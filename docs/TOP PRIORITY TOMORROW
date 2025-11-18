@@ -1,0 +1,2 @@
+Implement a system for the UI which allows users to work out which textures are loaded correctly.
+Disabling metallic shine doesn't remove the effect, it just stops it updating.

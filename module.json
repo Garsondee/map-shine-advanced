@@ -1,20 +1,20 @@
 {
-  "id": "module",
-  "title": "New Module",
-  "description": "",
-  "version": "#{VERSION}#",
+  "id": "map-shine-advanced",
+  "title": "Map Shine Advanced",
+  "description": "This Foundry VTT module is designed to bring the capabilities of three.js into Foundry VTT with a focus on producing 2.5 battlemaps with BPR shading, particles and advanced rendering options.",
+  "version": "0.2.0-dev",
   "library": "false",
   "manifestPlusVersion": "1.2.0",
   "compatibility": {
-    "minimum": 10,
-    "verified": 10,
-    "maximum": 11
+    "minimum": "13",
+    "verified": "13",
+    "maximum": "13"
   },
   "authors": [
     {
-      "name": "The League of Extraordinary FVTT Developers",
-      "url": "https://github.com/League-of-Foundry-Developers",
-      "discord": "discordID#0001"
+      "name": "Ingram Blakelock",
+      "url": "https://github.com/Garsondee/map-shine-advanced",
+      "discord": "garsondee"
     }
   ],
   "relationships": {
@@ -22,6 +22,7 @@
     "requires": []
   },
   "esmodules": [
+    "scripts/vendor/tweakpane-loader.js",
     "scripts/module.js"
   ],
   "scripts": [
@@ -37,9 +38,9 @@
       "path": "languages/en.json"
     }
   ],
-  "url": "#{URL}#",
-  "manifest": "#{MANIFEST}#",
-  "download": "#{DOWNLOAD}#",
+  "url": "https://github.com/Garsondee/map-shine-advanced",
+  "manifest": "https://github.com/Garsondee/map-shine-advanced/releases/latest/download/module.json",
+  "download": "https://github.com/Garsondee/map-shine-advanced/releases/latest/download/map-shine-advanced.zip",
   "license": "LICENSE",
   "readme": "README.md",
   "media": [

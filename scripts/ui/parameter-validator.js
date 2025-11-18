@@ -1,0 +1,415 @@
+/**
+ * @fileoverview Parameter validation system with sanity checks
+ * Prevents invalid parameter combinations that break effects silently
+ * @module ui/parameter-validator
+ */
+
+import { createLogger } from '../core/log.js';
+
+const log = createLogger('ParamValidator');
+
+/**
+ * Validation result
+ * @typedef {Object} ValidationResult
+ * @property {boolean} valid - Whether the value is valid
+ * @property {*} value - Validated/clamped value
+ * @property {string[]} warnings - Any warnings about the value
+ * @property {string|null} error - Error message if invalid
+ */
+
+/**
+ * Parameter validator - ensures safe parameter values
+ */
+export class ParameterValidator {
+  constructor() {
+    /** @type {Map<string, Function>} Custom validators per parameter */
+    this.customValidators = new Map();
+    
+    /** @type {Map<string, Function>} Sanity checkers per effect */
+    this.sanityCheckers = new Map();
+  }
+
+  /**
+   * Register a custom validator for a specific parameter
+   * @param {string} paramId - Parameter identifier (e.g., 'stripe1Intensity')
+   * @param {Function} validator - Validator function (value) => ValidationResult
+   */
+  registerValidator(paramId, validator) {
+    this.customValidators.set(paramId, validator);
+  }
+
+  /**
+   * Register a sanity checker for an effect
+   * Checks combinations of parameters for invalid states
+   * @param {string} effectId - Effect identifier
+   * @param {Function} checker - Checker function (params) => { valid, warnings, fixes }
+   */
+  registerSanityChecker(effectId, checker) {
+    this.sanityCheckers.set(effectId, checker);
+  }
+
+  /**
+   * Validate a single parameter value
+   * @param {string} paramId - Parameter identifier
+   * @param {*} value - Value to validate
+   * @param {Object} paramDef - Parameter definition from schema
+   * @returns {ValidationResult}
+   */
+  validateParameter(paramId, value, paramDef) {
+    const warnings = [];
+    let validValue = value;
+
+    // Type checking
+    const expectedType = this.inferType(paramDef);
+    if (expectedType && typeof value !== expectedType) {
+      return {
+        valid: false,
+        value: paramDef.default,
+        warnings: [],
+        error: `Type mismatch: expected ${expectedType}, got ${typeof value}`
+      };
+    }
+
+    // Numeric validation
+    if (typeof value === 'number') {
+      // Check for NaN/Infinity
+      if (!Number.isFinite(value)) {
+        return {
+          valid: false,
+          value: paramDef.default,
+          warnings: [],
+          error: `Invalid number: ${value}`
+        };
+      }
+
+      // Clamp to min/max
+      if (paramDef.min !== undefined && value < paramDef.min) {
+        validValue = paramDef.min;
+        warnings.push(`Value ${value} clamped to min ${paramDef.min}`);
+      }
+      if (paramDef.max !== undefined && value > paramDef.max) {
+        validValue = paramDef.max;
+        warnings.push(`Value ${value} clamped to max ${paramDef.max}`);
+      }
+
+      // Warn on extreme values
+      if (paramDef.min !== undefined && paramDef.max !== undefined) {
+        const range = paramDef.max - paramDef.min;
+        const normalized = (value - paramDef.min) / range;
+        if (normalized > 0.95) {
+          warnings.push(`Value near maximum (${(normalized * 100).toFixed(0)}%)`);
+        }
+      }
+    }
+
+    // Boolean validation
+    if (paramDef.type === 'boolean' && typeof value !== 'boolean') {
+      validValue = Boolean(value);
+      warnings.push(`Coerced to boolean: ${value} -> ${validValue}`);
+    }
+
+    // Enum/options validation
+    if (paramDef.options) {
+      const validValues = Object.values(paramDef.options);
+      if (!validValues.includes(value)) {
+        return {
+          valid: false,
+          value: paramDef.default,
+          warnings: [],
+          error: `Invalid option: ${value} not in [${validValues.join(', ')}]`
+        };
+      }
+    }
+
+    // Custom validator
+    if (this.customValidators.has(paramId)) {
+      const customResult = this.customValidators.get(paramId)(validValue, paramDef);
+      if (customResult.warnings) warnings.push(...customResult.warnings);
+      if (!customResult.valid) {
+        return customResult;
+      }
+      validValue = customResult.value;
+    }
+
+    return {
+      valid: true,
+      value: validValue,
+      warnings,
+      error: null
+    };
+  }
+
+  /**
+   * Validate all parameters for an effect
+   * @param {string} effectId - Effect identifier
+   * @param {Object} params - Parameter object
+   * @param {Object} schema - Effect schema
+   * @returns {Object} { valid, params, warnings, errors }
+   */
+  validateAllParameters(effectId, params, schema) {
+    const validatedParams = {};
+    const allWarnings = [];
+    const allErrors = [];
+
+    // Validate each parameter
+    for (const [paramId, value] of Object.entries(params)) {
+      const paramDef = schema.parameters?.[paramId];
+      if (!paramDef) {
+        allWarnings.push(`Unknown parameter: ${paramId}`);
+        continue;
+      }
+
+      const result = this.validateParameter(paramId, value, paramDef);
+      
+      if (result.error) {
+        allErrors.push(`${paramId}: ${result.error}`);
+        validatedParams[paramId] = paramDef.default;
+      } else {
+        validatedParams[paramId] = result.value;
+      }
+
+      if (result.warnings.length > 0) {
+        result.warnings.forEach(w => allWarnings.push(`${paramId}: ${w}`));
+      }
+    }
+
+    // Run sanity checker if registered
+    if (this.sanityCheckers.has(effectId)) {
+      const sanityResult = this.sanityCheckers.get(effectId)(validatedParams, schema);
+      
+      if (!sanityResult.valid) {
+        allErrors.push(...(sanityResult.errors || []));
+        
+        // Apply auto-fixes if provided
+        if (sanityResult.fixes) {
+          Object.assign(validatedParams, sanityResult.fixes);
+          allWarnings.push('Auto-fixes applied for invalid parameter combination');
+        }
+      }
+
+      if (sanityResult.warnings) {
+        allWarnings.push(...sanityResult.warnings);
+      }
+    }
+
+    return {
+      valid: allErrors.length === 0,
+      params: validatedParams,
+      warnings: allWarnings,
+      errors: allErrors
+    };
+  }
+
+  /**
+   * Infer expected type from parameter definition
+   * @param {Object} paramDef - Parameter definition
+   * @returns {string|null} Type name or null
+   * @private
+   */
+  inferType(paramDef) {
+    if (paramDef.type === 'slider') return 'number';
+    if (paramDef.type === 'boolean') return 'boolean';
+    if (paramDef.type === 'list') return typeof Object.values(paramDef.options || {})[0];
+    if (paramDef.min !== undefined || paramDef.max !== undefined) return 'number';
+    return null;
+  }
+}
+
+/**
+ * Calculate effective state of specular effect
+ * Determines if effect is enabled but ineffective (no visual output)
+ * @param {Object} params - Effect parameters
+ * @returns {Object} { effective, reasons }
+ */
+export function getSpecularEffectiveState(params) {
+  const reasons = [];
+  
+  // Main effect disabled
+  if (!params.enabled) {
+    return { effective: false, reasons: ['Effect is disabled'] };
+  }
+  
+  // Zero intensity = no visible effect
+  if (params.intensity === 0) {
+    reasons.push('Shine intensity is 0 (no visual effect)');
+  }
+  
+  // Check stripes if enabled
+  if (params.stripeEnabled) {
+    const hasActiveStripe = 
+      (params.stripe1Enabled && params.stripe1Intensity > 0 && params.stripe1Width > 0) ||
+      (params.stripe2Enabled && params.stripe2Intensity > 0 && params.stripe2Width > 0) ||
+      (params.stripe3Enabled && params.stripe3Intensity > 0 && params.stripe3Width > 0);
+    
+    if (!hasActiveStripe) {
+      reasons.push('Stripes enabled but all layers ineffective (zero intensity or width)');
+    }
+  }
+  
+  return {
+    effective: reasons.length === 0,
+    reasons
+  };
+}
+
+/**
+ * Get dependency state for stripe layers
+ * Determines which controls should be enabled based on parent settings
+ * Also identifies problematic parameters (causing auto-disable)
+ * @param {Object} params - Effect parameters
+ * @returns {Object} Dependency state with problem tracking
+ */
+export function getStripeDependencyState(params) {
+  const stripeControlsActive = params.stripeEnabled === true;
+  
+  // Check each layer for problems (intensity or width = 0)
+  const layer1Problems = [];
+  const layer2Problems = [];
+  const layer3Problems = [];
+  
+  if (params.stripe1Intensity === 0) layer1Problems.push('stripe1Intensity');
+  if (params.stripe1Width === 0) layer1Problems.push('stripe1Width');
+  
+  if (params.stripe2Intensity === 0) layer2Problems.push('stripe2Intensity');
+  if (params.stripe2Width === 0) layer2Problems.push('stripe2Width');
+  
+  if (params.stripe3Intensity === 0) layer3Problems.push('stripe3Intensity');
+  if (params.stripe3Width === 0) layer3Problems.push('stripe3Width');
+  
+  return {
+    stripeControlsActive, // Blend mode, parallax strength
+    stripe1Active: stripeControlsActive && params.stripe1Enabled === true,
+    stripe2Active: stripeControlsActive && params.stripe2Enabled === true,
+    stripe3Active: stripeControlsActive && params.stripe3Enabled === true,
+    stripe1Problems: layer1Problems, // Array of problem param IDs for layer 1
+    stripe2Problems: layer2Problems, // Array of problem param IDs for layer 2
+    stripe3Problems: layer3Problems  // Array of problem param IDs for layer 3
+  };
+}
+
+/**
+ * Create sanity checker for specular effect
+ * Detects invalid parameter combinations
+ * @param {Object} params - Effect parameters
+ * @returns {Object} Sanity check result
+ */
+export function createSpecularSanityChecker(params, schema) {
+  const warnings = [];
+  const errors = [];
+  const fixes = {};
+
+  // Check 1: Stripe intensity overflow
+  // High intensity + high width + multiply blend = overflow
+  if (params.stripeEnabled) {
+    const totalIntensity = 
+      (params.stripe1Enabled ? params.stripe1Intensity : 0) +
+      (params.stripe2Enabled ? params.stripe2Intensity : 0) +
+      (params.stripe3Enabled ? params.stripe3Intensity : 0);
+    
+    if (totalIntensity > 3.0) {
+      warnings.push(`Combined stripe intensity very high (${totalIntensity.toFixed(2)}), may cause overflow`);
+    }
+
+    // Check for multiply blend with high values
+    if (params.stripeBlendMode === 1 && totalIntensity > 2.0) {
+      warnings.push('Multiply blend mode with high intensity may cause artifacts');
+    }
+  }
+
+  // Check 2: Stripe width sanity
+  for (let i = 1; i <= 3; i++) {
+    const enabled = params[`stripe${i}Enabled`];
+    const width = params[`stripe${i}Width`];
+    const intensity = params[`stripe${i}Intensity`];
+    
+    if (enabled && width !== undefined) {
+      // Width too small
+      if (width < 0.01) {
+        errors.push(`Layer ${i} width too small (${width}), may cause aliasing`);
+        fixes[`stripe${i}Width`] = 0.05;
+      }
+      
+      // Width too large
+      if (width > 0.95) {
+        warnings.push(`Layer ${i} width very large (${width}), stripes may not be visible`);
+      }
+
+      // Enabled with zero intensity
+      if (enabled && intensity === 0) {
+        warnings.push(`Layer ${i} enabled but intensity is 0 (no visual effect)`);
+      }
+    }
+  }
+
+  // Check 3: Parallax sanity
+  const parallaxStrength = params.parallaxStrength;
+  if (parallaxStrength !== undefined && parallaxStrength > 5) {
+    warnings.push(`Parallax strength very high (${parallaxStrength}), may cause extreme displacement`);
+  }
+
+  // Check 4: Frequency sanity
+  for (let i = 1; i <= 3; i++) {
+    const frequency = params[`stripe${i}Frequency`];
+    if (frequency !== undefined) {
+      if (frequency === 0) {
+        errors.push(`Layer ${i} frequency is 0 (invalid)`);
+        fixes[`stripe${i}Frequency`] = 1.0;
+      }
+      if (frequency > 25) {
+        warnings.push(`Layer ${i} frequency very high (${frequency}), may cause moiré`);
+      }
+    }
+  }
+
+  // Check 5: Material parameter sanity
+  if (params.intensity > 1.5) {
+    warnings.push(`Specular intensity very high (${params.intensity}), may cause overexposure`);
+  }
+
+  if (params.roughness === 0 && params.intensity > 1.0) {
+    warnings.push('Zero roughness with high intensity may create harsh highlights');
+  }
+
+  // Check 6: All stripes disabled
+  if (params.stripeEnabled && 
+      !params.stripe1Enabled && 
+      !params.stripe2Enabled && 
+      !params.stripe3Enabled) {
+    warnings.push('Stripes enabled but all layers disabled (no effect)');
+  }
+
+  return {
+    valid: errors.length === 0,
+    warnings,
+    errors,
+    fixes: Object.keys(fixes).length > 0 ? fixes : null
+  };
+}
+
+/**
+ * Global validator instance
+ */
+export const globalValidator = new ParameterValidator();
+
+// Register specular sanity checker
+globalValidator.registerSanityChecker('specular', createSpecularSanityChecker);
+
+// Register custom validators for specific problematic parameters
+globalValidator.registerValidator('stripe1Width', (value, paramDef) => {
+  const warnings = [];
+  if (value < 0.05) warnings.push('Very small width may cause aliasing artifacts');
+  if (value > 0.9) warnings.push('Very large width may make stripes invisible');
+  
+  return {
+    valid: value >= paramDef.min && value <= paramDef.max,
+    value: Math.max(paramDef.min, Math.min(paramDef.max, value)),
+    warnings,
+    error: null
+  };
+});
+
+// Similar for other layers
+globalValidator.registerValidator('stripe2Width', globalValidator.customValidators.get('stripe1Width'));
+globalValidator.registerValidator('stripe3Width', globalValidator.customValidators.get('stripe1Width'));
+
+log.info('Parameter validator initialized');

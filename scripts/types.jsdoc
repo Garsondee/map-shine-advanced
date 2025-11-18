@@ -1,0 +1,140 @@
+/**
+ * @fileoverview Shared type definitions for Map Shine Advanced
+ * @module types
+ */
+
+/**
+ * GPU capability detection results
+ * @typedef {Object} GPUCapabilities
+ * @property {boolean} webgpu - WebGPU API available and adapter acquired
+ * @property {boolean} webgl2 - WebGL 2.0 context available
+ * @property {boolean} webgl - WebGL 1.0 context available
+ * @property {'high'|'medium'|'low'|'none'} tier - Computed rendering tier
+ */
+
+/**
+ * Renderer initialization result
+ * @typedef {Object} RendererResult
+ * @property {THREE.WebGLRenderer|WebGPURenderer|null} renderer - Initialized renderer instance
+ * @property {'WebGPU'|'WebGL2'|'WebGL1'|null} rendererType - Type of renderer created
+ */
+
+/**
+ * Module state container
+ * @typedef {Object} MapShineState
+ * @property {THREE.WebGLRenderer|WebGPURenderer|null} renderer - Active renderer instance
+ * @property {'WebGPU'|'WebGL2'|'WebGL1'|null} rendererType - Active renderer type
+ * @property {GPUCapabilities|null} capabilities - Detected GPU capabilities
+ * @property {boolean} initialized - Whether module bootstrap completed successfully
+ * @property {string|null} error - Error message if initialization failed
+ * @property {THREE.Scene|null} scene - Active three.js scene
+ * @property {THREE.Camera|null} camera - Active camera instance
+ */
+
+/**
+ * Map effect mask definition
+ * @typedef {Object} EffectMask
+ * @property {string} suffix - File suffix (e.g., '_Specular', '_Fire', '_Outdoors')
+ * @property {string} type - Effect type identifier
+ * @property {THREE.Texture|null} texture - Loaded texture or null
+ * @property {boolean} required - Whether this mask is required for the effect to function
+ */
+
+/**
+ * Map asset bundle (base texture + effect masks)
+ * @typedef {Object} MapAssetBundle
+ * @property {string} basePath - Base path without extension (e.g., 'BattleMap')
+ * @property {THREE.Texture} baseTexture - Main map texture
+ * @property {EffectMask[]} masks - Array of loaded effect masks
+ * @property {boolean} isMapShineCompatible - Whether this map has Map Shine masks
+ */
+
+/**
+ * Bootstrap initialization options
+ * @typedef {Object} BootstrapOptions
+ * @property {boolean} [verbose=false] - Enable verbose logging
+ * @property {boolean} [skipSceneInit=false] - Skip initial scene creation for testing
+ */
+
+/**
+ * Effect configuration
+ * @typedef {Object} EffectConfig
+ * @property {string} id - Unique effect identifier
+ * @property {string} name - Human-readable effect name
+ * @property {string} description - Effect description for UI
+ * @property {string[]} requiredMasks - List of required mask suffixes
+ * @property {string[]} optionalMasks - List of optional mask suffixes
+ * @property {boolean} enabled - Whether effect is currently active
+ * @property {Object} parameters - Effect-specific parameters
+ */
+
+/**
+ * Scene settings structure stored in Foundry scene flags
+ * @typedef {Object} SceneSettings
+ * @property {boolean} enabled - Whether Map Shine is enabled for this scene
+ * @property {string} version - Module version that created these settings (for migration)
+ * @property {Object.<string, EffectConfig>} effects - Map of effect ID to configuration
+ * @property {Object} renderer - Renderer-specific settings
+ * @property {Object} performance - Performance optimization settings
+ */
+
+/**
+ * Three-tier settings container
+ * @typedef {Object} SettingsTiers
+ * @property {SceneSettings} mapMaker - Original author's settings (baseline)
+ * @property {SceneSettings|null} gm - GM's tweaked settings (overrides mapMaker)
+ * @property {Object.<string, boolean>} player - Per-effect enable/disable flags (client-local)
+ */
+
+/**
+ * Resolved effective settings (after tier application)
+ * @typedef {Object} EffectiveSettings
+ * @property {Object.<string, EffectConfig>} effects - Resolved effect configurations
+ * @property {'mapMaker'|'gm'|'player'} activeMode - Which mode the user is in
+ * @property {boolean} canRevert - Whether "Revert to Original" is available
+ */
+
+/**
+ * Settings migration result
+ * @typedef {Object} MigrationResult
+ * @property {boolean} success - Whether migration succeeded
+ * @property {string} fromVersion - Original version
+ * @property {string} toVersion - Target version
+ * @property {string[]} warnings - Non-fatal migration warnings
+ * @property {Error|null} error - Fatal error if success is false
+ */
+
+/**
+ * Effect layer definition for compositing order
+ * @typedef {Object} EffectLayer
+ * @property {number} order - Render order (lower renders first)
+ * @property {string} name - Layer name for debugging
+ * @property {THREE.RenderTarget|null} renderTarget - Optional render-to-texture target
+ * @property {boolean} requiresDepth - Whether this layer needs depth buffer
+ */
+
+/**
+ * Asset loading progress callback
+ * @typedef {Function} AssetLoadProgressCallback
+ * @param {number} loaded - Number of assets loaded
+ * @param {number} total - Total number of assets to load
+ * @param {string} currentAsset - Current asset being loaded
+ */
+
+/**
+ * Asset loading result
+ * @typedef {Object} AssetLoadResult
+ * @property {boolean} success - Whether loading succeeded
+ * @property {MapAssetBundle|null} bundle - Loaded asset bundle
+ * @property {string[]} warnings - Non-fatal loading warnings
+ * @property {Error|null} error - Fatal error if success is false
+ */
+
+/**
+ * Shader uniform definition
+ * @typedef {Object} ShaderUniform
+ * @property {string} name - Uniform name in GLSL
+ * @property {string} type - Uniform type (float, vec2, vec3, sampler2D, etc.)
+ * @property {*} value - Initial value
+ * @property {boolean} [animatable] - Whether this uniform should animate over time
+ */

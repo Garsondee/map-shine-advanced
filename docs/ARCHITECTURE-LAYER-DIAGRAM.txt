@@ -1,0 +1,208 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    MAP SHINE ADVANCED - LAYER ARCHITECTURE
+                          Visual Rendering Pipeline
+═══════════════════════════════════════════════════════════════════════════════
+
+                              RENDER ORDER (Bottom → Top)
+                                      
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                        GROUND PASS (THREE.js)                              ┃
+┃                        Below Foundry Tokens                                ┃
+┃                        Z-Order: 100-400                                    ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+        │
+        ├─► 100: GROUND_BASE
+        │        └─ Base texture (albedo/diffuse)
+        │        └─ Renders to: RT_Ground
+        │
+        ├─► 200: GROUND_MATERIAL
+        │        └─ PBR effects: Specular, Roughness, Normal Maps
+        │        └─ Reads from: RT_Ground
+        │        └─ Renders to: RT_Material
+        │
+        ├─► 300: GROUND_SURFACE
+        │        └─ Surface FX: Water ripples, lava, iridescence
+        │        └─ Reads from: RT_Material
+        │        └─ Renders to: RT_Surface
+        │
+        └─► 400: GROUND_DECALS
+                 └─ Ground particles: Fog, dust, ground shadows
+                 └─ Reads from: RT_Surface
+                 └─ Renders to: RT_GroundFinal
+                 
+                 ▼ ▼ ▼ COMPOSITE TO PIXI ▼ ▼ ▼
+                 
+        ┌────────────────────────────────────────────┐
+        │ RT_GroundFinal → PIXI.Sprite              │
+        │ Injected into: canvas.primary.background  │
+        │ Z-Index: 100                               │
+        └────────────────────────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                  SCENE OBJECTS (THREE.js Sprites)                          ┃
+┃                  Synced from Foundry Data                                  ┃
+┃                  Z-Order: 500-800                                          ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+        │
+        ├─► 500: TILES_BACKGROUND (THREE.Sprite)
+        │        └─ Source: canvas.scene.tiles (overhead=false, z<0)
+        │        └─ Floor decorations, furniture, etc.
+        │        └─ Rendered as THREE.js sprites at z=1.0
+        │
+        ├─► 600: TILES_FOREGROUND (THREE.Sprite)
+        │        └─ Source: canvas.scene.tiles (overhead=false, z>=0)
+        │        └─ Objects above floor but below tokens
+        │        └─ Rendered as THREE.js sprites at z=5.0
+        │
+        ├─► 700: TOKENS (THREE.Sprite)
+        │        └─ Source: canvas.tokens.placeables
+        │        └─ Character/NPC tokens
+        │        └─ Rendered as THREE.js sprites at z=10 + elevation
+        │        └─ ★ SYNCED from Foundry, rendered by THREE.js
+        │
+        └─► 800: TILES_OVERHEAD (THREE.Sprite)
+                 └─ Source: canvas.scene.tiles (overhead=true)
+                 └─ Roofs, ceilings (occlude tokens from above)
+                 └─ Rendered as THREE.js sprites at z=20.0
+                 
+                 ▼ ▼ ▼ ALL RENDERED IN SINGLE THREE.js PASS ▼ ▼ ▼
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                      OVERHEAD PASS (THREE.js)                              ┃
+┃                      Above Foundry Tokens                                  ┃
+┃                      Z-Order: 900-1100                                     ┃
+┃                      ★ MASK-AWARE: Responds to _Outdoors mask             ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+        │
+        ├─► 900: ENVIRONMENTAL_LOW
+        │        └─ Low-altitude environmental effects
+        │        └─ Tree canopy shadows, roof shadows
+        │        └─ Reads: _Outdoors mask
+        │        └─ Renders to: RT_EnvLow (with alpha)
+        │
+        ├─► 1000: PARTICLES_OVERHEAD
+        │         └─ Above-token particles
+        │         └─ Rain, snow, falling leaves
+        │         └─ Reads: _Outdoors mask (don't rain indoors!)
+        │         └─ Renders to: RT_Particles (with alpha)
+        │
+        └─► 1100: ENVIRONMENTAL_HIGH
+                  └─ High-altitude environmental
+                  └─ Cloud shadows, lightning, aurora
+                  └─ Reads: _Outdoors mask (optional)
+                  └─ Renders to: RT_EnvHigh (with alpha)
+                  
+        ┌───────────────────────────────────────────┐
+        │ Composite RT_EnvLow + RT_Particles +      │
+        │ RT_EnvHigh → RT_OverheadFinal             │
+        └───────────────────────────────────────────┘
+                  
+                 ▼ ▼ ▼ COMPOSITE TO PIXI ▼ ▼ ▼
+                 
+        ┌────────────────────────────────────────────┐
+        │ RT_OverheadFinal → PIXI.Sprite            │
+        │ Injected into: canvas.effects              │
+        │ Z-Index: 850                               │
+        │ Blend Mode: NORMAL (with alpha)            │
+        └────────────────────────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                   POST-PROCESSING PASS (THREE.js)                          ┃
+┃                   Full-Screen Effects                                      ┃
+┃                   Z-Order: 1200                                            ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+        │
+        └─► 1200: POST_PROCESSING
+                  └─ Screen-space effects (full viewport)
+                  └─ Bloom, color grading, vignette, film grain
+                  └─ Reads: Entire composited scene
+                  └─ Renders to: Screen (final output)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                          MASK-AWARE RENDERING EXAMPLE
+                          
+                           ┌──────────────────────┐
+                           │  _Outdoors Mask      │
+                           │  (Luminance)         │
+                           │                      │
+                           │  ██████░░░░░░░░░░    │
+                           │  ██████░░░░░░░░░░    │ White = Outdoor
+                           │  ██████░░░░░░░░░░    │ Black = Indoor
+                           │  ░░░░░░░░░░░░████    │
+                           │  ░░░░░░░░░░░░████    │
+                           └──────────────────────┘
+                                     ▼
+                           
+                           Applied to Rain Effect:
+                           
+                           ┌──────────────────────┐
+                           │  ☔☔☔☔              │ Rain visible
+                           │  ☔☔☔☔              │ outdoors only
+                           │  ☔☔☔☔              │
+                           │              ☔☔☔    │
+                           │              ☔☔☔    │
+                           └──────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                            ZOOM-BASED MASKING
+                            
+       Zoomed Out (Low Zoom)          │          Zoomed In (High Zoom)
+       View from above                │          Street-level view
+                                      │
+    ┌─────────────────────┐           │       ┌─────────────────────┐
+    │  ☔ ☔ ☔ ☔ ☔ ☔ ☔ ☔  │           │       │  ☔ ☔ ☔           │
+    │  ☔ ☔ ☔ ☔ ☔ ☔ ☔ ☔  │ Mask      │       │  ☔ ☔ ☔           │
+    │  ☔ ☔ ☔ ☔ ☔ ☔ ☔ ☔  │ Strength  │ Mask  │  ☔ ☔ ☔   [House] │
+    │  ☔ ☔ [House] ☔ ☔   │   20%     │ 100%  │            [House] │
+    │  ☔ ☔ [House] ☔ ☔   │           │       │            [House] │
+    └─────────────────────┘           │       └─────────────────────┘
+         See rain everywhere           │          No rain indoors
+       (bird's eye view)               │          (immersive view)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                         RENDER TARGET FLOW (Multi-Pass)
+                         
+    GROUND EFFECTS:                  OVERHEAD EFFECTS:
+    
+    RT_Ground ──► RT_Material ──►    RT_EnvLow ──┐
+                  │                               │
+                  └──► RT_Surface ──►             ├──► RT_OverheadFinal
+                       │                          │
+                       └──► RT_GroundFinal        │
+                            │              RT_Particles ──┘
+                            │
+                            ▼
+                      PIXI Sprite
+                    (Ground Layer)
+                    
+    
+    ┌──────────────────────────────────────────────────────────────┐
+    │                                                              │
+    │  Foundry Tokens (PIXI)   ◄── Rendered by Foundry           │
+    │                                                              │
+    └──────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+                      PIXI Sprite
+                   (Overhead Layer)
+
+═══════════════════════════════════════════════════════════════════════════════
+                               KEY INSIGHTS
+═══════════════════════════════════════════════════════════════════════════════
+
+1. THREE.js renders to WebGLRenderTarget, NOT directly to screen
+2. Each RT is converted to PIXI.Texture and injected into Foundry's canvas
+3. Foundry's token rendering happens between our ground and overhead passes
+4. Mask textures control visibility of overhead effects (indoor/outdoor)
+5. Post-processing reads the final composited PIXI canvas
+
+═══════════════════════════════════════════════════════════════════════════════

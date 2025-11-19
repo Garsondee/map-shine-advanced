@@ -326,8 +326,13 @@ export class InteractionManager {
           if (event.shiftKey) {
             snapped = foundryPos;
           } else {
-            // Default to vertex snapping for walls
-            snapped = this.snapToGrid(foundryPos.x, foundryPos.y, CONST.GRID_SNAPPING_MODES.VERTEX);
+            // Use Foundry's standard wall snapping logic
+            const M = CONST.GRID_SNAPPING_MODES;
+            const size = canvas.dimensions.size;
+            const resolution = size >= 128 ? 8 : (size >= 64 ? 4 : 2);
+            const mode = canvas.forceSnapVertices ? M.VERTEX : (M.CENTER | M.VERTEX | M.CORNER | M.SIDE_MIDPOINT);
+            
+            snapped = this.snapToGrid(foundryPos.x, foundryPos.y, mode, resolution);
           }
           
           const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
@@ -564,7 +569,12 @@ export class InteractionManager {
             if (event.shiftKey) {
               snapped = foundryPos;
             } else {
-              snapped = this.snapToGrid(foundryPos.x, foundryPos.y, CONST.GRID_SNAPPING_MODES.VERTEX);
+              const M = CONST.GRID_SNAPPING_MODES;
+              const size = canvas.dimensions.size;
+              const resolution = size >= 128 ? 8 : (size >= 64 ? 4 : 2);
+              const mode = canvas.forceSnapVertices ? M.VERTEX : (M.CENTER | M.VERTEX | M.CORNER | M.SIDE_MIDPOINT);
+              
+              snapped = this.snapToGrid(foundryPos.x, foundryPos.y, mode, resolution);
             }
             
             const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
@@ -600,7 +610,12 @@ export class InteractionManager {
                  if (event.shiftKey) {
                      snapped = foundryPos;
                  } else {
-                     snapped = this.snapToGrid(foundryPos.x, foundryPos.y, CONST.GRID_SNAPPING_MODES.VERTEX);
+                     const M = CONST.GRID_SNAPPING_MODES;
+                     const size = canvas.dimensions.size;
+                     const resolution = size >= 128 ? 8 : (size >= 64 ? 4 : 2);
+                     const mode = canvas.forceSnapVertices ? M.VERTEX : (M.CENTER | M.VERTEX | M.CORNER | M.SIDE_MIDPOINT);
+                     
+                     snapped = this.snapToGrid(foundryPos.x, foundryPos.y, mode, resolution);
                  }
                  const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
                  
@@ -1236,14 +1251,16 @@ export class InteractionManager {
    * @param {number} x 
    * @param {number} y 
    * @param {number} [mode] - Snapping mode (default to CENTER)
+   * @param {number} [resolution] - Grid resolution (default 1)
    * @returns {{x: number, y: number}}
    */
-  snapToGrid(x, y, mode = CONST.GRID_SNAPPING_MODES.CENTER) {
+  snapToGrid(x, y, mode = CONST.GRID_SNAPPING_MODES.CENTER, resolution = 1) {
     if (!canvas.grid) return { x, y };
     
     // Use Foundry's native grid snapping
     return canvas.grid.getSnappedPoint({ x, y }, {
-      mode: mode
+      mode: mode,
+      resolution: resolution
     });
   }
 

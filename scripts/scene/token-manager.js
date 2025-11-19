@@ -37,6 +37,9 @@ export class TokenManager {
     this.initialized = false;
     this.hooksRegistered = false;
     
+    // Track active animations to allow cancellation
+    this.activeAnimations = new Map(); // tokenId -> { cancel: () => void }
+    
     log.debug('TokenManager created');
   }
 
@@ -78,7 +81,7 @@ export class TokenManager {
     // Update existing token
     Hooks.on('updateToken', (tokenDoc, changes, options, userId) => {
       log.debug(`Token updated: ${tokenDoc.id}`, changes);
-      this.updateTokenSprite(tokenDoc, changes);
+      this.updateTokenSprite(tokenDoc, changes, options);
     });
 
     // Delete token
@@ -147,7 +150,9 @@ export class TokenManager {
       transparent: true,
       alphaTest: 0.1, // Discard fully transparent pixels
       depthTest: true,
-      depthWrite: true
+      depthWrite: true,
+      sizeAttenuation: true, // Enable perspective scaling - tokens should scale with the world
+      side: THREE.DoubleSide // CRITICAL: Prevent culling when projection matrix is flipped
     });
 
     const sprite = new THREE.Sprite(material);
@@ -160,6 +165,7 @@ export class TokenManager {
     // Load texture (async, will update material when loaded)
     this.loadTokenTexture(texturePath).then(texture => {
       material.map = texture;
+      material.opacity = 1; // Restore opacity
       material.needsUpdate = true;
     }).catch(error => {
       log.error(`Failed to load token texture: ${texturePath}`, error);
@@ -168,8 +174,13 @@ export class TokenManager {
     // Set initial position, scale, visibility
     this.updateSpriteTransform(sprite, tokenDoc);
     this.updateSpriteVisibility(sprite, tokenDoc);
+    
+    // Start with 0 opacity to prevent white flash before texture loads
+    sprite.material.opacity = 0;
 
     // Add to scene
+    // DEBUG: TEMPORARILY DISABLED TOKEN RENDERING
+    // log.warn(`DEBUG: Token rendering disabled for ${tokenDoc.id}`);
     this.scene.add(sprite);
 
     // Store reference
@@ -186,9 +197,10 @@ export class TokenManager {
    * Update an existing token sprite
    * @param {TokenDocument} tokenDoc - Updated token document
    * @param {object} changes - Changed properties
+   * @param {object} [options={}] - Update options
    * @private
    */
-  updateTokenSprite(tokenDoc, changes) {
+  updateTokenSprite(tokenDoc, changes, options = {}) {
     const spriteData = this.tokenSprites.get(tokenDoc.id);
     if (!spriteData) {
       // Token doesn't exist yet, create it
@@ -202,7 +214,12 @@ export class TokenManager {
     // Update transform if position/size/elevation changed
     if ('x' in changes || 'y' in changes || 'width' in changes || 
         'height' in changes || 'elevation' in changes || 'rotation' in changes) {
-      this.updateSpriteTransform(sprite, tokenDoc);
+      log.debug(`Updating transform for ${tokenDoc.id}: x=${tokenDoc.x}, y=${tokenDoc.y}, z=${tokenDoc.elevation}`);
+      
+      // Check if we should animate (default true unless specified false)
+      // Also, if only elevation/size changed, we might snap? Foundry animates size/elevation too usually.
+      const animate = options.animate !== false;
+      this.updateSpriteTransform(sprite, tokenDoc, animate);
     }
 
     // Update texture if changed
@@ -223,6 +240,9 @@ export class TokenManager {
     // Update stored reference
     spriteData.tokenDoc = tokenDoc;
     spriteData.lastUpdate = Date.now();
+    
+    // CRITICAL: Update sprite userData so InteractionManager sees the new doc
+    sprite.userData.tokenDoc = tokenDoc;
 
     log.debug(`Updated token sprite: ${tokenDoc.id}`);
   }
@@ -279,27 +299,153 @@ export class TokenManager {
    * Update sprite transform (position, scale, rotation)
    * @param {THREE.Sprite} sprite - THREE.js sprite
    * @param {TokenDocument} tokenDoc - Foundry token document
+   * @param {boolean} [animate=false] - Whether to animate the transition
    * @private
    */
-  updateSpriteTransform(sprite, tokenDoc) {
+  updateSpriteTransform(sprite, tokenDoc, animate = false) {
+    // Get grid size for proper scaling
+    const gridSize = canvas.grid?.size || 100;
+    
+    // Get texture scale factors (default to 1)
+    const scaleX = tokenDoc.texture?.scaleX ?? 1;
+    const scaleY = tokenDoc.texture?.scaleY ?? 1;
+    
+    // Token width/height are in grid units, convert to pixels AND apply texture scale
+    const widthPx = tokenDoc.width * gridSize * scaleX;
+    const heightPx = tokenDoc.height * gridSize * scaleY;
+    
     // Convert Foundry position (top-left origin) to THREE.js (center origin)
-    const centerX = tokenDoc.x + tokenDoc.width / 2;
-    const centerY = tokenDoc.y + tokenDoc.height / 2;
+    const rectWidth = tokenDoc.width * gridSize;
+    const rectHeight = tokenDoc.height * gridSize;
+    const centerX = tokenDoc.x + rectWidth / 2;
+    
+    // Invert Y for Standard Coordinate System
+    const sceneHeight = canvas.dimensions?.height || 10000;
+    const centerY = sceneHeight - (tokenDoc.y + rectHeight / 2);
     
     // Z-position = base + elevation
-    // Elevation is in grid units, convert to reasonable z-offset
     const elevation = tokenDoc.elevation || 0;
     const zPosition = TOKEN_BASE_Z + elevation;
 
-    sprite.position.set(centerX, centerY, zPosition);
+    log.debug(`Calculated Sprite Pos: (${centerX}, ${centerY}, ${zPosition}) from Token (${tokenDoc.x}, ${tokenDoc.y})`);
+    log.debug(`Current Sprite Pos: (${sprite.position.x}, ${sprite.position.y}, ${sprite.position.z})`);
 
-    // Scale to match token size
-    sprite.scale.set(tokenDoc.width, tokenDoc.height, 1);
+    // Handle Scale (usually instant)
+    sprite.scale.set(widthPx, heightPx, 1);
 
-    // Rotation (Foundry uses degrees, THREE.js uses radians)
+    // Target Rotation (radians)
+    let targetRotation = 0;
     if (tokenDoc.rotation !== undefined) {
-      sprite.material.rotation = THREE.MathUtils.degToRad(tokenDoc.rotation);
+      targetRotation = THREE.MathUtils.degToRad(tokenDoc.rotation);
     }
+
+    // Animation Logic
+    if (animate && typeof CanvasAnimation !== 'undefined') {
+      const attributes = [];
+      
+      // Position X
+      if (Math.abs(sprite.position.x - centerX) > 0.1) {
+        attributes.push({ parent: sprite.position, attribute: "x", to: centerX });
+      }
+      // Position Y
+      if (Math.abs(sprite.position.y - centerY) > 0.1) {
+        attributes.push({ parent: sprite.position, attribute: "y", to: centerY });
+      }
+      // Position Z (Elevation)
+      if (Math.abs(sprite.position.z - zPosition) > 0.1) {
+        attributes.push({ parent: sprite.position, attribute: "z", to: zPosition });
+      }
+      // Rotation
+      if (sprite.material && Math.abs(sprite.material.rotation - targetRotation) > 0.01) {
+        attributes.push({ parent: sprite.material, attribute: "rotation", to: targetRotation });
+      }
+
+      if (attributes.length > 0) {
+        // Calculate duration based on distance
+        const dist = Math.hypot(sprite.position.x - centerX, sprite.position.y - centerY);
+        
+        // If distance is negligible, snap instantly
+        if (dist < 1) {
+          log.debug(`Distance too small (${dist}), snapping`);
+          sprite.position.set(centerX, centerY, zPosition);
+          if (sprite.material) sprite.material.rotation = targetRotation;
+          return;
+        }
+
+        const duration = Math.max(250, Math.min((dist / gridSize) * 250, 2000));
+        
+        log.debug(`Starting animation for ${tokenDoc.id}. Duration: ${duration}, Attrs: ${attributes.length}`);
+        
+        this.runAnimation(tokenDoc.id, attributes, duration);
+        return;
+      } else {
+        log.debug(`No animation needed for ${tokenDoc.id} (already at target)`);
+      }
+    } else {
+      log.debug(`Skipping animation for ${tokenDoc.id} (animate=${animate})`);
+    }
+
+    // Fallback: Instant Snap
+    sprite.position.set(centerX, centerY, zPosition);
+    if (sprite.material) {
+      sprite.material.rotation = targetRotation;
+    }
+  }
+
+  /**
+   * Custom animation system
+   * @param {string} tokenId 
+   * @param {Array} attributes 
+   * @param {number} duration 
+   * @private
+   */
+  runAnimation(tokenId, attributes, duration) {
+    // Cancel existing
+    if (this.activeAnimations.has(tokenId)) {
+      this.activeAnimations.get(tokenId).cancel();
+      this.activeAnimations.delete(tokenId);
+    }
+
+    const startTime = performance.now();
+    
+    // Capture start values
+    const animData = attributes.map(attr => ({
+      parent: attr.parent,
+      attribute: attr.attribute,
+      start: attr.to,
+      to: attr.parent[attr.attribute],
+      diff: attr.parent[attr.attribute] - attr.to
+    }));
+
+    let animationFrameId;
+
+    const tick = (currentTime) => {
+      const elapsed = currentTime - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      
+      // EaseInOutCosine: 0.5 - Math.cos(progress * Math.PI) / 2
+      const ease = 0.5 - Math.cos(progress * Math.PI) / 2;
+
+      for (const data of animData) {
+        data.parent[data.attribute] = data.start + (data.diff * ease);
+      }
+
+      if (progress < 1) {
+        animationFrameId = requestAnimationFrame(tick);
+      } else {
+        // Ensure final values are exact
+        for (const data of animData) {
+          data.parent[data.attribute] = data.to;
+        }
+        this.activeAnimations.delete(tokenId);
+      }
+    };
+
+    animationFrameId = requestAnimationFrame(tick);
+
+    this.activeAnimations.set(tokenId, {
+      cancel: () => cancelAnimationFrame(animationFrameId)
+    });
   }
 
   /**
@@ -312,12 +458,200 @@ export class TokenManager {
     // Hidden tokens are only visible to GMs
     if (tokenDoc.hidden) {
       sprite.visible = game.user?.isGM || false;
+      sprite.material.opacity = 0.5;
     } else {
       sprite.visible = true;
+      sprite.material.opacity = 1.0;
+    }
+  }
+
+  /**
+   * Set token selection state
+   * @param {string} tokenId 
+   * @param {boolean} selected 
+   */
+  setTokenSelection(tokenId, selected) {
+    const spriteData = this.tokenSprites.get(tokenId);
+    if (!spriteData) return;
+
+    const { sprite, tokenDoc } = spriteData;
+    
+    // Use square border instead of tint
+    if (selected) {
+      if (!spriteData.selectionBorder) {
+        this.createSelectionBorder(spriteData);
+      }
+      spriteData.selectionBorder.visible = true;
+      
+      // Also show name on selection? Usually yes.
+      this.setHover(tokenId, true);
+    } else {
+      if (spriteData.selectionBorder) {
+        spriteData.selectionBorder.visible = false;
+      }
+      // Hide name if not hovered (we'll need to track hover state separately, but for now assume deselect = hide)
+      this.setHover(tokenId, false);
+    }
+    
+    // Reset tint
+    sprite.material.color.setHex(0xffffff);
+  }
+
+  /**
+   * Set token hover state
+   * @param {string} tokenId 
+   * @param {boolean} hovered 
+   */
+  setHover(tokenId, hovered) {
+    const spriteData = this.tokenSprites.get(tokenId);
+    if (!spriteData) return;
+
+    // Create name label if needed
+    if (hovered && !spriteData.nameLabel) {
+      this.createNameLabel(spriteData);
     }
 
-    // Could also handle disposition (friendly, neutral, hostile) colors here
-    // Could handle effects (invisible, etc.) here
+    if (spriteData.nameLabel) {
+      spriteData.nameLabel.visible = hovered;
+    }
+  }
+
+  /**
+   * Create selection border for a token
+   * @param {object} spriteData 
+   * @private
+   */
+  createSelectionBorder(spriteData) {
+    const THREE = window.THREE;
+    const { sprite, tokenDoc } = spriteData;
+    
+    // Create square geometry (1x1, centered)
+    // Vertices: TopLeft, TopRight, BottomRight, BottomLeft
+    const points = [];
+    points.push(new THREE.Vector3(-0.5, 0.5, 0));
+    points.push(new THREE.Vector3(0.5, 0.5, 0));
+    points.push(new THREE.Vector3(0.5, -0.5, 0));
+    points.push(new THREE.Vector3(-0.5, -0.5, 0));
+    
+    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+    
+    // Orange/Yellow selection color: 0xFF9829 (Foundry-ish)
+    const material = new THREE.LineBasicMaterial({ 
+      color: 0xFF9829, 
+      linewidth: 2, // Note: WebGL lineWidth often limited to 1
+      depthTest: false, // Always show on top
+      depthWrite: false
+    });
+    
+    const border = new THREE.LineLoop(geometry, material);
+    border.name = 'SelectionBorder';
+    
+    // Scale to match sprite (which matches token size)
+    // Sprite has scale set to pixel width/height
+    // But we are adding as child of sprite? 
+    // If child of sprite, it inherits sprite scale.
+    // Since sprite is 1x1 geometry scaled to WxH.
+    // Our border is 1x1. So it matches perfectly.
+    // BUT sprite might be scaled differently if texture is non-square?
+    // TokenManager sets sprite scale to (widthPx, heightPx, 1).
+    // So child at scale (1,1,1) will stretch to (widthPx, heightPx).
+    // Correct.
+    
+    // Z-offset to prevent z-fighting with token? 
+    // Token is at Z=10. Border at Z=0 relative to token.
+    // We set depthTest: false so it draws on top.
+    
+    sprite.add(border);
+    spriteData.selectionBorder = border;
+  }
+
+  /**
+   * Create name label for a token
+   * @param {object} spriteData 
+   * @private
+   */
+  createNameLabel(spriteData) {
+    const THREE = window.THREE;
+    const { sprite, tokenDoc } = spriteData;
+    
+    // Create canvas for text
+    // High resolution for crisp rendering
+    const fontSize = 96; 
+    const padding = 20;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    const text = tokenDoc.name || "Unknown";
+    const font = `bold ${fontSize}px Arial, sans-serif`;
+    
+    ctx.font = font;
+    const metrics = ctx.measureText(text);
+    const textWidth = metrics.width;
+    const canvasWidth = Math.ceil(textWidth + padding * 2);
+    const canvasHeight = Math.ceil(fontSize * 1.4); // Room for descenders/outline
+    
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+    
+    // Text Configuration
+    ctx.font = font;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    
+    // Center position
+    const cx = canvasWidth / 2;
+    const cy = canvasHeight / 2;
+
+    // Text Outline (Stroke) for readability without background
+    ctx.strokeStyle = 'black';
+    ctx.lineWidth = 8; // Thick outline
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+    ctx.strokeText(text, cx, cy);
+    
+    // Text Fill
+    ctx.fillStyle = 'white';
+    ctx.fillText(text, cx, cy);
+    
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.colorSpace = THREE.SRGBColorSpace; // Ensure correct colors
+    
+    const material = new THREE.SpriteMaterial({ 
+      map: texture, 
+      transparent: true,
+      depthTest: false // Always on top
+    });
+    
+    const label = new THREE.Sprite(material);
+    label.name = 'NameLabel';
+    
+    // Scale calculation:
+    // Maintain constant world height regardless of resolution
+    const parentScaleX = sprite.scale.x || 100;
+    const parentScaleY = sprite.scale.y || 100;
+    
+    // Target height in world units (approx 1/3 grid square)
+    // Slightly adjusted for visual balance
+    const targetHeight = 30; 
+    const aspectRatio = canvasWidth / canvasHeight;
+    const targetWidth = targetHeight * aspectRatio;
+    
+    // Apply relative scale to counteract parent scaling
+    label.scale.set(
+      targetWidth / parentScaleX,
+      targetHeight / parentScaleY,
+      1
+    );
+    
+    // Position above token
+    const relativeLabelHeight = targetHeight / parentScaleY;
+    // 0.5 is top edge. Move up by half label height + margin.
+    label.position.set(0, 0.5 + (relativeLabelHeight / 2) + 0.05, 0);
+    
+    sprite.add(label);
+    spriteData.nameLabel = label;
   }
 
   /**

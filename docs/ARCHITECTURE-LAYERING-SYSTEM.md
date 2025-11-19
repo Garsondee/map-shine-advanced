@@ -672,10 +672,11 @@ const TIER_BUDGETS = {
 ## Implementation Roadmap
 
 ### Phase 1: Core Managers (Week 1-2)
-- [ ] **Implement `TokenManager`** - Sync Foundry tokens to THREE.js sprites
-- [ ] **Implement `TileManager`** - Sync Foundry tiles to THREE.js sprites  
-- [ ] **Implement `GridRenderer`** - Render grid based on Foundry settings
-- [ ] **Test z-ordering** - Verify tokens render above ground, below overhead tiles
+- [x] **Implement `TokenManager`** - Sync Foundry tokens to THREE.js sprites
+- [x] **Implement `TileManager`** - Sync Foundry tiles to THREE.js sprites  
+- [x] **Implement `GridRenderer`** - Render grid based on Foundry settings
+- [x] **Implement `InteractionManager`** - Select, Drag, Delete logic
+- [x] **Test z-ordering** - Verify tokens render above ground, below overhead tiles
 
 ### Phase 2: Refactor Effect System (Week 3)
 - [ ] **Update `EffectBase`** with new contract for render target effects

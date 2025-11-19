@@ -15,9 +15,11 @@ const log = createLogger('DropHandler');
 export class DropHandler {
   /**
    * @param {HTMLElement} canvasElement - THREE.js canvas element
+   * @param {SceneComposer} sceneComposer - Scene composer for coordinate conversion
    */
-  constructor(canvasElement) {
+  constructor(canvasElement, sceneComposer) {
     this.canvasElement = canvasElement;
+    this.sceneComposer = sceneComposer;
     this.boundHandlers = {
       dragover: this.onDragOver.bind(this),
       drop: this.onDrop.bind(this)
@@ -258,30 +260,73 @@ export class DropHandler {
 
   /**
    * Convert viewport coordinates to canvas coordinates
-   * Accounts for camera pan and zoom
+   * Accounts for camera pan and zoom using SceneComposer's camera
    * @param {number} viewportX - X coordinate relative to canvas element
    * @param {number} viewportY - Y coordinate relative to canvas element
    * @returns {{x: number, y: number}}
    * @private
    */
   viewportToCanvas(viewportX, viewportY) {
-    // For now, simple 1:1 mapping
-    // TODO: Account for camera pan/zoom when camera controller is active
-    
-    // Get canvas transform from Foundry
+    if (this.sceneComposer && this.sceneComposer.camera) {
+      const camera = this.sceneComposer.camera;
+      const rect = this.canvasElement.getBoundingClientRect();
+      
+      // Normalized Device Coordinates (NDC) [-1, 1]
+      // X: -1 (Left) to 1 (Right)
+      // Y: 1 (Top) to -1 (Bottom) (Standard GL)
+      const ndcX = (viewportX / rect.width) * 2 - 1;
+      const ndcY = -(viewportY / rect.height) * 2 + 1;
+      
+      const THREE = window.THREE;
+      
+      if (camera.isPerspectiveCamera) {
+        // Create ray from camera
+        // Note: We can't use Raycaster here easily without importing it, 
+        // but we can do the math manually or use Vector3.unproject
+        
+        const vector = new THREE.Vector3(ndcX, ndcY, 0.5);
+        vector.unproject(camera);
+        
+        const dir = vector.sub(camera.position).normalize();
+        
+        const distance = -camera.position.z / dir.z;
+        
+        const pos = camera.position.clone().add(dir.multiplyScalar(distance));
+        
+        return { x: pos.x, y: pos.y };
+      }
+      else if (camera.isOrthographicCamera) {
+        // Map NDC to frustum
+        const x = (ndcX + 1) / 2 * (camera.right - camera.left) + camera.left;
+        const y = (ndcY + 1) / 2 * (camera.top - camera.bottom) + camera.bottom;
+        
+        // Add camera position (pan)
+        // Note: In Ortho, position moves the view.
+        // If Camera at (Px, Py). Center of view is (Px, Py).
+        // Frustum is relative to P? No, usually relative to 0,0 if position is 0,0.
+        // Three.js Ortho: Projection is static box. View Matrix handles position.
+        // So we need to unproject or simply add position.
+        
+        // Using unproject is safer
+        const vector = new THREE.Vector3(ndcX, ndcY, 0);
+        vector.unproject(camera);
+        
+        return { x: vector.x, y: vector.y };
+      }
+    }
+
+    // Fallback to Foundry's transform if SceneComposer not available
     const stage = canvas.stage;
     if (stage) {
       const transform = stage.transform.worldTransform;
       const scale = stage.scale.x;
       
-      // Invert transform
       const canvasX = (viewportX - transform.tx) / scale;
       const canvasY = (viewportY - transform.ty) / scale;
       
       return { x: canvasX, y: canvasY };
     }
 
-    // Fallback: direct mapping
     return { x: viewportX, y: viewportY };
   }
 

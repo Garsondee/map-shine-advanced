@@ -590,10 +590,20 @@ export class SpecularEffect extends EffectBase {
     if (!this.material) return;
     
     // Update camera position for view-dependent effects
-    this.material.uniforms.uCameraPosition.value.copy(camera.position);
+    // Safety check: ensure camera position is valid
+    if (isFinite(camera.position.x) && isFinite(camera.position.y) && isFinite(camera.position.z)) {
+      this.material.uniforms.uCameraPosition.value.copy(camera.position);
+    } else {
+      log.warn('Camera position contains NaN/Infinity, using fallback');
+      this.material.uniforms.uCameraPosition.value.set(0, 0, 100);
+    }
     
-    // For orthographic cameras, track the frustum center (actual pan position)
-    if (camera.isOrthographicCamera) {
+    // Update uCameraOffset for parallax effects
+    if (camera.isPerspectiveCamera) {
+      // For perspective camera, use camera position as offset
+      this.material.uniforms.uCameraOffset.value.set(camera.position.x, camera.position.y);
+    } else if (camera.isOrthographicCamera) {
+      // For orthographic cameras, track the frustum center (actual pan position)
       const centerX = (camera.left + camera.right) / 2;
       const centerY = (camera.top + camera.bottom) / 2;
       this.material.uniforms.uCameraOffset.value.set(centerX, centerY);

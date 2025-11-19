@@ -97,7 +97,9 @@ export class CameraController {
     // Convert screen-space delta to world-space delta
     const worldDelta = this.screenToWorldDelta(deltaX, deltaY);
     
-    // Pan camera (invert both axes: drag right = pan left, drag down = pan up)
+    // Pan camera (Standard Coordinate System: X Right, Y Up)
+    // Drag Right (+screenX) -> Move Camera Left (-worldX) to "pull" world Right.
+    // Drag Down (+screenY) -> Move Camera Up (+worldY) to "pull" world Down. (Inverted from previous logic)
     this.sceneComposer.pan(-worldDelta.x, worldDelta.y);
     
     this.lastMousePos = { x: event.clientX, y: event.clientY };
@@ -160,18 +162,35 @@ export class CameraController {
     if (!camera) return { x: 0, y: 0 };
     
     const rect = this.canvas.getBoundingClientRect();
-    const canvasWidth = rect.width;
     const canvasHeight = rect.height;
+
+    // Perspective Camera logic
+    if (camera.isPerspectiveCamera) {
+      // Calculate world units per pixel at current camera Z
+      // Visible Height = 2 * Z * tan(FOV/2)
+      const fovRad = (camera.fov * Math.PI) / 180;
+      const worldHeightVisible = 2 * camera.position.z * Math.tan(fovRad / 2);
+      
+      const scale = worldHeightVisible / canvasHeight;
+      
+      return { 
+        x: screenDeltaX * scale, 
+        y: screenDeltaY * scale 
+      };
+    }
     
-    // Get camera frustum size in world units
-    const frustumWidth = camera.right - camera.left;
-    const frustumHeight = camera.top - camera.bottom;
-    
-    // Convert pixel delta to world delta
-    const worldDeltaX = (screenDeltaX / canvasWidth) * frustumWidth;
-    const worldDeltaY = (screenDeltaY / canvasHeight) * frustumHeight;
-    
-    return { x: worldDeltaX, y: worldDeltaY };
+    // Fallback for Orthographic Camera (if ever used)
+    if (camera.isOrthographicCamera) {
+      const frustumWidth = camera.right - camera.left;
+      const frustumHeight = camera.top - camera.bottom;
+      
+      return {
+        x: (screenDeltaX / rect.width) * frustumWidth,
+        y: (screenDeltaY / canvasHeight) * frustumHeight
+      };
+    }
+
+    return { x: 0, y: 0 };
   }
   
   /**

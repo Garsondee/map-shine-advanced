@@ -49,6 +49,8 @@ export class SceneComposer {
     this.foundrySceneData = {
       width: foundryScene.dimensions.width,
       height: foundryScene.dimensions.height,
+      sceneWidth: foundryScene.dimensions.sceneWidth,
+      sceneHeight: foundryScene.dimensions.sceneHeight,
       gridSize: foundryScene.grid.size,
       gridType: foundryScene.grid.type,
       padding: foundryScene.padding || 0
@@ -56,8 +58,9 @@ export class SceneComposer {
 
     // Create three.js scene
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x000000); // Black background
-
+    // Remove explicit scene background to rely on renderer clear color (which is forced to black)
+    // this.scene.background = new THREE.Color(0x000000); 
+    
     // Use Foundry's already-loaded background texture instead of reloading
     // Foundry's canvas.primary.background.texture is already loaded and accessible
     const baseTexture = await this.getFoundryBackgroundTexture(foundryScene);
@@ -187,8 +190,11 @@ export class SceneComposer {
     // Use Foundry scene dimensions for world space size
     const worldWidth = this.foundrySceneData.width;
     const worldHeight = this.foundrySceneData.height;
+    const sceneWidth = this.foundrySceneData.sceneWidth;
+    const sceneHeight = this.foundrySceneData.sceneHeight;
 
-    const geometry = new THREE.PlaneGeometry(worldWidth, worldHeight);
+    // Use SCENE dimensions for geometry to prevent stretching texture across padding
+    const geometry = new THREE.PlaneGeometry(sceneWidth, sceneHeight);
     
     // Basic material for now (will be replaced with PBR material in effect system)
     const material = new THREE.MeshBasicMaterial({
@@ -197,25 +203,38 @@ export class SceneComposer {
       transparent: false
     });
     // Flip Y to correct UV orientation mismatch between PIXI and three.js
-    if (material.map) { material.map.flipY = true; material.map.needsUpdate = true; }
+    if (material.map) { 
+      material.map.flipY = true; 
+      material.map.needsUpdate = true; 
+    }
 
     this.basePlaneMesh = new THREE.Mesh(geometry, material);
     this.basePlaneMesh.name = 'BasePlane';
     
-    // Position at world origin
+    // Position at world center
     this.basePlaneMesh.position.set(worldWidth / 2, worldHeight / 2, 0);
     
-    // Rotate 180° around X-axis to flip vertically (accounts for Foundry texture orientation)
-    this.basePlaneMesh.rotation.x = Math.PI;
+    // CRITICAL: Foundry uses Y-down coordinates (0 at top, H at bottom).
+    // Three.js uses Y-up (0 at bottom, H at top).
+    // Strategy: Map Foundry 0 -> World H (Top) and Foundry H -> World 0 (Bottom).
+    // Plane Geometry is created at center (W/2, H/2).
+    // Top-Left Vertex is at (0, H). Bottom-Right is at (W, 0).
+    // Texture (FlipY=true) maps Image Top-Left to Vertex Top-Left.
+    // This aligns Image Top with World Top (H).
+    
+    // User Feedback: "The plane needs to be flipped vertically."
+    // Flipping the mesh Y-scale inverts the visual content within the same bounds.
+    this.basePlaneMesh.scale.y = -1;
     
     this.scene.add(this.basePlaneMesh);
-    log.info(`Base plane added: size ${worldWidth}x${worldHeight}, pos (${worldWidth/2}, ${worldHeight/2}, 0), rotation.x=${Math.PI}`);
+    log.info(`Base plane added: size ${worldWidth}x${worldHeight}, pos (${worldWidth/2}, ${worldHeight/2}, 0)`);
   }
 
   /**
-   * Setup orthographic camera for 2.5D top-down view
-   * @param {number} viewportWidth - Viewport width
-   * @param {number} viewportHeight - Viewport height
+   * Setup perspective camera for quasi-orthographic 2.5D top-down view
+   * Uses distant camera with narrow FOV to minimize perspective distortion
+   * @param {number} viewportWidth - Viewport width in CSS pixels
+   * @param {number} viewportHeight - Viewport height in CSS pixels
    * @private
    */
   setupCamera(viewportWidth, viewportHeight) {
@@ -223,44 +242,50 @@ export class SceneComposer {
 
     const worldWidth = this.foundrySceneData.width;
     const worldHeight = this.foundrySceneData.height;
-    const viewportAspect = viewportWidth / viewportHeight;
-    const worldAspect = worldWidth / worldHeight;
 
-    // Calculate frustum to fit world in viewport while maintaining aspect
-    let frustumWidth, frustumHeight;
-    
-    if (viewportAspect > worldAspect) {
-      // Viewport is wider than world - fit height, extend width
-      frustumHeight = worldHeight;
-      frustumWidth = frustumHeight * viewportAspect;
-    } else {
-      // Viewport is taller than world - fit width, extend height
-      frustumWidth = worldWidth;
-      frustumHeight = frustumWidth / viewportAspect;
-    }
-
-    // Center the frustum on the world center IN WORLD SPACE
-    // For orthographic camera: frustum defines world space bounds directly
+    // Center of the world (where camera looks)
     const centerX = worldWidth / 2;
     const centerY = worldHeight / 2;
 
-    this.camera = new THREE.OrthographicCamera(
-      centerX - frustumWidth / 2,   // left (world space)
-      centerX + frustumWidth / 2,   // right (world space)
-      centerY + frustumHeight / 2,  // top (world space)
-      centerY - frustumHeight / 2,  // bottom (world space)
-      0.1,                          // near
-      1000                          // far
+    // QUASI-ORTHOGRAPHIC SETUP:
+    // Position camera very far away with narrow FOV
+    // At extreme distance, perspective distortion becomes negligible
+    const cameraDistance = 10000;
+
+    // Calculate FOV to achieve 1:1 pixel mapping at this distance
+    // tan(FOV/2) = (viewHeight/2) / distance
+    // FOV = 2 * atan((viewHeight/2) / distance)
+    const fovRadians = 2 * Math.atan(viewportHeight / (2 * cameraDistance));
+    const fovDegrees = fovRadians * (180 / Math.PI);
+
+    const aspect = viewportWidth / viewportHeight;
+
+    this.camera = new THREE.PerspectiveCamera(
+      fovDegrees,
+      aspect,
+      10,            // near (increased for better depth precision)
+      200000         // far (increased to allow significant zoom out)
     );
 
-    // Position camera at origin looking down -Z (standard orthographic setup)
-    // The frustum bounds define what's visible in world space
-    this.camera.position.set(0, 0, 100);
-    this.camera.lookAt(0, 0, 0);
-    this.camera.up.set(0, 1, 0);
+    // Position camera high above world center
+    this.camera.position.set(centerX, centerY, cameraDistance);
+    
+    // Standard Orientation (Look down -Z, Up is +Y)
+    // Screen Top sees World +Y (Top). Screen Bottom sees World 0 (Bottom).
+    // This matches our new coordinate strategy.
+    this.camera.rotation.set(0, 0, 0);
+    
+    this.camera.updateMatrix();
+    this.camera.updateMatrixWorld(true);
     this.camera.updateProjectionMatrix();
+    
+    log.info(`Camera rotation set to: x=${this.camera.rotation.x.toFixed(4)}, y=${this.camera.rotation.y.toFixed(4)}, z=${this.camera.rotation.z.toFixed(4)}`);
 
-    log.info(`Camera setup: frustum ${frustumWidth.toFixed(0)}x${frustumHeight.toFixed(0)}, world ${worldWidth}x${worldHeight}, viewport ${viewportWidth}x${viewportHeight}`);
+    // Store camera distance for zoom calculations
+    this.cameraDistance = cameraDistance;
+    this.baseDistance = cameraDistance;
+
+    log.info(`Perspective camera setup: FOV ${fovDegrees.toFixed(2)}°, distance ${cameraDistance}, aspect ${aspect.toFixed(2)}, viewport ${viewportWidth}x${viewportHeight}`);
   }
 
   /**
@@ -271,18 +296,18 @@ export class SceneComposer {
   resize(viewportWidth, viewportHeight) {
     if (!this.camera) return;
 
+    // Update aspect ratio
     const aspect = viewportWidth / viewportHeight;
-    const worldHeight = this.foundrySceneData.height;
-    const frustumHeight = worldHeight;
-    const frustumWidth = frustumHeight * aspect;
+    this.camera.aspect = aspect;
 
-    this.camera.left = -frustumWidth / 2;
-    this.camera.right = frustumWidth / 2;
-    this.camera.top = frustumHeight / 2;
-    this.camera.bottom = -frustumHeight / 2;
+    // Recalculate FOV for new viewport height to maintain 1:1 pixel mapping
+    const fovRadians = 2 * Math.atan(viewportHeight / (2 * this.cameraDistance));
+    const fovDegrees = fovRadians * (180 / Math.PI);
+    this.camera.fov = fovDegrees;
+
     this.camera.updateProjectionMatrix();
 
-    log.debug(`Camera resized: ${viewportWidth}x${viewportHeight}`);
+    log.debug(`Camera resized: ${viewportWidth}x${viewportHeight}, FOV: ${fovDegrees.toFixed(2)}°`);
   }
 
   /**
@@ -293,46 +318,59 @@ export class SceneComposer {
   pan(deltaX, deltaY) {
     if (!this.camera) return;
 
-    // For orthographic cameras, shift the frustum bounds instead of camera position
-    this.camera.left += deltaX;
-    this.camera.right += deltaX;
-    this.camera.top += deltaY;
-    this.camera.bottom += deltaY;
-    this.camera.updateProjectionMatrix();
+    // For perspective camera looking straight down:
+    // Just translate the camera in XY, keeping Z constant
+    // The camera rotation stays fixed (looking down -Z axis)
+    let newX = this.camera.position.x + deltaX;
+    let newY = this.camera.position.y + deltaY;
     
-    log.debug(`Camera pan: (${deltaX.toFixed(1)}, ${deltaY.toFixed(1)})`);
+    // Clamp camera to scene bounds + margin
+    // Prevent user from panning too far away and getting lost
+    const width = this.foundrySceneData.width;
+    const height = this.foundrySceneData.height;
+    const marginX = Math.max(2000, width * 0.5);
+    const marginY = Math.max(2000, height * 0.5);
+    
+    // Bounds: [-Margin, Width + Margin]
+    newX = Math.max(-marginX, Math.min(newX, width + marginX));
+    newY = Math.max(-marginY, Math.min(newY, height + marginY));
+    
+    this.camera.position.x = newX;
+    this.camera.position.y = newY;
+    
+    // No need to call lookAt() - camera rotation is already set
+    // and doesn't change during panning
+    
+    log.debug(`Camera pan to (${this.camera.position.x.toFixed(1)}, ${this.camera.position.y.toFixed(1)})`);
   }
 
   /**
-   * Zoom camera by factor (Foundry-style: zoom around current view center)
+   * Zoom camera by factor (move closer/farther)
    * @param {number} zoomFactor - Zoom multiplier (>1 = zoom in, <1 = zoom out)
-   * @param {number} centerX - Zoom center X in viewport space (0-1, default 0.5) - UNUSED, kept for API compatibility
-   * @param {number} centerY - Zoom center Y in viewport space (0-1, default 0.5) - UNUSED, kept for API compatibility
+   * @param {number} centerX - Zoom center X in viewport space (0-1, default 0.5) - UNUSED for now
+   * @param {number} centerY - Zoom center Y in viewport space (0-1, default 0.5) - UNUSED for now
    */
   zoom(zoomFactor, centerX = 0.5, centerY = 0.5) {
     if (!this.camera) return;
 
-    // Foundry approach: Keep the current view center fixed, just scale the frustum size
-    // This matches how Foundry's canvas.pan({scale: newScale}) works
+    // For perspective camera: move along Z-axis
+    // Closer = zoomed in, farther = zoomed out
+    // Divide by zoomFactor because closer distance means bigger view
+    let newDistance = this.cameraDistance / zoomFactor;
     
-    // Get current frustum center (stays fixed during zoom)
-    const currentCenterX = (this.camera.left + this.camera.right) / 2;
-    const currentCenterY = (this.camera.top + this.camera.bottom) / 2;
+    // Clamp distance to prevent clipping
+    // Min: 100 (keep above tokens at Z=10)
+    // Max: 180000 (keep within far plane of 200000)
+    newDistance = Math.max(100, Math.min(newDistance, 180000));
+    
+    // Update camera Z position
+    this.camera.position.z = newDistance;
+    this.cameraDistance = newDistance;
+    
+    // Camera rotation stays fixed (already looking down -Z)
+    // No need to call lookAt()
 
-    // Calculate new frustum dimensions (smaller frustum = zoomed in)
-    const currentWidth = this.camera.right - this.camera.left;
-    const currentHeight = this.camera.top - this.camera.bottom;
-    const newWidth = currentWidth / zoomFactor;
-    const newHeight = currentHeight / zoomFactor;
-
-    // Update frustum bounds around the SAME center point
-    this.camera.left = currentCenterX - newWidth / 2;
-    this.camera.right = currentCenterX + newWidth / 2;
-    this.camera.top = currentCenterY + newHeight / 2;
-    this.camera.bottom = currentCenterY - newHeight / 2;
-    this.camera.updateProjectionMatrix();
-
-    log.debug(`Camera zoom: ${zoomFactor.toFixed(2)}x, center stays at (${currentCenterX.toFixed(1)}, ${currentCenterY.toFixed(1)})`);
+    log.debug(`Camera zoom: ${zoomFactor.toFixed(2)}x, new distance: ${newDistance.toFixed(0)}`);
   }
 
   /**

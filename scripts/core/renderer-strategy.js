@@ -69,7 +69,7 @@ async function tryWebGPU() {
     
     const renderer = new WebGPURenderer({
       antialias: true,
-      alpha: true,
+      alpha: false, // Opaque background to prevent white bleed-through
       powerPreference: 'high-performance'
     });
     
@@ -91,7 +91,7 @@ function tryWebGL2(THREE) {
   try {
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
-      alpha: true,
+      alpha: false, // Opaque background
       powerPreference: 'high-performance'
     });
     
@@ -119,7 +119,7 @@ function tryWebGL1(THREE) {
     const renderer = new THREE.WebGLRenderer({
       canvas: gl.canvas,
       antialias: false,
-      alpha: true
+      alpha: false // Opaque background
     });
     
     return { success: true, renderer };
@@ -146,6 +146,12 @@ export function configure(renderer, options = {}) {
 
   renderer.setSize(width, height);
   renderer.setPixelRatio(Math.min(pixelRatio, 2)); // Cap at 2 for performance
+  
+  // CRITICAL: Set clear color to OPAQUE black (alpha = 1)
+  // Without this, canvas is transparent and nothing is visible!
+  if (renderer.setClearColor) {
+    renderer.setClearColor(0x000000, 1); // Black, fully opaque
+  }
 
   log.debug(`Renderer configured: ${width}x${height}, pixelRatio: ${pixelRatio}`);
 }

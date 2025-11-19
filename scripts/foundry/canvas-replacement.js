@@ -13,7 +13,11 @@ import { SpecularEffect } from '../effects/SpecularEffect.js';
 import { RenderLoop } from '../core/render-loop.js';
 import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { TokenManager } from '../scene/token-manager.js';
+import { TileManager } from '../scene/tile-manager.js';
+import { InteractionManager } from '../scene/interaction-manager.js';
+import { GridRenderer } from '../scene/grid-renderer.js';
 import { DropHandler } from './drop-handler.js';
+import { sceneDebug } from '../utils/scene-debug.js';
 
 const log = createLogger('Canvas');
 
@@ -43,6 +47,15 @@ let uiManager = null;
 
 /** @type {TokenManager|null} */
 let tokenManager = null;
+
+/** @type {TileManager|null} */
+let tileManager = null;
+
+/** @type {InteractionManager|null} */
+let interactionManager = null;
+
+/** @type {GridRenderer|null} */
+let gridRenderer = null;
 
 /** @type {DropHandler|null} */
 let dropHandler = null;
@@ -205,10 +218,17 @@ async function createThreeCanvas(scene) {
     rendererCanvas.style.height = '100%';
     rendererCanvas.style.zIndex = '1'; // Below PIXI canvas (which is hidden and non-interactive)
     rendererCanvas.style.pointerEvents = 'auto'; // ENABLE pointer events for drop handling
+    rendererCanvas.style.backgroundColor = '#000000'; // CRITICAL: Force black background via CSS
     
     threeCanvas = rendererCanvas; // Update reference
     const rect = threeCanvas.getBoundingClientRect();
     renderer.setSize(rect.width, rect.height);
+    
+    // CRITICAL: Force renderer clear color to opaque black
+    // This ensures that "void" areas are black, not white or transparent
+    if (renderer.setClearColor) {
+      renderer.setClearColor(0x000000, 1);
+    }
 
     // Step 1: Initialize scene composer
     sceneComposer = new SceneComposer();
@@ -232,13 +252,33 @@ async function createThreeCanvas(scene) {
     const basePlane = sceneComposer.getBasePlane();
     specularEffect.setBaseMesh(basePlane, bundle);
 
+    // Step 3b: Initialize grid renderer
+    gridRenderer = new GridRenderer(threeScene);
+    gridRenderer.initialize();
+    gridRenderer.updateGrid();
+    log.info('Grid renderer initialized');
+
     // Step 4: Initialize token manager
     tokenManager = new TokenManager(threeScene);
     tokenManager.initialize();
-    log.info('Token manager initialized');
+    
+    // Sync existing tokens immediately (we're already in canvasReady, so the hook won't fire)
+    tokenManager.syncAllTokens();
+    log.info('Token manager initialized and synced');
 
-    // Step 5: Initialize drop handler (for token/tile creation)
-    dropHandler = new DropHandler(threeCanvas);
+    // Step 4b: Initialize tile manager
+    tileManager = new TileManager(threeScene);
+    tileManager.initialize();
+    tileManager.syncAllTiles();
+    log.info('Tile manager initialized and synced');
+
+    // Step 5: Initialize interaction manager (Selection, Drag/Drop)
+    interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager);
+    interactionManager.initialize();
+    log.info('Interaction manager initialized');
+
+    // Step 6: Initialize drop handler (for creating new items)
+    dropHandler = new DropHandler(threeCanvas, sceneComposer);
     dropHandler.initialize();
     log.info('Drop handler initialized');
 
@@ -261,7 +301,11 @@ async function createThreeCanvas(scene) {
     mapShine.specularEffect = specularEffect;
     mapShine.cameraController = cameraController;
     mapShine.tokenManager = tokenManager; // NEW: Expose token manager for diagnostics
+    mapShine.tileManager = tileManager; // NEW: Expose tile manager for diagnostics
+    mapShine.interactionManager = interactionManager; // NEW: Expose interaction manager
+    mapShine.gridRenderer = gridRenderer; // NEW: Expose grid renderer
     mapShine.renderLoop = renderLoop; // CRITICAL: Expose render loop for diagnostics
+    mapShine.sceneDebug = sceneDebug; // NEW: Expose scene debug helpers
     // Attach to canvas as well for convenience (used by console snippets)
     try { canvas.mapShine = mapShine; } catch (_) {}
 
@@ -330,6 +374,24 @@ async function initializeUI(specularEffect) {
     onSpecularUpdate
   );
 
+  // --- Grid Settings ---
+  if (gridRenderer) {
+    const gridSchema = GridRenderer.getControlSchema();
+    
+    const onGridUpdate = (effectId, paramId, value) => {
+      gridRenderer.updateSetting(paramId, value);
+      log.debug(`Grid.${paramId} = ${value}`);
+    };
+
+    uiManager.registerEffect(
+      'grid',
+      'Grid Settings',
+      gridSchema,
+      onGridUpdate
+    );
+    log.info('Grid settings wired to UI');
+  }
+
   // Expose UI manager globally for debugging
   window.MapShine.uiManager = uiManager;
   
@@ -374,6 +436,27 @@ function destroyThreeCanvas() {
     tokenManager.dispose();
     tokenManager = null;
     log.debug('Token manager disposed');
+  }
+
+  // Dispose tile manager
+  if (tileManager) {
+    tileManager.dispose();
+    tileManager = null;
+    log.debug('Tile manager disposed');
+  }
+
+  // Dispose interaction manager
+  if (interactionManager) {
+    interactionManager.dispose();
+    interactionManager = null;
+    log.debug('Interaction manager disposed');
+  }
+
+  // Dispose grid renderer
+  if (gridRenderer) {
+    gridRenderer.dispose();
+    gridRenderer = null;
+    log.debug('Grid renderer disposed');
   }
 
   // Dispose effect composer

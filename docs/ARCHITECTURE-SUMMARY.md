@@ -84,24 +84,34 @@ renderPostProcessing(sceneRT);
 ## Key Managers
 
 ### TokenManager
+- **Implemented**
 - Syncs `canvas.tokens.placeables` → `THREE.Sprite[]`
-- Handles create, update, delete
+- Handles create, update, delete via hooks
 - Respects elevation (z-position)
+- Manages selection visuals (orange ring/tint)
 
 ### TileManager
+- **Implemented**
 - Syncs `canvas.scene.tiles` → `THREE.Sprite[]`
-- Groups by overhead flag and z-index
+- Groups by overhead flag and z-index (Background/Foreground/Overhead)
 - Creates sprites at correct z-layers
 
 ### GridRenderer
+- **Implemented**
 - Renders grid based on `canvas.scene.grid`
 - Caches to texture for performance
-- Supports square, hex, gridless
+- Supports square and hex grids
+
+### InteractionManager
+- **Implemented**
+- Handles mouse input (Select, Drag, Drop)
+- Raycasts against scene objects with proper Z-plane intersection
+- Handles grid snapping during drag
+- Syncs updates to Foundry documents (with `animate: false` to prevent hangs)
 
 ---
 
 ## Benefits
-
 1. **Complete Visual Control** - We render everything, no PIXI interference
 2. **Simple Z-Ordering** - THREE.js handles sorting automatically
 3. **One Render Call** - Entire scene rendered in single pass (except ground effects)
@@ -112,7 +122,6 @@ renderPostProcessing(sceneRT);
 ---
 
 ## Trade-offs
-
 1. **Complexity** - Must sync Foundry data every frame
 2. **Token Rendering** - We're responsible for all token visuals
 3. **Module Conflicts** - Modules that modify PIXI canvas won't work
@@ -121,54 +130,33 @@ renderPostProcessing(sceneRT);
 ---
 
 ## Next Steps
-
-1. ✅ Architecture approved
-2. 🔄 Implement `TokenManager` (Phase 1)
-3. 🔄 Implement `TileManager` (Phase 1)
-4. 🔄 Implement `GridRenderer` (Phase 1)
-5. ⏳ Test with real tokens/tiles
-6. ⏳ Add environmental effects
-7. ⏳ Polish & optimize
+1. **Core Rendering** (Tokens, Tiles, Grid) - Complete
+2. **Interaction** (Select, Move, Delete) - Complete
+3. **Environmental Effects** (Phase 2) - Next Priority
+   - Weather (Rain, Snow)
+   - Mask-aware rendering (Indoor/Outdoor)
+4. **Post-Processing** (Phase 3)
+   - Bloom, Color Grading
+5. **Polish & Optimize**
 
 ---
 
-## 🔍 Foundry Integration Details
+## Foundry Integration Details
 
 **Full Report**: See `FOUNDRY-INTEGRATION-FINDINGS.md`
 
-### Key Data Sources
-
-```javascript
-// Tokens (from Foundry)
-const tokens = canvas.tokens.placeables;
-token.document.x, .y, .elevation, .width, .height, .texture.src
-
-// Tiles (from Foundry)  
-const tiles = canvas.scene.tiles;
-tile.document.x, .y, .elevation, .width, .height, .texture.src
-
-// Grid (from Foundry)
-canvas.scene.grid.type, .size, .style, .color
-canvas.scene.foregroundElevation // Overhead tile threshold
-```
-
-### Update Hooks
-
-```javascript
-// React to Foundry changes
-Hooks.on("createToken", (doc) => tokenManager.createSprite(doc));
-Hooks.on("updateToken", (doc, changes) => tokenManager.updateSprite(doc, changes));
-Hooks.on("deleteToken", (doc) => tokenManager.removeSprite(doc.id));
-// Same pattern for tiles
-```
-
-### Critical Findings
-
-1. **No `overhead` boolean** - Tiles with `elevation >= scene.foregroundElevation` are overhead
-2. **Top-left origin** - Foundry uses top-left, THREE.js uses center (must convert)
-3. **Hook-based sync** - Use Foundry hooks for incremental updates (not polling)
-4. **6 grid types** - Square, 4 hex variants, gridless
-5. **Elevation in grid units** - Not pixels
+### Critical Learnings
+1. **Hanging Updates**: Token updates must use `{animate: false}` when the PIXI canvas is hidden, otherwise Foundry waits for animation promises that never resolve.
+2. **Coordinate Conversion**: 
+   - Foundry: Top-Left Origin (Y-down)
+   - THREE.js: Center Origin (Y-up)
+   - Conversion: `y_three = sceneHeight - (y_foundry + height/2)`
+3. **Raycasting**: Simple unprojection fails for 2.5D. Must use **Ray-Plane Intersection** with the object's Z-plane to get accurate world coordinates.
+4. **Layering**:
+   - Background Tiles: z=1.0
+   - Foreground Tiles: z=5.0
+   - Tokens: z=10.0 + elevation
+   - Overhead Tiles: z=20.0 (determined by `elevation >= foregroundElevation`)
 
 ---
 

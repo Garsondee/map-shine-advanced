@@ -120,6 +120,16 @@ export class RenderLoop {
 
     // Render the scene
     try {
+      // CRITICAL: Enforce opaque black background every frame
+      if (this.renderer.setClearColor) {
+        this.renderer.setClearColor(0x000000, 1);
+      }
+      
+      // Ensure autoClear is enabled so the background is actually cleared
+      if (this.renderer.autoClear === false) {
+        this.renderer.autoClear = true;
+      }
+
       this.renderer.render(this.scene, this.camera);
       
       // Debug: Log first few renders

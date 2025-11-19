@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import Coordinates from '../utils/coordinates.js';
 
 const log = createLogger('InteractionManager');
 
@@ -17,12 +18,14 @@ export class InteractionManager {
    * @param {SceneComposer} sceneComposer - For camera and coordinate conversion
    * @param {TokenManager} tokenManager - For accessing token sprites
    * @param {TileManager} tileManager - For accessing tile sprites
+   * @param {WallManager} wallManager - For creating/managing walls
    */
-  constructor(canvasElement, sceneComposer, tokenManager, tileManager) {
+  constructor(canvasElement, sceneComposer, tokenManager, tileManager, wallManager) {
     this.canvasElement = canvasElement;
     this.sceneComposer = sceneComposer;
     this.tokenManager = tokenManager;
     this.tileManager = tileManager;
+    this.wallManager = wallManager;
 
     this.raycaster = new THREE.Raycaster();
     this.mouse = new THREE.Vector2();
@@ -42,6 +45,15 @@ export class InteractionManager {
       previews: new Map() // Map<string, THREE.Sprite> - Drag previews
     };
 
+    // Wall Draw state
+    this.wallDraw = {
+      active: false,
+      start: new THREE.Vector3(), // World pos
+      current: new THREE.Vector3(), // World pos
+      previewLine: null, // THREE.Line
+      type: 'walls' // 'walls', 'terrain', etc.
+    };
+
     // Drag Select state
     this.dragSelect = {
       active: false,
@@ -56,6 +68,8 @@ export class InteractionManager {
     
     /** @type {string|null} ID of currently hovered token */
     this.hoveredTokenId = null;
+    /** @type {string|null} ID of currently hovered wall */
+    this.hoveredWallId = null;
 
     this.boundHandlers = {
       onPointerDown: this.onPointerDown.bind(this),
@@ -177,32 +191,60 @@ export class InteractionManager {
    * @param {MouseEvent} event 
    */
   onDoubleClick(event) {
-    // Get mouse position in NDC
-    this.updateMouseCoords(event);
-    this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
+    try {
+        // Get mouse position in NDC
+        this.updateMouseCoords(event);
+        this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
 
-    const interactables = this.tokenManager.getAllTokenSprites();
-    const intersects = this.raycaster.intersectObjects(interactables, false);
+        // 1. Check Walls
+        const wallGroup = this.wallManager.wallGroup;
+        this.raycaster.params.Line.threshold = 10; // Tolerance
+        const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
+        
+        if (wallIntersects.length > 0) {
+            const hit = wallIntersects[0];
+            let object = hit.object;
+            // Find group with wallId
+            while(object && object !== wallGroup) {
+                if (object.userData && object.userData.wallId) {
+                    const wallId = object.userData.wallId;
+                    const wall = canvas.walls.get(wallId);
+                    if (wall && wall.document.testUserPermission(game.user, "LIMITED")) {
+                        log.info(`Opening config for wall ${wallId}`);
+                        wall.sheet.render(true);
+                        return;
+                    }
+                }
+                object = object.parent;
+            }
+        }
 
-    if (intersects.length > 0) {
-      const hit = intersects[0];
-      const sprite = hit.object;
-      const tokenDoc = sprite.userData.tokenDoc;
+        // 2. Check Tokens
+        const interactables = this.tokenManager.getAllTokenSprites();
+        const intersects = this.raycaster.intersectObjects(interactables, false);
 
-      // Permission check: "LIMITED" permission required to view sheet
-      if (!tokenDoc.testUserPermission(game.user, "LIMITED")) {
-        ui.notifications.warn("You do not have permission to view this Token's sheet.");
-        return;
-      }
+        if (intersects.length > 0) {
+          const hit = intersects[0];
+          const sprite = hit.object;
+          const tokenDoc = sprite.userData.tokenDoc;
 
-      const actor = tokenDoc.actor;
-      if (actor) {
-        log.info(`Opening actor sheet for: ${tokenDoc.name}`);
-        actor.sheet.render(true);
-      } else {
-        // Fallback if no actor (unlikely for valid tokens)
-        log.warn(`Token ${tokenDoc.name} has no associated actor`);
-      }
+          // Permission check: "LIMITED" permission required to view sheet
+          if (!tokenDoc.testUserPermission(game.user, "LIMITED")) {
+            ui.notifications.warn("You do not have permission to view this Token's sheet.");
+            return;
+          }
+
+          const actor = tokenDoc.actor;
+          if (actor) {
+            log.info(`Opening actor sheet for: ${tokenDoc.name}`);
+            actor.sheet.render(true);
+          } else {
+            // Fallback if no actor (unlikely for valid tokens)
+            log.warn(`Token ${tokenDoc.name} has no associated actor`);
+          }
+        }
+    } catch (error) {
+        log.error('Error in onDoubleClick:', error);
     }
   }
 
@@ -211,112 +253,292 @@ export class InteractionManager {
    * @param {PointerEvent} event 
    */
   onPointerDown(event) {
-    // Only handle left click for now
-    if (event.button !== 0) return;
+    try {
+        // Only handle left click for now
+        if (event.button !== 0) return;
 
-    // Get mouse position in NDC
-    this.updateMouseCoords(event);
+        // Get mouse position in NDC
+        this.updateMouseCoords(event);
 
-    // Raycast
-    this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
-    
-    // Collect interactive objects (Tokens for now)
-    const interactables = [
-      ...this.tokenManager.getAllTokenSprites(),
-      // ...this.tileManager.getAllTileSprites() // TODO: Add tiles later
-    ];
+        // Raycast
+        this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
+        
+        // Collect interactive objects
+        const tokenSprites = this.tokenManager.getAllTokenSprites();
+        const wallGroup = this.wallManager.wallGroup;
+        
+        // 1. Check for Wall/Door Interactions first (usually on top or distinct)
+        // We raycast against wallGroup recursively
+        const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
+        
+        if (wallIntersects.length > 0) {
+            // Sort by distance is default
+            const hit = wallIntersects[0];
+            let object = hit.object;
+            
+            // Traverse up to find userData if needed (e.g. door parts)
+            let interactable = null;
+            let type = null;
+            
+            while (object && object !== wallGroup) {
+                if (object.userData && object.userData.type) {
+                    interactable = object;
+                    type = object.userData.type;
+                    break;
+                }
+                object = object.parent;
+            }
+            
+            if (interactable) {
+                if (type === 'doorControl') {
+                     this.handleDoorClick(interactable, event);
+                     return;
+                }
+                
+                if (type === 'wallEndpoint') {
+                     this.startWallDrag(interactable, event);
+                     return;
+                }
+            }
+        }
 
-    const intersects = this.raycaster.intersectObjects(interactables, false);
+        // 2. Check Wall Drawing (If on WallsLayer and didn't click an endpoint/door)
+        const activeLayer = canvas.activeLayer?.name;
+        const activeTool = game.activeTool;
+        const isWallLayer = activeLayer && activeLayer.includes('WallsLayer');
+        
+        if (isWallLayer) {
+          // Start Wall Drawing
+          const worldPos = this.viewportToWorld(event.clientX, event.clientY, 0);
+          if (!worldPos) return;
 
-    if (intersects.length > 0) {
-      // Hit something
-      const hit = intersects[0];
-      const sprite = hit.object;
-      const tokenDoc = sprite.userData.tokenDoc;
-      
-      // Permission check
-      if (!tokenDoc.canUserModify(game.user, "update")) {
-        ui.notifications.warn("You do not have permission to control this Token.");
-        return;
-      }
+          // Snap start position
+          const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
+          
+          let snapped;
+          if (event.shiftKey) {
+            snapped = foundryPos;
+          } else {
+            // Default to vertex snapping for walls
+            snapped = this.snapToGrid(foundryPos.x, foundryPos.y, CONST.GRID_SNAPPING_MODES.VERTEX);
+          }
+          
+          const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
+          
+          this.wallDraw.active = true;
+          this.wallDraw.start.set(snappedWorld.x, snappedWorld.y, 0);
+          this.wallDraw.current.set(snappedWorld.x, snappedWorld.y, 0);
+          this.wallDraw.type = activeTool;
+          
+          // Create preview line
+          if (!this.wallDraw.previewLine) {
+            const geometry = new THREE.BufferGeometry().setFromPoints([
+              this.wallDraw.start,
+              this.wallDraw.current
+            ]);
+            const material = new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 2 });
+            this.wallDraw.previewLine = new THREE.Line(geometry, material);
+            this.wallDraw.previewLine.name = 'WallPreview';
+            this.wallDraw.previewLine.position.z = 3.5; // Lift above walls (3.0) and grid (2.0)
+            this.sceneComposer.scene.add(this.wallDraw.previewLine);
+          } else {
+            this.wallDraw.previewLine.visible = true;
+            
+            // Update start/end positions of existing line
+            const positions = this.wallDraw.previewLine.geometry.attributes.position.array;
+            positions[0] = this.wallDraw.start.x;
+            positions[1] = this.wallDraw.start.y;
+            positions[2] = 0;
+            positions[3] = this.wallDraw.current.x;
+            positions[4] = this.wallDraw.current.y;
+            positions[5] = 0;
+            this.wallDraw.previewLine.geometry.attributes.position.needsUpdate = true;
+          }
+          
+          // Disable camera controls
+          if (window.MapShine?.cameraController) {
+            window.MapShine.cameraController.enabled = false;
+          }
+          
+          return; // Skip token selection
+        }
 
-      // Handle Selection
-      const isSelected = this.selection.has(tokenDoc.id);
-      
-      if (event.shiftKey) {
-        // Toggle or Add
-        if (isSelected) {
-          // If shift-clicking selected, deselect it (unless we start dragging?)
-          // For now, let's just ensure it stays selected or maybe allow deselect on UP if no drag?
-          // Simpler: Shift always adds/keeps.
+        // 3. Check Tokens
+        const intersects = this.raycaster.intersectObjects(tokenSprites, false);
+
+        if (intersects.length > 0) {
+          // Hit something
+          const hit = intersects[0];
+          const sprite = hit.object;
+          const tokenDoc = sprite.userData.tokenDoc;
+          
+          // Permission check
+          if (!tokenDoc.canUserModify(game.user, "update")) {
+            ui.notifications.warn("You do not have permission to control this Token.");
+            return;
+          }
+
+          // Handle Selection
+          const isSelected = this.selection.has(tokenDoc.id);
+          
+          if (event.shiftKey) {
+            // Toggle or Add
+            if (isSelected) {
+              // If shift-clicking selected, deselect it (unless we start dragging?)
+              // For now, let's just ensure it stays selected or maybe allow deselect on UP if no drag?
+              // Simpler: Shift always adds/keeps.
+            } else {
+              this.selectObject(sprite);
+            }
+          } else {
+            if (!isSelected) {
+               // Clicked unselected -> Clear others, select this
+               this.clearSelection();
+               this.selectObject(sprite);
+            }
+            // If clicked selected -> Keep group selection
+          }
+
+          // Start Drag
+          this.dragState.active = true;
+          this.dragState.leaderId = tokenDoc.id;
+          
+          // Create Previews
+          this.createDragPreviews();
+          
+          // Set leader object to the PREVIEW of the clicked token
+          const leaderPreview = this.dragState.previews.get(tokenDoc.id);
+          if (!leaderPreview) {
+            log.error("Failed to create leader preview");
+            this.dragState.active = false;
+            return;
+          }
+          
+          this.dragState.object = leaderPreview;
+          this.dragState.startPos.copy(leaderPreview.position);
+          this.dragState.offset.subVectors(leaderPreview.position, hit.point); // Offset from hit point to center
+          this.dragState.hasMoved = false;
+          
+          // Capture initial positions of PREVIEWS
+          this.dragState.initialPositions.clear();
+          for (const [id, preview] of this.dragState.previews) {
+            this.dragState.initialPositions.set(id, preview.position.clone());
+          }
+          
+          // Disable camera controls if dragging
+          if (window.MapShine?.cameraController) {
+            window.MapShine.cameraController.enabled = false;
+          }
+
         } else {
-          this.selectObject(sprite);
+          // Clicked empty space - deselect all unless shift held
+          if (!event.shiftKey) {
+            this.clearSelection();
+          }
+          
+          // Start Drag Select
+          this.dragSelect.active = true;
+          
+          // Calculate start pos on ground/token plane (Z=10)
+          const worldPos = this.viewportToWorld(event.clientX, event.clientY, 10);
+          if (worldPos) {
+            this.dragSelect.start.copy(worldPos);
+            this.dragSelect.current.copy(worldPos);
+            
+            // Reset visuals
+            this.dragSelect.mesh.position.copy(worldPos);
+            this.dragSelect.mesh.scale.set(0.1, 0.1, 1);
+            this.dragSelect.mesh.visible = true;
+            
+            this.dragSelect.border.position.copy(worldPos);
+            this.dragSelect.border.scale.set(0.1, 0.1, 1);
+            this.dragSelect.border.visible = true;
+          }
         }
-      } else {
-        if (!isSelected) {
-           // Clicked unselected -> Clear others, select this
-           this.clearSelection();
-           this.selectObject(sprite);
-        }
-        // If clicked selected -> Keep group selection
-      }
+    } catch (error) {
+        log.error('Error in onPointerDown:', error);
+    }
+  }
 
-      // Start Drag
+  /**
+   * Handle Door Click
+   * @param {THREE.Group} doorGroup 
+   * @param {PointerEvent} event 
+   */
+  handleDoorClick(doorGroup, event) {
+      try {
+          const wallId = doorGroup.userData.wallId;
+          const wall = canvas.walls.get(wallId);
+          if (!wall) {
+              log.warn(`handleDoorClick: Wall ${wallId} not found in canvas.walls`);
+              return;
+          }
+
+          // Determine whether the player can control the door
+          if ( !game.user.can("WALL_DOORS") ) {
+              log.warn("handleDoorClick: User cannot control doors");
+              return;
+          }
+          if ( game.paused && !game.user.isGM ) {
+            ui.notifications.warn("GAME.PausedWarning", {localize: true});
+            return;
+          }
+
+          const ds = wall.document.ds;
+          const states = CONST.WALL_DOOR_STATES;
+          const sound = !(game.user.isGM && event.altKey);
+
+          log.info(`handleDoorClick: Wall ${wallId}, Current State: ${ds}`);
+
+          // Right click: Lock/Unlock (GM only)
+          if (ds === states.LOCKED) {
+              if (sound) AudioHelper.play({src: CONFIG.sounds.lock}); 
+              log.info("handleDoorClick: Door is locked");
+              return;
+          }
+
+          // Toggle Open/Closed
+          const newState = ds === states.CLOSED ? states.OPEN : states.CLOSED;
+          log.info(`handleDoorClick: Toggling to ${newState}`);
+          
+          wall.document.update({ds: newState}, {sound}).then(() => {
+              log.info(`handleDoorClick: Update successful for ${wallId}`);
+          }).catch(err => {
+              log.error(`handleDoorClick: Update failed for ${wallId}`, err);
+          });
+      } catch(err) {
+          log.error("Error in handleDoorClick", err);
+      }
+  }
+
+  /**
+   * Start dragging a wall endpoint
+   * @param {THREE.Mesh} endpoint 
+   * @param {PointerEvent} event 
+   */
+  startWallDrag(endpoint, event) {
+      const wallId = endpoint.userData.wallId;
+      const index = endpoint.userData.index; // 0 or 1
+      const wall = canvas.walls.get(wallId);
+      
+      if (!wall) return;
+
+      // Permission
+      if (!game.user.isGM) return; // Usually only GM edits walls
+
       this.dragState.active = true;
-      this.dragState.leaderId = tokenDoc.id;
+      this.dragState.mode = 'wallEndpoint';
+      this.dragState.wallId = wallId;
+      this.dragState.endpointIndex = index;
+      this.dragState.object = endpoint; // The mesh being dragged
+      this.dragState.startPos.copy(endpoint.position);
       
-      // Create Previews
-      this.createDragPreviews();
-      
-      // Set leader object to the PREVIEW of the clicked token
-      const leaderPreview = this.dragState.previews.get(tokenDoc.id);
-      if (!leaderPreview) {
-        log.error("Failed to create leader preview");
-        this.dragState.active = false;
-        return;
-      }
-      
-      this.dragState.object = leaderPreview;
-      this.dragState.startPos.copy(leaderPreview.position);
-      this.dragState.offset.subVectors(leaderPreview.position, hit.point); // Offset from hit point to center
-      this.dragState.hasMoved = false;
-      
-      // Capture initial positions of PREVIEWS
-      this.dragState.initialPositions.clear();
-      for (const [id, preview] of this.dragState.previews) {
-        this.dragState.initialPositions.set(id, preview.position.clone());
-      }
-      
-      // Disable camera controls if dragging
+      // Disable camera
       if (window.MapShine?.cameraController) {
         window.MapShine.cameraController.enabled = false;
       }
-
-    } else {
-      // Clicked empty space - deselect all unless shift held
-      if (!event.shiftKey) {
-        this.clearSelection();
-      }
       
-      // Start Drag Select
-      this.dragSelect.active = true;
-      
-      // Calculate start pos on ground/token plane (Z=10)
-      const worldPos = this.viewportToWorld(event.clientX, event.clientY, 10);
-      if (worldPos) {
-        this.dragSelect.start.copy(worldPos);
-        this.dragSelect.current.copy(worldPos);
-        
-        // Reset visuals
-        this.dragSelect.mesh.position.copy(worldPos);
-        this.dragSelect.mesh.scale.set(0.1, 0.1, 1);
-        this.dragSelect.mesh.visible = true;
-        
-        this.dragSelect.border.position.copy(worldPos);
-        this.dragSelect.border.scale.set(0.1, 0.1, 1);
-        this.dragSelect.border.visible = true;
-      }
-    }
+      log.info(`Started dragging wall ${wallId} endpoint ${index}`);
   }
 
   /**
@@ -324,89 +546,164 @@ export class InteractionManager {
    * @param {PointerEvent} event 
    */
   onPointerMove(event) {
-    // Case 1: Drag Select
-    if (this.dragSelect.active) {
-      this.updateMouseCoords(event);
-      
-      // Calculate current pos on ground/token plane (Z=10)
-      const worldPos = this.viewportToWorld(event.clientX, event.clientY, 10);
-      if (worldPos) {
-        this.dragSelect.current.copy(worldPos);
-        
-        // Update visuals
-        const start = this.dragSelect.start;
-        const current = this.dragSelect.current;
-        
-        const minX = Math.min(start.x, current.x);
-        const maxX = Math.max(start.x, current.x);
-        const minY = Math.min(start.y, current.y);
-        const maxY = Math.max(start.y, current.y);
-        
-        const width = maxX - minX;
-        const height = maxY - minY;
-        const centerX = minX + width / 2;
-        const centerY = minY + height / 2;
-        
-        // Update Mesh
-        this.dragSelect.mesh.position.set(centerX, centerY, 10.1); // Slightly above tokens? No, usually overlay.
-        // Tokens are at Z=10. Let's put this at Z=100 (overlay).
-        this.dragSelect.mesh.position.z = 100; 
-        this.dragSelect.mesh.scale.set(width, height, 1);
-        
-        // Update Border
-        this.dragSelect.border.position.set(centerX, centerY, 100);
-        this.dragSelect.border.scale.set(width, height, 1);
-      }
-      return;
-    }
-
-    // Case 2: Hover (if not dragging object)
-    if (!this.dragState.active || !this.dragState.object) {
-      this.handleHover(event);
-      return;
-    }
-
-    // Case 3: Object Drag
-    this.dragState.hasMoved = true;
-    this.updateMouseCoords(event);
-    
-    // Raycast to find world position on the z-plane of the object
-    // Use the object's current Z for the intersection plane
-    const targetZ = this.dragState.object.position.z;
-    
-    // Get world position at the target Z plane
-    const worldPos = this.viewportToWorld(event.clientX, event.clientY, targetZ);
-    
-    if (worldPos) {
-      // Calculate the new position
-      // We want to maintain the offset from the grab point to the object center
-      let x = worldPos.x + this.dragState.offset.x;
-      let y = worldPos.y + this.dragState.offset.y;
-      
-      // Snap to grid logic if Shift is NOT held
-      if (!event.shiftKey) {
-        const foundryPos = this.worldToFoundry(x, y);
-        const snapped = this.snapToGrid(foundryPos.x, foundryPos.y);
-        const snappedWorld = this.foundryToWorld(snapped.x, snapped.y);
-        x = snappedWorld.x;
-        y = snappedWorld.y;
-      }
-
-      // Calculate delta from LEADER's initial position
-      const leaderInitial = this.dragState.initialPositions.get(this.dragState.leaderId);
-      if (!leaderInitial) return;
-
-      const deltaX = x - leaderInitial.x;
-      const deltaY = y - leaderInitial.y;
-
-      // Apply delta to ALL previews
-      for (const [id, preview] of this.dragState.previews) {
-        const initialPos = this.dragState.initialPositions.get(id);
-        if (initialPos) {
-          preview.position.x = initialPos.x + deltaX;
-          preview.position.y = initialPos.y + deltaY;
+    try {
+        // Case 0: Wall Drawing
+        if (this.wallDraw.active) {
+          this.updateMouseCoords(event);
+          const worldPos = this.viewportToWorld(event.clientX, event.clientY, 0);
+          if (worldPos) {
+            // Snap current position
+            const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
+            
+            let snapped;
+            if (event.shiftKey) {
+              snapped = foundryPos;
+            } else {
+              snapped = this.snapToGrid(foundryPos.x, foundryPos.y, CONST.GRID_SNAPPING_MODES.VERTEX);
+            }
+            
+            const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
+            
+            this.wallDraw.current.set(snappedWorld.x, snappedWorld.y, 0);
+            
+            // Update geometry
+            const positions = this.wallDraw.previewLine.geometry.attributes.position.array;
+            positions[3] = this.wallDraw.current.x;
+            positions[4] = this.wallDraw.current.y;
+            positions[5] = 0;
+            this.wallDraw.previewLine.geometry.attributes.position.needsUpdate = true;
+          }
+          return;
         }
-      }
+
+        // Case 0.5: Wall Endpoint Drag
+        if (this.dragState.active && this.dragState.mode === 'wallEndpoint') {
+            this.updateMouseCoords(event);
+            const worldPos = this.viewportToWorld(event.clientX, event.clientY, 0); // Walls are at Z=0? No, Z=3. But we project to Z=0 plane usually for grid.
+            // Let's project to Z=0 or Z=3.
+            if (worldPos) {
+                 const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
+                 let snapped;
+                 if (event.shiftKey) {
+                     snapped = foundryPos;
+                 } else {
+                     snapped = this.snapToGrid(foundryPos.x, foundryPos.y, CONST.GRID_SNAPPING_MODES.VERTEX);
+                 }
+                 const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
+                 
+                 // Update Visuals (Optimistic)
+                 // We need to update the Line and the Endpoint
+                 const wallGroup = this.dragState.object.parent;
+                 // Check if parent is still valid (might have been removed if update happened during drag? Unlikely for GM drag)
+                 if (!wallGroup) return;
+
+                 const line = wallGroup.children.find(c => c.type === 'Line');
+                 const endpoint = this.dragState.object;
+                 
+                 endpoint.position.set(snappedWorld.x, snappedWorld.y, 3.0); // Keep Z
+                 
+                 if (line) {
+                     const positions = line.geometry.attributes.position.array;
+                     // Index 0 -> start (0,1,2), Index 1 -> end (3,4,5)
+                     const idx = this.dragState.endpointIndex * 3;
+                     positions[idx] = snappedWorld.x;
+                     positions[idx+1] = snappedWorld.y;
+                     positions[idx+2] = 3.0;
+                     line.geometry.attributes.position.needsUpdate = true;
+                 }
+            }
+            return;
+        }
+
+        // Case 1: Drag Select
+        if (this.dragSelect.active) {
+          this.updateMouseCoords(event);
+          
+          // Calculate current pos on ground/token plane (Z=10)
+          const worldPos = this.viewportToWorld(event.clientX, event.clientY, 10);
+          if (worldPos) {
+            this.dragSelect.current.copy(worldPos);
+            
+            // Update visuals
+            const start = this.dragSelect.start;
+            const current = this.dragSelect.current;
+            
+            const minX = Math.min(start.x, current.x);
+            const maxX = Math.max(start.x, current.x);
+            const minY = Math.min(start.y, current.y);
+            const maxY = Math.max(start.y, current.y);
+            
+            const width = maxX - minX;
+            const height = maxY - minY;
+            const centerX = minX + width / 2;
+            const centerY = minY + height / 2;
+            
+            // Update Mesh
+            this.dragSelect.mesh.position.set(centerX, centerY, 10.1); // Slightly above tokens? No, usually overlay.
+            // Tokens are at Z=10. Let's put this at Z=100 (overlay).
+            this.dragSelect.mesh.position.z = 100; 
+            this.dragSelect.mesh.scale.set(width, height, 1);
+            
+            // Update Border
+            this.dragSelect.border.position.set(centerX, centerY, 100);
+            this.dragSelect.border.scale.set(width, height, 1);
+          }
+          return;
+        }
+
+        // Case 2: Hover (if not dragging object)
+        if (!this.dragState.active || !this.dragState.object) {
+          this.handleHover(event);
+          return;
+        }
+
+        // Case 3: Object Drag
+        this.dragState.hasMoved = true;
+        this.updateMouseCoords(event);
+        
+        // Raycast to find world position on the z-plane of the object
+        // Use the object's current Z for the intersection plane
+        const targetZ = this.dragState.object.position.z;
+        
+        // Get world position at the target Z plane
+        const worldPos = this.viewportToWorld(event.clientX, event.clientY, targetZ);
+        
+        if (worldPos) {
+          // DEBUG: Log drag details
+          log.debug(`Drag: Mouse(${event.clientX}, ${event.clientY}) -> World(${worldPos.x.toFixed(1)}, ${worldPos.y.toFixed(1)}, ${worldPos.z.toFixed(1)})`);
+
+          // Calculate the new position
+          // We want to maintain the offset from the grab point to the object center
+          let x = worldPos.x + this.dragState.offset.x;
+          let y = worldPos.y + this.dragState.offset.y;
+          
+          // Snap to grid logic if Shift is NOT held
+          if (!event.shiftKey) {
+            const foundryPos = Coordinates.toFoundry(x, y);
+            const snapped = this.snapToGrid(foundryPos.x, foundryPos.y);
+            const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
+            x = snappedWorld.x;
+            y = snappedWorld.y;
+          }
+
+          // Calculate delta from LEADER's initial position
+          const leaderInitial = this.dragState.initialPositions.get(this.dragState.leaderId);
+          if (!leaderInitial) return;
+
+          const deltaX = x - leaderInitial.x;
+          const deltaY = y - leaderInitial.y;
+
+          // Apply delta to ALL previews
+          for (const [id, preview] of this.dragState.previews) {
+            const initialPos = this.dragState.initialPositions.get(id);
+            if (initialPos) {
+              preview.position.x = initialPos.x + deltaX;
+              preview.position.y = initialPos.y + deltaY;
+            }
+          }
+        }
+    } catch (error) {
+        log.error('Error in onPointerMove:', error);
     }
   }
 
@@ -419,6 +716,56 @@ export class InteractionManager {
     this.updateMouseCoords(event);
     this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
 
+    let hitFound = false;
+
+    // 1. Check Walls (Priority for "near line" detection)
+    // Only check walls if we are GM or on Wall Layer? Usually useful for everyone if interactive, but editing is GM.
+    // The user said "Foundry VTT... making sure it knows you meant to select that wall".
+    // We'll enable it for GM mainly for editing, or everyone for doors?
+    // Highlighting the whole wall is good for knowing which one you are about to click.
+    
+    if (game.user.isGM || canvas.activeLayer?.name?.includes('WallsLayer')) {
+        const wallGroup = this.wallManager.wallGroup;
+        this.raycaster.params.Line.threshold = 20; // Lenient threshold
+        const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
+        
+        if (wallIntersects.length > 0) {
+            const hit = wallIntersects[0];
+            let object = hit.object;
+            while(object && object !== wallGroup) {
+                if (object.userData && object.userData.wallId) {
+                    const wallId = object.userData.wallId;
+                    hitFound = true;
+                    
+                    if (this.hoveredWallId !== wallId) {
+                        if (this.hoveredWallId) {
+                            this.wallManager.setHighlight(this.hoveredWallId, false);
+                        }
+                        this.hoveredWallId = wallId;
+                        this.wallManager.setHighlight(this.hoveredWallId, true);
+                        this.canvasElement.style.cursor = 'pointer';
+                    }
+                    break; // Found valid wall part
+                }
+                object = object.parent;
+            }
+        }
+    }
+
+    if (!hitFound) {
+        if (this.hoveredWallId) {
+            this.wallManager.setHighlight(this.hoveredWallId, false);
+            this.hoveredWallId = null;
+            this.canvasElement.style.cursor = 'default';
+        }
+    }
+
+    // If we hit a wall, we might still want to check tokens if the wall didn't claim it?
+    // But if we are "near a line", we probably want the line.
+    // If we didn't find a wall, check tokens.
+    if (hitFound) return;
+
+    // 2. Check Tokens
     const interactables = this.tokenManager.getAllTokenSprites();
     const intersects = this.raycaster.intersectObjects(interactables, false);
 
@@ -457,124 +804,267 @@ export class InteractionManager {
    * @param {PointerEvent} event 
    */
   async onPointerUp(event) {
-    // Handle Drag Select
-    if (this.dragSelect.active) {
-      this.dragSelect.active = false;
-      this.dragSelect.mesh.visible = false;
-      this.dragSelect.border.visible = false;
-      
-      // Calculate selection bounds
-      const start = this.dragSelect.start;
-      const current = this.dragSelect.current;
-      
-      const minX = Math.min(start.x, current.x);
-      const maxX = Math.max(start.x, current.x);
-      const minY = Math.min(start.y, current.y);
-      const maxY = Math.max(start.y, current.y);
-      
-      // Find tokens within bounds
-      // Foundry selects if CENTER is within bounds
-      const tokens = this.tokenManager.getAllTokenSprites();
-      
-      for (const sprite of tokens) {
-        const x = sprite.position.x;
-        const y = sprite.position.y;
-        
-        if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
-          const tokenDoc = sprite.userData.tokenDoc;
-          // Only select if we have permission (observer or owner usually can select, but control requires owner)
-          // Foundry allows selecting visible tokens usually.
-          // We'll check canUserModify("update") to mirror our click selection logic
-          if (tokenDoc.canUserModify(game.user, "update")) {
-            this.selectObject(sprite);
+    try {
+        // Handle Wall Endpoint Drag End
+        if (this.dragState.active && this.dragState.mode === 'wallEndpoint') {
+          this.dragState.active = false;
+          
+          // Re-enable camera controls
+          if (window.MapShine?.cameraController) {
+            window.MapShine.cameraController.enabled = true;
           }
-        }
-      }
-      
-      return;
-    }
-
-    if (!this.dragState.active) return;
-
-    // Re-enable camera controls
-    if (window.MapShine?.cameraController) {
-      window.MapShine.cameraController.enabled = true;
-    }
-
-    if (this.dragState.hasMoved && this.dragState.object) {
-      // Commit change to Foundry for ALL selected tokens
-      const updates = [];
-      
-      // Use selection set
-      for (const id of this.selection) {
-        const data = this.tokenManager.tokenSprites.get(id);
-        const preview = this.dragState.previews.get(id);
-        
-        if (!data || !preview) continue;
-        
-        const tokenDoc = data.tokenDoc;
-        
-        // Calculate final position from PREVIEW position
-        const worldPos = preview.position;
-        const foundryPos = this.worldToFoundry(worldPos.x, worldPos.y);
-        
-        // Adjust for center vs top-left
-        const width = tokenDoc.width * canvas.grid.size;
-        const height = tokenDoc.height * canvas.grid.size;
-        
-        const finalX = foundryPos.x - width / 2;
-        const finalY = foundryPos.y - height / 2;
-        
-        log.debug(`Token ${tokenDoc.name} (${id}): World(${worldPos.x.toFixed(1)}, ${worldPos.y.toFixed(1)}) -> FoundryCenter(${foundryPos.x.toFixed(1)}, ${foundryPos.y.toFixed(1)}) -> TopLeft(${finalX.toFixed(1)}, ${finalY.toFixed(1)})`);
-
-        updates.push({
-          _id: id,
-          x: finalX,
-          y: finalY
-        });
-
-        // OPTIMISTIC UPDATE: Move real sprite to final position immediately
-        // This prevents the "jump back" visual glitch while waiting for the hook
-        if (data.sprite) {
-          data.sprite.position.copy(preview.position);
-        }
-      }
-      
-      if (updates.length > 0) {
-        log.info(`Updating ${updates.length} tokens`, updates);
-        
-        // Reset drag state immediately
-        this.dragState.active = false;
-        this.dragState.object = null;
-        this.destroyDragPreviews();
-        
-        try {
-          // CRITICAL: animate: true (default) to trigger smooth transition from old pos to new pos
-          // We removed animate: false here.
-          await canvas.scene.updateEmbeddedDocuments('Token', updates);
-          log.debug(`Tokens updated successfully`);
-        } catch (err) {
-          log.error('Failed to update token positions', err);
-          // Revert sprite positions if update failed
-          // We need to restore from drag select start or initial positions?
-          // initialPositions map has the start coords.
-          for (const [id, initialPos] of this.dragState.initialPositions) {
-             const data = this.tokenManager.tokenSprites.get(id);
-             if (data && data.sprite) {
-               data.sprite.position.copy(initialPos);
-             }
+          
+          const endpoint = this.dragState.object;
+          const wallId = this.dragState.wallId;
+          const index = this.dragState.endpointIndex;
+          const wall = canvas.walls.get(wallId);
+          
+          if (wall) {
+              // Current world position of endpoint
+              const worldPos = endpoint.position;
+              const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
+              
+              // Update document
+              // doc.c is [x0, y0, x1, y1]
+              const c = [...wall.document.c];
+              if (index === 0) {
+                  c[0] = foundryPos.x;
+                  c[1] = foundryPos.y;
+              } else {
+                  c[2] = foundryPos.x;
+                  c[3] = foundryPos.y;
+              }
+              
+              try {
+                  await wall.document.update({c});
+                  log.info(`Updated wall ${wallId} coords`);
+              } catch(e) {
+                  log.error('Failed to update wall', e);
+                  // Revert visual by re-syncing from original doc
+                  this.wallManager.update(wall.document, {c: wall.document.c}); 
+              }
           }
+          
+          this.dragState.object = null;
+          return;
         }
-      } else {
-        this.dragState.active = false;
-        this.dragState.object = null;
-        this.destroyDragPreviews();
-      }
-    } else {
-        this.dragState.active = false;
-        this.dragState.object = null;
-        this.destroyDragPreviews();
+
+        // Handle Wall Draw End
+        if (this.wallDraw.active) {
+          this.wallDraw.active = false;
+          
+          // Hide preview
+          if (this.wallDraw.previewLine) {
+            this.wallDraw.previewLine.visible = false;
+          }
+          
+          // Re-enable camera controls
+          if (window.MapShine?.cameraController) {
+            window.MapShine.cameraController.enabled = true;
+          }
+          
+          // Create Wall
+          const startF = Coordinates.toFoundry(this.wallDraw.start.x, this.wallDraw.start.y);
+          const endF = Coordinates.toFoundry(this.wallDraw.current.x, this.wallDraw.current.y);
+          
+          // Ignore zero-length walls
+          if (startF.x === endF.x && startF.y === endF.y) return;
+          
+          // Prepare Data based on tool
+          const data = this.getWallData(this.wallDraw.type, [startF.x, startF.y, endF.x, endF.y]);
+          
+          try {
+            await canvas.scene.createEmbeddedDocuments('Wall', [data]);
+            log.info('Created wall segment');
+            
+            // Chain? If Ctrl held, start new segment from endF
+            if (event.ctrlKey) {
+               // TODO: Implement Chaining logic
+               // For now, simple single segment
+            }
+          } catch (e) {
+            log.error('Failed to create wall', e);
+          }
+          
+          return;
+        }
+
+        // Handle Drag Select
+        if (this.dragSelect.active) {
+          this.dragSelect.active = false;
+          this.dragSelect.mesh.visible = false;
+          this.dragSelect.border.visible = false;
+          
+          // Calculate selection bounds
+          const start = this.dragSelect.start;
+          const current = this.dragSelect.current;
+          
+          const minX = Math.min(start.x, current.x);
+          const maxX = Math.max(start.x, current.x);
+          const minY = Math.min(start.y, current.y);
+          const maxY = Math.max(start.y, current.y);
+          
+          // Find tokens within bounds
+          // Foundry selects if CENTER is within bounds
+          const tokens = this.tokenManager.getAllTokenSprites();
+          
+          for (const sprite of tokens) {
+            const x = sprite.position.x;
+            const y = sprite.position.y;
+            
+            if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
+              const tokenDoc = sprite.userData.tokenDoc;
+              // Only select if we have permission (observer or owner usually can select, but control requires owner)
+              // Foundry allows selecting visible tokens usually.
+              // We'll check canUserModify("update") to mirror our click selection logic
+              if (tokenDoc.canUserModify(game.user, "update")) {
+                this.selectObject(sprite);
+              }
+            }
+          }
+          
+          return;
+        }
+
+        if (!this.dragState.active) return;
+
+        // Re-enable camera controls
+        if (window.MapShine?.cameraController) {
+          window.MapShine.cameraController.enabled = true;
+        }
+
+        if (this.dragState.hasMoved && this.dragState.object) {
+          // Commit change to Foundry for ALL selected tokens
+          const updates = [];
+          
+          // Use selection set
+          for (const id of this.selection) {
+            const data = this.tokenManager.tokenSprites.get(id);
+            const preview = this.dragState.previews.get(id);
+            
+            if (!data || !preview) continue;
+            
+            const tokenDoc = data.tokenDoc;
+            
+            // Calculate final position from PREVIEW position
+            const worldPos = preview.position;
+            const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
+            
+            // Adjust for center vs top-left
+            const width = tokenDoc.width * canvas.grid.size;
+            const height = tokenDoc.height * canvas.grid.size;
+            
+            const finalX = foundryPos.x - width / 2;
+            const finalY = foundryPos.y - height / 2;
+            
+            log.debug(`Token ${tokenDoc.name} (${id}): World(${worldPos.x.toFixed(1)}, ${worldPos.y.toFixed(1)}) -> FoundryCenter(${foundryPos.x.toFixed(1)}, ${foundryPos.y.toFixed(1)}) -> TopLeft(${finalX.toFixed(1)}, ${finalY.toFixed(1)})`);
+
+            log.debug(`Final position calculation: World(${worldPos.x.toFixed(1)}, ${worldPos.y.toFixed(1)}) -> FoundryCenter(${foundryPos.x.toFixed(1)}, ${foundryPos.y.toFixed(1)}) -> TopLeft(${finalX.toFixed(1)}, ${finalY.toFixed(1)})`);
+
+            updates.push({
+              _id: id,
+              x: finalX,
+              y: finalY
+            });
+
+            // REMOVED OPTIMISTIC UPDATE: Rely on updateToken hook to trigger animation
+            // This ensures visual state matches server state and prevents animation lag/skipping
+            /*
+            if (data.sprite) {
+              data.sprite.position.copy(preview.position);
+            }
+            */
+          }
+          
+          if (updates.length > 0) {
+            log.info(`Updating ${updates.length} tokens`, updates);
+            
+            // Reset drag state immediately
+            this.dragState.active = false;
+            this.dragState.object = null;
+            this.destroyDragPreviews();
+            
+            try {
+              // CRITICAL: animate: true (default) to trigger smooth transition from old pos to new pos
+              // We removed animate: false here.
+              await canvas.scene.updateEmbeddedDocuments('Token', updates);
+              log.debug(`Tokens updated successfully`);
+            } catch (err) {
+              log.error('Failed to update token positions', err);
+              // Revert sprite positions if update failed
+              // We need to restore from drag select start or initial positions?
+              // initialPositions map has the start coords.
+              for (const [id, initialPos] of this.dragState.initialPositions) {
+                 const data = this.tokenManager.tokenSprites.get(id);
+                 if (data && data.sprite) {
+                   data.sprite.position.copy(initialPos);
+                 }
+              }
+            }
+          } else {
+            this.dragState.active = false;
+            this.dragState.object = null;
+            this.destroyDragPreviews();
+          }
+        } else {
+            this.dragState.active = false;
+            this.dragState.object = null;
+            this.destroyDragPreviews();
+        }
+    } catch (error) {
+        log.error('Error in onPointerUp:', error);
     }
+  }
+
+  /**
+   * Get wall data based on tool type
+   * @param {string} tool - Tool name (walls, terrain, etc.)
+   * @param {number[]} coords - [x0, y0, x1, y1]
+   * @returns {Object} Wall data
+   * @private
+   */
+  getWallData(tool, coords) {
+    const data = { c: coords };
+    
+    // Defaults: move=20 (NORMAL), sight=20 (NORMAL), door=0 (NONE)
+    // Constants from Foundry source or approximations
+    const NONE = 0;
+    const LIMITED = 10;
+    const NORMAL = 20;
+    
+    switch (tool) {
+      case 'walls': // Standard
+        data.move = NORMAL;
+        data.sight = NORMAL;
+        break;
+      case 'terrain':
+        data.move = NORMAL;
+        data.sight = LIMITED;
+        break;
+      case 'invisible':
+        data.move = NORMAL;
+        data.sight = NONE;
+        break;
+      case 'ethereal':
+        data.move = NONE;
+        data.sight = NORMAL;
+        break;
+      case 'doors':
+        data.move = NORMAL;
+        data.sight = NORMAL;
+        data.door = 1; // DOOR
+        break;
+      case 'secret':
+        data.move = NORMAL;
+        data.sight = NORMAL;
+        data.door = 2; // SECRET
+        break;
+      default:
+        data.move = NORMAL;
+        data.sight = NORMAL;
+    }
+    
+    return data;
   }
 
   /**
@@ -621,6 +1111,9 @@ export class InteractionManager {
    * @returns {THREE.Vector3|null} Intersection point or null if no intersection
    */
   viewportToWorld(clientX, clientY, targetZ = 0) {
+    // updateMouseCoords expects an event-like object with clientX/Y
+    // We can just reuse the logic here or call updateMouseCoords if we construct a fake event
+    // But easier to just recalculate NDC directly since we have the raw coords
     const rect = this.canvasElement.getBoundingClientRect();
     const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
     const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
@@ -630,81 +1123,36 @@ export class InteractionManager {
     
     if (!camera) return null;
 
-    // Create ray from camera
-    // unproject(ndcX, ndcY, 0.5) gives a point inside the frustum
-    const vector = new THREE.Vector3(ndcX, ndcY, 0.5);
-    vector.unproject(camera);
-    
-    // Calculate direction from camera to unprojected point
-    const dir = vector.sub(camera.position).normalize();
-    
-    // Ray: P = Origin + t * Direction
-    // We want to find t where P.z = targetZ
-    // Origin.z + t * Direction.z = targetZ
-    // t = (targetZ - Origin.z) / Direction.z
-    
-    if (Math.abs(dir.z) < 0.0001) {
-      // Ray is parallel to plane
-      return null;
-    }
-    
-    const t = (targetZ - camera.position.z) / dir.z;
-    
-    // If t < 0, intersection is behind camera
-    if (t < 0) return null;
-    
-    // Calculate intersection point
-    const pos = camera.position.clone().add(dir.multiplyScalar(t));
-    
-    return pos;
-  }
+    // Use the class raycaster to ensure consistency with selection logic
+    // (avoiding manual unproject which might differ slightly)
+    this.mouse.set(ndcX, ndcY);
+    this.raycaster.setFromCamera(this.mouse, camera);
 
-  /**
-   * Convert World (THREE) to Foundry (Pixels, Top-Left 0,0)
-   * @param {number} wx 
-   * @param {number} wy 
-   * @returns {{x: number, y: number}}
-   */
-  worldToFoundry(wx, wy) {
-    // Foundry X = World X
-    // Foundry Y = SceneHeight - World Y
-    const sceneHeight = canvas.dimensions.height;
-    return {
-      x: wx,
-      y: sceneHeight - wy
-    };
-  }
-
-  /**
-   * Convert Foundry to World
-   * @param {number} fx 
-   * @param {number} fy 
-   * @returns {{x: number, y: number}}
-   */
-  foundryToWorld(fx, fy) {
-    const sceneHeight = canvas.dimensions.height;
-    return {
-      x: fx,
-      y: sceneHeight - fy
-    };
+    // Create a plane at targetZ facing up (normal = 0,0,1)
+    // Plane constant 'w' in Ax + By + Cz + w = 0
+    // 0x + 0y + 1z - targetZ = 0  =>  z = targetZ
+    // THREE.Plane takes (normal, constant) where constant is -distance from origin along normal
+    const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -targetZ);
+    
+    const target = new THREE.Vector3();
+    const intersection = this.raycaster.ray.intersectPlane(plane, target);
+    
+    return intersection || null;
   }
 
   /**
    * Snap point to grid
    * @param {number} x 
    * @param {number} y 
+   * @param {number} [mode] - Snapping mode (default to CENTER)
    * @returns {{x: number, y: number}}
    */
-  snapToGrid(x, y) {
+  snapToGrid(x, y, mode = CONST.GRID_SNAPPING_MODES.CENTER) {
     if (!canvas.grid) return { x, y };
     
     // Use Foundry's native grid snapping
-    // CONST.GRID_SNAPPING_MODES.CENTER = 16? No, use CENTER or vertex
-    // For Tokens, we usually want CENTER of cell if it's size 1
-    
-    // Use getSnappedPoint
     return canvas.grid.getSnappedPoint({ x, y }, {
-      mode: CONST.GRID_SNAPPING_MODES.CENTER
+      mode: mode
     });
   }
 

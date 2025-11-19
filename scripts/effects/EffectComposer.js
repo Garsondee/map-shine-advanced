@@ -35,6 +35,9 @@ export class EffectComposer {
     
     /** @type {Map<string, THREE.RenderTarget>} */
     this.renderTargets = new Map();
+
+    /** @type {Set<Object>} - Objects that need update(timeInfo) called every frame */
+    this.updatables = new Set();
     
     /** @type {GPUCapabilities} */
     this.capabilities = null;
@@ -109,6 +112,30 @@ export class EffectComposer {
   }
 
   /**
+   * Register an object to be updated every frame
+   * @param {Object} updatable - Object with update(timeInfo) method
+   */
+  addUpdatable(updatable) {
+    if (this.updatables.has(updatable)) return;
+    
+    if (typeof updatable.update !== 'function') {
+      log.error('Updatable object must have an update(timeInfo) method');
+      return;
+    }
+    
+    this.updatables.add(updatable);
+    log.debug('Updatable registered');
+  }
+
+  /**
+   * Remove an updatable object
+   * @param {Object} updatable - Object to remove
+   */
+  removeUpdatable(updatable) {
+    this.updatables.delete(updatable);
+  }
+
+  /**
    * Resolve effect dependencies and determine render order
    * @returns {EffectBase[]} Sorted effects ready for rendering
    * @private
@@ -137,6 +164,15 @@ export class EffectComposer {
 
     // Update centralized time (single source of truth)
     const timeInfo = this.timeManager.update();
+
+    // Update registered updatables (managers, etc.)
+    for (const updatable of this.updatables) {
+      try {
+        updatable.update(timeInfo);
+      } catch (error) {
+        log.error('Error updating updatable:', error);
+      }
+    }
 
     // Render each effect in order
     for (const effect of effects) {

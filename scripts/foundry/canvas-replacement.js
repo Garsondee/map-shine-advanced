@@ -14,6 +14,7 @@ import { RenderLoop } from '../core/render-loop.js';
 import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { TokenManager } from '../scene/token-manager.js';
 import { TileManager } from '../scene/tile-manager.js';
+import { WallManager } from '../scene/wall-manager.js';
 import { InteractionManager } from '../scene/interaction-manager.js';
 import { GridRenderer } from '../scene/grid-renderer.js';
 import { DropHandler } from './drop-handler.js';
@@ -50,6 +51,9 @@ let tokenManager = null;
 
 /** @type {TileManager|null} */
 let tileManager = null;
+
+/** @type {WallManager|null} */
+let wallManager = null;
 
 /** @type {InteractionManager|null} */
 let interactionManager = null;
@@ -179,8 +183,8 @@ async function createThreeCanvas(scene) {
   }
 
   try {
-    // CRITICAL: Override Foundry's PIXI rendering
-    overrideFoundryRendering();
+    // CRITICAL: Configure Foundry PIXI Canvas for Hybrid Mode
+    configureFoundryCanvas();
 
     // Create new canvas element
     threeCanvas = document.createElement('canvas');
@@ -260,6 +264,7 @@ async function createThreeCanvas(scene) {
 
     // Step 4: Initialize token manager
     tokenManager = new TokenManager(threeScene);
+    tokenManager.setEffectComposer(effectComposer); // Connect to main loop
     tokenManager.initialize();
     
     // Sync existing tokens immediately (we're already in canvasReady, so the hook won't fire)
@@ -272,8 +277,14 @@ async function createThreeCanvas(scene) {
     tileManager.syncAllTiles();
     log.info('Tile manager initialized and synced');
 
+    // Step 4c: Initialize wall manager
+    wallManager = new WallManager(threeScene);
+    wallManager.initialize();
+    // Sync happens in initialize
+    log.info('Wall manager initialized');
+
     // Step 5: Initialize interaction manager (Selection, Drag/Drop)
-    interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager);
+    interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager, wallManager);
     interactionManager.initialize();
     log.info('Interaction manager initialized');
 
@@ -302,6 +313,7 @@ async function createThreeCanvas(scene) {
     mapShine.cameraController = cameraController;
     mapShine.tokenManager = tokenManager; // NEW: Expose token manager for diagnostics
     mapShine.tileManager = tileManager; // NEW: Expose tile manager for diagnostics
+    mapShine.wallManager = wallManager; // NEW: Expose wall manager
     mapShine.interactionManager = interactionManager; // NEW: Expose interaction manager
     mapShine.gridRenderer = gridRenderer; // NEW: Expose grid renderer
     mapShine.renderLoop = renderLoop; // CRITICAL: Expose render loop for diagnostics
@@ -445,6 +457,13 @@ function destroyThreeCanvas() {
     log.debug('Tile manager disposed');
   }
 
+  // Dispose wall manager
+  if (wallManager) {
+    wallManager.dispose();
+    wallManager = null;
+    log.debug('Wall manager disposed');
+  }
+
   // Dispose interaction manager
   if (interactionManager) {
     interactionManager.dispose();
@@ -490,27 +509,132 @@ function destroyThreeCanvas() {
 }
 
 /**
- * Override Foundry's PIXI rendering system
- * Hides PIXI canvas completely - Foundry UI buttons are separate HTML elements
+ * Configure Foundry's PIXI canvas for Hybrid Mode
+ * Keeps canvas visible but hides specific layers we've replaced
+ * Sets up input arbitration to pass clicks through to THREE.js when needed
  * @private
  */
-function overrideFoundryRendering() {
+function configureFoundryCanvas() {
   if (!canvas || !canvas.app) {
-    log.warn('Cannot override rendering - Foundry canvas not ready');
+    log.warn('Cannot configure canvas - Foundry canvas not ready');
     return;
   }
 
-  log.info('Overriding Foundry PIXI rendering system');
+  log.info('Configuring Foundry PIXI canvas for Hybrid Mode');
 
-  // Hide PIXI canvas completely - we handle all interactions
   const pixiCanvas = canvas.app.view;
   if (pixiCanvas) {
-    pixiCanvas.style.opacity = '0'; // Hide visually
-    pixiCanvas.style.pointerEvents = 'none'; // Disable - we'll handle drops ourselves
-    log.debug('PIXI canvas hidden and non-interactive');
+    // Hide visual output but keep interactive
+    pixiCanvas.style.opacity = '0'; 
+    // Enable interaction so Foundry tools (Walls, etc.) still receive events
+    pixiCanvas.style.pointerEvents = 'auto';
+    
+    // Ensure it is on top so it catches the mouse events
+    pixiCanvas.style.zIndex = '10'; 
   }
 
-  log.info('PIXI canvas completely disabled');
+  // Hide the layers we have replaced
+  manageFoundryLayers();
+
+  // Setup Input Arbitration (Tool switching)
+  // We still use this to optimize: if using Token tool, we might want THREE to handle input directly?
+  // But if PIXI is opaque (alpha:false), we can't have THREE behind it if PIXI blocks events?
+  // Wait, opacity:0 does NOT block events.
+  // So if PIXI is zIndex 10, it catches ALL events.
+  // We need to let events pass through to THREE if we are not using a Foundry tool.
+  setupInputArbitration();
+
+  log.info('PIXI canvas configured for Replacement Mode');
+}
+
+/**
+ * Hide specific Foundry layers that we render in THREE.js
+ * @private
+ */
+function manageFoundryLayers() {
+  // List of layers to hide
+  // We use the layer names as they appear in canvas.layers
+  // or access them directly if possible
+  
+  // 1. Background Layer (canvas.background)
+  if (canvas.background) {
+    canvas.background.visible = false;
+    log.debug('Hidden Foundry BackgroundLayer');
+  }
+  
+  // 2. Grid Layer (canvas.grid)
+  if (canvas.grid) {
+    canvas.grid.visible = false;
+    log.debug('Hidden Foundry GridLayer');
+  }
+
+  // 3. Token Layer (canvas.tokens)
+  if (canvas.tokens) {
+    canvas.tokens.visible = false;
+    log.debug('Hidden Foundry TokenLayer');
+  }
+  
+  // 4. Tiles Layer (canvas.tiles) - Foreground and Background
+  // Note: Tiles are complicated in V12/13, they might be in Primary Canvas Group
+  if (canvas.tiles) {
+    canvas.tiles.visible = false;
+    log.debug('Hidden Foundry TilesLayer');
+  }
+
+  // 5. Effects/Weather (canvas.weather or canvas.environment)
+  if (canvas.weather) {
+    canvas.weather.visible = false;
+  }
+}
+
+/**
+ * Setup Input Arbitration
+ * Listens to tool changes to toggle PIXI canvas interactivity
+ * @private
+ */
+function setupInputArbitration() {
+  // Hook into tool changes
+  Hooks.on('canvasInit', manageFoundryLayers); // Re-apply layer hiding on scene change
+  
+  // We check the active layer/tool to decide who gets input
+  const updateInputMode = () => {
+    const pixiCanvas = canvas.app?.view;
+    if (!pixiCanvas) return;
+
+    const activeLayer = canvas.activeLayer?.name;
+    const tool = game.activeTool;
+    
+    // Tools that require PIXI interaction (Legacy fallback)
+    // We are taking over Walls, so remove it from this list
+    const pixiTools = [
+      // 'walls', // We handle walls in THREE.js now
+      'lighting',
+      'sounds',
+      'templates',
+      'drawings',
+      'notes'
+    ];
+    
+    // Check if we are on a layer that needs PIXI
+    // WallsLayer is now handled by THREE.js
+    const needsPixi = pixiTools.some(t => activeLayer?.toLowerCase().includes(t));
+    
+    if (needsPixi) {
+      pixiCanvas.style.pointerEvents = 'auto';
+      log.debug(`Input Mode: PIXI (Layer: ${activeLayer})`);
+    } else {
+      pixiCanvas.style.pointerEvents = 'none';
+      log.debug(`Input Mode: THREE.js (Layer: ${activeLayer})`);
+    }
+  };
+
+  // Hook into layer changes
+  Hooks.on('canvasReady', updateInputMode);
+  Hooks.on('changeSidebarTab', updateInputMode); // When switching tools
+  Hooks.on('renderSceneControls', updateInputMode); // When clicking tools
+  
+  // Initial check
+  updateInputMode();
 }
 
 /**

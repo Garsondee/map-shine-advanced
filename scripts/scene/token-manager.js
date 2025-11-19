@@ -37,10 +37,31 @@ export class TokenManager {
     this.initialized = false;
     this.hooksRegistered = false;
     
-    // Track active animations to allow cancellation
-    this.activeAnimations = new Map(); // tokenId -> { cancel: () => void }
+    /** @type {EffectComposer|null} */
+    this.effectComposer = null;
+
+    // Track active animations
+    // Map<tokenId, { 
+    //   attributes: Array<{parent, attribute, start, to, diff}>, 
+    //   duration: number, 
+    //   elapsed: number, 
+    //   easing: string 
+    // }>
+    this.activeAnimations = new Map();
     
     log.debug('TokenManager created');
+  }
+
+  /**
+   * Set the EffectComposer instance
+   * @param {EffectComposer} composer 
+   */
+  setEffectComposer(composer) {
+    this.effectComposer = composer;
+    // Auto-register if already initialized
+    if (this.initialized && this.effectComposer) {
+      this.effectComposer.addUpdatable(this);
+    }
   }
 
   /**
@@ -56,7 +77,40 @@ export class TokenManager {
     this.setupHooks();
     this.initialized = true;
     
+    if (this.effectComposer) {
+      this.effectComposer.addUpdatable(this);
+    }
+    
     log.info('TokenManager initialized');
+  }
+
+  /**
+   * Update tokens (called every frame by EffectComposer)
+   * @param {TimeInfo} timeInfo 
+   */
+  update(timeInfo) {
+    // Process active animations
+    for (const [tokenId, anim] of this.activeAnimations.entries()) {
+      // Update elapsed time
+      anim.elapsed += timeInfo.delta * 1000; // Convert seconds to ms for duration compatibility
+      
+      const progress = Math.min(anim.elapsed / anim.duration, 1);
+      
+      // EaseInOutCosine: 0.5 - Math.cos(progress * Math.PI) / 2
+      const ease = 0.5 - Math.cos(progress * Math.PI) / 2;
+
+      for (const data of anim.attributes) {
+        data.parent[data.attribute] = data.start + (data.diff * ease);
+      }
+
+      if (progress >= 1) {
+        // Ensure final values are exact
+        for (const data of anim.attributes) {
+          data.parent[data.attribute] = data.to;
+        }
+        this.activeAnimations.delete(tokenId);
+      }
+    }
   }
 
   /**
@@ -210,16 +264,34 @@ export class TokenManager {
     }
 
     const { sprite } = spriteData;
+    
+    log.debug(`updateTokenSprite: ${tokenDoc.id} | changes:`, changes);
 
     // Update transform if position/size/elevation changed
     if ('x' in changes || 'y' in changes || 'width' in changes || 
         'height' in changes || 'elevation' in changes || 'rotation' in changes) {
-      log.debug(`Updating transform for ${tokenDoc.id}: x=${tokenDoc.x}, y=${tokenDoc.y}, z=${tokenDoc.elevation}`);
+      
+      // Create a proxy/merged object for target state
+      // We prefer 'changes' values as they are authoritative for the new state
+      // This fixes the "lagging behind" issue where tokenDoc might be stale in the hook
+      const targetDoc = {
+        x: 'x' in changes ? changes.x : tokenDoc.x,
+        y: 'y' in changes ? changes.y : tokenDoc.y,
+        width: 'width' in changes ? changes.width : tokenDoc.width,
+        height: 'height' in changes ? changes.height : tokenDoc.height,
+        elevation: 'elevation' in changes ? changes.elevation : tokenDoc.elevation,
+        rotation: 'rotation' in changes ? changes.rotation : tokenDoc.rotation,
+        // For complex objects like texture, fall back to tokenDoc for now unless critical
+        texture: tokenDoc.texture,
+        id: tokenDoc.id
+      };
+
+      log.debug(`Updating transform for ${tokenDoc.id}: x=${targetDoc.x}, y=${targetDoc.y}, z=${targetDoc.elevation}`);
       
       // Check if we should animate (default true unless specified false)
       // Also, if only elevation/size changed, we might snap? Foundry animates size/elevation too usually.
       const animate = options.animate !== false;
-      this.updateSpriteTransform(sprite, tokenDoc, animate);
+      this.updateSpriteTransform(sprite, targetDoc, animate);
     }
 
     // Update texture if changed
@@ -376,7 +448,7 @@ export class TokenManager {
         
         log.debug(`Starting animation for ${tokenDoc.id}. Duration: ${duration}, Attrs: ${attributes.length}`);
         
-        this.runAnimation(tokenDoc.id, attributes, duration);
+        this.startAnimation(tokenDoc.id, attributes, duration);
         return;
       } else {
         log.debug(`No animation needed for ${tokenDoc.id} (already at target)`);
@@ -393,58 +465,31 @@ export class TokenManager {
   }
 
   /**
-   * Custom animation system
+   * Start a token animation (managed by main loop)
    * @param {string} tokenId 
    * @param {Array} attributes 
    * @param {number} duration 
    * @private
    */
-  runAnimation(tokenId, attributes, duration) {
-    // Cancel existing
-    if (this.activeAnimations.has(tokenId)) {
-      this.activeAnimations.get(tokenId).cancel();
-      this.activeAnimations.delete(tokenId);
-    }
+  startAnimation(tokenId, attributes, duration) {
+    // Cancel existing (overwrite)
+    this.activeAnimations.delete(tokenId);
 
-    const startTime = performance.now();
-    
-    // Capture start values
-    const animData = attributes.map(attr => ({
+    // Capture start values and calculate diffs
+    const animAttributes = attributes.map(attr => ({
       parent: attr.parent,
       attribute: attr.attribute,
-      start: attr.to,
-      to: attr.parent[attr.attribute],
-      diff: attr.parent[attr.attribute] - attr.to
+      start: attr.parent[attr.attribute], // Current value is start
+      to: attr.to,
+      diff: attr.to - attr.parent[attr.attribute]
     }));
 
-    let animationFrameId;
-
-    const tick = (currentTime) => {
-      const elapsed = currentTime - startTime;
-      const progress = Math.min(elapsed / duration, 1);
-      
-      // EaseInOutCosine: 0.5 - Math.cos(progress * Math.PI) / 2
-      const ease = 0.5 - Math.cos(progress * Math.PI) / 2;
-
-      for (const data of animData) {
-        data.parent[data.attribute] = data.start + (data.diff * ease);
-      }
-
-      if (progress < 1) {
-        animationFrameId = requestAnimationFrame(tick);
-      } else {
-        // Ensure final values are exact
-        for (const data of animData) {
-          data.parent[data.attribute] = data.to;
-        }
-        this.activeAnimations.delete(tokenId);
-      }
-    };
-
-    animationFrameId = requestAnimationFrame(tick);
+    log.debug(`startAnimation: ${tokenId}, duration=${duration}, diffs=${animAttributes.map(a => a.diff).join(',')}`);
 
     this.activeAnimations.set(tokenId, {
-      cancel: () => cancelAnimationFrame(animationFrameId)
+      attributes: animAttributes,
+      duration: duration,
+      elapsed: 0
     });
   }
 

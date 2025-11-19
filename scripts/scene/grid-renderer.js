@@ -10,7 +10,7 @@ import { createLogger } from '../core/log.js';
 const log = createLogger('GridRenderer');
 
 // Z-position for grid (just above ground, below tiles)
-const GRID_Z = 0.4;
+const GRID_Z = 2.0;
 
 /**
  * GridRenderer - Renders the scene grid

@@ -160,7 +160,7 @@ export class SceneComposer {
       threeTexture.colorSpace = THREE.SRGBColorSpace;
     }
     // Flip Y: PIXI textures are top-left origin, three.js UVs are bottom-left origin
-    threeTexture.flipY = true;
+    threeTexture.flipY = false;
     
     // Match PIXI's texture settings
     threeTexture.wrapS = THREE.ClampToEdgeWrapping;
@@ -204,7 +204,7 @@ export class SceneComposer {
     });
     // Flip Y to correct UV orientation mismatch between PIXI and three.js
     if (material.map) { 
-      material.map.flipY = true; 
+      material.map.flipY = false; 
       material.map.needsUpdate = true; 
     }
 
@@ -228,12 +228,10 @@ export class SceneComposer {
     // Strategy: Map Foundry 0 -> World H (Top) and Foundry H -> World 0 (Bottom).
     // Plane Geometry is created at center (W/2, H/2).
     // Top-Left Vertex is at (0, H). Bottom-Right is at (W, 0).
-    // Texture (FlipY=true) maps Image Top-Left to Vertex Top-Left.
-    // This aligns Image Top with World Top (H).
+    // Texture (FlipY=false) maps Image Top-Left to Vertex Bottom-Left? No.
+    // With scale.y = -1, we invert the geometry.
     
-    // User Feedback: "The plane needs to be flipped vertically."
-    // Flipping the mesh Y-scale inverts the visual content within the same bounds.
-    this.basePlaneMesh.scale.y = -1;
+    this.basePlaneMesh.scale.y = -1; 
     
     this.scene.add(this.basePlaneMesh);
     log.info(`Base plane added: size ${worldWidth}x${worldHeight}, pos (${worldWidth/2}, ${worldHeight/2}, 0)`);
@@ -269,10 +267,13 @@ export class SceneComposer {
 
     const aspect = viewportWidth / viewportHeight;
 
+    // Dynamic Near Plane: Start with ratio 0.1 of distance
+    const nearPlane = Math.max(10, cameraDistance * 0.1);
+
     this.camera = new THREE.PerspectiveCamera(
       fovDegrees,
       aspect,
-      10,            // near (increased for better depth precision)
+      nearPlane,     // near (dynamic for depth precision)
       200000         // far (increased to allow significant zoom out)
     );
 
@@ -376,10 +377,16 @@ export class SceneComposer {
     this.camera.position.z = newDistance;
     this.cameraDistance = newDistance;
     
+    // Dynamic Near Plane Optimization
+    // Maintain healthy Far/Near ratio to preserve depth buffer precision
+    // At high distances, a small near plane destroys precision
+    this.camera.near = Math.max(10, newDistance * 0.1);
+    this.camera.updateProjectionMatrix();
+    
     // Camera rotation stays fixed (already looking down -Z)
     // No need to call lookAt()
 
-    log.debug(`Camera zoom: ${zoomFactor.toFixed(2)}x, new distance: ${newDistance.toFixed(0)}`);
+    log.debug(`Camera zoom: ${zoomFactor.toFixed(2)}x, new distance: ${newDistance.toFixed(0)}, near: ${this.camera.near.toFixed(0)}`);
   }
 
   /**

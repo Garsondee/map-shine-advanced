@@ -199,7 +199,7 @@ export class SceneComposer {
     // Basic material for now (will be replaced with PBR material in effect system)
     const material = new THREE.MeshBasicMaterial({
       map: texture,
-      side: THREE.DoubleSide,
+      side: THREE.FrontSide, // Only render texture on front
       transparent: false
     });
     // Flip Y to correct UV orientation mismatch between PIXI and three.js
@@ -210,6 +210,15 @@ export class SceneComposer {
 
     this.basePlaneMesh = new THREE.Mesh(geometry, material);
     this.basePlaneMesh.name = 'BasePlane';
+    
+    // Create red back-face for orientation debugging
+    const backMaterial = new THREE.MeshBasicMaterial({
+      color: 0xff0000,
+      side: THREE.BackSide
+    });
+    const backMesh = new THREE.Mesh(geometry, backMaterial);
+    backMesh.name = 'BasePlane_Back';
+    this.basePlaneMesh.add(backMesh);
     
     // Position at world center
     this.basePlaneMesh.position.set(worldWidth / 2, worldHeight / 2, 0);

@@ -1,15 +1,18 @@
 # Map Shine Advanced — Project Plan
 
 ## Vision
-Replace Foundry VTT's rendering system with a three.js-based 2.5D engine that delivers cinematic visual effects (PBR materials, particles, weather, post-processing) while maintaining compatibility with Foundry's token workflow and gracefully handling non-compatible maps.
+Replace Foundry VTT's rendering system with a three.js-based 2.5D engine that makes otherwise static 2D maps feel alive with **maximum visual sparkle, motion, and "life"** while requiring a **minimal number of extra textures**.
+
+The core philosophy is **fun and ease-of-use over technical accuracy**: a single luminance mask (for example `BattleMap_Specular.png`) should already unlock a wide range of animated, eye-catching effects for non-technical users, with any additional masks treated as **optional quality boosts**, not requirements.
 
 ## Product Goals
 - **Performance-first**: Avoid the "layers upon layers" performance trap of the original Map Shine
 - **Intelligent resource management**: Shared effect dependencies (e.g., cloud shadows affecting specular surfaces)
-- **Artist-friendly**: Suffix-based texture system (`BattleMap_Specular.png`, `BattleMap_Fire.png`, etc.)
-- **User-friendly UI**: Consistent, non-overwhelming controls with contextual help for non-technical users
-- **Foundry integration**: Token drag-drop works seamlessly; non-compatible maps bypass the system
-- **Maintainable architecture**: Clean separation of concerns to prevent fragile interdependencies
+- **Artist-friendly, minimal requirements**: Suffix-based texture system where **a single specular luminance mask** can drive multiple animated effects; additional masks are **optional enhancements**, not prerequisites.
+- **User-friendly UI**: Consistent, non-overwhelming controls with contextual help for non-technical users.
+- **Fun over accuracy**: Prioritize visually exciting, playful results over physically perfect realism, especially when that keeps the workflow simple.
+- **Foundry integration**: Token drag-drop works seamlessly; non-compatible maps bypass the system.
+- **Maintainable architecture**: Clean separation of concerns to prevent fragile interdependencies.
 
 ## Guiding Principles
 - Single entrypoint: `scripts/module.js` handles Foundry hooks, defers to bootstrap modules.
@@ -78,11 +81,17 @@ Replace Foundry VTT's rendering system with a three.js-based 2.5D engine that de
 - Short functions; prefer pure helpers.
 
 ## Asset System (Suffix-Based Texture Loading)
-Maps can use suffixed textures alongside base texture for effect masks:
+The asset system is designed so that **one extra texture is enough** for compelling results. Most maps should only need:
+
 - `BattleMap.png` / `.jpg` / `.webp` — Base diffuse/albedo texture
-- `BattleMap_Specular.png` — Colored luminance mask for specular highlights (black = non-specular)
+- `BattleMap_Specular.png` — Colored luminance mask for specular highlights and other driven effects (black = non-specular)
+
+From that single specular mask, shaders can derive **multiple animated behaviors** (moving highlights, glitter, pulsing bands, etc.) without forcing creators to author separate intermediate maps.
+
+Additional masks are **entirely optional** and only exist to push quality further when desired:
+
 - `BattleMap_Roughness.png` — Roughness map for PBR (optional, intelligent fallback if missing)
-- `BattleMap_Normal.png` — Normal map for lighting detail
+- `BattleMap_Normal.png` — Normal map for lighting detail (optional)
 - `BattleMap_Fire.png` — Fire effect mask (may need transparency)
 - `BattleMap_Outdoors.png` — B&W mask: indoor vs outdoor areas (enables targeted weather effects)
 - `BattleMap_Iridescence.png` — Iridescence/oil-slick effect mask
@@ -100,11 +109,13 @@ Maps can use suffixed textures alongside base texture for effect masks:
 ## Effect System Architecture
 
 ### Core Technical Approach
-Map Shine Advanced uses **image-based PBR with layered effect composition**:
-- **Masked Textures**: Suffix-based system (BattleMap_Specular.png, etc.)
-- **Procedural Noise**: Perlin/simplex noise driving animation (heat distortion, water ripples)
-- **Camera Parallax**: Multi-layer depth illusion for 2.5D
-- **Custom Shaders**: GLSL shaders for advanced effects (heat distortion, iridescence)
+Map Shine Advanced uses **image-based PBR with layered effect composition** to turn a single specular luminance mask into many different kinds of motion and sparkle:
+
+- **Masked Textures (minimal set)**: Suffix-based system where `BattleMap_Specular.png` is the primary required mask for most effects; other masks are optional refinements.
+- **Procedural Micro-facets**: Shader-based sparkle/glitter that uses the specular mask as a **luminance driver**, adding life and twinkle without extra textures.
+- **Procedural Noise**: Perlin/simplex noise driving animation (heat distortion, water ripples, pulsing bands) to extract more movement from the same single mask.
+- **Camera Parallax**: Multi-layer depth illusion for 2.5D.
+- **Custom Shaders**: GLSL shaders for advanced effects (heat distortion, iridescence) that treat optional masks as bonuses, not requirements.
 - **GPU Particles**: Instanced rendering for fire, smoke, rain, etc.
 
 ### Effect Composition & Layering
@@ -376,7 +387,7 @@ Each effect:
 - **Asset System**: Image-based PBR with suffix textures (NOT glTF)
   - Rationale: 2.5D doesn't need true 3D assets, simpler for creators, faster loading, full material control
   - Core techniques: Masked textures, procedural noise, parallax, custom shaders, GPU particles
-- **MVP Effect**: PBR material pipeline with specular highlights (intelligent roughness fallback)
+- **MVP Effect**: PBR material pipeline with specular highlights and **procedural sparkle/micro-facets** (intelligent roughness fallback, minimal required maps)
 - **Performance**: Flexible targets, smooth experience sufficient for TTRPG use case
 - **Asset Formats**: JPG, PNG, WebP supported
 - **UI Library**: Tweakpane for parameter controls

@@ -21,6 +21,9 @@ export class SpecularEffect extends EffectBase {
     this.priority = 10; // Render early in material layer
     this.alwaysRender = true; // Core visual effect
     
+    // Backing field for enabled property
+    this._enabled = true;
+    
     /** @type {THREE.Mesh|null} */
     this.mesh = null;
     
@@ -75,8 +78,36 @@ export class SpecularEffect extends EffectBase {
       stripe3Angle: 90.0,
       stripe3Width: 0.5,
       stripe3Intensity: 0.2,
-      stripe3Parallax: 1.0
+      stripe3Parallax: 1.0,
+
+      // Micro Sparkle
+      sparkleEnabled: false,
+      sparkleIntensity: 0.8,
+      sparkleScale: 50.0,
+      sparkleSpeed: 0.5
     };
+  }
+
+  /**
+   * Get enabled state
+   * @returns {boolean} Enabled state
+   */
+  get enabled() {
+    return this._enabled;
+  }
+
+  /**
+   * Set enabled state and update shader uniform immediately
+   * @param {boolean} value - New enabled state
+   */
+  set enabled(value) {
+    this._enabled = value;
+    
+    // Update uniform immediately if material exists
+    // This ensures the effect turns off even if the update loop stops
+    if (this.material && this.material.uniforms.uEffectEnabled) {
+      this.material.uniforms.uEffectEnabled.value = value;
+    }
   }
 
   /**
@@ -122,6 +153,13 @@ export class SpecularEffect extends EffectBase {
           type: 'folder',
           expanded: false,
           parameters: ['stripe3Enabled', 'stripe3Frequency', 'stripe3Speed', 'stripe3Angle', 'stripe3Width', 'stripe3Intensity', 'stripe3Parallax']
+        },
+        {
+          name: 'sparkle',
+          label: 'Micro Sparkle',
+          type: 'folder',
+          expanded: false,
+          parameters: ['sparkleEnabled', 'sparkleIntensity', 'sparkleScale', 'sparkleSpeed']
         }
       ],
       parameters: {
@@ -362,6 +400,38 @@ export class SpecularEffect extends EffectBase {
           step: 0.1,
           default: 1.0,
           throttle: 100
+        },
+        sparkleEnabled: {
+          type: 'boolean',
+          label: 'Enable Sparkles',
+          default: false
+        },
+        sparkleIntensity: {
+          type: 'slider',
+          label: 'Sparkle Intensity',
+          min: 0,
+          max: 2,
+          step: 0.01,
+          default: 0.8,
+          throttle: 100
+        },
+        sparkleScale: {
+          type: 'slider',
+          label: 'Sparkle Scale',
+          min: 300,
+          max: 8000,
+          step: 1,
+          default: 50.0,
+          throttle: 100
+        },
+        sparkleSpeed: {
+          type: 'slider',
+          label: 'Sparkle Speed',
+          min: 0,
+          max: 5,
+          step: 0.01,
+          default: 0.5,
+          throttle: 100
         }
       }
     };
@@ -436,6 +506,9 @@ export class SpecularEffect extends EffectBase {
         uHasRoughnessMap: { value: this.roughnessMask !== null },
         uHasNormalMap: { value: this.normalMap !== null },
         
+        // Effect enabled state (for pass-through)
+        uEffectEnabled: { value: this._enabled },
+        
         // Effect parameters
         uSpecularIntensity: { value: this.params.intensity },
         uRoughness: { value: this.params.roughness },
@@ -493,6 +566,12 @@ export class SpecularEffect extends EffectBase {
         uStripe3Intensity: { value: this.params.stripe3Intensity },
         uStripe3Parallax: { value: this.params.stripe3Parallax },
         
+        // Micro Sparkle
+        uSparkleEnabled: { value: this.params.sparkleEnabled },
+        uSparkleIntensity: { value: this.params.sparkleIntensity },
+        uSparkleScale: { value: this.params.sparkleScale },
+        uSparkleSpeed: { value: this.params.sparkleSpeed },
+
         // Foundry scene darkness (0 = light, 1 = dark)
         uDarknessLevel: { value: 0.0 }
       },
@@ -546,6 +625,12 @@ export class SpecularEffect extends EffectBase {
     this.material.uniforms.uStripeEnabled.value = this.params.stripeEnabled;
     this.material.uniforms.uStripeBlendMode.value = this.params.stripeBlendMode;
     this.material.uniforms.uParallaxStrength.value = this.params.parallaxStrength;
+    
+    // Update sparkle parameters
+    this.material.uniforms.uSparkleEnabled.value = this.params.sparkleEnabled;
+    this.material.uniforms.uSparkleIntensity.value = this.params.sparkleIntensity;
+    this.material.uniforms.uSparkleScale.value = this.params.sparkleScale;
+    this.material.uniforms.uSparkleSpeed.value = this.params.sparkleSpeed;
     
     // Layer 1
     this.material.uniforms.uStripe1Enabled.value = this.params.stripe1Enabled;
@@ -703,6 +788,8 @@ export class SpecularEffect extends EffectBase {
       uniform bool uHasRoughnessMap;
       uniform bool uHasNormalMap;
       
+      uniform bool uEffectEnabled;
+      
       uniform float uSpecularIntensity;
       uniform float uRoughness;
       uniform float uMetallic;
@@ -748,6 +835,12 @@ export class SpecularEffect extends EffectBase {
       uniform float uStripe3Intensity;
       uniform float uStripe3Parallax;
       
+      // Micro Sparkle
+      uniform bool uSparkleEnabled;
+      uniform float uSparkleIntensity;
+      uniform float uSparkleScale;
+      uniform float uSparkleSpeed;
+      
       // Foundry scene darkness (0 = light, 1 = dark)
       uniform float uDarknessLevel;
       
@@ -758,6 +851,30 @@ export class SpecularEffect extends EffectBase {
       // Simple 1D noise function for stripe variation
       float noise1D(float p) {
         return fract(sin(p * 127.1) * 43758.5453);
+      }
+      
+      // Pseudo-random hash for sparkles
+      float hash12(vec2 p) {
+        vec3 p3  = fract(vec3(p.xyx) * .1031);
+        p3 += dot(p3, p3.yzx + 33.33);
+        return fract((p3.x + p3.y) * p3.z);
+      }
+
+      // Sparkle noise function
+      float sparkleNoise(vec2 uv, float scale, float time, float speed) {
+        vec2 p = uv * scale;
+        vec2 id = floor(p);
+        
+        // Random value per cell
+        float rnd = hash12(id);
+        
+        // Animate phase
+        float phase = time * speed + rnd * 6.28;
+        
+        // Blink pattern (peaky sine wave)
+        float blink = max(0.0, sin(phase) - 0.8) * 5.0;
+        
+        return blink * rnd;
       }
       
       /**
@@ -853,6 +970,16 @@ export class SpecularEffect extends EffectBase {
       void main() {
         // Sample textures
         vec4 albedo = texture2D(uAlbedoMap, vUv);
+        
+        // Apply Foundry darkness level
+        float lightLevel = 1.0 - uDarknessLevel;
+        
+        // If effect is disabled, just render the base albedo with standard lighting
+        if (!uEffectEnabled) {
+          gl_FragColor = vec4(albedo.rgb * lightLevel, albedo.a);
+          return;
+        }
+        
         vec4 specularMask = texture2D(uSpecularMap, vUv);
         float roughness = uHasRoughnessMap ? texture2D(uRoughnessMap, vUv).r : uRoughness;
         
@@ -906,12 +1033,24 @@ export class SpecularEffect extends EffectBase {
         // stripeContribution modulates the specular intensity
         float stripeContribution = 1.0 + stripeMask;
         
+        // Calculate sparkles
+        float sparkleVal = 0.0;
+        if (uSparkleEnabled) {
+          // Generate sparkles based on UV and time
+          sparkleVal = sparkleNoise(vUv, uSparkleScale, uTime, uSparkleSpeed);
+          
+          // Mask by specular strength so we don't sparkle on matte areas
+          sparkleVal *= specularStrength;
+        }
+        
+        // Add sparkles to the contribution
+        float totalModulator = stripeContribution + (sparkleVal * uSparkleIntensity);
+        
         // For 2.5D top-down: specular mask directly defines shine areas
         // The colored mask defines WHERE and WHAT COLOR things shine
-        vec3 specularColor = specularMask.rgb * stripeContribution * uSpecularIntensity * uLightColor;
+        vec3 specularColor = specularMask.rgb * totalModulator * uSpecularIntensity * uLightColor;
         
-        // Apply Foundry darkness level with different falloff curves
-        float lightLevel = 1.0 - uDarknessLevel;
+        // Apply Foundry darkness level with different falloff curves (reuse lightLevel defined earlier)
         
         // Linear falloff for albedo (base texture)
         float albedoBrightness = lightLevel;

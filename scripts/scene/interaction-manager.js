@@ -299,6 +299,13 @@ export class InteractionManager {
                      this.startWallDrag(interactable, event);
                      return;
                 }
+
+                if (type === 'wallLine') {
+                    if (game.user.isGM || canvas.activeLayer?.name?.includes('WallsLayer')) {
+                        this.selectWall(interactable, event);
+                        return;
+                    }
+                }
             }
         }
 
@@ -330,30 +337,27 @@ export class InteractionManager {
           this.wallDraw.current.set(snappedWorld.x, snappedWorld.y, 0);
           this.wallDraw.type = activeTool;
           
-          // Create preview line
+          // Create preview mesh
           if (!this.wallDraw.previewLine) {
-            const geometry = new THREE.BufferGeometry().setFromPoints([
-              this.wallDraw.start,
-              this.wallDraw.current
-            ]);
-            const material = new THREE.LineBasicMaterial({ color: 0xffffff, linewidth: 2 });
-            this.wallDraw.previewLine = new THREE.Line(geometry, material);
+            const geometry = new THREE.PlaneGeometry(1, 6); // Unit length, 6px thickness
+            const material = new THREE.MeshBasicMaterial({ 
+                color: 0xffffff, 
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0.5
+            });
+            this.wallDraw.previewLine = new THREE.Mesh(geometry, material);
             this.wallDraw.previewLine.name = 'WallPreview';
-            this.wallDraw.previewLine.position.z = 3.5; // Lift above walls (3.0) and grid (2.0)
+            this.wallDraw.previewLine.position.z = 3.5;
             this.sceneComposer.scene.add(this.wallDraw.previewLine);
           } else {
             this.wallDraw.previewLine.visible = true;
-            
-            // Update start/end positions of existing line
-            const positions = this.wallDraw.previewLine.geometry.attributes.position.array;
-            positions[0] = this.wallDraw.start.x;
-            positions[1] = this.wallDraw.start.y;
-            positions[2] = 0;
-            positions[3] = this.wallDraw.current.x;
-            positions[4] = this.wallDraw.current.y;
-            positions[5] = 0;
-            this.wallDraw.previewLine.geometry.attributes.position.needsUpdate = true;
           }
+          
+          // Reset transform
+          this.wallDraw.previewLine.position.copy(this.wallDraw.start);
+          this.wallDraw.previewLine.position.z = 3.5;
+          this.wallDraw.previewLine.scale.set(0, 1, 1);
           
           // Disable camera controls
           if (window.MapShine?.cameraController) {
@@ -401,6 +405,7 @@ export class InteractionManager {
 
           // Start Drag
           this.dragState.active = true;
+          this.dragState.mode = null; // Ensure no leftover mode from other interactions
           this.dragState.leaderId = tokenDoc.id;
           
           // Create Previews
@@ -566,12 +571,20 @@ export class InteractionManager {
             
             this.wallDraw.current.set(snappedWorld.x, snappedWorld.y, 0);
             
-            // Update geometry
-            const positions = this.wallDraw.previewLine.geometry.attributes.position.array;
-            positions[3] = this.wallDraw.current.x;
-            positions[4] = this.wallDraw.current.y;
-            positions[5] = 0;
-            this.wallDraw.previewLine.geometry.attributes.position.needsUpdate = true;
+            // Update geometry (Mesh transform)
+            const dx = this.wallDraw.current.x - this.wallDraw.start.x;
+            const dy = this.wallDraw.current.y - this.wallDraw.start.y;
+            const length = Math.sqrt(dx*dx + dy*dy);
+            const angle = Math.atan2(dy, dx);
+            
+            const mesh = this.wallDraw.previewLine;
+            mesh.position.set(
+                (this.wallDraw.start.x + this.wallDraw.current.x) / 2,
+                (this.wallDraw.start.y + this.wallDraw.current.y) / 2,
+                3.5
+            );
+            mesh.rotation.z = angle;
+            mesh.scale.set(length, 1, 1);
           }
           return;
         }
@@ -597,19 +610,45 @@ export class InteractionManager {
                  // Check if parent is still valid (might have been removed if update happened during drag? Unlikely for GM drag)
                  if (!wallGroup) return;
 
-                 const line = wallGroup.children.find(c => c.type === 'Line');
+                 const wallMesh = wallGroup.children.find(c => c.userData.type === 'wallLine');
                  const endpoint = this.dragState.object;
                  
-                 endpoint.position.set(snappedWorld.x, snappedWorld.y, 3.0); // Keep Z
+                 // Local Z should be 0 relative to wallGroup
+                 endpoint.position.set(snappedWorld.x, snappedWorld.y, 0); 
                  
-                 if (line) {
-                     const positions = line.geometry.attributes.position.array;
-                     // Index 0 -> start (0,1,2), Index 1 -> end (3,4,5)
-                     const idx = this.dragState.endpointIndex * 3;
-                     positions[idx] = snappedWorld.x;
-                     positions[idx+1] = snappedWorld.y;
-                     positions[idx+2] = 3.0;
-                     line.geometry.attributes.position.needsUpdate = true;
+                 if (wallMesh) {
+                     // Find other endpoint
+                     const otherIndex = this.dragState.endpointIndex === 0 ? 1 : 0;
+                     const otherEndpoint = wallGroup.children.find(c => 
+                         c.userData.type === 'wallEndpoint' && c.userData.index === otherIndex
+                     );
+                     
+                     if (otherEndpoint) {
+                         const start = endpoint.position;
+                         const end = otherEndpoint.position;
+                         
+                         const dx = end.x - start.x;
+                         const dy = end.y - start.y;
+                         const dist = Math.sqrt(dx*dx + dy*dy);
+                         const angle = Math.atan2(dy, dx);
+                         
+                         wallMesh.position.set((start.x + end.x)/2, (start.y + end.y)/2, 0);
+                         wallMesh.rotation.z = angle;
+                         
+                         // Scale width based on original geometry
+                         const originalLength = wallMesh.geometry.parameters.width;
+                         if (originalLength > 0) {
+                             wallMesh.scale.setX(dist / originalLength);
+                         }
+                         
+                         // Update Hitbox
+                         const hitbox = wallGroup.children.find(c => c.userData.type === 'wallHitbox');
+                         if (hitbox) {
+                             hitbox.position.copy(wallMesh.position);
+                             hitbox.rotation.copy(wallMesh.rotation);
+                             hitbox.scale.copy(wallMesh.scale);
+                         }
+                     }
                  }
             }
             return;
@@ -808,6 +847,7 @@ export class InteractionManager {
         // Handle Wall Endpoint Drag End
         if (this.dragState.active && this.dragState.mode === 'wallEndpoint') {
           this.dragState.active = false;
+          this.dragState.mode = null;
           
           // Re-enable camera controls
           if (window.MapShine?.cameraController) {
@@ -948,8 +988,44 @@ export class InteractionManager {
             
             // Calculate final position from PREVIEW position
             const worldPos = preview.position;
-            const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
+            let foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
             
+            // COLLISION CHECK: Ensure we don't drop through walls
+            const token = tokenDoc.object;
+            if (token) {
+                const origin = token.center;
+                // checkCollision returns PolygonVertex {x, y} or null
+                // We use mode: 'closest' to get the first impact
+                const collision = token.checkCollision(foundryPos, { mode: 'closest', type: 'move' });
+                
+                if (collision) {
+                    // Calculate vector from Origin to Collision
+                    const dx = collision.x - origin.x;
+                    const dy = collision.y - origin.y;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    
+                    // Back off slightly from the wall to find the "nearest complete grid space"
+                    // If we are right at the wall, we want the cell *before* the wall.
+                    if (dist > 0) {
+                         const backDist = 2; // px
+                         const scale = Math.max(0, dist - backDist) / dist;
+                         
+                         const backX = origin.x + dx * scale;
+                         const backY = origin.y + dy * scale;
+                         
+                         // Snap to Grid Center
+                         const snapped = canvas.grid.getSnappedPoint({x: backX, y: backY}, {
+                             mode: CONST.GRID_SNAPPING_MODES.CENTER
+                         });
+                         
+                         log.debug(`Collision detected at (${collision.x.toFixed(1)}, ${collision.y.toFixed(1)}). Snapped back to (${snapped.x}, ${snapped.y})`);
+                         
+                         // Update target position
+                         foundryPos = snapped;
+                    }
+                }
+            }
+
             // Adjust for center vs top-left
             const width = tokenDoc.width * canvas.grid.size;
             const height = tokenDoc.height * canvas.grid.size;
@@ -1075,20 +1151,35 @@ export class InteractionManager {
     // Delete key
     if (event.key === 'Delete' || event.key === 'Backspace') {
       if (this.selection.size > 0) {
-        // Filter for tokens
+        // Filter for tokens and walls
         const tokensToDelete = [];
+        const wallsToDelete = [];
+
         for (const id of this.selection) {
+          // Check Token
           const sprite = this.tokenManager.getTokenSprite(id);
           if (sprite) {
             tokensToDelete.push(sprite.userData.tokenDoc.id);
+            continue;
+          }
+          
+          // Check Wall
+          if (this.wallManager.walls.has(id)) {
+              wallsToDelete.push(id);
           }
         }
         
         if (tokensToDelete.length > 0) {
           log.info(`Deleting ${tokensToDelete.length} tokens`);
           await canvas.scene.deleteEmbeddedDocuments('Token', tokensToDelete);
-          this.clearSelection();
         }
+
+        if (wallsToDelete.length > 0) {
+          log.info(`Deleting ${wallsToDelete.length} walls`);
+          await canvas.scene.deleteEmbeddedDocuments('Wall', wallsToDelete);
+        }
+        
+        this.clearSelection();
       }
     }
   }
@@ -1157,6 +1248,40 @@ export class InteractionManager {
   }
 
   /**
+   * Select a wall
+   * @param {THREE.Mesh} wallMesh 
+   * @param {PointerEvent} event
+   */
+  selectWall(wallMesh, event) {
+    // Find parent group which has the wallId
+    let object = wallMesh;
+    while(object && !object.userData.wallId) {
+        object = object.parent;
+    }
+    if (!object) return;
+
+    const wallId = object.userData.wallId;
+    const isSelected = this.selection.has(wallId);
+
+    if (event.shiftKey) {
+        if (isSelected) {
+             // keep selected or toggle? Standard is toggle or keep.
+             // Let's just ensure it is added.
+             this.wallManager.select(wallId, true);
+        } else {
+             this.selection.add(wallId);
+             this.wallManager.select(wallId, true);
+        }
+    } else {
+        if (!isSelected) {
+             this.clearSelection();
+             this.selection.add(wallId);
+             this.wallManager.select(wallId, true);
+        }
+    }
+  }
+
+  /**
    * Select an object
    * @param {THREE.Sprite} sprite 
    */
@@ -1173,7 +1298,14 @@ export class InteractionManager {
    */
   clearSelection() {
     for (const id of this.selection) {
-      this.tokenManager.setTokenSelection(id, false);
+      // Check Token
+      if (this.tokenManager.tokenSprites.has(id)) {
+          this.tokenManager.setTokenSelection(id, false);
+      }
+      // Check Wall
+      if (this.wallManager.walls.has(id)) {
+          this.wallManager.select(id, false);
+      }
     }
     this.selection.clear();
   }

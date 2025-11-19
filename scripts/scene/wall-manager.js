@@ -40,13 +40,16 @@ export class WallManager {
     this.wallGroup = new THREE.Group();
     this.wallGroup.name = 'Walls';
     
+    // Track selected walls
+    this.selected = new Set();
+    
     // Z-index for walls (raised to avoid z-fighting with ground/grid)
     this.wallGroup.position.z = 3.0; 
     
     this.scene.add(this.wallGroup);
     
     // Reusable geometry for endpoints
-    this.endpointGeometry = new THREE.CircleGeometry(4, 8); // Radius 4px
+    this.endpointGeometry = new THREE.CircleGeometry(5, 16); // Radius 5px
     
     log.debug('WallManager created');
   }
@@ -73,23 +76,41 @@ export class WallManager {
     Hooks.on('createWall', (doc) => this.create(doc));
     Hooks.on('updateWall', (doc, changes) => this.update(doc, changes));
     Hooks.on('deleteWall', (doc) => this.remove(doc.id));
-    Hooks.on('renderSceneControls', () => this.updateVisibility());
+    
+    // Use specific activation hooks to avoid state lag
+    Hooks.on('activateWallsLayer', () => {
+        log.debug('activateWallsLayer hook fired');
+        this.setVisibility(true);
+    });
+    Hooks.on('deactivateWallsLayer', () => {
+        log.debug('deactivateWallsLayer hook fired');
+        this.setVisibility(false);
+    });
+    
+    // Also update on canvas ready/init just in case
+    Hooks.on('canvasReady', () => this.updateVisibility());
   }
 
   /**
-   * Update visibility of wall lines based on active layer
-   * Door handles remain visible
+   * Update visibility based on current active layer state
    */
   updateVisibility() {
     const showLines = canvas.walls?.active ?? false;
-    
+    this.setVisibility(showLines);
+  }
+
+  /**
+   * Set explicit visibility for wall lines
+   * @param {boolean} visible 
+   */
+  setVisibility(visible) {
     this.walls.forEach(group => {
       group.children.forEach(child => {
         // Skip door controls (they stay visible)
         if (child.userData.type === 'doorControl') return;
         
         // Toggle lines and endpoints
-        child.visible = showLines;
+        child.visible = visible;
       });
     });
   }
@@ -139,20 +160,41 @@ export class WallManager {
     // Determine Color based on properties
     const color = this.getWallColor(doc, dataOverride);
     
-    // Create Line
-    const lineGeometry = new THREE.BufferGeometry().setFromPoints([
-        start,
-        end
-    ]);
+    // Create Wall Mesh (Thick Line)
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const length = Math.sqrt(dx * dx + dy * dy);
+    const angle = Math.atan2(dy, dx);
 
-    const material = new THREE.LineBasicMaterial({ 
+    const thickness = 6; // px
+    const wallGeo = new THREE.PlaneGeometry(length, thickness);
+    const wallMat = new THREE.MeshBasicMaterial({ 
         color: color,
-        linewidth: 2
+        side: THREE.DoubleSide
     });
     
-    const line = new THREE.Line(lineGeometry, material);
-    line.visible = showLines;
-    group.add(line);
+    const wallMesh = new THREE.Mesh(wallGeo, wallMat);
+    wallMesh.position.set((start.x + end.x) / 2, (start.y + end.y) / 2, 0);
+    wallMesh.rotation.z = angle;
+    wallMesh.userData = { type: 'wallLine' };
+    wallMesh.visible = showLines;
+    group.add(wallMesh);
+
+    // Hitbox (wider invisible mesh for easier selection)
+    const hitboxGeo = new THREE.PlaneGeometry(length, 20); 
+    const hitboxMat = new THREE.MeshBasicMaterial({ 
+        visible: true,
+        transparent: true,
+        opacity: 0,
+        side: THREE.DoubleSide,
+        depthWrite: false
+    });
+    const hitbox = new THREE.Mesh(hitboxGeo, hitboxMat);
+    hitbox.position.copy(wallMesh.position);
+    hitbox.rotation.copy(wallMesh.rotation);
+    hitbox.userData = { type: 'wallHitbox' };
+    hitbox.visible = showLines;
+    group.add(hitbox);
 
     // Create Endpoints (Circles)
     const dotMat = new THREE.MeshBasicMaterial({ color: color });
@@ -198,22 +240,31 @@ export class WallManager {
       doorGroup.position.set(midX, midY, 0.1); // Slightly above wall line
       doorGroup.userData = { type: 'doorControl', wallId: doc.id };
       
-      // Background (Rounded Rect approx)
-      // 40x40 canvas units -> converted to world units?
-      // Canvas grid size is usually 100px. Icons are fixed size.
-      // Foundry uses 40px * uiScale.
-      // In THREE, we are in world pixels (usually).
       const size = 40 * (canvas.dimensions.uiScale || 1);
+      const radius = size / 2;
       
-      const bgGeo = new THREE.PlaneGeometry(size + 4, size + 4);
+      // Background (Circle)
+      const bgGeo = new THREE.CircleGeometry(radius, 24);
       const bgMat = new THREE.MeshBasicMaterial({ 
           color: 0x000000,
           transparent: true,
-          opacity: 0.0, // Only visible on hover? Foundry says alpha=0 usually, 0.25 on hover.
+          opacity: 0.5,
           side: THREE.DoubleSide
       });
       const bg = new THREE.Mesh(bgGeo, bgMat);
       doorGroup.add(bg);
+      
+      // Border (Ring)
+      const borderGeo = new THREE.RingGeometry(radius - 2, radius, 24);
+      const borderMat = new THREE.MeshBasicMaterial({ 
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.8,
+          side: THREE.DoubleSide
+      });
+      const border = new THREE.Mesh(borderGeo, borderMat);
+      border.position.z = 0.005;
+      doorGroup.add(border);
       
       // Icon Sprite
       const iconPath = this.getDoorIconPath(doc, dataOverride);
@@ -223,28 +274,21 @@ export class WallManager {
 
       const loader = new THREE.TextureLoader();
       
-      // Use a Sprite for the icon so it always faces camera (if we were 3D) 
-      // but in 2.5D top-down, a Plane is fine too. Sprite is easier for icons.
-      // Actually, sprites always face camera. Planes align with ground.
-      // If we want it "flat on the map" (like Foundry), use Plane.
-      // Foundry's icons are mostly flat.
-      const iconGeo = new THREE.PlaneGeometry(size, size);
+      const iconSize = size * 0.7;
+      const iconGeo = new THREE.PlaneGeometry(iconSize, iconSize);
       const iconMat = new THREE.MeshBasicMaterial({
           transparent: true,
-          opacity: 0.8,
+          opacity: 1.0,
           color: 0xffffff
       });
       
-      // Add timestamp to bypass cache if state stuck? 
-      // Or maybe texture is fine but material isn't updating?
-      // Let's try simple load.
       loader.load(iconPath, (tex) => {
           iconMat.map = tex;
           iconMat.needsUpdate = true;
       });
       
       const icon = new THREE.Mesh(iconGeo, iconMat);
-      // icon.position.z = 0.1;
+      icon.position.z = 0.01;
       doorGroup.add(icon);
 
       // Store references for updates
@@ -337,18 +381,17 @@ export class WallManager {
       const group = this.walls.get(id);
       if (!group) return;
       
-      const line = group.children.find(c => c.type === 'Line');
+      // If active is false, but it is selected, keep it active (highlighted)
+      const shouldBeHighlighted = active || this.selected.has(id);
+
+      const line = group.children.find(c => c.userData.type === 'wallLine');
       if (line) {
-          if (active) {
+          if (shouldBeHighlighted) {
              line.material.color.setHex(0xff9829); // Orange highlight
-             line.material.linewidth = 4;
-             // Note: linewidth only works in WebGL1 usually, usually need separate thick line mesh for WebGL2
-             // For now, let's assume color change is enough feedback
           } else {
              const doc = canvas.walls.get(id)?.document;
              if (doc) {
                  line.material.color.setHex(this.getWallColor(doc));
-                 line.material.linewidth = 2;
              }
           }
           line.material.needsUpdate = true;
@@ -357,9 +400,24 @@ export class WallManager {
       // Highlight endpoints too?
       group.children.forEach(c => {
           if (c.userData.type === 'wallEndpoint') {
-              c.material.color.setHex(active ? 0xff9829 : this.getWallColor(canvas.walls.get(id).document));
+              c.material.color.setHex(shouldBeHighlighted ? 0xff9829 : this.getWallColor(canvas.walls.get(id).document));
           }
       });
+  }
+
+  /**
+   * Select a wall
+   * @param {string} id 
+   * @param {boolean} active 
+   */
+  select(id, active) {
+    if (active) {
+      this.selected.add(id);
+    } else {
+      this.selected.delete(id);
+    }
+    // Re-evaluate highlight state
+    this.setHighlight(id, false); // False here means "check selection state" basically
   }
 
   /**

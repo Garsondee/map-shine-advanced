@@ -250,8 +250,15 @@ export class TweakpaneManager {
       step: 0.1
     }).on('change', (ev) => {
       this.uiScale = ev.value;
-      this.updateScale();
-      this.saveUIState();
+      
+      // Only update UI scale after user releases the mouse (0.1s delay)
+      // This prevents the UI from "running away" under the cursor while dragging
+      if (ev.last) {
+        setTimeout(() => {
+          this.updateScale();
+          this.saveUIState();
+        }, 100);
+      }
     });
 
     // Texture Manager Button

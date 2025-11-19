@@ -39,6 +39,15 @@ Hooks.once('init', async function() {
   sceneSettings.registerSettings();
   registerUISettings();
   
+  // Debounce Foundry UI configuration to avoid rapid reflows while dragging sliders (e.g. UI scale)
+  if (typeof game !== 'undefined' && game && typeof game.configureUI === 'function' && globalThis.foundry?.utils?.debounce) {
+    const originalConfigureUI = game.configureUI.bind(game);
+    const debouncedConfigureUI = globalThis.foundry.utils.debounce(originalConfigureUI, 250, false);
+    game.configureUI = function(config) {
+      return debouncedConfigureUI(config);
+    };
+  }
+  
   // Initialize canvas replacement hooks
   canvasReplacement.initialize();
 });

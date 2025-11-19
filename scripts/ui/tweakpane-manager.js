@@ -6,6 +6,7 @@
 
 import { createLogger } from '../core/log.js';
 import { globalValidator, getSpecularEffectiveState, getStripeDependencyState } from './parameter-validator.js';
+import { TextureManagerUI } from './texture-manager.js';
 
 const log = createLogger('UI');
 
@@ -73,6 +74,15 @@ export class TweakpaneManager {
     
     /** @type {number} Save debounce time (ms) */
     this.saveDebounceMs = 1000;
+
+    /** @type {HTMLElement|null} Custom header overlay used for dragging and controls */
+    this.headerOverlay = null;
+
+    /** @type {TextureManagerUI|null} */
+    this.textureManager = null;
+
+    /** @type {number} UI scale factor */
+    this.uiScale = 1.0;
   }
 
   /**
@@ -114,6 +124,24 @@ export class TweakpaneManager {
       expanded: true
     });
 
+    // Create a custom transparent header overlay for dragging and controls
+    this.headerOverlay = document.createElement('div');
+    this.headerOverlay.className = 'map-shine-ui-header-overlay';
+    this.headerOverlay.style.position = 'absolute';
+    this.headerOverlay.style.top = '0';
+    this.headerOverlay.style.left = '0';
+    this.headerOverlay.style.right = '0';
+    this.headerOverlay.style.height = '24px';
+    this.headerOverlay.style.pointerEvents = 'auto';
+    this.headerOverlay.style.cursor = 'move';
+    this.headerOverlay.style.background = 'transparent';
+    this.headerOverlay.style.zIndex = '10001';
+    this.container.style.position = 'fixed';
+    this.container.appendChild(this.headerOverlay);
+
+    // Add custom title bar controls (e.g., minimize button)
+    this.addTitleControls();
+
     // Load saved UI state (position, scale, accordion states)
     await this.loadUIState();
 
@@ -134,7 +162,54 @@ export class TweakpaneManager {
     // Make pane draggable
     this.makeDraggable();
 
+    // Initialize Texture Manager
+    this.textureManager = new TextureManagerUI();
+    await this.textureManager.initialize();
+
     log.info('Tweakpane UI initialized');
+  }
+
+  /**
+   * Add custom controls to the Tweakpane title bar (e.g., minimize button)
+   * @private
+   */
+  addTitleControls() {
+    if (!this.container) return;
+
+    // Prefer custom header overlay; fall back to pane root if needed
+    const header = this.headerOverlay || this.pane?.element || this.container;
+
+    // Create a small [-] button on the left side of the title bar
+    const button = document.createElement('button');
+    button.textContent = '\u2212'; // minus sign
+    button.title = 'Minimize / Restore Map Shine panel';
+    button.style.position = 'absolute';
+    button.style.left = '8px';
+    button.style.top = '4px';
+    button.style.padding = '0 6px';
+    button.style.border = 'none';
+    button.style.background = 'transparent';
+    button.style.color = 'inherit';
+    button.style.cursor = 'pointer';
+    button.style.fontSize = '12px';
+
+    // Prevent this button from starting a drag operation on mousedown
+    button.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    // Toggle pane expanded state on click
+    button.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (this.pane) {
+        this.pane.expanded = !this.pane.expanded;
+      }
+    });
+
+    header.appendChild(button);
+    log.debug('Title controls added to Tweakpane header');
   }
 
   /**
@@ -162,6 +237,31 @@ export class TweakpaneManager {
       step: 1
     }).on('change', (ev) => {
       this.onGlobalChange('timeRate', ev.value);
+    });
+
+    // Visual separator between time controls and UI/tools controls
+    globalFolder.addBlade({ view: 'separator' });
+
+    // UI Scale
+    globalFolder.addBinding({ scale: this.uiScale }, 'scale', {
+      label: 'UI Scale',
+      min: 0.5,
+      max: 2.0,
+      step: 0.1
+    }).on('change', (ev) => {
+      this.uiScale = ev.value;
+      this.updateScale();
+      this.saveUIState();
+    });
+
+    // Texture Manager Button
+    globalFolder.addButton({
+      title: 'Open Texture Manager',
+      label: 'Tools'
+    }).on('click', () => {
+      if (this.textureManager) {
+        this.textureManager.toggle();
+      }
     });
 
     // Track accordion state
@@ -240,7 +340,9 @@ export class TweakpaneManager {
       </div>
     `;
 
-    brandingFolder.element.appendChild(linkContainer);
+    // Append into the folder's collapsible content area so it folds correctly
+    const contentElement = brandingFolder.element.querySelector('.tp-fldv_c') || brandingFolder.element;
+    contentElement.appendChild(linkContainer);
 
     // Track accordion state
     brandingFolder.on('fold', (ev) => {
@@ -1150,26 +1252,40 @@ export class TweakpaneManager {
   }
 
   /**
+   * Update UI scale
+   * @private
+   */
+  updateScale() {
+    if (this.container) {
+      this.container.style.transformOrigin = 'top left';
+      this.container.style.transform = `scale(${this.uiScale})`;
+    }
+  }
+
+  /**
    * Make the pane draggable
    * @private
    */
   makeDraggable() {
-    const titleElement = this.pane.element.querySelector('.tp-rotv');
-    if (!titleElement) {
-      log.warn('Could not find title element for dragging');
+    // Prefer the custom header overlay if present, otherwise fall back to the pane element or container
+    const dragHandle = this.headerOverlay || this.pane?.element || this.container;
+    if (!dragHandle) {
+      log.warn('Could not find drag handle element for Tweakpane UI');
       return;
     }
 
     let isDragging = false;
+    let hasDragged = false;
     let startX = 0;
     let startY = 0;
     let startLeft = 0;
     let startTop = 0;
 
-    titleElement.style.cursor = 'move';
+    dragHandle.style.cursor = 'move';
 
     const onMouseDown = (e) => {
       isDragging = true;
+      hasDragged = false;
       startX = e.clientX;
       startY = e.clientY;
       
@@ -1177,9 +1293,16 @@ export class TweakpaneManager {
       startLeft = rect.left;
       startTop = rect.top;
 
+      // Clear any right/bottom anchoring so left/top take effect
+      this.container.style.right = 'auto';
+      this.container.style.bottom = 'auto';
+      this.container.style.left = `${startLeft}px`;
+      this.container.style.top = `${startTop}px`;
+
       document.addEventListener('mousemove', onMouseMove);
       document.addEventListener('mouseup', onMouseUp);
       e.preventDefault();
+      e.stopPropagation();
     };
 
     const onMouseMove = (e) => {
@@ -1188,22 +1311,41 @@ export class TweakpaneManager {
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
 
+      // Treat movement beyond a small threshold as a drag
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+        hasDragged = true;
+      }
+
       this.container.style.left = `${startLeft + dx}px`;
       this.container.style.top = `${startTop + dy}px`;
       this.container.style.right = 'auto';
       this.container.style.bottom = 'auto';
     };
 
-    const onMouseUp = () => {
+    const onMouseUp = (e) => {
       isDragging = false;
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
       
-      // Save position
+      // If we actually dragged, suppress the click that would fold the pane
+      if (hasDragged && e) {
+        e.preventDefault();
+        e.stopPropagation();
+      } else {
+        // No drag: allow normal Tweakpane behavior (click-to-fold)
+      }
+
+      // Save position after drag or click
       this.saveUIState();
     };
 
-    titleElement.addEventListener('mousedown', onMouseDown);
+    dragHandle.addEventListener('mousedown', onMouseDown);
+
+    // Disable default Tweakpane click-to-fold on the header; folding is handled by our custom [-] button
+    dragHandle.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
   }
 
   /**
@@ -1236,6 +1378,12 @@ export class TweakpaneManager {
         Object.assign(this.globalParams, state.globalParams);
       }
 
+      // Restore scale
+      if (state.scale) {
+        this.uiScale = state.scale;
+        this.updateScale();
+      }
+
       log.debug('UI state loaded from settings');
     } catch (e) {
       log.warn('Failed to load UI state:', e);
@@ -1261,7 +1409,8 @@ export class TweakpaneManager {
           bottom: this.container.style.bottom
         },
         accordionStates: this.accordionStates,
-        globalParams: this.globalParams
+        globalParams: this.globalParams,
+        scale: this.uiScale
       };
 
       await game.settings.set('map-shine-advanced', 'ui-state', state);
@@ -1367,6 +1516,14 @@ export function registerUISettings() {
   game.settings.register('map-shine-advanced', 'ui-state', {
     name: 'UI State',
     hint: 'Stores UI panel position, scale, and accordion states',
+    scope: 'client',
+    config: false,
+    type: Object,
+    default: {}
+  });
+
+  game.settings.register('map-shine-advanced', 'texture-manager-state', {
+    name: 'Texture Manager State',
     scope: 'client',
     config: false,
     type: Object,

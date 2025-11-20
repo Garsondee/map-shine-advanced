@@ -42,6 +42,9 @@ export class EffectComposer {
     /** @type {GPUCapabilities} */
     this.capabilities = null;
     
+    /** @type {THREE.RenderTarget} */
+    this.sceneRenderTarget = null;
+
     /** @type {TimeManager} - Centralized time management */
     this.timeManager = new TimeManager();
     
@@ -55,6 +58,29 @@ export class EffectComposer {
   initialize(capabilities) {
     this.capabilities = capabilities;
     log.info(`EffectComposer initialized (GPU tier: ${capabilities.tier})`);
+  }
+
+  /**
+   * Ensure scene render target exists and is sized correctly
+   * @private
+   */
+  ensureSceneRenderTarget() {
+    const size = new window.THREE.Vector2();
+    this.renderer.getDrawingBufferSize(size);
+    
+    if (!this.sceneRenderTarget) {
+      this.sceneRenderTarget = new window.THREE.WebGLRenderTarget(size.width, size.height, {
+        minFilter: window.THREE.LinearFilter,
+        magFilter: window.THREE.LinearFilter,
+        format: window.THREE.RGBAFormat,
+        type: window.THREE.FloatType, // Use FloatType for HDR if possible
+        depthBuffer: true
+      });
+      log.debug(`Created scene render target: ${size.width}x${size.height}`);
+    } else if (this.sceneRenderTarget.width !== size.width || this.sceneRenderTarget.height !== size.height) {
+      this.sceneRenderTarget.setSize(size.width, size.height);
+      log.debug(`Resized scene render target to: ${size.width}x${size.height}`);
+    }
   }
 
   /**
@@ -174,23 +200,83 @@ export class EffectComposer {
       }
     }
 
-    // Render each effect in order
-    for (const effect of effects) {
-      try {
-        // Check if effect should render this frame (for performance gating)
-        if (!this.shouldRenderThisFrame(effect, timeInfo)) {
-          continue;
-        }
+    // Split effects into scene (in-world) and post-processing
+    const sceneEffects = [];
+    const postEffects = [];
 
+    for (const effect of effects) {
+      // Check if effect should render this frame (for performance gating)
+      if (!this.shouldRenderThisFrame(effect, timeInfo)) continue;
+
+      if (effect.layer && effect.layer.order >= RenderLayers.POST_PROCESSING.order) {
+        postEffects.push(effect);
+      } else {
+        sceneEffects.push(effect);
+      }
+    }
+
+    // PASS 0: UPDATE & OPTIONAL RENDER FOR SCENE EFFECTS
+    for (const effect of sceneEffects) {
+      try {
+        // Allow scene effects to update internal state/uniforms
+        effect.update(timeInfo);
+
+        // Most scene effects rely on the main scene render, but render is
+        // still available for those that need it (e.g., to sync materials)
+        effect.render(this.renderer, this.scene, this.camera);
+      } catch (error) {
+        log.error(`Scene effect update/render error (${effect.id}):`, error);
+        effect.enabled = false;
+      }
+    }
+
+    const usePostProcessing = postEffects.length > 0;
+
+    // Debug log for post-processing path (throttled)
+    if (usePostProcessing && Math.random() < 0.005) {
+      log.debug('Rendering with Post-Processing', {
+        postEffects: postEffects.map(e => e.id),
+        sceneEffects: sceneEffects.length
+      });
+    }
+
+    if (usePostProcessing) {
+      // Render scene into HDR-capable off-screen target
+      this.ensureSceneRenderTarget();
+      this.renderer.setRenderTarget(this.sceneRenderTarget);
+      this.renderer.clear();
+    } else {
+      // Default path: render directly to screen
+      this.renderer.setRenderTarget(null);
+    }
+
+    // Single authoritative scene render (background, tiles, tokens, surface effects, etc.)
+    this.renderer.render(this.scene, this.camera);
+
+    // If no post-processing effects are active, we're done
+    if (!usePostProcessing) return;
+
+    // PASS 2: POST-PROCESSING ON SCENE TEXTURE
+    const inputTexture = this.sceneRenderTarget.texture;
+
+    // Switch back to the default framebuffer (screen)
+    this.renderer.setRenderTarget(null);
+
+    for (const effect of postEffects) {
+      try {
         // Update effect state with time info
         effect.update(timeInfo);
 
-        // Render effect
+        // Provide scene color texture if effect supports it
+        if (typeof effect.setInputTexture === 'function') {
+          effect.setInputTexture(inputTexture);
+        }
+
+        // Let the effect render its full-screen pass (or chained pass)
         effect.render(this.renderer, this.scene, this.camera);
 
       } catch (error) {
-        log.error(`Effect render error (${effect.id}):`, error);
-        // Disable problematic effect
+        log.error(`Post-processing effect error (${effect.id}):`, error);
         effect.enabled = false;
       }
     }

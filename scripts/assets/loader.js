@@ -15,11 +15,11 @@ const SUPPORTED_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
 const EFFECT_MASKS = {
   specular: { suffix: '_Specular', required: false, description: 'Specular highlights mask' },
   roughness: { suffix: '_Roughness', required: false, description: 'Roughness/smoothness map' },
-  normal: { suffix: '_Normal', required: false, description: 'Normal map for lighting detail' }
+  normal: { suffix: '_Normal', required: false, description: 'Normal map for lighting detail' },
   // TODO: Uncomment as effects are implemented to avoid console spam
   // fire: { suffix: '_Fire', required: false, description: 'Fire effect mask' },
   // outdoors: { suffix: '_Outdoors', required: false, description: 'Indoor/outdoor area mask' },
-  // iridescence: { suffix: '_Iridescence', required: false, description: 'Iridescence effect mask' },
+  iridescence: { suffix: '_Iridescence', required: false, description: 'Iridescence effect mask' },
   // water: { suffix: '_Water', required: false, description: 'Water surface mask' },
   // emissive: { suffix: '_Emissive', required: false, description: 'Self-illumination mask' }
 };

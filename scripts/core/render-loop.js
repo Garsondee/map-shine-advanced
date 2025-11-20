@@ -109,16 +109,17 @@ export class RenderLoop {
       this.lastFpsUpdate = now;
     }
 
-    // Update and render effects if composer is present
+    // When an EffectComposer is present, it owns the full render pipeline
     if (this.effectComposer) {
       try {
         this.effectComposer.render(deltaTime);
       } catch (error) {
         log.error('Effect composer render error:', error);
       }
+      return;
     }
 
-    // Render the scene
+    // Fallback path: direct scene render with enforced clear color
     try {
       // CRITICAL: Enforce opaque black background every frame
       if (this.renderer.setClearColor) {
@@ -134,7 +135,7 @@ export class RenderLoop {
       
       // Debug: Log first few renders
       if (this.frameCount <= 3) {
-        log.debug(`Frame ${this.frameCount} rendered successfully`);
+        log.debug(`Frame ${this.frameCount} rendered successfully (no composer)`);
       }
     } catch (error) {
       log.error('Renderer error:', error);

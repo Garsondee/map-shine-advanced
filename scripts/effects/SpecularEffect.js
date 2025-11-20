@@ -41,6 +41,10 @@ export class SpecularEffect extends EffectBase {
     
     // Effect parameters (exposed to Tweakpane later)
     this.params = {
+      // Status
+      textureStatus: 'Searching...',
+      hasSpecularMask: false,
+
       intensity: 0.5,           // Reduced from 2.0 to avoid overexposure
       roughness: 0.3,
       metallic: 0.0,
@@ -120,6 +124,12 @@ export class SpecularEffect extends EffectBase {
       enabled: true,
       groups: [
         {
+          name: 'status',
+          label: 'Effect Status',
+          type: 'inline',
+          parameters: ['textureStatus']
+        },
+        {
           name: 'material',
           label: 'Material Properties',
           type: 'inline', // Controls shown directly (not in nested folder)
@@ -163,6 +173,16 @@ export class SpecularEffect extends EffectBase {
         }
       ],
       parameters: {
+        hasSpecularMask: {
+          type: 'boolean',
+          default: false
+        },
+        textureStatus: {
+          type: 'string',
+          label: 'Mask Status',
+          default: 'Checking...',
+          readonly: true
+        },
         intensity: {
           type: 'slider',
           label: 'Shine Intensity',
@@ -269,7 +289,7 @@ export class SpecularEffect extends EffectBase {
           type: 'slider',
           label: 'Layer 1 Intensity',
           min: 0,
-          max: 2,
+          max: 5,
           step: 0.01,
           default: 0.5,
           throttle: 100
@@ -328,7 +348,7 @@ export class SpecularEffect extends EffectBase {
           type: 'slider',
           label: 'Layer 2 Intensity',
           min: 0,
-          max: 2,
+          max: 5,
           step: 0.01,
           default: 0.3,
           throttle: 100
@@ -387,7 +407,7 @@ export class SpecularEffect extends EffectBase {
           type: 'slider',
           label: 'Layer 3 Intensity',
           min: 0,
-          max: 2,
+          max: 5,
           step: 0.01,
           default: 0.2,
           throttle: 100
@@ -467,6 +487,15 @@ export class SpecularEffect extends EffectBase {
     this.roughnessMask = roughnessMaskData?.texture || null;
     this.normalMap = normalMapData?.texture || null;
     
+    // Update status params
+    this.params.hasSpecularMask = !!this.specularMask;
+    
+    if (this.specularMask) {
+      this.params.textureStatus = 'Ready (Texture Found)';
+    } else {
+      this.params.textureStatus = 'Inactive (No Texture Found)';
+    }
+
     if (!this.specularMask) {
       log.warn('No specular mask found, effect will have no visible result');
       this.enabled = false;
@@ -877,6 +906,51 @@ export class SpecularEffect extends EffectBase {
         return blink * rnd;
       }
       
+      // RGB to HSV conversion
+      vec3 rgb2hsv(vec3 c) {
+        float cMax = max(c.r, max(c.g, c.b));
+        float cMin = min(c.r, min(c.g, c.b));
+        float delta = cMax - cMin;
+        
+        float h = 0.0;
+        if (delta > 0.00001) {
+          if (cMax == c.r) {
+            h = mod(((c.g - c.b) / delta), 6.0);
+          } else if (cMax == c.g) {
+            h = ((c.b - c.r) / delta) + 2.0;
+          } else {
+            h = ((c.r - c.g) / delta) + 4.0;
+          }
+          h /= 6.0;
+          if (h < 0.0) h += 1.0;
+        }
+        
+        float s = cMax > 0.00001 ? (delta / cMax) : 0.0;
+        float v = cMax;
+        
+        return vec3(h, s, v);
+      }
+      
+      // HSV to RGB conversion
+      vec3 hsv2rgb(vec3 c) {
+        float h = c.x * 6.0;
+        float s = c.y;
+        float v = c.z;
+        
+        float i = floor(h);
+        float f = h - i;
+        float p = v * (1.0 - s);
+        float q = v * (1.0 - s * f);
+        float t = v * (1.0 - s * (1.0 - f));
+        
+        if (i < 1.0) return vec3(v, t, p);
+        else if (i < 2.0) return vec3(q, v, p);
+        else if (i < 3.0) return vec3(p, v, t);
+        else if (i < 4.0) return vec3(p, q, v);
+        else if (i < 5.0) return vec3(t, p, v);
+        else return vec3(v, p, q);
+      }
+      
       /**
        * Generate a single stripe layer with camera-based parallax
        * @param uv - Base UV coordinates
@@ -1061,9 +1135,25 @@ export class SpecularEffect extends EffectBase {
         // Apply brightness multipliers
         vec3 litAlbedo = albedo.rgb * albedoBrightness;
         vec3 litSpecular = specularColor * specularBrightness;
+
+        // Use specular energy to boost both brightness (value) and saturation
+        float specularEnergy = dot(litSpecular, vec3(0.299, 0.587, 0.114));
         
-        // Final composition (additive specular)
-        vec3 finalColor = litAlbedo + litSpecular;
+        // Convert base to HSV so we can push V and S together
+        vec3 baseHsv = rgb2hsv(litAlbedo);
+        
+        // Scale factor tuned so even strong specular doesn't immediately clip
+        float boost = specularEnergy;
+        float saturationBoost = boost * 0.5; // Saturation grows more slowly than brightness
+        float valueBoost = boost;
+        
+        baseHsv.y = clamp(baseHsv.y + saturationBoost, 0.0, 1.0);
+        baseHsv.z = clamp(baseHsv.z + valueBoost, 0.0, 1.0);
+        
+        vec3 boostedBase = hsv2rgb(baseHsv);
+        
+        // Add a reduced raw specular term for crisp highlights without washing out colour
+        vec3 finalColor = boostedBase + litSpecular * 0.25;
         
         // Debug visualization (uncomment to see components)
         // finalColor = vec3(stripeMask); // Show stripe pattern only

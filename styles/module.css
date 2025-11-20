@@ -16,6 +16,34 @@
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
   max-height: 80vh;
   overflow-y: auto;
+  /* Prevent scrollbar from overlapping inner controls */
+  padding-right: 8px;
+  box-sizing: border-box;
+}
+
+/* Localized vertical scrollbar styling for Map Shine UI */
+#map-shine-ui {
+  /* Firefox */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.6) rgba(0, 0, 0, 0.4);
+}
+
+/* WebKit-based browsers (Chromium, Safari) */
+#map-shine-ui::-webkit-scrollbar {
+  width: 8px;
+}
+
+#map-shine-ui::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+#map-shine-ui::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 4px;
+}
+
+#map-shine-ui::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.85);
 }
 
 /* Tweakpane customizations for Foundry VTT integration */
@@ -38,4 +66,21 @@
 
 #map-shine-ui a:hover {
   opacity: 0.8;
+}
+
+/* Slight extra gap between sibling folders (accordion headers) */
+#map-shine-ui .tp-fldv + .tp-fldv {
+  margin-top: 4px;
+}
+
+/* Vertical spacing between individual rows/inputs */
+#map-shine-ui .tp-lblv,
+#map-shine-ui .tp-bldv {
+  margin-top: 4px;
+  margin-bottom: 4px;
+}
+
+.tp-fldv {
+  position: relative;
+  margin-bottom: 4px !important;
 }

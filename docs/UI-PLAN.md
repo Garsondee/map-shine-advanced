@@ -279,6 +279,10 @@ const materialFolder = effectsFolder.addFolder({title: 'Material Effects'});
 ```
 
 ### Phase 2: Effect System
+- **Create UI Stubs**:
+  - Implement placeholder classes for all 25+ effects
+  - Define minimal control schemas (enabled, intensity) for each
+  - Register all stubs to validate UI scrolling, folding, and categorization
 - Category folders
 - Enable/solo/copy buttons
 - Dynamic control generation from effect metadata
@@ -306,17 +310,17 @@ const materialFolder = effectsFolder.addFolder({title: 'Material Effects'});
 ## Effect Organization Details
 
 ### Categories
-1. **Material Effects** - Surface appearance (specular, water, iridescence)
-2. **Particle Effects** - Animated sprites (fire, smoke, rain, snow)
-3. **Environmental** - Scene-wide (clouds, weather, day/night)
-4. **Vegetation** - Animated plants (trees, grass)
-5. **Post-Processing** - Screen effects (bloom, DOF, color grade)
+1. **Atmospheric & Environmental** - Cloud Shadows, Time of Day, Weather, Heat Distortion, Lightning, Ambient, Cloud Depth
+2. **Surface & Material** - Metallic Shine, Water, Foam, Iridescence, Ground Glow, Biofilm
+3. **Object & Structure** - Structural Shadows, Building Shadows, Canopy Distortion, Physics Rope, Bush & Tree, Overhead Effect
+4. **Particle Systems** - Dust, Fire & Sparks, Steam, Metallic Glints, Smelly Flies
+5. **Global & UI Effects** - Post-Processing, Prism, Scene Transitions, Pause Effect, Loading Screen, Map Points
 
 ### Priority System
 Effects render in priority order within layer:
-- Priority 10: Core visual (specular)
-- Priority 5: Standard effects
-- Priority 1: Optional polish
+- Priority 10: Core visual (specular, material effects)
+- Priority 5: Standard effects (environmental, particles)
+- Priority 1: Optional polish (post-processing)
 
 ### Effect Actions
 - **Enable Toggle**: Turn effect on/off

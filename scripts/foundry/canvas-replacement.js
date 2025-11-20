@@ -10,6 +10,38 @@ import { SceneComposer } from '../scene/composer.js';
 import { CameraController } from '../scene/camera-controller.js';
 import { EffectComposer } from '../effects/EffectComposer.js';
 import { SpecularEffect } from '../effects/SpecularEffect.js';
+import { IridescenceEffect } from '../effects/IridescenceEffect.js';
+import { ColorCorrectionEffect } from '../effects/ColorCorrectionEffect.js';
+import {
+  CloudShadowsEffect,
+  TimeOfDayEffect,
+  WeatherEffect,
+  HeatDistortionEffect,
+  LightningEffect,
+  AmbientEffect,
+  CloudDepthEffect,
+  WaterEffect,
+  FoamEffect,
+  GroundGlowEffect,
+  BiofilmEffect,
+  StructuralShadowsEffect,
+  BuildingShadowsEffect,
+  CanopyDistortionEffect,
+  PhysicsRopeEffect,
+  BushTreeEffect,
+  OverheadEffect,
+  DustEffect,
+  FireSparksEffect,
+  SteamEffect,
+  MetallicGlintsEffect,
+  SmellyFliesEffect,
+  PostProcessingEffect,
+  PrismEffect,
+  SceneTransitionsEffect,
+  PauseEffect,
+  LoadingScreenEffect,
+  MapPointsEffect
+} from '../effects/stubs/StubEffects.js';
 import { RenderLoop } from '../core/render-loop.js';
 import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { TokenManager } from '../scene/token-manager.js';
@@ -251,10 +283,19 @@ async function createThreeCanvas(scene) {
     // Step 3: Register specular effect
     const specularEffect = new SpecularEffect();
     effectComposer.registerEffect(specularEffect);
+
+    // Step 3.1: Register iridescence effect
+    const iridescenceEffect = new IridescenceEffect();
+    effectComposer.registerEffect(iridescenceEffect);
+
+    // Step 3.2: Register color correction effect (Post-Processing)
+    const colorCorrectionEffect = new ColorCorrectionEffect();
+    effectComposer.registerEffect(colorCorrectionEffect);
     
     // Provide the base mesh and asset bundle to the effect
     const basePlane = sceneComposer.getBasePlane();
     specularEffect.setBaseMesh(basePlane, bundle);
+    iridescenceEffect.setBaseMesh(basePlane, bundle);
 
     // Step 3b: Initialize grid renderer
     gridRenderer = new GridRenderer(threeScene);
@@ -310,6 +351,8 @@ async function createThreeCanvas(scene) {
     mapShine.sceneComposer = sceneComposer;
     mapShine.effectComposer = effectComposer;
     mapShine.specularEffect = specularEffect;
+    mapShine.iridescenceEffect = iridescenceEffect;
+    mapShine.colorCorrectionEffect = colorCorrectionEffect;
     mapShine.cameraController = cameraController;
     mapShine.tokenManager = tokenManager; // NEW: Expose token manager for diagnostics
     mapShine.tileManager = tileManager; // NEW: Expose tile manager for diagnostics
@@ -332,7 +375,7 @@ async function createThreeCanvas(scene) {
 
     // Initialize Tweakpane UI
     try {
-      await initializeUI(specularEffect);
+      await initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect);
     } catch (e) {
       log.error('Failed to initialize UI:', e);
     }
@@ -346,9 +389,11 @@ async function createThreeCanvas(scene) {
 /**
  * Initialize Tweakpane UI and register effects
  * @param {SpecularEffect} specularEffect - The specular effect instance
+ * @param {IridescenceEffect} iridescenceEffect - The iridescence effect instance
+ * @param {ColorCorrectionEffect} colorCorrectionEffect - The color correction effect instance
  * @private
  */
-async function initializeUI(specularEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -378,13 +423,65 @@ async function initializeUI(specularEffect) {
     }
   };
 
-  // Register effect with UI
+  // Register effect with UI (Surface & Material category)
   uiManager.registerEffect(
     'specular',
     'Metallic / Specular',
     specularSchema,
-    onSpecularUpdate
+    onSpecularUpdate,
+    'surface'
   );
+
+  // --- Iridescence Settings ---
+  if (iridescenceEffect) {
+    const iridescenceSchema = IridescenceEffect.getControlSchema();
+    
+    const onIridescenceUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        iridescenceEffect.enabled = value;
+        log.debug(`Iridescence effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (iridescenceEffect.params[paramId] !== undefined) {
+        iridescenceEffect.params[paramId] = value;
+        log.debug(`Iridescence.${paramId} = ${value}`);
+      }
+    };
+
+    uiManager.registerEffect(
+      'iridescence',
+      'Iridescence / Holographic',
+      iridescenceSchema,
+      onIridescenceUpdate,
+      'surface'
+    );
+
+    // Sync status
+    if (uiManager.effectFolders['iridescence']) {
+      const folderData = uiManager.effectFolders['iridescence'];
+      folderData.params.textureStatus = iridescenceEffect.params.textureStatus;
+      
+      if (folderData.bindings.textureStatus) {
+        folderData.bindings.textureStatus.refresh();
+      }
+      uiManager.updateEffectiveState('iridescence');
+    }
+  }
+
+  // Sync dynamic status from effect to UI immediately
+  if (uiManager.effectFolders['specular']) {
+    const folderData = uiManager.effectFolders['specular'];
+    
+    // Update internal params in UI manager
+    folderData.params.textureStatus = specularEffect.params.textureStatus;
+    folderData.params.hasSpecularMask = specularEffect.params.hasSpecularMask;
+    
+    // Refresh status display
+    if (folderData.bindings.textureStatus) {
+      folderData.bindings.textureStatus.refresh();
+    }
+    
+    // Update status light
+    uiManager.updateEffectiveState('specular');
+  }
 
   // --- Grid Settings ---
   if (gridRenderer) {
@@ -399,9 +496,112 @@ async function initializeUI(specularEffect) {
       'grid',
       'Grid Settings',
       gridSchema,
-      onGridUpdate
+      onGridUpdate,
+      'global'
     );
     log.info('Grid settings wired to UI');
+  }
+
+  // --- Color Correction & Grading (Post-Processing) ---
+  if (colorCorrectionEffect) {
+    const ccSchema = ColorCorrectionEffect.getControlSchema();
+
+    const onColorCorrectionUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        colorCorrectionEffect.enabled = value;
+        log.debug(`ColorCorrection effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (colorCorrectionEffect.params && Object.prototype.hasOwnProperty.call(colorCorrectionEffect.params, paramId)) {
+        colorCorrectionEffect.params[paramId] = value;
+        log.debug(`ColorCorrection.${paramId} =`, value);
+      }
+    };
+
+    uiManager.registerEffect(
+      'colorCorrection',
+      'Color Grading & VFX',
+      ccSchema,
+      onColorCorrectionUpdate,
+      'global'
+    );
+
+    log.info('Color correction effect wired to UI');
+  }
+
+  // --- Stub Effects ---
+  // UI-only placeholders for planned effects; these do not yet affect rendering
+  const stubEffectDefs = [
+    // Atmospheric & Environmental
+    { id: 'cloud-shadows',      name: 'Cloud Shadows',        Class: CloudShadowsEffect,      categoryId: 'atmospheric' },
+    { id: 'time-of-day',        name: 'Time of Day',          Class: TimeOfDayEffect,         categoryId: 'atmospheric' },
+    { id: 'weather',            name: 'Weather System',       Class: WeatherEffect,           categoryId: 'atmospheric' },
+    { id: 'heat-distortion',    name: 'Heat Distortion',      Class: HeatDistortionEffect,    categoryId: 'atmospheric' },
+    { id: 'lightning',          name: 'Lightning',            Class: LightningEffect,         categoryId: 'atmospheric' },
+    { id: 'ambient',            name: 'Ambient Lighting',     Class: AmbientEffect,           categoryId: 'atmospheric' },
+    { id: 'cloud-depth',        name: 'Cloud Depth',          Class: CloudDepthEffect,        categoryId: 'atmospheric' },
+
+    // Surface & Material
+    { id: 'water',              name: 'Water',                Class: WaterEffect,             categoryId: 'water' },
+    { id: 'foam',               name: 'Foam',                 Class: FoamEffect,              categoryId: 'water' },
+    { id: 'ground-glow',        name: 'Ground Glow',          Class: GroundGlowEffect,        categoryId: 'surface' },
+    { id: 'biofilm',            name: 'Water Splashes',       Class: BiofilmEffect,           categoryId: 'water' },
+
+    // Object & Structure
+    { id: 'structural-shadows', name: 'Structural Shadows',   Class: StructuralShadowsEffect, categoryId: 'structure' },
+    { id: 'building-shadows',   name: 'Building Shadows',     Class: BuildingShadowsEffect,   categoryId: 'structure' },
+    { id: 'canopy-distortion',  name: 'Canopy Distortion',    Class: CanopyDistortionEffect,  categoryId: 'structure' },
+    { id: 'physics-rope',       name: 'Physics Rope',         Class: PhysicsRopeEffect,       categoryId: 'structure' },
+    { id: 'bush-tree',          name: 'Bush & Tree',          Class: BushTreeEffect,          categoryId: 'structure' },
+    { id: 'overhead',           name: 'Overhead Effect',      Class: OverheadEffect,          categoryId: 'structure' },
+
+    // Particle Systems
+    { id: 'dust',               name: 'Dust',                 Class: DustEffect,              categoryId: 'particle' },
+    { id: 'fire-sparks',        name: 'Fire & Sparks',        Class: FireSparksEffect,        categoryId: 'particle' },
+    { id: 'steam',              name: 'Steam',                Class: SteamEffect,             categoryId: 'particle' },
+    { id: 'metallic-glints',    name: 'Metallic Glints',      Class: MetallicGlintsEffect,    categoryId: 'particle' },
+    { id: 'smelly-flies',       name: 'Smelly Flies',         Class: SmellyFliesEffect,       categoryId: 'particle' },
+
+    // Global & UI Effects
+    // { id: 'post-processing',    name: 'Post-Processing',      Class: PostProcessingEffect,    categoryId: 'global' }, // Replaced by real ColorCorrectionEffect
+    { id: 'prism',              name: 'Prism',                Class: PrismEffect,             categoryId: 'global' },
+    { id: 'scene-transitions',  name: 'Scene Transitions',    Class: SceneTransitionsEffect,  categoryId: 'global' },
+    { id: 'pause',              name: 'Pause Effect',         Class: PauseEffect,             categoryId: 'global' },
+    { id: 'loading-screen',     name: 'Loading Screen',       Class: LoadingScreenEffect,     categoryId: 'global' },
+    { id: 'map-points',         name: 'Map Points',           Class: MapPointsEffect,         categoryId: 'global' }
+  ];
+
+  // Simple storage for stub parameters (for future wiring to real effects)
+  if (!window.MapShine.stubEffects) {
+    window.MapShine.stubEffects = {};
+  }
+
+  for (const def of stubEffectDefs) {
+    const { id, name, Class, categoryId } = def;
+
+    // Avoid duplicate registration if initializeUI is called multiple times
+    if (window.MapShine.stubEffects[id]?.registered) continue;
+
+    const schema = Class.getControlSchema();
+
+    // Local state container for this effect
+    window.MapShine.stubEffects[id] = window.MapShine.stubEffects[id] || {
+      params: {},
+      enabled: false,
+      registered: false
+    };
+
+    const onStubUpdate = (effectId, paramId, value) => {
+      const entry = window.MapShine.stubEffects[effectId];
+      if (!entry) return;
+
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        entry.enabled = value;
+      } else {
+        entry.params[paramId] = value;
+      }
+    };
+
+    uiManager.registerEffect(id, name, schema, onStubUpdate, categoryId);
+    window.MapShine.stubEffects[id].registered = true;
   }
 
   // Expose UI manager globally for debugging

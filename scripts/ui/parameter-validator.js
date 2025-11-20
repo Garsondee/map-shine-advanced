@@ -229,6 +229,11 @@ export function getSpecularEffectiveState(params) {
     return { effective: false, reasons: ['Effect is disabled'] };
   }
   
+  // Missing required texture
+  if (params.hasSpecularMask === false) {
+    reasons.push('Missing specular mask (_Specular suffix)');
+  }
+
   // Zero intensity = no visible effect
   if (params.intensity === 0) {
     reasons.push('Shine intensity is 0 (no visual effect)');
@@ -278,106 +283,58 @@ export function getStripeDependencyState(params) {
   
   return {
     stripeControlsActive, // Blend mode, parallax strength
+    // A layer is considered "active" if stripes are enabled globally and the
+    // layer's own enabled flag is true. This drives which controls the UI
+    // disables in tweakpane-manager.js.
     stripe1Active: stripeControlsActive && params.stripe1Enabled === true,
     stripe2Active: stripeControlsActive && params.stripe2Enabled === true,
     stripe3Active: stripeControlsActive && params.stripe3Enabled === true,
-    stripe1Problems: layer1Problems, // Array of problem param IDs for layer 1
-    stripe2Problems: layer2Problems, // Array of problem param IDs for layer 2
-    stripe3Problems: layer3Problems  // Array of problem param IDs for layer 3
+    stripe1Problems: layer1Problems,
+    stripe2Problems: layer2Problems,
+    stripe3Problems: layer3Problems
   };
 }
 
 /**
- * Create sanity checker for specular effect
- * Detects invalid parameter combinations
+ * Create sanity checker for iridescence effect
+ * Keeps key parameters within visually sane ranges
  * @param {Object} params - Effect parameters
  * @returns {Object} Sanity check result
  */
-export function createSpecularSanityChecker(params, schema) {
+export function createIridescenceSanityChecker(params, schema) {
   const warnings = [];
   const errors = [];
   const fixes = {};
-
-  // Check 1: Stripe intensity overflow
-  // High intensity + high width + multiply blend = overflow
-  if (params.stripeEnabled) {
-    const totalIntensity = 
-      (params.stripe1Enabled ? params.stripe1Intensity : 0) +
-      (params.stripe2Enabled ? params.stripe2Intensity : 0) +
-      (params.stripe3Enabled ? params.stripe3Intensity : 0);
-    
-    if (totalIntensity > 3.0) {
-      warnings.push(`Combined stripe intensity very high (${totalIntensity.toFixed(2)}), may cause overflow`);
-    }
-
-    // Check for multiply blend with high values
-    if (params.stripeBlendMode === 1 && totalIntensity > 2.0) {
-      warnings.push('Multiply blend mode with high intensity may cause artifacts');
-    }
+  
+  if (params.intensity < 0.0) {
+    errors.push(`Iridescence intensity below 0 (${params.intensity}) is invalid`);
+    fixes.intensity = 0.0;
+  } else if (params.intensity > 2.0) {
+    warnings.push(`Iridescence intensity very high (${params.intensity}), may wash out details`);
   }
-
-  // Check 2: Stripe width sanity
-  for (let i = 1; i <= 3; i++) {
-    const enabled = params[`stripe${i}Enabled`];
-    const width = params[`stripe${i}Width`];
-    const intensity = params[`stripe${i}Intensity`];
-    
-    if (enabled && width !== undefined) {
-      // Width too small
-      if (width < 0.01) {
-        errors.push(`Layer ${i} width too small (${width}), may cause aliasing`);
-        fixes[`stripe${i}Width`] = 0.05;
-      }
-      
-      // Width too large
-      if (width > 0.95) {
-        warnings.push(`Layer ${i} width very large (${width}), stripes may not be visible`);
-      }
-
-      // Enabled with zero intensity
-      if (enabled && intensity === 0) {
-        warnings.push(`Layer ${i} enabled but intensity is 0 (no visual effect)`);
-      }
-    }
+  
+  if (params.noiseScale < 0.01) {
+    errors.push(`Noise scale too small (${params.noiseScale}), islands may collapse to flat color`);
+    fixes.noiseScale = 0.01;
+  } else if (params.noiseScale > 10.0) {
+    warnings.push(`Noise scale very large (${params.noiseScale}), glitter may alias or look noisy`);
   }
-
-  // Check 3: Parallax sanity
-  const parallaxStrength = params.parallaxStrength;
-  if (parallaxStrength !== undefined && parallaxStrength > 5) {
-    warnings.push(`Parallax strength very high (${parallaxStrength}), may cause extreme displacement`);
+  
+  if (params.phaseMult <= 0.0) {
+    errors.push(`Phase multiplier must be > 0 (got ${params.phaseMult})`);
+    fixes.phaseMult = 1.0;
+  } else if (params.phaseMult > 12.0) {
+    warnings.push(`Phase multiplier very high (${params.phaseMult}), may cause dense banding`);
   }
-
-  // Check 4: Frequency sanity
-  for (let i = 1; i <= 3; i++) {
-    const frequency = params[`stripe${i}Frequency`];
-    if (frequency !== undefined) {
-      if (frequency === 0) {
-        errors.push(`Layer ${i} frequency is 0 (invalid)`);
-        fixes[`stripe${i}Frequency`] = 1.0;
-      }
-      if (frequency > 25) {
-        warnings.push(`Layer ${i} frequency very high (${frequency}), may cause moiré`);
-      }
-    }
+  
+  if (params.ignoreDarkness < 0.0) {
+    fixes.ignoreDarkness = 0.0;
+    warnings.push('Clamping Magic Glow below 0 to 0.0');
+  } else if (params.ignoreDarkness > 1.0) {
+    fixes.ignoreDarkness = 1.0;
+    warnings.push('Clamping Magic Glow above 1 to 1.0');
   }
-
-  // Check 5: Material parameter sanity
-  if (params.intensity > 1.5) {
-    warnings.push(`Specular intensity very high (${params.intensity}), may cause overexposure`);
-  }
-
-  if (params.roughness === 0 && params.intensity > 1.0) {
-    warnings.push('Zero roughness with high intensity may create harsh highlights');
-  }
-
-  // Check 6: All stripes disabled
-  if (params.stripeEnabled && 
-      !params.stripe1Enabled && 
-      !params.stripe2Enabled && 
-      !params.stripe3Enabled) {
-    warnings.push('Stripes enabled but all layers disabled (no effect)');
-  }
-
+  
   return {
     valid: errors.length === 0,
     warnings,
@@ -391,24 +348,42 @@ export function createSpecularSanityChecker(params, schema) {
  */
 export const globalValidator = new ParameterValidator();
 
-// Register specular sanity checker
-globalValidator.registerSanityChecker('specular', createSpecularSanityChecker);
+// Register sanity checkers
+globalValidator.registerSanityChecker('specular', (params, schema) => {
+  // If effect is disabled, it's a valid state - no sanity check errors needed
+  if (!params.enabled) {
+    return {
+      valid: true,
+      warnings: [],
+      errors: [],
+      fixes: null
+    };
+  }
 
-// Register custom validators for specific problematic parameters
+  // Delegate to existing logic by reusing getSpecularEffectiveState where appropriate
+  const state = getSpecularEffectiveState(params);
+  return {
+    valid: state.effective,
+    warnings: state.effective ? [] : state.reasons,
+    errors: state.effective ? [] : state.reasons,
+    fixes: null
+  };
+});
+globalValidator.registerSanityChecker('iridescence', createIridescenceSanityChecker);
+
+// Register existing stripe width custom validators (if needed elsewhere)
 globalValidator.registerValidator('stripe1Width', (value, paramDef) => {
   const warnings = [];
-  if (value < 0.05) warnings.push('Very small width may cause aliasing artifacts');
-  if (value > 0.9) warnings.push('Very large width may make stripes invisible');
-  
+  if (value <= 0) {
+    warnings.push('Stripe width is 0 (layer will be auto-disabled)');
+  }
   return {
-    valid: value >= paramDef.min && value <= paramDef.max,
-    value: Math.max(paramDef.min, Math.min(paramDef.max, value)),
+    valid: true,
+    value,
     warnings,
     error: null
   };
 });
-
-// Similar for other layers
 globalValidator.registerValidator('stripe2Width', globalValidator.customValidators.get('stripe1Width'));
 globalValidator.registerValidator('stripe3Width', globalValidator.customValidators.get('stripe1Width'));
 

@@ -66,6 +66,9 @@ export class TweakpaneManager {
     /** @type {string} Current settings mode: 'mapMaker' or 'gm' */
     this.settingsMode = 'mapMaker';
     
+    /** @type {Object<string, any>} Category folders */
+    this.categoryFolders = {};
+
     /** @type {Set<string>} Effects queued for save */
     this.saveQueue = new Set();
     
@@ -359,13 +362,39 @@ export class TweakpaneManager {
   }
 
   /**
+   * Ensure a category folder exists
+   * @param {string} categoryId - Unique category identifier
+   * @param {string} title - Display title
+   * @returns {any} Tweakpane folder instance
+   */
+  ensureCategoryFolder(categoryId, title) {
+    if (this.categoryFolders[categoryId]) {
+      return this.categoryFolders[categoryId];
+    }
+
+    const folder = this.pane.addFolder({
+      title: title,
+      expanded: this.accordionStates[`cat_${categoryId}`] ?? false
+    });
+
+    folder.on('fold', (ev) => {
+      this.accordionStates[`cat_${categoryId}`] = ev.expanded;
+      this.saveUIState();
+    });
+
+    this.categoryFolders[categoryId] = folder;
+    return folder;
+  }
+
+  /**
    * Register an effect with the UI
    * @param {string} effectId - Unique effect identifier
    * @param {string} effectName - Display name
    * @param {Object} schema - Effect control schema
    * @param {Function} updateCallback - Called when parameters change
+   * @param {string} [categoryId] - Optional category ID to group effect under
    */
-  registerEffect(effectId, effectName, schema, updateCallback) {
+  registerEffect(effectId, effectName, schema, updateCallback, categoryId = null) {
     if (this.effectFolders[effectId]) {
       log.warn(`Effect ${effectId} already registered`);
       return;
@@ -373,8 +402,22 @@ export class TweakpaneManager {
 
     log.info(`Registering effect: ${effectName}`);
 
-    // Create effect folder
-    const folder = this.pane.addFolder({
+    // Determine parent container (category folder or main pane)
+    let parent = this.pane;
+    if (categoryId) {
+      const titles = {
+        atmospheric: 'Atmospheric & Environmental',
+        surface: 'Surface & Material',
+        water: 'Water',
+        structure: 'Objects & Structures',
+        particle: 'Particles & VFX',
+        global: 'Global & Post'
+      };
+      const title = titles[categoryId] || categoryId;
+      parent = this.ensureCategoryFolder(categoryId, title);
+    }
+
+    const folder = parent.addFolder({
       title: effectName,
       expanded: this.accordionStates[effectId] ?? false
     });
@@ -384,30 +427,71 @@ export class TweakpaneManager {
       params: {},
       bindings: {},
       schema,
-      statusElement: null,  // Status warning element
-      dependencyState: {}   // Track which controls should be enabled
+      statusElement: null,
+      dependencyState: {}
     };
 
-    // Load saved parameters from scene settings (three-tier hierarchy)
     const savedParams = this.loadEffectParameters(effectId, schema);
-    
-    // Validate loaded parameters
     const validation = globalValidator.validateAllParameters(effectId, savedParams, schema);
     if (!validation.valid) {
-      log.error(`${effectId} loaded invalid parameters:`, validation.errors);
-      ui.notifications.warn(`Map Shine: ${effectName} has invalid settings. Using safe defaults.`);
+      log.warn(`${effectId} initial validation failed:`, validation.errors);
     }
-    if (validation.warnings.length > 0) {
-      log.warn(`${effectId} parameter warnings:`, validation.warnings);
-    }
-    
-    // Use validated parameters
     const validatedParams = validation.params;
 
-    // Add status indicator element
     this.addStatusIndicator(effectId, folder);
-    
-    // Add enable toggle
+
+    // Preset dropdown just under header
+    if (schema.presets && typeof schema.presets === 'object') {
+      const presetKeys = Object.keys(schema.presets);
+      if (presetKeys.length > 0) {
+        const presetState = { preset: 'Custom' };
+        const presetOptions = { Custom: 'Custom' };
+        for (const key of presetKeys) {
+          presetOptions[key] = key;
+        }
+
+        const presetBinding = folder.addBinding(presetState, 'preset', {
+          label: 'Preset',
+          options: presetOptions
+        });
+
+        presetBinding.on('change', (ev) => {
+          const selected = ev.value;
+          if (selected === 'Custom') return;
+          const presetDef = schema.presets[selected];
+          if (!presetDef) return;
+
+          const effectData = this.effectFolders[effectId];
+          if (!effectData) return;
+
+          for (const [paramId, value] of Object.entries(presetDef)) {
+            const paramDef = schema.parameters?.[paramId];
+            if (!paramDef) continue;
+
+            const result = globalValidator.validateParameter(paramId, value, paramDef);
+            const finalValue = result.valid ? result.value : paramDef.default;
+
+            effectData.params[paramId] = finalValue;
+
+            if (effectData.bindings[paramId]) {
+              effectData.bindings[paramId].refresh();
+            }
+
+            const callback = this.effectCallbacks.get(effectId) || updateCallback;
+            if (callback) {
+              callback(effectId, paramId, finalValue);
+            }
+          }
+
+          this.updateEffectiveState(effectId);
+          this.updateControlStates(effectId);
+          this.runSanityCheck(effectId);
+          this.queueSave(effectId);
+        });
+      }
+    }
+
+    // Enabled toggle
     this.effectFolders[effectId].params.enabled = savedParams.enabled ?? schema.enabled ?? true;
     const enableBinding = folder.addBinding(
       this.effectFolders[effectId].params,
@@ -415,7 +499,6 @@ export class TweakpaneManager {
       { label: 'Enabled' }
     );
 
-    // Throttle enable toggle
     enableBinding.on('change', this.throttle((ev) => {
       this.markDirty(effectId, 'enabled');
       updateCallback(effectId, 'enabled', ev.value);
@@ -424,24 +507,20 @@ export class TweakpaneManager {
       this.queueSave(effectId);
     }, 100));
 
-    // Build controls from schema with validated parameters
+    // Build controls from schema
     this.buildEffectControls(effectId, folder, schema, updateCallback, validatedParams);
-    
-    // Initial state update
+
     this.updateEffectiveState(effectId);
     this.updateControlStates(effectId);
-    
-    // Add "Reset to Defaults" button
+
     folder.addButton({
       title: '🔄 Reset to Defaults'
     }).on('click', () => {
       this.resetEffectToDefaults(effectId);
     });
 
-    // Store callback
     this.effectCallbacks.set(effectId, updateCallback);
 
-    // Track accordion state
     folder.on('fold', (ev) => {
       this.accordionStates[effectId] = ev.expanded;
       this.saveUIState();
@@ -449,15 +528,11 @@ export class TweakpaneManager {
   }
 
   /**
-   * Build effect controls from schema
+   * Build effect controls based on schema groups or flat structure
    * @private
    */
-  buildEffectControls(effectId, folder, schema, updateCallback, savedParams = {}) {
-    const effectData = this.effectFolders[effectId];
-
-    // Check if schema has groups (new organized structure)
-    if (schema.groups && Array.isArray(schema.groups)) {
-      // Build controls organized by groups
+  buildEffectControls(effectId, folder, schema, updateCallback, savedParams) {
+    if (schema.groups) {
       for (const group of schema.groups) {
         // Add separator before this group if requested
         if (group.separator) {
@@ -538,6 +613,11 @@ export class TweakpaneManager {
       paramId,
       bindingOptions
     );
+
+    // Apply readonly state if requested
+    if (paramDef.readonly) {
+      binding.disabled = true;
+    }
 
     effectData.bindings[paramId] = binding;
     
@@ -964,21 +1044,35 @@ export class TweakpaneManager {
    * @private
    */
   addStatusIndicator(effectId, folder) {
-    const statusContainer = document.createElement('div');
-    statusContainer.style.padding = '8px';
-    statusContainer.style.marginBottom = '8px';
-    statusContainer.style.fontSize = '11px';
-    statusContainer.style.borderRadius = '4px';
-    statusContainer.style.display = 'none'; // Hidden by default
-    statusContainer.style.backgroundColor = '#3a3a3a';
-    statusContainer.style.border = '1px solid #ffa500';
-    statusContainer.style.color = '#ffa500';
-    statusContainer.innerHTML = '<strong>⚠️ Status:</strong> <span class="status-text"></span>';
+    // Find the title element (button) in the folder
+    // Tweakpane uses class 'tp-fldv_t' for the title button
+    const titleElement = folder.element.querySelector('.tp-fldv_t');
     
-    // Insert at top of folder
-    folder.element.insertBefore(statusContainer, folder.element.firstChild.nextSibling);
+    if (!titleElement) {
+      return;
+    }
+
+    // Create status light
+    const statusLight = document.createElement('div');
+    statusLight.className = 'status-light';
+    statusLight.style.width = '8px';
+    statusLight.style.height = '8px';
+    statusLight.style.borderRadius = '50%';
+    statusLight.style.backgroundColor = '#666';
+    statusLight.style.marginRight = '8px';
+    statusLight.style.display = 'inline-block';
+    statusLight.style.verticalAlign = 'middle';
+    statusLight.style.flexShrink = '0';
+    statusLight.style.transition = 'background-color 0.2s, box-shadow 0.2s';
     
-    this.effectFolders[effectId].statusElement = statusContainer;
+    // Add tooltop
+    statusLight.title = 'Status: Initializing...';
+    
+    // Insert before the title text (first child of button)
+    titleElement.insertBefore(statusLight, titleElement.firstChild);
+    
+    // Store reference to the light element itself
+    this.effectFolders[effectId].statusElement = statusLight;
   }
 
   /**
@@ -1002,18 +1096,28 @@ export class TweakpaneManager {
       };
     }
     
-    // Update status element
-    const statusElement = effectData.statusElement;
-    const statusText = statusElement.querySelector('.status-text');
+    // Update status light
+    const statusLight = effectData.statusElement;
+    let tooltip = '';
     
-    if (!effectiveState.effective && effectData.params.enabled) {
-      // Show warning - enabled but ineffective
-      statusText.textContent = effectiveState.reasons.join('; ');
-      statusElement.style.display = 'block';
+    if (!effectData.params.enabled) {
+      // Disabled
+      statusLight.style.backgroundColor = '#666666'; // Grey
+      statusLight.style.boxShadow = 'none';
+      tooltip = 'Disabled';
+    } else if (!effectiveState.effective) {
+      // Enabled but ineffective (Error/Warning)
+      statusLight.style.backgroundColor = '#ff4444'; // Red
+      statusLight.style.boxShadow = '0 0 4px #ff4444';
+      tooltip = effectiveState.reasons.join('; ');
     } else {
-      // Hide status - either disabled or working correctly
-      statusElement.style.display = 'none';
+      // Active & Effective
+      statusLight.style.backgroundColor = '#44ff44'; // Green
+      statusLight.style.boxShadow = '0 0 4px #44ff44';
+      tooltip = 'Active';
     }
+    
+    statusLight.title = `Status: ${tooltip}`;
   }
 
   /**

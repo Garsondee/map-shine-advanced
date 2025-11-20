@@ -143,30 +143,41 @@ Each effect:
 - Defines GPU tier requirements (high/medium/low)
 
 **Effect Categories**:
-1. **Material Effects** (surface appearance)
-   - Specular highlights (metallic shine, wet surfaces)
-   - Iridescence (oily, magical shimmer)
-   - Water (reflections, caustics, ripples)
-   - Heat distortion
-2. **Particle Effects** (animated sprites/geometry)
-   - Fire, smoke, embers
-   - Rain, snow
-   - Dust, pollen
-   - Magic sparkles
-3. **Environmental Effects** (scene-wide)
-   - Cloud shadows (move across outdoor areas, visible from above when zoomed out)
-   - Weather systems (wind direction/gusts, precipitation)
-   - Canopy shadows (tree coverage)
-   - Day/night cycle
-4. **Vegetation** (animated geometry)
-   - Trees/bushes swaying with wind
-   - Grass movement
-5. **Post-Processing** (screen-space effects)
-   - Color grading (Sin City selective color, LUTs)
-   - Bloom, glow
-   - Depth of field, rack focus
-   - Grain, vignette, chromatic aberration
-   - Film emulation presets
+1. **Atmospheric & Environmental Effects**
+   - **Cloud Shadows**: Procedural scrolling cloud shadows that occlude light and other effects.
+   - **Time of Day**: Dynamic lighting system that adjusts scene brightness and shadows based on in-game time.
+   - **Weather System**: Shader-based Rain, Snow, and Fog effects that respond to wind and intensity settings.
+   - **Heat Distortion**: Simulates heat haze and shimmer distortions for hot environments.
+   - **Lightning**: Procedural lightning flashes with customizable frequency and intensity.
+   - **Ambient**: General ambient lighting and color adjustments for the scene.
+   - **Cloud Depth**: Adds depth perception effects to cloud layers.
+2. **Surface & Material Effects**
+   - **Metallic Shine**: Adds reflective specular highlights to surfaces using `_Specular` masks.
+   - **Water**: Animated water distortion and flow effects.
+   - **Foam**: Dynamic foam generation for water edges and turbulent areas.
+   - **Iridescence**: Oil-slick and rainbow interference effects using `_Iridescence` masks.
+   - **Ground Glow**: Emissive glowing effects for magical terrain or lava.
+   - **Biofilm**: Organic surface overlays for slime, mold, or creep.
+3. **Object & Structure Interactions**
+   - **Structural Shadows**: Animated interior lighting and shadows cast from windows using `_Structural` masks.
+   - **Building Shadows**: Dynamic shadows cast by buildings that rotate and lengthen based on the sun's position.
+   - **Canopy Distortion**: Simulates wind movement in tree canopies using `_Canopy` masks.
+   - **Physics Rope**: Physical rope simulations for hanging objects.
+   - **Bush & Tree**: Interactive foliage that sways and reacts to movement.
+   - **Overhead Effect**: Visual treatments applied specifically to overhead tiles (roofs).
+4. **Particle Systems**
+   - **Dust**: Floating ambient dust motes.
+   - **Fire & Sparks**: Flame particles and emitted sparks for torches or campfires.
+   - **Steam**: Pressurized steam or smoke plumes.
+   - **Metallic Glints**: Occasional sparkles on reflective surfaces.
+   - **Smelly Flies**: Insects buzzing around specific points of interest.
+5. **Global & UI Effects**
+   - **Post-Processing**: Full-screen color correction (Saturation, Contrast, Gamma, Tint, Exposure).
+   - **Prism**: Chromatic aberration and prism distortion effects.
+   - **Scene Transitions**: Cinematic fade-to-black and loading screen overlays during scene changes.
+   - **Pause Effect**: Visual filters (grayscale, blur) and UI overlays applied when the game is paused.
+   - **Loading Screen**: Enhanced loading screen with hints, progress bars, and custom visuals.
+   - **Map Points**: Interactive markers or points of interest on the map.
 
 **Effect Dependency Graph**:
 - Example: Cloud shadow writes to a "shadow map" texture
@@ -411,4 +422,9 @@ Each effect:
    - ✅ Specular effect with custom PBR shader
 3. Document effect mask authoring workflow for artists
 4. Create example map with PBR masks (_Specular, _Normal, _Roughness) for testing
-5. Begin v0.3: Tweakpane UI integration for real-time parameter adjustment
+5. **Create UI Stubs for All Effects**:
+   - Create stub Effect classes for every effect listed in "Effect Categories"
+   - Define Tweakpane control schemas for each effect (placeholder controls)
+   - Register all effects with TweakpaneManager to visualize the full UI structure
+   - Verify scalability of the UI with 20+ effects
+6. Begin v0.3: Tweakpane UI integration for real-time parameter adjustment

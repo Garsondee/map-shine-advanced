@@ -93,6 +93,7 @@ export class ParameterValidator {
       }
 
       // Warn on extreme values
+      /* 
       if (paramDef.min !== undefined && paramDef.max !== undefined) {
         const range = paramDef.max - paramDef.min;
         const normalized = (value - paramDef.min) / range;
@@ -100,6 +101,7 @@ export class ParameterValidator {
           warnings.push(`Value near maximum (${(normalized * 100).toFixed(0)}%)`);
         }
       }
+      */
     }
 
     // Boolean validation

@@ -39,7 +39,8 @@ export class ParticleSystem extends EffectBase {
     /** @type {Object} */
     this.uniforms = {
       deltaTime: null,
-      time: null
+      time: null,
+      sceneBounds: null
     };
   }
 
@@ -114,6 +115,13 @@ export class ParticleSystem extends EffectBase {
       
       // Simulation is handled directly in the vertex shader via createParticleMaterial
       
+      // 7. Set initial scene bounds for clipping
+      if (this.uniforms.sceneBounds && typeof canvas !== 'undefined' && canvas.dimensions) {
+          const { sceneX, sceneY, sceneWidth, sceneHeight } = canvas.dimensions;
+          this.uniforms.sceneBounds.value.set(sceneX, sceneY, sceneWidth, sceneHeight);
+          log.info(`Set particle clipping bounds: x=${sceneX}, y=${sceneY}, w=${sceneWidth}, h=${sceneHeight}`);
+      }
+
       log.info('ParticleSystem GPU initialized successfully');
 
       // Expose for debugging
@@ -125,15 +133,25 @@ export class ParticleSystem extends EffectBase {
         const { EmitterManager } = await import('./EmitterManager.js');
         this.emitterManager = new EmitterManager();
         
+        let cx = 0, cy = 0, width = 1000, height = 1000;
+        
+        // Try to get dimensions from Foundry canvas
+        if (typeof canvas !== 'undefined' && canvas.dimensions) {
+            width = canvas.dimensions.width;
+            height = canvas.dimensions.height;
+            cx = width / 2;
+            cy = height / 2;
+        }
+
         // Add a "Rain/Magic" test emitter covering the scene
         this.emitterManager.addEmitter({
           type: 2, // Rain type (wide area)
-          x: 0, y: 0, z: 0,
-          rate: 5000, // High rate to ensure visibility
-          param1: 1000, // Spread width
-          param2: 1000  // Spread height
+          x: cx, y: cy, z: 3000, // Higher ceiling
+          rate: 50000, // Higher rate for larger area
+          param1: width * 1.5, // Spread width (1.5x to cover padding)
+          param2: height * 1.5  // Spread height
         });
-        log.info('Debug: Added global test emitter (Type 2, Rate 5000)');
+        log.info(`Debug: Added global test emitter at (${cx}, ${cy}) size ${width}x${height}`);
       }
 
     } catch (e) {

@@ -45,48 +45,56 @@ export class SpecularEffect extends EffectBase {
       textureStatus: 'Searching...',
       hasSpecularMask: false,
 
-      intensity: 0.5,           // Reduced from 2.0 to avoid overexposure
-      roughness: 0.3,
-      metallic: 0.0,
+      intensity: 0.7,           // Default shine intensity
+      roughness: 0.25,
       lightDirection: { x: 0.6, y: 0.4, z: 0.7 },
       lightColor: { r: 1.0, g: 1.0, b: 1.0 },
-      ambientIntensity: 0.2,
       
       // Multi-layer stripe system
       stripeEnabled: true,
-      stripeBlendMode: 0,       // 0=Add, 1=Multiply, 2=Screen, 3=Overlay
-      parallaxStrength: 1.0,    // Global parallax intensity multiplier
+      stripeBlendMode: 2,       // 0=Add, 1=Multiply, 2=Screen, 3=Overlay
+      parallaxStrength: 1.5,    // Global parallax intensity multiplier
+      stripeMaskThreshold: 0.35, // 0 = all mask, 1 = only brightest texels
       
       // Layer 1 - Primary stripes
       stripe1Enabled: true,
-      stripe1Frequency: 4.0,
-      stripe1Speed: 0.15,
-      stripe1Angle: 45.0,
-      stripe1Width: 0.4,
-      stripe1Intensity: 0.5,
+      stripe1Frequency: 12.0,
+      stripe1Speed: 0.02,
+      stripe1Angle: 115.0,
+      stripe1Width: 0.47,
+      stripe1Intensity: 1.81,
       stripe1Parallax: 0.0,     // Parallax offset (0 = no parallax)
+      stripe1Wave: 1.7,         // Stripe waviness amount
+      stripe1Gaps: 0.31,        // Stripe breakup / shiny spots
+      stripe1Softness: 3.17,    // Stripe edge softness (0=hard,5=very soft)
       
       // Layer 2 - Secondary stripes
-      stripe2Enabled: false,
-      stripe2Frequency: 8.0,
-      stripe2Speed: -0.1,       // Negative = opposite direction
-      stripe2Angle: 135.0,
-      stripe2Width: 0.3,
-      stripe2Intensity: 0.3,
-      stripe2Parallax: 0.5,
+      stripe2Enabled: true,
+      stripe2Frequency: 10.5,
+      stripe2Speed: -0.04,      // Negative = opposite direction
+      stripe2Angle: 111.0,
+      stripe2Width: 0.73,
+      stripe2Intensity: 1.49,
+      stripe2Parallax: 1.0,
+      stripe2Wave: 1.6,
+      stripe2Gaps: 0.5,
+      stripe2Softness: 3.93,
       
       // Layer 3 - Tertiary stripes
-      stripe3Enabled: false,
-      stripe3Frequency: 2.0,
-      stripe3Speed: 0.08,
-      stripe3Angle: 90.0,
-      stripe3Width: 0.5,
-      stripe3Intensity: 0.2,
+      stripe3Enabled: true,
+      stripe3Frequency: 11.5,
+      stripe3Speed: -0.01,
+      stripe3Angle: 162.0,
+      stripe3Width: 0.68,
+      stripe3Intensity: 1.38,
       stripe3Parallax: 1.0,
+      stripe3Wave: 1.1,
+      stripe3Gaps: 0.37,
+      stripe3Softness: 3.44,
 
       // Micro Sparkle
       sparkleEnabled: false,
-      sparkleIntensity: 0.8,
+      sparkleIntensity: 0.5,
       sparkleScale: 50.0,
       sparkleSpeed: 0.5
     };
@@ -133,14 +141,14 @@ export class SpecularEffect extends EffectBase {
           name: 'material',
           label: 'Material Properties',
           type: 'inline', // Controls shown directly (not in nested folder)
-          parameters: ['intensity', 'roughness', 'metallic', 'ambientIntensity']
+          parameters: ['intensity', 'roughness']
         },
         {
           name: 'stripe-settings',
           label: 'Stripe Settings',
           type: 'inline',
           separator: true, // Add separator before this group
-          parameters: ['stripeEnabled', 'stripeBlendMode', 'parallaxStrength']
+          parameters: ['stripeEnabled', 'stripeBlendMode', 'parallaxStrength', 'stripeMaskThreshold']
         },
         {
           name: 'layer1',
@@ -148,21 +156,21 @@ export class SpecularEffect extends EffectBase {
           type: 'folder', // Nested collapsible folder
           separator: true,
           expanded: false,
-          parameters: ['stripe1Enabled', 'stripe1Frequency', 'stripe1Speed', 'stripe1Angle', 'stripe1Width', 'stripe1Intensity', 'stripe1Parallax']
+          parameters: ['stripe1Enabled', 'stripe1Frequency', 'stripe1Speed', 'stripe1Angle', 'stripe1Width', 'stripe1Intensity', 'stripe1Parallax', 'stripe1Wave', 'stripe1Gaps', 'stripe1Softness']
         },
         {
           name: 'layer2',
           label: 'Layer 2',
           type: 'folder',
           expanded: false,
-          parameters: ['stripe2Enabled', 'stripe2Frequency', 'stripe2Speed', 'stripe2Angle', 'stripe2Width', 'stripe2Intensity', 'stripe2Parallax']
+          parameters: ['stripe2Enabled', 'stripe2Frequency', 'stripe2Speed', 'stripe2Angle', 'stripe2Width', 'stripe2Intensity', 'stripe2Parallax', 'stripe2Wave', 'stripe2Gaps', 'stripe2Softness']
         },
         {
           name: 'layer3',
           label: 'Layer 3',
           type: 'folder',
           expanded: false,
-          parameters: ['stripe3Enabled', 'stripe3Frequency', 'stripe3Speed', 'stripe3Angle', 'stripe3Width', 'stripe3Intensity', 'stripe3Parallax']
+          parameters: ['stripe3Enabled', 'stripe3Frequency', 'stripe3Speed', 'stripe3Angle', 'stripe3Width', 'stripe3Intensity', 'stripe3Parallax', 'stripe3Wave', 'stripe3Gaps', 'stripe3Softness']
         },
         {
           name: 'sparkle',
@@ -189,7 +197,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 2,
           step: 0.01,
-          default: 0.5,
+          default: 0.7,
           throttle: 100
         },
         roughness: {
@@ -198,27 +206,10 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.3,
+          default: 0.25,
           throttle: 100
         },
-        metallic: {
-          type: 'slider',
-          label: 'Metallic',
-          min: 0,
-          max: 1,
-          step: 0.01,
-          default: 0.0,
-          throttle: 100
-        },
-        ambientIntensity: {
-          type: 'slider',
-          label: 'Ambient Light',
-          min: 0,
-          max: 1,
-          step: 0.01,
-          default: 0.2,
-          throttle: 100
-        },
+        
         stripeEnabled: {
           type: 'boolean',
           label: 'Enable Stripes',
@@ -233,7 +224,16 @@ export class SpecularEffect extends EffectBase {
             'Screen': 2,
             'Overlay': 3
           },
-          default: 0
+          default: 2
+        },
+        stripeMaskThreshold: {
+          type: 'slider',
+          label: 'Stripe Brightness Threshold',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.35,
+          throttle: 100
         },
         parallaxStrength: {
           type: 'slider',
@@ -241,7 +241,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 2,
           step: 0.1,
-          default: 1.0,
+          default: 1.5,
           throttle: 100
         },
         stripe1Enabled: {
@@ -255,7 +255,7 @@ export class SpecularEffect extends EffectBase {
           min: 0.5,
           max: 20,
           step: 0.5,
-          default: 4.0,
+          default: 12.0,
           throttle: 100
         },
         stripe1Speed: {
@@ -264,7 +264,7 @@ export class SpecularEffect extends EffectBase {
           min: -1,
           max: 1,
           step: 0.01,
-          default: 0.15,
+          default: 0.02,
           throttle: 100
         },
         stripe1Angle: {
@@ -273,7 +273,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 360,
           step: 1,
-          default: 45,
+          default: 115,
           throttle: 100
         },
         stripe1Width: {
@@ -282,7 +282,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.4,
+          default: 0.47,
           throttle: 100
         },
         stripe1Intensity: {
@@ -291,7 +291,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 5,
           step: 0.01,
-          default: 0.5,
+          default: 1.81,
           throttle: 100
         },
         stripe1Parallax: {
@@ -303,10 +303,37 @@ export class SpecularEffect extends EffectBase {
           default: 0.0,
           throttle: 100
         },
+        stripe1Wave: {
+          type: 'slider',
+          label: 'Layer 1 Wave',
+          min: 0,
+          max: 2,
+          step: 0.1,
+          default: 1.7,
+          throttle: 100
+        },
+        stripe1Gaps: {
+          type: 'slider',
+          label: 'Layer 1 Gaps',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.31,
+          throttle: 100
+        },
+        stripe1Softness: {
+          type: 'slider',
+          label: 'Layer 1 Softness',
+          min: 0,
+          max: 5,
+          step: 0.01,
+          default: 3.17,
+          throttle: 100
+        },
         stripe2Enabled: {
           type: 'boolean',
           label: 'Layer 2 Enabled',
-          default: false
+          default: true
         },
         stripe2Frequency: {
           type: 'slider',
@@ -314,7 +341,7 @@ export class SpecularEffect extends EffectBase {
           min: 0.5,
           max: 20,
           step: 0.5,
-          default: 8.0,
+          default: 10.5,
           throttle: 100
         },
         stripe2Speed: {
@@ -323,7 +350,7 @@ export class SpecularEffect extends EffectBase {
           min: -1,
           max: 1,
           step: 0.01,
-          default: -0.1,
+          default: -0.04,
           throttle: 100
         },
         stripe2Angle: {
@@ -332,7 +359,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 360,
           step: 1,
-          default: 135,
+          default: 111,
           throttle: 100
         },
         stripe2Width: {
@@ -341,7 +368,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.3,
+          default: 0.73,
           throttle: 100
         },
         stripe2Intensity: {
@@ -350,7 +377,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 5,
           step: 0.01,
-          default: 0.3,
+          default: 1.49,
           throttle: 100
         },
         stripe2Parallax: {
@@ -359,13 +386,40 @@ export class SpecularEffect extends EffectBase {
           min: -2,
           max: 2,
           step: 0.1,
+          default: 1.0,
+          throttle: 100
+        },
+        stripe2Wave: {
+          type: 'slider',
+          label: 'Layer 2 Wave',
+          min: 0,
+          max: 2,
+          step: 0.1,
+          default: 1.6,
+          throttle: 100
+        },
+        stripe2Gaps: {
+          type: 'slider',
+          label: 'Layer 2 Gaps',
+          min: 0,
+          max: 1,
+          step: 0.01,
           default: 0.5,
+          throttle: 100
+        },
+        stripe2Softness: {
+          type: 'slider',
+          label: 'Layer 2 Softness',
+          min: 0,
+          max: 5,
+          step: 0.01,
+          default: 3.93,
           throttle: 100
         },
         stripe3Enabled: {
           type: 'boolean',
           label: 'Layer 3 Enabled',
-          default: false
+          default: true
         },
         stripe3Frequency: {
           type: 'slider',
@@ -373,7 +427,7 @@ export class SpecularEffect extends EffectBase {
           min: 0.5,
           max: 20,
           step: 0.5,
-          default: 2.0,
+          default: 11.5,
           throttle: 100
         },
         stripe3Speed: {
@@ -382,7 +436,7 @@ export class SpecularEffect extends EffectBase {
           min: -1,
           max: 1,
           step: 0.01,
-          default: 0.08,
+          default: -0.01,
           throttle: 100
         },
         stripe3Angle: {
@@ -391,7 +445,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 360,
           step: 1,
-          default: 90,
+          default: 162,
           throttle: 100
         },
         stripe3Width: {
@@ -400,7 +454,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.5,
+          default: 0.68,
           throttle: 100
         },
         stripe3Intensity: {
@@ -409,7 +463,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 5,
           step: 0.01,
-          default: 0.2,
+          default: 1.38,
           throttle: 100
         },
         stripe3Parallax: {
@@ -419,6 +473,33 @@ export class SpecularEffect extends EffectBase {
           max: 2,
           step: 0.1,
           default: 1.0,
+          throttle: 100
+        },
+        stripe3Wave: {
+          type: 'slider',
+          label: 'Layer 3 Wave',
+          min: 0,
+          max: 2,
+          step: 0.1,
+          default: 1.1,
+          throttle: 100
+        },
+        stripe3Gaps: {
+          type: 'slider',
+          label: 'Layer 3 Gaps',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.37,
+          throttle: 100
+        },
+        stripe3Softness: {
+          type: 'slider',
+          label: 'Layer 3 Softness',
+          min: 0,
+          max: 5,
+          step: 0.01,
+          default: 3.44,
           throttle: 100
         },
         sparkleEnabled: {
@@ -554,7 +635,6 @@ export class SpecularEffect extends EffectBase {
           this.params.lightColor.g,
           this.params.lightColor.b
         ) },
-        uAmbientIntensity: { value: this.params.ambientIntensity },
         
         // Camera
         uCameraPosition: { value: new THREE.Vector3() },
@@ -567,33 +647,43 @@ export class SpecularEffect extends EffectBase {
         uStripeEnabled: { value: this.params.stripeEnabled },
         uStripeBlendMode: { value: this.params.stripeBlendMode },
         uParallaxStrength: { value: this.params.parallaxStrength },
+        uStripeMaskThreshold: { value: this.params.stripeMaskThreshold },
         
         // Layer 1
-        uStripe1Enabled: { value: this.params.stripe1Enabled },
+        uStripe1Enabled:   { value: this.params.stripe1Enabled },
         uStripe1Frequency: { value: this.params.stripe1Frequency },
-        uStripe1Speed: { value: this.params.stripe1Speed },
-        uStripe1Angle: { value: this.params.stripe1Angle },
-        uStripe1Width: { value: this.params.stripe1Width },
+        uStripe1Speed:     { value: this.params.stripe1Speed },
+        uStripe1Angle:     { value: this.params.stripe1Angle },
+        uStripe1Width:     { value: this.params.stripe1Width },
         uStripe1Intensity: { value: this.params.stripe1Intensity },
-        uStripe1Parallax: { value: this.params.stripe1Parallax },
+        uStripe1Parallax:  { value: this.params.stripe1Parallax },
+        uStripe1Wave:      { value: this.params.stripe1Wave },
+        uStripe1Gaps:      { value: this.params.stripe1Gaps },
+        uStripe1Softness:  { value: this.params.stripe1Softness },
         
         // Layer 2
-        uStripe2Enabled: { value: this.params.stripe2Enabled },
+        uStripe2Enabled:   { value: this.params.stripe2Enabled },
         uStripe2Frequency: { value: this.params.stripe2Frequency },
-        uStripe2Speed: { value: this.params.stripe2Speed },
-        uStripe2Angle: { value: this.params.stripe2Angle },
-        uStripe2Width: { value: this.params.stripe2Width },
+        uStripe2Speed:     { value: this.params.stripe2Speed },
+        uStripe2Angle:     { value: this.params.stripe2Angle },
+        uStripe2Width:     { value: this.params.stripe2Width },
         uStripe2Intensity: { value: this.params.stripe2Intensity },
-        uStripe2Parallax: { value: this.params.stripe2Parallax },
+        uStripe2Parallax:  { value: this.params.stripe2Parallax },
+        uStripe2Wave:      { value: this.params.stripe2Wave },
+        uStripe2Gaps:      { value: this.params.stripe2Gaps },
+        uStripe2Softness:  { value: this.params.stripe2Softness },
         
         // Layer 3
-        uStripe3Enabled: { value: this.params.stripe3Enabled },
+        uStripe3Enabled:   { value: this.params.stripe3Enabled },
         uStripe3Frequency: { value: this.params.stripe3Frequency },
-        uStripe3Speed: { value: this.params.stripe3Speed },
-        uStripe3Angle: { value: this.params.stripe3Angle },
-        uStripe3Width: { value: this.params.stripe3Width },
+        uStripe3Speed:     { value: this.params.stripe3Speed },
+        uStripe3Angle:     { value: this.params.stripe3Angle },
+        uStripe3Width:     { value: this.params.stripe3Width },
         uStripe3Intensity: { value: this.params.stripe3Intensity },
-        uStripe3Parallax: { value: this.params.stripe3Parallax },
+        uStripe3Parallax:  { value: this.params.stripe3Parallax },
+        uStripe3Wave:      { value: this.params.stripe3Wave },
+        uStripe3Gaps:      { value: this.params.stripe3Gaps },
+        uStripe3Softness:  { value: this.params.stripe3Softness },
         
         // Micro Sparkle
         uSparkleEnabled: { value: this.params.sparkleEnabled },
@@ -633,8 +723,6 @@ export class SpecularEffect extends EffectBase {
     // Update uniforms from parameters
     this.material.uniforms.uSpecularIntensity.value = this.params.intensity;
     this.material.uniforms.uRoughness.value = this.params.roughness;
-    this.material.uniforms.uMetallic.value = this.params.metallic;
-    this.material.uniforms.uAmbientIntensity.value = this.params.ambientIntensity;
     
     // Update light direction
     this.material.uniforms.uLightDirection.value.set(
@@ -654,6 +742,7 @@ export class SpecularEffect extends EffectBase {
     this.material.uniforms.uStripeEnabled.value = this.params.stripeEnabled;
     this.material.uniforms.uStripeBlendMode.value = this.params.stripeBlendMode;
     this.material.uniforms.uParallaxStrength.value = this.params.parallaxStrength;
+    this.material.uniforms.uStripeMaskThreshold.value = this.params.stripeMaskThreshold;
     
     // Update sparkle parameters
     this.material.uniforms.uSparkleEnabled.value = this.params.sparkleEnabled;
@@ -662,31 +751,40 @@ export class SpecularEffect extends EffectBase {
     this.material.uniforms.uSparkleSpeed.value = this.params.sparkleSpeed;
     
     // Layer 1
-    this.material.uniforms.uStripe1Enabled.value = this.params.stripe1Enabled;
+    this.material.uniforms.uStripe1Enabled.value   = this.params.stripe1Enabled;
     this.material.uniforms.uStripe1Frequency.value = this.params.stripe1Frequency;
-    this.material.uniforms.uStripe1Speed.value = this.params.stripe1Speed;
-    this.material.uniforms.uStripe1Angle.value = this.params.stripe1Angle;
-    this.material.uniforms.uStripe1Width.value = this.params.stripe1Width;
+    this.material.uniforms.uStripe1Speed.value     = this.params.stripe1Speed;
+    this.material.uniforms.uStripe1Angle.value     = this.params.stripe1Angle;
+    this.material.uniforms.uStripe1Width.value     = this.params.stripe1Width;
     this.material.uniforms.uStripe1Intensity.value = this.params.stripe1Intensity;
-    this.material.uniforms.uStripe1Parallax.value = this.params.stripe1Parallax;
+    this.material.uniforms.uStripe1Parallax.value  = this.params.stripe1Parallax;
+    this.material.uniforms.uStripe1Wave.value      = this.params.stripe1Wave;
+    this.material.uniforms.uStripe1Gaps.value      = this.params.stripe1Gaps;
+    this.material.uniforms.uStripe1Softness.value  = this.params.stripe1Softness;
     
     // Layer 2
-    this.material.uniforms.uStripe2Enabled.value = this.params.stripe2Enabled;
+    this.material.uniforms.uStripe2Enabled.value   = this.params.stripe2Enabled;
     this.material.uniforms.uStripe2Frequency.value = this.params.stripe2Frequency;
-    this.material.uniforms.uStripe2Speed.value = this.params.stripe2Speed;
-    this.material.uniforms.uStripe2Angle.value = this.params.stripe2Angle;
-    this.material.uniforms.uStripe2Width.value = this.params.stripe2Width;
+    this.material.uniforms.uStripe2Speed.value     = this.params.stripe2Speed;
+    this.material.uniforms.uStripe2Angle.value     = this.params.stripe2Angle;
+    this.material.uniforms.uStripe2Width.value     = this.params.stripe2Width;
     this.material.uniforms.uStripe2Intensity.value = this.params.stripe2Intensity;
-    this.material.uniforms.uStripe2Parallax.value = this.params.stripe2Parallax;
+    this.material.uniforms.uStripe2Parallax.value  = this.params.stripe2Parallax;
+    this.material.uniforms.uStripe2Wave.value      = this.params.stripe2Wave;
+    this.material.uniforms.uStripe2Gaps.value      = this.params.stripe2Gaps;
+    this.material.uniforms.uStripe2Softness.value  = this.params.stripe2Softness;
     
     // Layer 3
-    this.material.uniforms.uStripe3Enabled.value = this.params.stripe3Enabled;
+    this.material.uniforms.uStripe3Enabled.value   = this.params.stripe3Enabled;
     this.material.uniforms.uStripe3Frequency.value = this.params.stripe3Frequency;
-    this.material.uniforms.uStripe3Speed.value = this.params.stripe3Speed;
-    this.material.uniforms.uStripe3Angle.value = this.params.stripe3Angle;
-    this.material.uniforms.uStripe3Width.value = this.params.stripe3Width;
+    this.material.uniforms.uStripe3Speed.value     = this.params.stripe3Speed;
+    this.material.uniforms.uStripe3Angle.value     = this.params.stripe3Angle;
+    this.material.uniforms.uStripe3Width.value     = this.params.stripe3Width;
     this.material.uniforms.uStripe3Intensity.value = this.params.stripe3Intensity;
-    this.material.uniforms.uStripe3Parallax.value = this.params.stripe3Parallax;
+    this.material.uniforms.uStripe3Parallax.value  = this.params.stripe3Parallax;
+    this.material.uniforms.uStripe3Wave.value      = this.params.stripe3Wave;
+    this.material.uniforms.uStripe3Gaps.value      = this.params.stripe3Gaps;
+    this.material.uniforms.uStripe3Softness.value  = this.params.stripe3Softness;
     
     // Update Foundry darkness level
     if (canvas?.scene?.environment?.darknessLevel !== undefined) {
@@ -821,11 +919,9 @@ export class SpecularEffect extends EffectBase {
       
       uniform float uSpecularIntensity;
       uniform float uRoughness;
-      uniform float uMetallic;
       
       uniform vec3 uLightDirection;
       uniform vec3 uLightColor;
-      uniform float uAmbientIntensity;
       uniform vec3 uCameraPosition;
       uniform vec2 uCameraOffset; // Orthographic camera pan offset
       
@@ -836,33 +932,43 @@ export class SpecularEffect extends EffectBase {
       uniform bool uStripeEnabled;
       uniform float uStripeBlendMode;
       uniform float uParallaxStrength;
+      uniform float uStripeMaskThreshold;
       
       // Layer 1
-      uniform bool uStripe1Enabled;
+      uniform bool  uStripe1Enabled;
       uniform float uStripe1Frequency;
       uniform float uStripe1Speed;
       uniform float uStripe1Angle;
       uniform float uStripe1Width;
       uniform float uStripe1Intensity;
       uniform float uStripe1Parallax;
+      uniform float uStripe1Wave;
+      uniform float uStripe1Gaps;
+      uniform float uStripe1Softness;
       
       // Layer 2
-      uniform bool uStripe2Enabled;
+      uniform bool  uStripe2Enabled;
       uniform float uStripe2Frequency;
       uniform float uStripe2Speed;
       uniform float uStripe2Angle;
       uniform float uStripe2Width;
       uniform float uStripe2Intensity;
       uniform float uStripe2Parallax;
+      uniform float uStripe2Wave;
+      uniform float uStripe2Gaps;
+      uniform float uStripe2Softness;
       
       // Layer 3
-      uniform bool uStripe3Enabled;
+      uniform bool  uStripe3Enabled;
       uniform float uStripe3Frequency;
       uniform float uStripe3Speed;
       uniform float uStripe3Angle;
       uniform float uStripe3Width;
       uniform float uStripe3Intensity;
       uniform float uStripe3Parallax;
+      uniform float uStripe3Wave;
+      uniform float uStripe3Gaps;
+      uniform float uStripe3Softness;
       
       // Micro Sparkle
       uniform bool uSparkleEnabled;
@@ -905,50 +1011,33 @@ export class SpecularEffect extends EffectBase {
         
         return blink * rnd;
       }
-      
-      // RGB to HSV conversion
-      vec3 rgb2hsv(vec3 c) {
-        float cMax = max(c.r, max(c.g, c.b));
-        float cMin = min(c.r, min(c.g, c.b));
-        float delta = cMax - cMin;
-        
-        float h = 0.0;
-        if (delta > 0.00001) {
-          if (cMax == c.r) {
-            h = mod(((c.g - c.b) / delta), 6.0);
-          } else if (cMax == c.g) {
-            h = ((c.b - c.r) / delta) + 2.0;
-          } else {
-            h = ((c.r - c.g) / delta) + 4.0;
-          }
-          h /= 6.0;
-          if (h < 0.0) h += 1.0;
-        }
-        
-        float s = cMax > 0.00001 ? (delta / cMax) : 0.0;
-        float v = cMax;
-        
-        return vec3(h, s, v);
-      }
-      
-      // HSV to RGB conversion
-      vec3 hsv2rgb(vec3 c) {
-        float h = c.x * 6.0;
-        float s = c.y;
-        float v = c.z;
-        
-        float i = floor(h);
-        float f = h - i;
-        float p = v * (1.0 - s);
-        float q = v * (1.0 - s * f);
-        float t = v * (1.0 - s * (1.0 - f));
-        
-        if (i < 1.0) return vec3(v, t, p);
-        else if (i < 2.0) return vec3(q, v, p);
-        else if (i < 3.0) return vec3(p, v, t);
-        else if (i < 4.0) return vec3(p, q, v);
-        else if (i < 5.0) return vec3(t, p, v);
-        else return vec3(v, p, q);
+
+      // Simplex 2D noise for stripe distortion and gaps
+      vec3 permute(vec3 x) { return mod(((x*34.0)+1.0)*x, 289.0); }
+
+      float snoise(vec2 v){
+        const vec4 C = vec4(0.211324865405187, 0.366025403784439,
+                            -0.577350269189626, 0.024390243902439);
+        vec2 i  = floor(v + dot(v, C.yy));
+        vec2 x0 = v - i + dot(i, C.xx);
+        vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+        vec4 x12 = x0.xyxy + C.xxzz;
+        x12.xy -= i1;
+        i = mod(i, 289.0);
+        vec3 p = permute( permute( i.y + vec3(0.0, i1.y, 1.0 ))
+                        + i.x + vec3(0.0, i1.x, 1.0 ));
+        vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+        m *= m;
+        m *= m;
+        vec3 x = 2.0 * fract(p * C.www) - 1.0;
+        vec3 h = abs(x) - 0.5;
+        vec3 ox = floor(x + 0.5);
+        vec3 a0 = x - ox;
+        m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
+        vec3 g;
+        g.x  = a0.x  * x0.x  + h.x  * x0.y;
+        g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+        return 130.0 * dot(m, g);
       }
       
       /**
@@ -974,7 +1063,10 @@ export class SpecularEffect extends EffectBase {
         float angle, 
         float width,
         float parallaxDepth,
-        float parallaxStrength
+        float parallaxStrength,
+        float wave,
+        float gaps,
+        float softness
       ) {
         // Apply camera-based parallax offset
         // Parallax creates the illusion of depth by offsetting UV based on camera position
@@ -990,6 +1082,12 @@ export class SpecularEffect extends EffectBase {
           vec2 offset = uCameraOffset * parallaxDepth * parallaxStrength * 0.0005;
           parallaxUv -= offset;
         }
+
+        // Distort UVs for waviness
+        if (wave > 0.0) {
+          float waveNoise = snoise(parallaxUv * 2.0 + time * 0.1);
+          parallaxUv += waveNoise * wave * 0.05;
+        }
         
         // Rotate UV based on angle
         float rad = radians(angle);
@@ -1004,15 +1102,40 @@ export class SpecularEffect extends EffectBase {
         float pos = rotUv.x * frequency + time * speed;
         float stripe = fract(pos);
         
-        // Add subtle noise variation to width for organic feel
-        float noiseVal = noise1D(floor(pos)) * 0.5 + 0.5;
-        float widthMod = width * (0.8 + noiseVal * 0.4);
+        // Map UI width (0-1) to an actual half-band size (0.02-0.48)
+        // - width = 0   -> very thin stripe
+        // - width = 1   -> very thick stripe (almost full period)
+        float w = clamp(width, 0.0, 1.0);
+        float bandHalfWidth = mix(0.02, 0.48, w);
         
-        // Create stripe with smooth edges using dual smoothstep
-        // This creates a band that's bright in the middle and fades at edges
-        float edgeSoftness = 0.1;
-        float stripePattern = smoothstep(widthMod, widthMod + edgeSoftness, stripe) * 
-                              smoothstep(1.0 - widthMod, 1.0 - widthMod - edgeSoftness, stripe);
+        // Optional subtle jitter so all stripes aren't identical, but
+        // small enough to keep the control intuitive
+        float noiseVal = noise1D(floor(pos));
+        bandHalfWidth *= (0.95 + 0.1 * noiseVal);
+        
+        // Distance from the center of the period (0.5)
+        float d = abs(stripe - 0.5);
+        
+        // Soft edge size driven by softness (0=hard,1=very soft)
+        float s = clamp(softness, 0.0, 1.0);
+        float edgeSoftness = mix(0.005, 0.18, s);
+        float innerRadius = bandHalfWidth - edgeSoftness;
+        innerRadius = max(innerRadius, 0.0);
+        
+        // Stripe value = 1 in the middle of the band, falling to 0 at edges
+        float stripePattern = smoothstep(bandHalfWidth, innerRadius, d);
+
+        // Subtle temporal pulse so stripes are not static
+        float pulse = 0.9 + 0.1 * sin(time * 0.7 + frequency * 1.23);
+        stripePattern *= pulse;
+
+        // Apply gaps to break stripes into shiny spots
+        if (gaps > 0.0) {
+          float gapNoise = snoise(rotUv * 5.0 + time * 0.2);
+          float normNoise = gapNoise * 0.5 + 0.5; // 0..1
+          float gapMask = smoothstep(gaps, gaps + 0.2, normNoise);
+          stripePattern *= gapMask;
+        }
         
         return stripePattern;
       }
@@ -1073,7 +1196,8 @@ export class SpecularEffect extends EffectBase {
             layer1 = generateStripeLayer(
               vUv, vWorldPosition, uCameraPosition, uTime, 
               uStripe1Frequency, uStripe1Speed, uStripe1Angle, 
-              uStripe1Width, uStripe1Parallax, uParallaxStrength
+              uStripe1Width, uStripe1Parallax, uParallaxStrength,
+              uStripe1Wave, uStripe1Gaps, uStripe1Softness
             ) * uStripe1Intensity;
           }
           
@@ -1081,7 +1205,8 @@ export class SpecularEffect extends EffectBase {
             layer2 = generateStripeLayer(
               vUv, vWorldPosition, uCameraPosition, uTime, 
               uStripe2Frequency, uStripe2Speed, uStripe2Angle, 
-              uStripe2Width, uStripe2Parallax, uParallaxStrength
+              uStripe2Width, uStripe2Parallax, uParallaxStrength,
+              uStripe2Wave, uStripe2Gaps, uStripe2Softness
             ) * uStripe2Intensity;
           }
           
@@ -1089,7 +1214,8 @@ export class SpecularEffect extends EffectBase {
             layer3 = generateStripeLayer(
               vUv, vWorldPosition, uCameraPosition, uTime, 
               uStripe3Frequency, uStripe3Speed, uStripe3Angle, 
-              uStripe3Width, uStripe3Parallax, uParallaxStrength
+              uStripe3Width, uStripe3Parallax, uParallaxStrength,
+              uStripe3Wave, uStripe3Gaps, uStripe3Softness
             ) * uStripe3Intensity;
           }
           
@@ -1119,6 +1245,14 @@ export class SpecularEffect extends EffectBase {
         
         // Add sparkles to the contribution
         float totalModulator = stripeContribution + (sparkleVal * uSparkleIntensity);
+
+        // Global stripe brightness threshold: only allow shine on the
+        // brightest parts of the specular mask. 0 = full mask, 1 = only
+        // near-white texels.
+        if (uStripeMaskThreshold > 0.0) {
+          float thresholdMask = smoothstep(uStripeMaskThreshold, 1.0, specularStrength);
+          totalModulator *= thresholdMask;
+        }
         
         // For 2.5D top-down: specular mask directly defines shine areas
         // The colored mask defines WHERE and WHAT COLOR things shine
@@ -1136,24 +1270,8 @@ export class SpecularEffect extends EffectBase {
         vec3 litAlbedo = albedo.rgb * albedoBrightness;
         vec3 litSpecular = specularColor * specularBrightness;
 
-        // Use specular energy to boost both brightness (value) and saturation
-        float specularEnergy = dot(litSpecular, vec3(0.299, 0.587, 0.114));
-        
-        // Convert base to HSV so we can push V and S together
-        vec3 baseHsv = rgb2hsv(litAlbedo);
-        
-        // Scale factor tuned so even strong specular doesn't immediately clip
-        float boost = specularEnergy;
-        float saturationBoost = boost * 0.5; // Saturation grows more slowly than brightness
-        float valueBoost = boost;
-        
-        baseHsv.y = clamp(baseHsv.y + saturationBoost, 0.0, 1.0);
-        baseHsv.z = clamp(baseHsv.z + valueBoost, 0.0, 1.0);
-        
-        vec3 boostedBase = hsv2rgb(baseHsv);
-        
-        // Add a reduced raw specular term for crisp highlights without washing out colour
-        vec3 finalColor = boostedBase + litSpecular * 0.25;
+        // Simple additive composition: base + specular
+        vec3 finalColor = litAlbedo + litSpecular;
         
         // Debug visualization (uncomment to see components)
         // finalColor = vec3(stripeMask); // Show stripe pattern only
@@ -1161,7 +1279,7 @@ export class SpecularEffect extends EffectBase {
         // finalColor = vec3(layer2); // Show layer 2 only
         // finalColor = vec3(layer3); // Show layer 3 only
         // finalColor = specularMask.rgb; // Show specular mask only
-        
+
         gl_FragColor = vec4(finalColor, albedo.a);
       }
     `;

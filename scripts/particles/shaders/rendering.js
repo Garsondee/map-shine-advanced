@@ -25,7 +25,8 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
       uEmitterTexSize: { value: new THREE.Vector2(emitterTexWidth, 1) },
       uParticlesPerEmitter: { value: particlesPerEmitter },
       uEmitterCount: { value: buffers.emitterCount },
-      uParticleTexture: { value: texture }
+      uParticleTexture: { value: texture },
+      uSceneBounds: { value: new THREE.Vector4(0, 0, 10000, 10000) } // x, y, w, h
     },
     vertexShader: `
       uniform float uTime;
@@ -33,6 +34,7 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
       uniform vec2 uEmitterTexSize;
       uniform float uParticlesPerEmitter;
       uniform float uEmitterCount;
+      uniform vec4 uSceneBounds;
 
       attribute float index;
 
@@ -61,6 +63,8 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
         float emZ = readEmitterFloat(baseOffset + 2);
         float emType = readEmitterFloat(baseOffset + 3);
         float emRate = readEmitterFloat(baseOffset + 4);
+        float emParam1 = readEmitterFloat(baseOffset + 5);
+        float emParam2 = readEmitterFloat(baseOffset + 6);
 
         // Local life cycle
         float randSeed = hash(idx);
@@ -96,10 +100,13 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
           size = 0.5 + lifeProgress;
         } else if (emType == 2.0) {
           // RAIN
-          vec3 fall = vec3(0.0, 0.0, -1.0) * (localTime * 20.0);
-          vec3 startHeight = vec3(0.0, 0.0, 4.0);
-          vec3 area = vec3(spread * 50.0, spreadY * 50.0, 0.0);
-          pos = vec3(emX, emY, emZ) + startHeight + area + fall;
+          vec3 fall = vec3(0.0, 0.0, -1.0) * (localTime * 1500.0);
+          
+          float width = (emParam1 > 0.0) ? emParam1 : 500.0;
+          float height = (emParam2 > 0.0) ? emParam2 : 500.0;
+          
+          vec3 area = vec3(spread * width * 0.5, spreadY * height * 0.5, 0.0);
+          pos = vec3(emX, emY, emZ) + area + fall;
 
           color = vec4(0.6, 0.7, 1.0, 0.6);
           size = 0.5;
@@ -119,14 +126,27 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
         float isActive = step(0.0, emRate - 0.0001);
         float fadeIn = clamp(lifeProgress * 10.0, 0.0, 1.0);
         float fadeOut = clamp((1.0 - lifeProgress) * 5.0, 0.0, 1.0);
-        float alpha = fadeIn * fadeOut * isActive;
+        
+        // Clipping: Check if inside scene bounds
+        float inBoundsX = step(uSceneBounds.x, pos.x) * step(pos.x, uSceneBounds.x + uSceneBounds.z);
+        float inBoundsY = step(uSceneBounds.y, pos.y) * step(pos.y, uSceneBounds.y + uSceneBounds.w);
+        float inBounds = inBoundsX * inBoundsY;
+
+        float alpha = fadeIn * fadeOut * isActive * inBounds;
 
         vColor = color;
         vAlpha = alpha;
 
         vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
         gl_Position = projectionMatrix * mvPosition;
-        gl_PointSize = size * 50.0;
+
+        // Depth-aware point sizing so particles scale with zoom like world objects.
+        // Reference depth matches the default camera distance in SceneComposer (10000).
+        float depth = -mvPosition.z;
+        float referenceDepth = 10000.0;
+        float depthScale = referenceDepth / max(depth, 1.0);
+
+        gl_PointSize = size * 50.0 * depthScale;
       }
     `,
     fragmentShader: `
@@ -154,6 +174,7 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
   if (uniforms) {
     uniforms.time = material.uniforms.uTime;
     uniforms.deltaTime = material.uniforms.uDeltaTime;
+    uniforms.sceneBounds = material.uniforms.uSceneBounds;
   }
 
   return material;

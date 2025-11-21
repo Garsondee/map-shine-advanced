@@ -20,6 +20,7 @@ const EFFECT_MASKS = {
   // fire: { suffix: '_Fire', required: false, description: 'Fire effect mask' },
   // outdoors: { suffix: '_Outdoors', required: false, description: 'Indoor/outdoor area mask' },
   iridescence: { suffix: '_Iridescence', required: false, description: 'Iridescence effect mask' },
+  prism: { suffix: '_Prism', required: false, description: 'Prism/refraction mask' },
   // water: { suffix: '_Water', required: false, description: 'Water surface mask' },
   // emissive: { suffix: '_Emissive', required: false, description: 'Self-illumination mask' }
 };

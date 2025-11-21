@@ -48,6 +48,15 @@ export class EffectComposer {
     /** @type {TimeManager} - Centralized time management */
     this.timeManager = new TimeManager();
     
+    // Explicitly enable EXT_float_blend if available to suppress warnings
+    try {
+      if (renderer.extensions) {
+        renderer.extensions.get('EXT_float_blend');
+      }
+    } catch (e) {
+      // Ignore if extension not supported
+    }
+    
     log.info('EffectComposer created');
   }
 
@@ -257,23 +266,60 @@ export class EffectComposer {
     if (!usePostProcessing) return;
 
     // PASS 2: POST-PROCESSING ON SCENE TEXTURE
-    const inputTexture = this.sceneRenderTarget.texture;
+    // We use a ping-pong approach:
+    // Input starts as sceneRenderTarget.
+    // We flip between post_1 and post_2 buffers.
+    // The last effect renders to screen (null).
 
-    // Switch back to the default framebuffer (screen)
-    this.renderer.setRenderTarget(null);
+    let inputBuffer = this.sceneRenderTarget;
+    let outputBuffer = this.getRenderTarget('post_1', inputBuffer.width, inputBuffer.height, false);
+    
+    // Ensure secondary buffer exists if we have multiple effects
+    const pingPongBuffer = this.getRenderTarget('post_2', inputBuffer.width, inputBuffer.height, false);
 
-    for (const effect of postEffects) {
+    for (let i = 0; i < postEffects.length; i++) {
+      const effect = postEffects[i];
+      const isLast = i === postEffects.length - 1;
+      
+      // Determine output target
+      const currentOutput = isLast ? null : outputBuffer;
+      
       try {
         // Update effect state with time info
         effect.update(timeInfo);
 
-        // Provide scene color texture if effect supports it
+        // Configure effect inputs/outputs
         if (typeof effect.setInputTexture === 'function') {
-          effect.setInputTexture(inputTexture);
+          effect.setInputTexture(inputBuffer.texture);
+        }
+        
+        if (typeof effect.setRenderToScreen === 'function') {
+          effect.setRenderToScreen(isLast);
+        }
+        
+        // Some complex passes (like Bloom) need explicit buffer references
+        if (typeof effect.setBuffers === 'function') {
+          effect.setBuffers(inputBuffer, currentOutput);
         }
 
-        // Let the effect render its full-screen pass (or chained pass)
+        // Set the render target for standard effects
+        // (Complex effects might override this internally, which is fine)
+        this.renderer.setRenderTarget(currentOutput);
+        // Clear if not rendering to screen (screen clearing is handled by Foundry/browser usually, or we overwrite)
+        if (currentOutput) {
+          this.renderer.clear();
+        }
+
+        // Let the effect render its full-screen pass
         effect.render(this.renderer, this.scene, this.camera);
+
+        // Ping-pong swap for next iteration
+        if (!isLast) {
+          inputBuffer = outputBuffer;
+          outputBuffer = (inputBuffer === this.getRenderTarget('post_1')) 
+            ? pingPongBuffer 
+            : this.getRenderTarget('post_1');
+        }
 
       } catch (error) {
         log.error(`Post-processing effect error (${effect.id}):`, error);

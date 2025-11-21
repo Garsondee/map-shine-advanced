@@ -12,6 +12,9 @@ import { EffectComposer } from '../effects/EffectComposer.js';
 import { SpecularEffect } from '../effects/SpecularEffect.js';
 import { IridescenceEffect } from '../effects/IridescenceEffect.js';
 import { ColorCorrectionEffect } from '../effects/ColorCorrectionEffect.js';
+import { AsciiEffect } from '../effects/AsciiEffect.js';
+import { BloomEffect } from '../effects/BloomEffect.js';
+import { PrismEffect } from '../effects/PrismEffect.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import {
   CloudShadowsEffect,
@@ -37,7 +40,6 @@ import {
   MetallicGlintsEffect,
   SmellyFliesEffect,
   PostProcessingEffect,
-  PrismEffect,
   SceneTransitionsEffect,
   PauseEffect,
   LoadingScreenEffect,
@@ -293,14 +295,27 @@ async function createThreeCanvas(scene) {
     const colorCorrectionEffect = new ColorCorrectionEffect();
     effectComposer.registerEffect(colorCorrectionEffect);
     
-    // Step 3.3: Register Particle System (WebGPU/WebGL2)
+    // Step 3.3: Register ASCII Effect (Post-Processing)
+    const asciiEffect = new AsciiEffect();
+    effectComposer.registerEffect(asciiEffect);
+    
+    // Step 3.4: Register Particle System (WebGPU/WebGL2)
     const particleSystem = new ParticleSystem();
     effectComposer.registerEffect(particleSystem);
+
+    // Step 3.5: Register Prism Effect
+    const prismEffect = new PrismEffect();
+    effectComposer.registerEffect(prismEffect);
+
+    // Step 3.6: Register Bloom Effect
+    const bloomEffect = new BloomEffect();
+    effectComposer.registerEffect(bloomEffect);
 
     // Provide the base mesh and asset bundle to the effect
     const basePlane = sceneComposer.getBasePlane();
     specularEffect.setBaseMesh(basePlane, bundle);
     iridescenceEffect.setBaseMesh(basePlane, bundle);
+    prismEffect.setBaseMesh(basePlane, bundle);
 
     // Step 3b: Initialize grid renderer
     gridRenderer = new GridRenderer(threeScene);
@@ -357,7 +372,10 @@ async function createThreeCanvas(scene) {
     mapShine.effectComposer = effectComposer;
     mapShine.specularEffect = specularEffect;
     mapShine.iridescenceEffect = iridescenceEffect;
+    mapShine.prismEffect = prismEffect;
+    mapShine.bloomEffect = bloomEffect;
     mapShine.colorCorrectionEffect = colorCorrectionEffect;
+    mapShine.asciiEffect = asciiEffect;
     mapShine.cameraController = cameraController;
     mapShine.tokenManager = tokenManager; // NEW: Expose token manager for diagnostics
     mapShine.tileManager = tileManager; // NEW: Expose tile manager for diagnostics
@@ -380,7 +398,7 @@ async function createThreeCanvas(scene) {
 
     // Initialize Tweakpane UI
     try {
-      await initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect);
+      await initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, bloomEffect);
     } catch (e) {
       log.error('Failed to initialize UI:', e);
     }
@@ -396,9 +414,12 @@ async function createThreeCanvas(scene) {
  * @param {SpecularEffect} specularEffect - The specular effect instance
  * @param {IridescenceEffect} iridescenceEffect - The iridescence effect instance
  * @param {ColorCorrectionEffect} colorCorrectionEffect - The color correction effect instance
+ * @param {AsciiEffect} asciiEffect - The ASCII effect instance
+ * @param {PrismEffect} prismEffect - The prism effect instance
+ * @param {BloomEffect} bloomEffect - The bloom effect instance
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, bloomEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -488,6 +509,63 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     uiManager.updateEffectiveState('specular');
   }
 
+  // --- Prism Settings ---
+  if (prismEffect) {
+    const prismSchema = PrismEffect.getControlSchema();
+    
+    const onPrismUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        prismEffect.enabled = value;
+        log.debug(`Prism effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (prismEffect.params[paramId] !== undefined) {
+        prismEffect.params[paramId] = value;
+        log.debug(`Prism.${paramId} = ${value}`);
+      }
+    };
+
+    uiManager.registerEffect(
+      'prism',
+      'Prism / Refraction',
+      prismSchema,
+      onPrismUpdate,
+      'surface'
+    );
+
+    // Sync status
+    if (uiManager.effectFolders['prism']) {
+      const folderData = uiManager.effectFolders['prism'];
+      folderData.params.textureStatus = prismEffect.params.textureStatus;
+      
+      if (folderData.bindings.textureStatus) {
+        folderData.bindings.textureStatus.refresh();
+      }
+      uiManager.updateEffectiveState('prism');
+    }
+  }
+
+  // --- Bloom Settings ---
+  if (bloomEffect) {
+    const bloomSchema = BloomEffect.getControlSchema();
+    
+    const onBloomUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        bloomEffect.enabled = value;
+        log.debug(`Bloom effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (bloomEffect.params[paramId] !== undefined) {
+        bloomEffect.params[paramId] = value;
+        log.debug(`Bloom.${paramId} = ${value}`);
+      }
+    };
+
+    uiManager.registerEffect(
+      'bloom',
+      'Bloom (Glow)',
+      bloomSchema,
+      onBloomUpdate,
+      'global'
+    );
+  }
+
   // --- Grid Settings ---
   if (gridRenderer) {
     const gridSchema = GridRenderer.getControlSchema();
@@ -532,6 +610,30 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     log.info('Color correction effect wired to UI');
   }
 
+  // --- ASCII Effect ---
+  if (asciiEffect) {
+    const asciiSchema = AsciiEffect.getControlSchema();
+    
+    const onAsciiUpdate = (effectId, paramId, value) => {
+       if (paramId === 'enabled' || paramId === 'masterEnabled') {
+         asciiEffect.enabled = value;
+         log.debug(`Ascii effect ${value ? 'enabled' : 'disabled'}`);
+       } else {
+         asciiEffect.params[paramId] = value;
+         // Params are read in update() loop
+       }
+    };
+    
+    uiManager.registerEffect(
+      'ascii',
+      'ASCII Art',
+      asciiSchema,
+      onAsciiUpdate,
+      'global'
+    );
+    log.info('ASCII effect wired to UI');
+  }
+
   // --- Stub Effects ---
   // UI-only placeholders for planned effects; these do not yet affect rendering
   const stubEffectDefs = [
@@ -567,7 +669,6 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
 
     // Global & UI Effects
     // { id: 'post-processing',    name: 'Post-Processing',      Class: PostProcessingEffect,    categoryId: 'global' }, // Replaced by real ColorCorrectionEffect
-    { id: 'prism',              name: 'Prism',                Class: PrismEffect,             categoryId: 'global' },
     { id: 'scene-transitions',  name: 'Scene Transitions',    Class: SceneTransitionsEffect,  categoryId: 'global' },
     { id: 'pause',              name: 'Pause Effect',         Class: PauseEffect,             categoryId: 'global' },
     { id: 'loading-screen',     name: 'Loading Screen',       Class: LoadingScreenEffect,     categoryId: 'global' },

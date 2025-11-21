@@ -90,6 +90,7 @@ export class ColorCorrectionEffect extends EffectBase {
         }
       ],
       parameters: {
+        enabled: { type: 'boolean', default: true, hidden: true },
         exposure: { type: 'slider', min: 0, max: 5, step: 0.01, default: 1.0 },
         temperature: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
         tint: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },

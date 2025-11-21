@@ -97,7 +97,6 @@ export class SmellyFliesEffect extends StubEffect { constructor() { super('smell
 // --- Global & UI Effects ---
 
 export class PostProcessingEffect extends StubEffect { constructor() { super('post-processing', 'Post-Processing', 'global'); } }
-export class PrismEffect extends StubEffect { constructor() { super('prism', 'Prism', 'global'); } }
 export class SceneTransitionsEffect extends StubEffect { constructor() { super('scene-transitions', 'Scene Transitions', 'global'); } }
 export class PauseEffect extends StubEffect { constructor() { super('pause', 'Pause Effect', 'global'); } }
 export class LoadingScreenEffect extends StubEffect { constructor() { super('loading-screen', 'Loading Screen', 'global'); } }

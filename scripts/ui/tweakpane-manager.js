@@ -510,6 +510,15 @@ export class TweakpaneManager {
     // Build controls from schema
     this.buildEffectControls(effectId, folder, schema, updateCallback, validatedParams);
 
+    // Push initial parameter values into the effect so it starts in sync
+    const effectData = this.effectFolders[effectId];
+    const initialCallback = this.effectCallbacks.get(effectId) || updateCallback;
+    if (initialCallback && effectData && effectData.params) {
+      for (const [paramId, value] of Object.entries(effectData.params)) {
+        initialCallback(effectId, paramId, value);
+      }
+    }
+
     this.updateEffectiveState(effectId);
     this.updateControlStates(effectId);
 

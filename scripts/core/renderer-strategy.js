@@ -9,7 +9,7 @@ const log = createLogger('Renderer');
 
 /**
  * Create and initialize renderer based on detected capabilities
- * Uses tiered fallback: WebGPU → WebGL2 → WebGL1
+ * Uses tiered fallback: WebGL2 → WebGL1
  * @param {*} THREE - three.js module
  * @param {GPUCapabilities} capabilities - Detected GPU capabilities
  * @returns {Promise<RendererResult>} Initialized renderer and type
@@ -19,20 +19,8 @@ export async function create(THREE, capabilities) {
   let renderer = null;
   let rendererType = null;
 
-  // Tier 1: Try WebGPU for high-end features
-  if (capabilities.webgpu) {
-    const result = await tryWebGPU();
-    if (result.success) {
-      renderer = result.renderer;
-      rendererType = 'WebGPU';
-      log.info('WebGPU renderer initialized (High-tier effects enabled)');
-    } else {
-      log.warn('WebGPU initialization failed, falling back to WebGL:', result.error);
-    }
-  }
-
-  // Tier 2: Fallback to WebGL2 for medium features
-  if (!renderer && capabilities.webgl2) {
+  // Tier 1: WebGL2 for full feature set
+  if (capabilities.webgl2) {
     const result = tryWebGL2(THREE);
     if (result.success) {
       renderer = result.renderer;
@@ -43,7 +31,7 @@ export async function create(THREE, capabilities) {
     }
   }
 
-  // Tier 3: Fallback to WebGL 1 (limited features)
+  // Tier 2: Fallback to WebGL 1 (limited features)
   if (!renderer && capabilities.webgl) {
     const result = tryWebGL1(THREE);
     if (result.success) {
@@ -56,29 +44,6 @@ export async function create(THREE, capabilities) {
   }
 
   return { renderer, rendererType };
-}
-
-/**
- * Attempt to create WebGPU renderer
- * @returns {Promise<{success: boolean, renderer?: WebGPURenderer, error?: Error}>}
- * @private
- */
-async function tryWebGPU() {
-  try {
-    const { default: WebGPURenderer } = await import('https://unpkg.com/three@0.159.0/examples/jsm/renderers/webgpu/WebGPURenderer.js?module');
-    
-    const renderer = new WebGPURenderer({
-      antialias: true,
-      alpha: false, // Opaque background to prevent white bleed-through
-      powerPreference: 'high-performance'
-    });
-    
-    await renderer.init();
-    
-    return { success: true, renderer };
-  } catch (e) {
-    return { success: false, error: e };
-  }
 }
 
 /**
@@ -130,7 +95,7 @@ function tryWebGL1(THREE) {
 
 /**
  * Configure common renderer settings
- * @param {THREE.WebGLRenderer|WebGPURenderer} renderer - Renderer instance
+ * @param {THREE.WebGLRenderer} renderer - Renderer instance
  * @param {Object} [options] - Configuration options
  * @param {number} [options.width] - Canvas width
  * @param {number} [options.height] - Canvas height

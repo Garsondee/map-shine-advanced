@@ -40,9 +40,9 @@ export async function bootstrap(options = {}) {
   };
 
   try {
-    // Step 1: Load three.js
+    // Step 1: Load three.js (bundled from node_modules via build script)
     logger.info('Loading three.js...');
-    const THREE = await import('../vendor/three/three.module.js');
+    const THREE = await import('../vendor/three/three.custom.js');
     window.THREE = THREE; // Expose globally for debugging
     logger.info(`three.js r${THREE.REVISION} loaded`);
 

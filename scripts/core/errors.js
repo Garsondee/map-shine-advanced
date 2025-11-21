@@ -19,7 +19,6 @@ export function showCompatibilityError(capabilities) {
     <hr>
     <h3>Your System Status:</h3>
     <ul>
-      <li>WebGPU: ${capabilities.webgpu ? '✓ Available' : '✗ Not Available'}</li>
       <li>WebGL 2.0: ${capabilities.webgl2 ? '✓ Available' : '✗ Not Available'}</li>
       <li>WebGL 1.0: ${capabilities.webgl ? '✓ Available' : '✗ Not Available'}</li>
     </ul>
@@ -75,7 +74,7 @@ export function showInitializationError(message, error) {
  */
 export function showSuccessNotification(tier) {
   const tierMessages = {
-    high: 'Full effects enabled with WebGPU',
+    high: 'Full effects enabled with WebGL 2.0',
     medium: 'Standard effects enabled with WebGL 2.0',
     low: 'Basic effects enabled with WebGL 1.0 (consider updating GPU drivers)'
   };

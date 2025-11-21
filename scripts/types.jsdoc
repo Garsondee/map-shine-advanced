@@ -6,7 +6,6 @@
 /**
  * GPU capability detection results
  * @typedef {Object} GPUCapabilities
- * @property {boolean} webgpu - WebGPU API available and adapter acquired
  * @property {boolean} webgl2 - WebGL 2.0 context available
  * @property {boolean} webgl - WebGL 1.0 context available
  * @property {'high'|'medium'|'low'|'none'} tier - Computed rendering tier
@@ -15,15 +14,15 @@
 /**
  * Renderer initialization result
  * @typedef {Object} RendererResult
- * @property {THREE.WebGLRenderer|WebGPURenderer|null} renderer - Initialized renderer instance
- * @property {'WebGPU'|'WebGL2'|'WebGL1'|null} rendererType - Type of renderer created
+ * @property {THREE.WebGLRenderer|null} renderer - Initialized renderer instance
+ * @property {'WebGL2'|'WebGL1'|null} rendererType - Type of renderer created
  */
 
 /**
  * Module state container
  * @typedef {Object} MapShineState
- * @property {THREE.WebGLRenderer|WebGPURenderer|null} renderer - Active renderer instance
- * @property {'WebGPU'|'WebGL2'|'WebGL1'|null} rendererType - Active renderer type
+ * @property {THREE.WebGLRenderer|null} renderer - Active renderer instance
+ * @property {'WebGL2'|'WebGL1'|null} rendererType - Active renderer type
  * @property {GPUCapabilities|null} capabilities - Detected GPU capabilities
  * @property {boolean} initialized - Whether module bootstrap completed successfully
  * @property {string|null} error - Error message if initialization failed

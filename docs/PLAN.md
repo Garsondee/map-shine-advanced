@@ -25,14 +25,11 @@ The core philosophy is **fun and ease-of-use over technical accuracy**: a single
 - `scripts/`
   - `core/`
     - `bootstrap.js` — high-level startup orchestrator (called from `module.js`).
-    - `capabilities.js` — GPU/WebGL/WebGPU detection helpers.
-    - `renderer-strategy.js` — decides renderer tier and constructs the renderer.
+    - `capabilities.js` — GPU/WebGL detection helpers (WebGL2 primary, WebGL1 fallback).
+    - `renderer-strategy.js` — constructs the WebGL renderer and selects feature tier.
     - `errors.js` — user-facing error helpers (dialogs, notifications).
     - `log.js` — centralized logging utility (namespaced).
-  - `render/`
-    - `webgpu/` — WebGPURenderer helpers, pipelines, materials.
-    - `webgl/` — WebGLRenderer helpers, materials, post-processing.
-    - `common/` — shared render utilities (cameras, lights, resize handling).
+  - `render/` — WebGL renderer helpers, materials, post-processing, and shared utilities (cameras, lights, resize handling).
   - `scene/` — scene graph creation, loaders for assets, environment setup.
   - `assets/` — asset management, caching, preloading, texture utils.
   - `ui/` — settings panels, toolbars, Foundry app windows.
@@ -50,17 +47,15 @@ The core philosophy is **fun and ease-of-use over technical accuracy**: a single
 
 ## Bootstrap Flow
 1. `capabilities.detect()` → returns capability object and computed tier.
-2. `rendererStrategy.create(capabilities)` → chooses and constructs renderer.
+2. `rendererStrategy.create(capabilities)` → constructs a WebGL2 renderer when available, otherwise a limited WebGL1 renderer.
 3. `scene.createDefault(renderer)` → basic scene to validate pipeline.
 4. `ui/status.notifyTier(tier)` → one-line user feedback.
 5. Wire resize and lifecycle hooks.
 6. If any stage fails → `errors.showCompatibility()` with actionable guidance.
 
 ## Renderer Strategy (Decision Outline)
-- If `navigator.gpu` and WebGPU adapter available → try WebGPU.
-  - If WebGPU init fails → fall through to WebGL2.
-- Else if WebGL2 context available → WebGL2.
-- Else if WebGL1 context available → WebGL1 (limited mode).
+- If WebGL2 context available → initialize WebGL2 renderer (full feature set).
+- Else if WebGL1 context available → initialize WebGL1 renderer (limited mode, reduced effects).
 - Else → show compatibility error.
 
 ## Error Handling & Messaging
@@ -332,7 +327,7 @@ Each effect:
   - Iridescence (oil-slick shimmer)
   - Heat distortion (refraction)
 - [ ] Particle system foundation
-  - GPU particle system (instanced rendering or compute shaders for WebGPU)
+  - GPU-friendly particle system designed for WebGL2 (instanced rendering, optional transform feedback)
   - Particle emitter system with point placement
 - [ ] First particle effects:
   - Fire & smoke (candles, torches)

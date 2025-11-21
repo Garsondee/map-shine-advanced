@@ -12,6 +12,7 @@ import { EffectComposer } from '../effects/EffectComposer.js';
 import { SpecularEffect } from '../effects/SpecularEffect.js';
 import { IridescenceEffect } from '../effects/IridescenceEffect.js';
 import { ColorCorrectionEffect } from '../effects/ColorCorrectionEffect.js';
+import { ParticleSystem } from '../particles/ParticleSystem.js';
 import {
   CloudShadowsEffect,
   TimeOfDayEffect,
@@ -292,6 +293,10 @@ async function createThreeCanvas(scene) {
     const colorCorrectionEffect = new ColorCorrectionEffect();
     effectComposer.registerEffect(colorCorrectionEffect);
     
+    // Step 3.3: Register Particle System (WebGPU/WebGL2)
+    const particleSystem = new ParticleSystem();
+    effectComposer.registerEffect(particleSystem);
+
     // Provide the base mesh and asset bundle to the effect
     const basePlane = sceneComposer.getBasePlane();
     specularEffect.setBaseMesh(basePlane, bundle);

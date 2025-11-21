@@ -1,0 +1,14 @@
+{
+  "name": "map-shine-advanced",
+  "version": "1.0.0",
+  "description": "Foundry VTT module with Three.js WebGPU",
+  "scripts": {
+    "build:tsl": "node scripts/build/build.js"
+  },
+  "dependencies": {
+    "three": "^0.170.0" 
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}

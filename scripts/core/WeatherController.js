@@ -310,6 +310,11 @@ export class WeatherController {
     return {
       enabled: true,
       parameters: {
+        enabled: {
+          label: 'Enabled',
+          default: true,
+          type: 'boolean'
+        },
         // Transition Controls
         transitionDuration: {
           label: 'Transition Time (s)',

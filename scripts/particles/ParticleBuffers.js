@@ -39,8 +39,9 @@ export class ParticleBuffers {
     this.seedBuffer = null; // Random seed per particle
 
     // Emitter Buffer (CPU -> GPU communication)
-    // We support a fixed number of emitter instructions per frame (e.g., 32)
-    this.emitterCount = 32;
+    // We support a fixed number of emitter instructions per frame
+    // Reduced to 1 for now to ensure all particles are used for the weather system
+    this.emitterCount = 1;
     this.emitterBuffer = null; // StorageBufferAttribute
     this.emitterArray = null;  // CPU-side Float32Array mirror
   }

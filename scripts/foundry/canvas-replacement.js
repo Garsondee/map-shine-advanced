@@ -305,6 +305,12 @@ async function createThreeCanvas(scene) {
     effectComposer = new EffectComposer(renderer, threeScene, camera);
     effectComposer.initialize(mapShine.capabilities);
 
+    // Ensure WeatherController is initialized and driven by the centralized TimeManager.
+    // This allows precipitation, wind, etc. to update every frame and drive GPU effects
+    // like the particle-based weather system without requiring manual console snippets.
+    weatherController.initialize();
+    effectComposer.addUpdatable(weatherController);
+
     // Step 3: Register specular effect
     const specularEffect = new SpecularEffect();
     effectComposer.registerEffect(specularEffect);

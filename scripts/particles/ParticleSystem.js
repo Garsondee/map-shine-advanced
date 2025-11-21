@@ -132,30 +132,22 @@ export class ParticleSystem extends EffectBase {
       window.MapShineParticles = this;
       log.info('Debug: ParticleSystem exposed as window.MapShineParticles');
 
-      // DEBUG: Auto-initialize EmitterManager and add a global test emitter
+      // Initialize EmitterManager and Weather Emitter
       if (!this.emitterManager) {
         const { EmitterManager } = await import('./EmitterManager.js');
         this.emitterManager = new EmitterManager();
         
-        let cx = 0, cy = 0, width = 1000, height = 1000;
-        
-        // Try to get dimensions from Foundry canvas
-        if (typeof canvas !== 'undefined' && canvas.dimensions) {
-            width = canvas.dimensions.width;
-            height = canvas.dimensions.height;
-            cx = width / 2;
-            cy = height / 2;
-        }
-
-        // Add a "Rain/Magic" test emitter covering the scene
-        this.emitterManager.addEmitter({
-          type: 2, // Rain type (wide area)
-          x: cx, y: cy, z: 3000, // Higher ceiling
-          rate: 50000, // Higher rate for larger area
-          param1: width * 1.5, // Spread width (1.5x to cover padding)
-          param2: height * 1.5  // Spread height
+        // Add a persistent weather emitter covering the scene
+        // Initial state is inactive (rate 0) until weather system updates it
+        const handle = this.emitterManager.addEmitter({
+          type: 2, // Rain type default
+          x: 0, y: 0, z: 3000, // High ceiling
+          rate: 0, // Start disabled
+          param1: 1000, // Width (dynamic)
+          param2: 1000  // Height (dynamic)
         });
-        log.info(`Debug: Added global test emitter at (${cx}, ${cy}) size ${width}x${height}`);
+        this.weatherEmitterId = handle.id;
+        log.info(`Initialized Weather Emitter (ID: ${handle.id})`);
       }
 
     } catch (e) {
@@ -178,6 +170,57 @@ export class ParticleSystem extends EffectBase {
    */
   update(timeInfo) {
     if (!this.enabled) return;
+
+    // 0. Sync with Weather Controller
+    if (this.emitterManager && this.weatherEmitterId) {
+      const weather = weatherController.getCurrentState();
+      const emitter = this.emitterManager.emitters.find(e => e.id === this.weatherEmitterId);
+      
+      // Ensure scene bounds are up to date
+      if (this.uniforms.sceneBounds && typeof canvas !== 'undefined' && canvas.dimensions) {
+          const d = canvas.dimensions;
+          const sx = d.sceneX ?? 0;
+          const sy = d.sceneY ?? 0;
+          const sw = d.sceneWidth ?? d.width ?? 1000;
+          const sh = d.sceneHeight ?? d.height ?? 1000;
+          
+          this.uniforms.sceneBounds.value.set(sx, sy, sw, sh);
+      }
+
+      if (emitter) {
+        // Update Rate (Precipitation)
+        // Interpret precipitation 0..1 as density probability
+        emitter.rate = weather.precipitation;
+
+        // Update Type
+        // 1=Rain -> Shader 2.0
+        // 2=Snow -> Shader 3.0
+        if (weather.precipType === 2) {
+          emitter.type = 3.0; // Snow/Magic slot
+        } else {
+          emitter.type = 2.0; // Rain slot
+        }
+
+        // Update Area (Scene Bounds)
+        if (this.uniforms.sceneBounds) {
+          const b = this.uniforms.sceneBounds.value; // x, y, w, h
+          emitter.x = b.x + b.z / 2;
+          emitter.y = b.y + b.w / 2;
+          emitter.param1 = b.z; // Width
+          emitter.param2 = b.w; // Height
+        }
+
+        // Update Wind Uniform
+        if (this.uniforms.windVector) {
+          // Scale factor: wind speed 1.0 -> 1000 units/sec drift
+          const speed = weather.windSpeed * 1000.0;
+          const dir = weather.windDirection;
+          if (dir && dir.x !== undefined) {
+             this.uniforms.windVector.value.set(dir.x * speed, dir.y * speed, 0);
+          }
+        }
+      }
+    }
 
     // 1. Update Emitters (CPU -> GPU Buffer)
     if (this.emitterManager && this.buffers && this.buffers.updateEmitters) {

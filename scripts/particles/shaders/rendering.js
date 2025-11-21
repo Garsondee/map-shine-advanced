@@ -26,7 +26,8 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
       uParticlesPerEmitter: { value: particlesPerEmitter },
       uEmitterCount: { value: buffers.emitterCount },
       uParticleTexture: { value: texture },
-      uSceneBounds: { value: new THREE.Vector4(0, 0, 10000, 10000) } // x, y, w, h
+      uSceneBounds: { value: new THREE.Vector4(0, 0, 10000, 10000) }, // x, y, w, h
+      uWindVector: { value: new THREE.Vector3(0, 0, 0) }
     },
     vertexShader: `
       uniform float uTime;
@@ -35,6 +36,7 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
       uniform float uParticlesPerEmitter;
       uniform float uEmitterCount;
       uniform vec4 uSceneBounds;
+      uniform vec3 uWindVector;
 
       attribute float index;
 

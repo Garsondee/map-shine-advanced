@@ -6,6 +6,7 @@
 
 import { createLogger } from '../core/log.js';
 import * as assetLoader from '../assets/loader.js';
+import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('SceneComposer');
 
@@ -53,7 +54,8 @@ export class SceneComposer {
       sceneHeight: foundryScene.dimensions.sceneHeight,
       gridSize: foundryScene.grid.size,
       gridType: foundryScene.grid.type,
-      padding: foundryScene.padding || 0
+      padding: foundryScene.padding || 0,
+      backgroundColor: foundryScene.backgroundColor || '#999999'
     };
 
     // Create three.js scene
@@ -192,6 +194,22 @@ export class SceneComposer {
     const worldHeight = this.foundrySceneData.height;
     const sceneWidth = this.foundrySceneData.sceneWidth;
     const sceneHeight = this.foundrySceneData.sceneHeight;
+
+    // Solid background plane covering the entire world (including padding)
+    const bgColorStr = this.foundrySceneData.backgroundColor || '#999999';
+    let bgColorInt = 0x999999;
+    try {
+      const hex = bgColorStr.replace('#', '');
+      const parsed = parseInt(hex, 16);
+      if (!Number.isNaN(parsed)) bgColorInt = parsed;
+    } catch (e) {
+      // Fallback already set
+    }
+    const bgGeometry = new THREE.PlaneGeometry(worldWidth, worldHeight);
+    const bgMaterial = new THREE.MeshBasicMaterial({ color: bgColorInt });
+    const bgMesh = new THREE.Mesh(bgGeometry, bgMaterial);
+    bgMesh.position.set(worldWidth / 2, worldHeight / 2, -0.1);
+    this.scene.add(bgMesh);
 
     // Use SCENE dimensions for geometry to prevent stretching texture across padding
     const geometry = new THREE.PlaneGeometry(sceneWidth, sceneHeight);

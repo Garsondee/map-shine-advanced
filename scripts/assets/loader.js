@@ -18,7 +18,7 @@ const EFFECT_MASKS = {
   normal: { suffix: '_Normal', required: false, description: 'Normal map for lighting detail' },
   // TODO: Uncomment as effects are implemented to avoid console spam
   // fire: { suffix: '_Fire', required: false, description: 'Fire effect mask' },
-  // outdoors: { suffix: '_Outdoors', required: false, description: 'Indoor/outdoor area mask' },
+  outdoors: { suffix: '_Outdoors', required: false, description: 'Indoor/outdoor area mask' },
   iridescence: { suffix: '_Iridescence', required: false, description: 'Iridescence effect mask' },
   prism: { suffix: '_Prism', required: false, description: 'Prism/refraction mask' },
   // water: { suffix: '_Water', required: false, description: 'Water surface mask' },

@@ -57,7 +57,8 @@ export class IridescenceEffect extends EffectBase {
       ignoreDarkness: 0.0, // 0=Physical, 1=Magical
       
       // Advanced
-      alpha: 1.0 // Global opacity multiplier
+      alpha: 1.0, // Global opacity multiplier
+      maskThreshold: 0.8
     };
   }
 
@@ -99,7 +100,7 @@ export class IridescenceEffect extends EffectBase {
           name: 'main',
           label: 'Effect Properties',
           type: 'inline',
-          parameters: ['intensity', 'alpha', 'flowSpeed', 'parallaxStrength', 'angle']
+          parameters: ['intensity', 'alpha', 'flowSpeed', 'parallaxStrength', 'angle', 'maskThreshold']
         },
         {
           name: 'style',
@@ -215,6 +216,14 @@ export class IridescenceEffect extends EffectBase {
           max: 3.0,
           step: 0.01,
           default: 1.0
+        },
+        maskThreshold: {
+          type: 'slider',
+          label: 'Mask Brightness Cutoff',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.8
         }
       },
       presets: {
@@ -289,25 +298,21 @@ export class IridescenceEffect extends EffectBase {
       this.enabled = false;
       return;
     }
-    
+
     log.info('Iridescence mask loaded, creating overlay mesh');
     this.createOverlayMesh();
   }
 
-  /**
-   * Create the additive overlay mesh
-   * @private
-   */
   createOverlayMesh() {
     const THREE = window.THREE;
-    
+
     // Create shader material
     this.material = new THREE.ShaderMaterial({
       uniforms: {
         uIridescenceMask: { value: this.iridescenceMask },
         uTime: { value: 0.0 },
         uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
-        
+
         // Params
         uIntensity: { value: this.params.intensity },
         uAlpha: { value: this.params.alpha },
@@ -321,7 +326,8 @@ export class IridescenceEffect extends EffectBase {
         uIgnoreDarkness: { value: this.params.ignoreDarkness },
         uParallaxStrength: { value: this.params.parallaxStrength },
         uCameraOffset: { value: new THREE.Vector2(0, 0) },
-        
+        uMaskThreshold: { value: this.params.maskThreshold },
+
         // Foundry darkness
         uDarknessLevel: { value: 0.0 }
       },
@@ -333,39 +339,35 @@ export class IridescenceEffect extends EffectBase {
       depthWrite: false, // Don't write depth, just overlay
       depthTest: true    // Respect depth (so tokens/walls can occlude if needed)
     });
-    
+
     // Clone geometry from base mesh to ensure perfect match
     this.mesh = new THREE.Mesh(this.baseMesh.geometry, this.material);
-    
+
     // Sync transform
     this.mesh.position.copy(this.baseMesh.position);
     this.mesh.rotation.copy(this.baseMesh.rotation);
     this.mesh.scale.copy(this.baseMesh.scale);
-    
+
     // Slight offset to prevent z-fighting (though Additive + DepthWrite False helps)
     // We'll use renderOrder to ensure it draws after base
     this.mesh.renderOrder = 10; // Base is usually 0
-    
+
     // Add to scene
     this.scene.add(this.mesh);
-    
+
     // Initial visibility state
     this.mesh.visible = this._enabled;
-    
+
     log.debug('Iridescence overlay mesh created');
   }
 
-  /**
-   * Update effect state
-   * @param {TimeInfo} timeInfo
-   */
   update(timeInfo) {
     if (!this.material || !this.mesh) return;
-    
+
     // Sync visibility
     this.mesh.visible = this._enabled;
     if (!this._enabled) return;
-    
+
     // Update uniforms
     this.material.uniforms.uTime.value = timeInfo.elapsed;
     this.material.uniforms.uIntensity.value = this.params.intensity;
@@ -394,19 +396,14 @@ export class IridescenceEffect extends EffectBase {
     this.material.uniforms.uAngle.value = this.params.angle * (Math.PI / 180.0);
     this.material.uniforms.uIgnoreDarkness.value = this.params.ignoreDarkness;
     this.material.uniforms.uParallaxStrength.value = this.params.parallaxStrength;
-    
+    this.material.uniforms.uMaskThreshold.value = this.params.maskThreshold;
+
     // Update darkness
     if (canvas?.scene?.environment?.darknessLevel !== undefined) {
       this.material.uniforms.uDarknessLevel.value = canvas.scene.environment.darknessLevel;
     }
   }
 
-  /**
-   * Sync camera-dependent uniforms (parallax, etc.)
-   * @param {THREE.Renderer} renderer
-   * @param {THREE.Scene} scene
-   * @param {THREE.Camera} camera
-   */
   render(renderer, scene, camera) {
     if (!this.material || !this.mesh) return;
 
@@ -420,20 +417,12 @@ export class IridescenceEffect extends EffectBase {
     }
   }
 
-  /**
-   * Handle resize
-   * @param {number} width
-   * @param {number} height
-   */
   onResize(width, height) {
     if (this.material) {
       this.material.uniforms.uResolution.value.set(width, height);
     }
   }
 
-  /**
-   * Dispose resources
-   */
   dispose() {
     if (this.mesh) {
       this.scene.remove(this.mesh);
@@ -451,7 +440,7 @@ export class IridescenceEffect extends EffectBase {
     return `
       varying vec2 vUv;
       varying vec3 vWorldPosition;
-      
+
       void main() {
         vUv = uv;
         vWorldPosition = (modelMatrix * vec4(position, 1.0)).xyz;
@@ -465,7 +454,7 @@ export class IridescenceEffect extends EffectBase {
       uniform sampler2D uIridescenceMask;
       uniform float uTime;
       uniform vec2 uResolution;
-      
+
       uniform float uIntensity;
       uniform float uAlpha;
       uniform float uDistortionStrength;
@@ -479,35 +468,39 @@ export class IridescenceEffect extends EffectBase {
       uniform float uIgnoreDarkness; // 0.0 = Physical, 1.0 = Magical Glow
       uniform float uParallaxStrength;
       uniform vec2 uCameraOffset;
-      
+      uniform float uMaskThreshold;
+
       varying vec2 vUv;
       varying vec3 vWorldPosition;
-      
+
       // Helper for hash noise
       float hash(vec2 p) { 
         return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); 
       }
-      
+
       void main() {
         // 1. Get mask value (luminance from R channel)
-        float maskVal = texture2D(uIridescenceMask, vUv).r;
-        
+        float rawMask = texture2D(uIridescenceMask, vUv).r;
+
+        // Only keep brightest parts of the mask; smooth for soft edges
+        float maskVal = smoothstep(uMaskThreshold, 1.0, rawMask);
+
         // Optimization: discard if no mask contribution
         if (maskVal < 0.01) discard;
-        
+
         // 2. Screen Space Shimmer
         // Calculate normalized screen coordinates (0-1)
         vec2 screenUV = gl_FragCoord.xy / uResolution.xy;
-        
+
         // Calculate diagonal sweep based on angle
         float cosA = cos(uAngle);
         float sinA = sin(uAngle);
         // Rotate screen UVs effectively
         float diagonalSweep = screenUV.x * cosA + screenUV.y * sinA;
-        
+
         // 3. Noise Logic (Island Separation)
         float randomOffset = 0.0;
-        
+
         if (uNoiseType > 0.5) {
             // GLITTER/HASH NOISE
             // Snap position to grid, then jitter cell sampling to break uniform tiling
@@ -521,7 +514,7 @@ export class IridescenceEffect extends EffectBase {
             // LIQUID/WAVE NOISE (Original smooth noise)
             // Based on World Position so it stays pinned to the map
             vec2 worldNoise = vWorldPosition.xy * uNoiseScale;
-            
+
             // Rotate into an irrational angle to avoid axis-aligned repetition
             const float PHI = 1.61803398875;
             mat2 rot = mat2(cos(PHI), -sin(PHI), sin(PHI), cos(PHI));
@@ -532,7 +525,7 @@ export class IridescenceEffect extends EffectBase {
             float n2 = sin(2.7 * w.x + 1.3) * cos(2.7 * w.y - 0.7);
             randomOffset = (n1 + 0.5 * n2) * 1.5;
         }
-        
+
         // 4. Phase Calculation
         // Combine Screen Sweep + World Randomness + Mask Shape + Time
         // Camera parallax term: small contribution from camera movement so slow flow still reacts to view changes
@@ -542,21 +535,21 @@ export class IridescenceEffect extends EffectBase {
                     + (maskVal * uDistortionStrength) 
                     + (uTime * uFlowSpeed)
                     + parallaxTerm;
-        
+
         // 5. Cosine Palette Generation
         // The "Magic Vector" (0, 2, 4) creates rainbow-like gradients
         float colorPhase = phase * uColorCycleSpeed;
         vec3 rainbowColor = 0.5 + 0.5 * cos(vec3(0.0, 2.0, 4.0) + colorPhase * 6.28 * uPhaseMult);
-        
+
         // 6. Composition
         // Apply Darkness & Magic Glow
         // If Magic (1.0), ignore darkness (stay bright). If Physical (0.0), fade with darkness.
         float envDarkness = 1.0 - uDarknessLevel;
         float lightLevel = mix(envDarkness, 1.0, uIgnoreDarkness);
-        
+
         // Apply alpha and all factors
         vec3 finalColor = rainbowColor * maskVal * uIntensity * lightLevel * uAlpha;
-        
+
         gl_FragColor = vec4(finalColor, 1.0); // Alpha output is 1.0 because we use additive blending (src * 1 + dst)
       }
     `;

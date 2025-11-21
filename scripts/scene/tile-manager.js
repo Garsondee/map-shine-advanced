@@ -134,6 +134,75 @@ export class TileManager {
   }
 
   /**
+   * Update tile states (occlusion animation)
+   * @param {Object} timeInfo - Time information
+   * @public
+   */
+  update(timeInfo) {
+    const dt = timeInfo.delta;
+    const canvasTokens = canvas.tokens?.placeables || [];
+    // We care about controlled tokens or the observed token
+    const sources = canvas.tokens?.controlled.length > 0 
+      ? canvas.tokens.controlled 
+      : (canvas.tokens?.observed || []);
+
+    for (const { sprite, tileDoc } of this.tileSprites.values()) {
+      // Only process overhead tiles for occlusion
+      if (!sprite.userData.isOverhead) continue;
+
+      // Handle Occlusion
+      // Default: use configured alpha
+      let targetAlpha = tileDoc.alpha ?? 1;
+      
+      const occlusion = tileDoc.occlusion || {};
+      const mode = occlusion.mode || CONST.TILE_OCCLUSION_MODES.NONE;
+
+      if (mode !== CONST.TILE_OCCLUSION_MODES.NONE) {
+        let occluded = false;
+
+        // Check if any relevant token is under this tile
+        // Simple bounds check for now (Foundry uses more complex pixel-perfect alpha checks usually)
+        // We'll use the tile's rectangle (ignoring rotation for simple check, or proper check if needed)
+        
+        // TODO: Improve this to use proper SAT or pixel check for rotated tiles
+        // For now, simple bounding box of the sprite
+        
+        // Get tile bounds in world space
+        const left = tileDoc.x;
+        const right = tileDoc.x + tileDoc.width;
+        const top = tileDoc.y;
+        const bottom = tileDoc.y + tileDoc.height;
+
+        for (const token of sources) {
+          // Token center
+          const tx = token.document.x + token.document.width / 2 * (canvas.dimensions.size || 100); // Wait, width/height are grid units?
+          // token.document.width is in grid units. token.w is pixels.
+          const txPx = token.x + token.w / 2;
+          const tyPx = token.y + token.h / 2;
+
+          if (txPx >= left && txPx <= right && tyPx >= top && tyPx <= bottom) {
+             occluded = true;
+             break;
+          }
+        }
+
+        if (occluded) {
+          targetAlpha = occlusion.alpha ?? 0;
+        }
+      }
+      
+      // Smoothly interpolate alpha
+      // We use a fast lerp factor
+      const currentAlpha = sprite.material.opacity;
+      if (Math.abs(currentAlpha - targetAlpha) > 0.01) {
+        sprite.material.opacity = THREE.MathUtils.lerp(currentAlpha, targetAlpha, 10 * dt);
+      } else {
+        sprite.material.opacity = targetAlpha;
+      }
+    }
+  }
+
+  /**
    * Create a THREE.js sprite for a Foundry tile
    * @param {TileDocument} tileDoc - Foundry tile document
    * @private
@@ -289,6 +358,9 @@ export class TileManager {
     
     const foregroundElevation = canvas.scene.foregroundElevation || 0;
     const isOverhead = tileDoc.elevation >= foregroundElevation;
+    
+    // Store overhead status for update loop
+    sprite.userData.isOverhead = isOverhead;
     
     let zBase = Z_FOREGROUND;
     

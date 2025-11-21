@@ -3,6 +3,7 @@ import { createLogger } from '../core/log.js';
 import { ParticleBuffers } from './ParticleBuffers.js';
 import { createSimulationNode } from './shaders/simulation.js';
 import { createParticleMaterial } from './shaders/rendering.js';
+import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('ParticleSystem');
 
@@ -24,6 +25,9 @@ export class ParticleSystem extends EffectBase {
 
     /** @type {import('./EmitterManager.js').EmitterManager|null} */
     this.emitterManager = null;
+
+    /** @type {string|null} ID of the main weather emitter */
+    this.weatherEmitterId = null;
 
     /** Renderer / scene references */
     this.renderer = null;

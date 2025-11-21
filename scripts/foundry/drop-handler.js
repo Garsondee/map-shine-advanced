@@ -219,12 +219,67 @@ export class DropHandler {
   async handleTileDrop(event, data) {
     log.info('Handling tile drop');
     
-    // For now, delegate to Foundry's tile layer if it exists
-    // We'll implement full tile handling later
-    if (canvas.tiles?._onDropData) {
-      return canvas.tiles._onDropData(event, data);
-    } else {
-      log.warn('Tile drops not yet fully implemented');
+    // Permission check
+    if (!game.user.can('TILE_CREATE')) {
+      ui.notifications.warn('You do not have permission to create Tiles.');
+      return;
+    }
+
+    // Get texture source
+    let imgSrc = data.texture;
+    if (!imgSrc && data.type === 'Tile') {
+       // Dragging from Tile Browser or file
+       // data might contain img, or we need to infer
+       imgSrc = data.img;
+    }
+    
+    if (!imgSrc) {
+      // Fallback for dragging generic images
+      try {
+        const parsed = JSON.parse(event.dataTransfer.getData('text/plain'));
+        if (parsed.src) imgSrc = parsed.src;
+      } catch (e) {}
+    }
+
+    if (!imgSrc) {
+      log.warn('No image source found for tile drop');
+      return;
+    }
+
+    // Determine dimensions (load texture to get size)
+    const tex = await loadTexture(imgSrc);
+    const width = tex.baseTexture.width;
+    const height = tex.baseTexture.height;
+
+    // Calculate position (center on drop)
+    let x = data.x - (width / 2);
+    let y = data.y - (height / 2);
+
+    // Snap to grid if shift key NOT held
+    if (!event.shiftKey && canvas.grid) {
+      const snapped = canvas.grid.getSnappedPoint({x, y}, {
+        mode: CONST.GRID_SNAPPING_MODES.TOP_LEFT_CORNER
+      });
+      x = snapped.x;
+      y = snapped.y;
+    }
+
+    // Prepare tile data
+    const tileData = {
+      texture: { src: imgSrc },
+      width: width,
+      height: height,
+      x: x,
+      y: y,
+      elevation: 0 // Default elevation
+    };
+
+    // Create TileDocument
+    log.info(`Creating tile at (${x}, ${y})`);
+    const created = await canvas.scene.createEmbeddedDocuments('Tile', [tileData]);
+    
+    if (created && created.length > 0) {
+       log.info(`Tile created: ${created[0].id}`);
     }
   }
 

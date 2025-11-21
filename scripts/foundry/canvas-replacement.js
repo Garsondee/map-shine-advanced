@@ -56,6 +56,7 @@ import { InteractionManager } from '../scene/interaction-manager.js';
 import { GridRenderer } from '../scene/grid-renderer.js';
 import { DropHandler } from './drop-handler.js';
 import { sceneDebug } from '../utils/scene-debug.js';
+import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('Canvas');
 
@@ -251,7 +252,23 @@ async function createThreeCanvas(scene) {
     // Get renderer from global state and attach its canvas
     renderer = mapShine.renderer;
     const rendererCanvas = renderer.domElement;
-    
+
+    // Resolve background colour from Foundry scene (fallback to Foundry default #999999)
+    // scene.backgroundColor is a hex string like "#999999" in modern Foundry versions
+    const sceneBgColorStr = (scene && typeof scene.backgroundColor === 'string' && scene.backgroundColor.trim().length > 0)
+      ? scene.backgroundColor
+      : '#999999';
+
+    // Parse hex string to numeric RGB for three.js clear colour
+    let sceneBgColorInt = 0x999999;
+    try {
+      const hex = sceneBgColorStr.replace('#', '');
+      const parsed = parseInt(hex, 16);
+      if (!Number.isNaN(parsed)) sceneBgColorInt = parsed;
+    } catch (e) {
+      // Fallback already set to 0x999999
+    }
+
     // Replace our placeholder with the renderer's actual canvas
     threeCanvas.replaceWith(rendererCanvas);
     rendererCanvas.id = 'map-shine-canvas';
@@ -262,14 +279,14 @@ async function createThreeCanvas(scene) {
     rendererCanvas.style.height = '100%';
     rendererCanvas.style.zIndex = '1'; // Below PIXI canvas (which is hidden and non-interactive)
     rendererCanvas.style.pointerEvents = 'auto'; // ENABLE pointer events for drop handling
-    rendererCanvas.style.backgroundColor = '#000000'; // CRITICAL: Force black background via CSS
-    
+    // Use Foundry's scene background colour so padded region matches core Foundry
+    rendererCanvas.style.backgroundColor = sceneBgColorStr;
+
     threeCanvas = rendererCanvas; // Update reference
     const rect = threeCanvas.getBoundingClientRect();
     renderer.setSize(rect.width, rect.height);
-    
-    // CRITICAL: Force renderer clear color to opaque black
-    // This ensures that "void" areas are black, not white or transparent
+
+    // Ensure regions outside the Foundry world bounds remain black; padded region is covered by a background plane
     if (renderer.setClearColor) {
       renderer.setClearColor(0x000000, 1);
     }
@@ -350,6 +367,7 @@ async function createThreeCanvas(scene) {
     tileManager = new TileManager(threeScene);
     tileManager.initialize();
     tileManager.syncAllTiles();
+    effectComposer.addUpdatable(tileManager); // Register for occlusion updates
     log.info('Tile manager initialized and synced');
 
     // Step 4c: Initialize wall manager
@@ -398,6 +416,7 @@ async function createThreeCanvas(scene) {
     mapShine.wallManager = wallManager; // NEW: Expose wall manager
     mapShine.interactionManager = interactionManager; // NEW: Expose interaction manager
     mapShine.gridRenderer = gridRenderer; // NEW: Expose grid renderer
+    mapShine.weatherController = weatherController; // NEW: Expose weather controller
     mapShine.renderLoop = renderLoop; // CRITICAL: Expose render loop for diagnostics
     mapShine.sceneDebug = sceneDebug; // NEW: Expose scene debug helpers
     // Attach to canvas as well for convenience (used by console snippets)
@@ -635,6 +654,102 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     );
   }
 
+  // --- Weather System Settings ---
+  const weatherSchema = weatherController.constructor.getControlSchema();
+
+  const onWeatherUpdate = (effectId, paramId, value) => {
+    // Handle different parameter groups
+    if (paramId === 'enabled') {
+       // Weather system is always running technically, but we could toggle visibility of effects
+       // For now, just log
+       log.debug(`Weather system ${value ? 'enabled' : 'disabled'}`);
+    } else if (paramId === 'transitionDuration') {
+      weatherController.transitionDuration = value;
+    } else if (paramId === 'variability') {
+      weatherController.setVariability(value);
+    } else if (paramId === 'timeOfDay') {
+      weatherController.setTime(value);
+    } else {
+      // Manual Overrides (update target state directly)
+      const target = weatherController.targetState;
+      
+      if (paramId === 'windDirection') {
+        // UI gives degrees (0-360), convert to vector
+        const rad = (value * Math.PI) / 180;
+
+        // Ensure windDirection is a THREE.Vector2 before using .set()
+        const THREE = window.THREE;
+        if (!THREE) {
+          // If THREE is not available for some reason, bail out safely
+          log.warn('THREE not available while updating windDirection');
+          return;
+        }
+
+        if (!(target.windDirection instanceof THREE.Vector2)) {
+          const existing = target.windDirection || { x: 1, y: 0 };
+          target.windDirection = new THREE.Vector2(existing.x ?? 1, existing.y ?? 0);
+        }
+
+        target.windDirection.set(Math.cos(rad), Math.sin(rad));
+      } else if (target[paramId] !== undefined) {
+        target[paramId] = value;
+      }
+      
+      // If we are NOT transitioning, we might want to snap startState too
+      // so next transition starts from here? 
+      // Actually, if we change targetState while not transitioning, 
+      // the update loop will snap currentState to targetState immediately.
+      // So we get instant feedback.
+    }
+  };
+
+  // Initialize params object from current controller state for the UI
+  // We want the UI to reflect the Target State (what the user set), not the wandering Current State
+  const weatherParams = {
+    enabled: true,
+    transitionDuration: weatherController.transitionDuration,
+    variability: weatherController.variability,
+    timeOfDay: weatherController.timeOfDay,
+    
+    // Manual params
+    precipitation: weatherController.targetState.precipitation,
+    cloudCover: weatherController.targetState.cloudCover,
+    windSpeed: weatherController.targetState.windSpeed,
+    windDirection: Math.atan2(weatherController.targetState.windDirection.y, weatherController.targetState.windDirection.x) * (180 / Math.PI),
+    fogDensity: weatherController.targetState.fogDensity,
+    wetness: weatherController.currentState.wetness // Read-only derived
+  };
+
+  // Fix negative angles
+  if (weatherParams.windDirection < 0) weatherParams.windDirection += 360;
+
+  // Override the schema defaults with current values to ensure sync
+  // (This is a bit of a hack to pre-populate the UI)
+  // uiManager.registerEffect will merge these with loaded settings
+  
+  // We pass a custom 'updateCallback' that intercepts the preset logic in TweakpaneManager if needed,
+  // or we just rely on the standard callback.
+  // The TweakpaneManager handles presets by iterating properties and calling this callback.
+  // So if a preset sets 'precipitation' to 0.8, it calls onWeatherUpdate('weather', 'precipitation', 0.8).
+  // This works perfect.
+
+  uiManager.registerEffect(
+    'weather',
+    'Weather System',
+    weatherSchema,
+    onWeatherUpdate,
+    'atmospheric'
+  );
+
+  // Manually sync the initial values into the UI manager's storage for this effect
+  // because registerEffect loads from scene settings or defaults, but we want to sync 
+  // with the controller's in-memory state if it was initialized differently.
+  // Actually, registerEffect handles loading. We should let it load, then sync controller TO settings?
+  // Or settings TO controller?
+  // Let's assume Scene Settings are authoritative.
+  // The updateCallback is called during initialization for loaded params.
+  // So weatherController will be updated to match Scene Settings. Perfect.
+
   // --- Grid Settings ---
   if (gridRenderer) {
     const gridSchema = GridRenderer.getControlSchema();
@@ -709,7 +824,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     // Atmospheric & Environmental
     { id: 'cloud-shadows',      name: 'Cloud Shadows',        Class: CloudShadowsEffect,      categoryId: 'atmospheric' },
     { id: 'time-of-day',        name: 'Time of Day',          Class: TimeOfDayEffect,         categoryId: 'atmospheric' },
-    { id: 'weather',            name: 'Weather System',       Class: WeatherEffect,           categoryId: 'atmospheric' },
+    // Weather System replaced by active controller
     { id: 'heat-distortion',    name: 'Heat Distortion',      Class: HeatDistortionEffect,    categoryId: 'atmospheric' },
     { id: 'lightning',          name: 'Lightning',            Class: LightningEffect,         categoryId: 'atmospheric' },
     { id: 'ambient',            name: 'Ambient Lighting',     Class: AmbientEffect,           categoryId: 'atmospheric' },

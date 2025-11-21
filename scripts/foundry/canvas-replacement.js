@@ -14,6 +14,8 @@ import { IridescenceEffect } from '../effects/IridescenceEffect.js';
 import { ColorCorrectionEffect } from '../effects/ColorCorrectionEffect.js';
 import { AsciiEffect } from '../effects/AsciiEffect.js';
 import { BloomEffect } from '../effects/BloomEffect.js';
+import { LightingEffect } from '../effects/LightingEffect.js';
+import { LensflareEffect } from '../effects/LensflareEffect.js';
 import { PrismEffect } from '../effects/PrismEffect.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import {
@@ -98,6 +100,9 @@ let gridRenderer = null;
 
 /** @type {DropHandler|null} */
 let dropHandler = null;
+
+/** @type {LightingEffect|null} */
+let lightingEffect = null;
 
 /**
  * Initialize canvas replacement hooks
@@ -307,15 +312,24 @@ async function createThreeCanvas(scene) {
     const prismEffect = new PrismEffect();
     effectComposer.registerEffect(prismEffect);
 
-    // Step 3.6: Register Bloom Effect
+    // Step 3.6: Register Lighting Effect
+    lightingEffect = new LightingEffect();
+    effectComposer.registerEffect(lightingEffect);
+
+    // Step 3.7: Register Bloom Effect
     const bloomEffect = new BloomEffect();
     effectComposer.registerEffect(bloomEffect);
+
+    // Step 3.8: Register Lensflare Effect
+    const lensflareEffect = new LensflareEffect();
+    effectComposer.registerEffect(lensflareEffect);
 
     // Provide the base mesh and asset bundle to the effect
     const basePlane = sceneComposer.getBasePlane();
     specularEffect.setBaseMesh(basePlane, bundle);
     iridescenceEffect.setBaseMesh(basePlane, bundle);
     prismEffect.setBaseMesh(basePlane, bundle);
+    lightingEffect.setBaseMesh(basePlane);
 
     // Step 3b: Initialize grid renderer
     gridRenderer = new GridRenderer(threeScene);
@@ -373,7 +387,9 @@ async function createThreeCanvas(scene) {
     mapShine.specularEffect = specularEffect;
     mapShine.iridescenceEffect = iridescenceEffect;
     mapShine.prismEffect = prismEffect;
+    mapShine.lightingEffect = lightingEffect;
     mapShine.bloomEffect = bloomEffect;
+    mapShine.lensflareEffect = lensflareEffect;
     mapShine.colorCorrectionEffect = colorCorrectionEffect;
     mapShine.asciiEffect = asciiEffect;
     mapShine.cameraController = cameraController;
@@ -398,7 +414,7 @@ async function createThreeCanvas(scene) {
 
     // Initialize Tweakpane UI
     try {
-      await initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, bloomEffect);
+      await initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect);
     } catch (e) {
       log.error('Failed to initialize UI:', e);
     }
@@ -416,10 +432,12 @@ async function createThreeCanvas(scene) {
  * @param {ColorCorrectionEffect} colorCorrectionEffect - The color correction effect instance
  * @param {AsciiEffect} asciiEffect - The ASCII effect instance
  * @param {PrismEffect} prismEffect - The prism effect instance
+ * @param {LightingEffect} lightingEffect - The dynamic lighting effect instance
  * @param {BloomEffect} bloomEffect - The bloom effect instance
+ * @param {LensflareEffect} lensflareEffect - The lensflare effect instance
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, bloomEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -543,6 +561,29 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     }
   }
 
+  // --- Lighting Settings ---
+  if (lightingEffect) {
+    const lightingSchema = LightingEffect.getControlSchema();
+    
+    const onLightingUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        lightingEffect.enabled = value;
+        log.debug(`Lighting effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (lightingEffect.params[paramId] !== undefined) {
+        lightingEffect.params[paramId] = value;
+        log.debug(`Lighting.${paramId} = ${value}`);
+      }
+    };
+
+    uiManager.registerEffect(
+      'lighting',
+      'Dynamic Lighting',
+      lightingSchema,
+      onLightingUpdate,
+      'global'
+    );
+  }
+
   // --- Bloom Settings ---
   if (bloomEffect) {
     const bloomSchema = BloomEffect.getControlSchema();
@@ -562,6 +603,34 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       'Bloom (Glow)',
       bloomSchema,
       onBloomUpdate,
+      'global'
+    );
+  }
+
+  // --- Lensflare Settings ---
+  if (lensflareEffect) {
+    const lensflareSchema = LensflareEffect.getControlSchema();
+    
+    const onLensflareUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        // Drive the internal params.enabled flag for this effect; the
+        // EffectComposer keeps the effect registered so update() can
+        // hide/show flares without being removed from the pipeline.
+        if (lensflareEffect.params && Object.prototype.hasOwnProperty.call(lensflareEffect.params, 'enabled')) {
+          lensflareEffect.params.enabled = value;
+        }
+        log.debug(`Lensflare effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (lensflareEffect.params[paramId] !== undefined) {
+        lensflareEffect.params[paramId] = value;
+        log.debug(`Lensflare.${paramId} = ${value}`);
+      }
+    };
+
+    uiManager.registerEffect(
+      'lensflare',
+      'Lensflare',
+      lensflareSchema,
+      onLensflareUpdate,
       'global'
     );
   }

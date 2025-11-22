@@ -4,6 +4,7 @@ import { ParticleBuffers } from './ParticleBuffers.js';
 import { createSimulationNode } from './shaders/simulation.js';
 import { createParticleMaterial } from './shaders/rendering.js';
 import { weatherController } from '../core/WeatherController.js';
+import { RainStreakGeometry } from './RainStreakGeometry.js';
 
 const log = createLogger('ParticleSystem');
 
@@ -22,6 +23,9 @@ export class ParticleSystem extends EffectBase {
 
     /** @type {ParticleBuffers} */
     this.buffers = new ParticleBuffers(capacity);
+
+    /** @type {RainStreakGeometry|null} */
+    this.rainGeometry = null;
 
     /** @type {import('./EmitterManager.js').EmitterManager|null} */
     this.emitterManager = null;
@@ -108,6 +112,9 @@ export class ParticleSystem extends EffectBase {
       // 5. Create Mesh (Points)
       this.particles = new THREE.Points(geometry, material);
       this.particles.frustumCulled = false; // Always render (bounds are dynamic)
+      // Legacy sprite-based particle rendering is currently disabled in favor of
+      // the new 3D RainStreakGeometry path.
+      this.particles.visible = false;
       this.scene.add(this.particles);
 
       // 6. Ensure uniform objects exist
@@ -125,8 +132,15 @@ export class ParticleSystem extends EffectBase {
           this.uniforms.sceneBounds.value.set(sceneX, sceneY, sceneWidth, sceneHeight);
           log.info(`Set particle clipping bounds: x=${sceneX}, y=${sceneY}, w=${sceneWidth}, h=${sceneHeight}`);
       }
+      
+      // 8. Initialize 3D Rain Streak Geometry
+      this.rainGeometry = new RainStreakGeometry(20000);
+      this.rainGeometry.initialize(THREE);
+      if (this.rainGeometry.mesh) {
+        this.scene.add(this.rainGeometry.mesh);
+      }
 
-      log.info('ParticleSystem GPU initialized successfully');
+      log.info('ParticleSystem GPU initialized successfully (including RainStreakGeometry)');
 
       // Expose for debugging
       window.MapShineParticles = this;
@@ -172,8 +186,9 @@ export class ParticleSystem extends EffectBase {
     if (!this.enabled) return;
 
     // 0. Sync with Weather Controller
+    let weather = null;
     if (this.emitterManager && this.weatherEmitterId) {
-      const weather = weatherController.getCurrentState();
+      weather = weatherController.getCurrentState();
       const emitter = this.emitterManager.emitters.find(e => e.id === this.weatherEmitterId);
       
       // Ensure scene bounds are up to date
@@ -234,6 +249,21 @@ export class ParticleSystem extends EffectBase {
     // 2. Update Uniforms
     this.uniforms.deltaTime.value = timeInfo.delta;
     this.uniforms.time.value = timeInfo.elapsed;
+
+    // 3. Update RainStreakGeometry (3D streaks)
+    if (this.rainGeometry) {
+      // Derive bounds for rain from sceneBounds uniform if available
+      let boundsVec4 = null;
+      if (this.uniforms.sceneBounds && this.uniforms.sceneBounds.value) {
+        boundsVec4 = this.uniforms.sceneBounds.value;
+      }
+
+      if (!weather) {
+        weather = weatherController.getCurrentState();
+      }
+
+      this.rainGeometry.update(timeInfo, weather, boundsVec4);
+    }
   }
 
   /**
@@ -254,6 +284,14 @@ export class ParticleSystem extends EffectBase {
       if (this.particles.geometry) this.particles.geometry.dispose();
       if (this.particles.material) this.particles.material.dispose();
       this.particles = null;
+    }
+    
+    if (this.rainGeometry) {
+      if (this.rainGeometry.mesh && this.scene) {
+        this.scene.remove(this.rainGeometry.mesh);
+      }
+      this.rainGeometry.dispose();
+      this.rainGeometry = null;
     }
     
     this.computeNode = null;

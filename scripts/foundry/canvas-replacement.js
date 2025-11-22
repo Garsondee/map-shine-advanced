@@ -301,6 +301,22 @@ async function createThreeCanvas(scene) {
 
     log.info(`Scene composer initialized with ${bundle.masks.length} effect masks`);
 
+    // Wire the _Outdoors (roof/indoor) mask into the WeatherController so
+    // precipitation effects (rain, snow, puddles) can respect covered areas.
+    try {
+      if (bundle?.masks?.length) {
+        const outdoorsMask = bundle.masks.find(m => m.id === 'outdoors' || m.type === 'outdoors');
+        if (outdoorsMask?.texture && weatherController?.setRoofMap) {
+          weatherController.setRoofMap(outdoorsMask.texture);
+          log.info('WeatherController roof map set from _Outdoors mask texture');
+        } else {
+          log.debug('No _Outdoors mask texture found for this scene');
+        }
+      }
+    } catch (e) {
+      log.warn('Failed to apply _Outdoors roof mask to WeatherController:', e);
+    }
+
     // Step 2: Initialize effect composer
     effectComposer = new EffectComposer(renderer, threeScene, camera);
     effectComposer.initialize(mapShine.capabilities);
@@ -697,6 +713,12 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         }
 
         target.windDirection.set(Math.cos(rad), Math.sin(rad));
+      } else if (paramId === 'rainAngle') {
+        // Debug control: directly drive the particle system's rain streak angle (degrees)
+        const ps = window.MapShineParticles;
+        if (ps && ps.uniforms && ps.uniforms.rainAngle) {
+          ps.uniforms.rainAngle.value = value;
+        }
       } else if (target[paramId] !== undefined) {
         target[paramId] = value;
       }
@@ -746,6 +768,72 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     onWeatherUpdate,
     'atmospheric'
   );
+
+  // Add a simple windvane indicator inside the Weather UI folder that reflects
+  // the live scene wind direction from WeatherController.currentState.
+  try {
+    const weatherFolderData = uiManager.effectFolders?.weather;
+    const folderElement = weatherFolderData?.folder?.element;
+    if (folderElement) {
+      const content = folderElement.querySelector('.tp-fldv_c') || folderElement;
+
+      const vaneWrapper = document.createElement('div');
+      vaneWrapper.style.display = 'flex';
+      vaneWrapper.style.alignItems = 'center';
+      vaneWrapper.style.justifyContent = 'space-between';
+      vaneWrapper.style.marginTop = '4px';
+
+      const label = document.createElement('div');
+      label.textContent = 'Wind Direction';
+      label.style.fontSize = '11px';
+
+      const vane = document.createElement('div');
+      vane.style.width = '24px';
+      vane.style.height = '24px';
+      vane.style.position = 'relative';
+
+      const arrow = document.createElement('div');
+      arrow.style.position = 'absolute';
+      arrow.style.left = '50%';
+      arrow.style.top = '50%';
+      arrow.style.width = '2px';
+      arrow.style.height = '10px';
+      arrow.style.background = 'currentColor';
+      arrow.style.transformOrigin = '50% 100%';
+
+      const arrowHead = document.createElement('div');
+      arrowHead.style.position = 'absolute';
+      arrowHead.style.left = '50%';
+      arrowHead.style.top = '0';
+      arrowHead.style.transform = 'translate(-50%, -50%)';
+      arrowHead.style.width = '0';
+      arrowHead.style.height = '0';
+      arrowHead.style.borderLeft = '4px solid transparent';
+      arrowHead.style.borderRight = '4px solid transparent';
+      arrowHead.style.borderBottom = '6px solid currentColor';
+
+      arrow.appendChild(arrowHead);
+      vane.appendChild(arrow);
+
+      vaneWrapper.appendChild(label);
+      vaneWrapper.appendChild(vane);
+      content.appendChild(vaneWrapper);
+
+      // Periodically sync arrow rotation with the live wind direction.
+      const updateWindVane = () => {
+        const state = weatherController.getCurrentState();
+        if (!state || !state.windDirection) return;
+        const angleRad = Math.atan2(state.windDirection.y, state.windDirection.x);
+        const angleDeg = (angleRad * 180) / Math.PI;
+        arrow.style.transform = `translate(-50%, -50%) rotate(${angleDeg}deg)`;
+      };
+
+      updateWindVane();
+      setInterval(updateWindVane, 200);
+    }
+  } catch (e) {
+    log.warn('Failed to add windvane UI indicator:', e);
+  }
 
   // Manually sync the initial values into the UI manager's storage for this effect
   // because registerEffect loads from scene settings or defaults, but we want to sync 

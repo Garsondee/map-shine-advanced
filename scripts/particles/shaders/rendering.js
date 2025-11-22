@@ -27,7 +27,9 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
       uEmitterCount: { value: buffers.emitterCount },
       uParticleTexture: { value: texture },
       uSceneBounds: { value: new THREE.Vector4(0, 0, 10000, 10000) }, // x, y, w, h
-      uWindVector: { value: new THREE.Vector3(0, 0, 0) }
+      uWindVector: { value: new THREE.Vector3(0, 0, 0) },
+      // Debug: global rain streak orientation in degrees (screen-space)
+      uRainAngle: { value: 270.0 }
     },
     vertexShader: `
       uniform float uTime;
@@ -37,11 +39,15 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
       uniform float uEmitterCount;
       uniform vec4 uSceneBounds;
       uniform vec3 uWindVector;
+      uniform float uRainAngle;
 
       attribute float index;
 
       varying vec4 vColor;
       varying float vAlpha;
+      varying float vType;
+      // Screen-space motion direction (for oriented streaks)
+      varying vec2 vMotionDir;
 
       // Read a single float from the 1D emitter texture
       float readEmitterFloat(int offset) {
@@ -83,6 +89,9 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
         vec4 color = vec4(1.0);
         float size = 1.0;
 
+        // World-space motion direction for this particle type (approximate)
+        vec3 motionDir = vec3(0.0);
+
         if (emType == 0.0) {
           // FIRE
           vec3 up = vec3(0.0, 0.0, 1.0) * (localTime * 3.0);
@@ -92,6 +101,7 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
           vec3 fireColor = mix(vec3(1.0, 0.8, 0.1), vec3(1.0, 0.1, 0.0), pow(lifeProgress, 0.5));
           color = vec4(fireColor, 1.0);
           size = 1.0 - lifeProgress;
+          motionDir = normalize(vec3(0.0, 0.0, 1.0));
         } else if (emType == 1.0) {
           // SMOKE
           vec3 up = vec3(0.0, 0.0, 1.0) * (localTime * 1.5);
@@ -100,6 +110,7 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
 
           color = vec4(0.5, 0.5, 0.5, 0.8);
           size = 0.5 + lifeProgress;
+          motionDir = normalize(vec3(0.0, 0.0, 1.0));
         } else if (emType == 2.0) {
           // RAIN
           vec3 fall = vec3(0.0, 0.0, -1.0) * (localTime * 1500.0);
@@ -110,8 +121,15 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
           vec3 area = vec3(spread * width * 0.5, spreadY * height * 0.5, 0.0);
           pos = vec3(emX, emY, emZ) + area + fall;
 
-          color = vec4(0.6, 0.7, 1.0, 0.6);
-          size = 0.5;
+          // Softer, dimmer blue so it reads as rain instead of blown-out white
+          color = vec4(0.35, 0.55, 0.95, 0.45);
+          // Slightly smaller base size to avoid blobby appearance
+          size = 0.3;
+
+          // Approximate world-space motion for rain: fast downward fall plus lateral wind drift.
+          // We don't have per-particle velocity in this stateless shader, so we reuse the
+          // analytic fall direction and add projected wind.
+          motionDir = normalize(vec3(uWindVector.xy * 0.001, -1.0));
         } else {
           // MAGIC / SPARKLES
           float radius = localTime * 5.0;
@@ -122,6 +140,7 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
           pos = vec3(emX, emY, emZ) + dir * radius;
           color = vec4(0.8, 0.3, 1.0, 1.0);
           size = 1.0 - lifeProgress;
+          motionDir = normalize(dir);
         }
 
         // Visibility / Opacity
@@ -138,7 +157,12 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
 
         vColor = color;
         vAlpha = alpha;
+        vType = emType;
 
+        // For now, use a fixed screen-space downward direction for streaks.
+        vMotionDir = vec2(0.0, -1.0);
+
+        // Standard model-view-projection transform
         vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
         gl_Position = projectionMatrix * mvPosition;
 
@@ -153,14 +177,49 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
     `,
     fragmentShader: `
       uniform sampler2D uParticleTexture;
+      uniform float uRainAngle;
 
       varying vec4 vColor;
       varying float vAlpha;
+      varying float vType;
+      varying vec2 vMotionDir;
 
       void main() {
         vec2 uv = gl_PointCoord;
-        vec4 tex = texture2D(uParticleTexture, uv);
-        vec4 col = tex * vColor;
+
+        vec4 col;
+
+        if (vType == 2.0) {
+          // RAIN: render as a streak aligned with the projected motion direction.
+          // We build a thin, soft-edged line mask in the point sprite quad using
+          // vMotionDir (in screen space) as the "along" axis.
+
+          // Centered quad coordinates in [-0.5, 0.5]
+          vec2 p = uv - vec2(0.5);
+
+          // Orthonormal basis from a debug-controlled angle (degrees)
+          float angle = radians(uRainAngle);
+          vec2 dir = vec2(cos(angle), sin(angle));
+          vec2 ortho = vec2(-dir.y, dir.x);
+
+          float along  = dot(p, dir);   // along motion
+          float across = dot(p, ortho); // perpendicular to motion
+
+          float halfWidth = 0.08;  // streak thickness
+          float halfHeight = 0.5;  // streak length
+          float edgeSoftness = 0.03;
+
+          float maskAcross = smoothstep(halfWidth + edgeSoftness, halfWidth, abs(across));
+          float maskAlong  = smoothstep(halfHeight + edgeSoftness, halfHeight, abs(along));
+          float lineMask = maskAcross * maskAlong;
+
+          col = vec4(vColor.rgb, vColor.a * lineMask);
+        } else {
+          // Other types (fire/smoke/magic) still use the base texture
+          vec4 tex = texture2D(uParticleTexture, uv);
+          col = tex * vColor;
+        }
+
         col.a *= vAlpha;
         if (col.a <= 0.001) discard;
         gl_FragColor = col;
@@ -168,7 +227,9 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
     `,
     transparent: true,
     depthWrite: false,
-    blending: THREE.AdditiveBlending
+    // Use normal alpha blending so rain appears as blue droplets over the map
+    // instead of overly bright additive blobs.
+    blending: THREE.NormalBlending
   });
 
   // Wire uniforms into the provided container so ParticleSystem.update()
@@ -177,6 +238,8 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
     uniforms.time = material.uniforms.uTime;
     uniforms.deltaTime = material.uniforms.uDeltaTime;
     uniforms.sceneBounds = material.uniforms.uSceneBounds;
+    // Expose debug rain angle uniform for external control
+    uniforms.rainAngle = material.uniforms.uRainAngle;
   }
 
   return material;

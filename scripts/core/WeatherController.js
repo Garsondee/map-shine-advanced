@@ -205,17 +205,19 @@ export class WeatherController {
     // or assume we have a noise library available.
     // For now, simple sine composition for "wandering"
     
-    const noise1 = Math.sin(time * 0.1 + this.noiseOffset) * this.variability * 0.1;
-    const noise2 = Math.cos(time * 0.05 + this.noiseOffset * 2) * this.variability * 0.2;
+    const base = this.variability;
+    const noise1 = Math.sin(time * 0.02 + this.noiseOffset) * base * 0.05;
+    const noise2 = Math.cos(time * 0.10 + this.noiseOffset * 2) * base * 0.10;
+    const noise3 = Math.sin(time * 0.70 + this.noiseOffset * 3) * base * 0.20;
 
     // Perturb wind speed
     this.currentState.windSpeed = THREE.MathUtils.clamp(
-      this.currentState.windSpeed + noise1, 
+      this.currentState.windSpeed + noise1 + noise3, 
       0, 1
     );
 
     // Perturb wind direction angle
-    const anglePerturb = noise2; // Radians
+    const anglePerturb = noise2 + (noise3 * 0.5); // Radians
     const currentAngle = Math.atan2(this.currentState.windDirection.y, this.currentState.windDirection.x);
     const newAngle = currentAngle + anglePerturb;
     this.currentState.windDirection.set(Math.cos(newAngle), Math.sin(newAngle));
@@ -352,7 +354,7 @@ export class WeatherController {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          group: 'manual'
+          group: 'state'
         },
         cloudCover: {
           label: 'Cloud Cover',
@@ -360,7 +362,7 @@ export class WeatherController {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          group: 'manual'
+          group: 'state'
         },
         windSpeed: {
           label: 'Wind Speed',
@@ -368,7 +370,7 @@ export class WeatherController {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          group: 'manual'
+          group: 'state'
         },
         windDirection: {
           label: 'Wind Angle',
@@ -376,7 +378,7 @@ export class WeatherController {
           min: 0.0,
           max: 360.0,
           step: 1.0,
-          group: 'manual'
+          group: 'state'
         },
         fogDensity: {
           label: 'Fog Density',
@@ -394,12 +396,23 @@ export class WeatherController {
           step: 0.01,
           group: 'manual',
           readonly: true
+        },
+
+        // Debug controls
+        rainAngle: {
+          label: 'Rain Streak Angle',
+          default: 270.0,
+          min: 0.0,
+          max: 360.0,
+          step: 1.0,
+          group: 'debug'
         }
       },
       groups: [
         { label: 'Environment', type: 'folder', parameters: ['timeOfDay'] },
         { label: 'Simulation', type: 'folder', parameters: ['variability', 'transitionDuration'] },
-        { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'windSpeed', 'windDirection', 'fogDensity', 'wetness'], expanded: true }
+        { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'windSpeed', 'windDirection', 'fogDensity', 'wetness'], expanded: true },
+        { label: 'Debug', type: 'folder', parameters: ['rainAngle'] }
       ],
       presets: {
         'Clear': { precipitation: 0.0, cloudCover: 0.0, windSpeed: 0.1, fogDensity: 0.0 },

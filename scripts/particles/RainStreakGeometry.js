@@ -12,6 +12,7 @@ export class RainStreakGeometry {
     this.geometry = null;
     this.material = null;
     this.mesh = null;
+    this._spawnDensity = 0;
   }
 
   /**
@@ -52,13 +53,19 @@ export class RainStreakGeometry {
         uSceneDarkness: { value: 0.0 },
         // Roof / outdoors mask (_Outdoors texture) for indoor/outdoor culling
         uRoofMap: { value: null },
-        uRoofMaskEnabled: { value: 0.0 }
+        uRoofMaskEnabled: { value: 0.0 },
+        // Spawn density 0..1 controls how many streak instances are active
+        uSpawnDensity: { value: 0.0 },
+        // Normalized wind speed 0..1 used to modulate droplet breakup in the
+        // fragment shader (high wind => smoother, less segmented streaks).
+        uWindSpeed: { value: 0.0 }
       },
       vertexShader: `
         uniform float uTime;
         uniform vec3 uWindVector;
         uniform vec2 uScale;
         uniform vec4 uSceneBounds;
+        uniform float uSpawnDensity;
         uniform sampler2D uRoofMap;
         uniform float uRoofMaskEnabled;
 
@@ -67,6 +74,10 @@ export class RainStreakGeometry {
         varying float vAlpha;
         // Per-streak phase used for shimmer in fragment shader
         varying float vPhase;
+        // Along-streak coordinate in [0,1] for tip shaping
+        varying float vAlong;
+        // Across-streak coordinate in [0,1] for jagged silhouette
+        varying float vWidthCoord;
 
         // Pseudo-random helper
         float hash(float n) {
@@ -74,7 +85,7 @@ export class RainStreakGeometry {
         }
 
         void main() {
-          // --- 1. Stateless Position Logic (same as current system) ---
+          // --- 1. Stateless Position Logic ---
           float idx = instanceIndex;
           float randSeed = hash(idx);
           
@@ -84,8 +95,10 @@ export class RainStreakGeometry {
           float localTime = mod(uTime + timeOffset, cycleDuration);
           float lifeProgress = localTime / cycleDuration;
 
+          // Per-instance spawn gating driven by precipitation slider.
+          float spawnMask = step(hash(idx + 13.0), clamp(uSpawnDensity, 0.0, 1.0));
+
           // Random spread over scene
-          // We'll use the scene bounds to define the spawn area
           float spreadX = (hash(idx + 1.0) - 0.5);
           float spreadY = (hash(idx + 2.0) - 0.5);
           
@@ -94,9 +107,8 @@ export class RainStreakGeometry {
           float centerX = uSceneBounds.x + areaW * 0.5;
           float centerY = uSceneBounds.y + areaH * 0.5;
 
-          // Jitter the spawn height so drops originate from a tall column above
-          // the scene, making the camera feel embedded in the rain volume.
-          float spawnZ = 3500.0 + hash(idx + 5.0) * 2500.0; // ~3500-6000
+          // Jitter the spawn height so drops originate from a taller column above the scene.
+          float spawnZ = 5000.0 + hash(idx + 5.0) * 4000.0; // ~5000-9000
 
           vec3 startPos = vec3(
             centerX + spreadX * areaW,
@@ -104,52 +116,64 @@ export class RainStreakGeometry {
             spawnZ
           );
 
-          // Motion: Fall + Wind
-          // We keep a coherent overall wind direction but only add modest
-          // noise so that even at windSpeed=1.0 the motion still feels like
-          // a driven sheet of rain, not fully chaotic.
+          // --- 2. Wind + Chaos ---
 
-          // 0..1 measure of lateral wind intensity (matches CPU mapping of 1.0 -> 1000 units/sec)
-          // TODO: Revisit this turbulence model once a full 2D wind field and
-          // lighting-aware rain interaction are available; current noise is a
-          // tuned approximation for cinematic behaviour.
-          float windStrength = clamp(length(uWindVector.xy) / 800.0, 0.0, 1.0);
+          // Normalized lateral wind intensity 0..1
+          float rawWind = length(uWindVector.xy) / 800.0;
+          float windStrength = pow(clamp(rawWind, 0.0, 1.0), 2.5);
 
-          // Base horizontal wind vector
-          vec2 baseWind = uWindVector.xy;
+          // 1) Per-particle speed variation: 0.5x .. 1.5x
+          float speedVar = 0.5 + hash(idx + 31.0);
 
-          // Time-varying noise direction per streak (slow to medium speed), with
-          // a per-streak frequency so they don't all orbit in sync.
-          float freq = 0.3 + windStrength * 1.2 + hash(idx + 6.0) * 0.8;
-          float noisePhase = uTime * freq + randSeed * 6.2831853;
-          vec2 noiseDir = vec2(cos(noisePhase), sin(noisePhase));
+          // 2) Per-particle direction jitter: rotate wind by +/- ~15 degrees
+          float dirNoise = (hash(idx + 45.0) - 0.5) * 0.5 * windStrength;
+          float c = cos(dirNoise);
+          float s = sin(dirNoise);
+          vec2 uniqueWind = vec2(
+            uWindVector.x * c - uWindVector.y * s,
+            uWindVector.x * s + uWindVector.y * c
+          );
 
-          // Per-streak jitter radius so not all streaks share the same offset
-          // distance from the wind axis.
-          float jitterRadius = (10.0 + 60.0 * hash(idx + 7.0)) * windStrength;
-          vec2 jitter = noiseDir * jitterRadius;
+          // 3) ID-based turbulence: independent meander per instance.
+          // At low wind we allow some wobble; at high wind we damp it so
+          // directional flow dominates and we don't get sideways thrashing.
+          float turbFreq = 2.0;
+          float uniquePhase = hash(idx + 99.0) * 100.0;
+          float turbAmp = windStrength * 50.0 * (1.0 - 0.5 * windStrength);
+          turbAmp = max(turbAmp, 0.0);
+          vec2 turbulence = vec2(
+            sin(uTime * turbFreq + uniquePhase),
+            cos(uTime * turbFreq * 0.8 + uniquePhase)
+          ) * turbAmp;
 
-          // Combine large-scale wind with local turbulence.
-          vec2 combinedWind = baseWind + jitter;
+          // Base wind terminal velocity for this streak
+          vec2 vTerm = uniqueWind * (windStrength / (rawWind + 0.001)) * speedVar;
 
-          // If there is essentially no base wind, keep drizzle mostly vertical,
-          // only adding a modest, less-patterned lateral component.
-          vec2 finalWindXY = (length(baseWind) > 10.0)
-            ? combinedWind
-            : jitter * 0.5;
+          // Drag / inertia response: streaks accelerate sideways into the wind
+          // x(t) = vTerm * (t - (1-exp(-k*t))/k)
+          float dragCoeff = 3.0;
+          float windResponse = localTime - (1.0 - exp(-dragCoeff * localTime)) / dragCoeff;
+          vec2 windDisplacement = vTerm * windResponse;
 
-          // Vertical motion with simple acceleration: v = v0 + a*t, z = z0 + v0*t + 0.5*a*t^2
-          // Each streak gets a slightly different initial fall speed so they
-          // cross the scene and hit the ground at different times.
-          float baseFallSpeed = 900.0 + 600.0 * hash(idx + 3.0); // ~900-1500
-          float gravity = -1800.0; // pulls them down faster over time
+          // Total lateral offset: mostly wind-driven, with small uncorrelated turbulence
+          vec2 lateralOffset = windDisplacement + turbulence;
+
+          // Approximate instantaneous lateral velocity for orientation
+          // dv/dt for the drag curve tends to vTerm as t grows; we approximate
+          // using vTerm plus a small turbulence contribution.
+          vec2 finalWindXY = vTerm + turbulence * 0.2; 
+
+          // Vertical motion with simple acceleration.
+          // At higher wind, slightly increase fall speed and gravity so the
+          // streaks still read as falling rain rather than sliding sideways.
+          float baseFallSpeed = (900.0 + 600.0 * hash(idx + 3.0)) * (1.0 + 0.5 * windStrength);
+          float gravity = -1800.0 * (1.0 + windStrength);
 
           float t = localTime;
           float vz0 = -baseFallSpeed;
           float vz = vz0 + gravity * t;
           float zOffset = vz0 * t + 0.5 * gravity * t * t;
 
-          vec2 lateralOffset = finalWindXY * t;
           vec3 currentPos = startPos + vec3(lateralOffset, zOffset);
 
           // Wrap/Clip logic could go here, but simple modulus works for continuous rain
@@ -172,10 +196,16 @@ export class RainStreakGeometry {
           // Let's assume standard billboard behavior constrained to an axis.
           
           // But wait, we want "true 3D". 
-          // A simple approach: The strip connects P and P - (velocity * dt).
-          // Or P and P + (dir * length).
-          
-          float streakLength = uScale.y * 50.0; // Base length multiplier
+          // A simple approach: The strip connects P and P - (velocity * dt),
+          // so slower drops appear shorter and faster drops appear longer.
+
+          // Use current velocity magnitude to modulate streak length per instance.
+          float speed = length(vec3(finalWindXY, vz));
+          // Reference speed chosen around typical storm terminal speed so
+          // drizzle is visibly shorter while heavy, fast rain is longer.
+          float refSpeed = 1800.0;
+          float speedNorm = clamp(speed / refSpeed, 0.3, 1.5);
+          float streakLength = uScale.y * 25.0 * speedNorm;
           float thickness = uScale.x * 10.0;
 
           // Basis vectors
@@ -235,10 +265,20 @@ export class RainStreakGeometry {
             alpha *= isOutdoor;
           }
 
+          // Apply spawn density mask last so that precipitation directly
+          // controls the fraction of active streaks.
+          alpha *= spawnMask;
+
           vAlpha = alpha;
           // Cache a per-streak phase for shimmer; use a distinct hash so
           // neighbouring streaks don't sync.
           vPhase = hash(idx + 9.0);
+
+          // Normalized along-streak coordinate (0 = one end, 1 = the other).
+          // Map localPos.y = -0.5 (tail) .. +0.5 (tip) directly into 0..1.
+          vAlong = localPos.y + 0.5;
+          // Normalized across-streak coordinate; map localPos.x = -0.5..0.5 to 0..1.
+          vWidthCoord = localPos.x + 0.5;
         }
       `,
       fragmentShader: `
@@ -246,39 +286,79 @@ export class RainStreakGeometry {
         uniform float uOpacity;
         uniform float uSceneDarkness;
         uniform float uTime;
+        uniform float uWindSpeed;
         varying float vAlpha;
         varying float vPhase;
+        varying float vAlong;
+        varying float vWidthCoord;
 
         void main() {
           float alpha = uOpacity * vAlpha;
           if (alpha <= 0.01) discard;
 
-          // Global brightness from scene darkness: at darkness=0 rain is at
-          // full base brightness; at darkness=1 it is significantly dimmed.
+          // Global brightness from scene darkness.
           float darkness = clamp(uSceneDarkness, 0.0, 1.0);
-          float baseBrightness = mix(1.0, 0.2, darkness); // 1.0 -> 0.2
+          float baseBrightness = mix(1.0, 0.25, darkness);
 
-          // Darkness-aware shimmer: in bright scenes we allow a subtle
-          // specular-like twinkle along the streaks; in darkness we
-          // suppress it so rain doesn't glow in the dark.
-          float lightFactor = 1.0 - 0.7 * darkness; // 1.0 -> 0.3
+          // Geometric shaping: tip-bright streak with sharp front fade and
+          // longer, softer fade toward the back (tail).
+          float along = clamp(vAlong, 0.0, 1.0);             // 0 = tail, 1 = tip
+          float width = clamp(vWidthCoord, 0.0, 1.0);        // 0..1 across
 
-          // Time-varying sparkle per streak; vPhase ensures neighbours
-          // don't sync perfectly.
-          float sparkle = 0.5 + 0.5 * sin(uTime * 12.0 + vPhase * 6.2831853);
+          // Long, soft tail: fade in gradually over ~40% of the length.
+          float tailMask = smoothstep(0.0, 0.40, along);
+          // Sharp front (tip): fade out quickly in the last ~10%.
+          float tipMask  = 1.0 - smoothstep(0.90, 1.0, along);
+          float alongMask = tailMask * tipMask;
 
-          // Final specular boost, kept gentle so it reads as a wet sheen
-          // rather than glitter.
-          float specIntensity = 0.3; // overall strength cap
-          float spec = specIntensity * sparkle * lightFactor;
+          // Across-streak coordinate in -1..1.
+          float x = width * 2.0 - 1.0;
+
+          // Inner bright core: thin, high-opacity band on the center line.
+          float coreWidth = 1.0 - smoothstep(0.05, 0.18, abs(x));
+          float coreMask = pow(coreWidth, 2.5);
+
+          // Outer halo: wider, low-opacity shoulder so it doesn't look like a
+          // single pixel wire.
+          float haloWidth = 1.0 - smoothstep(0.25, 0.50, abs(x));
+          float haloMask = pow(haloWidth, 1.5);
+
+          float widthMask = max(coreMask, 0.35 * haloMask);
+
+          // Base raindrop silhouette.
+          float shape = alongMask * widthMask;
+
+          // Breakup noise: punch small holes along the streak so it feels
+          // more like motion-blurred droplets than a solid bar. Use a less
+          // obviously periodic combination of along, vPhase, and time.
+          float breakupPhase = along * 83.17 + vPhase * 127.31 + uTime * 5.0;
+          float breakupBase = sin(breakupPhase) * 0.7 + cos(breakupPhase * 1.731) * 0.3;
+          float breakup = 0.6 + 0.4 * fract(breakupBase * 43758.5453123);
+
+          alpha *= shape * breakup;
+          if (alpha <= 0.001) discard;
+
+          // Subtle internal highlight along the center, biased toward the tip.
+          float highlightCore = smoothstep(0.4, 0.0, abs(x));
+          float tipBoost = smoothstep(0.3, 1.0, along);
+          float centerHighlight = highlightCore * tipBoost;
+
+          float shimmer = 0.08 * sin(uTime * 18.0 + vPhase * 6.2831853);
+          float highlight = 0.20 * centerHighlight + shimmer * centerHighlight;
+
+          // Tip-weighted brightness: bias overall brightness so the leading
+          // edge reads clearly brighter than the trailing tail.
+          float tipBrightness = mix(0.7, 1.5, along);
 
           vec3 baseColor = uColor * baseBrightness;
-          vec3 finalColor = baseColor * (1.0 + spec);
+          vec3 finalColor = baseColor * tipBrightness * (1.0 + highlight);
+
           gl_FragColor = vec4(finalColor, alpha);
         }
       `,
       transparent: true,
       depthWrite: false,
+      depthTest: false,
       side: THREE.DoubleSide
     });
 
@@ -286,6 +366,8 @@ export class RainStreakGeometry {
     this.mesh = new THREE.Mesh(this.geometry, this.material);
     // Prevent culling since instances move outside bounding sphere of base geo
     this.mesh.frustumCulled = false; 
+    // Place in the overhead particles band (above overhead tiles at z≈20)
+    this.mesh.position.z = 30.0;
   }
 
   /**
@@ -314,21 +396,43 @@ export class RainStreakGeometry {
         weatherState.windDirection.y * speed,
         0
       );
+    }
 
-      const precip = weatherState.precipitation || 0;
+    const precip = (weatherState && typeof weatherState.precipitation === 'number')
+      ? weatherState.precipitation
+      : 0;
 
-      // Base length factor ~1.0. Increases with precipitation and wind so that
-      // heavier, windier storms produce longer, sharper streaks, while drizzle
-      // stays shorter.
-      const baseLen = 1.0;
-      const lengthFactor = 0.6 + precip * 1.4 + windSpeed * 0.8; // ~0.6 - 2.8
-      u.uScale.value.y = baseLen * lengthFactor;
+    // Base length factor ~1.0. Now depends only on wind so precipitation
+    // controls density (spawn) but not individual streak length.
+    const windSpeed = (weatherState && typeof weatherState.windSpeed === 'number')
+      ? weatherState.windSpeed
+      : 0;
+    // Also expose normalized wind speed directly to the fragment shader so
+    // droplet breakup/segmentation can soften as wind increases.
+    if (u.uWindSpeed) {
+      u.uWindSpeed.value = windSpeed;
+    }
+    const baseLen = 1.0;
+    const lengthFactor = 0.7 + windSpeed * 1.3; // ~0.7 - 2.0
+    u.uScale.value.y = baseLen * lengthFactor;
 
-      // Slightly thicken streaks under strong wind so sheets of rain read a
-      // bit more solid in storms.
-      const baseThickness = 0.05;
-      const thicknessFactor = 0.9 + windSpeed * 0.6; // ~0.9 - 1.5
-      u.uScale.value.x = baseThickness * thicknessFactor;
+    // Maintain constant thickness to prevent "laddering" artifacts (parallel lines)
+    // caused by stretching the procedural droplet texture horizontally.
+    // Slightly thicker so width shaping is visible at normal zoom.
+    const baseThickness = 0.07;
+    const thicknessFactor = 0.9; 
+    u.uScale.value.x = baseThickness * thicknessFactor;
+
+    // Map precipitation 0..1 -> active streak fraction 0..1.
+    // Use a slightly aggressive curve so density ramps up quickly.
+    const clampedPrecip = Math.max(0, Math.min(1, precip));
+    const targetDensity = Math.pow(clampedPrecip, 0.8);
+    if (u.uSpawnDensity) {
+      const delta = Math.max(0.0, Math.min(1.0, timeInfo.delta || 0));
+      const k = 3.0;
+      const lerp = 1.0 - Math.exp(-k * delta);
+      this._spawnDensity += (targetDensity - this._spawnDensity) * lerp;
+      u.uSpawnDensity.value = this._spawnDensity;
     }
 
     // Scene darkness: drive from Foundry scene environment if available so
@@ -342,8 +446,9 @@ export class RainStreakGeometry {
     }
 
     // Roof / outdoors mask: cull rain under covered/indoor regions when the
-    // WeatherController has a roofMap (the _Outdoors texture) available.
-    if (weatherController && weatherController.roofMap) {
+    // WeatherController has a roofMap (the _Outdoors texture) available AND
+    // the roofMaskActive flag is true (e.g. while roofs are hover-hidden).
+    if (weatherController && weatherController.roofMap && weatherController.roofMaskActive) {
       u.uRoofMap.value = weatherController.roofMap;
       u.uRoofMaskEnabled.value = 1.0;
     } else {

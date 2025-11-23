@@ -70,6 +70,8 @@ export class InteractionManager {
     this.hoveredTokenId = null;
     /** @type {string|null} ID of currently hovered wall */
     this.hoveredWallId = null;
+    /** @type {string|null} ID of currently hovered overhead tile */
+    this.hoveredOverheadTileId = null;
 
     this.boundHandlers = {
       onPointerDown: this.onPointerDown.bind(this),
@@ -816,10 +818,68 @@ export class InteractionManager {
 
     // If we hit a wall, we might still want to check tokens if the wall didn't claim it?
     // But if we are "near a line", we probably want the line.
-    // If we didn't find a wall, check tokens.
     if (hitFound) return;
 
-    // 2. Check Tokens
+    // 2. Check Overhead Tiles (for hover-to-hide behavior)
+    if (this.tileManager && this.tileManager.getOverheadTileSprites) {
+      const overheadSprites = this.tileManager.getOverheadTileSprites();
+      if (overheadSprites.length > 0) {
+        const tileIntersects = this.raycaster.intersectObjects(overheadSprites, false);
+
+        if (tileIntersects.length > 0) {
+          const hit = tileIntersects[0];
+          const sprite = hit.object;
+          const tileId = sprite.userData.foundryTileId;
+
+          // Only treat this as a "real" hit if the pointer is over an
+          // opaque part of the roof sprite (alpha > 0.5). This prevents the
+          // roof from vanishing when hovering transparent gutters/holes.
+          if (this.tileManager.isWorldPointOpaque) {
+            const data = this.tileManager.tileSprites.get(tileId);
+            if (!data || !this.tileManager.isWorldPointOpaque(data, hit.point.x, hit.point.y)) {
+              // Hit is on a transparent pixel; ignore this tile for hover.
+              // Clear any prior hover-hidden tile if present.
+              if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
+                this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
+                this.hoveredOverheadTileId = null;
+              }
+              // Do not mark hitFound; allow tokens below to be hovered.
+              // Effectively treat as "no tile hit".
+              // Continue to the token hover logic below.
+              // (We early-return from this tile branch.)
+              //
+              // NOTE: We don't "continue" the outer function; we just skip
+              // setting hitFound here.
+              //
+              // So drop through to tokens.
+            } else {
+              if (this.hoveredOverheadTileId !== tileId) {
+                // Restore previous hovered tile if any
+                if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
+                  this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
+                }
+
+                this.hoveredOverheadTileId = tileId;
+                if (this.tileManager.setTileHoverHidden) {
+                  this.tileManager.setTileHoverHidden(tileId, true);
+                }
+              }
+
+              hitFound = true;
+            }
+          }
+        } else if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
+          // No tile currently under cursor; restore any previously hidden tile
+          this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
+          this.hoveredOverheadTileId = null;
+        }
+      }
+    }
+
+    // If we hit an overhead tile, don't hover tokens through it
+    if (hitFound) return;
+
+    // 3. Check Tokens
     const interactables = this.tokenManager.getAllTokenSprites();
     const intersects = this.raycaster.intersectObjects(interactables, false);
 

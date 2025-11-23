@@ -5,6 +5,7 @@ import { createSimulationNode } from './shaders/simulation.js';
 import { createParticleMaterial } from './shaders/rendering.js';
 import { weatherController } from '../core/WeatherController.js';
 import { RainStreakGeometry } from './RainStreakGeometry.js';
+import { SnowGeometry } from './SnowGeometry.js';
 
 const log = createLogger('ParticleSystem');
 
@@ -26,6 +27,8 @@ export class ParticleSystem extends EffectBase {
 
     /** @type {RainStreakGeometry|null} */
     this.rainGeometry = null;
+    /** @type {SnowGeometry|null} */
+    this.snowGeometry = null;
 
     /** @type {import('./EmitterManager.js').EmitterManager|null} */
     this.emitterManager = null;
@@ -140,7 +143,14 @@ export class ParticleSystem extends EffectBase {
         this.scene.add(this.rainGeometry.mesh);
       }
 
-      log.info('ParticleSystem GPU initialized successfully (including RainStreakGeometry)');
+      // 9. Initialize 3D Snow Geometry
+      this.snowGeometry = new SnowGeometry(12000);
+      this.snowGeometry.initialize(THREE);
+      if (this.snowGeometry.mesh) {
+        this.scene.add(this.snowGeometry.mesh);
+      }
+
+      log.info('ParticleSystem GPU initialized successfully (including RainStreakGeometry and SnowGeometry)');
 
       // Expose for debugging
       window.MapShineParticles = this;
@@ -250,19 +260,33 @@ export class ParticleSystem extends EffectBase {
     this.uniforms.deltaTime.value = timeInfo.delta;
     this.uniforms.time.value = timeInfo.elapsed;
 
-    // 3. Update RainStreakGeometry (3D streaks)
+    // 3. Update 3D precipitation geometries (rain + snow) using freezeLevel
+    // as a continuous temperature axis: 0 = all rain, 1 = all snow.
+    let boundsVec4 = null;
+    if (this.uniforms.sceneBounds && this.uniforms.sceneBounds.value) {
+      boundsVec4 = this.uniforms.sceneBounds.value;
+    }
+
+    if (!weather) {
+      weather = weatherController.getCurrentState();
+    }
+
+    const precip = (weather && typeof weather.precipitation === 'number') ? weather.precipitation : 0;
+    const freeze = (weather && typeof weather.freezeLevel === 'number')
+      ? Math.max(0, Math.min(1, weather.freezeLevel))
+      : 0;
+
+    const rainPrecip = precip * (1.0 - freeze);
+    const snowPrecip = precip * freeze;
+
     if (this.rainGeometry) {
-      // Derive bounds for rain from sceneBounds uniform if available
-      let boundsVec4 = null;
-      if (this.uniforms.sceneBounds && this.uniforms.sceneBounds.value) {
-        boundsVec4 = this.uniforms.sceneBounds.value;
-      }
+      const rainWeather = { ...weather, precipitation: rainPrecip };
+      this.rainGeometry.update(timeInfo, rainWeather, boundsVec4);
+    }
 
-      if (!weather) {
-        weather = weatherController.getCurrentState();
-      }
-
-      this.rainGeometry.update(timeInfo, weather, boundsVec4);
+    if (this.snowGeometry) {
+      const snowWeather = { ...weather, precipitation: snowPrecip };
+      this.snowGeometry.update(timeInfo, snowWeather, boundsVec4);
     }
   }
 
@@ -292,6 +316,14 @@ export class ParticleSystem extends EffectBase {
       }
       this.rainGeometry.dispose();
       this.rainGeometry = null;
+    }
+
+    if (this.snowGeometry) {
+      if (this.snowGeometry.mesh && this.scene) {
+        this.scene.remove(this.snowGeometry.mesh);
+      }
+      this.snowGeometry.dispose();
+      this.snowGeometry = null;
     }
     
     this.computeNode = null;

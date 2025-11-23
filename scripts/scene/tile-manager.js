@@ -6,6 +6,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('TileManager');
 
@@ -33,6 +34,9 @@ export class TileManager {
     
     /** @type {Map<string, THREE.Texture>} */
     this.textureCache = new Map();
+    
+    /** @type {Map<string, {width: number, height: number, data: Uint8ClampedArray}>} */
+    this.alphaMaskCache = new Map();
     
     this.initialized = false;
     this.hooksRegistered = false;
@@ -134,6 +138,85 @@ export class TileManager {
   }
 
   /**
+   * Get all overhead tile sprites (for interaction/hover)
+   * @returns {THREE.Sprite[]}
+   * @public
+   */
+  getOverheadTileSprites() {
+    const sprites = [];
+    for (const { sprite } of this.tileSprites.values()) {
+      if (sprite.userData.isOverhead) sprites.push(sprite);
+    }
+    return sprites;
+  }
+
+  /**
+   * Toggle hover-based hiding for a specific tile. When un-hiding, normal
+   * visibility rules (GM hidden, alpha, etc.) are re-applied.
+   * @param {string} tileId
+   * @param {boolean} hidden
+   * @public
+   */
+  setTileHoverHidden(tileId, hidden) {
+    const data = this.tileSprites.get(tileId);
+    if (!data) return;
+
+    data.hoverHidden = !!hidden;
+  }
+
+  /**
+   * Determine if a given world-space point hits an opaque pixel of a tile
+   * sprite's texture (alpha > 0.5).
+   * @param {{sprite: THREE.Sprite, tileDoc: TileDocument}} data
+   * @param {number} worldX
+   * @param {number} worldY
+   * @returns {boolean}
+   * @public
+   */
+  isWorldPointOpaque(data, worldX, worldY) {
+    const { sprite, tileDoc } = data;
+    const texture = sprite.material?.map;
+    const image = texture?.image;
+    if (!texture || !image) return false;
+
+    // Map world coords back to Foundry top-left space
+    const sceneHeight = canvas.dimensions?.height || 10000;
+    const foundryY = sceneHeight - worldY;
+
+    const u = (worldX - tileDoc.x) / tileDoc.width;
+    const v = (foundryY - tileDoc.y) / tileDoc.height;
+
+    if (u < 0 || u > 1 || v < 0 || v > 1) return false;
+
+    const key = texture.uuid || image.src || texture.id || tileDoc.id;
+
+    let mask = this.alphaMaskCache.get(key);
+    if (!mask) {
+      try {
+        const canvasEl = document.createElement('canvas');
+        canvasEl.width = image.width;
+        canvasEl.height = image.height;
+        const ctx = canvasEl.getContext('2d');
+        if (!ctx) return true; // Fallback: treat as opaque
+        ctx.drawImage(image, 0, 0);
+        const imgData = ctx.getImageData(0, 0, image.width, image.height);
+        mask = { width: image.width, height: image.height, data: imgData.data };
+        this.alphaMaskCache.set(key, mask);
+      } catch (e) {
+        // If we fail to build a mask, default to opaque to avoid breaking UX
+        return true;
+      }
+    }
+
+    const ix = Math.floor(u * (mask.width - 1));
+    const iy = Math.floor(v * (mask.height - 1));
+    const index = (iy * mask.width + ix) * 4;
+    const alpha = mask.data[index + 3] / 255;
+
+    return alpha > 0.5;
+  }
+
+  /**
    * Update tile states (occlusion animation)
    * @param {Object} timeInfo - Time information
    * @public
@@ -146,7 +229,10 @@ export class TileManager {
       ? canvas.tokens.controlled 
       : (canvas.tokens?.observed || []);
 
-    for (const { sprite, tileDoc } of this.tileSprites.values()) {
+    let anyHoverHidden = false;
+
+    for (const data of this.tileSprites.values()) {
+      const { sprite, tileDoc, hoverHidden } = data;
       // Only process overhead tiles for occlusion
       if (!sprite.userData.isOverhead) continue;
 
@@ -190,15 +276,28 @@ export class TileManager {
           targetAlpha = occlusion.alpha ?? 0;
         }
       }
+
+      // Apply hover-hide (fade to zero alpha when hovered)
+      if (hoverHidden) {
+        targetAlpha = 0;
+        anyHoverHidden = true;
+      }
       
       // Smoothly interpolate alpha
-      // We use a fast lerp factor
+      // Use a ~2 second time constant for hover/occlusion fades
       const currentAlpha = sprite.material.opacity;
       if (Math.abs(currentAlpha - targetAlpha) > 0.01) {
-        sprite.material.opacity = THREE.MathUtils.lerp(currentAlpha, targetAlpha, 10 * dt);
+        const lerpFactor = Math.min(dt / 2, 1); // ~2s to converge
+        sprite.material.opacity = THREE.MathUtils.lerp(currentAlpha, targetAlpha, lerpFactor);
       } else {
         sprite.material.opacity = targetAlpha;
       }
+    }
+
+    // Tell WeatherController whether any roof is currently being hover-hidden,
+    // so that precipitation effects can decide when to apply the _Outdoors mask.
+    if (weatherController && typeof weatherController.setRoofMaskActive === 'function') {
+      weatherController.setRoofMaskActive(anyHoverHidden);
     }
   }
 

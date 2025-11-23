@@ -745,7 +745,8 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     windSpeed: weatherController.targetState.windSpeed,
     windDirection: Math.atan2(weatherController.targetState.windDirection.y, weatherController.targetState.windDirection.x) * (180 / Math.PI),
     fogDensity: weatherController.targetState.fogDensity,
-    wetness: weatherController.currentState.wetness // Read-only derived
+    wetness: weatherController.currentState.wetness, // Read-only derived
+    freezeLevel: weatherController.targetState.freezeLevel
   };
 
   // Fix negative angles

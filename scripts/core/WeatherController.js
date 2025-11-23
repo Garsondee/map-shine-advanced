@@ -74,6 +74,9 @@ export class WeatherController {
     this.season = 'SUMMER';
 
     this.initialized = false;
+
+    /** @type {boolean} Whether weather effects should currently apply the roof/outdoors mask */
+    this.roofMaskActive = false;
   }
 
   /**
@@ -109,6 +112,16 @@ export class WeatherController {
   setRoofMap(texture) {
     this.roofMap = texture;
     log.info('Roof Map set from _Outdoors texture');
+  }
+
+  /**
+   * Enable or disable use of the roof/outdoors mask for weather rendering.
+   * This lets other systems (e.g. TileManager hover reveal) decide when the
+   * _Outdoors mask should actually gate precipitation visibility.
+   * @param {boolean} active
+   */
+  setRoofMaskActive(active) {
+    this.roofMaskActive = !!active;
   }
 
   /**
@@ -211,8 +224,11 @@ export class WeatherController {
     const noise3 = Math.sin(time * 0.70 + this.noiseOffset * 3) * base * 0.20;
 
     // Perturb wind speed
+    // Scale variability by wind speed so we don't get strong gusts at 0 base wind
+    const windScale = Math.min(1.0, this.targetState.windSpeed * 2.0 + 0.1);
+    
     this.currentState.windSpeed = THREE.MathUtils.clamp(
-      this.currentState.windSpeed + noise1 + noise3, 
+      this.currentState.windSpeed + (noise1 + noise3) * windScale, 
       0, 1
     );
 
@@ -397,6 +413,14 @@ export class WeatherController {
           group: 'manual',
           readonly: true
         },
+        freezeLevel: {
+          label: 'Freeze Level',
+          default: 0.0,
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          group: 'manual'
+        },
 
         // Debug controls
         rainAngle: {
@@ -411,7 +435,7 @@ export class WeatherController {
       groups: [
         { label: 'Environment', type: 'folder', parameters: ['timeOfDay'] },
         { label: 'Simulation', type: 'folder', parameters: ['variability', 'transitionDuration'] },
-        { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'windSpeed', 'windDirection', 'fogDensity', 'wetness'], expanded: true },
+        { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'windSpeed', 'windDirection', 'fogDensity', 'wetness', 'freezeLevel'], expanded: true },
         { label: 'Debug', type: 'folder', parameters: ['rainAngle'] }
       ],
       presets: {

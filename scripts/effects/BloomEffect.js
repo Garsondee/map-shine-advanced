@@ -31,7 +31,10 @@ export class BloomEffect extends EffectBase {
       strength: 1.5,
       radius: 0.4,
       threshold: 0.85,
-      tintColor: { r: 1, g: 1, b: 1 }
+      tintColor: { r: 1, g: 1, b: 1 },
+      // Controls how the bloom layer blends over the base scene
+      blendOpacity: 1.0,
+      blendMode: 'add' // 'add', 'screen', 'soft'
     };
   }
 
@@ -46,7 +49,7 @@ export class BloomEffect extends EffectBase {
           name: 'bloom',
           label: 'Bloom Settings',
           type: 'inline',
-          parameters: ['strength', 'radius', 'threshold', 'tintColor']
+          parameters: ['strength', 'radius', 'threshold', 'tintColor', 'blendOpacity', 'blendMode']
         }
       ],
       parameters: {
@@ -54,7 +57,18 @@ export class BloomEffect extends EffectBase {
         strength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 1.5 },
         radius: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.4 },
         threshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.85 },
-        tintColor: { type: 'color', default: { r: 1, g: 1, b: 1 } }
+        tintColor: { type: 'color', default: { r: 1, g: 1, b: 1 } },
+        blendOpacity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0 },
+        // Tweakpane expects an options map: label -> value
+        blendMode: {
+          type: 'select',
+          options: {
+            'Additive': 'add',
+            'Screen': 'screen',
+            'Soft Light': 'soft'
+          },
+          default: 'add'
+        }
       },
       presets: {
         'Subtle': { strength: 0.8, radius: 0.2, threshold: 0.9 },
@@ -105,6 +119,23 @@ export class BloomEffect extends EffectBase {
     this.pass.strength = p.strength;
     this.pass.radius = p.radius;
     this.pass.threshold = p.threshold;
+    
+    // Update blend material so we can control how the bloom glows over the scene
+    if (this.pass.blendMaterial) {
+      const THREE = window.THREE;
+      this.pass.blendMaterial.opacity = p.blendOpacity;
+      
+      let targetBlending = THREE.AdditiveBlending;
+      if (p.blendMode === 'screen') {
+        targetBlending = THREE.ScreenBlending;
+      } else if (p.blendMode === 'soft') {
+        targetBlending = THREE.SoftLightBlending;
+      }
+      if (this.pass.blendMaterial.blending !== targetBlending) {
+        this.pass.blendMaterial.blending = targetBlending;
+        this.pass.blendMaterial.needsUpdate = true;
+      }
+    }
     
     if (this.pass.compositeMaterial.uniforms['bloomTintColors']) {
         this.updateTintColor();

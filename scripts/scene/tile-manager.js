@@ -286,10 +286,18 @@ export class TileManager {
       // Smoothly interpolate alpha
       // Use a ~2 second time constant for hover/occlusion fades
       const currentAlpha = sprite.material.opacity;
-      if (Math.abs(currentAlpha - targetAlpha) > 0.01) {
-        const lerpFactor = Math.min(dt / 2, 1); // ~2s to converge
-        sprite.material.opacity = THREE.MathUtils.lerp(currentAlpha, targetAlpha, lerpFactor);
+      const diff = targetAlpha - currentAlpha;
+      const absDiff = Math.abs(diff);
+
+      if (absDiff > 0.0005) {
+        // Move opacity toward target at a fixed rate of 0.5 per second,
+        // so a full 0->1 transition takes about 2 seconds regardless of
+        // frame rate.
+        const maxStep = dt / 2; // 0.5 units per second
+        const step = Math.sign(diff) * Math.min(absDiff, maxStep);
+        sprite.material.opacity = currentAlpha + step;
       } else {
+        // Close enough: snap to target to avoid tiny tails.
         sprite.material.opacity = targetAlpha;
       }
     }

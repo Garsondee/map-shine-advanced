@@ -83,8 +83,11 @@ export class SnowGeometry {
           float localTime = mod(uTime + timeOffset, cycleDuration);
           float life = localTime / cycleDuration;
 
-          // Per-instance enable based on spawn density (snow intensity)
-          float spawnMask = step(hash(idx + 17.0), clamp(uSpawnDensity, 0.0, 1.0));
+          // Per-instance enable based on spawn density (snow intensity).
+          // Use an explicit epsilon guard so that when density is effectively
+          // zero, NO flakes render (even if hash() returns 0.0 for some ids).
+          float density = clamp(uSpawnDensity, 0.0, 1.0);
+          float spawnMask = step(hash(idx + 17.0), density) * step(0.0001, density);
 
           float areaW = uSceneBounds.z;
           float areaH = uSceneBounds.w;
@@ -305,7 +308,9 @@ export class SnowGeometry {
     const clampedPrecip = Math.max(0, Math.min(1, precip));
     const density = Math.pow(clampedPrecip, 0.9);
     if (u.uSpawnDensity) {
-      u.uSpawnDensity.value = density;
+      // Hard cutoff: if density is effectively zero, force an exact 0 so
+      // the shader never spawns stray flakes from numerical edge cases.
+      u.uSpawnDensity.value = density <= 0.0001 ? 0.0 : density;
     }
 
     try {

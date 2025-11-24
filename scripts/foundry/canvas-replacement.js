@@ -18,6 +18,7 @@ import { LightingEffect } from '../effects/LightingEffect.js';
 import { LensflareEffect } from '../effects/LensflareEffect.js';
 import { PrismEffect } from '../effects/PrismEffect.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
+import { FireSparksEffect } from '../particles/FireSparksEffect.js';
 import {
   CloudShadowsEffect,
   TimeOfDayEffect,
@@ -37,7 +38,6 @@ import {
   BushTreeEffect,
   OverheadEffect,
   DustEffect,
-  FireSparksEffect,
   SteamEffect,
   MetallicGlintsEffect,
   SmellyFliesEffect,
@@ -347,6 +347,15 @@ async function createThreeCanvas(scene) {
     const particleSystem = new ParticleSystem();
     effectComposer.registerEffect(particleSystem);
 
+    // Step 3.4: Register Fire Sparks Effect
+    const fireSparksEffect = new FireSparksEffect();
+    effectComposer.registerEffect(fireSparksEffect);
+    fireSparksEffect.setParticleSystem(particleSystem);
+    // Pass asset bundle to check for _Fire mask
+    if (bundle) {
+      fireSparksEffect.setAssetBundle(bundle);
+    }
+
     // Step 3.5: Register Prism Effect
     const prismEffect = new PrismEffect();
     effectComposer.registerEffect(prismEffect);
@@ -365,6 +374,7 @@ async function createThreeCanvas(scene) {
 
     // Provide the base mesh and asset bundle to the effect
     const basePlane = sceneComposer.getBasePlane();
+
     specularEffect.setBaseMesh(basePlane, bundle);
     iridescenceEffect.setBaseMesh(basePlane, bundle);
     prismEffect.setBaseMesh(basePlane, bundle);
@@ -432,6 +442,7 @@ async function createThreeCanvas(scene) {
     mapShine.lensflareEffect = lensflareEffect;
     mapShine.colorCorrectionEffect = colorCorrectionEffect;
     mapShine.asciiEffect = asciiEffect;
+    mapShine.fireSparksEffect = fireSparksEffect;
     mapShine.cameraController = cameraController;
     mapShine.tokenManager = tokenManager; // NEW: Expose token manager for diagnostics
     mapShine.tileManager = tileManager; // NEW: Expose tile manager for diagnostics
@@ -455,7 +466,7 @@ async function createThreeCanvas(scene) {
 
     // Initialize Tweakpane UI
     try {
-      await initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect);
+      await initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect, fireSparksEffect);
     } catch (e) {
       log.error('Failed to initialize UI:', e);
     }
@@ -478,7 +489,7 @@ async function createThreeCanvas(scene) {
  * @param {LensflareEffect} lensflareEffect - The lensflare effect instance
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect, fireSparksEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -770,6 +781,69 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     'atmospheric'
   );
 
+  // --- Fire & Sparks Debug Settings ---
+  if (fireSparksEffect) {
+    const fireSchema = FireSparksEffect.getControlSchema();
+
+    const onFireUpdate = (effectId, paramId, value) => {
+      const ps = fireSparksEffect.particleSystem;
+      const em = ps?.emitterManager;
+
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        fireSparksEffect.settings.enabled = value;
+        fireSparksEffect.params.enabled = value;
+
+        // When disabling, force global emitters off; when enabling, restore from params
+        if (em) {
+          if (fireSparksEffect.globalFireEmitterId) {
+            const e = em.emitters.find(x => x.id === fireSparksEffect.globalFireEmitterId);
+            if (e) e.rate = value ? fireSparksEffect.params.globalFireRate : 0.0;
+          }
+          if (fireSparksEffect.globalSparksEmitterId) {
+            const e = em.emitters.find(x => x.id === fireSparksEffect.globalSparksEmitterId);
+            if (e) e.rate = value ? fireSparksEffect.params.globalSparksRate : 0.0;
+          }
+        }
+        return;
+      }
+
+      // Persist param value
+      if (fireSparksEffect.params && Object.prototype.hasOwnProperty.call(fireSparksEffect.params, paramId)) {
+        fireSparksEffect.params[paramId] = value;
+      }
+
+      if (!ps || !em) return;
+
+      // Update mask toggle
+      if (paramId === 'fireMaskEnabled' && ps.uniforms?.fireMaskEnabled) {
+        ps.uniforms.fireMaskEnabled.value = value ? 1.0 : 0.0;
+      }
+
+      // Update mask threshold
+      if (paramId === 'fireMaskThreshold' && ps.uniforms?.fireMaskThreshold) {
+        ps.uniforms.fireMaskThreshold.value = value;
+      }
+
+      // Update global emitter rates if we have handles
+      if (paramId === 'globalFireRate' && fireSparksEffect.globalFireEmitterId) {
+        const e = em.emitters.find(x => x.id === fireSparksEffect.globalFireEmitterId);
+        if (e) e.rate = value;
+      }
+      if (paramId === 'globalSparksRate' && fireSparksEffect.globalSparksEmitterId) {
+        const e = em.emitters.find(x => x.id === fireSparksEffect.globalSparksEmitterId);
+        if (e) e.rate = value;
+      }
+    };
+
+    uiManager.registerEffect(
+      'fire-sparks',
+      'Fire / Sparks (Debug)',
+      fireSchema,
+      onFireUpdate,
+      'particle'
+    );
+  }
+
   // Add a simple windvane indicator inside the Weather UI folder that reflects
   // the live scene wind direction from WeatherController.currentState.
   try {
@@ -941,7 +1015,6 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
 
     // Particle Systems
     { id: 'dust',               name: 'Dust',                 Class: DustEffect,              categoryId: 'particle' },
-    { id: 'fire-sparks',        name: 'Fire & Sparks',        Class: FireSparksEffect,        categoryId: 'particle' },
     { id: 'steam',              name: 'Steam',                Class: SteamEffect,             categoryId: 'particle' },
     { id: 'metallic-glints',    name: 'Metallic Glints',      Class: MetallicGlintsEffect,    categoryId: 'particle' },
     { id: 'smelly-flies',       name: 'Smelly Flies',         Class: SmellyFliesEffect,       categoryId: 'particle' },

@@ -6,6 +6,7 @@ import { createParticleMaterial } from './shaders/rendering.js';
 import { weatherController } from '../core/WeatherController.js';
 import { RainStreakGeometry } from './RainStreakGeometry.js';
 import { SnowGeometry } from './SnowGeometry.js';
+import { EmitterManager } from './EmitterManager.js';
 
 const log = createLogger('ParticleSystem');
 
@@ -14,7 +15,7 @@ const log = createLogger('ParticleSystem');
  * Designed for renderer backends that support compute-style simulation and TSL NodeMaterial.
  */
 export class ParticleSystem extends EffectBase {
-  constructor(capacity = 100000) {
+  constructor(capacity = 60000) {
     // Temporarily use 'low' tier so the particle system always registers,
     // even on GPUs where advanced compute features are limited.
     super('particles', RenderLayers.PARTICLES, 'low');
@@ -31,7 +32,7 @@ export class ParticleSystem extends EffectBase {
     this.snowGeometry = null;
 
     /** @type {import('./EmitterManager.js').EmitterManager|null} */
-    this.emitterManager = null;
+    this.emitterManager = new EmitterManager();
 
     /** @type {string|null} ID of the main weather emitter */
     this.weatherEmitterId = null;
@@ -51,7 +52,13 @@ export class ParticleSystem extends EffectBase {
     this.uniforms = {
       deltaTime: null,
       time: null,
-      sceneBounds: null
+      sceneBounds: null,
+      roofMap: null,
+      roofMaskEnabled: null,
+      fireMap: null,
+      fireMaskEnabled: null,
+      fireMaskThreshold: null,
+      globalWindInfluence: null
     };
   }
 
@@ -115,17 +122,19 @@ export class ParticleSystem extends EffectBase {
       // 5. Create Mesh (Points)
       this.particles = new THREE.Points(geometry, material);
       this.particles.frustumCulled = false; // Always render (bounds are dynamic)
-      // Legacy sprite-based particle rendering is currently disabled in favor of
-      // the new 3D RainStreakGeometry path.
-      this.particles.visible = false;
+      // Enable GPU particle rendering for fire/sparks effects.
+      this.particles.visible = true;
       this.scene.add(this.particles);
 
       // 6. Ensure uniform objects exist
       // createParticleMaterial wires its internal ShaderMaterial uniforms into
-      // this.uniforms.{time, deltaTime}, but we defensively initialize them
-      // in case the implementation changes.
+      // this.uniforms.{time, deltaTime, fireMap, fireMaskEnabled}, but we
+      // defensively initialize them in case the implementation changes.
       if (!this.uniforms.deltaTime) this.uniforms.deltaTime = { value: 0.016 };
       if (!this.uniforms.time) this.uniforms.time = { value: 0.0 };
+      if (!this.uniforms.fireMap) this.uniforms.fireMap = { value: null };
+      if (!this.uniforms.fireMaskEnabled) this.uniforms.fireMaskEnabled = { value: 0.0 };
+      if (!this.uniforms.fireMaskThreshold) this.uniforms.fireMaskThreshold = { value: 0.9 };
       
       // Simulation is handled directly in the vertex shader via createParticleMaterial
       
@@ -156,11 +165,8 @@ export class ParticleSystem extends EffectBase {
       window.MapShineParticles = this;
       log.info('Debug: ParticleSystem exposed as window.MapShineParticles');
 
-      // Initialize EmitterManager and Weather Emitter
-      if (!this.emitterManager) {
-        const { EmitterManager } = await import('./EmitterManager.js');
-        this.emitterManager = new EmitterManager();
-        
+      // Initialize Weather Emitter
+      if (this.emitterManager && !this.weatherEmitterId) {
         // Add a persistent weather emitter covering the scene
         // Initial state is inactive (rate 0) until weather system updates it
         const handle = this.emitterManager.addEmitter({
@@ -243,6 +249,17 @@ export class ParticleSystem extends EffectBase {
           if (dir && dir.x !== undefined) {
              this.uniforms.windVector.value.set(dir.x * speed, dir.y * speed, 0);
           }
+        }
+        
+        // Update Roof/Outdoors Mask
+        if (this.uniforms.roofMap && weatherController.roofMap) {
+          this.uniforms.roofMap.value = weatherController.roofMap;
+          // Only enable if actively used (controlled by weather controller or scene settings)
+          this.uniforms.roofMaskEnabled.value = weatherController.roofMaskActive ? 1.0 : 0.0;
+        }
+        
+        if (this.uniforms.globalWindInfluence) {
+            this.uniforms.globalWindInfluence.value = 1.0; // Default to full influence
         }
       }
     }

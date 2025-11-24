@@ -96,7 +96,10 @@ export class RainStreakGeometry {
           float lifeProgress = localTime / cycleDuration;
 
           // Per-instance spawn gating driven by precipitation slider.
-          float spawnMask = step(hash(idx + 13.0), clamp(uSpawnDensity, 0.0, 1.0));
+          // Use an explicit epsilon guard so that when density is effectively
+          // zero, NO streaks render (even if hash() returns 0.0 for some ids).
+          float density = clamp(uSpawnDensity, 0.0, 1.0);
+          float spawnMask = step(hash(idx + 13.0), density) * step(0.0001, density);
 
           // Random spread over scene
           float spreadX = (hash(idx + 1.0) - 0.5);
@@ -416,13 +419,6 @@ export class RainStreakGeometry {
     const lengthFactor = 0.7 + windSpeed * 1.3; // ~0.7 - 2.0
     u.uScale.value.y = baseLen * lengthFactor;
 
-    // Maintain constant thickness to prevent "laddering" artifacts (parallel lines)
-    // caused by stretching the procedural droplet texture horizontally.
-    // Slightly thicker so width shaping is visible at normal zoom.
-    const baseThickness = 0.07;
-    const thicknessFactor = 0.9; 
-    u.uScale.value.x = baseThickness * thicknessFactor;
-
     // Map precipitation 0..1 -> active streak fraction 0..1.
     // Use a slightly aggressive curve so density ramps up quickly.
     const clampedPrecip = Math.max(0, Math.min(1, precip));
@@ -432,11 +428,15 @@ export class RainStreakGeometry {
       const k = 3.0;
       const lerp = 1.0 - Math.exp(-k * delta);
       this._spawnDensity += (targetDensity - this._spawnDensity) * lerp;
+      // Hard cutoff: if density is effectively zero, force exact 0 so
+      // the shader never spawns stray streaks from numerical edge cases.
+      if (targetDensity <= 0.0001) {
+        this._spawnDensity = 0.0;
+      }
       u.uSpawnDensity.value = this._spawnDensity;
     }
 
-    // Scene darkness: drive from Foundry scene environment if available so
-    // shimmer fades appropriately in dark scenes.
+    // Scene darkness: drive from Foundry scene environment if available.
     try {
       if (typeof canvas !== 'undefined' && canvas?.scene?.environment?.darknessLevel !== undefined) {
         u.uSceneDarkness.value = canvas.scene.environment.darknessLevel;

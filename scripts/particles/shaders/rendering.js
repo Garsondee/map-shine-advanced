@@ -30,9 +30,7 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
       uWindVector: { value: new THREE.Vector3(0, 0, 0) },
       uRoofMap: { value: null },
       uRoofMaskEnabled: { value: 0.0 },
-      uFireMap: { value: null },
-      uFireMaskEnabled: { value: 0.0 },
-      uFireMaskThreshold: { value: 0.9 },
+      uFirePositionMap: { value: null },
       uGlobalWindInfluence: { value: 1.0 },
       // Debug: global rain streak orientation in degrees (screen-space)
       uRainAngle: { value: 270.0 }
@@ -47,9 +45,7 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
       uniform vec3 uWindVector;
       uniform sampler2D uRoofMap;
       uniform float uRoofMaskEnabled;
-      uniform sampler2D uFireMap;
-      uniform float uFireMaskEnabled;
-      uniform float uFireMaskThreshold;
+      uniform sampler2D uFirePositionMap;
       uniform float uGlobalWindInfluence;
       uniform float uRainAngle;
 
@@ -122,29 +118,52 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
              outdoorFactor = texture2D(uRoofMap, mapUV).r;
         }
         
-        // Fire Mask factor (applied later after computing world-space pos)
-        float fireMaskFactor = 1.0;
-
         vec3 effectiveWind = uWindVector * outdoorFactor * uGlobalWindInfluence;
 
         if (emType == 0.0) {
-          // FIRE (global mask-driven variant)
-          // - Emitter is centered on the scene and param1/2 encode the scene size.
-          // - We generate a uniform random XY jitter over the scene rectangle and
-          //   then use a separate texture lookup (uFireMap) to decide which
-          //   particles are actually visible based on the authored _Fire mask.
+          // FIRE (Lookup Map Technique)
+          // ---------------------------------------------
+          // uFirePositionMap is a packed list of VALID spawn locations built
+          // on the CPU from the _Fire luminance mask at load time.
           //
-          // This keeps the CPU emitter simple (just a big rectangle) and pushes
-          // the spawn filtering entirely into the vertex shader.
-          // Param1: Scene width for global emitter
-          // Param2: Scene height for global emitter
-          // Use half-extent so jitter covers exactly [sceneX, sceneX+sceneWidth] etc.
-          float radiusX = (emParam1 > 0.0) ? emParam1 * 0.5 : 20.0;
-          float radiusY = (emParam2 > 0.0) ? emParam2 * 0.5 : radiusX;
+          // Instead of throwing particles into a large rectangle and then
+          // rejecting the ones that land on dark pixels, we:
+          //   1. Scan the mask once on the CPU and record every bright pixel.
+          //   2. Store those (u,v,brightness) triples into a float texture.
+          //   3. Here in the shader, pick a random texel from that list.
+          //
+          // Result: 100% of live particles are guaranteed to spawn ON the
+          // painted fire mask, no wasted work, and the visual density directly
+          // reflects the original luminance.
 
-          // Zero-velocity: particles sit on the ground plane with simple XY jitter
-          vec3 jitter = vec3(spread * radiusX, spreadY * radiusY, 0.0);
-          pos = vec3(emX, emY, 0.0) + jitter;
+          // 1. Generate a random ID for looking up a position
+          // We use the particle index and time to pick a spot in our
+          // Coordinate Texture (position map).
+          vec2 lookupUV = vec2(hash(idx + 10.0 + uTime * 0.1), hash(idx + 20.0 + uTime * 0.1));
+          
+          // 2. Read the coordinate from our DataTexture
+          vec4 spawnData = texture2D(uFirePositionMap, lookupUV);
+          
+          // spawnData.x = World X (Normalized 0-1)
+          // spawnData.y = World Y (Normalized 0-1)
+          // spawnData.z = Intensity
+          
+          if (spawnData.z <= 0.001) {
+              // Hit an empty spot? Kill particle
+              size = 0.0;
+              pos = vec3(0.0, 0.0, -9999.0);
+          } else {
+              // 3. Map Normalized Coord back to World Space
+              // Use uSceneBounds directly as the reference frame for the mask
+              float worldX = uSceneBounds.x + (spawnData.x * uSceneBounds.z);
+              float worldY = uSceneBounds.y + (spawnData.y * uSceneBounds.w); // y is already flipped in generator
+              
+              // Apply some jitter so they don't look like a grid
+              float jitterX = (hash(idx) - 0.5) * 10.0; 
+              float jitterY = (hash(idx + 1.0) - 0.5) * 10.0;
+              
+              pos = vec3(worldX + jitterX, worldY + jitterY, 0.0);
+          }
 
           // Fire Styling: life-based color gradient and size pulse.
           // Color over life:
@@ -201,32 +220,6 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
           // We don't have per-particle velocity in this stateless shader, so we reuse the
           // analytic fall direction and add projected wind.
           motionDir = normalize(vec3(uWindVector.xy * 0.001, -1.0));
-        } else if (emType == 4.0) {
-          // SPARKS
-          // Ballistic motion: Up + Gravity
-          
-          float radius = (emParam1 > 0.0) ? emParam1 : 10.0;
-          
-          // Initial velocity (Random Up cone)
-          vec3 v0 = vec3(spread * 20.0, spreadY * 20.0, 150.0 + randSeed * 100.0);
-          vec3 gravity = vec3(0.0, 0.0, -80.0); // Drag/Gravity
-          
-          // Position = p0 + v0*t + 0.5*a*t^2
-          vec3 ballistic = v0 * localTime + 0.5 * gravity * localTime * localTime;
-          
-          // Wind influence (sparks are light)
-          vec3 windDrift = effectiveWind * localTime * 2.0;
-          
-          // Turbulent swirl
-          float swirlFreq = 5.0;
-          vec3 swirl = vec3(sin(localTime * swirlFreq + randSeed * 10.0), cos(localTime * swirlFreq), 0.0) * 10.0 * localTime;
-
-          pos = vec3(emX, emY, emZ) + ballistic + windDrift + swirl;
-          
-          // Color: Bright Yellow/White -> Red -> Off
-          vec3 cSpark = mix(vec3(1.0, 0.9, 0.5), vec3(1.0, 0.2, 0.0), lifeProgress);
-          color = vec4(cSpark, 1.0);
-          
         } else {
           // MAGIC / SPARKLES (Default fallback)
           float radius = localTime * 5.0;
@@ -240,47 +233,11 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
           motionDir = normalize(dir);
         }
 
-        // Sample Fire Mask using particle world position (Fire only).
-        //
-        // World -> UV mapping:
-        //   - uSceneBounds = vec4(sceneX, sceneY, sceneWidth, sceneHeight)
-        //   - Particles live in the same world space as the base plane, so we
-        //     remap pos.xy into [0,1] relative to the scene rect and flip V to
-        //     match the texture orientation used by the ground plane.
-        //
-        // Important gotcha: many authoring tools export fully opaque alpha
-        // (A=1) even for black pixels. If we used max(R,G,B,A) we would get
-        // fireMaskFactor=1 everywhere. We therefore only look at RGB when
-        // constructing fireMaskFactor.
-        //
-        // Debugging: uFireMaskThreshold<0 enables a special mode that colors
-        // particles by (u,v,mask) so UV alignment and mask values can be
-        // inspected directly in-scene.
-        if (emType == 0.0) {
-            float u = (pos.x - uSceneBounds.x) / uSceneBounds.z;
-            float v = (pos.y - uSceneBounds.y) / uSceneBounds.w;
-            v = 1.0 - v; // Flip V to match texture orientation (consistent with roof mask sampling)
-            vec2 mapUV = clamp(vec2(u, v), 0.0, 1.0);
-
-            // Fire mask: use RGB luminance only. Many authoring tools export
-            // fully opaque alpha (1.0) even for black pixels, which would make
-            // a max(R,G,B,A) test always return 1.0. By ignoring alpha here we
-            // ensure that black areas (RGB≈0) correctly produce a 0.0 mask.
-            vec4 maskSample = texture2D(uFireMap, mapUV);
-            fireMaskFactor = max(max(maskSample.r, maskSample.g), maskSample.b);
-
-            // Debug mode: when threshold is negative, visualize UVs instead of
-            // normal fire color so we can inspect coordinate mapping.
-            if (uFireMaskThreshold < 0.0) {
-              color = vec4(mapUV.x, mapUV.y, fireMaskFactor, 1.0);
-            }
-        }
-
         // Visibility / Opacity
         float isActive = step(0.0, emRate - 0.0001);
         float fadeIn = clamp(lifeProgress * 10.0, 0.0, 1.0);
         // Note: Some types handle their own fadeOut (fire)
-        float fadeOut = (emType == 0.0 || emType == 4.0) ? 1.0 : clamp((1.0 - lifeProgress) * 5.0, 0.0, 1.0);
+        float fadeOut = (emType == 0.0) ? 1.0 : clamp((1.0 - lifeProgress) * 5.0, 0.0, 1.0);
         
         // Clipping: Check if inside scene bounds
         float inBoundsX = step(uSceneBounds.x, pos.x) * step(pos.x, uSceneBounds.x + uSceneBounds.z);
@@ -288,25 +245,6 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
         float inBounds = inBoundsX * inBoundsY;
 
         float alpha = fadeIn * fadeOut * isActive * inBounds;
-        
-        // DEBUG: Visualize fire mask as grayscale for Fire particles when
-        // threshold is non-negative (normal masking mode). When threshold is
-        // negative, UV debug coloring above takes precedence.
-        if (emType == 0.0 && uFireMaskThreshold >= 0.0) {
-          color = vec4(fireMaskFactor, fireMaskFactor, fireMaskFactor, 1.0);
-        }
-
-        // Apply Fire Mask cutoff to Fire (0) only when enabled and when
-        // threshold is non-negative. Negative threshold is reserved for
-        // debugging the UV/mask mapping so that authors can see the raw
-        // fireMaskFactor without culling.
-        if (uFireMaskEnabled > 0.5 && uFireMaskThreshold >= 0.0 && emType == 0.0) {
-           float maskStep = step(uFireMaskThreshold, fireMaskFactor);
-           alpha *= maskStep;
-           if (maskStep < 0.5) {
-             size = 0.0;
-           }
-        }
 
         vColor = color;
         vAlpha = alpha;
@@ -369,11 +307,16 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
 
           col = vec4(vColor.rgb, vColor.a * lineMask);
         } else {
-          // Other types (fire/smoke/magic): use texture as a soft alpha mask only.
-          // This avoids inheriting any base texture tint (e.g. blue) and lets the
-          // vertex shader fully control fire/smoke colors.
-          vec4 tex = texture2D(uParticleTexture, uv);
-          col = vec4(vColor.rgb, vColor.a * tex.a);
+          // Other types (fire/smoke/magic): render as soft round sprites using
+          // a procedural radial alpha falloff so they appear as glowing discs
+          // instead of hard-edged squares.
+          vec2 p = uv - vec2(0.5);
+          float r = length(p);
+          float edge = 0.5;
+          float inner = 0.25;
+          float radialMask = 1.0 - smoothstep(inner, edge, r);
+
+          col = vec4(vColor.rgb, vColor.a * radialMask);
         }
 
         col.a *= vAlpha;
@@ -383,6 +326,7 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
     `,
     transparent: true,
     depthWrite: false,
+    depthTest: false,
     // Use normal alpha blending so rain appears as blue droplets over the map
     // instead of overly bright additive blobs.
     blending: THREE.NormalBlending
@@ -395,9 +339,7 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
     uniforms.deltaTime = material.uniforms.uDeltaTime;
     uniforms.sceneBounds = material.uniforms.uSceneBounds;
     // Fire mask plumbing
-    uniforms.fireMap = material.uniforms.uFireMap;
-    uniforms.fireMaskEnabled = material.uniforms.uFireMaskEnabled;
-    uniforms.fireMaskThreshold = material.uniforms.uFireMaskThreshold;
+    uniforms.firePositionMap = material.uniforms.uFirePositionMap;
     // Expose debug rain angle uniform for external control
     uniforms.rainAngle = material.uniforms.uRainAngle;
   }

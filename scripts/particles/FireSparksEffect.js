@@ -29,8 +29,6 @@ export class FireSparksEffect extends EffectBase {
     // Handles for the scene-wide emitters created from the _Fire mask
     /** @type {string|null} */
     this.globalFireEmitterId = null;
-    /** @type {string|null} */
-    this.globalSparksEmitterId = null;
 
     // Global settings
     this.settings = {
@@ -43,10 +41,7 @@ export class FireSparksEffect extends EffectBase {
     // UI-exposed parameters for debugging and tuning
     this.params = {
       enabled: true,
-      globalFireRate: 0.25,
-      globalSparksRate: 0.1,
-      fireMaskEnabled: true,
-      fireMaskThreshold: 0.05
+      globalFireRate: 0.25
     };
   }
 
@@ -60,9 +55,9 @@ export class FireSparksEffect extends EffectBase {
       groups: [
         {
           name: 'debug',
-          label: 'Fire / Sparks Debug',
+          label: 'Fire Debug',
           type: 'inline',
-          parameters: ['globalFireRate', 'globalSparksRate', 'fireMaskEnabled', 'fireMaskThreshold']
+          parameters: ['globalFireRate']
         }
       ],
       parameters: {
@@ -73,27 +68,6 @@ export class FireSparksEffect extends EffectBase {
           max: 1.0,
           step: 0.01,
           default: 0.25
-        },
-        globalSparksRate: {
-          type: 'slider',
-          label: 'Global Sparks Rate',
-          min: 0.0,
-          max: 1.0,
-          step: 0.01,
-          default: 0.1
-        },
-        fireMaskEnabled: {
-          type: 'boolean',
-          label: 'Use _Fire Mask',
-          default: true
-        },
-        fireMaskThreshold: {
-          type: 'slider',
-          label: 'Mask Threshold',
-          min: 0.0,
-          max: 1.0,
-          step: 0.01,
-          default: 0.9
         }
       },
       presets: {}
@@ -112,6 +86,101 @@ export class FireSparksEffect extends EffectBase {
   }
 
   /**
+   * Generates a DataTexture containing only the valid coordinates where fire should exist.
+   *
+   * This is the canonical pattern for turning a painted luminance mask texture
+   * (e.g. Battlemap_Fire.png) into GPU-friendly spawn positions:
+   * - CPU (load time):
+   *   - Sample the mask once.
+   *   - For every pixel whose brightness is above a threshold, record its
+   *     normalized UV (0-1) and brightness.
+   *   - Pack that list into a floating-point DataTexture (our "position map").
+   * - GPU (render time):
+   *   - The vertex shader draws a random UV into this position map.
+   *   - Each particle reads back a pre-vetted UV and never sees black/empty
+   *     regions of the original mask.
+   *
+   * Compared to per-frame rejection sampling against the mask, this lookup
+   * approach is:
+   * - Deterministic (every stored pixel is a guaranteed hit).
+   * - Cheap on the GPU (just one texture read instead of repeated retries).
+   * - Faithful to the authored luminance in the source image.
+   *
+   * @param {THREE.Texture} maskTexture - The source _Fire mask
+   * @param {number} threshold - 0.0 to 1.0
+   * @returns {THREE.DataTexture|null}
+   */
+  generatePositionMap(maskTexture, threshold = 0.1) {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+
+    // 1. Draw mask to a canvas to read pixel data
+    const image = maskTexture.image;
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(image, 0, 0);
+    
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imgData.data; // RGBA array
+    
+    // 2. Collect valid coordinates
+    const validCoords = [];
+    for (let i = 0; i < data.length; i += 4) {
+      // Simple luminance check (r+g+b)/3 or just use Red channel
+      // Use Red channel since masks are typically R or grayscale
+      const brightness = data[i] / 255.0; 
+      
+      if (brightness > threshold) {
+        // Store normalized coordinates (0.0 to 1.0)
+        const pixelIndex = i / 4;
+        const x = (pixelIndex % canvas.width) / canvas.width;
+        const y = Math.floor(pixelIndex / canvas.width) / canvas.height;
+        
+        // Push X, Y, and Brightness (for particle intensity)
+        validCoords.push(x, y, brightness); 
+      }
+    }
+
+    if (validCoords.length === 0) {
+      log.warn("FireSparks: No valid spawn points found in mask!");
+      return null;
+    }
+
+    // 3. Create a DataTexture big enough to hold these coords
+    // We make a square texture to fit the data
+    const count = validCoords.length / 3;
+    const size = Math.ceil(Math.sqrt(count));
+    const dataArray = new Float32Array(size * size * 4); // RGBA float texture
+
+    for (let i = 0; i < count; i++) {
+      const stride = i * 3;
+      const texStride = i * 4;
+      
+      dataArray[texStride] = validCoords[stride];     // X
+      dataArray[texStride + 1] = 1.0 - validCoords[stride + 1]; // Y (Flip Y for Three.js)
+      dataArray[texStride + 2] = validCoords[stride + 2]; // Density/Brightness
+      dataArray[texStride + 3] = 1.0; // Padding
+    }
+
+    const positionMap = new THREE.DataTexture(
+      dataArray, 
+      size, 
+      size, 
+      THREE.RGBAFormat, 
+      THREE.FloatType
+    );
+    positionMap.needsUpdate = true;
+    
+    // Store how many valid points we have so the shader knows the range
+    positionMap.userData = { validPoints: count };
+    
+    log.info(`Generated Fire Position Map: ${count} points, texture size ${size}x${size}`);
+    return positionMap;
+  }
+
+  /**
    * Set asset bundle to check for _Fire mask
    * @param {Object} bundle 
    */
@@ -120,46 +189,40 @@ export class FireSparksEffect extends EffectBase {
 
     const fireMask = bundle.masks.find(m => m.type === 'fire');
     if (fireMask) {
-       // Cache texture so we can apply it once the ParticleSystem is fully
-       // initialized. SceneComposer may finish loading masks before
-       // ParticleSystem.initialize has created its ShaderMaterial and
-       // uniforms, so we cannot assume fireMap exists yet.
-       this.fireMaskTexture = fireMask.texture;
-
-       // If the ParticleSystem is already present and uniforms are live,
-       // immediately bind the mask texture and related uniforms.
+       // GENERATE THE LOOKUP MAP
+       this.firePositionMap = this.generatePositionMap(fireMask.texture);
+       
        if (this.particleSystem && this.particleSystem.uniforms) {
-         log.info('Found _Fire mask, enabling Global Fire Mode');
-
-         if (this.particleSystem.uniforms.fireMap) {
-           this.particleSystem.uniforms.fireMap.value = this.fireMaskTexture;
-           this.particleSystem.uniforms.fireMaskEnabled.value = this.params.fireMaskEnabled ? 1.0 : 0.0;
-           if (this.particleSystem.uniforms.fireMaskThreshold) {
-             this.particleSystem.uniforms.fireMaskThreshold.value = this.params.fireMaskThreshold;
-           }
-         }
+          // Pass the new map to uniforms
+          if (this.particleSystem.uniforms.firePositionMap) {
+             this.particleSystem.uniforms.firePositionMap.value = this.firePositionMap;
+             log.info('Bound Fire Position Map to ParticleSystem');
+          } else {
+             log.warn('ParticleSystem uniforms exist but firePositionMap is missing');
+          }
        }
        
-       // 2. Create Global Fire Emitter
-       // We need scene bounds
-       const dim = canvas.dimensions;
-       const width = dim.sceneWidth || dim.width;
-       const height = dim.sceneHeight || dim.height;
-       const cx = (dim.sceneX || 0) + width / 2;
-       const cy = (dim.sceneY || 0) + height / 2;
-       
-       // Fire Emitter covering scene
-       const fireEmitter = this.particleSystem.emitterManager.addEmitter({
-          type: 0, // Fire
-          x: cx, y: cy, z: 0,
-          // Rate is controlled by debug params so user can tune density
-          rate: this.params.globalFireRate,
-          param1: width,
-          param2: height
-       });
-       this.globalFireEmitterId = fireEmitter.id;
-       
-       log.info(`Created Global Fire Emitter at (${cx}, ${cy}) size=${width}x${height} (sparks disabled for debug)`);
+       // 2. Create Global Fire Emitter if a particle backend is available
+       if (this.particleSystem && this.particleSystem.emitterManager && typeof canvas !== 'undefined' && canvas.dimensions) {
+         const dim = canvas.dimensions;
+         const width = dim.sceneWidth || dim.width;
+         const height = dim.sceneHeight || dim.height;
+         const cx = (dim.sceneX || 0) + width / 2;
+         const cy = (dim.sceneY || 0) + height / 2;
+
+         const fireEmitter = this.particleSystem.emitterManager.addEmitter({
+           type: 0, // Fire
+           x: cx, y: cy, z: 0,
+           rate: this.params.globalFireRate,
+           param1: width,
+           param2: height
+         });
+         this.globalFireEmitterId = fireEmitter.id;
+
+         log.info(`Created Global Fire Emitter at (${cx}, ${cy}) size=${width}x${height}`);
+       } else {
+         log.warn('Fire mask found but ParticleSystem/EmitterManager not available; skipping global fire emitters');
+       }
     }
   }
 
@@ -172,14 +235,11 @@ export class FireSparksEffect extends EffectBase {
     this.particleSystem = particleSystem;
     log.info('Connected to ParticleSystem');
 
-    // Deferred wiring: if setAssetBundle ran first and discovered a _Fire mask
-    // before ParticleSystem.initialize created the ShaderMaterial, we bind the
-    // cached texture and mask uniforms here once the uniforms object is ready.
-    if (this.fireMaskTexture && this.particleSystem && this.particleSystem.uniforms && this.particleSystem.uniforms.fireMap) {
-      this.particleSystem.uniforms.fireMap.value = this.fireMaskTexture;
-      this.particleSystem.uniforms.fireMaskEnabled.value = this.params.fireMaskEnabled ? 1.0 : 0.0;
-      if (this.particleSystem.uniforms.fireMaskThreshold) {
-        this.particleSystem.uniforms.fireMaskThreshold.value = this.params.fireMaskThreshold;
+    // Deferred wiring: if setAssetBundle ran first and generated the map,
+    // bind it now.
+    if (this.firePositionMap && this.particleSystem && this.particleSystem.uniforms) {
+      if (this.particleSystem.uniforms.firePositionMap) {
+        this.particleSystem.uniforms.firePositionMap.value = this.firePositionMap;
       }
     }
   }
@@ -239,9 +299,6 @@ export class FireSparksEffect extends EffectBase {
       // Remove Emitter
       if (this.particleSystem && this.particleSystem.emitterManager) {
         this.particleSystem.emitterManager.removeEmitter(fire.emitterId);
-        if (fire.sparksEmitterId) {
-          this.particleSystem.emitterManager.removeEmitter(fire.sparksEmitterId);
-        }
       }
       
       // Remove Light

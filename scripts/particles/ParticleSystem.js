@@ -55,10 +55,9 @@ export class ParticleSystem extends EffectBase {
       sceneBounds: null,
       roofMap: null,
       roofMaskEnabled: null,
-      fireMap: null,
-      fireMaskEnabled: null,
-      fireMaskThreshold: null,
-      globalWindInfluence: null
+      firePositionMap: null,
+      globalWindInfluence: null,
+      rainAngle: null
     };
   }
 
@@ -82,69 +81,6 @@ export class ParticleSystem extends EffectBase {
     }
 
     try {
-      // 1. Initialize Buffers
-      this.buffers.initialize(THREE);
-      log.info('ParticleSystem buffers initialized');
-
-      // 2. Load Texture
-      const textureLoader = new THREE.TextureLoader();
-      const texture = textureLoader.load('modules/map-shine-advanced/assets/particle.webp');
-
-      // 3. Create Rendering Material (WebGL2 ShaderMaterial)
-      const material = createParticleMaterial(THREE, this.buffers, texture, this.uniforms);
-      
-      // 4. Create Geometry
-      // For Points, we just need 'count' vertices. 
-      // Storage Buffers are accessed via instanceIndex, so we need 'count' instances or vertices.
-      // For Points, 'position' attribute is usually needed, but we use storage buffer for position.
-      // We can provide a dummy buffer or use setDrawRange.
-      const geometry = new THREE.BufferGeometry();
-      geometry.setDrawRange(0, this.buffers.capacity);
-      
-      // Attach particle attributes
-      geometry.setAttribute('position', this.buffers.positionBuffer);
-      geometry.setAttribute('velocity', this.buffers.velocityBuffer);
-      geometry.setAttribute('color', this.buffers.colorBuffer);
-      geometry.setAttribute('ageLife', this.buffers.ageLifeBuffer);
-      geometry.setAttribute('scaleType', this.buffers.scaleTypeBuffer);
-      geometry.setAttribute('seed', this.buffers.seedBuffer);
-
-      // Add explicit index attribute for TSL 'vertexIndex' (safety for WebGL2 fallback)
-      const indices = new Float32Array(this.buffers.capacity);
-      for (let i = 0; i < this.buffers.capacity; i++) indices[i] = i;
-      geometry.setAttribute('index', new THREE.BufferAttribute(indices, 1));
-
-      // PointsNodeMaterial expects a 'uv' vertex attribute. Provide a trivial one
-      // so the attribute node can bind without errors.
-      const dummyUv = new Float32Array(2);
-      geometry.setAttribute('uv', new THREE.BufferAttribute(dummyUv, 2));
-
-      // 5. Create Mesh (Points)
-      this.particles = new THREE.Points(geometry, material);
-      this.particles.frustumCulled = false; // Always render (bounds are dynamic)
-      // Enable GPU particle rendering for fire/sparks effects.
-      this.particles.visible = true;
-      this.scene.add(this.particles);
-
-      // 6. Ensure uniform objects exist
-      // createParticleMaterial wires its internal ShaderMaterial uniforms into
-      // this.uniforms.{time, deltaTime, fireMap, fireMaskEnabled}, but we
-      // defensively initialize them in case the implementation changes.
-      if (!this.uniforms.deltaTime) this.uniforms.deltaTime = { value: 0.016 };
-      if (!this.uniforms.time) this.uniforms.time = { value: 0.0 };
-      if (!this.uniforms.fireMap) this.uniforms.fireMap = { value: null };
-      if (!this.uniforms.fireMaskEnabled) this.uniforms.fireMaskEnabled = { value: 0.0 };
-      if (!this.uniforms.fireMaskThreshold) this.uniforms.fireMaskThreshold = { value: 0.9 };
-      
-      // Simulation is handled directly in the vertex shader via createParticleMaterial
-      
-      // 7. Set initial scene bounds for clipping
-      if (this.uniforms.sceneBounds && typeof canvas !== 'undefined' && canvas.dimensions) {
-          const { sceneX, sceneY, sceneWidth, sceneHeight } = canvas.dimensions;
-          this.uniforms.sceneBounds.value.set(sceneX, sceneY, sceneWidth, sceneHeight);
-          log.info(`Set particle clipping bounds: x=${sceneX}, y=${sceneY}, w=${sceneWidth}, h=${sceneHeight}`);
-      }
-      
       // 8. Initialize 3D Rain Streak Geometry
       this.rainGeometry = new RainStreakGeometry(20000);
       this.rainGeometry.initialize(THREE);
@@ -159,26 +95,37 @@ export class ParticleSystem extends EffectBase {
         this.scene.add(this.snowGeometry.mesh);
       }
 
-      log.info('ParticleSystem GPU initialized successfully (including RainStreakGeometry and SnowGeometry)');
+      // 10. Initialize Generic Stateless Particle Mesh (for Fire, Smoke, etc.)
+      this.buffers.initialize(THREE);
+      
+      // We only need a per-particle index; the vertex shader computes positions procedurally
+      const geometry = new THREE.BufferGeometry();
+      const indexArray = new Float32Array(this.buffers.capacity);
+      for (let i = 0; i < this.buffers.capacity; i++) {
+        indexArray[i] = i;
+      }
+      geometry.setAttribute('index', new THREE.BufferAttribute(indexArray, 1));
+
+      // Provide a dummy position attribute (all zeros). THREE.Points expects a position
+      // attribute even if the shader completely overrides particle positions.
+      const positionArray = new Float32Array(this.buffers.capacity * 3);
+      geometry.setAttribute('position', new THREE.BufferAttribute(positionArray, 3));
+      
+      // Create a default white texture
+      const defaultTex = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
+      defaultTex.needsUpdate = true;
+
+      const material = createParticleMaterial(THREE, this.buffers, defaultTex, this.uniforms);
+      
+      this.particles = new THREE.Points(geometry, material);
+      this.particles.frustumCulled = false; // Particles can be anywhere
+      this.scene.add(this.particles);
+
+      log.info('ParticleSystem initialized (Rain, Snow, and Generic Stateless Particles)');
 
       // Expose for debugging
       window.MapShineParticles = this;
       log.info('Debug: ParticleSystem exposed as window.MapShineParticles');
-
-      // Initialize Weather Emitter
-      if (this.emitterManager && !this.weatherEmitterId) {
-        // Add a persistent weather emitter covering the scene
-        // Initial state is inactive (rate 0) until weather system updates it
-        const handle = this.emitterManager.addEmitter({
-          type: 2, // Rain type default
-          x: 0, y: 0, z: 3000, // High ceiling
-          rate: 0, // Start disabled
-          param1: 1000, // Width (dynamic)
-          param2: 1000  // Height (dynamic)
-        });
-        this.weatherEmitterId = handle.id;
-        log.info(`Initialized Weather Emitter (ID: ${handle.id})`);
-      }
 
     } catch (e) {
       log.error('Failed to initialize ParticleSystem:', e);
@@ -200,92 +147,23 @@ export class ParticleSystem extends EffectBase {
    */
   update(timeInfo) {
     if (!this.enabled) return;
+    // 0. Get current weather state
+    let weather = weatherController.getCurrentState();
 
-    // 0. Sync with Weather Controller
-    let weather = null;
-    if (this.emitterManager && this.weatherEmitterId) {
-      weather = weatherController.getCurrentState();
-      const emitter = this.emitterManager.emitters.find(e => e.id === this.weatherEmitterId);
-      
-      // Ensure scene bounds are up to date
-      if (this.uniforms.sceneBounds && typeof canvas !== 'undefined' && canvas.dimensions) {
-          const d = canvas.dimensions;
-          const sx = d.sceneX ?? 0;
-          const sy = d.sceneY ?? 0;
-          const sw = d.sceneWidth ?? d.width ?? 1000;
-          const sh = d.sceneHeight ?? d.height ?? 1000;
-          
-          this.uniforms.sceneBounds.value.set(sx, sy, sw, sh);
-      }
-
-      if (emitter) {
-        // Update Rate (Precipitation)
-        // Interpret precipitation 0..1 as density probability
-        emitter.rate = weather.precipitation;
-
-        // Update Type
-        // 1=Rain -> Shader 2.0
-        // 2=Snow -> Shader 3.0
-        if (weather.precipType === 2) {
-          emitter.type = 3.0; // Snow/Magic slot
-        } else {
-          emitter.type = 2.0; // Rain slot
-        }
-
-        // Update Area (Scene Bounds)
-        if (this.uniforms.sceneBounds) {
-          const b = this.uniforms.sceneBounds.value; // x, y, w, h
-          emitter.x = b.x + b.z / 2;
-          emitter.y = b.y + b.w / 2;
-          emitter.param1 = b.z; // Width
-          emitter.param2 = b.w; // Height
-        }
-
-        // Update Wind Uniform
-        if (this.uniforms.windVector) {
-          // Scale factor: wind speed 1.0 -> 1000 units/sec drift
-          const speed = weather.windSpeed * 1000.0;
-          const dir = weather.windDirection;
-          if (dir && dir.x !== undefined) {
-             this.uniforms.windVector.value.set(dir.x * speed, dir.y * speed, 0);
-          }
-        }
-        
-        // Update Roof/Outdoors Mask
-        if (this.uniforms.roofMap && weatherController.roofMap) {
-          this.uniforms.roofMap.value = weatherController.roofMap;
-          // Only enable if actively used (controlled by weather controller or scene settings)
-          this.uniforms.roofMaskEnabled.value = weatherController.roofMaskActive ? 1.0 : 0.0;
-        }
-        
-        if (this.uniforms.globalWindInfluence) {
-            this.uniforms.globalWindInfluence.value = 1.0; // Default to full influence
-        }
-      }
-    }
-
-    // 1. Update Emitters (CPU -> GPU Buffer)
-    if (this.emitterManager && this.buffers && this.buffers.updateEmitters) {
-      const frameEmitters = this.emitterManager.buildFrameEmitList();
-      if (frameEmitters.length > 0) {
-        log.debug(`Dispatching ${frameEmitters.length} emitters to GPU`);
-      }
-      this.buffers.updateEmitters(frameEmitters);
-    }
-
-    // 2. Update Uniforms
-    this.uniforms.deltaTime.value = timeInfo.delta;
-    this.uniforms.time.value = timeInfo.elapsed;
-
-    // 3. Update 3D precipitation geometries (rain + snow) using freezeLevel
-    // as a continuous temperature axis: 0 = all rain, 1 = all snow.
+    // 1. Compute scene bounds vector for rain/snow clipping
     let boundsVec4 = null;
-    if (this.uniforms.sceneBounds && this.uniforms.sceneBounds.value) {
-      boundsVec4 = this.uniforms.sceneBounds.value;
-    }
-
-    if (!weather) {
-      weather = weatherController.getCurrentState();
+    if (typeof canvas !== 'undefined' && canvas.dimensions) {
+      const d = canvas.dimensions;
+      const sx = d.sceneX ?? 0;
+      const sy = d.sceneY ?? 0;
+      const sw = d.sceneWidth ?? d.width ?? 1000;
+      const sh = d.sceneHeight ?? d.height ?? 1000;
+      const THREE = window.THREE;
+      if (THREE) {
+        if (!this._sceneBounds) this._sceneBounds = new THREE.Vector4(sx, sy, sw, sh);
+        this._sceneBounds.set(sx, sy, sw, sh);
+        boundsVec4 = this._sceneBounds;
+      }
     }
 
     const precip = (weather && typeof weather.precipitation === 'number') ? weather.precipitation : 0;
@@ -304,6 +182,28 @@ export class ParticleSystem extends EffectBase {
     if (this.snowGeometry) {
       const snowWeather = { ...weather, precipitation: snowPrecip };
       this.snowGeometry.update(timeInfo, snowWeather, boundsVec4);
+    }
+
+    // 4. Update emitter buffer for generic GPU particles (fire, sparks, etc.)
+    if (this.emitterManager && this.buffers) {
+      const emitList = this.emitterManager.buildFrameEmitList();
+      this.buffers.updateEmitters(emitList);
+    }
+
+    // 5. Drive shader uniforms for time and scene bounds
+    if (this.uniforms) {
+      const dt = typeof timeInfo.delta === 'number' ? timeInfo.delta : 0.016;
+      const t = typeof timeInfo.elapsed === 'number' ? timeInfo.elapsed : 0;
+
+      if (this.uniforms.time && this.uniforms.time.value !== undefined) {
+        this.uniforms.time.value = t;
+      }
+      if (this.uniforms.deltaTime && this.uniforms.deltaTime.value !== undefined) {
+        this.uniforms.deltaTime.value = dt;
+      }
+      if (boundsVec4 && this.uniforms.sceneBounds && this.uniforms.sceneBounds.value) {
+        this.uniforms.sceneBounds.value.copy(boundsVec4);
+      }
     }
   }
 

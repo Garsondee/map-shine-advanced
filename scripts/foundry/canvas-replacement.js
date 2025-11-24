@@ -347,11 +347,12 @@ async function createThreeCanvas(scene) {
     const particleSystem = new ParticleSystem();
     effectComposer.registerEffect(particleSystem);
 
-    // Step 3.4: Register Fire Sparks Effect
+    // Step 3.4: Register Fire Sparks Effect and wire it to the ParticleSystem
     const fireSparksEffect = new FireSparksEffect();
-    effectComposer.registerEffect(fireSparksEffect);
+    // Provide the particle backend so FireSparksEffect can create emitters and bind uniforms
     fireSparksEffect.setParticleSystem(particleSystem);
-    // Pass asset bundle to check for _Fire mask
+    effectComposer.registerEffect(fireSparksEffect);
+    // Pass asset bundle to check for _Fire mask (after particle system is wired)
     if (bundle) {
       fireSparksEffect.setAssetBundle(bundle);
     }
@@ -781,7 +782,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     'atmospheric'
   );
 
-  // --- Fire & Sparks Debug Settings ---
+  // --- Fire Debug Settings ---
   if (fireSparksEffect) {
     const fireSchema = FireSparksEffect.getControlSchema();
 
@@ -799,10 +800,6 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
             const e = em.emitters.find(x => x.id === fireSparksEffect.globalFireEmitterId);
             if (e) e.rate = value ? fireSparksEffect.params.globalFireRate : 0.0;
           }
-          if (fireSparksEffect.globalSparksEmitterId) {
-            const e = em.emitters.find(x => x.id === fireSparksEffect.globalSparksEmitterId);
-            if (e) e.rate = value ? fireSparksEffect.params.globalSparksRate : 0.0;
-          }
         }
         return;
       }
@@ -814,30 +811,16 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
 
       if (!ps || !em) return;
 
-      // Update mask toggle
-      if (paramId === 'fireMaskEnabled' && ps.uniforms?.fireMaskEnabled) {
-        ps.uniforms.fireMaskEnabled.value = value ? 1.0 : 0.0;
-      }
-
-      // Update mask threshold
-      if (paramId === 'fireMaskThreshold' && ps.uniforms?.fireMaskThreshold) {
-        ps.uniforms.fireMaskThreshold.value = value;
-      }
-
       // Update global emitter rates if we have handles
       if (paramId === 'globalFireRate' && fireSparksEffect.globalFireEmitterId) {
         const e = em.emitters.find(x => x.id === fireSparksEffect.globalFireEmitterId);
-        if (e) e.rate = value;
-      }
-      if (paramId === 'globalSparksRate' && fireSparksEffect.globalSparksEmitterId) {
-        const e = em.emitters.find(x => x.id === fireSparksEffect.globalSparksEmitterId);
         if (e) e.rate = value;
       }
     };
 
     uiManager.registerEffect(
       'fire-sparks',
-      'Fire / Sparks (Debug)',
+      'Fire (Debug)',
       fireSchema,
       onFireUpdate,
       'particle'

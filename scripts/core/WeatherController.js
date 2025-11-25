@@ -77,6 +77,27 @@ export class WeatherController {
 
     /** @type {boolean} Whether weather effects should currently apply the roof/outdoors mask */
     this.roofMaskActive = false;
+
+    // Per-system tuning parameters for precipitation visuals
+    this.rainTuning = {
+      intensityScale: 1.0,
+      streakLength: 1.0,
+      dropSize: 1.0,
+      brightness: 1.0,
+      gravityScale: 1.0,
+      windInfluence: 1.0
+    };
+
+    this.snowTuning = {
+      intensityScale: 1.0,
+      flakeSize: 1.0,
+      brightness: 1.0,
+      fallSpeed: 1.0,
+      gravityScale: 1.0,
+      windInfluence: 1.0,
+      curlStrength: 1.0,
+      flutterStrength: 1.0
+    };
   }
 
   /**
@@ -422,21 +443,128 @@ export class WeatherController {
           group: 'manual'
         },
 
-        // Debug controls
-        rainAngle: {
-          label: 'Rain Streak Angle',
-          default: 270.0,
+        // Rain tuning
+        rainIntensityScale: {
+          label: 'Rain Intensity Scale',
+          default: 3.0,
           min: 0.0,
-          max: 360.0,
-          step: 1.0,
-          group: 'debug'
+          max: 6.0,
+          step: 0.05,
+          group: 'rain'
+        },
+        rainStreakLength: {
+          label: 'Rain Streak Length',
+          default: 0.65,
+          min: 0.25,
+          max: 2.5,
+          step: 0.05,
+          group: 'rain'
+        },
+        rainDropSize: {
+          label: 'Rain Drop Size',
+          default: 0.7,
+          min: 0.5,
+          max: 3.0,
+          step: 0.05,
+          group: 'rain'
+        },
+        rainBrightness: {
+          label: 'Rain Brightness',
+          default: 2.25,
+          min: 0.1,
+          max: 3.0,
+          step: 0.05,
+          group: 'rain'
+        },
+        rainGravityScale: {
+          label: 'Rain Gravity Scale',
+          default: 3.0,
+          min: 0.2,
+          max: 6.0,
+          step: 0.05,
+          group: 'rain'
+        },
+        rainWindInfluence: {
+          label: 'Rain Wind Influence',
+          default: 1.0,
+          min: 0.0,
+          max: 2.0,
+          step: 0.05,
+          group: 'rain'
+        },
+
+        // Snow tuning
+        snowIntensityScale: {
+          label: 'Snow Intensity Scale',
+          default: 3.0,
+          min: 0.0,
+          max: 6.0,
+          step: 0.05,
+          group: 'snow'
+        },
+        snowFlakeSize: {
+          label: 'Snow Flake Size',
+          default: 0.5,
+          min: 0.5,
+          max: 3.0,
+          step: 0.05,
+          group: 'snow'
+        },
+        snowBrightness: {
+          label: 'Snow Brightness',
+          default: 1.0,
+          min: 0.1,
+          max: 3.0,
+          step: 0.05,
+          group: 'snow'
+        },
+        snowFallSpeed: {
+          label: 'Snow Fall Speed',
+          default: 2.0,
+          min: 0.2,
+          max: 3.0,
+          step: 0.05,
+          group: 'snow'
+        },
+        snowGravityScale: {
+          label: 'Snow Gravity Scale',
+          default: 1.0,
+          min: 0.2,
+          max: 3.0,
+          step: 0.05,
+          group: 'snow'
+        },
+        snowWindInfluence: {
+          label: 'Snow Wind Influence',
+          default: 1.0,
+          min: 0.0,
+          max: 2.0,
+          step: 0.05,
+          group: 'snow'
+        },
+        snowCurlStrength: {
+          label: 'Snow Curl Strength',
+          default: 3.0,
+          min: 0.0,
+          max: 6.0,
+          step: 0.05,
+          group: 'snow'
+        },
+        snowFlutterStrength: {
+          label: 'Snow Flutter Strength',
+          default: 3.0,
+          min: 0.0,
+          max: 6.0,
+          step: 0.05,
+          group: 'snow'
         }
       },
       groups: [
         { label: 'Environment', type: 'folder', parameters: ['timeOfDay'] },
         { label: 'Simulation', type: 'folder', parameters: ['variability', 'transitionDuration'] },
         { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'windSpeed', 'windDirection', 'fogDensity', 'wetness', 'freezeLevel'], expanded: true },
-        { label: 'Debug', type: 'folder', parameters: ['rainAngle'] }
+        { label: 'Rain', type: 'folder', parameters: ['rainIntensityScale', 'rainStreakLength', 'rainDropSize', 'rainBrightness', 'rainGravityScale', 'rainWindInfluence'] },
+        { label: 'Snow', type: 'folder', parameters: ['snowIntensityScale', 'snowFlakeSize', 'snowBrightness', 'snowFallSpeed', 'snowGravityScale', 'snowWindInfluence', 'snowCurlStrength', 'snowFlutterStrength'] }
       ],
       presets: {
         'Clear': { precipitation: 0.0, cloudCover: 0.0, windSpeed: 0.1, fogDensity: 0.0 },

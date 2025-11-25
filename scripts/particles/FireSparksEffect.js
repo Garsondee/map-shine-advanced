@@ -1,354 +1,226 @@
 import { EffectBase, RenderLayers } from '../effects/EffectComposer.js';
 import { createLogger } from '../core/log.js';
-import { weatherController } from '../core/WeatherController.js';
+import { 
+  ParticleSystem, 
+  IntervalValue,
+  ColorRange,
+  Vector4,
+  PointEmitter,
+  RenderMode
+} from '../libs/three.quarks.module.js';
 
 const log = createLogger('FireSparksEffect');
 
-/**
- * Fire & Sparks Effect
- * Manages CPU-side fire logic:
- * 1. Creates/Destroys Particle Emitters (via EmitterManager)
- * 2. Manages Dynamic Lights for fires
- * 3. Provides Tweakpane UI for placing/editing fires
- */
+class FireMaskShape {
+  constructor(points, width, height, offsetX, offsetY) {
+    this.points = points;
+    this.width = width;
+    this.height = height;
+    this.offsetX = offsetX;
+    this.offsetY = offsetY;
+    this.type = 'fire_mask'; 
+  }
+  
+  initialize(p) {
+    const count = this.points.length / 3;
+    if (count === 0) return;
+    const idx = Math.floor(Math.random() * count) * 3;
+    const u = this.points[idx];
+    const v = this.points[idx + 1];
+    p.position.x = this.offsetX + u * this.width;
+    p.position.y = this.offsetY + v * this.height;
+    p.position.z = 0;
+  }
+}
+
 export class FireSparksEffect extends EffectBase {
   constructor() {
     super('fire-sparks', RenderLayers.PARTICLES, 'low');
-    
-    /** @type {Array<{id: string, emitterId: string, light: THREE.PointLight, baseParams: Object}>} */
     this.fires = [];
-    
-    /** @type {import('./ParticleSystem.js').ParticleSystem|null} */
-    this.particleSystem = null;
-
-    // Cached _Fire mask texture so we can wire uniforms even if the asset
-    // bundle loads before the ParticleSystem has finished initializing.
-    /** @type {THREE.Texture|null} Cached _Fire mask texture for deferred wiring */
-    this.fireMaskTexture = null;
-
-    // Handles for the scene-wide emitters created from the _Fire mask
-    /** @type {string|null} */
-    this.globalFireEmitterId = null;
-
-    // Global settings
+    this.particleSystemRef = null; 
+    this.globalSystem = null;
+    this.fireTexture = this._createFireTexture();
     this.settings = {
       enabled: true,
       windInfluence: 1.0,
       lightIntensity: 1.0,
       maxLights: 10
     };
-
-    // UI-exposed parameters for debugging and tuning
     this.params = {
       enabled: true,
-      globalFireRate: 0.25
+      globalFireRate: 0.25,
+      fireAlpha: 0.6,
+      fireCoreBoost: 1.0,
+      fireHeight: 110.0,
+      fireSize: 18.0
     };
   }
-
-  /**
-   * Tweakpane control schema for Fire & Sparks debug settings
-   * @returns {Object}
-   */
+  
+  _createFireTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+    grad.addColorStop(0.4, 'rgba(255, 255, 255, 0.5)');
+    grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 64, 64);
+    return new window.THREE.CanvasTexture(canvas);
+  }
+  
   static getControlSchema() {
     return {
       enabled: true,
       groups: [
-        {
-          name: 'debug',
-          label: 'Fire Debug',
-          type: 'inline',
-          parameters: ['globalFireRate']
-        }
+        { name: 'debug', label: 'Fire Tuning', type: 'inline', parameters: ['globalFireRate', 'fireAlpha', 'fireHeight', 'fireSize'] }
       ],
       parameters: {
-        globalFireRate: {
-          type: 'slider',
-          label: 'Global Fire Rate',
-          min: 0.0,
-          max: 1.0,
-          step: 0.01,
-          default: 0.25
-        }
-      },
-      presets: {}
+        enabled: { type: 'checkbox', label: 'Fire Enabled', default: true },
+        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 5.0, step: 0.1, default: 0.25 },
+        fireAlpha: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.6 },
+        fireHeight: { type: 'slider', label: 'Height', min: 10.0, max: 300.0, step: 10.0, default: 110.0 },
+        fireSize: { type: 'slider', label: 'Particle Size', min: 1.0, max: 50.0, step: 1.0, default: 18.0 }
+      }
     };
   }
-
-  /**
-   * Initialize the effect
-   * @param {THREE.Renderer} renderer
-   * @param {THREE.Scene} scene
-   * @param {THREE.Camera} camera
-   */
+  
   initialize(renderer, scene, camera) {
     this.scene = scene;
-    log.info('FireSparksEffect initialized');
+    log.info('FireSparksEffect initialized (Quarks)');
   }
-
-  /**
-   * Generates a DataTexture containing only the valid coordinates where fire should exist.
-   *
-   * This is the canonical pattern for turning a painted luminance mask texture
-   * (e.g. Battlemap_Fire.png) into GPU-friendly spawn positions:
-   * - CPU (load time):
-   *   - Sample the mask once.
-   *   - For every pixel whose brightness is above a threshold, record its
-   *     normalized UV (0-1) and brightness.
-   *   - Pack that list into a floating-point DataTexture (our "position map").
-   * - GPU (render time):
-   *   - The vertex shader draws a random UV into this position map.
-   *   - Each particle reads back a pre-vetted UV and never sees black/empty
-   *     regions of the original mask.
-   *
-   * Compared to per-frame rejection sampling against the mask, this lookup
-   * approach is:
-   * - Deterministic (every stored pixel is a guaranteed hit).
-   * - Cheap on the GPU (just one texture read instead of repeated retries).
-   * - Faithful to the authored luminance in the source image.
-   *
-   * @param {THREE.Texture} maskTexture - The source _Fire mask
-   * @param {number} threshold - 0.0 to 1.0
-   * @returns {THREE.DataTexture|null}
-   */
-  generatePositionMap(maskTexture, threshold = 0.1) {
-    const THREE = window.THREE;
-    if (!THREE) return null;
-
-    // 1. Draw mask to a canvas to read pixel data
-    const image = maskTexture.image;
-    const canvas = document.createElement('canvas');
-    canvas.width = image.width;
-    canvas.height = image.height;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(image, 0, 0);
-    
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imgData.data; // RGBA array
-    
-    // 2. Collect valid coordinates
-    const validCoords = [];
-    for (let i = 0; i < data.length; i += 4) {
-      // Simple luminance check (r+g+b)/3 or just use Red channel
-      // Use Red channel since masks are typically R or grayscale
-      const brightness = data[i] / 255.0; 
-      
-      if (brightness > threshold) {
-        // Store normalized coordinates (0.0 to 1.0)
-        const pixelIndex = i / 4;
-        const x = (pixelIndex % canvas.width) / canvas.width;
-        const y = Math.floor(pixelIndex / canvas.width) / canvas.height;
-        
-        // Push X, Y, and Brightness (for particle intensity)
-        validCoords.push(x, y, brightness); 
-      }
-    }
-
-    if (validCoords.length === 0) {
-      log.warn("FireSparks: No valid spawn points found in mask!");
-      return null;
-    }
-
-    // 3. Create a DataTexture big enough to hold these coords
-    // We make a square texture to fit the data
-    const count = validCoords.length / 3;
-    const size = Math.ceil(Math.sqrt(count));
-    const dataArray = new Float32Array(size * size * 4); // RGBA float texture
-
-    for (let i = 0; i < count; i++) {
-      const stride = i * 3;
-      const texStride = i * 4;
-      
-      dataArray[texStride] = validCoords[stride];     // X
-      dataArray[texStride + 1] = 1.0 - validCoords[stride + 1]; // Y (Flip Y for Three.js)
-      dataArray[texStride + 2] = validCoords[stride + 2]; // Density/Brightness
-      dataArray[texStride + 3] = 1.0; // Padding
-    }
-
-    const positionMap = new THREE.DataTexture(
-      dataArray, 
-      size, 
-      size, 
-      THREE.RGBAFormat, 
-      THREE.FloatType
-    );
-    positionMap.needsUpdate = true;
-    
-    // Store how many valid points we have so the shader knows the range
-    positionMap.userData = { validPoints: count };
-    
-    log.info(`Generated Fire Position Map: ${count} points, texture size ${size}x${size}`);
-    return positionMap;
+  
+  setParticleSystem(ps) {
+    this.particleSystemRef = ps;
+    log.info('Connected to ParticleSystem');
   }
-
-  /**
-   * Set asset bundle to check for _Fire mask
-   * @param {Object} bundle 
-   */
+  
   setAssetBundle(bundle) {
     if (!bundle || !bundle.masks) return;
-
     const fireMask = bundle.masks.find(m => m.type === 'fire');
-    if (fireMask) {
-       // GENERATE THE LOOKUP MAP
-       this.firePositionMap = this.generatePositionMap(fireMask.texture);
-       
-       if (this.particleSystem && this.particleSystem.uniforms) {
-          // Pass the new map to uniforms
-          if (this.particleSystem.uniforms.firePositionMap) {
-             this.particleSystem.uniforms.firePositionMap.value = this.firePositionMap;
-             log.info('Bound Fire Position Map to ParticleSystem');
-          } else {
-             log.warn('ParticleSystem uniforms exist but firePositionMap is missing');
-          }
-       }
-       
-       // 2. Create Global Fire Emitter if a particle backend is available
-       if (this.particleSystem && this.particleSystem.emitterManager && typeof canvas !== 'undefined' && canvas.dimensions) {
-         const dim = canvas.dimensions;
-         const width = dim.sceneWidth || dim.width;
-         const height = dim.sceneHeight || dim.height;
-         const cx = (dim.sceneX || 0) + width / 2;
-         const cy = (dim.sceneY || 0) + height / 2;
-
-         const fireEmitter = this.particleSystem.emitterManager.addEmitter({
-           type: 0, // Fire
-           x: cx, y: cy, z: 0,
-           rate: this.params.globalFireRate,
-           param1: width,
-           param2: height
-         });
-         this.globalFireEmitterId = fireEmitter.id;
-
-         log.info(`Created Global Fire Emitter at (${cx}, ${cy}) size=${width}x${height}`);
-       } else {
-         log.warn('Fire mask found but ParticleSystem/EmitterManager not available; skipping global fire emitters');
-       }
-    }
-  }
-
-  /**
-   * Connect to the ParticleSystem to access EmitterManager
-   * Called by EffectComposer or manually after registration
-   * @param {import('./ParticleSystem.js').ParticleSystem} particleSystem 
-   */
-  setParticleSystem(particleSystem) {
-    this.particleSystem = particleSystem;
-    log.info('Connected to ParticleSystem');
-
-    // Deferred wiring: if setAssetBundle ran first and generated the map,
-    // bind it now.
-    if (this.firePositionMap && this.particleSystem && this.particleSystem.uniforms) {
-      if (this.particleSystem.uniforms.firePositionMap) {
-        this.particleSystem.uniforms.firePositionMap.value = this.firePositionMap;
-      }
-    }
-  }
-
-  /**
-   * Create a new fire instance
-   * @param {number} x - World X
-   * @param {number} y - World Y
-   * @param {number} radius - Radius of the fire base
-   * @param {number} height - Height scale of the fire
-   * @param {number} intensity - 0.0 to 1.0
-   */
-  createFire(x, y, radius = 50, height = 1.0, intensity = 1.0) {
-    if (!this.particleSystem || !this.particleSystem.emitterManager) {
-      log.warn('Cannot create fire: ParticleSystem or EmitterManager not ready');
-      return null;
-    }
-
-    // 1. Create Particle Emitter
-    const emitter = this.particleSystem.emitterManager.addEmitter({
-      type: 0, // FIRE type
-      x: x,
-      y: y,
-      z: 0, // Ground level
-      rate: intensity,
-      param1: radius,
-      param2: height
-    });
-
-    // 2. Create Dynamic Light
-    const light = new window.THREE.PointLight(0xff6600, 1.0, radius * 10.0);
-    light.position.set(x, y, 50); // Slightly raised
-    this.scene.add(light);
-
-    const fireObj = {
-      id: crypto.randomUUID(),
-      emitterId: emitter.id,
-      light: light,
-      baseParams: { x, y, radius, height, intensity },
-      noiseOffset: Math.random() * 100.0
-    };
-
-    this.fires.push(fireObj);
-    log.info(`Created fire at (${x}, ${y}) radius=${radius}`);
-    return fireObj.id;
-  }
-
-  /**
-   * Remove a fire instance
-   * @param {string} id 
-   */
-  removeFire(id) {
-    const index = this.fires.findIndex(f => f.id === id);
-    if (index !== -1) {
-      const fire = this.fires[index];
-      
-      // Remove Emitter
-      if (this.particleSystem && this.particleSystem.emitterManager) {
-        this.particleSystem.emitterManager.removeEmitter(fire.emitterId);
-      }
-      
-      // Remove Light
-      if (fire.light) {
-        this.scene.remove(fire.light);
-        fire.light.dispose();
-      }
-      
-      this.fires.splice(index, 1);
-      log.info(`Removed fire ${id}`);
-    }
-  }
-
-  /**
-   * Update loop (Light flickering)
-   * @param {Object} timeInfo 
-   */
-  update(timeInfo) {
-    if (!this.settings.enabled) return;
-
-    const time = timeInfo.elapsed;
-
-    for (const fire of this.fires) {
-      // Simple flicker noise
-      const n1 = Math.sin(time * 10.0 + fire.noiseOffset);
-      const n2 = Math.cos(time * 23.0 + fire.noiseOffset * 2.0);
-      const flicker = 1.0 + (n1 * 0.1 + n2 * 0.05);
-
-      // Target intensity
-      const targetInt = fire.baseParams.intensity * this.settings.lightIntensity * 2.0;
-      
-      if (fire.light) {
-        fire.light.intensity = targetInt * flicker;
-        // Optional: Modulate radius slightly?
-        // fire.light.distance = fire.baseParams.radius * 10.0 * flicker;
-      }
+    if (fireMask && this.particleSystemRef && this.particleSystemRef.batchRenderer) {
+      const points = this._generatePoints(fireMask.texture);
+      if (!points) return;
+      const d = canvas.dimensions;
+      const width = d.sceneWidth || d.width;
+      const height = d.sceneHeight || d.height;
+      const sx = d.sceneX || 0;
+      const sy = d.sceneY || 0;
+      const shape = new FireMaskShape(points, width, height, sx, sy);
+      this.globalSystem = this._createFireSystem({
+        shape: shape,
+        rate: new IntervalValue(10.0, 20.0), 
+        size: this.params.fireSize,
+        height: this.params.fireHeight
+      });
+      this.particleSystemRef.batchRenderer.addSystem(this.globalSystem);
+      log.info('Created Global Fire System from mask (' + (points.length/3) + ' points)');
     }
   }
   
-  /**
-   * Clear all fires
-   */
+  _generatePoints(maskTexture, threshold = 0.1) {
+    const image = maskTexture.image;
+    const c = document.createElement('canvas');
+    c.width = image.width;
+    c.height = image.height;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(image, 0, 0);
+    const data = ctx.getImageData(0, 0, c.width, c.height).data;
+    const coords = [];
+    for (let i = 0; i < data.length; i += 4) {
+        const b = data[i] / 255.0;
+        if (b > threshold) {
+            const idx = i / 4;
+            const x = (idx % c.width) / c.width;
+            const y = Math.floor(idx / c.width) / c.height;
+            coords.push(x, y, b);
+        }
+    }
+    if (coords.length === 0) return null;
+    return new Float32Array(coords);
+  }
+  
+  _createFireSystem(opts) {
+    const { shape, rate, size, height } = opts;
+    const THREE = window.THREE;
+    const material = new THREE.MeshBasicMaterial({
+      map: this.fireTexture,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      color: 0xffffff
+    });
+    const system = new ParticleSystem({
+      duration: 1,
+      looping: true,
+      startLife: new IntervalValue(0.5, 1.0),
+      startSpeed: new IntervalValue(height * 0.5, height * 1.5),
+      startSize: new IntervalValue(size * 0.8, size * 1.5),
+      startColor: new ColorRange(new Vector4(1, 1, 0.5, 1), new Vector4(1, 0.2, 0, 1)),
+      worldSpace: true,
+      maxParticles: 10000,
+      emissionOverTime: rate,
+      shape: shape,
+      material: material,
+      renderMode: RenderMode.BillBoard,
+      startRotation: new IntervalValue(0, Math.PI * 2),
+    });
+    return system;
+  }
+  
+  createFire(x, y, radius = 50, height = 1.0, intensity = 1.0) {
+     if (!this.particleSystemRef || !this.particleSystemRef.batchRenderer) return null;
+     const system = this._createFireSystem({
+        shape: new PointEmitter(),
+        rate: new IntervalValue(intensity * 10, intensity * 20),
+        size: radius * 0.4,
+        height: height * 50.0
+     });
+     system.emitter.position.set(x, y, 0);
+     this.particleSystemRef.batchRenderer.addSystem(system);
+     const light = new window.THREE.PointLight(0xff6600, 1.0, radius * 8.0);
+     light.position.set(x, y, 50);
+     this.scene.add(light);
+     const id = crypto.randomUUID();
+     this.fires.push({ id, system, light });
+     return id;
+  }
+  
+  removeFire(id) {
+      const idx = this.fires.findIndex(f => f.id === id);
+      if (idx !== -1) {
+          const { system, light } = this.fires[idx];
+          if (this.particleSystemRef?.batchRenderer) {
+              this.particleSystemRef.batchRenderer.deleteSystem(system);
+          }
+          this.scene.remove(light);
+          light.dispose();
+          this.fires.splice(idx, 1);
+      }
+  }
+  
+  update(timeInfo) {
+    if (!this.settings.enabled) return;
+    const t = timeInfo.elapsed;
+    for (const f of this.fires) {
+        f.light.intensity = 1.0 + Math.sin(t * 10) * 0.2;
+    }
+    if (this.globalSystem) {
+        const baseRate = 200.0 * this.params.globalFireRate; 
+        this.globalSystem.emissionOverTime = new IntervalValue(baseRate * 0.8, baseRate * 1.2);
+    }
+  }
+  
   clear() {
-    // Copy array to avoid modification issues during iteration
-    const ids = this.fires.map(f => f.id);
-    ids.forEach(id => this.removeFire(id));
+      [...this.fires].forEach(f => this.removeFire(f.id));
   }
   
   dispose() {
-    this.clear();
-    super.dispose();
+      this.clear();
+      if (this.globalSystem && this.particleSystemRef?.batchRenderer) {
+          this.particleSystemRef.batchRenderer.deleteSystem(this.globalSystem);
+      }
+      super.dispose();
   }
 }

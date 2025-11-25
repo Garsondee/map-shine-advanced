@@ -725,12 +725,26 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         }
 
         target.windDirection.set(Math.cos(rad), Math.sin(rad));
-      } else if (paramId === 'rainAngle') {
-        // Debug control: directly drive the particle system's rain streak angle (degrees)
-        const ps = window.MapShineParticles;
-        if (ps && ps.uniforms && ps.uniforms.rainAngle) {
-          ps.uniforms.rainAngle.value = value;
-        }
+      } else if (paramId.startsWith('rain')) {
+        const rt = weatherController.rainTuning;
+        if (!rt) return;
+        if (paramId === 'rainIntensityScale') rt.intensityScale = value;
+        else if (paramId === 'rainStreakLength') rt.streakLength = value;
+        else if (paramId === 'rainDropSize') rt.dropSize = value;
+        else if (paramId === 'rainBrightness') rt.brightness = value;
+        else if (paramId === 'rainGravityScale') rt.gravityScale = value;
+        else if (paramId === 'rainWindInfluence') rt.windInfluence = value;
+      } else if (paramId.startsWith('snow')) {
+        const st = weatherController.snowTuning;
+        if (!st) return;
+        if (paramId === 'snowIntensityScale') st.intensityScale = value;
+        else if (paramId === 'snowFlakeSize') st.flakeSize = value;
+        else if (paramId === 'snowBrightness') st.brightness = value;
+        else if (paramId === 'snowFallSpeed') st.fallSpeed = value;
+        else if (paramId === 'snowGravityScale') st.gravityScale = value;
+        else if (paramId === 'snowWindInfluence') st.windInfluence = value;
+        else if (paramId === 'snowCurlStrength') st.curlStrength = value;
+        else if (paramId === 'snowFlutterStrength') st.flutterStrength = value;
       } else if (target[paramId] !== undefined) {
         target[paramId] = value;
       }
@@ -816,6 +830,20 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         const e = em.emitters.find(x => x.id === fireSparksEffect.globalFireEmitterId);
         if (e) e.rate = value;
       }
+
+      // Drive fire tuning uniforms when available
+      const u = ps.uniforms;
+      if (u) {
+        if (paramId === 'fireAlpha' && u.fireAlpha) {
+          u.fireAlpha.value = value;
+        } else if (paramId === 'fireCoreBoost' && u.fireCoreBoost) {
+          u.fireCoreBoost.value = value;
+        } else if (paramId === 'fireHeight' && u.fireHeight) {
+          u.fireHeight.value = value;
+        } else if (paramId === 'fireSize' && u.fireSize) {
+          u.fireSize.value = value;
+        }
+      }
     };
 
     uiManager.registerEffect(
@@ -883,7 +911,11 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         if (!state || !state.windDirection) return;
         const angleRad = Math.atan2(state.windDirection.y, state.windDirection.x);
         const angleDeg = (angleRad * 180) / Math.PI;
-        arrow.style.transform = `translate(-50%, -50%) rotate(${angleDeg}deg)`;
+        // Map world wind vector angle to UI rotation so that:
+        // 0° (east), 90° (north), 180° (west), 270° (south) all align visually
+        // with the direction the wind is pushing.
+        // This mapping preserves correctness at 0° and 180° while fixing 90°/270°.
+        arrow.style.transform = `translate(-50%, -50%) rotate(${90 - angleDeg}deg)`;
       };
 
       updateWindVane();

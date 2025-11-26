@@ -168,6 +168,10 @@ class SnowFlutterBehavior {
   update(particle, delta, system) {
     if (!particle || typeof particle.age !== 'number') return;
 
+    // Once a flake has landed, SnowFloorBehavior owns its motion; do not
+    // continue to flutter it across the ground.
+    if (particle._landed) return;
+
     const t = particle.age;
     const phase = particle._flutterPhase || 0;
     const speed = particle._flutterSpeed || 0.7;
@@ -194,6 +198,50 @@ class SnowFlutterBehavior {
   reset() { /* no-op */ }
 }
 
+// Snow spin behavior: gives each flake a gentle, per-particle rotation while
+// it is airborne. Rotation is stopped automatically once SnowFloorBehavior
+// marks the particle as "landed" via the _landed flag.
+class SnowSpinBehavior {
+  constructor() {
+    this.type = 'SnowSpin';
+    this.strength = 1.0;
+  }
+
+  initialize(particle, system) {
+    if (!particle) return;
+
+    // Assign a small per-particle spin speed if not already present. Allow
+    // clockwise and counter-clockwise rotation with slight variation.
+    if (typeof particle._spinSpeed !== 'number') {
+      const base = 1.2 + Math.random() * 1.2; // 1.2–2.4 rad/s for stronger visible spin
+      const dir = Math.random() < 0.5 ? -1 : 1;
+      particle._spinSpeed = base * dir;
+    }
+  }
+
+  update(particle, delta, system) {
+    if (!particle || typeof delta !== 'number') return;
+
+    // Once the flake has landed, we no longer adjust rotation so it appears
+    // settled on the ground.
+    if (particle._landed) return;
+
+    if (typeof particle.rotation === 'number' && typeof particle._spinSpeed === 'number') {
+      particle.rotation += particle._spinSpeed * this.strength * delta;
+    }
+  }
+
+  frameUpdate(delta) { /* no-op */ }
+
+  clone() {
+    const b = new SnowSpinBehavior();
+    b.strength = this.strength;
+    return b;
+  }
+
+  reset() { /* no-op */ }
+}
+
 // Snow floor behavior: when flakes reach the ground plane (z <= 0), stop their
 // motion and fade them out over a short duration before killing them. This
 // gives the impression of flakes "settling" on the ground instead of popping
@@ -214,6 +262,7 @@ class SnowFloorBehavior {
     particle._landedAgeStart = 0;
     particle._landedBaseAlpha = undefined;
     particle._landedBaseSize = undefined;
+    particle._landedPosition = undefined;
   }
 
   update(particle, delta, system) {
@@ -223,6 +272,12 @@ class SnowFloorBehavior {
     if (particle._landed) {
       if (particle.velocity) {
         particle.velocity.set(0, 0, 0);
+      }
+
+      // Pin position to the landing point so external forces/behaviors cannot
+      // slide the flake across the ground while it is shrinking.
+      if (particle.position && particle._landedPosition) {
+        particle.position.copy(particle._landedPosition);
       }
 
       if (particle.color) {
@@ -266,6 +321,9 @@ class SnowFloorBehavior {
       }
       if (particle.size) {
         particle._landedBaseSize = particle.size.clone();
+      }
+      if (particle.position) {
+        particle._landedPosition = particle.position.clone();
       }
       // Ensure the particle lives at least long enough to complete the fade.
       if (typeof particle.life === 'number' && typeof particle.age === 'number') {
@@ -434,18 +492,42 @@ export class WeatherParticles {
     return texture;
   }
 
-  _createSnowTexture() {
-    const canvas = document.createElement('canvas');
-    canvas.width = 32;
-    canvas.height = 32;
-    const ctx = canvas.getContext('2d');
-    const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
-    grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+_createSnowTexture() {
+  const canvas = document.createElement('canvas');
+  // Increase resolution slightly for better soft edges, 
+  // though 32x32 is usually fine for particles.
+  canvas.width = 32;
+  canvas.height = 32;
+  const ctx = canvas.getContext('2d');
+
+  // Draw a cluster of "flakes" to create one irregular particle
+  const puffCount = 6; 
+  
+  for (let i = 0; i < puffCount; i++) {
+    // Randomize position slightly around the center (16, 16)
+    // We keep it within a ~10px radius so it doesn't clip edges
+    const x = 16 + (Math.random() - 0.5) * 12;
+    const y = 16 + (Math.random() - 0.5) * 12;
+    
+    // Randomize the size of each puff
+    const radius = 2 + Math.random() * 8;
+    
+    // Create a soft gradient for each puff
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, radius);
+    
+    // Center is white with random transparency (simulates density variation)
+    // Edges fade to transparent
+    grad.addColorStop(0, `rgba(255, 255, 255, ${0.5 + Math.random() * 0.5})`);
     grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+
     ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 32, 32);
-    return new window.THREE.CanvasTexture(canvas);
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
   }
+
+  return new window.THREE.CanvasTexture(canvas);
+}
 
   _createSplashTexture() {
     // Build a 2x2 atlas of unique splash shapes (4 variants) so each
@@ -890,6 +972,9 @@ export class WeatherParticles {
 
     // Per-flake flutter to capture the "paper falling" rocking motion.
     const snowFlutter = new SnowFlutterBehavior();
+    // Gentle spin while airborne; stops once SnowFloorBehavior marks flakes as
+    // landed via the _landed flag.
+    const snowSpin = new SnowSpinBehavior();
 
      this.snowSystem = new ParticleSystem({
        duration: 5,
@@ -910,10 +995,21 @@ export class WeatherParticles {
       startRotation: new IntervalValue(0, Math.PI * 2),
       // Horizontal motion now comes only from snowWind (driven by windSpeed)
       // and snowCurl (turbulence field), plus gravity for vertical fall.
-      // SnowFloorBehavior owns ground contact + fade-out, while a relaxed
+      // SnowFloorBehavior owns ground contact + fade-out, while SnowSpinBehavior
+      // adds a gentle rotation only while flakes are airborne. A relaxed
       // WorldVolumeKillBehavior (snowKillBehavior) still enforces the scene
       // rectangle in X/Y so flakes cannot drift infinitely off the sides.
-      behaviors: [snowGravity, snowWind, snowCurl, snowColorOverLife, new SnowFloorBehavior(), new RainFadeInBehavior(), snowKillBehavior],
+      behaviors: [
+        snowGravity,
+        snowWind,
+        snowCurl,
+        snowColorOverLife,
+        snowFlutter,
+        snowSpin,
+        new SnowFloorBehavior(),
+        new RainFadeInBehavior(),
+        snowKillBehavior
+      ],
     });
      
      this.snowSystem.emitter.position.set(centerX, centerY, emitterZ);

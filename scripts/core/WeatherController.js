@@ -479,7 +479,7 @@ export class WeatherController {
           readonly: true
         },
         freezeLevel: {
-          label: 'Freeze Level',
+          label: 'Temperature (Rain <-> Snow)',
           default: 0.0,
           min: 0.0,
           max: 1.0,

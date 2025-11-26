@@ -9,7 +9,10 @@ import {
   ApplyForce,
   ColorOverLife,
   TurbulenceField,
-  CurlNoiseField
+  CurlNoiseField,
+  SizeOverLife,
+  PiecewiseBezier,
+  Bezier
 } from '../libs/three.quarks.module.js';
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
@@ -292,19 +295,59 @@ class SnowFloorBehavior {
 // (worldSpace: true in the Quarks systems) and define the kill volume
 // directly from the scene rectangle and 0..7500 height.
 
+// Custom behavior to handle 0 -> 10% -> 0% opacity over life
+class SplashAlphaBehavior {
+  constructor(peakOpacity = 0.1) {
+    this.type = 'SplashAlpha';
+    this.peakOpacity = peakOpacity;
+  }
+
+  initialize(particle, system) {
+    // No init needed, we drive alpha every frame
+  }
+
+  update(particle, delta, system) {
+    if (!particle || typeof particle.age !== 'number') return;
+    
+    // Normalized life 0..1
+    const t = particle.age / particle.life;
+    
+    let alpha = 0;
+    if (t < 0.5) {
+      // 0.0 -> 0.5 maps to 0.0 -> peak
+      alpha = (t * 2.0) * this.peakOpacity;
+    } else {
+      // 0.5 -> 1.0 maps to peak -> 0.0
+      alpha = ((1.0 - t) * 2.0) * this.peakOpacity;
+    }
+    
+    // Apply to particle color alpha (w)
+    if (particle.color) {
+        particle.color.w = alpha;
+    }
+  }
+
+  frameUpdate(delta) {}
+  clone() { return new SplashAlphaBehavior(this.peakOpacity); }
+  reset() {}
+}
+
 export class WeatherParticles {
   constructor(batchRenderer, scene) {
     this.batchRenderer = batchRenderer;
     this.scene = scene;
     this.rainSystem = null;
     this.snowSystem = null;
+    this.splashSystem = null;
     this.rainTexture = this._createRainTexture();
     this.snowTexture = this._createSnowTexture();
+    this.splashTexture = this._createSplashTexture();
     this.enabled = true;
     this._time = 0;
 
     this._rainMaterial = null;
     this._snowMaterial = null;
+    this._splashMaterial = null;
 
     // ROOF / _OUTDOORS MASK INTEGRATION (high level):
     // - WeatherController owns the _Outdoors texture (roofMap) and two flags:
@@ -343,6 +386,9 @@ export class WeatherParticles {
     this._rainCurl = null;
     this._rainCurlBaseStrength = null;
 
+    /** @type {SplashAlphaBehavior|null} */
+    this._splashAlphaBehavior = null;
+
     this._rainBaseGravity = 8000;
     this._snowBaseGravity = 3000;
 
@@ -351,6 +397,9 @@ export class WeatherParticles {
 
     /** @type {THREE.ShaderMaterial|null} quarks batch material for snow */
     this._snowBatchMaterial = null;
+
+    /** @type {THREE.ShaderMaterial|null} quarks batch material for splashes */
+    this._splashBatchMaterial = null;
 
     // Cache to avoid recomputing rain material/particle properties every frame.
     // We track key tuning values so we only update Quarks when they actually change.
@@ -390,6 +439,86 @@ export class WeatherParticles {
     ctx.fillRect(0, 0, 32, 32);
     return new window.THREE.CanvasTexture(canvas);
   }
+
+  _createSplashTexture() {
+    const size = 128; // Increased resolution for finer details
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    const imgData = ctx.createImageData(size, size);
+    const data = imgData.data;
+    
+    const cx = size / 2;
+    const cy = size / 2;
+    
+    // Randomize the "shape" of this specific texture generation
+    const seedOffset = Math.random() * 100;
+
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const idx = (y * size + x) * 4;
+        const dx = x - cx;
+        const dy = y - cy;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        const angle = Math.atan2(dy, dx);
+        
+        // 1. COMPLEX NOISE
+        // Mix 3 sine waves + random noise for jagged edges
+        // High frequency (angle * 20) makes it "spiky"
+        // Low frequency (angle * 3) makes it "wobbly"
+        const noise = 
+            Math.sin(angle * 3.0 + seedOffset) * 2.0 + 
+            Math.sin(angle * 11.0 - seedOffset) * 1.5 + 
+            Math.sin(angle * 25.0) * 1.0 +
+            (Math.random() - 0.5) * 1.5; // Jagged pixel noise
+
+        // 2. VARYING RADIUS
+        const baseRadius = 28; // slightly smaller relative to 128px canvas
+        const radius = baseRadius + noise * 3.0;
+        
+        // 3. THICKNESS VARIATION
+        // The ring is thicker in some spots, thinner in others
+        const thicknessBase = 4.0;
+        const thicknessVar = Math.sin(angle * 5 + seedOffset) * 2.0;
+        const thickness = Math.max(0.5, thicknessBase + thicknessVar);
+
+        const distFromRing = Math.abs(dist - radius);
+
+        // 4. DETACHED DROPLETS
+        // Occasional noise spikes far from the center
+        const isDroplet = (dist > radius + 5) && (dist < radius + 15) && (Math.random() > 0.96);
+
+        // 5. RENDER
+        if (distFromRing < thickness || isDroplet) {
+            let alpha = 1.0;
+            
+            if (!isDroplet) {
+                // Soften edges of the main ring
+                alpha = 1 - (distFromRing / thickness);
+                // "Break" the ring: some parts are almost invisible
+                alpha *= (0.6 + 0.4 * Math.sin(angle * 7 + seedOffset));
+            } else {
+                // Droplets are solid but tiny
+                alpha = 0.6 + Math.random() * 0.4;
+            }
+            
+            // Add grain
+            alpha *= (0.8 + Math.random() * 0.4);
+
+            data[idx] = 255;
+            data[idx + 1] = 255;
+            data[idx + 2] = 255;
+            data[idx + 3] = Math.floor(Math.max(0, Math.min(1, alpha)) * 255);
+        } else {
+            data[idx + 3] = 0;
+        }
+      }
+    }
+    
+    ctx.putImageData(imgData, 0, 0);
+    return new window.THREE.CanvasTexture(canvas);
+}
 
   _initSystems() {
      const THREE = window.THREE;
@@ -542,6 +671,93 @@ export class WeatherParticles {
     // Attach curl as a behavior to the rain system
     this.rainSystem.behaviors.push(rainCurl);
 
+    // --- SPLASHES ---
+    const splashMaterial = new THREE.MeshBasicMaterial({
+      map: this.splashTexture,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.AdditiveBlending,
+      color: 0xffffff,
+      opacity: 0.8
+    });
+
+    this._splashMaterial = splashMaterial;
+    this._patchRoofMaskMaterial(this._splashMaterial);
+
+    // Use custom alpha behavior for "triangle" fade: 0 -> 10% -> 0
+    const splashAlphaBehavior = new SplashAlphaBehavior(0.10);
+    this._splashAlphaBehavior = splashAlphaBehavior;
+
+    // Rapid expansion behavior: much faster/larger
+    // Start small (0.2 scale) and grow aggressively over a short life
+    const splashSizeOverLife = new SizeOverLife(
+      // Stronger curve than before so splashes expand more within their (now shorter) lifetime.
+      new PiecewiseBezier([[new Bezier(0.4, 4.0, 7.0, 9.0), 0]])
+    );
+    
+    this.splashSystem = new ParticleSystem({
+      duration: 1,
+      looping: true,
+      prewarm: false,
+      
+      // Very short life baseline; will be overridden by tuning each frame.
+      startLife: new IntervalValue(0.1, 0.2),
+      
+      // Static on the ground (no speed)
+      startSpeed: new ConstantValue(0),
+      
+      // Size: randomization (World units/pixels)
+      // Was 0.5-1.2 which is 1px. Needs to be visible, e.g. 12-24px.
+      startSize: new IntervalValue(12, 24), 
+      
+      // Start at full white (1.0). SplashAlphaBehavior will drive alpha 0 -> 0.1 -> 0.
+      startColor: new ColorRange(new Vector4(0.8, 0.9, 1.0, 1.0), new Vector4(0.8, 0.9, 1.0, 1.0)),
+      worldSpace: true,
+      maxParticles: 2000, // Enough for heavy rain
+      emissionOverTime: new ConstantValue(0),
+      
+      // Spawn across the whole map
+      shape: new RandomRectangleEmitter({ width: sceneW, height: sceneH }),
+      
+      material: splashMaterial,
+      renderOrder: 50, // Same layer as rain
+      renderMode: RenderMode.BillBoard, // Face camera (top-down view = circle on ground)
+      
+      // Pick a random orientation once at spawn; no over-life spin behavior.
+      startRotation: new IntervalValue(0, Math.PI * 2),
+      behaviors: [
+        splashAlphaBehavior,
+        splashSizeOverLife,
+        // We do NOT add gravity or wind. Splashes stay where they spawn.
+        // We use the same kill behavior to clean up if map changes size (optional)
+        killBehavior
+      ]
+    });
+
+    // Z Position: Ground level. 
+    // Z=10 ensures it draws above the background canvas (usually Z=0) 
+    // but below tokens (Z=100+).
+    this.splashSystem.emitter.position.set(centerX, centerY, 10);
+    this.splashSystem.emitter.rotation.set(0, 0, 0); // No rotation needed for billboards
+
+    if (this.scene) this.scene.add(this.splashSystem.emitter);
+    this.batchRenderer.addSystem(this.splashSystem);
+
+    // Patch the batch material
+    try {
+       const idx = this.batchRenderer.systemToBatchIndex?.get(this.splashSystem);
+       if (idx !== undefined && this.batchRenderer.batches && this.batchRenderer.batches[idx]) {
+         const batch = this.batchRenderer.batches[idx];
+         if (batch.material) {
+           this._splashBatchMaterial = batch.material;
+           this._patchRoofMaskMaterial(this._splashBatchMaterial);
+         }
+       }
+     } catch (e) {
+       log.warn('Failed to patch splash batch material:', e);
+     }
+
     // --- SNOW ---
      const snowMaterial = new THREE.MeshBasicMaterial({
        map: this.snowTexture,
@@ -592,10 +808,10 @@ export class WeatherParticles {
       startRotation: new IntervalValue(0, Math.PI * 2),
       // Horizontal motion now comes only from snowWind (driven by windSpeed)
       // and snowCurl (turbulence field), plus gravity for vertical fall.
-      // SnowFloorBehavior now owns ground contact + fade-out. We rely on
-      // lifetime-based culling for out-of-bounds flakes instead of an
-      // additional world-volume kill for snow.
-      behaviors: [snowGravity, snowWind, snowCurl, snowColorOverLife, new SnowFloorBehavior(), new RainFadeInBehavior()],
+      // SnowFloorBehavior owns ground contact + fade-out, while a relaxed
+      // WorldVolumeKillBehavior (snowKillBehavior) still enforces the scene
+      // rectangle in X/Y so flakes cannot drift infinitely off the sides.
+      behaviors: [snowGravity, snowWind, snowCurl, snowColorOverLife, new SnowFloorBehavior(), new RainFadeInBehavior(), snowKillBehavior],
     });
      
      this.snowSystem.emitter.position.set(centerX, centerY, emitterZ);
@@ -883,6 +1099,53 @@ export class WeatherParticles {
           uniforms.uRoofMap.value = this._roofTexture;
         }
     }
+    
+    if (this.splashSystem) {
+        // Splashes only happen during rain.
+        // Logic: Precipitation > 0 AND FreezeLevel < 0.5 (Rain)
+        
+        // Base emission scaled by rain intensity and user splashIntensityScale.
+        const splashIntensityScale = rainTuning.splashIntensityScale ?? 1.0;
+        let splashEmission = 0;
+        if (baseRainIntensity > 0) {
+           // 200 splashes/sec at full intensity, further scaled by user.
+           splashEmission = 200 * baseRainIntensity * splashIntensityScale; 
+        }
+
+        this.splashSystem.emissionOverTime = new ConstantValue(splashEmission);
+        
+        // --- Lifetime Tuning for Splash ---
+        const lifeMin = Math.max(0.001, rainTuning.splashLifeMin ?? 0.1);
+        const lifeMax = Math.max(lifeMin, rainTuning.splashLifeMax ?? 0.2);
+        this.splashSystem.startLife = new IntervalValue(lifeMin, lifeMax);
+
+        // --- Size Tuning for Splash ---
+        const sizeMin = rainTuning.splashSizeMin ?? 12.0;
+        const sizeMax = Math.max(sizeMin, rainTuning.splashSizeMax ?? 24.0);
+        this.splashSystem.startSize = new IntervalValue(sizeMin, sizeMax);
+
+        // --- Opacity Peak Tuning for Splash ---
+        const peak = rainTuning.splashOpacityPeak ?? 0.10;
+        if (this._splashAlphaBehavior) {
+          this._splashAlphaBehavior.peakOpacity = peak;
+        }
+
+        // --- Mask Uniforms ---
+        if (this._splashMaterial && this._splashMaterial.userData.roofUniforms) {
+           const u = this._splashMaterial.userData.roofUniforms;
+           u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+           if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
+           u.uRoofMap.value = this._roofTexture;
+        }
+        
+        if (this._splashBatchMaterial && this._splashBatchMaterial.userData.roofUniforms) {
+           const u = this._splashBatchMaterial.userData.roofUniforms;
+           u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+           if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
+           u.uRoofMap.value = this._roofTexture;
+        }
+    }
+
     if (this.snowSystem) {
         this.snowSystem.emissionOverTime = new ConstantValue(500 * snowIntensity);
 
@@ -983,7 +1246,12 @@ export class WeatherParticles {
         this.batchRenderer.deleteSystem(this.snowSystem);
         if (this.snowSystem.emitter.parent) this.snowSystem.emitter.parent.remove(this.snowSystem.emitter);
     }
+    if (this.splashSystem) {
+        this.batchRenderer.deleteSystem(this.splashSystem);
+        if (this.splashSystem.emitter.parent) this.splashSystem.emitter.parent.remove(this.splashSystem.emitter);
+    }
     if (this.rainTexture) this.rainTexture.dispose();
     if (this.snowTexture) this.snowTexture.dispose();
+    if (this.splashTexture) this.splashTexture.dispose();
   }
 }

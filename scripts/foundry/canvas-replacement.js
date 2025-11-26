@@ -737,6 +737,13 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         else if (paramId === 'rainBrightness') rt.brightness = value;
         else if (paramId === 'rainGravityScale') rt.gravityScale = value;
         else if (paramId === 'rainWindInfluence') rt.windInfluence = value;
+        // Splash-specific controls
+        else if (paramId === 'rainSplashIntensityScale') rt.splashIntensityScale = value;
+        else if (paramId === 'rainSplashLifeMin') rt.splashLifeMin = value;
+        else if (paramId === 'rainSplashLifeMax') rt.splashLifeMax = value;
+        else if (paramId === 'rainSplashSizeMin') rt.splashSizeMin = value;
+        else if (paramId === 'rainSplashSizeMax') rt.splashSizeMax = value;
+        else if (paramId === 'rainSplashOpacityPeak') rt.splashOpacityPeak = value;
       } else if (paramId.startsWith('snow')) {
         const st = weatherController.snowTuning;
         if (!st) return;

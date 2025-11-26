@@ -54,15 +54,15 @@ export class SpecularEffect extends EffectBase {
       stripeEnabled: true,
       stripeBlendMode: 2,       // 0=Add, 1=Multiply, 2=Screen, 3=Overlay
       parallaxStrength: 1.5,    // Global parallax intensity multiplier
-      stripeMaskThreshold: 0.35, // 0 = all mask, 1 = only brightest texels
+      stripeMaskThreshold: 0.32, // 0 = all mask, 1 = only brightest texels
       
       // Layer 1 - Primary stripes
       stripe1Enabled: true,
       stripe1Frequency: 12.0,
-      stripe1Speed: 0.02,
+      stripe1Speed: -0.01,
       stripe1Angle: 115.0,
       stripe1Width: 0.47,
-      stripe1Intensity: 1.81,
+      stripe1Intensity: 2.74,
       stripe1Parallax: 0.0,     // Parallax offset (0 = no parallax)
       stripe1Wave: 1.7,         // Stripe waviness amount
       stripe1Gaps: 0.31,        // Stripe breakup / shiny spots
@@ -71,11 +71,11 @@ export class SpecularEffect extends EffectBase {
       // Layer 2 - Secondary stripes
       stripe2Enabled: true,
       stripe2Frequency: 10.5,
-      stripe2Speed: -0.04,      // Negative = opposite direction
+      stripe2Speed: -0.02,      // Negative = opposite direction
       stripe2Angle: 111.0,
       stripe2Width: 0.73,
-      stripe2Intensity: 1.49,
-      stripe2Parallax: 1.0,
+      stripe2Intensity: 2.74,
+      stripe2Parallax: 2.0,
       stripe2Wave: 1.6,
       stripe2Gaps: 0.5,
       stripe2Softness: 3.93,
@@ -86,7 +86,7 @@ export class SpecularEffect extends EffectBase {
       stripe3Speed: -0.01,
       stripe3Angle: 162.0,
       stripe3Width: 0.68,
-      stripe3Intensity: 1.38,
+      stripe3Intensity: 2.03,
       stripe3Parallax: 1.0,
       stripe3Wave: 1.1,
       stripe3Gaps: 0.37,
@@ -232,7 +232,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.35,
+          default: 0.32,
           throttle: 100
         },
         parallaxStrength: {
@@ -264,7 +264,7 @@ export class SpecularEffect extends EffectBase {
           min: -1,
           max: 1,
           step: 0.01,
-          default: 0.02,
+          default: -0.01,
           throttle: 100
         },
         stripe1Angle: {
@@ -291,7 +291,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 5,
           step: 0.01,
-          default: 1.81,
+          default: 2.74,
           throttle: 100
         },
         stripe1Parallax: {
@@ -350,7 +350,7 @@ export class SpecularEffect extends EffectBase {
           min: -1,
           max: 1,
           step: 0.01,
-          default: -0.04,
+          default: -0.02,
           throttle: 100
         },
         stripe2Angle: {
@@ -377,7 +377,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 5,
           step: 0.01,
-          default: 1.49,
+          default: 2.74,
           throttle: 100
         },
         stripe2Parallax: {
@@ -386,7 +386,7 @@ export class SpecularEffect extends EffectBase {
           min: -2,
           max: 2,
           step: 0.1,
-          default: 1.0,
+          default: 2.0,
           throttle: 100
         },
         stripe2Wave: {
@@ -463,7 +463,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 5,
           step: 0.01,
-          default: 1.38,
+          default: 2.03,
           throttle: 100
         },
         stripe3Parallax: {

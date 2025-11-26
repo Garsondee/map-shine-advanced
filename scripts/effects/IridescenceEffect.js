@@ -47,18 +47,18 @@ export class IridescenceEffect extends EffectBase {
       distortionStrength: 0.5,
       noiseScale: 0.2,
       noiseType: 0, // 0=Smooth, 1=Glitter
-      flowSpeed: 0.2,
+      flowSpeed: 0.36,
       phaseMult: 1.0,
-      angle: 45.0,
-      parallaxStrength: 1.0,
+      angle: 0.0,
+      parallaxStrength: 1.48,
       
       // Colors
-      colorCycleSpeed: 1.0, // Multiplier for color cycling
-      ignoreDarkness: 0.0, // 0=Physical, 1=Magical
+      colorCycleSpeed: 0.2, // Multiplier for color cycling
+      ignoreDarkness: 0.75, // 0=Physical, 1=Magical
       
       // Advanced
-      alpha: 1.0, // Global opacity multiplier
-      maskThreshold: 0.8
+      alpha: 0.75, // Global opacity multiplier
+      maskThreshold: 0.49
     };
   }
 
@@ -142,7 +142,7 @@ export class IridescenceEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 1.0
+          default: 0.75
         },
         noiseType: {
           type: 'list',
@@ -159,7 +159,7 @@ export class IridescenceEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.0
+          default: 0.75
         },
         colorCycleSpeed: {
           type: 'slider',
@@ -167,7 +167,7 @@ export class IridescenceEffect extends EffectBase {
           min: 0.1,
           max: 3.0,
           step: 0.05,
-          default: 1.0
+          default: 0.2
         },
         flowSpeed: {
           type: 'slider',
@@ -175,7 +175,7 @@ export class IridescenceEffect extends EffectBase {
           min: -2,
           max: 2,
           step: 0.01,
-          default: 0.2
+          default: 0.36
         },
         angle: {
           type: 'slider',
@@ -183,7 +183,7 @@ export class IridescenceEffect extends EffectBase {
           min: 0,
           max: 360,
           step: 1,
-          default: 45.0
+          default: 0.0
         },
         distortionStrength: {
           type: 'slider',
@@ -215,7 +215,7 @@ export class IridescenceEffect extends EffectBase {
           min: 0.0,
           max: 3.0,
           step: 0.01,
-          default: 1.0
+          default: 1.48
         },
         maskThreshold: {
           type: 'slider',
@@ -223,7 +223,7 @@ export class IridescenceEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.8
+          default: 0.49
         }
       },
       presets: {

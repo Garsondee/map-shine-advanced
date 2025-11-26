@@ -57,10 +57,14 @@ class FireMaskShape {
   initialize(p) {
     const count = this.points.length / 3;
     if (count === 0) return;
+
+    // 1. Pick a random point in the precomputed (u, v, brightness) list
     const idx = Math.floor(Math.random() * count) * 3;
     const u = this.points[idx];
     const v = this.points[idx + 1];
-    // Direct UV mapping onto the scene rectangle. The _Fire mask has the
+    const brightness = this.points[idx + 2]; // 0.0 to 1.0 luminance from the _Fire mask
+
+    // 2. Direct UV mapping onto the scene rectangle. The _Fire mask has the
     // same pixel dimensions as the base albedo for the scene, so we treat
     // (u, v) exactly like the base texture UVs.
     //
@@ -74,10 +78,31 @@ class FireMaskShape {
     p.position.x = this.offsetX + u * this.width;
     p.position.y = this.offsetY + (1.0 - v) * this.height;
     p.position.z = 0;
-    
-    // Critical: Reset velocity to prevent accumulation across particle reuse
+
+    // 3. Apply brightness-based modifiers. The particle system has already
+    // assigned random life/size/opacity; we now scale them by mask luminance.
+
+    // Lifetime: Darker pixels die faster.
+    // At 0 brightness, keep 30% life; at 1.0 brightness, keep 100%.
+    if (typeof p.life === 'number') {
+      p.life *= (0.3 + 0.7 * brightness);
+    }
+
+    // Size: Darker pixels spawn smaller flames.
+    // At 0 brightness, 40% size; at 1.0 brightness, 100%.
+    if (typeof p.size === 'number') {
+      p.size *= (0.4 + 0.6 * brightness);
+    }
+
+    // Opacity (Alpha): Darker pixels are much more transparent.
+    // Using brightness^2 gives a sharper falloff so grey pixels look ghostly.
+    if (p.color && typeof p.color.w === 'number') {
+      p.color.w *= (brightness * brightness);
+    }
+
+    // 4. Reset velocity to prevent accumulation across particle reuse
     if (p.velocity) {
-        p.velocity.set(0, 0, 0);
+      p.velocity.set(0, 0, 0);
     }
   }
 
@@ -164,7 +189,7 @@ export class FireSparksEffect extends EffectBase {
     };
     this.params = {
       enabled: true,
-      globalFireRate: 20.0,
+      globalFireRate: 1.9,
       fireAlpha: 0.6,
       fireCoreBoost: 1.0,
       fireHeight: 600.0,
@@ -174,17 +199,17 @@ export class FireSparksEffect extends EffectBase {
       lightIntensity: 0.9,
 
       // Fire fine controls (defaults from tuned UI)
-      fireSizeMin: 13.0,
-      fireSizeMax: 92.0,
-      fireLifeMin: 0.65,
-      fireLifeMax: 1.70,
-      fireOpacityMin: 0.18,
-      fireOpacityMax: 0.54,
-      fireColorBoostMin: 0.75,
-      fireColorBoostMax: 2.30,
+      fireSizeMin: 11.0,
+      fireSizeMax: 86.0,
+      fireLifeMin: 0.85,
+      fireLifeMax: 1.55,
+      fireOpacityMin: 0.06,
+      fireOpacityMax: 0.41,
+      fireColorBoostMin: 0.50,
+      fireColorBoostMax: 4.50,
       fireSpinEnabled: true,
-      fireSpinSpeedMin: 10.0,
-      fireSpinSpeedMax: 40.0,
+      fireSpinSpeedMin: 0.2,
+      fireSpinSpeedMax: 4.5,
 
       // Ember fine controls (defaults from tuned UI)
       emberSizeMin: 5.0,
@@ -193,8 +218,24 @@ export class FireSparksEffect extends EffectBase {
       emberLifeMax: 3.4,
       emberOpacityMin: 0.40,
       emberOpacityMax: 1.00,
-      emberColorBoostMin: 1.05,
-      emberColorBoostMax: 3.00
+      emberColorBoostMin: 1.70,
+      emberColorBoostMax: 2.85,
+
+      // New color controls
+      fireStartColor: { r: 1.0, g: 1.0, b: 1.0 },
+      fireEndColor: { r: 1.0, g: 0.0, b: 0.0 },
+      emberStartColor: { r: 1.0, g: 1.0, b: 1.0 },
+      emberEndColor: { r: 1.0, g: 0.0, b: 0.0 },
+
+      // Physics controls
+      fireUpdraft: 0.85,
+      emberUpdraft: 0.15,
+      fireCurlStrength: 0.10,
+      emberCurlStrength: 3.95,
+
+      // Per-effect time scaling (independent of global Simulation Speed)
+      // 1.0 = baseline, >1.0 = faster (shorter lifetimes), <1.0 = slower.
+      timeScale: 0.85,
     };
   }
   
@@ -230,30 +271,34 @@ export class FireSparksEffect extends EffectBase {
       groups: [
         { name: 'fire-main', label: 'Fire - Main', type: 'inline', parameters: ['globalFireRate', 'fireHeight'] },
         { name: 'fire-shape', label: 'Fire - Shape', type: 'inline', parameters: ['fireSizeMin', 'fireSizeMax', 'fireLifeMin', 'fireLifeMax'] },
-        { name: 'fire-look', label: 'Fire - Look', type: 'inline', parameters: ['fireOpacityMin', 'fireOpacityMax', 'fireColorBoostMin', 'fireColorBoostMax'] },
+        { name: 'fire-look', label: 'Fire - Look', type: 'inline', parameters: ['fireOpacityMin', 'fireOpacityMax', 'fireColorBoostMin', 'fireColorBoostMax', 'fireStartColor', 'fireEndColor'] },
         { name: 'fire-spin', label: 'Fire - Spin', type: 'inline', parameters: ['fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax'] },
+        { name: 'fire-physics', label: 'Fire - Physics', type: 'inline', parameters: ['fireUpdraft', 'fireCurlStrength'] },
         { name: 'embers-main', label: 'Embers - Main', type: 'inline', parameters: ['emberRate'] },
         { name: 'embers-shape', label: 'Embers - Shape', type: 'inline', parameters: ['emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax'] },
-        { name: 'embers-look', label: 'Embers - Look', type: 'inline', parameters: ['emberOpacityMin', 'emberOpacityMax', 'emberColorBoostMin', 'emberColorBoostMax'] },
-        { name: 'env', label: 'Environment', type: 'inline', parameters: ['windInfluence', 'lightIntensity'] }
+        { name: 'embers-look', label: 'Embers - Look', type: 'inline', parameters: ['emberOpacityMin', 'emberOpacityMax', 'emberColorBoostMin', 'emberColorBoostMax', 'emberStartColor', 'emberEndColor'] },
+        { name: 'embers-physics', label: 'Embers - Physics', type: 'inline', parameters: ['emberUpdraft', 'emberCurlStrength'] },
+        { name: 'env', label: 'Environment', type: 'inline', parameters: ['windInfluence', 'lightIntensity', 'timeScale'] }
       ],
       parameters: {
         enabled: { type: 'checkbox', label: 'Fire Enabled', default: true },
-        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 10.0 },
+        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 1.9 },
         fireAlpha: { type: 'slider', label: 'Opacity (Legacy)', min: 0.0, max: 1.0, step: 0.01, default: 0.6 },
         fireCoreBoost: { type: 'slider', label: 'Core Boost (Legacy)', min: 0.0, max: 5.0, step: 0.1, default: 1.0 },
         fireHeight: { type: 'slider', label: 'Height', min: 10.0, max: 600.0, step: 10.0, default: 600.0 },
-        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 100.0, step: 1.0, default: 13.0 },
-        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 150.0, step: 1.0, default: 92.0 },
-        fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 4.0, step: 0.05, default: 0.65 },
-        fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 1.70 },
-        fireOpacityMin: { type: 'slider', label: 'Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.18 },
-        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.54 },
-        fireColorBoostMin: { type: 'slider', label: 'Color Boost Min', min: 0.0, max: 2.0, step: 0.05, default: 0.75 },
-        fireColorBoostMax: { type: 'slider', label: 'Color Boost Max', min: 0.0, max: 3.0, step: 0.05, default: 2.30 },
+        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 100.0, step: 1.0, default: 11.0 },
+        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 150.0, step: 1.0, default: 86.0 },
+        fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 4.0, step: 0.05, default: 0.85 },
+        fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 1.55 },
+        fireOpacityMin: { type: 'slider', label: 'Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.06 },
+        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.41 },
+        fireColorBoostMin: { type: 'slider', label: 'Color Boost Min', min: 0.0, max: 2.0, step: 0.05, default: 0.50 },
+        fireColorBoostMax: { type: 'slider', label: 'Color Boost Max', min: 0.0, max: 12.0, step: 0.05, default: 4.50 },
+        fireStartColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 } },
+        fireEndColor: { type: 'color', default: { r: 1.0, g: 0.0, b: 0.0 } },
         fireSpinEnabled: { type: 'checkbox', label: 'Spin Enabled', default: true },
-        fireSpinSpeedMin: { type: 'slider', label: 'Spin Speed Min (rad/s)', min: 0.0, max: 50.0, step: 0.5, default: 10.0 },
-        fireSpinSpeedMax: { type: 'slider', label: 'Spin Speed Max (rad/s)', min: 0.0, max: 50.0, step: 0.5, default: 40.0 },
+        fireSpinSpeedMin: { type: 'slider', label: 'Spin Speed Min (rad/s)', min: 0.0, max: 50.0, step: 0.1, default: 0.2 },
+        fireSpinSpeedMax: { type: 'slider', label: 'Spin Speed Max (rad/s)', min: 0.0, max: 50.0, step: 0.1, default: 4.5 },
         emberRate: { type: 'slider', label: 'Ember Density', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
         emberSizeMin: { type: 'slider', label: 'Ember Size Min', min: 1.0, max: 40.0, step: 1.0, default: 5.0 },
         emberSizeMax: { type: 'slider', label: 'Ember Size Max', min: 1.0, max: 60.0, step: 1.0, default: 12.0 },
@@ -261,10 +306,17 @@ export class FireSparksEffect extends EffectBase {
         emberLifeMax: { type: 'slider', label: 'Ember Life Max (s)', min: 0.1, max: 12.0, step: 0.1, default: 3.4 },
         emberOpacityMin: { type: 'slider', label: 'Ember Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.40 },
         emberOpacityMax: { type: 'slider', label: 'Ember Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 1.00 },
-        emberColorBoostMin: { type: 'slider', label: 'Ember Color Boost Min', min: 0.0, max: 2.0, step: 0.05, default: 1.05 },
-        emberColorBoostMax: { type: 'slider', label: 'Ember Color Boost Max', min: 0.0, max: 3.0, step: 0.05, default: 3.00 },
+        emberColorBoostMin: { type: 'slider', label: 'Ember Color Boost Min', min: 0.0, max: 2.0, step: 0.05, default: 1.70 },
+        emberColorBoostMax: { type: 'slider', label: 'Ember Color Boost Max', min: 0.0, max: 3.0, step: 0.05, default: 2.85 },
+        emberStartColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 } },
+        emberEndColor: { type: 'color', default: { r: 1.0, g: 0.0, b: 0.0 } },
+        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 0.85 },
+        emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 0.15 },
+        fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.10 },
+        emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 3.95 },
         windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 1.4 },
-        lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 0.9 }
+        lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 0.9 },
+        timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 0.85 }
       }
     };
   }
@@ -401,16 +453,21 @@ export class FireSparksEffect extends EffectBase {
     const windForce = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(0));
     
     // Increased turbulence to break up uniform sprite look
+    const fireCurlScale = new THREE.Vector3(150, 150, 50);
+    const fireCurlStrengthBase = new THREE.Vector3(80, 80, 30);
     const turbulence = new CurlNoiseField(
-        new THREE.Vector3(150, 150, 50), 
-        new THREE.Vector3(80, 80, 30), 
+        fireCurlScale,
+        fireCurlStrengthBase.clone(),
         1.5
     );
 
     const p = this.params;
+    const timeScale = Math.max(0.1, p.timeScale ?? 1.0);
 
-    const lifeMin = Math.max(0.01, p.fireLifeMin ?? 0.6);
-    const lifeMax = Math.max(lifeMin, p.fireLifeMax ?? 1.2);
+    const baseLifeMin = p.fireLifeMin ?? 0.6;
+    const baseLifeMax = p.fireLifeMax ?? 1.2;
+    const lifeMin = Math.max(0.01, baseLifeMin / timeScale);
+    const lifeMax = Math.max(lifeMin, baseLifeMax / timeScale);
     const sizeMin = Math.max(0.1, p.fireSizeMin ?? (size * 0.8));
     const sizeMax = Math.max(sizeMin, p.fireSizeMax ?? (size * 1.5));
 
@@ -420,6 +477,9 @@ export class FireSparksEffect extends EffectBase {
     const colorBoostMin = p.fireColorBoostMin ?? 0.8;
     const colorBoostMax = Math.max(colorBoostMin, p.fireColorBoostMax ?? 1.2);
 
+    const fireStart = p.fireStartColor || { r: 1.2, g: 1.0, b: 0.6 };
+    const fireEnd = p.fireEndColor || { r: 0.8, g: 0.2, b: 0.05 };
+
     const system = new ParticleSystem({
       duration: 1,
       looping: true,
@@ -427,8 +487,18 @@ export class FireSparksEffect extends EffectBase {
       startSpeed: new ConstantValue(0),
       startSize: new IntervalValue(sizeMin, sizeMax),
       startColor: new ColorRange(
-        new Vector4(colorBoostMin, colorBoostMin, colorBoostMin, opacityMin),
-        new Vector4(colorBoostMax, colorBoostMax, colorBoostMax, opacityMax)
+        new Vector4(
+          fireStart.r * colorBoostMin,
+          fireStart.g * colorBoostMin,
+          fireStart.b * colorBoostMin,
+          opacityMin
+        ),
+        new Vector4(
+          fireEnd.r * colorBoostMax,
+          fireEnd.g * colorBoostMax,
+          fireEnd.b * colorBoostMax,
+          opacityMax
+        )
       ),
       worldSpace: true,
       maxParticles: 10000,
@@ -449,7 +519,14 @@ export class FireSparksEffect extends EffectBase {
       ]
     });
     
-    system.userData = { windForce, ownerEffect: this };
+    system.userData = {
+      windForce,
+      ownerEffect: this,
+      updraftForce: buoyancy,
+      baseUpdraftMag: height * 2.5,
+      turbulence,
+      baseCurlStrength: fireCurlStrengthBase.clone()
+    };
     
     return system;
   }
@@ -468,9 +545,12 @@ export class FireSparksEffect extends EffectBase {
     });
 
     const p = this.params;
+    const timeScale = Math.max(0.1, p.timeScale ?? 1.0);
 
-    const lifeMin = Math.max(0.01, p.emberLifeMin ?? 1.5);
-    const lifeMax = Math.max(lifeMin, p.emberLifeMax ?? 3.0);
+    const baseLifeMin = p.emberLifeMin ?? 1.5;
+    const baseLifeMax = p.emberLifeMax ?? 3.0;
+    const lifeMin = Math.max(0.01, baseLifeMin / timeScale);
+    const lifeMax = Math.max(lifeMin, baseLifeMax / timeScale);
     const sizeMin = Math.max(0.1, p.emberSizeMin ?? 4.0);
     const sizeMax = Math.max(sizeMin, p.emberSizeMax ?? 10.0);
 
@@ -480,6 +560,12 @@ export class FireSparksEffect extends EffectBase {
     const colorBoostMin = p.emberColorBoostMin ?? 0.9;
     const colorBoostMax = Math.max(colorBoostMin, p.emberColorBoostMax ?? 1.5);
 
+    const emberStart = p.emberStartColor || { r: 1.0, g: 0.8, b: 0.4 };
+    const emberEnd = p.emberEndColor || { r: 1.0, g: 0.2, b: 0.0 };
+
+    const emberCurlScale = new THREE.Vector3(30, 30, 30);
+    const emberCurlStrengthBase = new THREE.Vector3(150, 150, 50);
+
     const system = new ParticleSystem({
       duration: 1,
       looping: true,
@@ -487,8 +573,18 @@ export class FireSparksEffect extends EffectBase {
       startSpeed: new ConstantValue(0),
       startSize: new IntervalValue(sizeMin, sizeMax),
       startColor: new ColorRange(
-        new Vector4(1.0 * colorBoostMin, 1.0 * colorBoostMin, 0.8 * colorBoostMin, opacityMin),
-        new Vector4(1.0 * colorBoostMax, 0.2 * colorBoostMax, 0.0 * colorBoostMax, opacityMax)
+        new Vector4(
+          emberStart.r * colorBoostMin,
+          emberStart.g * colorBoostMin,
+          emberStart.b * colorBoostMin,
+          opacityMin
+        ),
+        new Vector4(
+          emberEnd.r * colorBoostMax,
+          emberEnd.g * colorBoostMax,
+          emberEnd.b * colorBoostMax,
+          opacityMax
+        )
       ),
       worldSpace: true,
       maxParticles: 2000,
@@ -501,8 +597,8 @@ export class FireSparksEffect extends EffectBase {
         new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(height * 8.0)),
         new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(0)),
         new CurlNoiseField(
-          new THREE.Vector3(30, 30, 30),
-          new THREE.Vector3(150, 150, 50),
+          emberCurlScale,
+          emberCurlStrengthBase.clone(),
           4.0
         ),
         new SizeOverLife(new PiecewiseBezier([[new Bezier(1, 0.9, 0.5, 0), 0]]))
@@ -511,6 +607,10 @@ export class FireSparksEffect extends EffectBase {
 
     system.userData = {
       windForce: system.behaviors.find(b => b instanceof ApplyForce && b.direction.x === 1),
+      updraftForce: system.behaviors.find(b => b instanceof ApplyForce && b.direction.z === 1),
+      baseUpdraftMag: height * 8.0,
+      turbulence: system.behaviors.find(b => b instanceof CurlNoiseField),
+      baseCurlStrength: emberCurlStrengthBase.clone(),
       isEmber: true,
       ownerEffect: this
     };
@@ -609,8 +709,8 @@ export class FireSparksEffect extends EffectBase {
     for (const f of this.fires) systems.push(f.system);
 
     const p = this.params;
-
     const clamp01 = x => Math.max(0.0, Math.min(1.0, x));
+    const timeScale = Math.max(0.1, p.timeScale ?? 1.0);
 
     for (const sys of systems) {
         const isEmber = !!(sys.userData && sys.userData.isEmber);
@@ -627,9 +727,28 @@ export class FireSparksEffect extends EffectBase {
             }
         }
 
+        // 3b. Updraft and curl noise per-system (physics controls)
+        const updraftParam = isEmber ? (p.emberUpdraft ?? 1.0) : (p.fireUpdraft ?? 1.0);
+        const curlParam = isEmber ? (p.emberCurlStrength ?? 1.0) : (p.fireCurlStrength ?? 1.0);
+
+        if (sys.userData && sys.userData.updraftForce && typeof sys.userData.baseUpdraftMag === 'number') {
+            const uf = sys.userData.updraftForce;
+            const baseMag = sys.userData.baseUpdraftMag;
+            if (typeof uf.magnitude !== 'undefined') {
+                uf.magnitude = new ConstantValue(baseMag * Math.max(0.0, updraftParam));
+            }
+        }
+
+        if (sys.userData && sys.userData.turbulence && sys.userData.baseCurlStrength && THREE && sys.userData.turbulence.strength) {
+            const baseStrength = sys.userData.baseCurlStrength;
+            sys.userData.turbulence.strength.copy(baseStrength).multiplyScalar(Math.max(0.0, curlParam));
+        }
+
         if (isEmber) {
-            const lifeMin = Math.max(0.01, p.emberLifeMin ?? 1.5);
-            const lifeMax = Math.max(lifeMin, p.emberLifeMax ?? 3.0);
+            const baseEmberLifeMin = p.emberLifeMin ?? 1.5;
+            const baseEmberLifeMax = p.emberLifeMax ?? 3.0;
+            const lifeMin = Math.max(0.01, baseEmberLifeMin / timeScale);
+            const lifeMax = Math.max(lifeMin, baseEmberLifeMax / timeScale);
             const sizeMin = Math.max(0.1, p.emberSizeMin ?? 3.0);
             const sizeMax = Math.max(sizeMin, p.emberSizeMax ?? 14.0);
             const opacityMin = clamp01(p.emberOpacityMin ?? 0.4);
@@ -637,15 +756,30 @@ export class FireSparksEffect extends EffectBase {
             const colorBoostMin = p.emberColorBoostMin ?? 0.9;
             const colorBoostMax = Math.max(colorBoostMin, p.emberColorBoostMax ?? 1.5);
 
+            const emberStart = p.emberStartColor || { r: 1.0, g: 0.8, b: 0.4 };
+            const emberEnd = p.emberEndColor || { r: 1.0, g: 0.2, b: 0.0 };
+
             sys.startLife = new IntervalValue(lifeMin, lifeMax);
             sys.startSize = new IntervalValue(sizeMin, sizeMax);
             sys.startColor = new ColorRange(
-              new Vector4(1.0 * colorBoostMin, 0.8 * colorBoostMin, 0.4 * colorBoostMin, opacityMin),
-              new Vector4(1.0 * colorBoostMax, 0.9 * colorBoostMax, 0.6 * colorBoostMax, opacityMax)
+              new Vector4(
+                emberStart.r * colorBoostMin,
+                emberStart.g * colorBoostMin,
+                emberStart.b * colorBoostMin,
+                opacityMin
+              ),
+              new Vector4(
+                emberEnd.r * colorBoostMax,
+                emberEnd.g * colorBoostMax,
+                emberEnd.b * colorBoostMax,
+                opacityMax
+              )
             );
         } else {
-            const lifeMin = Math.max(0.01, p.fireLifeMin ?? 0.4);
-            const lifeMax = Math.max(lifeMin, p.fireLifeMax ?? 1.6);
+            const baseFireLifeMin = p.fireLifeMin ?? 0.4;
+            const baseFireLifeMax = p.fireLifeMax ?? 1.6;
+            const lifeMin = Math.max(0.01, baseFireLifeMin / timeScale);
+            const lifeMax = Math.max(lifeMin, baseFireLifeMax / timeScale);
             const rawOpMin = p.fireOpacityMin ?? 0.25;
             const rawOpMax = p.fireOpacityMax ?? 0.68;
             const opacityMin = clamp01(rawOpMin * 0.4);
@@ -655,26 +789,39 @@ export class FireSparksEffect extends EffectBase {
             const colorBoostMin = p.fireColorBoostMin ?? 0.8;
             const colorBoostMax = Math.max(colorBoostMin, p.fireColorBoostMax ?? 1.2);
 
+            const fireStart = p.fireStartColor || { r: 1.2, g: 1.0, b: 0.6 };
+            const fireEnd = p.fireEndColor || { r: 0.8, g: 0.2, b: 0.05 };
+
             sys.startLife = new IntervalValue(lifeMin, lifeMax);
             sys.startSize = new IntervalValue(sizeMin, sizeMax);
             sys.startColor = new ColorRange(
-              new Vector4(1.0 * colorBoostMin, 0.4 * colorBoostMin, 0.1 * colorBoostMin, opacityMin),
-              new Vector4(1.0 * colorBoostMax, 0.9 * colorBoostMax, 0.5 * colorBoostMax, opacityMax)
+              new Vector4(
+                fireStart.r * colorBoostMin,
+                fireStart.g * colorBoostMin,
+                fireStart.b * colorBoostMin,
+                opacityMin
+              ),
+              new Vector4(
+                fireEnd.r * colorBoostMax,
+                fireEnd.g * colorBoostMax,
+                fireEnd.b * colorBoostMax,
+                opacityMax
+              )
             );
 
             if (Array.isArray(sys.behaviors)) {
               const col = sys.behaviors.find(b => b && (b.type === 'ColorOverLife' || b.constructor?.name === 'ColorOverLife'));
               if (col) {
                 const startVec = new Vector4(
-                  1.1 * colorBoostMax,
-                  1.1 * colorBoostMax,
-                  1.0 * colorBoostMax,
+                  fireStart.r * colorBoostMax,
+                  fireStart.g * colorBoostMax,
+                  fireStart.b * colorBoostMax,
                   1.0
                 );
                 const endVec = new Vector4(
-                  0.6 * colorBoostMax,
-                  0.05 * colorBoostMax,
-                  0.0,
+                  fireEnd.r * colorBoostMax,
+                  fireEnd.g * colorBoostMax,
+                  fireEnd.b * colorBoostMax,
                   0.0
                 );
                 col.color = new ColorRange(startVec, endVec);
@@ -682,8 +829,10 @@ export class FireSparksEffect extends EffectBase {
             }
         }
 
-        const baseLifeMin = sys.userData && sys.userData.isEmber ? (p.emberLifeMin ?? 1.5) : (p.fireLifeMin ?? 0.6);
-        const baseLifeMax = sys.userData && sys.userData.isEmber ? (p.emberLifeMax ?? 3.0) : (p.fireLifeMax ?? 1.2);
+        const baseLifeMinRaw = isEmber ? (p.emberLifeMin ?? 1.5) : (p.fireLifeMin ?? 0.6);
+        const baseLifeMaxRaw = isEmber ? (p.emberLifeMax ?? 3.0) : (p.fireLifeMax ?? 1.2);
+        const baseLifeMin = baseLifeMinRaw / timeScale;
+        const baseLifeMax = baseLifeMaxRaw / timeScale;
 
         if (windSpeed > 0.1) {
             const factor = 1.0 - (windSpeed * 0.6);

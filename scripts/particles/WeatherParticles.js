@@ -1130,6 +1130,7 @@ _createSnowTexture() {
     this._snowGravityForce = snowGravity;
     this._snowCurl = snowCurl;
     this._snowCurlBaseStrength = snowCurl.strength.clone();
+    this._snowFlutter = snowFlutter;
     this._rainCurl = rainCurl;
     this._rainCurlBaseStrength = rainCurl.strength.clone();
 
@@ -1395,6 +1396,15 @@ _createSnowTexture() {
 
         const baseIntensity = baseRainIntensity;
 
+        // Drive splash emission with a different curve than raindrops.
+        // From 0-25% precipitation: no splashes.
+        // From 25%-100%: ramp splash factor from 0 -> 1.
+        let splashPrecipFactor = 0.0;
+        if (precip > 0.25) {
+          const t = (precip - 0.25) / 0.75;
+          splashPrecipFactor = THREE ? THREE.MathUtils.clamp(t, 0.0, 1.0) : Math.max(0, Math.min(1, t));
+        }
+
         const perSplash = [
           {
             system: this.splashSystems[0],
@@ -1452,12 +1462,12 @@ _createSnowTexture() {
 
           const t = entry.tuning || {};
 
-          // Base emission scaled by rain intensity and per-splash intensity.
+          // Base emission scaled by rain intensity, precipitation curve, and per-splash intensity.
           const splashIntensityScale = t.intensity ?? 0.0;
           let splashEmission = 0;
-          if (baseIntensity > 0 && splashIntensityScale > 0) {
-            // 200 splashes/sec at full intensity, further scaled per splash.
-            splashEmission = 200 * baseIntensity * splashIntensityScale;
+          if (baseIntensity > 0 && splashIntensityScale > 0 && splashPrecipFactor > 0) {
+            // 200 splashes/sec at full intensity, further scaled per splash and precipitation factor.
+            splashEmission = 200 * baseIntensity * splashIntensityScale * splashPrecipFactor;
           }
 
           system.emissionOverTime = new ConstantValue(splashEmission);
@@ -1510,6 +1520,12 @@ _createSnowTexture() {
         if (this._snowCurl && this._snowCurlBaseStrength) {
           const curlStrength = snowTuning.curlStrength ?? 1.0;
           this._snowCurl.strength.copy(this._snowCurlBaseStrength).multiplyScalar(curlStrength);
+        }
+
+        // Drive per-flake flutter wobble from tuning so Snow Flutter Strength has effect.
+        if (this._snowFlutter) {
+          const flutterStrength = snowTuning.flutterStrength ?? 1.0;
+          this._snowFlutter.strength = flutterStrength;
         }
         // Apply roof mask uniforms for snow (base material)
         if (this._snowMaterial && this._snowMaterial.userData && this._snowMaterial.userData.roofUniforms) {

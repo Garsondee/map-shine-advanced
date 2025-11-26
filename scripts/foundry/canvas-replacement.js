@@ -704,6 +704,8 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       weatherController.transitionDuration = value;
     } else if (paramId === 'variability') {
       weatherController.setVariability(value);
+    } else if (paramId === 'simulationSpeed') {
+      weatherController.simulationSpeed = value;
     } else if (paramId === 'timeOfDay') {
       weatherController.setTime(value);
     } else {
@@ -775,7 +777,6 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         if (paramId === 'snowIntensityScale') st.intensityScale = value;
         else if (paramId === 'snowFlakeSize') st.flakeSize = value;
         else if (paramId === 'snowBrightness') st.brightness = value;
-        else if (paramId === 'snowFallSpeed') st.fallSpeed = value;
         else if (paramId === 'snowGravityScale') st.gravityScale = value;
         else if (paramId === 'snowWindInfluence') st.windInfluence = value;
         else if (paramId === 'snowCurlStrength') st.curlStrength = value;
@@ -798,6 +799,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     enabled: true,
     transitionDuration: weatherController.transitionDuration,
     variability: weatherController.variability,
+    simulationSpeed: weatherController.simulationSpeed,
     timeOfDay: weatherController.timeOfDay,
     roofMaskForceEnabled: weatherController.roofMaskForceEnabled,
     

@@ -493,11 +493,12 @@ export class WeatherParticles {
   }
 
 _createSnowTexture() {
-  // Build a 2x2 atlas of unique flake shapes (4 variants), similar in
-  // spirit to the rain splash atlas but using soft billboard flakes.
-  const cellSize = 32;
+  // 1. INCREASE RESOLUTION
+  // Bumped from 32 to 64 per cell. This creates a 128x128 texture.
+  // This ensures flakes look crisp when they fall close to the camera.
+  const cellSize = 64;
   const grid = 2;
-  const totalSize = cellSize * grid; // 64x64 texture
+  const totalSize = cellSize * grid;
 
   const canvas = document.createElement('canvas');
   canvas.width = totalSize;
@@ -507,81 +508,93 @@ _createSnowTexture() {
   const drawFlakeInCell = (cellX, cellY, variant) => {
     const cx = cellX * cellSize + cellSize / 2;
     const cy = cellY * cellSize + cellSize / 2;
+    
+    // 2. PADDING
+    // We leave a roughly 4px gap between the flake and the cell edge.
+    // This prevents "texture bleeding" (lines from one flake showing up on another)
+    // when Mipmaps blur the texture at a distance.
+    const maxRadius = (cellSize / 2) - 4;
 
-    // Base parameters per variant: subtle differences in size/roughness.
-    let coreRadius = 10;
-    let innerPuffCount = 3;
-    let edgePuffCount = 3;
+    ctx.save();
+    ctx.translate(cx, cy);
 
-    if (variant === 1) {
-      coreRadius = 9;      // slightly smaller, denser
-      innerPuffCount = 4;  // more inner detail
-      edgePuffCount = 2;   // smoother edge
-    } else if (variant === 2) {
-      coreRadius = 8;      // smallest core
-      innerPuffCount = 2;  // minimal inner detail
-      edgePuffCount = 4;   // more irregular edge
-    } else if (variant === 3) {
-      coreRadius = 11;     // largest, softest core
-      innerPuffCount = 4;
-      edgePuffCount = 4;
-    }
-
-    // 1) Core disk: single connected blob that guarantees the flake
-    // is visually contiguous.
-    const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreRadius);
-    coreGrad.addColorStop(0, 'rgba(255, 255, 255, 1.0)');
-    coreGrad.addColorStop(1, 'rgba(255, 255, 255, 0.0)');
-    ctx.fillStyle = coreGrad;
+    // 3. THE "BOKEH" GLOW
+    // A soft radial background that gives the flake volume and makes it
+    // visible even if the fine structural lines are too small to see.
+    const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, maxRadius);
+    glow.addColorStop(0, 'rgba(255, 255, 255, 0.8)');   // Bright center
+    glow.addColorStop(0.3, 'rgba(255, 255, 255, 0.2)'); // Soft core
+    glow.addColorStop(1, 'rgba(255, 255, 255, 0)');     // Fade out
+    ctx.fillStyle = glow;
     ctx.beginPath();
-    ctx.arc(cx, cy, coreRadius, 0, Math.PI * 2);
+    ctx.arc(0, 0, maxRadius, 0, Math.PI * 2);
     ctx.fill();
 
-    // 2) Internal noise puffs: small gradients constrained to lie
-    // inside the core disk so no detached satellites can appear.
-    for (let i = 0; i < innerPuffCount; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const dist = Math.random() * (coreRadius * 0.5); // stay well inside core
-      const x = cx + Math.cos(angle) * dist;
-      const y = cy + Math.sin(angle) * dist;
+    // 4. CRYSTALLINE STRUCTURE
+    // Real snowflakes have hexagonal symmetry. We draw one "arm"
+    // and rotate it 6 times.
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    // A white shadow creates a "bloom" effect
+    ctx.shadowColor = "rgba(255, 255, 255, 1)"; 
+    ctx.shadowBlur = 4;
 
-      const radius = 2 + Math.random() * 4; // smaller detail puffs
+    for (let i = 0; i < 6; i++) {
+      ctx.save(); 
+      ctx.rotate((Math.PI / 3) * i); // Rotate 60 degrees per arm
 
-      const grad = ctx.createRadialGradient(x, y, 0, x, y, radius);
-      const alphaCenter = 0.5 + Math.random() * 0.5; // 0.5–1.0
-      grad.addColorStop(0, `rgba(255, 255, 255, ${alphaCenter})`);
-      grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-
-      ctx.fillStyle = grad;
       ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
-      ctx.fill();
+      
+      if (variant === 0) {
+        // Variant 1: The Classic Star
+        ctx.lineWidth = 3;
+        ctx.moveTo(0, 0);
+        ctx.lineTo(0, maxRadius * 0.8);
+      } 
+      else if (variant === 1) {
+        // Variant 2: The Fern (Dendrite)
+        // Main spine
+        ctx.lineWidth = 2;
+        ctx.moveTo(0, 0);
+        ctx.lineTo(0, maxRadius * 0.9);
+        // Little branches V-shape
+        ctx.lineWidth = 1.5;
+        const branchY = maxRadius * 0.5;
+        const branchW = maxRadius * 0.25;
+        ctx.moveTo(0, branchY);
+        ctx.lineTo(branchW, branchY + (maxRadius * 0.2));
+        ctx.moveTo(0, branchY);
+        ctx.lineTo(-branchW, branchY + (maxRadius * 0.2));
+      } 
+      else if (variant === 2) {
+        // Variant 3: The Plate (Hexagon center)
+        ctx.lineWidth = 3;
+        ctx.moveTo(0, 0);
+        ctx.lineTo(0, maxRadius * 0.7);
+        // Crossbar to form the inner hexagon shape
+        ctx.lineWidth = 2;
+        ctx.moveTo(-5, maxRadius * 0.3);
+        ctx.lineTo(5, maxRadius * 0.3);
+      } 
+      else {
+        // Variant 4: The Heavy Flake (Clumped)
+        // Thicker, shorter strokes to simulate flakes sticking together
+        ctx.lineWidth = 4;
+        ctx.moveTo(0, 0);
+        ctx.lineTo(0, maxRadius * 0.6);
+        ctx.moveTo(0, maxRadius * 0.3);
+        ctx.lineTo(4, maxRadius * 0.5);
+      }
+      
+      ctx.stroke();
+      ctx.restore();
     }
-
-    // 3) Edge puffs: slightly irregular outline, but centers are constrained
-    // near the core radius so they always overlap and remain connected.
-    for (let i = 0; i < edgePuffCount; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      // Place centers between ~70% and 100% of core radius from center.
-      const dist = coreRadius * (0.7 + Math.random() * 0.3);
-      const x = cx + Math.cos(angle) * dist;
-      const y = cy + Math.sin(angle) * dist;
-
-      const radius = 3 + Math.random() * 4; // overlap core edge
-
-      const grad = ctx.createRadialGradient(x, y, 0, x, y, radius);
-      const alphaCenter = 0.3 + Math.random() * 0.4; // softer than inner puffs
-      grad.addColorStop(0, `rgba(255, 255, 255, ${alphaCenter})`);
-      grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
-      ctx.fill();
-    }
+    
+    ctx.restore(); // Reset translation for next cell
   };
 
-  // Generate 4 unique flake variants in a 2x2 grid.
+  // Generate the 4 variants
   drawFlakeInCell(0, 0, 0);
   drawFlakeInCell(1, 0, 1);
   drawFlakeInCell(0, 1, 2);
@@ -589,11 +602,16 @@ _createSnowTexture() {
 
   const tex = new window.THREE.CanvasTexture(canvas);
   const THREE = window.THREE;
+
   if (THREE) {
-    // Atlas: use nearest for minification to reduce bleeding between tiles.
-    tex.minFilter = THREE.NearestFilter;
+    // 5. BETTER FILTERING
+    // Use LinearMipmapLinear so it looks smooth (not pixelated) at a distance,
+    // but retains the crisp shape when close.
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
     tex.magFilter = THREE.LinearFilter;
+    tex.needsUpdate = true;
   }
+
   return tex;
 }
 

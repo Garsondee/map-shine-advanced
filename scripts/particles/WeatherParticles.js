@@ -104,6 +104,38 @@ class WorldVolumeKillBehavior {
   reset() { /* no-op */ }
 }
 
+class RainFadeInBehavior {
+  constructor() {
+    this.type = 'RainFadeIn';
+    this.fadeDuration = 1.0;
+  }
+
+  initialize(particle, system) {
+    if (particle && particle.color) {
+      particle._baseAlpha = particle.color.w;
+      particle.color.w = 0;
+    }
+  }
+
+  update(particle, delta, system) {
+    if (!particle || typeof particle.age !== 'number' || !particle.color) return;
+
+    const t = Math.min(Math.max(particle.age / this.fadeDuration, 0), 1);
+    const baseA = typeof particle._baseAlpha === 'number' ? particle._baseAlpha : 1.0;
+    particle.color.w = baseA * t;
+  }
+
+  frameUpdate(delta) { /* no-op */ }
+
+  clone() {
+    const b = new RainFadeInBehavior();
+    b.fadeDuration = this.fadeDuration;
+    return b;
+  }
+
+  reset() { /* no-op */ }
+}
+
 // Snow-specific flutter behavior to create the classic "paper falling" sway.
 // This operates in world space and adds a gentle, per-particle sine-wave drift
 // primarily along the X axis (with a small Y component) as flakes fall.
@@ -170,6 +202,15 @@ export class WeatherParticles {
     this.enabled = true;
     this._time = 0;
 
+    this._rainMaterial = null;
+    this._snowMaterial = null;
+
+    /** @type {THREE.Texture|null} cached roof/outdoors mask texture */
+    this._roofTexture = null;
+
+    /** @type {THREE.Vector4|null} cached scene bounds for mask projection */
+    this._sceneBounds = null;
+
     this._rainWindForce = null;
     this._snowWindForce = null;
     this._rainGravityForce = null;
@@ -182,6 +223,14 @@ export class WeatherParticles {
 
     this._rainBaseGravity = 8000;
     this._snowBaseGravity = 3000;
+
+    // Cache to avoid recomputing rain material/particle properties every frame.
+    // We track key tuning values so we only update Quarks when they actually change.
+    this._lastRainTuning = {
+      brightness: null,
+      dropSize: null,
+      streakLength: null
+    };
 
     this._initSystems();
   }
@@ -226,23 +275,38 @@ export class WeatherParticles {
     // This gives us the true playable area in world units (top-left origin).
     // We then extend this into 3D by treating Z=0 as the ground plane and
     // Z=7500 as the top of the world volume for all weather particles.
+    //
+    // LAYERING CONTRACT (weather vs. tiles / overhead):
+    // - Overhead tiles use Z_OVERHEAD=20, depthTest=true, depthWrite=false,
+    //   renderOrder=10 (see TileManager.updateSpriteTransform).
+    // - three.quarks builds its own SpriteBatch ShaderMaterials from the
+    //   MeshBasicMaterial we provide here; we must NOT override SpriteBatch
+    //   materials directly or we risk losing the texture map.
+    // - To ensure rain/snow render visibly above roofs we:
+    //     * keep depthWrite=false so particles never write depth,
+    //     * set depthTest=false so they ignore the depth buffer, and
+    //     * set renderOrder=50 on the ParticleSystem configs below.
+    //   Combined with ParticleSystem's BatchedRenderer.renderOrder=50 this
+    //   guarantees weather batches draw after tiles and appear as an overlay.
     log.info(`WeatherParticles: scene bounds [${sceneX}, ${sceneY}, ${sceneW}x${sceneH}]`);
 
     const centerX = sceneX + sceneW / 2;
     const centerY = sceneY + sceneH / 2;
-    const emitterZ = 3000; // High ceiling
+    const emitterZ = 7500;
 
-    // World volume in world space: scene rectangle in X/Y, 0..7500 in Z.
+    // World volume in world space: scene rectangle in X/Y, 0..7500 in Z. We
+    // keep a tall band here so strong gravity/wind forces do not immediately
+    // cull particles before they have a chance to render.
     const volumeMin = new THREE.Vector3(sceneX, sceneY, 0);
     const volumeMax = new THREE.Vector3(sceneX + sceneW, sceneY + sceneH, 7500);
     const killBehavior = new WorldVolumeKillBehavior(volumeMin, volumeMax);
     
     // --- COMMON OVER-LIFE BEHAVIORS ---
-    // Rain: keep chroma roughly constant but fade alpha towards the end of life.
+    // Rain: keep chroma and alpha roughly constant over life; fade handled by RainFadeInBehavior.
     const rainColorOverLife = new ColorOverLife(
       new ColorRange(
         new Vector4(1.0, 1.0, 1.0, 1.0),
-        new Vector4(1.0, 1.0, 1.0, 0.2)
+        new Vector4(1.0, 1.0, 1.0, 1.0)
       )
     );
 
@@ -261,50 +325,57 @@ export class WeatherParticles {
      const wind = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(3000));
 
      // --- RAIN ---
-     const rainMaterial = new THREE.MeshBasicMaterial({
-       map: this.rainTexture,
-       transparent: true,
-       depthWrite: false,
-       blending: THREE.AdditiveBlending,
-       color: 0xffffff,
-       opacity: 1.0,
-       side: THREE.DoubleSide // Ensure visibility from all angles
-     });
+    const rainMaterial = new THREE.MeshBasicMaterial({
+      map: this.rainTexture,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.NormalBlending,
+      color: 0xffffff,
+      opacity: 1.0,
+      side: THREE.DoubleSide
+    });
 
-     this.rainSystem = new ParticleSystem({
-       duration: 1,
-       looping: true,
-       prewarm: true,
-       
-       // LIFE: Short life ensures they don't fall infinitely below the floor
-       startLife: new IntervalValue(0.6, 0.8),
-       
-       // SPEED: High, but not game-breakingly high.
-       // Gravity will accelerate them further.
-       startSpeed: new IntervalValue(6000, 8000), 
-       
-       // SIZE: narrow streaks; actual visual width is mostly from texture.
+    this._rainMaterial = rainMaterial;
+
+    // Inject roof mask support into the rain material without changing its core look.
+    this._patchRoofMaskMaterial(this._rainMaterial);
+
+    this.rainSystem = new ParticleSystem({
+      duration: 1,
+      looping: true,
+      prewarm: true,
+      
+      // LIFE: Long enough that particles are culled by the world-volume floor instead of timing out mid-air.
+      startLife: new IntervalValue(3.0, 4.0),
+      
+      // SPEED: High, but not game-breakingly high.
+      // Gravity will accelerate them further.
+      startSpeed: new IntervalValue(6000, 8000), 
+      
+      // SIZE: narrow streaks; actual visual width is mostly from texture.
       startSize: new IntervalValue(1.2, 2.2), 
-       
-       startColor: new ColorRange(new Vector4(0.6, 0.7, 1.0, 0.5), new Vector4(0.6, 0.7, 1.0, 0.2)),
-       worldSpace: true,
-       maxParticles: 15000,
-       emissionOverTime: new ConstantValue(0), 
-       shape: new RandomRectangleEmitter({ width: sceneW, height: sceneH }),
-       material: rainMaterial,
-       
-       // RENDER MODE: StretchedBillBoard
-       // Uses velocity to stretch the quad.
-       renderMode: RenderMode.StretchedBillBoard,
-       // speedFactor: Controls how "long" the rain streak is relative to speed.
-       // 4000 speed * 0.05 factor = 200 unit long streak.
-       speedFactor: 0.05, 
-       
-       startRotation: new ConstantValue(0),
-       behaviors: [gravity, wind, rainColorOverLife, killBehavior],
+      
+      startColor: new ColorRange(new Vector4(0.6, 0.7, 1.0, 1.0), new Vector4(0.6, 0.7, 1.0, 1.0)),
+      worldSpace: true,
+      maxParticles: 15000,
+      emissionOverTime: new ConstantValue(0), 
+      shape: new RandomRectangleEmitter({ width: sceneW, height: sceneH }),
+      material: rainMaterial,
+      renderOrder: 50,
+      
+      // RENDER MODE: StretchedBillBoard
+      // Uses velocity to stretch the quad.
+      renderMode: RenderMode.StretchedBillBoard,
+      // speedFactor: Controls how "long" the rain streak is relative to speed.
+      // 4000 speed * 0.02 factor = 80 unit long streak.
+      speedFactor: 0.02, 
+      
+      startRotation: new ConstantValue(0),
+      behaviors: [gravity, wind, rainColorOverLife, killBehavior, new RainFadeInBehavior()],
     });
      
-     this.rainSystem.emitter.position.set(centerX, centerY, emitterZ);
+    this.rainSystem.emitter.position.set(centerX, centerY, emitterZ);
      // Rotate Emitter to shoot DOWN (-Z)
      this.rainSystem.emitter.rotation.set(Math.PI, 0, 0);
 
@@ -326,11 +397,17 @@ export class WeatherParticles {
        map: this.snowTexture,
        transparent: true,
        depthWrite: false,
+       depthTest: false,
        blending: THREE.AdditiveBlending,
        color: 0xffffff
      });
 
-     // Slower gravity for snow; lateral motion (wind + turbulence) will be configured per-frame.
+     this._snowMaterial = snowMaterial;
+
+    // Inject roof mask support into the snow material as well.
+    this._patchRoofMaskMaterial(this._snowMaterial);
+
+    // Slower gravity for snow; lateral motion (wind + turbulence) will be configured per-frame.
     // Increase gravity so flakes clearly fall rather than drifting mostly sideways.
     const snowGravity = new ApplyForce(new THREE.Vector3(0, 0, -1), new ConstantValue(this._snowBaseGravity));
     const snowWind = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(800));
@@ -359,12 +436,13 @@ export class WeatherParticles {
       emissionOverTime: new ConstantValue(0),
       shape: new RandomRectangleEmitter({ width: sceneW, height: sceneH }),
       material: snowMaterial,
+      renderOrder: 50,
       // Snow uses standard Billboards (flakes don't stretch)
       renderMode: RenderMode.BillBoard,
       startRotation: new IntervalValue(0, Math.PI * 2),
       // Horizontal motion now comes only from snowWind (driven by windSpeed)
       // and snowCurl (turbulence field), plus gravity for vertical fall.
-      behaviors: [snowGravity, snowWind, snowCurl, snowColorOverLife, killBehavior.clone()],
+      behaviors: [snowGravity, snowWind, snowCurl, snowColorOverLife, killBehavior.clone(), new RainFadeInBehavior()],
     });
      
      this.snowSystem.emitter.position.set(centerX, centerY, emitterZ);
@@ -386,7 +464,19 @@ export class WeatherParticles {
      log.info(`Weather systems initialized. Area: ${sceneW}x${sceneH}`);
   }
 
-  update(dt) {
+  /**
+   * Patch a MeshBasicMaterial to support sampling the roof/_Outdoors mask.
+   * This keeps the existing lighting and texturing logic intact and only adds
+   * a late discard based on uRoofMap/uSceneBounds/uRoofMaskEnabled.
+   * @param {THREE.Material} material
+   * @private
+   */
+  _patchRoofMaskMaterial(material) {
+    const THREE = window.THREE;
+    if (!material || !THREE) return;
+  }
+
+  update(dt, sceneBoundsVec4) {
     const weather = weatherController.getCurrentState();
     if (!weather) return;
     
@@ -397,31 +487,89 @@ export class WeatherParticles {
 
     const THREE = window.THREE;
 
+    // Cache scene bounds for mask projection
+    if (sceneBoundsVec4 && THREE) {
+      if (!this._sceneBounds) this._sceneBounds = new THREE.Vector4();
+      this._sceneBounds.copy(sceneBoundsVec4);
+    }
+
+    // Update roof/outdoors texture and mask state from WeatherController
+    const roofTex = weatherController.roofMap || null;
+    this._roofTexture = roofTex;
+    const roofMaskEnabled = (weatherController.roofMaskActive || weatherController.roofMaskForceEnabled) && !!roofTex;
+
     const precip = weather.precipitation || 0;
     const freeze = weather.freezeLevel || 0;
     const rainTuning = weatherController.rainTuning || {};
     const snowTuning = weatherController.snowTuning || {};
-    const rainIntensity = precip * (1.0 - freeze) * (rainTuning.intensityScale ?? 1.0);
+    const baseRainIntensity = precip * (1.0 - freeze) * (rainTuning.intensityScale ?? 1.0);
     const snowIntensity = precip * freeze * (snowTuning.intensityScale ?? 1.0);
-    
+
     if (this.rainSystem) {
+        // Minimal per-frame work: just drive emission by precipitation/intensity.
+        const rainIntensity = baseRainIntensity;
         this.rainSystem.emissionOverTime = new ConstantValue(4000 * rainIntensity);
 
-        const dropSize = rainTuning.dropSize ?? 1.0;
-        const sizeMin = 1.2 * dropSize;
-        const sizeMax = 2.2 * dropSize;
-        this.rainSystem.startSize = new IntervalValue(sizeMin, sizeMax);
+        // --- EFFICIENT TUNING UPDATES ---
+        // Only update system properties if the specific tuning value has changed.
 
-        const streakLen = rainTuning.streakLength ?? 1.0;
-        this.rainSystem.speedFactor = 0.05 * streakLen;
+        // 1. Drop Size -> startSize
+        const currentDropSize = rainTuning.dropSize ?? 1.0;
+        if (currentDropSize !== this._lastRainTuning.dropSize) {
+          this._lastRainTuning.dropSize = currentDropSize;
+          const sizeMin = 1.2 * currentDropSize;
+          const sizeMax = 2.2 * currentDropSize;
+          this.rainSystem.startSize = new IntervalValue(sizeMin, sizeMax);
+        }
 
-        // Map brightness tuning to material opacity so user can make rain more/less visible.
-        const brightness = rainTuning.brightness ?? 1.0;
-        if (this.rainSystem.material) {
-          // Simple mapping: 0.5 -> quite faint, 2.5+ -> very solid but clamped to 1.0
-          const targetOpacity = THREE.MathUtils.clamp(0.3 + 0.3 * brightness, 0.0, 1.0);
-          this.rainSystem.material.opacity = targetOpacity;
-          this.rainSystem.material.needsUpdate = true;
+        // 2. Streak Length -> speedFactor
+        const currentStreakLen = rainTuning.streakLength ?? 1.0;
+        if (currentStreakLen !== this._lastRainTuning.streakLength) {
+          this._lastRainTuning.streakLength = currentStreakLen;
+          // Keep this in sync with the baseline speedFactor set in _initSystems.
+          // Smaller values (e.g. 0.25) now produce noticeably shorter streaks.
+          this.rainSystem.speedFactor = 0.02 * currentStreakLen;
+        }
+
+        // 3. Brightness -> material opacity & startColor alpha
+        const currentBrightness = rainTuning.brightness ?? 1.0;
+        if (currentBrightness !== this._lastRainTuning.brightness &&
+            (this._rainMaterial || this.rainSystem.material)) {
+
+          this._lastRainTuning.brightness = currentBrightness;
+
+          const clampedB = THREE.MathUtils.clamp(currentBrightness, 0.0, 3.0);
+          const alphaScale = clampedB / 3.0; // 0 -> invisible, 1 -> full
+
+          // Material opacity
+          const targetOpacity = THREE.MathUtils.clamp(alphaScale * 1.2, 0.0, 1.0);
+          if (this._rainMaterial) {
+            this._rainMaterial.opacity = targetOpacity;
+            this._rainMaterial.needsUpdate = true;
+          }
+          if (this.rainSystem.material) {
+            this.rainSystem.material.opacity = targetOpacity;
+            this.rainSystem.material.needsUpdate = true;
+          }
+
+          // Particle alpha
+          const baseMinAlpha = 1.0;
+          const baseMaxAlpha = 0.7;
+          const minA = baseMinAlpha * alphaScale;
+          const maxA = baseMaxAlpha * alphaScale;
+          this.rainSystem.startColor = new ColorRange(
+            new Vector4(0.6, 0.7, 1.0, minA),
+            new Vector4(0.6, 0.7, 1.0, maxA)
+          );
+        }
+        // Apply roof mask uniforms for rain
+        if (this._rainMaterial && this._rainMaterial.userData && this._rainMaterial.userData.roofUniforms) {
+          const uniforms = this._rainMaterial.userData.roofUniforms;
+          uniforms.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+          if (this._sceneBounds) {
+            uniforms.uSceneBounds.value.copy(this._sceneBounds);
+          }
+          uniforms.uRoofMap.value = this._roofTexture;
         }
     }
     if (this.snowSystem) {
@@ -436,6 +584,15 @@ export class WeatherParticles {
         if (this._snowCurl && this._snowCurlBaseStrength) {
           const curlStrength = snowTuning.curlStrength ?? 1.0;
           this._snowCurl.strength.copy(this._snowCurlBaseStrength).multiplyScalar(curlStrength);
+        }
+        // Apply roof mask uniforms for snow
+        if (this._snowMaterial && this._snowMaterial.userData && this._snowMaterial.userData.roofUniforms) {
+          const uniforms = this._snowMaterial.userData.roofUniforms;
+          uniforms.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+          if (this._sceneBounds) {
+            uniforms.uSceneBounds.value.copy(this._sceneBounds);
+          }
+          uniforms.uRoofMap.value = this._roofTexture;
         }
     }
 

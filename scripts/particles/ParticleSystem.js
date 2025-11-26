@@ -63,6 +63,18 @@ export class ParticleSystem extends EffectBase {
     try {
       // 1. Initialize three.quarks BatchedRenderer
       this.batchRenderer = new BatchedRenderer();
+      // LAYERING CONTRACT:
+      // - All quarks SpriteBatches created from this renderer share its
+      //   Object3D.renderOrder.
+      // - Overhead tiles use renderOrder=10 and depthWrite=false so they do
+      //   not dominate the depth buffer.
+      // - WeatherParticles configures individual ParticleSystems with
+      //   renderOrder=50 and MeshBasicMaterials that have depthWrite=false
+      //   and depthTest=false.
+      // - With this.batchRenderer.renderOrder=50, the resulting SpriteBatches
+      //   render after tiles and, because they ignore depth, appear as an
+      //   overlay above overhead geometry.
+      this.batchRenderer.renderOrder = 50;
       this.scene.add(this.batchRenderer);
       log.info('Initialized three.quarks BatchedRenderer');
 
@@ -108,7 +120,7 @@ export class ParticleSystem extends EffectBase {
       }
     }
 
-    // 1. Compute scene bounds vector for rain/snow clipping
+    // 1. Compute scene bounds vector for rain/snow clipping and masking
     let boundsVec4 = null;
     if (typeof canvas !== 'undefined' && canvas.dimensions) {
       const d = canvas.dimensions;
@@ -129,9 +141,9 @@ export class ParticleSystem extends EffectBase {
       const dtMs = typeof timeInfo.delta === 'number' ? timeInfo.delta : 16.0;
       const dt = dtMs * 0.001 * 500;
 
-      // Update weather systems
+      // Update weather systems (pass dt and scene bounds if available)
       if (this.weatherParticles) {
-        this.weatherParticles.update(dt);
+        this.weatherParticles.update(dt, boundsVec4);
       }
 
       this.batchRenderer.update(dt); // Quarks expects seconds

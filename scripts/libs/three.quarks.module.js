@@ -727,6 +727,9 @@ class VFXBatch extends Mesh {
         };
         this.frustumCulled = false;
         this.renderOrder = this.settings.renderOrder;
+        this.material = settings.material.clone();
+        this.material.depthWrite = settings.material.depthWrite;
+        this.material.depthTest = settings.material.depthTest;
     }
     addSystem(system) {
         this.systems.add(system);

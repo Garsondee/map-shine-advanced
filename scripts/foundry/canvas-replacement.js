@@ -697,6 +697,9 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
        // Weather system is always running technically, but we could toggle visibility of effects
        // For now, just log
        log.debug(`Weather system ${value ? 'enabled' : 'disabled'}`);
+    } else if (paramId === 'roofMaskForceEnabled') {
+      // Manual override for indoor masking independent of roof hover state
+      weatherController.roofMaskForceEnabled = !!value;
     } else if (paramId === 'transitionDuration') {
       weatherController.transitionDuration = value;
     } else if (paramId === 'variability') {
@@ -764,6 +767,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     transitionDuration: weatherController.transitionDuration,
     variability: weatherController.variability,
     timeOfDay: weatherController.timeOfDay,
+    roofMaskForceEnabled: weatherController.roofMaskForceEnabled,
     
     // Manual params
     precipitation: weatherController.targetState.precipitation,

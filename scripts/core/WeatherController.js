@@ -78,6 +78,9 @@ export class WeatherController {
     /** @type {boolean} Whether weather effects should currently apply the roof/outdoors mask */
     this.roofMaskActive = false;
 
+    /** @type {boolean} Manual override to force indoor/roof mask for weather at all times */
+    this.roofMaskForceEnabled = false;
+
     // Per-system tuning parameters for precipitation visuals
     this.rainTuning = {
       intensityScale: 1.0,
@@ -93,7 +96,7 @@ export class WeatherController {
       flakeSize: 1.0,
       brightness: 1.0,
       fallSpeed: 1.0,
-      gravityScale: 1.0,
+      gravityScale: 0.5,
       windInfluence: 1.0,
       curlStrength: 1.0,
       flutterStrength: 1.0
@@ -464,7 +467,7 @@ export class WeatherController {
           label: 'Rain Drop Size',
           default: 0.7,
           min: 0.5,
-          max: 3.0,
+          max: 8.0,
           step: 0.05,
           group: 'rain'
         },
@@ -472,7 +475,7 @@ export class WeatherController {
           label: 'Rain Brightness',
           default: 2.25,
           min: 0.1,
-          max: 3.0,
+          max: 12.0,
           step: 0.05,
           group: 'rain'
         },
@@ -528,7 +531,7 @@ export class WeatherController {
         },
         snowGravityScale: {
           label: 'Snow Gravity Scale',
-          default: 1.0,
+          default: 0.5,
           min: 0.2,
           max: 3.0,
           step: 0.05,
@@ -557,10 +560,18 @@ export class WeatherController {
           max: 6.0,
           step: 0.05,
           group: 'snow'
+        },
+
+        // Roof/Indoors mask control
+        roofMaskForceEnabled: {
+          label: 'Force Indoor Mask',
+          default: false,
+          type: 'boolean',
+          group: 'environment'
         }
       },
       groups: [
-        { label: 'Environment', type: 'folder', parameters: ['timeOfDay'] },
+        { label: 'Environment', type: 'folder', parameters: ['timeOfDay', 'roofMaskForceEnabled'] },
         { label: 'Simulation', type: 'folder', parameters: ['variability', 'transitionDuration'] },
         { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'windSpeed', 'windDirection', 'fogDensity', 'wetness', 'freezeLevel'], expanded: true },
         { label: 'Rain', type: 'folder', parameters: ['rainIntensityScale', 'rainStreakLength', 'rainDropSize', 'rainBrightness', 'rainGravityScale', 'rainWindInfluence'] },

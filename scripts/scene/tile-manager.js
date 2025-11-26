@@ -473,6 +473,16 @@ export class TileManager {
     
     if (isOverhead) {
       zBase = Z_OVERHEAD;
+      // Overhead tiles should not dominate the depth buffer so that
+      // weather and other environmental effects can render visibly above
+      // them. Keep depth testing so roofs still occlude underlying
+      // geometry, but avoid writing new depth values and give them a
+      // modest renderOrder below the particle systems.
+      if (sprite.material) {
+        sprite.material.depthWrite = false;
+        sprite.material.needsUpdate = true;
+      }
+      sprite.renderOrder = 10;
     } else {
       // Foundry 'z' property (sort key) determines background/foreground for non-overhead tiles
       // Note: Foundry uses 'sort' or 'z' depending on version, tileDoc.z is common access

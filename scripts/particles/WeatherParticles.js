@@ -493,40 +493,108 @@ export class WeatherParticles {
   }
 
 _createSnowTexture() {
+  // Build a 2x2 atlas of unique flake shapes (4 variants), similar in
+  // spirit to the rain splash atlas but using soft billboard flakes.
+  const cellSize = 32;
+  const grid = 2;
+  const totalSize = cellSize * grid; // 64x64 texture
+
   const canvas = document.createElement('canvas');
-  // Increase resolution slightly for better soft edges, 
-  // though 32x32 is usually fine for particles.
-  canvas.width = 32;
-  canvas.height = 32;
+  canvas.width = totalSize;
+  canvas.height = totalSize;
   const ctx = canvas.getContext('2d');
 
-  // Draw a cluster of "flakes" to create one irregular particle
-  const puffCount = 6; 
-  
-  for (let i = 0; i < puffCount; i++) {
-    // Randomize position slightly around the center (16, 16)
-    // We keep it within a ~10px radius so it doesn't clip edges
-    const x = 16 + (Math.random() - 0.5) * 12;
-    const y = 16 + (Math.random() - 0.5) * 12;
-    
-    // Randomize the size of each puff
-    const radius = 2 + Math.random() * 8;
-    
-    // Create a soft gradient for each puff
-    const grad = ctx.createRadialGradient(x, y, 0, x, y, radius);
-    
-    // Center is white with random transparency (simulates density variation)
-    // Edges fade to transparent
-    grad.addColorStop(0, `rgba(255, 255, 255, ${0.5 + Math.random() * 0.5})`);
-    grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+  const drawFlakeInCell = (cellX, cellY, variant) => {
+    const cx = cellX * cellSize + cellSize / 2;
+    const cy = cellY * cellSize + cellSize / 2;
 
-    ctx.fillStyle = grad;
+    // Base parameters per variant: subtle differences in size/roughness.
+    let coreRadius = 10;
+    let innerPuffCount = 3;
+    let edgePuffCount = 3;
+
+    if (variant === 1) {
+      coreRadius = 9;      // slightly smaller, denser
+      innerPuffCount = 4;  // more inner detail
+      edgePuffCount = 2;   // smoother edge
+    } else if (variant === 2) {
+      coreRadius = 8;      // smallest core
+      innerPuffCount = 2;  // minimal inner detail
+      edgePuffCount = 4;   // more irregular edge
+    } else if (variant === 3) {
+      coreRadius = 11;     // largest, softest core
+      innerPuffCount = 4;
+      edgePuffCount = 4;
+    }
+
+    // 1) Core disk: single connected blob that guarantees the flake
+    // is visually contiguous.
+    const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreRadius);
+    coreGrad.addColorStop(0, 'rgba(255, 255, 255, 1.0)');
+    coreGrad.addColorStop(1, 'rgba(255, 255, 255, 0.0)');
+    ctx.fillStyle = coreGrad;
     ctx.beginPath();
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.arc(cx, cy, coreRadius, 0, Math.PI * 2);
     ctx.fill();
-  }
 
-  return new window.THREE.CanvasTexture(canvas);
+    // 2) Internal noise puffs: small gradients constrained to lie
+    // inside the core disk so no detached satellites can appear.
+    for (let i = 0; i < innerPuffCount; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const dist = Math.random() * (coreRadius * 0.5); // stay well inside core
+      const x = cx + Math.cos(angle) * dist;
+      const y = cy + Math.sin(angle) * dist;
+
+      const radius = 2 + Math.random() * 4; // smaller detail puffs
+
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, radius);
+      const alphaCenter = 0.5 + Math.random() * 0.5; // 0.5–1.0
+      grad.addColorStop(0, `rgba(255, 255, 255, ${alphaCenter})`);
+      grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 3) Edge puffs: slightly irregular outline, but centers are constrained
+    // near the core radius so they always overlap and remain connected.
+    for (let i = 0; i < edgePuffCount; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      // Place centers between ~70% and 100% of core radius from center.
+      const dist = coreRadius * (0.7 + Math.random() * 0.3);
+      const x = cx + Math.cos(angle) * dist;
+      const y = cy + Math.sin(angle) * dist;
+
+      const radius = 3 + Math.random() * 4; // overlap core edge
+
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, radius);
+      const alphaCenter = 0.3 + Math.random() * 0.4; // softer than inner puffs
+      grad.addColorStop(0, `rgba(255, 255, 255, ${alphaCenter})`);
+      grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  };
+
+  // Generate 4 unique flake variants in a 2x2 grid.
+  drawFlakeInCell(0, 0, 0);
+  drawFlakeInCell(1, 0, 1);
+  drawFlakeInCell(0, 1, 2);
+  drawFlakeInCell(1, 1, 3);
+
+  const tex = new window.THREE.CanvasTexture(canvas);
+  const THREE = window.THREE;
+  if (THREE) {
+    // Atlas: use nearest for minification to reduce bleeding between tiles.
+    tex.minFilter = THREE.NearestFilter;
+    tex.magFilter = THREE.LinearFilter;
+  }
+  return tex;
 }
 
   _createSplashTexture() {
@@ -992,6 +1060,11 @@ _createSnowTexture() {
       renderOrder: 50,
       // Snow uses standard Billboards (flakes don't stretch)
       renderMode: RenderMode.BillBoard,
+      // 2x2 flake atlas: four variants.
+      uTileCount: 2,
+      vTileCount: 2,
+      // Randomly choose one of the four atlas tiles per particle.
+      startTileIndex: new IntervalValue(0, 3),
       startRotation: new IntervalValue(0, Math.PI * 2),
       // Horizontal motion now comes only from snowWind (driven by windSpeed)
       // and snowCurl (turbulence field), plus gravity for vertical fall.

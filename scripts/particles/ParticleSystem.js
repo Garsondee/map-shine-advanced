@@ -139,7 +139,10 @@ export class ParticleSystem extends EffectBase {
     // 5. Update Quarks Renderer
     if (this.batchRenderer) {
       const dtMs = typeof timeInfo.delta === 'number' ? timeInfo.delta : 16.0;
-      const dt = dtMs * 0.001 * 500;
+      // Speed up Quarks simulation (~3x) by increasing the time scaling factor.
+      // Quarks expects dt in seconds; we multiply by a larger factor so particles
+      // advance faster relative to the render loop.
+      const dt = dtMs * 0.001 * 1500;
 
       // Update weather systems (pass dt and scene bounds if available)
       if (this.weatherParticles) {

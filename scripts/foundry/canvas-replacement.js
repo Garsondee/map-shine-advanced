@@ -835,56 +835,14 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
   // --- Fire Debug Settings ---
   if (fireSparksEffect) {
     const fireSchema = FireSparksEffect.getControlSchema();
-
+    
     const onFireUpdate = (effectId, paramId, value) => {
-      const ps = fireSparksEffect.particleSystem;
-      const em = ps?.emitterManager;
-
-      if (paramId === 'enabled' || paramId === 'masterEnabled') {
-        fireSparksEffect.settings.enabled = value;
-        fireSparksEffect.params.enabled = value;
-
-        // When disabling, force global emitters off; when enabling, restore from params
-        if (em) {
-          if (fireSparksEffect.globalFireEmitterId) {
-            const e = em.emitters.find(x => x.id === fireSparksEffect.globalFireEmitterId);
-            if (e) e.rate = value ? fireSparksEffect.params.globalFireRate : 0.0;
-          }
-        }
-        return;
-      }
-
-      // Persist param value
-      if (fireSparksEffect.params && Object.prototype.hasOwnProperty.call(fireSparksEffect.params, paramId)) {
-        fireSparksEffect.params[paramId] = value;
-      }
-
-      if (!ps || !em) return;
-
-      // Update global emitter rates if we have handles
-      if (paramId === 'globalFireRate' && fireSparksEffect.globalFireEmitterId) {
-        const e = em.emitters.find(x => x.id === fireSparksEffect.globalFireEmitterId);
-        if (e) e.rate = value;
-      }
-
-      // Drive fire tuning uniforms when available
-      const u = ps.uniforms;
-      if (u) {
-        if (paramId === 'fireAlpha' && u.fireAlpha) {
-          u.fireAlpha.value = value;
-        } else if (paramId === 'fireCoreBoost' && u.fireCoreBoost) {
-          u.fireCoreBoost.value = value;
-        } else if (paramId === 'fireHeight' && u.fireHeight) {
-          u.fireHeight.value = value;
-        } else if (paramId === 'fireSize' && u.fireSize) {
-          u.fireSize.value = value;
-        }
-      }
+      fireSparksEffect.applyParamChange(paramId, value);
     };
 
     uiManager.registerEffect(
       'fire-sparks',
-      'Fire (Debug)',
+      'Fire',
       fireSchema,
       onFireUpdate,
       'particle'

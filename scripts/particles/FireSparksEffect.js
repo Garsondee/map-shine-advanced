@@ -12,8 +12,10 @@ import {
   ColorOverLife,
   SizeOverLife,
   PiecewiseBezier,
-  Bezier
+  Bezier,
+  CurlNoiseField
 } from '../libs/three.quarks.module.js';
+import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('FireSparksEffect');
 
@@ -72,6 +74,11 @@ class FireMaskShape {
     p.position.x = this.offsetX + u * this.width;
     p.position.y = this.offsetY + (1.0 - v) * this.height;
     p.position.z = 0;
+    
+    // Critical: Reset velocity to prevent accumulation across particle reuse
+    if (p.velocity) {
+        p.velocity.set(0, 0, 0);
+    }
   }
 
   // three.quarks emitter shapes are expected to expose an update(system, delta)
@@ -247,12 +254,25 @@ export class FireSparksEffect extends EffectBase {
             [new Bezier(1.0, 1.2, 1.5, 2.0), 0]
         ])
     );
+    
+    // Vertical Lift (Buoyancy) - CORRECTED AXIS: Z is Up in 2.5D.
+    // h = 0.5 * a * t^2  =>  a = 2h / t^2. With t~1.0s, a = 2h.
+    const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(height * 2.0));
+    
+    // Wind Integration (Dynamic) - Wind blows on X/Y plane.
+    const windForce = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(0));
+    
+    // Turbulence & Chaos (Curl Noise)
+    const turbulence = new CurlNoiseField(
+        new THREE.Vector3(200, 200, 50), 
+        new THREE.Vector3(60, 60, 20), 
+        1.0
+    );
 
     const system = new ParticleSystem({
       duration: 1,
       looping: true,
       startLife: new IntervalValue(0.8, 1.4),
-      // Debug: keep particles fixed at their spawn position to verify mask alignment.
       startSpeed: new ConstantValue(0),
       startSize: new IntervalValue(size * 0.8, size * 1.5),
       startColor: new ColorRange(new Vector4(1, 1, 1, 1), new Vector4(1, 1, 1, 1)),
@@ -266,9 +286,16 @@ export class FireSparksEffect extends EffectBase {
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [
           colorOverLife,
-          sizeOverLife
+          sizeOverLife,
+          buoyancy,
+          windForce,
+          turbulence
       ]
     });
+    
+    // Attach references for update loop
+    system.userData = { windForce };
+    
     return system;
   }
   
@@ -306,12 +333,57 @@ export class FireSparksEffect extends EffectBase {
   update(timeInfo) {
     if (!this.settings.enabled) return;
     const t = timeInfo.elapsed;
+    const THREE = window.THREE;
+
+    // 1. Animate Lights (Flicker)
     for (const f of this.fires) {
-        f.light.intensity = 1.0 + Math.sin(t * 10) * 0.2;
+        // Added pseudo-random phase based on ID to desync lights
+        const phase = f.id ? f.id.charCodeAt(0) : 0;
+        f.light.intensity = 1.0 + Math.sin(t * 10.0 + phase) * 0.2;
     }
+
+    // 2. Update Global Fire Rate
     if (this.globalSystem) {
         const baseRate = 200.0 * this.params.globalFireRate; 
         this.globalSystem.emissionOverTime = new IntervalValue(baseRate * 0.8, baseRate * 1.2);
+    }
+
+    // 3. Apply Wind Forces
+    // Map global wind vectors to ApplyForce behavior
+    const windSpeed = weatherController.currentState.windSpeed || 0;
+    const windDir = weatherController.currentState.windDirection || { x: 1, y: 0 };
+    
+    // Convert normalized 2D wind to 3D force vector
+    const influence = this.settings.windInfluence || 1.0;
+    // Base force magnitude: 300 feels right for fire leaning
+    const forceMag = windSpeed * 300.0 * influence; 
+
+    // Collect all active systems
+    const systems = [];
+    if (this.globalSystem) systems.push(this.globalSystem);
+    for (const f of this.fires) systems.push(f.system);
+
+    for (const sys of systems) {
+        if (sys.userData && sys.userData.windForce) {
+            const wf = sys.userData.windForce;
+            // Update Direction
+            if (wf.direction) {
+                wf.direction.set(windDir.x, windDir.y, 0);
+            }
+            // Update Magnitude
+            if (wf.magnitude) {
+                wf.magnitude = new ConstantValue(forceMag);
+            }
+        }
+        
+        // Lower life duration slightly during high wind to simulate flames blowing out
+        // Original life is IntervalValue(0.8, 1.4).
+        if (windSpeed > 0.1) {
+            const factor = 1.0 - (windSpeed * 0.4); // Max 40% reduction
+            sys.startLife = new IntervalValue(0.8 * factor, 1.4 * factor);
+        } else {
+             sys.startLife = new IntervalValue(0.8, 1.4);
+        }
     }
   }
   

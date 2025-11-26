@@ -2122,6 +2122,26 @@ class SpriteBatch extends VFXBatch {
                     depthTest: this.settings.material.depthTest,
                     lights: needLights,
                 });
+
+                // Allow the source material to patch the particle shaders via
+                // onBeforeCompile (e.g. WeatherParticles roof/outdoors masking).
+                // We mimic the THREE.Material onBeforeCompile contract by
+                // providing a shader object with vertexShader/fragmentShader
+                // and uniforms/defines, then copy back any changes.
+                const srcMat = this.settings.material;
+                if (srcMat && typeof srcMat.onBeforeCompile === 'function') {
+                    const shader = {
+                        uniforms: this.material.uniforms,
+                        vertexShader: this.material.vertexShader,
+                        fragmentShader: this.material.fragmentShader,
+                        defines: this.material.defines,
+                    };
+                    srcMat.onBeforeCompile(shader);
+                    this.material.uniforms = shader.uniforms || this.material.uniforms;
+                    this.material.vertexShader = shader.vertexShader || this.material.vertexShader;
+                    this.material.fragmentShader = shader.fragmentShader || this.material.fragmentShader;
+                    this.material.defines = shader.defines || this.material.defines;
+                }
             }
         }
         else if (this.settings.renderMode === RenderMode.StretchedBillBoard) {
@@ -2142,6 +2162,21 @@ class SpriteBatch extends VFXBatch {
                 alphaTest: this.settings.material.alphaTest,
                 depthTest: this.settings.material.depthTest,
             });
+
+            const srcMat = this.settings.material;
+            if (srcMat && typeof srcMat.onBeforeCompile === 'function') {
+                const shader = {
+                    uniforms: this.material.uniforms,
+                    vertexShader: this.material.vertexShader,
+                    fragmentShader: this.material.fragmentShader,
+                    defines: this.material.defines,
+                };
+                srcMat.onBeforeCompile(shader);
+                this.material.uniforms = shader.uniforms || this.material.uniforms;
+                this.material.vertexShader = shader.vertexShader || this.material.vertexShader;
+                this.material.fragmentShader = shader.fragmentShader || this.material.fragmentShader;
+                this.material.defines = shader.defines || this.material.defines;
+            }
         }
         else {
             throw new Error('render mode unavailable');

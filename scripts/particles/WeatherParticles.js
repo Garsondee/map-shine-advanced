@@ -224,6 +224,12 @@ export class WeatherParticles {
     this._rainBaseGravity = 8000;
     this._snowBaseGravity = 3000;
 
+    /** @type {THREE.ShaderMaterial|null} quarks batch material for rain */
+    this._rainBatchMaterial = null;
+
+    /** @type {THREE.ShaderMaterial|null} quarks batch material for snow */
+    this._snowBatchMaterial = null;
+
     // Cache to avoid recomputing rain material/particle properties every frame.
     // We track key tuning values so we only update Quarks when they actually change.
     this._lastRainTuning = {
@@ -382,6 +388,21 @@ export class WeatherParticles {
      if (this.scene) this.scene.add(this.rainSystem.emitter);
      this.batchRenderer.addSystem(this.rainSystem);
 
+     // Patch the actual quarks batch material used to render rain so the
+     // roof/outdoors mask logic runs on the SpriteBatch shader.
+     try {
+       const idx = this.batchRenderer.systemToBatchIndex?.get(this.rainSystem);
+       if (idx !== undefined && this.batchRenderer.batches && this.batchRenderer.batches[idx]) {
+         const batch = this.batchRenderer.batches[idx];
+         if (batch.material) {
+           this._rainBatchMaterial = batch.material;
+           this._patchRoofMaskMaterial(this._rainBatchMaterial);
+         }
+       }
+     } catch (e) {
+       log.warn('Failed to patch rain batch material for roof mask:', e);
+     }
+
      // --- RAIN CURL NOISE (shared for all rain particles) ---
     const rainCurl = new CurlNoiseField(
       new THREE.Vector3(1400, 1400, 2000),   // larger cells than snow for broad gusts
@@ -450,6 +471,20 @@ export class WeatherParticles {
 
      if (this.scene) this.scene.add(this.snowSystem.emitter);
      this.batchRenderer.addSystem(this.snowSystem);
+
+     // Patch the quarks batch material used for snow as well.
+     try {
+       const idx = this.batchRenderer.systemToBatchIndex?.get(this.snowSystem);
+       if (idx !== undefined && this.batchRenderer.batches && this.batchRenderer.batches[idx]) {
+         const batch = this.batchRenderer.batches[idx];
+         if (batch.material) {
+           this._snowBatchMaterial = batch.material;
+           this._patchRoofMaskMaterial(this._snowBatchMaterial);
+         }
+       }
+     } catch (e) {
+       log.warn('Failed to patch snow batch material for roof mask:', e);
+     }
      
      // Cache references to key forces/behaviors so we can drive them from WeatherController
      this._rainWindForce = wind;
@@ -474,6 +509,124 @@ export class WeatherParticles {
   _patchRoofMaskMaterial(material) {
     const THREE = window.THREE;
     if (!material || !THREE) return;
+
+    // Avoid double-patching the same material
+    if (material.userData && material.userData.roofUniforms) {
+      return;
+    }
+
+    const uniforms = {
+      uRoofMap: { value: null },
+      // (sceneX, sceneY, sceneWidth, sceneHeight) in world units
+      uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+      // 0.0 = disabled, 1.0 = enabled
+      uRoofMaskEnabled: { value: 0.0 }
+    };
+
+    // Store for per-frame updates in update()
+    material.userData = material.userData || {};
+    material.userData.roofUniforms = uniforms;
+
+    const isShaderMat = material.isShaderMaterial === true;
+
+    if (isShaderMat) {
+      // Directly patch the quarks batch ShaderMaterial in place.
+      const uni = material.uniforms || (material.uniforms = {});
+      uni.uRoofMap = uniforms.uRoofMap;
+      uni.uSceneBounds = uniforms.uSceneBounds;
+      uni.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
+
+      if (typeof material.vertexShader === 'string') {
+        material.vertexShader = material.vertexShader
+          .replace(
+            'void main() {',
+            'varying vec3 vRoofWorldPos;\nvoid main() {'
+          )
+          .replace(
+            '#include <soft_vertex>',
+            '#include <soft_vertex>\n  vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;'
+          );
+      }
+
+      if (typeof material.fragmentShader === 'string') {
+        material.fragmentShader = material.fragmentShader
+          .replace(
+            'void main() {',
+            'varying vec3 vRoofWorldPos;\nuniform sampler2D uRoofMap;\nuniform vec4 uSceneBounds;\nuniform float uRoofMaskEnabled;\nvoid main() {'
+          )
+          .replace(
+            '#include <soft_fragment>',
+            '  if (uRoofMaskEnabled > 0.5) {\n' +
+            '    // Map world XY into 0..1 UVs inside the scene rectangle.\n' +
+            '    vec2 uvMask = vec2(\n' +
+            '      (vRoofWorldPos.x - uSceneBounds.x) / uSceneBounds.z,\n' +
+            '      1.0 - (vRoofWorldPos.y - uSceneBounds.y) / uSceneBounds.w\n' +
+            '    );\n' +
+            '    // Quick bounds check to avoid sampling outside the mask.\n' +
+            '    if (uvMask.x < 0.0 || uvMask.x > 1.0 || uvMask.y < 0.0 || uvMask.y > 1.0) {\n' +
+            '      discard;\n' +
+            '    } else {\n' +
+            '      float m = texture2D(uRoofMap, uvMask).r;\n' +
+            '      // Convention: bright/white = outdoors, dark/black = indoors.\n' +
+            '      if (m < 0.5) {\n' +
+            '        discard;\n' +
+            '      }\n' +
+            '    }\n' +
+            '  }\n' +
+            '#include <soft_fragment>'
+          );
+      }
+
+      material.needsUpdate = true;
+      return;
+    }
+
+    // Fallback path: patch non-ShaderMaterials via onBeforeCompile so quarks
+    // can pick up the modifications when building its internal ShaderMaterial.
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uRoofMap = uniforms.uRoofMap;
+      shader.uniforms.uSceneBounds = uniforms.uSceneBounds;
+      shader.uniforms.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
+
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          'void main() {',
+          'varying vec3 vRoofWorldPos;\nvoid main() {'
+        )
+        .replace(
+          '#include <soft_vertex>',
+          '#include <soft_vertex>\n  vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;'
+        );
+
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          'void main() {',
+          'varying vec3 vRoofWorldPos;\nuniform sampler2D uRoofMap;\nuniform vec4 uSceneBounds;\nuniform float uRoofMaskEnabled;\nvoid main() {'
+        )
+        .replace(
+          '#include <soft_fragment>',
+          '  if (uRoofMaskEnabled > 0.5) {\n' +
+          '    // Map world XY into 0..1 UVs inside the scene rectangle.\n' +
+          '    vec2 uvMask = vec2(\n' +
+          '      (vRoofWorldPos.x - uSceneBounds.x) / uSceneBounds.z,\n' +
+          '      1.0 - (vRoofWorldPos.y - uSceneBounds.y) / uSceneBounds.w\n' +
+          '    );\n' +
+          '    // Quick bounds check to avoid sampling outside the mask.\n' +
+          '    if (uvMask.x < 0.0 || uvMask.x > 1.0 || uvMask.y < 0.0 || uvMask.y > 1.0) {\n' +
+          '      discard;\n' +
+          '    } else {\n' +
+          '      float m = texture2D(uRoofMap, uvMask).r;\n' +
+          '      // Convention: bright/white = outdoors, dark/black = indoors.\n' +
+          '      if (m < 0.5) {\n' +
+          '        discard;\n' +
+          '      }\n' +
+          '    }\n' +
+          '  }\n' +
+          '#include <soft_fragment>'
+        );
+    };
+
+    material.needsUpdate = true;
   }
 
   update(dt, sceneBoundsVec4) {
@@ -562,9 +715,19 @@ export class WeatherParticles {
             new Vector4(0.6, 0.7, 1.0, maxA)
           );
         }
-        // Apply roof mask uniforms for rain
+        // Apply roof mask uniforms for rain (base material)
         if (this._rainMaterial && this._rainMaterial.userData && this._rainMaterial.userData.roofUniforms) {
           const uniforms = this._rainMaterial.userData.roofUniforms;
+          uniforms.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+          if (this._sceneBounds) {
+            uniforms.uSceneBounds.value.copy(this._sceneBounds);
+          }
+          uniforms.uRoofMap.value = this._roofTexture;
+        }
+
+        // Also drive the batch ShaderMaterial uniforms used by quarks for rain.
+        if (this._rainBatchMaterial && this._rainBatchMaterial.userData && this._rainBatchMaterial.userData.roofUniforms) {
+          const uniforms = this._rainBatchMaterial.userData.roofUniforms;
           uniforms.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
           if (this._sceneBounds) {
             uniforms.uSceneBounds.value.copy(this._sceneBounds);
@@ -585,9 +748,19 @@ export class WeatherParticles {
           const curlStrength = snowTuning.curlStrength ?? 1.0;
           this._snowCurl.strength.copy(this._snowCurlBaseStrength).multiplyScalar(curlStrength);
         }
-        // Apply roof mask uniforms for snow
+        // Apply roof mask uniforms for snow (base material)
         if (this._snowMaterial && this._snowMaterial.userData && this._snowMaterial.userData.roofUniforms) {
           const uniforms = this._snowMaterial.userData.roofUniforms;
+          uniforms.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+          if (this._sceneBounds) {
+            uniforms.uSceneBounds.value.copy(this._sceneBounds);
+          }
+          uniforms.uRoofMap.value = this._roofTexture;
+        }
+
+        // Also drive the batch ShaderMaterial uniforms used by quarks for snow.
+        if (this._snowBatchMaterial && this._snowBatchMaterial.userData && this._snowBatchMaterial.userData.roofUniforms) {
+          const uniforms = this._snowBatchMaterial.userData.roofUniforms;
           uniforms.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
           if (this._sceneBounds) {
             uniforms.uSceneBounds.value.copy(this._sceneBounds);

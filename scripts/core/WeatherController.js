@@ -96,7 +96,40 @@ export class WeatherController {
       splashLifeMax: 0.22,         // Seconds
       splashSizeMin: 8.0,          // World units/pixels
       splashSizeMax: 8.0,          // World units/pixels
-      splashOpacityPeak: 0.04      // 0..1 peak alpha for SplashAlphaBehavior
+      splashOpacityPeak: 0.04,     // 0..1 peak alpha for SplashAlphaBehavior
+
+      // Per-tile splash tuning (4 atlas tiles / splash archetypes)
+      // Splash 1: Thin clean ring
+      splash1IntensityScale: 0.85,
+      splash1LifeMin: 0.08,
+      splash1LifeMax: 0.15,
+      splash1SizeMin: 8.0,
+      splash1SizeMax: 16.0,
+      splash1OpacityPeak: 0.03,
+
+      // Splash 2: Thick broken ring
+      splash2IntensityScale: 0.95,
+      splash2LifeMin: 0.02,
+      splash2LifeMax: 0.22,
+      splash2SizeMin: 8.0,
+      splash2SizeMax: 16.0,
+      splash2OpacityPeak: 0.02,
+
+      // Splash 3: Droplets-only pattern
+      splash3IntensityScale: 1.30,
+      splash3LifeMin: 0.11,
+      splash3LifeMax: 0.30,
+      splash3SizeMin: 8.0,
+      splash3SizeMax: 18.0,
+      splash3OpacityPeak: 0.08,
+
+      // Splash 4: Inner puddle
+      splash4IntensityScale: 1.10,
+      splash4LifeMin: 0.015,
+      splash4LifeMax: 0.11,
+      splash4SizeMin: 10.0,
+      splash4SizeMax: 16.0,
+      splash4OpacityPeak: 0.01
     };
 
     this.snowTuning = {
@@ -504,50 +537,201 @@ export class WeatherController {
           group: 'rain'
         },
 
-        // Rain splash tuning
-        rainSplashIntensityScale: {
-          label: 'Splash Intensity Scale',
-          default: 10.0,
+        // Per-splash (per atlas tile) tuning
+        // Splash 1: Thin clean ring
+        rainSplash1IntensityScale: {
+          label: 'Splash 1 (Thin Ring) Intensity',
+          default: 0.85,
           min: 0.0,
           max: 10.0,
           step: 0.05,
           group: 'rain'
         },
-        rainSplashLifeMin: {
-          label: 'Splash Life Min (s)',
-          default: 0.02,
-          min: 0.02,
+        rainSplash1LifeMin: {
+          label: 'Splash 1 (Thin Ring) Life Min (s)',
+          default: 0.08,
+          min: 0.005,
           max: 1.0,
-          step: 0.01,
+          step: 0.005,
           group: 'rain'
         },
-        rainSplashLifeMax: {
-          label: 'Splash Life Max (s)',
-          default: 0.22,
-          min: 0.02,
+        rainSplash1LifeMax: {
+          label: 'Splash 1 (Thin Ring) Life Max (s)',
+          default: 0.15,
+          min: 0.01,
           max: 1.5,
           step: 0.01,
           group: 'rain'
         },
-        rainSplashSizeMin: {
-          label: 'Splash Size Min (px)',
+        rainSplash1SizeMin: {
+          label: 'Splash 1 (Thin Ring) Size Min (px)',
           default: 8.0,
           min: 2.0,
           max: 128.0,
           step: 1.0,
           group: 'rain'
         },
-        rainSplashSizeMax: {
-          label: 'Splash Size Max (px)',
-          default: 8.0,
+        rainSplash1SizeMax: {
+          label: 'Splash 1 (Thin Ring) Size Max (px)',
+          default: 16.0,
           min: 2.0,
           max: 256.0,
           step: 1.0,
           group: 'rain'
         },
-        rainSplashOpacityPeak: {
-          label: 'Splash Peak Opacity',
-          default: 0.04,
+        rainSplash1OpacityPeak: {
+          label: 'Splash 1 (Thin Ring) Peak Opacity',
+          default: 0.03,
+          min: 0.0,
+          max: 0.6,
+          step: 0.01,
+          group: 'rain'
+        },
+
+        // Splash 2: Thick broken ring
+        rainSplash2IntensityScale: {
+          label: 'Splash 2 (Broken Ring) Intensity',
+          default: 0.95,
+          min: 0.0,
+          max: 10.0,
+          step: 0.05,
+          group: 'rain'
+        },
+        rainSplash2LifeMin: {
+          label: 'Splash 2 (Broken Ring) Life Min (s)',
+          default: 0.02,
+          min: 0.005,
+          max: 1.0,
+          step: 0.005,
+          group: 'rain'
+        },
+        rainSplash2LifeMax: {
+          label: 'Splash 2 (Broken Ring) Life Max (s)',
+          default: 0.22,
+          min: 0.01,
+          max: 1.5,
+          step: 0.01,
+          group: 'rain'
+        },
+        rainSplash2SizeMin: {
+          label: 'Splash 2 (Broken Ring) Size Min (px)',
+          default: 8.0,
+          min: 2.0,
+          max: 128.0,
+          step: 1.0,
+          group: 'rain'
+        },
+        rainSplash2SizeMax: {
+          label: 'Splash 2 (Broken Ring) Size Max (px)',
+          default: 16.0,
+          min: 2.0,
+          max: 256.0,
+          step: 1.0,
+          group: 'rain'
+        },
+        rainSplash2OpacityPeak: {
+          label: 'Splash 2 (Broken Ring) Peak Opacity',
+          default: 0.02,
+          min: 0.0,
+          max: 0.6,
+          step: 0.01,
+          group: 'rain'
+        },
+
+        // Splash 3: Droplets-only pattern
+        rainSplash3IntensityScale: {
+          label: 'Splash 3 (Droplets) Intensity',
+          default: 1.30,
+          min: 0.0,
+          max: 10.0,
+          step: 0.05,
+          group: 'rain'
+        },
+        rainSplash3LifeMin: {
+          label: 'Splash 3 (Droplets) Life Min (s)',
+          default: 0.11,
+          min: 0.005,
+          max: 1.0,
+          step: 0.005,
+          group: 'rain'
+        },
+        rainSplash3LifeMax: {
+          label: 'Splash 3 (Droplets) Life Max (s)',
+          default: 0.30,
+          min: 0.01,
+          max: 1.5,
+          step: 0.01,
+          group: 'rain'
+        },
+        rainSplash3SizeMin: {
+          label: 'Splash 3 (Droplets) Size Min (px)',
+          default: 8.0,
+          min: 2.0,
+          max: 128.0,
+          step: 1.0,
+          group: 'rain'
+        },
+        rainSplash3SizeMax: {
+          label: 'Splash 3 (Droplets) Size Max (px)',
+          default: 18.0,
+          min: 2.0,
+          max: 256.0,
+          step: 1.0,
+          group: 'rain'
+        },
+        rainSplash3OpacityPeak: {
+          label: 'Splash 3 (Droplets) Peak Opacity',
+          default: 0.08,
+          min: 0.0,
+          max: 0.6,
+          step: 0.01,
+          group: 'rain'
+        },
+
+        // Splash 4: Inner puddle
+        rainSplash4IntensityScale: {
+          label: 'Splash 4 (Puddle) Intensity',
+          default: 1.10,
+          min: 0.0,
+          max: 10.0,
+          step: 0.05,
+          group: 'rain'
+        },
+        rainSplash4LifeMin: {
+          label: 'Splash 4 (Puddle) Life Min (s)',
+          default: 0.015,
+          min: 0.005,
+          max: 1.0,
+          step: 0.005,
+          group: 'rain'
+        },
+        rainSplash4LifeMax: {
+          label: 'Splash 4 (Puddle) Life Max (s)',
+          default: 0.11,
+          min: 0.01,
+          max: 1.5,
+          step: 0.01,
+          group: 'rain'
+        },
+        rainSplash4SizeMin: {
+          label: 'Splash 4 (Puddle) Size Min (px)',
+          default: 10.0,
+          min: 2.0,
+          max: 128.0,
+          step: 1.0,
+          group: 'rain'
+        },
+        rainSplash4SizeMax: {
+          label: 'Splash 4 (Puddle) Size Max (px)',
+          default: 16.0,
+          min: 2.0,
+          max: 256.0,
+          step: 1.0,
+          group: 'rain'
+        },
+        rainSplash4OpacityPeak: {
+          label: 'Splash 4 (Puddle) Peak Opacity',
+          default: 0.01,
           min: 0.0,
           max: 0.6,
           step: 0.01,
@@ -638,13 +822,33 @@ export class WeatherController {
           'rainDropSize',
           'rainBrightness',
           'rainGravityScale',
-          'rainWindInfluence',
-          'rainSplashIntensityScale',
-          'rainSplashLifeMin',
-          'rainSplashLifeMax',
-          'rainSplashSizeMin',
-          'rainSplashSizeMax',
-          'rainSplashOpacityPeak'
+          'rainWindInfluence'
+        ] },
+        { label: 'Rain Splashes', type: 'folder', parameters: [
+          'rainSplash1IntensityScale',
+          'rainSplash1LifeMin',
+          'rainSplash1LifeMax',
+          'rainSplash1SizeMin',
+          'rainSplash1SizeMax',
+          'rainSplash1OpacityPeak',
+          'rainSplash2IntensityScale',
+          'rainSplash2LifeMin',
+          'rainSplash2LifeMax',
+          'rainSplash2SizeMin',
+          'rainSplash2SizeMax',
+          'rainSplash2OpacityPeak',
+          'rainSplash3IntensityScale',
+          'rainSplash3LifeMin',
+          'rainSplash3LifeMax',
+          'rainSplash3SizeMin',
+          'rainSplash3SizeMax',
+          'rainSplash3OpacityPeak',
+          'rainSplash4IntensityScale',
+          'rainSplash4LifeMin',
+          'rainSplash4LifeMax',
+          'rainSplash4SizeMin',
+          'rainSplash4SizeMax',
+          'rainSplash4OpacityPeak'
         ] },
         { label: 'Snow', type: 'folder', parameters: ['snowIntensityScale', 'snowFlakeSize', 'snowBrightness', 'snowFallSpeed', 'snowGravityScale', 'snowWindInfluence', 'snowCurlStrength', 'snowFlutterStrength'] }
       ],

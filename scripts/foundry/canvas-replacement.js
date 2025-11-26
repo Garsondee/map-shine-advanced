@@ -744,6 +744,31 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         else if (paramId === 'rainSplashSizeMin') rt.splashSizeMin = value;
         else if (paramId === 'rainSplashSizeMax') rt.splashSizeMax = value;
         else if (paramId === 'rainSplashOpacityPeak') rt.splashOpacityPeak = value;
+        // Per-splash (per atlas tile) controls
+        else if (paramId === 'rainSplash1IntensityScale') rt.splash1IntensityScale = value;
+        else if (paramId === 'rainSplash1LifeMin') rt.splash1LifeMin = value;
+        else if (paramId === 'rainSplash1LifeMax') rt.splash1LifeMax = value;
+        else if (paramId === 'rainSplash1SizeMin') rt.splash1SizeMin = value;
+        else if (paramId === 'rainSplash1SizeMax') rt.splash1SizeMax = value;
+        else if (paramId === 'rainSplash1OpacityPeak') rt.splash1OpacityPeak = value;
+        else if (paramId === 'rainSplash2IntensityScale') rt.splash2IntensityScale = value;
+        else if (paramId === 'rainSplash2LifeMin') rt.splash2LifeMin = value;
+        else if (paramId === 'rainSplash2LifeMax') rt.splash2LifeMax = value;
+        else if (paramId === 'rainSplash2SizeMin') rt.splash2SizeMin = value;
+        else if (paramId === 'rainSplash2SizeMax') rt.splash2SizeMax = value;
+        else if (paramId === 'rainSplash2OpacityPeak') rt.splash2OpacityPeak = value;
+        else if (paramId === 'rainSplash3IntensityScale') rt.splash3IntensityScale = value;
+        else if (paramId === 'rainSplash3LifeMin') rt.splash3LifeMin = value;
+        else if (paramId === 'rainSplash3LifeMax') rt.splash3LifeMax = value;
+        else if (paramId === 'rainSplash3SizeMin') rt.splash3SizeMin = value;
+        else if (paramId === 'rainSplash3SizeMax') rt.splash3SizeMax = value;
+        else if (paramId === 'rainSplash3OpacityPeak') rt.splash3OpacityPeak = value;
+        else if (paramId === 'rainSplash4IntensityScale') rt.splash4IntensityScale = value;
+        else if (paramId === 'rainSplash4LifeMin') rt.splash4LifeMin = value;
+        else if (paramId === 'rainSplash4LifeMax') rt.splash4LifeMax = value;
+        else if (paramId === 'rainSplash4SizeMin') rt.splash4SizeMin = value;
+        else if (paramId === 'rainSplash4SizeMax') rt.splash4SizeMax = value;
+        else if (paramId === 'rainSplash4OpacityPeak') rt.splash4OpacityPeak = value;
       } else if (paramId.startsWith('snow')) {
         const st = weatherController.snowTuning;
         if (!st) return;

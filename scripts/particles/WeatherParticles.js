@@ -339,6 +339,7 @@ export class WeatherParticles {
     this.rainSystem = null;
     this.snowSystem = null;
     this.splashSystem = null;
+    this.splashSystems = [];
     this.rainTexture = this._createRainTexture();
     this.snowTexture = this._createSnowTexture();
     this.splashTexture = this._createSplashTexture();
@@ -389,6 +390,9 @@ export class WeatherParticles {
     /** @type {SplashAlphaBehavior|null} */
     this._splashAlphaBehavior = null;
 
+    /** @type {SplashAlphaBehavior[]} */
+    this._splashAlphaBehaviors = [];
+
     this._rainBaseGravity = 8000;
     this._snowBaseGravity = 3000;
 
@@ -400,6 +404,9 @@ export class WeatherParticles {
 
     /** @type {THREE.ShaderMaterial|null} quarks batch material for splashes */
     this._splashBatchMaterial = null;
+
+    /** @type {THREE.ShaderMaterial[]} quarks batch materials for per-tile splash systems */
+    this._splashBatchMaterials = [];
 
     // Cache to avoid recomputing rain material/particle properties every frame.
     // We track key tuning values so we only update Quarks when they actually change.
@@ -441,84 +448,153 @@ export class WeatherParticles {
   }
 
   _createSplashTexture() {
-    const size = 128; // Increased resolution for finer details
+    // Build a 2x2 atlas of unique splash shapes (4 variants) so each
+    // particle can sample a different tile for more variety.
+    const cellSize = 64;
+    const grid = 2; // 2x2 grid
+    const totalSize = cellSize * grid; // 128x128 texture
+    
     const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
+    canvas.width = totalSize;
+    canvas.height = totalSize;
     const ctx = canvas.getContext('2d');
-    const imgData = ctx.createImageData(size, size);
-    const data = imgData.data;
-    
-    const cx = size / 2;
-    const cy = size / 2;
-    
-    // Randomize the "shape" of this specific texture generation
-    const seedOffset = Math.random() * 100;
 
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const idx = (y * size + x) * 4;
-        const dx = x - cx;
-        const dy = y - cy;
-        const dist = Math.sqrt(dx*dx + dy*dy);
-        const angle = Math.atan2(dy, dx);
-        
-        // 1. COMPLEX NOISE
-        // Mix 3 sine waves + random noise for jagged edges
-        // High frequency (angle * 20) makes it "spiky"
-        // Low frequency (angle * 3) makes it "wobbly"
-        const noise = 
-            Math.sin(angle * 3.0 + seedOffset) * 2.0 + 
-            Math.sin(angle * 11.0 - seedOffset) * 1.5 + 
-            Math.sin(angle * 25.0) * 1.0 +
-            (Math.random() - 0.5) * 1.5; // Jagged pixel noise
+    const drawSplashInCell = (cellX, cellY) => {
+      const imgData = ctx.createImageData(cellSize, cellSize);
+      const data = imgData.data;
 
-        // 2. VARYING RADIUS
-        const baseRadius = 28; // slightly smaller relative to 128px canvas
-        const radius = baseRadius + noise * 3.0;
-        
-        // 3. THICKNESS VARIATION
-        // The ring is thicker in some spots, thinner in others
-        const thicknessBase = 4.0;
-        const thicknessVar = Math.sin(angle * 5 + seedOffset) * 2.0;
-        const thickness = Math.max(0.5, thicknessBase + thicknessVar);
+      // Make each of the 4 cells deliberately different so we can visually
+      // confirm that all tiles are being sampled.
 
-        const distFromRing = Math.abs(dist - radius);
-
-        // 4. DETACHED DROPLETS
-        // Occasional noise spikes far from the center
-        const isDroplet = (dist > radius + 5) && (dist < radius + 15) && (Math.random() > 0.96);
-
-        // 5. RENDER
-        if (distFromRing < thickness || isDroplet) {
-            let alpha = 1.0;
-            
-            if (!isDroplet) {
-                // Soften edges of the main ring
-                alpha = 1 - (distFromRing / thickness);
-                // "Break" the ring: some parts are almost invisible
-                alpha *= (0.6 + 0.4 * Math.sin(angle * 7 + seedOffset));
+      // Cell (0,0): thin, clean ring
+      if (cellX === 0 && cellY === 0) {
+        const radius = cellSize * 0.35;
+        const thickness = 2.0;
+        for (let y = 0; y < cellSize; y++) {
+          for (let x = 0; x < cellSize; x++) {
+            const lx = x - cellSize / 2;
+            const ly = y - cellSize / 2;
+            const dist = Math.sqrt(lx * lx + ly * ly);
+            const distFromRing = Math.abs(dist - radius);
+            const idx = (y * cellSize + x) * 4;
+            if (distFromRing < thickness) {
+              const alpha = 1 - (distFromRing / thickness);
+              data[idx] = 255;
+              data[idx + 1] = 255;
+              data[idx + 2] = 255;
+              data[idx + 3] = Math.floor(alpha * 255);
             } else {
-                // Droplets are solid but tiny
-                alpha = 0.6 + Math.random() * 0.4;
+              data[idx + 3] = 0;
             }
-            
-            // Add grain
-            alpha *= (0.8 + Math.random() * 0.4);
-
-            data[idx] = 255;
-            data[idx + 1] = 255;
-            data[idx + 2] = 255;
-            data[idx + 3] = Math.floor(Math.max(0, Math.min(1, alpha)) * 255);
-        } else {
-            data[idx + 3] = 0;
+          }
         }
+        ctx.putImageData(imgData, cellX * cellSize, cellY * cellSize);
+        return;
       }
+
+      // Cell (1,0): thick, broken, noisy ring with strong angular gaps
+      if (cellX === 1 && cellY === 0) {
+        const radius = cellSize * 0.38;
+        const thickness = 5.0;
+        for (let y = 0; y < cellSize; y++) {
+          for (let x = 0; x < cellSize; x++) {
+            const lx = x - cellSize / 2;
+            const ly = y - cellSize / 2;
+            const dist = Math.sqrt(lx * lx + ly * ly);
+            const angle = Math.atan2(ly, lx);
+            const distFromRing = Math.abs(dist - radius);
+            const idx = (y * cellSize + x) * 4;
+            if (distFromRing < thickness) {
+              let alpha = 1 - (distFromRing / thickness);
+              // Strong angular gating to make clear broken arcs
+              alpha *= (0.3 + 0.7 * Math.max(0, Math.sin(angle * 4.0)));
+              alpha *= (0.5 + 0.5 * (Math.random()));
+              data[idx] = 255;
+              data[idx + 1] = 255;
+              data[idx + 2] = 255;
+              data[idx + 3] = Math.floor(alpha * 255);
+            } else {
+              data[idx + 3] = 0;
+            }
+          }
+        }
+        ctx.putImageData(imgData, cellX * cellSize, cellY * cellSize);
+        return;
+      }
+
+      // Cell (0,1): mostly small droplets, no main ring
+      if (cellX === 0 && cellY === 1) {
+        const maxR = cellSize * 0.45;
+        for (let y = 0; y < cellSize; y++) {
+          for (let x = 0; x < cellSize; x++) {
+            const lx = x - cellSize / 2;
+            const ly = y - cellSize / 2;
+            const dist = Math.sqrt(lx * lx + ly * ly);
+            const idx = (y * cellSize + x) * 4;
+            // Sparse random droplets in an annulus
+            if (dist < maxR && dist > maxR * 0.2 && Math.random() > 0.93) {
+              const alpha = 0.6 + Math.random() * 0.4;
+              data[idx] = 255;
+              data[idx + 1] = 255;
+              data[idx + 2] = 255;
+              data[idx + 3] = Math.floor(alpha * 255);
+            } else {
+              data[idx + 3] = 0;
+            }
+          }
+        }
+        ctx.putImageData(imgData, cellX * cellSize, cellY * cellSize);
+        return;
+      }
+
+      // Cell (1,1): filled inner puddle with soft edge
+      {
+        const innerR = cellSize * 0.22;
+        const outerR = cellSize * 0.40;
+        for (let y = 0; y < cellSize; y++) {
+          for (let x = 0; x < cellSize; x++) {
+            const lx = x - cellSize / 2;
+            const ly = y - cellSize / 2;
+            const dist = Math.sqrt(lx * lx + ly * ly);
+            const idx = (y * cellSize + x) * 4;
+            if (dist < outerR) {
+              let alpha;
+              if (dist < innerR) {
+                // Solid core
+                alpha = 1.0;
+              } else {
+                // Falloff towards outer radius
+                const t = (dist - innerR) / (outerR - innerR);
+                alpha = 1.0 - t;
+              }
+              data[idx] = 255;
+              data[idx + 1] = 255;
+              data[idx + 2] = 255;
+              data[idx + 3] = Math.floor(alpha * 255);
+            } else {
+              data[idx + 3] = 0;
+            }
+          }
+        }
+        ctx.putImageData(imgData, cellX * cellSize, cellY * cellSize);
+      }
+    };
+
+    // Generate 4 unique splashes
+    drawSplashInCell(0, 0);
+    drawSplashInCell(1, 0);
+    drawSplashInCell(0, 1);
+    drawSplashInCell(1, 1);
+
+    const tex = new window.THREE.CanvasTexture(canvas);
+    // Important for atlases to reduce bleeding between tiles
+    const THREE = window.THREE;
+    if (THREE) {
+      tex.minFilter = THREE.NearestFilter;
+      tex.magFilter = THREE.LinearFilter;
     }
-    
-    ctx.putImageData(imgData, 0, 0);
-    return new window.THREE.CanvasTexture(canvas);
-}
+    return tex;
+  }
 
   _initSystems() {
      const THREE = window.THREE;
@@ -696,67 +772,93 @@ export class WeatherParticles {
       new PiecewiseBezier([[new Bezier(0.4, 4.0, 7.0, 9.0), 0]])
     );
     
-    this.splashSystem = new ParticleSystem({
-      duration: 1,
-      looping: true,
-      prewarm: false,
-      
-      // Very short life baseline; will be overridden by tuning each frame.
-      startLife: new IntervalValue(0.1, 0.2),
-      
-      // Static on the ground (no speed)
-      startSpeed: new ConstantValue(0),
-      
-      // Size: randomization (World units/pixels)
-      // Was 0.5-1.2 which is 1px. Needs to be visible, e.g. 12-24px.
-      startSize: new IntervalValue(12, 24), 
-      
-      // Start at full white (1.0). SplashAlphaBehavior will drive alpha 0 -> 0.1 -> 0.
-      startColor: new ColorRange(new Vector4(0.8, 0.9, 1.0, 1.0), new Vector4(0.8, 0.9, 1.0, 1.0)),
-      worldSpace: true,
-      maxParticles: 2000, // Enough for heavy rain
-      emissionOverTime: new ConstantValue(0),
-      
-      // Spawn across the whole map
-      shape: new RandomRectangleEmitter({ width: sceneW, height: sceneH }),
-      
-      material: splashMaterial,
-      renderOrder: 50, // Same layer as rain
-      renderMode: RenderMode.BillBoard, // Face camera (top-down view = circle on ground)
-      
-      // Pick a random orientation once at spawn; no over-life spin behavior.
-      startRotation: new IntervalValue(0, Math.PI * 2),
-      behaviors: [
-        splashAlphaBehavior,
-        splashSizeOverLife,
-        // We do NOT add gravity or wind. Splashes stay where they spawn.
-        // We use the same kill behavior to clean up if map changes size (optional)
-        killBehavior
-      ]
-    });
+    // Create four independent splash systems (one per atlas tile) so each
+    // splash archetype can be tuned separately.
+    this.splashSystems = [];
+    this._splashAlphaBehaviors = [];
 
-    // Z Position: Ground level. 
-    // Z=10 ensures it draws above the background canvas (usually Z=0) 
-    // but below tokens (Z=100+).
-    this.splashSystem.emitter.position.set(centerX, centerY, 10);
-    this.splashSystem.emitter.rotation.set(0, 0, 0); // No rotation needed for billboards
+    const createSplashSystemForTile = (tileIndex) => {
+      const alphaBehavior = new SplashAlphaBehavior(0.10);
+      this._splashAlphaBehaviors[tileIndex] = alphaBehavior;
 
-    if (this.scene) this.scene.add(this.splashSystem.emitter);
-    this.batchRenderer.addSystem(this.splashSystem);
+      const system = new ParticleSystem({
+        duration: 1,
+        looping: true,
+        prewarm: false,
+        
+        // Very short life baseline; will be overridden by tuning each frame.
+        startLife: new IntervalValue(0.1, 0.2),
+        
+        // Static on the ground (no speed)
+        startSpeed: new ConstantValue(0),
+        
+        // Size: randomization (World units/pixels)
+        // Was 0.5-1.2 which is 1px. Needs to be visible, e.g. 12-24px.
+        startSize: new IntervalValue(12, 24), 
+        
+        // Start at full white (1.0). SplashAlphaBehavior will drive alpha 0 -> 0.1 -> 0.
+        startColor: new ColorRange(new Vector4(0.8, 0.9, 1.0, 1.0), new Vector4(0.8, 0.9, 1.0, 1.0)),
+        worldSpace: true,
+        maxParticles: 2000, // Enough for heavy rain
+        emissionOverTime: new ConstantValue(0),
+        
+        // Atlas: 2x2 tiles (4 variants) on the splash texture
+        uTileCount: 2,
+        vTileCount: 2,
+        // Lock this system to a specific atlas tile
+        startTileIndex: new ConstantValue(tileIndex),
+        
+        // Spawn across the whole map
+        shape: new RandomRectangleEmitter({ width: sceneW, height: sceneH }),
+        
+        material: splashMaterial,
+        renderOrder: 50, // Same layer as rain
+        renderMode: RenderMode.BillBoard, // Face camera (top-down view = circle on ground)
+        
+        // Pick a random orientation once at spawn; no over-life spin behavior.
+        startRotation: new IntervalValue(0, Math.PI * 2),
+        behaviors: [
+          alphaBehavior,
+          splashSizeOverLife,
+          // We do NOT add gravity or wind. Splashes stay where they spawn.
+          // We use the same kill behavior to clean up if map changes size (optional)
+          killBehavior
+        ]
+      });
 
-    // Patch the batch material
-    try {
-       const idx = this.batchRenderer.systemToBatchIndex?.get(this.splashSystem);
-       if (idx !== undefined && this.batchRenderer.batches && this.batchRenderer.batches[idx]) {
-         const batch = this.batchRenderer.batches[idx];
-         if (batch.material) {
-           this._splashBatchMaterial = batch.material;
-           this._patchRoofMaskMaterial(this._splashBatchMaterial);
-         }
-       }
-     } catch (e) {
-       log.warn('Failed to patch splash batch material:', e);
-     }
+      // Z Position: Ground level. 
+      // Z=10 ensures it draws above the background canvas (usually Z=0) 
+      // but below tokens (Z=100+).
+      system.emitter.position.set(centerX, centerY, 10);
+      system.emitter.rotation.set(0, 0, 0); // No rotation needed for billboards
+
+      if (this.scene) this.scene.add(system.emitter);
+      this.batchRenderer.addSystem(system);
+
+      // Patch the batch material for this splash system
+      try {
+        const idx = this.batchRenderer.systemToBatchIndex?.get(system);
+        if (idx !== undefined && this.batchRenderer.batches && this.batchRenderer.batches[idx]) {
+          const batch = this.batchRenderer.batches[idx];
+          if (batch.material) {
+            this._splashBatchMaterial = batch.material;
+            this._splashBatchMaterials.push(batch.material);
+            this._patchRoofMaskMaterial(batch.material);
+          }
+        }
+      } catch (e) {
+        log.warn('Failed to patch splash batch material:', e);
+      }
+
+      this.splashSystems[tileIndex] = system;
+      return system;
+    };
+
+    // Tile indices: 0=(0,0 thin ring), 1=(1,0 broken ring), 2=(0,1 droplets), 3=(1,1 puddle)
+    createSplashSystemForTile(0);
+    createSplashSystemForTile(1);
+    createSplashSystemForTile(2);
+    createSplashSystemForTile(3);
 
     // --- SNOW ---
      const snowMaterial = new THREE.MeshBasicMaterial({
@@ -1100,34 +1202,94 @@ export class WeatherParticles {
         }
     }
     
-    if (this.splashSystem) {
+    if (this.splashSystems && this.splashSystems.length > 0) {
         // Splashes only happen during rain.
         // Logic: Precipitation > 0 AND FreezeLevel < 0.5 (Rain)
-        
-        // Base emission scaled by rain intensity and user splashIntensityScale.
-        const splashIntensityScale = rainTuning.splashIntensityScale ?? 1.0;
-        let splashEmission = 0;
-        if (baseRainIntensity > 0) {
-           // 200 splashes/sec at full intensity, further scaled by user.
-           splashEmission = 200 * baseRainIntensity * splashIntensityScale; 
-        }
 
-        this.splashSystem.emissionOverTime = new ConstantValue(splashEmission);
-        
-        // --- Lifetime Tuning for Splash ---
-        const lifeMin = Math.max(0.001, rainTuning.splashLifeMin ?? 0.1);
-        const lifeMax = Math.max(lifeMin, rainTuning.splashLifeMax ?? 0.2);
-        this.splashSystem.startLife = new IntervalValue(lifeMin, lifeMax);
+        const baseIntensity = baseRainIntensity;
 
-        // --- Size Tuning for Splash ---
-        const sizeMin = rainTuning.splashSizeMin ?? 12.0;
-        const sizeMax = Math.max(sizeMin, rainTuning.splashSizeMax ?? 24.0);
-        this.splashSystem.startSize = new IntervalValue(sizeMin, sizeMax);
+        const perSplash = [
+          {
+            system: this.splashSystems[0],
+            tuning: {
+              intensity: rainTuning.splash1IntensityScale,
+              lifeMin: rainTuning.splash1LifeMin,
+              lifeMax: rainTuning.splash1LifeMax,
+              sizeMin: rainTuning.splash1SizeMin,
+              sizeMax: rainTuning.splash1SizeMax,
+              peak:    rainTuning.splash1OpacityPeak
+            },
+            alphaBehavior: this._splashAlphaBehaviors?.[0]
+          },
+          {
+            system: this.splashSystems[1],
+            tuning: {
+              intensity: rainTuning.splash2IntensityScale,
+              lifeMin: rainTuning.splash2LifeMin,
+              lifeMax: rainTuning.splash2LifeMax,
+              sizeMin: rainTuning.splash2SizeMin,
+              sizeMax: rainTuning.splash2SizeMax,
+              peak:    rainTuning.splash2OpacityPeak
+            },
+            alphaBehavior: this._splashAlphaBehaviors?.[1]
+          },
+          {
+            system: this.splashSystems[2],
+            tuning: {
+              intensity: rainTuning.splash3IntensityScale,
+              lifeMin: rainTuning.splash3LifeMin,
+              lifeMax: rainTuning.splash3LifeMax,
+              sizeMin: rainTuning.splash3SizeMin,
+              sizeMax: rainTuning.splash3SizeMax,
+              peak:    rainTuning.splash3OpacityPeak
+            },
+            alphaBehavior: this._splashAlphaBehaviors?.[2]
+          },
+          {
+            system: this.splashSystems[3],
+            tuning: {
+              intensity: rainTuning.splash4IntensityScale,
+              lifeMin: rainTuning.splash4LifeMin,
+              lifeMax: rainTuning.splash4LifeMax,
+              sizeMin: rainTuning.splash4SizeMin,
+              sizeMax: rainTuning.splash4SizeMax,
+              peak:    rainTuning.splash4OpacityPeak
+            },
+            alphaBehavior: this._splashAlphaBehaviors?.[3]
+          }
+        ];
 
-        // --- Opacity Peak Tuning for Splash ---
-        const peak = rainTuning.splashOpacityPeak ?? 0.10;
-        if (this._splashAlphaBehavior) {
-          this._splashAlphaBehavior.peakOpacity = peak;
+        for (const entry of perSplash) {
+          const system = entry.system;
+          if (!system) continue;
+
+          const t = entry.tuning || {};
+
+          // Base emission scaled by rain intensity and per-splash intensity.
+          const splashIntensityScale = t.intensity ?? 0.0;
+          let splashEmission = 0;
+          if (baseIntensity > 0 && splashIntensityScale > 0) {
+            // 200 splashes/sec at full intensity, further scaled per splash.
+            splashEmission = 200 * baseIntensity * splashIntensityScale;
+          }
+
+          system.emissionOverTime = new ConstantValue(splashEmission);
+
+          // --- Lifetime Tuning for this splash ---
+          const lifeMin = Math.max(0.001, t.lifeMin ?? 0.1);
+          const lifeMax = Math.max(lifeMin, t.lifeMax ?? 0.2);
+          system.startLife = new IntervalValue(lifeMin, lifeMax);
+
+          // --- Size Tuning for this splash ---
+          const sizeMin = t.sizeMin ?? 12.0;
+          const sizeMax = Math.max(sizeMin, t.sizeMax ?? 24.0);
+          system.startSize = new IntervalValue(sizeMin, sizeMax);
+
+          // --- Opacity Peak Tuning for this splash ---
+          const peak = t.peak ?? 0.10;
+          if (entry.alphaBehavior) {
+            entry.alphaBehavior.peakOpacity = peak;
+          }
         }
 
         // --- Mask Uniforms ---
@@ -1137,12 +1299,15 @@ export class WeatherParticles {
            if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
            u.uRoofMap.value = this._roofTexture;
         }
-        
-        if (this._splashBatchMaterial && this._splashBatchMaterial.userData.roofUniforms) {
-           const u = this._splashBatchMaterial.userData.roofUniforms;
-           u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
-           if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
-           u.uRoofMap.value = this._roofTexture;
+
+        if (this._splashBatchMaterials && this._splashBatchMaterials.length > 0) {
+          for (const mat of this._splashBatchMaterials) {
+            if (!mat || !mat.userData || !mat.userData.roofUniforms) continue;
+            const u = mat.userData.roofUniforms;
+            u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+            if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
+            u.uRoofMap.value = this._roofTexture;
+          }
         }
     }
 

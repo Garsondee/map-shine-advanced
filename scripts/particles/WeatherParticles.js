@@ -120,6 +120,10 @@ class RainFadeInBehavior {
   update(particle, delta, system) {
     if (!particle || typeof particle.age !== 'number' || !particle.color) return;
 
+    // If a particle has "landed" (used by SnowFloorBehavior), skip the
+    // fade-in logic so the floor behavior can own alpha over time.
+    if (particle._landed) return;
+
     const t = Math.min(Math.max(particle.age / this.fadeDuration, 0), 1);
     const baseA = typeof particle._baseAlpha === 'number' ? particle._baseAlpha : 1.0;
     particle.color.w = baseA * t;
@@ -187,6 +191,103 @@ class SnowFlutterBehavior {
   reset() { /* no-op */ }
 }
 
+// Snow floor behavior: when flakes reach the ground plane (z <= 0), stop their
+// motion and fade them out over a short duration before killing them. This
+// gives the impression of flakes "settling" on the ground instead of popping
+// out of existence.
+class SnowFloorBehavior {
+  constructor() {
+    this.type = 'SnowFloor';
+    // Quarks internally clamps its per-frame delta to 0.1, and our
+    // ParticleSystem feeds it an upscaled dt. A value around 1.0 here
+    // corresponds to roughly ~2 seconds of real-time fade in practice.
+    this.fadeDuration = 1.0;
+  }
+
+  initialize(particle, system) {
+    if (!particle) return;
+    // Ensure landing flags are cleared on spawn.
+    particle._landed = false;
+    particle._landedAgeStart = 0;
+    particle._landedBaseAlpha = undefined;
+    particle._landedBaseSize = undefined;
+  }
+
+  update(particle, delta, system) {
+    if (!particle || !particle.position) return;
+
+    // Already landed: keep them fixed and drive fade-out.
+    if (particle._landed) {
+      if (particle.velocity) {
+        particle.velocity.set(0, 0, 0);
+      }
+
+      if (particle.color) {
+        const startAge = particle._landedAgeStart || 0;
+        const baseA = (typeof particle._landedBaseAlpha === 'number') ? particle._landedBaseAlpha : particle.color.w;
+        const t = Math.min(Math.max((particle.age - startAge) / this.fadeDuration, 0), 1);
+        particle.color.w = baseA * (1.0 - t);
+
+        // When fully faded, mark as dead by forcing age beyond lifetime.
+        if (t >= 1.0) {
+          if (typeof particle.life === 'number') {
+            particle.age = particle.life;
+          } else {
+            particle.age = 1e9;
+          }
+        }
+      }
+
+      // Shrink the flake as it fades out.
+      if (particle.size) {
+        // Cache the size at the moment of landing so we shrink from that.
+        if (!particle._landedBaseSize) {
+          particle._landedBaseSize = particle.size.clone();
+        }
+        const startAge = particle._landedAgeStart || 0;
+        const t = Math.min(Math.max((particle.age - startAge) / this.fadeDuration, 0), 1);
+        const scale = 1.0 - t;
+        particle.size.copy(particle._landedBaseSize).multiplyScalar(scale);
+      }
+
+      return;
+    }
+
+    // Not yet landed: check for contact with the ground plane.
+    const z = particle.position.z;
+    if (z <= 0) {
+      particle._landed = true;
+      particle._landedAgeStart = typeof particle.age === 'number' ? particle.age : 0;
+      if (particle.color) {
+        particle._landedBaseAlpha = particle.color.w;
+      }
+      if (particle.size) {
+        particle._landedBaseSize = particle.size.clone();
+      }
+      // Ensure the particle lives at least long enough to complete the fade.
+      if (typeof particle.life === 'number' && typeof particle.age === 'number') {
+        const minLife = particle.age + this.fadeDuration;
+        if (particle.life < minLife) {
+          particle.life = minLife;
+        }
+      }
+      if (particle.velocity) {
+        particle.velocity.set(0, 0, 0);
+      }
+    }
+  }
+
+  frameUpdate(delta) { /* no-op */ }
+
+  clone() {
+    const b = new SnowFloorBehavior();
+    b.fadeDuration = this.fadeDuration;
+    return b;
+  }
+
+  reset() { /* no-op */ }
+}
+
 // NOTE: For both rain and snow we now treat particle.position as world-space
 // (worldSpace: true in the Quarks systems) and define the kill volume
 // directly from the scene rectangle and 0..7500 height.
@@ -204,6 +305,27 @@ export class WeatherParticles {
 
     this._rainMaterial = null;
     this._snowMaterial = null;
+
+    // ROOF / _OUTDOORS MASK INTEGRATION (high level):
+    // - WeatherController owns the _Outdoors texture (roofMap) and two flags:
+    //     * roofMaskActive: driven by TileManager when any overhead roof is hover-hidden.
+    //     * roofMaskForceEnabled: manual override from the UI.
+    // - ParticleSystem.update computes the Foundry scene bounds vector
+    //   [sceneX, sceneY, sceneWidth, sceneHeight] each frame and passes it to
+    //   WeatherParticles.update so we can project world X/Y into 0..1 mask UVs.
+    // - WeatherParticles caches that bounds vector here as a THREE.Vector4 and
+    //   reads roofMap/roofMask* from WeatherController each frame.
+    // - For rendering, we do NOT touch the internal quarks shaders directly in
+    //   user code. Instead we call _patchRoofMaskMaterial on both the source
+    //   MeshBasicMaterials (rain/snow) and the SpriteBatch ShaderMaterials
+    //   created by three.quarks' BatchedRenderer.
+    // - _patchRoofMaskMaterial injects a world-space position varying and a
+    //   small fragment mask block into those shaders, then we drive three
+    //   uniforms each frame:
+    //       uRoofMap       : sampler2D for the _Outdoors mask
+    //       uSceneBounds   : (sceneX, sceneY, sceneWidth, sceneHeight)
+    //       uRoofMaskEnabled : 0/1 gate from WeatherController flags
+    //   so any future batched effects can follow the same pattern.
 
     /** @type {THREE.Texture|null} cached roof/outdoors mask texture */
     this._roofTexture = null;
@@ -306,6 +428,13 @@ export class WeatherParticles {
     const volumeMin = new THREE.Vector3(sceneX, sceneY, 0);
     const volumeMax = new THREE.Vector3(sceneX + sceneW, sceneY + sceneH, 7500);
     const killBehavior = new WorldVolumeKillBehavior(volumeMin, volumeMax);
+    
+    // For snow we want flakes to be able to rest on the ground (z ~= 0) and
+    // fade out instead of being culled the instant they touch the floor.
+    // Use a slightly relaxed kill volume in Z so the SnowFloorBehavior can
+    // manage their lifetime once they land.
+    const snowVolumeMin = new THREE.Vector3(sceneX, sceneY, -100);
+    const snowKillBehavior = new WorldVolumeKillBehavior(snowVolumeMin, volumeMax);
     
     // --- COMMON OVER-LIFE BEHAVIORS ---
     // Rain: keep chroma and alpha roughly constant over life; fade handled by RainFadeInBehavior.
@@ -463,7 +592,10 @@ export class WeatherParticles {
       startRotation: new IntervalValue(0, Math.PI * 2),
       // Horizontal motion now comes only from snowWind (driven by windSpeed)
       // and snowCurl (turbulence field), plus gravity for vertical fall.
-      behaviors: [snowGravity, snowWind, snowCurl, snowColorOverLife, killBehavior.clone(), new RainFadeInBehavior()],
+      // SnowFloorBehavior now owns ground contact + fade-out. We rely on
+      // lifetime-based culling for out-of-bounds flakes instead of an
+      // additional world-volume kill for snow.
+      behaviors: [snowGravity, snowWind, snowCurl, snowColorOverLife, new SnowFloorBehavior(), new RainFadeInBehavior()],
     });
      
      this.snowSystem.emitter.position.set(centerX, centerY, emitterZ);
@@ -515,6 +647,10 @@ export class WeatherParticles {
       return;
     }
 
+    // These uniforms live on material.userData so WeatherParticles.update can
+    // drive them every frame. They are then wired into either the real
+    // ShaderMaterial.uniforms (for quarks SpriteBatches) or into the shader
+    // object passed to onBeforeCompile (for plain MeshBasicMaterials).
     const uniforms = {
       uRoofMap: { value: null },
       // (sceneX, sceneY, sceneWidth, sceneHeight) in world units
@@ -530,13 +666,19 @@ export class WeatherParticles {
     const isShaderMat = material.isShaderMaterial === true;
 
     if (isShaderMat) {
-      // Directly patch the quarks batch ShaderMaterial in place.
+      // Directly patch the quarks SpriteBatch ShaderMaterial in place. This is
+      // the path used for the actual batched rain/snow draw calls produced by
+      // three.quarks' BatchedRenderer.
       const uni = material.uniforms || (material.uniforms = {});
       uni.uRoofMap = uniforms.uRoofMap;
       uni.uSceneBounds = uniforms.uSceneBounds;
       uni.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
 
       if (typeof material.vertexShader === 'string') {
+        // All quarks billboard variants use an `offset` attribute plus
+        // #include <soft_vertex>. We piggyback on that include to compute a
+        // world-space position once per vertex, without depending on quarks'
+        // internal naming of matrices.
         material.vertexShader = material.vertexShader
           .replace(
             'void main() {',
@@ -549,6 +691,9 @@ export class WeatherParticles {
       }
 
       if (typeof material.fragmentShader === 'string') {
+        // Fragment path: project vRoofWorldPos.xy into the scene rectangle and
+        // sample the _Outdoors mask. We flip Y because Foundry's world origin
+        // is top-left while textures are bottom-left in UV space.
         material.fragmentShader = material.fragmentShader
           .replace(
             'void main() {',
@@ -582,7 +727,10 @@ export class WeatherParticles {
     }
 
     // Fallback path: patch non-ShaderMaterials via onBeforeCompile so quarks
-    // can pick up the modifications when building its internal ShaderMaterial.
+    // can pick up the modifications when building its internal ShaderMaterial
+    // from our MeshBasicMaterial template. The injected code is the same as
+    // above; the only difference is that we edit the temporary `shader`
+    // object instead of the final ShaderMaterial instance.
     material.onBeforeCompile = (shader) => {
       shader.uniforms.uRoofMap = uniforms.uRoofMap;
       shader.uniforms.uSceneBounds = uniforms.uSceneBounds;

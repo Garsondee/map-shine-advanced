@@ -508,7 +508,7 @@ export class WeatherController {
         snowFlakeSize: {
           label: 'Snow Flake Size',
           default: 0.5,
-          min: 0.5,
+          min: 0.05,
           max: 3.0,
           step: 0.05,
           group: 'snow'

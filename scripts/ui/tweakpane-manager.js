@@ -56,7 +56,7 @@ export class TweakpaneManager {
     
     /** @type {Object} Global parameters */
     this.globalParams = {
-      masterEnabled: true,
+      mapMakerMode: false,
       timeRate: 100 // 0-100%
     };
     
@@ -225,11 +225,11 @@ export class TweakpaneManager {
       expanded: this.accordionStates['global'] ?? true
     });
 
-    // Master enable/disable
-    globalFolder.addBinding(this.globalParams, 'masterEnabled', {
-      label: 'Master Enable'
+    // Map Maker Mode toggle
+    globalFolder.addBinding(this.globalParams, 'mapMakerMode', {
+      label: 'Map Maker Mode'
     }).on('change', (ev) => {
-      this.onGlobalChange('masterEnabled', ev.value);
+      this.onGlobalChange('mapMakerMode', ev.value);
     });
 
     // Time rate slider
@@ -681,10 +681,12 @@ export class TweakpaneManager {
   onGlobalChange(param, value) {
     log.debug(`Global param changed: ${param} = ${value}`);
     
-    if (param === 'masterEnabled') {
-      // Propagate to all effects
-      for (const [effectId, callback] of this.effectCallbacks.entries()) {
-        callback(effectId, 'masterEnabled', value);
+    if (param === 'mapMakerMode') {
+      // Toggle Map Maker Mode (System Swap)
+      if (window.MapShine?.setMapMakerMode) {
+        window.MapShine.setMapMakerMode(value);
+      } else {
+        log.warn('setMapMakerMode not available on window.MapShine');
       }
     } else if (param === 'timeRate') {
       // Update TimeManager

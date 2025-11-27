@@ -114,6 +114,26 @@ export class TileManager {
   }
 
   /**
+   * Set global visibility of all 3D tiles
+   * Used when switching between Gameplay Mode (Visible) and Map Maker Mode (Hidden)
+   * @param {boolean} visible 
+   * @public
+   */
+  setVisibility(visible) {
+    for (const { sprite, tileDoc } of this.tileSprites.values()) {
+      if (!sprite) continue;
+      
+      // If turning ON, respect the tile's document hidden state
+      if (visible) {
+        sprite.visible = !tileDoc.hidden;
+      } else {
+        // If turning OFF, always hide
+        sprite.visible = false;
+      }
+    }
+  }
+
+  /**
    * Sync all existing tiles from Foundry to THREE.js
    * Called on canvasReady
    * @public

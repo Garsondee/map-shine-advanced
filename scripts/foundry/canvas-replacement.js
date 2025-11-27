@@ -52,6 +52,10 @@ import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { TokenManager } from '../scene/token-manager.js';
 import { TileManager } from '../scene/tile-manager.js';
 import { WallManager } from '../scene/wall-manager.js';
+import { DrawingManager } from '../scene/drawing-manager.js';
+import { NoteManager } from '../scene/note-manager.js';
+import { TemplateManager } from '../scene/template-manager.js';
+import { LightIconManager } from '../scene/light-icon-manager.js';
 import { InteractionManager } from '../scene/interaction-manager.js';
 import { GridRenderer } from '../scene/grid-renderer.js';
 import { DropHandler } from './drop-handler.js';
@@ -62,6 +66,9 @@ const log = createLogger('Canvas');
 
 /** @type {HTMLCanvasElement|null} */
 let threeCanvas = null;
+
+/** @type {boolean} */
+let isMapMakerMode = false;
 
 /** @type {boolean} */
 let isHooked = false;
@@ -92,6 +99,18 @@ let tileManager = null;
 
 /** @type {WallManager|null} */
 let wallManager = null;
+
+/** @type {DrawingManager|null} */
+let drawingManager = null;
+
+/** @type {NoteManager|null} */
+let noteManager = null;
+
+/** @type {TemplateManager|null} */
+let templateManager = null;
+
+/** @type {LightIconManager|null} */
+let lightIconManager = null;
 
 /** @type {InteractionManager|null} */
 let interactionManager = null;
@@ -225,6 +244,7 @@ async function createThreeCanvas(scene) {
 
   try {
     // CRITICAL: Configure Foundry PIXI Canvas for Hybrid Mode
+    isMapMakerMode = false; // Default to Gameplay Mode
     configureFoundryCanvas();
 
     // Create new canvas element
@@ -409,6 +429,26 @@ async function createThreeCanvas(scene) {
     // Sync happens in initialize
     log.info('Wall manager initialized');
 
+    // Step 4d: Initialize drawing manager
+    drawingManager = new DrawingManager(threeScene);
+    drawingManager.initialize();
+    log.info('Drawing manager initialized');
+
+    // Step 4e: Initialize note manager
+    noteManager = new NoteManager(threeScene);
+    noteManager.initialize();
+    log.info('Note manager initialized');
+
+    // Step 4f: Initialize template manager
+    templateManager = new TemplateManager(threeScene);
+    templateManager.initialize();
+    log.info('Template manager initialized');
+
+    // Step 4g: Initialize light icon manager
+    lightIconManager = new LightIconManager(threeScene);
+    lightIconManager.initialize();
+    log.info('Light icon manager initialized');
+
     // Step 5: Initialize interaction manager (Selection, Drag/Drop)
     interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager, wallManager);
     interactionManager.initialize();
@@ -448,11 +488,16 @@ async function createThreeCanvas(scene) {
     mapShine.tokenManager = tokenManager; // NEW: Expose token manager for diagnostics
     mapShine.tileManager = tileManager; // NEW: Expose tile manager for diagnostics
     mapShine.wallManager = wallManager; // NEW: Expose wall manager
+    mapShine.drawingManager = drawingManager;
+    mapShine.noteManager = noteManager;
+    mapShine.templateManager = templateManager;
+    mapShine.lightIconManager = lightIconManager;
     mapShine.interactionManager = interactionManager; // NEW: Expose interaction manager
     mapShine.gridRenderer = gridRenderer; // NEW: Expose grid renderer
     mapShine.weatherController = weatherController; // NEW: Expose weather controller
     mapShine.renderLoop = renderLoop; // CRITICAL: Expose render loop for diagnostics
     mapShine.sceneDebug = sceneDebug; // NEW: Expose scene debug helpers
+    mapShine.setMapMakerMode = setMapMakerMode; // NEW: Expose mode toggle for UI
     // Attach to canvas as well for convenience (used by console snippets)
     try { canvas.mapShine = mapShine; } catch (_) {}
 
@@ -1133,6 +1178,27 @@ function destroyThreeCanvas() {
     log.debug('Wall manager disposed');
   }
 
+  // Dispose drawing manager
+  if (drawingManager) {
+    drawingManager.dispose();
+    drawingManager = null;
+    log.debug('Drawing manager disposed');
+  }
+
+  // Dispose note manager
+  if (noteManager) {
+    noteManager.dispose();
+    noteManager = null;
+    log.debug('Note manager disposed');
+  }
+
+  // Dispose template manager
+  if (templateManager) {
+    templateManager.dispose();
+    templateManager = null;
+    log.debug('Template manager disposed');
+  }
+
   // Dispose interaction manager
   if (interactionManager) {
     interactionManager.dispose();
@@ -1178,6 +1244,64 @@ function destroyThreeCanvas() {
 }
 
 /**
+ * Set Map Maker Mode (Master Toggle)
+ * @param {boolean} enabled - True for Map Maker (PIXI), False for Gameplay (Three.js)
+ * @public
+ */
+export function setMapMakerMode(enabled) {
+  if (isMapMakerMode === enabled) return;
+  
+  isMapMakerMode = enabled;
+  log.info(`Switching to ${enabled ? 'Map Maker' : 'Gameplay'} Mode`);
+  
+  if (enabled) {
+    disableSystem(); // Hide Three.js, Show PIXI
+  } else {
+    enableSystem(); // Show Three.js, Hide PIXI layers
+  }
+}
+
+/**
+ * Enable the Three.js System (Gameplay Mode)
+ * @private
+ */
+function enableSystem() {
+  if (!threeCanvas) return;
+  
+  // Resume Render Loop
+  if (renderLoop && !renderLoop.running()) {
+    renderLoop.start();
+  }
+  
+  // Show Three.js Canvas
+  threeCanvas.style.opacity = '1';
+  threeCanvas.style.pointerEvents = 'auto'; // Capture inputs, but allow fallthrough via Input Arbitration
+  
+  // Configure PIXI for Hybrid Mode
+  configureFoundryCanvas();
+}
+
+/**
+ * Disable the Three.js System (Map Maker Mode)
+ * @private
+ */
+function disableSystem() {
+  // Pause Render Loop to save resources
+  if (renderLoop && renderLoop.running()) {
+    renderLoop.stop();
+  }
+  
+  // Hide Three.js Canvas
+  if (threeCanvas) {
+    threeCanvas.style.opacity = '0';
+    threeCanvas.style.pointerEvents = 'none';
+  }
+  
+  // Restore full PIXI functionality
+  restoreFoundryRendering();
+}
+
+/**
  * Configure Foundry's PIXI canvas for Hybrid Mode
  * Keeps canvas visible but hides specific layers we've replaced
  * Sets up input arbitration to pass clicks through to THREE.js when needed
@@ -1193,66 +1317,103 @@ function configureFoundryCanvas() {
 
   const pixiCanvas = canvas.app.view;
   if (pixiCanvas) {
-    // Hide visual output but keep interactive
-    pixiCanvas.style.opacity = '0'; 
-    // Enable interaction so Foundry tools (Walls, etc.) still receive events
-    pixiCanvas.style.pointerEvents = 'auto';
-    
-    // Ensure it is on top so it catches the mouse events
+    // In Gameplay Mode (isMapMakerMode === false) we want Three.js to be the
+    // sole visible renderer. The native PIXI canvas should be fully hidden so
+    // the user clearly sees the 3D view. Map Maker Mode will call
+    // restoreFoundryRendering() to bring PIXI back when editing.
+    pixiCanvas.style.opacity = '0';
+    pixiCanvas.style.pointerEvents = 'none';
+    // Keep a high z-index so that when Map Maker Mode is enabled and PIXI is
+    // restored, it can sit above the Three.js canvas again.
     pixiCanvas.style.zIndex = '10'; 
   }
 
-  // Hide the layers we have replaced
-  manageFoundryLayers();
+  // Update layer visibility based on current tool
+  updateLayerVisibility();
 
   // Setup Input Arbitration (Tool switching)
-  // We still use this to optimize: if using Token tool, we might want THREE to handle input directly?
-  // But if PIXI is opaque (alpha:false), we can't have THREE behind it if PIXI blocks events?
-  // Wait, opacity:0 does NOT block events.
-  // So if PIXI is zIndex 10, it catches ALL events.
-  // We need to let events pass through to THREE if we are not using a Foundry tool.
   setupInputArbitration();
 
   log.info('PIXI canvas configured for Replacement Mode');
 }
 
 /**
- * Hide specific Foundry layers that we render in THREE.js
+ * Update visibility of Foundry layers based on active tool and mode
  * @private
  */
-function manageFoundryLayers() {
-  // List of layers to hide
-  // We use the layer names as they appear in canvas.layers
-  // or access them directly if possible
+function updateLayerVisibility() {
+  if (!canvas.ready) return;
   
-  // 1. Background Layer (canvas.background)
-  if (canvas.background) {
-    canvas.background.visible = false;
-    log.debug('Hidden Foundry BackgroundLayer');
-  }
+  // 1. Always Hide "Replaced" Layers in Gameplay/Hybrid Mode
+  // These are rendered by Three.js
+  if (canvas.background) canvas.background.visible = false;
+  if (canvas.grid) canvas.grid.visible = false;
+  if (canvas.tokens) canvas.tokens.visible = false;
+  if (canvas.weather) canvas.weather.visible = false;
+  if (canvas.environment) canvas.environment.visible = false; // V12+
+
+  // 2. Dynamic Layers - Show only if using the corresponding tool
+  const activeLayer = canvas.activeLayer?.name;
   
-  // 2. Grid Layer (canvas.grid)
-  if (canvas.grid) {
-    canvas.grid.visible = false;
-    log.debug('Hidden Foundry GridLayer');
+  // Helper to toggle PIXI layer vs Three.js Manager
+  const toggleLayer = (pixiLayerName, manager, forceHideThree = false) => {
+    const isActive = activeLayer === pixiLayerName;
+    const layer = canvas.layers.find(l => l.name === pixiLayerName); // V12 safer access?
+    
+    // Show PIXI layer if active
+    if (layer) layer.visible = isActive;
+    
+    // Hide Three.js counterpart if active (to avoid double rendering during edit)
+    // OR if we are in Map Maker Mode (where Three.js is hidden anyway)
+    if (manager && manager.setVisibility) {
+        // In Gameplay Mode: Show manager unless we are explicitly editing this layer
+        // In Map Maker Mode: Manager is hidden via canvas opacity, but we can also logically hide it
+        const showThree = !isActive && !isMapMakerMode;
+        manager.setVisibility(showThree);
+    }
+  };
+
+  // Walls
+  // If Walls Layer is active, show PIXI walls, hide Three.js walls
+  // If not active, hide PIXI walls, show Three.js walls
+  if (canvas.walls) {
+      const isWallsActive = activeLayer === 'WallsLayer';
+      canvas.walls.visible = isWallsActive;
+      if (wallManager) {
+          // Show Three.js walls only when NOT editing walls and NOT in Map Maker mode
+          // Actually, we usually want 3D walls visible even when editing? 
+          // No, user requested "Native Mode" for editing.
+          wallManager.setVisibility(!isWallsActive && !isMapMakerMode);
+      }
   }
 
-  // 3. Token Layer (canvas.tokens)
-  if (canvas.tokens) {
-    canvas.tokens.visible = false;
-    log.debug('Hidden Foundry TokenLayer');
-  }
-  
-  // 4. Tiles Layer (canvas.tiles) - Foreground and Background
-  // Note: Tiles are complicated in V12/13, they might be in Primary Canvas Group
+  // Tiles
   if (canvas.tiles) {
-    canvas.tiles.visible = false;
-    log.debug('Hidden Foundry TilesLayer');
+      const isTilesActive = activeLayer === 'TilesLayer';
+      canvas.tiles.visible = isTilesActive;
+      if (tileManager) {
+          tileManager.setVisibility(!isTilesActive && !isMapMakerMode);
+      }
   }
 
-  // 5. Effects/Weather (canvas.weather or canvas.environment)
-  if (canvas.weather) {
-    canvas.weather.visible = false;
+  // Other Tools (Lighting, Sounds, etc.) - Just show/hide PIXI layer
+  // We don't have Three.js counterparts for these yet (except Lighting Effect, which is global)
+  const simpleLayers = [
+      'LightingLayer', 'SoundsLayer', 'TemplateLayer', 'DrawingsLayer', 'NotesLayer', 'RegionLayer'
+  ];
+  
+  simpleLayers.forEach(name => {
+      const layer = canvas[name === 'RegionLayer' ? 'regions' : name.replace('Layer', '').toLowerCase()];
+      // Note: canvas.lighting, canvas.sounds, etc.
+      // V12 Regions is canvas.regions
+      if (layer) {
+          layer.visible = (activeLayer === name);
+      }
+  });
+  
+  // Regions Layer (V12 specific check)
+  if (canvas.regions) {
+      canvas.regions.visible = (activeLayer === 'RegionLayer');
   }
 }
 
@@ -1263,47 +1424,75 @@ function manageFoundryLayers() {
  */
 function setupInputArbitration() {
   // Hook into tool changes
-  Hooks.on('canvasInit', manageFoundryLayers); // Re-apply layer hiding on scene change
+  // We use 'canvasInit' to re-apply settings if scene changes, 
+  // but 'createThreeCanvas' handles the main init.
   
-  // We check the active layer/tool to decide who gets input
-  const updateInputMode = () => {
-    const pixiCanvas = canvas.app?.view;
-    if (!pixiCanvas) return;
-
-    const activeLayer = canvas.activeLayer?.name;
-    const tool = game.activeTool;
-    
-    // Tools that require PIXI interaction (Legacy fallback)
-    // We are taking over Walls, so remove it from this list
-    const pixiTools = [
-      // 'walls', // We handle walls in THREE.js now
-      'lighting',
-      'sounds',
-      'templates',
-      'drawings',
-      'notes'
-    ];
-    
-    // Check if we are on a layer that needs PIXI
-    // WallsLayer is now handled by THREE.js
-    const needsPixi = pixiTools.some(t => activeLayer?.toLowerCase().includes(t));
-    
-    if (needsPixi) {
-      pixiCanvas.style.pointerEvents = 'auto';
-      log.debug(`Input Mode: PIXI (Layer: ${activeLayer})`);
-    } else {
-      pixiCanvas.style.pointerEvents = 'none';
-      log.debug(`Input Mode: THREE.js (Layer: ${activeLayer})`);
-    }
-  };
-
-  // Hook into layer changes
-  Hooks.on('canvasReady', updateInputMode);
-  Hooks.on('changeSidebarTab', updateInputMode); // When switching tools
-  Hooks.on('renderSceneControls', updateInputMode); // When clicking tools
+  // Remove existing listeners to avoid duplicates if re-initialized
+  Hooks.off('changeSidebarTab', updateInputMode);
+  Hooks.off('renderSceneControls', updateInputMode);
+  
+  Hooks.on('changeSidebarTab', updateInputMode);
+  Hooks.on('renderSceneControls', updateInputMode);
   
   // Initial check
   updateInputMode();
+}
+
+/**
+ * Update Input Mode based on active tool
+ * @private
+ */
+function updateInputMode() {
+    if (!canvas.ready) return;
+    
+    const pixiCanvas = canvas.app?.view;
+    if (!pixiCanvas) return;
+
+    // If Map Maker Mode is ON, we keep PIXI fully in control. Visibility for
+    // native layers is managed exclusively by restoreFoundryRendering(). We
+    // must NOT call updateLayerVisibility here, or the scene will vanish when
+    // switching tools (Lights, Walls, etc.).
+    if (isMapMakerMode) {
+        pixiCanvas.style.pointerEvents = 'auto';
+        return;
+    }
+
+    // In Gameplay Mode (Hybrid), we actively manage PIXI layer visibility to
+    // avoid double-rendering. Do this *before* deciding who gets input.
+    updateLayerVisibility();
+
+    const activeLayer = canvas.activeLayer?.name;
+    
+    // Tools that require PIXI interaction
+    // Basically any layer that isn't TokenLayer (assuming we handle Tokens in 3D eventually? 
+    // For now, we hide TokenLayer, so we might need PIXI input if we want to select tokens?
+    // Wait, TokenManager syncs tokens. If we hide TokenLayer, we can't select tokens via PIXI.
+    // InteractionManager handles 3D selection.
+    
+    // So we ONLY need PIXI input if we are on a "Edit" layer.
+    const editLayers = [
+      'WallsLayer',
+      // NOTE: LightingLayer is intentionally *not* included here. In Gameplay
+      // Mode we handle light placement directly in the Three.js interaction
+      // system, so PIXI should not reclaim pointerEvents when the Lighting
+      // controls are active.
+      'SoundsLayer',
+      'TemplateLayer',
+      'DrawingsLayer',
+      'NotesLayer',
+      'RegionLayer',
+      'TilesLayer'
+    ];
+    
+    const isEditMode = editLayers.some(l => activeLayer === l);
+    
+    if (isEditMode) {
+      pixiCanvas.style.pointerEvents = 'auto';
+      log.debug(`Input Mode: PIXI (Edit: ${activeLayer})`);
+    } else {
+      pixiCanvas.style.pointerEvents = 'none'; // Pass through to Three.js
+      log.debug(`Input Mode: THREE.js (Gameplay: ${activeLayer})`);
+    }
 }
 
 /**
@@ -1323,17 +1512,20 @@ function restoreFoundryRendering() {
     pixiCanvas.style.zIndex = ''; // Reset to default
   }
 
-  // Restore background layer visibility
-  if (canvas.background) {
-    canvas.background.visible = true;
-    log.debug('PIXI background layer restored');
-  }
-
-  // Restore primary background alpha
-  if (canvas.primary?.background) {
-    canvas.primary.background.alpha = 1;
-    log.debug('PIXI primary background restored');
-  }
+  // Restore ALL layers
+  if (canvas.background) canvas.background.visible = true;
+  if (canvas.grid) canvas.grid.visible = true;
+  if (canvas.tokens) canvas.tokens.visible = true;
+  if (canvas.tiles) canvas.tiles.visible = true;
+  if (canvas.lighting) canvas.lighting.visible = true;
+  if (canvas.sounds) canvas.sounds.visible = true;
+  if (canvas.templates) canvas.templates.visible = true;
+  if (canvas.drawings) canvas.drawings.visible = true;
+  if (canvas.notes) canvas.notes.visible = true;
+  if (canvas.walls) canvas.walls.visible = true;
+  if (canvas.weather) canvas.weather.visible = true;
+  if (canvas.environment) canvas.environment.visible = true;
+  if (canvas.regions) canvas.regions.visible = true;
 
   log.info('PIXI rendering restored');
 }

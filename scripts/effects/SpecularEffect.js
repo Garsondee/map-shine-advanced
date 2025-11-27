@@ -692,7 +692,15 @@ export class SpecularEffect extends EffectBase {
         uSparkleSpeed: { value: this.params.sparkleSpeed },
 
         // Foundry scene darkness (0 = light, 1 = dark)
-        uDarknessLevel: { value: 0.0 }
+        uDarknessLevel: { value: 0.0 },
+
+        // Foundry ambient environment colors (linear RGB), approximated
+        // from canvas.environment.colors when available. These are used
+        // to tint the base albedo so our "neutral" scene brightness and
+        // color temperature more closely match Foundry's PIXI pipeline.
+        uAmbientDaylight: { value: new THREE.Color(1.0, 1.0, 1.0) },
+        uAmbientDarkness: { value: new THREE.Color(0.14, 0.14, 0.28) },
+        uAmbientBrightest: { value: new THREE.Color(1.0, 1.0, 1.0) }
       },
       
       vertexShader: this.getVertexShader(),
@@ -785,10 +793,45 @@ export class SpecularEffect extends EffectBase {
     this.material.uniforms.uStripe3Wave.value      = this.params.stripe3Wave;
     this.material.uniforms.uStripe3Gaps.value      = this.params.stripe3Gaps;
     this.material.uniforms.uStripe3Softness.value  = this.params.stripe3Softness;
-    
-    // Update Foundry darkness level
-    if (canvas?.scene?.environment?.darknessLevel !== undefined) {
-      this.material.uniforms.uDarknessLevel.value = canvas.scene.environment.darknessLevel;
+
+    // Update Foundry darkness level and ambient environment colors
+    try {
+      const scene = canvas?.scene;
+      const env = canvas?.environment;
+      if (scene?.environment?.darknessLevel !== undefined) {
+        this.material.uniforms.uDarknessLevel.value = scene.environment.darknessLevel;
+      }
+
+      const colors = env?.colors;
+      if (colors) {
+        const uniforms = this.material.uniforms;
+
+        const applyColor = (src, targetColor) => {
+          if (!src || !targetColor) return;
+          // Foundry Color objects expose .toArray() and sometimes .rgb; use
+          // whatever is available and fall back to sane defaults.
+          let r = 1, g = 1, b = 1;
+          try {
+            if (Array.isArray(src)) {
+              r = src[0] ?? 1; g = src[1] ?? 1; b = src[2] ?? 1;
+            } else if (typeof src.r === 'number' && typeof src.g === 'number' && typeof src.b === 'number') {
+              r = src.r; g = src.g; b = src.b;
+            } else if (typeof src.toArray === 'function') {
+              const arr = src.toArray();
+              r = arr[0] ?? 1; g = arr[1] ?? 1; b = arr[2] ?? 1;
+            }
+          } catch (e) {
+            // Keep defaults on failure.
+          }
+          targetColor.setRGB(r, g, b);
+        };
+
+        applyColor(colors.ambientDaylight,  uniforms.uAmbientDaylight.value);
+        applyColor(colors.ambientDarkness,  uniforms.uAmbientDarkness.value);
+        applyColor(colors.ambientBrightest, uniforms.uAmbientBrightest.value);
+      }
+    } catch (e) {
+      // If canvas or environment are not ready, keep previous values.
     }
   }
 
@@ -979,6 +1022,11 @@ export class SpecularEffect extends EffectBase {
       // Foundry scene darkness (0 = light, 1 = dark)
       uniform float uDarknessLevel;
       
+      // Foundry ambient environment colors (linear RGB).
+      uniform vec3 uAmbientDaylight;
+      uniform vec3 uAmbientDarkness;
+      uniform vec3 uAmbientBrightest;
+      
       varying vec2 vUv;
       varying vec3 vWorldNormal;
       varying vec3 vWorldPosition;
@@ -1168,12 +1216,19 @@ export class SpecularEffect extends EffectBase {
         // Sample textures
         vec4 albedo = texture2D(uAlbedoMap, vUv);
         
-        // Apply Foundry darkness level
+        // Apply Foundry darkness level and ambient environment tint. We
+        // approximate Foundry's computedBackgroundColor by blending
+        // between ambientDaylight and ambientDarkness.
         float lightLevel = 1.0 - uDarknessLevel;
+        vec3 ambientTint = mix(uAmbientDaylight, uAmbientDarkness, uDarknessLevel);
         
         // If effect is disabled, just render the base albedo with standard lighting
         if (!uEffectEnabled) {
-          gl_FragColor = vec4(albedo.rgb * lightLevel, albedo.a);
+          // Tint the base albedo by the ambient environment so the Three.js
+          // base plane lives in roughly the same color/brightness space as
+          // Foundry's background lighting pass.
+          vec3 baseAlbedo = albedo.rgb * ambientTint;
+          gl_FragColor = vec4(baseAlbedo, albedo.a);
           return;
         }
         
@@ -1258,16 +1313,22 @@ export class SpecularEffect extends EffectBase {
         // The colored mask defines WHERE and WHAT COLOR things shine
         vec3 specularColor = specularMask.rgb * totalModulator * uSpecularIntensity * uLightColor;
         
-        // Apply Foundry darkness level with different falloff curves (reuse lightLevel defined earlier)
+        // Apply Foundry darkness level with different falloff curves (reuse
+        // lightLevel defined earlier). Albedo is additionally tinted by the
+        // ambient environment mix so bright scenes feel closer to Foundry's
+        // warm daylight and dark scenes to its cool darkness.
         
         // Linear falloff for albedo (base texture)
-        float albedoBrightness = lightLevel;
+        // Clamp to minimal value to prevent total blackness (information loss),
+        // allowing lighting effects to still reveal texture detail.
+        float albedoBrightness = max(lightLevel, 0.05);
         
         // Slower falloff curve for specular (gentler fade)
-        float specularBrightness = sqrt(lightLevel);
+        float specularBrightness = sqrt(max(lightLevel, 0.0));
         
-        // Apply brightness multipliers
-        vec3 litAlbedo = albedo.rgb * albedoBrightness;
+        // Apply brightness multipliers and ambient tint
+        vec3 baseAlbedo = albedo.rgb * ambientTint;
+        vec3 litAlbedo = baseAlbedo * albedoBrightness;
         vec3 litSpecular = specularColor * specularBrightness;
 
         // Simple additive composition: base + specular

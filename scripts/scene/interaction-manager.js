@@ -374,6 +374,57 @@ export class InteractionManager {
           return; // Skip token selection
         }
 
+        // 2.5. Native Light Placement (LightingLayer in Three.js Gameplay Mode)
+        // When on the Lighting layer with the standard light tool active, allow the GM to
+        // place AmbientLight documents directly from the 3D view without swapping modes.
+        const isLightingLayer = activeLayer === 'LightingLayer';
+        if (isLightingLayer) {
+          // Only GM may place lights for now, matching Foundry's default behavior
+          if (!game.user.isGM) {
+            ui.notifications.warn('Only the GM can place lights in this mode.');
+            return;
+          }
+
+          if (!canvas.lighting) return;
+
+          const worldPos = this.viewportToWorld(event.clientX, event.clientY, 0);
+          if (!worldPos) return;
+
+          const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
+
+          // Derive a reasonable default radius from scene dimensions. We use a
+          // slightly larger radius than Foundry's tiny default so the pool of
+          // light is clearly visible in the Three.js overlay.
+          const distance = canvas.dimensions?.distance || 5;
+          const defaultBright = distance * 4; // in scene distance units
+          const defaultDim = distance * 8;
+
+          const data = {
+            x: foundryPos.x,
+            y: foundryPos.y,
+            config: {
+              // Distances are in scene units; Foundry will convert to pixels internally
+              bright: defaultBright,
+              dim: defaultDim,
+              luminosity: 0.5,
+              attenuation: 0.5,
+              rotation: 0,
+              angle: 360,
+              color: null, // Use Foundry default color
+              darkness: { min: 0, max: 1 }
+            }
+          };
+
+          try {
+            canvas.scene.createEmbeddedDocuments('AmbientLight', [data]);
+          } catch (e) {
+            log.error('Failed to create AmbientLight from Three.js interaction', e);
+          }
+
+          // Do not start token selection when placing a light
+          return;
+        }
+
         // 3. Check Tokens
         const intersects = this.raycaster.intersectObjects(tokenSprites, false);
 

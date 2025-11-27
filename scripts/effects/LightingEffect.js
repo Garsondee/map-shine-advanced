@@ -13,24 +13,35 @@ const log = createLogger('LightingEffect');
 
 export class LightingEffect extends EffectBase {
   constructor() {
-    super('lighting', RenderLayers.SURFACE_EFFECTS, 'low'); // Render with surface effects for now
+    super('lighting', RenderLayers.POST_PROCESSING, 'low');
     
-    this.priority = 10; // Base lighting
+    this.priority = 1; // Render immediately after base scene (before Bloom/ColorCorrection)
     this.alwaysRender = true;
 
-    // Lighting parameters
+    // Lighting parameters (UI-facing).
     this.params = {
       enabled: true,
       globalIntensity: 1.0,
-      ambientColor: { r: 0.1, g: 0.1, b: 0.1 } // Base ambient level
+      ambientColor: { r: 0.02, g: 0.02, b: 0.02 },
+      
+      // Advanced Scene Lighting Controls
+      darknessBoost: 1.8,   // Multiplier for lights when in darkness
+      ambientMix: 0.0,      // How much ambient color tints the lights
+      lightSaturation: 0.5, // Saturation of the lights themselves
+      contrast: 1.0,        // Contrast of the light map
+      correction: 1.26,     // Final brightness multiplier for the light map
+      coreBoost: 1.5,       // Extra boost for the inner bright core of lights
+      falloffSoftness: 4.0  // Exponent on falloff curve ( <1 = softer, >1 = harder )
     };
 
     // Resources
     this.lights = new Map(); // Map<id, {data, uniformIndex}>
     this.maxLights = 64; // Maximum number of dynamic lights supported in shader
     
-    // Mesh references (to apply lighting to)
-    this.targets = new Set();
+    // Internal scene for full-screen quad rendering
+    this.quadScene = null;
+    this.quadCamera = null;
+    this.mesh = null;
     
     // Material/Shader management
     this.uniforms = null;
@@ -48,12 +59,36 @@ export class LightingEffect extends EffectBase {
           label: 'Global Lighting',
           type: 'inline',
           parameters: ['globalIntensity', 'ambientColor']
+        },
+        {
+          name: 'scene_lighting',
+          label: 'Scene Lighting Adjustments',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'darknessBoost',
+            'ambientMix',
+            'lightSaturation',
+            'contrast',
+            'correction',
+            'coreBoost',
+            'falloffSoftness'
+          ]
         }
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        globalIntensity: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.0 },
-        ambientColor: { type: 'color', default: { r: 0.1, g: 0.1, b: 0.1 } }
+        globalIntensity: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.0, label: 'Global Brightness' },
+        ambientColor: { type: 'color', default: { r: 0.02, g: 0.02, b: 0.02 } },
+        
+        // New Controls
+        darknessBoost: { type: 'slider', min: 1.0, max: 20.0, step: 0.1, default: 1.8, label: 'Darkness Punch' },
+        ambientMix: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.0, label: 'Ambient Tint Mix' },
+        lightSaturation: { type: 'slider', min: 0.0, max: 2.0, step: 0.1, default: 0.5, label: 'Light Saturation' },
+        contrast: { type: 'slider', min: 0.5, max: 2.0, step: 0.01, default: 1.0, label: 'Light Map Contrast' },
+        correction: { type: 'slider', min: 0.5, max: 2.0, step: 0.01, default: 1.26, label: 'Final Boost' },
+        coreBoost: { type: 'slider', min: 0.0, max: 3.0, step: 0.05, default: 1.5, label: 'Core Boost' },
+        falloffSoftness: { type: 'slider', min: 0.25, max: 4.0, step: 0.05, default: 4.0, label: 'Attenuation Softness' }
       }
     };
   }
@@ -62,9 +97,22 @@ export class LightingEffect extends EffectBase {
    * Initialize the effect
    */
   initialize(renderer, scene, camera) {
-    log.info('Initializing LightingEffect');
-    this.scene = scene;
+    log.info('Initializing LightingEffect (Post-Process)');
     this.renderer = renderer;
+
+    const THREE = window.THREE;
+
+    // 1. Create internal scene for quad rendering
+    this.quadScene = new THREE.Scene();
+    this.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+    // 2. Create Lighting Material
+    this.material = this.createLightingMaterial();
+
+    // 3. Create Quad
+    const geometry = new THREE.PlaneGeometry(2, 2);
+    this.mesh = new THREE.Mesh(geometry, this.material);
+    this.quadScene.add(this.mesh);
 
     // Listen for light updates
     this.hookIdCreate = Hooks.on('createAmbientLight', (doc) => this.onLightCreated(doc));
@@ -76,44 +124,40 @@ export class LightingEffect extends EffectBase {
   }
 
   /**
-   * Set the base mesh to apply lighting to (usually the base plane)
-   * This effect modifies the material of the target mesh(es) or adds an overlay
-   * For this implementation, we'll use an overlay mesh with additive blending
-   * to paint light onto the scene without replacing the base materials complex PBR.
+   * Set the base mesh (Legacy - no longer needed for Post-Process, but kept for API compatibility if called)
    */
   setBaseMesh(mesh) {
-    if (!mesh) return;
-    
-    // We will create a "Lighting Plane" that sits just above the base plane
-    // and renders the accumulated light. This avoids hacking the PBR shader for now.
-    // In a full deferred renderer, we'd do this differently.
-    const geometry = mesh.geometry.clone();
-    const material = this.createLightingMaterial();
-    
-    this.lightingMesh = new window.THREE.Mesh(geometry, material);
-    this.lightingMesh.name = 'LightingOverlay';
-    
-    // Copy transform from base mesh
-    this.lightingMesh.position.copy(mesh.position);
-    this.lightingMesh.position.z += 0.1; // Slight offset
-    this.lightingMesh.rotation.copy(mesh.rotation);
-    this.lightingMesh.scale.copy(mesh.scale);
-    
-    this.scene.add(this.lightingMesh);
-    this.targets.add(this.lightingMesh);
-    
-    this.updateLightUniforms();
+    // No-op for screen-space lighting
   }
 
   createLightingMaterial() {
     const THREE = window.THREE;
     
-    // Uniforms for N lights
+    // Uniforms for N lights + Scene Context
     this.uniforms = {
-      ambientColor: { value: new THREE.Color(0.1, 0.1, 0.1) },
+      tDiffuse: { value: null }, // Input scene texture
+      uViewOffset: { value: new THREE.Vector2() }, // Camera World Pos (Bottom-Left)
+      uViewSize: { value: new THREE.Vector2() },   // Camera World View Size
+      
+      // Base ambient contribution
+      ambientColor: { value: new THREE.Color(0.02, 0.02, 0.02) },
       globalIntensity: { value: 1.0 },
-      // Foundry scene darkness (0 = fully lit, 1 = max darkness)
       uDarknessLevel: { value: 0.0 },
+      
+      // Advanced Tuning Uniforms
+      uDarknessBoost: { value: 1.8 },
+      uAmbientMix: { value: 0.0 },
+      uLightSaturation: { value: 0.5 },
+      uContrast: { value: 1.0 },
+      uCorrection: { value: 1.26 },
+      uCoreBoost: { value: 1.5 },
+      uFalloffSoftness: { value: 4.0 },
+      
+      // Foundry ambient environment colors
+      uAmbientDaylight: { value: new THREE.Color(1.0, 1.0, 1.0) },
+      uAmbientDarkness: { value: new THREE.Color(0.14, 0.14, 0.28) },
+      uAmbientBrightest: { value: new THREE.Color(1.0, 1.0, 1.0) },
+      
       numLights: { value: 0 },
       lightPosition: { value: new Float32Array(this.maxLights * 3) }, // x,y,z flat array
       lightColor: { value: new Float32Array(this.maxLights * 3) },    // r,g,b flat array
@@ -122,38 +166,66 @@ export class LightingEffect extends EffectBase {
 
     const vertexShader = `
       varying vec2 vUv;
-      varying vec3 vWorldPosition;
       
       void main() {
         vUv = uv;
-        vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-        vWorldPosition = worldPosition.xyz;
-        gl_Position = projectionMatrix * viewMatrix * worldPosition;
+        gl_Position = vec4(position, 1.0);
       }
     `;
 
     const fragmentShader = `
+      uniform sampler2D tDiffuse;
+      uniform vec2 uViewOffset;
+      uniform vec2 uViewSize;
+      
       uniform vec3 ambientColor;
       uniform float globalIntensity;
-      // Foundry scene darkness (0 = light, 1 = dark; 1 ~= 75% darkening)
       uniform float uDarknessLevel;
+      
+      uniform float uDarknessBoost;
+      uniform float uAmbientMix;
+      uniform float uLightSaturation;
+      uniform float uContrast;
+      uniform float uCorrection;
+      uniform float uCoreBoost;
+      uniform float uFalloffSoftness;
+      
+      uniform vec3 uAmbientDaylight;
+      uniform vec3 uAmbientDarkness;
+      uniform vec3 uAmbientBrightest;
+      
       uniform int numLights;
       uniform vec3 lightPosition[${this.maxLights}];
       uniform vec3 lightColor[${this.maxLights}];
       uniform vec4 lightConfig[${this.maxLights}]; // radius, dim, attenuation, unused
       
-      varying vec3 vWorldPosition;
+      varying vec2 vUv;
+      
+      // Saturation helper
+      vec3 adjustSaturation(vec3 color, float saturation) {
+        float gray = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        return mix(vec3(gray), color, saturation);
+      }
       
       void main() {
-        // Use Foundry darkness only as a subtle modifier for dynamic lights.
-        // Do NOT darken the whole scene again here, since the base canvas and
-        // other effects already apply the scene darkness. That would double-darken.
-        float clampedDarkness = clamp(uDarknessLevel, 0.0, 1.0);
+        // Sample Base Color (Albedo)
+        vec4 baseTexel = texture2D(tDiffuse, vUv);
+        vec3 baseColor = baseTexel.rgb;
+        
+        // Reconstruct World Position
+        // Simple linear mapping from UV to View Bounds
+        vec2 worldPos = uViewOffset + (vUv * uViewSize);
+        
+        // ---------------------------------------------------------
+        // Lighting Calculation (Foundry-like)
+        // ---------------------------------------------------------
 
-        // Base multiplier for Multiply blending: always 1.0 so the overlay does
-        // not globally dim the scene. Darkness is handled by Foundry itself.
-        float baseBrightness = 1.0;
-        vec3 totalLight = vec3(baseBrightness) * globalIntensity;
+        float clampedDarkness = clamp(uDarknessLevel, 0.0, 1.0);
+        vec3 ambientTint = mix(uAmbientDaylight, uAmbientDarkness, clampedDarkness);
+
+        // Accumulate Dynamic Lights
+        // We start at 0.0 because the Base Color already contains the ambient light.
+        vec3 totalLight = vec3(0.0);
         
         for (int i = 0; i < ${this.maxLights}; i++) {
           if (i >= numLights) break;
@@ -164,46 +236,67 @@ export class LightingEffect extends EffectBase {
           float dim = lightConfig[i].y;
           float attenuation = lightConfig[i].z;
           
-          float dist = distance(vWorldPosition.xy, lPos.xy);
+          float dist = distance(worldPos, lPos.xy);
           
           if (dist < radius) {
-            // Normalized distance
             float d = dist / radius;
             
-            // Simple falloff
-            // Attenuation controls how sharp the falloff is
-            float falloff = 1.0 - smoothstep(dim/radius, 1.0, d);
+            // Foundry Falloff
+            float inner = (radius > 0.0) ? clamp(dim / radius, 0.0, 0.99) : 0.0;
+            float falloff = 1.0 - smoothstep(inner, 1.0, d);
             
-            // Apply attenuation factor
-            // Foundry attenuation: 0 = no falloff (linear?), 1 = sharp falloff
-            // We'll mix between linear and squared falloff
             float linear = 1.0 - d;
             float squared = 1.0 - d * d;
             float lightIntensity = mix(linear, squared, attenuation) * falloff;
 
-            // Let dynamic lights respond a bit to darkness without crushing them.
-            // At darkness 0 -> factor 1.0, at darkness 1 -> factor ~0.7
-            float dynamicBrightness = 1.0 - 0.3 * clampedDarkness;
-            totalLight += lColor * lightIntensity * dynamicBrightness;
+            // Core Brightness Boost: amplify contribution near the center
+            if (uCoreBoost > 0.0 && inner > 0.0) {
+              float coreT = 1.0 - clamp(d / inner, 0.0, 1.0);
+              float coreFactor = 1.0 + uCoreBoost * coreT * coreT;
+              lightIntensity *= coreFactor;
+            }
+            
+            // Dynamic Brightness Boost
+            // As darkness increases, we need to boost the light multiplier significantly
+            // because the base texture we are multiplying against is getting darker.
+            float dynamicBoost = mix(1.0, uDarknessBoost, clampedDarkness);
+            
+            // Apply light saturation adjustment
+            vec3 satColor = adjustSaturation(lColor, uLightSaturation);
+            
+            // Mix with ambient tint
+            vec3 tintedLightColor = satColor * mix(vec3(1.0), ambientTint, uAmbientMix);
+
+            totalLight += tintedLightColor * lightIntensity * dynamicBoost;
           }
         }
         
-        // Output with additive blending (we want to add light to the scene)
-        // But since this is an overlay, we need to output alpha?
-        // Actually, we want to MULTIPLY the underlying texture by this light?
-        // Or ADD light? Standard rendering is Diffuse * Light.
-        // Since we can't easily access the underlying texture here without huge changes,
-        // We will make this an ADDITIVE light layer for "Colored Light" and rely on 
-        // base texture for ambient.
-        // Wait, standard lighting logic: (Ambient + Dynamic) * Diffuse.
-        // If we render this on top with Multiply, we darken the scene where there is no light.
-        // That creates shadows/darkness!
+        // Apply Light Map Contrast
+        if (uContrast != 1.0) {
+           totalLight = (totalLight - 0.5) * uContrast + 0.5;
+           totalLight = max(vec3(0.0), totalLight); // Prevent negatives
+        }
+
+        // Apply Attenuation Softness (exponent on final falloff)
+        if (uFalloffSoftness != 1.0) {
+          vec3 eps = vec3(1e-4);
+          totalLight = pow(max(totalLight, eps), vec3(uFalloffSoftness));
+        }
         
-        // Let's try: BlendMode Multiply. Initialize with white.
-        // Areas with no light -> Ambient Color (dark).
-        // Areas with light -> Add to Ambient.
+        // Tone Mapping for the Light Map itself to prevent nuclear burnout
+        // but allow it to go > 1.0 for the "punch".
+        totalLight = totalLight / (vec3(1.0) + totalLight * 0.1);
         
-        gl_FragColor = vec4(totalLight, 1.0);
+        // Apply Final Correction Boost
+        totalLight *= uCorrection;
+        
+        // Final Composition: "Adaptive Luminance" logic
+        // The Base Color is already lit by Ambient.
+        // We want to ADD the Dynamic Light contribution, but modulated by the Base Color (Texture).
+        // Final = Base + (Base * Light)
+        vec3 finalColor = baseColor + (baseColor * totalLight);
+        
+        gl_FragColor = vec4(finalColor, baseTexel.a);
       }
     `;
 
@@ -211,11 +304,48 @@ export class LightingEffect extends EffectBase {
       uniforms: this.uniforms,
       vertexShader: vertexShader,
       fragmentShader: fragmentShader,
-      transparent: true,
-      blending: THREE.MultiplyBlending, // Multiply to tint/darken the underlying scene
       depthWrite: false,
-      depthTest: true // Respect depth so we don't light through things? Actually map is flat.
+      depthTest: false
     });
+  }
+  
+  setInputTexture(texture) {
+    if (this.material) {
+      this.material.uniforms.tDiffuse.value = texture;
+    }
+  }
+
+  render(renderer, scene, camera) {
+    if (!this.enabled || !this.material || !this.material.uniforms.tDiffuse.value) return;
+
+    // Calculate View Bounds for World Position Reconstruction
+    if (camera && camera.isPerspectiveCamera) {
+      // Calculate visible height at Z=0 (Ground Plane)
+      // camera.position.z is height above ground (assuming ground is 0)
+      // fov is vertical FOV in degrees
+      const dist = Math.max(1, camera.position.z);
+      const vFOV = THREE.MathUtils.degToRad(camera.fov);
+      const visibleHeight = 2 * Math.tan(vFOV / 2) * dist;
+      const visibleWidth = visibleHeight * camera.aspect;
+      
+      // Camera Position is center of view
+      // Top-Left of view (which maps to UV 0,1? No, UV 0,0 is Bottom-Left in Three GLSL)
+      // Bottom-Left World Pos:
+      const cx = camera.position.x;
+      const cy = camera.position.y;
+      
+      const left = cx - visibleWidth / 2;
+      const bottom = cy - visibleHeight / 2;
+      
+      this.material.uniforms.uViewOffset.value.set(left, bottom);
+      this.material.uniforms.uViewSize.value.set(visibleWidth, visibleHeight);
+    }
+
+    // Render Quad
+    const oldAutoClear = renderer.autoClear;
+    renderer.autoClear = false;
+    renderer.render(this.quadScene, this.quadCamera);
+    renderer.autoClear = oldAutoClear;
   }
 
   syncAllLights() {
@@ -241,15 +371,41 @@ export class LightingEffect extends EffectBase {
     
     // Extract color
     let r = 1, g = 1, b = 1;
-    const colorInt = config.color;
-    if (colorInt !== null && colorInt !== undefined) {
-      r = ((colorInt >> 16) & 0xff) / 255;
-      g = ((colorInt >> 8) & 0xff) / 255;
-      b = (colorInt & 0xff) / 255;
+    const colorInput = config.color;
+    
+    if (colorInput) {
+        try {
+            // Handle Foundry Color object, hex string, or integer
+            if (typeof colorInput === 'object' && colorInput.rgb) {
+                r = colorInput.rgb[0];
+                g = colorInput.rgb[1];
+                b = colorInput.rgb[2];
+            } else {
+                // Fallback to Foundry's Color helper if available, otherwise robust parse
+                const c = (typeof foundry !== 'undefined' && foundry.utils?.Color) 
+                    ? foundry.utils.Color.from(colorInput)
+                    : new THREE.Color(colorInput);
+                    
+                r = c.r;
+                g = c.g;
+                b = c.b;
+            }
+        } catch (e) {
+            // Fallback to simple integer parsing if all else fails
+            if (typeof colorInput === 'number') {
+                r = ((colorInput >> 16) & 0xff) / 255;
+                g = ((colorInput >> 8) & 0xff) / 255;
+                b = (colorInput & 0xff) / 255;
+            }
+        }
     }
     
     // Extract intensity/brightness
-    const intensity = config.luminosity ?? 0.5;
+    // Foundry luminosity: 0 = off, 0.5 = normal, 1 = bright
+    // We map 0.5 -> 1.0 intensity.
+    const luminosity = config.luminosity ?? 0.5;
+    const intensity = luminosity * 2.0; 
+    
     const dim = config.dim || 0;
     const bright = config.bright || 0;
     const radius = Math.max(dim, bright);
@@ -264,6 +420,7 @@ export class LightingEffect extends EffectBase {
       color: { r: r * intensity, g: g * intensity, b: b * intensity }, // Scale color by intensity
       radius: radius,
       dim: dim,
+      bright: bright,
       attenuation: config.attenuation ?? 0.5
     });
   }
@@ -325,46 +482,89 @@ export class LightingEffect extends EffectBase {
       // Canvas conversion
       const pixelsPerUnit = canvas.dimensions.size / canvas.dimensions.distance;
       const radiusPx = l.radius * pixelsPerUnit;
-      const dimPx = l.dim * pixelsPerUnit;
+      const brightPx = l.bright * pixelsPerUnit;
       
       this.uniforms.lightConfig.value[i4] = radiusPx;
-      this.uniforms.lightConfig.value[i4 + 1] = dimPx;
+      this.uniforms.lightConfig.value[i4 + 1] = brightPx;
       this.uniforms.lightConfig.value[i4 + 2] = l.attenuation;
       this.uniforms.lightConfig.value[i4 + 3] = 0;
     }
   }
 
   update(timeInfo) {
+    // If the effect is disabled, hide (or eventually dispose) the overlay mesh
+    // but keep the light data around so a later re-enable is cheap.
     if (!this.enabled) {
       if (this.lightingMesh) this.lightingMesh.visible = false;
       return;
     }
-    if (this.lightingMesh) this.lightingMesh.visible = true;
-    
+
+    if (this.lightingMesh) {
+      this.lightingMesh.visible = true;
+    }
+
     if (this.uniforms) {
-      const p = this.params;
-      this.uniforms.globalIntensity.value = p.globalIntensity;
-      this.uniforms.ambientColor.value.setRGB(p.ambientColor.r, p.ambientColor.g, p.ambientColor.b);
-      // Drive darkness from Foundry scene environment if available
+      const u = this.uniforms;
+      const p = this.params || {};
+
+      // Clamp UI/scene-driven parameters into a conservative range so Three.js
+      // lighting stays in line with Foundry's native look even if older
+      // scenes have very bright saved values.
+      const rawGI = (typeof p.globalIntensity === 'number') ? p.globalIntensity : 0.8;
+      const clampedGI = Math.max(0.1, Math.min(rawGI, 0.9));
+      u.globalIntensity.value = clampedGI;
+
+      const ac = p.ambientColor || { r: 0.02, g: 0.02, b: 0.02 };
+      const ar = Math.max(0.0, Math.min(ac.r ?? 0.02, 0.06));
+      const ag = Math.max(0.0, Math.min(ac.g ?? 0.02, 0.06));
+      const ab = Math.max(0.0, Math.min(ac.b ?? 0.02, 0.06));
+      u.ambientColor.value.setRGB(ar, ag, ab);
+
+      // Sync Advanced Controls
+      if (typeof p.darknessBoost === 'number') u.uDarknessBoost.value = p.darknessBoost;
+      if (typeof p.ambientMix === 'number') u.uAmbientMix.value = p.ambientMix;
+      if (typeof p.lightSaturation === 'number') u.uLightSaturation.value = p.lightSaturation;
+      if (typeof p.contrast === 'number') u.uContrast.value = p.contrast;
+      if (typeof p.correction === 'number') u.uCorrection.value = p.correction;
+      if (typeof p.coreBoost === 'number') u.uCoreBoost.value = p.coreBoost;
+      if (typeof p.falloffSoftness === 'number') u.uFalloffSoftness.value = p.falloffSoftness;
+
+      // Drive darkness and ambient environment colors from Foundry's canvas
+      // when available so lighting tracks the same environment used by PIXI.
       try {
-        if (typeof canvas !== 'undefined' && canvas?.scene?.environment?.darknessLevel !== undefined) {
-          this.uniforms.uDarknessLevel.value = canvas.scene.environment.darknessLevel;
+        const scene = canvas?.scene;
+        const env = canvas?.environment;
+        if (scene?.environment?.darknessLevel !== undefined) {
+          u.uDarknessLevel.value = scene.environment.darknessLevel;
+        }
+
+        const colors = env?.colors;
+        if (colors) {
+          const applyColor = (src, targetColor) => {
+            if (!src || !targetColor) return;
+            let r = 1, g = 1, b = 1;
+            try {
+              if (Array.isArray(src)) {
+                r = src[0] ?? 1; g = src[1] ?? 1; b = src[2] ?? 1;
+              } else if (typeof src.r === 'number' && typeof src.g === 'number' && typeof src.b === 'number') {
+                r = src.r; g = src.g; b = src.b;
+              } else if (typeof src.toArray === 'function') {
+                const arr = src.toArray();
+                r = arr[0] ?? 1; g = arr[1] ?? 1; b = arr[2] ?? 1;
+              }
+            } catch (e) {
+              // Keep defaults on failure.
+            }
+            targetColor.setRGB(r, g, b);
+          };
+
+          applyColor(colors.ambientDaylight,  u.uAmbientDaylight.value);
+          applyColor(colors.ambientDarkness,  u.uAmbientDarkness.value);
+          applyColor(colors.ambientBrightest, u.uAmbientBrightest.value);
         }
       } catch (e) {
-        // If canvas is not ready or throws, keep previous value
+        // If canvas or environment are not ready, keep previous values.
       }
-    }
-  }
-
-  dispose() {
-    Hooks.off('createAmbientLight', this.hookIdCreate);
-    Hooks.off('updateAmbientLight', this.hookIdUpdate);
-    Hooks.off('deleteAmbientLight', this.hookIdDelete);
-    
-    if (this.lightingMesh) {
-      this.scene.remove(this.lightingMesh);
-      this.lightingMesh.geometry.dispose();
-      this.lightingMesh.material.dispose();
     }
   }
 }

@@ -44,28 +44,28 @@ export class PrismEffect extends EffectBase {
       hasPrismMask: false,
 
       // Refraction
-      intensity: 0.2,           // Distortion strength
-      spread: 0.10,             // Chromatic aberration spread (RGB split)
+      intensity: 0.3,           // Distortion strength
+      spread: 0.5,              // Chromatic aberration spread (RGB split)
       
       // Facets (Crystal structure)
-      facetScale: 1000.0,       // Size of the crystal facets
+      facetScale: 254.0,        // Size of the crystal facets
       facetAnimate: true,       // Whether facets move/rotate
-      facetSpeed: 2.0,          // Speed of animation
-      facetSoftness: 0.53,      // 0 = sharp facets, 1 = soft lumpy glass
+      facetSpeed: 1.01,         // Speed of animation
+      facetSoftness: 0.85,      // 0 = sharp facets, 1 = soft lumpy glass
       
       // Appearance
-      brightness: 2.0,          // Boost brightness of refracted light
-      opacity: 0.7,             // Opacity of the overlay
+      brightness: 1.5,          // Boost brightness of refracted light
+      opacity: 0.5,             // Opacity of the overlay
 
       // Mask shaping
-      maskThreshold: 0.8,       // Only apply effect on brightest parts of mask
+      maskThreshold: 0.9,       // Only apply effect on brightest parts of mask
 
       // Camera parallax
-      parallaxStrength: 3.35,   // How strongly camera panning affects facets
+      parallaxStrength: 2.4,    // How strongly camera panning affects facets
       
       // Glint (Sparkle)
-      glintStrength: 0.3,
-      glintThreshold: 1.0       // Only sparkle on sharpest angles
+      glintStrength: 0.45,
+      glintThreshold: 0.13      // Only sparkle on sharpest angles
     };
   }
 
@@ -137,15 +137,15 @@ export class PrismEffect extends EffectBase {
           min: 0,
           max: 5.0,
           step: 0.1,
-          default: 0.2
+          default: 0.3
         },
         spread: {
           type: 'slider',
           label: 'Spectral Spread',
           min: 0.0,
-          max: 0.1,
-          step: 0.001,
-          default: 0.10
+          max: 1.0,
+          step: 0.1,
+          default: 0.5
         },
         brightness: {
           type: 'slider',
@@ -153,7 +153,7 @@ export class PrismEffect extends EffectBase {
           min: 0.5,
           max: 3.0,
           step: 0.1,
-          default: 2.0
+          default: 1.5
         },
         opacity: {
           type: 'slider',
@@ -161,7 +161,7 @@ export class PrismEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.05,
-          default: 0.7
+          default: 0.5
         },
         maskThreshold: {
           type: 'slider',
@@ -169,7 +169,7 @@ export class PrismEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.8
+          default: 0.9
         },
         facetScale: {
           type: 'slider',
@@ -177,7 +177,7 @@ export class PrismEffect extends EffectBase {
           min: 1.0,
           max: 1000.0,
           step: 1.0,
-          default: 1000.0
+          default: 254.0
         },
         facetAnimate: {
           type: 'boolean',
@@ -190,7 +190,7 @@ export class PrismEffect extends EffectBase {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 2.0
+          default: 1.01
         },
         facetSoftness: {
           type: 'slider',
@@ -198,7 +198,7 @@ export class PrismEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.53
+          default: 0.85
         },
         parallaxStrength: {
           type: 'slider',
@@ -206,7 +206,7 @@ export class PrismEffect extends EffectBase {
           min: 0.0,
           max: 5.0,
           step: 0.05,
-          default: 3.35
+          default: 2.4
         },
         glintStrength: {
           type: 'slider',
@@ -214,7 +214,7 @@ export class PrismEffect extends EffectBase {
           min: 0.0,
           max: 2.0,
           step: 0.05,
-          default: 0.3
+          default: 0.45
         },
         glintThreshold: {
           type: 'slider',
@@ -222,7 +222,7 @@ export class PrismEffect extends EffectBase {
           min: 0.0,
           max: 0.99,
           step: 0.01,
-          default: 1.0
+          default: 0.13
         }
       }
     };

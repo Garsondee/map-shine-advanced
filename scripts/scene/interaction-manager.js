@@ -1169,9 +1169,12 @@ export class InteractionManager {
           // We want to maintain the offset from the grab point to the object center
           let x = worldPos.x + this.dragState.offset.x;
           let y = worldPos.y + this.dragState.offset.y;
+
+          // For light icon drags, we do NOT snap to grid; they should move freely.
+          const isLightDrag = this.lightIconManager && this.lightIconManager.lights && this.lightIconManager.lights.has(this.dragState.leaderId);
           
-          // Snap to grid logic if Shift is NOT held
-          if (!event.shiftKey) {
+          // Snap to grid logic if Shift is NOT held and this is NOT a light drag
+          if (!event.shiftKey && !isLightDrag) {
             const foundryPos = Coordinates.toFoundry(x, y);
             const snapped = this.snapToGrid(foundryPos.x, foundryPos.y);
             const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);

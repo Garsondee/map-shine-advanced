@@ -167,7 +167,11 @@ export class LightIconManager {
     if (changes.x !== undefined || changes.y !== undefined) {
       const x = changes.x ?? doc.x;
       const y = changes.y ?? doc.y;
-      sprite.position.set(x, y, sprite.position.z);
+
+      // Convert Foundry coordinates (top-left origin, pixels) into Three.js
+      // world space so the icon stays aligned with the ambient light.
+      const worldPos = Coordinates.toWorld(x, y);
+      sprite.position.set(worldPos.x, worldPos.y, sprite.position.z);
     }
 
     // No icon/color change for now; that could be extended later

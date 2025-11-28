@@ -1505,27 +1505,29 @@ function updateInputMode() {
       'TilesLayer'
     ];
     
-    const isEditMode = editLayers.some(l => activeLayer === l);
-    
-    // Drive Three.js wall line visibility based on the *final* active layer
-    // after Foundry has finished switching tools. We defer to the next tick
-    // to avoid reading a stale activeLayer during control changes.
-    if (wallManager && wallManager.setVisibility) {
-      setTimeout(() => {
-        if (!canvas?.ready) return;
-        const finalLayer = canvas.activeLayer?.name;
+    // Drive Three.js wall line visibility and PIXI input routing based on the
+    // *final* active layer after Foundry has finished switching tools.
+    // We defer to the next tick to avoid reading a stale activeLayer during
+    // control changes.
+    setTimeout(() => {
+      if (!canvas?.ready || isMapMakerMode) return;
+
+      const finalLayer = canvas.activeLayer?.name;
+      const isEditMode = editLayers.some(l => finalLayer === l);
+
+      if (wallManager && wallManager.setVisibility) {
         const showThreeWalls = finalLayer === 'WallsLayer' && !isMapMakerMode;
         wallManager.setVisibility(showThreeWalls);
-      }, 0);
-    }
-    
-    if (isEditMode) {
-      pixiCanvas.style.pointerEvents = 'auto';
-      log.debug(`Input Mode: PIXI (Edit: ${activeLayer})`);
-    } else {
-      pixiCanvas.style.pointerEvents = 'none'; // Pass through to Three.js
-      log.debug(`Input Mode: THREE.js (Gameplay: ${activeLayer})`);
-    }
+      }
+
+      if (isEditMode) {
+        pixiCanvas.style.pointerEvents = 'auto';
+        log.debug(`Input Mode: PIXI (Edit: ${finalLayer})`);
+      } else {
+        pixiCanvas.style.pointerEvents = 'none'; // Pass through to Three.js
+        log.debug(`Input Mode: THREE.js (Gameplay: ${finalLayer})`);
+      }
+    }, 0);
 }
 
 /**

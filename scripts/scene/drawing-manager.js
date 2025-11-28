@@ -111,20 +111,42 @@ export class DrawingManager {
     try {
         // Basic implementation: Render text if it has text, otherwise render a box
         const group = new THREE.Group();
-        group.position.set(doc.x, doc.y, 0);
-        
-        // 1. Text Rendering
-        if (doc.text) {
-            this.createText(doc, group);
-        }
-        
-        // 2. Shape Rendering (Simple Outline)
-        this.createShape(doc, group);
-        
-        // Apply rotation
+
+        // Use Drawing shape dimensions for placement, matching Foundry
+        const shape = doc.shape || {};
+        const width = shape.width || doc.width || 0;
+        const height = shape.height || doc.height || 0;
+
+        // Center of the drawing in Foundry coordinates (top-left origin, Y-down)
+        const centerX = doc.x + width / 2;
+        const centerY = doc.y + height / 2;
+
+        // Convert to THREE world coordinates (Y-up) using scene height
+        const sceneHeight = canvas.dimensions?.height || 10000;
+        const worldY = sceneHeight - centerY;
+
+        // Position the group at the world-space center. Z is inherited from parent group
+        group.position.set(centerX, worldY, 0);
+
+        // Apply rotation around the center. Foundry rotates clockwise in screen-space;
+        // we negate here to account for Y-up vs Y-down.
         if (doc.rotation) {
             group.rotation.z = THREE.MathUtils.degToRad(-doc.rotation);
         }
+
+        // 1. Text Rendering (centered in the drawing box)
+        if (doc.text && (doc.fontSize || 0) > 0) {
+            this.createText(doc, group, width, height);
+        }
+        
+        // 2. Shape Rendering (Simple Outline)
+        this.createShape(doc, group, width, height);
+
+        // Visibility rules: mimic Foundry isVisible behavior
+        const isGM = game.user?.isGM;
+        const isAuthor = doc.isAuthor;
+        const hidden = doc.hidden;
+        group.visible = !hidden || isAuthor || isGM;
 
         this.group.add(group);
         this.drawings.set(doc.id, group);
@@ -139,8 +161,10 @@ export class DrawingManager {
    * Render text using CanvasTexture
    * @param {DrawingDocument} doc 
    * @param {THREE.Group} group 
+   * @param {number} width - Drawing box width
+   * @param {number} height - Drawing box height
    */
-  createText(doc, group) {
+  createText(doc, group, width, height) {
     // Create canvas for text
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
@@ -148,29 +172,38 @@ export class DrawingManager {
     const fontSize = doc.fontSize || 48;
     const fontFamily = doc.fontFamily || 'Arial';
     const color = doc.textColor || '#FFFFFF';
+    const textAlpha = doc.textAlpha != null ? doc.textAlpha : 1.0;
     
-    // Estimate size (can be improved)
-    const width = doc.width || 200;
-    const height = doc.height || 100;
-    
-    canvas.width = width;
-    canvas.height = height;
+    // Use the drawing box size for the text canvas so it matches Foundry's layout
+    const canvasWidth = Math.max(Math.floor(width), 1);
+    const canvasHeight = Math.max(Math.floor(height), 1);
+
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
     
     ctx.font = `${fontSize}px ${fontFamily}`;
     ctx.fillStyle = color;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     
-    // Handle wrapping? For now just center
-    ctx.fillText(doc.text, width / 2, height / 2);
+    // Basic implementation: single-line centered text
+    ctx.fillText(doc.text, canvasWidth / 2, canvasHeight / 2);
     
     const texture = new THREE.CanvasTexture(canvas);
-    const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+
+    const material = new THREE.SpriteMaterial({ 
+      map: texture, 
+      transparent: true,
+      opacity: textAlpha,
+      depthTest: false // Keep text readable above shapes
+    });
     const sprite = new THREE.Sprite(material);
     
+    // Scale sprite to match the drawing box, centered at group origin
     sprite.scale.set(width, height, 1);
-    // Center in the drawing box
-    sprite.position.set(width / 2, height / 2, 0);
+    sprite.position.set(0, 0, 0);
     
     group.add(sprite);
   }
@@ -179,10 +212,10 @@ export class DrawingManager {
    * Render shape outline
    * @param {DrawingDocument} doc 
    * @param {THREE.Group} group 
+   * @param {number} width - Drawing box width
+   * @param {number} height - Drawing box height
    */
-  createShape(doc, group) {
-    const width = doc.width || 100;
-    const height = doc.height || 100;
+  createShape(doc, group, width, height) {
     const color = doc.strokeColor || 0xFFFFFF;
     const thickness = doc.strokeWidth || 2;
     
@@ -193,8 +226,9 @@ export class DrawingManager {
     const material = new THREE.LineBasicMaterial({ color: new THREE.Color(color) });
     const line = new THREE.LineSegments(geometry, material);
     
-    // Pivot is top-left in Foundry, Center in PlaneGeometry
-    line.position.set(width / 2, height / 2, 0);
+    // Geometry is already centered; place it at the group origin so it
+    // aligns with the text sprite and rotates around the drawing center.
+    line.position.set(0, 0, 0);
     
     group.add(line);
   }

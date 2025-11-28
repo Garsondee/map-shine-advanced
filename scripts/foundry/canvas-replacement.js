@@ -450,7 +450,7 @@ async function createThreeCanvas(scene) {
     log.info('Light icon manager initialized');
 
     // Step 5: Initialize interaction manager (Selection, Drag/Drop)
-    interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager, wallManager);
+    interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager, wallManager, lightIconManager);
     interactionManager.initialize();
     effectComposer.addUpdatable(interactionManager); // Register for updates (HUD positioning)
     log.info('Interaction manager initialized');
@@ -1429,11 +1429,13 @@ function updateLayerVisibility() {
       canvas.regions.visible = (activeLayer === 'RegionLayer');
   }
 
-  // Drive Three.js light icon visibility to mirror Lighting layer tool usage,
-  // but only in Gameplay mode. In Map Maker mode, the entire Three.js canvas
-  // is hidden so this is effectively redundant but kept for logical clarity.
+  // Drive Three.js light icon visibility from a single source of truth.
+  // In Gameplay mode (Three.js active), we always show light icons so they are
+  // available for selection and manipulation regardless of the specific tool.
+  // In Map Maker mode, the entire Three.js canvas is hidden, so we also hide
+  // the icons here for logical consistency.
   if (lightIconManager && lightIconManager.setVisibility) {
-      const showIcons = activeLayer === 'LightingLayer' && !isMapMakerMode;
+      const showIcons = !isMapMakerMode;
       lightIconManager.setVisibility(showIcons);
   }
 }

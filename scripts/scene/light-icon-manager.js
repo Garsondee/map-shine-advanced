@@ -49,7 +49,6 @@ export class LightIconManager {
 
     this.setupHooks();
     this.syncAllLights();
-    this.updateVisibility();
 
     this.initialized = true;
     log.info('LightIconManager initialized');
@@ -69,11 +68,7 @@ export class LightIconManager {
     // Resync on canvas ready (scene change)
     Hooks.on('canvasReady', () => {
       this.syncAllLights();
-      this.updateVisibility();
     });
-
-    // Update visibility whenever scene controls re-render (tool/layer changes)
-    Hooks.on('renderSceneControls', () => this.updateVisibility());
 
     this.hooksRegistered = true;
   }
@@ -93,11 +88,10 @@ export class LightIconManager {
    * @private
    */
   updateVisibility() {
-    // Show icons only when the Lighting layer is active so that ambient light
-    // handles behave like core Foundry light controls.
-    const activeLayer = canvas.activeLayer?.name;
-    const isLightingLayerActive = activeLayer === 'LightingLayer';
-    this.setVisibility(isLightingLayerActive);
+    // Deprecated: Visibility is now driven centrally by canvas-replacement.js
+    // via lightIconManager.setVisibility(showIcons) inside updateLayerVisibility().
+    // This method is kept for backward compatibility but no longer reads
+    // canvas.activeLayer directly to avoid timing issues during tool switches.
   }
 
   /**

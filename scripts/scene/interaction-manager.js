@@ -19,13 +19,15 @@ export class InteractionManager {
    * @param {TokenManager} tokenManager - For accessing token sprites
    * @param {TileManager} tileManager - For accessing tile sprites
    * @param {WallManager} wallManager - For creating/managing walls
+   * @param {LightIconManager} [lightIconManager] - For accessing light icons
    */
-  constructor(canvasElement, sceneComposer, tokenManager, tileManager, wallManager) {
+  constructor(canvasElement, sceneComposer, tokenManager, tileManager, wallManager, lightIconManager = null) {
     this.canvasElement = canvasElement;
     this.sceneComposer = sceneComposer;
     this.tokenManager = tokenManager;
     this.tileManager = tileManager;
     this.wallManager = wallManager;
+    this.lightIconManager = lightIconManager;
 
     this.raycaster = new THREE.Raycaster();
     this.mouse = new THREE.Vector2();
@@ -174,14 +176,61 @@ export class InteractionManager {
     // Z-index just above ground/floor but below tokens
     this.lightPlacement.previewGroup.position.z = 5;
 
-    // Fill (Yellow semi-transparent)
+    // Fill (Shader-based "Light Look")
     const geometry = new THREE.CircleGeometry(1, 64);
-    const material = new THREE.MeshBasicMaterial({
-      color: 0xFFFFBB,
+    
+    // Shader adapted from LightMesh.js but for Unit Circle (Radius 1)
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        uColor: { value: new THREE.Color(1.0, 1.0, 0.8) }, // Warm light default
+        uRatio: { value: 0.5 } // bright/dim ratio
+      },
+      vertexShader: `
+        varying vec2 vLocalPos;
+        void main() {
+          vLocalPos = position.xy;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        varying vec2 vLocalPos;
+        uniform vec3 uColor;
+        uniform float uRatio;
+
+        void main() {
+          float dist = length(vLocalPos);
+          if (dist >= 1.0) discard;
+
+          // Falloff Logic
+          float dOuter = dist;
+          float innerFrac = clamp(uRatio, 0.0, 0.99);
+
+          float coreRegion = 1.0 - smoothstep(0.0, innerFrac, dOuter);
+          float haloRegion = 1.0 - smoothstep(innerFrac, 1.0, dOuter);
+
+          // Bright core, soft halo
+          float coreIntensity = pow(coreRegion, 1.2) * 2.0;
+          float haloIntensity = pow(haloRegion, 1.0) * 0.6; 
+
+          float intensity = (coreIntensity + haloIntensity) * 2.0;
+          
+          // Output with additive-friendly alpha
+          gl_FragColor = vec4(uColor * intensity, intensity); 
+        }
+      `,
       transparent: true,
-      opacity: 0.2,
-      depthTest: false
+      depthWrite: false,
+      depthTest: false,
+      // Use CustomBlending to match LightingEffect's "Modulate & Add" formula:
+      // Final = Dst + (Dst * Src)
+      // This ensures the preview looks correct on dark backgrounds instead of washing them out.
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.DstColorFactor,
+      blendDst: THREE.OneFactor,
+      side: THREE.DoubleSide
     });
+
     this.lightPlacement.previewFill = new THREE.Mesh(geometry, material);
     this.lightPlacement.previewGroup.add(this.lightPlacement.previewFill);
 
@@ -209,25 +258,44 @@ export class InteractionManager {
     this.dragState.previews.clear();
     
     for (const id of this.selection) {
-      const data = this.tokenManager.tokenSprites.get(id);
-      if (!data || !data.sprite) continue;
-      
-      const original = data.sprite;
-      const preview = original.clone();
-      
-      // Clone material to modify opacity without affecting original
-      if (original.material) {
-        preview.material = original.material.clone();
-        preview.material.opacity = 0.5;
-        preview.material.transparent = true;
+      // Check Token
+      const tokenData = this.tokenManager.tokenSprites.get(id);
+      if (tokenData && tokenData.sprite) {
+        const original = tokenData.sprite;
+        const preview = original.clone();
+        
+        if (original.material) {
+          preview.material = original.material.clone();
+          preview.material.opacity = 0.5;
+          preview.material.transparent = true;
+        }
+        
+        if (this.sceneComposer.scene) {
+          this.sceneComposer.scene.add(preview);
+        }
+        
+        this.dragState.previews.set(id, preview);
+        continue;
       }
-      
-      // Add to scene
-      if (this.sceneComposer.scene) {
-        this.sceneComposer.scene.add(preview);
+
+      // Check Light
+      if (this.lightIconManager && this.lightIconManager.lights.has(id)) {
+          const original = this.lightIconManager.lights.get(id);
+          const preview = original.clone();
+
+          if (original.material) {
+              preview.material = original.material.clone();
+              preview.material.opacity = 0.5;
+              preview.material.transparent = true;
+          }
+
+          if (this.sceneComposer.scene) {
+              this.sceneComposer.scene.add(preview);
+          }
+
+          this.dragState.previews.set(id, preview);
+          continue;
       }
-      
-      this.dragState.previews.set(id, preview);
     }
   }
 
@@ -259,6 +327,27 @@ export class InteractionManager {
         this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
 
         // 1. Check Walls
+        // ... existing wall code ...
+
+        // 1.5 Check Lights (Lighting Layer)
+        if (canvas.activeLayer?.name === 'LightingLayer' && this.lightIconManager) {
+            const lightIcons = Array.from(this.lightIconManager.lights.values());
+            const intersects = this.raycaster.intersectObjects(lightIcons, false);
+            if (intersects.length > 0) {
+                const hit = intersects[0];
+                const sprite = hit.object;
+                const lightId = sprite.userData.lightId;
+                const light = canvas.lighting.get(lightId);
+                
+                if (light && light.document.testUserPermission(game.user, "LIMITED")) {
+                    log.info(`Opening config for light ${lightId}`);
+                    light.sheet.render(true);
+                    return;
+                }
+            }
+        }
+
+        // 2. Check Tokens
         const wallGroup = this.wallManager.wallGroup;
         this.raycaster.params.Line.threshold = 10; // Tolerance
         const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
@@ -308,6 +397,50 @@ export class InteractionManager {
     } catch (error) {
         log.error('Error in onDoubleClick:', error);
     }
+  }
+
+  /**
+   * Helper to start drag operation
+   * @param {THREE.Object3D} targetObject 
+   * @param {THREE.Vector3} hitPoint 
+   */
+  startDrag(targetObject, hitPoint) {
+      let id;
+      if (targetObject.userData.tokenDoc) {
+          id = targetObject.userData.tokenDoc.id;
+      } else if (targetObject.userData.lightId) {
+          id = targetObject.userData.lightId;
+      } else {
+          return;
+      }
+
+      this.dragState.active = true;
+      this.dragState.mode = null;
+      this.dragState.leaderId = id;
+      
+      // Create Previews
+      this.createDragPreviews();
+      
+      const leaderPreview = this.dragState.previews.get(id);
+      if (!leaderPreview) {
+        log.error("Failed to create leader preview");
+        this.dragState.active = false;
+        return;
+      }
+      
+      this.dragState.object = leaderPreview;
+      this.dragState.startPos.copy(leaderPreview.position);
+      this.dragState.offset.subVectors(leaderPreview.position, hitPoint); 
+      this.dragState.hasMoved = false;
+      
+      this.dragState.initialPositions.clear();
+      for (const [pid, preview] of this.dragState.previews) {
+        this.dragState.initialPositions.set(pid, preview.position.clone());
+      }
+      
+      if (window.MapShine?.cameraController) {
+        window.MapShine.cameraController.enabled = false;
+      }
   }
 
   /**
@@ -472,6 +605,38 @@ export class InteractionManager {
         // place AmbientLight documents directly from the 3D view without swapping modes.
         const isLightingLayer = activeLayer === 'LightingLayer';
         if (isLightingLayer) {
+          // 2.5a Check for Existing Lights (Select/Drag)
+          // Prioritize interacting with existing lights over placing new ones
+          if (this.lightIconManager) {
+             const lightIcons = Array.from(this.lightIconManager.lights.values());
+             const intersects = this.raycaster.intersectObjects(lightIcons, false);
+             
+             if (intersects.length > 0) {
+                 const hit = intersects[0];
+                 const sprite = hit.object;
+                 const lightId = sprite.userData.lightId;
+                 const lightDoc = canvas.lighting.get(lightId)?.document;
+
+                 if (lightDoc && lightDoc.canUserModify(game.user, "update")) {
+                     // Handle Selection
+                     const isSelected = this.selection.has(lightId);
+                     if (event.shiftKey) {
+                         if (!isSelected) this.selectObject(sprite);
+                     } else {
+                         if (!isSelected) {
+                             this.clearSelection();
+                             this.selectObject(sprite);
+                         }
+                     }
+
+                     // Start Drag
+                     this.startDrag(sprite, hit.point);
+                     return;
+                 }
+             }
+          }
+
+          // 2.5b Place New Light
           // Only GM may place lights for now, matching Foundry's default behavior
           if (!game.user.isGM) {
             ui.notifications.warn('Only the GM can place lights in this mode.');
@@ -551,37 +716,8 @@ export class InteractionManager {
           }
 
           // Start Drag
-          this.dragState.active = true;
-          this.dragState.mode = null; // Ensure no leftover mode from other interactions
-          this.dragState.leaderId = tokenDoc.id;
+          this.startDrag(sprite, hit.point);
           
-          // Create Previews
-          this.createDragPreviews();
-          
-          // Set leader object to the PREVIEW of the clicked token
-          const leaderPreview = this.dragState.previews.get(tokenDoc.id);
-          if (!leaderPreview) {
-            log.error("Failed to create leader preview");
-            this.dragState.active = false;
-            return;
-          }
-          
-          this.dragState.object = leaderPreview;
-          this.dragState.startPos.copy(leaderPreview.position);
-          this.dragState.offset.subVectors(leaderPreview.position, hit.point); // Offset from hit point to center
-          this.dragState.hasMoved = false;
-          
-          // Capture initial positions of PREVIEWS
-          this.dragState.initialPositions.clear();
-          for (const [id, preview] of this.dragState.previews) {
-            this.dragState.initialPositions.set(id, preview.position.clone());
-          }
-          
-          // Disable camera controls if dragging
-          if (window.MapShine?.cameraController) {
-            window.MapShine.cameraController.enabled = false;
-          }
-
         } else {
           // Clicked empty space - deselect all unless shift held
           if (!event.shiftKey) {
@@ -1441,114 +1577,98 @@ export class InteractionManager {
         }
 
         if (this.dragState.hasMoved && this.dragState.object) {
-          // Commit change to Foundry for ALL selected tokens
-          const updates = [];
+          // Commit change to Foundry for ALL selected objects
+          const tokenUpdates = [];
+          const lightUpdates = [];
           
           // Use selection set
           for (const id of this.selection) {
-            const data = this.tokenManager.tokenSprites.get(id);
             const preview = this.dragState.previews.get(id);
-            
-            if (!data || !preview) continue;
-            
-            const tokenDoc = data.tokenDoc;
-            
-            // Calculate final position from PREVIEW position
-            const worldPos = preview.position;
-            let foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
-            
-            // COLLISION CHECK: Ensure we don't drop through walls
-            const token = tokenDoc.object;
-            if (token) {
-                const origin = token.center;
-                // checkCollision returns PolygonVertex {x, y} or null
-                // We use mode: 'closest' to get the first impact
-                const collision = token.checkCollision(foundryPos, { mode: 'closest', type: 'move' });
+            if (!preview) continue;
+
+            // Check Token
+            const tokenData = this.tokenManager.tokenSprites.get(id);
+            if (tokenData) {
+                const tokenDoc = tokenData.tokenDoc;
                 
-                if (collision) {
-                    // Calculate vector from Origin to Collision
-                    const dx = collision.x - origin.x;
-                    const dy = collision.y - origin.y;
-                    const dist = Math.sqrt(dx*dx + dy*dy);
-                    
-                    // Back off slightly from the wall to find the "nearest complete grid space"
-                    // If we are right at the wall, we want the cell *before* the wall.
-                    if (dist > 0) {
-                         const backDist = 2; // px
-                         const scale = Math.max(0, dist - backDist) / dist;
-                         
-                         const backX = origin.x + dx * scale;
-                         const backY = origin.y + dy * scale;
-                         
-                         // Snap to Grid Center
-                         const snapped = canvas.grid.getSnappedPoint({x: backX, y: backY}, {
-                             mode: CONST.GRID_SNAPPING_MODES.CENTER
-                         });
-                         
-                         log.debug(`Collision detected at (${collision.x.toFixed(1)}, ${collision.y.toFixed(1)}). Snapped back to (${snapped.x}, ${snapped.y})`);
-                         
-                         // Update target position
-                         foundryPos = snapped;
+                // Calculate final position from PREVIEW position
+                const worldPos = preview.position;
+                let foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
+                
+                // COLLISION CHECK (Tokens Only)
+                // ... (Collision logic moved here or reused)
+                const token = tokenDoc.object;
+                if (token) {
+                    const origin = token.center;
+                    const collision = token.checkCollision(foundryPos, { mode: 'closest', type: 'move' });
+                    if (collision) {
+                        const dx = collision.x - origin.x;
+                        const dy = collision.y - origin.y;
+                        const dist = Math.sqrt(dx*dx + dy*dy);
+                        if (dist > 0) {
+                             const backDist = 2;
+                             const scale = Math.max(0, dist - backDist) / dist;
+                             const backX = origin.x + dx * scale;
+                             const backY = origin.y + dy * scale;
+                             const snapped = canvas.grid.getSnappedPoint({x: backX, y: backY}, {
+                                 mode: CONST.GRID_SNAPPING_MODES.CENTER
+                             });
+                             foundryPos = snapped;
+                        }
                     }
                 }
+
+                // Adjust for center vs top-left
+                const width = tokenDoc.width * canvas.grid.size;
+                const height = tokenDoc.height * canvas.grid.size;
+                const finalX = foundryPos.x - width / 2;
+                const finalY = foundryPos.y - height / 2;
+                
+                tokenUpdates.push({ _id: id, x: finalX, y: finalY });
+                continue;
             }
 
-            // Adjust for center vs top-left
-            const width = tokenDoc.width * canvas.grid.size;
-            const height = tokenDoc.height * canvas.grid.size;
-            
-            const finalX = foundryPos.x - width / 2;
-            const finalY = foundryPos.y - height / 2;
-            
-            log.debug(`Token ${tokenDoc.name} (${id}): World(${worldPos.x.toFixed(1)}, ${worldPos.y.toFixed(1)}) -> FoundryCenter(${foundryPos.x.toFixed(1)}, ${foundryPos.y.toFixed(1)}) -> TopLeft(${finalX.toFixed(1)}, ${finalY.toFixed(1)})`);
-
-            log.debug(`Final position calculation: World(${worldPos.x.toFixed(1)}, ${worldPos.y.toFixed(1)}) -> FoundryCenter(${foundryPos.x.toFixed(1)}, ${foundryPos.y.toFixed(1)}) -> TopLeft(${finalX.toFixed(1)}, ${finalY.toFixed(1)})`);
-
-            updates.push({
-              _id: id,
-              x: finalX,
-              y: finalY
-            });
-
-            // REMOVED OPTIMISTIC UPDATE: Rely on updateToken hook to trigger animation
-            // This ensures visual state matches server state and prevents animation lag/skipping
-            /*
-            if (data.sprite) {
-              data.sprite.position.copy(preview.position);
+            // Check Light
+            if (this.lightIconManager && this.lightIconManager.lights.has(id)) {
+                const worldPos = preview.position;
+                const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
+                
+                lightUpdates.push({ _id: id, x: foundryPos.x, y: foundryPos.y });
+                continue;
             }
-            */
           }
           
-          if (updates.length > 0) {
-            log.info(`Updating ${updates.length} tokens`, updates);
-            
-            // Reset drag state immediately
-            this.dragState.active = false;
-            this.dragState.object = null;
-            this.destroyDragPreviews();
-            
+          let anyUpdates = false;
+
+          if (tokenUpdates.length > 0) {
+            log.info(`Updating ${tokenUpdates.length} tokens`);
+            anyUpdates = true;
             try {
-              // CRITICAL: animate: true (default) to trigger smooth transition from old pos to new pos
-              // We removed animate: false here.
-              await canvas.scene.updateEmbeddedDocuments('Token', updates);
-              log.debug(`Tokens updated successfully`);
+              await canvas.scene.updateEmbeddedDocuments('Token', tokenUpdates);
             } catch (err) {
               log.error('Failed to update token positions', err);
-              // Revert sprite positions if update failed
-              // We need to restore from drag select start or initial positions?
-              // initialPositions map has the start coords.
-              for (const [id, initialPos] of this.dragState.initialPositions) {
-                 const data = this.tokenManager.tokenSprites.get(id);
-                 if (data && data.sprite) {
-                   data.sprite.position.copy(initialPos);
-                 }
-              }
             }
-          } else {
-            this.dragState.active = false;
-            this.dragState.object = null;
-            this.destroyDragPreviews();
           }
+
+          if (lightUpdates.length > 0) {
+              log.info(`Updating ${lightUpdates.length} lights`);
+              anyUpdates = true;
+              try {
+                  await canvas.scene.updateEmbeddedDocuments('AmbientLight', lightUpdates);
+              } catch (err) {
+                  log.error('Failed to update light positions', err);
+              }
+          }
+            
+          // Cleanup
+          this.dragState.active = false;
+          this.dragState.object = null;
+          this.destroyDragPreviews();
+          
+          // If updates failed, we might want to revert, but for now we just clear state.
+          // The previous code had revert logic, but it's complex with mixed types.
+          // We'll rely on the fact that without optimistic updates, they just snap back if not updated.
+
         } else {
             this.dragState.active = false;
             this.dragState.object = null;
@@ -1755,11 +1875,18 @@ export class InteractionManager {
    * @param {THREE.Sprite} sprite 
    */
   selectObject(sprite) {
-    const id = sprite.userData.tokenDoc.id;
+    let id;
+    if (sprite.userData.tokenDoc) {
+        id = sprite.userData.tokenDoc.id;
+        this.tokenManager.setTokenSelection(id, true);
+    } else if (sprite.userData.lightId) {
+        id = sprite.userData.lightId;
+        // TODO: Visual selection for lights
+        if (sprite.material) sprite.material.color.set(0x8888ff); // Tint blue
+    } else {
+        return;
+    }
     this.selection.add(id);
-    
-    // Update Visuals
-    this.tokenManager.setTokenSelection(id, true);
   }
 
   /**
@@ -1770,6 +1897,11 @@ export class InteractionManager {
       // Check Token
       if (this.tokenManager.tokenSprites.has(id)) {
           this.tokenManager.setTokenSelection(id, false);
+      }
+      // Check Light
+      if (this.lightIconManager && this.lightIconManager.lights.has(id)) {
+          const sprite = this.lightIconManager.lights.get(id);
+          if (sprite && sprite.material) sprite.material.color.set(0xffffff); // Reset tint
       }
       // Check Wall
       if (this.wallManager.walls.has(id)) {

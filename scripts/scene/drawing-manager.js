@@ -223,9 +223,93 @@ export class DrawingManager {
     const fillType = doc.fillType;
     const fillColor = doc.fillColor || 0x000000;
     const fillAlpha = doc.fillAlpha != null ? doc.fillAlpha : 0;
-    
-    // If no stroke, use fill color?
-    // For now just always draw a debug box if not text
+    const shape = doc.shape || {};
+    const type = shape.type;
+
+    // Polygon / Freehand style drawings: render a smoothed ribbon using quads
+    // along the path. Foundry stores both polygon and freehand points in
+    // shape.points; the exact type string can vary (e.g. 'p' vs 'f'), so we key
+    // off the presence of points and approximate Foundry's drawSmoothedPath
+    // behaviour using a CatmullRomCurve3.
+    if (Array.isArray(shape.points) && shape.points.length >= 4) {
+      const pts = shape.points;
+      const vertexCount = Math.floor(pts.length / 2);
+
+      /** @type {THREE.Vector3[]} */
+      const rawPoints = [];
+      for (let i = 0; i < vertexCount; i++) {
+        const px = pts[i * 2 + 0] ?? 0;
+        const py = pts[i * 2 + 1] ?? 0;
+
+        // Points are in local drawing-box coordinates, top-left origin, Y-down.
+        // Convert to local group space (centered, Y-up).
+        const localX = px - width / 2;
+        const localY = (height - py) - height / 2;
+        rawPoints.push(new THREE.Vector3(localX, localY, 0));
+      }
+
+      // Basic smoothing: use a Catmull-Rom spline with a density informed by
+      // the document's bezierFactor (if present). Foundry multiplies this by 2.
+      const bezierFactor = typeof doc.bezierFactor === 'number' ? doc.bezierFactor : 1;
+      const smoothSegments = Math.max(1, Math.floor(vertexCount * (bezierFactor * 2)));
+      let samplePoints = rawPoints;
+
+      if (rawPoints.length >= 2) {
+        const curve = new THREE.CatmullRomCurve3(rawPoints, false, 'catmullrom', 0.5);
+        samplePoints = curve.getPoints(smoothSegments);
+      }
+
+      const pathGroup = new THREE.Group();
+
+      // Determine if the path should be treated as closed. Foundry considers
+      // polygons closed when they have a fill or when the first and last
+      // points are equal.
+      let isClosed = false;
+      if (fillType) {
+        isClosed = true;
+      } else if (vertexCount >= 2) {
+        const fx = pts[0];
+        const fy = pts[1];
+        const lx = pts[(vertexCount - 1) * 2];
+        const ly = pts[(vertexCount - 1) * 2 + 1];
+        isClosed = (fx === lx) && (fy === ly);
+      }
+
+      const segCount = isClosed ? samplePoints.length : samplePoints.length - 1;
+
+      for (let i = 0; i < segCount; i++) {
+        const p0 = samplePoints[i];
+        const p1 = samplePoints[(i + 1) % samplePoints.length];
+
+        const dx = p1.x - p0.x;
+        const dy = p1.y - p0.y;
+        const length = Math.sqrt(dx * dx + dy * dy);
+        if (length <= 0.0001) continue;
+
+        const angle = Math.atan2(dy, dx);
+        const segGeom = new THREE.PlaneGeometry(length, thickness);
+        const segMat = new THREE.MeshBasicMaterial({
+          color: new THREE.Color(color),
+          transparent: strokeAlpha < 1.0,
+          opacity: strokeAlpha,
+          depthWrite: false,
+          depthTest: true,
+          side: THREE.DoubleSide
+        });
+
+        const segMesh = new THREE.Mesh(segGeom, segMat);
+        segMesh.position.set(
+          (p0.x + p1.x) / 2,
+          (p0.y + p1.y) / 2,
+          0
+        );
+        segMesh.rotation.z = angle;
+        pathGroup.add(segMesh);
+      }
+
+      group.add(pathGroup);
+      return;
+    }
 
     // Inset the rectangle by half the stroke width on each side, similar to
     // Foundry's use of lineWidth / 2 in _refreshShape.

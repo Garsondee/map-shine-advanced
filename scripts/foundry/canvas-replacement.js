@@ -429,7 +429,7 @@ async function createThreeCanvas(scene) {
     // Sync happens in initialize
     log.info('Wall manager initialized');
 
-    // Step 4d: Initialize drawing manager
+    // Step 4d: Initialize drawing manager (Three.js drawings)
     drawingManager = new DrawingManager(threeScene);
     drawingManager.initialize();
     log.info('Drawing manager initialized');
@@ -489,7 +489,7 @@ async function createThreeCanvas(scene) {
     mapShine.tokenManager = tokenManager; // NEW: Expose token manager for diagnostics
     mapShine.tileManager = tileManager; // NEW: Expose tile manager for diagnostics
     mapShine.wallManager = wallManager; // NEW: Expose wall manager
-    mapShine.drawingManager = drawingManager;
+    mapShine.drawingManager = drawingManager; // NEW: Expose drawing manager
     mapShine.noteManager = noteManager;
     mapShine.templateManager = templateManager;
     mapShine.lightIconManager = lightIconManager;
@@ -1367,6 +1367,9 @@ function updateLayerVisibility() {
   if (canvas.weather) canvas.weather.visible = false;
   if (canvas.environment) canvas.environment.visible = false; // V12+
 
+  // Drawings are NOT replaced; they should render via PIXI as an overlay.
+  if (canvas.drawings) canvas.drawings.visible = true;
+
   // 2. Dynamic Layers - Show only if using the corresponding tool
   const activeLayer = canvas.activeLayer?.name;
   
@@ -1413,7 +1416,7 @@ function updateLayerVisibility() {
   // For Lighting, we also drive the Three.js light icon manager visibility so that
   // light icons only show when the Lighting tool is active.
   const simpleLayers = [
-      'LightingLayer', 'SoundsLayer', 'TemplateLayer', 'DrawingsLayer', 'NotesLayer', 'RegionLayer'
+      'LightingLayer', 'SoundsLayer', 'TemplateLayer', 'NotesLayer', 'RegionLayer'
   ];
   
   simpleLayers.forEach(name => {

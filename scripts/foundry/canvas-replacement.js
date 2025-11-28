@@ -1490,9 +1490,13 @@ function updateInputMode() {
     // Wait, TokenManager syncs tokens. If we hide TokenLayer, we can't select tokens via PIXI.
     // InteractionManager handles 3D selection.
     
-    // So we ONLY need PIXI input if we are on a "Edit" layer.
+    // So we ONLY need PIXI input if we are on an "Edit" layer that still
+    // relies on Foundry's native PIXI interaction (sounds, templates, etc.).
+    // Wall editing is handled entirely in Three.js, so WallsLayer is
+    // intentionally *excluded* here. That way, while in wall placement mode
+    // the Three.js canvas continues to receive input and camera panning
+    // remains available.
     const editLayers = [
-      'WallsLayer',
       // NOTE: LightingLayer is intentionally *not* included here. In Gameplay
       // Mode we handle light placement directly in the Three.js interaction
       // system, so PIXI should not reclaim pointerEvents when the Lighting

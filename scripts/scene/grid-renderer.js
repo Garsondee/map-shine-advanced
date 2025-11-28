@@ -187,7 +187,8 @@ export class GridRenderer {
     const geometry = new THREE.PlaneGeometry(width, height);
     
     // Determine opacity
-    const opacity = this.settings.alphaOverride !== null ? this.settings.alphaOverride : canvas.grid.alpha;
+    const baseOpacity = this.settings.alphaOverride !== null ? this.settings.alphaOverride : canvas.grid.alpha;
+    const opacity = Math.pow(Math.max(0, Math.min(1, baseOpacity)), 2.2);
     
     const material = new THREE.MeshBasicMaterial({
       map: this.gridTexture,

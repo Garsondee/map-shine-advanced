@@ -90,7 +90,38 @@ class FireMaskShape {
     const outdoorFactor = weatherController.getRoofMaskIntensity(u, v);
     p._windSusceptibility = outdoorFactor;
 
-    // 4. Apply brightness-based modifiers. The particle system has already
+    // 4. Weather Guttering: Rain + Wind kills exposed fire
+    // "High wind speed plus high precipitation should mean the fire is almost out"
+    const weather = weatherController.getCurrentState();
+    const precip = weather.precipitation || 0;
+    const wind = weather.windSpeed || 0;
+    
+    // Only affect particles that are somewhat outdoors and weather is bad
+    if (outdoorFactor > 0.01 && (precip > 0.05 || wind > 0.1)) {
+        // Calculate weather stress (0.0 = None, 1.0+ = Heavy)
+        // We weigh precipitation heavily (0.8) and wind moderately (0.4)
+        // Halved overall intensity so the additional guttering is less aggressive
+        const weatherStress = 0.5 * (precip * 0.8 + wind * 0.4) * outdoorFactor;
+        
+        // Survival factor: 1.0 (Healthy) -> 0.1 (Dying)
+        const survival = Math.max(0.1, 1.0 - weatherStress);
+        
+        if (typeof p.life === 'number') {
+            p.life *= survival;
+        }
+        
+        // Dying flames are smaller
+        if (typeof p.size === 'number') {
+            p.size *= (0.6 + 0.4 * survival);
+        }
+        
+        // Dying flames are more transparent (fizzle out)
+        if (p.color && typeof p.color.w === 'number') {
+            p.color.w *= (0.5 + 0.5 * survival);
+        }
+    }
+
+    // 5. Apply brightness-based modifiers. The particle system has already
     // assigned random life/size/opacity; we now scale them by mask luminance.
 
     // Lifetime: Darker pixels die faster.

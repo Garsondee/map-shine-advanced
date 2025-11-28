@@ -67,6 +67,15 @@ export class WeatherController {
     this.variability = 0.2; // Default variability
     this.noiseOffset = 0;
 
+    // Wind Gust System
+    this.gustWaitMin = 5.0;   // Seconds to wait between gusts (min)
+    this.gustWaitMax = 15.0;  // Seconds to wait between gusts (max)
+    this.gustDuration = 3.0;  // Duration of a gust
+    this.gustTimer = 0;       // Countdown timer
+    this.isGusting = false;   // Current state
+    this.currentGustStrength = 0; // Smoothed gust value
+    this.gustStrength = 1.0;      // Multiplier for how strong gusts are compared to base wind
+
     // Time of Day (0-24)
     this.timeOfDay = 12.0; // Noon
 
@@ -179,6 +188,84 @@ export class WeatherController {
   setRoofMap(texture) {
     this.roofMap = texture;
     log.info('Roof Map set from _Outdoors texture');
+    
+    if (texture && texture.image) {
+      this._extractRoofMaskData(texture.image);
+    } else {
+      this.roofMaskData = null;
+      this.roofMaskSize = { width: 0, height: 0 };
+    }
+  }
+
+  /**
+   * Extract pixel data from the roof mask texture for CPU-side lookup.
+   * @param {HTMLImageElement|HTMLCanvasElement} image 
+   * @private
+   */
+  _extractRoofMaskData(image) {
+    try {
+      const canvas = document.createElement('canvas');
+      // Downscale slightly for performance if huge? No, keep simple for now.
+      // But limit max resolution to avoid massive memory usage if the map is huge.
+      // 1024x1024 is plenty for this lookup.
+      let w = image.width;
+      let h = image.height;
+      const maxDim = 1024;
+      if (w > maxDim || h > maxDim) {
+        const scale = maxDim / Math.max(w, h);
+        w = Math.floor(w * scale);
+        h = Math.floor(h * scale);
+      }
+      
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(image, 0, 0, w, h);
+      
+      // We only need the Red channel (luminance)
+      const imageData = ctx.getImageData(0, 0, w, h);
+      const pixels = imageData.data; // RGBA
+      
+      // Store compact: 1 byte per pixel
+      this.roofMaskData = new Uint8Array(w * h);
+      for (let i = 0; i < w * h; i++) {
+        // Red channel is every 4th byte
+        this.roofMaskData[i] = pixels[i * 4];
+      }
+      
+      this.roofMaskSize = { width: w, height: h };
+      log.info(`Roof mask data extracted: ${w}x${h}`);
+      
+    } catch (e) {
+      log.warn('Failed to extract roof mask data:', e);
+      this.roofMaskData = null;
+    }
+  }
+
+  /**
+   * Check if a specific UV coordinate is considered "Outdoors".
+   * @param {number} u - Normalized X (0-1)
+   * @param {number} v - Normalized Y (0-1)
+   * @returns {number} 0.0 (Indoors) to 1.0 (Outdoors)
+   */
+  getRoofMaskIntensity(u, v) {
+    if (!this.roofMaskData || !this.roofMaskSize.width) return 1.0; // Default to outdoors if no mask
+
+    // Clamp UVs
+    const x = Math.max(0, Math.min(1, u));
+    const y = Math.max(0, Math.min(1, v));
+    
+    const w = this.roofMaskSize.width;
+    const h = this.roofMaskSize.height;
+    
+    // Sample coordinates
+    const px = Math.floor(x * (w - 1));
+    const py = Math.floor(y * (h - 1));
+    
+    const idx = py * w + px;
+    
+    // Return normalized intensity (0-255 -> 0.0-1.0)
+    return this.roofMaskData[idx] / 255.0;
   }
 
   /**
@@ -225,7 +312,7 @@ export class WeatherController {
     // 2. Apply Wanderer Loop (Noise)
     // Only apply noise to continuous variables if variability > 0
     if (this.variability > 0) {
-      this._applyVariability(elapsed);
+      this._applyVariability(elapsed, dt);
     }
 
     // 3. Update derived state (Wetness lagging)
@@ -278,31 +365,78 @@ export class WeatherController {
   /**
    * Apply noise-based variability to the current state
    * @param {number} time - Current absolute time
+   * @param {number} dt - Delta time
    * @private
    */
-  _applyVariability(time) {
-    // Use sine waves as a cheap substitute for Perlin noise for now, 
-    // or assume we have a noise library available.
-    // For now, simple sine composition for "wandering"
-    
-    const base = this.variability;
-    const noise1 = Math.sin(time * 0.02 + this.noiseOffset) * base * 0.05;
-    const noise2 = Math.cos(time * 0.10 + this.noiseOffset * 2) * base * 0.10;
-    const noise3 = Math.sin(time * 0.70 + this.noiseOffset * 3) * base * 0.20;
+  _applyVariability(time, dt) {
+    const baseVar = this.variability;
 
-    // Perturb wind speed
-    // Scale variability by wind speed so we don't get strong gusts at 0 base wind
-    const windScale = Math.min(1.0, this.targetState.windSpeed * 2.0 + 0.1);
+    // --- Gust State Machine ---
+    this.gustTimer -= dt;
+    if (this.gustTimer <= 0) {
+      // Toggle state
+      this.isGusting = !this.isGusting;
+      
+      if (this.isGusting) {
+        // Start Gust
+        this.gustTimer = this.gustDuration;
+        // log.debug('Gust started');
+      } else {
+        // Start Wait
+        // Random wait between min and max
+        const range = Math.max(0, this.gustWaitMax - this.gustWaitMin);
+        this.gustTimer = this.gustWaitMin + Math.random() * range;
+        // log.debug(`Gust ended. Waiting ${this.gustTimer.toFixed(1)}s`);
+      }
+    }
+
+    // Smoothly attack/decay the gust strength scalar
+    const targetGust = this.isGusting ? 1.0 : 0.0;
+    // Attack fast (3.0), decay slower (1.0)
+    const lerpSpeed = this.isGusting ? 3.0 : 1.0; 
+    this.currentGustStrength += (targetGust - this.currentGustStrength) * lerpSpeed * dt;
+
+
+    // --- Noise Generation ---
     
-    this.currentState.windSpeed = THREE.MathUtils.clamp(
-      this.currentState.windSpeed + (noise1 + noise3) * windScale, 
-      0, 1
+    // 1. Base Meander (Always active, low frequency)
+    // Gives the wind a "living" feeling even when not gusting
+    const meander = Math.sin(time * 0.2 + this.noiseOffset) * baseVar * 0.1;
+
+    // 2. Gust Noise (High frequency turbulence)
+    // Only audible/visible when gust strength is high
+    // Composite sine waves for "ragged" feel
+    const gustNoiseRaw = (
+      Math.sin(time * 3.0 + this.noiseOffset * 2) * 0.5 + 
+      Math.cos(time * 7.0 + this.noiseOffset * 3) * 0.25 +
+      Math.sin(time * 1.3) * 0.25
     );
+    
+    // Modulate gust noise by the smooth gust strength envelope
+    // Multiply by baseVar and gustStrength so the overall "Variability" slider and wind UI both scale this
+    const gustComponent = gustNoiseRaw * this.currentGustStrength * (baseVar * 2.0) * this.gustStrength;
 
-    // Perturb wind direction angle
-    const anglePerturb = noise2 + (noise3 * 0.5); // Radians
+
+    // --- Apply to State ---
+
+    // Wind Speed = Target + Meander + Gust
+    // We scale the add-ons by the target speed so 0 wind doesn't have gusts (unless we want it to?)
+    // Let's allow gusts to exist even at low wind, but maybe scale them slightly so they aren't overwhelming
+    const windBase = this.targetState.windSpeed;
+    // Allow gusts to boost speed significantly, but clamp to 0..1
+    // The '0.2' ensures that even at 0 target wind, we can get small breezes if variability is high
+    const magnitudeScale = Math.min(1.0, windBase + 0.2); 
+
+    let newSpeed = windBase + (meander + gustComponent) * magnitudeScale;
+    this.currentState.windSpeed = THREE.MathUtils.clamp(newSpeed, 0, 1);
+
+
+    // Wind Direction = Target + Meander
+    // Gusts usually push in the primary direction, so we mainly perturb direction with the slow meander
+    const dirMeander = Math.cos(time * 0.15 + this.noiseOffset) * baseVar * 0.5; // Radians
     const currentAngle = Math.atan2(this.currentState.windDirection.y, this.currentState.windDirection.x);
-    const newAngle = currentAngle + anglePerturb;
+    const newAngle = currentAngle + dirMeander;
+    
     this.currentState.windDirection.set(Math.cos(newAngle), Math.sin(newAngle));
   }
 
@@ -455,21 +589,22 @@ export class WeatherController {
           step: 0.01,
           group: 'state'
         },
+        // Wind base state (moved into dedicated Wind folder)
         windSpeed: {
-          label: 'Wind Speed',
+          label: 'Base Wind Speed',
           default: 0.0,
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          group: 'state'
+          group: 'wind'
         },
         windDirection: {
-          label: 'Wind Angle',
+          label: 'Wind Direction (deg)',
           default: 0.0,
           min: 0.0,
           max: 360.0,
           step: 1.0,
-          group: 'state'
+          group: 'wind'
         },
         fogDensity: {
           label: 'Fog Density',
@@ -495,6 +630,40 @@ export class WeatherController {
           max: 1.0,
           step: 0.01,
           group: 'manual'
+        },
+
+        // Wind / Gust tuning
+        gustWaitMin: {
+          label: 'Gust Pause Min (s)',
+          default: 5.0,
+          min: 0.0,
+          max: 60.0,
+          step: 0.5,
+          group: 'wind'
+        },
+        gustWaitMax: {
+          label: 'Gust Pause Max (s)',
+          default: 15.0,
+          min: 0.0,
+          max: 120.0,
+          step: 0.5,
+          group: 'wind'
+        },
+        gustDuration: {
+          label: 'Gust Duration (s)',
+          default: 3.0,
+          min: 0.1,
+          max: 30.0,
+          step: 0.1,
+          group: 'wind'
+        },
+        gustStrength: {
+          label: 'Gust Strength',
+          default: 1.0,
+          min: 0.0,
+          max: 3.0,
+          step: 0.05,
+          group: 'wind'
         },
 
         // Rain tuning
@@ -817,7 +986,8 @@ export class WeatherController {
       groups: [
         { label: 'Environment', type: 'folder', parameters: ['timeOfDay', 'roofMaskForceEnabled'] },
         { label: 'Simulation', type: 'folder', parameters: ['variability', 'transitionDuration', 'simulationSpeed'] },
-        { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'windSpeed', 'windDirection', 'fogDensity', 'wetness', 'freezeLevel'], expanded: true },
+        { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'fogDensity', 'wetness', 'freezeLevel'], expanded: true },
+        { label: 'Wind', type: 'folder', parameters: ['windSpeed', 'windDirection', 'gustWaitMin', 'gustWaitMax', 'gustDuration', 'gustStrength'], expanded: true },
         { label: 'Rain', type: 'folder', parameters: [
           'rainIntensityScale',
           'rainStreakLength',

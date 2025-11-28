@@ -249,10 +249,58 @@ export class TileManager {
       ? canvas.tokens.controlled 
       : (canvas.tokens?.observed || []);
 
+    // Calculate global tile tint based on darkness
+    // This matches the logic in SpecularEffect to darken elements at night
+    const THREE = window.THREE;
+    let globalTint = new THREE.Color(1, 1, 1);
+    
+    try {
+      const scene = canvas?.scene;
+      const env = canvas?.environment;
+      
+      if (scene?.environment?.darknessLevel !== undefined) {
+        const darkness = scene.environment.darknessLevel;
+        
+        // Get environment colors (robust fallback)
+        const getThreeColor = (src, def) => {
+            try {
+                if (!src) return new THREE.Color(def);
+                if (src instanceof THREE.Color) return src;
+                if (src.rgb) return new THREE.Color(src.rgb[0], src.rgb[1], src.rgb[2]);
+                if (Array.isArray(src)) return new THREE.Color(src[0], src[1], src[2]);
+                return new THREE.Color(src);
+            } catch (e) { return new THREE.Color(def); }
+        };
+
+        const daylight = getThreeColor(env?.colors?.ambientDaylight, 0xffffff);
+        const darknessColor = getThreeColor(env?.colors?.ambientDarkness, 0x242448);
+        
+        // Calculate ambient tint (mix of day/night colors)
+        const ambientTint = daylight.clone().lerp(darknessColor, darkness);
+        
+        // Calculate light level (brightness falloff)
+        // User Request: "I think at darkness 1 you need to darken the scene by something like 0.75"
+        // So minBrightness should be around 0.25 (1.0 - 0.75)
+        // We clamp to ensure it doesn't go pitch black.
+        const lightLevel = Math.max(1.0 - darkness, 0.25);
+        
+        // Final tint = ambient color * brightness
+        globalTint.copy(ambientTint).multiplyScalar(lightLevel);
+      }
+    } catch(e) {
+      // Fallback to white if environment lookup fails
+    }
+
     let anyHoverHidden = false;
 
     for (const data of this.tileSprites.values()) {
       const { sprite, tileDoc, hoverHidden } = data;
+      
+      // Apply global lighting tint to all tiles
+      if (sprite.material) {
+        sprite.material.color.copy(globalTint);
+      }
+
       // Only process overhead tiles for occlusion
       if (!sprite.userData.isOverhead) continue;
 

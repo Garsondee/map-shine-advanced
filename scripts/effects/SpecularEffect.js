@@ -7,6 +7,7 @@
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { ShaderValidator } from '../core/shader-validator.js';
+import Coordinates from '../utils/coordinates.js';
 
 const log = createLogger('SpecularEffect');
 
@@ -38,6 +39,10 @@ export class SpecularEffect extends EffectBase {
     
     /** @type {THREE.ShaderMaterial|null} */
     this.material = null;
+
+    // Light tracking
+    this.lights = new Map();
+    this.maxLights = 64;
     
     // Effect parameters (exposed to Tweakpane later)
     this.params = {
@@ -547,6 +552,19 @@ export class SpecularEffect extends EffectBase {
   initialize(renderer, scene, camera) {
     log.info('Initializing specular effect');
     
+    // Bound handlers for cleanup
+    this.onLightCreatedBound = this.onLightCreated.bind(this);
+    this.onLightUpdatedBound = this.onLightUpdated.bind(this);
+    this.onLightDeletedBound = this.onLightDeleted.bind(this);
+    
+    // Listen for light updates
+    Hooks.on('createAmbientLight', this.onLightCreatedBound);
+    Hooks.on('updateAmbientLight', this.onLightUpdatedBound);
+    Hooks.on('deleteAmbientLight', this.onLightDeletedBound);
+
+    // Initial sync
+    this.syncAllLights();
+    
     // Material will be created when mesh is provided
     // (see setBaseMesh method)
   }
@@ -700,7 +718,13 @@ export class SpecularEffect extends EffectBase {
         // color temperature more closely match Foundry's PIXI pipeline.
         uAmbientDaylight: { value: new THREE.Color(1.0, 1.0, 1.0) },
         uAmbientDarkness: { value: new THREE.Color(0.14, 0.14, 0.28) },
-        uAmbientBrightest: { value: new THREE.Color(1.0, 1.0, 1.0) }
+        uAmbientBrightest: { value: new THREE.Color(1.0, 1.0, 1.0) },
+
+        // Dynamic Lights
+        numLights: { value: 0 },
+        lightPosition: { value: new Float32Array(this.maxLights * 3) },
+        lightColor: { value: new Float32Array(this.maxLights * 3) },
+        lightConfig: { value: new Float32Array(this.maxLights * 4) }
       },
       
       vertexShader: this.getVertexShader(),
@@ -711,6 +735,141 @@ export class SpecularEffect extends EffectBase {
     });
     
     log.debug('PBR material created');
+    
+    // Initial sync of light data to the new material
+    this.updateLightUniforms();
+  }
+
+  /* -------------------------------------------- */
+  /*  Light Management                            */
+  /* -------------------------------------------- */
+
+  syncAllLights() {
+    if (!canvas.lighting) return;
+    
+    this.lights.clear();
+    
+    // Get all ambient lights
+    const lights = canvas.lighting.placeables;
+    lights.forEach(light => {
+      this.addLight(light.document);
+    });
+    
+    this.updateLightUniforms();
+  }
+
+  addLight(doc) {
+    if (this.lights.size >= this.maxLights) return;
+    if (this.lights.has(doc.id)) return;
+    
+    const config = doc.config;
+    if (!config) return;
+    
+    // Extract color
+    let r = 1, g = 1, b = 1;
+    const colorInput = config.color;
+    
+    if (colorInput) {
+        try {
+            if (typeof colorInput === 'object' && colorInput.rgb) {
+                r = colorInput.rgb[0];
+                g = colorInput.rgb[1];
+                b = colorInput.rgb[2];
+            } else {
+                const c = (typeof foundry !== 'undefined' && foundry.utils?.Color) 
+                    ? foundry.utils.Color.from(colorInput)
+                    : new THREE.Color(colorInput);
+                r = c.r;
+                g = c.g;
+                b = c.b;
+            }
+        } catch (e) {
+            if (typeof colorInput === 'number') {
+                r = ((colorInput >> 16) & 0xff) / 255;
+                g = ((colorInput >> 8) & 0xff) / 255;
+                b = (colorInput & 0xff) / 255;
+            }
+        }
+    }
+    
+    const luminosity = config.luminosity ?? 0.5;
+    const intensity = luminosity * 2.0; 
+    
+    const dim = config.dim || 0;
+    const bright = config.bright || 0;
+    const radius = Math.max(dim, bright);
+    
+    if (radius === 0) return;
+    
+    const worldPos = Coordinates.toWorld(doc.x, doc.y);
+    
+    this.lights.set(doc.id, {
+      position: worldPos,
+      color: { r: r * intensity, g: g * intensity, b: b * intensity },
+      radius: radius,
+      dim: dim,
+      bright: bright,
+      attenuation: config.attenuation ?? 0.5
+    });
+  }
+
+  removeLight(id) {
+    if (this.lights.delete(id)) {
+      this.updateLightUniforms();
+    }
+  }
+
+  onLightCreated(doc) {
+    this.addLight(doc);
+    this.updateLightUniforms();
+  }
+
+  onLightUpdated(doc, changes) {
+    this.removeLight(doc.id);
+    this.addLight(doc);
+    this.updateLightUniforms();
+  }
+
+  onLightDeleted(doc) {
+    this.removeLight(doc.id);
+  }
+
+  updateLightUniforms() {
+    if (!this.material) return;
+    
+    const lightsArray = Array.from(this.lights.values());
+    const num = lightsArray.length;
+    
+    this.material.uniforms.numLights.value = num;
+    
+    const lightPos = this.material.uniforms.lightPosition.value;
+    const lightCol = this.material.uniforms.lightColor.value;
+    const lightCfg = this.material.uniforms.lightConfig.value;
+
+    // Pixels per distance unit
+    const pixelsPerUnit = canvas.dimensions.size / canvas.dimensions.distance;
+
+    for (let i = 0; i < num; i++) {
+      const l = lightsArray[i];
+      const i3 = i * 3;
+      const i4 = i * 4;
+      
+      lightPos[i3] = l.position.x;
+      lightPos[i3 + 1] = l.position.y;
+      lightPos[i3 + 2] = 0;
+      
+      lightCol[i3] = l.color.r;
+      lightCol[i3 + 1] = l.color.g;
+      lightCol[i3 + 2] = l.color.b;
+      
+      const radiusPx = l.radius * pixelsPerUnit;
+      const brightPx = l.bright * pixelsPerUnit;
+      
+      lightCfg[i4] = radiusPx;
+      lightCfg[i4 + 1] = brightPx;
+      lightCfg[i4 + 2] = l.attenuation;
+      lightCfg[i4 + 3] = 0;
+    }
   }
 
   /**
@@ -916,6 +1075,10 @@ export class SpecularEffect extends EffectBase {
    * Dispose resources
    */
   dispose() {
+    Hooks.off('createAmbientLight', this.onLightCreatedBound);
+    Hooks.off('updateAmbientLight', this.onLightUpdatedBound);
+    Hooks.off('deleteAmbientLight', this.onLightDeletedBound);
+
     if (this.material) {
       this.material.dispose();
       this.material = null;
@@ -1027,6 +1190,12 @@ export class SpecularEffect extends EffectBase {
       uniform vec3 uAmbientDarkness;
       uniform vec3 uAmbientBrightest;
       
+      // Dynamic Lights
+      uniform int numLights;
+      uniform vec3 lightPosition[${this.maxLights}];
+      uniform vec3 lightColor[${this.maxLights}];
+      uniform vec4 lightConfig[${this.maxLights}]; // radius, dim, attenuation, unused
+
       varying vec2 vUv;
       varying vec3 vWorldNormal;
       varying vec3 vWorldPosition;
@@ -1232,6 +1401,47 @@ export class SpecularEffect extends EffectBase {
           return;
         }
         
+        // ---------------------------------------------------------
+        // Dynamic Lighting Calculation (Falloff Only)
+        // ---------------------------------------------------------
+        vec3 totalDynamicLight = vec3(0.0);
+        
+        for (int i = 0; i < ${this.maxLights}; i++) {
+          if (i >= numLights) break;
+          
+          vec3 lPos = lightPosition[i];
+          vec3 lColor = lightColor[i];
+          float radius = lightConfig[i].x;
+          float dim = lightConfig[i].y;
+          float attenuation = lightConfig[i].z;
+          
+          float dist = distance(vWorldPosition.xy, lPos.xy);
+          
+          if (dist < radius) {
+            float d = dist / radius;
+            
+            // Foundry Falloff
+            float inner = (radius > 0.0) ? clamp(dim / radius, 0.0, 0.99) : 0.0;
+            float falloff = 1.0 - smoothstep(inner, 1.0, d);
+            
+            float linear = 1.0 - d;
+            float squared = 1.0 - d * d;
+            float lightIntensity = mix(linear, squared, attenuation) * falloff;
+            
+            totalDynamicLight += lColor * lightIntensity;
+          }
+        }
+
+        // Ambient environment contribution (approximated)
+        // This represents the "Global Light" (Sun/Moon)
+        // We scale it by lightLevel so it fades out as darkness increases,
+        // ensuring no global specular shine in pitch darkness.
+        vec3 ambientLight = ambientTint * lightLevel; 
+        
+        // Total light receiving at this pixel
+        // Used to modulate specular so it doesn't shine in pitch blackness
+        vec3 totalIncidentLight = ambientLight + totalDynamicLight;
+        
         vec4 specularMask = texture2D(uSpecularMap, vUv);
         float roughness = uHasRoughnessMap ? texture2D(uRoughnessMap, vUv).r : uRoughness;
         
@@ -1310,8 +1520,10 @@ export class SpecularEffect extends EffectBase {
         }
         
         // For 2.5D top-down: specular mask directly defines shine areas
-        // The colored mask defines WHERE and WHAT COLOR things shine
-        vec3 specularColor = specularMask.rgb * totalModulator * uSpecularIntensity * uLightColor;
+        // The colored mask defines WHERE and WHAT COLOR things shine.
+        // We modulate by totalIncidentLight to ensure we don't shine in darkness.
+        // uLightColor is preserved as a manual tint/multiplier.
+        vec3 specularColor = specularMask.rgb * totalModulator * uSpecularIntensity * uLightColor * totalIncidentLight;
         
         // Apply Foundry darkness level with different falloff curves (reuse
         // lightLevel defined earlier). Albedo is additionally tinted by the
@@ -1321,15 +1533,15 @@ export class SpecularEffect extends EffectBase {
         // Linear falloff for albedo (base texture)
         // Clamp to minimal value to prevent total blackness (information loss),
         // allowing lighting effects to still reveal texture detail.
-        float albedoBrightness = max(lightLevel, 0.05);
-        
-        // Slower falloff curve for specular (gentler fade)
-        float specularBrightness = sqrt(max(lightLevel, 0.0));
+        // User Request: Darken by ~0.75 at max darkness -> min 0.25
+        float albedoBrightness = max(lightLevel, 0.25);
         
         // Apply brightness multipliers and ambient tint
         vec3 baseAlbedo = albedo.rgb * ambientTint;
         vec3 litAlbedo = baseAlbedo * albedoBrightness;
-        vec3 litSpecular = specularColor * specularBrightness;
+        
+        // Specular is already lit by totalIncidentLight (which includes ambient + dynamic)
+        vec3 litSpecular = specularColor;
 
         // Simple additive composition: base + specular
         vec3 finalColor = litAlbedo + litSpecular;

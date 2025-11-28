@@ -93,10 +93,11 @@ export class LightIconManager {
    * @private
    */
   updateVisibility() {
-    // For now, always show light icons in Gameplay Mode so they are easy to
-    // discover and debug. We can later restrict this to LightingLayer only if
-    // desired.
-    this.setVisibility(true);
+    // Show icons only when the Lighting layer is active so that ambient light
+    // handles behave like core Foundry light controls.
+    const activeLayer = canvas.activeLayer?.name;
+    const isLightingLayerActive = activeLayer === 'LightingLayer';
+    this.setVisibility(isLightingLayerActive);
   }
 
   /**

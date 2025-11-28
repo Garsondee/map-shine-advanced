@@ -76,19 +76,6 @@ export class WallManager {
     Hooks.on('createWall', (doc) => this.create(doc));
     Hooks.on('updateWall', (doc, changes) => this.update(doc, changes));
     Hooks.on('deleteWall', (doc) => this.remove(doc.id));
-    
-    // Use specific activation hooks to avoid state lag
-    Hooks.on('activateWallsLayer', () => {
-        log.debug('activateWallsLayer hook fired');
-        this.setVisibility(true);
-    });
-    Hooks.on('deactivateWallsLayer', () => {
-        log.debug('deactivateWallsLayer hook fired');
-        this.setVisibility(false);
-    });
-    
-    // Also update on canvas ready/init just in case
-    Hooks.on('canvasReady', () => this.updateVisibility());
   }
 
   /**

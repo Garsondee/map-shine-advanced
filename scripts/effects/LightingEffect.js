@@ -22,16 +22,16 @@ export class LightingEffect extends EffectBase {
     this.params = {
       enabled: true,
       globalIntensity: 1.0,
-      ambientColor: { r: 0.02, g: 0.02, b: 0.02 },
+      ambientColor: { r: 0.00, g: 0.00, b: 0.00 },
       
       // Advanced Scene Lighting Controls
-      darknessBoost: 1.8,   // Multiplier for lights when in darkness
-      ambientMix: 0.0,      // How much ambient color tints the lights
-      lightSaturation: 0.5, // Saturation of the lights themselves
+      darknessBoost: 20.0,   // Multiplier for lights when in darkness
+      ambientMix: 1.0,      // How much ambient color tints the lights
+      lightSaturation: 1.0, // Saturation of the lights themselves
       contrast: 1.0,        // Contrast of the light map
-      correction: 1.26,     // Final brightness multiplier for the light map
-      coreBoost: 1.5,       // Extra boost for the inner bright core of lights
-      falloffSoftness: 4.0  // Exponent on falloff curve ( <1 = softer, >1 = harder )
+      correction: 0.50,     // Final brightness multiplier for the light map
+      coreBoost: 3.0,       // Extra boost for the inner bright core of lights
+      falloffSoftness: 1.0  // Exponent on falloff curve ( <1 = softer, >1 = harder )
     };
 
     // Resources
@@ -174,6 +174,9 @@ export class LightingEffect extends EffectBase {
     `;
 
     const fragmentShader = `
+      #include <common>
+      #include <dithering_pars_fragment>
+
       uniform sampler2D tDiffuse;
       uniform vec2 uViewOffset;
       uniform vec2 uViewSize;

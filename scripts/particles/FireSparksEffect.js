@@ -16,6 +16,7 @@ import {
   CurlNoiseField
 } from '../libs/three.quarks.module.js';
 import { weatherController } from '../core/WeatherController.js';
+import { SmartWindBehavior } from './SmartWindBehavior.js';
 
 const log = createLogger('FireSparksEffect');
 
@@ -79,7 +80,17 @@ class FireMaskShape {
     p.position.y = this.offsetY + (1.0 - v) * this.height;
     p.position.z = 0;
 
-    // 3. Apply brightness-based modifiers. The particle system has already
+    // 3. TAGGING: Check "Outdoors" mask to determine wind susceptibility.
+    // We query the WeatherController using the same (u, 1-v) logic? 
+    // Wait, getRoofMaskIntensity expects normalized UVs where 0,0 is top-left of image?
+    // The helper in WeatherController takes standard UVs (0-1).
+    // Let's assume it matches the texture space (u, v) we just read.
+    // NOTE: WeatherController.getRoofMaskIntensity reads (u,v) directly from the mask data array.
+    // The _Outdoors texture matches the _Fire texture in orientation.
+    const outdoorFactor = weatherController.getRoofMaskIntensity(u, v);
+    p._windSusceptibility = outdoorFactor;
+
+    // 4. Apply brightness-based modifiers. The particle system has already
     // assigned random life/size/opacity; we now scale them by mask luminance.
 
     // Lifetime: Darker pixels die faster.
@@ -100,7 +111,7 @@ class FireMaskShape {
       p.color.w *= (brightness * brightness);
     }
 
-    // 4. Reset velocity to prevent accumulation across particle reuse
+    // 5. Reset velocity to prevent accumulation across particle reuse
     if (p.velocity) {
       p.velocity.set(0, 0, 0);
     }
@@ -189,13 +200,17 @@ export class FireSparksEffect extends EffectBase {
     };
     this.params = {
       enabled: true,
-      globalFireRate: 1.9,
+      // Matches UI: Global Intensity = 5.0
+      globalFireRate: 5.0,
       fireAlpha: 0.6,
       fireCoreBoost: 1.0,
-      fireHeight: 600.0,
+      // Matches UI: Height = 10
+      fireHeight: 10.0,
       fireSize: 18.0,
       emberRate: 5.0,
-      windInfluence: 1.4,
+      // Matches UI: Wind Influence = 2.0
+      windInfluence: 2.0,
+      // Matches UI: Light Intensity = 0.9
       lightIntensity: 0.9,
 
       // Fire fine controls (defaults from tuned UI)
@@ -203,12 +218,14 @@ export class FireSparksEffect extends EffectBase {
       fireSizeMax: 86.0,
       fireLifeMin: 0.85,
       fireLifeMax: 1.55,
-      fireOpacityMin: 0.06,
-      fireOpacityMax: 0.41,
-      fireColorBoostMin: 0.50,
-      fireColorBoostMax: 4.50,
+      // Matches UI: Opacity Min = 0.03, Opacity Max = 0.20
+      fireOpacityMin: 0.03,
+      fireOpacityMax: 0.20,
+      // Matches UI: Color Boost Min = 0.0, Color Boost Max = 0.85
+      fireColorBoostMin: 0.00,
+      fireColorBoostMax: 0.85,
       fireSpinEnabled: true,
-      fireSpinSpeedMin: 0.2,
+      fireSpinSpeedMin: 1.3,
       fireSpinSpeedMax: 4.5,
 
       // Ember fine controls (defaults from tuned UI)
@@ -222,20 +239,21 @@ export class FireSparksEffect extends EffectBase {
       emberColorBoostMax: 2.85,
 
       // New color controls
-      fireStartColor: { r: 1.0, g: 1.0, b: 1.0 },
-      fireEndColor: { r: 1.0, g: 0.0, b: 0.0 },
-      emberStartColor: { r: 1.0, g: 1.0, b: 1.0 },
+      fireStartColor: { r: 0.114, g: 0.075, b: 0.0 },
+      fireEndColor: { r: 0.004, g: 0.0, b: 0.0 },
+      emberStartColor: { r: 1.0, g: 1.0, b: 0.0 },
       emberEndColor: { r: 1.0, g: 0.0, b: 0.0 },
 
       // Physics controls
-      fireUpdraft: 0.85,
-      emberUpdraft: 0.15,
-      fireCurlStrength: 0.10,
+      fireUpdraft: 0.70,
+      emberUpdraft: 0.85,
+      fireCurlStrength: 1.35,
       emberCurlStrength: 3.95,
 
       // Per-effect time scaling (independent of global Simulation Speed)
       // 1.0 = baseline, >1.0 = faster (shorter lifetimes), <1.0 = slower.
-      timeScale: 0.85,
+      // Matches UI: Time Scale = 1.0
+      timeScale: 1.00,
     };
   }
   
@@ -282,18 +300,22 @@ export class FireSparksEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'checkbox', label: 'Fire Enabled', default: true },
-        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 1.9 },
+        // Matches tuned UI default: 5.0
+        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 5.0 },
         fireAlpha: { type: 'slider', label: 'Opacity (Legacy)', min: 0.0, max: 1.0, step: 0.01, default: 0.6 },
         fireCoreBoost: { type: 'slider', label: 'Core Boost (Legacy)', min: 0.0, max: 5.0, step: 0.1, default: 1.0 },
-        fireHeight: { type: 'slider', label: 'Height', min: 10.0, max: 600.0, step: 10.0, default: 600.0 },
+        // Matches tuned UI default: 10
+        fireHeight: { type: 'slider', label: 'Height', min: 10.0, max: 600.0, step: 10.0, default: 10.0 },
         fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 100.0, step: 1.0, default: 11.0 },
         fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 150.0, step: 1.0, default: 86.0 },
         fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 4.0, step: 0.05, default: 0.85 },
         fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 1.55 },
-        fireOpacityMin: { type: 'slider', label: 'Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.06 },
-        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.41 },
-        fireColorBoostMin: { type: 'slider', label: 'Color Boost Min', min: 0.0, max: 2.0, step: 0.05, default: 0.50 },
-        fireColorBoostMax: { type: 'slider', label: 'Color Boost Max', min: 0.0, max: 12.0, step: 0.05, default: 4.50 },
+        // Matches tuned UI defaults: Opacity Min = 0.03, Opacity Max = 0.20
+        fireOpacityMin: { type: 'slider', label: 'Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.03 },
+        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.20 },
+        // Matches tuned UI defaults: Color Boost Min = 0.0, Color Boost Max = 0.85
+        fireColorBoostMin: { type: 'slider', label: 'Color Boost Min', min: 0.0, max: 2.0, step: 0.05, default: 0.0 },
+        fireColorBoostMax: { type: 'slider', label: 'Color Boost Max', min: 0.0, max: 12.0, step: 0.05, default: 0.85 },
         fireStartColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 } },
         fireEndColor: { type: 'color', default: { r: 1.0, g: 0.0, b: 0.0 } },
         fireSpinEnabled: { type: 'checkbox', label: 'Spin Enabled', default: true },
@@ -314,9 +336,10 @@ export class FireSparksEffect extends EffectBase {
         emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 0.15 },
         fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.10 },
         emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 3.95 },
-        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 1.4 },
+        // Matches tuned UI defaults: Wind Influence = 2.0, Light Intensity = 0.9, Time Scale = 1.0
+        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 2.0 },
         lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 0.9 },
-        timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 0.85 }
+        timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 1.0 }
       }
     };
   }
@@ -450,7 +473,8 @@ export class FireSparksEffect extends EffectBase {
     // Vertical Lift: slightly more aggressive to match tapering
     const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(height * 2.5));
     
-    const windForce = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(0));
+    // Replaced standard ApplyForce with SmartWindBehavior for indoor/outdoor masking
+    const windForce = new SmartWindBehavior();
     
     // Increased turbulence to break up uniform sprite look
     const fireCurlScale = new THREE.Vector3(150, 150, 50);
@@ -519,6 +543,9 @@ export class FireSparksEffect extends EffectBase {
       ]
     });
     
+    // Patch the material to support roof/outdoors masking
+    this._patchRoofMaskMaterial(material);
+
     system.userData = {
       windForce,
       ownerEffect: this,
@@ -595,7 +622,7 @@ export class FireSparksEffect extends EffectBase {
       renderOrder: 51,
       behaviors: [
         new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(height * 8.0)),
-        new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(0)),
+        new SmartWindBehavior(),
         new CurlNoiseField(
           emberCurlScale,
           emberCurlStrengthBase.clone(),
@@ -605,8 +632,11 @@ export class FireSparksEffect extends EffectBase {
       ]
     });
 
+    // Patch the material to support roof/outdoors masking
+    this._patchRoofMaskMaterial(material);
+
     system.userData = {
-      windForce: system.behaviors.find(b => b instanceof ApplyForce && b.direction.x === 1),
+      windForce: system.behaviors.find(b => b instanceof SmartWindBehavior),
       updraftForce: system.behaviors.find(b => b instanceof ApplyForce && b.direction.z === 1),
       baseUpdraftMag: height * 8.0,
       turbulence: system.behaviors.find(b => b instanceof CurlNoiseField),
@@ -618,6 +648,80 @@ export class FireSparksEffect extends EffectBase {
     return system;
   }
   
+  /**
+   * Patch a MeshBasicMaterial to support sampling the roof/_Outdoors mask.
+   *
+   * PREFERRED PATTERN (for all future quarks-based particle systems that need
+   * roof/indoor awareness):
+   * - Keep simulation stateless / GPU-driven (three.quarks).
+   * - Use WeatherController.roofMap (_Outdoors) as a shared indoor/outdoor mask.
+   * - Project world-space XY into scene-rect UVs (uSceneBounds) and sample
+   *   that mask in the fragment shader.
+   * - Drive a simple 0/1 uniform from JS to decide when the mask is active
+   *   (e.g. for Fire we enable occlusion when roofs are solid; WeatherParticles
+   *   enables masking while roofs are hover-hidden).
+   * - Always patch BOTH the source MeshBasicMaterial and the SpriteBatch
+   *   ShaderMaterial created by three.quarks' BatchedRenderer, then update
+   *   uniforms every frame from the owning effect.
+   *
+   * This mirrors WeatherParticles.js and should be treated as the canonical
+   * approach for integrating new particle effects with roof/overhead tiles.
+   */
+  _patchRoofMaskMaterial(material) {
+    const THREE = window.THREE;
+    if (!material || !THREE) return;
+
+    if (material.userData && material.userData.roofUniforms) return;
+
+    const uniforms = {
+      uRoofMap: { value: null },
+      uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+      uRoofMaskEnabled: { value: 0.0 }
+    };
+
+    material.userData = material.userData || {};
+    material.userData.roofUniforms = uniforms;
+
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uRoofMap = uniforms.uRoofMap;
+      shader.uniforms.uSceneBounds = uniforms.uSceneBounds;
+      shader.uniforms.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
+
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          'void main() {',
+          'varying vec3 vRoofWorldPos;\nvoid main() {'
+        )
+        .replace(
+          '#include <soft_vertex>',
+          '#include <soft_vertex>\n  vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;'
+        );
+
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          'void main() {',
+          'varying vec3 vRoofWorldPos;\nuniform sampler2D uRoofMap;\nuniform vec4 uSceneBounds;\nuniform float uRoofMaskEnabled;\nvoid main() {'
+        )
+        .replace(
+          '#include <soft_fragment>',
+          '  if (uRoofMaskEnabled > 0.5) {\n' +
+          '    vec2 uvMask = vec2(\n' +
+          '      (vRoofWorldPos.x - uSceneBounds.x) / uSceneBounds.z,\n' +
+          '      1.0 - (vRoofWorldPos.y - uSceneBounds.y) / uSceneBounds.w\n' +
+          '    );\n' +
+          '    if (uvMask.x >= 0.0 && uvMask.x <= 1.0 && uvMask.y >= 0.0 && uvMask.y <= 1.0) {\n' +
+          '      float m = texture2D(uRoofMap, uvMask).r;\n' +
+          '      // Dark (Indoors) pixels are discarded when mask is active\n' +
+          '      if (m < 0.5) discard;\n' +
+          '    }\n' +
+          '  }\n' +
+          '#include <soft_fragment>'
+        );
+    };
+    
+    material.needsUpdate = true;
+  }
+
   createFire(x, y, radius = 50, height = 1.0, intensity = 1.0) {
      if (!this.particleSystemRef || !this.particleSystemRef.batchRenderer) return null;
      const system = this._createFireSystem({
@@ -691,16 +795,44 @@ export class FireSparksEffect extends EffectBase {
     }
 
     // 3. Apply Wind Forces
-    // Map global wind vectors to ApplyForce behavior
-    const windSpeed = weatherController.currentState.windSpeed || 0;
-    const windDir = weatherController.currentState.windDirection || { x: 1, y: 0 };
-    
-    // Convert normalized 2D wind to 3D force vector
+    // SmartWindBehavior now handles the vector math and indoor/outdoor check.
+    // We just need to update the per-system intensity override based on UI
+    // settings and drive the shared roof/occlusion uniforms.
     const influence = (this.params && typeof this.params.windInfluence === 'number')
       ? this.params.windInfluence
       : (this.settings.windInfluence || 1.0);
-    // Base force magnitude: 300 feels right for fire leaning
-    const forceMag = windSpeed * 300.0 * influence; 
+
+    // Restore windSpeed for lifetime shortening logic
+    const windSpeed = weatherController.currentState.windSpeed || 0;
+
+    // Update Roof Mask State (Shared Roof/Occlusion Pattern)
+    const roofTex = weatherController.roofMap || null;
+    // FIRE LOGIC INVERSION:
+    // - WeatherParticles enables mask when `roofMaskActive` is TRUE (Peeking)
+    //   to hide *rain* indoors while the GM is looking inside a building.
+    // - FireSparks instead enables mask when `roofMaskActive` is FALSE
+    //   (roof solid/visible) so indoor flames are occluded by overhead tiles
+    //   but become visible again when those roofs are hover-hidden.
+    // - If no roof map exists, disable occlusion entirely (show fire
+    //   everywhere). New particle systems with roof awareness should follow
+    //   this same pattern: compute a per-effect boolean in JS and feed it into
+    //   the shared roof mask uniforms.
+    const roofMaskEnabled = !!roofTex && !weatherController.roofMaskActive;
+    
+    // Calculate Scene Bounds for UV projection
+    // Matches logic in FireMaskShape and WeatherParticles
+    const d = canvas.dimensions;
+    if (d && window.THREE) {
+      if (!this._sceneBounds) this._sceneBounds = new window.THREE.Vector4();
+      const sw = d.sceneWidth || d.width;
+      const sh = d.sceneHeight || d.height;
+      const sx = d.sceneX || 0;
+      // World Y is inverted relative to Foundry canvas Y.
+      // sceneY is from top. World Y origin is bottom-left.
+      // So scene bottom Y = (TotalHeight - TopPadding - SceneHeight)
+      const sy = (d.height || sh) - (d.sceneY || 0) - sh;
+      this._sceneBounds.set(sx, sy, sw, sh);
+    }
 
     // Collect all active systems
     const systems = [];
@@ -713,18 +845,51 @@ export class FireSparksEffect extends EffectBase {
     const timeScale = Math.max(0.1, p.timeScale ?? 1.0);
 
     for (const sys of systems) {
+        // Update Roof/Occlusion Uniforms
+        // 1. Update the source material (template)
+        if (sys.material && sys.material.userData && sys.material.userData.roofUniforms) {
+            const u = sys.material.userData.roofUniforms;
+            u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+            u.uRoofMap.value = roofTex;
+            if (this._sceneBounds) {
+                u.uSceneBounds.value.copy(this._sceneBounds);
+            }
+        }
+
+        // 2. Find and update the ACTUAL batch material used by quarks.
+        // three.quarks generates a ShaderMaterial internally for the batch.
+        // We must patch THAT material for the shader logic to run.
+        if (this.particleSystemRef && this.particleSystemRef.batchRenderer) {
+          const renderer = this.particleSystemRef.batchRenderer;
+          const batchIdx = renderer.systemToBatchIndex ? renderer.systemToBatchIndex.get(sys) : undefined;
+          
+          if (batchIdx !== undefined && renderer.batches && renderer.batches[batchIdx]) {
+            const batchMat = renderer.batches[batchIdx].material;
+            if (batchMat) {
+              // Patch if not yet patched
+              if (!batchMat.userData || !batchMat.userData.roofUniforms) {
+                this._patchRoofMaskMaterial(batchMat);
+              }
+              // Update uniforms on the batch material
+              if (batchMat.userData && batchMat.userData.roofUniforms) {
+                const u = batchMat.userData.roofUniforms;
+                u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+                u.uRoofMap.value = roofTex;
+                if (this._sceneBounds) {
+                   u.uSceneBounds.value.copy(this._sceneBounds);
+                }
+              }
+            }
+          }
+        }
+
         const isEmber = !!(sys.userData && sys.userData.isEmber);
 
-        // 3a. Wind force per-system
-        if (sys.userData && sys.userData.windForce) {
-            const wf = sys.userData.windForce;
+        // 3a. Update wind influence multiplier
+        if (sys.userData) {
+            // Embers are lighter, so they get a 1.5x boost to wind effect
             const multiplier = isEmber ? 1.5 : 1.0;
-            if (wf.direction) {
-                wf.direction.set(windDir.x, windDir.y, 0);
-            }
-            if (wf.magnitude) {
-                wf.magnitude = new ConstantValue(forceMag * multiplier);
-            }
+            sys.userData.windInfluence = influence * multiplier;
         }
 
         // 3b. Updraft and curl noise per-system (physics controls)

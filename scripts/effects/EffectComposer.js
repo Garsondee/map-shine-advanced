@@ -368,6 +368,7 @@ export class EffectComposer {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat,
+      type: THREE.FloatType, // Maintain high precision for post-processing chain
       depthBuffer: depthBuffer,
       stencilBuffer: false
     });

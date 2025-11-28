@@ -753,6 +753,14 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       weatherController.simulationSpeed = value;
     } else if (paramId === 'timeOfDay') {
       weatherController.setTime(value);
+    } else if (paramId === 'gustWaitMin') {
+      weatherController.gustWaitMin = value;
+    } else if (paramId === 'gustWaitMax') {
+      weatherController.gustWaitMax = value;
+    } else if (paramId === 'gustDuration') {
+      weatherController.gustDuration = value;
+    } else if (paramId === 'gustStrength') {
+      weatherController.gustStrength = value;
     } else {
       // Manual Overrides (update target state directly)
       const target = weatherController.targetState;
@@ -855,7 +863,13 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     windDirection: Math.atan2(weatherController.targetState.windDirection.y, weatherController.targetState.windDirection.x) * (180 / Math.PI),
     fogDensity: weatherController.targetState.fogDensity,
     wetness: weatherController.currentState.wetness, // Read-only derived
-    freezeLevel: weatherController.targetState.freezeLevel
+    freezeLevel: weatherController.targetState.freezeLevel,
+
+    // Wind / Gust tuning
+    gustWaitMin: weatherController.gustWaitMin,
+    gustWaitMax: weatherController.gustWaitMax,
+    gustDuration: weatherController.gustDuration,
+    gustStrength: weatherController.gustStrength
   };
 
   // Fix negative angles
@@ -1374,16 +1388,14 @@ function updateLayerVisibility() {
   };
 
   // Walls
-  // If Walls Layer is active, show PIXI walls, hide Three.js walls
-  // If not active, hide PIXI walls, show Three.js walls
+  // If Walls Layer is active, show PIXI walls, hide Three.js wall edit lines.
+  // If not active, hide PIXI walls, show Three.js wall edit lines.
   if (canvas.walls) {
       const isWallsActive = activeLayer === 'WallsLayer';
       canvas.walls.visible = isWallsActive;
-      if (wallManager) {
-          // Show Three.js walls only when NOT editing walls and NOT in Map Maker mode
-          // Actually, we usually want 3D walls visible even when editing? 
-          // No, user requested "Native Mode" for editing.
-          wallManager.setVisibility(!isWallsActive && !isMapMakerMode);
+      if (wallManager && wallManager.setVisibility) {
+          const showThreeWalls = !isWallsActive && !isMapMakerMode;
+          wallManager.setVisibility(showThreeWalls);
       }
   }
 
@@ -1397,7 +1409,8 @@ function updateLayerVisibility() {
   }
 
   // Other Tools (Lighting, Sounds, etc.) - Just show/hide PIXI layer
-  // We don't have Three.js counterparts for these yet (except Lighting Effect, which is global)
+  // For Lighting, we also drive the Three.js light icon manager visibility so that
+  // light icons only show when the Lighting tool is active.
   const simpleLayers = [
       'LightingLayer', 'SoundsLayer', 'TemplateLayer', 'DrawingsLayer', 'NotesLayer', 'RegionLayer'
   ];
@@ -1414,6 +1427,14 @@ function updateLayerVisibility() {
   // Regions Layer (V12 specific check)
   if (canvas.regions) {
       canvas.regions.visible = (activeLayer === 'RegionLayer');
+  }
+
+  // Drive Three.js light icon visibility to mirror Lighting layer tool usage,
+  // but only in Gameplay mode. In Map Maker mode, the entire Three.js canvas
+  // is hidden so this is effectively redundant but kept for logical clarity.
+  if (lightIconManager && lightIconManager.setVisibility) {
+      const showIcons = activeLayer === 'LightingLayer' && !isMapMakerMode;
+      lightIconManager.setVisibility(showIcons);
   }
 }
 

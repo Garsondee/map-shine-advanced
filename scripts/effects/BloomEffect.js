@@ -28,9 +28,9 @@ export class BloomEffect extends EffectBase {
     
     this.params = {
       enabled: true,
-      strength: 1.5,
-      radius: 0.4,
-      threshold: 0.85,
+      strength: 0.30,
+      radius: 0.20,
+      threshold: 0.98,
       tintColor: { r: 1, g: 1, b: 1 },
       // Controls how the bloom layer blends over the base scene
       blendOpacity: 1.0,

@@ -9,6 +9,7 @@ import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { weatherController } from '../core/WeatherController.js';
+import LightMesh from '../scene/LightMesh.js';
 
 const log = createLogger('LightingEffect');
 
@@ -36,13 +37,19 @@ export class LightingEffect extends EffectBase {
     };
 
     // Resources
-    this.lights = new Map(); // Map<id, {data, uniformIndex}>
-    this.maxLights = 64; // Maximum number of dynamic lights supported in shader
+    this.lights = new Map(); // Map<id, { helper: LightMesh }>
+    this.maxLights = 64; // Legacy shader capacity (no longer used for arrays, kept for safety)
     
     // Internal scene for full-screen quad rendering
     this.quadScene = null;
     this.quadCamera = null;
     this.mesh = null;
+
+    // Light accumulation pass (world-space light meshes rendered to a buffer)
+    this.lightScene = null;      // THREE.Scene containing LightMesh helpers
+    this.lightTarget = null;     // WebGLRenderTarget for accumulated lights
+    this.mainScene = null;       // Reference to primary scene
+    this.mainCamera = null;      // Reference to primary camera
     
     // Material/Shader management
     this.uniforms = null;
@@ -124,12 +131,17 @@ export class LightingEffect extends EffectBase {
   initialize(renderer, scene, camera) {
     log.info('Initializing LightingEffect (Post-Process)');
     this.renderer = renderer;
+    this.mainScene = scene;
+    this.mainCamera = camera;
 
     const THREE = window.THREE;
 
     // 1. Create internal scene for quad rendering
     this.quadScene = new THREE.Scene();
     this.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+    // 1b. Create light accumulation scene
+    this.lightScene = new THREE.Scene();
 
     // 2. Create Lighting Material
     this.material = this.createLightingMaterial();
@@ -152,6 +164,9 @@ export class LightingEffect extends EffectBase {
     if (this.roofAlphaTarget) {
       this.roofAlphaTarget.setSize(width, height);
     }
+    if (this.lightTarget) {
+      this.lightTarget.setSize(width, height);
+    }
   }
 
   /**
@@ -164,16 +179,14 @@ export class LightingEffect extends EffectBase {
   createLightingMaterial() {
     const THREE = window.THREE;
     
-    // Uniforms for N lights + Scene Context
+    // Uniforms for Scene Context + Accumulated Light Map
     // NOTE: Roof occlusion uniforms mirror the shared _Outdoors pattern used
-    // by WeatherParticles / FireSparksEffect, but here we:
-    //   - Use uRoofMap + uSceneBounds to classify lights as indoor/outdoor.
-    //   - Use uRoofAlphaMap (screen-space pass of overhead tiles) to compute
-    //     how much roof opacity sits above each shaded pixel.
-    // This combination lets us do per-pixel, per-light indoor lighting that
-    // respects semi-transparent and hidden roofs.
+    // by WeatherParticles / FireSparksEffect. In this refactored version we
+    // sample an accumulated light texture (tLight) and apply roof masking in
+    // screen-space using uRoofAlphaMap and uRoofMap.
     this.uniforms = {
       tDiffuse: { value: null }, // Input scene texture
+      tLight: { value: null },   // Accumulated light texture from lightScene
       uViewOffset: { value: new THREE.Vector2() }, // Camera World Pos (Bottom-Left)
       uViewSize: { value: new THREE.Vector2() },   // Camera World View Size
       
@@ -207,11 +220,6 @@ export class LightingEffect extends EffectBase {
       uAmbientDaylight: { value: new THREE.Color(1.0, 1.0, 1.0) },
       uAmbientDarkness: { value: new THREE.Color(0.14, 0.14, 0.28) },
       uAmbientBrightest: { value: new THREE.Color(1.0, 1.0, 1.0) },
-      
-      numLights: { value: 0 },
-      lightPosition: { value: new Float32Array(this.maxLights * 3) }, // x,y,z flat array
-      lightColor: { value: new Float32Array(this.maxLights * 3) },    // r,g,b flat array
-      lightConfig: { value: new Float32Array(this.maxLights * 4) }    // radius, dim, attenuation, type
     };
 
     const vertexShader = `
@@ -228,6 +236,7 @@ export class LightingEffect extends EffectBase {
       #include <dithering_pars_fragment>
 
       uniform sampler2D tDiffuse;
+      uniform sampler2D tLight;
       uniform vec2 uViewOffset;
       uniform vec2 uViewSize;
       
@@ -252,11 +261,6 @@ export class LightingEffect extends EffectBase {
       uniform vec3 uAmbientDarkness;
       uniform vec3 uAmbientBrightest;
       
-      uniform int numLights;
-      uniform vec3 lightPosition[${this.maxLights}];
-      uniform vec3 lightColor[${this.maxLights}];
-      uniform vec4 lightConfig[${this.maxLights}]; // radius, dim, attenuation, unused
-      
       varying vec2 vUv;
       
       // Saturation helper
@@ -269,104 +273,35 @@ export class LightingEffect extends EffectBase {
         // Sample Base Color (Albedo)
         vec4 baseTexel = texture2D(tDiffuse, vUv);
         vec3 baseColor = baseTexel.rgb;
-        
-        // Reconstruct World Position
+
+        // Sample accumulated light map (already in screen-space)
+        vec3 totalLight = texture2D(tLight, vUv).rgb;
+
+        // Reconstruct World Position for roof/outdoors masking
         // Simple linear mapping from UV to View Bounds
         vec2 worldPos = uViewOffset + (vUv * uViewSize);
-        
-        // ---------------------------------------------------------
-        // Lighting Calculation (Foundry-like)
-        // ---------------------------------------------------------
 
         float clampedDarkness = clamp(uDarknessLevel, 0.0, 1.0);
         vec3 ambientTint = mix(uAmbientDaylight, uAmbientDarkness, clampedDarkness);
 
-        // Accumulate Dynamic Lights
-        // We start at 0.0 because the Base Color already contains the ambient light.
-        vec3 totalLight = vec3(0.0);
-        
         // Pre-sample roof alpha at this pixel (Screen Space)
-        // This is the composite opacity of all overhead tiles rendered in the
-        // Roof Alpha Pass (see render()).
         float roofAlpha = texture2D(uRoofAlphaMap, vUv).a;
-        
-        for (int i = 0; i < ${this.maxLights}; i++) {
-          if (i >= numLights) break;
-          
-          vec3 lPos = lightPosition[i];
-          
-          // Check if this light is Indoors (under a roof)
-          // We sample the uRoofMap at the light's world position. Dark
-          // (_Outdoors < 0.5) = Indoors, Bright (>= 0.5) = Outdoors.
-          float isIndoor = 0.0;
-          if (uHasRoofMap > 0.5) {
-             // Map World Pos -> UV in the shared _Outdoors mask
-             vec2 lUV = vec2(
-               (lPos.x - uSceneBounds.x) / uSceneBounds.z,
-               1.0 - (lPos.y - uSceneBounds.y) / uSceneBounds.w
-             );
-             // Sample bounds check
-             if (lUV.x >= 0.0 && lUV.x <= 1.0 && lUV.y >= 0.0 && lUV.y <= 1.0) {
-                // Dark (0) = Indoors, Bright (1) = Outdoors
-                float outdoorVal = texture2D(uRoofMap, lUV).r;
-                if (outdoorVal < 0.5) isIndoor = 1.0;
-             } else {
-                // Light is outside the scene bounds -> assume Outdoors
-                isIndoor = 0.0;
-             }
-          }
-          
-          vec3 lColor = lightColor[i];
-          float radius = lightConfig[i].x;
-          float dim = lightConfig[i].y;
-          float attenuation = lightConfig[i].z;
-          
-          float dist = distance(worldPos, lPos.xy);
-          
-          if (dist < radius) {
-            float d = dist / radius;
-            
-            // Foundry Falloff
-            float inner = (radius > 0.0) ? clamp(dim / radius, 0.0, 0.99) : 0.0;
-            float falloff = 1.0 - smoothstep(inner, 1.0, d);
-            
-            float linear = 1.0 - d;
-            float squared = 1.0 - d * d;
-            float lightIntensity = mix(linear, squared, attenuation) * falloff;
 
-            // Core Brightness Boost: amplify contribution near the center
-            if (uCoreBoost > 0.0 && inner > 0.0) {
-              float coreT = 1.0 - clamp(d / inner, 0.0, 1.0);
-              float coreFactor = 1.0 + uCoreBoost * coreT * coreT;
-              lightIntensity *= coreFactor;
+        // World-space roof mask classification (indoor vs outdoor) based on
+        // _Outdoors texture. Dark = Indoors, Bright = Outdoors.
+        if (uHasRoofMap > 0.5) {
+          vec2 lUV = vec2(
+            (worldPos.x - uSceneBounds.x) / uSceneBounds.z,
+            1.0 - (worldPos.y - uSceneBounds.y) / uSceneBounds.w
+          );
+          if (lUV.x >= 0.0 && lUV.x <= 1.0 && lUV.y >= 0.0 && lUV.y <= 1.0) {
+            float outdoorVal = texture2D(uRoofMap, lUV).r;
+            // Indoors: attenuate by (1 - roofAlpha) so opaque roofs block
+            // completely and hidden roofs allow full contribution.
+            if (outdoorVal < 0.5) {
+              float occlusion = roofAlpha;
+              totalLight *= (1.0 - occlusion);
             }
-            
-            // Dynamic Brightness Boost
-            // As darkness increases, we need to boost the light multiplier significantly
-            // because the base texture we are multiplying against is getting darker.
-            float dynamicBoost = mix(1.0, uDarknessBoost, clampedDarkness);
-            
-            // Apply light saturation adjustment
-            vec3 satColor = adjustSaturation(lColor, uLightSaturation);
-            
-            // Mix with ambient tint
-            vec3 tintedLightColor = satColor * mix(vec3(1.0), ambientTint, uAmbientMix);
-
-            // Apply Roof Occlusion for Indoor Lights
-            // PREFERRED PATTERN (Lighting + Roofs):
-            // - Light classification uses the world-space _Outdoors mask.
-            // - Occlusion strength comes from the screen-space roof alpha.
-            //   * roofAlpha = 1.0 (Opaque roof)     -> 100% blocked
-            //   * roofAlpha = 0.0 (Hidden / no roof)-> 0% blocked
-            //   * roofAlpha = 0.5 (Semi-transparent)-> 50% blocked
-            // - Outdoor lights ignore roofAlpha entirely so roofs can still be
-            //   lit from above by sun/moon or other external sources.
-            if (isIndoor > 0.5) {
-               float occlusion = roofAlpha;
-               lightIntensity *= (1.0 - occlusion);
-            }
-
-            totalLight += tintedLightColor * lightIntensity * dynamicBoost;
           }
         }
         
@@ -467,6 +402,41 @@ export class LightingEffect extends EffectBase {
     this.material.uniforms.uRoofAlphaMap.value = this.roofAlphaTarget.texture;
 
     // -------------------------------------------------------
+    // Light Accumulation Pass
+    // Render all LightMesh helpers in world-space into a separate target.
+    // -------------------------------------------------------
+
+    if (!this.lightTarget) {
+      const size = new THREE.Vector2();
+      renderer.getSize(size);
+      this.lightTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.FloatType
+      });
+    }
+
+    const oldTarget2 = renderer.getRenderTarget();
+    const oldClearAlpha2 = renderer.getClearAlpha();
+    const oldClearColor2 = new THREE.Color();
+    renderer.getClearColor(oldClearColor2);
+
+    renderer.setRenderTarget(this.lightTarget);
+    renderer.setClearColor(0x000000, 0.0);
+    renderer.clear();
+
+    if (this.lightScene && this.mainCamera) {
+      renderer.render(this.lightScene, this.mainCamera);
+    }
+
+    renderer.setRenderTarget(oldTarget2);
+    renderer.setClearColor(oldClearColor2, oldClearAlpha2);
+
+    // Bind accumulated light texture
+    this.material.uniforms.tLight.value = this.lightTarget.texture;
+
+    // -------------------------------------------------------
     // Main Lighting Pass
     // -------------------------------------------------------
 
@@ -503,95 +473,129 @@ export class LightingEffect extends EffectBase {
   syncAllLights() {
     if (!canvas.lighting) return;
     
+    // Clear existing helpers
+    this.lights.forEach(entry => {
+      if (entry.helper && entry.helper.mesh && this.lightScene) {
+        this.lightScene.remove(entry.helper.mesh);
+      }
+      if (entry.helper) entry.helper.dispose();
+    });
     this.lights.clear();
-    
+
     // Get all ambient lights
     const lights = canvas.lighting.placeables;
     lights.forEach(light => {
       this.addLight(light.document);
     });
-    
-    this.updateLightUniforms();
   }
 
   addLight(doc) {
-    if (this.lights.size >= this.maxLights) return;
-    if (this.lights.has(doc.id)) return;
-    
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    // If this light already exists, remove and recreate to avoid stale geometry.
+    this.removeLight(doc.id);
+
     const config = doc.config;
     if (!config) return;
-    
+
     // Extract color
     let r = 1, g = 1, b = 1;
     const colorInput = config.color;
-    
+
     if (colorInput) {
-        try {
-            // Handle Foundry Color object, hex string, or integer
-            if (typeof colorInput === 'object' && colorInput.rgb) {
-                r = colorInput.rgb[0];
-                g = colorInput.rgb[1];
-                b = colorInput.rgb[2];
-            } else {
-                // Fallback to Foundry's Color helper if available, otherwise robust parse
-                const c = (typeof foundry !== 'undefined' && foundry.utils?.Color) 
-                    ? foundry.utils.Color.from(colorInput)
-                    : new THREE.Color(colorInput);
-                    
-                r = c.r;
-                g = c.g;
-                b = c.b;
-            }
-        } catch (e) {
-            // Fallback to simple integer parsing if all else fails
-            if (typeof colorInput === 'number') {
-                r = ((colorInput >> 16) & 0xff) / 255;
-                g = ((colorInput >> 8) & 0xff) / 255;
-                b = (colorInput & 0xff) / 255;
-            }
+      try {
+        // Handle Foundry Color object, hex string, or integer
+        if (typeof colorInput === 'object' && colorInput.rgb) {
+          r = colorInput.rgb[0];
+          g = colorInput.rgb[1];
+          b = colorInput.rgb[2];
+        } else {
+          const c = (typeof foundry !== 'undefined' && foundry.utils?.Color)
+            ? foundry.utils.Color.from(colorInput)
+            : new THREE.Color(colorInput);
+          r = c.r;
+          g = c.g;
+          b = c.b;
         }
+      } catch (e) {
+        if (typeof colorInput === 'number') {
+          r = ((colorInput >> 16) & 0xff) / 255;
+          g = ((colorInput >> 8) & 0xff) / 255;
+          b = (colorInput & 0xff) / 255;
+        }
+      }
     }
-    
-    // Extract intensity/brightness
-    // Foundry luminosity: 0 = off, 0.5 = normal, 1 = bright
-    // We map 0.5 -> 1.0 intensity.
+
+    // Extract intensity/brightness (Foundry convention)
     const luminosity = config.luminosity ?? 0.5;
-    const intensity = luminosity * 2.0; 
-    
+    const intensity = luminosity * 2.0;
+
     const dim = config.dim || 0;
     const bright = config.bright || 0;
     const radius = Math.max(dim, bright);
-    
     if (radius === 0) return;
-    
-    // World position
+
+    // Convert radius from distance units to pixels
+    const d = canvas.dimensions;
+    const pixelsPerUnit = d ? (d.size / d.distance) : 1.0;
+    const radiusPx = radius * pixelsPerUnit;
+
+    // World position (center of light)
     const worldPos = Coordinates.toWorld(doc.x, doc.y);
-    
-    this.lights.set(doc.id, {
-      position: worldPos,
-      color: { r: r * intensity, g: g * intensity, b: b * intensity }, // Scale color by intensity
-      radius: radius,
-      dim: dim,
-      bright: bright,
-      attenuation: config.attenuation ?? 0.5
+    const center = new THREE.Vector2(worldPos.x, worldPos.y);
+
+    // Optional polygon from Foundry's PointSourcePolygon (already wall-clipped)
+    let worldPoints = null;
+    try {
+      const placeable = canvas.lighting?.get(doc.id);
+      const source = placeable?.source;
+      const pts = source?.shape?.points;
+      if (Array.isArray(pts) && pts.length >= 6) {
+        worldPoints = [];
+        for (let i = 0; i < pts.length; i += 2) {
+          const fx = pts[i];
+          const fy = pts[i + 1];
+          const v = Coordinates.toWorld(fx, fy);
+          worldPoints.push(v.x, v.y);
+        }
+      }
+    } catch (e) {
+      // If anything goes wrong, fall back to a simple circle.
+    }
+
+    const helper = new LightMesh(center, radiusPx, { r: r * intensity, g: g * intensity, b: b * intensity }, {
+      worldPoints
     });
+
+    if (this.lightScene && helper.mesh) {
+      this.lightScene.add(helper.mesh);
+    }
+
+    this.lights.set(doc.id, { helper });
   }
 
   removeLight(id) {
-    if (this.lights.delete(id)) {
-      this.updateLightUniforms();
+    const entry = this.lights.get(id);
+    if (!entry) return;
+
+    if (entry.helper) {
+      if (entry.helper.mesh && this.lightScene) {
+        this.lightScene.remove(entry.helper.mesh);
+      }
+      entry.helper.dispose();
     }
+
+    this.lights.delete(id);
   }
 
   onLightCreated(doc) {
     this.addLight(doc);
-    this.updateLightUniforms();
   }
 
   onLightUpdated(doc, changes) {
     this.removeLight(doc.id);
     this.addLight(doc);
-    this.updateLightUniforms();
   }
 
   onLightDeleted(doc) {
@@ -599,48 +603,7 @@ export class LightingEffect extends EffectBase {
   }
 
   updateLightUniforms() {
-    if (!this.uniforms) return;
-    
-    const lightsArray = Array.from(this.lights.values());
-    const num = lightsArray.length;
-    
-    this.uniforms.numLights.value = num;
-    
-    // Update arrays
-    // Float32Array doesn't have .set for objects, need manual fill
-    for (let i = 0; i < num; i++) {
-      const l = lightsArray[i];
-      const i3 = i * 3;
-      const i4 = i * 4;
-      
-      // Position
-      this.uniforms.lightPosition.value[i3] = l.position.x;
-      this.uniforms.lightPosition.value[i3 + 1] = l.position.y;
-      this.uniforms.lightPosition.value[i3 + 2] = 0; // Z
-      
-      // Color
-      this.uniforms.lightColor.value[i3] = l.color.r;
-      this.uniforms.lightColor.value[i3 + 1] = l.color.g;
-      this.uniforms.lightColor.value[i3 + 2] = l.color.b;
-      
-      // Config
-      // Need to convert radius from grid units/pixels?
-      // Foundry radius is in distance units (e.g. feet), usually need canvas.dimensions.distance conversion
-      // But config.dim/bright on the document are usually in distance units?
-      // Let's check how Lensflare did it.
-      // Actually lensflare used bright/dim ratio.
-      // We need pixel radius.
-      
-      // Canvas conversion
-      const pixelsPerUnit = canvas.dimensions.size / canvas.dimensions.distance;
-      const radiusPx = l.radius * pixelsPerUnit;
-      const brightPx = l.bright * pixelsPerUnit;
-      
-      this.uniforms.lightConfig.value[i4] = radiusPx;
-      this.uniforms.lightConfig.value[i4 + 1] = brightPx;
-      this.uniforms.lightConfig.value[i4 + 2] = l.attenuation;
-      this.uniforms.lightConfig.value[i4 + 3] = 0;
-    }
+    // No-op: legacy array-based shader path removed in favor of LightMesh helpers
   }
 
   update(timeInfo) {

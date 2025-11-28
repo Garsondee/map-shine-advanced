@@ -34,6 +34,12 @@ window.MapShine = MapShine;
  */
 Hooks.once('init', async function() {
   info('Initializing...');
+
+  console.log(
+  "%c GNU Terry Pratchett %c \n“A man is not dead while his name is still spoken.”",
+  "background: #4b0082; color: #FFD700; font-weight: bold; padding: 4px 8px; border-radius: 4px;",
+  "color: #888; font-style: italic;"
+);
   
   // Register settings
   sceneSettings.registerSettings();

@@ -591,6 +591,11 @@ export class InteractionManager {
       
       const sprite = spriteData.sprite;
       
+      // CRITICAL: Ensure camera matrices are up to date for accurate projection
+      // This fixes "lag" or "parallax" where the HUD trails behind the camera
+      this.sceneComposer.camera.updateMatrixWorld();
+      this.sceneComposer.camera.updateProjectionMatrix();
+
       // Project world position to screen coordinates
       // We use the sprite's position (which is center bottom usually, or center? TokenManager puts it at center)
       // Token sprites are centered.
@@ -600,12 +605,31 @@ export class InteractionManager {
       // Convert NDC to CSS pixels
       // NDC: [-1, 1] -> CSS: [0, width/height]
       // Y is inverted in CSS (0 at top) vs NDC (1 at top)
-      const rect = this.canvasElement.getBoundingClientRect();
-      const width = rect.width;
-      const height = rect.height;
+      let rect = this.canvasElement.getBoundingClientRect();
       
-      const x = (pos.x + 1) * width / 2;
-      const y = - (pos.y - 1) * height / 2;
+      // Fallback if canvas rect is zero (e.g. not yet layout)
+      // This fixes the "Top Left" (0,0) issue if rect is invalid
+      let width = rect.width;
+      let height = rect.height;
+      let left = rect.left;
+      let top = rect.top;
+
+      if (width === 0 || height === 0) {
+          width = window.innerWidth;
+          height = window.innerHeight;
+          left = 0;
+          top = 0;
+      }
+      
+      // Calculate Screen Coordinates
+      // NDC X [-1, 1] -> [0, Width]
+      const x = (pos.x + 1) * width / 2 + left;
+      
+      // NDC Y [-1, 1] -> [Height, 0] (Inverted)
+      // pos.y=1 (Top) -> 0
+      // pos.y=-1 (Bottom) -> Height
+      // Formula: (1 - pos.y) * height / 2
+      const y = (1 - pos.y) * height / 2 + top;
       
       // Update HUD element position
       // Foundry's HUD usually centers itself based on object bounds, but since the object bounds
@@ -618,27 +642,51 @@ export class InteractionManager {
           const hudEl = (hud.element instanceof jQuery || (hud.element.jquery)) ? hud.element[0] : hud.element;
           
           if (hudEl) {
-              const hudWidth = hudEl.offsetWidth;
-              const hudHeight = hudEl.offsetHeight;
+              // CRITICAL FIX: Reparent HUD to body to avoid parent scaling issues (Parallax)
+              // Foundry/System might put HUD in a scaled container (like #board).
+              // We need screen-space coordinates (1:1).
+              if (hudEl.parentNode !== document.body) {
+                  document.body.appendChild(hudEl);
+                  log.debug('Reparented Token HUD to body');
+              }
+
+              // Calculate Scale
+              // We need to match the scale of the token on screen.
+              // Base scale is 1:1 at baseDistance.
+              // Current scale = baseDistance / currentDistance (approx for perspective)
+              // Or better: use the ratio of screen pixels to world units.
               
-              const left = x - hudWidth / 2;
-              const top = y - hudHeight / 2;
+              let scale = 1.0;
+              if (this.sceneComposer.camera && this.sceneComposer.baseDistance) {
+                  // Simple perspective scale approx
+                  const dist = this.sceneComposer.camera.position.z - (sprite.position.z || 0);
+                  if (dist > 0) {
+                      scale = this.sceneComposer.baseDistance / dist;
+                  }
+              }
               
-              // Log position for debugging
-              // log.debug(`HUD Position: ${left.toFixed(1)}, ${top.toFixed(1)} (Z: ${hudEl.style.zIndex})`);
+              // Apply position and scale
+              // Use translate(-50%, -50%) to center the HUD element on the screen coordinate (x,y)
+              // regardless of its size or scale.
+              
+              // Slightly enlarge the HUD (~25%) so it nicely wraps around the token even
+              // when Foundry's native layout expects a slightly smaller canvas zoom.
+              const finalScale = scale * 1.25;
+
+              const style = {
+                  left: `${x}px`,
+                  top: `${y}px`,
+                  transform: `translate(-50%, -50%) scale(${finalScale})`,
+                  transformOrigin: 'center center',
+                  zIndex: '100',
+                  pointerEvents: 'auto',
+                  position: 'fixed' // Use fixed to match screen coords
+              };
 
               if (typeof hud.element.css === 'function') {
-                  hud.element.css({
-                      left: left,
-                      top: top,
-                      zIndex: 100, // Force Z-index
-                      pointerEvents: 'auto' // Force interactive
-                  });
+                  hud.element.css(style);
               } else if (hudEl.style) {
-                  hudEl.style.left = `${left}px`;
-                  hudEl.style.top = `${top}px`;
-                  hudEl.style.zIndex = '100';
-                  hudEl.style.pointerEvents = 'auto';
+                  Object.assign(hudEl.style, style);
               }
           }
       }

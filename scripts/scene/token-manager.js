@@ -111,6 +111,48 @@ export class TokenManager {
         this.activeAnimations.delete(tokenId);
       }
     }
+
+    // Apply global lighting tint to tokens based on scene darkness
+    const THREE = window.THREE;
+    if (THREE) {
+      let globalTint = new THREE.Color(1, 1, 1);
+
+      try {
+        const scene = canvas?.scene;
+        const env = canvas?.environment;
+
+        if (scene?.environment?.darknessLevel !== undefined) {
+          const darkness = scene.environment.darknessLevel;
+
+          const getThreeColor = (src, def) => {
+            try {
+              if (!src) return new THREE.Color(def);
+              if (src instanceof THREE.Color) return src;
+              if (src.rgb) return new THREE.Color(src.rgb[0], src.rgb[1], src.rgb[2]);
+              if (Array.isArray(src)) return new THREE.Color(src[0], src[1], src[2]);
+              return new THREE.Color(src);
+            } catch (e) { return new THREE.Color(def); }
+          };
+
+          const daylight = getThreeColor(env?.colors?.ambientDaylight, 0xffffff);
+          const darknessColor = getThreeColor(env?.colors?.ambientDarkness, 0x242448);
+
+          const ambientTint = daylight.clone().lerp(darknessColor, darkness);
+
+          const lightLevel = Math.max(1.0 - darkness, 0.25);
+
+          globalTint.copy(ambientTint).multiplyScalar(lightLevel);
+        }
+      } catch (e) {
+      }
+
+      for (const data of this.tokenSprites.values()) {
+        const { sprite } = data;
+        if (sprite && sprite.material) {
+          sprite.material.color.copy(globalTint);
+        }
+      }
+    }
   }
 
   /**

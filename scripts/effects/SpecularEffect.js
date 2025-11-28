@@ -1388,8 +1388,14 @@ export class SpecularEffect extends EffectBase {
         // Apply Foundry darkness level and ambient environment tint. We
         // approximate Foundry's computedBackgroundColor by blending
         // between ambientDaylight and ambientDarkness.
-        float lightLevel = 1.0 - uDarknessLevel;
-        vec3 ambientTint = mix(uAmbientDaylight, uAmbientDarkness, uDarknessLevel);
+        float safeDarkness = clamp(uDarknessLevel, 0.0, 1.0);
+        
+        // Foundry VTT darkness 1.0 is ~75% dark, not pitch black.
+        // We clamp the light level falloff to ensure the scene remains visible (0.25).
+        // This also ensures that dynamic lights have a base surface to reflect off.
+        float lightLevel = max(1.0 - safeDarkness, 0.25);
+        
+        vec3 ambientTint = mix(uAmbientDaylight, uAmbientDarkness, safeDarkness);
         
         // If effect is disabled, just render the base albedo with standard lighting
         if (!uEffectEnabled) {
@@ -1531,10 +1537,8 @@ export class SpecularEffect extends EffectBase {
         // warm daylight and dark scenes to its cool darkness.
         
         // Linear falloff for albedo (base texture)
-        // Clamp to minimal value to prevent total blackness (information loss),
-        // allowing lighting effects to still reveal texture detail.
-        // User Request: Darken by ~0.75 at max darkness -> min 0.25
-        float albedoBrightness = max(lightLevel, 0.25);
+        // Allow total blackness at max darkness if requested
+        float albedoBrightness = max(lightLevel, 0.0);
         
         // Apply brightness multipliers and ambient tint
         vec3 baseAlbedo = albedo.rgb * ambientTint;

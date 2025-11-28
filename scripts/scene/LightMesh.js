@@ -52,7 +52,8 @@ export class LightMesh {
       uniforms: {
         uColor: { value: new THREE.Color(this.color.r, this.color.g, this.color.b) },
         uInnerRadius: { value: this.innerRadiusPx },
-        uOuterRadius: { value: this.outerRadiusPx }
+        uOuterRadius: { value: this.outerRadiusPx },
+        uHaloBoost: { value: 1.0 }
       },
       vertexShader: `
         varying vec2 vLocalPos;
@@ -67,6 +68,7 @@ export class LightMesh {
         uniform vec3 uColor;
         uniform float uInnerRadius;
         uniform float uOuterRadius;
+        uniform float uHaloBoost;
 
         void main() {
           float dist = length(vLocalPos);
@@ -84,7 +86,10 @@ export class LightMesh {
           // Make the core significantly brighter than the halo so the
           // bright radius is clearly visible.
           float coreIntensity = pow(coreRegion, 1.2) * 1.8; // sharp, bright core
-          float haloIntensity = pow(haloRegion, 1.0) * 0.18; // much dimmer halo
+          
+          // Halo intensity (dim radius)
+          // Base 0.18 factor boosted by uHaloBoost
+          float haloIntensity = pow(haloRegion, 1.0) * 0.18 * uHaloBoost;
 
           float intensity = coreIntensity + haloIntensity;
 

@@ -21,19 +21,37 @@ export class LightingEffect extends EffectBase {
     this.alwaysRender = true;
 
     // Lighting parameters (UI-facing).
+    // NOTE: These defaults should stay in sync with getControlSchema()
+    // so that "Reset to Defaults" in the UI matches the initial state.
     this.params = {
       enabled: true,
       globalIntensity: 1.0,
       ambientColor: { r: 0.00, g: 0.00, b: 0.00 },
       
-      // Advanced Scene Lighting Controls
-      darknessBoost: 20.0,   // Multiplier for lights when in darkness
-      ambientMix: 1.0,      // How much ambient color tints the lights
-      lightSaturation: 1.0, // Saturation of the lights themselves
-      contrast: 1.0,        // Contrast of the light map
-      correction: 0.50,     // Final brightness multiplier for the light map
-      coreBoost: 3.0,       // Extra boost for the inner bright core of lights
-      falloffSoftness: 1.0  // Exponent on falloff curve ( <1 = softer, >1 = harder )
+      // Global ambient contribution applied directly to the base pass.
+      // This acts as a simple way to lift the ground plane (and everything
+      // rendered into the base scene) without changing individual light
+      // intensities.
+      ambientBoost: 0.0,
+      
+      // Advanced Scene Lighting Controls (new tuned defaults)
+      darknessBoost: 3.0,    // "Darkness Punch"
+      ambientMix: 1.0,       // "Ambient Tint Mix"
+      lightSaturation: 1.0,  // "Light Saturation"
+      contrast: 1.00,        // "Light Map Contrast"
+      correction: 1.00,      // "Final Boost"
+      coreBoost: 0.0,        // "Core Boost"
+      dimLightBoost: 1.0,    // "Dim Light Boost"
+      falloffSoftness: 1.00, // "Attenuation Softness"
+      
+      // Color Correction Controls
+      sceneSaturation: 1.0,
+      sceneGamma: 1.0,
+      sceneExposure: 1.0,
+      sceneBrightness: 0.0,
+      sceneContrast: 1.0,
+      sceneTemperature: 0.0,
+      sceneTint: 0.0
     };
 
     // Resources
@@ -90,7 +108,7 @@ export class LightingEffect extends EffectBase {
           name: 'lighting',
           label: 'Global Lighting',
           type: 'inline',
-          parameters: ['globalIntensity', 'ambientColor']
+          parameters: ['globalIntensity', 'ambientColor', 'ambientBoost']
         },
         {
           name: 'scene_lighting',
@@ -104,23 +122,43 @@ export class LightingEffect extends EffectBase {
             'contrast',
             'correction',
             'coreBoost',
+            'dimLightBoost',
             'falloffSoftness'
           ]
+        },
+        {
+          name: 'color_correction',
+          label: 'Color Correction (Foundry Match)',
+          type: 'folder',
+          expanded: true,
+          parameters: ['sceneSaturation', 'sceneGamma', 'sceneExposure', 'sceneBrightness', 'sceneContrast', 'sceneTemperature', 'sceneTint']
         }
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
         globalIntensity: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.0, label: 'Global Brightness' },
-        ambientColor: { type: 'color', default: { r: 0.02, g: 0.02, b: 0.02 } },
+        ambientColor: { type: 'color', default: { r: 0.00, g: 0.00, b: 0.00 } },
+        ambientBoost: { type: 'slider', min: 0.0, max: 2.0, step: 0.05, default: 0.0, label: 'Ambient Ground Boost' },
         
         // New Controls
-        darknessBoost: { type: 'slider', min: 1.0, max: 20.0, step: 0.1, default: 1.8, label: 'Darkness Punch' },
-        ambientMix: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.0, label: 'Ambient Tint Mix' },
-        lightSaturation: { type: 'slider', min: 0.0, max: 2.0, step: 0.1, default: 0.5, label: 'Light Saturation' },
-        contrast: { type: 'slider', min: 0.5, max: 2.0, step: 0.01, default: 1.0, label: 'Light Map Contrast' },
-        correction: { type: 'slider', min: 0.5, max: 2.0, step: 0.01, default: 1.26, label: 'Final Boost' },
-        coreBoost: { type: 'slider', min: 0.0, max: 3.0, step: 0.05, default: 1.5, label: 'Core Boost' },
-        falloffSoftness: { type: 'slider', min: 0.25, max: 4.0, step: 0.05, default: 4.0, label: 'Attenuation Softness' }
+        darknessBoost: { type: 'slider', min: 1.0, max: 20.0, step: 0.1, default: 3.0, label: 'Darkness Punch' },
+        ambientMix: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Ambient Tint Mix' },
+        lightSaturation: { type: 'slider', min: 0.0, max: 2.0, step: 0.1, default: 1.0, label: 'Light Saturation' },
+        contrast: { type: 'slider', min: 0.5, max: 2.0, step: 0.01, default: 1.00, label: 'Light Map Contrast' },
+        correction: { type: 'slider', min: 0.5, max: 2.0, step: 0.01, default: 1.00, label: 'Final Boost' },
+        coreBoost: { type: 'slider', min: 0.0, max: 3.0, step: 0.05, default: 0.0, label: 'Core Boost' },
+        dimLightBoost: { type: 'slider', min: 0.0, max: 3.0, step: 0.1, default: 1.0, label: 'Dim Light Boost' },
+        falloffSoftness: { type: 'slider', min: 0.25, max: 4.0, step: 0.05, default: 1.00, label: 'Attenuation Softness' },
+
+        // Color Correction Controls
+        sceneSaturation: { type: 'slider', min: 0.0, max: 2.0, step: 0.05, default: 1.0, label: 'Saturation' },
+        sceneGamma: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.0, label: 'Gamma' },
+        sceneExposure: { type: 'slider', min: 0.0, max: 2.0, step: 0.05, default: 1.0, label: 'Exposure' },
+        // Scene CC ranges are deliberately tight so small tweaks are gentle
+        sceneBrightness: { type: 'slider', min: -0.2, max: 0.2, step: 0.01, default: 0.0, label: 'Brightness' },
+        sceneContrast: { type: 'slider', min: 0.8, max: 1.2, step: 0.01, default: 1.0, label: 'Contrast' },
+        sceneTemperature: { type: 'slider', min: -1.0, max: 1.0, step: 0.05, default: 0.0, label: 'Temperature' },
+        sceneTint: { type: 'slider', min: -1.0, max: 1.0, step: 0.05, default: 0.0, label: 'Tint' }
       }
     };
   }
@@ -205,6 +243,7 @@ export class LightingEffect extends EffectBase {
       // Base ambient contribution
       ambientColor: { value: new THREE.Color(0.02, 0.02, 0.02) },
       globalIntensity: { value: 1.0 },
+      uAmbientBoost: { value: 0.0 },
       uDarknessLevel: { value: 0.0 },
       
       // Advanced Tuning Uniforms
@@ -215,6 +254,15 @@ export class LightingEffect extends EffectBase {
       uCorrection: { value: 1.26 },
       uCoreBoost: { value: 1.5 },
       uFalloffSoftness: { value: 4.0 },
+      
+      // Color Correction Uniforms
+      uSceneSaturation: { value: 1.0 },
+      uSceneGamma: { value: 1.0 },
+      uSceneExposure: { value: 1.0 },
+      uSceneBrightness: { value: 0.0 },
+      uSceneContrast: { value: 1.0 },
+      uSceneTemperature: { value: 0.0 },
+      uSceneTint: { value: 0.0 },
       
       // Foundry ambient environment colors
       uAmbientDaylight: { value: new THREE.Color(1.0, 1.0, 1.0) },
@@ -247,6 +295,7 @@ export class LightingEffect extends EffectBase {
       
       uniform vec3 ambientColor;
       uniform float globalIntensity;
+      uniform float uAmbientBoost;
       uniform float uDarknessLevel;
       
       uniform float uDarknessBoost;
@@ -256,6 +305,14 @@ export class LightingEffect extends EffectBase {
       uniform float uCorrection;
       uniform float uCoreBoost;
       uniform float uFalloffSoftness;
+      
+      uniform float uSceneSaturation;
+      uniform float uSceneGamma;
+      uniform float uSceneExposure;
+      uniform float uSceneBrightness;
+      uniform float uSceneContrast;
+      uniform float uSceneTemperature;
+      uniform float uSceneTint;
       
       uniform vec3 uAmbientDaylight;
       uniform vec3 uAmbientDarkness;
@@ -267,6 +324,19 @@ export class LightingEffect extends EffectBase {
       vec3 adjustSaturation(vec3 color, float saturation) {
         float gray = dot(color, vec3(0.2126, 0.7152, 0.0722));
         return mix(vec3(gray), color, saturation);
+      }
+      
+      // White Balance helper
+      vec3 applyWhiteBalance(vec3 color, float temp, float tint) {
+        // Temperature: Blue <-> Orange
+        vec3 tempShift = vec3(1.0 + temp, 1.0, 1.0 - temp);
+        if (temp < 0.0) tempShift = vec3(1.0, 1.0, 1.0 - temp * 0.5); // More blue
+        else tempShift = vec3(1.0 + temp * 0.5, 1.0, 1.0); // More orange
+        
+        // Tint: Green <-> Magenta
+        vec3 tintShift = vec3(1.0, 1.0 + tint, 1.0);
+        
+        return color * tempShift * tintShift;
       }
       
       void main() {
@@ -341,11 +411,74 @@ export class LightingEffect extends EffectBase {
         totalLight *= uCorrection;
         
         // Final Composition: "Adaptive Luminance" logic
-        // The Base Color is already lit by Ambient.
-        // We want to ADD the Dynamic Light contribution, but modulated by the Base Color (Texture).
-        // Final = Base + (Base * Light)
-        vec3 finalColor = baseColor + (baseColor * totalLight);
+        // AmbientBoost now acts as a brightness gain on the base color so we
+        // preserve the underlying map hues instead of washing them out with a
+        // flat grey term.
+        //
+        // ambientGain = 1.0  => original base
+        // ambientGain > 1.0  => brighter base (exposure-style boost)
+        float ambientGain = 1.0 + uAmbientBoost;
+        vec3 boostedBase = baseColor * ambientGain;
+
+        // Dynamic light still modulates the (now brighter) base.
+        // Final = BoostedBase + (BoostedBase * Light)
+        vec3 finalColor = boostedBase + (boostedBase * totalLight);
         
+        // Apply Scene Color Correction
+        // 1. Saturation
+        if (uSceneSaturation != 1.0) {
+          finalColor = adjustSaturation(finalColor, uSceneSaturation);
+        }
+        
+        // 2. White Balance (Temp + Tint)
+        if (uSceneTemperature != 0.0 || uSceneTint != 0.0) {
+          finalColor = applyWhiteBalance(finalColor, uSceneTemperature, uSceneTint);
+        }
+        
+        // 3. Exposure (simple multiplier in linear space)
+        if (uSceneExposure != 1.0) {
+          finalColor *= uSceneExposure;
+        }
+        
+        // 4. Luma-space Contrast/Brightness
+        // Compute original luma so we can remap brightness/contrast without
+        // blowing out colors. This keeps hue/chroma more stable.
+        float origLuma = dot(finalColor, vec3(0.2126, 0.7152, 0.0722));
+        float newLuma = origLuma;
+        
+        // Internally dampen slider strength so UI steps stay gentle.
+        float contrastStrength = (uSceneContrast - 1.0) * 0.5 + 1.0; // half as strong
+        float brightnessStrength = uSceneBrightness * 0.5;           // half as strong
+        
+        if (contrastStrength != 1.0) {
+          // Contrast in luma space around mid-grey 0.5
+          newLuma = (newLuma - 0.5) * contrastStrength + 0.5;
+        }
+        if (brightnessStrength != 0.0) {
+          newLuma += brightnessStrength;
+        }
+
+        // Keep adjusted luma in a sane display range.
+        newLuma = clamp(newLuma, 0.0, 1.5);
+
+        // Rescale RGB by the luma ratio, preserving color direction.
+        // Small epsilon avoids division by zero in very dark areas.
+        float eps = 1e-4;
+        if (origLuma > eps) {
+          float lumaScale = newLuma / max(origLuma, eps);
+          finalColor *= lumaScale;
+        } else {
+          // If the original pixel was effectively black, just add brightness
+          // uniformly so subtle detail can emerge without huge jumps.
+          finalColor += vec3(newLuma);
+        }
+
+        // 5. Gamma
+        if (uSceneGamma != 1.0) {
+          finalColor = pow(max(finalColor, vec3(0.0)), vec3(1.0 / uSceneGamma));
+        }
+
+        // Output final color
         gl_FragColor = vec4(finalColor, baseTexel.a);
       }
     `;
@@ -640,12 +773,17 @@ export class LightingEffect extends EffectBase {
       const u = this.uniforms;
       const p = this.params || {};
 
-      // Clamp UI/scene-driven parameters into a conservative range so Three.js
-      // lighting stays in line with Foundry's native look even if older
-      // scenes have very bright saved values.
-      const rawGI = (typeof p.globalIntensity === 'number') ? p.globalIntensity : 0.8;
-      const clampedGI = Math.max(0.1, Math.min(rawGI, 0.9));
+      // Global brightness is driven directly from the UI slider (0..2).
+      // Clamp only to the advertised range so the slider behaves as expected.
+      const rawGI = (typeof p.globalIntensity === 'number') ? p.globalIntensity : 1.0;
+      const clampedGI = Math.max(0.0, Math.min(rawGI, 2.0));
       u.globalIntensity.value = clampedGI;
+
+      // Ambient ground boost lifts the base pass using the selected ambientColor.
+      // Clamp softly so extremely high saved values don't blow out the scene.
+      const rawAB = (typeof p.ambientBoost === 'number') ? p.ambientBoost : 0.0;
+      const clampedAB = Math.max(0.0, Math.min(rawAB, 2.0));
+      u.uAmbientBoost.value = clampedAB;
 
       // Update Roof Uniforms
       if (weatherController && weatherController.roofMap) {
@@ -675,6 +813,25 @@ export class LightingEffect extends EffectBase {
       if (typeof p.correction === 'number') u.uCorrection.value = p.correction;
       if (typeof p.coreBoost === 'number') u.uCoreBoost.value = p.coreBoost;
       if (typeof p.falloffSoftness === 'number') u.uFalloffSoftness.value = p.falloffSoftness;
+      
+      // Sync Dim Light Boost to all active LightMeshes
+      if (typeof p.dimLightBoost === 'number') {
+        const boost = p.dimLightBoost;
+        this.lights.forEach(entry => {
+          if (entry.helper && entry.helper.material) {
+            entry.helper.material.uniforms.uHaloBoost.value = boost;
+          }
+        });
+      }
+
+      // Sync Color Correction
+      if (typeof p.sceneSaturation === 'number') u.uSceneSaturation.value = p.sceneSaturation;
+      if (typeof p.sceneGamma === 'number') u.uSceneGamma.value = p.sceneGamma;
+      if (typeof p.sceneExposure === 'number') u.uSceneExposure.value = p.sceneExposure;
+      if (typeof p.sceneBrightness === 'number') u.uSceneBrightness.value = p.sceneBrightness;
+      if (typeof p.sceneContrast === 'number') u.uSceneContrast.value = p.sceneContrast;
+      if (typeof p.sceneTemperature === 'number') u.uSceneTemperature.value = p.sceneTemperature;
+      if (typeof p.sceneTint === 'number') u.uSceneTint.value = p.sceneTint;
 
       // Drive darkness and ambient environment colors from Foundry's canvas
       // when available so lighting tracks the same environment used by PIXI.

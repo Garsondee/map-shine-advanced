@@ -7,6 +7,7 @@
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { ShaderValidator } from '../core/shader-validator.js';
+import Coordinates from '../utils/coordinates.js';
 
 const log = createLogger('IridescenceEffect');
 
@@ -35,6 +36,10 @@ export class IridescenceEffect extends EffectBase {
     
     /** @type {THREE.ShaderMaterial|null} */
     this.material = null;
+
+    // Light tracking
+    this.lights = new Map();
+    this.maxLights = 64;
     
     // Effect parameters
     this.params = {
@@ -159,7 +164,7 @@ export class IridescenceEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.75
+          default: 0.0
         },
         colorCycleSpeed: {
           type: 'slider',
@@ -273,6 +278,21 @@ export class IridescenceEffect extends EffectBase {
   initialize(renderer, scene, camera) {
     log.info('Initializing iridescence effect');
     this.scene = scene;
+
+    // Bound handlers for cleanup
+    this.onLightCreatedBound = this.onLightCreated.bind(this);
+    this.onLightUpdatedBound = this.onLightUpdated.bind(this);
+    this.onLightDeletedBound = this.onLightDeleted.bind(this);
+
+    // Listen for light updates
+    if (typeof Hooks !== 'undefined') {
+      Hooks.on('createAmbientLight', this.onLightCreatedBound);
+      Hooks.on('updateAmbientLight', this.onLightUpdatedBound);
+      Hooks.on('deleteAmbientLight', this.onLightDeletedBound);
+    }
+
+    // Initial sync
+    this.syncAllLights();
   }
 
   /**
@@ -329,7 +349,18 @@ export class IridescenceEffect extends EffectBase {
         uMaskThreshold: { value: this.params.maskThreshold },
 
         // Foundry darkness
-        uDarknessLevel: { value: 0.0 }
+        uDarknessLevel: { value: 0.0 },
+
+        // Foundry ambient environment colors (linear RGB)
+        uAmbientDaylight: { value: new THREE.Color(1.0, 1.0, 1.0) },
+        uAmbientDarkness: { value: new THREE.Color(0.14, 0.14, 0.28) },
+        uAmbientBrightest: { value: new THREE.Color(1.0, 1.0, 1.0) },
+
+        // Dynamic Lights
+        numLights: { value: 0 },
+        lightPosition: { value: new Float32Array(this.maxLights * 3) },
+        lightColor: { value: new Float32Array(this.maxLights * 3) },
+        lightConfig: { value: new Float32Array(this.maxLights * 4) }
       },
       vertexShader: this.getVertexShader(),
       fragmentShader: this.getFragmentShader(),
@@ -359,6 +390,141 @@ export class IridescenceEffect extends EffectBase {
     this.mesh.visible = this._enabled;
 
     log.debug('Iridescence overlay mesh created');
+
+    // Initial sync of light data to the new material
+    this.updateLightUniforms();
+  }
+
+  /* -------------------------------------------- */
+  /*  Light Management                            */
+  /* -------------------------------------------- */
+
+  syncAllLights() {
+    if (typeof canvas === 'undefined' || !canvas.lighting) return;
+    
+    this.lights.clear();
+    
+    // Get all ambient lights
+    const lights = canvas.lighting.placeables;
+    lights.forEach(light => {
+      this.addLight(light.document);
+    });
+    
+    this.updateLightUniforms();
+  }
+
+  addLight(doc) {
+    if (this.lights.size >= this.maxLights) return;
+    if (this.lights.has(doc.id)) return;
+    
+    const config = doc.config;
+    if (!config) return;
+    
+    // Extract color
+    let r = 1, g = 1, b = 1;
+    const colorInput = config.color;
+    
+    if (colorInput) {
+        try {
+            if (typeof colorInput === 'object' && colorInput.rgb) {
+                r = colorInput.rgb[0];
+                g = colorInput.rgb[1];
+                b = colorInput.rgb[2];
+            } else {
+                const c = (typeof foundry !== 'undefined' && foundry.utils?.Color) 
+                    ? foundry.utils.Color.from(colorInput)
+                    : new THREE.Color(colorInput);
+                r = c.r;
+                g = c.g;
+                b = c.b;
+            }
+        } catch (e) {
+            if (typeof colorInput === 'number') {
+                r = ((colorInput >> 16) & 0xff) / 255;
+                g = ((colorInput >> 8) & 0xff) / 255;
+                b = (colorInput & 0xff) / 255;
+            }
+        }
+    }
+    
+    const luminosity = config.luminosity ?? 0.5;
+    const intensity = luminosity * 2.0; 
+    
+    const dim = config.dim || 0;
+    const bright = config.bright || 0;
+    const radius = Math.max(dim, bright);
+    
+    if (radius === 0) return;
+    
+    const worldPos = Coordinates.toWorld(doc.x, doc.y);
+    
+    this.lights.set(doc.id, {
+      position: worldPos,
+      color: { r: r * intensity, g: g * intensity, b: b * intensity },
+      radius: radius,
+      dim: dim,
+      bright: bright,
+      attenuation: config.attenuation ?? 0.5
+    });
+  }
+
+  removeLight(id) {
+    if (this.lights.delete(id)) {
+      this.updateLightUniforms();
+    }
+  }
+
+  onLightCreated(doc) {
+    this.addLight(doc);
+    this.updateLightUniforms();
+  }
+
+  onLightUpdated(doc, changes) {
+    this.removeLight(doc.id);
+    this.addLight(doc);
+    this.updateLightUniforms();
+  }
+
+  onLightDeleted(doc) {
+    this.removeLight(doc.id);
+  }
+
+  updateLightUniforms() {
+    if (!this.material) return;
+    
+    const lightsArray = Array.from(this.lights.values());
+    const num = lightsArray.length;
+    
+    this.material.uniforms.numLights.value = num;
+    
+    const lightPos = this.material.uniforms.lightPosition.value;
+    const lightCol = this.material.uniforms.lightColor.value;
+    const lightCfg = this.material.uniforms.lightConfig.value;
+
+    // Pixels per distance unit
+    const pixelsPerUnit = (canvas && canvas.dimensions) ? (canvas.dimensions.size / canvas.dimensions.distance) : 1.0;
+
+    for (let i = 0; i < num; i++) {
+      const l = lightsArray[i];
+      const i3 = i * 3;
+      const i4 = i * 4;
+      
+      lightPos[i3] = l.position.x;
+      lightPos[i3 + 1] = l.position.y;
+      lightPos[i3 + 2] = 0;
+      
+      lightCol[i3] = l.color.r;
+      lightCol[i3 + 1] = l.color.g;
+      lightCol[i3 + 2] = l.color.b;
+      
+      const radiusPx = l.radius * pixelsPerUnit;
+      const brightPx = l.bright * pixelsPerUnit;
+      
+      lightCfg[i4] = radiusPx;
+      lightCfg[i4 + 1] = brightPx;
+      lightCfg[i4 + 2] = l.attenuation;
+      lightCfg[i4 + 3] = 0;
+    }
   }
 
   update(timeInfo) {
@@ -399,8 +565,40 @@ export class IridescenceEffect extends EffectBase {
     this.material.uniforms.uMaskThreshold.value = this.params.maskThreshold;
 
     // Update darkness
-    if (canvas?.scene?.environment?.darknessLevel !== undefined) {
-      this.material.uniforms.uDarknessLevel.value = canvas.scene.environment.darknessLevel;
+    try {
+      const scene = canvas?.scene;
+      const env = canvas?.environment;
+
+      if (scene?.environment?.darknessLevel !== undefined) {
+        this.material.uniforms.uDarknessLevel.value = scene.environment.darknessLevel;
+      }
+
+      const colors = env?.colors;
+      if (colors) {
+        const uniforms = this.material.uniforms;
+        
+        const applyColor = (src, targetColor) => {
+          if (!src || !targetColor) return;
+          let r = 1, g = 1, b = 1;
+          try {
+            if (Array.isArray(src)) {
+              r = src[0] ?? 1; g = src[1] ?? 1; b = src[2] ?? 1;
+            } else if (typeof src.r === 'number' && typeof src.g === 'number' && typeof src.b === 'number') {
+              r = src.r; g = src.g; b = src.b;
+            } else if (typeof src.toArray === 'function') {
+              const arr = src.toArray();
+              r = arr[0] ?? 1; g = arr[1] ?? 1; b = arr[2] ?? 1;
+            }
+          } catch (e) {}
+          targetColor.setRGB(r, g, b);
+        };
+
+        applyColor(colors.ambientDaylight,  uniforms.uAmbientDaylight.value);
+        applyColor(colors.ambientDarkness,  uniforms.uAmbientDarkness.value);
+        applyColor(colors.ambientBrightest, uniforms.uAmbientBrightest.value);
+      }
+    } catch (e) {
+      // Ignore
     }
   }
 
@@ -469,6 +667,17 @@ export class IridescenceEffect extends EffectBase {
       uniform float uParallaxStrength;
       uniform vec2 uCameraOffset;
       uniform float uMaskThreshold;
+      
+      // Foundry ambient environment colors (linear RGB).
+      uniform vec3 uAmbientDaylight;
+      uniform vec3 uAmbientDarkness;
+      uniform vec3 uAmbientBrightest;
+
+      // Dynamic Lights
+      uniform int numLights;
+      uniform vec3 lightPosition[${this.maxLights}];
+      uniform vec3 lightColor[${this.maxLights}];
+      uniform vec4 lightConfig[${this.maxLights}]; // radius, dim, attenuation, unused
 
       varying vec2 vUv;
       varying vec3 vWorldPosition;
@@ -544,11 +753,52 @@ export class IridescenceEffect extends EffectBase {
         // 6. Composition
         // Apply Darkness & Magic Glow
         // If Magic (1.0), ignore darkness (stay bright). If Physical (0.0), fade with darkness.
-        float envDarkness = 1.0 - uDarknessLevel;
-        float lightLevel = mix(envDarkness, 1.0, uIgnoreDarkness);
+
+        // Calculate Total Incident Light (Ambient + Dynamic)
+        // 1. Ambient
+        vec3 ambientTint = mix(uAmbientDaylight, uAmbientDarkness, uDarknessLevel);
+        // Fade ambient contribution based on darkness level (standard Foundry behavior for global light)
+        // But keep color tint.
+        // Ensure scene is never fully black (0.25 floor) so lights can work
+        float ambientStrength = max(1.0 - uDarknessLevel, 0.25);
+        vec3 ambientLight = ambientTint * ambientStrength;
+
+        // 2. Dynamic Lights
+        vec3 totalDynamicLight = vec3(0.0);
+        for (int i = 0; i < ${this.maxLights}; i++) {
+          if (i >= numLights) break;
+          
+          vec3 lPos = lightPosition[i];
+          vec3 lColor = lightColor[i];
+          float radius = lightConfig[i].x;
+          float dim = lightConfig[i].y;
+          float attenuation = lightConfig[i].z;
+          
+          float dist = distance(vWorldPosition.xy, lPos.xy);
+          
+          if (dist < radius) {
+            float d = dist / radius;
+            float inner = (radius > 0.0) ? clamp(dim / radius, 0.0, 0.99) : 0.0;
+            float falloff = 1.0 - smoothstep(inner, 1.0, d);
+            float linear = 1.0 - d;
+            float squared = 1.0 - d * d;
+            float lightIntensity = mix(linear, squared, attenuation) * falloff;
+            totalDynamicLight += lColor * lightIntensity;
+          }
+        }
+
+        vec3 totalIncidentLight = ambientLight + totalDynamicLight;
+        
+        // Mix between "Lit" (Physical) and "Self-Luminous" (Magical)
+        // If uIgnoreDarkness is 1.0, we act as if we are fully lit by white light (1.0)
+        // If uIgnoreDarkness is 0.0, we depend on totalIncidentLight
+        
+        // We use the luminance of totalIncidentLight to drive intensity
+        float lightLuma = dot(totalIncidentLight, vec3(0.299, 0.587, 0.114));
+        float litFactor = mix(lightLuma, 1.0, uIgnoreDarkness);
 
         // Apply alpha and all factors
-        vec3 finalColor = rainbowColor * maskVal * uIntensity * lightLevel * uAlpha;
+        vec3 finalColor = rainbowColor * maskVal * uIntensity * litFactor * uAlpha;
 
         gl_FragColor = vec4(finalColor, 1.0); // Alpha output is 1.0 because we use additive blending (src * 1 + dst)
       }

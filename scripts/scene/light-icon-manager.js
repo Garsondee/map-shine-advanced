@@ -32,6 +32,7 @@ export class LightIconManager {
     this.group = new THREE.Group();
     this.group.name = 'LightIcons';
     this.group.position.z = 4.0; // Above templates/notes so they are easy to see
+    this.group.visible = false;  // Start hidden until canvas-replacement drives visibility
     this.scene.add(this.group);
 
     // Default icon (Foundry core light icon)

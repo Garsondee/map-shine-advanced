@@ -1428,16 +1428,6 @@ function updateLayerVisibility() {
   if (canvas.regions) {
       canvas.regions.visible = (activeLayer === 'RegionLayer');
   }
-
-  // Drive Three.js light icon visibility from a single source of truth.
-  // In Gameplay mode (Three.js active), we always show light icons so they are
-  // available for selection and manipulation regardless of the specific tool.
-  // In Map Maker mode, the entire Three.js canvas is hidden, so we also hide
-  // the icons here for logical consistency.
-  if (lightIconManager && lightIconManager.setVisibility) {
-      const showIcons = !isMapMakerMode;
-      lightIconManager.setVisibility(showIcons);
-  }
 }
 
 /**
@@ -1520,6 +1510,17 @@ function updateInputMode() {
 
       const finalLayer = canvas.activeLayer?.name;
       const isEditMode = editLayers.some(l => finalLayer === l);
+
+      // Drive Three.js light icon visibility from a single source of truth.
+      // In Gameplay mode (Three.js active), show light icons only when the
+      // Lighting layer is the *final* active layer so they behave like
+      // Foundry's native handles. In Map Maker mode, the entire Three.js
+      // canvas is hidden, so we also hide the icons here for logical
+      // consistency.
+      if (lightIconManager && lightIconManager.setVisibility) {
+        const showIcons = (finalLayer === 'LightingLayer') && !isMapMakerMode;
+        lightIconManager.setVisibility(showIcons);
+      }
 
       if (wallManager && wallManager.setVisibility) {
         const showThreeWalls = finalLayer === 'WallsLayer' && !isMapMakerMode;

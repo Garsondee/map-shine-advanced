@@ -1397,10 +1397,6 @@ function updateLayerVisibility() {
   if (canvas.walls) {
       const isWallsActive = activeLayer === 'WallsLayer';
       canvas.walls.visible = isWallsActive;
-      if (wallManager && wallManager.setVisibility) {
-          const showThreeWalls = !isWallsActive && !isMapMakerMode;
-          wallManager.setVisibility(showThreeWalls);
-      }
   }
 
   // Tiles
@@ -1511,6 +1507,18 @@ function updateInputMode() {
     
     const isEditMode = editLayers.some(l => activeLayer === l);
     
+    // Drive Three.js wall line visibility based on the *final* active layer
+    // after Foundry has finished switching tools. We defer to the next tick
+    // to avoid reading a stale activeLayer during control changes.
+    if (wallManager && wallManager.setVisibility) {
+      setTimeout(() => {
+        if (!canvas?.ready) return;
+        const finalLayer = canvas.activeLayer?.name;
+        const showThreeWalls = finalLayer === 'WallsLayer' && !isMapMakerMode;
+        wallManager.setVisibility(showThreeWalls);
+      }, 0);
+    }
+    
     if (isEditMode) {
       pixiCanvas.style.pointerEvents = 'auto';
       log.debug(`Input Mode: PIXI (Edit: ${activeLayer})`);
@@ -1521,7 +1529,7 @@ function updateInputMode() {
 }
 
 /**
- * Restore Foundry's PIXI rendering (for cleanup/disabling module)
+ * Restore Foundry's native PIXI rendering state
  * @private
  */
 function restoreFoundryRendering() {

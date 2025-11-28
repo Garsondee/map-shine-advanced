@@ -217,11 +217,40 @@ export class DrawingManager {
    */
   createShape(doc, group, width, height) {
     const THREE = window.THREE;
-    const color = doc.strokeColor || 0xFFFFFF;
+
+    // Resolve stroke colour from the document. Foundry stores strokeColor as a
+    // numeric hex, but it may also be a string like "#ff0000" or a Number-
+    // wrapper object depending on how it's accessed. Fall back to fillColor if
+    // stroke is not set and always coerce to a primitive number for THREE.Color.
+    let strokeColor = doc.strokeColor;
+    if (typeof strokeColor === 'string') {
+      try {
+        const hex = strokeColor.replace('#', '');
+        const parsed = parseInt(hex, 16);
+        if (!Number.isNaN(parsed)) strokeColor = parsed;
+      } catch (_) {
+        // ignore and fall back below
+      }
+    }
+    if (strokeColor == null) strokeColor = doc.fillColor || 0xFFFFFF;
+
+    // Coerce Number objects or Color-like wrappers to a primitive.
+    if (strokeColor && typeof strokeColor === 'object' && typeof strokeColor.valueOf === 'function') {
+      strokeColor = strokeColor.valueOf();
+    }
+    strokeColor = Number(strokeColor);
+    if (!Number.isFinite(strokeColor)) strokeColor = 0xFFFFFF;
+
+    const color = strokeColor;
     const thickness = doc.strokeWidth || 2;
     const strokeAlpha = doc.strokeAlpha != null ? doc.strokeAlpha : 1.0;
     const fillType = doc.fillType;
-    const fillColor = doc.fillColor || 0x000000;
+    let fillColor = doc.fillColor || 0x000000;
+    if (fillColor && typeof fillColor === 'object' && typeof fillColor.valueOf === 'function') {
+      fillColor = fillColor.valueOf();
+    }
+    fillColor = Number(fillColor);
+    if (!Number.isFinite(fillColor)) fillColor = 0x000000;
     const fillAlpha = doc.fillAlpha != null ? doc.fillAlpha : 0;
     const shape = doc.shape || {};
     const type = shape.type;
@@ -249,9 +278,12 @@ export class DrawingManager {
       }
 
       // Basic smoothing: use a Catmull-Rom spline with a density informed by
-      // the document's bezierFactor (if present). Foundry multiplies this by 2.
+      // the document's bezierFactor (if present). Foundry multiplies this by 2,
+      // but we also enforce a higher base density so curves look smooth even
+      // when bezierFactor is small.
       const bezierFactor = typeof doc.bezierFactor === 'number' ? doc.bezierFactor : 1;
-      const smoothSegments = Math.max(1, Math.floor(vertexCount * (bezierFactor * 2)));
+      const baseSegments = vertexCount * 4;
+      const smoothSegments = Math.max(1, Math.floor(Math.max(baseSegments, vertexCount * (bezierFactor * 4))));
       let samplePoints = rawPoints;
 
       if (rawPoints.length >= 2) {
@@ -283,8 +315,12 @@ export class DrawingManager {
 
         const dx = p1.x - p0.x;
         const dy = p1.y - p0.y;
-        const length = Math.sqrt(dx * dx + dy * dy);
+        let length = Math.sqrt(dx * dx + dy * dy);
         if (length <= 0.0001) continue;
+
+        // Slightly over-extend each segment so neighbouring quads overlap,
+        // avoiding tiny gaps at joins.
+        length += thickness;
 
         const angle = Math.atan2(dy, dx);
         const segGeom = new THREE.PlaneGeometry(length, thickness);

@@ -62,6 +62,15 @@ export class InteractionManager {
       mesh: null,
       border: null
     };
+
+    // Right Click State (for HUD)
+    this.rightClickState = {
+      active: false,
+      time: 0,
+      startPos: new THREE.Vector2(),
+      tokenId: null,
+      threshold: 10 // Increased from 5 to 10 to prevent accidental panning
+    };
     
     // Create drag select visuals
     this.createSelectionBox();
@@ -256,8 +265,8 @@ export class InteractionManager {
    */
   onPointerDown(event) {
     try {
-        // Only handle left click for now
-        if (event.button !== 0) return;
+        // Allow Left (0) and Right (2) clicks
+        if (event.button !== 0 && event.button !== 2) return;
 
         // Get mouse position in NDC
         this.updateMouseCoords(event);
@@ -268,6 +277,39 @@ export class InteractionManager {
         // Collect interactive objects
         const tokenSprites = this.tokenManager.getAllTokenSprites();
         const wallGroup = this.wallManager.wallGroup;
+
+        // Handle Right Click (Potential HUD)
+        if (event.button === 2) {
+            // Raycast against tokens for HUD
+            const intersects = this.raycaster.intersectObjects(tokenSprites, false);
+            if (intersects.length > 0) {
+                const hit = intersects[0];
+                const sprite = hit.object;
+                const tokenDoc = sprite.userData.tokenDoc;
+                
+                log.debug(`Right click down on token: ${tokenDoc.name} (${tokenDoc.id})`);
+
+                // Only if we have permission (isOwner usually required for HUD)
+                // But Foundry allows right clicking to see non-interactive HUD parts? 
+                // Usually checks token.isOwner for full HUD.
+                // We'll initiate the click state and let HUD bind check permissions or we check here.
+                // Foundry: _canHUD -> isOwner.
+                
+                this.rightClickState.active = true;
+                this.rightClickState.tokenId = tokenDoc.id;
+                this.rightClickState.startPos.set(event.clientX, event.clientY);
+                this.rightClickState.time = Date.now();
+
+                // NOTE: We do NOT preventDefault or stopPropagation here because
+                // CameraController needs to see this event to start Panning (Right Drag).
+                // If the user moves the mouse > threshold, rightClickState.active becomes false
+                // and the HUD won't open (standard Foundry behavior).
+                return; 
+            } else {
+                log.debug('Right click down: No token hit');
+            }
+            return;
+        }
         
         // 1. Check for Wall/Door Interactions first (usually on top or distinct)
         // We raycast against wallGroup recursively
@@ -524,6 +566,85 @@ export class InteractionManager {
   }
 
   /**
+   * Update loop called by EffectComposer
+   * @param {TimeInfo} timeInfo 
+   */
+  update(timeInfo) {
+      // Keep HUD positioned correctly if open
+      if (canvas.tokens?.hud?.rendered && canvas.tokens.hud.object) {
+          this.updateHUDPosition();
+      }
+  }
+
+  /**
+   * Update Token HUD position to match Three.js camera
+   */
+  updateHUDPosition() {
+      const hud = canvas.tokens.hud;
+      const token = hud.object;
+      if (!token) return;
+      
+      // Get Three.js sprite for this token
+      // tokenManager might store data by ID
+      const spriteData = this.tokenManager.tokenSprites.get(token.id);
+      if (!spriteData || !spriteData.sprite) return;
+      
+      const sprite = spriteData.sprite;
+      
+      // Project world position to screen coordinates
+      // We use the sprite's position (which is center bottom usually, or center? TokenManager puts it at center)
+      // Token sprites are centered.
+      const pos = sprite.position.clone();
+      pos.project(this.sceneComposer.camera);
+      
+      // Convert NDC to CSS pixels
+      // NDC: [-1, 1] -> CSS: [0, width/height]
+      // Y is inverted in CSS (0 at top) vs NDC (1 at top)
+      const rect = this.canvasElement.getBoundingClientRect();
+      const width = rect.width;
+      const height = rect.height;
+      
+      const x = (pos.x + 1) * width / 2;
+      const y = - (pos.y - 1) * height / 2;
+      
+      // Update HUD element position
+      // Foundry's HUD usually centers itself based on object bounds, but since the object bounds
+      // (PIXI) are disconnected from the view, we must position it manually.
+      // The HUD element has absolute positioning.
+      // We'll center the HUD on the token.
+      
+      if (hud.element) {
+          // hud.element might be jQuery object or raw DOM or array
+          const hudEl = (hud.element instanceof jQuery || (hud.element.jquery)) ? hud.element[0] : hud.element;
+          
+          if (hudEl) {
+              const hudWidth = hudEl.offsetWidth;
+              const hudHeight = hudEl.offsetHeight;
+              
+              const left = x - hudWidth / 2;
+              const top = y - hudHeight / 2;
+              
+              // Log position for debugging
+              // log.debug(`HUD Position: ${left.toFixed(1)}, ${top.toFixed(1)} (Z: ${hudEl.style.zIndex})`);
+
+              if (typeof hud.element.css === 'function') {
+                  hud.element.css({
+                      left: left,
+                      top: top,
+                      zIndex: 100, // Force Z-index
+                      pointerEvents: 'auto' // Force interactive
+                  });
+              } else if (hudEl.style) {
+                  hudEl.style.left = `${left}px`;
+                  hudEl.style.top = `${top}px`;
+                  hudEl.style.zIndex = '100';
+                  hudEl.style.pointerEvents = 'auto';
+              }
+          }
+      }
+  }
+
+  /**
    * Handle Door Click
    * @param {THREE.Group} doorGroup 
    * @param {PointerEvent} event 
@@ -610,6 +731,15 @@ export class InteractionManager {
    */
   onPointerMove(event) {
     try {
+        // Check Right Click Threshold (Cancel HUD if dragged)
+        if (this.rightClickState.active) {
+            const dist = Math.hypot(event.clientX - this.rightClickState.startPos.x, event.clientY - this.rightClickState.startPos.y);
+            if (dist > this.rightClickState.threshold) {
+                log.debug(`Right click cancelled: moved ${dist.toFixed(1)}px (threshold ${this.rightClickState.threshold}px)`);
+                this.rightClickState.active = false; // It's a drag/pan, not a click
+            }
+        }
+
         // Case 0: Wall Drawing
         if (this.wallDraw.active) {
           this.updateMouseCoords(event);
@@ -970,6 +1100,32 @@ export class InteractionManager {
    */
   async onPointerUp(event) {
     try {
+        // Handle Right Click (HUD)
+        if (event.button === 2 && this.rightClickState.active) {
+            const tokenId = this.rightClickState.tokenId;
+            log.debug(`Right click up: Opening HUD for ${tokenId}`);
+            
+            this.rightClickState.active = false;
+            this.rightClickState.tokenId = null;
+
+            const token = canvas.tokens.get(tokenId);
+            if (token && token.layer.hud) {
+                // Check permission again just to be safe, though HUD will also check
+                if (token.document.isOwner) {
+                    token.layer.hud.bind(token);
+                    // Force immediate position update
+                    this.updateHUDPosition();
+                } else {
+                    log.warn(`User is not owner of token ${token.name}, cannot open HUD`);
+                }
+            } else {
+                log.warn(`Token ${tokenId} or HUD not found`);
+            }
+            // Prevent context menu since we handled it
+            event.preventDefault();
+            return;
+        }
+
         // Handle Wall Endpoint Drag End
         if (this.dragState.active && this.dragState.mode === 'wallEndpoint') {
           this.dragState.active = false;

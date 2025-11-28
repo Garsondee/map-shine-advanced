@@ -452,6 +452,7 @@ async function createThreeCanvas(scene) {
     // Step 5: Initialize interaction manager (Selection, Drag/Drop)
     interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager, wallManager);
     interactionManager.initialize();
+    effectComposer.addUpdatable(interactionManager); // Register for updates (HUD positioning)
     log.info('Interaction manager initialized');
 
     // Step 6: Initialize drop handler (for creating new items)
@@ -1603,6 +1604,23 @@ function ensureUILayering() {
     log.debug('Navigation z-index set to 100');
   }
   
+  // HUD Layer (Token HUD, Tile HUD, etc.)
+  const hudLayer = document.getElementById('hud');
+  if (hudLayer) {
+    hudLayer.style.zIndex = '100';
+    hudLayer.style.pointerEvents = 'none'; // Container is transparent
+    log.debug('HUD layer z-index set to 100');
+    
+    // Enable pointer events for direct children (the actual HUDs)
+    // We can't select them all easily as they are dynamic, but we can set a rule
+    // or observer? Or just rely on the HUDs having pointer-events: auto in CSS?
+    // Usually Foundry CSS handles this, but if we override the container...
+    // Let's force it on children if possible, or assume Foundry CSS is sufficient once container allows it.
+    // Actually, setting container to 'none' propagates unless children override it.
+    // Foundry's #hud usually has pointer-events: none by default? 
+    // Let's just trust standard CSS for children, but ensure container is above canvas.
+  }
+
   // Main UI container - make it transparent to pointer events over canvas area
   // This allows mouse events to pass through to the Three.js canvas
   const uiContainer = document.getElementById('ui');

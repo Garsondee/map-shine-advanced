@@ -25,16 +25,23 @@
 export class LightMesh {
   /**
    * @param {THREE.Vector2} centerWorld - Light origin in world space (x,y).
-   * @param {number} radiusPx - Bright or max radius in pixels (Three world units).
+   * @param {number} outerRadiusPx - Max (dim) radius in pixels (Three world units).
    * @param {{r:number,g:number,b:number}} color - Linear RGB color (0..1).
    * @param {Object} [options]
+   * @param {number} [options.innerRadiusPx] - Bright radius in pixels. Defaults to 0.5 * outerRadiusPx.
    * @param {Array<number>} [options.worldPoints] - Optional initial polygon points as [x0,y0,x1,y1,...] in world space.
    */
-  constructor(centerWorld, radiusPx, color, options = {}) {
+  constructor(centerWorld, outerRadiusPx, color, options = {}) {
     const THREE = window.THREE;
 
     this.center = centerWorld.clone();
-    this.radiusPx = Math.max(1, radiusPx || 1);
+    this.outerRadiusPx = Math.max(1, outerRadiusPx || 1);
+    this.innerRadiusPx = Math.max(
+      1,
+      typeof options.innerRadiusPx === 'number' && options.innerRadiusPx > 0
+        ? Math.min(options.innerRadiusPx, this.outerRadiusPx)
+        : this.outerRadiusPx * 0.5
+    );
     this.color = { r: color?.r ?? 1, g: color?.g ?? 1, b: color?.b ?? 1 };
 
     /** @type {THREE.Mesh} */
@@ -44,7 +51,8 @@ export class LightMesh {
     this.material = new THREE.ShaderMaterial({
       uniforms: {
         uColor: { value: new THREE.Color(this.color.r, this.color.g, this.color.b) },
-        uRadius: { value: this.radiusPx }
+        uInnerRadius: { value: this.innerRadiusPx },
+        uOuterRadius: { value: this.outerRadiusPx }
       },
       vertexShader: `
         varying vec2 vLocalPos;
@@ -57,19 +65,28 @@ export class LightMesh {
       fragmentShader: `
         varying vec2 vLocalPos;
         uniform vec3 uColor;
-        uniform float uRadius;
+        uniform float uInnerRadius;
+        uniform float uOuterRadius;
 
         void main() {
           float dist = length(vLocalPos);
-          if (dist >= uRadius) discard;
+          if (dist >= uOuterRadius) discard;
 
-          // Smooth falloff similar to Foundry: inner bright core then soft dim.
-          float d = dist / uRadius;
-          float inner = 0.5; // fraction of radius that is "bright"
-          float falloff = 1.0 - smoothstep(inner, 1.0, d);
+          // Two-zone falloff:
+          // - 0 .. innerRadius  : tight, very bright core
+          // - innerRadius .. outerRadius : much softer, dim halo
+          float dOuter = dist / max(uOuterRadius, 1e-4);
+          float innerFrac = clamp(uInnerRadius / max(uOuterRadius, 1e-4), 0.0, 0.99);
 
-          // Simple quadratic falloff for a bit of punch
-          float intensity = pow(max(0.0, falloff), 2.0);
+          float coreRegion = 1.0 - smoothstep(0.0, innerFrac, dOuter);
+          float haloRegion = 1.0 - smoothstep(innerFrac, 1.0, dOuter);
+
+          // Make the core significantly brighter than the halo so the
+          // bright radius is clearly visible.
+          float coreIntensity = pow(coreRegion, 1.2) * 1.8; // sharp, bright core
+          float haloIntensity = pow(haloRegion, 1.0) * 0.18; // much dimmer halo
+
+          float intensity = coreIntensity + haloIntensity;
 
           gl_FragColor = vec4(uColor * intensity, intensity);
         }
@@ -139,7 +156,7 @@ export class LightMesh {
   _buildFallbackCircle() {
     const THREE = window.THREE;
     const segments = 32;
-    const geometry = new THREE.CircleGeometry(this.radiusPx, segments);
+    const geometry = new THREE.CircleGeometry(this.outerRadiusPx, segments);
 
     if (!this.mesh) {
       this.mesh = new THREE.Mesh(geometry, this.material);
@@ -154,14 +171,22 @@ export class LightMesh {
   /**
    * Update color and radius uniforms.
    * @param {{r:number,g:number,b:number}} color
-   * @param {number} radiusPx
+   * @param {number} outerRadiusPx
+   * @param {number} [innerRadiusPx]
    */
-  updateAppearance(color, radiusPx) {
+  updateAppearance(color, outerRadiusPx, innerRadiusPx) {
     this.color = { r: color?.r ?? 1, g: color?.g ?? 1, b: color?.b ?? 1 };
-    this.radiusPx = Math.max(1, radiusPx || 1);
+    this.outerRadiusPx = Math.max(1, outerRadiusPx || 1);
+    this.innerRadiusPx = Math.max(
+      1,
+      typeof innerRadiusPx === 'number' && innerRadiusPx > 0
+        ? Math.min(innerRadiusPx, this.outerRadiusPx)
+        : this.outerRadiusPx * 0.5
+    );
 
     this.material.uniforms.uColor.value.setRGB(this.color.r, this.color.g, this.color.b);
-    this.material.uniforms.uRadius.value = this.radiusPx;
+    this.material.uniforms.uOuterRadius.value = this.outerRadiusPx;
+    this.material.uniforms.uInnerRadius.value = this.innerRadiusPx;
   }
 
   /** Dispose geometry and material. */

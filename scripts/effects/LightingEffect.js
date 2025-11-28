@@ -304,6 +304,22 @@ export class LightingEffect extends EffectBase {
             }
           }
         }
+
+        // Darkness punch and global brightness gain
+        float dynamicBoost = mix(1.0, uDarknessBoost, clampedDarkness);
+        totalLight *= (dynamicBoost * globalIntensity);
+
+        // Core boost: amplify only the *brightest* portion of the light map so the
+        // inner core pops more without inflating the full radius. We derive a
+        // simple mask from the current light intensity and gate the boost so that
+        // low-intensity pixels near the edge are minimally affected.
+        if (uCoreBoost > 0.0) {
+          float maxC = max(max(totalLight.r, totalLight.g), totalLight.b);
+          // coreMask ~0 for dim pixels, ~1 for very bright ones.
+          float coreMask = smoothstep(0.55, 0.95, maxC);
+          float coreFactor = 1.0 + uCoreBoost * coreMask;
+          totalLight *= coreFactor;
+        }
         
         // Apply Light Map Contrast
         if (uContrast != 1.0) {
@@ -536,10 +552,11 @@ export class LightingEffect extends EffectBase {
     const radius = Math.max(dim, bright);
     if (radius === 0) return;
 
-    // Convert radius from distance units to pixels
+    // Convert radii from distance units to pixels
     const d = canvas.dimensions;
     const pixelsPerUnit = d ? (d.size / d.distance) : 1.0;
     const radiusPx = radius * pixelsPerUnit;
+    const brightPx = Math.max(1, bright * pixelsPerUnit);
 
     // World position (center of light)
     const worldPos = Coordinates.toWorld(doc.x, doc.y);
@@ -565,7 +582,8 @@ export class LightingEffect extends EffectBase {
     }
 
     const helper = new LightMesh(center, radiusPx, { r: r * intensity, g: g * intensity, b: b * intensity }, {
-      worldPoints
+      worldPoints,
+      innerRadiusPx: brightPx
     });
 
     if (this.lightScene && helper.mesh) {

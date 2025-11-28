@@ -216,21 +216,75 @@ export class DrawingManager {
    * @param {number} height - Drawing box height
    */
   createShape(doc, group, width, height) {
+    const THREE = window.THREE;
     const color = doc.strokeColor || 0xFFFFFF;
     const thickness = doc.strokeWidth || 2;
+    const strokeAlpha = doc.strokeAlpha != null ? doc.strokeAlpha : 1.0;
+    const fillType = doc.fillType;
+    const fillColor = doc.fillColor || 0x000000;
+    const fillAlpha = doc.fillAlpha != null ? doc.fillAlpha : 0;
     
     // If no stroke, use fill color?
     // For now just always draw a debug box if not text
-    
-    const geometry = new THREE.EdgesGeometry(new THREE.PlaneGeometry(width, height));
-    const material = new THREE.LineBasicMaterial({ color: new THREE.Color(color) });
-    const line = new THREE.LineSegments(geometry, material);
-    
-    // Geometry is already centered; place it at the group origin so it
-    // aligns with the text sprite and rotates around the drawing center.
-    line.position.set(0, 0, 0);
-    
-    group.add(line);
+
+    // Inset the rectangle by half the stroke width on each side, similar to
+    // Foundry's use of lineWidth / 2 in _refreshShape.
+    const innerWidth = Math.max(width - thickness, 0);
+    const innerHeight = Math.max(height - thickness, 0);
+
+    // Optional fill (solid color only, patterns are ignored for now)
+    if (fillType && fillAlpha > 0) {
+      const fillGeometry = new THREE.PlaneGeometry(innerWidth, innerHeight);
+      const fillMaterial = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(fillColor),
+        transparent: true,
+        opacity: fillAlpha,
+        depthTest: true,
+        depthWrite: false
+      });
+      const fillMesh = new THREE.Mesh(fillGeometry, fillMaterial);
+      fillMesh.position.set(0, 0, 0);
+      group.add(fillMesh);
+    }
+
+    // Border band: use a Shape with an inner hole so thickness is geometry,
+    // not line width (WebGL lineWidth is effectively 1px).
+    const halfW = width / 2;
+    const halfH = height / 2;
+    const innerHalfW = innerWidth / 2;
+    const innerHalfH = innerHeight / 2;
+
+    const outerShape = new THREE.Shape();
+    outerShape.moveTo(-halfW, -halfH);
+    outerShape.lineTo( halfW, -halfH);
+    outerShape.lineTo( halfW,  halfH);
+    outerShape.lineTo(-halfW,  halfH);
+    outerShape.lineTo(-halfW, -halfH);
+
+    // Inner hole (clockwise vs CCW is handled by ShapeGeometry)
+    if (innerWidth > 0 && innerHeight > 0) {
+      const innerPath = new THREE.Path();
+      innerPath.moveTo(-innerHalfW, -innerHalfH);
+      innerPath.lineTo( innerHalfW, -innerHalfH);
+      innerPath.lineTo( innerHalfW,  innerHalfH);
+      innerPath.lineTo(-innerHalfW,  innerHalfH);
+      innerPath.lineTo(-innerHalfW, -innerHalfH);
+      outerShape.holes.push(innerPath);
+    }
+
+    const borderGeometry = new THREE.ShapeGeometry(outerShape);
+    const borderMaterial = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(color),
+      transparent: strokeAlpha < 1.0,
+      opacity: strokeAlpha,
+      side: THREE.DoubleSide,
+      depthTest: true,
+      depthWrite: false
+    });
+
+    const borderMesh = new THREE.Mesh(borderGeometry, borderMaterial);
+    borderMesh.position.set(0, 0, 0);
+    group.add(borderMesh);
   }
 
   /**

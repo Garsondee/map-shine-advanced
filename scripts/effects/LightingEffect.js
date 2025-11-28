@@ -8,6 +8,7 @@
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
+import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('LightingEffect');
 
@@ -45,6 +46,30 @@ export class LightingEffect extends EffectBase {
     
     // Material/Shader management
     this.uniforms = null;
+    
+    // Roof Occlusion
+    // PREFERRED PATTERN (for lighting vs. overhead tiles):
+    // - Overhead tiles are rendered once into a dedicated "roof alpha" render
+    //   target (screen-space RGBA, Layer 20 only).
+    // - The _Outdoors mask from WeatherController (uRoofMap) is used to decide
+    //   whether a light source is "indoor" (dark) or "outdoor" (bright).
+    // - In the lighting shader we:
+    //     * Reconstruct world-space XY for each shaded pixel from the camera
+    //       view bounds.
+    //     * Sample uRoofAlphaMap at the current pixel to get the composite roof
+    //       opacity above the scene (opaque, semi-transparent, or fully hidden).
+    //     * For each light, sample uRoofMap at the light's position to decide
+    //       if it is indoors.
+    //     * If a light is indoors, attenuate its contribution by (1 - roofAlpha)
+    //       so opaque roof pixels block it completely, semi-transparent parts
+    //       leak light, and hidden roofs allow full contribution.
+    // - This keeps lighting behavior consistent with particle occlusion (rain,
+    //   fire, etc.) while giving per-pixel control over how much light can pass
+    //   through roofs.
+    // New roof-aware lighting features should follow this pattern instead of
+    // trying to cull lights on the CPU.
+    this.roofAlphaTarget = null;
+    this.ROOF_LAYER = 20;
   }
 
   /**
@@ -123,6 +148,12 @@ export class LightingEffect extends EffectBase {
     this.syncAllLights();
   }
 
+  onResize(width, height) {
+    if (this.roofAlphaTarget) {
+      this.roofAlphaTarget.setSize(width, height);
+    }
+  }
+
   /**
    * Set the base mesh (Legacy - no longer needed for Post-Process, but kept for API compatibility if called)
    */
@@ -134,10 +165,29 @@ export class LightingEffect extends EffectBase {
     const THREE = window.THREE;
     
     // Uniforms for N lights + Scene Context
+    // NOTE: Roof occlusion uniforms mirror the shared _Outdoors pattern used
+    // by WeatherParticles / FireSparksEffect, but here we:
+    //   - Use uRoofMap + uSceneBounds to classify lights as indoor/outdoor.
+    //   - Use uRoofAlphaMap (screen-space pass of overhead tiles) to compute
+    //     how much roof opacity sits above each shaded pixel.
+    // This combination lets us do per-pixel, per-light indoor lighting that
+    // respects semi-transparent and hidden roofs.
     this.uniforms = {
       tDiffuse: { value: null }, // Input scene texture
       uViewOffset: { value: new THREE.Vector2() }, // Camera World Pos (Bottom-Left)
       uViewSize: { value: new THREE.Vector2() },   // Camera World View Size
+      
+      // Roof Occlusion Uniforms
+      // uRoofMap       : World-space _Outdoors mask (dark = indoors, bright = outdoors)
+      // uRoofAlphaMap  : Screen-space alpha of overhead tiles (Layer 20 pre-pass)
+      // uSceneBounds   : (sceneX, sceneY, sceneWidth, sceneHeight) for mapping
+      //                  world XY into 0..1 UVs when sampling uRoofMap.
+      // uHasRoofMap    : Simple 0/1 gate so we can disable the mask entirely
+      //                  when no _Outdoors texture is present.
+      uRoofMap: { value: null },      // _Outdoors mask
+      uRoofAlphaMap: { value: null }, // Real-time overhead tile alpha
+      uSceneBounds: { value: new THREE.Vector4(0,0,1,1) }, // Scene bounds for UV mapping
+      uHasRoofMap: { value: 0.0 },
       
       // Base ambient contribution
       ambientColor: { value: new THREE.Color(0.02, 0.02, 0.02) },
@@ -180,6 +230,11 @@ export class LightingEffect extends EffectBase {
       uniform sampler2D tDiffuse;
       uniform vec2 uViewOffset;
       uniform vec2 uViewSize;
+      
+      uniform sampler2D uRoofMap;
+      uniform sampler2D uRoofAlphaMap;
+      uniform vec4 uSceneBounds;
+      uniform float uHasRoofMap;
       
       uniform vec3 ambientColor;
       uniform float globalIntensity;
@@ -230,10 +285,37 @@ export class LightingEffect extends EffectBase {
         // We start at 0.0 because the Base Color already contains the ambient light.
         vec3 totalLight = vec3(0.0);
         
+        // Pre-sample roof alpha at this pixel (Screen Space)
+        // This is the composite opacity of all overhead tiles rendered in the
+        // Roof Alpha Pass (see render()).
+        float roofAlpha = texture2D(uRoofAlphaMap, vUv).a;
+        
         for (int i = 0; i < ${this.maxLights}; i++) {
           if (i >= numLights) break;
           
           vec3 lPos = lightPosition[i];
+          
+          // Check if this light is Indoors (under a roof)
+          // We sample the uRoofMap at the light's world position. Dark
+          // (_Outdoors < 0.5) = Indoors, Bright (>= 0.5) = Outdoors.
+          float isIndoor = 0.0;
+          if (uHasRoofMap > 0.5) {
+             // Map World Pos -> UV in the shared _Outdoors mask
+             vec2 lUV = vec2(
+               (lPos.x - uSceneBounds.x) / uSceneBounds.z,
+               1.0 - (lPos.y - uSceneBounds.y) / uSceneBounds.w
+             );
+             // Sample bounds check
+             if (lUV.x >= 0.0 && lUV.x <= 1.0 && lUV.y >= 0.0 && lUV.y <= 1.0) {
+                // Dark (0) = Indoors, Bright (1) = Outdoors
+                float outdoorVal = texture2D(uRoofMap, lUV).r;
+                if (outdoorVal < 0.5) isIndoor = 1.0;
+             } else {
+                // Light is outside the scene bounds -> assume Outdoors
+                isIndoor = 0.0;
+             }
+          }
+          
           vec3 lColor = lightColor[i];
           float radius = lightConfig[i].x;
           float dim = lightConfig[i].y;
@@ -269,6 +351,20 @@ export class LightingEffect extends EffectBase {
             
             // Mix with ambient tint
             vec3 tintedLightColor = satColor * mix(vec3(1.0), ambientTint, uAmbientMix);
+
+            // Apply Roof Occlusion for Indoor Lights
+            // PREFERRED PATTERN (Lighting + Roofs):
+            // - Light classification uses the world-space _Outdoors mask.
+            // - Occlusion strength comes from the screen-space roof alpha.
+            //   * roofAlpha = 1.0 (Opaque roof)     -> 100% blocked
+            //   * roofAlpha = 0.0 (Hidden / no roof)-> 0% blocked
+            //   * roofAlpha = 0.5 (Semi-transparent)-> 50% blocked
+            // - Outdoor lights ignore roofAlpha entirely so roofs can still be
+            //   lit from above by sun/moon or other external sources.
+            if (isIndoor > 0.5) {
+               float occlusion = roofAlpha;
+               lightIntensity *= (1.0 - occlusion);
+            }
 
             totalLight += tintedLightColor * lightIntensity * dynamicBoost;
           }
@@ -320,6 +416,59 @@ export class LightingEffect extends EffectBase {
 
   render(renderer, scene, camera) {
     if (!this.enabled || !this.material || !this.material.uniforms.tDiffuse.value) return;
+
+    const THREE = window.THREE;
+
+    // -------------------------------------------------------
+    // Roof Alpha Pass
+    // Render overhead tiles (Layer 20) to an off-screen target
+    // so we can sample their opacity in the lighting shader.
+    // -------------------------------------------------------
+    if (!this.roofAlphaTarget) {
+      const size = new THREE.Vector2();
+      renderer.getSize(size);
+      this.roofAlphaTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    }
+    
+    // Save state
+    const oldTarget = renderer.getRenderTarget();
+    const oldClearAlpha = renderer.getClearAlpha();
+    const oldClearColor = new THREE.Color();
+    renderer.getClearColor(oldClearColor);
+    
+    // Setup Roof Pass
+    renderer.setRenderTarget(this.roofAlphaTarget);
+    renderer.setClearColor(0x000000, 0.0); // Transparent background
+    renderer.clear();
+    
+    // Switch Camera Layers
+    // We only want to see the ROOF_LAYER (20).
+    // Standard layer (0) should be hidden for this pass.
+    camera.layers.disable(0); 
+    camera.layers.enable(this.ROOF_LAYER); 
+    
+    // Render Roofs
+    renderer.render(scene, camera);
+    
+    // Restore Camera Layers
+    camera.layers.disable(this.ROOF_LAYER);
+    camera.layers.enable(0); 
+    
+    // Restore Renderer State
+    renderer.setRenderTarget(oldTarget);
+    renderer.setClearColor(oldClearColor, oldClearAlpha);
+    
+    // Bind Roof Alpha Map to Lighting Shader
+    this.material.uniforms.uRoofAlphaMap.value = this.roofAlphaTarget.texture;
+
+    // -------------------------------------------------------
+    // Main Lighting Pass
+    // -------------------------------------------------------
 
     // Calculate View Bounds for World Position Reconstruction
     if (camera && camera.isPerspectiveCamera) {
@@ -516,6 +665,20 @@ export class LightingEffect extends EffectBase {
       const rawGI = (typeof p.globalIntensity === 'number') ? p.globalIntensity : 0.8;
       const clampedGI = Math.max(0.1, Math.min(rawGI, 0.9));
       u.globalIntensity.value = clampedGI;
+
+      // Update Roof Uniforms
+      if (weatherController && weatherController.roofMap) {
+        u.uRoofMap.value = weatherController.roofMap;
+        u.uHasRoofMap.value = 1.0;
+      } else {
+        u.uRoofMap.value = null;
+        u.uHasRoofMap.value = 0.0;
+      }
+
+      if (canvas && canvas.dimensions) {
+        const d = canvas.dimensions;
+        u.uSceneBounds.value.set(d.sceneX, d.sceneY, d.sceneWidth, d.sceneHeight);
+      }
 
       const ac = p.ambientColor || { r: 0.02, g: 0.02, b: 0.02 };
       const ar = Math.max(0.0, Math.min(ac.r ?? 0.02, 0.06));

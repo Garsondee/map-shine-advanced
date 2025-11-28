@@ -537,6 +537,16 @@ export class TileManager {
     // Store overhead status for update loop
     sprite.userData.isOverhead = isOverhead;
     
+    // Layer Management for Roof Masking
+    // We use Layer 20 for overhead tiles so LightingEffect can render a separate
+    // "Roof Alpha Mask" to handle indoor light occlusion.
+    const ROOF_LAYER = 20;
+    if (isOverhead) {
+      sprite.layers.enable(ROOF_LAYER);
+    } else {
+      sprite.layers.disable(ROOF_LAYER);
+    }
+    
     let zBase = Z_FOREGROUND;
     
     if (isOverhead) {

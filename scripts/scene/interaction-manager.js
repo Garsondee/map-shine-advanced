@@ -71,9 +71,20 @@ export class InteractionManager {
       tokenId: null,
       threshold: 10 // Increased from 5 to 10 to prevent accidental panning
     };
+
+    // Light Placement State
+    this.lightPlacement = {
+      active: false,
+      start: new THREE.Vector3(),
+      current: new THREE.Vector3(),
+      previewGroup: null,
+      previewFill: null,
+      previewBorder: null
+    };
     
     // Create drag select visuals
     this.createSelectionBox();
+    this.createLightPreview();
     
     /** @type {string|null} ID of currently hovered token */
     this.hoveredTokenId = null;
@@ -147,6 +158,46 @@ export class InteractionManager {
     if (this.sceneComposer.scene) {
       this.sceneComposer.scene.add(this.dragSelect.mesh);
       this.sceneComposer.scene.add(this.dragSelect.border);
+    }
+  }
+
+  /**
+   * Create light placement preview visuals
+   * @private
+   */
+  createLightPreview() {
+    const THREE = window.THREE;
+
+    this.lightPlacement.previewGroup = new THREE.Group();
+    this.lightPlacement.previewGroup.name = 'LightPlacementPreview';
+    this.lightPlacement.previewGroup.visible = false;
+    // Z-index just above ground/floor but below tokens
+    this.lightPlacement.previewGroup.position.z = 5;
+
+    // Fill (Yellow semi-transparent)
+    const geometry = new THREE.CircleGeometry(1, 64);
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xFFFFBB,
+      transparent: true,
+      opacity: 0.2,
+      depthTest: false
+    });
+    this.lightPlacement.previewFill = new THREE.Mesh(geometry, material);
+    this.lightPlacement.previewGroup.add(this.lightPlacement.previewFill);
+
+    // Border (Yellow solid)
+    const borderGeo = new THREE.EdgesGeometry(geometry);
+    const borderMat = new THREE.LineBasicMaterial({
+      color: 0xFFFFBB,
+      transparent: true,
+      opacity: 0.8,
+      depthTest: false
+    });
+    this.lightPlacement.previewBorder = new THREE.LineSegments(borderGeo, borderMat);
+    this.lightPlacement.previewGroup.add(this.lightPlacement.previewBorder);
+
+    if (this.sceneComposer.scene) {
+      this.sceneComposer.scene.add(this.lightPlacement.previewGroup);
     }
   }
 
@@ -434,33 +485,29 @@ export class InteractionManager {
 
           const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
 
-          // Derive a reasonable default radius from scene dimensions. We use a
-          // slightly larger radius than Foundry's tiny default so the pool of
-          // light is clearly visible in the Three.js overlay.
-          const distance = canvas.dimensions?.distance || 5;
-          const defaultBright = distance * 4; // in scene distance units
-          const defaultDim = distance * 8;
+          // Snap start position (Shift skips snap)
+          let snapped = foundryPos;
+          if (!event.shiftKey) {
+             const M = CONST.GRID_SNAPPING_MODES;
+             // Snap to grid center/vertex/etc based on resolution like Foundry
+             snapped = this.snapToGrid(foundryPos.x, foundryPos.y, M.CENTER | M.VERTEX | M.CORNER | M.SIDE_MIDPOINT);
+          }
+          const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
 
-          const data = {
-            x: foundryPos.x,
-            y: foundryPos.y,
-            config: {
-              // Distances are in scene units; Foundry will convert to pixels internally
-              bright: defaultBright,
-              dim: defaultDim,
-              luminosity: 0.5,
-              attenuation: 0.5,
-              rotation: 0,
-              angle: 360,
-              color: null, // Use Foundry default color
-              darkness: { min: 0, max: 1 }
-            }
-          };
+          // Initialize Drag State
+          this.lightPlacement.active = true;
+          this.lightPlacement.start.set(snappedWorld.x, snappedWorld.y, 0);
+          this.lightPlacement.current.set(snappedWorld.x, snappedWorld.y, 0);
+          
+          // Initialize Visuals
+          this.lightPlacement.previewGroup.position.copy(this.lightPlacement.start);
+          this.lightPlacement.previewGroup.position.z = 5; // Keep above ground
+          this.lightPlacement.previewGroup.scale.set(0.1, 0.1, 1); // Tiny start
+          this.lightPlacement.previewGroup.visible = true;
 
-          try {
-            canvas.scene.createEmbeddedDocuments('AmbientLight', [data]);
-          } catch (e) {
-            log.error('Failed to create AmbientLight from Three.js interaction', e);
+          // Disable camera controls
+          if (window.MapShine?.cameraController) {
+             window.MapShine.cameraController.enabled = false;
           }
 
           // Do not start token selection when placing a light
@@ -830,6 +877,31 @@ export class InteractionManager {
           return;
         }
 
+        // Case 0.25: Light Placement Drag
+        if (this.lightPlacement.active) {
+             this.updateMouseCoords(event);
+             const worldPos = this.viewportToWorld(event.clientX, event.clientY, 0);
+             if (worldPos) {
+                 // Update current position (snap not strictly required for radius, but usually destination is free)
+                 // Foundry's light drag usually doesn't snap destination unless Shift?
+                 // Actually code says: "Snap the origin... Update the light radius... const radius = Math.hypot(destination.x - origin.x, ...)"
+                 // Destination is raw event data usually.
+                 this.lightPlacement.current.set(worldPos.x, worldPos.y, 0);
+                 
+                 // Calculate radius in World Units
+                 const dx = this.lightPlacement.current.x - this.lightPlacement.start.x;
+                 const dy = this.lightPlacement.current.y - this.lightPlacement.start.y;
+                 const radius = Math.sqrt(dx*dx + dy*dy);
+                 
+                 // Update Visuals
+                 // Circle geometry is radius 1, so we scale by radius
+                 // Minimum visibility
+                 const scale = Math.max(radius, 0.1);
+                 this.lightPlacement.previewGroup.scale.set(scale, scale, 1);
+             }
+             return;
+        }
+
         // Case 0.5: Wall Endpoint Drag
         if (this.dragState.active && this.dragState.mode === 'wallEndpoint') {
             this.updateMouseCoords(event);
@@ -1171,6 +1243,71 @@ export class InteractionManager {
             }
             // Prevent context menu since we handled it
             event.preventDefault();
+            return;
+        }
+
+        // Handle Light Placement End
+        if (this.lightPlacement.active) {
+            this.lightPlacement.active = false;
+            this.lightPlacement.previewGroup.visible = false;
+
+            // Re-enable camera controls
+            if (window.MapShine?.cameraController) {
+                window.MapShine.cameraController.enabled = true;
+            }
+
+            // Calculate final parameters
+            const startWorld = this.lightPlacement.start;
+            const currentWorld = this.lightPlacement.current;
+
+            // Convert to Foundry Coords
+            const startF = Coordinates.toFoundry(startWorld.x, startWorld.y);
+            const currentF = Coordinates.toFoundry(currentWorld.x, currentWorld.y);
+
+            // Calculate Radius in Pixels
+            const dx = currentF.x - startF.x;
+            const dy = currentF.y - startF.y;
+            const radiusPixels = Math.hypot(dx, dy);
+
+            // Minimum threshold to prevent accidental tiny lights (e.g. just a click)
+            // If click (< 10px drag), use default logic
+            let bright, dim;
+            const isClick = radiusPixels < 10;
+
+            if (isClick) {
+                const distance = canvas.dimensions?.distance || 5;
+                dim = distance * 8; // Default dim
+                bright = distance * 4; // Default bright
+            } else {
+                // Convert Pixel Radius to Distance Units
+                // dim = radius * (distance / size)
+                const conversion = canvas.dimensions.distance / canvas.dimensions.size;
+                dim = radiusPixels * conversion;
+                bright = dim / 2;
+            }
+
+            const data = {
+                x: startF.x,
+                y: startF.y,
+                config: {
+                    bright: bright,
+                    dim: dim,
+                    luminosity: 0.5,
+                    attenuation: 0.5,
+                    rotation: 0,
+                    angle: 360,
+                    color: null,
+                    darkness: { min: 0, max: 1 }
+                }
+            };
+
+            try {
+                await canvas.scene.createEmbeddedDocuments('AmbientLight', [data]);
+                log.info(`Created AmbientLight at (${startF.x.toFixed(1)}, ${startF.y.toFixed(1)}) with dim radius ${dim.toFixed(1)}`);
+            } catch (e) {
+                log.error('Failed to create AmbientLight', e);
+            }
+            
             return;
         }
 

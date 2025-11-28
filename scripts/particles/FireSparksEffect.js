@@ -675,6 +675,21 @@ export class FireSparksEffect extends EffectBase {
 
     const uniforms = {
       uRoofMap: { value: null },
+      // Screen-space roof alpha map from LightingEffect's Roof Alpha Pass.
+      // PREFERRED PATTERN (matching LightingEffect):
+      // - uRoofMap + uSceneBounds classify pixels or emitters as indoor vs
+      //   outdoor using the shared _Outdoors mask.
+      // - uRoofAlphaMap provides the actual per-pixel opacity of overhead
+      //   tiles in screen space (Layer 20 pre-pass).
+      // - Particles only consult uRoofAlphaMap when the _Outdoors sample says
+      //   "indoors", so transparent roof cutouts and semi-transparent tiles
+      //   can still leak fire/embers visually.
+      uRoofAlphaMap: { value: null },
+      // Renderer resolution in *drawing buffer* pixels so we can derive
+      // screen UVs from gl_FragCoord.xy when sampling the roof alpha texture.
+      // IMPORTANT: gl_FragCoord is in physical pixels; using logical canvas
+      // size here would break on High-DPR displays (UVs > 1.0).
+      uResolution: { value: new THREE.Vector2(1, 1) },
       uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
       uRoofMaskEnabled: { value: 0.0 }
     };
@@ -684,6 +699,8 @@ export class FireSparksEffect extends EffectBase {
 
     material.onBeforeCompile = (shader) => {
       shader.uniforms.uRoofMap = uniforms.uRoofMap;
+      shader.uniforms.uRoofAlphaMap = uniforms.uRoofAlphaMap;
+      shader.uniforms.uResolution = uniforms.uResolution;
       shader.uniforms.uSceneBounds = uniforms.uSceneBounds;
       shader.uniforms.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
 
@@ -700,7 +717,7 @@ export class FireSparksEffect extends EffectBase {
       shader.fragmentShader = shader.fragmentShader
         .replace(
           'void main() {',
-          'varying vec3 vRoofWorldPos;\nuniform sampler2D uRoofMap;\nuniform vec4 uSceneBounds;\nuniform float uRoofMaskEnabled;\nvoid main() {'
+          'varying vec3 vRoofWorldPos;\nuniform sampler2D uRoofMap;\nuniform sampler2D uRoofAlphaMap;\nuniform vec2 uResolution;\nuniform vec4 uSceneBounds;\nuniform float uRoofMaskEnabled;\nvoid main() {'
         )
         .replace(
           '#include <soft_fragment>',
@@ -711,8 +728,18 @@ export class FireSparksEffect extends EffectBase {
           '    );\n' +
           '    if (uvMask.x >= 0.0 && uvMask.x <= 1.0 && uvMask.y >= 0.0 && uvMask.y <= 1.0) {\n' +
           '      float m = texture2D(uRoofMap, uvMask).r;\n' +
-          '      // Dark (Indoors) pixels are discarded when mask is active\n' +
-          '      if (m < 0.5) discard;\n' +
+          '      // Dark (Indoors) pixels become subject to roof alpha occlusion when mask is active\n' +
+          '      if (m < 0.5) {\n' +
+          '        // Sample actual roof opacity from the LightingEffect Roof Alpha Pass.\n' +
+          '        // This uses screen-space UVs so semi-transparent roofs only partially\n' +
+          '        // attenuate fire, matching the lighting occlusion behavior.\n' +
+          '        vec2 screenUV = gl_FragCoord.xy / uResolution;\n' +
+          '        float roofAlpha = texture2D(uRoofAlphaMap, screenUV).a;\n' +
+          '        // 1.0 roofAlpha  -> fully occluded (no fire visible)\n' +
+          '        // 0.5 roofAlpha  -> half visible (semi-transparent roof)\n' +
+          '        // 0.0 roofAlpha  -> fully visible (no roof / hidden)\n' +
+          '        gl_FragColor.a *= (1.0 - roofAlpha);\n' +
+          '      }\n' +
           '    }\n' +
           '  }\n' +
           '#include <soft_fragment>'
@@ -818,6 +845,33 @@ export class FireSparksEffect extends EffectBase {
     //   this same pattern: compute a per-effect boolean in JS and feed it into
     //   the shared roof mask uniforms.
     const roofMaskEnabled = !!roofTex && !weatherController.roofMaskActive;
+
+    // Retrieve Roof Alpha Map from LightingEffect if available so we can
+    // respect the actual overhead tile opacity (opaque vs semi vs hidden).
+    let roofAlphaTex = null;
+    const lighting = window.MapShine?.lightingEffect;
+    if (lighting && lighting.roofAlphaTarget) {
+      roofAlphaTex = lighting.roofAlphaTarget.texture;
+    }
+
+    // Retrieve renderer resolution for screen-space UVs (gl_FragCoord.xy / res).
+    const renderer = window.MapShine?.renderer || window.canvas?.app?.renderer;
+    let resX = 1, resY = 1;
+    if (renderer && THREE) {
+      const size = new THREE.Vector2();
+      // CRITICAL: Use drawing buffer size (physical pixels) so gl_FragCoord.xy
+      // matches uResolution on High-DPR displays. Falling back to logical size
+      // multiplied by pixelRatio if getDrawingBufferSize is unavailable.
+      if (typeof renderer.getDrawingBufferSize === 'function') {
+        renderer.getDrawingBufferSize(size);
+      } else if (typeof renderer.getSize === 'function') {
+        renderer.getSize(size);
+        const dpr = typeof renderer.getPixelRatio === 'function' ? renderer.getPixelRatio() : (window.devicePixelRatio || 1);
+        size.multiplyScalar(dpr);
+      }
+      resX = size.x || 1;
+      resY = size.y || 1;
+    }
     
     // Calculate Scene Bounds for UV projection
     // Matches logic in FireMaskShape and WeatherParticles
@@ -851,6 +905,8 @@ export class FireSparksEffect extends EffectBase {
             const u = sys.material.userData.roofUniforms;
             u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
             u.uRoofMap.value = roofTex;
+            u.uRoofAlphaMap.value = roofAlphaTex;
+            u.uResolution.value.set(resX, resY);
             if (this._sceneBounds) {
                 u.uSceneBounds.value.copy(this._sceneBounds);
             }
@@ -875,6 +931,8 @@ export class FireSparksEffect extends EffectBase {
                 const u = batchMat.userData.roofUniforms;
                 u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
                 u.uRoofMap.value = roofTex;
+                u.uRoofAlphaMap.value = roofAlphaTex;
+                u.uResolution.value.set(resX, resY);
                 if (this._sceneBounds) {
                    u.uSceneBounds.value.copy(this._sceneBounds);
                 }

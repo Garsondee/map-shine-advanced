@@ -451,6 +451,9 @@ export class WeatherParticles {
     /** @type {SplashAlphaBehavior[]} */
     this._splashAlphaBehaviors = [];
 
+    /** @type {ApplyForce[]} */
+    this._splashWindForces = [];
+
     this._rainBaseGravity = 8000;
     this._snowBaseGravity = 3000;
 
@@ -944,10 +947,15 @@ _createSnowTexture() {
     // splash archetype can be tuned separately.
     this.splashSystems = [];
     this._splashAlphaBehaviors = [];
+    this._splashWindForces = [];
 
     const createSplashSystemForTile = (tileIndex) => {
       const alphaBehavior = new SplashAlphaBehavior(0.10);
       this._splashAlphaBehaviors[tileIndex] = alphaBehavior;
+      
+      // Wind force for splashes (initially 0)
+      const splashWind = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(0));
+      this._splashWindForces.push(splashWind);
 
       const system = new ParticleSystem({
         duration: 1,
@@ -988,7 +996,8 @@ _createSnowTexture() {
         behaviors: [
           alphaBehavior,
           splashSizeOverLife,
-          // We do NOT add gravity or wind. Splashes stay where they spawn.
+          splashWind,
+          // We do NOT add gravity. Splashes stay on the ground plane but can drift with wind.
           // We use the same kill behavior to clean up if map changes size (optional)
           killBehavior
         ]
@@ -1602,21 +1611,40 @@ _createSnowTexture() {
       if (this._snowGravityForce && typeof this._snowGravityForce.magnitude !== 'undefined') {
         this._snowGravityForce.magnitude = new ConstantValue(this._snowBaseGravity * snowGravScale);
       }
+
+      // Splashes: Wind coupling (> 25%)
+      if (this._splashWindForces && this._splashWindForces.length > 0) {
+        let splashWindMag = 0;
+        // "Start subtle but at 100% wind speed it can be stronger."
+        if (windSpeed > 0.25) {
+          // Map 0.25..1.0 to 0.0..1.0
+          const t = (windSpeed - 0.25) * 4.0;
+          // Base magnitude 75 (~5x weaker than previous 375)
+          splashWindMag = t * 75;
+        }
+
+        for (const force of this._splashWindForces) {
+          if (force.direction) force.direction.set(baseDir.x, baseDir.y, 0);
+          if (typeof force.magnitude !== 'undefined') {
+            force.magnitude = new ConstantValue(splashWindMag);
+          }
+        }
+      }
     }
   }
-  
+
   dispose() {
     if (this.rainSystem) {
-        this.batchRenderer.deleteSystem(this.rainSystem);
-        if (this.rainSystem.emitter.parent) this.rainSystem.emitter.parent.remove(this.rainSystem.emitter);
+      this.batchRenderer.deleteSystem(this.rainSystem);
+      if (this.rainSystem.emitter.parent) this.rainSystem.emitter.parent.remove(this.rainSystem.emitter);
     }
     if (this.snowSystem) {
-        this.batchRenderer.deleteSystem(this.snowSystem);
-        if (this.snowSystem.emitter.parent) this.snowSystem.emitter.parent.remove(this.snowSystem.emitter);
+      this.batchRenderer.deleteSystem(this.snowSystem);
+      if (this.snowSystem.emitter.parent) this.snowSystem.emitter.parent.remove(this.snowSystem.emitter);
     }
     if (this.splashSystem) {
-        this.batchRenderer.deleteSystem(this.splashSystem);
-        if (this.splashSystem.emitter.parent) this.splashSystem.emitter.parent.remove(this.splashSystem.emitter);
+      this.batchRenderer.deleteSystem(this.splashSystem);
+      if (this.splashSystem.emitter.parent) this.splashSystem.emitter.parent.remove(this.splashSystem.emitter);
     }
     if (this.rainTexture) this.rainTexture.dispose();
     if (this.snowTexture) this.snowTexture.dispose();

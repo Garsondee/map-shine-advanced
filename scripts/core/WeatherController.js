@@ -97,10 +97,13 @@ export class WeatherController {
     this.rainTuning = {
       intensityScale: 2.6,
       streakLength: 0.25,
-      dropSize: 8.0,
+      dropSize: 2.05,
+      dropSizeMin: 1.4,
+      dropSizeMax: 3.5,
       brightness: 0.3,
       gravityScale: 3.0,
       windInfluence: 2.0,
+      curlStrength: 1.0,
 
       // Splash-specific tuning (rain splashes on the ground)
       splashIntensityScale: 10.0,  // Multiplier on base splash emission
@@ -685,10 +688,26 @@ export class WeatherController {
         },
         rainDropSize: {
           label: 'Rain Drop Size',
-          default: 8.0,
+          default: 2.05,
           min: 0.5,
           max: 16.0,
           step: 0.05,
+          group: 'rain'
+        },
+        rainDropSizeMin: {
+          label: 'Rain Drop Size Min',
+          default: 1.4,
+          min: 0.5,
+          max: 64.0,
+          step: 0.1,
+          group: 'rain'
+        },
+        rainDropSizeMax: {
+          label: 'Rain Drop Size Max',
+          default: 3.5,
+          min: 0.5,
+          max: 64.0,
+          step: 0.1,
           group: 'rain'
         },
         rainBrightness: {
@@ -710,6 +729,14 @@ export class WeatherController {
         rainWindInfluence: {
           label: 'Rain Wind Influence',
           default: 2.0,
+          min: 0.0,
+          max: 4.0,
+          step: 0.05,
+          group: 'rain'
+        },
+        rainCurlStrength: {
+          label: 'Rain Turbulence Strength',
+          default: 1.0,
           min: 0.0,
           max: 4.0,
           step: 0.05,
@@ -992,9 +1019,12 @@ export class WeatherController {
           'rainIntensityScale',
           'rainStreakLength',
           'rainDropSize',
+          'rainDropSizeMin',
+          'rainDropSizeMax',
           'rainBrightness',
           'rainGravityScale',
-          'rainWindInfluence'
+          'rainWindInfluence',
+          'rainCurlStrength'
         ] },
         { label: 'Rain Splashes', type: 'folder', parameters: [
           'rainSplash1IntensityScale',

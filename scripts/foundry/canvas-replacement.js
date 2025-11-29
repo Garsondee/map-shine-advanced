@@ -762,6 +762,8 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       weatherController.gustDuration = value;
     } else if (paramId === 'gustStrength') {
       weatherController.gustStrength = value;
+    } else if (paramId === 'rainCurlStrength') {
+      weatherController.rainTuning.curlStrength = value;
     } else {
       // Manual Overrides (update target state directly)
       const target = weatherController.targetState;
@@ -790,9 +792,12 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         if (paramId === 'rainIntensityScale') rt.intensityScale = value;
         else if (paramId === 'rainStreakLength') rt.streakLength = value;
         else if (paramId === 'rainDropSize') rt.dropSize = value;
+        else if (paramId === 'rainDropSizeMin') rt.dropSizeMin = value;
+        else if (paramId === 'rainDropSizeMax') rt.dropSizeMax = value;
         else if (paramId === 'rainBrightness') rt.brightness = value;
         else if (paramId === 'rainGravityScale') rt.gravityScale = value;
         else if (paramId === 'rainWindInfluence') rt.windInfluence = value;
+        else if (paramId === 'rainCurlStrength') rt.curlStrength = value;
         // Splash-specific controls
         else if (paramId === 'rainSplashIntensityScale') rt.splashIntensityScale = value;
         else if (paramId === 'rainSplashLifeMin') rt.splashLifeMin = value;

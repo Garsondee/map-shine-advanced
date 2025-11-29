@@ -474,6 +474,8 @@ export class WeatherParticles {
     this._lastRainTuning = {
       brightness: null,
       dropSize: null,
+      dropSizeMin: null,
+      dropSizeMax: null,
       streakLength: null
     };
 
@@ -1329,13 +1331,20 @@ _createSnowTexture() {
         // --- EFFICIENT TUNING UPDATES ---
         // Only update system properties if the specific tuning value has changed.
 
-        // 1. Drop Size -> startSize
+        // 1. Drop Size -> startSize (configurable min/max, with sane fallbacks)
         const currentDropSize = rainTuning.dropSize ?? 1.0;
-        if (currentDropSize !== this._lastRainTuning.dropSize) {
+        const currentDropSizeMin = rainTuning.dropSizeMin ?? (1.2 * currentDropSize);
+        const currentDropSizeMax = rainTuning.dropSizeMax ?? (2.2 * currentDropSize);
+
+        if (currentDropSize !== this._lastRainTuning.dropSize ||
+            currentDropSizeMin !== this._lastRainTuning.dropSizeMin ||
+            currentDropSizeMax !== this._lastRainTuning.dropSizeMax) {
+
           this._lastRainTuning.dropSize = currentDropSize;
-          const sizeMin = 1.2 * currentDropSize;
-          const sizeMax = 2.2 * currentDropSize;
-          this.rainSystem.startSize = new IntervalValue(sizeMin, sizeMax);
+          this._lastRainTuning.dropSizeMin = currentDropSizeMin;
+          this._lastRainTuning.dropSizeMax = currentDropSizeMax;
+
+          this.rainSystem.startSize = new IntervalValue(currentDropSizeMin, currentDropSizeMax);
         }
 
         // 2. Streak Length -> speedFactor
@@ -1582,7 +1591,14 @@ _createSnowTexture() {
 
       // Rain curl turbulence: very low at calm, grows with wind speed.
       if (this._rainCurl && this._rainCurlBaseStrength) {
-        const curlScale = THREE.MathUtils.clamp(windSpeed, 0, 1);
+        // Start introducing turbulence once windSpeed exceeds 0.5, ramping to full at 1.0.
+        let windTurbulenceFactor = 0;
+        if (windSpeed > 0.5) {
+          windTurbulenceFactor = THREE.MathUtils.clamp((windSpeed - 0.5) / 0.5, 0, 1);
+        }
+
+        const curlStrength = rainTuning.curlStrength ?? 1.0;
+        const curlScale = windTurbulenceFactor * curlStrength;
         this._rainCurl.strength.copy(this._rainCurlBaseStrength).multiplyScalar(curlScale);
       }
 

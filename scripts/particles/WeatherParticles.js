@@ -1305,6 +1305,26 @@ _createSnowTexture() {
 
     const THREE = window.THREE;
 
+    // Global scene darkness coupling (0 = fully lit, 1 = max darkness).
+    // We use this as a scalar on particle brightness/opacity so that
+    // weather is not self-illuminated in dark scenes, while still
+    // remaining faintly visible at full darkness.
+    let sceneDarkness = 0;
+    try {
+      if (typeof canvas !== 'undefined' && canvas?.scene?.environment?.darknessLevel !== undefined) {
+        sceneDarkness = canvas.scene.environment.darknessLevel;
+      }
+    } catch (e) {
+      // If canvas is not ready, keep previous/default darkness.
+    }
+    sceneDarkness = Math.max(0, Math.min(1, sceneDarkness));
+
+    // Map 0..1 darkness to a brightness scale of ~1.0 -> 0.3. This keeps
+    // particles readable but clearly dimmer in night scenes.
+    const darknessBrightnessScale = THREE
+      ? THREE.MathUtils.lerp(1.0, 0.3, sceneDarkness)
+      : (1.0 - 0.7 * sceneDarkness);
+
     // Cache scene bounds for mask projection
     if (sceneBoundsVec4 && THREE) {
       if (!this._sceneBounds) this._sceneBounds = new THREE.Vector4();
@@ -1357,7 +1377,7 @@ _createSnowTexture() {
         }
 
         // 3. Brightness -> material opacity & startColor alpha
-        const currentBrightness = rainTuning.brightness ?? 1.0;
+        const currentBrightness = (rainTuning.brightness ?? 1.0) * darknessBrightnessScale;
         if (currentBrightness !== this._lastRainTuning.brightness &&
             (this._rainMaterial || this.rainSystem.material)) {
 
@@ -1501,7 +1521,7 @@ _createSnowTexture() {
           system.startSize = new IntervalValue(sizeMin, sizeMax);
 
           // --- Opacity Peak Tuning for this splash ---
-          const peak = t.peak ?? 0.10;
+          const peak = (t.peak ?? 0.10) * darknessBrightnessScale;
           if (entry.alphaBehavior) {
             entry.alphaBehavior.peakOpacity = peak;
           }
@@ -1533,6 +1553,18 @@ _createSnowTexture() {
         const sMin = 8 * flakeSize;
         const sMax = 12 * flakeSize;
         this.snowSystem.startSize = new IntervalValue(sMin, sMax);
+
+        // Snow brightness: modulate by scene darkness so flakes are dim in
+        // dark scenes rather than fully self-illuminated.
+        const snowBrightness = (snowTuning.brightness ?? 1.0) * darknessBrightnessScale;
+        const clampedSnowB = THREE ? THREE.MathUtils.clamp(snowBrightness, 0.0, 3.0) : snowBrightness;
+        const snowAlphaScale = clampedSnowB / 3.0;
+        const snowMinAlpha = 1.0 * snowAlphaScale;
+        const snowMaxAlpha = 0.8 * snowAlphaScale;
+        this.snowSystem.startColor = new ColorRange(
+          new Vector4(1.0, 1.0, 1.0, snowMinAlpha),
+          new Vector4(0.9, 0.95, 1.0, snowMaxAlpha)
+        );
 
         // Scale curl noise strength based on tuning so users can dial swirl intensity.
         if (this._snowCurl && this._snowCurlBaseStrength) {

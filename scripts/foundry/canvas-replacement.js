@@ -11,6 +11,7 @@ import { CameraController } from '../scene/camera-controller.js';
 import { EffectComposer } from '../effects/EffectComposer.js';
 import { SpecularEffect } from '../effects/SpecularEffect.js';
 import { IridescenceEffect } from '../effects/IridescenceEffect.js';
+import { WindowLightEffect } from '../effects/WindowLightEffect.js';
 import { ColorCorrectionEffect } from '../effects/ColorCorrectionEffect.js';
 import { AsciiEffect } from '../effects/AsciiEffect.js';
 import { BloomEffect } from '../effects/BloomEffect.js';
@@ -31,7 +32,6 @@ import {
   FoamEffect,
   GroundGlowEffect,
   BiofilmEffect,
-  StructuralShadowsEffect,
   BuildingShadowsEffect,
   CanopyDistortionEffect,
   PhysicsRopeEffect,
@@ -355,6 +355,10 @@ async function createThreeCanvas(scene) {
     const iridescenceEffect = new IridescenceEffect();
     effectComposer.registerEffect(iridescenceEffect);
 
+    // Step 3.1.5: Register window lighting effect
+    const windowLightEffect = new WindowLightEffect();
+    effectComposer.registerEffect(windowLightEffect);
+
     // Step 3.2: Register color correction effect (Post-Processing)
     const colorCorrectionEffect = new ColorCorrectionEffect();
     effectComposer.registerEffect(colorCorrectionEffect);
@@ -399,7 +403,8 @@ async function createThreeCanvas(scene) {
     specularEffect.setBaseMesh(basePlane, bundle);
     iridescenceEffect.setBaseMesh(basePlane, bundle);
     prismEffect.setBaseMesh(basePlane, bundle);
-    lightingEffect.setBaseMesh(basePlane);
+    windowLightEffect.setBaseMesh(basePlane, bundle);
+    lightingEffect.setBaseMesh(basePlane, bundle);
 
     // Step 3b: Initialize grid renderer
     gridRenderer = new GridRenderer(threeScene);
@@ -478,6 +483,7 @@ async function createThreeCanvas(scene) {
     mapShine.effectComposer = effectComposer;
     mapShine.specularEffect = specularEffect;
     mapShine.iridescenceEffect = iridescenceEffect;
+    mapShine.windowLightEffect = windowLightEffect;
     mapShine.prismEffect = prismEffect;
     mapShine.lightingEffect = lightingEffect;
     mapShine.bloomEffect = bloomEffect;
@@ -513,7 +519,18 @@ async function createThreeCanvas(scene) {
 
     // Initialize Tweakpane UI
     try {
-      await initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect, fireSparksEffect);
+      await initializeUI(
+        specularEffect,
+        iridescenceEffect,
+        colorCorrectionEffect,
+        asciiEffect,
+        prismEffect,
+        lightingEffect,
+        bloomEffect,
+        lensflareEffect,
+        fireSparksEffect,
+        windowLightEffect
+      );
     } catch (e) {
       log.error('Failed to initialize UI:', e);
     }
@@ -534,9 +551,10 @@ async function createThreeCanvas(scene) {
  * @param {LightingEffect} lightingEffect - The dynamic lighting effect instance
  * @param {BloomEffect} bloomEffect - The bloom effect instance
  * @param {LensflareEffect} lensflareEffect - The lensflare effect instance
+ * @param {WindowLightEffect} windowLightEffect - The window lighting effect instance
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect, fireSparksEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect, fireSparksEffect, windowLightEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -660,31 +678,9 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     }
   }
 
-  // --- Lighting Settings ---
-  if (lightingEffect) {
-    const lightingSchema = LightingEffect.getControlSchema();
-    
-    const onLightingUpdate = (effectId, paramId, value) => {
-      if (paramId === 'enabled' || paramId === 'masterEnabled') {
-        lightingEffect.enabled = value;
-        log.debug(`Lighting effect ${value ? 'enabled' : 'disabled'}`);
-      } else if (lightingEffect.params[paramId] !== undefined) {
-        lightingEffect.params[paramId] = value;
-        log.debug(`Lighting.${paramId} = ${value}`);
-      }
-    };
-
-    uiManager.registerEffect(
-      'lighting',
-      'Dynamic Lighting',
-      lightingSchema,
-      onLightingUpdate,
-      'global'
-    );
-  }
-
   // --- Bloom Settings ---
   if (bloomEffect) {
+    // ... (rest of the code remains the same)
     const bloomSchema = BloomEffect.getControlSchema();
     
     const onBloomUpdate = (effectId, paramId, value) => {
@@ -899,6 +895,38 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     'atmospheric'
   );
 
+  // --- Window Light Settings ---
+  if (windowLightEffect) {
+    const windowSchema = WindowLightEffect.getControlSchema();
+
+    const onWindowUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        windowLightEffect.enabled = value;
+        log.debug(`WindowLight effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (windowLightEffect.params && Object.prototype.hasOwnProperty.call(windowLightEffect.params, paramId)) {
+        windowLightEffect.params[paramId] = value;
+      }
+    };
+
+    uiManager.registerEffect(
+      'windowLight',
+      'Window Light',
+      windowSchema,
+      onWindowUpdate,
+      'atmospheric'
+    );
+
+    if (uiManager.effectFolders['windowLight']) {
+      const folderData = uiManager.effectFolders['windowLight'];
+      folderData.params.textureStatus = windowLightEffect.params.textureStatus;
+
+      if (folderData.bindings.textureStatus) {
+        folderData.bindings.textureStatus.refresh();
+      }
+      uiManager.updateEffectiveState('windowLight');
+    }
+  }
+
   // --- Fire Debug Settings ---
   if (fireSparksEffect) {
     const fireSchema = FireSparksEffect.getControlSchema();
@@ -1082,7 +1110,6 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     { id: 'biofilm',            name: 'Water Splashes',       Class: BiofilmEffect,           categoryId: 'water' },
 
     // Object & Structure
-    { id: 'structural-shadows', name: 'Structural Shadows',   Class: StructuralShadowsEffect, categoryId: 'structure' },
     { id: 'building-shadows',   name: 'Building Shadows',     Class: BuildingShadowsEffect,   categoryId: 'structure' },
     { id: 'canopy-distortion',  name: 'Canopy Distortion',    Class: CanopyDistortionEffect,  categoryId: 'structure' },
     { id: 'physics-rope',       name: 'Physics Rope',         Class: PhysicsRopeEffect,       categoryId: 'structure' },

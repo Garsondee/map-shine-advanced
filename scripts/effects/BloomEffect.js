@@ -127,9 +127,15 @@ export class BloomEffect extends EffectBase {
       
       let targetBlending = THREE.AdditiveBlending;
       if (p.blendMode === 'screen') {
-        targetBlending = THREE.ScreenBlending;
+        // Screen-style bloom: in this custom Three build we approximate
+        // "screen" using standard additive blending. This keeps the
+        // mode functional without relying on undefined enums.
+        targetBlending = THREE.AdditiveBlending;
       } else if (p.blendMode === 'soft') {
-        targetBlending = THREE.SoftLightBlending;
+        // Soft light-style bloom: also approximated via additive
+        // blending for compatibility with the available blending
+        // constants.
+        targetBlending = THREE.AdditiveBlending;
       }
       if (this.pass.blendMaterial.blending !== targetBlending) {
         this.pass.blendMaterial.blending = targetBlending;

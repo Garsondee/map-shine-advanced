@@ -79,7 +79,6 @@ export class BiofilmEffect extends StubEffect { constructor() { super('biofilm',
 
 // --- Object & Structure Interactions ---
 
-export class StructuralShadowsEffect extends StubEffect { constructor() { super('structural-shadows', 'Structural Shadows', 'structure'); } }
 export class BuildingShadowsEffect extends StubEffect { constructor() { super('building-shadows', 'Building Shadows', 'structure'); } }
 export class CanopyDistortionEffect extends StubEffect { constructor() { super('canopy-distortion', 'Canopy Distortion', 'structure'); } }
 export class PhysicsRopeEffect extends StubEffect { constructor() { super('physics-rope', 'Physics Rope', 'structure'); } }

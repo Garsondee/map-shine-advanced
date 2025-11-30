@@ -7,6 +7,8 @@
 
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
+import { weatherController } from '../core/WeatherController.js';
+
 import { ThreeLightSource } from './ThreeLightSource.js'; // Import the class above
 
 const log = createLogger('LightingEffect');
@@ -30,11 +32,22 @@ export class LightingEffect extends EffectBase {
     this.lights = new Map(); // Map<id, ThreeLightSource>
     
     // THREE resources
-    this.lightScene = null;  // Scene for Light Accumulation
-    this.lightTarget = null; // Buffer for Light Accumulation
-    this.quadScene = null;   // Scene for Final Composite
+    this.lightScene = null;      // Scene for Light Accumulation
+    this.lightTarget = null;     // Buffer for Light Accumulation
+    this.roofAlphaTarget = null; // Buffer for Roof Alpha Mask (overhead tiles)
+    this.quadScene = null;       // Scene for Final Composite
     this.quadCamera = null;
     this.compositeMaterial = null;
+
+    /** @type {THREE.Texture|null} */
+    this.windowMask = null;
+    /** @type {THREE.Texture|null} */
+    this.outdoorsMask = null;
+
+    /** @type {THREE.Mesh|null} */
+    this.windowLightMesh = null;
+    /** @type {THREE.ShaderMaterial|null} */
+    this.windowLightMaterial = null;
   }
 
   /**
@@ -80,10 +93,10 @@ export class LightingEffect extends EffectBase {
       uniforms: {
         tDiffuse: { value: null }, // Base Scene
         tLight: { value: null },   // Accumulated HDR Light
+        tRoofAlpha: { value: null }, // Overhead tile alpha mask
         uDarknessLevel: { value: 0.0 },
         uAmbientBrightest: { value: new THREE.Color(1,1,1) },
         uAmbientDarkness: { value: new THREE.Color(0.1, 0.1, 0.2) },
-        
         // Post-process settings
         uExposure: { value: 0.0 },
         uSaturation: { value: 1.0 },
@@ -99,6 +112,7 @@ export class LightingEffect extends EffectBase {
       fragmentShader: `
         uniform sampler2D tDiffuse;
         uniform sampler2D tLight;
+        uniform sampler2D tRoofAlpha;
         uniform float uDarknessLevel;
         uniform vec3 uAmbientBrightest;
         uniform vec3 uAmbientDarkness;
@@ -117,14 +131,24 @@ export class LightingEffect extends EffectBase {
         void main() {
           vec4 baseColor = texture2D(tDiffuse, vUv);
           vec4 lightSample = texture2D(tLight, vUv); // HDR light buffer
+          vec4 roofSample = texture2D(tRoofAlpha, vUv);
           
           // 1. Determine Ambient Light
           vec3 ambient = mix(uAmbientBrightest, uAmbientDarkness, uDarknessLevel);
           
-          // 2. Combine Ambient with Accumulated Lights
-          vec3 totalIllumination = ambient + lightSample.rgb;
+          // 2. Roof Occlusion Mask
+          // roofSample.a represents the opacity of overhead tiles at this pixel.
+          // We want lights to appear UNDER roofs, only in transparent and semi-transparent
+          // regions of those tiles. Therefore, dynamic light contribution is scaled by
+          // (1.0 - roofAlpha): fully opaque roofs block light entirely, while semi-
+          // transparent pixels allow a proportional amount of light through.
+          float roofAlpha = roofSample.a;
+          float lightVisibility = 1.0 - roofAlpha;
+
+          // 3. Combine Ambient with Accumulated Lights (roof-masked)
+          vec3 totalIllumination = ambient + (lightSample.rgb * lightVisibility);
           
-          // 3. Apply to Base Texture (Multiply)
+          // 4. Apply to Base Texture (Multiply)
           vec3 finalRGB = baseColor.rgb * totalIllumination;
 
           // --- POST PROCESSING ---
@@ -166,10 +190,125 @@ export class LightingEffect extends EffectBase {
     });
   }
 
-  // Kept for API compatibility with canvas-replacement, but unused in the
-  // current screen-space post-process implementation.
-  setBaseMesh(_mesh) {
-    // No-op: Lighting is computed in screen space from tDiffuse and tLight.
+  setBaseMesh(baseMesh, assetBundle) {
+    const THREE = window.THREE;
+    if (!assetBundle || !assetBundle.masks) return;
+
+    const windowData = assetBundle.masks.find(m => m.id === 'windows' || m.id === 'structural');
+    const outdoorsData = assetBundle.masks.find(m => m.id === 'outdoors');
+
+    this.windowMask = windowData?.texture || null;
+    this.outdoorsMask = outdoorsData?.texture || null;
+
+    if (!this.windowMask) {
+      if (this.windowLightMesh && this.lightScene) {
+        this.lightScene.remove(this.windowLightMesh);
+      }
+      this.windowLightMesh = null;
+      this.windowLightMaterial = null;
+      return;
+    }
+
+    // Create a world-space window light mesh that writes into the light buffer
+    const geometry = baseMesh.geometry;
+
+    this.windowLightMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uWindowMask: { value: this.windowMask },
+        uOutdoorsMask: { value: this.outdoorsMask },
+        uHasOutdoorsMask: { value: this.outdoorsMask ? 1.0 : 0.0 },
+        uWindowTexelSize: {
+          value: (this.windowMask && this.windowMask.image)
+            ? new THREE.Vector2(1 / this.windowMask.image.width, 1 / this.windowMask.image.height)
+            : new THREE.Vector2(1 / 1024, 1 / 1024)
+        },
+        uIntensity: { value: 1.0 },
+        uMaskThreshold: { value: 0.1 },
+        uSoftness: { value: 0.2 },
+        uColor: { value: new THREE.Color(1.0, 0.96, 0.85) },
+        uCloudCover: { value: 0.0 },
+        uCloudInfluence: { value: 1.0 },
+        uMinCloudFactor: { value: 0.0 }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D uWindowMask;
+        uniform sampler2D uOutdoorsMask;
+        uniform float uHasOutdoorsMask;
+        uniform vec2 uWindowTexelSize;
+        uniform float uIntensity;
+        uniform float uMaskThreshold;
+        uniform float uSoftness;
+        uniform vec3 uColor;
+        uniform float uCloudCover;
+        uniform float uCloudInfluence;
+        uniform float uMinCloudFactor;
+
+        varying vec2 vUv;
+
+        float msLuminance(vec3 c) {
+          return dot(c, vec3(0.2126, 0.7152, 0.0722));
+        }
+
+        void main() {
+          if (uIntensity <= 0.0001) {
+            discard;
+          }
+
+          vec3 windowSample = texture2D(uWindowMask, vUv).rgb;
+          float centerMask = msLuminance(windowSample);
+
+          vec2 t = uWindowTexelSize;
+          float maskN = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0, -t.y)).rgb);
+          float maskS = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0,  t.y)).rgb);
+          float maskE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, 0.0)).rgb);
+          float maskW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, 0.0)).rgb);
+
+          float baseMask = (centerMask * 2.0 + maskN + maskS + maskE + maskW) / 6.0;
+
+          float halfWidth = max(uSoftness, 1e-3);
+          float edgeLo = clamp(uMaskThreshold - halfWidth, 0.0, 1.0);
+          float edgeHi = clamp(uMaskThreshold + halfWidth, 0.0, 1.0);
+          float m = smoothstep(edgeLo, edgeHi, baseMask);
+          if (m <= 0.0) discard;
+
+          float indoor = 1.0;
+          if (uHasOutdoorsMask > 0.5) {
+            float outdoorStrength = texture2D(uOutdoorsMask, vUv).r;
+            indoor = 1.0 - outdoorStrength;
+            if (indoor <= 0.0) discard;
+          }
+
+          float cloud = clamp(uCloudCover, 0.0, 1.0);
+          float cloudFactor = 1.0 - (cloud * 0.8 * uCloudInfluence);
+          cloudFactor = max(cloudFactor, uMinCloudFactor);
+
+          float strength = m * indoor * cloudFactor * uIntensity;
+          vec3 lightColor = uColor * strength;
+
+          gl_FragColor = vec4(lightColor, 1.0);
+        }
+      `,
+      blending: THREE.AdditiveBlending,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true
+    });
+
+    this.windowLightMesh = new THREE.Mesh(geometry, this.windowLightMaterial);
+    this.windowLightMesh.position.copy(baseMesh.position);
+    this.windowLightMesh.rotation.copy(baseMesh.rotation);
+    this.windowLightMesh.scale.copy(baseMesh.scale);
+
+    if (this.lightScene) {
+      this.lightScene.add(this.windowLightMesh);
+    }
   }
 
   syncAllLights() {
@@ -223,6 +362,35 @@ export class LightingEffect extends EffectBase {
     u.uExposure.value = this.params.exposure;
     u.uSaturation.value = this.params.saturation;
     u.uContrast.value = this.params.contrast;
+
+    // Drive window light uniforms from WeatherController and, if available,
+    // from the WindowLightEffect UI parameters.
+    let cloudCover = 0.0;
+    try {
+      const state = weatherController?.getCurrentState?.();
+      if (state && typeof state.cloudCover === 'number') {
+        cloudCover = state.cloudCover;
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    if (this.windowLightMaterial) {
+      const wu = this.windowLightMaterial.uniforms;
+      wu.uCloudCover.value = cloudCover;
+
+      const wl = window.MapShine?.windowLightEffect;
+      if (wl && wl.params) {
+        wu.uIntensity.value = wl.params.intensity ?? wu.uIntensity.value;
+        wu.uMaskThreshold.value = wl.params.maskThreshold ?? wu.uMaskThreshold.value;
+        wu.uSoftness.value = wl.params.softness ?? wu.uSoftness.value;
+        wu.uCloudInfluence.value = wl.params.cloudInfluence ?? wu.uCloudInfluence.value;
+        wu.uMinCloudFactor.value = wl.params.minCloudFactor ?? wu.uMinCloudFactor.value;
+        if (wl.params.color) {
+          wu.uColor.value.set(wl.params.color.r, wl.params.color.g, wl.params.color.b);
+        }
+      }
+    }
   }
 
   render(renderer, scene, camera) {
@@ -246,6 +414,33 @@ export class LightingEffect extends EffectBase {
       this.lightTarget.setSize(size.x, size.y);
     }
 
+    if (!this.roofAlphaTarget) {
+      this.roofAlphaTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else if (this.roofAlphaTarget.width !== size.x || this.roofAlphaTarget.height !== size.y) {
+      this.roofAlphaTarget.setSize(size.x, size.y);
+    }
+
+    // 0. Render Roof Alpha Mask (overhead tiles only)
+    // We rely on TileManager tagging overhead tiles into ROOF_LAYER (20).
+    const ROOF_LAYER = 20;
+    const previousLayersMask = this.mainCamera.layers.mask;
+    const previousTarget = renderer.getRenderTarget();
+
+    this.mainCamera.layers.set(ROOF_LAYER);
+    renderer.setRenderTarget(this.roofAlphaTarget);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    renderer.render(scene, this.mainCamera);
+
+    // Restore camera layers and render target
+    this.mainCamera.layers.mask = previousLayersMask;
+    renderer.setRenderTarget(previousTarget);
+
     // 1. Accumulate Lights into lightTarget
     const oldTarget = renderer.getRenderTarget();
     renderer.setRenderTarget(this.lightTarget);
@@ -256,9 +451,10 @@ export class LightingEffect extends EffectBase {
       renderer.render(this.lightScene, this.mainCamera);
     }
 
-    // 2. Composite: use lightTarget as tLight, base scene texture comes from
-    // EffectComposer via setInputTexture(tDiffuse).
+    // 2. Composite: use lightTarget as tLight and roofAlphaTarget as tRoofAlpha.
+    // Base scene texture comes from EffectComposer via setInputTexture(tDiffuse).
     this.compositeMaterial.uniforms.tLight.value = this.lightTarget.texture;
+    this.compositeMaterial.uniforms.tRoofAlpha.value = this.roofAlphaTarget.texture;
 
     renderer.setRenderTarget(oldTarget);
     renderer.render(this.quadScene, this.quadCamera);

@@ -1,15 +1,13 @@
 /**
  * @fileoverview Lighting Effect
- * Implements dynamic lighting for the scene base plane and ground tiles
- * Uses Foundry VTT light source data to render lights in Three.js
+ * Implements dynamic lighting for the scene base plane.
+ * Replaces Foundry's PIXI lighting with a multipass Three.js approach.
  * @module effects/LightingEffect
  */
 
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
-import Coordinates from '../utils/coordinates.js';
-import { weatherController } from '../core/WeatherController.js';
-import LightMesh from '../scene/LightMesh.js';
+import { ThreeLightSource } from './ThreeLightSource.js'; // Import the class above
 
 const log = createLogger('LightingEffect');
 
@@ -17,84 +15,26 @@ export class LightingEffect extends EffectBase {
   constructor() {
     super('lighting', RenderLayers.POST_PROCESSING, 'low');
     
-    this.priority = 1; // Render immediately after base scene (before Bloom/ColorCorrection)
-    this.alwaysRender = true;
-
-    // Lighting parameters (UI-facing).
-    // NOTE: These defaults should stay in sync with getControlSchema()
-    // so that "Reset to Defaults" in the UI matches the initial state.
+    this.priority = 1; 
+    
+    // UI Parameters matching Foundry VTT + Custom Tweaks
     this.params = {
       enabled: true,
-      globalIntensity: 1.0,
-      ambientColor: { r: 0.00, g: 0.00, b: 0.00 },
-      
-      // Global ambient contribution applied directly to the base pass.
-      // This acts as a simple way to lift the ground plane (and everything
-      // rendered into the base scene) without changing individual light
-      // intensities.
-      ambientBoost: 0.0,
-      
-      // Advanced Scene Lighting Controls (new tuned defaults)
-      darknessBoost: 3.0,    // "Darkness Punch"
-      ambientMix: 1.0,       // "Ambient Tint Mix"
-      lightSaturation: 1.0,  // "Light Saturation"
-      contrast: 1.00,        // "Light Map Contrast"
-      correction: 1.00,      // "Final Boost"
-      coreBoost: 0.0,        // "Core Boost"
-      dimLightBoost: 1.0,    // "Dim Light Boost"
-      falloffSoftness: 1.00, // "Attenuation Softness"
-      
-      // Color Correction Controls
-      sceneSaturation: 1.0,
-      sceneGamma: 1.0,
-      sceneExposure: 1.0,
-      sceneBrightness: 0.0,
-      sceneContrast: 1.0,
-      sceneTemperature: 0.0,
-      sceneTint: 0.0
+      globalIllumination: 1.0, // Multiplier for ambient
+      exposure: 0.0,
+      saturation: 1.0,
+      contrast: 1.0,
+      darknessLevel: 0.0, // Read-only mostly, synced from canvas
     };
 
-    // Resources
-    this.lights = new Map(); // Map<id, { helper: LightMesh }>
-    this.maxLights = 64; // Legacy shader capacity (no longer used for arrays, kept for safety)
+    this.lights = new Map(); // Map<id, ThreeLightSource>
     
-    // Internal scene for full-screen quad rendering
-    this.quadScene = null;
+    // THREE resources
+    this.lightScene = null;  // Scene for Light Accumulation
+    this.lightTarget = null; // Buffer for Light Accumulation
+    this.quadScene = null;   // Scene for Final Composite
     this.quadCamera = null;
-    this.mesh = null;
-
-    // Light accumulation pass (world-space light meshes rendered to a buffer)
-    this.lightScene = null;      // THREE.Scene containing LightMesh helpers
-    this.lightTarget = null;     // WebGLRenderTarget for accumulated lights
-    this.mainScene = null;       // Reference to primary scene
-    this.mainCamera = null;      // Reference to primary camera
-    
-    // Material/Shader management
-    this.uniforms = null;
-    
-    // Roof Occlusion
-    // PREFERRED PATTERN (for lighting vs. overhead tiles):
-    // - Overhead tiles are rendered once into a dedicated "roof alpha" render
-    //   target (screen-space RGBA, Layer 20 only).
-    // - The _Outdoors mask from WeatherController (uRoofMap) is used to decide
-    //   whether a light source is "indoor" (dark) or "outdoor" (bright).
-    // - In the lighting shader we:
-    //     * Reconstruct world-space XY for each shaded pixel from the camera
-    //       view bounds.
-    //     * Sample uRoofAlphaMap at the current pixel to get the composite roof
-    //       opacity above the scene (opaque, semi-transparent, or fully hidden).
-    //     * For each light, sample uRoofMap at the light's position to decide
-    //       if it is indoors.
-    //     * If a light is indoors, attenuate its contribution by (1 - roofAlpha)
-    //       so opaque roof pixels block it completely, semi-transparent parts
-    //       leak light, and hidden roofs allow full contribution.
-    // - This keeps lighting behavior consistent with particle occlusion (rain,
-    //   fire, etc.) while giving per-pixel control over how much light can pass
-    //   through roofs.
-    // New roof-aware lighting features should follow this pattern instead of
-    // trying to cull lights on the CPU.
-    this.roofAlphaTarget = null;
-    this.ROOF_LAYER = 20;
+    this.compositeMaterial = null;
   }
 
   /**
@@ -105,770 +45,228 @@ export class LightingEffect extends EffectBase {
       enabled: true,
       groups: [
         {
-          name: 'lighting',
-          label: 'Global Lighting',
-          type: 'inline',
-          parameters: ['globalIntensity', 'ambientColor', 'ambientBoost']
-        },
-        {
-          name: 'scene_lighting',
-          label: 'Scene Lighting Adjustments',
-          type: 'folder',
-          expanded: true,
-          parameters: [
-            'darknessBoost',
-            'ambientMix',
-            'lightSaturation',
-            'contrast',
-            'correction',
-            'coreBoost',
-            'dimLightBoost',
-            'falloffSoftness'
-          ]
-        },
-        {
-          name: 'color_correction',
-          label: 'Color Correction (Foundry Match)',
-          type: 'folder',
-          expanded: true,
-          parameters: ['sceneSaturation', 'sceneGamma', 'sceneExposure', 'sceneBrightness', 'sceneContrast', 'sceneTemperature', 'sceneTint']
+           name: 'correction',
+           label: 'Color Correction',
+           type: 'inline',
+           parameters: ['exposure', 'saturation', 'contrast']
         }
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        globalIntensity: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.0, label: 'Global Brightness' },
-        ambientColor: { type: 'color', default: { r: 0.00, g: 0.00, b: 0.00 } },
-        ambientBoost: { type: 'slider', min: 0.0, max: 2.0, step: 0.05, default: 0.0, label: 'Ambient Ground Boost' },
-        
-        // New Controls
-        darknessBoost: { type: 'slider', min: 1.0, max: 20.0, step: 0.1, default: 3.0, label: 'Darkness Punch' },
-        ambientMix: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Ambient Tint Mix' },
-        lightSaturation: { type: 'slider', min: 0.0, max: 2.0, step: 0.1, default: 1.0, label: 'Light Saturation' },
-        contrast: { type: 'slider', min: 0.5, max: 2.0, step: 0.01, default: 1.00, label: 'Light Map Contrast' },
-        correction: { type: 'slider', min: 0.5, max: 2.0, step: 0.01, default: 1.00, label: 'Final Boost' },
-        coreBoost: { type: 'slider', min: 0.0, max: 3.0, step: 0.05, default: 0.0, label: 'Core Boost' },
-        dimLightBoost: { type: 'slider', min: 0.0, max: 3.0, step: 0.1, default: 1.0, label: 'Dim Light Boost' },
-        falloffSoftness: { type: 'slider', min: 0.25, max: 4.0, step: 0.05, default: 1.00, label: 'Attenuation Softness' },
-
-        // Color Correction Controls
-        sceneSaturation: { type: 'slider', min: 0.0, max: 2.0, step: 0.05, default: 1.0, label: 'Saturation' },
-        sceneGamma: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.0, label: 'Gamma' },
-        sceneExposure: { type: 'slider', min: 0.0, max: 2.0, step: 0.05, default: 1.0, label: 'Exposure' },
-        // Scene CC ranges are deliberately tight so small tweaks are gentle
-        sceneBrightness: { type: 'slider', min: -0.2, max: 0.2, step: 0.01, default: 0.0, label: 'Brightness' },
-        sceneContrast: { type: 'slider', min: 0.8, max: 1.2, step: 0.01, default: 1.0, label: 'Contrast' },
-        sceneTemperature: { type: 'slider', min: -1.0, max: 1.0, step: 0.05, default: 0.0, label: 'Temperature' },
-        sceneTint: { type: 'slider', min: -1.0, max: 1.0, step: 0.05, default: 0.0, label: 'Tint' }
+        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.0 },
+        exposure: { type: 'slider', min: -1, max: 1, step: 0.1, default: 0.0 },
+        saturation: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.0 },
+        contrast: { type: 'slider', min: 0.5, max: 1.5, step: 0.05, default: 1.0 },
       }
     };
   }
 
-  /**
-   * Initialize the effect
-   */
   initialize(renderer, scene, camera) {
-    log.info('Initializing LightingEffect (Post-Process)');
+    const THREE = window.THREE;
     this.renderer = renderer;
-    this.mainScene = scene;
     this.mainCamera = camera;
 
-    const THREE = window.THREE;
+    // 1. Light Accumulation Setup
+    this.lightScene = new THREE.Scene();
+    // Use black background for additive light accumulation
+    this.lightScene.background = new THREE.Color(0x000000); 
 
-    // 1. Create internal scene for quad rendering
+    // 2. Final Composite Quad
     this.quadScene = new THREE.Scene();
     this.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    
+    // The Composite Shader (Combines Diffuse + Light + Color Correction)
+    this.compositeMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tDiffuse: { value: null }, // Base Scene
+        tLight: { value: null },   // Accumulated HDR Light
+        uDarknessLevel: { value: 0.0 },
+        uAmbientBrightest: { value: new THREE.Color(1,1,1) },
+        uAmbientDarkness: { value: new THREE.Color(0.1, 0.1, 0.2) },
+        
+        // Post-process settings
+        uExposure: { value: 0.0 },
+        uSaturation: { value: 1.0 },
+        uContrast: { value: 1.0 }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tDiffuse;
+        uniform sampler2D tLight;
+        uniform float uDarknessLevel;
+        uniform vec3 uAmbientBrightest;
+        uniform vec3 uAmbientDarkness;
+        
+        uniform float uExposure;
+        uniform float uSaturation;
+        uniform float uContrast;
+        
+        varying vec2 vUv;
 
-    // 1b. Create light accumulation scene
-    this.lightScene = new THREE.Scene();
+        vec3 adjustSaturation(vec3 color, float value) {
+          vec3 gray = vec3(dot(color, vec3(0.2126, 0.7152, 0.0722)));
+          return mix(gray, color, value);
+        }
 
-    // 2. Create Lighting Material
-    this.material = this.createLightingMaterial();
+        void main() {
+          vec4 baseColor = texture2D(tDiffuse, vUv);
+          vec4 lightSample = texture2D(tLight, vUv); // HDR light buffer
+          
+          // 1. Determine Ambient Light
+          vec3 ambient = mix(uAmbientBrightest, uAmbientDarkness, uDarknessLevel);
+          
+          // 2. Combine Ambient with Accumulated Lights
+          vec3 totalIllumination = ambient + lightSample.rgb;
+          
+          // 3. Apply to Base Texture (Multiply)
+          vec3 finalRGB = baseColor.rgb * totalIllumination;
 
-    // 3. Create Quad
-    const geometry = new THREE.PlaneGeometry(2, 2);
-    this.mesh = new THREE.Mesh(geometry, this.material);
-    this.quadScene.add(this.mesh);
+          // --- POST PROCESSING ---
 
-    // Listen for light updates
-    this.hookIdCreate = Hooks.on('createAmbientLight', (doc) => this.onLightCreated(doc));
-    this.hookIdUpdate = Hooks.on('updateAmbientLight', (doc, changes) => this.onLightUpdated(doc, changes));
-    this.hookIdDelete = Hooks.on('deleteAmbientLight', (doc) => this.onLightDeleted(doc));
+          // Exposure
+          finalRGB *= pow(2.0, uExposure);
 
-    // Initial sync
+          // Contrast
+          finalRGB = (finalRGB - 0.5) * uContrast + 0.5;
+
+          // Saturation
+          finalRGB = adjustSaturation(finalRGB, uSaturation);
+
+          gl_FragColor = vec4(finalRGB, baseColor.a);
+        }
+      `
+    });
+
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.compositeMaterial);
+    this.quadScene.add(quad);
+
+    // Hooks to Foundry
+    Hooks.on('createAmbientLight', (doc) => this.onLightUpdate(doc));
+    Hooks.on('updateAmbientLight', (doc) => this.onLightUpdate(doc));
+    Hooks.on('deleteAmbientLight', (doc) => this.onLightDelete(doc));
+    
+    // Initial Load
     this.syncAllLights();
   }
 
   onResize(width, height) {
-    if (this.roofAlphaTarget) {
-      this.roofAlphaTarget.setSize(width, height);
-    }
-    if (this.lightTarget) {
-      this.lightTarget.setSize(width, height);
-    }
-  }
-
-  /**
-   * Set the base mesh (Legacy - no longer needed for Post-Process, but kept for API compatibility if called)
-   */
-  setBaseMesh(mesh) {
-    // No-op for screen-space lighting
-  }
-
-  createLightingMaterial() {
     const THREE = window.THREE;
-    
-    // Uniforms for Scene Context + Accumulated Light Map
-    // NOTE: Roof occlusion uniforms mirror the shared _Outdoors pattern used
-    // by WeatherParticles / FireSparksEffect. In this refactored version we
-    // sample an accumulated light texture (tLight) and apply roof masking in
-    // screen-space using uRoofAlphaMap and uRoofMap.
-    this.uniforms = {
-      tDiffuse: { value: null }, // Input scene texture
-      tLight: { value: null },   // Accumulated light texture from lightScene
-      uViewOffset: { value: new THREE.Vector2() }, // Camera World Pos (Bottom-Left)
-      uViewSize: { value: new THREE.Vector2() },   // Camera World View Size
-      
-      // Roof Occlusion Uniforms
-      // uRoofMap       : World-space _Outdoors mask (dark = indoors, bright = outdoors)
-      // uRoofAlphaMap  : Screen-space alpha of overhead tiles (Layer 20 pre-pass)
-      // uSceneBounds   : (sceneX, sceneY, sceneWidth, sceneHeight) for mapping
-      //                  world XY into 0..1 UVs when sampling uRoofMap.
-      // uHasRoofMap    : Simple 0/1 gate so we can disable the mask entirely
-      //                  when no _Outdoors texture is present.
-      uRoofMap: { value: null },      // _Outdoors mask
-      uRoofAlphaMap: { value: null }, // Real-time overhead tile alpha
-      uSceneBounds: { value: new THREE.Vector4(0,0,1,1) }, // Scene bounds for UV mapping
-      uHasRoofMap: { value: 0.0 },
-      
-      // Base ambient contribution
-      ambientColor: { value: new THREE.Color(0.02, 0.02, 0.02) },
-      globalIntensity: { value: 1.0 },
-      uAmbientBoost: { value: 0.0 },
-      uDarknessLevel: { value: 0.0 },
-      
-      // Advanced Tuning Uniforms
-      uDarknessBoost: { value: 1.8 },
-      uAmbientMix: { value: 0.0 },
-      uLightSaturation: { value: 0.5 },
-      uContrast: { value: 1.0 },
-      uCorrection: { value: 1.26 },
-      uCoreBoost: { value: 1.5 },
-      uFalloffSoftness: { value: 4.0 },
-      
-      // Color Correction Uniforms
-      uSceneSaturation: { value: 1.0 },
-      uSceneGamma: { value: 1.0 },
-      uSceneExposure: { value: 1.0 },
-      uSceneBrightness: { value: 0.0 },
-      uSceneContrast: { value: 1.0 },
-      uSceneTemperature: { value: 0.0 },
-      uSceneTint: { value: 0.0 },
-      
-      // Foundry ambient environment colors
-      uAmbientDaylight: { value: new THREE.Color(1.0, 1.0, 1.0) },
-      uAmbientDarkness: { value: new THREE.Color(0.14, 0.14, 0.28) },
-      uAmbientBrightest: { value: new THREE.Color(1.0, 1.0, 1.0) },
-    };
-
-    const vertexShader = `
-      varying vec2 vUv;
-      
-      void main() {
-        vUv = uv;
-        gl_Position = vec4(position, 1.0);
-      }
-    `;
-
-    const fragmentShader = `
-      #include <common>
-      #include <dithering_pars_fragment>
-
-      uniform sampler2D tDiffuse;
-      uniform sampler2D tLight;
-      uniform vec2 uViewOffset;
-      uniform vec2 uViewSize;
-      
-      uniform sampler2D uRoofMap;
-      uniform sampler2D uRoofAlphaMap;
-      uniform vec4 uSceneBounds;
-      uniform float uHasRoofMap;
-      
-      uniform vec3 ambientColor;
-      uniform float globalIntensity;
-      uniform float uAmbientBoost;
-      uniform float uDarknessLevel;
-      
-      uniform float uDarknessBoost;
-      uniform float uAmbientMix;
-      uniform float uLightSaturation;
-      uniform float uContrast;
-      uniform float uCorrection;
-      uniform float uCoreBoost;
-      uniform float uFalloffSoftness;
-      
-      uniform float uSceneSaturation;
-      uniform float uSceneGamma;
-      uniform float uSceneExposure;
-      uniform float uSceneBrightness;
-      uniform float uSceneContrast;
-      uniform float uSceneTemperature;
-      uniform float uSceneTint;
-      
-      uniform vec3 uAmbientDaylight;
-      uniform vec3 uAmbientDarkness;
-      uniform vec3 uAmbientBrightest;
-      
-      varying vec2 vUv;
-      
-      // Saturation helper
-      vec3 adjustSaturation(vec3 color, float saturation) {
-        float gray = dot(color, vec3(0.2126, 0.7152, 0.0722));
-        return mix(vec3(gray), color, saturation);
-      }
-      
-      // White Balance helper
-      vec3 applyWhiteBalance(vec3 color, float temp, float tint) {
-        // Temperature: Blue <-> Orange
-        vec3 tempShift = vec3(1.0 + temp, 1.0, 1.0 - temp);
-        if (temp < 0.0) tempShift = vec3(1.0, 1.0, 1.0 - temp * 0.5); // More blue
-        else tempShift = vec3(1.0 + temp * 0.5, 1.0, 1.0); // More orange
-        
-        // Tint: Green <-> Magenta
-        vec3 tintShift = vec3(1.0, 1.0 + tint, 1.0);
-        
-        return color * tempShift * tintShift;
-      }
-      
-      void main() {
-        // Sample Base Color (Albedo)
-        vec4 baseTexel = texture2D(tDiffuse, vUv);
-        vec3 baseColor = baseTexel.rgb;
-
-        // Sample accumulated light map (already in screen-space)
-        vec3 totalLight = texture2D(tLight, vUv).rgb;
-
-        // Reconstruct World Position for roof/outdoors masking
-        // Simple linear mapping from UV to View Bounds
-        vec2 worldPos = uViewOffset + (vUv * uViewSize);
-
-        float clampedDarkness = clamp(uDarknessLevel, 0.0, 1.0);
-        vec3 ambientTint = mix(uAmbientDaylight, uAmbientDarkness, clampedDarkness);
-
-        // Pre-sample roof alpha at this pixel (Screen Space)
-        float roofAlpha = texture2D(uRoofAlphaMap, vUv).a;
-
-        // World-space roof mask classification (indoor vs outdoor) based on
-        // _Outdoors texture. Dark = Indoors, Bright = Outdoors.
-        if (uHasRoofMap > 0.5) {
-          vec2 lUV = vec2(
-            (worldPos.x - uSceneBounds.x) / uSceneBounds.z,
-            1.0 - (worldPos.y - uSceneBounds.y) / uSceneBounds.w
-          );
-          if (lUV.x >= 0.0 && lUV.x <= 1.0 && lUV.y >= 0.0 && lUV.y <= 1.0) {
-            float outdoorVal = texture2D(uRoofMap, lUV).r;
-            // Indoors: attenuate by (1 - roofAlpha) so opaque roofs block
-            // completely and hidden roofs allow full contribution.
-            if (outdoorVal < 0.5) {
-              float occlusion = roofAlpha;
-              totalLight *= (1.0 - occlusion);
-            }
-          }
-        }
-
-        // Darkness punch and global brightness gain
-        float dynamicBoost = mix(1.0, uDarknessBoost, clampedDarkness);
-        totalLight *= (dynamicBoost * globalIntensity);
-
-        // Core boost: amplify only the *brightest* portion of the light map so the
-        // inner core pops more without inflating the full radius. We derive a
-        // simple mask from the current light intensity and gate the boost so that
-        // low-intensity pixels near the edge are minimally affected.
-        if (uCoreBoost > 0.0) {
-          float maxC = max(max(totalLight.r, totalLight.g), totalLight.b);
-          // coreMask ~0 for dim pixels, ~1 for very bright ones.
-          float coreMask = smoothstep(0.55, 0.95, maxC);
-          float coreFactor = 1.0 + uCoreBoost * coreMask;
-          totalLight *= coreFactor;
-        }
-        
-        // Apply Light Map Contrast
-        if (uContrast != 1.0) {
-           totalLight = (totalLight - 0.5) * uContrast + 0.5;
-           totalLight = max(vec3(0.0), totalLight); // Prevent negatives
-        }
-
-        // Apply Attenuation Softness (exponent on final falloff)
-        if (uFalloffSoftness != 1.0) {
-          vec3 eps = vec3(1e-4);
-          totalLight = pow(max(totalLight, eps), vec3(uFalloffSoftness));
-        }
-        
-        // Tone Mapping for the Light Map itself to prevent nuclear burnout
-        // but allow it to go > 1.0 for the "punch".
-        totalLight = totalLight / (vec3(1.0) + totalLight * 0.1);
-        
-        // Apply Final Correction Boost
-        totalLight *= uCorrection;
-        
-        // Final Composition: "Adaptive Luminance" logic
-        // AmbientBoost now acts as a brightness gain on the base color so we
-        // preserve the underlying map hues instead of washing them out with a
-        // flat grey term.
-        //
-        // ambientGain = 1.0  => original base
-        // ambientGain > 1.0  => brighter base (exposure-style boost)
-        float ambientGain = 1.0 + uAmbientBoost;
-        vec3 boostedBase = baseColor * ambientGain;
-
-        // Dynamic light still modulates the (now brighter) base.
-        // Final = BoostedBase + (BoostedBase * Light)
-        vec3 finalColor = boostedBase + (boostedBase * totalLight);
-        
-        // Apply Scene Color Correction
-        // 1. Saturation
-        if (uSceneSaturation != 1.0) {
-          finalColor = adjustSaturation(finalColor, uSceneSaturation);
-        }
-        
-        // 2. White Balance (Temp + Tint)
-        if (uSceneTemperature != 0.0 || uSceneTint != 0.0) {
-          finalColor = applyWhiteBalance(finalColor, uSceneTemperature, uSceneTint);
-        }
-        
-        // 3. Exposure (simple multiplier in linear space)
-        if (uSceneExposure != 1.0) {
-          finalColor *= uSceneExposure;
-        }
-        
-        // 4. Luma-space Contrast/Brightness
-        // Compute original luma so we can remap brightness/contrast without
-        // blowing out colors. This keeps hue/chroma more stable.
-        float origLuma = dot(finalColor, vec3(0.2126, 0.7152, 0.0722));
-        float newLuma = origLuma;
-        
-        // Internally dampen slider strength so UI steps stay gentle.
-        float contrastStrength = (uSceneContrast - 1.0) * 0.5 + 1.0; // half as strong
-        float brightnessStrength = uSceneBrightness * 0.5;           // half as strong
-        
-        if (contrastStrength != 1.0) {
-          // Contrast in luma space around mid-grey 0.5
-          newLuma = (newLuma - 0.5) * contrastStrength + 0.5;
-        }
-        if (brightnessStrength != 0.0) {
-          newLuma += brightnessStrength;
-        }
-
-        // Keep adjusted luma in a sane display range.
-        newLuma = clamp(newLuma, 0.0, 1.5);
-
-        // Rescale RGB by the luma ratio, preserving color direction.
-        // Small epsilon avoids division by zero in very dark areas.
-        float eps = 1e-4;
-        if (origLuma > eps) {
-          float lumaScale = newLuma / max(origLuma, eps);
-          finalColor *= lumaScale;
-        } else {
-          // If the original pixel was effectively black, just add brightness
-          // uniformly so subtle detail can emerge without huge jumps.
-          finalColor += vec3(newLuma);
-        }
-
-        // 5. Gamma
-        if (uSceneGamma != 1.0) {
-          finalColor = pow(max(finalColor, vec3(0.0)), vec3(1.0 / uSceneGamma));
-        }
-
-        // Output final color
-        gl_FragColor = vec4(finalColor, baseTexel.a);
-      }
-    `;
-
-    return new THREE.ShaderMaterial({
-      uniforms: this.uniforms,
-      vertexShader: vertexShader,
-      fragmentShader: fragmentShader,
-      depthWrite: false,
-      depthTest: false
+    if (this.lightTarget) this.lightTarget.dispose();
+    this.lightTarget = new THREE.WebGLRenderTarget(width, height, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.HalfFloatType // HDR capable
     });
   }
-  
-  setInputTexture(texture) {
-    if (this.material) {
-      this.material.uniforms.tDiffuse.value = texture;
+
+  // Kept for API compatibility with canvas-replacement, but unused in the
+  // current screen-space post-process implementation.
+  setBaseMesh(_mesh) {
+    // No-op: Lighting is computed in screen space from tDiffuse and tLight.
+  }
+
+  syncAllLights() {
+    if (!canvas.lighting) return;
+    this.lights.forEach(l => l.dispose());
+    this.lights.clear();
+    canvas.lighting.placeables.forEach(p => this.onLightUpdate(p.document));
+  }
+
+  onLightUpdate(doc) {
+    if (this.lights.has(doc.id)) {
+      this.lights.get(doc.id).updateData(doc);
+    } else {
+      const source = new ThreeLightSource(doc);
+      this.lights.set(doc.id, source);
+      if (source.mesh) this.lightScene.add(source.mesh);
     }
+  }
+
+  onLightDelete(doc) {
+    if (this.lights.has(doc.id)) {
+      const source = this.lights.get(doc.id);
+      if (source.mesh) this.lightScene.remove(source.mesh);
+      source.dispose();
+      this.lights.delete(doc.id);
+    }
+  }
+
+  update(timeInfo) {
+    if (!this.enabled) return;
+
+    const dt = timeInfo && typeof timeInfo.delta === 'number' ? timeInfo.delta : 0;
+
+    // Sync Environment Data
+    if (canvas.scene && canvas.environment) {
+      this.params.darknessLevel = canvas.environment.darknessLevel;
+      // Sync ambient colors if available
+      if (canvas.environment.colors) {
+         // Copy colors to uniforms...
+      }
+    }
+
+    // Update Animations for all lights
+    this.lights.forEach(light => {
+      light.updateAnimation(dt, this.params.darknessLevel);
+    });
+
+    // Update Composite Uniforms
+    const u = this.compositeMaterial.uniforms;
+    u.uDarknessLevel.value = this.params.darknessLevel;
+    u.uExposure.value = this.params.exposure;
+    u.uSaturation.value = this.params.saturation;
+    u.uContrast.value = this.params.contrast;
   }
 
   render(renderer, scene, camera) {
-    if (!this.enabled || !this.material || !this.material.uniforms.tDiffuse.value) return;
+    if (!this.enabled) return;
 
     const THREE = window.THREE;
 
-    // -------------------------------------------------------
-    // Roof Alpha Pass
-    // Render overhead tiles (Layer 20) to an off-screen target
-    // so we can sample their opacity in the lighting shader.
-    // -------------------------------------------------------
-    if (!this.roofAlphaTarget) {
-      const size = new THREE.Vector2();
-      renderer.getSize(size);
-      this.roofAlphaTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
-        minFilter: THREE.LinearFilter,
-        magFilter: THREE.LinearFilter,
-        format: THREE.RGBAFormat,
-        type: THREE.UnsignedByteType
-      });
-    }
-    
-    // Save state
-    const oldTarget = renderer.getRenderTarget();
-    const oldClearAlpha = renderer.getClearAlpha();
-    const oldClearColor = new THREE.Color();
-    renderer.getClearColor(oldClearColor);
-    
-    // Setup Roof Pass
-    renderer.setRenderTarget(this.roofAlphaTarget);
-    renderer.setClearColor(0x000000, 0.0); // Transparent background
-    renderer.clear();
-    
-    // Switch Camera Layers
-    // We only want to see the ROOF_LAYER (20).
-    // Standard layer (0) should be hidden for this pass.
-    camera.layers.disable(0); 
-    camera.layers.enable(this.ROOF_LAYER); 
-    
-    // Render Roofs
-    renderer.render(scene, camera);
-    
-    // Restore Camera Layers
-    camera.layers.disable(this.ROOF_LAYER);
-    camera.layers.enable(0); 
-    
-    // Restore Renderer State
-    renderer.setRenderTarget(oldTarget);
-    renderer.setClearColor(oldClearColor, oldClearAlpha);
-    
-    // Bind Roof Alpha Map to Lighting Shader
-    this.material.uniforms.uRoofAlphaMap.value = this.roofAlphaTarget.texture;
-
-    // -------------------------------------------------------
-    // Light Accumulation Pass
-    // Render all LightMesh helpers in world-space into a separate target.
-    // -------------------------------------------------------
-
+    // Ensure we have a light accumulation target that matches the current
+    // drawing buffer size. This avoids a black screen if onResize has not
+    // been called yet.
+    const size = new THREE.Vector2();
+    renderer.getDrawingBufferSize(size);
     if (!this.lightTarget) {
-      const size = new THREE.Vector2();
-      renderer.getSize(size);
       this.lightTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
-        type: THREE.FloatType
+        type: THREE.HalfFloatType // HDR capable
       });
+    } else if (this.lightTarget.width !== size.x || this.lightTarget.height !== size.y) {
+      this.lightTarget.setSize(size.x, size.y);
     }
 
-    const oldTarget2 = renderer.getRenderTarget();
-    const oldClearAlpha2 = renderer.getClearAlpha();
-    const oldClearColor2 = new THREE.Color();
-    renderer.getClearColor(oldClearColor2);
-
+    // 1. Accumulate Lights into lightTarget
+    const oldTarget = renderer.getRenderTarget();
     renderer.setRenderTarget(this.lightTarget);
-    renderer.setClearColor(0x000000, 0.0);
+    renderer.setClearColor(0x000000, 1);
     renderer.clear();
 
     if (this.lightScene && this.mainCamera) {
       renderer.render(this.lightScene, this.mainCamera);
     }
 
-    renderer.setRenderTarget(oldTarget2);
-    renderer.setClearColor(oldClearColor2, oldClearAlpha2);
+    // 2. Composite: use lightTarget as tLight, base scene texture comes from
+    // EffectComposer via setInputTexture(tDiffuse).
+    this.compositeMaterial.uniforms.tLight.value = this.lightTarget.texture;
 
-    // Bind accumulated light texture
-    this.material.uniforms.tLight.value = this.lightTarget.texture;
-
-    // -------------------------------------------------------
-    // Main Lighting Pass
-    // -------------------------------------------------------
-
-    // Calculate View Bounds for World Position Reconstruction
-    if (camera && camera.isPerspectiveCamera) {
-      // Calculate visible height at Z=0 (Ground Plane)
-      // camera.position.z is height above ground (assuming ground is 0)
-      // fov is vertical FOV in degrees
-      const dist = Math.max(1, camera.position.z);
-      const vFOV = THREE.MathUtils.degToRad(camera.fov);
-      const visibleHeight = 2 * Math.tan(vFOV / 2) * dist;
-      const visibleWidth = visibleHeight * camera.aspect;
-      
-      // Camera Position is center of view
-      // Top-Left of view (which maps to UV 0,1? No, UV 0,0 is Bottom-Left in Three GLSL)
-      // Bottom-Left World Pos:
-      const cx = camera.position.x;
-      const cy = camera.position.y;
-      
-      const left = cx - visibleWidth / 2;
-      const bottom = cy - visibleHeight / 2;
-      
-      this.material.uniforms.uViewOffset.value.set(left, bottom);
-      this.material.uniforms.uViewSize.value.set(visibleWidth, visibleHeight);
-    }
-
-    // Render Quad
-    const oldAutoClear = renderer.autoClear;
-    renderer.autoClear = false;
+    renderer.setRenderTarget(oldTarget);
     renderer.render(this.quadScene, this.quadCamera);
-    renderer.autoClear = oldAutoClear;
   }
 
-  syncAllLights() {
-    if (!canvas.lighting) return;
-    
-    // Clear existing helpers
-    this.lights.forEach(entry => {
-      if (entry.helper && entry.helper.mesh && this.lightScene) {
-        this.lightScene.remove(entry.helper.mesh);
-      }
-      if (entry.helper) entry.helper.dispose();
-    });
-    this.lights.clear();
-
-    // Get all ambient lights
-    const lights = canvas.lighting.placeables;
-    lights.forEach(light => {
-      this.addLight(light.document);
-    });
-  }
-
-  addLight(doc) {
-    const THREE = window.THREE;
-    if (!THREE) return;
-
-    // If this light already exists, remove and recreate to avoid stale geometry.
-    this.removeLight(doc.id);
-
-    const config = doc.config;
-    if (!config) return;
-
-    // Extract color
-    let r = 1, g = 1, b = 1;
-    const colorInput = config.color;
-
-    if (colorInput) {
-      try {
-        // Handle Foundry Color object, hex string, or integer
-        if (typeof colorInput === 'object' && colorInput.rgb) {
-          r = colorInput.rgb[0];
-          g = colorInput.rgb[1];
-          b = colorInput.rgb[2];
-        } else {
-          const c = (typeof foundry !== 'undefined' && foundry.utils?.Color)
-            ? foundry.utils.Color.from(colorInput)
-            : new THREE.Color(colorInput);
-          r = c.r;
-          g = c.g;
-          b = c.b;
-        }
-      } catch (e) {
-        if (typeof colorInput === 'number') {
-          r = ((colorInput >> 16) & 0xff) / 255;
-          g = ((colorInput >> 8) & 0xff) / 255;
-          b = (colorInput & 0xff) / 255;
-        }
-      }
-    }
-
-    // Extract intensity/brightness (Foundry convention)
-    const luminosity = config.luminosity ?? 0.5;
-    const intensity = luminosity * 2.0;
-
-    const dim = config.dim || 0;
-    const bright = config.bright || 0;
-    const radius = Math.max(dim, bright);
-    if (radius === 0) return;
-
-    // Convert radii from distance units to pixels
-    const d = canvas.dimensions;
-    const pixelsPerUnit = d ? (d.size / d.distance) : 1.0;
-    const radiusPx = radius * pixelsPerUnit;
-    const brightPx = Math.max(1, bright * pixelsPerUnit);
-
-    // World position (center of light)
-    const worldPos = Coordinates.toWorld(doc.x, doc.y);
-    const center = new THREE.Vector2(worldPos.x, worldPos.y);
-
-    // Optional polygon from Foundry's PointSourcePolygon (already wall-clipped)
-    let worldPoints = null;
-    try {
-      const placeable = canvas.lighting?.get(doc.id);
-      const source = placeable?.source;
-      const pts = source?.shape?.points;
-      if (Array.isArray(pts) && pts.length >= 6) {
-        worldPoints = [];
-        for (let i = 0; i < pts.length; i += 2) {
-          const fx = pts[i];
-          const fy = pts[i + 1];
-          const v = Coordinates.toWorld(fx, fy);
-          worldPoints.push(v.x, v.y);
-        }
-      }
-    } catch (e) {
-      // If anything goes wrong, fall back to a simple circle.
-    }
-
-    const helper = new LightMesh(center, radiusPx, { r: r * intensity, g: g * intensity, b: b * intensity }, {
-      worldPoints,
-      innerRadiusPx: brightPx
-    });
-
-    if (this.lightScene && helper.mesh) {
-      this.lightScene.add(helper.mesh);
-    }
-
-    this.lights.set(doc.id, { helper });
-  }
-
-  removeLight(id) {
-    const entry = this.lights.get(id);
-    if (!entry) return;
-
-    if (entry.helper) {
-      if (entry.helper.mesh && this.lightScene) {
-        this.lightScene.remove(entry.helper.mesh);
-      }
-      entry.helper.dispose();
-    }
-
-    this.lights.delete(id);
-  }
-
-  onLightCreated(doc) {
-    this.addLight(doc);
-  }
-
-  onLightUpdated(doc, changes) {
-    this.removeLight(doc.id);
-    this.addLight(doc);
-  }
-
-  onLightDeleted(doc) {
-    this.removeLight(doc.id);
-  }
-
-  updateLightUniforms() {
-    // No-op: legacy array-based shader path removed in favor of LightMesh helpers
-  }
-
-  update(timeInfo) {
-    // If the effect is disabled, hide (or eventually dispose) the overlay mesh
-    // but keep the light data around so a later re-enable is cheap.
-    if (!this.enabled) {
-      if (this.lightingMesh) this.lightingMesh.visible = false;
-      return;
-    }
-
-    if (this.lightingMesh) {
-      this.lightingMesh.visible = true;
-    }
-
-    if (this.uniforms) {
-      const u = this.uniforms;
-      const p = this.params || {};
-
-      // Global brightness is driven directly from the UI slider (0..2).
-      // Clamp only to the advertised range so the slider behaves as expected.
-      const rawGI = (typeof p.globalIntensity === 'number') ? p.globalIntensity : 1.0;
-      const clampedGI = Math.max(0.0, Math.min(rawGI, 2.0));
-      u.globalIntensity.value = clampedGI;
-
-      // Ambient ground boost lifts the base pass using the selected ambientColor.
-      // Clamp softly so extremely high saved values don't blow out the scene.
-      const rawAB = (typeof p.ambientBoost === 'number') ? p.ambientBoost : 0.0;
-      const clampedAB = Math.max(0.0, Math.min(rawAB, 2.0));
-      u.uAmbientBoost.value = clampedAB;
-
-      // Update Roof Uniforms
-      if (weatherController && weatherController.roofMap) {
-        u.uRoofMap.value = weatherController.roofMap;
-        u.uHasRoofMap.value = 1.0;
-      } else {
-        u.uRoofMap.value = null;
-        u.uHasRoofMap.value = 0.0;
-      }
-
-      if (canvas && canvas.dimensions) {
-        const d = canvas.dimensions;
-        u.uSceneBounds.value.set(d.sceneX, d.sceneY, d.sceneWidth, d.sceneHeight);
-      }
-
-      const ac = p.ambientColor || { r: 0.02, g: 0.02, b: 0.02 };
-      const ar = Math.max(0.0, Math.min(ac.r ?? 0.02, 0.06));
-      const ag = Math.max(0.0, Math.min(ac.g ?? 0.02, 0.06));
-      const ab = Math.max(0.0, Math.min(ac.b ?? 0.02, 0.06));
-      u.ambientColor.value.setRGB(ar, ag, ab);
-
-      // Sync Advanced Controls
-      if (typeof p.darknessBoost === 'number') u.uDarknessBoost.value = p.darknessBoost;
-      if (typeof p.ambientMix === 'number') u.uAmbientMix.value = p.ambientMix;
-      if (typeof p.lightSaturation === 'number') u.uLightSaturation.value = p.lightSaturation;
-      if (typeof p.contrast === 'number') u.uContrast.value = p.contrast;
-      if (typeof p.correction === 'number') u.uCorrection.value = p.correction;
-      if (typeof p.coreBoost === 'number') u.uCoreBoost.value = p.coreBoost;
-      if (typeof p.falloffSoftness === 'number') u.uFalloffSoftness.value = p.falloffSoftness;
-      
-      // Sync Dim Light Boost to all active LightMeshes
-      if (typeof p.dimLightBoost === 'number') {
-        const boost = p.dimLightBoost;
-        this.lights.forEach(entry => {
-          if (entry.helper && entry.helper.material) {
-            entry.helper.material.uniforms.uHaloBoost.value = boost;
-          }
-        });
-      }
-
-      // Sync Color Correction
-      if (typeof p.sceneSaturation === 'number') u.uSceneSaturation.value = p.sceneSaturation;
-      if (typeof p.sceneGamma === 'number') u.uSceneGamma.value = p.sceneGamma;
-      if (typeof p.sceneExposure === 'number') u.uSceneExposure.value = p.sceneExposure;
-      if (typeof p.sceneBrightness === 'number') u.uSceneBrightness.value = p.sceneBrightness;
-      if (typeof p.sceneContrast === 'number') u.uSceneContrast.value = p.sceneContrast;
-      if (typeof p.sceneTemperature === 'number') u.uSceneTemperature.value = p.sceneTemperature;
-      if (typeof p.sceneTint === 'number') u.uSceneTint.value = p.sceneTint;
-
-      // Drive darkness and ambient environment colors from Foundry's canvas
-      // when available so lighting tracks the same environment used by PIXI.
-      try {
-        const scene = canvas?.scene;
-        const env = canvas?.environment;
-        if (scene?.environment?.darknessLevel !== undefined) {
-          u.uDarknessLevel.value = scene.environment.darknessLevel;
-        }
-
-        const colors = env?.colors;
-        if (colors) {
-          const applyColor = (src, targetColor) => {
-            if (!src || !targetColor) return;
-            let r = 1, g = 1, b = 1;
-            try {
-              if (Array.isArray(src)) {
-                r = src[0] ?? 1; g = src[1] ?? 1; b = src[2] ?? 1;
-              } else if (typeof src.r === 'number' && typeof src.g === 'number' && typeof src.b === 'number') {
-                r = src.r; g = src.g; b = src.b;
-              } else if (typeof src.toArray === 'function') {
-                const arr = src.toArray();
-                r = arr[0] ?? 1; g = arr[1] ?? 1; b = arr[2] ?? 1;
-              }
-            } catch (e) {
-              // Keep defaults on failure.
-            }
-            targetColor.setRGB(r, g, b);
-          };
-
-          applyColor(colors.ambientDaylight,  u.uAmbientDaylight.value);
-          applyColor(colors.ambientDarkness,  u.uAmbientDarkness.value);
-          applyColor(colors.ambientBrightest, u.uAmbientBrightest.value);
-        }
-      } catch (e) {
-        // If canvas or environment are not ready, keep previous values.
-      }
+  setInputTexture(texture) {
+    if (this.compositeMaterial) {
+      this.compositeMaterial.uniforms.tDiffuse.value = texture;
     }
   }
 }

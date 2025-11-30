@@ -46,12 +46,13 @@ const log = createLogger('FireSparksEffect');
  *     offsetY = H - sceneY - sceneHeight  (Y-inverted world coords)
  */
 class FireMaskShape {
-  constructor(points, width, height, offsetX, offsetY) {
+  constructor(points, width, height, offsetX, offsetY, ownerEffect) {
     this.points = points;
     this.width = width;
     this.height = height;
     this.offsetX = offsetX;
     this.offsetY = offsetY;
+    this.ownerEffect = ownerEffect;
     this.type = 'fire_mask'; 
   }
   
@@ -98,10 +99,13 @@ class FireMaskShape {
     
     // Only affect particles that are somewhat outdoors and weather is bad
     if (outdoorFactor > 0.01 && (precip > 0.05 || wind > 0.1)) {
+        const params = this.ownerEffect && this.ownerEffect.params ? this.ownerEffect.params : null;
+        const precipKill = params && typeof params.weatherPrecipKill === 'number' ? params.weatherPrecipKill : 0.8;
+        const windKill = params && typeof params.weatherWindKill === 'number' ? params.weatherWindKill : 0.4;
+
         // Calculate weather stress (0.0 = None, 1.0+ = Heavy)
-        // We weigh precipitation heavily (0.8) and wind moderately (0.4)
-        // Halved overall intensity so the additional guttering is less aggressive
-        const weatherStress = 0.5 * (precip * 0.8 + wind * 0.4) * outdoorFactor;
+        // UI controls scale the impact of precipitation and wind.
+        const weatherStress = 0.5 * (precip * precipKill + wind * windKill) * outdoorFactor;
         
         // Survival factor: 1.0 (Healthy) -> 0.1 (Dying)
         const survival = Math.max(0.1, 1.0 - weatherStress);
@@ -281,6 +285,13 @@ export class FireSparksEffect extends EffectBase {
       fireCurlStrength: 1.35,
       emberCurlStrength: 3.95,
 
+      // Weather guttering controls (outdoor fire kill strength)
+      // These scale how strongly precipitation and wind reduce fire lifetime
+      // and size during spawn-time guttering in FireMaskShape.initialize.
+      // Defaults preserve existing tuned behavior: precip 0.8, wind 0.4.
+      weatherPrecipKill: 0.8,
+      weatherWindKill: 0.4,
+
       // Per-effect time scaling (independent of global Simulation Speed)
       // 1.0 = baseline, >1.0 = faster (shorter lifetimes), <1.0 = slower.
       // Matches UI: Time Scale = 1.0
@@ -327,7 +338,7 @@ export class FireSparksEffect extends EffectBase {
         { name: 'embers-shape', label: 'Embers - Shape', type: 'inline', parameters: ['emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax'] },
         { name: 'embers-look', label: 'Embers - Look', type: 'inline', parameters: ['emberOpacityMin', 'emberOpacityMax', 'emberColorBoostMin', 'emberColorBoostMax', 'emberStartColor', 'emberEndColor'] },
         { name: 'embers-physics', label: 'Embers - Physics', type: 'inline', parameters: ['emberUpdraft', 'emberCurlStrength'] },
-        { name: 'env', label: 'Environment', type: 'inline', parameters: ['windInfluence', 'lightIntensity', 'timeScale'] }
+        { name: 'env', label: 'Environment', type: 'inline', parameters: ['windInfluence', 'lightIntensity', 'timeScale', 'weatherPrecipKill', 'weatherWindKill'] }
       ],
       parameters: {
         enabled: { type: 'checkbox', label: 'Fire Enabled', default: true },
@@ -370,7 +381,11 @@ export class FireSparksEffect extends EffectBase {
         // Matches tuned UI defaults: Wind Influence = 2.0, Light Intensity = 0.9, Time Scale = 1.0
         windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 2.0 },
         lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 0.9 },
-        timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 1.0 }
+        timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 1.0 },
+
+        // Weather guttering strength (spawn-time kill) for outdoor flames
+        weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.8 },
+        weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.4 }
       }
     };
   }
@@ -430,7 +445,7 @@ export class FireSparksEffect extends EffectBase {
       // Invert Y so that mask v=0 is the **visual top** of the scene and
       // v=1 is the bottom, matching the base plane and token/tile transforms.
       const sy = (d.height || height) - (d.sceneY || 0) - height;
-      const shape = new FireMaskShape(points, width, height, sx, sy);
+      const shape = new FireMaskShape(points, width, height, sx, sy, this);
       this.globalSystem = this._createFireSystem({
         shape: shape,
         rate: new IntervalValue(10.0, 20.0), 

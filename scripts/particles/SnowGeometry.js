@@ -202,14 +202,35 @@ export class SnowGeometry {
           // Pass through mesh UVs for procedural flake shaping in fragment
           vUv = uv;
 
-          // Camera-facing billboard quad
+          // Camera-facing billboard quad with per-flake tumbling.
+          // We rotate the local quad in-place so each flake appears to
+          // spin in the view plane. Spin intensity scales with wind
+          // strength so calm snow drifts gently while storms look more
+          // chaotic.
           vec3 worldPos = currentPos;
           vec3 camRight = vec3(1.0, 0.0, 0.0);
           vec3 camUp = vec3(0.0, 1.0, 0.0);
 
           vec3 localPos = position; // -0.5..0.5
-          vec3 offset = camRight * (localPos.x * uScale.x * 40.0) +
-                        camUp * (localPos.y * uScale.y * 40.0);
+
+          // --- Per-flake tumble ---
+          // Base spin speed: 1.5–4.0 rad/s, randomized per instance for
+          // clearly visible rotation
+          float baseSpin = 1.5 + hash(idx + 41.0) * 2.5;
+          // Wind-scaled spin multiplier: gentle spin at calm, very strong
+          // spin in high winds so blizzards look chaotic.
+          float windSpinScale = mix(0.4, 4.0, windStrength);
+          float tumbleAngle = (uTime + timeOffset) * baseSpin * windSpinScale;
+
+          float s = sin(tumbleAngle);
+          float c = cos(tumbleAngle);
+
+          vec2 rotatedLocal;
+          rotatedLocal.x = localPos.x * c - localPos.y * s;
+          rotatedLocal.y = localPos.x * s + localPos.y * c;
+
+          vec3 offset = camRight * (rotatedLocal.x * uScale.x * 40.0) +
+                        camUp * (rotatedLocal.y * uScale.y * 40.0);
 
           worldPos += offset;
 

@@ -43,6 +43,7 @@ export class LightMesh {
         : this.outerRadiusPx * 0.5
     );
     this.color = { r: color?.r ?? 1, g: color?.g ?? 1, b: color?.b ?? 1 };
+    this.attenuation = typeof options.attenuation === 'number' ? options.attenuation : 0.5;
 
     /** @type {THREE.Mesh} */
     this.mesh = null;
@@ -53,7 +54,23 @@ export class LightMesh {
         uColor: { value: new THREE.Color(this.color.r, this.color.g, this.color.b) },
         uInnerRadius: { value: this.innerRadiusPx },
         uOuterRadius: { value: this.outerRadiusPx },
-        uHaloBoost: { value: 1.0 }
+        // Scene-driven per-radius boosts for bright vs dim regions.
+        uBrightRadiusBoost: { value: 3.0 },
+        uDimRadiusBoost:    { value: 2.6 },
+        // Per-radius contrast (exponents for core/halo masks).
+        uCoreContrast: { value: 1.0 },
+        uHaloContrast: { value: 1.0 },
+        uAttenuation: { value: this.attenuation },
+        // Global softness multiplier driven by LightingEffect.falloffSoftness
+        // (0.25 = hardest, 4.0 = softest in the UI). 1.0 is neutral.
+        uGlobalSoftness: { value: 1.0 },
+        // Normalized fade controls (0..1)
+        // Bright fade is inside the bright radius: fractions of inner radius.
+        uBrightFadeStart: { value: 0.8 },
+        uBrightFadeEnd:   { value: 1.0 },
+        // Dim fade is between bright and dim radii: 0 = at bright radius, 1 = at dim.
+        uDimFadeStart:    { value: 0.2 },
+        uDimFadeEnd:      { value: 1.0 }
       },
       vertexShader: `
         varying vec2 vLocalPos;
@@ -68,32 +85,32 @@ export class LightMesh {
         uniform vec3 uColor;
         uniform float uInnerRadius;
         uniform float uOuterRadius;
-        uniform float uHaloBoost;
-
+        uniform float uAttenuation;
         void main() {
           float dist = length(vLocalPos);
           if (dist >= uOuterRadius) discard;
 
-          // Two-zone falloff:
-          // - 0 .. innerRadius  : tight, very bright core
-          // - innerRadius .. outerRadius : much softer, dim halo
-          float dOuter = dist / max(uOuterRadius, 1e-4);
-          float innerFrac = clamp(uInnerRadius / max(uOuterRadius, 1e-4), 0.0, 0.99);
+          // Normalize distance so 0 = center, 1 = dim edge.
+          float d = dist / max(uOuterRadius, 1e-4);
 
-          float coreRegion = 1.0 - smoothstep(0.0, innerFrac, dOuter);
-          float haloRegion = 1.0 - smoothstep(innerFrac, 1.0, dOuter);
+          // Bright radius ratio: where the inner (bright) circle ends.
+          float brightRatio = clamp(uInnerRadius / max(uOuterRadius, 1e-4), 0.0, 1.0);
 
-          // Make the core significantly brighter than the halo so the
-          // bright radius is clearly visible.
-          float coreIntensity = pow(coreRegion, 1.2) * 1.8; // sharp, bright core
-          
-          // Halo intensity (dim radius)
-          // Base 0.18 factor boosted by uHaloBoost
-          float haloIntensity = pow(haloRegion, 1.0) * 0.18 * uHaloBoost;
+          // Attenuation drives edge hardness for BOTH radii, matching Foundry.
+          float att = clamp(uAttenuation, 0.0, 1.0);
+          float hardness = mix(0.05, 1.0, att);
 
-          float intensity = coreIntensity + haloIntensity;
+          // Dim falloff: outer halo from center (0) to dim edge (1).
+          float dimFalloff = 1.0 - smoothstep(1.0 - hardness, 1.0, d);
 
-          gl_FragColor = vec4(uColor * intensity, intensity);
+          // Bright falloff: remap so bright edge is treated as 1.0.
+          float brightDist = d / max(0.001, brightRatio);
+          float brightFalloff = 1.0 - smoothstep(1.0 - hardness, 1.0, brightDist);
+
+          // Combine bright + dim contributions and clamp.
+          float finalIntensity = clamp(dimFalloff + brightFalloff, 0.0, 1.0);
+
+          gl_FragColor = vec4(uColor * finalIntensity, finalIntensity);
         }
       `,
       transparent: true,
@@ -192,6 +209,7 @@ export class LightMesh {
     this.material.uniforms.uColor.value.setRGB(this.color.r, this.color.g, this.color.b);
     this.material.uniforms.uOuterRadius.value = this.outerRadiusPx;
     this.material.uniforms.uInnerRadius.value = this.innerRadiusPx;
+    this.material.uniforms.uAttenuation.value = this.attenuation;
   }
 
   /** Dispose geometry and material. */

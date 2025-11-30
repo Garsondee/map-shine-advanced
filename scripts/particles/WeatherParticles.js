@@ -227,7 +227,20 @@ class SnowSpinBehavior {
     if (particle._landed) return;
 
     if (typeof particle.rotation === 'number' && typeof particle._spinSpeed === 'number') {
-      particle.rotation += particle._spinSpeed * this.strength * delta;
+      // Drive tumbling intensity from current wind speed so calm snow
+      // drifts with gentle spin while storms look much more chaotic.
+      let wind = 0;
+      try {
+        if (weatherController && weatherController.currentState) {
+          wind = weatherController.currentState.windSpeed || 0;
+        }
+      } catch (e) {
+        wind = 0;
+      }
+
+      // 0 wind -> ~0.4x base spin, 1.0 wind -> ~3x base spin.
+      const windFactor = 0.4 + 2.6 * Math.max(0, Math.min(1, wind));
+      particle.rotation += particle._spinSpeed * this.strength * windFactor * delta;
     }
   }
 

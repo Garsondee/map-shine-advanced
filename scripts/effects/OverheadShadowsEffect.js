@@ -28,12 +28,6 @@ export class OverheadShadowsEffect extends EffectBase {
     this.priority = 10;
     this.alwaysRender = true;
 
-    /** @type {THREE.Scene|null} */
-    this.quadScene = null;
-    /** @type {THREE.OrthographicCamera|null} */
-    this.quadCamera = null;
-    /** @type {THREE.Mesh|null} */
-    this.quad = null;
     /** @type {THREE.ShaderMaterial|null} */
     this.material = null;
     /** @type {THREE.WebGLRenderTarget|null} */
@@ -50,6 +44,14 @@ export class OverheadShadowsEffect extends EffectBase {
 
     /** @type {THREE.Vector2|null} */
     this.sunDir = null; // Screen-space sun direction, driven by TimeManager
+
+    /** @type {THREE.Mesh|null} */
+    this.baseMesh = null; // Groundplane mesh
+
+    /** @type {THREE.Scene|null} */
+    this.shadowScene = null; // World-pinned shadow mesh scene
+    /** @type {THREE.Mesh|null} */
+    this.shadowMesh = null;
 
     this.params = {
       enabled: true,
@@ -69,8 +71,15 @@ export class OverheadShadowsEffect extends EffectBase {
    */
   setBaseMesh(baseMesh, assetBundle) {
     if (!assetBundle || !assetBundle.masks) return;
+    this.baseMesh = baseMesh;
     const outdoorsData = assetBundle.masks.find(m => m.id === 'outdoors' || m.type === 'outdoors');
     this.outdoorsMask = outdoorsData?.texture || null;
+
+    // If initialize() has already run and we have a base mesh, build the
+    // world-pinned shadow mesh now.
+    if (this.renderer && this.mainScene && this.mainCamera) {
+      this._createShadowMesh();
+    }
   }
 
   /**
@@ -138,56 +147,83 @@ export class OverheadShadowsEffect extends EffectBase {
     this.mainScene = scene;
     this.mainCamera = camera;
 
-    this.quadScene = new THREE.Scene();
-    this.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    // Create a dedicated scene to render the world-pinned shadow mesh. The
+    // roof mask itself is still rendered into roofTarget using the main
+    // scene and ROOF_LAYER; this scene only contains the groundplane
+    // shadow mesh that samples that mask.
+    this.shadowScene = new THREE.Scene();
+
+    if (this.baseMesh) {
+      this._createShadowMesh();
+    }
+
+    log.info('OverheadShadowsEffect initialized');
+  }
+
+  _createShadowMesh() {
+    const THREE = window.THREE;
+    if (!THREE || !this.baseMesh) return;
+
+    // Dispose previous mesh/material if rebuilding
+    if (this.shadowMesh && this.shadowScene) {
+      this.shadowScene.remove(this.shadowMesh);
+      this.shadowMesh.geometry.dispose();
+      this.shadowMesh = null;
+    }
+    if (this.material) {
+      this.material.dispose();
+      this.material = null;
+    }
 
     this.material = new THREE.ShaderMaterial({
       uniforms: {
         tRoof: { value: null },
-        tOutdoors: { value: null },
-        uHasOutdoorsMask: { value: 0.0 },
         uOpacity: { value: this.params.opacity },
         uLength: { value: this.params.length },
         uSoftness: { value: this.params.softness },
         uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
-        uSunDir: { value: new THREE.Vector2(0.0, 1.0) }
+        uSunDir: { value: new THREE.Vector2(0.0, 1.0) },
+        uResolution: { value: new THREE.Vector2(1024, 1024) },
+        uZoom: { value: 1.0 }
       },
       vertexShader: `
         varying vec2 vUv;
         void main() {
           vUv = uv;
-          gl_Position = vec4(position, 1.0);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
       fragmentShader: `
         uniform sampler2D tRoof;
-        // tOutdoors / uHasOutdoorsMask are reserved for a future
-        // world-pinned outdoors gating pass. For now we ignore them in
-        // the shader to avoid sampling a world-UV texture in
-        // screen-space, which causes the shadow to move when the camera
-        // pans.
-        uniform sampler2D tOutdoors;
-        uniform float uHasOutdoorsMask;
         uniform float uOpacity;
         uniform float uLength;
         uniform float uSoftness;
         uniform vec2 uTexelSize;
         uniform vec2 uSunDir;
+        uniform vec2 uResolution;
+        uniform float uZoom;
 
         varying vec2 vUv;
 
         void main() {
-          // Sun direction in screen space, driven by TimeManager.
-          // We assume uSunDir is already normalized.
-          vec2 dir = uSunDir;
-          float len = uLength;
+          // Screen-space UV for this fragment, matching the roofTarget
+          // render that was produced with the same camera.
+          vec2 screenUv = gl_FragCoord.xy / uResolution;
+
+          // Sun direction in screen space, driven by TimeManager. We
+          // assume uSunDir is already normalized.
+          vec2 dir = normalize(uSunDir);
+
+          // Scale length by zoom so the world-space band stays
+          // approximately constant as the camera zoom changes.
+          float len = uLength * max(uZoom, 0.0001);
 
           // Base roof coverage (directly overhead)
-          float roofBase = texture2D(tRoof, vUv).a;
+          float roofBase = texture2D(tRoof, screenUv).a;
 
           // Sample along the shadow direction at a small distance to
           // represent where the shadow lands on the ground outside.
-          vec2 offsetUv = vUv + dir * len;
+          vec2 offsetUv = screenUv + dir * len;
           float roofOffset = texture2D(tRoof, offsetUv).a;
 
           // Simple 3x3 blur around the offset position to soften edges.
@@ -211,13 +247,14 @@ export class OverheadShadowsEffect extends EffectBase {
 
           // Shadow band from blurred roofOffset. We intentionally do NOT
           // subtract roofBase so the band stays solid across the roof
-          // footprint in screen space. Outdoors-based masking will be
-          // handled in a future world-pinned pass.
+          // footprint. Roof masking and outdoors gating are handled in
+          // LightingEffect during final composition.
           float shadowMask = blurred;
 
           float strength = clamp(shadowMask * uOpacity, 0.0, 1.0);
 
-          // Encode shadow factor in the red channel (1.0 = fully lit, 0.0 = fully shadowed)
+          // Encode shadow factor in the red channel (1.0 = fully lit,
+          // 0.0 = fully shadowed).
           float shadowFactor = 1.0 - strength;
           gl_FragColor = vec4(shadowFactor, shadowFactor, shadowFactor, 1.0);
         }
@@ -225,10 +262,12 @@ export class OverheadShadowsEffect extends EffectBase {
       transparent: false
     });
 
-    this.quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.material);
-    this.quadScene.add(this.quad);
+    this.shadowMesh = new THREE.Mesh(this.baseMesh.geometry, this.material);
+    this.shadowMesh.position.copy(this.baseMesh.position);
+    this.shadowMesh.rotation.copy(this.baseMesh.rotation);
+    this.shadowMesh.scale.copy(this.baseMesh.scale);
 
-    log.info('OverheadShadowsEffect initialized');
+    this.shadowScene.add(this.shadowMesh);
   }
 
   onResize(width, height) {
@@ -248,6 +287,9 @@ export class OverheadShadowsEffect extends EffectBase {
 
     if (this.material && this.material.uniforms && this.material.uniforms.uTexelSize) {
       this.material.uniforms.uTexelSize.value.set(1 / width, 1 / height);
+    }
+    if (this.material && this.material.uniforms && this.material.uniforms.uResolution) {
+      this.material.uniforms.uResolution.value.set(width, height);
     }
 
     if (!this.shadowTarget) {
@@ -298,12 +340,12 @@ export class OverheadShadowsEffect extends EffectBase {
       // Fallback: keep default hour
     }
 
-    // Map hour to a sun azimuth.
+    // Map hour to a sun azimuth over a half-orbit.
     // 12h (noon) -> 0 azimuth
     //  6h (sunrise) -> -PI/2
     // 18h (sunset)  -> +PI/2
     const t = (hour % 24.0) / 24.0;
-    const azimuth = (t - 0.5) * Math.PI * 2.0;
+    const azimuth = (t - 0.5) * Math.PI;
 
     // Horizontal offset (X) driven by -sin(azimuth):
     //  Noon (0)       ->  0  (no horizontal offset)
@@ -314,17 +356,30 @@ export class OverheadShadowsEffect extends EffectBase {
     // Vertical offset (Y) driven by cos(azimuth) scaled by sunLatitude
     // (eccentricity). When sunLatitude = 0, Y is always 0 so the band
     // slides purely east/west. Increasing sunLatitude introduces an
-    // orbital north/south component.
+    // orbital north/south component. We flip the sign here so the
+    // north/south motion matches BuildingShadowsEffect visually.
     const lat = Math.max(0.0, Math.min(1.0, this.params.sunLatitude ?? 0.5));
-    const y = -Math.cos(azimuth) * lat;
+    const y = Math.cos(azimuth) * lat;
 
     if (!this.sunDir) {
       this.sunDir = new THREE.Vector2(x, y);
     } else {
       this.sunDir.set(x, y);
     }
-    if (this.material.uniforms.uSunDir) {
+    if (this.material && this.material.uniforms.uSunDir) {
       this.material.uniforms.uSunDir.value.copy(this.sunDir);
+    }
+
+    // Drive basic uniforms from params and camera zoom.
+    if (this.material) {
+      const u = this.material.uniforms;
+      if (u.uOpacity) u.uOpacity.value = this.params.opacity;
+      if (u.uLength)  u.uLength.value  = this.params.length;
+      if (u.uSoftness) u.uSoftness.value = this.params.softness;
+      if (u.uZoom && this.mainCamera) {
+        const z = typeof this.mainCamera.zoom === 'number' ? this.mainCamera.zoom : 1.0;
+        u.uZoom.value = z;
+      }
     }
   }
 
@@ -335,7 +390,7 @@ export class OverheadShadowsEffect extends EffectBase {
     if (!this.enabled || !this.material) return;
 
     const THREE = window.THREE;
-    if (!THREE || !this.mainCamera || !this.mainScene) return;
+    if (!THREE || !this.mainCamera || !this.mainScene || !this.shadowScene) return;
 
     // Ensure roof target exists and is correctly sized
     const size = new THREE.Vector2();
@@ -376,25 +431,30 @@ export class OverheadShadowsEffect extends EffectBase {
     renderer.clear();
     renderer.render(this.mainScene, this.mainCamera);
 
-    // Pass 2: build shadow texture from roofTarget using full-screen quad
-    this.material.uniforms.tRoof.value = this.roofTarget.texture;
-    this.material.uniforms.tOutdoors.value = this.outdoorsMask;
-    this.material.uniforms.uHasOutdoorsMask.value = this.outdoorsMask ? 1.0 : 0.0;
-    this.material.uniforms.uOpacity.value = this.params.opacity;
-    this.material.uniforms.uLength.value = this.params.length;
-    this.material.uniforms.uSoftness.value = this.params.softness;
+    // IMPORTANT: restore camera layers before rendering the world-pinned
+    // shadow mesh so the base plane is visible to the camera again.
+    this.mainCamera.layers.mask = previousLayersMask;
+
+    // Pass 2: build shadow texture from roofTarget using a world-pinned
+    // groundplane mesh that samples the roof mask in screen space.
+    if (this.material && this.material.uniforms) {
+      this.material.uniforms.tRoof.value = this.roofTarget.texture;
+      if (this.material.uniforms.uResolution) {
+        this.material.uniforms.uResolution.value.set(size.x, size.y);
+      }
+    }
 
     renderer.setRenderTarget(this.shadowTarget);
+    renderer.setClearColor(0xffffff, 1);
     renderer.clear();
-    renderer.render(this.quadScene, this.quadCamera);
+    renderer.render(this.shadowScene, this.mainCamera);
 
-    // Restore per-sprite opacity, camera layers and previous target
+    // Restore per-sprite opacity and previous render target
     for (const entry of overrides) {
       if (entry.object && entry.object.material) {
         entry.object.material.opacity = entry.opacity;
       }
     }
-    this.mainCamera.layers.mask = previousLayersMask;
     renderer.setRenderTarget(previousTarget);
   }
 
@@ -407,16 +467,15 @@ export class OverheadShadowsEffect extends EffectBase {
       this.shadowTarget.dispose();
       this.shadowTarget = null;
     }
-    if (this.quad) {
-      this.quad.geometry.dispose();
-      this.quad = null;
-    }
     if (this.material) {
       this.material.dispose();
       this.material = null;
     }
-    this.quadScene = null;
-    this.quadCamera = null;
+    if (this.shadowMesh && this.shadowScene) {
+      this.shadowScene.remove(this.shadowMesh);
+      this.shadowMesh = null;
+    }
+    this.shadowScene = null;
     log.info('OverheadShadowsEffect disposed');
   }
 }

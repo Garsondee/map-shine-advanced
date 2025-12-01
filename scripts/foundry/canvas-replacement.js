@@ -19,6 +19,7 @@ import { LightingEffect } from '../effects/LightingEffect.js';
 import { LensflareEffect } from '../effects/LensflareEffect.js';
 import { PrismEffect } from '../effects/PrismEffect.js';
 import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
+import { BuildingShadowsEffect } from '../effects/BuildingShadowsEffect.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { FireSparksEffect } from '../particles/FireSparksEffect.js';
 import {
@@ -33,7 +34,6 @@ import {
   FoamEffect,
   GroundGlowEffect,
   BiofilmEffect,
-  BuildingShadowsEffect,
   CanopyDistortionEffect,
   PhysicsRopeEffect,
   BushTreeEffect,
@@ -394,6 +394,10 @@ async function createThreeCanvas(scene) {
     const overheadShadowsEffect = new OverheadShadowsEffect();
     effectComposer.registerEffect(overheadShadowsEffect);
 
+    // Step 3.6.6: Register Building Shadows (post-lighting, environmental)
+    const buildingShadowsEffect = new BuildingShadowsEffect();
+    effectComposer.registerEffect(buildingShadowsEffect);
+
     // Step 3.7: Register Bloom Effect
     const bloomEffect = new BloomEffect();
     effectComposer.registerEffect(bloomEffect);
@@ -411,6 +415,7 @@ async function createThreeCanvas(scene) {
     windowLightEffect.setBaseMesh(basePlane, bundle);
     lightingEffect.setBaseMesh(basePlane, bundle);
     overheadShadowsEffect.setBaseMesh(basePlane, bundle);
+    buildingShadowsEffect.setBaseMesh(basePlane, bundle);
 
     // Step 3b: Initialize grid renderer
     gridRenderer = new GridRenderer(threeScene);
@@ -493,6 +498,7 @@ async function createThreeCanvas(scene) {
     mapShine.prismEffect = prismEffect;
     mapShine.lightingEffect = lightingEffect;
     mapShine.overheadShadowsEffect = overheadShadowsEffect;
+    mapShine.buildingShadowsEffect = buildingShadowsEffect;
     mapShine.bloomEffect = bloomEffect;
     mapShine.lensflareEffect = lensflareEffect;
     mapShine.colorCorrectionEffect = colorCorrectionEffect;
@@ -537,7 +543,8 @@ async function createThreeCanvas(scene) {
         lensflareEffect,
         fireSparksEffect,
         windowLightEffect,
-        overheadShadowsEffect
+        overheadShadowsEffect,
+        buildingShadowsEffect
       );
     } catch (e) {
       log.error('Failed to initialize UI:', e);
@@ -561,9 +568,10 @@ async function createThreeCanvas(scene) {
  * @param {LensflareEffect} lensflareEffect - The lensflare effect instance
  * @param {WindowLightEffect} windowLightEffect - The window lighting effect instance
  * @param {OverheadShadowsEffect} overheadShadowsEffect - The overhead shadows effect instance
+ * @param {BuildingShadowsEffect} buildingShadowsEffect - The building shadows effect instance
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect, fireSparksEffect, windowLightEffect, overheadShadowsEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect, fireSparksEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -947,6 +955,13 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       } else if (overheadShadowsEffect.params && Object.prototype.hasOwnProperty.call(overheadShadowsEffect.params, paramId)) {
         overheadShadowsEffect.params[paramId] = value;
         log.debug(`OverheadShadows.${paramId} =`, value);
+
+        // Keep BuildingShadowsEffect's sunLatitude in sync so both
+        // shadow casters share the same north/south eccentricity.
+        if (paramId === 'sunLatitude' && buildingShadowsEffect && buildingShadowsEffect.params) {
+          buildingShadowsEffect.params.sunLatitude = value;
+          log.debug('BuildingShadows.sunLatitude synced from OverheadShadows:', value);
+        }
       }
     };
 
@@ -955,6 +970,36 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       'Overhead Shadows',
       overheadSchema,
       onOverheadUpdate,
+      'atmospheric'
+    );
+  }
+
+  // --- Building Shadows Settings ---
+  if (buildingShadowsEffect) {
+    const buildingSchema = BuildingShadowsEffect.getControlSchema();
+
+    const onBuildingUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        buildingShadowsEffect.enabled = !!value;
+        log.debug(`BuildingShadows effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (buildingShadowsEffect.params && Object.prototype.hasOwnProperty.call(buildingShadowsEffect.params, paramId)) {
+        buildingShadowsEffect.params[paramId] = value;
+        log.debug(`BuildingShadows.${paramId} =`, value);
+
+        // Keep OverheadShadowsEffect's sunLatitude in sync so both
+        // shadow casters share the same north/south eccentricity.
+        if (paramId === 'sunLatitude' && overheadShadowsEffect && overheadShadowsEffect.params) {
+          overheadShadowsEffect.params.sunLatitude = value;
+          log.debug('OverheadShadows.sunLatitude synced from BuildingShadows:', value);
+        }
+      }
+    };
+
+    uiManager.registerEffect(
+      'building-shadows',
+      'Building Shadows',
+      buildingSchema,
+      onBuildingUpdate,
       'atmospheric'
     );
   }
@@ -1142,7 +1187,6 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     { id: 'biofilm',            name: 'Water Splashes',       Class: BiofilmEffect,           categoryId: 'water' },
 
     // Object & Structure
-    { id: 'building-shadows',   name: 'Building Shadows',     Class: BuildingShadowsEffect,   categoryId: 'structure' },
     { id: 'canopy-distortion',  name: 'Canopy Distortion',    Class: CanopyDistortionEffect,  categoryId: 'structure' },
     { id: 'physics-rope',       name: 'Physics Rope',         Class: PhysicsRopeEffect,       categoryId: 'structure' },
     { id: 'bush-tree',          name: 'Bush & Tree',          Class: BushTreeEffect,          categoryId: 'structure' },

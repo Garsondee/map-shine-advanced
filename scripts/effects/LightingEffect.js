@@ -112,13 +112,15 @@ export class LightingEffect extends EffectBase {
         tLight: { value: null },   // Accumulated HDR Light
         tRoofAlpha: { value: null }, // Overhead tile alpha mask
         tOverheadShadow: { value: null }, // Overhead shadow factor (from OverheadShadowsEffect)
+        tBuildingShadow: { value: null }, // Building shadow factor (from BuildingShadowsEffect)
         tOutdoorsMask: { value: null }, // _Outdoors mask (bright outside, dark indoors)
         uDarknessLevel: { value: 0.0 },
         uAmbientBrightest: { value: new THREE.Color(1,1,1) },
         uAmbientDarkness: { value: new THREE.Color(0.1, 0.1, 0.2) },
-        // Overhead shadow controls
+        // Overhead & building shadow controls
         uOverheadShadowOpacity: { value: 0.0 },
         uOverheadShadowAffectsLights: { value: 0.75 },
+        uBuildingShadowOpacity: { value: 0.0 },
         uHasOutdoorsMask: { value: 0.0 },
         // Post-process settings
         uExposure: { value: 0.0 },
@@ -137,18 +139,18 @@ export class LightingEffect extends EffectBase {
         uniform sampler2D tLight;
         uniform sampler2D tRoofAlpha;
         uniform sampler2D tOverheadShadow;
+        uniform sampler2D tBuildingShadow;
         uniform sampler2D tOutdoorsMask;
         uniform float uDarknessLevel;
         uniform vec3 uAmbientBrightest;
         uniform vec3 uAmbientDarkness;
         uniform float uOverheadShadowOpacity;
         uniform float uOverheadShadowAffectsLights;
+        uniform float uBuildingShadowOpacity;
         uniform float uHasOutdoorsMask;
-        
         uniform float uExposure;
         uniform float uSaturation;
         uniform float uContrast;
-        
         varying vec2 vUv;
 
         vec3 adjustSaturation(vec3 color, float value) {
@@ -180,25 +182,38 @@ export class LightingEffect extends EffectBase {
           float shadowOpacity = clamp(uOverheadShadowOpacity, 0.0, 1.0);
           float rawShadowFactor = mix(1.0, shadowTex, shadowOpacity);
 
-          // Do not darken the overhead tiles themselves: where roofAlpha is high,
-          // blend back toward 1.0 so the roof sprite remains unaffected and the
-          // shadow only appears on the ground below.
-          float shadowFactor = mix(rawShadowFactor, 1.0, roofAlpha);
+          // 3b. Building shadow factor (from BuildingShadowsEffect)
+          float buildingTex = texture2D(tBuildingShadow, vUv).r;
+          float buildingOpacity = clamp(uBuildingShadowOpacity, 0.0, 1.0);
+          float rawBuildingFactor = mix(1.0, buildingTex, buildingOpacity);
 
-          // Gate shadowFactor by outdoors mask to avoid darkening building
-          // interiors. Outdoors mask convention: bright outside, dark indoors.
-          // Where indoors (dark), blend shadowFactor back toward 1.0 so the
-          // interior remains at baseline illumination.
+          // Do not darken the overhead tiles themselves: where roofAlpha is high,
+          // blend both overhead and building shadow factors back toward 1.0 so
+          // the roof sprite remains unaffected and the shadow only appears on
+          // the ground below.
+          float shadowFactor = mix(rawShadowFactor, 1.0, roofAlpha);
+          float buildingFactor = mix(rawBuildingFactor, 1.0, roofAlpha);
+
+          // Gate both overhead and building shadow factors by the outdoors
+          // mask to avoid darkening building interiors. Outdoors mask
+          // convention: bright outside, dark indoors. Where indoors (dark),
+          // blend factors back toward 1.0 so the interior remains at
+          // baseline illumination.
           if (uHasOutdoorsMask > 0.5) {
             float outdoorStrength = texture2D(tOutdoorsMask, vUv).r;
             shadowFactor = mix(1.0, shadowFactor, outdoorStrength);
+            buildingFactor = mix(1.0, buildingFactor, outdoorStrength);
           }
+
+          // Combine overhead and building shadow factors multiplicatively so
+          // areas where both effects are strong become noticeably darker.
+          float combinedShadowFactor = shadowFactor * buildingFactor;
 
           // 4. Combine Ambient with Accumulated Lights (roof-masked + overhead shadows)
           float kd = clamp(uOverheadShadowAffectsLights, 0.0, 1.0);
-          vec3 shadedAmbient = ambient * shadowFactor;
+          vec3 shadedAmbient = ambient * combinedShadowFactor;
           vec3 baseLights = lightSample.rgb * lightVisibility;
-          vec3 shadedLights = mix(baseLights, baseLights * shadowFactor, kd);
+          vec3 shadedLights = mix(baseLights, baseLights * combinedShadowFactor, kd);
           vec3 totalIllumination = shadedAmbient + shadedLights;
           
           // 4. Apply to Base Texture (Multiply)
@@ -482,6 +497,18 @@ export class LightingEffect extends EffectBase {
       u.uOverheadShadowOpacity.value = 0.0;
     }
 
+    // Drive building shadow opacity from BuildingShadowsEffect (if present).
+    try {
+      const building = window.MapShine?.buildingShadowsEffect;
+      if (building && building.params && building.enabled && building.shadowTarget) {
+        u.uBuildingShadowOpacity.value = building.params.opacity ?? 0.0;
+      } else {
+        u.uBuildingShadowOpacity.value = 0.0;
+      }
+    } catch (e) {
+      u.uBuildingShadowOpacity.value = 0.0;
+    }
+
     // Window light uniforms driven by WeatherController and WindowLightEffect
     let cloudCover = 0.0;
     try {
@@ -620,6 +647,16 @@ export class LightingEffect extends EffectBase {
         : null;
     } catch (e) {
       cu.tOverheadShadow.value = null;
+    }
+
+    // Bind building shadow texture if available.
+    try {
+      const building = window.MapShine?.buildingShadowsEffect;
+      cu.tBuildingShadow.value = (building && building.shadowTarget)
+        ? building.shadowTarget.texture
+        : null;
+    } catch (e) {
+      cu.tBuildingShadow.value = null;
     }
 
     renderer.setRenderTarget(oldTarget);

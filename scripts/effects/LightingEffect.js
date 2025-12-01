@@ -113,6 +113,7 @@ export class LightingEffect extends EffectBase {
         tRoofAlpha: { value: null }, // Overhead tile alpha mask
         tOverheadShadow: { value: null }, // Overhead shadow factor (from OverheadShadowsEffect)
         tBuildingShadow: { value: null }, // Building shadow factor (from BuildingShadowsEffect)
+        tBushShadow: { value: null }, // Bush shadow factor (from BushEffect)
         tOutdoorsMask: { value: null }, // _Outdoors mask (bright outside, dark indoors)
         uDarknessLevel: { value: 0.0 },
         uAmbientBrightest: { value: new THREE.Color(1,1,1) },
@@ -121,7 +122,13 @@ export class LightingEffect extends EffectBase {
         uOverheadShadowOpacity: { value: 0.0 },
         uOverheadShadowAffectsLights: { value: 0.75 },
         uBuildingShadowOpacity: { value: 0.0 },
+        uBushShadowOpacity: { value: 0.0 },
         uHasOutdoorsMask: { value: 0.0 },
+        // Shared sun/zoom/texel data for screen-space shadow offsets
+        uShadowSunDir: { value: new THREE.Vector2(0, 1) },
+        uShadowZoom: { value: 1.0 },
+        uBushShadowLength: { value: 0.04 },
+        uCompositeTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         // Post-process settings
         uExposure: { value: 0.0 },
         uSaturation: { value: 1.0 },
@@ -140,6 +147,7 @@ export class LightingEffect extends EffectBase {
         uniform sampler2D tRoofAlpha;
         uniform sampler2D tOverheadShadow;
         uniform sampler2D tBuildingShadow;
+        uniform sampler2D tBushShadow;
         uniform sampler2D tOutdoorsMask;
         uniform float uDarknessLevel;
         uniform vec3 uAmbientBrightest;
@@ -147,7 +155,12 @@ export class LightingEffect extends EffectBase {
         uniform float uOverheadShadowOpacity;
         uniform float uOverheadShadowAffectsLights;
         uniform float uBuildingShadowOpacity;
+        uniform float uBushShadowOpacity;
         uniform float uHasOutdoorsMask;
+        uniform vec2  uShadowSunDir;
+        uniform float uShadowZoom;
+        uniform float uBushShadowLength;
+        uniform vec2  uCompositeTexelSize;
         uniform float uExposure;
         uniform float uSaturation;
         uniform float uContrast;
@@ -187,12 +200,35 @@ export class LightingEffect extends EffectBase {
           float buildingOpacity = clamp(uBuildingShadowOpacity, 0.0, 1.0);
           float rawBuildingFactor = mix(1.0, buildingTex, buildingOpacity);
 
+          // 3c. Bush shadow factor (from BushEffect)
+          // Sample bush mask with the same screen-space sun direction and
+          // zoom model used by OverheadShadowsEffect so bush shadows move
+          // with time-of-day.
+          vec2 bushDir = normalize(uShadowSunDir);
+          float bushPixelLen = uBushShadowLength * 1080.0 * max(uShadowZoom, 0.0001);
+          vec2 bushOffsetUv = bushDir * bushPixelLen * uCompositeTexelSize;
+          float bushTex = texture2D(tBushShadow, vUv + bushOffsetUv).r;
+          float bushOpacity = clamp(uBushShadowOpacity, 0.0, 1.0);
+          float rawBushFactor = mix(1.0, bushTex, bushOpacity);
+
+          // Use the unshifted bush coverage at vUv as a self-mask so the
+          // bush body is not darkened by its own shadow. The bush shadow
+          // pass encodes blurred light factor in .r and raw coverage in .g.
+          float bushCoverage = texture2D(tBushShadow, vUv).g;
+          float bushSelfMask = clamp(bushCoverage, 0.0, 1.0);
+
           // Do not darken the overhead tiles themselves: where roofAlpha is high,
           // blend both overhead and building shadow factors back toward 1.0 so
           // the roof sprite remains unaffected and the shadow only appears on
           // the ground below.
           float shadowFactor = mix(rawShadowFactor, 1.0, roofAlpha);
           float buildingFactor = mix(rawBuildingFactor, 1.0, roofAlpha);
+          float bushFactor = mix(rawBushFactor, 1.0, roofAlpha);
+
+          // Where the bush body covers this pixel, force bushFactor back
+          // toward 1.0 so the shadow appears underneath the bush, not on
+          // top of it.
+          bushFactor = mix(bushFactor, 1.0, bushSelfMask);
 
           // Gate both overhead and building shadow factors by the outdoors
           // mask to avoid darkening building interiors. Outdoors mask
@@ -203,11 +239,12 @@ export class LightingEffect extends EffectBase {
             float outdoorStrength = texture2D(tOutdoorsMask, vUv).r;
             shadowFactor = mix(1.0, shadowFactor, outdoorStrength);
             buildingFactor = mix(1.0, buildingFactor, outdoorStrength);
+            bushFactor = mix(1.0, bushFactor, outdoorStrength);
           }
 
           // Combine overhead and building shadow factors multiplicatively so
           // areas where both effects are strong become noticeably darker.
-          float combinedShadowFactor = shadowFactor * buildingFactor;
+          float combinedShadowFactor = shadowFactor * buildingFactor * bushFactor;
 
           // 4. Combine Ambient with Accumulated Lights (roof-masked + overhead shadows)
           float kd = clamp(uOverheadShadowAffectsLights, 0.0, 1.0);
@@ -513,6 +550,22 @@ export class LightingEffect extends EffectBase {
       u.uBuildingShadowOpacity.value = 0.0;
     }
 
+    // Drive bush shadow opacity and length from BushEffect (if present).
+    try {
+      const bush = window.MapShine?.bushEffect;
+      if (bush && bush.params && bush.enabled && bush.shadowTarget) {
+        const baseOpacity = bush.params.shadowOpacity ?? 0.0;
+        u.uBushShadowOpacity.value = baseOpacity;
+        if (typeof bush.params.shadowLength === 'number') {
+          u.uBushShadowLength.value = bush.params.shadowLength;
+        }
+      } else {
+        u.uBushShadowOpacity.value = 0.0;
+      }
+    } catch (e) {
+      u.uBushShadowOpacity.value = 0.0;
+    }
+
     // Window light uniforms driven by WeatherController and WindowLightEffect
     let cloudCover = 0.0;
     try {
@@ -544,6 +597,44 @@ export class LightingEffect extends EffectBase {
         }
       }
     }
+
+    // --- Shared sun/zoom data for screen-space shadows (overhead, building, bush) ---
+    try {
+      const overhead = window.MapShine?.overheadShadowsEffect;
+      const THREE = window.THREE;
+
+      if (overhead && overhead.sunDir && THREE) {
+        u.uShadowSunDir.value.copy(overhead.sunDir);
+      } else if (weatherController && THREE) {
+        // Fallback: recompute sunDir from WeatherController.timeOfDay and
+        // overhead sunLatitude, mirroring OverheadShadowsEffect logic.
+        let hour = 12.0;
+        try {
+          if (typeof weatherController.timeOfDay === 'number') {
+            hour = weatherController.timeOfDay;
+          }
+        } catch (e) {}
+
+        const t = (hour % 24.0) / 24.0;
+        const azimuth = (t - 0.5) * Math.PI;
+        const lat = (overhead && overhead.params && typeof overhead.params.sunLatitude === 'number')
+          ? THREE.MathUtils.clamp(overhead.params.sunLatitude, 0.0, 1.0)
+          : 0.5;
+        const x = -Math.sin(azimuth);
+        const y = Math.cos(azimuth) * lat;
+        u.uShadowSunDir.value.set(x, y);
+      }
+
+      // Zoom factor matching OverheadShadowsEffect logic (camera dolly zoom).
+      if (this.mainCamera && THREE) {
+        const baseDist = 10000.0;
+        const dist = this.mainCamera.position.z;
+        const z = (dist > 0.1) ? (baseDist / dist) : 1.0;
+        u.uShadowZoom.value = z;
+      }
+    } catch (e) {
+      // keep previous values
+    }
   }
 
   render(renderer, scene, camera) {
@@ -556,6 +647,7 @@ export class LightingEffect extends EffectBase {
     // been called yet.
     const size = new THREE.Vector2();
     renderer.getDrawingBufferSize(size);
+
     if (!this.lightTarget) {
       this.lightTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
         minFilter: THREE.LinearFilter,
@@ -565,6 +657,12 @@ export class LightingEffect extends EffectBase {
       });
     } else if (this.lightTarget.width !== size.x || this.lightTarget.height !== size.y) {
       this.lightTarget.setSize(size.x, size.y);
+    }
+
+    // Update composite texel size so screen-space shadow offsets can be
+    // expressed in pixels consistently.
+    if (this.compositeMaterial && this.compositeMaterial.uniforms.uCompositeTexelSize) {
+      this.compositeMaterial.uniforms.uCompositeTexelSize.value.set(1 / size.x, 1 / size.y);
     }
 
     if (!this.roofAlphaTarget) {
@@ -661,6 +759,16 @@ export class LightingEffect extends EffectBase {
         : null;
     } catch (e) {
       cu.tBuildingShadow.value = null;
+    }
+
+    // Bind bush shadow texture if available.
+    try {
+      const bush = window.MapShine?.bushEffect;
+      cu.tBushShadow.value = (bush && bush.shadowTarget)
+        ? bush.shadowTarget.texture
+        : null;
+    } catch (e) {
+      cu.tBushShadow.value = null;
     }
 
     renderer.setRenderTarget(oldTarget);

@@ -66,6 +66,14 @@ class FireMaskShape {
     const v = this.points[idx + 1];
     const brightness = this.points[idx + 2]; // 0.0 to 1.0 luminance from the _Fire mask
 
+    // Defensive: if mask data is bad, kill this particle immediately.
+    if (!Number.isFinite(u) || !Number.isFinite(v) || !Number.isFinite(brightness) || brightness <= 0.0) {
+      if (typeof p.life === 'number') p.life = 0;
+      if (p.color && typeof p.color.w === 'number') p.color.w = 0;
+      if (typeof p.size === 'number') p.size = 0;
+      return;
+    }
+
     // 2. Direct UV mapping onto the scene rectangle. The _Fire mask has the
     // same pixel dimensions as the base albedo for the scene, so we treat
     // (u, v) exactly like the base texture UVs.
@@ -88,14 +96,18 @@ class FireMaskShape {
     // Let's assume it matches the texture space (u, v) we just read.
     // NOTE: WeatherController.getRoofMaskIntensity reads (u,v) directly from the mask data array.
     // The _Outdoors texture matches the _Fire texture in orientation.
-    const outdoorFactor = weatherController.getRoofMaskIntensity(u, v);
+    let outdoorFactor = weatherController.getRoofMaskIntensity(u, v);
+    if (!Number.isFinite(outdoorFactor) || outdoorFactor < 0) outdoorFactor = 0;
+    if (outdoorFactor > 1) outdoorFactor = 1;
     p._windSusceptibility = outdoorFactor;
 
     // 4. Weather Guttering: Rain + Wind kills exposed fire
     // "High wind speed plus high precipitation should mean the fire is almost out"
-    const weather = weatherController.getCurrentState();
-    const precip = weather.precipitation || 0;
-    const wind = weather.windSpeed || 0;
+    const weather = weatherController.getCurrentState ? weatherController.getCurrentState() : {};
+    let precip = weather && typeof weather.precipitation === 'number' ? weather.precipitation : 0;
+    let wind = weather && typeof weather.windSpeed === 'number' ? weather.windSpeed : 0;
+    if (!Number.isFinite(precip)) precip = 0;
+    if (!Number.isFinite(wind)) wind = 0;
     
     // Only affect particles that are somewhat outdoors and weather is bad
     if (outdoorFactor > 0.01 && (precip > 0.05 || wind > 0.1)) {
@@ -149,6 +161,20 @@ class FireMaskShape {
     // 5. Reset velocity to prevent accumulation across particle reuse
     if (p.velocity) {
       p.velocity.set(0, 0, 0);
+    }
+
+    // Final sanity check: if any core properties are invalid or extreme, kill the particle.
+    const tooBig = (val) => !Number.isFinite(val) || Math.abs(val) > 1e6;
+
+    const posBad = p.position && (tooBig(p.position.x) || tooBig(p.position.y) || tooBig(p.position.z));
+    const lifeBad = typeof p.life === 'number' && tooBig(p.life);
+    const sizeBad = typeof p.size === 'number' && tooBig(p.size);
+    const alphaBad = p.color && typeof p.color.w === 'number' && tooBig(p.color.w);
+
+    if (posBad || lifeBad || sizeBad || alphaBad) {
+      if (typeof p.life === 'number') p.life = 0;
+      if (typeof p.size === 'number') p.size = 0;
+      if (p.color && typeof p.color.w === 'number') p.color.w = 0;
     }
   }
 

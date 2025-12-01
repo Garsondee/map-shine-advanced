@@ -38,19 +38,19 @@ export class BushEffect extends EffectBase {
       intensity: 1.0,
       
       // -- Wind Physics --
-      windSpeedGlobal: 0.1086,   // Multiplier for actual game wind speed
-      windRampSpeed: 1.5,        // Inertia: Lower = slower fade in/out of movement
+      windSpeedGlobal: 0.1413,   // Multiplier for actual game wind speed
+      windRampSpeed: 0.20,       // Inertia: Lower = slower fade in/out of movement
       gustFrequency: 0.01,       // How distinct the "waves" of wind are (Spatial)
-      gustSpeed: 0.16,           // How fast the noise field scrolls
+      gustSpeed: 0.8985,         // How fast the noise field scrolls
       
       // -- Bush Movement --
-      branchBend: 0.034,         // How far the "branches" move in strong wind
-      elasticity: 2.913,         // Higher = snappier return, Lower = lazy heavy branches
+      branchBend: 0.024,         // How far the "branches" move in strong wind
+      elasticity: 5.0,           // Higher = snappier return, Lower = lazy heavy branches
       
       // -- Leaf Flutter --
       flutterIntensity: 0.001,   // Base vibration
-      flutterSpeed: 1.0,         // Speed of vibration
-      flutterScale: 0.05,        // Spatial scale of flutter clusters (leaf size)
+      flutterSpeed: 14.91,       // Speed of vibration
+      flutterScale: 0.01,        // Spatial scale of flutter clusters (leaf size)
       
       // -- Color --
       exposure: -2.0,
@@ -93,15 +93,15 @@ export class BushEffect extends EffectBase {
       ],
       parameters: {
         intensity: { type: 'slider', min: 0.0, max: 2.0, default: 1.0 },
-        windSpeedGlobal: { type: 'slider', label: 'Wind Multiplier', min: 0.0, max: 3.0, default: 0.1086 },
-        windRampSpeed: { type: 'slider', label: 'Responsiveness', min: 0.1, max: 10.0, default: 1.5 },
+        windSpeedGlobal: { type: 'slider', label: 'Wind Multiplier', min: 0.0, max: 3.0, default: 0.1413 },
+        windRampSpeed: { type: 'slider', label: 'Responsiveness', min: 0.1, max: 10.0, default: 0.20 },
         gustFrequency: { type: 'slider', label: 'Gust Scale', min: 0.01, max: 0.5, default: 0.01 },
-        gustSpeed: { type: 'slider', label: 'Gust Speed', min: 0.0, max: 2.0, default: 0.16 },
-        branchBend: { type: 'slider', label: 'Bend Strength', min: 0.0, max: 0.05, step: 0.001, default: 0.034 },
-        elasticity: { type: 'slider', label: 'Bounciness', min: 0.5, max: 5.0, default: 2.913 },
+        gustSpeed: { type: 'slider', label: 'Gust Speed', min: 0.0, max: 2.0, default: 0.8985 },
+        branchBend: { type: 'slider', label: 'Bend Strength', min: 0.0, max: 0.05, step: 0.001, default: 0.024 },
+        elasticity: { type: 'slider', label: 'Bounciness', min: 0.5, max: 5.0, default: 5.0 },
         flutterIntensity: { type: 'slider', label: 'Flutter Amp', min: 0.0, max: 0.02, step: 0.001, default: 0.001 },
-        flutterSpeed: { type: 'slider', label: 'Flutter Hz', min: 1.0, max: 20.0, default: 1.0 },
-        flutterScale: { type: 'slider', label: 'Leaf Size', min: 0.01, max: 100.0, default: 0.05 },
+        flutterSpeed: { type: 'slider', label: 'Flutter Hz', min: 1.0, max: 20.0, default: 14.91 },
+        flutterScale: { type: 'slider', label: 'Leaf Size', min: 0.01, max: 100.0, default: 0.01 },
         exposure: { type: 'slider', min: -2.0, max: 2.0, default: -2.0 },
         brightness: { type: 'slider', min: -0.5, max: 0.5, default: 0.0 },
         contrast: { type: 'slider', min: 0.5, max: 2.0, default: 1.03 },

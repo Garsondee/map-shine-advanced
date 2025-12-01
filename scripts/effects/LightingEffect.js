@@ -48,6 +48,19 @@ export class LightingEffect extends EffectBase {
     this.windowLightMesh = null;
     /** @type {THREE.ShaderMaterial|null} */
     this.windowLightMaterial = null;
+
+    // Screen-space outdoors mask for overhead shadows: we project the
+    // world-space _Outdoors texture from the base plane into a
+    // full-screen render target using the main camera so the composite
+    // shader can safely sample it with vUv without breaking pinning.
+    /** @type {THREE.Scene|null} */
+    this.outdoorsScene = null;
+    /** @type {THREE.Mesh|null} */
+    this.outdoorsMesh = null;
+    /** @type {THREE.Material|null} */
+    this.outdoorsMaterial = null;
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this.outdoorsTarget = null;
   }
 
   /**
@@ -84,6 +97,10 @@ export class LightingEffect extends EffectBase {
     // Use black background for additive light accumulation
     this.lightScene.background = new THREE.Color(0x000000); 
 
+    // Scene used to project _Outdoors mask from the base plane into
+    // screen space for overhead shadow gating.
+    this.outdoorsScene = new THREE.Scene();
+
     // 2. Final Composite Quad
     this.quadScene = new THREE.Scene();
     this.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -94,9 +111,15 @@ export class LightingEffect extends EffectBase {
         tDiffuse: { value: null }, // Base Scene
         tLight: { value: null },   // Accumulated HDR Light
         tRoofAlpha: { value: null }, // Overhead tile alpha mask
+        tOverheadShadow: { value: null }, // Overhead shadow factor (from OverheadShadowsEffect)
+        tOutdoorsMask: { value: null }, // _Outdoors mask (bright outside, dark indoors)
         uDarknessLevel: { value: 0.0 },
         uAmbientBrightest: { value: new THREE.Color(1,1,1) },
         uAmbientDarkness: { value: new THREE.Color(0.1, 0.1, 0.2) },
+        // Overhead shadow controls
+        uOverheadShadowOpacity: { value: 0.0 },
+        uOverheadShadowAffectsLights: { value: 0.75 },
+        uHasOutdoorsMask: { value: 0.0 },
         // Post-process settings
         uExposure: { value: 0.0 },
         uSaturation: { value: 1.0 },
@@ -113,9 +136,14 @@ export class LightingEffect extends EffectBase {
         uniform sampler2D tDiffuse;
         uniform sampler2D tLight;
         uniform sampler2D tRoofAlpha;
+        uniform sampler2D tOverheadShadow;
+        uniform sampler2D tOutdoorsMask;
         uniform float uDarknessLevel;
         uniform vec3 uAmbientBrightest;
         uniform vec3 uAmbientDarkness;
+        uniform float uOverheadShadowOpacity;
+        uniform float uOverheadShadowAffectsLights;
+        uniform float uHasOutdoorsMask;
         
         uniform float uExposure;
         uniform float uSaturation;
@@ -145,8 +173,33 @@ export class LightingEffect extends EffectBase {
           float roofAlpha = roofSample.a;
           float lightVisibility = 1.0 - roofAlpha;
 
-          // 3. Combine Ambient with Accumulated Lights (roof-masked)
-          vec3 totalIllumination = ambient + (lightSample.rgb * lightVisibility);
+          // 3. Overhead shadow factor (from OverheadShadowsEffect)
+          //    Encoded as grayscale where 1.0 = fully lit, 0.0 = fully shadowed.
+          float shadowTex = texture2D(tOverheadShadow, vUv).r;
+          // If no texture is bound or effect is disabled, opacity will be 0 from update().
+          float shadowOpacity = clamp(uOverheadShadowOpacity, 0.0, 1.0);
+          float rawShadowFactor = mix(1.0, shadowTex, shadowOpacity);
+
+          // Do not darken the overhead tiles themselves: where roofAlpha is high,
+          // blend back toward 1.0 so the roof sprite remains unaffected and the
+          // shadow only appears on the ground below.
+          float shadowFactor = mix(rawShadowFactor, 1.0, roofAlpha);
+
+          // Gate shadowFactor by outdoors mask to avoid darkening building
+          // interiors. Outdoors mask convention: bright outside, dark indoors.
+          // Where indoors (dark), blend shadowFactor back toward 1.0 so the
+          // interior remains at baseline illumination.
+          if (uHasOutdoorsMask > 0.5) {
+            float outdoorStrength = texture2D(tOutdoorsMask, vUv).r;
+            shadowFactor = mix(1.0, shadowFactor, outdoorStrength);
+          }
+
+          // 4. Combine Ambient with Accumulated Lights (roof-masked + overhead shadows)
+          float kd = clamp(uOverheadShadowAffectsLights, 0.0, 1.0);
+          vec3 shadedAmbient = ambient * shadowFactor;
+          vec3 baseLights = lightSample.rgb * lightVisibility;
+          vec3 shadedLights = mix(baseLights, baseLights * shadowFactor, kd);
+          vec3 totalIllumination = shadedAmbient + shadedLights;
           
           // 4. Apply to Base Texture (Multiply)
           vec3 finalRGB = baseColor.rgb * totalIllumination;
@@ -338,6 +391,32 @@ export class LightingEffect extends EffectBase {
     if (this.lightScene) {
       this.lightScene.add(this.windowLightMesh);
     }
+
+    // Build a dedicated outdoors projection mesh so we can render the
+    // _Outdoors mask into a screen-space texture (outdoorsTarget) for
+    // overhead shadow gating in the composite shader.
+    if (this.outdoorsScene && this.outdoorsMask) {
+      if (this.outdoorsMesh && this.outdoorsScene) {
+        this.outdoorsScene.remove(this.outdoorsMesh);
+      }
+
+      this.outdoorsMaterial = new THREE.MeshBasicMaterial({
+        map: this.outdoorsMask,
+        transparent: false,
+        depthWrite: false,
+        depthTest: false
+      });
+
+      this.outdoorsMesh = new THREE.Mesh(baseMesh.geometry, this.outdoorsMaterial);
+      this.outdoorsMesh.position.copy(baseMesh.position);
+      this.outdoorsMesh.rotation.copy(baseMesh.rotation);
+      this.outdoorsMesh.scale.copy(baseMesh.scale);
+
+      this.outdoorsScene.add(this.outdoorsMesh);
+    } else {
+      this.outdoorsMesh = null;
+      this.outdoorsMaterial = null;
+    }
   }
 
   syncAllLights() {
@@ -374,10 +453,7 @@ export class LightingEffect extends EffectBase {
     // Sync Environment Data
     if (canvas.scene && canvas.environment) {
       this.params.darknessLevel = canvas.environment.darknessLevel;
-      // Sync ambient colors if available
-      if (canvas.environment.colors) {
-         // Copy colors to uniforms...
-      }
+      // (Ambient colors sync omitted here to keep this patch focused.)
     }
 
     // Update Animations for all lights
@@ -392,8 +468,21 @@ export class LightingEffect extends EffectBase {
     u.uSaturation.value = this.params.saturation;
     u.uContrast.value = this.params.contrast;
 
-    // Drive window light uniforms from WeatherController and, if available,
-    // from the WindowLightEffect UI parameters.
+    // Drive overhead shadow uniforms from OverheadShadowsEffect (if present).
+    try {
+      const overhead = window.MapShine?.overheadShadowsEffect;
+      if (overhead && overhead.params && overhead.enabled && overhead.shadowTarget) {
+        u.uOverheadShadowOpacity.value = overhead.params.opacity ?? 0.0;
+        u.uOverheadShadowAffectsLights.value = overhead.params.affectsLights ?? 0.75;
+      } else {
+        // No active overhead shadows; disable effect in shader.
+        u.uOverheadShadowOpacity.value = 0.0;
+      }
+    } catch (e) {
+      u.uOverheadShadowOpacity.value = 0.0;
+    }
+
+    // Window light uniforms driven by WeatherController and WindowLightEffect
     let cloudCover = 0.0;
     try {
       const state = weatherController?.getCurrentState?.();
@@ -458,6 +547,17 @@ export class LightingEffect extends EffectBase {
       this.roofAlphaTarget.setSize(size.x, size.y);
     }
 
+    if (!this.outdoorsTarget) {
+      this.outdoorsTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else if (this.outdoorsTarget.width !== size.x || this.outdoorsTarget.height !== size.y) {
+      this.outdoorsTarget.setSize(size.x, size.y);
+    }
+
     // 0. Render Roof Alpha Mask (overhead tiles only)
     // We rely on TileManager tagging overhead tiles into ROOF_LAYER (20).
     const ROOF_LAYER = 20;
@@ -474,6 +574,20 @@ export class LightingEffect extends EffectBase {
     this.mainCamera.layers.mask = previousLayersMask;
     renderer.setRenderTarget(previousTarget);
 
+    // 0.5 Render screen-space _Outdoors mask from the base plane only
+    // into outdoorsTarget using the main camera. This produces a
+    // screen-aligned outdoors factor we can safely sample with vUv in
+    // the composite shader without introducing world-space pinning
+    // errors.
+    if (this.outdoorsScene && this.outdoorsMesh && this.outdoorsTarget) {
+      const prevTarget2 = renderer.getRenderTarget();
+      renderer.setRenderTarget(this.outdoorsTarget);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+      renderer.render(this.outdoorsScene, this.mainCamera);
+      renderer.setRenderTarget(prevTarget2);
+    }
+
     // 1. Accumulate Lights into lightTarget
     const oldTarget = renderer.getRenderTarget();
     renderer.setRenderTarget(this.lightTarget);
@@ -486,8 +600,27 @@ export class LightingEffect extends EffectBase {
 
     // 2. Composite: use lightTarget as tLight and roofAlphaTarget as tRoofAlpha.
     // Base scene texture comes from EffectComposer via setInputTexture(tDiffuse).
-    this.compositeMaterial.uniforms.tLight.value = this.lightTarget.texture;
-    this.compositeMaterial.uniforms.tRoofAlpha.value = this.roofAlphaTarget.texture;
+    const cu = this.compositeMaterial.uniforms;
+    cu.tLight.value = this.lightTarget.texture;
+    cu.tRoofAlpha.value = this.roofAlphaTarget.texture;
+
+    // Bind screen-space outdoors mask so we can avoid darkening
+    // building interiors in a way that is correctly pinned to the
+    // groundplane.
+    cu.tOutdoorsMask.value = (this.outdoorsTarget && this.outdoorsTarget.texture)
+      ? this.outdoorsTarget.texture
+      : null;
+    cu.uHasOutdoorsMask.value = this.outdoorsTarget ? 1.0 : 0.0;
+
+    // Bind overhead shadow texture if available.
+    try {
+      const overhead = window.MapShine?.overheadShadowsEffect;
+      cu.tOverheadShadow.value = (overhead && overhead.shadowTarget)
+        ? overhead.shadowTarget.texture
+        : null;
+    } catch (e) {
+      cu.tOverheadShadow.value = null;
+    }
 
     renderer.setRenderTarget(oldTarget);
     renderer.render(this.quadScene, this.quadCamera);

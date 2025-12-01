@@ -18,6 +18,7 @@ import { BloomEffect } from '../effects/BloomEffect.js';
 import { LightingEffect } from '../effects/LightingEffect.js';
 import { LensflareEffect } from '../effects/LensflareEffect.js';
 import { PrismEffect } from '../effects/PrismEffect.js';
+import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { FireSparksEffect } from '../particles/FireSparksEffect.js';
 import {
@@ -389,6 +390,10 @@ async function createThreeCanvas(scene) {
     lightingEffect = new LightingEffect();
     effectComposer.registerEffect(lightingEffect);
 
+    // Step 3.6.5: Register Overhead Shadows (post-lighting)
+    const overheadShadowsEffect = new OverheadShadowsEffect();
+    effectComposer.registerEffect(overheadShadowsEffect);
+
     // Step 3.7: Register Bloom Effect
     const bloomEffect = new BloomEffect();
     effectComposer.registerEffect(bloomEffect);
@@ -405,6 +410,7 @@ async function createThreeCanvas(scene) {
     prismEffect.setBaseMesh(basePlane, bundle);
     windowLightEffect.setBaseMesh(basePlane, bundle);
     lightingEffect.setBaseMesh(basePlane, bundle);
+    overheadShadowsEffect.setBaseMesh(basePlane, bundle);
 
     // Step 3b: Initialize grid renderer
     gridRenderer = new GridRenderer(threeScene);
@@ -486,6 +492,7 @@ async function createThreeCanvas(scene) {
     mapShine.windowLightEffect = windowLightEffect;
     mapShine.prismEffect = prismEffect;
     mapShine.lightingEffect = lightingEffect;
+    mapShine.overheadShadowsEffect = overheadShadowsEffect;
     mapShine.bloomEffect = bloomEffect;
     mapShine.lensflareEffect = lensflareEffect;
     mapShine.colorCorrectionEffect = colorCorrectionEffect;
@@ -529,7 +536,8 @@ async function createThreeCanvas(scene) {
         bloomEffect,
         lensflareEffect,
         fireSparksEffect,
-        windowLightEffect
+        windowLightEffect,
+        overheadShadowsEffect
       );
     } catch (e) {
       log.error('Failed to initialize UI:', e);
@@ -552,9 +560,10 @@ async function createThreeCanvas(scene) {
  * @param {BloomEffect} bloomEffect - The bloom effect instance
  * @param {LensflareEffect} lensflareEffect - The lensflare effect instance
  * @param {WindowLightEffect} windowLightEffect - The window lighting effect instance
+ * @param {OverheadShadowsEffect} overheadShadowsEffect - The overhead shadows effect instance
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect, fireSparksEffect, windowLightEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect, fireSparksEffect, windowLightEffect, overheadShadowsEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -925,6 +934,29 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       }
       uiManager.updateEffectiveState('windowLight');
     }
+  }
+
+  // --- Overhead Shadows Settings ---
+  if (overheadShadowsEffect) {
+    const overheadSchema = OverheadShadowsEffect.getControlSchema();
+
+    const onOverheadUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        overheadShadowsEffect.enabled = !!value;
+        log.debug(`OverheadShadows effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (overheadShadowsEffect.params && Object.prototype.hasOwnProperty.call(overheadShadowsEffect.params, paramId)) {
+        overheadShadowsEffect.params[paramId] = value;
+        log.debug(`OverheadShadows.${paramId} =`, value);
+      }
+    };
+
+    uiManager.registerEffect(
+      'overhead-shadows',
+      'Overhead Shadows',
+      overheadSchema,
+      onOverheadUpdate,
+      'atmospheric'
+    );
   }
 
   // --- Fire Debug Settings ---

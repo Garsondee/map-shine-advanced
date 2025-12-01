@@ -57,7 +57,11 @@ export class TweakpaneManager {
     /** @type {Object} Global parameters */
     this.globalParams = {
       mapMakerMode: false,
-      timeRate: 100 // 0-100%
+      timeRate: 100, // 0-200%
+      // Time of day (0-24h). This is a top-level control that drives
+      // WeatherController.timeOfDay and any effects that depend on it
+      // (e.g. Overhead Shadows, future sun/sky systems).
+      timeOfDay: 12.0
     };
     
     /** @type {Object<string, any>} Accordion expanded states */
@@ -240,6 +244,17 @@ export class TweakpaneManager {
       step: 1
     }).on('change', (ev) => {
       this.onGlobalChange('timeRate', ev.value);
+    });
+
+    // Time of Day slider (0-24h) - primary global control for sun-driven
+    // effects. Placed directly under Time Rate.
+    globalFolder.addBinding(this.globalParams, 'timeOfDay', {
+      label: 'Time of Day',
+      min: 0.0,
+      max: 24.0,
+      step: 0.1
+    }).on('change', (ev) => {
+      this.onGlobalChange('timeOfDay', ev.value);
     });
 
     // Visual separator between time controls and UI/tools controls
@@ -695,6 +710,17 @@ export class TweakpaneManager {
         log.debug(`Time scale set to ${(value / 100).toFixed(2)}x`);
       } else {
         log.warn('TimeManager not available, cannot set time rate');
+      }
+    } else if (param === 'timeOfDay') {
+      // Forward global time-of-day to WeatherController so all
+      // time-driven systems share a single source of truth.
+      try {
+        const wc = window.MapShine?.weatherController || window.weatherController;
+        if (wc && typeof wc.setTime === 'function') {
+          wc.setTime(value);
+        }
+      } catch (e) {
+        log.warn('Failed to apply global timeOfDay to WeatherController:', e);
       }
     }
 

@@ -6,8 +6,15 @@ const log = createLogger('BushEffect');
 
 /**
  * Animated Bushes effect
- * Renders the `_Bush` RGBA texture as a surface overlay on the base plane
- * and applies wind-driven UV distortion to simulate foliage motion.
+ * Renders the `_Bush` RGBA texture as a surface overlay.
+ * 
+ * IMPROVEMENTS:
+ * - Implements scrolling "Gust" noise to desynchronize movement.
+ * - Simulates weight: bushes bend WITH wind, they don't oscillate equally back and forth.
+ * - Couples leaf flutter to wind gusts (leaves shake more when wind hits).
+ * - ORBITAL MOVEMENT: Decouples the forward push from the sideways sway so bushes
+ *   move in arcs rather than linear piston (rewind) motions.
+ * - Adds smoothing/inertia so wind changes don't cause snapping movements.
  */
 export class BushEffect extends EffectBase {
   constructor() {
@@ -15,32 +22,37 @@ export class BushEffect extends EffectBase {
 
     this.priority = 11;
     this.alwaysRender = false;
-
-    /** @type {THREE.Mesh|null} */
     this.baseMesh = null;
-    /** @type {THREE.Mesh|null} */
     this.mesh = null;
-
-    /** @type {THREE.Texture|null} */
-    this.bushMask = null; // _Bush texture (RGBA with transparency)
-
-    /** @type {THREE.ShaderMaterial|null} */
+    this.bushMask = null;
     this.material = null;
-
-    /** @type {THREE.Scene|null} */
     this.scene = null;
-
     this._enabled = true;
+
+    // Internal state for smoothing
+    this._currentWindSpeed = 0.0;
+    this._lastFrameTime = 0.0;
 
     this.params = {
       enabled: true,
-      intensity: 1.0,          // Overall contribution of the bush layer
-      swayIntensity: 0.02,     // Low-frequency sway strength
-      swayFrequency: 0.5,      // Low-frequency sway speed (Hz-ish)
-      flutterIntensity: 0.005, // High-frequency flutter strength
-      detailScale: 12.0,       // Spatial frequency of flutter noise
-
-      // Local color correction for foliage (tuned defaults)
+      intensity: 1.0,
+      
+      // -- Wind Physics --
+      windSpeedGlobal: 0.1086,   // Multiplier for actual game wind speed
+      windRampSpeed: 1.5,        // Inertia: Lower = slower fade in/out of movement
+      gustFrequency: 0.01,       // How distinct the "waves" of wind are (Spatial)
+      gustSpeed: 0.16,           // How fast the noise field scrolls
+      
+      // -- Bush Movement --
+      branchBend: 0.034,         // How far the "branches" move in strong wind
+      elasticity: 2.913,         // Higher = snappier return, Lower = lazy heavy branches
+      
+      // -- Leaf Flutter --
+      flutterIntensity: 0.001,   // Base vibration
+      flutterSpeed: 1.0,         // Speed of vibration
+      flutterScale: 0.05,        // Spatial scale of flutter clusters (leaf size)
+      
+      // -- Color --
       exposure: -2.0,
       brightness: 0.0,
       contrast: 1.03,
@@ -50,124 +62,52 @@ export class BushEffect extends EffectBase {
     };
   }
 
-  get enabled() {
-    return this._enabled;
-  }
-
+  get enabled() { return this._enabled; }
   set enabled(value) {
     this._enabled = !!value;
     if (this.mesh) this.mesh.visible = !!value && !!this.bushMask;
   }
 
-  /**
-   * UI control schema for Tweakpane
-   */
   static getControlSchema() {
     return {
       enabled: true,
       groups: [
         {
-          name: 'bush-main',
-          label: 'Animated Bushes',
+          name: 'bush-phys',
+          label: 'Wind Physics',
           type: 'inline',
-          parameters: ['intensity', 'swayIntensity', 'swayFrequency', 'flutterIntensity']
+          parameters: ['windSpeedGlobal', 'windRampSpeed', 'gustFrequency', 'gustSpeed', 'branchBend', 'elasticity']
+        },
+        {
+          name: 'bush-flutter',
+          label: 'Leaf Flutter',
+          type: 'inline',
+          parameters: ['flutterIntensity', 'flutterSpeed', 'flutterScale']
         },
         {
           name: 'bush-color',
-          label: 'Color & CC',
+          label: 'Color',
           type: 'folder',
           parameters: ['exposure', 'brightness', 'contrast', 'saturation', 'temperature', 'tint']
         }
       ],
       parameters: {
-        intensity: {
-          type: 'slider',
-          label: 'Opacity',
-          min: 0.0,
-          max: 2.0,
-          step: 0.01,
-          default: 1.0
-        },
-        swayIntensity: {
-          type: 'slider',
-          label: 'Sway Intensity',
-          min: 0.0,
-          max: 0.08,
-          step: 0.001,
-          default: 0.02
-        },
-        swayFrequency: {
-          type: 'slider',
-          label: 'Sway Speed',
-          min: 0.1,
-          max: 2.0,
-          step: 0.01,
-          default: 0.5
-        },
-        flutterIntensity: {
-          type: 'slider',
-          label: 'Flutter Intensity',
-          min: 0.0,
-          max: 0.02,
-          step: 0.0005,
-          default: 0.005
-        },
-        detailScale: {
-          type: 'slider',
-          label: 'Detail Scale',
-          min: 4.0,
-          max: 32.0,
-          step: 0.5,
-          default: 12.0
-        },
-        exposure: {
-          type: 'slider',
-          label: 'Exposure',
-          min: -2.0,
-          max: 2.0,
-          step: 0.01,
-          default: -2.0
-        },
-        brightness: {
-          type: 'slider',
-          label: 'Brightness',
-          min: -0.5,
-          max: 0.5,
-          step: 0.01,
-          default: 0.0
-        },
-        contrast: {
-          type: 'slider',
-          label: 'Contrast',
-          min: 0.5,
-          max: 2.0,
-          step: 0.01,
-          default: 1.03
-        },
-        saturation: {
-          type: 'slider',
-          label: 'Saturation',
-          min: 0.0,
-          max: 2.0,
-          step: 0.01,
-          default: 1.25
-        },
-        temperature: {
-          type: 'slider',
-          label: 'Temperature',
-          min: -1.0,
-          max: 1.0,
-          step: 0.01,
-          default: 0.0
-        },
-        tint: {
-          type: 'slider',
-          label: 'Tint',
-          min: -1.0,
-          max: 1.0,
-          step: 0.01,
-          default: 0.0
-        }
+        intensity: { type: 'slider', min: 0.0, max: 2.0, default: 1.0 },
+        windSpeedGlobal: { type: 'slider', label: 'Wind Multiplier', min: 0.0, max: 3.0, default: 0.1086 },
+        windRampSpeed: { type: 'slider', label: 'Responsiveness', min: 0.1, max: 10.0, default: 1.5 },
+        gustFrequency: { type: 'slider', label: 'Gust Scale', min: 0.01, max: 0.5, default: 0.01 },
+        gustSpeed: { type: 'slider', label: 'Gust Speed', min: 0.0, max: 2.0, default: 0.16 },
+        branchBend: { type: 'slider', label: 'Bend Strength', min: 0.0, max: 0.05, step: 0.001, default: 0.034 },
+        elasticity: { type: 'slider', label: 'Bounciness', min: 0.5, max: 5.0, default: 2.913 },
+        flutterIntensity: { type: 'slider', label: 'Flutter Amp', min: 0.0, max: 0.02, step: 0.001, default: 0.001 },
+        flutterSpeed: { type: 'slider', label: 'Flutter Hz', min: 1.0, max: 20.0, default: 1.0 },
+        flutterScale: { type: 'slider', label: 'Leaf Size', min: 0.01, max: 100.0, default: 0.05 },
+        exposure: { type: 'slider', min: -2.0, max: 2.0, default: -2.0 },
+        brightness: { type: 'slider', min: -0.5, max: 0.5, default: 0.0 },
+        contrast: { type: 'slider', min: 0.5, max: 2.0, default: 1.03 },
+        saturation: { type: 'slider', min: 0.0, max: 2.0, default: 1.25 },
+        temperature: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
+        tint: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 }
       }
     };
   }
@@ -179,31 +119,16 @@ export class BushEffect extends EffectBase {
     log.info('BushEffect initialized');
   }
 
-  /**
-   * Receive base mesh and asset bundle so we can access the _Bush texture.
-   * @param {THREE.Mesh} baseMesh
-   * @param {MapAssetBundle} assetBundle
-   */
   setBaseMesh(baseMesh, assetBundle) {
     if (!assetBundle || !assetBundle.masks) return;
-
-    const THREE = window.THREE;
-    if (!THREE) return;
-
     this.baseMesh = baseMesh;
-
     const bushData = assetBundle.masks.find(m => m.id === 'bush' || m.type === 'bush');
     this.bushMask = bushData?.texture || null;
-
     if (!this.bushMask) {
-      log.info('No _Bush texture found for BushEffect; disabling effect');
       this.enabled = false;
       return;
     }
-
-    if (this.scene) {
-      this._createMesh();
-    }
+    if (this.scene) this._createMesh();
   }
 
   _createMesh() {
@@ -214,7 +139,6 @@ export class BushEffect extends EffectBase {
       this.scene.remove(this.mesh);
       this.mesh = null;
     }
-
     if (this.material) {
       this.material.dispose();
       this.material = null;
@@ -226,17 +150,27 @@ export class BushEffect extends EffectBase {
         uTime: { value: 0.0 },
         uWindDir: { value: new THREE.Vector2(1.0, 0.0) },
         uWindSpeed: { value: 0.0 },
+        
+        // Params
         uIntensity: { value: this.params.intensity },
-        uSwayIntensity: { value: this.params.swayIntensity },
-        uSwayFrequency: { value: this.params.swayFrequency },
+        uWindSpeedGlobal: { value: this.params.windSpeedGlobal },
+        uGustFrequency: { value: this.params.gustFrequency },
+        uGustSpeed: { value: this.params.gustSpeed },
+        uBranchBend: { value: this.params.branchBend },
+        uElasticity: { value: this.params.elasticity },
         uFlutterIntensity: { value: this.params.flutterIntensity },
-        uDetailScale: { value: this.params.detailScale },
+        uFlutterSpeed: { value: this.params.flutterSpeed },
+        uFlutterScale: { value: this.params.flutterScale },
+        
+        // Color
         uExposure: { value: this.params.exposure },
         uBrightness: { value: this.params.brightness },
         uContrast: { value: this.params.contrast },
         uSaturation: { value: this.params.saturation },
         uTemperature: { value: this.params.temperature },
         uTint: { value: this.params.tint },
+        
+        // Shadows
         tOverheadShadow: { value: null },
         tBuildingShadow: { value: null },
         tOutdoorsMask: { value: null },
@@ -247,16 +181,16 @@ export class BushEffect extends EffectBase {
       vertexShader: `
         varying vec2 vUv;
         varying vec2 vScreenUv;
+        // Pass world position to fragment to anchor noise to the ground, not the mesh UVs
+        varying vec2 vWorldPos; 
 
         void main() {
           vUv = uv;
+          vec4 worldPos = modelMatrix * vec4(position, 1.0);
+          vWorldPos = worldPos.xy; 
 
-          // Compute clip-space position
-          vec4 clipPos = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-
-          // Derive screen-space UV (0-1) from clip-space position so we can
-          // sample screen-space shadow buffers that are aligned with the
-          // camera, matching LightingEffect.
+          vec4 clipPos = projectionMatrix * viewMatrix * worldPos;
+          
           vec2 ndc = clipPos.xy / clipPos.w;
           vScreenUv = ndc * 0.5 + 0.5;
 
@@ -265,15 +199,20 @@ export class BushEffect extends EffectBase {
       `,
       fragmentShader: `
         uniform sampler2D uBushMask;
-
         uniform float uTime;
         uniform vec2  uWindDir;
         uniform float uWindSpeed;
         uniform float uIntensity;
-        uniform float uSwayIntensity;
-        uniform float uSwayFrequency;
+        
+        uniform float uWindSpeedGlobal;
+        uniform float uGustFrequency;
+        uniform float uGustSpeed;
+        uniform float uBranchBend;
+        uniform float uElasticity;
         uniform float uFlutterIntensity;
-        uniform float uDetailScale;
+        uniform float uFlutterSpeed;
+        uniform float uFlutterScale;
+
         uniform float uExposure;
         uniform float uBrightness;
         uniform float uContrast;
@@ -290,9 +229,20 @@ export class BushEffect extends EffectBase {
 
         varying vec2 vUv;
         varying vec2 vScreenUv;
+        varying vec2 vWorldPos;
 
+        // Pseudo-random hash
         float hash(vec2 p) {
-          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+          return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+        }
+
+        // Gradient Noise
+        float noise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            vec2 u = f * f * (3.0 - 2.0 * f);
+            return mix(mix(hash(i + vec2(0.0,0.0)), hash(i + vec2(1.0,0.0)), u.x),
+                       mix(hash(i + vec2(0.0,1.0)), hash(i + vec2(1.0,1.0)), u.x), u.y);
         }
 
         float msLuminance(vec3 c) {
@@ -300,89 +250,92 @@ export class BushEffect extends EffectBase {
         }
 
         vec3 applyCC(vec3 color) {
-          // Exposure
           color *= pow(2.0, uExposure);
-
-          // Simple temperature/tint shift in YCbCr-ish space
           float t = uTemperature;
           float g = uTint;
-          color.r += t * 0.1;
-          color.b -= t * 0.1;
-          color.g += g * 0.1;
-
-          // Brightness
+          color.r += t * 0.1; color.b -= t * 0.1; color.g += g * 0.1;
           color += vec3(uBrightness);
-
-          // Contrast around mid-gray
           color = (color - 0.5) * uContrast + 0.5;
-
-          // Saturation
           float l = msLuminance(color);
           color = mix(vec3(l), color, uSaturation);
-
           return color;
         }
 
         void main() {
-          // Normalized wind direction (fallback to +X if zero)
-          vec2 dir = normalize(uWindDir);
-          if (length(dir) < 0.001) {
-            dir = vec2(1.0, 0.0);
-          }
+          // 1. Calculate Environmental Factors
+          vec2 windDir = normalize(uWindDir);
+          if (length(windDir) < 0.01) windDir = vec2(1.0, 0.0);
+          
+          float speed = uWindSpeed * uWindSpeedGlobal;
+          float ambientMotion = 0.1; 
+          float effectiveSpeed = ambientMotion + speed;
 
-          float speed = clamp(uWindSpeed, 0.0, 1.0);
+          // 2. Compute "Gust" Field (Main Push)
+          vec2 gustPos = vWorldPos * uGustFrequency;
+          vec2 scroll = windDir * uTime * uGustSpeed * effectiveSpeed;
+          
+          // Noise determines the "push" strength (0.0 to 1.0)
+          float gustNoise = noise(gustPos - scroll);
+          float gustStrength = smoothstep(0.2, 0.8, gustNoise);
 
-          // Low-frequency sway: gentle bending over the whole bush area
-          float swayPhase = uTime * (6.2831853 * uSwayFrequency) + vUv.y * 3.14159;
-          float sway = sin(swayPhase) * uSwayIntensity * speed;
+          // 3. Compute "Orbit" (Perpendicular Sway)
+          // To fix the "rewind" effect, we need the bush to take a different path back 
+          // than it took forward. We use a sine wave to control perpendicular sway.
+          // By offsetting the phase, we turn linear motion into elliptical/orbital motion.
+          vec2 perpDir = vec2(-windDir.y, windDir.x);
+          
+          // 'Elasticity' controls the frequency of the bounce
+          float orbitPhase = uTime * uElasticity + (gustNoise * 5.0);
+          float orbitSway = sin(orbitPhase);
 
-          // High-frequency flutter: fine leaf noise, modulated by hash
-          vec2 cell = floor(vUv * uDetailScale);
-          float cellHash = hash(cell);
-          float flutterPhase = uTime * 12.0 + cellHash * 6.2831853;
-          float flutter = sin(flutterPhase) * uFlutterIntensity * speed;
+          // 4. Combine Forces
+          // Force A: Wind Push (Unidirectional along Wind Vector)
+          float pushMagnitude = gustStrength * uBranchBend * effectiveSpeed;
+          
+          // Force B: Sway (Bidirectional along Perpendicular Vector)
+          // We scale this down (0.4) so it's an ellipse, not a circle.
+          // We also modulate it slightly by gustStrength so it sways MORE when wind is strong.
+          float swayMagnitude = orbitSway * (uBranchBend * 0.4) * effectiveSpeed * (0.5 + 0.5 * gustStrength);
 
-          vec2 offset = dir * (sway + flutter);
-          vec2 bushUv = vUv + offset;
+          // 5. Leaf Flutter (High Frequency Vibration)
+          float noiseVal = noise(vWorldPos * uFlutterScale);
+          float flutterPhase = uTime * uFlutterSpeed * effectiveSpeed + noiseVal * 6.28;
+          float flutter = sin(flutterPhase);
+          float flutterMagnitude = flutter * uFlutterIntensity * (0.5 + 0.5 * gustStrength);
 
-          vec4 bushSample = texture2D(uBushMask, bushUv);
+          // Final Distortion Vector
+          // Summing these creates a chaotic, non-linear loop motion.
+          vec2 distortion = (windDir * pushMagnitude) 
+                          + (perpDir * swayMagnitude) 
+                          + vec2(flutter, flutter) * flutterMagnitude;
+
+          // Sample Texture
+          vec4 bushSample = texture2D(uBushMask, vUv - distortion);
+
+          // --- Standard Render Logic ---
           float a = bushSample.a * uIntensity;
-
-          if (a <= 0.001) {
-            discard;
-          }
+          if (a <= 0.001) discard;
 
           vec3 color = bushSample.rgb;
           color = applyCC(color);
 
-          // Sample overhead and building shadow factors in screen space so
-          // bushes inherit the same shadowing as the ground plane. These
-          // textures encode 1.0 = fully lit, 0.0 = fully shadowed.
           float shadowFactor = 1.0;
           float buildingFactor = 1.0;
 
-          // Overhead shadows (from OverheadShadowsEffect)
+          // Shadows
           float shadowTex = texture2D(tOverheadShadow, vScreenUv).r;
-          float shadowOpacity = clamp(uOverheadShadowOpacity, 0.0, 1.0);
-          shadowFactor = mix(1.0, shadowTex, shadowOpacity);
+          shadowFactor = mix(1.0, shadowTex, uOverheadShadowOpacity);
 
-          // Building shadows (from BuildingShadowsEffect)
           float buildingTex = texture2D(tBuildingShadow, vScreenUv).r;
-          float buildingOpacity = clamp(uBuildingShadowOpacity, 0.0, 1.0);
-          buildingFactor = mix(1.0, buildingTex, buildingOpacity);
+          buildingFactor = mix(1.0, buildingTex, uBuildingShadowOpacity);
 
-          // Gate both overhead and building shadows by the outdoors mask so
-          // indoor foliage is not darkened by outdoor shadow passes. Outdoors
-          // convention: bright outside, dark indoors.
           if (uHasOutdoorsMask > 0.5) {
             float outdoorStrength = texture2D(tOutdoorsMask, vScreenUv).r;
             shadowFactor = mix(1.0, shadowFactor, outdoorStrength);
             buildingFactor = mix(1.0, buildingFactor, outdoorStrength);
           }
 
-          float combinedShadowFactor = shadowFactor * buildingFactor;
-          color *= combinedShadowFactor;
-
+          color *= shadowFactor * buildingFactor;
           gl_FragColor = vec4(color, clamp(a, 0.0, 1.0));
         }
       `,
@@ -395,8 +348,6 @@ export class BushEffect extends EffectBase {
     this.mesh.position.copy(this.baseMesh.position);
     this.mesh.rotation.copy(this.baseMesh.rotation);
     this.mesh.scale.copy(this.baseMesh.scale);
-
-    // Render just above the base plane / material layer but below overhead tiles
     this.mesh.renderOrder = (this.baseMesh.renderOrder || 0) + 1;
 
     this.scene.add(this.mesh);
@@ -404,32 +355,48 @@ export class BushEffect extends EffectBase {
   }
 
   update(timeInfo) {
-    if (!this.material || !this.mesh || !this._enabled || !this.bushMask) return;
+    if (!this.material || !this.mesh || !this._enabled) return;
 
     const u = this.material.uniforms;
     u.uTime.value = timeInfo.elapsed;
+    
+    // Calculate delta time for frame-independent smoothing
+    const now = timeInfo.elapsed;
+    const delta = now - (this._lastFrameTime || now);
+    this._lastFrameTime = now;
+    const safeDelta = Math.min(delta, 0.1); 
 
-    // Drive from WeatherController if available
+    // --- Weather Integration with Smoothing ---
     try {
       const state = weatherController?.getCurrentState?.();
       if (state) {
-        const dir = state.windDirection;
-        if (dir && typeof dir.x === 'number' && typeof dir.y === 'number') {
-          u.uWindDir.value.set(dir.x, dir.y);
-        }
-        if (typeof state.windSpeed === 'number') {
-          u.uWindSpeed.value = state.windSpeed;
-        }
+        if (state.windDirection) u.uWindDir.value.set(state.windDirection.x, state.windDirection.y);
+        
+        const targetWindSpeed = (typeof state.windSpeed === 'number') ? state.windSpeed : 0.0;
+        
+        // Dampen the wind speed change (Low-Pass Filter)
+        const smoothingFactor = this.params.windRampSpeed * safeDelta;
+        const alpha = Math.max(0.0, Math.min(1.0, smoothingFactor));
+        
+        this._currentWindSpeed += (targetWindSpeed - this._currentWindSpeed) * alpha;
+        
+        u.uWindSpeed.value = this._currentWindSpeed;
       }
     } catch (e) {
-      // ignore, keep previous wind values
+      u.uWindSpeed.value = 0.0;
     }
 
+    // --- Parameter Sync ---
     u.uIntensity.value = this.params.intensity;
-    u.uSwayIntensity.value = this.params.swayIntensity;
-    u.uSwayFrequency.value = this.params.swayFrequency;
+    u.uWindSpeedGlobal.value = this.params.windSpeedGlobal;
+    u.uGustFrequency.value = this.params.gustFrequency;
+    u.uGustSpeed.value = this.params.gustSpeed;
+    u.uBranchBend.value = this.params.branchBend;
+    u.uElasticity.value = this.params.elasticity;
     u.uFlutterIntensity.value = this.params.flutterIntensity;
-    u.uDetailScale.value = this.params.detailScale;
+    u.uFlutterSpeed.value = this.params.flutterSpeed;
+    u.uFlutterScale.value = this.params.flutterScale;
+
     u.uExposure.value = this.params.exposure;
     u.uBrightness.value = this.params.brightness;
     u.uContrast.value = this.params.contrast;
@@ -437,25 +404,17 @@ export class BushEffect extends EffectBase {
     u.uTemperature.value = this.params.temperature;
     u.uTint.value = this.params.tint;
 
-    // Drive shadow textures and opacities from the shared environmental
-    // effects so bushes inherit the same shadowing as the ground plane.
+    // --- Shadow Integration ---
     try {
       const mapShine = window.MapShine || window.mapShine;
-
-      // Overhead shadows
+      
       const overhead = mapShine?.overheadShadowsEffect;
-      if (overhead && overhead.shadowTarget) {
-        u.tOverheadShadow.value = overhead.shadowTarget.texture;
-        u.uOverheadShadowOpacity.value = overhead.params?.opacity ?? 0.0;
-      } else {
-        u.tOverheadShadow.value = null;
-        u.uOverheadShadowOpacity.value = 0.0;
-      }
+      u.tOverheadShadow.value = overhead?.shadowTarget?.texture || null;
+      u.uOverheadShadowOpacity.value = overhead?.params?.opacity ?? 0.0;
 
-      // Building shadows
       const building = mapShine?.buildingShadowsEffect;
+      const THREE = window.THREE;
       if (building && building.shadowTarget) {
-        const THREE = window.THREE;
         const baseOpacity = building.params?.opacity ?? 0.0;
         let ti = 1.0;
         if (THREE && typeof building.timeIntensity === 'number') {
@@ -468,46 +427,14 @@ export class BushEffect extends EffectBase {
         u.uBuildingShadowOpacity.value = 0.0;
       }
 
-      // Outdoors mask (screen-space), projected by LightingEffect
       const lighting = mapShine?.lightingEffect;
-      if (lighting && lighting.outdoorsTarget && lighting.outdoorsTarget.texture) {
+      if (lighting?.outdoorsTarget?.texture) {
         u.tOutdoorsMask.value = lighting.outdoorsTarget.texture;
         u.uHasOutdoorsMask.value = 1.0;
       } else {
         u.tOutdoorsMask.value = null;
         u.uHasOutdoorsMask.value = 0.0;
       }
-    } catch (e) {
-      // In diagnostics or partial initialization states, fail gracefully.
-      u.tOverheadShadow.value = null;
-      u.tBuildingShadow.value = null;
-      u.tOutdoorsMask.value = null;
-      u.uOverheadShadowOpacity.value = 0.0;
-      u.uBuildingShadowOpacity.value = 0.0;
-      u.uHasOutdoorsMask.value = 0.0;
-    }
-
-    this.mesh.visible = this._enabled && !!this.bushMask;
-  }
-
-  render(renderer, scene, camera) {
-    // No off-screen passes required; the mesh lives in the main scene.
-  }
-
-  onResize(width, height) {
-    // No screen-space resources to resize for this effect.
-  }
-
-  dispose() {
-    if (this.mesh && this.scene) {
-      this.scene.remove(this.mesh);
-      this.mesh = null;
-    }
-    if (this.material) {
-      this.material.dispose();
-      this.material = null;
-    }
-    this.bushMask = null;
-    log.info('BushEffect disposed');
+    } catch (e) {}
   }
 }

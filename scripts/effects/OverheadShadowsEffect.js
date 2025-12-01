@@ -216,14 +216,20 @@ export class OverheadShadowsEffect extends EffectBase {
 
           // Scale length by zoom so the world-space band stays
           // approximately constant as the camera zoom changes.
-          float len = uLength * max(uZoom, 0.0001);
+          // We use a reference height of 1080px to convert the normalized uLength
+          // into a pixel distance. This ensures the shadow length is stable across
+          // different resolutions (resolution-independent) and aspect ratios.
+          // uLength (0.04) * 1080 ~= 43 pixels at Zoom 1.
+          float pixelLen = uLength * 1080.0 * max(uZoom, 0.0001);
 
           // Base roof coverage (directly overhead)
           float roofBase = texture2D(tRoof, screenUv).a;
 
-          // Sample along the shadow direction at a small distance to
-          // represent where the shadow lands on the ground outside.
-          vec2 offsetUv = screenUv + dir * len;
+          // Sample along the shadow direction. We multiply by uTexelSize
+          // to convert the pixel length into UV space. Since uTexelSize.x
+          // and uTexelSize.y may differ (non-square aspect), this automatically
+          // corrects for aspect ratio, preventing shadow stretching.
+          vec2 offsetUv = screenUv + dir * pixelLen * uTexelSize;
           float roofOffset = texture2D(tRoof, offsetUv).a;
 
           // Simple 3x3 blur around the offset position to soften edges.
@@ -377,7 +383,13 @@ export class OverheadShadowsEffect extends EffectBase {
       if (u.uLength)  u.uLength.value  = this.params.length;
       if (u.uSoftness) u.uSoftness.value = this.params.softness;
       if (u.uZoom && this.mainCamera) {
-        const z = typeof this.mainCamera.zoom === 'number' ? this.mainCamera.zoom : 1.0;
+        // Calculate zoom from perspective camera distance (dolly zoom).
+        // Base distance is 10000 (from SceneComposer).
+        // We cannot rely on camera.zoom because PerspectiveCamera keeps it at 1.0
+        // while moving the camera position to zoom.
+        const baseDist = 10000.0;
+        const dist = this.mainCamera.position.z;
+        const z = (dist > 0.1) ? (baseDist / dist) : 1.0;
         u.uZoom.value = z;
       }
     }

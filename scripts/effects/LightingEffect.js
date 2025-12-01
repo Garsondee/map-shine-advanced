@@ -228,7 +228,9 @@ export class LightingEffect extends EffectBase {
         uColor: { value: new THREE.Color(1.0, 0.96, 0.85) },
         uCloudCover: { value: 0.0 },
         uCloudInfluence: { value: 1.0 },
-        uMinCloudFactor: { value: 0.0 }
+        uMinCloudFactor: { value: 0.0 },
+        uRgbShiftAmount: { value: 0.0 },
+        uRgbShiftAngle: { value: 0.0 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -249,6 +251,8 @@ export class LightingEffect extends EffectBase {
         uniform float uCloudCover;
         uniform float uCloudInfluence;
         uniform float uMinCloudFactor;
+        uniform float uRgbShiftAmount;
+        uniform float uRgbShiftAngle;
 
         varying vec2 vUv;
 
@@ -264,13 +268,18 @@ export class LightingEffect extends EffectBase {
           vec3 windowSample = texture2D(uWindowMask, vUv).rgb;
           float centerMask = msLuminance(windowSample);
 
-          vec2 t = uWindowTexelSize;
+          float blurScale = 1.0 + (uSoftness * 4.0);
+          vec2 t = uWindowTexelSize * blurScale;
           float maskN = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0, -t.y)).rgb);
           float maskS = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0,  t.y)).rgb);
           float maskE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, 0.0)).rgb);
           float maskW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, 0.0)).rgb);
+          float maskNE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, -t.y)).rgb);
+          float maskNW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, -t.y)).rgb);
+          float maskSE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x,  t.y)).rgb);
+          float maskSW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x,  t.y)).rgb);
 
-          float baseMask = (centerMask * 2.0 + maskN + maskS + maskE + maskW) / 6.0;
+          float baseMask = (centerMask * 2.0 + maskN + maskS + maskE + maskW + maskNE + maskNW + maskSE + maskSW) / 10.0;
 
           float halfWidth = max(uSoftness, 1e-3);
           float edgeLo = clamp(uMaskThreshold - halfWidth, 0.0, 1.0);
@@ -290,7 +299,27 @@ export class LightingEffect extends EffectBase {
           cloudFactor = max(cloudFactor, uMinCloudFactor);
 
           float strength = m * indoor * cloudFactor * uIntensity;
+
           vec3 lightColor = uColor * strength;
+
+          if (uRgbShiftAmount > 0.0001) {
+            float angle = uRgbShiftAngle;
+            vec2 dir = vec2(cos(angle), sin(angle));
+            vec2 shift = dir * uRgbShiftAmount * uWindowTexelSize;
+
+            float maskR = msLuminance(texture2D(uWindowMask, vUv + shift).rgb);
+            float maskG = baseMask;
+            float maskB = msLuminance(texture2D(uWindowMask, vUv - shift).rgb);
+
+            float denom = max(baseMask, 1e-3);
+            float rScale = maskR / denom;
+            float gScale = maskG / denom;
+            float bScale = maskB / denom;
+
+            lightColor.r *= rScale;
+            lightColor.g *= gScale;
+            lightColor.b *= bScale;
+          }
 
           gl_FragColor = vec4(lightColor, 1.0);
         }
@@ -386,6 +415,10 @@ export class LightingEffect extends EffectBase {
         wu.uSoftness.value = wl.params.softness ?? wu.uSoftness.value;
         wu.uCloudInfluence.value = wl.params.cloudInfluence ?? wu.uCloudInfluence.value;
         wu.uMinCloudFactor.value = wl.params.minCloudFactor ?? wu.uMinCloudFactor.value;
+        wu.uRgbShiftAmount.value = wl.params.rgbShiftAmount ?? wu.uRgbShiftAmount.value;
+        if (typeof wl.params.rgbShiftAngle === 'number') {
+          wu.uRgbShiftAngle.value = wl.params.rgbShiftAngle * (Math.PI / 180.0);
+        }
         if (wl.params.color) {
           wu.uColor.value.set(wl.params.color.r, wl.params.color.g, wl.params.color.b);
         }

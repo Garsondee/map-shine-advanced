@@ -346,6 +346,13 @@ export class OverheadShadowsEffect extends EffectBase {
       // Fallback: keep default hour
     }
 
+    // Optimization: Skip update if params haven't changed
+    const camZ = this.mainCamera ? this.mainCamera.position.z : 0;
+    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${camZ.toFixed(2)}`;
+    
+    if (this._lastUpdateHash === updateHash && this.sunDir) return;
+    this._lastUpdateHash = updateHash;
+
     // Map hour to a sun azimuth over a half-orbit.
     // 12h (noon) -> 0 azimuth
     //  6h (sunrise) -> -PI/2
@@ -407,11 +414,11 @@ export class OverheadShadowsEffect extends EffectBase {
     // Ensure roof target exists and is correctly sized
     const size = new THREE.Vector2();
     renderer.getDrawingBufferSize(size);
+
     if (!this.roofTarget || !this.shadowTarget) {
       this.onResize(size.x, size.y);
     } else if (this.roofTarget.width !== size.x || this.roofTarget.height !== size.y) {
-      this.roofTarget.setSize(size.x, size.y);
-      this.shadowTarget.setSize(size.x, size.y);
+      this.onResize(size.x, size.y);
     }
 
     // 1. Render ROOF_LAYER (20) into roofTarget as alpha mask.

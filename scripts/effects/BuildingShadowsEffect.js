@@ -21,6 +21,13 @@ const log = createLogger('BuildingShadowsEffect');
  *   nearby outdoor pixels.
  * - The shadow is produced by raymarching backwards along the sun
  *   direction in screen space and checking for indoor pixels.
+ * 
+ * Performance Optimization (v2):
+ * - Implements "World Space Caching".
+ * - The expensive raymarching shader is rendered only when conditions change (time, params)
+ *   into a persistent World Space texture (worldShadowTarget).
+ * - The per-frame render pass simply samples this cached texture onto the screen-aligned mesh.
+ * - This reduces per-frame cost from 64 texture fetches/math ops to 1 texture fetch.
  */
 export class BuildingShadowsEffect extends EffectBase {
   constructor() {
@@ -31,7 +38,10 @@ export class BuildingShadowsEffect extends EffectBase {
     this.alwaysRender = true;
 
     /** @type {THREE.ShaderMaterial|null} */
-    this.material = null;
+    this.bakeMaterial = null; // The expensive raymarcher
+
+    /** @type {THREE.MeshBasicMaterial|null} */
+    this.displayMaterial = null; // The cheap sampler
 
     /** @type {THREE.Mesh|null} */
     this.baseMesh = null;
@@ -42,7 +52,17 @@ export class BuildingShadowsEffect extends EffectBase {
     this.shadowMesh = null;
 
     /** @type {THREE.WebGLRenderTarget|null} */
-    this.shadowTarget = null;   // Final building shadow factor texture
+    this.shadowTarget = null;   // Final building shadow factor texture (Screen Space)
+
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this.worldShadowTarget = null; // Cached baked shadow map (World Space)
+
+    /** @type {THREE.Scene|null} */
+    this.bakeScene = null;
+    /** @type {THREE.Camera|null} */
+    this.bakeCamera = null;
+    /** @type {THREE.Mesh|null} */
+    this.bakeQuad = null;
 
     /** @type {THREE.Texture|null} */
     this.outdoorsMask = null;   // _Outdoors mask (bright outside, dark indoors)
@@ -62,8 +82,13 @@ export class BuildingShadowsEffect extends EffectBase {
       penumbraRadiusNear: 0.0,
       penumbraRadiusFar: 0.06,
       penumbraSamples: 3,
-      penumbraExponent: 1.0
+      penumbraExponent: 1.0,
+      sunriseTime: 6.0,
+      sunsetTime: 18.0
     };
+
+    this.needsBake = true;
+    this.lastBakeHash = '';
   }
 
   /**
@@ -89,6 +114,7 @@ export class BuildingShadowsEffect extends EffectBase {
     // If initialize() has already run, we can build the world-pinned shadow mesh now.
     if (this.renderer && this.mainScene && this.mainCamera) {
       this._createShadowMesh();
+      this.needsBake = true;
     }
   }
 
@@ -103,7 +129,7 @@ export class BuildingShadowsEffect extends EffectBase {
           name: 'main',
           label: 'Building Shadows',
           type: 'inline',
-          parameters: ['opacity', 'length', 'quality', 'sunLatitude', 'blurStrength']
+          parameters: ['opacity', 'length', 'quality', 'sunLatitude', 'blurStrength', 'sunriseTime', 'sunsetTime']
         }
       ],
       parameters: {
@@ -146,6 +172,22 @@ export class BuildingShadowsEffect extends EffectBase {
           max: 1.0,
           step: 0.01,
           default: 0.5
+        },
+        sunriseTime: {
+          type: 'slider',
+          label: 'Sunrise Time',
+          min: 0.0,
+          max: 24.0,
+          step: 0.1,
+          default: 6.0
+        },
+        sunsetTime: {
+          type: 'slider',
+          label: 'Sunset Time',
+          min: 0.0,
+          max: 24.0,
+          step: 0.1,
+          default: 18.0
         }
       }
     };
@@ -157,43 +199,24 @@ export class BuildingShadowsEffect extends EffectBase {
     this.mainScene = scene;
     this.mainCamera = camera;
 
-    // Create a dedicated scene to render the world-pinned shadow mesh.
-    this.shadowScene = new THREE.Scene();
-
-    // If setBaseMesh has already run and we have an outdoors mask, build the mesh now.
-    if (this.baseMesh && this.outdoorsMask) {
-      this._createShadowMesh();
-    }
-
-    log.info('BuildingShadowsEffect initialized');
-  }
-
-  _createShadowMesh() {
-    const THREE = window.THREE;
-    if (!THREE || !this.baseMesh || !this.outdoorsMask) return;
-
-    // Dispose previous mesh/material if rebuilding
-    if (this.shadowMesh && this.shadowScene) {
-      this.shadowScene.remove(this.shadowMesh);
-      this.shadowMesh.geometry.dispose();
-      this.shadowMesh = null;
-    }
-    if (this.material) {
-      this.material.dispose();
-      this.material = null;
-    }
-
-    this.material = new THREE.ShaderMaterial({
+    // 1. Create Bake Environment (World Space Cache)
+    // Renders a full-UV quad (0..1) to generate the shadow map
+    this.bakeScene = new THREE.Scene();
+    // Orthographic camera covering 0..1 in X and Y
+    // left=0, right=1, top=1, bottom=0, near=0, far=1
+    this.bakeCamera = new THREE.OrthographicCamera(0, 1, 1, 0, 0, 1);
+    
+    // Raymarching Material (Expensive)
+    this.bakeMaterial = new THREE.ShaderMaterial({
       uniforms: {
-        tOutdoors: { value: this.outdoorsMask },
-        uOpacity: { value: this.params.opacity },
-        uLength: { value: this.params.length },
-        uSampleCount: { value: this.params.quality },
-        uSunDir: { value: new THREE.Vector2(0.0, 1.0) },
-        uPenumbraRadiusNear: { value: this.params.penumbraRadiusNear },
-        uPenumbraRadiusFar: { value: this.params.penumbraRadiusFar },
-        uPenumbraSamples: { value: this.params.penumbraSamples },
-        uPenumbraExponent: { value: this.params.penumbraExponent }
+        tOutdoors: { value: null },
+        uLength: { value: 0.05 },
+        uSampleCount: { value: 24 },
+        uSunDir: { value: new THREE.Vector2(0, 1) },
+        uPenumbraRadiusNear: { value: 0 },
+        uPenumbraRadiusFar: { value: 0.06 },
+        uPenumbraSamples: { value: 3 },
+        uPenumbraExponent: { value: 1 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -204,7 +227,6 @@ export class BuildingShadowsEffect extends EffectBase {
       `,
       fragmentShader: `
         uniform sampler2D tOutdoors;
-        uniform float uOpacity;
         uniform float uLength;
         uniform float uSampleCount;
         uniform vec2 uSunDir;
@@ -224,16 +246,11 @@ export class BuildingShadowsEffect extends EffectBase {
           vec2 dir = normalize(uSunDir);
           float samples = max(uSampleCount, 1.0);
 
-          // Start fully lit
-          float shadowFactor = 1.0;
-
           // Direction perpendicular to the shadow, used for penumbra
-          // sampling. This lets the cone widen as we move away from the
-          // building, producing softer edges further from the caster.
           vec2 perp = normalize(vec2(-dir.y, dir.x));
           float penumbraCount = max(uPenumbraSamples, 1.0);
 
-          // Accumulate occlusion along the ray with distance-based weighting
+          // Accumulate occlusion along the ray
           float totalOcclusion = 0.0;
           float totalWeight = 0.0;
 
@@ -245,9 +262,7 @@ export class BuildingShadowsEffect extends EffectBase {
             float t = (samples > 1.0) ? (fi / (samples - 1.0)) : 0.0;
             vec2 baseUv = vUv + dir * (t * uLength);
 
-            if (!inBounds(baseUv)) {
-              continue;
-            }
+            if (!inBounds(baseUv)) continue;
 
             float rLerp = pow(t, uPenumbraExponent);
             float radius = mix(uPenumbraRadiusNear, uPenumbraRadiusFar, rLerp);
@@ -258,12 +273,14 @@ export class BuildingShadowsEffect extends EffectBase {
             int maxPenumbra = 16;
             int taps = int(clamp(penumbraCount, 1.0, float(maxPenumbra)));
 
+            // If radius is tiny or taps is 1, single sample
             if (taps <= 1 || radius <= 1e-5) {
               vec3 sampleColor = texture2D(tOutdoors, baseUv).rgb;
               float outdoors = dot(sampleColor, vec3(0.2126, 0.7152, 0.0722));
-              occlusion = (outdoors < 0.5) ? 1.0 : 0.0;
+              occlusion = (outdoors < 0.5) ? 1.0 : 0.0; // Indoor = Occluder
               weightSum = 1.0;
             } else {
+              // Penumbra blur
               for (int j = 0; j < maxPenumbra; j++) {
                 if (j >= taps) break;
 
@@ -303,18 +320,59 @@ export class BuildingShadowsEffect extends EffectBase {
             avgOcclusion = clamp(totalOcclusion / totalWeight, 0.0, 1.0);
           }
 
-          shadowFactor = 1.0 - avgOcclusion;
+          // Output raw light factor (1.0 = Fully Lit, 0.0 = Fully Shadowed)
+          // We do NOT apply opacity here. Opacity is handled by LightingEffect composition.
+          float shadowFactor = 1.0 - avgOcclusion;
 
-          float strength = clamp((1.0 - shadowFactor) * uOpacity, 0.0, 1.0);
-          float finalFactor = 1.0 - strength;
-
-          gl_FragColor = vec4(finalFactor, finalFactor, finalFactor, 1.0);
+          gl_FragColor = vec4(shadowFactor, shadowFactor, shadowFactor, 1.0);
         }
       `,
       transparent: false
     });
 
-    this.shadowMesh = new THREE.Mesh(this.baseMesh.geometry, this.material);
+    // Bake Quad (0..1 in UVs)
+    // PlaneGeometry defaults to 1x1 centered at 0,0
+    this.bakeQuad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.bakeMaterial);
+    this.bakeQuad.position.set(0.5, 0.5, 0); // Move center to 0.5,0.5 so it spans 0..1
+    this.bakeScene.add(this.bakeQuad);
+
+    // 2. Create Display Environment (Screen Space Render)
+    this.shadowScene = new THREE.Scene();
+
+    // Simple material to sample the baked world texture
+    this.displayMaterial = new THREE.MeshBasicMaterial({
+      map: null, // Will be bound to worldShadowTarget.texture
+      transparent: true,
+      opacity: 1.0, // We rely on LightingEffect.uBuildingShadowOpacity
+      blending: THREE.NoBlending 
+    });
+
+    if (this.baseMesh && this.outdoorsMask) {
+      this._createShadowMesh();
+      this.needsBake = true;
+    }
+
+    log.info('BuildingShadowsEffect initialized with World Space Caching');
+  }
+
+  _createShadowMesh() {
+    const THREE = window.THREE;
+    if (!THREE || !this.baseMesh || !this.outdoorsMask) return;
+
+    // Dispose previous mesh/material if rebuilding
+    if (this.shadowMesh && this.shadowScene) {
+      this.shadowScene.remove(this.shadowMesh);
+      this.shadowMesh.geometry.dispose();
+      this.shadowMesh = null;
+    }
+
+    // Update the bake material input
+    if (this.bakeMaterial) {
+      this.bakeMaterial.uniforms.tOutdoors.value = this.outdoorsMask;
+    }
+
+    // Create the world-pinned mesh for display
+    this.shadowMesh = new THREE.Mesh(this.baseMesh.geometry, this.displayMaterial);
     this.shadowMesh.position.copy(this.baseMesh.position);
     this.shadowMesh.rotation.copy(this.baseMesh.rotation);
     this.shadowMesh.scale.copy(this.baseMesh.scale);
@@ -344,31 +402,25 @@ export class BuildingShadowsEffect extends EffectBase {
   }
 
   update(timeInfo) {
-    if (!this.material || !this.enabled) return;
+    if (!this.enabled) return;
 
     const THREE = window.THREE;
     if (!THREE) return;
 
-    // Read time of day from WeatherController (0-24 hours). Default to
-    // noon (12.0) if unavailable.
+    // 1. Update Time & Sun Direction
     let hour = 12.0;
     try {
       if (weatherController && typeof weatherController.timeOfDay === 'number') {
         hour = weatherController.timeOfDay;
       }
-    } catch (e) {
-      // Fallback: keep default hour
-    }
+    } catch (e) { /* default */ }
+
+    const sunrise = Math.max(0.0, Math.min(24.0, this.params.sunriseTime ?? 6.0));
+    const sunset = Math.max(0.0, Math.min(24.0, this.params.sunsetTime ?? 18.0));
 
     const t = (hour % 24.0) / 24.0;
-    // Use a half-orbit (-PI/2 .. +PI/2) so the sun moves smoothly from
-    // east to west over the course of the day without wrapping a full
-    // 360 degrees, which caused the shadow direction to "pop" when
-    // sunLatitude is low.
     const azimuth = (t - 0.5) * Math.PI;
-
     const x = -Math.sin(azimuth);
-
     const lat = Math.max(0.0, Math.min(1.0, this.params.sunLatitude ?? 0.5));
     const y = -Math.cos(azimuth) * lat;
 
@@ -378,78 +430,148 @@ export class BuildingShadowsEffect extends EffectBase {
       this.sunDir.set(x, y);
     }
 
-    if (this.material.uniforms.uSunDir) {
-      this.material.uniforms.uSunDir.value.copy(this.sunDir);
+    const safeHour = ((hour % 24.0) + 24.0) % 24.0;
+    const dayLength = ((sunset - sunrise) + 24.0) % 24.0;
+    let timeIntensity = 0.0;
+
+    if (dayLength > 0.01) {
+      const phase = ((safeHour - sunrise) + 24.0) % 24.0;
+
+      // Core daytime lobe: symmetric peak at sunrise/sunset, minimum at midday.
+      if (phase >= 0.0 && phase <= dayLength) {
+        const u = phase / dayLength;
+        const edge = Math.abs(2.0 * u - 1.0);
+        timeIntensity = Math.pow(edge, 0.5);
+      } else {
+        // Extended fade region outside [sunrise, sunset] to avoid a hard cutoff.
+        const fadeHours = 1.5; // Duration of pre-dawn / post-dusk fade in hours.
+
+        // Pre-dawn: from (sunrise - fadeHours) up to sunrise.
+        const preDawnDelta = ((sunrise - safeHour) + 24.0) % 24.0;
+        if (preDawnDelta > 0.0 && preDawnDelta < fadeHours) {
+          const tFade = 1.0 - (preDawnDelta / fadeHours);
+          timeIntensity = Math.pow(Math.max(0.0, tFade), 0.5);
+        }
+
+        // Post-dusk: from sunset out to (sunset + fadeHours).
+        const postDuskDelta = ((safeHour - sunset) + 24.0) % 24.0;
+        if (postDuskDelta > 0.0 && postDuskDelta < fadeHours) {
+          const tFade = 1.0 - (postDuskDelta / fadeHours);
+          const tail = Math.pow(Math.max(0.0, tFade), 0.5);
+          // If both regions somehow overlap, keep the stronger contribution.
+          timeIntensity = Math.max(timeIntensity, tail);
+        }
+      }
+    } else {
+      timeIntensity = 1.0;
     }
 
-    // Drive basic shadow controls
-    if (this.material.uniforms.uOpacity) {
-      this.material.uniforms.uOpacity.value = this.params.opacity;
-    }
-    if (this.material.uniforms.uLength) {
-      this.material.uniforms.uLength.value = this.params.length;
-    }
-    if (this.material.uniforms.uSampleCount) {
-      this.material.uniforms.uSampleCount.value = this.params.quality;
-    }
+    this.timeIntensity = timeIntensity;
 
-    // Derive penumbra parameters from a single blurStrength control so
-    // the UI stays simple but still drives a meaningful blur range.
+    // 2. Derive Penumbra Params
     const blur = Math.max(0.0, Math.min(1.0, this.params.blurStrength ?? 0.5));
-
-    // Near radius stays small so the shadow begins relatively crisp
-    // at the building edge.
     this.params.penumbraRadiusNear = 0.0;
-    // Far radius scales up with blur strength.
-    this.params.penumbraRadiusFar = 0.02 + blur * 0.18; // 0.02 .. 0.20
-
-    // Sample count: 1 (no blur) up to 9 (very soft) in odd steps.
+    this.params.penumbraRadiusFar = 0.02 + blur * 0.18;
     const minTaps = 1;
     const maxTaps = 9;
     const taps = Math.round(minTaps + blur * (maxTaps - minTaps));
     this.params.penumbraSamples = Math.max(1, Math.min(9, taps));
+    this.params.penumbraExponent = 0.5 + blur * 2.0;
 
-    // Blur growth curve: lower values bias blur towards the base,
-    // higher values bias blur towards the tail.
-    this.params.penumbraExponent = 0.5 + blur * 2.0; // 0.5 .. 2.5
+    // 3. Check if Bake is Needed
+    // Construct a hash of all parameters that affect the shadow shape
+    // (Opacity is NOT included as it's applied in composition)
+    const bakeState = {
+      sunX: x.toFixed(4),
+      sunY: y.toFixed(4),
+      length: this.params.length,
+      quality: this.params.quality,
+      pNear: this.params.penumbraRadiusNear,
+      pFar: this.params.penumbraRadiusFar,
+      pSamples: this.params.penumbraSamples,
+      pExp: this.params.penumbraExponent,
+      maskId: this.outdoorsMask ? this.outdoorsMask.uuid : 'null'
+    };
+    const currentHash = JSON.stringify(bakeState);
 
-    if (this.material.uniforms.uPenumbraRadiusNear) {
-      this.material.uniforms.uPenumbraRadiusNear.value = this.params.penumbraRadiusNear;
+    if (currentHash !== this.lastBakeHash) {
+      this.needsBake = true;
+      this.lastBakeHash = currentHash;
     }
-    if (this.material.uniforms.uPenumbraRadiusFar) {
-      this.material.uniforms.uPenumbraRadiusFar.value = this.params.penumbraRadiusFar;
-    }
-    if (this.material.uniforms.uPenumbraSamples) {
-      this.material.uniforms.uPenumbraSamples.value = this.params.penumbraSamples;
-    }
-    if (this.material.uniforms.uPenumbraExponent) {
-      this.material.uniforms.uPenumbraExponent.value = this.params.penumbraExponent;
+
+    // Update Bake Material Uniforms
+    if (this.needsBake && this.bakeMaterial) {
+      const u = this.bakeMaterial.uniforms;
+      const timeScale = (typeof this.timeIntensity === 'number')
+        ? (0.5 + 0.5 * THREE.MathUtils.clamp(this.timeIntensity, 0.0, 1.0))
+        : 1.0;
+      const effectiveLength = this.params.length * timeScale;
+
+      u.uLength.value = effectiveLength;
+      u.uSampleCount.value = this.params.quality;
+      u.uSunDir.value.copy(this.sunDir);
+      u.uPenumbraRadiusNear.value = this.params.penumbraRadiusNear;
+      u.uPenumbraRadiusFar.value = this.params.penumbraRadiusFar;
+      u.uPenumbraSamples.value = this.params.penumbraSamples;
+      u.uPenumbraExponent.value = this.params.penumbraExponent;
     }
   }
 
   render(renderer, scene, camera) {
-    if (!this.enabled || !this.material) return;
+    if (!this.enabled) return;
 
     const THREE = window.THREE;
     if (!THREE || !this.mainCamera || !this.shadowScene) return;
 
-    // Ensure render target exists and is correctly sized
+    // Ensure targets
     const size = new THREE.Vector2();
     renderer.getDrawingBufferSize(size);
     if (!this.shadowTarget) {
       this.onResize(size.x, size.y);
-    } else if (this.shadowTarget.width !== size.x || this.shadowTarget.height !== size.y) {
-      this.shadowTarget.setSize(size.x, size.y);
     }
 
     const previousTarget = renderer.getRenderTarget();
 
-    // Render world-pinned shadow mesh into shadowTarget. Clear to white so
-    // regions outside the base mesh remain fully lit (factor = 1.0).
-    renderer.setRenderTarget(this.shadowTarget);
-    renderer.setClearColor(0xffffff, 1);
-    renderer.clear();
-    renderer.render(this.shadowScene, this.mainCamera);
+    // --- PASS 1: BAKE WORLD SHADOWS (Only if needed) ---
+    if (this.needsBake && this.bakeScene && this.bakeCamera) {
+      if (!this.worldShadowTarget) {
+        // Use a fixed high resolution for the world shadow map
+        const BAKE_SIZE = 2048; 
+        this.worldShadowTarget = new THREE.WebGLRenderTarget(BAKE_SIZE, BAKE_SIZE, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          format: THREE.RGBAFormat,
+          type: THREE.UnsignedByteType,
+          wrapS: THREE.ClampToEdgeWrapping,
+          wrapT: THREE.ClampToEdgeWrapping
+        });
+        
+        // Bind the new texture to display material
+        if (this.displayMaterial) {
+          this.displayMaterial.map = this.worldShadowTarget.texture;
+          this.displayMaterial.needsUpdate = true;
+        }
+      }
+
+      renderer.setRenderTarget(this.worldShadowTarget);
+      renderer.setClearColor(0xffffff, 1); // Default to Lit
+      renderer.clear();
+      renderer.render(this.bakeScene, this.bakeCamera);
+
+      this.needsBake = false;
+      
+      // Log strictly for debugging, maybe remove later
+      // log.debug('Baked Building Shadows');
+    }
+
+    // --- PASS 2: RENDER SCREEN SPACE SHADOWS ---
+    // Render world-pinned shadow mesh (sampling baked texture) into screen-space target
+    if (this.shadowTarget) {
+      renderer.setRenderTarget(this.shadowTarget);
+      renderer.setClearColor(0xffffff, 1);
+      renderer.clear();
+      renderer.render(this.shadowScene, this.mainCamera);
+    }
 
     renderer.setRenderTarget(previousTarget);
   }
@@ -459,15 +581,24 @@ export class BuildingShadowsEffect extends EffectBase {
       this.shadowTarget.dispose();
       this.shadowTarget = null;
     }
-    if (this.material) {
-      this.material.dispose();
-      this.material = null;
+    if (this.worldShadowTarget) {
+      this.worldShadowTarget.dispose();
+      this.worldShadowTarget = null;
+    }
+    if (this.bakeMaterial) {
+      this.bakeMaterial.dispose();
+      this.bakeMaterial = null;
+    }
+    if (this.displayMaterial) {
+      this.displayMaterial.dispose();
+      this.displayMaterial = null;
     }
     if (this.shadowMesh && this.shadowScene) {
       this.shadowScene.remove(this.shadowMesh);
       this.shadowMesh = null;
     }
     this.shadowScene = null;
+    this.bakeScene = null;
     log.info('BuildingShadowsEffect disposed');
   }
 }

@@ -501,7 +501,11 @@ export class LightingEffect extends EffectBase {
     try {
       const building = window.MapShine?.buildingShadowsEffect;
       if (building && building.params && building.enabled && building.shadowTarget) {
-        u.uBuildingShadowOpacity.value = building.params.opacity ?? 0.0;
+        const baseOpacity = building.params.opacity ?? 0.0;
+        const ti = (typeof building.timeIntensity === 'number')
+          ? THREE.MathUtils.clamp(building.timeIntensity, 0.0, 1.0)
+          : 1.0;
+        u.uBuildingShadowOpacity.value = baseOpacity * ti;
       } else {
         u.uBuildingShadowOpacity.value = 0.0;
       }

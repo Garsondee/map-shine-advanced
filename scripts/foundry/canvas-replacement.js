@@ -12,6 +12,7 @@ import { EffectComposer } from '../effects/EffectComposer.js';
 import { SpecularEffect } from '../effects/SpecularEffect.js';
 import { IridescenceEffect } from '../effects/IridescenceEffect.js';
 import { WindowLightEffect } from '../effects/WindowLightEffect.js';
+import { BushEffect } from '../effects/BushEffect.js';
 import { ColorCorrectionEffect } from '../effects/ColorCorrectionEffect.js';
 import { AsciiEffect } from '../effects/AsciiEffect.js';
 import { BloomEffect } from '../effects/BloomEffect.js';
@@ -390,6 +391,10 @@ async function createThreeCanvas(scene) {
     lightingEffect = new LightingEffect();
     effectComposer.registerEffect(lightingEffect);
 
+    // Step 3.6.25: Register Animated Bushes (surface overlay, before shadows)
+    const bushEffect = new BushEffect();
+    effectComposer.registerEffect(bushEffect);
+
     // Step 3.6.5: Register Overhead Shadows (post-lighting)
     const overheadShadowsEffect = new OverheadShadowsEffect();
     effectComposer.registerEffect(overheadShadowsEffect);
@@ -413,6 +418,7 @@ async function createThreeCanvas(scene) {
     iridescenceEffect.setBaseMesh(basePlane, bundle);
     prismEffect.setBaseMesh(basePlane, bundle);
     windowLightEffect.setBaseMesh(basePlane, bundle);
+    bushEffect.setBaseMesh(basePlane, bundle);
     lightingEffect.setBaseMesh(basePlane, bundle);
     overheadShadowsEffect.setBaseMesh(basePlane, bundle);
     buildingShadowsEffect.setBaseMesh(basePlane, bundle);
@@ -495,6 +501,7 @@ async function createThreeCanvas(scene) {
     mapShine.specularEffect = specularEffect;
     mapShine.iridescenceEffect = iridescenceEffect;
     mapShine.windowLightEffect = windowLightEffect;
+    mapShine.bushEffect = bushEffect;
     mapShine.prismEffect = prismEffect;
     mapShine.lightingEffect = lightingEffect;
     mapShine.overheadShadowsEffect = overheadShadowsEffect;
@@ -544,7 +551,8 @@ async function createThreeCanvas(scene) {
         fireSparksEffect,
         windowLightEffect,
         overheadShadowsEffect,
-        buildingShadowsEffect
+        buildingShadowsEffect,
+        bushEffect
       );
     } catch (e) {
       log.error('Failed to initialize UI:', e);
@@ -569,9 +577,10 @@ async function createThreeCanvas(scene) {
  * @param {WindowLightEffect} windowLightEffect - The window lighting effect instance
  * @param {OverheadShadowsEffect} overheadShadowsEffect - The overhead shadows effect instance
  * @param {BuildingShadowsEffect} buildingShadowsEffect - The building shadows effect instance
+ * @param {BushEffect} bushEffect - The animated bushes surface effect instance
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect, fireSparksEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect, fireSparksEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, bushEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -609,6 +618,29 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     onSpecularUpdate,
     'surface'
   );
+
+  // --- Animated Bushes Settings ---
+  if (bushEffect) {
+    const bushSchema = BushEffect.getControlSchema();
+
+    const onBushUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        bushEffect.enabled = value;
+        log.debug(`Bush effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (bushEffect.params && Object.prototype.hasOwnProperty.call(bushEffect.params, paramId)) {
+        bushEffect.params[paramId] = value;
+        log.debug(`Bush.${paramId} = ${value}`);
+      }
+    };
+
+    uiManager.registerEffect(
+      'bush',
+      'Animated Bushes',
+      bushSchema,
+      onBushUpdate,
+      'structure'
+    );
+  }
 
   // --- Iridescence Settings ---
   if (iridescenceEffect) {

@@ -22,6 +22,7 @@ const EFFECT_MASKS = {
   prism: { suffix: '_Prism', required: false, description: 'Prism/refraction mask' },
   windows: { suffix: '_Windows', required: false, description: 'Window lighting mask' },
   structural: { suffix: '_Structural', required: false, description: 'Structural (legacy window) mask' },
+  bush: { suffix: '_Bush', required: false, description: 'Animated bush texture (RGBA with transparency)' },
   // water: { suffix: '_Water', required: false, description: 'Water surface mask' },
   // emissive: { suffix: '_Emissive', required: false, description: 'Self-illumination mask' }
 };

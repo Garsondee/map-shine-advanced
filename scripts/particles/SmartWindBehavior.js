@@ -23,17 +23,25 @@ export class SmartWindBehavior {
   update(particle, delta, system) {
     if (!particle || typeof delta !== 'number') return;
 
+    // Sanity check delta to prevent physics explosions on lag spikes
+    let dt = delta;
+    if (!Number.isFinite(dt)) return;
+    dt = Math.min(Math.max(dt, 0), 0.1);
+    if (dt <= 0.0001) return;
+
     // 1. Check Susceptibility
-    const susceptibility = particle._windSusceptibility;
-    if (susceptibility <= 0.001) return; // Optimization: Skip indoor particles
+    const susceptibility = typeof particle._windSusceptibility === 'number'
+      ? particle._windSusceptibility
+      : 1.0;
+    if (!Number.isFinite(susceptibility) || susceptibility <= 0.001) return; // Optimization: Skip indoor particles
 
     // 2. Get Global Wind State
     const state = weatherController.getCurrentState();
-    const windSpeed = state.windSpeed || 0;
-    if (windSpeed <= 0.001) return;
+    let windSpeed = state && typeof state.windSpeed === 'number' ? state.windSpeed : 0;
+    if (!Number.isFinite(windSpeed) || windSpeed <= 0.001) return;
 
-    const windDir = state.windDirection; // Vector2
-    if (!windDir) return;
+    const windDir = state && state.windDirection; // Vector2
+    if (!windDir || !Number.isFinite(windDir.x) || !Number.isFinite(windDir.y)) return;
 
     // 3. Calculate Force
     // Base magnitude scaling matches FireSparksEffect / WeatherParticles tuning
@@ -45,16 +53,23 @@ export class SmartWindBehavior {
     if (system && system.userData && typeof system.userData.windInfluence === 'number') {
         influence = system.userData.windInfluence;
     }
+    if (!Number.isFinite(influence)) influence = 1.0;
 
     const forceMag = windSpeed * 300.0 * influence * susceptibility;
+    if (!Number.isFinite(forceMag)) return;
 
     // 4. Apply to Velocity
     // Standard Euler integration: v += a * dt
     // Wind acts as a force (acceleration).
     
     if (particle.velocity) {
-      particle.velocity.x += windDir.x * forceMag * delta;
-      particle.velocity.y += windDir.y * forceMag * delta;
+      const dvx = windDir.x * forceMag * dt;
+      const dvy = windDir.y * forceMag * dt;
+
+      if (Number.isFinite(dvx) && Number.isFinite(dvy)) {
+        particle.velocity.x += dvx;
+        particle.velocity.y += dvy;
+      }
     }
   }
 

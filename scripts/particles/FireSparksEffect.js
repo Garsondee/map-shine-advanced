@@ -223,15 +223,26 @@ class FireSpinBehavior {
   update(particle, delta) {
     if (!particle || typeof delta !== 'number') return;
 
+    // Clamp delta to avoid huge jumps after stalls
+    let dt = delta;
+    if (!Number.isFinite(dt)) return;
+    dt = Math.min(Math.max(dt, 0), 0.1);
+    if (dt <= 0.0001) return;
+
     // If speed is 0 or undefined, do nothing
-    if (!particle._spinSpeed) return;
+    if (!Number.isFinite(particle._spinSpeed) || particle._spinSpeed === 0) return;
+
+    const dAngle = particle._spinSpeed * dt;
+    if (!Number.isFinite(dAngle)) return;
 
     // three.quarks usually uses a number for billboard rotation,
     // but some configurations use an object with .z
     if (typeof particle.rotation === 'number') {
-      particle.rotation += particle._spinSpeed * delta;
+      const next = particle.rotation + dAngle;
+      if (Number.isFinite(next)) particle.rotation = next;
     } else if (particle.rotation && typeof particle.rotation.z === 'number') {
-      particle.rotation.z += particle._spinSpeed * delta;
+      const nextZ = particle.rotation.z + dAngle;
+      if (Number.isFinite(nextZ)) particle.rotation.z = nextZ;
     }
   }
 
@@ -261,12 +272,12 @@ export class FireSparksEffect extends EffectBase {
     };
     this.params = {
       enabled: true,
-      // Matches UI: Global Intensity = 5.0
-      globalFireRate: 5.0,
+      // Matches UI: Global Intensity = 2.0
+      globalFireRate: 2.0,
       fireAlpha: 0.6,
       fireCoreBoost: 1.0,
-      // Matches UI: Height = 10
-      fireHeight: 10.0,
+      // Matches UI: Height = 600
+      fireHeight: 600.0,
       fireSize: 18.0,
       emberRate: 5.0,
       // Matches UI: Wind Influence = 2.0
@@ -275,16 +286,16 @@ export class FireSparksEffect extends EffectBase {
       lightIntensity: 0.9,
 
       // Fire fine controls (defaults from tuned UI)
-      fireSizeMin: 11.0,
-      fireSizeMax: 86.0,
-      fireLifeMin: 0.85,
-      fireLifeMax: 1.55,
-      // Matches UI: Opacity Min = 0.03, Opacity Max = 0.20
-      fireOpacityMin: 0.03,
-      fireOpacityMax: 0.20,
-      // Matches UI: Color Boost Min = 0.0, Color Boost Max = 0.85
+      fireSizeMin: 25.0,
+      fireSizeMax: 61.0,
+      fireLifeMin: 0.60,
+      fireLifeMax: 1.10,
+      // Matches UI: Opacity Min = 0.01, Opacity Max = 0.02
+      fireOpacityMin: 0.01,
+      fireOpacityMax: 0.02,
+      // Matches UI: Color Boost Min = 0.0, Color Boost Max = 1.85
       fireColorBoostMin: 0.00,
-      fireColorBoostMax: 0.85,
+      fireColorBoostMax: 1.85,
       fireSpinEnabled: true,
       fireSpinSpeedMin: 1.3,
       fireSpinSpeedMax: 4.5,
@@ -300,15 +311,15 @@ export class FireSparksEffect extends EffectBase {
       emberColorBoostMax: 2.85,
 
       // New color controls
-      fireStartColor: { r: 0.114, g: 0.075, b: 0.0 },
+      fireStartColor: { r: 1.0, g: 1.0, b: 1.0 },
       fireEndColor: { r: 0.004, g: 0.0, b: 0.0 },
       emberStartColor: { r: 1.0, g: 1.0, b: 0.0 },
       emberEndColor: { r: 1.0, g: 0.0, b: 0.0 },
 
       // Physics controls
-      fireUpdraft: 0.70,
+      fireUpdraft: 12.0,
       emberUpdraft: 0.85,
-      fireCurlStrength: 1.35,
+      fireCurlStrength: 6.15,
       emberCurlStrength: 3.95,
 
       // Weather guttering controls (outdoor fire kill strength)
@@ -368,22 +379,22 @@ export class FireSparksEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'checkbox', label: 'Fire Enabled', default: true },
-        // Matches tuned UI default: 5.0
-        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 5.0 },
+        // Matches tuned UI default: 2.0
+        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 2.0 },
         fireAlpha: { type: 'slider', label: 'Opacity (Legacy)', min: 0.0, max: 1.0, step: 0.01, default: 0.6 },
         fireCoreBoost: { type: 'slider', label: 'Core Boost (Legacy)', min: 0.0, max: 5.0, step: 0.1, default: 1.0 },
-        // Matches tuned UI default: 10
-        fireHeight: { type: 'slider', label: 'Height', min: 10.0, max: 600.0, step: 10.0, default: 10.0 },
-        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 100.0, step: 1.0, default: 11.0 },
-        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 150.0, step: 1.0, default: 86.0 },
-        fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 4.0, step: 0.05, default: 0.85 },
-        fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 1.55 },
-        // Matches tuned UI defaults: Opacity Min = 0.03, Opacity Max = 0.20
-        fireOpacityMin: { type: 'slider', label: 'Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.03 },
-        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.20 },
-        // Matches tuned UI defaults: Color Boost Min = 0.0, Color Boost Max = 0.85
+        // Matches tuned UI default: 600
+        fireHeight: { type: 'slider', label: 'Height', min: 10.0, max: 600.0, step: 10.0, default: 600.0 },
+        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 100.0, step: 1.0, default: 25.0 },
+        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 150.0, step: 1.0, default: 61.0 },
+        fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 4.0, step: 0.05, default: 0.60 },
+        fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 1.10 },
+        // Matches tuned UI defaults: Opacity Min = 0.01, Opacity Max = 0.02
+        fireOpacityMin: { type: 'slider', label: 'Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.01 },
+        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.02 },
+        // Matches tuned UI defaults: Color Boost Min = 0.0, Color Boost Max = 1.85
         fireColorBoostMin: { type: 'slider', label: 'Color Boost Min', min: 0.0, max: 2.0, step: 0.05, default: 0.0 },
-        fireColorBoostMax: { type: 'slider', label: 'Color Boost Max', min: 0.0, max: 12.0, step: 0.05, default: 0.85 },
+        fireColorBoostMax: { type: 'slider', label: 'Color Boost Max', min: 0.0, max: 12.0, step: 0.05, default: 1.85 },
         fireStartColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 } },
         fireEndColor: { type: 'color', default: { r: 1.0, g: 0.0, b: 0.0 } },
         fireSpinEnabled: { type: 'checkbox', label: 'Spin Enabled', default: true },
@@ -400,18 +411,18 @@ export class FireSparksEffect extends EffectBase {
         emberColorBoostMax: { type: 'slider', label: 'Ember Color Boost Max', min: 0.0, max: 3.0, step: 0.05, default: 2.85 },
         emberStartColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 } },
         emberEndColor: { type: 'color', default: { r: 1.0, g: 0.0, b: 0.0 } },
-        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 0.85 },
+        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 12.0 },
         emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 0.15 },
-        fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.10 },
+        fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 6.15 },
         emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 3.95 },
-        // Matches tuned UI defaults: Wind Influence = 2.0, Light Intensity = 0.9, Time Scale = 1.0
-        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 2.0 },
-        lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 0.9 },
+        // Matches tuned UI defaults: Wind Influence = 5.0, Light Intensity = 1.2, Time Scale = 1.0
+        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
+        lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 1.2 },
         timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 1.0 },
 
         // Weather guttering strength (spawn-time kill) for outdoor flames
-        weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.8 },
-        weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.4 }
+        weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 1.0 },
+        weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.5 }
       }
     };
   }
@@ -866,6 +877,7 @@ export class FireSparksEffect extends EffectBase {
   
   update(timeInfo) {
     if (!this.settings.enabled) return;
+    
     const t = timeInfo.elapsed;
     const THREE = window.THREE;
 

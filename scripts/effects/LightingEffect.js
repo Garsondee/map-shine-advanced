@@ -175,10 +175,10 @@ export class LightingEffect extends EffectBase {
           vec4 baseColor = texture2D(tDiffuse, vUv);
           vec4 lightSample = texture2D(tLight, vUv); // HDR light buffer
           vec4 roofSample = texture2D(tRoofAlpha, vUv);
-          
+
           // 1. Determine Ambient Light
           vec3 ambient = mix(uAmbientBrightest, uAmbientDarkness, uDarknessLevel);
-          
+
           // 2. Roof Occlusion Mask
           // roofSample.a represents the opacity of overhead tiles at this pixel.
           // We want lights to appear UNDER roofs, only in transparent and semi-transparent
@@ -249,9 +249,29 @@ export class LightingEffect extends EffectBase {
           // 4. Combine Ambient with Accumulated Lights (roof-masked + overhead shadows)
           float kd = clamp(uOverheadShadowAffectsLights, 0.0, 1.0);
           vec3 shadedAmbient = ambient * combinedShadowFactor;
+
           vec3 baseLights = lightSample.rgb * lightVisibility;
+
+          // Guard against NaNs from the light buffer
+          bool badLight = (baseLights.r != baseLights.r) || (baseLights.g != baseLights.g) || (baseLights.b != baseLights.b);
+          if (badLight) {
+            baseLights = vec3(0.0);
+          }
+
           vec3 shadedLights = mix(baseLights, baseLights * combinedShadowFactor, kd);
           vec3 totalIllumination = shadedAmbient + shadedLights;
+
+          // Final safety: if illumination goes NaN or effectively zero, fall back
+          // to a small ambient floor so we never get a pure black flash.
+          bool badIllum = (totalIllumination.r != totalIllumination.r) ||
+                          (totalIllumination.g != totalIllumination.g) ||
+                          (totalIllumination.b != totalIllumination.b);
+          if (badIllum) {
+            totalIllumination = ambient;
+          }
+
+          vec3 minIllum = ambient * 0.1;
+          totalIllumination = max(totalIllumination, minIllum);
           
           // 4. Apply to Base Texture (Multiply)
           vec3 finalRGB = baseColor.rgb * totalIllumination;

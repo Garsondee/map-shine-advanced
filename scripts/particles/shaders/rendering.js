@@ -162,9 +162,21 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
           // spawnData.y = World Y (Normalized 0-1)
           // spawnData.z = Intensity
           
-          // Treat emitter rate (0..1) as a spawn probability so the UI slider
-          // directly controls how many particles are active for this emitter.
-          float spawnChance = clamp(emRate, 0.0, 1.0);
+          // Sanitize emitter rate and treat it as a simple on/off flag.
+          // We no longer interpret "rate" as a 0..1 probability here; the
+          // actual particle counts are controlled on the CPU (Quarks).
+          float rawRate = emRate;
+          // NaN check: (x != x) is true only for NaN
+          bool rateNaN = (rawRate != rawRate);
+          if (rateNaN || rawRate < 0.0) rawRate = 0.0;
+
+          // hasRate = 1.0 when emitter is effectively active (> small epsilon)
+          float hasRate = step(0.0001, rawRate);
+
+          // Use hasRate as a deterministic spawn mask: either this emitter is
+          // emitting (1.0) or not (0.0). The CPU-side emission logic already
+          // handles density and counts.
+          float spawnChance = hasRate;
           float spawnMask = step(hash(idx + emitterIdxF * 37.0), spawnChance);
 
           if (spawnData.z <= 0.001 || spawnMask < 0.5) {
@@ -270,9 +282,10 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
         }
 
         // Visibility / Opacity
-        // For fire, we already applied a probabilistic spawnMask above; here we
-        // just gate on emRate > 0 so rate=0 reliably kills all particles.
-        float isActive = step(0.0, emRate - 0.0001);
+        // For fire, we already applied a spawnMask based on hasRate; here we
+        // just gate on hasRate so emitters with zero/invalid rate reliably
+        // kill all particles.
+        float isActive = (emType == 0.0) ? hasRate : step(0.0, emRate - 0.0001);
         float fadeIn = clamp(lifeProgress * 4.0, 0.0, 1.0);
         // Note: Some types handle their own fadeOut (fire)
         float fadeOut = (emType == 0.0)
@@ -285,6 +298,31 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
         float inBounds = inBoundsX * inBoundsY;
 
         float alpha = fadeIn * fadeOut * isActive * inBounds;
+
+        // --- FINAL SANITY CHECK ---
+        // Even after CPU-side guards, a newly spawned particle can still end up
+        // with invalid or extreme values due to bad emitter data. As a last
+        // line of defense on the GPU, detect NaNs and huge coordinates/sizes
+        // and silently cull those particles.
+        float big = 1e6;
+
+        // Clamp extremely large coordinates into a safe range so they can't
+        // explode the projection matrix.
+        pos.x = clamp(pos.x, -big, big);
+        pos.y = clamp(pos.y, -big, big);
+        pos.z = clamp(pos.z, -big, big);
+        size  = clamp(size, 0.0, big);
+
+        // Detect NaNs via self-inequality (x != x is true only for NaN).
+        bool badPos = (pos.x != pos.x) || (pos.y != pos.y) || (pos.z != pos.z);
+        bool badSize = (size != size) || (size <= 0.0);
+
+        if (badPos || badSize) {
+          // Push completely off-screen and force alpha to 0 so the fragment
+          // shader never sees this particle.
+          pos = vec3(0.0, 0.0, -1e9);
+          alpha = 0.0;
+        }
 
         vColor = color;
         vAlpha = alpha;
@@ -359,6 +397,38 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
 
           col = vec4(vColor.rgb, vColor.a * lineMask);
         } else if (vType == 0.0) {
+          // FIRE (DEBUG SIMPLIFIED): render as a simple radial disc with a
+          // fixed fire-like colour and radial alpha mask. This removes the
+          // complex procedural noise and shaping so we can see if those are
+          // responsible for black geometries.
+
+          vec2 p = uv - vec2(0.5); // -0.5..0.5
+          float r = length(p);
+
+          // Simple radial mask: solid center, soft edge.
+          float inner = 0.0;
+          float outer = 0.5;
+          float radialMask = 1.0 - smoothstep(inner, outer, r);
+
+          // Extra safety: force alpha to 0 near the sprite border so we never
+          // see the point sprite square.
+          float safeEdge = 1.0 - smoothstep(0.45, 0.5, r);
+          float flameMask = radialMask * safeEdge;
+
+          // Fixed warm fire colour (no procedural noise or ramps).
+          vec3 fireCol = vec3(1.0, 0.6, 0.2) * uFireCoreBoost;
+
+          // Use life to gently dim late particles so they feel like embers.
+          float lifeFade = 1.0 - smoothstep(0.7, 1.0, vLife);
+          fireCol *= lifeFade * 0.9;
+
+          // Overall alpha: driven by vAlpha, our radial mask, and uFireAlpha.
+          float localAlpha = vAlpha * flameMask * uFireAlpha;
+
+          col = vec4(fireCol, localAlpha);
+
+          /*
+          // ORIGINAL FIRE SHADER (kept for reference while debugging):
           // FIRE: tapered, ragged, lower-opacity tongues with fuzzy edges.
           vec2 p = uv - vec2(0.5); // -0.5..0.5
 
@@ -414,6 +484,7 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
           float localAlpha = vAlpha * flameMask * uFireAlpha;
 
           col = vec4(fireCol, localAlpha);
+          */
         } else {
           // Other types (smoke/magic): soft round sprites using a radial alpha
           // falloff so they appear as glowing discs instead of hard-edged
@@ -430,6 +501,15 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
         // Global alpha scale (scene bounds, enable flags, life cycle).
         if (vType != 0.0) {
           col.a *= vAlpha;
+        }
+
+        // FINAL SAFETY GUARD:
+        // If the computed colour contains NaNs (from upstream data issues),
+        // force the fragment to be fully transparent instead of allowing
+        // undefined values to propagate into the framebuffer as black quads.
+        bool badCol = (col.r != col.r) || (col.g != col.g) || (col.b != col.b) || (col.a != col.a);
+        if (badCol) {
+          col = vec4(0.0);
         }
 
         if (col.a <= 0.001) discard;

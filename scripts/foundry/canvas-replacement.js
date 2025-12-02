@@ -13,6 +13,7 @@ import { SpecularEffect } from '../effects/SpecularEffect.js';
 import { IridescenceEffect } from '../effects/IridescenceEffect.js';
 import { WindowLightEffect } from '../effects/WindowLightEffect.js';
 import { BushEffect } from '../effects/BushEffect.js';
+import { TreeEffect } from '../effects/TreeEffect.js';
 import { ColorCorrectionEffect } from '../effects/ColorCorrectionEffect.js';
 import { AsciiEffect } from '../effects/AsciiEffect.js';
 import { BloomEffect } from '../effects/BloomEffect.js';
@@ -395,6 +396,10 @@ async function createThreeCanvas(scene) {
     const bushEffect = new BushEffect();
     effectComposer.registerEffect(bushEffect);
 
+    // Step 3.6.26: Register Animated Trees (High Canopy, above overhead)
+    const treeEffect = new TreeEffect();
+    effectComposer.registerEffect(treeEffect);
+
     // Step 3.6.5: Register Overhead Shadows (post-lighting)
     const overheadShadowsEffect = new OverheadShadowsEffect();
     effectComposer.registerEffect(overheadShadowsEffect);
@@ -419,6 +424,7 @@ async function createThreeCanvas(scene) {
     prismEffect.setBaseMesh(basePlane, bundle);
     windowLightEffect.setBaseMesh(basePlane, bundle);
     bushEffect.setBaseMesh(basePlane, bundle);
+    treeEffect.setBaseMesh(basePlane, bundle);
     lightingEffect.setBaseMesh(basePlane, bundle);
     overheadShadowsEffect.setBaseMesh(basePlane, bundle);
     buildingShadowsEffect.setBaseMesh(basePlane, bundle);
@@ -502,6 +508,7 @@ async function createThreeCanvas(scene) {
     mapShine.iridescenceEffect = iridescenceEffect;
     mapShine.windowLightEffect = windowLightEffect;
     mapShine.bushEffect = bushEffect;
+    mapShine.treeEffect = treeEffect;
     mapShine.prismEffect = prismEffect;
     mapShine.lightingEffect = lightingEffect;
     mapShine.overheadShadowsEffect = overheadShadowsEffect;
@@ -552,7 +559,8 @@ async function createThreeCanvas(scene) {
         windowLightEffect,
         overheadShadowsEffect,
         buildingShadowsEffect,
-        bushEffect
+        bushEffect,
+        treeEffect
       );
     } catch (e) {
       log.error('Failed to initialize UI:', e);
@@ -580,7 +588,7 @@ async function createThreeCanvas(scene) {
  * @param {BushEffect} bushEffect - The animated bushes surface effect instance
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect, fireSparksEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, bushEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect, fireSparksEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, bushEffect, treeEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -638,7 +646,30 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       'Animated Bushes',
       bushSchema,
       onBushUpdate,
-      'structure'
+      'surface'
+    );
+  }
+
+  // --- Animated Trees Settings ---
+  if (treeEffect) {
+    const treeSchema = TreeEffect.getControlSchema();
+
+    const onTreeUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        treeEffect.enabled = value;
+        log.debug(`Tree effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (treeEffect.params && Object.prototype.hasOwnProperty.call(treeEffect.params, paramId)) {
+        treeEffect.params[paramId] = value;
+        log.debug(`Tree.${paramId} = ${value}`);
+      }
+    };
+
+    uiManager.registerEffect(
+      'tree',
+      'Animated Trees (Canopy)',
+      treeSchema,
+      onTreeUpdate,
+      'surface'
     );
   }
 

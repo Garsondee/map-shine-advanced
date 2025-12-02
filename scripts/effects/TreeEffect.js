@@ -2,29 +2,26 @@ import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
 
-const log = createLogger('BushEffect');
+const log = createLogger('TreeEffect');
 
 /**
- * Animated Bushes effect
- * Renders the `_Bush` RGBA texture as a surface overlay.
+ * Animated Tree effect (High Canopy)
+ * Renders the `_Tree` RGBA texture as a high-level surface overlay.
  * 
- * IMPROVEMENTS:
- * - Implements scrolling "Gust" noise to desynchronize movement.
- * - Simulates weight: bushes bend WITH wind, they don't oscillate equally back and forth.
- * - Couples leaf flutter to wind gusts (leaves shake more when wind hits).
- * - ORBITAL MOVEMENT: Decouples the forward push from the sideways sway so bushes
- *   move in arcs rather than linear piston (rewind) motions.
- * - Adds smoothing/inertia so wind changes don't cause snapping movements.
+ * Key Differences from BushEffect:
+ * - Placed ABOVE overhead layers (z=25)
+ * - Does NOT receive shadows (canopy is top-most)
+ * - Casts shadows onto everything below (Ground, Overhead, Bushes)
  */
-export class BushEffect extends EffectBase {
+export class TreeEffect extends EffectBase {
   constructor() {
-    super('bush', RenderLayers.SURFACE_EFFECTS, 'low');
+    super('tree', RenderLayers.SURFACE_EFFECTS, 'low');
 
-    this.priority = 11;
+    this.priority = 12; // Higher priority than bushes
     this.alwaysRender = false;
     this.baseMesh = null;
     this.mesh = null;
-    this.bushMask = null;
+    this.treeMask = null;
     this.material = null;
     this.scene = null;
     this.shadowScene = null;
@@ -43,19 +40,19 @@ export class BushEffect extends EffectBase {
       intensity: 1.0,
 
       // -- Wind Physics --
-      windSpeedGlobal: 0.13,     // Multiplier for actual game wind speed
-      windRampSpeed: 0.40,       // Inertia: Lower = slower fade in/out of movement
-      gustFrequency: 0.01,       // How distinct the "waves" of wind are (Spatial)
-      gustSpeed: 0.22028,        // How fast the noise field scrolls
+      windSpeedGlobal: 0.36,     // Multiplier for actual game wind speed (slightly stronger than bushes)
+      windRampSpeed: 2.05,       // Inertia: heavier canopy, slower response
+      gustFrequency: 0.002,      // Larger, more spread-out gusts for tall trees
+      gustSpeed: 0.15,           // How fast the noise field scrolls
 
-      // -- Bush Movement --
-      branchBend: 0.021,         // How far the "branches" move in strong wind
-      elasticity: 1.19136,       // Higher = snappier return, Lower = lazy heavy branches
+      // -- Tree Movement --
+      branchBend: 0.013,         // Tree trunks bend less overall
+      elasticity: 3.15,          // Heavier inertia than bushes
 
       // -- Leaf Flutter --
-      flutterIntensity: 0.0005,  // Base vibration
-      flutterSpeed: 1.0,         // Speed of vibration
-      flutterScale: 0.0167,      // Spatial scale of flutter clusters (leaf size)
+      flutterIntensity: 0.0001,  // Very subtle flutter for high canopy
+      flutterSpeed: 1.5,         // Slightly slower flutter than bushes
+      flutterScale: 0.01,        // Slightly larger clusters (bigger leaf groups)
 
       // -- Color --
       exposure: -2.0,
@@ -65,17 +62,17 @@ export class BushEffect extends EffectBase {
       temperature: 0.0,
       tint: 0.0,
 
-      // Shadow
-      shadowOpacity: 0.59927,
-      shadowLength: 0.02297,
-      shadowSoftness: 5.0
+      // Shadow (cast onto scene via LightingEffect)
+      shadowOpacity: 0.35,
+      shadowLength: 0.08,
+      shadowSoftness: 10.0
     };
   }
 
   get enabled() { return this._enabled; }
   set enabled(value) {
     this._enabled = !!value;
-    if (this.mesh) this.mesh.visible = !!value && !!this.bushMask;
+    if (this.mesh) this.mesh.visible = !!value && !!this.treeMask;
   }
 
   static getControlSchema() {
@@ -83,25 +80,25 @@ export class BushEffect extends EffectBase {
       enabled: true,
       groups: [
         {
-          name: 'bush-phys',
+          name: 'tree-phys',
           label: 'Wind Physics',
           type: 'inline',
           parameters: ['windSpeedGlobal', 'windRampSpeed', 'gustFrequency', 'gustSpeed', 'branchBend', 'elasticity']
         },
         {
-          name: 'bush-flutter',
+          name: 'tree-flutter',
           label: 'Leaf Flutter',
           type: 'inline',
           parameters: ['flutterIntensity', 'flutterSpeed', 'flutterScale']
         },
         {
-          name: 'bush-color',
+          name: 'tree-color',
           label: 'Color',
           type: 'folder',
           parameters: ['exposure', 'brightness', 'contrast', 'saturation', 'temperature', 'tint']
         },
         {
-          name: 'bush-shadow',
+          name: 'tree-shadow',
           label: 'Shadow',
           type: 'inline',
           parameters: ['shadowOpacity', 'shadowLength', 'shadowSoftness']
@@ -109,31 +106,31 @@ export class BushEffect extends EffectBase {
       ],
       parameters: {
         intensity: { type: 'slider', min: 0.0, max: 2.0, default: 1.0 },
-        windSpeedGlobal: { type: 'slider', label: 'Wind Strength', min: 0.0, max: 3.0, default: 0.13 },
-        windRampSpeed: { type: 'slider', label: 'Wind Responsiveness', min: 0.1, max: 10.0, default: 0.40 },
-        gustFrequency: { type: 'slider', label: 'Gust Spacing', min: 0.01, max: 0.5, default: 0.01 },
-        gustSpeed: { type: 'slider', label: 'Gust Speed', min: 0.0, max: 2.0, default: 0.22028 },
-        branchBend: { type: 'slider', label: 'Branch Bend', min: 0.0, max: 0.05, step: 0.001, default: 0.021 },
-        elasticity: { type: 'slider', label: 'Springiness', min: 0.5, max: 5.0, default: 1.19136 },
-        flutterIntensity: { type: 'slider', label: 'Leaf Flutter Amount', min: 0.0, max: 0.005, step: 0.0001, default: 0.0005 },
-        flutterSpeed: { type: 'slider', label: 'Leaf Flutter Speed', min: 1.0, max: 20.0, default: 1.0 },
-        flutterScale: { type: 'slider', label: 'Leaf Cluster Size', min: 0.005, max: 0.1, default: 0.0167 },
+        windSpeedGlobal: { type: 'slider', label: 'Wind Strength', min: 0.0, max: 3.0, default: 0.36 },
+        windRampSpeed: { type: 'slider', label: 'Wind Responsiveness', min: 0.1, max: 10.0, default: 2.05 },
+        gustFrequency: { type: 'slider', label: 'Gust Spacing', min: 0.001, max: 0.1, default: 0.002 },
+        gustSpeed: { type: 'slider', label: 'Gust Speed', min: 0.0, max: 2.0, default: 0.15 },
+        branchBend: { type: 'slider', label: 'Branch Bend', min: 0.0, max: 0.1, step: 0.001, default: 0.013 },
+        elasticity: { type: 'slider', label: 'Springiness', min: 0.5, max: 5.0, default: 3.15 },
+        flutterIntensity: { type: 'slider', label: 'Leaf Flutter Amount', min: 0.0, max: 0.005, step: 0.0001, default: 0.0001 },
+        flutterSpeed: { type: 'slider', label: 'Leaf Flutter Speed', min: 1.0, max: 20.0, default: 1.5 },
+        flutterScale: { type: 'slider', label: 'Leaf Cluster Size', min: 0.005, max: 0.1, default: 0.01 },
         exposure: { type: 'slider', min: -2.0, max: 2.0, default: -2.0 },
         brightness: { type: 'slider', min: -0.5, max: 0.5, default: 0.0 },
         contrast: { type: 'slider', min: 0.5, max: 2.0, default: 1.03 },
         saturation: { type: 'slider', min: 0.0, max: 2.0, default: 1.25 },
         temperature: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
         tint: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
-        shadowOpacity: { type: 'slider', label: 'Shadow Opacity', min: 0.0, max: 1.0, default: 0.59927 },
-        shadowLength: { type: 'slider', label: 'Shadow Length', min: 0.0, max: 0.1, default: 0.02297 },
-        shadowSoftness: { type: 'slider', label: 'Shadow Softness', min: 0.5, max: 5.0, default: 5.0 }
+        shadowOpacity: { type: 'slider', label: 'Shadow Opacity', min: 0.0, max: 1.0, default: 0.35 },
+        shadowLength: { type: 'slider', label: 'Shadow Length', min: 0.0, max: 0.2, default: 0.08 },
+        shadowSoftness: { type: 'slider', label: 'Shadow Softness', min: 0.5, max: 10.0, default: 10.0 }
       }
     };
   }
 
   _createShadowMesh() {
     const THREE = window.THREE;
-    if (!THREE || !this.baseMesh || !this.bushMask) return;
+    if (!THREE || !this.baseMesh || !this.treeMask) return;
 
     if (this.shadowMesh && this.shadowScene) {
       this.shadowScene.remove(this.shadowMesh);
@@ -146,7 +143,7 @@ export class BushEffect extends EffectBase {
 
     this.shadowMaterial = new THREE.ShaderMaterial({
       uniforms: {
-        uBushMask: { value: this.bushMask },
+        uTreeMask: { value: this.treeMask },
         uTime: { value: 0.0 },
         uWindDir: { value: new THREE.Vector2(1.0, 0.0) },
         uWindSpeed: { value: 0.0 },
@@ -181,7 +178,7 @@ export class BushEffect extends EffectBase {
         }
       `,
       fragmentShader: `
-        uniform sampler2D uBushMask;
+        uniform sampler2D uTreeMask;
         uniform float uTime;
         uniform vec2  uWindDir;
         uniform float uWindSpeed;
@@ -218,7 +215,7 @@ export class BushEffect extends EffectBase {
         }
 
         void main() {
-          // --- Wind / Bush motion (same as color pass) ---
+          // --- Wind / Tree motion ---
           vec2 windDir = normalize(uWindDir);
           if (length(windDir) < 0.01) windDir = vec2(1.0, 0.0);
 
@@ -247,11 +244,10 @@ export class BushEffect extends EffectBase {
                           + (perpDir * swayMagnitude)
                           + vec2(flutter, flutter) * flutterMagnitude;
 
-          // Sample projected bush alpha (shadow source) and self alpha at the animated bush position
-          vec4 bushSample = texture2D(uBushMask, vUv - distortion);
-          float selfAlpha = bushSample.a;
-
-          float a = bushSample.a;
+          // Sample projected tree alpha (shadow source)
+          vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
+          float a = treeSample.a;
+          
           float baseShadow = clamp(a * uShadowOpacity, 0.0, 1.0);
 
           float accum = 0.0;
@@ -262,11 +258,9 @@ export class BushEffect extends EffectBase {
           for (int dy = -1; dy <= 1; dy++) {
             for (int dx = -1; dx <= 1; dx++) {
               vec2 blurUv = vUv + vec2(float(dx), float(dy)) * stepUv;
-
               float w = 1.0;
               if (dx == 0 && dy == 0) w = 2.0;
-              float v = texture2D(uBushMask, blurUv - distortion).a;
-
+              float v = texture2D(uTreeMask, blurUv - distortion).a;
               accum += v * w;
               weightSum += w;
             }
@@ -275,7 +269,7 @@ export class BushEffect extends EffectBase {
           float blurred = (weightSum > 0.0) ? accum / weightSum : baseShadow;
           float strength = clamp(blurred * uShadowOpacity, 0.0, 1.0);
           float shadowFactor = 1.0 - strength;
-
+          
           float coverage = a;
           gl_FragColor = vec4(shadowFactor, coverage, 0.0, 1.0);
         }
@@ -298,31 +292,31 @@ export class BushEffect extends EffectBase {
     const THREE = window.THREE;
     if (THREE) {
       this.shadowScene = new THREE.Scene();
-      if (this.baseMesh && this.bushMask) {
+      if (this.baseMesh && this.treeMask) {
         this._createShadowMesh();
       }
     }
-    log.info('BushEffect initialized');
+    log.info('TreeEffect initialized');
   }
 
   setBaseMesh(baseMesh, assetBundle) {
     if (!assetBundle || !assetBundle.masks) return;
     this.baseMesh = baseMesh;
 
-    const bushData = assetBundle.masks.find(m => m.id === 'bush' || m.type === 'bush');
-    this.bushMask = bushData?.texture || null;
+    const treeData = assetBundle.masks.find(m => m.id === 'tree' || m.type === 'tree');
+    this.treeMask = treeData?.texture || null;
 
-    if (!this.bushMask) {
+    if (!this.treeMask) {
       this.enabled = false;
       return;
     }
     if (this.scene) this._createMesh();
-    if (this.shadowScene && this.bushMask) this._createShadowMesh();
+    if (this.shadowScene && this.treeMask) this._createShadowMesh();
   }
 
   _createMesh() {
     const THREE = window.THREE;
-    if (!THREE || !this.baseMesh || !this.bushMask) return;
+    if (!THREE || !this.baseMesh || !this.treeMask) return;
 
     if (this.mesh && this.scene) {
       this.scene.remove(this.mesh);
@@ -335,7 +329,7 @@ export class BushEffect extends EffectBase {
 
     this.material = new THREE.ShaderMaterial({
       uniforms: {
-        uBushMask: { value: this.bushMask },
+        uTreeMask: { value: this.treeMask },
         uTime: { value: 0.0 },
         uWindDir: { value: new THREE.Vector2(1.0, 0.0) },
         uWindSpeed: { value: 0.0 },
@@ -357,37 +351,22 @@ export class BushEffect extends EffectBase {
         uContrast: { value: this.params.contrast },
         uSaturation: { value: this.params.saturation },
         uTemperature: { value: this.params.temperature },
-        uTint: { value: this.params.tint },
-        
-        // Shadows
-        tOverheadShadow: { value: null },
-        tBuildingShadow: { value: null },
-        tOutdoorsMask: { value: null },
-        uOverheadShadowOpacity: { value: 0.0 },
-        uBuildingShadowOpacity: { value: 0.0 },
-        uHasOutdoorsMask: { value: 0.0 }
+        uTint: { value: this.params.tint }
+        // Note: No shadow reception uniforms (Tree is top-most)
       },
       vertexShader: `
         varying vec2 vUv;
-        varying vec2 vScreenUv;
-        // Pass world position to fragment to anchor noise to the ground, not the mesh UVs
         varying vec2 vWorldPos; 
 
         void main() {
           vUv = uv;
           vec4 worldPos = modelMatrix * vec4(position, 1.0);
           vWorldPos = worldPos.xy; 
-
-          vec4 clipPos = projectionMatrix * viewMatrix * worldPos;
-          
-          vec2 ndc = clipPos.xy / clipPos.w;
-          vScreenUv = ndc * 0.5 + 0.5;
-
-          gl_Position = clipPos;
+          gl_Position = projectionMatrix * viewMatrix * worldPos;
         }
       `,
       fragmentShader: `
-        uniform sampler2D uBushMask;
+        uniform sampler2D uTreeMask;
         uniform float uTime;
         uniform vec2  uWindDir;
         uniform float uWindSpeed;
@@ -409,15 +388,7 @@ export class BushEffect extends EffectBase {
         uniform float uTemperature;
         uniform float uTint;
 
-        uniform sampler2D tOverheadShadow;
-        uniform sampler2D tBuildingShadow;
-        uniform sampler2D tOutdoorsMask;
-        uniform float uOverheadShadowOpacity;
-        uniform float uBuildingShadowOpacity;
-        uniform float uHasOutdoorsMask;
-
         varying vec2 vUv;
-        varying vec2 vScreenUv;
         varying vec2 vWorldPos;
 
         // Pseudo-random hash
@@ -463,68 +434,40 @@ export class BushEffect extends EffectBase {
           vec2 gustPos = vWorldPos * uGustFrequency;
           vec2 scroll = windDir * uTime * uGustSpeed * effectiveSpeed;
           
-          // Noise determines the "push" strength (0.0 to 1.0)
           float gustNoise = noise(gustPos - scroll);
           float gustStrength = smoothstep(0.2, 0.8, gustNoise);
 
           // 3. Compute "Orbit" (Perpendicular Sway)
-          // To fix the "rewind" effect, we need the bush to take a different path back 
-          // than it took forward. We use a sine wave to control perpendicular sway.
-          // By offsetting the phase, we turn linear motion into elliptical/orbital motion.
           vec2 perpDir = vec2(-windDir.y, windDir.x);
           
-          // 'Elasticity' controls the frequency of the bounce
           float orbitPhase = uTime * uElasticity + (gustNoise * 5.0);
           float orbitSway = sin(orbitPhase);
 
           // 4. Combine Forces
-          // Force A: Wind Push (Unidirectional along Wind Vector)
           float pushMagnitude = gustStrength * uBranchBend * effectiveSpeed;
-          
-          // Force B: Sway (Bidirectional along Perpendicular Vector)
-          // We scale this down (0.4) so it's an ellipse, not a circle.
-          // We also modulate it slightly by gustStrength so it sways MORE when wind is strong.
           float swayMagnitude = orbitSway * (uBranchBend * 0.4) * effectiveSpeed * (0.5 + 0.5 * gustStrength);
 
-          // 5. Leaf Flutter (High Frequency Vibration)
+          // 5. Leaf Flutter
           float noiseVal = noise(vWorldPos * uFlutterScale);
           float flutterPhase = uTime * uFlutterSpeed * effectiveSpeed + noiseVal * 6.28;
           float flutter = sin(flutterPhase);
           float flutterMagnitude = flutter * uFlutterIntensity * (0.5 + 0.5 * gustStrength);
 
-          // Final Distortion Vector
-          // Summing these creates a chaotic, non-linear loop motion.
           vec2 distortion = (windDir * pushMagnitude) 
                           + (perpDir * swayMagnitude) 
                           + vec2(flutter, flutter) * flutterMagnitude;
 
           // Sample Texture
-          vec4 bushSample = texture2D(uBushMask, vUv - distortion);
+          vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
 
-          // --- Standard Render Logic ---
-          float a = bushSample.a * uIntensity;
+          float a = treeSample.a * uIntensity;
           if (a <= 0.001) discard;
 
-          vec3 color = bushSample.rgb;
+          vec3 color = treeSample.rgb;
           color = applyCC(color);
 
-          float shadowFactor = 1.0;
-          float buildingFactor = 1.0;
-
-          // Shadows
-          float shadowTex = texture2D(tOverheadShadow, vScreenUv).r;
-          shadowFactor = mix(1.0, shadowTex, uOverheadShadowOpacity);
-
-          float buildingTex = texture2D(tBuildingShadow, vScreenUv).r;
-          buildingFactor = mix(1.0, buildingTex, uBuildingShadowOpacity);
-
-          if (uHasOutdoorsMask > 0.5) {
-            float outdoorStrength = texture2D(tOutdoorsMask, vScreenUv).r;
-            shadowFactor = mix(1.0, shadowFactor, outdoorStrength);
-            buildingFactor = mix(1.0, buildingFactor, outdoorStrength);
-          }
-
-          color *= shadowFactor * buildingFactor;
+          // No shadow reception - Trees are top canopy
+          
           gl_FragColor = vec4(color, clamp(a, 0.0, 1.0));
         }
       `,
@@ -535,9 +478,18 @@ export class BushEffect extends EffectBase {
 
     this.mesh = new THREE.Mesh(this.baseMesh.geometry, this.material);
     this.mesh.position.copy(this.baseMesh.position);
+    // Elevate tree layer above overhead tiles (z=20)
+    this.mesh.position.z = 25.0; 
+    
     this.mesh.rotation.copy(this.baseMesh.rotation);
     this.mesh.scale.copy(this.baseMesh.scale);
-    this.mesh.renderOrder = (this.baseMesh.renderOrder || 0) + 1;
+    this.mesh.renderOrder = (this.baseMesh.renderOrder || 0) + 20; // Ensure draw on top
+    
+    // ENABLE ROOF LAYER (20)
+    // This ensures LightingEffect renders this into tRoofAlpha, which:
+    // 1. Prevents ground shadows from darkening the tree (mix(shadow, 1.0, roofAlpha))
+    // 2. Prevents ground lights from lighting the tree (sunlight only)
+    this.mesh.layers.enable(20);
 
     this.scene.add(this.mesh);
     this.mesh.visible = this._enabled;
@@ -549,17 +501,14 @@ export class BushEffect extends EffectBase {
     const u = this.material.uniforms;
     u.uTime.value = timeInfo.elapsed;
     
-    // Calculate delta time for frame-independent smoothing
     const now = timeInfo.elapsed;
     const delta = now - (this._lastFrameTime || now);
     this._lastFrameTime = now;
     const safeDelta = Math.min(delta, 0.1); 
 
-    // Shared MapShine handle for downstream shadow integration and
-    // sun-direction/zoom syncing so scope is correct for all blocks.
     const mapShine = window.MapShine || window.mapShine;
 
-    // --- Weather Integration with Smoothing ---
+    // --- Weather Integration ---
     try {
       const state = weatherController?.getCurrentState?.();
       if (state) {
@@ -572,7 +521,6 @@ export class BushEffect extends EffectBase {
         
         const targetWindSpeed = (typeof state.windSpeed === 'number') ? state.windSpeed : 0.0;
         
-        // Dampen the wind speed change (Low-Pass Filter)
         const smoothingFactor = this.params.windRampSpeed * safeDelta;
         const alpha = Math.max(0.0, Math.min(1.0, smoothingFactor));
         
@@ -624,84 +572,35 @@ export class BushEffect extends EffectBase {
 
       su.uShadowLength.value = this.params.shadowLength;
       su.uShadowSoftness.value = this.params.shadowSoftness;
-    }
-
-    // --- Shadow Integration ---
-    try {
-      const overhead = mapShine?.overheadShadowsEffect;
-      u.tOverheadShadow.value = overhead?.shadowTarget?.texture || null;
-      u.uOverheadShadowOpacity.value = overhead?.params?.opacity ?? 0.0;
-
-      const building = mapShine?.buildingShadowsEffect;
-      const THREE = window.THREE;
-      if (building && building.shadowTarget) {
-        const baseOpacity = building.params?.opacity ?? 0.0;
-        let ti = 1.0;
-        if (THREE && typeof building.timeIntensity === 'number') {
-          ti = THREE.MathUtils.clamp(building.timeIntensity, 0.0, 1.0);
-        }
-        u.tBuildingShadow.value = building.shadowTarget.texture;
-        u.uBuildingShadowOpacity.value = baseOpacity * ti;
-      } else {
-        u.tBuildingShadow.value = null;
-        u.uBuildingShadowOpacity.value = 0.0;
-      }
-
-      const lighting = mapShine?.lightingEffect;
-      if (lighting?.outdoorsTarget?.texture) {
-        u.tOutdoorsMask.value = lighting.outdoorsTarget.texture;
-        u.uHasOutdoorsMask.value = 1.0;
-      } else {
-        u.tOutdoorsMask.value = null;
-        u.uHasOutdoorsMask.value = 0.0;
-      }
-    } catch (e) {}
-
-    if (this.shadowMaterial && this.shadowMaterial.uniforms) {
+      
+      // Screen Space Shadows Setup
       const THREE = window.THREE;
       if (THREE && this.renderer) {
         const size = new THREE.Vector2();
         this.renderer.getDrawingBufferSize(size);
-        const su = this.shadowMaterial.uniforms;
         if (su.uResolution) su.uResolution.value.set(size.x, size.y);
         if (su.uTexelSize) su.uTexelSize.value.set(1 / size.x, 1 / size.y);
       }
-
-      // Sync sun direction with OverheadShadowsEffect when available so
-      // bush shadows exactly match the roof shadows. Fall back to the
-      // same time-of-day model if overhead is missing.
+      
+      // Sync sun direction
       try {
         const overhead = mapShine?.overheadShadowsEffect;
-
         if (su.uSunDir) {
           if (overhead && overhead.sunDir) {
             su.uSunDir.value.copy(overhead.sunDir);
           } else if (weatherController) {
+            // Fallback time-of-day
             let hour = 12.0;
-            try {
-              if (typeof weatherController.timeOfDay === 'number') {
-                hour = weatherController.timeOfDay;
-              }
-            } catch (e) {}
-
+            try { if (typeof weatherController.timeOfDay === 'number') hour = weatherController.timeOfDay; } catch (e) {}
             const t = (hour % 24.0) / 24.0;
             const azimuth = (t - 0.5) * Math.PI;
-
-            const x = -Math.sin(azimuth);
-            const lat = (overhead && overhead.params)
-              ? (overhead.params.sunLatitude ?? 0.5)
-              : 0.5;
-            const y = Math.cos(azimuth) * lat;
-
-            su.uSunDir.value.set(x, y);
+            const lat = (overhead && overhead.params) ? (overhead.params.sunLatitude ?? 0.5) : 0.5;
+            su.uSunDir.value.set(-Math.sin(azimuth), Math.cos(azimuth) * lat);
           }
         }
-
         if (su.uZoom && this.camera) {
-          const baseDist = 10000.0;
-          const dist = this.camera.position.z;
-          const z = (dist > 0.1) ? (baseDist / dist) : 1.0;
-          su.uZoom.value = z;
+           const dist = this.camera.position.z;
+           su.uZoom.value = (dist > 0.1) ? (10000.0 / dist) : 1.0;
         }
       } catch (e) {}
     }
@@ -725,13 +624,6 @@ export class BushEffect extends EffectBase {
       });
     } else if (this.shadowTarget.width !== size.x || this.shadowTarget.height !== size.y) {
       this.shadowTarget.setSize(size.x, size.y);
-    }
-
-    if (this.shadowMaterial.uniforms.uResolution) {
-      this.shadowMaterial.uniforms.uResolution.value.set(size.x, size.y);
-    }
-    if (this.shadowMaterial.uniforms.uTexelSize) {
-      this.shadowMaterial.uniforms.uTexelSize.value.set(1 / size.x, 1 / size.y);
     }
 
     const previousTarget = renderer.getRenderTarget();

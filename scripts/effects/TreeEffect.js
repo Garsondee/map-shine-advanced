@@ -31,6 +31,13 @@ export class TreeEffect extends EffectBase {
 
     this._enabled = true;
 
+    this._hoverHidden = false;
+    this._hoverFade = 1.0;
+
+    this._alphaMask = null;
+    this._alphaMaskWidth = 0;
+    this._alphaMaskHeight = 0;
+
     // Internal state for smoothing
     this._currentWindSpeed = 0.0;
     this._lastFrameTime = 0.0;
@@ -67,6 +74,54 @@ export class TreeEffect extends EffectBase {
       shadowLength: 0.08,
       shadowSoftness: 10.0
     };
+  }
+
+  _ensureAlphaMask() {
+    if (!this.treeMask || !this.treeMask.image || this._alphaMask) return;
+
+    try {
+      const image = this.treeMask.image;
+      let width = image.width;
+      let height = image.height;
+      if (!width || !height) return;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.drawImage(image, 0, 0, width, height);
+      const imgData = ctx.getImageData(0, 0, width, height);
+      this._alphaMask = imgData.data;
+      this._alphaMaskWidth = width;
+      this._alphaMaskHeight = height;
+    } catch (e) {
+      // If anything fails, leave mask null and fall back to simple hit test.
+      this._alphaMask = null;
+      this._alphaMaskWidth = 0;
+      this._alphaMaskHeight = 0;
+    }
+  }
+
+  isUvOpaque(uv) {
+    if (!uv) return true;
+    this._ensureAlphaMask();
+    if (!this._alphaMask || !this._alphaMaskWidth || !this._alphaMaskHeight) return true;
+
+    let u = uv.x;
+    let v = uv.y;
+    if (u < 0 || u > 1 || v < 0 || v > 1) return false;
+
+    const x = Math.floor(u * (this._alphaMaskWidth - 1));
+    const y = Math.floor(v * (this._alphaMaskHeight - 1));
+    const index = (y * this._alphaMaskWidth + x) * 4;
+    const alpha = this._alphaMask[index + 3] / 255;
+    return alpha > 0.5;
+  }
+
+  setHoverHidden(hidden) {
+    this._hoverHidden = !!hidden;
   }
 
   get enabled() { return this._enabled; }
@@ -351,7 +406,9 @@ export class TreeEffect extends EffectBase {
         uContrast: { value: this.params.contrast },
         uSaturation: { value: this.params.saturation },
         uTemperature: { value: this.params.temperature },
-        uTint: { value: this.params.tint }
+        uTint: { value: this.params.tint },
+
+        uHoverFade: { value: 1.0 }
         // Note: No shadow reception uniforms (Tree is top-most)
       },
       vertexShader: `
@@ -387,6 +444,8 @@ export class TreeEffect extends EffectBase {
         uniform float uSaturation;
         uniform float uTemperature;
         uniform float uTint;
+
+        uniform float uHoverFade;
 
         varying vec2 vUv;
         varying vec2 vWorldPos;
@@ -460,7 +519,7 @@ export class TreeEffect extends EffectBase {
           // Sample Texture
           vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
 
-          float a = treeSample.a * uIntensity;
+          float a = treeSample.a * uIntensity * uHoverFade;
           if (a <= 0.001) discard;
 
           vec3 color = treeSample.rgb;
@@ -555,6 +614,22 @@ export class TreeEffect extends EffectBase {
     u.uSaturation.value = this.params.saturation;
     u.uTemperature.value = this.params.temperature;
     u.uTint.value = this.params.tint;
+
+    const dt = timeInfo.delta ?? safeDelta;
+    const targetFade = this._hoverHidden ? 0.0 : 1.0;
+    const currentFade = this._hoverFade;
+    const diffFade = targetFade - currentFade;
+    const absDiffFade = Math.abs(diffFade);
+
+    if (absDiffFade > 0.0005) {
+      const maxStep = dt / 2;
+      const step = Math.sign(diffFade) * Math.min(absDiffFade, maxStep);
+      this._hoverFade = currentFade + step;
+    } else {
+      this._hoverFade = targetFade;
+    }
+
+    u.uHoverFade.value = this._hoverFade;
 
     if (this.shadowMaterial && this.shadowMaterial.uniforms) {
       const su = this.shadowMaterial.uniforms;

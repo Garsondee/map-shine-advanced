@@ -94,6 +94,7 @@ export class InteractionManager {
     this.hoveredWallId = null;
     /** @type {string|null} ID of currently hovered overhead tile */
     this.hoveredOverheadTileId = null;
+    this.hoveringTreeCanopy = false;
 
     this.boundHandlers = {
       onPointerDown: this.onPointerDown.bind(this),
@@ -1318,6 +1319,32 @@ export class InteractionManager {
 
     // If we hit an overhead tile, don't hover tokens through it
     if (hitFound) return;
+
+    const mapShine = window.MapShine || window.mapShine;
+    const treeEffect = mapShine?.treeEffect;
+    if (treeEffect && treeEffect.mesh) {
+      const treeHits = this.raycaster.intersectObject(treeEffect.mesh, false);
+      if (treeHits.length > 0) {
+        const hit = treeHits[0];
+        let opaqueHit = true;
+        if (typeof treeEffect.isUvOpaque === 'function' && hit.uv) {
+          opaqueHit = treeEffect.isUvOpaque(hit.uv);
+        }
+
+        if (opaqueHit) {
+          if (!this.hoveringTreeCanopy && typeof treeEffect.setHoverHidden === 'function') {
+            treeEffect.setHoverHidden(true);
+            this.hoveringTreeCanopy = true;
+          }
+        } else if (this.hoveringTreeCanopy && typeof treeEffect.setHoverHidden === 'function') {
+          treeEffect.setHoverHidden(false);
+          this.hoveringTreeCanopy = false;
+        }
+      } else if (this.hoveringTreeCanopy && typeof treeEffect.setHoverHidden === 'function') {
+        treeEffect.setHoverHidden(false);
+        this.hoveringTreeCanopy = false;
+      }
+    }
 
     // 3. Check Tokens
     const interactables = this.tokenManager.getAllTokenSprites();

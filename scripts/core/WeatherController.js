@@ -64,20 +64,20 @@ export class WeatherController {
     this.isTransitioning = false;
 
     // Variability (Wanderer Loop)
-    this.variability = 0.2; // Default variability
+    this.variability = 0.7; // Tuned variability
     this.noiseOffset = 0;
 
     // Wind Gust System
     this.gustWaitMin = 5.0;   // Seconds to wait between gusts (min)
-    this.gustWaitMax = 15.0;  // Seconds to wait between gusts (max)
-    this.gustDuration = 3.0;  // Duration of a gust
+    this.gustWaitMax = 13.5;  // Seconds to wait between gusts (max)
+    this.gustDuration = 2.8;  // Duration of a gust
     this.gustTimer = 0;       // Countdown timer
     this.isGusting = false;   // Current state
     this.currentGustStrength = 0; // Smoothed gust value
-    this.gustStrength = 1.0;      // Multiplier for how strong gusts are compared to base wind
+    this.gustStrength = 0.7;      // Multiplier for how strong gusts are compared to base wind
 
     // Time of Day (0-24)
-    this.timeOfDay = 12.0; // Noon
+    this.timeOfDay = 6.6; // Tuned time of day
 
     // Season
     this.season = 'SUMMER';
@@ -91,19 +91,19 @@ export class WeatherController {
     this.roofMaskForceEnabled = false;
 
     /** @type {number} Global simulation speed scalar for Quarks-based effects (weather, fire, etc.). */
-    this.simulationSpeed = 2.0;
+    this.simulationSpeed = 1.0;
 
     // Per-system tuning parameters for precipitation visuals
     this.rainTuning = {
-      intensityScale: 2.6,
+      intensityScale: 1.0,
       streakLength: 0.25,
-      dropSize: 2.05,
+      dropSize: 6.1,
       dropSizeMin: 1.4,
-      dropSizeMax: 3.5,
-      brightness: 0.3,
-      gravityScale: 3.0,
-      windInfluence: 2.0,
-      curlStrength: 1.0,
+      dropSizeMax: 13.8,
+      brightness: 0.8,
+      gravityScale: 6.0,
+      windInfluence: 1.6,
+      curlStrength: 4.0,
 
       // Splash-specific tuning (rain splashes on the ground)
       splashIntensityScale: 10.0,  // Multiplier on base splash emission
@@ -128,7 +128,7 @@ export class WeatherController {
       splash2LifeMax: 0.22,
       splash2SizeMin: 2.0,
       splash2SizeMax: 3.0,
-      splash2OpacityPeak: 0.02,
+      splash2OpacityPeak: 0.01,
 
       // Splash 3: Droplets-only pattern
       splash3IntensityScale: 5.95,
@@ -136,25 +136,25 @@ export class WeatherController {
       splash3LifeMax: 1.50,
       splash3SizeMin: 6.0,
       splash3SizeMax: 17.0,
-      splash3OpacityPeak: 0.08,
+      splash3OpacityPeak: 0.04,
 
       // Splash 4: Inner puddle
       splash4IntensityScale: 1.10,
       splash4LifeMin: 0.305,
       splash4LifeMax: 1.40,
-      splash4SizeMin: 9.0,
+      splash4SizeMin: 10.0,
       splash4SizeMax: 24.0,
-      splash4OpacityPeak: 0.10
+      splash4OpacityPeak: 0.01
     };
 
     this.snowTuning = {
       intensityScale: 1.0,
-      flakeSize: 1.0,
+      flakeSize: 0.6,
       brightness: 1.0,
-      gravityScale: 0.5,
-      windInfluence: 1.0,
-      curlStrength: 1.0,
-      flutterStrength: 1.0
+      gravityScale: 0.41,
+      windInfluence: 0.35,
+      curlStrength: 2.5,
+      flutterStrength: 2.0
     };
   }
 
@@ -550,7 +550,7 @@ export class WeatherController {
         // Variability
         variability: {
           label: 'Variability',
-          default: 0.2,
+          default: 0.7,
           min: 0.0,
           max: 1.0,
           step: 0.01,
@@ -558,7 +558,7 @@ export class WeatherController {
         },
         simulationSpeed: {
           label: 'Simulation Speed',
-          default: 2.0,
+          default: 1.0,
           min: 0.05,
           max: 3.0,
           step: 0.05,
@@ -568,7 +568,7 @@ export class WeatherController {
         // Time
         timeOfDay: {
           label: 'Time of Day',
-          default: 12.0,
+          default: 6.6,
           min: 0.0,
           max: 24.0,
           step: 0.1,
@@ -646,7 +646,7 @@ export class WeatherController {
         },
         gustWaitMax: {
           label: 'Gust Pause Max (s)',
-          default: 15.0,
+          default: 13.5,
           min: 0.0,
           max: 120.0,
           step: 0.5,
@@ -654,7 +654,7 @@ export class WeatherController {
         },
         gustDuration: {
           label: 'Gust Duration (s)',
-          default: 3.0,
+          default: 2.8,
           min: 0.1,
           max: 30.0,
           step: 0.1,
@@ -662,7 +662,7 @@ export class WeatherController {
         },
         gustStrength: {
           label: 'Gust Strength',
-          default: 1.0,
+          default: 0.7,
           min: 0.0,
           max: 3.0,
           step: 0.05,
@@ -672,7 +672,7 @@ export class WeatherController {
         // Rain tuning
         rainIntensityScale: {
           label: 'Rain Intensity Scale',
-          default: 2.6,
+          default: 1.0,
           min: 0.0,
           max: 6.0,
           step: 0.05,
@@ -688,7 +688,7 @@ export class WeatherController {
         },
         rainDropSize: {
           label: 'Rain Drop Size',
-          default: 2.05,
+          default: 6.1,
           min: 0.5,
           max: 16.0,
           step: 0.05,
@@ -704,7 +704,7 @@ export class WeatherController {
         },
         rainDropSizeMax: {
           label: 'Rain Drop Size Max',
-          default: 3.5,
+          default: 13.8,
           min: 0.5,
           max: 64.0,
           step: 0.1,
@@ -712,7 +712,7 @@ export class WeatherController {
         },
         rainBrightness: {
           label: 'Rain Brightness',
-          default: 0.3,
+          default: 0.8,
           min: 0.1,
           max: 12.0,
           step: 0.05,
@@ -720,7 +720,7 @@ export class WeatherController {
         },
         rainGravityScale: {
           label: 'Rain Gravity Scale',
-          default: 3.0,
+          default: 6.0,
           min: 0.2,
           max: 6.0,
           step: 0.05,
@@ -728,7 +728,7 @@ export class WeatherController {
         },
         rainWindInfluence: {
           label: 'Rain Wind Influence',
-          default: 2.0,
+          default: 1.6,
           min: 0.0,
           max: 4.0,
           step: 0.05,
@@ -736,7 +736,7 @@ export class WeatherController {
         },
         rainCurlStrength: {
           label: 'Rain Turbulence Strength',
-          default: 1.0,
+          default: 4.0,
           min: 0.0,
           max: 4.0,
           step: 0.05,
@@ -837,7 +837,7 @@ export class WeatherController {
         },
         rainSplash2OpacityPeak: {
           label: 'Splash 2 (Broken Ring) Peak Opacity',
-          default: 0.02,
+          default: 0.01,
           min: 0.0,
           max: 0.6,
           step: 0.01,
@@ -887,7 +887,7 @@ export class WeatherController {
         },
         rainSplash3OpacityPeak: {
           label: 'Splash 3 (Droplets) Peak Opacity',
-          default: 0.08,
+          default: 0.04,
           min: 0.0,
           max: 0.6,
           step: 0.01,
@@ -921,7 +921,7 @@ export class WeatherController {
         },
         rainSplash4SizeMin: {
           label: 'Splash 4 (Puddle) Size Min (px)',
-          default: 9.0,
+          default: 10.0,
           min: 2.0,
           max: 128.0,
           step: 1.0,
@@ -937,7 +937,7 @@ export class WeatherController {
         },
         rainSplash4OpacityPeak: {
           label: 'Splash 4 (Puddle) Peak Opacity',
-          default: 0.10,
+          default: 0.01,
           min: 0.0,
           max: 0.6,
           step: 0.01,
@@ -955,7 +955,7 @@ export class WeatherController {
         },
         snowFlakeSize: {
           label: 'Snow Flake Size',
-          default: 0.5,
+          default: 0.6,
           min: 0.05,
           max: 3.0,
           step: 0.05,
@@ -971,7 +971,7 @@ export class WeatherController {
         },
         snowGravityScale: {
           label: 'Snow Gravity Scale',
-          default: 0.5,
+          default: 0.41,
           min: 0.01,
           max: 3.0,
           step: 0.05,
@@ -979,7 +979,7 @@ export class WeatherController {
         },
         snowWindInfluence: {
           label: 'Snow Wind Influence',
-          default: 1.0,
+          default: 0.35,
           min: 0.0,
           max: 2.0,
           step: 0.05,
@@ -987,7 +987,7 @@ export class WeatherController {
         },
         snowCurlStrength: {
           label: 'Snow Curl Strength',
-          default: 3.0,
+          default: 2.5,
           min: 0.0,
           max: 12.0,
           step: 0.05,
@@ -995,7 +995,7 @@ export class WeatherController {
         },
         snowFlutterStrength: {
           label: 'Snow Flutter Strength',
-          default: 3.0,
+          default: 2.0,
           min: 0.0,
           max: 6.0,
           step: 0.05,

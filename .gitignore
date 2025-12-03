@@ -1,3 +1,4 @@
 # Ignore the Foundry source code bundle
 foundryvttsourcecode/
 node_modules/
+gamesystemsourcecode/

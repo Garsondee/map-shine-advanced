@@ -47,30 +47,30 @@ export class TreeEffect extends EffectBase {
       intensity: 1.0,
 
       // -- Wind Physics --
-      windSpeedGlobal: 0.36,     // Multiplier for actual game wind speed (slightly stronger than bushes)
-      windRampSpeed: 2.05,       // Inertia: heavier canopy, slower response
-      gustFrequency: 0.002,      // Larger, more spread-out gusts for tall trees
+      windSpeedGlobal: 0.36304,  // Multiplier for actual game wind speed (slightly stronger than bushes)
+      windRampSpeed: 1.29804,    // Inertia: heavier canopy, slower response
+      gustFrequency: 0.00221,    // Larger, more spread-out gusts for tall trees
       gustSpeed: 0.15,           // How fast the noise field scrolls
 
       // -- Tree Movement --
-      branchBend: 0.013,         // Tree trunks bend less overall
-      elasticity: 3.15,          // Heavier inertia than bushes
+      branchBend: 0.033,         // Tree trunks bend more in strong wind
+      elasticity: 5.0,           // Heavier inertia than bushes
 
       // -- Leaf Flutter --
-      flutterIntensity: 0.0001,  // Very subtle flutter for high canopy
+      flutterIntensity: 0.0012,  // Subtle flutter for high canopy
       flutterSpeed: 1.5,         // Slightly slower flutter than bushes
-      flutterScale: 0.01,        // Slightly larger clusters (bigger leaf groups)
+      flutterScale: 0.02,        // Slightly larger clusters (bigger leaf groups)
 
       // -- Color --
-      exposure: -2.0,
+      exposure: -1.0,
       brightness: 0.0,
-      contrast: 1.03,
-      saturation: 1.25,
+      contrast: 1.0,
+      saturation: 1.1,
       temperature: 0.0,
       tint: 0.0,
 
       // Shadow (cast onto scene via LightingEffect)
-      shadowOpacity: 0.35,
+      shadowOpacity: 0.3,
       shadowLength: 0.08,
       shadowSoftness: 10.0
     };
@@ -124,6 +124,10 @@ export class TreeEffect extends EffectBase {
     this._hoverHidden = !!hidden;
   }
 
+  getHoverFade() {
+    return this._hoverFade;
+  }
+
   get enabled() { return this._enabled; }
   set enabled(value) {
     this._enabled = !!value;
@@ -161,22 +165,22 @@ export class TreeEffect extends EffectBase {
       ],
       parameters: {
         intensity: { type: 'slider', min: 0.0, max: 2.0, default: 1.0 },
-        windSpeedGlobal: { type: 'slider', label: 'Wind Strength', min: 0.0, max: 3.0, default: 0.36 },
-        windRampSpeed: { type: 'slider', label: 'Wind Responsiveness', min: 0.1, max: 10.0, default: 2.05 },
-        gustFrequency: { type: 'slider', label: 'Gust Spacing', min: 0.001, max: 0.1, default: 0.002 },
+        windSpeedGlobal: { type: 'slider', label: 'Wind Strength', min: 0.0, max: 3.0, default: 0.36304 },
+        windRampSpeed: { type: 'slider', label: 'Wind Responsiveness', min: 0.1, max: 10.0, default: 1.29804 },
+        gustFrequency: { type: 'slider', label: 'Gust Spacing', min: 0.001, max: 0.1, default: 0.00221 },
         gustSpeed: { type: 'slider', label: 'Gust Speed', min: 0.0, max: 2.0, default: 0.15 },
-        branchBend: { type: 'slider', label: 'Branch Bend', min: 0.0, max: 0.1, step: 0.001, default: 0.013 },
-        elasticity: { type: 'slider', label: 'Springiness', min: 0.5, max: 5.0, default: 3.15 },
-        flutterIntensity: { type: 'slider', label: 'Leaf Flutter Amount', min: 0.0, max: 0.005, step: 0.0001, default: 0.0001 },
+        branchBend: { type: 'slider', label: 'Branch Bend', min: 0.0, max: 0.1, step: 0.001, default: 0.033 },
+        elasticity: { type: 'slider', label: 'Springiness', min: 0.5, max: 5.0, default: 5.0 },
+        flutterIntensity: { type: 'slider', label: 'Leaf Flutter Amount', min: 0.0, max: 0.005, step: 0.0001, default: 0.0012 },
         flutterSpeed: { type: 'slider', label: 'Leaf Flutter Speed', min: 1.0, max: 20.0, default: 1.5 },
-        flutterScale: { type: 'slider', label: 'Leaf Cluster Size', min: 0.005, max: 0.1, default: 0.01 },
-        exposure: { type: 'slider', min: -2.0, max: 2.0, default: -2.0 },
+        flutterScale: { type: 'slider', label: 'Leaf Cluster Size', min: 0.005, max: 0.1, default: 0.02 },
+        exposure: { type: 'slider', min: -2.0, max: 2.0, default: -1.0 },
         brightness: { type: 'slider', min: -0.5, max: 0.5, default: 0.0 },
-        contrast: { type: 'slider', min: 0.5, max: 2.0, default: 1.03 },
-        saturation: { type: 'slider', min: 0.0, max: 2.0, default: 1.25 },
+        contrast: { type: 'slider', min: 0.5, max: 2.0, default: 1.0 },
+        saturation: { type: 'slider', min: 0.0, max: 2.0, default: 1.1 },
         temperature: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
         tint: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
-        shadowOpacity: { type: 'slider', label: 'Shadow Opacity', min: 0.0, max: 1.0, default: 0.35 },
+        shadowOpacity: { type: 'slider', label: 'Shadow Opacity', min: 0.0, max: 1.0, default: 0.3 },
         shadowLength: { type: 'slider', label: 'Shadow Length', min: 0.0, max: 0.2, default: 0.08 },
         shadowSoftness: { type: 'slider', label: 'Shadow Softness', min: 0.5, max: 10.0, default: 10.0 }
       }

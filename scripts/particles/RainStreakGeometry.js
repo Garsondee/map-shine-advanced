@@ -436,13 +436,14 @@ export class RainStreakGeometry {
       u.uSpawnDensity.value = this._spawnDensity;
     }
 
-    // Scene darkness: drive from Foundry scene environment if available.
     try {
-      if (typeof canvas !== 'undefined' && canvas?.scene?.environment?.darknessLevel !== undefined) {
+      const le = window.MapShine?.lightingEffect;
+      if (le && typeof le.getEffectiveDarkness === 'function') {
+        u.uSceneDarkness.value = le.getEffectiveDarkness();
+      } else if (typeof canvas !== 'undefined' && canvas?.scene?.environment?.darknessLevel !== undefined) {
         u.uSceneDarkness.value = canvas.scene.environment.darknessLevel;
       }
     } catch (e) {
-      // If canvas is not ready or throws, keep previous value.
     }
 
     // Roof / outdoors mask: cull rain under covered/indoor regions when the

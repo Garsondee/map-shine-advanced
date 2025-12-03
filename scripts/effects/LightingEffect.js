@@ -22,8 +22,10 @@ export class LightingEffect extends EffectBase {
     // UI Parameters matching Foundry VTT + Custom Tweaks
     this.params = {
       enabled: true,
-      globalIllumination: 1.0, // Multiplier for ambient
-      exposure: 0.0,
+      globalIllumination: 1.4, // Multiplier for ambient
+      lightIntensity: 0.8, // Master multiplier for dynamic lights (tuned default)
+      darknessEffect: 0.5, // Scales Foundry's darknessLevel (tuned default)
+      exposure: 0.8,
       saturation: 1.0,
       contrast: 1.0,
       darknessLevel: 0.0, // Read-only mostly, synced from canvas
@@ -61,6 +63,8 @@ export class LightingEffect extends EffectBase {
     this.outdoorsMaterial = null;
     /** @type {THREE.WebGLRenderTarget|null} */
     this.outdoorsTarget = null;
+
+    this._effectiveDarkness = null;
   }
 
   /**
@@ -71,16 +75,30 @@ export class LightingEffect extends EffectBase {
       enabled: true,
       groups: [
         {
-           name: 'correction',
-           label: 'Color Correction',
-           type: 'inline',
-           parameters: ['exposure', 'saturation', 'contrast']
+          name: 'illumination',
+          label: 'Global Illumination',
+          type: 'inline',
+          parameters: ['globalIllumination', 'lightIntensity']
+        },
+        {
+          name: 'darkness',
+          label: 'Darkness Response',
+          type: 'inline',
+          parameters: ['darknessEffect']
+        },
+        {
+          name: 'correction',
+          label: 'Color Correction',
+          type: 'inline',
+          parameters: ['exposure', 'saturation', 'contrast']
         }
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.0 },
-        exposure: { type: 'slider', min: -1, max: 1, step: 0.1, default: 0.0 },
+        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.4 },
+        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.8, label: 'Light Intensity' },
+        darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Darkness Effect' },
+        exposure: { type: 'slider', min: -1, max: 1, step: 0.1, default: 0.8 },
         saturation: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.0 },
         contrast: { type: 'slider', min: 0.5, max: 1.5, step: 0.05, default: 1.0 },
       }
@@ -119,12 +137,15 @@ export class LightingEffect extends EffectBase {
         uDarknessLevel: { value: 0.0 },
         uAmbientBrightest: { value: new THREE.Color(1,1,1) },
         uAmbientDarkness: { value: new THREE.Color(0.1, 0.1, 0.2) },
+        uGlobalIllumination: { value: 1.0 },
+        uLightIntensity: { value: 1.0 },
         // Overhead & building shadow controls
         uOverheadShadowOpacity: { value: 0.0 },
         uOverheadShadowAffectsLights: { value: 0.75 },
         uBuildingShadowOpacity: { value: 0.0 },
         uBushShadowOpacity: { value: 0.0 },
         uTreeShadowOpacity: { value: 0.0 },
+        uTreeSelfShadowStrength: { value: 1.0 },
         uHasOutdoorsMask: { value: 0.0 },
         // Shared sun/zoom/texel data for screen-space shadow offsets
         uShadowSunDir: { value: new THREE.Vector2(0, 1) },
@@ -156,11 +177,14 @@ export class LightingEffect extends EffectBase {
         uniform float uDarknessLevel;
         uniform vec3 uAmbientBrightest;
         uniform vec3 uAmbientDarkness;
+        uniform float uGlobalIllumination;
+        uniform float uLightIntensity;
         uniform float uOverheadShadowOpacity;
         uniform float uOverheadShadowAffectsLights;
         uniform float uBuildingShadowOpacity;
         uniform float uBushShadowOpacity;
         uniform float uTreeShadowOpacity;
+        uniform float uTreeSelfShadowStrength;
         uniform float uHasOutdoorsMask;
         uniform vec2  uShadowSunDir;
         uniform float uShadowZoom;
@@ -177,39 +201,38 @@ export class LightingEffect extends EffectBase {
           return mix(gray, color, value);
         }
 
+        // REINHARD-JODIE TONE MAPPING
+        // This compresses high dynamic range values to 0.0 - 1.0
+        // while preserving saturation in bright highlights better than standard reinhard.
+        vec3 reinhardJodie(vec3 c) {
+          float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+          vec3 tc = c / (c + 1.0);
+          return mix(c / (l + 1.0), tc, tc);
+        }
+
         void main() {
           vec4 baseColor = texture2D(tDiffuse, vUv);
           vec4 lightSample = texture2D(tLight, vUv); // HDR light buffer
           vec4 roofSample = texture2D(tRoofAlpha, vUv);
 
           // 1. Determine Ambient Light
-          vec3 ambient = mix(uAmbientBrightest, uAmbientDarkness, uDarknessLevel);
+          float master = max(uLightIntensity, 0.0);
+          vec3 ambient = mix(uAmbientBrightest, uAmbientDarkness, uDarknessLevel) * max(uGlobalIllumination, 0.0) * master;
 
           // 2. Roof Occlusion Mask
-          // roofSample.a represents the opacity of overhead tiles at this pixel.
-          // We want lights to appear UNDER roofs, only in transparent and semi-transparent
-          // regions of those tiles. Therefore, dynamic light contribution is scaled by
-          // (1.0 - roofAlpha): fully opaque roofs block light entirely, while semi-
-          // transparent pixels allow a proportional amount of light through.
           float roofAlpha = roofSample.a;
           float lightVisibility = 1.0 - roofAlpha;
 
-          // 3. Overhead shadow factor (from OverheadShadowsEffect)
-          //    Encoded as grayscale where 1.0 = fully lit, 0.0 = fully shadowed.
+          // 3. Shadow Sampling (Overhead, Building, Bush, Tree)
           float shadowTex = texture2D(tOverheadShadow, vUv).r;
-          // If no texture is bound or effect is disabled, opacity will be 0 from update().
           float shadowOpacity = clamp(uOverheadShadowOpacity, 0.0, 1.0);
           float rawShadowFactor = mix(1.0, shadowTex, shadowOpacity);
 
-          // 3b. Building shadow factor (from BuildingShadowsEffect)
           float buildingTex = texture2D(tBuildingShadow, vUv).r;
           float buildingOpacity = clamp(uBuildingShadowOpacity, 0.0, 1.0);
           float rawBuildingFactor = mix(1.0, buildingTex, buildingOpacity);
 
-          // 3c. Bush shadow factor (from BushEffect)
-          // Sample bush mask with the same screen-space sun direction and
-          // zoom model used by OverheadShadowsEffect so bush shadows move
-          // with time-of-day.
+          // Bush Shadows
           vec2 bushDir = normalize(uShadowSunDir);
           float bushPixelLen = uBushShadowLength * 1080.0 * max(uShadowZoom, 0.0001);
           vec2 bushOffsetUv = bushDir * bushPixelLen * uCompositeTexelSize;
@@ -217,50 +240,28 @@ export class LightingEffect extends EffectBase {
           float bushOpacity = clamp(uBushShadowOpacity, 0.0, 1.0);
           float rawBushFactor = mix(1.0, bushTex, bushOpacity);
 
-          // 3d. Tree shadow factor (from TreeEffect)
-          // Trees cast shadows ONTO overhead layers, so we calculate them similarly
-          // but do not mask them out with roofAlpha later.
+          // Tree Shadows
           float treePixelLen = uTreeShadowLength * 1080.0 * max(uShadowZoom, 0.0001);
           vec2 treeOffsetUv = bushDir * treePixelLen * uCompositeTexelSize;
           float treeTex = texture2D(tTreeShadow, vUv + treeOffsetUv).r;
           float treeOpacity = clamp(uTreeShadowOpacity, 0.0, 1.0);
           float rawTreeFactor = mix(1.0, treeTex, treeOpacity);
 
-          // Use the unshifted bush coverage at vUv as a self-mask so the
-          // bush body is not darkened by its own shadow. The bush shadow
-          // pass encodes blurred light factor in .r and raw coverage in .g.
+          // Self-masking
           float bushCoverage = texture2D(tBushShadow, vUv).g;
           float bushSelfMask = clamp(bushCoverage, 0.0, 1.0);
-
-          // Tree self-mask
           float treeCoverage = texture2D(tTreeShadow, vUv).g;
-          float treeSelfMask = clamp(treeCoverage, 0.0, 1.0);
+          float treeSelfMask = clamp(treeCoverage, 0.0, 1.0) * clamp(uTreeSelfShadowStrength, 0.0, 1.0);
 
-          // Do not darken the overhead tiles themselves: where roofAlpha is high,
-          // blend both overhead and building shadow factors back toward 1.0 so
-          // the roof sprite remains unaffected and the shadow only appears on
-          // the ground below.
+          // Shadow mixing logic
           float shadowFactor = mix(rawShadowFactor, 1.0, roofAlpha);
           float buildingFactor = mix(rawBuildingFactor, 1.0, roofAlpha);
           float bushFactor = mix(rawBushFactor, 1.0, roofAlpha);
-          
-          // Trees are ABOVE overhead tiles, so their shadow SHOULD affect the roof.
-          // We do NOT mix rawTreeFactor with roofAlpha.
           float treeFactor = rawTreeFactor;
 
-          // Where the bush body covers this pixel, force bushFactor back
-          // toward 1.0 so the shadow appears underneath the bush, not on
-          // top of it.
           bushFactor = mix(bushFactor, 1.0, bushSelfMask);
-
-          // Same for trees - don't shadow the tree itself
           treeFactor = mix(treeFactor, 1.0, treeSelfMask);
 
-          // Gate both overhead and building shadow factors by the outdoors
-          // mask to avoid darkening building interiors. Outdoors mask
-          // convention: bright outside, dark indoors. Where indoors (dark),
-          // blend factors back toward 1.0 so the interior remains at
-          // baseline illumination.
           if (uHasOutdoorsMask > 0.5) {
             float outdoorStrength = texture2D(tOutdoorsMask, vUv).r;
             shadowFactor = mix(1.0, shadowFactor, outdoorStrength);
@@ -269,27 +270,24 @@ export class LightingEffect extends EffectBase {
             treeFactor = mix(1.0, treeFactor, outdoorStrength);
           }
 
-          // Combine overhead and building shadow factors multiplicatively so
-          // areas where both effects are strong become noticeably darker.
           float combinedShadowFactor = shadowFactor * buildingFactor * bushFactor * treeFactor;
 
-          // 4. Combine Ambient with Accumulated Lights (roof-masked + overhead shadows)
+          // 4. Combine Ambient with Accumulated Lights
           float kd = clamp(uOverheadShadowAffectsLights, 0.0, 1.0);
           vec3 shadedAmbient = ambient * combinedShadowFactor;
 
           vec3 baseLights = lightSample.rgb * lightVisibility;
 
-          // Guard against NaNs from the light buffer
+          // Safety check for NaN
           bool badLight = (baseLights.r != baseLights.r) || (baseLights.g != baseLights.g) || (baseLights.b != baseLights.b);
           if (badLight) {
             baseLights = vec3(0.0);
           }
 
           vec3 shadedLights = mix(baseLights, baseLights * combinedShadowFactor, kd);
-          vec3 totalIllumination = shadedAmbient + shadedLights;
+          vec3 totalIllumination = shadedAmbient + shadedLights * master;
 
-          // Final safety: if illumination goes NaN or effectively zero, fall back
-          // to a small ambient floor so we never get a pure black flash.
+          // Safety check for black flash
           bool badIllum = (totalIllumination.r != totalIllumination.r) ||
                           (totalIllumination.g != totalIllumination.g) ||
                           (totalIllumination.b != totalIllumination.b);
@@ -300,16 +298,23 @@ export class LightingEffect extends EffectBase {
           vec3 minIllum = ambient * 0.1;
           totalIllumination = max(totalIllumination, minIllum);
           
-          // 4. Apply to Base Texture (Multiply)
-          vec3 finalRGB = baseColor.rgb * totalIllumination;
+          // 5. Apply Illumination to Base Texture
+          // We calculate the raw HDR color first
+          vec3 hdrColor = baseColor.rgb * totalIllumination;
 
           // --- POST PROCESSING ---
 
-          // Exposure
-          finalRGB *= pow(2.0, uExposure);
+          // Exposure (Applied in linear HDR space)
+          // Note: Since tone mapping compresses brightness, you might need to
+          // bump your default uExposure slightly if the map feels too dark.
+          hdrColor *= pow(2.0, uExposure);
 
-          // Contrast
-          finalRGB = (finalRGB - 0.5) * uContrast + 0.5;
+          // Apply Tone Mapping (Reinhard-Jodie)
+          // This maps (0 -> Infinity) to (0 -> 1) smoothly.
+          vec3 toneMappedColor = reinhardJodie(hdrColor);
+
+          // Contrast (Applied after tone mapping handles the range compression)
+          vec3 finalRGB = (toneMappedColor - 0.5) * uContrast + 0.5;
 
           // Saturation
           finalRGB = adjustSaturation(finalRGB, uSaturation);
@@ -562,7 +567,9 @@ export class LightingEffect extends EffectBase {
 
     // Update Composite Uniforms
     const u = this.compositeMaterial.uniforms;
-    u.uDarknessLevel.value = this.params.darknessLevel;
+    u.uDarknessLevel.value = this.getEffectiveDarkness();
+    u.uGlobalIllumination.value = this.params.globalIllumination;
+    u.uLightIntensity.value = this.params.lightIntensity;
     u.uExposure.value = this.params.exposure;
     u.uSaturation.value = this.params.saturation;
     u.uContrast.value = this.params.contrast;
@@ -613,7 +620,7 @@ export class LightingEffect extends EffectBase {
       u.uBushShadowOpacity.value = 0.0;
     }
 
-    // Drive tree shadow opacity and length from TreeEffect (if present).
+    // Drive tree shadow opacity, length, and self-shadow behavior from TreeEffect (if present).
     try {
       const tree = window.MapShine?.treeEffect;
       if (tree && tree.params && tree.enabled && tree.shadowTarget) {
@@ -622,11 +629,22 @@ export class LightingEffect extends EffectBase {
         if (typeof tree.params.shadowLength === 'number') {
           u.uTreeShadowLength.value = tree.params.shadowLength;
         }
+
+        let selfStrength = 1.0;
+        if (typeof tree.getHoverFade === 'function') {
+          const f = tree.getHoverFade();
+          if (typeof f === 'number' && isFinite(f)) {
+            selfStrength = Math.max(0.0, Math.min(1.0, f));
+          }
+        }
+        u.uTreeSelfShadowStrength.value = selfStrength;
       } else {
         u.uTreeShadowOpacity.value = 0.0;
+        u.uTreeSelfShadowStrength.value = 1.0;
       }
     } catch (e) {
       u.uTreeShadowOpacity.value = 0.0;
+      u.uTreeSelfShadowStrength.value = 1.0;
     }
 
     // Window light uniforms driven by WeatherController and WindowLightEffect
@@ -698,6 +716,36 @@ export class LightingEffect extends EffectBase {
     } catch (e) {
       // keep previous values
     }
+  }
+
+  getEffectiveDarkness() {
+    let darkness = 0.0;
+    try {
+      if (typeof this.params.darknessLevel === 'number') {
+        darkness = this.params.darknessLevel;
+      }
+      // Baseline compression so that raw darkness 1.0 is not fully black.
+      // With baseScale = 0.75 and darknessEffect = 1.0, raw 1.0 -> effective 0.75.
+      const baseScale = 0.75;
+      const userScale = (typeof this.params.darknessEffect === 'number')
+        ? this.params.darknessEffect
+        : 1.0;
+      darkness *= baseScale * userScale;
+      const THREE = window.THREE;
+      if (THREE && THREE.MathUtils) {
+        darkness = THREE.MathUtils.clamp(darkness, 0.0, 1.0);
+      } else {
+        darkness = Math.max(0, Math.min(1, darkness));
+      }
+    } catch (e) {
+      darkness = 0.0;
+    }
+
+    this._effectiveDarkness = darkness;
+    if (window.MapShine) {
+      window.MapShine.effectiveDarkness = darkness;
+    }
+    return darkness;
   }
 
   render(renderer, scene, camera) {

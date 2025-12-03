@@ -41,7 +41,7 @@ export class WindowLightEffect extends EffectBase {
       hasWindowMask: false,
 
       // Core light controls
-      intensity: 1.0,
+      intensity: 3.0,
       color: { r: 1.0, g: 0.96, b: 0.85 }, // Warm window light
       exposure: 0.0,
       brightness: 0.0,
@@ -51,22 +51,22 @@ export class WindowLightEffect extends EffectBase {
       tint: 0.0,
 
       // Mask shaping
-      maskThreshold: 0.1,
-      softness: 0.2,
+      maskThreshold: 0.0,
+      softness: 0.89,
 
       // Cloud interaction
       cloudInfluence: 1.0,   // 0=ignore clouds, 1=overcast kills light
       minCloudFactor: 0.0,   // Floor so light never fully disappears if desired
 
       // Specular coupling (local glints)
-      specularBoost: 1.0,
+      specularBoost: 0.0,
 
       // Blending mode (0=Add, 1=Multiply, 2=Screen, 3=Overlay)
-      blendMode: 2,
+      blendMode: 3,
 
       // RGB Split
-      rgbShiftAmount: 0.25,  // pixels at 1080p-ish; remapped in shader
-      rgbShiftAngle: 30.0    // degrees
+      rgbShiftAmount: 2.0,  // pixels at 1080p-ish; remapped in shader
+      rgbShiftAngle: 125.0    // degrees
     };
   }
 
@@ -145,9 +145,9 @@ export class WindowLightEffect extends EffectBase {
           type: 'slider',
           label: 'Intensity',
           min: 0.0,
-          max: 3.0,
-          step: 0.01,
-          default: 1.0
+          max: 5.0,
+          step: 0.05,
+          default: 3.0
         },
         maskThreshold: {
           type: 'slider',
@@ -155,15 +155,15 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.1
+          default: 0.0
         },
         softness: {
           type: 'slider',
           label: 'Edge Softness',
           min: 0.0,
-          max: 1.0,
+          max: 2.0,
           step: 0.01,
-          default: 0.2
+          default: 0.89
         },
         color: {
           type: 'color',
@@ -240,7 +240,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 3.0,
           step: 0.01,
-          default: 1.0
+          default: 0.0
         },
         blendMode: {
           type: 'list',
@@ -251,7 +251,7 @@ export class WindowLightEffect extends EffectBase {
             Screen: 2,
             Overlay: 3
           },
-          default: 2
+          default: 3
         },
         rgbShiftAmount: {
           type: 'slider',
@@ -259,7 +259,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 0.25
+          default: 2.0
         },
         rgbShiftAngle: {
           type: 'slider',
@@ -267,7 +267,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 360.0,
           step: 1.0,
-          default: 30.0
+          default: 125.0
         }
       }
     };

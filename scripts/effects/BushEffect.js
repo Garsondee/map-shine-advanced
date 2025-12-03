@@ -43,31 +43,31 @@ export class BushEffect extends EffectBase {
       intensity: 1.0,
 
       // -- Wind Physics --
-      windSpeedGlobal: 0.13,     // Multiplier for actual game wind speed
-      windRampSpeed: 0.40,       // Inertia: Lower = slower fade in/out of movement
+      windSpeedGlobal: 0.13478,     // Multiplier for actual game wind speed
+      windRampSpeed: 0.86766,       // Inertia: Lower = slower fade in/out of movement
       gustFrequency: 0.01,       // How distinct the "waves" of wind are (Spatial)
-      gustSpeed: 0.22028,        // How fast the noise field scrolls
+      gustSpeed: 0.52463,        // How fast the noise field scrolls
 
       // -- Bush Movement --
       branchBend: 0.021,         // How far the "branches" move in strong wind
-      elasticity: 1.19136,       // Higher = snappier return, Lower = lazy heavy branches
+      elasticity: 5.0,           // Higher = snappier return, Lower = lazy heavy branches
 
       // -- Leaf Flutter --
-      flutterIntensity: 0.0005,  // Base vibration
-      flutterSpeed: 1.0,         // Speed of vibration
-      flutterScale: 0.0167,      // Spatial scale of flutter clusters (leaf size)
+      flutterIntensity: 0.0014,  // Base vibration
+      flutterSpeed: 1.85362,     // Speed of vibration
+      flutterScale: 0.01133,     // Spatial scale of flutter clusters (leaf size)
 
       // -- Color --
-      exposure: -2.0,
+      exposure: -1.0,
       brightness: 0.0,
-      contrast: 1.03,
-      saturation: 1.25,
+      contrast: 1.0,
+      saturation: 1.1,
       temperature: 0.0,
       tint: 0.0,
 
       // Shadow
-      shadowOpacity: 0.59927,
-      shadowLength: 0.02297,
+      shadowOpacity: 0.3,
+      shadowLength: 0.03,
       shadowSoftness: 5.0
     };
   }
@@ -109,23 +109,23 @@ export class BushEffect extends EffectBase {
       ],
       parameters: {
         intensity: { type: 'slider', min: 0.0, max: 2.0, default: 1.0 },
-        windSpeedGlobal: { type: 'slider', label: 'Wind Strength', min: 0.0, max: 3.0, default: 0.13 },
-        windRampSpeed: { type: 'slider', label: 'Wind Responsiveness', min: 0.1, max: 10.0, default: 0.40 },
+        windSpeedGlobal: { type: 'slider', label: 'Wind Strength', min: 0.0, max: 3.0, default: 0.13478 },
+        windRampSpeed: { type: 'slider', label: 'Wind Responsiveness', min: 0.1, max: 10.0, default: 0.86766 },
         gustFrequency: { type: 'slider', label: 'Gust Spacing', min: 0.01, max: 0.5, default: 0.01 },
-        gustSpeed: { type: 'slider', label: 'Gust Speed', min: 0.0, max: 2.0, default: 0.22028 },
+        gustSpeed: { type: 'slider', label: 'Gust Speed', min: 0.0, max: 2.0, default: 0.52463 },
         branchBend: { type: 'slider', label: 'Branch Bend', min: 0.0, max: 0.05, step: 0.001, default: 0.021 },
-        elasticity: { type: 'slider', label: 'Springiness', min: 0.5, max: 5.0, default: 1.19136 },
-        flutterIntensity: { type: 'slider', label: 'Leaf Flutter Amount', min: 0.0, max: 0.005, step: 0.0001, default: 0.0005 },
-        flutterSpeed: { type: 'slider', label: 'Leaf Flutter Speed', min: 1.0, max: 20.0, default: 1.0 },
-        flutterScale: { type: 'slider', label: 'Leaf Cluster Size', min: 0.005, max: 0.1, default: 0.0167 },
-        exposure: { type: 'slider', min: -2.0, max: 2.0, default: -2.0 },
+        elasticity: { type: 'slider', label: 'Springiness', min: 0.5, max: 5.0, default: 5.0 },
+        flutterIntensity: { type: 'slider', label: 'Leaf Flutter Amount', min: 0.0, max: 0.005, step: 0.0001, default: 0.0014 },
+        flutterSpeed: { type: 'slider', label: 'Leaf Flutter Speed', min: 1.0, max: 20.0, default: 1.85362 },
+        flutterScale: { type: 'slider', label: 'Leaf Cluster Size', min: 0.005, max: 0.1, default: 0.01133 },
+        exposure: { type: 'slider', min: -2.0, max: 2.0, default: -1.0 },
         brightness: { type: 'slider', min: -0.5, max: 0.5, default: 0.0 },
-        contrast: { type: 'slider', min: 0.5, max: 2.0, default: 1.03 },
-        saturation: { type: 'slider', min: 0.0, max: 2.0, default: 1.25 },
+        contrast: { type: 'slider', min: 0.5, max: 2.0, default: 1.0 },
+        saturation: { type: 'slider', min: 0.0, max: 2.0, default: 1.1 },
         temperature: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
         tint: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
-        shadowOpacity: { type: 'slider', label: 'Shadow Opacity', min: 0.0, max: 1.0, default: 0.59927 },
-        shadowLength: { type: 'slider', label: 'Shadow Length', min: 0.0, max: 0.1, default: 0.02297 },
+        shadowOpacity: { type: 'slider', label: 'Shadow Opacity', min: 0.0, max: 1.0, default: 0.3 },
+        shadowLength: { type: 'slider', label: 'Shadow Length', min: 0.0, max: 0.1, default: 0.03 },
         shadowSoftness: { type: 'slider', label: 'Shadow Softness', min: 0.5, max: 5.0, default: 5.0 }
       }
     };

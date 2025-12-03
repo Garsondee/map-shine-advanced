@@ -90,6 +90,15 @@ export class TweakpaneManager {
 
     /** @type {number} UI scale factor */
     this.uiScale = 1.0;
+
+    /** @type {{scale:number}} Backing object for UI scale binding */
+    this.uiScaleParams = { scale: this.uiScale };
+
+    /** @type {Object|null} Snapshot for master reset undo */
+    this.lastMasterResetSnapshot = null;
+
+    /** @type {any|null} Tweakpane button for Undo */
+    this.undoButton = null;
   }
 
   /**
@@ -261,13 +270,14 @@ export class TweakpaneManager {
     globalFolder.addBlade({ view: 'separator' });
 
     // UI Scale
-    globalFolder.addBinding({ scale: this.uiScale }, 'scale', {
+    globalFolder.addBinding(this.uiScaleParams, 'scale', {
       label: 'UI Scale',
       min: 0.5,
       max: 2.0,
       step: 0.1
     }).on('change', (ev) => {
       this.uiScale = ev.value;
+      this.uiScaleParams.scale = ev.value;
       
       // Only update UI scale after user releases the mouse (0.1s delay)
       // This prevents the UI from "running away" under the cursor while dragging
@@ -289,11 +299,161 @@ export class TweakpaneManager {
       }
     });
 
+    // Non-default settings dump (for debugging / default tuning)
+    globalFolder.addButton({
+      title: 'Copy Non-Default Settings',
+      label: 'Debug'
+    }).on('click', async () => {
+      await this.copyNonDefaultSettingsToClipboard();
+    });
+
+    const masterResetButton = globalFolder.addButton({
+      title: 'Master Reset to Defaults',
+      label: 'Defaults'
+    });
+
+    masterResetButton.on('click', () => {
+      this.onMasterResetToDefaults();
+    });
+
+    this.undoButton = globalFolder.addButton({
+      title: 'Undo Last Master Reset',
+      label: 'Undo'
+    });
+
+    this.undoButton.on('click', () => {
+      this.onUndoMasterReset();
+    });
+
+    this.updateUndoButtonState();
+
     // Track accordion state
     globalFolder.on('fold', (ev) => {
       this.accordionStates['global'] = ev.expanded;
       this.saveUIState();
     });
+  }
+  
+  onMasterResetToDefaults() {
+    // Capture current state so we can undo
+    this.captureMasterResetSnapshot();
+
+    // Reset all registered effects to their schema defaults without per-effect notifications
+    for (const [effectId] of Object.entries(this.effectFolders)) {
+      this.resetEffectToDefaultsInternal(effectId, false);
+    }
+
+    // Reset global controls to their defaults
+    this.globalParams.mapMakerMode = false;
+    this.globalParams.timeRate = 100;
+    this.globalParams.timeOfDay = 12.0;
+
+    // Reset UI scale
+    this.uiScale = 1.0;
+    this.uiScaleParams.scale = 1.0;
+    this.updateScale();
+    this.saveUIState();
+
+    // Propagate global control changes to the underlying systems
+    this.onGlobalChange('mapMakerMode', this.globalParams.mapMakerMode);
+    this.onGlobalChange('timeRate', this.globalParams.timeRate);
+    this.onGlobalChange('timeOfDay', this.globalParams.timeOfDay);
+
+    // Queue saves for all effects so scene flags are updated
+    for (const [effectId] of Object.entries(this.effectFolders)) {
+      this.queueSave(effectId);
+    }
+
+    // Refresh pane visuals
+    if (this.pane) {
+      this.pane.refresh();
+    }
+
+    ui.notifications.info('Map Shine: All effects reset to defaults');
+  }
+
+  onUndoMasterReset() {
+    if (!this.lastMasterResetSnapshot) {
+      ui.notifications.warn('Map Shine: Nothing to undo');
+      return;
+    }
+
+    this.applyMasterResetSnapshot();
+
+    if (this.pane) {
+      this.pane.refresh();
+    }
+
+    ui.notifications.info('Map Shine: Previous settings restored');
+  }
+
+  captureMasterResetSnapshot() {
+    const effects = {};
+    for (const [effectId, effectData] of Object.entries(this.effectFolders)) {
+      effects[effectId] = {
+        params: { ...effectData.params }
+      };
+    }
+
+    this.lastMasterResetSnapshot = {
+      globalParams: { ...this.globalParams },
+      uiScale: this.uiScale,
+      settingsMode: this.settingsMode,
+      effects
+    };
+
+    this.updateUndoButtonState();
+  }
+
+  applyMasterResetSnapshot() {
+    const snapshot = this.lastMasterResetSnapshot;
+    if (!snapshot) return;
+
+    // Restore globals
+    this.globalParams.mapMakerMode = snapshot.globalParams.mapMakerMode;
+    this.globalParams.timeRate = snapshot.globalParams.timeRate;
+    this.globalParams.timeOfDay = snapshot.globalParams.timeOfDay;
+
+    // Restore UI scale
+    this.uiScale = snapshot.uiScale ?? 1.0;
+    this.uiScaleParams.scale = this.uiScale;
+    this.updateScale();
+    this.saveUIState();
+
+    // Propagate global control changes
+    this.onGlobalChange('mapMakerMode', this.globalParams.mapMakerMode);
+    this.onGlobalChange('timeRate', this.globalParams.timeRate);
+    this.onGlobalChange('timeOfDay', this.globalParams.timeOfDay);
+
+    // Restore each effect's parameters and notify callbacks
+    for (const [effectId, effectSnapshot] of Object.entries(snapshot.effects || {})) {
+      const effectData = this.effectFolders[effectId];
+      if (!effectData) continue;
+
+      const params = effectSnapshot.params || {};
+      for (const [paramId, value] of Object.entries(params)) {
+        effectData.params[paramId] = value;
+
+        if (effectData.bindings[paramId]) {
+          effectData.bindings[paramId].refresh();
+        }
+
+        const callback = this.effectCallbacks.get(effectId);
+        if (callback) {
+          callback(effectId, paramId, value);
+        }
+      }
+
+      this.updateEffectiveState(effectId);
+      this.updateControlStates(effectId);
+      this.queueSave(effectId);
+    }
+  }
+
+  updateUndoButtonState() {
+    if (this.undoButton) {
+      this.undoButton.disabled = !this.lastMasterResetSnapshot;
+    }
   }
 
   /**
@@ -668,8 +828,21 @@ export class TweakpaneManager {
         log.warn(`${effectId}.${paramId}:`, validation.warnings);
       }
       
-      // Use validated value
-      const validValue = validation.value;
+      // Use validated value and snap to the control's step grid for
+      // numeric parameters so we avoid floating point noise like
+      // 0.5000000001 when the UI is configured for step 0.01.
+      let validValue = validation.value;
+      if (typeof validValue === 'number' && typeof paramDef.step === 'number') {
+        const step = paramDef.step;
+        const snapped = Math.round(validValue / step) * step;
+        // Crush tiny near-zero values to 0 to avoid -0 and 1e-17 noise.
+        if (Math.abs(snapped) < step / 100) {
+          validValue = 0;
+        } else {
+          validValue = snapped;
+        }
+      }
+
       effectData.params[paramId] = validValue;
       
       // Auto-disable/enable layers based on problematic values
@@ -945,6 +1118,10 @@ export class TweakpaneManager {
    * @public
    */
   resetEffectToDefaults(effectId) {
+    this.resetEffectToDefaultsInternal(effectId, true);
+  }
+
+  resetEffectToDefaultsInternal(effectId, notify) {
     const effectData = this.effectFolders[effectId];
     if (!effectData) {
       log.error(`Cannot reset ${effectId}: effect not registered`);
@@ -956,12 +1133,12 @@ export class TweakpaneManager {
     // Reset all parameters to schema defaults
     for (const [paramId, paramDef] of Object.entries(effectData.schema.parameters || {})) {
       effectData.params[paramId] = paramDef.default;
-      
+
       // Refresh UI binding
       if (effectData.bindings[paramId]) {
         effectData.bindings[paramId].refresh();
       }
-      
+
       // Notify callback
       const callback = this.effectCallbacks.get(effectId);
       if (callback) {
@@ -979,7 +1156,166 @@ export class TweakpaneManager {
     // Save to appropriate tier
     this.queueSave(effectId);
 
-    ui.notifications.info(`Map Shine: ${effectId} reset to defaults`);
+    if (notify) {
+      ui.notifications.info(`Map Shine: ${effectId} reset to defaults`);
+    }
+  }
+
+  /**
+   * Generate a text dump of all effect parameters that differ from schema defaults
+   * grouped by effect. Used for debugging and tuning default values.
+   * @returns {string}
+   * @public
+   */
+  generateNonDefaultSettingsDump() {
+    const lines = [];
+
+    const scene = canvas?.scene;
+    const sceneName = scene?.name || 'Unknown Scene';
+    const sceneId = scene?.id || 'unknown-id';
+
+    lines.push('Map Shine Advanced - Non-Default Effect Settings');
+    lines.push(`Scene: ${sceneName} (${sceneId})`);
+    lines.push(`Settings Mode: ${this.settingsMode}`);
+    lines.push(`User: ${game.user?.name || 'Unknown User'}`);
+    lines.push(`Timestamp: ${new Date().toISOString()}`);
+    lines.push('');
+
+    let anyDifferences = false;
+
+    for (const [effectId, effectData] of Object.entries(this.effectFolders)) {
+      if (!effectData || !effectData.schema) continue;
+
+      const params = effectData.params || {};
+      const schemaParams = effectData.schema.parameters || {};
+
+      const effectLines = [];
+
+      // Enabled flag vs schema default
+      const defaultEnabled = effectData.schema.enabled ?? true;
+      const currentEnabled = params.enabled ?? defaultEnabled;
+      if (this.valuesDiffer(currentEnabled, defaultEnabled)) {
+        effectLines.push(`enabled = ${JSON.stringify(currentEnabled)}`);
+      }
+
+      // Compare each declared parameter to its default. We intentionally
+      // skip parameter-level `enabled` here because the effect-level
+      // enabled state is already tracked and printed above, and including
+      // both would produce duplicate `enabled` lines in the dump.
+      for (const [paramId, paramDef] of Object.entries(schemaParams)) {
+        if (paramId === 'enabled') continue;
+        const defaultValue = paramDef.default;
+        const currentValue = params[paramId];
+
+        if (!this.valuesDiffer(currentValue, defaultValue, paramDef)) continue;
+
+        const formatted = this.formatParamValue(paramId, currentValue, paramDef);
+        effectLines.push(`${paramId} = ${formatted}`);
+      }
+
+      if (effectLines.length > 0) {
+        anyDifferences = true;
+        lines.push(`--- Effect: ${effectId} ---`);
+        for (const l of effectLines) {
+          lines.push(l);
+        }
+        lines.push('');
+      }
+    }
+
+    if (!anyDifferences) {
+      lines.push('All effects are currently at their schema default values.');
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Format a parameter value for the non-default settings dump. Numbers
+   * are rounded according to their slider step so we avoid extremely
+   * long floating point representations.
+   * @param {string} paramId
+   * @param {any} value
+   * @param {Object} [paramDef]
+   * @returns {string}
+   * @private
+   */
+  formatParamValue(paramId, value, paramDef) {
+    if (typeof value !== 'number') {
+      return JSON.stringify(value);
+    }
+
+    const step = (paramDef && typeof paramDef.step === 'number') ? paramDef.step : 0.01;
+
+    // Derive a sensible number of decimals from the step size (e.g.
+    // 0.01 -> 2 decimals, 0.005 -> 3 decimals, 1 -> 0 decimals).
+    let decimals = 0;
+    if (step < 1) {
+      const log10 = Math.log10(step);
+      decimals = Math.max(0, -Math.floor(log10));
+      if (decimals > 6) decimals = 6; // hard cap for safety
+    }
+
+    let v = value;
+    const tiny = step / 100;
+    if (Math.abs(v) < tiny) v = 0;
+
+    v = Number(v.toFixed(decimals));
+    return JSON.stringify(v);
+  }
+
+  /**
+   * Helper to compare parameter values (supports primitives and JSON-serializable objects)
+   * @param {any} a
+   * @param {any} b
+   * @returns {boolean}
+   * @private
+   */
+  valuesDiffer(a, b, paramDef) {
+    // Fast path for strict equality and null/undefined cases
+    if (a === b) return false;
+    if (a == null || b == null) return a !== b;
+
+    // For numeric parameters, treat tiny floating point differences as
+    // equal so that 0.7 and 0.7000000000000001 do not register as
+    // non-default.
+    if (typeof a === 'number' && typeof b === 'number') {
+      if (!isFinite(a) || !isFinite(b)) return a !== b;
+
+      let eps;
+      if (paramDef && typeof paramDef.step === 'number' && paramDef.step > 0) {
+        eps = paramDef.step / 10;
+      } else {
+        eps = 1e-4;
+      }
+
+      return Math.abs(a - b) > eps;
+    }
+
+    // Fallback: deep compare via JSON
+    return JSON.stringify(a) !== JSON.stringify(b);
+  }
+
+  /**
+   * Copy the non-default settings dump to the clipboard, with a console fallback
+   * @returns {Promise<void>}
+   * @public
+   */
+  async copyNonDefaultSettingsToClipboard() {
+    const dump = this.generateNonDefaultSettingsDump();
+
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(dump);
+        ui.notifications.info('Map Shine: Non-default settings copied to clipboard');
+      } else {
+        throw new Error('Clipboard API not available');
+      }
+    } catch (error) {
+      log.warn('Failed to copy non-default settings to clipboard, printing to console instead:', error);
+      console.log(dump);
+      ui.notifications.warn('Map Shine: Could not copy to clipboard. Dump printed to browser console.');
+    }
   }
 
   /**

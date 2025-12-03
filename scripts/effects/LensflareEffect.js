@@ -316,9 +316,9 @@ export class LensflareEffect extends EffectBase {
     this.flareTexture1 = null;
 
     this.params = {
-      enabled: true,
-      intensity: 1.0,
-      sizeScale: 1.0,
+      enabled: false,
+      intensity: 0.7,
+      sizeScale: 2.5,
       colorTint: { r: 1, g: 1, b: 1 }
     };
   }
@@ -328,7 +328,7 @@ export class LensflareEffect extends EffectBase {
    */
   static getControlSchema() {
     return {
-      enabled: true,
+      enabled: false,
       groups: [
         {
           name: 'lensflare',
@@ -338,9 +338,9 @@ export class LensflareEffect extends EffectBase {
         }
       ],
       parameters: {
-        enabled: { type: 'boolean', default: true, hidden: true },
-        intensity: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.0 },
-        sizeScale: { type: 'slider', min: 0.1, max: 3.0, step: 0.1, default: 1.0 },
+        enabled: { type: 'boolean', default: false, hidden: true },
+        intensity: { type: 'slider', min: 0, max: 2, step: 0.1, default: 0.7 },
+        sizeScale: { type: 'slider', min: 0.1, max: 3.0, step: 0.1, default: 2.5 },
         colorTint: { type: 'color', default: { r: 1, g: 1, b: 1 } }
       },
       presets: {

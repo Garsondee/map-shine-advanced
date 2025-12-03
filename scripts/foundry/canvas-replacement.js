@@ -15,6 +15,7 @@ import { WindowLightEffect } from '../effects/WindowLightEffect.js';
 import { BushEffect } from '../effects/BushEffect.js';
 import { TreeEffect } from '../effects/TreeEffect.js';
 import { ColorCorrectionEffect } from '../effects/ColorCorrectionEffect.js';
+import { SkyColorEffect } from '../effects/SkyColorEffect.js';
 import { AsciiEffect } from '../effects/AsciiEffect.js';
 import { BloomEffect } from '../effects/BloomEffect.js';
 import { LightingEffect } from '../effects/LightingEffect.js';
@@ -24,6 +25,9 @@ import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
 import { BuildingShadowsEffect } from '../effects/BuildingShadowsEffect.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { FireSparksEffect } from '../particles/FireSparksEffect.js';
+import { VisionManager } from '../vision/VisionManager.js';
+import { FogManager } from '../vision/FogManager.js';
+import { FogEffect } from '../effects/FogEffect.js';
 import {
   CloudShadowsEffect,
   TimeOfDayEffect,
@@ -126,6 +130,18 @@ let dropHandler = null;
 
 /** @type {LightingEffect|null} */
 let lightingEffect = null;
+
+/** @type {VisionManager|null} */
+let visionManager = null;
+
+/** @type {FogManager|null} */
+let fogManager = null;
+
+/** @type {FogEffect|null} */
+let fogEffect = null;
+
+/** @type {SkyColorEffect|null} */
+let skyColorEffect = null;
 
 /**
  * Initialize canvas replacement hooks
@@ -388,6 +404,33 @@ async function createThreeCanvas(scene) {
     const prismEffect = new PrismEffect();
     effectComposer.registerEffect(prismEffect);
 
+    // Step 3.5.1: Initialize Vision and Fog Managers (Fog of War)
+    // CRITICAL: Use Foundry scene dimensions (world space), NOT viewport dimensions (screen pixels)
+    // Vision polygons are computed in Foundry world coordinates, so the VisionManager camera
+    // and GeometryConverter must use the same coordinate system.
+    const sceneWidth = canvas.dimensions?.width || rect.width;
+    const sceneHeight = canvas.dimensions?.height || rect.height;
+    visionManager = new VisionManager(renderer, sceneWidth, sceneHeight);
+    effectComposer.addUpdatable(visionManager);
+    
+    fogManager = new FogManager(renderer, sceneWidth, sceneHeight);
+    fogManager.load(); // Load saved fog state
+
+    // Wire Vision updates to Fog accumulation
+    // Patch update() to trigger accumulation when vision changes
+    const originalVisionUpdate = visionManager.update.bind(visionManager);
+    visionManager.update = () => {
+      if (visionManager.needsUpdate) {
+        originalVisionUpdate();
+        fogManager.accumulate(visionManager.getTexture());
+      }
+    };
+
+    // Step 3.5.2: Register Fog Effect
+    fogEffect = new FogEffect();
+    fogEffect.setTextures(visionManager.getTexture(), fogManager.getTexture());
+    effectComposer.registerEffect(fogEffect);
+
     // Step 3.6: Register Lighting Effect
     lightingEffect = new LightingEffect();
     effectComposer.registerEffect(lightingEffect);
@@ -415,6 +458,10 @@ async function createThreeCanvas(scene) {
     // Step 3.8: Register Lensflare Effect
     const lensflareEffect = new LensflareEffect();
     effectComposer.registerEffect(lensflareEffect);
+
+    // Step 7: Create Sky Color Effect (post-lighting color grading for sky/outdoors)
+    skyColorEffect = new SkyColorEffect();
+    effectComposer.registerEffect(skyColorEffect);
 
     // Provide the base mesh and asset bundle to the effect
     const basePlane = sceneComposer.getBasePlane();
@@ -518,6 +565,10 @@ async function createThreeCanvas(scene) {
     mapShine.colorCorrectionEffect = colorCorrectionEffect;
     mapShine.asciiEffect = asciiEffect;
     mapShine.fireSparksEffect = fireSparksEffect;
+    mapShine.visionManager = visionManager; // NEW: Expose VisionManager
+    mapShine.fogManager = fogManager; // NEW: Expose FogManager
+    mapShine.fogEffect = fogEffect; // NEW: Expose FogEffect
+    mapShine.skyColorEffect = skyColorEffect; // NEW: Expose SkyColorEffect
     mapShine.cameraController = cameraController;
     mapShine.tokenManager = tokenManager; // NEW: Expose token manager for diagnostics
     mapShine.tileManager = tileManager; // NEW: Expose tile manager for diagnostics
@@ -553,6 +604,7 @@ async function createThreeCanvas(scene) {
         asciiEffect,
         prismEffect,
         lightingEffect,
+        skyColorEffect,
         bloomEffect,
         lensflareEffect,
         fireSparksEffect,
@@ -560,7 +612,8 @@ async function createThreeCanvas(scene) {
         overheadShadowsEffect,
         buildingShadowsEffect,
         bushEffect,
-        treeEffect
+        treeEffect,
+        fogEffect
       );
     } catch (e) {
       log.error('Failed to initialize UI:', e);
@@ -580,15 +633,18 @@ async function createThreeCanvas(scene) {
  * @param {AsciiEffect} asciiEffect - The ASCII effect instance
  * @param {PrismEffect} prismEffect - The prism effect instance
  * @param {LightingEffect} lightingEffect - The dynamic lighting effect instance
+ * @param {SkyColorEffect} skyColorEffect - The sky color grading effect instance
  * @param {BloomEffect} bloomEffect - The bloom effect instance
  * @param {LensflareEffect} lensflareEffect - The lensflare effect instance
  * @param {WindowLightEffect} windowLightEffect - The window lighting effect instance
  * @param {OverheadShadowsEffect} overheadShadowsEffect - The overhead shadows effect instance
  * @param {BuildingShadowsEffect} buildingShadowsEffect - The building shadows effect instance
  * @param {BushEffect} bushEffect - The animated bushes surface effect instance
+ * @param {TreeEffect} treeEffect - The animated trees surface effect instance
+ * @param {FogEffect} fogEffect - The fog of war effect instance
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, bloomEffect, lensflareEffect, fireSparksEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, bushEffect, treeEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, bushEffect, treeEffect, fogEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -626,6 +682,29 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     onSpecularUpdate,
     'surface'
   );
+
+  // --- Fog Settings ---
+  if (fogEffect) {
+    const fogSchema = FogEffect.getControlSchema();
+    
+    const onFogUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        fogEffect.enabled = value;
+        log.debug(`Fog effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (fogEffect.params[paramId] !== undefined) {
+        fogEffect.params[paramId] = value;
+        log.debug(`Fog.${paramId} = ${value}`);
+      }
+    };
+
+    uiManager.registerEffect(
+      'fog',
+      'Fog of War',
+      fogSchema,
+      onFogUpdate,
+      'global'
+    );
+  }
 
   // --- Animated Bushes Settings ---
   if (bushEffect) {
@@ -756,6 +835,52 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       }
       uiManager.updateEffectiveState('prism');
     }
+  }
+
+  // --- Lighting / Tone Mapping Settings (Global & Post) ---
+  if (lightingEffect) {
+    const lightingSchema = LightingEffect.getControlSchema();
+
+    const onLightingUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        lightingEffect.enabled = value;
+        log.debug(`Lighting effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (lightingEffect.params && Object.prototype.hasOwnProperty.call(lightingEffect.params, paramId)) {
+        lightingEffect.params[paramId] = value;
+        log.debug(`Lighting.${paramId} = ${value}`);
+      }
+    };
+
+    uiManager.registerEffect(
+      'lighting',
+      'Lighting & Tone Mapping',
+      lightingSchema,
+      onLightingUpdate,
+      'global'
+    );
+  }
+
+  // --- Sky Color Settings (Global & Post) ---
+  if (skyColorEffect) {
+    const skySchema = SkyColorEffect.getControlSchema();
+
+    const onSkyUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        skyColorEffect.enabled = value;
+        log.debug(`SkyColor effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (skyColorEffect.params && Object.prototype.hasOwnProperty.call(skyColorEffect.params, paramId)) {
+        skyColorEffect.params[paramId] = value;
+        log.debug(`SkyColor.${paramId} = ${value}`);
+      }
+    };
+
+    uiManager.registerEffect(
+      'sky-color',
+      'Sky Color',
+      skySchema,
+      onSkyUpdate,
+      'global'
+    );
   }
 
   // --- Bloom Settings ---
@@ -1405,6 +1530,19 @@ function destroyThreeCanvas() {
     effectComposer = null;
     log.debug('Effect composer disposed');
   }
+
+  // Dispose Fog of War
+  if (visionManager) {
+    visionManager.dispose();
+    visionManager = null;
+    log.debug('VisionManager disposed');
+  }
+  if (fogManager) {
+    fogManager.dispose();
+    fogManager = null;
+    log.debug('FogManager disposed');
+  }
+  fogEffect = null; // Part of effectComposer cleanup, but clear ref
 
   // Dispose scene composer
   if (sceneComposer) {

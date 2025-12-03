@@ -28,9 +28,9 @@ export class BloomEffect extends EffectBase {
     
     this.params = {
       enabled: true,
-      strength: 0.30,
-      radius: 0.20,
-      threshold: 0.98,
+      strength: 0.35,
+      radius: 0.16,
+      threshold: 0.46,
       tintColor: { r: 1, g: 1, b: 1 },
       // Controls how the bloom layer blends over the base scene
       blendOpacity: 1.0,
@@ -54,9 +54,9 @@ export class BloomEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        strength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 1.5 },
-        radius: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.4 },
-        threshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.85 },
+        strength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 0.35 },
+        radius: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.16 },
+        threshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.46 },
         tintColor: { type: 'color', default: { r: 1, g: 1, b: 1 } },
         blendOpacity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0 },
         // Tweakpane expects an options map: label -> value

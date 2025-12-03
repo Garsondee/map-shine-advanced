@@ -1324,7 +1324,10 @@ _createSnowTexture() {
     // remaining faintly visible at full darkness.
     let sceneDarkness = 0;
     try {
-      if (typeof canvas !== 'undefined' && canvas?.scene?.environment?.darknessLevel !== undefined) {
+      const le = window.MapShine?.lightingEffect;
+      if (le && typeof le.getEffectiveDarkness === 'function') {
+        sceneDarkness = le.getEffectiveDarkness();
+      } else if (typeof canvas !== 'undefined' && canvas?.scene?.environment?.darknessLevel !== undefined) {
         sceneDarkness = canvas.scene.environment.darknessLevel;
       }
     } catch (e) {

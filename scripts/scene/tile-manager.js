@@ -259,7 +259,11 @@ export class TileManager {
       const env = canvas?.environment;
       
       if (scene?.environment?.darknessLevel !== undefined) {
-        const darkness = scene.environment.darknessLevel;
+        let darkness = scene.environment.darknessLevel;
+        const le = window.MapShine?.lightingEffect;
+        if (le && typeof le.getEffectiveDarkness === 'function') {
+          darkness = le.getEffectiveDarkness();
+        }
         
         // Get environment colors (robust fallback)
         const getThreeColor = (src, def) => {

@@ -54,7 +54,7 @@ export class PrismEffect extends EffectBase {
       facetSoftness: 0.85,      // 0 = sharp facets, 1 = soft lumpy glass
       
       // Appearance
-      brightness: 1.5,          // Boost brightness of refracted light
+      brightness: 0.8,          // Boost brightness of refracted light
       opacity: 0.5,             // Opacity of the overlay
 
       // Mask shaping
@@ -137,7 +137,7 @@ export class PrismEffect extends EffectBase {
           min: 0,
           max: 5.0,
           step: 0.1,
-          default: 0.3
+          default: 0.9
         },
         spread: {
           type: 'slider',
@@ -145,7 +145,7 @@ export class PrismEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.1,
-          default: 0.5
+          default: 0.6
         },
         brightness: {
           type: 'slider',

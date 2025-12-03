@@ -1917,6 +1917,11 @@ export class InteractionManager {
         return;
     }
     this.selection.add(id);
+    
+    // Force vision update to ensure fog is correct
+    if (window.MapShine && window.MapShine.visionManager) {
+      window.MapShine.visionManager.needsUpdate = true;
+    }
   }
 
   /**
@@ -1939,6 +1944,11 @@ export class InteractionManager {
       }
     }
     this.selection.clear();
+    
+    // Force vision update to ensure fog is correct (bypass mode)
+    if (window.MapShine && window.MapShine.visionManager) {
+      window.MapShine.visionManager.needsUpdate = true;
+    }
   }
 
   /**

@@ -48,22 +48,22 @@ export class IridescenceEffect extends EffectBase {
       hasIridescenceMask: false,
 
       // Core settings
-      intensity: 1.0,
-      distortionStrength: 0.5,
-      noiseScale: 0.2,
+      intensity: 0.5,
+      distortionStrength: 0.92,
+      noiseScale: 0.68,
       noiseType: 0, // 0=Smooth, 1=Glitter
-      flowSpeed: 0.36,
-      phaseMult: 1.0,
+      flowSpeed: 1.5,
+      phaseMult: 4.0,
       angle: 0.0,
-      parallaxStrength: 1.48,
+      parallaxStrength: 3.0,
+      maskThreshold: 0.34,
       
       // Colors
-      colorCycleSpeed: 0.2, // Multiplier for color cycling
-      ignoreDarkness: 0.75, // 0=Physical, 1=Magical
+      colorCycleSpeed: 0.1, // Multiplier for color cycling
+      ignoreDarkness: 0.5, // 0=Physical, 1=Magical
       
       // Advanced
-      alpha: 0.75, // Global opacity multiplier
-      maskThreshold: 0.49
+      alpha: 0.5, // Global opacity multiplier
     };
   }
 
@@ -139,7 +139,7 @@ export class IridescenceEffect extends EffectBase {
           min: 0,
           max: 2,
           step: 0.01,
-          default: 1.0
+          default: 0.5
         },
         alpha: {
           type: 'slider',
@@ -147,7 +147,7 @@ export class IridescenceEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.75
+          default: 0.5
         },
         noiseType: {
           type: 'list',
@@ -160,27 +160,27 @@ export class IridescenceEffect extends EffectBase {
         },
         ignoreDarkness: {
           type: 'slider',
-          label: 'Magic Glow',
+          label: 'Ignore Darkness',
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.0
+          default: 0.5
         },
         colorCycleSpeed: {
           type: 'slider',
           label: 'Color Cycle Speed',
-          min: 0.1,
-          max: 3.0,
-          step: 0.05,
-          default: 0.2
+          min: 0,
+          max: 2,
+          step: 0.01,
+          default: 0.1
         },
         flowSpeed: {
           type: 'slider',
           label: 'Flow Speed',
-          min: -2,
-          max: 2,
+          min: 0,
+          max: 5,
           step: 0.01,
-          default: 0.36
+          default: 1.5
         },
         angle: {
           type: 'slider',
@@ -192,43 +192,43 @@ export class IridescenceEffect extends EffectBase {
         },
         distortionStrength: {
           type: 'slider',
-          label: 'Distortion',
+          label: 'Distortion Strength',
           min: 0,
           max: 2,
           step: 0.01,
-          default: 0.5
+          default: 0.92
         },
         noiseScale: {
           type: 'slider',
           label: 'Noise Scale',
-          min: 0.01,
-          max: 1.0,
+          min: 0.1,
+          max: 4,
           step: 0.01,
-          default: 0.5
+          default: 0.68
         },
         phaseMult: {
           type: 'slider',
           label: 'Phase Multiplier',
-          min: 0.1,
-          max: 10.0,
+          min: 0.5,
+          max: 6,
           step: 0.1,
-          default: 1.0
+          default: 4.0
         },
         parallaxStrength: {
           type: 'slider',
-          label: 'Parallax Influence',
-          min: 0.0,
-          max: 3.0,
+          label: 'Parallax Strength',
+          min: 0,
+          max: 5,
           step: 0.01,
-          default: 1.48
+          default: 3.0
         },
         maskThreshold: {
           type: 'slider',
-          label: 'Mask Brightness Cutoff',
-          min: 0.0,
-          max: 1.0,
+          label: 'Mask Threshold',
+          min: 0,
+          max: 1,
           step: 0.01,
-          default: 0.49
+          default: 0.34
         }
       },
       presets: {
@@ -366,7 +366,7 @@ export class IridescenceEffect extends EffectBase {
       fragmentShader: this.getFragmentShader(),
       side: THREE.DoubleSide,
       transparent: true,
-      blending: THREE.AdditiveBlending,
+      blending: THREE.NormalBlending,
       depthWrite: false, // Don't write depth, just overlay
       depthTest: true    // Respect depth (so tokens/walls can occlude if needed)
     });
@@ -570,7 +570,12 @@ export class IridescenceEffect extends EffectBase {
       const env = canvas?.environment;
 
       if (scene?.environment?.darknessLevel !== undefined) {
-        this.material.uniforms.uDarknessLevel.value = scene.environment.darknessLevel;
+        let darkness = scene.environment.darknessLevel;
+        const le = window.MapShine?.lightingEffect;
+        if (le && typeof le.getEffectiveDarkness === 'function') {
+          darkness = le.getEffectiveDarkness();
+        }
+        this.material.uniforms.uDarknessLevel.value = darkness;
       }
 
       const colors = env?.colors;
@@ -797,10 +802,18 @@ export class IridescenceEffect extends EffectBase {
         float lightLuma = dot(totalIncidentLight, vec3(0.299, 0.587, 0.114));
         float litFactor = mix(lightLuma, 1.0, uIgnoreDarkness);
 
-        // Apply alpha and all factors
-        vec3 finalColor = rainbowColor * maskVal * uIntensity * litFactor * uAlpha;
-
-        gl_FragColor = vec4(finalColor, 1.0); // Alpha output is 1.0 because we use additive blending (src * 1 + dst)
+        // COLOR CALCULATION FOR NORMAL BLENDING
+        // The color is the rainbow pattern, scaled by light
+        vec3 finalRGB = rainbowColor * litFactor;
+        
+        // The alpha determines how much we cover the background
+        // combined with the overall alpha slider and the mask intensity
+        float finalAlpha = maskVal * uAlpha * uIntensity;
+        
+        // Ensure alpha doesn't exceed 1.0
+        finalAlpha = clamp(finalAlpha, 0.0, 1.0);
+        
+        gl_FragColor = vec4(finalRGB, finalAlpha);
       }
     `;
   }

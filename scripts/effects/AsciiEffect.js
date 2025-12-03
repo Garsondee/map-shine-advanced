@@ -76,7 +76,7 @@ export class AsciiEffect extends EffectBase {
    */
   static getControlSchema() {
     return {
-      enabled: true,
+      enabled: false,
       groups: [
         {
           name: 'settings',
@@ -118,7 +118,7 @@ export class AsciiEffect extends EffectBase {
         }
       ],
       parameters: {
-        enabled: { type: 'boolean', default: true, hidden: true },
+        enabled: { type: 'boolean', default: false, hidden: true },
         resolution: { type: 'slider', min: 0.05, max: 0.5, step: 0.01, default: 0.12 },
         lineHeight: { type: 'slider', min: 0.5, max: 4.0, step: 0.1, default: 1.5 },
         opacity: { type: 'slider', min: 0, max: 1, step: 0.05, default: 0.95 },

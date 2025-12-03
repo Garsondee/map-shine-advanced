@@ -31,9 +31,9 @@ export class GridRenderer {
     // Grid settings
     this.settings = {
       style: 'solid', // solid, dashed, dotted
-      thickness: 1.0,
+      thickness: 3.0,
       colorOverride: null, // Use null to use Foundry color
-      alphaOverride: null, // Use null to use Foundry alpha
+      alphaOverride: 0.1, // Use null to use Foundry alpha
       dashArray: []
     };
 
@@ -65,7 +65,7 @@ export class GridRenderer {
           min: 0.5,
           max: 5.0,
           step: 0.5,
-          default: 1.0
+          default: 3.0
         },
         colorOverride: {
           label: 'Color (Override)',
@@ -81,7 +81,7 @@ export class GridRenderer {
           min: 0.0,
           max: 1.0,
           step: 0.05,
-          default: 0.5
+          default: 0.1
         }
       }
     };

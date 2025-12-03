@@ -36,7 +36,8 @@ export async function bootstrap(options = {}) {
     initialized: false,
     error: null,
     scene: null,
-    camera: null
+    camera: null,
+    gameSystem: null
   };
 
   try {
@@ -77,6 +78,12 @@ export async function bootstrap(options = {}) {
 
     state.renderer = renderer;
     state.rendererType = rendererType;
+
+    // Step 4.5: Initialize Game System Manager
+    logger.info('Initializing game system manager...');
+    const { GameSystemManager } = await import('./game-system.js');
+    state.gameSystem = new GameSystemManager();
+    state.gameSystem.initialize();
 
     // Step 5: Create minimal scene (if not skipped)
     if (!skipSceneInit) {

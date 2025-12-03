@@ -327,27 +327,29 @@ export class SnowGeometry {
       : 0;
 
     const clampedPrecip = Math.max(0, Math.min(1, precip));
-    const density = Math.pow(clampedPrecip, 0.9);
+    const targetDensity = Math.pow(clampedPrecip, 0.8);
     if (u.uSpawnDensity) {
-      // Hard cutoff: if density is effectively zero, force an exact 0 so
-      // the shader never spawns stray flakes from numerical edge cases.
-      u.uSpawnDensity.value = density <= 0.0001 ? 0.0 : density;
+      const delta = Math.max(0.0, Math.min(1.0, timeInfo.delta || 0));
+      const k = 3.0;
+      const lerp = 1.0 - Math.exp(-k * delta);
+      this._spawnDensity += (targetDensity - this._spawnDensity) * lerp;
+      if (targetDensity <= 0.0001) {
+        this._spawnDensity = 0.0;
+      }
+      u.uSpawnDensity.value = this._spawnDensity;
     }
 
     try {
-      if (typeof canvas !== 'undefined' && canvas?.scene?.environment?.darknessLevel !== undefined) {
+      const le = window.MapShine?.lightingEffect;
+      if (le && typeof le.getEffectiveDarkness === 'function') {
+        u.uSceneDarkness.value = le.getEffectiveDarkness();
+      } else if (typeof canvas !== 'undefined' && canvas?.scene?.environment?.darknessLevel !== undefined) {
         u.uSceneDarkness.value = canvas.scene.environment.darknessLevel;
       }
     } catch (e) {
-      // ignore
     }
 
-    if (weatherController && weatherController.roofMap && weatherController.roofMaskActive) {
-      u.uRoofMap.value = weatherController.roofMap;
-      u.uRoofMaskEnabled.value = 1.0;
-    } else {
-      u.uRoofMaskEnabled.value = 0.0;
-    }
+    u.uRoofMaskEnabled.value = 0.0;
 
     if (bounds) {
       u.uSceneBounds.value.copy(bounds);

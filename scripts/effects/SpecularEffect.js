@@ -50,36 +50,36 @@ export class SpecularEffect extends EffectBase {
       textureStatus: 'Searching...',
       hasSpecularMask: false,
 
-      intensity: 0.6,           // Default shine intensity
+      intensity: 0.4,           // Default shine intensity
       roughness: 0.0,
       lightDirection: { x: 0.6, y: 0.4, z: 0.7 },
       lightColor: { r: 1.0, g: 1.0, b: 1.0 },
       
       // Multi-layer stripe system
       stripeEnabled: true,
-      stripeBlendMode: 2,       // 0=Add, 1=Multiply, 2=Screen, 3=Overlay
+      stripeBlendMode: 0,       // 0=Add, 1=Multiply, 2=Screen, 3=Overlay
       parallaxStrength: 1.5,    // Global parallax intensity multiplier
-      stripeMaskThreshold: 0.10, // 0 = all mask, 1 = only brightest texels
+      stripeMaskThreshold: 0.25, // 0 = all mask, 1 = only brightest texels
       
       // Layer 1 - Primary stripes
       stripe1Enabled: true,
-      stripe1Frequency: 12.0,
+      stripe1Frequency: 20.0,
       stripe1Speed: -0.01,
       stripe1Angle: 115.0,
-      stripe1Width: 0.47,
-      stripe1Intensity: 1.43,
+      stripe1Width: 0.24,
+      stripe1Intensity: 1.0,
       stripe1Parallax: 0.0,     // Parallax offset (0 = no parallax)
       stripe1Wave: 1.7,         // Stripe waviness amount
       stripe1Gaps: 0.31,        // Stripe breakup / shiny spots
-      stripe1Softness: 3.17,    // Stripe edge softness (0=hard,5=very soft)
+      stripe1Softness: 2.14,    // Stripe edge softness (0=hard,5=very soft)
       
       // Layer 2 - Secondary stripes
       stripe2Enabled: true,
       stripe2Frequency: 10.5,
       stripe2Speed: -0.02,      // Negative = opposite direction
       stripe2Angle: 111.0,
-      stripe2Width: 0.73,
-      stripe2Intensity: 1.54,
+      stripe2Width: 0.25,
+      stripe2Intensity: 4.26,
       stripe2Parallax: 0.1,
       stripe2Wave: 1.6,
       stripe2Gaps: 0.5,
@@ -91,17 +91,17 @@ export class SpecularEffect extends EffectBase {
       stripe3Speed: 0.29,
       stripe3Angle: 162.0,
       stripe3Width: 0.24,
-      stripe3Intensity: 3.01,
+      stripe3Intensity: 4.09,
       stripe3Parallax: 1.0,
-      stripe3Wave: 1.1,
+      stripe3Wave: 0.4,
       stripe3Gaps: 0.37,
       stripe3Softness: 3.44,
 
       // Micro Sparkle
-      sparkleEnabled: false,
+      sparkleEnabled: true,
       sparkleIntensity: 0.5,
-      sparkleScale: 50.0,
-      sparkleSpeed: 0.5
+      sparkleScale: 5433,
+      sparkleSpeed: 0.45
     };
   }
 
@@ -198,11 +198,11 @@ export class SpecularEffect extends EffectBase {
         },
         intensity: {
           type: 'slider',
-          label: 'Shine Intensity',
+          label: 'Specular Intensity',
           min: 0,
           max: 2,
           step: 0.01,
-          default: 0.7,
+          default: 0.4,
           throttle: 100
         },
         roughness: {
@@ -229,7 +229,7 @@ export class SpecularEffect extends EffectBase {
             'Screen': 2,
             'Overlay': 3
           },
-          default: 2
+          default: 0
         },
         stripeMaskThreshold: {
           type: 'slider',
@@ -237,7 +237,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.10,
+          default: 0.25,
           throttle: 100
         },
         parallaxStrength: {
@@ -260,7 +260,7 @@ export class SpecularEffect extends EffectBase {
           min: 0.5,
           max: 20,
           step: 0.5,
-          default: 12.0,
+          default: 20.0,
           throttle: 100
         },
         stripe1Speed: {
@@ -287,7 +287,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.47,
+          default: 0.24,
           throttle: 100
         },
         stripe1Intensity: {
@@ -296,7 +296,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 5,
           step: 0.01,
-          default: 1.43,
+          default: 1.0,
           throttle: 100
         },
         stripe1Parallax: {
@@ -332,7 +332,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 5,
           step: 0.01,
-          default: 3.17,
+          default: 2.14,
           throttle: 100
         },
         stripe2Enabled: {
@@ -373,7 +373,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.73,
+          default: 0.25,
           throttle: 100
         },
         stripe2Intensity: {
@@ -382,7 +382,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 5,
           step: 0.01,
-          default: 1.54,
+          default: 4.26,
           throttle: 100
         },
         stripe2Parallax: {
@@ -468,7 +468,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 5,
           step: 0.01,
-          default: 3.01,
+          default: 4.09,
           throttle: 100
         },
         stripe3Parallax: {
@@ -486,7 +486,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 2,
           step: 0.1,
-          default: 1.1,
+          default: 0.4,
           throttle: 100
         },
         stripe3Gaps: {
@@ -510,33 +510,33 @@ export class SpecularEffect extends EffectBase {
         sparkleEnabled: {
           type: 'boolean',
           label: 'Enable Sparkles',
-          default: false
+          default: true
         },
         sparkleIntensity: {
           type: 'slider',
           label: 'Sparkle Intensity',
           min: 0,
-          max: 2,
+          max: 1,
           step: 0.01,
-          default: 0.8,
+          default: 0.5,
           throttle: 100
         },
         sparkleScale: {
           type: 'slider',
           label: 'Sparkle Scale',
-          min: 300,
-          max: 8000,
+          min: 512,
+          max: 8192,
           step: 1,
-          default: 50.0,
+          default: 5433,
           throttle: 100
         },
         sparkleSpeed: {
           type: 'slider',
           label: 'Sparkle Speed',
           min: 0,
-          max: 5,
+          max: 2,
           step: 0.01,
-          default: 0.5,
+          default: 0.45,
           throttle: 100
         }
       }
@@ -958,7 +958,12 @@ export class SpecularEffect extends EffectBase {
       const scene = canvas?.scene;
       const env = canvas?.environment;
       if (scene?.environment?.darknessLevel !== undefined) {
-        this.material.uniforms.uDarknessLevel.value = scene.environment.darknessLevel;
+        let darkness = scene.environment.darknessLevel;
+        const le = window.MapShine?.lightingEffect;
+        if (le && typeof le.getEffectiveDarkness === 'function') {
+          darkness = le.getEffectiveDarkness();
+        }
+        this.material.uniforms.uDarknessLevel.value = darkness;
       }
 
       const colors = env?.colors;
@@ -1381,6 +1386,13 @@ export class SpecularEffect extends EffectBase {
         }
       }
       
+      // Reinhard-Jodie tone mapping to compress highlights and prevent wash-out
+      vec3 reinhardJodie(vec3 c) {
+        float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        vec3 tc = c / (c + 1.0);
+        return mix(c / (l + 1.0), tc, tc);
+      }
+      
       void main() {
         // Sample textures
         vec4 albedo = texture2D(uAlbedoMap, vUv);
@@ -1557,6 +1569,9 @@ export class SpecularEffect extends EffectBase {
         // finalColor = vec3(layer3); // Show layer 3 only
         // finalColor = specularMask.rgb; // Show specular mask only
 
+        // Apply tone mapping to compress bright highlights and avoid clipping
+        finalColor = reinhardJodie(finalColor);
+        
         gl_FragColor = vec4(finalColor, albedo.a);
       }
     `;

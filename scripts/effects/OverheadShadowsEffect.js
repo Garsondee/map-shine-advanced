@@ -55,12 +55,12 @@ export class OverheadShadowsEffect extends EffectBase {
 
     this.params = {
       enabled: true,
-      opacity: 0.6,        // How strong the shadow darkening is
-      length: 0.04,        // Shadow length in UV space (0-0.25 reasonable)
-      softness: 1.5,       // Multiplier for blur kernel size
+      opacity: 0.4,
+      length: 0.165,
+      softness: 3.0,
       verticalOnly: true,  // v1: primarily vertical motion in screen space
-      affectsLights: 0.75, // 0=ambient only, 1=ambient + full dynamic light
-      sunLatitude: 0.5     // 0=flat east/west, 1=maximum north/south arc
+      affectsLights: 0.0,
+      sunLatitude: 0.1     // 0=flat east/west, 1=maximum north/south arc
     };
   }
 
@@ -103,23 +103,23 @@ export class OverheadShadowsEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.6
+          default: 0.4
         },
         length: {
           type: 'slider',
           label: 'Shadow Length',
           min: 0.0,
-          max: 0.25,
+          max: 0.3,
           step: 0.005,
-          default: 0.04
+          default: 0.165
         },
         softness: {
           type: 'slider',
           label: 'Softness',
           min: 0.5,
-          max: 9.0,
+          max: 5.0,
           step: 0.1,
-          default: 1.5
+          default: 3.0
         },
         sunLatitude: {
           type: 'slider',
@@ -127,7 +127,7 @@ export class OverheadShadowsEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.5
+          default: 0.1
         },
         affectsLights: {
           type: 'slider',

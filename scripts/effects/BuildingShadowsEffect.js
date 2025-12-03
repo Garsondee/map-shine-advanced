@@ -72,13 +72,12 @@ export class BuildingShadowsEffect extends EffectBase {
 
     this.params = {
       enabled: true,
-      opacity: 0.7,        // How strong the building shadow darkening is
-      length: 0.05,        // Shadow length in UV space (0-0.25 reasonable)
-      quality: 24,         // Sample count along the ray (integer >= 4)
-      sunLatitude: 0.5,    // 0=flat east/west, 1=maximum north/south arc
+      opacity: 0.4,
+      length: 0.075,
+      quality: 48,
+      sunLatitude: 0.1,
+      blurStrength: 0.7,
       // High-level blur control (0 = hard edge, 1 = very soft)
-      blurStrength: 0.5,
-      // Internal penumbra parameters derived from blurStrength in update()
       penumbraRadiusNear: 0.0,
       penumbraRadiusFar: 0.06,
       penumbraSamples: 3,
@@ -139,23 +138,23 @@ export class BuildingShadowsEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.7
+          default: 0.4
         },
         length: {
           type: 'slider',
           label: 'Shadow Length',
           min: 0.0,
-          max: 0.25,
+          max: 0.3,
           step: 0.005,
-          default: 0.05
+          default: 0.075
         },
         quality: {
           type: 'slider',
           label: 'Quality (Samples)',
-          min: 4,
-          max: 48,
+          min: 8,
+          max: 128,
           step: 1,
-          default: 24
+          default: 48
         },
         sunLatitude: {
           type: 'slider',
@@ -163,15 +162,15 @@ export class BuildingShadowsEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.5
+          default: 0.1
         },
         blurStrength: {
           type: 'slider',
           label: 'Blur Strength',
           min: 0.0,
-          max: 1.0,
-          step: 0.01,
-          default: 0.5
+          max: 2.0,
+          step: 0.05,
+          default: 0.7
         },
         sunriseTime: {
           type: 'slider',

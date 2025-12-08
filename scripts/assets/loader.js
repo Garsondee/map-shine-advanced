@@ -92,6 +92,15 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
       if (maskFile) {
         const maskTexture = await loadTextureAsync(maskFile);
         if (maskTexture) {
+          // Set color space based on mask type:
+          // - Data textures (normal, roughness) should remain Linear (no gamma)
+          // - Color textures (windows, fire, outdoors, etc.) should be sRGB
+          // This fixes the contrast/darkness mismatch with Foundry PIXI rendering
+          const isDataTexture = ['normal', 'roughness'].includes(maskId);
+          if (THREE.SRGBColorSpace && !isDataTexture) {
+            maskTexture.colorSpace = THREE.SRGBColorSpace;
+          }
+          
           masks.push({
             id: maskId,
             suffix: maskDef.suffix,
@@ -99,7 +108,7 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
             texture: maskTexture,
             required: maskDef.required
           });
-          log.debug(`Loaded effect mask: ${maskId} from ${maskFile}`);
+          log.debug(`Loaded effect mask: ${maskId} from ${maskFile} (colorSpace: ${isDataTexture ? 'Linear' : 'sRGB'})`);
         }
       } else if (maskDef.required) {
         warnings.push(`Required mask missing: ${maskId} (${maskDef.suffix})`);

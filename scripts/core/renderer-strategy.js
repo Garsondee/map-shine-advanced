@@ -118,5 +118,17 @@ export function configure(renderer, options = {}) {
     renderer.setClearColor(0x000000, 1); // Black, fully opaque
   }
 
-  log.debug(`Renderer configured: ${width}x${height}, pixelRatio: ${pixelRatio}`);
+  // Configure color space and tone mapping for correct brightness matching with Foundry PIXI
+  // See docs/CONTRAST-DARKNESS-ANALYSIS.md for rationale
+  const THREE = window.THREE;
+  if (THREE && THREE.SRGBColorSpace) {
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+  }
+  // Disable built-in tone mapping - we handle it in LightingEffect composite shader
+  // This prevents double tone mapping which would darken the image
+  if (THREE && THREE.NoToneMapping !== undefined) {
+    renderer.toneMapping = THREE.NoToneMapping;
+  }
+
+  log.debug(`Renderer configured: ${width}x${height}, pixelRatio: ${pixelRatio}, outputColorSpace: sRGB`);
 }

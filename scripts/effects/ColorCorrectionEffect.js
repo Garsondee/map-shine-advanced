@@ -22,6 +22,9 @@ export class ColorCorrectionEffect extends EffectBase {
     this.mesh = null;
     this.material = null;
     
+    // NOTE: Defaults tuned to match Foundry PIXI brightness more closely.
+    // Tone mapping is OFF by default to avoid darkening the scene.
+    // See docs/CONTRAST-DARKNESS-ANALYSIS.md for rationale.
     this.params = {
       // 1. Input
       exposure: 1.0,
@@ -31,8 +34,8 @@ export class ColorCorrectionEffect extends EffectBase {
       tint: 0.0,        // -1.0 (Green) to 1.0 (Magenta)
       
       // 3. Basic Adjustments
-      brightness: 0.01,
-      contrast: 1.01,
+      brightness: 0.0,  // Neutral (was 0.01)
+      contrast: 1.0,    // Neutral (was 1.01)
       saturation: 1.0,
       vibrance: 0.0,
       
@@ -41,10 +44,10 @@ export class ColorCorrectionEffect extends EffectBase {
       liftColor: { r: 0, g: 0, b: 0 },
       gammaColor: { r: 1, g: 1, b: 1 },
       gainColor: { r: 1, g: 1, b: 1 },
-      masterGamma: 1.15,
+      masterGamma: 1.0, // Neutral (was 1.15 which darkened midtones)
       
       // 5. Tone Mapping
-      toneMapping: 1, // 0=None, 1=ACES, 2=Reinhard
+      toneMapping: 0, // 0=None (was 1=ACES which compressed and darkened)
       
       // 6. Artistic
       vignetteStrength: 0.0,
@@ -96,20 +99,20 @@ export class ColorCorrectionEffect extends EffectBase {
         temperature: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
         tint: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
         
-        brightness: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.01 },
-        contrast: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.01 },
+        brightness: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.0 },
+        contrast: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0 },
         saturation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0 },
         vibrance: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
         
         liftColor: { type: 'color', default: { r: 0, g: 0, b: 0 } },
         gammaColor: { type: 'color', default: { r: 1, g: 1, b: 1 } },
         gainColor: { type: 'color', default: { r: 1, g: 1, b: 1 } },
-        masterGamma: { type: 'slider', min: 0.1, max: 3, step: 0.01, default: 1.15 },
+        masterGamma: { type: 'slider', min: 0.1, max: 3, step: 0.01, default: 1.0 },
         
         toneMapping: { 
           type: 'list', 
           options: { 'None': 0, 'ACES Filmic': 1, 'Reinhard': 2 },
-          default: 1 
+          default: 0 
         },
         
         vignetteStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.0 },

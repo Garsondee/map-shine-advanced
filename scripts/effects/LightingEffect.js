@@ -20,15 +20,19 @@ export class LightingEffect extends EffectBase {
     this.priority = 1; 
     
     // UI Parameters matching Foundry VTT + Custom Tweaks
+    // NOTE: LightingEffect now ONLY handles lighting math (ambient + dynamic lights).
+    // All tone mapping, exposure, contrast, saturation is handled by ColorCorrectionEffect.
+    // See docs/CONTRAST-DARKNESS-ANALYSIS.md for rationale.
     this.params = {
       enabled: true,
-      globalIllumination: 1.4, // Multiplier for ambient
-      lightIntensity: 0.8, // Master multiplier for dynamic lights (tuned default)
-      darknessEffect: 0.5, // Scales Foundry's darknessLevel (tuned default)
-      exposure: 0.8,
-      saturation: 1.0,
-      contrast: 1.0,
+      globalIllumination: 1.0, // Multiplier for ambient
+      lightIntensity: 1.0, // Master multiplier for dynamic lights
+      darknessEffect: 0.5, // Scales Foundry's darknessLevel
       darknessLevel: 0.0, // Read-only mostly, synced from canvas
+      // Outdoor brightness control: adjusts outdoor areas relative to darkness level
+      // At darkness 0: outdoors *= outdoorBrightness (boost daylight)
+      // At darkness 1: outdoors *= (2.0 - outdoorBrightness) (dim night)
+      outdoorBrightness: 1.5, // 1.0 = no change, 2.0 = double brightness at day
     };
 
     this.lights = new Map(); // Map<id, ThreeLightSource>
@@ -84,23 +88,15 @@ export class LightingEffect extends EffectBase {
           name: 'darkness',
           label: 'Darkness Response',
           type: 'inline',
-          parameters: ['darknessEffect']
+          parameters: ['darknessEffect', 'outdoorBrightness']
         },
-        {
-          name: 'correction',
-          label: 'Color Correction',
-          type: 'inline',
-          parameters: ['exposure', 'saturation', 'contrast']
-        }
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.4 },
-        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.8, label: 'Light Intensity' },
+        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.0 },
+        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 1.0, label: 'Light Intensity' },
         darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Darkness Effect' },
-        exposure: { type: 'slider', min: -1, max: 1, step: 0.1, default: 0.8 },
-        saturation: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.0 },
-        contrast: { type: 'slider', min: 0.5, max: 1.5, step: 0.05, default: 1.0 },
+        outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.5, label: 'Outdoor Brightness' },
       }
     };
   }
@@ -153,10 +149,8 @@ export class LightingEffect extends EffectBase {
         uBushShadowLength: { value: 0.04 },
         uTreeShadowLength: { value: 0.08 },
         uCompositeTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
-        // Post-process settings
-        uExposure: { value: 0.0 },
-        uSaturation: { value: 1.0 },
-        uContrast: { value: 1.0 }
+        // Outdoor brightness boost (applied based on darkness level)
+        uOutdoorBrightness: { value: 1.5 },
       },
       vertexShader: `
         varying vec2 vUv;
@@ -191,9 +185,7 @@ export class LightingEffect extends EffectBase {
         uniform float uBushShadowLength;
         uniform float uTreeShadowLength;
         uniform vec2  uCompositeTexelSize;
-        uniform float uExposure;
-        uniform float uSaturation;
-        uniform float uContrast;
+        uniform float uOutdoorBrightness;
         varying vec2 vUv;
 
         vec3 adjustSaturation(vec3 color, float value) {
@@ -299,27 +291,26 @@ export class LightingEffect extends EffectBase {
           totalIllumination = max(totalIllumination, minIllum);
           
           // 5. Apply Illumination to Base Texture
-          // We calculate the raw HDR color first
-          vec3 hdrColor = baseColor.rgb * totalIllumination;
+          vec3 litColor = baseColor.rgb * totalIllumination;
 
-          // --- POST PROCESSING ---
+          // 6. Apply Outdoor Brightness Boost
+          // At darkness 0: multiply outdoor areas by uOutdoorBrightness (e.g., 1.5 = 50% brighter)
+          // At darkness 1: multiply outdoor areas by (2.0 - uOutdoorBrightness) (e.g., 0.5 = 50% darker)
+          // Indoor areas (where outdoorsMask is dark) are unaffected.
+          if (uHasOutdoorsMask > 0.5) {
+            float outdoorStrength = texture2D(tOutdoorsMask, vUv).r;
+            // Interpolate brightness multiplier based on darkness level
+            // At darkness 0: use uOutdoorBrightness directly
+            // At darkness 1: use (2.0 - uOutdoorBrightness) to invert the boost
+            float dayBoost = uOutdoorBrightness;
+            float nightDim = 2.0 - uOutdoorBrightness;
+            float outdoorMultiplier = mix(dayBoost, nightDim, uDarknessLevel);
+            // Apply only to outdoor areas, indoor areas stay at 1.0
+            float finalMultiplier = mix(1.0, outdoorMultiplier, outdoorStrength);
+            litColor *= finalMultiplier;
+          }
 
-          // Exposure (Applied in linear HDR space)
-          // Note: Since tone mapping compresses brightness, you might need to
-          // bump your default uExposure slightly if the map feels too dark.
-          hdrColor *= pow(2.0, uExposure);
-
-          // Apply Tone Mapping (Reinhard-Jodie)
-          // This maps (0 -> Infinity) to (0 -> 1) smoothly.
-          vec3 toneMappedColor = reinhardJodie(hdrColor);
-
-          // Contrast (Applied after tone mapping handles the range compression)
-          vec3 finalRGB = (toneMappedColor - 0.5) * uContrast + 0.5;
-
-          // Saturation
-          finalRGB = adjustSaturation(finalRGB, uSaturation);
-
-          gl_FragColor = vec4(finalRGB, baseColor.a);
+          gl_FragColor = vec4(litColor, baseColor.a);
         }
       `
     });
@@ -570,9 +561,7 @@ export class LightingEffect extends EffectBase {
     u.uDarknessLevel.value = this.getEffectiveDarkness();
     u.uGlobalIllumination.value = this.params.globalIllumination;
     u.uLightIntensity.value = this.params.lightIntensity;
-    u.uExposure.value = this.params.exposure;
-    u.uSaturation.value = this.params.saturation;
-    u.uContrast.value = this.params.contrast;
+    u.uOutdoorBrightness.value = this.params.outdoorBrightness;
 
     // Drive overhead shadow uniforms from OverheadShadowsEffect (if present).
     try {

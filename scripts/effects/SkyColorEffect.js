@@ -10,11 +10,15 @@ export class SkyColorEffect extends EffectBase {
 
     this.priority = 5;
 
+    // NOTE: Defaults tuned to avoid stacking color correction with ColorCorrectionEffect.
+    // Set intensity to 0 by default so users can opt-in to atmospheric grading.
+    // See docs/CONTRAST-DARKNESS-ANALYSIS.md for rationale.
     this.params = {
       enabled: true,
 
       // Master blend of sky grading vs base scene
-      intensity: 1.0,
+      // Default 0 to avoid double color correction - users can increase for atmospheric look
+      intensity: 0.0,
 
       // Automation vs manual override
       debugOverride: false,
@@ -58,7 +62,7 @@ export class SkyColorEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 1.0,
+          default: 0.0,
           label: 'Intensity',
           throttle: 50
         },

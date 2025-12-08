@@ -39,21 +39,31 @@ export class SceneComposer {
    * @returns {Promise<{scene: THREE.Scene, camera: THREE.Camera, bundle: MapAssetBundle}>}
    */
   async initialize(foundryScene, viewportWidth, viewportHeight) {
-    log.info(`Initializing scene: ${foundryScene.name}`);
+    log.info(`Initializing scene: ${foundryScene?.name || 'unnamed'}`);
 
     const THREE = window.THREE;
     if (!THREE) {
       throw new Error('three.js not loaded');
     }
 
-    // Store Foundry scene data
+    // Validate foundryScene exists
+    if (!foundryScene) {
+      throw new Error('No Foundry scene provided');
+    }
+
+    // Validate dimensions exist (required for camera/plane setup)
+    if (!foundryScene.dimensions) {
+      throw new Error('Scene has no dimensions data');
+    }
+
+    // Store Foundry scene data with safe defaults
     this.foundrySceneData = {
-      width: foundryScene.dimensions.width,
-      height: foundryScene.dimensions.height,
-      sceneWidth: foundryScene.dimensions.sceneWidth,
-      sceneHeight: foundryScene.dimensions.sceneHeight,
-      gridSize: foundryScene.grid.size,
-      gridType: foundryScene.grid.type,
+      width: foundryScene.dimensions.width || 1000,
+      height: foundryScene.dimensions.height || 1000,
+      sceneWidth: foundryScene.dimensions.sceneWidth || foundryScene.dimensions.width || 1000,
+      sceneHeight: foundryScene.dimensions.sceneHeight || foundryScene.dimensions.height || 1000,
+      gridSize: foundryScene.grid?.size || 100,
+      gridType: foundryScene.grid?.type || 1,
       padding: foundryScene.padding || 0,
       backgroundColor: foundryScene.backgroundColor || '#999999'
     };
@@ -63,34 +73,51 @@ export class SceneComposer {
     // Remove explicit scene background to rely on renderer clear color (which is forced to black)
     // this.scene.background = new THREE.Color(0x000000); 
     
-    // Use Foundry's already-loaded background texture instead of reloading
-    // Foundry's canvas.primary.background.texture is already loaded and accessible
-    const baseTexture = await this.getFoundryBackgroundTexture(foundryScene);
-    if (!baseTexture) {
-      throw new Error(`Could not access Foundry's loaded background texture`);
-    }
-
-    // Load effect masks only (not base texture)
-    const bgPath = this.extractBasePath(foundryScene.background.src);
-    log.info(`Loading effect masks for: ${bgPath}`);
+    // Check if scene has a background image
+    const hasBackgroundImage = foundryScene.background?.src && 
+                               typeof foundryScene.background.src === 'string' && 
+                               foundryScene.background.src.trim().length > 0;
     
-    const result = await assetLoader.loadAssetBundle(
-      bgPath,
-      (loaded, total, asset) => {
-        log.debug(`Asset loading: ${loaded}/${total} - ${asset}`);
-      },
-      { skipBaseTexture: true } // Skip base texture since we got it from Foundry
-    );
+    let baseTexture = null;
+    let bgPath = null;
+    
+    if (hasBackgroundImage) {
+      // Use Foundry's already-loaded background texture instead of reloading
+      // Foundry's canvas.primary.background.texture is already loaded and accessible
+      baseTexture = await this.getFoundryBackgroundTexture(foundryScene);
+      
+      if (baseTexture) {
+        // Load effect masks only (not base texture)
+        bgPath = this.extractBasePath(foundryScene.background.src);
+        log.info(`Loading effect masks for: ${bgPath}`);
+      } else {
+        log.warn('Could not access Foundry background texture, using fallback');
+      }
+    } else {
+      log.info('Scene has no background image, using solid color fallback');
+    }
+    
+    // Load effect masks if we have a background path
+    let result = { success: false, bundle: { masks: [] }, warnings: [] };
+    if (bgPath) {
+      result = await assetLoader.loadAssetBundle(
+        bgPath,
+        (loaded, total, asset) => {
+          log.debug(`Asset loading: ${loaded}/${total} - ${asset}`);
+        },
+        { skipBaseTexture: true } // Skip base texture since we got it from Foundry
+      );
+    }
 
     // Create bundle with Foundry's texture + any masks that loaded successfully
     this.currentBundle = {
-      basePath: bgPath,
+      basePath: bgPath || '',
       baseTexture: baseTexture,
       masks: result.success ? result.bundle.masks : [],
       isMapShineCompatible: result.success ? result.bundle.isMapShineCompatible : false
     };
 
-    // Create base plane mesh with the battlemap texture
+    // Create base plane mesh (with texture or fallback color)
     this.createBasePlane(baseTexture);
 
     // Setup orthographic camera
@@ -176,17 +203,17 @@ export class SceneComposer {
 
   /**
    * Create the base plane mesh with battlemap texture
-   * @param {THREE.Texture} texture - Base battlemap texture
+   * @param {THREE.Texture|null} texture - Base battlemap texture (null for blank maps)
    * @private
    */
   createBasePlane(texture) {
     const THREE = window.THREE;
 
-    // Get texture dimensions
-    const imgWidth = texture.image.width;
-    const imgHeight = texture.image.height;
+    // Get texture dimensions (or use scene dimensions for blank maps)
+    const imgWidth = texture?.image?.width || this.foundrySceneData.sceneWidth;
+    const imgHeight = texture?.image?.height || this.foundrySceneData.sceneHeight;
 
-    log.debug(`Creating base plane: ${imgWidth}x${imgHeight}px`);
+    log.debug(`Creating base plane: ${imgWidth}x${imgHeight}px${texture ? '' : ' (no texture)'}`);
 
     // Create plane geometry matching texture aspect ratio
     // Use Foundry scene dimensions for world space size
@@ -215,15 +242,27 @@ export class SceneComposer {
     const geometry = new THREE.PlaneGeometry(sceneWidth, sceneHeight);
     
     // Basic material for now (will be replaced with PBR material in effect system)
-    const material = new THREE.MeshBasicMaterial({
-      map: texture,
-      side: THREE.FrontSide, // Only render texture on front
-      transparent: false
-    });
-    // Flip Y to correct UV orientation mismatch between PIXI and three.js
-    if (material.map) { 
-      material.map.flipY = false; 
-      material.map.needsUpdate = true; 
+    // If no texture, use scene background color
+    let material;
+    if (texture) {
+      material = new THREE.MeshBasicMaterial({
+        map: texture,
+        side: THREE.FrontSide, // Only render texture on front
+        transparent: false
+      });
+      // Flip Y to correct UV orientation mismatch between PIXI and three.js
+      if (material.map) { 
+        material.map.flipY = false; 
+        material.map.needsUpdate = true; 
+      }
+    } else {
+      // Fallback: solid color plane for blank maps
+      material = new THREE.MeshBasicMaterial({
+        color: bgColorInt,
+        side: THREE.FrontSide,
+        transparent: false
+      });
+      log.info('Using solid color material for blank map');
     }
 
     this.basePlaneMesh = new THREE.Mesh(geometry, material);

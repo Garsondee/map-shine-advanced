@@ -235,7 +235,7 @@ export class EffectComposer {
         effect.render(this.renderer, this.scene, this.camera);
       } catch (error) {
         log.error(`Scene effect update/render error (${effect.id}):`, error);
-        effect.enabled = false;
+        this.handleEffectError(effect, error);
       }
     }
 
@@ -323,7 +323,32 @@ export class EffectComposer {
 
       } catch (error) {
         log.error(`Post-processing effect error (${effect.id}):`, error);
-        effect.enabled = false;
+        this.handleEffectError(effect, error);
+      }
+    }
+  }
+
+  /**
+   * Handle effect error with user notification
+   * @param {EffectBase} effect - The effect that errored
+   * @param {Error} error - The error that occurred
+   * @private
+   */
+  handleEffectError(effect, error) {
+    // Disable the effect to prevent repeated errors
+    effect.enabled = false;
+    
+    // Store error state for debugging
+    effect.errorState = error.message || 'Unknown error';
+    effect.errorTime = Date.now();
+    
+    // Notify user once per effect (don't spam notifications)
+    if (!effect._userNotified) {
+      effect._userNotified = true;
+      
+      // Use Foundry's notification system if available
+      if (typeof ui !== 'undefined' && ui.notifications) {
+        ui.notifications.warn(`Map Shine: "${effect.id}" effect disabled due to error. Check console for details.`);
       }
     }
   }
@@ -500,17 +525,57 @@ export class EffectBase {
 
   /**
    * Handle resize event
+   * Default implementation updates common resources (render targets, resolution uniforms)
+   * Override in subclass for custom resize behavior
    * @param {number} width - New width
    * @param {number} height - New height
    */
   onResize(width, height) {
-    // Override in subclass if needed
+    // Update any render targets owned by this effect
+    if (this.renderTarget) {
+      this.renderTarget.setSize(width, height);
+    }
+    
+    // Update resolution uniforms if present
+    if (this.material?.uniforms?.uResolution) {
+      this.material.uniforms.uResolution.value.set(width, height);
+    }
+    if (this.material?.uniforms?.uTexelSize) {
+      this.material.uniforms.uTexelSize.value.set(1 / width, 1 / height);
+    }
   }
 
   /**
    * Dispose effect resources
+   * Default implementation cleans up common resources
+   * Override in subclass for additional cleanup
    */
   dispose() {
-    // Override in subclass
+    // Dispose materials
+    if (this.material) {
+      if (this.material.map) {
+        this.material.map.dispose();
+      }
+      this.material.dispose();
+      this.material = null;
+    }
+    
+    // Dispose geometries
+    if (this.geometry) {
+      this.geometry.dispose();
+      this.geometry = null;
+    }
+    
+    // Dispose render targets
+    if (this.renderTarget) {
+      this.renderTarget.dispose();
+      this.renderTarget = null;
+    }
+    
+    // Remove mesh from scene if present
+    if (this.mesh && this.mesh.parent) {
+      this.mesh.parent.remove(this.mesh);
+      this.mesh = null;
+    }
   }
 }

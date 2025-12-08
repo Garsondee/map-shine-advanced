@@ -45,6 +45,67 @@ const log = createLogger('FireSparksEffect');
  *     offsetX = canvas.dimensions.sceneX
  *     offsetY = H - sceneY - sceneHeight  (Y-inverted world coords)
  */
+/**
+ * Emitter shape that spawns particles from a list of discrete world-space
+ * points (from MapPointsManager). Used for v1.x backwards compatibility
+ * where fire sources are defined as explicit coordinates rather than masks.
+ *
+ * This aggregates ALL map points into a single emitter shape so we only
+ * need 1-2 particle systems total instead of N systems per point.
+ */
+class MultiPointEmitterShape {
+  /**
+   * @param {Float32Array} points - Packed [x, y, intensity, x, y, intensity, ...] in world coords
+   * @param {Object} ownerEffect - Reference to FireSparksEffect for weather queries
+   */
+  constructor(points, ownerEffect) {
+    this.points = points; // Float32Array: [x, y, intensity, ...]
+    this.ownerEffect = ownerEffect;
+    this.type = 'multi_point';
+  }
+
+  initialize(p) {
+    const count = this.points.length / 3;
+    if (count === 0) return;
+
+    // Pick a random point from the list
+    const idx = Math.floor(Math.random() * count) * 3;
+    const worldX = this.points[idx];
+    const worldY = this.points[idx + 1];
+    const intensity = this.points[idx + 2];
+
+    // Defensive: if data is bad, kill this particle immediately
+    if (!Number.isFinite(worldX) || !Number.isFinite(worldY) || !Number.isFinite(intensity) || intensity <= 0) {
+      if (typeof p.life === 'number') p.life = 0;
+      if (p.color && typeof p.color.w === 'number') p.color.w = 0;
+      if (typeof p.size === 'number') p.size = 0;
+      return;
+    }
+
+    // Position directly in world space (already converted by setMapPointsSources)
+    p.position.x = worldX;
+    p.position.y = worldY;
+    p.position.z = 0;
+
+    // Apply intensity-based modifiers
+    if (typeof p.life === 'number') {
+      p.life *= (0.5 + 0.5 * intensity);
+    }
+    if (typeof p.size === 'number') {
+      p.size *= (0.6 + 0.4 * intensity);
+    }
+
+    // Reset velocity
+    if (p.velocity) {
+      p.velocity.set(0, 0, 0);
+    }
+  }
+
+  update(system, delta) {
+    // Static point list, no per-frame evolution
+  }
+}
+
 class FireMaskShape {
   constructor(points, width, height, offsetX, offsetY, ownerEffect) {
     this.points = points;
@@ -437,6 +498,146 @@ export class FireSparksEffect extends EffectBase {
     log.info('Connected to ParticleSystem');
   }
   
+  /**
+   * Set up fire sources from MapPointsManager (v1.x backwards compatibility)
+   * Creates AGGREGATED fire particle systems from all map point locations.
+   * 
+   * PERFORMANCE FIX: Instead of creating one ParticleSystem per point (which
+   * caused multi-second freezes on zoom-out with many fire sources), we now
+   * aggregate all points into a single MultiPointEmitterShape and create
+   * just 1-2 systems total (fire + embers).
+   * 
+   * @param {MapPointsManager} mapPointsManager - The map points manager instance
+   */
+  setMapPointsSources(mapPointsManager) {
+    if (!mapPointsManager || !this.particleSystemRef?.batchRenderer) {
+      return;
+    }
+
+    // Get all point groups targeting 'fire' or 'candleFlame'
+    const fireGroups = mapPointsManager.getGroupsByEffect('fire');
+    const candleGroups = mapPointsManager.getGroupsByEffect('candleFlame');
+    
+    const allGroups = [...fireGroups, ...candleGroups];
+    
+    if (allGroups.length === 0) {
+      log.debug('No map point fire sources found');
+      return;
+    }
+
+    // Aggregate all points into arrays for fire and candle separately
+    const firePoints = [];   // Regular fire points
+    const candlePoints = []; // Candle flame points (smaller, gentler)
+    
+    const d = canvas?.dimensions;
+    const worldHeight = d?.height || 1000;
+
+    for (const group of allGroups) {
+      if (!group.points || group.points.length === 0) continue;
+      
+      const isCandle = group.effectTarget === 'candleFlame';
+      const intensity = group.emission?.intensity ?? 1.0;
+      const targetArray = isCandle ? candlePoints : firePoints;
+      
+      for (const point of group.points) {
+        // Convert to world coordinates (Foundry Y is inverted)
+        const worldX = point.x;
+        const worldY = worldHeight - point.y;
+        
+        // Pack as [x, y, intensity]
+        targetArray.push(worldX, worldY, intensity);
+      }
+    }
+
+    const totalPoints = (firePoints.length + candlePoints.length) / 3;
+    log.info(`Aggregating ${totalPoints} map points into combined fire systems`);
+
+    // Create a single fire system for all regular fire points
+    if (firePoints.length > 0) {
+      const firePointsArray = new Float32Array(firePoints);
+      const fireShape = new MultiPointEmitterShape(firePointsArray, this);
+      const pointCount = firePoints.length / 3;
+      
+      // Scale emission rate by number of points
+      const baseRate = this.params.globalFireRate ?? 4.0;
+      const rate = new IntervalValue(
+        baseRate * pointCount * 0.5,
+        baseRate * pointCount * 1.0
+      );
+      
+      const fireSystem = this._createFireSystem({
+        shape: fireShape,
+        rate,
+        size: this.params.fireSize,
+        height: this.params.fireHeight
+      });
+      
+      this.particleSystemRef.batchRenderer.addSystem(fireSystem);
+      this.scene.add(fireSystem.emitter);
+      
+      // Track as a single aggregated fire source
+      this.fires.push({
+        id: 'mappoints_fire_aggregated',
+        system: fireSystem,
+        position: { x: 0, y: 0 }, // Centroid not meaningful for aggregated
+        isCandle: false,
+        pointCount
+      });
+      
+      // Create matching ember system
+      const emberRate = new IntervalValue(
+        (this.params.emberRate ?? 5.0) * pointCount * 0.3,
+        (this.params.emberRate ?? 5.0) * pointCount * 0.6
+      );
+      
+      const emberSystem = this._createEmberSystem({
+        shape: fireShape, // Reuse same shape
+        rate: emberRate,
+        height: this.params.fireHeight
+      });
+      
+      this.particleSystemRef.batchRenderer.addSystem(emberSystem);
+      this.scene.add(emberSystem.emitter);
+      
+      log.info(`Created aggregated fire system for ${pointCount} fire points`);
+    }
+
+    // Create a single candle system for all candle points
+    if (candlePoints.length > 0) {
+      const candlePointsArray = new Float32Array(candlePoints);
+      const candleShape = new MultiPointEmitterShape(candlePointsArray, this);
+      const pointCount = candlePoints.length / 3;
+      
+      // Candles are smaller and gentler
+      const scale = 0.3;
+      const baseRate = this.params.globalFireRate ?? 4.0;
+      const rate = new IntervalValue(
+        baseRate * pointCount * 0.3 * scale,
+        baseRate * pointCount * 0.6 * scale
+      );
+      
+      const candleSystem = this._createFireSystem({
+        shape: candleShape,
+        rate,
+        size: this.params.fireSize * scale,
+        height: this.params.fireHeight * scale
+      });
+      
+      this.particleSystemRef.batchRenderer.addSystem(candleSystem);
+      this.scene.add(candleSystem.emitter);
+      
+      this.fires.push({
+        id: 'mappoints_candle_aggregated',
+        system: candleSystem,
+        position: { x: 0, y: 0 },
+        isCandle: true,
+        pointCount
+      });
+      
+      log.info(`Created aggregated candle system for ${pointCount} candle points`);
+    }
+  }
+
   setAssetBundle(bundle) {
     if (!bundle || !bundle.masks) return;
     // The asset loader (assets/loader.js) exposes any `<Base>_Fire.*` image

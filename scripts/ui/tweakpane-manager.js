@@ -7,6 +7,7 @@
 import { createLogger } from '../core/log.js';
 import { globalValidator, getSpecularEffectiveState, getStripeDependencyState } from './parameter-validator.js';
 import { TextureManagerUI } from './texture-manager.js';
+import * as sceneSettings from '../settings/scene-settings.js';
 
 const log = createLogger('UI');
 
@@ -487,6 +488,56 @@ export class TweakpaneManager {
     }).on('click', () => {
       this.revertToMapMaker();
     });
+
+    // Enable / Upgrade Map Shine Advanced for this scene
+    const scene = canvas?.scene;
+    const isEnabled = !!scene && scene.getFlag('map-shine-advanced', 'enabled') === true;
+    // Legacy v1.x module used the "map-shine" flag scope. On newer
+    // Foundry versions, getFlag will throw if that scope is not
+    // registered, so we must guard this in a try/catch.
+    let hasLegacy = false;
+    if (scene) {
+      try {
+        hasLegacy = scene.getFlag('map-shine', 'enabled') === true;
+      } catch (e) {
+        // Flag scope not available; treat as no legacy data present.
+        hasLegacy = false;
+      }
+    }
+
+    if (scene) {
+      if (isEnabled) {
+        // Show a disabled status button when already enabled
+        const statusButton = setupFolder.addButton({
+          title: 'Map Shine Advanced Enabled'
+        });
+        statusButton.disabled = true;
+      } else {
+        const title = hasLegacy
+          ? 'Upgrade Scene to Map Shine Advanced'
+          : 'Enable Map Shine Advanced for this Scene';
+
+        const enableButton = setupFolder.addButton({
+          title
+        });
+
+        enableButton.on('click', async () => {
+          const s = canvas?.scene;
+          if (!s) {
+            ui.notifications?.warn?.('Map Shine: No active scene to enable.');
+            return;
+          }
+
+          try {
+            await sceneSettings.enable(s);
+            ui.notifications?.info?.('Map Shine: Scene enabled for Map Shine Advanced. Reload or re-open the scene to activate the 3D canvas.');
+          } catch (e) {
+            log.error('Failed to enable Map Shine Advanced for scene:', e);
+            ui.notifications?.error?.('Map Shine: Failed to enable this scene. Check console for details.');
+          }
+        });
+      }
+    }
 
     // Track accordion state
     setupFolder.on('fold', (ev) => {

@@ -65,6 +65,7 @@ import { TemplateManager } from '../scene/template-manager.js';
 import { LightIconManager } from '../scene/light-icon-manager.js';
 import { InteractionManager } from '../scene/interaction-manager.js';
 import { GridRenderer } from '../scene/grid-renderer.js';
+import { MapPointsManager } from '../scene/map-points-manager.js';
 import { DropHandler } from './drop-handler.js';
 import { sceneDebug } from '../utils/scene-debug.js';
 import { weatherController } from '../core/WeatherController.js';
@@ -125,6 +126,9 @@ let interactionManager = null;
 /** @type {GridRenderer|null} */
 let gridRenderer = null;
 
+/** @type {MapPointsManager|null} */
+let mapPointsManager = null;
+
 /** @type {DropHandler|null} */
 let dropHandler = null;
 
@@ -161,6 +165,9 @@ export function initialize() {
     
     // Hook into canvas teardown
     Hooks.on('canvasTearDown', onCanvasTearDown);
+    
+    // Hook into scene configuration changes (grid, padding, background, etc.)
+    Hooks.on('updateScene', onUpdateScene);
 
     isHooked = true;
     log.info('Canvas replacement hooks registered');
@@ -173,6 +180,41 @@ export function initialize() {
 }
 
 /**
+ * Hook handler for updateScene event
+ * Called when scene configuration changes mid-session
+ * @param {Scene} scene - The updated scene
+ * @param {object} changes - Changed properties
+ * @param {object} options - Update options
+ * @param {string} userId - User who made the change
+ * @private
+ */
+function onUpdateScene(scene, changes, options, userId) {
+  // Only process if this is the current scene and Map Shine is enabled
+  if (!canvas?.scene || scene.id !== canvas.scene.id) return;
+  if (!sceneSettings.isEnabled(scene)) return;
+  
+  // Check for changes that require full reinitialization
+  const requiresReinit = [
+    'grid',           // Grid size, type, style changes
+    'padding',        // Scene padding changes
+    'background',     // Background image changes
+    'width',          // Scene dimension changes
+    'height',
+    'backgroundColor' // Background color changes
+  ].some(key => key in changes);
+  
+  if (requiresReinit) {
+    log.info('Scene configuration changed, reinitializing Map Shine canvas');
+    
+    // Defer to next frame to ensure Foundry has finished updating
+    setTimeout(async () => {
+      destroyThreeCanvas();
+      await createThreeCanvas(scene);
+    }, 0);
+  }
+}
+
+/**
  * Hook handler for canvasReady event
  * Called when Foundry's canvas is fully initialized
  * @param {Canvas} canvas - Foundry canvas instance
@@ -181,9 +223,8 @@ export function initialize() {
 async function onCanvasReady(canvas) {
   const scene = canvas.scene;
 
-  // Check if Map Shine is enabled for this scene
-  if (!scene || !sceneSettings.isEnabled(scene)) {
-    log.debug(`Scene not enabled for Map Shine: ${scene?.name || 'undefined'}`);
+  if (!scene) {
+    log.debug('onCanvasReady called with no active scene');
     return;
   }
 
@@ -192,18 +233,49 @@ async function onCanvasReady(canvas) {
   if (!window.MapShine || !window.MapShine.initialized) {
     log.info('Waiting for bootstrap to complete...');
     
-    // Wait up to 5 seconds for bootstrap
+    // Wait up to 15 seconds for bootstrap (increased for slow systems)
+    const MAX_WAIT_MS = 15000;
+    const POLL_INTERVAL_MS = 100;
     const startTime = Date.now();
-    while (!window.MapShine?.initialized && (Date.now() - startTime) < 5000) {
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
+    let lastLogTime = startTime;
     
+    while (!window.MapShine?.initialized && (Date.now() - startTime) < MAX_WAIT_MS) {
+      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+      
+      // Log progress every 2 seconds to show we're still waiting
+      if (Date.now() - lastLogTime > 2000) {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        log.debug(`Still waiting for bootstrap... (${elapsed}s elapsed)`);
+        lastLogTime = Date.now();
+      }
+    }
+
     if (!window.MapShine?.initialized) {
       log.error('Bootstrap timeout - module did not initialize in time');
+      ui.notifications.error('Map Shine: Initialization timeout. Try refreshing the page.');
       return;
     }
     
     log.info('Bootstrap complete, proceeding with canvas initialization');
+  }
+
+  // If scene is not enabled for Map Shine, run UI-only mode so GMs can
+  // configure and enable Map Shine without replacing the Foundry canvas.
+  if (!sceneSettings.isEnabled(scene)) {
+    log.debug(`Scene not enabled for Map Shine, initializing UI-only mode: ${scene.name}`);
+
+    if (!uiManager) {
+      try {
+        uiManager = new TweakpaneManager();
+        await uiManager.initialize();
+        window.MapShine.uiManager = uiManager;
+        log.info('Map Shine UI initialized in UI-only mode');
+      } catch (e) {
+        log.error('Failed to initialize Map Shine UI in UI-only mode:', e);
+      }
+    }
+
+    return;
   }
 
   log.info(`Initializing Map Shine canvas for scene: ${scene.name}`);
@@ -221,8 +293,34 @@ async function onCanvasReady(canvas) {
 function onCanvasTearDown(canvas) {
   log.info('Tearing down Map Shine canvas');
 
+  // CRITICAL: Pause time manager immediately to stop all animations
+  if (effectComposer?.timeManager) {
+    try {
+      effectComposer.timeManager.pause();
+    } catch (e) {
+      log.warn('Failed to pause time manager:', e);
+    }
+  }
+
   // Cleanup three.js canvas
   destroyThreeCanvas();
+  
+  // Clear global references to prevent stale state
+  if (window.MapShine) {
+    window.MapShine.sceneComposer = null;
+    window.MapShine.effectComposer = null;
+    window.MapShine.tokenManager = null;
+    window.MapShine.tileManager = null;
+    window.MapShine.wallManager = null;
+    window.MapShine.visionManager = null;
+    window.MapShine.fogManager = null;
+    window.MapShine.renderLoop = null;
+    window.MapShine.cameraController = null;
+    window.MapShine.interactionManager = null;
+    window.MapShine.gridRenderer = null;
+    window.MapShine.mapPointsManager = null;
+    // Keep renderer and capabilities - they're reusable
+  }
 }
 
 /**
@@ -524,6 +622,17 @@ async function createThreeCanvas(scene) {
     lightIconManager.initialize();
     log.info('Light icon manager initialized');
 
+    // Step 4h: Initialize map points manager (v1.x backwards compatibility)
+    mapPointsManager = new MapPointsManager(threeScene);
+    await mapPointsManager.initialize();
+    log.info('Map points manager initialized');
+
+    // Wire map points to particle effects (fire, candle flame, etc.)
+    if (fireSparksEffect && mapPointsManager.groups.size > 0) {
+      fireSparksEffect.setMapPointsSources(mapPointsManager);
+      log.info('Map points wired to fire effect');
+    }
+
     // Step 5: Initialize interaction manager (Selection, Drag/Drop)
     interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager, wallManager, lightIconManager);
     interactionManager.initialize();
@@ -579,6 +688,7 @@ async function createThreeCanvas(scene) {
     mapShine.lightIconManager = lightIconManager;
     mapShine.interactionManager = interactionManager; // NEW: Expose interaction manager
     mapShine.gridRenderer = gridRenderer; // NEW: Expose grid renderer
+    mapShine.mapPointsManager = mapPointsManager; // NEW: Expose map points manager
     mapShine.weatherController = weatherController; // NEW: Expose weather controller
     mapShine.renderLoop = renderLoop; // CRITICAL: Expose render loop for diagnostics
     mapShine.sceneDebug = sceneDebug; // NEW: Expose scene debug helpers
@@ -1522,6 +1632,13 @@ function destroyThreeCanvas() {
     gridRenderer.dispose();
     gridRenderer = null;
     log.debug('Grid renderer disposed');
+  }
+
+  // Dispose map points manager
+  if (mapPointsManager) {
+    mapPointsManager.dispose();
+    mapPointsManager = null;
+    log.debug('Map points manager disposed');
   }
 
   // Dispose effect composer

@@ -19,6 +19,12 @@
   /* Prevent scrollbar from overlapping inner controls */
   padding-right: 8px;
   box-sizing: border-box;
+  
+  /* PERFORMANCE: Isolate the UI container to prevent hover states from
+     triggering full-page repaints. This creates a new stacking context
+     and limits repaint scope to just this element. */
+  contain: layout style paint;
+  will-change: transform;
 }
 
 /* Localized vertical scrollbar styling for Map Shine UI */

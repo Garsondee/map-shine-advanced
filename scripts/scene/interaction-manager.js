@@ -963,6 +963,12 @@ export class InteractionManager {
    */
   onPointerMove(event) {
     try {
+        // PERFORMANCE: Skip expensive hover detection if mouse is not over the canvas.
+        // This prevents raycasting when hovering over Tweakpane UI or other overlays.
+        // We still process active drags/draws since those need to track mouse globally.
+        const isOverCanvas = event.target === this.canvasElement || 
+                             this.canvasElement.contains(event.target);
+        
         // Check Right Click Threshold (Cancel HUD if dragged)
         if (this.rightClickState.active) {
             const dist = Math.hypot(event.clientX - this.rightClickState.startPos.x, event.clientY - this.rightClickState.startPos.y);
@@ -1146,8 +1152,12 @@ export class InteractionManager {
         }
 
         // Case 2: Hover (if not dragging object)
+        // PERFORMANCE: Only do expensive hover raycasting if mouse is over the canvas.
+        // This prevents frame drops when hovering over Tweakpane UI.
         if (!this.dragState.active || !this.dragState.object) {
-          this.handleHover(event);
+          if (isOverCanvas) {
+            this.handleHover(event);
+          }
           return;
         }
 

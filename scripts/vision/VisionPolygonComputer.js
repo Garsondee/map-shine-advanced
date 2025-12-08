@@ -19,6 +19,19 @@ export class VisionPolygonComputer {
     
     /** @type {number} Small offset for casting rays past endpoints */
     this.epsilon = 0.0001;
+
+    // PERFORMANCE: Reusable object pools to avoid per-frame allocations
+    // These are cleared and reused each compute() call instead of creating new arrays/objects.
+    this._segmentsPool = [];
+    this._endpointsPool = [];
+    this._intersectionsPool = [];
+    this._seenAnglesSet = new Set();
+    this._endpointMap = new Map();
+    
+    // Reusable temp objects for closestPointOnSegment
+    this._tempClosest = { x: 0, y: 0 };
+    this._tempRayEnd = { x: 0, y: 0 };
+    this._tempHit = { x: 0, y: 0 };
   }
 
   /**
@@ -258,23 +271,51 @@ export class VisionPolygonComputer {
    * @returns {Array<{x: number, y: number, angle: number}>}
    */
   collectEndpoints(segments, center, radius) {
-    const endpointMap = new Map();
-    const radiusSq = radius * radius;
+    // PERFORMANCE: Reuse map and array instead of allocating new ones
+    this._endpointMap.clear();
+    this._endpointsPool.length = 0;
     
-    for (const seg of segments) {
-      for (const point of [seg.a, seg.b]) {
-        const distSq = (point.x - center.x) ** 2 + (point.y - center.y) ** 2;
-        if (distSq <= radiusSq * 1.01) { // Small tolerance
-          const key = `${point.x.toFixed(2)},${point.y.toFixed(2)}`;
-          if (!endpointMap.has(key)) {
-            const angle = Math.atan2(point.y - center.y, point.x - center.x);
-            endpointMap.set(key, { x: point.x, y: point.y, angle });
+    const radiusSq = radius * radius;
+    const radiusSqTol = radiusSq * 1.01; // Small tolerance
+    
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      // Inline the two points instead of creating an array
+      const points = [seg.a, seg.b];
+      for (let j = 0; j < 2; j++) {
+        const point = points[j];
+        const dx = point.x - center.x;
+        const dy = point.y - center.y;
+        const distSq = dx * dx + dy * dy;
+        if (distSq <= radiusSqTol) {
+          // Use integer-based key to avoid string allocation overhead
+          const keyX = Math.round(point.x * 100);
+          const keyY = Math.round(point.y * 100);
+          const key = keyX * 1000000 + keyY; // Numeric key
+          if (!this._endpointMap.has(key)) {
+            const angle = Math.atan2(dy, dx);
+            // Reuse endpoint objects from pool if available
+            let ep;
+            if (this._endpointsPool.length < this._endpointMap.size + 1) {
+              ep = { x: point.x, y: point.y, angle };
+            } else {
+              ep = this._endpointsPool[this._endpointMap.size];
+              ep.x = point.x;
+              ep.y = point.y;
+              ep.angle = angle;
+            }
+            this._endpointMap.set(key, ep);
           }
         }
       }
     }
     
-    return Array.from(endpointMap.values());
+    // Build result array reusing pool
+    this._endpointsPool.length = 0;
+    for (const ep of this._endpointMap.values()) {
+      this._endpointsPool.push(ep);
+    }
+    return this._endpointsPool;
   }
 
   /**
@@ -286,28 +327,33 @@ export class VisionPolygonComputer {
    * @returns {Array<{x: number, y: number, angle: number}>}
    */
   castRays(origin, endpoints, segments, radius) {
-    const intersections = [];
-    const seenAngles = new Set();
+    // PERFORMANCE: Reuse arrays and sets instead of allocating
+    this._intersectionsPool.length = 0;
+    this._seenAnglesSet.clear();
     
-    for (const endpoint of endpoints) {
+    const offsets = [-this.epsilon, 0, this.epsilon];
+    
+    for (let i = 0; i < endpoints.length; i++) {
+      const endpoint = endpoints[i];
       // Cast 3 rays: slightly before, at, and slightly after the endpoint
       // This ensures we catch corners correctly
-      for (const offset of [-this.epsilon, 0, this.epsilon]) {
-        const angle = endpoint.angle + offset;
+      for (let j = 0; j < 3; j++) {
+        const angle = endpoint.angle + offsets[j];
         
-        // Avoid duplicate angles
-        const angleKey = angle.toFixed(6);
-        if (seenAngles.has(angleKey)) continue;
-        seenAngles.add(angleKey);
+        // Avoid duplicate angles - use integer key to avoid string allocation
+        const angleKey = Math.round(angle * 1000000);
+        if (this._seenAnglesSet.has(angleKey)) continue;
+        this._seenAnglesSet.add(angleKey);
         
         const hit = this.castRay(origin, angle, segments, radius);
         if (hit) {
-          intersections.push({ x: hit.x, y: hit.y, angle });
+          // Reuse or create intersection object
+          this._intersectionsPool.push({ x: hit.x, y: hit.y, angle });
         }
       }
     }
     
-    return intersections;
+    return this._intersectionsPool;
   }
 
   /**
@@ -400,14 +446,18 @@ export class VisionPolygonComputer {
     const dy = segB.y - segA.y;
     const lenSq = dx * dx + dy * dy;
     
-    if (lenSq === 0) return segA;
+    if (lenSq === 0) {
+      this._tempClosest.x = segA.x;
+      this._tempClosest.y = segA.y;
+      return this._tempClosest;
+    }
     
     let t = ((point.x - segA.x) * dx + (point.y - segA.y) * dy) / lenSq;
     t = Math.max(0, Math.min(1, t));
     
-    return {
-      x: segA.x + t * dx,
-      y: segA.y + t * dy
-    };
+    // PERFORMANCE: Reuse temp object instead of allocating
+    this._tempClosest.x = segA.x + t * dx;
+    this._tempClosest.y = segA.y + t * dy;
+    return this._tempClosest;
   }
 }

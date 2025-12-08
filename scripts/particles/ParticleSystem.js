@@ -6,6 +6,12 @@ import { WeatherParticles } from './WeatherParticles.js';
 
 const log = createLogger('ParticleSystem');
 
+// TEMPORARY GLOBAL KILL-SWITCH:
+// When true, completely disables all Quarks-based particle systems (weather, fire, splashes)
+// so we can profile map pan/zoom performance without any particle overhead.
+// Currently FALSE - particles are re-enabled after vision/fog optimization.
+const DISABLE_ALL_PARTICLES = false;
+
 /**
  * GPU-resident particle system effect (Phase 2)
  * Designed for renderer backends that support compute-style simulation and TSL NodeMaterial.
@@ -49,6 +55,12 @@ export class ParticleSystem extends EffectBase {
    */
   async initialize(renderer, scene, camera) {
     log.info('ParticleSystem.initialize called');
+
+    if (DISABLE_ALL_PARTICLES) {
+      log.warn('ParticleSystem disabled by DISABLE_ALL_PARTICLES flag (perf testing).');
+      this.enabled = false;
+      return;
+    }
     this.renderer = renderer;
     this.scene = scene;
     this.camera = camera;
@@ -107,6 +119,7 @@ export class ParticleSystem extends EffectBase {
    * @param {TimeInfo} timeInfo
    */
   update(timeInfo) {
+    if (DISABLE_ALL_PARTICLES) return;
     if (!this.enabled) return;
     // 0. Step WeatherController so currentState reflects UI-driven targetState
     if (weatherController) {

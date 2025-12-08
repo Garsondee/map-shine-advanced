@@ -13,6 +13,11 @@ import { ThreeLightSource } from './ThreeLightSource.js'; // Import the class ab
 
 const log = createLogger('LightingEffect');
 
+// TEMPORARY KILL-SWITCH: Disable lighting effect for perf testing.
+// Set to true to skip all lighting passes and render scene directly.
+// Currently FALSE so normal rendering works while we profile other systems.
+const DISABLE_LIGHTING_EFFECT = false;
+
 export class LightingEffect extends EffectBase {
   constructor() {
     super('lighting', RenderLayers.POST_PROCESSING, 'low');
@@ -541,6 +546,7 @@ export class LightingEffect extends EffectBase {
   }
 
   update(timeInfo) {
+    if (DISABLE_LIGHTING_EFFECT) return;
     if (!this.enabled) return;
 
     const dt = timeInfo && typeof timeInfo.delta === 'number' ? timeInfo.delta : 0;
@@ -738,6 +744,7 @@ export class LightingEffect extends EffectBase {
   }
 
   render(renderer, scene, camera) {
+    if (DISABLE_LIGHTING_EFFECT) return;
     if (!this.enabled) return;
 
     const THREE = window.THREE;

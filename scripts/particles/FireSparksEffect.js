@@ -323,6 +323,8 @@ export class FireSparksEffect extends EffectBase {
     this.particleSystemRef = null; 
     this.globalSystem = null;
     this.globalEmbers = null;
+    this._lastAssetBundle = null;
+    this._lastMapPointsManager = null;
     this.emberTexture = null;
     this.fireTexture = this._createFireTexture();
     this.settings = {
@@ -510,6 +512,8 @@ export class FireSparksEffect extends EffectBase {
    * @param {MapPointsManager} mapPointsManager - The map points manager instance
    */
   setMapPointsSources(mapPointsManager) {
+    this._lastMapPointsManager = mapPointsManager || null;
+
     if (!mapPointsManager || !this.particleSystemRef?.batchRenderer) {
       return;
     }
@@ -599,7 +603,18 @@ export class FireSparksEffect extends EffectBase {
       this.particleSystemRef.batchRenderer.addSystem(emberSystem);
       this.scene.add(emberSystem.emitter);
       
-      log.info(`Created aggregated fire system for ${pointCount} fire points`);
+      // Track the aggregated ember system as well so it is fully torn down
+      // when the Fire effect is disabled from the UI.
+      this.fires.push({
+        id: 'mappoints_fire_embers_aggregated',
+        system: emberSystem,
+        position: { x: 0, y: 0 },
+        isCandle: false,
+        pointCount,
+        isEmber: true
+      });
+
+      log.info(`Created aggregated fire + ember systems for ${pointCount} fire points`);
     }
 
     // Create a single candle system for all candle points
@@ -639,6 +654,7 @@ export class FireSparksEffect extends EffectBase {
   }
 
   setAssetBundle(bundle) {
+    this._lastAssetBundle = bundle || null;
     if (!bundle || !bundle.masks) return;
     // The asset loader (assets/loader.js) exposes any `<Base>_Fire.*` image
     // as a mask entry with `type: 'fire'`. We treat that as an author-painted
@@ -1073,6 +1089,15 @@ export class FireSparksEffect extends EffectBase {
       if (this.params) {
         this.params.enabled = value;
       }
+      // When disabled from UI, completely tear down fire systems so we can
+      // profile hitching without any Quarks fire overhead. When re-enabled,
+      // lazily rebuild from the last known asset bundle and map-points
+      // sources if available.
+      if (!value) {
+        this._destroyParticleSystems();
+      } else {
+        this._rebuildParticleSystemsIfNeeded();
+      }
     }
   }
   
@@ -1356,13 +1381,76 @@ export class FireSparksEffect extends EffectBase {
   }
   
   dispose() {
-      this.clear();
-      if (this.globalSystem && this.particleSystemRef?.batchRenderer) {
-          this.particleSystemRef.batchRenderer.deleteSystem(this.globalSystem);
-      }
-      if (this.globalEmbers && this.particleSystemRef?.batchRenderer) {
-          this.particleSystemRef.batchRenderer.deleteSystem(this.globalEmbers);
-      }
+      this._destroyParticleSystems();
+      this._lastAssetBundle = null;
+      this._lastMapPointsManager = null;
       super.dispose();
+  }
+
+  /**
+   * Completely remove all fire-related particle systems and lights from the
+   * batch renderer and scene. This is used when the effect is disabled from
+   * the UI and during dispose(). It does not touch the underlying
+   * ParticleSystem backend; only the systems created by this effect.
+   */
+  _destroyParticleSystems() {
+    const batch = this.particleSystemRef?.batchRenderer;
+    const scene = this.scene;
+
+    // Remove global mask-based systems
+    if (batch && this.globalSystem) {
+      batch.deleteSystem(this.globalSystem);
+    }
+    if (scene && this.globalSystem?.emitter) {
+      scene.remove(this.globalSystem.emitter);
+    }
+    if (batch && this.globalEmbers) {
+      batch.deleteSystem(this.globalEmbers);
+    }
+    if (scene && this.globalEmbers?.emitter) {
+      scene.remove(this.globalEmbers.emitter);
+    }
+    this.globalSystem = null;
+    this.globalEmbers = null;
+
+    // Remove any per-fire systems and lights created via createFire or
+    // aggregated map-point paths. We avoid calling removeFire here because
+    // some entries (aggregated systems) may not have a light.
+    if (batch || scene) {
+      for (const f of this.fires) {
+        if (batch && f.system) {
+          batch.deleteSystem(f.system);
+        }
+        if (scene && f.light) {
+          scene.remove(f.light);
+          if (typeof f.light.dispose === 'function') {
+            f.light.dispose();
+          }
+        }
+      }
+    }
+    this.fires.length = 0;
+  }
+
+  /**
+   * Rebuild fire systems after a full teardown when the effect is re-enabled
+   * from the UI. This uses the last asset bundle and map-points manager if
+   * they were provided earlier in the scene lifecycle.
+   */
+  _rebuildParticleSystemsIfNeeded() {
+    // Don't rebuild if we have no particle backend yet
+    if (!this.particleSystemRef?.batchRenderer || !this.scene) return;
+
+    // If we have a stored asset bundle, recreate the global mask-based
+    // systems. setAssetBundle will update _lastAssetBundle again, which is
+    // fine.
+    if (this._lastAssetBundle) {
+      this.setAssetBundle(this._lastAssetBundle);
+    }
+
+    // If we have stored map-points, recreate aggregated systems.
+    if (this._lastMapPointsManager) {
+      this.setMapPointsSources(this._lastMapPointsManager);
+    }
   }
 }

@@ -60,6 +60,10 @@ class WorldVolumeKillBehavior {
     this.type = 'WorldVolumeKill';
     this.min = min.clone();
     this.max = max.clone();
+    // PERFORMANCE FIX: Reuse a single Vector3 for world-space transforms
+    // instead of allocating a new one per particle per frame.
+    // This eliminates massive GC pressure that caused pan/zoom hitches.
+    this._tempVec = new window.THREE.Vector3();
   }
 
   initialize(particle, system) { /* no-op */ }
@@ -70,17 +74,17 @@ class WorldVolumeKillBehavior {
 
     // Convert to world space using the emitter's matrixWorld when available,
     // so this behavior works whether the system uses local or world space.
-    const THREE = window.THREE;
     let wx = p.x;
     let wy = p.y;
     let wz = p.z;
 
-    if (THREE && system && system.emitter && system.emitter.matrixWorld) {
-      const wp = new THREE.Vector3(p.x, p.y, p.z);
-      wp.applyMatrix4(system.emitter.matrixWorld);
-      wx = wp.x;
-      wy = wp.y;
-      wz = wp.z;
+    if (system && system.emitter && system.emitter.matrixWorld) {
+      // PERFORMANCE: Reuse _tempVec instead of allocating new Vector3
+      this._tempVec.set(p.x, p.y, p.z);
+      this._tempVec.applyMatrix4(system.emitter.matrixWorld);
+      wx = this._tempVec.x;
+      wy = this._tempVec.y;
+      wz = this._tempVec.z;
     }
 
     if (
@@ -491,6 +495,10 @@ export class WeatherParticles {
       dropSizeMax: null,
       streakLength: null
     };
+
+    // PERFORMANCE FIX: Reuse Vector3 for wind direction calculations in update()
+    // instead of allocating a new one every frame.
+    this._tempWindDir = new window.THREE.Vector3();
 
     this._initSystems();
   }
@@ -1619,11 +1627,9 @@ _createSnowTexture() {
       const windSpeed = weather.windSpeed || 0; // 0-1 scalar
       const dir2 = weather.windDirection; // Expected THREE.Vector2 or Vector3-like
 
-      const baseDir = new THREE.Vector3(
-        dir2?.x ?? 1,
-        dir2?.y ?? 0,
-        0
-      );
+      // PERFORMANCE FIX: Reuse _tempWindDir instead of allocating new Vector3 every frame
+      const baseDir = this._tempWindDir;
+      baseDir.set(dir2?.x ?? 1, dir2?.y ?? 0, 0);
       if (baseDir.lengthSq() === 0) baseDir.set(1, 0, 0);
       baseDir.normalize();
 

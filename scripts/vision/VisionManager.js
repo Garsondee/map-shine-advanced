@@ -10,6 +10,11 @@ import { VisionPolygonComputer } from './VisionPolygonComputer.js';
 
 const log = createLogger('VisionManager');
 
+// TEMPORARY KILL-SWITCH: Disable vision polygon computation for perf testing.
+// Set to true to skip all vision updates and show entire scene as visible.
+// Currently FALSE - vision is now optimized with throttling and object pooling.
+const DISABLE_VISION_UPDATES = false;
+
 export class VisionManager {
   /**
    * @param {THREE.Renderer} renderer
@@ -62,6 +67,16 @@ export class VisionManager {
     // Scene bounds for clipping vision (set from canvas.dimensions.sceneRect)
     this.sceneBounds = null;
     
+    // PERFORMANCE: Throttle vision updates to avoid recomputing every animation frame.
+    // refreshToken fires ~60 times/sec during token movement; we limit to ~10 updates/sec.
+    this._lastUpdateTime = 0;
+    this._updateThrottleMs = 100; // Minimum ms between vision recomputes
+    this._pendingThrottledUpdate = false;
+    
+    // PERFORMANCE: Reusable objects to avoid per-frame allocations
+    this._tempCenter = { x: 0, y: 0 };
+    this._tempSceneBounds = null;
+    
     // Register hooks
     this.setupHooks();
     
@@ -91,6 +106,7 @@ export class VisionManager {
     
     // refreshToken fires during token animation frames - gives us smooth "in-between" vision
     // This updates the FOV as the token moves, producing more realistic sight lines
+    // PERFORMANCE: Throttle these updates to avoid recomputing vision 60x/sec during animation.
     Hooks.on('refreshToken', (token) => {
       // Only update if this token has vision
       const gsm = window.MapShine?.gameSystem;
@@ -102,7 +118,8 @@ export class VisionManager {
           x: token.x,
           y: token.y
         });
-        this.needsUpdate = true;
+        // Mark for throttled update instead of immediate
+        this._pendingThrottledUpdate = true;
       }
     });
     
@@ -154,7 +171,29 @@ export class VisionManager {
    * Called by EffectComposer or main loop
    */
   update() {
+    if (DISABLE_VISION_UPDATES) {
+      // Skip vision computation entirely; show full scene as visible.
+      this.needsUpdate = false;
+      this._pendingThrottledUpdate = false;
+      return;
+    }
+    
+    // PERFORMANCE: Throttle updates from refreshToken to avoid 60fps vision recomputes.
+    // Immediate updates (needsUpdate) from updateToken/createWall/etc. are not throttled.
+    if (!this.needsUpdate && this._pendingThrottledUpdate) {
+      const now = performance.now();
+      if (now - this._lastUpdateTime < this._updateThrottleMs) {
+        // Too soon since last update, skip this frame
+        return;
+      }
+      // Enough time has passed, allow the throttled update
+      this.needsUpdate = true;
+    }
+    
     if (!this.needsUpdate) return;
+    
+    this._lastUpdateTime = performance.now();
+    this._pendingThrottledUpdate = false;
 
     // 1. Clear Scene
     this.clearScene();

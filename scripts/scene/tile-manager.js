@@ -10,6 +10,11 @@ import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('TileManager');
 
+// TEMPORARY KILL-SWITCH: Disable tile manager updates for perf testing.
+// Set to true to skip all tile sync operations.
+// Currently FALSE so tiles behave normally while we profile other systems.
+const DISABLE_TILE_UPDATES = false;
+
 // Z-layer constants from Architecture
 const Z_BACKGROUND = 1.0;
 const Z_FOREGROUND = 5.0;
@@ -139,6 +144,10 @@ export class TileManager {
    * @public
    */
   syncAllTiles() {
+    if (DISABLE_TILE_UPDATES) {
+      log.warn('TileManager disabled by DISABLE_TILE_UPDATES flag (perf testing).');
+      return;
+    }
     if (!canvas || !canvas.scene || !canvas.scene.tiles) {
       log.warn('Canvas or scene tiles not available');
       return;
@@ -242,6 +251,7 @@ export class TileManager {
    * @public
    */
   update(timeInfo) {
+    if (DISABLE_TILE_UPDATES) return;
     const dt = timeInfo.delta;
     const canvasTokens = canvas.tokens?.placeables || [];
     // We care about controlled tokens or the observed token

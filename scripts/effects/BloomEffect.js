@@ -54,9 +54,9 @@ export class BloomEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        strength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 0.35 },
-        radius: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.16 },
-        threshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.46 },
+        strength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 0.4 },
+        radius: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.2 },
+        threshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.99 },
         tintColor: { type: 'color', default: { r: 1, g: 1, b: 1 } },
         blendOpacity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0 },
         // Tweakpane expects an options map: label -> value
@@ -67,7 +67,7 @@ export class BloomEffect extends EffectBase {
             'Screen': 'screen',
             'Soft Light': 'soft'
           },
-          default: 'add'
+          default: 'screen'
         }
       },
       presets: {

@@ -1369,8 +1369,12 @@ _createSnowTexture() {
 
     if (this.rainSystem) {
         // Minimal per-frame work: just drive emission by precipitation/intensity.
+        // PERFORMANCE: Mutate existing ConstantValue instead of creating new one every frame
         const rainIntensity = baseRainIntensity;
-        this.rainSystem.emissionOverTime = new ConstantValue(4000 * rainIntensity);
+        const emission = this.rainSystem.emissionOverTime;
+        if (emission && typeof emission.value === 'number') {
+            emission.value = 4000 * rainIntensity;
+        }
 
         // --- EFFICIENT TUNING UPDATES ---
         // Only update system properties if the specific tuning value has changed.
@@ -1388,7 +1392,11 @@ _createSnowTexture() {
           this._lastRainTuning.dropSizeMin = currentDropSizeMin;
           this._lastRainTuning.dropSizeMax = currentDropSizeMax;
 
-          this.rainSystem.startSize = new IntervalValue(currentDropSizeMin, currentDropSizeMax);
+          // PERFORMANCE: Mutate existing IntervalValue instead of creating new one
+          if (this.rainSystem.startSize && typeof this.rainSystem.startSize.a === 'number') {
+            this.rainSystem.startSize.a = currentDropSizeMin;
+            this.rainSystem.startSize.b = currentDropSizeMax;
+          }
         }
 
         // 2. Streak Length -> speedFactor
@@ -1422,14 +1430,15 @@ _createSnowTexture() {
           }
 
           // Particle alpha
+          // PERFORMANCE: Mutate existing ColorRange Vector4s instead of creating new ones
           const baseMinAlpha = 1.0;
           const baseMaxAlpha = 0.7;
           const minA = baseMinAlpha * alphaScale;
           const maxA = baseMaxAlpha * alphaScale;
-          this.rainSystem.startColor = new ColorRange(
-            new Vector4(0.6, 0.7, 1.0, minA),
-            new Vector4(0.6, 0.7, 1.0, maxA)
-          );
+          if (this.rainSystem.startColor && this.rainSystem.startColor.a && this.rainSystem.startColor.b) {
+            this.rainSystem.startColor.a.set(0.6, 0.7, 1.0, minA);
+            this.rainSystem.startColor.b.set(0.6, 0.7, 1.0, maxA);
+          }
         }
         // Apply roof mask uniforms for rain (base material)
         if (this._rainMaterial && this._rainMaterial.userData && this._rainMaterial.userData.roofUniforms) {
@@ -1532,17 +1541,27 @@ _createSnowTexture() {
             splashEmission = 200 * baseIntensity * splashIntensityScale * splashPrecipFactor;
           }
 
-          system.emissionOverTime = new ConstantValue(splashEmission);
+          // PERFORMANCE: Mutate existing values instead of creating new objects every frame
+          const emissionVal = system.emissionOverTime;
+          if (emissionVal && typeof emissionVal.value === 'number') {
+            emissionVal.value = splashEmission;
+          }
 
           // --- Lifetime Tuning for this splash ---
           const lifeMin = Math.max(0.001, t.lifeMin ?? 0.1);
           const lifeMax = Math.max(lifeMin, t.lifeMax ?? 0.2);
-          system.startLife = new IntervalValue(lifeMin, lifeMax);
+          if (system.startLife && typeof system.startLife.a === 'number') {
+            system.startLife.a = lifeMin;
+            system.startLife.b = lifeMax;
+          }
 
           // --- Size Tuning for this splash ---
           const sizeMin = t.sizeMin ?? 12.0;
           const sizeMax = Math.max(sizeMin, t.sizeMax ?? 24.0);
-          system.startSize = new IntervalValue(sizeMin, sizeMax);
+          if (system.startSize && typeof system.startSize.a === 'number') {
+            system.startSize.a = sizeMin;
+            system.startSize.b = sizeMax;
+          }
 
           // --- Opacity Peak Tuning for this splash ---
           const peak = (t.peak ?? 0.10) * darknessBrightnessScale;
@@ -1571,12 +1590,19 @@ _createSnowTexture() {
     }
 
     if (this.snowSystem) {
-        this.snowSystem.emissionOverTime = new ConstantValue(500 * snowIntensity);
+        // PERFORMANCE: Mutate existing values instead of creating new objects every frame
+        const snowEmission = this.snowSystem.emissionOverTime;
+        if (snowEmission && typeof snowEmission.value === 'number') {
+            snowEmission.value = 500 * snowIntensity;
+        }
 
         const flakeSize = snowTuning.flakeSize ?? 1.0;
         const sMin = 8 * flakeSize;
         const sMax = 12 * flakeSize;
-        this.snowSystem.startSize = new IntervalValue(sMin, sMax);
+        if (this.snowSystem.startSize && typeof this.snowSystem.startSize.a === 'number') {
+            this.snowSystem.startSize.a = sMin;
+            this.snowSystem.startSize.b = sMax;
+        }
 
         // Snow brightness: modulate by scene darkness so flakes are dim in
         // dark scenes rather than fully self-illuminated.
@@ -1585,10 +1611,11 @@ _createSnowTexture() {
         const snowAlphaScale = clampedSnowB / 3.0;
         const snowMinAlpha = 1.0 * snowAlphaScale;
         const snowMaxAlpha = 0.8 * snowAlphaScale;
-        this.snowSystem.startColor = new ColorRange(
-          new Vector4(1.0, 1.0, 1.0, snowMinAlpha),
-          new Vector4(0.9, 0.95, 1.0, snowMaxAlpha)
-        );
+        // PERFORMANCE: Mutate existing ColorRange Vector4s
+        if (this.snowSystem.startColor && this.snowSystem.startColor.a && this.snowSystem.startColor.b) {
+            this.snowSystem.startColor.a.set(1.0, 1.0, 1.0, snowMinAlpha);
+            this.snowSystem.startColor.b.set(0.9, 0.95, 1.0, snowMaxAlpha);
+        }
 
         // Scale curl noise strength based on tuning so users can dial swirl intensity.
         if (this._snowCurl && this._snowCurlBaseStrength) {
@@ -1638,8 +1665,9 @@ _createSnowTexture() {
       const rainWindInfluence = rainTuning.windInfluence ?? 1.0;
       if (this._rainWindForce && this._rainWindForce.direction) {
         this._rainWindForce.direction.set(baseDir.x, baseDir.y, 0);
-        if (typeof this._rainWindForce.magnitude !== 'undefined') {
-          this._rainWindForce.magnitude = new ConstantValue(3000 * windSpeed * rainWindInfluence);
+        // PERFORMANCE: Mutate existing ConstantValue instead of creating new one
+        if (this._rainWindForce.magnitude && typeof this._rainWindForce.magnitude.value === 'number') {
+          this._rainWindForce.magnitude.value = 3000 * windSpeed * rainWindInfluence;
         }
       }
 
@@ -1663,26 +1691,29 @@ _createSnowTexture() {
         this._snowWindForce.direction.set(baseDir.x, baseDir.y, 0);
 
         // Let windSpeed fully control alignment strength; at 0 wind, no directional drift.
-        if (typeof this._snowWindForce.magnitude !== 'undefined') {
+        // PERFORMANCE: Mutate existing ConstantValue instead of creating new one
+        if (this._snowWindForce.magnitude && typeof this._snowWindForce.magnitude.value === 'number') {
           const baseMag = 800; // matches constructor default above
           const align = THREE.MathUtils.clamp(windSpeed, 0, 1);
           const strength = align * snowWindInfluence;
-          this._snowWindForce.magnitude = new ConstantValue(baseMag * strength);
+          this._snowWindForce.magnitude.value = baseMag * strength;
         }
       }
 
       // Gravity scaling for rain and snow
+      // PERFORMANCE: Mutate existing ConstantValue instead of creating new one
       const rainGravScale = rainTuning.gravityScale ?? 1.0;
-      if (this._rainGravityForce && typeof this._rainGravityForce.magnitude !== 'undefined') {
-        this._rainGravityForce.magnitude = new ConstantValue(this._rainBaseGravity * rainGravScale);
+      if (this._rainGravityForce && this._rainGravityForce.magnitude && typeof this._rainGravityForce.magnitude.value === 'number') {
+        this._rainGravityForce.magnitude.value = this._rainBaseGravity * rainGravScale;
       }
 
       const snowGravScale = snowTuning.gravityScale ?? 1.0;
-      if (this._snowGravityForce && typeof this._snowGravityForce.magnitude !== 'undefined') {
-        this._snowGravityForce.magnitude = new ConstantValue(this._snowBaseGravity * snowGravScale);
+      if (this._snowGravityForce && this._snowGravityForce.magnitude && typeof this._snowGravityForce.magnitude.value === 'number') {
+        this._snowGravityForce.magnitude.value = this._snowBaseGravity * snowGravScale;
       }
 
       // Splashes: Wind coupling (> 25%)
+      // PERFORMANCE: Mutate existing ConstantValue instead of creating new one
       if (this._splashWindForces && this._splashWindForces.length > 0) {
         let splashWindMag = 0;
         // "Start subtle but at 100% wind speed it can be stronger."
@@ -1695,8 +1726,8 @@ _createSnowTexture() {
 
         for (const force of this._splashWindForces) {
           if (force.direction) force.direction.set(baseDir.x, baseDir.y, 0);
-          if (typeof force.magnitude !== 'undefined') {
-            force.magnitude = new ConstantValue(splashWindMag);
+          if (force.magnitude && typeof force.magnitude.value === 'number') {
+            force.magnitude.value = splashWindMag;
           }
         }
       }

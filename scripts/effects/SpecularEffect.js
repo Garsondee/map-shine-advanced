@@ -50,7 +50,7 @@ export class SpecularEffect extends EffectBase {
       textureStatus: 'Searching...',
       hasSpecularMask: false,
 
-      intensity: 0.4,           // Default shine intensity
+      intensity: 0.5,           // Default shine intensity
       roughness: 0.0,
       lightDirection: { x: 0.6, y: 0.4, z: 0.7 },
       lightColor: { r: 1.0, g: 1.0, b: 1.0 },
@@ -59,15 +59,15 @@ export class SpecularEffect extends EffectBase {
       stripeEnabled: true,
       stripeBlendMode: 0,       // 0=Add, 1=Multiply, 2=Screen, 3=Overlay
       parallaxStrength: 1.5,    // Global parallax intensity multiplier
-      stripeMaskThreshold: 0.25, // 0 = all mask, 1 = only brightest texels
+      stripeMaskThreshold: 0.1, // 0 = all mask, 1 = only brightest texels
       
       // Layer 1 - Primary stripes
       stripe1Enabled: true,
-      stripe1Frequency: 20.0,
+      stripe1Frequency: 11.0,
       stripe1Speed: -0.01,
       stripe1Angle: 115.0,
-      stripe1Width: 0.24,
-      stripe1Intensity: 1.0,
+      stripe1Width: 0.21,
+      stripe1Intensity: 5.0,
       stripe1Parallax: 0.0,     // Parallax offset (0 = no parallax)
       stripe1Wave: 1.7,         // Stripe waviness amount
       stripe1Gaps: 0.31,        // Stripe breakup / shiny spots
@@ -75,11 +75,11 @@ export class SpecularEffect extends EffectBase {
       
       // Layer 2 - Secondary stripes
       stripe2Enabled: true,
-      stripe2Frequency: 10.5,
+      stripe2Frequency: 15.5,
       stripe2Speed: -0.02,      // Negative = opposite direction
       stripe2Angle: 111.0,
-      stripe2Width: 0.25,
-      stripe2Intensity: 4.26,
+      stripe2Width: 0.38,
+      stripe2Intensity: 5.0,
       stripe2Parallax: 0.1,
       stripe2Wave: 1.6,
       stripe2Gaps: 0.5,
@@ -87,21 +87,21 @@ export class SpecularEffect extends EffectBase {
       
       // Layer 3 - Tertiary stripes
       stripe3Enabled: true,
-      stripe3Frequency: 11.5,
+      stripe3Frequency: 5.0,
       stripe3Speed: 0.29,
       stripe3Angle: 162.0,
-      stripe3Width: 0.24,
-      stripe3Intensity: 4.09,
+      stripe3Width: 0.09,
+      stripe3Intensity: 5.0,
       stripe3Parallax: 1.0,
       stripe3Wave: 0.4,
       stripe3Gaps: 0.37,
       stripe3Softness: 3.44,
 
       // Micro Sparkle
-      sparkleEnabled: true,
-      sparkleIntensity: 0.5,
-      sparkleScale: 5433,
-      sparkleSpeed: 0.45
+      sparkleEnabled: false,
+      sparkleIntensity: 0.95,
+      sparkleScale: 2460,
+      sparkleSpeed: 1.38
     };
   }
 
@@ -202,7 +202,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 2,
           step: 0.01,
-          default: 0.4,
+          default: 0.5,
           throttle: 100
         },
         roughness: {
@@ -237,7 +237,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.25,
+          default: 0.1,
           throttle: 100
         },
         parallaxStrength: {
@@ -260,7 +260,7 @@ export class SpecularEffect extends EffectBase {
           min: 0.5,
           max: 20,
           step: 0.5,
-          default: 20.0,
+          default: 11.0,
           throttle: 100
         },
         stripe1Speed: {
@@ -287,7 +287,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.24,
+          default: 0.21,
           throttle: 100
         },
         stripe1Intensity: {
@@ -296,7 +296,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 5,
           step: 0.01,
-          default: 1.0,
+          default: 5.0,
           throttle: 100
         },
         stripe1Parallax: {
@@ -346,7 +346,7 @@ export class SpecularEffect extends EffectBase {
           min: 0.5,
           max: 20,
           step: 0.5,
-          default: 10.5,
+          default: 15.5,
           throttle: 100
         },
         stripe2Speed: {
@@ -373,7 +373,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.25,
+          default: 0.38,
           throttle: 100
         },
         stripe2Intensity: {
@@ -382,7 +382,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 5,
           step: 0.01,
-          default: 4.26,
+          default: 5.0,
           throttle: 100
         },
         stripe2Parallax: {
@@ -432,7 +432,7 @@ export class SpecularEffect extends EffectBase {
           min: 0.5,
           max: 20,
           step: 0.5,
-          default: 11.5,
+          default: 5.0,
           throttle: 100
         },
         stripe3Speed: {
@@ -459,7 +459,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.24,
+          default: 0.09,
           throttle: 100
         },
         stripe3Intensity: {
@@ -468,7 +468,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 5,
           step: 0.01,
-          default: 4.09,
+          default: 5.0,
           throttle: 100
         },
         stripe3Parallax: {
@@ -509,34 +509,34 @@ export class SpecularEffect extends EffectBase {
         },
         sparkleEnabled: {
           type: 'boolean',
-          label: 'Enable Sparkles',
-          default: true
+          label: 'Enable Sparkle',
+          default: false
         },
         sparkleIntensity: {
           type: 'slider',
           label: 'Sparkle Intensity',
           min: 0,
-          max: 1,
+          max: 2,
           step: 0.01,
-          default: 0.5,
+          default: 0.95,
           throttle: 100
         },
         sparkleScale: {
           type: 'slider',
           label: 'Sparkle Scale',
-          min: 512,
-          max: 8192,
+          min: 100,
+          max: 10000,
           step: 1,
-          default: 5433,
+          default: 2460,
           throttle: 100
         },
         sparkleSpeed: {
           type: 'slider',
           label: 'Sparkle Speed',
           min: 0,
-          max: 2,
+          max: 5,
           step: 0.01,
-          default: 0.45,
+          default: 1.38,
           throttle: 100
         }
       }

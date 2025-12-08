@@ -46,6 +46,12 @@ export class TileManager {
     this.initialized = false;
     this.hooksRegistered = false;
     
+    // PERFORMANCE: Reusable color objects to avoid per-frame allocations
+    this._globalTint = null;      // Lazy init when THREE is available
+    this._tempDaylight = null;
+    this._tempDarkness = null;
+    this._tempAmbient = null;
+    
     log.debug('TileManager created');
   }
 
@@ -262,7 +268,15 @@ export class TileManager {
     // Calculate global tile tint based on darkness
     // This matches the logic in SpecularEffect to darken elements at night
     const THREE = window.THREE;
-    let globalTint = new THREE.Color(1, 1, 1);
+    
+    // PERFORMANCE: Reuse color objects instead of allocating every frame
+    if (!this._globalTint) {
+      this._globalTint = new THREE.Color(1, 1, 1);
+      this._tempDaylight = new THREE.Color();
+      this._tempDarkness = new THREE.Color();
+      this._tempAmbient = new THREE.Color();
+    }
+    const globalTint = this._globalTint.set(1, 1, 1);
     
     try {
       const scene = canvas?.scene;
@@ -275,22 +289,22 @@ export class TileManager {
           darkness = le.getEffectiveDarkness();
         }
         
-        // Get environment colors (robust fallback)
-        const getThreeColor = (src, def) => {
+        // PERFORMANCE: Reuse color objects, mutate in place
+        const setThreeColor = (target, src, def) => {
             try {
-                if (!src) return new THREE.Color(def);
-                if (src instanceof THREE.Color) return src;
-                if (src.rgb) return new THREE.Color(src.rgb[0], src.rgb[1], src.rgb[2]);
-                if (Array.isArray(src)) return new THREE.Color(src[0], src[1], src[2]);
-                return new THREE.Color(src);
-            } catch (e) { return new THREE.Color(def); }
+                if (!src) { target.set(def); return target; }
+                if (src instanceof THREE.Color) { target.copy(src); return target; }
+                if (src.rgb) { target.setRGB(src.rgb[0], src.rgb[1], src.rgb[2]); return target; }
+                if (Array.isArray(src)) { target.setRGB(src[0], src[1], src[2]); return target; }
+                target.set(src); return target;
+            } catch (e) { target.set(def); return target; }
         };
 
-        const daylight = getThreeColor(env?.colors?.ambientDaylight, 0xffffff);
-        const darknessColor = getThreeColor(env?.colors?.ambientDarkness, 0x242448);
+        const daylight = setThreeColor(this._tempDaylight, env?.colors?.ambientDaylight, 0xffffff);
+        const darknessColor = setThreeColor(this._tempDarkness, env?.colors?.ambientDarkness, 0x242448);
         
-        // Calculate ambient tint (mix of day/night colors)
-        const ambientTint = daylight.clone().lerp(darknessColor, darkness);
+        // Calculate ambient tint (mix of day/night colors) - reuse _tempAmbient
+        this._tempAmbient.copy(daylight).lerp(darknessColor, darkness);
         
         // Calculate light level (brightness falloff)
         // User Request: "I think at darkness 1 you need to darken the scene by something like 0.75"
@@ -299,7 +313,7 @@ export class TileManager {
         const lightLevel = Math.max(1.0 - darkness, 0.25);
         
         // Final tint = ambient color * brightness
-        globalTint.copy(ambientTint).multiplyScalar(lightLevel);
+        globalTint.copy(this._tempAmbient).multiplyScalar(lightLevel);
       }
     } catch(e) {
       // Fallback to white if environment lookup fails

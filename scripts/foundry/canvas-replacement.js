@@ -485,14 +485,15 @@ async function createThreeCanvas(scene) {
     effectComposer.registerEffect(asciiEffect);
     
     // Step 3.4: Register Particle System (WebGPU/WebGL2)
+    // CRITICAL: Must await to ensure batchRenderer is initialized before FireSparksEffect uses it
     const particleSystem = new ParticleSystem();
-    effectComposer.registerEffect(particleSystem);
+    await effectComposer.registerEffect(particleSystem);
 
     // Step 3.4: Register Fire Sparks Effect and wire it to the ParticleSystem
     const fireSparksEffect = new FireSparksEffect();
     // Provide the particle backend so FireSparksEffect can create emitters and bind uniforms
     fireSparksEffect.setParticleSystem(particleSystem);
-    effectComposer.registerEffect(fireSparksEffect);
+    await effectComposer.registerEffect(fireSparksEffect);
     // Pass asset bundle to check for _Fire mask (after particle system is wired)
     if (bundle) {
       fireSparksEffect.setAssetBundle(bundle);
@@ -515,11 +516,21 @@ async function createThreeCanvas(scene) {
     fogManager.load(); // Load saved fog state
 
     // Wire Vision updates to Fog accumulation
-    // Patch update() to trigger accumulation when vision changes
+    // Patch update() to trigger accumulation when vision actually changes
     const originalVisionUpdate = visionManager.update.bind(visionManager);
     visionManager.update = () => {
-      if (visionManager.needsUpdate) {
-        originalVisionUpdate();
+      // Track state BEFORE calling original
+      // We need to detect if the original actually rendered, which happens when:
+      // 1. needsUpdate was true, OR
+      // 2. _pendingThrottledUpdate was true AND throttle timer elapsed
+      // The original clears needsUpdate after rendering, so we check if it changed.
+      const hadPending = visionManager.needsUpdate || visionManager._pendingThrottledUpdate;
+      
+      originalVisionUpdate();
+      
+      // If we had pending work and needsUpdate is now false, an update happened.
+      // Also check _pendingThrottledUpdate is false to confirm the throttled update ran.
+      if (hadPending && !visionManager.needsUpdate && !visionManager._pendingThrottledUpdate) {
         fogManager.accumulate(visionManager.getTexture());
       }
     };
@@ -1051,8 +1062,11 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
   const onWeatherUpdate = (effectId, paramId, value) => {
     // Handle different parameter groups
     if (paramId === 'enabled') {
-       // Weather system is always running technically, but we could toggle visibility of effects
-       // For now, just log
+       // Runtime kill-switch for weather simulation & particles.
+       // When disabled, ParticleSystem.update() checks this flag and skips
+       // all WeatherController + WeatherParticles work so we can profile
+       // map performance without any precipitation overhead.
+       weatherController.enabled = !!value;
        log.debug(`Weather system ${value ? 'enabled' : 'disabled'}`);
     } else if (paramId === 'roofMaskForceEnabled') {
       // Manual override for indoor masking independent of roof hover state
@@ -1166,7 +1180,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
   // Initialize params object from current controller state for the UI
   // We want the UI to reflect the Target State (what the user set), not the wandering Current State
   const weatherParams = {
-    enabled: true,
+    enabled: weatherController.enabled ?? true,
     transitionDuration: weatherController.transitionDuration,
     variability: weatherController.variability,
     simulationSpeed: weatherController.simulationSpeed,

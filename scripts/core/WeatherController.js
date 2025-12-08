@@ -45,7 +45,7 @@ export class WeatherController {
       precipitation: 0.0,
       precipType: PrecipitationType.NONE,
       cloudCover: 0.0,
-      windSpeed: 0.0,
+      windSpeed: 0.07,
       windDirection: { x: 1, y: 0 }, // Placeholder, upgraded to Vector2 in initialize()
       fogDensity: 0.0,
       wetness: 0.0,
@@ -81,6 +81,9 @@ export class WeatherController {
 
     // Season
     this.season = 'SUMMER';
+
+    /** @type {boolean} Global enable/disable flag for all weather simulation & particles */
+    this.enabled = true;
 
     this.initialized = false;
 

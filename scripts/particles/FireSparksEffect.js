@@ -162,6 +162,16 @@ class FireMaskShape {
     if (outdoorFactor > 1) outdoorFactor = 1;
     p._windSusceptibility = outdoorFactor;
 
+    // Indoor vs Outdoor behavior tweak:
+    // - outdoorFactor ~= 1.0  -> fully exposed fire (legacy behavior)
+    // - outdoorFactor ~= 0.0  -> fully indoors (under solid roof)
+    // For indoor fire "sparks", shorten their lifetime so they appear
+    // tighter and less buoyant than outdoor sparks. We leave outdoor
+    // particles unchanged.
+    if (outdoorFactor <= 0.01 && typeof p.life === 'number') {
+      p.life *= 0.2;
+    }
+
     // 4. Weather Guttering: Rain + Wind kills exposed fire
     // "High wind speed plus high precipitation should mean the fire is almost out"
     const weather = weatherController.getCurrentState ? weatherController.getCurrentState() : {};
@@ -327,6 +337,15 @@ export class FireSparksEffect extends EffectBase {
     this._lastMapPointsManager = null;
     this.emberTexture = null;
     this.fireTexture = this._createFireTexture();
+    
+    // PERFORMANCE: Reusable objects to avoid per-frame allocations in update()
+    // These are cleared/reused each frame instead of creating new instances.
+    this._tempVec2 = null; // Lazy init when THREE is available
+    this._reusableIntervalValue = null;
+    this._reusableConstantValue = null;
+    // Per-system reusable color objects (keyed by system reference)
+    this._systemColorCache = new WeakMap();
+    
     this.settings = {
       enabled: true,
       windInfluence: 1.0,
@@ -349,13 +368,13 @@ export class FireSparksEffect extends EffectBase {
       lightIntensity: 0.9,
 
       // Fire fine controls (defaults from tuned UI)
-      fireSizeMin: 25.0,
-      fireSizeMax: 57.0,
+      fireSizeMin: 12.0,
+      fireSizeMax: 65.0,
       fireLifeMin: 0.60,
       fireLifeMax: 1.10,
-      // Opacity Min = 0.01, tuned Opacity Max = 0.03
+      // Opacity Min = 0.01, tuned Opacity Max = 1.0
       fireOpacityMin: 0.01,
-      fireOpacityMax: 0.17,
+      fireOpacityMax: 1.0,
       // Color Boost Min = 0.0, tuned Color Boost Max = 1.75
       fireColorBoostMin: 0.00,
       fireColorBoostMax: 12.0,
@@ -442,19 +461,19 @@ export class FireSparksEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'checkbox', label: 'Fire Enabled', default: true },
-        // Tuned default: 4.0
-        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 4.0 },
+        // Tuned default: 1.0
+        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 1.0 },
         fireAlpha: { type: 'slider', label: 'Opacity (Legacy)', min: 0.0, max: 1.0, step: 0.01, default: 0.6 },
         fireCoreBoost: { type: 'slider', label: 'Core Boost (Legacy)', min: 0.0, max: 5.0, step: 0.1, default: 1.0 },
         // Matches tuned UI default: 600
         fireHeight: { type: 'slider', label: 'Height', min: 10.0, max: 600.0, step: 10.0, default: 600.0 },
-        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 100.0, step: 1.0, default: 25.0 },
-        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 150.0, step: 1.0, default: 57.0 },
+        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 100.0, step: 1.0, default: 12.0 },
+        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 150.0, step: 1.0, default: 65.0 },
         fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 4.0, step: 0.05, default: 0.60 },
         fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 1.10 },
-        // Matches tuned UI defaults: Opacity Min = 0.01, Opacity Max = 0.17
+        // Matches tuned UI defaults: Opacity Min = 0.01, Opacity Max = 1.0
         fireOpacityMin: { type: 'slider', label: 'Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.01 },
-        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.17 },
+        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
         // Matches tuned UI defaults: Color Boost Min = 0.0, Color Boost Max = 12.0
         fireColorBoostMin: { type: 'slider', label: 'Color Boost Min', min: 0.0, max: 2.0, step: 0.05, default: 0.0 },
         fireColorBoostMax: { type: 'slider', label: 'Color Boost Max', min: 0.0, max: 12.0, step: 0.05, default: 12.0 },
@@ -655,11 +674,21 @@ export class FireSparksEffect extends EffectBase {
 
   setAssetBundle(bundle) {
     this._lastAssetBundle = bundle || null;
-    if (!bundle || !bundle.masks) return;
+    if (!bundle || !bundle.masks) {
+      log.info('FireSparksEffect: No bundle or masks provided');
+      return;
+    }
     // The asset loader (assets/loader.js) exposes any `<Base>_Fire.*` image
     // as a mask entry with `type: 'fire'`. We treat that as an author-painted
     // spawn mask for global fire: bright pixels mark where fire should exist.
     const fireMask = bundle.masks.find(m => m.type === 'fire');
+    log.info('FireSparksEffect: Looking for fire mask', { 
+      foundMask: !!fireMask, 
+      hasParticleSystem: !!this.particleSystemRef,
+      hasBatchRenderer: !!this.particleSystemRef?.batchRenderer,
+      hasScene: !!this.scene,
+      maskTypes: bundle.masks.map(m => m.type)
+    });
     if (fireMask && this.particleSystemRef && this.particleSystemRef.batchRenderer) {
       try {
         const d = canvas.dimensions;
@@ -723,6 +752,10 @@ export class FireSparksEffect extends EffectBase {
   
   _generatePoints(maskTexture, threshold = 0.1) {
     const image = maskTexture.image;
+    if (!image) {
+      log.warn('FireSparksEffect: No image in mask texture');
+      return null;
+    }
     const c = document.createElement('canvas');
     c.width = image.width;
     c.height = image.height;
@@ -739,7 +772,11 @@ export class FireSparksEffect extends EffectBase {
             coords.push(x, y, b);
         }
     }
-    if (coords.length === 0) return null;
+    if (coords.length === 0) {
+      log.warn('FireSparksEffect: No fire points found in mask (all pixels below threshold)');
+      return null;
+    }
+    log.info(`FireSparksEffect: Generated ${coords.length / 3} fire spawn points from mask`);
     return new Float32Array(coords);
   }
   
@@ -1122,13 +1159,29 @@ export class FireSparksEffect extends EffectBase {
         // Added pseudo-random phase based on ID to desync lights
         const phase = f.id ? f.id.charCodeAt(0) : 0;
         const phaseFlicker = flicker + Math.sin(t * 17.0 + phase * 0.01) * 0.05;
-        f.light.intensity = baseLightIntensity * (1.0 + phaseFlicker);
+        if (f.light) f.light.intensity = baseLightIntensity * (1.0 + phaseFlicker);
     }
 
     // 2. Update Global Fire Rate
+    // PERFORMANCE: Mutate existing IntervalValue instead of creating new one every frame
     if (this.globalSystem) {
-        const baseRate = 200.0 * this.params.globalFireRate; 
-        this.globalSystem.emissionOverTime = new IntervalValue(baseRate * 0.8, baseRate * 1.2);
+        const baseRate = 200.0 * this.params.globalFireRate;
+        const emission = this.globalSystem.emissionOverTime;
+        if (emission && typeof emission.a === 'number') {
+            emission.a = baseRate * 0.8;
+            emission.b = baseRate * 1.2;
+        }
+        // Debug: Log emission rate once every ~5 seconds
+        if (!this._lastEmissionLog || t - this._lastEmissionLog > 5) {
+            this._lastEmissionLog = t;
+            log.debug('Fire emission rate:', {
+                baseRate,
+                emissionA: emission?.a,
+                emissionB: emission?.b,
+                globalFireRate: this.params.globalFireRate,
+                particleCount: this.globalSystem.particleNum
+            });
+        }
     }
 
     // 3. Apply Wind Forces
@@ -1140,7 +1193,7 @@ export class FireSparksEffect extends EffectBase {
       : (this.settings.windInfluence || 1.0);
 
     // Restore windSpeed for lifetime shortening logic
-    const windSpeed = weatherController.currentState.windSpeed || 0;
+    const windSpeed = weatherController.currentState?.windSpeed || 0;
 
     // Update Roof Mask State (Shared Roof/Occlusion Pattern)
     const roofTex = weatherController.roofMap || null;
@@ -1165,10 +1218,12 @@ export class FireSparksEffect extends EffectBase {
     }
 
     // Retrieve renderer resolution for screen-space UVs (gl_FragCoord.xy / res).
+    // PERFORMANCE: Reuse cached Vector2 instead of allocating every frame
     const renderer = window.MapShine?.renderer || window.canvas?.app?.renderer;
     let resX = 1, resY = 1;
     if (renderer && THREE) {
-      const size = new THREE.Vector2();
+      if (!this._tempVec2) this._tempVec2 = new THREE.Vector2();
+      const size = this._tempVec2;
       // CRITICAL: Use drawing buffer size (physical pixels) so gl_FragCoord.xy
       // matches uResolution on High-DPR displays. Falling back to logical size
       // multiplied by pixelRatio if getDrawingBufferSize is unavailable.
@@ -1185,7 +1240,7 @@ export class FireSparksEffect extends EffectBase {
     
     // Calculate Scene Bounds for UV projection
     // Matches logic in FireMaskShape and WeatherParticles
-    const d = canvas.dimensions;
+    const d = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
     if (d && window.THREE) {
       if (!this._sceneBounds) this._sceneBounds = new window.THREE.Vector4();
       const sw = d.sceneWidth || d.width;
@@ -1202,13 +1257,17 @@ export class FireSparksEffect extends EffectBase {
     const systems = [];
     if (this.globalSystem) systems.push(this.globalSystem);
     if (this.globalEmbers) systems.push(this.globalEmbers);
-    for (const f of this.fires) systems.push(f.system);
+    for (const f of this.fires) {
+        if (f && f.system) systems.push(f.system);
+    }
 
     const p = this.params;
     const clamp01 = x => Math.max(0.0, Math.min(1.0, x));
     const timeScale = Math.max(0.1, p.timeScale ?? 1.0);
 
     for (const sys of systems) {
+        if (!sys) continue; // Skip null/undefined systems
+        
         // Update Roof/Occlusion Uniforms
         // 1. Update the source material (template)
         if (sys.material && sys.material.userData && sys.material.userData.roofUniforms) {
@@ -1264,11 +1323,12 @@ export class FireSparksEffect extends EffectBase {
         const updraftParam = isEmber ? (p.emberUpdraft ?? 1.0) : (p.fireUpdraft ?? 1.0);
         const curlParam = isEmber ? (p.emberCurlStrength ?? 1.0) : (p.fireCurlStrength ?? 1.0);
 
+        // PERFORMANCE: Mutate existing ConstantValue instead of creating new one
         if (sys.userData && sys.userData.updraftForce && typeof sys.userData.baseUpdraftMag === 'number') {
             const uf = sys.userData.updraftForce;
             const baseMag = sys.userData.baseUpdraftMag;
-            if (typeof uf.magnitude !== 'undefined') {
-                uf.magnitude = new ConstantValue(baseMag * Math.max(0.0, updraftParam));
+            if (uf.magnitude && typeof uf.magnitude.value === 'number') {
+                uf.magnitude.value = baseMag * Math.max(0.0, updraftParam);
             }
         }
 
@@ -1277,6 +1337,10 @@ export class FireSparksEffect extends EffectBase {
             sys.userData.turbulence.strength.copy(baseStrength).multiplyScalar(Math.max(0.0, curlParam));
         }
 
+        // PERFORMANCE: Mutate existing IntervalValue/ColorRange objects instead of
+        // creating new ones every frame. three.quarks IntervalValue has .a and .b
+        // properties; ColorRange has .a and .b Vector4s we can mutate in place.
+        
         if (isEmber) {
             const baseEmberLifeMin = p.emberLifeMin ?? 1.5;
             const baseEmberLifeMax = p.emberLifeMax ?? 3.0;
@@ -1292,22 +1356,30 @@ export class FireSparksEffect extends EffectBase {
             const emberStart = p.emberStartColor || { r: 1.0, g: 0.8, b: 0.4 };
             const emberEnd = p.emberEndColor || { r: 1.0, g: 0.2, b: 0.0 };
 
-            sys.startLife = new IntervalValue(lifeMin, lifeMax);
-            sys.startSize = new IntervalValue(sizeMin, sizeMax);
-            sys.startColor = new ColorRange(
-              new Vector4(
-                emberStart.r * colorBoostMin,
-                emberStart.g * colorBoostMin,
-                emberStart.b * colorBoostMin,
-                opacityMin
-              ),
-              new Vector4(
-                emberEnd.r * colorBoostMax,
-                emberEnd.g * colorBoostMax,
-                emberEnd.b * colorBoostMax,
-                opacityMax
-              )
-            );
+            // Mutate existing IntervalValue if present, otherwise set new one (first frame only)
+            if (sys.startLife && typeof sys.startLife.a === 'number') {
+                sys.startLife.a = lifeMin;
+                sys.startLife.b = lifeMax;
+            }
+            if (sys.startSize && typeof sys.startSize.a === 'number') {
+                sys.startSize.a = sizeMin;
+                sys.startSize.b = sizeMax;
+            }
+            // Mutate existing ColorRange Vector4s
+            if (sys.startColor && sys.startColor.a && sys.startColor.b) {
+                sys.startColor.a.set(
+                    emberStart.r * colorBoostMin,
+                    emberStart.g * colorBoostMin,
+                    emberStart.b * colorBoostMin,
+                    opacityMin
+                );
+                sys.startColor.b.set(
+                    emberEnd.r * colorBoostMax,
+                    emberEnd.g * colorBoostMax,
+                    emberEnd.b * colorBoostMax,
+                    opacityMax
+                );
+            }
         } else {
             const baseFireLifeMin = p.fireLifeMin ?? 0.4;
             const baseFireLifeMax = p.fireLifeMax ?? 1.6;
@@ -1325,53 +1397,61 @@ export class FireSparksEffect extends EffectBase {
             const fireStart = p.fireStartColor || { r: 1.2, g: 1.0, b: 0.6 };
             const fireEnd = p.fireEndColor || { r: 0.8, g: 0.2, b: 0.05 };
 
-            sys.startLife = new IntervalValue(lifeMin, lifeMax);
-            sys.startSize = new IntervalValue(sizeMin, sizeMax);
-            sys.startColor = new ColorRange(
-              new Vector4(
-                fireStart.r * colorBoostMin,
-                fireStart.g * colorBoostMin,
-                fireStart.b * colorBoostMin,
-                opacityMin
-              ),
-              new Vector4(
-                fireEnd.r * colorBoostMax,
-                fireEnd.g * colorBoostMax,
-                fireEnd.b * colorBoostMax,
-                opacityMax
-              )
-            );
+            // Mutate existing IntervalValue if present
+            if (sys.startLife && typeof sys.startLife.a === 'number') {
+                sys.startLife.a = lifeMin;
+                sys.startLife.b = lifeMax;
+            }
+            if (sys.startSize && typeof sys.startSize.a === 'number') {
+                sys.startSize.a = sizeMin;
+                sys.startSize.b = sizeMax;
+            }
+            // Mutate existing ColorRange Vector4s
+            if (sys.startColor && sys.startColor.a && sys.startColor.b) {
+                sys.startColor.a.set(
+                    fireStart.r * colorBoostMin,
+                    fireStart.g * colorBoostMin,
+                    fireStart.b * colorBoostMin,
+                    opacityMin
+                );
+                sys.startColor.b.set(
+                    fireEnd.r * colorBoostMax,
+                    fireEnd.g * colorBoostMax,
+                    fireEnd.b * colorBoostMax,
+                    opacityMax
+                );
+            }
 
+            // Update ColorOverLife behavior - mutate existing Vector4s
             if (Array.isArray(sys.behaviors)) {
               const col = sys.behaviors.find(b => b && (b.type === 'ColorOverLife' || b.constructor?.name === 'ColorOverLife'));
-              if (col) {
-                const startVec = new Vector4(
+              if (col && col.color && col.color.a && col.color.b) {
+                col.color.a.set(
                   fireStart.r * colorBoostMax,
                   fireStart.g * colorBoostMax,
                   fireStart.b * colorBoostMax,
                   1.0
                 );
-                const endVec = new Vector4(
+                col.color.b.set(
                   fireEnd.r * colorBoostMax,
                   fireEnd.g * colorBoostMax,
                   fireEnd.b * colorBoostMax,
                   0.0
                 );
-                col.color = new ColorRange(startVec, endVec);
               }
             }
         }
 
+        // Wind-based lifetime reduction - mutate existing IntervalValue
         const baseLifeMinRaw = isEmber ? (p.emberLifeMin ?? 1.5) : (p.fireLifeMin ?? 0.6);
         const baseLifeMaxRaw = isEmber ? (p.emberLifeMax ?? 3.0) : (p.fireLifeMax ?? 1.2);
         const baseLifeMin = baseLifeMinRaw / timeScale;
         const baseLifeMax = baseLifeMaxRaw / timeScale;
 
-        if (windSpeed > 0.1) {
+        if (windSpeed > 0.1 && sys.startLife && typeof sys.startLife.a === 'number') {
             const factor = 1.0 - (windSpeed * 0.6);
-            const minLife = Math.max(0.1, baseLifeMin * factor);
-            const maxLife = Math.max(minLife, baseLifeMax * factor);
-            sys.startLife = new IntervalValue(minLife, maxLife);
+            sys.startLife.a = Math.max(0.1, baseLifeMin * factor);
+            sys.startLife.b = Math.max(sys.startLife.a, baseLifeMax * factor);
         }
     }
   }

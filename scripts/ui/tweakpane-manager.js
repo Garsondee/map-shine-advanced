@@ -95,6 +95,9 @@ export class TweakpaneManager {
     /** @type {{scale:number}} Backing object for UI scale binding */
     this.uiScaleParams = { scale: this.uiScale };
 
+    /** @type {number|null} Pending UI state save timeout */
+    this._uiStateSaveTimeout = null;
+
     /** @type {Object|null} Snapshot for master reset undo */
     this.lastMasterResetSnapshot = null;
 
@@ -1929,13 +1932,28 @@ export class TweakpaneManager {
   }
 
   /**
-   * Save UI state to client settings
+   * Save UI state to client settings (debounced to prevent freeze on rapid accordion clicks)
    * @private
    */
-  async saveUIState() {
+  saveUIState() {
+    // PERFORMANCE: Debounce saves to prevent freezing when rapidly clicking accordions
+    // Each accordion fold event was triggering an immediate async database write
+    if (this._uiStateSaveTimeout) {
+      clearTimeout(this._uiStateSaveTimeout);
+    }
+    
+    this._uiStateSaveTimeout = setTimeout(() => {
+      this._uiStateSaveTimeout = null;
+      this._doSaveUIState();
+    }, 500); // 500ms debounce
+  }
+
+  /**
+   * Actually perform the UI state save
+   * @private
+   */
+  async _doSaveUIState() {
     try {
-      const rect = this.container.getBoundingClientRect();
-      
       const state = {
         position: {
           left: this.container.style.left,

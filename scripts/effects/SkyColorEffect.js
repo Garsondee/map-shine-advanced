@@ -62,7 +62,7 @@ export class SkyColorEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.0,
+          default: 0.2,
           label: 'Intensity',
           throttle: 50
         },

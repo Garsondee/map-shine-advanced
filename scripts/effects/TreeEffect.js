@@ -62,7 +62,7 @@ export class TreeEffect extends EffectBase {
       flutterScale: 0.02,        // Slightly larger clusters (bigger leaf groups)
 
       // -- Color --
-      exposure: -1.0,
+      exposure: 0.0,
       brightness: 0.0,
       contrast: 1.0,
       saturation: 1.1,
@@ -74,6 +74,9 @@ export class TreeEffect extends EffectBase {
       shadowLength: 0.08,
       shadowSoftness: 10.0
     };
+    
+    // PERFORMANCE: Reusable objects to avoid per-frame allocations
+    this._tempSize = null; // Lazy init when THREE is available
   }
 
   _ensureAlphaMask() {
@@ -174,7 +177,7 @@ export class TreeEffect extends EffectBase {
         flutterIntensity: { type: 'slider', label: 'Leaf Flutter Amount', min: 0.0, max: 0.005, step: 0.0001, default: 0.0012 },
         flutterSpeed: { type: 'slider', label: 'Leaf Flutter Speed', min: 1.0, max: 20.0, default: 1.5 },
         flutterScale: { type: 'slider', label: 'Leaf Cluster Size', min: 0.005, max: 0.1, default: 0.02 },
-        exposure: { type: 'slider', min: -2.0, max: 2.0, default: -1.0 },
+        exposure: { type: 'slider', min: -2.0, max: 2.0, default: 0.0 },
         brightness: { type: 'slider', min: -0.5, max: 0.5, default: 0.0 },
         contrast: { type: 'slider', min: 0.5, max: 2.0, default: 1.0 },
         saturation: { type: 'slider', min: 0.0, max: 2.0, default: 1.1 },
@@ -655,7 +658,9 @@ export class TreeEffect extends EffectBase {
       // Screen Space Shadows Setup
       const THREE = window.THREE;
       if (THREE && this.renderer) {
-        const size = new THREE.Vector2();
+        // PERFORMANCE: Reuse Vector2 instead of allocating every frame
+        if (!this._tempSize) this._tempSize = new THREE.Vector2();
+        const size = this._tempSize;
         this.renderer.getDrawingBufferSize(size);
         if (su.uResolution) su.uResolution.value.set(size.x, size.y);
         if (su.uTexelSize) su.uTexelSize.value.set(1 / size.x, 1 / size.y);
@@ -691,7 +696,9 @@ export class TreeEffect extends EffectBase {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    const size = new THREE.Vector2();
+    // PERFORMANCE: Reuse Vector2 instead of allocating every frame
+    if (!this._tempSize) this._tempSize = new THREE.Vector2();
+    const size = this._tempSize;
     renderer.getDrawingBufferSize(size);
 
     if (!this.shadowTarget) {

@@ -349,7 +349,16 @@ export class SnowGeometry {
     } catch (e) {
     }
 
-    u.uRoofMaskEnabled.value = 0.0;
+    // Roof / outdoors mask: cull snow under covered/indoor regions when the
+    // WeatherController has a roofMap (the _Outdoors texture) available.
+    // Always hide snow in black (indoor) areas of the mask, regardless of
+    // whether roof tiles are present or hover-hidden.
+    if (weatherController && weatherController.roofMap) {
+      u.uRoofMap.value = weatherController.roofMap;
+      u.uRoofMaskEnabled.value = 1.0;
+    } else {
+      u.uRoofMaskEnabled.value = 0.0;
+    }
 
     if (bounds) {
       u.uSceneBounds.value.copy(bounds);

@@ -74,6 +74,9 @@ export class LightingEffect extends EffectBase {
     this.outdoorsTarget = null;
 
     this._effectiveDarkness = null;
+    
+    // PERFORMANCE: Reusable objects to avoid per-frame allocations
+    this._tempSize = null; // Lazy init when THREE is available
   }
 
   /**
@@ -98,10 +101,10 @@ export class LightingEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.0 },
-        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 1.0, label: 'Light Intensity' },
+        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.5 },
+        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Light Intensity' },
         darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Darkness Effect' },
-        outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.5, label: 'Outdoor Brightness' },
+        outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 2.0, label: 'Outdoor Brightness' },
       }
     };
   }
@@ -752,7 +755,9 @@ export class LightingEffect extends EffectBase {
     // Ensure we have a light accumulation target that matches the current
     // drawing buffer size. This avoids a black screen if onResize has not
     // been called yet.
-    const size = new THREE.Vector2();
+    // PERFORMANCE: Reuse Vector2 instead of allocating every frame
+    if (!this._tempSize) this._tempSize = new THREE.Vector2();
+    const size = this._tempSize;
     renderer.getDrawingBufferSize(size);
 
     if (!this.lightTarget) {

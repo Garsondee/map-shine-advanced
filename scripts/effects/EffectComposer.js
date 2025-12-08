@@ -47,6 +47,14 @@ export class EffectComposer {
 
     /** @type {TimeManager} - Centralized time management */
     this.timeManager = new TimeManager();
+
+    // PERFORMANCE: Cache for resolved render order to avoid per-frame allocations
+    this._cachedRenderOrder = [];
+    this._renderOrderDirty = true;
+    
+    // PERFORMANCE: Reusable arrays for scene/post effect splitting
+    this._sceneEffects = [];
+    this._postEffects = [];
     
     // Explicitly enable EXT_float_blend if available to suppress warnings
     try {
@@ -74,7 +82,9 @@ export class EffectComposer {
    * @private
    */
   ensureSceneRenderTarget() {
-    const size = new window.THREE.Vector2();
+    // PERFORMANCE: Reuse Vector2 instead of allocating every frame
+    if (!this._sizeVec2) this._sizeVec2 = new window.THREE.Vector2();
+    const size = this._sizeVec2;
     this.renderer.getDrawingBufferSize(size);
     
     if (!this.sceneRenderTarget) {
@@ -95,8 +105,9 @@ export class EffectComposer {
   /**
    * Register an effect for rendering
    * @param {EffectBase} effect - Effect instance
+   * @returns {Promise<void>} Resolves when effect is fully initialized
    */
-  registerEffect(effect) {
+  async registerEffect(effect) {
     if (this.effects.has(effect.id)) {
       log.warn(`Effect already registered: ${effect.id}`);
       return;
@@ -109,7 +120,11 @@ export class EffectComposer {
     }
 
     this.effects.set(effect.id, effect);
-    effect.initialize(this.renderer, this.scene, this.camera);
+    // CRITICAL: Await async initialize methods to ensure effects are fully ready
+    // before subsequent code tries to use them (e.g., FireSparksEffect needs
+    // ParticleSystem.batchRenderer to be initialized before setAssetBundle)
+    await effect.initialize(this.renderer, this.scene, this.camera);
+    this.invalidateRenderOrder();
     
     log.info(`Effect registered: ${effect.id} (layer: ${effect.layer.name})`);
   }
@@ -127,6 +142,7 @@ export class EffectComposer {
 
     effect.dispose();
     this.effects.delete(effectId);
+    this.invalidateRenderOrder();
     log.info(`Effect unregistered: ${effectId}`);
   }
 
@@ -171,23 +187,40 @@ export class EffectComposer {
   }
 
   /**
+   * Mark render order as needing recalculation (call when effects change)
+   */
+  invalidateRenderOrder() {
+    this._renderOrderDirty = true;
+  }
+
+  /**
    * Resolve effect dependencies and determine render order
+   * PERFORMANCE: Caches result to avoid per-frame array allocations
    * @returns {EffectBase[]} Sorted effects ready for rendering
    * @private
    */
   resolveRenderOrder() {
-    const enabledEffects = Array.from(this.effects.values())
-      .filter(effect => effect.enabled);
+    // PERFORMANCE: Only rebuild if dirty
+    // Note: We always rebuild to catch enabled state changes - the cost is minimal
+    // compared to the bugs from stale caches. The main savings is reusing the array.
+    
+    // Rebuild the cached order (reuse array to avoid allocation)
+    this._cachedRenderOrder.length = 0;
+    for (const effect of this.effects.values()) {
+      if (effect.enabled) {
+        this._cachedRenderOrder.push(effect);
+      }
+    }
 
     // Sort by layer order, then by effect priority
-    enabledEffects.sort((a, b) => {
+    this._cachedRenderOrder.sort((a, b) => {
       if (a.layer.order !== b.layer.order) {
         return a.layer.order - b.layer.order;
       }
       return (a.priority || 0) - (b.priority || 0);
     });
 
-    return enabledEffects;
+    return this._cachedRenderOrder;
   }
 
   /**
@@ -210,8 +243,11 @@ export class EffectComposer {
     }
 
     // Split effects into scene (in-world) and post-processing
-    const sceneEffects = [];
-    const postEffects = [];
+    // PERFORMANCE: Reuse arrays instead of allocating new ones every frame
+    const sceneEffects = this._sceneEffects;
+    const postEffects = this._postEffects;
+    sceneEffects.length = 0;
+    postEffects.length = 0;
 
     for (const effect of effects) {
       // Check if effect should render this frame (for performance gating)

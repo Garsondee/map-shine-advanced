@@ -121,6 +121,9 @@ export class ParticleSystem extends EffectBase {
   update(timeInfo) {
     if (DISABLE_ALL_PARTICLES) return;
     if (!this.enabled) return;
+    // When WeatherController is explicitly disabled via the UI, skip all
+    // weather + particle simulation work so we can profile other systems.
+    if (weatherController && weatherController.enabled === false) return;
     // 0. Step WeatherController so currentState reflects UI-driven targetState
     if (weatherController) {
       // Initialize once (no-op on subsequent calls)
@@ -151,16 +154,28 @@ export class ParticleSystem extends EffectBase {
 
     // 5. Update Quarks Renderer
     if (this.batchRenderer) {
-      const dtMs = typeof timeInfo.delta === 'number' ? timeInfo.delta : 16.0;
+      // timeInfo.delta is in SECONDS (from TimeManager), not milliseconds.
+      // We apply a simulation speed multiplier to control particle animation rate.
+      const deltaSec = typeof timeInfo.delta === 'number' ? timeInfo.delta : 0.016;
+      
+      // CRITICAL: Clamp delta to prevent runaway particle spawning after frame stalls.
+      // Without this clamp, a 1-second stall would try to spawn 1 second worth of
+      // particles in a single frame, causing a feedback loop where:
+      //   large delta → spawn many particles → frame takes longer → larger delta → freeze
+      // We cap at 100ms (0.1s) of simulation per frame to break this cycle.
+      const clampedDelta = Math.min(deltaSec, 0.1);
+      
       // Global simulation speed control for Quarks-based systems (weather, fire, etc.).
-      // Quarks expects dt in seconds; we scale it by a base factor and a user-tunable
-      // simulationSpeed coming from WeatherController. A value of 2.0 reproduces the
-      // previous hardcoded 1500x multiplier.
+      // A value of 2.0 with baseScale 750 reproduces the previous 1500x multiplier.
       const simSpeed = (weatherController && typeof weatherController.simulationSpeed === 'number')
         ? weatherController.simulationSpeed
         : 2.0;
-      const baseScale = 750; // 750 * 2.0 = 1500 (matches legacy behavior)
-      const dt = dtMs * 0.001 * baseScale * simSpeed;
+      const baseScale = 750;
+      // NOTE: The * 0.001 factor was historically used because the code assumed
+      // delta was in milliseconds. Since TimeManager provides seconds, this
+      // effectively scales simulation time by 0.001 * 750 * 2 = 1.5x real-time.
+      // We preserve this for backwards compatibility with tuned particle parameters.
+      const dt = clampedDelta * 0.001 * baseScale * simSpeed;
 
       // Update weather systems (pass dt and scene bounds if available)
       if (this.weatherParticles) {

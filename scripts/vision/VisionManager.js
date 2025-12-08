@@ -10,9 +10,10 @@ import { VisionPolygonComputer } from './VisionPolygonComputer.js';
 
 const log = createLogger('VisionManager');
 
-// TEMPORARY KILL-SWITCH: Disable vision polygon computation for perf testing.
-// Set to true to skip all vision updates and show entire scene as visible.
-// Currently FALSE - vision is now optimized with throttling and object pooling.
+// TEMPORARY KILL-SWITCH: Disable heavy vision polygon computation for perf testing.
+// When true, we skip all polygon work but still render a full-visibility quad into
+// the vision render target so downstream effects (FogEffect) continue to receive
+// a valid mask and the scene remains fully visible.
 const DISABLE_VISION_UPDATES = false;
 
 export class VisionManager {
@@ -172,9 +173,24 @@ export class VisionManager {
    */
   update() {
     if (DISABLE_VISION_UPDATES) {
-      // Skip vision computation entirely; show full scene as visible.
-      this.needsUpdate = false;
-      this._pendingThrottledUpdate = false;
+      // PERF MODE: Skip all polygon computation and just render a single
+      // full-screen quad as "fully visible" once, then reuse that texture.
+      if (this.needsUpdate) {
+        this.clearScene();
+
+        const quadGeometry = new window.THREE.PlaneGeometry(this.width, this.height);
+        const quadMesh = new window.THREE.Mesh(quadGeometry, this.material);
+        this.scene.add(quadMesh);
+
+        const currentTarget = this.renderer.getRenderTarget();
+        this.renderer.setRenderTarget(this.renderTarget);
+        this.renderer.clear();
+        this.renderer.render(this.scene, this.camera);
+        this.renderer.setRenderTarget(currentTarget);
+
+        this.needsUpdate = false;
+        this._pendingThrottledUpdate = false;
+      }
       return;
     }
     

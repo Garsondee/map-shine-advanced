@@ -447,9 +447,10 @@ export class RainStreakGeometry {
     }
 
     // Roof / outdoors mask: cull rain under covered/indoor regions when the
-    // WeatherController has a roofMap (the _Outdoors texture) available AND
-    // the roofMaskActive flag is true (e.g. while roofs are hover-hidden).
-    if (weatherController && weatherController.roofMap && weatherController.roofMaskActive) {
+    // WeatherController has a roofMap (the _Outdoors texture) available.
+    // Always hide rain in black (indoor) areas of the mask, regardless of
+    // whether roof tiles are present or hover-hidden.
+    if (weatherController && weatherController.roofMap) {
       u.uRoofMap.value = weatherController.roofMap;
       u.uRoofMaskEnabled.value = 1.0;
     } else {

@@ -62,6 +62,9 @@ export class OverheadShadowsEffect extends EffectBase {
       affectsLights: 0.0,
       sunLatitude: 0.1     // 0=flat east/west, 1=maximum north/south arc
     };
+    
+    // PERFORMANCE: Reusable objects to avoid per-frame allocations
+    this._tempSize = null; // Lazy init when THREE is available
   }
 
   /**
@@ -412,7 +415,9 @@ export class OverheadShadowsEffect extends EffectBase {
     if (!THREE || !this.mainCamera || !this.mainScene || !this.shadowScene) return;
 
     // Ensure roof target exists and is correctly sized
-    const size = new THREE.Vector2();
+    // PERFORMANCE: Reuse Vector2 instead of allocating every frame
+    if (!this._tempSize) this._tempSize = new THREE.Vector2();
+    const size = this._tempSize;
     renderer.getDrawingBufferSize(size);
 
     if (!this.roofTarget || !this.shadowTarget) {

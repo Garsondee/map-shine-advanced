@@ -65,6 +65,16 @@ export class TimeManager {
     
     /** @type {number} - FPS update interval in ms */
     this._fpsUpdateInterval = 1000;
+
+    // PERFORMANCE: Reuse timeInfo object to avoid per-frame allocations
+    this._timeInfo = {
+      elapsed: 0,
+      delta: 0,
+      frameCount: 0,
+      fps: 0,
+      scale: 1.0,
+      paused: false
+    };
     
     log.info('TimeManager initialized');
   }
@@ -75,8 +85,18 @@ export class TimeManager {
    */
   update() {
     const now = performance.now();
-    const realDelta = (now - this.lastUpdate) / 1000; // Convert ms to seconds
+    let realDelta = (now - this.lastUpdate) / 1000; // Convert ms to seconds
     this.lastUpdate = now;
+
+    // CRITICAL: Clamp delta to prevent animation "catch-up" after alt-tab or debugger pause.
+    // When the browser tab loses focus, requestAnimationFrame pauses but performance.now()
+    // keeps ticking. Without this clamp, returning to the tab causes a massive delta spike
+    // (e.g., 30+ seconds) which makes animations go haywire trying to "catch up".
+    // 100ms max ensures smooth recovery from any pause.
+    const MAX_DELTA = 0.1; // 100ms max per frame
+    if (realDelta > MAX_DELTA) {
+      realDelta = MAX_DELTA;
+    }
 
     // Apply pause and scaling
     if (!this.paused) {
@@ -100,17 +120,18 @@ export class TimeManager {
 
   /**
    * Get current time information for effects
+   * PERFORMANCE: Reuses cached object to avoid per-frame allocations
    * @returns {TimeInfo} Time info object
    */
   getTimeInfo() {
-    return {
-      elapsed: this.elapsed,
-      delta: this.delta,
-      frameCount: this.frameCount,
-      fps: this.fps,
-      scale: this.scale,
-      paused: this.paused
-    };
+    // Update cached object instead of creating new one
+    this._timeInfo.elapsed = this.elapsed;
+    this._timeInfo.delta = this.delta;
+    this._timeInfo.frameCount = this.frameCount;
+    this._timeInfo.fps = this.fps;
+    this._timeInfo.scale = this.scale;
+    this._timeInfo.paused = this.paused;
+    return this._timeInfo;
   }
 
   /**

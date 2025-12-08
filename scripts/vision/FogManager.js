@@ -8,6 +8,11 @@ import { createLogger } from '../core/log.js';
 
 const log = createLogger('FogManager');
 
+// Kill-switch for fog persistence saves.
+// When true, fog exploration is still accumulated in GPU memory but never
+// saved to Foundry's database.
+const DISABLE_FOG_SAVE = false;
+
 export class FogManager {
   /**
    * @param {THREE.Renderer} renderer
@@ -106,68 +111,179 @@ export class FogManager {
   }
 
   /**
-   * Save exploration data to Foundry database
+   * Save exploration data to Foundry database (async, non-blocking)
+   * Uses OffscreenCanvas and chunked processing to avoid freezing the main thread.
    * Mimics canvas.fog.save()
    */
   async _save() {
+    if (DISABLE_FOG_SAVE) {
+      this.pendingSave = false;
+      return;
+    }
     if (!this.pendingSave) return;
+    
+    // Prevent concurrent saves
+    if (this._isSaving) return;
+    this._isSaving = true;
     
     try {
       // Ensure Foundry fog exploration is available
       if (!canvas || !canvas.fog || !canvas.fog.exploration) {
         log.debug('FogManager._save skipped: canvas.fog.exploration not available');
         this.pendingSave = false;
+        this._isSaving = false;
         return;
       }
 
-      // 1. Read pixels
-      const buffer = new Uint8Array(this.width * this.height * 4); // RGBA (readRenderTargetPixels requires RGBA usually)
-      this.renderer.readRenderTargetPixels(this.renderTarget, 0, 0, this.width, this.height, buffer);
-
-      // 2. Compress/Convert to Base64 (Simplified)
-      // Generating a real image from raw pixels is hard in pure JS without canvas
-      // We'll use an offscreen HTML canvas for encoding. Name it offscreenCanvas
-      // to avoid shadowing Foundry's global `canvas` object.
-      const offscreenCanvas = document.createElement('canvas');
-      offscreenCanvas.width = this.width;
-      offscreenCanvas.height = this.height;
-      const ctx = offscreenCanvas.getContext('2d');
+      const width = this.width;
+      const height = this.height;
       
-      // Create ImageData (taking only Red channel)
-      const imgData = ctx.createImageData(this.width, this.height);
-      const pixels = imgData.data;
+      // 1. Read pixels from GPU (this is still synchronous but unavoidable)
+      // We minimize impact by doing this quickly and deferring heavy work
+      const buffer = new Uint8Array(width * height * 4);
+      this.renderer.readRenderTargetPixels(this.renderTarget, 0, 0, width, height, buffer);
       
-      // Convert Red channel from render target (which might be RGBA or Red depending on implementation)
-      // Three.js readRenderTargetPixels reads into RGBA usually even if format is RED
-      for (let i = 0; i < buffer.length; i += 4) {
-        const val = buffer[i]; // R
-        pixels[i] = val;   // R
-        pixels[i+1] = val; // G
-        pixels[i+2] = val; // B
-        pixels[i+3] = 255; // Alpha (Opaque)
+      // 2. Use OffscreenCanvas for non-blocking image encoding
+      // OffscreenCanvas.convertToBlob() is async and doesn't block the main thread
+      let base64;
+      
+      if (typeof OffscreenCanvas !== 'undefined') {
+        // Modern path: Use OffscreenCanvas for async encoding
+        base64 = await this._encodeWithOffscreenCanvas(buffer, width, height);
+      } else {
+        // Fallback: Use chunked processing with regular canvas
+        base64 = await this._encodeWithChunkedCanvas(buffer, width, height);
       }
       
-      ctx.putImageData(imgData, 0, 0);
-      const base64 = offscreenCanvas.toDataURL('image/webp', 0.8);
+      if (!base64) {
+        log.warn('FogManager._save: encoding failed');
+        this.pendingSave = false;
+        this._isSaving = false;
+        return;
+      }
 
       // 3. Update Foundry Document
-      // We hook into Foundry's existing FogExploration document. Some
-      // Foundry versions expose fields directly on the document
-      // (exploration.explored), others under exploration.data.explored.
       const exploration = canvas.fog.exploration;
       const updateData = {
         explored: base64,
         timestamp: Date.now()
       };
 
-      await exploration.update(updateData, { loadFog: false }); // Don't trigger reload
-      log.debug('Saved FogExploration');
+      await exploration.update(updateData, { loadFog: false });
+      log.debug('Saved FogExploration (async)');
       
       this.pendingSave = false;
       
     } catch (err) {
       log.error('Failed to save FogExploration', err);
+    } finally {
+      this._isSaving = false;
     }
+  }
+  
+  /**
+   * Encode fog data using OffscreenCanvas (non-blocking)
+   * @private
+   */
+  async _encodeWithOffscreenCanvas(buffer, width, height) {
+    try {
+      const offscreen = new OffscreenCanvas(width, height);
+      const ctx = offscreen.getContext('2d');
+      
+      // Create ImageData and fill it
+      const imgData = ctx.createImageData(width, height);
+      const pixels = imgData.data;
+      
+      // Convert Red channel to grayscale RGBA
+      // Process in chunks to yield to main thread periodically
+      const CHUNK_SIZE = 262144; // 256KB worth of pixels per chunk
+      for (let i = 0; i < buffer.length; i += CHUNK_SIZE) {
+        const end = Math.min(i + CHUNK_SIZE, buffer.length);
+        for (let j = i; j < end; j += 4) {
+          const val = buffer[j]; // R channel
+          pixels[j] = val;
+          pixels[j + 1] = val;
+          pixels[j + 2] = val;
+          pixels[j + 3] = 255;
+        }
+        // Yield to main thread between chunks
+        if (end < buffer.length) {
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      }
+      
+      ctx.putImageData(imgData, 0, 0);
+      
+      // convertToBlob is async and non-blocking!
+      const blob = await offscreen.convertToBlob({ type: 'image/webp', quality: 0.8 });
+      
+      // Convert blob to base64 data URL
+      return await this._blobToDataURL(blob);
+      
+    } catch (err) {
+      log.warn('OffscreenCanvas encoding failed, falling back', err);
+      return await this._encodeWithChunkedCanvas(buffer, width, height);
+    }
+  }
+  
+  /**
+   * Encode fog data using regular canvas with chunked processing (fallback)
+   * @private
+   */
+  async _encodeWithChunkedCanvas(buffer, width, height) {
+    const offscreenCanvas = document.createElement('canvas');
+    offscreenCanvas.width = width;
+    offscreenCanvas.height = height;
+    const ctx = offscreenCanvas.getContext('2d');
+    
+    const imgData = ctx.createImageData(width, height);
+    const pixels = imgData.data;
+    
+    // Process in chunks, yielding between each
+    const CHUNK_SIZE = 262144;
+    for (let i = 0; i < buffer.length; i += CHUNK_SIZE) {
+      const end = Math.min(i + CHUNK_SIZE, buffer.length);
+      for (let j = i; j < end; j += 4) {
+        const val = buffer[j];
+        pixels[j] = val;
+        pixels[j + 1] = val;
+        pixels[j + 2] = val;
+        pixels[j + 3] = 255;
+      }
+      // Yield to main thread
+      if (end < buffer.length) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    }
+    
+    // putImageData is synchronous but we've already done the heavy lifting
+    ctx.putImageData(imgData, 0, 0);
+    
+    // toDataURL is synchronous but should be fast after putImageData
+    // For very large canvases, we could use toBlob() which is async
+    return new Promise((resolve) => {
+      offscreenCanvas.toBlob((blob) => {
+        if (blob) {
+          this._blobToDataURL(blob).then(resolve);
+        } else {
+          // Fallback to sync toDataURL if toBlob fails
+          resolve(offscreenCanvas.toDataURL('image/webp', 0.8));
+        }
+      }, 'image/webp', 0.8);
+    });
+  }
+  
+  /**
+   * Convert a Blob to a data URL asynchronously
+   * @private
+   */
+  _blobToDataURL(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
   }
 
   /**

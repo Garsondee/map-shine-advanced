@@ -137,7 +137,7 @@ export class PrismEffect extends EffectBase {
           min: 0,
           max: 5.0,
           step: 0.1,
-          default: 0.9
+          default: 0.3
         },
         spread: {
           type: 'slider',
@@ -161,7 +161,7 @@ export class PrismEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.05,
-          default: 0.5
+          default: 0.25
         },
         maskThreshold: {
           type: 'slider',
@@ -214,7 +214,7 @@ export class PrismEffect extends EffectBase {
           min: 0.0,
           max: 2.0,
           step: 0.05,
-          default: 0.45
+          default: 0.4
         },
         glintThreshold: {
           type: 'slider',

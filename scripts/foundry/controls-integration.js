@@ -8,6 +8,7 @@ import { createLogger } from '../core/log.js';
 import { LayerVisibilityManager } from './layer-visibility-manager.js';
 import { InputRouter } from './input-router.js';
 import { CameraSync } from './camera-sync.js';
+import { UnifiedCameraController } from './unified-camera.js';
 
 const log = createLogger('ControlsIntegration');
 
@@ -35,6 +36,7 @@ export class ControlsIntegration {
    * @param {object} options
    * @param {import('../scene/composer.js').SceneComposer} options.sceneComposer
    * @param {import('../effects/EffectComposer.js').EffectComposer} [options.effectComposer]
+   * @param {UnifiedCameraController} [options.unifiedCamera] - Unified camera controller
    */
   constructor(options = {}) {
     /** @type {import('../scene/composer.js').SceneComposer|null} */
@@ -42,6 +44,9 @@ export class ControlsIntegration {
     
     /** @type {import('../effects/EffectComposer.js').EffectComposer|null} */
     this.effectComposer = options.effectComposer || null;
+    
+    /** @type {UnifiedCameraController|null} */
+    this.unifiedCamera = options.unifiedCamera || null;
     
     /** @type {IntegrationState} */
     this.state = IntegrationState.UNINITIALIZED;
@@ -70,6 +75,17 @@ export class ControlsIntegration {
     /** @type {number[]} */
     this._hookIds = [];
   }
+
+  /**
+   * One-shot camera sync is now handled by UnifiedCameraController.initialize()
+   * This method is kept for backwards compatibility but does nothing.
+   * @private
+   * @deprecated Use UnifiedCameraController instead
+   */
+  syncThreeFromPixiOnce() {
+    // UnifiedCameraController handles initial sync in its initialize() method
+    log.debug('syncThreeFromPixiOnce called (no-op, UnifiedCameraController handles sync)');
+  }
   
   /**
    * Initialize the controls integration system
@@ -96,13 +112,10 @@ export class ControlsIntegration {
       // Initialize sub-systems
       this.layerVisibility = new LayerVisibilityManager();
       this.inputRouter = new InputRouter();
-      this.cameraSync = new CameraSync({ sceneComposer: this.sceneComposer });
       
-      // Register camera sync with effect composer for per-frame updates
-      if (this.effectComposer) {
-        this.effectComposer.addUpdatable(this.cameraSync);
-        log.debug('Camera sync registered with effect composer');
-      }
+      // CameraSync is deprecated - UnifiedCameraController handles all camera sync
+      // We keep the reference for backwards compatibility but don't use it
+      this.cameraSync = null;
       
       // Register hooks
       this.registerHooks();
@@ -110,7 +123,15 @@ export class ControlsIntegration {
       // Initial state sync
       this.layerVisibility.update();
       this.inputRouter.autoUpdate();
-      this.cameraSync.forceFullSync();
+      
+      // Camera sync is now handled by UnifiedCameraController
+      // which was initialized before ControlsIntegration in canvas-replacement.js
+      if (this.unifiedCamera) {
+        log.debug('UnifiedCameraController is handling camera sync');
+      } else {
+        // Fallback: do a one-shot sync if no unified camera
+        this.syncThreeFromPixiOnce();
+      }
       
       this._initialized = true;
       this.transition(IntegrationState.ACTIVE, 'Initialization complete');
@@ -211,6 +232,19 @@ export class ControlsIntegration {
         log.debug(`Hidden visual layer: ${name}`);
       }
     }
+
+    // Also hide the native Fog of War visual layer. We fully replace fog
+    // rendering with our own VisionManager + FogManager + FogEffect chain,
+    // but still rely on canvas.fog.exploration for persistence. Turning the
+    // layer invisible prevents double-fog artifacts.
+    if (canvas.fog) {
+      try {
+        canvas.fog.visible = false;
+        log.debug('Hidden native fog visual layer');
+      } catch (_) {
+        // Ignore - fog layer structure may vary by Foundry version
+      }
+    }
     
     // CRITICAL: Tokens layer needs special handling
     // - Visual rendering is done by Three.js (TokenManager)
@@ -308,13 +342,17 @@ export class ControlsIntegration {
     this._hookIds.push({ name: 'renderSceneControls', id: controlsHookId });
     
     // Canvas pan - sync Three.js camera to match PIXI stage
+    // NOTE: UnifiedCameraController also listens to canvasPan, but we keep this
+    // hook for any additional logic that might be needed
     const panHookId = Hooks.on('canvasPan', (canvas, position) => {
       if (this.state !== IntegrationState.ACTIVE) return;
       
       try {
-        // When Foundry pans PIXI stage, sync Three.js camera to match
-        // (PIXI is master - Foundry controls it, Three.js follows)
-        this.cameraSync?.requestSync('canvasPan');
+        // UnifiedCameraController handles the actual sync via its own hook
+        // This hook is kept for backwards compatibility and potential future use
+        if (!this.unifiedCamera) {
+          this.cameraSync?.requestSync('canvasPan');
+        }
       } catch (error) {
         this.handleError(error, 'canvasPan');
       }

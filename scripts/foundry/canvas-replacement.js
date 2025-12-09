@@ -8,6 +8,7 @@ import { createLogger } from '../core/log.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import { SceneComposer } from '../scene/composer.js';
 import { CameraController } from '../scene/camera-controller.js';
+import { UnifiedCameraController } from './unified-camera.js';
 import { EffectComposer } from '../effects/EffectComposer.js';
 import { SpecularEffect } from '../effects/SpecularEffect.js';
 import { IridescenceEffect } from '../effects/IridescenceEffect.js';
@@ -100,6 +101,9 @@ let renderLoop = null;
 
 /** @type {CameraController|null} */
 let cameraController = null;
+
+/** @type {UnifiedCameraController|null} */
+let unifiedCamera = null;
 
 /** @type {TweakpaneManager|null} */
 let uiManager = null;
@@ -724,26 +728,32 @@ async function createThreeCanvas(scene) {
     dropHandler.initialize();
     log.info('Drop handler initialized');
 
-    // Step 6: Initialize camera controller (for fallback mode only)
-    // In hybrid mode, Foundry's native pan controls are used instead
+    // Step 6: Initialize UNIFIED camera controller
+    // This replaces the old separate CameraController and CameraSync with a single
+    // system that keeps PIXI and Three.js cameras in perfect sync at all times.
+    unifiedCamera = new UnifiedCameraController({
+      sceneComposer,
+      threeCanvas
+    });
+    unifiedCamera.initialize();
+    effectComposer.addUpdatable(unifiedCamera); // Per-frame sync check
+    log.info('Unified camera controller initialized');
+    
+    // Legacy CameraController kept for reference but disabled
     cameraController = new CameraController(threeCanvas, sceneComposer);
-    log.info('Camera controller initialized');
+    cameraController.disable(); // Disabled - UnifiedCameraController handles pan/zoom
+    log.info('Legacy camera controller initialized (disabled)');
 
     // Step 6b: Initialize controls integration (PIXI overlay system)
     // This replaces the old configureFoundryCanvas() approach with a more robust system
     controlsIntegration = new ControlsIntegration({ 
       sceneComposer,
-      effectComposer 
+      effectComposer,
+      unifiedCamera // Pass unified camera for coordination
     });
     await controlsIntegration.initialize();
     
-    // Disable CameraController when ControlsIntegration is active
-    // Foundry's native pan/zoom controls the PIXI stage, and CameraSync syncs Three.js to match
-    if (controlsIntegration.getState() === 'active') {
-      cameraController.disable();
-      log.info('Camera controller disabled - using Foundry native pan/zoom via CameraSync');
-    }
-    log.info('Controls integration initialized');
+    log.info('Controls integration initialized (UnifiedCameraController handles all pan/zoom)');
 
     // Step 7: Ensure Foundry UI layers are above our canvas
     ensureUILayering();
@@ -776,6 +786,7 @@ async function createThreeCanvas(scene) {
     mapShine.fogEffect = fogEffect; // NEW: Expose FogEffect
     mapShine.skyColorEffect = skyColorEffect; // NEW: Expose SkyColorEffect
     mapShine.cameraController = cameraController;
+    mapShine.unifiedCamera = unifiedCamera; // NEW: Expose unified camera
     mapShine.tokenManager = tokenManager; // NEW: Expose token manager for diagnostics
     mapShine.tileManager = tileManager; // NEW: Expose tile manager for diagnostics
     mapShine.wallManager = wallManager; // NEW: Expose wall manager
@@ -794,10 +805,12 @@ async function createThreeCanvas(scene) {
     mapShine.controlsIntegration = controlsIntegration; // NEW: Expose controls integration
     // Expose sub-systems for debugging
     if (controlsIntegration) {
-      mapShine.cameraSync = controlsIntegration.cameraSync;
+      mapShine.cameraSync = controlsIntegration.cameraSync; // May be null now
       mapShine.inputRouter = controlsIntegration.inputRouter;
       mapShine.layerVisibility = controlsIntegration.layerVisibility;
     }
+    // Also expose unified camera at top level
+    mapShine.unifiedCamera = unifiedCamera;
     // Attach to canvas as well for convenience (used by console snippets)
     try { canvas.mapShine = mapShine; } catch (_) {}
 

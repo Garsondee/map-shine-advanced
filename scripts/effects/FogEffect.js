@@ -351,98 +351,83 @@ export class FogEffect extends EffectBase {
   }
 
   /**
-   * Update view bounds uniform from camera
+   * Update view bounds uniform from the Three.js camera
+   *
+   * We compute the visible world rectangle from the main 3D camera and
+   * express it in Foundry world coordinates (X-right, Y-down, origin at
+   * top-left of the scene). This keeps the fog aligned with the rendered
+   * map when pan/zoom are driven by the Three.js camera.
+   *
    * @param {THREE.Camera} camera - Main scene camera
    */
   updateViewBounds(camera) {
     const u = this.material.uniforms;
-    
-    // Get scene dimensions (full canvas including padding)
+
+    // Full scene dimensions (including padding) in Foundry coordinates
     const sceneWidth = canvas?.dimensions?.width || 1;
     const sceneHeight = canvas?.dimensions?.height || 1;
     u.uSceneDimensions.value.set(sceneWidth, sceneHeight);
-    
-    // Get scene rect (actual map area, excluding padding)
-    // sceneRect is in Foundry Y-down coordinates - keep it that way since
-    // the shader now works in Foundry coordinates
+
+    // Actual scene rect (excluding padding) in Foundry coords
     const sceneRect = canvas?.dimensions?.sceneRect;
     if (sceneRect) {
-      // Pass through directly in Foundry coordinates (x, y, width, height)
       u.uSceneRect.value.set(sceneRect.x, sceneRect.y, sceneRect.width, sceneRect.height);
     } else {
-      // Fallback: assume entire canvas is the scene
       u.uSceneRect.value.set(0, 0, sceneWidth, sceneHeight);
     }
-    
-    // Compute view bounds based on camera type
-    // 
-    // COORDINATE SYSTEMS:
-    // - Main camera: position is in "Three.js world" coords where:
-    //     X = Foundry X (same)
-    //     Y = sceneHeight - Foundry Y (flipped)
-    //   Camera position is the world coordinate at screen center.
-    // 
-    // - Vision texture: rendered with a centered orthographic camera at (0,0,10)
-    //   covering (-width/2 to +width/2, -height/2 to +height/2).
-    //   Vision polygons are transformed by GeometryConverter:
-    //     threeX = foundryX - width/2
-    //     threeY = -(foundryY - height/2) = height/2 - foundryY
-    // 
-    // - To sample vision texture, we need to convert screen UV to vision UV:
-    //   1. Screen UV -> world position (using view bounds)
-    //   2. World position -> Foundry position
-    //   3. Foundry position -> vision UV (normalized 0-1)
-    // 
-    // The shader does: visionUv = (worldX / sceneWidth, worldY / sceneHeight)
-    // This assumes worldX/worldY are in Foundry-like coords (0 to width/height).
-    // But our camera position is in Three.js coords where Y is flipped!
-    // 
-    // FIX: Convert view bounds to Foundry-like coordinates for the shader.
-    // The shader expects worldX in [0, sceneWidth] and worldY in [0, sceneHeight]
-    // where worldY=0 is TOP (Foundry convention) for vision UV calculation.
-    
+
+    if (!camera) {
+      // Fallback: full-scene bounds
+      u.uViewBounds.value.set(0, 0, sceneWidth, sceneHeight);
+      return;
+    }
+
+    // The SceneComposer and CameraSync maintain a mapping where:
+    //   camera.position.x === Foundry X at screen center
+    //   camera.position.y === sceneHeight - FoundryY_at_screen_center
+    // So we can invert Y to get Foundry Y-down.
+
+    const camPos = camera.position;
+
     if (camera.isPerspectiveCamera) {
-      // For perspective camera, compute visible world rect at z=0
-      const camPos = camera.position;
+      // Perspective: compute visible rect at z=0 from FOV and distance
       const distance = camPos.z;
-      
-      // Calculate visible dimensions at z=0 using FOV
-      const vFov = camera.fov * Math.PI / 180;
+      const vFov = camera.fov * Math.PI / 180.0;
       const visibleHeight = 2 * Math.tan(vFov / 2) * distance;
       const visibleWidth = visibleHeight * camera.aspect;
-      
-      // Camera position is in Three.js coords (Y-up, where Y=sceneHeight is top)
-      // Convert to Foundry coords for the shader (Y-down, where Y=0 is top)
+
+      // Convert camera center from Three.js Y-up to Foundry Y-down
       const foundryX = camPos.x;
       const foundryY = sceneHeight - camPos.y;
-      
-      // View bounds in Foundry coordinates
+
       const minX = foundryX - visibleWidth / 2;
       const maxX = foundryX + visibleWidth / 2;
-      // Note: in Foundry Y-down, minY is at top of view, maxY is at bottom
-      const minY = foundryY - visibleHeight / 2;
-      const maxY = foundryY + visibleHeight / 2;
-      
+      const minY = foundryY - visibleHeight / 2; // top of view in Foundry
+      const maxY = foundryY + visibleHeight / 2; // bottom of view
+
       u.uViewBounds.value.set(minX, minY, maxX, maxY);
-      
-      // DEBUG: Log every frame to diagnose fog pinning issue
-      console.log(`FogEffect ViewBounds: camPos=(${camPos.x.toFixed(0)}, ${camPos.y.toFixed(0)}, ${distance.toFixed(0)}), foundry=(${foundryX.toFixed(0)}, ${foundryY.toFixed(0)}), bounds=(${minX.toFixed(0)}, ${minY.toFixed(0)}) to (${maxX.toFixed(0)}, ${maxY.toFixed(0)})`);
-      
+
+      // Optional: lightweight debug sampling
+      if (Math.random() < 0.01) {
+        log.debug(`ViewBounds (perspective): cam=(${camPos.x.toFixed(0)}, ${camPos.y.toFixed(0)}, ${distance.toFixed(0)}), ` +
+                  `foundry=(${foundryX.toFixed(0)}, ${foundryY.toFixed(0)}), ` +
+                  `visible=${visibleWidth.toFixed(0)}x${visibleHeight.toFixed(0)}, ` +
+                  `bounds=(${minX.toFixed(0)}, ${minY.toFixed(0)}) -> (${maxX.toFixed(0)}, ${maxY.toFixed(0)})`);
+      }
     } else if (camera.isOrthographicCamera) {
-      // For orthographic camera, bounds are from camera properties
-      const camPos = camera.position;
-      
-      // Convert to Foundry coordinates
+      // Orthographic: use the camera frustum directly
       const foundryX = camPos.x;
       const foundryY = sceneHeight - camPos.y;
-      
-      // Camera left/right/top/bottom are offsets from camera position
+
       const minX = foundryX + camera.left / camera.zoom;
       const maxX = foundryX + camera.right / camera.zoom;
-      const minY = foundryY - camera.top / camera.zoom;  // top in Three.js is negative Y in Foundry
+      const minY = foundryY - camera.top / camera.zoom;
       const maxY = foundryY - camera.bottom / camera.zoom;
-      
+
       u.uViewBounds.value.set(minX, minY, maxX, maxY);
+    } else {
+      // Unknown camera type - fall back to full scene
+      u.uViewBounds.value.set(0, 0, sceneWidth, sceneHeight);
     }
   }
 

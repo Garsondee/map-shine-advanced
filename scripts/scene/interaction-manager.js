@@ -112,15 +112,32 @@ export class InteractionManager {
 
   /**
    * Initialize event listeners
+   * 
+   * NOTE: As of the PIXI-first interaction strategy, most interaction is handled
+   * by Foundry's native PIXI layer. The Three.js canvas is render-only.
+   * We keep the InteractionManager for:
+   * - HUD positioning (updateHUDPosition)
+   * - Hover effects on Three.js objects (overhead tiles, tree canopy)
+   * - Any future Three.js-specific interaction needs
    */
   initialize() {
-    this.canvasElement.addEventListener('pointerdown', this.boundHandlers.onPointerDown);
-    window.addEventListener('pointermove', this.boundHandlers.onPointerMove);
-    window.addEventListener('pointerup', this.boundHandlers.onPointerUp);
-    window.addEventListener('keydown', this.boundHandlers.onKeyDown);
+    // Use window-level listeners so clicks are seen even if another element
+    // (e.g. Foundry overlay) is the immediate target. Actual handling is
+    // gated by the InputRouter so we only react when Three.js should
+    // receive input.
+    window.addEventListener('pointerdown', this.boundHandlers.onPointerDown, { capture: true });
     this.canvasElement.addEventListener('dblclick', this.boundHandlers.onDoubleClick);
-    
-    log.info('InteractionManager initialized');
+
+    window.addEventListener('pointerup', this.boundHandlers.onPointerUp);
+    window.addEventListener('pointermove', this.boundHandlers.onPointerMove);
+    window.addEventListener('keydown', this.boundHandlers.onKeyDown);
+
+    const rect = this.canvasElement.getBoundingClientRect();
+    log.info('InteractionManager initialized (Three.js token interaction enabled)', {
+      canvasId: this.canvasElement.id,
+      width: rect.width,
+      height: rect.height
+    });
   }
 
   /**
@@ -383,6 +400,11 @@ export class InteractionManager {
           const sprite = hit.object;
           const tokenDoc = sprite.userData.tokenDoc;
 
+          log.debug('onPointerDown token hit', {
+            tokenId: tokenDoc?.id,
+            tokenName: tokenDoc?.name
+          });
+
           // Permission check: "LIMITED" permission required to view sheet
           if (!tokenDoc.testUserPermission(game.user, "LIMITED")) {
             ui.notifications.warn("You do not have permission to view this Token's sheet.");
@@ -453,23 +475,78 @@ export class InteractionManager {
    */
   onPointerDown(event) {
     try {
-        // Allow Left (0) and Right (2) clicks
+        // DEBUG: Raw console log to verify handler execution independent of
+        // Map Shine's logging utility or input routing.
+        console.log('Map Shine Advanced | InteractionManager | RAW onPointerDown', {
+          button: event.button,
+          clientX: event.clientX,
+          clientY: event.clientY,
+          target: event.target
+        });
+
         if (event.button !== 0 && event.button !== 2) return;
 
-        // Get mouse position in NDC
-        this.updateMouseCoords(event);
-
-        // Raycast
-        this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
+        // Respect the current input mode: only handle clicks when the
+        // InputRouter says Three.js should receive input. This prevents
+        // conflicts when PIXI tools are active, but we *override* this
+        // for the Tokens layer so gameplay clicks are never blocked.
+        const mapShine = window.MapShine || window.mapShine;
+        const inputRouter = mapShine?.inputRouter;
+        const activeLayerName = canvas.activeLayer?.name;
+        const activeTool = game.activeTool;
         
-        // Collect interactive objects
+        // DEBUG: Log InputRouter state to diagnose why clicks aren't being processed
+        log.info('onPointerDown InputRouter check', {
+          hasInputRouter: !!inputRouter,
+          currentMode: inputRouter?.currentMode,
+          shouldThreeReceive: inputRouter?.shouldThreeReceiveInput?.(),
+          activeLayer: activeLayerName,
+          activeTool
+        });
+
+        const isTokenLayerName = activeLayerName === 'TokenLayer' || activeLayerName === 'TokensLayer';
+        const isTokenSelectTool = activeTool === 'select' || !activeTool;
+        const shouldOverrideRouter = isTokenLayerName && isTokenSelectTool;
+        
+        if (inputRouter && !inputRouter.shouldThreeReceiveInput()) {
+          if (shouldOverrideRouter) {
+            log.info('onPointerDown overriding InputRouter block on Tokens layer; forcing THREE mode');
+            try {
+              inputRouter.forceThree?.('InteractionManager token click');
+            } catch (e) {
+              log.warn('Failed to force THREE mode on token click', e);
+            }
+            // Fall through and continue handling the click.
+          } else {
+            log.info('onPointerDown BLOCKED by InputRouter (PIXI mode active)');
+            return;
+          }
+        }
+
+        log.info('onPointerDown received', {
+          button: event.button,
+          clientX: event.clientX,
+          clientY: event.clientY,
+          activeLayer: canvas.activeLayer?.name,
+          activeTool: game.activeTool
+        });
+
+        this.updateMouseCoords(event);
+        this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
+
+        log.info('onPointerDown mouse NDC', {
+          ndcX: this.mouse.x,
+          ndcY: this.mouse.y
+        });
+        
         const tokenSprites = this.tokenManager.getAllTokenSprites();
+        log.info('onPointerDown tokenSprites count', { count: tokenSprites.length });
         const wallGroup = this.wallManager.wallGroup;
 
         // Handle Right Click (Potential HUD or Door Lock/Unlock)
         if (event.button === 2) {
-            // First check for door controls (GM lock/unlock)
             const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
+            log.info('onPointerDown right-click wallIntersects', { count: wallIntersects.length });
             if (wallIntersects.length > 0) {
                 const hit = wallIntersects[0];
                 let object = hit.object;
@@ -487,6 +564,7 @@ export class InteractionManager {
 
             // Raycast against tokens for HUD
             const intersects = this.raycaster.intersectObjects(tokenSprites, false);
+            log.info('onPointerDown right-click tokenIntersects', { count: intersects.length });
             if (intersects.length > 0) {
                 const hit = intersects[0];
                 const sprite = hit.object;
@@ -516,9 +594,16 @@ export class InteractionManager {
             return;
         }
         
-        // 1. Check for Wall/Door Interactions first (usually on top or distinct)
-        // We raycast against wallGroup recursively
-        const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
+        const activeLayer = canvas.activeLayer?.name;
+        const isTokensLayer = activeLayer === 'TokensLayer';
+        const isWallLayer = activeLayer && activeLayer.includes('WallsLayer');
+        const shouldCheckWalls = !isTokensLayer && (isWallLayer || game.user.isGM);
+        const wallIntersects = shouldCheckWalls ? this.raycaster.intersectObject(wallGroup, true) : [];
+
+        log.info('onPointerDown wallIntersects', {
+          shouldCheckWalls,
+          count: wallIntersects.length
+        });
         
         if (wallIntersects.length > 0) {
             // Sort by distance is default
@@ -558,10 +643,7 @@ export class InteractionManager {
             }
         }
 
-        // 2. Check Wall Drawing (If on WallsLayer and didn't click an endpoint/door)
-        const activeLayer = canvas.activeLayer?.name;
-        const activeTool = game.activeTool;
-        const isWallLayer = activeLayer && activeLayer.includes('WallsLayer');
+        const currentTool = game.activeTool;
         
         if (isWallLayer) {
           // Start Wall Drawing
@@ -589,7 +671,7 @@ export class InteractionManager {
           this.wallDraw.active = true;
           this.wallDraw.start.set(snappedWorld.x, snappedWorld.y, 0);
           this.wallDraw.current.set(snappedWorld.x, snappedWorld.y, 0);
-          this.wallDraw.type = activeTool;
+          this.wallDraw.type = currentTool;
           
           // Create preview mesh
           if (!this.wallDraw.previewLine) {
@@ -700,8 +782,9 @@ export class InteractionManager {
           return;
         }
 
-        // 3. Check Tokens
         const intersects = this.raycaster.intersectObjects(tokenSprites, false);
+
+        log.info('onPointerDown left-click tokenIntersects', { count: intersects.length });
 
         if (intersects.length > 0) {
           // Hit something
@@ -725,7 +808,7 @@ export class InteractionManager {
             return;
           }
 
-          // Handle Selection
+          // Handle Selection (Three.js selection state)
           const isSelected = this.selection.has(tokenDoc.id);
           
           if (event.shiftKey) {
@@ -739,15 +822,29 @@ export class InteractionManager {
             }
           } else {
             if (!isSelected) {
-               // Clicked unselected -> Clear others, select this
-               this.clearSelection();
-               this.selectObject(sprite);
+              // Clicked unselected -> Clear others, select this
+              this.clearSelection();
+              this.selectObject(sprite);
             }
             // If clicked selected -> Keep group selection
           }
 
           // Start Drag
           this.startDrag(sprite, hit.point);
+
+          // Also drive Foundry's native token control so cursor/selection/HUD
+          // behavior matches core. This uses the underlying PIXI token object
+          // but is triggered from our Three.js hit test.
+          try {
+            const fvttToken = canvas.tokens?.get(tokenDoc.id);
+            if (fvttToken) {
+              const releaseOthers = !event.shiftKey;
+              // Do not pan camera here; CameraSync keeps Three.js aligned.
+              fvttToken.control({ releaseOthers, pan: false });
+            }
+          } catch (err) {
+            log.warn('Failed to sync selection to Foundry token', err);
+          }
           
         } else {
           // Clicked empty space - deselect all unless shift held

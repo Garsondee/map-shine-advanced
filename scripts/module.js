@@ -45,44 +45,32 @@ Hooks.once('init', async function() {
   registerUISettings();
   
   // Register scene control button to toggle Map Shine UI
+  // Foundry v13+ uses Record<string, SceneControl> with tools as Record<string, SceneControlTool>
   Hooks.on('getSceneControlButtons', (controls) => {
     try {
-      let tokenControls = null;
-
-      // Foundry versions differ: controls may be an Array or a Record<string, SceneControl>
-      if (Array.isArray(controls)) {
-        tokenControls = controls.find(c => c.name === 'token' || c.name === 'tokens') || null;
-      } else if (controls && typeof controls === 'object') {
-        // Prefer explicit keys if present
-        tokenControls = controls.token || controls.tokens || null;
-        if (!tokenControls) {
-          // Fallback: search values by name property
-          const values = Object.values(controls);
-          tokenControls = values.find(c => c && (c.name === 'token' || c.name === 'tokens')) || null;
-        }
-      }
-
-      if (!tokenControls) return;
-
-      let tools = tokenControls.tools;
-      if (!Array.isArray(tools)) {
-        // Foundry may store tools as an object map in some versions; normalize to array
-        tools = Array.isArray(tools) ? tools : (tools ? Object.values(tools) : []);
-        tokenControls.tools = tools;
-      }
+      // In Foundry v13+, controls is Record<string, SceneControl>
+      // Access tokens control directly by key
+      const tokenControls = controls?.tokens;
+      if (!tokenControls?.tools) return;
 
       // Avoid duplicate tool registration
-      if (tools.some(t => t.name === 'map-shine-ui')) return;
+      if (tokenControls.tools['map-shine-ui']) return;
 
-      tools.push({
+      // Add tool as a property on the tools object (not array push)
+      // Include toolclip to prevent Foundry errors when hovering
+      tokenControls.tools['map-shine-ui'] = {
         name: 'map-shine-ui',
         title: 'Map Shine UI',
         icon: 'fas fa-sun',
         button: true,
-        // During development, expose the UI toggle on all scenes but only to GMs
-        visible: () => game.user?.isGM ?? false,
-
-        onClick: () => {
+        order: 100, // Place at end of tools list
+        visible: game.user?.isGM ?? false,
+        toolclip: {
+          src: '',
+          heading: 'MAPSHINE.ToolTitle',
+          items: [{ paragraph: 'MAPSHINE.ToolDescription' }]
+        },
+        onChange: () => {
           const uiManager = window.MapShine?.uiManager;
           if (!uiManager) {
             ui.notifications?.warn?.('Map Shine UI is not available yet. The scene may still be initializing.');
@@ -90,7 +78,7 @@ Hooks.once('init', async function() {
           }
           uiManager.toggle();
         }
-      });
+      };
     } catch (e) {
       console.error('Map Shine: failed to register scene control button', e);
     }

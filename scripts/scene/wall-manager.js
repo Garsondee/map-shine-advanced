@@ -197,12 +197,6 @@ export class WallManager {
     p1.userData = { type: 'wallEndpoint', wallId: doc.id, index: 1 };
     p1.visible = showLines;
     group.add(p1);
-    
-    // Door Icon
-    const doorType = dataOverride.door !== undefined ? dataOverride.door : doc.door;
-    if (doorType > 0) {
-        this.createDoorControl(group, doc, start, end, dataOverride);
-    }
 
     this.wallGroup.add(group);
     this.walls.set(doc.id, group);

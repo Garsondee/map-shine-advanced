@@ -70,8 +70,12 @@ import { MapPointsManager } from '../scene/map-points-manager.js';
 import { DropHandler } from './drop-handler.js';
 import { sceneDebug } from '../utils/scene-debug.js';
 import { weatherController } from '../core/WeatherController.js';
+import { ControlsIntegration } from './controls-integration.js';
 
 const log = createLogger('Canvas');
+
+/** @type {ControlsIntegration|null} */
+let controlsIntegration = null;
 
 /** @type {HTMLCanvasElement|null} */
 let threeCanvas = null;
@@ -164,6 +168,16 @@ export function initialize() {
   }
 
   try {
+    // CRITICAL: Hook into canvasConfig to make PIXI canvas transparent
+    // This hook is called BEFORE the PIXI.Application is created, allowing us
+    // to set transparent: true so the PIXI canvas can show Three.js underneath
+    Hooks.on('canvasConfig', (config) => {
+      log.info('Configuring PIXI canvas for transparency');
+      config.transparent = true;
+      // Also set backgroundAlpha to 0 for good measure
+      config.backgroundAlpha = 0;
+    });
+    
     // Hook into canvas ready event (when canvas is fully initialized)
     Hooks.on('canvasReady', onCanvasReady);
     
@@ -365,9 +379,8 @@ async function createThreeCanvas(scene) {
   }
 
   try {
-    // CRITICAL: Configure Foundry PIXI Canvas for Hybrid Mode
+    // Set default mode - actual canvas configuration happens after ControlsIntegration init
     isMapMakerMode = false; // Default to Gameplay Mode
-    configureFoundryCanvas();
 
     // Create new canvas element
     threeCanvas = document.createElement('canvas');
@@ -377,8 +390,8 @@ async function createThreeCanvas(scene) {
     threeCanvas.style.left = '0';
     threeCanvas.style.width = '100%';
     threeCanvas.style.height = '100%';
-    threeCanvas.style.zIndex = '1'; // Very low - background layer only
-    threeCanvas.style.pointerEvents = 'auto'; // Enable for camera controls (right-click, scroll)
+    threeCanvas.style.zIndex = '1'; // Below PIXI (but PIXI is transparent, so Three.js shows through)
+    threeCanvas.style.pointerEvents = 'auto'; // Three.js handles interaction in gameplay mode
 
     // Inject NEXT to Foundry's canvas (as sibling, not child)
     // #board is the PIXI canvas itself, not a container!
@@ -387,6 +400,51 @@ async function createThreeCanvas(scene) {
       log.error('Failed to find Foundry canvas (#board)');
       return;
     }
+    
+    // Configure PIXI canvas for hybrid mode immediately
+    // ControlsIntegration will take over later, but we need this now to prevent black screen
+    // Strategy: Three.js handles interaction in gameplay by default; PIXI starts as a
+    // transparent overlay (no pointer events) and InputRouter/ControlsIntegration
+    // enable PIXI input when edit tools are active.
+    pixiCanvas.style.opacity = '1'; // Keep visible for overlay layers (drawings, templates, notes)
+    pixiCanvas.style.zIndex = '10'; // On top
+    pixiCanvas.style.pointerEvents = 'none'; // Pass pointer events to Three.js by default
+    
+    // CRITICAL: Set PIXI renderer background to transparent
+    // Without this, the PIXI background color renders over Three.js content
+    if (canvas.app?.renderer?.background) {
+      canvas.app.renderer.background.alpha = 0;
+      log.debug('PIXI renderer background alpha set to 0');
+    }
+    
+    // Hide replaced PIXI layers immediately (background, grid, etc.)
+    // These are rendered by Three.js, so they must be hidden
+    if (canvas.background) canvas.background.visible = false;
+    if (canvas.grid) canvas.grid.visible = false;
+    if (canvas.primary) canvas.primary.visible = false;
+    if (canvas.weather) canvas.weather.visible = false;
+    if (canvas.environment) canvas.environment.visible = false;
+    
+    // CRITICAL: Tokens layer needs special handling
+    // - Visual rendering is done by Three.js (TokenManager)
+    // - But PIXI tokens must remain INTERACTIVE for clicks, HUD, selection, cursor
+    // - We make token meshes TRANSPARENT (alpha=0) instead of invisible
+    // - This keeps hit detection working while Three.js renders the visuals
+    if (canvas.tokens) {
+      canvas.tokens.visible = true; // Layer stays visible for interaction
+      canvas.tokens.interactiveChildren = true;
+      // Make tokens transparent - ControlsIntegration.hideReplacedLayers() handles this
+      // more thoroughly after tokens are synced
+      for (const token of canvas.tokens.placeables) {
+        if (token.mesh) token.mesh.alpha = 0;
+        if (token.icon) token.icon.alpha = 0;
+        if (token.border) token.border.alpha = 0;
+        token.visible = true;
+        token.interactive = true;
+      }
+    }
+    log.debug('Replaced PIXI layers hidden, tokens layer transparent but interactive');
+    
     // Insert our canvas as a sibling, right after the PIXI canvas
     pixiCanvas.parentElement.insertBefore(threeCanvas, pixiCanvas.nextSibling);
     log.debug('Three.js canvas created and attached as sibling to PIXI canvas');
@@ -419,8 +477,8 @@ async function createThreeCanvas(scene) {
     rendererCanvas.style.left = '0';
     rendererCanvas.style.width = '100%';
     rendererCanvas.style.height = '100%';
-    rendererCanvas.style.zIndex = '1'; // Below PIXI canvas (which is hidden and non-interactive)
-    rendererCanvas.style.pointerEvents = 'auto'; // ENABLE pointer events for drop handling
+    rendererCanvas.style.zIndex = '1'; // Below PIXI (but PIXI is transparent, so Three.js shows through)
+    rendererCanvas.style.pointerEvents = 'auto'; // Three.js handles interaction in gameplay mode
     // Use Foundry's scene background colour so padded region matches core Foundry
     rendererCanvas.style.backgroundColor = sceneBgColorStr;
 
@@ -666,9 +724,26 @@ async function createThreeCanvas(scene) {
     dropHandler.initialize();
     log.info('Drop handler initialized');
 
-    // Step 6: Initialize camera controller
+    // Step 6: Initialize camera controller (for fallback mode only)
+    // In hybrid mode, Foundry's native pan controls are used instead
     cameraController = new CameraController(threeCanvas, sceneComposer);
     log.info('Camera controller initialized');
+
+    // Step 6b: Initialize controls integration (PIXI overlay system)
+    // This replaces the old configureFoundryCanvas() approach with a more robust system
+    controlsIntegration = new ControlsIntegration({ 
+      sceneComposer,
+      effectComposer 
+    });
+    await controlsIntegration.initialize();
+    
+    // Disable CameraController when ControlsIntegration is active
+    // Foundry's native pan/zoom controls the PIXI stage, and CameraSync syncs Three.js to match
+    if (controlsIntegration.getState() === 'active') {
+      cameraController.disable();
+      log.info('Camera controller disabled - using Foundry native pan/zoom via CameraSync');
+    }
+    log.info('Controls integration initialized');
 
     // Step 7: Ensure Foundry UI layers are above our canvas
     ensureUILayering();
@@ -716,6 +791,13 @@ async function createThreeCanvas(scene) {
     mapShine.renderLoop = renderLoop; // CRITICAL: Expose render loop for diagnostics
     mapShine.sceneDebug = sceneDebug; // NEW: Expose scene debug helpers
     mapShine.setMapMakerMode = setMapMakerMode; // NEW: Expose mode toggle for UI
+    mapShine.controlsIntegration = controlsIntegration; // NEW: Expose controls integration
+    // Expose sub-systems for debugging
+    if (controlsIntegration) {
+      mapShine.cameraSync = controlsIntegration.cameraSync;
+      mapShine.inputRouter = controlsIntegration.inputRouter;
+      mapShine.layerVisibility = controlsIntegration.layerVisibility;
+    }
     // Attach to canvas as well for convenience (used by console snippets)
     try { canvas.mapShine = mapShine; } catch (_) {}
 
@@ -1590,6 +1672,13 @@ function destroyThreeCanvas() {
     log.debug('Camera controller disposed');
   }
 
+  // Dispose controls integration
+  if (controlsIntegration) {
+    controlsIntegration.destroy();
+    controlsIntegration = null;
+    log.debug('Controls integration disposed');
+  }
+
   // Stop render loop
   if (renderLoop) {
     renderLoop.stop();
@@ -1747,12 +1836,33 @@ function enableSystem() {
     renderLoop.start();
   }
   
-  // Show Three.js Canvas
+  // Three.js Canvas: visible but render-only (no interaction)
   threeCanvas.style.opacity = '1';
-  threeCanvas.style.pointerEvents = 'auto'; // Capture inputs, but allow fallthrough via Input Arbitration
+  threeCanvas.style.zIndex = '1'; // Below PIXI
+  threeCanvas.style.pointerEvents = 'none'; // Three.js is render-only
   
-  // Configure PIXI for Hybrid Mode
-  configureFoundryCanvas();
+  // PIXI Canvas: on top, handles ALL interaction
+  const pixiCanvas = canvas.app?.view;
+  if (pixiCanvas) {
+    pixiCanvas.style.opacity = '1'; // Visible for overlay layers
+    pixiCanvas.style.zIndex = '10'; // On top
+    pixiCanvas.style.pointerEvents = 'auto'; // PIXI handles ALL interaction
+  }
+  
+  // CRITICAL: Set PIXI renderer background to transparent
+  // This allows Three.js content to show through
+  if (canvas.app?.renderer?.background) {
+    canvas.app.renderer.background.alpha = 0;
+  }
+  
+  // Let ControlsIntegration handle the rest if active
+  if (controlsIntegration && controlsIntegration.getState() === 'active') {
+    controlsIntegration.layerVisibility?.update();
+    controlsIntegration.inputRouter?.autoUpdate();
+  } else {
+    // Fallback to legacy configuration
+    configureFoundryCanvas();
+  }
 }
 
 /**
@@ -1779,6 +1889,9 @@ function disableSystem() {
  * Configure Foundry's PIXI canvas for Hybrid Mode
  * Keeps canvas visible but hides specific layers we've replaced
  * Sets up input arbitration to pass clicks through to THREE.js when needed
+ * 
+ * NOTE: This function is now largely superseded by ControlsIntegration.
+ * It remains for backward compatibility and fallback scenarios.
  * @private
  */
 function configureFoundryCanvas() {
@@ -1787,19 +1900,27 @@ function configureFoundryCanvas() {
     return;
   }
 
-  log.info('Configuring Foundry PIXI canvas for Hybrid Mode');
+  // If controls integration is active, let it handle configuration
+  if (controlsIntegration && controlsIntegration.getState() === 'active') {
+    log.debug('Controls integration active, skipping legacy configureFoundryCanvas');
+    return;
+  }
+
+  log.info('Configuring Foundry PIXI canvas for Hybrid Mode (legacy)');
 
   const pixiCanvas = canvas.app.view;
   if (pixiCanvas) {
-    // In Gameplay Mode (isMapMakerMode === false) we want Three.js to be the
-    // sole visible renderer. The native PIXI canvas should be fully hidden so
-    // the user clearly sees the 3D view. Map Maker Mode will call
-    // restoreFoundryRendering() to bring PIXI back when editing.
-    pixiCanvas.style.opacity = '0';
-    pixiCanvas.style.pointerEvents = 'none';
-    // Keep a high z-index so that when Map Maker Mode is enabled and PIXI is
-    // restored, it can sit above the Three.js canvas again.
-    pixiCanvas.style.zIndex = '10'; 
+    // PIXI-first strategy: PIXI handles ALL interaction, Three.js is render-only
+    // PIXI stays on top with opacity 1 so overlay layers (drawings, templates, notes) show.
+    // Three.js is below but visible through PIXI's transparent background.
+    pixiCanvas.style.opacity = '1'; // Keep visible for overlay layers
+    pixiCanvas.style.pointerEvents = 'auto'; // PIXI handles ALL interaction
+    pixiCanvas.style.zIndex = '10'; // On top
+  }
+  
+  // CRITICAL: Set PIXI renderer background to transparent
+  if (canvas.app?.renderer?.background) {
+    canvas.app.renderer.background.alpha = 0;
   }
 
   // Update layer visibility based on current tool
@@ -1808,7 +1929,7 @@ function configureFoundryCanvas() {
   // Setup Input Arbitration (Tool switching)
   setupInputArbitration();
 
-  log.info('PIXI canvas configured for Replacement Mode');
+  log.info('PIXI canvas configured for Replacement Mode (legacy)');
 }
 
 /**
@@ -1822,9 +1943,26 @@ function updateLayerVisibility() {
   // These are rendered by Three.js
   if (canvas.background) canvas.background.visible = false;
   if (canvas.grid) canvas.grid.visible = false;
-  if (canvas.tokens) canvas.tokens.visible = false;
   if (canvas.weather) canvas.weather.visible = false;
   if (canvas.environment) canvas.environment.visible = false; // V12+
+
+  // CRITICAL: Tokens layer needs special handling
+  // - Visual rendering is done by Three.js (TokenManager)
+  // - But PIXI tokens must remain INTERACTIVE for clicks, HUD, selection, cursor
+  // - We make token meshes TRANSPARENT (alpha=0) instead of invisible
+  // - This keeps hit detection working while Three.js renders the visuals
+  if (canvas.tokens) {
+    canvas.tokens.visible = true; // Layer stays visible for interaction
+    canvas.tokens.interactiveChildren = true;
+    // Make individual token visuals transparent but keep them interactive
+    for (const token of canvas.tokens.placeables) {
+      if (token.mesh) token.mesh.alpha = 0;
+      if (token.icon) token.icon.alpha = 0;
+      if (token.border) token.border.alpha = 0;
+      token.visible = true;
+      token.interactive = true;
+    }
+  }
 
   // Drawings are NOT replaced; they should render via PIXI as an overlay.
   if (canvas.drawings) canvas.drawings.visible = true;
@@ -1916,6 +2054,12 @@ function setupInputArbitration() {
  */
 function updateInputMode() {
     if (!canvas.ready) return;
+    
+    // If ControlsIntegration is active, it handles input routing via InputRouter
+    // Skip this legacy function to avoid conflicts
+    if (controlsIntegration && controlsIntegration.getState() === 'active') {
+        return;
+    }
     
     const pixiCanvas = canvas.app?.view;
     if (!pixiCanvas) return;

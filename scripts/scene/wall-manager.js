@@ -230,27 +230,34 @@ export class WallManager {
       const size = 40 * (canvas.dimensions.uiScale || 1);
       const radius = size / 2;
       
-      // Background (Circle)
-      const bgGeo = new THREE.CircleGeometry(radius, 24);
+      // Higher segment count for smooth anti-aliased circles
+      const segments = 64;
+      
+      // Background (Circle) - increased z-separation to prevent z-fighting
+      const bgGeo = new THREE.CircleGeometry(radius, segments);
       const bgMat = new THREE.MeshBasicMaterial({ 
           color: 0x000000,
           transparent: true,
           opacity: 0.5,
-          side: THREE.DoubleSide
+          side: THREE.DoubleSide,
+          depthWrite: false  // Prevent depth buffer conflicts
       });
       const bg = new THREE.Mesh(bgGeo, bgMat);
+      bg.renderOrder = 1000;  // Ensure consistent render order
       doorGroup.add(bg);
       
-      // Border (Ring)
-      const borderGeo = new THREE.RingGeometry(radius - 2, radius, 24);
+      // Border (Ring) - higher segments for smooth edges
+      const borderGeo = new THREE.RingGeometry(radius - 2, radius, segments);
       const borderMat = new THREE.MeshBasicMaterial({ 
           color: 0xffffff,
           transparent: true,
           opacity: 0.8,
-          side: THREE.DoubleSide
+          side: THREE.DoubleSide,
+          depthWrite: false
       });
       const border = new THREE.Mesh(borderGeo, borderMat);
-      border.position.z = 0.005;
+      border.position.z = 0.5;  // Increased z-separation to prevent flickering
+      border.renderOrder = 1001;
       doorGroup.add(border);
       
       // Icon Sprite
@@ -266,16 +273,23 @@ export class WallManager {
       const iconMat = new THREE.MeshBasicMaterial({
           transparent: true,
           opacity: 1.0,
-          color: 0xffffff
+          color: 0xffffff,
+          depthWrite: false
       });
       
       loader.load(iconPath, (tex) => {
+          // Enable anisotropic filtering for sharper icon at angles
+          tex.anisotropy = 4;
+          tex.minFilter = THREE.LinearMipmapLinearFilter;
+          tex.magFilter = THREE.LinearFilter;
+          tex.generateMipmaps = true;
           iconMat.map = tex;
           iconMat.needsUpdate = true;
       });
       
       const icon = new THREE.Mesh(iconGeo, iconMat);
-      icon.position.z = 0.01;
+      icon.position.z = 1.0;  // Increased z-separation to prevent flickering
+      icon.renderOrder = 1002;
       doorGroup.add(icon);
 
       // Store references for updates

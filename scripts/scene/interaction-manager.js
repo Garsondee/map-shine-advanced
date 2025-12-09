@@ -95,6 +95,9 @@ export class InteractionManager {
     /** @type {string|null} ID of currently hovered overhead tile */
     this.hoveredOverheadTileId = null;
     this.hoveringTreeCanopy = false;
+    
+    /** @type {string|null} ID of token whose HUD is currently open */
+    this.openHudTokenId = null;
 
     this.boundHandlers = {
       onPointerDown: this.onPointerDown.bind(this),
@@ -463,8 +466,25 @@ export class InteractionManager {
         const tokenSprites = this.tokenManager.getAllTokenSprites();
         const wallGroup = this.wallManager.wallGroup;
 
-        // Handle Right Click (Potential HUD)
+        // Handle Right Click (Potential HUD or Door Lock/Unlock)
         if (event.button === 2) {
+            // First check for door controls (GM lock/unlock)
+            const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
+            if (wallIntersects.length > 0) {
+                const hit = wallIntersects[0];
+                let object = hit.object;
+                
+                // Traverse up to find doorControl userData
+                while (object && object !== wallGroup) {
+                    if (object.userData && object.userData.type === 'doorControl') {
+                        this.handleDoorRightClick(object, event);
+                        event.preventDefault();
+                        return;
+                    }
+                    object = object.parent;
+                }
+            }
+
             // Raycast against tokens for HUD
             const intersects = this.raycaster.intersectObjects(tokenSprites, false);
             if (intersects.length > 0) {
@@ -689,6 +709,16 @@ export class InteractionManager {
           const sprite = hit.object;
           const tokenDoc = sprite.userData.tokenDoc;
           
+          // Close HUD if clicking on a different token
+          if (this.openHudTokenId && this.openHudTokenId !== tokenDoc.id) {
+            const hud = canvas.tokens?.hud;
+            if (hud?.rendered) {
+              log.debug('Left click on different token: Closing HUD');
+              hud.close();
+            }
+            this.openHudTokenId = null;
+          }
+          
           // Permission check
           if (!tokenDoc.canUserModify(game.user, "update")) {
             ui.notifications.warn("You do not have permission to control this Token.");
@@ -723,6 +753,16 @@ export class InteractionManager {
           // Clicked empty space - deselect all unless shift held
           if (!event.shiftKey) {
             this.clearSelection();
+          }
+          
+          // Close any open Token HUD when clicking empty space
+          if (this.openHudTokenId) {
+            const hud = canvas.tokens?.hud;
+            if (hud?.rendered) {
+              log.debug('Left click on empty space: Closing HUD');
+              hud.close();
+            }
+            this.openHudTokenId = null;
           }
           
           // Start Drag Select
@@ -924,6 +964,51 @@ export class InteractionManager {
           });
       } catch(err) {
           log.error("Error in handleDoorClick", err);
+      }
+  }
+
+  /**
+   * Handle Door Right Click (Lock/Unlock - GM only)
+   * @param {THREE.Group} doorGroup 
+   * @param {PointerEvent} event 
+   */
+  handleDoorRightClick(doorGroup, event) {
+      try {
+          // Only GM can lock/unlock doors
+          if (!game.user.isGM) {
+              log.debug("handleDoorRightClick: Only GM can lock/unlock doors");
+              return;
+          }
+
+          const wallId = doorGroup.userData.wallId;
+          const wall = canvas.walls.get(wallId);
+          if (!wall) {
+              log.warn(`handleDoorRightClick: Wall ${wallId} not found in canvas.walls`);
+              return;
+          }
+
+          const ds = wall.document.ds;
+          const states = CONST.WALL_DOOR_STATES;
+
+          // Cannot lock an open door
+          if (ds === states.OPEN) {
+              log.debug("handleDoorRightClick: Cannot lock an open door");
+              return;
+          }
+
+          // Toggle between LOCKED and CLOSED
+          const newState = ds === states.LOCKED ? states.CLOSED : states.LOCKED;
+          const sound = !(game.user.isGM && event.altKey);
+
+          log.info(`handleDoorRightClick: Wall ${wallId}, toggling ${ds} -> ${newState}`);
+
+          wall.document.update({ds: newState}, {sound}).then(() => {
+              log.info(`handleDoorRightClick: Update successful for ${wallId}`);
+          }).catch(err => {
+              log.error(`handleDoorRightClick: Update failed for ${wallId}`, err);
+          });
+      } catch(err) {
+          log.error("Error in handleDoorRightClick", err);
       }
   }
 
@@ -1396,23 +1481,31 @@ export class InteractionManager {
    */
   async onPointerUp(event) {
     try {
-        // Handle Right Click (HUD)
+        // Handle Right Click (HUD toggle)
         if (event.button === 2 && this.rightClickState.active) {
             const tokenId = this.rightClickState.tokenId;
-            log.debug(`Right click up: Opening HUD for ${tokenId}`);
             
             this.rightClickState.active = false;
             this.rightClickState.tokenId = null;
 
             const token = canvas.tokens.get(tokenId);
             if (token && token.layer.hud) {
-                // Check permission again just to be safe, though HUD will also check
-                if (token.document.isOwner) {
-                    token.layer.hud.bind(token);
-                    // Force immediate position update
-                    this.updateHUDPosition();
+                // If HUD is already open for this token, close it (toggle behavior)
+                if (this.openHudTokenId === tokenId) {
+                    log.debug(`Right click up: Closing HUD for ${tokenId}`);
+                    token.layer.hud.close();
+                    this.openHudTokenId = null;
                 } else {
-                    log.warn(`User is not owner of token ${token.name}, cannot open HUD`);
+                    // Check permission again just to be safe, though HUD will also check
+                    if (token.document.isOwner) {
+                        log.debug(`Right click up: Opening HUD for ${tokenId}`);
+                        token.layer.hud.bind(token);
+                        this.openHudTokenId = tokenId;
+                        // Force immediate position update
+                        this.updateHUDPosition();
+                    } else {
+                        log.warn(`User is not owner of token ${token.name}, cannot open HUD`);
+                    }
                 }
             } else {
                 log.warn(`Token ${tokenId} or HUD not found`);

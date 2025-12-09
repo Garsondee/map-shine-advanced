@@ -59,6 +59,7 @@ import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { TokenManager } from '../scene/token-manager.js';
 import { TileManager } from '../scene/tile-manager.js';
 import { WallManager } from '../scene/wall-manager.js';
+import { DoorMeshManager } from '../scene/DoorMeshManager.js';
 import { DrawingManager } from '../scene/drawing-manager.js';
 import { NoteManager } from '../scene/note-manager.js';
 import { TemplateManager } from '../scene/template-manager.js';
@@ -107,6 +108,9 @@ let tileManager = null;
 
 /** @type {WallManager|null} */
 let wallManager = null;
+
+/** @type {DoorMeshManager|null} */
+let doorMeshManager = null;
 
 /** @type {DrawingManager|null} */
 let drawingManager = null;
@@ -312,6 +316,7 @@ function onCanvasTearDown(canvas) {
     window.MapShine.tokenManager = null;
     window.MapShine.tileManager = null;
     window.MapShine.wallManager = null;
+    window.MapShine.doorMeshManager = null;
     window.MapShine.visionManager = null;
     window.MapShine.fogManager = null;
     window.MapShine.renderLoop = null;
@@ -613,6 +618,12 @@ async function createThreeCanvas(scene) {
     // Sync happens in initialize
     log.info('Wall manager initialized');
 
+    // Step 4c.1: Initialize door mesh manager (animated door graphics)
+    doorMeshManager = new DoorMeshManager(threeScene, sceneComposer.camera);
+    doorMeshManager.initialize();
+    effectComposer.addUpdatable(doorMeshManager); // Register for animation updates
+    log.info('Door mesh manager initialized');
+
     // Step 4d: Initialize drawing manager (Three.js drawings)
     drawingManager = new DrawingManager(threeScene);
     drawingManager.initialize();
@@ -693,6 +704,7 @@ async function createThreeCanvas(scene) {
     mapShine.tokenManager = tokenManager; // NEW: Expose token manager for diagnostics
     mapShine.tileManager = tileManager; // NEW: Expose tile manager for diagnostics
     mapShine.wallManager = wallManager; // NEW: Expose wall manager
+    mapShine.doorMeshManager = doorMeshManager; // Animated door graphics
     mapShine.drawingManager = drawingManager; // NEW: Expose drawing manager
     mapShine.noteManager = noteManager;
     mapShine.templateManager = templateManager;
@@ -1611,6 +1623,13 @@ function destroyThreeCanvas() {
     wallManager.dispose();
     wallManager = null;
     log.debug('Wall manager disposed');
+  }
+
+  // Dispose door mesh manager
+  if (doorMeshManager) {
+    doorMeshManager.dispose();
+    doorMeshManager = null;
+    log.debug('Door mesh manager disposed');
   }
 
   // Dispose drawing manager

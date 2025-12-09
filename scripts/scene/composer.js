@@ -412,6 +412,62 @@ export class SceneComposer {
   }
 
   /**
+   * Get Foundry-compatible zoom scale limits
+   * Mirrors Foundry VTT's Canvas#getDimensions zoom calculation
+   * @returns {{min: number, max: number}} Scale limits (1.0 = base zoom)
+   * @private
+   */
+  getZoomLimits() {
+    const { innerWidth, innerHeight } = window;
+    const width = this.foundrySceneData.width;
+    const height = this.foundrySceneData.height;
+    const gridSize = this.foundrySceneData.gridSize;
+    const padding = gridSize; // Use grid size as padding like Foundry
+    
+    // Min scale: fit entire padded scene in viewport
+    // Matches Foundry: Math.min(innerWidth / paddedWidth, innerHeight / paddedHeight, 1)
+    const paddedWidth = width + (2 * padding);
+    const paddedHeight = height + (2 * padding);
+    let minScale = CONFIG?.Canvas?.minZoom;
+    if (minScale === undefined) {
+      minScale = Math.min(innerWidth / paddedWidth, innerHeight / paddedHeight, 1);
+    }
+    
+    // Max scale: zoom in to see ~3 grid cells
+    // Matches Foundry: factor = 3 * (sourceGridSize / gridSize)
+    // maxScale = Math.max(Math.min(innerWidth / gridSizeX, innerHeight / gridSizeY) / factor, minScale)
+    let maxScale = CONFIG?.Canvas?.maxZoom;
+    if (maxScale === undefined) {
+      const factor = 3; // 3 grid cells visible at max zoom
+      maxScale = Math.max(Math.min(innerWidth / gridSize, innerHeight / gridSize) / factor, minScale);
+    }
+    
+    return { min: minScale, max: maxScale };
+  }
+
+  /**
+   * Convert zoom scale to camera distance
+   * Scale 1.0 = baseDistance, higher scale = closer camera
+   * @param {number} scale - Zoom scale (1.0 = default)
+   * @returns {number} Camera distance
+   * @private
+   */
+  scaleToDistance(scale) {
+    // scale = baseDistance / distance, so distance = baseDistance / scale
+    return this.baseDistance / scale;
+  }
+
+  /**
+   * Convert camera distance to zoom scale
+   * @param {number} distance - Camera distance
+   * @returns {number} Zoom scale
+   * @private
+   */
+  distanceToScale(distance) {
+    return this.baseDistance / distance;
+  }
+
+  /**
    * Zoom camera by factor (move closer/farther)
    * @param {number} zoomFactor - Zoom multiplier (>1 = zoom in, <1 = zoom out)
    * @param {number} centerX - Zoom center X in viewport space (0-1, default 0.5) - UNUSED for now
@@ -420,12 +476,20 @@ export class SceneComposer {
   zoom(zoomFactor, centerX = 0.5, centerY = 0.5) {
     if (!this.camera) return;
 
-    // For perspective camera: move along Z-axis
-    // Closer = zoomed in, farther = zoomed out
-    // Divide by zoomFactor because closer distance means bigger view
-    let newDistance = this.cameraDistance / zoomFactor;
+    // Get current scale and apply zoom factor
+    const currentScale = this.distanceToScale(this.cameraDistance);
+    let newScale = currentScale * zoomFactor;
     
-    // Clamp distance to prevent clipping
+    // Get Foundry-compatible zoom limits
+    const limits = this.getZoomLimits();
+    
+    // Clamp scale to Foundry limits
+    newScale = Math.max(limits.min, Math.min(newScale, limits.max));
+    
+    // Convert back to camera distance
+    let newDistance = this.scaleToDistance(newScale);
+    
+    // Additional safety clamps for depth buffer
     // Min: 100 (keep above tokens at Z=10)
     // Max: 180000 (keep within far plane of 200000)
     newDistance = Math.max(100, Math.min(newDistance, 180000));
@@ -443,7 +507,16 @@ export class SceneComposer {
     // Camera rotation stays fixed (already looking down -Z)
     // No need to call lookAt()
 
-    log.debug(`Camera zoom: ${zoomFactor.toFixed(2)}x, new distance: ${newDistance.toFixed(0)}, near: ${this.camera.near.toFixed(0)}`);
+    log.debug(`Camera zoom: scale ${newScale.toFixed(3)} (limits: ${limits.min.toFixed(3)}-${limits.max.toFixed(3)}), distance: ${newDistance.toFixed(0)}`);
+  }
+
+  /**
+   * Get current zoom scale
+   * @returns {number} Current zoom scale (1.0 = default)
+   */
+  getZoomScale() {
+    if (!this.camera) return 1.0;
+    return this.distanceToScale(this.cameraDistance);
   }
 
   /**

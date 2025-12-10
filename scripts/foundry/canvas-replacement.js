@@ -517,6 +517,9 @@ async function createThreeCanvas(scene) {
 
     log.info(`Scene composer initialized with ${bundle.masks.length} effect masks`);
 
+    // CRITICAL: Expose sceneComposer early so effects can access groundZ during initialization
+    mapShine.sceneComposer = sceneComposer;
+
     // Wire the _Outdoors (roof/indoor) mask into the WeatherController so
     // precipitation effects (rain, snow, puddles) can respect covered areas.
     try {

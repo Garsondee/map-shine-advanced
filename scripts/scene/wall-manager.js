@@ -43,7 +43,7 @@ export class WallManager {
     // Track selected walls
     this.selected = new Set();
     
-    // Z-index for walls (raised to avoid z-fighting with ground/grid)
+    // Z-index for walls - will be updated in initialize() once groundZ is available
     this.wallGroup.position.z = 3.0; 
     
     this.scene.add(this.wallGroup);
@@ -61,11 +61,15 @@ export class WallManager {
   initialize() {
     if (this.initialized) return;
 
+    // Update Z position based on groundZ
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+    this.wallGroup.position.z = groundZ + 3.0;
+
     this.setupHooks();
     this.syncAllWalls();
     
     this.initialized = true;
-    log.info('WallManager initialized');
+    log.info(`WallManager initialized at z=${this.wallGroup.position.z}`);
   }
 
   /**

@@ -701,11 +701,18 @@ export class BushEffect extends EffectBase {
           }
         }
 
-        if (su.uZoom && this.camera) {
-          const baseDist = 10000.0;
-          const dist = this.camera.position.z;
-          const z = (dist > 0.1) ? (baseDist / dist) : 1.0;
-          su.uZoom.value = z;
+        if (su.uZoom) {
+          // Prefer sceneComposer.currentZoom (FOV-based zoom system)
+          const sceneComposer = window.MapShine?.sceneComposer;
+          if (sceneComposer?.currentZoom !== undefined) {
+            su.uZoom.value = sceneComposer.currentZoom;
+          } else if (this.camera?.isOrthographicCamera) {
+            su.uZoom.value = this.camera.zoom;
+          } else if (this.camera) {
+            const baseDist = 10000.0;
+            const dist = this.camera.position.z;
+            su.uZoom.value = (dist > 0.1) ? (baseDist / dist) : 1.0;
+          }
         }
       } catch (e) {}
     }

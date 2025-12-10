@@ -18,7 +18,7 @@ export class SceneComposer {
     /** @type {THREE.Scene|null} */
     this.scene = null;
     
-    /** @type {THREE.OrthographicCamera|null} */
+    /** @type {THREE.PerspectiveCamera|null} */
     this.camera = null;
     
     /** @type {MapAssetBundle|null} */
@@ -120,7 +120,7 @@ export class SceneComposer {
     // Create base plane mesh (with texture or fallback color)
     this.createBasePlane(baseTexture);
 
-    // Setup orthographic camera
+    // Setup perspective camera with FOV-based zoom
     this.setupCamera(viewportWidth, viewportHeight);
 
     log.info(`Scene initialized: ${this.currentBundle.masks.length} effect masks available`);
@@ -235,7 +235,12 @@ export class SceneComposer {
     const bgGeometry = new THREE.PlaneGeometry(worldWidth, worldHeight);
     const bgMaterial = new THREE.MeshBasicMaterial({ color: bgColorInt });
     const bgMesh = new THREE.Mesh(bgGeometry, bgMaterial);
-    bgMesh.position.set(worldWidth / 2, worldHeight / 2, -0.1);
+    // Position background slightly behind the base plane
+    // groundZ is set when basePlaneMesh is created (1000 by default)
+    // For perfect PIXI alignment with camera at Z=2000, ground should be at Z=1000
+    // This gives distanceToGround = 1000, matching the base FOV calculation
+    const GROUND_Z = 1000; // Canonical ground plane Z position
+    bgMesh.position.set(worldWidth / 2, worldHeight / 2, GROUND_Z - 0.1);
     this.scene.add(bgMesh);
 
     // Use SCENE dimensions for geometry to prevent stretching texture across padding
@@ -277,10 +282,12 @@ export class SceneComposer {
     backMesh.name = 'BasePlane_Back';
     this.basePlaneMesh.add(backMesh);
     
-    // Position at world center
-    this.basePlaneMesh.position.set(worldWidth / 2, worldHeight / 2, 0);
+    // Position at world center at the canonical ground Z
+    // This value (1000) is the canonical groundZ that all other layers reference
+    // With camera at Z=2000, this gives distanceToGround=1000 for clean 1:1 pixel mapping
+    this.basePlaneMesh.position.set(worldWidth / 2, worldHeight / 2, GROUND_Z);
     
-    // CRITICAL: Foundry uses Y-down coordinates (0 at top, H at bottom).
+    // CRITICAL: Foundry uses Y-down coordinates (0 at top, H at bottom). 
     // Three.js uses Y-up (0 at bottom, H at top).
     // Strategy: Map Foundry 0 -> World H (Top) and Foundry H -> World 0 (Bottom).
     // Plane Geometry is created at center (W/2, H/2).
@@ -295,8 +302,19 @@ export class SceneComposer {
   }
 
   /**
-   * Setup perspective camera for quasi-orthographic 2.5D top-down view
-   * Uses distant camera with narrow FOV to minimize perspective distortion
+   * Setup perspective camera with FOV-based zoom for 2.5D top-down view
+   * 
+   * This approach keeps the camera at a FIXED Z position and zooms by
+   * adjusting the FOV. This gives us:
+   * - Perspective depth for particles (rain/snow look 3D)
+   * - Fixed near/far planes (no depth precision issues)
+   * - Ground plane always at same depth in frustum (no disappearing)
+   * - Parallax effects during pan
+   * 
+   * The key insight: ground plane disappearing was caused by camera Z
+   * moving, which changed the ground's position in the depth buffer.
+   * With FOV zoom, ground stays at constant depth.
+   * 
    * @param {number} viewportWidth - Viewport width in CSS pixels
    * @param {number} viewportHeight - Viewport height in CSS pixels
    * @private
@@ -311,48 +329,61 @@ export class SceneComposer {
     const centerX = worldWidth / 2;
     const centerY = worldHeight / 2;
 
-    // QUASI-ORTHOGRAPHIC SETUP:
-    // Position camera very far away with narrow FOV
-    // At extreme distance, perspective distortion becomes negligible
-    const cameraDistance = 10000;
+    // FIXED CAMERA HEIGHT - never changes during zoom
+    // This is the key to stability: ground plane is always at a predictable
+    // depth relative to camera, so no near/far plane issues.
+    const CAMERA_HEIGHT = 2000;
+    
+    // The ground plane may be offset in Z (e.g. 0, 900, etc.). Use the
+    // ACTUAL distance between camera and ground for FOV math so that
+    // moving the plane in Z does not break alignment with PIXI.
+    const groundZ = this.basePlaneMesh?.position?.z ?? 0;
+    const distanceToGround = Math.max(1, CAMERA_HEIGHT - groundZ);
 
-    // Calculate FOV to achieve 1:1 pixel mapping at this distance
-    // tan(FOV/2) = (viewHeight/2) / distance
-    // FOV = 2 * atan((viewHeight/2) / distance)
-    const fovRadians = 2 * Math.atan(viewportHeight / (2 * cameraDistance));
-    const fovDegrees = fovRadians * (180 / Math.PI);
-
+    // Calculate base FOV to achieve 1:1 pixel mapping at zoom=1.
+    // At zoom=1, we want to see exactly viewportHeight world units vertically
+    // at the ground plane depth.
+    // FOV = 2 * atan((viewportHeight/2) / distanceToGround)
+    const baseFovRadians = 2 * Math.atan(viewportHeight / (2 * distanceToGround));
+    const baseFovDegrees = baseFovRadians * (180 / Math.PI);
+    
     const aspect = viewportWidth / viewportHeight;
 
-    // Dynamic Near Plane: Start with ratio 0.1 of distance
-    const nearPlane = Math.max(10, cameraDistance * 0.1);
-
     this.camera = new THREE.PerspectiveCamera(
-      fovDegrees,
+      baseFovDegrees,
       aspect,
-      nearPlane,     // near (dynamic for depth precision)
-      200000         // far (increased to allow significant zoom out)
+      1,            // near - fixed, close enough for all content
+      5000          // far - fixed, far enough for all content
     );
 
-    // Position camera high above world center
-    this.camera.position.set(centerX, centerY, cameraDistance);
+    // Position camera at fixed height above world center, looking down -Z
+    this.camera.position.set(centerX, centerY, CAMERA_HEIGHT);
     
     // Standard Orientation (Look down -Z, Up is +Y)
-    // Screen Top sees World +Y (Top). Screen Bottom sees World 0 (Bottom).
-    // This matches our new coordinate strategy.
     this.camera.rotation.set(0, 0, 0);
     
     this.camera.updateMatrix();
     this.camera.updateMatrixWorld(true);
     this.camera.updateProjectionMatrix();
     
-    log.info(`Camera rotation set to: x=${this.camera.rotation.x.toFixed(4)}, y=${this.camera.rotation.y.toFixed(4)}, z=${this.camera.rotation.z.toFixed(4)}`);
+    // Store camera constants for zoom calculations
+    this.cameraHeight = CAMERA_HEIGHT;
+    this.groundZ = groundZ;
+    this.groundDistance = distanceToGround;
+    this.baseFov = baseFovDegrees;
+    this.baseFovRadians = baseFovRadians;
+    this.baseFovTanHalf = Math.tan(baseFovRadians / 2);
+    this.currentZoom = 1.0;
+    
+    // Store base viewport dimensions for resize calculations
+    this.baseViewportWidth = viewportWidth;
+    this.baseViewportHeight = viewportHeight;
+    
+    // Legacy compatibility - some code checks these
+    this.cameraDistance = CAMERA_HEIGHT;
+    this.baseDistance = CAMERA_HEIGHT;
 
-    // Store camera distance for zoom calculations
-    this.cameraDistance = cameraDistance;
-    this.baseDistance = cameraDistance;
-
-    log.info(`Perspective camera setup: FOV ${fovDegrees.toFixed(2)}°, distance ${cameraDistance}, aspect ${aspect.toFixed(2)}, viewport ${viewportWidth}x${viewportHeight}`);
+    log.info(`Perspective camera setup (FOV zoom): height=${CAMERA_HEIGHT}, groundZ=${groundZ}, distance=${distanceToGround}, baseFOV=${baseFovDegrees.toFixed(2)}°, center (${centerX}, ${centerY}), viewport ${viewportWidth}x${viewportHeight}`);
   }
 
   /**
@@ -364,17 +395,36 @@ export class SceneComposer {
     if (!this.camera) return;
 
     // Update aspect ratio
-    const aspect = viewportWidth / viewportHeight;
-    this.camera.aspect = aspect;
+    this.camera.aspect = viewportWidth / viewportHeight;
+    
+    // Recalculate base FOV for new viewport height using the actual
+    // camera-to-ground distance. This keeps zoom + parallax consistent
+    // even if the base plane Z has been tweaked.
+    const groundZ = this.basePlaneMesh?.position?.z ?? (this.groundZ ?? 0);
+    const distanceToGround = Math.max(1, this.cameraHeight - groundZ);
+    this.groundZ = groundZ;
+    this.groundDistance = distanceToGround;
 
-    // Recalculate FOV for new viewport height to maintain 1:1 pixel mapping
-    const fovRadians = 2 * Math.atan(viewportHeight / (2 * this.cameraDistance));
-    const fovDegrees = fovRadians * (180 / Math.PI);
-    this.camera.fov = fovDegrees;
+    const baseFovRadians = 2 * Math.atan(viewportHeight / (2 * distanceToGround));
+    this.baseFov = baseFovRadians * (180 / Math.PI);
+    this.baseFovRadians = baseFovRadians;
+    this.baseFovTanHalf = Math.tan(baseFovRadians / 2);
 
+    // Apply current zoom to new base FOV
+    if (this.camera.isPerspectiveCamera) {
+      const baseTan = this.baseFovTanHalf;
+      const zoom = this.currentZoom || 1;
+      const fovRad = 2 * Math.atan(baseTan / zoom);
+      this.camera.fov = fovRad * (180 / Math.PI);
+    }
+    
     this.camera.updateProjectionMatrix();
+    
+    // Update stored dimensions
+    this.baseViewportWidth = viewportWidth;
+    this.baseViewportHeight = viewportHeight;
 
-    log.debug(`Camera resized: ${viewportWidth}x${viewportHeight}, FOV: ${fovDegrees.toFixed(2)}°`);
+    log.debug(`Camera resized: ${viewportWidth}x${viewportHeight}, FOV=${this.camera.fov.toFixed(2)}°`);
   }
 
   /**
@@ -385,28 +435,22 @@ export class SceneComposer {
   pan(deltaX, deltaY) {
     if (!this.camera) return;
 
-    // For perspective camera looking straight down:
-    // Just translate the camera in XY, keeping Z constant
-    // The camera rotation stays fixed (looking down -Z axis)
+    // Translate camera in XY (Z stays fixed)
     let newX = this.camera.position.x + deltaX;
     let newY = this.camera.position.y + deltaY;
     
     // Clamp camera to scene bounds + margin
-    // Prevent user from panning too far away and getting lost
     const width = this.foundrySceneData.width;
     const height = this.foundrySceneData.height;
     const marginX = Math.max(2000, width * 0.5);
     const marginY = Math.max(2000, height * 0.5);
     
-    // Bounds: [-Margin, Width + Margin]
     newX = Math.max(-marginX, Math.min(newX, width + marginX));
     newY = Math.max(-marginY, Math.min(newY, height + marginY));
     
     this.camera.position.x = newX;
     this.camera.position.y = newY;
-    
-    // No need to call lookAt() - camera rotation is already set
-    // and doesn't change during panning
+    // Z stays at cameraHeight - never changes
     
     log.debug(`Camera pan to (${this.camera.position.x.toFixed(1)}, ${this.camera.position.y.toFixed(1)})`);
   }
@@ -446,29 +490,13 @@ export class SceneComposer {
   }
 
   /**
-   * Convert zoom scale to camera distance
-   * Scale 1.0 = baseDistance, higher scale = closer camera
-   * @param {number} scale - Zoom scale (1.0 = default)
-   * @returns {number} Camera distance
-   * @private
-   */
-  scaleToDistance(scale) {
-    // scale = baseDistance / distance, so distance = baseDistance / scale
-    return this.baseDistance / scale;
-  }
-
-  /**
-   * Convert camera distance to zoom scale
-   * @param {number} distance - Camera distance
-   * @returns {number} Zoom scale
-   * @private
-   */
-  distanceToScale(distance) {
-    return this.baseDistance / distance;
-  }
-
-  /**
-   * Zoom camera by factor (move closer/farther)
+   * Zoom camera by factor using FOV adjustment
+   * 
+   * FOV zoom: narrower FOV = magnified view (zoom in)
+   *           wider FOV = wider view (zoom out)
+   * 
+   * Formula: currentFOV = baseFOV / zoomLevel
+   * 
    * @param {number} zoomFactor - Zoom multiplier (>1 = zoom in, <1 = zoom out)
    * @param {number} centerX - Zoom center X in viewport space (0-1, default 0.5) - UNUSED for now
    * @param {number} centerY - Zoom center Y in viewport space (0-1, default 0.5) - UNUSED for now
@@ -476,38 +504,24 @@ export class SceneComposer {
   zoom(zoomFactor, centerX = 0.5, centerY = 0.5) {
     if (!this.camera) return;
 
-    // Get current scale and apply zoom factor
-    const currentScale = this.distanceToScale(this.cameraDistance);
-    let newScale = currentScale * zoomFactor;
+    let newZoom = this.currentZoom * zoomFactor;
     
     // Get Foundry-compatible zoom limits
     const limits = this.getZoomLimits();
     
-    // Clamp scale to Foundry limits
-    newScale = Math.max(limits.min, Math.min(newScale, limits.max));
+    // Clamp zoom to limits
+    newZoom = Math.max(limits.min, Math.min(newZoom, limits.max));
     
-    // Convert back to camera distance
-    let newDistance = this.scaleToDistance(newScale);
+    // Store zoom level
+    this.currentZoom = newZoom;
     
-    // Additional safety clamps for depth buffer
-    // Min: 100 (keep above tokens at Z=10)
-    // Max: 180000 (keep within far plane of 200000)
-    newDistance = Math.max(100, Math.min(newDistance, 180000));
-    
-    // Update camera Z position
-    this.camera.position.z = newDistance;
-    this.cameraDistance = newDistance;
-    
-    // Dynamic Near Plane Optimization
-    // Maintain healthy Far/Near ratio to preserve depth buffer precision
-    // At high distances, a small near plane destroys precision
-    this.camera.near = Math.max(10, newDistance * 0.1);
+    // Apply FOV zoom: higher zoom = narrower FOV
+    // Clamp FOV to reasonable range (1° to 170°)
+    const newFov = Math.max(1, Math.min(170, this.baseFov / newZoom));
+    this.camera.fov = newFov;
     this.camera.updateProjectionMatrix();
-    
-    // Camera rotation stays fixed (already looking down -Z)
-    // No need to call lookAt()
 
-    log.debug(`Camera zoom: scale ${newScale.toFixed(3)} (limits: ${limits.min.toFixed(3)}-${limits.max.toFixed(3)}), distance: ${newDistance.toFixed(0)}`);
+    log.debug(`Camera zoom: ${newZoom.toFixed(3)} (FOV=${newFov.toFixed(2)}°, limits: ${limits.min.toFixed(3)}-${limits.max.toFixed(3)})`);
   }
 
   /**
@@ -516,7 +530,8 @@ export class SceneComposer {
    */
   getZoomScale() {
     if (!this.camera) return 1.0;
-    return this.distanceToScale(this.cameraDistance);
+    // FOV-based zoom: return stored zoom level
+    return this.currentZoom;
   }
 
   /**

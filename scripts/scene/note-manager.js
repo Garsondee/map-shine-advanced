@@ -30,7 +30,8 @@ export class NoteManager {
     // Group for all notes
     this.group = new THREE.Group();
     this.group.name = 'Notes';
-    this.group.position.z = 2.5; // Above drawings
+    // Z position will be set in initialize() once groundZ is available
+    this.group.position.z = 2.5;
     this.scene.add(this.group);
     
     // Default icon
@@ -46,11 +47,15 @@ export class NoteManager {
   initialize() {
     if (this.initialized) return;
 
+    // Update Z position based on groundZ
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+    this.group.position.z = groundZ + 2.5;
+
     this.setupHooks();
     this.syncAllNotes();
     
     this.initialized = true;
-    log.info('NoteManager initialized');
+    log.info(`NoteManager initialized at z=${this.group.position.z}`);
   }
 
   /**

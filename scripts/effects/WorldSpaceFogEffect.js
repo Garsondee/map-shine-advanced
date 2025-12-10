@@ -21,14 +21,14 @@ import { frameCoordinator } from '../core/frame-coordinator.js';
 const log = createLogger('WorldSpaceFogEffect');
 
 /**
- * Z position for the fog plane in world space.
- * We keep this at Z=0 (same as scene content) and rely on:
+ * Z offset for the fog plane above groundZ.
+ * We position the fog slightly above the ground plane and rely on:
  * - depthTest: false - fog doesn't participate in depth testing
  * - renderOrder: 9999 - fog renders after everything else
  * This avoids perspective distortion issues that occur when the fog plane
  * is at a different Z than the scene content.
  */
-const FOG_PLANE_Z = 0;
+const FOG_PLANE_Z_OFFSET = 50.0; // Above most scene content but below overhead tiles
 
 export class WorldSpaceFogEffect extends EffectBase {
   constructor() {
@@ -451,8 +451,9 @@ export class WorldSpaceFogEffect extends EffectBase {
     const centerX = x + width / 2;
     const centerY = this.sceneDimensions.height - (y + height / 2);
     
-    // Initial Z position - will be updated each frame in update() to track camera
-    this.fogPlane.position.set(centerX, centerY, FOG_PLANE_Z);
+    // Position fog plane relative to groundZ
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+    this.fogPlane.position.set(centerX, centerY, groundZ + FOG_PLANE_Z_OFFSET);
     
     // Frustum culling off - always render
     this.fogPlane.frustumCulled = false;
@@ -460,7 +461,7 @@ export class WorldSpaceFogEffect extends EffectBase {
     // Add to main scene
     this.mainScene.add(this.fogPlane);
     
-    log.debug(`Fog plane created at (${centerX}, ${centerY}, ${FOG_PLANE_Z}), size ${width}x${height}`);
+    log.debug(`Fog plane created at (${centerX}, ${centerY}, ${groundZ + FOG_PLANE_Z_OFFSET}), size ${width}x${height}`);
   }
 
   /**

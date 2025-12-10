@@ -682,9 +682,17 @@ export class TreeEffect extends EffectBase {
             su.uSunDir.value.set(-Math.sin(azimuth), Math.cos(azimuth) * lat);
           }
         }
-        if (su.uZoom && this.camera) {
-           const dist = this.camera.position.z;
-           su.uZoom.value = (dist > 0.1) ? (10000.0 / dist) : 1.0;
+        if (su.uZoom) {
+          // Prefer sceneComposer.currentZoom (FOV-based zoom system)
+          const sceneComposer = window.MapShine?.sceneComposer;
+          if (sceneComposer?.currentZoom !== undefined) {
+            su.uZoom.value = sceneComposer.currentZoom;
+          } else if (this.camera?.isOrthographicCamera) {
+            su.uZoom.value = this.camera.zoom;
+          } else if (this.camera) {
+            const dist = this.camera.position.z;
+            su.uZoom.value = (dist > 0.1) ? (10000.0 / dist) : 1.0;
+          }
         }
       } catch (e) {}
     }

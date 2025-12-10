@@ -31,7 +31,8 @@ export class LightIconManager {
     // Group for all light icons
     this.group = new THREE.Group();
     this.group.name = 'LightIcons';
-    this.group.position.z = 4.0; // Above templates/notes so they are easy to see
+    // Z position will be set in initialize() once groundZ is available
+    this.group.position.z = 4.0;
     this.group.visible = false;  // Start hidden until canvas-replacement drives visibility
     this.scene.add(this.group);
 
@@ -48,11 +49,15 @@ export class LightIconManager {
   initialize() {
     if (this.initialized) return;
 
+    // Update Z position based on groundZ
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+    this.group.position.z = groundZ + 4.0;
+
     this.setupHooks();
     this.syncAllLights();
 
     this.initialized = true;
-    log.info('LightIconManager initialized');
+    log.info(`LightIconManager initialized at z=${this.group.position.z}`);
   }
 
   /**

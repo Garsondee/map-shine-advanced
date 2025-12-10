@@ -55,8 +55,8 @@ export class CameraFollower {
       return false;
     }
     
-    // Do initial sync
-    this._syncFromPixi();
+    // Force initial sync (bypass threshold check)
+    this.forceSync();
     
     this._initialized = true;
     log.info('Camera follower initialized - Three.js will follow PIXI');
@@ -115,15 +115,18 @@ export class CameraFollower {
     // Three.js: Y-up, position is center of view
     camera.position.x = pixiX;
     camera.position.y = worldHeight - pixiY;
+    // Z position stays fixed for FOV-based zoom
     
-    // For perspective camera, zoom = baseDistance / Z
-    if (camera.isPerspectiveCamera) {
-      const baseDistance = this.sceneComposer.baseDistance || 10000;
-      const newZ = baseDistance / pixiZoom;
-      camera.position.z = newZ;
-      
-      // Update near plane to maintain depth buffer precision
-      camera.near = Math.max(10, newZ * 0.01);
+    // FOV-based zoom: adjust FOV instead of camera Z position
+    // This keeps the ground plane at a constant depth in the frustum
+    if (camera.isPerspectiveCamera && this.sceneComposer.baseFovTanHalf !== undefined) {
+      const baseTan = this.sceneComposer.baseFovTanHalf;
+      const zoom = pixiZoom || 1;
+      const fovRad = 2 * Math.atan(baseTan / zoom);
+      const fovDeg = fovRad * (180 / Math.PI);
+      const clamped = Math.max(1, Math.min(170, fovDeg));
+      camera.fov = clamped;
+      this.sceneComposer.currentZoom = zoom;
       camera.updateProjectionMatrix();
     } else if (camera.isOrthographicCamera) {
       camera.zoom = pixiZoom;
@@ -135,10 +138,23 @@ export class CameraFollower {
    * Force an immediate sync (useful after scene changes)
    */
   forceSync() {
+    // Reset cache to force sync on next call
     this._lastX = -999999;
     this._lastY = -999999;
-    this._lastZoom = -1;
+    this._lastZoom = -999999;
+    
+    // Immediately sync
     this._syncFromPixi();
+    
+    // Log the sync for debugging
+    const stage = canvas?.stage;
+    const camera = this.sceneComposer?.camera;
+    const worldHeight = this.sceneComposer?.foundrySceneData?.height || 0;
+    if (stage && camera) {
+      log.info(`Force sync: PIXI pivot=(${stage.pivot.x.toFixed(1)}, ${stage.pivot.y.toFixed(1)}), zoom=${stage.scale.x.toFixed(3)}`);
+      log.info(`Force sync: Three pos=(${camera.position.x.toFixed(1)}, ${camera.position.y.toFixed(1)}, ${camera.position.z.toFixed(1)}), FOV=${camera.fov?.toFixed(2) || 'N/A'}°`);
+      log.info(`Force sync: worldHeight=${worldHeight}, baseFov=${this.sceneComposer?.baseFov?.toFixed(2) || 'N/A'}°, currentZoom=${this.sceneComposer?.currentZoom?.toFixed(3) || 'N/A'}`);
+    }
   }
   
   /**

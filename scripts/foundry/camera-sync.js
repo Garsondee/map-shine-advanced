@@ -154,10 +154,17 @@ export class CameraSync {
       camera.position.x = threeX;
       camera.position.y = threeY;
       
-      // Update Three.js camera zoom (via Z distance for perspective camera)
-      if (camera.isPerspectiveCamera) {
-        const baseDistance = this.sceneComposer.baseDistance || 10000;
-        camera.position.z = baseDistance / pixiZoom;
+      // Update Three.js camera zoom via FOV (camera Z stays fixed)
+      // This keeps the ground plane at a constant depth in the frustum
+      if (camera.isPerspectiveCamera && this.sceneComposer.baseFovTanHalf !== undefined) {
+        const baseTan = this.sceneComposer.baseFovTanHalf;
+        const zoom = pixiZoom || 1;
+        const fovRad = 2 * Math.atan(baseTan / zoom);
+        const fovDeg = fovRad * (180 / Math.PI);
+        const clamped = Math.max(1, Math.min(170, fovDeg));
+        camera.fov = clamped;
+        this.sceneComposer.currentZoom = zoom;
+        camera.updateProjectionMatrix();
       } else if (camera.isOrthographicCamera) {
         camera.zoom = pixiZoom;
         camera.updateProjectionMatrix();
@@ -326,21 +333,20 @@ export class CameraSync {
     const dy = Math.abs(threeY - this.lastPosition.y);
     const dz = Math.abs(pixiZoom - this.lastPosition.zoom);
     
-    // DEBUG: Log every frame to diagnose zoom sync issues
-    console.log(`CameraSync: pixiZoom=${pixiZoom.toFixed(3)}, lastZoom=${this.lastPosition.zoom.toFixed(3)}, dz=${dz.toFixed(4)}, camZ=${camera.position.z.toFixed(0)}`);
-    
     if (dx > this.syncThreshold || dy > this.syncThreshold || dz > this.syncThreshold) {
       // IMMEDIATE sync - no debouncing for per-frame updates
       // This ensures Three.js camera follows PIXI in real-time during panning
       camera.position.x = threeX;
       camera.position.y = threeY;
       
-      // Update zoom (via Z distance for perspective camera)
-      if (camera.isPerspectiveCamera) {
-        const baseDistance = this.sceneComposer.baseDistance || 10000;
-        const newZ = baseDistance / pixiZoom;
-        console.log(`CameraSync ZOOM UPDATE: baseDistance=${baseDistance}, pixiZoom=${pixiZoom.toFixed(3)}, newZ=${newZ.toFixed(0)}`);
-        camera.position.z = newZ;
+      // Update zoom via FOV (camera Z stays fixed)
+      // This keeps the ground plane at a constant depth in the frustum
+      if (camera.isPerspectiveCamera && this.sceneComposer.baseFov !== undefined) {
+        const baseFov = this.sceneComposer.baseFov;
+        const newFov = Math.max(1, Math.min(170, baseFov / pixiZoom));
+        camera.fov = newFov;
+        this.sceneComposer.currentZoom = pixiZoom;
+        camera.updateProjectionMatrix();
       } else if (camera.isOrthographicCamera) {
         camera.zoom = pixiZoom;
         camera.updateProjectionMatrix();

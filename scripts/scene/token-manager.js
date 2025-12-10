@@ -10,7 +10,7 @@ const log = createLogger('TokenManager');
 
 /**
  * Z-position base for tokens (from architecture)
- * Tokens render at this z-position + elevation
+ * Tokens render at this z-position + elevation above the scene groundZ.
  */
 const TOKEN_BASE_Z = 10.0;
 
@@ -441,9 +441,10 @@ export class TokenManager {
     const sceneHeight = canvas.dimensions?.height || 10000;
     const centerY = sceneHeight - (tokenDoc.y + rectHeight / 2);
     
-    // Z-position = base + elevation
+    // Z-position = groundZ + base + elevation
     const elevation = tokenDoc.elevation || 0;
-    const zPosition = TOKEN_BASE_Z + elevation;
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+    const zPosition = groundZ + TOKEN_BASE_Z + elevation;
 
     log.debug(`Calculated Sprite Pos: (${centerX}, ${centerY}, ${zPosition}) from Token (${tokenDoc.x}, ${tokenDoc.y})`);
     log.debug(`Current Sprite Pos: (${sprite.position.x}, ${sprite.position.y}, ${sprite.position.z})`);

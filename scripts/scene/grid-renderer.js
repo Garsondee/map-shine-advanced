@@ -9,8 +9,9 @@ import { createLogger } from '../core/log.js';
 
 const log = createLogger('GridRenderer');
 
-// Z-position for grid (just above ground, below tiles)
-const GRID_Z = 2.0;
+// Z-position offset for grid (just above ground, below tiles)
+// This is an OFFSET added to groundZ, not an absolute value
+const GRID_Z_OFFSET = 0.5;
 
 /**
  * GridRenderer - Renders the scene grid
@@ -206,7 +207,9 @@ export class GridRenderer {
     const sceneWidth = canvas.dimensions.width;
     const sceneHeight = canvas.dimensions.height;
     
-    this.gridMesh.position.set(sceneWidth / 2, sceneHeight / 2, GRID_Z);
+    // Position grid relative to groundZ
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+    this.gridMesh.position.set(sceneWidth / 2, sceneHeight / 2, groundZ + GRID_Z_OFFSET);
     
     // Flip Y to match texture
     this.gridMesh.scale.y = -1; 

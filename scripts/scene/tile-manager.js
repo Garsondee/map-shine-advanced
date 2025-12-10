@@ -15,10 +15,11 @@ const log = createLogger('TileManager');
 // Currently FALSE so tiles behave normally while we profile other systems.
 const DISABLE_TILE_UPDATES = false;
 
-// Z-layer constants from Architecture
-const Z_BACKGROUND = 1.0;
-const Z_FOREGROUND = 5.0;
-const Z_OVERHEAD = 20.0;
+// Z-layer offsets from groundZ (from Architecture)
+// These are OFFSETS added to groundZ, not absolute values
+const Z_BACKGROUND_OFFSET = 1.0;
+const Z_FOREGROUND_OFFSET = 5.0;
+const Z_OVERHEAD_OFFSET = 20.0;
 
 /**
  * TileManager - Synchronizes Foundry VTT tiles to THREE.js sprites
@@ -575,10 +576,12 @@ export class TileManager {
       sprite.layers.disable(ROOF_LAYER);
     }
     
-    let zBase = Z_FOREGROUND;
+    // Get groundZ for proper layering
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+    let zBase = groundZ + Z_FOREGROUND_OFFSET;
     
     if (isOverhead) {
-      zBase = Z_OVERHEAD;
+      zBase = groundZ + Z_OVERHEAD_OFFSET;
       // Overhead tiles should not dominate the depth buffer so that
       // weather and other environmental effects can render visibly above
       // them. Keep depth testing so roofs still occlude underlying
@@ -594,9 +597,9 @@ export class TileManager {
       // Note: Foundry uses 'sort' or 'z' depending on version, tileDoc.z is common access
       const sortKey = tileDoc.sort ?? tileDoc.z ?? 0;
       if (sortKey < 0) {
-        zBase = Z_BACKGROUND;
+        zBase = groundZ + Z_BACKGROUND_OFFSET;
       } else {
-        zBase = Z_FOREGROUND;
+        zBase = groundZ + Z_FOREGROUND_OFFSET;
       }
     }
     

@@ -27,7 +27,8 @@ export class TemplateManager {
     // Group for all templates
     this.group = new THREE.Group();
     this.group.name = 'Templates';
-    this.group.position.z = 1.5; // Just above ground/tiles
+    // Z position will be set in initialize() once groundZ is available
+    this.group.position.z = 1.5;
     this.scene.add(this.group);
     
     log.debug('TemplateManager created');
@@ -40,11 +41,15 @@ export class TemplateManager {
   initialize() {
     if (this.initialized) return;
 
+    // Update Z position based on groundZ
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+    this.group.position.z = groundZ + 1.5;
+
     this.setupHooks();
     this.syncAllTemplates();
     
     this.initialized = true;
-    log.info('TemplateManager initialized');
+    log.info(`TemplateManager initialized at z=${this.group.position.z}`);
   }
 
   /**

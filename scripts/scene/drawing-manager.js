@@ -27,7 +27,8 @@ export class DrawingManager {
     // Group for all drawings
     this.group = new THREE.Group();
     this.group.name = 'Drawings';
-    this.group.position.z = 2.0; // Above tiles, below walls
+    // Z position will be set in initialize() once groundZ is available
+    this.group.position.z = 2.0;
     this.scene.add(this.group);
     
     log.debug('DrawingManager created');
@@ -40,11 +41,15 @@ export class DrawingManager {
   initialize() {
     if (this.initialized) return;
 
+    // Update Z position based on groundZ
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+    this.group.position.z = groundZ + 2.0;
+
     this.setupHooks();
     this.syncAllDrawings();
     
     this.initialized = true;
-    log.info('DrawingManager initialized');
+    log.info(`DrawingManager initialized at z=${this.group.position.z}`);
   }
 
   /**

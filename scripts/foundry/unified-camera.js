@@ -145,11 +145,16 @@ export class UnifiedCameraController {
     this.state.x = camera.position.x;
     this.state.y = worldHeight - camera.position.y;
     
-    if (camera.isPerspectiveCamera) {
-      const baseDistance = this.sceneComposer.baseDistance || 10000;
-      this.state.zoom = baseDistance / camera.position.z;
+    // FOV-based zoom: read from sceneComposer.currentZoom
+    // This is the authoritative zoom level for the FOV-zoom system
+    if (this.sceneComposer.currentZoom !== undefined) {
+      this.state.zoom = this.sceneComposer.currentZoom;
     } else if (camera.isOrthographicCamera) {
       this.state.zoom = camera.zoom;
+    } else if (camera.isPerspectiveCamera) {
+      // Legacy fallback
+      const baseDistance = this.sceneComposer.baseDistance || 10000;
+      this.state.zoom = baseDistance / camera.position.z;
     }
   }
   
@@ -188,11 +193,21 @@ export class UnifiedCameraController {
     // Convert Foundry Y-down to Three.js Y-up
     camera.position.x = this.state.x;
     camera.position.y = worldHeight - this.state.y;
+    // Z position stays fixed for FOV-based zoom
     
-    if (camera.isPerspectiveCamera) {
-      const baseDistance = this.sceneComposer.baseDistance || 10000;
-      camera.position.z = baseDistance / this.state.zoom;
+    // FOV-based zoom: adjust FOV instead of camera Z position
+    // This keeps the ground plane at a constant depth in the frustum
+    if (camera.isPerspectiveCamera && this.sceneComposer.baseFovTanHalf !== undefined) {
+      const baseTan = this.sceneComposer.baseFovTanHalf;
+      const zoom = this.state.zoom || 1;
+      const fovRad = 2 * Math.atan(baseTan / zoom);
+      const fovDeg = fovRad * (180 / Math.PI);
+      const clamped = Math.max(1, Math.min(170, fovDeg));
+      camera.fov = clamped;
+      this.sceneComposer.currentZoom = zoom;
+      camera.updateProjectionMatrix();
     } else if (camera.isOrthographicCamera) {
+      // Fallback for orthographic camera
       camera.zoom = this.state.zoom;
       camera.updateProjectionMatrix();
     }

@@ -325,6 +325,33 @@ export class OverheadShadowsEffect extends EffectBase {
   }
 
   /**
+   * Get effective zoom level from camera.
+   * Works with FOV-based zoom (reads sceneComposer.currentZoom),
+   * OrthographicCamera (uses camera.zoom), or legacy PerspectiveCamera.
+   * @returns {number} Zoom level (1.0 = default)
+   * @private
+   */
+  _getEffectiveZoom() {
+    // Prefer sceneComposer.currentZoom (FOV-based zoom system)
+    const sceneComposer = window.MapShine?.sceneComposer;
+    if (sceneComposer?.currentZoom !== undefined) {
+      return sceneComposer.currentZoom;
+    }
+    
+    if (!this.mainCamera) return 1.0;
+    
+    // OrthographicCamera: zoom is a direct property
+    if (this.mainCamera.isOrthographicCamera) {
+      return this.mainCamera.zoom;
+    }
+    
+    // PerspectiveCamera legacy fallback: calculate from Z position
+    const baseDist = 10000.0;
+    const dist = this.mainCamera.position.z;
+    return (dist > 0.1) ? (baseDist / dist) : 1.0;
+  }
+
+  /**
    * Update sun direction from current time of day.
    *
    * We use WeatherController.timeOfDay (0-24h) which is driven by the
@@ -350,8 +377,8 @@ export class OverheadShadowsEffect extends EffectBase {
     }
 
     // Optimization: Skip update if params haven't changed
-    const camZ = this.mainCamera ? this.mainCamera.position.z : 0;
-    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${camZ.toFixed(2)}`;
+    const camZoom = this._getEffectiveZoom();
+    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${camZoom.toFixed(4)}`;
     
     if (this._lastUpdateHash === updateHash && this.sunDir) return;
     this._lastUpdateHash = updateHash;
@@ -393,14 +420,7 @@ export class OverheadShadowsEffect extends EffectBase {
       if (u.uLength)  u.uLength.value  = this.params.length;
       if (u.uSoftness) u.uSoftness.value = this.params.softness;
       if (u.uZoom && this.mainCamera) {
-        // Calculate zoom from perspective camera distance (dolly zoom).
-        // Base distance is 10000 (from SceneComposer).
-        // We cannot rely on camera.zoom because PerspectiveCamera keeps it at 1.0
-        // while moving the camera position to zoom.
-        const baseDist = 10000.0;
-        const dist = this.mainCamera.position.z;
-        const z = (dist > 0.1) ? (baseDist / dist) : 1.0;
-        u.uZoom.value = z;
+        u.uZoom.value = this._getEffectiveZoom();
       }
     }
   }

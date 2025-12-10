@@ -704,16 +704,40 @@ export class LightingEffect extends EffectBase {
         u.uShadowSunDir.value.set(x, y);
       }
 
-      // Zoom factor matching OverheadShadowsEffect logic (camera dolly zoom).
-      if (this.mainCamera && THREE) {
-        const baseDist = 10000.0;
-        const dist = this.mainCamera.position.z;
-        const z = (dist > 0.1) ? (baseDist / dist) : 1.0;
-        u.uShadowZoom.value = z;
+      // Zoom factor - works with both OrthographicCamera and PerspectiveCamera
+      if (this.mainCamera) {
+        u.uShadowZoom.value = this._getEffectiveZoom();
       }
     } catch (e) {
       // keep previous values
     }
+  }
+
+  /**
+   * Get effective zoom level from camera.
+   * Works with FOV-based zoom (reads sceneComposer.currentZoom),
+   * OrthographicCamera (uses camera.zoom), or legacy PerspectiveCamera.
+   * @returns {number} Zoom level (1.0 = default)
+   * @private
+   */
+  _getEffectiveZoom() {
+    // Prefer sceneComposer.currentZoom (FOV-based zoom system)
+    const sceneComposer = window.MapShine?.sceneComposer;
+    if (sceneComposer?.currentZoom !== undefined) {
+      return sceneComposer.currentZoom;
+    }
+    
+    if (!this.mainCamera) return 1.0;
+    
+    // OrthographicCamera: zoom is a direct property
+    if (this.mainCamera.isOrthographicCamera) {
+      return this.mainCamera.zoom;
+    }
+    
+    // PerspectiveCamera legacy fallback: calculate from Z position
+    const baseDist = 10000.0;
+    const dist = this.mainCamera.position.z;
+    return (dist > 0.1) ? (baseDist / dist) : 1.0;
   }
 
   getEffectiveDarkness() {

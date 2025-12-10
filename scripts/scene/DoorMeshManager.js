@@ -287,7 +287,8 @@ class DoorMesh {
     }
     
     // Apply to mesh
-    this.mesh.position.set(x, y, 0.5); // Slightly above ground
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+    this.mesh.position.set(x, y, groundZ + 1.0); // Slightly above ground
     this.mesh.rotation.z = rotation;
     this.mesh.scale.set(scaleX, scaleY, 1);
     this.mesh.material.opacity = alpha;

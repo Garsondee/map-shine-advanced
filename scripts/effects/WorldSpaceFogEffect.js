@@ -609,8 +609,34 @@ export class WorldSpaceFogEffect extends EffectBase {
     if (!fogEnabled) return true;
     
     if (isGM) {
-      const controlled = canvas?.tokens?.controlled || [];
-      return controlled.length === 0;
+      // First, trust Foundry's native controlled tokens
+      const foundryControlled = canvas?.tokens?.controlled || [];
+      let hasControlledTokens = foundryControlled.length > 0;
+
+      // Also consider MapShine's Three.js selection as a fallback/extension.
+      // This ensures that as soon as a token is selected in our custom UI,
+      // the GM no longer bypasses fog, even if Foundry hasn't fully synced yet.
+      if (!hasControlledTokens) {
+        try {
+          const ms = window.MapShine;
+          const interactionManager = ms?.interactionManager;
+          const tokenManager = ms?.tokenManager;
+          const selection = interactionManager?.selection;
+
+          if (interactionManager && tokenManager && selection && selection.size > 0) {
+            for (const id of selection) {
+              if (tokenManager.tokenSprites && tokenManager.tokenSprites.has(id)) {
+                hasControlledTokens = true;
+                break;
+              }
+            }
+          }
+        } catch (_) {
+          // Ignore MapShine check errors
+        }
+      }
+
+      return !hasControlledTokens;
     }
     
     return false;

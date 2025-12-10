@@ -2136,6 +2136,17 @@ export class InteractionManager {
       // Check Token
       if (this.tokenManager.tokenSprites.has(id)) {
           this.tokenManager.setTokenSelection(id, false);
+
+          // Also release Foundry's native token control so that
+          // canvas.tokens.controlled is kept in sync with MapShine's
+          // selection state. This is important for fog bypass logic
+          // which checks whether the GM has any controlled tokens.
+          try {
+            const fvttToken = canvas.tokens?.get(id);
+            if (fvttToken) fvttToken.release();
+          } catch (_) {
+            // Ignore release errors
+          }
       }
       // Check Light
       if (this.lightIconManager && this.lightIconManager.lights.has(id)) {
@@ -2149,8 +2160,8 @@ export class InteractionManager {
     }
     this.selection.clear();
     
-    // NOTE: Vision/fog updates are now handled natively by Foundry.
-    // FogEffect uses FoundryFogBridge to extract Foundry's vision textures directly.
+    // NOTE: Vision/fog updates are now handled by MapShine's world-space fog
+    // effect, which also consults Foundry's controlled tokens for GM bypass.
   }
 
   /**

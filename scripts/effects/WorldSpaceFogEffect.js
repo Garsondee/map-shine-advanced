@@ -22,13 +22,21 @@ const log = createLogger('WorldSpaceFogEffect');
 
 /**
  * Z offset for the fog plane above groundZ.
- * We position the fog slightly above the ground plane and rely on:
- * - depthTest: false - fog doesn't participate in depth testing
- * - renderOrder: 9999 - fog renders after everything else
- * This avoids perspective distortion issues that occur when the fog plane
- * is at a different Z than the scene content.
+ *
+ * We want the fog plane to sit just above all world content that can be
+ * occluded by fog (ground, tiles, tokens, environmental meshes) while
+ * remaining as close as possible to the canonical ground plane to avoid
+ * any unintended parallax or depth-related artifacts.
+ *
+ * NOTE:
+ * - depthTest: false  → fog does not participate in depth testing
+ * - renderOrder: 9999 → fog renders after everything else regardless of Z
+ *
+ * The small offset here is only to keep the plane numerically above other
+ * meshes that may also sit near groundZ; visually, ordering is controlled
+ * by renderOrder + disabled depth test.
  */
-const FOG_PLANE_Z_OFFSET = 50.0; // Above most scene content but below overhead tiles
+const FOG_PLANE_Z_OFFSET = 5.0; // Just above all scene content, but very close to the ground plane
 
 export class WorldSpaceFogEffect extends EffectBase {
   constructor() {

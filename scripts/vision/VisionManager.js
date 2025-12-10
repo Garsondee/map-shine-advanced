@@ -65,6 +65,10 @@ export class VisionManager {
     // This stores the authoritative new positions from updateToken hooks
     this.pendingPositions = new Map();
     
+    // CONTROLLED TOKENS: Only compute vision for tokens the user controls
+    // This is the key to performance - we don't compute vision for ALL tokens
+    this._controlledTokenIds = new Set();
+    
     // Scene bounds for clipping vision (set from canvas.dimensions.sceneRect)
     this.sceneBounds = null;
     
@@ -78,6 +82,9 @@ export class VisionManager {
     this._tempCenter = { x: 0, y: 0 };
     this._tempSceneBounds = null;
     
+    // Cache the last computed vision state to detect if we actually need to rerender
+    this._lastVisionHash = null;
+    
     // Register hooks
     this.setupHooks();
     
@@ -89,19 +96,28 @@ export class VisionManager {
     // Capture the changes object which contains the NEW position values
     // token.document may still have OLD values during the hook
     Hooks.on('updateToken', (tokenDoc, changes) => { 
-      // Store the new position if x or y changed
-      if ('x' in changes || 'y' in changes) {
-        this.pendingPositions.set(tokenDoc.id, {
-          x: 'x' in changes ? changes.x : tokenDoc.x,
-          y: 'y' in changes ? changes.y : tokenDoc.y
-        });
+      // Only track position changes for controlled tokens
+      if (this._controlledTokenIds.has(tokenDoc.id)) {
+        if ('x' in changes || 'y' in changes) {
+          this.pendingPositions.set(tokenDoc.id, {
+            x: 'x' in changes ? changes.x : tokenDoc.x,
+            y: 'y' in changes ? changes.y : tokenDoc.y
+          });
+        }
+        this.needsUpdate = true;
       }
-      this.needsUpdate = true;
     });
-    Hooks.on('controlToken', () => { this.needsUpdate = true; });
+    
+    // CRITICAL: Track controlled tokens explicitly
+    // This is the key hook for knowing which tokens to compute vision for
+    Hooks.on('controlToken', (token, controlled) => { 
+      this._handleControlToken(token, controlled);
+    });
+    
     Hooks.on('createToken', () => { this.needsUpdate = true; });
     Hooks.on('deleteToken', (tokenDoc) => { 
       this.pendingPositions.delete(tokenDoc.id);
+      this._controlledTokenIds.delete(tokenDoc.id);
       this.needsUpdate = true; 
     });
     
@@ -109,7 +125,9 @@ export class VisionManager {
     // This updates the FOV as the token moves, producing more realistic sight lines
     // PERFORMANCE: Throttle these updates to avoid recomputing vision 60x/sec during animation.
     Hooks.on('refreshToken', (token) => {
-      // Only update if this token has vision
+      // Only update if this token is controlled AND has vision
+      if (!this._controlledTokenIds.has(token.document?.id)) return;
+      
       const gsm = window.MapShine?.gameSystem;
       const hasVision = gsm ? gsm.hasTokenVision(token) : (token.hasSight || token.document?.sight?.enabled);
       if (hasVision) {
@@ -132,12 +150,97 @@ export class VisionManager {
     // Scene hooks
     Hooks.on('canvasReady', () => { 
       this.pendingPositions.clear();
+      this._controlledTokenIds.clear();
+      this._lastVisionHash = null;
       this.needsUpdate = true; 
     });
     
     // Legacy hooks (may still fire in some Foundry versions)
     Hooks.on('sightRefresh', () => { this.needsUpdate = true; });
     Hooks.on('lightingRefresh', () => { this.needsUpdate = true; });
+  }
+
+  /**
+   * Handle controlToken hook - track which tokens are controlled
+   * @param {Token} token - The token being controlled/released
+   * @param {boolean} controlled - Whether the token is now controlled
+   */
+  _handleControlToken(token, controlled) {
+    const tokenId = token.document?.id;
+    if (!tokenId) return;
+    
+    if (controlled) {
+      // Token is being selected
+      this._controlledTokenIds.add(tokenId);
+      log.debug(`Token controlled: ${tokenId}, total controlled: ${this._controlledTokenIds.size}`);
+    } else {
+      // Token is being deselected
+      this._controlledTokenIds.delete(tokenId);
+      this.pendingPositions.delete(tokenId);
+      log.debug(`Token released: ${tokenId}, total controlled: ${this._controlledTokenIds.size}`);
+    }
+    
+    // Always trigger update when selection changes
+    this.needsUpdate = true;
+  }
+
+  /**
+   * Set a pending position for a token (for drag preview updates)
+   * @param {string} tokenId - The token ID
+   * @param {number} x - Foundry X coordinate (top-left corner)
+   * @param {number} y - Foundry Y coordinate (top-left corner)
+   */
+  setTokenPosition(tokenId, x, y) {
+    if (!this._controlledTokenIds.has(tokenId)) return;
+    this.pendingPositions.set(tokenId, { x, y });
+    this._pendingThrottledUpdate = true;
+  }
+
+  /**
+   * Force an immediate vision update (bypasses throttling)
+   */
+  forceUpdate() {
+    this.needsUpdate = true;
+  }
+
+  /**
+   * Sync controlled tokens from MapShine's InteractionManager
+   * Called when we need to ensure our state matches the UI selection
+   */
+  syncControlledTokens() {
+    const ms = window.MapShine;
+    const interactionManager = ms?.interactionManager;
+    const tokenManager = ms?.tokenManager;
+    const selection = interactionManager?.selection;
+    
+    if (!selection || !tokenManager) {
+      // Fallback to Foundry's controlled tokens
+      const controlled = canvas?.tokens?.controlled || [];
+      this._controlledTokenIds.clear();
+      for (const token of controlled) {
+        if (token.document?.id) {
+          this._controlledTokenIds.add(token.document.id);
+        }
+      }
+    } else {
+      // Use MapShine's selection
+      this._controlledTokenIds.clear();
+      for (const id of selection) {
+        // Only add if it's actually a token (not a light, wall, etc.)
+        if (tokenManager.tokenSprites?.has(id)) {
+          this._controlledTokenIds.add(id);
+        }
+      }
+    }
+    
+    // Clear stale pending positions
+    for (const id of this.pendingPositions.keys()) {
+      if (!this._controlledTokenIds.has(id)) {
+        this.pendingPositions.delete(id);
+      }
+    }
+    
+    this.needsUpdate = true;
   }
 
   resize(width, height) {
@@ -227,10 +330,17 @@ export class VisionManager {
       height: sceneRect.height
     } : null;
     
-    // 2. Get tokens with vision
+    // 2. Get CONTROLLED tokens with vision (not ALL tokens)
+    // This is the key optimization - we only compute vision for tokens the user controls
     const tokens = (canvas?.tokens?.placeables ?? []).filter(token => {
+      const tokenId = token.document?.id;
+      if (!tokenId) return false;
+      
       // Skip hidden tokens
       if (token.document?.hidden) return false;
+      
+      // CRITICAL: Only process controlled tokens
+      if (!this._controlledTokenIds.has(tokenId)) return false;
       
       // Check if token has vision
       if (gsm) {
@@ -329,8 +439,14 @@ export class VisionManager {
     this.renderer.render(this.scene, this.camera);
     this.renderer.setRenderTarget(currentTarget); // Restore
 
-    // Clear pending positions after use - they're now reflected in the rendered vision
-    this.pendingPositions.clear();
+    // DON'T clear pending positions here - they may still be needed for ongoing
+    // animations or drags. They will be overwritten by new hook data anyway.
+    // Only clear positions for tokens that are no longer controlled.
+    for (const id of this.pendingPositions.keys()) {
+      if (!this._controlledTokenIds.has(id)) {
+        this.pendingPositions.delete(id);
+      }
+    }
     
     this.needsUpdate = false;
   }

@@ -597,7 +597,16 @@ async function createThreeCanvas(scene) {
       
       // If we had pending work and needsUpdate is now false, an update happened.
       // Also check _pendingThrottledUpdate is false to confirm the throttled update ran.
-      if (hadPending && !visionManager.needsUpdate && !visionManager._pendingThrottledUpdate) {
+      // Additionally, only accumulate exploration when there is at least one
+      // controlled token driving vision; this prevents the GM omniscient view
+      // (no controlled tokens) from pre-filling the entire map as explored.
+      if (
+        hadPending &&
+        !visionManager.needsUpdate &&
+        !visionManager._pendingThrottledUpdate &&
+        visionManager._controlledTokenIds &&
+        visionManager._controlledTokenIds.size > 0
+      ) {
         fogManager.accumulate(visionManager.getTexture());
       }
     };

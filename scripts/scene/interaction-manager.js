@@ -1390,6 +1390,27 @@ export class InteractionManager {
               preview.position.y = initialPos.y + deltaY;
             }
           }
+          
+          // Update VisionManager with drag preview positions for real-time fog updates
+          // This ensures the fog follows the token during drag, before the server confirms
+          const vm = window.MapShine?.visionManager;
+          if (vm && !isLightDrag) {
+            for (const [id, preview] of this.dragState.previews) {
+              // Only update if this is a token (not a light)
+              if (this.tokenManager.tokenSprites.has(id)) {
+                // Convert Three.js world position to Foundry coordinates
+                const foundryPos = Coordinates.toFoundry(preview.position.x, preview.position.y);
+                // Store as top-left corner (Foundry convention) - subtract half token size
+                const tokenDoc = this.tokenManager.tokenSprites.get(id)?.userData?.tokenDoc;
+                if (tokenDoc) {
+                  const tokenWidth = (tokenDoc.width ?? 1) * (canvas.dimensions?.size ?? 100);
+                  const tokenHeight = (tokenDoc.height ?? 1) * (canvas.dimensions?.size ?? 100);
+                  // Use the clean API to set the position
+                  vm.setTokenPosition(id, foundryPos.x - tokenWidth / 2, foundryPos.y - tokenHeight / 2);
+                }
+              }
+            }
+          }
         }
     } catch (error) {
         log.error('Error in onPointerMove:', error);
@@ -2106,8 +2127,10 @@ export class InteractionManager {
    */
   selectObject(sprite) {
     let id;
+    let isToken = false;
     if (sprite.userData.tokenDoc) {
         id = sprite.userData.tokenDoc.id;
+        isToken = true;
         this.tokenManager.setTokenSelection(id, true);
     } else if (sprite.userData.lightId) {
         id = sprite.userData.lightId;
@@ -2118,9 +2141,14 @@ export class InteractionManager {
     }
     this.selection.add(id);
     
-    // Force vision update to ensure fog is correct
-    if (window.MapShine && window.MapShine.visionManager) {
-      window.MapShine.visionManager.needsUpdate = true;
+    // Sync with VisionManager for fog of war
+    const vm = window.MapShine?.visionManager;
+    if (vm) {
+      if (isToken) {
+        // Add this token to controlled set
+        vm._controlledTokenIds.add(id);
+      }
+      vm.needsUpdate = true;
     }
   }
 
@@ -2128,10 +2156,17 @@ export class InteractionManager {
    * Clear selection
    */
   clearSelection() {
+    const vm = window.MapShine?.visionManager;
+    
     for (const id of this.selection) {
       // Check Token
       if (this.tokenManager.tokenSprites.has(id)) {
           this.tokenManager.setTokenSelection(id, false);
+          // Remove from VisionManager's controlled set
+          if (vm) {
+            vm._controlledTokenIds.delete(id);
+            vm.pendingPositions.delete(id);
+          }
       }
       // Check Light
       if (this.lightIconManager && this.lightIconManager.lights.has(id)) {
@@ -2146,8 +2181,8 @@ export class InteractionManager {
     this.selection.clear();
     
     // Force vision update to ensure fog is correct (bypass mode)
-    if (window.MapShine && window.MapShine.visionManager) {
-      window.MapShine.visionManager.needsUpdate = true;
+    if (vm) {
+      vm.needsUpdate = true;
     }
   }
 

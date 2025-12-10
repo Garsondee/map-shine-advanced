@@ -16,6 +16,7 @@
 
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
+import { frameCoordinator } from '../core/frame-coordinator.js';
 
 const log = createLogger('WorldSpaceFogEffect');
 
@@ -81,6 +82,12 @@ export class WorldSpaceFogEffect extends EffectBase {
 
     // Track MapShine selection changes to know when to recompute vision
     this._lastSelectionVersion = '';
+    
+    // Track camera position for movement detection
+    this._lastCameraX = 0;
+    this._lastCameraY = 0;
+    this._lastCameraZoom = 1;
+    this._cameraMovementThreshold = 50; // pixels
   }
 
   /**
@@ -602,6 +609,47 @@ export class WorldSpaceFogEffect extends EffectBase {
   }
 
   /**
+   * Detect significant camera movement and trigger perception update if needed
+   * This ensures Foundry's vision system is current before we sample textures
+   * @private
+   */
+  _detectCameraMovement() {
+    const stage = canvas?.stage;
+    if (!stage) return;
+    
+    const currentX = stage.pivot.x;
+    const currentY = stage.pivot.y;
+    const currentZoom = stage.scale.x || 1;
+    
+    const dx = Math.abs(currentX - this._lastCameraX);
+    const dy = Math.abs(currentY - this._lastCameraY);
+    const dz = Math.abs(currentZoom - this._lastCameraZoom);
+    
+    // Check if camera moved significantly
+    const movedSignificantly = dx > this._cameraMovementThreshold || 
+                               dy > this._cameraMovementThreshold ||
+                               dz > 0.1;
+    
+    if (movedSignificantly) {
+      // Force Foundry's perception system to update
+      // This ensures vision polygons are current for this frame
+      frameCoordinator.forcePerceptionUpdate();
+      
+      // Also mark vision as needing update
+      this._needsVisionUpdate = true;
+      
+      // Update tracking
+      this._lastCameraX = currentX;
+      this._lastCameraY = currentY;
+      this._lastCameraZoom = currentZoom;
+      
+      if (Math.random() < 0.1) {
+        log.debug(`Camera moved: dx=${dx.toFixed(0)}, dy=${dy.toFixed(0)}, dz=${dz.toFixed(3)} - forcing perception update`);
+      }
+    }
+  }
+
+  /**
    * Check if fog should be bypassed (GM with no tokens selected)
    * @private
    */
@@ -661,6 +709,10 @@ export class WorldSpaceFogEffect extends EffectBase {
     
     if (!this.params.enabled || bypassFog) return;
     
+    // Detect camera movement - if camera moved significantly, we may need to
+    // force a perception update to ensure Foundry's vision system is current
+    this._detectCameraMovement();
+    
     // Detect MapShine selection changes (Three.js-driven UI) and trigger
     // a vision recompute when the set of selected token IDs changes.
     try {
@@ -684,6 +736,8 @@ export class WorldSpaceFogEffect extends EffectBase {
     }
 
     // Update vision mask if needed
+    // If frame coordinator is available and we're in a coordinated frame,
+    // the vision update may have already been triggered by the post-PIXI callback
     if (this._needsVisionUpdate) {
       this._renderVisionMask();
     }

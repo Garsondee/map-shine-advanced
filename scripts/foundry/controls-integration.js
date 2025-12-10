@@ -8,7 +8,6 @@ import { createLogger } from '../core/log.js';
 import { LayerVisibilityManager } from './layer-visibility-manager.js';
 import { InputRouter } from './input-router.js';
 import { CameraSync } from './camera-sync.js';
-import { UnifiedCameraController } from './unified-camera.js';
 
 const log = createLogger('ControlsIntegration');
 
@@ -36,7 +35,6 @@ export class ControlsIntegration {
    * @param {object} options
    * @param {import('../scene/composer.js').SceneComposer} options.sceneComposer
    * @param {import('../effects/EffectComposer.js').EffectComposer} [options.effectComposer]
-   * @param {UnifiedCameraController} [options.unifiedCamera] - Unified camera controller
    */
   constructor(options = {}) {
     /** @type {import('../scene/composer.js').SceneComposer|null} */
@@ -44,9 +42,6 @@ export class ControlsIntegration {
     
     /** @type {import('../effects/EffectComposer.js').EffectComposer|null} */
     this.effectComposer = options.effectComposer || null;
-    
-    /** @type {UnifiedCameraController|null} */
-    this.unifiedCamera = options.unifiedCamera || null;
     
     /** @type {IntegrationState} */
     this.state = IntegrationState.UNINITIALIZED;
@@ -77,14 +72,14 @@ export class ControlsIntegration {
   }
 
   /**
-   * One-shot camera sync is now handled by UnifiedCameraController.initialize()
+   * One-shot camera sync is now handled by CameraFollower.initialize()
    * This method is kept for backwards compatibility but does nothing.
    * @private
-   * @deprecated Use UnifiedCameraController instead
+   * @deprecated CameraFollower handles sync automatically each frame
    */
   syncThreeFromPixiOnce() {
-    // UnifiedCameraController handles initial sync in its initialize() method
-    log.debug('syncThreeFromPixiOnce called (no-op, UnifiedCameraController handles sync)');
+    // CameraFollower handles sync automatically each frame
+    log.debug('syncThreeFromPixiOnce called (no-op, CameraFollower handles sync)');
   }
   
   /**
@@ -113,7 +108,7 @@ export class ControlsIntegration {
       this.layerVisibility = new LayerVisibilityManager();
       this.inputRouter = new InputRouter();
       
-      // CameraSync is deprecated - UnifiedCameraController handles all camera sync
+      // CameraSync is deprecated - CameraFollower handles all camera sync
       // We keep the reference for backwards compatibility but don't use it
       this.cameraSync = null;
       
@@ -124,14 +119,10 @@ export class ControlsIntegration {
       this.layerVisibility.update();
       this.inputRouter.autoUpdate();
       
-      // Camera sync is now handled by UnifiedCameraController
+      // Camera sync is now handled by CameraFollower
       // which was initialized before ControlsIntegration in canvas-replacement.js
-      if (this.unifiedCamera) {
-        log.debug('UnifiedCameraController is handling camera sync');
-      } else {
-        // Fallback: do a one-shot sync if no unified camera
-        this.syncThreeFromPixiOnce();
-      }
+      // CameraFollower reads PIXI state each frame and applies to Three.js
+      log.debug('CameraFollower is handling camera sync');
       
       this._initialized = true;
       this.transition(IntegrationState.ACTIVE, 'Initialization complete');
@@ -417,35 +408,18 @@ export class ControlsIntegration {
     });
     this._hookIds.push({ name: 'renderSceneControls', id: controlsHookId });
     
-    // Canvas pan - sync Three.js camera to match PIXI stage
-    // NOTE: UnifiedCameraController also listens to canvasPan, but we keep this
-    // hook for any additional logic that might be needed
+    // Canvas pan - CameraFollower handles sync automatically each frame
+    // This hook is kept for potential future use but does nothing currently
     const panHookId = Hooks.on('canvasPan', (canvas, position) => {
       if (this.state !== IntegrationState.ACTIVE) return;
-      
-      try {
-        // UnifiedCameraController handles the actual sync via its own hook
-        // This hook is kept for backwards compatibility and potential future use
-        if (!this.unifiedCamera) {
-          this.cameraSync?.requestSync('canvasPan');
-        }
-      } catch (error) {
-        this.handleError(error, 'canvasPan');
-      }
+      // CameraFollower reads PIXI state each frame - no explicit sync needed
     });
     this._hookIds.push({ name: 'canvasPan', id: panHookId });
     
-    // Sidebar collapse - force camera sync
+    // Sidebar collapse - CameraFollower will pick up the change next frame
     const sidebarHookId = Hooks.on('collapseSidebar', () => {
       if (this.state !== IntegrationState.ACTIVE) return;
-      
-      setTimeout(() => {
-        try {
-          this.cameraSync?.forceFullSync();
-        } catch (error) {
-          this.handleError(error, 'collapseSidebar');
-        }
-      }, 100);
+      // CameraFollower reads PIXI state each frame - no explicit sync needed
     });
     this._hookIds.push({ name: 'collapseSidebar', id: sidebarHookId });
     

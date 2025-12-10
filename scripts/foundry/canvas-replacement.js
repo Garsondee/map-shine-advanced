@@ -7,8 +7,8 @@
 import { createLogger } from '../core/log.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import { SceneComposer } from '../scene/composer.js';
-import { CameraController } from '../scene/camera-controller.js';
-import { UnifiedCameraController } from './unified-camera.js';
+import { CameraFollower } from './camera-follower.js';
+import { PixiInputBridge } from './pixi-input-bridge.js';
 import { EffectComposer } from '../effects/EffectComposer.js';
 import { SpecularEffect } from '../effects/SpecularEffect.js';
 import { IridescenceEffect } from '../effects/IridescenceEffect.js';
@@ -72,6 +72,7 @@ import { DropHandler } from './drop-handler.js';
 import { sceneDebug } from '../utils/scene-debug.js';
 import { weatherController } from '../core/WeatherController.js';
 import { ControlsIntegration } from './controls-integration.js';
+import { frameCoordinator } from '../core/frame-coordinator.js';
 
 const log = createLogger('Canvas');
 
@@ -99,11 +100,11 @@ let effectComposer = null;
 /** @type {RenderLoop|null} */
 let renderLoop = null;
 
-/** @type {CameraController|null} */
-let cameraController = null;
+/** @type {CameraFollower|null} */
+let cameraFollower = null;
 
-/** @type {UnifiedCameraController|null} */
-let unifiedCamera = null;
+/** @type {PixiInputBridge|null} */
+let pixiInputBridge = null;
 
 /** @type {TweakpaneManager|null} */
 let uiManager = null;
@@ -155,6 +156,9 @@ let fogEffect = null;
 
 /** @type {SkyColorEffect|null} */
 let skyColorEffect = null;
+
+/** @type {boolean} - Whether frame coordinator is initialized */
+let frameCoordinatorInitialized = false;
 
 /**
  * Initialize canvas replacement hooks
@@ -321,6 +325,16 @@ function onCanvasTearDown(canvas) {
     }
   }
 
+  // Dispose frame coordinator (removes PIXI ticker hook)
+  if (frameCoordinatorInitialized) {
+    try {
+      frameCoordinator.dispose();
+      frameCoordinatorInitialized = false;
+    } catch (e) {
+      log.warn('Failed to dispose frame coordinator:', e);
+    }
+  }
+
   // Cleanup three.js canvas
   destroyThreeCanvas();
   
@@ -334,10 +348,12 @@ function onCanvasTearDown(canvas) {
     window.MapShine.doorMeshManager = null;
     window.MapShine.fogEffect = null;
     window.MapShine.renderLoop = null;
-    window.MapShine.cameraController = null;
+    window.MapShine.cameraFollower = null;
+    window.MapShine.pixiInputBridge = null;
     window.MapShine.interactionManager = null;
     window.MapShine.gridRenderer = null;
     window.MapShine.mapPointsManager = null;
+    window.MapShine.frameCoordinator = null;
     // Keep renderer and capabilities - they're reusable
   }
 }
@@ -695,32 +711,30 @@ async function createThreeCanvas(scene) {
     dropHandler.initialize();
     log.info('Drop handler initialized');
 
-    // Step 6: Initialize UNIFIED camera controller
-    // This replaces the old separate CameraController and CameraSync with a single
-    // system that keeps PIXI and Three.js cameras in perfect sync at all times.
-    unifiedCamera = new UnifiedCameraController({
-      sceneComposer,
-      threeCanvas
-    });
-    unifiedCamera.initialize();
-    effectComposer.addUpdatable(unifiedCamera); // Per-frame sync check
-    log.info('Unified camera controller initialized');
-    
-    // Legacy CameraController kept for reference but disabled
-    cameraController = new CameraController(threeCanvas, sceneComposer);
-    cameraController.disable(); // Disabled - UnifiedCameraController handles pan/zoom
-    log.info('Legacy camera controller initialized (disabled)');
+    // Step 6: Initialize Camera Follower
+    // Simple one-way sync: Three.js camera follows PIXI camera each frame.
+    // PIXI/Foundry handles all pan/zoom input - we just read and match.
+    // This eliminates bidirectional sync issues and race conditions.
+    cameraFollower = new CameraFollower({ sceneComposer });
+    cameraFollower.initialize();
+    effectComposer.addUpdatable(cameraFollower); // Per-frame sync
+    log.info('Camera follower initialized - Three.js follows PIXI');
+
+    // Step 6a: Initialize PIXI Input Bridge
+    // Handles pan/zoom input on Three canvas and applies to PIXI stage.
+    // CameraFollower then reads PIXI state and updates Three camera.
+    pixiInputBridge = new PixiInputBridge(threeCanvas);
+    pixiInputBridge.initialize();
+    log.info('PIXI input bridge initialized - pan/zoom updates PIXI stage');
 
     // Step 6b: Initialize controls integration (PIXI overlay system)
-    // This replaces the old configureFoundryCanvas() approach with a more robust system
     controlsIntegration = new ControlsIntegration({ 
       sceneComposer,
-      effectComposer,
-      unifiedCamera // Pass unified camera for coordination
+      effectComposer
     });
     await controlsIntegration.initialize();
     
-    log.info('Controls integration initialized (UnifiedCameraController handles all pan/zoom)');
+    log.info('Controls integration initialized');
 
     // Step 7: Ensure Foundry UI layers are above our canvas
     ensureUILayering();
@@ -730,6 +744,32 @@ async function createThreeCanvas(scene) {
     renderLoop.start();
 
     log.info('Render loop started');
+
+    // Step 9: Initialize Frame Coordinator for PIXI/Three.js synchronization
+    // This hooks into Foundry's ticker to ensure we render after PIXI updates complete
+    if (!frameCoordinatorInitialized) {
+      frameCoordinatorInitialized = frameCoordinator.initialize();
+      if (frameCoordinatorInitialized) {
+        // Register fog effect for synchronized texture extraction
+        frameCoordinator.onPostPixi((frameState) => {
+          // fogEffect may be null during teardown or if initialization failed;
+          // in that case, just skip fog work for this frame.
+          const fog = fogEffect;
+          if (!fog) return;
+
+          // Force vision update when needed so fog textures are current
+          // before Three.js renders.
+          if (fog._needsVisionUpdate) {
+            fog._renderVisionMask();
+          }
+        });
+        
+        log.info('Frame coordinator initialized - PIXI/Three.js sync enabled');
+      } else {
+        log.warn('Frame coordinator failed to initialize - fog may lag during rapid camera movement');
+      }
+    }
+    mapShine.frameCoordinator = frameCoordinator;
 
     // Expose for diagnostics (after render loop is created)
     mapShine.sceneComposer = sceneComposer;
@@ -750,8 +790,8 @@ async function createThreeCanvas(scene) {
     mapShine.fireSparksEffect = fireSparksEffect;
     mapShine.fogEffect = fogEffect; // Fog of War (world-space plane mesh)
     mapShine.skyColorEffect = skyColorEffect; // NEW: Expose SkyColorEffect
-    mapShine.cameraController = cameraController;
-    mapShine.unifiedCamera = unifiedCamera; // NEW: Expose unified camera
+    mapShine.cameraFollower = cameraFollower; // Three.js camera follows PIXI
+    mapShine.pixiInputBridge = pixiInputBridge; // Pan/zoom input bridge
     mapShine.tokenManager = tokenManager; // NEW: Expose token manager for diagnostics
     mapShine.tileManager = tileManager; // NEW: Expose tile manager for diagnostics
     mapShine.wallManager = wallManager; // NEW: Expose wall manager
@@ -774,8 +814,6 @@ async function createThreeCanvas(scene) {
       mapShine.inputRouter = controlsIntegration.inputRouter;
       mapShine.layerVisibility = controlsIntegration.layerVisibility;
     }
-    // Also expose unified camera at top level
-    mapShine.unifiedCamera = unifiedCamera;
     // Attach to canvas as well for convenience (used by console snippets)
     try { canvas.mapShine = mapShine; } catch (_) {}
 
@@ -1643,11 +1681,18 @@ function destroyThreeCanvas() {
     log.debug('UI manager disposed');
   }
 
-  // Dispose camera controller
-  if (cameraController) {
-    cameraController.dispose();
-    cameraController = null;
-    log.debug('Camera controller disposed');
+  // Dispose camera follower
+  if (cameraFollower) {
+    cameraFollower.dispose();
+    cameraFollower = null;
+    log.debug('Camera follower disposed');
+  }
+
+  // Dispose PIXI input bridge
+  if (pixiInputBridge) {
+    pixiInputBridge.dispose();
+    pixiInputBridge = null;
+    log.debug('PIXI input bridge disposed');
   }
 
   // Dispose controls integration

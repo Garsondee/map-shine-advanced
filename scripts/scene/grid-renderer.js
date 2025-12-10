@@ -11,7 +11,7 @@ const log = createLogger('GridRenderer');
 
 // Z-position offset for grid (just above ground, below tiles)
 // This is an OFFSET added to groundZ, not an absolute value
-const GRID_Z_OFFSET = 0.5;
+const GRID_Z_OFFSET = 0.01;
 
 /**
  * GridRenderer - Renders the scene grid

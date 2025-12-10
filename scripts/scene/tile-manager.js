@@ -16,10 +16,12 @@ const log = createLogger('TileManager');
 const DISABLE_TILE_UPDATES = false;
 
 // Z-layer offsets from groundZ (from Architecture)
-// These are OFFSETS added to groundZ, not absolute values
-const Z_BACKGROUND_OFFSET = 1.0;
-const Z_FOREGROUND_OFFSET = 5.0;
-const Z_OVERHEAD_OFFSET = 20.0;
+// These are OFFSETS added to groundZ, not absolute values.
+// Compressed so all tiles live in a very thin band above the ground plane.
+// Background < Foreground < Overhead, but differences are tiny.
+const Z_BACKGROUND_OFFSET = 0.01;
+const Z_FOREGROUND_OFFSET = 0.02;
+const Z_OVERHEAD_OFFSET = 0.03;
 
 /**
  * TileManager - Synchronizes Foundry VTT tiles to THREE.js sprites

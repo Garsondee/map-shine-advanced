@@ -11,8 +11,9 @@ const log = createLogger('TokenManager');
 /**
  * Z-position base for tokens (from architecture)
  * Tokens render at this z-position + elevation above the scene groundZ.
+ * Kept in a thin band above tiles to minimize depth range.
  */
-const TOKEN_BASE_Z = 10.0;
+const TOKEN_BASE_Z = 0.06;
 
 /**
  * TokenManager - Synchronizes Foundry VTT tokens to THREE.js sprites

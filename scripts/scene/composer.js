@@ -10,6 +10,14 @@ import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('SceneComposer');
 
+// Perspective strength multiplier for the camera.
+// 1.0  = mathematically exact 1:1 ground-plane mapping (stronger perspective)
+// <1.0 = flatter perspective (more orthographic-feeling)
+// >1.0 = more exaggerated perspective
+// NOTE: Values very far from 1.0 can introduce slight desync vs PIXI; small tweaks
+// like 0.9–0.95 are usually safe. Adjust to taste.
+const PERSPECTIVE_STRENGTH = 1.0;
+
 /**
  * Scene composer class - manages three.js scene setup for battlemaps
  */
@@ -344,7 +352,10 @@ export class SceneComposer {
     // At zoom=1, we want to see exactly viewportHeight world units vertically
     // at the ground plane depth.
     // FOV = 2 * atan((viewportHeight/2) / distanceToGround)
-    const baseFovRadians = 2 * Math.atan(viewportHeight / (2 * distanceToGround));
+    const baseFovRadiansRaw = 2 * Math.atan(viewportHeight / (2 * distanceToGround));
+
+    // Apply perspective strength tweak: 1.0 = raw math, <1.0 = flatter.
+    const baseFovRadians = baseFovRadiansRaw * PERSPECTIVE_STRENGTH;
     const baseFovDegrees = baseFovRadians * (180 / Math.PI);
     
     const aspect = viewportWidth / viewportHeight;
@@ -405,7 +416,8 @@ export class SceneComposer {
     this.groundZ = groundZ;
     this.groundDistance = distanceToGround;
 
-    const baseFovRadians = 2 * Math.atan(viewportHeight / (2 * distanceToGround));
+    const baseFovRadiansRaw = 2 * Math.atan(viewportHeight / (2 * distanceToGround));
+    const baseFovRadians = baseFovRadiansRaw * PERSPECTIVE_STRENGTH;
     this.baseFov = baseFovRadians * (180 / Math.PI);
     this.baseFovRadians = baseFovRadians;
     this.baseFovTanHalf = Math.tan(baseFovRadians / 2);

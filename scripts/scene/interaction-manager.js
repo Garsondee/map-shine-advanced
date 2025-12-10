@@ -62,7 +62,11 @@ export class InteractionManager {
       start: new THREE.Vector3(),
       current: new THREE.Vector3(),
       mesh: null,
-      border: null
+      border: null,
+      // Screen-space positions for visual overlay (client coordinates)
+      screenStart: new THREE.Vector2(),
+      screenCurrent: new THREE.Vector2(),
+      overlayEl: null
     };
 
     // Right Click State (for HUD)
@@ -84,8 +88,9 @@ export class InteractionManager {
       previewBorder: null
     };
     
-    // Create drag select visuals
+    // Create drag select visuals (Three.js mesh kept for compatibility)
     this.createSelectionBox();
+    this.createSelectionOverlay();
     this.createLightPreview();
     
     /** @type {string|null} ID of currently hovered token */
@@ -182,6 +187,24 @@ export class InteractionManager {
       this.sceneComposer.scene.add(this.dragSelect.mesh);
       this.sceneComposer.scene.add(this.dragSelect.border);
     }
+  }
+
+  /**
+   * Create a screen-space DOM overlay for drag selection.
+   * This ensures the visual rectangle matches Foundry's PIXI selection box,
+   * which is also screen-space, regardless of perspective.
+   * @private
+   */
+  createSelectionOverlay() {
+    const el = document.createElement('div');
+    el.style.position = 'fixed';
+    el.style.pointerEvents = 'none';
+    el.style.zIndex = '9999';
+    el.style.border = '2px solid rgba(51,136,255,0.8)';
+    el.style.backgroundColor = 'rgba(51,136,255,0.2)';
+    el.style.display = 'none';
+    document.body.appendChild(el);
+    this.dragSelect.overlayEl = el;
   }
 
   /**
@@ -595,6 +618,7 @@ export class InteractionManager {
         }
         
         const activeLayer = canvas.activeLayer?.name;
+        const groundZ = this.sceneComposer?.groundZ ?? 0;
         const isTokensLayer = activeLayer === 'TokensLayer';
         const isWallLayer = activeLayer && activeLayer.includes('WallsLayer');
         const shouldCheckWalls = !isTokensLayer && (isWallLayer || game.user.isGM);
@@ -646,8 +670,8 @@ export class InteractionManager {
         const currentTool = game.activeTool;
         
         if (isWallLayer) {
-          // Start Wall Drawing
-          const worldPos = this.viewportToWorld(event.clientX, event.clientY, 0);
+          // Start Wall Drawing on the ground plane (aligned with groundZ)
+          const worldPos = this.viewportToWorld(event.clientX, event.clientY, groundZ);
           if (!worldPos) return;
 
           // Snap start position
@@ -748,7 +772,8 @@ export class InteractionManager {
 
           if (!canvas.lighting) return;
 
-          const worldPos = this.viewportToWorld(event.clientX, event.clientY, 0);
+          // Project onto ground plane for light placement
+          const worldPos = this.viewportToWorld(event.clientX, event.clientY, groundZ);
           if (!worldPos) return;
 
           const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
@@ -865,20 +890,29 @@ export class InteractionManager {
           // Start Drag Select
           this.dragSelect.active = true;
           
-          // Calculate start pos on ground/token plane (Z=10)
-          const worldPos = this.viewportToWorld(event.clientX, event.clientY, 10);
+          // World-space start for selection math (ground plane)
+          const worldPos = this.viewportToWorld(event.clientX, event.clientY, groundZ);
           if (worldPos) {
             this.dragSelect.start.copy(worldPos);
             this.dragSelect.current.copy(worldPos);
-            
-            // Reset visuals
-            this.dragSelect.mesh.position.copy(worldPos);
-            this.dragSelect.mesh.scale.set(0.1, 0.1, 1);
-            this.dragSelect.mesh.visible = true;
-            
-            this.dragSelect.border.position.copy(worldPos);
-            this.dragSelect.border.scale.set(0.1, 0.1, 1);
-            this.dragSelect.border.visible = true;
+          }
+
+          // Screen-space start for visual overlay
+          this.dragSelect.screenStart.set(event.clientX, event.clientY);
+          this.dragSelect.screenCurrent.copy(this.dragSelect.screenStart);
+
+          // Hide old Three.js box; use DOM overlay instead
+          if (this.dragSelect.mesh) this.dragSelect.mesh.visible = false;
+          if (this.dragSelect.border) this.dragSelect.border.visible = false;
+
+          const rect = this.canvasElement.getBoundingClientRect();
+          const overlay = this.dragSelect.overlayEl;
+          if (overlay && rect.width > 0 && rect.height > 0) {
+            overlay.style.left = `${this.dragSelect.screenStart.x}px`;
+            overlay.style.top = `${this.dragSelect.screenStart.y}px`;
+            overlay.style.width = '0px';
+            overlay.style.height = '0px';
+            overlay.style.display = 'block';
           }
         }
     } catch (error) {
@@ -1301,35 +1335,34 @@ export class InteractionManager {
         if (this.dragSelect.active) {
           this.updateMouseCoords(event);
           
-          // Calculate current pos on ground/token plane (Z=10)
-          const worldPos = this.viewportToWorld(event.clientX, event.clientY, 10);
+          // World-space current for selection math
+          const groundZ = this.sceneComposer?.groundZ ?? 0;
+          const worldPos = this.viewportToWorld(event.clientX, event.clientY, groundZ);
           if (worldPos) {
             this.dragSelect.current.copy(worldPos);
-            
-            // Update visuals
-            const start = this.dragSelect.start;
-            const current = this.dragSelect.current;
-            
-            const minX = Math.min(start.x, current.x);
-            const maxX = Math.max(start.x, current.x);
-            const minY = Math.min(start.y, current.y);
-            const maxY = Math.max(start.y, current.y);
-            
-            const width = maxX - minX;
-            const height = maxY - minY;
-            const centerX = minX + width / 2;
-            const centerY = minY + height / 2;
-            
-            // Update Mesh
-            this.dragSelect.mesh.position.set(centerX, centerY, 10.1); // Slightly above tokens? No, usually overlay.
-            // Tokens are at Z=10. Let's put this at Z=100 (overlay).
-            this.dragSelect.mesh.position.z = 100; 
-            this.dragSelect.mesh.scale.set(width, height, 1);
-            
-            // Update Border
-            this.dragSelect.border.position.set(centerX, centerY, 100);
-            this.dragSelect.border.scale.set(width, height, 1);
           }
+
+          // Screen-space current for visual overlay
+          this.dragSelect.screenCurrent.set(event.clientX, event.clientY);
+          const overlay = this.dragSelect.overlayEl;
+          if (overlay) {
+            const x1 = this.dragSelect.screenStart.x;
+            const y1 = this.dragSelect.screenStart.y;
+            const x2 = this.dragSelect.screenCurrent.x;
+            const y2 = this.dragSelect.screenCurrent.y;
+
+            const left = Math.min(x1, x2);
+            const top = Math.min(y1, y2);
+            const width = Math.abs(x2 - x1);
+            const height = Math.abs(y2 - y1);
+
+            overlay.style.left = `${left}px`;
+            overlay.style.top = `${top}px`;
+            overlay.style.width = `${width}px`;
+            overlay.style.height = `${height}px`;
+            overlay.style.display = 'block';
+          }
+
           return;
         }
 
@@ -1769,8 +1802,9 @@ export class InteractionManager {
         // Handle Drag Select
         if (this.dragSelect.active) {
           this.dragSelect.active = false;
-          this.dragSelect.mesh.visible = false;
-          this.dragSelect.border.visible = false;
+          if (this.dragSelect.mesh) this.dragSelect.mesh.visible = false;
+          if (this.dragSelect.border) this.dragSelect.border.visible = false;
+          if (this.dragSelect.overlayEl) this.dragSelect.overlayEl.style.display = 'none';
           
           // Calculate selection bounds
           const start = this.dragSelect.start;

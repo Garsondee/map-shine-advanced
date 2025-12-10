@@ -40,9 +40,17 @@ export class FogManager {
     this.renderer.clearColor();
     this.renderer.setRenderTarget(null);
 
-    // Scene for accumulation (Fullscreen Quad)
+    // Scene for accumulation
+    // CRITICAL: Use the same world-space camera as VisionManager to ensure
+    // the exploration texture is accumulated in world space, not screen space.
+    // This fixes the "explored area pinned to camera" bug.
     this.scene = new window.THREE.Scene();
-    this.camera = new window.THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this.camera = new window.THREE.OrthographicCamera(
+      width / -2, width / 2,
+      height / 2, height / -2,
+      0, 100
+    );
+    this.camera.position.z = 10;
     
     // Material to draw Vision Texture onto Exploration Texture
     // Uses MAX blending to ensure visited areas stay visited
@@ -55,7 +63,12 @@ export class FogManager {
       blendDst: window.THREE.OneFactor
     });
 
-    this.quad = new window.THREE.Mesh(new window.THREE.PlaneGeometry(2, 2), this.material);
+    // Create a world-space quad that covers the entire scene
+    // This ensures the vision texture is copied 1:1 to the exploration texture
+    this.quad = new window.THREE.Mesh(
+      new window.THREE.PlaneGeometry(width, height),
+      this.material
+    );
     this.scene.add(this.quad);
 
     // Debounced save function
@@ -300,9 +313,10 @@ export class FogManager {
     // Load Base64 into a texture
     const loader = new window.THREE.TextureLoader();
     loader.load(base64, (texture) => {
-      // Draw loaded texture into our render target
+      // Draw loaded texture into our render target using world-space quad
+      // This matches the accumulation setup to ensure consistent coordinate systems
       const mesh = new window.THREE.Mesh(
-        new window.THREE.PlaneGeometry(2, 2),
+        new window.THREE.PlaneGeometry(this.width, this.height),
         new window.THREE.MeshBasicMaterial({ 
             map: texture,
             blending: window.THREE.NoBlending // Overwrite

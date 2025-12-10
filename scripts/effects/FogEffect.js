@@ -1,11 +1,21 @@
 /**
  * @fileoverview Fog of War Effect
- * Composites the real-time vision mask and persistent exploration mask over the scene.
+ * 
+ * Composites Foundry's native vision mask and exploration mask over the Three.js scene.
+ * 
+ * This effect uses FoundryFogBridge to extract Foundry's existing PIXI textures
+ * (canvas.masks.vision.renderTexture and canvas.fog.sprite.texture) and convert
+ * them to Three.js textures. This approach:
+ * - Eliminates custom vision polygon computation
+ * - Ensures perfect sync with Foundry's native fog behavior
+ * - Leverages Foundry's existing save/load persistence
+ * 
  * @module effects/FogEffect
  */
 
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
+import { FoundryFogBridge } from '../vision/FoundryFogBridge.js';
 
 const log = createLogger('FogEffect');
 
@@ -13,29 +23,28 @@ export class FogEffect extends EffectBase {
   constructor() {
     super('fog', RenderLayers.POST_PROCESSING, 'low');
     
-    this.priority = 10; // High priority, apply after lighting but before bloom? 
-    // Actually, Fog usually occludes lighting. But we might want glow to show through?
-    // Foundry applies Fog *after* lighting (Lighting is hidden by Fog).
-    // So RenderLayers.POST_PROCESSING is appropriate, likely effectively last or near last.
+    // High priority - fog should apply after lighting but before bloom
+    // Foundry applies Fog *after* lighting (Lighting is hidden by Fog)
+    this.priority = 10;
     
     this.params = {
       enabled: true,
       unexploredColor: '#000000',
-      exploredColor: '#000000', // Usually black but transparent? No, usually dark.
-      exploredOpacity: 0.5, // How much to dim the explored area
+      exploredColor: '#000000',
+      exploredOpacity: 0.5,
       softness: 0.1
     };
 
-    this.visionTexture = null;
-    this.exploredTexture = null;
+    // Bridge to Foundry's native fog system
+    this.fogBridge = null;
     
     this.material = null;
     this.quadScene = null;
     this.quadCamera = null;
 
     // Post-processing integration state
-    this.readBuffer = null;   // Input render target from EffectComposer
-    this.writeBuffer = null;  // Output render target (or null for screen)
+    this.readBuffer = null;
+    this.writeBuffer = null;
     this.renderToScreen = false;
   }
 
@@ -66,27 +75,30 @@ export class FogEffect extends EffectBase {
     this.renderer = renderer;
     const THREE = window.THREE;
 
+    // Initialize the Foundry fog bridge
+    this.fogBridge = new FoundryFogBridge(renderer);
+    this.fogBridge.initialize();
+
     this.quadScene = new THREE.Scene();
     this.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
     this.material = new THREE.ShaderMaterial({
       uniforms: {
         tDiffuse: { value: null },   // The scene so far
-        tVision: { value: null },    // Real-time Vision (White = Visible)
-        tExplored: { value: null },  // Persistent Exploration (Red/Alpha = Visited)
+        tVision: { value: null },    // Real-time Vision from Foundry (White = Visible)
+        tExplored: { value: null },  // Persistent Exploration from Foundry (White = Visited)
         uUnexploredColor: { value: new THREE.Color(0x000000) },
         uExploredColor: { value: new THREE.Color(0x000000) },
-        uExploredOpacity: { value: 0.6 },
-        uSoftness: { value: 0.1 }, // Not used yet, blur handled elsewhere?
+        uExploredOpacity: { value: 0.5 },
         uBypassFog: { value: 0.0 },
-        // Camera view bounds in world space for vision texture sampling
-        // vec4(minX, minY, maxX, maxY) in world coordinates
+        // Camera view bounds in world space for texture sampling
         uViewBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
         // Full canvas dimensions (including padding)
         uSceneDimensions: { value: new THREE.Vector2(1, 1) },
         // Scene rect bounds (actual map area, excluding padding)
-        // vec4(x, y, width, height) in world coordinates
-        uSceneRect: { value: new THREE.Vector4(0, 0, 1, 1) }
+        uSceneRect: { value: new THREE.Vector4(0, 0, 1, 1) },
+        // Fog sprite position and size (for exploration texture mapping)
+        uFogSpriteRect: { value: new THREE.Vector4(0, 0, 1, 1) }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -105,55 +117,53 @@ export class FogEffect extends EffectBase {
         uniform float uExploredOpacity;
         uniform float uBypassFog;
         
-        // Camera view bounds: (minX, minY, maxX, maxY) in world space
+        // Camera view bounds in Three.js world space: (minX, minY, maxX, maxY)
+        // Three.js: Y-up, origin at bottom-left
         uniform vec4 uViewBounds;
-        // Full canvas dimensions: (width, height) in world space
+        // Full canvas dimensions (Foundry world space)
         uniform vec2 uSceneDimensions;
-        // Scene rect bounds: (x, y, width, height) - the actual map area excluding padding
+        // Scene rect bounds: (x, y, width, height) in Foundry coords
         uniform vec4 uSceneRect;
+        // Fog sprite rect: (x, y, width, height) in Foundry coords
+        uniform vec4 uFogSpriteRect;
 
         varying vec2 vUv;
 
         void main() {
           vec4 sceneColor = texture2D(tDiffuse, vUv);
+          
           if (uBypassFog > 0.5) {
             gl_FragColor = sceneColor;
             return;
           }
           
-          // Convert screen UV to Foundry world position
-          // Screen UV (0,0) = bottom-left of view, (1,1) = top-right of view
-          // View bounds are in FOUNDRY coordinates (Y-down, where Y=0 is top)
-          // uViewBounds = (minX, minY, maxX, maxY) in Foundry coords
-          //
-          // For screen UV:
-          //   vUv.x=0 -> left edge -> minX
-          //   vUv.x=1 -> right edge -> maxX
-          //   vUv.y=0 -> bottom of screen -> in Foundry Y-down, this is maxY (larger Y = lower)
-          //   vUv.y=1 -> top of screen -> in Foundry Y-down, this is minY (smaller Y = higher)
-          float foundryX = mix(uViewBounds.x, uViewBounds.z, vUv.x);
-          float foundryY = mix(uViewBounds.w, uViewBounds.y, vUv.y); // Note: reversed for Y
+          // VISION TEXTURE: Rendered at screen resolution, covers current viewport
+          // Foundry's vision mask is rendered to screen-sized texture
+          // PIXI has (0,0) at top-left, Three.js has (0,0) at bottom-left
+          // So we need to flip Y for the vision texture sampling
+          vec2 visionUv = vec2(vUv.x, 1.0 - vUv.y);
           
-          // Convert Foundry position to vision texture UV
-          // 
-          // VisionManager camera: Centered orthographic at (0,0,10)
-          //   - left=-width/2, right=+width/2, bottom=-height/2, top=+height/2
-          // 
-          // GeometryConverter transforms Foundry coords to centered Three.js coords:
-          //   threeX = foundryX - width/2
-          //   threeY = height/2 - foundryY (Y is flipped)
-          // 
-          // Vision texture UV for a point at Foundry (fx, fy):
-          //   visionUv.x = (threeX + width/2) / width = fx / width
-          //   visionUv.y = (threeY + height/2) / height = (height - fy) / height
-          vec2 visionUv = vec2(
-            foundryX / uSceneDimensions.x,
-            1.0 - foundryY / uSceneDimensions.y
-          );
+          // Sample vision mask (current LOS)
+          // Foundry uses RED channel for fog data
+          float vision = texture2D(tVision, visionUv).r;
           
-          // Check if we're outside the actual scene rect (in the padded region)
-          // uSceneRect is (x, y, width, height) in Foundry coordinates
-          // foundryX/foundryY are already in Foundry coordinates
+          // EXPLORATION TEXTURE: Covers the scene rect (not screen)
+          // Need to convert screen UV -> world position -> exploration UV
+          
+          // Convert screen UV to Three.js world position
+          // vUv (0,0) = bottom-left of screen, (1,1) = top-right (Three.js convention)
+          // uViewBounds = (minX, minY, maxX, maxY) in Three.js coords (Y-up)
+          float threeX = mix(uViewBounds.x, uViewBounds.z, vUv.x);
+          float threeY = mix(uViewBounds.y, uViewBounds.w, vUv.y);
+          
+          // Convert Three.js world coords to Foundry coords
+          // Three.js: (0,0) at bottom-left, Y-up
+          // Foundry: (0,0) at top-left, Y-down
+          // Conversion: foundryX = threeX, foundryY = sceneHeight - threeY
+          float foundryX = threeX;
+          float foundryY = uSceneDimensions.y - threeY;
+          
+          // Check if we're outside the actual scene rect (in padded region)
           float sceneMinX = uSceneRect.x;
           float sceneMinY = uSceneRect.y;
           float sceneMaxX = uSceneRect.x + uSceneRect.z;
@@ -162,19 +172,23 @@ export class FogEffect extends EffectBase {
           bool outsideBounds = foundryX < sceneMinX || foundryX > sceneMaxX || 
                                foundryY < sceneMinY || foundryY > sceneMaxY;
           
-          if (outsideBounds) {
-            // Outside scene rect (in padded region) - show unexplored color (black)
-            gl_FragColor = vec4(uUnexploredColor, 1.0);
-            return;
-          }
+          // Convert Foundry position to exploration texture UV
+          // Exploration sprite is positioned at sceneRect in Foundry coords (Y-down).
+          // The underlying PIXI texture, when sampled via Three.js, ends up vertically
+          // inverted relative to our world-space mapping, so we explicitly flip the
+          // local Y here to keep the explored fog pinned to world space.
+          float localY = (foundryY - uFogSpriteRect.y) / uFogSpriteRect.w;
+          vec2 exploredUv = vec2(
+            (foundryX - uFogSpriteRect.x) / uFogSpriteRect.z,
+            1.0 - localY
+          );
           
-          // Sample vision mask (current LOS) and exploration mask (previously seen)
-          float vision = texture2D(tVision, visionUv).r;
-          float explored = texture2D(tExplored, visionUv).r;
+          // Sample exploration mask (previously seen)
+          float explored = texture2D(tExplored, exploredUv).r;
           
           // Fog of War Logic:
           // 1. Currently Visible (vision > threshold) -> Show Scene fully
-          // 2. Previously Explored but not visible -> Show Scene dimmed (exploredOpacity)
+          // 2. Previously Explored but not visible -> Show Scene dimmed
           // 3. Never Explored -> Show Unexplored Color (Black)
 
           vec3 finalColor;
@@ -182,13 +196,12 @@ export class FogEffect extends EffectBase {
           if (vision > 0.1) {
              // Currently visible - full brightness
              finalColor = sceneColor.rgb;
-          } else if (explored > 0.1) {
+          } else if (explored > 0.1 && !outsideBounds) {
              // Previously explored but not currently visible - dim the scene
-             // Mix between scene color and explored tint based on exploredOpacity
              vec3 dimmedScene = mix(sceneColor.rgb, uExploredColor, uExploredOpacity);
              finalColor = dimmedScene;
           } else {
-             // Never explored - complete darkness
+             // Never explored or outside bounds - complete darkness
              finalColor = uUnexploredColor;
           }
 
@@ -201,26 +214,12 @@ export class FogEffect extends EffectBase {
 
     const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.material);
     this.quadScene.add(quad);
-  }
-
-  /**
-   * Set the textures from the managers
-   * @param {THREE.Texture} vision 
-   * @param {THREE.Texture} explored 
-   */
-  setTextures(vision, explored) {
-    this.visionTexture = vision;
-    this.exploredTexture = explored;
-    if (this.material) {
-      this.material.uniforms.tVision.value = vision;
-      this.material.uniforms.tExplored.value = explored;
-    }
+    
+    log.info('FogEffect initialized with FoundryFogBridge');
   }
 
   /**
    * Set input/output buffers from EffectComposer
-   * @param {THREE.WebGLRenderTarget} readBuffer 
-   * @param {THREE.WebGLRenderTarget} writeBuffer 
    */
   setBuffers(readBuffer, writeBuffer) {
     this.readBuffer = readBuffer;
@@ -228,8 +227,7 @@ export class FogEffect extends EffectBase {
   }
 
   /**
-   * Set input texture (Alternative to setBuffers for simple effects)
-   * @param {THREE.Texture} texture 
+   * Set input texture
    */
   setInputTexture(texture) {
     if (this.material) {
@@ -238,95 +236,131 @@ export class FogEffect extends EffectBase {
   }
 
   update(timeInfo) {
-    if (!this.material) return;
+    if (!this.material || !this.fogBridge) return;
 
-    // GM convenience: when a GM has no tokens selected, show the full
-    // scene with no fog. When a GM selects a token (via the Three.js
-    // interaction manager), re-enable fog so their view is constrained
-    // by vision again. Non-GM users always respect fog.
+    // Sync textures from Foundry every frame
+    this.fogBridge.sync();
+
+    // GM convenience: bypass fog when no tokens selected
+    // Also check Foundry's native controlled tokens
     try {
       const isGM = game?.user?.isGM;
+      
+      // Check Foundry's native token control state (most reliable)
+      const foundryControlled = canvas?.tokens?.controlled || [];
+      let hasControlledTokens = foundryControlled.length > 0;
+      
+      // Also check MapShine's selection as backup
+      if (!hasControlledTokens) {
+        try {
+          const ms = window.MapShine;
+          const interactionManager = ms?.interactionManager;
+          const tokenManager = ms?.tokenManager;
+          const selection = interactionManager?.selection;
 
-      // Prefer MapShine's own selection state, since the PIXI canvas is
-      // visually hidden and Foundry's canvas.tokens.controlled array
-      // may not reflect Three.js interaction.
-      let hasControlledTokens = false;
-      try {
-        const ms = window.MapShine;
-        const interactionManager = ms?.interactionManager;
-        const tokenManager = ms?.tokenManager;
-        const selection = interactionManager?.selection;
-
-        if (interactionManager && tokenManager && selection && selection.size > 0) {
-          for (const id of selection) {
-            if (tokenManager.tokenSprites && tokenManager.tokenSprites.has(id)) {
-              hasControlledTokens = true;
-              break;
+          if (interactionManager && tokenManager && selection && selection.size > 0) {
+            for (const id of selection) {
+              if (tokenManager.tokenSprites && tokenManager.tokenSprites.has(id)) {
+                hasControlledTokens = true;
+                break;
+              }
             }
           }
+        } catch (_) {
+          // Ignore MapShine check errors
         }
-      } catch (_) {
-        // Fallback to Foundry selection if anything goes wrong.
-        const controlled = canvas?.tokens?.controlled || [];
-        hasControlledTokens = controlled.length > 0;
       }
 
-      const bypassFog = isGM && !hasControlledTokens;
+      // Also check if fog is even enabled for this scene
+      const fogEnabled = this.fogBridge.isFogEnabled();
+      const bypassFog = !fogEnabled || (isGM && !hasControlledTokens);
 
-      if (Math.random() < 0.01) {
-        log.debug(`Fog Update: isGM=${isGM}, hasControlled=${hasControlledTokens}, bypass=${bypassFog}, enabled=${this.params.enabled}`);
-      }
-
-      // Drive shader bypass flag instead of disabling the effect, so
-      // the post-processing chain continues to receive valid color.
       const u = this.material.uniforms;
       u.uBypassFog.value = bypassFog ? 1.0 : 0.0;
 
-      // Restore enabled state from params for cases where the user
-      // explicitly toggles the fog effect via UI.
       this.enabled = this.params.enabled !== false;
+      
+      // Debug logging (throttled)
+      if (Math.random() < 0.002) {
+        log.debug(`Fog state: enabled=${this.enabled}, bypass=${bypassFog}, fogEnabled=${fogEnabled}, isGM=${isGM}, hasTokens=${hasControlledTokens}`);
+      }
     } catch (_) {
-      // On any failure, fall back to respecting the current enabled flag.
+      // On failure, keep current state
     }
 
     if (!this.enabled) return;
 
-    // Update Uniforms
+    // Update uniforms
     const u = this.material.uniforms;
     u.uUnexploredColor.value.set(this.params.unexploredColor);
     u.uExploredColor.value.set(this.params.exploredColor);
     u.uExploredOpacity.value = this.params.exploredOpacity;
-    // Sync from Foundry if available (Optional, can override with params)
-    if (canvas && canvas.colors) {
-       // canvas.colors.fogUnexplored / fogExplored
-       // We can choose to sync these if params.autoSync is true, or just let the user tweak.
-       // For now, let params drive it.
+    
+    // Bind Foundry's textures
+    u.tVision.value = this.fogBridge.getVisionTexture();
+    u.tExplored.value = this.fogBridge.getExploredTexture();
+    
+    // Update scene dimensions
+    const dims = this.fogBridge.getSceneDimensions();
+    u.uSceneDimensions.value.set(dims.width, dims.height);
+    
+    // Update scene rect
+    const rect = this.fogBridge.getSceneRect();
+    u.uSceneRect.value.set(rect.x, rect.y, rect.width, rect.height);
+    
+    // Update fog sprite rect (exploration texture position/size)
+    this._updateFogSpriteRect(u);
+    
+    // Debug logging (throttled)
+    if (Math.random() < 0.002) {
+      log.debug(`SceneDims: ${dims.width}x${dims.height}, SceneRect: (${rect.x}, ${rect.y}, ${rect.width}, ${rect.height})`);
+    }
+  }
+
+  /**
+   * Update the fog sprite rect uniform from Foundry's fog sprite
+   * @private
+   */
+  _updateFogSpriteRect(uniforms) {
+    try {
+      // The exploration texture is positioned at the sceneRect, not at the sprite's
+      // display position. Use canvas.dimensions.sceneRect for correct world mapping.
+      const sceneRect = canvas?.dimensions?.sceneRect;
+      if (sceneRect) {
+        const x = sceneRect.x;
+        const y = sceneRect.y;
+        const w = sceneRect.width;
+        const h = sceneRect.height;
+        uniforms.uFogSpriteRect.value.set(x, y, w, h);
+        
+        // Debug logging (throttled)
+        if (Math.random() < 0.002) {
+          log.debug(`FogSpriteRect (from sceneRect): x=${x}, y=${y}, w=${w}, h=${h}`);
+        }
+      } else {
+        // Fallback to scene dimensions
+        const dims = this.fogBridge.getSceneDimensions();
+        uniforms.uFogSpriteRect.value.set(0, 0, dims.width, dims.height);
+      }
+    } catch (_) {
+      // Keep existing values
     }
   }
 
   /**
    * Render pass
-   * NOTE: EffectComposer calls render(renderer, scene, camera).
-   * We use the camera to compute view bounds for vision texture sampling.
-   * @param {THREE.Renderer} renderer 
-   * @param {THREE.Scene} scene
-   * @param {THREE.Camera} camera
    */
   render(renderer, scene, camera) {
     if (!this.enabled) return;
 
     const inputTexture = this.readBuffer ? this.readBuffer.texture : this.material.uniforms.tDiffuse.value;
 
-    // Guard: If vital resources are missing, pass through the input to output
-    // to prevent breaking the chain (which results in a black screen).
-    if (!inputTexture || !this.visionTexture) {
-      if (inputTexture) {
-        this.passThrough(renderer, inputTexture);
-      }
+    // Guard: pass through if resources missing
+    if (!inputTexture) {
       return;
     }
 
-    // 1. Set Render Target
+    // Set render target
     if (this.writeBuffer) {
       renderer.setRenderTarget(this.writeBuffer);
       renderer.clear();
@@ -334,107 +368,79 @@ export class FogEffect extends EffectBase {
       renderer.setRenderTarget(null);
     }
 
-    // 2. Compute camera view bounds in world space
-    // This allows the shader to transform screen UVs to world-space UVs
+    // Update view bounds from camera
     if (camera) {
       this.updateViewBounds(camera);
     }
 
-    // 3. Bind Uniforms
+    // Bind uniforms
     this.material.uniforms.tDiffuse.value = inputTexture;
-    // tVision and tExplored are set via setTextures/update, but ensure they are bound
-    if (this.visionTexture) this.material.uniforms.tVision.value = this.visionTexture;
-    if (this.exploredTexture) this.material.uniforms.tExplored.value = this.exploredTexture;
 
-    // 4. Render Quad
+    // Render quad
     renderer.render(this.quadScene, this.quadCamera);
   }
 
   /**
    * Update view bounds uniform from the Three.js camera
-   *
-   * We compute the visible world rectangle from the main 3D camera and
-   * express it in Foundry world coordinates (X-right, Y-down, origin at
-   * top-left of the scene). This keeps the fog aligned with the rendered
-   * map when pan/zoom are driven by the Three.js camera.
-   *
-   * @param {THREE.Camera} camera - Main scene camera
+   * Outputs bounds in Three.js world space (Y-up, origin at bottom-left)
    */
   updateViewBounds(camera) {
     const u = this.material.uniforms;
 
-    // Full scene dimensions (including padding) in Foundry coordinates
     const sceneWidth = canvas?.dimensions?.width || 1;
     const sceneHeight = canvas?.dimensions?.height || 1;
-    u.uSceneDimensions.value.set(sceneWidth, sceneHeight);
-
-    // Actual scene rect (excluding padding) in Foundry coords
-    const sceneRect = canvas?.dimensions?.sceneRect;
-    if (sceneRect) {
-      u.uSceneRect.value.set(sceneRect.x, sceneRect.y, sceneRect.width, sceneRect.height);
-    } else {
-      u.uSceneRect.value.set(0, 0, sceneWidth, sceneHeight);
-    }
 
     if (!camera) {
-      // Fallback: full-scene bounds
+      // Default: full scene in Three.js coords
       u.uViewBounds.value.set(0, 0, sceneWidth, sceneHeight);
       return;
     }
 
-    // The SceneComposer and CameraSync maintain a mapping where:
-    //   camera.position.x === Foundry X at screen center
-    //   camera.position.y === sceneHeight - FoundryY_at_screen_center
-    // So we can invert Y to get Foundry Y-down.
-
     const camPos = camera.position;
 
     if (camera.isPerspectiveCamera) {
-      // Perspective: compute visible rect at z=0 from FOV and distance
       const distance = camPos.z;
       const vFov = camera.fov * Math.PI / 180.0;
       const visibleHeight = 2 * Math.tan(vFov / 2) * distance;
       const visibleWidth = visibleHeight * camera.aspect;
 
-      // Convert camera center from Three.js Y-up to Foundry Y-down
-      const foundryX = camPos.x;
-      const foundryY = sceneHeight - camPos.y;
-
-      const minX = foundryX - visibleWidth / 2;
-      const maxX = foundryX + visibleWidth / 2;
-      const minY = foundryY - visibleHeight / 2; // top of view in Foundry
-      const maxY = foundryY + visibleHeight / 2; // bottom of view
+      // Camera position is already in Three.js world space
+      const minX = camPos.x - visibleWidth / 2;
+      const maxX = camPos.x + visibleWidth / 2;
+      const minY = camPos.y - visibleHeight / 2;
+      const maxY = camPos.y + visibleHeight / 2;
 
       u.uViewBounds.value.set(minX, minY, maxX, maxY);
-
-      // Optional: lightweight debug sampling
-      if (Math.random() < 0.01) {
-        log.debug(`ViewBounds (perspective): cam=(${camPos.x.toFixed(0)}, ${camPos.y.toFixed(0)}, ${distance.toFixed(0)}), ` +
-                  `foundry=(${foundryX.toFixed(0)}, ${foundryY.toFixed(0)}), ` +
-                  `visible=${visibleWidth.toFixed(0)}x${visibleHeight.toFixed(0)}, ` +
-                  `bounds=(${minX.toFixed(0)}, ${minY.toFixed(0)}) -> (${maxX.toFixed(0)}, ${maxY.toFixed(0)})`);
-      }
     } else if (camera.isOrthographicCamera) {
-      // Orthographic: use the camera frustum directly
-      const foundryX = camPos.x;
-      const foundryY = sceneHeight - camPos.y;
-
-      const minX = foundryX + camera.left / camera.zoom;
-      const maxX = foundryX + camera.right / camera.zoom;
-      const minY = foundryY - camera.top / camera.zoom;
-      const maxY = foundryY - camera.bottom / camera.zoom;
+      // Orthographic camera: left/right/top/bottom define the view frustum
+      // These are already in world units, just need to apply zoom and offset by camera position
+      const minX = camPos.x + camera.left / camera.zoom;
+      const maxX = camPos.x + camera.right / camera.zoom;
+      const minY = camPos.y + camera.bottom / camera.zoom;
+      const maxY = camPos.y + camera.top / camera.zoom;
 
       u.uViewBounds.value.set(minX, minY, maxX, maxY);
+      
+      // Debug logging (throttled) - more detailed for debugging drift
+      if (Math.random() < 0.005) {
+        const vb = u.uViewBounds.value;
+        const sd = u.uSceneDimensions.value;
+        const sr = u.uSceneRect.value;
+        const fsr = u.uFogSpriteRect.value;
+        log.debug(`FOG DEBUG:
+  ViewBounds: (${vb.x.toFixed(0)}, ${vb.y.toFixed(0)}) to (${vb.z.toFixed(0)}, ${vb.w.toFixed(0)})
+  SceneDims: ${sd.x.toFixed(0)}x${sd.y.toFixed(0)}
+  SceneRect: (${sr.x.toFixed(0)}, ${sr.y.toFixed(0)}, ${sr.z.toFixed(0)}, ${sr.w.toFixed(0)})
+  FogSpriteRect: (${fsr.x.toFixed(0)}, ${fsr.y.toFixed(0)}, ${fsr.z.toFixed(0)}, ${fsr.w.toFixed(0)})
+  CamPos: (${camPos.x.toFixed(0)}, ${camPos.y.toFixed(0)}), zoom: ${camera.zoom.toFixed(2)}`);
+      }
     } else {
-      // Unknown camera type - fall back to full scene
       u.uViewBounds.value.set(0, 0, sceneWidth, sceneHeight);
     }
   }
 
   /**
    * Helper to pass input to output without applying fog
-   * @param {THREE.Renderer} renderer 
-   * @param {THREE.Texture} inputTexture 
    */
   passThrough(renderer, inputTexture) {
     const oldBypass = this.material.uniforms.uBypassFog.value;
@@ -449,8 +455,17 @@ export class FogEffect extends EffectBase {
     }
 
     renderer.render(this.quadScene, this.quadCamera);
-    
-    // Restore bypass flag (though update() will override it next frame)
     this.material.uniforms.uBypassFog.value = oldBypass;
-  } 
+  }
+
+  /**
+   * Dispose resources
+   */
+  dispose() {
+    if (this.fogBridge) {
+      this.fogBridge.dispose();
+      this.fogBridge = null;
+    }
+    super.dispose();
+  }
 }

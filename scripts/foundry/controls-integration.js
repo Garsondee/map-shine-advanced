@@ -210,6 +210,11 @@ export class ControlsIntegration {
     // These are rendered by Three.js, so they must be hidden to prevent double-rendering
     this.hideReplacedLayers();
     
+    // Re-hide visibility layer after sight refresh (Foundry may re-show it)
+    Hooks.on('sightRefresh', () => {
+      this._hideVisibilityLayer();
+    });
+    
     log.debug('PIXI overlay configured: opacity 0, z-index 10 (on top but transparent)');
   }
   
@@ -233,16 +238,56 @@ export class ControlsIntegration {
       }
     }
 
-    // Also hide the native Fog of War visual layer. We fully replace fog
-    // rendering with our own VisionManager + FogManager + FogEffect chain,
-    // but still rely on canvas.fog.exploration for persistence. Turning the
-    // layer invisible prevents double-fog artifacts.
+    // Also hide the native Fog of War visual layers. We replace fog
+    // rendering with WorldSpaceFogEffect which renders fog as a world-space
+    // plane mesh. Turning these layers invisible prevents double-fog artifacts.
+    // Foundry's vision sources are still computed - we just hide the visual output.
+    
+    // canvas.fog contains the exploration sprite
     if (canvas.fog) {
       try {
         canvas.fog.visible = false;
-        log.debug('Hidden native fog visual layer');
+        log.debug('Hidden native fog layer');
       } catch (_) {
         // Ignore - fog layer structure may vary by Foundry version
+      }
+    }
+    
+    // canvas.visibility is the layer that applies the actual fog filter
+    // This is the main source of the "double fog" issue - it renders
+    // Foundry's native visibility filter which we're replacing with WorldSpaceFogEffect
+    // 
+    // IMPORTANT: We set visible=false but keep the layer's internal rendering active
+    // so that canvas.effects.visionSources continues to be computed. The visibility layer
+    // itself won't draw to screen, but vision polygon computation still happens.
+    if (canvas.visibility) {
+      try {
+        // Hide the visibility layer's visual output
+        canvas.visibility.visible = false;
+        
+        // Also disable the visibility filter if it exists
+        // This filter is what actually draws the fog overlay
+        if (canvas.visibility.filter) {
+          canvas.visibility.filter.enabled = false;
+        }
+        
+        // Hide the vision sub-container which renders the red vision polygons
+        if (canvas.visibility.vision) {
+          canvas.visibility.vision.visible = false;
+        }
+        
+        // Hide any other visibility children
+        if (canvas.visibility.children) {
+          for (const child of canvas.visibility.children) {
+            if (child.visible !== undefined) {
+              child.visible = false;
+            }
+          }
+        }
+        
+        log.debug('Hidden native visibility layer, filter, and children');
+      } catch (_) {
+        // Ignore - visibility layer structure may vary by Foundry version
       }
     }
     
@@ -262,6 +307,37 @@ export class ControlsIntegration {
         this.makeTokenTransparent(token);
       }
       log.debug('Tokens layer: meshes transparent, interaction enabled');
+    }
+  }
+  
+  /**
+   * Hide the visibility layer and its children
+   * Called on sightRefresh to ensure Foundry doesn't re-show it
+   * @private
+   */
+  _hideVisibilityLayer() {
+    if (!canvas?.visibility) return;
+    
+    try {
+      canvas.visibility.visible = false;
+      
+      if (canvas.visibility.filter) {
+        canvas.visibility.filter.enabled = false;
+      }
+      
+      if (canvas.visibility.vision) {
+        canvas.visibility.vision.visible = false;
+      }
+      
+      if (canvas.visibility.children) {
+        for (const child of canvas.visibility.children) {
+          if (child.visible !== undefined) {
+            child.visible = false;
+          }
+        }
+      }
+    } catch (_) {
+      // Ignore errors
     }
   }
   

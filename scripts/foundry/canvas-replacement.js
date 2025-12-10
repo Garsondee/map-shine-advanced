@@ -26,9 +26,9 @@ import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
 import { BuildingShadowsEffect } from '../effects/BuildingShadowsEffect.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { FireSparksEffect } from '../particles/FireSparksEffect.js';
-import { VisionManager } from '../vision/VisionManager.js';
-import { FogManager } from '../vision/FogManager.js';
-import { FogEffect } from '../effects/FogEffect.js';
+import { WorldSpaceFogEffect } from '../effects/WorldSpaceFogEffect.js';
+// NOTE: VisionManager and FogManager are no longer used.
+// WorldSpaceFogEffect renders fog as a world-space plane mesh, eliminating coordinate conversion issues.
 import {
   CloudShadowsEffect,
   TimeOfDayEffect,
@@ -147,14 +147,11 @@ let dropHandler = null;
 /** @type {LightingEffect|null} */
 let lightingEffect = null;
 
-/** @type {VisionManager|null} */
-let visionManager = null;
-
-/** @type {FogManager|null} */
-let fogManager = null;
-
-/** @type {FogEffect|null} */
+/** @type {WorldSpaceFogEffect|null} */
 let fogEffect = null;
+
+// NOTE: visionManager and fogManager are no longer used.
+// WorldSpaceFogEffect renders fog as a world-space plane mesh in the Three.js scene.
 
 /** @type {SkyColorEffect|null} */
 let skyColorEffect = null;
@@ -335,8 +332,7 @@ function onCanvasTearDown(canvas) {
     window.MapShine.tileManager = null;
     window.MapShine.wallManager = null;
     window.MapShine.doorMeshManager = null;
-    window.MapShine.visionManager = null;
-    window.MapShine.fogManager = null;
+    window.MapShine.fogEffect = null;
     window.MapShine.renderLoop = null;
     window.MapShine.cameraController = null;
     window.MapShine.interactionManager = null;
@@ -570,51 +566,13 @@ async function createThreeCanvas(scene) {
     const prismEffect = new PrismEffect();
     effectComposer.registerEffect(prismEffect);
 
-    // Step 3.5.1: Initialize Vision and Fog Managers (Fog of War)
-    // CRITICAL: Use Foundry scene dimensions (world space), NOT viewport dimensions (screen pixels)
-    // Vision polygons are computed in Foundry world coordinates, so the VisionManager camera
-    // and GeometryConverter must use the same coordinate system.
-    const sceneWidth = canvas.dimensions?.width || rect.width;
-    const sceneHeight = canvas.dimensions?.height || rect.height;
-    visionManager = new VisionManager(renderer, sceneWidth, sceneHeight);
-    effectComposer.addUpdatable(visionManager);
-    
-    fogManager = new FogManager(renderer, sceneWidth, sceneHeight);
-    fogManager.load(); // Load saved fog state
-
-    // Wire Vision updates to Fog accumulation
-    // Patch update() to trigger accumulation when vision actually changes
-    const originalVisionUpdate = visionManager.update.bind(visionManager);
-    visionManager.update = () => {
-      // Track state BEFORE calling original
-      // We need to detect if the original actually rendered, which happens when:
-      // 1. needsUpdate was true, OR
-      // 2. _pendingThrottledUpdate was true AND throttle timer elapsed
-      // The original clears needsUpdate after rendering, so we check if it changed.
-      const hadPending = visionManager.needsUpdate || visionManager._pendingThrottledUpdate;
-      
-      originalVisionUpdate();
-      
-      // If we had pending work and needsUpdate is now false, an update happened.
-      // Also check _pendingThrottledUpdate is false to confirm the throttled update ran.
-      // Additionally, only accumulate exploration when there is at least one
-      // controlled token driving vision; this prevents the GM omniscient view
-      // (no controlled tokens) from pre-filling the entire map as explored.
-      if (
-        hadPending &&
-        !visionManager.needsUpdate &&
-        !visionManager._pendingThrottledUpdate &&
-        visionManager._controlledTokenIds &&
-        visionManager._controlledTokenIds.size > 0
-      ) {
-        fogManager.accumulate(visionManager.getTexture());
-      }
-    };
-
-    // Step 3.5.2: Register Fog Effect
-    fogEffect = new FogEffect();
-    fogEffect.setTextures(visionManager.getTexture(), fogManager.getTexture());
+    // Step 3.5.1: Register World-Space Fog Effect (Fog of War)
+    // WorldSpaceFogEffect renders fog as a plane mesh in the Three.js scene.
+    // This eliminates coordinate conversion issues between screen-space and world-space.
+    // Vision is rendered to a world-space render target, exploration uses Foundry's texture.
+    fogEffect = new WorldSpaceFogEffect();
     effectComposer.registerEffect(fogEffect);
+    log.info('WorldSpaceFogEffect registered');
 
     // Step 3.6: Register Lighting Effect
     lightingEffect = new LightingEffect();
@@ -790,9 +748,7 @@ async function createThreeCanvas(scene) {
     mapShine.colorCorrectionEffect = colorCorrectionEffect;
     mapShine.asciiEffect = asciiEffect;
     mapShine.fireSparksEffect = fireSparksEffect;
-    mapShine.visionManager = visionManager; // NEW: Expose VisionManager
-    mapShine.fogManager = fogManager; // NEW: Expose FogManager
-    mapShine.fogEffect = fogEffect; // NEW: Expose FogEffect
+    mapShine.fogEffect = fogEffect; // Fog of War (world-space plane mesh)
     mapShine.skyColorEffect = skyColorEffect; // NEW: Expose SkyColorEffect
     mapShine.cameraController = cameraController;
     mapShine.unifiedCamera = unifiedCamera; // NEW: Expose unified camera
@@ -922,7 +878,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
 
   // --- Fog Settings ---
   if (fogEffect) {
-    const fogSchema = FogEffect.getControlSchema();
+    const fogSchema = WorldSpaceFogEffect.getControlSchema();
     
     const onFogUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -1792,18 +1748,8 @@ function destroyThreeCanvas() {
     log.debug('Effect composer disposed');
   }
 
-  // Dispose Fog of War
-  if (visionManager) {
-    visionManager.dispose();
-    visionManager = null;
-    log.debug('VisionManager disposed');
-  }
-  if (fogManager) {
-    fogManager.dispose();
-    fogManager = null;
-    log.debug('FogManager disposed');
-  }
-  fogEffect = null; // Part of effectComposer cleanup, but clear ref
+  // Dispose Fog of War (FogEffect is disposed as part of effectComposer)
+  fogEffect = null;
 
   // Dispose scene composer
   if (sceneComposer) {

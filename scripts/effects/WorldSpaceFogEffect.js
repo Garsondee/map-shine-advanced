@@ -53,8 +53,19 @@ export class WorldSpaceFogEffect extends EffectBase {
     this.visionCamera = null;
     this.visionMaterial = null;
     
-    // Exploration texture from Foundry (already world-space)
-    this.exploredTexture = null;
+    // Self-maintained exploration render target
+    // We accumulate vision into this each frame: explored = max(explored, vision)
+    // This gives us proper "explored but not visible" without relying on Foundry's
+    // pre-populated exploration texture which marks outdoors as explored by default.
+    this.explorationRenderTarget = null;
+    this.explorationScene = null;
+    this.explorationCamera = null;
+    this.explorationMaterial = null;
+    
+    // Ping-pong targets for accumulation
+    this._explorationTargetA = null;
+    this._explorationTargetB = null;
+    this._currentExplorationTarget = 'A';
     
     // Scene dimensions
     this.sceneRect = { x: 0, y: 0, width: 1, height: 1 };
@@ -114,6 +125,9 @@ export class WorldSpaceFogEffect extends EffectBase {
 
     // Create world-space vision render target
     this._createVisionRenderTarget();
+    
+    // Create self-maintained exploration render target
+    this._createExplorationRenderTarget();
     
     // Create the fog overlay plane
     this._createFogPlane();
@@ -204,6 +218,138 @@ export class WorldSpaceFogEffect extends EffectBase {
   }
 
   /**
+   * Create the self-maintained exploration render target
+   * We use ping-pong rendering to accumulate: explored = max(explored, vision)
+   * @private
+   */
+  _createExplorationRenderTarget() {
+    const THREE = window.THREE;
+    const { width, height } = this.sceneRect;
+    
+    // Use same resolution as vision target
+    const maxSize = 2048;
+    const scale = Math.min(1, maxSize / Math.max(width, height));
+    const rtWidth = Math.ceil(width * scale);
+    const rtHeight = Math.ceil(height * scale);
+    
+    const rtOptions = {
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      stencilBuffer: false,
+      depthBuffer: false,
+      generateMipmaps: false
+    };
+    
+    // Create two targets for ping-pong rendering
+    this._explorationTargetA = new THREE.WebGLRenderTarget(rtWidth, rtHeight, rtOptions);
+    this._explorationTargetB = new THREE.WebGLRenderTarget(rtWidth, rtHeight, rtOptions);
+    this._currentExplorationTarget = 'A';
+    
+    // Scene and camera for accumulation pass
+    this.explorationScene = new THREE.Scene();
+    this.explorationCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    
+    // Material that does: output = max(previousExplored, currentVision)
+    this.explorationMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tPreviousExplored: { value: null },
+        tCurrentVision: { value: null }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tPreviousExplored;
+        uniform sampler2D tCurrentVision;
+        varying vec2 vUv;
+        
+        void main() {
+          float prev = texture2D(tPreviousExplored, vUv).r;
+          float curr = texture2D(tCurrentVision, vUv).r;
+          float explored = max(prev, curr);
+          gl_FragColor = vec4(explored, explored, explored, 1.0);
+        }
+      `,
+      depthWrite: false,
+      depthTest: false
+    });
+    
+    // Full-screen quad for accumulation
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.explorationMaterial);
+    this.explorationScene.add(quad);
+    
+    // Clear both targets to black initially
+    const currentTarget = this.renderer.getRenderTarget();
+    this.renderer.setRenderTarget(this._explorationTargetA);
+    this.renderer.setClearColor(0x000000, 1);
+    this.renderer.clear();
+    this.renderer.setRenderTarget(this._explorationTargetB);
+    this.renderer.clear();
+    this.renderer.setRenderTarget(currentTarget);
+    
+    log.debug(`Exploration render targets created: ${rtWidth}x${rtHeight}`);
+  }
+
+  /**
+   * Get the current exploration texture (the one we read from)
+   * @private
+   */
+  _getExplorationReadTarget() {
+    return this._currentExplorationTarget === 'A' 
+      ? this._explorationTargetA 
+      : this._explorationTargetB;
+  }
+
+  /**
+   * Get the exploration texture to write to (the other one)
+   * @private
+   */
+  _getExplorationWriteTarget() {
+    return this._currentExplorationTarget === 'A' 
+      ? this._explorationTargetB 
+      : this._explorationTargetA;
+  }
+
+  /**
+   * Swap exploration targets after accumulation
+   * @private
+   */
+  _swapExplorationTargets() {
+    this._currentExplorationTarget = this._currentExplorationTarget === 'A' ? 'B' : 'A';
+  }
+
+  /**
+   * Accumulate current vision into exploration texture
+   * explored = max(explored, vision)
+   * @private
+   */
+  _accumulateExploration() {
+    if (!this.explorationMaterial || !this._explorationTargetA) return;
+    
+    const readTarget = this._getExplorationReadTarget();
+    const writeTarget = this._getExplorationWriteTarget();
+    
+    // Set up uniforms
+    this.explorationMaterial.uniforms.tPreviousExplored.value = readTarget.texture;
+    this.explorationMaterial.uniforms.tCurrentVision.value = this.visionRenderTarget.texture;
+    
+    // Render accumulation pass
+    const currentTarget = this.renderer.getRenderTarget();
+    this.renderer.setRenderTarget(writeTarget);
+    this.renderer.render(this.explorationScene, this.explorationCamera);
+    this.renderer.setRenderTarget(currentTarget);
+    
+    // Swap targets so next frame reads from the one we just wrote
+    this._swapExplorationTargets();
+  }
+
+  /**
    * Create the fog overlay plane mesh
    * @private
    */
@@ -230,12 +376,16 @@ export class WorldSpaceFogEffect extends EffectBase {
       `,
       fragmentShader: `
         uniform sampler2D tVision;
-        uniform sampler2D tExplored; // Currently unused - reserved for future exploration support
+        uniform sampler2D tExplored;
         uniform vec3 uUnexploredColor;
         uniform vec3 uExploredColor;
         uniform float uExploredOpacity;
         uniform float uBypassFog;
         
+        // Scene rect in Foundry coords (x, y, width, height)
+        // We will inject this via defines/uniform replacement from JS if needed.
+        // For now, assume the fog plane covers exactly the sceneRect, so vUv maps
+        // linearly across it and we can reconstruct Foundry world coordinates.
         varying vec2 vUv;
         
         void main() {
@@ -250,15 +400,23 @@ export class WorldSpaceFogEffect extends EffectBase {
           vec2 visionUv = vec2(vUv.x, 1.0 - vUv.y);
           float vision = texture2D(tVision, visionUv).r;
           
-          // For now, ignore exploration entirely and implement strict LOS fog:
-          //  - vision > threshold  -> fully transparent (no fog)
-          //  - vision <= threshold -> full darkness
+          // Exploration texture is in Foundry world space over the sceneRect.
+          // The fog plane's geometry is also aligned to sceneRect, so we can
+          // use vUv directly as local coordinates. However, the underlying
+          // PIXI texture is vertically inverted relative to our plane, so we
+          // flip Y once when sampling.
+          vec2 exploredUv = vec2(vUv.x, 1.0 - vUv.y);
+          float explored = texture2D(tExplored, exploredUv).r;
           
+          // Fog of War logic:
+          // 1. Currently visible -> fully transparent (discard)
+          // 2. Previously explored but not visible -> dim overlay
+          // 3. Never explored -> full darkness
           if (vision > 0.1) {
-            // Currently visible - no fog, make fully transparent
             discard;
+          } else if (explored > 0.1 && uExploredOpacity > 0.0) {
+            gl_FragColor = vec4(uExploredColor, uExploredOpacity);
           } else {
-            // Not currently visible - full darkness
             gl_FragColor = vec4(uUnexploredColor, 1.0);
           }
         }
@@ -441,71 +599,6 @@ export class WorldSpaceFogEffect extends EffectBase {
   }
 
   /**
-   * Extract exploration texture from Foundry
-   * @private
-   */
-  _extractExploredTexture() {
-    const THREE = window.THREE;
-    
-    try {
-      // If Foundry's exploration system is disabled for this scene, treat
-      // everything as unexplored and return a black texture so that only
-      // current vision reveals the map.
-      const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
-      if (!explorationEnabled) {
-        return this._fallbackBlack;
-      }
-      
-      const pixiTexture = canvas?.fog?.sprite?.texture;
-      if (!pixiTexture?.valid) {
-        return this._fallbackBlack;
-      }
-      
-      // Get the WebGL texture from PIXI
-      const baseTexture = pixiTexture.baseTexture;
-      const pixiRenderer = canvas?.app?.renderer;
-      if (!baseTexture || !pixiRenderer) {
-        return this._fallbackBlack;
-      }
-      
-      // Force PIXI to upload
-      pixiRenderer.texture.bind(baseTexture);
-      
-      const glTexture = baseTexture._glTextures?.[pixiRenderer.texture.CONTEXT_UID];
-      if (!glTexture?.texture) {
-        return this._fallbackBlack;
-      }
-      
-      // Create or update Three.js texture wrapper
-      if (!this.exploredTexture) {
-        this.exploredTexture = new THREE.Texture();
-        this.exploredTexture.format = THREE.RGBAFormat;
-        this.exploredTexture.type = THREE.UnsignedByteType;
-        this.exploredTexture.minFilter = THREE.LinearFilter;
-        this.exploredTexture.magFilter = THREE.LinearFilter;
-        this.exploredTexture.wrapS = THREE.ClampToEdgeWrapping;
-        this.exploredTexture.wrapT = THREE.ClampToEdgeWrapping;
-        this.exploredTexture.generateMipmaps = false;
-      }
-      
-      // Inject WebGL texture handle
-      const properties = this.renderer.properties.get(this.exploredTexture);
-      properties.__webglTexture = glTexture.texture;
-      properties.__webglInit = true;
-      
-      const width = baseTexture.realWidth || baseTexture.width || 1;
-      const height = baseTexture.realHeight || baseTexture.height || 1;
-      this.exploredTexture.image = { width, height };
-      this.exploredTexture.needsUpdate = false;
-      
-      return this.exploredTexture;
-    } catch (e) {
-      log.warn('Failed to extract explored texture:', e);
-      return this._fallbackBlack;
-    }
-  }
-
-  /**
    * Check if fog should be bypassed (GM with no tokens selected)
    * @private
    */
@@ -560,8 +653,14 @@ export class WorldSpaceFogEffect extends EffectBase {
       this._renderVisionMask();
     }
     
-    // Update exploration texture from Foundry
-    const exploredTex = this._extractExploredTexture();
+    // Accumulate current vision into our self-maintained exploration texture
+    // This runs every frame so that as the token moves, the explored area grows
+    // explored = max(explored, vision)
+    this._accumulateExploration();
+    
+    // Use our self-maintained exploration texture (NOT Foundry's pre-populated one)
+    // This ensures only areas we've actually seen with our token are marked explored
+    const exploredTex = this._getExplorationReadTarget()?.texture || this._fallbackBlack;
     this.fogMaterial.uniforms.tExplored.value = exploredTex;
     
     // Update color uniforms
@@ -599,6 +698,15 @@ export class WorldSpaceFogEffect extends EffectBase {
     }
     this._createVisionRenderTarget();
     
+    // Recreate exploration render targets at new size
+    if (this._explorationTargetA) {
+      this._explorationTargetA.dispose();
+    }
+    if (this._explorationTargetB) {
+      this._explorationTargetB.dispose();
+    }
+    this._createExplorationRenderTarget();
+    
     // Update fog plane geometry and position
     if (this.fogPlane) {
       this.mainScene.remove(this.fogPlane);
@@ -618,6 +726,17 @@ export class WorldSpaceFogEffect extends EffectBase {
     
     if (this.visionRenderTarget) {
       this.visionRenderTarget.dispose();
+    }
+    
+    // Dispose exploration render targets
+    if (this._explorationTargetA) {
+      this._explorationTargetA.dispose();
+    }
+    if (this._explorationTargetB) {
+      this._explorationTargetB.dispose();
+    }
+    if (this.explorationMaterial) {
+      this.explorationMaterial.dispose();
     }
     
     if (this._fallbackWhite) this._fallbackWhite.dispose();

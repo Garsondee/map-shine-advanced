@@ -71,6 +71,11 @@ export class UnifiedCameraController {
     this._isDragging = false;
     this._lastMousePos = null;
     
+    // Cooldown to prevent drift detection from fighting with user input
+    // After any user-initiated zoom/pan, we skip drift detection for this many ms
+    this._inputCooldownMs = 200;
+    this._lastInputTime = 0;
+    
     // Bound handlers
     this._onMouseDown = this._onMouseDown.bind(this);
     this._onMouseMove = this._onMouseMove.bind(this);
@@ -213,6 +218,11 @@ export class UnifiedCameraController {
   pan(dx, dy, source = 'api') {
     if (!this.enabled || this._updateLock) return;
     
+    // Mark input time to prevent drift detection from fighting with pan
+    if (source === 'three') {
+      this._lastInputTime = performance.now();
+    }
+    
     this._updateLock = true;
     this._lastChangeSource = source;
     
@@ -288,6 +298,11 @@ export class UnifiedCameraController {
    */
   zoomBy(factor, screenX = 0.5, screenY = 0.5, source = 'api') {
     if (!this.enabled || this._updateLock) return;
+    
+    // Mark input time to prevent drift detection from fighting with zoom
+    if (source === 'three') {
+      this._lastInputTime = performance.now();
+    }
     
     const oldZoom = this.state.zoom;
     let newZoom = oldZoom * factor;
@@ -413,6 +428,18 @@ export class UnifiedCameraController {
     if (!this.enabled || this._updateLock) return;
     if (!canvas?.ready || !canvas?.stage) return;
     
+    // Skip drift detection during cooldown period after user input
+    // This prevents the sync from fighting with zoom/pan operations
+    const now = performance.now();
+    if (now - this._lastInputTime < this._inputCooldownMs) {
+      return;
+    }
+    
+    // Also skip if user is actively dragging
+    if (this._isDragging) {
+      return;
+    }
+    
     // Read PIXI state and check for drift
     const stage = canvas.stage;
     const pixiX = stage.pivot.x;
@@ -526,6 +553,9 @@ export class UnifiedCameraController {
    */
   _onWheel(event) {
     if (!this.enabled) return;
+    
+    // Mark input time to prevent drift detection from fighting with zoom
+    this._lastInputTime = performance.now();
     
     const factor = event.deltaY > 0 ? 0.9 : 1.1;
     

@@ -20,12 +20,14 @@ import { createLogger } from '../core/log.js';
 const log = createLogger('WorldSpaceFogEffect');
 
 /**
- * Z-height for the fog overlay plane
- * Must be above ALL other scene content including particles, effects, etc.
- * Post-processing effects happen after scene render, so this just needs to be
- * above all meshes in the scene.
+ * Z position for the fog plane in world space.
+ * We keep this at Z=0 (same as scene content) and rely on:
+ * - depthTest: false - fog doesn't participate in depth testing
+ * - renderOrder: 9999 - fog renders after everything else
+ * This avoids perspective distortion issues that occur when the fog plane
+ * is at a different Z than the scene content.
  */
-const FOG_PLANE_Z = 1000;
+const FOG_PLANE_Z = 0;
 
 export class WorldSpaceFogEffect extends EffectBase {
   constructor() {
@@ -423,7 +425,7 @@ export class WorldSpaceFogEffect extends EffectBase {
       `,
       transparent: true,
       depthWrite: false,
-      depthTest: true,
+      depthTest: false,  // Disable depth test - fog always renders on top via renderOrder
       side: THREE.DoubleSide
     });
     
@@ -442,6 +444,7 @@ export class WorldSpaceFogEffect extends EffectBase {
     const centerX = x + width / 2;
     const centerY = this.sceneDimensions.height - (y + height / 2);
     
+    // Initial Z position - will be updated each frame in update() to track camera
     this.fogPlane.position.set(centerX, centerY, FOG_PLANE_Z);
     
     // Frustum culling off - always render
@@ -649,6 +652,12 @@ export class WorldSpaceFogEffect extends EffectBase {
     const bypassFog = this._shouldBypassFog();
     this.fogMaterial.uniforms.uBypassFog.value = bypassFog ? 1.0 : 0.0;
     this.fogPlane.visible = this.params.enabled && !bypassFog;
+    
+    // Keep fog plane at fixed Z=0 (same as scene content) to avoid perspective
+    // distortion issues. The fog plane uses depthTest=false and renderOrder=9999
+    // to ensure it always renders on top regardless of Z position.
+    // This avoids the complexity of scaling the plane to compensate for perspective
+    // when moving it closer to the camera.
     
     if (!this.params.enabled || bypassFog) return;
     

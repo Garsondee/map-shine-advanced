@@ -37,6 +37,15 @@ export class SceneComposer {
     
     /** @type {Object} */
     this.foundrySceneData = null;
+
+    /** @type {number|undefined} Canonical ground plane Z (set in setupCamera) */
+    this.groundZ = undefined;
+
+    /** @type {number|undefined} Top of the logical world volume (for weather, fog, etc.) */
+    this.worldTopZ = undefined;
+
+    /** @type {number|undefined} Preferred emitter Z for world-space weather volumes */
+    this.weatherEmitterZ = undefined;
   }
 
   /**
@@ -381,6 +390,11 @@ export class SceneComposer {
     this.cameraHeight = CAMERA_HEIGHT;
     this.groundZ = groundZ;
     this.groundDistance = distanceToGround;
+    // Define canonical vertical bounds for the world volume so that
+    // all effects (weather, fog, etc.) can place content relative to
+    // the ground plane without duplicating constants.
+    this.worldTopZ = groundZ + 7500;
+    this.weatherEmitterZ = groundZ + 6500;
     this.baseFov = baseFovDegrees;
     this.baseFovRadians = baseFovRadians;
     this.baseFovTanHalf = Math.tan(baseFovRadians / 2);
@@ -415,6 +429,10 @@ export class SceneComposer {
     const distanceToGround = Math.max(1, this.cameraHeight - groundZ);
     this.groundZ = groundZ;
     this.groundDistance = distanceToGround;
+    // Keep vertical bounds in sync if the base plane Z changes (e.g. via
+    // future editing tools or scene configuration).
+    this.worldTopZ = groundZ + 7500;
+    this.weatherEmitterZ = groundZ + 6500;
 
     const baseFovRadiansRaw = 2 * Math.atan(viewportHeight / (2 * distanceToGround));
     const baseFovRadians = baseFovRadiansRaw * PERSPECTIVE_STRENGTH;

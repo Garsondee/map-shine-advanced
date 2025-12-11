@@ -491,7 +491,7 @@ export class WeatherParticles {
     /** @type {ApplyForce[]} */
     this._splashWindForces = [];
 
-    this._rainBaseGravity = 8000;
+    this._rainBaseGravity = 2500;
     this._snowBaseGravity = 3000;
 
     /** @type {THREE.ShaderMaterial|null} quarks batch material for rain */
@@ -834,9 +834,19 @@ _createSnowTexture() {
     //   available, otherwise fall back to 1000 as the canonical value.
     //
     const sceneComposer = window.MapShine?.sceneComposer;
+    // Canonical vertical wires from SceneComposer so all world-space effects
+    // share the same notion of ground plane, emitter height, and world top.
     const groundZ = (sceneComposer && typeof sceneComposer.groundZ === 'number')
       ? sceneComposer.groundZ
       : 1000; // Fallback to SceneComposer's canonical ground plane Z
+
+    const worldTopZ = (sceneComposer && typeof sceneComposer.worldTopZ === 'number')
+      ? sceneComposer.worldTopZ
+      : (groundZ + 7500);
+
+    const emitterZ = (sceneComposer && typeof sceneComposer.weatherEmitterZ === 'number')
+      ? sceneComposer.weatherEmitterZ
+      : (groundZ + 6500);
 
     // LAYERING CONTRACT (weather vs. tiles / overhead):
     // - Overhead tiles use Z_OVERHEAD=20, depthTest=true, depthWrite=false,
@@ -855,16 +865,14 @@ _createSnowTexture() {
     const centerX = sceneX + sceneW / 2;
     const centerY = sceneY + sceneH / 2;
     // Place the weather emitters well above the ground plane so rain/snow
-    // have room to fall before hitting the map. We measure this relative
-    // to groundZ so that changing the base plane height keeps particles
-    // visually locked to the ground.
-    const emitterZ = groundZ + 6500;
+    // have room to fall before hitting the map. Use SceneComposer.weatherEmitterZ
+    // when available so all systems share a single canonical emitter height.
 
-    // World volume in world space: scene rectangle in X/Y, groundZ..groundZ+7500 in Z.
+    // World volume in world space: scene rectangle in X/Y, groundZ..worldTopZ in Z.
     // We keep a tall band here so strong gravity/wind forces do not immediately
     // cull particles before they have a chance to render.
     const volumeMin = new THREE.Vector3(sceneX, sceneY, groundZ);
-    const volumeMax = new THREE.Vector3(sceneX + sceneW, sceneY + sceneH, groundZ + 7500);
+    const volumeMax = new THREE.Vector3(sceneX + sceneW, sceneY + sceneH, worldTopZ);
     const killBehavior = new WorldVolumeKillBehavior(volumeMin, volumeMax);
     
     // For snow we want flakes to be able to rest on the ground (z ~= groundZ) and
@@ -922,9 +930,9 @@ _createSnowTexture() {
       // LIFE: Long enough that particles are culled by the world-volume floor instead of timing out mid-air.
       startLife: new IntervalValue(3.0, 4.0),
       
-      // SPEED: High, but not game-breakingly high.
-      // Gravity will accelerate them further.
-      startSpeed: new IntervalValue(6000, 8000), 
+      // SPEED: Tuned to give a readable fall rate at default gravity.
+      // Gravity will still accelerate them further, but base speed is lower.
+      startSpeed: new IntervalValue(2500, 3500), 
       
       // SIZE: narrow streaks; actual visual width is mostly from texture.
       startSize: new IntervalValue(1.2, 2.2), 
@@ -941,8 +949,8 @@ _createSnowTexture() {
       // Uses velocity to stretch the quad.
       renderMode: RenderMode.StretchedBillBoard,
       // speedFactor: Controls how "long" the rain streak is relative to speed.
-      // 4000 speed * 0.02 factor = 80 unit long streak.
-      speedFactor: 0.02, 
+      // 4000 speed * 0.01 factor = 40 unit long streak.
+      speedFactor: 0.01, 
       
       startRotation: new ConstantValue(0),
       behaviors: [gravity, wind, rainColorOverLife, killBehavior, new RainFadeInBehavior()],
@@ -1231,12 +1239,25 @@ _createSnowTexture() {
     // drive them every frame. They are then wired into either the real
     // ShaderMaterial.uniforms (for quarks SpriteBatches) or into the shader
     // object passed to onBeforeCompile (for plain MeshBasicMaterials).
+    //
+    // DUAL-MASK SYSTEM:
+    // - uRoofMap: World-space _Outdoors mask (white=outdoors, black=indoors)
+    // - uRoofAlphaMap: Screen-space roof alpha from LightingEffect (alpha>0 = roof visible)
+    //
+    // Logic:
+    // - Show rain if: (outdoors AND roof hidden) OR (roof visible - rain lands on roof)
+    // - Hide rain if: indoors AND no visible roof overhead
     const uniforms = {
       uRoofMap: { value: null },
+      uRoofAlphaMap: { value: null },
       // (sceneX, sceneY, sceneWidth, sceneHeight) in world units
       uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
       // 0.0 = disabled, 1.0 = enabled
-      uRoofMaskEnabled: { value: 0.0 }
+      uRoofMaskEnabled: { value: 0.0 },
+      // 0.0 = no roof alpha map, 1.0 = has roof alpha map
+      uHasRoofAlphaMap: { value: 0.0 },
+      // Screen size for gl_FragCoord -> UV conversion
+      uScreenSize: { value: new THREE.Vector2(1920, 1080) }
     };
 
     // Store for per-frame updates in update()
@@ -1245,14 +1266,70 @@ _createSnowTexture() {
 
     const isShaderMat = material.isShaderMaterial === true;
 
+    // The GLSL fragment code for dual-mask precipitation visibility.
+    // This is shared between ShaderMaterial and onBeforeCompile paths.
+    const fragmentMaskCode =
+      '  // DUAL-MASK PRECIPITATION VISIBILITY\n' +
+      '  // uRoofMap: _Outdoors mask (world-space, white=outdoors, black=indoors)\n' +
+      '  // uRoofAlphaMap: screen-space roof alpha (alpha>0 = roof visible)\n' +
+      '  {\n' +
+      '    // Map world XY into 0..1 UVs inside the scene rectangle for _Outdoors mask.\n' +
+      '    vec2 uvMask = vec2(\n' +
+      '      (vRoofWorldPos.x - uSceneBounds.x) / uSceneBounds.z,\n' +
+      '      1.0 - (vRoofWorldPos.y - uSceneBounds.y) / uSceneBounds.w\n' +
+      '    );\n' +
+      '    \n' +
+      '    // Quick bounds check to avoid sampling outside the mask.\n' +
+      '    if (uvMask.x < 0.0 || uvMask.x > 1.0 || uvMask.y < 0.0 || uvMask.y > 1.0) {\n' +
+      '      discard;\n' +
+      '    }\n' +
+      '    \n' +
+      '    // Sample _Outdoors mask (world-space): white=outdoors, black=indoors\n' +
+      '    float outdoorsMask = 1.0;\n' +
+      '    if (uRoofMaskEnabled > 0.5) {\n' +
+      '      outdoorsMask = texture2D(uRoofMap, uvMask).r;\n' +
+      '    }\n' +
+      '    \n' +
+      '    // Sample roof alpha (screen-space): alpha>0 = roof tile visible\n' +
+      '    // roofAlphaTarget is rendered with the same camera, so we use\n' +
+      '    // gl_FragCoord to get proper screen-space UVs.\n' +
+      '    float roofAlpha = 0.0;\n' +
+      '    if (uHasRoofAlphaMap > 0.5) {\n' +
+      '      // gl_FragCoord.xy gives pixel coordinates, divide by viewport size\n' +
+      '      // uScreenSize is passed as (width, height) in the uniform\n' +
+      '      vec2 screenUv = gl_FragCoord.xy / uScreenSize;\n' +
+      '      roofAlpha = texture2D(uRoofAlphaMap, screenUv).a;\n' +
+      '    }\n' +
+      '    \n' +
+      '    // VISIBILITY LOGIC:\n' +
+      '    // Show rain if:\n' +
+      '    //   1. Roof is visible (roofAlpha > 0.1) - rain lands on roof\n' +
+      '    //   2. OR: Outdoors (outdoorsMask > 0.5) AND roof hidden (roofAlpha < 0.1)\n' +
+      '    // Hide rain if:\n' +
+      '    //   Indoors (outdoorsMask < 0.5) AND no visible roof (roofAlpha < 0.1)\n' +
+      '    \n' +
+      '    bool roofVisible = roofAlpha > 0.1;\n' +
+      '    bool isOutdoors = outdoorsMask > 0.5;\n' +
+      '    \n' +
+      '    // Rain shows on visible roofs OR in outdoor areas without roofs\n' +
+      '    bool showPrecip = roofVisible || isOutdoors;\n' +
+      '    \n' +
+      '    if (!showPrecip) {\n' +
+      '      discard;\n' +
+      '    }\n' +
+      '  }\n';
+
     if (isShaderMat) {
       // Directly patch the quarks SpriteBatch ShaderMaterial in place. This is
       // the path used for the actual batched rain/snow draw calls produced by
       // three.quarks' BatchedRenderer.
       const uni = material.uniforms || (material.uniforms = {});
       uni.uRoofMap = uniforms.uRoofMap;
+      uni.uRoofAlphaMap = uniforms.uRoofAlphaMap;
       uni.uSceneBounds = uniforms.uSceneBounds;
       uni.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
+      uni.uHasRoofAlphaMap = uniforms.uHasRoofAlphaMap;
+      uni.uScreenSize = uniforms.uScreenSize;
 
       if (typeof material.vertexShader === 'string') {
         // All quarks billboard variants use an `offset` attribute plus
@@ -1271,34 +1348,21 @@ _createSnowTexture() {
       }
 
       if (typeof material.fragmentShader === 'string') {
-        // Fragment path: project vRoofWorldPos.xy into the scene rectangle and
-        // sample the _Outdoors mask. We flip Y because Foundry's world origin
-        // is top-left while textures are bottom-left in UV space.
         material.fragmentShader = material.fragmentShader
           .replace(
             'void main() {',
-            'varying vec3 vRoofWorldPos;\nuniform sampler2D uRoofMap;\nuniform vec4 uSceneBounds;\nuniform float uRoofMaskEnabled;\nvoid main() {'
+            'varying vec3 vRoofWorldPos;\n' +
+            'uniform sampler2D uRoofMap;\n' +
+            'uniform sampler2D uRoofAlphaMap;\n' +
+            'uniform vec4 uSceneBounds;\n' +
+            'uniform float uRoofMaskEnabled;\n' +
+            'uniform float uHasRoofAlphaMap;\n' +
+            'uniform vec2 uScreenSize;\n' +
+            'void main() {'
           )
           .replace(
             '#include <soft_fragment>',
-            '  if (uRoofMaskEnabled > 0.5) {\n' +
-            '    // Map world XY into 0..1 UVs inside the scene rectangle.\n' +
-            '    vec2 uvMask = vec2(\n' +
-            '      (vRoofWorldPos.x - uSceneBounds.x) / uSceneBounds.z,\n' +
-            '      1.0 - (vRoofWorldPos.y - uSceneBounds.y) / uSceneBounds.w\n' +
-            '    );\n' +
-            '    // Quick bounds check to avoid sampling outside the mask.\n' +
-            '    if (uvMask.x < 0.0 || uvMask.x > 1.0 || uvMask.y < 0.0 || uvMask.y > 1.0) {\n' +
-            '      discard;\n' +
-            '    } else {\n' +
-            '      float m = texture2D(uRoofMap, uvMask).r;\n' +
-            '      // Convention: bright/white = outdoors, dark/black = indoors.\n' +
-            '      if (m < 0.5) {\n' +
-            '        discard;\n' +
-            '      }\n' +
-            '    }\n' +
-            '  }\n' +
-            '#include <soft_fragment>'
+            fragmentMaskCode + '#include <soft_fragment>'
           );
       }
 
@@ -1313,8 +1377,11 @@ _createSnowTexture() {
     // object instead of the final ShaderMaterial instance.
     material.onBeforeCompile = (shader) => {
       shader.uniforms.uRoofMap = uniforms.uRoofMap;
+      shader.uniforms.uRoofAlphaMap = uniforms.uRoofAlphaMap;
       shader.uniforms.uSceneBounds = uniforms.uSceneBounds;
       shader.uniforms.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
+      shader.uniforms.uHasRoofAlphaMap = uniforms.uHasRoofAlphaMap;
+      shader.uniforms.uScreenSize = uniforms.uScreenSize;
 
       shader.vertexShader = shader.vertexShader
         .replace(
@@ -1329,28 +1396,18 @@ _createSnowTexture() {
       shader.fragmentShader = shader.fragmentShader
         .replace(
           'void main() {',
-          'varying vec3 vRoofWorldPos;\nuniform sampler2D uRoofMap;\nuniform vec4 uSceneBounds;\nuniform float uRoofMaskEnabled;\nvoid main() {'
+          'varying vec3 vRoofWorldPos;\n' +
+          'uniform sampler2D uRoofMap;\n' +
+          'uniform sampler2D uRoofAlphaMap;\n' +
+          'uniform vec4 uSceneBounds;\n' +
+          'uniform float uRoofMaskEnabled;\n' +
+          'uniform float uHasRoofAlphaMap;\n' +
+          'uniform vec2 uScreenSize;\n' +
+          'void main() {'
         )
         .replace(
           '#include <soft_fragment>',
-          '  if (uRoofMaskEnabled > 0.5) {\n' +
-          '    // Map world XY into 0..1 UVs inside the scene rectangle.\n' +
-          '    vec2 uvMask = vec2(\n' +
-          '      (vRoofWorldPos.x - uSceneBounds.x) / uSceneBounds.z,\n' +
-          '      1.0 - (vRoofWorldPos.y - uSceneBounds.y) / uSceneBounds.w\n' +
-          '    );\n' +
-          '    // Quick bounds check to avoid sampling outside the mask.\n' +
-          '    if (uvMask.x < 0.0 || uvMask.x > 1.0 || uvMask.y < 0.0 || uvMask.y > 1.0) {\n' +
-          '      discard;\n' +
-          '    } else {\n' +
-          '      float m = texture2D(uRoofMap, uvMask).r;\n' +
-          '      // Convention: bright/white = outdoors, dark/black = indoors.\n' +
-          '      if (m < 0.5) {\n' +
-          '        discard;\n' +
-          '      }\n' +
-          '    }\n' +
-          '  }\n' +
-          '#include <soft_fragment>'
+          fragmentMaskCode + '#include <soft_fragment>'
         );
     };
 
@@ -1400,7 +1457,32 @@ _createSnowTexture() {
     // Update roof/outdoors texture and mask state from WeatherController
     const roofTex = weatherController.roofMap || null;
     this._roofTexture = roofTex;
-    const roofMaskEnabled = (weatherController.roofMaskActive || weatherController.roofMaskForceEnabled) && !!roofTex;
+    
+    // DUAL-MASK SYSTEM:
+    // - roofMaskEnabled: Always true if we have an _Outdoors mask (controls indoor/outdoor gating)
+    // - roofAlphaMap: Screen-space texture from LightingEffect showing visible overhead tiles
+    //
+    // The shader logic is:
+    // - Show rain if: (outdoors AND roof hidden) OR (roof visible - rain lands on roof)
+    // - Hide rain if: indoors AND no visible roof overhead
+    const roofMaskEnabled = !!roofTex;
+    
+    // Get the roof alpha texture from LightingEffect (screen-space overhead tile visibility)
+    let roofAlphaTexture = null;
+    let screenWidth = 1920;
+    let screenHeight = 1080;
+    try {
+      const le = window.MapShine?.lightingEffect;
+      if (le && le.roofAlphaTarget && le.roofAlphaTarget.texture) {
+        roofAlphaTexture = le.roofAlphaTarget.texture;
+        // Get screen size from the render target dimensions
+        screenWidth = le.roofAlphaTarget.width || 1920;
+        screenHeight = le.roofAlphaTarget.height || 1080;
+      }
+    } catch (e) {
+      // LightingEffect not available
+    }
+    const hasRoofAlphaMap = !!roofAlphaTexture;
 
     const precip = weather.precipitation || 0;
     const freeze = weather.freezeLevel || 0;
@@ -1486,20 +1568,26 @@ _createSnowTexture() {
         if (this._rainMaterial && this._rainMaterial.userData && this._rainMaterial.userData.roofUniforms) {
           const uniforms = this._rainMaterial.userData.roofUniforms;
           uniforms.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+          uniforms.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
           if (this._sceneBounds) {
             uniforms.uSceneBounds.value.copy(this._sceneBounds);
           }
           uniforms.uRoofMap.value = this._roofTexture;
+          uniforms.uRoofAlphaMap.value = roofAlphaTexture;
+          uniforms.uScreenSize.value.set(screenWidth, screenHeight);
         }
 
         // Also drive the batch ShaderMaterial uniforms used by quarks for rain.
         if (this._rainBatchMaterial && this._rainBatchMaterial.userData && this._rainBatchMaterial.userData.roofUniforms) {
           const uniforms = this._rainBatchMaterial.userData.roofUniforms;
           uniforms.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+          uniforms.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
           if (this._sceneBounds) {
             uniforms.uSceneBounds.value.copy(this._sceneBounds);
           }
           uniforms.uRoofMap.value = this._roofTexture;
+          uniforms.uRoofAlphaMap.value = roofAlphaTexture;
+          uniforms.uScreenSize.value.set(screenWidth, screenHeight);
         }
     }
     
@@ -1616,8 +1704,11 @@ _createSnowTexture() {
         if (this._splashMaterial && this._splashMaterial.userData.roofUniforms) {
            const u = this._splashMaterial.userData.roofUniforms;
            u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+           u.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
            if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
            u.uRoofMap.value = this._roofTexture;
+           u.uRoofAlphaMap.value = roofAlphaTexture;
+           u.uScreenSize.value.set(screenWidth, screenHeight);
         }
 
         if (this._splashBatchMaterials && this._splashBatchMaterials.length > 0) {
@@ -1625,8 +1716,11 @@ _createSnowTexture() {
             if (!mat || !mat.userData || !mat.userData.roofUniforms) continue;
             const u = mat.userData.roofUniforms;
             u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+            u.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
             if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
             u.uRoofMap.value = this._roofTexture;
+            u.uRoofAlphaMap.value = roofAlphaTexture;
+            u.uScreenSize.value.set(screenWidth, screenHeight);
           }
         }
     }
@@ -1674,20 +1768,26 @@ _createSnowTexture() {
         if (this._snowMaterial && this._snowMaterial.userData && this._snowMaterial.userData.roofUniforms) {
           const uniforms = this._snowMaterial.userData.roofUniforms;
           uniforms.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+          uniforms.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
           if (this._sceneBounds) {
             uniforms.uSceneBounds.value.copy(this._sceneBounds);
           }
           uniforms.uRoofMap.value = this._roofTexture;
+          uniforms.uRoofAlphaMap.value = roofAlphaTexture;
+          uniforms.uScreenSize.value.set(screenWidth, screenHeight);
         }
 
         // Also drive the batch ShaderMaterial uniforms used by quarks for snow.
         if (this._snowBatchMaterial && this._snowBatchMaterial.userData && this._snowBatchMaterial.userData.roofUniforms) {
           const uniforms = this._snowBatchMaterial.userData.roofUniforms;
           uniforms.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+          uniforms.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
           if (this._sceneBounds) {
             uniforms.uSceneBounds.value.copy(this._sceneBounds);
           }
           uniforms.uRoofMap.value = this._roofTexture;
+          uniforms.uRoofAlphaMap.value = roofAlphaTexture;
+          uniforms.uScreenSize.value.set(screenWidth, screenHeight);
         }
     }
 

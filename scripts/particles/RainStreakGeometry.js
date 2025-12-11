@@ -208,7 +208,7 @@ export class RainStreakGeometry {
           // drizzle is visibly shorter while heavy, fast rain is longer.
           float refSpeed = 1800.0;
           float speedNorm = clamp(speed / refSpeed, 0.3, 1.5);
-          float streakLength = uScale.y * 25.0 * speedNorm;
+          float streakLength = uScale.y * 15.0 * speedNorm;
           float thickness = uScale.x * 10.0;
 
           // Basis vectors

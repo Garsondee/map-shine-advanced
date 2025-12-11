@@ -99,12 +99,12 @@ export class WeatherController {
     // Per-system tuning parameters for precipitation visuals
     this.rainTuning = {
       intensityScale: 1.0,
-      streakLength: 0.25,
+      streakLength: 0.18,
       dropSize: 6.1,
       dropSizeMin: 1.4,
       dropSizeMax: 13.8,
       brightness: 0.8,
-      gravityScale: 6.0,
+      gravityScale: 3.0,
       windInfluence: 1.6,
       curlStrength: 4.0,
 
@@ -723,8 +723,8 @@ export class WeatherController {
         },
         rainGravityScale: {
           label: 'Rain Gravity Scale',
-          default: 6.0,
-          min: 0.2,
+          default: 3.0,
+          min: 0.05,
           max: 6.0,
           step: 0.05,
           group: 'rain'

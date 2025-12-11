@@ -55,6 +55,18 @@ export class SmartWindBehavior {
     }
     if (!Number.isFinite(influence)) influence = 1.0;
 
+    // When influence is effectively zero (e.g. Fire UI Wind Influence = 0), we
+    // want particles to *stop* being carried by the wind, not just stop
+    // accelerating further. Apply a gentle horizontal damping so any existing
+    // wind-driven velocity decays quickly.
+    if (influence <= 0.001) {
+      if (particle.velocity) {
+        particle.velocity.x *= 0.85;
+        particle.velocity.y *= 0.85;
+      }
+      return;
+    }
+
     const forceMag = windSpeed * 300.0 * influence * susceptibility;
     if (!Number.isFinite(forceMag)) return;
 

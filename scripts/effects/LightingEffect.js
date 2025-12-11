@@ -331,6 +331,11 @@ export class LightingEffect extends EffectBase {
     Hooks.on('updateAmbientLight', (doc) => this.onLightUpdate(doc));
     Hooks.on('deleteAmbientLight', (doc) => this.onLightDelete(doc));
     
+    // Listen for lightingRefresh to rebuild any lights that were created before
+    // Foundry computed their LOS polygons (fixes lights extending through walls
+    // on initial creation/paste).
+    Hooks.on('lightingRefresh', () => this.onLightingRefresh());
+    
     // Initial Load
     this.syncAllLights();
   }
@@ -546,6 +551,26 @@ export class LightingEffect extends EffectBase {
       source.dispose();
       this.lights.delete(doc.id);
     }
+  }
+
+  /**
+   * Called when Foundry finishes computing LOS polygons for all lights.
+   * Rebuilds any lights that were created before their LOS was available
+   * (i.e., still using circle fallback geometry).
+   */
+  onLightingRefresh() {
+    if (!canvas.lighting) return;
+    
+    this.lights.forEach((source, id) => {
+      if (source._usingCircleFallback) {
+        // Force a geometry rebuild now that LOS should be available
+        source.updateData(source.document, true);
+        // Re-add mesh to scene if it was rebuilt
+        if (source.mesh && !source.mesh.parent) {
+          this.lightScene.add(source.mesh);
+        }
+      }
+    });
   }
 
   update(timeInfo) {

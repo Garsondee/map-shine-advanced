@@ -28,6 +28,16 @@ export class ThreeLightSource {
       noise: new SmoothNoise()
     };
 
+    /**
+     * Track whether we are currently using a simple circular geometry
+     * fallback instead of the wall-clipped LOS polygon. This can happen
+     * if the LightSource LOS has not been initialized yet at the moment
+     * this ThreeLightSource is constructed. We will attempt to upgrade
+     * to the proper LOS polygon lazily in updateAnimation().
+     * @type {boolean}
+     */
+    this._usingCircleFallback = false;
+
     this.init();
   }
 
@@ -120,6 +130,20 @@ export class ThreeLightSource {
     this.updateData(this.document, true);
   }
 
+  /**
+   * Get the ground plane Z position from SceneComposer.
+   * Lights should be positioned at this Z level (plus a small offset).
+   * @returns {number} Ground Z position (default 1000)
+   * @private
+   */
+  _getGroundZ() {
+    const sceneComposer = window.MapShine?.sceneComposer;
+    if (sceneComposer && typeof sceneComposer.groundZ === 'number') {
+      return sceneComposer.groundZ;
+    }
+    return 1000; // Default ground plane Z
+  }
+
   updateData(doc, forceRebuild = false) {
     this.document = doc;
     const config = doc.config;
@@ -169,16 +193,20 @@ export class ThreeLightSource {
     this.material.uniforms.uAttenuation.value = computedAttenuation;
 
     // 4. Position
+    // Light meshes must be at the ground plane Z level (plus small offset)
+    // to align with the base plane after the camera/ground refactor.
     const worldPos = Coordinates.toWorld(doc.x, doc.y);
+    const groundZ = this._getGroundZ();
+    const lightZ = groundZ + 0.1; // Slightly above ground plane
 
     if (forceRebuild || !this.mesh) {
-      this.rebuildGeometry(worldPos.x, worldPos.y, rPx);
+      this.rebuildGeometry(worldPos.x, worldPos.y, rPx, lightZ);
     } else {
-      this.mesh.position.set(worldPos.x, worldPos.y, 0.1);
+      this.mesh.position.set(worldPos.x, worldPos.y, lightZ);
     }
   }
 
-  rebuildGeometry(worldX, worldY, radiusPx) {
+  rebuildGeometry(worldX, worldY, radiusPx, lightZ) {
     const THREE = window.THREE;
     if (this.mesh) {
       this.mesh.geometry.dispose();
@@ -190,27 +218,34 @@ export class ThreeLightSource {
 
     try {
       const placeable = canvas.lighting?.get(this.id);
-      if (placeable && placeable.source && placeable.source.shape) {
-        const points = placeable.source.shape.points;
-        shapePoints = [];
-        for(let i=0; i<points.length; i+=2) {
-            const v = Coordinates.toWorld(points[i], points[i+1]);
-            // Convert to Local Space
+      if (placeable && placeable.source) {
+        // Prefer the LOS polygon, which is already clipped by walls.
+        const poly = placeable.source.los || placeable.source.shape;
+        const points = poly?.points;
+        if (points && points.length >= 6) {
+          shapePoints = [];
+          for (let i = 0; i < points.length; i += 2) {
+            const v = Coordinates.toWorld(points[i], points[i + 1]);
+            // Convert to local space around the light center
             shapePoints.push(new THREE.Vector2(v.x - worldX, v.y - worldY));
+          }
         }
       }
-    } catch(e) { }
+    } catch (e) { }
 
     if (shapePoints && shapePoints.length > 2) {
       const shape = new THREE.Shape(shapePoints);
       geometry = new THREE.ShapeGeometry(shape);
+      this._usingCircleFallback = false;
     } else {
       // Circle Fallback - bumped segments to 128 for smoother large radii
       geometry = new THREE.CircleGeometry(radiusPx, 128);
+      this._usingCircleFallback = true;
     }
 
     this.mesh = new THREE.Mesh(geometry, this.material);
-    this.mesh.position.set(worldX, worldY, 0.1);
+    // Position at ground plane Z level (passed from updateData)
+    this.mesh.position.set(worldX, worldY, lightZ);
     
     // Ensure render order is handled correctly if needed
     this.mesh.renderOrder = 100;
@@ -232,6 +267,35 @@ export class ThreeLightSource {
       this.material.uniforms.uIntensity.value = 0.7 + (s * 0.3);
     } else {
       this.material.uniforms.uIntensity.value = 1.0;
+    }
+
+    // If we had to fall back to a simple circle because the LOS polygon
+    // was not yet available when this light was created, try to upgrade
+    // lazily once the LOS data exists. This ensures lights respect walls
+    // even if Foundry computes LOS after our initial sync.
+    if (this._usingCircleFallback) {
+      try {
+        const placeable = canvas.lighting?.get(this.id);
+        const poly = placeable?.source?.los;
+        const points = poly?.points;
+        if (points && points.length >= 6) {
+          const d = canvas.dimensions;
+          const config = this.document.config;
+          const dim = config.dim || 0;
+          const bright = config.bright || 0;
+          const radius = Math.max(dim, bright);
+          const pxPerUnit = d.size / d.distance;
+          const rPx = radius * pxPerUnit;
+
+          const worldPos = Coordinates.toWorld(this.document.x, this.document.y);
+          const groundZ = this._getGroundZ();
+          const lightZ = groundZ + 0.1;
+
+          this.rebuildGeometry(worldPos.x, worldPos.y, rPx, lightZ);
+        }
+      } catch (e) {
+        // Swallow and try again on a later frame if needed.
+      }
     }
   }
 

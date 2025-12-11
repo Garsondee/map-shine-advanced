@@ -24,6 +24,21 @@
 
 export class LightMesh {
   /**
+   * Get the ground plane Z position from SceneComposer.
+   * Light meshes should be positioned at this Z level.
+   * @returns {number} Ground Z position (default 1000)
+   * @private
+   * @static
+   */
+  static _getGroundZ() {
+    const sceneComposer = window.MapShine?.sceneComposer;
+    if (sceneComposer && typeof sceneComposer.groundZ === 'number') {
+      return sceneComposer.groundZ;
+    }
+    return 1000; // Default ground plane Z
+  }
+
+  /**
    * @param {THREE.Vector2} centerWorld - Light origin in world space (x,y).
    * @param {number} outerRadiusPx - Max (dim) radius in pixels (Three world units).
    * @param {{r:number,g:number,b:number}} color - Linear RGB color (0..1).
@@ -162,13 +177,16 @@ export class LightMesh {
 
     const geometry = new THREE.ShapeGeometry(shape);
 
+    // Position at ground plane Z level (plus small offset)
+    const lightZ = LightMesh._getGroundZ() + 0.1;
+
     if (!this.mesh) {
       this.mesh = new THREE.Mesh(geometry, this.material);
-      this.mesh.position.set(this.center.x, this.center.y, 0);
+      this.mesh.position.set(this.center.x, this.center.y, lightZ);
     } else {
       this.mesh.geometry.dispose();
       this.mesh.geometry = geometry;
-      this.mesh.position.set(this.center.x, this.center.y, 0);
+      this.mesh.position.set(this.center.x, this.center.y, lightZ);
     }
   }
 
@@ -180,13 +198,16 @@ export class LightMesh {
     const segments = 32;
     const geometry = new THREE.CircleGeometry(this.outerRadiusPx, segments);
 
+    // Position at ground plane Z level (plus small offset)
+    const lightZ = LightMesh._getGroundZ() + 0.1;
+
     if (!this.mesh) {
       this.mesh = new THREE.Mesh(geometry, this.material);
-      this.mesh.position.set(this.center.x, this.center.y, 0);
+      this.mesh.position.set(this.center.x, this.center.y, lightZ);
     } else {
       this.mesh.geometry.dispose();
       this.mesh.geometry = geometry;
-      this.mesh.position.set(this.center.x, this.center.y, 0);
+      this.mesh.position.set(this.center.x, this.center.y, lightZ);
     }
   }
 

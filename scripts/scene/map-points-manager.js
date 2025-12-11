@@ -566,13 +566,17 @@ export class MapPointsManager {
     // Choose color based on effect target
     const color = this.getEffectColor(group.effectTarget);
     
+    // Get ground plane Z for proper positioning
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
+    const helperZ = groundZ + 50; // Render above ground plane
+    
     if (group.type === 'point') {
       // Create point markers
       const geometry = new THREE.BufferGeometry();
       const positions = [];
       
       for (const point of group.points) {
-        positions.push(point.x, point.y, 50); // Z=50 to render above map
+        positions.push(point.x, point.y, helperZ);
       }
       
       geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -597,7 +601,7 @@ export class MapPointsManager {
       const positions = [];
       
       for (const point of group.points) {
-        positions.push(point.x, point.y, 50);
+        positions.push(point.x, point.y, helperZ);
       }
       
       geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -622,10 +626,10 @@ export class MapPointsManager {
         const positions = [];
         
         for (const point of group.points) {
-          positions.push(point.x, point.y, 50);
+          positions.push(point.x, point.y, helperZ);
         }
         // Close the loop
-        positions.push(group.points[0].x, group.points[0].y, 50);
+        positions.push(group.points[0].x, group.points[0].y, helperZ);
         
         geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
         

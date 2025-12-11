@@ -259,7 +259,7 @@ class SnowSpinBehavior {
   reset() { /* no-op */ }
 }
 
-// Snow floor behavior: when flakes reach the ground plane (z <= 0), stop their
+// Snow floor behavior: when flakes reach the ground plane (z <= groundZ), stop their
 // motion and fade them out over a short duration before killing them. This
 // gives the impression of flakes "settling" on the ground instead of popping
 // out of existence.
@@ -270,6 +270,25 @@ class SnowFloorBehavior {
     // ParticleSystem feeds it an upscaled dt. A value around 1.0 here
     // corresponds to roughly ~2 seconds of real-time fade in practice.
     this.fadeDuration = 1.0;
+    // Cache groundZ from SceneComposer; updated lazily in update() if needed.
+    this._groundZ = null;
+  }
+
+  /**
+   * Get the ground plane Z position from SceneComposer.
+   * @returns {number} Ground Z position (default 1000)
+   * @private
+   */
+  _getGroundZ() {
+    // Return cached value if available
+    if (this._groundZ !== null) return this._groundZ;
+    
+    const sceneComposer = window.MapShine?.sceneComposer;
+    if (sceneComposer && typeof sceneComposer.groundZ === 'number') {
+      this._groundZ = sceneComposer.groundZ;
+      return this._groundZ;
+    }
+    return 1000; // Default ground plane Z
   }
 
   initialize(particle, system) {
@@ -330,7 +349,8 @@ class SnowFloorBehavior {
 
     // Not yet landed: check for contact with the ground plane.
     const z = particle.position.z;
-    if (z <= 0) {
+    const groundZ = this._getGroundZ();
+    if (z <= groundZ) {
       particle._landed = true;
       particle._landedAgeStart = typeof particle.age === 'number' ? particle.age : 0;
       if (particle.color) {
@@ -794,15 +814,30 @@ _createSnowTexture() {
      const THREE = window.THREE;
      const d = window.canvas?.dimensions;
      const sceneW = d?.sceneWidth ?? d?.width ?? 2000;
-     const sceneH = d?.sceneHeight ?? d?.height ?? 2000;
+    const sceneH = d?.sceneHeight ?? d?.height ?? 2000;
     const sceneX = d?.sceneX ?? 0;
     const sceneY = d?.sceneY ?? 0;
     
     // Scene rectangle comes directly from Foundry's canvas.dimensions.
     // This gives us the true playable area in world units (top-left origin).
-    // We then extend this into 3D by treating Z=0 as the ground plane and
-    // Z=7500 as the top of the world volume for all weather particles.
+    // We then extend this into 3D using the same canonical ground plane Z
+    // that SceneComposer uses for the base plane mesh.
     //
+    // Ground plane alignment contract:
+    // - SceneComposer.createBasePlane() positions the base plane at
+    //   GROUND_Z = 1000 (with camera at Z=2000), so the visible map lives
+    //   at Z=1000 in world space.
+    // - Previously WeatherParticles assumed Z=0 as ground, which caused
+    //   rain/snow and splashes to appear offset relative to the map when the
+    //   base plane Z moved.
+    // - Here we derive the effective groundZ from SceneComposer when
+    //   available, otherwise fall back to 1000 as the canonical value.
+    //
+    const sceneComposer = window.MapShine?.sceneComposer;
+    const groundZ = (sceneComposer && typeof sceneComposer.groundZ === 'number')
+      ? sceneComposer.groundZ
+      : 1000; // Fallback to SceneComposer's canonical ground plane Z
+
     // LAYERING CONTRACT (weather vs. tiles / overhead):
     // - Overhead tiles use Z_OVERHEAD=20, depthTest=true, depthWrite=false,
     //   renderOrder=10 (see TileManager.updateSpriteTransform).
@@ -819,20 +854,24 @@ _createSnowTexture() {
 
     const centerX = sceneX + sceneW / 2;
     const centerY = sceneY + sceneH / 2;
-    const emitterZ = 7500;
+    // Place the weather emitters well above the ground plane so rain/snow
+    // have room to fall before hitting the map. We measure this relative
+    // to groundZ so that changing the base plane height keeps particles
+    // visually locked to the ground.
+    const emitterZ = groundZ + 6500;
 
-    // World volume in world space: scene rectangle in X/Y, 0..7500 in Z. We
-    // keep a tall band here so strong gravity/wind forces do not immediately
+    // World volume in world space: scene rectangle in X/Y, groundZ..groundZ+7500 in Z.
+    // We keep a tall band here so strong gravity/wind forces do not immediately
     // cull particles before they have a chance to render.
-    const volumeMin = new THREE.Vector3(sceneX, sceneY, 0);
-    const volumeMax = new THREE.Vector3(sceneX + sceneW, sceneY + sceneH, 7500);
+    const volumeMin = new THREE.Vector3(sceneX, sceneY, groundZ);
+    const volumeMax = new THREE.Vector3(sceneX + sceneW, sceneY + sceneH, groundZ + 7500);
     const killBehavior = new WorldVolumeKillBehavior(volumeMin, volumeMax);
     
-    // For snow we want flakes to be able to rest on the ground (z ~= 0) and
+    // For snow we want flakes to be able to rest on the ground (z ~= groundZ) and
     // fade out instead of being culled the instant they touch the floor.
     // Use a slightly relaxed kill volume in Z so the SnowFloorBehavior can
     // manage their lifetime once they land.
-    const snowVolumeMin = new THREE.Vector3(sceneX, sceneY, -100);
+    const snowVolumeMin = new THREE.Vector3(sceneX, sceneY, groundZ - 100);
     const snowKillBehavior = new WorldVolumeKillBehavior(snowVolumeMin, volumeMax);
     
     // --- COMMON OVER-LIFE BEHAVIORS ---
@@ -1026,10 +1065,10 @@ _createSnowTexture() {
         ]
       });
 
-      // Z Position: Ground level. 
-      // Z=10 ensures it draws above the background canvas (usually Z=0) 
-      // but below tokens (Z=100+).
-      system.emitter.position.set(centerX, centerY, 10);
+      // Z Position: Ground level, aligned with the base plane.
+    // We nudge slightly above groundZ so splashes draw above the map but
+    // below tokens.
+    system.emitter.position.set(centerX, centerY, groundZ + 10);
       system.emitter.rotation.set(0, 0, 0); // No rotation needed for billboards
 
       if (this.scene) this.scene.add(system.emitter);
@@ -1114,7 +1153,10 @@ _createSnowTexture() {
       uTileCount: 2,
       vTileCount: 2,
       // Randomly choose one of the four atlas tiles per particle.
-      startTileIndex: new IntervalValue(0, 3),
+      // NOTE: IntervalValue uses lerp(a, b, random) where random ∈ [0,1),
+      // so IntervalValue(0,3) produces [0,3) and floor() never yields 3.
+      // Use (0,4) so floor([0,4)) → {0,1,2,3}.
+      startTileIndex: new IntervalValue(0, 4),
       startRotation: new IntervalValue(0, Math.PI * 2),
       // Horizontal motion now comes only from snowWind (driven by windSpeed)
       // and snowCurl (turbulence field), plus gravity for vertical fall.

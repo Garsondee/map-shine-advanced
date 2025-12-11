@@ -13,7 +13,8 @@ import {
   SizeOverLife,
   PiecewiseBezier,
   Bezier,
-  CurlNoiseField
+  CurlNoiseField,
+  FrameOverLife
 } from '../libs/three.quarks.module.js';
 import { weatherController } from '../core/WeatherController.js';
 import { SmartWindBehavior } from './SmartWindBehavior.js';
@@ -83,9 +84,15 @@ class MultiPointEmitterShape {
     }
 
     // Position directly in world space (already converted by setMapPointsSources)
+    // Fire particles must spawn at the ground plane Z level to align with the map.
+    const sceneComposer = window.MapShine?.sceneComposer;
+    const groundZ = (sceneComposer && typeof sceneComposer.groundZ === 'number')
+      ? sceneComposer.groundZ
+      : 1000;
+
     p.position.x = worldX;
     p.position.y = worldY;
-    p.position.z = 0;
+    p.position.z = groundZ;
 
     // Apply intensity-based modifiers
     if (typeof p.life === 'number') {
@@ -146,9 +153,22 @@ class FireMaskShape {
     //   `scale.y = -1`, so visually the image looks correct in world space.
     // - To place particles back onto that same plane we must therefore use
     //   (1 - v) when mapping into world Y.
+    //
+    // GROUND PLANE ALIGNMENT:
+    // - SceneComposer.createBasePlane() positions the base plane mesh at a
+    //   canonical groundZ (1000 by default) so that with the camera at Z=2000
+    //   we get a clean 1:1 pixel mapping at zoom=1.
+    // - When that groundZ changes, particles spawning at z=0 will appear
+    //   offset from the visible map. To keep fire visually glued to the
+    //   ground we spawn at the same groundZ used by SceneComposer.
+    const sceneComposer = window.MapShine?.sceneComposer;
+    const groundZ = (sceneComposer && typeof sceneComposer.groundZ === 'number')
+      ? sceneComposer.groundZ
+      : 1000;
+
     p.position.x = this.offsetX + u * this.width;
     p.position.y = this.offsetY + (1.0 - v) * this.height;
-    p.position.z = 0;
+    p.position.z = groundZ;
 
     // 3. TAGGING: Check "Outdoors" mask to determine wind susceptibility.
     // We query the WeatherController using the same (u, 1-v) logic? 
@@ -167,9 +187,14 @@ class FireMaskShape {
     // - outdoorFactor ~= 0.0  -> fully indoors (under solid roof)
     // For indoor fire "sparks", shorten their lifetime so they appear
     // tighter and less buoyant than outdoor sparks. We leave outdoor
-    // particles unchanged.
+    // particles unchanged. The scale factor is configurable per-effect
+    // via FireSparksEffect.params.indoorLifeScale.
     if (outdoorFactor <= 0.01 && typeof p.life === 'number') {
-      p.life *= 0.2;
+      const params = this.ownerEffect && this.ownerEffect.params ? this.ownerEffect.params : null;
+      const indoorLifeScale = params && typeof params.indoorLifeScale === 'number'
+        ? params.indoorLifeScale
+        : 0.2;
+      p.life *= indoorLifeScale;
     }
 
     // 4. Weather Guttering: Rain + Wind kills exposed fire
@@ -336,7 +361,6 @@ export class FireSparksEffect extends EffectBase {
     this._lastAssetBundle = null;
     this._lastMapPointsManager = null;
     this.emberTexture = null;
-    this.fireTexture = this._createFireTexture();
     
     // PERFORMANCE: Reusable objects to avoid per-frame allocations in update()
     // These are cleared/reused each frame instead of creating new instances.
@@ -354,41 +378,41 @@ export class FireSparksEffect extends EffectBase {
     };
     this.params = {
       enabled: true,
-      // Tuned default: Global Intensity = 3.5
+      // Tuned default from scene: Global Intensity
       globalFireRate: 4.0,
-      fireAlpha: 0.6,
-      fireCoreBoost: 1.0,
-      // Matches UI: Height = 600
-      fireHeight: 600.0,
+      // Tuned default: very low flame height for floor-level glyphs
+      fireHeight: 10.0,
       fireSize: 18.0,
       emberRate: 5.0,
-      // Matches UI: Wind Influence = 2.0
+      // Wind Influence is controlled by WeatherController; keep existing default
       windInfluence: 2.0,
-      // Matches UI: Light Intensity = 0.9
-      lightIntensity: 0.9,
+      // Updated default from scene
+      lightIntensity: 5.0,
 
-      // Fire fine controls (defaults from tuned UI)
-      fireSizeMin: 12.0,
-      fireSizeMax: 65.0,
-      fireLifeMin: 0.60,
-      fireLifeMax: 1.10,
-      // Opacity Min = 0.01, tuned Opacity Max = 1.0
-      fireOpacityMin: 0.01,
-      fireOpacityMax: 1.0,
-      // Color Boost Min = 0.0, tuned Color Boost Max = 1.75
-      fireColorBoostMin: 0.00,
-      fireColorBoostMax: 12.0,
+      // Fire fine controls (defaults from Mad Scientist scene)
+      fireSizeMin: 60.0,
+      fireSizeMax: 95.0,
+      fireLifeMin: 2.3,
+      fireLifeMax: 2.55,
+      fireOpacityMin: 0.2,
+      fireOpacityMax: 0.8,
+      fireColorBoostMin: 0.0,
+      fireColorBoostMax: 1.35,
       fireSpinEnabled: true,
-      fireSpinSpeedMin: 1.3,
-      fireSpinSpeedMax: 5.1,
+      fireSpinSpeedMin: 0.2,
+      fireSpinSpeedMax: 0.7,
 
-      // Ember fine controls (defaults from tuned UI)
-      emberSizeMin: 5.0,
-      emberSizeMax: 12.0,
-      emberLifeMin: 1.0,
-      emberLifeMax: 3.4,
-      emberOpacityMin: 0.40,
-      emberOpacityMax: 1.00,
+      // Temperature Control
+      // 0.0 = Chilled/Dying (Red/Grey), 0.5 = Standard (Orange), 1.0 = Bunsen (Blue)
+      fireTemperature: 0.5,
+
+      // Ember fine controls (keep most previous tuning, update sizes from scene)
+      emberSizeMin: 13.0,
+      emberSizeMax: 22.0,
+      emberLifeMin: 0.7,
+      emberLifeMax: 3.6,
+      emberOpacityMin: 0.67,
+      emberOpacityMax: 0.89,
       emberColorBoostMin: 1.70,
       emberColorBoostMax: 2.85,
 
@@ -398,11 +422,11 @@ export class FireSparksEffect extends EffectBase {
       emberStartColor: { r: 1.0, g: 0.8, b: 0.4 },
       emberEndColor: { r: 1.0, g: 0.2, b: 0.0 },
 
-      // Physics controls
-      fireUpdraft: 2.25,
-      emberUpdraft: 2.4,
-      fireCurlStrength: 1.35,
-      emberCurlStrength: 6.15,
+      // Physics controls (match Mad Scientist scene where provided)
+      fireUpdraft: 2.5,
+      emberUpdraft: 1.6,
+      fireCurlStrength: 0.7,
+      emberCurlStrength: 6.05,
 
       // Weather guttering controls (outdoor fire kill strength)
       // These scale how strongly precipitation and wind reduce fire lifetime
@@ -413,20 +437,266 @@ export class FireSparksEffect extends EffectBase {
 
       // Per-effect time scaling (independent of global Simulation Speed)
       // 1.0 = baseline, >1.0 = faster (shorter lifetimes), <1.0 = slower.
-      // Matches UI: Time Scale = 1.0
-      timeScale: 1.00,
+      // Updated default from scene: Time Scale = 3.0
+      timeScale: 3.0,
+
+      // Indoor vs outdoor lifetime scaling.
+      // 1.0 = indoor flames live as long as outdoor flames.
+      // <1.0 = indoor flames are shorter-lived (tighter, less buoyant).
+      // This is applied in FireMaskShape.initialize when outdoorFactor ~ 0.
+      indoorLifeScale: 0.75,
+
+      // ========== FLAME SHAPE ATLAS CONTROLS ==========
+      // Global flame shape parameters (affect all animation frames)
+      flameNoiseScale: 1.1,         // Frequency of noise distortion
+      flameNoiseStrength: 1.0,      // How much noise distorts the shape
+      flameTaper: 0.0,              // Vertical taper (0=no taper, 1=full taper to point)
+      flameWidth: 0.5,              // Horizontal scale of flame shape
+      flameHeight: 0.5,             // Vertical scale of flame shape
+      flameEdgeSoftness: 1.0,       // Edge falloff softness
+      flameCoreBrightness: 4.0,     // Core intensity multiplier
+      flameCoreSize: 0.16,          // Size of hot core relative to flame
+      // Master intensity for all flame sprites
+      flameAtlasIntensity: 2.0,
+      // Global opacity multiplier for all sprites
+      flameAtlasOpacity: 0.46,
+      // Non-linear alpha response for the atlas. 1.0 = linear, >1.0 = tighter
+      // cores with softer edges, <1.0 = broader, softer flames.
+      flameAlphaGamma: 1.0
     };
+
+    // Create procedural flame atlas texture after params are initialized so
+    // _drawFlameInCell can safely read this.params during atlas generation.
+    this.fireTexture = this._createFireTexture();
   }
   
+  /**
+   * Create a procedural 8x8 flame atlas texture with 64 animation frames.
+   * Increased from 4x4 to 8x8 for 60fps-equivalent smoothness.
+   * @returns {THREE.CanvasTexture}
+   */
   _createFireTexture() {
     const THREE = window.THREE;
     if (!THREE) return null;
-    
-    const texture = new THREE.TextureLoader().load('modules/map-shine-advanced/assets/flame.webp');
-    texture.minFilter = THREE.LinearMipmapLinearFilter;
+
+    // Build an 8x8 atlas of flame animation frames (64 frames)
+    const cellSize = 128;  // Keep 128px for crisp detail
+    const grid = 8;        // Total size: 1024x1024
+
+    // IMPORTANT: Store grid size immediately so _drawFlameInCell knows we are in 8x8 mode
+    this._flameAtlasGrid = grid;
+    this._flameAtlasCellSize = cellSize;
+
+    const totalSize = cellSize * grid; 
+
+    const canvas = document.createElement('canvas');
+    canvas.width = totalSize;
+    canvas.height = totalSize;
+    const ctx = canvas.getContext('2d');
+
+    // Store canvas reference/context for later atlas regeneration.
+    this._flameAtlasCanvas = canvas;
+    this._flameAtlasCtx = ctx;
+
+    // Generate all 64 flame tiles procedurally
+    for (let row = 0; row < grid; row++) {
+      for (let col = 0; col < grid; col++) {
+        this._drawFlameInCell(ctx, col, row, cellSize);
+      }
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.NearestFilter;
     texture.magFilter = THREE.LinearFilter;
-    texture.generateMipmaps = true;
+    texture.generateMipmaps = false;
+    texture.needsUpdate = true;
+
     return texture;
+  }
+
+
+  /**
+   * Simplex-like 2D noise function for procedural flame shapes.
+   * Uses a combination of sine waves to approximate organic noise.
+   * @param {number} x - X coordinate
+   * @param {number} y - Y coordinate
+   * @param {number} seed - Per-tile seed for variation
+   * @returns {number} Noise value in range [-1, 1]
+   */
+  _flameNoise(x, y, seed = 0) {
+    // Multi-octave sine-based noise approximation
+    
+    // CHANGE: Removed "* 127.1". 
+    // The 'seed' passed from _drawFlameInCell is already calculated as a 
+    // continuous phase (0 to 2PI). Multiplying it destroys the continuity.
+    const s = seed; 
+
+    let n = 0;
+    n += Math.sin(x * 1.0 + y * 1.7 + s) * 0.5;
+    n += Math.sin(x * 2.3 - y * 1.9 + s * 1.3) * 0.25;
+    n += Math.sin(x * 4.1 + y * 3.7 + s * 0.7) * 0.125;
+    n += Math.sin(x * 7.9 - y * 6.3 + s * 2.1) * 0.0625;
+    return n;
+  }
+
+  /**
+   * Draw a single flame shape into a cell of the atlas.
+   * For an 8x8 atlas, tileIndex 0-63 represents animation frames with evolving noise phase.
+   * @param {CanvasRenderingContext2D} ctx - Canvas context
+   * @param {number} cellX - Cell X index (0-7)
+   * @param {number} cellY - Cell Y index (0-7)
+   * @param {number} cellSize - Size of each cell in pixels
+   */
+  _drawFlameInCell(ctx, cellX, cellY, cellSize) {
+    const p = this.params || {};
+    // Ensure we default to 8 if not set, though _createFireTexture sets it now.
+    const grid = this._flameAtlasGrid || 8; 
+    const tileIndex = cellY * grid + cellX; // 0-63 for 8x8 grid
+
+    // For animation: use tileIndex as a time phase offset (0 to 1 over 64 frames)
+    const timePhase = tileIndex / (grid * grid); // 0.0 to ~0.98
+
+    // Get per-tile parameters (fall back to globals)
+    // For animation frames, we use global params since all frames share the same base shape
+    const getTileParam = (baseName, globalName) => {
+      const globalKey = `flame${globalName}`;
+      return p[globalKey] !== undefined ? p[globalKey] : 1.0;
+    };
+
+    const noiseScale = getTileParam('NoiseScale', 'NoiseScale');
+    const noiseStrength = getTileParam('NoiseStrength', 'NoiseStrength');
+    const taper = getTileParam('Taper', 'Taper');
+    const widthScale = getTileParam('Width', 'Width') || 1.0;
+    const heightScale = getTileParam('Height', 'Height') || 1.0;
+    const edgeSoftness = getTileParam('EdgeSoftness', 'EdgeSoftness');
+    const coreBrightness = p.flameCoreBrightness !== undefined ? p.flameCoreBrightness : 1.0;
+    const coreSize = p.flameCoreSize !== undefined ? p.flameCoreSize : 0.3;
+
+    // Global atlas intensity controls
+    const atlasIntensity = (typeof p.flameAtlasIntensity === 'number') ? p.flameAtlasIntensity : 1.0;
+    const atlasOpacity = (typeof p.flameAtlasOpacity === 'number') ? p.flameAtlasOpacity : 1.0;
+    const alphaGamma = (typeof p.flameAlphaGamma === 'number') ? p.flameAlphaGamma : 1.0;
+
+    // Animation seed: base seed + time phase offset for smooth evolution
+    // The timePhase creates a continuous animation loop across all 64 frames
+    const baseSeed = 42.0; // Fixed base seed for consistent flame shape
+    const animationSpeed = 2.0 * Math.PI; // One full cycle over 64 frames
+    const seed = baseSeed + timePhase * animationSpeed;
+
+    const imgData = ctx.createImageData(cellSize, cellSize);
+    const data = imgData.data;
+
+    const cx = cellSize / 2;
+    const cy = cellSize / 2;
+
+    for (let py = 0; py < cellSize; py++) {
+      for (let px = 0; px < cellSize; px++) {
+        // Normalized coordinates centered on cell (-1 to 1)
+        const nx = ((px - cx) / (cellSize * 0.5)) / widthScale;
+        const ny = ((py - cy) / (cellSize * 0.5)) / heightScale;
+
+        // Vertical position (0 = bottom, 1 = top of flame)
+        // Flame grows upward, so invert Y
+        const vPos = 1.0 - (ny + 1.0) * 0.5; // 0 at bottom, 1 at top
+
+        let flameMask;
+        let verticalMask;
+
+        // All animation frames use the same tapered ellipse with noisy edge
+        // The noise phase evolves with tileIndex to create animation
+
+        // Base flame shape: ellipse that tapers toward the top
+        // Width narrows as we go up based on taper parameter
+        const taperFactor = 1.0 - taper * vPos;
+        const effectiveWidth = Math.max(0.1, taperFactor);
+
+        // Distance from center axis (horizontal)
+        const hDist = Math.abs(nx) / effectiveWidth;
+
+        // Add noise distortion to the edge - seed evolves with timePhase for animation
+        const noiseX = px * noiseScale * 0.05;
+        const noiseY = py * noiseScale * 0.05;
+        const noise = this._flameNoise(noiseX, noiseY, seed) * noiseStrength;
+
+        // Flame mask: 1.0 inside, 0.0 outside
+        // Use smoothstep for soft edges
+        const edgeThreshold = 0.8 + noise;
+        const innerEdge = Math.max(0, edgeThreshold - edgeSoftness);
+        flameMask = 1.0 - this._smoothstep(innerEdge, edgeThreshold, hDist);
+
+        // Vertical falloff: fade out at top and bottom
+        const topFade = 1.0 - this._smoothstep(0.7, 1.0, vPos);
+        const bottomFade = this._smoothstep(0.0, 0.15, vPos);
+        verticalMask = topFade * bottomFade;
+
+        // Core brightness: hotter in the center
+        const coreDist = Math.sqrt(nx * nx + (ny + 0.3) * (ny + 0.3)); // Core offset downward
+        const coreIntensity = (1.0 - this._smoothstep(0, coreSize * 2, coreDist)) * coreBrightness;
+
+        // Shape alpha before global/persprite opacity controls
+        let shapeAlpha = flameMask * verticalMask;
+        shapeAlpha = Math.max(0, Math.min(1, shapeAlpha));
+
+        // Apply non-linear shaping and global alpha multipliers
+        const shapedAlpha = Math.pow(shapeAlpha, alphaGamma);
+        let alpha = shapedAlpha * atlasIntensity * atlasOpacity;
+        alpha = Math.max(0, Math.min(1, alpha));
+
+        // Color: white core fading to orange/red at edges
+        // Use the underlying shape alpha to drive color temperature so opacity
+        // controls do not desaturate or cool the flame, only its visibility.
+        const temp = shapeAlpha * (0.5 + 0.5 * coreIntensity);
+        const r = Math.min(1.0, 0.3 + temp * 0.7 + coreIntensity * 0.3);
+        const g = Math.min(1.0, 0.1 + temp * 0.6 + coreIntensity * 0.4);
+        const b = Math.min(1.0, temp * 0.2 + coreIntensity * 0.6);
+
+        const idx = (py * cellSize + px) * 4;
+        data[idx] = Math.floor(r * 255);
+        data[idx + 1] = Math.floor(g * 255);
+        data[idx + 2] = Math.floor(b * 255);
+        data[idx + 3] = Math.floor(alpha * 255);
+      }
+    }
+
+    ctx.putImageData(imgData, cellX * cellSize, cellY * cellSize);
+  }
+
+  /**
+   * Smoothstep interpolation function.
+   * @param {number} edge0 - Lower edge
+   * @param {number} edge1 - Upper edge
+   * @param {number} x - Input value
+   * @returns {number} Smoothly interpolated value
+   */
+  _smoothstep(edge0, edge1, x) {
+    const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+    return t * t * (3 - 2 * t);
+  }
+
+  /**
+   * Regenerate the flame atlas texture when shape parameters change.
+   * Call this after modifying any flame shape params.
+   */
+  regenerateFlameAtlas() {
+    if (!this._flameAtlasCanvas || !this._flameAtlasCtx || !this.fireTexture) {
+      return;
+    }
+
+    const ctx = this._flameAtlasCtx;
+    const cellSize = this._flameAtlasCellSize;
+
+    // Clear and redraw all tiles in the current atlas grid (8x8 animation frames by default)
+    const grid = this._flameAtlasGrid || 8;
+    ctx.clearRect(0, 0, this._flameAtlasCanvas.width, this._flameAtlasCanvas.height);
+    for (let row = 0; row < grid; row++) {
+      for (let col = 0; col < grid; col++) {
+        this._drawFlameInCell(ctx, col, row, cellSize);
+      }
+    }
+
+    // Mark texture for update
+    this.fireTexture.needsUpdate = true;
+    log.debug('Flame atlas regenerated');
   }
 
   _ensureEmberTexture() {
@@ -448,63 +718,88 @@ export class FireSparksEffect extends EffectBase {
     return {
       enabled: true,
       groups: [
-        { name: 'fire-main', label: 'Fire - Main', type: 'inline', parameters: ['globalFireRate', 'fireHeight'] },
+        { name: 'fire-main', label: 'Fire - Main', type: 'inline', parameters: ['globalFireRate', 'fireHeight', 'fireTemperature'] },
         { name: 'fire-shape', label: 'Fire - Shape', type: 'inline', parameters: ['fireSizeMin', 'fireSizeMax', 'fireLifeMin', 'fireLifeMax'] },
         { name: 'fire-look', label: 'Fire - Look', type: 'inline', parameters: ['fireOpacityMin', 'fireOpacityMax', 'fireColorBoostMin', 'fireColorBoostMax', 'fireStartColor', 'fireEndColor'] },
         { name: 'fire-spin', label: 'Fire - Spin', type: 'inline', parameters: ['fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax'] },
         { name: 'fire-physics', label: 'Fire - Physics', type: 'inline', parameters: ['fireUpdraft', 'fireCurlStrength'] },
+        // Flame Shape Atlas Controls (Global) - all 16 animation frames share these parameters
+        {
+          name: 'flame-atlas-global',
+          label: 'Flame Atlas (Animation)',
+          type: 'inline',
+          parameters: ['flameAtlasIntensity', 'flameAtlasOpacity', 'flameAlphaGamma', 'flameNoiseScale', 'flameNoiseStrength', 'flameTaper', 'flameWidth', 'flameHeight', 'flameEdgeSoftness', 'flameCoreBrightness', 'flameCoreSize']
+        },
         { name: 'embers-main', label: 'Embers - Main', type: 'inline', parameters: ['emberRate'] },
         { name: 'embers-shape', label: 'Embers - Shape', type: 'inline', parameters: ['emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax'] },
         { name: 'embers-look', label: 'Embers - Look', type: 'inline', parameters: ['emberOpacityMin', 'emberOpacityMax', 'emberColorBoostMin', 'emberColorBoostMax', 'emberStartColor', 'emberEndColor'] },
         { name: 'embers-physics', label: 'Embers - Physics', type: 'inline', parameters: ['emberUpdraft', 'emberCurlStrength'] },
-        { name: 'env', label: 'Environment', type: 'inline', parameters: ['windInfluence', 'lightIntensity', 'timeScale', 'weatherPrecipKill', 'weatherWindKill'] }
+        { name: 'env', label: 'Environment', type: 'inline', parameters: ['windInfluence', 'lightIntensity', 'timeScale', 'indoorLifeScale', 'weatherPrecipKill', 'weatherWindKill'] }
       ],
       parameters: {
         enabled: { type: 'checkbox', label: 'Fire Enabled', default: true },
-        // Tuned default: 1.0
-        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 1.0 },
-        fireAlpha: { type: 'slider', label: 'Opacity (Legacy)', min: 0.0, max: 1.0, step: 0.01, default: 0.6 },
-        fireCoreBoost: { type: 'slider', label: 'Core Boost (Legacy)', min: 0.0, max: 5.0, step: 0.1, default: 1.0 },
-        // Matches tuned UI default: 600
-        fireHeight: { type: 'slider', label: 'Height', min: 10.0, max: 600.0, step: 10.0, default: 600.0 },
-        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 100.0, step: 1.0, default: 12.0 },
-        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 150.0, step: 1.0, default: 65.0 },
-        fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 4.0, step: 0.05, default: 0.60 },
-        fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 1.10 },
-        // Matches tuned UI defaults: Opacity Min = 0.01, Opacity Max = 1.0
-        fireOpacityMin: { type: 'slider', label: 'Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.01 },
-        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
-        // Matches tuned UI defaults: Color Boost Min = 0.0, Color Boost Max = 12.0
-        fireColorBoostMin: { type: 'slider', label: 'Color Boost Min', min: 0.0, max: 2.0, step: 0.05, default: 0.0 },
-        fireColorBoostMax: { type: 'slider', label: 'Color Boost Max', min: 0.0, max: 12.0, step: 0.05, default: 12.0 },
+        // Tuned default from scene: Global Intensity
+        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 4.0 },
+        // Tuned default: low height for floor-level glyph fires
+        fireHeight: { type: 'slider', label: 'Height', min: 1.0, max: 600.0, step: 1.0, default: 10.0 },
+
+        // Temperature (0.0 = Arctic/Chilled, 1.0 = Blue Bunsen)
+        fireTemperature: { type: 'slider', label: 'Temperature', min: 0.0, max: 1.0, step: 0.05, default: 0.5 },
+        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 150.0, step: 1.0, default: 60.0 },
+        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 200.0, step: 1.0, default: 95.0 },
+        fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 6.0, step: 0.05, default: 2.3 },
+        fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 2.55 },
+        // Defaults from Mad Scientist scene
+        fireOpacityMin: { type: 'slider', label: 'Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.12 },
+        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
+        fireColorBoostMin: { type: 'slider', label: 'Color Boost Min', min: 0.0, max: 4.0, step: 0.05, default: 0.0 },
+        fireColorBoostMax: { type: 'slider', label: 'Color Boost Max', min: 0.0, max: 12.0, step: 0.05, default: 1.75 },
         fireStartColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 } },
         fireEndColor: { type: 'color', default: { r: 0.8, g: 0.2, b: 0.05 } },
         fireSpinEnabled: { type: 'checkbox', label: 'Spin Enabled', default: true },
-        fireSpinSpeedMin: { type: 'slider', label: 'Spin Speed Min (rad/s)', min: 0.0, max: 50.0, step: 0.1, default: 1.3 },
-        fireSpinSpeedMax: { type: 'slider', label: 'Spin Speed Max (rad/s)', min: 0.0, max: 50.0, step: 0.1, default: 5.1 },
+        fireSpinSpeedMin: { type: 'slider', label: 'Spin Speed Min (rad/s)', min: 0.0, max: 50.0, step: 0.1, default: 0.2 },
+        fireSpinSpeedMax: { type: 'slider', label: 'Spin Speed Max (rad/s)', min: 0.0, max: 50.0, step: 0.1, default: 0.7 },
+
+        // ========== FLAME SHAPE ATLAS CONTROLS ==========
+        // Global flame shape parameters - all animation frames share these
+        flameAtlasIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 4.0, step: 0.01, default: 2.0 },
+        flameAtlasOpacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.46 },
+        flameAlphaGamma: { type: 'slider', label: 'Alpha Gamma', min: 0.1, max: 4.0, step: 0.05, default: 1.0 },
+        flameNoiseScale: { type: 'slider', label: 'Noise Scale', min: 0.5, max: 10.0, step: 0.1, default: 1.1 },
+        flameNoiseStrength: { type: 'slider', label: 'Noise Strength', min: 0.0, max: 2.0, step: 0.01, default: 1.0 },
+        flameTaper: { type: 'slider', label: 'Taper', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
+        flameWidth: { type: 'slider', label: 'Width', min: 0.2, max: 3.0, step: 0.05, default: 0.5 },
+        flameHeight: { type: 'slider', label: 'Height', min: 0.2, max: 3.0, step: 0.05, default: 0.5 },
+        flameEdgeSoftness: { type: 'slider', label: 'Edge Softness', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
+        flameCoreBrightness: { type: 'slider', label: 'Core Brightness', min: 0.0, max: 4.0, step: 0.05, default: 4.0 },
+        flameCoreSize: { type: 'slider', label: 'Core Size', min: 0.01, max: 1.0, step: 0.01, default: 0.16 },
+
         emberRate: { type: 'slider', label: 'Ember Density', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
-        emberSizeMin: { type: 'slider', label: 'Ember Size Min', min: 1.0, max: 40.0, step: 1.0, default: 5.0 },
-        emberSizeMax: { type: 'slider', label: 'Ember Size Max', min: 1.0, max: 60.0, step: 1.0, default: 12.0 },
-        emberLifeMin: { type: 'slider', label: 'Ember Life Min (s)', min: 0.1, max: 8.0, step: 0.1, default: 1.0 },
-        emberLifeMax: { type: 'slider', label: 'Ember Life Max (s)', min: 0.1, max: 12.0, step: 0.1, default: 3.4 },
-        emberOpacityMin: { type: 'slider', label: 'Ember Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.40 },
-        emberOpacityMax: { type: 'slider', label: 'Ember Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 1.00 },
+        emberSizeMin: { type: 'slider', label: 'Ember Size Min', min: 1.0, max: 40.0, step: 1.0, default: 13.0 },
+        emberSizeMax: { type: 'slider', label: 'Ember Size Max', min: 1.0, max: 60.0, step: 1.0, default: 22.0 },
+        emberLifeMin: { type: 'slider', label: 'Ember Life Min (s)', min: 0.1, max: 8.0, step: 0.1, default: 0.7 },
+        emberLifeMax: { type: 'slider', label: 'Ember Life Max (s)', min: 0.1, max: 12.0, step: 0.1, default: 3.6 },
+        emberOpacityMin: { type: 'slider', label: 'Ember Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.67 },
+        emberOpacityMax: { type: 'slider', label: 'Ember Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.89 },
         emberColorBoostMin: { type: 'slider', label: 'Ember Color Boost Min', min: 0.0, max: 2.0, step: 0.05, default: 1.70 },
         emberColorBoostMax: { type: 'slider', label: 'Ember Color Boost Max', min: 0.0, max: 3.0, step: 0.05, default: 2.85 },
         emberStartColor: { type: 'color', default: { r: 1.0, g: 0.8, b: 0.4 } },
         emberEndColor: { type: 'color', default: { r: 1.0, g: 0.2, b: 0.0 } },
-        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 2.25 },
-        emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 2.4 },
-        fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 1.35 },
-        emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 6.15 },
-        // Matches tuned UI defaults: Wind Influence = 5.0, Light Intensity = 1.2, Time Scale = 1.0
-        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
-        lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 4.1 },
-        timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 1.0 },
+        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 2.5 },
+        emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 1.6 },
+        fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.7 },
+        emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 6.05 },
+        // Wind Influence remains generic; Light Intensity and Time Scale match scene
+        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 2.0 },
+        lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
+        timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 3.0 },
+
+        // Indoor vs outdoor lifetime scaling (applied only when particles are fully indoors)
+        indoorLifeScale: { type: 'slider', label: 'Indoor Life Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.75 },
 
         // Weather guttering strength (spawn-time kill) for outdoor flames
-        weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 1.0 },
-        weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.5 }
+        weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 1.55 },
+        weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 1.15 }
       }
     };
   }
@@ -785,6 +1080,9 @@ export class FireSparksEffect extends EffectBase {
     const THREE = window.THREE;
     
     const material = new THREE.MeshBasicMaterial({
+      // Use the procedural flame atlas as the particle texture. This mirrors
+      // WeatherParticles' splash atlas usage and ensures point sprites sample
+      // our 2x2 flame tiles instead of a legacy generic sprite.
       map: this.fireTexture,
       transparent: true,
       depthWrite: false, // Essential for fire to not occlude itself
@@ -807,8 +1105,9 @@ export class FireSparksEffect extends EffectBase {
         ])
     );
     
-    // Vertical Lift: slightly more aggressive to match tapering
-    const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(height * 2.5));
+    // Vertical Lift: base magnitude was tuned before the camera change and is now ~20x too strong.
+    // Scale it down so that with fireUpdraft ~= 2.25 the apparent rise speed matches the old look.
+    const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(height * 0.125));
     
     // Replaced standard ApplyForce with SmartWindBehavior for indoor/outdoor masking
     const windForce = new SmartWindBehavior();
@@ -868,7 +1167,11 @@ export class FireSparksEffect extends EffectBase {
       material: material,
       renderMode: RenderMode.BillBoard,
       renderOrder: 50,
-      // Randomize initial sprite orientation so flames feel more chaotic.
+      // 4x4 flame atlas: 16 animation frames
+      uTileCount: 8,
+      vTileCount: 8,
+      // Start at frame 0 - FrameOverLife will animate through all 16 frames
+      startTileIndex: new ConstantValue(0),
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [
           colorOverLife,
@@ -876,7 +1179,11 @@ export class FireSparksEffect extends EffectBase {
           buoyancy,
           windForce,
           turbulence,
-          new FireSpinBehavior()
+          new FireSpinBehavior(),
+          
+          // CHANGE: Animate from frame 0 to 63 over the particle's life.
+          // Using Bezier control points (0, 21, 42, 63) for linear interpolation.
+          new FrameOverLife(new PiecewiseBezier([[new Bezier(0, 21, 42, 63), 0]]))
       ]
     });
     
@@ -958,7 +1265,9 @@ export class FireSparksEffect extends EffectBase {
       renderMode: RenderMode.BillBoard,
       renderOrder: 51,
       behaviors: [
-        new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(height * 8.0)),
+        // Updraft: likewise reduce the base magnitude so emberUpdraft stays in a sensible range
+        // after the camera height/scale change.
+        new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(height * 0.4)),
         new SmartWindBehavior(),
         new CurlNoiseField(
           emberCurlScale,
@@ -975,7 +1284,7 @@ export class FireSparksEffect extends EffectBase {
     system.userData = {
       windForce: system.behaviors.find(b => b instanceof SmartWindBehavior),
       updraftForce: system.behaviors.find(b => b instanceof ApplyForce && b.direction.z === 1),
-      baseUpdraftMag: height * 8.0,
+      baseUpdraftMag: height * 0.4,
       turbulence: system.behaviors.find(b => b instanceof CurlNoiseField),
       baseCurlStrength: emberCurlStrengthBase.clone(),
       isEmber: true,
@@ -1088,16 +1397,25 @@ export class FireSparksEffect extends EffectBase {
 
   createFire(x, y, radius = 50, height = 1.0, intensity = 1.0) {
      if (!this.particleSystemRef || !this.particleSystemRef.batchRenderer) return null;
+     
+     // Get ground plane Z from SceneComposer for proper alignment
+     const sceneComposer = window.MapShine?.sceneComposer;
+     const groundZ = (sceneComposer && typeof sceneComposer.groundZ === 'number')
+       ? sceneComposer.groundZ
+       : 1000;
+     
      const system = this._createFireSystem({
         shape: new PointEmitter(),
         rate: new IntervalValue(intensity * 15, intensity * 25),
         size: radius * 0.8,
         height: height * 50.0
      });
-     system.emitter.position.set(x, y, 10);
+     // Position emitter at ground plane level
+     system.emitter.position.set(x, y, groundZ);
      this.particleSystemRef.batchRenderer.addSystem(system);
+     // Position light slightly above ground plane for proper illumination
      const light = new window.THREE.PointLight(0xff6600, 1.0, radius * 8.0);
-     light.position.set(x, y, 50);
+     light.position.set(x, y, groundZ + 50);
      this.scene.add(light);
      const id = crypto.randomUUID();
      this.fires.push({ id, system, light });
@@ -1136,97 +1454,125 @@ export class FireSparksEffect extends EffectBase {
         this._rebuildParticleSystemsIfNeeded();
       }
     }
+
+    // Regenerate flame atlas when any flame shape parameter changes
+    if (paramId.startsWith('flame') || paramId.startsWith('flame1') || 
+        paramId.startsWith('flame2') || paramId.startsWith('flame3') || 
+        paramId.startsWith('flame4')) {
+      // Debounce regeneration to avoid excessive redraws during slider drags
+      if (this._flameAtlasRegenerateTimeout) {
+        clearTimeout(this._flameAtlasRegenerateTimeout);
+      }
+      this._flameAtlasRegenerateTimeout = setTimeout(() => {
+        this.regenerateFlameAtlas();
+        this._flameAtlasRegenerateTimeout = null;
+      }, 50);
+      }
   }
-  
+
   update(timeInfo) {
     if (!this.settings.enabled) return;
-    
+
     const t = timeInfo.elapsed;
     const THREE = window.THREE;
+    const p = this.params;
+
+    // --- TEMPERATURE LOGIC START ---
+    // 0.0 = Chilled (Red/Deep Orange/Smoky), 0.5 = Standard, 1.0 = Bunsen (Blue/White)
+    const temp = (typeof p.fireTemperature === 'number') ? p.fireTemperature : 0.5;
+
+    // 1. Calculate Temperature Modifier for Physics (Range: 0.75 to 1.25)
+    // Low Temp = Slower, sluggish (0.75x)
+    // High Temp = Faster, energetic (1.25x)
+    const tempPhysMod = 0.75 + (temp * 0.5);
+
+    // 2. Calculate Color Targets
+    // We define 3 palettes and lerp between them based on 'temp' slider
+    const lerpRGB = (c1, c2, f) => ({
+      r: c1.r + (c2.r - c1.r) * f,
+      g: c1.g + (c2.g - c1.g) * f,
+      b: c1.b + (c2.b - c1.b) * f
+    });
+
+    // Palette Definitions
+    // Cold: Deep reds, struggling flame
+    const coldStart = { r: 0.8, g: 0.3, b: 0.1 };
+    const coldEnd   = { r: 0.2, g: 0.0, b: 0.0 };
+
+    // Standard: The user's specific inputs from params (Orange/Yellow default)
+    const stdStart  = p.fireStartColor || { r: 1.0, g: 1.0, b: 1.0 };
+    const stdEnd    = p.fireEndColor || { r: 0.8, g: 0.2, b: 0.05 };
+
+    // Hot: Bunsen Blue/White
+    const hotStart  = { r: 0.2, g: 0.6, b: 1.0 }; // Bright Cyan/Blue core
+    const hotEnd    = { r: 0.0, g: 0.1, b: 0.8 }; // Deep Blue edges
+
+    let targetFireStart, targetFireEnd;
+
+    if (temp <= 0.5) {
+      // Lerp Cold -> Standard
+      const f = temp * 2.0; // 0..1
+      targetFireStart = lerpRGB(coldStart, stdStart, f);
+      targetFireEnd   = lerpRGB(coldEnd, stdEnd, f);
+    } else {
+      // Lerp Standard -> Hot
+      const f = (temp - 0.5) * 2.0; // 0..1
+      targetFireStart = lerpRGB(stdStart, hotStart, f);
+      targetFireEnd   = lerpRGB(stdEnd, hotEnd, f);
+    }
+    // --- TEMPERATURE LOGIC END ---
 
     // 1. Animate Lights (Flicker)
-    const baseLightIntensity = (this.params && typeof this.params.lightIntensity === 'number')
-      ? this.params.lightIntensity
+    const baseLightIntensity = (p && typeof p.lightIntensity === 'number')
+      ? p.lightIntensity
       : (this.settings.lightIntensity || 1.0);
 
-    // Chaotic multi-sine flicker to avoid smooth, gamey pulsing
     const flicker =
       Math.sin(t * 10.0) * 0.1 +
       Math.sin(t * 22.0) * 0.1 +
       Math.sin(t * 43.0) * 0.1;
 
     for (const f of this.fires) {
-        // Added pseudo-random phase based on ID to desync lights
-        const phase = f.id ? f.id.charCodeAt(0) : 0;
-        const phaseFlicker = flicker + Math.sin(t * 17.0 + phase * 0.01) * 0.05;
-        if (f.light) f.light.intensity = baseLightIntensity * (1.0 + phaseFlicker);
+      const phase = f.id ? f.id.charCodeAt(0) : 0;
+      const phaseFlicker = flicker + Math.sin(t * 17.0 + phase * 0.01) * 0.05;
+      if (f.light) {
+        f.light.intensity = baseLightIntensity * (1.0 + phaseFlicker);
+      }
     }
 
     // 2. Update Global Fire Rate
-    // PERFORMANCE: Mutate existing IntervalValue instead of creating new one every frame
+    // Scale by timeScale AND Temperature (Hotter = slightly faster burn)
+    const timeScale = Math.max(0.1, p?.timeScale ?? 1.0);
+    const effectiveTimeScale = timeScale * (0.8 + 0.4 * temp);
+
     if (this.globalSystem) {
-        const baseRate = 200.0 * this.params.globalFireRate;
-        const emission = this.globalSystem.emissionOverTime;
-        if (emission && typeof emission.a === 'number') {
-            emission.a = baseRate * 0.8;
-            emission.b = baseRate * 1.2;
-        }
-        // Debug: Log emission rate once every ~5 seconds
-        if (!this._lastEmissionLog || t - this._lastEmissionLog > 5) {
-            this._lastEmissionLog = t;
-            log.debug('Fire emission rate:', {
-                baseRate,
-                emissionA: emission?.a,
-                emissionB: emission?.b,
-                globalFireRate: this.params.globalFireRate,
-                particleCount: this.globalSystem.particleNum
-            });
-        }
+      const baseRate = 200.0 * p.globalFireRate * effectiveTimeScale;
+      const emission = this.globalSystem.emissionOverTime;
+      if (emission && typeof emission.a === 'number') {
+        emission.a = baseRate * 0.8;
+        emission.b = baseRate * 1.2;
+      }
     }
 
-    // 3. Apply Wind Forces
-    // SmartWindBehavior now handles the vector math and indoor/outdoor check.
-    // We just need to update the per-system intensity override based on UI
-    // settings and drive the shared roof/occlusion uniforms.
-    const influence = (this.params && typeof this.params.windInfluence === 'number')
-      ? this.params.windInfluence
+    // 3. Environment & Bounds Logic
+    const influence = (p && typeof p.windInfluence === 'number')
+      ? p.windInfluence
       : (this.settings.windInfluence || 1.0);
-
-    // Restore windSpeed for lifetime shortening logic
     const windSpeed = weatherController.currentState?.windSpeed || 0;
-
-    // Update Roof Mask State (Shared Roof/Occlusion Pattern)
     const roofTex = weatherController.roofMap || null;
-    // FIRE LOGIC INVERSION:
-    // - WeatherParticles enables mask when `roofMaskActive` is TRUE (Peeking)
-    //   to hide *rain* indoors while the GM is looking inside a building.
-    // - FireSparks instead enables mask when `roofMaskActive` is FALSE
-    //   (roof solid/visible) so indoor flames are occluded by overhead tiles
-    //   but become visible again when those roofs are hover-hidden.
-    // - If no roof map exists, disable occlusion entirely (show fire
-    //   everywhere). New particle systems with roof awareness should follow
-    //   this same pattern: compute a per-effect boolean in JS and feed it into
-    //   the shared roof mask uniforms.
     const roofMaskEnabled = !!roofTex && !weatherController.roofMaskActive;
 
-    // Retrieve Roof Alpha Map from LightingEffect if available so we can
-    // respect the actual overhead tile opacity (opaque vs semi vs hidden).
     let roofAlphaTex = null;
     const lighting = window.MapShine?.lightingEffect;
     if (lighting && lighting.roofAlphaTarget) {
       roofAlphaTex = lighting.roofAlphaTarget.texture;
     }
 
-    // Retrieve renderer resolution for screen-space UVs (gl_FragCoord.xy / res).
-    // PERFORMANCE: Reuse cached Vector2 instead of allocating every frame
     const renderer = window.MapShine?.renderer || window.canvas?.app?.renderer;
     let resX = 1, resY = 1;
     if (renderer && THREE) {
       if (!this._tempVec2) this._tempVec2 = new THREE.Vector2();
       const size = this._tempVec2;
-      // CRITICAL: Use drawing buffer size (physical pixels) so gl_FragCoord.xy
-      // matches uResolution on High-DPR displays. Falling back to logical size
-      // multiplied by pixelRatio if getDrawingBufferSize is unavailable.
       if (typeof renderer.getDrawingBufferSize === 'function') {
         renderer.getDrawingBufferSize(size);
       } else if (typeof renderer.getSize === 'function') {
@@ -1237,222 +1583,191 @@ export class FireSparksEffect extends EffectBase {
       resX = size.x || 1;
       resY = size.y || 1;
     }
-    
-    // Calculate Scene Bounds for UV projection
-    // Matches logic in FireMaskShape and WeatherParticles
+
     const d = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
     if (d && window.THREE) {
       if (!this._sceneBounds) this._sceneBounds = new window.THREE.Vector4();
       const sw = d.sceneWidth || d.width;
       const sh = d.sceneHeight || d.height;
       const sx = d.sceneX || 0;
-      // World Y is inverted relative to Foundry canvas Y.
-      // sceneY is from top. World Y origin is bottom-left.
-      // So scene bottom Y = (TotalHeight - TopPadding - SceneHeight)
       const sy = (d.height || sh) - (d.sceneY || 0) - sh;
       this._sceneBounds.set(sx, sy, sw, sh);
     }
 
-    // Collect all active systems
+    // Collect systems
     const systems = [];
     if (this.globalSystem) systems.push(this.globalSystem);
     if (this.globalEmbers) systems.push(this.globalEmbers);
     for (const f of this.fires) {
-        if (f && f.system) systems.push(f.system);
+      if (f && f.system) systems.push(f.system);
     }
 
-    const p = this.params;
+    const p2 = this.params;
     const clamp01 = x => Math.max(0.0, Math.min(1.0, x));
-    const timeScale = Math.max(0.1, p.timeScale ?? 1.0);
 
     for (const sys of systems) {
-        if (!sys) continue; // Skip null/undefined systems
-        
-        // Update Roof/Occlusion Uniforms
-        // 1. Update the source material (template)
-        if (sys.material && sys.material.userData && sys.material.userData.roofUniforms) {
-            const u = sys.material.userData.roofUniforms;
-            u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
-            u.uRoofMap.value = roofTex;
-            u.uRoofAlphaMap.value = roofAlphaTex;
-            u.uResolution.value.set(resX, resY);
-            if (this._sceneBounds) {
-                u.uSceneBounds.value.copy(this._sceneBounds);
-            }
-        }
+      if (!sys) continue;
 
-        // 2. Find and update the ACTUAL batch material used by quarks.
-        // three.quarks generates a ShaderMaterial internally for the batch.
-        // We must patch THAT material for the shader logic to run.
-        if (this.particleSystemRef && this.particleSystemRef.batchRenderer) {
-          const renderer = this.particleSystemRef.batchRenderer;
-          const batchIdx = renderer.systemToBatchIndex ? renderer.systemToBatchIndex.get(sys) : undefined;
-          
-          if (batchIdx !== undefined && renderer.batches && renderer.batches[batchIdx]) {
-            const batchMat = renderer.batches[batchIdx].material;
-            if (batchMat) {
-              // Patch if not yet patched
-              if (!batchMat.userData || !batchMat.userData.roofUniforms) {
-                this._patchRoofMaskMaterial(batchMat);
-              }
-              // Update uniforms on the batch material
-              if (batchMat.userData && batchMat.userData.roofUniforms) {
-                const u = batchMat.userData.roofUniforms;
-                u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
-                u.uRoofMap.value = roofTex;
-                u.uRoofAlphaMap.value = roofAlphaTex;
-                u.uResolution.value.set(resX, resY);
-                if (this._sceneBounds) {
-                   u.uSceneBounds.value.copy(this._sceneBounds);
-                }
-              }
+      // Update Uniforms (roof / occlusion)
+      if (sys.material && sys.material.userData && sys.material.userData.roofUniforms) {
+        const u = sys.material.userData.roofUniforms;
+        u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+        u.uRoofMap.value = roofTex;
+        u.uRoofAlphaMap.value = roofAlphaTex;
+        u.uResolution.value.set(resX, resY);
+        if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
+      }
+      if (this.particleSystemRef && this.particleSystemRef.batchRenderer) {
+        const renderer = this.particleSystemRef.batchRenderer;
+        const batchIdx = renderer.systemToBatchIndex ? renderer.systemToBatchIndex.get(sys) : undefined;
+        if (batchIdx !== undefined && renderer.batches && renderer.batches[batchIdx]) {
+          const batchMat = renderer.batches[batchIdx].material;
+          if (batchMat) {
+            if (!batchMat.userData || !batchMat.userData.roofUniforms) this._patchRoofMaskMaterial(batchMat);
+            if (batchMat.userData && batchMat.userData.roofUniforms) {
+              const u = batchMat.userData.roofUniforms;
+              u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+              u.uRoofMap.value = roofTex;
+              u.uRoofAlphaMap.value = roofAlphaTex;
+              u.uResolution.value.set(resX, resY);
+              if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
             }
           }
         }
+      }
 
-        const isEmber = !!(sys.userData && sys.userData.isEmber);
+      const isEmber = !!(sys.userData && sys.userData.isEmber);
 
-        // 3a. Update wind influence multiplier
-        if (sys.userData) {
-            // Embers are lighter, so they get a 1.5x boost to wind effect
-            const multiplier = isEmber ? 1.5 : 1.0;
-            sys.userData.windInfluence = influence * multiplier;
+      // Wind Influence
+      if (sys.userData) {
+        const multiplier = isEmber ? 1.5 : 1.0;
+        sys.userData.windInfluence = influence * multiplier;
+      }
+
+      // Apply Temperature Modifier to Physics (Updraft & Turbulence)
+      const updraftParam = isEmber ? (p2.emberUpdraft ?? 1.0) : (p2.fireUpdraft ?? 1.0);
+      const curlParam = isEmber ? (p2.emberCurlStrength ?? 1.0) : (p2.fireCurlStrength ?? 1.0);
+
+      if (sys.userData && sys.userData.updraftForce && typeof sys.userData.baseUpdraftMag === 'number') {
+        const uf = sys.userData.updraftForce;
+        const baseMag = sys.userData.baseUpdraftMag;
+        if (uf.magnitude && typeof uf.magnitude.value === 'number') {
+          uf.magnitude.value = baseMag * Math.max(0.0, updraftParam) * effectiveTimeScale * tempPhysMod;
         }
+      }
 
-        // 3b. Updraft and curl noise per-system (physics controls)
-        const updraftParam = isEmber ? (p.emberUpdraft ?? 1.0) : (p.fireUpdraft ?? 1.0);
-        const curlParam = isEmber ? (p.emberCurlStrength ?? 1.0) : (p.fireCurlStrength ?? 1.0);
+      if (sys.userData && sys.userData.turbulence && sys.userData.baseCurlStrength && THREE && sys.userData.turbulence.strength) {
+        const baseStrength = sys.userData.baseCurlStrength;
+        sys.userData.turbulence.strength
+          .copy(baseStrength)
+          .multiplyScalar(Math.max(0.0, curlParam) * effectiveTimeScale * tempPhysMod);
+      }
 
-        // PERFORMANCE: Mutate existing ConstantValue instead of creating new one
-        if (sys.userData && sys.userData.updraftForce && typeof sys.userData.baseUpdraftMag === 'number') {
-            const uf = sys.userData.updraftForce;
-            const baseMag = sys.userData.baseUpdraftMag;
-            if (uf.magnitude && typeof uf.magnitude.value === 'number') {
-                uf.magnitude.value = baseMag * Math.max(0.0, updraftParam);
-            }
-        }
+      // --- APPLY COLORS & LIFETIME ---
+      if (isEmber) {
+        const baseEmberLifeMin = p2.emberLifeMin ?? 1.5;
+        const baseEmberLifeMax = p2.emberLifeMax ?? 3.0;
+        const lifeMin = Math.max(0.01, baseEmberLifeMin / effectiveTimeScale);
+        const lifeMax = Math.max(lifeMin, baseEmberLifeMax / effectiveTimeScale);
 
-        if (sys.userData && sys.userData.turbulence && sys.userData.baseCurlStrength && THREE && sys.userData.turbulence.strength) {
-            const baseStrength = sys.userData.baseCurlStrength;
-            sys.userData.turbulence.strength.copy(baseStrength).multiplyScalar(Math.max(0.0, curlParam));
-        }
+        const opacityMin = clamp01(p2.emberOpacityMin ?? 0.4);
+        const opacityMax = Math.max(opacityMin, clamp01(p2.emberOpacityMax ?? 1.0));
+        const colorBoostMin = p2.emberColorBoostMin ?? 0.9;
+        const colorBoostMax = Math.max(colorBoostMin, p2.emberColorBoostMax ?? 1.5);
 
-        // PERFORMANCE: Mutate existing IntervalValue/ColorRange objects instead of
-        // creating new ones every frame. three.quarks IntervalValue has .a and .b
-        // properties; ColorRange has .a and .b Vector4s we can mutate in place.
-        
-        if (isEmber) {
-            const baseEmberLifeMin = p.emberLifeMin ?? 1.5;
-            const baseEmberLifeMax = p.emberLifeMax ?? 3.0;
-            const lifeMin = Math.max(0.01, baseEmberLifeMin / timeScale);
-            const lifeMax = Math.max(lifeMin, baseEmberLifeMax / timeScale);
-            const sizeMin = Math.max(0.1, p.emberSizeMin ?? 3.0);
-            const sizeMax = Math.max(sizeMin, p.emberSizeMax ?? 14.0);
-            const opacityMin = clamp01(p.emberOpacityMin ?? 0.4);
-            const opacityMax = Math.max(opacityMin, clamp01(p.emberOpacityMax ?? 1.0));
-            const colorBoostMin = p.emberColorBoostMin ?? 0.9;
-            const colorBoostMax = Math.max(colorBoostMin, p.emberColorBoostMax ?? 1.5);
+        const emberStdStart = p2.emberStartColor || { r: 1.0, g: 0.8, b: 0.4 };
+        const emberStdEnd   = p2.emberEndColor || { r: 1.0, g: 0.2, b: 0.0 };
 
-            const emberStart = p.emberStartColor || { r: 1.0, g: 0.8, b: 0.4 };
-            const emberEnd = p.emberEndColor || { r: 1.0, g: 0.2, b: 0.0 };
-
-            // Mutate existing IntervalValue if present, otherwise set new one (first frame only)
-            if (sys.startLife && typeof sys.startLife.a === 'number') {
-                sys.startLife.a = lifeMin;
-                sys.startLife.b = lifeMax;
-            }
-            if (sys.startSize && typeof sys.startSize.a === 'number') {
-                sys.startSize.a = sizeMin;
-                sys.startSize.b = sizeMax;
-            }
-            // Mutate existing ColorRange Vector4s
-            if (sys.startColor && sys.startColor.a && sys.startColor.b) {
-                sys.startColor.a.set(
-                    emberStart.r * colorBoostMin,
-                    emberStart.g * colorBoostMin,
-                    emberStart.b * colorBoostMin,
-                    opacityMin
-                );
-                sys.startColor.b.set(
-                    emberEnd.r * colorBoostMax,
-                    emberEnd.g * colorBoostMax,
-                    emberEnd.b * colorBoostMax,
-                    opacityMax
-                );
-            }
+        let targetEmberStart, targetEmberEnd;
+        if (temp <= 0.5) {
+          const f = temp * 2.0;
+          targetEmberStart = lerpRGB(coldStart, emberStdStart, f);
+          targetEmberEnd   = lerpRGB(coldEnd, emberStdEnd, f);
         } else {
-            const baseFireLifeMin = p.fireLifeMin ?? 0.4;
-            const baseFireLifeMax = p.fireLifeMax ?? 1.6;
-            const lifeMin = Math.max(0.01, baseFireLifeMin / timeScale);
-            const lifeMax = Math.max(lifeMin, baseFireLifeMax / timeScale);
-            const rawOpMin = p.fireOpacityMin ?? 0.25;
-            const rawOpMax = p.fireOpacityMax ?? 0.68;
-            const opacityMin = clamp01(rawOpMin * 0.4);
-            const opacityMax = Math.max(opacityMin, clamp01(rawOpMax * 0.5));
-            const sizeMin = Math.max(0.1, p.fireSizeMin ?? 10.0);
-            const sizeMax = Math.max(sizeMin, p.fireSizeMax ?? 40.0);
-            const colorBoostMin = p.fireColorBoostMin ?? 0.8;
-            const colorBoostMax = Math.max(colorBoostMin, p.fireColorBoostMax ?? 1.2);
-
-            const fireStart = p.fireStartColor || { r: 1.2, g: 1.0, b: 0.6 };
-            const fireEnd = p.fireEndColor || { r: 0.8, g: 0.2, b: 0.05 };
-
-            // Mutate existing IntervalValue if present
-            if (sys.startLife && typeof sys.startLife.a === 'number') {
-                sys.startLife.a = lifeMin;
-                sys.startLife.b = lifeMax;
-            }
-            if (sys.startSize && typeof sys.startSize.a === 'number') {
-                sys.startSize.a = sizeMin;
-                sys.startSize.b = sizeMax;
-            }
-            // Mutate existing ColorRange Vector4s
-            if (sys.startColor && sys.startColor.a && sys.startColor.b) {
-                sys.startColor.a.set(
-                    fireStart.r * colorBoostMin,
-                    fireStart.g * colorBoostMin,
-                    fireStart.b * colorBoostMin,
-                    opacityMin
-                );
-                sys.startColor.b.set(
-                    fireEnd.r * colorBoostMax,
-                    fireEnd.g * colorBoostMax,
-                    fireEnd.b * colorBoostMax,
-                    opacityMax
-                );
-            }
-
-            // Update ColorOverLife behavior - mutate existing Vector4s
-            if (Array.isArray(sys.behaviors)) {
-              const col = sys.behaviors.find(b => b && (b.type === 'ColorOverLife' || b.constructor?.name === 'ColorOverLife'));
-              if (col && col.color && col.color.a && col.color.b) {
-                col.color.a.set(
-                  fireStart.r * colorBoostMax,
-                  fireStart.g * colorBoostMax,
-                  fireStart.b * colorBoostMax,
-                  1.0
-                );
-                col.color.b.set(
-                  fireEnd.r * colorBoostMax,
-                  fireEnd.g * colorBoostMax,
-                  fireEnd.b * colorBoostMax,
-                  0.0
-                );
-              }
-            }
+          const f = (temp - 0.5) * 2.0;
+          targetEmberStart = lerpRGB(emberStdStart, hotStart, f);
+          targetEmberEnd   = lerpRGB(emberStdEnd, hotEnd, f);
         }
 
-        // Wind-based lifetime reduction - mutate existing IntervalValue
-        const baseLifeMinRaw = isEmber ? (p.emberLifeMin ?? 1.5) : (p.fireLifeMin ?? 0.6);
-        const baseLifeMaxRaw = isEmber ? (p.emberLifeMax ?? 3.0) : (p.fireLifeMax ?? 1.2);
-        const baseLifeMin = baseLifeMinRaw / timeScale;
-        const baseLifeMax = baseLifeMaxRaw / timeScale;
-
-        if (windSpeed > 0.1 && sys.startLife && typeof sys.startLife.a === 'number') {
-            const factor = 1.0 - (windSpeed * 0.6);
-            sys.startLife.a = Math.max(0.1, baseLifeMin * factor);
-            sys.startLife.b = Math.max(sys.startLife.a, baseLifeMax * factor);
+        if (sys.startLife && typeof sys.startLife.a === 'number') {
+          sys.startLife.a = lifeMin;
+          sys.startLife.b = lifeMax;
         }
+        if (sys.startColor && sys.startColor.a && sys.startColor.b) {
+          sys.startColor.a.set(
+            targetEmberStart.r * colorBoostMin,
+            targetEmberStart.g * colorBoostMin,
+            targetEmberStart.b * colorBoostMin,
+            opacityMin
+          );
+          sys.startColor.b.set(
+            targetEmberEnd.r * colorBoostMax,
+            targetEmberEnd.g * colorBoostMax,
+            targetEmberEnd.b * colorBoostMax,
+            opacityMax
+          );
+        }
+      } else {
+        // Fire system
+        // Lifetime is affected by Temperature (Hot = Burns faster/Shorter life)
+        const lifeTempMod = 1.25 - (temp * 0.5);
+
+        const baseFireLifeMin = p2.fireLifeMin ?? 0.4;
+        const baseFireLifeMax = p2.fireLifeMax ?? 1.6;
+        const lifeMin = Math.max(0.01, (baseFireLifeMin / effectiveTimeScale) * lifeTempMod);
+        const lifeMax = Math.max(lifeMin, (baseFireLifeMax / effectiveTimeScale) * lifeTempMod);
+
+        const rawOpMin = p2.fireOpacityMin ?? 0.25;
+        const rawOpMax = p2.fireOpacityMax ?? 0.68;
+        const opacityMin = clamp01(rawOpMin * 0.4);
+        const opacityMax = Math.max(opacityMin, clamp01(rawOpMax * 0.5));
+        const colorBoostMin = p2.fireColorBoostMin ?? 0.8;
+        const colorBoostMax = Math.max(colorBoostMin, p2.fireColorBoostMax ?? 1.2);
+
+        if (sys.startLife && typeof sys.startLife.a === 'number') {
+          sys.startLife.a = lifeMin;
+          sys.startLife.b = lifeMax;
+        }
+        if (sys.startColor && sys.startColor.a && sys.startColor.b) {
+          sys.startColor.a.set(
+            targetFireStart.r * colorBoostMin,
+            targetFireStart.g * colorBoostMin,
+            targetFireStart.b * colorBoostMin,
+            opacityMin
+          );
+          sys.startColor.b.set(
+            targetFireEnd.r * colorBoostMax,
+            targetFireEnd.g * colorBoostMax,
+            targetFireEnd.b * colorBoostMax,
+            opacityMax
+          );
+        }
+
+        if (Array.isArray(sys.behaviors)) {
+          const col = sys.behaviors.find(b => b && (b.type === 'ColorOverLife' || b.constructor?.name === 'ColorOverLife'));
+          if (col && col.color && col.color.a && col.color.b) {
+            col.color.a.set(
+              targetFireStart.r * colorBoostMax,
+              targetFireStart.g * colorBoostMax,
+              targetFireStart.b * colorBoostMax,
+              1.0
+            );
+            col.color.b.set(
+              targetFireEnd.r * colorBoostMax,
+              targetFireEnd.g * colorBoostMax,
+              targetFireEnd.b * colorBoostMax,
+              0.0
+            );
+          }
+        }
+      }
+
+      // Wind-based lifetime reduction
+      if (windSpeed > 0.1 && sys.startLife && typeof sys.startLife.a === 'number') {
+        const factor = 1.0 - (windSpeed * 0.6);
+        sys.startLife.a *= factor;
+        sys.startLife.b *= factor;
+      }
     }
   }
   

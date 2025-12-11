@@ -55,7 +55,25 @@ export class TileManager {
     this._tempDarkness = null;
     this._tempAmbient = null;
     
+    // Window light effect reference for overhead tile lighting
+    /** @type {WindowLightEffect|null} */
+    this.windowLightEffect = null;
+    
     log.debug('TileManager created');
+  }
+
+  /**
+   * Set the WindowLightEffect reference for overhead tile lighting
+   * @param {WindowLightEffect} effect
+   */
+  setWindowLightEffect(effect) {
+    this.windowLightEffect = effect;
+    // Clear cached mask data so it gets re-extracted
+    this._windowMaskData = null;
+    this._windowMaskExtractFailed = false;
+    this._outdoorsMaskData = null;
+    this._outdoorsMaskExtractFailed = false;
+    log.debug('WindowLightEffect linked to TileManager');
   }
 
   /**
@@ -324,6 +342,9 @@ export class TileManager {
 
     let anyHoverHidden = false;
 
+    // Store global tint for window light application (avoid per-tile cloning)
+    this._frameGlobalTint = globalTint;
+
     for (const data of this.tileSprites.values()) {
       const { sprite, tileDoc, hoverHidden } = data;
       
@@ -406,6 +427,237 @@ export class TileManager {
     if (weatherController && typeof weatherController.setRoofMaskActive === 'function') {
       weatherController.setRoofMaskActive(anyHoverHidden);
     }
+
+    // Apply window light to overhead tiles if enabled
+    this._applyWindowLightToOverheadTiles();
+  }
+
+  /**
+   * Apply window light brightness to overhead tiles.
+   * Samples the WindowLightEffect's light texture and adds brightness to tiles
+   * that are positioned over lit window areas.
+   * @private
+   */
+  _applyWindowLightToOverheadTiles() {
+    const wle = this.windowLightEffect;
+    if (!wle) {
+      return;
+    }
+    if (!wle.params.lightOverheadTiles) {
+      return;
+    }
+    // Allow the effect to work even without a window mask if intensity > 0.9 (debug mode)
+    if (!wle.params.hasWindowMask && wle.params.overheadLightIntensity <= 0.9) {
+      return;
+    }
+    if (!wle._enabled) return;
+
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    // Get scene dimensions for UV calculation
+    const sceneWidth = canvas.dimensions?.width || 10000;
+    const sceneHeight = canvas.dimensions?.height || 10000;
+
+    // Count overhead tiles for debugging
+    let overheadCount = 0;
+    let litCount = 0;
+
+    // For each overhead tile, calculate the average window light in its area
+    // and apply as an additive tint on top of the global darkness tint
+    for (const data of this.tileSprites.values()) {
+      const { sprite, tileDoc } = data;
+      if (!sprite.userData.isOverhead) continue;
+      overheadCount++;
+
+      // Use the frame's global tint as the base (already applied in main loop)
+      const baseColor = this._frameGlobalTint;
+      if (!baseColor) continue;
+
+      // Calculate tile center UV in scene space
+      const tileCenterX = tileDoc.x + tileDoc.width / 2;
+      const tileCenterY = tileDoc.y + tileDoc.height / 2;
+      const u = tileCenterX / sceneWidth;
+      const v = tileCenterY / sceneHeight;
+
+      // Sample the window light at the tile's position
+      const lightSample = this._sampleWindowLight(null, u, v);
+
+      if (lightSample && lightSample.brightness > 0.01) {
+        litCount++;
+        // Apply additive brightness to the tile on top of global tint
+        const intensity = lightSample.brightness * wle.params.overheadLightIntensity;
+        
+        // Additive blend: globalTint + (lightColor * intensity)
+        sprite.material.color.r = Math.min(1.5, baseColor.r + lightSample.r * intensity);
+        sprite.material.color.g = Math.min(1.5, baseColor.g + lightSample.g * intensity);
+        sprite.material.color.b = Math.min(1.5, baseColor.b + lightSample.b * intensity);
+      } else if (wle.params.overheadLightIntensity > 0.9) {
+        // Debug mode: when intensity is maxed, tint all overhead tiles slightly to verify the system works
+        sprite.material.color.r = Math.min(1.5, baseColor.r + 0.3);
+        sprite.material.color.g = Math.min(1.5, baseColor.g + 0.1);
+        sprite.material.color.b = Math.min(1.5, baseColor.b + 0.0);
+      }
+      // If no window light, the global tint is already applied - no action needed
+    }
+
+    // Debug log once every 5 seconds
+    if (!this._lastWindowLightLog || Date.now() - this._lastWindowLightLog > 5000) {
+      this._lastWindowLightLog = Date.now();
+      const maskDataReady = !!this._windowMaskData;
+      const extractFailed = !!this._windowMaskExtractFailed;
+      log.debug(`Window light overhead: ${overheadCount} overhead tiles, ${litCount} lit, maskData=${maskDataReady}, extractFailed=${extractFailed}, intensity=${wle.params.overheadLightIntensity}`);
+    }
+  }
+
+  /**
+   * Extract mask pixel data from a THREE.Texture for CPU sampling.
+   * @param {THREE.Texture} texture
+   * @returns {{data: Uint8ClampedArray, width: number, height: number}|null}
+   * @private
+   */
+  _extractMaskData(texture) {
+    if (!texture) {
+      log.debug('_extractMaskData: texture is null');
+      return null;
+    }
+    if (!texture.image) {
+      log.debug('_extractMaskData: texture.image is null');
+      return null;
+    }
+    
+    const image = texture.image;
+    
+    // Check if it's an HTMLImageElement or similar drawable
+    // Also accept VideoFrame and OffscreenCanvas which are valid sources
+    const isDrawable = (
+      image instanceof HTMLImageElement || 
+      image instanceof HTMLCanvasElement || 
+      image instanceof ImageBitmap ||
+      (typeof OffscreenCanvas !== 'undefined' && image instanceof OffscreenCanvas) ||
+      (typeof VideoFrame !== 'undefined' && image instanceof VideoFrame)
+    );
+    
+    if (!isDrawable) {
+      log.warn('Window mask image is not a drawable type:', typeof image, image?.constructor?.name);
+      return null;
+    }
+
+    try {
+      const canvas = document.createElement('canvas');
+      const w = image.width || image.naturalWidth || 256;
+      const h = image.height || image.naturalHeight || 256;
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        log.warn('_extractMaskData: failed to get 2d context');
+        return null;
+      }
+      
+      ctx.drawImage(image, 0, 0, w, h);
+      const imageData = ctx.getImageData(0, 0, w, h);
+      log.debug(`_extractMaskData: successfully extracted ${w}x${h} pixels`);
+      return { data: imageData.data, width: w, height: h };
+    } catch (e) {
+      log.warn('Failed to extract mask data:', e.message);
+      return null;
+    }
+  }
+
+  /**
+   * Sample the window light texture at a given UV coordinate.
+   * Returns the light color and brightness at that point.
+   * @param {THREE.Texture} texture - unused, kept for API compatibility
+   * @param {number} u - U coordinate (0-1)
+   * @param {number} v - V coordinate (0-1)
+   * @returns {{r: number, g: number, b: number, brightness: number}|null}
+   * @private
+   */
+  _sampleWindowLight(texture, u, v) {
+    const wle = this.windowLightEffect;
+    if (!wle || !wle.windowMask) {
+      return null;
+    }
+
+    // Lazy-extract window mask data
+    if (!this._windowMaskData && !this._windowMaskExtractFailed) {
+      const extracted = this._extractMaskData(wle.windowMask);
+      if (extracted) {
+        this._windowMaskData = extracted.data;
+        this._windowMaskWidth = extracted.width;
+        this._windowMaskHeight = extracted.height;
+        log.info(`Window mask data extracted: ${extracted.width}x${extracted.height}`);
+      } else {
+        this._windowMaskExtractFailed = true;
+        log.warn('Failed to extract window mask data for overhead tile lighting');
+      }
+    }
+
+    if (!this._windowMaskData) return null;
+
+    // Sample the mask at the UV coordinate
+    const ix = Math.floor(Math.max(0, Math.min(1, u)) * (this._windowMaskWidth - 1));
+    const iy = Math.floor(Math.max(0, Math.min(1, v)) * (this._windowMaskHeight - 1));
+    const index = (iy * this._windowMaskWidth + ix) * 4;
+
+    const r = this._windowMaskData[index] / 255;
+    const g = this._windowMaskData[index + 1] / 255;
+    const b = this._windowMaskData[index + 2] / 255;
+    const brightness = (r * 0.2126 + g * 0.7152 + b * 0.0722);
+
+    // Apply the same mask shaping as the shader
+    const threshold = wle.params.maskThreshold;
+    const softness = wle.params.softness;
+    const halfWidth = Math.max(softness, 0.001);
+    const edgeLo = Math.max(0, threshold - halfWidth);
+    const edgeHi = Math.min(1, threshold + halfWidth);
+    
+    // Smoothstep
+    let shaped = 0;
+    if (brightness <= edgeLo) {
+      shaped = 0;
+    } else if (brightness >= edgeHi) {
+      shaped = 1;
+    } else {
+      const t = (brightness - edgeLo) / (edgeHi - edgeLo);
+      shaped = t * t * (3 - 2 * t);
+    }
+
+    // Check outdoors mask if available (skip outdoor areas)
+    let indoorFactor = 1.0;
+    if (wle.outdoorsMask) {
+      // Lazy-extract outdoors mask data
+      if (!this._outdoorsMaskData && !this._outdoorsMaskExtractFailed) {
+        const extracted = this._extractMaskData(wle.outdoorsMask);
+        if (extracted) {
+          this._outdoorsMaskData = extracted.data;
+          this._outdoorsMaskWidth = extracted.width;
+          this._outdoorsMaskHeight = extracted.height;
+        } else {
+          this._outdoorsMaskExtractFailed = true;
+        }
+      }
+      
+      if (this._outdoorsMaskData) {
+        const oix = Math.floor(Math.max(0, Math.min(1, u)) * (this._outdoorsMaskWidth - 1));
+        const oiy = Math.floor(Math.max(0, Math.min(1, v)) * (this._outdoorsMaskHeight - 1));
+        const oIndex = (oiy * this._outdoorsMaskWidth + oix) * 4;
+        const outdoorStrength = this._outdoorsMaskData[oIndex] / 255;
+        indoorFactor = 1.0 - outdoorStrength;
+      }
+    }
+
+    const finalBrightness = shaped * indoorFactor * wle.params.intensity;
+
+    // Return the light color (from params) scaled by brightness
+    const color = wle.params.color;
+    return {
+      r: color.r,
+      g: color.g,
+      b: color.b,
+      brightness: Math.min(1, finalBrightness)
+    };
   }
 
   /**

@@ -35,6 +35,18 @@ export class WindowLightEffect extends EffectBase {
     /** @type {THREE.ShaderMaterial|null} */
     this.material = null;
 
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this.lightTarget = null; // Render target for window light brightness (used by TileManager)
+
+    /** @type {THREE.Scene|null} */
+    this.lightScene = null; // Separate scene for rendering light-only pass
+
+    /** @type {THREE.Mesh|null} */
+    this.lightMesh = null; // Mesh for light-only rendering
+
+    /** @type {THREE.ShaderMaterial|null} */
+    this.lightMaterial = null; // Material for light-only pass
+
     this.params = {
       // Status
       textureStatus: 'Searching...',
@@ -66,7 +78,11 @@ export class WindowLightEffect extends EffectBase {
 
       // RGB Split
       rgbShiftAmount: 2.0,  // pixels at 1080p-ish; remapped in shader
-      rgbShiftAngle: 125.0    // degrees
+      rgbShiftAngle: 125.0,   // degrees
+
+      // Overhead tile lighting
+      lightOverheadTiles: true,  // Whether window light affects overhead tiles
+      overheadLightIntensity: 0.5  // How much window light affects overhead tiles (0-1)
     };
   }
 
@@ -127,6 +143,12 @@ export class WindowLightEffect extends EffectBase {
           label: 'RGB Split',
           type: 'inline',
           parameters: ['rgbShiftAmount', 'rgbShiftAngle']
+        },
+        {
+          name: 'overhead',
+          label: 'Overhead Tiles',
+          type: 'inline',
+          parameters: ['lightOverheadTiles', 'overheadLightIntensity']
         }
       ],
       parameters: {
@@ -268,6 +290,19 @@ export class WindowLightEffect extends EffectBase {
           max: 360.0,
           step: 1.0,
           default: 125.0
+        },
+        lightOverheadTiles: {
+          type: 'boolean',
+          label: 'Light Overhead Tiles',
+          default: true
+        },
+        overheadLightIntensity: {
+          type: 'slider',
+          label: 'Overhead Intensity',
+          min: 0.0,
+          max: 1.0,
+          step: 0.05,
+          default: 0.5
         }
       }
     };
@@ -278,6 +313,8 @@ export class WindowLightEffect extends EffectBase {
    */
   initialize(renderer, scene, camera) {
     this.scene = scene;
+    this.renderer = renderer;
+    this.camera = camera;
     log.info('Initializing WindowLightEffect');
   }
 
@@ -622,6 +659,190 @@ export class WindowLightEffect extends EffectBase {
     if (this.material) {
       this.material.uniforms.uResolution.value.set(width, height);
     }
+    if (this.lightMaterial) {
+      this.lightMaterial.uniforms.uResolution.value.set(width, height);
+    }
+    
+    // Resize light target if it exists
+    if (this.lightTarget) {
+      this.lightTarget.setSize(width, height);
+    }
+  }
+
+  /**
+   * Create the light-only render target and mesh for overhead tile lighting.
+   * This renders just the window light brightness (no base color) to a texture
+   * that TileManager can sample.
+   */
+  createLightTarget() {
+    const THREE = window.THREE;
+    if (!THREE || !this.baseMesh || !this.windowMask) return;
+
+    // Create render target for light brightness
+    const width = window.innerWidth || 1024;
+    const height = window.innerHeight || 1024;
+    
+    this.lightTarget = new THREE.WebGLRenderTarget(width, height, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType
+    });
+
+    // Create a separate scene for light-only rendering
+    this.lightScene = new THREE.Scene();
+
+    // Create material that outputs just the light brightness (grayscale)
+    this.lightMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uWindowMask: { value: this.windowMask },
+        uOutdoorsMask: { value: this.outdoorsMask },
+        uHasOutdoorsMask: { value: this.outdoorsMask ? 1.0 : 0.0 },
+        uWindowTexelSize: {
+          value: this.windowMask && this.windowMask.image
+            ? new THREE.Vector2(1 / this.windowMask.image.width, 1 / this.windowMask.image.height)
+            : new THREE.Vector2(1 / 1024, 1 / 1024)
+        },
+        uIntensity: { value: this.params.intensity },
+        uMaskThreshold: { value: this.params.maskThreshold },
+        uSoftness: { value: this.params.softness },
+        uCloudCover: { value: 0.0 },
+        uCloudInfluence: { value: this.params.cloudInfluence },
+        uMinCloudFactor: { value: this.params.minCloudFactor },
+        uColor: { value: new THREE.Color(this.params.color.r, this.params.color.g, this.params.color.b) },
+        uResolution: { value: new THREE.Vector2(width, height) }
+      },
+      vertexShader: this.getVertexShader(),
+      fragmentShader: this.getLightOnlyFragmentShader(),
+      side: THREE.DoubleSide,
+      transparent: false,
+      depthWrite: false,
+      depthTest: false
+    });
+
+    this.lightMesh = new THREE.Mesh(this.baseMesh.geometry, this.lightMaterial);
+    this.lightMesh.position.copy(this.baseMesh.position);
+    this.lightMesh.rotation.copy(this.baseMesh.rotation);
+    this.lightMesh.scale.copy(this.baseMesh.scale);
+
+    this.lightScene.add(this.lightMesh);
+    log.info('Window light target created for overhead tile lighting');
+  }
+
+  /**
+   * Fragment shader that outputs just the window light brightness.
+   * Used for the light-only render target that TileManager samples.
+   */
+  getLightOnlyFragmentShader() {
+    return `
+      uniform sampler2D uWindowMask;
+      uniform sampler2D uOutdoorsMask;
+      uniform float uHasOutdoorsMask;
+      uniform vec2 uWindowTexelSize;
+      uniform float uIntensity;
+      uniform float uMaskThreshold;
+      uniform float uSoftness;
+      uniform float uCloudCover;
+      uniform float uCloudInfluence;
+      uniform float uMinCloudFactor;
+      uniform vec3 uColor;
+
+      varying vec2 vUv;
+
+      float msLuminance(vec3 c) {
+        return dot(c, vec3(0.2126, 0.7152, 0.0722));
+      }
+
+      void main() {
+        // Sample window mask with blur
+        vec3 windowSample = texture2D(uWindowMask, vUv).rgb;
+        float centerMask = msLuminance(windowSample);
+
+        vec2 t = uWindowTexelSize;
+        float maskN = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0, -t.y)).rgb);
+        float maskS = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0,  t.y)).rgb);
+        float maskE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, 0.0)).rgb);
+        float maskW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, 0.0)).rgb);
+
+        float baseMask = (centerMask * 2.0 + maskN + maskS + maskE + maskW) / 6.0;
+
+        // Mask shaping
+        float halfWidth = max(uSoftness, 1e-3);
+        float edgeLo = clamp(uMaskThreshold - halfWidth, 0.0, 1.0);
+        float edgeHi = clamp(uMaskThreshold + halfWidth, 0.0, 1.0);
+        float m = smoothstep(edgeLo, edgeHi, baseMask);
+
+        // Outdoors rejection - window light only affects indoors
+        float indoorFactor = 1.0;
+        if (uHasOutdoorsMask > 0.5) {
+          float outdoorStrength = texture2D(uOutdoorsMask, vUv).r;
+          indoorFactor = 1.0 - outdoorStrength;
+        }
+
+        // Cloud attenuation
+        float cloud = clamp(uCloudCover, 0.0, 1.0);
+        float cloudFactor = 1.0 - (cloud * 0.8 * uCloudInfluence);
+        cloudFactor = max(cloudFactor, uMinCloudFactor);
+
+        // Final light brightness (0-1 range, clamped)
+        float lightBrightness = m * indoorFactor * cloudFactor * uIntensity;
+        lightBrightness = clamp(lightBrightness, 0.0, 1.0);
+
+        // Output light brightness with color tint in RGB, brightness in alpha
+        // TileManager will use the RGB for tinting and alpha for intensity
+        gl_FragColor = vec4(uColor * lightBrightness, lightBrightness);
+      }
+    `;
+  }
+
+  /**
+   * Render the light-only pass to lightTarget.
+   * Called by TileManager or EffectComposer when overhead tile lighting is enabled.
+   * @param {THREE.WebGLRenderer} renderer
+   */
+  renderLightPass(renderer) {
+    if (!this.params.lightOverheadTiles || !this.lightTarget || !this.lightScene || !this.camera) {
+      return;
+    }
+    if (!this._enabled || !this.params.hasWindowMask) {
+      return;
+    }
+
+    // Update light material uniforms
+    if (this.lightMaterial) {
+      const u = this.lightMaterial.uniforms;
+      u.uIntensity.value = this.params.intensity * this.params.overheadLightIntensity;
+      u.uMaskThreshold.value = this.params.maskThreshold;
+      u.uSoftness.value = this.params.softness;
+      u.uCloudInfluence.value = this.params.cloudInfluence;
+      u.uMinCloudFactor.value = this.params.minCloudFactor;
+      u.uColor.value.set(this.params.color.r, this.params.color.g, this.params.color.b);
+      
+      // Sync cloud cover
+      try {
+        const state = weatherController?.getCurrentState?.();
+        if (state && typeof state.cloudCover === 'number') {
+          u.uCloudCover.value = state.cloudCover;
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    const prevTarget = renderer.getRenderTarget();
+    renderer.setRenderTarget(this.lightTarget);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    renderer.render(this.lightScene, this.camera);
+    renderer.setRenderTarget(prevTarget);
+  }
+
+  /**
+   * Get the light brightness texture for overhead tile lighting.
+   * @returns {THREE.Texture|null}
+   */
+  getLightTexture() {
+    return this.lightTarget?.texture || null;
   }
 
   dispose() {
@@ -633,6 +854,19 @@ export class WindowLightEffect extends EffectBase {
       this.material.dispose();
       this.material = null;
     }
+    if (this.lightMesh && this.lightScene) {
+      this.lightScene.remove(this.lightMesh);
+      this.lightMesh = null;
+    }
+    if (this.lightMaterial) {
+      this.lightMaterial.dispose();
+      this.lightMaterial = null;
+    }
+    if (this.lightTarget) {
+      this.lightTarget.dispose();
+      this.lightTarget = null;
+    }
+    this.lightScene = null;
     this.windowMask = null;
     this.outdoorsMask = null;
     this.specularMask = null;

@@ -91,6 +91,10 @@ export class WorldSpaceFogEffect extends EffectBase {
     // Track MapShine selection changes to know when to recompute vision
     this._lastSelectionVersion = '';
     
+    // Track whether we have valid vision data (LOS polygons computed)
+    // Used to hide fog plane until Foundry's async perception update completes
+    this._hasValidVision = false;
+    
     // Track camera position for movement detection
     this._lastCameraX = 0;
     this._lastCameraY = 0;
@@ -484,11 +488,23 @@ export class WorldSpaceFogEffect extends EffectBase {
     // - Walls change
     
     // We'll trigger updates on these hooks
-    Hooks.on('controlToken', () => { this._needsVisionUpdate = true; });
+    Hooks.on('controlToken', (token, controlled) => {
+      // When token control changes, ensure Foundry recomputes
+      // perception so that vision polygons exist before we
+      // render the vision mask for the newly controlled token.
+      log.debug(`controlToken hook: ${token?.name} controlled=${controlled}, forcing perception update`);
+      frameCoordinator.forcePerceptionUpdate();
+      this._needsVisionUpdate = true;
+      this._hasValidVision = false; // Reset until we get valid LOS polygons
+    });
     Hooks.on('updateToken', () => { this._needsVisionUpdate = true; });
     Hooks.on('sightRefresh', () => { this._needsVisionUpdate = true; });
     Hooks.on('lightingRefresh', () => { this._needsVisionUpdate = true; });
     
+    // Initial render: force perception so that any starting
+    // controlled token (or vision source) has a valid LOS
+    // polygon before the first fog mask is drawn.
+    frameCoordinator.forcePerceptionUpdate();
     this._needsVisionUpdate = true; // Initial render
   }
 
@@ -533,19 +549,21 @@ export class WorldSpaceFogEffect extends EffectBase {
       controlledTokens = canvas?.tokens?.controlled || [];
     }
 
-    // Debug: Log what we're working with
-    if (Math.random() < 0.02) {
+    // Debug: Log what we're working with (always log when we have controlled tokens but no vision yet)
+    const shouldLogDebug = Math.random() < 0.02 || (controlledTokens.length > 0 && !this._hasValidVision);
+    if (shouldLogDebug) {
       const visionSources = canvas?.effects?.visionSources;
-      log.debug(`Vision sources: ${visionSources?.size || 0}, controlled tokens: ${controlledTokens.length}`);
-      if (visionSources) {
-        for (const vs of visionSources) {
-          log.debug(`  VisionSource: active=${vs.active}, shape=${vs.shape?.points?.length || 0} points`);
-        }
+      log.debug(`Vision sources: ${visionSources?.size || 0}, controlled tokens: ${controlledTokens.length}, hasValidVision: ${this._hasValidVision}`);
+      for (const token of controlledTokens) {
+        const vs = token.vision;
+        const shape = vs?.los || vs?.shape || vs?.fov;
+        log.debug(`  Token ${token.name}: vision=${!!vs}, los=${!!vs?.los}, shape=${!!vs?.shape}, fov=${!!vs?.fov}, points=${shape?.points?.length || 0}`);
       }
     }
     
     // Try to get vision from controlled tokens' vision sources
     let polygonsRendered = 0;
+    let tokensWithoutValidLOS = 0;
     
     for (const token of controlledTokens) {
       // Each token has a vision source in canvas.effects.visionSources
@@ -556,6 +574,7 @@ export class WorldSpaceFogEffect extends EffectBase {
         if (Math.random() < 0.02) {
           log.debug(`Token ${token.name} has no vision source`);
         }
+        tokensWithoutValidLOS++;
         continue;
       }
       
@@ -567,6 +586,7 @@ export class WorldSpaceFogEffect extends EffectBase {
         if (Math.random() < 0.02) {
           log.debug(`Token ${token.name} vision source has no valid shape (los=${!!visionSource.los}, shape=${!!visionSource.shape}, fov=${!!visionSource.fov})`);
         }
+        tokensWithoutValidLOS++;
         continue;
       }
       
@@ -609,7 +629,32 @@ export class WorldSpaceFogEffect extends EffectBase {
     this.renderer.setRenderTarget(currentTarget);
     this.renderer.setClearColor(currentClearColor, currentClearAlpha);
     
-    this._needsVisionUpdate = false;
+    // Only clear the update flag if we successfully rendered vision for all
+    // controlled tokens. If any token is missing a valid LOS polygon, keep
+    // the flag set so we retry next frame (Foundry's perception update is async).
+    if (controlledTokens.length > 0 && tokensWithoutValidLOS > 0) {
+      // Some tokens don't have valid LOS yet - keep retrying
+      // Also re-trigger perception update in case it didn't take
+      frameCoordinator.forcePerceptionUpdate();
+      this._hasValidVision = false;
+      log.debug(`Vision mask incomplete: ${polygonsRendered}/${controlledTokens.length} tokens have valid LOS, retrying...`);
+    } else if (controlledTokens.length > 0 && polygonsRendered > 0) {
+      // We have controlled tokens AND successfully rendered their vision
+      this._needsVisionUpdate = false;
+      this._hasValidVision = true;
+    } else if (controlledTokens.length === 0) {
+      // No controlled tokens - GM bypass mode is handled separately by _shouldBypassFog.
+      // We clear the update flag but leave _hasValidVision unchanged so that
+      // a subsequent selection cannot accidentally reuse a "valid" state that
+      // was set when no tokens were controlled.
+      this._needsVisionUpdate = false;
+    } else {
+      // controlledTokens.length > 0 but polygonsRendered === 0 and tokensWithoutValidLOS === 0
+      // This shouldn't happen, but keep retrying just in case
+      frameCoordinator.forcePerceptionUpdate();
+      this._hasValidVision = false;
+      log.debug(`Vision mask edge case: ${controlledTokens.length} tokens, ${polygonsRendered} rendered, retrying...`);
+    }
     
     // Debug logging
     if (Math.random() < 0.01) {
@@ -708,7 +753,13 @@ export class WorldSpaceFogEffect extends EffectBase {
     // Check if fog should be bypassed
     const bypassFog = this._shouldBypassFog();
     this.fogMaterial.uniforms.uBypassFog.value = bypassFog ? 1.0 : 0.0;
-    this.fogPlane.visible = this.params.enabled && !bypassFog;
+    
+    // Hide fog plane if:
+    // - Fog is disabled
+    // - Fog is bypassed (GM with no tokens)
+    // - We don't have valid vision data yet (waiting for Foundry's async perception update)
+    const waitingForVision = this._needsVisionUpdate && !this._hasValidVision;
+    this.fogPlane.visible = this.params.enabled && !bypassFog && !waitingForVision;
     
     // Keep fog plane at fixed Z=0 (same as scene content) to avoid perspective
     // distortion issues. The fog plane uses depthTest=false and renderOrder=9999
@@ -738,7 +789,13 @@ export class WorldSpaceFogEffect extends EffectBase {
       }
       if (selectionVersion !== this._lastSelectionVersion) {
         this._lastSelectionVersion = selectionVersion;
+
+        // MapShine selection changed (Three.js-driven token selection).
+        // Force Foundry perception so that the corresponding vision
+        // sources are up to date before we rebuild the vision mask.
+        frameCoordinator.forcePerceptionUpdate();
         this._needsVisionUpdate = true;
+        this._hasValidVision = false; // Reset until we get valid LOS polygons
       }
     } catch (_) {
       // Ignore MapShine selection errors

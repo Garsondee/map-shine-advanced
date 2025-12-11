@@ -657,6 +657,7 @@ async function createThreeCanvas(scene) {
     tileManager = new TileManager(threeScene);
     tileManager.initialize();
     tileManager.syncAllTiles();
+    tileManager.setWindowLightEffect(windowLightEffect); // Link for overhead tile lighting
     effectComposer.addUpdatable(tileManager); // Register for occlusion updates
     log.info('Tile manager initialized and synced');
 

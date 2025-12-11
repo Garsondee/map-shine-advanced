@@ -248,5 +248,15 @@ export function registerSettings() {
     default: false
   });
 
+  // Last used map point effect target (for quick placement)
+  game.settings.register('map-shine-advanced', 'lastMapPointEffect', {
+    name: 'Last Map Point Effect',
+    hint: 'The last effect type used when placing map points',
+    scope: 'client',
+    config: false,
+    type: String,
+    default: 'smellyFlies'
+  });
+
   log.info('Settings registered');
 }

@@ -69,6 +69,26 @@ export const EFFECT_SOURCE_OPTIONS = {
  */
 
 /**
+ * @typedef {Object} AreaPolygon
+ * @property {string} groupId - Parent group ID
+ * @property {MapPoint[]} points - Polygon vertices
+ * @property {EmissionSettings} emission - Emission settings
+ * @property {{minX: number, minY: number, maxX: number, maxY: number}} bounds - Bounding box
+ */
+
+/**
+ * @typedef {Object} AreaBounds
+ * @property {number} minX - Minimum X coordinate
+ * @property {number} minY - Minimum Y coordinate
+ * @property {number} maxX - Maximum X coordinate
+ * @property {number} maxY - Maximum Y coordinate
+ * @property {number} centerX - Center X coordinate
+ * @property {number} centerY - Center Y coordinate
+ * @property {number} width - Width of bounds
+ * @property {number} height - Height of bounds
+ */
+
+/**
  * MapPointsManager - Manages map point groups for the Three.js rendering system
  * Provides backwards compatibility with v1.x data stored in scene flags
  */
@@ -369,6 +389,147 @@ export class MapPointsManager {
     }
     
     return ropes;
+  }
+
+  /**
+   * Get all area polygons for a specific effect
+   * @param {string} effectTarget - Effect key (e.g., 'smellyFlies')
+   * @returns {AreaPolygon[]}
+   */
+  getAreasForEffect(effectTarget) {
+    const groups = this.getGroupsByEffect(effectTarget);
+    const areas = [];
+    
+    for (const group of groups) {
+      if (group.type !== 'area' || !group.points || group.points.length < 3) {
+        continue;
+      }
+      
+      areas.push({
+        groupId: group.id,
+        points: group.points,
+        emission: group.emission,
+        bounds: this._computeBounds(group.points)
+      });
+    }
+    
+    return areas;
+  }
+
+  /**
+   * Check if a point is inside an area group's polygon
+   * Uses ray-casting algorithm for point-in-polygon test
+   * @param {string} groupId - Group ID
+   * @param {{x: number, y: number}} point - Point to test
+   * @returns {boolean}
+   */
+  isPointInArea(groupId, point) {
+    const group = this.groups.get(groupId);
+    if (!group || group.type !== 'area' || !group.points || group.points.length < 3) {
+      return false;
+    }
+    
+    return this._isPointInPolygon(point.x, point.y, group.points);
+  }
+
+  /**
+   * Get a random point inside an area group's polygon
+   * Uses rejection sampling with bounding box
+   * @param {string} groupId - Group ID
+   * @param {number} [maxAttempts=50] - Maximum sampling attempts
+   * @returns {{x: number, y: number}|null}
+   */
+  getRandomPointInArea(groupId, maxAttempts = 50) {
+    const group = this.groups.get(groupId);
+    if (!group || group.type !== 'area' || !group.points || group.points.length < 3) {
+      return null;
+    }
+    
+    const bounds = this._computeBounds(group.points);
+    
+    for (let i = 0; i < maxAttempts; i++) {
+      const x = bounds.minX + Math.random() * bounds.width;
+      const y = bounds.minY + Math.random() * bounds.height;
+      
+      if (this._isPointInPolygon(x, y, group.points)) {
+        return { x, y };
+      }
+    }
+    
+    // Fallback: return centroid (always inside for convex polygons, usually inside for concave)
+    return { x: bounds.centerX, y: bounds.centerY };
+  }
+
+  /**
+   * Get the bounding box of an area group
+   * @param {string} groupId - Group ID
+   * @returns {AreaBounds|null}
+   */
+  getAreaBounds(groupId) {
+    const group = this.groups.get(groupId);
+    if (!group || !group.points || group.points.length < 1) {
+      return null;
+    }
+    
+    return this._computeBounds(group.points);
+  }
+
+  /**
+   * Compute bounding box for a set of points
+   * @param {MapPoint[]} points - Array of points
+   * @returns {AreaBounds}
+   * @private
+   */
+  _computeBounds(points) {
+    let minX = Infinity, minY = Infinity;
+    let maxX = -Infinity, maxY = -Infinity;
+    
+    for (const p of points) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+    
+    const width = maxX - minX;
+    const height = maxY - minY;
+    
+    return {
+      minX,
+      minY,
+      maxX,
+      maxY,
+      centerX: minX + width / 2,
+      centerY: minY + height / 2,
+      width,
+      height
+    };
+  }
+
+  /**
+   * Ray-casting point-in-polygon test
+   * @param {number} x - Test point X
+   * @param {number} y - Test point Y
+   * @param {MapPoint[]} polygon - Polygon vertices
+   * @returns {boolean}
+   * @private
+   */
+  _isPointInPolygon(x, y, polygon) {
+    let inside = false;
+    const n = polygon.length;
+    
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = polygon[i].x, yi = polygon[i].y;
+      const xj = polygon[j].x, yj = polygon[j].y;
+      
+      // Check if the ray from (x, y) going right crosses this edge
+      if (((yi > y) !== (yj > y)) &&
+          (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+        inside = !inside;
+      }
+    }
+    
+    return inside;
   }
 
   /**

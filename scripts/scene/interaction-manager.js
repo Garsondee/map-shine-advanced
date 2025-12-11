@@ -87,11 +87,24 @@ export class InteractionManager {
       previewFill: null,
       previewBorder: null
     };
+
+    // Map Point Drawing State
+    this.mapPointDraw = {
+      active: false,
+      effectTarget: null, // e.g., 'smellyFlies', 'fire'
+      groupType: 'area', // 'point', 'area', 'line'
+      points: [], // Array of {x, y} in world coords
+      previewGroup: null,
+      previewLine: null,
+      previewPoints: null,
+      previewFill: null
+    };
     
     // Create drag select visuals (Three.js mesh kept for compatibility)
     this.createSelectionBox();
     this.createSelectionOverlay();
     this.createLightPreview();
+    this.createMapPointPreview();
     
     /** @type {string|null} ID of currently hovered token */
     this.hoveredTokenId = null;
@@ -295,6 +308,288 @@ export class InteractionManager {
   }
 
   /**
+   * Create map point drawing preview visuals
+   * @private
+   */
+  createMapPointPreview() {
+    const THREE = window.THREE;
+
+    this.mapPointDraw.previewGroup = new THREE.Group();
+    this.mapPointDraw.previewGroup.name = 'MapPointDrawPreview';
+    this.mapPointDraw.previewGroup.visible = false;
+    this.mapPointDraw.previewGroup.renderOrder = 9998;
+
+    // Line connecting points
+    const lineGeo = new THREE.BufferGeometry();
+    lineGeo.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+    const lineMat = new THREE.LineBasicMaterial({
+      color: 0x00ff00,
+      transparent: true,
+      opacity: 0.8,
+      depthTest: false
+    });
+    this.mapPointDraw.previewLine = new THREE.Line(lineGeo, lineMat);
+    this.mapPointDraw.previewGroup.add(this.mapPointDraw.previewLine);
+
+    // Points as small spheres/circles
+    const pointsGeo = new THREE.BufferGeometry();
+    pointsGeo.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+    const pointsMat = new THREE.PointsMaterial({
+      color: 0x00ff00,
+      size: 12,
+      sizeAttenuation: false,
+      depthTest: false
+    });
+    this.mapPointDraw.previewPoints = new THREE.Points(pointsGeo, pointsMat);
+    this.mapPointDraw.previewGroup.add(this.mapPointDraw.previewPoints);
+
+    // Semi-transparent fill for area (will be updated dynamically)
+    const fillGeo = new THREE.BufferGeometry();
+    const fillMat = new THREE.MeshBasicMaterial({
+      color: 0x00ff00,
+      transparent: true,
+      opacity: 0.2,
+      depthTest: false,
+      side: THREE.DoubleSide
+    });
+    this.mapPointDraw.previewFill = new THREE.Mesh(fillGeo, fillMat);
+    this.mapPointDraw.previewGroup.add(this.mapPointDraw.previewFill);
+
+    if (this.sceneComposer.scene) {
+      this.sceneComposer.scene.add(this.mapPointDraw.previewGroup);
+    }
+  }
+
+  /**
+   * Start map point drawing mode
+   * @param {string} effectTarget - Effect key (e.g., 'smellyFlies', 'fire')
+   * @param {'point'|'area'|'line'} [groupType='area'] - Type of group to create
+   */
+  startMapPointDrawing(effectTarget, groupType = 'area') {
+    this.mapPointDraw.active = true;
+    this.mapPointDraw.effectTarget = effectTarget;
+    this.mapPointDraw.groupType = groupType;
+    this.mapPointDraw.points = [];
+    this.mapPointDraw.previewGroup.visible = true;
+
+    // Update preview color based on effect
+    const color = this._getEffectColor(effectTarget);
+    if (this.mapPointDraw.previewLine.material) {
+      this.mapPointDraw.previewLine.material.color.setHex(color);
+    }
+    if (this.mapPointDraw.previewPoints.material) {
+      this.mapPointDraw.previewPoints.material.color.setHex(color);
+    }
+    if (this.mapPointDraw.previewFill.material) {
+      this.mapPointDraw.previewFill.material.color.setHex(color);
+    }
+
+    // Save last used effect target
+    this._saveLastEffectTarget(effectTarget);
+
+    log.info(`Started map point drawing: ${effectTarget} (${groupType})`);
+    ui.notifications.info(`Click to place points. Double-click or press Enter to finish. Press Escape to cancel.`);
+  }
+
+  /**
+   * Cancel map point drawing mode
+   */
+  cancelMapPointDrawing() {
+    this.mapPointDraw.active = false;
+    this.mapPointDraw.points = [];
+    this.mapPointDraw.previewGroup.visible = false;
+    this._updateMapPointPreview();
+    log.info('Map point drawing cancelled');
+  }
+
+  /**
+   * Finish map point drawing and create the group
+   * @private
+   */
+  async _finishMapPointDrawing() {
+    if (!this.mapPointDraw.active || this.mapPointDraw.points.length < 1) {
+      this.cancelMapPointDrawing();
+      return;
+    }
+
+    const { effectTarget, groupType, points } = this.mapPointDraw;
+
+    // Validate minimum points
+    if (groupType === 'area' && points.length < 3) {
+      ui.notifications.warn('Area requires at least 3 points');
+      return;
+    }
+    if (groupType === 'line' && points.length < 2) {
+      ui.notifications.warn('Line requires at least 2 points');
+      return;
+    }
+
+    // Get MapPointsManager
+    const mapPointsManager = window.MapShine?.mapPointsManager;
+    if (!mapPointsManager) {
+      log.error('MapPointsManager not available');
+      this.cancelMapPointDrawing();
+      return;
+    }
+
+    // Create the group
+    try {
+      const group = await mapPointsManager.createGroup({
+        label: `${effectTarget} ${groupType}`,
+        type: groupType,
+        points: points.map(p => ({ x: p.x, y: p.y })),
+        isEffectSource: true,
+        effectTarget: effectTarget
+      });
+
+      log.info(`Created map point group: ${group.id}`);
+      ui.notifications.info(`Created ${effectTarget} spawn ${groupType}`);
+    } catch (e) {
+      log.error('Failed to create map point group:', e);
+      ui.notifications.error('Failed to create spawn area');
+    }
+
+    // Reset state
+    this.mapPointDraw.active = false;
+    this.mapPointDraw.points = [];
+    this.mapPointDraw.previewGroup.visible = false;
+    this._updateMapPointPreview();
+  }
+
+  /**
+   * Add a point to the current map point drawing
+   * @param {number} worldX - World X coordinate
+   * @param {number} worldY - World Y coordinate
+   * @private
+   */
+  _addMapPoint(worldX, worldY) {
+    if (!this.mapPointDraw.active) return;
+
+    // Snap to grid if shift is not held
+    let x = worldX;
+    let y = worldY;
+    if (!this._shiftHeld) {
+      const snapped = this.snapToGrid(worldX, worldY);
+      x = snapped.x;
+      y = snapped.y;
+    }
+
+    this.mapPointDraw.points.push({ x, y });
+    this._updateMapPointPreview();
+
+    log.debug(`Added map point: (${x}, ${y}), total: ${this.mapPointDraw.points.length}`);
+  }
+
+  /**
+   * Update the map point preview visuals
+   * @private
+   */
+  _updateMapPointPreview(cursorX = null, cursorY = null) {
+    const THREE = window.THREE;
+    const { points, groupType, previewLine, previewPoints, previewFill } = this.mapPointDraw;
+
+    // Get ground Z
+    const groundZ = this.sceneComposer?.groundZ ?? 1000;
+    const previewZ = groundZ + 10;
+
+    // Build positions array (include cursor position if provided)
+    const allPoints = [...points];
+    if (cursorX !== null && cursorY !== null && this.mapPointDraw.active) {
+      allPoints.push({ x: cursorX, y: cursorY });
+    }
+
+    // Update line
+    const linePositions = [];
+    for (const p of allPoints) {
+      linePositions.push(p.x, p.y, previewZ);
+    }
+    // Close the loop for area type
+    if (groupType === 'area' && allPoints.length > 2) {
+      linePositions.push(allPoints[0].x, allPoints[0].y, previewZ);
+    }
+    previewLine.geometry.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
+    previewLine.geometry.attributes.position.needsUpdate = true;
+
+    // Update points
+    const pointPositions = [];
+    for (const p of points) { // Only show confirmed points, not cursor
+      pointPositions.push(p.x, p.y, previewZ);
+    }
+    previewPoints.geometry.setAttribute('position', new THREE.Float32BufferAttribute(pointPositions, 3));
+    previewPoints.geometry.attributes.position.needsUpdate = true;
+
+    // Update fill for area type
+    if (groupType === 'area' && allPoints.length >= 3) {
+      const shape = new THREE.Shape();
+      shape.moveTo(allPoints[0].x, allPoints[0].y);
+      for (let i = 1; i < allPoints.length; i++) {
+        shape.lineTo(allPoints[i].x, allPoints[i].y);
+      }
+      shape.closePath();
+
+      const fillGeo = new THREE.ShapeGeometry(shape);
+      // Offset Z
+      const posAttr = fillGeo.getAttribute('position');
+      for (let i = 0; i < posAttr.count; i++) {
+        posAttr.setZ(i, previewZ - 1);
+      }
+      posAttr.needsUpdate = true;
+
+      previewFill.geometry.dispose();
+      previewFill.geometry = fillGeo;
+    }
+  }
+
+  /**
+   * Get color for an effect type
+   * @param {string} effectTarget
+   * @returns {number} Hex color
+   * @private
+   */
+  _getEffectColor(effectTarget) {
+    const colors = {
+      fire: 0xff4400,
+      candleFlame: 0xffaa00,
+      sparks: 0xffff00,
+      lightning: 0x00aaff,
+      dust: 0xaaaaaa,
+      smellyFlies: 0x00ff00,
+      water: 0x0066ff,
+      pressurisedSteam: 0xcccccc,
+      cloudShadows: 0x666666,
+      canopy: 0x228822,
+      structuralShadows: 0x444444
+    };
+    return colors[effectTarget] || 0x00ff00;
+  }
+
+  /**
+   * Save the last used effect target to client settings
+   * @param {string} effectTarget
+   * @private
+   */
+  _saveLastEffectTarget(effectTarget) {
+    try {
+      game.settings.set('map-shine-advanced', 'lastMapPointEffect', effectTarget);
+    } catch (e) {
+      // Setting may not be registered yet, store in localStorage as fallback
+      localStorage.setItem('map-shine-lastMapPointEffect', effectTarget);
+    }
+  }
+
+  /**
+   * Get the last used effect target
+   * @returns {string}
+   */
+  getLastEffectTarget() {
+    try {
+      return game.settings.get('map-shine-advanced', 'lastMapPointEffect') || 'smellyFlies';
+    } catch (e) {
+      return localStorage.getItem('map-shine-lastMapPointEffect') || 'smellyFlies';
+    }
+  }
+
+  /**
    * Create drag previews for selected tokens
    * @private
    */
@@ -366,6 +661,13 @@ export class InteractionManager {
    */
   onDoubleClick(event) {
     try {
+        // Handle Map Point Drawing Mode - double-click finishes drawing
+        if (this.mapPointDraw.active) {
+          this._finishMapPointDrawing();
+          event.preventDefault();
+          return;
+        }
+
         // Get mouse position in NDC
         this.updateMouseCoords(event);
         this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
@@ -508,6 +810,17 @@ export class InteractionManager {
         });
 
         if (event.button !== 0 && event.button !== 2) return;
+
+        // Handle Map Point Drawing Mode (takes priority over other interactions)
+        if (this.mapPointDraw.active && event.button === 0) {
+          const worldPos = this.screenToWorld(event.clientX, event.clientY);
+          if (worldPos) {
+            this._addMapPoint(worldPos.x, worldPos.y);
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
+        }
 
         // Respect the current input mode: only handle clicks when the
         // InputRouter says Three.js should receive input. This prevents
@@ -1194,7 +1507,24 @@ export class InteractionManager {
             }
         }
 
-        // Case 0: Wall Drawing
+        // Case 0: Map Point Drawing Preview
+        if (this.mapPointDraw.active) {
+          const worldPos = this.screenToWorld(event.clientX, event.clientY);
+          if (worldPos) {
+            // Snap cursor position if shift not held
+            let cursorX = worldPos.x;
+            let cursorY = worldPos.y;
+            if (!event.shiftKey) {
+              const snapped = this.snapToGrid(worldPos.x, worldPos.y);
+              cursorX = snapped.x;
+              cursorY = snapped.y;
+            }
+            this._updateMapPointPreview(cursorX, cursorY);
+          }
+          // Don't return - allow other hover effects to work
+        }
+
+        // Case 0.5: Wall Drawing
         if (this.wallDraw.active) {
           this.updateMouseCoords(event);
           const worldPos = this.viewportToWorld(event.clientX, event.clientY, 0);
@@ -2003,6 +2333,27 @@ export class InteractionManager {
    * @param {KeyboardEvent} event 
    */
   async onKeyDown(event) {
+    // Handle Map Point Drawing Mode keys
+    if (this.mapPointDraw.active) {
+      if (event.key === 'Escape') {
+        this.cancelMapPointDrawing();
+        event.preventDefault();
+        return;
+      }
+      if (event.key === 'Enter') {
+        await this._finishMapPointDrawing();
+        event.preventDefault();
+        return;
+      }
+      // Backspace removes last point
+      if (event.key === 'Backspace' && this.mapPointDraw.points.length > 0) {
+        this.mapPointDraw.points.pop();
+        this._updateMapPointPreview();
+        event.preventDefault();
+        return;
+      }
+    }
+
     // Delete key
     if (event.key === 'Delete' || event.key === 'Backspace') {
       if (this.selection.size > 0) {
@@ -2084,6 +2435,19 @@ export class InteractionManager {
     const intersection = this.raycaster.ray.intersectPlane(plane, target);
     
     return intersection || null;
+  }
+
+  /**
+   * Convert screen coordinates to world coordinates at ground level
+   * @param {number} clientX - Screen X coordinate
+   * @param {number} clientY - Screen Y coordinate
+   * @returns {{x: number, y: number}|null} World coordinates or null
+   */
+  screenToWorld(clientX, clientY) {
+    const groundZ = this.sceneComposer?.groundZ ?? 1000;
+    const worldPos = this.viewportToWorld(clientX, clientY, groundZ);
+    if (!worldPos) return null;
+    return { x: worldPos.x, y: worldPos.y };
   }
 
   /**

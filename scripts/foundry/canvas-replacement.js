@@ -26,6 +26,7 @@ import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
 import { BuildingShadowsEffect } from '../effects/BuildingShadowsEffect.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { FireSparksEffect } from '../particles/FireSparksEffect.js';
+import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { WorldSpaceFogEffect } from '../effects/WorldSpaceFogEffect.js';
 // NOTE: VisionManager and FogManager are no longer used.
 // WorldSpaceFogEffect renders fog as a world-space plane mesh, eliminating coordinate conversion issues.
@@ -48,7 +49,6 @@ import {
   DustEffect,
   SteamEffect,
   MetallicGlintsEffect,
-  SmellyFliesEffect,
   PostProcessingEffect,
   SceneTransitionsEffect,
   PauseEffect,
@@ -581,6 +581,10 @@ async function createThreeCanvas(scene) {
       fireSparksEffect.setAssetBundle(bundle);
     }
 
+    // Step 3.4b: Register Smelly Flies Effect (smart particles with AI behavior)
+    const smellyFliesEffect = new SmellyFliesEffect();
+    await effectComposer.registerEffect(smellyFliesEffect);
+
     // Step 3.5: Register Prism Effect
     const prismEffect = new PrismEffect();
     effectComposer.registerEffect(prismEffect);
@@ -698,10 +702,16 @@ async function createThreeCanvas(scene) {
     await mapPointsManager.initialize();
     log.info('Map points manager initialized');
 
-    // Wire map points to particle effects (fire, candle flame, etc.)
+    // Wire map points to particle effects (fire, candle flame, smelly flies, etc.)
     if (fireSparksEffect && mapPointsManager.groups.size > 0) {
       fireSparksEffect.setMapPointsSources(mapPointsManager);
       log.info('Map points wired to fire effect');
+    }
+    
+    // Wire smelly flies to map points (always wire, even if no groups yet - it listens for changes)
+    if (smellyFliesEffect) {
+      smellyFliesEffect.setMapPointsSources(mapPointsManager);
+      log.info('Map points wired to smelly flies effect');
     }
 
     // Step 5: Initialize interaction manager (Selection, Drag/Drop)
@@ -792,6 +802,7 @@ async function createThreeCanvas(scene) {
     mapShine.colorCorrectionEffect = colorCorrectionEffect;
     mapShine.asciiEffect = asciiEffect;
     mapShine.fireSparksEffect = fireSparksEffect;
+    mapShine.smellyFliesEffect = smellyFliesEffect; // Smart particle swarms
     mapShine.fogEffect = fogEffect; // Fog of War (world-space plane mesh)
     mapShine.skyColorEffect = skyColorEffect; // NEW: Expose SkyColorEffect
     mapShine.cameraFollower = cameraFollower; // Three.js camera follows PIXI
@@ -1445,6 +1456,39 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       onFireUpdate,
       'particle'
     );
+  }
+
+  // --- Smelly Flies Settings ---
+  const smellyFliesEffect = window.MapShine?.smellyFliesEffect;
+  if (smellyFliesEffect) {
+    const fliesSchema = SmellyFliesEffect.getControlSchema();
+    
+    const onFliesUpdate = (effectId, paramId, value) => {
+      smellyFliesEffect.applyParamChange(paramId, value);
+    };
+
+    uiManager.registerEffect(
+      'smelly-flies',
+      'Smelly Flies',
+      fliesSchema,
+      onFliesUpdate,
+      'particle'
+    );
+
+    // Add "Draw Spawn Area" button to Smelly Flies folder
+    const fliesFolderData = uiManager.effectFolders?.['smelly-flies'];
+    if (fliesFolderData?.folder) {
+      fliesFolderData.folder.addButton({
+        title: '🎯 Draw Spawn Area'
+      }).on('click', () => {
+        const interactionManager = window.MapShine?.interactionManager;
+        if (interactionManager) {
+          interactionManager.startMapPointDrawing('smellyFlies', 'area');
+        } else {
+          ui.notifications.warn('Interaction manager not available');
+        }
+      });
+    }
   }
 
   // Add a simple windvane indicator inside the Weather UI folder that reflects

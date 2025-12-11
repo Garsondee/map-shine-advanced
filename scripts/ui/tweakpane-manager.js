@@ -303,6 +303,14 @@ export class TweakpaneManager {
       }
     });
 
+    // Map Points Drawing Button
+    globalFolder.addButton({
+      title: '🎯 Draw Map Points',
+      label: 'Map Points'
+    }).on('click', () => {
+      this.openMapPointDrawingDialog();
+    });
+
     // Non-default settings dump (for debugging / default tuning)
     globalFolder.addButton({
       title: 'Copy Non-Default Settings',
@@ -2057,6 +2065,90 @@ export class TweakpaneManager {
       uiFrameRate: this.uiFrameRate,
       running: this.running
     };
+  }
+
+  /**
+   * Open a dialog to select effect type and start map point drawing
+   */
+  openMapPointDrawingDialog() {
+    const interactionManager = window.MapShine?.interactionManager;
+    if (!interactionManager) {
+      ui.notifications.warn('Interaction manager not available');
+      return;
+    }
+
+    // Get last used effect
+    const lastEffect = interactionManager.getLastEffectTarget();
+
+    // Effect options from EFFECT_SOURCE_OPTIONS
+    const effectOptions = {
+      smellyFlies: 'Smelly Flies',
+      fire: 'Fire Particles',
+      candleFlame: 'Candle Flame',
+      sparks: 'Sparks',
+      dust: 'Dust Motes',
+      lightning: 'Lightning',
+      pressurisedSteam: 'Pressurised Steam',
+      water: 'Water Surface',
+      cloudShadows: 'Cloud Shadows',
+      canopy: 'Canopy Shadows',
+      structuralShadows: 'Structural Shadows'
+    };
+
+    // Group type options
+    const groupTypeOptions = {
+      area: 'Area (Polygon)',
+      point: 'Single Point',
+      line: 'Line'
+    };
+
+    // Build dialog content
+    const content = `
+      <form>
+        <div class="form-group">
+          <label>Effect Type</label>
+          <select name="effectTarget" style="width: 100%;">
+            ${Object.entries(effectOptions).map(([key, label]) => 
+              `<option value="${key}" ${key === lastEffect ? 'selected' : ''}>${label}</option>`
+            ).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Group Type</label>
+          <select name="groupType" style="width: 100%;">
+            ${Object.entries(groupTypeOptions).map(([key, label]) => 
+              `<option value="${key}" ${key === 'area' ? 'selected' : ''}>${label}</option>`
+            ).join('')}
+          </select>
+        </div>
+        <p class="notes" style="margin-top: 10px; font-size: 11px; color: #888;">
+          Click to place points. Double-click or press Enter to finish.<br>
+          Press Escape to cancel. Backspace removes last point.<br>
+          Hold Shift to disable grid snapping.
+        </p>
+      </form>
+    `;
+
+    new Dialog({
+      title: 'Draw Map Points',
+      content,
+      buttons: {
+        draw: {
+          icon: '<i class="fas fa-crosshairs"></i>',
+          label: 'Start Drawing',
+          callback: (html) => {
+            const effectTarget = html.find('[name="effectTarget"]').val();
+            const groupType = html.find('[name="groupType"]').val();
+            interactionManager.startMapPointDrawing(effectTarget, groupType);
+          }
+        },
+        cancel: {
+          icon: '<i class="fas fa-times"></i>',
+          label: 'Cancel'
+        }
+      },
+      default: 'draw'
+    }).render(true);
   }
 }
 

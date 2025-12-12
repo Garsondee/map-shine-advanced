@@ -397,109 +397,147 @@ export class LightingEffect extends EffectBase {
           value: (this.windowMask && this.windowMask.image)
             ? new THREE.Vector2(1 / this.windowMask.image.width, 1 / this.windowMask.image.height)
             : new THREE.Vector2(1 / 1024, 1 / 1024)
-        },
-        uIntensity: { value: 1.0 },
-        uMaskThreshold: { value: 0.1 },
-        uSoftness: { value: 0.2 },
-        uColor: { value: new THREE.Color(1.0, 0.96, 0.85) },
-        uCloudCover: { value: 0.0 },
-        uCloudInfluence: { value: 1.0 },
-        uMinCloudFactor: { value: 0.0 },
-        uRgbShiftAmount: { value: 0.0 },
-        uRgbShiftAngle: { value: 0.0 }
       },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      uIntensity: { value: 1.0 },
+      uMaskThreshold: { value: 0.1 },
+      uSoftness: { value: 0.2 },
+      uColor: { value: new THREE.Color(1.0, 0.96, 0.85) },
+      uCloudCover: { value: 0.0 },
+      uCloudInfluence: { value: 1.0 },
+      uMinCloudFactor: { value: 0.0 },
+      uCloudLocalInfluence: { value: 1.0 },
+      uCloudDensityCurve: { value: 1.0 },
+      uCloudShadowMap: { value: null },
+      uHasCloudShadowMap: { value: 0.0 },
+      uRgbShiftAmount: { value: 0.0 },
+      uRgbShiftAngle: { value: 0.0 }
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      varying vec4 vClipPos;
+      void main() {
+        vUv = uv;
+        vClipPos = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        gl_Position = vClipPos;
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D uWindowMask;
+      uniform sampler2D uOutdoorsMask;
+      uniform float uHasOutdoorsMask;
+      uniform vec2 uWindowTexelSize;
+      uniform float uIntensity;
+      uniform float uMaskThreshold;
+      uniform float uSoftness;
+      uniform vec3 uColor;
+      uniform float uCloudCover;
+      uniform float uCloudInfluence;
+      uniform float uMinCloudFactor;
+      uniform float uCloudLocalInfluence;
+      uniform float uCloudDensityCurve;
+      uniform sampler2D uCloudShadowMap;
+      uniform float uHasCloudShadowMap;
+      uniform float uRgbShiftAmount;
+      uniform float uRgbShiftAngle;
+
+      varying vec2 vUv;
+      varying vec4 vClipPos;
+
+      float msLuminance(vec3 c) {
+        return dot(c, vec3(0.2126, 0.7152, 0.0722));
+      }
+
+      void main() {
+        if (uIntensity <= 0.0001) {
+          discard;
         }
-      `,
-      fragmentShader: `
-        uniform sampler2D uWindowMask;
-        uniform sampler2D uOutdoorsMask;
-        uniform float uHasOutdoorsMask;
-        uniform vec2 uWindowTexelSize;
-        uniform float uIntensity;
-        uniform float uMaskThreshold;
-        uniform float uSoftness;
-        uniform vec3 uColor;
-        uniform float uCloudCover;
-        uniform float uCloudInfluence;
-        uniform float uMinCloudFactor;
-        uniform float uRgbShiftAmount;
-        uniform float uRgbShiftAngle;
 
-        varying vec2 vUv;
+        vec3 windowSample = texture2D(uWindowMask, vUv).rgb;
+        float centerMask = msLuminance(windowSample);
 
-        float msLuminance(vec3 c) {
-          return dot(c, vec3(0.2126, 0.7152, 0.0722));
+        float blurScale = 1.0 + (uSoftness * 4.0);
+        vec2 t = uWindowTexelSize * blurScale;
+        float maskN = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0, -t.y)).rgb);
+        float maskS = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0,  t.y)).rgb);
+        float maskE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, 0.0)).rgb);
+        float maskW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, 0.0)).rgb);
+        float maskNE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, -t.y)).rgb);
+        float maskNW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, -t.y)).rgb);
+        float maskSE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x,  t.y)).rgb);
+        float maskSW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x,  t.y)).rgb);
+
+        float baseMask = (centerMask * 2.0 + maskN + maskS + maskE + maskW + maskNE + maskNW + maskSE + maskSW) / 10.0;
+
+        float halfWidth = max(uSoftness, 1e-3);
+        float edgeLo = clamp(uMaskThreshold - halfWidth, 0.0, 1.0);
+        float edgeHi = clamp(uMaskThreshold + halfWidth, 0.0, 1.0);
+        float m = smoothstep(edgeLo, edgeHi, baseMask);
+        if (m <= 0.0) discard;
+
+        float indoor = 1.0;
+        if (uHasOutdoorsMask > 0.5) {
+          float outdoorStrength = texture2D(uOutdoorsMask, vUv).r;
+          indoor = 1.0 - outdoorStrength;
+          if (indoor <= 0.0) discard;
         }
 
-        void main() {
-          if (uIntensity <= 0.0001) {
-            discard;
-          }
+        // Cloud attenuation - combine global cloud cover with spatially-varying density
+        float cloud = clamp(uCloudCover, 0.0, 1.0);
+        float globalCloudFactor = 1.0 - (cloud * 0.9 * uCloudInfluence);
+        
+        float cloudFactor = globalCloudFactor;
+        
+        // Sample cloud DENSITY texture for spatial variation (animated clouds passing by)
+        // CloudEffect provides *density* (0 = clear, 1 = thick cloud). We remap through
+        // a user-controlled curve and invert to get a "lit" factor.
+        if (uHasCloudShadowMap > 0.5) {
+          // Cloud density is rendered in SCREEN SPACE, convert clip coords to screen UV
+          vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
+          float localCloudDensity = 1.0 - texture2D(uCloudShadowMap, screenUV).r;
 
-          vec3 windowSample = texture2D(uWindowMask, vUv).rgb;
-          float centerMask = msLuminance(windowSample);
+          // Apply gamma-style curve so you can bias towards thin wisps or thick cores
+          float d = clamp(localCloudDensity, 0.0, 1.0);
+          d = pow(d, max(uCloudDensityCurve, 0.001));
 
-          float blurScale = 1.0 + (uSoftness * 4.0);
-          vec2 t = uWindowTexelSize * blurScale;
-          float maskN = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0, -t.y)).rgb);
-          float maskS = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0,  t.y)).rgb);
-          float maskE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, 0.0)).rgb);
-          float maskW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, 0.0)).rgb);
-          float maskNE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, -t.y)).rgb);
-          float maskNW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, -t.y)).rgb);
-          float maskSE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x,  t.y)).rgb);
-          float maskSW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x,  t.y)).rgb);
+          // Convert density -> local shadow factor in [0,1], where 1 = fully lit, 0 = fully shadowed
+          float localShadowFactor = 1.0 - d;
 
-          float baseMask = (centerMask * 2.0 + maskN + maskS + maskE + maskW + maskNE + maskNW + maskSE + maskSW) / 10.0;
-
-          float halfWidth = max(uSoftness, 1e-3);
-          float edgeLo = clamp(uMaskThreshold - halfWidth, 0.0, 1.0);
-          float edgeHi = clamp(uMaskThreshold + halfWidth, 0.0, 1.0);
-          float m = smoothstep(edgeLo, edgeHi, baseMask);
-          if (m <= 0.0) discard;
-
-          float indoor = 1.0;
-          if (uHasOutdoorsMask > 0.5) {
-            float outdoorStrength = texture2D(uOutdoorsMask, vUv).r;
-            indoor = 1.0 - outdoorStrength;
-            if (indoor <= 0.0) discard;
-          }
-
-          float cloud = clamp(uCloudCover, 0.0, 1.0);
-          float cloudFactor = 1.0 - (cloud * 0.8 * uCloudInfluence);
-          cloudFactor = max(cloudFactor, uMinCloudFactor);
-
-          float strength = m * indoor * cloudFactor * uIntensity;
-
-          vec3 lightColor = uColor * strength;
-
-          if (uRgbShiftAmount > 0.0001) {
-            float angle = uRgbShiftAngle;
-            vec2 dir = vec2(cos(angle), sin(angle));
-            vec2 shift = dir * uRgbShiftAmount * uWindowTexelSize;
-
-            float maskR = msLuminance(texture2D(uWindowMask, vUv + shift).rgb);
-            float maskG = baseMask;
-            float maskB = msLuminance(texture2D(uWindowMask, vUv - shift).rgb);
-
-            float denom = max(baseMask, 1e-3);
-            float rScale = maskR / denom;
-            float gScale = maskG / denom;
-            float bScale = maskB / denom;
-
-            lightColor.r *= rScale;
-            lightColor.g *= gScale;
-            lightColor.b *= bScale;
-          }
-
-          gl_FragColor = vec4(lightColor, 1.0);
+          // Blend local shadow with global factor; uCloudLocalInfluence in [0,3]
+          // controls how strongly local structure modulates the global overcast level.
+          // Values >1 exaggerate contrast.
+          float localMix = clamp(uCloudLocalInfluence, 0.0, 3.0);
+          float blended = mix(1.0, localShadowFactor, localMix);
+          cloudFactor = globalCloudFactor * blended;
         }
-      `,
+        
+        cloudFactor = max(cloudFactor, uMinCloudFactor);
+
+        float strength = m * indoor * cloudFactor * uIntensity;
+
+        vec3 lightColor = uColor * strength;
+
+        if (uRgbShiftAmount > 0.0001) {
+          float angle = uRgbShiftAngle;
+          vec2 dir = vec2(cos(angle), sin(angle));
+          vec2 shift = dir * uRgbShiftAmount * uWindowTexelSize;
+
+          float maskR = msLuminance(texture2D(uWindowMask, vUv + shift).rgb);
+          float maskG = baseMask;
+          float maskB = msLuminance(texture2D(uWindowMask, vUv - shift).rgb);
+
+          float denom = max(baseMask, 1e-3);
+          float rScale = maskR / denom;
+          float gScale = maskG / denom;
+          float bScale = maskB / denom;
+
+          lightColor.r *= rScale;
+          lightColor.g *= gScale;
+          lightColor.b *= bScale;
+        }
+
+        gl_FragColor = vec4(lightColor, 1.0);
+      }
+    `,
       blending: THREE.AdditiveBlending,
       transparent: true,
       depthWrite: false,
@@ -707,6 +745,8 @@ export class LightingEffect extends EffectBase {
         wu.uSoftness.value = wl.params.softness ?? wu.uSoftness.value;
         wu.uCloudInfluence.value = wl.params.cloudInfluence ?? wu.uCloudInfluence.value;
         wu.uMinCloudFactor.value = wl.params.minCloudFactor ?? wu.uMinCloudFactor.value;
+        wu.uCloudLocalInfluence.value = wl.params.cloudLocalInfluence ?? wu.uCloudLocalInfluence.value;
+        wu.uCloudDensityCurve.value = wl.params.cloudDensityCurve ?? wu.uCloudDensityCurve.value;
         wu.uRgbShiftAmount.value = wl.params.rgbShiftAmount ?? wu.uRgbShiftAmount.value;
         if (typeof wl.params.rgbShiftAngle === 'number') {
           wu.uRgbShiftAngle.value = wl.params.rgbShiftAngle * (Math.PI / 180.0);
@@ -714,6 +754,22 @@ export class LightingEffect extends EffectBase {
         if (wl.params.color) {
           wu.uColor.value.set(wl.params.color.r, wl.params.color.g, wl.params.color.b);
         }
+      }
+      
+      // Bind cloud DENSITY texture for spatially-varying dimming (not outdoors-masked shadow)
+      try {
+        const cloudEffect = window.MapShine?.cloudEffect;
+        if (cloudEffect?.cloudDensityTarget?.texture && cloudEffect.enabled) {
+          wu.uCloudShadowMap.value = cloudEffect.cloudDensityTarget.texture;
+          wu.uHasCloudShadowMap.value = 1.0;
+          if (Math.random() < 0.002) console.log('[LightingEffect] Cloud DENSITY BOUND');
+        } else {
+          wu.uCloudShadowMap.value = null;
+          wu.uHasCloudShadowMap.value = 0.0;
+          if (Math.random() < 0.002) console.log('[LightingEffect] Cloud density NOT bound - effect:', !!cloudEffect, 'target:', !!cloudEffect?.cloudDensityTarget, 'enabled:', cloudEffect?.enabled);
+        }
+      } catch (e) {
+        wu.uHasCloudShadowMap.value = 0.0;
       }
     }
 

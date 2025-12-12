@@ -529,7 +529,8 @@ export class CloudEffect extends EffectBase {
         uFadeStart: { value: this.params.cloudTopFadeStart },
         uFadeEnd: { value: this.params.cloudTopFadeEnd },
         uCloudColor: { value: new THREE.Vector3(1.0, 1.0, 1.0) },
-        uSkyTint: { value: new THREE.Vector3(0.9, 0.95, 1.0) }
+        uSkyTint: { value: new THREE.Vector3(0.9, 0.95, 1.0) },
+        uTimeOfDayTint: { value: new THREE.Vector3(1.0, 1.0, 1.0) }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -548,6 +549,7 @@ export class CloudEffect extends EffectBase {
         uniform float uFadeEnd;
         uniform vec3 uCloudColor;
         uniform vec3 uSkyTint;
+        uniform vec3 uTimeOfDayTint;
 
         varying vec2 vUv;
 
@@ -567,8 +569,9 @@ export class CloudEffect extends EffectBase {
           // Final alpha combines density, zoom fade, and user opacity
           float alpha = cloudAlpha * zoomFade * uCloudTopOpacity;
 
-          // Cloud color with slight sky tint for realism
-          vec3 color = mix(uSkyTint, uCloudColor, density * 0.5 + 0.5);
+          // Cloud color with slight sky tint for realism, then apply time-of-day tint
+          vec3 baseColor = mix(uSkyTint, uCloudColor, density * 0.5 + 0.5);
+          vec3 color = baseColor * uTimeOfDayTint;
 
           // Apply outdoors mask - only show cloud tops outdoors
           if (uHasOutdoorsMask > 0.5) {
@@ -640,6 +643,66 @@ export class CloudEffect extends EffectBase {
     }
 
     return this.sunDir;
+  }
+
+  /**
+   * Calculate time-of-day tint for cloud tops.
+   * Clouds tint warm at sunrise/sunset, white at midday, dark blue-gray at night.
+   * @returns {THREE.Vector3} RGB tint color
+   * @private
+   */
+  _calculateTimeOfDayTint() {
+    const THREE = window.THREE;
+    if (!THREE) return new THREE.Vector3(1, 1, 1);
+
+    let hour = 12.0;
+    try {
+      if (weatherController && typeof weatherController.timeOfDay === 'number') {
+        hour = weatherController.timeOfDay;
+      }
+    } catch (e) {
+      // Fallback to noon
+    }
+
+    // Define color stops
+    const NIGHT = new THREE.Vector3(0.4, 0.45, 0.6);      // Dark blue-gray
+    const SUNRISE = new THREE.Vector3(1.0, 0.7, 0.5);     // Warm orange
+    const DAY = new THREE.Vector3(1.0, 1.0, 1.0);         // Pure white
+    const SUNSET = new THREE.Vector3(1.0, 0.6, 0.4);      // Orange-pink
+
+    // Time ranges
+    // Night: 0-5, 20-24
+    // Sunrise: 5-7
+    // Day: 7-17
+    // Sunset: 17-20
+
+    let tint = DAY.clone();
+
+    if (hour < 5 || hour >= 21) {
+      // Night
+      tint.copy(NIGHT);
+    } else if (hour < 6) {
+      // Pre-dawn (5-6): Night -> Sunrise
+      const t = hour - 5;
+      tint.lerpVectors(NIGHT, SUNRISE, t);
+    } else if (hour < 7) {
+      // Sunrise (6-7): Sunrise -> Day
+      const t = hour - 6;
+      tint.lerpVectors(SUNRISE, DAY, t);
+    } else if (hour < 18) {
+      // Day (7-18): Pure white
+      tint.copy(DAY);
+    } else if (hour < 19) {
+      // Pre-sunset (18-19): Day -> Sunset
+      const t = hour - 18;
+      tint.lerpVectors(DAY, SUNSET, t);
+    } else if (hour < 21) {
+      // Sunset to night (19-21): Sunset -> Night
+      const t = (hour - 19) / 2;
+      tint.lerpVectors(SUNSET, NIGHT, t);
+    }
+
+    return tint;
   }
 
   onResize(width, height) {
@@ -824,6 +887,10 @@ export class CloudEffect extends EffectBase {
       const limits = sceneComposer?.getZoomLimits?.() ?? { min: 0.1, max: 3.0 };
       const normalizedZoom = (zoom - limits.min) / (limits.max - limits.min);
       tu.uNormalizedZoom.value = Math.max(0, Math.min(1, normalizedZoom));
+
+      // Apply time-of-day tint for sunrise/sunset coloring
+      const tint = this._calculateTimeOfDayTint();
+      tu.uTimeOfDayTint.value.copy(tint);
 
       // Set outdoors mask for cloud top material
       if (le?.outdoorsTarget) {

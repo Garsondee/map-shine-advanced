@@ -67,8 +67,10 @@ export class WindowLightEffect extends EffectBase {
       softness: 0.89,
 
       // Cloud interaction
-      cloudInfluence: 1.0,   // 0=ignore clouds, 1=overcast kills light
-      minCloudFactor: 0.0,   // Floor so light never fully disappears if desired
+      cloudInfluence: 1.0,        // 0=ignore clouds, 1=overcast kills light, >1 exaggerates
+      minCloudFactor: 0.0,        // Floor so light never fully disappears if desired
+      cloudLocalInfluence: 1.0,   // Strength of local cloud density modulation (0-3)
+      cloudDensityCurve: 1.0,     // Gamma for density -> shadow mapping (0.2-3)
 
       // Specular coupling (local glints)
       specularBoost: 0.0,
@@ -124,7 +126,7 @@ export class WindowLightEffect extends EffectBase {
           name: 'clouds',
           label: 'Cloud & Environment',
           type: 'inline',
-          parameters: ['cloudInfluence', 'minCloudFactor']
+          parameters: ['cloudInfluence', 'cloudLocalInfluence', 'cloudDensityCurve', 'minCloudFactor']
         },
         {
           name: 'specular',
@@ -244,8 +246,24 @@ export class WindowLightEffect extends EffectBase {
           type: 'slider',
           label: 'Cloud Influence',
           min: 0.0,
-          max: 1.0,
+          max: 3.0,
           step: 0.01,
+          default: 1.0
+        },
+        cloudLocalInfluence: {
+          type: 'slider',
+          label: 'Local Shadow Strength',
+          min: 0.0,
+          max: 3.0,
+          step: 0.05,
+          default: 1.0
+        },
+        cloudDensityCurve: {
+          type: 'slider',
+          label: 'Cloud Density Curve',
+          min: 0.2,
+          max: 3.0,
+          step: 0.05,
           default: 1.0
         },
         minCloudFactor: {
@@ -300,7 +318,7 @@ export class WindowLightEffect extends EffectBase {
           type: 'slider',
           label: 'Overhead Intensity',
           min: 0.0,
-          max: 1.0,
+          max: 5.0,
           step: 0.05,
           default: 0.5
         }
@@ -389,6 +407,12 @@ export class WindowLightEffect extends EffectBase {
         uCloudCover: { value: 0.0 },
         uCloudInfluence: { value: this.params.cloudInfluence },
         uMinCloudFactor: { value: this.params.minCloudFactor },
+        uCloudLocalInfluence: { value: this.params.cloudLocalInfluence },
+        uCloudDensityCurve: { value: this.params.cloudDensityCurve },
+
+        // Spatially-varying cloud shadow from CloudEffect
+        uCloudShadowMap: { value: null },
+        uHasCloudShadowMap: { value: 0.0 },
 
         uSpecularBoost: { value: this.params.specularBoost },
 
@@ -423,10 +447,12 @@ export class WindowLightEffect extends EffectBase {
   getVertexShader() {
     return `
       varying vec2 vUv;
+      varying vec4 vClipPos;
 
       void main() {
         vUv = uv;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        vClipPos = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        gl_Position = vClipPos;
       }
     `;
   }
@@ -463,6 +489,13 @@ export class WindowLightEffect extends EffectBase {
       uniform float uCloudCover;
       uniform float uCloudInfluence;
       uniform float uMinCloudFactor;
+      uniform float uCloudLocalInfluence;
+      uniform float uCloudDensityCurve;
+
+      uniform sampler2D uCloudShadowMap;
+      uniform float uHasCloudShadowMap;
+
+      varying vec4 vClipPos;
 
       uniform float uSpecularBoost;
 
@@ -566,10 +599,43 @@ export class WindowLightEffect extends EffectBase {
           if (indoorFactor <= 0.0) discard;
         }
 
-        // Cloud attenuation from WeatherController cloudCover
+        // Cloud attenuation - combine global cloud cover with spatially-varying shadow
+        // Global cloud cover provides base dimming, shadow map adds local variation
         float cloud = clamp(uCloudCover, 0.0, 1.0);
-        float cloudFactor = 1.0 - (cloud * 0.8 * uCloudInfluence);
+        // At 100% cloud cover with cloudInfluence=1.0: 1.0 - (1.0 * 0.9 * 1.0) = 0.1
+        float globalCloudFactor = 1.0 - (cloud * 0.9 * uCloudInfluence);
+        
+        float cloudFactor = globalCloudFactor;
+        
+        // If cloud density map available, derive a local shadow factor for spatial variation.
+        // CloudEffect provides *density* (0 = clear, 1 = thick cloud). We remap this through
+        // a user-controlled curve and then invert to get a "lit" factor.
+        if (uHasCloudShadowMap > 0.5) {
+          // Cloud density is rendered in SCREEN SPACE, so we need screen UVs.
+          vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
+          float localCloudDensity = 1.0 - texture2D(uCloudShadowMap, screenUV).r;
+
+
+          // Clamp and apply a gamma-style curve so you can bias towards
+          // either thin wisps or only thick cores of clouds.
+          float d = clamp(localCloudDensity, 0.0, 1.0);
+          d = pow(d, max(uCloudDensityCurve, 0.001));
+
+          // Convert density -> local shadow factor in [0,1], where 1 = fully lit, 0 = fully shadowed.
+          float localShadowFactor = 1.0 - d;
+
+          // Blend local shadow with global factor; uCloudLocalInfluence in [0,3]
+          // controls how strongly local structure modulates the global overcast
+          // level. Values >1 exaggerate contrast.
+          float localMix = clamp(uCloudLocalInfluence, 0.0, 3.0);
+          float blended = mix(1.0, localShadowFactor, localMix);
+          cloudFactor = globalCloudFactor * blended;
+        }
+        
         cloudFactor = max(cloudFactor, uMinCloudFactor);
+        
+        // DEBUG: Uncomment to visualize cloud factor
+         gl_FragColor = vec4(1.0 - cloudFactor, cloudFactor, 0.0, 1.0); return;
 
         float windowStrength = m * indoorFactor * cloudFactor;
         
@@ -625,9 +691,13 @@ export class WindowLightEffect extends EffectBase {
       const state = weatherController?.getCurrentState?.();
       if (state && typeof state.cloudCover === 'number') {
         this.material.uniforms.uCloudCover.value = state.cloudCover;
+        // Debug: Log cloud cover value periodically
+        if (Math.random() < 0.005) {
+          log.info(`[WindowLight] cloudCover from WeatherController: ${state.cloudCover.toFixed(2)}`);
+        }
       }
     } catch (e) {
-      // ignore
+      log.warn('[WindowLight] Failed to get cloud cover from WeatherController', e);
     }
 
     // Sync params
@@ -646,6 +716,30 @@ export class WindowLightEffect extends EffectBase {
 
     u.uCloudInfluence.value = this.params.cloudInfluence;
     u.uMinCloudFactor.value = this.params.minCloudFactor;
+
+    // Bind spatially-varying cloud shadow texture from CloudEffect
+    try {
+      const cloudEffect = window.MapShine?.cloudEffect;
+      // Use raw cloud density (0 = clear, 1 = dense cloud) so we can decide how
+      // to apply it indoors vs outdoors. The uniform name is kept for backwards
+      // compatibility but now carries density, not an outdoors-masked shadow.
+      if (cloudEffect?.cloudDensityTarget?.texture && cloudEffect.enabled) {
+        u.uCloudShadowMap.value = cloudEffect.cloudDensityTarget.texture;
+        u.uHasCloudShadowMap.value = 1.0;
+      } else {
+        u.uCloudShadowMap.value = null;
+        u.uHasCloudShadowMap.value = 0.0;
+      }
+    } catch (e) {
+      u.uHasCloudShadowMap.value = 0.0;
+    }
+
+    // Debug: Log cloud values periodically
+    if (Math.random() < 0.01) {
+      console.log('[WindowLight] cloudCover:', u.uCloudCover.value, 
+                  'cloudInfluence:', u.uCloudInfluence.value,
+                  'hasCloudShadowMap:', u.uHasCloudShadowMap.value);
+    }
 
     u.uSpecularBoost.value = this.params.specularBoost;
 

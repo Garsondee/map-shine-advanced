@@ -826,6 +826,51 @@ float computeCloudShadow(vec2 uv) {
 }
 ```
 
+### 14.7 Fake AO for Soft Cloud Shading (Optional)
+
+For the **cloud top mesh / heightfield** (when enabled), add a cheap, fake ambient occlusion based on cloud density curvature so puffy peaks feel sunlit and valleys feel softly shadowed.
+
+**Concept**:
+- Treat **high-density regions** as raised lobes
+- Use neighboring samples of the **cloud density texture** to estimate concavity/convexity
+- Darken concave regions (valleys) and slightly brighten convex ones (peaks)
+- This is purely a **screen-space trick** in the cloud top fragment shader, no extra geometry
+
+**Shader Sketch**:
+```glsl
+uniform sampler2D uCloudDensity;
+uniform vec2 uTexelSize;      // 1 / cloudDensity resolution
+
+float sampleDensity(vec2 uv) {
+    return texture2D(uCloudDensity, uv).r;
+}
+
+vec3 shadeCloud(vec2 uv, vec3 baseCloudColor) {
+    float d  = sampleDensity(uv);
+    float dN = sampleDensity(uv + vec2(0.0,  uTexelSize.y));
+    float dS = sampleDensity(uv + vec2(0.0, -uTexelSize.y));
+    float dE = sampleDensity(uv + vec2( uTexelSize.x, 0.0));
+    float dW = sampleDensity(uv + vec2(-uTexelSize.x, 0.0));
+
+    // Simple Laplacian: negative in valleys, positive on peaks
+    float avg = 0.25 * (dN + dS + dE + dW);
+    float curvature = avg - d;
+
+    // Map curvature to an AO term in [0.7, 1.1]
+    float ao = clamp(1.0 + curvature * 0.6, 0.7, 1.1);
+
+    // Darken valleys, slightly brighten peaks
+    return baseCloudColor * ao;
+}
+```
+
+**Usage**:
+- Only apply in the **cloud top fragment shader** (heightfield rendering path)
+- Keep it behind a simple toggle/threshold so it can be disabled on low-tier GPUs
+- AO strength factor can be a single scalar param: `cloudAOIntensity` (0-1)
+
+This gives clouds a gentle sense of volume and softness without true volumetric lighting.
+
 ---
 
 ## 15. Gust Behavior for Clouds

@@ -160,6 +160,18 @@ let skyColorEffect = null;
 /** @type {boolean} - Whether frame coordinator is initialized */
 let frameCoordinatorInitialized = false;
 
+/** @type {ResizeObserver|null} - Observer for canvas container resize */
+let resizeObserver = null;
+
+/** @type {Function|null} - Bound window resize handler for cleanup */
+let windowResizeHandler = null;
+
+/** @type {number} - Debounce timer for resize events */
+let resizeDebounceTimer = null;
+
+/** @type {number|null} - Hook ID for collapseSidebar listener */
+let collapseSidebarHookId = null;
+
 /**
  * Initialize canvas replacement hooks
  * Uses Foundry's native hook system for v13 compatibility
@@ -758,6 +770,9 @@ async function createThreeCanvas(scene) {
     renderLoop.start();
 
     log.info('Render loop started');
+
+    // Step 8.5: Set up resize handling
+    setupResizeHandling();
 
     // Step 9: Initialize Frame Coordinator for PIXI/Three.js synchronization
     // This hooks into Foundry's ticker to ensure we render after PIXI updates complete
@@ -1722,6 +1737,9 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
  * @private
  */
 function destroyThreeCanvas() {
+  // Clean up resize handling first
+  cleanupResizeHandling();
+
   // Dispose UI manager
   if (uiManager) {
     uiManager.dispose();
@@ -2331,6 +2349,138 @@ function ensureUILayering() {
  */
 export function getCanvas() {
   return threeCanvas;
+}
+
+/**
+ * Set up resize handling for the Three.js canvas
+ * Uses ResizeObserver for container changes and window resize as fallback
+ * @private
+ */
+function setupResizeHandling() {
+  // Clean up any existing handlers first
+  cleanupResizeHandling();
+
+  if (!threeCanvas) {
+    log.warn('Cannot set up resize handling - no canvas');
+    return;
+  }
+
+  const container = threeCanvas.parentElement;
+  if (!container) {
+    log.warn('Cannot set up resize handling - no container');
+    return;
+  }
+
+  /**
+   * Debounced resize handler to avoid excessive updates
+   * @param {number} width 
+   * @param {number} height 
+   */
+  const handleResize = (width, height) => {
+    // Clear any pending debounce
+    if (resizeDebounceTimer) {
+      clearTimeout(resizeDebounceTimer);
+    }
+
+    // Debounce resize events (16ms = ~60fps, prevents excessive updates during drag)
+    resizeDebounceTimer = setTimeout(() => {
+      // Validate dimensions
+      if (width <= 0 || height <= 0) {
+        log.debug(`Ignoring invalid resize dimensions: ${width}x${height}`);
+        return;
+      }
+
+      // Check if size actually changed
+      const currentWidth = renderer?.domElement?.width || 0;
+      const currentHeight = renderer?.domElement?.height || 0;
+      
+      // Account for device pixel ratio
+      const dpr = window.devicePixelRatio || 1;
+      const targetWidth = Math.floor(width * dpr);
+      const targetHeight = Math.floor(height * dpr);
+
+      if (targetWidth === currentWidth && targetHeight === currentHeight) {
+        log.debug('Resize skipped - dimensions unchanged');
+        return;
+      }
+
+      log.info(`Handling resize: ${width}x${height} (DPR: ${dpr})`);
+      resize(width, height);
+    }, 16);
+  };
+
+  // Method 1: ResizeObserver (preferred - handles sidebar, popouts, etc.)
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        // Use contentRect for accurate dimensions (excludes padding/border)
+        const { width, height } = entry.contentRect;
+        handleResize(width, height);
+      }
+    });
+
+    resizeObserver.observe(container);
+    log.debug('ResizeObserver attached to canvas container');
+  } else {
+    log.warn('ResizeObserver not available - falling back to window resize only');
+  }
+
+  // Method 2: Window resize event (fallback and additional coverage)
+  windowResizeHandler = () => {
+    if (!threeCanvas) return;
+    const rect = threeCanvas.getBoundingClientRect();
+    handleResize(rect.width, rect.height);
+  };
+
+  window.addEventListener('resize', windowResizeHandler);
+  log.debug('Window resize listener attached');
+
+  // Method 3: Listen for Foundry sidebar collapse/expand which changes canvas area
+  // The 'collapseSidebar' hook fires when sidebar is toggled
+  collapseSidebarHookId = Hooks.on('collapseSidebar', () => {
+    // Delay slightly to let DOM update
+    setTimeout(() => {
+      if (threeCanvas) {
+        const rect = threeCanvas.getBoundingClientRect();
+        handleResize(rect.width, rect.height);
+      }
+    }, 50);
+  });
+
+  log.info('Resize handling initialized');
+}
+
+/**
+ * Clean up resize handling resources
+ * @private
+ */
+function cleanupResizeHandling() {
+  // Clear debounce timer
+  if (resizeDebounceTimer) {
+    clearTimeout(resizeDebounceTimer);
+    resizeDebounceTimer = null;
+  }
+
+  // Disconnect ResizeObserver
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = null;
+    log.debug('ResizeObserver disconnected');
+  }
+
+  // Remove window resize listener
+  if (windowResizeHandler) {
+    window.removeEventListener('resize', windowResizeHandler);
+    windowResizeHandler = null;
+    log.debug('Window resize listener removed');
+  }
+
+  // Remove collapseSidebar hook
+  if (collapseSidebarHookId !== null) {
+    Hooks.off('collapseSidebar', collapseSidebarHookId);
+    collapseSidebarHookId = null;
+    log.debug('collapseSidebar hook removed');
+  }
 }
 
 /**

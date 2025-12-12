@@ -446,6 +446,13 @@ export class EffectComposer {
    * @param {number} height - New height
    */
   resize(width, height) {
+    // Resize scene render target
+    if (this.sceneRenderTarget) {
+      this.sceneRenderTarget.setSize(width, height);
+      log.debug(`Resized scene render target: ${width}x${height}`);
+    }
+
+    // Resize all named render targets
     for (const [name, target] of this.renderTargets.entries()) {
       target.setSize(width, height);
       log.debug(`Resized render target: ${name} (${width}x${height})`);
@@ -457,6 +464,8 @@ export class EffectComposer {
         effect.onResize(width, height);
       }
     }
+
+    log.info(`EffectComposer resized to ${width}x${height}`);
   }
 
   /**

@@ -689,8 +689,10 @@ export class WorldSpaceFogEffect extends EffectBase {
       // This ensures vision polygons are current for this frame
       frameCoordinator.forcePerceptionUpdate();
       
-      // Also mark vision as needing update
+      // Also mark vision as needing update and invalidate current vision
+      // so the fog plane hides until we get fresh LOS polygons
       this._needsVisionUpdate = true;
+      this._hasValidVision = false;
       
       // Update tracking
       this._lastCameraX = currentX;
@@ -754,23 +756,15 @@ export class WorldSpaceFogEffect extends EffectBase {
     const bypassFog = this._shouldBypassFog();
     this.fogMaterial.uniforms.uBypassFog.value = bypassFog ? 1.0 : 0.0;
     
-    // Hide fog plane if:
-    // - Fog is disabled
-    // - Fog is bypassed (GM with no tokens)
-    // - We don't have valid vision data yet (waiting for Foundry's async perception update)
-    const waitingForVision = this._needsVisionUpdate && !this._hasValidVision;
-    this.fogPlane.visible = this.params.enabled && !bypassFog && !waitingForVision;
+    if (!this.params.enabled || bypassFog) {
+      this.fogPlane.visible = false;
+      return;
+    }
     
-    // Keep fog plane at fixed Z=0 (same as scene content) to avoid perspective
-    // distortion issues. The fog plane uses depthTest=false and renderOrder=9999
-    // to ensure it always renders on top regardless of Z position.
-    // This avoids the complexity of scaling the plane to compensate for perspective
-    // when moving it closer to the camera.
-    
-    if (!this.params.enabled || bypassFog) return;
-    
-    // Detect camera movement - if camera moved significantly, we may need to
-    // force a perception update to ensure Foundry's vision system is current
+    // Detect camera movement FIRST - if camera moved significantly, we may need to
+    // force a perception update to ensure Foundry's vision system is current.
+    // This must happen BEFORE the visibility check so that _hasValidVision is
+    // correctly invalidated before we decide whether to show the fog plane.
     this._detectCameraMovement();
     
     // Detect MapShine selection changes (Three.js-driven UI) and trigger
@@ -806,6 +800,16 @@ export class WorldSpaceFogEffect extends EffectBase {
     // the vision update may have already been triggered by the post-PIXI callback
     if (this._needsVisionUpdate) {
       this._renderVisionMask();
+    }
+    
+    // NOW set fog plane visibility - after all invalidation checks have run
+    // Hide fog plane if we don't have valid vision data yet (waiting for Foundry's async perception update)
+    const waitingForVision = this._needsVisionUpdate && !this._hasValidVision;
+    this.fogPlane.visible = !waitingForVision;
+    
+    if (waitingForVision) {
+      // Don't accumulate exploration or update uniforms while waiting for valid vision
+      return;
     }
     
     // Accumulate current vision into our self-maintained exploration texture

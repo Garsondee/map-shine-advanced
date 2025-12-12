@@ -24,6 +24,7 @@ import { LensflareEffect } from '../effects/LensflareEffect.js';
 import { PrismEffect } from '../effects/PrismEffect.js';
 import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
 import { BuildingShadowsEffect } from '../effects/BuildingShadowsEffect.js';
+import { CloudEffect } from '../effects/CloudEffect.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { FireSparksEffect } from '../particles/FireSparksEffect.js';
 import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
@@ -629,6 +630,10 @@ async function createThreeCanvas(scene) {
     const buildingShadowsEffect = new BuildingShadowsEffect();
     effectComposer.registerEffect(buildingShadowsEffect);
 
+    // Step 3.6.7: Register Cloud Effect (procedural cloud shadows)
+    const cloudEffect = new CloudEffect();
+    effectComposer.registerEffect(cloudEffect);
+
     // Step 3.7: Register Bloom Effect
     const bloomEffect = new BloomEffect();
     effectComposer.registerEffect(bloomEffect);
@@ -653,6 +658,7 @@ async function createThreeCanvas(scene) {
     lightingEffect.setBaseMesh(basePlane, bundle);
     overheadShadowsEffect.setBaseMesh(basePlane, bundle);
     buildingShadowsEffect.setBaseMesh(basePlane, bundle);
+    cloudEffect.setBaseMesh(basePlane, bundle);
 
     // Step 3b: Initialize grid renderer
     gridRenderer = new GridRenderer(threeScene);
@@ -812,6 +818,7 @@ async function createThreeCanvas(scene) {
     mapShine.lightingEffect = lightingEffect;
     mapShine.overheadShadowsEffect = overheadShadowsEffect;
     mapShine.buildingShadowsEffect = buildingShadowsEffect;
+    mapShine.cloudEffect = cloudEffect;
     mapShine.bloomEffect = bloomEffect;
     mapShine.lensflareEffect = lensflareEffect;
     mapShine.colorCorrectionEffect = colorCorrectionEffect;
@@ -872,6 +879,7 @@ async function createThreeCanvas(scene) {
         windowLightEffect,
         overheadShadowsEffect,
         buildingShadowsEffect,
+        cloudEffect,
         bushEffect,
         treeEffect,
         fogEffect
@@ -900,12 +908,13 @@ async function createThreeCanvas(scene) {
  * @param {WindowLightEffect} windowLightEffect - The window lighting effect instance
  * @param {OverheadShadowsEffect} overheadShadowsEffect - The overhead shadows effect instance
  * @param {BuildingShadowsEffect} buildingShadowsEffect - The building shadows effect instance
+ * @param {CloudEffect} cloudEffect - The procedural cloud shadows effect instance
  * @param {BushEffect} bushEffect - The animated bushes surface effect instance
  * @param {TreeEffect} treeEffect - The animated trees surface effect instance
  * @param {FogEffect} fogEffect - The fog of war effect instance
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, bushEffect, treeEffect, fogEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, bushEffect, treeEffect, fogEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -1452,6 +1461,29 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       'Building Shadows',
       buildingSchema,
       onBuildingUpdate,
+      'atmospheric'
+    );
+  }
+
+  // --- Cloud Shadows Settings ---
+  if (cloudEffect) {
+    const cloudSchema = CloudEffect.getControlSchema();
+
+    const onCloudUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        cloudEffect.enabled = !!value;
+        log.debug(`Cloud effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (cloudEffect.params && Object.prototype.hasOwnProperty.call(cloudEffect.params, paramId)) {
+        cloudEffect.params[paramId] = value;
+        log.debug(`Cloud.${paramId} =`, value);
+      }
+    };
+
+    uiManager.registerEffect(
+      'cloud',
+      'Cloud Shadows',
+      cloudSchema,
+      onCloudUpdate,
       'atmospheric'
     );
   }

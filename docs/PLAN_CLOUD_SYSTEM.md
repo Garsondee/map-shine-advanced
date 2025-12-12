@@ -1307,3 +1307,334 @@ When `timeOfDay` is night (19:00 - 5:00):
    - Precipitation could spawn from cloud density
    - Heavier rain under denser clouds
    - Adds visual coherence but complexity
+
+---
+
+## 23. Potential Issues & Mitigations
+
+### 23.1 Coordinate System Mismatch (The "UV Drift" Problem)
+
+**Risk**: If cloud noise is calculated in Screen Space (`vUv`), clouds will appear to "follow" the camera as the player pans. The world is huge, but the screen is small.
+
+**Symptoms**:
+- Clouds slide with the viewport instead of staying fixed to the map
+- Shadow positions shift when panning (not just when time changes)
+- Breaks immersion — clouds should be pinned to geography
+
+**Solution**: Always use **World Space Coordinates** for cloud generation.
+
+```glsl
+// BAD: Screen-space UV (clouds follow camera)
+float cloud = generateClouds(vUv, uTime);
+
+// GOOD: World-space UV (clouds pinned to map)
+uniform vec2 uSceneSize;      // canvas.dimensions.sceneRect size
+uniform vec2 uCameraOffset;   // Current camera position in world coords
+
+vec2 worldUV = (vUv * uViewportSize + uCameraOffset) / uSceneSize;
+float cloud = generateClouds(worldUV, uTime);
+```
+
+**Implementation Notes**:
+- Pass `uCameraOffset` from `UnifiedCameraController` or `sceneComposer.camera.position`
+- `uSceneSize` comes from `canvas.dimensions.sceneRect`
+- Normalize to 0-1 range over the scene for consistent noise scale
+- This matches how `BuildingShadowsEffect` and `OverheadShadowsEffect` handle world-space sampling
+
+---
+
+### 23.2 Shadow "Detachment" at Dawn/Dusk
+
+**Risk**: At very low sun angles, a cloud at Z=500 might cast a shadow 2000+ units away. If `cloudShadowTarget` is only slightly larger than the screen, the shadow will "pop" out of existence when the cloud casting it scrolls off-canvas.
+
+**Symptoms**:
+- Shadows appear/disappear abruptly at screen edges
+- Dawn/dusk shadows are truncated or missing
+- Visible "shadow seams" at viewport boundaries
+
+**Solutions**:
+
+**Option A: Extended Sampling Padding**
+```glsl
+// Sample cloud noise with padding beyond visible area
+vec2 paddedUV = worldUV;
+float padding = uShadowOffset * 2.0; // Sample 2x the max offset distance
+paddedUV = (paddedUV - 0.5) * (1.0 + padding) + 0.5;
+float cloud = generateClouds(paddedUV, uTime);
+```
+
+**Option B: Tiling Noise (Wrap-Around)**
+```glsl
+// Use seamlessly tiling noise so off-screen clouds wrap
+vec2 tiledUV = fract(worldUV * uNoiseScale);
+float cloud = generateClouds(tiledUV, uTime);
+```
+
+**Option C: Larger Render Target**
+- Render `cloudDensityTarget` at 150-200% of viewport size
+- Sample shadow with offset, then crop to visible area
+- More memory but cleanest solution
+
+**Recommendation**: Use **Option B (Tiling Noise)** for procedural clouds. The noise functions in Section 19 already produce tileable output when using `fract()`. For texture-based clouds, ensure the `_Clouds` texture is seamlessly tileable.
+
+---
+
+### 23.3 Indoor Mask "Bleeding" (Shadow Blur Artifact)
+
+**Risk**: If cloud shadows have "Softness" (blur), the shadow might bleed through walls into building interiors if the `_Outdoors` mask is applied *before* the blur pass.
+
+**Symptoms**:
+- Soft shadow edges creep into indoor areas
+- Interior rooms near windows show cloud shadow gradients
+- Mask boundary is visibly "fuzzy"
+
+**Solution**: Apply the `_Outdoors` mask as the **final step** in the shadow composite, *after* any blur/softness processing.
+
+```glsl
+// WRONG ORDER: Mask before blur
+float shadow = generateCloudShadow(worldUV);
+shadow *= outdoorsMask; // Mask applied
+shadow = blur(shadow);  // Blur spreads masked edge INTO interiors!
+
+// CORRECT ORDER: Blur before mask
+float shadow = generateCloudShadow(worldUV);
+shadow = blur(shadow);  // Blur first
+shadow *= outdoorsMask; // Mask applied LAST - clean indoor cutoff
+```
+
+**Alternative**: Dilate the `_Outdoors` mask slightly (erode the indoor regions) to create a buffer zone:
+```glsl
+// Erode indoor mask by 1-2 pixels to prevent bleeding
+float erodedOutdoors = texture2D(uOutdoorsMask, uv).r;
+erodedOutdoors = smoothstep(0.1, 0.2, erodedOutdoors); // Shrink outdoor region slightly
+shadow *= erodedOutdoors;
+```
+
+---
+
+### 23.4 Over-Darkening (Crushing Blacks)
+
+**Risk**: With multiple shadow systems (Building, Overhead, Cloud, Bush, Tree), naive multiplication crushes shadows to black:
+```glsl
+// DANGEROUS: Multiplicative stacking
+finalColor = ambient * buildingShadow * overheadShadow * cloudShadow;
+// 0.5 * 0.5 * 0.5 = 0.125 (way too dark!)
+```
+
+**Symptoms**:
+- Areas under multiple shadow sources become pitch black
+- Players can't see tokens/map details in shaded areas
+- Unnatural "ink pool" shadows
+
+**Solutions**:
+
+**Option A: Minimum Shadow Floor**
+```glsl
+float combinedShadow = buildingShadow * overheadShadow * cloudShadow;
+combinedShadow = max(combinedShadow, 0.25); // Never darker than 25%
+```
+
+**Option B: Screen Blend for Shadows**
+```glsl
+// Screen blend: 1 - (1-a)*(1-b)*(1-c)
+// Shadows add but never exceed full darkness
+float invB = 1.0 - buildingShadow;
+float invO = 1.0 - overheadShadow;
+float invC = 1.0 - cloudShadow;
+float combinedShadow = 1.0 - (invB * invO * invC);
+```
+
+**Option C: Max-Based Composition**
+```glsl
+// Only the darkest shadow wins (no stacking)
+float combinedShadow = min(buildingShadow, min(overheadShadow, cloudShadow));
+```
+
+**Option D: Weighted Average**
+```glsl
+// Average shadows with weights
+float combinedShadow = (buildingShadow * 0.4 + overheadShadow * 0.3 + cloudShadow * 0.3);
+```
+
+**Recommendation**: Use **Option A (Minimum Floor)** with a configurable `uMinShadowBrightness` uniform (default 0.2-0.3). This is simple, predictable, and ensures playability. The floor value could be exposed in UI as "Shadow Intensity Limit".
+
+**Implementation in LightingEffect**:
+```glsl
+// In composite shader
+uniform float uMinShadowBrightness; // Default 0.25
+
+float combinedShadowFactor = shadowFactor * buildingFactor * bushFactor * treeFactor * cloudFactor;
+combinedShadowFactor = max(combinedShadowFactor, uMinShadowBrightness);
+```
+
+---
+
+## 24. Suggested Refinements
+
+### 24.1 Cloud Parallax for Window Sampling
+
+**Current Plan** (Section 2.2): Sample cloud shadow at the window's ground UV position.
+
+**Problem**: If you sample at the ground position, the interior dims at the exact same moment the ground shadow hits the wall. This looks flat/2D — as if the cloud is at ground level.
+
+**Refinement**: Sample the cloud shadow with a **slight offset in the sun direction** to simulate the cloud being high above the building.
+
+```glsl
+// In WindowLightEffect fragment shader
+uniform vec2 uSunDir;
+uniform float uCloudHeight; // Normalized cloud altitude (0.0-1.0)
+
+// Offset sample position "upward" toward where the cloud actually is
+vec2 cloudSampleUV = vUv + uSunDir * uCloudHeight * 0.1;
+float localCloudShadow = texture2D(uCloudShadowMap, cloudSampleUV).r;
+```
+
+**Visual Effect**:
+- Interior dims *slightly before* the ground shadow reaches the building
+- Creates the illusion that the cloud is passing overhead at altitude
+- More natural "rolling shadow" feel
+
+**Parameter**: `cloudSampleOffset` (0.0 - 0.2) — how far "up" to sample relative to sun direction.
+
+---
+
+### 24.2 Specular "Wetness" Integration
+
+**Current Plan** (Section 5): Sky reflections in specular surfaces.
+
+**Enhancement**: When it's raining (via `WeatherController.precipitation`), **boost sky reflection intensity** to simulate wet surfaces.
+
+```javascript
+// In SpecularEffect.update()
+const precip = weatherController?.currentState?.precipitation ?? 0;
+const wetBoost = 1.0 + precip * 0.5; // 50% brighter reflections when raining
+
+this.material.uniforms.uSkyReflectionIntensity.value = 
+    this.params.skyReflectionIntensity * wetBoost;
+```
+
+**Rationale**:
+- Wet surfaces are more reflective (water fills micro-roughness)
+- Clouds look much better reflected on "wet" ground
+- Creates powerful atmospheric link between rain and reflections
+- Simple multiplier, no shader changes needed
+
+**Formula**: `effectiveIntensity = baseIntensity * (1.0 + precipitation * wetnessFactor)`
+
+**Parameter**: `wetReflectionBoost` (0.0 - 1.0) — how much rain boosts reflections.
+
+---
+
+### 24.3 Zoom Comfort: Separate Cloud Top Transparency
+
+**Current Plan** (Section 4): Cloud tops fade based on zoom level.
+
+**Problem**: When zoomed out (satellite view), cloud tops can obscure tokens and game state. Players often want:
+- **Dark shadows** (atmosphere, drama)
+- **Faint cloud tops** (playability, can see tokens)
+
+**Refinement**: Add a **separate opacity slider** for cloud tops, independent of shadow opacity.
+
+**New Parameters**:
+| Parameter | Type | Range | Default | Description |
+|-----------|------|-------|---------|-------------|
+| `cloudTopMaxOpacity` | slider | 0-1 | 0.4 | Maximum cloud top visibility (even when fully zoomed out) |
+| `shadowOpacity` | slider | 0-1 | 0.6 | Shadow darkness (independent of cloud top visibility) |
+
+**Implementation**:
+```javascript
+// In CloudEffect.update()
+const zoom = sceneComposer.currentZoom;
+
+// Cloud tops: fade based on zoom AND respect max opacity cap
+const zoomAlpha = 1.0 - smoothstep(this.params.cloudTopFadeStart, this.params.cloudTopFadeEnd, zoom);
+const cloudTopAlpha = zoomAlpha * this.params.cloudTopMaxOpacity;
+
+this.cloudTopMesh.material.opacity = cloudTopAlpha;
+
+// Shadows: completely independent
+this.material.uniforms.uShadowOpacity.value = this.params.shadowOpacity;
+```
+
+**UI Grouping**:
+```
+Cloud Visibility
+├── Cloud Top Opacity: [====----] 0.4   (how visible cloud layer is)
+├── Fade Start Zoom:   [======--] 0.3   (zoom level where fade begins)
+└── Fade End Zoom:     [========] 0.8   (zoom level where fully hidden)
+
+Shadow Settings
+├── Shadow Opacity:    [======--] 0.6   (how dark shadows are)
+└── Shadow Softness:   [====----] 0.3   (blur amount)
+```
+
+This lets map makers create dramatic shadows while keeping cloud tops subtle enough to not interfere with gameplay.
+
+---
+
+## 25. Additional Research Notes
+
+### 25.1 Reference: Existing World-Space Effects
+
+Several existing effects already solve the world-space coordinate problem:
+
+**BuildingShadowsEffect** (`@scripts/effects/BuildingShadowsEffect.js`):
+- Uses world-space baked shadow texture
+- Samples with camera-compensated UVs
+- Good reference for shadow offset math
+
+**OverheadShadowsEffect** (`@scripts/effects/OverheadShadowsEffect.js`):
+- Calculates sun direction from `weatherController.timeOfDay`
+- Uses `uZoom` for consistent pixel-space offsets
+- Lines 362-426 show the sun direction calculation
+
+**WorldSpaceFogEffect** (from memory):
+- Renders fog as world-space plane mesh
+- Uses `sceneRect` for bounds
+- Eliminates coordinate conversion issues
+
+### 25.2 Reference: Shadow Composition in LightingEffect
+
+`LightingEffect.js` (lines 226-274) already handles multiple shadow sources:
+```glsl
+float combinedShadowFactor = shadowFactor * buildingFactor * bushFactor * treeFactor;
+```
+
+Cloud shadows should integrate here with the same pattern. The `uMinShadowBrightness` floor should be applied to this combined factor.
+
+### 25.3 Reference: WeatherController Precipitation State
+
+`WeatherController.js` provides:
+- `currentState.precipitation` (0.0 - 1.0)
+- `currentState.cloudCover` (0.0 - 1.0)
+- `currentState.windSpeed` (0.0 - 1.0)
+- `currentState.windDirection` (Vector2)
+
+All available for cloud system integration. The `wetness` property (line 30-31) tracks accumulated wetness with lag behind precipitation — useful for the specular wetness boost.
+
+### 25.4 Noise Tiling Verification
+
+Before implementation, verify that the noise functions in Section 19 produce seamless tiles:
+1. Render noise to a test texture
+2. Tile 2x2 and check for seams
+3. If seams visible, add explicit tiling logic:
+```glsl
+// Force seamless tiling
+vec2 tiledP = fract(p);
+// Blend edges for seamless wrap
+float edgeBlend = smoothstep(0.0, 0.1, min(tiledP.x, 1.0 - tiledP.x)) *
+                  smoothstep(0.0, 0.1, min(tiledP.y, 1.0 - tiledP.y));
+```
+
+---
+
+## 26. Pre-Implementation Checklist
+
+Before starting Phase 1, verify:
+
+- [ ] **Coordinate System**: Confirm `UnifiedCameraController` exposes camera offset in world coords
+- [ ] **Render Target Size**: Decide on padding strategy for dawn/dusk shadow offset
+- [ ] **LightingEffect Integration Point**: Identify exact line where cloud shadow uniform should be added
+- [ ] **UI Category**: Confirm `atmospheric` category exists in TweakpaneManager
+- [ ] **Asset Loader**: Check if `_Clouds` suffix needs to be added to `loader.js`
+- [ ] **Performance Baseline**: Profile current frame time before adding cloud passes

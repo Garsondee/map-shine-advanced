@@ -137,6 +137,8 @@ export class LightingEffect extends EffectBase {
         tBuildingShadow: { value: null }, // Building shadow factor (from BuildingShadowsEffect)
         tBushShadow: { value: null }, // Bush shadow factor (from BushEffect)
         tTreeShadow: { value: null }, // Tree shadow factor (from TreeEffect)
+        tCloudShadow: { value: null }, // Cloud shadow factor (from CloudEffect)
+        tCloudTop: { value: null }, // Cloud top overlay (from CloudEffect)
         tOutdoorsMask: { value: null }, // _Outdoors mask (bright outside, dark indoors)
         uDarknessLevel: { value: 0.0 },
         uAmbientBrightest: { value: new THREE.Color(1,1,1) },
@@ -150,6 +152,7 @@ export class LightingEffect extends EffectBase {
         uBushShadowOpacity: { value: 0.0 },
         uTreeShadowOpacity: { value: 0.0 },
         uTreeSelfShadowStrength: { value: 1.0 },
+        uCloudShadowOpacity: { value: 0.0 },
         uHasOutdoorsMask: { value: 0.0 },
         // Shared sun/zoom/texel data for screen-space shadow offsets
         uShadowSunDir: { value: new THREE.Vector2(0, 1) },
@@ -175,6 +178,8 @@ export class LightingEffect extends EffectBase {
         uniform sampler2D tBuildingShadow;
         uniform sampler2D tBushShadow;
         uniform sampler2D tTreeShadow;
+        uniform sampler2D tCloudShadow;
+        uniform sampler2D tCloudTop;
         uniform sampler2D tOutdoorsMask;
         uniform float uDarknessLevel;
         uniform vec3 uAmbientBrightest;
@@ -187,6 +192,7 @@ export class LightingEffect extends EffectBase {
         uniform float uBushShadowOpacity;
         uniform float uTreeShadowOpacity;
         uniform float uTreeSelfShadowStrength;
+        uniform float uCloudShadowOpacity;
         uniform float uHasOutdoorsMask;
         uniform vec2  uShadowSunDir;
         uniform float uShadowZoom;
@@ -247,6 +253,11 @@ export class LightingEffect extends EffectBase {
           float treeOpacity = clamp(uTreeShadowOpacity, 0.0, 1.0);
           float rawTreeFactor = mix(1.0, treeTex, treeOpacity);
 
+          // Cloud Shadows (already masked to outdoors in CloudEffect)
+          float cloudTex = texture2D(tCloudShadow, vUv).r;
+          float cloudOpacity = clamp(uCloudShadowOpacity, 0.0, 1.0);
+          float cloudFactor = mix(1.0, cloudTex, cloudOpacity);
+
           // Self-masking
           float bushCoverage = texture2D(tBushShadow, vUv).g;
           float bushSelfMask = clamp(bushCoverage, 0.0, 1.0);
@@ -270,7 +281,7 @@ export class LightingEffect extends EffectBase {
             treeFactor = mix(1.0, treeFactor, outdoorStrength);
           }
 
-          float combinedShadowFactor = shadowFactor * buildingFactor * bushFactor * treeFactor;
+          float combinedShadowFactor = shadowFactor * buildingFactor * bushFactor * treeFactor * cloudFactor;
 
           // 4. Combine Ambient with Accumulated Lights
           float kd = clamp(uOverheadShadowAffectsLights, 0.0, 1.0);
@@ -317,6 +328,10 @@ export class LightingEffect extends EffectBase {
             float finalMultiplier = mix(1.0, outdoorMultiplier, outdoorStrength);
             litColor *= finalMultiplier;
           }
+
+          // 7. Blend Cloud Tops over the scene (zoom-dependent white overlay)
+          vec4 cloudTop = texture2D(tCloudTop, vUv);
+          litColor = mix(litColor, cloudTop.rgb, cloudTop.a);
 
           gl_FragColor = vec4(litColor, baseColor.a);
         }
@@ -940,6 +955,25 @@ export class LightingEffect extends EffectBase {
         : null;
     } catch (e) {
       cu.tTreeShadow.value = null;
+    }
+
+    // Bind cloud shadow and cloud top textures if available.
+    try {
+      const cloud = window.MapShine?.cloudEffect;
+      cu.tCloudShadow.value = (cloud && cloud.cloudShadowTarget)
+        ? cloud.cloudShadowTarget.texture
+        : null;
+      cu.tCloudTop.value = (cloud && cloud.cloudTopTarget)
+        ? cloud.cloudTopTarget.texture
+        : null;
+      // Drive cloud shadow opacity from CloudEffect params
+      cu.uCloudShadowOpacity.value = (cloud && cloud.enabled && cloud.params)
+        ? cloud.params.shadowOpacity
+        : 0.0;
+    } catch (e) {
+      cu.tCloudShadow.value = null;
+      cu.tCloudTop.value = null;
+      cu.uCloudShadowOpacity.value = 0.0;
     }
 
     renderer.setRenderTarget(oldTarget);

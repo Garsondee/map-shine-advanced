@@ -731,83 +731,166 @@ export class MapPointsManager {
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
     const helperZ = groundZ + 50; // Render above ground plane
     
+    // Create a group to hold all visual elements
+    const helperGroup = new THREE.Group();
+    helperGroup.name = `MapPointHelper_${id}`;
+    helperGroup.renderOrder = 1000;
+    
     if (group.type === 'point') {
-      // Create point markers
-      const geometry = new THREE.BufferGeometry();
-      const positions = [];
-      
-      for (const point of group.points) {
-        positions.push(point.x, point.y, helperZ);
+      // Create visible point markers for each point
+      for (let i = 0; i < group.points.length; i++) {
+        const point = group.points[i];
+        const marker = this._createPointMarkerMesh(point.x, point.y, helperZ, color, i);
+        helperGroup.add(marker);
       }
-      
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-      
-      const material = new THREE.PointsMaterial({
-        color,
-        size: 20,
-        sizeAttenuation: false,
-        depthTest: false
-      });
-      
-      const points = new THREE.Points(geometry, material);
-      points.name = `MapPointHelper_${id}`;
-      points.renderOrder = 1000;
-      
-      this.scene.add(points);
-      this.visualObjects.set(id, points);
       
     } else if (group.type === 'line' || group.type === 'rope') {
       // Create line visualization
-      const geometry = new THREE.BufferGeometry();
+      const lineGeo = new THREE.BufferGeometry();
       const positions = [];
       
       for (const point of group.points) {
         positions.push(point.x, point.y, helperZ);
       }
       
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
       
-      const material = new THREE.LineBasicMaterial({
+      const lineMat = new THREE.LineBasicMaterial({
         color,
         linewidth: 2,
-        depthTest: false
+        depthTest: false,
+        transparent: true,
+        opacity: 0.8
       });
       
-      const line = new THREE.Line(geometry, material);
-      line.name = `MapPointHelper_${id}`;
-      line.renderOrder = 1000;
+      const line = new THREE.Line(lineGeo, lineMat);
+      helperGroup.add(line);
       
-      this.scene.add(line);
-      this.visualObjects.set(id, line);
+      // Add point markers at each vertex
+      for (let i = 0; i < group.points.length; i++) {
+        const point = group.points[i];
+        const marker = this._createPointMarkerMesh(point.x, point.y, helperZ + 1, color, i);
+        helperGroup.add(marker);
+      }
       
     } else if (group.type === 'area') {
-      // Create area outline (closed loop)
+      // Create area outline (closed loop) with fill
       if (group.points.length >= 3) {
-        const geometry = new THREE.BufferGeometry();
-        const positions = [];
+        // Semi-transparent fill
+        const shape = new THREE.Shape();
+        shape.moveTo(group.points[0].x, group.points[0].y);
+        for (let i = 1; i < group.points.length; i++) {
+          shape.lineTo(group.points[i].x, group.points[i].y);
+        }
+        shape.closePath();
         
+        const fillGeo = new THREE.ShapeGeometry(shape);
+        const posAttr = fillGeo.getAttribute('position');
+        for (let i = 0; i < posAttr.count; i++) {
+          posAttr.setZ(i, helperZ - 1);
+        }
+        posAttr.needsUpdate = true;
+        
+        const fillMat = new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: 0.15,
+          depthTest: false,
+          side: THREE.DoubleSide
+        });
+        
+        const fillMesh = new THREE.Mesh(fillGeo, fillMat);
+        helperGroup.add(fillMesh);
+        
+        // Outline
+        const outlineGeo = new THREE.BufferGeometry();
+        const positions = [];
         for (const point of group.points) {
           positions.push(point.x, point.y, helperZ);
         }
-        // Close the loop
         positions.push(group.points[0].x, group.points[0].y, helperZ);
         
-        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        outlineGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
         
-        const material = new THREE.LineBasicMaterial({
+        const outlineMat = new THREE.LineBasicMaterial({
           color,
           linewidth: 2,
-          depthTest: false
+          depthTest: false,
+          transparent: true,
+          opacity: 0.9
         });
         
-        const line = new THREE.LineLoop(geometry, material);
-        line.name = `MapPointHelper_${id}`;
-        line.renderOrder = 1000;
+        const outline = new THREE.Line(outlineGeo, outlineMat);
+        helperGroup.add(outline);
         
-        this.scene.add(line);
-        this.visualObjects.set(id, line);
+        // Add point markers at each vertex
+        for (let i = 0; i < group.points.length; i++) {
+          const point = group.points[i];
+          const marker = this._createPointMarkerMesh(point.x, point.y, helperZ + 1, color, i);
+          helperGroup.add(marker);
+        }
       }
     }
+    
+    this.scene.add(helperGroup);
+    this.visualObjects.set(id, helperGroup);
+  }
+
+  /**
+   * Create a point marker mesh (circle with border)
+   * @param {number} x - World X
+   * @param {number} y - World Y  
+   * @param {number} z - World Z
+   * @param {number} color - Hex color
+   * @param {number} index - Point index
+   * @returns {THREE.Group}
+   * @private
+   */
+  _createPointMarkerMesh(x, y, z, color, index) {
+    const THREE = window.THREE;
+    const group = new THREE.Group();
+    group.position.set(x, y, z);
+
+    // White outer ring (border)
+    const outerRing = new THREE.RingGeometry(16, 22, 32);
+    const outerMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.9,
+      depthTest: false,
+      side: THREE.DoubleSide
+    });
+    const outerMesh = new THREE.Mesh(outerRing, outerMat);
+    group.add(outerMesh);
+
+    // Inner filled circle (effect color)
+    const innerCircle = new THREE.CircleGeometry(14, 32);
+    const innerMat = new THREE.MeshBasicMaterial({
+      color: color,
+      transparent: true,
+      opacity: 0.85,
+      depthTest: false,
+      side: THREE.DoubleSide
+    });
+    const innerMesh = new THREE.Mesh(innerCircle, innerMat);
+    innerMesh.position.z = 0.1;
+    group.add(innerMesh);
+
+    // Center dot (darker)
+    const centerDot = new THREE.CircleGeometry(4, 16);
+    const centerMat = new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      transparent: true,
+      opacity: 0.5,
+      depthTest: false,
+      side: THREE.DoubleSide
+    });
+    const centerMesh = new THREE.Mesh(centerDot, centerMat);
+    centerMesh.position.z = 0.2;
+    group.add(centerMesh);
+
+    group.renderOrder = 1001 + index;
+    return group;
   }
 
   /**
@@ -842,8 +925,17 @@ export class MapPointsManager {
   removeVisualObject(id) {
     const obj = this.visualObjects.get(id);
     if (obj) {
-      if (obj.geometry) obj.geometry.dispose();
-      if (obj.material) obj.material.dispose();
+      // Recursively dispose all children (for groups with multiple meshes)
+      obj.traverse((child) => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) {
+          if (Array.isArray(child.material)) {
+            child.material.forEach(m => m.dispose());
+          } else {
+            child.material.dispose();
+          }
+        }
+      });
       this.scene.remove(obj);
       this.visualObjects.delete(id);
     }

@@ -94,10 +94,13 @@ export class InteractionManager {
       effectTarget: null, // e.g., 'smellyFlies', 'fire'
       groupType: 'area', // 'point', 'area', 'line'
       points: [], // Array of {x, y} in world coords
+      snapToGrid: false, // Grid snapping OFF by default, Shift to enable
       previewGroup: null,
       previewLine: null,
       previewPoints: null,
-      previewFill: null
+      previewFill: null,
+      cursorPoint: null, // Preview of where next point will be placed
+      pointMarkers: [] // Individual point marker meshes for better visibility
     };
     
     // Create drag select visuals (Three.js mesh kept for compatibility)
@@ -325,18 +328,19 @@ export class InteractionManager {
     const lineMat = new THREE.LineBasicMaterial({
       color: 0x00ff00,
       transparent: true,
-      opacity: 0.8,
-      depthTest: false
+      opacity: 0.9,
+      depthTest: false,
+      linewidth: 2
     });
     this.mapPointDraw.previewLine = new THREE.Line(lineGeo, lineMat);
     this.mapPointDraw.previewGroup.add(this.mapPointDraw.previewLine);
 
-    // Points as small spheres/circles
+    // Legacy points object (kept for compatibility but we use markers now)
     const pointsGeo = new THREE.BufferGeometry();
     pointsGeo.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
     const pointsMat = new THREE.PointsMaterial({
       color: 0x00ff00,
-      size: 12,
+      size: 16,
       sizeAttenuation: false,
       depthTest: false
     });
@@ -348,12 +352,28 @@ export class InteractionManager {
     const fillMat = new THREE.MeshBasicMaterial({
       color: 0x00ff00,
       transparent: true,
-      opacity: 0.2,
+      opacity: 0.15,
       depthTest: false,
       side: THREE.DoubleSide
     });
     this.mapPointDraw.previewFill = new THREE.Mesh(fillGeo, fillMat);
     this.mapPointDraw.previewGroup.add(this.mapPointDraw.previewFill);
+
+    // Cursor point preview (shows where next point will be placed)
+    const cursorGeo = new THREE.RingGeometry(12, 16, 32);
+    const cursorMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.8,
+      depthTest: false,
+      side: THREE.DoubleSide
+    });
+    this.mapPointDraw.cursorPoint = new THREE.Mesh(cursorGeo, cursorMat);
+    this.mapPointDraw.cursorPoint.visible = false;
+    this.mapPointDraw.previewGroup.add(this.mapPointDraw.cursorPoint);
+
+    // Initialize point markers array
+    this.mapPointDraw.pointMarkers = [];
 
     if (this.sceneComposer.scene) {
       this.sceneComposer.scene.add(this.mapPointDraw.previewGroup);
@@ -364,13 +384,18 @@ export class InteractionManager {
    * Start map point drawing mode
    * @param {string} effectTarget - Effect key (e.g., 'smellyFlies', 'fire')
    * @param {'point'|'area'|'line'} [groupType='area'] - Type of group to create
+   * @param {boolean} [snapToGrid=false] - Whether to snap to grid by default
    */
-  startMapPointDrawing(effectTarget, groupType = 'area') {
+  startMapPointDrawing(effectTarget, groupType = 'area', snapToGrid = false) {
     this.mapPointDraw.active = true;
     this.mapPointDraw.effectTarget = effectTarget;
     this.mapPointDraw.groupType = groupType;
     this.mapPointDraw.points = [];
+    this.mapPointDraw.snapToGrid = snapToGrid;
     this.mapPointDraw.previewGroup.visible = true;
+
+    // Clear any existing point markers
+    this._clearPointMarkers();
 
     // Update preview color based on effect
     const color = this._getEffectColor(effectTarget);
@@ -387,23 +412,40 @@ export class InteractionManager {
     // Save last used effect target
     this._saveLastEffectTarget(effectTarget);
 
-    log.info(`Started map point drawing: ${effectTarget} (${groupType})`);
-    ui.notifications.info(`Click to place points. Double-click or press Enter to finish. Press Escape to cancel.`);
+    log.info(`Started map point drawing: ${effectTarget} (${groupType}), snap=${snapToGrid}`);
+    const snapMsg = snapToGrid ? 'Hold Shift to disable grid snap.' : 'Hold Shift to enable grid snap.';
+    ui.notifications.info(`Click to place points. ${snapMsg} Double-click or Enter to finish. Escape to cancel.`);
   }
 
   /**
    * Cancel map point drawing mode
    */
   cancelMapPointDrawing() {
+    // If we were editing an existing group, restore its visual helper
+    if (this.mapPointDraw.editingGroupId) {
+      const mapPointsManager = window.MapShine?.mapPointsManager;
+      if (mapPointsManager?.showVisualHelpers) {
+        const group = mapPointsManager.getGroup(this.mapPointDraw.editingGroupId);
+        if (group) {
+          mapPointsManager.createVisualHelper(this.mapPointDraw.editingGroupId, group);
+        }
+      }
+    }
+
     this.mapPointDraw.active = false;
     this.mapPointDraw.points = [];
+    this.mapPointDraw.editingGroupId = null;
     this.mapPointDraw.previewGroup.visible = false;
+    this._clearPointMarkers();
     this._updateMapPointPreview();
+    if (this.mapPointDraw.cursorPoint) {
+      this.mapPointDraw.cursorPoint.visible = false;
+    }
     log.info('Map point drawing cancelled');
   }
 
   /**
-   * Finish map point drawing and create the group
+   * Finish map point drawing and create/update the group
    * @private
    */
   async _finishMapPointDrawing() {
@@ -412,7 +454,7 @@ export class InteractionManager {
       return;
     }
 
-    const { effectTarget, groupType, points } = this.mapPointDraw;
+    const { effectTarget, groupType, points, editingGroupId } = this.mapPointDraw;
 
     // Validate minimum points
     if (groupType === 'area' && points.length < 3) {
@@ -432,44 +474,72 @@ export class InteractionManager {
       return;
     }
 
-    // Create the group
     try {
-      const group = await mapPointsManager.createGroup({
-        label: `${effectTarget} ${groupType}`,
-        type: groupType,
-        points: points.map(p => ({ x: p.x, y: p.y })),
-        isEffectSource: true,
-        effectTarget: effectTarget
-      });
+      if (editingGroupId) {
+        // Update existing group with new points
+        await mapPointsManager.updateGroup(editingGroupId, {
+          points: points.map(p => ({ x: p.x, y: p.y }))
+        });
+        log.info(`Updated map point group: ${editingGroupId}`);
+        ui.notifications.info(`Updated group with ${points.length} points`);
+        
+        // Refresh visual helper
+        if (mapPointsManager.showVisualHelpers) {
+          const group = mapPointsManager.getGroup(editingGroupId);
+          if (group) {
+            mapPointsManager.createVisualHelper(editingGroupId, group);
+          }
+        }
+      } else {
+        // Create new group
+        const group = await mapPointsManager.createGroup({
+          label: `${effectTarget} ${groupType}`,
+          type: groupType,
+          points: points.map(p => ({ x: p.x, y: p.y })),
+          isEffectSource: true,
+          effectTarget: effectTarget
+        });
 
-      log.info(`Created map point group: ${group.id}`);
-      ui.notifications.info(`Created ${effectTarget} spawn ${groupType}`);
+        log.info(`Created map point group: ${group.id}`);
+        ui.notifications.info(`Created ${effectTarget} spawn ${groupType}`);
+      }
     } catch (e) {
-      log.error('Failed to create map point group:', e);
-      ui.notifications.error('Failed to create spawn area');
+      log.error('Failed to save map point group:', e);
+      ui.notifications.error('Failed to save spawn area');
     }
 
     // Reset state
     this.mapPointDraw.active = false;
     this.mapPointDraw.points = [];
+    this.mapPointDraw.editingGroupId = null;
     this.mapPointDraw.previewGroup.visible = false;
+    this._clearPointMarkers();
     this._updateMapPointPreview();
+    if (this.mapPointDraw.cursorPoint) {
+      this.mapPointDraw.cursorPoint.visible = false;
+    }
   }
 
   /**
    * Add a point to the current map point drawing
    * @param {number} worldX - World X coordinate
    * @param {number} worldY - World Y coordinate
+   * @param {boolean} shiftHeld - Whether shift key is held
    * @private
    */
-  _addMapPoint(worldX, worldY) {
+  _addMapPoint(worldX, worldY, shiftHeld = false) {
     if (!this.mapPointDraw.active) return;
 
-    // Snap to grid if shift is not held
+    // Snapping logic: 
+    // - If snapToGrid is ON (default OFF): snap unless Shift is held
+    // - If snapToGrid is OFF (default): only snap when Shift IS held
     let x = worldX;
     let y = worldY;
-    if (!this._shiftHeld) {
-      const snapped = this.snapToGrid(worldX, worldY);
+    const shouldSnap = this.mapPointDraw.snapToGrid ? !shiftHeld : shiftHeld;
+    
+    if (shouldSnap) {
+      // Use resolution=2 for half-grid subdivisions (2x2 = 4 snap points per grid cell)
+      const snapped = this.snapToGrid(worldX, worldY, CONST.GRID_SNAPPING_MODES.CENTER | CONST.GRID_SNAPPING_MODES.VERTEX | CONST.GRID_SNAPPING_MODES.CORNER | CONST.GRID_SNAPPING_MODES.SIDE_MIDPOINT, 2);
       x = snapped.x;
       y = snapped.y;
     }
@@ -477,7 +547,78 @@ export class InteractionManager {
     this.mapPointDraw.points.push({ x, y });
     this._updateMapPointPreview();
 
-    log.debug(`Added map point: (${x}, ${y}), total: ${this.mapPointDraw.points.length}`);
+    log.debug(`Added map point: (${x}, ${y}), total: ${this.mapPointDraw.points.length}, snapped=${shouldSnap}`);
+  }
+
+  /**
+   * Clear all point marker meshes
+   * @private
+   */
+  _clearPointMarkers() {
+    const THREE = window.THREE;
+    for (const marker of this.mapPointDraw.pointMarkers) {
+      if (marker.geometry) marker.geometry.dispose();
+      if (marker.material) marker.material.dispose();
+      this.mapPointDraw.previewGroup.remove(marker);
+    }
+    this.mapPointDraw.pointMarkers = [];
+  }
+
+  /**
+   * Create a point marker mesh at the given position
+   * @param {number} x - World X
+   * @param {number} y - World Y
+   * @param {number} z - World Z
+   * @param {number} color - Hex color
+   * @param {number} index - Point index (for numbering)
+   * @returns {THREE.Group}
+   * @private
+   */
+  _createPointMarker(x, y, z, color, index) {
+    const THREE = window.THREE;
+    const group = new THREE.Group();
+    group.position.set(x, y, z);
+
+    // Outer ring (white border)
+    const outerRing = new THREE.RingGeometry(18, 24, 32);
+    const outerMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.9,
+      depthTest: false,
+      side: THREE.DoubleSide
+    });
+    const outerMesh = new THREE.Mesh(outerRing, outerMat);
+    group.add(outerMesh);
+
+    // Inner filled circle (effect color)
+    const innerCircle = new THREE.CircleGeometry(16, 32);
+    const innerMat = new THREE.MeshBasicMaterial({
+      color: color,
+      transparent: true,
+      opacity: 0.8,
+      depthTest: false,
+      side: THREE.DoubleSide
+    });
+    const innerMesh = new THREE.Mesh(innerCircle, innerMat);
+    innerMesh.position.z = 0.1; // Slightly in front
+    group.add(innerMesh);
+
+    // Center dot (darker)
+    const centerDot = new THREE.CircleGeometry(4, 16);
+    const centerMat = new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      transparent: true,
+      opacity: 0.6,
+      depthTest: false,
+      side: THREE.DoubleSide
+    });
+    const centerMesh = new THREE.Mesh(centerDot, centerMat);
+    centerMesh.position.z = 0.2;
+    group.add(centerMesh);
+
+    group.renderOrder = 10000 + index;
+    return group;
   }
 
   /**
@@ -486,11 +627,14 @@ export class InteractionManager {
    */
   _updateMapPointPreview(cursorX = null, cursorY = null) {
     const THREE = window.THREE;
-    const { points, groupType, previewLine, previewPoints, previewFill } = this.mapPointDraw;
+    const { points, groupType, previewLine, previewPoints, previewFill, cursorPoint } = this.mapPointDraw;
 
     // Get ground Z
     const groundZ = this.sceneComposer?.groundZ ?? 1000;
     const previewZ = groundZ + 10;
+
+    // Get effect color for markers
+    const effectColor = this._getEffectColor(this.mapPointDraw.effectTarget);
 
     // Build positions array (include cursor position if provided)
     const allPoints = [...points];
@@ -510,13 +654,53 @@ export class InteractionManager {
     previewLine.geometry.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
     previewLine.geometry.attributes.position.needsUpdate = true;
 
-    // Update points
+    // Update legacy points (kept for fallback)
     const pointPositions = [];
-    for (const p of points) { // Only show confirmed points, not cursor
+    for (const p of points) {
       pointPositions.push(p.x, p.y, previewZ);
     }
     previewPoints.geometry.setAttribute('position', new THREE.Float32BufferAttribute(pointPositions, 3));
     previewPoints.geometry.attributes.position.needsUpdate = true;
+
+    // Update point markers - create new ones if needed, update positions
+    // First, ensure we have the right number of markers
+    while (this.mapPointDraw.pointMarkers.length < points.length) {
+      const idx = this.mapPointDraw.pointMarkers.length;
+      const marker = this._createPointMarker(0, 0, previewZ, effectColor, idx);
+      this.mapPointDraw.previewGroup.add(marker);
+      this.mapPointDraw.pointMarkers.push(marker);
+    }
+    // Remove excess markers
+    while (this.mapPointDraw.pointMarkers.length > points.length) {
+      const marker = this.mapPointDraw.pointMarkers.pop();
+      if (marker) {
+        marker.traverse((child) => {
+          if (child.geometry) child.geometry.dispose();
+          if (child.material) child.material.dispose();
+        });
+        this.mapPointDraw.previewGroup.remove(marker);
+      }
+    }
+    // Update marker positions
+    for (let i = 0; i < points.length; i++) {
+      const marker = this.mapPointDraw.pointMarkers[i];
+      if (marker) {
+        marker.position.set(points[i].x, points[i].y, previewZ + 1);
+      }
+    }
+
+    // Update cursor preview position
+    if (cursorPoint && cursorX !== null && cursorY !== null && this.mapPointDraw.active) {
+      cursorPoint.position.set(cursorX, cursorY, previewZ + 2);
+      cursorPoint.visible = true;
+      // Update cursor color to match effect
+      if (cursorPoint.material) {
+        cursorPoint.material.color.setHex(effectColor);
+        cursorPoint.material.opacity = 0.6;
+      }
+    } else if (cursorPoint) {
+      cursorPoint.visible = false;
+    }
 
     // Update fill for area type
     if (groupType === 'area' && allPoints.length >= 3) {
@@ -586,6 +770,305 @@ export class InteractionManager {
       return game.settings.get('map-shine-advanced', 'lastMapPointEffect') || 'smellyFlies';
     } catch (e) {
       return localStorage.getItem('map-shine-lastMapPointEffect') || 'smellyFlies';
+    }
+  }
+
+  /**
+   * Start adding points to an existing group
+   * @param {string} groupId - ID of the group to add points to
+   */
+  startAddPointsToGroup(groupId) {
+    const mapPointsManager = window.MapShine?.mapPointsManager;
+    if (!mapPointsManager) return;
+
+    const group = mapPointsManager.getGroup(groupId);
+    if (!group) {
+      ui.notifications.warn('Group not found');
+      return;
+    }
+
+    // Set up state for adding points to existing group
+    this.mapPointDraw.active = true;
+    this.mapPointDraw.effectTarget = group.effectTarget;
+    this.mapPointDraw.groupType = group.type;
+    this.mapPointDraw.points = [...group.points]; // Start with existing points
+    this.mapPointDraw.snapToGrid = false;
+    this.mapPointDraw.editingGroupId = groupId; // Track that we're editing, not creating
+    this.mapPointDraw.previewGroup.visible = true;
+
+    // Clear any existing point markers and rebuild
+    this._clearPointMarkers();
+
+    // Update preview color based on effect
+    const color = this._getEffectColor(group.effectTarget);
+    if (this.mapPointDraw.previewLine.material) {
+      this.mapPointDraw.previewLine.material.color.setHex(color);
+    }
+    if (this.mapPointDraw.previewPoints.material) {
+      this.mapPointDraw.previewPoints.material.color.setHex(color);
+    }
+    if (this.mapPointDraw.previewFill.material) {
+      this.mapPointDraw.previewFill.material.color.setHex(color);
+    }
+
+    // Update preview to show existing points
+    this._updateMapPointPreview();
+
+    // Hide the visual helper for this group while editing
+    mapPointsManager.removeVisualObject(groupId);
+
+    log.info(`Started adding points to group: ${groupId} (${group.label})`);
+    ui.notifications.info(`Adding points to "${group.label}". Click to add. Enter to save. Escape to cancel.`);
+  }
+
+  /**
+   * Get the map point group ID at a screen position (if visual helpers are visible)
+   * @param {number} clientX - Screen X coordinate
+   * @param {number} clientY - Screen Y coordinate
+   * @returns {string|null} Group ID or null if no group at position
+   * @private
+   */
+  _getMapPointGroupAtPosition(clientX, clientY) {
+    const mapPointsManager = window.MapShine?.mapPointsManager;
+    if (!mapPointsManager?.showVisualHelpers) return null;
+    
+    const worldPos = this.screenToWorld(clientX, clientY);
+    if (!worldPos) return null;
+
+    // Check each group's visual helper for intersection
+    const clickRadius = 30; // Pixel tolerance for clicking on points/lines
+    
+    for (const [groupId, group] of mapPointsManager.groups) {
+      if (!group.points || group.points.length === 0) continue;
+      
+      // Check if click is near any point in the group
+      for (const point of group.points) {
+        const dx = worldPos.x - point.x;
+        const dy = worldPos.y - point.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        
+        if (dist < clickRadius) {
+          return groupId;
+        }
+      }
+      
+      // For areas, also check if click is inside the polygon
+      if (group.type === 'area' && group.points.length >= 3) {
+        if (mapPointsManager._isPointInPolygon(worldPos.x, worldPos.y, group.points)) {
+          return groupId;
+        }
+      }
+      
+      // For lines, check if click is near any line segment
+      if (group.type === 'line' && group.points.length >= 2) {
+        for (let i = 0; i < group.points.length - 1; i++) {
+          const p1 = group.points[i];
+          const p2 = group.points[i + 1];
+          const dist = this._pointToLineDistance(worldPos.x, worldPos.y, p1.x, p1.y, p2.x, p2.y);
+          if (dist < clickRadius) {
+            return groupId;
+          }
+        }
+      }
+    }
+    
+    return null;
+  }
+
+  /**
+   * Calculate distance from a point to a line segment
+   * @private
+   */
+  _pointToLineDistance(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lengthSq = dx * dx + dy * dy;
+    
+    if (lengthSq === 0) {
+      // Line segment is a point
+      return Math.sqrt((px - x1) * (px - x1) + (py - y1) * (py - y1));
+    }
+    
+    // Project point onto line, clamped to segment
+    let t = ((px - x1) * dx + (py - y1) * dy) / lengthSq;
+    t = Math.max(0, Math.min(1, t));
+    
+    const projX = x1 + t * dx;
+    const projY = y1 + t * dy;
+    
+    return Math.sqrt((px - projX) * (px - projX) + (py - projY) * (py - projY));
+  }
+
+  /**
+   * Show context menu for a map point group
+   * @param {string} groupId - Group ID
+   * @param {number} clientX - Screen X for menu position
+   * @param {number} clientY - Screen Y for menu position
+   * @private
+   */
+  _showMapPointContextMenu(groupId, clientX, clientY) {
+    const mapPointsManager = window.MapShine?.mapPointsManager;
+    const tweakpaneManager = window.MapShine?.tweakpaneManager;
+    
+    if (!mapPointsManager) return;
+    
+    const group = mapPointsManager.getGroup(groupId);
+    if (!group) return;
+
+    // Create context menu element
+    const existingMenu = document.getElementById('map-point-context-menu');
+    if (existingMenu) existingMenu.remove();
+
+    const menu = document.createElement('div');
+    menu.id = 'map-point-context-menu';
+    menu.style.cssText = `
+      position: fixed;
+      left: ${clientX}px;
+      top: ${clientY}px;
+      background: #1a1a2e;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 4px 0;
+      min-width: 160px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+      z-index: 100000;
+      font-family: var(--font-primary);
+      font-size: 12px;
+    `;
+
+    const menuItems = [
+      { icon: 'fa-edit', label: 'Edit Group', action: 'edit' },
+      { icon: 'fa-plus-circle', label: 'Add Points', action: 'addPoints' },
+      { icon: 'fa-crosshairs', label: 'Focus', action: 'focus' },
+      { icon: 'fa-copy', label: 'Duplicate', action: 'duplicate' },
+      { divider: true },
+      { icon: 'fa-eye-slash', label: 'Hide Helpers', action: 'hideHelpers' },
+      { divider: true },
+      { icon: 'fa-trash', label: 'Delete', action: 'delete', danger: true }
+    ];
+
+    for (const item of menuItems) {
+      if (item.divider) {
+        const divider = document.createElement('div');
+        divider.style.cssText = 'height: 1px; background: #444; margin: 4px 0;';
+        menu.appendChild(divider);
+        continue;
+      }
+
+      const menuItem = document.createElement('div');
+      menuItem.style.cssText = `
+        padding: 6px 12px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: ${item.danger ? '#ff6666' : '#ddd'};
+        transition: background 0.1s;
+      `;
+      menuItem.innerHTML = `<i class="fas ${item.icon}" style="width: 14px;"></i> ${item.label}`;
+      
+      menuItem.addEventListener('mouseenter', () => {
+        menuItem.style.background = item.danger ? '#4a2a2a' : '#3a3a4e';
+      });
+      menuItem.addEventListener('mouseleave', () => {
+        menuItem.style.background = 'transparent';
+      });
+      
+      menuItem.addEventListener('click', async () => {
+        menu.remove();
+        
+        switch (item.action) {
+          case 'edit':
+            if (tweakpaneManager?.openGroupEditDialog) {
+              tweakpaneManager.openGroupEditDialog(groupId);
+            }
+            break;
+            
+          case 'focus':
+            const bounds = mapPointsManager.getAreaBounds(groupId);
+            if (bounds) {
+              canvas.pan({ x: bounds.centerX, y: bounds.centerY });
+            }
+            break;
+            
+          case 'duplicate':
+            const newGroup = await mapPointsManager.createGroup({
+              ...group,
+              id: undefined, // Generate new ID
+              label: `${group.label} (copy)`
+            });
+            ui.notifications.info(`Duplicated: ${newGroup.label}`);
+            // Refresh helpers
+            if (mapPointsManager.showVisualHelpers) {
+              mapPointsManager.setShowVisualHelpers(false);
+              mapPointsManager.setShowVisualHelpers(true);
+            }
+            break;
+            
+          case 'addPoints':
+            this.startAddPointsToGroup(groupId);
+            break;
+            
+          case 'hideHelpers':
+            mapPointsManager.setShowVisualHelpers(false);
+            break;
+            
+          case 'delete':
+            const confirmed = await Dialog.confirm({
+              title: 'Delete Map Point Group',
+              content: `<p>Delete "${group.label || 'this group'}"?</p>`,
+              yes: () => true,
+              no: () => false
+            });
+            if (confirmed) {
+              await mapPointsManager.deleteGroup(groupId);
+              ui.notifications.info('Group deleted');
+            }
+            break;
+        }
+      });
+      
+      menu.appendChild(menuItem);
+    }
+
+    // Add header showing group name
+    const header = document.createElement('div');
+    header.style.cssText = `
+      padding: 6px 12px 8px;
+      font-weight: bold;
+      color: #aaa;
+      font-size: 11px;
+      border-bottom: 1px solid #444;
+      margin-bottom: 4px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    `;
+    header.textContent = group.label || 'Map Point Group';
+    menu.insertBefore(header, menu.firstChild);
+
+    document.body.appendChild(menu);
+
+    // Close menu when clicking elsewhere
+    const closeMenu = (e) => {
+      if (!menu.contains(e.target)) {
+        menu.remove();
+        document.removeEventListener('pointerdown', closeMenu);
+      }
+    };
+    
+    // Delay adding listener to prevent immediate close
+    setTimeout(() => {
+      document.addEventListener('pointerdown', closeMenu);
+    }, 10);
+
+    // Adjust position if menu goes off-screen
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) {
+      menu.style.left = `${clientX - rect.width}px`;
+    }
+    if (rect.bottom > window.innerHeight) {
+      menu.style.top = `${clientY - rect.height}px`;
     }
   }
 
@@ -815,10 +1298,39 @@ export class InteractionManager {
         if (this.mapPointDraw.active && event.button === 0) {
           const worldPos = this.screenToWorld(event.clientX, event.clientY);
           if (worldPos) {
-            this._addMapPoint(worldPos.x, worldPos.y);
+            this._addMapPoint(worldPos.x, worldPos.y, event.shiftKey);
             event.preventDefault();
             event.stopPropagation();
             return;
+          }
+        }
+
+        // Handle right-click on map point helpers (context menu)
+        if (event.button === 2) {
+          const clickedGroupId = this._getMapPointGroupAtPosition(event.clientX, event.clientY);
+          if (clickedGroupId) {
+            event.preventDefault();
+            event.stopPropagation();
+            this._showMapPointContextMenu(clickedGroupId, event.clientX, event.clientY);
+            return;
+          }
+        }
+
+        // Handle left-click on map point helpers (select/edit)
+        if (event.button === 0) {
+          const mapPointsManager = window.MapShine?.mapPointsManager;
+          if (mapPointsManager?.showVisualHelpers) {
+            const clickedGroupId = this._getMapPointGroupAtPosition(event.clientX, event.clientY);
+            if (clickedGroupId) {
+              event.preventDefault();
+              event.stopPropagation();
+              // Open edit dialog for this group
+              const tweakpaneManager = window.MapShine?.tweakpaneManager;
+              if (tweakpaneManager?.openGroupEditDialog) {
+                tweakpaneManager.openGroupEditDialog(clickedGroupId);
+              }
+              return;
+            }
           }
         }
 
@@ -1511,11 +2023,16 @@ export class InteractionManager {
         if (this.mapPointDraw.active) {
           const worldPos = this.screenToWorld(event.clientX, event.clientY);
           if (worldPos) {
-            // Snap cursor position if shift not held
+            // Snapping logic matches _addMapPoint:
+            // - If snapToGrid is ON: snap unless Shift is held
+            // - If snapToGrid is OFF (default): only snap when Shift IS held
             let cursorX = worldPos.x;
             let cursorY = worldPos.y;
-            if (!event.shiftKey) {
-              const snapped = this.snapToGrid(worldPos.x, worldPos.y);
+            const shouldSnap = this.mapPointDraw.snapToGrid ? !event.shiftKey : event.shiftKey;
+            
+            if (shouldSnap) {
+              // Use resolution=2 for half-grid subdivisions
+              const snapped = this.snapToGrid(worldPos.x, worldPos.y, CONST.GRID_SNAPPING_MODES.CENTER | CONST.GRID_SNAPPING_MODES.VERTEX | CONST.GRID_SNAPPING_MODES.CORNER | CONST.GRID_SNAPPING_MODES.SIDE_MIDPOINT, 2);
               cursorX = snapped.x;
               cursorY = snapped.y;
             }

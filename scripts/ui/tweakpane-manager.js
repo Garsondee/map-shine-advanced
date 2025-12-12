@@ -303,12 +303,12 @@ export class TweakpaneManager {
       }
     });
 
-    // Map Points Drawing Button
+    // Map Points Manager Button (opens management dialog with draw/edit/delete)
     globalFolder.addButton({
-      title: '🎯 Draw Map Points',
+      title: '🎯 Manage Map Points',
       label: 'Map Points'
     }).on('click', () => {
-      this.openMapPointDrawingDialog();
+      this.openMapPointsManagerDialog();
     });
 
     // Non-default settings dump (for debugging / default tuning)
@@ -2072,6 +2072,7 @@ export class TweakpaneManager {
    */
   openMapPointDrawingDialog() {
     const interactionManager = window.MapShine?.interactionManager;
+    const mapPointsManager = window.MapShine?.mapPointsManager;
     if (!interactionManager) {
       ui.notifications.warn('Interaction manager not available');
       return;
@@ -2102,6 +2103,10 @@ export class TweakpaneManager {
       line: 'Line'
     };
 
+    // Count existing groups
+    const existingGroupCount = mapPointsManager?.groups?.size || 0;
+    const showHelpers = mapPointsManager?.showVisualHelpers || false;
+
     // Build dialog content
     const content = `
       <form>
@@ -2121,11 +2126,36 @@ export class TweakpaneManager {
             ).join('')}
           </select>
         </div>
-        <p class="notes" style="margin-top: 10px; font-size: 11px; color: #888;">
-          Click to place points. Double-click or press Enter to finish.<br>
-          Press Escape to cancel. Backspace removes last point.<br>
-          Hold Shift to disable grid snapping.
-        </p>
+        <div class="form-group">
+          <label>
+            <input type="checkbox" name="snapToGrid" style="margin-right: 6px;">
+            Snap to Grid (half-grid subdivisions)
+          </label>
+          <p class="notes" style="margin: 4px 0 0 0; font-size: 10px; color: #666;">
+            When enabled, points snap to grid. Hold Shift to temporarily toggle.
+          </p>
+        </div>
+        <hr style="margin: 12px 0; border: none; border-top: 1px solid #444;">
+        <div class="form-group" style="display: flex; justify-content: space-between; align-items: center;">
+          <span style="font-size: 11px; color: #888;">
+            ${existingGroupCount} existing group${existingGroupCount !== 1 ? 's' : ''} on this scene
+          </span>
+          <label style="font-size: 11px; cursor: pointer;">
+            <input type="checkbox" name="showExisting" ${showHelpers ? 'checked' : ''} style="margin-right: 4px;">
+            Show existing
+          </label>
+        </div>
+        <hr style="margin: 12px 0; border: none; border-top: 1px solid #444;">
+        <div style="background: #1a1a2e; padding: 10px; border-radius: 4px; margin-top: 8px;">
+          <p style="margin: 0 0 6px 0; font-size: 11px; color: #aaa; font-weight: bold;">Controls:</p>
+          <ul style="margin: 0; padding-left: 16px; font-size: 10px; color: #888; line-height: 1.6;">
+            <li><strong>Click</strong> - Place a point</li>
+            <li><strong>Double-click</strong> or <strong>Enter</strong> - Finish drawing</li>
+            <li><strong>Backspace</strong> - Remove last point</li>
+            <li><strong>Escape</strong> - Cancel drawing</li>
+            <li><strong>Shift</strong> - Toggle grid snap</li>
+          </ul>
+        </div>
       </form>
     `;
 
@@ -2139,7 +2169,15 @@ export class TweakpaneManager {
           callback: (html) => {
             const effectTarget = html.find('[name="effectTarget"]').val();
             const groupType = html.find('[name="groupType"]').val();
-            interactionManager.startMapPointDrawing(effectTarget, groupType);
+            const snapToGrid = html.find('[name="snapToGrid"]').is(':checked');
+            interactionManager.startMapPointDrawing(effectTarget, groupType, snapToGrid);
+          }
+        },
+        manage: {
+          icon: '<i class="fas fa-list"></i>',
+          label: 'Manage Existing',
+          callback: () => {
+            this.openMapPointsManagerDialog();
           }
         },
         cancel: {
@@ -2147,8 +2185,438 @@ export class TweakpaneManager {
           label: 'Cancel'
         }
       },
-      default: 'draw'
+      default: 'draw',
+      render: (html) => {
+        // Handle "Show existing" checkbox toggle
+        html.find('[name="showExisting"]').on('change', (ev) => {
+          const show = ev.target.checked;
+          if (mapPointsManager) {
+            mapPointsManager.setShowVisualHelpers(show);
+          }
+        });
+      }
     }).render(true);
+  }
+
+  /**
+   * Open a dialog to manage existing map point groups
+   */
+  openMapPointsManagerDialog() {
+    const mapPointsManager = window.MapShine?.mapPointsManager;
+    const interactionManager = window.MapShine?.interactionManager;
+    
+    if (!mapPointsManager) {
+      ui.notifications.warn('Map Points Manager not available');
+      return;
+    }
+
+    // Effect options for editing
+    const effectOptions = {
+      '': 'None',
+      smellyFlies: 'Smelly Flies',
+      fire: 'Fire Particles',
+      candleFlame: 'Candle Flame',
+      sparks: 'Sparks',
+      dust: 'Dust Motes',
+      lightning: 'Lightning',
+      pressurisedSteam: 'Pressurised Steam',
+      water: 'Water Surface',
+      cloudShadows: 'Cloud Shadows',
+      canopy: 'Canopy Shadows',
+      structuralShadows: 'Structural Shadows'
+    };
+
+    // Group type labels
+    const groupTypeLabels = {
+      area: 'Area',
+      point: 'Point',
+      line: 'Line',
+      rope: 'Rope'
+    };
+
+    // Build groups list HTML
+    const buildGroupsList = () => {
+      const groups = Array.from(mapPointsManager.groups.values());
+      
+      if (groups.length === 0) {
+        return `
+          <div style="text-align: center; padding: 20px; color: #888;">
+            <i class="fas fa-map-marker-alt" style="font-size: 24px; margin-bottom: 8px; display: block;"></i>
+            No map point groups on this scene.<br>
+            <small>Use "Draw New" to create one.</small>
+          </div>
+        `;
+      }
+
+      return groups.map(group => {
+        const color = mapPointsManager.getEffectColor(group.effectTarget);
+        const colorHex = '#' + color.toString(16).padStart(6, '0');
+        const effectLabel = effectOptions[group.effectTarget] || group.effectTarget || 'None';
+        const typeLabel = groupTypeLabels[group.type] || group.type;
+        const pointCount = group.points?.length || 0;
+        
+        return `
+          <div class="map-point-group-item" data-group-id="${group.id}" style="
+            display: flex;
+            align-items: center;
+            padding: 8px 10px;
+            margin-bottom: 6px;
+            background: #2a2a3e;
+            border-radius: 4px;
+            border-left: 4px solid ${colorHex};
+            cursor: pointer;
+            transition: background 0.15s;
+          " onmouseover="this.style.background='#3a3a4e'" onmouseout="this.style.background='#2a2a3e'">
+            <div style="flex: 1; min-width: 0;">
+              <div style="font-weight: bold; font-size: 12px; color: #ddd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                ${group.label || 'Unnamed Group'}
+              </div>
+              <div style="font-size: 10px; color: #888; margin-top: 2px;">
+                ${typeLabel} • ${effectLabel} • ${pointCount} point${pointCount !== 1 ? 's' : ''}
+              </div>
+            </div>
+            <div style="display: flex; gap: 4px; margin-left: 8px;">
+              <button type="button" class="group-action-btn group-edit-btn" data-action="edit" data-group-id="${group.id}" 
+                style="padding: 4px 8px; font-size: 10px; background: #4a4a6a; border: none; border-radius: 3px; color: #ddd; cursor: pointer;"
+                title="Edit group">
+                <i class="fas fa-edit"></i>
+              </button>
+              <button type="button" class="group-action-btn group-focus-btn" data-action="focus" data-group-id="${group.id}"
+                style="padding: 4px 8px; font-size: 10px; background: #4a4a6a; border: none; border-radius: 3px; color: #ddd; cursor: pointer;"
+                title="Focus on group">
+                <i class="fas fa-crosshairs"></i>
+              </button>
+              <button type="button" class="group-action-btn group-delete-btn" data-action="delete" data-group-id="${group.id}"
+                style="padding: 4px 8px; font-size: 10px; background: #6a3a3a; border: none; border-radius: 3px; color: #ddd; cursor: pointer;"
+                title="Delete group">
+                <i class="fas fa-trash"></i>
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    };
+
+    const content = `
+      <div class="map-points-manager-dialog">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <label style="font-size: 11px; cursor: pointer;">
+            <input type="checkbox" name="showHelpers" ${mapPointsManager.showVisualHelpers ? 'checked' : ''} style="margin-right: 6px;">
+            Show visual helpers
+          </label>
+          <span style="font-size: 11px; color: #888;">
+            ${mapPointsManager.groups.size} group${mapPointsManager.groups.size !== 1 ? 's' : ''}
+          </span>
+        </div>
+        <div class="groups-list" style="max-height: 300px; overflow-y: auto; margin-bottom: 12px;">
+          ${buildGroupsList()}
+        </div>
+      </div>
+    `;
+
+    const dialog = new Dialog({
+      title: 'Manage Map Points',
+      content,
+      buttons: {
+        drawNew: {
+          icon: '<i class="fas fa-plus"></i>',
+          label: 'Draw New',
+          callback: () => {
+            this.openMapPointDrawingDialog();
+          }
+        },
+        close: {
+          icon: '<i class="fas fa-times"></i>',
+          label: 'Close'
+        }
+      },
+      default: 'close',
+      render: (html) => {
+        // Handle show helpers toggle
+        html.find('[name="showHelpers"]').on('change', (ev) => {
+          mapPointsManager.setShowVisualHelpers(ev.target.checked);
+        });
+
+        // Handle group action buttons
+        html.find('.group-action-btn').on('click', async (ev) => {
+          ev.stopPropagation();
+          const btn = ev.currentTarget;
+          const action = btn.dataset.action;
+          const groupId = btn.dataset.groupId;
+          
+          if (action === 'delete') {
+            const group = mapPointsManager.getGroup(groupId);
+            const confirmed = await Dialog.confirm({
+              title: 'Delete Map Point Group',
+              content: `<p>Are you sure you want to delete "${group?.label || 'this group'}"?</p><p>This cannot be undone.</p>`,
+              yes: () => true,
+              no: () => false
+            });
+            
+            if (confirmed) {
+              await mapPointsManager.deleteGroup(groupId);
+              ui.notifications.info('Map point group deleted');
+              // Refresh the dialog
+              dialog.close();
+              this.openMapPointsManagerDialog();
+            }
+          } else if (action === 'edit') {
+            dialog.close();
+            this.openGroupEditDialog(groupId);
+          } else if (action === 'focus') {
+            const group = mapPointsManager.getGroup(groupId);
+            if (group && group.points && group.points.length > 0) {
+              // Calculate center of group
+              const bounds = mapPointsManager.getAreaBounds(groupId) || mapPointsManager._computeBounds(group.points);
+              if (bounds) {
+                // Pan canvas to center on group
+                canvas.pan({ x: bounds.centerX, y: bounds.centerY });
+                // Ensure helpers are visible
+                mapPointsManager.setShowVisualHelpers(true);
+                html.find('[name="showHelpers"]').prop('checked', true);
+              }
+            }
+          }
+        });
+
+        // Handle clicking on a group item (select/highlight)
+        html.find('.map-point-group-item').on('click', (ev) => {
+          if (ev.target.closest('.group-action-btn')) return;
+          
+          const groupId = ev.currentTarget.dataset.groupId;
+          const group = mapPointsManager.getGroup(groupId);
+          
+          if (group && group.points && group.points.length > 0) {
+            const bounds = mapPointsManager.getAreaBounds(groupId) || mapPointsManager._computeBounds(group.points);
+            if (bounds) {
+              canvas.pan({ x: bounds.centerX, y: bounds.centerY });
+              mapPointsManager.setShowVisualHelpers(true);
+              html.find('[name="showHelpers"]').prop('checked', true);
+            }
+          }
+        });
+      }
+    }, {
+      width: 400,
+      height: 'auto'
+    });
+    
+    dialog.render(true);
+  }
+
+  /**
+   * Open a dialog to edit a specific map point group
+   * @param {string} groupId - ID of the group to edit
+   */
+  openGroupEditDialog(groupId) {
+    const mapPointsManager = window.MapShine?.mapPointsManager;
+    if (!mapPointsManager) return;
+
+    const group = mapPointsManager.getGroup(groupId);
+    if (!group) {
+      ui.notifications.warn('Group not found');
+      return;
+    }
+
+    // Effect options
+    const effectOptions = {
+      '': 'None',
+      smellyFlies: 'Smelly Flies',
+      fire: 'Fire Particles',
+      candleFlame: 'Candle Flame',
+      sparks: 'Sparks',
+      dust: 'Dust Motes',
+      lightning: 'Lightning',
+      pressurisedSteam: 'Pressurised Steam',
+      water: 'Water Surface',
+      cloudShadows: 'Cloud Shadows',
+      canopy: 'Canopy Shadows',
+      structuralShadows: 'Structural Shadows'
+    };
+
+    // Group type options
+    const groupTypeOptions = {
+      area: 'Area (Polygon)',
+      point: 'Single Point',
+      line: 'Line'
+    };
+
+    const pointCount = group.points?.length || 0;
+
+    const content = `
+      <form class="group-edit-form">
+        <div class="form-group">
+          <label>Label</label>
+          <input type="text" name="label" value="${group.label || ''}" style="width: 100%;" placeholder="Group name">
+        </div>
+        <div class="form-group">
+          <label>Effect Type</label>
+          <select name="effectTarget" style="width: 100%;">
+            ${Object.entries(effectOptions).map(([key, label]) => 
+              `<option value="${key}" ${key === group.effectTarget ? 'selected' : ''}>${label}</option>`
+            ).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Group Type</label>
+          <select name="type" style="width: 100%;">
+            ${Object.entries(groupTypeOptions).map(([key, label]) => 
+              `<option value="${key}" ${key === group.type ? 'selected' : ''}>${label}</option>`
+            ).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>
+            <input type="checkbox" name="isEffectSource" ${group.isEffectSource ? 'checked' : ''} style="margin-right: 6px;">
+            Active (drives effect)
+          </label>
+        </div>
+        <hr style="margin: 12px 0; border: none; border-top: 1px solid #444;">
+        <div class="form-group">
+          <label>Emission Intensity</label>
+          <input type="range" name="emissionIntensity" min="0" max="1" step="0.05" 
+            value="${group.emission?.intensity ?? 1.0}" style="width: 100%;">
+          <span class="intensity-value" style="font-size: 10px; color: #888;">${((group.emission?.intensity ?? 1.0) * 100).toFixed(0)}%</span>
+        </div>
+        <hr style="margin: 12px 0; border: none; border-top: 1px solid #444;">
+        <div style="background: #1a1a2e; padding: 10px; border-radius: 4px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 11px; color: #aaa;">
+              <strong>${pointCount}</strong> point${pointCount !== 1 ? 's' : ''}
+            </span>
+            <div style="display: flex; gap: 4px;">
+              <button type="button" class="add-points-btn" style="
+                padding: 4px 10px; 
+                font-size: 10px; 
+                background: #3a5a3a; 
+                border: none; 
+                border-radius: 3px; 
+                color: #ddd; 
+                cursor: pointer;
+              ">
+                <i class="fas fa-plus"></i> Add Points
+              </button>
+              <button type="button" class="clear-points-btn" style="
+                padding: 4px 10px; 
+                font-size: 10px; 
+                background: #6a3a3a; 
+                border: none; 
+                border-radius: 3px; 
+                color: #ddd; 
+                cursor: pointer;
+              ">
+                <i class="fas fa-eraser"></i> Clear
+              </button>
+            </div>
+          </div>
+          <p style="margin: 8px 0 0 0; font-size: 10px; color: #666;">
+            Click "Add Points" to add more points to this group.
+          </p>
+        </div>
+      </form>
+    `;
+
+    const dialog = new Dialog({
+      title: `Edit: ${group.label || 'Map Point Group'}`,
+      content,
+      buttons: {
+        save: {
+          icon: '<i class="fas fa-save"></i>',
+          label: 'Save',
+          callback: async (html) => {
+            const updates = {
+              label: html.find('[name="label"]').val(),
+              effectTarget: html.find('[name="effectTarget"]').val(),
+              type: html.find('[name="type"]').val(),
+              isEffectSource: html.find('[name="isEffectSource"]').is(':checked'),
+              emission: {
+                ...group.emission,
+                intensity: parseFloat(html.find('[name="emissionIntensity"]').val())
+              }
+            };
+            
+            await mapPointsManager.updateGroup(groupId, updates);
+            ui.notifications.info('Group updated');
+            
+            // Refresh visual helpers if visible
+            if (mapPointsManager.showVisualHelpers) {
+              mapPointsManager.setShowVisualHelpers(false);
+              mapPointsManager.setShowVisualHelpers(true);
+            }
+          }
+        },
+        back: {
+          icon: '<i class="fas fa-arrow-left"></i>',
+          label: 'Back',
+          callback: () => {
+            this.openMapPointsManagerDialog();
+          }
+        },
+        delete: {
+          icon: '<i class="fas fa-trash"></i>',
+          label: 'Delete',
+          callback: async () => {
+            const confirmed = await Dialog.confirm({
+              title: 'Delete Map Point Group',
+              content: `<p>Are you sure you want to delete "${group.label || 'this group'}"?</p>`,
+              yes: () => true,
+              no: () => false
+            });
+            
+            if (confirmed) {
+              await mapPointsManager.deleteGroup(groupId);
+              ui.notifications.info('Group deleted');
+              this.openMapPointsManagerDialog();
+            }
+          }
+        }
+      },
+      default: 'save',
+      render: (html) => {
+        // Update intensity display
+        html.find('[name="emissionIntensity"]').on('input', (ev) => {
+          const val = parseFloat(ev.target.value);
+          html.find('.intensity-value').text(`${(val * 100).toFixed(0)}%`);
+        });
+
+        // Add points button
+        html.find('.add-points-btn').on('click', () => {
+          dialog.close();
+          const interactionManager = window.MapShine?.interactionManager;
+          if (interactionManager?.startAddPointsToGroup) {
+            interactionManager.startAddPointsToGroup(groupId);
+          }
+        });
+
+        // Clear all points button
+        html.find('.clear-points-btn').on('click', async () => {
+          const confirmed = await Dialog.confirm({
+            title: 'Clear All Points',
+            content: '<p>Remove all points from this group? This cannot be undone.</p>',
+            yes: () => true,
+            no: () => false
+          });
+          
+          if (confirmed) {
+            await mapPointsManager.updateGroup(groupId, { points: [] });
+            ui.notifications.info('All points cleared');
+            dialog.close();
+            this.openGroupEditDialog(groupId);
+          }
+        });
+
+        // Focus on group
+        const bounds = mapPointsManager.getAreaBounds(groupId) || mapPointsManager._computeBounds(group.points);
+        if (bounds) {
+          canvas.pan({ x: bounds.centerX, y: bounds.centerY });
+        }
+        mapPointsManager.setShowVisualHelpers(true);
+      }
+    }, {
+      width: 350
+    });
+
+    dialog.render(true);
   }
 }
 

@@ -43,18 +43,20 @@ const WALK_STATE = {
  */
 const DEFAULT_FLY_CONFIG = {
   enabled: true,
-  maxParticles: 8,
+  maxParticles: 4,
+  // Global behavior speed multiplier (affects all states)
+  speedMultiplier: 4.0,
   
   // Flying behavior
   flying: {
     spawnDuration: 0.5,
     noiseStrength: 1500,
-    tetherStrength: 20.0,    // Stronger tether to keep flies in area
+    tetherStrength: 20.0,
     maxSpeed: 600,
     drag: 0.85,
     landChance: 0.08,
     landingDuration: 0.8,
-    flyHeight: 80  // Z offset above ground when flying
+    flyHeight: 80
   },
   
   // Walking behavior
@@ -70,8 +72,9 @@ const DEFAULT_FLY_CONFIG = {
   
   // Visual properties
   visual: {
-    flyingScale: 22,
-    walkingScale: 18,
+    flyingScale: 18,
+    walkingScale: 16,
+    motionBlurEnabled: true,
     motionBlurStrength: 0.02,
     motionBlurMaxLength: 3,
     fadeInDuration: 0.5,     // Seconds to fade in
@@ -216,14 +219,25 @@ class FlyBehavior {
     if (!ud.home) ud.home = { x: particle.position.x, y: particle.position.y };
     if (!ud.walkState) ud.walkState = WALK_STATE.IDLE;
     if (typeof ud.rotation !== 'number') ud.rotation = Math.random() * Math.PI * 2;
+    
+    // Burst-based flight: flies dart in a direction, then pick a new one
+    if (typeof ud.burstTimer !== 'number') ud.burstTimer = 0;
+    if (typeof ud.burstDuration !== 'number') ud.burstDuration = 0;
+    if (!ud.burstDir) ud.burstDir = { x: 0, y: 0 };
   }
 
   update(particle, delta, system) {
     if (!particle || !particle.userData) return;
     
     // Clamp delta to prevent physics explosions
-    const dt = Math.min(Math.max(delta, 0), 0.1);
-    if (dt <= 0.0001) return;
+    const rawDt = Math.min(Math.max(delta, 0), 0.1);
+    if (rawDt <= 0.0001) return;
+
+    // Apply per-effect speed multiplier so all states run faster/slower
+    const speedMul = (this.config && typeof this.config.speedMultiplier === 'number')
+      ? this.config.speedMultiplier
+      : 1.0;
+    const dt = rawDt * speedMul;
     
     const ud = particle.userData;
     ud.stateTimer += dt;
@@ -254,6 +268,26 @@ class FlyBehavior {
     
     // Apply fade in/out via color alpha
     this._applyFade(particle, dt);
+    
+    // Set UV tile based on state (0 = flying, 1 = landed/walking)
+    this._applyTextureTile(particle);
+  }
+  
+  /**
+   * Set particle.uvTile based on current state
+   * Frame 0 = flying texture, Frame 1 = landed texture
+   * @private
+   */
+  _applyTextureTile(particle) {
+    const ud = particle.userData;
+    
+    // Walking and landing states use landed texture (frame 1)
+    // All other states use flying texture (frame 0)
+    if (ud.state === FLY_STATE.WALKING || ud.state === FLY_STATE.LANDING) {
+      particle.uvTile = 1;
+    } else {
+      particle.uvTile = 0;
+    }
   }
   
   /**
@@ -317,7 +351,8 @@ class FlyBehavior {
   }
 
   /**
-   * Flying state: buzzing around with noise + tether forces
+   * Flying state: burst-based darting with sharp direction changes
+   * Real flies move in sudden jerky arcs, not smooth curves
    * @private
    */
   _updateFlying(particle, dt) {
@@ -325,21 +360,62 @@ class FlyBehavior {
     const cfg = this.config.flying;
     const groundZ = this._getGroundZ();
     
-    // 1. Random noise force (buzzing)
-    const noiseX = (Math.random() - 0.5) * 2 * cfg.noiseStrength;
-    const noiseY = (Math.random() - 0.5) * 2 * cfg.noiseStrength;
+    // === BURST-BASED MOVEMENT ===
+    // Flies dart in a direction for a short burst, then pick a new direction
+    ud.burstTimer -= dt;
     
-    // 2. Tether force (attraction to home)
+    if (ud.burstTimer <= 0) {
+      // Pick a new burst direction and duration
+      // Burst duration: 0.05 - 0.25 seconds (very short, frantic)
+      ud.burstDuration = 0.05 + Math.random() * 0.2;
+      ud.burstTimer = ud.burstDuration;
+      
+      // New random direction with some bias toward home if far away
+      const dx = ud.home.x - particle.position.x;
+      const dy = ud.home.y - particle.position.y;
+      const distFromHome = Math.hypot(dx, dy) || 1;
+      
+      // Random angle, but bias toward home based on distance and tether strength
+      // Tether strength 5 = very weak bias, 50 = strong bias
+      const homeBias = Math.min(1.0, (distFromHome / 200) * (cfg.tetherStrength / 25));
+      const homeAngle = Math.atan2(dy, dx);
+      const randomAngle = Math.random() * Math.PI * 2;
+      
+      // Blend between random and home-directed based on distance
+      const finalAngle = randomAngle + homeBias * this._angleDiff(randomAngle, homeAngle) * 0.6;
+      
+      // Burst speed varies - sometimes fast dart, sometimes slower drift
+      const burstSpeed = cfg.noiseStrength * (0.3 + Math.random() * 0.7);
+      
+      ud.burstDir.x = Math.cos(finalAngle) * burstSpeed;
+      ud.burstDir.y = Math.sin(finalAngle) * burstSpeed;
+    }
+    
+    // Apply burst force (strong at start of burst, fades)
+    const burstProgress = 1 - (ud.burstTimer / ud.burstDuration);
+    const burstStrength = 1 - burstProgress * 0.5; // Fade to 50% over burst
+    
+    ud.velocity.x += ud.burstDir.x * burstStrength * dt;
+    ud.velocity.y += ud.burstDir.y * burstStrength * dt;
+    
+    // === SOFT TETHER (only when far from home) ===
     const dx = ud.home.x - particle.position.x;
     const dy = ud.home.y - particle.position.y;
-    const tetherX = dx * cfg.tetherStrength;
-    const tetherY = dy * cfg.tetherStrength;
+    const dist = Math.hypot(dx, dy) || 1;
     
-    // 3. Apply forces to velocity
-    ud.velocity.x += (noiseX + tetherX) * dt;
-    ud.velocity.y += (noiseY + tetherY) * dt;
+    // Tether only kicks in beyond a threshold distance
+    const tetherThreshold = 100;
+    if (dist > tetherThreshold) {
+      const nx = dx / dist;
+      const ny = dy / dist;
+      // Gentle pull, scaled by how far beyond threshold
+      const overDist = dist - tetherThreshold;
+      const tetherForce = overDist * cfg.tetherStrength * 0.02;
+      ud.velocity.x += nx * tetherForce * dt;
+      ud.velocity.y += ny * tetherForce * dt;
+    }
     
-    // 4. Speed limit
+    // === SPEED LIMIT ===
     const speed = Math.hypot(ud.velocity.x, ud.velocity.y);
     if (speed > cfg.maxSpeed) {
       const ratio = cfg.maxSpeed / speed;
@@ -347,12 +423,12 @@ class FlyBehavior {
       ud.velocity.y *= ratio;
     }
     
-    // 5. Drag
-    const dragFactor = 1 - cfg.drag * dt;
+    // === DRAG (lower than before for snappier movement) ===
+    const dragFactor = 1 - cfg.drag * 0.5 * dt;
     ud.velocity.x *= dragFactor;
     ud.velocity.y *= dragFactor;
     
-    // 6. Integrate position
+    // === INTEGRATE POSITION ===
     particle.position.x += ud.velocity.x * dt;
     particle.position.y += ud.velocity.y * dt;
     
@@ -361,7 +437,9 @@ class FlyBehavior {
     
     // Update rotation to face movement direction
     if (speed > 10) {
-      ud.rotation = Math.atan2(ud.velocity.y, ud.velocity.x);
+      // Snap rotation more quickly for jerky feel
+      const targetRot = Math.atan2(ud.velocity.y, ud.velocity.x);
+      ud.rotation = this._lerpAngle(ud.rotation, targetRot, dt * 12);
     }
     
     // Random chance to land
@@ -595,6 +673,19 @@ class FlyBehavior {
     const ud = particle.userData;
     const cfg = this.config.visual;
     
+    // Optional: allow disabling motion blur entirely for performance / style
+    if (cfg.motionBlurEnabled === false) {
+      const baseSize = (ud.state === FLY_STATE.WALKING) ? cfg.walkingScale : cfg.flyingScale;
+      if (particle.size && typeof particle.size.set === 'function') {
+        particle.size.set(baseSize, baseSize, baseSize);
+      } else if (particle.size && typeof particle.size === 'object') {
+        particle.size.x = baseSize;
+        particle.size.y = baseSize;
+        particle.size.z = baseSize;
+      }
+      return;
+    }
+
     let targetSize;
     if (ud.state === FLY_STATE.WALKING) {
       // No motion blur when walking
@@ -696,7 +787,7 @@ export class SmellyFliesEffect extends EffectBase {
           min: 1,
           max: 30,
           step: 1,
-          default: 8
+          default: 4
         },
         'flying.noiseStrength': {
           type: 'slider',
@@ -760,7 +851,7 @@ export class SmellyFliesEffect extends EffectBase {
           min: 10,
           max: 60,
           step: 1,
-          default: 22
+          default: 18
         },
         'visual.walkingScale': {
           type: 'slider',
@@ -768,7 +859,20 @@ export class SmellyFliesEffect extends EffectBase {
           min: 10,
           max: 60,
           step: 1,
-          default: 18
+          default: 16
+        },
+        'visual.motionBlurEnabled': {
+          type: 'boolean',
+          label: 'Motion Blur',
+          default: true
+        },
+        speedMultiplier: {
+          type: 'slider',
+          label: 'Speed',
+          min: 0.25,
+          max: 4.0,
+          step: 0.05,
+          default: 4.0
         }
       }
     };
@@ -797,6 +901,12 @@ export class SmellyFliesEffect extends EffectBase {
     
     /** @type {THREE.Texture} */
     this.flyTexture = null;
+    
+    /** @type {THREE.Texture} */
+    this.flyLandedTexture = null;
+    
+    /** @type {THREE.Texture} */
+    this.atlasTexture = null;  // Combined 2-frame atlas
     
     /** @type {MapPointsManager} */
     this.mapPointsManager = null;
@@ -845,41 +955,120 @@ export class SmellyFliesEffect extends EffectBase {
   }
 
   /**
-   * Load the fly sprite texture
+   * Load both fly textures and create a 2-frame atlas
+   * Frame 0 = flying, Frame 1 = landed/walking
    * @private
    */
   async _loadTexture() {
     const THREE = window.THREE;
-    const texturePath = 'modules/map-shine-advanced/assets/fly.webp';
+    const flyingPath = 'modules/map-shine-advanced/assets/fly.webp';
+    const landedPath = 'modules/map-shine-advanced/assets/fly_landed.webp';
     
-    return new Promise((resolve) => {
-      const loader = new THREE.TextureLoader();
+    // Load both textures
+    const loader = new THREE.TextureLoader();
+    
+    const loadTexture = (path) => new Promise((resolve) => {
       loader.load(
-        texturePath,
+        path,
         (texture) => {
           texture.minFilter = THREE.LinearFilter;
           texture.magFilter = THREE.LinearFilter;
-          this.flyTexture = texture;
-          log.debug('Fly texture loaded');
-          resolve();
+          resolve(texture);
         },
         undefined,
         (err) => {
-          log.warn('Failed to load fly texture, using fallback:', err);
-          // Create a simple fallback texture
-          const canvas = document.createElement('canvas');
-          canvas.width = 32;
-          canvas.height = 32;
-          const ctx = canvas.getContext('2d');
-          ctx.fillStyle = '#222';
-          ctx.beginPath();
-          ctx.ellipse(16, 16, 12, 8, 0, 0, Math.PI * 2);
-          ctx.fill();
-          this.flyTexture = new THREE.CanvasTexture(canvas);
-          resolve();
+          log.warn(`Failed to load texture ${path}:`, err);
+          resolve(null);
         }
       );
     });
+    
+    const [flyingTex, landedTex] = await Promise.all([
+      loadTexture(flyingPath),
+      loadTexture(landedPath)
+    ]);
+    
+    this.flyTexture = flyingTex;
+    this.flyLandedTexture = landedTex;
+    
+    // Create a 2-frame horizontal atlas (side by side)
+    // Frame 0 (left) = flying, Frame 1 (right) = landed
+    if (flyingTex && landedTex) {
+      this.atlasTexture = this._createAtlas(flyingTex, landedTex);
+      log.debug('Fly atlas texture created (2 frames)');
+    } else if (flyingTex) {
+      // Fallback: use flying texture for both frames
+      this.atlasTexture = this._createAtlas(flyingTex, flyingTex);
+      log.warn('Using flying texture for both frames (landed texture missing)');
+    } else {
+      // Create fallback
+      const canvas = document.createElement('canvas');
+      canvas.width = 64;
+      canvas.height = 32;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#222';
+      // Frame 0 (flying)
+      ctx.beginPath();
+      ctx.ellipse(16, 16, 12, 8, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Frame 1 (landed)
+      ctx.beginPath();
+      ctx.ellipse(48, 16, 10, 6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      this.atlasTexture = new THREE.CanvasTexture(canvas);
+      this.atlasTexture.minFilter = THREE.LinearFilter;
+      this.atlasTexture.magFilter = THREE.LinearFilter;
+      log.warn('Using fallback fly atlas');
+    }
+  }
+  
+  /**
+   * Create a horizontal 2-frame atlas from two textures
+   * @param {THREE.Texture} tex1 - Left frame (flying)
+   * @param {THREE.Texture} tex2 - Right frame (landed)
+   * @returns {THREE.Texture}
+   * @private
+   */
+  _createAtlas(tex1, tex2) {
+    const THREE = window.THREE;
+    
+    // Get image dimensions from the first texture
+    const img1 = tex1 && tex1.image;
+    const img2 = tex2 && tex2.image;
+    
+    if (!img1) {
+      log.warn('Cannot create atlas: base flying texture image not loaded');
+      return tex1;
+    }
+    
+    const w = img1.width;
+    const h = img1.height;
+    
+    // Create canvas for atlas (2x width)
+    const canvas = document.createElement('canvas');
+    canvas.width = w * 2;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    
+    // Draw frame 0 (flying) on left
+    ctx.drawImage(img1, 0, 0, w, h);
+    
+    // Draw frame 1 (landed) on right if available; otherwise fall back
+    // to a solid color so tile 1 is still visually distinct.
+    if (img2) {
+      ctx.drawImage(img2, w, 0, w, h);
+    } else {
+      ctx.fillStyle = '#ff00ff';
+      ctx.fillRect(w, 0, w, h);
+      log.warn('Landed texture image missing; using solid debug color for atlas frame 1');
+    }
+    
+    const atlas = new THREE.CanvasTexture(canvas);
+    atlas.minFilter = THREE.LinearFilter;
+    atlas.magFilter = THREE.LinearFilter;
+    atlas.needsUpdate = true;
+    
+    return atlas;
   }
 
   /**
@@ -912,7 +1101,7 @@ export class SmellyFliesEffect extends EffectBase {
     // Dispose existing systems
     this._disposeSystems();
     
-    if (!this.mapPointsManager || !this.batchRenderer || !this.flyTexture) {
+    if (!this.mapPointsManager || !this.batchRenderer || !this.atlasTexture) {
       return;
     }
     
@@ -950,13 +1139,13 @@ export class SmellyFliesEffect extends EffectBase {
    */
   _createFlySystem(area) {
     const THREE = window.THREE;
-    if (!THREE || !this.flyTexture) return null;
+    if (!THREE || !this.atlasTexture) return null;
     
     const cfg = this.params;
     
-    // Create material
+    // Create material using the 2-frame atlas
     const material = new THREE.MeshBasicMaterial({
-      map: this.flyTexture,
+      map: this.atlasTexture,
       transparent: true,
       depthWrite: false,
       depthTest: false,
@@ -983,8 +1172,8 @@ export class SmellyFliesEffect extends EffectBase {
       startSpeed: new ConstantValue(0),
       startSize: new IntervalValue(cfg.visual.flyingScale * 0.9, cfg.visual.flyingScale * 1.1),
       startColor: new ColorRange(
-        new Vector4(0.15, 0.12, 0.1, 1.0),
-        new Vector4(0.25, 0.2, 0.15, 1.0)
+        new Vector4(1.0, 1.0, 1.0, 1.0),  // White tint, let texture show through
+        new Vector4(1.0, 1.0, 1.0, 1.0)
       ),
       worldSpace: true,
       maxParticles: maxParticles,
@@ -993,6 +1182,10 @@ export class SmellyFliesEffect extends EffectBase {
       material: material,
       renderMode: RenderMode.BillBoard,
       renderOrder: 52,
+      // UV tile atlas: 2 columns (flying, landed), 1 row
+      uTileCount: 2,
+      vTileCount: 1,
+      startTileIndex: new ConstantValue(1),  // Start with flying frame
       behaviors: [
         new FlyBehavior(cfg)
       ]
@@ -1026,7 +1219,7 @@ export class SmellyFliesEffect extends EffectBase {
    */
   _createPointFlySystem(group) {
     const THREE = window.THREE;
-    if (!THREE || !this.flyTexture || !group.points || group.points.length === 0) return null;
+    if (!THREE || !this.atlasTexture || !group.points || group.points.length === 0) return null;
     
     const cfg = this.params;
     const point = group.points[0]; // Use first point as center
@@ -1053,9 +1246,9 @@ export class SmellyFliesEffect extends EffectBase {
       height: radius * 2
     };
     
-    // Create material
+    // Create material using the 2-frame atlas
     const material = new THREE.MeshBasicMaterial({
-      map: this.flyTexture,
+      map: this.atlasTexture,
       transparent: true,
       depthWrite: false,
       depthTest: false,
@@ -1078,8 +1271,8 @@ export class SmellyFliesEffect extends EffectBase {
       startSpeed: new ConstantValue(0),
       startSize: new IntervalValue(cfg.visual.flyingScale * 0.9, cfg.visual.flyingScale * 1.1),
       startColor: new ColorRange(
-        new Vector4(0.15, 0.12, 0.1, 1.0),
-        new Vector4(0.25, 0.2, 0.15, 1.0)
+        new Vector4(1.0, 1.0, 1.0, 1.0),  // White tint, let texture show through
+        new Vector4(1.0, 1.0, 1.0, 1.0)
       ),
       worldSpace: true,
       maxParticles: maxParticles,
@@ -1088,6 +1281,10 @@ export class SmellyFliesEffect extends EffectBase {
       material: material,
       renderMode: RenderMode.BillBoard,
       renderOrder: 52,
+      // UV tile atlas: 2 columns (flying, landed), 1 row
+      uTileCount: 2,
+      vTileCount: 1,
+      startTileIndex: new ConstantValue(0),  // Start with flying frame
       behaviors: [
         new FlyBehavior(cfg)
       ]

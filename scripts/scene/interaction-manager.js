@@ -1283,15 +1283,6 @@ export class InteractionManager {
    */
   onPointerDown(event) {
     try {
-        // DEBUG: Raw console log to verify handler execution independent of
-        // Map Shine's logging utility or input routing.
-        console.log('Map Shine Advanced | InteractionManager | RAW onPointerDown', {
-          button: event.button,
-          clientX: event.clientX,
-          clientY: event.clientY,
-          target: event.target
-        });
-
         if (event.button !== 0 && event.button !== 2) return;
 
         // Handle Map Point Drawing Mode (takes priority over other interactions)
@@ -1344,7 +1335,7 @@ export class InteractionManager {
         const activeTool = game.activeTool;
         
         // DEBUG: Log InputRouter state to diagnose why clicks aren't being processed
-        log.info('onPointerDown InputRouter check', {
+        log.debug('onPointerDown InputRouter check', {
           hasInputRouter: !!inputRouter,
           currentMode: inputRouter?.currentMode,
           shouldThreeReceive: inputRouter?.shouldThreeReceiveInput?.(),
@@ -1358,7 +1349,7 @@ export class InteractionManager {
         
         if (inputRouter && !inputRouter.shouldThreeReceiveInput()) {
           if (shouldOverrideRouter) {
-            log.info('onPointerDown overriding InputRouter block on Tokens layer; forcing THREE mode');
+            log.debug('onPointerDown overriding InputRouter block on Tokens layer; forcing THREE mode');
             try {
               inputRouter.forceThree?.('InteractionManager token click');
             } catch (e) {
@@ -1366,12 +1357,12 @@ export class InteractionManager {
             }
             // Fall through and continue handling the click.
           } else {
-            log.info('onPointerDown BLOCKED by InputRouter (PIXI mode active)');
+            log.debug('onPointerDown BLOCKED by InputRouter (PIXI mode active)');
             return;
           }
         }
 
-        log.info('onPointerDown received', {
+        log.debug('onPointerDown received', {
           button: event.button,
           clientX: event.clientX,
           clientY: event.clientY,
@@ -1382,19 +1373,19 @@ export class InteractionManager {
         this.updateMouseCoords(event);
         this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
 
-        log.info('onPointerDown mouse NDC', {
+        log.debug('onPointerDown mouse NDC', {
           ndcX: this.mouse.x,
           ndcY: this.mouse.y
         });
         
         const tokenSprites = this.tokenManager.getAllTokenSprites();
-        log.info('onPointerDown tokenSprites count', { count: tokenSprites.length });
+        log.debug('onPointerDown tokenSprites count', { count: tokenSprites.length });
         const wallGroup = this.wallManager.wallGroup;
 
         // Handle Right Click (Potential HUD or Door Lock/Unlock)
         if (event.button === 2) {
             const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
-            log.info('onPointerDown right-click wallIntersects', { count: wallIntersects.length });
+            log.debug('onPointerDown right-click wallIntersects', { count: wallIntersects.length });
             if (wallIntersects.length > 0) {
                 const hit = wallIntersects[0];
                 let object = hit.object;
@@ -1411,21 +1402,15 @@ export class InteractionManager {
             }
 
             // Raycast against tokens for HUD
-            const intersects = this.raycaster.intersectObjects(tokenSprites, false);
-            log.info('onPointerDown right-click tokenIntersects', { count: intersects.length });
-            if (intersects.length > 0) {
-                const hit = intersects[0];
+            const tokenIntersects = this.raycaster.intersectObjects(tokenSprites, false);
+            log.debug('onPointerDown right-click tokenIntersects', { count: tokenIntersects.length });
+            if (tokenIntersects.length > 0) {
+                const hit = tokenIntersects[0];
                 const sprite = hit.object;
                 const tokenDoc = sprite.userData.tokenDoc;
-                
+
                 log.debug(`Right click down on token: ${tokenDoc.name} (${tokenDoc.id})`);
 
-                // Only if we have permission (isOwner usually required for HUD)
-                // But Foundry allows right clicking to see non-interactive HUD parts? 
-                // Usually checks token.isOwner for full HUD.
-                // We'll initiate the click state and let HUD bind check permissions or we check here.
-                // Foundry: _canHUD -> isOwner.
-                
                 this.rightClickState.active = true;
                 this.rightClickState.tokenId = tokenDoc.id;
                 this.rightClickState.startPos.set(event.clientX, event.clientY);
@@ -1435,7 +1420,7 @@ export class InteractionManager {
                 // CameraController needs to see this event to start Panning (Right Drag).
                 // If the user moves the mouse > threshold, rightClickState.active becomes false
                 // and the HUD won't open (standard Foundry behavior).
-                return; 
+                return;
             } else {
                 log.debug('Right click down: No token hit');
             }
@@ -1449,7 +1434,7 @@ export class InteractionManager {
         const shouldCheckWalls = !isTokensLayer && (isWallLayer || game.user.isGM);
         const wallIntersects = shouldCheckWalls ? this.raycaster.intersectObject(wallGroup, true) : [];
 
-        log.info('onPointerDown wallIntersects', {
+        log.debug('onPointerDown wallIntersects', {
           shouldCheckWalls,
           count: wallIntersects.length
         });
@@ -1634,7 +1619,7 @@ export class InteractionManager {
 
         const intersects = this.raycaster.intersectObjects(tokenSprites, false);
 
-        log.info('onPointerDown left-click tokenIntersects', { count: intersects.length });
+        log.debug('onPointerDown left-click tokenIntersects', { count: intersects.length });
 
         if (intersects.length > 0) {
           // Hit something
@@ -3030,6 +3015,18 @@ export class InteractionManager {
         id = sprite.userData.tokenDoc.id;
         isToken = true;
         this.tokenManager.setTokenSelection(id, true);
+
+        // Keep Foundry's native token control state in sync.
+        // Drag-select previously only updated MapShine selection, which meant
+        // Foundry never fired controlToken/perception updates and fog/vision could break.
+        try {
+          const fvttToken = canvas.tokens?.get(id);
+          if (fvttToken && !fvttToken.controlled) {
+            fvttToken.control({ releaseOthers: false });
+          }
+        } catch (_) {
+          // Ignore control errors
+        }
     } else if (sprite.userData.lightId) {
         id = sprite.userData.lightId;
         // TODO: Visual selection for lights

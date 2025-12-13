@@ -169,7 +169,7 @@ export class WindowLightEffect extends EffectBase {
           type: 'slider',
           label: 'Intensity',
           min: 0.0,
-          max: 5.0,
+          max: 25.0,
           step: 0.05,
           default: 3.0
         },
@@ -297,7 +297,7 @@ export class WindowLightEffect extends EffectBase {
           type: 'slider',
           label: 'RGB Shift',
           min: 0.0,
-          max: 2.0,
+          max: 5.0,
           step: 0.01,
           default: 2.0
         },

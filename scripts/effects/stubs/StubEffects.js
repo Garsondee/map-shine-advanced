@@ -62,13 +62,11 @@ class StubEffect extends EffectBase {
 
 // --- Atmospheric & Environmental Effects ---
 
-export class CloudShadowsEffect extends StubEffect { constructor() { super('cloud-shadows', 'Cloud Shadows', 'atmospheric'); } }
 export class TimeOfDayEffect extends StubEffect { constructor() { super('time-of-day', 'Time of Day', 'atmospheric'); } }
 export class WeatherEffect extends StubEffect { constructor() { super('weather', 'Weather System', 'atmospheric'); } }
 export class HeatDistortionEffect extends StubEffect { constructor() { super('heat-distortion', 'Heat Distortion', 'atmospheric'); } }
 export class LightningEffect extends StubEffect { constructor() { super('lightning', 'Lightning', 'atmospheric'); } }
 export class AmbientEffect extends StubEffect { constructor() { super('ambient', 'Ambient Lighting', 'atmospheric'); } }
-export class CloudDepthEffect extends StubEffect { constructor() { super('cloud-depth', 'Cloud Depth', 'atmospheric'); } }
 
 // --- Surface & Material Effects ---
 

@@ -44,6 +44,9 @@ export class CloudEffect extends EffectBase {
     this.cloudShadowTarget = null;
 
     /** @type {THREE.WebGLRenderTarget|null} */
+    this.cloudTopDensityTarget = null;
+
+    /** @type {THREE.WebGLRenderTarget|null} */
     this.cloudTopTarget = null;
 
     /** @type {THREE.ShaderMaterial|null} */
@@ -70,6 +73,18 @@ export class CloudEffect extends EffectBase {
     // Accumulated wind offset for cloud drift
     this._windOffset = null; // Lazy init as THREE.Vector2
 
+    // For cloud-top shading: a modified sun direction so shading is visible even at midday
+    this._shadeSunDir = null; // Lazy init as THREE.Vector2
+
+    // Multi-layer wind offsets
+    this._layerWindOffsets = null; // Lazy init as Array<THREE.Vector2>
+    this._layerSpeedMult = [0.6, 0.85, 1.0, 1.15, 1.3];
+    this._layerDirAngle = [-0.03, -0.015, 0.0, 0.015, 0.03];
+    this._layerParallax = [0.05, 0.12, 0.2, 0.28, 0.35];
+    this._layerCoverMult = [0.35, 0.65, 1.0, 0.65, 0.35];
+    this._layerNoiseScaleMult = [0.85, 0.95, 1.0, 1.15, 1.3];
+    this._layerWeight = [0.35, 0.65, 1.0, 0.65, 0.35];
+
     this.params = {
       enabled: true,
 
@@ -80,12 +95,20 @@ export class CloudEffect extends EffectBase {
       cloudSharpness: 0.5,    // Edge sharpness (0 = soft, 1 = hard)
       cloudBrightness: 1.0,   // Cloud top brightness
 
+      // Cloud top shading
+      cloudTopShadingEnabled: true,
+      cloudTopShadingStrength: 1.0,
+      cloudTopNormalStrength: 1.0,
+      cloudTopAOIntensity: 1.0,
+      cloudTopEdgeHighlight: 1.0,
+
       // Shadow settings
       shadowOpacity: 0.4,     // How dark cloud shadows are
       shadowSoftness: 2.0,    // Blur amount for shadow edges
       shadowOffsetScale: 0.1, // How far shadows offset based on sun angle
 
       // Cloud top visibility (zoom-dependent)
+      cloudTopMode: 'aboveEverything',
       cloudTopOpacity: 0.3,   // Max opacity of visible cloud layer (0 = shadows only)
       cloudTopFadeStart: 0.3, // Zoom level where cloud tops start appearing
       cloudTopFadeEnd: 0.8,   // Zoom level where cloud tops are fully visible
@@ -93,6 +116,48 @@ export class CloudEffect extends EffectBase {
       // Wind drift
       windInfluence: 1.0,     // How much wind affects cloud movement
       driftSpeed: 0.02,       // Base drift speed multiplier
+
+      layerParallaxBase: 0.2,
+
+      layer1Enabled: true,
+      layer1Opacity: 0.35,
+      layer1Coverage: 0.35,
+      layer1Scale: 0.85,
+      layer1ParallaxMult: 0.25,
+      layer1SpeedMult: 0.6,
+      layer1DirDeg: -1.7,
+
+      layer2Enabled: true,
+      layer2Opacity: 0.65,
+      layer2Coverage: 0.65,
+      layer2Scale: 0.95,
+      layer2ParallaxMult: 0.6,
+      layer2SpeedMult: 0.85,
+      layer2DirDeg: -0.86,
+
+      layer3Enabled: true,
+      layer3Opacity: 1.0,
+      layer3Coverage: 1.0,
+      layer3Scale: 1.0,
+      layer3ParallaxMult: 1.0,
+      layer3SpeedMult: 1.0,
+      layer3DirDeg: 0.0,
+
+      layer4Enabled: true,
+      layer4Opacity: 0.65,
+      layer4Coverage: 0.65,
+      layer4Scale: 1.15,
+      layer4ParallaxMult: 1.4,
+      layer4SpeedMult: 1.15,
+      layer4DirDeg: 0.86,
+
+      layer5Enabled: true,
+      layer5Opacity: 0.35,
+      layer5Coverage: 0.35,
+      layer5Scale: 1.3,
+      layer5ParallaxMult: 1.75,
+      layer5SpeedMult: 1.3,
+      layer5DirDeg: 1.7,
 
       // Minimum shadow brightness (prevents crushing blacks)
       minShadowBrightness: 0.25
@@ -114,6 +179,19 @@ export class CloudEffect extends EffectBase {
       const outdoorsData = assetBundle.masks.find(m => m.id === 'outdoors' || m.type === 'outdoors');
       this.outdoorsMask = outdoorsData?.texture || null;
     }
+  }
+
+  /**
+   * GLSL-like smoothstep implemented in JS.
+   * @param {number} edge0
+   * @param {number} edge1
+   * @param {number} x
+   * @returns {number}
+   * @private
+   */
+  _smoothstep(edge0, edge1, x) {
+    const t = Math.max(0, Math.min(1, (x - edge0) / Math.max(edge1 - edge0, 1e-6)));
+    return t * t * (3 - 2 * t);
   }
 
   /**
@@ -141,7 +219,14 @@ export class CloudEffect extends EffectBase {
           label: 'Cloud Tops (Zoom)',
           type: 'inline',
           separator: true,
-          parameters: ['cloudTopOpacity', 'cloudTopFadeStart', 'cloudTopFadeEnd']
+          parameters: ['cloudTopMode', 'cloudTopOpacity', 'cloudTopFadeStart', 'cloudTopFadeEnd', 'cloudBrightness']
+        },
+        {
+          name: 'cloud-top-shading',
+          label: 'Cloud Top Shading',
+          type: 'inline',
+          separator: false,
+          parameters: ['cloudTopShadingEnabled', 'cloudTopShadingStrength', 'cloudTopNormalStrength', 'cloudTopAOIntensity', 'cloudTopEdgeHighlight']
         },
         {
           name: 'wind',
@@ -149,6 +234,53 @@ export class CloudEffect extends EffectBase {
           type: 'inline',
           separator: true,
           parameters: ['windInfluence', 'driftSpeed']
+        },
+        {
+          name: 'layer-base',
+          label: 'Cloud Layers (Base)',
+          type: 'inline',
+          separator: true,
+          parameters: ['layerParallaxBase']
+        },
+        {
+          name: 'layer-1',
+          label: 'Layer 1',
+          type: 'folder',
+          expanded: false,
+          separator: false,
+          parameters: ['layer1Enabled', 'layer1Opacity', 'layer1Scale', 'layer1Coverage', 'layer1ParallaxMult', 'layer1SpeedMult', 'layer1DirDeg']
+        },
+        {
+          name: 'layer-2',
+          label: 'Layer 2',
+          type: 'folder',
+          expanded: false,
+          separator: false,
+          parameters: ['layer2Enabled', 'layer2Opacity', 'layer2Scale', 'layer2Coverage', 'layer2ParallaxMult', 'layer2SpeedMult', 'layer2DirDeg']
+        },
+        {
+          name: 'layer-3',
+          label: 'Layer 3 (Main)',
+          type: 'folder',
+          expanded: false,
+          separator: false,
+          parameters: ['layer3Enabled', 'layer3Opacity', 'layer3Scale', 'layer3Coverage', 'layer3ParallaxMult', 'layer3SpeedMult', 'layer3DirDeg']
+        },
+        {
+          name: 'layer-4',
+          label: 'Layer 4',
+          type: 'folder',
+          expanded: false,
+          separator: false,
+          parameters: ['layer4Enabled', 'layer4Opacity', 'layer4Scale', 'layer4Coverage', 'layer4ParallaxMult', 'layer4SpeedMult', 'layer4DirDeg']
+        },
+        {
+          name: 'layer-5',
+          label: 'Layer 5',
+          type: 'folder',
+          expanded: false,
+          separator: false,
+          parameters: ['layer5Enabled', 'layer5Opacity', 'layer5Scale', 'layer5Coverage', 'layer5ParallaxMult', 'layer5SpeedMult', 'layer5DirDeg']
         }
       ],
       parameters: {
@@ -208,13 +340,22 @@ export class CloudEffect extends EffectBase {
           step: 0.01,
           default: 0.25
         },
+        cloudTopMode: {
+          type: 'list',
+          label: 'Cloud Top Mode',
+          options: {
+            'Outdoors Only': 'outdoorsOnly',
+            'Above Everything (Fade Mask)': 'aboveEverything'
+          },
+          default: 'aboveEverything'
+        },
         cloudTopOpacity: {
           type: 'slider',
           label: 'Cloud Top Opacity',
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.0
+          default: 0.3
         },
         cloudTopFadeStart: {
           type: 'slider',
@@ -247,6 +388,98 @@ export class CloudEffect extends EffectBase {
           max: 0.1,
           step: 0.001,
           default: 0.02
+        },
+        layerParallaxBase: {
+          type: 'slider',
+          label: 'Base Parallax',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.2
+        },
+        layer1Enabled: { type: 'boolean', label: 'Enabled', default: true },
+        layer1Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
+        layer1Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 0.85 },
+        layer1Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.35 },
+        layer1ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.25 },
+        layer1SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.6 },
+        layer1DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: -1.7 },
+
+        layer2Enabled: { type: 'boolean', label: 'Enabled', default: true },
+        layer2Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.65 },
+        layer2Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 0.95 },
+        layer2Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.65 },
+        layer2ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.6 },
+        layer2SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.85 },
+        layer2DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: -0.86 },
+
+        layer3Enabled: { type: 'boolean', label: 'Enabled', default: true },
+        layer3Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
+        layer3Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 1.0 },
+        layer3Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 1.0 },
+        layer3ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 1.0 },
+        layer3SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 1.0 },
+        layer3DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: 0.0 },
+
+        layer4Enabled: { type: 'boolean', label: 'Enabled', default: true },
+        layer4Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.65 },
+        layer4Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 1.15 },
+        layer4Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.65 },
+        layer4ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 1.4 },
+        layer4SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 1.15 },
+        layer4DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: 0.86 },
+
+        layer5Enabled: { type: 'boolean', label: 'Enabled', default: true },
+        layer5Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
+        layer5Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 1.3 },
+        layer5Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.35 },
+        layer5ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 1.75 },
+        layer5SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 1.3 },
+        layer5DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: 1.7 },
+        cloudBrightness: {
+          type: 'slider',
+          label: 'Cloud Brightness',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 1.0
+        },
+        cloudTopShadingEnabled: {
+          type: 'boolean',
+          label: 'Enable Shading',
+          default: true
+        },
+        cloudTopShadingStrength: {
+          type: 'slider',
+          label: 'Shading Strength',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 1.0
+        },
+        cloudTopNormalStrength: {
+          type: 'slider',
+          label: 'Normal Strength',
+          min: 0.0,
+          max: 3.0,
+          step: 0.01,
+          default: 1.0
+        },
+        cloudTopAOIntensity: {
+          type: 'slider',
+          label: 'AO Intensity',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 1.0
+        },
+        cloudTopEdgeHighlight: {
+          type: 'slider',
+          label: 'Edge Highlight',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 1.0
         }
       }
     };
@@ -265,6 +498,15 @@ export class CloudEffect extends EffectBase {
 
     // Initialize wind offset
     this._windOffset = new THREE.Vector2(0, 0);
+
+    // Initialize multi-layer wind offsets
+    this._layerWindOffsets = [
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(0, 0)
+    ];
 
     // Create quad scene for full-screen passes
     this.quadScene = new THREE.Scene();
@@ -302,7 +544,21 @@ export class CloudEffect extends EffectBase {
         uNoiseScale: { value: this.params.noiseScale },
         uNoiseDetail: { value: this.params.noiseDetail },
         uCloudSharpness: { value: this.params.cloudSharpness },
-        uWindOffset: { value: new THREE.Vector2(0, 0) },
+        uLayerWindOffsets: { value: this._layerWindOffsets || [
+          new THREE.Vector2(0, 0),
+          new THREE.Vector2(0, 0),
+          new THREE.Vector2(0, 0),
+          new THREE.Vector2(0, 0),
+          new THREE.Vector2(0, 0)
+        ] },
+        uLayerParallax: { value: this._layerParallax },
+        uLayerCoverMult: { value: this._layerCoverMult },
+        uLayerNoiseScaleMult: { value: this._layerNoiseScaleMult },
+        uLayerWeight: { value: this._layerWeight },
+        // 0.0 = no parallax (world-pinned density for shadows), 1.0 = full parallax (cloud tops)
+        uParallaxScale: { value: 0.0 },
+        // 0.0 = union blend (good for total occlusion), 1.0 = summed blend (helps layers read separately)
+        uCompositeMode: { value: 0.0 },
         uResolution: { value: new THREE.Vector2(1024, 1024) },
 
         // World-space coordinate conversion (view bounds in world coords)
@@ -323,7 +579,13 @@ export class CloudEffect extends EffectBase {
         uniform float uNoiseScale;
         uniform float uNoiseDetail;
         uniform float uCloudSharpness;
-        uniform vec2 uWindOffset;
+        uniform vec2 uLayerWindOffsets[5];
+        uniform float uLayerParallax[5];
+        uniform float uLayerCoverMult[5];
+        uniform float uLayerNoiseScaleMult[5];
+        uniform float uLayerWeight[5];
+        uniform float uParallaxScale;
+        uniform float uCompositeMode;
         uniform vec2 uResolution;
         uniform vec2 uViewBoundsMin;
         uniform vec2 uViewBoundsMax;
@@ -379,40 +641,72 @@ export class CloudEffect extends EffectBase {
           return value / maxValue;
         }
 
-        void main() {
-          // Convert screen UV to world-space UV using view bounds
-          // vUv (0,0)-(1,1) maps to the visible world rectangle
-          // This ensures clouds are pinned to the ground with ZERO parallax
-          vec2 worldPos = mix(uViewBoundsMin, uViewBoundsMax, vUv);
-          vec2 worldUV = worldPos / uSceneSize;
+        float sampleLayer(vec2 baseWorldPos, vec2 cameraPinnedPos, int layerIndex, int octaves) {
+          float parallax = uLayerParallax[layerIndex] * uParallaxScale;
+          vec2 layerWorldPos = mix(baseWorldPos, cameraPinnedPos, parallax);
+          vec2 layerUV = (layerWorldPos / uSceneSize) + uLayerWindOffsets[layerIndex];
 
-          // Apply wind offset for drift (NO sun offset here - that's applied in shadow pass)
-          vec2 driftedUV = worldUV + uWindOffset;
+          vec2 noiseUV = layerUV * (uNoiseScale * uLayerNoiseScaleMult[layerIndex]);
 
-          // Scale for noise sampling - NO fract() to avoid visible tile boundaries
-          // Simplex noise handles large coordinates naturally
-          vec2 noiseUV = driftedUV * uNoiseScale;
-
-          // Generate cloud density using FBM
-          int octaves = int(uNoiseDetail);
           float noise = fbm(noiseUV * 4.0 + uTime * 0.01, octaves);
-
-          // Remap noise from [-1, 1] to [0, 1]
           noise = noise * 0.5 + 0.5;
 
-          // Apply cloud cover threshold
-          // Higher cloudCover = more of the noise passes through
-          float threshold = 1.0 - uCloudCover;
+          float cover = clamp(uCloudCover * uLayerCoverMult[layerIndex], 0.0, 1.0);
+          float threshold = 1.0 - cover;
           float cloud = smoothstep(threshold - 0.1, threshold + 0.1, noise);
 
-          // Apply sharpness
           float sharpMix = uCloudSharpness;
           float softCloud = cloud;
           float hardCloud = step(threshold, noise);
           cloud = mix(softCloud, hardCloud, sharpMix);
 
-          // Output: R = cloud density, G = unused, B = unused, A = 1
-          gl_FragColor = vec4(cloud, cloud, cloud, 1.0);
+          return clamp(cloud * uLayerWeight[layerIndex], 0.0, 1.0);
+        }
+
+        void main() {
+          vec2 viewSize = uViewBoundsMax - uViewBoundsMin;
+
+          // Pinned-to-world position (no parallax)
+          vec2 baseWorldPos = mix(uViewBoundsMin, uViewBoundsMax, vUv);
+
+          // Pinned-to-camera/screen position (full parallax)
+          // Uses scene center as reference so this stays stable as the camera pans.
+          vec2 cameraPinnedPos = (0.5 * uSceneSize) + (vUv - 0.5) * viewSize;
+
+          int octaves = int(uNoiseDetail);
+
+          float l0 = sampleLayer(baseWorldPos, cameraPinnedPos, 0, octaves);
+          float l1 = sampleLayer(baseWorldPos, cameraPinnedPos, 1, octaves);
+          float l2 = sampleLayer(baseWorldPos, cameraPinnedPos, 2, octaves);
+          float l3 = sampleLayer(baseWorldPos, cameraPinnedPos, 3, octaves);
+          float l4 = sampleLayer(baseWorldPos, cameraPinnedPos, 4, octaves);
+
+          float composite = 0.0;
+          if (uCompositeMode < 0.5) {
+            // Union blend so multiple layers contribute instead of collapsing to the max.
+            // Good for “total occlusion” (shadows).
+            float inv = 1.0;
+            inv *= (1.0 - l0);
+            inv *= (1.0 - l1);
+            inv *= (1.0 - l2);
+            inv *= (1.0 - l3);
+            inv *= (1.0 - l4);
+            composite = clamp(1.0 - inv, 0.0, 1.0);
+          } else {
+            // Summed blend reads more like stacked layers (helps parallax/direction differences show).
+            composite = clamp((l0 + l1 + l2 + l3 + l4) / 2.0, 0.0, 1.0);
+          }
+
+          // Output format:
+          // - Shadows/world density: grayscale in RGB, alpha=1
+          // - Cloud tops density: RGB = mid/inner/outer bands, A = composite for alpha + shading
+          if (uCompositeMode < 0.5) {
+            gl_FragColor = vec4(composite, composite, composite, 1.0);
+          } else {
+            float inner = max(l1, l3);
+            float outer = max(l0, l4);
+            gl_FragColor = vec4(l2, inner, outer, composite);
+          }
         }
       `,
       depthWrite: false,
@@ -524,13 +818,22 @@ export class CloudEffect extends EffectBase {
         tCloudDensity: { value: null },
         tOutdoorsMask: { value: null },
         uHasOutdoorsMask: { value: 0.0 },
+        uOutdoorsMaskStrength: { value: 1.0 },
         uCloudTopOpacity: { value: this.params.cloudTopOpacity },
         uNormalizedZoom: { value: 0.5 },
         uFadeStart: { value: this.params.cloudTopFadeStart },
         uFadeEnd: { value: this.params.cloudTopFadeEnd },
         uCloudColor: { value: new THREE.Vector3(1.0, 1.0, 1.0) },
         uSkyTint: { value: new THREE.Vector3(0.9, 0.95, 1.0) },
-        uTimeOfDayTint: { value: new THREE.Vector3(1.0, 1.0, 1.0) }
+        uTimeOfDayTint: { value: new THREE.Vector3(1.0, 1.0, 1.0) },
+        uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
+        uSunDir: { value: new THREE.Vector2(0.0, 1.0) },
+        uCloudBrightness: { value: this.params.cloudBrightness },
+        uShadingEnabled: { value: 1.0 },
+        uShadingStrength: { value: 1.0 },
+        uNormalStrength: { value: 1.0 },
+        uAOIntensity: { value: 1.0 },
+        uEdgeHighlight: { value: 1.0 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -543,6 +846,7 @@ export class CloudEffect extends EffectBase {
         uniform sampler2D tCloudDensity;
         uniform sampler2D tOutdoorsMask;
         uniform float uHasOutdoorsMask;
+        uniform float uOutdoorsMaskStrength;
         uniform float uCloudTopOpacity;
         uniform float uNormalizedZoom;
         uniform float uFadeStart;
@@ -550,12 +854,69 @@ export class CloudEffect extends EffectBase {
         uniform vec3 uCloudColor;
         uniform vec3 uSkyTint;
         uniform vec3 uTimeOfDayTint;
+        uniform vec2 uTexelSize;
+        uniform vec2 uSunDir;
+        uniform float uCloudBrightness;
+        uniform float uShadingEnabled;
+        uniform float uShadingStrength;
+        uniform float uNormalStrength;
+        uniform float uAOIntensity;
+        uniform float uEdgeHighlight;
 
         varying vec2 vUv;
 
+        float readDensity(vec2 uv) {
+          vec4 t = texture2D(tCloudDensity, uv);
+          // Parallaxed cloud-top density stores composite in alpha.
+          // World density stores grayscale in RGB with alpha=1.
+          return (t.a > 0.999) ? t.r : t.a;
+        }
+
+        vec3 shadeCloud(vec2 uv, float density, vec3 baseColor) {
+          // Density gradient (treat density as a heightfield)
+          float dN = readDensity(uv + vec2(0.0,  uTexelSize.y));
+          float dS = readDensity(uv + vec2(0.0, -uTexelSize.y));
+          float dE = readDensity(uv + vec2( uTexelSize.x, 0.0));
+          float dW = readDensity(uv + vec2(-uTexelSize.x, 0.0));
+
+          vec2 grad = vec2(dE - dW, dN - dS);
+          float gradMag = length(grad);
+
+          vec3 n = normalize(vec3(-grad.x * 4.0 * uNormalStrength, -grad.y * 4.0 * uNormalStrength, 1.0));
+          vec3 l = normalize(vec3(uSunDir.x, uSunDir.y, 0.35));
+
+          float ndotl = clamp(dot(n, l), 0.0, 1.0);
+
+          // Gentle puffy shading
+          float shade = mix(0.65, 1.3, ndotl);
+          shade = mix(1.0, shade, clamp(uShadingStrength, 0.0, 2.0));
+
+          // Fake AO / curvature (valleys slightly darker)
+          float avg = 0.25 * (dN + dS + dE + dW);
+          float curvature = avg - density;
+          float ao = clamp(1.0 + curvature * 0.8 * uAOIntensity, 0.75, 1.1);
+
+          // Sun-facing edge highlight
+          vec2 ld = normalize(uSunDir);
+          float facing = 0.0;
+          if (gradMag > 1e-5) {
+            facing = clamp(dot(normalize(grad), ld), 0.0, 1.0);
+          }
+          float edge = smoothstep(0.03, 0.12, gradMag);
+          float edgeHighlight = edge * facing * 0.25 * uEdgeHighlight;
+
+          vec3 c = baseColor * shade * ao;
+          c += edgeHighlight;
+          return c;
+        }
+
         void main() {
           // Sample cloud density (no sun offset - we want clouds directly overhead)
-          float density = texture2D(tCloudDensity, vUv).r;
+          vec4 densTex = texture2D(tCloudDensity, vUv);
+          float density = (densTex.a > 0.999) ? densTex.r : densTex.a;
+          float dMid = densTex.r;
+          float dInner = densTex.g;
+          float dOuter = densTex.b;
 
           // Calculate zoom-based fade
           // When zoomed OUT (low normalizedZoom), clouds are visible
@@ -571,12 +932,29 @@ export class CloudEffect extends EffectBase {
 
           // Cloud color with slight sky tint for realism, then apply time-of-day tint
           vec3 baseColor = mix(uSkyTint, uCloudColor, density * 0.5 + 0.5);
-          vec3 color = baseColor * uTimeOfDayTint;
+
+          // Multi-band weighting for a more obviously layered look
+          // (mid is densest; inner/outer are lighter coverage)
+          float sum = max(dMid + dInner + dOuter, 1e-3);
+          vec3 layered = (
+            baseColor * 1.05 * dMid +
+            baseColor * 0.97 * dInner +
+            baseColor * 0.90 * dOuter
+          ) / sum;
+
+          vec3 color = layered * uTimeOfDayTint;
+          color *= uCloudBrightness;
+
+          // Add top shading to give volume
+          if (uShadingEnabled > 0.5) {
+            color = shadeCloud(vUv, density, color);
+          }
 
           // Apply outdoors mask - only show cloud tops outdoors
           if (uHasOutdoorsMask > 0.5) {
             float outdoors = texture2D(tOutdoorsMask, vUv).r;
-            alpha *= outdoors;
+            float maskStrength = clamp(uOutdoorsMaskStrength, 0.0, 1.0);
+            alpha *= mix(1.0, outdoors, maskStrength);
           }
 
           gl_FragColor = vec4(color, alpha);
@@ -733,6 +1111,18 @@ export class CloudEffect extends EffectBase {
       this.cloudShadowTarget.setSize(width, height);
     }
 
+    // Cloud top density render target (parallaxed multi-layer density)
+    if (!this.cloudTopDensityTarget) {
+      this.cloudTopDensityTarget = new THREE.WebGLRenderTarget(width, height, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else {
+      this.cloudTopDensityTarget.setSize(width, height);
+    }
+
     // Cloud top render target (RGBA for alpha blending)
     if (!this.cloudTopTarget) {
       this.cloudTopTarget = new THREE.WebGLRenderTarget(width, height, {
@@ -752,6 +1142,10 @@ export class CloudEffect extends EffectBase {
 
     if (this.shadowMaterial?.uniforms) {
       this.shadowMaterial.uniforms.uTexelSize.value.set(1 / width, 1 / height);
+    }
+
+    if (this.cloudTopMaterial?.uniforms) {
+      this.cloudTopMaterial.uniforms.uTexelSize.value.set(1 / width, 1 / height);
     }
   }
 
@@ -783,13 +1177,74 @@ export class CloudEffect extends EffectBase {
 
     // Update wind offset for cloud drift
     const delta = timeInfo?.delta ?? 0.016;
-    const driftAmount = windSpeed * this.params.windInfluence * this.params.driftSpeed * delta;
-    this._windOffset.x += windDirX * driftAmount;
-    this._windOffset.y += windDirY * driftAmount;
+    const driftAmountBase = windSpeed * this.params.windInfluence * this.params.driftSpeed * delta;
 
-    // Wrap wind offset to prevent floating point issues over long sessions
+    // Legacy single offset (kept for stability/debug)
+    this._windOffset.x += windDirX * driftAmountBase;
+    this._windOffset.y += windDirY * driftAmountBase;
     this._windOffset.x = this._windOffset.x % 100.0;
     this._windOffset.y = this._windOffset.y % 100.0;
+
+    // Multi-layer offsets: subtle speed + direction differences, plus parallax handled in shader
+    if (this._layerWindOffsets) {
+      const baseParallax = Math.max(0.0, Math.min(1.0, this.params.layerParallaxBase ?? 0.2));
+
+      const toRad = Math.PI / 180;
+      const l1Enabled = !!this.params.layer1Enabled;
+      const l2Enabled = !!this.params.layer2Enabled;
+      const l3Enabled = !!this.params.layer3Enabled;
+      const l4Enabled = !!this.params.layer4Enabled;
+      const l5Enabled = !!this.params.layer5Enabled;
+
+      this._layerSpeedMult[0] = this.params.layer1SpeedMult;
+      this._layerSpeedMult[1] = this.params.layer2SpeedMult;
+      this._layerSpeedMult[2] = this.params.layer3SpeedMult;
+      this._layerSpeedMult[3] = this.params.layer4SpeedMult;
+      this._layerSpeedMult[4] = this.params.layer5SpeedMult;
+
+      this._layerDirAngle[0] = (this.params.layer1DirDeg ?? 0) * toRad;
+      this._layerDirAngle[1] = (this.params.layer2DirDeg ?? 0) * toRad;
+      this._layerDirAngle[2] = (this.params.layer3DirDeg ?? 0) * toRad;
+      this._layerDirAngle[3] = (this.params.layer4DirDeg ?? 0) * toRad;
+      this._layerDirAngle[4] = (this.params.layer5DirDeg ?? 0) * toRad;
+
+      this._layerParallax[0] = Math.max(0.0, Math.min(1.0, baseParallax * (this.params.layer1ParallaxMult ?? 1.0)));
+      this._layerParallax[1] = Math.max(0.0, Math.min(1.0, baseParallax * (this.params.layer2ParallaxMult ?? 1.0)));
+      this._layerParallax[2] = Math.max(0.0, Math.min(1.0, baseParallax * (this.params.layer3ParallaxMult ?? 1.0)));
+      this._layerParallax[3] = Math.max(0.0, Math.min(1.0, baseParallax * (this.params.layer4ParallaxMult ?? 1.0)));
+      this._layerParallax[4] = Math.max(0.0, Math.min(1.0, baseParallax * (this.params.layer5ParallaxMult ?? 1.0)));
+
+      this._layerNoiseScaleMult[0] = this.params.layer1Scale;
+      this._layerNoiseScaleMult[1] = this.params.layer2Scale;
+      this._layerNoiseScaleMult[2] = this.params.layer3Scale;
+      this._layerNoiseScaleMult[3] = this.params.layer4Scale;
+      this._layerNoiseScaleMult[4] = this.params.layer5Scale;
+
+      this._layerCoverMult[0] = this.params.layer1Coverage;
+      this._layerCoverMult[1] = this.params.layer2Coverage;
+      this._layerCoverMult[2] = this.params.layer3Coverage;
+      this._layerCoverMult[3] = this.params.layer4Coverage;
+      this._layerCoverMult[4] = this.params.layer5Coverage;
+
+      this._layerWeight[0] = l1Enabled ? (this.params.layer1Opacity ?? 0.0) : 0.0;
+      this._layerWeight[1] = l2Enabled ? (this.params.layer2Opacity ?? 0.0) : 0.0;
+      this._layerWeight[2] = l3Enabled ? (this.params.layer3Opacity ?? 0.0) : 0.0;
+      this._layerWeight[3] = l4Enabled ? (this.params.layer4Opacity ?? 0.0) : 0.0;
+      this._layerWeight[4] = l5Enabled ? (this.params.layer5Opacity ?? 0.0) : 0.0;
+
+      for (let i = 0; i < this._layerWindOffsets.length; i++) {
+        const a = this._layerDirAngle[i] ?? 0.0;
+        const ca = Math.cos(a);
+        const sa = Math.sin(a);
+        const dx = windDirX * ca - windDirY * sa;
+        const dy = windDirX * sa + windDirY * ca;
+
+        const amt = driftAmountBase * (this._layerSpeedMult[i] ?? 1.0);
+        const o = this._layerWindOffsets[i];
+        o.x = (o.x + dx * amt) % 100.0;
+        o.y = (o.y + dy * amt) % 100.0;
+      }
+    }
 
     // Calculate sun direction for shadow offset
     this._calculateSunDirection();
@@ -836,7 +1291,14 @@ export class CloudEffect extends EffectBase {
     du.uNoiseScale.value = this.params.noiseScale;
     du.uNoiseDetail.value = this.params.noiseDetail;
     du.uCloudSharpness.value = this.params.cloudSharpness;
-    du.uWindOffset.value.copy(this._windOffset);
+
+    if (du.uLayerWindOffsets && this._layerWindOffsets) {
+      du.uLayerWindOffsets.value = this._layerWindOffsets;
+    }
+    if (du.uLayerParallax) du.uLayerParallax.value = this._layerParallax;
+    if (du.uLayerCoverMult) du.uLayerCoverMult.value = this._layerCoverMult;
+    if (du.uLayerNoiseScaleMult) du.uLayerNoiseScaleMult.value = this._layerNoiseScaleMult;
+    if (du.uLayerWeight) du.uLayerWeight.value = this._layerWeight;
     du.uSceneSize.value.set(sceneWidth, sceneHeight);
     du.uViewBoundsMin.value.set(viewMinX, viewMinY);
     du.uViewBoundsMax.value.set(viewMaxX, viewMaxY);
@@ -881,12 +1343,46 @@ export class CloudEffect extends EffectBase {
       tu.uCloudTopOpacity.value = this.params.cloudTopOpacity;
       tu.uFadeStart.value = this.params.cloudTopFadeStart;
       tu.uFadeEnd.value = this.params.cloudTopFadeEnd;
+      tu.uCloudBrightness.value = this.params.cloudBrightness;
 
-      // Calculate normalized zoom (0-1 range based on zoom limits)
-      // This makes cloud top fade independent of map size
-      const limits = sceneComposer?.getZoomLimits?.() ?? { min: 0.1, max: 3.0 };
-      const normalizedZoom = (zoom - limits.min) / (limits.max - limits.min);
-      tu.uNormalizedZoom.value = Math.max(0, Math.min(1, normalizedZoom));
+      if (tu.uShadingEnabled) tu.uShadingEnabled.value = this.params.cloudTopShadingEnabled ? 1.0 : 0.0;
+      if (tu.uShadingStrength) tu.uShadingStrength.value = this.params.cloudTopShadingStrength;
+      if (tu.uNormalStrength) tu.uNormalStrength.value = this.params.cloudTopNormalStrength;
+      if (tu.uAOIntensity) tu.uAOIntensity.value = this.params.cloudTopAOIntensity;
+      if (tu.uEdgeHighlight) tu.uEdgeHighlight.value = this.params.cloudTopEdgeHighlight;
+
+      // Use a stronger lateral sun direction for cloud-top shading so it reads at midday.
+      // This does NOT affect ground shadows (those use uShadowOffsetUV).
+      if (this.sunDir && tu.uSunDir) {
+        if (!this._shadeSunDir) this._shadeSunDir = new THREE.Vector2(0.0, 1.0);
+        this._shadeSunDir.copy(this.sunDir);
+        const mag = this._shadeSunDir.length();
+        const minMag = 0.6;
+        if (mag < minMag) {
+          if (mag < 1e-5) this._shadeSunDir.set(minMag, 0.0);
+          else this._shadeSunDir.multiplyScalar(minMag / mag);
+        }
+        tu.uSunDir.value.copy(this._shadeSunDir);
+      }
+
+      // Drive zoom fade based on the *actual* zoom value.
+      // The fadeStart/fadeEnd controls are expressed in zoom units (like Foundry zoom),
+      // so normalizing here breaks the expected behavior.
+      tu.uNormalizedZoom.value = zoom;
+
+      // Fade outdoors masking based on zoom, if in the above-everything mode.
+      // zoomFade is 1.0 when zoomed OUT (cloud tops visible) and 0.0 when zoomed IN.
+      // We want the outdoors mask to have the opposite behavior:
+      // - zoomed in: mask fully applied (keep indoors clear)
+      // - zoomed out: mask fades out so clouds can appear above everything
+      if (this.params.cloudTopMode === 'aboveEverything') {
+        const fadeStart = this.params.cloudTopFadeStart;
+        const fadeEnd = this.params.cloudTopFadeEnd;
+        const zoomFade = 1.0 - this._smoothstep(fadeStart, fadeEnd, zoom);
+        tu.uOutdoorsMaskStrength.value = 1.0 - zoomFade;
+      } else {
+        tu.uOutdoorsMaskStrength.value = 1.0;
+      }
 
       // Apply time-of-day tint for sunrise/sunset coloring
       const tint = this._calculateTimeOfDayTint();
@@ -925,7 +1421,9 @@ export class CloudEffect extends EffectBase {
 
     const previousTarget = renderer.getRenderTarget();
 
-    // Pass 1: Generate cloud density
+    // Pass 1: Generate world-pinned cloud density (NO parallax) for shadows and other consumers
+    if (this.densityMaterial.uniforms.uParallaxScale) this.densityMaterial.uniforms.uParallaxScale.value = 0.0;
+    if (this.densityMaterial.uniforms.uCompositeMode) this.densityMaterial.uniforms.uCompositeMode.value = 0.0;
     this.quadMesh.material = this.densityMaterial;
     renderer.setRenderTarget(this.cloudDensityTarget);
     renderer.setClearColor(0x000000, 1);
@@ -940,9 +1438,22 @@ export class CloudEffect extends EffectBase {
     renderer.clear();
     renderer.render(this.quadScene, this.quadCamera);
 
-    // Pass 3: Generate cloud tops (visible cloud layer with zoom fade)
+    // Pass 3: Generate parallaxed multi-layer density for cloud tops (this MUST NOT drive ground shadows)
+    if (this.cloudTopDensityTarget) {
+      if (this.densityMaterial.uniforms.uParallaxScale) this.densityMaterial.uniforms.uParallaxScale.value = 1.0;
+      if (this.densityMaterial.uniforms.uCompositeMode) this.densityMaterial.uniforms.uCompositeMode.value = 1.0;
+      this.quadMesh.material = this.densityMaterial;
+      renderer.setRenderTarget(this.cloudTopDensityTarget);
+      renderer.setClearColor(0x000000, 1);
+      renderer.clear();
+      renderer.render(this.quadScene, this.quadCamera);
+    }
+
+    // Pass 4: Generate cloud tops (visible cloud layer with zoom fade)
     if (this.cloudTopMaterial && this.cloudTopTarget) {
-      this.cloudTopMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
+      this.cloudTopMaterial.uniforms.tCloudDensity.value = this.cloudTopDensityTarget
+        ? this.cloudTopDensityTarget.texture
+        : this.cloudDensityTarget.texture;
       this.quadMesh.material = this.cloudTopMaterial;
       renderer.setRenderTarget(this.cloudTopTarget);
       renderer.setClearColor(0x000000, 0); // Transparent background
@@ -962,6 +1473,10 @@ export class CloudEffect extends EffectBase {
     if (this.cloudShadowTarget) {
       this.cloudShadowTarget.dispose();
       this.cloudShadowTarget = null;
+    }
+    if (this.cloudTopDensityTarget) {
+      this.cloudTopDensityTarget.dispose();
+      this.cloudTopDensityTarget = null;
     }
     if (this.cloudTopTarget) {
       this.cloudTopTarget.dispose();

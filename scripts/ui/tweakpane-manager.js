@@ -623,6 +623,135 @@ export class TweakpaneManager {
     return folder;
   }
 
+  registerEffectUnderEffect(parentEffectId, effectId, effectName, schema, updateCallback) {
+    const parentEffect = this.effectFolders[parentEffectId];
+    if (!parentEffect?.folder) {
+      this.registerEffect(effectId, effectName, schema, updateCallback, null);
+      return;
+    }
+
+    if (this.effectFolders[effectId]) {
+      log.warn(`Effect ${effectId} already registered`);
+      return;
+    }
+
+    log.info(`Registering effect: ${effectName}`);
+
+    const folder = parentEffect.folder.addFolder({
+      title: effectName,
+      expanded: this.accordionStates[effectId] ?? false
+    });
+
+    this.effectFolders[effectId] = {
+      folder,
+      params: {},
+      bindings: {},
+      schema,
+      statusElement: null,
+      dependencyState: {}
+    };
+
+    const savedParams = this.loadEffectParameters(effectId, schema);
+    const validation = globalValidator.validateAllParameters(effectId, savedParams, schema);
+    if (!validation.valid) {
+      log.warn(`${effectId} initial validation failed:`, validation.errors);
+    }
+    const validatedParams = validation.params;
+
+    this.addStatusIndicator(effectId, folder);
+
+    if (schema.presets && typeof schema.presets === 'object') {
+      const presetKeys = Object.keys(schema.presets);
+      if (presetKeys.length > 0) {
+        const presetState = { preset: 'Custom' };
+        const presetOptions = { Custom: 'Custom' };
+        for (const key of presetKeys) {
+          presetOptions[key] = key;
+        }
+
+        const presetBinding = folder.addBinding(presetState, 'preset', {
+          label: 'Preset',
+          options: presetOptions
+        });
+
+        presetBinding.on('change', (ev) => {
+          const selected = ev.value;
+          if (selected === 'Custom') return;
+          const presetDef = schema.presets[selected];
+          if (!presetDef) return;
+
+          const effectData = this.effectFolders[effectId];
+          if (!effectData) return;
+
+          for (const [paramId, value] of Object.entries(presetDef)) {
+            const paramDef = schema.parameters?.[paramId];
+            if (!paramDef) continue;
+
+            const result = globalValidator.validateParameter(paramId, value, paramDef);
+            const finalValue = result.valid ? result.value : paramDef.default;
+
+            effectData.params[paramId] = finalValue;
+
+            if (effectData.bindings[paramId]) {
+              effectData.bindings[paramId].refresh();
+            }
+
+            const callback = this.effectCallbacks.get(effectId) || updateCallback;
+            if (callback) {
+              callback(effectId, paramId, finalValue);
+            }
+          }
+
+          this.updateEffectiveState(effectId);
+          this.updateControlStates(effectId);
+          this.runSanityCheck(effectId);
+          this.queueSave(effectId);
+        });
+      }
+    }
+
+    this.effectFolders[effectId].params.enabled = savedParams.enabled ?? schema.enabled ?? true;
+    const enableBinding = folder.addBinding(
+      this.effectFolders[effectId].params,
+      'enabled',
+      { label: 'Enabled' }
+    );
+
+    enableBinding.on('change', this.throttle((ev) => {
+      this.markDirty(effectId, 'enabled');
+      updateCallback(effectId, 'enabled', ev.value);
+      this.updateEffectiveState(effectId);
+      this.updateControlStates(effectId);
+      this.queueSave(effectId);
+    }, 100));
+
+    this.buildEffectControls(effectId, folder, schema, updateCallback, validatedParams);
+
+    const effectData = this.effectFolders[effectId];
+    const initialCallback = this.effectCallbacks.get(effectId) || updateCallback;
+    if (initialCallback && effectData && effectData.params) {
+      for (const [paramId, value] of Object.entries(effectData.params)) {
+        initialCallback(effectId, paramId, value);
+      }
+    }
+
+    this.updateEffectiveState(effectId);
+    this.updateControlStates(effectId);
+
+    folder.addButton({
+      title: '🔄 Reset to Defaults'
+    }).on('click', () => {
+      this.resetEffectToDefaults(effectId);
+    });
+
+    this.effectCallbacks.set(effectId, updateCallback);
+
+    folder.on('fold', (ev) => {
+      this.accordionStates[effectId] = ev.expanded;
+      this.saveUIState();
+    });
+  }
+
   /**
    * Register an effect with the UI
    * @param {string} effectId - Unique effect identifier

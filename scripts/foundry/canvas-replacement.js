@@ -32,13 +32,11 @@ import { WorldSpaceFogEffect } from '../effects/WorldSpaceFogEffect.js';
 // NOTE: VisionManager and FogManager are no longer used.
 // WorldSpaceFogEffect renders fog as a world-space plane mesh, eliminating coordinate conversion issues.
 import {
-  CloudShadowsEffect,
   TimeOfDayEffect,
   WeatherEffect,
   HeatDistortionEffect,
   LightningEffect,
   AmbientEffect,
-  CloudDepthEffect,
   WaterEffect,
   FoamEffect,
   GroundGlowEffect,
@@ -1373,6 +1371,29 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     'atmospheric'
   );
 
+  // --- Cloud & Cloud Shadow Appearance (Weather Subcategory) ---
+  if (cloudEffect) {
+    const cloudSchema = CloudEffect.getControlSchema();
+
+    const onCloudUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        cloudEffect.enabled = !!value;
+        log.debug(`Cloud effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (cloudEffect.params && Object.prototype.hasOwnProperty.call(cloudEffect.params, paramId)) {
+        cloudEffect.params[paramId] = value;
+        log.debug(`Cloud.${paramId} =`, value);
+      }
+    };
+
+    uiManager.registerEffectUnderEffect(
+      'weather',
+      'cloud',
+      'Cloud and Cloud Shadow Appearance',
+      cloudSchema,
+      onCloudUpdate
+    );
+  }
+
   // --- Window Light Settings ---
   if (windowLightEffect) {
     const windowSchema = WindowLightEffect.getControlSchema();
@@ -1461,29 +1482,6 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       'Building Shadows',
       buildingSchema,
       onBuildingUpdate,
-      'atmospheric'
-    );
-  }
-
-  // --- Cloud Shadows Settings ---
-  if (cloudEffect) {
-    const cloudSchema = CloudEffect.getControlSchema();
-
-    const onCloudUpdate = (effectId, paramId, value) => {
-      if (paramId === 'enabled' || paramId === 'masterEnabled') {
-        cloudEffect.enabled = !!value;
-        log.debug(`Cloud effect ${value ? 'enabled' : 'disabled'}`);
-      } else if (cloudEffect.params && Object.prototype.hasOwnProperty.call(cloudEffect.params, paramId)) {
-        cloudEffect.params[paramId] = value;
-        log.debug(`Cloud.${paramId} =`, value);
-      }
-    };
-
-    uiManager.registerEffect(
-      'cloud',
-      'Cloud Shadows',
-      cloudSchema,
-      onCloudUpdate,
       'atmospheric'
     );
   }
@@ -1689,13 +1687,11 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
   // UI-only placeholders for planned effects; these do not yet affect rendering
   const stubEffectDefs = [
     // Atmospheric & Environmental
-    { id: 'cloud-shadows',      name: 'Cloud Shadows',        Class: CloudShadowsEffect,      categoryId: 'atmospheric' },
     { id: 'time-of-day',        name: 'Time of Day',          Class: TimeOfDayEffect,         categoryId: 'atmospheric' },
     // Weather System replaced by active controller
     { id: 'heat-distortion',    name: 'Heat Distortion',      Class: HeatDistortionEffect,    categoryId: 'atmospheric' },
     { id: 'lightning',          name: 'Lightning',            Class: LightningEffect,         categoryId: 'atmospheric' },
     { id: 'ambient',            name: 'Ambient Lighting',     Class: AmbientEffect,           categoryId: 'atmospheric' },
-    { id: 'cloud-depth',        name: 'Cloud Depth',          Class: CloudDepthEffect,        categoryId: 'atmospheric' },
 
     // Surface & Material
     { id: 'water',              name: 'Water',                Class: WaterEffect,             categoryId: 'water' },

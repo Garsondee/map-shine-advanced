@@ -762,11 +762,9 @@ export class LightingEffect extends EffectBase {
         if (cloudEffect?.cloudDensityTarget?.texture && cloudEffect.enabled) {
           wu.uCloudShadowMap.value = cloudEffect.cloudDensityTarget.texture;
           wu.uHasCloudShadowMap.value = 1.0;
-          if (Math.random() < 0.002) console.log('[LightingEffect] Cloud DENSITY BOUND');
         } else {
           wu.uCloudShadowMap.value = null;
           wu.uHasCloudShadowMap.value = 0.0;
-          if (Math.random() < 0.002) console.log('[LightingEffect] Cloud density NOT bound - effect:', !!cloudEffect, 'target:', !!cloudEffect?.cloudDensityTarget, 'enabled:', cloudEffect?.enabled);
         }
       } catch (e) {
         wu.uHasCloudShadowMap.value = 0.0;

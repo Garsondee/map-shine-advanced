@@ -23,40 +23,38 @@ This document outlines the backwards compatibility strategy for Map Shine v2.0, 
 
 ### Summary of All Effects
 
-| Effect | Trigger Type | Required Texture/Data | Config Path | Notes |
-|--------|-------------|----------------------|-------------|-------|
-| **Metallic Shine** | Texture | `_Specular.webp` | `baseShine` | Core effect, always active if texture found |
-| **Cloud Shadows** | Procedural | None (procedural) | `cloudShadows` | No texture required |
-| **Iridescence** | Texture | `_Iridescence.webp` | `iridescence` | Oil-slick rainbow effect |
-| **Canopy Shadows** | Texture | `_Canopy.webp` | `canopy` | Tree/foliage shadows |
-| **Bush Distortion** | Texture | `_Bush.webp` | `bush` | Foliage movement |
-| **Tree Distortion** | Texture | `_Tree.webp` | `tree` | Tree sway animation |
-| **Structural Shadows** | Texture | `_Structural.webp` | `structuralShadows` | Building/structure shadows |
-| **Prism** | Texture | `_Prism.webp` | `prism` | Light refraction effect |
-| **Water Effects** | Texture | `_Water.webp` | `water` | Waves, caustics, foam |
-| **Caustics** | Texture | `_Caustics.webp` (optional) | `water.caustics` | Underwater light patterns |
-| **Shoreline** | Texture | `_Shoreline.webp` (optional) | `water.shoreline` | Beach foam |
-| **Puddles** | Texture | `_Puddle.webp` | `water.puddles` | Rain puddle effects |
-| **Ground Glow** | Texture | `_GroundGlow.webp` | `groundGlow` | Emissive ground areas |
-| **Heat Distortion** | Texture | `_Heat.webp` | `heatDistortion` | Heat shimmer effect |
-| **Ambient Layer** | Texture | `_Ambient.webp` | `ambient` | Custom ambient overlay |
-| **Outdoors Mask** | Texture | `_Outdoors.webp` | N/A | Masking for weather/effects |
-| **Fire Particles** | Texture | `_Fire.webp` | `fire.particles` | Flame particle effect |
-| **Sparks** | Texture | `_Sparks.webp` | `sparks` | Spark particle effect |
-| **Dust Motes** | Texture | `_Dust.webp` | `dust` | Floating dust particles |
-| **Steam** | Texture/Points | `_Steam.webp` or Map Points | `pressurisedSteam` | Steam burst effect |
-| **Glint Particles** | Texture | `_Prism.webp` | `glint` | Sparkle particles |
-| **Metallic Glints** | Texture | `_Specular.webp` | `metallicGlints` | Metal sparkle particles |
-| **Water Splashes** | Texture | `_Water.webp` (edge detection) | `biofilm` | Splash particles at water edges |
-| **Water Glints** | Texture | `_Water.webp` | `water.glintParticles` | Water surface sparkles |
-| **Candle Flame** | Map Points | Point group | `candleFlame` | Candle flame particles |
-| **Smelly Flies** | Map Points | Point/Area group | `smellyFlies` | Fly swarm effect |
-| **Lightning** | Map Points | Line group | `lightning` | Lightning bolt effect |
-| **Physics Ropes** | Map Points | Line group | `physicsRope` | Rope/chain simulation |
-| **Building Shadows** | Texture | `_Structural.webp` | `buildingShadows` | Sun-angle shadows |
-| **Time of Day** | Procedural | None | `timeOfDay` | Day/night color grading |
-| **Post-Processing** | Procedural | None | `postProcessing` | Color correction, vignette, etc. |
-| **Weather System** | Procedural | None | `weather` | Rain, snow, fog, etc. |
+- [x] **Metallic Shine** (Texture: `_Specular.webp`, Config: `baseShine`) - Implemented (`scripts/effects/SpecularEffect.js`)
+- [x] **Cloud Shadows** (Procedural, Config: `cloudShadows`) - Implemented (`scripts/effects/CloudEffect.js`)
+- [x] **Iridescence** (Texture: `_Iridescence.webp`, Config: `iridescence`) - Implemented (`scripts/effects/IridescenceEffect.js`)
+- [ ] **Canopy Shadows** (Texture: `_Canopy.webp`, Config: `canopy`) - Not implemented (no Canopy effect/mask in current loader)
+- [x] **Bush Distortion** (Texture: `_Bush.webp`, Config: `bush`) - Implemented (`scripts/effects/BushEffect.js`)
+- [x] **Tree Distortion** (Texture: `_Tree.webp`, Config: `tree`) - Implemented (`scripts/effects/TreeEffect.js`)
+- [ ] **Window Lights** (Texture: Previously `_Structural.webp` and now '_Windows.webp') - Light coming in from outside of windows into dark interior spaces.
+- [x] **Prism** (Texture: `_Prism.webp`, Config: `prism`) - Implemented (`scripts/effects/PrismEffect.js`)
+- [ ] **Water Effects** (Texture: `_Water.webp`, Config: `water`) - Not implemented (Water effects are currently stubs; `_Water` mask not loaded)
+- [ ] **Caustics** (Texture: `_Caustics.webp`, Config: `water.caustics`) - Not implemented
+- [ ] **Shoreline** (Texture: `_Shoreline.webp`, Config: `water.shoreline`) - Not implemented
+- [ ] **Puddles** (Texture: `_Puddle.webp`, Config: `water.puddles`) - Not implemented as a mask-driven surface effect (rain splash "puddle" visuals exist inside WeatherParticles)
+- [ ] **Ground Glow** (Texture: `_GroundGlow.webp`, Config: `groundGlow`) - Not implemented (stub only)
+- [ ] **Heat Distortion** (Texture: `_Heat.webp`, Config: `heatDistortion`) - Not implemented (stub only)
+- [ ] **Ambient Layer** (Texture: `_Ambient.webp`, Config: `ambient`) - Not implemented (stub only)
+- [x] **Outdoors Mask** (Texture: `_Outdoors.webp`, Config: N/A) - Implemented (mask is loaded and wired into WeatherController + used by multiple effects)
+- [x] **Fire Particles** (Texture: `_Fire.webp`, Config: `fire.particles`) - Implemented (`scripts/particles/FireSparksEffect.js`)
+- [ ] **Sparks** (Texture: `_Sparks.webp`, Config: `sparks`) - Not implemented (no `_Sparks` mask support / effect)
+- [ ] **Dust Motes** (Texture: `_Dust.webp`, Config: `dust`) - Not implemented
+- [ ] **Steam** (Texture/Points: `_Steam.webp` or Map Points, Config: `pressurisedSteam`) - Not implemented
+- [ ] **Glint Particles** (Texture: `_Prism.webp`, Config: `glint`) - Not implemented as particles (some sparkle/glint may exist inside Prism/Specular shading)
+- [ ] **Metallic Glints** (Texture: `_Specular.webp`, Config: `metallicGlints`) - Not implemented as particles (micro sparkle exists in Specular shading)
+- [ ] **Water Splashes** (Texture: `_Water.webp`, Config: `biofilm`) - Not implemented as `_Water` edge-driven splashes (rain splashes exist, but not water-edge splashes)
+- [ ] **Water Glints** (Texture: `_Water.webp`, Config: `water.glintParticles`) - Not implemented
+- [x] **Candle Flame** (Map Points, Config: `candleFlame`) - Implemented via MapPointsManager + FireSparksEffect aggregation
+- [x] **Smelly Flies** (Map Points, Config: `smellyFlies`) - Implemented (`scripts/particles/SmellyFliesEffect.js`)
+- [ ] **Lightning** (Map Points, Config: `lightning`) - Not implemented (stub only)
+- [ ] **Physics Ropes** (Map Points, Config: `physicsRope`) - Not implemented
+- [x] **Building Shadows** (Texture: `_Outdoors.webp`, Config: `buildingShadows`) - Implemented (`scripts/effects/BuildingShadowsEffect.js`)
+- [x] **Time of Day** (Procedural, Config: `timeOfDay`) - Implemented as a global time-of-day control driving sun/time-based systems (WeatherController + shadows + sky tint)
+- [x] **Post-Processing** (Procedural, Config: `postProcessing`) - Implemented (EffectComposer + bloom/color correction/etc.)
+- [x] **Weather System** (Procedural, Config: `weather`) - Implemented (WeatherController + WeatherParticles)
 
 ---
 

@@ -7,6 +7,7 @@
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { ShaderValidator } from '../core/shader-validator.js';
+import { weatherController } from '../core/WeatherController.js';
 import Coordinates from '../utils/coordinates.js';
 
 const log = createLogger('SpecularEffect');
@@ -101,8 +102,15 @@ export class SpecularEffect extends EffectBase {
       sparkleEnabled: false,
       sparkleIntensity: 0.95,
       sparkleScale: 2460,
-      sparkleSpeed: 1.38
+      sparkleSpeed: 1.38,
+
+      // Outdoor Cloud Specular (cloud shadows drive specular intensity outdoors)
+      outdoorCloudSpecularEnabled: true,
+      outdoorStripeBlend: 0.3,     // How much stripes show outdoors (0=none, 1=full)
+      cloudSpecularIntensity: 1.0  // Intensity of cloud-driven specular outdoors
     };
+
+    this._tempScreenSize = null;
   }
 
   /**
@@ -183,6 +191,13 @@ export class SpecularEffect extends EffectBase {
           type: 'folder',
           expanded: false,
           parameters: ['sparkleEnabled', 'sparkleIntensity', 'sparkleScale', 'sparkleSpeed']
+        },
+        {
+          name: 'outdoor-cloud-specular',
+          label: 'Outdoor Cloud Specular',
+          type: 'folder',
+          expanded: false,
+          parameters: ['outdoorCloudSpecularEnabled', 'outdoorStripeBlend', 'cloudSpecularIntensity']
         }
       ],
       parameters: {
@@ -538,6 +553,30 @@ export class SpecularEffect extends EffectBase {
           step: 0.01,
           default: 1.38,
           throttle: 100
+        },
+
+        outdoorCloudSpecularEnabled: {
+          type: 'boolean',
+          label: 'Enable Cloud Specular',
+          default: true
+        },
+        outdoorStripeBlend: {
+          type: 'slider',
+          label: 'Outdoor Stripe Blend',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.3,
+          throttle: 100
+        },
+        cloudSpecularIntensity: {
+          type: 'slider',
+          label: 'Cloud Specular Intensity',
+          min: 0,
+          max: 3,
+          step: 0.01,
+          default: 1.0,
+          throttle: 100
         }
       }
     };
@@ -708,6 +747,19 @@ export class SpecularEffect extends EffectBase {
         uSparkleIntensity: { value: this.params.sparkleIntensity },
         uSparkleScale: { value: this.params.sparkleScale },
         uSparkleSpeed: { value: this.params.sparkleSpeed },
+
+        // Outdoor cloud specular (cloud shadows drive specular intensity outdoors)
+        uOutdoorCloudSpecularEnabled: { value: this.params.outdoorCloudSpecularEnabled },
+        uOutdoorStripeBlend: { value: this.params.outdoorStripeBlend },
+        uCloudSpecularIntensity: { value: this.params.cloudSpecularIntensity },
+
+        uRoofMap: { value: null },
+        uRoofMaskEnabled: { value: 0.0 },
+        uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+
+        uHasCloudShadowMap: { value: false },
+        uCloudShadowMap: { value: null },
+        uScreenSize: { value: new THREE.Vector2(1, 1) },
 
         // Foundry scene darkness (0 = light, 1 = dark)
         uDarknessLevel: { value: 0.0 },
@@ -916,6 +968,13 @@ export class SpecularEffect extends EffectBase {
     this.material.uniforms.uSparkleIntensity.value = this.params.sparkleIntensity;
     this.material.uniforms.uSparkleScale.value = this.params.sparkleScale;
     this.material.uniforms.uSparkleSpeed.value = this.params.sparkleSpeed;
+
+    // Outdoor cloud specular
+    if (this.material.uniforms.uOutdoorCloudSpecularEnabled) {
+      this.material.uniforms.uOutdoorCloudSpecularEnabled.value = this.params.outdoorCloudSpecularEnabled;
+      this.material.uniforms.uOutdoorStripeBlend.value = this.params.outdoorStripeBlend;
+      this.material.uniforms.uCloudSpecularIntensity.value = this.params.cloudSpecularIntensity;
+    }
     
     // Layer 1
     this.material.uniforms.uStripe1Enabled.value   = this.params.stripe1Enabled;
@@ -1026,6 +1085,49 @@ export class SpecularEffect extends EffectBase {
       const centerX = (camera.left + camera.right) / 2;
       const centerY = (camera.top + camera.bottom) / 2;
       this.material.uniforms.uCameraOffset.value.set(centerX, centerY);
+    }
+
+    // Bind CloudEffect shadow texture for sun-break specular boost.
+    // This must run every frame because CloudEffect renders to an internal
+    // render target which may be recreated/resized.
+    try {
+      const THREE = window.THREE;
+      if (THREE && this.material.uniforms.uScreenSize) {
+        if (!this._tempScreenSize) this._tempScreenSize = new THREE.Vector2();
+        renderer.getDrawingBufferSize(this._tempScreenSize);
+        this.material.uniforms.uScreenSize.value.set(this._tempScreenSize.x, this._tempScreenSize.y);
+
+        const cloud = window.MapShine?.cloudEffect;
+        const tex = cloud?.cloudShadowTarget?.texture || null;
+        const hasCloud = !!(cloud && cloud.enabled && tex);
+
+        if (this.material.uniforms.uHasCloudShadowMap) {
+          this.material.uniforms.uHasCloudShadowMap.value = hasCloud;
+        }
+        if (this.material.uniforms.uCloudShadowMap) {
+          this.material.uniforms.uCloudShadowMap.value = hasCloud ? tex : null;
+        }
+
+        if (this.material.uniforms.uRoofMap && this.material.uniforms.uRoofMaskEnabled && this.material.uniforms.uSceneBounds) {
+          const roofTex = weatherController?.roofMap || null;
+          this.material.uniforms.uRoofMap.value = roofTex;
+          this.material.uniforms.uRoofMaskEnabled.value = roofTex ? 1.0 : 0.0;
+
+          const d = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
+          if (d) {
+            const sx = d.sceneX ?? 0;
+            const sy = d.sceneY ?? 0;
+            const sw = d.sceneWidth ?? d.width ?? 1;
+            const sh = d.sceneHeight ?? d.height ?? 1;
+            this.material.uniforms.uSceneBounds.value.set(sx, sy, sw, sh);
+          }
+        }
+      }
+    } catch (e) {
+      if (this.material.uniforms.uHasCloudShadowMap) this.material.uniforms.uHasCloudShadowMap.value = false;
+      if (this.material.uniforms.uCloudShadowMap) this.material.uniforms.uCloudShadowMap.value = null;
+      if (this.material.uniforms.uRoofMap) this.material.uniforms.uRoofMap.value = null;
+      if (this.material.uniforms.uRoofMaskEnabled) this.material.uniforms.uRoofMaskEnabled.value = 0.0;
     }
     
     // Material is already applied to mesh, so normal scene render handles it
@@ -1186,6 +1288,19 @@ export class SpecularEffect extends EffectBase {
       uniform float uSparkleIntensity;
       uniform float uSparkleScale;
       uniform float uSparkleSpeed;
+
+      // Outdoor cloud specular: cloud shadows drive specular intensity outdoors
+      uniform bool uOutdoorCloudSpecularEnabled;
+      uniform float uOutdoorStripeBlend;      // How much stripes show outdoors (0=none, 1=full)
+      uniform float uCloudSpecularIntensity;  // Intensity of cloud-driven specular
+
+      uniform sampler2D uRoofMap;
+      uniform float uRoofMaskEnabled;
+      uniform vec4 uSceneBounds;
+
+      uniform bool uHasCloudShadowMap;
+      uniform sampler2D uCloudShadowMap;
+      uniform vec2 uScreenSize;
       
       // Foundry scene darkness (0 = light, 1 = dark)
       uniform float uDarknessLevel;
@@ -1465,9 +1580,17 @@ export class SpecularEffect extends EffectBase {
         
         // Calculate specular mask strength (luminance of the colored mask)
         float specularStrength = dot(specularMask.rgb, vec3(0.299, 0.587, 0.114));
+
+        // Cloud lighting (1.0 = lit gap, 0.0 = shadow) sampled in screen-space.
+        // Default to fully lit if texture is unavailable.
+        float cloudLit = 1.0;
+        if (uHasCloudShadowMap) {
+          vec2 screenUv0 = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
+          cloudLit = texture2D(uCloudShadowMap, screenUv0).r;
+        }
         
         // Multi-layer stripe composition
-        float stripeMask = 0.0;
+        float stripeMaskAnimated = 0.0;
         
         if (uStripeEnabled) {
           // Generate each stripe layer
@@ -1503,18 +1626,14 @@ export class SpecularEffect extends EffectBase {
           }
           
           // Composite layers using selected blend mode
-          stripeMask = layer1;
+          stripeMaskAnimated = layer1;
           if (uStripe2Enabled) {
-            stripeMask = blendMode(stripeMask, layer2, uStripeBlendMode);
+            stripeMaskAnimated = blendMode(stripeMaskAnimated, layer2, uStripeBlendMode);
           }
           if (uStripe3Enabled) {
-            stripeMask = blendMode(stripeMask, layer3, uStripeBlendMode);
+            stripeMaskAnimated = blendMode(stripeMaskAnimated, layer3, uStripeBlendMode);
           }
         }
-        
-        // Combine stripe animation with base specular strength
-        // stripeContribution modulates the specular intensity
-        float stripeContribution = 1.0 + stripeMask;
         
         // Calculate sparkles
         float sparkleVal = 0.0;
@@ -1526,8 +1645,39 @@ export class SpecularEffect extends EffectBase {
           sparkleVal *= specularStrength;
         }
         
-        // Add sparkles to the contribution
-        float totalModulator = stripeContribution + (sparkleVal * uSparkleIntensity);
+        // ---------------------------------------------------------
+        // Outdoor Cloud Specular
+        // ---------------------------------------------------------
+        // Outdoors: cloud shadow (cloudLit) is the primary driver of specular.
+        // cloudLit = 1.0 means lit by sky (no cloud shadow) → bright specular
+        // cloudLit = 0.0 means in cloud shadow → dim specular
+        // Stripes still contribute but are blended down outdoors via uOutdoorStripeBlend.
+        // Indoors (no cloud map): stripes work normally.
+        
+        float stripeContribution = stripeMaskAnimated;
+        float cloudSpecular = 0.0;
+
+        float outdoorFactor = 1.0;
+        if (uRoofMaskEnabled > 0.5) {
+          float u = (vWorldPosition.x - uSceneBounds.x) / max(1e-5, uSceneBounds.z);
+          float v = (vWorldPosition.y - uSceneBounds.y) / max(1e-5, uSceneBounds.w);
+          v = 1.0 - v;
+          vec2 roofUv = clamp(vec2(u, v), 0.0, 1.0);
+          outdoorFactor = texture2D(uRoofMap, roofUv).r;
+        }
+        
+        if (uOutdoorCloudSpecularEnabled && uHasCloudShadowMap) {
+          // Cloud lit areas get bright specular (reflecting sky)
+          cloudSpecular = cloudLit * uCloudSpecularIntensity * outdoorFactor;
+          
+          // Blend stripes: outdoors stripes are reduced, clouds dominate
+          // At outdoorStripeBlend=0: stripes contribute nothing outdoors
+          // At outdoorStripeBlend=1: stripes contribute fully (like indoors)
+          stripeContribution *= mix(1.0, uOutdoorStripeBlend, outdoorFactor);
+        }
+        
+        // Combine: base 1.0 + stripe contribution + cloud specular + sparkles
+        float totalModulator = 1.0 + stripeContribution + cloudSpecular + (sparkleVal * uSparkleIntensity);
 
         // Global stripe brightness threshold: only allow shine on the
         // brightest parts of the specular mask. 0 = full mask, 1 = only

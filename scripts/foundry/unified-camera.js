@@ -33,11 +33,13 @@ export class UnifiedCameraController {
    * @param {HTMLCanvasElement} [options.threeCanvas] - Three.js canvas for input
    */
   constructor(options = {}) {
+    const { sceneComposer, threeCanvas } = options;
+
     /** @type {import('../scene/composer.js').SceneComposer|null} */
-    this.sceneComposer = options.sceneComposer || null;
+    this.sceneComposer = sceneComposer || null;
     
     /** @type {HTMLCanvasElement|null} */
-    this.threeCanvas = options.threeCanvas || null;
+    this.threeCanvas = threeCanvas || null;
     
     /** @type {boolean} */
     this.enabled = true;
@@ -70,6 +72,10 @@ export class UnifiedCameraController {
     // Drag state for Three.js canvas input
     this._isDragging = false;
     this._lastMousePos = null;
+
+    this._pendingRightDrag = false;
+    this._rightDragStartPos = null;
+    this._rightDragThresholdPx = 6;
     
     // Cooldown to prevent drift detection from fighting with user input
     // After any user-initiated zoom/pan, we skip drift detection for this many ms
@@ -517,10 +523,10 @@ export class UnifiedCameraController {
     
     // Right mouse button for pan
     if (event.button === 2) {
-      this._isDragging = true;
-      this._lastMousePos = { x: event.clientX, y: event.clientY };
-      this.threeCanvas.style.cursor = 'grabbing';
-      event.preventDefault();
+      this._pendingRightDrag = true;
+      this._rightDragStartPos = { x: event.clientX, y: event.clientY };
+      this._isDragging = false;
+      this._lastMousePos = null;
     }
   }
   
@@ -530,7 +536,27 @@ export class UnifiedCameraController {
    * @private
    */
   _onMouseMove(event) {
-    if (!this.enabled || !this._isDragging || !this._lastMousePos) return;
+    if (!this.enabled) return;
+
+    if (this._pendingRightDrag && this._rightDragStartPos) {
+      const dist = Math.hypot(
+        event.clientX - this._rightDragStartPos.x,
+        event.clientY - this._rightDragStartPos.y
+      );
+
+      if (dist > this._rightDragThresholdPx) {
+        this._pendingRightDrag = false;
+        this._rightDragStartPos = null;
+        this._isDragging = true;
+        this._lastMousePos = { x: event.clientX, y: event.clientY };
+        this.threeCanvas.style.cursor = 'grabbing';
+        event.preventDefault();
+      } else {
+        return;
+      }
+    }
+
+    if (!this._isDragging || !this._lastMousePos) return;
     
     const deltaX = event.clientX - this._lastMousePos.x;
     const deltaY = event.clientY - this._lastMousePos.y;
@@ -559,6 +585,9 @@ export class UnifiedCameraController {
         this.threeCanvas.style.cursor = 'default';
       }
     }
+
+    this._pendingRightDrag = false;
+    this._rightDragStartPos = null;
   }
   
   /**
@@ -664,6 +693,8 @@ export class UnifiedCameraController {
     this.enabled = false;
     this._isDragging = false;
     this._lastMousePos = null;
+    this._pendingRightDrag = false;
+    this._rightDragStartPos = null;
     if (this.threeCanvas) {
       this.threeCanvas.style.cursor = 'default';
     }

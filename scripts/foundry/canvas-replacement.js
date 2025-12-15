@@ -25,9 +25,11 @@ import { PrismEffect } from '../effects/PrismEffect.js';
 import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
 import { BuildingShadowsEffect } from '../effects/BuildingShadowsEffect.js';
 import { CloudEffect } from '../effects/CloudEffect.js';
+import { DistortionManager } from '../effects/DistortionManager.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { FireSparksEffect } from '../particles/FireSparksEffect.js';
 import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
+import { DustMotesEffect } from '../particles/DustMotesEffect.js';
 import { WorldSpaceFogEffect } from '../effects/WorldSpaceFogEffect.js';
 // NOTE: VisionManager and FogManager are no longer used.
 // WorldSpaceFogEffect renders fog as a world-space plane mesh, eliminating coordinate conversion issues.
@@ -45,7 +47,6 @@ import {
   PhysicsRopeEffect,
   BushTreeEffect,
   OverheadEffect,
-  DustEffect,
   SteamEffect,
   MetallicGlintsEffect,
   PostProcessingEffect,
@@ -72,6 +73,7 @@ import { sceneDebug } from '../utils/scene-debug.js';
 import { weatherController } from '../core/WeatherController.js';
 import { ControlsIntegration } from './controls-integration.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
+import { loadingOverlay } from '../ui/loading-overlay.js';
 
 const log = createLogger('Canvas');
 
@@ -83,6 +85,13 @@ let threeCanvas = null;
 
 /** @type {boolean} */
 let isMapMakerMode = false;
+
+/**
+ * Track Foundry's native fog/visibility state so we can temporarily bypass it
+ * in Map Maker mode (GM convenience) without permanently mutating the scene.
+ * @type {{ fogVisible: boolean|null, visibilityVisible: boolean|null, visibilityFilterEnabled: boolean|null }|null}
+ */
+let mapMakerFogState = null;
 
 /** @type {boolean} */
 let isHooked = false;
@@ -171,6 +180,15 @@ let resizeDebounceTimer = null;
 /** @type {number|null} - Hook ID for collapseSidebar listener */
 let collapseSidebarHookId = null;
 
+ /** @type {number|null} - Interval ID for periodic FPS logging */
+ let fpsLogIntervalId = null;
+
+ /** @type {number|null} - Interval ID for weather windvane UI sync */
+ let windVaneIntervalId = null;
+
+ /** @type {boolean} */
+ let transitionsInstalled = false;
+
 /**
  * Initialize canvas replacement hooks
  * Uses Foundry's native hook system for v13 compatibility
@@ -203,6 +221,10 @@ export function initialize() {
     // Hook into scene configuration changes (grid, padding, background, etc.)
     Hooks.on('updateScene', onUpdateScene);
 
+     // Install transition wrapper so we can fade-to-black BEFORE Foundry tears down the old scene.
+     // This must wrap an awaited method (Canvas.tearDown) to actually block the teardown.
+     installCanvasTransitionWrapper();
+
     isHooked = true;
     log.info('Canvas replacement hooks registered');
     return true;
@@ -211,6 +233,88 @@ export function initialize() {
     log.error('Failed to register canvas hooks:', error);
     return false;
   }
+}
+
+function installCanvasTransitionWrapper() {
+  if (transitionsInstalled) return;
+  transitionsInstalled = true;
+
+  try {
+    const CanvasCls = globalThis.foundry?.canvas?.Canvas;
+    const proto = CanvasCls?.prototype;
+    if (!proto?.tearDown) {
+      log.warn('Canvas class not available; scene transition wrapper not installed');
+      return;
+    }
+
+    if (proto.tearDown.__mapShineWrapped) return;
+
+    const original = proto.tearDown;
+    const wrapped = async function(...args) {
+      try {
+        const scene = this.scene;
+        if (scene && sceneSettings.isEnabled(scene)) {
+          loadingOverlay.showLoading('Switching scenes…');
+          await loadingOverlay.fadeToBlack(5000);
+          loadingOverlay.setMessage('Loading…');
+          loadingOverlay.setProgress(0);
+        }
+      } catch (e) {
+        log.warn('Scene transition fade failed:', e);
+      }
+      return original.apply(this, args);
+    };
+
+    wrapped.__mapShineWrapped = true;
+    proto.tearDown = wrapped;
+    log.info('Installed Canvas.tearDown transition wrapper');
+  } catch (e) {
+    log.warn('Failed to install scene transition wrapper:', e);
+  }
+}
+
+async function waitForThreeFrames(
+  renderer,
+  renderLoop,
+  minFrames = 2,
+  timeoutMs = 5000,
+  {
+    minCalls = 1,
+    minDelayMs = 0,
+    stableCallsFrames = 2
+  } = {}
+) {
+  const startTime = performance.now();
+
+  const startThreeFrame = renderer?.info?.render?.frame;
+  const startLoopFrame = typeof renderLoop?.getFrameCount === 'function' ? renderLoop.getFrameCount() : 0;
+
+  let callsStable = 0;
+
+  while (performance.now() - startTime < timeoutMs) {
+    const now = performance.now();
+    const currentThreeFrame = renderer?.info?.render?.frame;
+    const currentLoopFrame = typeof renderLoop?.getFrameCount === 'function' ? renderLoop.getFrameCount() : 0;
+
+    const hasThreeCounter = Number.isFinite(startThreeFrame) && Number.isFinite(currentThreeFrame);
+    const framesAdvanced = hasThreeCounter
+      ? (currentThreeFrame - startThreeFrame)
+      : (currentLoopFrame - startLoopFrame);
+
+    const calls = renderer?.info?.render?.calls;
+    if (Number.isFinite(calls) && calls >= minCalls) callsStable++;
+    else callsStable = 0;
+
+    const meetsDelay = (now - startTime) >= minDelayMs;
+    const meetsFrames = framesAdvanced >= minFrames;
+    const meetsCalls = !Number.isFinite(calls) ? true : (callsStable >= stableCallsFrames);
+
+    if (meetsDelay && meetsFrames && meetsCalls) return true;
+
+    await new Promise(resolve => requestAnimationFrame(resolve));
+  }
+
+  return false;
 }
 
 /**
@@ -309,10 +413,23 @@ async function onCanvasReady(canvas) {
       }
     }
 
+     // Scene not replaced by Three.js - dismiss the overlay so the user can interact with Foundry normally.
+     try {
+       loadingOverlay.fadeIn(500).catch(() => {});
+     } catch (e) {
+       log.debug('Loading overlay not available:', e);
+     }
+
     return;
   }
 
   log.info(`Initializing Map Shine canvas for scene: ${scene.name}`);
+
+  try {
+    loadingOverlay.showBlack(`Loading ${scene.name}…`);
+  } catch (e) {
+    log.debug('Loading overlay not available:', e);
+  }
 
   // Create three.js canvas overlay
   await createThreeCanvas(scene);
@@ -406,6 +523,13 @@ async function createThreeCanvas(scene) {
   }
 
   try {
+    try {
+      loadingOverlay.showBlack(`Loading ${scene?.name || 'scene'}…`);
+      loadingOverlay.setProgress(0.05);
+    } catch (e) {
+      log.debug('Loading overlay not available:', e);
+    }
+
     // Set default mode - actual canvas configuration happens after ControlsIntegration init
     isMapMakerMode = false; // Default to Gameplay Mode
 
@@ -486,16 +610,6 @@ async function createThreeCanvas(scene) {
       ? scene.backgroundColor
       : '#999999';
 
-    // Parse hex string to numeric RGB for three.js clear colour
-    let sceneBgColorInt = 0x999999;
-    try {
-      const hex = sceneBgColorStr.replace('#', '');
-      const parsed = parseInt(hex, 16);
-      if (!Number.isNaN(parsed)) sceneBgColorInt = parsed;
-    } catch (e) {
-      // Fallback already set to 0x999999
-    }
-
     // Replace our placeholder with the renderer's actual canvas
     threeCanvas.replaceWith(rendererCanvas);
     rendererCanvas.id = 'map-shine-canvas';
@@ -523,7 +637,20 @@ async function createThreeCanvas(scene) {
     const { scene: threeScene, camera, bundle } = await sceneComposer.initialize(
       scene,
       rect.width,
-      rect.height
+      rect.height,
+      {
+        onProgress: (loaded, total, asset) => {
+          try {
+            const denom = total > 0 ? total : 1;
+            const v = Math.max(0, Math.min(1, loaded / denom));
+            loadingOverlay.setMessage(`Loading ${asset}…`);
+            // Reserve first 40% of the bar for asset/mask loading.
+            loadingOverlay.setProgress(0.05 + v * 0.35);
+          } catch (e) {
+            // Ignore overlay errors
+          }
+        }
+      }
     );
 
     log.info(`Scene composer initialized with ${bundle.masks.length} effect masks`);
@@ -551,6 +678,13 @@ async function createThreeCanvas(scene) {
     effectComposer = new EffectComposer(renderer, threeScene, camera);
     effectComposer.initialize(mapShine.capabilities);
 
+    try {
+      loadingOverlay.setMessage('Initializing effects…');
+      loadingOverlay.setProgress(0.45);
+    } catch (e) {
+      // Ignore overlay errors
+    }
+
     // Ensure WeatherController is initialized and driven by the centralized TimeManager.
     // This allows precipitation, wind, etc. to update every frame and drive GPU effects
     // like the particle-based weather system without requiring manual console snippets.
@@ -559,23 +693,23 @@ async function createThreeCanvas(scene) {
 
     // Step 3: Register specular effect
     const specularEffect = new SpecularEffect();
-    effectComposer.registerEffect(specularEffect);
+    await effectComposer.registerEffect(specularEffect);
 
     // Step 3.1: Register iridescence effect
     const iridescenceEffect = new IridescenceEffect();
-    effectComposer.registerEffect(iridescenceEffect);
+    await effectComposer.registerEffect(iridescenceEffect);
 
     // Step 3.1.5: Register window lighting effect
     const windowLightEffect = new WindowLightEffect();
-    effectComposer.registerEffect(windowLightEffect);
+    await effectComposer.registerEffect(windowLightEffect);
 
     // Step 3.2: Register color correction effect (Post-Processing)
     const colorCorrectionEffect = new ColorCorrectionEffect();
-    effectComposer.registerEffect(colorCorrectionEffect);
+    await effectComposer.registerEffect(colorCorrectionEffect);
     
     // Step 3.3: Register ASCII Effect (Post-Processing)
     const asciiEffect = new AsciiEffect();
-    effectComposer.registerEffect(asciiEffect);
+    await effectComposer.registerEffect(asciiEffect);
     
     // Step 3.4: Register Particle System (WebGPU/WebGL2)
     // CRITICAL: Must await to ensure batchRenderer is initialized before FireSparksEffect uses it
@@ -596,53 +730,64 @@ async function createThreeCanvas(scene) {
     const smellyFliesEffect = new SmellyFliesEffect();
     await effectComposer.registerEffect(smellyFliesEffect);
 
+    const dustMotesEffect = new DustMotesEffect();
+    await effectComposer.registerEffect(dustMotesEffect);
+
+    if (bundle) {
+      dustMotesEffect.setAssetBundle(bundle);
+    }
+
     // Step 3.5: Register Prism Effect
     const prismEffect = new PrismEffect();
-    effectComposer.registerEffect(prismEffect);
+    await effectComposer.registerEffect(prismEffect);
 
     // Step 3.5.1: Register World-Space Fog Effect (Fog of War)
     // WorldSpaceFogEffect renders fog as a plane mesh in the Three.js scene.
     // This eliminates coordinate conversion issues between screen-space and world-space.
     // Vision is rendered to a world-space render target, exploration uses Foundry's texture.
     fogEffect = new WorldSpaceFogEffect();
-    effectComposer.registerEffect(fogEffect);
+    await effectComposer.registerEffect(fogEffect);
     log.info('WorldSpaceFogEffect registered');
 
     // Step 3.6: Register Lighting Effect
     lightingEffect = new LightingEffect();
-    effectComposer.registerEffect(lightingEffect);
+    await effectComposer.registerEffect(lightingEffect);
 
     // Step 3.6.25: Register Animated Bushes (surface overlay, before shadows)
     const bushEffect = new BushEffect();
-    effectComposer.registerEffect(bushEffect);
+    await effectComposer.registerEffect(bushEffect);
 
     // Step 3.6.26: Register Animated Trees (High Canopy, above overhead)
     const treeEffect = new TreeEffect();
-    effectComposer.registerEffect(treeEffect);
+    await effectComposer.registerEffect(treeEffect);
 
     // Step 3.6.5: Register Overhead Shadows (post-lighting)
     const overheadShadowsEffect = new OverheadShadowsEffect();
-    effectComposer.registerEffect(overheadShadowsEffect);
+    await effectComposer.registerEffect(overheadShadowsEffect);
 
     // Step 3.6.6: Register Building Shadows (post-lighting, environmental)
     const buildingShadowsEffect = new BuildingShadowsEffect();
-    effectComposer.registerEffect(buildingShadowsEffect);
+    await effectComposer.registerEffect(buildingShadowsEffect);
 
     // Step 3.6.7: Register Cloud Effect (procedural cloud shadows)
     const cloudEffect = new CloudEffect();
-    effectComposer.registerEffect(cloudEffect);
+    await effectComposer.registerEffect(cloudEffect);
+
+    // Step 3.6.8: Register Distortion Manager (centralized screen-space distortions)
+    const distortionManager = new DistortionManager();
+    await effectComposer.registerEffect(distortionManager);
 
     // Step 3.7: Register Bloom Effect
     const bloomEffect = new BloomEffect();
-    effectComposer.registerEffect(bloomEffect);
+    await effectComposer.registerEffect(bloomEffect);
 
     // Step 3.8: Register Lensflare Effect
     const lensflareEffect = new LensflareEffect();
-    effectComposer.registerEffect(lensflareEffect);
+    await effectComposer.registerEffect(lensflareEffect);
 
     // Step 7: Create Sky Color Effect (post-lighting color grading for sky/outdoors)
     skyColorEffect = new SkyColorEffect();
-    effectComposer.registerEffect(skyColorEffect);
+    await effectComposer.registerEffect(skyColorEffect);
 
     // Provide the base mesh and asset bundle to the effect
     const basePlane = sceneComposer.getBasePlane();
@@ -651,6 +796,7 @@ async function createThreeCanvas(scene) {
     iridescenceEffect.setBaseMesh(basePlane, bundle);
     prismEffect.setBaseMesh(basePlane, bundle);
     windowLightEffect.setBaseMesh(basePlane, bundle);
+    windowLightEffect.createLightTarget();
     bushEffect.setBaseMesh(basePlane, bundle);
     treeEffect.setBaseMesh(basePlane, bundle);
     lightingEffect.setBaseMesh(basePlane, bundle);
@@ -817,12 +963,14 @@ async function createThreeCanvas(scene) {
     mapShine.overheadShadowsEffect = overheadShadowsEffect;
     mapShine.buildingShadowsEffect = buildingShadowsEffect;
     mapShine.cloudEffect = cloudEffect;
+    mapShine.distortionManager = distortionManager;
     mapShine.bloomEffect = bloomEffect;
     mapShine.lensflareEffect = lensflareEffect;
     mapShine.colorCorrectionEffect = colorCorrectionEffect;
     mapShine.asciiEffect = asciiEffect;
     mapShine.fireSparksEffect = fireSparksEffect;
     mapShine.smellyFliesEffect = smellyFliesEffect; // Smart particle swarms
+    mapShine.dustMotesEffect = dustMotesEffect;
     mapShine.fogEffect = fogEffect; // Fog of War (world-space plane mesh)
     mapShine.skyColorEffect = skyColorEffect; // NEW: Expose SkyColorEffect
     mapShine.cameraFollower = cameraFollower; // Three.js camera follows PIXI
@@ -855,7 +1003,11 @@ async function createThreeCanvas(scene) {
     log.info('Specular effect registered and initialized');
 
     // Log FPS periodically
-    setInterval(() => {
+    if (fpsLogIntervalId !== null) {
+      clearInterval(fpsLogIntervalId);
+      fpsLogIntervalId = null;
+    }
+    fpsLogIntervalId = setInterval(() => {
       if (renderLoop && renderLoop.running()) {
         log.debug(`FPS: ${renderLoop.getFPS()}, Frames: ${renderLoop.getFrameCount()}`);
       }
@@ -874,16 +1026,45 @@ async function createThreeCanvas(scene) {
         bloomEffect,
         lensflareEffect,
         fireSparksEffect,
+        smellyFliesEffect,
+        dustMotesEffect,
         windowLightEffect,
         overheadShadowsEffect,
         buildingShadowsEffect,
         cloudEffect,
         bushEffect,
         treeEffect,
-        fogEffect
+        fogEffect,
+        distortionManager
       );
     } catch (e) {
       log.error('Failed to initialize UI:', e);
+    }
+
+    // Only begin fading-in once we have proof that Three has actually rendered.
+    // This prevents the overlay from fading out during shader compilation / first-frame stutter.
+    try {
+      loadingOverlay.setMessage('Finalizing…');
+    } catch (e) {
+      // Ignore overlay errors
+    }
+
+    try {
+      await waitForThreeFrames(renderer, renderLoop, 6, 12000, {
+        minCalls: 1,
+        stableCallsFrames: 3,
+        minDelayMs: 350
+      });
+    } catch (e) {
+      // Ignore wait errors
+    }
+
+    try {
+      loadingOverlay.setMessage('Finished');
+      loadingOverlay.setProgress(1);
+      await loadingOverlay.fadeIn(5000);
+    } catch (e) {
+      // Ignore overlay errors
     }
 
   } catch (error) {
@@ -910,9 +1091,10 @@ async function createThreeCanvas(scene) {
  * @param {BushEffect} bushEffect - The animated bushes surface effect instance
  * @param {TreeEffect} treeEffect - The animated trees surface effect instance
  * @param {FogEffect} fogEffect - The fog of war effect instance
+ * @param {DistortionManager} distortionManager - The centralized distortion manager
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, bushEffect, treeEffect, fogEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, smellyFliesEffect, dustMotesEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, bushEffect, treeEffect, fogEffect, distortionManager) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -1503,8 +1685,30 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     );
   }
 
+  // --- Distortion Manager Settings ---
+  if (distortionManager) {
+    const distortionSchema = DistortionManager.getControlSchema();
+    
+    const onDistortionUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        distortionManager.enabled = value;
+        log.debug(`DistortionManager ${value ? 'enabled' : 'disabled'}`);
+      } else if (distortionManager.params && Object.prototype.hasOwnProperty.call(distortionManager.params, paramId)) {
+        distortionManager.params[paramId] = value;
+        log.debug(`Distortion.${paramId} = ${value}`);
+      }
+    };
+
+    uiManager.registerEffect(
+      'distortion',
+      'Screen Distortion',
+      distortionSchema,
+      onDistortionUpdate,
+      'global'
+    );
+  }
+
   // --- Smelly Flies Settings ---
-  const smellyFliesEffect = window.MapShine?.smellyFliesEffect;
   if (smellyFliesEffect) {
     const fliesSchema = SmellyFliesEffect.getControlSchema();
     
@@ -1534,6 +1738,22 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         }
       });
     }
+  }
+
+  if (dustMotesEffect) {
+    const dustSchema = DustMotesEffect.getControlSchema();
+
+    const onDustUpdate = (effectId, paramId, value) => {
+      dustMotesEffect.applyParamChange(paramId, value);
+    };
+
+    uiManager.registerEffect(
+      'dust',
+      'Dust',
+      dustSchema,
+      onDustUpdate,
+      'particle'
+    );
   }
 
   // Add a simple windvane indicator inside the Weather UI folder that reflects
@@ -1600,7 +1820,11 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       };
 
       updateWindVane();
-      setInterval(updateWindVane, 200);
+      if (windVaneIntervalId !== null) {
+        clearInterval(windVaneIntervalId);
+        windVaneIntervalId = null;
+      }
+      windVaneIntervalId = setInterval(updateWindVane, 200);
     }
   } catch (e) {
     log.warn('Failed to add windvane UI indicator:', e);
@@ -1706,10 +1930,8 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     { id: 'overhead',           name: 'Overhead Effect',      Class: OverheadEffect,          categoryId: 'structure' },
 
     // Particle Systems
-    { id: 'dust',               name: 'Dust',                 Class: DustEffect,              categoryId: 'particle' },
     { id: 'steam',              name: 'Steam',                Class: SteamEffect,             categoryId: 'particle' },
     { id: 'metallic-glints',    name: 'Metallic Glints',      Class: MetallicGlintsEffect,    categoryId: 'particle' },
-    { id: 'smelly-flies',       name: 'Smelly Flies',         Class: SmellyFliesEffect,       categoryId: 'particle' },
 
     // Global & UI Effects
     // { id: 'post-processing',    name: 'Post-Processing',      Class: PostProcessingEffect,    categoryId: 'global' }, // Replaced by real ColorCorrectionEffect
@@ -1767,6 +1989,16 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
 function destroyThreeCanvas() {
   // Clean up resize handling first
   cleanupResizeHandling();
+
+  // Clear any timers created by this module
+  if (fpsLogIntervalId !== null) {
+    clearInterval(fpsLogIntervalId);
+    fpsLogIntervalId = null;
+  }
+  if (windVaneIntervalId !== null) {
+    clearInterval(windVaneIntervalId);
+    windVaneIntervalId = null;
+  }
 
   // Dispose UI manager
   if (uiManager) {
@@ -1859,6 +2091,13 @@ function destroyThreeCanvas() {
     log.debug('Template manager disposed');
   }
 
+  // Dispose light icon manager
+  if (lightIconManager) {
+    lightIconManager.dispose();
+    lightIconManager = null;
+    log.debug('Light icon manager disposed');
+  }
+
   // Dispose interaction manager
   if (interactionManager) {
     interactionManager.dispose();
@@ -1931,12 +2170,59 @@ export function setMapMakerMode(enabled) {
   }
 }
 
+function applyMapMakerFogOverride() {
+  if (!game?.user?.isGM) return;
+  if (!canvas?.ready) return;
+
+  // Capture prior state once per Map Maker entry.
+  if (!mapMakerFogState) {
+    mapMakerFogState = {
+      fogVisible: canvas.fog?.visible ?? null,
+      visibilityVisible: canvas.visibility?.visible ?? null,
+      visibilityFilterEnabled: canvas.visibility?.filter?.enabled ?? null
+    };
+  }
+
+  // In Map Maker mode, fog/visibility can black out the entire map for GMs
+  // when no token vision source is active. Hide them to keep the map editable.
+  try {
+    if (canvas.fog) canvas.fog.visible = false;
+    if (canvas.visibility) canvas.visibility.visible = false;
+    if (canvas.visibility?.filter) canvas.visibility.filter.enabled = false;
+  } catch (_) {
+    // Ignore - structure may vary by Foundry version
+  }
+}
+
+function restoreMapMakerFogOverride() {
+  if (!mapMakerFogState) return;
+
+  try {
+    if (canvas?.fog && mapMakerFogState.fogVisible !== null) {
+      canvas.fog.visible = mapMakerFogState.fogVisible;
+    }
+    if (canvas?.visibility && mapMakerFogState.visibilityVisible !== null) {
+      canvas.visibility.visible = mapMakerFogState.visibilityVisible;
+    }
+    if (canvas?.visibility?.filter && mapMakerFogState.visibilityFilterEnabled !== null) {
+      canvas.visibility.filter.enabled = mapMakerFogState.visibilityFilterEnabled;
+    }
+  } catch (_) {
+    // Ignore
+  } finally {
+    mapMakerFogState = null;
+  }
+}
+
 /**
  * Enable the Three.js System (Gameplay Mode)
  * @private
  */
 function enableSystem() {
   if (!threeCanvas) return;
+
+  // Leaving Map Maker mode - restore any temporary fog/visibility overrides.
+  restoreMapMakerFogOverride();
   
   // Resume Render Loop
   if (renderLoop && !renderLoop.running()) {
@@ -1962,10 +2248,24 @@ function enableSystem() {
     canvas.app.renderer.background.alpha = 0;
   }
   
-  // Let ControlsIntegration handle the rest if active
-  if (controlsIntegration && controlsIntegration.getState() === 'active') {
-    controlsIntegration.layerVisibility?.update();
-    controlsIntegration.inputRouter?.autoUpdate();
+  // Re-enable ControlsIntegration if it was disabled (e.g., returning from Map Maker mode)
+  if (controlsIntegration) {
+    const state = controlsIntegration.getState();
+    if (state === 'disabled') {
+      // Re-initialize to restore hooks and layer management
+      controlsIntegration.initialize().then(() => {
+        log.info('ControlsIntegration re-enabled after Map Maker mode');
+      }).catch(err => {
+        log.warn('Failed to re-enable ControlsIntegration:', err);
+        configureFoundryCanvas();
+      });
+    } else if (state === 'active') {
+      controlsIntegration.layerVisibility?.update();
+      controlsIntegration.inputRouter?.autoUpdate();
+    } else {
+      // Fallback to legacy configuration
+      configureFoundryCanvas();
+    }
   } else {
     // Fallback to legacy configuration
     configureFoundryCanvas();
@@ -1988,8 +2288,20 @@ function disableSystem() {
     threeCanvas.style.pointerEvents = 'none';
   }
   
-  // Restore full PIXI functionality
-  restoreFoundryRendering();
+  // CRITICAL: Disable ControlsIntegration BEFORE restoring PIXI.
+  // This prevents its hooks from re-hiding layers after we restore them.
+  // The disable() method calls restoreAllLayers() internally.
+  if (controlsIntegration && controlsIntegration.getState() === 'active') {
+    controlsIntegration.disable();
+    log.info('ControlsIntegration disabled for Map Maker mode');
+  } else {
+    // Fallback if ControlsIntegration isn't active
+    restoreFoundryRendering();
+  }
+
+  // GM convenience: prevent Foundry fog/visibility from blacking out the map
+  // while editing in Map Maker mode.
+  applyMapMakerFogOverride();
 }
 
 /**
@@ -2256,6 +2568,14 @@ function restoreFoundryRendering() {
 
   log.info('Restoring Foundry PIXI rendering');
 
+  // Restore PIXI renderer background to opaque.
+  // In Gameplay mode we set it transparent so Three.js can show through.
+  // When Three.js is hidden (Map Maker mode), leaving PIXI transparent
+  // results in a black screen.
+  if (canvas.app?.renderer?.background) {
+    canvas.app.renderer.background.alpha = 1;
+  }
+
   // Restore PIXI canvas to default state
   const pixiCanvas = canvas.app.view;
   if (pixiCanvas) {
@@ -2264,9 +2584,10 @@ function restoreFoundryRendering() {
     pixiCanvas.style.zIndex = ''; // Reset to default
   }
 
-  // Restore ALL layers
+  // Restore ALL layers (including 'primary' which is critical for V12+)
   if (canvas.background) canvas.background.visible = true;
   if (canvas.grid) canvas.grid.visible = true;
+  if (canvas.primary) canvas.primary.visible = true;
   if (canvas.tokens) canvas.tokens.visible = true;
   if (canvas.tiles) canvas.tiles.visible = true;
   if (canvas.lighting) canvas.lighting.visible = true;
@@ -2278,6 +2599,22 @@ function restoreFoundryRendering() {
   if (canvas.weather) canvas.weather.visible = true;
   if (canvas.environment) canvas.environment.visible = true;
   if (canvas.regions) canvas.regions.visible = true;
+  if (canvas.fog) canvas.fog.visible = true;
+  if (canvas.visibility) canvas.visibility.visible = true;
+  
+  // Restore visibility filter if it was disabled
+  if (canvas.visibility?.filter) {
+    canvas.visibility.filter.enabled = true;
+  }
+  
+  // Restore token alphas (they were set to ~0 for Three.js rendering)
+  if (canvas.tokens?.placeables) {
+    for (const token of canvas.tokens.placeables) {
+      if (token.mesh) token.mesh.alpha = 1;
+      if (token.icon) token.icon.alpha = 1;
+      if (token.border) token.border.alpha = 1;
+    }
+  }
 
   log.info('PIXI rendering restored');
 }

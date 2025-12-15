@@ -218,9 +218,10 @@ export class ThreeLightSource {
 
     try {
       const placeable = canvas.lighting?.get(this.id);
-      if (placeable && placeable.source) {
+      const lightSource = placeable?.lightSource ?? placeable?.source;
+      if (lightSource) {
         // Prefer the LOS polygon, which is already clipped by walls.
-        const poly = placeable.source.los || placeable.source.shape;
+        const poly = lightSource.los || lightSource.shape;
         const points = poly?.points;
         if (points && points.length >= 6) {
           shapePoints = [];
@@ -276,7 +277,8 @@ export class ThreeLightSource {
     if (this._usingCircleFallback) {
       try {
         const placeable = canvas.lighting?.get(this.id);
-        const poly = placeable?.source?.los;
+        const lightSource = placeable?.lightSource ?? placeable?.source;
+        const poly = lightSource?.los;
         const points = poly?.points;
         if (points && points.length >= 6) {
           const d = canvas.dimensions;

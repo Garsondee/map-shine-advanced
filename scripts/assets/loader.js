@@ -17,6 +17,7 @@ const EFFECT_MASKS = {
   roughness: { suffix: '_Roughness', required: false, description: 'Roughness/smoothness map' },
   normal: { suffix: '_Normal', required: false, description: 'Normal map for lighting detail' },
   fire: { suffix: '_Fire', required: false, description: 'Fire effect mask' },
+  dust: { suffix: '_Dust', required: false, description: 'Dust motes mask' },
   outdoors: { suffix: '_Outdoors', required: false, description: 'Indoor/outdoor area mask' },
   iridescence: { suffix: '_Iridescence', required: false, description: 'Iridescence effect mask' },
   prism: { suffix: '_Prism', required: false, description: 'Prism/refraction mask' },
@@ -206,7 +207,12 @@ async function discoverAvailableFiles(basePath) {
 
     // Use Foundry's FilePicker to browse the directory
     // This returns the actual files that exist
-    const result = await FilePicker.browse('data', directory);
+    const filePickerImpl = globalThis.foundry?.applications?.apps?.FilePicker?.implementation;
+    const filePicker = filePickerImpl ?? globalThis.FilePicker;
+    if (!filePicker) {
+      throw new Error('FilePicker is not available');
+    }
+    const result = await filePicker.browse('data', directory);
     
     if (!result || !result.files) {
       log.warn('FilePicker returned no files for directory:', directory);
@@ -288,7 +294,11 @@ async function loadTextureAsync(path) {
   try {
     // Use Foundry's built-in texture loading (via PIXI)
     // Don't use fallback - let it throw on 404 so we can try next format
-    const pixiTexture = await loadTexture(absolutePath);
+    const loadTextureFn = globalThis.foundry?.canvas?.loadTexture ?? globalThis.loadTexture;
+    if (!loadTextureFn) {
+      throw new Error('loadTexture is not available');
+    }
+    const pixiTexture = await loadTextureFn(absolutePath);
     
     if (!pixiTexture || !pixiTexture.baseTexture) {
       throw new Error(`Failed to load texture: ${absolutePath}`);

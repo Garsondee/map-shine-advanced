@@ -44,9 +44,9 @@ export class WeatherController {
     this.currentState = {
       precipitation: 0.0,
       precipType: PrecipitationType.NONE,
-      cloudCover: 0.0,
+      cloudCover: 0.41,
       windSpeed: 0.07,
-      windDirection: { x: 1, y: 0 }, // Placeholder, upgraded to Vector2 in initialize()
+      windDirection: { x: -0.9063077870366499, y: -0.42261826174069944 }, // 205deg, upgraded to Vector2 in initialize()
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0
@@ -98,14 +98,14 @@ export class WeatherController {
 
     // Per-system tuning parameters for precipitation visuals
     this.rainTuning = {
-      intensityScale: 1.0,
+      intensityScale: 0.8,
       streakLength: 0.18,
-      dropSize: 6.1,
+      dropSize: 3.1,
       dropSizeMin: 1.4,
       dropSizeMax: 13.8,
-      brightness: 0.8,
-      gravityScale: 3.0,
-      windInfluence: 1.6,
+      brightness: 5.7,
+      gravityScale: 0.05,
+      windInfluence: 0.85,
       curlStrength: 4.0,
 
       // Splash-specific tuning (rain splashes on the ground)
@@ -118,46 +118,46 @@ export class WeatherController {
 
       // Per-tile splash tuning (4 atlas tiles / splash archetypes)
       // Splash 1: Thin clean ring
-      splash1IntensityScale: 0.85,
+      splash1IntensityScale: 5.3,
       splash1LifeMin: 0.20,
       splash1LifeMax: 0.35,
       splash1SizeMin: 8.0,
       splash1SizeMax: 16.0,
-      splash1OpacityPeak: 0.01,
+      splash1OpacityPeak: 0.05,
 
       // Splash 2: Thick broken ring
-      splash2IntensityScale: 0.10,
+      splash2IntensityScale: 5.85,
       splash2LifeMin: 0.09,
       splash2LifeMax: 0.22,
       splash2SizeMin: 2.0,
       splash2SizeMax: 3.0,
-      splash2OpacityPeak: 0.01,
+      splash2OpacityPeak: 0.05,
 
       // Splash 3: Droplets-only pattern
       splash3IntensityScale: 5.95,
-      splash3LifeMin: 0.06,
-      splash3LifeMax: 1.50,
+      splash3LifeMin: 0.20,
+      splash3LifeMax: 0.79,
       splash3SizeMin: 6.0,
-      splash3SizeMax: 17.0,
-      splash3OpacityPeak: 0.04,
+      splash3SizeMax: 27.0,
+      splash3OpacityPeak: 0.12,
 
       // Splash 4: Inner puddle
-      splash4IntensityScale: 1.10,
+      splash4IntensityScale: 9.25,
       splash4LifeMin: 0.305,
       splash4LifeMax: 1.40,
       splash4SizeMin: 10.0,
       splash4SizeMax: 24.0,
-      splash4OpacityPeak: 0.01
+      splash4OpacityPeak: 0.02
     };
 
     this.snowTuning = {
       intensityScale: 1.0,
-      flakeSize: 0.6,
+      flakeSize: 1.5,
       brightness: 1.0,
-      gravityScale: 0.41,
-      windInfluence: 0.35,
-      curlStrength: 2.5,
-      flutterStrength: 2.0
+      gravityScale: 0.01,
+      windInfluence: 0.85,
+      curlStrength: 11.25,
+      flutterStrength: 4.65
     };
   }
 
@@ -589,7 +589,7 @@ export class WeatherController {
         },
         cloudCover: {
           label: 'Cloud Cover',
-          default: 0.0,
+          default: 0.41,
           min: 0.0,
           max: 1.0,
           step: 0.01,
@@ -606,7 +606,7 @@ export class WeatherController {
         },
         windDirection: {
           label: 'Wind Direction (deg)',
-          default: 0.0,
+          default: 205.0,
           min: 0.0,
           max: 360.0,
           step: 1.0,
@@ -675,7 +675,7 @@ export class WeatherController {
         // Rain tuning
         rainIntensityScale: {
           label: 'Rain Intensity Scale',
-          default: 1.0,
+          default: 0.8,
           min: 0.0,
           max: 6.0,
           step: 0.05,
@@ -691,7 +691,7 @@ export class WeatherController {
         },
         rainDropSize: {
           label: 'Rain Drop Size',
-          default: 6.1,
+          default: 3.1,
           min: 0.5,
           max: 16.0,
           step: 0.05,
@@ -715,7 +715,7 @@ export class WeatherController {
         },
         rainBrightness: {
           label: 'Rain Brightness',
-          default: 0.8,
+          default: 5.7,
           min: 0.1,
           max: 12.0,
           step: 0.05,
@@ -723,7 +723,7 @@ export class WeatherController {
         },
         rainGravityScale: {
           label: 'Rain Gravity Scale',
-          default: 3.0,
+          default: 0.05,
           min: 0.05,
           max: 6.0,
           step: 0.05,
@@ -731,7 +731,7 @@ export class WeatherController {
         },
         rainWindInfluence: {
           label: 'Rain Wind Influence',
-          default: 1.6,
+          default: 0.85,
           min: 0.0,
           max: 4.0,
           step: 0.05,
@@ -750,7 +750,7 @@ export class WeatherController {
         // Splash 1: Thin clean ring
         rainSplash1IntensityScale: {
           label: 'Splash 1 (Thin Ring) Intensity',
-          default: 0.85,
+          default: 5.3,
           min: 0.0,
           max: 10.0,
           step: 0.05,
@@ -790,7 +790,7 @@ export class WeatherController {
         },
         rainSplash1OpacityPeak: {
           label: 'Splash 1 (Thin Ring) Peak Opacity',
-          default: 0.01,
+          default: 0.05,
           min: 0.0,
           max: 0.6,
           step: 0.01,
@@ -800,7 +800,7 @@ export class WeatherController {
         // Splash 2: Thick broken ring
         rainSplash2IntensityScale: {
           label: 'Splash 2 (Broken Ring) Intensity',
-          default: 0.10,
+          default: 5.85,
           min: 0.0,
           max: 10.0,
           step: 0.05,
@@ -840,7 +840,7 @@ export class WeatherController {
         },
         rainSplash2OpacityPeak: {
           label: 'Splash 2 (Broken Ring) Peak Opacity',
-          default: 0.01,
+          default: 0.05,
           min: 0.0,
           max: 0.6,
           step: 0.01,
@@ -858,7 +858,7 @@ export class WeatherController {
         },
         rainSplash3LifeMin: {
           label: 'Splash 3 (Droplets) Life Min (s)',
-          default: 0.060,
+          default: 0.20,
           min: 0.005,
           max: 1.0,
           step: 0.005,
@@ -866,7 +866,7 @@ export class WeatherController {
         },
         rainSplash3LifeMax: {
           label: 'Splash 3 (Droplets) Life Max (s)',
-          default: 1.50,
+          default: 0.79,
           min: 0.01,
           max: 1.5,
           step: 0.01,
@@ -882,7 +882,7 @@ export class WeatherController {
         },
         rainSplash3SizeMax: {
           label: 'Splash 3 (Droplets) Size Max (px)',
-          default: 17.0,
+          default: 27.0,
           min: 2.0,
           max: 256.0,
           step: 1.0,
@@ -890,7 +890,7 @@ export class WeatherController {
         },
         rainSplash3OpacityPeak: {
           label: 'Splash 3 (Droplets) Peak Opacity',
-          default: 0.04,
+          default: 0.12,
           min: 0.0,
           max: 0.6,
           step: 0.01,
@@ -900,7 +900,7 @@ export class WeatherController {
         // Splash 4: Inner puddle
         rainSplash4IntensityScale: {
           label: 'Splash 4 (Puddle) Intensity',
-          default: 1.10,
+          default: 9.25,
           min: 0.0,
           max: 10.0,
           step: 0.05,
@@ -940,7 +940,7 @@ export class WeatherController {
         },
         rainSplash4OpacityPeak: {
           label: 'Splash 4 (Puddle) Peak Opacity',
-          default: 0.01,
+          default: 0.02,
           min: 0.0,
           max: 0.6,
           step: 0.01,
@@ -958,7 +958,7 @@ export class WeatherController {
         },
         snowFlakeSize: {
           label: 'Snow Flake Size',
-          default: 0.6,
+          default: 1.5,
           min: 0.05,
           max: 3.0,
           step: 0.05,
@@ -974,7 +974,7 @@ export class WeatherController {
         },
         snowGravityScale: {
           label: 'Snow Gravity Scale',
-          default: 0.41,
+          default: 0.01,
           min: 0.01,
           max: 3.0,
           step: 0.05,
@@ -982,7 +982,7 @@ export class WeatherController {
         },
         snowWindInfluence: {
           label: 'Snow Wind Influence',
-          default: 0.35,
+          default: 0.85,
           min: 0.0,
           max: 2.0,
           step: 0.05,
@@ -990,7 +990,7 @@ export class WeatherController {
         },
         snowCurlStrength: {
           label: 'Snow Curl Strength',
-          default: 2.5,
+          default: 11.25,
           min: 0.0,
           max: 12.0,
           step: 0.05,
@@ -998,7 +998,7 @@ export class WeatherController {
         },
         snowFlutterStrength: {
           label: 'Snow Flutter Strength',
-          default: 2.0,
+          default: 4.65,
           min: 0.0,
           max: 6.0,
           step: 0.05,

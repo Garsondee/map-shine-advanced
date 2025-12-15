@@ -53,9 +53,10 @@ export class SceneComposer {
    * @param {Scene} foundryScene - Foundry VTT scene object
    * @param {number} viewportWidth - Viewport width in pixels
    * @param {number} viewportHeight - Viewport height in pixels
+   * @param {{onProgress?: (loaded:number, total:number, asset:string)=>void}} [options]
    * @returns {Promise<{scene: THREE.Scene, camera: THREE.Camera, bundle: MapAssetBundle}>}
    */
-  async initialize(foundryScene, viewportWidth, viewportHeight) {
+  async initialize(foundryScene, viewportWidth, viewportHeight, options = {}) {
     log.info(`Initializing scene: ${foundryScene?.name || 'unnamed'}`);
 
     const THREE = window.THREE;
@@ -121,6 +122,13 @@ export class SceneComposer {
         bgPath,
         (loaded, total, asset) => {
           log.debug(`Asset loading: ${loaded}/${total} - ${asset}`);
+          try {
+            if (typeof options?.onProgress === 'function') {
+              options.onProgress(loaded, total, asset);
+            }
+          } catch (e) {
+            log.warn('Asset progress callback failed:', e);
+          }
         },
         { skipBaseTexture: true } // Skip base texture since we got it from Foundry
       );

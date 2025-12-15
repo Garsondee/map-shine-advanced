@@ -176,7 +176,7 @@ export class InputRouter {
       Hooks.callAll('mapShineInputModeChange', { 
         mode, 
         layer: canvas.activeLayer?.constructor?.name,
-        tool: ui.controls?.activeTool,
+        tool: ui.controls?.tool?.name ?? ui.controls?.activeTool,
         reason 
       });
       
@@ -206,7 +206,7 @@ export class InputRouter {
     
     // Defensive: ui.controls may not exist during initialization
     // This prevents the "toolclip" error when Foundry is still setting up
-    const activeTool = ui?.controls?.activeTool ?? '';
+    const activeTool = ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? '';
     
     // IMPORTANT: Tokens layer should ALWAYS use Three.js for interaction
     // Foundry's tokens layer constructor name can be 'TokenLayer' or 'TokensLayer'
@@ -254,7 +254,7 @@ export class InputRouter {
     
     const newMode = this.determineMode();
     const layer = canvas.activeLayer?.constructor?.name || 'unknown';
-    const tool = ui.controls?.activeTool || 'unknown';
+    const tool = ui.controls?.tool?.name ?? ui.controls?.activeTool ?? 'unknown';
     
     this.setMode(newMode, `auto: ${layer}/${tool}`);
   }
@@ -326,7 +326,7 @@ export class InputRouter {
     return {
       currentMode: this.currentMode,
       activeLayer: canvas.activeLayer?.constructor?.name || null,
-      activeTool: ui.controls?.activeTool || null,
+      activeTool: ui.controls?.tool?.name ?? ui.controls?.activeTool ?? null,
       determinedMode: this.determineMode(),
       transitionLocked: this._transitionLock
     };

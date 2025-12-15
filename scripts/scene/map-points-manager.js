@@ -577,6 +577,13 @@ export class MapPointsManager {
       return null;
     }
 
+    // If the caller explicitly clears points, treat that as deleting the group.
+    // This matches user expectations that "removing the map points" removes the group itself.
+    if (Object.prototype.hasOwnProperty.call(updates, 'points') && Array.isArray(updates.points) && updates.points.length === 0) {
+      await this.deleteGroup(id);
+      return null;
+    }
+
     // Merge updates
     const updatedGroup = { ...group, ...updates };
     this.groups.set(id, updatedGroup);
@@ -644,6 +651,12 @@ export class MapPointsManager {
     }
 
     group.points.splice(pointIndex, 1);
+
+    // If the last point was removed, delete the group entirely.
+    if (group.points.length === 0) {
+      await this.deleteGroup(groupId);
+      return true;
+    }
     
     await this.saveToScene();
     this.notifyListeners();

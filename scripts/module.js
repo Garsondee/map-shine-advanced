@@ -9,6 +9,7 @@ import { info } from './core/log.js';
 import * as sceneSettings from './settings/scene-settings.js';
 import * as canvasReplacement from './foundry/canvas-replacement.js';
 import { registerUISettings } from './ui/tweakpane-manager.js';
+import { loadingOverlay } from './ui/loading-overlay.js';
 
 /**
  * Module state exposed globally for debugging and inter-module communication
@@ -34,6 +35,12 @@ window.MapShine = MapShine;
  */
 Hooks.once('init', async function() {
   info('Initializing...');
+
+  try {
+    loadingOverlay.showBlack('Initializing…');
+  } catch (e) {
+    console.warn('Map Shine: failed to initialize loading overlay', e);
+  }
 
   console.log("%c GNU Terry Pratchett %c \n“A man is not dead while his name is still spoken.”",
   "background: #313131ff; color: #FFD700; font-weight: bold; padding: 4px 8px; border-radius: 4px;",
@@ -93,11 +100,24 @@ Hooks.once('init', async function() {
  * Main bootstrap happens here
  */
 Hooks.once('ready', async function() {
+  try {
+    loadingOverlay.setMessage('Preparing renderer…');
+  } catch (e) {
+    console.warn('Map Shine: failed to update loading overlay', e);
+  }
   // Run bootstrap sequence
   const state = await bootstrap({ verbose: false });
   
   // Update global state
   Object.assign(MapShine, state);
+
+  try {
+    if (!state?.initialized) {
+      loadingOverlay.setMessage('Renderer unavailable');
+    }
+  } catch (e) {
+    console.warn('Map Shine: failed to update loading overlay', e);
+  }
   
   info('Module ready');
 });

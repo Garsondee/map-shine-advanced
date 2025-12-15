@@ -90,73 +90,81 @@ export class CloudEffect extends EffectBase {
 
       // Cloud generation
       cloudCover: 0.5,        // Base cloud coverage (0-1), driven by WeatherController
-      noiseScale: 2.0,        // Scale of noise pattern (higher = smaller clouds)
+      noiseScale: 0.5,        // Scale of noise pattern (higher = smaller clouds)
       noiseDetail: 4,         // Number of noise octaves (1-6)
-      cloudSharpness: 0.5,    // Edge sharpness (0 = soft, 1 = hard)
-      cloudBrightness: 1.0,   // Cloud top brightness
+      cloudSharpness: 0.0,    // Edge sharpness (0 = soft, 1 = hard)
+      noiseTimeSpeed: 0.01,
+      cloudBrightness: 0.99,   // Cloud top brightness
+
+      // Domain warping (wispy/swirly look)
+      domainWarpEnabled: true,
+      domainWarpStrength: 0.005,
+      domainWarpScale: 1.05,
+      domainWarpSpeed: 0.115,
+      domainWarpTimeOffsetY: 1.4,
 
       // Cloud top shading
       cloudTopShadingEnabled: true,
-      cloudTopShadingStrength: 1.0,
-      cloudTopNormalStrength: 1.0,
-      cloudTopAOIntensity: 1.0,
-      cloudTopEdgeHighlight: 1.0,
+      cloudTopShadingStrength: 2.0,
+      cloudTopNormalStrength: 0.99,
+      cloudTopAOIntensity: 2.0,
+      cloudTopEdgeHighlight: 2.0,
 
       // Shadow settings
-      shadowOpacity: 0.4,     // How dark cloud shadows are
-      shadowSoftness: 2.0,    // Blur amount for shadow edges
-      shadowOffsetScale: 0.1, // How far shadows offset based on sun angle
+      shadowOpacity: 0.8,     // How dark cloud shadows are
+      shadowSoftness: 5.0,    // Blur amount for shadow edges
+      shadowOffsetScale: 0.3, // How far shadows offset based on sun angle
 
       // Cloud top visibility (zoom-dependent)
       cloudTopMode: 'aboveEverything',
-      cloudTopOpacity: 0.3,   // Max opacity of visible cloud layer (0 = shadows only)
-      cloudTopFadeStart: 0.3, // Zoom level where cloud tops start appearing
-      cloudTopFadeEnd: 0.8,   // Zoom level where cloud tops are fully visible
+      cloudTopOpacity: 1.0,   // Max opacity of visible cloud layer (0 = shadows only)
+      cloudTopFadeStart: 0.24, // Zoom level where cloud tops start appearing
+      cloudTopFadeEnd: 0.39,   // Zoom level where cloud tops are fully visible
 
       // Wind drift
       windInfluence: 1.0,     // How much wind affects cloud movement
       driftSpeed: 0.02,       // Base drift speed multiplier
 
-      layerParallaxBase: 0.2,
+      layerParallaxBase: 1.0,
 
       layer1Enabled: true,
-      layer1Opacity: 0.35,
+      layer1Opacity: 0.36,
       layer1Coverage: 0.35,
       layer1Scale: 0.85,
-      layer1ParallaxMult: 0.25,
+      layer1ParallaxMult: 0.1,
       layer1SpeedMult: 0.6,
       layer1DirDeg: -1.7,
 
       layer2Enabled: true,
-      layer2Opacity: 0.65,
+      layer2Opacity: 0.53,
       layer2Coverage: 0.65,
       layer2Scale: 0.95,
-      layer2ParallaxMult: 0.6,
+      layer2ParallaxMult: 0.1,
       layer2SpeedMult: 0.85,
       layer2DirDeg: -0.86,
 
       layer3Enabled: true,
-      layer3Opacity: 1.0,
+      layer3Opacity: 0.59,
       layer3Coverage: 1.0,
       layer3Scale: 1.0,
-      layer3ParallaxMult: 1.0,
+      layer3ParallaxMult: 0.1,
       layer3SpeedMult: 1.0,
       layer3DirDeg: 0.0,
 
       layer4Enabled: true,
-      layer4Opacity: 0.65,
+      layer4Opacity: 0.19,
       layer4Coverage: 0.65,
-      layer4Scale: 1.15,
-      layer4ParallaxMult: 1.4,
+      layer4Scale: 3.0,
+      layer4ParallaxMult: 0.1,
       layer4SpeedMult: 1.15,
       layer4DirDeg: 0.86,
 
       layer5Enabled: true,
-      layer5Opacity: 0.35,
+      layer5Opacity: 0.49,
       layer5Coverage: 0.35,
-      layer5Scale: 1.3,
-      layer5ParallaxMult: 1.75,
-      layer5SpeedMult: 1.3,
+      layer5Scale: 2.83,
+      layer5ParallaxMult: 0.1,
+      layer5SpeedMult: 2.0,
       layer5DirDeg: 1.7,
 
       // Minimum shadow brightness (prevents crushing blacks)
@@ -205,7 +213,14 @@ export class CloudEffect extends EffectBase {
           name: 'cloud-generation',
           label: 'Cloud Generation',
           type: 'inline',
-          parameters: ['noiseScale', 'noiseDetail', 'cloudSharpness']
+          parameters: ['noiseScale', 'noiseDetail', 'cloudSharpness', 'noiseTimeSpeed']
+        },
+        {
+          name: 'domain-warping',
+          label: 'Domain Warping (Wisps)',
+          type: 'inline',
+          separator: false,
+          parameters: ['domainWarpEnabled', 'domainWarpStrength', 'domainWarpScale', 'domainWarpSpeed', 'domainWarpTimeOffsetY']
         },
         {
           name: 'shadow-settings',
@@ -290,7 +305,7 @@ export class CloudEffect extends EffectBase {
           min: 0.5,
           max: 8.0,
           step: 0.1,
-          default: 2.0
+          default: 0.5
         },
         noiseDetail: {
           type: 'slider',
@@ -306,7 +321,52 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.5
+          default: 0.0
+        },
+        noiseTimeSpeed: {
+          type: 'slider',
+          label: 'Internal Motion',
+          min: 0.0,
+          max: 0.05,
+          step: 0.001,
+          default: 0.01
+        },
+        domainWarpEnabled: {
+          type: 'boolean',
+          label: 'Enabled',
+          default: true
+        },
+        domainWarpStrength: {
+          type: 'slider',
+          label: 'Strength',
+          min: 0.0,
+          max: 0.5,
+          step: 0.005,
+          default: 0.005
+        },
+        domainWarpScale: {
+          type: 'slider',
+          label: 'Warp Scale',
+          min: 0.25,
+          max: 10.0,
+          step: 0.05,
+          default: 1.05
+        },
+        domainWarpSpeed: {
+          type: 'slider',
+          label: 'Warp Speed',
+          min: 0.0,
+          max: 0.5,
+          step: 0.005,
+          default: 0.115
+        },
+        domainWarpTimeOffsetY: {
+          type: 'slider',
+          label: 'Y Offset',
+          min: 0.0,
+          max: 10.0,
+          step: 0.1,
+          default: 1.4
         },
         shadowOpacity: {
           type: 'slider',
@@ -314,7 +374,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.4
+          default: 0.8
         },
         shadowSoftness: {
           type: 'slider',
@@ -322,7 +382,7 @@ export class CloudEffect extends EffectBase {
           min: 0.5,
           max: 10.0,
           step: 0.1,
-          default: 3.0
+          default: 5.0
         },
         shadowOffsetScale: {
           type: 'slider',
@@ -330,7 +390,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 0.3,
           step: 0.01,
-          default: 0.1
+          default: 0.3
         },
         minShadowBrightness: {
           type: 'slider',
@@ -355,7 +415,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.3
+          default: 1.0
         },
         cloudTopFadeStart: {
           type: 'slider',
@@ -363,7 +423,7 @@ export class CloudEffect extends EffectBase {
           min: 0.1,
           max: 1.0,
           step: 0.01,
-          default: 0.3
+          default: 0.24
         },
         cloudTopFadeEnd: {
           type: 'slider',
@@ -371,7 +431,7 @@ export class CloudEffect extends EffectBase {
           min: 0.1,
           max: 1.0,
           step: 0.01,
-          default: 0.8
+          default: 0.39
         },
         windInfluence: {
           type: 'slider',
@@ -395,46 +455,46 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.2
+          default: 1.0
         },
         layer1Enabled: { type: 'boolean', label: 'Enabled', default: true },
-        layer1Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
+        layer1Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.36 },
         layer1Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 0.85 },
         layer1Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.35 },
-        layer1ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.25 },
+        layer1ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.1 },
         layer1SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.6 },
         layer1DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: -1.7 },
 
         layer2Enabled: { type: 'boolean', label: 'Enabled', default: true },
-        layer2Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.65 },
+        layer2Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.53 },
         layer2Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 0.95 },
         layer2Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.65 },
-        layer2ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.6 },
+        layer2ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.1 },
         layer2SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.85 },
         layer2DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: -0.86 },
 
         layer3Enabled: { type: 'boolean', label: 'Enabled', default: true },
-        layer3Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
+        layer3Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.59 },
         layer3Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 1.0 },
         layer3Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 1.0 },
-        layer3ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 1.0 },
+        layer3ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.1 },
         layer3SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 1.0 },
         layer3DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: 0.0 },
 
         layer4Enabled: { type: 'boolean', label: 'Enabled', default: true },
-        layer4Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.65 },
-        layer4Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 1.15 },
+        layer4Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.19 },
+        layer4Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 3.0 },
         layer4Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.65 },
-        layer4ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 1.4 },
+        layer4ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.1 },
         layer4SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 1.15 },
         layer4DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: 0.86 },
 
         layer5Enabled: { type: 'boolean', label: 'Enabled', default: true },
-        layer5Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
-        layer5Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 1.3 },
+        layer5Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.49 },
+        layer5Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 2.83 },
         layer5Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.35 },
-        layer5ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 1.75 },
-        layer5SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 1.3 },
+        layer5ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.1 },
+        layer5SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 2.0 },
         layer5DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: 1.7 },
         cloudBrightness: {
           type: 'slider',
@@ -442,7 +502,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 1.0
+          default: 0.99
         },
         cloudTopShadingEnabled: {
           type: 'boolean',
@@ -455,7 +515,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 1.0
+          default: 2.0
         },
         cloudTopNormalStrength: {
           type: 'slider',
@@ -463,7 +523,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 3.0,
           step: 0.01,
-          default: 1.0
+          default: 0.99
         },
         cloudTopAOIntensity: {
           type: 'slider',
@@ -471,7 +531,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 1.0
+          default: 2.0
         },
         cloudTopEdgeHighlight: {
           type: 'slider',
@@ -479,7 +539,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 1.0
+          default: 2.0
         }
       }
     };
@@ -544,6 +604,12 @@ export class CloudEffect extends EffectBase {
         uNoiseScale: { value: this.params.noiseScale },
         uNoiseDetail: { value: this.params.noiseDetail },
         uCloudSharpness: { value: this.params.cloudSharpness },
+        uNoiseTimeSpeed: { value: this.params.noiseTimeSpeed },
+        uDomainWarpEnabled: { value: this.params.domainWarpEnabled ? 1.0 : 0.0 },
+        uDomainWarpStrength: { value: this.params.domainWarpStrength },
+        uDomainWarpScale: { value: this.params.domainWarpScale },
+        uDomainWarpSpeed: { value: this.params.domainWarpSpeed },
+        uDomainWarpTimeOffsetY: { value: this.params.domainWarpTimeOffsetY },
         uLayerWindOffsets: { value: this._layerWindOffsets || [
           new THREE.Vector2(0, 0),
           new THREE.Vector2(0, 0),
@@ -579,6 +645,12 @@ export class CloudEffect extends EffectBase {
         uniform float uNoiseScale;
         uniform float uNoiseDetail;
         uniform float uCloudSharpness;
+        uniform float uNoiseTimeSpeed;
+        uniform float uDomainWarpEnabled;
+        uniform float uDomainWarpStrength;
+        uniform float uDomainWarpScale;
+        uniform float uDomainWarpSpeed;
+        uniform float uDomainWarpTimeOffsetY;
         uniform vec2 uLayerWindOffsets[5];
         uniform float uLayerParallax[5];
         uniform float uLayerCoverMult[5];
@@ -646,9 +718,20 @@ export class CloudEffect extends EffectBase {
           vec2 layerWorldPos = mix(baseWorldPos, cameraPinnedPos, parallax);
           vec2 layerUV = (layerWorldPos / uSceneSize) + uLayerWindOffsets[layerIndex];
 
-          vec2 noiseUV = layerUV * (uNoiseScale * uLayerNoiseScaleMult[layerIndex]);
+          // Domain warping for wispy/swirly clouds
+          float time = uTime * uDomainWarpSpeed;
+          vec2 warpUV = layerUV * uDomainWarpScale;
+          vec2 warp = vec2(
+            snoise(warpUV + vec2(time, 0.0)),
+            snoise(warpUV + vec2(0.0, time + uDomainWarpTimeOffsetY))
+          );
+          warp *= step(0.5, uDomainWarpEnabled);
 
-          float noise = fbm(noiseUV * 4.0 + uTime * 0.01, octaves);
+          float wispStrength = uDomainWarpStrength;
+          vec2 noiseUV = layerUV * (uNoiseScale * uLayerNoiseScaleMult[layerIndex]);
+          noiseUV += warp * wispStrength;
+
+          float noise = fbm(noiseUV * 4.0 + vec2(uTime * uNoiseTimeSpeed), octaves);
           noise = noise * 0.5 + 0.5;
 
           float cover = clamp(uCloudCover * uLayerCoverMult[layerIndex], 0.0, 1.0);
@@ -1291,6 +1374,12 @@ export class CloudEffect extends EffectBase {
     du.uNoiseScale.value = this.params.noiseScale;
     du.uNoiseDetail.value = this.params.noiseDetail;
     du.uCloudSharpness.value = this.params.cloudSharpness;
+    if (du.uNoiseTimeSpeed) du.uNoiseTimeSpeed.value = this.params.noiseTimeSpeed;
+    if (du.uDomainWarpEnabled) du.uDomainWarpEnabled.value = this.params.domainWarpEnabled ? 1.0 : 0.0;
+    if (du.uDomainWarpStrength) du.uDomainWarpStrength.value = this.params.domainWarpStrength;
+    if (du.uDomainWarpScale) du.uDomainWarpScale.value = this.params.domainWarpScale;
+    if (du.uDomainWarpSpeed) du.uDomainWarpSpeed.value = this.params.domainWarpSpeed;
+    if (du.uDomainWarpTimeOffsetY) du.uDomainWarpTimeOffsetY.value = this.params.domainWarpTimeOffsetY;
 
     if (du.uLayerWindOffsets && this._layerWindOffsets) {
       du.uLayerWindOffsets.value = this._layerWindOffsets;

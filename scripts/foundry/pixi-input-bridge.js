@@ -33,6 +33,15 @@ export class PixiInputBridge {
     
     /** @type {boolean} */
     this._isDragging = false;
+
+    /** @type {boolean} */
+    this._pendingRightDrag = false;
+
+    /** @type {{x: number, y: number}|null} */
+    this._rightDragStartPos = null;
+
+    /** @type {number} */
+    this._rightDragThresholdPx = 6;
     
     /** @type {{x: number, y: number}|null} */
     this._lastMousePos = null;
@@ -109,10 +118,10 @@ export class PixiInputBridge {
     
     // Right mouse button for pan
     if (event.button === 2) {
-      this._isDragging = true;
-      this._lastMousePos = { x: event.clientX, y: event.clientY };
-      this.threeCanvas.style.cursor = 'grabbing';
-      event.preventDefault();
+      this._pendingRightDrag = true;
+      this._rightDragStartPos = { x: event.clientX, y: event.clientY };
+      this._isDragging = false;
+      this._lastMousePos = null;
     }
   }
   
@@ -122,8 +131,28 @@ export class PixiInputBridge {
    * @private
    */
   _onMouseMove(event) {
-    if (!this.enabled || !this._isDragging || !this._lastMousePos) return;
+    if (!this.enabled) return;
     if (!canvas?.stage) return;
+
+    if (this._pendingRightDrag && this._rightDragStartPos) {
+      const dist = Math.hypot(
+        event.clientX - this._rightDragStartPos.x,
+        event.clientY - this._rightDragStartPos.y
+      );
+
+      if (dist > this._rightDragThresholdPx) {
+        this._pendingRightDrag = false;
+        this._rightDragStartPos = null;
+        this._isDragging = true;
+        this._lastMousePos = { x: event.clientX, y: event.clientY };
+        this.threeCanvas.style.cursor = 'grabbing';
+        event.preventDefault();
+      } else {
+        return;
+      }
+    }
+
+    if (!this._isDragging || !this._lastMousePos) return;
     
     const deltaX = event.clientX - this._lastMousePos.x;
     const deltaY = event.clientY - this._lastMousePos.y;
@@ -156,6 +185,9 @@ export class PixiInputBridge {
         this.threeCanvas.style.cursor = 'default';
       }
     }
+
+    this._pendingRightDrag = false;
+    this._rightDragStartPos = null;
   }
   
   /**
@@ -235,6 +267,8 @@ export class PixiInputBridge {
     this.enabled = false;
     this._isDragging = false;
     this._lastMousePos = null;
+    this._pendingRightDrag = false;
+    this._rightDragStartPos = null;
     if (this.threeCanvas) {
       this.threeCanvas.style.cursor = 'default';
     }

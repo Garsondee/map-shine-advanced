@@ -31,7 +31,7 @@ export class LightingEffect extends EffectBase {
     this.params = {
       enabled: true,
       globalIllumination: 1.0, // Multiplier for ambient
-      lightIntensity: 1.0, // Master multiplier for dynamic lights
+      lightIntensity: 0.8, // Master multiplier for dynamic lights
       darknessEffect: 0.5, // Scales Foundry's darknessLevel
       darknessLevel: 0.0, // Read-only mostly, synced from canvas
       // Outdoor brightness control: adjusts outdoor areas relative to darkness level
@@ -77,6 +77,9 @@ export class LightingEffect extends EffectBase {
     
     // PERFORMANCE: Reusable objects to avoid per-frame allocations
     this._tempSize = null; // Lazy init when THREE is available
+
+    /** @type {THREE.Mesh|null} */
+    this._baseMesh = null;
   }
 
   /**
@@ -102,7 +105,7 @@ export class LightingEffect extends EffectBase {
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
         globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.5 },
-        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Light Intensity' },
+        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.8, label: 'Light Intensity' },
         darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Darkness Effect' },
         outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 2.0, label: 'Outdoor Brightness' },
       }
@@ -122,6 +125,8 @@ export class LightingEffect extends EffectBase {
     // Scene used to project _Outdoors mask from the base plane into
     // screen space for overhead shadow gating.
     this.outdoorsScene = new THREE.Scene();
+
+    this._rebuildOutdoorsProjection();
 
     // 2. Final Composite Quad
     this.quadScene = new THREE.Scene();
@@ -355,6 +360,35 @@ export class LightingEffect extends EffectBase {
     this.syncAllLights();
   }
 
+  _rebuildOutdoorsProjection() {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    if (this.outdoorsMesh && this.outdoorsScene) {
+      this.outdoorsScene.remove(this.outdoorsMesh);
+    }
+    this.outdoorsMesh = null;
+    this.outdoorsMaterial = null;
+
+    if (!this.outdoorsScene || !this.outdoorsMask || !this._baseMesh) {
+      return;
+    }
+
+    this.outdoorsMaterial = new THREE.MeshBasicMaterial({
+      map: this.outdoorsMask,
+      transparent: false,
+      depthWrite: false,
+      depthTest: false
+    });
+
+    this.outdoorsMesh = new THREE.Mesh(this._baseMesh.geometry, this.outdoorsMaterial);
+    this.outdoorsMesh.position.copy(this._baseMesh.position);
+    this.outdoorsMesh.rotation.copy(this._baseMesh.rotation);
+    this.outdoorsMesh.scale.copy(this._baseMesh.scale);
+
+    this.outdoorsScene.add(this.outdoorsMesh);
+  }
+
   onResize(width, height) {
     const THREE = window.THREE;
     if (this.lightTarget) this.lightTarget.dispose();
@@ -370,11 +404,15 @@ export class LightingEffect extends EffectBase {
     const THREE = window.THREE;
     if (!assetBundle || !assetBundle.masks) return;
 
+    this._baseMesh = baseMesh;
+
     const windowData = assetBundle.masks.find(m => m.id === 'windows' || m.id === 'structural');
     const outdoorsData = assetBundle.masks.find(m => m.id === 'outdoors');
 
     this.windowMask = windowData?.texture || null;
     this.outdoorsMask = outdoorsData?.texture || null;
+
+    this._rebuildOutdoorsProjection();
 
     if (!this.windowMask) {
       if (this.windowLightMesh && this.lightScene) {
@@ -397,147 +435,147 @@ export class LightingEffect extends EffectBase {
           value: (this.windowMask && this.windowMask.image)
             ? new THREE.Vector2(1 / this.windowMask.image.width, 1 / this.windowMask.image.height)
             : new THREE.Vector2(1 / 1024, 1 / 1024)
+        },
+        uIntensity: { value: 1.0 },
+        uMaskThreshold: { value: 0.1 },
+        uSoftness: { value: 0.2 },
+        uColor: { value: new THREE.Color(1.0, 0.96, 0.85) },
+        uCloudCover: { value: 0.0 },
+        uCloudInfluence: { value: 1.0 },
+        uMinCloudFactor: { value: 0.0 },
+        uCloudLocalInfluence: { value: 1.0 },
+        uCloudDensityCurve: { value: 1.0 },
+        uCloudShadowMap: { value: null },
+        uHasCloudShadowMap: { value: 0.0 },
+        uRgbShiftAmount: { value: 0.0 },
+        uRgbShiftAngle: { value: 0.0 }
       },
-      uIntensity: { value: 1.0 },
-      uMaskThreshold: { value: 0.1 },
-      uSoftness: { value: 0.2 },
-      uColor: { value: new THREE.Color(1.0, 0.96, 0.85) },
-      uCloudCover: { value: 0.0 },
-      uCloudInfluence: { value: 1.0 },
-      uMinCloudFactor: { value: 0.0 },
-      uCloudLocalInfluence: { value: 1.0 },
-      uCloudDensityCurve: { value: 1.0 },
-      uCloudShadowMap: { value: null },
-      uHasCloudShadowMap: { value: 0.0 },
-      uRgbShiftAmount: { value: 0.0 },
-      uRgbShiftAngle: { value: 0.0 }
-    },
-    vertexShader: `
-      varying vec2 vUv;
-      varying vec4 vClipPos;
-      void main() {
-        vUv = uv;
-        vClipPos = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        gl_Position = vClipPos;
-      }
-    `,
-    fragmentShader: `
-      uniform sampler2D uWindowMask;
-      uniform sampler2D uOutdoorsMask;
-      uniform float uHasOutdoorsMask;
-      uniform vec2 uWindowTexelSize;
-      uniform float uIntensity;
-      uniform float uMaskThreshold;
-      uniform float uSoftness;
-      uniform vec3 uColor;
-      uniform float uCloudCover;
-      uniform float uCloudInfluence;
-      uniform float uMinCloudFactor;
-      uniform float uCloudLocalInfluence;
-      uniform float uCloudDensityCurve;
-      uniform sampler2D uCloudShadowMap;
-      uniform float uHasCloudShadowMap;
-      uniform float uRgbShiftAmount;
-      uniform float uRgbShiftAngle;
+      vertexShader: `
+        varying vec2 vUv;
+        varying vec4 vClipPos;
+        void main() {
+          vUv = uv;
+          vClipPos = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          gl_Position = vClipPos;
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D uWindowMask;
+        uniform sampler2D uOutdoorsMask;
+        uniform float uHasOutdoorsMask;
+        uniform vec2 uWindowTexelSize;
+        uniform float uIntensity;
+        uniform float uMaskThreshold;
+        uniform float uSoftness;
+        uniform vec3 uColor;
+        uniform float uCloudCover;
+        uniform float uCloudInfluence;
+        uniform float uMinCloudFactor;
+        uniform float uCloudLocalInfluence;
+        uniform float uCloudDensityCurve;
+        uniform sampler2D uCloudShadowMap;
+        uniform float uHasCloudShadowMap;
+        uniform float uRgbShiftAmount;
+        uniform float uRgbShiftAngle;
 
-      varying vec2 vUv;
-      varying vec4 vClipPos;
+        varying vec2 vUv;
+        varying vec4 vClipPos;
 
-      float msLuminance(vec3 c) {
-        return dot(c, vec3(0.2126, 0.7152, 0.0722));
-      }
-
-      void main() {
-        if (uIntensity <= 0.0001) {
-          discard;
+        float msLuminance(vec3 c) {
+          return dot(c, vec3(0.2126, 0.7152, 0.0722));
         }
 
-        vec3 windowSample = texture2D(uWindowMask, vUv).rgb;
-        float centerMask = msLuminance(windowSample);
+        void main() {
+          if (uIntensity <= 0.0001) {
+            discard;
+          }
 
-        float blurScale = 1.0 + (uSoftness * 4.0);
-        vec2 t = uWindowTexelSize * blurScale;
-        float maskN = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0, -t.y)).rgb);
-        float maskS = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0,  t.y)).rgb);
-        float maskE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, 0.0)).rgb);
-        float maskW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, 0.0)).rgb);
-        float maskNE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, -t.y)).rgb);
-        float maskNW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, -t.y)).rgb);
-        float maskSE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x,  t.y)).rgb);
-        float maskSW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x,  t.y)).rgb);
+          vec3 windowSample = texture2D(uWindowMask, vUv).rgb;
+          float centerMask = msLuminance(windowSample);
 
-        float baseMask = (centerMask * 2.0 + maskN + maskS + maskE + maskW + maskNE + maskNW + maskSE + maskSW) / 10.0;
+          float blurScale = 1.0 + (uSoftness * 4.0);
+          vec2 t = uWindowTexelSize * blurScale;
+          float maskN = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0, -t.y)).rgb);
+          float maskS = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0,  t.y)).rgb);
+          float maskE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, 0.0)).rgb);
+          float maskW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, 0.0)).rgb);
+          float maskNE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, -t.y)).rgb);
+          float maskNW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, -t.y)).rgb);
+          float maskSE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x,  t.y)).rgb);
+          float maskSW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x,  t.y)).rgb);
 
-        float halfWidth = max(uSoftness, 1e-3);
-        float edgeLo = clamp(uMaskThreshold - halfWidth, 0.0, 1.0);
-        float edgeHi = clamp(uMaskThreshold + halfWidth, 0.0, 1.0);
-        float m = smoothstep(edgeLo, edgeHi, baseMask);
-        if (m <= 0.0) discard;
+          float baseMask = (centerMask * 2.0 + maskN + maskS + maskE + maskW + maskNE + maskNW + maskSE + maskSW) / 10.0;
 
-        float indoor = 1.0;
-        if (uHasOutdoorsMask > 0.5) {
-          float outdoorStrength = texture2D(uOutdoorsMask, vUv).r;
-          indoor = 1.0 - outdoorStrength;
-          if (indoor <= 0.0) discard;
+          float halfWidth = max(uSoftness, 1e-3);
+          float edgeLo = clamp(uMaskThreshold - halfWidth, 0.0, 1.0);
+          float edgeHi = clamp(uMaskThreshold + halfWidth, 0.0, 1.0);
+          float m = smoothstep(edgeLo, edgeHi, baseMask);
+          if (m <= 0.0) discard;
+
+          float indoor = 1.0;
+          if (uHasOutdoorsMask > 0.5) {
+            float outdoorStrength = texture2D(uOutdoorsMask, vUv).r;
+            indoor = 1.0 - outdoorStrength;
+            if (indoor <= 0.0) discard;
+          }
+
+          // Cloud attenuation - combine global cloud cover with spatially-varying density
+          float cloud = clamp(uCloudCover, 0.0, 1.0);
+          float globalCloudFactor = 1.0 - (cloud * 0.9 * uCloudInfluence);
+          
+          float cloudFactor = globalCloudFactor;
+          
+          // Sample cloud DENSITY texture for spatial variation (animated clouds passing by)
+          // CloudEffect provides *density* (0 = clear, 1 = thick cloud). We remap through
+          // a user-controlled curve and invert to get a "lit" factor.
+          if (uHasCloudShadowMap > 0.5) {
+            // Cloud density is rendered in SCREEN SPACE, convert clip coords to screen UV
+            vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
+            float localCloudDensity = 1.0 - texture2D(uCloudShadowMap, screenUV).r;
+
+            // Apply gamma-style curve so you can bias towards thin wisps or thick cores
+            float d = clamp(localCloudDensity, 0.0, 1.0);
+            d = pow(d, max(uCloudDensityCurve, 0.001));
+
+            // Convert density -> local shadow factor in [0,1], where 1 = fully lit, 0 = fully shadowed
+            float localShadowFactor = 1.0 - d;
+
+            // Blend local shadow with global factor; uCloudLocalInfluence in [0,3]
+            // controls how strongly local structure modulates the global overcast level.
+            // Values >1 exaggerate contrast.
+            float localMix = clamp(uCloudLocalInfluence, 0.0, 3.0);
+            float blended = mix(1.0, localShadowFactor, localMix);
+            cloudFactor = globalCloudFactor * blended;
+          }
+          
+          cloudFactor = max(cloudFactor, uMinCloudFactor);
+
+          float strength = m * indoor * cloudFactor * uIntensity;
+
+          vec3 lightColor = uColor * strength;
+
+          if (uRgbShiftAmount > 0.0001) {
+            float angle = uRgbShiftAngle;
+            vec2 dir = vec2(cos(angle), sin(angle));
+            vec2 shift = dir * uRgbShiftAmount * uWindowTexelSize;
+
+            float maskR = msLuminance(texture2D(uWindowMask, vUv + shift).rgb);
+            float maskG = baseMask;
+            float maskB = msLuminance(texture2D(uWindowMask, vUv - shift).rgb);
+
+            float denom = max(baseMask, 1e-3);
+            float rScale = maskR / denom;
+            float gScale = maskG / denom;
+            float bScale = maskB / denom;
+
+            lightColor.r *= rScale;
+            lightColor.g *= gScale;
+            lightColor.b *= bScale;
+          }
+
+          gl_FragColor = vec4(lightColor, 1.0);
         }
-
-        // Cloud attenuation - combine global cloud cover with spatially-varying density
-        float cloud = clamp(uCloudCover, 0.0, 1.0);
-        float globalCloudFactor = 1.0 - (cloud * 0.9 * uCloudInfluence);
-        
-        float cloudFactor = globalCloudFactor;
-        
-        // Sample cloud DENSITY texture for spatial variation (animated clouds passing by)
-        // CloudEffect provides *density* (0 = clear, 1 = thick cloud). We remap through
-        // a user-controlled curve and invert to get a "lit" factor.
-        if (uHasCloudShadowMap > 0.5) {
-          // Cloud density is rendered in SCREEN SPACE, convert clip coords to screen UV
-          vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
-          float localCloudDensity = 1.0 - texture2D(uCloudShadowMap, screenUV).r;
-
-          // Apply gamma-style curve so you can bias towards thin wisps or thick cores
-          float d = clamp(localCloudDensity, 0.0, 1.0);
-          d = pow(d, max(uCloudDensityCurve, 0.001));
-
-          // Convert density -> local shadow factor in [0,1], where 1 = fully lit, 0 = fully shadowed
-          float localShadowFactor = 1.0 - d;
-
-          // Blend local shadow with global factor; uCloudLocalInfluence in [0,3]
-          // controls how strongly local structure modulates the global overcast level.
-          // Values >1 exaggerate contrast.
-          float localMix = clamp(uCloudLocalInfluence, 0.0, 3.0);
-          float blended = mix(1.0, localShadowFactor, localMix);
-          cloudFactor = globalCloudFactor * blended;
-        }
-        
-        cloudFactor = max(cloudFactor, uMinCloudFactor);
-
-        float strength = m * indoor * cloudFactor * uIntensity;
-
-        vec3 lightColor = uColor * strength;
-
-        if (uRgbShiftAmount > 0.0001) {
-          float angle = uRgbShiftAngle;
-          vec2 dir = vec2(cos(angle), sin(angle));
-          vec2 shift = dir * uRgbShiftAmount * uWindowTexelSize;
-
-          float maskR = msLuminance(texture2D(uWindowMask, vUv + shift).rgb);
-          float maskG = baseMask;
-          float maskB = msLuminance(texture2D(uWindowMask, vUv - shift).rgb);
-
-          float denom = max(baseMask, 1e-3);
-          float rScale = maskR / denom;
-          float gScale = maskG / denom;
-          float bScale = maskB / denom;
-
-          lightColor.r *= rScale;
-          lightColor.g *= gScale;
-          lightColor.b *= bScale;
-        }
-
-        gl_FragColor = vec4(lightColor, 1.0);
-      }
-    `,
+      `,
       blending: THREE.AdditiveBlending,
       transparent: true,
       depthWrite: false,
@@ -553,31 +591,7 @@ export class LightingEffect extends EffectBase {
       this.lightScene.add(this.windowLightMesh);
     }
 
-    // Build a dedicated outdoors projection mesh so we can render the
-    // _Outdoors mask into a screen-space texture (outdoorsTarget) for
-    // overhead shadow gating in the composite shader.
-    if (this.outdoorsScene && this.outdoorsMask) {
-      if (this.outdoorsMesh && this.outdoorsScene) {
-        this.outdoorsScene.remove(this.outdoorsMesh);
-      }
-
-      this.outdoorsMaterial = new THREE.MeshBasicMaterial({
-        map: this.outdoorsMask,
-        transparent: false,
-        depthWrite: false,
-        depthTest: false
-      });
-
-      this.outdoorsMesh = new THREE.Mesh(baseMesh.geometry, this.outdoorsMaterial);
-      this.outdoorsMesh.position.copy(baseMesh.position);
-      this.outdoorsMesh.rotation.copy(baseMesh.rotation);
-      this.outdoorsMesh.scale.copy(baseMesh.scale);
-
-      this.outdoorsScene.add(this.outdoorsMesh);
-    } else {
-      this.outdoorsMesh = null;
-      this.outdoorsMaterial = null;
-    }
+    this._rebuildOutdoorsProjection();
   }
 
   syncAllLights() {
@@ -630,6 +644,8 @@ export class LightingEffect extends EffectBase {
     if (DISABLE_LIGHTING_EFFECT) return;
     if (!this.enabled) return;
 
+    const THREE = window.THREE;
+
     const dt = timeInfo && typeof timeInfo.delta === 'number' ? timeInfo.delta : 0;
 
     // Sync Environment Data
@@ -649,6 +665,27 @@ export class LightingEffect extends EffectBase {
     u.uGlobalIllumination.value = this.params.globalIllumination;
     u.uLightIntensity.value = this.params.lightIntensity;
     u.uOutdoorBrightness.value = this.params.outdoorBrightness;
+
+    try {
+      const env = canvas?.environment;
+      const setThreeColor = (target, src, def) => {
+        try {
+          if (!src) { target.set(def); return; }
+          if (src instanceof THREE.Color) { target.copy(src); return; }
+          if (src.rgb) { target.setRGB(src.rgb[0], src.rgb[1], src.rgb[2]); return; }
+          if (Array.isArray(src)) { target.setRGB(src[0], src[1], src[2]); return; }
+          target.set(src);
+        } catch (e) {
+          target.set(def);
+        }
+      };
+
+      if (THREE && env?.colors && u.uAmbientBrightest?.value && u.uAmbientDarkness?.value) {
+        setThreeColor(u.uAmbientBrightest.value, env.colors.ambientDaylight, 0xffffff);
+        setThreeColor(u.uAmbientDarkness.value, env.colors.ambientDarkness, 0x242448);
+      }
+    } catch (e) {
+    }
 
     // Drive overhead shadow uniforms from OverheadShadowsEffect (if present).
     try {
@@ -837,9 +874,22 @@ export class LightingEffect extends EffectBase {
   getEffectiveDarkness() {
     let darkness = 0.0;
     try {
-      if (typeof this.params.darknessLevel === 'number') {
+      const effects = canvas?.effects;
+      const getDarknessLevel = effects && typeof effects.getDarknessLevel === 'function'
+        ? effects.getDarknessLevel.bind(effects)
+        : null;
+
+      if (getDarknessLevel) {
+        const cam = window.MapShine?.unifiedCameraController;
+        const x = (cam?.state && typeof cam.state.x === 'number') ? cam.state.x : canvas?.stage?.pivot?.x;
+        const y = (cam?.state && typeof cam.state.y === 'number') ? cam.state.y : canvas?.stage?.pivot?.y;
+        if (typeof x === 'number' && typeof y === 'number') {
+          darkness = getDarknessLevel({ x, y, elevation: 0 });
+        }
+      } else if (typeof this.params.darknessLevel === 'number') {
         darkness = this.params.darknessLevel;
       }
+
       // Baseline compression so that raw darkness 1.0 is not fully black.
       // With baseScale = 0.75 and darknessEffect = 1.0, raw 1.0 -> effective 0.75.
       const baseScale = 0.75;
@@ -889,12 +939,6 @@ export class LightingEffect extends EffectBase {
       this.lightTarget.setSize(size.x, size.y);
     }
 
-    // Update composite texel size so screen-space shadow offsets can be
-    // expressed in pixels consistently.
-    if (this.compositeMaterial && this.compositeMaterial.uniforms.uCompositeTexelSize) {
-      this.compositeMaterial.uniforms.uCompositeTexelSize.value.set(1 / size.x, 1 / size.y);
-    }
-
     if (!this.roofAlphaTarget) {
       this.roofAlphaTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
         minFilter: THREE.LinearFilter,
@@ -906,15 +950,18 @@ export class LightingEffect extends EffectBase {
       this.roofAlphaTarget.setSize(size.x, size.y);
     }
 
-    if (!this.outdoorsTarget) {
-      this.outdoorsTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
-        minFilter: THREE.LinearFilter,
-        magFilter: THREE.LinearFilter,
-        format: THREE.RGBAFormat,
-        type: THREE.UnsignedByteType
-      });
-    } else if (this.outdoorsTarget.width !== size.x || this.outdoorsTarget.height !== size.y) {
-      this.outdoorsTarget.setSize(size.x, size.y);
+    const hasOutdoorsProjection = !!(this.outdoorsScene && this.outdoorsMesh && this.outdoorsMask);
+    if (hasOutdoorsProjection) {
+      if (!this.outdoorsTarget) {
+        this.outdoorsTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          format: THREE.RGBAFormat,
+          type: THREE.UnsignedByteType
+        });
+      } else if (this.outdoorsTarget.width !== size.x || this.outdoorsTarget.height !== size.y) {
+        this.outdoorsTarget.setSize(size.x, size.y);
+      }
     }
 
     // 0. Render Roof Alpha Mask (overhead tiles only)
@@ -938,7 +985,7 @@ export class LightingEffect extends EffectBase {
     // screen-aligned outdoors factor we can safely sample with vUv in
     // the composite shader without introducing world-space pinning
     // errors.
-    if (this.outdoorsScene && this.outdoorsMesh && this.outdoorsTarget) {
+    if (hasOutdoorsProjection && this.outdoorsTarget) {
       const prevTarget2 = renderer.getRenderTarget();
       renderer.setRenderTarget(this.outdoorsTarget);
       renderer.setClearColor(0x000000, 0);
@@ -966,10 +1013,10 @@ export class LightingEffect extends EffectBase {
     // Bind screen-space outdoors mask so we can avoid darkening
     // building interiors in a way that is correctly pinned to the
     // groundplane.
-    cu.tOutdoorsMask.value = (this.outdoorsTarget && this.outdoorsTarget.texture)
+    cu.tOutdoorsMask.value = (hasOutdoorsProjection && this.outdoorsTarget && this.outdoorsTarget.texture)
       ? this.outdoorsTarget.texture
       : null;
-    cu.uHasOutdoorsMask.value = this.outdoorsTarget ? 1.0 : 0.0;
+    cu.uHasOutdoorsMask.value = hasOutdoorsProjection ? 1.0 : 0.0;
 
     // Bind overhead shadow texture if available.
     try {

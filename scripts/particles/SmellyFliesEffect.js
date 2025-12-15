@@ -45,7 +45,7 @@ const DEFAULT_FLY_CONFIG = {
   enabled: true,
   maxParticles: 4,
   // Global behavior speed multiplier (affects all states)
-  speedMultiplier: 4.0,
+  speedMultiplier: 2.75,
   
   // Flying behavior
   flying: {
@@ -872,7 +872,7 @@ export class SmellyFliesEffect extends EffectBase {
           min: 0.25,
           max: 4.0,
           step: 0.05,
-          default: 4.0
+          default: 2.75
         }
       }
     };

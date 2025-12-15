@@ -74,6 +74,55 @@ export class BushEffect extends EffectBase {
 
       shadowSoftness: 5.0
     };
+
+    // PERFORMANCE: Reusable objects to avoid per-frame allocations
+    this._tempSize = null; // Lazy init when THREE is available
+  }
+
+  _resetTemporalState() {
+    this._currentWindSpeed = 0.0;
+    this._lastFrameTime = 0.0;
+  }
+
+  dispose() {
+    try {
+      if (this.mesh && this.scene) {
+        this.scene.remove(this.mesh);
+      }
+      this.mesh = null;
+
+      if (this.shadowMesh && this.shadowScene) {
+        this.shadowScene.remove(this.shadowMesh);
+      }
+      this.shadowMesh = null;
+
+      if (this.material) {
+        this.material.dispose();
+      }
+      this.material = null;
+
+      if (this.shadowMaterial) {
+        this.shadowMaterial.dispose();
+      }
+      this.shadowMaterial = null;
+
+      if (this.shadowTarget) {
+        this.shadowTarget.dispose();
+      }
+      this.shadowTarget = null;
+
+      this.shadowScene = null;
+      this.scene = null;
+      this.camera = null;
+      this.renderer = null;
+      this.baseMesh = null;
+      this.bushMask = null;
+
+      this._tempSize = null;
+      this._resetTemporalState();
+    } catch (e) {
+      // Keep dispose resilient during scene teardown
+    }
   }
 
   get enabled() { return this._enabled; }
@@ -315,6 +364,10 @@ export class BushEffect extends EffectBase {
 
     const bushData = assetBundle.masks.find(m => m.id === 'bush' || m.type === 'bush');
     this.bushMask = bushData?.texture || null;
+
+    // Scene switches can keep the effect instance around briefly; ensure we don't
+    // carry motion state across fundamentally different scenes.
+    this._resetTemporalState();
 
     if (!this.bushMask) {
       this.enabled = false;
@@ -664,7 +717,9 @@ export class BushEffect extends EffectBase {
     if (this.shadowMaterial && this.shadowMaterial.uniforms) {
       const THREE = window.THREE;
       if (THREE && this.renderer) {
-        const size = new THREE.Vector2();
+        // PERFORMANCE: Reuse Vector2 instead of allocating every frame
+        if (!this._tempSize) this._tempSize = new THREE.Vector2();
+        const size = this._tempSize;
         this.renderer.getDrawingBufferSize(size);
         const su = this.shadowMaterial.uniforms;
         if (su.uResolution) su.uResolution.value.set(size.x, size.y);
@@ -724,7 +779,9 @@ export class BushEffect extends EffectBase {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    const size = new THREE.Vector2();
+    // PERFORMANCE: Reuse Vector2 instead of allocating every frame
+    if (!this._tempSize) this._tempSize = new THREE.Vector2();
+    const size = this._tempSize;
     renderer.getDrawingBufferSize(size);
 
     if (!this.shadowTarget) {

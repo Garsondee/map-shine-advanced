@@ -1332,7 +1332,7 @@ export class InteractionManager {
         const mapShine = window.MapShine || window.mapShine;
         const inputRouter = mapShine?.inputRouter;
         const activeLayerName = canvas.activeLayer?.name;
-        const activeTool = game.activeTool;
+        const activeTool = ui?.controls?.tool?.name ?? game.activeTool;
         
         // DEBUG: Log InputRouter state to diagnose why clicks aren't being processed
         log.debug('onPointerDown InputRouter check', {
@@ -1367,11 +1367,17 @@ export class InteractionManager {
           clientX: event.clientX,
           clientY: event.clientY,
           activeLayer: canvas.activeLayer?.name,
-          activeTool: game.activeTool
+          activeTool: ui?.controls?.tool?.name ?? game.activeTool
         });
 
+        const camera = this.sceneComposer?.camera;
+        if (!camera) {
+          log.debug('onPointerDown ignored - Three.js camera not available');
+          return;
+        }
+
         this.updateMouseCoords(event);
-        this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
+        this.raycaster.setFromCamera(this.mouse, camera);
 
         log.debug('onPointerDown mouse NDC', {
           ndcX: this.mouse.x,
@@ -1387,17 +1393,26 @@ export class InteractionManager {
             const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
             log.debug('onPointerDown right-click wallIntersects', { count: wallIntersects.length });
             if (wallIntersects.length > 0) {
-                const hit = wallIntersects[0];
-                let object = hit.object;
-                
-                // Traverse up to find doorControl userData
-                while (object && object !== wallGroup) {
-                    if (object.userData && object.userData.type === 'doorControl') {
-                        this.handleDoorRightClick(object, event);
-                        event.preventDefault();
-                        return;
+                let doorControl = null;
+
+                for (const hit of wallIntersects) {
+                    let object = hit.object;
+                    while (object && object !== wallGroup) {
+                        if (object.userData && object.userData.type === 'doorControl') {
+                            doorControl = object;
+                            break;
+                        }
+                        object = object.parent;
                     }
-                    object = object.parent;
+                    if (doorControl) break;
+                }
+
+                if (doorControl) {
+                    this.handleDoorRightClick(doorControl, event);
+                    event.preventDefault();
+                    event.stopPropagation();
+                    event.stopImmediatePropagation();
+                    return;
                 }
             }
 
@@ -1477,7 +1492,7 @@ export class InteractionManager {
             }
         }
 
-        const currentTool = game.activeTool;
+        const currentTool = ui?.controls?.tool?.name ?? game.activeTool;
         
         if (isWallLayer) {
           // Start Wall Drawing on the ground plane (aligned with groundZ)
@@ -1871,6 +1886,17 @@ export class InteractionManager {
               return;
           }
 
+          // Prefer Foundry's native DoorControl interaction logic.
+          // This ensures parity with core Foundry behavior (permissions, paused checks, sounds, etc.).
+          if (wall.doorControl && typeof wall.doorControl._onMouseDown === 'function') {
+              wall.doorControl._onMouseDown({
+                  button: 0,
+                  nativeEvent: event,
+                  stopPropagation: () => {}
+              });
+              return;
+          }
+
           // Determine whether the player can control the door
           if ( !game.user.can("WALL_DOORS") ) {
               log.warn("handleDoorClick: User cannot control doors");
@@ -1925,6 +1951,16 @@ export class InteractionManager {
           const wall = canvas.walls.get(wallId);
           if (!wall) {
               log.warn(`handleDoorRightClick: Wall ${wallId} not found in canvas.walls`);
+              return;
+          }
+
+          // Prefer Foundry's native DoorControl right-click logic.
+          if (wall.doorControl && typeof wall.doorControl._onRightDown === 'function') {
+              wall.doorControl._onRightDown({
+                  button: 2,
+                  nativeEvent: event,
+                  stopPropagation: () => {}
+              });
               return;
           }
 

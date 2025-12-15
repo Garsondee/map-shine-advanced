@@ -573,14 +573,33 @@ export class ControlsIntegration {
    */
   restoreAllLayers() {
     const layers = [
-      'background', 'grid', 'tokens', 'tiles', 'lighting', 
+      'background', 'grid', 'primary', 'tokens', 'tiles', 'lighting', 
       'sounds', 'templates', 'drawings', 'notes', 'walls',
-      'weather', 'environment', 'regions', 'controls'
+      'weather', 'environment', 'regions', 'controls', 'fog', 'visibility'
     ];
     
     for (const name of layers) {
       const layer = canvas[name];
       if (layer) layer.visible = true;
+    }
+    
+    // Restore PIXI renderer background to opaque
+    if (canvas.app?.renderer?.background) {
+      canvas.app.renderer.background.alpha = 1;
+    }
+    
+    // Restore token alphas (they were set to ~0 for Three.js rendering)
+    if (canvas.tokens?.placeables) {
+      for (const token of canvas.tokens.placeables) {
+        if (token.mesh) token.mesh.alpha = 1;
+        if (token.icon) token.icon.alpha = 1;
+        if (token.border) token.border.alpha = 1;
+      }
+    }
+    
+    // Restore visibility layer filter if it was disabled
+    if (canvas.visibility?.filter) {
+      canvas.visibility.filter.enabled = true;
     }
   }
   

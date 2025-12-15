@@ -79,6 +79,61 @@ export class TreeEffect extends EffectBase {
     this._tempSize = null; // Lazy init when THREE is available
   }
 
+  _resetTemporalState() {
+    this._currentWindSpeed = 0.0;
+    this._lastFrameTime = 0.0;
+    this._hoverHidden = false;
+    this._hoverFade = 1.0;
+  }
+
+  _clearAlphaMaskCache() {
+    this._alphaMask = null;
+    this._alphaMaskWidth = 0;
+    this._alphaMaskHeight = 0;
+  }
+
+  dispose() {
+    try {
+      if (this.mesh && this.scene) {
+        this.scene.remove(this.mesh);
+      }
+      this.mesh = null;
+
+      if (this.shadowMesh && this.shadowScene) {
+        this.shadowScene.remove(this.shadowMesh);
+      }
+      this.shadowMesh = null;
+
+      if (this.material) {
+        this.material.dispose();
+      }
+      this.material = null;
+
+      if (this.shadowMaterial) {
+        this.shadowMaterial.dispose();
+      }
+      this.shadowMaterial = null;
+
+      if (this.shadowTarget) {
+        this.shadowTarget.dispose();
+      }
+      this.shadowTarget = null;
+
+      this.shadowScene = null;
+      this.scene = null;
+      this.camera = null;
+      this.renderer = null;
+      this.baseMesh = null;
+      this.treeMask = null;
+
+      this._tempSize = null;
+      this._clearAlphaMaskCache();
+      this._resetTemporalState();
+    } catch (e) {
+      // Keep dispose resilient during scene teardown
+    }
+  }
+
   _ensureAlphaMask() {
     if (!this.treeMask || !this.treeMask.image || this._alphaMask) return;
 
@@ -366,7 +421,19 @@ export class TreeEffect extends EffectBase {
     this.baseMesh = baseMesh;
 
     const treeData = assetBundle.masks.find(m => m.id === 'tree' || m.type === 'tree');
-    this.treeMask = treeData?.texture || null;
+    const nextMask = treeData?.texture || null;
+    const maskChanged = this.treeMask !== nextMask;
+    this.treeMask = nextMask;
+
+    // Scene switches can keep the effect instance around briefly; ensure we don't
+    // carry motion/hover state across fundamentally different scenes.
+    this._resetTemporalState();
+
+    // CPU-side alpha mask is derived from the GPU texture image; invalidate if the
+    // underlying texture changed.
+    if (maskChanged) {
+      this._clearAlphaMaskCache();
+    }
 
     if (!this.treeMask) {
       this.enabled = false;
@@ -544,8 +611,10 @@ export class TreeEffect extends EffectBase {
 
     this.mesh = new THREE.Mesh(this.baseMesh.geometry, this.material);
     this.mesh.position.copy(this.baseMesh.position);
-    // Elevate tree layer above overhead tiles (z=20)
-    this.mesh.position.z = 25.0; 
+    // Keep trees just above the ground plane.
+    // Ground Z is now canonical (see SceneComposer.createBasePlane), so a hardcoded
+    // small-Z value can put the mesh behind the map.
+    this.mesh.position.z = (this.baseMesh.position?.z ?? 0) + 0.5;
     
     this.mesh.rotation.copy(this.baseMesh.rotation);
     this.mesh.scale.copy(this.baseMesh.scale);

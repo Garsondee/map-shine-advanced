@@ -90,3 +90,97 @@
   position: relative;
   margin-bottom: 4px !important;
 }
+
+:root {
+  --map-shine-fade-ms: 5000ms;
+}
+
+#map-shine-loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: grid;
+  place-items: center;
+  background-color: rgba(0, 0, 0, 0.0);
+  opacity: 1;
+  transition:
+    background-color var(--map-shine-fade-ms) ease,
+    opacity var(--map-shine-fade-ms) ease;
+  pointer-events: auto;
+}
+
+#map-shine-loading-overlay.map-shine-loading-overlay--hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#map-shine-loading-overlay.map-shine-loading-overlay--black {
+  background-color: rgba(0, 0, 0, 1.0);
+}
+
+#map-shine-loading-overlay .map-shine-loading-overlay__content {
+  pointer-events: none;
+  width: min(420px, calc(100vw - 40px));
+  padding: 20px 18px;
+  border-radius: 12px;
+  background: rgba(10, 10, 10, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.55);
+}
+
+#map-shine-loading-overlay .map-shine-loading-overlay__title {
+  font-family: var(--font-primary, 'Signika', sans-serif);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: rgba(255, 255, 255, 0.95);
+}
+
+#map-shine-loading-overlay .map-shine-loading-overlay__subtitle {
+  margin-top: 2px;
+  font-family: var(--font-primary, 'Signika', sans-serif);
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+#map-shine-loading-overlay .map-shine-loading-overlay__spinner {
+  margin-top: 14px;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.18);
+  border-top-color: rgba(255, 255, 255, 0.85);
+  animation: mapShineSpin 0.9s linear infinite;
+}
+
+#map-shine-loading-overlay .map-shine-loading-overlay__message {
+  margin-top: 12px;
+  font-family: var(--font-primary, 'Signika', sans-serif);
+  font-size: 13px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+#map-shine-loading-overlay .map-shine-loading-overlay__progress {
+  margin-top: 12px;
+  height: 8px;
+  width: 100%;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+#map-shine-loading-overlay .map-shine-loading-overlay__progress-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(0, 200, 255, 0.85), rgba(160, 120, 255, 0.85));
+  transition: width 120ms linear;
+}
+
+@keyframes mapShineSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

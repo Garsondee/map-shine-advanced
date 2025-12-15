@@ -22,6 +22,15 @@ export class CameraController {
     
     /** @type {boolean} */
     this.isDragging = false;
+
+    /** @type {boolean} */
+    this._pendingRightDrag = false;
+
+    /** @type {{x: number, y: number}|null} */
+    this._rightDragStartPos = null;
+
+    /** @type {number} */
+    this._rightDragThresholdPx = 6;
     
     /** @type {{x: number, y: number}|null} */
     this.lastMousePos = null;
@@ -76,10 +85,13 @@ export class CameraController {
     
     // Right mouse button (button === 2)
     if (event.button === 2) {
-      this.isDragging = true;
-      this.lastMousePos = { x: event.clientX, y: event.clientY };
-      this.canvas.style.cursor = 'grabbing';
-      event.preventDefault();
+      // Don’t start panning immediately. Only begin drag after the mouse
+      // moves beyond a threshold so plain right-clicks can be used for
+      // interactions (e.g. door lock/unlock).
+      this._pendingRightDrag = true;
+      this._rightDragStartPos = { x: event.clientX, y: event.clientY };
+      this.isDragging = false;
+      this.lastMousePos = null;
     }
   }
   
@@ -89,7 +101,27 @@ export class CameraController {
    * @private
    */
   onMouseMove(event) {
-    if (!this.enabled || !this.isDragging || !this.lastMousePos) return;
+    if (!this.enabled) return;
+
+    if (this._pendingRightDrag && this._rightDragStartPos) {
+      const dist = Math.hypot(
+        event.clientX - this._rightDragStartPos.x,
+        event.clientY - this._rightDragStartPos.y
+      );
+
+      if (dist > this._rightDragThresholdPx) {
+        this._pendingRightDrag = false;
+        this._rightDragStartPos = null;
+        this.isDragging = true;
+        this.lastMousePos = { x: event.clientX, y: event.clientY };
+        this.canvas.style.cursor = 'grabbing';
+        event.preventDefault();
+      } else {
+        return;
+      }
+    }
+
+    if (!this.isDragging || !this.lastMousePos) return;
     
     const deltaX = event.clientX - this.lastMousePos.x;
     const deltaY = event.clientY - this.lastMousePos.y;
@@ -117,6 +149,9 @@ export class CameraController {
       this.lastMousePos = null;
       this.canvas.style.cursor = 'default';
     }
+
+    this._pendingRightDrag = false;
+    this._rightDragStartPos = null;
   }
   
   /**

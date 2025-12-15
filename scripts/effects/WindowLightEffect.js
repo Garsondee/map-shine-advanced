@@ -53,7 +53,7 @@ export class WindowLightEffect extends EffectBase {
       hasWindowMask: false,
 
       // Core light controls
-      intensity: 3.0,
+      intensity: 25.0,
       color: { r: 1.0, g: 0.96, b: 0.85 }, // Warm window light
       exposure: 0.0,
       brightness: 0.0,
@@ -63,20 +63,20 @@ export class WindowLightEffect extends EffectBase {
       tint: 0.0,
 
       // Mask shaping
-      maskThreshold: 0.0,
-      softness: 0.89,
+      maskThreshold: 0.1,
+      softness: 0.5,
 
       // Cloud interaction
-      cloudInfluence: 1.0,        // 0=ignore clouds, 1=overcast kills light, >1 exaggerates
+      cloudInfluence: 3.0,        // 0=ignore clouds, 1=overcast kills light, >1 exaggerates
       minCloudFactor: 0.0,        // Floor so light never fully disappears if desired
-      cloudLocalInfluence: 1.0,   // Strength of local cloud density modulation (0-3)
-      cloudDensityCurve: 1.0,     // Gamma for density -> shadow mapping (0.2-3)
+      cloudLocalInfluence: 3.0,   // Strength of local cloud density modulation (0-3)
+      cloudDensityCurve: 1.3,     // Gamma for density -> shadow mapping (0.2-3)
 
       // Specular coupling (local glints)
-      specularBoost: 0.0,
+      specularBoost: 3.0,
 
       // Blending mode (0=Add, 1=Multiply, 2=Screen, 3=Overlay)
-      blendMode: 3,
+      blendMode: 0,
 
       // RGB Split
       rgbShiftAmount: 2.0,  // pixels at 1080p-ish; remapped in shader
@@ -84,7 +84,7 @@ export class WindowLightEffect extends EffectBase {
 
       // Overhead tile lighting
       lightOverheadTiles: true,  // Whether window light affects overhead tiles
-      overheadLightIntensity: 0.5  // How much window light affects overhead tiles (0-1)
+      overheadLightIntensity: 5.0  // How much window light affects overhead tiles (0-1)
     };
   }
 
@@ -171,7 +171,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 25.0,
           step: 0.05,
-          default: 3.0
+          default: 25.0
         },
         maskThreshold: {
           type: 'slider',
@@ -179,7 +179,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.0
+          default: 0.1
         },
         softness: {
           type: 'slider',
@@ -187,7 +187,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 0.89
+          default: 0.5
         },
         color: {
           type: 'color',
@@ -248,7 +248,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 3.0,
           step: 0.01,
-          default: 1.0
+          default: 3.0
         },
         cloudLocalInfluence: {
           type: 'slider',
@@ -256,7 +256,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 3.0,
           step: 0.05,
-          default: 1.0
+          default: 3.0
         },
         cloudDensityCurve: {
           type: 'slider',
@@ -264,7 +264,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.2,
           max: 3.0,
           step: 0.05,
-          default: 1.0
+          default: 1.3
         },
         minCloudFactor: {
           type: 'slider',
@@ -280,7 +280,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 3.0,
           step: 0.01,
-          default: 0.0
+          default: 3.0
         },
         blendMode: {
           type: 'list',
@@ -291,7 +291,7 @@ export class WindowLightEffect extends EffectBase {
             Screen: 2,
             Overlay: 3
           },
-          default: 3
+          default: 0
         },
         rgbShiftAmount: {
           type: 'slider',
@@ -320,7 +320,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 5.0,
           step: 0.05,
-          default: 0.5
+          default: 5.0
         }
       }
     };
@@ -633,9 +633,6 @@ export class WindowLightEffect extends EffectBase {
         }
         
         cloudFactor = max(cloudFactor, uMinCloudFactor);
-        
-        // DEBUG: Uncomment to visualize cloud factor
-         gl_FragColor = vec4(1.0 - cloudFactor, cloudFactor, 0.0, 1.0); return;
 
         float windowStrength = m * indoorFactor * cloudFactor;
         
@@ -750,16 +747,29 @@ export class WindowLightEffect extends EffectBase {
   }
 
   onResize(width, height) {
+    const THREE = window.THREE;
+    let w = width;
+    let h = height;
+    try {
+      if (THREE && this.renderer && typeof this.renderer.getDrawingBufferSize === 'function') {
+        if (!this._tmpDrawSize) this._tmpDrawSize = new THREE.Vector2();
+        this.renderer.getDrawingBufferSize(this._tmpDrawSize);
+        w = Math.max(1, Math.floor(this._tmpDrawSize.x || this._tmpDrawSize.width || w));
+        h = Math.max(1, Math.floor(this._tmpDrawSize.y || this._tmpDrawSize.height || h));
+      }
+    } catch (e) {
+      // ignore
+    }
+
     if (this.material) {
-      this.material.uniforms.uResolution.value.set(width, height);
+      this.material.uniforms.uResolution.value.set(w, h);
     }
     if (this.lightMaterial) {
-      this.lightMaterial.uniforms.uResolution.value.set(width, height);
+      this.lightMaterial.uniforms.uResolution.value.set(w, h);
     }
-    
-    // Resize light target if it exists
+
     if (this.lightTarget) {
-      this.lightTarget.setSize(width, height);
+      this.lightTarget.setSize(w, h);
     }
   }
 
@@ -773,8 +783,22 @@ export class WindowLightEffect extends EffectBase {
     if (!THREE || !this.baseMesh || !this.windowMask) return;
 
     // Create render target for light brightness
-    const width = window.innerWidth || 1024;
-    const height = window.innerHeight || 1024;
+    let width = 1024;
+    let height = 1024;
+    try {
+      if (this.renderer && typeof this.renderer.getDrawingBufferSize === 'function') {
+        if (!this._tmpDrawSize) this._tmpDrawSize = new THREE.Vector2();
+        this.renderer.getDrawingBufferSize(this._tmpDrawSize);
+        width = Math.max(1, Math.floor(this._tmpDrawSize.x || this._tmpDrawSize.width || width));
+        height = Math.max(1, Math.floor(this._tmpDrawSize.y || this._tmpDrawSize.height || height));
+      } else {
+        width = Math.max(1, Math.floor(this.baseViewportWidth || window.innerWidth || width));
+        height = Math.max(1, Math.floor(this.baseViewportHeight || window.innerHeight || height));
+      }
+    } catch (e) {
+      width = Math.max(1, Math.floor(window.innerWidth || width));
+      height = Math.max(1, Math.floor(window.innerHeight || height));
+    }
     
     this.lightTarget = new THREE.WebGLRenderTarget(width, height, {
       minFilter: THREE.LinearFilter,
@@ -895,7 +919,7 @@ export class WindowLightEffect extends EffectBase {
    * @param {THREE.WebGLRenderer} renderer
    */
   renderLightPass(renderer) {
-    if (!this.params.lightOverheadTiles || !this.lightTarget || !this.lightScene || !this.camera) {
+    if (!this.lightTarget || !this.lightScene || !this.camera) {
       return;
     }
     if (!this._enabled || !this.params.hasWindowMask) {
@@ -905,7 +929,7 @@ export class WindowLightEffect extends EffectBase {
     // Update light material uniforms
     if (this.lightMaterial) {
       const u = this.lightMaterial.uniforms;
-      u.uIntensity.value = this.params.intensity * this.params.overheadLightIntensity;
+      u.uIntensity.value = this.params.intensity;
       u.uMaskThreshold.value = this.params.maskThreshold;
       u.uSoftness.value = this.params.softness;
       u.uCloudInfluence.value = this.params.cloudInfluence;

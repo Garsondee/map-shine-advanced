@@ -1,4 +1,5 @@
 import { EffectBase, RenderLayers } from '../effects/EffectComposer.js';
+import { DistortionLayer } from '../effects/DistortionManager.js';
 import { createLogger } from '../core/log.js';
 import { 
   ParticleSystem, 
@@ -385,7 +386,7 @@ export class FireSparksEffect extends EffectBase {
       fireSize: 18.0,
       emberRate: 5.0,
       // Wind Influence is controlled by WeatherController; keep existing default
-      windInfluence: 2.0,
+      windInfluence: 5.0,
       // Updated default from scene
       lightIntensity: 5.0,
 
@@ -423,7 +424,7 @@ export class FireSparksEffect extends EffectBase {
       emberEndColor: { r: 1.0, g: 0.2, b: 0.0 },
 
       // Physics controls (match Mad Scientist scene where provided)
-      fireUpdraft: 2.5,
+      fireUpdraft: 0.95,
       emberUpdraft: 1.6,
       fireCurlStrength: 0.7,
       emberCurlStrength: 6.05,
@@ -439,6 +440,16 @@ export class FireSparksEffect extends EffectBase {
       // 1.0 = baseline, >1.0 = faster (shorter lifetimes), <1.0 = slower.
       // Updated default from scene: Time Scale = 3.0
       timeScale: 3.0,
+
+      // ========== HEAT DISTORTION CONTROLS ==========
+      // Heat distortion creates a rippling heat haze effect around fire sources
+      heatDistortionEnabled: false,
+      heatDistortionIntensity: 0.015, // Strength of UV offset (0.0 - 0.05)
+      heatDistortionFrequency: 8.0,   // Noise frequency for shimmer pattern
+      heatDistortionSpeed: 1.0,       // Animation speed multiplier
+      heatDistortionBlurRadius: 4.0,  // Blur radius for mask expansion
+      heatDistortionBlurPasses: 3,    // Number of blur passes (more = wider area)
+      heatDistortionBoost: 2.0,       // Brightness boost before blur (expands effective area)
 
       // Indoor vs outdoor lifetime scaling.
       // 1.0 = indoor flames live as long as outdoor flames.
@@ -734,7 +745,8 @@ export class FireSparksEffect extends EffectBase {
         { name: 'embers-shape', label: 'Embers - Shape', type: 'inline', parameters: ['emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax'] },
         { name: 'embers-look', label: 'Embers - Look', type: 'inline', parameters: ['emberOpacityMin', 'emberOpacityMax', 'emberColorBoostMin', 'emberColorBoostMax', 'emberStartColor', 'emberEndColor'] },
         { name: 'embers-physics', label: 'Embers - Physics', type: 'inline', parameters: ['emberUpdraft', 'emberCurlStrength'] },
-        { name: 'env', label: 'Environment', type: 'inline', parameters: ['windInfluence', 'lightIntensity', 'timeScale', 'indoorLifeScale', 'weatherPrecipKill', 'weatherWindKill'] }
+        { name: 'env', label: 'Environment', type: 'inline', parameters: ['windInfluence', 'lightIntensity', 'timeScale', 'indoorLifeScale', 'weatherPrecipKill', 'weatherWindKill'] },
+        { name: 'heat-distortion', label: 'Heat Distortion', type: 'inline', parameters: ['heatDistortionEnabled', 'heatDistortionIntensity', 'heatDistortionFrequency', 'heatDistortionSpeed'] }
       ],
       parameters: {
         enabled: { type: 'checkbox', label: 'Fire Enabled', default: true },
@@ -785,12 +797,12 @@ export class FireSparksEffect extends EffectBase {
         emberColorBoostMax: { type: 'slider', label: 'Ember Color Boost Max', min: 0.0, max: 3.0, step: 0.05, default: 2.85 },
         emberStartColor: { type: 'color', default: { r: 1.0, g: 0.8, b: 0.4 } },
         emberEndColor: { type: 'color', default: { r: 1.0, g: 0.2, b: 0.0 } },
-        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 2.5 },
+        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 0.95 },
         emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 1.6 },
         fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.7 },
         emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 6.05 },
         // Wind Influence remains generic; Light Intensity and Time Scale match scene
-        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 2.0 },
+        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
         lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
         timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 3.0 },
 
@@ -799,7 +811,13 @@ export class FireSparksEffect extends EffectBase {
 
         // Weather guttering strength (spawn-time kill) for outdoor flames
         weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 1.55 },
-        weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 1.15 }
+        weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 1.15 },
+
+        // Heat Distortion Controls
+        heatDistortionEnabled: { type: 'checkbox', label: 'Enable Heat Haze', default: false },
+        heatDistortionIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 0.05, step: 0.001, default: 0.015 },
+        heatDistortionFrequency: { type: 'slider', label: 'Frequency', min: 1.0, max: 20.0, step: 0.5, default: 8.0 },
+        heatDistortionSpeed: { type: 'slider', label: 'Speed', min: 0.1, max: 3.0, step: 0.1, default: 1.0 }
       }
     };
   }
@@ -1042,7 +1060,167 @@ export class FireSparksEffect extends EffectBase {
       this.scene.add(this.globalSystem.emitter);
       this.scene.add(this.globalEmbers.emitter);
       log.info('Created Global Fire System from mask (' + (points.length/3) + ' points)');
+
+      // Register heat distortion with DistortionManager if available
+      this._registerHeatDistortion(fireMask.texture);
     }
+  }
+
+  /**
+   * Register heat distortion source with the centralized DistortionManager.
+   * Creates a boosted/blurred version of the _Fire mask for a wider heat haze area.
+   * @param {THREE.Texture} fireMaskTexture - The _Fire mask texture
+   * @private
+   */
+  _registerHeatDistortion(fireMaskTexture) {
+    const distortionManager = window.MapShine?.distortionManager;
+    if (!distortionManager) {
+      log.debug('DistortionManager not available, skipping heat distortion registration');
+      return;
+    }
+
+    if (!fireMaskTexture || !fireMaskTexture.image) {
+      log.debug('No valid fire mask texture for heat distortion');
+      return;
+    }
+
+    const THREE = window.THREE;
+    
+    // Create a boosted version of the fire mask for heat distortion
+    // This expands the effective area beyond the actual fire pixels
+    const boostedMask = this._createBoostedHeatMask(fireMaskTexture);
+    if (!boostedMask) return;
+
+    // Store reference for cleanup
+    this._heatDistortionMask = boostedMask;
+
+    // Register with DistortionManager (DistortionLayer imported at top of file)
+    distortionManager.registerSource('heat', DistortionLayer.ABOVE_GROUND, boostedMask, {
+      intensity: this.params.heatDistortionIntensity,
+      frequency: this.params.heatDistortionFrequency,
+      speed: this.params.heatDistortionSpeed,
+      blurRadius: this.params.heatDistortionBlurRadius,
+      blurPasses: this.params.heatDistortionBlurPasses
+    });
+
+    // Set initial enabled state
+    distortionManager.setSourceEnabled('heat', this.params.heatDistortionEnabled);
+
+    log.info('Heat distortion registered with DistortionManager');
+  }
+
+  /**
+   * Create a boosted/expanded version of the fire mask for heat distortion.
+   * The boost increases brightness so that after blur, the heat area extends
+   * well beyond the visible flames.
+   * @param {THREE.Texture} fireMaskTexture - Original _Fire mask
+   * @returns {THREE.Texture|null} Boosted mask texture
+   * @private
+   */
+  _createBoostedHeatMask(fireMaskTexture) {
+    const THREE = window.THREE;
+    const image = fireMaskTexture.image;
+    if (!image) return null;
+
+    // Create a canvas to process the mask
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext('2d');
+    
+    // Draw original mask
+    ctx.drawImage(image, 0, 0);
+    
+    // Get pixel data and boost brightness
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+    const boost = this.params.heatDistortionBoost || 2.0;
+    
+    for (let i = 0; i < data.length; i += 4) {
+      // Boost and clamp to 255
+      data[i] = Math.min(255, data[i] * boost);     // R
+      data[i + 1] = Math.min(255, data[i + 1] * boost); // G
+      data[i + 2] = Math.min(255, data[i + 2] * boost); // B
+      // Alpha stays the same
+    }
+    
+    ctx.putImageData(imageData, 0, 0);
+    
+    // Apply a simple box blur to expand the mask (CPU-side preprocessing)
+    // This complements the GPU blur in DistortionManager
+    this._applyBoxBlur(ctx, canvas.width, canvas.height, 3);
+    
+    // Create THREE texture from processed canvas
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.needsUpdate = true;
+    
+    return texture;
+  }
+
+  /**
+   * Apply a simple box blur to a canvas context
+   * @param {CanvasRenderingContext2D} ctx - Canvas context
+   * @param {number} width - Canvas width
+   * @param {number} height - Canvas height
+   * @param {number} radius - Blur radius in pixels
+   * @private
+   */
+  _applyBoxBlur(ctx, width, height, radius) {
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+    const temp = new Uint8ClampedArray(data.length);
+    
+    // Horizontal pass
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let r = 0, g = 0, b = 0, a = 0, count = 0;
+        
+        for (let dx = -radius; dx <= radius; dx++) {
+          const nx = Math.max(0, Math.min(width - 1, x + dx));
+          const idx = (y * width + nx) * 4;
+          r += data[idx];
+          g += data[idx + 1];
+          b += data[idx + 2];
+          a += data[idx + 3];
+          count++;
+        }
+        
+        const outIdx = (y * width + x) * 4;
+        temp[outIdx] = r / count;
+        temp[outIdx + 1] = g / count;
+        temp[outIdx + 2] = b / count;
+        temp[outIdx + 3] = a / count;
+      }
+    }
+    
+    // Vertical pass
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let r = 0, g = 0, b = 0, a = 0, count = 0;
+        
+        for (let dy = -radius; dy <= radius; dy++) {
+          const ny = Math.max(0, Math.min(height - 1, y + dy));
+          const idx = (ny * width + x) * 4;
+          r += temp[idx];
+          g += temp[idx + 1];
+          b += temp[idx + 2];
+          a += temp[idx + 3];
+          count++;
+        }
+        
+        const outIdx = (y * width + x) * 4;
+        data[outIdx] = r / count;
+        data[outIdx + 1] = g / count;
+        data[outIdx + 2] = b / count;
+        data[outIdx + 3] = a / count;
+      }
+    }
+    
+    ctx.putImageData(imageData, 0, 0);
   }
   
   _generatePoints(maskTexture, threshold = 0.1) {
@@ -1769,6 +1947,33 @@ export class FireSparksEffect extends EffectBase {
         sys.startLife.b *= factor;
       }
     }
+
+    // Sync heat distortion params to DistortionManager
+    this._updateHeatDistortion();
+  }
+
+  /**
+   * Sync heat distortion parameters to the DistortionManager each frame.
+   * @private
+   */
+  _updateHeatDistortion() {
+    const distortionManager = window.MapShine?.distortionManager;
+    if (!distortionManager) return;
+
+    const heatSource = distortionManager.getSource('heat');
+    if (!heatSource) return;
+
+    const p = this.params;
+
+    // Update enabled state
+    distortionManager.setSourceEnabled('heat', p.heatDistortionEnabled);
+
+    // Update parameters
+    distortionManager.updateSourceParams('heat', {
+      intensity: p.heatDistortionIntensity,
+      frequency: p.heatDistortionFrequency,
+      speed: p.heatDistortionSpeed
+    });
   }
   
   clear() {
@@ -1779,6 +1984,17 @@ export class FireSparksEffect extends EffectBase {
       this._destroyParticleSystems();
       this._lastAssetBundle = null;
       this._lastMapPointsManager = null;
+      
+      // Cleanup heat distortion
+      const distortionManager = window.MapShine?.distortionManager;
+      if (distortionManager) {
+        distortionManager.unregisterSource('heat');
+      }
+      if (this._heatDistortionMask) {
+        this._heatDistortionMask.dispose();
+        this._heatDistortionMask = null;
+      }
+      
       super.dispose();
   }
 

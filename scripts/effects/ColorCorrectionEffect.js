@@ -27,7 +27,7 @@ export class ColorCorrectionEffect extends EffectBase {
     // See docs/CONTRAST-DARKNESS-ANALYSIS.md for rationale.
     this.params = {
       // 1. Input
-      exposure: 1.0,
+      exposure: 0.85,
       
       // 2. White Balance
       temperature: 0.0, // -1.0 (Blue) to 1.0 (Orange)
@@ -42,12 +42,12 @@ export class ColorCorrectionEffect extends EffectBase {
       // 4. Color Grading (Lift/Gamma/Gain)
       // We use flat properties for Tweakpane compatibility (vectors can be tricky)
       liftColor: { r: 0, g: 0, b: 0 },
-      gammaColor: { r: 1, g: 1, b: 1 },
+      gammaColor: { r: 0.5, g: 0.5, b: 0.5 },
       gainColor: { r: 1, g: 1, b: 1 },
-      masterGamma: 2.0,
+      masterGamma: 2.5,
       
       // 5. Tone Mapping
-      toneMapping: 2,
+      toneMapping: 0,
       
       // 6. Artistic
       vignetteStrength: 0.0,
@@ -95,24 +95,24 @@ export class ColorCorrectionEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        exposure: { type: 'slider', min: 0, max: 5, step: 0.01, default: 1.35 },
+        exposure: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.85 },
         temperature: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
         tint: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
         
         brightness: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.0 },
-        contrast: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.1 },
+        contrast: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0 },
         saturation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0 },
         vibrance: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
         
         liftColor: { type: 'color', default: { r: 0, g: 0, b: 0 } },
-        gammaColor: { type: 'color', default: { r: 1, g: 1, b: 1 } },
+        gammaColor: { type: 'color', default: { r: 0.5, g: 0.5, b: 0.5 } },
         gainColor: { type: 'color', default: { r: 1, g: 1, b: 1 } },
-        masterGamma: { type: 'slider', min: 0.1, max: 3, step: 0.01, default: 2.0 },
+        masterGamma: { type: 'slider', min: 0.1, max: 3, step: 0.01, default: 2.5 },
         
         toneMapping: { 
           type: 'list', 
           options: { 'None': 0, 'ACES Filmic': 1, 'Reinhard': 2 },
-          default: 2 
+          default: 0 
         },
         
         vignetteStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.0 },

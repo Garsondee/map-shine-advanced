@@ -272,6 +272,7 @@ class SnowFloorBehavior {
     this.fadeDuration = 1.0;
     // Cache groundZ from SceneComposer; updated lazily in update() if needed.
     this._groundZ = null;
+    this._tempVec = null;
   }
 
   /**
@@ -348,8 +349,15 @@ class SnowFloorBehavior {
     }
 
     // Not yet landed: check for contact with the ground plane.
-    const z = particle.position.z;
     const groundZ = this._getGroundZ();
+    let z = particle.position.z;
+    const THREE = window.THREE;
+    if (system && system.emitter && system.emitter.matrixWorld && THREE) {
+      if (!this._tempVec) this._tempVec = new THREE.Vector3();
+      this._tempVec.set(particle.position.x, particle.position.y, particle.position.z);
+      this._tempVec.applyMatrix4(system.emitter.matrixWorld);
+      z = this._tempVec.z;
+    }
     if (z <= groundZ) {
       particle._landed = true;
       particle._landedAgeStart = typeof particle.age === 'number' ? particle.age : 0;
@@ -1114,7 +1122,9 @@ _createSnowTexture() {
        depthWrite: false,
        depthTest: false,
        blending: THREE.AdditiveBlending,
-       color: 0xffffff
+       color: 0xffffff,
+       opacity: 1.0,
+       side: THREE.DoubleSide
      });
 
      this._snowMaterial = snowMaterial;
@@ -1198,6 +1208,7 @@ _createSnowTexture() {
          const batch = this.batchRenderer.batches[idx];
          if (batch.material) {
            this._snowBatchMaterial = batch.material;
+           this._snowBatchMaterial.side = THREE.DoubleSide;
            this._patchRoofMaskMaterial(this._snowBatchMaterial);
          }
        }

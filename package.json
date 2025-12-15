@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "description": "Foundry VTT module with Three.js WebGPU",
   "scripts": {
-    "build:tsl": "node scripts/build/build.js"
+    "build:tsl": "node scripts/build/build.js",
+    "release": "node scripts/release/release.js",
+    "release:test": "node scripts/release/release.js --version 0.1.4 --force"
   },
   "dependencies": {
     "three": "^0.170.0" 

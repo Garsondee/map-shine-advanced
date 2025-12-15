@@ -856,6 +856,22 @@ _createSnowTexture() {
       ? sceneComposer.weatherEmitterZ
       : (groundZ + 6500);
 
+    // IMPORTANT: Keep the weather emitter within the camera frustum.
+    // The PerspectiveCamera looks down -Z from a fixed height (typically z=2000)
+    // with far=5000. Spawning at groundZ+6500 (e.g. 7500) puts particles behind
+    // the camera / beyond the far plane. Rain still appears because it falls fast
+    // enough to enter the frustum, but snow falls slowly and may never become visible.
+    let safeEmitterZ = emitterZ;
+    try {
+      const cam = sceneComposer?.camera;
+      if (cam && typeof cam.position?.z === 'number') {
+        // Ensure spawn plane is in front of the camera (smaller Z than camera).
+        safeEmitterZ = Math.min(safeEmitterZ, cam.position.z - 10);
+      }
+    } catch (e) {
+      // Fallback: use computed emitterZ
+    }
+
     // LAYERING CONTRACT (weather vs. tiles / overhead):
     // - Overhead tiles use Z_OVERHEAD=20, depthTest=true, depthWrite=false,
     //   renderOrder=10 (see TileManager.updateSpriteTransform).
@@ -964,7 +980,7 @@ _createSnowTexture() {
       behaviors: [gravity, wind, rainColorOverLife, killBehavior, new RainFadeInBehavior()],
     });
      
-    this.rainSystem.emitter.position.set(centerX, centerY, emitterZ);
+    this.rainSystem.emitter.position.set(centerX, centerY, safeEmitterZ);
      // Rotate Emitter to shoot DOWN (-Z)
      this.rainSystem.emitter.rotation.set(Math.PI, 0, 0);
 
@@ -1195,7 +1211,7 @@ _createSnowTexture() {
       ],
     });
      
-     this.snowSystem.emitter.position.set(centerX, centerY, emitterZ);
+     this.snowSystem.emitter.position.set(centerX, centerY, safeEmitterZ);
      this.snowSystem.emitter.rotation.set(Math.PI, 0, 0);
 
      if (this.scene) this.scene.add(this.snowSystem.emitter);

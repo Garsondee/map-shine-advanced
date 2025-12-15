@@ -3,3 +3,5 @@ foundryvttsourcecode/
 node_modules/
 gamesystemsourcecode/
 oldmapshinemodulecode/
+module-staging/
+dist/

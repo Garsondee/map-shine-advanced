@@ -1,71 +1,175 @@
-![](https://img.shields.io/badge/Foundry-v10-informational)
-<!--- Downloads @ Latest Badge -->
-<!--- replace <user>/<repo> with your username/repository -->
-<!--- ![Latest Release Download Count](https://img.shields.io/github/downloads/<user>/<repo>/latest/module.zip) -->
+![](https://img.shields.io/badge/Foundry-v13-informational)
 
-<!--- Forge Bazaar Install % Badge -->
-<!--- replace <your-module-name> with the `name` in your manifest -->
-<!--- ![Forge Installs](https://img.shields.io/badge/dynamic/json?label=Forge%20Installs&query=package.installs&suffix=%25&url=https%3A%2F%2Fforge-vtt.com%2Fapi%2Fbazaar%2Fpackage%2F<your-module-name>&colorB=4aa94a) -->
+# Map Shine Advanced
 
+Map Shine Advanced is a Foundry VTT module that brings a Three.js-based renderer to Foundry with a focus on cinematic 2.5D battlemaps: PBR-style surface shading, mask-driven effects, particles, and a modern post-processing pipeline.
 
-# How to use this Template to create a versioned Release
+- **Repo**: https://github.com/Garsondee/map-shine-advanced
+- **Status**: `0.2.0-dev` (active development)
 
-1. Open your repository's releases page.
+## What this module does
 
-![Where to click to open repository releases.](https://user-images.githubusercontent.com/7644614/93409301-9fd25080-f864-11ea-9e0c-bdd09e4418e4.png)
+- **Renders the scene in Three.js** while Foundry continues to provide game logic + UI.
+- **Syncs Foundry documents** (tokens, tiles, walls, drawings, notes, templates, lights) into Three.js managers.
+- **Uses a suffix-based texture system** so map authors can provide extra masks like `_Specular`, `_Outdoors`, `_Windows`, etc.
 
-2. Click "Draft a new release"
+## Compatibility
 
-![Draft a new release button.](https://user-images.githubusercontent.com/7644614/93409364-c1333c80-f864-11ea-89f1-abfcb18a8d9f.png)
+- **Foundry VTT**: v13 (minimum/verified/maximum currently set to 13)
 
-3. Fill out the release version as the tag name.
+## Installation
 
-If you want to add details at this stage you can, or you can always come back later and edit them.
+Install using the manifest URL:
 
-![Release Creation Form](https://user-images.githubusercontent.com/7644614/93409543-225b1000-f865-11ea-9a19-f1906a724421.png)
+```text
+https://github.com/Garsondee/map-shine-advanced/releases/latest/download/module.json
+```
 
-4. Hit submit.
+## Quick start
 
-5. Wait a few minutes.
+1. Install and enable the module.
+2. Open a Scene.
+3. Open the Map Shine panel:
+   - In the Scene Controls (Tokens), click **Map Shine UI**.
+4. In the panel, enable Map Shine for the current scene.
 
-A Github Action will run to populate the `module.json` and `module.zip` with the correct urls that you can then use to distribute this release. You can check on its status in the "Actions" tab.
+### Gameplay mode vs Map Maker mode
 
-![Actions Tab](https://user-images.githubusercontent.com/7644614/93409820-c1800780-f865-11ea-8c6b-c3792e35e0c8.png)
+Map Shine supports a hybrid workflow:
 
-6. Grab the module.json url from the release's details page.
+- **Gameplay Mode**
+  - Three.js is responsible for most rendering and gameplay interactions.
+  - The Foundry canvas remains available for UI and tooling, but is configured as a transparent overlay.
 
-![image](https://user-images.githubusercontent.com/7644614/93409960-10c63800-f866-11ea-83f6-270cc5d10b71.png)
+- **Map Maker Mode**
+  - Toggle **Map Maker Mode** in the Map Shine panel.
+  - Intended for using native Foundry tools (walls, lights, drawings, regions, etc.) without fighting the Three.js interaction model.
 
-This `module.json` will only ever point at this release's `module.zip`, making it useful for sharing a specific version for compatibility purposes.
+## Map authoring: suffix-based masks
 
-7. You can use the url `https://github.com/<user>/<repo>/releases/latest/download/module.json` to refer to the manifest.
+Map Shine discovers masks by searching for sibling files next to your scene background image. Use the same base filename as your background, plus a suffix.
 
-This is the url you want to use to install the module typically, as it will get updated automatically.
+Example (if your background is `MyMap.webp`):
 
-# How to List Your Releases on Package Admin
+- `MyMap_Specular.webp`
+- `MyMap_Roughness.webp`
+- `MyMap_Normal.webp`
+- `MyMap_Outdoors.webp`
+- `MyMap_Windows.webp`
 
-To request a package listing for your first release, go to the [Package Submission Form](https://foundryvtt.com/packages/submit) (accessible via a link at the bottom of the "[Systems and Modules](https://foundryvtt.com/packages/)" page on the Foundry website).
+Supported formats:
 
-Fill in the form. "Package Name" must match the name in the module manifest.  Package Title will be the display name for the package.  Package URL should be your repo URL.
-![image](https://user-images.githubusercontent.com/36359784/120664263-b49e5500-c482-11eb-9126-af7006389903.png)
+- `webp`
+- `png`
+- `jpg` / `jpeg`
 
+### Currently recognized suffixes
 
-One of the Foundry staff will typically get back to you with an approval or any further questions within a few days, and give you access to the package admin pages.
+These are the masks currently discovered by the loader (`scripts/assets/loader.js`):
 
-Once you have access to the [module admin page](https://foundryvtt.com/admin/packages/package/), you can release a new version by going into the page for your module, scrolling to the bottom, and filling in a new Package Version.
+- **`_Specular`**: Specular highlights mask
+- **`_Roughness`**: Roughness map
+- **`_Normal`**: Normal map
+- **`_Iridescence`**: Iridescence mask
+- **`_Prism`**: Prism/refraction mask
+- **`_Outdoors`**: Indoor/outdoor mask (used for roof/indoor logic)
+- **`_Windows`**: Window lighting mask
+- **`_Structural`**: Legacy structural/window mask fallback
+- **`_Fire`**: Fire placement mask
+- **`_Dust`**: Dust motes placement mask
+- **`_Bush`**: Animated bush texture (RGBA)
+- **`_Tree`**: Animated tree canopy texture
 
-When listing a new version, Version should be the version number you set above, and the Manifest URL should be the manifest __for that specific version__ (do not use /latest/ here).
-![image](https://user-images.githubusercontent.com/36359784/120664346-c4b63480-c482-11eb-9d8b-731b50d70939.png)
+## Features (current)
 
-> ### :warning: Important :warning:
-> 
-> It is very important that you use the specific release manifest url, and not the `/latest` url here. For more details about why this is important and how Foundry Installs/Updates packages, read [this wiki article](https://foundryvtt.wiki/en/development/guides/releases-and-history).
+### Core rendering & syncing
 
-Clicking "Save" in the bottom right will save the new version, which means that anyone installing your module from within Foundry will get that version, and a post will be generated in the #release-announcements channel on the official Foundry VTT Discord.
+- **Three.js scene rendering** with a dedicated render loop.
+- **TokenManager**: token sprites synced from Foundry.
+- **TileManager**: tiles synced from Foundry, including overhead/roof tiles.
+- **WallManager**: walls synced and rendered in Three.js.
+- **DoorMeshManager**: Three.js door meshes.
+- **GridRenderer**: grid rendering based on Foundry grid settings.
+- **DrawingManager**, **NoteManager**, **TemplateManager**, **LightIconManager**: Three.js counterparts for common Foundry overlays.
+- **MapPointsManager**: v1.x map points compatibility and effect wiring.
 
+### Effects & post processing
 
-# FoundryVTT Module
+Registered effects are orchestrated through `EffectComposer` (`scripts/effects/EffectComposer.js`). Current notable effects include:
 
-Does something, probably
+- **LightingEffect**: screen-space lighting composition.
+- **WorldSpaceFogEffect**: Fog of War rendered as a world-space plane with Foundry vision/exploration textures.
+- **SpecularEffect**: mask-driven specular surface shading.
+- **IridescenceEffect**: additive iridescent overlay.
+- **PrismEffect**: masked refraction/prism look.
+- **WindowLightEffect**: interior window light pools driven by `_Windows` / `_Structural`.
+- **OverheadShadowsEffect**: roof/overhead shadowing.
+- **BuildingShadowsEffect**: long shadows derived from `_Outdoors`.
+- **CloudEffect**: procedural cloud shadows.
+- **SkyColorEffect**: outdoor grading driven by `WeatherController` time/weather.
+- **ColorCorrectionEffect**, **BloomEffect**, **LensflareEffect**, **AsciiEffect**.
+- **DistortionManager**: centralized distortion composition (heat haze, etc.).
 
-## Changelog
+### Particles
+
+- **ParticleSystem**: shared particle backend.
+- **FireSparksEffect**: mask-driven fire placement (and map-points driven fire/candle sources).
+- **SmellyFliesEffect**: map-points driven “smart particles”.
+- **DustMotesEffect**: dust motes (mask-driven), with planned coupling to window light.
+
+### Weather state
+
+- **WeatherController** provides shared global state (precipitation, cloud cover, wind, time-of-day) and drives multiple effects.
+
+## Roadmap (planned)
+
+This is a high-level summary of the current planning documents in `docs/`.
+
+- **Cloud system expansion**
+  - Spatial window dimming based on cloud shadows
+  - Sky reflections on specular surfaces
+  - Zoom-dependent cloud tops
+
+- **Wall-aware lighting**
+  - Mesh-based light polygons derived from Foundry visibility polygons
+  - Light accumulation buffer + composition pass
+
+- **Vision-driven early discard / performance culling**
+  - Centralized visibility texture for early fragment discard across expensive effects
+
+- **Smart particles + editing**
+  - Three.js-native map points authoring tools (interactive placement, dragging, areas)
+  - More effect types powered by map points (steam, lightning, etc.)
+
+## Development
+
+### Building the custom Three.js bundle
+
+This repo uses an esbuild step to generate a custom Three.js bundle used by Foundry:
+
+```text
+npm install
+npm run build:tsl
+```
+
+That produces:
+
+```text
+scripts/vendor/three/three.custom.js
+```
+
+## Troubleshooting
+
+- **Nothing renders / black screen**
+  - Check the browser console for capability errors. The module requires WebGL.
+
+- **Effects look like they do nothing**
+  - Many effects default to subtle settings (some are intentionally `0` intensity until enabled).
+
+- **My masks aren’t detected**
+  - Ensure the mask files are in the same directory as the background.
+  - Ensure the base filename matches exactly and the suffix is correct.
+
+## License
+
+See `LICENSE`.

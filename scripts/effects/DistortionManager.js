@@ -128,15 +128,19 @@ export const DistortionNoise = {
    */
   waterRipple: `
     vec2 waterDistortion(vec2 uv, float time, float intensity, float frequency, float speed) {
-      // Concentric ripple pattern
-      float d = length(uv - 0.5) * frequency;
-      float ripple = sin(d * 10.0 - time * speed * 3.0) * exp(-d * 0.5);
-      
-      // Add some noise variation
-      float noise = snoise(uv * frequency + time * speed * 0.2);
-      
-      vec2 dir = normalize(uv - 0.5 + 0.001);
-      return dir * (ripple + noise * 0.3) * intensity;
+      // Tileable-ish ripples: avoid any UV-center falloff so the effect works
+      // anywhere on the map and is driven only by the water mask.
+      vec2 p = uv * frequency;
+      float t = time * speed;
+
+      float w1 = sin((p.x + t) * 6.2831853);
+      float w2 = sin((p.y - t * 0.9) * 6.2831853 * 1.37);
+      float w3 = sin((p.x + p.y + t * 0.6) * 6.2831853 * 0.73);
+      float n = snoise(p * 1.5 + vec2(t * 0.15, -t * 0.12));
+
+      // Convert scalar field to 2D offset. Keep it cheap and stable.
+      vec2 offset = vec2(w1 + 0.35 * w3 + 0.45 * n, w2 - 0.35 * w3 + 0.45 * n);
+      return offset * intensity;
     }
   `,
 
@@ -283,6 +287,11 @@ export class DistortionManager extends EffectBase {
     
     // Create final apply pass material (applies distortion to scene)
     this._createApplyMaterial();
+
+    // Initialize apply material resolution
+    if (this.applyMaterial?.uniforms?.uResolution) {
+      this.applyMaterial.uniforms.uResolution.value.set(width, height);
+    }
     
     log.info('DistortionManager initialized');
   }
@@ -423,6 +432,7 @@ export class DistortionManager extends EffectBase {
         // Heat distortion source
         tHeatMask: { value: null },
         uHeatEnabled: { value: 0.0 },
+        uHeatMaskFlipY: { value: 1.0 },
         uHeatIntensity: { value: 0.015 },
         uHeatFrequency: { value: 8.0 },
         uHeatSpeed: { value: 1.0 },
@@ -466,6 +476,7 @@ export class DistortionManager extends EffectBase {
         // Heat source
         uniform sampler2D tHeatMask;
         uniform float uHeatEnabled;
+        uniform float uHeatMaskFlipY;
         uniform float uHeatIntensity;
         uniform float uHeatFrequency;
         uniform float uHeatSpeed;
@@ -522,6 +533,7 @@ export class DistortionManager extends EffectBase {
         void main() {
           vec2 totalOffset = vec2(0.0);
           float totalMask = 0.0;
+          float waterOnlyMask = 0.0;
 
           // Derive stable world-space coordinates (Foundry coords, then scene UV)
           vec2 foundryPos = screenUvToFoundry(vUv);
@@ -536,7 +548,8 @@ export class DistortionManager extends EffectBase {
           
           // Heat distortion
           if (uHeatEnabled > 0.5) {
-            vec2 heatUv = vec2(sceneUv.x, 1.0 - sceneUv.y);
+            float heatY = (uHeatMaskFlipY > 0.5) ? (1.0 - sceneUv.y) : sceneUv.y;
+            vec2 heatUv = vec2(sceneUv.x, heatY);
             float heatMask = texture2D(tHeatMask, heatUv).r * sceneInBounds;
             if (heatMask > 0.01) {
               // Use heatUv for noise coords so the pattern stays pinned to the map
@@ -549,12 +562,14 @@ export class DistortionManager extends EffectBase {
           
           // Water distortion (future)
           if (uWaterEnabled > 0.5) {
-            float waterMask = texture2D(tWaterMask, vUv).r;
-            if (waterMask > 0.01) {
-              vec2 waterOffset = waterDistortion(vUv, uTime, uWaterIntensity, uWaterFrequency, uWaterSpeed);
-              totalOffset += waterOffset * waterMask;
-              totalMask = max(totalMask, waterMask);
-            }
+            vec2 waterUv = vec2(sceneUv.x, sceneUv.y);
+            float waterMask = texture2D(tWaterMask, waterUv).r * sceneInBounds;
+            // Use waterUv for noise coords so ripples stay pinned to the map
+            // and aligned to the mask's UV convention.
+            vec2 waterOffset = waterDistortion(waterUv, uTime, uWaterIntensity, uWaterFrequency, uWaterSpeed);
+            totalOffset += waterOffset * waterMask;
+            totalMask = max(totalMask, waterMask);
+            waterOnlyMask = max(waterOnlyMask, waterMask);
           }
           
           // Apply roof masking if needed (distortion only under roofs)
@@ -568,8 +583,11 @@ export class DistortionManager extends EffectBase {
           // Apply global intensity
           totalOffset *= uGlobalIntensity;
           
-          // Output: RG = offset, B = total mask, A = 1.0
-          gl_FragColor = vec4(totalOffset * 0.5 + 0.5, totalMask, 1.0);
+          // Output:
+          // - RG = offset encoded to 0..1
+          // - B  = max(total distortion mask)
+          // - A  = water-only mask (for chromatic refraction in apply pass)
+          gl_FragColor = vec4(totalOffset * 0.5 + 0.5, totalMask, waterOnlyMask);
         }
       `,
       depthWrite: false,
@@ -596,8 +614,47 @@ export class DistortionManager extends EffectBase {
       uniforms: {
         tScene: { value: null },
         tDistortion: { value: null },
+        tWaterMask: { value: null },
+        uWaterMaskTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
+        tOutdoorsMask: { value: null },
+        tCloudShadow: { value: null },
+        tWindowLight: { value: null },
+        uResolution: { value: new THREE.Vector2(1, 1) },
+        uTime: { value: 0.0 },
+
+        // Camera/view mapping (mirrors composite shader)
+        uViewBounds: { value: new THREE.Vector4(0.0, 0.0, 1.0, 1.0) },
+        uSceneDimensions: { value: new THREE.Vector2(1.0, 1.0) },
+        uSceneRect: { value: new THREE.Vector4(0.0, 0.0, 1.0, 1.0) },
+        uHasSceneRect: { value: 0.0 },
         uDebugMode: { value: 0.0 },
-        uDebugShowMask: { value: 0.0 }
+        uDebugShowMask: { value: 0.0 },
+
+        // Water-only chromatic refraction (RGB split)
+        uWaterChromaEnabled: { value: 0.0 },
+        uWaterChroma: { value: 0.0 },
+        uWaterChromaMaxPixels: { value: 1.5 },
+
+        // Water tint/absorption (depth-based, uses water mask as depth)
+        uWaterTintEnabled: { value: 0.0 },
+        uWaterTintColor: { value: new THREE.Color(0x1a4d7a) },
+        uWaterTintStrength: { value: 0.65 },
+        uWaterDepthPower: { value: 1.4 },
+
+        // Caustics (shallow-water highlights)
+        uWaterCausticsEnabled: { value: 0.0 },
+        uHasWaterMask: { value: 0.0 },
+        uHasOutdoorsMask: { value: 0.0 },
+        uHasCloudShadow: { value: 0.0 },
+        uHasWindowLight: { value: 0.0 },
+        uWaterCausticsIntensity: { value: 0.35 },
+        uWaterCausticsScale: { value: 10.0 },
+        uWaterCausticsSpeed: { value: 0.35 },
+        uWaterCausticsSharpness: { value: 3.0 },
+        uWaterCausticsEdgeLo: { value: 0.05 },
+        uWaterCausticsEdgeHi: { value: 0.55 },
+        uWaterCausticsEdgeBlurTexels: { value: 6.0 },
+        uWaterCausticsDebug: { value: 0.0 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -609,9 +666,118 @@ export class DistortionManager extends EffectBase {
       fragmentShader: `
         uniform sampler2D tScene;
         uniform sampler2D tDistortion;
+        uniform sampler2D tWaterMask;
+        uniform vec2 uWaterMaskTexelSize;
+        uniform sampler2D tOutdoorsMask;
+        uniform sampler2D tCloudShadow;
+        uniform sampler2D tWindowLight;
+        uniform vec2 uResolution;
+        uniform float uTime;
+
+        uniform vec4 uViewBounds;
+        uniform vec2 uSceneDimensions;
+        uniform vec4 uSceneRect;
+        uniform float uHasSceneRect;
         uniform float uDebugMode;
         uniform float uDebugShowMask;
+
+        uniform float uWaterChromaEnabled;
+        uniform float uWaterChroma;
+        uniform float uWaterChromaMaxPixels;
+
+        uniform float uWaterTintEnabled;
+        uniform vec3 uWaterTintColor;
+        uniform float uWaterTintStrength;
+        uniform float uWaterDepthPower;
+
+        uniform float uWaterCausticsEnabled;
+        uniform float uHasWaterMask;
+        uniform float uHasOutdoorsMask;
+        uniform float uHasCloudShadow;
+        uniform float uHasWindowLight;
+        uniform float uWaterCausticsIntensity;
+        uniform float uWaterCausticsScale;
+        uniform float uWaterCausticsSpeed;
+        uniform float uWaterCausticsSharpness;
+        uniform float uWaterCausticsEdgeLo;
+        uniform float uWaterCausticsEdgeHi;
+        uniform float uWaterCausticsEdgeBlurTexels;
+        uniform float uWaterCausticsDebug;
         varying vec2 vUv;
+
+        ${DistortionNoise.simplex2D}
+        ${DistortionNoise.fbm}
+
+        vec2 screenUvToFoundry(vec2 screenUv) {
+          float threeX = mix(uViewBounds.x, uViewBounds.z, screenUv.x);
+          float threeY = mix(uViewBounds.y, uViewBounds.w, screenUv.y);
+          float foundryX = threeX;
+          float foundryY = uSceneDimensions.y - threeY;
+          return vec2(foundryX, foundryY);
+        }
+
+        vec2 foundryToSceneUv(vec2 foundryPos) {
+          vec2 sceneOrigin = uSceneRect.xy;
+          vec2 sceneSize = uSceneRect.zw;
+          return (foundryPos - sceneOrigin) / sceneSize;
+        }
+
+        float inUnitSquare(vec2 uv) {
+          vec2 a = step(vec2(0.0), uv);
+          vec2 b = step(uv, vec2(1.0));
+          return a.x * a.y * b.x * b.y;
+        }
+
+        vec2 safeClampUv(vec2 uv) {
+          return clamp(uv, vec2(0.001), vec2(0.999));
+        }
+
+        float causticsPattern(vec2 sceneUv, float time, float scale, float speed, float sharpness) {
+          vec2 p = sceneUv * scale;
+          float t = time * speed;
+          float n1 = fbm(p + vec2(t * 0.12, -t * 0.09), 4, 2.0, 0.5);
+          float n2 = fbm(p * 1.7 + vec2(-t * 0.08, t * 0.11), 3, 2.1, 0.55);
+          // fbm() returns roughly [-1..1]. Remap to [0..1] before shaping, otherwise
+          // high thresholds will only trigger as rare "flashes".
+          float n = 0.6 * n1 + 0.4 * n2;
+          float nn = clamp(0.5 + 0.5 * n, 0.0, 1.0);
+
+          // Ridged transform: produces thin, caustic-like filaments instead of broad blobs.
+          float ridge = 1.0 - abs(2.0 * nn - 1.0);
+
+          float s = max(0.1, sharpness);
+          float w = 0.18 / (1.0 + s * 0.65);
+          float c = smoothstep(1.0 - w, 1.0, ridge);
+          return c;
+        }
+
+        float shorelineFactor(sampler2D tex, vec2 uv) {
+          vec2 duvDx = dFdx(uv);
+          vec2 duvDy = dFdy(uv);
+          float wx1 = texture2D(tex, safeClampUv(uv + duvDx)).r;
+          float wx2 = texture2D(tex, safeClampUv(uv - duvDx)).r;
+          float wy1 = texture2D(tex, safeClampUv(uv + duvDy)).r;
+          float wy2 = texture2D(tex, safeClampUv(uv - duvDy)).r;
+          float grad = abs(wx1 - wx2) + abs(wy1 - wy2);
+          return clamp(grad * 4.0, 0.0, 1.0);
+        }
+
+        float blur13Tap(sampler2D tex, vec2 uv, vec2 stepUv) {
+          float c = texture2D(tex, safeClampUv(uv)).r;
+          float n = texture2D(tex, safeClampUv(uv + vec2(0.0, stepUv.y))).r;
+          float s = texture2D(tex, safeClampUv(uv - vec2(0.0, stepUv.y))).r;
+          float e = texture2D(tex, safeClampUv(uv + vec2(stepUv.x, 0.0))).r;
+          float w = texture2D(tex, safeClampUv(uv - vec2(stepUv.x, 0.0))).r;
+          float ne = texture2D(tex, safeClampUv(uv + vec2(stepUv.x, stepUv.y))).r;
+          float nw = texture2D(tex, safeClampUv(uv + vec2(-stepUv.x, stepUv.y))).r;
+          float se = texture2D(tex, safeClampUv(uv + vec2(stepUv.x, -stepUv.y))).r;
+          float sw = texture2D(tex, safeClampUv(uv + vec2(-stepUv.x, -stepUv.y))).r;
+          float n2 = texture2D(tex, safeClampUv(uv + vec2(0.0, stepUv.y * 2.0))).r;
+          float s2 = texture2D(tex, safeClampUv(uv - vec2(0.0, stepUv.y * 2.0))).r;
+          float e2 = texture2D(tex, safeClampUv(uv + vec2(stepUv.x * 2.0, 0.0))).r;
+          float w2 = texture2D(tex, safeClampUv(uv - vec2(stepUv.x * 2.0, 0.0))).r;
+          return (c * 4.0 + (n + s + e + w) * 2.0 + (ne + nw + se + sw) + (n2 + s2 + e2 + w2)) / 20.0;
+        }
         
         void main() {
           vec4 distortionSample = texture2D(tDistortion, vUv);
@@ -619,14 +785,136 @@ export class DistortionManager extends EffectBase {
           // Decode offset from 0-1 range back to -0.5 to 0.5
           vec2 offset = (distortionSample.rg - 0.5) * 2.0;
           float mask = distortionSample.b;
+          float waterMask = distortionSample.a;
           
           // Apply distortion
-          vec2 distortedUv = vUv + offset;
-          
-          // Clamp to prevent sampling outside texture
-          distortedUv = clamp(distortedUv, vec2(0.001), vec2(0.999));
+          vec2 distortedUv = safeClampUv(vUv + offset);
           
           vec4 sceneColor = texture2D(tScene, distortedUv);
+
+          // Water chromatic refraction (RGB split)
+          // Uses the distortion direction as the dispersion axis and clamps the maximum
+          // per-channel shift in pixels to avoid harsh/nausating separation.
+          if (uWaterChromaEnabled > 0.5 && waterMask > 0.001 && uWaterChroma > 0.0) {
+            vec2 texelSize = 1.0 / max(uResolution, vec2(1.0));
+            float maxOffsetUv = uWaterChromaMaxPixels * max(texelSize.x, texelSize.y);
+
+            float offLen = length(offset);
+            vec2 dir = offLen > 1e-6 ? (offset / offLen) : vec2(0.0, 0.0);
+
+            // Scale by water mask so dispersion fades out at edges.
+            float chroma = clamp(uWaterChroma * waterMask, 0.0, 1.0);
+            float shift = min(offLen * chroma, maxOffsetUv);
+            vec2 chromaOffset = dir * shift;
+
+            vec2 uvR = safeClampUv(distortedUv + chromaOffset);
+            vec2 uvG = distortedUv;
+            vec2 uvB = safeClampUv(distortedUv - chromaOffset);
+
+            float r = texture2D(tScene, uvR).r;
+            float g = texture2D(tScene, uvG).g;
+            float b = texture2D(tScene, uvB).b;
+
+            sceneColor.rgb = vec3(r, g, b);
+          }
+
+          // Water depth-based tint/absorption + caustics (pinned to map via sceneUv)
+          if ((uWaterTintEnabled > 0.5 || uWaterCausticsEnabled > 0.5 || uWaterCausticsDebug > 0.5) && uHasWaterMask > 0.5) {
+            vec2 foundryPos = screenUvToFoundry(vUv);
+            vec2 sceneUv = vUv;
+            float sceneInBounds = 1.0;
+            if (uHasSceneRect > 0.5) {
+              sceneUv = foundryToSceneUv(foundryPos);
+              sceneInBounds = inUnitSquare(sceneUv);
+              sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
+            }
+
+            float rawDepth = clamp(waterMask, 0.0, 1.0);
+            float shore = 0.0;
+            float blurredDepth = rawDepth;
+            float outdoorStrength = 1.0;
+            if (uHasWaterMask > 0.5) {
+              rawDepth = texture2D(tWaterMask, sceneUv).r * sceneInBounds;
+              shore = shorelineFactor(tWaterMask, sceneUv) * sceneInBounds;
+
+              // Soft edge sampling using a tiny blur kernel in UV space. This avoids
+              // hard caustics cutoffs when the source mask is binary.
+              float blurTexels = clamp(uWaterCausticsEdgeBlurTexels, 0.0, 64.0);
+              vec2 stepUv = max(uWaterMaskTexelSize, vec2(1.0 / 4096.0)) * blurTexels;
+              blurredDepth = blur13Tap(tWaterMask, sceneUv, stepUv) * sceneInBounds;
+
+              if (uHasOutdoorsMask > 0.5) {
+                outdoorStrength = texture2D(tOutdoorsMask, sceneUv).r;
+              }
+            }
+
+            // Debug override: show mask + shoreline so we can verify mapping/uniforms
+            if (uWaterCausticsDebug > 0.5) {
+              // R = sampled water mask, G = shoreline factor, B = composite alpha
+              sceneColor.rgb = vec3(rawDepth, shore, waterMask);
+              gl_FragColor = sceneColor;
+              return;
+            }
+
+            float depth = clamp(rawDepth, 0.0, 1.0);
+            depth = pow(depth, max(0.05, uWaterDepthPower));
+
+            if (uWaterTintEnabled > 0.5) {
+              float tintAmt = clamp(depth * uWaterTintStrength, 0.0, 1.0);
+              vec3 base = sceneColor.rgb;
+              vec3 tinted = mix(base, uWaterTintColor, tintAmt);
+              float darken = 1.0 - 0.35 * tintAmt;
+              sceneColor.rgb = tinted * darken;
+            }
+
+            if (uWaterCausticsEnabled > 0.5) {
+              float shallow = pow(1.0 - depth, 1.1);
+              // If the water mask is mostly binary (depth ~ 1.0 everywhere),
+              // shallow will be ~0. In that case, still allow caustics across the
+              // water surface with a shoreline boost.
+              float baseCoverage = 0.22;
+              float shoreBoost = clamp(shore, 0.0, 1.0);
+              float coverage = max(shallow, mix(baseCoverage, 1.0, shoreBoost));
+
+              // Softened edge falloff (prevents hard caustics border at water edges)
+              float edgeLo = clamp(uWaterCausticsEdgeLo, 0.0, 1.0);
+              float edgeHi = clamp(uWaterCausticsEdgeHi, 0.0, 1.0);
+              float lo = min(edgeLo, edgeHi - 0.001);
+              float hi = max(edgeHi, lo + 0.001);
+              float edge = smoothstep(lo, hi, clamp(blurredDepth, 0.0, 1.0));
+
+              // Lighting gating:
+              // - Outdoors: suppressed by cloud shadows (cloudShadow=1 lit, 0 shadowed)
+              // - Indoors: only where window light is bright (windowLight alpha)
+              float outdoor = clamp(outdoorStrength, 0.0, 1.0);
+              float indoor = 1.0 - outdoor;
+
+              float cloudLit = 1.0;
+              if (uHasCloudShadow > 0.5 && uHasSceneRect > 0.5) {
+                cloudLit = texture2D(tCloudShadow, sceneUv).r;
+              }
+
+              float windowBright = 0.0;
+              if (uHasWindowLight > 0.5) {
+                // WindowLightEffect light target stores brightness in alpha.
+                windowBright = texture2D(tWindowLight, vUv).a;
+                windowBright = smoothstep(0.05, 0.25, windowBright);
+              }
+
+              float lightGate = max(outdoor * cloudLit, indoor * windowBright);
+
+              // Dual-layer caustics: a soft base + sharp detail
+              float cSharp = causticsPattern(sceneUv, uTime, uWaterCausticsScale, uWaterCausticsSpeed, uWaterCausticsSharpness);
+              float cSoft = causticsPattern(sceneUv, uTime * 0.85, uWaterCausticsScale * 0.55, uWaterCausticsSpeed * 0.65, max(0.1, uWaterCausticsSharpness * 0.35));
+              float c = clamp(0.65 * cSoft + 0.95 * cSharp, 0.0, 1.0);
+
+              float causticsAmt = uWaterCausticsIntensity * coverage;
+              causticsAmt *= edge * lightGate;
+              vec3 causticsColor = mix(vec3(1.0, 1.0, 0.85), uWaterTintColor, 0.15);
+              vec3 add = causticsColor * c * causticsAmt;
+              sceneColor.rgb += add * 1.35;
+            }
+          }
           
           // Debug visualization
           if (uDebugMode > 0.5) {
@@ -819,10 +1107,15 @@ export class DistortionManager extends EffectBase {
     if (!this.enabled) return;
     
     const u = this.compositeMaterial.uniforms;
+    const au = this.applyMaterial?.uniforms;
     
     // Update time
     u.uTime.value = timeInfo.elapsed;
     u.uGlobalIntensity.value = this.params.globalIntensity;
+
+    if (au) {
+      au.uTime.value = timeInfo.elapsed;
+    }
 
     // Update view mapping (screen UV -> Three world -> Foundry world -> scene UV)
     try {
@@ -831,6 +1124,10 @@ export class DistortionManager extends EffectBase {
       // Full canvas dimensions (Foundry coords, including padding)
       if (d && typeof d.width === 'number' && typeof d.height === 'number') {
         u.uSceneDimensions.value.set(d.width, d.height);
+
+        if (au && au.uSceneDimensions) {
+          au.uSceneDimensions.value.set(d.width, d.height);
+        }
       }
 
       // Compute view bounds by intersecting camera frustum with ground plane at groundZ
@@ -838,6 +1135,10 @@ export class DistortionManager extends EffectBase {
       const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
       if (camera) {
         this._updateViewBoundsFromCamera(camera, groundZ, u.uViewBounds.value);
+
+        if (au && au.uViewBounds) {
+          au.uViewBounds.value.copy(u.uViewBounds.value);
+        }
       }
 
       // Prefer canvas.dimensions.sceneRect (used elsewhere in this codebase)
@@ -845,12 +1146,25 @@ export class DistortionManager extends EffectBase {
       if (sceneRect && typeof sceneRect.x === 'number' && typeof sceneRect.y === 'number') {
         u.uSceneRect.value.set(sceneRect.x, sceneRect.y, sceneRect.width || 1, sceneRect.height || 1);
         u.uHasSceneRect.value = 1.0;
+
+        if (au && au.uSceneRect && au.uHasSceneRect) {
+          au.uSceneRect.value.copy(u.uSceneRect.value);
+          au.uHasSceneRect.value = 1.0;
+        }
       } else {
         u.uHasSceneRect.value = 0.0;
+
+        if (au && au.uHasSceneRect) {
+          au.uHasSceneRect.value = 0.0;
+        }
       }
     } catch (_) {
       // If anything goes wrong, fall back to screen-space behavior
       u.uHasSceneRect.value = 0.0;
+
+      if (au && au.uHasSceneRect) {
+        au.uHasSceneRect.value = 0.0;
+      }
     }
     
     // Update per-source uniforms
@@ -858,6 +1172,7 @@ export class DistortionManager extends EffectBase {
     if (heatSource && heatSource.enabled && heatSource.mask) {
       u.uHeatEnabled.value = 1.0;
       u.tHeatMask.value = heatSource.mask;
+      u.uHeatMaskFlipY.value = heatSource.mask.flipY ? 1.0 : 0.0;
       u.uHeatIntensity.value = heatSource.params.intensity;
       u.uHeatFrequency.value = heatSource.params.frequency;
       u.uHeatSpeed.value = heatSource.params.speed;
@@ -875,19 +1190,153 @@ export class DistortionManager extends EffectBase {
     } else {
       u.uWaterEnabled.value = 0.0;
     }
+
+    // Water chromatic refraction (apply pass)
+    if (au) {
+      // Provide the actual water mask to the apply pass so caustics can derive
+      // shoreline/edge factors even when the composite alpha is saturated.
+      if (waterSource && waterSource.enabled && waterSource.mask) {
+        if (au.tWaterMask) au.tWaterMask.value = waterSource.mask;
+        if (au.uHasWaterMask) au.uHasWaterMask.value = 1.0;
+
+        if (au.uWaterMaskTexelSize) {
+          const img = waterSource.mask.image;
+          const w = img && img.width ? img.width : 2048;
+          const h = img && img.height ? img.height : 2048;
+          au.uWaterMaskTexelSize.value.set(1 / w, 1 / h);
+        }
+      } else {
+        if (au.tWaterMask) au.tWaterMask.value = null;
+        if (au.uHasWaterMask) au.uHasWaterMask.value = 0.0;
+
+        if (au.uWaterMaskTexelSize) {
+          au.uWaterMaskTexelSize.value.set(1 / 2048, 1 / 2048);
+        }
+      }
+
+      const chromaEnabled = !!(waterSource && waterSource.enabled && waterSource.mask && waterSource.params?.chromaEnabled);
+      au.uWaterChromaEnabled.value = chromaEnabled ? 1.0 : 0.0;
+      au.uWaterChroma.value = Number.isFinite(waterSource?.params?.chroma) ? waterSource.params.chroma : 0.0;
+      au.uWaterChromaMaxPixels.value = Number.isFinite(waterSource?.params?.chromaMaxPixels) ? waterSource.params.chromaMaxPixels : 1.5;
+
+      // Water depth-based tint
+      const tintEnabled = !!(waterSource && waterSource.enabled && waterSource.mask && waterSource.params?.tintEnabled);
+      au.uWaterTintEnabled.value = tintEnabled ? 1.0 : 0.0;
+      if (au.uWaterTintColor && waterSource?.params?.tintColor) {
+        const c = waterSource.params.tintColor;
+        if (typeof c === 'string') {
+          au.uWaterTintColor.value.set(c);
+        } else if (typeof c.r === 'number' && typeof c.g === 'number' && typeof c.b === 'number') {
+          au.uWaterTintColor.value.setRGB(c.r, c.g, c.b);
+        }
+      }
+      au.uWaterTintStrength.value = Number.isFinite(waterSource?.params?.tintStrength) ? waterSource.params.tintStrength : 0.65;
+      au.uWaterDepthPower.value = Number.isFinite(waterSource?.params?.depthPower) ? waterSource.params.depthPower : 1.4;
+
+      // Caustics
+      const causticsEnabled = !!(waterSource && waterSource.enabled && waterSource.mask && waterSource.params?.causticsEnabled);
+      au.uWaterCausticsEnabled.value = causticsEnabled ? 1.0 : 0.0;
+      au.uWaterCausticsIntensity.value = Number.isFinite(waterSource?.params?.causticsIntensity) ? waterSource.params.causticsIntensity : 0.35;
+      au.uWaterCausticsScale.value = Number.isFinite(waterSource?.params?.causticsScale) ? waterSource.params.causticsScale : 10.0;
+      au.uWaterCausticsSpeed.value = Number.isFinite(waterSource?.params?.causticsSpeed) ? waterSource.params.causticsSpeed : 0.35;
+      au.uWaterCausticsSharpness.value = Number.isFinite(waterSource?.params?.causticsSharpness) ? waterSource.params.causticsSharpness : 3.0;
+      if (au.uWaterCausticsEdgeLo) au.uWaterCausticsEdgeLo.value = Number.isFinite(waterSource?.params?.causticsEdgeLo) ? waterSource.params.causticsEdgeLo : 0.05;
+      if (au.uWaterCausticsEdgeHi) au.uWaterCausticsEdgeHi.value = Number.isFinite(waterSource?.params?.causticsEdgeHi) ? waterSource.params.causticsEdgeHi : 0.55;
+      if (au.uWaterCausticsEdgeBlurTexels) au.uWaterCausticsEdgeBlurTexels.value = Number.isFinite(waterSource?.params?.causticsEdgeBlurTexels) ? waterSource.params.causticsEdgeBlurTexels : 6.0;
+
+      // Environment/light maps for caustics gating
+      // Outdoors mask (0=indoors/covered, 1=outdoors)
+      try {
+        const mm = window.MapShine?.maskManager;
+        const outdoorsTex = mm ? mm.getTexture('outdoors.scene') : null;
+        if (au.tOutdoorsMask) au.tOutdoorsMask.value = outdoorsTex;
+        if (au.uHasOutdoorsMask) au.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
+
+        if (!outdoorsTex) {
+          const wle = window.MapShine?.windowLightEffect;
+          const cloud = window.MapShine?.cloudEffect;
+          const fallback = wle?.outdoorsMask || cloud?.outdoorsMask || null;
+          if (au.tOutdoorsMask) au.tOutdoorsMask.value = fallback;
+          if (au.uHasOutdoorsMask) au.uHasOutdoorsMask.value = fallback ? 1.0 : 0.0;
+        }
+      } catch (e) {
+        if (au.tOutdoorsMask) au.tOutdoorsMask.value = null;
+        if (au.uHasOutdoorsMask) au.uHasOutdoorsMask.value = 0.0;
+      }
+
+      // Cloud shadows (CloudEffect cloudShadowTarget: 1 lit, 0 shadowed; indoors forced to 1)
+      try {
+        const mm = window.MapShine?.maskManager;
+        const cloudShadowTex = mm ? mm.getTexture('cloudShadow.screen') : null;
+        if (au.tCloudShadow) au.tCloudShadow.value = cloudShadowTex;
+        if (au.uHasCloudShadow) au.uHasCloudShadow.value = cloudShadowTex ? 1.0 : 0.0;
+
+        if (!cloudShadowTex) {
+          const cloud = window.MapShine?.cloudEffect;
+          const fallback = (cloud && cloud.enabled && cloud.cloudShadowTarget?.texture)
+            ? cloud.cloudShadowTarget.texture
+            : null;
+          if (au.tCloudShadow) au.tCloudShadow.value = fallback;
+          if (au.uHasCloudShadow) au.uHasCloudShadow.value = fallback ? 1.0 : 0.0;
+        }
+      } catch (e) {
+        if (au.tCloudShadow) au.tCloudShadow.value = null;
+        if (au.uHasCloudShadow) au.uHasCloudShadow.value = 0.0;
+      }
+
+      // Window light brightness (WindowLightEffect light target alpha)
+      try {
+        const wle = window.MapShine?.windowLightEffect;
+        let windowLightTex = null;
+
+        const mm = window.MapShine?.maskManager;
+        const mmWindowLightTex = mm ? mm.getTexture('windowLight.screen') : null;
+        if (mmWindowLightTex) {
+          windowLightTex = mmWindowLightTex;
+        }
+
+        if (wle && typeof wle.getLightTexture === 'function') {
+          // Keep the light target up to date if caustics are enabled.
+          if (causticsEnabled && typeof wle.renderLightPass === 'function' && this.renderer) {
+            wle.renderLightPass(this.renderer);
+          }
+          if (!windowLightTex) {
+            windowLightTex = wle.getLightTexture();
+          }
+        }
+        if (au.tWindowLight) au.tWindowLight.value = windowLightTex;
+        if (au.uHasWindowLight) au.uHasWindowLight.value = windowLightTex ? 1.0 : 0.0;
+      } catch (e) {
+        if (au.tWindowLight) au.tWindowLight.value = null;
+        if (au.uHasWindowLight) au.uHasWindowLight.value = 0.0;
+      }
+
+      if (au.uWaterCausticsDebug) {
+        const dbg = !!(waterSource && waterSource.enabled && waterSource.mask && waterSource.params?.causticsDebug);
+        au.uWaterCausticsDebug.value = dbg ? 1.0 : 0.0;
+      }
+    }
     
-    // Update roof alpha from LightingEffect if available
-    const lightingEffect = window.MapShine?.lightingEffect;
-    if (lightingEffect?.roofAlphaTarget) {
-      u.tRoofAlpha.value = lightingEffect.roofAlphaTarget.texture;
+    const mm = window.MapShine?.maskManager;
+    const roofAlphaTex = mm ? mm.getTexture('roofAlpha.screen') : null;
+    if (roofAlphaTex) {
+      u.tRoofAlpha.value = roofAlphaTex;
       u.uHasRoofAlpha.value = 1.0;
     } else {
-      u.uHasRoofAlpha.value = 0.0;
+      const lightingEffect = window.MapShine?.lightingEffect;
+      if (lightingEffect?.roofAlphaTarget) {
+        u.tRoofAlpha.value = lightingEffect.roofAlphaTarget.texture;
+        u.uHasRoofAlpha.value = 1.0;
+      } else {
+        u.uHasRoofAlpha.value = 0.0;
+      }
     }
     
     // Update apply material debug flags
-    this.applyMaterial.uniforms.uDebugMode.value = this.params.debugMode ? 1.0 : 0.0;
-    this.applyMaterial.uniforms.uDebugShowMask.value = this.params.debugShowMask ? 1.0 : 0.0;
+    if (au) {
+      au.uDebugMode.value = this.params.debugMode ? 1.0 : 0.0;
+      au.uDebugShowMask.value = this.params.debugShowMask ? 1.0 : 0.0;
+    }
   }
 
   /**
@@ -1043,6 +1492,10 @@ export class DistortionManager extends EffectBase {
     
     if (this.compositeMaterial) {
       this.compositeMaterial.uniforms.uResolution.value.set(width, height);
+    }
+
+    if (this.applyMaterial?.uniforms?.uResolution) {
+      this.applyMaterial.uniforms.uResolution.value.set(width, height);
     }
   }
 

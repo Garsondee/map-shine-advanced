@@ -25,7 +25,7 @@ const EFFECT_MASKS = {
   structural: { suffix: '_Structural', required: false, description: 'Structural (legacy window) mask' },
   bush: { suffix: '_Bush', required: false, description: 'Animated bush texture (RGBA with transparency)' },
   tree: { suffix: '_Tree', required: false, description: 'Animated tree texture (high canopy)' },
-  // water: { suffix: '_Water', required: false, description: 'Water surface mask' },
+  water: { suffix: '_Water', required: false, description: 'Water depth mask (data)' },
   // emissive: { suffix: '_Emissive', required: false, description: 'Self-illumination mask' }
 };
 
@@ -97,7 +97,7 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
           // - Data textures (normal, roughness) should remain Linear (no gamma)
           // - Color textures (windows, fire, outdoors, etc.) should be sRGB
           // This fixes the contrast/darkness mismatch with Foundry PIXI rendering
-          const isDataTexture = ['normal', 'roughness'].includes(maskId);
+          const isDataTexture = ['normal', 'roughness', 'water'].includes(maskId);
           if (THREE.SRGBColorSpace && !isDataTexture) {
             maskTexture.colorSpace = THREE.SRGBColorSpace;
           }

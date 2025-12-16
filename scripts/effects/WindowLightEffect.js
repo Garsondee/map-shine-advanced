@@ -47,6 +47,8 @@ export class WindowLightEffect extends EffectBase {
     /** @type {THREE.ShaderMaterial|null} */
     this.lightMaterial = null; // Material for light-only pass
 
+    this._publishedWindowLightTex = null;
+
     this.params = {
       // Status
       textureStatus: 'Searching...',
@@ -613,7 +615,7 @@ export class WindowLightEffect extends EffectBase {
         if (uHasCloudShadowMap > 0.5) {
           // Cloud density is rendered in SCREEN SPACE, so we need screen UVs.
           vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
-          float localCloudDensity = 1.0 - texture2D(uCloudShadowMap, screenUV).r;
+          float localCloudDensity = texture2D(uCloudShadowMap, screenUV).r;
 
 
           // Clamp and apply a gamma-style curve so you can bias towards
@@ -953,6 +955,26 @@ export class WindowLightEffect extends EffectBase {
     renderer.clear();
     renderer.render(this.lightScene, this.camera);
     renderer.setRenderTarget(prevTarget);
+
+    try {
+      const mm = window.MapShine?.maskManager;
+      if (mm) {
+        const tex = this.lightTarget?.texture;
+        if (tex && tex !== this._publishedWindowLightTex) {
+          this._publishedWindowLightTex = tex;
+          mm.setTexture('windowLight.screen', tex, {
+            space: 'screenUv',
+            source: 'renderTarget',
+            channels: 'a',
+            uvFlipY: false,
+            lifecycle: 'dynamicPerFrame',
+            width: this.lightTarget?.width ?? null,
+            height: this.lightTarget?.height ?? null
+          });
+        }
+      }
+    } catch (e) {
+    }
   }
 
   /**

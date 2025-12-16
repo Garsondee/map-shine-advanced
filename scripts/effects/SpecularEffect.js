@@ -1097,15 +1097,27 @@ export class SpecularEffect extends EffectBase {
         renderer.getDrawingBufferSize(this._tempScreenSize);
         this.material.uniforms.uScreenSize.value.set(this._tempScreenSize.x, this._tempScreenSize.y);
 
-        const cloud = window.MapShine?.cloudEffect;
-        const tex = cloud?.cloudShadowTarget?.texture || null;
-        const hasCloud = !!(cloud && cloud.enabled && tex);
+        const mm = window.MapShine?.maskManager;
+        const tex = mm ? mm.getTexture('cloudShadow.screen') : null;
+        let hasCloud = !!tex;
+
+        if (!tex) {
+          const cloud = window.MapShine?.cloudEffect;
+          const fallbackTex = cloud?.cloudShadowTarget?.texture || null;
+          hasCloud = !!(cloud && cloud.enabled && fallbackTex);
+          if (this.material.uniforms.uCloudShadowMap) {
+            this.material.uniforms.uCloudShadowMap.value = hasCloud ? fallbackTex : null;
+          }
+          if (this.material.uniforms.uHasCloudShadowMap) {
+            this.material.uniforms.uHasCloudShadowMap.value = hasCloud;
+          }
+        }
 
         if (this.material.uniforms.uHasCloudShadowMap) {
           this.material.uniforms.uHasCloudShadowMap.value = hasCloud;
         }
         if (this.material.uniforms.uCloudShadowMap) {
-          this.material.uniforms.uCloudShadowMap.value = hasCloud ? tex : null;
+          this.material.uniforms.uCloudShadowMap.value = hasCloud ? (tex || this.material.uniforms.uCloudShadowMap.value) : null;
         }
 
         if (this.material.uniforms.uRoofMap && this.material.uniforms.uRoofMaskEnabled && this.material.uniforms.uSceneBounds) {

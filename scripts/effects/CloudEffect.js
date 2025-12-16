@@ -49,6 +49,9 @@ export class CloudEffect extends EffectBase {
     /** @type {THREE.WebGLRenderTarget|null} */
     this.cloudTopTarget = null;
 
+    this._publishedCloudShadowTex = null;
+    this._publishedCloudDensityTex = null;
+
     /** @type {THREE.ShaderMaterial|null} */
     this.cloudTopMaterial = null;
 
@@ -1548,6 +1551,40 @@ export class CloudEffect extends EffectBase {
       renderer.setClearColor(0x000000, 0); // Transparent background
       renderer.clear();
       renderer.render(this.quadScene, this.quadCamera);
+    }
+
+    try {
+      const mm = window.MapShine?.maskManager;
+      if (mm) {
+        const shadowTex = this.cloudShadowTarget?.texture;
+        if (shadowTex && shadowTex !== this._publishedCloudShadowTex) {
+          this._publishedCloudShadowTex = shadowTex;
+          mm.setTexture('cloudShadow.screen', shadowTex, {
+            space: 'screenUv',
+            source: 'renderTarget',
+            channels: 'r',
+            uvFlipY: false,
+            lifecycle: 'dynamicPerFrame',
+            width: this.cloudShadowTarget?.width ?? null,
+            height: this.cloudShadowTarget?.height ?? null
+          });
+        }
+
+        const densityTex = this.cloudDensityTarget?.texture;
+        if (densityTex && densityTex !== this._publishedCloudDensityTex) {
+          this._publishedCloudDensityTex = densityTex;
+          mm.setTexture('cloudDensity.screen', densityTex, {
+            space: 'screenUv',
+            source: 'renderTarget',
+            channels: 'r',
+            uvFlipY: false,
+            lifecycle: 'dynamicPerFrame',
+            width: this.cloudDensityTarget?.width ?? null,
+            height: this.cloudDensityTarget?.height ?? null
+          });
+        }
+      }
+    } catch (e) {
     }
 
     // Restore previous render target

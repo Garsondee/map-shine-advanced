@@ -1499,12 +1499,20 @@ _createSnowTexture() {
     let screenWidth = 1920;
     let screenHeight = 1080;
     try {
-      const le = window.MapShine?.lightingEffect;
-      if (le && le.roofAlphaTarget && le.roofAlphaTarget.texture) {
-        roofAlphaTexture = le.roofAlphaTarget.texture;
-        // Get screen size from the render target dimensions
-        screenWidth = le.roofAlphaTarget.width || 1920;
-        screenHeight = le.roofAlphaTarget.height || 1080;
+      const mm = window.MapShine?.maskManager;
+      const rec = mm ? mm.getRecord('roofAlpha.screen') : null;
+      if (rec && rec.texture) {
+        roofAlphaTexture = rec.texture;
+        screenWidth = rec.width || 1920;
+        screenHeight = rec.height || 1080;
+      } else {
+        const le = window.MapShine?.lightingEffect;
+        if (le && le.roofAlphaTarget && le.roofAlphaTarget.texture) {
+          roofAlphaTexture = le.roofAlphaTarget.texture;
+          // Get screen size from the render target dimensions
+          screenWidth = le.roofAlphaTarget.width || 1920;
+          screenHeight = le.roofAlphaTarget.height || 1080;
+        }
       }
     } catch (e) {
       // LightingEffect not available

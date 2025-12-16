@@ -80,6 +80,9 @@ export class LightingEffect extends EffectBase {
 
     /** @type {THREE.Mesh|null} */
     this._baseMesh = null;
+
+    this._publishedRoofAlphaTex = null;
+    this._publishedOutdoorsTex = null;
   }
 
   /**
@@ -531,14 +534,14 @@ export class LightingEffect extends EffectBase {
           if (uHasCloudShadowMap > 0.5) {
             // Cloud density is rendered in SCREEN SPACE, convert clip coords to screen UV
             vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
-            float localCloudDensity = 1.0 - texture2D(uCloudShadowMap, screenUV).r;
+            float localCloudDensity = texture2D(uCloudShadowMap, screenUV).r;
 
             // Apply gamma-style curve so you can bias towards thin wisps or thick cores
             float d = clamp(localCloudDensity, 0.0, 1.0);
             d = pow(d, max(uCloudDensityCurve, 0.001));
 
             // Convert density -> local shadow factor in [0,1], where 1 = fully lit, 0 = fully shadowed
-            float localShadowFactor = 1.0 - d;
+            float localShadowFactor = d;
 
             // Blend local shadow with global factor; uCloudLocalInfluence in [0,3]
             // controls how strongly local structure modulates the global overcast level.
@@ -638,6 +641,26 @@ export class LightingEffect extends EffectBase {
         }
       }
     });
+  }
+
+  getEffectiveDarkness() {
+    let d = this.params?.darknessLevel;
+    try {
+      const env = canvas?.environment;
+      if (env && typeof env.darknessLevel === 'number') {
+        d = env.darknessLevel;
+      }
+    } catch (e) {
+    }
+
+    d = (typeof d === 'number' && isFinite(d)) ? d : 0.0;
+    const scale = (typeof this.params?.darknessEffect === 'number' && isFinite(this.params.darknessEffect))
+      ? this.params.darknessEffect
+      : 1.0;
+
+    const eff = Math.max(0.0, Math.min(1.0, d * scale));
+    this._effectiveDarkness = eff;
+    return eff;
   }
 
   update(timeInfo) {
@@ -844,76 +867,6 @@ export class LightingEffect extends EffectBase {
     }
   }
 
-  /**
-   * Get effective zoom level from camera.
-   * Works with FOV-based zoom (reads sceneComposer.currentZoom),
-   * OrthographicCamera (uses camera.zoom), or legacy PerspectiveCamera.
-   * @returns {number} Zoom level (1.0 = default)
-   * @private
-   */
-  _getEffectiveZoom() {
-    // Prefer sceneComposer.currentZoom (FOV-based zoom system)
-    const sceneComposer = window.MapShine?.sceneComposer;
-    if (sceneComposer?.currentZoom !== undefined) {
-      return sceneComposer.currentZoom;
-    }
-    
-    if (!this.mainCamera) return 1.0;
-    
-    // OrthographicCamera: zoom is a direct property
-    if (this.mainCamera.isOrthographicCamera) {
-      return this.mainCamera.zoom;
-    }
-    
-    // PerspectiveCamera legacy fallback: calculate from Z position
-    const baseDist = 10000.0;
-    const dist = this.mainCamera.position.z;
-    return (dist > 0.1) ? (baseDist / dist) : 1.0;
-  }
-
-  getEffectiveDarkness() {
-    let darkness = 0.0;
-    try {
-      const effects = canvas?.effects;
-      const getDarknessLevel = effects && typeof effects.getDarknessLevel === 'function'
-        ? effects.getDarknessLevel.bind(effects)
-        : null;
-
-      if (getDarknessLevel) {
-        const cam = window.MapShine?.unifiedCameraController;
-        const x = (cam?.state && typeof cam.state.x === 'number') ? cam.state.x : canvas?.stage?.pivot?.x;
-        const y = (cam?.state && typeof cam.state.y === 'number') ? cam.state.y : canvas?.stage?.pivot?.y;
-        if (typeof x === 'number' && typeof y === 'number') {
-          darkness = getDarknessLevel({ x, y, elevation: 0 });
-        }
-      } else if (typeof this.params.darknessLevel === 'number') {
-        darkness = this.params.darknessLevel;
-      }
-
-      // Baseline compression so that raw darkness 1.0 is not fully black.
-      // With baseScale = 0.75 and darknessEffect = 1.0, raw 1.0 -> effective 0.75.
-      const baseScale = 0.75;
-      const userScale = (typeof this.params.darknessEffect === 'number')
-        ? this.params.darknessEffect
-        : 1.0;
-      darkness *= baseScale * userScale;
-      const THREE = window.THREE;
-      if (THREE && THREE.MathUtils) {
-        darkness = THREE.MathUtils.clamp(darkness, 0.0, 1.0);
-      } else {
-        darkness = Math.max(0, Math.min(1, darkness));
-      }
-    } catch (e) {
-      darkness = 0.0;
-    }
-
-    this._effectiveDarkness = darkness;
-    if (window.MapShine) {
-      window.MapShine.effectiveDarkness = darkness;
-    }
-    return darkness;
-  }
-
   render(renderer, scene, camera) {
     if (DISABLE_LIGHTING_EFFECT) return;
     if (!this.enabled) return;
@@ -962,6 +915,40 @@ export class LightingEffect extends EffectBase {
       } else if (this.outdoorsTarget.width !== size.x || this.outdoorsTarget.height !== size.y) {
         this.outdoorsTarget.setSize(size.x, size.y);
       }
+    }
+
+    try {
+      const mm = window.MapShine?.maskManager;
+      if (mm) {
+        const roofTex = this.roofAlphaTarget?.texture;
+        if (roofTex && roofTex !== this._publishedRoofAlphaTex) {
+          this._publishedRoofAlphaTex = roofTex;
+          mm.setTexture('roofAlpha.screen', roofTex, {
+            space: 'screenUv',
+            source: 'renderTarget',
+            channels: 'a',
+            uvFlipY: false,
+            lifecycle: 'dynamicPerFrame',
+            width: this.roofAlphaTarget?.width ?? null,
+            height: this.roofAlphaTarget?.height ?? null
+          });
+        }
+
+        const outdoorsTex = this.outdoorsTarget?.texture;
+        if (outdoorsTex && outdoorsTex !== this._publishedOutdoorsTex) {
+          this._publishedOutdoorsTex = outdoorsTex;
+          mm.setTexture('outdoors.screen', outdoorsTex, {
+            space: 'screenUv',
+            source: 'renderTarget',
+            channels: 'r',
+            uvFlipY: false,
+            lifecycle: 'dynamicPerFrame',
+            width: this.outdoorsTarget?.width ?? null,
+            height: this.outdoorsTarget?.height ?? null
+          });
+        }
+      }
+    } catch (e) {
     }
 
     // 0. Render Roof Alpha Mask (overhead tiles only)

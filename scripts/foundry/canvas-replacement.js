@@ -26,35 +26,13 @@ import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
 import { BuildingShadowsEffect } from '../effects/BuildingShadowsEffect.js';
 import { CloudEffect } from '../effects/CloudEffect.js';
 import { DistortionManager } from '../effects/DistortionManager.js';
+import { WaterEffect } from '../effects/WaterEffect.js';
+import { MaskManager } from '../masks/MaskManager.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { FireSparksEffect } from '../particles/FireSparksEffect.js';
 import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { DustMotesEffect } from '../particles/DustMotesEffect.js';
 import { WorldSpaceFogEffect } from '../effects/WorldSpaceFogEffect.js';
-// NOTE: VisionManager and FogManager are no longer used.
-// WorldSpaceFogEffect renders fog as a world-space plane mesh, eliminating coordinate conversion issues.
-import {
-  TimeOfDayEffect,
-  WeatherEffect,
-  HeatDistortionEffect,
-  LightningEffect,
-  AmbientEffect,
-  WaterEffect,
-  FoamEffect,
-  GroundGlowEffect,
-  BiofilmEffect,
-  CanopyDistortionEffect,
-  PhysicsRopeEffect,
-  BushTreeEffect,
-  OverheadEffect,
-  SteamEffect,
-  MetallicGlintsEffect,
-  PostProcessingEffect,
-  SceneTransitionsEffect,
-  PauseEffect,
-  LoadingScreenEffect,
-  MapPointsEffect
-} from '../effects/stubs/StubEffects.js';
 import { RenderLoop } from '../core/render-loop.js';
 import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { TokenManager } from '../scene/token-manager.js';
@@ -426,7 +404,8 @@ async function onCanvasReady(canvas) {
   log.info(`Initializing Map Shine canvas for scene: ${scene.name}`);
 
   try {
-    loadingOverlay.showBlack(`Loading ${scene.name}…`);
+    loadingOverlay.showBlack(`Loading ${scene?.name || 'scene'}…`);
+    loadingOverlay.setProgress(0.05);
   } catch (e) {
     log.debug('Loading overlay not available:', e);
   }
@@ -463,6 +442,14 @@ function onCanvasTearDown(canvas) {
     }
   }
 
+  if (window.MapShine?.maskManager && typeof window.MapShine.maskManager.dispose === 'function') {
+    try {
+      window.MapShine.maskManager.dispose();
+    } catch (e) {
+      log.warn('Failed to dispose MaskManager:', e);
+    }
+  }
+
   // Cleanup three.js canvas
   destroyThreeCanvas();
   
@@ -470,6 +457,7 @@ function onCanvasTearDown(canvas) {
   if (window.MapShine) {
     window.MapShine.sceneComposer = null;
     window.MapShine.effectComposer = null;
+    window.MapShine.maskManager = null;
     window.MapShine.tokenManager = null;
     window.MapShine.tileManager = null;
     window.MapShine.wallManager = null;
@@ -658,6 +646,26 @@ async function createThreeCanvas(scene) {
     // CRITICAL: Expose sceneComposer early so effects can access groundZ during initialization
     mapShine.sceneComposer = sceneComposer;
 
+    mapShine.maskManager = new MaskManager();
+    mapShine.maskManager.setRenderer(renderer);
+    try {
+      const mm = mapShine.maskManager;
+      if (mm && bundle?.masks && Array.isArray(bundle.masks)) {
+        for (const m of bundle.masks) {
+          if (!m || !m.id || !m.texture) continue;
+          mm.setTexture(`${m.id}.scene`, m.texture, {
+            space: 'sceneUv',
+            source: 'assetMask',
+            colorSpace: m.texture.colorSpace ?? null,
+            uvFlipY: m.texture.flipY ?? null,
+            lifecycle: 'staticPerScene'
+          });
+        }
+      }
+    } catch (e) {
+      log.warn('Failed to initialize MaskManager registry for bundle masks:', e);
+    }
+
     // Wire the _Outdoors (roof/indoor) mask into the WeatherController so
     // precipitation effects (rain, snow, puddles) can respect covered areas.
     try {
@@ -741,6 +749,10 @@ async function createThreeCanvas(scene) {
     const prismEffect = new PrismEffect();
     await effectComposer.registerEffect(prismEffect);
 
+    // Step 3.5.05: Register Water Effect (MVP: drives DistortionManager using _Water)
+    const waterEffect = new WaterEffect();
+    await effectComposer.registerEffect(waterEffect);
+
     // Step 3.5.1: Register World-Space Fog Effect (Fog of War)
     // WorldSpaceFogEffect renders fog as a plane mesh in the Three.js scene.
     // This eliminates coordinate conversion issues between screen-space and world-space.
@@ -795,6 +807,7 @@ async function createThreeCanvas(scene) {
     specularEffect.setBaseMesh(basePlane, bundle);
     iridescenceEffect.setBaseMesh(basePlane, bundle);
     prismEffect.setBaseMesh(basePlane, bundle);
+    waterEffect.setBaseMesh(basePlane, bundle);
     windowLightEffect.setBaseMesh(basePlane, bundle);
     windowLightEffect.createLightTarget();
     bushEffect.setBaseMesh(basePlane, bundle);
@@ -959,6 +972,7 @@ async function createThreeCanvas(scene) {
     mapShine.bushEffect = bushEffect;
     mapShine.treeEffect = treeEffect;
     mapShine.prismEffect = prismEffect;
+    mapShine.waterEffect = waterEffect;
     mapShine.lightingEffect = lightingEffect;
     mapShine.overheadShadowsEffect = overheadShadowsEffect;
     mapShine.buildingShadowsEffect = buildingShadowsEffect;
@@ -1034,6 +1048,7 @@ async function createThreeCanvas(scene) {
         cloudEffect,
         bushEffect,
         treeEffect,
+        waterEffect,
         fogEffect,
         distortionManager
       );
@@ -1090,11 +1105,12 @@ async function createThreeCanvas(scene) {
  * @param {CloudEffect} cloudEffect - The procedural cloud shadows effect instance
  * @param {BushEffect} bushEffect - The animated bushes surface effect instance
  * @param {TreeEffect} treeEffect - The animated trees surface effect instance
+ * @param {WaterEffect} waterEffect - The water effect instance
  * @param {FogEffect} fogEffect - The fog of war effect instance
  * @param {DistortionManager} distortionManager - The centralized distortion manager
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, smellyFliesEffect, dustMotesEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, bushEffect, treeEffect, fogEffect, distortionManager) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, smellyFliesEffect, dustMotesEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, bushEffect, treeEffect, waterEffect, fogEffect, distortionManager) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -1708,6 +1724,28 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     );
   }
 
+  // --- Water Settings ---
+  if (waterEffect) {
+    const waterSchema = WaterEffect.getControlSchema();
+
+    const onWaterUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        waterEffect.enabled = !!value;
+        log.debug(`Water effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (waterEffect.params && Object.prototype.hasOwnProperty.call(waterEffect.params, paramId)) {
+        waterEffect.params[paramId] = value;
+      }
+    };
+
+    uiManager.registerEffect(
+      'water',
+      'Water',
+      waterSchema,
+      onWaterUpdate,
+      'water'
+    );
+  }
+
   // --- Smelly Flies Settings ---
   if (smellyFliesEffect) {
     const fliesSchema = SmellyFliesEffect.getControlSchema();
@@ -1905,75 +1943,6 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       'global'
     );
     log.info('ASCII effect wired to UI');
-  }
-
-  // --- Stub Effects ---
-  // UI-only placeholders for planned effects; these do not yet affect rendering
-  const stubEffectDefs = [
-    // Atmospheric & Environmental
-    { id: 'time-of-day',        name: 'Time of Day',          Class: TimeOfDayEffect,         categoryId: 'atmospheric' },
-    // Weather System replaced by active controller
-    { id: 'heat-distortion',    name: 'Heat Distortion',      Class: HeatDistortionEffect,    categoryId: 'atmospheric' },
-    { id: 'lightning',          name: 'Lightning',            Class: LightningEffect,         categoryId: 'atmospheric' },
-    { id: 'ambient',            name: 'Ambient Lighting',     Class: AmbientEffect,           categoryId: 'atmospheric' },
-
-    // Surface & Material
-    { id: 'water',              name: 'Water',                Class: WaterEffect,             categoryId: 'water' },
-    { id: 'foam',               name: 'Foam',                 Class: FoamEffect,              categoryId: 'water' },
-    { id: 'ground-glow',        name: 'Ground Glow',          Class: GroundGlowEffect,        categoryId: 'surface' },
-    { id: 'biofilm',            name: 'Water Splashes',       Class: BiofilmEffect,           categoryId: 'water' },
-
-    // Object & Structure
-    { id: 'canopy-distortion',  name: 'Canopy Distortion',    Class: CanopyDistortionEffect,  categoryId: 'structure' },
-    { id: 'physics-rope',       name: 'Physics Rope',         Class: PhysicsRopeEffect,       categoryId: 'structure' },
-    { id: 'bush-tree',          name: 'Bush & Tree',          Class: BushTreeEffect,          categoryId: 'structure' },
-    { id: 'overhead',           name: 'Overhead Effect',      Class: OverheadEffect,          categoryId: 'structure' },
-
-    // Particle Systems
-    { id: 'steam',              name: 'Steam',                Class: SteamEffect,             categoryId: 'particle' },
-    { id: 'metallic-glints',    name: 'Metallic Glints',      Class: MetallicGlintsEffect,    categoryId: 'particle' },
-
-    // Global & UI Effects
-    // { id: 'post-processing',    name: 'Post-Processing',      Class: PostProcessingEffect,    categoryId: 'global' }, // Replaced by real ColorCorrectionEffect
-    { id: 'scene-transitions',  name: 'Scene Transitions',    Class: SceneTransitionsEffect,  categoryId: 'global' },
-    { id: 'pause',              name: 'Pause Effect',         Class: PauseEffect,             categoryId: 'global' },
-    { id: 'loading-screen',     name: 'Loading Screen',       Class: LoadingScreenEffect,     categoryId: 'global' },
-    { id: 'map-points',         name: 'Map Points',           Class: MapPointsEffect,         categoryId: 'global' }
-  ];
-
-  // Simple storage for stub parameters (for future wiring to real effects)
-  if (!window.MapShine.stubEffects) {
-    window.MapShine.stubEffects = {};
-  }
-
-  for (const def of stubEffectDefs) {
-    const { id, name, Class, categoryId } = def;
-
-    // Avoid duplicate registration if initializeUI is called multiple times
-    if (window.MapShine.stubEffects[id]?.registered) continue;
-
-    const schema = Class.getControlSchema();
-
-    // Local state container for this effect
-    window.MapShine.stubEffects[id] = window.MapShine.stubEffects[id] || {
-      params: {},
-      enabled: false,
-      registered: false
-    };
-
-    const onStubUpdate = (effectId, paramId, value) => {
-      const entry = window.MapShine.stubEffects[effectId];
-      if (!entry) return;
-
-      if (paramId === 'enabled' || paramId === 'masterEnabled') {
-        entry.enabled = value;
-      } else {
-        entry.params[paramId] = value;
-      }
-    };
-
-    uiManager.registerEffect(id, name, schema, onStubUpdate, categoryId);
-    window.MapShine.stubEffects[id].registered = true;
   }
 
   // Expose UI manager globally for debugging

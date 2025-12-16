@@ -1084,18 +1084,30 @@ export class FireSparksEffect extends EffectBase {
       return;
     }
 
-    const THREE = window.THREE;
-    
-    // Create a boosted version of the fire mask for heat distortion
-    // This expands the effective area beyond the actual fire pixels
-    const boostedMask = this._createBoostedHeatMask(fireMaskTexture);
-    if (!boostedMask) return;
+    let heatMask = null;
+    try {
+      const mm = window.MapShine?.maskManager;
+      if (mm && typeof mm.getOrCreateBlurredMask === 'function') {
+        heatMask = mm.getOrCreateBlurredMask('fire.heatExpanded.scene', 'fire.scene', {
+          boost: this.params.heatDistortionBoost,
+          threshold: 0.05,
+          blurRadius: this.params.heatDistortionBlurRadius,
+          blurPasses: this.params.heatDistortionBlurPasses,
+          scale: 1.0
+        });
+      }
+    } catch (e) {
+    }
 
-    // Store reference for cleanup
-    this._heatDistortionMask = boostedMask;
+    if (!heatMask) {
+      heatMask = this._createBoostedHeatMask(fireMaskTexture);
+      if (!heatMask) return;
+      this._heatDistortionMask = heatMask;
+    } else {
+      this._heatDistortionMask = null;
+    }
 
-    // Register with DistortionManager (DistortionLayer imported at top of file)
-    distortionManager.registerSource('heat', DistortionLayer.ABOVE_GROUND, boostedMask, {
+    distortionManager.registerSource('heat', DistortionLayer.ABOVE_GROUND, heatMask, {
       intensity: this.params.heatDistortionIntensity,
       frequency: this.params.heatDistortionFrequency,
       speed: this.params.heatDistortionSpeed,

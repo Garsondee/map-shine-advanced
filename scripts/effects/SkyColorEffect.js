@@ -270,12 +270,19 @@ export class SkyColorEffect extends EffectBase {
       u.uContrast.value = contrast;
       u.uIntensity.value = this.params.intensity;
 
-      const le = window.MapShine?.lightingEffect;
-      if (le && le.outdoorsTarget) {
-        u.tOutdoorsMask.value = le.outdoorsTarget.texture;
+      const mm = window.MapShine?.maskManager;
+      const outdoorsTex = mm ? mm.getTexture('outdoors.screen') : null;
+      if (outdoorsTex) {
+        u.tOutdoorsMask.value = outdoorsTex;
         u.uHasOutdoorsMask.value = 1.0;
       } else {
-        u.uHasOutdoorsMask.value = 0.0;
+        const le = window.MapShine?.lightingEffect;
+        if (le && le.outdoorsTarget) {
+          u.tOutdoorsMask.value = le.outdoorsTarget.texture;
+          u.uHasOutdoorsMask.value = 1.0;
+        } else {
+          u.uHasOutdoorsMask.value = 0.0;
+        }
       }
     } catch (e) {
       if (Math.random() < 0.01) {

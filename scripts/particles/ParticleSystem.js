@@ -45,6 +45,11 @@ export class ParticleSystem extends EffectBase {
 
     /** @type {Object} */
     // this.uniforms = ... // Removed legacy uniforms
+
+    this._cullFrustum = null;
+    this._cullProjScreenMatrix = null;
+    this._cullSphere = null;
+    this._cullCenter = null;
   }
 
   /**
@@ -182,8 +187,89 @@ export class ParticleSystem extends EffectBase {
         this.weatherParticles.update(dt, boundsVec4);
       }
 
+      this._applyQuarksCulling();
+
       this.batchRenderer.update(dt); // Quarks expects seconds
     }
+  }
+
+  _applyQuarksCulling() {
+    const THREE = window.THREE;
+    if (!THREE) return;
+    const sceneComposer = window.MapShine?.sceneComposer;
+    const camera = sceneComposer?.camera || this.camera;
+    if (!camera) return;
+    const systemMap = this.batchRenderer?.systemToBatchIndex;
+    if (!systemMap || typeof systemMap.forEach !== 'function') return;
+
+    if (!this._cullFrustum) this._cullFrustum = new THREE.Frustum();
+    if (!this._cullProjScreenMatrix) this._cullProjScreenMatrix = new THREE.Matrix4();
+    if (!this._cullSphere) this._cullSphere = new THREE.Sphere();
+    if (!this._cullCenter) this._cullCenter = new THREE.Vector3();
+
+    if (typeof camera.updateProjectionMatrix === 'function') camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
+    this._cullProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    this._cullFrustum.setFromProjectionMatrix(this._cullProjScreenMatrix);
+    const groundZ = (sceneComposer && typeof sceneComposer.groundZ === 'number') ? sceneComposer.groundZ : null;
+
+    systemMap.forEach((_, ps) => {
+      if (!ps || !ps.emitter) return;
+      const emitter = ps.emitter;
+      const ud = emitter.userData || (emitter.userData = {});
+      if (ud.msAutoCull === false) return;
+
+      const pos = emitter.position;
+      const c = ud.msCullCenter;
+      if (c && typeof c === 'object') {
+        if (typeof c.x === 'number' && typeof c.y === 'number' && typeof c.z === 'number') {
+          this._cullCenter.set(c.x, c.y, c.z);
+        } else if (Array.isArray(c) && c.length >= 3) {
+          this._cullCenter.set(c[0], c[1], c[2]);
+        } else {
+          this._cullCenter.set(pos.x, pos.y, pos.z);
+        }
+      } else {
+        this._cullCenter.set(pos.x, pos.y, pos.z);
+      }
+
+      let radius = 500;
+      const shape = ps.emitterShape;
+      if (shape && typeof shape.width === 'number' && typeof shape.height === 'number') {
+        const w = Math.max(0, shape.width);
+        const h = Math.max(0, shape.height);
+        radius = 0.5 * Math.sqrt(w * w + h * h);
+      }
+
+      if (groundZ !== null) {
+        radius += Math.max(0, Math.abs(this._cullCenter.z - groundZ)) * 0.5;
+      }
+
+      if (typeof ud.msCullRadius === 'number' && Number.isFinite(ud.msCullRadius) && ud.msCullRadius > 0) {
+        radius = ud.msCullRadius;
+      }
+
+      this._cullSphere.center.copy(this._cullCenter);
+      this._cullSphere.radius = radius;
+
+      const visible = this._cullFrustum.intersectsSphere(this._cullSphere);
+      ud._msLastCullVisible = visible;
+      ud._msLastCullRadius = radius;
+      ud._msLastCullCenter = { x: this._cullCenter.x, y: this._cullCenter.y, z: this._cullCenter.z };
+      const wasCulled = !!ud._msCulled;
+      emitter.visible = visible;
+      if (visible) {
+        if (wasCulled) {
+          if (typeof ps.play === 'function') ps.play();
+          ud._msCulled = false;
+        }
+      } else {
+        if (!wasCulled) {
+          if (typeof ps.pause === 'function') ps.pause();
+          ud._msCulled = true;
+        }
+      }
+    });
   }
 
   /**

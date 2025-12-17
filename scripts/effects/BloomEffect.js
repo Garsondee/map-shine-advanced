@@ -36,6 +36,11 @@ export class BloomEffect extends EffectBase {
       blendOpacity: 1.0,
       blendMode: 'add' // 'add', 'screen', 'soft'
     };
+
+    this._tintColorVec = null;
+    this._lastTintR = null;
+    this._lastTintG = null;
+    this._lastTintB = null;
   }
 
   /**
@@ -143,16 +148,25 @@ export class BloomEffect extends EffectBase {
       }
     }
     
-    if (this.pass.compositeMaterial.uniforms['bloomTintColors']) {
-        this.updateTintColor();
+    const tc = p.tintColor;
+    if (tc.r !== this._lastTintR || tc.g !== this._lastTintG || tc.b !== this._lastTintB) {
+      this.updateTintColor();
+      this._lastTintR = tc.r;
+      this._lastTintG = tc.g;
+      this._lastTintB = tc.b;
     }
   }
   
   updateTintColor() {
       if (!this.pass) return;
+
+      const THREE = window.THREE;
+      if (!THREE) return;
+
+      if (!this._tintColorVec) this._tintColorVec = new THREE.Vector3();
       
       // Update all mips with the tint color
-      const color = new THREE.Vector3(
+      const color = this._tintColorVec.set(
           this.params.tintColor.r, 
           this.params.tintColor.g, 
           this.params.tintColor.b

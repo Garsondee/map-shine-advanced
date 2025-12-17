@@ -20,6 +20,7 @@ import { SkyColorEffect } from '../effects/SkyColorEffect.js';
 import { AsciiEffect } from '../effects/AsciiEffect.js';
 import { BloomEffect } from '../effects/BloomEffect.js';
 import { LightingEffect } from '../effects/LightingEffect.js';
+import { LightningEffect } from '../effects/LightningEffect.js';
 import { LensflareEffect } from '../effects/LensflareEffect.js';
 import { PrismEffect } from '../effects/PrismEffect.js';
 import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
@@ -134,6 +135,9 @@ let dropHandler = null;
 
 /** @type {LightingEffect|null} */
 let lightingEffect = null;
+
+/** @type {LightningEffect|null} */
+let lightningEffect = null;
 
 /** @type {WorldSpaceFogEffect|null} */
 let fogEffect = null;
@@ -753,6 +757,9 @@ async function createThreeCanvas(scene) {
       dustMotesEffect.setAssetBundle(bundle);
     }
 
+    lightningEffect = new LightningEffect();
+    await effectComposer.registerEffect(lightningEffect);
+
     // Step 3.5: Register Prism Effect
     const prismEffect = new PrismEffect();
     await effectComposer.registerEffect(prismEffect);
@@ -900,6 +907,11 @@ async function createThreeCanvas(scene) {
       log.info('Map points wired to smelly flies effect');
     }
 
+    if (lightningEffect) {
+      lightningEffect.setMapPointsSources(mapPointsManager);
+      log.info('Map points wired to lightning effect');
+    }
+
     // Step 5: Initialize interaction manager (Selection, Drag/Drop)
     interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager, wallManager, lightIconManager);
     interactionManager.initialize();
@@ -982,20 +994,9 @@ async function createThreeCanvas(scene) {
     mapShine.windowLightEffect = windowLightEffect;
     mapShine.bushEffect = bushEffect;
     mapShine.treeEffect = treeEffect;
-    mapShine.prismEffect = prismEffect;
-    mapShine.waterEffect = waterEffect;
-    mapShine.lightingEffect = lightingEffect;
-    mapShine.overheadShadowsEffect = overheadShadowsEffect;
-    mapShine.buildingShadowsEffect = buildingShadowsEffect;
-    mapShine.cloudEffect = cloudEffect;
-    mapShine.distortionManager = distortionManager;
-    mapShine.bloomEffect = bloomEffect;
-    mapShine.lensflareEffect = lensflareEffect;
-    mapShine.colorCorrectionEffect = colorCorrectionEffect;
-    mapShine.asciiEffect = asciiEffect;
-    mapShine.fireSparksEffect = fireSparksEffect;
     mapShine.smellyFliesEffect = smellyFliesEffect; // Smart particle swarms
     mapShine.dustMotesEffect = dustMotesEffect;
+    mapShine.lightningEffect = lightningEffect;
     mapShine.fogEffect = fogEffect; // Fog of War (world-space plane mesh)
     mapShine.skyColorEffect = skyColorEffect; // NEW: Expose SkyColorEffect
     mapShine.cameraFollower = cameraFollower; // Three.js camera follows PIXI
@@ -1053,6 +1054,7 @@ async function createThreeCanvas(scene) {
         fireSparksEffect,
         smellyFliesEffect,
         dustMotesEffect,
+        lightningEffect,
         windowLightEffect,
         overheadShadowsEffect,
         buildingShadowsEffect,
@@ -1122,7 +1124,7 @@ async function createThreeCanvas(scene) {
  * @param {DistortionManager} distortionManager - The centralized distortion manager
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, smellyFliesEffect, dustMotesEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, bushEffect, treeEffect, waterEffect, fogEffect, distortionManager, maskDebugEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, smellyFliesEffect, dustMotesEffect, lightningEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, bushEffect, treeEffect, waterEffect, fogEffect, distortionManager, maskDebugEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -1713,6 +1715,27 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     );
   }
 
+  if (lightningEffect) {
+    const lightningSchema = LightningEffect.getControlSchema();
+
+    const onLightningUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        lightningEffect.enabled = !!value;
+        log.debug(`Lightning effect ${value ? 'enabled' : 'disabled'}`);
+      } else {
+        lightningEffect.applyParamChange(paramId, value);
+      }
+    };
+
+    uiManager.registerEffect(
+      'lightning',
+      'Lightning (Map Points)',
+      lightningSchema,
+      onLightningUpdate,
+      'particle'
+    );
+  }
+
   // --- Distortion Manager Settings ---
   if (distortionManager) {
     const distortionSchema = DistortionManager.getControlSchema();
@@ -2138,6 +2161,8 @@ function destroyThreeCanvas() {
 
   // Dispose Fog of War (FogEffect is disposed as part of effectComposer)
   fogEffect = null;
+
+  lightningEffect = null;
 
   // Dispose scene composer
   if (sceneComposer) {

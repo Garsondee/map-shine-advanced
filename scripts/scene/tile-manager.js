@@ -45,6 +45,8 @@ export class TileManager {
     
     /** @type {Map<string, {width: number, height: number, data: Uint8ClampedArray}>} */
     this.alphaMaskCache = new Map();
+
+    this._overheadTileIds = new Set();
     
     this.initialized = false;
     this.hooksRegistered = false;
@@ -54,6 +56,9 @@ export class TileManager {
     this._tempDaylight = null;
     this._tempDarkness = null;
     this._tempAmbient = null;
+
+    this._lastTintKey = null;
+    this._tintDirty = true;
     
     // Window light effect reference for overhead tile lighting
     /** @type {WindowLightEffect|null} */
@@ -340,21 +345,36 @@ export class TileManager {
       // Fallback to white if environment lookup fails
     }
 
+    const tr = Math.max(0, Math.min(255, (globalTint.r * 255 + 0.5) | 0));
+    const tg = Math.max(0, Math.min(255, (globalTint.g * 255 + 0.5) | 0));
+    const tb = Math.max(0, Math.min(255, (globalTint.b * 255 + 0.5) | 0));
+    const tintKey = (tr << 16) | (tg << 8) | tb;
+
+    if (this._tintDirty || tintKey !== this._lastTintKey) {
+      this._lastTintKey = tintKey;
+      this._tintDirty = false;
+
+      for (const data of this.tileSprites.values()) {
+        const { sprite } = data;
+        if (!sprite.userData.isOverhead && sprite.material) {
+          sprite.material.color.copy(globalTint);
+        }
+      }
+    }
+
     let anyHoverHidden = false;
 
     // Store global tint for window light application (avoid per-tile cloning)
     this._frameGlobalTint = globalTint;
 
-    for (const data of this.tileSprites.values()) {
+    for (const tileId of this._overheadTileIds) {
+      const data = this.tileSprites.get(tileId);
+      if (!data) continue;
+
       const { sprite, tileDoc, hoverHidden } = data;
-      
-      // Apply global lighting tint to all tiles
       if (sprite.material) {
         sprite.material.color.copy(globalTint);
       }
-
-      // Only process overhead tiles for occlusion
-      if (!sprite.userData.isOverhead) continue;
 
       // Handle Occlusion
       // Default: use configured alpha
@@ -465,9 +485,11 @@ export class TileManager {
 
     // For each overhead tile, calculate the average window light in its area
     // and apply as an additive tint on top of the global darkness tint
-    for (const data of this.tileSprites.values()) {
+    for (const tileId of this._overheadTileIds) {
+      const data = this.tileSprites.get(tileId);
+      if (!data) continue;
+
       const { sprite, tileDoc } = data;
-      if (!sprite.userData.isOverhead) continue;
       overheadCount++;
 
       // Use the frame's global tint as the base (already applied in main loop)
@@ -696,6 +718,7 @@ export class TileManager {
 
     const sprite = new THREE.Sprite(material);
     sprite.name = `Tile_${tileDoc.id}`;
+    sprite.matrixAutoUpdate = false;
     
     // Store Foundry data
     sprite.userData.foundryTileId = tileDoc.id;
@@ -719,6 +742,14 @@ export class TileManager {
       sprite,
       tileDoc
     });
+
+    if (sprite.userData.isOverhead) {
+      this._overheadTileIds.add(tileDoc.id);
+    } else {
+      this._overheadTileIds.delete(tileDoc.id);
+    }
+
+    this._tintDirty = true;
 
     log.debug(`Created tile sprite: ${tileDoc.id}`);
   }
@@ -795,6 +826,8 @@ export class TileManager {
     }
     
     this.tileSprites.delete(tileId);
+    this._overheadTileIds.delete(tileId);
+    this._tintDirty = true;
     log.debug(`Removed tile sprite: ${tileId}`);
   }
 
@@ -816,9 +849,18 @@ export class TileManager {
     
     const foregroundElevation = canvas.scene.foregroundElevation || 0;
     const isOverhead = tileDoc.elevation >= foregroundElevation;
+    const wasOverhead = !!sprite.userData.isOverhead;
     
     // Store overhead status for update loop
     sprite.userData.isOverhead = isOverhead;
+    if (wasOverhead !== isOverhead) {
+      this._tintDirty = true;
+      const tileId = tileDoc?.id;
+      if (tileId) {
+        if (isOverhead) this._overheadTileIds.add(tileId);
+        else this._overheadTileIds.delete(tileId);
+      }
+    }
     
     // Layer Management for Roof Masking
     // We use Layer 20 for overhead tiles so LightingEffect can render a separate
@@ -880,6 +922,7 @@ export class TileManager {
     
     sprite.position.set(centerX, worldY, zPosition);
     sprite.scale.set(width, height, 1);
+    sprite.updateMatrix();
     
     // 3. Rotation
     if (tileDoc.rotation) {
@@ -952,6 +995,7 @@ export class TileManager {
       sprite.material?.dispose();
     }
     this.tileSprites.clear();
+    this._overheadTileIds.clear();
 
     if (clearCache) {
       for (const texture of this.textureCache.values()) {

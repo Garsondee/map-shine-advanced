@@ -359,6 +359,8 @@ export class FireSparksEffect extends EffectBase {
     this.particleSystemRef = null; 
     this.globalSystem = null;
     this.globalEmbers = null;
+    this.globalSystems = [];
+    this.globalEmberSystems = [];
     this._lastAssetBundle = null;
     this._lastMapPointsManager = null;
     this.emberTexture = null;
@@ -850,6 +852,19 @@ export class FireSparksEffect extends EffectBase {
       return;
     }
 
+    const batch = this.particleSystemRef.batchRenderer;
+    for (let i = this.fires.length - 1; i >= 0; i--) {
+      const f = this.fires[i];
+      if (!f || typeof f.id !== 'string') continue;
+      if (!f.id.startsWith('mappoints_')) continue;
+      try {
+        if (batch && f.system) batch.deleteSystem(f.system);
+        if (this.scene && f.system?.emitter) this.scene.remove(f.system.emitter);
+      } catch (e) {
+      }
+      this.fires.splice(i, 1);
+    }
+
     // Get all point groups targeting 'fire' or 'candleFlame'
     const fireGroups = mapPointsManager.getGroupsByEffect('fire');
     const candleGroups = mapPointsManager.getGroupsByEffect('candleFlame');
@@ -861,9 +876,9 @@ export class FireSparksEffect extends EffectBase {
       return;
     }
 
-    // Aggregate all points into arrays for fire and candle separately
-    const firePoints = [];   // Regular fire points
-    const candlePoints = []; // Candle flame points (smaller, gentler)
+    const BUCKET_SIZE = 2000;
+    const fireBuckets = new Map();
+    const candleBuckets = new Map();
     
     const d = canvas?.dimensions;
     const worldHeight = d?.height || 1000;
@@ -873,115 +888,118 @@ export class FireSparksEffect extends EffectBase {
       
       const isCandle = group.effectTarget === 'candleFlame';
       const intensity = group.emission?.intensity ?? 1.0;
-      const targetArray = isCandle ? candlePoints : firePoints;
+      const targetBuckets = isCandle ? candleBuckets : fireBuckets;
       
       for (const point of group.points) {
         // Convert to world coordinates (Foundry Y is inverted)
         const worldX = point.x;
         const worldY = worldHeight - point.y;
         
-        // Pack as [x, y, intensity]
-        targetArray.push(worldX, worldY, intensity);
+        const bx = Math.floor(worldX / BUCKET_SIZE);
+        const by = Math.floor(worldY / BUCKET_SIZE);
+        const key = `${bx},${by}`;
+        let arr = targetBuckets.get(key);
+        if (!arr) {
+          arr = [];
+          targetBuckets.set(key, arr);
+        }
+        arr.push(worldX, worldY, intensity);
       }
     }
 
-    const totalPoints = (firePoints.length + candlePoints.length) / 3;
+    let totalPoints = 0;
+    fireBuckets.forEach((arr) => { totalPoints += arr.length / 3; });
+    candleBuckets.forEach((arr) => { totalPoints += arr.length / 3; });
     log.info(`Aggregating ${totalPoints} map points into combined fire systems`);
 
-    // Create a single fire system for all regular fire points
-    if (firePoints.length > 0) {
-      const firePointsArray = new Float32Array(firePoints);
-      const fireShape = new MultiPointEmitterShape(firePointsArray, this);
-      const pointCount = firePoints.length / 3;
-      
-      // Scale emission rate by number of points
-      const baseRate = this.params.globalFireRate ?? 4.0;
-      const rate = new IntervalValue(
-        baseRate * pointCount * 0.5,
-        baseRate * pointCount * 1.0
-      );
-      
-      const fireSystem = this._createFireSystem({
-        shape: fireShape,
-        rate,
-        size: this.params.fireSize,
-        height: this.params.fireHeight
-      });
-      
-      this.particleSystemRef.batchRenderer.addSystem(fireSystem);
-      this.scene.add(fireSystem.emitter);
-      
-      // Track as a single aggregated fire source
-      this.fires.push({
-        id: 'mappoints_fire_aggregated',
-        system: fireSystem,
-        position: { x: 0, y: 0 }, // Centroid not meaningful for aggregated
-        isCandle: false,
-        pointCount
-      });
-      
-      // Create matching ember system
-      const emberRate = new IntervalValue(
-        (this.params.emberRate ?? 5.0) * pointCount * 0.3,
-        (this.params.emberRate ?? 5.0) * pointCount * 0.6
-      );
-      
-      const emberSystem = this._createEmberSystem({
-        shape: fireShape, // Reuse same shape
-        rate: emberRate,
-        height: this.params.fireHeight
-      });
-      
-      this.particleSystemRef.batchRenderer.addSystem(emberSystem);
-      this.scene.add(emberSystem.emitter);
-      
-      // Track the aggregated ember system as well so it is fully torn down
-      // when the Fire effect is disabled from the UI.
-      this.fires.push({
-        id: 'mappoints_fire_embers_aggregated',
-        system: emberSystem,
-        position: { x: 0, y: 0 },
-        isCandle: false,
-        pointCount,
-        isEmber: true
-      });
+    if (fireBuckets.size > 0) {
+      fireBuckets.forEach((arr, key) => {
+        if (!arr || arr.length < 3) return;
+        const pointsArray = new Float32Array(arr);
+        const shape = new MultiPointEmitterShape(pointsArray, this);
+        const pointCount = arr.length / 3;
 
-      log.info(`Created aggregated fire + ember systems for ${pointCount} fire points`);
+        const baseRate = this.params.globalFireRate ?? 4.0;
+        const rate = new IntervalValue(
+          baseRate * pointCount * 0.5,
+          baseRate * pointCount * 1.0
+        );
+
+        const fireSystem = this._createFireSystem({
+          shape,
+          rate,
+          size: this.params.fireSize,
+          height: this.params.fireHeight
+        });
+
+        batch.addSystem(fireSystem);
+        this.scene.add(fireSystem.emitter);
+
+        this.fires.push({
+          id: `mappoints_fire_${key}`,
+          system: fireSystem,
+          position: { x: 0, y: 0 },
+          isCandle: false,
+          pointCount
+        });
+
+        const emberRate = new IntervalValue(
+          (this.params.emberRate ?? 5.0) * pointCount * 0.3,
+          (this.params.emberRate ?? 5.0) * pointCount * 0.6
+        );
+
+        const emberSystem = this._createEmberSystem({
+          shape,
+          rate: emberRate,
+          height: this.params.fireHeight
+        });
+
+        batch.addSystem(emberSystem);
+        this.scene.add(emberSystem.emitter);
+
+        this.fires.push({
+          id: `mappoints_fire_embers_${key}`,
+          system: emberSystem,
+          position: { x: 0, y: 0 },
+          isCandle: false,
+          pointCount,
+          isEmber: true
+        });
+      });
     }
 
-    // Create a single candle system for all candle points
-    if (candlePoints.length > 0) {
-      const candlePointsArray = new Float32Array(candlePoints);
-      const candleShape = new MultiPointEmitterShape(candlePointsArray, this);
-      const pointCount = candlePoints.length / 3;
-      
-      // Candles are smaller and gentler
-      const scale = 0.3;
-      const baseRate = this.params.globalFireRate ?? 4.0;
-      const rate = new IntervalValue(
-        baseRate * pointCount * 0.3 * scale,
-        baseRate * pointCount * 0.6 * scale
-      );
-      
-      const candleSystem = this._createFireSystem({
-        shape: candleShape,
-        rate,
-        size: this.params.fireSize * scale,
-        height: this.params.fireHeight * scale
+    if (candleBuckets.size > 0) {
+      candleBuckets.forEach((arr, key) => {
+        if (!arr || arr.length < 3) return;
+        const pointsArray = new Float32Array(arr);
+        const shape = new MultiPointEmitterShape(pointsArray, this);
+        const pointCount = arr.length / 3;
+
+        const scale = 0.3;
+        const baseRate = this.params.globalFireRate ?? 4.0;
+        const rate = new IntervalValue(
+          baseRate * pointCount * 0.3 * scale,
+          baseRate * pointCount * 0.6 * scale
+        );
+
+        const candleSystem = this._createFireSystem({
+          shape,
+          rate,
+          size: this.params.fireSize * scale,
+          height: this.params.fireHeight * scale
+        });
+
+        batch.addSystem(candleSystem);
+        this.scene.add(candleSystem.emitter);
+
+        this.fires.push({
+          id: `mappoints_candle_${key}`,
+          system: candleSystem,
+          position: { x: 0, y: 0 },
+          isCandle: true,
+          pointCount
+        });
       });
-      
-      this.particleSystemRef.batchRenderer.addSystem(candleSystem);
-      this.scene.add(candleSystem.emitter);
-      
-      this.fires.push({
-        id: 'mappoints_candle_aggregated',
-        system: candleSystem,
-        position: { x: 0, y: 0 },
-        isCandle: true,
-        pointCount
-      });
-      
-      log.info(`Created aggregated candle system for ${pointCount} candle points`);
     }
   }
 
@@ -1003,6 +1021,29 @@ export class FireSparksEffect extends EffectBase {
       maskTypes: bundle.masks.map(m => m.type)
     });
     if (fireMask && this.particleSystemRef && this.particleSystemRef.batchRenderer) {
+      const batch = this.particleSystemRef.batchRenderer;
+      const scene = this.scene;
+
+      if (batch && this.globalSystem) batch.deleteSystem(this.globalSystem);
+      if (scene && this.globalSystem?.emitter) scene.remove(this.globalSystem.emitter);
+      if (batch && this.globalEmbers) batch.deleteSystem(this.globalEmbers);
+      if (scene && this.globalEmbers?.emitter) scene.remove(this.globalEmbers.emitter);
+      this.globalSystem = null;
+      this.globalEmbers = null;
+
+      if (batch || scene) {
+        for (const sys of this.globalSystems) {
+          if (batch && sys) batch.deleteSystem(sys);
+          if (scene && sys?.emitter) scene.remove(sys.emitter);
+        }
+        for (const sys of this.globalEmberSystems) {
+          if (batch && sys) batch.deleteSystem(sys);
+          if (scene && sys?.emitter) scene.remove(sys.emitter);
+        }
+      }
+      this.globalSystems.length = 0;
+      this.globalEmberSystems.length = 0;
+
       try {
         const d = canvas.dimensions;
         const baseTex = bundle.baseTexture;
@@ -1041,25 +1082,67 @@ export class FireSparksEffect extends EffectBase {
       // Invert Y so that mask v=0 is the **visual top** of the scene and
       // v=1 is the bottom, matching the base plane and token/tile transforms.
       const sy = (d.height || height) - (d.sceneY || 0) - height;
-      const shape = new FireMaskShape(points, width, height, sx, sy, this);
-      this.globalSystem = this._createFireSystem({
-        shape: shape,
-        rate: new IntervalValue(10.0, 20.0), 
-        size: this.params.fireSize,
-        height: this.params.fireHeight
-      });
-      this.particleSystemRef.batchRenderer.addSystem(this.globalSystem);
+      const BUCKET_SIZE = 2000;
+      const buckets = new Map();
+      const totalCount = points.length / 3;
+      for (let i = 0; i < points.length; i += 3) {
+        const u = points[i];
+        const v = points[i + 1];
+        const b = points[i + 2];
+        if (!Number.isFinite(u) || !Number.isFinite(v) || !Number.isFinite(b) || b <= 0) continue;
+        const worldX = sx + u * width;
+        const worldY = sy + (1.0 - v) * height;
+        const bx = Math.floor(worldX / BUCKET_SIZE);
+        const by = Math.floor(worldY / BUCKET_SIZE);
+        const key = `${bx},${by}`;
+        let arr = buckets.get(key);
+        if (!arr) {
+          arr = [];
+          buckets.set(key, arr);
+        }
+        arr.push(u, v, b);
+      }
 
-      this.globalEmbers = this._createEmberSystem({
-        shape: shape,
-        rate: new IntervalValue(5.0 * this.params.emberRate, 10.0 * this.params.emberRate),
-        height: this.params.fireHeight
-      });
-      this.particleSystemRef.batchRenderer.addSystem(this.globalEmbers);
+      buckets.forEach((arr, key) => {
+        if (!arr || arr.length < 3) return;
+        const bucketPoints = new Float32Array(arr);
+        const bucketCount = bucketPoints.length / 3;
+        const weight = totalCount > 0 ? (bucketCount / totalCount) : 1.0;
+        const shape = new FireMaskShape(bucketPoints, width, height, sx, sy, this);
 
-      this.scene.add(this.globalSystem.emitter);
-      this.scene.add(this.globalEmbers.emitter);
-      log.info('Created Global Fire System from mask (' + (points.length/3) + ' points)');
+        const fireSystem = this._createFireSystem({
+          shape: shape,
+          rate: new IntervalValue(10.0 * weight, 20.0 * weight),
+          size: this.params.fireSize,
+          height: this.params.fireHeight
+        });
+        if (fireSystem && fireSystem.userData) {
+          fireSystem.userData._msMaskWeight = weight;
+          fireSystem.userData._msMaskKey = key;
+        }
+        batch.addSystem(fireSystem);
+        if (this.scene) this.scene.add(fireSystem.emitter);
+        this.globalSystems.push(fireSystem);
+
+        const emberSystem = this._createEmberSystem({
+          shape: shape,
+          rate: new IntervalValue(
+            (5.0 * this.params.emberRate) * weight,
+            (10.0 * this.params.emberRate) * weight
+          ),
+          height: this.params.fireHeight
+        });
+        if (emberSystem && emberSystem.userData) {
+          emberSystem.userData._msMaskWeight = weight;
+          emberSystem.userData._msMaskKey = key;
+          emberSystem.userData.isEmber = true;
+        }
+        batch.addSystem(emberSystem);
+        if (this.scene) this.scene.add(emberSystem.emitter);
+        this.globalEmberSystems.push(emberSystem);
+      });
+
+      log.info('Created Global Fire Systems from mask (' + (points.length/3) + ' points, ' + buckets.size + ' buckets)');
 
       // Register heat distortion with DistortionManager if available
       this._registerHeatDistortion(fireMask.texture);
@@ -1388,6 +1471,15 @@ export class FireSparksEffect extends EffectBase {
       turbulence,
       baseCurlStrength: fireCurlStrengthBase.clone()
     };
+
+    if (system.emitter) {
+      system.emitter.userData = system.emitter.userData || {};
+      const b = this._computeCullBoundsForShape(shape, height);
+      if (b) {
+        system.emitter.userData.msCullCenter = b.center;
+        system.emitter.userData.msCullRadius = b.radius;
+      }
+    }
     
     return system;
   }
@@ -1481,7 +1573,77 @@ export class FireSparksEffect extends EffectBase {
       ownerEffect: this
     };
 
+    if (system.emitter) {
+      system.emitter.userData = system.emitter.userData || {};
+      const b = this._computeCullBoundsForShape(shape, height);
+      if (b) {
+        system.emitter.userData.msCullCenter = b.center;
+        system.emitter.userData.msCullRadius = b.radius;
+      }
+    }
+
     return system;
+  }
+
+  _computeCullBoundsForShape(shape, height) {
+    if (!shape) return null;
+
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    if (shape.type === 'multi_point' && shape.points && shape.points.length >= 3) {
+      const pts = shape.points;
+      for (let i = 0; i < pts.length; i += 3) {
+        const x = pts[i];
+        const y = pts[i + 1];
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    } else if (shape.type === 'fire_mask' && shape.points && shape.points.length >= 3) {
+      const pts = shape.points;
+      const w = shape.width;
+      const h = shape.height;
+      const ox = shape.offsetX;
+      const oy = shape.offsetY;
+      if (![w, h, ox, oy].every(Number.isFinite)) return null;
+      for (let i = 0; i < pts.length; i += 3) {
+        const u = pts[i];
+        const v = pts[i + 1];
+        if (!Number.isFinite(u) || !Number.isFinite(v)) continue;
+        const x = ox + u * w;
+        const y = oy + (1.0 - v) * h;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    } else {
+      return null;
+    }
+
+    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+      return null;
+    }
+
+    const cx = (minX + maxX) * 0.5;
+    const cy = (minY + maxY) * 0.5;
+    const dx = Math.max(0, maxX - minX);
+    const dy = Math.max(0, maxY - minY);
+    const r2d = 0.5 * Math.sqrt(dx * dx + dy * dy);
+
+    const sceneComposer = window.MapShine?.sceneComposer;
+    const groundZ = (sceneComposer && typeof sceneComposer.groundZ === 'number') ? sceneComposer.groundZ : 1000;
+    const h = (typeof height === 'number' && Number.isFinite(height)) ? height : 0;
+    const vz = Math.max(200, h * 10);
+    const cz = groundZ + vz * 0.5;
+    const radius = Math.sqrt(r2d * r2d + (vz * 0.5) * (vz * 0.5));
+
+    return { center: { x: cx, y: cy, z: cz }, radius };
   }
   
   /**
@@ -1743,6 +1905,19 @@ export class FireSparksEffect extends EffectBase {
         emission.b = baseRate * 1.2;
       }
     }
+    if (this.globalSystems && this.globalSystems.length) {
+      const baseRate = 200.0 * p.globalFireRate * effectiveTimeScale;
+      for (const sys of this.globalSystems) {
+        if (!sys) continue;
+        const weight = (sys.userData && typeof sys.userData._msMaskWeight === 'number') ? sys.userData._msMaskWeight : 1.0;
+        const emission = sys.emissionOverTime;
+        if (emission && typeof emission.a === 'number') {
+          const r = baseRate * weight;
+          emission.a = r * 0.8;
+          emission.b = r * 1.2;
+        }
+      }
+    }
 
     // 3. Environment & Bounds Logic
     const influence = (p && typeof p.windInfluence === 'number')
@@ -1788,6 +1963,8 @@ export class FireSparksEffect extends EffectBase {
     const systems = [];
     if (this.globalSystem) systems.push(this.globalSystem);
     if (this.globalEmbers) systems.push(this.globalEmbers);
+    if (this.globalSystems && this.globalSystems.length) systems.push(...this.globalSystems);
+    if (this.globalEmberSystems && this.globalEmberSystems.length) systems.push(...this.globalEmberSystems);
     for (const f of this.fires) {
       if (f && f.system) systems.push(f.system);
     }
@@ -2035,6 +2212,19 @@ export class FireSparksEffect extends EffectBase {
     }
     this.globalSystem = null;
     this.globalEmbers = null;
+
+    if (batch || scene) {
+      for (const sys of this.globalSystems) {
+        if (batch && sys) batch.deleteSystem(sys);
+        if (scene && sys?.emitter) scene.remove(sys.emitter);
+      }
+      for (const sys of this.globalEmberSystems) {
+        if (batch && sys) batch.deleteSystem(sys);
+        if (scene && sys?.emitter) scene.remove(sys.emitter);
+      }
+    }
+    this.globalSystems.length = 0;
+    this.globalEmberSystems.length = 0;
 
     // Remove any per-fire systems and lights created via createFire or
     // aggregated map-point paths. We avoid calling removeFire here because

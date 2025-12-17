@@ -613,6 +613,12 @@ export class CloudEffect extends EffectBase {
     this._tempVec2A = new THREE.Vector2();
     this._tempVec2B = new THREE.Vector2();
 
+    this._tintNight = new THREE.Vector3(0.4, 0.45, 0.6);
+    this._tintSunrise = new THREE.Vector3(1.0, 0.7, 0.5);
+    this._tintDay = new THREE.Vector3(1.0, 1.0, 1.0);
+    this._tintSunset = new THREE.Vector3(1.0, 0.6, 0.4);
+    this._tintResult = new THREE.Vector3(1.0, 1.0, 1.0);
+
     // Create quad scene for full-screen passes
     this.quadScene = new THREE.Scene();
     this.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -1158,8 +1164,7 @@ export class CloudEffect extends EffectBase {
    * @private
    */
   _calculateTimeOfDayTint() {
-    const THREE = window.THREE;
-    if (!THREE) return new THREE.Vector3(1, 1, 1);
+    if (!this._tintResult) return null;
 
     let hour = 12.0;
     try {
@@ -1170,42 +1175,24 @@ export class CloudEffect extends EffectBase {
       // Fallback to noon
     }
 
-    // Define color stops
-    const NIGHT = new THREE.Vector3(0.4, 0.45, 0.6);      // Dark blue-gray
-    const SUNRISE = new THREE.Vector3(1.0, 0.7, 0.5);     // Warm orange
-    const DAY = new THREE.Vector3(1.0, 1.0, 1.0);         // Pure white
-    const SUNSET = new THREE.Vector3(1.0, 0.6, 0.4);      // Orange-pink
-
-    // Time ranges
-    // Night: 0-5, 20-24
-    // Sunrise: 5-7
-    // Day: 7-17
-    // Sunset: 17-20
-
-    let tint = DAY.clone();
+    const tint = this._tintResult;
 
     if (hour < 5 || hour >= 21) {
-      // Night
-      tint.copy(NIGHT);
+      tint.copy(this._tintNight);
     } else if (hour < 6) {
-      // Pre-dawn (5-6): Night -> Sunrise
       const t = hour - 5;
-      tint.lerpVectors(NIGHT, SUNRISE, t);
+      tint.lerpVectors(this._tintNight, this._tintSunrise, t);
     } else if (hour < 7) {
-      // Sunrise (6-7): Sunrise -> Day
       const t = hour - 6;
-      tint.lerpVectors(SUNRISE, DAY, t);
+      tint.lerpVectors(this._tintSunrise, this._tintDay, t);
     } else if (hour < 18) {
-      // Day (7-18): Pure white
-      tint.copy(DAY);
+      tint.copy(this._tintDay);
     } else if (hour < 19) {
-      // Pre-sunset (18-19): Day -> Sunset
       const t = hour - 18;
-      tint.lerpVectors(DAY, SUNSET, t);
+      tint.lerpVectors(this._tintDay, this._tintSunset, t);
     } else if (hour < 21) {
-      // Sunset to night (19-21): Sunset -> Night
       const t = (hour - 19) / 2;
-      tint.lerpVectors(SUNSET, NIGHT, t);
+      tint.lerpVectors(this._tintSunset, this._tintNight, t);
     }
 
     return tint;

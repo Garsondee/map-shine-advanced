@@ -1736,6 +1736,89 @@ _createSnowTexture() {
 
     const THREE = window.THREE;
 
+    // Phase 1 (Quarks perf): view-dependent emission bounds.
+    // Reduce spawn area to the camera-visible rectangle (+ margin) instead of the full map.
+    // We keep the _Outdoors mask projection in full-scene coordinates via uSceneBounds.
+    const sceneComposer = window.MapShine?.sceneComposer;
+    const mainCamera = sceneComposer?.camera;
+    if (THREE && sceneComposer && mainCamera) {
+      const zoom = sceneComposer.currentZoom || 1.0;
+      const viewportWidth = sceneComposer.baseViewportWidth || window.innerWidth;
+      const viewportHeight = sceneComposer.baseViewportHeight || window.innerHeight;
+
+      const visibleW = viewportWidth / Math.max(1e-6, zoom);
+      const visibleH = viewportHeight / Math.max(1e-6, zoom);
+
+      const marginScale = 1.2;
+      const desiredW = visibleW * marginScale;
+      const desiredH = visibleH * marginScale;
+
+      // Clamp the view rectangle to the scene rect in *world-space* (Y-up).
+      let sceneX = 0;
+      let sceneY = 0;
+      let sceneW = 0;
+      let sceneH = 0;
+      try {
+        const d = canvas?.dimensions;
+        const rect = d?.sceneRect;
+        const totalH = d?.height ?? 0;
+        if (rect && typeof rect.x === 'number') {
+          sceneX = rect.x;
+          sceneW = rect.width;
+          sceneH = rect.height;
+          sceneY = (totalH > 0) ? (totalH - (rect.y + rect.height)) : rect.y;
+        } else if (d) {
+          sceneX = d.sceneX ?? 0;
+          sceneW = d.sceneWidth ?? d.width ?? 0;
+          sceneH = d.sceneHeight ?? d.height ?? 0;
+          sceneY = (totalH > 0) ? (totalH - ((d.sceneY ?? 0) + sceneH)) : (d.sceneY ?? 0);
+        }
+      } catch (e) {
+        // Fallback: no clamping
+      }
+
+      const camX = mainCamera.position.x;
+      const camY = mainCamera.position.y;
+
+      let minX = camX - desiredW / 2;
+      let maxX = camX + desiredW / 2;
+      let minY = camY - desiredH / 2;
+      let maxY = camY + desiredH / 2;
+
+      if (sceneW > 0 && sceneH > 0) {
+        const sMinX = sceneX;
+        const sMaxX = sceneX + sceneW;
+        const sMinY = sceneY;
+        const sMaxY = sceneY + sceneH;
+
+        minX = Math.max(sMinX, minX);
+        maxX = Math.min(sMaxX, maxX);
+        minY = Math.max(sMinY, minY);
+        maxY = Math.min(sMaxY, maxY);
+      }
+
+      const emitW = Math.max(1, maxX - minX);
+      const emitH = Math.max(1, maxY - minY);
+      const emitCX = (minX + maxX) * 0.5;
+      const emitCY = (minY + maxY) * 0.5;
+
+      if (this.rainSystem?.emitter && this.rainSystem.emitterShape) {
+        const shape = this.rainSystem.emitterShape;
+        if (typeof shape.width === 'number') shape.width = emitW;
+        if (typeof shape.height === 'number') shape.height = emitH;
+        this.rainSystem.emitter.position.x = emitCX;
+        this.rainSystem.emitter.position.y = emitCY;
+      }
+
+      if (this.snowSystem?.emitter && this.snowSystem.emitterShape) {
+        const shape = this.snowSystem.emitterShape;
+        if (typeof shape.width === 'number') shape.width = emitW;
+        if (typeof shape.height === 'number') shape.height = emitH;
+        this.snowSystem.emitter.position.x = emitCX;
+        this.snowSystem.emitter.position.y = emitCY;
+      }
+    }
+
     // Global scene darkness coupling (0 = fully lit, 1 = max darkness).
     // We use this as a scalar on particle brightness/opacity so that
     // weather is not self-illuminated in dark scenes, while still

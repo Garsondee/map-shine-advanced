@@ -49,6 +49,13 @@ export class TokenManager {
     //   easing: string 
     // }>
     this.activeAnimations = new Map();
+
+    this._globalTint = null;
+    this._daylightTint = null;
+    this._darknessTint = null;
+    this._ambientTint = null;
+    this._lastTintKey = null;
+    this._tintDirty = true;
     
     log.debug('TokenManager created');
   }
@@ -111,12 +118,24 @@ export class TokenManager {
         }
         this.activeAnimations.delete(tokenId);
       }
+
+      const spriteData = this.tokenSprites.get(tokenId);
+      const sprite = spriteData?.sprite;
+      if (sprite && sprite.matrixAutoUpdate === false) {
+        sprite.updateMatrix();
+      }
     }
 
     // Apply global lighting tint to tokens based on scene darkness
     const THREE = window.THREE;
     if (THREE) {
-      let globalTint = new THREE.Color(1, 1, 1);
+      if (!this._globalTint) this._globalTint = new THREE.Color(1, 1, 1);
+      if (!this._daylightTint) this._daylightTint = new THREE.Color(1, 1, 1);
+      if (!this._darknessTint) this._darknessTint = new THREE.Color(1, 1, 1);
+      if (!this._ambientTint) this._ambientTint = new THREE.Color(1, 1, 1);
+
+      const globalTint = this._globalTint;
+      globalTint.setRGB(1, 1, 1);
 
       try {
         const scene = canvas?.scene;
@@ -129,20 +148,37 @@ export class TokenManager {
             darkness = le.getEffectiveDarkness();
           }
 
-          const getThreeColor = (src, def) => {
+          const getThreeColor = (src, def, out) => {
             try {
-              if (!src) return new THREE.Color(def);
-              if (src instanceof THREE.Color) return src;
-              if (src.rgb) return new THREE.Color(src.rgb[0], src.rgb[1], src.rgb[2]);
-              if (Array.isArray(src)) return new THREE.Color(src[0], src[1], src[2]);
-              return new THREE.Color(src);
-            } catch (e) { return new THREE.Color(def); }
+              if (!out) out = new THREE.Color(def);
+              if (!src) {
+                out.set(def);
+                return out;
+              }
+              if (src instanceof THREE.Color) {
+                out.copy(src);
+                return out;
+              }
+              if (src.rgb) {
+                out.setRGB(src.rgb[0], src.rgb[1], src.rgb[2]);
+                return out;
+              }
+              if (Array.isArray(src)) {
+                out.setRGB(src[0], src[1], src[2]);
+                return out;
+              }
+              out.set(src);
+              return out;
+            } catch (e) {
+              out.set(def);
+              return out;
+            }
           };
 
-          const daylight = getThreeColor(env?.colors?.ambientDaylight, 0xffffff);
-          const darknessColor = getThreeColor(env?.colors?.ambientDarkness, 0x242448);
+          const daylight = getThreeColor(env?.colors?.ambientDaylight, 0xffffff, this._daylightTint);
+          const darknessColor = getThreeColor(env?.colors?.ambientDarkness, 0x242448, this._darknessTint);
 
-          const ambientTint = daylight.clone().lerp(darknessColor, darkness);
+          const ambientTint = this._ambientTint.copy(daylight).lerp(darknessColor, darkness);
 
           const lightLevel = Math.max(1.0 - darkness, 0.25);
 
@@ -150,6 +186,18 @@ export class TokenManager {
         }
       } catch (e) {
       }
+
+      const tr = Math.max(0, Math.min(255, (globalTint.r * 255 + 0.5) | 0));
+      const tg = Math.max(0, Math.min(255, (globalTint.g * 255 + 0.5) | 0));
+      const tb = Math.max(0, Math.min(255, (globalTint.b * 255 + 0.5) | 0));
+      const tintKey = (tr << 16) | (tg << 8) | tb;
+
+      if (!this._tintDirty && tintKey === this._lastTintKey) {
+        return;
+      }
+
+      this._lastTintKey = tintKey;
+      this._tintDirty = false;
 
       for (const data of this.tokenSprites.values()) {
         const { sprite } = data;
@@ -258,6 +306,7 @@ export class TokenManager {
 
     const sprite = new THREE.Sprite(material);
     sprite.name = `Token_${tokenDoc.id}`;
+    sprite.matrixAutoUpdate = false;
     
     // Store Foundry data in userData
     sprite.userData.foundryTokenId = tokenDoc.id;
@@ -290,6 +339,8 @@ export class TokenManager {
       tokenDoc,
       lastUpdate: Date.now()
     });
+
+    this._tintDirty = true;
 
     log.debug(`Created token sprite: ${tokenDoc.id} at (${tokenDoc.x}, ${tokenDoc.y}, z=${sprite.position.z})`);
   }
@@ -411,6 +462,8 @@ export class TokenManager {
     // Remove from map
     this.tokenSprites.delete(tokenId);
 
+    this._tintDirty = true;
+
     log.debug(`Removed token sprite: ${tokenId}`);
   }
 
@@ -452,6 +505,9 @@ export class TokenManager {
 
     // Handle Scale (usually instant)
     sprite.scale.set(widthPx, heightPx, 1);
+    if (sprite.matrixAutoUpdate === false) {
+      sprite.updateMatrix();
+    }
 
     // Target Rotation (radians)
     let targetRotation = 0;
@@ -489,6 +545,9 @@ export class TokenManager {
           log.debug(`Distance too small (${dist}), snapping`);
           sprite.position.set(centerX, centerY, zPosition);
           if (sprite.material) sprite.material.rotation = targetRotation;
+          if (sprite.matrixAutoUpdate === false) {
+            sprite.updateMatrix();
+          }
           return;
         }
 
@@ -509,6 +568,9 @@ export class TokenManager {
     sprite.position.set(centerX, centerY, zPosition);
     if (sprite.material) {
       sprite.material.rotation = targetRotation;
+    }
+    if (sprite.matrixAutoUpdate === false) {
+      sprite.updateMatrix();
     }
   }
 
@@ -588,6 +650,7 @@ export class TokenManager {
     
     // Reset tint
     sprite.material.color.setHex(0xffffff);
+    this._tintDirty = true;
   }
 
   /**
@@ -638,6 +701,7 @@ export class TokenManager {
     
     const border = new THREE.LineLoop(geometry, material);
     border.name = 'SelectionBorder';
+    border.matrixAutoUpdate = false;
     
     // Scale to match sprite (which matches token size)
     // Sprite has scale set to pixel width/height
@@ -655,6 +719,7 @@ export class TokenManager {
     // We set depthTest: false so it draws on top.
     
     sprite.add(border);
+    border.updateMatrix();
     spriteData.selectionBorder = border;
   }
 
@@ -719,6 +784,7 @@ export class TokenManager {
     
     const label = new THREE.Sprite(material);
     label.name = 'NameLabel';
+    label.matrixAutoUpdate = false;
     
     // Scale calculation:
     // Maintain constant world height regardless of resolution
@@ -742,6 +808,7 @@ export class TokenManager {
     const relativeLabelHeight = targetHeight / parentScaleY;
     // 0.5 is top edge. Move up by half label height + margin.
     label.position.set(0, 0.5 + (relativeLabelHeight / 2) + 0.05, 0);
+    label.updateMatrix();
     
     sprite.add(label);
     spriteData.nameLabel = label;

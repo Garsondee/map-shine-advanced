@@ -44,12 +44,16 @@ export class CloudEffect extends EffectBase {
     this.cloudShadowTarget = null;
 
     /** @type {THREE.WebGLRenderTarget|null} */
+    this.cloudShadowRawTarget = null;
+
+    /** @type {THREE.WebGLRenderTarget|null} */
     this.cloudTopDensityTarget = null;
 
     /** @type {THREE.WebGLRenderTarget|null} */
     this.cloudTopTarget = null;
 
     this._publishedCloudShadowTex = null;
+    this._publishedCloudShadowRawTex = null;
     this._publishedCloudDensityTex = null;
 
     /** @type {THREE.ShaderMaterial|null} */
@@ -76,11 +80,15 @@ export class CloudEffect extends EffectBase {
     // Accumulated wind offset for cloud drift
     this._windOffset = null; // Lazy init as THREE.Vector2
 
+    // Inertial wind velocity (UV units / second)
+    this._windVelocity = null; // Lazy init as THREE.Vector2
+
     // For cloud-top shading: a modified sun direction so shading is visible even at midday
     this._shadeSunDir = null; // Lazy init as THREE.Vector2
 
     // Multi-layer wind offsets
     this._layerWindOffsets = null; // Lazy init as Array<THREE.Vector2>
+    this._layerWindVelocities = null; // Lazy init as Array<THREE.Vector2>
     this._layerSpeedMult = [0.6, 0.85, 1.0, 1.15, 1.3];
     this._layerDirAngle = [-0.03, -0.015, 0.0, 0.015, 0.03];
     this._layerParallax = [0.05, 0.12, 0.2, 0.28, 0.35];
@@ -127,6 +135,9 @@ export class CloudEffect extends EffectBase {
       // Wind drift
       windInfluence: 1.0,     // How much wind affects cloud movement
       driftSpeed: 0.02,       // Base drift speed multiplier
+
+      driftResponsiveness: 2.5,
+      driftMaxSpeed: 0.05,
 
       layerParallaxBase: 1.0,
 
@@ -177,6 +188,9 @@ export class CloudEffect extends EffectBase {
     // Performance: reusable objects
     this._tempSize = null;
     this._lastUpdateHash = null;
+
+    this._tempVec2A = null;
+    this._tempVec2B = null;
   }
 
   /**
@@ -251,7 +265,7 @@ export class CloudEffect extends EffectBase {
           label: 'Wind & Drift',
           type: 'inline',
           separator: true,
-          parameters: ['windInfluence', 'driftSpeed']
+          parameters: ['windInfluence', 'driftSpeed', 'driftResponsiveness', 'driftMaxSpeed']
         },
         {
           name: 'layer-base',
@@ -452,6 +466,22 @@ export class CloudEffect extends EffectBase {
           step: 0.001,
           default: 0.02
         },
+        driftResponsiveness: {
+          type: 'slider',
+          label: 'Responsiveness',
+          min: 0.1,
+          max: 10.0,
+          step: 0.1,
+          default: 2.5
+        },
+        driftMaxSpeed: {
+          type: 'slider',
+          label: 'Max Speed',
+          min: 0.0,
+          max: 0.5,
+          step: 0.01,
+          default: 0.05
+        },
         layerParallaxBase: {
           type: 'slider',
           label: 'Base Parallax',
@@ -561,6 +591,7 @@ export class CloudEffect extends EffectBase {
 
     // Initialize wind offset
     this._windOffset = new THREE.Vector2(0, 0);
+    this._windVelocity = new THREE.Vector2(0, 0);
 
     // Initialize multi-layer wind offsets
     this._layerWindOffsets = [
@@ -570,6 +601,17 @@ export class CloudEffect extends EffectBase {
       new THREE.Vector2(0, 0),
       new THREE.Vector2(0, 0)
     ];
+
+    this._layerWindVelocities = [
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(0, 0),
+      new THREE.Vector2(0, 0)
+    ];
+
+    this._tempVec2A = new THREE.Vector2();
+    this._tempVec2B = new THREE.Vector2();
 
     // Create quad scene for full-screen passes
     this.quadScene = new THREE.Scene();
@@ -1197,6 +1239,18 @@ export class CloudEffect extends EffectBase {
       this.cloudShadowTarget.setSize(width, height);
     }
 
+    // Cloud shadow render target (UNMASKED - for indoor consumers like WindowLight)
+    if (!this.cloudShadowRawTarget) {
+      this.cloudShadowRawTarget = new THREE.WebGLRenderTarget(width, height, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else {
+      this.cloudShadowRawTarget.setSize(width, height);
+    }
+
     // Cloud top density render target (parallaxed multi-layer density)
     if (!this.cloudTopDensityTarget) {
       this.cloudTopDensityTarget = new THREE.WebGLRenderTarget(width, height, {
@@ -1262,17 +1316,34 @@ export class CloudEffect extends EffectBase {
     }
 
     // Update wind offset for cloud drift
+    // Note: uLayerWindOffsets are *sampling offsets* (added to UV). Increasing the sampling coordinate
+    // makes the visual pattern appear to move the opposite direction. So we subtract displacement here
+    // so clouds drift WITH the wind direction.
     const delta = timeInfo?.delta ?? 0.016;
-    const driftAmountBase = windSpeed * this.params.windInfluence * this.params.driftSpeed * delta;
+    const targetBaseSpeed = windSpeed * this.params.windInfluence * this.params.driftSpeed;
+    const responsiveness = Math.max(0.0, this.params.driftResponsiveness ?? 2.5);
+    const maxSpeed = Math.max(0.0, this.params.driftMaxSpeed ?? 0.05);
+    const lerpAlpha = responsiveness > 0.0 ? (1.0 - Math.exp(-responsiveness * delta)) : 1.0;
+
+    if (!this._tempVec2A) this._tempVec2A = new THREE.Vector2();
+    if (!this._tempVec2B) this._tempVec2B = new THREE.Vector2();
 
     // Legacy single offset (kept for stability/debug)
-    this._windOffset.x += windDirX * driftAmountBase;
-    this._windOffset.y += windDirY * driftAmountBase;
-    this._windOffset.x = this._windOffset.x % 100.0;
-    this._windOffset.y = this._windOffset.y % 100.0;
+    if (this._windOffset && this._windVelocity) {
+      this._tempVec2A.set(windDirX, windDirY);
+      if (this._tempVec2A.lengthSq() > 1e-6) this._tempVec2A.normalize();
+      this._tempVec2A.multiplyScalar(targetBaseSpeed);
+
+      this._windVelocity.lerp(this._tempVec2A, lerpAlpha);
+      const vLen = this._windVelocity.length();
+      if (vLen > maxSpeed && vLen > 1e-6) this._windVelocity.multiplyScalar(maxSpeed / vLen);
+
+      this._windOffset.x = (this._windOffset.x - this._windVelocity.x * delta) % 100.0;
+      this._windOffset.y = (this._windOffset.y - this._windVelocity.y * delta) % 100.0;
+    }
 
     // Multi-layer offsets: subtle speed + direction differences, plus parallax handled in shader
-    if (this._layerWindOffsets) {
+    if (this._layerWindOffsets && this._layerWindVelocities) {
       const baseParallax = Math.max(0.0, Math.min(1.0, this.params.layerParallaxBase ?? 0.2));
 
       const toRad = Math.PI / 180;
@@ -1318,17 +1389,29 @@ export class CloudEffect extends EffectBase {
       this._layerWeight[3] = l4Enabled ? (this.params.layer4Opacity ?? 0.0) : 0.0;
       this._layerWeight[4] = l5Enabled ? (this.params.layer5Opacity ?? 0.0) : 0.0;
 
+      this._tempVec2A.set(windDirX, windDirY);
+      if (this._tempVec2A.lengthSq() > 1e-6) this._tempVec2A.normalize();
+
       for (let i = 0; i < this._layerWindOffsets.length; i++) {
         const a = this._layerDirAngle[i] ?? 0.0;
         const ca = Math.cos(a);
         const sa = Math.sin(a);
-        const dx = windDirX * ca - windDirY * sa;
-        const dy = windDirX * sa + windDirY * ca;
 
-        const amt = driftAmountBase * (this._layerSpeedMult[i] ?? 1.0);
+        const dx = this._tempVec2A.x * ca - this._tempVec2A.y * sa;
+        const dy = this._tempVec2A.x * sa + this._tempVec2A.y * ca;
+
+        const speedMult = (this._layerSpeedMult[i] ?? 1.0);
+        this._tempVec2B.set(dx, dy).multiplyScalar(targetBaseSpeed * speedMult);
+
+        const v = this._layerWindVelocities[i];
+        v.lerp(this._tempVec2B, lerpAlpha);
+        const vMax = maxSpeed * speedMult;
+        const vLayerLen = v.length();
+        if (vLayerLen > vMax && vLayerLen > 1e-6) v.multiplyScalar(vMax / vLayerLen);
+
         const o = this._layerWindOffsets[i];
-        o.x = (o.x + dx * amt) % 100.0;
-        o.y = (o.y + dy * amt) % 100.0;
+        o.x = (o.x - v.x * delta) % 100.0;
+        o.y = (o.y - v.y * delta) % 100.0;
       }
     }
 
@@ -1505,7 +1588,7 @@ export class CloudEffect extends EffectBase {
     const width = this._tempSize.x;
     const height = this._tempSize.y;
 
-    if (!this.cloudDensityTarget || !this.cloudShadowTarget) {
+    if (!this.cloudDensityTarget || !this.cloudShadowTarget || !this.cloudShadowRawTarget) {
       this.onResize(width, height);
     } else if (this.cloudDensityTarget.width !== width || this.cloudDensityTarget.height !== height) {
       this.onResize(width, height);
@@ -1522,7 +1605,27 @@ export class CloudEffect extends EffectBase {
     renderer.clear();
     renderer.render(this.quadScene, this.quadCamera);
 
-    // Pass 2: Generate cloud shadow from density
+    // Pass 2a: Generate UNMASKED cloud shadow from density (for indoor consumers)
+    {
+      const su = this.shadowMaterial.uniforms;
+      const prevHasMask = su.uHasOutdoorsMask ? su.uHasOutdoorsMask.value : 0.0;
+      const prevMaskTex = su.tOutdoorsMask ? su.tOutdoorsMask.value : null;
+
+      if (su.uHasOutdoorsMask) su.uHasOutdoorsMask.value = 0.0;
+      if (su.tOutdoorsMask) su.tOutdoorsMask.value = null;
+
+      this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
+      this.quadMesh.material = this.shadowMaterial;
+      renderer.setRenderTarget(this.cloudShadowRawTarget);
+      renderer.setClearColor(0xffffff, 1);
+      renderer.clear();
+      renderer.render(this.quadScene, this.quadCamera);
+
+      if (su.uHasOutdoorsMask) su.uHasOutdoorsMask.value = prevHasMask;
+      if (su.tOutdoorsMask) su.tOutdoorsMask.value = prevMaskTex;
+    }
+
+    // Pass 2b: Generate cloud shadow from density (OUTDOORS-MASKED)
     this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
     this.quadMesh.material = this.shadowMaterial;
     renderer.setRenderTarget(this.cloudShadowTarget);
@@ -1570,6 +1673,20 @@ export class CloudEffect extends EffectBase {
           });
         }
 
+        const shadowRawTex = this.cloudShadowRawTarget?.texture;
+        if (shadowRawTex && shadowRawTex !== this._publishedCloudShadowRawTex) {
+          this._publishedCloudShadowRawTex = shadowRawTex;
+          mm.setTexture('cloudShadowRaw.screen', shadowRawTex, {
+            space: 'screenUv',
+            source: 'renderTarget',
+            channels: 'r',
+            uvFlipY: false,
+            lifecycle: 'dynamicPerFrame',
+            width: this.cloudShadowRawTarget?.width ?? null,
+            height: this.cloudShadowRawTarget?.height ?? null
+          });
+        }
+
         const densityTex = this.cloudDensityTarget?.texture;
         if (densityTex && densityTex !== this._publishedCloudDensityTex) {
           this._publishedCloudDensityTex = densityTex;
@@ -1599,6 +1716,10 @@ export class CloudEffect extends EffectBase {
     if (this.cloudShadowTarget) {
       this.cloudShadowTarget.dispose();
       this.cloudShadowTarget = null;
+    }
+    if (this.cloudShadowRawTarget) {
+      this.cloudShadowRawTarget.dispose();
+      this.cloudShadowRawTarget = null;
     }
     if (this.cloudTopDensityTarget) {
       this.cloudTopDensityTarget.dispose();

@@ -438,11 +438,11 @@ export class WeatherController {
 
 
     // Wind Direction = Target + Meander
-    // Gusts usually push in the primary direction, so we mainly perturb direction with the slow meander
+    // IMPORTANT: do NOT integrate from currentState each frame (random-walk drift can eventually reverse wind).
+    // Instead, treat variability as a bounded perturbation around the *target* direction.
     const dirMeander = Math.cos(time * 0.15 + this.noiseOffset) * baseVar * 0.5; // Radians
-    const currentAngle = Math.atan2(this.currentState.windDirection.y, this.currentState.windDirection.x);
-    const newAngle = currentAngle + dirMeander;
-    
+    const baseAngle = Math.atan2(this.targetState.windDirection.y, this.targetState.windDirection.x);
+    const newAngle = baseAngle + dirMeander;
     this.currentState.windDirection.set(Math.cos(newAngle), Math.sin(newAngle));
   }
 

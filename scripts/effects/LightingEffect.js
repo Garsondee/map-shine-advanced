@@ -522,36 +522,38 @@ export class LightingEffect extends EffectBase {
             if (indoor <= 0.0) discard;
           }
 
-          // Cloud attenuation - combine global cloud cover with spatially-varying density
-          float cloud = clamp(uCloudCover, 0.0, 1.0);
-          float globalCloudFactor = 1.0 - (cloud * 0.9 * uCloudInfluence);
-          
-          float cloudFactor = globalCloudFactor;
-          
-          // Sample cloud DENSITY texture for spatial variation (animated clouds passing by)
-          // CloudEffect provides *density* (0 = clear, 1 = thick cloud). We remap through
-          // a user-controlled curve and invert to get a "lit" factor.
+          // Cloud attenuation
+          // Do NOT use raw cloud cover (slider) for window light. The only thing
+          // that should dim this effect is the presence/content of the cloud
+          // density texture produced by CloudEffect.
+          float cloudFactor = 1.0;
+
+          // Sample cloud SHADOW FACTOR texture for spatial variation (animated clouds passing by)
+          // CloudEffect provides *shadow factor* (1 = fully lit, 0 = fully shadowed).
           if (uHasCloudShadowMap > 0.5) {
             // Cloud density is rendered in SCREEN SPACE, convert clip coords to screen UV
             vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
-            float localCloudDensity = texture2D(uCloudShadowMap, screenUV).r;
+            float shadowFactor = texture2D(uCloudShadowMap, screenUV).r;
 
-            // Apply gamma-style curve so you can bias towards thin wisps or thick cores
-            float d = clamp(localCloudDensity, 0.0, 1.0);
-            d = pow(d, max(uCloudDensityCurve, 0.001));
+            // Curve shaping: higher values make midtones darker (stronger shadows).
+            float curve = max(uCloudDensityCurve, 0.001);
+            shadowFactor = pow(clamp(shadowFactor, 0.0, 1.0), curve);
 
-            // Convert density -> local shadow factor in [0,1], where 1 = fully lit, 0 = fully shadowed
-            float localShadowFactor = d;
-
-            // Blend local shadow with global factor; uCloudLocalInfluence in [0,3]
-            // controls how strongly local structure modulates the global overcast level.
-            // Values >1 exaggerate contrast.
-            float localMix = clamp(uCloudLocalInfluence, 0.0, 3.0);
-            float blended = mix(1.0, localShadowFactor, localMix);
-            cloudFactor = globalCloudFactor * blended;
+            // uCloudLocalInfluence is exposed as [0,3] in UI. Remap to [0,1]
+            // so we don't extrapolate past 0..1 and accidentally invert/destroy intensity.
+            float localMix = clamp(uCloudLocalInfluence / 3.0, 0.0, 1.0);
+            cloudFactor = mix(1.0, shadowFactor, localMix);
           }
-          
+
           cloudFactor = max(cloudFactor, uMinCloudFactor);
+
+          // Apply global influence shaping. When influence is high, clouds dim harder.
+          // influence = 0 => ignore clouds.
+          if (uCloudInfluence > 0.0001) {
+            cloudFactor = pow(max(cloudFactor, 1e-4), uCloudInfluence);
+          } else {
+            cloudFactor = 1.0;
+          }
 
           float strength = m * indoor * cloudFactor * uIntensity;
 
@@ -668,6 +670,25 @@ export class LightingEffect extends EffectBase {
     if (!this.enabled) return;
 
     const THREE = window.THREE;
+
+    const setThreeColorLoose = (target, input, fallback = 0xffffff) => {
+      try {
+        if (!target) return;
+        if (input && typeof input === 'object' && 'r' in input && 'g' in input && 'b' in input) {
+          target.set(input.r, input.g, input.b);
+          return;
+        }
+        if (typeof input === 'string' || typeof input === 'number') {
+          target.set(input);
+          return;
+        }
+        target.set(fallback);
+      } catch (e) {
+        try {
+          target.set(fallback);
+        } catch (e2) {}
+      }
+    };
 
     const dt = timeInfo && typeof timeInfo.delta === 'number' ? timeInfo.delta : 0;
 
@@ -811,16 +832,19 @@ export class LightingEffect extends EffectBase {
         if (typeof wl.params.rgbShiftAngle === 'number') {
           wu.uRgbShiftAngle.value = wl.params.rgbShiftAngle * (Math.PI / 180.0);
         }
-        if (wl.params.color) {
-          wu.uColor.value.set(wl.params.color.r, wl.params.color.g, wl.params.color.b);
-        }
+        setThreeColorLoose(wu.uColor.value, wl.params.color, 0xfff5dd);
       }
       
       // Bind cloud DENSITY texture for spatially-varying dimming (not outdoors-masked shadow)
       try {
         const cloudEffect = window.MapShine?.cloudEffect;
-        if (cloudEffect?.cloudDensityTarget?.texture && cloudEffect.enabled) {
-          wu.uCloudShadowMap.value = cloudEffect.cloudDensityTarget.texture;
+        const mm = window.MapShine?.maskManager;
+        const shadowRaw = mm ? mm.getTexture('cloudShadowRaw.screen') : null;
+        if (shadowRaw) {
+          wu.uCloudShadowMap.value = shadowRaw;
+          wu.uHasCloudShadowMap.value = 1.0;
+        } else if (cloudEffect?.cloudShadowRawTarget?.texture && cloudEffect.enabled) {
+          wu.uCloudShadowMap.value = cloudEffect.cloudShadowRawTarget.texture;
           wu.uHasCloudShadowMap.value = 1.0;
         } else {
           wu.uCloudShadowMap.value = null;

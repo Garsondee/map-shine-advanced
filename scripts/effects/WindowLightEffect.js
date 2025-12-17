@@ -55,7 +55,7 @@ export class WindowLightEffect extends EffectBase {
       hasWindowMask: false,
 
       // Core light controls
-      intensity: 25.0,
+      intensity: 10.0,
       color: { r: 1.0, g: 0.96, b: 0.85 }, // Warm window light
       exposure: 0.0,
       brightness: 0.0,
@@ -65,14 +65,14 @@ export class WindowLightEffect extends EffectBase {
       tint: 0.0,
 
       // Mask shaping
-      maskThreshold: 0.1,
-      softness: 0.5,
+      maskThreshold: 0.17,
+      softness: 1.0,
 
       // Cloud interaction
-      cloudInfluence: 3.0,        // 0=ignore clouds, 1=overcast kills light, >1 exaggerates
+      cloudInfluence: 25.0,        // 0=ignore clouds, 1=overcast kills light, >1 exaggerates
       minCloudFactor: 0.0,        // Floor so light never fully disappears if desired
-      cloudLocalInfluence: 3.0,   // Strength of local cloud density modulation (0-3)
-      cloudDensityCurve: 1.3,     // Gamma for density -> shadow mapping (0.2-3)
+      cloudLocalInfluence: 25.0,   // Strength of local cloud density modulation (0-3)
+      cloudDensityCurve: 0.2,     // Gamma for density -> shadow mapping (0.2-3)
 
       // Specular coupling (local glints)
       specularBoost: 3.0,
@@ -81,13 +81,27 @@ export class WindowLightEffect extends EffectBase {
       blendMode: 0,
 
       // RGB Split
-      rgbShiftAmount: 2.0,  // pixels at 1080p-ish; remapped in shader
-      rgbShiftAngle: 125.0,   // degrees
+      rgbShiftAmount: 5.0,  // pixels at 1080p-ish; remapped in shader
+      rgbShiftAngle: 158.0,   // degrees
 
       // Overhead tile lighting
       lightOverheadTiles: true,  // Whether window light affects overhead tiles
-      overheadLightIntensity: 5.0  // How much window light affects overhead tiles (0-1)
+      overheadLightIntensity: 9.6  // How much window light affects overhead tiles (0-1)
     };
+  }
+
+  _applyThreeColor(target, input) {
+    const THREE = window.THREE;
+    if (!THREE || !target) return;
+    if (input && typeof input === 'object' && 'r' in input && 'g' in input && 'b' in input) {
+      target.set(input.r, input.g, input.b);
+      return;
+    }
+    if (typeof input === 'string' || typeof input === 'number') {
+      target.set(input);
+      return;
+    }
+    target.set(1.0, 1.0, 1.0);
   }
 
   get enabled() {
@@ -173,7 +187,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 25.0,
           step: 0.05,
-          default: 25.0
+          default: 10.0
         },
         maskThreshold: {
           type: 'slider',
@@ -181,7 +195,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.1
+          default: 0.17
         },
         softness: {
           type: 'slider',
@@ -189,7 +203,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 0.5
+          default: 1.0
         },
         color: {
           type: 'color',
@@ -248,31 +262,31 @@ export class WindowLightEffect extends EffectBase {
           type: 'slider',
           label: 'Cloud Influence',
           min: 0.0,
-          max: 3.0,
+          max: 25.0,
           step: 0.01,
-          default: 3.0
+          default: 25.0
         },
         cloudLocalInfluence: {
           type: 'slider',
           label: 'Local Shadow Strength',
           min: 0.0,
-          max: 3.0,
+          max: 25.0,
           step: 0.05,
-          default: 3.0
+          default: 25.0
         },
         cloudDensityCurve: {
           type: 'slider',
           label: 'Cloud Density Curve',
           min: 0.2,
-          max: 3.0,
+          max: 25.0,
           step: 0.05,
-          default: 1.3
+          default: 0.2
         },
         minCloudFactor: {
           type: 'slider',
           label: 'Min Cloud Factor',
           min: 0.0,
-          max: 1.0,
+          max: 25.0,
           step: 0.01,
           default: 0.0
         },
@@ -301,7 +315,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 5.0,
           step: 0.01,
-          default: 2.0
+          default: 5.0
         },
         rgbShiftAngle: {
           type: 'slider',
@@ -309,7 +323,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 360.0,
           step: 1.0,
-          default: 125.0
+          default: 158.0
         },
         lightOverheadTiles: {
           type: 'boolean',
@@ -320,9 +334,9 @@ export class WindowLightEffect extends EffectBase {
           type: 'slider',
           label: 'Overhead Intensity',
           min: 0.0,
-          max: 5.0,
+          max: 25.0,
           step: 0.05,
-          default: 5.0
+          default: 9.6
         }
       }
     };
@@ -601,39 +615,32 @@ export class WindowLightEffect extends EffectBase {
           if (indoorFactor <= 0.0) discard;
         }
 
-        // Cloud attenuation - combine global cloud cover with spatially-varying shadow
-        // Global cloud cover provides base dimming, shadow map adds local variation
-        float cloud = clamp(uCloudCover, 0.0, 1.0);
-        // At 100% cloud cover with cloudInfluence=1.0: 1.0 - (1.0 * 0.9 * 1.0) = 0.1
-        float globalCloudFactor = 1.0 - (cloud * 0.9 * uCloudInfluence);
-        
-        float cloudFactor = globalCloudFactor;
-        
-        // If cloud density map available, derive a local shadow factor for spatial variation.
-        // CloudEffect provides *density* (0 = clear, 1 = thick cloud). We remap this through
-        // a user-controlled curve and then invert to get a "lit" factor.
+        // Cloud attenuation
+        // Do NOT use raw cloud cover (slider) for window light. The only thing
+        // that should dim this effect is the presence/content of the cloud
+        // density texture produced by CloudEffect.
+        float cloudFactor = 1.0;
         if (uHasCloudShadowMap > 0.5) {
-          // Cloud density is rendered in SCREEN SPACE, so we need screen UVs.
+          // Cloud shadows are rendered in SCREEN SPACE, so we need screen UVs.
           vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
-          float localCloudDensity = texture2D(uCloudShadowMap, screenUV).r;
+          float d = texture2D(uCloudShadowMap, screenUV).r;
+          d = clamp(d, 0.0, 1.0);
+          float curve = max(uCloudDensityCurve, 0.001);
+          d = pow(d, curve);
 
+          float localStrength = max(uCloudLocalInfluence, 0.0);
+          float lightFactor = 1.0 - clamp(d * localStrength, 0.0, 1.0);
 
-          // Clamp and apply a gamma-style curve so you can bias towards
-          // either thin wisps or only thick cores of clouds.
-          float d = clamp(localCloudDensity, 0.0, 1.0);
-          d = pow(d, max(uCloudDensityCurve, 0.001));
+          float influence = max(uCloudInfluence, 0.0);
+          if (influence > 0.0001) {
+            lightFactor = pow(max(lightFactor, 1e-4), influence);
+          } else {
+            lightFactor = 1.0;
+          }
 
-          // Convert density -> local shadow factor in [0,1], where 1 = fully lit, 0 = fully shadowed.
-          float localShadowFactor = 1.0 - d;
-
-          // Blend local shadow with global factor; uCloudLocalInfluence in [0,3]
-          // controls how strongly local structure modulates the global overcast
-          // level. Values >1 exaggerate contrast.
-          float localMix = clamp(uCloudLocalInfluence, 0.0, 3.0);
-          float blended = mix(1.0, localShadowFactor, localMix);
-          cloudFactor = globalCloudFactor * blended;
+          cloudFactor = lightFactor;
         }
-        
+
         cloudFactor = max(cloudFactor, uMinCloudFactor);
 
         float windowStrength = m * indoorFactor * cloudFactor;
@@ -664,8 +671,10 @@ export class WindowLightEffect extends EffectBase {
 
         vec3 lightColor = diffuse + specular;
 
-        // Apply local CC to the light contribution only
-        lightColor = applyCC(lightColor);
+        float ccScale = max(uIntensity, 1.0);
+        vec3 ccInput = clamp(lightColor / ccScale, 0.0, 1.0);
+        ccInput = applyCC(ccInput);
+        lightColor = ccInput * ccScale;
 
         // Treat window light as additive illumination on the groundplane.
         // We keep the light contribution non-negative so it can only
@@ -705,7 +714,7 @@ export class WindowLightEffect extends EffectBase {
     u.uMaskThreshold.value = this.params.maskThreshold;
     u.uSoftness.value = this.params.softness;
 
-    u.uColor.value.set(this.params.color.r, this.params.color.g, this.params.color.b);
+    this._applyThreeColor(u.uColor.value, this.params.color);
     u.uExposure.value = this.params.exposure;
     u.uBrightness.value = this.params.brightness;
     u.uContrast.value = this.params.contrast;
@@ -715,15 +724,19 @@ export class WindowLightEffect extends EffectBase {
 
     u.uCloudInfluence.value = this.params.cloudInfluence;
     u.uMinCloudFactor.value = this.params.minCloudFactor;
+    u.uCloudLocalInfluence.value = this.params.cloudLocalInfluence;
+    u.uCloudDensityCurve.value = this.params.cloudDensityCurve;
 
     // Bind spatially-varying cloud shadow texture from CloudEffect
     try {
       const cloudEffect = window.MapShine?.cloudEffect;
-      // Use raw cloud density (0 = clear, 1 = dense cloud) so we can decide how
-      // to apply it indoors vs outdoors. The uniform name is kept for backwards
-      // compatibility but now carries density, not an outdoors-masked shadow.
-      if (cloudEffect?.cloudDensityTarget?.texture && cloudEffect.enabled) {
-        u.uCloudShadowMap.value = cloudEffect.cloudDensityTarget.texture;
+      const mm = window.MapShine?.maskManager;
+      const mmShadowRaw = mm ? mm.getTexture('cloudShadowRaw.screen') : null;
+      if (mmShadowRaw) {
+        u.uCloudShadowMap.value = mmShadowRaw;
+        u.uHasCloudShadowMap.value = 1.0;
+      } else if (cloudEffect?.cloudShadowRawTarget?.texture && cloudEffect.enabled) {
+        u.uCloudShadowMap.value = cloudEffect.cloudShadowRawTarget.texture;
         u.uHasCloudShadowMap.value = 1.0;
       } else {
         u.uCloudShadowMap.value = null;
@@ -826,9 +839,12 @@ export class WindowLightEffect extends EffectBase {
         uIntensity: { value: this.params.intensity },
         uMaskThreshold: { value: this.params.maskThreshold },
         uSoftness: { value: this.params.softness },
-        uCloudCover: { value: 0.0 },
-        uCloudInfluence: { value: this.params.cloudInfluence },
         uMinCloudFactor: { value: this.params.minCloudFactor },
+        uCloudInfluence: { value: this.params.cloudInfluence },
+        uCloudLocalInfluence: { value: this.params.cloudLocalInfluence },
+        uCloudDensityCurve: { value: this.params.cloudDensityCurve },
+        uCloudShadowMap: { value: null },
+        uHasCloudShadowMap: { value: 0.0 },
         uColor: { value: new THREE.Color(this.params.color.r, this.params.color.g, this.params.color.b) },
         uResolution: { value: new THREE.Vector2(width, height) }
       },
@@ -862,11 +878,15 @@ export class WindowLightEffect extends EffectBase {
       uniform float uIntensity;
       uniform float uMaskThreshold;
       uniform float uSoftness;
-      uniform float uCloudCover;
-      uniform float uCloudInfluence;
       uniform float uMinCloudFactor;
+      uniform float uCloudInfluence;
+      uniform float uCloudLocalInfluence;
+      uniform float uCloudDensityCurve;
+      uniform sampler2D uCloudShadowMap;
+      uniform float uHasCloudShadowMap;
       uniform vec3 uColor;
 
+      varying vec4 vClipPos;
       varying vec2 vUv;
 
       float msLuminance(vec3 c) {
@@ -900,8 +920,30 @@ export class WindowLightEffect extends EffectBase {
         }
 
         // Cloud attenuation
-        float cloud = clamp(uCloudCover, 0.0, 1.0);
-        float cloudFactor = 1.0 - (cloud * 0.8 * uCloudInfluence);
+        // Do NOT use raw cloud cover (slider) for window light. The only thing
+        // that should dim this pass is the presence/content of the cloud
+        // density texture produced by CloudEffect.
+        float cloudFactor = 1.0;
+        if (uHasCloudShadowMap > 0.5) {
+          vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
+          float d = texture2D(uCloudShadowMap, screenUV).r;
+          d = clamp(d, 0.0, 1.0);
+          float curve = max(uCloudDensityCurve, 0.001);
+          d = pow(d, curve);
+
+          float localStrength = max(uCloudLocalInfluence, 0.0);
+          float lightFactor = 1.0 - clamp(d * localStrength, 0.0, 1.0);
+
+          float influence = max(uCloudInfluence, 0.0);
+          if (influence > 0.0001) {
+            lightFactor = pow(max(lightFactor, 1e-4), influence);
+          } else {
+            lightFactor = 1.0;
+          }
+
+          cloudFactor = lightFactor;
+        }
+
         cloudFactor = max(cloudFactor, uMinCloudFactor);
 
         // Final light brightness (0-1 range, clamped)
@@ -934,18 +976,31 @@ export class WindowLightEffect extends EffectBase {
       u.uIntensity.value = this.params.intensity;
       u.uMaskThreshold.value = this.params.maskThreshold;
       u.uSoftness.value = this.params.softness;
-      u.uCloudInfluence.value = this.params.cloudInfluence;
       u.uMinCloudFactor.value = this.params.minCloudFactor;
-      u.uColor.value.set(this.params.color.r, this.params.color.g, this.params.color.b);
-      
-      // Sync cloud cover
+      u.uCloudInfluence.value = this.params.cloudInfluence;
+      u.uCloudLocalInfluence.value = this.params.cloudLocalInfluence;
+      u.uCloudDensityCurve.value = this.params.cloudDensityCurve;
+      this._applyThreeColor(u.uColor.value, this.params.color);
+
+      // Bind spatially-varying cloud density texture from CloudEffect
       try {
-        const state = weatherController?.getCurrentState?.();
-        if (state && typeof state.cloudCover === 'number') {
-          u.uCloudCover.value = state.cloudCover;
+        const mm = window.MapShine?.maskManager;
+        const mmCloud = mm ? mm.getTexture('cloudShadowRaw.screen') : null;
+        if (mmCloud) {
+          u.uCloudShadowMap.value = mmCloud;
+          u.uHasCloudShadowMap.value = 1.0;
+        } else {
+          const cloudEffect = window.MapShine?.cloudEffect;
+          if (cloudEffect?.cloudShadowRawTarget?.texture && cloudEffect.enabled) {
+            u.uCloudShadowMap.value = cloudEffect.cloudShadowRawTarget.texture;
+            u.uHasCloudShadowMap.value = 1.0;
+          } else {
+            u.uCloudShadowMap.value = null;
+            u.uHasCloudShadowMap.value = 0.0;
+          }
         }
       } catch (e) {
-        // ignore
+        u.uHasCloudShadowMap.value = 0.0;
       }
     }
 

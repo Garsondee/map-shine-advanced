@@ -3,12 +3,14 @@ export class MaskManager {
     this._masks = new Map();
     this._renderer = null;
     this._derived = new Map();
+    this._recipes = new Map();
 
     this._quadScene = null;
     this._quadCamera = null;
     this._quadMesh = null;
     this._boostMaterial = null;
     this._blurMaterial = null;
+    this._opMaterial = null;
     this._tmpVec2 = null;
   }
 
@@ -111,7 +113,179 @@ export class MaskManager {
       });
     }
 
+    if (!this._opMaterial) {
+      this._opMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          tA: { value: null },
+          tB: { value: null },
+          uOp: { value: 0.0 },
+          uLo: { value: 0.0 },
+          uHi: { value: 1.0 }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform sampler2D tA;
+          uniform sampler2D tB;
+          uniform float uOp;
+          uniform float uLo;
+          uniform float uHi;
+          varying vec2 vUv;
+
+          void main() {
+            float a = texture2D(tA, vUv).r;
+            float b = texture2D(tB, vUv).r;
+            float outV = a;
+
+            if (uOp < 0.5) {
+              outV = 1.0 - a;
+            } else if (uOp < 1.5) {
+              outV = smoothstep(uLo, uHi, a);
+            } else if (uOp < 2.5) {
+              outV = max(a, b);
+            } else if (uOp < 3.5) {
+              outV = min(a, b);
+            } else {
+              outV = a * b;
+            }
+
+            gl_FragColor = vec4(outV, outV, outV, 1.0);
+          }
+        `,
+        depthWrite: false,
+        depthTest: false
+      });
+    }
+
     return true;
+  }
+
+  defineDerivedMask(id, recipe) {
+    if (!id || typeof id !== 'string') {
+      throw new Error('MaskManager.defineDerivedMask: id must be a non-empty string');
+    }
+    if (!recipe || typeof recipe !== 'object') {
+      throw new Error('MaskManager.defineDerivedMask: recipe must be an object');
+    }
+    this._recipes.set(id, recipe);
+  }
+
+  _getTextureInternal(id, visiting) {
+    const rec = this._masks.get(id);
+    if (rec) return rec.texture;
+    const recipe = this._recipes.get(id);
+    if (!recipe) return null;
+    return this._evaluateDerived(id, recipe, visiting);
+  }
+
+  _evaluateDerived(id, recipe, visiting) {
+    const THREE = window.THREE;
+    if (!THREE || !this._renderer) return null;
+    if (!this._ensureQuad() || !this._ensureMaterials()) return null;
+
+    if (!visiting) visiting = new Set();
+    if (visiting.has(id)) {
+      throw new Error(`MaskManager derived mask cycle detected at ${id}`);
+    }
+    visiting.add(id);
+
+    const op = recipe.op;
+    let aId = null;
+    let bId = null;
+    if (op === 'invert' || op === 'threshold') {
+      aId = recipe.input;
+    } else {
+      aId = recipe.a;
+      bId = recipe.b;
+    }
+
+    const aTex = aId ? this._getTextureInternal(aId, visiting) : null;
+    const bTex = bId ? this._getTextureInternal(bId, visiting) : null;
+    visiting.delete(id);
+
+    if (!aTex) return null;
+    if ((op !== 'invert' && op !== 'threshold') && !bTex) return null;
+
+    const aRec = aId ? this.getRecord(aId) : null;
+    const bRec = bId ? this.getRecord(bId) : null;
+    const dynamic = (aRec?.lifecycle === 'dynamicPerFrame') || (bRec?.lifecycle === 'dynamicPerFrame');
+
+    const baseW = aRec?.width ?? aTex?.image?.width ?? null;
+    const baseH = aRec?.height ?? aTex?.image?.height ?? null;
+    if (!baseW || !baseH) return null;
+
+    const w = Math.max(1, Math.floor(baseW));
+    const h = Math.max(1, Math.floor(baseH));
+
+    const lo = (typeof recipe.lo === 'number' && isFinite(recipe.lo)) ? recipe.lo : 0.0;
+    const hi = (typeof recipe.hi === 'number' && isFinite(recipe.hi)) ? recipe.hi : 1.0;
+
+    const aUuid = aTex?.uuid ?? 'null';
+    const bUuid = bTex?.uuid ?? 'null';
+    const key = `${op}|${aUuid}|${bUuid}|${w}x${h}|lo${lo}|hi${hi}`;
+
+    const rt = this._getOrCreateDerivedTargets(id, w, h, THREE.UnsignedByteType);
+    if (!rt) return null;
+
+    if (!dynamic && rt.key === key) {
+      const outTexCached = rt.a.texture;
+      this.setTexture(id, outTexCached, {
+        space: aRec?.space ?? 'sceneUv',
+        source: 'derived',
+        channels: 'r',
+        uvFlipY: false,
+        lifecycle: aRec?.lifecycle ?? 'staticPerScene',
+        width: w,
+        height: h
+      });
+      return outTexCached;
+    }
+    rt.key = key;
+
+    const prevTarget = this._renderer.getRenderTarget();
+
+    const u = this._opMaterial.uniforms;
+    u.tA.value = aTex;
+    u.tB.value = bTex ?? aTex;
+    if (op === 'invert') {
+      u.uOp.value = 0.0;
+    } else if (op === 'threshold') {
+      u.uOp.value = 1.0;
+    } else if (op === 'max') {
+      u.uOp.value = 2.0;
+    } else if (op === 'min') {
+      u.uOp.value = 3.0;
+    } else if (op === 'mul') {
+      u.uOp.value = 4.0;
+    } else {
+      u.uOp.value = 4.0;
+    }
+    u.uLo.value = lo;
+    u.uHi.value = hi;
+
+    this._quadMesh.material = this._opMaterial;
+    this._renderer.setRenderTarget(rt.a);
+    this._renderer.clear();
+    this._renderer.render(this._quadScene, this._quadCamera);
+
+    this._renderer.setRenderTarget(prevTarget);
+
+    const outTex = rt.a.texture;
+    this.setTexture(id, outTex, {
+      space: aRec?.space ?? 'sceneUv',
+      source: 'derived',
+      channels: 'r',
+      uvFlipY: false,
+      lifecycle: dynamic ? 'dynamicPerFrame' : (aRec?.lifecycle ?? 'staticPerScene'),
+      width: w,
+      height: h
+    });
+    return outTex;
   }
 
   _getOrCreateDerivedTargets(outId, width, height, type) {
@@ -253,16 +427,19 @@ export class MaskManager {
     try {
       if (this._boostMaterial) this._boostMaterial.dispose();
       if (this._blurMaterial) this._blurMaterial.dispose();
+      if (this._opMaterial) this._opMaterial.dispose();
     } catch (e) {
     }
 
     this._boostMaterial = null;
     this._blurMaterial = null;
+    this._opMaterial = null;
     this._quadMesh = null;
     this._quadScene = null;
     this._quadCamera = null;
     this._renderer = null;
     this._tmpVec2 = null;
+    this._recipes.clear();
     this._masks.clear();
   }
 
@@ -296,7 +473,12 @@ export class MaskManager {
 
   getTexture(id) {
     const rec = this._masks.get(id);
-    return rec ? rec.texture : null;
+    if (rec) return rec.texture;
+    try {
+      return this._getTextureInternal(id, new Set());
+    } catch (e) {
+      return null;
+    }
   }
 
   getRecord(id) {

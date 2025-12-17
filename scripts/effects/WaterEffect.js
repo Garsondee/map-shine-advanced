@@ -1,6 +1,7 @@
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { DistortionLayer } from './DistortionManager.js';
+import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('WaterEffect');
 
@@ -37,6 +38,13 @@ export class WaterEffect extends EffectBase {
       causticsEdgeBlurTexels: 6.0,
       causticsDebug: false,
 
+      rainRipplesEnabled: true,
+      rainRippleIntensityBoost: 1.0,
+      rainRippleSpeedBoost: 0.65,
+
+      shoreFoamEnabled: false,
+      shoreFoamIntensity: 1.0,
+
       debugMask: false
     };
 
@@ -44,6 +52,12 @@ export class WaterEffect extends EffectBase {
     this.waterMask = null;
 
     this._sourceRegistered = false;
+
+    this._dmDebugOwned = false;
+    this._dmPrevDebugMode = false;
+    this._dmPrevDebugShowMask = false;
+
+    this._waterMaskFlipY = 0.0;
   }
 
   static getControlSchema() {
@@ -191,6 +205,42 @@ export class WaterEffect extends EffectBase {
           default: false
         },
 
+        rainRipplesEnabled: {
+          type: 'checkbox',
+          label: 'Rain Ripples',
+          default: true
+        },
+        rainRippleIntensityBoost: {
+          type: 'slider',
+          label: 'Rain Ripple Intensity',
+          min: 0,
+          max: 4,
+          step: 0.05,
+          default: 1.0
+        },
+        rainRippleSpeedBoost: {
+          type: 'slider',
+          label: 'Rain Ripple Speed',
+          min: 0,
+          max: 4,
+          step: 0.05,
+          default: 0.65
+        },
+
+        shoreFoamEnabled: {
+          type: 'checkbox',
+          label: 'Shore Foam',
+          default: false
+        },
+        shoreFoamIntensity: {
+          type: 'slider',
+          label: 'Shore Foam Intensity',
+          min: 0,
+          max: 4,
+          step: 0.05,
+          default: 1.0
+        },
+
         debugMask: {
           type: 'checkbox',
           label: 'Debug Mask',
@@ -211,6 +261,12 @@ export class WaterEffect extends EffectBase {
       this.waterMask.minFilter = THREE.LinearFilter;
       this.waterMask.magFilter = THREE.LinearFilter;
       this.waterMask.generateMipmaps = false;
+
+      this._waterMaskFlipY = this.waterMask.flipY ? 1.0 : 0.0;
+      if (this.waterMask.flipY) {
+        this.waterMask.flipY = false;
+      }
+
       this.waterMask.needsUpdate = true;
     }
 
@@ -226,6 +282,11 @@ export class WaterEffect extends EffectBase {
     const p = this.params || {};
 
     if (!this.enabled || !this.waterMask) {
+      if (this._dmDebugOwned && dm.params) {
+        dm.params.debugMode = this._dmPrevDebugMode;
+        dm.params.debugShowMask = this._dmPrevDebugShowMask;
+        this._dmDebugOwned = false;
+      }
       if (this._sourceRegistered) {
         dm.setSourceEnabled('water', false);
       }
@@ -246,9 +307,20 @@ export class WaterEffect extends EffectBase {
 
     const debugMask = typeof p.debugMask === 'boolean' ? p.debugMask : false;
 
-    if (debugMask && dm.params) {
-      dm.params.debugMode = true;
-      dm.params.debugShowMask = true;
+    if (dm.params) {
+      if (debugMask) {
+        if (!this._dmDebugOwned) {
+          this._dmPrevDebugMode = !!dm.params.debugMode;
+          this._dmPrevDebugShowMask = !!dm.params.debugShowMask;
+          this._dmDebugOwned = true;
+        }
+        dm.params.debugMode = true;
+        dm.params.debugShowMask = true;
+      } else if (this._dmDebugOwned) {
+        dm.params.debugMode = this._dmPrevDebugMode;
+        dm.params.debugShowMask = this._dmPrevDebugShowMask;
+        this._dmDebugOwned = false;
+      }
     }
 
     const chromaEnabled = typeof p.chromaticEnabled === 'boolean' ? p.chromaticEnabled : true;
@@ -270,15 +342,32 @@ export class WaterEffect extends EffectBase {
     const causticsEdgeBlurTexels = typeof p.causticsEdgeBlurTexels === 'number' ? p.causticsEdgeBlurTexels : 6.0;
     const causticsDebug = typeof p.causticsDebug === 'boolean' ? p.causticsDebug : false;
 
-    const intensity = intensityUi * 0.08;
-    const frequency = scaleUi * 6.0;
-    const speed = 0.25 + speedUi * 10.0;
+    let intensity = intensityUi * 0.08;
+    let frequency = scaleUi * 6.0;
+    let speed = 0.25 + speedUi * 10.0;
+
+    const rainRipplesEnabled = typeof p.rainRipplesEnabled === 'boolean' ? p.rainRipplesEnabled : true;
+    const rainRippleIntensityBoost = typeof p.rainRippleIntensityBoost === 'number' ? p.rainRippleIntensityBoost : 1.0;
+    const rainRippleSpeedBoost = typeof p.rainRippleSpeedBoost === 'number' ? p.rainRippleSpeedBoost : 0.65;
+
+    if (rainRipplesEnabled && weatherController && typeof weatherController.getCurrentState === 'function') {
+      const w = weatherController.getCurrentState();
+      const precip = w?.precipitation ?? 0;
+      const freeze = w?.freezeLevel ?? 0;
+      const rainFactor = Math.max(0, Math.min(1, precip * (1.0 - freeze)));
+
+      intensity *= (1.0 + rainFactor * rainRippleIntensityBoost);
+      speed *= (1.0 + rainFactor * rainRippleSpeedBoost);
+      frequency *= (1.0 + rainFactor * 0.15);
+    }
 
     if (!this._sourceRegistered) {
       dm.registerSource('water', DistortionLayer.ABOVE_GROUND, this.waterMask, {
         intensity,
         frequency,
         speed,
+
+        maskFlipY: this._waterMaskFlipY,
 
         // Chromatic refraction (RGB split) in DistortionManager apply pass
         chromaEnabled,
@@ -309,6 +398,7 @@ export class WaterEffect extends EffectBase {
         intensity,
         frequency,
         speed,
+        maskFlipY: this._waterMaskFlipY,
         chromaEnabled,
         chroma: chromaUi,
         chromaMaxPixels,
@@ -340,6 +430,12 @@ export class WaterEffect extends EffectBase {
       dm.unregisterSource('water');
     }
     this._sourceRegistered = false;
+
+    if (dm && this._dmDebugOwned && dm.params) {
+      dm.params.debugMode = this._dmPrevDebugMode;
+      dm.params.debugShowMask = this._dmPrevDebugShowMask;
+      this._dmDebugOwned = false;
+    }
 
     super.dispose();
   }

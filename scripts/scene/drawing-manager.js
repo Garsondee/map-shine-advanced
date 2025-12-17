@@ -17,6 +17,7 @@ export class DrawingManager {
    */
   constructor(scene) {
     this.scene = scene;
+    const THREE = window.THREE;
     
     /** @type {Map<string, THREE.Object3D>} */
     this.drawings = new Map();
@@ -27,6 +28,7 @@ export class DrawingManager {
     // Group for all drawings
     this.group = new THREE.Group();
     this.group.name = 'Drawings';
+    this.group.renderOrder = 1000;
     // Z position will be set in initialize() once groundZ is available
     this.group.position.z = 2.0;
     this.scene.add(this.group);
@@ -69,8 +71,8 @@ export class DrawingManager {
     });
 
     // Listen for layer activation to toggle visibility
-    Hooks.on('activateDrawingsLayer', () => this.setVisibility(false));
-    Hooks.on('deactivateDrawingsLayer', () => this.setVisibility(true));
+    Hooks.on('activateDrawingsLayer', () => this.updateVisibility());
+    Hooks.on('deactivateDrawingsLayer', () => this.updateVisibility());
 
     this.hooksRegistered = true;
   }
@@ -89,8 +91,7 @@ export class DrawingManager {
    * @private
    */
   updateVisibility() {
-    const isDrawingsLayer = canvas.activeLayer?.name === 'DrawingsLayer';
-    this.setVisibility(!isDrawingsLayer);
+    this.setVisibility(true);
   }
 
   /**
@@ -98,10 +99,42 @@ export class DrawingManager {
    * @private
    */
   syncAllDrawings() {
-    if (!canvas.scene || !canvas.scene.drawings) return;
-    
-    for (const drawing of canvas.scene.drawings) {
-      this.create(drawing);
+    if (!canvas?.ready) return;
+
+    /** @type {any[]} */
+    let docs = [];
+
+    const sceneDrawings = canvas.scene?.drawings;
+    if (sceneDrawings) {
+      if (Array.isArray(sceneDrawings)) {
+        docs = sceneDrawings;
+      } else if (Array.isArray(sceneDrawings.contents)) {
+        docs = sceneDrawings.contents;
+      } else if (typeof sceneDrawings.values === 'function') {
+        docs = Array.from(sceneDrawings.values());
+      } else if (typeof sceneDrawings[Symbol.iterator] === 'function') {
+        docs = [];
+        for (const entry of sceneDrawings) {
+          if (Array.isArray(entry) && entry.length >= 2) docs.push(entry[1]);
+          else docs.push(entry);
+        }
+      }
+    }
+
+    // Fallback: use placeables if the scene collection isn't accessible.
+    if ((!docs || docs.length === 0) && Array.isArray(canvas.drawings?.placeables)) {
+      docs = canvas.drawings.placeables.map(d => d?.document).filter(Boolean);
+    }
+
+    if (!Array.isArray(docs) || docs.length === 0) {
+      log.debug('No drawings found to sync');
+      return;
+    }
+
+    log.debug(`Syncing ${docs.length} drawings`);
+    for (const drawingDoc of docs) {
+      if (!drawingDoc?.id) continue;
+      this.create(drawingDoc);
     }
   }
 
@@ -111,20 +144,32 @@ export class DrawingManager {
    * @private
    */
   create(doc) {
-    if (this.drawings.has(doc.id)) return;
+    const drawingDoc = doc?.document ?? doc;
+    if (!drawingDoc?.id) return;
+    if (this.drawings.has(drawingDoc.id)) return;
 
     try {
+        const THREE = window.THREE;
+
+        // Resolve the corresponding placeable, if available.
+        // Depending on Foundry version and layer visibility, drawingDoc.object may be null.
+        let placeable = drawingDoc.object;
+        if (!placeable && doc?.document) placeable = doc;
+        if (!placeable && Array.isArray(canvas.drawings?.placeables)) {
+          placeable = canvas.drawings.placeables.find(d => (d?.document?.id === drawingDoc.id) || (d?.id === drawingDoc.id)) || null;
+        }
+
         // Basic implementation: Render text if it has text, otherwise render a box
         const group = new THREE.Group();
 
         // Use Drawing shape dimensions for placement, matching Foundry
-        const shape = doc.shape || {};
-        const width = shape.width || doc.width || 0;
-        const height = shape.height || doc.height || 0;
+        const shape = drawingDoc.shape || {};
+        const width = shape.width || drawingDoc.width || 0;
+        const height = shape.height || drawingDoc.height || 0;
 
         // Center of the drawing in Foundry coordinates (top-left origin, Y-down)
-        const centerX = doc.x + width / 2;
-        const centerY = doc.y + height / 2;
+        const centerX = drawingDoc.x + width / 2;
+        const centerY = drawingDoc.y + height / 2;
 
         // Convert to THREE world coordinates (Y-up) using scene height
         const sceneHeight = canvas.dimensions?.height || 10000;
@@ -135,30 +180,38 @@ export class DrawingManager {
 
         // Apply rotation around the center. Foundry rotates clockwise in screen-space;
         // we negate here to account for Y-up vs Y-down.
-        if (doc.rotation) {
-            group.rotation.z = THREE.MathUtils.degToRad(-doc.rotation);
+        if (drawingDoc.rotation) {
+            group.rotation.z = THREE.MathUtils.degToRad(-drawingDoc.rotation);
         }
 
         // 1. Text Rendering (centered in the drawing box)
-        if (doc.text && (doc.fontSize || 0) > 0) {
-            this.createText(doc, group, width, height);
+        // Foundry may render "pending" text during editing (placeable._pendingText)
+        // even if the document text has not been committed yet.
+        let displayText = drawingDoc.text;
+        if ((displayText == null || displayText === '') && placeable) {
+          if (placeable._pendingText !== undefined) displayText = placeable._pendingText;
+          else if (placeable.text?.text !== undefined) displayText = placeable.text.text;
+          else if (placeable.document?.text !== undefined) displayText = placeable.document.text;
+        }
+        if (displayText != null && String(displayText).length > 0) {
+          this.createText(drawingDoc, group, width, height, String(displayText));
         }
         
         // 2. Shape Rendering (Simple Outline)
-        this.createShape(doc, group, width, height);
+        this.createShape(drawingDoc, group, width, height);
 
         // Visibility rules: mimic Foundry isVisible behavior
         const isGM = game.user?.isGM;
-        const isAuthor = doc.isAuthor;
-        const hidden = doc.hidden;
+        const isAuthor = drawingDoc.isAuthor;
+        const hidden = drawingDoc.hidden;
         group.visible = !hidden || isAuthor || isGM;
 
         this.group.add(group);
-        this.drawings.set(doc.id, group);
+        this.drawings.set(drawingDoc.id, group);
         
-        log.debug(`Created drawing ${doc.id}`);
+        log.debug(`Created drawing ${drawingDoc.id}`);
     } catch (e) {
-        log.error(`Failed to create drawing ${doc.id}:`, e);
+        log.error(`Failed to create drawing ${drawingDoc?.id || 'unknown'}:`, e);
     }
   }
 
@@ -169,47 +222,174 @@ export class DrawingManager {
    * @param {number} width - Drawing box width
    * @param {number} height - Drawing box height
    */
-  createText(doc, group, width, height) {
-    // Create canvas for text
+  createText(doc, group, width, height, overrideText) {
+    const text = overrideText ?? (doc.text ?? '');
+    if (!text) return;
+
+    const THREE = window.THREE;
+
+    const resolution = 2;
+    const fontSize = doc.fontSize || 48;
+    const fontFamily = doc.fontFamily || globalThis.CONFIG?.defaultFontFamily || 'Signika';
+    const normalizeCssColor = (c, fallback = '#FFFFFF') => {
+      if (typeof c === 'number' && Number.isFinite(c)) {
+        return `#${Math.trunc(c).toString(16).padStart(6, '0')}`;
+      }
+      if (typeof c !== 'string') return fallback;
+      const s = c.trim();
+      if (!s) return fallback;
+      if (/^0x[0-9a-fA-F]{6}$/.test(s)) return `#${s.slice(2)}`;
+      if (/^[0-9a-fA-F]{6}$/.test(s)) return `#${s}`;
+      return s;
+    };
+
+    const fillColor = normalizeCssColor(doc.textColor, '#FFFFFF');
+    const textAlpha = doc.textAlpha != null ? doc.textAlpha : 1.0;
+
+    const stroke = Math.max(Math.round(fontSize / 32), 2);
+    const dropShadowBlur = Math.max(Math.round(fontSize / 16), 2);
+    const padding = stroke * 4;
+
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
-    
-    const fontSize = doc.fontSize || 48;
-    const fontFamily = doc.fontFamily || 'Arial';
-    const color = doc.textColor || '#FFFFFF';
-    const textAlpha = doc.textAlpha != null ? doc.textAlpha : 1.0;
-    
-    // Use the drawing box size for the text canvas so it matches Foundry's layout
-    const canvasWidth = Math.max(Math.floor(width), 1);
-    const canvasHeight = Math.max(Math.floor(height), 1);
 
-    canvas.width = canvasWidth;
-    canvas.height = canvasHeight;
-    
-    ctx.font = `${fontSize}px ${fontFamily}`;
-    ctx.fillStyle = color;
+    const fontPx = fontSize * resolution;
+    const strokePx = stroke * resolution;
+    const paddingPx = padding * resolution;
+    const wrapWidthPx = Math.max(1, Math.floor(width * resolution));
+
+    const parseHexColor = (c) => {
+      if (typeof c === 'number') {
+        const r = (c >> 16) & 0xff;
+        const g = (c >> 8) & 0xff;
+        const b = c & 0xff;
+        return { r, g, b };
+      }
+      if (typeof c !== 'string') return null;
+      const s = c.trim();
+      if (s.startsWith('#')) {
+        let hex = s.slice(1);
+        if (hex.length === 3) hex = hex.split('').map((ch) => ch + ch).join('');
+        if (hex.length !== 6) return null;
+        const v = parseInt(hex, 16);
+        if (Number.isNaN(v)) return null;
+        return { r: (v >> 16) & 0xff, g: (v >> 8) & 0xff, b: v & 0xff };
+      }
+      return null;
+    };
+
+    const rgb = parseHexColor(fillColor);
+    const luminance = rgb ? (0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b) / 255 : 1;
+    const strokeColor = luminance > 0.6 ? '#000000' : '#FFFFFF';
+
+    // First pass: measure and wrap using the final font settings.
+    ctx.font = `${fontPx}px ${fontFamily}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    
-    // Basic implementation: single-line centered text
-    ctx.fillText(doc.text, canvasWidth / 2, canvasHeight / 2);
-    
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+
+    const wrapParagraph = (paragraph) => {
+      const words = paragraph.split(/\s+/).filter((w) => w.length);
+      if (!words.length) return [''];
+      const lines = [];
+      let line = words[0];
+      for (let i = 1; i < words.length; i++) {
+        const next = `${line} ${words[i]}`;
+        if (ctx.measureText(next).width <= wrapWidthPx) {
+          line = next;
+        } else {
+          lines.push(line);
+          line = words[i];
+        }
+      }
+      lines.push(line);
+
+      const finalLines = [];
+      for (const l of lines) {
+        if (ctx.measureText(l).width <= wrapWidthPx) {
+          finalLines.push(l);
+          continue;
+        }
+        let sub = '';
+        for (const ch of l) {
+          const test = sub + ch;
+          if (ctx.measureText(test).width <= wrapWidthPx || sub.length === 0) {
+            sub = test;
+          } else {
+            finalLines.push(sub);
+            sub = ch;
+          }
+        }
+        if (sub) finalLines.push(sub);
+      }
+      return finalLines;
+    };
+
+    const paragraphs = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    const lines = [];
+    for (const p of paragraphs) {
+      const wrapped = wrapParagraph(p);
+      for (const l of wrapped) lines.push(l);
+    }
+
+    const lineHeightPx = Math.round(fontPx * 1.2);
+
+    let maxLineWidthPx = 1;
+    for (const l of lines) {
+      maxLineWidthPx = Math.max(maxLineWidthPx, Math.ceil(ctx.measureText(l).width));
+    }
+    const contentWidthPx = Math.max(1, maxLineWidthPx);
+    const contentHeightPx = Math.max(1, lines.length * lineHeightPx);
+
+    const canvasWidth = Math.max(1, Math.ceil(contentWidthPx + (paddingPx * 2)));
+    const canvasHeight = Math.max(1, Math.ceil(contentHeightPx + (paddingPx * 2)));
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+
+    // Second pass: redraw using the final canvas size.
+    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+    ctx.font = `${fontPx}px ${fontFamily}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+
+    const startY = (canvasHeight / 2) - (contentHeightPx / 2) + (lineHeightPx / 2);
+    const cx = canvasWidth / 2;
+
+    ctx.shadowColor = '#000000';
+    ctx.shadowBlur = dropShadowBlur * resolution;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+
+    ctx.lineWidth = strokePx;
+    ctx.strokeStyle = strokeColor;
+    ctx.fillStyle = fillColor;
+
+    for (let i = 0; i < lines.length; i++) {
+      const y = startY + (i * lineHeightPx);
+      ctx.strokeText(lines[i], cx, y);
+      ctx.fillText(lines[i], cx, y);
+    }
+
     const texture = new THREE.CanvasTexture(canvas);
     texture.minFilter = THREE.LinearFilter;
     texture.magFilter = THREE.LinearFilter;
+    if (THREE.SRGBColorSpace) texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
 
-    const material = new THREE.SpriteMaterial({ 
-      map: texture, 
+    const material = new THREE.SpriteMaterial({
+      map: texture,
       transparent: true,
       opacity: textAlpha,
-      depthTest: false // Keep text readable above shapes
+      depthTest: false
     });
     const sprite = new THREE.Sprite(material);
-    
-    // Scale sprite to match the drawing box, centered at group origin
-    sprite.scale.set(width, height, 1);
+    sprite.renderOrder = 1001;
+    sprite.scale.set(canvasWidth / resolution, canvasHeight / resolution, 1);
     sprite.position.set(0, 0, 0);
-    
+
     group.add(sprite);
   }
 
@@ -334,11 +514,12 @@ export class DrawingManager {
           transparent: strokeAlpha < 1.0,
           opacity: strokeAlpha,
           depthWrite: false,
-          depthTest: true,
+          depthTest: false,
           side: THREE.DoubleSide
         });
 
         const segMesh = new THREE.Mesh(segGeom, segMat);
+        segMesh.renderOrder = 1000;
         segMesh.position.set(
           (p0.x + p1.x) / 2,
           (p0.y + p1.y) / 2,
@@ -364,10 +545,11 @@ export class DrawingManager {
         color: new THREE.Color(fillColor),
         transparent: true,
         opacity: fillAlpha,
-        depthTest: true,
+        depthTest: false,
         depthWrite: false
       });
       const fillMesh = new THREE.Mesh(fillGeometry, fillMaterial);
+      fillMesh.renderOrder = 999;
       fillMesh.position.set(0, 0, 0);
       group.add(fillMesh);
     }
@@ -403,11 +585,12 @@ export class DrawingManager {
       transparent: strokeAlpha < 1.0,
       opacity: strokeAlpha,
       side: THREE.DoubleSide,
-      depthTest: true,
+      depthTest: false,
       depthWrite: false
     });
 
     const borderMesh = new THREE.Mesh(borderGeometry, borderMaterial);
+    borderMesh.renderOrder = 1000;
     borderMesh.position.set(0, 0, 0);
     group.add(borderMesh);
   }

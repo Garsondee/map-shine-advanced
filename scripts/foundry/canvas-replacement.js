@@ -27,6 +27,7 @@ import { BuildingShadowsEffect } from '../effects/BuildingShadowsEffect.js';
 import { CloudEffect } from '../effects/CloudEffect.js';
 import { DistortionManager } from '../effects/DistortionManager.js';
 import { WaterEffect } from '../effects/WaterEffect.js';
+import { MaskDebugEffect } from '../effects/MaskDebugEffect.js';
 import { MaskManager } from '../masks/MaskManager.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { FireSparksEffect } from '../particles/FireSparksEffect.js';
@@ -662,6 +663,13 @@ async function createThreeCanvas(scene) {
           });
         }
       }
+
+      if (mm && typeof mm.defineDerivedMask === 'function') {
+        mm.defineDerivedMask('indoor.scene', { op: 'invert', input: 'outdoors.scene' });
+        mm.defineDerivedMask('roofVisible.screen', { op: 'threshold', input: 'roofAlpha.screen', lo: 0.05, hi: 0.15 });
+        mm.defineDerivedMask('roofClear.screen', { op: 'invert', input: 'roofVisible.screen' });
+        mm.defineDerivedMask('precipVisibility.screen', { op: 'max', a: 'outdoors.screen', b: 'roofClear.screen' });
+      }
     } catch (e) {
       log.warn('Failed to initialize MaskManager registry for bundle masks:', e);
     }
@@ -796,6 +804,9 @@ async function createThreeCanvas(scene) {
     // Step 3.8: Register Lensflare Effect
     const lensflareEffect = new LensflareEffect();
     await effectComposer.registerEffect(lensflareEffect);
+
+    const maskDebugEffect = new MaskDebugEffect();
+    await effectComposer.registerEffect(maskDebugEffect);
 
     // Step 7: Create Sky Color Effect (post-lighting color grading for sky/outdoors)
     skyColorEffect = new SkyColorEffect();
@@ -1050,7 +1061,8 @@ async function createThreeCanvas(scene) {
         treeEffect,
         waterEffect,
         fogEffect,
-        distortionManager
+        distortionManager,
+        maskDebugEffect
       );
     } catch (e) {
       log.error('Failed to initialize UI:', e);
@@ -1110,7 +1122,7 @@ async function createThreeCanvas(scene) {
  * @param {DistortionManager} distortionManager - The centralized distortion manager
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, smellyFliesEffect, dustMotesEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, bushEffect, treeEffect, waterEffect, fogEffect, distortionManager) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, smellyFliesEffect, dustMotesEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, bushEffect, treeEffect, waterEffect, fogEffect, distortionManager, maskDebugEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -1943,6 +1955,35 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       'global'
     );
     log.info('ASCII effect wired to UI');
+  }
+
+  if (maskDebugEffect) {
+    const ids = (() => {
+      try {
+        const mm = window.MapShine?.maskManager;
+        const list = mm ? mm.listIds() : [];
+        const o = {};
+        for (const id of list) {
+          o[id] = id;
+        }
+        return o;
+      } catch (e) {
+        return null;
+      }
+    })();
+
+    const schema = MaskDebugEffect.getControlSchema(ids);
+    const onUpdate = (effectId, paramId, value) => {
+      maskDebugEffect.applyParamChange(paramId, value);
+    };
+
+    uiManager.registerEffect(
+      'mask-debug',
+      'Mask Debug',
+      schema,
+      onUpdate,
+      'debug'
+    );
   }
 
   // Expose UI manager globally for debugging

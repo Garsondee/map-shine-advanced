@@ -777,7 +777,8 @@ export class TweakpaneManager {
         water: 'Water',
         structure: 'Objects & Structures',
         particle: 'Particles & VFX',
-        global: 'Global & Post'
+        global: 'Global & Post',
+        debug: 'Debug'
       };
       const title = titles[categoryId] || categoryId;
       parent = this.ensureCategoryFolder(categoryId, title);

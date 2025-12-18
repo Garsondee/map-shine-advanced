@@ -1781,6 +1781,9 @@ export class FireSparksEffect extends EffectBase {
           if (this.particleSystemRef?.batchRenderer) {
               this.particleSystemRef.batchRenderer.deleteSystem(system);
           }
+          if (this.scene && system?.emitter) {
+              this.scene.remove(system.emitter);
+          }
           this.scene.remove(light);
           light.dispose();
           this.fires.splice(idx, 1);
@@ -1796,6 +1799,19 @@ export class FireSparksEffect extends EffectBase {
       if (this.params) {
         this.params.enabled = value;
       }
+
+      // Ensure heat distortion does not remain stuck on when the effect is disabled.
+      // update() early-returns when disabled, so we must explicitly toggle the
+      // DistortionManager source here.
+      const distortionManager = window.MapShine?.distortionManager;
+      if (distortionManager) {
+        if (!value) {
+          distortionManager.setSourceEnabled('heat', false);
+        } else {
+          distortionManager.setSourceEnabled('heat', !!this.params?.heatDistortionEnabled);
+        }
+      }
+
       // When disabled from UI, completely tear down fire systems so we can
       // profile hitching without any Quarks fire overhead. When re-enabled,
       // lazily rebuild from the last known asset bundle and map-points
@@ -2233,6 +2249,9 @@ export class FireSparksEffect extends EffectBase {
       for (const f of this.fires) {
         if (batch && f.system) {
           batch.deleteSystem(f.system);
+        }
+        if (scene && f.system?.emitter) {
+          scene.remove(f.system.emitter);
         }
         if (scene && f.light) {
           scene.remove(f.light);

@@ -2317,6 +2317,11 @@ export class TweakpaneManager {
       },
       default: 'draw',
       render: (html) => {
+        // Prevent UI clicks from leaking through to the underlying canvas.
+        html.closest('.app.window-app')?.on('pointerdown', (ev) => {
+          ev.stopPropagation();
+        });
+
         // Handle "Show existing" checkbox toggle
         html.find('[name="showExisting"]').on('change', (ev) => {
           const show = ev.target.checked;
@@ -2462,6 +2467,11 @@ export class TweakpaneManager {
       },
       default: 'close',
       render: (html) => {
+        // Prevent UI clicks from leaking through to the underlying canvas.
+        html.closest('.app.window-app')?.on('pointerdown', (ev) => {
+          ev.stopPropagation();
+        });
+
         // Handle show helpers toggle
         html.find('[name="showHelpers"]').on('change', (ev) => {
           mapPointsManager.setShowVisualHelpers(ev.target.checked);
@@ -2484,11 +2494,14 @@ export class TweakpaneManager {
             });
             
             if (confirmed) {
-              await mapPointsManager.deleteGroup(groupId);
-              ui.notifications.info('Map point group deleted');
-              // Refresh the dialog
-              dialog.close();
-              this.openMapPointsManagerDialog();
+              const ok = await mapPointsManager.deleteGroup(groupId);
+              if (ok) {
+                ui.notifications.info('Map point group deleted');
+                dialog.close();
+                this.openMapPointsManagerDialog();
+              } else {
+                ui.notifications.warn('Failed to delete map point group (insufficient permissions or save error).');
+              }
             }
           } else if (action === 'edit') {
             dialog.close();
@@ -2642,6 +2655,7 @@ export class TweakpaneManager {
           <p style="margin: 8px 0 0 0; font-size: 10px; color: #666;">
             Click "Add Points" to add more points to this group.
           </p>
+          ${pointsListHtml}
         </div>
       </form>
     `;
@@ -2694,19 +2708,50 @@ export class TweakpaneManager {
             });
             
             if (confirmed) {
-              await mapPointsManager.deleteGroup(groupId);
-              ui.notifications.info('Group deleted');
-              this.openMapPointsManagerDialog();
+              const ok = await mapPointsManager.deleteGroup(groupId);
+              if (ok) {
+                ui.notifications.info('Group deleted');
+                this.openMapPointsManagerDialog();
+              } else {
+                ui.notifications.warn('Failed to delete group (insufficient permissions or save error).');
+              }
             }
           }
         }
       },
       default: 'save',
       render: (html) => {
+        // Prevent UI clicks from leaking through to the underlying canvas.
+        html.closest('.app.window-app')?.on('pointerdown', (ev) => {
+          ev.stopPropagation();
+        });
+
         // Update intensity display
         html.find('[name="emissionIntensity"]').on('input', (ev) => {
           const val = parseFloat(ev.target.value);
           html.find('.intensity-value').text(`${(val * 100).toFixed(0)}%`);
+        });
+
+        // Remove a single point
+        html.find('.remove-point-btn').on('click', async (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const idx = parseInt(ev.currentTarget.dataset.pointIndex);
+          if (!Number.isFinite(idx)) return;
+
+          const confirmed = await Dialog.confirm({
+            title: 'Remove Point',
+            content: '<p>Remove this point from the group?</p>',
+            yes: () => true,
+            no: () => false
+          });
+          if (!confirmed) return;
+
+          await mapPointsManager.removePoint(groupId, idx);
+          ui.notifications.info('Point removed');
+
+          dialog.close();
+          this.openGroupEditDialog(groupId);
         });
 
         // Add points button

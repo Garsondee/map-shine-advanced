@@ -1076,11 +1076,13 @@ export class SmellyFliesEffect extends EffectBase {
    * @param {MapPointsManager} manager
    */
   setMapPointsSources(manager) {
+    const prevManager = this.mapPointsManager;
     this.mapPointsManager = manager;
-    
+
     // Remove old change listener
-    if (this._changeListener && manager) {
-      manager.removeChangeListener(this._changeListener);
+    
+    if (this._changeListener && prevManager) {
+      prevManager.removeChangeListener(this._changeListener);
     }
     
     // Create systems for existing areas
@@ -1195,6 +1197,32 @@ export class SmellyFliesEffect extends EffectBase {
     // AreaSpawnShape already writes world-space positions, so any emitter
     // transform would offset flies away from their intended area.
     system.emitter.position.set(0, 0, 0);
+
+    if (system.emitter) {
+      system.emitter.userData = system.emitter.userData || {};
+      const b = area && area.bounds;
+      if (b && typeof b === 'object') {
+        const minX = b.minX;
+        const minY = b.minY;
+        const maxX = b.maxX;
+        const maxY = b.maxY;
+        if ([minX, minY, maxX, maxY].every(Number.isFinite)) {
+          const cx = (minX + maxX) * 0.5;
+          const cy = (minY + maxY) * 0.5;
+          const dx = Math.max(0, maxX - minX);
+          const dy = Math.max(0, maxY - minY);
+          const r2d = 0.5 * Math.sqrt(dx * dx + dy * dy);
+          const sceneComposer = window.MapShine?.sceneComposer;
+          const groundZ = (sceneComposer && typeof sceneComposer.groundZ === 'number') ? sceneComposer.groundZ : 1000;
+          const flyHeight = cfg?.flying?.flyHeight;
+          const vz = Math.max(200, (typeof flyHeight === 'number' && Number.isFinite(flyHeight)) ? flyHeight * 10 : 800);
+          const cz = groundZ + vz * 0.5;
+          const radius = Math.sqrt(r2d * r2d + (vz * 0.5) * (vz * 0.5));
+          system.emitter.userData.msCullCenter = { x: cx, y: cy, z: cz };
+          system.emitter.userData.msCullRadius = radius;
+        }
+      }
+    }
     
     // Add to scene and batch renderer
     this.scene.add(system.emitter);
@@ -1293,6 +1321,29 @@ export class SmellyFliesEffect extends EffectBase {
     // Same reasoning as area systems: emitter stays at origin so the
     // AreaSpawnShape's world-space positions are not additionally offset.
     system.emitter.position.set(0, 0, 0);
+
+    if (system.emitter) {
+      system.emitter.userData = system.emitter.userData || {};
+      const minX = bounds.minX;
+      const minY = bounds.minY;
+      const maxX = bounds.maxX;
+      const maxY = bounds.maxY;
+      if ([minX, minY, maxX, maxY].every(Number.isFinite)) {
+        const cx = (minX + maxX) * 0.5;
+        const cy = (minY + maxY) * 0.5;
+        const dx = Math.max(0, maxX - minX);
+        const dy = Math.max(0, maxY - minY);
+        const r2d = 0.5 * Math.sqrt(dx * dx + dy * dy);
+        const sceneComposer = window.MapShine?.sceneComposer;
+        const groundZ = (sceneComposer && typeof sceneComposer.groundZ === 'number') ? sceneComposer.groundZ : 1000;
+        const flyHeight = cfg?.flying?.flyHeight;
+        const vz = Math.max(200, (typeof flyHeight === 'number' && Number.isFinite(flyHeight)) ? flyHeight * 10 : 800);
+        const cz = groundZ + vz * 0.5;
+        const radius = Math.sqrt(r2d * r2d + (vz * 0.5) * (vz * 0.5));
+        system.emitter.userData.msCullCenter = { x: cx, y: cy, z: cz };
+        system.emitter.userData.msCullRadius = radius;
+      }
+    }
     
     this.scene.add(system.emitter);
     this.batchRenderer.addSystem(system);

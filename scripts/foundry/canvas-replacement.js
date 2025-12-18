@@ -468,6 +468,7 @@ function onCanvasTearDown(canvas) {
     window.MapShine.wallManager = null;
     window.MapShine.doorMeshManager = null;
     window.MapShine.fogEffect = null;
+    window.MapShine.lightingEffect = null;
     window.MapShine.renderLoop = null;
     window.MapShine.cameraFollower = null;
     window.MapShine.pixiInputBridge = null;
@@ -475,6 +476,9 @@ function onCanvasTearDown(canvas) {
     window.MapShine.gridRenderer = null;
     window.MapShine.mapPointsManager = null;
     window.MapShine.frameCoordinator = null;
+    window.MapShine.waterEffect = null;
+    window.MapShine.distortionManager = null;
+    window.MapShine.cloudEffect = null;
     // Keep renderer and capabilities - they're reusable
   }
 }
@@ -780,6 +784,8 @@ async function createThreeCanvas(scene) {
     lightingEffect = new LightingEffect();
     await effectComposer.registerEffect(lightingEffect);
 
+    if (window.MapShine) window.MapShine.lightingEffect = lightingEffect;
+
     // Step 3.6.25: Register Animated Bushes (surface overlay, before shadows)
     const bushEffect = new BushEffect();
     await effectComposer.registerEffect(bushEffect);
@@ -799,6 +805,8 @@ async function createThreeCanvas(scene) {
     // Step 3.6.7: Register Cloud Effect (procedural cloud shadows)
     const cloudEffect = new CloudEffect();
     await effectComposer.registerEffect(cloudEffect);
+
+    if (window.MapShine) window.MapShine.cloudEffect = cloudEffect;
 
     // Step 3.6.8: Register Distortion Manager (centralized screen-space distortions)
     const distortionManager = new DistortionManager();
@@ -997,8 +1005,10 @@ async function createThreeCanvas(scene) {
     mapShine.smellyFliesEffect = smellyFliesEffect; // Smart particle swarms
     mapShine.dustMotesEffect = dustMotesEffect;
     mapShine.lightningEffect = lightningEffect;
+    mapShine.waterEffect = waterEffect;
     mapShine.fogEffect = fogEffect; // Fog of War (world-space plane mesh)
     mapShine.skyColorEffect = skyColorEffect; // NEW: Expose SkyColorEffect
+    mapShine.distortionManager = distortionManager;
     mapShine.cameraFollower = cameraFollower; // Three.js camera follows PIXI
     mapShine.pixiInputBridge = pixiInputBridge; // Pan/zoom input bridge
     mapShine.tokenManager = tokenManager; // NEW: Expose token manager for diagnostics

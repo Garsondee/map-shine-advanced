@@ -131,6 +131,21 @@ export class InteractionManager {
     log.debug('InteractionManager created');
   }
 
+  _isEventFromUI(event) {
+    const target = event?.target;
+    if (!(target instanceof Element)) return false;
+
+    if (target.closest('.window-app, .app.window-app, #ui, #sidebar, #navigation')) return true;
+
+    if (target.closest('button, a, input, select, textarea, label')) return true;
+
+    if (target.closest('#map-shine-ui, #map-shine-texture-manager, #map-shine-loading-overlay')) return true;
+
+    if (target.closest('#map-point-context-menu')) return true;
+
+    return false;
+  }
+
   /**
    * Initialize event listeners
    * 
@@ -387,10 +402,15 @@ export class InteractionManager {
    * @param {boolean} [snapToGrid=false] - Whether to snap to grid by default
    */
   startMapPointDrawing(effectTarget, groupType = 'area', snapToGrid = false) {
+    if (this.mapPointDraw.active) {
+      this.cancelMapPointDrawing();
+    }
+
     this.mapPointDraw.active = true;
     this.mapPointDraw.effectTarget = effectTarget;
     this.mapPointDraw.groupType = groupType;
     this.mapPointDraw.points = [];
+    this.mapPointDraw.editingGroupId = null;
     this.mapPointDraw.snapToGrid = snapToGrid;
     this.mapPointDraw.previewGroup.visible = true;
 
@@ -908,7 +928,7 @@ export class InteractionManager {
    */
   _showMapPointContextMenu(groupId, clientX, clientY) {
     const mapPointsManager = window.MapShine?.mapPointsManager;
-    const tweakpaneManager = window.MapShine?.tweakpaneManager;
+    const uiManager = window.MapShine?.uiManager;
     
     if (!mapPointsManager) return;
     
@@ -979,8 +999,8 @@ export class InteractionManager {
         
         switch (item.action) {
           case 'edit':
-            if (tweakpaneManager?.openGroupEditDialog) {
-              tweakpaneManager.openGroupEditDialog(groupId);
+            if (uiManager?.openGroupEditDialog) {
+              uiManager.openGroupEditDialog(groupId);
             }
             break;
             
@@ -1021,8 +1041,12 @@ export class InteractionManager {
               no: () => false
             });
             if (confirmed) {
-              await mapPointsManager.deleteGroup(groupId);
-              ui.notifications.info('Group deleted');
+              const ok = await mapPointsManager.deleteGroup(groupId);
+              if (ok) {
+                ui.notifications.info('Group deleted');
+              } else {
+                ui.notifications.warn('Failed to delete group (insufficient permissions or save error).');
+              }
             }
             break;
         }
@@ -1284,6 +1308,7 @@ export class InteractionManager {
   onPointerDown(event) {
     try {
         if (event.button !== 0 && event.button !== 2) return;
+        if (this._isEventFromUI(event)) return;
 
         // Handle Map Point Drawing Mode (takes priority over other interactions)
         if (this.mapPointDraw.active && event.button === 0) {
@@ -1316,9 +1341,9 @@ export class InteractionManager {
               event.preventDefault();
               event.stopPropagation();
               // Open edit dialog for this group
-              const tweakpaneManager = window.MapShine?.tweakpaneManager;
-              if (tweakpaneManager?.openGroupEditDialog) {
-                tweakpaneManager.openGroupEditDialog(clickedGroupId);
+              const uiManager = window.MapShine?.uiManager;
+              if (uiManager?.openGroupEditDialog) {
+                uiManager.openGroupEditDialog(clickedGroupId);
               }
               return;
             }

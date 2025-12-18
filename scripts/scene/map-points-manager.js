@@ -114,8 +114,34 @@ export class MapPointsManager {
     
     /** @type {Function[]} */
     this.changeListeners = [];
+
+    /** @type {Promise<void>} */
+    this._opChain = Promise.resolve();
+
+    /** @type {Array<{hook: string, fn: Function}>} */
+    this._hookRegistrations = [];
+
+    this._idCounter = 0;
     
     log.debug('MapPointsManager created');
+  }
+
+  _enqueueOp(fn) {
+    this._opChain = this._opChain.catch(() => {}).then(() => fn());
+    return this._opChain;
+  }
+
+  _canEditScene() {
+    const scene = canvas?.scene;
+    const user = game?.user;
+    if (!scene || !user) return false;
+    if (user.isGM) return true;
+    try {
+      if (typeof scene.canUserModify === 'function') return scene.canUserModify(user, 'update');
+    } catch (_) {
+      return false;
+    }
+    return false;
   }
 
   /**
@@ -145,61 +171,108 @@ export class MapPointsManager {
    * @private
    */
   async loadFromScene() {
-    const scene = canvas?.scene;
-    if (!scene) {
-      log.warn('No active scene, skipping map points load');
-      return;
-    }
+    return this._enqueueOp(async () => {
+      const scene = canvas?.scene;
+      if (!scene) {
+        log.warn('No active scene, skipping map points load');
+        this.groups.clear();
+        this.clearVisualObjects();
+        return;
+      }
 
-    // Try to get groups from scene flags
-    // First check current module namespace, then fall back to legacy v1.x namespace
-    let groupsData = null;
-    let fromLegacy = false;
-    
-    try {
-      groupsData = scene.getFlag(MODULE_ID, 'mapPointGroups');
-    } catch (e) {
-      // Flag namespace not registered, this is fine
-      log.debug('Current module flag namespace not available');
-    }
-    
-    // If not found in current namespace, try legacy namespace
-    if (!groupsData) {
+      let v2Initialized = false;
       try {
-        groupsData = scene.getFlag(LEGACY_MODULE_ID, 'mapPointGroups');
+        const initFlag = scene.getFlag(MODULE_ID, 'mapPointGroupsInitialized');
+        v2Initialized = Boolean(initFlag);
+      } catch (_) {
+        v2Initialized = false;
+      }
+
+      let groupsData = null;
+      let fromLegacy = false;
+
+      try {
+        groupsData = scene.getFlag(MODULE_ID, 'mapPointGroups');
+      } catch (e) {
+        log.debug('Current module flag namespace not available');
+      }
+
+      if (!groupsData && v2Initialized) {
+        groupsData = {};
+      }
+
+      if (!groupsData && !v2Initialized) {
+        try {
+          groupsData = scene.getFlag(LEGACY_MODULE_ID, 'mapPointGroups');
+        } catch (e) {
+          groupsData = scene?.flags?.[LEGACY_MODULE_ID]?.mapPointGroups;
+        }
+
         if (groupsData) {
           fromLegacy = true;
           log.info('Found map point groups in legacy namespace, will migrate');
         }
-      } catch (e) {
-        // Legacy namespace not available either, this is fine
-        log.debug('Legacy module flag namespace not available');
       }
-    }
-    
-    if (!groupsData) {
-      log.debug('No map point groups found in scene flags');
-      return;
-    }
 
-    // Convert object to Map and migrate if needed
-    let needsMigration = false;
-    
-    for (const [id, group] of Object.entries(groupsData)) {
-      const migratedGroup = this.migrateGroup(group);
-      if (migratedGroup.version !== group.version) {
-        needsMigration = true;
+      log.debug(`Loading map points: v2Initialized=${v2Initialized}, source=${fromLegacy ? 'legacy' : 'current'}`);
+
+      const prevShowHelpers = this.showVisualHelpers;
+      this.groups.clear();
+      this.clearVisualObjects();
+
+      if (!groupsData || typeof groupsData !== 'object') {
+        log.debug('No map point groups found in scene flags');
+        return;
       }
-      this.groups.set(id, migratedGroup);
-    }
 
-    // Save migrated data to current namespace if migrating from legacy or version changed
-    if (needsMigration || fromLegacy) {
-      log.info(`Migrating map point groups to v2 format${fromLegacy ? ' (from legacy namespace)' : ''}`);
-      await this.saveToScene();
-    }
+      const utils = globalThis.foundry?.utils;
+      const raw = typeof utils?.deepClone === 'function' ? utils.deepClone(groupsData) : groupsData;
 
-    log.info(`Loaded ${this.groups.size} map point groups from scene${fromLegacy ? ' (from legacy)' : ''}`);
+      let needsMigration = false;
+
+      for (const [id, group] of Object.entries(raw)) {
+        if (!group || typeof group !== 'object') {
+          needsMigration = true;
+          continue;
+        }
+
+        const migratedGroup = this.migrateGroup(group);
+        migratedGroup.id = id;
+
+        if (!Array.isArray(migratedGroup.points)) migratedGroup.points = [];
+        migratedGroup.points = migratedGroup.points
+          .filter(p => p && typeof p === 'object')
+          .map(p => ({ x: Number(p.x), y: Number(p.y) }))
+          .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+        if (migratedGroup.version !== (group.version ?? 0)) needsMigration = true;
+        if (!migratedGroup.type || !['point', 'line', 'area', 'rope'].includes(migratedGroup.type)) {
+          migratedGroup.type = 'point';
+          needsMigration = true;
+        }
+        if (typeof migratedGroup.label !== 'string') {
+          migratedGroup.label = String(migratedGroup.label ?? 'New Group');
+          needsMigration = true;
+        }
+
+        this.groups.set(id, migratedGroup);
+      }
+
+      if (needsMigration || fromLegacy) {
+        log.info(`Migrating map point groups to v2 format${fromLegacy ? ' (from legacy namespace)' : ''}`);
+        await this._saveToSceneNow();
+      }
+
+      if (prevShowHelpers) {
+        const editingGroupId = window.MapShine?.interactionManager?.mapPointDraw?.editingGroupId;
+        for (const [id, group] of this.groups) {
+          if (editingGroupId && id === editingGroupId) continue;
+          this.createVisualHelper(id, group);
+        }
+      }
+
+      log.info(`Loaded ${this.groups.size} map point groups from scene${fromLegacy ? ' (from legacy)' : ''}`);
+    });
   }
 
   /**
@@ -209,8 +282,27 @@ export class MapPointsManager {
    * @private
    */
   migrateGroup(group) {
+    if (!group || typeof group !== 'object') {
+      return {
+        id: foundry.utils.randomID(),
+        label: 'New Group',
+        type: 'point',
+        points: [],
+        isBroken: false,
+        reason: '',
+        isEffectSource: false,
+        effectTarget: '',
+        emission: {
+          intensity: 1.0,
+          falloff: { enabled: false, strength: 0.5 }
+        },
+        version: CURRENT_VERSION,
+        metadata: {}
+      };
+    }
+
     // Already v2+
-    if (group.version >= CURRENT_VERSION) {
+    if ((group.version ?? 0) >= CURRENT_VERSION) {
       return group;
     }
 
@@ -246,20 +338,38 @@ export class MapPointsManager {
    * @private
    */
   async saveToScene() {
+    return this._enqueueOp(() => this._saveToSceneNow());
+  }
+
+  async _saveToSceneNow() {
     const scene = canvas?.scene;
     if (!scene) {
       log.warn('No active scene, cannot save map points');
-      return;
+      return false;
     }
 
-    // Convert Map to plain object for storage
+    if (!this._canEditScene()) {
+      ui?.notifications?.warn?.('You do not have permission to modify map points on this scene.');
+      return false;
+    }
+
     const groupsData = {};
     for (const [id, group] of this.groups) {
-      groupsData[id] = group;
+      if (!group || typeof group !== 'object') continue;
+      groupsData[id] = { ...group, id };
     }
 
-    await scene.setFlag(MODULE_ID, 'mapPointGroups', groupsData);
-    log.debug('Map point groups saved to scene');
+    try {
+      await scene.unsetFlag(MODULE_ID, 'mapPointGroups');
+      await scene.setFlag(MODULE_ID, 'mapPointGroups', groupsData);
+      await scene.setFlag(MODULE_ID, 'mapPointGroupsInitialized', true);
+      log.debug('Map point groups saved to scene');
+      return true;
+    } catch (e) {
+      log.error('Failed to save map point groups to scene:', e);
+      ui?.notifications?.error?.('Failed to save map points to the scene. See console for details.');
+      return false;
+    }
   }
 
   /**
@@ -267,28 +377,29 @@ export class MapPointsManager {
    * @private
    */
   setupHooks() {
-    // Listen for scene flag updates
-    Hooks.on('updateScene', (scene, changes, options, userId) => {
-      // Only process if this is the current scene
+    const updateSceneHandler = async (scene, changes) => {
       if (scene.id !== canvas?.scene?.id) return;
-      
-      // Check if mapPointGroups flag was updated (in either namespace)
+
       const currentUpdated = changes.flags?.[MODULE_ID]?.mapPointGroups !== undefined;
       const legacyUpdated = changes.flags?.[LEGACY_MODULE_ID]?.mapPointGroups !== undefined;
-      
+
       if (currentUpdated || legacyUpdated) {
         log.debug('Map point groups updated via scene flag');
-        this.loadFromScene();
+        await this.loadFromScene();
         this.notifyListeners();
       }
-    });
+    };
 
-    // Listen for canvas ready to reload groups
-    Hooks.on('canvasReady', () => {
-      this.groups.clear();
-      this.clearVisualObjects();
-      this.loadFromScene();
-    });
+    Hooks.on('updateScene', updateSceneHandler);
+    this._hookRegistrations.push({ hook: 'updateScene', fn: updateSceneHandler });
+
+    const canvasReadyHandler = async () => {
+      await this.loadFromScene();
+      this.notifyListeners();
+    };
+
+    Hooks.on('canvasReady', canvasReadyHandler);
+    this._hookRegistrations.push({ hook: 'canvasReady', fn: canvasReadyHandler });
   }
 
   /**
@@ -538,30 +649,56 @@ export class MapPointsManager {
    * @returns {Promise<MapPointGroup>}
    */
   async createGroup(groupData) {
-    const id = groupData.id || foundry.utils.randomID();
-    
-    const group = this.migrateGroup({
-      id,
-      label: groupData.label || 'New Group',
-      type: groupData.type || 'point',
-      points: groupData.points || [],
-      isBroken: false,
-      reason: '',
-      isEffectSource: groupData.isEffectSource ?? false,
-      effectTarget: groupData.effectTarget || '',
-      emission: groupData.emission || {
-        intensity: 1.0,
-        falloff: { enabled: false, strength: 0.5 }
-      },
-      ...groupData
-    });
+    return this._enqueueOp(async () => {
+      if (!this._canEditScene()) {
+        ui?.notifications?.warn?.('You do not have permission to create map points on this scene.');
+        throw new Error('Insufficient permissions to create map point group');
+      }
 
-    this.groups.set(id, group);
-    await this.saveToScene();
-    this.notifyListeners();
-    
-    log.info(`Created map point group: ${id} (${group.label})`);
-    return group;
+      let id = groupData.id;
+      if (typeof id !== 'string' || id.length === 0) {
+        const base = foundry.utils.randomID();
+        const t = Date.now().toString(36);
+        const n = (this._idCounter = (this._idCounter + 1) | 0);
+        id = `${base}_${t}_${n}`;
+      }
+      while (this.groups.has(id)) {
+        const base = foundry.utils.randomID();
+        const t = Date.now().toString(36);
+        const n = (this._idCounter = (this._idCounter + 1) | 0);
+        id = `${base}_${t}_${n}`;
+      }
+
+      const group = this.migrateGroup({
+        id,
+        label: groupData.label || 'New Group',
+        type: groupData.type || 'point',
+        points: groupData.points || [],
+        isBroken: false,
+        reason: '',
+        isEffectSource: groupData.isEffectSource ?? false,
+        effectTarget: groupData.effectTarget || '',
+        emission: groupData.emission || {
+          intensity: 1.0,
+          falloff: { enabled: false, strength: 0.5 }
+        },
+        ...groupData
+      });
+
+      group.id = id;
+
+      this.groups.set(id, group);
+      const ok = await this._saveToSceneNow();
+      if (!ok) {
+        this.groups.delete(id);
+        throw new Error('Failed to save map point group to scene');
+      }
+
+      this.notifyListeners();
+
+      log.info(`Created map point group: ${id} (${group.label})`);
+      return group;
+    });
   }
 
   /**
@@ -571,28 +708,52 @@ export class MapPointsManager {
    * @returns {Promise<MapPointGroup|null>}
    */
   async updateGroup(id, updates) {
-    const group = this.groups.get(id);
-    if (!group) {
-      log.warn(`Cannot update non-existent group: ${id}`);
-      return null;
-    }
+    return this._enqueueOp(async () => {
+      if (!this._canEditScene()) {
+        ui?.notifications?.warn?.('You do not have permission to edit map points on this scene.');
+        return null;
+      }
 
-    // If the caller explicitly clears points, treat that as deleting the group.
-    // This matches user expectations that "removing the map points" removes the group itself.
-    if (Object.prototype.hasOwnProperty.call(updates, 'points') && Array.isArray(updates.points) && updates.points.length === 0) {
-      await this.deleteGroup(id);
-      return null;
-    }
+      const group = this.groups.get(id);
+      if (!group) {
+        log.warn(`Cannot update non-existent group: ${id}`);
+        return null;
+      }
 
-    // Merge updates
-    const updatedGroup = { ...group, ...updates };
-    this.groups.set(id, updatedGroup);
-    
-    await this.saveToScene();
-    this.notifyListeners();
-    
-    log.debug(`Updated map point group: ${id}`);
-    return updatedGroup;
+      // If the caller explicitly clears points, treat that as deleting the group.
+      // This matches user expectations that "removing the map points" removes the group itself.
+      if (Object.prototype.hasOwnProperty.call(updates, 'points') && Array.isArray(updates.points) && updates.points.length === 0) {
+        if (!this._canEditScene()) return null;
+        if (!this.groups.has(id)) return null;
+        const prev = group;
+        this.groups.delete(id);
+        this.removeVisualObject(id);
+        const ok = await this._saveToSceneNow();
+        if (!ok) {
+          this.groups.set(id, prev);
+          if (this.showVisualHelpers) this.createVisualHelper(id, prev);
+          return prev;
+        }
+        this.notifyListeners();
+        log.info(`Deleted map point group: ${id}`);
+        return null;
+      }
+
+      const prev = group;
+      const updatedGroup = { ...group, ...updates };
+      this.groups.set(id, updatedGroup);
+
+      const ok = await this._saveToSceneNow();
+      if (!ok) {
+        this.groups.set(id, prev);
+        return prev;
+      }
+
+      this.notifyListeners();
+
+      log.debug(`Updated map point group: ${id}`);
+      return updatedGroup;
+    });
   }
 
   /**
@@ -601,19 +762,32 @@ export class MapPointsManager {
    * @returns {Promise<boolean>}
    */
   async deleteGroup(id) {
-    if (!this.groups.has(id)) {
-      log.warn(`Cannot delete non-existent group: ${id}`);
-      return false;
-    }
+    return this._enqueueOp(async () => {
+      if (!this._canEditScene()) {
+        ui?.notifications?.warn?.('You do not have permission to delete map points on this scene.');
+        return false;
+      }
 
-    this.groups.delete(id);
-    this.removeVisualObject(id);
-    
-    await this.saveToScene();
-    this.notifyListeners();
-    
-    log.info(`Deleted map point group: ${id}`);
-    return true;
+      if (!this.groups.has(id)) {
+        log.warn(`Cannot delete non-existent group: ${id}`);
+        return false;
+      }
+
+      const prev = this.groups.get(id);
+      this.groups.delete(id);
+      this.removeVisualObject(id);
+
+      const ok = await this._saveToSceneNow();
+      if (!ok) {
+        this.groups.set(id, prev);
+        if (this.showVisualHelpers) this.createVisualHelper(id, prev);
+        return false;
+      }
+
+      this.notifyListeners();
+      log.info(`Deleted map point group: ${id}`);
+      return true;
+    });
   }
 
   /**
@@ -623,19 +797,32 @@ export class MapPointsManager {
    * @returns {Promise<boolean>}
    */
   async addPoint(groupId, point) {
-    const group = this.groups.get(groupId);
-    if (!group) {
-      log.warn(`Cannot add point to non-existent group: ${groupId}`);
-      return false;
-    }
+    return this._enqueueOp(async () => {
+      if (!this._canEditScene()) {
+        ui?.notifications?.warn?.('You do not have permission to edit map points on this scene.');
+        return false;
+      }
 
-    group.points = group.points || [];
-    group.points.push(point);
-    
-    await this.saveToScene();
-    this.notifyListeners();
-    
-    return true;
+      const group = this.groups.get(groupId);
+      if (!group) {
+        log.warn(`Cannot add point to non-existent group: ${groupId}`);
+        return false;
+      }
+
+      const prevPoints = Array.isArray(group.points) ? group.points.slice() : [];
+      group.points = group.points || [];
+      group.points.push(point);
+
+      const ok = await this._saveToSceneNow();
+      if (!ok) {
+        group.points = prevPoints;
+        return false;
+      }
+
+      this.notifyListeners();
+
+      return true;
+    });
   }
 
   /**
@@ -645,23 +832,43 @@ export class MapPointsManager {
    * @returns {Promise<boolean>}
    */
   async removePoint(groupId, pointIndex) {
-    const group = this.groups.get(groupId);
-    if (!group || !group.points || pointIndex >= group.points.length) {
-      return false;
-    }
+    return this._enqueueOp(async () => {
+      if (!this._canEditScene()) {
+        ui?.notifications?.warn?.('You do not have permission to edit map points on this scene.');
+        return false;
+      }
 
-    group.points.splice(pointIndex, 1);
+      const group = this.groups.get(groupId);
+      if (!group || !group.points || pointIndex >= group.points.length) {
+        return false;
+      }
 
-    // If the last point was removed, delete the group entirely.
-    if (group.points.length === 0) {
-      await this.deleteGroup(groupId);
+      const prev = { ...group, points: group.points.slice() };
+      group.points.splice(pointIndex, 1);
+
+      if (group.points.length === 0) {
+        this.groups.delete(groupId);
+        this.removeVisualObject(groupId);
+        const ok = await this._saveToSceneNow();
+        if (!ok) {
+          this.groups.set(groupId, prev);
+          if (this.showVisualHelpers) this.createVisualHelper(groupId, prev);
+          return false;
+        }
+        this.notifyListeners();
+        log.info(`Deleted map point group: ${groupId}`);
+        return true;
+      }
+
+      const ok = await this._saveToSceneNow();
+      if (!ok) {
+        this.groups.set(groupId, prev);
+        return false;
+      }
+
+      this.notifyListeners();
       return true;
-    }
-    
-    await this.saveToScene();
-    this.notifyListeners();
-    
-    return true;
+    });
   }
 
   /**
@@ -718,6 +925,8 @@ export class MapPointsManager {
   createVisualHelpers() {
     const THREE = window.THREE;
     if (!THREE) return;
+
+    this.clearVisualObjects();
 
     for (const [id, group] of this.groups) {
       this.createVisualHelper(id, group);
@@ -968,6 +1177,15 @@ export class MapPointsManager {
    * Dispose of all resources
    */
   dispose() {
+    for (const { hook, fn } of this._hookRegistrations) {
+      try {
+        Hooks.off(hook, fn);
+      } catch (_) {
+        // Ignore
+      }
+    }
+    this._hookRegistrations = [];
+
     this.clearVisualObjects();
     this.groups.clear();
     this.changeListeners = [];

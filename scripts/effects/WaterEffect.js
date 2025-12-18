@@ -58,6 +58,7 @@ export class WaterEffect extends EffectBase {
     this._dmPrevDebugShowMask = false;
 
     this._waterMaskFlipY = 0.0;
+    this._waterMaskUseAlpha = 0.0;
   }
 
   static getControlSchema() {
@@ -262,9 +263,46 @@ export class WaterEffect extends EffectBase {
       this.waterMask.magFilter = THREE.LinearFilter;
       this.waterMask.generateMipmaps = false;
 
-      this._waterMaskFlipY = this.waterMask.flipY ? 1.0 : 0.0;
-      if (this.waterMask.flipY) {
-        this.waterMask.flipY = false;
+      this._waterMaskFlipY = 0.0;
+      if (!this.waterMask.flipY) {
+        this.waterMask.flipY = true;
+      }
+
+      try {
+        const img = this.waterMask.image;
+        if (img && (img instanceof HTMLImageElement || img instanceof HTMLCanvasElement || img instanceof ImageBitmap || img instanceof OffscreenCanvas || img instanceof HTMLVideoElement)) {
+          const canvas = document.createElement('canvas');
+          const w = 32;
+          const h = 32;
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, w, h);
+            const data = ctx.getImageData(0, 0, w, h).data;
+            let rMin = 255;
+            let rMax = 0;
+            let aMin = 255;
+            let aMax = 0;
+            for (let i = 0; i < data.length; i += 4) {
+              const r = data[i];
+              const a = data[i + 3];
+              if (r < rMin) rMin = r;
+              if (r > rMax) rMax = r;
+              if (a < aMin) aMin = a;
+              if (a > aMax) aMax = a;
+            }
+            const rRange = rMax - rMin;
+            const aRange = aMax - aMin;
+            if (aRange > rRange + 8) {
+              this._waterMaskUseAlpha = 1.0;
+            } else {
+              this._waterMaskUseAlpha = 0.0;
+            }
+          }
+        }
+      } catch (_) {
+        this._waterMaskUseAlpha = 0.0;
       }
 
       this.waterMask.needsUpdate = true;
@@ -368,6 +406,7 @@ export class WaterEffect extends EffectBase {
         speed,
 
         maskFlipY: this._waterMaskFlipY,
+        maskUseAlpha: this._waterMaskUseAlpha,
 
         // Chromatic refraction (RGB split) in DistortionManager apply pass
         chromaEnabled,
@@ -399,6 +438,7 @@ export class WaterEffect extends EffectBase {
         frequency,
         speed,
         maskFlipY: this._waterMaskFlipY,
+        maskUseAlpha: this._waterMaskUseAlpha,
         chromaEnabled,
         chroma: chromaUi,
         chromaMaxPixels,

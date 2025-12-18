@@ -440,6 +440,8 @@ export class DistortionManager extends EffectBase {
         // Future source slots
         tWaterMask: { value: null },
         uWaterEnabled: { value: 0.0 },
+        uWaterMaskFlipY: { value: 0.0 },
+        uWaterMaskUseAlpha: { value: 0.0 },
         uWaterIntensity: { value: 0.02 },
         uWaterFrequency: { value: 4.0 },
         uWaterSpeed: { value: 1.0 },
@@ -484,6 +486,8 @@ export class DistortionManager extends EffectBase {
         // Water source
         uniform sampler2D tWaterMask;
         uniform float uWaterEnabled;
+        uniform float uWaterMaskFlipY;
+        uniform float uWaterMaskUseAlpha;
         uniform float uWaterIntensity;
         uniform float uWaterFrequency;
         uniform float uWaterSpeed;
@@ -529,6 +533,10 @@ export class DistortionManager extends EffectBase {
           vec2 b = step(uv, vec2(1.0));
           return a.x * a.y * b.x * b.y;
         }
+
+        float waterMaskValue(vec4 s) {
+          return (uWaterMaskUseAlpha > 0.5) ? s.a : s.r;
+        }
         
         void main() {
           vec2 totalOffset = vec2(0.0);
@@ -562,8 +570,10 @@ export class DistortionManager extends EffectBase {
           
           // Water distortion (future)
           if (uWaterEnabled > 0.5) {
-            vec2 waterUv = vec2(sceneUv.x, sceneUv.y);
-            float waterMask = texture2D(tWaterMask, waterUv).r * sceneInBounds;
+            float waterY = (uWaterMaskFlipY > 0.5) ? (1.0 - sceneUv.y) : sceneUv.y;
+            vec2 waterUv = vec2(sceneUv.x, waterY);
+            vec4 waterSample = texture2D(tWaterMask, waterUv);
+            float waterMask = waterMaskValue(waterSample) * sceneInBounds;
             // Use waterUv for noise coords so ripples stay pinned to the map
             // and aligned to the mask's UV convention.
             vec2 waterOffset = waterDistortion(waterUv, uTime, uWaterIntensity, uWaterFrequency, uWaterSpeed);
@@ -615,6 +625,8 @@ export class DistortionManager extends EffectBase {
         tScene: { value: null },
         tDistortion: { value: null },
         tWaterMask: { value: null },
+        uWaterMaskFlipY: { value: 0.0 },
+        uWaterMaskUseAlpha: { value: 0.0 },
         uWaterMaskTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
         tOutdoorsMask: { value: null },
         tCloudShadow: { value: null },
@@ -667,6 +679,8 @@ export class DistortionManager extends EffectBase {
         uniform sampler2D tScene;
         uniform sampler2D tDistortion;
         uniform sampler2D tWaterMask;
+        uniform float uWaterMaskFlipY;
+        uniform float uWaterMaskUseAlpha;
         uniform vec2 uWaterMaskTexelSize;
         uniform sampler2D tOutdoorsMask;
         uniform sampler2D tCloudShadow;
@@ -732,6 +746,10 @@ export class DistortionManager extends EffectBase {
           return clamp(uv, vec2(0.001), vec2(0.999));
         }
 
+        float waterMaskValue(vec4 s) {
+          return (uWaterMaskUseAlpha > 0.5) ? s.a : s.r;
+        }
+
         float causticsPattern(vec2 sceneUv, float time, float scale, float speed, float sharpness) {
           vec2 p = sceneUv * scale;
           float t = time * speed;
@@ -754,28 +772,45 @@ export class DistortionManager extends EffectBase {
         float shorelineFactor(sampler2D tex, vec2 uv) {
           vec2 duvDx = dFdx(uv);
           vec2 duvDy = dFdy(uv);
-          float wx1 = texture2D(tex, safeClampUv(uv + duvDx)).r;
-          float wx2 = texture2D(tex, safeClampUv(uv - duvDx)).r;
-          float wy1 = texture2D(tex, safeClampUv(uv + duvDy)).r;
-          float wy2 = texture2D(tex, safeClampUv(uv - duvDy)).r;
+          vec4 sx1 = texture2D(tex, safeClampUv(uv + duvDx));
+          vec4 sx2 = texture2D(tex, safeClampUv(uv - duvDx));
+          vec4 sy1 = texture2D(tex, safeClampUv(uv + duvDy));
+          vec4 sy2 = texture2D(tex, safeClampUv(uv - duvDy));
+          float wx1 = waterMaskValue(sx1);
+          float wx2 = waterMaskValue(sx2);
+          float wy1 = waterMaskValue(sy1);
+          float wy2 = waterMaskValue(sy2);
           float grad = abs(wx1 - wx2) + abs(wy1 - wy2);
           return clamp(grad * 4.0, 0.0, 1.0);
         }
 
         float blur13Tap(sampler2D tex, vec2 uv, vec2 stepUv) {
-          float c = texture2D(tex, safeClampUv(uv)).r;
-          float n = texture2D(tex, safeClampUv(uv + vec2(0.0, stepUv.y))).r;
-          float s = texture2D(tex, safeClampUv(uv - vec2(0.0, stepUv.y))).r;
-          float e = texture2D(tex, safeClampUv(uv + vec2(stepUv.x, 0.0))).r;
-          float w = texture2D(tex, safeClampUv(uv - vec2(stepUv.x, 0.0))).r;
-          float ne = texture2D(tex, safeClampUv(uv + vec2(stepUv.x, stepUv.y))).r;
-          float nw = texture2D(tex, safeClampUv(uv + vec2(-stepUv.x, stepUv.y))).r;
-          float se = texture2D(tex, safeClampUv(uv + vec2(stepUv.x, -stepUv.y))).r;
-          float sw = texture2D(tex, safeClampUv(uv + vec2(-stepUv.x, -stepUv.y))).r;
-          float n2 = texture2D(tex, safeClampUv(uv + vec2(0.0, stepUv.y * 2.0))).r;
-          float s2 = texture2D(tex, safeClampUv(uv - vec2(0.0, stepUv.y * 2.0))).r;
-          float e2 = texture2D(tex, safeClampUv(uv + vec2(stepUv.x * 2.0, 0.0))).r;
-          float w2 = texture2D(tex, safeClampUv(uv - vec2(stepUv.x * 2.0, 0.0))).r;
+          vec4 cs = texture2D(tex, safeClampUv(uv));
+          vec4 ns = texture2D(tex, safeClampUv(uv + vec2(0.0, stepUv.y)));
+          vec4 ss = texture2D(tex, safeClampUv(uv - vec2(0.0, stepUv.y)));
+          vec4 es = texture2D(tex, safeClampUv(uv + vec2(stepUv.x, 0.0)));
+          vec4 ws = texture2D(tex, safeClampUv(uv - vec2(stepUv.x, 0.0)));
+          vec4 nes = texture2D(tex, safeClampUv(uv + vec2(stepUv.x, stepUv.y)));
+          vec4 nws = texture2D(tex, safeClampUv(uv + vec2(-stepUv.x, stepUv.y)));
+          vec4 ses = texture2D(tex, safeClampUv(uv + vec2(stepUv.x, -stepUv.y)));
+          vec4 sws = texture2D(tex, safeClampUv(uv + vec2(-stepUv.x, -stepUv.y)));
+          vec4 n2s = texture2D(tex, safeClampUv(uv + vec2(0.0, stepUv.y * 2.0)));
+          vec4 s2s = texture2D(tex, safeClampUv(uv - vec2(0.0, stepUv.y * 2.0)));
+          vec4 e2s = texture2D(tex, safeClampUv(uv + vec2(stepUv.x * 2.0, 0.0)));
+          vec4 w2s = texture2D(tex, safeClampUv(uv - vec2(stepUv.x * 2.0, 0.0)));
+          float c = waterMaskValue(cs);
+          float n = waterMaskValue(ns);
+          float s = waterMaskValue(ss);
+          float e = waterMaskValue(es);
+          float w = waterMaskValue(ws);
+          float ne = waterMaskValue(nes);
+          float nw = waterMaskValue(nws);
+          float se = waterMaskValue(ses);
+          float sw = waterMaskValue(sws);
+          float n2 = waterMaskValue(n2s);
+          float s2 = waterMaskValue(s2s);
+          float e2 = waterMaskValue(e2s);
+          float w2 = waterMaskValue(w2s);
           return (c * 4.0 + (n + s + e + w) * 2.0 + (ne + nw + se + sw) + (n2 + s2 + e2 + w2)) / 20.0;
         }
         
@@ -829,23 +864,20 @@ export class DistortionManager extends EffectBase {
               sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
             }
 
-            float rawDepth = clamp(waterMask, 0.0, 1.0);
-            float shore = 0.0;
-            float blurredDepth = rawDepth;
+            float waterY = (uWaterMaskFlipY > 0.5) ? (1.0 - sceneUv.y) : sceneUv.y;
+            vec2 waterUv = vec2(sceneUv.x, waterY);
+
+            vec4 waterDepthSample = texture2D(tWaterMask, waterUv);
+            float rawDepth = waterMaskValue(waterDepthSample) * sceneInBounds;
+            float shore = shorelineFactor(tWaterMask, waterUv) * sceneInBounds;
+
+            float blurTexels = clamp(uWaterCausticsEdgeBlurTexels, 0.0, 64.0);
+            vec2 stepUv = max(uWaterMaskTexelSize, vec2(1.0 / 4096.0)) * blurTexels;
+            float blurredDepth = blur13Tap(tWaterMask, waterUv, stepUv) * sceneInBounds;
+
             float outdoorStrength = 1.0;
-            if (uHasWaterMask > 0.5) {
-              rawDepth = texture2D(tWaterMask, sceneUv).r * sceneInBounds;
-              shore = shorelineFactor(tWaterMask, sceneUv) * sceneInBounds;
-
-              // Soft edge sampling using a tiny blur kernel in UV space. This avoids
-              // hard caustics cutoffs when the source mask is binary.
-              float blurTexels = clamp(uWaterCausticsEdgeBlurTexels, 0.0, 64.0);
-              vec2 stepUv = max(uWaterMaskTexelSize, vec2(1.0 / 4096.0)) * blurTexels;
-              blurredDepth = blur13Tap(tWaterMask, sceneUv, stepUv) * sceneInBounds;
-
-              if (uHasOutdoorsMask > 0.5) {
-                outdoorStrength = texture2D(tOutdoorsMask, sceneUv).r;
-              }
+            if (uHasOutdoorsMask > 0.5) {
+              outdoorStrength = texture2D(tOutdoorsMask, sceneUv).r;
             }
 
             // Debug override: show mask + shoreline so we can verify mapping/uniforms
@@ -1184,11 +1216,23 @@ export class DistortionManager extends EffectBase {
     if (waterSource && waterSource.enabled && waterSource.mask) {
       u.uWaterEnabled.value = 1.0;
       u.tWaterMask.value = waterSource.mask;
+      if (u.uWaterMaskFlipY) {
+        const v = Number.isFinite(waterSource.params?.maskFlipY)
+          ? waterSource.params.maskFlipY
+          : (waterSource.mask.flipY ? 1.0 : 0.0);
+        u.uWaterMaskFlipY.value = v > 0.5 ? 1.0 : 0.0;
+      }
+      if (u.uWaterMaskUseAlpha) {
+        const v = Number.isFinite(waterSource.params?.maskUseAlpha) ? waterSource.params.maskUseAlpha : 0.0;
+        u.uWaterMaskUseAlpha.value = v > 0.5 ? 1.0 : 0.0;
+      }
       u.uWaterIntensity.value = waterSource.params.intensity;
       u.uWaterFrequency.value = waterSource.params.frequency;
       u.uWaterSpeed.value = waterSource.params.speed;
     } else {
       u.uWaterEnabled.value = 0.0;
+      if (u.uWaterMaskFlipY) u.uWaterMaskFlipY.value = 0.0;
+      if (u.uWaterMaskUseAlpha) u.uWaterMaskUseAlpha.value = 0.0;
     }
 
     // Water chromatic refraction (apply pass)
@@ -1199,6 +1243,18 @@ export class DistortionManager extends EffectBase {
         if (au.tWaterMask) au.tWaterMask.value = waterSource.mask;
         if (au.uHasWaterMask) au.uHasWaterMask.value = 1.0;
 
+        if (au.uWaterMaskFlipY) {
+          const v = Number.isFinite(waterSource.params?.maskFlipY)
+            ? waterSource.params.maskFlipY
+            : (waterSource.mask.flipY ? 1.0 : 0.0);
+          au.uWaterMaskFlipY.value = v > 0.5 ? 1.0 : 0.0;
+        }
+
+        if (au.uWaterMaskUseAlpha) {
+          const v = Number.isFinite(waterSource.params?.maskUseAlpha) ? waterSource.params.maskUseAlpha : 0.0;
+          au.uWaterMaskUseAlpha.value = v > 0.5 ? 1.0 : 0.0;
+        }
+
         if (au.uWaterMaskTexelSize) {
           const img = waterSource.mask.image;
           const w = img && img.width ? img.width : 2048;
@@ -1208,6 +1264,9 @@ export class DistortionManager extends EffectBase {
       } else {
         if (au.tWaterMask) au.tWaterMask.value = null;
         if (au.uHasWaterMask) au.uHasWaterMask.value = 0.0;
+
+        if (au.uWaterMaskFlipY) au.uWaterMaskFlipY.value = 0.0;
+        if (au.uWaterMaskUseAlpha) au.uWaterMaskUseAlpha.value = 0.0;
 
         if (au.uWaterMaskTexelSize) {
           au.uWaterMaskTexelSize.value.set(1 / 2048, 1 / 2048);

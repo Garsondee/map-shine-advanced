@@ -32,6 +32,10 @@ export class LightningEffect extends EffectBase {
       taper: 0.65,
       glowStrength: 1.0,
 
+      zOffset: 2.0,
+
+      overheadOrder: 0,
+
       segments: 32,
       curveAmount: 0.35,
       macroDisplacement: 95.0,
@@ -96,7 +100,7 @@ export class LightningEffect extends EffectBase {
           name: 'look',
           label: 'Look',
           type: 'inline',
-          parameters: ['outerColor', 'coreColor', 'brightness', 'width', 'taper', 'glowStrength', 'textureScrollSpeed']
+          parameters: ['outerColor', 'coreColor', 'brightness', 'width', 'taper', 'glowStrength', 'zOffset', 'overheadOrder', 'textureScrollSpeed']
         },
         {
           name: 'shape',
@@ -129,6 +133,16 @@ export class LightningEffect extends EffectBase {
         width: { type: 'slider', min: 1, max: 120, step: 1, default: 26, label: 'Width (px-ish)' },
         taper: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.65, label: 'Taper' },
         glowStrength: { type: 'slider', min: 0, max: 5, step: 0.05, default: 1.0, label: 'Glow Strength' },
+        zOffset: { type: 'slider', min: 0, max: 50, step: 0.25, default: 2.0, label: 'Z Offset' },
+        overheadOrder: {
+          type: 'list',
+          label: 'Overhead Order',
+          options: {
+            'Below Overhead': 0,
+            'Above Overhead': 1
+          },
+          default: 0
+        },
         textureScrollSpeed: { type: 'slider', min: 0, max: 30, step: 0.1, default: 6.0, label: 'Texture Scroll Speed' },
 
         segments: { type: 'slider', min: 4, max: 96, step: 1, default: 32, label: 'Segments' },
@@ -175,6 +189,8 @@ export class LightningEffect extends EffectBase {
 
     this._createStrikePool();
 
+    this._applyOverheadOrderToMeshes();
+
     this._initialized = true;
     log.info('LightningEffect initialized');
   }
@@ -189,6 +205,10 @@ export class LightningEffect extends EffectBase {
     if (paramId === 'enabled') return;
     if (this.params && Object.prototype.hasOwnProperty.call(this.params, paramId)) {
       this.params[paramId] = value;
+    }
+
+    if (paramId === 'overheadOrder') {
+      this._applyOverheadOrderToMeshes();
     }
   }
 
@@ -319,7 +339,7 @@ export class LightningEffect extends EffectBase {
   _toWorldPoint(point) {
     const THREE = window.THREE;
     const v = new THREE.Vector3(point.x, point.y, 0);
-    v.z = this._getGroundZ() + 40.0;
+    v.z = this._getGroundZ() + (this.params?.zOffset ?? 2.0);
     return v;
   }
 
@@ -391,7 +411,7 @@ export class LightningEffect extends EffectBase {
       const mesh = new THREE.Mesh(geometry, material);
       mesh.frustumCulled = false;
       mesh.visible = false;
-      mesh.renderOrder = 20;
+      mesh.renderOrder = 9;
 
       if (this.scene) {
         this.scene.add(mesh);
@@ -413,6 +433,21 @@ export class LightningEffect extends EffectBase {
         pointCount: 0,
         arrays: geometry.userData._arrays
       });
+    }
+  }
+
+  _applyOverheadOrderToMeshes() {
+    const order = (this.params && typeof this.params.overheadOrder === 'number') ? this.params.overheadOrder : 0;
+    const overheadRenderOrder = 10;
+    const below = overheadRenderOrder - 1;
+    const above = overheadRenderOrder + 10;
+    const lightningOrder = order > 0.5 ? above : below;
+
+    for (let i = 0; i < this._strikePool.length; i++) {
+      const s = this._strikePool[i];
+      if (s && s.mesh) {
+        s.mesh.renderOrder = lightningOrder;
+      }
     }
   }
 

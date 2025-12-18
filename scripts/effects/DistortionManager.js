@@ -633,6 +633,7 @@ export class DistortionManager extends EffectBase {
         tWindowLight: { value: null },
         uResolution: { value: new THREE.Vector2(1, 1) },
         uTime: { value: 0.0 },
+        uZoom: { value: 1.0 },
 
         // Camera/view mapping (mirrors composite shader)
         uViewBounds: { value: new THREE.Vector4(0.0, 0.0, 1.0, 1.0) },
@@ -687,6 +688,7 @@ export class DistortionManager extends EffectBase {
         uniform sampler2D tWindowLight;
         uniform vec2 uResolution;
         uniform float uTime;
+        uniform float uZoom;
 
         uniform vec4 uViewBounds;
         uniform vec2 uSceneDimensions;
@@ -821,9 +823,14 @@ export class DistortionManager extends EffectBase {
           vec2 offset = (distortionSample.rg - 0.5) * 2.0;
           float mask = distortionSample.b;
           float waterMask = distortionSample.a;
+
+          // Keep perceived distortion stable across zoom levels by scaling the
+          // screen-space UV offset. (Zoom out => smaller offset.)
+          float zoom = max(uZoom, 0.001);
+          vec2 zoomedOffset = offset * zoom;
           
           // Apply distortion
-          vec2 distortedUv = safeClampUv(vUv + offset);
+          vec2 distortedUv = safeClampUv(vUv + zoomedOffset);
           
           vec4 sceneColor = texture2D(tScene, distortedUv);
 
@@ -834,8 +841,8 @@ export class DistortionManager extends EffectBase {
             vec2 texelSize = 1.0 / max(uResolution, vec2(1.0));
             float maxOffsetUv = uWaterChromaMaxPixels * max(texelSize.x, texelSize.y);
 
-            float offLen = length(offset);
-            vec2 dir = offLen > 1e-6 ? (offset / offLen) : vec2(0.0, 0.0);
+            float offLen = length(zoomedOffset);
+            vec2 dir = offLen > 1e-6 ? (zoomedOffset / offLen) : vec2(0.0, 0.0);
 
             // Scale by water mask so dispersion fades out at edges.
             float chroma = clamp(uWaterChroma * waterMask, 0.0, 1.0);
@@ -955,7 +962,7 @@ export class DistortionManager extends EffectBase {
               sceneColor.rgb = mix(sceneColor.rgb, vec3(1.0, 0.0, 0.0), mask * 0.5);
             } else {
               // Show offset as color
-              sceneColor.rgb = mix(sceneColor.rgb, vec3(offset.x + 0.5, offset.y + 0.5, 0.0), 0.5);
+              sceneColor.rgb = mix(sceneColor.rgb, vec3(zoomedOffset.x + 0.5, zoomedOffset.y + 0.5, 0.0), 0.5);
             }
           }
           
@@ -1147,6 +1154,10 @@ export class DistortionManager extends EffectBase {
 
     if (au) {
       au.uTime.value = timeInfo.elapsed;
+
+      const sceneComposer = window.MapShine?.sceneComposer;
+      const z = sceneComposer?.currentZoom ?? (typeof sceneComposer?.getZoomScale === 'function' ? sceneComposer.getZoomScale() : 1.0);
+      au.uZoom.value = Number.isFinite(z) ? z : 1.0;
     }
 
     // Update view mapping (screen UV -> Three world -> Foundry world -> scene UV)

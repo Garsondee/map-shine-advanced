@@ -202,6 +202,11 @@ export class WallManager {
     p1.visible = showLines;
     group.add(p1);
 
+    const door = dataOverride.door !== undefined ? dataOverride.door : doc.door;
+    if (door) {
+      this.createDoorControl(group, doc, start, end, dataOverride);
+    }
+
     this.wallGroup.add(group);
     this.walls.set(doc.id, group);
     
@@ -224,6 +229,8 @@ export class WallManager {
       const doorGroup = new THREE.Group();
       doorGroup.position.set(midX, midY, 0.1); // Slightly above wall line
       doorGroup.userData = { type: 'doorControl', wallId: doc.id };
+
+      const showVisuals = false;
       
       const size = 40 * (canvas.dimensions.uiScale || 1);
       const radius = size / 2;
@@ -236,10 +243,11 @@ export class WallManager {
       const bgMat = new THREE.MeshBasicMaterial({ 
           color: 0x000000,
           transparent: true,
-          opacity: 0.5,
+          opacity: showVisuals ? 0.5 : 0.0,
           side: THREE.DoubleSide,
           depthWrite: false  // Prevent depth buffer conflicts
       });
+      bgMat.colorWrite = showVisuals;
       const bg = new THREE.Mesh(bgGeo, bgMat);
       bg.renderOrder = 1000;  // Ensure consistent render order
       doorGroup.add(bg);
@@ -249,10 +257,11 @@ export class WallManager {
       const borderMat = new THREE.MeshBasicMaterial({ 
           color: 0xffffff,
           transparent: true,
-          opacity: 0.8,
+          opacity: showVisuals ? 0.8 : 0.0,
           side: THREE.DoubleSide,
           depthWrite: false
       });
+      borderMat.colorWrite = showVisuals;
       const border = new THREE.Mesh(borderGeo, borderMat);
       border.position.z = 0.5;  // Increased z-separation to prevent flickering
       border.renderOrder = 1001;
@@ -270,20 +279,23 @@ export class WallManager {
       const iconGeo = new THREE.PlaneGeometry(iconSize, iconSize);
       const iconMat = new THREE.MeshBasicMaterial({
           transparent: true,
-          opacity: 1.0,
+          opacity: showVisuals ? 1.0 : 0.0,
           color: 0xffffff,
           depthWrite: false
       });
+      iconMat.colorWrite = showVisuals;
       
-      loader.load(iconPath, (tex) => {
-          // Enable anisotropic filtering for sharper icon at angles
-          tex.anisotropy = 4;
-          tex.minFilter = THREE.LinearMipmapLinearFilter;
-          tex.magFilter = THREE.LinearFilter;
-          tex.generateMipmaps = true;
-          iconMat.map = tex;
-          iconMat.needsUpdate = true;
-      });
+      if (showVisuals) {
+        loader.load(iconPath, (tex) => {
+            // Enable anisotropic filtering for sharper icon at angles
+            tex.anisotropy = 4;
+            tex.minFilter = THREE.LinearMipmapLinearFilter;
+            tex.magFilter = THREE.LinearFilter;
+            tex.generateMipmaps = true;
+            iconMat.map = tex;
+            iconMat.needsUpdate = true;
+        });
+      }
       
       const icon = new THREE.Mesh(iconGeo, iconMat);
       icon.position.z = 1.0;  // Increased z-separation to prevent flickering

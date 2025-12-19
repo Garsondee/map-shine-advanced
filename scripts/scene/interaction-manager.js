@@ -59,6 +59,7 @@ export class InteractionManager {
     // Drag Select state
     this.dragSelect = {
       active: false,
+      dragging: false,
       start: new THREE.Vector3(),
       current: new THREE.Vector3(),
       mesh: null,
@@ -66,7 +67,8 @@ export class InteractionManager {
       // Screen-space positions for visual overlay (client coordinates)
       screenStart: new THREE.Vector2(),
       screenCurrent: new THREE.Vector2(),
-      overlayEl: null
+      overlayEl: null,
+      threshold: 10
     };
 
     // Right Click State (for HUD)
@@ -1471,6 +1473,32 @@ export class InteractionManager {
         const groundZ = this.sceneComposer?.groundZ ?? 0;
         const isTokensLayer = activeLayer === 'TokensLayer';
         const isWallLayer = activeLayer && activeLayer.includes('WallsLayer');
+
+        const doorIntersects = this.raycaster.intersectObject(wallGroup, true);
+        if (doorIntersects.length > 0) {
+            let doorControl = null;
+
+            for (const hit of doorIntersects) {
+                let object = hit.object;
+                while (object && object !== wallGroup) {
+                    if (object.userData && object.userData.type === 'doorControl') {
+                        doorControl = object;
+                        break;
+                    }
+                    object = object.parent;
+                }
+                if (doorControl) break;
+            }
+
+            if (doorControl) {
+                this.handleDoorClick(doorControl, event);
+                event.preventDefault();
+                event.stopPropagation();
+                event.stopImmediatePropagation();
+                return;
+            }
+        }
+
         const shouldCheckWalls = !isTokensLayer && (isWallLayer || game.user.isGM);
         const wallIntersects = shouldCheckWalls ? this.raycaster.intersectObject(wallGroup, true) : [];
 
@@ -1739,6 +1767,7 @@ export class InteractionManager {
           
           // Start Drag Select
           this.dragSelect.active = true;
+          this.dragSelect.dragging = false;
           
           // World-space start for selection math (ground plane)
           const worldPos = this.viewportToWorld(event.clientX, event.clientY, groundZ);
@@ -1762,7 +1791,7 @@ export class InteractionManager {
             overlay.style.top = `${this.dragSelect.screenStart.y}px`;
             overlay.style.width = '0px';
             overlay.style.height = '0px';
-            overlay.style.display = 'block';
+            overlay.style.display = 'none';
           }
         }
     } catch (error) {
@@ -2226,6 +2255,19 @@ export class InteractionManager {
 
         // Case 1: Drag Select
         if (this.dragSelect.active) {
+          if (!this.dragSelect.dragging) {
+            const dist = Math.hypot(
+              event.clientX - this.dragSelect.screenStart.x,
+              event.clientY - this.dragSelect.screenStart.y
+            );
+
+            if (dist < this.dragSelect.threshold) {
+              return;
+            }
+
+            this.dragSelect.dragging = true;
+          }
+
           this.updateMouseCoords(event);
           
           // World-space current for selection math
@@ -2694,10 +2736,16 @@ export class InteractionManager {
 
         // Handle Drag Select
         if (this.dragSelect.active) {
+          const wasDragging = this.dragSelect.dragging;
           this.dragSelect.active = false;
+          this.dragSelect.dragging = false;
           if (this.dragSelect.mesh) this.dragSelect.mesh.visible = false;
           if (this.dragSelect.border) this.dragSelect.border.visible = false;
           if (this.dragSelect.overlayEl) this.dragSelect.overlayEl.style.display = 'none';
+
+          if (!wasDragging) {
+            return;
+          }
           
           // Calculate selection bounds
           const start = this.dragSelect.start;

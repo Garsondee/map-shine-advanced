@@ -82,6 +82,86 @@ export const DistortionNoise = {
     }
   `,
 
+  simplex4D: `
+    vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+    float mod289(float x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+    vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }
+    float permute(float x) { return mod289(((x * 34.0) + 1.0) * x); }
+    vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+    float taylorInvSqrt(float r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+    vec4 grad4(float j, vec4 ip) {
+      const vec4 ones = vec4(1.0, 1.0, 1.0, -1.0);
+      vec4 p, s;
+      p.xyz = floor(fract(vec3(j) * ip.xyz) * 7.0) * ip.z - 1.0;
+      p.w = 1.5 - dot(abs(p.xyz), ones.xyz);
+      s = vec4(lessThan(p, vec4(0.0)));
+      p.xyz = p.xyz + (s.xyz * 2.0 - 1.0) * s.www;
+      return p;
+    }
+
+    float snoise(vec4 v) {
+      const vec2 C = vec2(0.138196601125011, 0.309016994374947);
+
+      vec4 i = floor(v + dot(v, vec4(C.y)));
+      vec4 x0 = v - i + dot(i, vec4(C.x));
+
+      vec4 i0;
+      vec3 isX = step(x0.yzw, x0.xxx);
+      vec3 isYZ = step(x0.zww, x0.yyz);
+      i0.x = isX.x + isX.y + isX.z;
+      i0.yzw = 1.0 - isX;
+      i0.y += isYZ.x + isYZ.y;
+      i0.zw += 1.0 - isYZ.xy;
+      i0.z += isYZ.z;
+      i0.w += 1.0 - isYZ.z;
+
+      vec4 i3 = clamp(i0, 0.0, 1.0);
+      vec4 i2 = clamp(i0 - 1.0, 0.0, 1.0);
+      vec4 i1 = clamp(i0 - 2.0, 0.0, 1.0);
+
+      vec4 x1 = x0 - i1 + C.x;
+      vec4 x2 = x0 - i2 + C.x * 2.0;
+      vec4 x3 = x0 - i3 + C.x * 3.0;
+      vec4 x4 = x0 - 1.0 + C.x * 4.0;
+
+      i = mod289(i);
+      float j0 = permute(permute(permute(permute(i.w) + i.z) + i.y) + i.x);
+      vec4 j1 = permute(permute(permute(permute(i.w + vec4(i1.w, i2.w, i3.w, 1.0))
+                                  + i.z + vec4(i1.z, i2.z, i3.z, 1.0))
+                                  + i.y + vec4(i1.y, i2.y, i3.y, 1.0))
+                                  + i.x + vec4(i1.x, i2.x, i3.x, 1.0));
+
+      vec4 ip = vec4(1.0 / 294.0, 1.0 / 49.0, 1.0 / 7.0, 0.0);
+
+      vec4 p0 = grad4(j0, ip);
+      vec4 p1 = grad4(j1.x, ip);
+      vec4 p2 = grad4(j1.y, ip);
+      vec4 p3 = grad4(j1.z, ip);
+      vec4 p4 = grad4(j1.w, ip);
+
+      vec4 norm = taylorInvSqrt(vec4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
+      p0 *= norm.x;
+      p1 *= norm.y;
+      p2 *= norm.z;
+      p3 *= norm.w;
+      p4 *= taylorInvSqrt(dot(p4, p4));
+
+      vec3 m0 = max(0.6 - vec3(dot(x0, x0), dot(x1, x1), dot(x2, x2)), 0.0);
+      vec2 m1 = max(0.6 - vec2(dot(x3, x3), dot(x4, x4)), 0.0);
+      m0 = m0 * m0;
+      m1 = m1 * m1;
+
+      float n0 = dot(p0, x0);
+      float n1 = dot(p1, x1);
+      float n2 = dot(p2, x2);
+      float n3 = dot(p3, x3);
+      float n4 = dot(p4, x4);
+
+      return 49.0 * (dot(m0 * m0, vec3(n0, n1, n2)) + dot(m1 * m1, vec2(n3, n4)));
+    }
+  `,
+
   /**
    * Fractal Brownian Motion noise (layered simplex)
    */
@@ -667,7 +747,21 @@ export class DistortionManager extends EffectBase {
         uWaterCausticsEdgeLo: { value: 0.05 },
         uWaterCausticsEdgeHi: { value: 0.55 },
         uWaterCausticsEdgeBlurTexels: { value: 6.0 },
-        uWaterCausticsDebug: { value: 0.0 }
+        uWaterCausticsDebug: { value: 0.0 },
+
+        uWaterFoamEnabled: { value: 0.0 },
+        uWaterFoamIntensity: { value: 1.0 },
+        uWaterFoamTiles: { value: 6.0 },
+        uWaterFoamScale: { value: 10.0 },
+        uWaterFoamSpeed: { value: 0.25 },
+        uWaterFoamThreshold: { value: 0.7 },
+        uWaterFoamSoftness: { value: 0.25 },
+        uWaterFoamStreakiness: { value: 2.8 },
+        uWaterFoamDepthLo: { value: 0.25 },
+        uWaterFoamDepthHi: { value: 0.75 },
+        uWaterFoamColor: { value: new THREE.Color(0xffffff) },
+        uWaterWindDir: { value: new THREE.Vector2(1.0, 0.0) },
+        uWaterWindSpeed: { value: 0.0 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -719,10 +813,31 @@ export class DistortionManager extends EffectBase {
         uniform float uWaterCausticsEdgeHi;
         uniform float uWaterCausticsEdgeBlurTexels;
         uniform float uWaterCausticsDebug;
+
+        uniform float uWaterFoamEnabled;
+        uniform float uWaterFoamIntensity;
+        uniform float uWaterFoamTiles;
+        uniform float uWaterFoamScale;
+        uniform float uWaterFoamSpeed;
+        uniform float uWaterFoamThreshold;
+        uniform float uWaterFoamSoftness;
+        uniform float uWaterFoamStreakiness;
+        uniform float uWaterFoamDepthLo;
+        uniform float uWaterFoamDepthHi;
+        uniform vec3 uWaterFoamColor;
+        uniform vec2 uWaterWindDir;
+        uniform float uWaterWindSpeed;
         varying vec2 vUv;
 
         ${DistortionNoise.simplex2D}
+        ${DistortionNoise.simplex4D}
         ${DistortionNoise.fbm}
+
+        vec4 torusNoiseCoords(vec2 uv, float period) {
+          float x = uv.x * period * 6.28318530718;
+          float y = uv.y * period * 6.28318530718;
+          return vec4(cos(x), sin(x), cos(y), sin(y));
+        }
 
         vec2 screenUvToFoundry(vec2 screenUv) {
           float threeX = mix(uViewBounds.x, uViewBounds.z, screenUv.x);
@@ -861,7 +976,7 @@ export class DistortionManager extends EffectBase {
           }
 
           // Water depth-based tint/absorption + caustics (pinned to map via sceneUv)
-          if ((uWaterTintEnabled > 0.5 || uWaterCausticsEnabled > 0.5 || uWaterCausticsDebug > 0.5) && uHasWaterMask > 0.5) {
+          if ((uWaterTintEnabled > 0.5 || uWaterCausticsEnabled > 0.5 || uWaterCausticsDebug > 0.5 || uWaterFoamEnabled > 0.5) && uHasWaterMask > 0.5) {
             vec2 foundryPos = screenUvToFoundry(vUv);
             vec2 sceneUv = vUv;
             float sceneInBounds = 1.0;
@@ -952,6 +1067,43 @@ export class DistortionManager extends EffectBase {
               vec3 causticsColor = mix(vec3(1.0, 1.0, 0.85), uWaterTintColor, 0.15);
               vec3 add = causticsColor * c * causticsAmt;
               sceneColor.rgb += add * 1.35;
+            }
+
+            if (uWaterFoamEnabled > 0.5) {
+              vec2 windDir = uWaterWindDir;
+              float windLen = length(windDir);
+              if (windLen > 1e-5) {
+                windDir /= windLen;
+              } else {
+                windDir = vec2(1.0, 0.0);
+              }
+
+              float windSpeed01 = clamp(uWaterWindSpeed, 0.0, 1.0);
+              if (windSpeed01 > 0.001) {
+                float windFactor = smoothstep(0.15, 0.85, windSpeed01);
+                float depthFactor = smoothstep(uWaterFoamDepthLo, uWaterFoamDepthHi, depth);
+                float foamMask = clamp(rawDepth, 0.0, 1.0) * outdoorStrength * uHasOutdoorsMask * windFactor * depthFactor;
+
+                float tiles = max(1.0, floor(uWaterFoamTiles + 0.5));
+                float streak = clamp(uWaterFoamStreakiness, 0.25, 12.0);
+
+                vec2 perp = vec2(-windDir.y, windDir.x);
+                vec2 adv = sceneUv * uWaterFoamScale;
+                adv += windDir * uTime * uWaterFoamSpeed * (0.25 + windSpeed01 * 2.0);
+                float along = dot(adv, windDir) / max(0.001, streak);
+                float across = dot(adv, perp) * streak;
+                vec2 p = vec2(along, across);
+
+                float n1 = snoise(torusNoiseCoords(p, tiles));
+                float n2 = snoise(torusNoiseCoords(p * 1.9 + vec2(0.13, 0.71), tiles));
+                float nn = clamp(0.5 + 0.5 * (0.65 * n1 + 0.35 * n2), 0.0, 1.0);
+
+                float ridge = 1.0 - abs(2.0 * nn - 1.0);
+                float foam = smoothstep(uWaterFoamThreshold, uWaterFoamThreshold + uWaterFoamSoftness, ridge);
+                foam *= clamp(uWaterFoamIntensity, 0.0, 8.0) * foamMask;
+
+                sceneColor.rgb = mix(sceneColor.rgb, uWaterFoamColor, clamp(foam, 0.0, 1.0));
+              }
             }
           }
           
@@ -1313,6 +1465,32 @@ export class DistortionManager extends EffectBase {
       if (au.uWaterCausticsEdgeLo) au.uWaterCausticsEdgeLo.value = Number.isFinite(waterSource?.params?.causticsEdgeLo) ? waterSource.params.causticsEdgeLo : 0.05;
       if (au.uWaterCausticsEdgeHi) au.uWaterCausticsEdgeHi.value = Number.isFinite(waterSource?.params?.causticsEdgeHi) ? waterSource.params.causticsEdgeHi : 0.55;
       if (au.uWaterCausticsEdgeBlurTexels) au.uWaterCausticsEdgeBlurTexels.value = Number.isFinite(waterSource?.params?.causticsEdgeBlurTexels) ? waterSource.params.causticsEdgeBlurTexels : 6.0;
+
+      const foamEnabled = !!(waterSource && waterSource.enabled && waterSource.mask && waterSource.params?.windFoamEnabled);
+      if (au.uWaterFoamEnabled) au.uWaterFoamEnabled.value = foamEnabled ? 1.0 : 0.0;
+      if (au.uWaterFoamIntensity) au.uWaterFoamIntensity.value = Number.isFinite(waterSource?.params?.windFoamIntensity) ? waterSource.params.windFoamIntensity : 1.0;
+      if (au.uWaterFoamTiles) au.uWaterFoamTiles.value = Number.isFinite(waterSource?.params?.windFoamTiles) ? waterSource.params.windFoamTiles : 6.0;
+      if (au.uWaterFoamScale) au.uWaterFoamScale.value = Number.isFinite(waterSource?.params?.windFoamScale) ? waterSource.params.windFoamScale : 10.0;
+      if (au.uWaterFoamSpeed) au.uWaterFoamSpeed.value = Number.isFinite(waterSource?.params?.windFoamSpeed) ? waterSource.params.windFoamSpeed : 0.25;
+      if (au.uWaterFoamThreshold) au.uWaterFoamThreshold.value = Number.isFinite(waterSource?.params?.windFoamThreshold) ? waterSource.params.windFoamThreshold : 0.7;
+      if (au.uWaterFoamSoftness) au.uWaterFoamSoftness.value = Number.isFinite(waterSource?.params?.windFoamSoftness) ? waterSource.params.windFoamSoftness : 0.25;
+      if (au.uWaterFoamStreakiness) au.uWaterFoamStreakiness.value = Number.isFinite(waterSource?.params?.windFoamStreakiness) ? waterSource.params.windFoamStreakiness : 2.8;
+      if (au.uWaterFoamDepthLo) au.uWaterFoamDepthLo.value = Number.isFinite(waterSource?.params?.windFoamDepthLo) ? waterSource.params.windFoamDepthLo : 0.25;
+      if (au.uWaterFoamDepthHi) au.uWaterFoamDepthHi.value = Number.isFinite(waterSource?.params?.windFoamDepthHi) ? waterSource.params.windFoamDepthHi : 0.75;
+      if (au.uWaterFoamColor && waterSource?.params?.windFoamColor) {
+        const c = waterSource.params.windFoamColor;
+        if (typeof c === 'string') {
+          au.uWaterFoamColor.value.set(c);
+        } else if (typeof c.r === 'number' && typeof c.g === 'number' && typeof c.b === 'number') {
+          au.uWaterFoamColor.value.setRGB(c.r, c.g, c.b);
+        }
+      }
+      if (au.uWaterWindDir) {
+        const wx = Number.isFinite(waterSource?.params?.windDirX) ? waterSource.params.windDirX : 1.0;
+        const wy = Number.isFinite(waterSource?.params?.windDirY) ? waterSource.params.windDirY : 0.0;
+        au.uWaterWindDir.value.set(wx, wy);
+      }
+      if (au.uWaterWindSpeed) au.uWaterWindSpeed.value = Number.isFinite(waterSource?.params?.windSpeed) ? waterSource.params.windSpeed : 0.0;
 
       // Environment/light maps for caustics gating
       // Outdoors mask (0=indoors/covered, 1=outdoors)

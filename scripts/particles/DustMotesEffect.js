@@ -154,30 +154,30 @@ export class DustMotesEffect extends EffectBase {
     this.params = {
       enabled: false,
 
-      density: 1.0,
-      maxParticles: 4000,
+      density: 0.7,
+      maxParticles: 3000,
 
-      brightness: 1.0,
-      opacity: 1.0,
+      brightness: 0.75,
+      opacity: 0.6,
 
-      lifeMin: 4.0,
-      lifeMax: 12.0,
+      lifeMin: 5.0,
+      lifeMax: 15.0,
 
-      sizeMin: 6.0,
-      sizeMax: 20.0,
+      sizeMin: 4.0,
+      sizeMax: 16.0,
 
       zMin: 10.0,
       zMax: 140.0,
 
-      motionDrift: 6.0,
-      motionCurlStrength: 12.0,
+      motionDrift: 4.0,
+      motionCurlStrength: 8.0,
       motionCurlScale: 380.0,
 
-      baseDarkness: 0.92,
+      baseDarkness: 0.88,
 
       lightMin: 0.05,
-      lightMax: 0.35,
-      lightIntensity: 1.0,
+      lightMax: 0.25,
+      lightIntensity: 0.8,
       lightTintInfluence: 0.65,
 
       debugShowLight: false,
@@ -201,6 +201,7 @@ export class DustMotesEffect extends EffectBase {
     this._needsRebuild = false;
 
     this._tmpSceneBounds = null;
+    this._lastSceneBoundsKey = null;
   }
 
   static getControlSchema() {
@@ -337,6 +338,9 @@ export class DustMotesEffect extends EffectBase {
     if (paramId === 'enabled' || paramId === 'masterEnabled') {
       this.enabled = !!value;
       this.params.enabled = !!value;
+      if (this.enabled) {
+        this._needsRebuild = true;
+      }
       return;
     }
 
@@ -480,8 +484,6 @@ export class DustMotesEffect extends EffectBase {
   _rebuildSystem() {
     if (!this.batchRenderer || !this.scene) return;
 
-    this._disposeSystem();
-
     if (!this.params.enabled || !this._spawnPoints || this._spawnPoints.length < 3) {
       return;
     }
@@ -493,10 +495,30 @@ export class DustMotesEffect extends EffectBase {
     if (!tex) return;
 
     const d = canvas?.dimensions;
-    const width = d?.sceneWidth ?? d?.width ?? 1000;
-    const height = d?.sceneHeight ?? d?.height ?? 1000;
-    const sx = d?.sceneX ?? 0;
-    const sy = (d?.height || height) - (d?.sceneY || 0) - height;
+    const width = d?.sceneWidth;
+    const height = d?.sceneHeight;
+    const sx = d?.sceneX;
+    const sceneY = d?.sceneY;
+    const fullH = d?.height;
+
+    // If we don't have valid scene dimensions yet (common during early init),
+    // don't build a system with fallback sizes (it can place particles off-map).
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 1 || height <= 1) {
+      return;
+    }
+    if (!Number.isFinite(sx) || !Number.isFinite(sceneY) || !Number.isFinite(fullH) || fullH <= 1) {
+      return;
+    }
+
+    const sy = fullH - sceneY - height;
+    const sceneBoundsKey = `${sx},${sy},${width},${height},${fullH}`;
+
+    // If we're already built for the current bounds and not explicitly marked dirty, skip.
+    if (!this._needsRebuild && this._system && this._lastSceneBoundsKey === sceneBoundsKey) {
+      return;
+    }
+
+    this._disposeSystem();
 
     const sceneComposer = window.MapShine?.sceneComposer;
     const groundZ = (sceneComposer && typeof sceneComposer.groundZ === 'number') ? sceneComposer.groundZ : 1000;
@@ -509,7 +531,7 @@ export class DustMotesEffect extends EffectBase {
       transparent: true,
       blending: THREE.NormalBlending,
       depthWrite: false,
-      depthTest: true,
+      depthTest: false,
       color: 0xffffff
     });
 
@@ -569,6 +591,7 @@ export class DustMotesEffect extends EffectBase {
     this._material = material;
 
     this._needsRebuild = false;
+    this._lastSceneBoundsKey = sceneBoundsKey;
   }
 
   _tryPatchBatchMaterial() {
@@ -618,23 +641,29 @@ export class DustMotesEffect extends EffectBase {
       '    gl_FragColor.rgb = gl_FragColor.rgb * uDustBrightness;\n' +
       '    gl_FragColor.a = gl_FragColor.a * uDustOpacity;\n' +
       '  } else if (uHasWindowLightTex <= 0.5) {\n' +
-      '    gl_FragColor.a = 0.0;\n' +
+      '    float baseVis = clamp((1.0 - clamp(uBaseDarkness, 0.0, 1.0)) * 2.5, 0.0, 1.0);\n' +
+      '    // Apply brightness within visibility bounds\n' +
+      '    gl_FragColor.rgb = gl_FragColor.rgb * baseVis * uDustBrightness;\n' +
+      '    gl_FragColor.a = gl_FragColor.a * baseVis * uDustOpacity;\n' +
       '  } else {\n' +
       '    vec2 screenUv = gl_FragCoord.xy / uWindowScreenSize;\n' +
       '    vec4 wl = texture2D(uWindowLightTex, screenUv);\n' +
       '    float light = wl.a;\n' +
-      '    float vis = smoothstep(uLightMin, uLightMax, light) * uLightIntensity;\n' +
-      '    vis = clamp(vis, 0.0, 1.0);\n' +
+      '    float lightVis = smoothstep(uLightMin, uLightMax, light) * uLightIntensity;\n' +
+      '    lightVis = clamp(lightVis, 0.0, 1.0);\n' +
       '    if (uDebugShowLight > 0.5) {\n' +
       '      gl_FragColor = vec4(vec3(light), 1.0);\n' +
       '    } else {\n' +
       '      float baseFactor = 1.0 - clamp(uBaseDarkness, 0.0, 1.0);\n' +
+      '      float baseVis = clamp(baseFactor * 2.5, 0.0, 1.0);\n' +
+      '      // Use lightTintInfluence to control how much window light affects visibility\n' +
+      '      float influence = clamp(uLightTintInfluence, 0.0, 1.0);\n' +
+      '      float vis = mix(baseVis, lightVis, influence);\n' +
       '      float brightness = mix(baseFactor, 1.0, vis);\n' +
-      '      vec3 tint = mix(vec3(1.0), wl.rgb, clamp(uLightTintInfluence, 0.0, 1.0));\n' +
-      '      gl_FragColor.rgb = gl_FragColor.rgb * brightness * tint;\n' +
-      '      gl_FragColor.a = gl_FragColor.a * vis;\n' +
-      '      gl_FragColor.rgb = gl_FragColor.rgb * uDustBrightness;\n' +
-      '      gl_FragColor.a = gl_FragColor.a * uDustOpacity;\n' +
+      '      vec3 tint = mix(vec3(1.0), wl.rgb, influence);\n' +
+      '      // Apply brightness within visibility bounds so it doesn\'t override gating\n' +
+      '      gl_FragColor.rgb = gl_FragColor.rgb * brightness * tint * uDustBrightness;\n' +
+      '      gl_FragColor.a = gl_FragColor.a * vis * uDustOpacity;\n' +
       '    }\n' +
       '  }\n';
 
@@ -751,9 +780,9 @@ export class DustMotesEffect extends EffectBase {
       if (!u) return;
 
       u.uWindowLightTex.value = lightTex;
-      // For normal operation, gate on WindowLightEffect being enabled and having a mask.
-      // For debugging, allow the light sample view to show the texture even if the gate is off.
-      u.uHasWindowLightTex.value = (lightTex && (this.params.debugShowLight || (wleEnabled && hasWindowMask))) ? 1.0 : 0.0;
+      // Dust should remain visible even without a window mask; treat the light texture as optional.
+      // For debugging, allow the light sample view to show the texture even if WindowLight is disabled.
+      u.uHasWindowLightTex.value = (lightTex && (this.params.debugShowLight || wleEnabled || hasWindowMask)) ? 1.0 : 0.0;
       u.uWindowScreenSize.value.set(screenW, screenH);
 
       u.uBaseDarkness.value = this.params.baseDarkness;
@@ -803,6 +832,31 @@ export class DustMotesEffect extends EffectBase {
     }
 
     if (!this.batchRenderer || !this.scene) return;
+
+    // If the scene bounds changed since the last successful build, rebuild so particles remain aligned.
+    try {
+      const d = canvas?.dimensions;
+      const width = d?.sceneWidth;
+      const height = d?.sceneHeight;
+      const sx = d?.sceneX;
+      const sceneY = d?.sceneY;
+      const fullH = d?.height;
+      if (
+        Number.isFinite(width) && Number.isFinite(height) && width > 1 && height > 1 &&
+        Number.isFinite(sx) && Number.isFinite(sceneY) && Number.isFinite(fullH) && fullH > 1
+      ) {
+        const sy = fullH - sceneY - height;
+        const sceneBoundsKey = `${sx},${sy},${width},${height},${fullH}`;
+        if (this._lastSceneBoundsKey && this._lastSceneBoundsKey !== sceneBoundsKey) {
+          this._needsRebuild = true;
+        }
+      }
+    } catch (e) {
+    }
+
+    if (!this._system && this._spawnPoints && this._spawnPoints.length >= 3) {
+      this._needsRebuild = true;
+    }
 
     if (this._needsRebuild) {
       this._rebuildSystem();

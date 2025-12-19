@@ -820,7 +820,10 @@ export class LightingEffect extends EffectBase {
       wu.uCloudCover.value = cloudCover;
 
       const wl = window.MapShine?.windowLightEffect;
-      if (wl && wl.params) {
+      const wlActive = !!(wl && wl.enabled && wl.params && wl.params.hasWindowMask);
+      if (this.windowLightMesh) this.windowLightMesh.visible = wlActive;
+
+      if (wlActive) {
         wu.uIntensity.value = wl.params.intensity ?? wu.uIntensity.value;
         wu.uMaskThreshold.value = wl.params.maskThreshold ?? wu.uMaskThreshold.value;
         wu.uSoftness.value = wl.params.softness ?? wu.uSoftness.value;
@@ -833,6 +836,9 @@ export class LightingEffect extends EffectBase {
           wu.uRgbShiftAngle.value = wl.params.rgbShiftAngle * (Math.PI / 180.0);
         }
         setThreeColorLoose(wu.uColor.value, wl.params.color, 0xfff5dd);
+      } else {
+        wu.uIntensity.value = 0.0;
+        wu.uHasCloudShadowMap.value = 0.0;
       }
       
       // Bind cloud DENSITY texture for spatially-varying dimming (not outdoors-masked shadow)
@@ -840,10 +846,10 @@ export class LightingEffect extends EffectBase {
         const cloudEffect = window.MapShine?.cloudEffect;
         const mm = window.MapShine?.maskManager;
         const shadowRaw = mm ? mm.getTexture('cloudShadowRaw.screen') : null;
-        if (shadowRaw) {
+        if (wlActive && shadowRaw) {
           wu.uCloudShadowMap.value = shadowRaw;
           wu.uHasCloudShadowMap.value = 1.0;
-        } else if (cloudEffect?.cloudShadowRawTarget?.texture && cloudEffect.enabled) {
+        } else if (wlActive && cloudEffect?.cloudShadowRawTarget?.texture && cloudEffect.enabled) {
           wu.uCloudShadowMap.value = cloudEffect.cloudShadowRawTarget.texture;
           wu.uHasCloudShadowMap.value = 1.0;
         } else {

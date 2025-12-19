@@ -103,6 +103,11 @@ export class TweakpaneManager {
 
     /** @type {any|null} Tweakpane button for Undo */
     this.undoButton = null;
+
+    this._uiValidatorActive = false;
+    this._uiValidatorRunning = false;
+    this._uiValidatorButton = null;
+    this._uiValidatorGlobalHandlers = {};
   }
 
   /**
@@ -242,56 +247,74 @@ export class TweakpaneManager {
       expanded: this.accordionStates['global'] ?? true
     });
 
-    // Map Maker Mode toggle
-    globalFolder.addBinding(this.globalParams, 'mapMakerMode', {
-      label: 'Map Maker Mode'
-    }).on('change', (ev) => {
-      this.onGlobalChange('mapMakerMode', ev.value);
+    this._uiValidatorButton = globalFolder.addButton({
+      title: 'Run UI Validator',
+      label: 'Debug'
     });
 
+    this._uiValidatorButton.on('click', async () => {
+      await this.runUIValidator();
+    });
+
+    // Map Maker Mode toggle
+    const onMapMakerModeChange = (ev) => {
+      this.onGlobalChange('mapMakerMode', ev.value);
+    };
+    this._uiValidatorGlobalHandlers.mapMakerMode = onMapMakerModeChange;
+
+    globalFolder.addBinding(this.globalParams, 'mapMakerMode', {
+      label: 'Map Maker Mode'
+    }).on('change', onMapMakerModeChange);
+
     // Time rate slider
+    const onTimeRateChange = (ev) => {
+      this.onGlobalChange('timeRate', ev.value);
+    };
+    this._uiValidatorGlobalHandlers.timeRate = onTimeRateChange;
+
     globalFolder.addBinding(this.globalParams, 'timeRate', {
       label: 'Time Rate',
       min: 0,
       max: 200,
       step: 1
-    }).on('change', (ev) => {
-      this.onGlobalChange('timeRate', ev.value);
-    });
+    }).on('change', onTimeRateChange);
 
     // Time of Day slider (0-24h) - primary global control for sun-driven
     // effects. Placed directly under Time Rate.
+    const onTimeOfDayChange = (ev) => {
+      this.onGlobalChange('timeOfDay', ev.value);
+    };
+    this._uiValidatorGlobalHandlers.timeOfDay = onTimeOfDayChange;
+
     globalFolder.addBinding(this.globalParams, 'timeOfDay', {
       label: 'Time of Day',
       min: 0.0,
       max: 24.0,
       step: 0.1
-    }).on('change', (ev) => {
-      this.onGlobalChange('timeOfDay', ev.value);
-    });
+    }).on('change', onTimeOfDayChange);
 
     // Visual separator between time controls and UI/tools controls
     globalFolder.addBlade({ view: 'separator' });
 
     // UI Scale
-    globalFolder.addBinding(this.uiScaleParams, 'scale', {
-      label: 'UI Scale',
-      min: 0.5,
-      max: 2.0,
-      step: 0.1
-    }).on('change', (ev) => {
+    const onUiScaleChange = (ev) => {
       this.uiScale = ev.value;
       this.uiScaleParams.scale = ev.value;
-      
-      // Only update UI scale after user releases the mouse (0.1s delay)
-      // This prevents the UI from "running away" under the cursor while dragging
       if (ev.last) {
         setTimeout(() => {
           this.updateScale();
           this.saveUIState();
         }, 100);
       }
-    });
+    };
+    this._uiValidatorGlobalHandlers.uiScale = onUiScaleChange;
+
+    globalFolder.addBinding(this.uiScaleParams, 'scale', {
+      label: 'UI Scale',
+      min: 0.5,
+      max: 2.0,
+      step: 0.1
+    }).on('change', onUiScaleChange);
 
     // Texture Manager Button
     globalFolder.addButton({
@@ -651,6 +674,15 @@ export class TweakpaneManager {
       dependencyState: {}
     };
 
+    if (!schema.parameters) schema.parameters = {};
+    if (!schema.parameters.enabled) {
+      schema.parameters.enabled = {
+        type: 'boolean',
+        default: schema.enabled ?? true,
+        hidden: true
+      };
+    }
+
     const savedParams = this.loadEffectParameters(effectId, schema);
     const validation = globalValidator.validateAllParameters(effectId, savedParams, schema);
     if (!validation.valid) {
@@ -717,13 +749,21 @@ export class TweakpaneManager {
       { label: 'Enabled' }
     );
 
-    enableBinding.on('change', this.throttle((ev) => {
+    const handleEnabledChange = (ev) => {
       this.markDirty(effectId, 'enabled');
       updateCallback(effectId, 'enabled', ev.value);
       this.updateEffectiveState(effectId);
       this.updateControlStates(effectId);
       this.queueSave(effectId);
-    }, 100));
+    };
+
+    const effectDataForHandlers = this.effectFolders[effectId];
+    if (effectDataForHandlers) {
+      if (!effectDataForHandlers._uiValidatorHandlers) effectDataForHandlers._uiValidatorHandlers = {};
+      effectDataForHandlers._uiValidatorHandlers.enabled = handleEnabledChange;
+    }
+
+    enableBinding.on('change', this.throttle(handleEnabledChange, 100));
 
     this.buildEffectControls(effectId, folder, schema, updateCallback, validatedParams);
 
@@ -798,6 +838,15 @@ export class TweakpaneManager {
       dependencyState: {}
     };
 
+    if (!schema.parameters) schema.parameters = {};
+    if (!schema.parameters.enabled) {
+      schema.parameters.enabled = {
+        type: 'boolean',
+        default: schema.enabled ?? true,
+        hidden: true
+      };
+    }
+
     const savedParams = this.loadEffectParameters(effectId, schema);
     const validation = globalValidator.validateAllParameters(effectId, savedParams, schema);
     if (!validation.valid) {
@@ -866,13 +915,21 @@ export class TweakpaneManager {
       { label: 'Enabled' }
     );
 
-    enableBinding.on('change', this.throttle((ev) => {
+    const handleEnabledChange = (ev) => {
       this.markDirty(effectId, 'enabled');
       updateCallback(effectId, 'enabled', ev.value);
       this.updateEffectiveState(effectId);
       this.updateControlStates(effectId);
       this.queueSave(effectId);
-    }, 100));
+    };
+
+    const effectDataForHandlers = this.effectFolders[effectId];
+    if (effectDataForHandlers) {
+      if (!effectDataForHandlers._uiValidatorHandlers) effectDataForHandlers._uiValidatorHandlers = {};
+      effectDataForHandlers._uiValidatorHandlers.enabled = handleEnabledChange;
+    }
+
+    enableBinding.on('change', this.throttle(handleEnabledChange, 100));
 
     // Build controls from schema
     this.buildEffectControls(effectId, folder, schema, updateCallback, validatedParams);
@@ -1001,9 +1058,7 @@ export class TweakpaneManager {
     if (!effectData.bindingConfigs) effectData.bindingConfigs = {};
     effectData.bindingConfigs[paramId] = { binding, paramDef };
 
-    // Throttled change handler with validation
-    const throttleTime = paramDef.throttle || 100; // Default 100ms
-    binding.on('change', this.throttle((ev) => {
+    const handleChange = (ev) => {
       // Validate new value
       const validation = globalValidator.validateParameter(paramId, ev.value, paramDef);
       
@@ -1051,7 +1106,14 @@ export class TweakpaneManager {
       
       // Run sanity check on whole effect after change
       this.runSanityCheck(effectId);
-    }, throttleTime));
+    };
+
+    if (!effectData._uiValidatorHandlers) effectData._uiValidatorHandlers = {};
+    effectData._uiValidatorHandlers[paramId] = handleChange;
+
+    // Throttled change handler with validation
+    const throttleTime = paramDef.throttle || 100; // Default 100ms
+    binding.on('change', this.throttle(handleChange, throttleTime));
   }
 
   /**
@@ -1143,6 +1205,7 @@ export class TweakpaneManager {
    * @private
    */
   queueSave(effectId) {
+    if (this._uiValidatorActive) return;
     this.saveQueue.add(effectId);
   }
 
@@ -1208,6 +1271,7 @@ export class TweakpaneManager {
    * @private
    */
   async flushSaveQueue() {
+    if (this._uiValidatorActive) return;
     if (this.saveQueue.size === 0) return;
 
     const now = performance.now();
@@ -1517,6 +1581,7 @@ export class TweakpaneManager {
    * @private
    */
   runSanityCheck(effectId) {
+    if (this._uiValidatorActive) return;
     const effectData = this.effectFolders[effectId];
     if (!effectData) return;
 
@@ -2074,6 +2139,7 @@ export class TweakpaneManager {
    * @private
    */
   saveUIState() {
+    if (this._uiValidatorActive) return;
     // PERFORMANCE: Debounce saves to prevent freezing when rapidly clicking accordions
     // Each accordion fold event was triggering an immediate async database write
     if (this._uiStateSaveTimeout) {
@@ -2183,6 +2249,320 @@ export class TweakpaneManager {
     this.effectFolders = {};
     this.effectCallbacks.clear();
     this.dirtyParams.clear();
+  }
+
+  async runUIValidator() {
+    if (this._uiValidatorRunning) return;
+
+    const validatorButton = this._uiValidatorButton;
+    if (validatorButton) validatorButton.disabled = true;
+
+    this._uiValidatorRunning = true;
+    this._uiValidatorActive = true;
+
+    const savedQueue = Array.from(this.saveQueue);
+    this.saveQueue.clear();
+
+    const originalGlobals = {
+      mapMakerMode: this.globalParams.mapMakerMode,
+      timeRate: this.globalParams.timeRate,
+      timeOfDay: this.globalParams.timeOfDay
+    };
+
+    const originalUiScale = this.uiScale;
+    const originalUiScaleBinding = this.uiScaleParams.scale;
+
+    const originalEffects = {};
+    for (const [effectId, effectData] of Object.entries(this.effectFolders)) {
+      if (!effectData?.params) continue;
+      originalEffects[effectId] = { ...effectData.params };
+    }
+
+    /** @type {Array<{kind:string,effectId?:string,paramId:string,status:'PASS'|'FAIL'|'SKIP',error?:any}>} */
+    const results = [];
+
+    const jiggleNumber = (value, min, max, step) => {
+      const n = typeof value === 'number' ? value : Number(value);
+      if (!Number.isFinite(n)) return { ok: false, value: value };
+      const span = (Number.isFinite(max) ? max : n + 1) - (Number.isFinite(min) ? min : n - 1);
+      const baseStep = typeof step === 'number' && step > 0 ? step : (Number.isFinite(span) && span > 0 ? span / 20 : 1);
+      let next = n + baseStep;
+      if (Number.isFinite(max) && next > max) next = n - baseStep;
+      if (Number.isFinite(min) && next < min) next = min;
+      if (Number.isFinite(max) && next > max) next = max;
+      if (Object.is(next, n)) {
+        if (Number.isFinite(min) && !Object.is(min, n)) next = min;
+        else if (Number.isFinite(max) && !Object.is(max, n)) next = max;
+      }
+      return { ok: true, value: next };
+    };
+
+    const jiggleOption = (current, options) => {
+      if (!options) return { ok: false, value: current };
+      const values = Object.values(options);
+      if (values.length <= 1) return { ok: false, value: current };
+      const idx = values.findIndex(v => v === current);
+      const next = values[(idx + 1) % values.length];
+      return { ok: true, value: next };
+    };
+
+    const quantizeToStep = (value, step, min) => {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return value;
+      if (typeof step !== 'number' || !Number.isFinite(step) || step <= 0) return value;
+      const base = (typeof min === 'number' && Number.isFinite(min)) ? min : 0;
+      const q = Math.round((value - base) / step) * step + base;
+      // Avoid -0
+      return Object.is(q, -0) ? 0 : q;
+    };
+
+    const safeInvoke = async (fn, ev) => {
+      const ret = fn(ev);
+      await Promise.resolve(ret);
+    };
+
+    const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+    try {
+      const globalTests = [
+        { id: 'timeRate', min: 0, max: 200, step: 1 },
+        { id: 'timeOfDay', min: 0.0, max: 24.0, step: 0.1 },
+        { id: 'uiScale', min: 0.5, max: 2.0, step: 0.1 }
+      ];
+
+      for (const t of globalTests) {
+        const handler = this._uiValidatorGlobalHandlers[t.id];
+        if (!handler) {
+          results.push({ kind: 'global', paramId: t.id, status: 'FAIL', error: 'Missing handler' });
+          continue;
+        }
+
+        try {
+          if (t.id === 'uiScale') {
+            const jig = jiggleNumber(this.uiScaleParams.scale, t.min, t.max, t.step);
+            if (!jig.ok) {
+              results.push({ kind: 'global', paramId: t.id, status: 'SKIP', error: 'Non-numeric' });
+              continue;
+            }
+            await safeInvoke(handler, { value: jig.value, last: false });
+            await safeInvoke(handler, { value: originalUiScaleBinding, last: false });
+            results.push({ kind: 'global', paramId: t.id, status: 'PASS' });
+          } else {
+            const cur = this.globalParams[t.id];
+            const jig = jiggleNumber(cur, t.min, t.max, t.step);
+            if (!jig.ok) {
+              results.push({ kind: 'global', paramId: t.id, status: 'SKIP', error: 'Non-numeric' });
+              continue;
+            }
+            await safeInvoke(handler, { value: jig.value, last: true });
+
+            // Basic runtime assertion: timeRate should affect TimeManager scale.
+            if (t.id === 'timeRate') {
+              const tm = window.MapShine?.timeManager;
+              const expectedScale = jig.value / 100;
+              const scale = tm?.scale;
+              if (typeof scale === 'number' && Number.isFinite(scale)) {
+                const eps = 0.0001;
+                if (Math.abs(scale - expectedScale) > eps) {
+                  results.push({ kind: 'assert', paramId: 'timeRate.scale', status: 'FAIL', error: `TimeManager.scale=${scale} expected≈${expectedScale}` });
+                } else {
+                  results.push({ kind: 'assert', paramId: 'timeRate.scale', status: 'PASS' });
+                }
+              } else {
+                results.push({ kind: 'assert', paramId: 'timeRate.scale', status: 'SKIP', error: 'TimeManager.scale not readable' });
+              }
+            }
+
+            await safeInvoke(handler, { value: originalGlobals[t.id], last: true });
+            results.push({ kind: 'global', paramId: t.id, status: 'PASS' });
+          }
+        } catch (e) {
+          results.push({ kind: 'global', paramId: t.id, status: 'FAIL', error: e });
+        }
+      }
+
+      for (const [effectId, effectData] of Object.entries(this.effectFolders)) {
+        const handlers = effectData?._uiValidatorHandlers;
+        const bindingConfigs = effectData?.bindingConfigs;
+        if (!handlers || !bindingConfigs) continue;
+
+        for (const [paramId, cfg] of Object.entries(bindingConfigs)) {
+          const binding = cfg?.binding;
+          const paramDef = cfg?.paramDef;
+
+          if (!binding || !paramDef) continue;
+          if (paramDef.readonly) {
+            results.push({ kind: 'effect', effectId, paramId, status: 'SKIP', error: 'readonly' });
+            continue;
+          }
+          if (binding.disabled) {
+            results.push({ kind: 'effect', effectId, paramId, status: 'SKIP', error: 'disabled' });
+            continue;
+          }
+
+          const handler = handlers[paramId];
+          if (!handler) {
+            results.push({ kind: 'effect', effectId, paramId, status: 'FAIL', error: 'Missing handler' });
+            continue;
+          }
+
+          const original = originalEffects[effectId]?.[paramId];
+          const current = effectData.params[paramId];
+          let nextValue = null;
+          let ok = true;
+
+          if (paramDef.options) {
+            const jig = jiggleOption(current, paramDef.options);
+            ok = jig.ok;
+            nextValue = jig.value;
+          } else if (typeof current === 'boolean') {
+            nextValue = !current;
+          } else if (typeof current === 'number' || typeof paramDef.min === 'number' || typeof paramDef.max === 'number') {
+            const jig = jiggleNumber(
+              typeof current === 'number' ? current : (typeof original === 'number' ? original : 0),
+              paramDef.min,
+              paramDef.max,
+              paramDef.step
+            );
+            ok = jig.ok;
+            nextValue = jig.value;
+          } else {
+            results.push({ kind: 'effect', effectId, paramId, status: 'SKIP', error: 'Unsupported type' });
+            continue;
+          }
+
+          if (!ok || nextValue === null || nextValue === undefined) {
+            results.push({ kind: 'effect', effectId, paramId, status: 'SKIP', error: 'No jiggle value' });
+            continue;
+          }
+
+          try {
+            await safeInvoke(handler, { value: nextValue, last: true });
+
+            // Sanity assertion: if a runtime effect exists and it exposes this param,
+            // verify that it actually changed (catches disconnected updateCallbacks).
+            try {
+              const composer = window.MapShine?.effectComposer;
+              const runtimeEffect = composer?.effects?.get?.(effectId);
+              if (runtimeEffect) {
+                if (paramId === 'enabled') {
+                  const hasParamsEnabled = runtimeEffect.params && Object.prototype.hasOwnProperty.call(runtimeEffect.params, 'enabled');
+                  const actual = hasParamsEnabled ? runtimeEffect.params.enabled : runtimeEffect.enabled;
+                  if (actual !== nextValue) {
+                    results.push({ kind: 'assert', effectId, paramId: `${effectId}.enabled`, status: 'FAIL', error: `Runtime enabled=${actual} expected=${nextValue}` });
+                  } else {
+                    results.push({ kind: 'assert', effectId, paramId: `${effectId}.enabled`, status: 'PASS' });
+                  }
+                } else if (runtimeEffect.params && Object.prototype.hasOwnProperty.call(runtimeEffect.params, paramId)) {
+                  const actual = runtimeEffect.params[paramId];
+                  // If the control has a step, Tweakpane may snap/quantize the value.
+                  // Compare against the step-quantized expected value to avoid false failures.
+                  if (typeof actual === 'number' && typeof nextValue === 'number' && typeof paramDef.step === 'number') {
+                    const expected = quantizeToStep(nextValue, paramDef.step, paramDef.min);
+                    const eps = Math.max(1e-6, paramDef.step / 100);
+                    if (Math.abs(actual - expected) > eps) {
+                      results.push({ kind: 'assert', effectId, paramId: `${effectId}.${paramId}`, status: 'FAIL', error: `Runtime=${actual} expected≈${expected}` });
+                    } else {
+                      results.push({ kind: 'assert', effectId, paramId: `${effectId}.${paramId}`, status: 'PASS' });
+                    }
+                  } else if (actual !== nextValue) {
+                    results.push({ kind: 'assert', effectId, paramId: `${effectId}.${paramId}`, status: 'FAIL', error: `Runtime=${actual} expected=${nextValue}` });
+                  } else {
+                    results.push({ kind: 'assert', effectId, paramId: `${effectId}.${paramId}`, status: 'PASS' });
+                  }
+                }
+              }
+            } catch (e) {
+              results.push({ kind: 'assert', effectId, paramId: `${effectId}.${paramId}`, status: 'FAIL', error: e });
+            }
+
+            await safeInvoke(handler, { value: original, last: true });
+            results.push({ kind: 'effect', effectId, paramId, status: 'PASS' });
+          } catch (e) {
+            results.push({ kind: 'effect', effectId, paramId, status: 'FAIL', error: e });
+          }
+        }
+      }
+
+      // Targeted assertion: Water enabled should actually enable/disable the DistortionManager source.
+      // This catches wiring issues where the UI toggles a flag but the visual output persists.
+      try {
+        const waterHandler = this.effectFolders?.water?._uiValidatorHandlers?.enabled;
+        const originalWaterEnabled = originalEffects?.water?.enabled;
+        const dm = window.MapShine?.distortionManager;
+        const waterEffect = window.MapShine?.effectComposer?.effects?.get?.('water');
+
+        if (!waterHandler || originalWaterEnabled === undefined) {
+          results.push({ kind: 'assert', paramId: 'water.enabled', status: 'SKIP', error: 'Water not registered' });
+        } else if (!dm?.sources) {
+          results.push({ kind: 'assert', paramId: 'water.enabled', status: 'SKIP', error: 'DistortionManager not available' });
+        } else if (!waterEffect?.waterMask) {
+          results.push({ kind: 'assert', paramId: 'water.enabled', status: 'SKIP', error: 'No water mask' });
+        } else {
+          await safeInvoke(waterHandler, { value: false, last: true });
+          await nextFrame();
+          await nextFrame();
+
+          const srcOff = dm.sources.get('water');
+          const okOff = !srcOff || srcOff.enabled === false;
+          if (!okOff) {
+            results.push({ kind: 'assert', paramId: 'water.enabled', status: 'FAIL', error: 'Distortion source still enabled after disabling water' });
+          } else {
+            results.push({ kind: 'assert', paramId: 'water.enabled', status: 'PASS' });
+          }
+
+          await safeInvoke(waterHandler, { value: originalWaterEnabled, last: true });
+          await nextFrame();
+        }
+      } catch (e) {
+        results.push({ kind: 'assert', paramId: 'water.enabled', status: 'FAIL', error: e });
+      }
+    } finally {
+      this.globalParams.mapMakerMode = originalGlobals.mapMakerMode;
+      this.globalParams.timeRate = originalGlobals.timeRate;
+      this.globalParams.timeOfDay = originalGlobals.timeOfDay;
+
+      this.uiScale = originalUiScale;
+      this.uiScaleParams.scale = originalUiScaleBinding;
+      this.updateScale();
+
+      for (const [effectId, params] of Object.entries(originalEffects)) {
+        const effectData = this.effectFolders[effectId];
+        if (!effectData?.params) continue;
+        Object.assign(effectData.params, params);
+        for (const [paramId] of Object.entries(params)) {
+          if (effectData.bindings?.[paramId]) {
+            effectData.bindings[paramId].refresh();
+          }
+        }
+      }
+
+      for (const id of savedQueue) this.saveQueue.add(id);
+      this._uiValidatorActive = false;
+      this._uiValidatorRunning = false;
+      if (validatorButton) validatorButton.disabled = false;
+    }
+
+    const pass = results.filter(r => r.status === 'PASS').length;
+    const fail = results.filter(r => r.status === 'FAIL').length;
+    const skip = results.filter(r => r.status === 'SKIP').length;
+
+    console.groupCollapsed(`Map Shine UI Validator: ${pass} pass, ${fail} fail, ${skip} skip`);
+    if (fail > 0) {
+      const failures = results.filter(r => r.status === 'FAIL').map(r => ({
+        kind: r.kind,
+        effectId: r.effectId,
+        paramId: r.paramId,
+        error: r.error?.stack || r.error?.message || String(r.error)
+      }));
+      console.table(failures);
+    }
+    console.groupEnd();
+
+    if (fail > 0) {
+      log.warn(`UI Validator found ${fail} failure(s). See console for details.`);
+    } else {
+      log.info('UI Validator completed with no failures.');
+    }
   }
 
   /**

@@ -52,6 +52,23 @@ export class WeatherController {
       freezeLevel: 0.0
     };
 
+    /**
+     * Neutral state returned by getCurrentState() while weather is disabled.
+     * This ensures all dependent effects (clouds, precipitation, wind-driven visuals)
+     * immediately render as "off" without needing each effect to special-case.
+     * @type {WeatherState}
+     */
+    this._disabledState = {
+      precipitation: 0.0,
+      precipType: PrecipitationType.NONE,
+      cloudCover: 0.0,
+      windSpeed: 0.0,
+      windDirection: { x: 1, y: 0 },
+      fogDensity: 0.0,
+      wetness: 0.0,
+      freezeLevel: 0.0
+    };
+
     /** @type {WeatherState} */
     this.targetState = { ...this.currentState, windDirection: { ...this.currentState.windDirection } };
 
@@ -182,6 +199,7 @@ export class WeatherController {
     upgradeState(this.currentState);
     upgradeState(this.targetState);
     upgradeState(this.startState);
+    upgradeState(this._disabledState);
 
     log.info('WeatherController initialized');
     this.initialized = true;
@@ -290,6 +308,7 @@ export class WeatherController {
    */
   update(timeInfo) {
     if (!this.initialized) return;
+    if (this.enabled === false) return;
 
     const dt = timeInfo.delta;
     const elapsed = timeInfo.elapsed;
@@ -524,6 +543,7 @@ export class WeatherController {
    * @returns {WeatherState}
    */
   getCurrentState() {
+    if (this.enabled === false) return this._disabledState;
     return this.currentState;
   }
 

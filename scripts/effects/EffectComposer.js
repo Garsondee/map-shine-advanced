@@ -21,6 +21,8 @@ export const RenderLayers = {
   POST_PROCESSING: { order: 500, name: 'PostProcessing', requiresDepth: false }
 };
 
+export const OVERLAY_THREE_LAYER = 31;
+
 /**
  * Effect Composer - orchestrates layered effect rendering
  */
@@ -66,6 +68,26 @@ export class EffectComposer {
     }
     
     log.info('EffectComposer created');
+  }
+
+  _renderOverlayToScreen() {
+    const THREE = window.THREE;
+    if (!THREE || !this.scene || !this.camera) return;
+
+    const prevTarget = this.renderer.getRenderTarget();
+    const prevAutoClear = this.renderer.autoClear;
+    const prevMask = this.camera.layers.mask;
+
+    try {
+      this.renderer.setRenderTarget(null);
+      this.renderer.autoClear = false;
+      this.camera.layers.set(OVERLAY_THREE_LAYER);
+      this.renderer.render(this.scene, this.camera);
+    } finally {
+      this.camera.layers.mask = prevMask;
+      this.renderer.autoClear = prevAutoClear;
+      this.renderer.setRenderTarget(prevTarget);
+    }
   }
 
   /**
@@ -299,7 +321,10 @@ export class EffectComposer {
     this.renderer.render(this.scene, this.camera);
 
     // If no post-processing effects are active, we're done
-    if (!usePostProcessing) return;
+    if (!usePostProcessing) {
+      this._renderOverlayToScreen();
+      return;
+    }
 
     // PASS 2: POST-PROCESSING ON SCENE TEXTURE
     // We use a ping-pong approach:
@@ -362,6 +387,8 @@ export class EffectComposer {
         this.handleEffectError(effect, error);
       }
     }
+
+    this._renderOverlayToScreen();
   }
 
   /**

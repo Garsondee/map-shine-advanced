@@ -1431,12 +1431,34 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
   const onWeatherUpdate = (effectId, paramId, value) => {
     // Handle different parameter groups
     if (paramId === 'enabled') {
-       // Runtime kill-switch for weather simulation & particles.
-       // When disabled, ParticleSystem.update() checks this flag and skips
-       // all WeatherController + WeatherParticles work so we can profile
-       // map performance without any precipitation overhead.
+       // Runtime kill-switch for all weather visuals (clouds + precipitation).
+       // NOTE: We do NOT stop the entire particle pipeline (fire/dust/etc still run).
+       // Instead WeatherController returns a neutral state, CloudEffect clears its
+       // targets, and WeatherParticles hides all precipitation emitters.
        weatherController.enabled = !!value;
        log.debug(`Weather system ${value ? 'enabled' : 'disabled'}`);
+
+       // Force immediate visual response (no need to wait for the next natural update).
+       try {
+         const cloudEffect = window.MapShine?.cloudEffect;
+         if (cloudEffect) cloudEffect.needsUpdate = true;
+
+         const particleSystem = window.MapShineParticles;
+         const wp = particleSystem?.weatherParticles;
+         if (wp) {
+           // WeatherParticles.update() will do the authoritative hide/zeroing,
+           // but toggling visibility here ensures instant feedback even if the
+           // next frame is delayed.
+           const show = weatherController.enabled !== false;
+           if (typeof wp._setWeatherSystemsVisible === 'function') {
+             wp._setWeatherSystemsVisible(show);
+           }
+           if (!show && typeof wp._zeroWeatherEmissions === 'function') {
+             wp._zeroWeatherEmissions();
+           }
+         }
+       } catch (e) {
+       }
     } else if (paramId === 'roofMaskForceEnabled') {
       // Manual override for indoor masking independent of roof hover state
       weatherController.roofMaskForceEnabled = !!value;

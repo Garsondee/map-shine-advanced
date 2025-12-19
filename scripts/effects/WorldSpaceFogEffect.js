@@ -14,7 +14,7 @@
  * @module effects/WorldSpaceFogEffect
  */
 
-import { EffectBase, RenderLayers } from './EffectComposer.js';
+import { EffectBase, RenderLayers, OVERLAY_THREE_LAYER } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
 
@@ -456,6 +456,7 @@ export class WorldSpaceFogEffect extends EffectBase {
     
     // Ensure fog renders on top of everything in the scene
     this.fogPlane.renderOrder = 9999;
+    this.fogPlane.layers.set(OVERLAY_THREE_LAYER);
     
     // Position the plane in Three.js world space
     // Three.js: origin bottom-left, Y-up

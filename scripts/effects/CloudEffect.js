@@ -99,6 +99,10 @@ export class CloudEffect extends EffectBase {
     this.params = {
       enabled: true,
 
+      // Performance
+      internalResolutionScale: 0.5,
+      updateEveryNFrames: 3,
+
       // Cloud generation
       cloudCover: 0.5,        // Base cloud coverage (0-1), driven by WeatherController
       noiseScale: 0.5,        // Scale of noise pattern (higher = smaller clouds)
@@ -191,6 +195,33 @@ export class CloudEffect extends EffectBase {
 
     this._tempVec2A = null;
     this._tempVec2B = null;
+
+    this._frameCounter = 0;
+    this._lastCamX = null;
+    this._lastCamY = null;
+    this._lastCamZoom = null;
+    this._motionCooldownFrames = 0;
+
+    this._lastRenderFullWidth = 0;
+    this._lastRenderFullHeight = 0;
+    this._lastInternalWidth = 0;
+    this._lastInternalHeight = 0;
+  }
+
+  /**
+   * @param {number} fullWidth
+   * @param {number} fullHeight
+   * @returns {{width:number,height:number}}
+   * @private
+   */
+  _getInternalRenderSize(fullWidth, fullHeight) {
+    const scale = (this.params && typeof this.params.internalResolutionScale === 'number')
+      ? this.params.internalResolutionScale
+      : 0.5;
+    const s = Math.max(0.1, Math.min(1.0, scale));
+    const width = Math.max(1, Math.floor(fullWidth * s));
+    const height = Math.max(1, Math.floor(fullHeight * s));
+    return { width, height };
   }
 
   /**
@@ -681,6 +712,8 @@ export class CloudEffect extends EffectBase {
         // World-space coordinate conversion (view bounds in world coords)
         uViewBoundsMin: { value: new THREE.Vector2(0, 0) },
         uViewBoundsMax: { value: new THREE.Vector2(1, 1) },
+        // Scene rect (EXCLUDES padding): world origin + size
+        uSceneOrigin: { value: new THREE.Vector2(0, 0) },
         uSceneSize: { value: new THREE.Vector2(1, 1) }
       },
       vertexShader: `
@@ -712,6 +745,7 @@ export class CloudEffect extends EffectBase {
         uniform vec2 uResolution;
         uniform vec2 uViewBoundsMin;
         uniform vec2 uViewBoundsMax;
+        uniform vec2 uSceneOrigin;
         uniform vec2 uSceneSize;
 
         varying vec2 vUv;
@@ -767,7 +801,7 @@ export class CloudEffect extends EffectBase {
         float sampleLayer(vec2 baseWorldPos, vec2 cameraPinnedPos, int layerIndex, int octaves) {
           float parallax = uLayerParallax[layerIndex] * uParallaxScale;
           vec2 layerWorldPos = mix(baseWorldPos, cameraPinnedPos, parallax);
-          vec2 layerUV = (layerWorldPos / uSceneSize) + uLayerWindOffsets[layerIndex];
+          vec2 layerUV = ((layerWorldPos - uSceneOrigin) / uSceneSize) + uLayerWindOffsets[layerIndex];
 
           // Domain warping for wispy/swirly clouds
           float time = uTime * uDomainWarpSpeed;
@@ -803,9 +837,17 @@ export class CloudEffect extends EffectBase {
           // Pinned-to-world position (no parallax)
           vec2 baseWorldPos = mix(uViewBoundsMin, uViewBoundsMax, vUv);
 
+          // Clip clouds to the actual scene rect (exclude padding)
+          vec2 sceneMax = uSceneOrigin + uSceneSize;
+          if (baseWorldPos.x < uSceneOrigin.x || baseWorldPos.y < uSceneOrigin.y ||
+              baseWorldPos.x > sceneMax.x || baseWorldPos.y > sceneMax.y) {
+            gl_FragColor = vec4(0.0);
+            return;
+          }
+
           // Pinned-to-camera/screen position (full parallax)
           // Uses scene center as reference so this stays stable as the camera pans.
-          vec2 cameraPinnedPos = (0.5 * uSceneSize) + (vUv - 0.5) * viewSize;
+          vec2 cameraPinnedPos = (uSceneOrigin + 0.5 * uSceneSize) + (vUv - 0.5) * viewSize;
 
           int octaves = int(uNoiseDetail);
 
@@ -889,6 +931,11 @@ export class CloudEffect extends EffectBase {
 
         varying vec2 vUv;
 
+        float readDensity(vec2 uv) {
+          vec4 t = texture2D(tCloudDensity, uv);
+          return (t.a > 0.999) ? t.r : t.a;
+        }
+
         void main() {
           // Apply sun offset when sampling density for shadows
           // This creates the shadow displacement effect
@@ -908,7 +955,7 @@ export class CloudEffect extends EffectBase {
               vec2 sUv = shadowUV + vec2(float(dx), float(dy)) * stepUv;
               float w = 1.0;
               if (dx == 0 && dy == 0) w = 2.0; // Center bias
-              float v = texture2D(tCloudDensity, sUv).r;
+              float v = readDensity(sUv);
               accum += v * w;
               weightSum += w;
             }
@@ -1202,77 +1249,86 @@ export class CloudEffect extends EffectBase {
     const THREE = window.THREE;
     if (!width || !height || !THREE) return;
 
+    const internal = this._getInternalRenderSize(width, height);
+    const iW = internal.width;
+    const iH = internal.height;
+
+    this._lastRenderFullWidth = width;
+    this._lastRenderFullHeight = height;
+    this._lastInternalWidth = iW;
+    this._lastInternalHeight = iH;
+
     // Cloud density render target
     if (!this.cloudDensityTarget) {
-      this.cloudDensityTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.cloudDensityTarget = new THREE.WebGLRenderTarget(iW, iH, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.cloudDensityTarget.setSize(width, height);
+      this.cloudDensityTarget.setSize(iW, iH);
     }
 
     // Cloud shadow render target
     if (!this.cloudShadowTarget) {
-      this.cloudShadowTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.cloudShadowTarget = new THREE.WebGLRenderTarget(iW, iH, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.cloudShadowTarget.setSize(width, height);
+      this.cloudShadowTarget.setSize(iW, iH);
     }
 
     // Cloud shadow render target (UNMASKED - for indoor consumers like WindowLight)
     if (!this.cloudShadowRawTarget) {
-      this.cloudShadowRawTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.cloudShadowRawTarget = new THREE.WebGLRenderTarget(iW, iH, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.cloudShadowRawTarget.setSize(width, height);
+      this.cloudShadowRawTarget.setSize(iW, iH);
     }
 
     // Cloud top density render target (parallaxed multi-layer density)
     if (!this.cloudTopDensityTarget) {
-      this.cloudTopDensityTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.cloudTopDensityTarget = new THREE.WebGLRenderTarget(iW, iH, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.cloudTopDensityTarget.setSize(width, height);
+      this.cloudTopDensityTarget.setSize(iW, iH);
     }
 
     // Cloud top render target (RGBA for alpha blending)
     if (!this.cloudTopTarget) {
-      this.cloudTopTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.cloudTopTarget = new THREE.WebGLRenderTarget(iW, iH, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.cloudTopTarget.setSize(width, height);
+      this.cloudTopTarget.setSize(iW, iH);
     }
 
     // Update material uniforms
     if (this.densityMaterial?.uniforms) {
-      this.densityMaterial.uniforms.uResolution.value.set(width, height);
+      this.densityMaterial.uniforms.uResolution.value.set(iW, iH);
     }
 
     if (this.shadowMaterial?.uniforms) {
-      this.shadowMaterial.uniforms.uTexelSize.value.set(1 / width, 1 / height);
+      this.shadowMaterial.uniforms.uTexelSize.value.set(1 / iW, 1 / iH);
     }
 
     if (this.cloudTopMaterial?.uniforms) {
-      this.cloudTopMaterial.uniforms.uTexelSize.value.set(1 / width, 1 / height);
+      this.cloudTopMaterial.uniforms.uTexelSize.value.set(1 / iW, 1 / iH);
     }
   }
 
@@ -1407,6 +1463,8 @@ export class CloudEffect extends EffectBase {
 
     // Get scene dimensions for world-space coordinates
     const sceneRect = canvas?.dimensions?.sceneRect;
+    const sceneX = sceneRect?.x ?? 0;
+    const sceneY = sceneRect?.y ?? 0;
     const sceneWidth = sceneRect?.width ?? 4000;
     const sceneHeight = sceneRect?.height ?? 3000;
 
@@ -1461,6 +1519,7 @@ export class CloudEffect extends EffectBase {
     if (du.uLayerCoverMult) du.uLayerCoverMult.value = this._layerCoverMult;
     if (du.uLayerNoiseScaleMult) du.uLayerNoiseScaleMult.value = this._layerNoiseScaleMult;
     if (du.uLayerWeight) du.uLayerWeight.value = this._layerWeight;
+    if (du.uSceneOrigin) du.uSceneOrigin.value.set(sceneX, sceneY);
     du.uSceneSize.value.set(sceneWidth, sceneHeight);
     du.uViewBoundsMin.value.set(viewMinX, viewMinY);
     du.uViewBoundsMax.value.set(viewMaxX, viewMaxY);
@@ -1569,23 +1628,163 @@ export class CloudEffect extends EffectBase {
     const THREE = window.THREE;
     if (!THREE || !this.quadScene || !this.quadCamera) return;
 
+    // Global Weather checkbox kill-switch.
+    // If weather is disabled we still must render *neutral* targets so downstream
+    // consumers (lighting/shadows/window light) immediately see "no clouds".
+    const weatherEnabled = !(weatherController && weatherController.enabled === false);
+
     // Ensure render targets exist
     if (!this._tempSize) this._tempSize = new THREE.Vector2();
     renderer.getDrawingBufferSize(this._tempSize);
     const width = this._tempSize.x;
     const height = this._tempSize.y;
 
+    const internal = this._getInternalRenderSize(width, height);
+    const iW = internal.width;
+    const iH = internal.height;
+
     if (!this.cloudDensityTarget || !this.cloudShadowTarget || !this.cloudShadowRawTarget) {
       this.onResize(width, height);
-    } else if (this.cloudDensityTarget.width !== width || this.cloudDensityTarget.height !== height) {
+    } else if (this.cloudDensityTarget.width !== iW || this.cloudDensityTarget.height !== iH) {
+      this.onResize(width, height);
+    } else if (this._lastRenderFullWidth !== width || this._lastRenderFullHeight !== height) {
       this.onResize(width, height);
     }
 
     const previousTarget = renderer.getRenderTarget();
 
+    // Temporal slicing (motion-aware): when the camera is moving we must update every frame
+    // to avoid the perception of lag/jitter. When stable, skip heavy passes.
+    const n = (this.params && typeof this.params.updateEveryNFrames === 'number')
+      ? (this.params.updateEveryNFrames | 0)
+      : 1;
+    const updateEvery = Math.max(1, n);
+
+    const currentZoom = this._getEffectiveZoom();
+    const cam = this.mainCamera || camera;
+    const camX = cam?.position?.x ?? 0;
+    const camY = cam?.position?.y ?? 0;
+
+    // Use a sub-pixel threshold in screen space so we don't skip updates during slow/smooth pans.
+    // If we skip while the view is moving, the world-pinned mapping in the density pass will lag
+    // behind the camera and look like jitter.
+    const moveThresholdPx = 0.25;
+    const zoomThreshold = 1e-5;
+
+    let moved = false;
+    if (this._lastCamX !== null && this._lastCamY !== null && this._lastCamZoom !== null) {
+      const dx = camX - this._lastCamX;
+      const dy = camY - this._lastCamY;
+      const dxPx = dx * currentZoom;
+      const dyPx = dy * currentZoom;
+      const d2Px = dxPx * dxPx + dyPx * dyPx;
+      if (d2Px > (moveThresholdPx * moveThresholdPx)) moved = true;
+      if (Math.abs(currentZoom - this._lastCamZoom) > zoomThreshold) moved = true;
+    } else {
+      moved = true;
+    }
+
+    this._lastCamX = camX;
+    this._lastCamY = camY;
+    this._lastCamZoom = currentZoom;
+
+    if (moved) {
+      this._motionCooldownFrames = 2;
+    } else if (this._motionCooldownFrames > 0) {
+      this._motionCooldownFrames--;
+    }
+
+    const viewIsStable = this._motionCooldownFrames === 0;
+
+    this._frameCounter = (this._frameCounter + 1) >>> 0;
+    const shouldUpdateThisFrame = (updateEvery <= 1) || !viewIsStable || ((this._frameCounter % updateEvery) === 0);
+
+    // If weather is disabled, clear textures to neutral values and skip all
+    // simulation work.
+    if (!weatherEnabled) {
+      renderer.setRenderTarget(this.cloudDensityTarget);
+      renderer.setClearColor(0x000000, 1);
+      renderer.clear();
+
+      renderer.setRenderTarget(this.cloudShadowRawTarget);
+      renderer.setClearColor(0xffffff, 1);
+      renderer.clear();
+
+      renderer.setRenderTarget(this.cloudShadowTarget);
+      renderer.setClearColor(0xffffff, 1);
+      renderer.clear();
+
+      if (this.cloudTopDensityTarget) {
+        renderer.setRenderTarget(this.cloudTopDensityTarget);
+        renderer.setClearColor(0x000000, 1);
+        renderer.clear();
+      }
+      if (this.cloudTopTarget) {
+        renderer.setRenderTarget(this.cloudTopTarget);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear();
+      }
+
+      try {
+        const mm = window.MapShine?.maskManager;
+        if (mm) {
+          const shadowTex = this.cloudShadowTarget?.texture;
+          if (shadowTex && shadowTex !== this._publishedCloudShadowTex) {
+            this._publishedCloudShadowTex = shadowTex;
+            mm.setTexture('cloudShadow.screen', shadowTex, {
+              space: 'screenUv',
+              source: 'renderTarget',
+              channels: 'r',
+              uvFlipY: false,
+              lifecycle: 'dynamicPerFrame',
+              width: this.cloudShadowTarget?.width ?? null,
+              height: this.cloudShadowTarget?.height ?? null
+            });
+          }
+
+          const shadowRawTex = this.cloudShadowRawTarget?.texture;
+          if (shadowRawTex && shadowRawTex !== this._publishedCloudShadowRawTex) {
+            this._publishedCloudShadowRawTex = shadowRawTex;
+            mm.setTexture('cloudShadowRaw.screen', shadowRawTex, {
+              space: 'screenUv',
+              source: 'renderTarget',
+              channels: 'r',
+              uvFlipY: false,
+              lifecycle: 'dynamicPerFrame',
+              width: this.cloudShadowRawTarget?.width ?? null,
+              height: this.cloudShadowRawTarget?.height ?? null
+            });
+          }
+
+          const densityTex = this.cloudDensityTarget?.texture;
+          if (densityTex && densityTex !== this._publishedCloudDensityTex) {
+            this._publishedCloudDensityTex = densityTex;
+            mm.setTexture('cloudDensity.screen', densityTex, {
+              space: 'screenUv',
+              source: 'renderTarget',
+              channels: 'r',
+              uvFlipY: false,
+              lifecycle: 'dynamicPerFrame',
+              width: this.cloudDensityTarget?.width ?? null,
+              height: this.cloudDensityTarget?.height ?? null
+            });
+          }
+        }
+      } catch (e) {
+      }
+
+      renderer.setRenderTarget(previousTarget);
+      return;
+    }
+
+    if (!shouldUpdateThisFrame) {
+      renderer.setRenderTarget(previousTarget);
+      return;
+    }
+
     // Pass 1: Generate world-pinned cloud density (NO parallax) for shadows and other consumers
     if (this.densityMaterial.uniforms.uParallaxScale) this.densityMaterial.uniforms.uParallaxScale.value = 0.0;
-    if (this.densityMaterial.uniforms.uCompositeMode) this.densityMaterial.uniforms.uCompositeMode.value = 0.0;
+    if (this.densityMaterial.uniforms.uCompositeMode) this.densityMaterial.uniforms.uCompositeMode.value = 1.0;
     this.quadMesh.material = this.densityMaterial;
     renderer.setRenderTarget(this.cloudDensityTarget);
     renderer.setClearColor(0x000000, 1);

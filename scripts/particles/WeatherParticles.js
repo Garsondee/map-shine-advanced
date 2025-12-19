@@ -14,6 +14,7 @@ import {
   PiecewiseBezier,
   Bezier
 } from '../libs/three.quarks.module.js';
+import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
 
@@ -33,6 +34,74 @@ class RandomRectangleEmitter {
     particle.position.y = y;
     particle.position.z = 0;
     particle.velocity.set(0, 0, particle.startSpeed);
+  }
+
+  update(system, delta) { /* no-op for now */ }
+}
+
+class ShorelineFoamSprayEmitter {
+  constructor(parameters = {}) {
+    this.type = 'shoreline-foam-spray';
+    this.width = parameters.width ?? 1;
+    this.height = parameters.height ?? 1;
+    this.sceneX = parameters.sceneX ?? 0;
+    this.sceneY = parameters.sceneY ?? 0;
+    this.totalHeight = parameters.totalHeight ?? this.height;
+    this.centerX = parameters.centerX ?? (this.sceneX + this.width / 2);
+    this.centerY = parameters.centerY ?? (this.sceneY + this.height / 2);
+    this._offsetY = (this.totalHeight - this.sceneY - this.height);
+
+    this._points = null;
+  }
+
+  setPoints(points) {
+    this._points = points && points.length ? points : null;
+  }
+
+  clearPoints() {
+    this._points = null;
+  }
+
+  initialize(particle) {
+    const pts = this._points;
+    if (pts && pts.length >= 4) {
+      const count = Math.floor(pts.length / 4);
+      const idx = (Math.floor(Math.random() * count) * 4);
+      const u = pts[idx];
+      const v = pts[idx + 1];
+      const nx = pts[idx + 2];
+      const ny = pts[idx + 3];
+
+      const worldX = this.sceneX + u * this.width;
+      const worldY = this._offsetY + (1.0 - v) * this.height;
+
+      particle.position.x = worldX - this.centerX;
+      particle.position.y = worldY - this.centerY;
+      particle.position.z = 0;
+
+      const nLen = Math.sqrt(nx * nx + ny * ny) || 1.0;
+      const dx = nx / nLen;
+      const dy = ny / nLen;
+      const s = particle.startSpeed || 0;
+      const jitter = 0.35;
+      particle.velocity.set(
+        dx * s + (Math.random() - 0.5) * s * jitter,
+        dy * s + (Math.random() - 0.5) * s * jitter,
+        0
+      );
+
+      if (typeof particle.rotation === 'number') {
+        particle.rotation = Math.atan2(ny, nx) + (Math.random() - 0.5) * 0.6;
+      }
+      return;
+    }
+
+    const x = (Math.random() - 0.5) * this.width;
+    const y = (Math.random() - 0.5) * this.height;
+    particle.position.x = x;
+    particle.position.y = y;
+    particle.position.z = 0;
+    particle.velocity.set(0, 0, 0);
   }
 
   update(system, delta) { /* no-op for now */ }
@@ -547,6 +616,120 @@ class SplashAlphaBehavior {
   reset() {}
 }
 
+class FoamPlumeBehavior {
+  constructor() {
+    this.type = 'FoamPlume';
+    this.peakOpacity = 0.65;
+    this.peakTime = 0.18;
+    this.startScale = 0.5;
+    this.maxScale = 2.2;
+  }
+
+  initialize(particle, system) {
+    if (!particle) return;
+    if (particle.size && !particle._foamBaseSize) {
+      particle._foamBaseSize = particle.size.clone();
+    }
+    if (particle.color) {
+      particle._foamBaseAlpha = particle.color.w;
+    }
+    if (typeof particle.rotation === 'number' && typeof particle._foamSpinSpeed !== 'number') {
+      particle._foamSpinSpeed = (Math.random() * 2.0 - 1.0) * 0.18;
+    }
+  }
+
+  update(particle, delta, system) {
+    if (!particle || typeof particle.age !== 'number' || typeof particle.life !== 'number') return;
+    const t = particle.life > 0 ? (particle.age / particle.life) : 0;
+
+    const growEnd = Math.max(0.05, this.peakTime * 2.0);
+    const g0 = Math.max(0.0, Math.min(1.0, t / growEnd));
+    const g = 1.0 - Math.pow(1.0 - g0, 3.0);
+    const scale = this.startScale + (this.maxScale - this.startScale) * g;
+    if (particle.size && particle._foamBaseSize) {
+      particle.size.copy(particle._foamBaseSize).multiplyScalar(scale);
+    }
+
+    const pt = Math.max(0.01, Math.min(0.6, this.peakTime));
+    let a01 = 0.0;
+    if (t < pt) {
+      a01 = t / pt;
+    } else {
+      a01 = (1.0 - t) / (1.0 - pt);
+    }
+    a01 = Math.max(0.0, Math.min(1.0, a01));
+    a01 = a01 * a01;
+
+    if (particle.color) {
+      particle.color.w = a01 * this.peakOpacity;
+    }
+
+    if (typeof particle.rotation === 'number' && typeof particle._foamSpinSpeed === 'number') {
+      particle.rotation += particle._foamSpinSpeed * delta;
+    }
+  }
+
+  frameUpdate(delta) { /* no-op */ }
+
+  clone() {
+    const b = new FoamPlumeBehavior();
+    b.peakOpacity = this.peakOpacity;
+    b.peakTime = this.peakTime;
+    b.startScale = this.startScale;
+    b.maxScale = this.maxScale;
+    return b;
+  }
+
+  reset() { /* no-op */ }
+}
+
+class FoamSprayBehavior {
+  constructor() {
+    this.type = 'FoamSpray';
+    this.peakOpacity = 0.35;
+    this.peakTime = 0.12;
+  }
+
+  initialize(particle, system) {
+    if (!particle) return;
+    if (typeof particle.rotation === 'number' && typeof particle._foamSpinSpeed !== 'number') {
+      particle._foamSpinSpeed = (Math.random() * 2.0 - 1.0) * 0.35;
+    }
+  }
+
+  update(particle, delta, system) {
+    if (!particle || typeof particle.age !== 'number' || typeof particle.life !== 'number') return;
+    const t = particle.life > 0 ? (particle.age / particle.life) : 0;
+
+    const pt = Math.max(0.01, Math.min(0.5, this.peakTime));
+    let a01 = 0.0;
+    if (t < pt) {
+      a01 = t / pt;
+    } else {
+      a01 = (1.0 - t) / (1.0 - pt);
+    }
+    a01 = Math.max(0.0, Math.min(1.0, a01));
+    a01 = Math.pow(a01, 0.75);
+
+    if (particle.color) {
+      particle.color.w = a01 * this.peakOpacity;
+    }
+
+    if (typeof particle.rotation === 'number' && typeof particle._foamSpinSpeed === 'number') {
+      particle.rotation += particle._foamSpinSpeed * delta;
+    }
+  }
+
+  frameUpdate(delta) { /* no-op */ }
+  clone() {
+    const b = new FoamSprayBehavior();
+    b.peakOpacity = this.peakOpacity;
+    b.peakTime = this.peakTime;
+    return b;
+  }
+  reset() { /* no-op */ }
+}
+
 export class WeatherParticles {
   constructor(batchRenderer, scene) {
     this.batchRenderer = batchRenderer;
@@ -571,6 +754,7 @@ export class WeatherParticles {
     this._shoreFoamMaskUuid = null;
     this._shoreFoamPoints = null;
     this._shoreFoamShape = null;
+    this._shoreFoamSprayShape = null;
 
     this._waterMaskThreshold = 0.15;
     this._waterMaskStride = 2;
@@ -580,6 +764,15 @@ export class WeatherParticles {
     this._snowMaterial = null;
     this._splashMaterial = null;
     this._foamMaterial = null;
+    this._foamSprayMaterial = null;
+
+    this._foamPlumeBehavior = null;
+    this._foamSprayBehavior = null;
+
+    this._foamSystem = null;
+    this._foamBatchMaterial = null;
+    this._foamSpraySystem = null;
+    this._foamSprayBatchMaterial = null;
 
     // ROOF / _OUTDOORS MASK INTEGRATION (high level):
     // - WeatherController owns the _Outdoors texture (roofMap) and two flags:
@@ -663,6 +856,66 @@ export class WeatherParticles {
     this._tempWindDir = new window.THREE.Vector3();
 
     this._initSystems();
+  }
+
+  _setWeatherSystemsVisible(visible) {
+    const v = !!visible;
+
+    if (this.rainSystem?.emitter) this.rainSystem.emitter.visible = v;
+    if (this.snowSystem?.emitter) this.snowSystem.emitter.visible = v;
+
+    if (this.splashSystem?.emitter) this.splashSystem.emitter.visible = v;
+    if (this.splashSystems && this.splashSystems.length) {
+      for (const s of this.splashSystems) {
+        if (s?.emitter) s.emitter.visible = v;
+      }
+    }
+
+    if (this._waterHitSplashSystems && this._waterHitSplashSystems.length) {
+      for (const entry of this._waterHitSplashSystems) {
+        if (entry?.system?.emitter) entry.system.emitter.visible = v;
+      }
+    }
+
+    if (this._foamSystem?.emitter) this._foamSystem.emitter.visible = v;
+    if (this._foamSpraySystem?.emitter) this._foamSpraySystem.emitter.visible = v;
+  }
+
+  _zeroWeatherEmissions() {
+    if (this.rainSystem?.emissionOverTime && typeof this.rainSystem.emissionOverTime.value === 'number') {
+      this.rainSystem.emissionOverTime.value = 0;
+    }
+    if (this.snowSystem?.emissionOverTime && typeof this.snowSystem.emissionOverTime.value === 'number') {
+      this.snowSystem.emissionOverTime.value = 0;
+    }
+
+    if (this.splashSystem?.emissionOverTime && typeof this.splashSystem.emissionOverTime.value === 'number') {
+      this.splashSystem.emissionOverTime.value = 0;
+    }
+    if (this.splashSystems && this.splashSystems.length) {
+      for (const s of this.splashSystems) {
+        if (s?.emissionOverTime && typeof s.emissionOverTime.value === 'number') {
+          s.emissionOverTime.value = 0;
+        }
+      }
+    }
+
+    if (this._waterHitSplashSystems && this._waterHitSplashSystems.length) {
+      for (const entry of this._waterHitSplashSystems) {
+        const sys = entry?.system;
+        if (sys?.emissionOverTime && typeof sys.emissionOverTime.value === 'number') {
+          sys.emissionOverTime.value = 0;
+        }
+      }
+    }
+
+    if (this._foamSystem?.emissionOverTime && typeof this._foamSystem.emissionOverTime.value === 'number') {
+      this._foamSystem.emissionOverTime.value = 0;
+    }
+
+    if (this._foamSpraySystem?.emissionOverTime && typeof this._foamSpraySystem.emissionOverTime.value === 'number') {
+      this._foamSpraySystem.emissionOverTime.value = 0;
+    }
   }
 
   _createRainTexture() {
@@ -1050,6 +1303,7 @@ _createSnowTexture() {
     this._splashShape = new RandomRectangleEmitter({ width: sceneW, height: sceneH });
     this._waterHitShape = new WaterMaskedSplashEmitter(maskParams);
     this._shoreFoamShape = new ShorelineFoamEmitter(maskParams);
+    this._shoreFoamSprayShape = new ShorelineFoamSprayEmitter(maskParams);
     // Place the weather emitters well above the ground plane so rain/snow
     // have room to fall before hitting the map. Use SceneComposer.weatherEmitterZ
     // when available so all systems share a single canonical emitter height.
@@ -1359,6 +1613,9 @@ _createSnowTexture() {
     this._foamMaterial = foamMaterial;
     this._patchRoofMaskMaterial(this._foamMaterial);
 
+    const foamPlumeBehavior = new FoamPlumeBehavior();
+    this._foamPlumeBehavior = foamPlumeBehavior;
+
     this._foamSystem = new ParticleSystem({
       duration: 1,
       looping: true,
@@ -1366,7 +1623,7 @@ _createSnowTexture() {
       startLife: new IntervalValue(0.6, 1.4),
       startSpeed: new ConstantValue(0),
       startSize: new IntervalValue(40, 90),
-      startColor: new ColorRange(new Vector4(1.0, 1.0, 1.0, 0.7), new Vector4(1.0, 1.0, 1.0, 0.0)),
+      startColor: new ColorRange(new Vector4(1.0, 1.0, 1.0, 1.0), new Vector4(1.0, 1.0, 1.0, 1.0)),
       worldSpace: true,
       maxParticles: 2500,
       emissionOverTime: new ConstantValue(0),
@@ -1375,11 +1632,12 @@ _createSnowTexture() {
       renderOrder: 50,
       renderMode: RenderMode.BillBoard,
       startRotation: new ConstantValue(0),
-      behaviors: [killBehavior]
+      behaviors: [foamPlumeBehavior, killBehavior]
     });
 
     this._foamSystem.emitter.position.set(centerX, centerY, groundZ + 10);
     this._foamSystem.emitter.rotation.set(0, 0, 0);
+    this._foamSystem.emitter.layers.set(OVERLAY_THREE_LAYER);
     if (this.scene) this.scene.add(this._foamSystem.emitter);
     this.batchRenderer.addSystem(this._foamSystem);
 
@@ -1390,10 +1648,70 @@ _createSnowTexture() {
         if (batch.material) {
           this._foamBatchMaterial = batch.material;
           this._patchRoofMaskMaterial(batch.material);
+          if (batch.layers && typeof batch.layers.set === 'function') {
+            batch.layers.set(OVERLAY_THREE_LAYER);
+          }
         }
       }
     } catch (e) {
       log.warn('Failed to patch foam batch material:', e);
+    }
+
+    const foamSprayMaterial = new THREE.MeshBasicMaterial({
+      map: this.foamTexture,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.AdditiveBlending,
+      color: 0xffffff,
+      opacity: 1.0
+    });
+
+    this._foamSprayMaterial = foamSprayMaterial;
+    this._patchRoofMaskMaterial(this._foamSprayMaterial);
+
+    const foamSprayBehavior = new FoamSprayBehavior();
+    this._foamSprayBehavior = foamSprayBehavior;
+
+    this._foamSpraySystem = new ParticleSystem({
+      duration: 1,
+      looping: true,
+      prewarm: false,
+      startLife: new IntervalValue(0.18, 0.55),
+      startSpeed: new IntervalValue(35, 120),
+      startSize: new IntervalValue(7, 18),
+      startColor: new ColorRange(new Vector4(1.0, 1.0, 1.0, 1.0), new Vector4(1.0, 1.0, 1.0, 1.0)),
+      worldSpace: true,
+      maxParticles: 3500,
+      emissionOverTime: new ConstantValue(0),
+      shape: this._shoreFoamSprayShape,
+      material: foamSprayMaterial,
+      renderOrder: 50,
+      renderMode: RenderMode.BillBoard,
+      startRotation: new IntervalValue(0, Math.PI * 2),
+      behaviors: [foamSprayBehavior, killBehavior]
+    });
+
+    this._foamSpraySystem.emitter.position.set(centerX, centerY, groundZ + 12);
+    this._foamSpraySystem.emitter.rotation.set(0, 0, 0);
+    this._foamSpraySystem.emitter.layers.set(OVERLAY_THREE_LAYER);
+    if (this.scene) this.scene.add(this._foamSpraySystem.emitter);
+    this.batchRenderer.addSystem(this._foamSpraySystem);
+
+    try {
+      const idx = this.batchRenderer.systemToBatchIndex?.get(this._foamSpraySystem);
+      if (idx !== undefined && this.batchRenderer.batches && this.batchRenderer.batches[idx]) {
+        const batch = this.batchRenderer.batches[idx];
+        if (batch.material) {
+          this._foamSprayBatchMaterial = batch.material;
+          this._patchRoofMaskMaterial(batch.material);
+          if (batch.layers && typeof batch.layers.set === 'function') {
+            batch.layers.set(OVERLAY_THREE_LAYER);
+          }
+        }
+      }
+    } catch (e) {
+      log.warn('Failed to patch foam spray batch material:', e);
     }
 
     // --- SNOW ---
@@ -1726,6 +2044,20 @@ _createSnowTexture() {
   }
 
   update(dt, sceneBoundsVec4) {
+    // Global Weather checkbox kill-switch.
+    // When weather is disabled we must:
+    // - hide all precipitation emitters immediately (no frozen rain/snow)
+    // - stop emitting new particles
+    // We intentionally do NOT stop the Quarks BatchedRenderer globally since
+    // other particle effects (fire, dust, etc.) may still be active.
+    if (weatherController && weatherController.enabled === false) {
+      this._zeroWeatherEmissions();
+      this._setWeatherSystemsVisible(false);
+      return;
+    }
+
+    this._setWeatherSystemsVisible(true);
+
     const weather = weatherController.getCurrentState();
     if (!weather) return;
     
@@ -1884,11 +2216,13 @@ _createSnowTexture() {
             12000
           );
           this._shoreFoamShape.setPoints(this._shoreFoamPoints);
+          if (this._shoreFoamSprayShape) this._shoreFoamSprayShape.setPoints(this._shoreFoamPoints);
         }
       } else if (this._shoreFoamMaskUuid !== null) {
         this._shoreFoamMaskUuid = null;
         this._shoreFoamPoints = null;
         this._shoreFoamShape.clearPoints();
+        if (this._shoreFoamSprayShape) this._shoreFoamSprayShape.clearPoints();
       }
     }
 
@@ -2213,6 +2547,37 @@ _createSnowTexture() {
       if (this._foamSystem.emissionOverTime && typeof this._foamSystem.emissionOverTime.value === 'number') {
         this._foamSystem.emissionOverTime.value = foamEmission;
       }
+
+      if (this._foamPlumeBehavior) {
+        const i = Math.max(0.0, Math.min(4.0, foamIntensity));
+        const w = Math.max(0.0, Math.min(1.0, windSpeed));
+        this._foamPlumeBehavior.peakOpacity = (0.55 + 0.15 * w) * (0.6 + 0.4 * i) * darknessBrightnessScale;
+        this._foamPlumeBehavior.peakTime = 0.16;
+        this._foamPlumeBehavior.startScale = 0.5;
+        this._foamPlumeBehavior.maxScale = 2.0 + 0.7 * w;
+      }
+    }
+
+    if (this._foamSpraySystem) {
+      const foamEnabled = !!(waterEffect?.params?.shoreFoamEnabled);
+      const foamIntensity = waterEffect?.params?.shoreFoamIntensity ?? 1.0;
+      const windSpeed = weather.windSpeed || 0;
+
+      let foamEmission = 0;
+      if (foamEnabled && waterEnabled && this._shoreFoamPoints && this._shoreFoamPoints.length) {
+        foamEmission = (25 + 140 * windSpeed) * foamIntensity;
+      }
+
+      if (this._foamSpraySystem.emissionOverTime && typeof this._foamSpraySystem.emissionOverTime.value === 'number') {
+        this._foamSpraySystem.emissionOverTime.value = foamEmission;
+      }
+
+      if (this._foamSprayBehavior) {
+        const i = Math.max(0.0, Math.min(4.0, foamIntensity));
+        const w = Math.max(0.0, Math.min(1.0, windSpeed));
+        this._foamSprayBehavior.peakOpacity = (0.22 + 0.28 * w) * (0.6 + 0.4 * i) * darknessBrightnessScale;
+        this._foamSprayBehavior.peakTime = 0.10;
+      }
     }
 
     if (this._waterHitSplashBatchMaterials && this._waterHitSplashBatchMaterials.length > 0) {
@@ -2244,6 +2609,34 @@ _createSnowTexture() {
 
     if (this._foamBatchMaterial && this._foamBatchMaterial.userData && this._foamBatchMaterial.userData.roofUniforms) {
       const u = this._foamBatchMaterial.userData.roofUniforms;
+      u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+      u.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
+      if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
+      u.uRoofMap.value = this._roofTexture;
+      u.uRoofAlphaMap.value = roofAlphaTexture;
+      u.uScreenSize.value.set(screenWidth, screenHeight);
+
+      u.uWaterMaskEnabled.value = (waterEnabled && !!waterTex) ? 1.0 : 0.0;
+      u.uWaterMaskThreshold.value = this._waterMaskThreshold;
+      u.uWaterMask.value = waterTex;
+    }
+
+    if (this._foamSprayMaterial && this._foamSprayMaterial.userData && this._foamSprayMaterial.userData.roofUniforms) {
+      const u = this._foamSprayMaterial.userData.roofUniforms;
+      u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+      u.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
+      if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
+      u.uRoofMap.value = this._roofTexture;
+      u.uRoofAlphaMap.value = roofAlphaTexture;
+      u.uScreenSize.value.set(screenWidth, screenHeight);
+
+      u.uWaterMaskEnabled.value = (waterEnabled && !!waterTex) ? 1.0 : 0.0;
+      u.uWaterMaskThreshold.value = this._waterMaskThreshold;
+      u.uWaterMask.value = waterTex;
+    }
+
+    if (this._foamSprayBatchMaterial && this._foamSprayBatchMaterial.userData && this._foamSprayBatchMaterial.userData.roofUniforms) {
+      const u = this._foamSprayBatchMaterial.userData.roofUniforms;
       u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
       u.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
       if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
@@ -2437,6 +2830,11 @@ _createSnowTexture() {
     if (this._foamSystem) {
       this.batchRenderer.deleteSystem(this._foamSystem);
       if (this._foamSystem.emitter?.parent) this._foamSystem.emitter.parent.remove(this._foamSystem.emitter);
+    }
+
+    if (this._foamSpraySystem) {
+      this.batchRenderer.deleteSystem(this._foamSpraySystem);
+      if (this._foamSpraySystem.emitter?.parent) this._foamSpraySystem.emitter.parent.remove(this._foamSpraySystem.emitter);
     }
 
     if (this.rainTexture) this.rainTexture.dispose();

@@ -92,6 +92,13 @@ export class ParticleSystem extends EffectBase {
       //   render after tiles and, because they ignore depth, appear as an
       //   overlay above overhead geometry.
       this.batchRenderer.renderOrder = 50;
+      try {
+        const { OVERLAY_THREE_LAYER } = await import('../effects/EffectComposer.js');
+        if (this.batchRenderer.layers && typeof this.batchRenderer.layers.enable === 'function') {
+          this.batchRenderer.layers.enable(OVERLAY_THREE_LAYER);
+        }
+      } catch (_) {
+      }
       this.scene.add(this.batchRenderer);
       log.info('Initialized three.quarks BatchedRenderer');
 
@@ -126,9 +133,6 @@ export class ParticleSystem extends EffectBase {
   update(timeInfo) {
     if (DISABLE_ALL_PARTICLES) return;
     if (!this.enabled) return;
-    // When WeatherController is explicitly disabled via the UI, skip all
-    // weather + particle simulation work so we can profile other systems.
-    if (weatherController && weatherController.enabled === false) return;
     // 0. Step WeatherController so currentState reflects UI-driven targetState
     if (weatherController) {
       // Initialize once (no-op on subsequent calls)

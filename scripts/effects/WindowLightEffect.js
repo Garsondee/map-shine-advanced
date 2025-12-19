@@ -109,8 +109,21 @@ export class WindowLightEffect extends EffectBase {
   }
 
   set enabled(value) {
-    this._enabled = value;
-    if (this.mesh) this.mesh.visible = !!value;
+    const next = !!value;
+    this._enabled = next;
+    if (this.mesh) this.mesh.visible = next;
+
+    // Ensure downstream systems cannot keep using a stale light texture.
+    if (!next) {
+      try {
+        const mm = window.MapShine?.maskManager;
+        if (mm && typeof mm.setTexture === 'function') {
+          mm.setTexture('windowLight.screen', null);
+        }
+        this._publishedWindowLightTex = null;
+      } catch (e) {
+      }
+    }
   }
 
   /**
@@ -1037,6 +1050,7 @@ export class WindowLightEffect extends EffectBase {
    * @returns {THREE.Texture|null}
    */
   getLightTexture() {
+    if (!this._enabled || !this.params.hasWindowMask) return null;
     return this.lightTarget?.texture || null;
   }
 

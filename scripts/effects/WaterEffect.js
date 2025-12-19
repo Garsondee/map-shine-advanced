@@ -12,7 +12,7 @@ export class WaterEffect extends EffectBase {
     this.priority = 4;
     this.alwaysRender = true;
 
-    this.enabled = false;
+    this._enabled = false;
 
     this.params = {
       intensity: 0.5,
@@ -42,6 +42,18 @@ export class WaterEffect extends EffectBase {
       rainRippleIntensityBoost: 1.0,
       rainRippleSpeedBoost: 0.65,
 
+      windFoamEnabled: false,
+      windFoamIntensity: 1.0,
+      windFoamTiles: 6.0,
+      windFoamScale: 10.0,
+      windFoamSpeed: 0.25,
+      windFoamThreshold: 0.7,
+      windFoamSoftness: 0.25,
+      windFoamStreakiness: 2.8,
+      windFoamDepthLo: 0.25,
+      windFoamDepthHi: 0.75,
+      windFoamColor: { r: 1.0, g: 1.0, b: 1.0 },
+
       shoreFoamEnabled: false,
       shoreFoamIntensity: 1.0,
 
@@ -59,6 +71,27 @@ export class WaterEffect extends EffectBase {
 
     this._waterMaskFlipY = 0.0;
     this._waterMaskUseAlpha = 0.0;
+  }
+
+  get enabled() {
+    return this._enabled;
+  }
+
+  set enabled(value) {
+    this._enabled = !!value;
+
+    if (!this._enabled) {
+      const dm = window.MapShine?.distortionManager;
+      if (dm && this._sourceRegistered) {
+        dm.setSourceEnabled('water', false);
+      }
+
+      if (this._dmDebugOwned && dm?.params) {
+        dm.params.debugMode = this._dmPrevDebugMode;
+        dm.params.debugShowMask = this._dmPrevDebugShowMask;
+        this._dmDebugOwned = false;
+      }
+    }
   }
 
   static getControlSchema() {
@@ -228,6 +261,89 @@ export class WaterEffect extends EffectBase {
           default: 0.65
         },
 
+        windFoamEnabled: {
+          type: 'checkbox',
+          label: 'Wind Foam',
+          default: false
+        },
+        windFoamIntensity: {
+          type: 'slider',
+          label: 'Wind Foam Intensity',
+          min: 0,
+          max: 4,
+          step: 0.05,
+          default: 1.0
+        },
+        windFoamTiles: {
+          type: 'slider',
+          label: 'Wind Foam Tiles',
+          min: 1,
+          max: 20,
+          step: 1,
+          default: 6.0
+        },
+        windFoamScale: {
+          type: 'slider',
+          label: 'Wind Foam Scale',
+          min: 1,
+          max: 40,
+          step: 0.25,
+          default: 10.0
+        },
+        windFoamSpeed: {
+          type: 'slider',
+          label: 'Wind Foam Speed',
+          min: 0,
+          max: 2,
+          step: 0.01,
+          default: 0.25
+        },
+        windFoamThreshold: {
+          type: 'slider',
+          label: 'Wind Foam Threshold',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.7
+        },
+        windFoamSoftness: {
+          type: 'slider',
+          label: 'Wind Foam Softness',
+          min: 0.01,
+          max: 0.75,
+          step: 0.01,
+          default: 0.25
+        },
+        windFoamStreakiness: {
+          type: 'slider',
+          label: 'Wind Foam Streakiness',
+          min: 0.25,
+          max: 12,
+          step: 0.05,
+          default: 2.8
+        },
+        windFoamDepthLo: {
+          type: 'slider',
+          label: 'Wind Foam Depth Lo',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.25
+        },
+        windFoamDepthHi: {
+          type: 'slider',
+          label: 'Wind Foam Depth Hi',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.75
+        },
+        windFoamColor: {
+          type: 'color',
+          label: 'Wind Foam Color',
+          default: { r: 1.0, g: 1.0, b: 1.0 }
+        },
+
         shoreFoamEnabled: {
           type: 'checkbox',
           label: 'Shore Foam',
@@ -380,6 +496,18 @@ export class WaterEffect extends EffectBase {
     const causticsEdgeBlurTexels = typeof p.causticsEdgeBlurTexels === 'number' ? p.causticsEdgeBlurTexels : 6.0;
     const causticsDebug = typeof p.causticsDebug === 'boolean' ? p.causticsDebug : false;
 
+    const windFoamEnabled = typeof p.windFoamEnabled === 'boolean' ? p.windFoamEnabled : false;
+    const windFoamIntensity = typeof p.windFoamIntensity === 'number' ? p.windFoamIntensity : 1.0;
+    const windFoamTiles = typeof p.windFoamTiles === 'number' ? p.windFoamTiles : 6.0;
+    const windFoamScale = typeof p.windFoamScale === 'number' ? p.windFoamScale : 10.0;
+    const windFoamSpeed = typeof p.windFoamSpeed === 'number' ? p.windFoamSpeed : 0.25;
+    const windFoamThreshold = typeof p.windFoamThreshold === 'number' ? p.windFoamThreshold : 0.7;
+    const windFoamSoftness = typeof p.windFoamSoftness === 'number' ? p.windFoamSoftness : 0.25;
+    const windFoamStreakiness = typeof p.windFoamStreakiness === 'number' ? p.windFoamStreakiness : 2.8;
+    const windFoamDepthLo = typeof p.windFoamDepthLo === 'number' ? p.windFoamDepthLo : 0.25;
+    const windFoamDepthHi = typeof p.windFoamDepthHi === 'number' ? p.windFoamDepthHi : 0.75;
+    const windFoamColor = p.windFoamColor ?? { r: 1.0, g: 1.0, b: 1.0 };
+
     let intensity = intensityUi * 0.08;
     let frequency = scaleUi * 6.0;
     let speed = 0.25 + speedUi * 10.0;
@@ -388,15 +516,34 @@ export class WaterEffect extends EffectBase {
     const rainRippleIntensityBoost = typeof p.rainRippleIntensityBoost === 'number' ? p.rainRippleIntensityBoost : 1.0;
     const rainRippleSpeedBoost = typeof p.rainRippleSpeedBoost === 'number' ? p.rainRippleSpeedBoost : 0.65;
 
-    if (rainRipplesEnabled && weatherController && typeof weatherController.getCurrentState === 'function') {
-      const w = weatherController.getCurrentState();
-      const precip = w?.precipitation ?? 0;
-      const freeze = w?.freezeLevel ?? 0;
+    let weatherState = null;
+    if ((rainRipplesEnabled || windFoamEnabled) && weatherController && typeof weatherController.getCurrentState === 'function') {
+      weatherState = weatherController.getCurrentState();
+    }
+
+    if (rainRipplesEnabled && weatherState) {
+      const precip = weatherState?.precipitation ?? 0;
+      const freeze = weatherState?.freezeLevel ?? 0;
       const rainFactor = Math.max(0, Math.min(1, precip * (1.0 - freeze)));
 
       intensity *= (1.0 + rainFactor * rainRippleIntensityBoost);
       speed *= (1.0 + rainFactor * rainRippleSpeedBoost);
       frequency *= (1.0 + rainFactor * 0.15);
+    }
+
+    let windDirX = 1.0;
+    let windDirY = 0.0;
+    let windSpeed01 = 0.0;
+    if (weatherState) {
+      const wd = weatherState?.windDirection;
+      const ws = weatherState?.windSpeed;
+      if (wd && Number.isFinite(wd.x) && Number.isFinite(wd.y)) {
+        windDirX = wd.x;
+        windDirY = wd.y;
+      }
+      if (Number.isFinite(ws)) {
+        windSpeed01 = ws;
+      }
     }
 
     if (!this._sourceRegistered) {
@@ -428,11 +575,28 @@ export class WaterEffect extends EffectBase {
         causticsEdgeLo,
         causticsEdgeHi,
         causticsEdgeBlurTexels,
-        causticsDebug
+        causticsDebug,
+
+        windFoamEnabled,
+        windFoamIntensity,
+        windFoamTiles,
+        windFoamScale,
+        windFoamSpeed,
+        windFoamThreshold,
+        windFoamSoftness,
+        windFoamStreakiness,
+        windFoamDepthLo,
+        windFoamDepthHi,
+        windFoamColor,
+
+        windDirX,
+        windDirY,
+        windSpeed: windSpeed01
       });
       this._sourceRegistered = true;
     } else {
       dm.updateSourceMask('water', this.waterMask);
+
       dm.updateSourceParams('water', {
         intensity,
         frequency,
@@ -456,7 +620,23 @@ export class WaterEffect extends EffectBase {
         causticsEdgeLo,
         causticsEdgeHi,
         causticsEdgeBlurTexels,
-        causticsDebug
+        causticsDebug,
+
+        windFoamEnabled,
+        windFoamIntensity,
+        windFoamTiles,
+        windFoamScale,
+        windFoamSpeed,
+        windFoamThreshold,
+        windFoamSoftness,
+        windFoamStreakiness,
+        windFoamDepthLo,
+        windFoamDepthHi,
+        windFoamColor,
+
+        windDirX,
+        windDirY,
+        windSpeed: windSpeed01
       });
       dm.setSourceEnabled('water', true);
     }

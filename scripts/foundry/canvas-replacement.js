@@ -29,6 +29,8 @@ import { CloudEffect } from '../effects/CloudEffect.js';
 import { DistortionManager } from '../effects/DistortionManager.js';
 import { WaterEffect } from '../effects/WaterEffect.js';
 import { MaskDebugEffect } from '../effects/MaskDebugEffect.js';
+import { DebugLayerEffect } from '../effects/DebugLayerEffect.js';
+import { PlayerLightEffect } from '../effects/PlayerLightEffect.js';
 import { MaskManager } from '../masks/MaskManager.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { FireSparksEffect } from '../particles/FireSparksEffect.js';
@@ -823,6 +825,12 @@ async function createThreeCanvas(scene) {
     const maskDebugEffect = new MaskDebugEffect();
     await effectComposer.registerEffect(maskDebugEffect);
 
+    const debugLayerEffect = new DebugLayerEffect();
+    await effectComposer.registerEffect(debugLayerEffect);
+
+    const playerLightEffect = new PlayerLightEffect();
+    await effectComposer.registerEffect(playerLightEffect);
+
     // Step 7: Create Sky Color Effect (post-lighting color grading for sky/outdoors)
     skyColorEffect = new SkyColorEffect();
     await effectComposer.registerEffect(skyColorEffect);
@@ -1009,6 +1017,8 @@ async function createThreeCanvas(scene) {
     mapShine.fogEffect = fogEffect; // Fog of War (world-space plane mesh)
     mapShine.skyColorEffect = skyColorEffect; // NEW: Expose SkyColorEffect
     mapShine.distortionManager = distortionManager;
+    mapShine.debugLayerEffect = debugLayerEffect;
+    mapShine.playerLightEffect = playerLightEffect;
     mapShine.cameraFollower = cameraFollower; // Three.js camera follows PIXI
     mapShine.pixiInputBridge = pixiInputBridge; // Pan/zoom input bridge
     mapShine.tokenManager = tokenManager; // NEW: Expose token manager for diagnostics
@@ -1074,7 +1084,9 @@ async function createThreeCanvas(scene) {
         waterEffect,
         fogEffect,
         distortionManager,
-        maskDebugEffect
+        maskDebugEffect,
+        debugLayerEffect,
+        playerLightEffect
       );
     } catch (e) {
       log.error('Failed to initialize UI:', e);
@@ -1134,7 +1146,7 @@ async function createThreeCanvas(scene) {
  * @param {DistortionManager} distortionManager - The centralized distortion manager
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, smellyFliesEffect, dustMotesEffect, lightningEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, bushEffect, treeEffect, waterEffect, fogEffect, distortionManager, maskDebugEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, smellyFliesEffect, dustMotesEffect, lightningEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, bushEffect, treeEffect, waterEffect, fogEffect, distortionManager, maskDebugEffect, debugLayerEffect, playerLightEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -2035,6 +2047,36 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     uiManager.registerEffect(
       'mask-debug',
       'Mask Debug',
+      schema,
+      onUpdate,
+      'debug'
+    );
+  }
+
+  if (debugLayerEffect) {
+    const schema = DebugLayerEffect.getControlSchema();
+    const onUpdate = (effectId, paramId, value) => {
+      debugLayerEffect.applyParamChange(paramId, value);
+    };
+
+    uiManager.registerEffect(
+      'debug-layer',
+      'Debug Layer',
+      schema,
+      onUpdate,
+      'debug'
+    );
+  }
+
+  if (playerLightEffect) {
+    const schema = PlayerLightEffect.getControlSchema();
+    const onUpdate = (effectId, paramId, value) => {
+      playerLightEffect.applyParamChange(paramId, value);
+    };
+
+    uiManager.registerEffect(
+      'player-light',
+      'Player Light',
       schema,
       onUpdate,
       'debug'

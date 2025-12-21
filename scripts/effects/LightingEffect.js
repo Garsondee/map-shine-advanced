@@ -10,6 +10,8 @@ import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
 
 import { ThreeLightSource } from './ThreeLightSource.js'; // Import the class above
+import { ThreeDarknessSource } from './ThreeDarknessSource.js';
+import { OVERLAY_THREE_LAYER } from './EffectComposer.js';
 
 const log = createLogger('LightingEffect');
 
@@ -38,17 +40,27 @@ export class LightingEffect extends EffectBase {
       // At darkness 0: outdoors *= outdoorBrightness (boost daylight)
       // At darkness 1: outdoors *= (2.0 - outdoorBrightness) (dim night)
       outdoorBrightness: 1.5, // 1.0 = no change, 2.0 = double brightness at day
+
+      debugShowLightBuffer: false,
+      debugLightBufferExposure: 1.0,
     };
 
     this.lights = new Map(); // Map<id, ThreeLightSource>
+    this.darknessSources = new Map(); // Map<id, ThreeDarknessSource>
     
     // THREE resources
     this.lightScene = null;      // Scene for Light Accumulation
     this.lightTarget = null;     // Buffer for Light Accumulation
+    this.darknessScene = null;   // Scene for Darkness Accumulation
+    this.darknessTarget = null;  // Buffer for Darkness Accumulation
     this.roofAlphaTarget = null; // Buffer for Roof Alpha Mask (overhead tiles)
     this.quadScene = null;       // Scene for Final Composite
     this.quadCamera = null;
     this.compositeMaterial = null;
+    this.debugLightBufferMaterial = null;
+
+    /** @type {THREE.Mesh|null} */
+    this._quadMesh = null;
 
     /** @type {THREE.Texture|null} */
     this.windowMask = null;
@@ -111,6 +123,8 @@ export class LightingEffect extends EffectBase {
         lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.8, label: 'Light Intensity' },
         darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Darkness Effect' },
         outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 2.0, label: 'Outdoor Brightness' },
+        debugShowLightBuffer: { type: 'boolean', default: false },
+        debugLightBufferExposure: { type: 'slider', min: 0.1, max: 10, step: 0.1, default: 1.0 },
       }
     };
   }
@@ -124,6 +138,9 @@ export class LightingEffect extends EffectBase {
     this.lightScene = new THREE.Scene();
     // Use black background for additive light accumulation
     this.lightScene.background = new THREE.Color(0x000000); 
+
+    this.darknessScene = new THREE.Scene();
+    this.darknessScene.background = new THREE.Color(0x000000);
 
     // Scene used to project _Outdoors mask from the base plane into
     // screen space for overhead shadow gating.
@@ -140,6 +157,7 @@ export class LightingEffect extends EffectBase {
       uniforms: {
         tDiffuse: { value: null }, // Base Scene
         tLight: { value: null },   // Accumulated HDR Light
+        tDarkness: { value: null }, // Accumulated Darkness Mask
         tRoofAlpha: { value: null }, // Overhead tile alpha mask
         tOverheadShadow: { value: null }, // Overhead shadow factor (from OverheadShadowsEffect)
         tBuildingShadow: { value: null }, // Building shadow factor (from BuildingShadowsEffect)
@@ -181,6 +199,7 @@ export class LightingEffect extends EffectBase {
       fragmentShader: `
         uniform sampler2D tDiffuse;
         uniform sampler2D tLight;
+        uniform sampler2D tDarkness;
         uniform sampler2D tRoofAlpha;
         uniform sampler2D tOverheadShadow;
         uniform sampler2D tBuildingShadow;
@@ -227,6 +246,7 @@ export class LightingEffect extends EffectBase {
         void main() {
           vec4 baseColor = texture2D(tDiffuse, vUv);
           vec4 lightSample = texture2D(tLight, vUv); // HDR light buffer
+          float darknessMask = clamp(texture2D(tDarkness, vUv).r, 0.0, 1.0);
           vec4 roofSample = texture2D(tRoofAlpha, vUv);
 
           // 1. Determine Ambient Light
@@ -306,6 +326,9 @@ export class LightingEffect extends EffectBase {
           vec3 shadedLights = mix(baseLights, baseLights * combinedShadowFactor, kd);
           vec3 totalIllumination = shadedAmbient + shadedLights * master;
 
+          float dMask = clamp(darknessMask, 0.0, 1.0);
+          totalIllumination *= (1.0 - dMask);
+
           // Safety check for black flash
           bool badIllum = (totalIllumination.r != totalIllumination.r) ||
                           (totalIllumination.g != totalIllumination.g) ||
@@ -321,18 +344,11 @@ export class LightingEffect extends EffectBase {
           vec3 litColor = baseColor.rgb * totalIllumination;
 
           // 6. Apply Outdoor Brightness Boost
-          // At darkness 0: multiply outdoor areas by uOutdoorBrightness (e.g., 1.5 = 50% brighter)
-          // At darkness 1: multiply outdoor areas by (2.0 - uOutdoorBrightness) (e.g., 0.5 = 50% darker)
-          // Indoor areas (where outdoorsMask is dark) are unaffected.
           if (uHasOutdoorsMask > 0.5) {
             float outdoorStrength = texture2D(tOutdoorsMask, vUv).r;
-            // Interpolate brightness multiplier based on darkness level
-            // At darkness 0: use uOutdoorBrightness directly
-            // At darkness 1: use (2.0 - uOutdoorBrightness) to invert the boost
             float dayBoost = uOutdoorBrightness;
             float nightDim = 2.0 - uOutdoorBrightness;
             float outdoorMultiplier = mix(dayBoost, nightDim, uDarknessLevel);
-            // Apply only to outdoor areas, indoor areas stay at 1.0
             float finalMultiplier = mix(1.0, outdoorMultiplier, outdoorStrength);
             litColor *= finalMultiplier;
           }
@@ -346,8 +362,41 @@ export class LightingEffect extends EffectBase {
       `
     });
 
-    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.compositeMaterial);
-    this.quadScene.add(quad);
+    this.debugLightBufferMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tLight: { value: null },
+        uExposure: { value: 1.0 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tLight;
+        uniform float uExposure;
+        varying vec2 vUv;
+
+        vec3 reinhard(vec3 c) {
+          return c / (c + 1.0);
+        }
+
+        void main() {
+          vec3 c = texture2D(tLight, vUv).rgb * max(uExposure, 0.0);
+          c = reinhard(max(c, vec3(0.0)));
+          gl_FragColor = vec4(c, 1.0);
+        }
+      `,
+      depthWrite: false,
+      depthTest: false,
+      transparent: false,
+    });
+    this.debugLightBufferMaterial.toneMapped = false;
+
+    this._quadMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.compositeMaterial);
+    this.quadScene.add(this._quadMesh);
 
     // Hooks to Foundry
     Hooks.on('createAmbientLight', (doc) => this.onLightUpdate(doc));
@@ -395,6 +444,7 @@ export class LightingEffect extends EffectBase {
   onResize(width, height) {
     const THREE = window.THREE;
     if (this.lightTarget) this.lightTarget.dispose();
+    if (this.darknessTarget) this.darknessTarget.dispose();
     this.lightTarget = new THREE.WebGLRenderTarget(width, height, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
@@ -603,46 +653,88 @@ export class LightingEffect extends EffectBase {
     if (!canvas.lighting) return;
     this.lights.forEach(l => l.dispose());
     this.lights.clear();
+    this.darknessSources.forEach(d => d.dispose());
+    this.darknessSources.clear();
     canvas.lighting.placeables.forEach(p => this.onLightUpdate(p.document));
   }
 
+  /**
+   * Called when Foundry finishes computing LOS polygons for all lights.
+   * Rebuilds any lights that were created before their LOS was available.
+   */
+  onLightingRefresh() {
+    if (!canvas.lighting) return;
+
+    this.lights.forEach((source) => {
+      if (!source) return;
+      if (!source._usingCircleFallback) return;
+
+      try {
+        // Force geometry rebuild now that LOS should be available.
+        source.updateData(source.document, true);
+
+        // Ensure the mesh is attached to the light scene.
+        if (source.mesh && this.lightScene && !source.mesh.parent) {
+          this.lightScene.add(source.mesh);
+        }
+      } catch (e) {
+      }
+    });
+  }
+
   onLightUpdate(doc) {
+    console.debug('[LightingEffect] onLightUpdate', doc.id, doc.config?.negative, doc.config);
+    if (doc?.config?.negative) {
+      console.debug('[LightingEffect] Creating/Updating darkness source for', doc.id);
+      if (this.darknessSources.has(doc.id)) {
+        this.darknessSources.get(doc.id).updateData(doc);
+      } else {
+        const source = new ThreeDarknessSource(doc);
+        source.init();
+        this.darknessSources.set(doc.id, source);
+        if (source.mesh && this.darknessScene) this.darknessScene.add(source.mesh);
+        console.debug('[LightingEffect] Added darkness mesh to scene', doc.id);
+      }
+      if (this.lights.has(doc.id)) {
+        const source = this.lights.get(doc.id);
+        if (source?.mesh) this.lightScene?.remove(source.mesh);
+        source?.dispose();
+        this.lights.delete(doc.id);
+      }
+      return;
+    }
+
+    if (this.darknessSources.has(doc.id)) {
+      const ds = this.darknessSources.get(doc.id);
+      if (ds?.mesh && this.darknessScene) this.darknessScene.remove(ds.mesh);
+      ds?.dispose();
+      this.darknessSources.delete(doc.id);
+    }
+
     if (this.lights.has(doc.id)) {
       this.lights.get(doc.id).updateData(doc);
     } else {
       const source = new ThreeLightSource(doc);
+      source.init();
       this.lights.set(doc.id, source);
       if (source.mesh) this.lightScene.add(source.mesh);
     }
   }
 
   onLightDelete(doc) {
+    if (this.darknessSources.has(doc.id)) {
+      const source = this.darknessSources.get(doc.id);
+      if (source.mesh && this.darknessScene) this.darknessScene.remove(source.mesh);
+      source.dispose();
+      this.darknessSources.delete(doc.id);
+    }
+
     if (this.lights.has(doc.id)) {
       const source = this.lights.get(doc.id);
       if (source.mesh) this.lightScene.remove(source.mesh);
       source.dispose();
       this.lights.delete(doc.id);
     }
-  }
-
-  /**
-   * Called when Foundry finishes computing LOS polygons for all lights.
-   * Rebuilds any lights that were created before their LOS was available
-   * (i.e., still using circle fallback geometry).
-   */
-  onLightingRefresh() {
-    if (!canvas.lighting) return;
-    
-    this.lights.forEach((source, id) => {
-      if (source._usingCircleFallback) {
-        // Force a geometry rebuild now that LOS should be available
-        source.updateData(source.document, true);
-        // Re-add mesh to scene if it was rebuilt
-        if (source.mesh && !source.mesh.parent) {
-          this.lightScene.add(source.mesh);
-        }
-      }
-    });
   }
 
   getEffectiveDarkness() {
@@ -690,8 +782,6 @@ export class LightingEffect extends EffectBase {
       }
     };
 
-    const dt = timeInfo && typeof timeInfo.delta === 'number' ? timeInfo.delta : 0;
-
     // Sync Environment Data
     if (canvas.scene && canvas.environment) {
       this.params.darknessLevel = canvas.environment.darknessLevel;
@@ -700,7 +790,12 @@ export class LightingEffect extends EffectBase {
 
     // Update Animations for all lights
     this.lights.forEach(light => {
-      light.updateAnimation(dt, this.params.darknessLevel);
+      light.updateAnimation(timeInfo, this.params.darknessLevel);
+    });
+
+    // Update Animations for all darkness sources
+    this.darknessSources.forEach(ds => {
+      ds.updateAnimation(timeInfo);
     });
 
     // Update Composite Uniforms
@@ -922,6 +1017,17 @@ export class LightingEffect extends EffectBase {
       this.lightTarget.setSize(size.x, size.y);
     }
 
+    if (!this.darknessTarget) {
+      this.darknessTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else if (this.darknessTarget.width !== size.x || this.darknessTarget.height !== size.y) {
+      this.darknessTarget.setSize(size.x, size.y);
+    }
+
     if (!this.roofAlphaTarget) {
       this.roofAlphaTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
         minFilter: THREE.LinearFilter,
@@ -1018,13 +1124,30 @@ export class LightingEffect extends EffectBase {
     renderer.clear();
 
     if (this.lightScene && this.mainCamera) {
-      renderer.render(this.lightScene, this.mainCamera);
+      const prevMask = this.mainCamera.layers.mask;
+      try {
+        // Always include default layer 0 and our overlay layer during light accumulation.
+        this.mainCamera.layers.enable(0);
+        this.mainCamera.layers.enable(OVERLAY_THREE_LAYER);
+        renderer.render(this.lightScene, this.mainCamera);
+      } finally {
+        this.mainCamera.layers.mask = prevMask;
+      }
+    }
+
+    // 1.5 Accumulate Darkness into darknessTarget
+    renderer.setRenderTarget(this.darknessTarget);
+    renderer.setClearColor(0x000000, 1);
+    renderer.clear();
+    if (this.darknessScene && this.mainCamera) {
+      renderer.render(this.darknessScene, this.mainCamera);
     }
 
     // 2. Composite: use lightTarget as tLight and roofAlphaTarget as tRoofAlpha.
     // Base scene texture comes from EffectComposer via setInputTexture(tDiffuse).
     const cu = this.compositeMaterial.uniforms;
     cu.tLight.value = this.lightTarget.texture;
+    cu.tDarkness.value = this.darknessTarget.texture;
     cu.tRoofAlpha.value = this.roofAlphaTarget.texture;
 
     // Bind screen-space outdoors mask so we can avoid darkening
@@ -1095,6 +1218,15 @@ export class LightingEffect extends EffectBase {
     }
 
     renderer.setRenderTarget(oldTarget);
+
+    if (this.params?.debugShowLightBuffer && this._quadMesh && this.debugLightBufferMaterial) {
+      this.debugLightBufferMaterial.uniforms.tLight.value = this.lightTarget.texture;
+      this.debugLightBufferMaterial.uniforms.uExposure.value = this.params.debugLightBufferExposure ?? 1.0;
+      this._quadMesh.material = this.debugLightBufferMaterial;
+    } else if (this._quadMesh) {
+      this._quadMesh.material = this.compositeMaterial;
+    }
+
     renderer.render(this.quadScene, this.quadCamera);
   }
 

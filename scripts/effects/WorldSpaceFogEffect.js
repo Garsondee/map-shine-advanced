@@ -48,7 +48,8 @@ export class WorldSpaceFogEffect extends EffectBase {
       enabled: true,
       unexploredColor: '#000000',
       exploredColor: '#000000',
-      exploredOpacity: 0.5
+      exploredOpacity: 0.5,
+      softness: 2.0
     };
 
     // Scene reference
@@ -63,6 +64,9 @@ export class WorldSpaceFogEffect extends EffectBase {
     this.visionScene = null;
     this.visionCamera = null;
     this.visionMaterial = null;
+
+    this._visionRTWidth = 1;
+    this._visionRTHeight = 1;
     
     // Self-maintained exploration render target
     // We accumulate vision into this each frame: explored = max(explored, vision)
@@ -72,6 +76,9 @@ export class WorldSpaceFogEffect extends EffectBase {
     this.explorationScene = null;
     this.explorationCamera = null;
     this.explorationMaterial = null;
+
+    this._explorationRTWidth = 1;
+    this._explorationRTHeight = 1;
     
     // Ping-pong targets for accumulation
     this._explorationTargetA = null;
@@ -113,14 +120,15 @@ export class WorldSpaceFogEffect extends EffectBase {
           name: 'fog',
           label: 'Fog of War',
           type: 'inline',
-          parameters: ['unexploredColor', 'exploredColor', 'exploredOpacity']
+          parameters: ['unexploredColor', 'exploredColor', 'exploredOpacity', 'softness']
         }
       ],
       parameters: {
         enabled: { type: 'boolean', default: true },
         unexploredColor: { type: 'color', default: '#000000', label: 'Unexplored' },
         exploredColor: { type: 'color', default: '#000000', label: 'Explored Tint' },
-        exploredOpacity: { type: 'slider', min: 0, max: 1, step: 0.05, default: 0.5, label: 'Explored Opacity' }
+        exploredOpacity: { type: 'slider', min: 0, max: 1, step: 0.05, default: 0.5, label: 'Explored Opacity' },
+        softness: { type: 'slider', min: 0, max: 12, step: 0.5, default: 2.0, label: 'Edge Softness' }
       }
     };
   }
@@ -203,6 +211,9 @@ export class WorldSpaceFogEffect extends EffectBase {
     const scale = Math.min(1, maxSize / Math.max(width, height));
     const rtWidth = Math.ceil(width * scale);
     const rtHeight = Math.ceil(height * scale);
+
+    this._visionRTWidth = rtWidth;
+    this._visionRTHeight = rtHeight;
     
     this.visionRenderTarget = new THREE.WebGLRenderTarget(rtWidth, rtHeight, {
       format: THREE.RGBAFormat,  // Use RGBA for proper sampling
@@ -252,6 +263,9 @@ export class WorldSpaceFogEffect extends EffectBase {
     const scale = Math.min(1, maxSize / Math.max(width, height));
     const rtWidth = Math.ceil(width * scale);
     const rtHeight = Math.ceil(height * scale);
+
+    this._explorationRTWidth = rtWidth;
+    this._explorationRTHeight = rtHeight;
     
     const rtOptions = {
       format: THREE.RGBAFormat,
@@ -280,6 +294,15 @@ export class WorldSpaceFogEffect extends EffectBase {
       },
       vertexShader: `
         varying vec2 vUv;
+
+        float sampleBlur4(sampler2D tex, vec2 uv, vec2 texel) {
+          float c = texture2D(tex, uv).r;
+          float l = texture2D(tex, uv + vec2(-texel.x, 0.0)).r;
+          float r = texture2D(tex, uv + vec2(texel.x, 0.0)).r;
+          float d = texture2D(tex, uv + vec2(0.0, -texel.y)).r;
+          float u = texture2D(tex, uv + vec2(0.0, texel.y)).r;
+          return (c * 4.0 + l + r + d + u) / 8.0;
+        }
         void main() {
           vUv = uv;
           gl_Position = vec4(position, 1.0);
@@ -386,7 +409,10 @@ export class WorldSpaceFogEffect extends EffectBase {
         uUnexploredColor: { value: new THREE.Color(0x000000) },
         uExploredColor: { value: new THREE.Color(0x000000) },
         uExploredOpacity: { value: 0.5 },
-        uBypassFog: { value: 0.0 }
+        uBypassFog: { value: 0.0 },
+        uSoftnessPx: { value: 2.0 },
+        uVisionTexelSize: { value: new THREE.Vector2(1, 1) },
+        uExploredTexelSize: { value: new THREE.Vector2(1, 1) }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -402,12 +428,24 @@ export class WorldSpaceFogEffect extends EffectBase {
         uniform vec3 uExploredColor;
         uniform float uExploredOpacity;
         uniform float uBypassFog;
+        uniform float uSoftnessPx;
+        uniform vec2 uVisionTexelSize;
+        uniform vec2 uExploredTexelSize;
         
         // Scene rect in Foundry coords (x, y, width, height)
         // We will inject this via defines/uniform replacement from JS if needed.
         // For now, assume the fog plane covers exactly the sceneRect, so vUv maps
         // linearly across it and we can reconstruct Foundry world coordinates.
         varying vec2 vUv;
+
+        float sampleBlur4(sampler2D tex, vec2 uv, vec2 texel) {
+          float c = texture2D(tex, uv).r;
+          float l = texture2D(tex, uv + vec2(-texel.x, 0.0)).r;
+          float r = texture2D(tex, uv + vec2(texel.x, 0.0)).r;
+          float d = texture2D(tex, uv + vec2(0.0, -texel.y)).r;
+          float u = texture2D(tex, uv + vec2(0.0, texel.y)).r;
+          return (c * 4.0 + l + r + d + u) / 8.0;
+        }
         
         void main() {
           if (uBypassFog > 0.5) {
@@ -419,7 +457,7 @@ export class WorldSpaceFogEffect extends EffectBase {
           // UV needs Y-flip because Three.js plane UVs are bottom-left origin
           // but our vision camera renders with top-left origin (Foundry coords)
           vec2 visionUv = vec2(vUv.x, 1.0 - vUv.y);
-          float vision = texture2D(tVision, visionUv).r;
+          float vision = sampleBlur4(tVision, visionUv, uVisionTexelSize);
           
           // Exploration texture is in Foundry world space over the sceneRect.
           // The fog plane's geometry is also aligned to sceneRect, so we can
@@ -427,19 +465,26 @@ export class WorldSpaceFogEffect extends EffectBase {
           // PIXI texture is vertically inverted relative to our plane, so we
           // flip Y once when sampling.
           vec2 exploredUv = vec2(vUv.x, 1.0 - vUv.y);
-          float explored = texture2D(tExplored, exploredUv).r;
+          float explored = sampleBlur4(tExplored, exploredUv, uExploredTexelSize);
           
-          // Fog of War logic:
-          // 1. Currently visible -> fully transparent (discard)
-          // 2. Previously explored but not visible -> dim overlay
-          // 3. Never explored -> full darkness
-          if (vision > 0.1) {
+          float threshold = 0.1;
+          float softnessVision = max(uVisionTexelSize.x, uVisionTexelSize.y) * uSoftnessPx;
+          float softnessExplored = max(uExploredTexelSize.x, uExploredTexelSize.y) * uSoftnessPx;
+
+          float visible = smoothstep(threshold - softnessVision, threshold + softnessVision, vision);
+          float exploredMask = smoothstep(threshold - softnessExplored, threshold + softnessExplored, explored);
+
+          float fogAlpha = 1.0 - visible;
+          float exploredAlpha = mix(1.0, uExploredOpacity, exploredMask);
+
+          vec3 fogColor = mix(uUnexploredColor, uExploredColor, exploredMask);
+          float outAlpha = fogAlpha * exploredAlpha;
+
+          if (outAlpha <= 0.001) {
             discard;
-          } else if (explored > 0.1 && uExploredOpacity > 0.0) {
-            gl_FragColor = vec4(uExploredColor, uExploredOpacity);
-          } else {
-            gl_FragColor = vec4(uUnexploredColor, 1.0);
           }
+
+          gl_FragColor = vec4(fogColor, outAlpha);
         }
       `,
       transparent: true,
@@ -822,6 +867,15 @@ export class WorldSpaceFogEffect extends EffectBase {
     // This ensures only areas we've actually seen with our token are marked explored
     const exploredTex = this._getExplorationReadTarget()?.texture || this._fallbackBlack;
     this.fogMaterial.uniforms.tExplored.value = exploredTex;
+
+    // Update texel sizes for softness/AA in the fog shader
+    const vtW = Math.max(1, this._visionRTWidth);
+    const vtH = Math.max(1, this._visionRTHeight);
+    const etW = Math.max(1, this._explorationRTWidth);
+    const etH = Math.max(1, this._explorationRTHeight);
+    this.fogMaterial.uniforms.uVisionTexelSize.value.set(1.0 / vtW, 1.0 / vtH);
+    this.fogMaterial.uniforms.uExploredTexelSize.value.set(1.0 / etW, 1.0 / etH);
+    this.fogMaterial.uniforms.uSoftnessPx.value = this.params.softness;
     
     // Update color uniforms
     this.fogMaterial.uniforms.uUnexploredColor.value.set(this.params.unexploredColor);

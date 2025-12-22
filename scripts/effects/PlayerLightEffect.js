@@ -59,7 +59,8 @@ export class PlayerLightEffect extends EffectBase {
       enabled: false,
       mode: 'torch',
 
-      maxDistanceUnits: 30,
+      torchMaxDistanceUnits: 10,
+      flashlightMaxDistanceUnits: 60,
       fadeOutDistanceUnits: 10,
       wallBlockEnabled: true,
 
@@ -68,6 +69,10 @@ export class PlayerLightEffect extends EffectBase {
 
       torchBaseIntensity: 1.0,
       emberIntensity: 0.12,
+      torchGutterDisableLight: true,
+      torchGutterLifeScale: 0.3,
+      torchReigniteRequiresTouch: false,
+      torchReigniteTouchExtraUnits: 0.25,
       intensityRiseSpeed: 10,
       intensityFallSpeed: 18,
 
@@ -187,6 +192,9 @@ export class PlayerLightEffect extends EffectBase {
     this._torchIntensity = 0;
     this._torchFinalIntensity = 0;
 
+    this._torchGuttering = false;
+    this._torchExtinguished = false;
+
     this._distanceFade = 0;
 
     this._cookieTextures = {};
@@ -244,7 +252,8 @@ export class PlayerLightEffect extends EffectBase {
           parameters: [
             'enabled',
             'mode',
-            'maxDistanceUnits',
+            'torchMaxDistanceUnits',
+            'flashlightMaxDistanceUnits',
             'fadeOutDistanceUnits',
             'wallBlockEnabled',
             'debugReadoutEnabled'
@@ -260,6 +269,10 @@ export class PlayerLightEffect extends EffectBase {
             'torchLightEnabled',
             'torchBaseIntensity',
             'emberIntensity',
+            'torchGutterDisableLight',
+            'torchGutterLifeScale',
+            'torchReigniteRequiresTouch',
+            'torchReigniteTouchExtraUnits',
             'intensityRiseSpeed',
             'intensityFallSpeed',
             'torchLightColor',
@@ -398,13 +411,18 @@ export class PlayerLightEffect extends EffectBase {
       parameters: {
         enabled: { type: 'boolean', default: false },
         mode: { type: 'list', label: 'Mode', options: { Torch: 'torch', Flashlight: 'flashlight' }, default: 'torch' },
-        maxDistanceUnits: { type: 'slider', label: 'Max Dist (u)', min: 1, max: 200, step: 1, default: 30, throttle: 50 },
+        torchMaxDistanceUnits: { type: 'slider', label: 'Torch Max Dist (u)', min: 1, max: 200, step: 1, default: 10, throttle: 50 },
+        flashlightMaxDistanceUnits: { type: 'slider', label: 'Flashlight Max Dist (u)', min: 1, max: 200, step: 1, default: 60, throttle: 50 },
         fadeOutDistanceUnits: { type: 'slider', label: 'Fade Band (u)', min: 0, max: 100, step: 1, default: 10, throttle: 50 },
         wallBlockEnabled: { type: 'boolean', label: 'Wall Block', default: true },
         springStiffness: { type: 'slider', label: 'Spring Stiffness', min: 1, max: 300, step: 1, default: 55, throttle: 50 },
         springDamping: { type: 'slider', label: 'Spring Damping', min: 0, max: 90, step: 1, default: 16, throttle: 50 },
         torchBaseIntensity: { type: 'slider', label: 'Base Intensity', min: 0, max: 6, step: 0.01, default: 1.0, throttle: 50 },
         emberIntensity: { type: 'slider', label: 'Ember Intensity', min: 0, max: 3, step: 0.01, default: 0.12, throttle: 50 },
+        torchGutterDisableLight: { type: 'boolean', label: 'Gutter: Disable Light', default: true },
+        torchGutterLifeScale: { type: 'slider', label: 'Gutter: Life Scale', min: 0.05, max: 1.0, step: 0.01, default: 0.3, throttle: 50 },
+        torchReigniteRequiresTouch: { type: 'boolean', label: 'Reignite Requires Touch', default: false },
+        torchReigniteTouchExtraUnits: { type: 'slider', label: 'Reignite Touch Extra (u)', min: 0, max: 10, step: 0.05, default: 0.25, throttle: 50 },
         intensityRiseSpeed: { type: 'slider', label: 'Rise Speed', min: 0.1, max: 60, step: 0.1, default: 10, throttle: 50 },
         intensityFallSpeed: { type: 'slider', label: 'Fall Speed', min: 0.1, max: 80, step: 0.1, default: 18, throttle: 50 },
         flickerIntensity: { type: 'slider', label: 'Flicker Amount', min: 0, max: 2.5, step: 0.01, default: 0.18, throttle: 50 },
@@ -618,8 +636,11 @@ export class PlayerLightEffect extends EffectBase {
         sys.emissionOverTime.value = rate;
       }
 
-      const lifeMin = Math.max(0.01, this.params.torchSparksLifeMin);
-      const lifeMax = Math.max(lifeMin, this.params.torchSparksLifeMax);
+      const baseLifeMin = Math.max(0.01, this.params.torchSparksLifeMin);
+      const baseLifeMax = Math.max(baseLifeMin, this.params.torchSparksLifeMax);
+      const lifeScale = this._torchGuttering ? Math.max(0.01, Math.min(1.0, (this.params.torchGutterLifeScale ?? 0.3))) : 1.0;
+      const lifeMin = Math.max(0.01, baseLifeMin * lifeScale);
+      const lifeMax = Math.max(lifeMin, baseLifeMax * lifeScale);
       if (sys.startLife && sys.startLife.a !== undefined) {
         sys.startLife.a = lifeMin;
         sys.startLife.b = lifeMax;
@@ -783,12 +804,13 @@ export class PlayerLightEffect extends EffectBase {
     const distanceUnits = distancePx * pxToUnits;
 
     const rangeMul = this.params.mode === 'torch' ? 3.0 : 4.0;
+    const baseMaxU = this.params.mode === 'torch' ? this.params.torchMaxDistanceUnits : this.params.flashlightMaxDistanceUnits;
 
     // Distance fade + kill.
     // - Within maxDistanceUnits: full intensity.
     // - Beyond: fade out over fadeOutDistanceUnits.
     // - Past max+fadeBand: hide entirely.
-    const maxU = Math.max(0.001, this.params.maxDistanceUnits) * rangeMul;
+    const maxU = Math.max(0.001, baseMaxU) * rangeMul;
     const fadeBandU = Math.max(0, this.params.fadeOutDistanceUnits ?? 0) * rangeMul;
     const killU = maxU + fadeBandU;
     let fade = 1.0;
@@ -799,6 +821,41 @@ export class PlayerLightEffect extends EffectBase {
     }
     fade = Math.max(0, Math.min(1, fade));
     this._distanceFade = fade;
+
+    const isTorchMode = this.params.mode === 'torch';
+
+    if (!isTorchMode || !this.params.torchReigniteRequiresTouch) {
+      this._torchExtinguished = false;
+    }
+
+    if (isTorchMode && this.params.torchReigniteRequiresTouch) {
+      try {
+        const gridSize = canvas?.dimensions?.size ?? 100;
+        const scaleX = tokenDoc?.texture?.scaleX ?? 1;
+        const scaleY = tokenDoc?.texture?.scaleY ?? 1;
+        const wPx = (tokenDoc?.width ?? 1) * gridSize * scaleX;
+        const hPx = (tokenDoc?.height ?? 1) * gridSize * scaleY;
+        const tokenRadiusPx = 0.5 * Math.max(0, Math.min(wPx, hPx));
+        const tokenRadiusU = tokenRadiusPx * pxToUnits;
+        const extraU = Math.max(0, this.params.torchReigniteTouchExtraUnits ?? 0);
+        const touching = distanceUnits <= (tokenRadiusU + extraU);
+
+        if (fade <= 0.0001) {
+          this._torchExtinguished = true;
+        }
+
+        if (this._torchExtinguished && !touching) {
+          this._setVisible(false);
+          this._hideDynamicLightSources();
+          return;
+        }
+
+        if (this._torchExtinguished && touching) {
+          this._torchExtinguished = false;
+        }
+      } catch (_) {
+      }
+    }
 
     if (fade <= 0.0001) {
       this._setVisible(false);
@@ -846,6 +903,8 @@ export class PlayerLightEffect extends EffectBase {
       } catch (_) {
       }
     }
+
+    this._torchGuttering = isTorchMode && distanceUnits > maxU;
 
     // Update debug overlay with current state
     const state = fade <= 0.0001 ? 'HIDDEN' : (blocked || distanceUnits > this.params.maxDistanceUnits ? 'EMBER' : 'ACTIVE');
@@ -1623,8 +1682,10 @@ export class PlayerLightEffect extends EffectBase {
     const dt = typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016;
     const t = typeof timeInfo?.elapsed === 'number' ? timeInfo.elapsed : 0;
 
-    const maxU = Math.max(0.001, (typeof maxDistanceUnitsOverride === 'number' ? maxDistanceUnitsOverride : this.params.maxDistanceUnits));
+    const maxU = Math.max(0.001, (typeof maxDistanceUnitsOverride === 'number' ? maxDistanceUnitsOverride : this.params.torchMaxDistanceUnits));
     const inRange = distanceUnits <= maxU;
+
+    const guttering = !inRange;
 
     const ember = (!inRange || blocked) ? 1 : 0;
     const baseTarget = ember ? this.params.emberIntensity : this.params.torchBaseIntensity;
@@ -1684,6 +1745,17 @@ export class PlayerLightEffect extends EffectBase {
     particleSystem.emitter.position.set(this._torchPos.x, this._torchPos.y, groundZ + 0.12);
 
     try {
+      if (particleSystem.startLife && particleSystem.startLife.a !== undefined) {
+        const ud = particleSystem.userData || (particleSystem.userData = {});
+        if (ud._msTorchBaseLifeMin === undefined) ud._msTorchBaseLifeMin = particleSystem.startLife.a;
+        if (ud._msTorchBaseLifeMax === undefined) ud._msTorchBaseLifeMax = particleSystem.startLife.b;
+        const baseLifeMin = Math.max(0.01, ud._msTorchBaseLifeMin);
+        const baseLifeMax = Math.max(baseLifeMin, ud._msTorchBaseLifeMax);
+        const lifeScale = guttering ? Math.max(0.01, Math.min(1.0, (this.params.torchGutterLifeScale ?? 0.3))) : 1.0;
+        particleSystem.startLife.a = Math.max(0.01, baseLifeMin * lifeScale);
+        particleSystem.startLife.b = Math.max(particleSystem.startLife.a, baseLifeMax * lifeScale);
+      }
+
       const minSz = Math.max(1, this.params.torchFlameSizeMin);
       const maxSz = Math.max(minSz, this.params.torchFlameSizeMax);
       const minRate = Math.max(0, this.params.torchFlameRateMin);
@@ -2000,7 +2072,8 @@ export class PlayerLightEffect extends EffectBase {
     // Torch light
     const torchSrc = this._ensureLightSource(torchId, '_torchLightDoc', '_torchLightSource', lightScene);
     if (torchSrc && torchSrc.mesh) {
-      const enabled = !!this.params.torchLightEnabled && this.params.mode === 'torch' && this.enabled;
+      const gutterNoLight = !!this.params.torchGutterDisableLight && !!this._torchGuttering;
+      const enabled = !!this.params.torchLightEnabled && this.params.mode === 'torch' && this.enabled && !gutterNoLight;
       torchSrc.mesh.visible = enabled;
 
       if (enabled && this._torchPos) {

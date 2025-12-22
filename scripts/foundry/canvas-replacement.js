@@ -168,6 +168,12 @@ let collapseSidebarHookId = null;
  /** @type {number|null} - Interval ID for periodic FPS logging */
  let fpsLogIntervalId = null;
 
+/** @type {Function|null} */
+let _webglContextLostHandler = null;
+
+/** @type {Function|null} */
+let _webglContextRestoredHandler = null;
+
  /** @type {number|null} - Interval ID for weather windvane UI sync */
  let windVaneIntervalId = null;
 
@@ -625,6 +631,50 @@ async function createThreeCanvas(scene) {
     threeCanvas = rendererCanvas; // Update reference
     const rect = threeCanvas.getBoundingClientRect();
     renderer.setSize(rect.width, rect.height);
+
+    // Robustness: Handle WebGL context loss/restoration.
+    // Some UI operations or GPU resets can trigger a context loss; in that case we must
+    // stop the RAF loop (otherwise we can wind up in a broken render state) and then
+    // attempt to resume when the context restores.
+    try {
+      _webglContextLostHandler = (ev) => {
+        try { ev.preventDefault(); } catch (_) {}
+        log.warn('WebGL context lost - pausing render loop');
+        try {
+          if (renderLoop?.running()) renderLoop.stop();
+        } catch (e) {
+          log.warn('Failed to stop render loop after context loss', e);
+        }
+      };
+
+      _webglContextRestoredHandler = () => {
+        log.info('WebGL context restored - attempting to resume rendering');
+        try {
+          // Re-apply sizing to ensure internal buffers are sane.
+          const r = threeCanvas?.getBoundingClientRect?.();
+          if (r && renderer) {
+            renderer.setSize(r.width, r.height);
+            if (sceneComposer) sceneComposer.resize(r.width, r.height);
+            if (effectComposer) effectComposer.resize(r.width, r.height);
+          }
+        } catch (e) {
+          log.warn('Resize failed during context restore', e);
+        }
+
+        try {
+          if (renderLoop && !renderLoop.running()) {
+            renderLoop.start();
+          }
+        } catch (e) {
+          log.warn('Failed to restart render loop after context restore', e);
+        }
+      };
+
+      threeCanvas.addEventListener('webglcontextlost', _webglContextLostHandler, false);
+      threeCanvas.addEventListener('webglcontextrestored', _webglContextRestoredHandler, false);
+    } catch (e) {
+      log.warn('Failed to register WebGL context loss handlers', e);
+    }
 
     // Ensure regions outside the Foundry world bounds remain black; padded region is covered by a background plane
     if (renderer.setClearColor) {
@@ -2094,6 +2144,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
  * @private
  */
 function destroyThreeCanvas() {
+  log.info('Destroying Three.js canvas');
   // Clean up resize handling first
   cleanupResizeHandling();
 
@@ -2247,6 +2298,20 @@ function destroyThreeCanvas() {
 
   // Remove canvas element
   if (threeCanvas) {
+    try {
+      if (_webglContextLostHandler) {
+        threeCanvas.removeEventListener('webglcontextlost', _webglContextLostHandler);
+      }
+      if (_webglContextRestoredHandler) {
+        threeCanvas.removeEventListener('webglcontextrestored', _webglContextRestoredHandler);
+      }
+    } catch (_) {
+      // Ignore
+    } finally {
+      _webglContextLostHandler = null;
+      _webglContextRestoredHandler = null;
+    }
+
     threeCanvas.remove();
     threeCanvas = null;
     log.debug('Three.js canvas removed');

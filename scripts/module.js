@@ -121,14 +121,3 @@ Hooks.once('ready', async function() {
   
   info('Module ready');
 });
-
-/**
- * Foundry VTT cleanup hook (if module needs to cleanup on disable)
- */
-if (typeof Hooks !== 'undefined') {
-  Hooks.on('closeApplication', function() {
-    if (MapShine.initialized) {
-      cleanup(MapShine);
-    }
-  });
-}

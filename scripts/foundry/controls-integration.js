@@ -69,6 +69,12 @@ export class ControlsIntegration {
     
     /** @type {number[]} */
     this._hookIds = [];
+
+    /** @type {boolean} */
+    this._environmentInitWrapped = false;
+
+    /** @type {Function|null} */
+    this._originalEnvironmentInitialize = null;
   }
 
   /**
@@ -176,10 +182,9 @@ export class ControlsIntegration {
     
     // CRITICAL: Set PIXI renderer background to transparent
     // Without this, the PIXI background color renders over Three.js content
-    if (canvas.app?.renderer?.background) {
-      canvas.app.renderer.background.alpha = 0;
-      log.debug('PIXI renderer background alpha set to 0');
-    }
+    this._enforcePixiTransparency();
+
+    this._wrapEnvironmentInitialize();
     
     // HYBRID STRATEGY: Three.js handles gameplay interaction, PIXI is a transparent
     // overlay whose interactivity is controlled by InputRouter.
@@ -207,6 +212,55 @@ export class ControlsIntegration {
     });
     
     log.debug('PIXI overlay configured: opacity 0, z-index 10 (on top but transparent)');
+  }
+
+  _enforcePixiTransparency() {
+    try {
+      if (canvas.app?.renderer?.background) {
+        canvas.app.renderer.background.alpha = 0;
+      }
+    } catch (e) {
+      log.warn('Failed to enforce PIXI renderer background alpha', e);
+    }
+  }
+
+  _wrapEnvironmentInitialize() {
+    if (this._environmentInitWrapped) return;
+
+    const env = canvas?.environment;
+    const init = env?.initialize;
+    if (typeof init !== 'function') return;
+
+    this._originalEnvironmentInitialize = init;
+
+    const self = this;
+    env.initialize = function(...args) {
+      const result = init.apply(this, args);
+      try {
+        self._enforcePixiTransparency();
+      } catch (_) {
+        // Ignore
+      }
+      return result;
+    };
+
+    this._environmentInitWrapped = true;
+  }
+
+  _unwrapEnvironmentInitialize() {
+    if (!this._environmentInitWrapped) return;
+
+    const env = canvas?.environment;
+    if (env && this._originalEnvironmentInitialize) {
+      try {
+        env.initialize = this._originalEnvironmentInitialize;
+      } catch (_) {
+        // Ignore
+      }
+    }
+
+    this._environmentInitWrapped = false;
+    this._originalEnvironmentInitialize = null;
   }
   
   /**
@@ -454,6 +508,46 @@ export class ControlsIntegration {
       }, 50);
     });
     this._hookIds.push({ name: 'createToken', id: createTokenHookId });
+
+    const renderAppHookId = Hooks.on('renderApplication', (app) => {
+      if (this.state !== IntegrationState.ACTIVE) return;
+      try {
+        const cls = app?.constructor?.name;
+        if (cls !== 'SceneConfig') return;
+        setTimeout(() => {
+          try {
+            this.configurePixiOverlay();
+            this.layerVisibility?.update();
+            this.inputRouter?.autoUpdate();
+          } catch (e) {
+            this.handleError(e, 'renderApplication(SceneConfig)');
+          }
+        }, 0);
+      } catch (e) {
+        this.handleError(e, 'renderApplication');
+      }
+    });
+    this._hookIds.push({ name: 'renderApplication', id: renderAppHookId });
+
+    const closeAppHookId = Hooks.on('closeApplication', (app) => {
+      if (this.state !== IntegrationState.ACTIVE) return;
+      try {
+        const cls = app?.constructor?.name;
+        if (cls !== 'SceneConfig') return;
+        setTimeout(() => {
+          try {
+            this.configurePixiOverlay();
+            this.layerVisibility?.update();
+            this.inputRouter?.autoUpdate();
+          } catch (e) {
+            this.handleError(e, 'closeApplication(SceneConfig)');
+          }
+        }, 0);
+      } catch (e) {
+        this.handleError(e, 'closeApplication');
+      }
+    });
+    this._hookIds.push({ name: 'closeApplication', id: closeAppHookId });
     
     log.debug(`Registered ${this._hookIds.length} integration hooks`);
   }
@@ -629,6 +723,8 @@ export class ControlsIntegration {
    */
   destroy() {
     this.disable();
+
+    this._unwrapEnvironmentInitialize();
     
     this.layerVisibility = null;
     this.inputRouter = null;

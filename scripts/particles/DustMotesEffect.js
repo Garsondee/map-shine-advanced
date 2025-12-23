@@ -581,6 +581,26 @@ export class DustMotesEffect extends EffectBase {
       ]
     });
 
+    if (system.emitter) {
+      system.emitter.userData = system.emitter.userData || {};
+
+      const centerX = sx + width * 0.5;
+      const centerY = sy + height * 0.5;
+
+      const zMin = p && typeof p.zMin === 'number' ? p.zMin : 10;
+      const zMax = p && typeof p.zMax === 'number' ? p.zMax : 140;
+      const minZ = groundZ + Math.min(zMin, zMax);
+      const maxZ = Math.min(worldTopZ, groundZ + Math.max(zMin, zMax));
+      const centerZ = (minZ + maxZ) * 0.5;
+
+      const r2d = 0.5 * Math.sqrt(width * width + height * height);
+      const rz = 0.5 * Math.max(0, maxZ - minZ);
+      const radius = Math.sqrt(r2d * r2d + rz * rz) + 250;
+
+      system.emitter.userData.msCullCenter = { x: centerX, y: centerY, z: centerZ };
+      system.emitter.userData.msCullRadius = radius;
+    }
+
     this._patchWindowLightMaterial(material);
 
     this.batchRenderer.addSystem(system);

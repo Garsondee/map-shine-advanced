@@ -36,7 +36,7 @@ const log = createLogger('WorldSpaceFogEffect');
  * meshes that may also sit near groundZ; visually, ordering is controlled
  * by renderOrder + disabled depth test.
  */
-const FOG_PLANE_Z_OFFSET = 5.0; // Just above all scene content, but very close to the ground plane
+const FOG_PLANE_Z_OFFSET = 0.05; // Nearly coplanar with the ground plane to avoid parallax/perspective peeking
 
 export class WorldSpaceFogEffect extends EffectBase {
   constructor() {
@@ -107,6 +107,33 @@ export class WorldSpaceFogEffect extends EffectBase {
     this._lastCameraY = 0;
     this._lastCameraZoom = 1;
     this._cameraMovementThreshold = 50; // pixels
+  }
+
+  resetExploration() {
+    if (!this._initialized) return;
+    if (!this.renderer) return;
+    if (!this._explorationTargetA || !this._explorationTargetB) return;
+
+    const THREE = window.THREE;
+
+    const currentTarget = this.renderer.getRenderTarget();
+    const currentClearColor = this.renderer.getClearColor(new THREE.Color());
+    const currentClearAlpha = this.renderer.getClearAlpha();
+
+    this.renderer.setClearColor(0x000000, 1);
+
+    this.renderer.setRenderTarget(this._explorationTargetA);
+    this.renderer.clear();
+
+    this.renderer.setRenderTarget(this._explorationTargetB);
+    this.renderer.clear();
+
+    this.renderer.setRenderTarget(currentTarget);
+    this.renderer.setClearColor(currentClearColor, currentClearAlpha);
+
+    this._currentExplorationTarget = 'A';
+    this._needsVisionUpdate = true;
+    this._hasValidVision = false;
   }
 
   /**

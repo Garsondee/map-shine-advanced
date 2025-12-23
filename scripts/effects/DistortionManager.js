@@ -754,6 +754,7 @@ export class DistortionManager extends EffectBase {
         uWaterFoamTiles: { value: 6.0 },
         uWaterFoamScale: { value: 10.0 },
         uWaterFoamSpeed: { value: 0.25 },
+        uWaterFoamPhase: { value: 0.0 },
         uWaterFoamThreshold: { value: 0.7 },
         uWaterFoamSoftness: { value: 0.25 },
         uWaterFoamStreakiness: { value: 2.8 },
@@ -819,6 +820,7 @@ export class DistortionManager extends EffectBase {
         uniform float uWaterFoamTiles;
         uniform float uWaterFoamScale;
         uniform float uWaterFoamSpeed;
+        uniform float uWaterFoamPhase;
         uniform float uWaterFoamThreshold;
         uniform float uWaterFoamSoftness;
         uniform float uWaterFoamStreakiness;
@@ -932,6 +934,10 @@ export class DistortionManager extends EffectBase {
         }
         
         void main() {
+          // Keep a copy of the wind direction in the same UV convention as the water mask
+          // so debug visualization can reference it even outside the water block.
+          vec2 windUvDir = vec2(1.0, 0.0);
+
           vec4 distortionSample = texture2D(tDistortion, vUv);
           
           // Decode offset from 0-1 range back to -0.5 to 0.5
@@ -1078,6 +1084,10 @@ export class DistortionManager extends EffectBase {
                 windDir = vec2(1.0, 0.0);
               }
 
+              // uWaterWindDir is provided by WaterEffect already normalized and already in
+              // the same UV convention as the water mask sampling (including any maskFlipY).
+              windUvDir = windDir;
+
               float windSpeed01 = clamp(uWaterWindSpeed, 0.0, 1.0);
               if (windSpeed01 > 0.001) {
                 float windFactor = smoothstep(0.15, 0.85, windSpeed01);
@@ -1087,10 +1097,14 @@ export class DistortionManager extends EffectBase {
                 float tiles = max(1.0, floor(uWaterFoamTiles + 0.5));
                 float streak = clamp(uWaterFoamStreakiness, 0.25, 12.0);
 
-                vec2 perp = vec2(-windDir.y, windDir.x);
-                vec2 adv = sceneUv * uWaterFoamScale;
-                adv += windDir * uTime * uWaterFoamSpeed * (0.25 + windSpeed01 * 2.0);
-                float along = dot(adv, windDir) / max(0.001, streak);
+                // Use the same UV space that the water mask uses so the pattern is stable and directionally correct.
+                float waterY = (uWaterMaskFlipY > 0.5) ? (1.0 - sceneUv.y) : sceneUv.y;
+                vec2 foamUv = vec2(sceneUv.x, waterY);
+
+                vec2 perp = vec2(-windUvDir.y, windUvDir.x);
+                vec2 adv = foamUv * uWaterFoamScale;
+                adv -= windUvDir * uWaterFoamPhase;
+                float along = dot(adv, windUvDir) / max(0.001, streak);
                 float across = dot(adv, perp) * streak;
                 vec2 p = vec2(along, across);
 
@@ -1113,8 +1127,17 @@ export class DistortionManager extends EffectBase {
               // Show mask as red overlay
               sceneColor.rgb = mix(sceneColor.rgb, vec3(1.0, 0.0, 0.0), mask * 0.5);
             } else {
-              // Show offset as color
-              sceneColor.rgb = mix(sceneColor.rgb, vec3(zoomedOffset.x + 0.5, zoomedOffset.y + 0.5, 0.0), 0.5);
+              // When water foam is enabled, visualize the wind direction the shader is using.
+              // This makes it obvious if the issue is upstream (uniforms) or in the foam math.
+              if (uWaterFoamEnabled > 0.5) {
+                vec2 w = windUvDir;
+                float wl = length(w);
+                if (wl > 1e-5) w /= wl;
+                sceneColor.rgb = mix(sceneColor.rgb, vec3(w.x * 0.5 + 0.5, w.y * 0.5 + 0.5, 0.0), 0.75);
+              } else {
+                // Show offset as color
+                sceneColor.rgb = mix(sceneColor.rgb, vec3(zoomedOffset.x + 0.5, zoomedOffset.y + 0.5, 0.0), 0.5);
+              }
             }
           }
           
@@ -1472,6 +1495,7 @@ export class DistortionManager extends EffectBase {
       if (au.uWaterFoamTiles) au.uWaterFoamTiles.value = Number.isFinite(waterSource?.params?.windFoamTiles) ? waterSource.params.windFoamTiles : 6.0;
       if (au.uWaterFoamScale) au.uWaterFoamScale.value = Number.isFinite(waterSource?.params?.windFoamScale) ? waterSource.params.windFoamScale : 10.0;
       if (au.uWaterFoamSpeed) au.uWaterFoamSpeed.value = Number.isFinite(waterSource?.params?.windFoamSpeed) ? waterSource.params.windFoamSpeed : 0.25;
+      if (au.uWaterFoamPhase) au.uWaterFoamPhase.value = Number.isFinite(waterSource?.params?.windFoamPhase) ? waterSource.params.windFoamPhase : 0.0;
       if (au.uWaterFoamThreshold) au.uWaterFoamThreshold.value = Number.isFinite(waterSource?.params?.windFoamThreshold) ? waterSource.params.windFoamThreshold : 0.7;
       if (au.uWaterFoamSoftness) au.uWaterFoamSoftness.value = Number.isFinite(waterSource?.params?.windFoamSoftness) ? waterSource.params.windFoamSoftness : 0.25;
       if (au.uWaterFoamStreakiness) au.uWaterFoamStreakiness.value = Number.isFinite(waterSource?.params?.windFoamStreakiness) ? waterSource.params.windFoamStreakiness : 2.8;
@@ -1491,6 +1515,22 @@ export class DistortionManager extends EffectBase {
         au.uWaterWindDir.value.set(wx, wy);
       }
       if (au.uWaterWindSpeed) au.uWaterWindSpeed.value = Number.isFinite(waterSource?.params?.windSpeed) ? waterSource.params.windSpeed : 0.0;
+
+      try {
+        if (window.MapShine) {
+          window.MapShine._waterFoamUniformDebug = {
+            windDir: au.uWaterWindDir?.value ? { x: au.uWaterWindDir.value.x, y: au.uWaterWindDir.value.y } : null,
+            windSpeed: typeof au.uWaterWindSpeed?.value === 'number' ? au.uWaterWindSpeed.value : null,
+            foamEnabled: au.uWaterFoamEnabled?.value ?? null,
+            foamSpeed: typeof au.uWaterFoamSpeed?.value === 'number' ? au.uWaterFoamSpeed.value : null,
+            maskFlipY: au.uWaterMaskFlipY?.value ?? null,
+            waterSourceEnabled: !!waterSource?.enabled,
+            waterSourceHasMask: !!waterSource?.mask,
+            waterSourceWindFoamParam: waterSource?.params?.windFoamEnabled ?? null
+          };
+        }
+      } catch (_) {
+      }
 
       // Environment/light maps for caustics gating
       // Outdoors mask (0=indoors/covered, 1=outdoors)

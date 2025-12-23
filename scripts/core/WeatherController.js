@@ -46,7 +46,7 @@ export class WeatherController {
       precipType: PrecipitationType.NONE,
       cloudCover: 0.41,
       windSpeed: 0.07,
-      windDirection: { x: -0.9063077870366499, y: -0.42261826174069944 }, // 205deg, upgraded to Vector2 in initialize()
+      windDirection: { x: -0.9063077870366499, y: 0.42261826174069944 }, // 205deg, upgraded to Vector2 in initialize() (Y-down world)
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0
@@ -460,9 +460,11 @@ export class WeatherController {
     // IMPORTANT: do NOT integrate from currentState each frame (random-walk drift can eventually reverse wind).
     // Instead, treat variability as a bounded perturbation around the *target* direction.
     const dirMeander = Math.cos(time * 0.15 + this.noiseOffset) * baseVar * 0.5; // Radians
-    const baseAngle = Math.atan2(this.targetState.windDirection.y, this.targetState.windDirection.x);
+    // windDirection is stored in Foundry/world coordinates (Y-down).
+    // Convert to a math angle (Y-up) for perturbation, then convert back.
+    const baseAngle = Math.atan2(-this.targetState.windDirection.y, this.targetState.windDirection.x);
     const newAngle = baseAngle + dirMeander;
-    this.currentState.windDirection.set(Math.cos(newAngle), Math.sin(newAngle));
+    this.currentState.windDirection.set(Math.cos(newAngle), -Math.sin(newAngle));
   }
 
   /**

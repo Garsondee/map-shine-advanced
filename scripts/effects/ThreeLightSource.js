@@ -84,6 +84,15 @@ export class ThreeLightSource {
     this._usingCircleFallback = false;
   }
 
+  _getWallInsetPx() {
+    try {
+      const inset = window.MapShine?.lightingEffect?.params?.wallInsetPx;
+      return (typeof inset === 'number' && isFinite(inset)) ? Math.max(0, inset) : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   init() {
     const THREE = window.THREE;
 
@@ -477,12 +486,16 @@ ${FoundryLightingShaderChunks.pulse}
     const rPx = radius * pxPerUnit;
     const brightPx = bright * pxPerUnit;
 
-    this._baseRadiusPx = rPx;
-    this._baseBrightRadiusPx = brightPx;
-    this._baseRatio = rPx > 0 ? (brightPx / rPx) : 1;
+    const wallInsetPx = this._getWallInsetPx();
+    const rPxInset = Math.max(0, rPx - wallInsetPx);
+    const brightPxInset = Math.max(0, brightPx - wallInsetPx);
 
-    this.material.uniforms.uRadius.value = rPx;
-    this.material.uniforms.uBrightRadius.value = brightPx;
+    this._baseRadiusPx = rPxInset;
+    this._baseBrightRadiusPx = brightPxInset;
+    this._baseRatio = rPxInset > 0 ? (brightPxInset / rPxInset) : 1;
+
+    this.material.uniforms.uRadius.value = rPxInset;
+    this.material.uniforms.uBrightRadius.value = brightPxInset;
     this.material.uniforms.uAlpha.value = config.alpha ?? 0.5;
 
     // --- FOUNDRY ATTENUATION MATH ---
@@ -498,9 +511,9 @@ ${FoundryLightingShaderChunks.pulse}
     const groundZ = this._getGroundZ();
     const lightZ = groundZ + 0.1; // Slightly above ground plane
 
-    const radiusChanged = Math.abs((prevRadiusPx ?? 0) - (rPx ?? 0)) > 1e-3;
+    const radiusChanged = Math.abs((prevRadiusPx ?? 0) - (rPxInset ?? 0)) > 1e-3;
     if (forceRebuild || !this.mesh || radiusChanged) {
-      this.rebuildGeometry(worldPos.x, worldPos.y, rPx, lightZ);
+      this.rebuildGeometry(worldPos.x, worldPos.y, rPxInset, lightZ);
     } else {
       this.mesh.position.set(worldPos.x, worldPos.y, lightZ);
     }
@@ -605,7 +618,6 @@ ${FoundryLightingShaderChunks.pulse}
 
     let amplitude = reverse ? (1 - this.animation.reactiveSoundAmplitude) : this.animation.reactiveSoundAmplitude;
     amplitude = amplitude * this._baseRatio;
-
     const ratioPulse = this._clamp(amplitude * 1.11, 0, 1);
     return { pulse: amplitude, ratioPulse };
   }
@@ -638,7 +650,66 @@ ${FoundryLightingShaderChunks.pulse}
       }
     } catch (e) { }
 
+    const wallInsetPx = this._getWallInsetPx();
     if (shapePoints && shapePoints.length > 2) {
+      if (wallInsetPx > 0) {
+        let insetOk = false;
+        try {
+          const ClipperLib = window.ClipperLib;
+          if (ClipperLib) {
+            const scale = 100;
+            const path = [];
+            for (let i = 0; i < shapePoints.length; i++) {
+              const p = shapePoints[i];
+              path.push({ X: Math.round(p.x * scale), Y: Math.round(p.y * scale) });
+            }
+
+            const area = (pts) => {
+              let a = 0;
+              for (let i = 0; i < pts.length; i++) {
+                const j = (i + 1) % pts.length;
+                a += (pts[i].X * pts[j].Y - pts[j].X * pts[i].Y);
+              }
+              return a * 0.5;
+            };
+
+            if (area(path) < 0) path.reverse();
+
+            const co = new ClipperLib.ClipperOffset(2.0, 0.25 * scale);
+            co.AddPath(path, ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+            const out = new ClipperLib.Paths();
+            co.Execute(out, -wallInsetPx * scale);
+            if (out && out.length) {
+              let best = out[0];
+              let bestAbsArea = Math.abs(area(best));
+              for (let i = 1; i < out.length; i++) {
+                const a = Math.abs(area(out[i]));
+                if (a > bestAbsArea) {
+                  best = out[i];
+                  bestAbsArea = a;
+                }
+              }
+              if (best && best.length >= 3) {
+                shapePoints = best.map((pt) => new THREE.Vector2(pt.X / scale, pt.Y / scale));
+                insetOk = true;
+              }
+            }
+          }
+        } catch (_) {
+        }
+
+        if (!insetOk) {
+          for (let i = 0; i < shapePoints.length; i++) {
+            const p = shapePoints[i];
+            const len = Math.hypot(p.x, p.y);
+            if (len > 1e-4) {
+              const mul = Math.max(0, (len - wallInsetPx) / len);
+              p.multiplyScalar(mul);
+            }
+          }
+        }
+      }
+
       const shape = new THREE.Shape(shapePoints);
       geometry = new THREE.ShapeGeometry(shape);
       this._usingCircleFallback = false;
@@ -651,7 +722,7 @@ ${FoundryLightingShaderChunks.pulse}
     this.mesh = new THREE.Mesh(geometry, this.material);
     // Position at ground plane Z level (passed from updateData)
     this.mesh.position.set(worldX, worldY, lightZ);
-    
+  
     // Ensure render order is handled correctly if needed
     this.mesh.renderOrder = 100;
   }
@@ -662,7 +733,6 @@ ${FoundryLightingShaderChunks.pulse}
     const { type, speed, intensity, reverse } = this._getAnimationOptions();
 
     const u = this.material.uniforms;
-
     // Reset to base values every frame; animated types will override.
     u.uRadius.value = this._baseRadiusPx;
     u.uBrightRadius.value = this._baseBrightRadiusPx;
@@ -833,11 +903,14 @@ ${FoundryLightingShaderChunks.pulse}
           const pxPerUnit = d.size / d.distance;
           const rPx = radius * pxPerUnit;
 
+          const wallInsetPx = this._getWallInsetPx();
+          const rPxInset = Math.max(0, rPx - wallInsetPx);
+
           const worldPos = Coordinates.toWorld(this.document.x, this.document.y);
           const groundZ = this._getGroundZ();
           const lightZ = groundZ + 0.1;
 
-          this.rebuildGeometry(worldPos.x, worldPos.y, rPx, lightZ);
+          this.rebuildGeometry(worldPos.x, worldPos.y, rPxInset, lightZ);
         }
       } catch (e) {
       }

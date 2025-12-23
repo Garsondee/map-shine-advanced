@@ -1052,6 +1052,31 @@ async function createThreeCanvas(scene) {
     }
     mapShine.frameCoordinator = frameCoordinator;
 
+    // Ensure MapShine fog exploration resets when Foundry fog is reset via UI (Lighting controls).
+    // Foundry's reset button calls canvas.fog.reset(), which triggers canvas.fog._handleReset() on clients.
+    // Our WorldSpaceFogEffect keeps its own GPU exploration history, so we must clear it explicitly.
+    try {
+      const fogMgr = canvas?.fog;
+      if (fogMgr && typeof fogMgr._handleReset === 'function' && !fogMgr._mapShineWrappedHandleReset) {
+        const originalHandleReset = fogMgr._handleReset.bind(fogMgr);
+        fogMgr._handleReset = async (...args) => {
+          const result = await originalHandleReset(...args);
+          try {
+            const fog = window.MapShine?.fogEffect;
+            if (fog && typeof fog.resetExploration === 'function') {
+              fog.resetExploration();
+            }
+          } catch (_) {
+            // Ignore
+          }
+          return result;
+        };
+        fogMgr._mapShineWrappedHandleReset = true;
+      }
+    } catch (_) {
+      // Ignore
+    }
+
     // Expose for diagnostics (after render loop is created)
     mapShine.sceneComposer = sceneComposer;
     mapShine.effectComposer = effectComposer;
@@ -1060,6 +1085,8 @@ async function createThreeCanvas(scene) {
     mapShine.windowLightEffect = windowLightEffect;
     mapShine.bushEffect = bushEffect;
     mapShine.treeEffect = treeEffect;
+    mapShine.overheadShadowsEffect = overheadShadowsEffect;
+    mapShine.buildingShadowsEffect = buildingShadowsEffect;
     mapShine.smellyFliesEffect = smellyFliesEffect; // Smart particle swarms
     mapShine.dustMotesEffect = dustMotesEffect;
     mapShine.lightningEffect = lightningEffect;
@@ -1563,7 +1590,9 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
           target.windDirection = new THREE.Vector2(existing.x ?? 1, existing.y ?? 0);
         }
 
-        target.windDirection.set(Math.cos(rad), Math.sin(rad));
+        // Foundry world uses Y-down. Our UI degrees are expressed in the usual math sense
+        // where 90° points north (up). Convert by flipping Y.
+        target.windDirection.set(Math.cos(rad), -Math.sin(rad));
       } else if (paramId.startsWith('rain')) {
         const rt = weatherController.rainTuning;
         if (!rt) return;
@@ -1644,7 +1673,8 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     precipitation: weatherController.targetState.precipitation,
     cloudCover: weatherController.targetState.cloudCover,
     windSpeed: weatherController.targetState.windSpeed,
-    windDirection: Math.atan2(weatherController.targetState.windDirection.y, weatherController.targetState.windDirection.x) * (180 / Math.PI),
+    // Inverse of the UI->vector mapping above (flip Y back to math coords)
+    windDirection: Math.atan2(-weatherController.targetState.windDirection.y, weatherController.targetState.windDirection.x) * (180 / Math.PI),
     fogDensity: weatherController.targetState.fogDensity,
     wetness: weatherController.currentState.wetness, // Read-only derived
     freezeLevel: weatherController.targetState.freezeLevel,

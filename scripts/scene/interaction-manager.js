@@ -47,6 +47,12 @@ export class InteractionManager {
       previews: new Map() // Map<string, THREE.Sprite> - Drag previews
     };
 
+    this.dragMeasure = {
+      active: false,
+      startFoundry: { x: 0, y: 0 },
+      el: null
+    };
+
     // Wall Draw state
     this.wallDraw = {
       active: false,
@@ -108,6 +114,7 @@ export class InteractionManager {
     // Create drag select visuals (Three.js mesh kept for compatibility)
     this.createSelectionBox();
     this.createSelectionOverlay();
+    this.createDragMeasureOverlay();
     this.createLightPreview();
     this.createMapPointPreview();
     
@@ -126,6 +133,7 @@ export class InteractionManager {
       onPointerDown: this.onPointerDown.bind(this),
       onPointerMove: this.onPointerMove.bind(this),
       onPointerUp: this.onPointerUp.bind(this),
+      onWheel: this.onWheel.bind(this),
       onKeyDown: this.onKeyDown.bind(this),
       onDoubleClick: this.onDoubleClick.bind(this)
     };
@@ -168,6 +176,7 @@ export class InteractionManager {
 
     window.addEventListener('pointerup', this.boundHandlers.onPointerUp);
     window.addEventListener('pointermove', this.boundHandlers.onPointerMove);
+    window.addEventListener('wheel', this.boundHandlers.onWheel, { passive: false });
     window.addEventListener('keydown', this.boundHandlers.onKeyDown);
 
     const rect = this.canvasElement.getBoundingClientRect();
@@ -238,6 +247,22 @@ export class InteractionManager {
     el.style.display = 'none';
     document.body.appendChild(el);
     this.dragSelect.overlayEl = el;
+  }
+
+  createDragMeasureOverlay() {
+    const el = document.createElement('div');
+    el.style.position = 'fixed';
+    el.style.pointerEvents = 'none';
+    el.style.zIndex = '10000';
+    el.style.padding = '4px 12px';
+    el.style.borderRadius = '4px';
+    el.style.backgroundColor = 'rgba(0,0,0,0.7)';
+    el.style.color = 'white';
+    el.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+    el.style.fontSize = '24px';
+    el.style.display = 'none';
+    document.body.appendChild(el);
+    this.dragMeasure.el = el;
   }
 
   /**
@@ -1297,10 +1322,58 @@ export class InteractionManager {
       for (const [pid, preview] of this.dragState.previews) {
         this.dragState.initialPositions.set(pid, preview.position.clone());
       }
+
+      this.dragMeasure.active = false;
+      if (this.dragMeasure.el) this.dragMeasure.el.style.display = 'none';
+
+      if (targetObject.userData.tokenDoc && this.dragMeasure.el) {
+        const startWorld = leaderPreview.position;
+        const startF = Coordinates.toFoundry(startWorld.x, startWorld.y);
+        this.dragMeasure.startFoundry.x = startF.x;
+        this.dragMeasure.startFoundry.y = startF.y;
+        this.dragMeasure.active = true;
+        this.dragMeasure.el.style.display = 'block';
+        this.dragMeasure.el.textContent = '';
+      }
       
       if (window.MapShine?.cameraController) {
         window.MapShine.cameraController.enabled = false;
       }
+  }
+
+  onWheel(event) {
+    try {
+      if (this._isEventFromUI(event)) return;
+
+      const rect = this.canvasElement.getBoundingClientRect();
+      const inside = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
+      if (!inside) return;
+
+      if (this.dragState?.active) return;
+
+      if (event.ctrlKey) event.preventDefault();
+
+      const isCtrl = game?.keyboard?.isModifierActive?.('CONTROL') ?? event.ctrlKey;
+      const isShift = event.shiftKey;
+      if (!(isCtrl || isShift)) return;
+
+      let dy = event.deltaY;
+      if (event.shiftKey && (dy === 0)) dy = event.deltaX;
+      if (!dy) return;
+
+      if (!canvas?.ready) return;
+      const layer = canvas.activeLayer;
+      if (!layer?.options?.rotatableObjects) return;
+
+      const hasTarget = layer.options?.controllableObjects ? (layer.controlled?.length > 0) : !!layer.hover;
+      if (!hasTarget) return;
+
+      event.delta = dy;
+      event.preventDefault();
+      layer._onMouseWheel?.(event);
+    } catch (err) {
+      log.error('Error in onWheel:', err);
+    }
   }
 
   /**
@@ -2358,6 +2431,24 @@ export class InteractionManager {
               preview.position.y = initialPos.y + deltaY;
             }
           }
+
+          if (this.dragMeasure.active && this.dragMeasure.el && canvas?.grid?.measurePath) {
+            const leaderPreview = this.dragState.previews.get(this.dragState.leaderId);
+            if (leaderPreview) {
+              const curF = Coordinates.toFoundry(leaderPreview.position.x, leaderPreview.position.y);
+              const measurement = canvas.grid.measurePath([
+                { x: this.dragMeasure.startFoundry.x, y: this.dragMeasure.startFoundry.y },
+                { x: curF.x, y: curF.y }
+              ]);
+
+              const units = canvas.grid.units || canvas.scene?.grid?.units || '';
+              const dist = (measurement?.distance ?? 0);
+              const distLabel = dist.toNearest ? dist.toNearest(0.01).toLocaleString(game.i18n.lang) : String(dist);
+              this.dragMeasure.el.textContent = units ? `${distLabel} ${units}` : `${distLabel}`;
+              this.dragMeasure.el.style.left = `${event.clientX + 16}px`;
+              this.dragMeasure.el.style.top = `${event.clientY + 16}px`;
+            }
+          }
           
           // NOTE: Vision updates during drag are now handled natively by Foundry.
           // FogEffect uses FoundryFogBridge to extract Foundry's vision textures directly,
@@ -2780,6 +2871,11 @@ export class InteractionManager {
 
         if (!this.dragState.active) return;
 
+        if (this.dragMeasure.el) {
+          this.dragMeasure.el.style.display = 'none';
+        }
+        this.dragMeasure.active = false;
+
         // Re-enable camera controls
         if (window.MapShine?.cameraController) {
           window.MapShine.cameraController.enabled = true;
@@ -3189,9 +3285,11 @@ export class InteractionManager {
    * Dispose
    */
   dispose() {
-    this.canvasElement.removeEventListener('pointerdown', this.boundHandlers.onPointerDown);
+    window.removeEventListener('pointerdown', this.boundHandlers.onPointerDown, { capture: true });
+    this.canvasElement.removeEventListener('dblclick', this.boundHandlers.onDoubleClick);
     window.removeEventListener('pointermove', this.boundHandlers.onPointerMove);
     window.removeEventListener('pointerup', this.boundHandlers.onPointerUp);
+    window.removeEventListener('wheel', this.boundHandlers.onWheel);
     window.removeEventListener('keydown', this.boundHandlers.onKeyDown);
     
     this.clearSelection();

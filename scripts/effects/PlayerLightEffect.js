@@ -237,6 +237,10 @@ export class PlayerLightEffect extends EffectBase {
 
     this._flashlightBeamInLightScene = false;
 
+    this._visionMaskTexture = null;
+    this._visionMaskTexelSize = null;
+    this._visionMaskHas = 0.0;
+
     this._debugOverlay = null;
   }
 
@@ -545,6 +549,8 @@ export class PlayerLightEffect extends EffectBase {
 
     this._flashlightCookieWorld = new THREE.Vector3();
 
+    this._visionMaskTexelSize = new THREE.Vector2(1, 1);
+
     this._torchPos = new THREE.Vector3();
     this._torchVel = new THREE.Vector3();
 
@@ -563,6 +569,8 @@ export class PlayerLightEffect extends EffectBase {
 
     this._tryAttachFlashlightToLightScene();
 
+    this._updateVisionMaskRefs();
+
     window.addEventListener('pointermove', this._onPointerMove, { passive: true });
 
     try {
@@ -577,6 +585,37 @@ export class PlayerLightEffect extends EffectBase {
     }
 
     log.info('PlayerLightEffect initialized');
+  }
+
+  _getFogEffect() {
+    try {
+      const sceneComposer = window.MapShine?.sceneComposer;
+      const effectComposer = sceneComposer?.effectComposer || window.MapShine?.effectComposer;
+      return effectComposer?.effects?.get?.('fog') || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _updateVisionMaskRefs() {
+    try {
+      const fog = this._getFogEffect();
+      const rt = fog?.visionRenderTarget;
+      const tex = rt?.texture;
+      if (tex) {
+        this._visionMaskTexture = tex;
+        const w = rt.width || 1;
+        const h = rt.height || 1;
+        if (this._visionMaskTexelSize) this._visionMaskTexelSize.set(1 / w, 1 / h);
+        this._visionMaskHas = 1.0;
+        return;
+      }
+    } catch (_) {
+    }
+
+    this._visionMaskTexture = null;
+    this._visionMaskHas = 0.0;
+    if (this._visionMaskTexelSize) this._visionMaskTexelSize.set(1, 1);
   }
 
   _tryAttachFlashlightToLightScene() {
@@ -1609,12 +1648,23 @@ export class PlayerLightEffect extends EffectBase {
         uCoreSharpness: { value: 8.0 },
         uRimIntensity: { value: 0.55 },
         uRimRadius: { value: 0.78 },
-        uRimWidth: { value: 0.22 }
+        uRimWidth: { value: 0.22 },
+        uVisionMap: { value: null },
+        uHasVisionMap: { value: 0.0 },
+        uVisionTexelSize: { value: new THREE.Vector2(1, 1) },
+        uVisionSoftnessPx: { value: 2.5 },
+        uVisionWallInsetPx: { value: 0.0 },
+        uVisionThreshold: { value: 0.1 },
+        uSceneRect: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uCanvasHeight: { value: 1.0 }
       },
       vertexShader: `
         varying vec2 vUv;
+        varying vec2 vWorld;
         void main() {
           vUv = uv;
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWorld = wp.xy;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
@@ -1631,7 +1681,45 @@ export class PlayerLightEffect extends EffectBase {
         uniform float uRimIntensity;
         uniform float uRimRadius;
         uniform float uRimWidth;
+        uniform sampler2D uVisionMap;
+        uniform float uHasVisionMap;
+        uniform vec2 uVisionTexelSize;
+        uniform float uVisionSoftnessPx;
+        uniform float uVisionWallInsetPx;
+        uniform float uVisionThreshold;
+        uniform vec4 uSceneRect;
+        uniform float uCanvasHeight;
         varying vec2 vUv;
+        varying vec2 vWorld;
+
+        float sampleBlur4(sampler2D tex, vec2 uv, vec2 texel) {
+          float c = texture2D(tex, uv).r;
+          float l = texture2D(tex, uv + vec2(-texel.x, 0.0)).r;
+          float r = texture2D(tex, uv + vec2(texel.x, 0.0)).r;
+          float d = texture2D(tex, uv + vec2(0.0, -texel.y)).r;
+          float u = texture2D(tex, uv + vec2(0.0, texel.y)).r;
+          return (c * 4.0 + l + r + d + u) / 8.0;
+        }
+
+        float sampleVisionVisible(vec2 worldXY) {
+          vec2 foundry = vec2(worldXY.x, uCanvasHeight - worldXY.y);
+          vec2 local = (foundry - uSceneRect.xy) / max(uSceneRect.zw, vec2(1e-6));
+          if (local.x < 0.0 || local.x > 1.0 || local.y < 0.0 || local.y > 1.0) return 0.0;
+          vec2 visionUv = vec2(local.x, local.y);
+          float vision = sampleBlur4(uVisionMap, visionUv, uVisionTexelSize);
+          float insetPx = max(0.0, uVisionWallInsetPx);
+          if (insetPx > 0.0) {
+            vec2 o = uVisionTexelSize * insetPx;
+            float vL = sampleBlur4(uVisionMap, visionUv + vec2(-o.x, 0.0), uVisionTexelSize);
+            float vR = sampleBlur4(uVisionMap, visionUv + vec2(o.x, 0.0), uVisionTexelSize);
+            float vD = sampleBlur4(uVisionMap, visionUv + vec2(0.0, -o.y), uVisionTexelSize);
+            float vU = sampleBlur4(uVisionMap, visionUv + vec2(0.0, o.y), uVisionTexelSize);
+            vision = min(vision, min(min(vL, vR), min(vD, vU)));
+          }
+          float soft = max(uVisionTexelSize.x, uVisionTexelSize.y) * max(0.0, uVisionSoftnessPx);
+          float thr = uVisionThreshold;
+          return smoothstep(thr - soft, thr + soft, vision);
+        }
 
         void main() {
           if (uIntensity <= 0.0001) discard;
@@ -1659,6 +1747,9 @@ export class PlayerLightEffect extends EffectBase {
           float radial = max(0.0, core + rim);
 
           float alpha = cookie * mask;
+          if (uHasVisionMap > 0.5) {
+            alpha *= sampleVisionVisible(vWorld);
+          }
           vec3 col = vec3(1.0, 0.95, 0.8) * uIntensity * radial;
           gl_FragColor = vec4(col, alpha);
         }
@@ -1815,6 +1906,8 @@ export class PlayerLightEffect extends EffectBase {
 
     this._tryAttachFlashlightToLightScene();
 
+    const lighting = this._getLightingEffect();
+
     const dt = typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016;
     const t = typeof timeInfo?.elapsed === 'number' ? timeInfo.elapsed : 0;
 
@@ -1959,6 +2052,30 @@ export class PlayerLightEffect extends EffectBase {
     cu.uRimRadius.value = Math.max(0.0, Math.min(1.0, this.params.flashlightCookieRimRadius ?? 0.78));
     cu.uRimWidth.value = Math.max(0.001, this.params.flashlightCookieRimWidth ?? 0.22);
 
+    if (!this._visionMaskTexture && this._visionMaskHas <= 0.0) {
+      this._updateVisionMaskRefs();
+    }
+
+    const rect = canvas?.dimensions?.sceneRect;
+    const canvasH = canvas?.dimensions?.height ?? 1;
+    if (cu.uHasVisionMap && cu.uVisionMap && cu.uSceneRect && cu.uCanvasHeight && cu.uVisionTexelSize) {
+      cu.uHasVisionMap.value = this._visionMaskHas;
+      cu.uVisionMap.value = this._visionMaskTexture;
+      cu.uCanvasHeight.value = canvasH;
+      if (cu.uVisionWallInsetPx) {
+        const inset = lighting?.params?.wallInsetPx;
+        cu.uVisionWallInsetPx.value = (typeof inset === 'number' && isFinite(inset)) ? Math.max(0, inset) : 0.0;
+      }
+      if (rect) {
+        cu.uSceneRect.value.set(rect.x, rect.y, rect.width, rect.height);
+      } else {
+        cu.uSceneRect.value.set(0, 0, canvas?.dimensions?.width ?? 1, canvasH);
+      }
+      if (this._visionMaskTexelSize) {
+        cu.uVisionTexelSize.value.copy(this._visionMaskTexelSize);
+      }
+    }
+
     const dirX = Math.cos(ang);
     const dirY = Math.sin(ang);
     const cookieDistU = Math.max(0.0, Math.min(coneLenU, edgeWallDistanceU));
@@ -1966,6 +2083,10 @@ export class PlayerLightEffect extends EffectBase {
     const cookieBasePx = Math.max(1, this.params.flashlightCookieSizePx ?? 120);
     const cookieFromBeam = Math.max(0.0, this.params.flashlightCookieSizeFromBeam ?? 0.75);
     const cookieWidthPx = Math.max(24, Math.max(cookieBasePx, widthPx * cookieFromBeam));
+
+    if (cu.uVisionSoftnessPx) {
+      cu.uVisionSoftnessPx.value = Math.max(1.5, Math.min(10.0, cookieWidthPx / 60.0));
+    }
 
     const cookieT = (coneMaxLenU > 0.0001) ? Math.max(0, Math.min(1, cookieDistU / coneMaxLenU)) : 0.0;
     const perspEnabled = !!this.params.flashlightCookiePerspectiveEnabled;

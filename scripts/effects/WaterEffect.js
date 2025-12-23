@@ -71,6 +71,8 @@ export class WaterEffect extends EffectBase {
 
     this._waterMaskFlipY = 0.0;
     this._waterMaskUseAlpha = 0.0;
+
+    this._windFoamPhase = 0.0;
   }
 
   get enabled() {
@@ -429,13 +431,39 @@ export class WaterEffect extends EffectBase {
     }
   }
 
-  update() {
+  update(timeInfo) {
     const dm = window.MapShine?.distortionManager;
-    if (!dm) return;
+    if (!dm) {
+      try {
+        if (window.MapShine) {
+          window.MapShine._waterFoamDebug = {
+            status: 'inactive',
+            reason: 'no_distortion_manager'
+          };
+        }
+      } catch (_) {
+      }
+      return;
+    }
+
+    const wc = window.MapShine?.weatherController || weatherController;
 
     const p = this.params || {};
 
     if (!this.enabled || !this.waterMask) {
+      try {
+        if (window.MapShine) {
+          window.MapShine._waterFoamDebug = {
+            status: 'inactive',
+            reason: !this.enabled ? 'water_effect_disabled' : 'no_water_mask',
+            waterEffectEnabled: !!this.enabled,
+            hasWaterMask: !!this.waterMask,
+            sourceRegistered: !!this._sourceRegistered,
+            windFoamEnabled: !!this.params?.windFoamEnabled
+          };
+        }
+      } catch (_) {
+      }
       if (this._dmDebugOwned && dm.params) {
         dm.params.debugMode = this._dmPrevDebugMode;
         dm.params.debugShowMask = this._dmPrevDebugShowMask;
@@ -517,8 +545,8 @@ export class WaterEffect extends EffectBase {
     const rainRippleSpeedBoost = typeof p.rainRippleSpeedBoost === 'number' ? p.rainRippleSpeedBoost : 0.65;
 
     let weatherState = null;
-    if ((rainRipplesEnabled || windFoamEnabled) && weatherController && typeof weatherController.getCurrentState === 'function') {
-      weatherState = weatherController.getCurrentState();
+    if ((rainRipplesEnabled || windFoamEnabled) && wc && typeof wc.getCurrentState === 'function') {
+      weatherState = wc.getCurrentState();
     }
 
     if (rainRipplesEnabled && weatherState) {
@@ -534,16 +562,75 @@ export class WaterEffect extends EffectBase {
     let windDirX = 1.0;
     let windDirY = 0.0;
     let windSpeed01 = 0.0;
-    if (weatherState) {
-      const wd = weatherState?.windDirection;
+    // Rebuild wind direction logic for wind foam:
+    // - Direction should follow the UI setting exactly => use targetState.windDirection when available.
+    // - Speed can still come from currentState (gusts/variability).
+    // - Convert once into the same UV convention the water mask sampling uses.
+    if (wc) {
+      const wdTarget = wc?.targetState?.windDirection;
+      const wdCurrent = weatherState?.windDirection;
       const ws = weatherState?.windSpeed;
+
+      let windDirSource = 'none';
+
+      const wd = (wdTarget && Number.isFinite(wdTarget.x) && Number.isFinite(wdTarget.y))
+        ? (windDirSource = 'target', wdTarget)
+        : (wdCurrent && Number.isFinite(wdCurrent.x) && Number.isFinite(wdCurrent.y))
+          ? (windDirSource = 'current', wdCurrent)
+          : null;
+
       if (wd && Number.isFinite(wd.x) && Number.isFinite(wd.y)) {
-        windDirX = wd.x;
-        windDirY = wd.y;
+        const len = Math.hypot(wd.x, wd.y) || 1.0;
+        windDirX = wd.x / len;
+        windDirY = wd.y / len;
+
+        // Convert from UI/world Y-down to water-mask UV convention.
+        // If the mask is not flipped (flipY=0), we invert Y here.
+        // If the mask is already flipped (flipY=1), we keep Y as-is.
+        if (this._waterMaskFlipY <= 0.5) {
+          windDirY *= -1.0;
+        }
       }
       if (Number.isFinite(ws)) {
         windSpeed01 = ws;
       }
+    }
+
+    // Integrate wind foam advection phase to avoid "ping-pong" behavior when wind speed changes.
+    // Using absolute time * varying speed creates apparent backtracking as gust envelopes rise/fall.
+    // Instead: phase += velocity * dt (monotonic). Direction changes still steer the scroll.
+    let dt = Number.isFinite(timeInfo?.delta) ? timeInfo.delta : 0.0;
+    dt = Math.max(0.0, Math.min(dt, 0.1));
+
+    const windSpeedClamped = Math.max(0.0, Math.min(1.0, windSpeed01));
+    const foamVelocity = windFoamEnabled
+      ? (windFoamSpeed * (0.25 + windSpeedClamped * 2.0))
+      : 0.0;
+
+    if (Number.isFinite(foamVelocity) && foamVelocity !== 0.0 && dt > 0.0) {
+      this._windFoamPhase += foamVelocity * dt;
+      // Prevent unbounded growth (keeps float precision stable over long sessions).
+      if (this._windFoamPhase > 10000.0) this._windFoamPhase -= 10000.0;
+      if (this._windFoamPhase < -10000.0) this._windFoamPhase += 10000.0;
+    }
+
+    const windFoamPhase = this._windFoamPhase;
+
+    try {
+      if (window.MapShine) {
+        window.MapShine._waterFoamDebug = {
+          wcEnabled: !!wc?.enabled,
+          usedWindDir: { x: windDirX, y: windDirY },
+          windDirSource,
+          targetWindDir: wc?.targetState?.windDirection ? { x: wc.targetState.windDirection.x, y: wc.targetState.windDirection.y } : null,
+          currentWindDir: weatherState?.windDirection ? { x: weatherState.windDirection.x, y: weatherState.windDirection.y } : null,
+          windSpeed01,
+          windFoamPhase,
+          maskFlipY: this._waterMaskFlipY,
+          windFoamEnabled
+        };
+      }
+    } catch (_) {
     }
 
     if (!this._sourceRegistered) {
@@ -591,7 +678,8 @@ export class WaterEffect extends EffectBase {
 
         windDirX,
         windDirY,
-        windSpeed: windSpeed01
+        windSpeed: windSpeed01,
+        windFoamPhase
       });
       this._sourceRegistered = true;
     } else {
@@ -636,7 +724,8 @@ export class WaterEffect extends EffectBase {
 
         windDirX,
         windDirY,
-        windSpeed: windSpeed01
+        windSpeed: windSpeed01,
+        windFoamPhase
       });
       dm.setSourceEnabled('water', true);
     }

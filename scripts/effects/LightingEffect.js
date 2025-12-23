@@ -41,6 +41,8 @@ export class LightingEffect extends EffectBase {
       // At darkness 1: outdoors *= (2.0 - outdoorBrightness) (dim night)
       outdoorBrightness: 1.5, // 1.0 = no change, 2.0 = double brightness at day
 
+      wallInsetPx: 6.0,
+
       debugShowLightBuffer: false,
       debugLightBufferExposure: 1.0,
     };
@@ -111,6 +113,12 @@ export class LightingEffect extends EffectBase {
           parameters: ['globalIllumination', 'lightIntensity']
         },
         {
+          name: 'occlusion',
+          label: 'Occlusion',
+          type: 'inline',
+          parameters: ['wallInsetPx']
+        },
+        {
           name: 'darkness',
           label: 'Darkness Response',
           type: 'inline',
@@ -121,6 +129,7 @@ export class LightingEffect extends EffectBase {
         enabled: { type: 'boolean', default: true, hidden: true },
         globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.5 },
         lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.8, label: 'Light Intensity' },
+        wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
         darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Darkness Effect' },
         outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 2.0, label: 'Outdoor Brightness' },
         debugShowLightBuffer: { type: 'boolean', default: false },

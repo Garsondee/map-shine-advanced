@@ -206,6 +206,10 @@ export class CloudEffect extends EffectBase {
     this._lastRenderFullHeight = 0;
     this._lastInternalWidth = 0;
     this._lastInternalHeight = 0;
+
+    this._forceUpdateFrames = 0;
+    this._lastParamHash = null;
+    this._lastElapsed = 0;
   }
 
   /**
@@ -1004,6 +1008,7 @@ export class CloudEffect extends EffectBase {
         // 0.0 = grayscale density in RGB with alpha=1 (cloudDensityTarget)
         // 1.0 = packed bands in RGB with composite density in alpha (cloudTopDensityTarget)
         uDensityMode: { value: 1.0 },
+        uTime: { value: 0.0 },
         tOutdoorsMask: { value: null },
         uHasOutdoorsMask: { value: 0.0 },
         uOutdoorsMaskStrength: { value: 1.0 },
@@ -1033,6 +1038,7 @@ export class CloudEffect extends EffectBase {
       fragmentShader: `
         uniform sampler2D tCloudDensity;
         uniform float uDensityMode;
+        uniform float uTime;
         uniform sampler2D tOutdoorsMask;
         uniform float uHasOutdoorsMask;
         uniform float uOutdoorsMaskStrength;
@@ -1061,6 +1067,32 @@ export class CloudEffect extends EffectBase {
           return (uDensityMode < 0.5) ? t.r : t.a;
         }
 
+        float hash21(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+        }
+
+        float noise2D(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          float a = hash21(i);
+          float b = hash21(i + vec2(1.0, 0.0));
+          float c = hash21(i + vec2(0.0, 1.0));
+          float d = hash21(i + vec2(1.0, 1.0));
+          vec2 u = f * f * (3.0 - 2.0 * f);
+          return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+        }
+
+        float fbm2D(vec2 p) {
+          float v = 0.0;
+          float a = 0.5;
+          for (int i = 0; i < 4; i++) {
+            v += a * noise2D(p);
+            p *= 2.02;
+            a *= 0.5;
+          }
+          return v;
+        }
+
         vec3 shadeCloud(vec2 uv, float density, vec3 baseColor) {
           // Density gradient (treat density as a heightfield)
           float dN = readDensity(uv + vec2(0.0,  uTexelSize.y));
@@ -1080,10 +1112,29 @@ export class CloudEffect extends EffectBase {
           float shade = mix(0.65, 1.3, ndotl);
           shade = mix(1.0, shade, clamp(uShadingStrength, 0.0, 2.0));
 
-          // Fake AO / curvature (valleys slightly darker)
-          float avg = 0.25 * (dN + dS + dE + dW);
-          float curvature = avg - density;
-          float ao = clamp(1.0 + curvature * 0.8 * uAOIntensity, 0.75, 1.1);
+          float dN2 = readDensity(uv + vec2(0.0,  uTexelSize.y * 6.0));
+          float dS2 = readDensity(uv + vec2(0.0, -uTexelSize.y * 6.0));
+          float dE2 = readDensity(uv + vec2( uTexelSize.x * 6.0, 0.0));
+          float dW2 = readDensity(uv + vec2(-uTexelSize.x * 6.0, 0.0));
+
+          float avgLocal = 0.25 * (dN + dS + dE + dW);
+          float avgWide = 0.25 * (dN2 + dS2 + dE2 + dW2);
+          float cavity = max(0.0, 0.55 * (avgLocal - density) + 0.45 * (avgWide - density));
+
+          float macro = smoothstep(0.0, 0.05, cavity);
+          macro = pow(macro, 0.75);
+          float dN3 = readDensity(uv + vec2(0.0,  uTexelSize.y * 2.0));
+          float dS3 = readDensity(uv + vec2(0.0, -uTexelSize.y * 2.0));
+          float dE3 = readDensity(uv + vec2( uTexelSize.x * 2.0, 0.0));
+          float dW3 = readDensity(uv + vec2(-uTexelSize.x * 2.0, 0.0));
+          float avgMicro = 0.25 * (dN3 + dS3 + dE3 + dW3);
+          float micro = abs(avgMicro - density);
+          float fuzzCavity = smoothstep(0.0, 0.06, micro + cavity * 0.35);
+
+          float aoStrength = clamp(uAOIntensity / 2.0, 0.0, 1.0);
+          float aoTerm = (0.60 * macro + 0.40 * fuzzCavity);
+          float ao = 1.0 - aoStrength * aoTerm * 0.9;
+          ao = clamp(ao, 0.45, 1.10);
 
           // Sun-facing edge highlight
           vec2 ld = normalize(uSunDir);
@@ -1349,6 +1400,8 @@ export class CloudEffect extends EffectBase {
   update(timeInfo) {
     if (!this.densityMaterial || !this.shadowMaterial || !this.enabled) return;
 
+    this._lastElapsed = timeInfo?.elapsed ?? 0;
+
     const THREE = window.THREE;
     if (!THREE) return;
 
@@ -1579,11 +1632,12 @@ export class CloudEffect extends EffectBase {
       tu.uFadeStart.value = this.params.cloudTopFadeStart;
       tu.uFadeEnd.value = this.params.cloudTopFadeEnd;
       tu.uCloudBrightness.value = this.params.cloudBrightness;
+      if (tu.uTime) tu.uTime.value = timeInfo?.elapsed ?? 0;
 
       if (tu.uShadingEnabled) tu.uShadingEnabled.value = this.params.cloudTopShadingEnabled ? 1.0 : 0.0;
       if (tu.uShadingStrength) tu.uShadingStrength.value = this.params.cloudTopShadingStrength;
       if (tu.uNormalStrength) tu.uNormalStrength.value = this.params.cloudTopNormalStrength;
-      if (tu.uAOIntensity) tu.uAOIntensity.value = this.params.cloudTopAOIntensity;
+      if (tu.uAOIntensity) tu.uAOIntensity.value = Number(this.params.cloudTopAOIntensity) || 0.0;
       if (tu.uEdgeHighlight) tu.uEdgeHighlight.value = this.params.cloudTopEdgeHighlight;
 
       // Use a stronger lateral sun direction for cloud-top shading so it reads at midday.
@@ -1667,6 +1721,16 @@ export class CloudEffect extends EffectBase {
 
     const previousTarget = renderer.getRenderTarget();
 
+    try {
+      const p = this.params;
+      const paramHash = `${p.updateEveryNFrames}|${p.internalResolutionScale}|${p.cloudCover}|${p.noiseScale}|${p.noiseDetail}|${p.cloudSharpness}|${p.noiseTimeSpeed}|${p.domainWarpEnabled}|${p.domainWarpStrength}|${p.domainWarpScale}|${p.domainWarpSpeed}|${p.domainWarpTimeOffsetY}|${p.shadowOpacity}|${p.shadowSoftness}|${p.shadowOffsetScale}|${p.minShadowBrightness}|${p.cloudTopMode}|${p.cloudTopOpacity}|${p.cloudTopFadeStart}|${p.cloudTopFadeEnd}|${p.cloudBrightness}|${p.cloudTopShadingEnabled}|${p.cloudTopShadingStrength}|${p.cloudTopNormalStrength}|${p.cloudTopAOIntensity}|${p.cloudTopEdgeHighlight}|${p.windInfluence}|${p.driftSpeed}|${p.driftResponsiveness}|${p.driftMaxSpeed}|${p.layerParallaxBase}|${p.layer1Enabled}|${p.layer1Opacity}|${p.layer1Coverage}|${p.layer1Scale}|${p.layer1ParallaxMult}|${p.layer1SpeedMult}|${p.layer1DirDeg}|${p.layer2Enabled}|${p.layer2Opacity}|${p.layer2Coverage}|${p.layer2Scale}|${p.layer2ParallaxMult}|${p.layer2SpeedMult}|${p.layer2DirDeg}|${p.layer3Enabled}|${p.layer3Opacity}|${p.layer3Coverage}|${p.layer3Scale}|${p.layer3ParallaxMult}|${p.layer3SpeedMult}|${p.layer3DirDeg}|${p.layer4Enabled}|${p.layer4Opacity}|${p.layer4Coverage}|${p.layer4Scale}|${p.layer4ParallaxMult}|${p.layer4SpeedMult}|${p.layer4DirDeg}|${p.layer5Enabled}|${p.layer5Opacity}|${p.layer5Coverage}|${p.layer5Scale}|${p.layer5ParallaxMult}|${p.layer5SpeedMult}|${p.layer5DirDeg}`;
+      if (paramHash !== this._lastParamHash) {
+        this._lastParamHash = paramHash;
+        this._forceUpdateFrames = Math.max(this._forceUpdateFrames, 2);
+      }
+    } catch (e) {
+    }
+
     // Temporal slicing (motion-aware): when the camera is moving we must update every frame
     // to avoid the perception of lag/jitter. When stable, skip heavy passes.
     const n = (this.params && typeof this.params.updateEveryNFrames === 'number')
@@ -1711,7 +1775,7 @@ export class CloudEffect extends EffectBase {
     const viewIsStable = this._motionCooldownFrames === 0;
 
     this._frameCounter = (this._frameCounter + 1) >>> 0;
-    const shouldUpdateThisFrame = (updateEvery <= 1) || !viewIsStable || ((this._frameCounter % updateEvery) === 0);
+    const shouldUpdateThisFrame = (updateEvery <= 1) || !viewIsStable || (this._forceUpdateFrames > 0) || ((this._frameCounter % updateEvery) === 0);
 
     // If weather is disabled, clear textures to neutral values and skip all
     // simulation work.
@@ -1795,6 +1859,8 @@ export class CloudEffect extends EffectBase {
       renderer.setRenderTarget(previousTarget);
       return;
     }
+
+    if (this._forceUpdateFrames > 0) this._forceUpdateFrames--;
 
     // Pass 1: Generate world-pinned cloud density (NO parallax) for shadows and other consumers
     if (this.densityMaterial.uniforms.uParallaxScale) this.densityMaterial.uniforms.uParallaxScale.value = 0.0;

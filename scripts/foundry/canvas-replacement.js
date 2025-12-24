@@ -39,6 +39,7 @@ import { DustMotesEffect } from '../particles/DustMotesEffect.js';
 import { WorldSpaceFogEffect } from '../effects/WorldSpaceFogEffect.js';
 import { RenderLoop } from '../core/render-loop.js';
 import { TweakpaneManager } from '../ui/tweakpane-manager.js';
+import { ControlPanelManager } from '../ui/control-panel-manager.js';
 import { TokenManager } from '../scene/token-manager.js';
 import { TileManager } from '../scene/tile-manager.js';
 import { WallManager } from '../scene/wall-manager.js';
@@ -98,6 +99,9 @@ let pixiInputBridge = null;
 
 /** @type {TweakpaneManager|null} */
 let uiManager = null;
+
+/** @type {ControlPanelManager|null} */
+let controlPanel = null;
 
 /** @type {TokenManager|null} */
 let tokenManager = null;
@@ -327,6 +331,67 @@ function onUpdateScene(scene, changes, options, userId) {
     if (changes?.flags?.['map-shine-advanced']) {
       const ns = changes.flags['map-shine-advanced'];
 
+      if (Object.prototype.hasOwnProperty.call(ns, 'controlState')) {
+        const cs = scene.getFlag('map-shine-advanced', 'controlState');
+        if (cs && typeof cs === 'object') {
+          try {
+            if (Number.isFinite(cs.timeOfDay)) {
+              weatherController.setTime?.(cs.timeOfDay);
+            }
+
+            const applyDynamic = (typeof cs.weatherMode !== 'string') || cs.weatherMode === 'dynamic';
+
+            if (applyDynamic) {
+              if (typeof cs.dynamicEnabled === 'boolean') {
+                if (typeof weatherController.setDynamicEnabled === 'function') {
+                  weatherController.setDynamicEnabled(cs.dynamicEnabled);
+                } else {
+                  weatherController.dynamicEnabled = cs.dynamicEnabled;
+                }
+              }
+
+              if (typeof cs.dynamicPresetId === 'string' && cs.dynamicPresetId) {
+                if (typeof weatherController.setDynamicPreset === 'function') {
+                  weatherController.setDynamicPreset(cs.dynamicPresetId);
+                } else {
+                  weatherController.dynamicPresetId = cs.dynamicPresetId;
+                }
+              }
+
+              if (Number.isFinite(cs.dynamicEvolutionSpeed)) {
+                if (typeof weatherController.setDynamicEvolutionSpeed === 'function') {
+                  weatherController.setDynamicEvolutionSpeed(cs.dynamicEvolutionSpeed);
+                } else {
+                  weatherController.dynamicEvolutionSpeed = cs.dynamicEvolutionSpeed;
+                }
+              }
+
+              if (typeof cs.dynamicPaused === 'boolean') {
+                if (typeof weatherController.setDynamicPaused === 'function') {
+                  weatherController.setDynamicPaused(cs.dynamicPaused);
+                } else {
+                  weatherController.dynamicPaused = cs.dynamicPaused;
+                }
+              }
+            }
+
+            const cp = window.MapShine?.controlPanel;
+            if (cp) {
+              cp.controlState = { ...cp.controlState, ...cs };
+              try {
+                cp._updateClock?.(cp.controlState.timeOfDay);
+              } catch (e) {
+              }
+              try {
+                cp.pane?.refresh?.();
+              } catch (e) {
+              }
+            }
+          } catch (e) {
+          }
+        }
+      }
+
       if (Object.prototype.hasOwnProperty.call(ns, 'weather-transition')) {
         const cmd = scene.getFlag('map-shine-advanced', 'weather-transition');
         if (cmd) {
@@ -344,6 +409,10 @@ function onUpdateScene(scene, changes, options, userId) {
 
       if (Object.prototype.hasOwnProperty.call(ns, 'weather-transitionTarget')) {
         weatherController._loadQueuedTransitionTargetFromScene?.();
+      }
+
+      if (Object.prototype.hasOwnProperty.call(ns, 'weather-snapshot')) {
+        weatherController._loadWeatherSnapshotFromScene?.();
       }
     }
   } catch (e) {
@@ -428,6 +497,17 @@ async function onCanvasReady(canvas) {
         log.info('Map Shine UI initialized in UI-only mode');
       } catch (e) {
         log.error('Failed to initialize Map Shine UI in UI-only mode:', e);
+      }
+    }
+
+    if (!controlPanel) {
+      try {
+        controlPanel = new ControlPanelManager();
+        await controlPanel.initialize();
+        window.MapShine.controlPanel = controlPanel;
+        log.info('Map Shine Control Panel initialized in UI-only mode');
+      } catch (e) {
+        log.error('Failed to initialize Map Shine Control Panel in UI-only mode:', e);
       }
     }
 
@@ -792,6 +872,10 @@ async function createThreeCanvas(scene) {
     // This allows precipitation, wind, etc. to update every frame and drive GPU effects
     // like the particle-based weather system without requiring manual console snippets.
     weatherController.initialize();
+
+    // Apply persisted snapshot after initialize so we restore the most recent live weather.
+    // (Initialize may run before flags are available in some edge cases; canvasReady ensures scene exists.)
+    weatherController._loadWeatherSnapshotFromScene?.();
     effectComposer.addUpdatable(weatherController);
 
     // Step 3: Register specular effect
@@ -1192,6 +1276,10 @@ async function createThreeCanvas(scene) {
         debugLayerEffect,
         playerLightEffect
       );
+
+      // Ensure the scene loads with the last persisted weather snapshot even if UI initialization
+      // (Control Panel / Tweakpane) applied other defaults during startup.
+      weatherController._loadWeatherSnapshotFromScene?.();
     } catch (e) {
       log.error('Failed to initialize UI:', e);
     }
@@ -1264,6 +1352,14 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     uiManager = new TweakpaneManager();
     await uiManager.initialize();
     log.info('UI Manager created');
+  }
+
+  // Create Control Panel manager if not already created
+  if (!controlPanel) {
+    controlPanel = new ControlPanelManager();
+    await controlPanel.initialize();
+    window.MapShine.controlPanel = controlPanel;
+    log.info('Control Panel Manager created');
   }
 
   // Get Specular effect schema from effect class (centralized definition)
@@ -2340,6 +2436,13 @@ function destroyThreeCanvas() {
     uiManager.dispose();
     uiManager = null;
     log.debug('UI manager disposed');
+  }
+
+  // Dispose Control Panel manager
+  if (controlPanel) {
+    controlPanel.destroy();
+    controlPanel = null;
+    log.debug('Control Panel manager disposed');
   }
 
   // Dispose camera follower

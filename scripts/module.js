@@ -51,7 +51,7 @@ Hooks.once('init', async function() {
   sceneSettings.registerSettings();
   registerUISettings();
   
-  // Register scene control button to toggle Map Shine UI
+  // Register scene control buttons for Map Shine panels
   // Foundry v13+ uses Record<string, SceneControl> with tools as Record<string, SceneControlTool>
   Hooks.on('getSceneControlButtons', (controls) => {
     try {
@@ -61,14 +61,13 @@ Hooks.once('init', async function() {
       if (!tokenControls?.tools) return;
 
       // Avoid duplicate tool registration
-      if (tokenControls.tools['map-shine-ui']) return;
+      if (tokenControls.tools['map-shine-config']) return;
 
-      // Add tool as a property on the tools object (not array push)
-      // Include toolclip to prevent Foundry errors when hovering
-      tokenControls.tools['map-shine-ui'] = {
-        name: 'map-shine-ui',
-        title: 'Map Shine UI',
-        icon: 'fas fa-sun',
+      // Configuration Panel button (existing TweakpaneManager)
+      tokenControls.tools['map-shine-config'] = {
+        name: 'map-shine-config',
+        title: 'Map Shine Config',
+        icon: 'fas fa-cog',
         button: true,
         order: 100, // Place at end of tools list
         visible: game.user?.isGM ?? false,
@@ -80,14 +79,37 @@ Hooks.once('init', async function() {
         onChange: () => {
           const uiManager = window.MapShine?.uiManager;
           if (!uiManager) {
-            ui.notifications?.warn?.('Map Shine UI is not available yet. The scene may still be initializing.');
+            ui.notifications?.warn?.('Map Shine Configuration is not available yet. The scene may still be initializing.');
             return;
           }
           uiManager.toggle();
         }
       };
+
+      // Control Panel button (new ControlPanelManager)
+      tokenControls.tools['map-shine-control'] = {
+        name: 'map-shine-control',
+        title: 'Map Shine Control',
+        icon: 'fas fa-sliders-h',
+        button: true,
+        order: 101, // After config button
+        visible: game.user?.isGM ?? false,
+        toolclip: {
+          src: '',
+          heading: 'MAPSHINE.ToolTitle',
+          items: [{ paragraph: 'MAPSHINE.ToolDescription' }]
+        },
+        onChange: () => {
+          const controlPanel = window.MapShine?.controlPanel;
+          if (!controlPanel) {
+            ui.notifications?.warn?.('Map Shine Control Panel is not available yet. The scene may still be initializing.');
+            return;
+          }
+          controlPanel.toggle();
+        }
+      };
     } catch (e) {
-      console.error('Map Shine: failed to register scene control button', e);
+      console.error('Map Shine: failed to register scene control buttons', e);
     }
   });
 

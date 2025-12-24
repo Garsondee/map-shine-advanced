@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { stateApplier } from './state-applier.js';
 import { globalValidator, getSpecularEffectiveState, getStripeDependencyState } from './parameter-validator.js';
 import { TextureManagerUI } from './texture-manager.js';
 import * as sceneSettings from '../settings/scene-settings.js';
@@ -295,20 +296,6 @@ export class TweakpaneManager {
       max: 200,
       step: 1
     }).on('change', onTimeRateChange);
-
-    // Time of Day slider (0-24h) - primary global control for sun-driven
-    // effects. Placed directly under Time Rate.
-    const onTimeOfDayChange = (ev) => {
-      this.onGlobalChange('timeOfDay', ev.value);
-    };
-    this._uiValidatorGlobalHandlers.timeOfDay = onTimeOfDayChange;
-
-    globalFolder.addBinding(this.globalParams, 'timeOfDay', {
-      label: 'Time of Day',
-      min: 0.0,
-      max: 24.0,
-      step: 0.1
-    }).on('change', onTimeOfDayChange);
 
     // Visual separator between time controls and UI/tools controls
     globalFolder.addBlade({ view: 'separator' });
@@ -1193,16 +1180,10 @@ export class TweakpaneManager {
         log.warn('TimeManager not available, cannot set time rate');
       }
     } else if (param === 'timeOfDay') {
-      // Forward global time-of-day to WeatherController so all
-      // time-driven systems share a single source of truth.
-      try {
-        const wc = window.MapShine?.weatherController || window.weatherController;
-        if (wc && typeof wc.setTime === 'function') {
-          wc.setTime(value);
-        }
-      } catch (e) {
-        log.warn('Failed to apply global timeOfDay to WeatherController:', e);
-      }
+      // Apply time of day using centralized StateApplier
+      stateApplier.applyTimeOfDay(value, false).catch(error => {
+        log.warn('Failed to apply timeOfDay via StateApplier:', error);
+      });
     }
 
     this.saveUIState();

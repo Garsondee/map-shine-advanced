@@ -158,6 +158,11 @@ export class WeatherController {
 
     this._lastTransitionCommandStartedAt = 0;
 
+    this._weatherSnapshotPersistTimer = 0;
+    this._weatherSnapshotPersistIntervalSeconds = 300.0;
+    this._weatherSnapshotSaveTimeout = null;
+    this._weatherSnapshotSaveDebounceMs = 1000;
+
     this._environmentState = {
       timeOfDay: 0.0,
       sceneDarkness: 0.0,
@@ -276,6 +281,7 @@ export class WeatherController {
 
     this._loadDynamicStateFromScene();
     this._loadQueuedTransitionTargetFromScene();
+    this._loadWeatherSnapshotFromScene();
 
     log.info('WeatherController initialized');
     this.initialized = true;
@@ -402,6 +408,14 @@ export class WeatherController {
     const dt = Math.min(timeInfo.delta, 0.25);
     const elapsed = timeInfo.elapsed;
 
+    if (this._canEditSceneFlags()) {
+      this._weatherSnapshotPersistTimer += dt;
+      if (this._weatherSnapshotPersistTimer >= this._weatherSnapshotPersistIntervalSeconds) {
+        this._weatherSnapshotPersistTimer = 0;
+        this._scheduleSaveWeatherSnapshot();
+      }
+    }
+
     if (this.dynamicEnabled === true) {
       this._updateDynamic(dt);
     }
@@ -409,7 +423,9 @@ export class WeatherController {
     // 1. Calculate Base State (Transition or Static)
     if (this.isTransitioning) {
       this.transitionElapsed += dt;
-      const progress = Math.min(this.transitionElapsed / this.transitionDuration, 1.0);
+      const dur = Number.isFinite(this.transitionDuration) ? this.transitionDuration : 0;
+      const safeDur = dur > 0.0001 ? dur : 0.0001;
+      const progress = Math.min(this.transitionElapsed / safeDur, 1.0);
       
       // Cubic ease-in-out for smoother transitions
       const t = progress < 0.5 
@@ -421,6 +437,15 @@ export class WeatherController {
       if (progress >= 1.0) {
         this.isTransitioning = false;
         log.debug('Weather transition complete');
+
+        // Snap to final target state so discrete fields like precipType are correct
+        // before we persist a snapshot.
+        this._copyState(this.targetState, this.currentState);
+
+        if (this._canEditSceneFlags()) {
+          this._weatherSnapshotPersistTimer = 0;
+          void this._saveWeatherSnapshotToScene();
+        }
       }
     } else {
       // Snap to target state (base for this frame)
@@ -437,6 +462,148 @@ export class WeatherController {
     this._updateWetness(dt);
 
     this._updateEnvironmentOutputs();
+  }
+
+  _serializeWeatherState(state) {
+    return {
+      precipitation: Number(state?.precipitation) || 0.0,
+      precipType: Number(state?.precipType) || 0,
+      cloudCover: Number(state?.cloudCover) || 0.0,
+      windSpeed: Number(state?.windSpeed) || 0.0,
+      windDirection: {
+        x: Number(state?.windDirection?.x) || 1,
+        y: Number(state?.windDirection?.y) || 0
+      },
+      fogDensity: Number(state?.fogDensity) || 0.0,
+      wetness: Number(state?.wetness) || 0.0,
+      freezeLevel: Number(state?.freezeLevel) || 0.0
+    };
+  }
+
+  _applySerializedWeatherState(serialized, dest) {
+    if (!serialized || typeof serialized !== 'object' || !dest) return;
+    dest.precipitation = Number(serialized.precipitation) || 0.0;
+    dest.precipType = Number(serialized.precipType) || 0;
+    dest.cloudCover = Number(serialized.cloudCover) || 0.0;
+    dest.windSpeed = Number(serialized.windSpeed) || 0.0;
+    dest.fogDensity = Number(serialized.fogDensity) || 0.0;
+    dest.wetness = Number(serialized.wetness) || 0.0;
+    dest.freezeLevel = Number(serialized.freezeLevel) || 0.0;
+
+    const wx = Number(serialized.windDirection?.x);
+    const wy = Number(serialized.windDirection?.y);
+    const x = Number.isFinite(wx) ? wx : 1;
+    const y = Number.isFinite(wy) ? wy : 0;
+    if (dest.windDirection?.set) dest.windDirection.set(x, y);
+    else dest.windDirection = { x, y };
+  }
+
+  _scheduleSaveWeatherSnapshot() {
+    try {
+      if (!this._canEditSceneFlags()) return;
+      const scene = canvas?.scene;
+      if (!scene) return;
+
+      if (this._weatherSnapshotSaveTimeout) {
+        clearTimeout(this._weatherSnapshotSaveTimeout);
+      }
+
+      this._weatherSnapshotSaveTimeout = setTimeout(() => {
+        this._weatherSnapshotSaveTimeout = null;
+        this._saveWeatherSnapshotToScene();
+      }, this._weatherSnapshotSaveDebounceMs);
+    } catch (e) {
+    }
+  }
+
+  async _saveWeatherSnapshotToScene() {
+    try {
+      if (!this._canEditSceneFlags()) return;
+      const scene = canvas?.scene;
+      if (!scene) return;
+
+      const payload = {
+        version: 1,
+        updatedAt: Date.now(),
+        enabled: this.enabled === true,
+        dynamicEnabled: this.dynamicEnabled === true,
+        dynamicPresetId: this.dynamicPresetId,
+        dynamicEvolutionSpeed: this.dynamicEvolutionSpeed,
+        dynamicPaused: this.dynamicPaused === true,
+        start: this._serializeWeatherState(this.startState),
+        current: this._serializeWeatherState(this.currentState),
+        target: this._serializeWeatherState(this.targetState),
+        isTransitioning: this.isTransitioning === true,
+        transitionDuration: Number(this.transitionDuration) || 0,
+        transitionElapsed: Number(this.transitionElapsed) || 0
+      };
+
+      await scene.setFlag('map-shine-advanced', 'weather-snapshot', payload);
+      log.debug(`Saved weather snapshot to scene flags (updatedAt=${payload.updatedAt})`);
+    } catch (e) {
+      log.warn('Failed to save weather snapshot to scene flags:', e);
+    }
+  }
+
+  _loadWeatherSnapshotFromScene() {
+    try {
+      const scene = canvas?.scene;
+      if (!scene) return;
+      const stored = scene.getFlag('map-shine-advanced', 'weather-snapshot');
+      if (!stored || typeof stored !== 'object') return;
+      if (stored.version !== 1) return;
+
+      if (stored.enabled === true || stored.enabled === false) {
+        this.enabled = stored.enabled === true;
+      }
+
+      if (stored.dynamicEnabled === true || stored.dynamicEnabled === false) {
+        this.dynamicEnabled = stored.dynamicEnabled === true;
+      }
+
+      if (typeof stored.dynamicPresetId === 'string' && stored.dynamicPresetId) {
+        this.dynamicPresetId = stored.dynamicPresetId;
+      }
+
+      if (Number.isFinite(stored.dynamicEvolutionSpeed)) {
+        this.dynamicEvolutionSpeed = stored.dynamicEvolutionSpeed;
+      }
+
+      if (stored.dynamicPaused === true || stored.dynamicPaused === false) {
+        this.dynamicPaused = stored.dynamicPaused === true;
+      }
+
+      this._applySerializedWeatherState(stored.target, this.targetState);
+      this._applySerializedWeatherState(stored.current, this.currentState);
+
+      const storedDur = Number(stored.transitionDuration) || 0;
+      const storedElapsed = Number(stored.transitionElapsed) || 0;
+      const wantsTransition = stored.isTransitioning === true && storedDur > 0.05;
+
+      if (wantsTransition) {
+        // If we have an explicit serialized start state, restore it so the lerp is correct.
+        // Otherwise, restart the transition from the stored current state (smooth continuation).
+        if (stored.start && typeof stored.start === 'object') {
+          this._applySerializedWeatherState(stored.start, this.startState);
+          this.transitionElapsed = Math.max(0, Math.min(storedElapsed, storedDur));
+        } else {
+          this._copyState(this.currentState, this.startState);
+          this.transitionElapsed = 0;
+        }
+        this.transitionDuration = storedDur;
+        this.isTransitioning = true;
+      } else {
+        this._copyState(this.currentState, this.startState);
+        this.isTransitioning = false;
+        this.transitionDuration = 0;
+        this.transitionElapsed = 0;
+      }
+
+      this._updateEnvironmentOutputs();
+      log.info(`Loaded weather snapshot from scene flags (updatedAt=${stored.updatedAt ?? 'unknown'})`);
+    } catch (e) {
+      log.warn('Failed to load weather snapshot from scene flags:', e);
+    }
   }
 
   setDynamicEnabled(enabled) {
@@ -930,15 +1097,35 @@ export class WeatherController {
         ui?.notifications?.warn?.('Map Shine: disable Dynamic Weather to use manual transitions.');
       } catch (_) {
       }
+      try {
+        log.warn('startQueuedTransition blocked because dynamicEnabled=true');
+      } catch (_) {
+      }
       return;
     }
 
-    const duration = Number.isFinite(durationSeconds) ? durationSeconds : (Number.isFinite(this.transitionDuration) ? this.transitionDuration : 5.0);
+    const durArg = Number(durationSeconds);
+    const durFromArg = Number.isFinite(durArg) && durArg > 0.05 ? durArg : null;
+    const durFromTransition = Number.isFinite(this.transitionDuration) && this.transitionDuration > 0.05 ? this.transitionDuration : null;
+    const durFromPreset = Number.isFinite(this.presetTransitionDurationSeconds) && this.presetTransitionDurationSeconds > 0.05
+      ? this.presetTransitionDurationSeconds
+      : 30.0;
+    const duration = durFromArg ?? durFromTransition ?? durFromPreset;
+
+    try {
+      log.info(`startQueuedTransition(durationSeconds=${String(durationSeconds)}) -> duration=${duration}`);
+    } catch (_) {
+    }
     const target = this._buildQueuedTransitionWeatherState();
     if (!target) return;
 
     this.transitionTo(target, duration);
     this._broadcastTransitionCommand(target, duration);
+
+    if (this._canEditSceneFlags()) {
+      this._weatherSnapshotPersistTimer = 0;
+      void this._saveWeatherSnapshotToScene();
+    }
   }
 
   _buildQueuedTransitionWeatherState() {
@@ -947,14 +1134,26 @@ export class WeatherController {
 
     const q = this._queuedTransitionTarget;
     const rad = (Number(q.windDirectionDeg) * Math.PI) / 180;
+    const precipitation = Number(q.precipitation) || 0.0;
+    const freezeLevel = Number(q.freezeLevel) || 0.0;
+
+    let precipType = PrecipitationType.NONE;
+    if (precipitation < 0.05) {
+      precipType = PrecipitationType.NONE;
+    } else if (freezeLevel > 0.55) {
+      precipType = PrecipitationType.SNOW;
+    } else {
+      precipType = PrecipitationType.RAIN;
+    }
+
     return {
-      precipitation: q.precipitation,
+      precipitation,
       cloudCover: q.cloudCover,
       windSpeed: q.windSpeed,
       windDirection: { x: Math.cos(rad), y: -Math.sin(rad) },
       fogDensity: q.fogDensity,
-      freezeLevel: q.freezeLevel,
-      precipType: PrecipitationType.NONE,
+      freezeLevel,
+      precipType,
       wetness: 0.0
     };
   }
@@ -1006,6 +1205,10 @@ export class WeatherController {
       if (!target || typeof target !== 'object') return;
 
       const duration = Number.isFinite(cmd.duration) ? cmd.duration : 5.0;
+      try {
+        log.info(`applyTransitionCommand(startedAt=${startedAt}) duration=${duration}`);
+      } catch (_) {
+      }
       this.transitionTo({
         precipitation: Number(target.precipitation) || 0,
         cloudCover: Number(target.cloudCover) || 0,
@@ -1545,7 +1748,9 @@ export class WeatherController {
    * @param {number} duration - Seconds
    */
   transitionTo(targetState, duration = 5.0) {
-    log.info(`Transitioning weather over ${duration}s`);
+    const durArg = Number(duration);
+    const safeDuration = Number.isFinite(durArg) ? Math.max(0.1, durArg) : 5.0;
+    log.info(`Transitioning weather over ${safeDuration}s`);
 
     const THREE = window.THREE;
     if (!THREE) return;
@@ -1567,7 +1772,7 @@ export class WeatherController {
       windDirection: cloneWindDir(targetState.windDirection)
     };
 
-    this.transitionDuration = duration;
+    this.transitionDuration = safeDuration;
     this.transitionElapsed = 0;
     this.isTransitioning = true;
   }

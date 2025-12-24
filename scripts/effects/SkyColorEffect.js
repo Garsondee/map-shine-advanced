@@ -115,6 +115,8 @@ export class SkyColorEffect extends EffectBase {
         tDiffuse: { value: null },
         tOutdoorsMask: { value: null },
         uHasOutdoorsMask: { value: 0.0 },
+        tCloudTop: { value: null },
+        uHasCloudTop: { value: 0.0 },
         uExposure: { value: 0.0 },
         uSaturation: { value: 1.0 },
         uContrast: { value: 1.0 },
@@ -131,6 +133,8 @@ export class SkyColorEffect extends EffectBase {
         uniform sampler2D tDiffuse;
         uniform sampler2D tOutdoorsMask;
         uniform float uHasOutdoorsMask;
+        uniform sampler2D tCloudTop;
+        uniform float uHasCloudTop;
         uniform float uExposure;
         uniform float uSaturation;
         uniform float uContrast;
@@ -152,7 +156,14 @@ export class SkyColorEffect extends EffectBase {
             outdoors = texture2D(tOutdoorsMask, vUv).r;
           }
 
-          if (uIntensity <= 0.0 || outdoors <= 0.0) {
+          float cloudTopAlpha = 0.0;
+          if (uHasCloudTop > 0.5) {
+            cloudTopAlpha = texture2D(tCloudTop, vUv).a;
+          }
+
+          float gradeMask = outdoors * (1.0 - cloudTopAlpha);
+
+          if (uIntensity <= 0.0 || gradeMask <= 0.0) {
             gl_FragColor = sceneColor;
             return;
           }
@@ -163,7 +174,7 @@ export class SkyColorEffect extends EffectBase {
           color = adjustSaturation(color, uSaturation);
           color = (color - 0.5) * uContrast + 0.5;
 
-          float mask = clamp(outdoors * uIntensity, 0.0, 1.0);
+          float mask = clamp(gradeMask * uIntensity, 0.0, 1.0);
           vec3 finalColor = mix(base, color, mask);
 
           gl_FragColor = vec4(finalColor, sceneColor.a);
@@ -208,10 +219,10 @@ export class SkyColorEffect extends EffectBase {
       const dayFactor = 0.5 * (Math.cos(angle) + 1.0);
 
       const precip = state?.precipitation ?? 0.0;
-      const cloud = state?.cloudCover ?? 0.0;
+      const cloudCover = state?.cloudCover ?? 0.0;
       const freezeLevel = state?.freezeLevel ?? 0.0; // 0 = warm rain, 1 = full snow/cold
       const stormFactor = Math.max(0.0, precip - 0.5) * 2.0;
-      const overcastFactor = Math.min(1.0, (precip + cloud) * 0.5);
+      const overcastFactor = Math.min(1.0, (precip + cloudCover) * 0.5);
 
       // Temperature influence:
       // freezeLevel 0.0  -> warm (rain only)
@@ -269,6 +280,15 @@ export class SkyColorEffect extends EffectBase {
       u.uSaturation.value = saturation;
       u.uContrast.value = contrast;
       u.uIntensity.value = this.params.intensity;
+
+      const cloudEffect = window.MapShine?.cloudEffect;
+      const cloudTopTex = cloudEffect?.cloudTopTarget?.texture ?? null;
+      if (cloudTopTex) {
+        u.tCloudTop.value = cloudTopTex;
+        u.uHasCloudTop.value = 1.0;
+      } else {
+        u.uHasCloudTop.value = 0.0;
+      }
 
       const mm = window.MapShine?.maskManager;
       const outdoorsTex = mm ? mm.getTexture('outdoors.screen') : null;

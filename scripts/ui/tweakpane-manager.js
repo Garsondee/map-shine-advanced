@@ -170,8 +170,25 @@ export class TweakpaneManager {
     // Load saved UI state (position, scale, accordion states)
     await this.loadUIState();
 
+    try {
+      const scene = canvas?.scene;
+      const allSettings = scene?.getFlag?.('map-shine-advanced', 'settings') || {};
+      const legacyTimeOfDay =
+        allSettings?.mapMaker?.effects?.weather?.timeOfDay ??
+        allSettings?.gm?.effects?.weather?.timeOfDay;
+
+      if (typeof legacyTimeOfDay === 'number' && Number.isFinite(legacyTimeOfDay)) {
+        if (this.globalParams.timeOfDay === 12.0) {
+          this.globalParams.timeOfDay = legacyTimeOfDay;
+        }
+      }
+    } catch (e) {
+    }
+
     // Build global controls
     this.buildGlobalControls();
+
+    this.onGlobalChange('timeOfDay', this.globalParams.timeOfDay);
 
     // Build scene setup section (only for GMs)
     if (game.user.isGM) {
@@ -715,6 +732,11 @@ export class TweakpaneManager {
           const effectData = this.effectFolders[effectId];
           if (!effectData) return;
 
+          const callback = this.effectCallbacks.get(effectId) || updateCallback;
+          if (callback) {
+            callback(effectId, '_preset_begin', selected);
+          }
+
           for (const [paramId, value] of Object.entries(presetDef)) {
             const paramDef = schema.parameters?.[paramId];
             if (!paramDef) continue;
@@ -728,10 +750,13 @@ export class TweakpaneManager {
               effectData.bindings[paramId].refresh();
             }
 
-            const callback = this.effectCallbacks.get(effectId) || updateCallback;
             if (callback) {
               callback(effectId, paramId, finalValue);
             }
+          }
+
+          if (callback) {
+            callback(effectId, '_preset_end', selected);
           }
 
           this.updateEffectiveState(effectId);
@@ -880,6 +905,11 @@ export class TweakpaneManager {
           const effectData = this.effectFolders[effectId];
           if (!effectData) return;
 
+          const callback = this.effectCallbacks.get(effectId) || updateCallback;
+          if (callback) {
+            callback(effectId, '_preset_begin', selected);
+          }
+
           for (const [paramId, value] of Object.entries(presetDef)) {
             const paramDef = schema.parameters?.[paramId];
             if (!paramDef) continue;
@@ -893,10 +923,13 @@ export class TweakpaneManager {
               effectData.bindings[paramId].refresh();
             }
 
-            const callback = this.effectCallbacks.get(effectId) || updateCallback;
             if (callback) {
               callback(effectId, paramId, finalValue);
             }
+          }
+
+          if (callback) {
+            callback(effectId, '_preset_end', selected);
           }
 
           this.updateEffectiveState(effectId);
@@ -1021,6 +1054,27 @@ export class TweakpaneManager {
    */
   buildParameterControl(effectId, container, paramId, paramDef, updateCallback, savedParams) {
     const effectData = this.effectFolders[effectId];
+
+    if (paramDef?.gmOnly === true && !game.user.isGM) {
+      return;
+    }
+
+    if (paramDef?.type === 'button') {
+      const title = paramDef.title || paramDef.label || paramId;
+      const button = container.addButton({
+        title,
+        label: paramDef.label && paramDef.title ? paramDef.label : undefined
+      });
+
+      button.on('click', () => {
+        try {
+          updateCallback(effectId, paramId, true);
+        } catch (e) {
+        }
+      });
+
+      return;
+    }
 
     // Use saved value if available, otherwise use default from schema
     effectData.params[paramId] = savedParams[paramId] ?? paramDef.default;
@@ -1763,17 +1817,52 @@ export class TweakpaneManager {
     let depState;
     if (effectId === 'specular') {
       depState = getStripeDependencyState(effectData.params);
+    } else if (effectId === 'weather') {
+      depState = {
+        dynamicEnabled: effectData.params.dynamicEnabled === true,
+        isGM: game.user.isGM
+      };
     } else {
       return; // No dependencies for other effects yet
     }
     
     // Update each binding's disabled state
     for (const [paramId, config] of Object.entries(effectData.bindingConfigs)) {
-      const { binding } = config;
+      const { binding, paramDef } = config;
       
       // Determine if this control should be disabled
       let shouldDisable = false;
       let isProblemControl = false;
+      let lockReason = '';
+
+      if (effectId === 'weather') {
+        // When Dynamic Weather is enabled, manual weather overrides become read-only.
+        // (We keep other controls like time-of-day, variability, and dynamic settings interactive.)
+        const manualParams = new Set([
+          'precipitation',
+          'cloudCover',
+          'windSpeed',
+          'windDirection',
+          'freezeLevel',
+          'fogDensity'
+        ]);
+
+        if (depState.dynamicEnabled && manualParams.has(paramId)) {
+          shouldDisable = true;
+          lockReason = 'Driven by Dynamic Weather';
+        }
+
+        // Respect schema-level readonly even if dynamic mode is off.
+        if (paramDef?.readonly) {
+          shouldDisable = true;
+          if (!lockReason) lockReason = 'Read only';
+        }
+
+        if (paramDef?.gmOnly === true && depState.isGM !== true) {
+          shouldDisable = true;
+          if (!lockReason) lockReason = 'GM only';
+        }
+      }
       
       // Stripe blend mode and parallax - disabled if stripes off
       if ((paramId === 'stripeBlendMode' || paramId === 'parallaxStrength') && !depState.stripeControlsActive) {
@@ -1827,6 +1916,10 @@ export class TweakpaneManager {
           label.style.color = '#ff4444'; // Red warning
         } else {
           label.style.color = ''; // Reset to default
+        }
+
+        if (effectId === 'weather') {
+          label.title = lockReason || '';
         }
       }
     }

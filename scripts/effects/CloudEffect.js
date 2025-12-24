@@ -901,6 +901,9 @@ export class CloudEffect extends EffectBase {
     this.shadowMaterial = new THREE.ShaderMaterial({
       uniforms: {
         tCloudDensity: { value: null },
+        // 0.0 = grayscale density in RGB with alpha=1 (cloudDensityTarget)
+        // 1.0 = packed bands in RGB with composite density in alpha (cloudTopDensityTarget)
+        uDensityMode: { value: 0.0 },
         tOutdoorsMask: { value: null },
         uHasOutdoorsMask: { value: 0.0 },
         uShadowOpacity: { value: this.params.shadowOpacity },
@@ -920,6 +923,7 @@ export class CloudEffect extends EffectBase {
       `,
       fragmentShader: `
         uniform sampler2D tCloudDensity;
+        uniform float uDensityMode;
         uniform sampler2D tOutdoorsMask;
         uniform float uHasOutdoorsMask;
         uniform float uShadowOpacity;
@@ -933,7 +937,7 @@ export class CloudEffect extends EffectBase {
 
         float readDensity(vec2 uv) {
           vec4 t = texture2D(tCloudDensity, uv);
-          return (t.a > 0.999) ? t.r : t.a;
+          return (uDensityMode < 0.5) ? t.r : t.a;
         }
 
         void main() {
@@ -997,6 +1001,9 @@ export class CloudEffect extends EffectBase {
     this.cloudTopMaterial = new THREE.ShaderMaterial({
       uniforms: {
         tCloudDensity: { value: null },
+        // 0.0 = grayscale density in RGB with alpha=1 (cloudDensityTarget)
+        // 1.0 = packed bands in RGB with composite density in alpha (cloudTopDensityTarget)
+        uDensityMode: { value: 1.0 },
         tOutdoorsMask: { value: null },
         uHasOutdoorsMask: { value: 0.0 },
         uOutdoorsMaskStrength: { value: 1.0 },
@@ -1025,6 +1032,7 @@ export class CloudEffect extends EffectBase {
       `,
       fragmentShader: `
         uniform sampler2D tCloudDensity;
+        uniform float uDensityMode;
         uniform sampler2D tOutdoorsMask;
         uniform float uHasOutdoorsMask;
         uniform float uOutdoorsMaskStrength;
@@ -1050,7 +1058,7 @@ export class CloudEffect extends EffectBase {
           vec4 t = texture2D(tCloudDensity, uv);
           // Parallaxed cloud-top density stores composite in alpha.
           // World density stores grayscale in RGB with alpha=1.
-          return (t.a > 0.999) ? t.r : t.a;
+          return (uDensityMode < 0.5) ? t.r : t.a;
         }
 
         vec3 shadeCloud(vec2 uv, float density, vec3 baseColor) {
@@ -1094,10 +1102,16 @@ export class CloudEffect extends EffectBase {
         void main() {
           // Sample cloud density (no sun offset - we want clouds directly overhead)
           vec4 densTex = texture2D(tCloudDensity, vUv);
-          float density = (densTex.a > 0.999) ? densTex.r : densTex.a;
+          float density = (uDensityMode < 0.5) ? densTex.r : densTex.a;
           float dMid = densTex.r;
           float dInner = densTex.g;
           float dOuter = densTex.b;
+
+          if (uDensityMode < 0.5) {
+            dMid = density;
+            dInner = density;
+            dOuter = density;
+          }
 
           // Calculate zoom-based fade
           // When zoomed OUT (low normalizedZoom), clouds are visible
@@ -1797,6 +1811,7 @@ export class CloudEffect extends EffectBase {
       const prevHasMask = su.uHasOutdoorsMask ? su.uHasOutdoorsMask.value : 0.0;
       const prevMaskTex = su.tOutdoorsMask ? su.tOutdoorsMask.value : null;
 
+      if (su.uDensityMode) su.uDensityMode.value = 0.0;
       if (su.uHasOutdoorsMask) su.uHasOutdoorsMask.value = 0.0;
       if (su.tOutdoorsMask) su.tOutdoorsMask.value = null;
 
@@ -1812,6 +1827,7 @@ export class CloudEffect extends EffectBase {
     }
 
     // Pass 2b: Generate cloud shadow from density (OUTDOORS-MASKED)
+    if (this.shadowMaterial.uniforms.uDensityMode) this.shadowMaterial.uniforms.uDensityMode.value = 0.0;
     this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
     this.quadMesh.material = this.shadowMaterial;
     renderer.setRenderTarget(this.cloudShadowTarget);
@@ -1832,7 +1848,11 @@ export class CloudEffect extends EffectBase {
 
     // Pass 4: Generate cloud tops (visible cloud layer with zoom fade)
     if (this.cloudTopMaterial && this.cloudTopTarget) {
-      this.cloudTopMaterial.uniforms.tCloudDensity.value = this.cloudTopDensityTarget
+      const usePacked = !!this.cloudTopDensityTarget;
+      if (this.cloudTopMaterial.uniforms.uDensityMode) {
+        this.cloudTopMaterial.uniforms.uDensityMode.value = usePacked ? 1.0 : 0.0;
+      }
+      this.cloudTopMaterial.uniforms.tCloudDensity.value = usePacked
         ? this.cloudTopDensityTarget.texture
         : this.cloudDensityTarget.texture;
       this.quadMesh.material = this.cloudTopMaterial;

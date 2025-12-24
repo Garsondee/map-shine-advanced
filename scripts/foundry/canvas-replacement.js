@@ -321,6 +321,33 @@ function onUpdateScene(scene, changes, options, userId) {
   // Only process if this is the current scene and Map Shine is enabled
   if (!canvas?.scene || scene.id !== canvas.scene.id) return;
   if (!sceneSettings.isEnabled(scene)) return;
+
+  // Weather authority sync (GM flags replicated to all clients)
+  try {
+    if (changes?.flags?.['map-shine-advanced']) {
+      const ns = changes.flags['map-shine-advanced'];
+
+      if (Object.prototype.hasOwnProperty.call(ns, 'weather-transition')) {
+        const cmd = scene.getFlag('map-shine-advanced', 'weather-transition');
+        if (cmd) {
+          weatherController.applyTransitionCommand?.(cmd);
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(ns, 'weather-dynamic')) {
+        weatherController._loadDynamicStateFromScene?.();
+        try {
+          uiManager?.updateControlStates?.('weather');
+        } catch (e) {
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(ns, 'weather-transitionTarget')) {
+        weatherController._loadQueuedTransitionTargetFromScene?.();
+      }
+    }
+  } catch (e) {
+  }
   
   // Check for changes that require full reinitialization
   const requiresReinit = [
@@ -1517,7 +1544,37 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
   // --- Weather System Settings ---
   const weatherSchema = weatherController.constructor.getControlSchema();
 
+  let weatherPresetBuffer = null;
+
   const onWeatherUpdate = (effectId, paramId, value) => {
+    if (paramId === '_preset_begin') {
+      weatherPresetBuffer = {};
+      return;
+    }
+
+    if (paramId === '_preset_end') {
+      const buffered = weatherPresetBuffer;
+      weatherPresetBuffer = null;
+      if (buffered && typeof weatherController.transitionToPreset === 'function') {
+        weatherController.transitionToPreset(buffered);
+      }
+      return;
+    }
+
+    if (weatherPresetBuffer) {
+      if (
+        paramId === 'precipitation' ||
+        paramId === 'cloudCover' ||
+        paramId === 'windSpeed' ||
+        paramId === 'windDirection' ||
+        paramId === 'fogDensity' ||
+        paramId === 'freezeLevel'
+      ) {
+        weatherPresetBuffer[paramId] = value;
+        return;
+      }
+    }
+
     // Handle different parameter groups
     if (paramId === 'enabled') {
        // Runtime kill-switch for all weather visuals (clouds + precipitation).
@@ -1548,6 +1605,85 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
          }
        } catch (e) {
        }
+    } else if (paramId === 'dynamicEnabled') {
+      if (typeof weatherController.setDynamicEnabled === 'function') {
+        weatherController.setDynamicEnabled(!!value);
+      } else {
+        weatherController.dynamicEnabled = !!value;
+        if (weatherController.dynamicEnabled) weatherController.enabled = true;
+      }
+      try {
+        uiManager?.updateControlStates?.('weather');
+      } catch (e) {
+      }
+    } else if (paramId === 'dynamicPresetId') {
+      if (typeof weatherController.setDynamicPreset === 'function') {
+        weatherController.setDynamicPreset(value);
+      } else {
+        weatherController.dynamicPresetId = value;
+      }
+    } else if (paramId === 'dynamicEvolutionSpeed') {
+      if (typeof weatherController.setDynamicEvolutionSpeed === 'function') {
+        weatherController.setDynamicEvolutionSpeed(value);
+      } else {
+        weatherController.dynamicEvolutionSpeed = value;
+      }
+    } else if (paramId === 'dynamicPlanDurationMinutes') {
+      if (typeof weatherController.setDynamicPlanDurationMinutes === 'function') {
+        weatherController.setDynamicPlanDurationMinutes(value);
+      } else {
+        const n = typeof value === 'number' ? value : Number(value);
+        if (Number.isFinite(n)) weatherController.dynamicPlanDurationSeconds = n * 60.0;
+      }
+    } else if (paramId === 'dynamicPaused') {
+      if (typeof weatherController.setDynamicPaused === 'function') {
+        weatherController.setDynamicPaused(!!value);
+      } else {
+        weatherController.dynamicPaused = !!value;
+      }
+    } else if (paramId === 'presetTransitionDurationMinutes') {
+      if (typeof weatherController.setPresetTransitionDurationMinutes === 'function') {
+        weatherController.setPresetTransitionDurationMinutes(value);
+      }
+    } else if (paramId === 'dynamicBoundsEnabled') {
+      weatherController.setDynamicBoundsEnabled?.(!!value);
+    } else if (
+      paramId === 'dynamicBoundsPrecipitationMin' ||
+      paramId === 'dynamicBoundsPrecipitationMax' ||
+      paramId === 'dynamicBoundsCloudCoverMin' ||
+      paramId === 'dynamicBoundsCloudCoverMax' ||
+      paramId === 'dynamicBoundsWindSpeedMin' ||
+      paramId === 'dynamicBoundsWindSpeedMax' ||
+      paramId === 'dynamicBoundsFogDensityMin' ||
+      paramId === 'dynamicBoundsFogDensityMax' ||
+      paramId === 'dynamicBoundsFreezeLevelMin' ||
+      paramId === 'dynamicBoundsFreezeLevelMax'
+    ) {
+      const key =
+        paramId === 'dynamicBoundsPrecipitationMin' ? 'precipitationMin' :
+        paramId === 'dynamicBoundsPrecipitationMax' ? 'precipitationMax' :
+        paramId === 'dynamicBoundsCloudCoverMin' ? 'cloudCoverMin' :
+        paramId === 'dynamicBoundsCloudCoverMax' ? 'cloudCoverMax' :
+        paramId === 'dynamicBoundsWindSpeedMin' ? 'windSpeedMin' :
+        paramId === 'dynamicBoundsWindSpeedMax' ? 'windSpeedMax' :
+        paramId === 'dynamicBoundsFogDensityMin' ? 'fogDensityMin' :
+        paramId === 'dynamicBoundsFogDensityMax' ? 'fogDensityMax' :
+        paramId === 'dynamicBoundsFreezeLevelMin' ? 'freezeLevelMin' :
+        'freezeLevelMax';
+      weatherController.setDynamicBound?.(key, value);
+    } else if (
+      paramId === 'queuedPrecipitation' ||
+      paramId === 'queuedCloudCover' ||
+      paramId === 'queuedWindSpeed' ||
+      paramId === 'queuedWindDirection' ||
+      paramId === 'queuedFogDensity' ||
+      paramId === 'queuedFreezeLevel'
+    ) {
+      weatherController.setQueuedTransitionParam?.(paramId, value);
+    } else if (paramId === 'queueFromCurrent') {
+      weatherController.queueTransitionFromCurrent?.();
+    } else if (paramId === 'startQueuedTransition') {
+      weatherController.startQueuedTransition?.(weatherController.transitionDuration);
     } else if (paramId === 'roofMaskForceEnabled') {
       // Manual override for indoor masking independent of roof hover state
       weatherController.roofMaskForceEnabled = !!value;
@@ -1664,11 +1800,22 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
   const weatherParams = {
     enabled: weatherController.enabled ?? true,
     transitionDuration: weatherController.transitionDuration,
+    presetTransitionDurationMinutes: Number.isFinite(weatherController.presetTransitionDurationSeconds)
+      ? (weatherController.presetTransitionDurationSeconds / 60.0)
+      : 0.5,
     variability: weatherController.variability,
     simulationSpeed: weatherController.simulationSpeed,
-    timeOfDay: weatherController.timeOfDay,
     roofMaskForceEnabled: weatherController.roofMaskForceEnabled,
     
+    // Dynamic Weather params
+    dynamicEnabled: weatherController.dynamicEnabled ?? false,
+    dynamicPresetId: weatherController.dynamicPresetId,
+    dynamicEvolutionSpeed: weatherController.dynamicEvolutionSpeed,
+    dynamicPlanDurationMinutes: Number.isFinite(weatherController.dynamicPlanDurationSeconds)
+      ? (weatherController.dynamicPlanDurationSeconds / 60.0)
+      : 6.0,
+    dynamicPaused: weatherController.dynamicPaused ?? false,
+
     // Manual params
     precipitation: weatherController.targetState.precipitation,
     cloudCover: weatherController.targetState.cloudCover,

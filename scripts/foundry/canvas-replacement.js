@@ -871,7 +871,7 @@ async function createThreeCanvas(scene) {
     // Ensure WeatherController is initialized and driven by the centralized TimeManager.
     // This allows precipitation, wind, etc. to update every frame and drive GPU effects
     // like the particle-based weather system without requiring manual console snippets.
-    weatherController.initialize();
+    await weatherController.initialize();
 
     // Apply persisted snapshot after initialize so we restore the most recent live weather.
     // (Initialize may run before flags are available in some edge cases; canvasReady ensures scene exists.)

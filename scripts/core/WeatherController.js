@@ -255,7 +255,7 @@ export class WeatherController {
   /**
    * Initialize the controller
    */
-  initialize() {
+  async initialize() {
     if (this.initialized) return;
     
     if (!window.THREE) {
@@ -281,7 +281,7 @@ export class WeatherController {
 
     this._loadDynamicStateFromScene();
     this._loadQueuedTransitionTargetFromScene();
-    this._loadWeatherSnapshotFromScene();
+    await this._loadWeatherSnapshotFromScene();
 
     log.info('WeatherController initialized');
     this.initialized = true;
@@ -530,6 +530,13 @@ export class WeatherController {
         dynamicPresetId: this.dynamicPresetId,
         dynamicEvolutionSpeed: this.dynamicEvolutionSpeed,
         dynamicPaused: this.dynamicPaused === true,
+        timeOfDay: Number(this.timeOfDay) || 12,
+        sceneDarkness: Number(
+          canvas?.scene?.environment?.darknessLevel ??
+          canvas?.environment?.darknessLevel ??
+          canvas?.scene?.darkness ??
+          0.0
+        ),
         start: this._serializeWeatherState(this.startState),
         current: this._serializeWeatherState(this.currentState),
         target: this._serializeWeatherState(this.targetState),
@@ -545,7 +552,7 @@ export class WeatherController {
     }
   }
 
-  _loadWeatherSnapshotFromScene() {
+  async _loadWeatherSnapshotFromScene() {
     try {
       const scene = canvas?.scene;
       if (!scene) return;
@@ -571,6 +578,21 @@ export class WeatherController {
 
       if (stored.dynamicPaused === true || stored.dynamicPaused === false) {
         this.dynamicPaused = stored.dynamicPaused === true;
+      }
+
+      if (Number.isFinite(stored.timeOfDay)) {
+        this.timeOfDay = stored.timeOfDay % 24;
+      }
+
+      // Restore scene darkness if available and user is GM
+      const hasStoredDarkness = Number.isFinite(stored.sceneDarkness);
+      if (hasStoredDarkness && game?.user?.isGM && canvas?.scene) {
+        try {
+          await canvas.scene.update({ 'environment.darknessLevel': stored.sceneDarkness });
+          log.debug(`Restored scene darkness: ${stored.sceneDarkness.toFixed(3)}`);
+        } catch (e) {
+          log.warn('Failed to restore scene darkness:', e);
+        }
       }
 
       this._applySerializedWeatherState(stored.target, this.targetState);
@@ -600,6 +622,23 @@ export class WeatherController {
       }
 
       this._updateEnvironmentOutputs();
+      
+      // Ensure time-driven systems (color grading, scene darkness) update with restored time
+      if (Number.isFinite(stored.timeOfDay)) {
+        try {
+          const stateApplier = window.MapShine?.stateApplier;
+          if (stateApplier && typeof stateApplier.applyTimeOfDay === 'function') {
+            // If the snapshot contains a persisted Foundry scene darkness, do NOT recompute it
+            // from timeOfDay here (would overwrite restored value). For older snapshots that
+            // don't have sceneDarkness, fall back to recomputing from timeOfDay.
+            const applyDarkness = !hasStoredDarkness;
+            await stateApplier.applyTimeOfDay(stored.timeOfDay % 24, false, applyDarkness);
+          }
+        } catch (e) {
+          log.warn('Failed to apply restored timeOfDay to time-driven systems:', e);
+        }
+      }
+      
       log.info(`Loaded weather snapshot from scene flags (updatedAt=${stored.updatedAt ?? 'unknown'})`);
     } catch (e) {
       log.warn('Failed to load weather snapshot from scene flags:', e);

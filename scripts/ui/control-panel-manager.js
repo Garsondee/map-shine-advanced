@@ -305,6 +305,9 @@ export class ControlPanelManager {
         if (typeof snap.dynamicPaused === 'boolean') {
           this.controlState.dynamicPaused = snap.dynamicPaused === true;
         }
+        if (Number.isFinite(snap.timeOfDay)) {
+          this.controlState.timeOfDay = snap.timeOfDay % 24;
+        }
 
         this._suppressInitialWeatherApply = true;
       }

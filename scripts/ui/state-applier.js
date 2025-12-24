@@ -27,9 +27,10 @@ export class StateApplier {
    * Apply time of day change to all systems
    * @param {number} hour - 0-24 hour value
    * @param {boolean} [saveToScene=true] - Whether to save to scene flags
+   * @param {boolean} [applyDarkness=true] - Whether to update Foundry scene darkness
    * @returns {Promise<void>}
    */
-  async applyTimeOfDay(hour, saveToScene = true) {
+  async applyTimeOfDay(hour, saveToScene = true, applyDarkness = true) {
     try {
       const clampedHour = ((hour % 24) + 24) % 24;
       
@@ -44,7 +45,12 @@ export class StateApplier {
       }
 
       // Update Foundry scene darkness based on time
-      await this._updateSceneDarkness(clampedHour);
+      if (applyDarkness) {
+        await this._updateSceneDarkness(clampedHour);
+      } else if (this._darknessTimer) {
+        clearTimeout(this._darknessTimer);
+        this._darknessTimer = null;
+      }
 
       // Save to scene flags if requested and user is GM
       if (saveToScene && game?.user?.isGM && canvas?.scene) {

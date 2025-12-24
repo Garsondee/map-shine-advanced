@@ -137,7 +137,7 @@ export class ParticleSystem extends EffectBase {
     if (weatherController) {
       // Initialize once (no-op on subsequent calls)
       if (!weatherController.initialized && typeof weatherController.initialize === 'function') {
-        weatherController.initialize();
+        void weatherController.initialize();
       }
 
       if (typeof weatherController.update === 'function') {

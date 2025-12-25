@@ -614,6 +614,16 @@ export class DistortionManager extends EffectBase {
           return a.x * a.y * b.x * b.y;
         }
 
+        float vignetteFactor(vec2 uv, float strength, float softness) {
+          float s = clamp(softness, 0.0, 1.0);
+          vec2 dist = (uv - 0.5) * 2.0;
+          float len = length(dist);
+          float inner = mix(0.85, 0.35, s);
+          float outer = mix(1.25, 0.85, s);
+          float vig = 1.0 - smoothstep(inner, outer, len);
+          return mix(1.0, vig, clamp(strength, 0.0, 2.0));
+        }
+
         float waterMaskValue(vec4 s) {
           return (uWaterMaskUseAlpha > 0.5) ? s.a : s.r;
         }
@@ -740,6 +750,12 @@ export class DistortionManager extends EffectBase {
         uHasOutdoorsMask: { value: 0.0 },
         uHasCloudShadow: { value: 0.0 },
         uHasWindowLight: { value: 0.0 },
+
+        // Environment gating (scene darkness + time-of-day vignette)
+        uSceneDarkness: { value: 0.0 },
+        uSkyVignetteStrength: { value: 0.0 },
+        uSkyVignetteSoftness: { value: 0.5 },
+        uSkyVignetteIntensity: { value: 0.0 },
         uWaterCausticsIntensity: { value: 0.35 },
         uWaterCausticsScale: { value: 10.0 },
         uWaterCausticsSpeed: { value: 0.35 },
@@ -806,6 +822,11 @@ export class DistortionManager extends EffectBase {
         uniform float uHasOutdoorsMask;
         uniform float uHasCloudShadow;
         uniform float uHasWindowLight;
+
+        uniform float uSceneDarkness;
+        uniform float uSkyVignetteStrength;
+        uniform float uSkyVignetteSoftness;
+        uniform float uSkyVignetteIntensity;
         uniform float uWaterCausticsIntensity;
         uniform float uWaterCausticsScale;
         uniform float uWaterCausticsSpeed;
@@ -859,6 +880,16 @@ export class DistortionManager extends EffectBase {
           vec2 a = step(vec2(0.0), uv);
           vec2 b = step(uv, vec2(1.0));
           return a.x * a.y * b.x * b.y;
+        }
+
+        float vignetteFactor(vec2 uv, float strength, float softness) {
+          float s = clamp(softness, 0.0, 1.0);
+          vec2 dist = (uv - 0.5) * 2.0;
+          float len = length(dist);
+          float inner = mix(0.85, 0.35, s);
+          float outer = mix(1.25, 0.85, s);
+          float vig = 1.0 - smoothstep(inner, outer, len);
+          return mix(1.0, vig, clamp(strength, 0.0, 2.0));
         }
 
         vec2 safeClampUv(vec2 uv) {
@@ -938,6 +969,15 @@ export class DistortionManager extends EffectBase {
           // so debug visualization can reference it even outside the water block.
           vec2 windUvDir = vec2(1.0, 0.0);
 
+          float darkness = clamp(uSceneDarkness, 0.0, 1.0);
+          float night = clamp(1.0 - darkness, 0.0, 1.0);
+          float nightVis = night * night;
+
+          float skyVigStrength = max(0.0, uSkyVignetteStrength) * clamp(uSkyVignetteIntensity, 0.0, 1.0);
+          float skyVig = (skyVigStrength > 0.001)
+            ? vignetteFactor(vUv, skyVigStrength, uSkyVignetteSoftness)
+            : 1.0;
+
           vec4 distortionSample = texture2D(tDistortion, vUv);
           
           // Decode offset from 0-1 range back to -0.5 to 0.5
@@ -960,13 +1000,13 @@ export class DistortionManager extends EffectBase {
           // per-channel shift in pixels to avoid harsh/nausating separation.
           if (uWaterChromaEnabled > 0.5 && waterMask > 0.001 && uWaterChroma > 0.0) {
             vec2 texelSize = 1.0 / max(uResolution, vec2(1.0));
-            float maxOffsetUv = uWaterChromaMaxPixels * max(texelSize.x, texelSize.y);
+            float maxOffsetUv = (uWaterChromaMaxPixels * night) * max(texelSize.x, texelSize.y);
 
             float offLen = length(zoomedOffset);
             vec2 dir = offLen > 1e-6 ? (zoomedOffset / offLen) : vec2(0.0, 0.0);
 
             // Scale by water mask so dispersion fades out at edges.
-            float chroma = clamp(uWaterChroma * waterMask, 0.0, 1.0);
+            float chroma = clamp(uWaterChroma * waterMask * nightVis * skyVig, 0.0, 1.0);
             float shift = min(offLen * chroma, maxOffsetUv);
             vec2 chromaOffset = dir * shift;
 
@@ -1069,7 +1109,7 @@ export class DistortionManager extends EffectBase {
               float c = clamp(0.65 * cSoft + 0.95 * cSharp, 0.0, 1.0);
 
               float causticsAmt = uWaterCausticsIntensity * coverage;
-              causticsAmt *= edge * lightGate;
+              causticsAmt *= edge * lightGate * nightVis * skyVig;
               vec3 causticsColor = mix(vec3(1.0, 1.0, 0.85), uWaterTintColor, 0.15);
               vec3 add = causticsColor * c * causticsAmt;
               sceneColor.rgb += add * 1.35;
@@ -1114,7 +1154,7 @@ export class DistortionManager extends EffectBase {
 
                 float ridge = 1.0 - abs(2.0 * nn - 1.0);
                 float foam = smoothstep(uWaterFoamThreshold, uWaterFoamThreshold + uWaterFoamSoftness, ridge);
-                foam *= clamp(uWaterFoamIntensity, 0.0, 8.0) * foamMask;
+                foam *= clamp(uWaterFoamIntensity, 0.0, 8.0) * foamMask * nightVis * skyVig;
 
                 sceneColor.rgb = mix(sceneColor.rgb, uWaterFoamColor, clamp(foam, 0.0, 1.0));
               }
@@ -1548,8 +1588,6 @@ export class DistortionManager extends EffectBase {
           if (au.uHasOutdoorsMask) au.uHasOutdoorsMask.value = fallback ? 1.0 : 0.0;
         }
       } catch (e) {
-        if (au.tOutdoorsMask) au.tOutdoorsMask.value = null;
-        if (au.uHasOutdoorsMask) au.uHasOutdoorsMask.value = 0.0;
       }
 
       // Cloud shadows (CloudEffect cloudShadowTarget: 1 lit, 0 shadowed; indoors forced to 1)
@@ -1592,6 +1630,7 @@ export class DistortionManager extends EffectBase {
             windowLightTex = wle.getLightTexture();
           }
         }
+
         if (au.tWindowLight) au.tWindowLight.value = windowLightTex;
         if (au.uHasWindowLight) au.uHasWindowLight.value = windowLightTex ? 1.0 : 0.0;
       } catch (e) {
@@ -1599,9 +1638,46 @@ export class DistortionManager extends EffectBase {
         if (au.uHasWindowLight) au.uHasWindowLight.value = 0.0;
       }
 
-      if (au.uWaterCausticsDebug) {
-        const dbg = !!(waterSource && waterSource.enabled && waterSource.mask && waterSource.params?.causticsDebug);
-        au.uWaterCausticsDebug.value = dbg ? 1.0 : 0.0;
+      // Scene darkness + SkyColor vignette (time-of-day)
+      try {
+        const le = window.MapShine?.lightingEffect;
+        let d = 0.0;
+        if (le && typeof le.getEffectiveDarkness === 'function') {
+          d = le.getEffectiveDarkness();
+        } else {
+          const env = canvas?.environment;
+          if (env && typeof env.darknessLevel === 'number') d = env.darknessLevel;
+        }
+        d = (typeof d === 'number' && Number.isFinite(d)) ? Math.max(0.0, Math.min(1.0, d)) : 0.0;
+        if (au.uSceneDarkness) au.uSceneDarkness.value = d;
+      } catch (_) {
+        if (au.uSceneDarkness) au.uSceneDarkness.value = 0.0;
+      }
+
+      try {
+        const sky = window.MapShine?.skyColorEffect;
+        const skyIntensity = (typeof sky?.params?.intensity === 'number' && Number.isFinite(sky.params.intensity))
+          ? Math.max(0.0, Math.min(1.0, sky.params.intensity))
+          : 0.0;
+
+        let vigStrength = 0.0;
+        let vigSoftness = 0.5;
+        if (sky?.material?.uniforms?.uVignetteStrength) {
+          const v = sky.material.uniforms.uVignetteStrength.value;
+          if (typeof v === 'number' && Number.isFinite(v)) vigStrength = v;
+        }
+        if (sky?.material?.uniforms?.uVignetteSoftness) {
+          const v = sky.material.uniforms.uVignetteSoftness.value;
+          if (typeof v === 'number' && Number.isFinite(v)) vigSoftness = v;
+        }
+
+        if (au.uSkyVignetteIntensity) au.uSkyVignetteIntensity.value = skyIntensity;
+        if (au.uSkyVignetteStrength) au.uSkyVignetteStrength.value = (typeof vigStrength === 'number' && Number.isFinite(vigStrength)) ? Math.max(0.0, Math.min(2.0, vigStrength)) : 0.0;
+        if (au.uSkyVignetteSoftness) au.uSkyVignetteSoftness.value = (typeof vigSoftness === 'number' && Number.isFinite(vigSoftness)) ? Math.max(0.0, Math.min(1.0, vigSoftness)) : 0.5;
+      } catch (_) {
+        if (au.uSkyVignetteIntensity) au.uSkyVignetteIntensity.value = 0.0;
+        if (au.uSkyVignetteStrength) au.uSkyVignetteStrength.value = 0.0;
+        if (au.uSkyVignetteSoftness) au.uSkyVignetteSoftness.value = 0.5;
       }
     }
     

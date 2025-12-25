@@ -142,7 +142,7 @@ export class WaterEffect extends EffectBase {
           type: 'slider',
           label: 'Chromatic Max (px)',
           min: 0,
-          max: 8,
+          max: 16,
           step: 0.1,
           default: 1.5
         },

@@ -178,7 +178,7 @@ export class InteractionManager {
     window.addEventListener('pointerup', this.boundHandlers.onPointerUp);
     window.addEventListener('pointermove', this.boundHandlers.onPointerMove);
     window.addEventListener('wheel', this.boundHandlers.onWheel, { passive: false });
-    window.addEventListener('keydown', this.boundHandlers.onKeyDown);
+    window.addEventListener('keydown', this.boundHandlers.onKeyDown, { capture: true });
 
     const rect = this.canvasElement.getBoundingClientRect();
     log.info('InteractionManager initialized (Three.js token interaction enabled)', {
@@ -186,6 +186,15 @@ export class InteractionManager {
       width: rect.width,
       height: rect.height
     });
+  }
+
+  _consumeKeyEvent(event) {
+    try {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+    } catch (_) {
+    }
   }
 
   /**
@@ -1901,7 +1910,15 @@ export class InteractionManager {
       // Get Three.js sprite for this token
       // tokenManager might store data by ID
       const spriteData = this.tokenManager.tokenSprites.get(token.id);
-      if (!spriteData || !spriteData.sprite) return;
+      if (!spriteData || !spriteData.sprite) {
+          // Token may have been deleted; avoid spamming errors by closing the HUD.
+          try {
+              if (hud?.rendered) hud.close();
+          } catch (_) {
+          }
+          this.openHudTokenId = null;
+          return;
+      }
       
       const sprite = spriteData.sprite;
       
@@ -3047,23 +3064,29 @@ export class InteractionManager {
    * @param {KeyboardEvent} event 
    */
   async onKeyDown(event) {
+    // Intercept Delete/Backspace early so Foundry doesn't also process it.
+    // (Otherwise you can get double-deletes and "does not exist" notifications.)
+    if ((event.key === 'Delete' || event.key === 'Backspace') && (this.mapPointDraw.active || this.selection.size > 0)) {
+      this._consumeKeyEvent(event);
+    }
+
     // Handle Map Point Drawing Mode keys
     if (this.mapPointDraw.active) {
       if (event.key === 'Escape') {
         this.cancelMapPointDrawing();
-        event.preventDefault();
+        this._consumeKeyEvent(event);
         return;
       }
       if (event.key === 'Enter') {
         await this._finishMapPointDrawing();
-        event.preventDefault();
+        this._consumeKeyEvent(event);
         return;
       }
       // Backspace removes last point
       if (event.key === 'Backspace' && this.mapPointDraw.points.length > 0) {
         this.mapPointDraw.points.pop();
         this._updateMapPointPreview();
-        event.preventDefault();
+        this._consumeKeyEvent(event);
         return;
       }
     }
@@ -3071,35 +3094,64 @@ export class InteractionManager {
     // Delete key
     if (event.key === 'Delete' || event.key === 'Backspace') {
       if (this.selection.size > 0) {
-        // Filter for tokens and walls
-        const tokensToDelete = [];
-        const wallsToDelete = [];
+        try {
+          // Filter for tokens and walls
+          const tokensToDelete = [];
+          const wallsToDelete = [];
+          const staleIds = [];
 
-        for (const id of this.selection) {
-          // Check Token
-          const sprite = this.tokenManager.getTokenSprite(id);
-          if (sprite) {
-            tokensToDelete.push(sprite.userData.tokenDoc.id);
-            continue;
-          }
-          
-          // Check Wall
-          if (this.wallManager.walls.has(id)) {
-              wallsToDelete.push(id);
-          }
-        }
-        
-        if (tokensToDelete.length > 0) {
-          log.info(`Deleting ${tokensToDelete.length} tokens`);
-          await canvas.scene.deleteEmbeddedDocuments('Token', tokensToDelete);
-        }
+          for (const id of this.selection) {
+            // Check Token
+            const sprite = this.tokenManager.getTokenSprite(id);
+            if (sprite) {
+              // The Three sprite can be stale (token already deleted on the server).
+              // Never ask Foundry to delete a token that doesn't exist.
+              const tokenId = sprite.userData?.tokenDoc?.id;
+              const tokenDocExists = tokenId && canvas.scene?.tokens?.get?.(tokenId);
+              if (!tokenId || !tokenDocExists) {
+                staleIds.push(id);
+                continue;
+              }
 
-        if (wallsToDelete.length > 0) {
-          log.info(`Deleting ${wallsToDelete.length} walls`);
-          await canvas.scene.deleteEmbeddedDocuments('Wall', wallsToDelete);
+              tokensToDelete.push(tokenId);
+              continue;
+            }
+
+            // Check Wall
+            if (this.wallManager.walls.has(id)) {
+                wallsToDelete.push(id);
+            }
+          }
+
+          // Drop any stale ids from selection so we don't keep hitting this path.
+          for (const id of staleIds) {
+            this.selection.delete(id);
+          }
+
+          if (tokensToDelete.length > 0) {
+            log.info(`Deleting ${tokensToDelete.length} tokens`);
+            await canvas.scene.deleteEmbeddedDocuments('Token', tokensToDelete);
+          }
+
+          if (wallsToDelete.length > 0) {
+            log.info(`Deleting ${wallsToDelete.length} walls`);
+            await canvas.scene.deleteEmbeddedDocuments('Wall', wallsToDelete);
+          }
+
+          this.clearSelection();
+        } catch (e) {
+          // FINAL SAFETY NET: Even with pre-checks, deletes can race with socket updates.
+          // If Foundry reports the doc no longer exists, treat as success.
+          const msg = e?.message || '';
+          if (typeof msg === 'string' && msg.includes('does not exist')) {
+            log.warn(`Delete skipped (already deleted): ${msg}`);
+            this.clearSelection();
+          } else {
+            throw e;
+          }
+        } finally {
+          this._consumeKeyEvent(event);
         }
-        
-        this.clearSelection();
       }
     }
   }

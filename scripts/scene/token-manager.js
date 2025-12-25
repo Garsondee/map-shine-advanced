@@ -312,12 +312,20 @@ export class TokenManager {
     // Store Foundry data in userData
     sprite.userData.foundryTokenId = tokenDoc.id;
     sprite.userData.tokenDoc = tokenDoc;
+    sprite.userData._removed = false;
 
     // Load texture (async, will update material when loaded)
+    // IMPORTANT: Token can be deleted before the texture resolves; guard against writing
+    // into a disposed material/sprite.
     this.loadTokenTexture(texturePath).then(texture => {
-      material.map = texture;
-      material.opacity = 1; // Restore opacity
-      material.needsUpdate = true;
+      const currentData = this.tokenSprites.get(tokenDoc.id);
+      const currentSprite = currentData?.sprite;
+      if (!currentSprite || currentSprite.userData?._removed) return;
+      if (!currentSprite.material || currentSprite.material.disposed) return;
+
+      currentSprite.material.map = texture;
+      currentSprite.material.opacity = 1; // Restore opacity
+      currentSprite.material.needsUpdate = true;
     }).catch(error => {
       log.error(`Failed to load token texture: ${texturePath}`, error);
     });
@@ -395,9 +403,15 @@ export class TokenManager {
 
     // Update texture if changed
     if ('texture' in changes && changes.texture?.src) {
-      this.loadTokenTexture(changes.texture.src).then(texture => {
-        sprite.material.map = texture;
-        sprite.material.needsUpdate = true;
+      const src = changes.texture.src;
+      this.loadTokenTexture(src).then(texture => {
+        const currentData = this.tokenSprites.get(tokenDoc.id);
+        const currentSprite = currentData?.sprite;
+        if (!currentSprite || currentSprite.userData?._removed) return;
+        if (!currentSprite.material || currentSprite.material.disposed) return;
+
+        currentSprite.material.map = texture;
+        currentSprite.material.needsUpdate = true;
       }).catch(error => {
         log.error(`Failed to load updated token texture`, error);
       });
@@ -446,6 +460,24 @@ export class TokenManager {
     }
 
     const { sprite } = spriteData;
+
+    // If Foundry's Token HUD is currently bound to this token, close it.
+    // Otherwise InteractionManager may attempt to reposition HUD for a token whose
+    // Three sprite has been removed.
+    try {
+      const hud = canvas.tokens?.hud;
+      const hudTokenId = hud?.object?.id;
+      if (hud?.rendered && hudTokenId === tokenId) {
+        hud.close();
+      }
+    } catch (_) {
+    }
+
+    // Mark removed early so any in-flight async callbacks can bail.
+    try {
+      sprite.userData._removed = true;
+    } catch (_) {
+    }
 
     // Remove from scene
     this.scene.remove(sprite);

@@ -57,8 +57,19 @@ export class TokenManager {
     this._ambientTint = null;
     this._lastTintKey = null;
     this._tintDirty = true;
+
+    /** @type {((tokenId: string) => void)|null} */
+    this._onTokenMovementStart = null;
     
     log.debug('TokenManager created');
+  }
+
+  /**
+   * Register a callback invoked when a token begins moving (authoritative update).
+   * @param {(tokenId: string) => void} callback
+   */
+  setOnTokenMovementStart(callback) {
+    this._onTokenMovementStart = typeof callback === 'function' ? callback : null;
   }
 
   /**
@@ -570,6 +581,10 @@ export class TokenManager {
       }
 
       if (attributes.length > 0) {
+        try {
+          if (this._onTokenMovementStart) this._onTokenMovementStart(tokenDoc.id);
+        } catch (_) {
+        }
         // Calculate duration based on distance
         const dist = Math.hypot(sprite.position.x - centerX, sprite.position.y - centerY);
         
@@ -598,6 +613,16 @@ export class TokenManager {
     }
 
     // Fallback: Instant Snap
+    if (
+      Math.abs(sprite.position.x - centerX) > 0.1 ||
+      Math.abs(sprite.position.y - centerY) > 0.1 ||
+      Math.abs(sprite.position.z - zPosition) > 0.1
+    ) {
+      try {
+        if (this._onTokenMovementStart) this._onTokenMovementStart(tokenDoc.id);
+      } catch (_) {
+      }
+    }
     sprite.position.set(centerX, centerY, zPosition);
     if (sprite.material) {
       sprite.material.rotation = targetRotation;

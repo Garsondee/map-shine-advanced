@@ -48,6 +48,11 @@ export class InteractionManager {
       previews: new Map() // Map<string, THREE.Sprite> - Drag previews
     };
 
+    this._pendingTokenMoveCleanup = {
+      timeoutId: null,
+      tokenIds: new Set()
+    };
+
     this.dragMeasure = {
       active: false,
       startFoundry: { x: 0, y: 0 },
@@ -142,6 +147,35 @@ export class InteractionManager {
     log.debug('InteractionManager created');
   }
 
+  /**
+   * Remove any existing drag previews and clear pending cleanup state.
+   * @private
+   */
+  _clearAllDragPreviews() {
+    this.destroyDragPreviews();
+
+    if (this._pendingTokenMoveCleanup.timeoutId) {
+      clearTimeout(this._pendingTokenMoveCleanup.timeoutId);
+      this._pendingTokenMoveCleanup.timeoutId = null;
+    }
+    this._pendingTokenMoveCleanup.tokenIds.clear();
+  }
+
+  /**
+   * Called when TokenManager starts moving a token due to an authoritative update.
+   * This is the exact moment Foundry would remove the local drag preview.
+   * @param {string} tokenId
+   * @private
+   */
+  _onTokenMovementStart(tokenId) {
+    if (!tokenId) return;
+
+    // Only clear if we are actually holding a ghost for this token.
+    if (this.dragState.previews.has(tokenId) || this._pendingTokenMoveCleanup.tokenIds.has(tokenId)) {
+      this._clearAllDragPreviews();
+    }
+  }
+
   _isEventFromUI(event) {
     const target = event?.target;
     if (!(target instanceof Element)) return false;
@@ -179,6 +213,13 @@ export class InteractionManager {
     window.addEventListener('pointermove', this.boundHandlers.onPointerMove);
     window.addEventListener('wheel', this.boundHandlers.onWheel, { passive: false });
     window.addEventListener('keydown', this.boundHandlers.onKeyDown, { capture: true });
+
+    // When a token actually starts moving due to the authoritative update,
+    // remove the ghost preview so the animated token is visible.
+    try {
+      this.tokenManager?.setOnTokenMovementStart?.((tokenId) => this._onTokenMovementStart(tokenId));
+    } catch (_) {
+    }
 
     const rect = this.canvasElement.getBoundingClientRect();
     log.info('InteractionManager initialized (Three.js token interaction enabled)', {
@@ -886,8 +927,8 @@ export class InteractionManager {
 
   /**
    * Get the map point group ID at a screen position (if visual helpers are visible)
-   * @param {number} clientX - Screen X coordinate
-   * @param {number} clientY - Screen Y coordinate
+   * @param {number} clientX - Screen X for menu position
+   * @param {number} clientY - Screen Y for menu position
    * @returns {string|null} Group ID or null if no group at position
    * @private
    */
@@ -1060,6 +1101,8 @@ export class InteractionManager {
               id: undefined, // Generate new ID
               label: `${group.label} (copy)`
             });
+
+            log.info(`Created map point group: ${newGroup.id}`);
             ui.notifications.info(`Duplicated: ${newGroup.label}`);
             // Refresh helpers
             if (mapPointsManager.showVisualHelpers) {
@@ -1152,11 +1195,22 @@ export class InteractionManager {
       if (tokenData && tokenData.sprite) {
         const original = tokenData.sprite;
         const preview = original.clone();
+
+        // Previews must update their matrix as we drag them.
+        preview.matrixAutoUpdate = true;
+        // Slightly above the original to avoid z-fighting.
+        preview.position.z = (preview.position.z ?? 0) + 0.01;
+        // Ensure it's drawn above the original even if depth is enabled elsewhere.
+        preview.renderOrder = 9998;
         
         if (original.material) {
           preview.material = original.material.clone();
           preview.material.opacity = 0.5;
           preview.material.transparent = true;
+
+          // Render on top; this is purely a UX overlay.
+          preview.material.depthTest = false;
+          preview.material.depthWrite = false;
         }
         
         if (this.sceneComposer.scene) {
@@ -1172,10 +1226,17 @@ export class InteractionManager {
           const original = this.lightIconManager.lights.get(id);
           const preview = original.clone();
 
+          preview.matrixAutoUpdate = true;
+          preview.position.z = (preview.position.z ?? 0) + 0.01;
+          preview.renderOrder = 9998;
+
           if (original.material) {
               preview.material = original.material.clone();
               preview.material.opacity = 0.5;
               preview.material.transparent = true;
+
+              preview.material.depthTest = false;
+              preview.material.depthWrite = false;
           }
 
           if (this.sceneComposer.scene) {
@@ -1398,9 +1459,6 @@ export class InteractionManager {
    */
   onPointerDown(event) {
     try {
-        if (event.button !== 0 && event.button !== 2) return;
-        if (this._isEventFromUI(event)) return;
-
         // Handle Map Point Drawing Mode (takes priority over other interactions)
         if (this.mapPointDraw.active && event.button === 0) {
           const worldPos = this.screenToWorld(event.clientX, event.clientY);
@@ -1513,7 +1571,7 @@ export class InteractionManager {
 
                 for (const hit of wallIntersects) {
                     let object = hit.object;
-                    while (object && object !== wallGroup) {
+                    while(object && object !== wallGroup) {
                         if (object.userData && object.userData.type === 'doorControl') {
                             doorControl = object;
                             break;
@@ -1569,7 +1627,7 @@ export class InteractionManager {
 
             for (const hit of doorIntersects) {
                 let object = hit.object;
-                while (object && object !== wallGroup) {
+                while(object && object !== wallGroup) {
                     if (object.userData && object.userData.type === 'doorControl') {
                         doorControl = object;
                         break;
@@ -2024,150 +2082,179 @@ export class InteractionManager {
   }
 
   /**
-   * Handle Door Click
-   * @param {THREE.Group} doorGroup 
+   * Handle hover detection
    * @param {PointerEvent} event 
+   * @private
    */
-  handleDoorClick(doorGroup, event) {
-      try {
-          const wallId = doorGroup.userData.wallId;
-          const wall = canvas.walls.get(wallId);
-          if (!wall) {
-              log.warn(`handleDoorClick: Wall ${wallId} not found in canvas.walls`);
-              return;
+  handleHover(event) {
+    this.updateMouseCoords(event);
+    this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
+
+    let hitFound = false;
+
+    // 1. Check Walls (Priority for "near line" detection)
+    // Only check walls if we are GM or on Wall Layer? Usually useful for everyone if interactive, but editing is GM.
+    // The user said "Foundry VTT... making sure it knows you meant to select that wall".
+    // We'll enable it for GM mainly for editing, or everyone for doors?
+    // Highlighting the whole wall is good for knowing which one you are about to click.
+    
+    if (game.user.isGM || canvas.activeLayer?.name?.includes('WallsLayer')) {
+        const wallGroup = this.wallManager.wallGroup;
+        this.raycaster.params.Line.threshold = 20; // Lenient threshold
+        const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
+        
+        if (wallIntersects.length > 0) {
+            const hit = wallIntersects[0];
+            let object = hit.object;
+            while(object && object !== wallGroup) {
+                if (object.userData && object.userData.wallId) {
+                    const wallId = object.userData.wallId;
+                    hitFound = true;
+                    
+                    if (this.hoveredWallId !== wallId) {
+                        if (this.hoveredWallId) {
+                            this.wallManager.setHighlight(this.hoveredWallId, false);
+                        }
+                        this.hoveredWallId = wallId;
+                        this.wallManager.setHighlight(this.hoveredWallId, true);
+                        this.canvasElement.style.cursor = 'pointer';
+                    }
+                    break; // Found valid wall part
+                }
+                object = object.parent;
+            }
+        }
+    }
+
+    if (!hitFound) {
+        if (this.hoveredWallId) {
+            this.wallManager.setHighlight(this.hoveredWallId, false);
+            this.hoveredWallId = null;
+            this.canvasElement.style.cursor = 'default';
+        }
+    }
+
+    // If we hit a wall, we might still want to check tokens if the wall didn't claim it?
+    // But if we are "near a line", we probably want the line.
+    if (hitFound) return;
+
+    // 2. Check Overhead Tiles (for hover-to-hide behavior)
+    if (this.tileManager && this.tileManager.getOverheadTileSprites) {
+      const overheadSprites = this.tileManager.getOverheadTileSprites();
+      if (overheadSprites.length > 0) {
+        const tileIntersects = this.raycaster.intersectObjects(overheadSprites, false);
+
+        if (tileIntersects.length > 0) {
+          const hit = tileIntersects[0];
+          const sprite = hit.object;
+          const tileId = sprite.userData.foundryTileId;
+
+          // Only treat this as a "real" hit if the pointer is over an
+          // opaque part of the roof sprite (alpha > 0.5). This prevents the
+          // roof from vanishing when hovering transparent gutters/holes.
+          if (this.tileManager.isWorldPointOpaque) {
+            const data = this.tileManager.tileSprites.get(tileId);
+            if (!data || !this.tileManager.isWorldPointOpaque(data, hit.point.x, hit.point.y)) {
+              // Hit is on a transparent pixel; ignore this tile for hover.
+              // Clear any prior hover-hidden tile if present.
+              if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
+                this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
+                this.hoveredOverheadTileId = null;
+              }
+              // Do not mark hitFound; allow tokens below to be hovered.
+              // Effectively treat as "no tile hit".
+              // Continue to the token hover logic below.
+              // (We early-return from this tile branch.)
+              //
+              // NOTE: We don't "continue" the outer function; we just skip
+              // setting hitFound here.
+              //
+              // So drop through to tokens.
+            } else {
+              if (this.hoveredOverheadTileId !== tileId) {
+                // Restore previous hovered tile if any
+                if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
+                  this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
+                }
+
+                this.hoveredOverheadTileId = tileId;
+                if (this.tileManager.setTileHoverHidden) {
+                  this.tileManager.setTileHoverHidden(tileId, true);
+                }
+              }
+
+              hitFound = true;
+            }
           }
-
-          // Prefer Foundry's native DoorControl interaction logic.
-          // This ensures parity with core Foundry behavior (permissions, paused checks, sounds, etc.).
-          if (wall.doorControl && typeof wall.doorControl._onMouseDown === 'function') {
-              wall.doorControl._onMouseDown({
-                  button: 0,
-                  nativeEvent: event,
-                  stopPropagation: () => {}
-              });
-              return;
-          }
-
-          // Determine whether the player can control the door
-          if ( !game.user.can("WALL_DOORS") ) {
-              log.warn("handleDoorClick: User cannot control doors");
-              return;
-          }
-          if ( game.paused && !game.user.isGM ) {
-            ui.notifications.warn("GAME.PausedWarning", {localize: true});
-            return;
-          }
-
-          const ds = wall.document.ds;
-          const states = CONST.WALL_DOOR_STATES;
-          const sound = !(game.user.isGM && event.altKey);
-
-          log.info(`handleDoorClick: Wall ${wallId}, Current State: ${ds}`);
-
-          // Right click: Lock/Unlock (GM only)
-          if (ds === states.LOCKED) {
-              if (sound) AudioHelper.play({src: CONFIG.sounds.lock}); 
-              log.info("handleDoorClick: Door is locked");
-              return;
-          }
-
-          // Toggle Open/Closed
-          const newState = ds === states.CLOSED ? states.OPEN : states.CLOSED;
-          log.info(`handleDoorClick: Toggling to ${newState}`);
-          
-          wall.document.update({ds: newState}, {sound}).then(() => {
-              log.info(`handleDoorClick: Update successful for ${wallId}`);
-          }).catch(err => {
-              log.error(`handleDoorClick: Update failed for ${wallId}`, err);
-          });
-      } catch(err) {
-          log.error("Error in handleDoorClick", err);
+        } else if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
+          // No tile currently under cursor; restore any previously hidden tile
+          this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
+          this.hoveredOverheadTileId = null;
+        }
       }
-  }
+    }
 
-  /**
-   * Handle Door Right Click (Lock/Unlock - GM only)
-   * @param {THREE.Group} doorGroup 
-   * @param {PointerEvent} event 
-   */
-  handleDoorRightClick(doorGroup, event) {
-      try {
-          // Only GM can lock/unlock doors
-          if (!game.user.isGM) {
-              log.debug("handleDoorRightClick: Only GM can lock/unlock doors");
-              return;
+    // If we hit an overhead tile, don't hover tokens through it
+    if (hitFound) return;
+
+    const mapShine = window.MapShine || window.mapShine;
+    const treeEffect = mapShine?.treeEffect;
+    if (treeEffect && treeEffect.mesh) {
+      const treeHits = this.raycaster.intersectObject(treeEffect.mesh, false);
+      if (treeHits.length > 0) {
+        const hit = treeHits[0];
+        let opaqueHit = true;
+        if (typeof treeEffect.isUvOpaque === 'function' && hit.uv) {
+          opaqueHit = treeEffect.isUvOpaque(hit.uv);
+        }
+
+        if (opaqueHit) {
+          if (!this.hoveringTreeCanopy && typeof treeEffect.setHoverHidden === 'function') {
+            treeEffect.setHoverHidden(true);
+            this.hoveringTreeCanopy = true;
           }
-
-          const wallId = doorGroup.userData.wallId;
-          const wall = canvas.walls.get(wallId);
-          if (!wall) {
-              log.warn(`handleDoorRightClick: Wall ${wallId} not found in canvas.walls`);
-              return;
-          }
-
-          // Prefer Foundry's native DoorControl right-click logic.
-          if (wall.doorControl && typeof wall.doorControl._onRightDown === 'function') {
-              wall.doorControl._onRightDown({
-                  button: 2,
-                  nativeEvent: event,
-                  stopPropagation: () => {}
-              });
-              return;
-          }
-
-          const ds = wall.document.ds;
-          const states = CONST.WALL_DOOR_STATES;
-
-          // Cannot lock an open door
-          if (ds === states.OPEN) {
-              log.debug("handleDoorRightClick: Cannot lock an open door");
-              return;
-          }
-
-          // Toggle between LOCKED and CLOSED
-          const newState = ds === states.LOCKED ? states.CLOSED : states.LOCKED;
-          const sound = !(game.user.isGM && event.altKey);
-
-          log.info(`handleDoorRightClick: Wall ${wallId}, toggling ${ds} -> ${newState}`);
-
-          wall.document.update({ds: newState}, {sound}).then(() => {
-              log.info(`handleDoorRightClick: Update successful for ${wallId}`);
-          }).catch(err => {
-              log.error(`handleDoorRightClick: Update failed for ${wallId}`, err);
-          });
-      } catch(err) {
-          log.error("Error in handleDoorRightClick", err);
+        } else if (this.hoveringTreeCanopy && typeof treeEffect.setHoverHidden === 'function') {
+          treeEffect.setHoverHidden(false);
+          this.hoveringTreeCanopy = false;
+        }
+      } else if (this.hoveringTreeCanopy && typeof treeEffect.setHoverHidden === 'function') {
+        treeEffect.setHoverHidden(false);
+        this.hoveringTreeCanopy = false;
       }
-  }
+    }
 
-  /**
-   * Start dragging a wall endpoint
-   * @param {THREE.Mesh} endpoint 
-   * @param {PointerEvent} event 
-   */
-  startWallDrag(endpoint, event) {
-      const wallId = endpoint.userData.wallId;
-      const index = endpoint.userData.index; // 0 or 1
-      const wall = canvas.walls.get(wallId);
+    // 3. Check Tokens
+    const interactables = this.tokenManager.getAllTokenSprites();
+    const intersects = this.raycaster.intersectObjects(interactables, false);
+
+    if (intersects.length > 0) {
+      const hit = intersects[0];
+      const sprite = hit.object;
+      const tokenDoc = sprite.userData.tokenDoc;
       
-      if (!wall) return;
-
-      // Permission
-      if (!game.user.isGM) return; // Usually only GM edits walls
-
-      this.dragState.active = true;
-      this.dragState.mode = 'wallEndpoint';
-      this.dragState.wallId = wallId;
-      this.dragState.endpointIndex = index;
-      this.dragState.object = endpoint; // The mesh being dragged
-      this.dragState.startPos.copy(endpoint.position);
+      // Check permissions
+      const canControl = tokenDoc.canUserModify(game.user, "update"); // Or just visible? 
+      // We want hover even if we can't move it, just to show name.
       
-      // Disable camera
-      if (window.MapShine?.cameraController) {
-        window.MapShine.cameraController.enabled = false;
+      if (this.hoveredTokenId !== tokenDoc.id) {
+        // Hover changed
+        if (this.hoveredTokenId) {
+          this.tokenManager.setHover(this.hoveredTokenId, false);
+        }
+        this.hoveredTokenId = tokenDoc.id;
+        this.tokenManager.setHover(this.hoveredTokenId, true);
+        
+        // Cursor
+        this.canvasElement.style.cursor = canControl ? 'pointer' : 'default';
       }
-      
-      log.info(`Started dragging wall ${wallId} endpoint ${index}`);
+    } else {
+      // No hit
+      if (this.hoveredTokenId) {
+        this.tokenManager.setHover(this.hoveredTokenId, false);
+        this.hoveredTokenId = null;
+        this.canvasElement.style.cursor = 'default';
+      }
+    }
   }
 
   /**
@@ -2480,182 +2567,6 @@ export class InteractionManager {
         }
     } catch (error) {
         log.error('Error in onPointerMove:', error);
-    }
-  }
-
-  /**
-   * Handle hover detection
-   * @param {PointerEvent} event 
-   * @private
-   */
-  handleHover(event) {
-    this.updateMouseCoords(event);
-    this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
-
-    let hitFound = false;
-
-    // 1. Check Walls (Priority for "near line" detection)
-    // Only check walls if we are GM or on Wall Layer? Usually useful for everyone if interactive, but editing is GM.
-    // The user said "Foundry VTT... making sure it knows you meant to select that wall".
-    // We'll enable it for GM mainly for editing, or everyone for doors?
-    // Highlighting the whole wall is good for knowing which one you are about to click.
-    
-    if (game.user.isGM || canvas.activeLayer?.name?.includes('WallsLayer')) {
-        const wallGroup = this.wallManager.wallGroup;
-        this.raycaster.params.Line.threshold = 20; // Lenient threshold
-        const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
-        
-        if (wallIntersects.length > 0) {
-            const hit = wallIntersects[0];
-            let object = hit.object;
-            while(object && object !== wallGroup) {
-                if (object.userData && object.userData.wallId) {
-                    const wallId = object.userData.wallId;
-                    hitFound = true;
-                    
-                    if (this.hoveredWallId !== wallId) {
-                        if (this.hoveredWallId) {
-                            this.wallManager.setHighlight(this.hoveredWallId, false);
-                        }
-                        this.hoveredWallId = wallId;
-                        this.wallManager.setHighlight(this.hoveredWallId, true);
-                        this.canvasElement.style.cursor = 'pointer';
-                    }
-                    break; // Found valid wall part
-                }
-                object = object.parent;
-            }
-        }
-    }
-
-    if (!hitFound) {
-        if (this.hoveredWallId) {
-            this.wallManager.setHighlight(this.hoveredWallId, false);
-            this.hoveredWallId = null;
-            this.canvasElement.style.cursor = 'default';
-        }
-    }
-
-    // If we hit a wall, we might still want to check tokens if the wall didn't claim it?
-    // But if we are "near a line", we probably want the line.
-    if (hitFound) return;
-
-    // 2. Check Overhead Tiles (for hover-to-hide behavior)
-    if (this.tileManager && this.tileManager.getOverheadTileSprites) {
-      const overheadSprites = this.tileManager.getOverheadTileSprites();
-      if (overheadSprites.length > 0) {
-        const tileIntersects = this.raycaster.intersectObjects(overheadSprites, false);
-
-        if (tileIntersects.length > 0) {
-          const hit = tileIntersects[0];
-          const sprite = hit.object;
-          const tileId = sprite.userData.foundryTileId;
-
-          // Only treat this as a "real" hit if the pointer is over an
-          // opaque part of the roof sprite (alpha > 0.5). This prevents the
-          // roof from vanishing when hovering transparent gutters/holes.
-          if (this.tileManager.isWorldPointOpaque) {
-            const data = this.tileManager.tileSprites.get(tileId);
-            if (!data || !this.tileManager.isWorldPointOpaque(data, hit.point.x, hit.point.y)) {
-              // Hit is on a transparent pixel; ignore this tile for hover.
-              // Clear any prior hover-hidden tile if present.
-              if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
-                this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
-                this.hoveredOverheadTileId = null;
-              }
-              // Do not mark hitFound; allow tokens below to be hovered.
-              // Effectively treat as "no tile hit".
-              // Continue to the token hover logic below.
-              // (We early-return from this tile branch.)
-              //
-              // NOTE: We don't "continue" the outer function; we just skip
-              // setting hitFound here.
-              //
-              // So drop through to tokens.
-            } else {
-              if (this.hoveredOverheadTileId !== tileId) {
-                // Restore previous hovered tile if any
-                if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
-                  this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
-                }
-
-                this.hoveredOverheadTileId = tileId;
-                if (this.tileManager.setTileHoverHidden) {
-                  this.tileManager.setTileHoverHidden(tileId, true);
-                }
-              }
-
-              hitFound = true;
-            }
-          }
-        } else if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
-          // No tile currently under cursor; restore any previously hidden tile
-          this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
-          this.hoveredOverheadTileId = null;
-        }
-      }
-    }
-
-    // If we hit an overhead tile, don't hover tokens through it
-    if (hitFound) return;
-
-    const mapShine = window.MapShine || window.mapShine;
-    const treeEffect = mapShine?.treeEffect;
-    if (treeEffect && treeEffect.mesh) {
-      const treeHits = this.raycaster.intersectObject(treeEffect.mesh, false);
-      if (treeHits.length > 0) {
-        const hit = treeHits[0];
-        let opaqueHit = true;
-        if (typeof treeEffect.isUvOpaque === 'function' && hit.uv) {
-          opaqueHit = treeEffect.isUvOpaque(hit.uv);
-        }
-
-        if (opaqueHit) {
-          if (!this.hoveringTreeCanopy && typeof treeEffect.setHoverHidden === 'function') {
-            treeEffect.setHoverHidden(true);
-            this.hoveringTreeCanopy = true;
-          }
-        } else if (this.hoveringTreeCanopy && typeof treeEffect.setHoverHidden === 'function') {
-          treeEffect.setHoverHidden(false);
-          this.hoveringTreeCanopy = false;
-        }
-      } else if (this.hoveringTreeCanopy && typeof treeEffect.setHoverHidden === 'function') {
-        treeEffect.setHoverHidden(false);
-        this.hoveringTreeCanopy = false;
-      }
-    }
-
-    // 3. Check Tokens
-    const interactables = this.tokenManager.getAllTokenSprites();
-    const intersects = this.raycaster.intersectObjects(interactables, false);
-
-    if (intersects.length > 0) {
-      const hit = intersects[0];
-      const sprite = hit.object;
-      const tokenDoc = sprite.userData.tokenDoc;
-      
-      // Check permissions
-      const canControl = tokenDoc.canUserModify(game.user, "update"); // Or just visible? 
-      // We want hover even if we can't move it, just to show name.
-      
-      if (this.hoveredTokenId !== tokenDoc.id) {
-        // Hover changed
-        if (this.hoveredTokenId) {
-          this.tokenManager.setHover(this.hoveredTokenId, false);
-        }
-        this.hoveredTokenId = tokenDoc.id;
-        this.tokenManager.setHover(this.hoveredTokenId, true);
-        
-        // Cursor
-        this.canvasElement.style.cursor = canControl ? 'pointer' : 'default';
-      }
-    } else {
-      // No hit
-      if (this.hoveredTokenId) {
-        this.tokenManager.setHover(this.hoveredTokenId, false);
-        this.hoveredTokenId = null;
-        this.canvasElement.style.cursor = 'default';
-      }
     }
   }
 
@@ -2992,7 +2903,27 @@ export class InteractionManager {
           // Cleanup
           this.dragState.active = false;
           this.dragState.object = null;
-          this.destroyDragPreviews();
+
+          // For tokens: keep the ghost preview around until the authoritative update
+          // actually starts moving the token (matching Foundry).
+          if (tokenUpdates.length > 0) {
+            for (const upd of tokenUpdates) {
+              if (upd?._id) this._pendingTokenMoveCleanup.tokenIds.add(upd._id);
+            }
+
+            if (this._pendingTokenMoveCleanup.timeoutId) {
+              clearTimeout(this._pendingTokenMoveCleanup.timeoutId);
+            }
+
+            // Fallback: if no movement ever begins (failed update, permission issues, etc.)
+            // clear the preview so it doesn't get stuck.
+            this._pendingTokenMoveCleanup.timeoutId = setTimeout(() => {
+              this._clearAllDragPreviews();
+            }, 1500);
+          } else {
+            // Lights and other drags should clean up immediately.
+            this._clearAllDragPreviews();
+          }
           
           // If updates failed, we might want to revert, but for now we just clear state.
           // The previous code had revert logic, but it's complex with mixed types.
@@ -3001,7 +2932,7 @@ export class InteractionManager {
         } else {
             this.dragState.active = false;
             this.dragState.object = null;
-            this.destroyDragPreviews();
+            this._clearAllDragPreviews();
         }
     } catch (error) {
         log.error('Error in onPointerUp:', error);

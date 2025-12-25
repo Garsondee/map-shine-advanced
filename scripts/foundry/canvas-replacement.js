@@ -2866,7 +2866,49 @@ function updateLayerVisibility() {
   // If not active, hide PIXI walls, show Three.js wall edit lines.
   if (canvas.walls) {
       const isWallsActive = activeLayer === 'WallsLayer';
-      canvas.walls.visible = isWallsActive;
+
+      canvas.walls.visible = true;
+      canvas.walls.interactiveChildren = true;
+
+      const makeWallTransparent = (wall) => {
+        if (!wall) return;
+        try {
+          const ALPHA = 0.01;
+          if (wall.line) wall.line.alpha = ALPHA;
+          if (wall.direction) wall.direction.alpha = ALPHA;
+          if (wall.endpoints) wall.endpoints.alpha = ALPHA;
+          if (wall.doorControl) {
+            wall.doorControl.visible = true;
+            wall.doorControl.alpha = 1;
+          }
+          wall.visible = true;
+          wall.interactive = true;
+          wall.interactiveChildren = true;
+        } catch (_) {
+        }
+      };
+
+      const restoreWallVisuals = (wall) => {
+        if (!wall) return;
+        try {
+          if (wall.line) wall.line.alpha = 1;
+          if (wall.direction) wall.direction.alpha = 1;
+          if (wall.endpoints) wall.endpoints.alpha = 1;
+          if (wall.doorControl) {
+            wall.doorControl.visible = true;
+            wall.doorControl.alpha = 1;
+          }
+        } catch (_) {
+        }
+      };
+
+      if (Array.isArray(canvas.walls.placeables)) {
+        if (isWallsActive) {
+          for (const wall of canvas.walls.placeables) restoreWallVisuals(wall);
+        } else {
+          for (const wall of canvas.walls.placeables) makeWallTransparent(wall);
+        }
+      }
   }
 
   // Tiles

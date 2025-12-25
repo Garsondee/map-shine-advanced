@@ -62,6 +62,8 @@ export class ThreeLightSource {
     this.mesh = null;
     this.material = null;
 
+    this._meshParent = null;
+
     this.animation = {
       seed: Math.floor(Math.random() * 100000),
       time: 0,
@@ -82,6 +84,9 @@ export class ThreeLightSource {
      * @type {boolean}
      */
     this._usingCircleFallback = false;
+
+    this._lastInsetWorldPx = null;
+    this._lastInsetUpdateAtSec = -Infinity;
   }
 
   _getWallInsetPx() {
@@ -91,6 +96,48 @@ export class ThreeLightSource {
     } catch (_) {
       return 0;
     }
+  }
+
+  _getEffectiveZoom() {
+    try {
+      const z0 = window.MapShine?.sceneComposer?.currentZoom;
+      if (typeof z0 === 'number' && isFinite(z0) && z0 > 0) return z0;
+    } catch (_) {
+    }
+
+    try {
+      const z1 = canvas?.stage?.scale?.x;
+      if (typeof z1 === 'number' && isFinite(z1) && z1 > 0) return z1;
+    } catch (_) {
+    }
+
+    return 1;
+  }
+
+  _getWallInsetWorldPx() {
+    const insetPx = this._getWallInsetPx();
+    if (!insetPx) return 0;
+
+    const paddedInsetPx = insetPx + 6;
+
+    const zoom = this._getEffectiveZoom();
+    if (!Number.isFinite(zoom) || zoom <= 0) return paddedInsetPx;
+    return paddedInsetPx / zoom;
+  }
+
+  /**
+   * Get the ground plane Z position from SceneComposer.
+   * Lights should be positioned at this Z level (plus a small offset)
+   * to align with the base plane after the camera/ground refactor.
+   * @returns {number} Ground Z position (default 1000)
+   * @private
+   */
+  _getGroundZ() {
+    const sceneComposer = window.MapShine?.sceneComposer;
+    if (sceneComposer && typeof sceneComposer.groundZ === 'number') {
+      return sceneComposer.groundZ;
+    }
+    return 1000; // Default ground plane Z
   }
 
   init() {
@@ -431,21 +478,6 @@ ${FoundryLightingShaderChunks.pulse}
     this.material.uniforms.uSeed.value = (this.animation.seed % 100000) / 100000;
   }
 
-  /**
-   * Get the ground plane Z position from SceneComposer.
-   * Lights should be positioned at this Z level (plus a small offset)
-   * to align with the base plane after the camera/ground refactor.
-   * @returns {number} Ground Z position (default 1000)
-   * @private
-   */
-  _getGroundZ() {
-    const sceneComposer = window.MapShine?.sceneComposer;
-    if (sceneComposer && typeof sceneComposer.groundZ === 'number') {
-      return sceneComposer.groundZ;
-    }
-    return 1000; // Default ground plane Z
-  }
-
   updateData(doc, forceRebuild = false) {
     this.document = doc;
     const config = doc.config;
@@ -486,9 +518,14 @@ ${FoundryLightingShaderChunks.pulse}
     const rPx = radius * pxPerUnit;
     const brightPx = bright * pxPerUnit;
 
-    const wallInsetPx = this._getWallInsetPx();
+    const wallInsetPx = this._getWallInsetWorldPx();
     const rPxInset = Math.max(0, rPx - wallInsetPx);
     const brightPxInset = Math.max(0, brightPx - wallInsetPx);
+
+    if (this._lastInsetWorldPx === null) {
+      this._lastInsetWorldPx = wallInsetPx;
+      this._lastInsetUpdateAtSec = 0;
+    }
 
     this._baseRadiusPx = rPxInset;
     this._baseBrightRadiusPx = brightPxInset;
@@ -624,6 +661,10 @@ ${FoundryLightingShaderChunks.pulse}
 
   rebuildGeometry(worldX, worldY, radiusPx, lightZ) {
     const THREE = window.THREE;
+    const prevMeshParent = this.mesh?.parent ?? this._meshParent;
+    const prevLayersMask = this.mesh?.layers?.mask;
+    const prevRenderOrder = this.mesh?.renderOrder;
+
     if (this.mesh) {
       this.mesh.geometry.dispose();
       this.mesh.removeFromParent();
@@ -650,7 +691,7 @@ ${FoundryLightingShaderChunks.pulse}
       }
     } catch (e) { }
 
-    const wallInsetPx = this._getWallInsetPx();
+    const wallInsetPx = this._getWallInsetWorldPx();
     if (shapePoints && shapePoints.length > 2) {
       if (wallInsetPx > 0) {
         let insetOk = false;
@@ -725,12 +766,36 @@ ${FoundryLightingShaderChunks.pulse}
   
     // Ensure render order is handled correctly if needed
     this.mesh.renderOrder = 100;
+
+    if (typeof prevLayersMask === 'number' && this.mesh.layers) {
+      this.mesh.layers.mask = prevLayersMask;
+    }
+    if (typeof prevRenderOrder === 'number') {
+      this.mesh.renderOrder = prevRenderOrder;
+    }
+
+    if (prevMeshParent && typeof prevMeshParent.add === 'function') {
+      prevMeshParent.add(this.mesh);
+      this._meshParent = prevMeshParent;
+    }
   }
 
   updateAnimation(timeInfo, globalDarkness) {
     const dtMs = (timeInfo && typeof timeInfo.delta === 'number') ? (timeInfo.delta * 1000) : 0;
     const tMs = (timeInfo && typeof timeInfo.elapsed === 'number') ? (timeInfo.elapsed * 1000) : 0;
+    const tSec = (timeInfo && typeof timeInfo.elapsed === 'number') ? timeInfo.elapsed : 0;
     const { type, speed, intensity, reverse } = this._getAnimationOptions();
+
+    const insetWorldPx = this._getWallInsetWorldPx();
+    const needsInsetUpdate = (this._lastInsetWorldPx === null) || (Math.abs(insetWorldPx - this._lastInsetWorldPx) > 0.5);
+    if (needsInsetUpdate && (tSec - this._lastInsetUpdateAtSec) > 0.1) {
+      try {
+        this._lastInsetWorldPx = insetWorldPx;
+        this._lastInsetUpdateAtSec = tSec;
+        this.updateData(this.document, true);
+      } catch (_) {
+      }
+    }
 
     const u = this.material.uniforms;
     // Reset to base values every frame; animated types will override.
@@ -903,7 +968,7 @@ ${FoundryLightingShaderChunks.pulse}
           const pxPerUnit = d.size / d.distance;
           const rPx = radius * pxPerUnit;
 
-          const wallInsetPx = this._getWallInsetPx();
+          const wallInsetPx = this._getWallInsetWorldPx();
           const rPxInset = Math.max(0, rPx - wallInsetPx);
 
           const worldPos = Coordinates.toWorld(this.document.x, this.document.y);

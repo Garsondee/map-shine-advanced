@@ -39,7 +39,8 @@ export class LayerVisibilityManager {
       'templates',
       'drawings',
       'notes',
-      'controls'
+      'controls',
+      'walls'
     ]);
     
     /**
@@ -48,7 +49,6 @@ export class LayerVisibilityManager {
      */
     this.editOnlyLayers = new Set([
       'tiles',
-      'walls',
       'lighting',
       'sounds',
       'regions'

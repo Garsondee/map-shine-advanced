@@ -2277,8 +2277,14 @@ export class PlayerLightEffect extends EffectBase {
 
   _hideDynamicLightSources() {
     try {
-      if (this._torchLightSource?.mesh) this._torchLightSource.mesh.visible = false;
-      if (this._flashlightLightSource?.mesh) this._flashlightLightSource.mesh.visible = false;
+      // Properly remove light meshes from the scene instead of just hiding them
+      // This prevents them from contributing to lighting calculations when disabled
+      if (this._torchLightSource?.mesh?.parent) {
+        this._torchLightSource.mesh.parent.remove(this._torchLightSource.mesh);
+      }
+      if (this._flashlightLightSource?.mesh?.parent) {
+        this._flashlightLightSource.mesh.parent.remove(this._flashlightLightSource.mesh);
+      }
       if (this._torchSparksSystem?.emitter) this._torchSparksSystem.emitter.visible = false;
       if (this._torchParticleSystem?.emitter) this._torchParticleSystem.emitter.visible = false;
     } catch (_) {
@@ -2300,52 +2306,61 @@ export class PlayerLightEffect extends EffectBase {
     if (torchSrc && torchSrc.mesh) {
       const gutterNoLight = !!this.params.torchGutterDisableLight && !!this._torchGuttering;
       const enabled = !!this.params.torchLightEnabled && this.params.mode === 'torch' && this.enabled && !gutterNoLight;
-      torchSrc.mesh.visible = enabled;
-
-      if (enabled && this._torchPos) {
-        const foundry = Coordinates.toFoundry(this._torchPos.x, this._torchPos.y);
-        const c = this.params.torchLightColor;
-
-        const baseIntensity = typeof this._torchFinalIntensity === 'number' ? this._torchFinalIntensity : 0;
-        const scaleWithIntensity = !!this.params.torchLightScaleWithIntensity;
-        const scale = scaleWithIntensity ? Math.max(0.15, Math.min(1.5, baseIntensity)) : 1.0;
-
-        const dim = Math.max(0, this.params.torchLightDim) * scale;
-        const bright = Math.max(0, this.params.torchLightBright) * scale;
-
-        const animType = this.params.torchLightAnimType === 'none' ? null : this.params.torchLightAnimType;
-
-        const doc = this._torchLightDoc;
-        doc.x = foundry.x;
-        doc.y = foundry.y;
-        doc.config = {
-          color: c,
-          dim,
-          bright,
-          alpha: this.params.torchLightAlpha,
-          attenuation: this.params.torchLightAttenuation,
-          luminosity: this.params.torchLightLuminosity,
-          animation: {
-            type: animType,
-            speed: this.params.torchLightAnimSpeed,
-            intensity: this.params.torchLightAnimIntensity,
-            reverse: false
-          }
-        };
-
-        torchSrc.updateData(doc, false);
-        try {
-          if (torchSrc.mesh && torchSrc.mesh.layers && typeof torchSrc.mesh.layers.enable === 'function') {
-            torchSrc.mesh.layers.enable(0);
-            torchSrc.mesh.layers.enable(OVERLAY_THREE_LAYER);
-          }
-          torchSrc.mesh.frustumCulled = false;
-          if (torchSrc.mesh && !torchSrc.mesh.parent) {
-            lightScene.add(torchSrc.mesh);
-          }
-        } catch (_) {
+      
+      if (enabled) {
+        // Re-add to scene if it was removed
+        if (!torchSrc.mesh.parent) {
+          lightScene.add(torchSrc.mesh);
         }
-        torchSrc.updateAnimation(timeInfo, lighting.params?.darknessLevel ?? 0);
+        torchSrc.mesh.visible = true;
+
+        if (this._torchPos) {
+          const foundry = Coordinates.toFoundry(this._torchPos.x, this._torchPos.y);
+          const c = this.params.torchLightColor;
+
+          const baseIntensity = typeof this._torchFinalIntensity === 'number' ? this._torchFinalIntensity : 0;
+          const scaleWithIntensity = !!this.params.torchLightScaleWithIntensity;
+          const scale = scaleWithIntensity ? Math.max(0.15, Math.min(1.5, baseIntensity)) : 1.0;
+
+          const dim = Math.max(0, this.params.torchLightDim) * scale;
+          const bright = Math.max(0, this.params.torchLightBright) * scale;
+
+          const animType = this.params.torchLightAnimType === 'none' ? null : this.params.torchLightAnimType;
+
+          const doc = this._torchLightDoc;
+          doc.x = foundry.x;
+          doc.y = foundry.y;
+          doc.config = {
+            color: c,
+            dim,
+            bright,
+            alpha: this.params.torchLightAlpha,
+            attenuation: this.params.torchLightAttenuation,
+            luminosity: this.params.torchLightLuminosity,
+            animation: {
+              type: animType,
+              speed: this.params.torchLightAnimSpeed,
+              intensity: this.params.torchLightAnimIntensity,
+              reverse: false
+            }
+          };
+
+          torchSrc.updateData(doc, false);
+          try {
+            if (torchSrc.mesh && torchSrc.mesh.layers && typeof torchSrc.mesh.layers.enable === 'function') {
+              torchSrc.mesh.layers.enable(0);
+              torchSrc.mesh.layers.enable(OVERLAY_THREE_LAYER);
+            }
+            torchSrc.mesh.frustumCulled = false;
+          } catch (_) {
+          }
+          torchSrc.updateAnimation(timeInfo, lighting.params?.darknessLevel ?? 0);
+        }
+      } else {
+        // Remove from scene when disabled
+        if (torchSrc.mesh.parent) {
+          torchSrc.mesh.parent.remove(torchSrc.mesh);
+        }
       }
     }
 
@@ -2353,9 +2368,14 @@ export class PlayerLightEffect extends EffectBase {
     const flashSrc = this._ensureLightSource(flashId, '_flashlightLightDoc', '_flashlightLightSource', lightScene);
     if (flashSrc && flashSrc.mesh) {
       const enabled = !!this.params.flashlightLightEnabled && this.params.mode === 'flashlight' && this.enabled;
-      flashSrc.mesh.visible = enabled;
-
+      
       if (enabled) {
+        // Re-add to scene if it was removed
+        if (!flashSrc.mesh.parent) {
+          lightScene.add(flashSrc.mesh);
+        }
+        flashSrc.mesh.visible = true;
+
         const baseFlashlightIntensity = Math.max(1e-6, this.params.flashlightIntensity);
         const flashlightIntensityFactor = Math.max(0, Math.min(1, (this._flashlightFinalIntensity ?? 0) / baseFlashlightIntensity));
 
@@ -2410,12 +2430,14 @@ export class PlayerLightEffect extends EffectBase {
             flashSrc.mesh.layers.enable(OVERLAY_THREE_LAYER);
           }
           flashSrc.mesh.frustumCulled = false;
-          if (flashSrc.mesh && !flashSrc.mesh.parent) {
-            lightScene.add(flashSrc.mesh);
-          }
         } catch (_) {
         }
         flashSrc.updateAnimation(timeInfo, lighting.params?.darknessLevel ?? 0);
+      } else {
+        // Remove from scene when disabled
+        if (flashSrc.mesh.parent) {
+          flashSrc.mesh.parent.remove(flashSrc.mesh);
+        }
       }
     }
   }

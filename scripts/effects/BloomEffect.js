@@ -6,6 +6,7 @@
 
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
+import { FoundryFogBridge } from '../vision/FoundryFogBridge.js';
 
 const log = createLogger('BloomEffect');
 
@@ -41,6 +42,14 @@ export class BloomEffect extends EffectBase {
     this._lastTintR = null;
     this._lastTintG = null;
     this._lastTintB = null;
+
+    this.fogBridge = null;
+
+    this._viewBounds = null;
+
+    this._tempNdc = null;
+    this._tempWorld = null;
+    this._tempDir = null;
   }
 
   /**
@@ -101,6 +110,96 @@ export class BloomEffect extends EffectBase {
       this.params.radius,
       this.params.threshold
     );
+
+    this.fogBridge = new FoundryFogBridge(renderer);
+    this.fogBridge.initialize();
+
+    this._viewBounds = new THREE.Vector4(0, 0, 1, 1);
+
+    if (this.pass?.blendMaterial?.uniforms && this.pass?.blendMaterial?.fragmentShader) {
+      const u = this.pass.blendMaterial.uniforms;
+
+      if (!u.tVision) u.tVision = { value: null };
+      if (!u.uMaskEnabled) u.uMaskEnabled = { value: 1.0 };
+      if (!u.uVisionThreshold) u.uVisionThreshold = { value: 0.1 };
+
+      // Softness is specified in *pixels* and converted to UV using uVisionTexelSize.
+      // This keeps the edge stable across resolution changes.
+      if (!u.uVisionSoftnessPx) u.uVisionSoftnessPx = { value: 2.0 };
+
+      u.uVisionSoftnessPx.value = 4.0;
+
+      // Mapping uniforms for screenUv -> Foundry coords -> sceneUv
+      if (!u.uViewBounds) u.uViewBounds = { value: this._viewBounds };
+      if (!u.uSceneDimensions) u.uSceneDimensions = { value: new THREE.Vector2(1.0, 1.0) };
+      if (!u.uSceneRect) u.uSceneRect = { value: new THREE.Vector4(0.0, 0.0, 1.0, 1.0) };
+      if (!u.uHasSceneRect) u.uHasSceneRect = { value: 0.0 };
+      if (!u.uVisionTexelSize) u.uVisionTexelSize = { value: new THREE.Vector2(1.0, 1.0) };
+
+      this.pass.blendMaterial.fragmentShader = `
+        uniform float opacity;
+        uniform sampler2D tDiffuse;
+        uniform sampler2D tVision;
+        uniform float uMaskEnabled;
+        uniform float uVisionThreshold;
+        uniform float uVisionSoftnessPx;
+
+        uniform vec4 uViewBounds;
+        uniform vec2 uSceneDimensions;
+        uniform vec4 uSceneRect;
+        uniform float uHasSceneRect;
+        uniform vec2 uVisionTexelSize;
+        varying vec2 vUv;
+
+        vec2 screenUvToFoundry(vec2 screenUv) {
+          float threeX = mix(uViewBounds.x, uViewBounds.z, screenUv.x);
+          float threeY = mix(uViewBounds.y, uViewBounds.w, screenUv.y);
+          float foundryX = threeX;
+          float foundryY = uSceneDimensions.y - threeY;
+          return vec2(foundryX, foundryY);
+        }
+
+        vec2 foundryToSceneUv(vec2 foundryPos) {
+          vec2 sceneOrigin = uSceneRect.xy;
+          vec2 sceneSize = uSceneRect.zw;
+          return (foundryPos - sceneOrigin) / sceneSize;
+        }
+
+        float sampleBlur4(sampler2D tex, vec2 uv, vec2 texel) {
+          float c = texture2D(tex, uv).r;
+          float l = texture2D(tex, uv + vec2(-texel.x, 0.0)).r;
+          float r = texture2D(tex, uv + vec2(texel.x, 0.0)).r;
+          float d = texture2D(tex, uv + vec2(0.0, -texel.y)).r;
+          float u = texture2D(tex, uv + vec2(0.0, texel.y)).r;
+          return (c * 4.0 + l + r + d + u) / 8.0;
+        }
+
+        void main() {
+          vec4 texel = texture2D( tDiffuse, vUv );
+
+          float visible = 1.0;
+          if (uMaskEnabled > 0.5) {
+            // Prefer world/scene-space sampling when scene rect is available.
+            vec2 uv = vUv;
+            if (uHasSceneRect > 0.5) {
+              vec2 foundryPos = screenUvToFoundry(vUv);
+              uv = foundryToSceneUv(foundryPos);
+              uv = clamp(uv, vec2(0.0), vec2(1.0));
+            }
+
+            // WorldSpaceFogEffect vision target is rendered in Foundry coords (Y-down),
+            // so when sampling it from a standard UV (Y-up) we need to flip Y.
+            vec2 visionUv = vec2(uv.x, 1.0 - uv.y);
+            float vision = sampleBlur4(tVision, visionUv, uVisionTexelSize);
+            float softness = max(uVisionTexelSize.x, uVisionTexelSize.y) * uVisionSoftnessPx;
+            visible = smoothstep(uVisionThreshold - softness, uVisionThreshold + softness, vision);
+          }
+
+          gl_FragColor = opacity * texel * visible;
+        }
+      `;
+      this.pass.blendMaterial.needsUpdate = true;
+    }
     
     // Initialize bloom tint colors
     this.updateTintColor();
@@ -210,6 +309,118 @@ export class BloomEffect extends EffectBase {
    */
   render(renderer, scene, camera) {
     if (!this.enabled || !this.pass || !this.readBuffer) return;
+
+    try {
+      const THREE = window.THREE;
+      const u = this.pass?.blendMaterial?.uniforms;
+
+      // Default mapping inputs
+      if (u?.uSceneDimensions) {
+        const d = canvas?.dimensions;
+        if (d && typeof d.width === 'number' && typeof d.height === 'number') {
+          u.uSceneDimensions.value.set(d.width, d.height);
+        }
+      }
+      if (u?.uSceneRect && u?.uHasSceneRect) {
+        const rect = canvas?.dimensions?.sceneRect;
+        if (rect && typeof rect.x === 'number' && typeof rect.y === 'number') {
+          u.uSceneRect.value.set(rect.x, rect.y, rect.width || 1, rect.height || 1);
+          u.uHasSceneRect.value = 1.0;
+        } else {
+          u.uHasSceneRect.value = 0.0;
+        }
+      }
+      if (u?.uViewBounds && camera) {
+        if (camera.isOrthographicCamera) {
+          const camPos = camera.position;
+          const minX = camPos.x + camera.left / camera.zoom;
+          const maxX = camPos.x + camera.right / camera.zoom;
+          const minY = camPos.y + camera.bottom / camera.zoom;
+          const maxY = camPos.y + camera.top / camera.zoom;
+          u.uViewBounds.value.set(minX, minY, maxX, maxY);
+        } else if (camera.isPerspectiveCamera && THREE) {
+          const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+
+          if (!this._tempNdc) this._tempNdc = new THREE.Vector3();
+          if (!this._tempWorld) this._tempWorld = new THREE.Vector3();
+          if (!this._tempDir) this._tempDir = new THREE.Vector3();
+
+          const origin = camera.position;
+          const ndc = this._tempNdc;
+          const world = this._tempWorld;
+          const dir = this._tempDir;
+
+          let minX = Infinity;
+          let minY = Infinity;
+          let maxX = -Infinity;
+          let maxY = -Infinity;
+
+          const corners = [
+            [-1, -1],
+            [1, -1],
+            [-1, 1],
+            [1, 1]
+          ];
+
+          for (let i = 0; i < corners.length; i++) {
+            const cx = corners[i][0];
+            const cy = corners[i][1];
+
+            ndc.set(cx, cy, 0.5);
+            world.copy(ndc).unproject(camera);
+
+            dir.subVectors(world, origin).normalize();
+            const dz = dir.z;
+            if (Math.abs(dz) < 1e-6) continue;
+
+            const t = (groundZ - origin.z) / dz;
+            if (!Number.isFinite(t) || t <= 0) continue;
+
+            const ix = origin.x + dir.x * t;
+            const iy = origin.y + dir.y * t;
+
+            if (ix < minX) minX = ix;
+            if (iy < minY) minY = iy;
+            if (ix > maxX) maxX = ix;
+            if (iy > maxY) maxY = iy;
+          }
+
+          if (minX !== Infinity && minY !== Infinity && maxX !== -Infinity && maxY !== -Infinity) {
+            u.uViewBounds.value.set(minX, minY, maxX, maxY);
+          }
+        }
+      }
+
+      // Prefer WorldSpaceFogEffect's self-maintained vision RT when available.
+      let visionTex = null;
+      const fog = window.MapShine?.fogEffect;
+      const fogVisionTex = fog?.visionRenderTarget?.texture;
+      if (fogVisionTex) {
+        visionTex = fogVisionTex;
+      } else {
+        this.fogBridge?.sync?.();
+        visionTex = this.fogBridge?.getVisionTexture?.();
+      }
+
+      if (u?.tVision) {
+        u.tVision.value = visionTex;
+      }
+
+      // If we're using the fog RT (scene-space), enable scene-rect mapping.
+      // If we're using Foundry's vision texture (screen-space), we should skip mapping.
+      if (u?.uHasSceneRect) {
+        u.uHasSceneRect.value = (visionTex === fogVisionTex && u.uHasSceneRect.value > 0.5) ? 1.0 : 0.0;
+      }
+
+      if (u?.uVisionTexelSize) {
+        const iw = visionTex?.image?.width;
+        const ih = visionTex?.image?.height;
+        const w = (typeof iw === 'number' && iw > 0) ? iw : 1;
+        const h = (typeof ih === 'number' && ih > 0) ? ih : 1;
+        u.uVisionTexelSize.value.set(1.0 / w, 1.0 / h);
+      }
+    } catch (_) {
+    }
     
     // We pass a dummy deltaTime because UnrealBloomPass doesn't strictly use it for animation
     // (unless it was doing something time-based which it isn't).
@@ -249,6 +460,10 @@ export class BloomEffect extends EffectBase {
     if (this.pass) {
       this.pass.dispose();
       this.pass = null;
+    }
+    if (this.fogBridge) {
+      this.fogBridge.dispose();
+      this.fogBridge = null;
     }
     if (this.copyMaterial) {
         this.copyMaterial.dispose();

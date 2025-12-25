@@ -75,6 +75,14 @@ export class ControlsIntegration {
 
     /** @type {Function|null} */
     this._originalEnvironmentInitialize = null;
+
+    /**
+     * Track wall visual hiding strategy.
+     * We keep the Walls layer itself visible so door controls/icons can render,
+     * but hide the wall segments unless the Walls layer is actively being edited.
+     * @type {boolean}
+     */
+    this._wallsAreTransparent = false;
   }
 
   /**
@@ -205,6 +213,9 @@ export class ControlsIntegration {
     // Immediately hide replaced PIXI layers (background, grid, tokens, etc.)
     // These are rendered by Three.js, so they must be hidden to prevent double-rendering
     this.hideReplacedLayers();
+
+    // Ensure wall visuals are configured correctly (doors should remain visible)
+    this._updateWallsVisualState();
     
     // Re-hide visibility layer after sight refresh (Foundry may re-show it)
     Hooks.on('sightRefresh', () => {
@@ -353,6 +364,96 @@ export class ControlsIntegration {
       }
       log.debug('Tokens layer: meshes transparent, interaction enabled');
     }
+
+    // Walls layer needs special handling:
+    // - We want native door controls/icons to remain visible as an overlay.
+    // - But wall segments themselves are rendered in Three.js.
+    // So we keep the Walls layer visible, but make its non-door visuals transparent
+    // unless the Walls layer is actively being edited.
+    if (canvas.walls) {
+      canvas.walls.visible = true;
+      canvas.walls.interactiveChildren = true;
+    }
+  }
+
+  /**
+   * Make a PIXI wall visually transparent but keep door controls visible.
+   * @param {Wall} wall
+   * @private
+   */
+  _makeWallTransparent(wall) {
+    if (!wall) return;
+
+    try {
+      const ALPHA = 0.01;
+
+      // Wall line graphics
+      if (wall.line) wall.line.alpha = ALPHA;
+
+      // Direction arrow graphics (if present)
+      if (wall.direction) wall.direction.alpha = ALPHA;
+
+      // Endpoints (if present)
+      if (wall.endpoints) {
+        wall.endpoints.alpha = ALPHA;
+      }
+
+      // Keep door control visible (this is what shows the door icon)
+      if (wall.doorControl) {
+        wall.doorControl.visible = true;
+        wall.doorControl.alpha = 1;
+      }
+
+      wall.visible = true;
+      wall.interactive = true;
+      wall.interactiveChildren = true;
+    } catch (_) {
+      // Ignore - wall structure can vary by Foundry version
+    }
+  }
+
+  /**
+   * Restore a PIXI wall's visual alpha to default so walls are visible for editing.
+   * @param {Wall} wall
+   * @private
+   */
+  _restoreWallVisuals(wall) {
+    if (!wall) return;
+
+    try {
+      if (wall.line) wall.line.alpha = 1;
+      if (wall.direction) wall.direction.alpha = 1;
+      if (wall.endpoints) wall.endpoints.alpha = 1;
+      if (wall.doorControl) {
+        wall.doorControl.visible = true;
+        wall.doorControl.alpha = 1;
+      }
+    } catch (_) {
+      // Ignore
+    }
+  }
+
+  /**
+   * Ensure wall visuals are correct for the current active layer.
+   * @private
+   */
+  _updateWallsVisualState() {
+    if (!canvas?.ready || !canvas.walls?.placeables) return;
+
+    const activeLayerName = canvas.activeLayer?.constructor?.name || canvas.activeLayer?.name || '';
+    const isWallsActive = activeLayerName === 'WallsLayer' || activeLayerName === 'walls';
+
+    if (isWallsActive) {
+      if (this._wallsAreTransparent) {
+        for (const wall of canvas.walls.placeables) this._restoreWallVisuals(wall);
+        this._wallsAreTransparent = false;
+      }
+    } else {
+      if (!this._wallsAreTransparent) {
+        for (const wall of canvas.walls.placeables) this._makeWallTransparent(wall);
+        this._wallsAreTransparent = true;
+      }
+    }
   }
   
   /**
@@ -441,6 +542,7 @@ export class ControlsIntegration {
         log.debug(`Layer activated: ${layer?.constructor?.name || 'unknown'}`);
         this.layerVisibility?.update();
         this.inputRouter?.autoUpdate();
+        this._updateWallsVisualState();
       } catch (error) {
         this.handleError(error, 'activateCanvasLayer');
       }
@@ -455,6 +557,7 @@ export class ControlsIntegration {
       setTimeout(() => {
         try {
           this.inputRouter?.autoUpdate();
+          this._updateWallsVisualState();
         } catch (error) {
           this.handleError(error, 'renderSceneControls');
         }
@@ -485,11 +588,70 @@ export class ControlsIntegration {
       try {
         // Make token transparent but keep it interactive
         this.makeTokenTransparent(token);
+
+        // Token refresh can happen during control/drag updates and may coincide with
+        // Foundry updating wall/door control visibility. Re-assert our walls visual state
+        // on the next tick.
+        setTimeout(() => {
+          try {
+            this._updateWallsVisualState();
+          } catch (_) {
+          }
+        }, 0);
       } catch (error) {
         // Silently ignore - token might not be ready yet
       }
     });
     this._hookIds.push({ name: 'refreshToken', id: refreshTokenHookId });
+
+    // When a token is controlled/released, Foundry may adjust control icon visibility.
+    // Re-assert that the walls layer stays visible so door controls/icons remain visible.
+    const controlTokenHookId = Hooks.on('controlToken', () => {
+      if (this.state !== IntegrationState.ACTIVE) return;
+      setTimeout(() => {
+        try {
+          // Keep walls layer visible for door controls
+          if (canvas?.walls) {
+            canvas.walls.visible = true;
+            canvas.walls.interactiveChildren = true;
+          }
+          this._updateWallsVisualState();
+        } catch (_) {
+        }
+      }, 0);
+    });
+    this._hookIds.push({ name: 'controlToken', id: controlTokenHookId });
+
+    // Wall refresh - reapply transparency so door controls stay visible
+    const refreshWallHookId = Hooks.on('refreshWall', (wall) => {
+      if (this.state !== IntegrationState.ACTIVE) return;
+      try {
+        // Only apply transparency when not actively editing walls
+        if (this._wallsAreTransparent) {
+          this._makeWallTransparent(wall);
+        }
+      } catch (_) {
+      }
+    });
+    this._hookIds.push({ name: 'refreshWall', id: refreshWallHookId });
+
+    const createWallHookId = Hooks.on('createWall', (doc) => {
+      if (this.state !== IntegrationState.ACTIVE) return;
+
+      // Defer to allow Foundry to create the wall object
+      setTimeout(() => {
+        try {
+          const wall = canvas.walls?.get(doc.id);
+          if (!wall) return;
+
+          if (this._wallsAreTransparent) {
+            this._makeWallTransparent(wall);
+          }
+        } catch (_) {
+        }
+      }, 50);
+    });
+    this._hookIds.push({ name: 'createWall', id: createWallHookId });
     
     // Also handle createToken to catch initial creation
     const createTokenHookId = Hooks.on('createToken', (doc, options, userId) => {

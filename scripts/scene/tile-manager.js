@@ -373,7 +373,49 @@ export class TileManager {
 
       const { sprite, tileDoc, hoverHidden } = data;
       if (sprite.material) {
-        sprite.material.color.copy(globalTint);
+        // Overhead tiles should respect the same outdoors brightness/dim response
+        // as the main LightingEffect composite (otherwise outdoor roofs stay too
+        // bright as darkness increases).
+        let overheadTint = globalTint;
+        try {
+          const le = window.MapShine?.lightingEffect;
+          if (le && le.params && typeof le.params.outdoorBrightness === 'number' && weatherController && typeof weatherController.getRoofMaskIntensity === 'function') {
+            const d = canvas.dimensions;
+            const sceneX = d?.sceneRect?.x ?? d?.sceneX ?? 0;
+            const sceneY = d?.sceneRect?.y ?? d?.sceneY ?? 0;
+            const sceneW = d?.sceneRect?.width ?? d?.sceneWidth ?? d?.width ?? 10000;
+            const sceneH = d?.sceneRect?.height ?? d?.sceneHeight ?? d?.height ?? 10000;
+
+            // Tile docs are in Foundry top-left (Y-down) space.
+            // The authored _Outdoors mask is also in sceneRect top-left UV space.
+            const tileCenterX = tileDoc.x + tileDoc.width / 2;
+            const tileCenterY = tileDoc.y + tileDoc.height / 2;
+            const u = (tileCenterX - sceneX) / sceneW;
+            const v = (tileCenterY - sceneY) / sceneH;
+
+            const outdoorStrength = weatherController.getRoofMaskIntensity(u, v);
+            if (outdoorStrength > 0.001) {
+              let darkness = canvas?.scene?.environment?.darknessLevel ?? 0.0;
+              if (typeof le.getEffectiveDarkness === 'function') {
+                darkness = le.getEffectiveDarkness();
+              }
+
+              const dayBoost = le.params.outdoorBrightness;
+              const nightDim = 2.0 - le.params.outdoorBrightness;
+              const outdoorMultiplier = (1.0 - darkness) * dayBoost + darkness * nightDim;
+              const finalMultiplier = (1.0 - outdoorStrength) * 1.0 + outdoorStrength * outdoorMultiplier;
+
+              // PERFORMANCE: reuse cached THREE.Color (avoid per-tile allocations)
+              if (!this._tempOverheadTint) {
+                this._tempOverheadTint = new THREE.Color(1, 1, 1);
+              }
+              overheadTint = this._tempOverheadTint.copy(globalTint).multiplyScalar(finalMultiplier);
+            }
+          }
+        } catch (_) {
+        }
+
+        sprite.material.color.copy(overheadTint);
       }
 
       // Handle Occlusion
@@ -475,9 +517,12 @@ export class TileManager {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    // Get scene dimensions for UV calculation
-    const sceneWidth = canvas.dimensions?.width || 10000;
-    const sceneHeight = canvas.dimensions?.height || 10000;
+    // Get scene dimensions for UV calculation (sceneRect, not padded canvas)
+    const d = canvas.dimensions;
+    const sceneX = d?.sceneRect?.x ?? d?.sceneX ?? 0;
+    const sceneY = d?.sceneRect?.y ?? d?.sceneY ?? 0;
+    const sceneW = d?.sceneRect?.width ?? d?.sceneWidth ?? d?.width ?? 10000;
+    const sceneH = d?.sceneRect?.height ?? d?.sceneHeight ?? d?.height ?? 10000;
 
     // Count overhead tiles for debugging
     let overheadCount = 0;
@@ -492,15 +537,15 @@ export class TileManager {
       const { sprite, tileDoc } = data;
       overheadCount++;
 
-      // Use the frame's global tint as the base (already applied in main loop)
-      const baseColor = this._frameGlobalTint;
+      // Use the tile's CURRENT color as base (it already includes global tint + outdoors/night dim).
+      const baseColor = sprite?.material?.color;
       if (!baseColor) continue;
 
       // Calculate tile center UV in scene space
       const tileCenterX = tileDoc.x + tileDoc.width / 2;
       const tileCenterY = tileDoc.y + tileDoc.height / 2;
-      const u = tileCenterX / sceneWidth;
-      const v = tileCenterY / sceneHeight;
+      const u = (tileCenterX - sceneX) / sceneW;
+      const v = (tileCenterY - sceneY) / sceneH;
 
       // Sample the window light at the tile's position
       const lightSample = this._sampleWindowLight(null, u, v);
@@ -508,13 +553,20 @@ export class TileManager {
       if (lightSample && lightSample.brightness > 0.01) {
         litCount++;
         // Apply additive brightness to the tile on top of global tint
-        const intensity = lightSample.brightness * wle.params.overheadLightIntensity;
+        const overheadIntensity = Math.max(0.0, Math.min(1.0, wle.params.overheadLightIntensity ?? 0.0));
+        const intensity = lightSample.brightness * overheadIntensity;
+
+        // Copy the base so we don't accumulate repeatedly across frames.
+        if (!this._tempWindowOverheadBase) {
+          this._tempWindowOverheadBase = new THREE.Color(1, 1, 1);
+        }
+        this._tempWindowOverheadBase.copy(baseColor);
         
         // Additive blend: globalTint + (lightColor * intensity)
-        sprite.material.color.r = Math.min(1.5, baseColor.r + lightSample.r * intensity);
-        sprite.material.color.g = Math.min(1.5, baseColor.g + lightSample.g * intensity);
-        sprite.material.color.b = Math.min(1.5, baseColor.b + lightSample.b * intensity);
-      } else if (wle.params.overheadLightIntensity > 0.9) {
+        sprite.material.color.r = Math.min(1.5, this._tempWindowOverheadBase.r + lightSample.r * intensity);
+        sprite.material.color.g = Math.min(1.5, this._tempWindowOverheadBase.g + lightSample.g * intensity);
+        sprite.material.color.b = Math.min(1.5, this._tempWindowOverheadBase.b + lightSample.b * intensity);
+      } else if (!wle.params.hasWindowMask && wle.params.overheadLightIntensity > 0.9) {
         // Debug mode: when intensity is maxed, tint all overhead tiles slightly to verify the system works
         sprite.material.color.r = Math.min(1.5, baseColor.r + 0.3);
         sprite.material.color.g = Math.min(1.5, baseColor.g + 0.1);

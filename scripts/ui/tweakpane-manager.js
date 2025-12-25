@@ -59,11 +59,7 @@ export class TweakpaneManager {
     /** @type {Object} Global parameters */
     this.globalParams = {
       mapMakerMode: false,
-      timeRate: 100, // 0-200%
-      // Time of day (0-24h). This is a top-level control that drives
-      // WeatherController.timeOfDay and any effects that depend on it
-      // (e.g. Overhead Shadows, future sun/sky systems).
-      timeOfDay: 12.0
+      timeRate: 100 // 0-200%
     };
     
     /** @type {Object<string, any>} Accordion expanded states */
@@ -171,25 +167,8 @@ export class TweakpaneManager {
     // Load saved UI state (position, scale, accordion states)
     await this.loadUIState();
 
-    try {
-      const scene = canvas?.scene;
-      const allSettings = scene?.getFlag?.('map-shine-advanced', 'settings') || {};
-      const legacyTimeOfDay =
-        allSettings?.mapMaker?.effects?.weather?.timeOfDay ??
-        allSettings?.gm?.effects?.weather?.timeOfDay;
-
-      if (typeof legacyTimeOfDay === 'number' && Number.isFinite(legacyTimeOfDay)) {
-        if (this.globalParams.timeOfDay === 12.0) {
-          this.globalParams.timeOfDay = legacyTimeOfDay;
-        }
-      }
-    } catch (e) {
-    }
-
     // Build global controls
     this.buildGlobalControls();
-
-    this.onGlobalChange('timeOfDay', this.globalParams.timeOfDay);
 
     // Build scene setup section (only for GMs)
     if (game.user.isGM) {
@@ -385,7 +364,6 @@ export class TweakpaneManager {
     // Reset global controls to their defaults
     this.globalParams.mapMakerMode = false;
     this.globalParams.timeRate = 100;
-    this.globalParams.timeOfDay = 12.0;
 
     // Reset UI scale
     this.uiScale = 1.0;
@@ -396,7 +374,6 @@ export class TweakpaneManager {
     // Propagate global control changes to the underlying systems
     this.onGlobalChange('mapMakerMode', this.globalParams.mapMakerMode);
     this.onGlobalChange('timeRate', this.globalParams.timeRate);
-    this.onGlobalChange('timeOfDay', this.globalParams.timeOfDay);
 
     // Queue saves for all effects so scene flags are updated
     for (const [effectId] of Object.entries(this.effectFolders)) {
@@ -451,7 +428,6 @@ export class TweakpaneManager {
     // Restore globals
     this.globalParams.mapMakerMode = snapshot.globalParams.mapMakerMode;
     this.globalParams.timeRate = snapshot.globalParams.timeRate;
-    this.globalParams.timeOfDay = snapshot.globalParams.timeOfDay;
 
     // Restore UI scale
     this.uiScale = snapshot.uiScale ?? 1.0;
@@ -462,7 +438,6 @@ export class TweakpaneManager {
     // Propagate global control changes
     this.onGlobalChange('mapMakerMode', this.globalParams.mapMakerMode);
     this.onGlobalChange('timeRate', this.globalParams.timeRate);
-    this.onGlobalChange('timeOfDay', this.globalParams.timeOfDay);
 
     // Restore each effect's parameters and notify callbacks
     for (const [effectId, effectSnapshot] of Object.entries(snapshot.effects || {})) {
@@ -1179,11 +1154,6 @@ export class TweakpaneManager {
       } else {
         log.warn('TimeManager not available, cannot set time rate');
       }
-    } else if (param === 'timeOfDay') {
-      // Apply time of day using centralized StateApplier
-      stateApplier.applyTimeOfDay(value, false).catch(error => {
-        log.warn('Failed to apply timeOfDay via StateApplier:', error);
-      });
     }
 
     this.saveUIState();
@@ -2339,8 +2309,7 @@ export class TweakpaneManager {
 
     const originalGlobals = {
       mapMakerMode: this.globalParams.mapMakerMode,
-      timeRate: this.globalParams.timeRate,
-      timeOfDay: this.globalParams.timeOfDay
+      timeRate: this.globalParams.timeRate
     };
 
     const originalUiScale = this.uiScale;
@@ -2399,7 +2368,6 @@ export class TweakpaneManager {
     try {
       const globalTests = [
         { id: 'timeRate', min: 0, max: 200, step: 1 },
-        { id: 'timeOfDay', min: 0.0, max: 24.0, step: 0.1 },
         { id: 'uiScale', min: 0.5, max: 2.0, step: 0.1 }
       ];
 
@@ -2593,7 +2561,6 @@ export class TweakpaneManager {
     } finally {
       this.globalParams.mapMakerMode = originalGlobals.mapMakerMode;
       this.globalParams.timeRate = originalGlobals.timeRate;
-      this.globalParams.timeOfDay = originalGlobals.timeOfDay;
 
       this.uiScale = originalUiScale;
       this.uiScaleParams.scale = originalUiScaleBinding;

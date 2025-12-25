@@ -554,6 +554,46 @@ export class LensflareEffect extends EffectBase {
     this.flares.clear();
   }
 
+  _mergeLightDocChanges(doc, changes) {
+    if (!doc || !changes || typeof changes !== 'object') return doc;
+
+    let base;
+    try {
+      base = (typeof doc.toObject === 'function') ? doc.toObject() : doc;
+    } catch (_) {
+      base = doc;
+    }
+
+    let expandedChanges = changes;
+    try {
+      const hasDotKeys = Object.keys(changes).some((k) => k.includes('.'));
+      if (hasDotKeys && foundry?.utils?.expandObject) {
+        expandedChanges = foundry.utils.expandObject(changes);
+      }
+    } catch (_) {
+      expandedChanges = changes;
+    }
+
+    try {
+      if (foundry?.utils?.mergeObject) {
+        return foundry.utils.mergeObject(base, expandedChanges, {
+          inplace: false,
+          overwrite: true,
+          recursive: true,
+          insertKeys: true,
+          insertValues: true
+        });
+      }
+    } catch (_) {
+    }
+
+    const merged = { ...base, ...expandedChanges };
+    if (base?.config || expandedChanges?.config) {
+      merged.config = { ...(base?.config ?? {}), ...(expandedChanges?.config ?? {}) };
+    }
+    return merged;
+  }
+
   onLightCreated(doc) {
     // We need to wait for the scene object to be available via EffectComposer or passed in update?
     // Hooks are global. EffectBase doesn't store scene permanently unless we save it in initialize.
@@ -571,27 +611,28 @@ export class LensflareEffect extends EffectBase {
   }
 
   onLightUpdated(doc, changes) {
-    const flare = this.flares.get(doc.id);
+    const targetDoc = this._mergeLightDocChanges(doc, changes);
+    const flare = this.flares.get(targetDoc.id);
     if (!flare) {
       // Maybe it became valid?
-      if (this.scene) this.createFlare(doc, this.scene);
+      if (this.scene) this.createFlare(targetDoc, this.scene);
       return;
     }
 
     if ('x' in changes || 'y' in changes || 'elevation' in changes) {
-      const worldPos = Coordinates.toWorld(doc.x, doc.y);
+      const worldPos = Coordinates.toWorld(targetDoc.x, targetDoc.y);
       flare.position.set(
         worldPos.x,
         worldPos.y,
-        (doc.elevation || 0) * canvas.dimensions.size / canvas.dimensions.distance + 50
+        (targetDoc.elevation || 0) * canvas.dimensions.size / canvas.dimensions.distance + 50
       );
     }
     
     if ('config' in changes) {
       // Color update or radius update - easier to recreate
       if (this.scene) {
-        this.removeFlare(doc.id, this.scene);
-        this.createFlare(doc, this.scene);
+        this.removeFlare(targetDoc.id, this.scene);
+        this.createFlare(targetDoc, this.scene);
       }
     }
   }

@@ -74,6 +74,9 @@ export class WindowLightEffect extends EffectBase {
       cloudLocalInfluence: 25.0,   // Strength of local cloud density modulation (0-3)
       cloudDensityCurve: 0.2,     // Gamma for density -> shadow mapping (0.2-3)
 
+      // Scene darkness interaction
+      darknessDimming: 0.5,
+
       // Specular coupling (local glints)
       specularBoost: 3.0,
 
@@ -86,7 +89,7 @@ export class WindowLightEffect extends EffectBase {
 
       // Overhead tile lighting
       lightOverheadTiles: true,  // Whether window light affects overhead tiles
-      overheadLightIntensity: 9.6  // How much window light affects overhead tiles (0-1)
+      overheadLightIntensity: 0.2  // How much window light affects overhead tiles (0-1)
     };
   }
 
@@ -155,7 +158,7 @@ export class WindowLightEffect extends EffectBase {
           name: 'clouds',
           label: 'Cloud & Environment',
           type: 'inline',
-          parameters: ['cloudInfluence', 'cloudLocalInfluence', 'cloudDensityCurve', 'minCloudFactor']
+          parameters: ['cloudInfluence', 'cloudLocalInfluence', 'cloudDensityCurve', 'minCloudFactor', 'darknessDimming']
         },
         {
           name: 'specular',
@@ -295,6 +298,14 @@ export class WindowLightEffect extends EffectBase {
           step: 0.05,
           default: 0.2
         },
+        darknessDimming: {
+          type: 'slider',
+          label: 'Darkness Dimming',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.5
+        },
         minCloudFactor: {
           type: 'slider',
           label: 'Min Cloud Factor',
@@ -347,9 +358,9 @@ export class WindowLightEffect extends EffectBase {
           type: 'slider',
           label: 'Overhead Intensity',
           min: 0.0,
-          max: 25.0,
+          max: 1.0,
           step: 0.05,
-          default: 9.6
+          default: 0.2
         }
       }
     };
@@ -439,6 +450,9 @@ export class WindowLightEffect extends EffectBase {
         uCloudLocalInfluence: { value: this.params.cloudLocalInfluence },
         uCloudDensityCurve: { value: this.params.cloudDensityCurve },
 
+        uDarknessLevel: { value: 0.0 },
+        uDarknessDimming: { value: this.params.darknessDimming },
+
         // Spatially-varying cloud shadow from CloudEffect
         uCloudShadowMap: { value: null },
         uHasCloudShadowMap: { value: 0.0 },
@@ -520,6 +534,9 @@ export class WindowLightEffect extends EffectBase {
       uniform float uMinCloudFactor;
       uniform float uCloudLocalInfluence;
       uniform float uCloudDensityCurve;
+
+      uniform float uDarknessLevel;
+      uniform float uDarknessDimming;
 
       uniform sampler2D uCloudShadowMap;
       uniform float uHasCloudShadowMap;
@@ -657,6 +674,12 @@ export class WindowLightEffect extends EffectBase {
         cloudFactor = max(cloudFactor, uMinCloudFactor);
 
         float windowStrength = m * indoorFactor * cloudFactor;
+
+        float d = clamp(uDarknessLevel, 0.0, 1.0);
+        float dimAmt = clamp(uDarknessDimming, 0.0, 1.0);
+        float night = clamp(1.0 - d, 0.0, 1.0);
+        float darknessFactor = mix(1.0, night * night, dimAmt);
+        float effIntensity = uIntensity * darknessFactor;
         
         // Treat the window mask primarily as a *brightness* mask for the
         // underlying groundplane. We derive a scalar light term from the
@@ -664,7 +687,7 @@ export class WindowLightEffect extends EffectBase {
         // painting a separate opaque blob.
 
         // Scalar light factor (how much extra illumination we add).
-        float lightScalar = windowStrength * uIntensity;
+        float lightScalar = windowStrength * effIntensity;
 
         // Warm tint for the additional light; we blend between neutral white
         // and user tint so the effect still feels like light on the floor
@@ -679,7 +702,7 @@ export class WindowLightEffect extends EffectBase {
         vec3 specular = vec3(0.0);
         if (uSpecularBoost > 0.0 && uHasSpecularMask > 0.5) {
           float floorSpecular = texture2D(uSpecularMask, vUv).r;
-          specular = vec3(1.0) * floorSpecular * windowStrength * uIntensity * uSpecularBoost;
+          specular = vec3(1.0) * floorSpecular * windowStrength * effIntensity * uSpecularBoost;
         }
 
         vec3 lightColor = diffuse + specular;
@@ -739,6 +762,19 @@ export class WindowLightEffect extends EffectBase {
     u.uMinCloudFactor.value = this.params.minCloudFactor;
     u.uCloudLocalInfluence.value = this.params.cloudLocalInfluence;
     u.uCloudDensityCurve.value = this.params.cloudDensityCurve;
+
+    u.uDarknessDimming.value = this.params.darknessDimming;
+    try {
+      const env = canvas?.environment;
+      let d = (env && typeof env.darknessLevel === 'number') ? env.darknessLevel : null;
+      if (d === null) {
+        const scene = canvas?.scene;
+        d = (scene && typeof scene.darkness === 'number') ? scene.darkness : 0.0;
+      }
+      u.uDarknessLevel.value = (typeof d === 'number' && isFinite(d)) ? Math.max(0.0, Math.min(1.0, d)) : 0.0;
+    } catch (e) {
+      u.uDarknessLevel.value = 0.0;
+    }
 
     // Bind spatially-varying cloud shadow texture from CloudEffect
     try {
@@ -856,6 +892,10 @@ export class WindowLightEffect extends EffectBase {
         uCloudInfluence: { value: this.params.cloudInfluence },
         uCloudLocalInfluence: { value: this.params.cloudLocalInfluence },
         uCloudDensityCurve: { value: this.params.cloudDensityCurve },
+
+        uDarknessLevel: { value: 0.0 },
+        uDarknessDimming: { value: this.params.darknessDimming },
+
         uCloudShadowMap: { value: null },
         uHasCloudShadowMap: { value: 0.0 },
         uColor: { value: new THREE.Color(this.params.color.r, this.params.color.g, this.params.color.b) },
@@ -898,6 +938,9 @@ export class WindowLightEffect extends EffectBase {
       uniform sampler2D uCloudShadowMap;
       uniform float uHasCloudShadowMap;
       uniform vec3 uColor;
+
+      uniform float uDarknessLevel;
+      uniform float uDarknessDimming;
 
       varying vec4 vClipPos;
       varying vec2 vUv;
@@ -959,8 +1002,14 @@ export class WindowLightEffect extends EffectBase {
 
         cloudFactor = max(cloudFactor, uMinCloudFactor);
 
+        float d = clamp(uDarknessLevel, 0.0, 1.0);
+        float dimAmt = clamp(uDarknessDimming, 0.0, 1.0);
+        float night = clamp(1.0 - d, 0.0, 1.0);
+        float darknessFactor = mix(1.0, night * night, dimAmt);
+        float effIntensity = uIntensity * darknessFactor;
+
         // Final light brightness (0-1 range, clamped)
-        float lightBrightness = m * indoorFactor * cloudFactor * uIntensity;
+        float lightBrightness = m * indoorFactor * cloudFactor * effIntensity;
         lightBrightness = clamp(lightBrightness, 0.0, 1.0);
 
         // Output light brightness with color tint in RGB, brightness in alpha
@@ -993,6 +1042,18 @@ export class WindowLightEffect extends EffectBase {
       u.uCloudInfluence.value = this.params.cloudInfluence;
       u.uCloudLocalInfluence.value = this.params.cloudLocalInfluence;
       u.uCloudDensityCurve.value = this.params.cloudDensityCurve;
+      u.uDarknessDimming.value = this.params.darknessDimming;
+      try {
+        const env = canvas?.environment;
+        let d = (env && typeof env.darknessLevel === 'number') ? env.darknessLevel : null;
+        if (d === null) {
+          const scene = canvas?.scene;
+          d = (scene && typeof scene.darkness === 'number') ? scene.darkness : 0.0;
+        }
+        u.uDarknessLevel.value = (typeof d === 'number' && isFinite(d)) ? Math.max(0.0, Math.min(1.0, d)) : 0.0;
+      } catch (e) {
+        u.uDarknessLevel.value = 0.0;
+      }
       this._applyThreeColor(u.uColor.value, this.params.color);
 
       // Bind spatially-varying cloud density texture from CloudEffect

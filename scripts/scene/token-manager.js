@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
 
 const log = createLogger('TokenManager');
 
@@ -702,6 +703,8 @@ export class TokenManager {
     const border = new THREE.LineLoop(geometry, material);
     border.name = 'SelectionBorder';
     border.matrixAutoUpdate = false;
+    // Render selection border in overlay pass so it's not affected by bloom
+    border.layers.set(OVERLAY_THREE_LAYER);
     
     // Scale to match sprite (which matches token size)
     // Sprite has scale set to pixel width/height
@@ -785,6 +788,8 @@ export class TokenManager {
     const label = new THREE.Sprite(material);
     label.name = 'NameLabel';
     label.matrixAutoUpdate = false;
+    // Render label in overlay pass so it's not affected by bloom
+    label.layers.set(OVERLAY_THREE_LAYER);
     
     // Scale calculation:
     // Maintain constant world height regardless of resolution

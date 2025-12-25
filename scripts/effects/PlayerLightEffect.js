@@ -1032,7 +1032,7 @@ export class PlayerLightEffect extends EffectBase {
     this._torchGuttering = isTorchMode && distanceUnits > maxU;
 
     // Update debug overlay with current state
-    const state = fade <= 0.0001 ? 'HIDDEN' : (blocked || distanceUnits > this.params.maxDistanceUnits ? 'EMBER' : 'ACTIVE');
+    const state = fade <= 0.0001 ? 'HIDDEN' : (blocked || distanceUnits > maxU ? 'EMBER' : 'ACTIVE');
     this._updateDebugOverlay(state, distanceUnits, blocked, fade);
 
     if (!this._torchParticlesRegistered) {
@@ -1365,7 +1365,10 @@ export class PlayerLightEffect extends EffectBase {
     const THREE = window.THREE;
     if (!THREE || !this._group) return;
 
-    const sparkTex = new THREE.TextureLoader().load(encodeURI('modules/map-shine-advanced/assets/kenney assets/spark_05.png'));
+    const sceneComposer = window.MapShine?.sceneComposer;
+    const effectComposer = sceneComposer?.effectComposer || window.MapShine?.effectComposer;
+    const fireEffect = effectComposer?.effects?.get?.('fire-sparks') || null;
+    const sparkTex = fireEffect?.emberTexture || new THREE.TextureLoader().load('modules/map-shine-advanced/assets/particle.webp');
     sparkTex.wrapS = THREE.ClampToEdgeWrapping;
     sparkTex.wrapT = THREE.ClampToEdgeWrapping;
     sparkTex.generateMipmaps = true;
@@ -1435,9 +1438,21 @@ export class PlayerLightEffect extends EffectBase {
     system.userData._msTorchUpdraft = updraft;
 
     this._torchSparksSystem = system;
+
+    const batch = window.MapShineParticles?.batchRenderer;
+    if (batch && typeof batch.addSystem === 'function') {
+      batch.addSystem(system);
+      if (this.scene && system.emitter && !system.emitter.parent) {
+        this.scene.add(system.emitter);
+      }
+    } else if (system.emitter) {
+      this._group.add(system.emitter);
+    }
+
     if (system.emitter) {
       system.emitter.visible = false;
-      this._group.add(system.emitter);
+      const ud = system.emitter.userData || (system.emitter.userData = {});
+      ud.msAutoCull = false;
     }
   }
 
@@ -1468,6 +1483,10 @@ export class PlayerLightEffect extends EffectBase {
     if (!this._debugOverlay) return;
 
     if (this.params.debugReadoutEnabled) {
+      const rangeMul = this.params.mode === 'torch' ? 3.0 : 4.0;
+      const baseMaxU = this.params.mode === 'torch' ? this.params.torchMaxDistanceUnits : this.params.flashlightMaxDistanceUnits;
+      const maxU = Math.max(0.001, baseMaxU) * rangeMul;
+
       this._debugOverlay.style.display = 'block';
       this._debugOverlay.innerHTML = `
         <div><strong>PlayerLight Debug</strong></div>
@@ -1476,7 +1495,7 @@ export class PlayerLightEffect extends EffectBase {
         <div>Distance: ${distance.toFixed(2)}u</div>
         <div>Blocked: ${blocked ? 'YES' : 'NO'}</div>
         <div>Fade: ${(distanceFade * 100).toFixed(1)}%</div>
-        <div>Max Dist: ${this.params.maxDistanceUnits}u</div>
+        <div>Max Dist: ${maxU.toFixed(2)}u</div>
         <div>Fade Band: ${this.params.fadeOutDistanceUnits}u</div>
       `;
     } else {
@@ -2012,7 +2031,7 @@ export class PlayerLightEffect extends EffectBase {
     const tokenRadiusU = tokenRadiusPx * pxToUnits;
     const beamStartPx = Math.max(0, tokenRadiusPx);
 
-    const maxU = Math.max(0.001, (typeof maxDistanceUnitsOverride === 'number' ? maxDistanceUnitsOverride : this.params.maxDistanceUnits));
+    const maxU = Math.max(0.001, (typeof maxDistanceUnitsOverride === 'number' ? maxDistanceUnitsOverride : this.params.flashlightMaxDistanceUnits));
     const aimDistU = Math.max(0, lenU - tokenRadiusU);
     const distT = Math.max(0, Math.min(1, aimDistU / maxU));
     const rangeFade = 1.0 - distT;
@@ -2345,7 +2364,7 @@ export class PlayerLightEffect extends EffectBase {
         const dy = cursorWorld.y - tokenCenterWorld.y;
         const distU = Math.hypot(dx, dy) * pxToUnits;
 
-        const maxU = Math.max(0.001, this.params.maxDistanceUnits) * 4.0;
+        const maxU = Math.max(0.001, this.params.flashlightMaxDistanceUnits) * 4.0;
         const distT = Math.max(0, Math.min(1, distU / maxU));
         const distanceScale = this.params.flashlightLightDistanceScaleEnabled
           ? ((this.params.flashlightLightDistanceScaleNear * (1 - distT)) + (this.params.flashlightLightDistanceScaleFar * distT))

@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
 
 const log = createLogger('DrawingManager');
 
@@ -205,6 +206,12 @@ export class DrawingManager {
         const isAuthor = drawingDoc.isAuthor;
         const hidden = drawingDoc.hidden;
         group.visible = !hidden || isAuthor || isGM;
+
+        // Render drawings in overlay pass so text/lines are not affected by bloom.
+        // Layers are not inherited in three.js, so apply to all descendants.
+        group.traverse((obj) => {
+          if (obj?.layers) obj.layers.set(OVERLAY_THREE_LAYER);
+        });
 
         this.group.add(group);
         this.drawings.set(drawingDoc.id, group);

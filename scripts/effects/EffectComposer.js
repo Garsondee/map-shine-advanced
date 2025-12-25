@@ -318,7 +318,15 @@ export class EffectComposer {
     }
 
     // Single authoritative scene render (background, tiles, tokens, surface effects, etc.)
-    this.renderer.render(this.scene, this.camera);
+    // Ensure overlay-only objects (layer 31) are NEVER included in post-processing inputs.
+    // They are rendered separately to screen in _renderOverlayToScreen().
+    const prevSceneLayersMask = this.camera.layers.mask;
+    try {
+      this.camera.layers.disable(OVERLAY_THREE_LAYER);
+      this.renderer.render(this.scene, this.camera);
+    } finally {
+      this.camera.layers.mask = prevSceneLayersMask;
+    }
 
     // If no post-processing effects are active, we're done
     if (!usePostProcessing) {

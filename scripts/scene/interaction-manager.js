@@ -6,6 +6,7 @@
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
+import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
 
 const log = createLogger('InteractionManager');
 
@@ -207,6 +208,7 @@ export class InteractionManager {
     this.dragSelect.mesh = new THREE.Mesh(geometry, material);
     this.dragSelect.mesh.visible = false;
     this.dragSelect.mesh.name = 'SelectionBoxFill';
+    this.dragSelect.mesh.layers.set(OVERLAY_THREE_LAYER);
     // Ensure it renders on top
     this.dragSelect.mesh.renderOrder = 9999;
     
@@ -222,6 +224,7 @@ export class InteractionManager {
     this.dragSelect.border = new THREE.LineSegments(borderGeo, borderMat);
     this.dragSelect.border.visible = false;
     this.dragSelect.border.name = 'SelectionBoxBorder';
+    this.dragSelect.border.layers.set(OVERLAY_THREE_LAYER);
     this.dragSelect.border.renderOrder = 10000;
     
     // Add to scene via SceneComposer
@@ -363,6 +366,7 @@ export class InteractionManager {
     this.mapPointDraw.previewGroup.name = 'MapPointDrawPreview';
     this.mapPointDraw.previewGroup.visible = false;
     this.mapPointDraw.previewGroup.renderOrder = 9998;
+    this.mapPointDraw.previewGroup.layers.set(OVERLAY_THREE_LAYER);
 
     // Line connecting points
     const lineGeo = new THREE.BufferGeometry();
@@ -375,6 +379,7 @@ export class InteractionManager {
       linewidth: 2
     });
     this.mapPointDraw.previewLine = new THREE.Line(lineGeo, lineMat);
+    this.mapPointDraw.previewLine.layers.set(OVERLAY_THREE_LAYER);
     this.mapPointDraw.previewGroup.add(this.mapPointDraw.previewLine);
 
     // Legacy points object (kept for compatibility but we use markers now)
@@ -387,6 +392,7 @@ export class InteractionManager {
       depthTest: false
     });
     this.mapPointDraw.previewPoints = new THREE.Points(pointsGeo, pointsMat);
+    this.mapPointDraw.previewPoints.layers.set(OVERLAY_THREE_LAYER);
     this.mapPointDraw.previewGroup.add(this.mapPointDraw.previewPoints);
 
     // Semi-transparent fill for area (will be updated dynamically)
@@ -399,6 +405,7 @@ export class InteractionManager {
       side: THREE.DoubleSide
     });
     this.mapPointDraw.previewFill = new THREE.Mesh(fillGeo, fillMat);
+    this.mapPointDraw.previewFill.layers.set(OVERLAY_THREE_LAYER);
     this.mapPointDraw.previewGroup.add(this.mapPointDraw.previewFill);
 
     // Cursor point preview (shows where next point will be placed)

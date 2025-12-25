@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
 
 const log = createLogger('TemplateManager');
 
@@ -168,6 +169,11 @@ export class TemplateManager {
         
         const mesh = new THREE.Mesh(geometry, material);
         mesh.position.set(doc.x, doc.y, 0);
+        // Render templates in overlay pass so they are not affected by bloom.
+        // Layers are not inherited in three.js, so apply to descendants too.
+        mesh.traverse((obj) => {
+          if (obj?.layers) obj.layers.set(OVERLAY_THREE_LAYER);
+        });
         
         // Rotation
         mesh.rotation.z = THREE.MathUtils.degToRad(-direction);

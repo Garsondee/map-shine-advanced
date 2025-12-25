@@ -34,8 +34,10 @@ export class LightingEffect extends EffectBase {
       enabled: true,
       globalIllumination: 1.0, // Multiplier for ambient
       lightIntensity: 0.8, // Master multiplier for dynamic lights
+      colorationStrength: 1.35,
       darknessEffect: 0.5, // Scales Foundry's darknessLevel
       darknessLevel: 0.0, // Read-only mostly, synced from canvas
+
       // Outdoor brightness control: adjusts outdoor areas relative to darkness level
       // At darkness 0: outdoors *= outdoorBrightness (boost daylight)
       // At darkness 1: outdoors *= (2.0 - outdoorBrightness) (dim night)
@@ -47,61 +49,42 @@ export class LightingEffect extends EffectBase {
       debugLightBufferExposure: 1.0,
     };
 
-    this.lights = new Map(); // Map<id, ThreeLightSource>
-    this.darknessSources = new Map(); // Map<id, ThreeDarknessSource>
+    this.lights = new Map(); 
+    this.darknessSources = new Map(); 
     
-    // THREE resources
-    this.lightScene = null;      // Scene for Light Accumulation
-    this.lightTarget = null;     // Buffer for Light Accumulation
-    this.darknessScene = null;   // Scene for Darkness Accumulation
-    this.darknessTarget = null;  // Buffer for Darkness Accumulation
-    this.roofAlphaTarget = null; // Buffer for Roof Alpha Mask (overhead tiles)
-    this.quadScene = null;       // Scene for Final Composite
+    this.lightScene = null;     
+    this.lightTarget = null;    
+    this.darknessScene = null;  
+    this.darknessTarget = null; 
+    this.roofAlphaTarget = null; 
+    this.quadScene = null;      
     this.quadCamera = null;
     this.compositeMaterial = null;
     this.debugLightBufferMaterial = null;
 
-    /** @type {THREE.Mesh|null} */
     this._quadMesh = null;
 
-    /** @type {THREE.Texture|null} */
     this.windowMask = null;
-    /** @type {THREE.Texture|null} */
     this.outdoorsMask = null;
 
-    /** @type {THREE.Mesh|null} */
     this.windowLightMesh = null;
-    /** @type {THREE.ShaderMaterial|null} */
     this.windowLightMaterial = null;
 
-    // Screen-space outdoors mask for overhead shadows: we project the
-    // world-space _Outdoors texture from the base plane into a
-    // full-screen render target using the main camera so the composite
-    // shader can safely sample it with vUv without breaking pinning.
-    /** @type {THREE.Scene|null} */
     this.outdoorsScene = null;
-    /** @type {THREE.Mesh|null} */
     this.outdoorsMesh = null;
-    /** @type {THREE.Material|null} */
     this.outdoorsMaterial = null;
-    /** @type {THREE.WebGLRenderTarget|null} */
     this.outdoorsTarget = null;
 
     this._effectiveDarkness = null;
     
-    // PERFORMANCE: Reusable objects to avoid per-frame allocations
-    this._tempSize = null; // Lazy init when THREE is available
+    this._tempSize = null; 
 
-    /** @type {THREE.Mesh|null} */
     this._baseMesh = null;
 
     this._publishedRoofAlphaTex = null;
     this._publishedOutdoorsTex = null;
   }
 
-  /**
-   * Get UI control schema
-   */
   static getControlSchema() {
     return {
       enabled: true,
@@ -110,7 +93,7 @@ export class LightingEffect extends EffectBase {
           name: 'illumination',
           label: 'Global Illumination',
           type: 'inline',
-          parameters: ['globalIllumination', 'lightIntensity']
+          parameters: ['globalIllumination', 'lightIntensity', 'colorationStrength']
         },
         {
           name: 'occlusion',
@@ -129,11 +112,12 @@ export class LightingEffect extends EffectBase {
         enabled: { type: 'boolean', default: true, hidden: true },
         globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.5 },
         lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.8, label: 'Light Intensity' },
+        colorationStrength: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.35, label: 'Coloration Strength' },
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
         darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Darkness Effect' },
         outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 2.0, label: 'Outdoor Brightness' },
         debugShowLightBuffer: { type: 'boolean', default: false },
-        debugLightBufferExposure: { type: 'slider', min: 0.1, max: 10, step: 0.1, default: 1.0 },
+        debugLightBufferExposure: { type: 'number', default: 1.0 },
       }
     };
   }
@@ -143,44 +127,38 @@ export class LightingEffect extends EffectBase {
     this.renderer = renderer;
     this.mainCamera = camera;
 
-    // 1. Light Accumulation Setup
     this.lightScene = new THREE.Scene();
-    // Use black background for additive light accumulation
     this.lightScene.background = new THREE.Color(0x000000); 
 
     this.darknessScene = new THREE.Scene();
     this.darknessScene.background = new THREE.Color(0x000000);
 
-    // Scene used to project _Outdoors mask from the base plane into
-    // screen space for overhead shadow gating.
     this.outdoorsScene = new THREE.Scene();
 
     this._rebuildOutdoorsProjection();
 
-    // 2. Final Composite Quad
     this.quadScene = new THREE.Scene();
     this.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     
-    // The Composite Shader (Combines Diffuse + Light + Color Correction)
     this.compositeMaterial = new THREE.ShaderMaterial({
       uniforms: {
-        tDiffuse: { value: null }, // Base Scene
-        tLight: { value: null },   // Accumulated HDR Light
-        tDarkness: { value: null }, // Accumulated Darkness Mask
-        tRoofAlpha: { value: null }, // Overhead tile alpha mask
-        tOverheadShadow: { value: null }, // Overhead shadow factor (from OverheadShadowsEffect)
-        tBuildingShadow: { value: null }, // Building shadow factor (from BuildingShadowsEffect)
-        tBushShadow: { value: null }, // Bush shadow factor (from BushEffect)
-        tTreeShadow: { value: null }, // Tree shadow factor (from TreeEffect)
-        tCloudShadow: { value: null }, // Cloud shadow factor (from CloudEffect)
-        tCloudTop: { value: null }, // Cloud top overlay (from CloudEffect)
-        tOutdoorsMask: { value: null }, // _Outdoors mask (bright outside, dark indoors)
+        tDiffuse: { value: null }, 
+        tLight: { value: null },   
+        tDarkness: { value: null }, 
+        tRoofAlpha: { value: null }, 
+        tOverheadShadow: { value: null }, 
+        tBuildingShadow: { value: null }, 
+        tBushShadow: { value: null }, 
+        tTreeShadow: { value: null }, 
+        tCloudShadow: { value: null }, 
+        tCloudTop: { value: null }, 
+        tOutdoorsMask: { value: null }, 
         uDarknessLevel: { value: 0.0 },
         uAmbientBrightest: { value: new THREE.Color(1,1,1) },
         uAmbientDarkness: { value: new THREE.Color(0.1, 0.1, 0.2) },
         uGlobalIllumination: { value: 1.0 },
         uLightIntensity: { value: 1.0 },
-        // Overhead & building shadow controls
+        uColorationStrength: { value: 1.35 },
         uOverheadShadowOpacity: { value: 0.0 },
         uOverheadShadowAffectsLights: { value: 0.75 },
         uBuildingShadowOpacity: { value: 0.0 },
@@ -189,13 +167,11 @@ export class LightingEffect extends EffectBase {
         uTreeSelfShadowStrength: { value: 1.0 },
         uCloudShadowOpacity: { value: 0.0 },
         uHasOutdoorsMask: { value: 0.0 },
-        // Shared sun/zoom/texel data for screen-space shadow offsets
         uShadowSunDir: { value: new THREE.Vector2(0, 1) },
         uShadowZoom: { value: 1.0 },
         uBushShadowLength: { value: 0.04 },
         uTreeShadowLength: { value: 0.08 },
         uCompositeTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
-        // Outdoor brightness boost (applied based on darkness level)
         uOutdoorBrightness: { value: 1.5 },
       },
       vertexShader: `
@@ -222,6 +198,7 @@ export class LightingEffect extends EffectBase {
         uniform vec3 uAmbientDarkness;
         uniform float uGlobalIllumination;
         uniform float uLightIntensity;
+        uniform float uColorationStrength;
         uniform float uOverheadShadowOpacity;
         uniform float uOverheadShadowAffectsLights;
         uniform float uBuildingShadowOpacity;
@@ -243,9 +220,10 @@ export class LightingEffect extends EffectBase {
           return mix(gray, color, value);
         }
 
-        // REINHARD-JODIE TONE MAPPING
-        // This compresses high dynamic range values to 0.0 - 1.0
-        // while preserving saturation in bright highlights better than standard reinhard.
+        float perceivedBrightness(vec3 c) {
+          return dot(c, vec3(0.2126, 0.7152, 0.0722));
+        }
+
         vec3 reinhardJodie(vec3 c) {
           float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
           vec3 tc = c / (c + 1.0);
@@ -254,19 +232,16 @@ export class LightingEffect extends EffectBase {
 
         void main() {
           vec4 baseColor = texture2D(tDiffuse, vUv);
-          vec4 lightSample = texture2D(tLight, vUv); // HDR light buffer
+          vec4 lightSample = texture2D(tLight, vUv); 
           float darknessMask = clamp(texture2D(tDarkness, vUv).r, 0.0, 1.0);
           vec4 roofSample = texture2D(tRoofAlpha, vUv);
 
-          // 1. Determine Ambient Light
           float master = max(uLightIntensity, 0.0);
-          vec3 ambient = mix(uAmbientBrightest, uAmbientDarkness, uDarknessLevel) * max(uGlobalIllumination, 0.0) * master;
+          vec3 ambient = mix(uAmbientBrightest, uAmbientDarkness, uDarknessLevel) * max(uGlobalIllumination, 0.0);
 
-          // 2. Roof Occlusion Mask
           float roofAlpha = roofSample.a;
           float lightVisibility = 1.0 - roofAlpha;
 
-          // 3. Shadow Sampling (Overhead, Building, Bush, Tree)
           float shadowTex = texture2D(tOverheadShadow, vUv).r;
           float shadowOpacity = clamp(uOverheadShadowOpacity, 0.0, 1.0);
           float rawShadowFactor = mix(1.0, shadowTex, shadowOpacity);
@@ -275,7 +250,6 @@ export class LightingEffect extends EffectBase {
           float buildingOpacity = clamp(uBuildingShadowOpacity, 0.0, 1.0);
           float rawBuildingFactor = mix(1.0, buildingTex, buildingOpacity);
 
-          // Bush Shadows
           vec2 bushDir = normalize(uShadowSunDir);
           float bushPixelLen = uBushShadowLength * 1080.0 * max(uShadowZoom, 0.0001);
           vec2 bushOffsetUv = bushDir * bushPixelLen * uCompositeTexelSize;
@@ -283,25 +257,21 @@ export class LightingEffect extends EffectBase {
           float bushOpacity = clamp(uBushShadowOpacity, 0.0, 1.0);
           float rawBushFactor = mix(1.0, bushTex, bushOpacity);
 
-          // Tree Shadows
           float treePixelLen = uTreeShadowLength * 1080.0 * max(uShadowZoom, 0.0001);
           vec2 treeOffsetUv = bushDir * treePixelLen * uCompositeTexelSize;
           float treeTex = texture2D(tTreeShadow, vUv + treeOffsetUv).r;
           float treeOpacity = clamp(uTreeShadowOpacity, 0.0, 1.0);
           float rawTreeFactor = mix(1.0, treeTex, treeOpacity);
 
-          // Cloud Shadows (already masked to outdoors in CloudEffect)
           float cloudTex = texture2D(tCloudShadow, vUv).r;
           float cloudOpacity = clamp(uCloudShadowOpacity, 0.0, 1.0);
           float cloudFactor = mix(1.0, cloudTex, cloudOpacity);
 
-          // Self-masking
           float bushCoverage = texture2D(tBushShadow, vUv).g;
           float bushSelfMask = clamp(bushCoverage, 0.0, 1.0);
           float treeCoverage = texture2D(tTreeShadow, vUv).g;
           float treeSelfMask = clamp(treeCoverage, 0.0, 1.0) * clamp(uTreeSelfShadowStrength, 0.0, 1.0);
 
-          // Shadow mixing logic
           float shadowFactor = mix(rawShadowFactor, 1.0, roofAlpha);
           float buildingFactor = mix(rawBuildingFactor, 1.0, roofAlpha);
           float bushFactor = mix(rawBushFactor, 1.0, roofAlpha);
@@ -320,25 +290,24 @@ export class LightingEffect extends EffectBase {
 
           float combinedShadowFactor = shadowFactor * buildingFactor * bushFactor * treeFactor * cloudFactor;
 
-          // 4. Combine Ambient with Accumulated Lights
           float kd = clamp(uOverheadShadowAffectsLights, 0.0, 1.0);
           vec3 shadedAmbient = ambient * combinedShadowFactor;
 
           vec3 baseLights = lightSample.rgb * lightVisibility;
-
-          // Safety check for NaN
           bool badLight = (baseLights.r != baseLights.r) || (baseLights.g != baseLights.g) || (baseLights.b != baseLights.b);
           if (badLight) {
             baseLights = vec3(0.0);
           }
 
           vec3 shadedLights = mix(baseLights, baseLights * combinedShadowFactor, kd);
-          vec3 totalIllumination = shadedAmbient + shadedLights * master;
+
+          vec3 safeLights = max(shadedLights, vec3(0.0));
+          float lightI = max(max(safeLights.r, safeLights.g), safeLights.b);
+          vec3 totalIllumination = shadedAmbient + vec3(lightI) * master;
 
           float dMask = clamp(darknessMask, 0.0, 1.0);
           totalIllumination *= (1.0 - dMask);
 
-          // Safety check for black flash
           bool badIllum = (totalIllumination.r != totalIllumination.r) ||
                           (totalIllumination.g != totalIllumination.g) ||
                           (totalIllumination.b != totalIllumination.b);
@@ -348,11 +317,14 @@ export class LightingEffect extends EffectBase {
 
           vec3 minIllum = ambient * 0.1;
           totalIllumination = max(totalIllumination, minIllum);
-          
-          // 5. Apply Illumination to Base Texture
+
           vec3 litColor = baseColor.rgb * totalIllumination;
 
-          // 6. Apply Outdoor Brightness Boost
+          float reflection = perceivedBrightness(baseColor.rgb);
+          vec3 coloration = shadedLights * master * reflection * max(uColorationStrength, 0.0);
+          coloration *= (1.0 - dMask);
+          litColor += coloration;
+
           if (uHasOutdoorsMask > 0.5) {
             float outdoorStrength = texture2D(tOutdoorsMask, vUv).r;
             float dayBoost = uOutdoorBrightness;
@@ -409,7 +381,7 @@ export class LightingEffect extends EffectBase {
 
     // Hooks to Foundry
     Hooks.on('createAmbientLight', (doc) => this.onLightUpdate(doc));
-    Hooks.on('updateAmbientLight', (doc) => this.onLightUpdate(doc));
+    Hooks.on('updateAmbientLight', (doc, changes) => this.onLightUpdate(doc, changes));
     Hooks.on('deleteAmbientLight', (doc) => this.onLightDelete(doc));
     
     // Listen for lightingRefresh to rebuild any lights that were created before
@@ -507,6 +479,8 @@ export class LightingEffect extends EffectBase {
         uMinCloudFactor: { value: 0.0 },
         uCloudLocalInfluence: { value: 1.0 },
         uCloudDensityCurve: { value: 1.0 },
+        uDarknessLevel: { value: 0.0 },
+        uDarknessDimming: { value: 0.5 },
         uCloudShadowMap: { value: null },
         uHasCloudShadowMap: { value: 0.0 },
         uRgbShiftAmount: { value: 0.0 },
@@ -535,6 +509,8 @@ export class LightingEffect extends EffectBase {
         uniform float uMinCloudFactor;
         uniform float uCloudLocalInfluence;
         uniform float uCloudDensityCurve;
+        uniform float uDarknessLevel;
+        uniform float uDarknessDimming;
         uniform sampler2D uCloudShadowMap;
         uniform float uHasCloudShadowMap;
         uniform float uRgbShiftAmount;
@@ -614,7 +590,12 @@ export class LightingEffect extends EffectBase {
             cloudFactor = 1.0;
           }
 
-          float strength = m * indoor * cloudFactor * uIntensity;
+          float d = clamp(uDarknessLevel, 0.0, 1.0);
+          float dimAmt = clamp(uDarknessDimming, 0.0, 1.0);
+          float night = clamp(1.0 - d, 0.0, 1.0);
+          float darknessFactor = mix(1.0, night * night, dimAmt);
+
+          float strength = m * indoor * cloudFactor * uIntensity * darknessFactor;
 
           vec3 lightColor = uColor * strength;
 
@@ -691,41 +672,82 @@ export class LightingEffect extends EffectBase {
     });
   }
 
-  onLightUpdate(doc) {
-    console.debug('[LightingEffect] onLightUpdate', doc.id, doc.config?.negative, doc.config);
-    if (doc?.config?.negative) {
-      console.debug('[LightingEffect] Creating/Updating darkness source for', doc.id);
-      if (this.darknessSources.has(doc.id)) {
-        this.darknessSources.get(doc.id).updateData(doc);
-      } else {
-        const source = new ThreeDarknessSource(doc);
-        source.init();
-        this.darknessSources.set(doc.id, source);
-        if (source.mesh && this.darknessScene) this.darknessScene.add(source.mesh);
-        console.debug('[LightingEffect] Added darkness mesh to scene', doc.id);
+  _mergeLightDocChanges(doc, changes) {
+    if (!doc || !changes || typeof changes !== 'object') return doc;
+
+    let base;
+    try {
+      base = (typeof doc.toObject === 'function') ? doc.toObject() : doc;
+    } catch (_) {
+      base = doc;
+    }
+
+    let expandedChanges = changes;
+    try {
+      const hasDotKeys = Object.keys(changes).some((k) => k.includes('.'));
+      if (hasDotKeys && foundry?.utils?.expandObject) {
+        expandedChanges = foundry.utils.expandObject(changes);
       }
-      if (this.lights.has(doc.id)) {
-        const source = this.lights.get(doc.id);
+    } catch (_) {
+      expandedChanges = changes;
+    }
+
+    try {
+      if (foundry?.utils?.mergeObject) {
+        return foundry.utils.mergeObject(base, expandedChanges, {
+          inplace: false,
+          overwrite: true,
+          recursive: true,
+          insertKeys: true,
+          insertValues: true
+        });
+      }
+    } catch (_) {
+    }
+
+    const merged = { ...base, ...expandedChanges };
+    if (base?.config || expandedChanges?.config) {
+      merged.config = { ...(base?.config ?? {}), ...(expandedChanges?.config ?? {}) };
+    }
+    return merged;
+  }
+
+  onLightUpdate(doc, changes) {
+    const targetDoc = this._mergeLightDocChanges(doc, changes);
+    console.debug('[LightingEffect] onLightUpdate', targetDoc.id, targetDoc.config?.negative, targetDoc.config);
+    if (targetDoc?.config?.negative) {
+      console.debug('[LightingEffect] Creating/Updating darkness source for', targetDoc.id);
+      if (this.darknessSources.has(targetDoc.id)) {
+        this.darknessSources.get(targetDoc.id).updateData(targetDoc);
+      } else {
+        const source = new ThreeDarknessSource(targetDoc);
+        source.init();
+        this.darknessSources.set(targetDoc.id, source);
+        if (source.mesh && this.darknessScene) this.darknessScene.add(source.mesh);
+        console.debug('[LightingEffect] Added darkness mesh to scene', targetDoc.id);
+      }
+      if (this.lights.has(targetDoc.id)) {
+        const source = this.lights.get(targetDoc.id);
         if (source?.mesh) this.lightScene?.remove(source.mesh);
         source?.dispose();
-        this.lights.delete(doc.id);
+        this.lights.delete(targetDoc.id);
       }
       return;
     }
 
-    if (this.darknessSources.has(doc.id)) {
-      const ds = this.darknessSources.get(doc.id);
+    if (this.darknessSources.has(targetDoc.id)) {
+      const ds = this.darknessSources.get(targetDoc.id);
       if (ds?.mesh && this.darknessScene) this.darknessScene.remove(ds.mesh);
       ds?.dispose();
-      this.darknessSources.delete(doc.id);
+      this.darknessSources.delete(targetDoc.id);
     }
 
-    if (this.lights.has(doc.id)) {
-      this.lights.get(doc.id).updateData(doc);
+    if (this.lights.has(targetDoc.id)) {
+      this.lights.get(targetDoc.id).updateData(targetDoc);
     } else {
-      const source = new ThreeLightSource(doc);
+      const source = new ThreeLightSource(targetDoc);
       source.init();
-      this.lights.set(doc.id, source);
+      this.lights.set(targetDoc.id, source);
       if (source.mesh) this.lightScene.add(source.mesh);
     }
   }
@@ -812,6 +834,7 @@ export class LightingEffect extends EffectBase {
     u.uDarknessLevel.value = this.getEffectiveDarkness();
     u.uGlobalIllumination.value = this.params.globalIllumination;
     u.uLightIntensity.value = this.params.lightIntensity;
+    u.uColorationStrength.value = this.params.colorationStrength;
     u.uOutdoorBrightness.value = this.params.outdoorBrightness;
 
     try {
@@ -940,11 +963,26 @@ export class LightingEffect extends EffectBase {
           wu.uRgbShiftAngle.value = wl.params.rgbShiftAngle * (Math.PI / 180.0);
         }
         setThreeColorLoose(wu.uColor.value, wl.params.color, 0xfff5dd);
+
+        if (wu.uDarknessDimming) {
+          const dd = wl.params.darknessDimming;
+          wu.uDarknessDimming.value = (typeof dd === 'number' && isFinite(dd)) ? Math.max(0.0, Math.min(1.0, dd)) : wu.uDarknessDimming.value;
+        }
+        if (wu.uDarknessLevel) {
+          let d = this.params?.darknessLevel;
+          try {
+            const env = canvas?.environment;
+            if (env && typeof env.darknessLevel === 'number') d = env.darknessLevel;
+          } catch (e) {
+          }
+          d = (typeof d === 'number' && isFinite(d)) ? Math.max(0.0, Math.min(1.0, d)) : 0.0;
+          wu.uDarknessLevel.value = d;
+        }
       } else {
         wu.uIntensity.value = 0.0;
         wu.uHasCloudShadowMap.value = 0.0;
       }
-      
+
       // Bind cloud DENSITY texture for spatially-varying dimming (not outdoors-masked shadow)
       try {
         const cloudEffect = window.MapShine?.cloudEffect;

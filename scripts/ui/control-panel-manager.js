@@ -73,6 +73,9 @@ export class ControlPanelManager {
     /** @type {number|null} */
     this._statusIntervalId = null;
 
+    /** @type {boolean} */
+    this._didLoadControlState = false;
+
     this._boundHandlers = {
       onFaceMouseDown: (e) => this._onClockMouseDown(e),
       onFaceTouchStart: (e) => this._onClockTouchStart(e),
@@ -90,6 +93,18 @@ export class ControlPanelManager {
     if (!this.pane?.element) return;
     if (this.statusPanel) return;
 
+    if (!document.getElementById('map-shine-control-status-style')) {
+      const style = document.createElement('style');
+      style.id = 'map-shine-control-status-style';
+      style.textContent = `
+        @keyframes mapShineIndeterminate {
+          0% { transform: translateX(-60%); }
+          100% { transform: translateX(160%); }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
     const panel = document.createElement('div');
     panel.style.padding = '10px 12px';
     panel.style.margin = '6px';
@@ -105,6 +120,20 @@ export class ControlPanelManager {
     title.style.fontWeight = '600';
     title.style.marginBottom = '6px';
     panel.appendChild(title);
+
+    const modeLine = document.createElement('div');
+    modeLine.style.display = 'flex';
+    modeLine.style.justifyContent = 'space-between';
+    modeLine.style.gap = '10px';
+    modeLine.style.opacity = '0.92';
+    modeLine.style.marginBottom = '8px';
+    panel.appendChild(modeLine);
+
+    const modeText = document.createElement('div');
+    const activityText = document.createElement('div');
+    activityText.style.opacity = '0.85';
+    modeLine.appendChild(modeText);
+    modeLine.appendChild(activityText);
 
     const row = document.createElement('div');
     row.style.display = 'grid';
@@ -171,7 +200,7 @@ export class ControlPanelManager {
     panel.appendChild(progressWrap);
 
     this.statusPanel = panel;
-    this._statusEls = { curText, tgtText, progressLabel, progressPct, barInner, progressWrap };
+    this._statusEls = { curText, tgtText, modeText, activityText, progressLabel, progressPct, barInner, progressWrap };
 
     // Insert directly under the pane title bar.
     const root = this.pane.element;
@@ -200,10 +229,37 @@ export class ControlPanelManager {
 
     const wc = coreWeatherController || window.MapShine?.weatherController || window.weatherController;
     if (!wc) {
+      els.modeText.textContent = 'Weather: Unavailable';
+      els.activityText.textContent = '';
       els.curText.textContent = 'WeatherController not available';
       els.tgtText.textContent = '—';
       els.progressWrap.style.display = 'none';
       return;
+    }
+
+    const isEnabled = wc.enabled !== false;
+    const isDynamic = wc.dynamicEnabled === true;
+    const isPaused = wc.dynamicPaused === true;
+    const isTrans = wc.isTransitioning === true && Number(wc.transitionDuration) > 0;
+
+    const dynamicPreset = typeof wc.dynamicPresetId === 'string' && wc.dynamicPresetId ? wc.dynamicPresetId : '—';
+    const dynamicSpeed = Number.isFinite(wc.dynamicEvolutionSpeed) ? wc.dynamicEvolutionSpeed : null;
+
+    let modeLabel = 'Weather: Directed';
+    if (!isEnabled) {
+      modeLabel = 'Weather: Disabled';
+    } else if (isDynamic) {
+      if (isPaused) modeLabel = `Weather: Dynamic (Paused)`;
+      else if (isTrans) modeLabel = `Weather: Dynamic (Transitioning)`;
+      else modeLabel = `Weather: Dynamic (Running)`;
+    }
+    els.modeText.textContent = modeLabel;
+
+    if (isEnabled && isDynamic) {
+      const spd = dynamicSpeed !== null ? `, Speed ${Math.round(dynamicSpeed)}x` : '';
+      els.activityText.textContent = `${dynamicPreset}${spd}`;
+    } else {
+      els.activityText.textContent = '';
     }
 
     const cur = wc.getCurrentState?.() ?? wc.currentState;
@@ -211,21 +267,39 @@ export class ControlPanelManager {
     els.curText.textContent = this._formatWeatherLine(cur);
     els.tgtText.textContent = this._formatWeatherLine(tgt);
 
-    const isTrans = wc.isTransitioning === true && Number(wc.transitionDuration) > 0;
-    if (!isTrans) {
+    if (!isEnabled) {
       els.progressWrap.style.display = 'none';
+      els.barInner.style.animation = 'none';
+      els.barInner.style.width = '0%';
       return;
     }
 
-    const dur = Math.max(0.0001, Number(wc.transitionDuration) || 0);
-    const el = Math.max(0, Number(wc.transitionElapsed) || 0);
-    const t = Math.max(0, Math.min(1, el / dur));
-    const eta = Math.max(0, dur - el);
+    if (isTrans) {
+      const dur = Math.max(0.0001, Number(wc.transitionDuration) || 0);
+      const el = Math.max(0, Number(wc.transitionElapsed) || 0);
+      const t = Math.max(0, Math.min(1, el / dur));
+      const eta = Math.max(0, dur - el);
 
-    els.progressWrap.style.display = 'block';
-    els.progressLabel.textContent = `Transitioning (${eta.toFixed(1)}s)`;
-    els.progressPct.textContent = `${Math.round(t * 100)}%`;
-    els.barInner.style.width = `${t * 100}%`;
+      els.progressWrap.style.display = 'block';
+      els.progressLabel.textContent = `Transitioning (${eta.toFixed(1)}s)`;
+      els.progressPct.textContent = `${Math.round(t * 100)}%`;
+      els.barInner.style.animation = 'none';
+      els.barInner.style.width = `${t * 100}%`;
+      return;
+    }
+
+    if (isDynamic) {
+      els.progressWrap.style.display = 'block';
+      els.progressLabel.textContent = isPaused ? 'Dynamic: Paused' : 'Dynamic: Running';
+      els.progressPct.textContent = '';
+      els.barInner.style.width = '35%';
+      els.barInner.style.animation = isPaused ? 'none' : 'mapShineIndeterminate 1.15s linear infinite';
+      return;
+    }
+
+    els.progressWrap.style.display = 'none';
+    els.barInner.style.animation = 'none';
+    els.barInner.style.width = '0%';
   }
 
   /**
@@ -287,29 +361,33 @@ export class ControlPanelManager {
     this._buildStatusPanel();
 
     // Load saved control state
-    await this._loadControlState();
+    this._didLoadControlState = await this._loadControlState();
 
     try {
-      const snap = canvas?.scene?.getFlag?.('map-shine-advanced', 'weather-snapshot');
-      if (snap && typeof snap === 'object') {
-        if (typeof snap.dynamicEnabled === 'boolean') {
-          this.controlState.dynamicEnabled = snap.dynamicEnabled === true;
-          this.controlState.weatherMode = snap.dynamicEnabled === true ? 'dynamic' : 'directed';
-        }
-        if (typeof snap.dynamicPresetId === 'string' && snap.dynamicPresetId) {
-          this.controlState.dynamicPresetId = snap.dynamicPresetId;
-        }
-        if (Number.isFinite(snap.dynamicEvolutionSpeed)) {
-          this.controlState.dynamicEvolutionSpeed = snap.dynamicEvolutionSpeed;
-        }
-        if (typeof snap.dynamicPaused === 'boolean') {
-          this.controlState.dynamicPaused = snap.dynamicPaused === true;
-        }
-        if (Number.isFinite(snap.timeOfDay)) {
-          this.controlState.timeOfDay = snap.timeOfDay % 24;
-        }
+      // Only use the weather snapshot as a fallback when no controlState is present.
+      // controlState is the authoritative live-play state and should win on refresh.
+      if (!this._didLoadControlState) {
+        const snap = canvas?.scene?.getFlag?.('map-shine-advanced', 'weather-snapshot');
+        if (snap && typeof snap === 'object') {
+          if (typeof snap.dynamicEnabled === 'boolean') {
+            this.controlState.dynamicEnabled = snap.dynamicEnabled === true;
+            this.controlState.weatherMode = snap.dynamicEnabled === true ? 'dynamic' : 'directed';
+          }
+          if (typeof snap.dynamicPresetId === 'string' && snap.dynamicPresetId) {
+            this.controlState.dynamicPresetId = snap.dynamicPresetId;
+          }
+          if (Number.isFinite(snap.dynamicEvolutionSpeed)) {
+            this.controlState.dynamicEvolutionSpeed = snap.dynamicEvolutionSpeed;
+          }
+          if (typeof snap.dynamicPaused === 'boolean') {
+            this.controlState.dynamicPaused = snap.dynamicPaused === true;
+          }
+          if (Number.isFinite(snap.timeOfDay)) {
+            this.controlState.timeOfDay = snap.timeOfDay % 24;
+          }
 
-        this._suppressInitialWeatherApply = true;
+          this._suppressInitialWeatherApply = true;
+        }
       }
     } catch (e) {
     }
@@ -669,7 +747,19 @@ export class ControlPanelManager {
       }
     }).on('change', (ev) => {
       this.controlState.weatherMode = ev.value;
+
+      // Make the mode toggle persist correctly across refresh by ensuring
+      // the underlying dynamicEnabled flag matches the selected mode.
+      // If the user picks Dynamic, dynamic weather should be enabled.
+      // If the user picks Directed, dynamic weather should be disabled.
+      if (ev.value === 'dynamic') {
+        this.controlState.dynamicEnabled = true;
+      } else {
+        this.controlState.dynamicEnabled = false;
+      }
+
       this._updateWeatherControls(weatherFolder);
+      void this._applyControlState();
       this.debouncedSave();
     });
 
@@ -961,17 +1051,20 @@ Current Weather:
   async _loadControlState() {
     try {
       const scene = canvas?.scene;
-      if (!scene) return;
+      if (!scene) return false;
 
       const saved = scene.getFlag('map-shine-advanced', 'controlState');
       if (saved) {
         // Merge with defaults to handle missing properties
         this.controlState = { ...this.controlState, ...saved };
         log.info('Loaded control state from scene flags');
+        return true;
       }
     } catch (error) {
       log.warn('Failed to load control state:', error);
     }
+
+    return false;
   }
 
   /**

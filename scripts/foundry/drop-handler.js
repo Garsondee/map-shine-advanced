@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import Coordinates from '../utils/coordinates.js';
 
 const log = createLogger('DropHandler');
 
@@ -195,8 +196,9 @@ export class DropHandler {
     
     // Center token on drop point
     let { x, y } = position;
-    x -= tokenDoc.width / 2;
-    y -= tokenDoc.height / 2;
+    const gridSize = canvas.grid?.size || 100;
+    x -= (tokenDoc.width * gridSize) / 2;
+    y -= (tokenDoc.height * gridSize) / 2;
 
     // Snap to grid if enabled
     if (snap && canvas.grid) {
@@ -343,12 +345,13 @@ export class DropHandler {
         vector.unproject(camera);
         
         const dir = vector.sub(camera.position).normalize();
-        
-        const distance = -camera.position.z / dir.z;
-        
+        const targetZ = this.sceneComposer?.groundZ ?? 0;
+        const distance = (targetZ - camera.position.z) / dir.z;
+
         const pos = camera.position.clone().add(dir.multiplyScalar(distance));
-        
-        return { x: pos.x, y: pos.y };
+
+        const foundryPos = Coordinates.toFoundry(pos.x, pos.y);
+        return { x: foundryPos.x, y: foundryPos.y };
       }
       else if (camera.isOrthographicCamera) {
         // Map NDC to frustum
@@ -365,8 +368,9 @@ export class DropHandler {
         // Using unproject is safer
         const vector = new THREE.Vector3(ndcX, ndcY, 0);
         vector.unproject(camera);
-        
-        return { x: vector.x, y: vector.y };
+
+        const foundryPos = Coordinates.toFoundry(vector.x, vector.y);
+        return { x: foundryPos.x, y: foundryPos.y };
       }
     }
 

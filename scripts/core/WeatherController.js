@@ -1798,18 +1798,51 @@ export class WeatherController {
       if (wd instanceof THREE.Vector2) return wd.clone();
       return new THREE.Vector2(wd?.x ?? 1, wd?.y ?? 0);
     };
-    
-    // Deep copy current state as start
-    this.startState = { 
-      ...this.currentState,
-      windDirection: cloneWindDir(this.currentState.windDirection)
-    };
-    
-    // Set target
-    this.targetState = {
-      ...targetState,
-      windDirection: cloneWindDir(targetState.windDirection)
-    };
+
+    // IMPORTANT: Keep startState/targetState object references stable.
+    // Other systems (UI/status panels, effects) may hold references to these objects.
+    // Replacing them would cause those consumers to read stale values.
+
+    // Copy current state into start state.
+    if (!this.startState || typeof this.startState !== 'object') {
+      this.startState = { ...this.currentState };
+    }
+    if (!(this.startState.windDirection instanceof THREE.Vector2)) {
+      this.startState.windDirection = cloneWindDir(this.currentState.windDirection);
+    }
+    this._copyState(this.currentState, this.startState);
+
+    // Copy provided target state into targetState.
+    if (!this.targetState || typeof this.targetState !== 'object') {
+      this.targetState = { ...this.currentState };
+    }
+    if (!(this.targetState.windDirection instanceof THREE.Vector2)) {
+      this.targetState.windDirection = cloneWindDir(targetState?.windDirection ?? this.currentState.windDirection);
+    }
+
+    this.targetState.precipitation = Number(targetState?.precipitation) || 0.0;
+    this.targetState.cloudCover = Number(targetState?.cloudCover) || 0.0;
+    this.targetState.windSpeed = Number(targetState?.windSpeed) || 0.0;
+    this.targetState.fogDensity = Number(targetState?.fogDensity) || 0.0;
+    this.targetState.freezeLevel = Number(targetState?.freezeLevel) || 0.0;
+
+    const wd = targetState?.windDirection;
+    if (wd && this.targetState.windDirection?.set) {
+      this.targetState.windDirection.set(Number(wd.x) || 1, Number(wd.y) || 0);
+      this.targetState.windDirection.normalize();
+    }
+
+    // Preserve explicitly provided discrete fields if present; otherwise derive.
+    if (Number.isFinite(targetState?.precipType)) {
+      this.targetState.precipType = Number(targetState.precipType) || 0;
+    } else {
+      if (this.targetState.precipitation < 0.05) this.targetState.precipType = PrecipitationType.NONE;
+      else if (this.targetState.freezeLevel > 0.55) this.targetState.precipType = PrecipitationType.SNOW;
+      else this.targetState.precipType = PrecipitationType.RAIN;
+    }
+    if (Number.isFinite(targetState?.wetness)) {
+      this.targetState.wetness = Number(targetState.wetness) || 0.0;
+    }
 
     this.transitionDuration = safeDuration;
     this.transitionElapsed = 0;

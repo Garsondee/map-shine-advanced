@@ -41,6 +41,9 @@ export class WaterEffect extends EffectBase {
       rainRipplesEnabled: true,
       rainRippleIntensityBoost: 1.0,
       rainRippleSpeedBoost: 0.65,
+      rainRippleScale: 2.0,
+
+      edgeSoftnessTexels: 6.0,
 
       windFoamEnabled: false,
       windFoamIntensity: 1.0,
@@ -261,6 +264,23 @@ export class WaterEffect extends EffectBase {
           max: 4,
           step: 0.05,
           default: 0.65
+        },
+        rainRippleScale: {
+          type: 'slider',
+          label: 'Rain Ripple Scale',
+          min: 0.25,
+          max: 8.0,
+          step: 0.05,
+          default: 2.0
+        },
+
+        edgeSoftnessTexels: {
+          type: 'slider',
+          label: 'Edge Softness (texels)',
+          min: 0.0,
+          max: 32.0,
+          step: 0.25,
+          default: 6.0
         },
 
         windFoamEnabled: {
@@ -543,6 +563,9 @@ export class WaterEffect extends EffectBase {
     const rainRipplesEnabled = typeof p.rainRipplesEnabled === 'boolean' ? p.rainRipplesEnabled : true;
     const rainRippleIntensityBoost = typeof p.rainRippleIntensityBoost === 'number' ? p.rainRippleIntensityBoost : 1.0;
     const rainRippleSpeedBoost = typeof p.rainRippleSpeedBoost === 'number' ? p.rainRippleSpeedBoost : 0.65;
+    const rainRippleScale = typeof p.rainRippleScale === 'number' ? p.rainRippleScale : 2.0;
+
+    const edgeSoftnessTexels = typeof p.edgeSoftnessTexels === 'number' ? p.edgeSoftnessTexels : 6.0;
 
     let weatherState = null;
     if ((rainRipplesEnabled || windFoamEnabled) && wc && typeof wc.getCurrentState === 'function') {
@@ -557,6 +580,7 @@ export class WaterEffect extends EffectBase {
       intensity *= (1.0 + rainFactor * rainRippleIntensityBoost);
       speed *= (1.0 + rainFactor * rainRippleSpeedBoost);
       frequency *= (1.0 + rainFactor * 0.15);
+      frequency *= (1.0 + rainFactor * Math.max(0.0, rainRippleScale));
     }
 
     let windDirX = 1.0;
@@ -639,6 +663,8 @@ export class WaterEffect extends EffectBase {
         frequency,
         speed,
 
+        edgeSoftnessTexels,
+
         maskFlipY: this._waterMaskFlipY,
         maskUseAlpha: this._waterMaskUseAlpha,
 
@@ -689,6 +715,7 @@ export class WaterEffect extends EffectBase {
         intensity,
         frequency,
         speed,
+        edgeSoftnessTexels,
         maskFlipY: this._waterMaskFlipY,
         maskUseAlpha: this._waterMaskUseAlpha,
         chromaEnabled,

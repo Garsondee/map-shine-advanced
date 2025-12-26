@@ -208,18 +208,55 @@ export const DistortionNoise = {
    */
   waterRipple: `
     vec2 waterDistortion(vec2 uv, float time, float intensity, float frequency, float speed) {
-      // Tileable-ish ripples: avoid any UV-center falloff so the effect works
-      // anywhere on the map and is driven only by the water mask.
       vec2 p = uv * frequency;
       float t = time * speed;
 
-      float w1 = sin((p.x + t) * 6.2831853);
-      float w2 = sin((p.y - t * 0.9) * 6.2831853 * 1.37);
-      float w3 = sin((p.x + p.y + t * 0.6) * 6.2831853 * 0.73);
-      float n = snoise(p * 1.5 + vec2(t * 0.15, -t * 0.12));
+      // Cell-based radial ripple field (tileable-ish without a single global center).
+      // Compute a couple of jittered centers per-cell and sum their ring waves.
+      vec2 cell = floor(p);
+      vec2 f = fract(p);
 
-      // Convert scalar field to 2D offset. Keep it cheap and stable.
-      vec2 offset = vec2(w1 + 0.35 * w3 + 0.45 * n, w2 - 0.35 * w3 + 0.45 * n);
+      // Cheap hash using simplex (already available). Returns 0..1.
+      vec2 h1 = vec2(
+        0.5 + 0.5 * snoise(cell * 0.17 + vec2(12.3, 45.6)),
+        0.5 + 0.5 * snoise(cell * 0.13 + vec2(78.9, 10.1))
+      );
+      vec2 h2 = vec2(
+        0.5 + 0.5 * snoise((cell + vec2(1.0, 0.0)) * 0.19 + vec2(2.7, 9.2)),
+        0.5 + 0.5 * snoise((cell + vec2(0.0, 1.0)) * 0.21 + vec2(6.1, 3.4))
+      );
+
+      // Jittered centers inside the cell.
+      vec2 c1 = 0.15 + 0.70 * h1;
+      vec2 c2 = 0.15 + 0.70 * h2;
+
+      vec2 d1 = f - c1;
+      vec2 d2 = f - c2;
+      float r1 = length(d1);
+      float r2 = length(d2);
+
+      // Expanding rings. Higher frequency => smaller/tighter ripples.
+      float ringFreq = 10.0;
+      float travel = t * 0.65;
+      float w1 = sin((r1 * ringFreq - travel) * 6.2831853);
+      float w2 = sin((r2 * ringFreq - travel * 1.07) * 6.2831853);
+
+      // Localized falloff per center, but no global vignette.
+      float a1 = exp(-r1 * 5.5);
+      float a2 = exp(-r2 * 5.5);
+
+      vec2 dir1 = d1 / max(r1, 1e-3);
+      vec2 dir2 = d2 / max(r2, 1e-3);
+
+      // Base radial offset field.
+      vec2 offset = (dir1 * w1 * a1 + dir2 * w2 * a2);
+
+      // End-stage noise so the displacement doesn't look perfectly clean.
+      float n = snoise(p * 1.85 + vec2(t * 0.22, -t * 0.19));
+      float n2 = snoise(p * 3.25 + vec2(-t * 0.31, t * 0.27));
+      vec2 endNoise = vec2(n, n2) * 0.35;
+      offset += endNoise;
+
       return offset * intensity;
     }
   `,
@@ -522,6 +559,8 @@ export class DistortionManager extends EffectBase {
         uWaterEnabled: { value: 0.0 },
         uWaterMaskFlipY: { value: 0.0 },
         uWaterMaskUseAlpha: { value: 0.0 },
+        uWaterMaskTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
+        uWaterEdgeSoftnessTexels: { value: 0.0 },
         uWaterIntensity: { value: 0.02 },
         uWaterFrequency: { value: 4.0 },
         uWaterSpeed: { value: 1.0 },
@@ -568,6 +607,8 @@ export class DistortionManager extends EffectBase {
         uniform float uWaterEnabled;
         uniform float uWaterMaskFlipY;
         uniform float uWaterMaskUseAlpha;
+        uniform vec2 uWaterMaskTexelSize;
+        uniform float uWaterEdgeSoftnessTexels;
         uniform float uWaterIntensity;
         uniform float uWaterFrequency;
         uniform float uWaterSpeed;
@@ -614,6 +655,10 @@ export class DistortionManager extends EffectBase {
           return a.x * a.y * b.x * b.y;
         }
 
+        vec2 safeClampUv(vec2 uv) {
+          return clamp(uv, vec2(0.001), vec2(0.999));
+        }
+
         float vignetteFactor(vec2 uv, float strength, float softness) {
           float s = clamp(softness, 0.0, 1.0);
           vec2 dist = (uv - 0.5) * 2.0;
@@ -626,6 +671,15 @@ export class DistortionManager extends EffectBase {
 
         float waterMaskValue(vec4 s) {
           return (uWaterMaskUseAlpha > 0.5) ? s.a : s.r;
+        }
+
+        float blur5TapMask(sampler2D tex, vec2 uv, vec2 stepUv) {
+          float c = waterMaskValue(texture2D(tex, uv));
+          float n = waterMaskValue(texture2D(tex, safeClampUv(uv + vec2(0.0, stepUv.y))));
+          float s = waterMaskValue(texture2D(tex, safeClampUv(uv - vec2(0.0, stepUv.y))));
+          float e = waterMaskValue(texture2D(tex, safeClampUv(uv + vec2(stepUv.x, 0.0))));
+          float w = waterMaskValue(texture2D(tex, safeClampUv(uv - vec2(stepUv.x, 0.0))));
+          return (c * 4.0 + (n + s + e + w) * 2.0) / 12.0;
         }
         
         void main() {
@@ -663,7 +717,23 @@ export class DistortionManager extends EffectBase {
             float waterY = (uWaterMaskFlipY > 0.5) ? (1.0 - sceneUv.y) : sceneUv.y;
             vec2 waterUv = vec2(sceneUv.x, waterY);
             vec4 waterSample = texture2D(tWaterMask, waterUv);
-            float waterMask = waterMaskValue(waterSample) * sceneInBounds;
+            float waterMaskHard = waterMaskValue(waterSample) * sceneInBounds;
+            float blurTexels = clamp(uWaterEdgeSoftnessTexels, 0.0, 64.0);
+            vec2 stepUv = max(uWaterMaskTexelSize, vec2(1.0 / 4096.0)) * blurTexels;
+            float waterMask = (blurTexels > 0.01)
+              ? blur5TapMask(tWaterMask, waterUv, stepUv) * sceneInBounds
+              : waterMaskHard;
+
+            // If the mask contains low non-zero values outside the intended water area,
+            // blurring can cause distortion to "leak" across the scene.
+            // We also want edges to be soft, so use a wider threshold window which
+            // expands slightly with edge softness.
+            float wm = clamp(waterMask, 0.0, 1.0);
+            float softness01 = clamp(blurTexels / 16.0, 0.0, 1.0);
+            float edgeLo = 0.02;
+            float edgeHi = mix(0.18, 0.35, softness01);
+            waterMask = smoothstep(edgeLo, edgeHi, wm);
+
             // Use waterUv for noise coords so ripples stay pinned to the map
             // and aligned to the mask's UV convention.
             vec2 waterOffset = waterDistortion(waterUv, uTime, uWaterIntensity, uWaterFrequency, uWaterSpeed);
@@ -718,12 +788,14 @@ export class DistortionManager extends EffectBase {
         uWaterMaskFlipY: { value: 0.0 },
         uWaterMaskUseAlpha: { value: 0.0 },
         uWaterMaskTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
+        uWaterEdgeSoftnessTexels: { value: 0.0 },
         tOutdoorsMask: { value: null },
         tCloudShadow: { value: null },
         tWindowLight: { value: null },
         uResolution: { value: new THREE.Vector2(1, 1) },
         uTime: { value: 0.0 },
         uZoom: { value: 1.0 },
+        uZoomMax: { value: 1.0 },
 
         // Camera/view mapping (mirrors composite shader)
         uViewBounds: { value: new THREE.Vector4(0.0, 0.0, 1.0, 1.0) },
@@ -794,12 +866,14 @@ export class DistortionManager extends EffectBase {
         uniform float uWaterMaskFlipY;
         uniform float uWaterMaskUseAlpha;
         uniform vec2 uWaterMaskTexelSize;
+        uniform float uWaterEdgeSoftnessTexels;
         uniform sampler2D tOutdoorsMask;
         uniform sampler2D tCloudShadow;
         uniform sampler2D tWindowLight;
         uniform vec2 uResolution;
         uniform float uTime;
         uniform float uZoom;
+        uniform float uZoomMax;
 
         uniform vec4 uViewBounds;
         uniform vec2 uSceneDimensions;
@@ -988,7 +1062,26 @@ export class DistortionManager extends EffectBase {
           // Keep perceived distortion stable across zoom levels by scaling the
           // screen-space UV offset. (Zoom out => smaller offset.)
           float zoom = max(uZoom, 0.001);
-          vec2 zoomedOffset = offset * zoom;
+          float zoomMax = max(uZoomMax, 0.001);
+          // IMPORTANT: always gate the actual UV offset by the distortion mask.
+          // This prevents hard cut edges and avoids any tiny mask leakage from
+          // distorting the whole scene.
+          // Normalize against max zoom so strength is monotonic as you zoom out.
+          // Example: if maxZoom=3, then zoom=0.94 => zoomNorm~0.31 (not near 1.0).
+          float zoomNorm = clamp(zoom / zoomMax, 0.0, 1.0);
+
+          float mask01 = clamp(mask, 0.0, 1.0);
+          vec2 scaledOffset = offset * zoomNorm * mask01;
+
+          // Clamp maximum distortion in pixels. Also reduce the allowed pixel shift
+          // when zoomed out so the effect doesn't dominate the scene.
+          vec2 texelSize = 1.0 / max(uResolution, vec2(1.0));
+          float maxPixels = 8.0 * zoomNorm;
+          float maxOffsetUv = maxPixels * max(texelSize.x, texelSize.y);
+          float offLen = length(scaledOffset);
+          vec2 zoomedOffset = (offLen > maxOffsetUv && offLen > 1e-6)
+            ? (scaledOffset * (maxOffsetUv / offLen))
+            : scaledOffset;
           
           // Apply distortion
           vec2 distortedUv = safeClampUv(vUv + zoomedOffset);
@@ -998,15 +1091,37 @@ export class DistortionManager extends EffectBase {
           // Water chromatic refraction (RGB split)
           // Uses the distortion direction as the dispersion axis and clamps the maximum
           // per-channel shift in pixels to avoid harsh/nausating separation.
-          if (uWaterChromaEnabled > 0.5 && waterMask > 0.001 && uWaterChroma > 0.0) {
-            vec2 texelSize = 1.0 / max(uResolution, vec2(1.0));
+          if (uWaterChromaEnabled > 0.5 && uWaterChroma > 0.0 && uHasWaterMask > 0.5) {
             float maxOffsetUv = (uWaterChromaMaxPixels * night) * max(texelSize.x, texelSize.y);
 
             float offLen = length(zoomedOffset);
             vec2 dir = offLen > 1e-6 ? (zoomedOffset / offLen) : vec2(0.0, 0.0);
 
-            // Scale by water mask so dispersion fades out at edges.
-            float chroma = clamp(uWaterChroma * waterMask * nightVis * skyVig, 0.0, 1.0);
+            // Derive a softened water mask directly from the water mask texture.
+            // Using the composite alpha here can produce sharp edges due to encoding/thresholding.
+            vec2 foundryPos = screenUvToFoundry(vUv);
+            vec2 sceneUv = vUv;
+            float sceneInBounds = 1.0;
+            if (uHasSceneRect > 0.5) {
+              sceneUv = foundryToSceneUv(foundryPos);
+              sceneInBounds = inUnitSquare(sceneUv);
+              sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
+            }
+
+            float waterY = (uWaterMaskFlipY > 0.5) ? (1.0 - sceneUv.y) : sceneUv.y;
+            vec2 waterUv = vec2(sceneUv.x, waterY);
+            float rawWater = waterMaskValue(texture2D(tWaterMask, waterUv)) * sceneInBounds;
+            float edgeBlurTexels = clamp(uWaterEdgeSoftnessTexels, 0.0, 64.0);
+            vec2 edgeStepUv = max(uWaterMaskTexelSize, vec2(1.0 / 4096.0)) * edgeBlurTexels;
+            float softWater = (edgeBlurTexels > 0.01)
+              ? blur13Tap(tWaterMask, waterUv, edgeStepUv) * sceneInBounds
+              : rawWater;
+
+            // Gate softly (prevents global bleed, keeps edges smooth).
+            float waterEdge = smoothstep(0.02, 0.22, clamp(softWater, 0.0, 1.0));
+
+            // Scale by softened water mask so dispersion fades out at edges.
+            float chroma = clamp(uWaterChroma * waterEdge * nightVis * skyVig, 0.0, 1.0);
             float shift = min(offLen * chroma, maxOffsetUv);
             vec2 chromaOffset = dir * shift;
 
@@ -1039,6 +1154,14 @@ export class DistortionManager extends EffectBase {
             float rawDepth = waterMaskValue(waterDepthSample) * sceneInBounds;
             float shore = shorelineFactor(tWaterMask, waterUv) * sceneInBounds;
 
+            // General purpose edge softness for all water effects (tint/chroma/foam),
+            // independent of caustics-specific edge blur.
+            float edgeBlurTexels = clamp(uWaterEdgeSoftnessTexels, 0.0, 64.0);
+            vec2 edgeStepUv = max(uWaterMaskTexelSize, vec2(1.0 / 4096.0)) * edgeBlurTexels;
+            float softDepth = (edgeBlurTexels > 0.01)
+              ? blur13Tap(tWaterMask, waterUv, edgeStepUv) * sceneInBounds
+              : rawDepth;
+
             float blurTexels = clamp(uWaterCausticsEdgeBlurTexels, 0.0, 64.0);
             vec2 stepUv = max(uWaterMaskTexelSize, vec2(1.0 / 4096.0)) * blurTexels;
             float blurredDepth = blur13Tap(tWaterMask, waterUv, stepUv) * sceneInBounds;
@@ -1056,7 +1179,7 @@ export class DistortionManager extends EffectBase {
               return;
             }
 
-            float depth = clamp(rawDepth, 0.0, 1.0);
+            float depth = clamp(softDepth, 0.0, 1.0);
             depth = pow(depth, max(0.05, uWaterDepthPower));
 
             if (uWaterTintEnabled > 0.5) {
@@ -1132,7 +1255,7 @@ export class DistortionManager extends EffectBase {
               if (windSpeed01 > 0.001) {
                 float windFactor = smoothstep(0.15, 0.85, windSpeed01);
                 float depthFactor = smoothstep(uWaterFoamDepthLo, uWaterFoamDepthHi, depth);
-                float foamMask = clamp(rawDepth, 0.0, 1.0) * outdoorStrength * uHasOutdoorsMask * windFactor * depthFactor;
+                float foamMask = clamp(softDepth, 0.0, 1.0) * outdoorStrength * uHasOutdoorsMask * windFactor * depthFactor;
 
                 float tiles = max(1.0, floor(uWaterFoamTiles + 0.5));
                 float streak = clamp(uWaterFoamStreakiness, 0.25, 12.0);
@@ -1370,9 +1493,15 @@ export class DistortionManager extends EffectBase {
     if (au) {
       au.uTime.value = timeInfo.elapsed;
 
-      const sceneComposer = window.MapShine?.sceneComposer;
+      const sceneComposer = window.MapShine?.sceneComposer ?? window.canvas?.mapShine?.sceneComposer;
       const z = sceneComposer?.currentZoom ?? (typeof sceneComposer?.getZoomScale === 'function' ? sceneComposer.getZoomScale() : 1.0);
       au.uZoom.value = Number.isFinite(z) ? z : 1.0;
+
+      if (au.uZoomMax) {
+        const limits = (typeof sceneComposer?.getZoomLimits === 'function') ? sceneComposer.getZoomLimits() : null;
+        const zm = limits && Number.isFinite(limits.max) ? limits.max : 1.0;
+        au.uZoomMax.value = Number.isFinite(zm) && zm > 0 ? zm : 1.0;
+      }
     }
 
     // Update view mapping (screen UV -> Three world -> Foundry world -> scene UV)
@@ -1390,7 +1519,8 @@ export class DistortionManager extends EffectBase {
 
       // Compute view bounds by intersecting camera frustum with ground plane at groundZ
       const camera = this.mainCamera;
-      const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+      const sceneComposer = window.MapShine?.sceneComposer ?? window.canvas?.mapShine?.sceneComposer;
+      const groundZ = sceneComposer?.groundZ ?? 0;
       if (camera) {
         this._updateViewBoundsFromCamera(camera, groundZ, u.uViewBounds.value);
 
@@ -1452,6 +1582,16 @@ export class DistortionManager extends EffectBase {
         const v = Number.isFinite(waterSource.params?.maskUseAlpha) ? waterSource.params.maskUseAlpha : 0.0;
         u.uWaterMaskUseAlpha.value = v > 0.5 ? 1.0 : 0.0;
       }
+      if (u.uWaterMaskTexelSize) {
+        const img = waterSource.mask.image;
+        const w = img && img.width ? img.width : 2048;
+        const h = img && img.height ? img.height : 2048;
+        u.uWaterMaskTexelSize.value.set(1 / w, 1 / h);
+      }
+      if (u.uWaterEdgeSoftnessTexels) {
+        const v = Number.isFinite(waterSource.params?.edgeSoftnessTexels) ? waterSource.params.edgeSoftnessTexels : 0.0;
+        u.uWaterEdgeSoftnessTexels.value = Math.max(0.0, Math.min(64.0, v));
+      }
       u.uWaterIntensity.value = waterSource.params.intensity;
       u.uWaterFrequency.value = waterSource.params.frequency;
       u.uWaterSpeed.value = waterSource.params.speed;
@@ -1459,6 +1599,8 @@ export class DistortionManager extends EffectBase {
       u.uWaterEnabled.value = 0.0;
       if (u.uWaterMaskFlipY) u.uWaterMaskFlipY.value = 0.0;
       if (u.uWaterMaskUseAlpha) u.uWaterMaskUseAlpha.value = 0.0;
+      if (u.uWaterMaskTexelSize) u.uWaterMaskTexelSize.value.set(1 / 2048, 1 / 2048);
+      if (u.uWaterEdgeSoftnessTexels) u.uWaterEdgeSoftnessTexels.value = 0.0;
     }
 
     // Water chromatic refraction (apply pass)
@@ -1487,6 +1629,11 @@ export class DistortionManager extends EffectBase {
           const h = img && img.height ? img.height : 2048;
           au.uWaterMaskTexelSize.value.set(1 / w, 1 / h);
         }
+
+        if (au.uWaterEdgeSoftnessTexels) {
+          const v = Number.isFinite(waterSource.params?.edgeSoftnessTexels) ? waterSource.params.edgeSoftnessTexels : 0.0;
+          au.uWaterEdgeSoftnessTexels.value = Math.max(0.0, Math.min(64.0, v));
+        }
       } else {
         if (au.tWaterMask) au.tWaterMask.value = null;
         if (au.uHasWaterMask) au.uHasWaterMask.value = 0.0;
@@ -1496,6 +1643,10 @@ export class DistortionManager extends EffectBase {
 
         if (au.uWaterMaskTexelSize) {
           au.uWaterMaskTexelSize.value.set(1 / 2048, 1 / 2048);
+        }
+
+        if (au.uWaterEdgeSoftnessTexels) {
+          au.uWaterEdgeSoftnessTexels.value = 0.0;
         }
       }
 

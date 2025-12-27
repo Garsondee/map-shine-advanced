@@ -305,6 +305,8 @@ export class DistortionManager extends EffectBase {
     
     // Composite distortion map (R=X offset, G=Y offset, B=intensity, A=mask)
     this.distortionTarget = null;
+
+    this.waterOccluderTarget = null;
     
     // Blur passes for mask expansion
     this.blurTargetA = null;
@@ -430,6 +432,15 @@ export class DistortionManager extends EffectBase {
     
     // Main distortion composite (stores final UV offsets)
     this.distortionTarget = new THREE.WebGLRenderTarget(width, height, rtOptions);
+
+    // Tile alpha occluder (screen-space) for water effects
+    this.waterOccluderTarget = new THREE.WebGLRenderTarget(width, height, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      depthBuffer: false
+    });
     
     // Blur ping-pong targets (for mask expansion)
     // Use lower resolution for performance
@@ -564,6 +575,10 @@ export class DistortionManager extends EffectBase {
         uWaterIntensity: { value: 0.02 },
         uWaterFrequency: { value: 4.0 },
         uWaterSpeed: { value: 1.0 },
+
+        // Water occluders (screen-space alpha)
+        tWaterOccluderAlpha: { value: null },
+        uHasWaterOccluderAlpha: { value: 0.0 },
         
         tMagicMask: { value: null },
         uMagicEnabled: { value: 0.0 },
@@ -612,6 +627,10 @@ export class DistortionManager extends EffectBase {
         uniform float uWaterIntensity;
         uniform float uWaterFrequency;
         uniform float uWaterSpeed;
+
+        // Water occluder alpha (screen-space)
+        uniform sampler2D tWaterOccluderAlpha;
+        uniform float uHasWaterOccluderAlpha;
         
         // Magic source
         uniform sampler2D tMagicMask;
@@ -687,6 +706,11 @@ export class DistortionManager extends EffectBase {
           float totalMask = 0.0;
           float waterOnlyMask = 0.0;
 
+          float waterOccluder = 0.0;
+          if (uHasWaterOccluderAlpha > 0.5) {
+            waterOccluder = texture2D(tWaterOccluderAlpha, vUv).a;
+          }
+
           // Derive stable world-space coordinates (Foundry coords, then scene UV)
           vec2 foundryPos = screenUvToFoundry(vUv);
           vec2 sceneUv = vUv;
@@ -733,6 +757,10 @@ export class DistortionManager extends EffectBase {
             float edgeLo = 0.02;
             float edgeHi = mix(0.18, 0.35, softness01);
             waterMask = smoothstep(edgeLo, edgeHi, wm);
+
+            // Suppress water anywhere a tile pixel is opaque (boats etc.).
+            // This keeps tiles without any _Water mask treated as non-water.
+            waterMask *= (1.0 - waterOccluder);
 
             // Use waterUv for noise coords so ripples stay pinned to the map
             // and aligned to the mask's UV convention.
@@ -785,6 +813,7 @@ export class DistortionManager extends EffectBase {
         tScene: { value: null },
         tDistortion: { value: null },
         tWaterMask: { value: null },
+        tWaterOccluderAlpha: { value: null },
         uWaterMaskFlipY: { value: 0.0 },
         uWaterMaskUseAlpha: { value: 0.0 },
         uWaterMaskTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
@@ -819,6 +848,7 @@ export class DistortionManager extends EffectBase {
         // Caustics (shallow-water highlights)
         uWaterCausticsEnabled: { value: 0.0 },
         uHasWaterMask: { value: 0.0 },
+        uHasWaterOccluderAlpha: { value: 0.0 },
         uHasOutdoorsMask: { value: 0.0 },
         uHasCloudShadow: { value: 0.0 },
         uHasWindowLight: { value: 0.0 },
@@ -863,6 +893,7 @@ export class DistortionManager extends EffectBase {
         uniform sampler2D tScene;
         uniform sampler2D tDistortion;
         uniform sampler2D tWaterMask;
+        uniform sampler2D tWaterOccluderAlpha;
         uniform float uWaterMaskFlipY;
         uniform float uWaterMaskUseAlpha;
         uniform vec2 uWaterMaskTexelSize;
@@ -893,6 +924,7 @@ export class DistortionManager extends EffectBase {
 
         uniform float uWaterCausticsEnabled;
         uniform float uHasWaterMask;
+        uniform float uHasWaterOccluderAlpha;
         uniform float uHasOutdoorsMask;
         uniform float uHasCloudShadow;
         uniform float uHasWindowLight;
@@ -1059,6 +1091,12 @@ export class DistortionManager extends EffectBase {
           float mask = distortionSample.b;
           float waterMask = distortionSample.a;
 
+          float waterOccluder = 0.0;
+          if (uHasWaterOccluderAlpha > 0.5) {
+            waterOccluder = texture2D(tWaterOccluderAlpha, vUv).a;
+          }
+          float waterVisible = (1.0 - waterOccluder);
+
           // Keep perceived distortion stable across zoom levels by scaling the
           // screen-space UV offset. (Zoom out => smaller offset.)
           float zoom = max(uZoom, 0.001);
@@ -1120,6 +1158,8 @@ export class DistortionManager extends EffectBase {
             // Gate softly (prevents global bleed, keeps edges smooth).
             float waterEdge = smoothstep(0.02, 0.22, clamp(softWater, 0.0, 1.0));
 
+            waterEdge *= waterVisible;
+
             // Scale by softened water mask so dispersion fades out at edges.
             float chroma = clamp(uWaterChroma * waterEdge * nightVis * skyVig, 0.0, 1.0);
             float shift = min(offLen * chroma, maxOffsetUv);
@@ -1162,9 +1202,13 @@ export class DistortionManager extends EffectBase {
               ? blur13Tap(tWaterMask, waterUv, edgeStepUv) * sceneInBounds
               : rawDepth;
 
+            softDepth *= waterVisible;
+
             float blurTexels = clamp(uWaterCausticsEdgeBlurTexels, 0.0, 64.0);
             vec2 stepUv = max(uWaterMaskTexelSize, vec2(1.0 / 4096.0)) * blurTexels;
             float blurredDepth = blur13Tap(tWaterMask, waterUv, stepUv) * sceneInBounds;
+
+            blurredDepth *= waterVisible;
 
             float outdoorStrength = 1.0;
             if (uHasOutdoorsMask > 0.5) {
@@ -1929,6 +1973,21 @@ export class DistortionManager extends EffectBase {
    */
   render(renderer, scene, camera) {
     if (!this.enabled || !this.readBuffer) return;
+
+    // Render screen-space occluder alpha for water (tile layer 22)
+    // This lets opaque tile pixels block water distortion.
+    this._renderWaterOccluders(renderer, scene);
+
+    const u = this.compositeMaterial?.uniforms;
+    const au = this.applyMaterial?.uniforms;
+    if (u) {
+      u.tWaterOccluderAlpha.value = this.waterOccluderTarget?.texture ?? null;
+      u.uHasWaterOccluderAlpha.value = this.waterOccluderTarget ? 1.0 : 0.0;
+    }
+    if (au) {
+      au.tWaterOccluderAlpha.value = this.waterOccluderTarget?.texture ?? null;
+      au.uHasWaterOccluderAlpha.value = this.waterOccluderTarget ? 1.0 : 0.0;
+    }
     
     // Check if any sources are active
     let hasActiveSources = false;
@@ -1993,6 +2052,10 @@ export class DistortionManager extends EffectBase {
     if (this.distortionTarget) {
       this.distortionTarget.setSize(width, height);
     }
+
+    if (this.waterOccluderTarget) {
+      this.waterOccluderTarget.setSize(width, height);
+    }
     
     const blurScale = 0.5;
     const blurW = Math.max(1, Math.floor(width * blurScale));
@@ -2025,6 +2088,11 @@ export class DistortionManager extends EffectBase {
     if (this.distortionTarget) {
       this.distortionTarget.dispose();
       this.distortionTarget = null;
+    }
+
+    if (this.waterOccluderTarget) {
+      this.waterOccluderTarget.dispose();
+      this.waterOccluderTarget = null;
     }
     
     if (this.blurTargetA) {
@@ -2060,6 +2128,28 @@ export class DistortionManager extends EffectBase {
     if (this._passThroughMaterial) {
       this._passThroughMaterial.dispose();
       this._passThroughMaterial = null;
+    }
+  }
+
+  _renderWaterOccluders(renderer, scene) {
+    if (!this.waterOccluderTarget || !this.mainCamera) return;
+
+    const TILE_OCCLUDER_LAYER = 22;
+    const prevTarget = renderer.getRenderTarget();
+    const prevMask = this.mainCamera.layers.mask;
+    const prevAutoClear = renderer.autoClear;
+
+    try {
+      this.mainCamera.layers.set(TILE_OCCLUDER_LAYER);
+      renderer.setRenderTarget(this.waterOccluderTarget);
+      renderer.setClearColor(0x000000, 0);
+      renderer.autoClear = true;
+      renderer.clear();
+      renderer.render(scene, this.mainCamera);
+    } finally {
+      this.mainCamera.layers.mask = prevMask;
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
     }
   }
 }

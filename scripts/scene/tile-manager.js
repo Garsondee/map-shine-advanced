@@ -25,6 +25,7 @@ const Z_OVERHEAD_OFFSET = 0.03;
 
 const ROOF_LAYER = 20;
 const WEATHER_ROOF_LAYER = 21;
+const WATER_OCCLUDER_LAYER = 22;
 
 /**
  * TileManager - Synchronizes Foundry VTT tiles to THREE.js sprites
@@ -946,6 +947,13 @@ export class TileManager {
     else sprite.layers.disable(ROOF_LAYER);
     if (isWeatherRoof) sprite.layers.enable(WEATHER_ROOF_LAYER);
     else sprite.layers.disable(WEATHER_ROOF_LAYER);
+
+    const occludesWaterFlag = tileDoc?.getFlag?.('map-shine-advanced', 'occludesWater')
+      ?? tileDoc?.flags?.['map-shine-advanced']?.occludesWater;
+    const occludesWater = (occludesWaterFlag === undefined) ? !isOverhead : !!occludesWaterFlag;
+    sprite.userData.occludesWater = occludesWater;
+    if (occludesWater) sprite.layers.enable(WATER_OCCLUDER_LAYER);
+    else sprite.layers.disable(WATER_OCCLUDER_LAYER);
 
     if (isOverhead) {
       zBase = groundZ + Z_OVERHEAD_OFFSET;

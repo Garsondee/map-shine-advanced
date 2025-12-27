@@ -1582,11 +1582,13 @@ export class InteractionManager {
                 }
 
                 if (doorControl) {
-                    this.handleDoorRightClick(doorControl, event);
-                    event.preventDefault();
-                    event.stopPropagation();
-                    event.stopImmediatePropagation();
-                    return;
+                    if (game.user.isGM) {
+                        this.handleDoorRightClick(doorControl, event);
+                        event.preventDefault();
+                        event.stopPropagation();
+                        event.stopImmediatePropagation();
+                        return;
+                    }
                 }
             }
 
@@ -3269,6 +3271,49 @@ export class InteractionManager {
     
     // NOTE: Vision/fog updates are now handled by MapShine's world-space fog
     // effect, which also consults Foundry's controlled tokens for GM bypass.
+  }
+
+  handleDoorClick(doorControl, event) {
+      let object = doorControl;
+      while (object && !object.userData?.wallId) object = object.parent;
+      const wallId = object?.userData?.wallId;
+      if (!wallId) return;
+
+      const wallDoc = canvas.walls?.get?.(wallId)?.document ?? canvas.scene?.walls?.get?.(wallId);
+      if (!wallDoc) return;
+
+      if (!wallDoc.canUserModify(game.user, 'update')) {
+          ui.notifications?.warn?.('You do not have permission to control this door.');
+          return;
+      }
+
+      const ds = wallDoc.ds;
+      if (ds === 2) {
+          ui.notifications?.info?.('This door is locked.');
+          return;
+      }
+
+      const newDs = ds === 1 ? 0 : 1;
+      wallDoc.update({ ds: newDs }).catch((err) => log.error('Failed to update door state', err));
+  }
+
+  handleDoorRightClick(doorControl, event) {
+      let object = doorControl;
+      while (object && !object.userData?.wallId) object = object.parent;
+      const wallId = object?.userData?.wallId;
+      if (!wallId) return;
+
+      const wallDoc = canvas.walls?.get?.(wallId)?.document ?? canvas.scene?.walls?.get?.(wallId);
+      if (!wallDoc) return;
+
+      if (!wallDoc.canUserModify(game.user, 'update')) {
+          ui.notifications?.warn?.('You do not have permission to modify this door.');
+          return;
+      }
+
+      const ds = wallDoc.ds;
+      const newDs = ds === 2 ? 0 : 2;
+      wallDoc.update({ ds: newDs }).catch((err) => log.error('Failed to update door lock state', err));
   }
 
   /**

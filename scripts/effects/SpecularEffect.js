@@ -111,6 +111,8 @@ export class SpecularEffect extends EffectBase {
     };
 
     this._tempScreenSize = null;
+
+    this._fallbackAlbedo = null;
   }
 
   /**
@@ -641,7 +643,9 @@ export class SpecularEffect extends EffectBase {
     }
     
     log.info('Specular mask loaded, creating PBR material');
-    this.createPBRMaterial(baseMesh.material.map);
+
+    const baseMap = baseMesh?.material?.map || this._getFallbackAlbedoTexture();
+    this.createPBRMaterial(baseMap);
     
     // Replace base mesh material
     baseMesh.material.dispose();
@@ -655,6 +659,8 @@ export class SpecularEffect extends EffectBase {
    */
   createPBRMaterial(baseTexture) {
     const THREE = window.THREE;
+
+    const safeBase = baseTexture || this._getFallbackAlbedoTexture();
     
     // Create shader material with custom GLSL
     // Track validation errors
@@ -664,10 +670,10 @@ export class SpecularEffect extends EffectBase {
     this.material = new THREE.ShaderMaterial({
       uniforms: {
         // Textures
-        uAlbedoMap: { value: baseTexture },
+        uAlbedoMap: { value: safeBase },
         uSpecularMap: { value: this.specularMask },
-        uRoughnessMap: { value: this.roughnessMask || baseTexture }, // Fallback to base texture
-        uNormalMap: { value: this.normalMap || baseTexture }, // Fallback to base texture
+        uRoughnessMap: { value: this.roughnessMask || safeBase },
+        uNormalMap: { value: this.normalMap || safeBase },
         
         // Texture availability flags
         uHasRoughnessMap: { value: this.roughnessMask !== null },
@@ -790,6 +796,24 @@ export class SpecularEffect extends EffectBase {
     
     // Initial sync of light data to the new material
     this.updateLightUniforms();
+  }
+
+  _getFallbackAlbedoTexture() {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+    if (this._fallbackAlbedo) return this._fallbackAlbedo;
+
+    const data = new Uint8Array([255, 255, 255, 255]);
+    const tex = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat);
+    tex.needsUpdate = true;
+    if (THREE.SRGBColorSpace) {
+      tex.colorSpace = THREE.SRGBColorSpace;
+    }
+    tex.minFilter = THREE.NearestFilter;
+    tex.magFilter = THREE.NearestFilter;
+    tex.generateMipmaps = false;
+    this._fallbackAlbedo = tex;
+    return tex;
   }
 
   /* -------------------------------------------- */

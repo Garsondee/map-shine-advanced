@@ -13,7 +13,7 @@ export class MaskDebugEffect extends EffectBase {
 
     this.params = {
       enabled: false,
-      maskId: 'outdoors.screen',
+      maskId: 'outdoors.scene',
       sampleSpace: 'auto',
       channel: 'r',
       invert: false,
@@ -68,7 +68,7 @@ export class MaskDebugEffect extends EffectBase {
         enabled: { type: 'boolean', default: false },
         maskId: {
           label: 'Mask',
-          default: 'outdoors.screen',
+          default: 'outdoors.scene',
           options: options ?? undefined
         },
         sampleSpace: {

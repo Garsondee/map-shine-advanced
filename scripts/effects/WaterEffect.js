@@ -401,10 +401,10 @@ export class WaterEffect extends EffectBase {
       this.waterMask.magFilter = THREE.LinearFilter;
       this.waterMask.generateMipmaps = false;
 
+      // MapShine convention: authored masks are treated as Foundry/top-left UVs.
+      // Keep flipY=false so v=0 samples the top of the image (matching base plane).
+      this.waterMask.flipY = false;
       this._waterMaskFlipY = 0.0;
-      if (!this.waterMask.flipY) {
-        this.waterMask.flipY = true;
-      }
 
       try {
         const img = this.waterMask.image;

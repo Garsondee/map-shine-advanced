@@ -227,6 +227,10 @@ export class GridRenderer {
     const THREE = window.THREE;
     const grid = canvas.grid;
     const dim = canvas.dimensions;
+
+    const renderer = window.MapShine?.renderer;
+    const maxTex = renderer?.capabilities?.maxTextureSize;
+    const maxTextureSize = Number.isFinite(maxTex) ? Math.max(256, Math.floor(maxTex)) : 4096;
     
     // Create a canvas large enough to hold the grid
     // WARNING: Creating a massive canvas for the whole map is bad for memory
@@ -235,13 +239,39 @@ export class GridRenderer {
     // Foundry draws the grid on a PIXI Graphics object.
     // Maybe we can extract that?
     
-    // Strategy: Draw the grid on an off-screen canvas
-    const canvasEl = document.createElement('canvas');
-    canvasEl.width = dim.width;
-    canvasEl.height = dim.height;
-    const ctx = canvasEl.getContext('2d');
-    
-    if (!ctx) return null;
+    const makeContext = (w, h) => {
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.floor(w));
+      c.height = Math.max(1, Math.floor(h));
+      const ctx = c.getContext('2d');
+      return { canvasEl: c, ctx };
+    };
+
+    // Square grids: create a small repeatable texture tile to avoid gigantic canvases.
+    // Hex grids: keep full draw (complex tiling) but downscale if needed.
+    let canvasEl;
+    let ctx;
+    let texRepeatX = 1;
+    let texRepeatY = 1;
+
+    if (!grid.isHexagonal) {
+      const s = Math.max(1, Math.floor(grid.size || 1));
+      ({ canvasEl, ctx } = makeContext(s, s));
+      if (!ctx) return null;
+
+      texRepeatX = (dim.width || 1) / s;
+      texRepeatY = (dim.height || 1) / s;
+    } else {
+      const w0 = dim.width || 1;
+      const h0 = dim.height || 1;
+      const scale = Math.min(1.0, maxTextureSize / Math.max(w0, h0));
+      ({ canvasEl, ctx } = makeContext(Math.round(w0 * scale), Math.round(h0 * scale)));
+      if (!ctx) return null;
+      try {
+        ctx.scale(scale, scale);
+      } catch (e) {
+      }
+    }
 
     // Configure Style
     const color = (this.settings.useColorOverride && this.settings.colorOverride) 
@@ -273,13 +303,27 @@ export class GridRenderer {
     if (grid.isHexagonal) {
       this.drawHexGrid(ctx, grid, dim);
     } else {
-      this.drawSquareGrid(ctx, grid, dim);
+      // Draw a single cell-sized tile: only the top and left edges.
+      // Repeating this texture yields a full grid without double-thick seams.
+      const s = Math.max(1, Math.floor(grid.size || 1));
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(s, 0);
+      ctx.moveTo(0, 0);
+      ctx.lineTo(0, s);
+      ctx.stroke();
     }
     
     const texture = new THREE.CanvasTexture(canvasEl);
     texture.minFilter = THREE.LinearFilter; // Or NearestFilter for crisp lines
     texture.magFilter = THREE.LinearFilter;
     texture.anisotropy = 16; // Better looking at angles (though we are top-down)
+
+    if (!grid.isHexagonal) {
+      texture.wrapS = THREE.RepeatWrapping;
+      texture.wrapT = THREE.RepeatWrapping;
+      texture.repeat.set(texRepeatX, texRepeatY);
+    }
     
     return texture;
   }

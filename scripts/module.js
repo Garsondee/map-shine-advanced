@@ -113,6 +113,43 @@ Hooks.once('init', async function() {
     }
   });
 
+  Hooks.on('renderTileConfig', (app, html) => {
+    try {
+      const $ = globalThis.$;
+      if (typeof $ !== 'function') return;
+
+      const tileDoc = app?.document;
+      if (!tileDoc) return;
+
+      const moduleId = 'map-shine-advanced';
+      const flagKey = 'overheadIsRoof';
+
+      const overheadTab = html.find('.tab[data-tab="overhead"]');
+      if (!overheadTab.length) return;
+
+      const current = !!(tileDoc.getFlag?.(moduleId, flagKey) ?? tileDoc.flags?.[moduleId]?.[flagKey]);
+
+      const group = $(
+        `<div class="form-group">
+           <label>Overhead = Roof (Map Shine)</label>
+           <div class="form-fields">
+             <input type="checkbox" name="flags.${moduleId}.${flagKey}" ${current ? 'checked' : ''} />
+           </div>
+           <p class="notes">Treat this overhead tile as a roof for weather visibility.</p>
+         </div>`
+      );
+
+      const anchor = overheadTab.find('input[name="overhead.restrictsWeather"]').closest('.form-group');
+      if (anchor.length) {
+        anchor.after(group);
+      } else {
+        overheadTab.append(group);
+      }
+    } catch (e) {
+      console.error('Map Shine: failed to inject TileConfig overhead roof toggle', e);
+    }
+  });
+
   // Initialize canvas replacement hooks
   canvasReplacement.initialize();
 });

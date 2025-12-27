@@ -486,6 +486,15 @@ export class MaskManager {
   }
 
   listIds() {
-    return Array.from(this._masks.keys());
+    const ids = new Set();
+    try {
+      for (const id of this._masks.keys()) ids.add(id);
+    } catch (e) {
+    }
+    try {
+      for (const id of this._recipes.keys()) ids.add(id);
+    } catch (e) {
+    }
+    return Array.from(ids);
   }
 }

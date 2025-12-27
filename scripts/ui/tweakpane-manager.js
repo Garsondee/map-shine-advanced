@@ -8,6 +8,7 @@ import { createLogger } from '../core/log.js';
 import { stateApplier } from './state-applier.js';
 import { globalValidator, getSpecularEffectiveState, getStripeDependencyState } from './parameter-validator.js';
 import { TextureManagerUI } from './texture-manager.js';
+import { EffectStackUI } from './effect-stack.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 
 const log = createLogger('UI');
@@ -85,6 +86,9 @@ export class TweakpaneManager {
 
     /** @type {TextureManagerUI|null} */
     this.textureManager = null;
+
+    /** @type {EffectStackUI|null} */
+    this.effectStack = null;
 
     /** @type {number} UI scale factor */
     this.uiScale = 1.0;
@@ -187,6 +191,10 @@ export class TweakpaneManager {
     // Initialize Texture Manager
     this.textureManager = new TextureManagerUI();
     await this.textureManager.initialize();
+
+    // Initialize Effect Stack
+    this.effectStack = new EffectStackUI();
+    await this.effectStack.initialize();
 
     log.info('Tweakpane UI initialized');
   }
@@ -306,6 +314,15 @@ export class TweakpaneManager {
     }).on('click', () => {
       if (this.textureManager) {
         this.textureManager.toggle();
+      }
+    });
+
+    globalFolder.addButton({
+      title: 'Open Effect Stack',
+      label: 'Tools'
+    }).on('click', () => {
+      if (this.effectStack) {
+        this.effectStack.toggle();
       }
     });
 
@@ -543,7 +560,20 @@ export class TweakpaneManager {
 
           try {
             await sceneSettings.enable(s);
-            ui.notifications?.info?.('Map Shine: Scene enabled for Map Shine Advanced. Reload or re-open the scene to activate the 3D canvas.');
+            ui.notifications?.info?.('Map Shine: Scene enabled for Map Shine Advanced. Reloading Foundry to activate the 3D canvas...');
+
+            setTimeout(() => {
+              try {
+                const utils = globalThis.foundry?.utils;
+                if (typeof utils?.debouncedReload === 'function') {
+                  utils.debouncedReload();
+                } else {
+                  globalThis.location?.reload?.();
+                }
+              } catch (e) {
+                globalThis.location?.reload?.();
+              }
+            }, 250);
           } catch (e) {
             log.error('Failed to enable Map Shine Advanced for scene:', e);
             ui.notifications?.error?.('Map Shine: Failed to enable this scene. Check console for details.');
@@ -3233,6 +3263,14 @@ export function registerUISettings() {
 
   game.settings.register('map-shine-advanced', 'texture-manager-state', {
     name: 'Texture Manager State',
+    scope: 'client',
+    config: false,
+    type: Object,
+    default: {}
+  });
+
+  game.settings.register('map-shine-advanced', 'effect-stack-state', {
+    name: 'Effect Stack State',
     scope: 'client',
     config: false,
     type: Object,

@@ -52,6 +52,46 @@
   background: rgba(255, 255, 255, 0.85);
 }
 
+/* Texture Manager UI Container */
+#map-shine-texture-manager {
+  font-family: var(--font-primary, 'Signika', sans-serif);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  max-height: 60vh;
+  overflow-y: auto;
+  /* Prevent scrollbar from overlapping inner controls */
+  padding-right: 8px;
+  box-sizing: border-box;
+  contain: layout style paint;
+  will-change: transform;
+}
+
+/* Localized vertical scrollbar styling for Texture Manager */
+#map-shine-texture-manager {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.6) rgba(0, 0, 0, 0.4);
+}
+
+#map-shine-texture-manager::-webkit-scrollbar {
+  width: 8px;
+}
+
+#map-shine-texture-manager::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+#map-shine-texture-manager::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 4px;
+}
+
+#map-shine-texture-manager::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.map-shine-texture-manager-columns {
+  align-items: start;
+}
+
 /* Tweakpane customizations for Foundry VTT integration */
 #map-shine-ui .tp-dfwv {
   max-width: 320px;

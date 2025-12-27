@@ -23,6 +23,9 @@ const Z_BACKGROUND_OFFSET = 0.01;
 const Z_FOREGROUND_OFFSET = 0.02;
 const Z_OVERHEAD_OFFSET = 0.03;
 
+const ROOF_LAYER = 20;
+const WEATHER_ROOF_LAYER = 21;
+
 /**
  * TileManager - Synchronizes Foundry VTT tiles to THREE.js sprites
  * Handles layering (Background/Foreground/Overhead) and reactive updates
@@ -47,6 +50,7 @@ export class TileManager {
     this.alphaMaskCache = new Map();
 
     this._overheadTileIds = new Set();
+    this._weatherRoofTileIds = new Set();
     
     this.initialized = false;
     this.hooksRegistered = false;
@@ -801,6 +805,12 @@ export class TileManager {
       this._overheadTileIds.delete(tileDoc.id);
     }
 
+    if (sprite.userData.isWeatherRoof) {
+      this._weatherRoofTileIds.add(tileDoc.id);
+    } else {
+      this._weatherRoofTileIds.delete(tileDoc.id);
+    }
+
     this._tintDirty = true;
 
     log.debug(`Created tile sprite: ${tileDoc.id}`);
@@ -823,9 +833,10 @@ export class TileManager {
     const { sprite } = spriteData;
 
     // Update transform if relevant properties changed
-    if ('x' in changes || 'y' in changes || 'width' in changes || 
-        'height' in changes || 'rotation' in changes || 
-        'elevation' in changes || 'z' in changes) {
+    if ('x' in changes || 'y' in changes || 'width' in changes ||
+        'height' in changes || 'rotation' in changes ||
+        'elevation' in changes || 'z' in changes ||
+        'flags' in changes) {
       this.updateSpriteTransform(sprite, tileDoc);
     }
 
@@ -879,6 +890,7 @@ export class TileManager {
     
     this.tileSprites.delete(tileId);
     this._overheadTileIds.delete(tileId);
+    this._weatherRoofTileIds.delete(tileId);
     this._tintDirty = true;
     log.debug(`Removed tile sprite: ${tileId}`);
   }
@@ -899,10 +911,13 @@ export class TileManager {
     //   - z < 0 ? Background
     //   - z >= 0 ? Foreground
     
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+    let zBase = groundZ + Z_FOREGROUND_OFFSET;
+
     const foregroundElevation = canvas.scene.foregroundElevation || 0;
     const isOverhead = tileDoc.elevation >= foregroundElevation;
     const wasOverhead = !!sprite.userData.isOverhead;
-    
+
     // Store overhead status for update loop
     sprite.userData.isOverhead = isOverhead;
     if (wasOverhead !== isOverhead) {
@@ -913,21 +928,25 @@ export class TileManager {
         else this._overheadTileIds.delete(tileId);
       }
     }
-    
-    // Layer Management for Roof Masking
-    // We use Layer 20 for overhead tiles so LightingEffect can render a separate
-    // "Roof Alpha Mask" to handle indoor light occlusion.
-    const ROOF_LAYER = 20;
-    if (isOverhead) {
-      sprite.layers.enable(ROOF_LAYER);
-    } else {
-      sprite.layers.disable(ROOF_LAYER);
+
+    const flag = tileDoc?.getFlag?.('map-shine-advanced', 'overheadIsRoof') ?? tileDoc?.flags?.['map-shine-advanced']?.overheadIsRoof;
+    const isWeatherRoof = isOverhead && !!flag;
+    const wasWeatherRoof = !!sprite.userData.isWeatherRoof;
+    sprite.userData.isWeatherRoof = isWeatherRoof;
+
+    if (wasWeatherRoof !== isWeatherRoof) {
+      const tileId = tileDoc?.id;
+      if (tileId) {
+        if (isWeatherRoof) this._weatherRoofTileIds.add(tileId);
+        else this._weatherRoofTileIds.delete(tileId);
+      }
     }
-    
-    // Get groundZ for proper layering
-    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
-    let zBase = groundZ + Z_FOREGROUND_OFFSET;
-    
+
+    if (isOverhead) sprite.layers.enable(ROOF_LAYER);
+    else sprite.layers.disable(ROOF_LAYER);
+    if (isWeatherRoof) sprite.layers.enable(WEATHER_ROOF_LAYER);
+    else sprite.layers.disable(WEATHER_ROOF_LAYER);
+
     if (isOverhead) {
       zBase = groundZ + Z_OVERHEAD_OFFSET;
       // Overhead tiles should not dominate the depth buffer so that
@@ -949,6 +968,13 @@ export class TileManager {
       } else {
         zBase = groundZ + Z_FOREGROUND_OFFSET;
       }
+
+      // If the sprite was previously overhead, restore depth writing.
+      if (sprite.material && sprite.material.depthWrite === false) {
+        sprite.material.depthWrite = true;
+        sprite.material.needsUpdate = true;
+      }
+      sprite.renderOrder = 0;
     }
     
     // Add small offset based on sort key to prevent z-fighting within same layer
@@ -1048,6 +1074,7 @@ export class TileManager {
     }
     this.tileSprites.clear();
     this._overheadTileIds.clear();
+    this._weatherRoofTileIds.clear();
 
     if (clearCache) {
       for (const texture of this.textureCache.values()) {

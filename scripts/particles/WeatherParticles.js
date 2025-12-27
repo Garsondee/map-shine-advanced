@@ -2245,18 +2245,18 @@ _createSnowTexture() {
     let screenHeight = 1080;
     try {
       const mm = window.MapShine?.maskManager;
-      const rec = mm ? mm.getRecord('roofAlpha.screen') : null;
+      const rec = mm ? mm.getRecord('weatherRoofAlpha.screen') : null;
       if (rec && rec.texture) {
         roofAlphaTexture = rec.texture;
         screenWidth = rec.width || 1920;
         screenHeight = rec.height || 1080;
       } else {
         const le = window.MapShine?.lightingEffect;
-        if (le && le.roofAlphaTarget && le.roofAlphaTarget.texture) {
-          roofAlphaTexture = le.roofAlphaTarget.texture;
+        if (le && le.weatherRoofAlphaTarget && le.weatherRoofAlphaTarget.texture) {
+          roofAlphaTexture = le.weatherRoofAlphaTarget.texture;
           // Get screen size from the render target dimensions
-          screenWidth = le.roofAlphaTarget.width || 1920;
-          screenHeight = le.roofAlphaTarget.height || 1080;
+          screenWidth = le.weatherRoofAlphaTarget.width || 1920;
+          screenHeight = le.weatherRoofAlphaTarget.height || 1080;
         }
       }
     } catch (e) {

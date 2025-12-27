@@ -48,6 +48,375 @@ export class SceneComposer {
     this.weatherEmitterZ = undefined;
   }
 
+  async _loadMasksOnlyForBasePath(basePath, options = {}) {
+    try {
+      const res = await assetLoader.loadAssetBundle(basePath, null, { skipBaseTexture: true, ...options });
+      if (res?.success && res?.bundle?.masks && Array.isArray(res.bundle.masks)) {
+        return res.bundle.masks;
+      }
+    } catch (e) {
+    }
+    return [];
+  }
+
+  _getLargeSceneMaskTiles() {
+    try {
+      const tiles = canvas?.scene?.tiles;
+      const d = canvas?.dimensions;
+      const sr = d?.sceneRect;
+      if (!tiles || !sr) return [];
+
+      const sceneX = sr.x ?? 0;
+      const sceneY = sr.y ?? 0;
+      const sceneW = sr.width ?? 0;
+      const sceneH = sr.height ?? 0;
+      if (!sceneW || !sceneH) return [];
+
+      const foregroundElevation = canvas?.scene?.foregroundElevation ?? Number.POSITIVE_INFINITY;
+
+      const tol = 1;
+      const minArea = sceneW * sceneH * 0.2;
+      const out = [];
+
+      for (const tileDoc of tiles) {
+        const src = tileDoc?.texture?.src;
+        if (typeof src !== 'string' || src.trim().length === 0) continue;
+
+        const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
+        if (Number.isFinite(foregroundElevation) && elev >= foregroundElevation) continue;
+
+        const x = Number.isFinite(tileDoc?.x) ? tileDoc.x : 0;
+        const y = Number.isFinite(tileDoc?.y) ? tileDoc.y : 0;
+        const w = Number.isFinite(tileDoc?.width) ? tileDoc.width : 0;
+        const h = Number.isFinite(tileDoc?.height) ? tileDoc.height : 0;
+        if (!w || !h) continue;
+
+        const area = w * h;
+        if (area < minArea) continue;
+
+        const yAligned = Math.abs(y - sceneY) <= tol && Math.abs(h - sceneH) <= tol;
+        if (!yAligned) continue;
+
+        out.push({
+          tileDoc,
+          src: src.trim(),
+          basePath: this.extractBasePath(src.trim()),
+          rect: { x, y, w, h }
+        });
+      }
+
+      out.sort((a, b) => (a.rect.x - b.rect.x));
+      return out;
+    } catch (e) {
+      return [];
+    }
+  }
+
+  _computeSceneMaskCompositeLayout(tiles) {
+    try {
+      const d = canvas?.dimensions;
+      const sr = d?.sceneRect;
+      if (!sr) return null;
+
+      const sceneX = sr.x ?? 0;
+      const sceneY = sr.y ?? 0;
+      const sceneW = sr.width ?? 0;
+      const sceneH = sr.height ?? 0;
+      if (!sceneW || !sceneH) return null;
+
+      if (!Array.isArray(tiles) || tiles.length < 2) return null;
+
+      const tol = 1;
+      const segments = [];
+      for (const t of tiles) {
+        const r = t?.rect;
+        if (!r) continue;
+        const coversY = Math.abs(r.y - sceneY) <= tol && Math.abs(r.h - sceneH) <= tol;
+        if (!coversY) continue;
+        const x0 = r.x;
+        const x1 = r.x + r.w;
+        const sx0 = Math.max(sceneX, Math.min(sceneX + sceneW, x0));
+        const sx1 = Math.max(sceneX, Math.min(sceneX + sceneW, x1));
+        if (sx1 - sx0 <= tol) continue;
+
+        segments.push({
+          basePath: t.basePath,
+          src: t.src,
+          tileDoc: t.tileDoc,
+          sceneX,
+          sceneY,
+          sceneW,
+          sceneH,
+          segX0: sx0,
+          segX1: sx1
+        });
+      }
+
+      if (segments.length < 2) return null;
+
+      segments.sort((a, b) => a.segX0 - b.segX0);
+      let covered = 0;
+      let cursor = sceneX;
+      for (const s of segments) {
+        if (s.segX1 <= cursor + tol) continue;
+        if (s.segX0 > cursor + tol) {
+          cursor = s.segX0;
+        }
+        const add = Math.max(0, s.segX1 - cursor);
+        covered += add;
+        cursor = Math.max(cursor, s.segX1);
+      }
+
+      const coverFrac = covered / sceneW;
+      if (coverFrac < 0.95) return null;
+
+      return { sceneX, sceneY, sceneW, sceneH, segments };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async _buildCompositeSceneMasks(layout, perBaseMasks) {
+    const THREE = window.THREE;
+    if (!THREE || !layout) return null;
+
+    const renderer = window.MapShine?.renderer;
+    const maxTex = renderer?.capabilities?.maxTextureSize;
+    const cap = Number.isFinite(maxTex) ? Math.max(256, Math.floor(maxTex)) : 4096;
+    const hardCap = Math.min(cap, 8192);
+
+    const sceneW = layout.sceneW;
+    const sceneH = layout.sceneH;
+    const scale = Math.min(1.0, hardCap / Math.max(1, sceneW), hardCap / Math.max(1, sceneH));
+
+    const outW = Math.max(1, Math.round(sceneW * scale));
+    const outH = Math.max(1, Math.round(sceneH * scale));
+
+    const registry = assetLoader.getEffectMaskRegistry?.() || {};
+    const compositeMasks = [];
+
+    for (const [maskId, def] of Object.entries(registry)) {
+      const suffix = def?.suffix;
+      if (typeof suffix !== 'string' || !suffix) continue;
+
+      const canvasEl = document.createElement('canvas');
+      canvasEl.width = outW;
+      canvasEl.height = outH;
+      const ctx = canvasEl.getContext('2d');
+      if (!ctx) continue;
+
+      ctx.clearRect(0, 0, outW, outH);
+
+      let any = false;
+      let desiredFlipY = null;
+
+      for (const seg of layout.segments) {
+        const masks = perBaseMasks.get(seg.basePath) || [];
+        const m = masks.find((x) => x?.id === maskId || x?.type === maskId);
+        const tex = m?.texture;
+        if (desiredFlipY === null && tex && typeof tex.flipY === 'boolean') {
+          desiredFlipY = tex.flipY;
+        }
+        const img = tex?.image;
+        if (!img) continue;
+
+        const segU0 = (seg.segX0 - layout.sceneX) / layout.sceneW;
+        const segU1 = (seg.segX1 - layout.sceneX) / layout.sceneW;
+        const dx = Math.round(segU0 * outW);
+        const dw = Math.max(1, Math.round((segU1 - segU0) * outW));
+
+        try {
+          ctx.drawImage(img, 0, 0, img.width, img.height, dx, 0, dw, outH);
+          any = true;
+        } catch (e) {
+        }
+      }
+
+      if (!any) continue;
+
+      const outTex = new THREE.Texture(canvasEl);
+      outTex.needsUpdate = true;
+
+      const isDataTexture = ['normal', 'roughness', 'water'].includes(maskId);
+      if (THREE.SRGBColorSpace && !isDataTexture) {
+        outTex.colorSpace = THREE.SRGBColorSpace;
+      }
+
+      outTex.minFilter = THREE.LinearFilter;
+      outTex.magFilter = THREE.LinearFilter;
+      outTex.generateMipmaps = false;
+
+      // Preserve the original mask texture's flipY convention so the composite
+      // behaves identically to the single-image (scene background) case.
+      outTex.flipY = desiredFlipY === null ? outTex.flipY : desiredFlipY;
+
+      compositeMasks.push({
+        id: maskId,
+        suffix,
+        type: maskId,
+        texture: outTex,
+        required: !!def?.required
+      });
+    }
+
+    return { masks: compositeMasks, width: outW, height: outH };
+  }
+
+  async _buildCompositeSceneAlbedo(layout) {
+    const THREE = window.THREE;
+    if (!THREE || !layout) return null;
+
+    const renderer = window.MapShine?.renderer;
+    const maxTex = renderer?.capabilities?.maxTextureSize;
+    const cap = Number.isFinite(maxTex) ? Math.max(256, Math.floor(maxTex)) : 4096;
+    const hardCap = Math.min(cap, 8192);
+
+    const sceneW = layout.sceneW;
+    const sceneH = layout.sceneH;
+    const scale = Math.min(1.0, hardCap / Math.max(1, sceneW), hardCap / Math.max(1, sceneH));
+
+    const outW = Math.max(1, Math.round(sceneW * scale));
+    const outH = Math.max(1, Math.round(sceneH * scale));
+
+    const canvasEl = document.createElement('canvas');
+    canvasEl.width = outW;
+    canvasEl.height = outH;
+    const ctx = canvasEl.getContext('2d');
+    if (!ctx) return null;
+
+    ctx.clearRect(0, 0, outW, outH);
+
+    const loadTextureFn = globalThis.foundry?.canvas?.loadTexture ?? globalThis.loadTexture;
+    if (!loadTextureFn) return null;
+
+    let any = false;
+
+    for (const seg of layout.segments) {
+      const src = seg?.src;
+      if (typeof src !== 'string' || !src.trim()) continue;
+
+      let img = null;
+      try {
+        const pixiTexture = await loadTextureFn(src.trim());
+        const resource = pixiTexture?.baseTexture?.resource;
+        img = resource?.source || null;
+      } catch (e) {
+        img = null;
+      }
+
+      if (!img) continue;
+
+      const segU0 = (seg.segX0 - layout.sceneX) / layout.sceneW;
+      const segU1 = (seg.segX1 - layout.sceneX) / layout.sceneW;
+      const dx = Math.round(segU0 * outW);
+      const dw = Math.max(1, Math.round((segU1 - segU0) * outW));
+
+      try {
+        ctx.drawImage(img, 0, 0, img.width, img.height, dx, 0, dw, outH);
+        any = true;
+      } catch (e) {
+      }
+    }
+
+    if (!any) return null;
+
+    const outTex = new THREE.Texture(canvasEl);
+    outTex.needsUpdate = true;
+    if (THREE.SRGBColorSpace) {
+      outTex.colorSpace = THREE.SRGBColorSpace;
+    }
+    outTex.minFilter = THREE.LinearFilter;
+    outTex.magFilter = THREE.LinearFilter;
+    outTex.generateMipmaps = false;
+    outTex.flipY = false;
+
+    return { texture: outTex, width: outW, height: outH };
+  }
+
+  _resolveMaskSourceSrc(foundryScene) {
+    try {
+      const override = foundryScene?.getFlag?.('map-shine-advanced', 'maskSource');
+      if (typeof override === 'string' && override.trim().length > 0) {
+        return override.trim();
+      }
+    } catch (e) {
+    }
+
+    // Auto-detect: choose a likely full-scene "base" tile (common for multi-layer maps)
+    try {
+      const tiles = canvas?.scene?.tiles;
+      const d = canvas?.dimensions;
+      const sr = d?.sceneRect;
+      if (!tiles || !sr) return null;
+
+      const sceneX = sr.x ?? 0;
+      const sceneY = sr.y ?? 0;
+      const sceneW = sr.width ?? (d?.sceneWidth ?? d?.width ?? 0);
+      const sceneH = sr.height ?? (d?.sceneHeight ?? d?.height ?? 0);
+      if (!sceneW || !sceneH) return null;
+
+      const foregroundElevation = canvas?.scene?.foregroundElevation ?? Number.POSITIVE_INFINITY;
+
+      let bestSrc = null;
+      let bestScore = -Infinity;
+
+      for (const tileDoc of tiles) {
+        const src = tileDoc?.texture?.src;
+        if (typeof src !== 'string' || src.trim().length === 0) continue;
+
+        let score = 0;
+
+        // Prefer non-overhead tiles
+        const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
+        if (Number.isFinite(foregroundElevation) && elev >= foregroundElevation) score -= 1000;
+
+        // Prefer tiles that cover the full sceneRect
+        const tol = 1;
+        const coversScene = (
+          Math.abs((tileDoc?.x ?? 0) - sceneX) <= tol &&
+          Math.abs((tileDoc?.y ?? 0) - sceneY) <= tol &&
+          Math.abs((tileDoc?.width ?? 0) - sceneW) <= tol &&
+          Math.abs((tileDoc?.height ?? 0) - sceneH) <= tol
+        );
+        if (coversScene) score += 50;
+
+        // Prefer common naming conventions
+        try {
+          const filename = src.substring(src.lastIndexOf('/') + 1).toLowerCase();
+          if (filename.includes('ground')) score += 15;
+          if (filename.includes('base')) score += 5;
+          if (filename.includes('albedo')) score += 2;
+        } catch (e) {
+        }
+
+        // Prefer larger tiles in general
+        const area = Math.max(0, (tileDoc?.width ?? 0) * (tileDoc?.height ?? 0));
+        score += Math.min(10, Math.log2(area + 1));
+
+        // Prefer lower elevations
+        score -= elev * 0.01;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestSrc = src.trim();
+        }
+      }
+
+      return bestSrc;
+    } catch (e) {
+    }
+
+    try {
+      const fallbackBg = foundryScene?.background?.src;
+      if (typeof fallbackBg === 'string' && fallbackBg.trim().length > 0) {
+        return fallbackBg.trim();
+      }
+    } catch (e) {
+    }
+
+    return null;
+  }
+
   /**
    * Initialize a new scene from Foundry scene data
    * @param {Scene} foundryScene - Foundry VTT scene object
@@ -98,17 +467,21 @@ export class SceneComposer {
     
     let baseTexture = null;
     let bgPath = null;
-    
+
+    // Determine which source image drives suffix-mask discovery.
+    // This may be the scene background or a full-scene tile (common for layered maps).
+    const maskSourceSrc = this._resolveMaskSourceSrc(foundryScene);
+    if (maskSourceSrc) {
+      bgPath = this.extractBasePath(maskSourceSrc);
+      log.info(`Mask source: ${maskSourceSrc}`);
+      log.info(`Loading effect masks for: ${bgPath}`);
+    }
+
     if (hasBackgroundImage) {
       // Use Foundry's already-loaded background texture instead of reloading
       // Foundry's canvas.primary.background.texture is already loaded and accessible
       baseTexture = await this.getFoundryBackgroundTexture(foundryScene);
-      
-      if (baseTexture) {
-        // Load effect masks only (not base texture)
-        bgPath = this.extractBasePath(foundryScene.background.src);
-        log.info(`Loading effect masks for: ${bgPath}`);
-      } else {
+      if (!baseTexture) {
         log.warn('Could not access Foundry background texture, using fallback');
       }
     } else {
@@ -134,6 +507,69 @@ export class SceneComposer {
       );
     }
 
+    this._maskCompositeInfo = null;
+    this._albedoCompositeInfo = null;
+    let compositeLayout = null;
+    try {
+      const tileCandidates = this._getLargeSceneMaskTiles();
+      const layout = this._computeSceneMaskCompositeLayout(tileCandidates);
+      compositeLayout = layout;
+      if (layout) {
+        const perBaseMasks = new Map();
+        for (const seg of layout.segments) {
+          if (!seg?.basePath || perBaseMasks.has(seg.basePath)) continue;
+          const masks = await this._loadMasksOnlyForBasePath(seg.basePath);
+          perBaseMasks.set(seg.basePath, masks);
+        }
+
+        const composite = await this._buildCompositeSceneMasks(layout, perBaseMasks);
+        if (composite?.masks?.length) {
+          result = {
+            success: true,
+            bundle: {
+              masks: composite.masks,
+              isMapShineCompatible: true
+            },
+            warnings: result?.warnings || [],
+            error: null
+          };
+
+          this._maskCompositeInfo = {
+            enabled: true,
+            sceneRect: { x: layout.sceneX, y: layout.sceneY, w: layout.sceneW, h: layout.sceneH },
+            outputSize: { w: composite.width, h: composite.height },
+            segments: layout.segments.map((s) => ({
+              basePath: s.basePath,
+              src: s.src,
+              segX0: s.segX0,
+              segX1: s.segX1
+            }))
+          };
+        }
+      }
+    } catch (e) {
+    }
+
+    if (!hasBackgroundImage && !baseTexture && compositeLayout) {
+      try {
+        const compositeAlbedo = await this._buildCompositeSceneAlbedo(compositeLayout);
+        if (compositeAlbedo?.texture) {
+          baseTexture = compositeAlbedo.texture;
+          this._albedoCompositeInfo = {
+            enabled: true,
+            outputSize: { w: compositeAlbedo.width, h: compositeAlbedo.height },
+            segments: compositeLayout.segments.map((s) => ({
+              basePath: s.basePath,
+              src: s.src,
+              segX0: s.segX0,
+              segX1: s.segX1
+            }))
+          };
+        }
+      } catch (e) {
+      }
+    }
+
     // Create bundle with Foundry's texture + any masks that loaded successfully
     this.currentBundle = {
       basePath: bgPath || '',
@@ -141,6 +577,23 @@ export class SceneComposer {
       masks: result.success ? result.bundle.masks : [],
       isMapShineCompatible: result.success ? result.bundle.isMapShineCompatible : false
     };
+
+    // Normalize mask textures to the same UV convention as the base plane.
+    // The base plane uses flipY=false and a geometry Y-inversion (scale.y=-1)
+    // to align Foundry's top-left origin. Masks must follow the same.
+    try {
+      if (this.currentBundle?.masks && Array.isArray(this.currentBundle.masks)) {
+        for (const m of this.currentBundle.masks) {
+          const tex = m?.texture;
+          if (!tex || typeof tex.flipY !== 'boolean') continue;
+          if (tex.flipY !== false) {
+            tex.flipY = false;
+            tex.needsUpdate = true;
+          }
+        }
+      }
+    } catch (e) {
+    }
 
     // Create base plane mesh (with texture or fallback color)
     this.createBasePlane(baseTexture);

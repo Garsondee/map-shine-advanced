@@ -57,6 +57,7 @@ export class LightingEffect extends EffectBase {
     this.darknessScene = null;  
     this.darknessTarget = null; 
     this.roofAlphaTarget = null; 
+    this.weatherRoofAlphaTarget = null;
     this.quadScene = null;      
     this.quadCamera = null;
     this.compositeMaterial = null;
@@ -82,6 +83,7 @@ export class LightingEffect extends EffectBase {
     this._baseMesh = null;
 
     this._publishedRoofAlphaTex = null;
+    this._publishedWeatherRoofAlphaTex = null;
     this._publishedOutdoorsTex = null;
   }
 
@@ -1086,6 +1088,17 @@ export class LightingEffect extends EffectBase {
       this.roofAlphaTarget.setSize(size.x, size.y);
     }
 
+    if (!this.weatherRoofAlphaTarget) {
+      this.weatherRoofAlphaTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else if (this.weatherRoofAlphaTarget.width !== size.x || this.weatherRoofAlphaTarget.height !== size.y) {
+      this.weatherRoofAlphaTarget.setSize(size.x, size.y);
+    }
+
     const hasOutdoorsProjection = !!(this.outdoorsScene && this.outdoorsMesh && this.outdoorsMask);
     if (hasOutdoorsProjection) {
       if (!this.outdoorsTarget) {
@@ -1117,6 +1130,20 @@ export class LightingEffect extends EffectBase {
           });
         }
 
+        const weatherRoofTex = this.weatherRoofAlphaTarget?.texture;
+        if (weatherRoofTex && weatherRoofTex !== this._publishedWeatherRoofAlphaTex) {
+          this._publishedWeatherRoofAlphaTex = weatherRoofTex;
+          mm.setTexture('weatherRoofAlpha.screen', weatherRoofTex, {
+            space: 'screenUv',
+            source: 'renderTarget',
+            channels: 'a',
+            uvFlipY: false,
+            lifecycle: 'dynamicPerFrame',
+            width: this.weatherRoofAlphaTarget?.width ?? null,
+            height: this.weatherRoofAlphaTarget?.height ?? null
+          });
+        }
+
         const outdoorsTex = this.outdoorsTarget?.texture;
         if (outdoorsTex && outdoorsTex !== this._publishedOutdoorsTex) {
           this._publishedOutdoorsTex = outdoorsTex;
@@ -1137,11 +1164,18 @@ export class LightingEffect extends EffectBase {
     // 0. Render Roof Alpha Mask (overhead tiles only)
     // We rely on TileManager tagging overhead tiles into ROOF_LAYER (20).
     const ROOF_LAYER = 20;
+    const WEATHER_ROOF_LAYER = 21;
     const previousLayersMask = this.mainCamera.layers.mask;
     const previousTarget = renderer.getRenderTarget();
 
     this.mainCamera.layers.set(ROOF_LAYER);
     renderer.setRenderTarget(this.roofAlphaTarget);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    renderer.render(scene, this.mainCamera);
+
+    this.mainCamera.layers.set(WEATHER_ROOF_LAYER);
+    renderer.setRenderTarget(this.weatherRoofAlphaTarget);
     renderer.setClearColor(0x000000, 0);
     renderer.clear();
     renderer.render(scene, this.mainCamera);

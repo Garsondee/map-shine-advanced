@@ -29,6 +29,10 @@ const EFFECT_MASKS = {
   // emissive: { suffix: '_Emissive', required: false, description: 'Self-illumination mask' }
 };
 
+export function getEffectMaskRegistry() {
+  return EFFECT_MASKS;
+}
+
 /** Asset cache to prevent redundant loads */
 const assetCache = new Map();
 

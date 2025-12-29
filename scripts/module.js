@@ -123,11 +123,20 @@ Hooks.once('init', async function() {
 
       const moduleId = 'map-shine-advanced';
       const flagKey = 'overheadIsRoof';
+      const bypassFlagKey = 'bypassEffects';
+      const cloudShadowsFlagKey = 'cloudShadowsEnabled';
+      const cloudTopsFlagKey = 'cloudTopsEnabled';
 
-      const overheadTab = html.find('.tab[data-tab="overhead"]');
+      const $html = html?.find ? html : $(html);
+      const overheadTab = $html.find('.tab[data-tab="overhead"]');
       if (!overheadTab.length) return;
 
       const current = !!(tileDoc.getFlag?.(moduleId, flagKey) ?? tileDoc.flags?.[moduleId]?.[flagKey]);
+      const bypassCurrent = !!(tileDoc.getFlag?.(moduleId, bypassFlagKey) ?? tileDoc.flags?.[moduleId]?.[bypassFlagKey]);
+      const cloudShadowsEnabled = (tileDoc.getFlag?.(moduleId, cloudShadowsFlagKey) ?? tileDoc.flags?.[moduleId]?.[cloudShadowsFlagKey]);
+      const cloudTopsEnabled = (tileDoc.getFlag?.(moduleId, cloudTopsFlagKey) ?? tileDoc.flags?.[moduleId]?.[cloudTopsFlagKey]);
+      const cloudShadowsCurrent = (cloudShadowsEnabled === undefined) ? true : !!cloudShadowsEnabled;
+      const cloudTopsCurrent = (cloudTopsEnabled === undefined) ? true : !!cloudTopsEnabled;
 
       const group = $(
         `<div class="form-group">
@@ -139,11 +148,47 @@ Hooks.once('init', async function() {
          </div>`
       );
 
+      const bypassGroup = $(
+        `<div class="form-group">
+           <label>Bypass Map Shine Effects</label>
+           <div class="form-fields">
+             <input type="checkbox" name="flags.${moduleId}.${bypassFlagKey}" ${bypassCurrent ? 'checked' : ''} />
+           </div>
+           <p class="notes">Render this tile outside the Map Shine post-processing stack.</p>
+         </div>`
+      );
+
+      const cloudShadowsGroup = $(
+        `<div class="form-group">
+           <label>Cloud Shadows (Map Shine)</label>
+           <div class="form-fields">
+             <input type="checkbox" name="flags.${moduleId}.${cloudShadowsFlagKey}" ${cloudShadowsCurrent ? 'checked' : ''} />
+           </div>
+           <p class="notes">Allow CloudEffect shadows to affect this tile.</p>
+         </div>`
+      );
+
+      const cloudTopsGroup = $(
+        `<div class="form-group">
+           <label>Cloud Tops (Map Shine)</label>
+           <div class="form-fields">
+             <input type="checkbox" name="flags.${moduleId}.${cloudTopsFlagKey}" ${cloudTopsCurrent ? 'checked' : ''} />
+           </div>
+           <p class="notes">Allow CloudEffect cloud-top overlay to render over this tile.</p>
+         </div>`
+      );
+
       const anchor = overheadTab.find('input[name="overhead.restrictsWeather"]').closest('.form-group');
       if (anchor.length) {
         anchor.after(group);
+        group.after(bypassGroup);
+        bypassGroup.after(cloudShadowsGroup);
+        cloudShadowsGroup.after(cloudTopsGroup);
       } else {
         overheadTab.append(group);
+        overheadTab.append(bypassGroup);
+        overheadTab.append(cloudShadowsGroup);
+        overheadTab.append(cloudTopsGroup);
       }
     } catch (e) {
       console.error('Map Shine: failed to inject TileConfig overhead roof toggle', e);

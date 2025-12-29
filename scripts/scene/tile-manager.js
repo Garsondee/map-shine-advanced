@@ -7,6 +7,7 @@
 
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
+import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../effects/EffectComposer.js';
 
 const log = createLogger('TileManager');
 
@@ -894,6 +895,11 @@ export class TileManager {
     this._weatherRoofTileIds.delete(tileId);
     this._tintDirty = true;
     log.debug(`Removed tile sprite: ${tileId}`);
+
+    try {
+      window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
+    } catch (_) {
+    }
   }
 
   /**
@@ -904,6 +910,31 @@ export class TileManager {
    */
   updateSpriteTransform(sprite, tileDoc) {
     const THREE = window.THREE;
+
+    const bypassFlag = tileDoc?.getFlag?.('map-shine-advanced', 'bypassEffects')
+      ?? tileDoc?.flags?.['map-shine-advanced']?.bypassEffects;
+    const bypassEffects = !!bypassFlag;
+    const wasBypass = !!sprite.userData.bypassEffects;
+    sprite.userData.bypassEffects = bypassEffects;
+
+    // If bypass is enabled, render ONLY on the overlay layer so the tile is excluded
+    // from the main scene render (and therefore from post-processing).
+    // Note: this also excludes the tile from roof/water layer passes.
+    if (bypassEffects) {
+      sprite.layers.set(OVERLAY_THREE_LAYER);
+      sprite.renderOrder = 1000;
+    } else if (wasBypass) {
+      // Reset to default layer when leaving bypass mode.
+      sprite.layers.set(0);
+      sprite.renderOrder = 0;
+    }
+
+    const cloudShadowsFlag = tileDoc?.getFlag?.('map-shine-advanced', 'cloudShadowsEnabled')
+      ?? tileDoc?.flags?.['map-shine-advanced']?.cloudShadowsEnabled;
+    const cloudTopsFlag = tileDoc?.getFlag?.('map-shine-advanced', 'cloudTopsEnabled')
+      ?? tileDoc?.flags?.['map-shine-advanced']?.cloudTopsEnabled;
+    const cloudShadowsEnabled = (cloudShadowsFlag === undefined) ? true : !!cloudShadowsFlag;
+    const cloudTopsEnabled = (cloudTopsFlag === undefined) ? true : !!cloudTopsFlag;
 
     // 1. Determine Z-Layer
     // Logic: 
@@ -943,17 +974,34 @@ export class TileManager {
       }
     }
 
-    if (isOverhead) sprite.layers.enable(ROOF_LAYER);
-    else sprite.layers.disable(ROOF_LAYER);
-    if (isWeatherRoof) sprite.layers.enable(WEATHER_ROOF_LAYER);
-    else sprite.layers.disable(WEATHER_ROOF_LAYER);
+    if (!bypassEffects) {
+      if (isOverhead) sprite.layers.enable(ROOF_LAYER);
+      else sprite.layers.disable(ROOF_LAYER);
+      if (isWeatherRoof) sprite.layers.enable(WEATHER_ROOF_LAYER);
+      else sprite.layers.disable(WEATHER_ROOF_LAYER);
+
+      if (!cloudShadowsEnabled) sprite.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+      else sprite.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+      if (!cloudTopsEnabled) sprite.layers.enable(TILE_FEATURE_LAYERS.CLOUD_TOP_BLOCKER);
+      else sprite.layers.disable(TILE_FEATURE_LAYERS.CLOUD_TOP_BLOCKER);
+    }
 
     const occludesWaterFlag = tileDoc?.getFlag?.('map-shine-advanced', 'occludesWater')
       ?? tileDoc?.flags?.['map-shine-advanced']?.occludesWater;
-    const occludesWater = (occludesWaterFlag === undefined) ? !isOverhead : !!occludesWaterFlag;
+    // Water occlusion is opt-in. Defaulting this to true for ground tiles makes the
+    // water occluder render target fully opaque (most base tiles are opaque), which
+    // suppresses water everywhere.
+    const occludesWater = (occludesWaterFlag === undefined) ? false : !!occludesWaterFlag;
     sprite.userData.occludesWater = occludesWater;
-    if (occludesWater) sprite.layers.enable(WATER_OCCLUDER_LAYER);
-    else sprite.layers.disable(WATER_OCCLUDER_LAYER);
+    if (!bypassEffects) {
+      if (occludesWater) sprite.layers.enable(WATER_OCCLUDER_LAYER);
+      else sprite.layers.disable(WATER_OCCLUDER_LAYER);
+    }
+
+    try {
+      window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
+    } catch (_) {
+    }
 
     if (isOverhead) {
       zBase = groundZ + Z_OVERHEAD_OFFSET;
@@ -1033,11 +1081,18 @@ export class TileManager {
     }
 
     // Opacity (Alpha)
-    // Hidden tiles are semi-transparent for GM
+    // If GM and tile is hidden, show at reduced opacity
     if (isHidden && isGM) {
+      sprite.visible = true;
       sprite.material.opacity = 0.5;
     } else {
+      sprite.visible = !isHidden;
       sprite.material.opacity = tileDoc.alpha ?? 1;
+    }
+
+    try {
+      window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
+    } catch (_) {
     }
   }
 

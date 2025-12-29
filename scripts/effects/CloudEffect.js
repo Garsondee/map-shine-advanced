@@ -4,7 +4,7 @@
  * @module effects/CloudEffect
  */
 
-import { EffectBase, RenderLayers } from './EffectComposer.js';
+import { EffectBase, RenderLayers, TILE_FEATURE_LAYERS } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
 
@@ -52,9 +52,17 @@ export class CloudEffect extends EffectBase {
     /** @type {THREE.WebGLRenderTarget|null} */
     this.cloudTopTarget = null;
 
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this.cloudShadowBlockerTarget = null;
+
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this.cloudTopBlockerTarget = null;
+
     this._publishedCloudShadowTex = null;
     this._publishedCloudShadowRawTex = null;
     this._publishedCloudDensityTex = null;
+    this._publishedCloudShadowBlockerTex = null;
+    this._publishedCloudTopBlockerTex = null;
 
     /** @type {THREE.ShaderMaterial|null} */
     this.cloudTopMaterial = null;
@@ -208,8 +216,97 @@ export class CloudEffect extends EffectBase {
     this._lastInternalHeight = 0;
 
     this._forceUpdateFrames = 0;
+    this._forceRecomposeFrames = 0;
+    this._blockersDirty = true;
     this._lastParamHash = null;
     this._lastElapsed = 0;
+
+    this._blockerOverrides = null;
+  }
+
+  requestUpdate(frames = 2) {
+    const n = (typeof frames === 'number' && Number.isFinite(frames)) ? (frames | 0) : 2;
+    const f = Math.max(1, n);
+    this._forceUpdateFrames = Math.max(this._forceUpdateFrames, f);
+  }
+
+  requestRecompose(frames = 2) {
+    const n = (typeof frames === 'number' && Number.isFinite(frames)) ? (frames | 0) : 2;
+    const f = Math.max(1, n);
+    this._forceRecomposeFrames = Math.max(this._forceRecomposeFrames, f);
+  }
+
+  requestBlockerUpdate(frames = 2) {
+    this._blockersDirty = true;
+    this.requestRecompose(frames);
+  }
+
+  _renderTileBlockerLayer(renderer, target, layerId) {
+    const THREE = window.THREE;
+    if (!THREE || !renderer || !target || !this.mainCamera || !this.mainScene) return;
+
+    const bit = 1 << layerId;
+    if (!this._blockerOverrides) this._blockerOverrides = [];
+    const overrides = this._blockerOverrides;
+    overrides.length = 0;
+
+    try {
+      this.mainScene.traverseVisible((obj) => {
+        if (!obj) return;
+        const mask = obj.layers?.mask;
+        if (typeof mask !== 'number' || (mask & bit) === 0) return;
+
+        const m = obj.material;
+        if (!m || !m.isSpriteMaterial) return;
+
+        overrides.push({
+          m,
+          map: m.map,
+          alphaMap: m.alphaMap,
+          opacity: m.opacity,
+          transparent: m.transparent,
+          alphaTest: m.alphaTest,
+          depthTest: m.depthTest,
+          depthWrite: m.depthWrite,
+          blending: m.blending,
+          color: m.color ? m.color.getHex() : null
+        });
+
+        m.map = null;
+        m.alphaMap = null;
+        if (m.color) m.color.setHex(0xffffff);
+        m.opacity = 1.0;
+        m.transparent = true;
+        m.alphaTest = 0.0;
+        m.depthTest = false;
+        m.depthWrite = false;
+        m.blending = THREE.NoBlending;
+        m.needsUpdate = true;
+      });
+
+      this.mainCamera.layers.set(layerId);
+      renderer.setRenderTarget(target);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+      renderer.render(this.mainScene, this.mainCamera);
+    } finally {
+      for (let i = overrides.length - 1; i >= 0; i--) {
+        const o = overrides[i];
+        const m = o.m;
+        if (!m) continue;
+        m.map = o.map;
+        m.alphaMap = o.alphaMap;
+        if (m.color && typeof o.color === 'number') m.color.setHex(o.color);
+        m.opacity = o.opacity;
+        m.transparent = o.transparent;
+        m.alphaTest = o.alphaTest;
+        m.depthTest = o.depthTest;
+        m.depthWrite = o.depthWrite;
+        m.blending = o.blending;
+        m.needsUpdate = true;
+      }
+      overrides.length = 0;
+    }
   }
 
   /**
@@ -805,7 +902,14 @@ export class CloudEffect extends EffectBase {
         float sampleLayer(vec2 baseWorldPos, vec2 cameraPinnedPos, int layerIndex, int octaves) {
           float parallax = uLayerParallax[layerIndex] * uParallaxScale;
           vec2 layerWorldPos = mix(baseWorldPos, cameraPinnedPos, parallax);
-          vec2 layerUV = ((layerWorldPos - uSceneOrigin) / uSceneSize) + uLayerWindOffsets[layerIndex];
+
+          float w = max(uSceneSize.x, 1.0);
+          float h = max(uSceneSize.y, 1.0);
+          float s = min(w, h);
+          vec2 aspect = vec2(w / s, h / s);
+
+          vec2 layerUV = ((layerWorldPos - uSceneOrigin) / uSceneSize) * aspect;
+          layerUV += uLayerWindOffsets[layerIndex] * aspect;
 
           // Domain warping for wispy/swirly clouds
           float time = uTime * uDomainWarpSpeed;
@@ -916,7 +1020,11 @@ export class CloudEffect extends EffectBase {
         uZoom: { value: 1.0 },
         uMinBrightness: { value: this.params.minShadowBrightness },
         // Sun offset for shadow displacement (in UV space)
-        uShadowOffsetUV: { value: new THREE.Vector2(0, 0) }
+        uShadowOffsetUV: { value: new THREE.Vector2(0, 0) },
+
+        // Per-tile blocker mask: 1.0 means this pixel should NOT receive cloud shadows
+        tBlockerMask: { value: null },
+        uHasBlockerMask: { value: 0.0 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -936,6 +1044,9 @@ export class CloudEffect extends EffectBase {
         uniform float uZoom;
         uniform float uMinBrightness;
         uniform vec2 uShadowOffsetUV;
+
+        uniform sampler2D tBlockerMask;
+        uniform float uHasBlockerMask;
 
         varying vec2 vUv;
 
@@ -985,6 +1096,12 @@ export class CloudEffect extends EffectBase {
             shadowFactor = mix(1.0, shadowFactor, outdoors);
           }
 
+          // Apply per-tile blocker mask: blocked pixels always receive full brightness.
+          if (uHasBlockerMask > 0.5) {
+            float b = texture2D(tBlockerMask, vUv).a;
+            shadowFactor = mix(shadowFactor, 1.0, clamp(b, 0.0, 1.0));
+          }
+
           gl_FragColor = vec4(shadowFactor, shadowFactor, shadowFactor, 1.0);
         }
       `,
@@ -1026,7 +1143,11 @@ export class CloudEffect extends EffectBase {
         uShadingStrength: { value: 1.0 },
         uNormalStrength: { value: 1.0 },
         uAOIntensity: { value: 1.0 },
-        uEdgeHighlight: { value: 1.0 }
+        uEdgeHighlight: { value: 1.0 },
+
+        // Per-tile blocker mask: 1.0 means this pixel should NOT receive cloud tops
+        tBlockerMask: { value: null },
+        uHasBlockerMask: { value: 0.0 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -1057,6 +1178,9 @@ export class CloudEffect extends EffectBase {
         uniform float uNormalStrength;
         uniform float uAOIntensity;
         uniform float uEdgeHighlight;
+
+        uniform sampler2D tBlockerMask;
+        uniform float uHasBlockerMask;
 
         varying vec2 vUv;
 
@@ -1201,6 +1325,14 @@ export class CloudEffect extends EffectBase {
             float outdoors = texture2D(tOutdoorsMask, vUv).r;
             float maskStrength = clamp(uOutdoorsMaskStrength, 0.0, 1.0);
             alpha *= mix(1.0, outdoors, maskStrength);
+          }
+
+          // Apply per-tile blocker mask: blocked pixels always get zero alpha.
+          if (uHasBlockerMask > 0.5) {
+            vec4 bm = texture2D(tBlockerMask, vUv);
+            float b = max(max(bm.r, bm.g), max(bm.b, bm.a));
+            b = step(0.01, b);
+            alpha *= (1.0 - b);
           }
 
           gl_FragColor = vec4(color, alpha);
@@ -1381,6 +1513,30 @@ export class CloudEffect extends EffectBase {
       });
     } else {
       this.cloudTopTarget.setSize(iW, iH);
+    }
+
+    // Cloud shadow blocker mask (tiles which do NOT receive cloud shadows)
+    if (!this.cloudShadowBlockerTarget) {
+      this.cloudShadowBlockerTarget = new THREE.WebGLRenderTarget(iW, iH, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else {
+      this.cloudShadowBlockerTarget.setSize(iW, iH);
+    }
+
+    // Cloud top blocker mask (tiles which do NOT receive cloud tops)
+    if (!this.cloudTopBlockerTarget) {
+      this.cloudTopBlockerTarget = new THREE.WebGLRenderTarget(iW, iH, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else {
+      this.cloudTopBlockerTarget.setSize(iW, iH);
     }
 
     // Update material uniforms
@@ -1720,6 +1876,7 @@ export class CloudEffect extends EffectBase {
     }
 
     const previousTarget = renderer.getRenderTarget();
+    const previousLayersMask = this.mainCamera?.layers?.mask;
 
     try {
       const p = this.params;
@@ -1776,6 +1933,7 @@ export class CloudEffect extends EffectBase {
 
     this._frameCounter = (this._frameCounter + 1) >>> 0;
     const shouldUpdateThisFrame = (updateEvery <= 1) || !viewIsStable || (this._forceUpdateFrames > 0) || ((this._frameCounter % updateEvery) === 0);
+    const shouldRecomposeThisFrame = (this._forceRecomposeFrames > 0) || this._blockersDirty;
 
     // If weather is disabled, clear textures to neutral values and skip all
     // simulation work.
@@ -1799,6 +1957,17 @@ export class CloudEffect extends EffectBase {
       }
       if (this.cloudTopTarget) {
         renderer.setRenderTarget(this.cloudTopTarget);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear();
+      }
+
+      if (this.cloudShadowBlockerTarget) {
+        renderer.setRenderTarget(this.cloudShadowBlockerTarget);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear();
+      }
+      if (this.cloudTopBlockerTarget) {
+        renderer.setRenderTarget(this.cloudTopBlockerTarget);
         renderer.setClearColor(0x000000, 0);
         renderer.clear();
       }
@@ -1855,12 +2024,107 @@ export class CloudEffect extends EffectBase {
       return;
     }
 
-    if (!shouldUpdateThisFrame) {
+    if (!shouldUpdateThisFrame && !shouldRecomposeThisFrame) {
       renderer.setRenderTarget(previousTarget);
       return;
     }
 
+    try {
+      if ((shouldUpdateThisFrame || shouldRecomposeThisFrame) && this.mainCamera && this.mainScene) {
+        if (this.cloudShadowBlockerTarget) {
+          this._renderTileBlockerLayer(renderer, this.cloudShadowBlockerTarget, TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+        }
+
+        if (this.cloudTopBlockerTarget) {
+          this._renderTileBlockerLayer(renderer, this.cloudTopBlockerTarget, TILE_FEATURE_LAYERS.CLOUD_TOP_BLOCKER);
+        }
+      }
+    } catch (e) {
+    } finally {
+      try {
+        if (this.mainCamera && typeof previousLayersMask === 'number') {
+          this.mainCamera.layers.mask = previousLayersMask;
+        }
+      } catch (e) {
+      }
+    }
+
     if (this._forceUpdateFrames > 0) this._forceUpdateFrames--;
+    if (this._forceRecomposeFrames > 0) this._forceRecomposeFrames--;
+    this._blockersDirty = false;
+
+    if (!shouldUpdateThisFrame) {
+      // Pass 2a: Generate UNMASKED cloud shadow from density (for indoor consumers)
+      {
+        const su = this.shadowMaterial.uniforms;
+        const prevHasMask = su.uHasOutdoorsMask ? su.uHasOutdoorsMask.value : 0.0;
+        const prevMaskTex = su.tOutdoorsMask ? su.tOutdoorsMask.value : null;
+
+        if (su.uDensityMode) su.uDensityMode.value = 0.0;
+        if (su.uHasOutdoorsMask) su.uHasOutdoorsMask.value = 0.0;
+        if (su.tOutdoorsMask) su.tOutdoorsMask.value = null;
+
+        this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
+
+        if (this.shadowMaterial.uniforms.tBlockerMask) {
+          this.shadowMaterial.uniforms.tBlockerMask.value = this.cloudShadowBlockerTarget?.texture ?? null;
+        }
+        if (this.shadowMaterial.uniforms.uHasBlockerMask) {
+          this.shadowMaterial.uniforms.uHasBlockerMask.value = this.cloudShadowBlockerTarget?.texture ? 1.0 : 0.0;
+        }
+        this.quadMesh.material = this.shadowMaterial;
+        renderer.setRenderTarget(this.cloudShadowRawTarget);
+        renderer.setClearColor(0xffffff, 1);
+        renderer.clear();
+        renderer.render(this.quadScene, this.quadCamera);
+
+        if (su.uHasOutdoorsMask) su.uHasOutdoorsMask.value = prevHasMask;
+        if (su.tOutdoorsMask) su.tOutdoorsMask.value = prevMaskTex;
+      }
+
+      // Pass 2b: Generate cloud shadow from density (OUTDOORS-MASKED)
+      if (this.shadowMaterial.uniforms.uDensityMode) this.shadowMaterial.uniforms.uDensityMode.value = 0.0;
+      this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
+
+      if (this.shadowMaterial.uniforms.tBlockerMask) {
+        this.shadowMaterial.uniforms.tBlockerMask.value = this.cloudShadowBlockerTarget?.texture ?? null;
+      }
+      if (this.shadowMaterial.uniforms.uHasBlockerMask) {
+        this.shadowMaterial.uniforms.uHasBlockerMask.value = this.cloudShadowBlockerTarget?.texture ? 1.0 : 0.0;
+      }
+      this.quadMesh.material = this.shadowMaterial;
+      renderer.setRenderTarget(this.cloudShadowTarget);
+      renderer.setClearColor(0xffffff, 1);
+      renderer.clear();
+      renderer.render(this.quadScene, this.quadCamera);
+
+      // Pass 4: Generate cloud tops (visible cloud layer with zoom fade)
+      if (this.cloudTopMaterial && this.cloudTopTarget) {
+        const usePacked = !!this.cloudTopDensityTarget;
+        if (this.cloudTopMaterial.uniforms.uDensityMode) {
+          this.cloudTopMaterial.uniforms.uDensityMode.value = usePacked ? 1.0 : 0.0;
+        }
+        this.cloudTopMaterial.uniforms.tCloudDensity.value = usePacked
+          ? this.cloudTopDensityTarget.texture
+          : this.cloudDensityTarget.texture;
+
+        if (this.cloudTopMaterial.uniforms.tBlockerMask) {
+          this.cloudTopMaterial.uniforms.tBlockerMask.value = this.cloudTopBlockerTarget?.texture ?? null;
+        }
+        if (this.cloudTopMaterial.uniforms.uHasBlockerMask) {
+          this.cloudTopMaterial.uniforms.uHasBlockerMask.value = this.cloudTopBlockerTarget?.texture ? 1.0 : 0.0;
+        }
+
+        this.quadMesh.material = this.cloudTopMaterial;
+        renderer.setRenderTarget(this.cloudTopTarget);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear();
+        renderer.render(this.quadScene, this.quadCamera);
+      }
+
+      renderer.setRenderTarget(previousTarget);
+      return;
+    }
 
     // Pass 1: Generate world-pinned cloud density (NO parallax) for shadows and other consumers
     if (this.densityMaterial.uniforms.uParallaxScale) this.densityMaterial.uniforms.uParallaxScale.value = 0.0;
@@ -1882,6 +2146,13 @@ export class CloudEffect extends EffectBase {
       if (su.tOutdoorsMask) su.tOutdoorsMask.value = null;
 
       this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
+
+      if (this.shadowMaterial.uniforms.tBlockerMask) {
+        this.shadowMaterial.uniforms.tBlockerMask.value = this.cloudShadowBlockerTarget?.texture ?? null;
+      }
+      if (this.shadowMaterial.uniforms.uHasBlockerMask) {
+        this.shadowMaterial.uniforms.uHasBlockerMask.value = this.cloudShadowBlockerTarget?.texture ? 1.0 : 0.0;
+      }
       this.quadMesh.material = this.shadowMaterial;
       renderer.setRenderTarget(this.cloudShadowRawTarget);
       renderer.setClearColor(0xffffff, 1);
@@ -1895,6 +2166,13 @@ export class CloudEffect extends EffectBase {
     // Pass 2b: Generate cloud shadow from density (OUTDOORS-MASKED)
     if (this.shadowMaterial.uniforms.uDensityMode) this.shadowMaterial.uniforms.uDensityMode.value = 0.0;
     this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
+
+    if (this.shadowMaterial.uniforms.tBlockerMask) {
+      this.shadowMaterial.uniforms.tBlockerMask.value = this.cloudShadowBlockerTarget?.texture ?? null;
+    }
+    if (this.shadowMaterial.uniforms.uHasBlockerMask) {
+      this.shadowMaterial.uniforms.uHasBlockerMask.value = this.cloudShadowBlockerTarget?.texture ? 1.0 : 0.0;
+    }
     this.quadMesh.material = this.shadowMaterial;
     renderer.setRenderTarget(this.cloudShadowTarget);
     renderer.setClearColor(0xffffff, 1);
@@ -1921,6 +2199,14 @@ export class CloudEffect extends EffectBase {
       this.cloudTopMaterial.uniforms.tCloudDensity.value = usePacked
         ? this.cloudTopDensityTarget.texture
         : this.cloudDensityTarget.texture;
+
+      if (this.cloudTopMaterial.uniforms.tBlockerMask) {
+        this.cloudTopMaterial.uniforms.tBlockerMask.value = this.cloudTopBlockerTarget?.texture ?? null;
+      }
+      if (this.cloudTopMaterial.uniforms.uHasBlockerMask) {
+        this.cloudTopMaterial.uniforms.uHasBlockerMask.value = this.cloudTopBlockerTarget?.texture ? 1.0 : 0.0;
+      }
+
       this.quadMesh.material = this.cloudTopMaterial;
       renderer.setRenderTarget(this.cloudTopTarget);
       renderer.setClearColor(0x000000, 0); // Transparent background
@@ -1972,6 +2258,34 @@ export class CloudEffect extends EffectBase {
             height: this.cloudDensityTarget?.height ?? null
           });
         }
+
+        const shadowBlockerTex = this.cloudShadowBlockerTarget?.texture;
+        if (shadowBlockerTex && shadowBlockerTex !== this._publishedCloudShadowBlockerTex) {
+          this._publishedCloudShadowBlockerTex = shadowBlockerTex;
+          mm.setTexture('cloudShadowBlocker.screen', shadowBlockerTex, {
+            space: 'screenUv',
+            source: 'renderTarget',
+            channels: 'rgba',
+            uvFlipY: false,
+            lifecycle: 'dynamicPerFrame',
+            width: this.cloudShadowBlockerTarget?.width ?? null,
+            height: this.cloudShadowBlockerTarget?.height ?? null
+          });
+        }
+
+        const topBlockerTex = this.cloudTopBlockerTarget?.texture;
+        if (topBlockerTex && topBlockerTex !== this._publishedCloudTopBlockerTex) {
+          this._publishedCloudTopBlockerTex = topBlockerTex;
+          mm.setTexture('cloudTopBlocker.screen', topBlockerTex, {
+            space: 'screenUv',
+            source: 'renderTarget',
+            channels: 'rgba',
+            uvFlipY: false,
+            lifecycle: 'dynamicPerFrame',
+            width: this.cloudTopBlockerTarget?.width ?? null,
+            height: this.cloudTopBlockerTarget?.height ?? null
+          });
+        }
       }
     } catch (e) {
     }
@@ -2000,6 +2314,16 @@ export class CloudEffect extends EffectBase {
     if (this.cloudTopTarget) {
       this.cloudTopTarget.dispose();
       this.cloudTopTarget = null;
+    }
+
+    if (this.cloudShadowBlockerTarget) {
+      this.cloudShadowBlockerTarget.dispose();
+      this.cloudShadowBlockerTarget = null;
+    }
+
+    if (this.cloudTopBlockerTarget) {
+      this.cloudTopBlockerTarget.dispose();
+      this.cloudTopBlockerTarget = null;
     }
     if (this.densityMaterial) {
       this.densityMaterial.dispose();

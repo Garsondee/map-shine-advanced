@@ -14,6 +14,48 @@ const CURRENT_VERSION = '0.2.0';
 /** Flag namespace in Foundry scene */
 const FLAG_NAMESPACE = 'map-shine-advanced';
 
+function _getPlayerOverridesSettingKey(scene) {
+  return `scene-${scene?.id}-player-overrides`;
+}
+
+function _ensurePlayerOverridesSettingRegistered(scene) {
+  try {
+    if (!scene?.id) return;
+    if (!game?.settings?.register || !game?.settings?.settings) return;
+
+    const key = _getPlayerOverridesSettingKey(scene);
+    const fullKey = `${FLAG_NAMESPACE}.${key}`;
+
+    if (game.settings.settings.has(fullKey)) return;
+
+    game.settings.register(FLAG_NAMESPACE, key, {
+      name: `Player Overrides (${scene.id})`,
+      hint: 'Per-scene Map Shine effect enable/disable overrides (client-local)',
+      scope: 'client',
+      config: false,
+      type: Object,
+      default: {}
+    });
+  } catch (e) {
+  }
+}
+
+/**
+ * Safely read player overrides for a scene (registers the setting on-demand).
+ * @param {Scene} scene
+ * @returns {Object.<string, boolean>}
+ * @public
+ */
+export function getPlayerOverrides(scene) {
+  try {
+    _ensurePlayerOverridesSettingRegistered(scene);
+    const key = _getPlayerOverridesSettingKey(scene);
+    return game.settings.get(FLAG_NAMESPACE, key) || {};
+  } catch (e) {
+    return {};
+  }
+}
+
 /**
  * Check if a scene is enabled for Map Shine
  * @param {Scene} scene - Foundry scene object
@@ -72,7 +114,7 @@ export function getEffectiveSettings(scene) {
   const mode = isGM ? 'gm' : 'player';
 
   // Get player overrides from client settings
-  const playerOverrides = game.settings.get('map-shine-advanced', `scene-${scene.id}-player-overrides`) || {};
+  const playerOverrides = getPlayerOverrides(scene);
 
   // Resolve settings hierarchy: mapMaker → gm → player
   let effectiveEffects = { ...settings.mapMaker.effects };
@@ -164,7 +206,8 @@ export async function revertToOriginal(scene) {
  * @public
  */
 export async function savePlayerOverrides(scene, overrides) {
-  await game.settings.set('map-shine-advanced', `scene-${scene.id}-player-overrides`, overrides);
+  _ensurePlayerOverridesSettingRegistered(scene);
+  await game.settings.set(FLAG_NAMESPACE, _getPlayerOverridesSettingKey(scene), overrides);
   log.info('Player overrides saved (client-local)');
 }
 

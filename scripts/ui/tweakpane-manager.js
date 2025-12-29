@@ -9,6 +9,7 @@ import { stateApplier } from './state-applier.js';
 import { globalValidator, getSpecularEffectiveState, getStripeDependencyState } from './parameter-validator.js';
 import { TextureManagerUI } from './texture-manager.js';
 import { EffectStackUI } from './effect-stack.js';
+import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../effects/EffectComposer.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 
 const log = createLogger('UI');
@@ -340,6 +341,49 @@ export class TweakpaneManager {
       label: 'Debug'
     }).on('click', async () => {
       await this.copyNonDefaultSettingsToClipboard();
+    });
+
+    globalFolder.addButton({
+      title: 'Dump Surface Report',
+      label: 'Debug'
+    }).on('click', () => {
+      try {
+        const report = window.MapShine?.surfaceRegistry?.refresh?.() || window.MapShine?.surfaceReport;
+        if (!report) {
+          ui.notifications?.warn?.('Map Shine: Surface Report not available');
+          return;
+        }
+
+        const surfaces = Array.isArray(report.surfaces) ? report.surfaces : [];
+        const stacks = Array.isArray(report.stacks) ? report.stacks : [];
+
+        console.groupCollapsed('Map Shine: Surface Report');
+        console.log('scene', report.scene);
+        console.log('stacks', stacks);
+
+        const rows = surfaces.map((s) => ({
+          surfaceId: s?.surfaceId,
+          source: s?.source,
+          kind: s?.kind,
+          roof: s?.roof,
+          stackId: s?.stackId,
+          elevation: s?.elevation,
+          hidden: s?.hidden,
+          bypassPostFX: s?.flags?.bypassPostFX,
+          cloudShadowsEnabled: s?.flags?.cloudShadowsEnabled,
+          cloudTopsEnabled: s?.flags?.cloudTopsEnabled,
+          occludesWater: s?.flags?.occludesWater,
+          threeHasObject: s?.three?.hasObject,
+          threeIsOverhead: s?.three?.isOverhead,
+          threeIsWeatherRoof: s?.three?.isWeatherRoof,
+          layersMask: s?.three?.layersMask
+        }));
+
+        console.table(rows);
+        console.groupEnd();
+      } catch (e) {
+        console.warn('Map Shine: Failed to dump Surface Report', e);
+      }
     });
 
     const masterResetButton = globalFolder.addButton({
@@ -1220,7 +1264,7 @@ export class TweakpaneManager {
 
       // Apply player overrides (client-local, disable only)
       if (!game.user.isGM) {
-        const playerOverrides = game.settings.get('map-shine-advanced', `scene-${scene.id}-player-overrides`) || {};
+        const playerOverrides = sceneSettings.getPlayerOverrides(scene);
         if (playerOverrides[effectId] !== undefined) {
           params.enabled = playerOverrides[effectId];
         }
@@ -1291,9 +1335,9 @@ export class TweakpaneManager {
         await scene.setFlag('map-shine-advanced', 'settings', allSettings);
       } else {
         // Players can only save enabled/disabled to client settings
-        const playerOverrides = game.settings.get('map-shine-advanced', `scene-${scene.id}-player-overrides`) || {};
+        const playerOverrides = sceneSettings.getPlayerOverrides(scene);
         playerOverrides[effectId] = params.enabled;
-        await game.settings.set('map-shine-advanced', `scene-${scene.id}-player-overrides`, playerOverrides);
+        await sceneSettings.savePlayerOverrides(scene, playerOverrides);
         log.debug(`Saved ${effectId} player override (enabled=${params.enabled})`);
       }
     } catch (error) {
@@ -2587,6 +2631,137 @@ export class TweakpaneManager {
         }
       } catch (e) {
         results.push({ kind: 'assert', paramId: 'water.enabled', status: 'FAIL', error: e });
+      }
+
+      try {
+        const report = window.MapShine?.surfaceRegistry?.refresh?.() || window.MapShine?.surfaceReport;
+        const scene = canvas?.scene;
+        const tileManager = window.MapShine?.tileManager;
+
+        if (!report || !scene || !tileManager) {
+          results.push({ kind: 'surface', paramId: 'surfaceReport', status: 'SKIP', error: 'SurfaceRegistry/scene/tileManager not available' });
+        } else {
+          const fgElev = Number.isFinite(scene?.foregroundElevation) ? scene.foregroundElevation : 0;
+          const layerEnabled = (sprite, layer) => {
+            const mask = sprite?.layers?.mask;
+            if (typeof mask !== 'number') return false;
+            const bit = 1 << layer;
+            return (mask & bit) !== 0;
+          };
+
+          const ROOF_LAYER = 20;
+          const WEATHER_ROOF_LAYER = 21;
+          const WATER_OCCLUDER_LAYER = 22;
+
+          const surfaces = Array.isArray(report?.surfaces) ? report.surfaces : [];
+          const bg = surfaces.find((s) => s?.surfaceId === 'scene:background');
+          if (!bg) {
+            results.push({ kind: 'surface', paramId: 'scene:background', status: 'FAIL', error: 'Missing background surface' });
+          } else {
+            if (bg.kind !== 'ground' || bg.stackId !== 'ground') {
+              results.push({ kind: 'surface', effectId: 'scene:background', paramId: 'taxonomy', status: 'FAIL', error: `kind=${bg.kind} stackId=${bg.stackId}` });
+            } else {
+              results.push({ kind: 'surface', effectId: 'scene:background', paramId: 'taxonomy', status: 'PASS' });
+            }
+          }
+
+          for (const s of surfaces) {
+            if (!s || s.source !== 'tile') continue;
+            const tileId = s.surfaceId;
+            if (!tileId) continue;
+
+            const tileDoc = scene.tiles?.get?.(tileId);
+            if (!tileDoc) {
+              results.push({ kind: 'surface', effectId: tileId, paramId: 'tileDoc', status: 'FAIL', error: 'TileDocument not found' });
+              continue;
+            }
+
+            const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
+            const expectedOverhead = elev >= fgElev;
+            const roofFlag = tileDoc?.getFlag?.('map-shine-advanced', 'overheadIsRoof') ?? tileDoc?.flags?.['map-shine-advanced']?.overheadIsRoof;
+            const expectedWeatherRoof = expectedOverhead && !!roofFlag;
+
+            const expectedKind = expectedWeatherRoof ? 'roof' : (expectedOverhead ? 'overhead' : 'ground');
+            const expectedStackId = expectedKind;
+
+            if (s.kind !== expectedKind || s.stackId !== expectedStackId) {
+              results.push({ kind: 'surface', effectId: tileId, paramId: 'taxonomy', status: 'FAIL', error: `report kind=${s.kind} stackId=${s.stackId} expected kind=${expectedKind} stackId=${expectedStackId}` });
+            } else {
+              results.push({ kind: 'surface', effectId: tileId, paramId: 'taxonomy', status: 'PASS' });
+            }
+
+            const spriteData = tileManager.tileSprites?.get?.(tileId);
+            const sprite = spriteData?.sprite;
+            if (!sprite) {
+              results.push({ kind: 'surface', effectId: tileId, paramId: 'three.sprite', status: 'FAIL', error: 'Missing Three sprite for tile' });
+              continue;
+            }
+
+            const bypassFlag = tileDoc?.getFlag?.('map-shine-advanced', 'bypassEffects')
+              ?? tileDoc?.flags?.['map-shine-advanced']?.bypassEffects;
+            const bypassEffects = !!bypassFlag;
+
+            if (!!sprite.userData?.isOverhead !== expectedOverhead) {
+              results.push({ kind: 'surface', effectId: tileId, paramId: 'three.userData.isOverhead', status: 'FAIL', error: `sprite=${!!sprite.userData?.isOverhead} expected=${expectedOverhead}` });
+            }
+
+            if (!!sprite.userData?.isWeatherRoof !== expectedWeatherRoof) {
+              results.push({ kind: 'surface', effectId: tileId, paramId: 'three.userData.isWeatherRoof', status: 'FAIL', error: `sprite=${!!sprite.userData?.isWeatherRoof} expected=${expectedWeatherRoof}` });
+            }
+
+            if (bypassEffects) {
+              if (!layerEnabled(sprite, OVERLAY_THREE_LAYER)) {
+                results.push({ kind: 'surface', effectId: tileId, paramId: 'layers.overlay', status: 'FAIL', error: `Expected OVERLAY_THREE_LAYER=${OVERLAY_THREE_LAYER}` });
+              }
+              continue;
+            }
+
+            if (expectedOverhead !== layerEnabled(sprite, ROOF_LAYER)) {
+              results.push({ kind: 'surface', effectId: tileId, paramId: 'layers.roof', status: 'FAIL', error: `ROOF_LAYER=${ROOF_LAYER} enabled=${layerEnabled(sprite, ROOF_LAYER)} expected=${expectedOverhead}` });
+            }
+
+            if (expectedWeatherRoof !== layerEnabled(sprite, WEATHER_ROOF_LAYER)) {
+              results.push({ kind: 'surface', effectId: tileId, paramId: 'layers.weatherRoof', status: 'FAIL', error: `WEATHER_ROOF_LAYER=${WEATHER_ROOF_LAYER} enabled=${layerEnabled(sprite, WEATHER_ROOF_LAYER)} expected=${expectedWeatherRoof}` });
+            }
+
+            const cloudShadowsFlag = tileDoc?.getFlag?.('map-shine-advanced', 'cloudShadowsEnabled')
+              ?? tileDoc?.flags?.['map-shine-advanced']?.cloudShadowsEnabled;
+            const cloudTopsFlag = tileDoc?.getFlag?.('map-shine-advanced', 'cloudTopsEnabled')
+              ?? tileDoc?.flags?.['map-shine-advanced']?.cloudTopsEnabled;
+            const cloudShadowsEnabled = (cloudShadowsFlag === undefined) ? true : !!cloudShadowsFlag;
+            const cloudTopsEnabled = (cloudTopsFlag === undefined) ? true : !!cloudTopsFlag;
+
+            const shadowBlockExpected = !cloudShadowsEnabled;
+            const topBlockExpected = !cloudTopsEnabled;
+
+            const shadowBlockLayer = TILE_FEATURE_LAYERS?.CLOUD_SHADOW_BLOCKER;
+            const topBlockLayer = TILE_FEATURE_LAYERS?.CLOUD_TOP_BLOCKER;
+
+            if (typeof shadowBlockLayer === 'number') {
+              const enabled = layerEnabled(sprite, shadowBlockLayer);
+              if (enabled !== shadowBlockExpected) {
+                results.push({ kind: 'surface', effectId: tileId, paramId: 'layers.cloudShadowBlocker', status: 'FAIL', error: `layer=${shadowBlockLayer} enabled=${enabled} expected=${shadowBlockExpected}` });
+              }
+            }
+
+            if (typeof topBlockLayer === 'number') {
+              const enabled = layerEnabled(sprite, topBlockLayer);
+              if (enabled !== topBlockExpected) {
+                results.push({ kind: 'surface', effectId: tileId, paramId: 'layers.cloudTopBlocker', status: 'FAIL', error: `layer=${topBlockLayer} enabled=${enabled} expected=${topBlockExpected}` });
+              }
+            }
+
+            const occludesWaterFlag = tileDoc?.getFlag?.('map-shine-advanced', 'occludesWater')
+              ?? tileDoc?.flags?.['map-shine-advanced']?.occludesWater;
+            const expectedOccludesWater = (occludesWaterFlag === undefined) ? !expectedOverhead : !!occludesWaterFlag;
+            const waterOccEnabled = layerEnabled(sprite, WATER_OCCLUDER_LAYER);
+            if (waterOccEnabled !== expectedOccludesWater) {
+              results.push({ kind: 'surface', effectId: tileId, paramId: 'layers.waterOccluder', status: 'FAIL', error: `layer=${WATER_OCCLUDER_LAYER} enabled=${waterOccEnabled} expected=${expectedOccludesWater}` });
+            }
+          }
+        }
+      } catch (e) {
+        results.push({ kind: 'surface', paramId: 'surfaceReport', status: 'FAIL', error: e });
       }
     } finally {
       this.globalParams.mapMakerMode = originalGlobals.mapMakerMode;

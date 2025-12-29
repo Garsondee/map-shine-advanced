@@ -28,6 +28,22 @@ export class WaterEffect extends EffectBase {
       tintStrength: 0.65,
       depthPower: 1.4,
 
+      murkEnabled: false,
+      murkIntensity: 0.65,
+      murkColor: { r: 0.08, g: 0.20, b: 0.22 },
+      murkScale: 2.25,
+      murkSpeed: 0.15,
+      murkDepthLo: 0.35,
+      murkDepthHi: 0.95,
+
+      sandEnabled: false,
+      sandIntensity: 0.65,
+      sandColor: { r: 0.75, g: 0.68, b: 0.52 },
+      sandScale: 18.0,
+      sandSpeed: 0.12,
+      sandDepthLo: 0.0,
+      sandDepthHi: 0.45,
+
       causticsEnabled: false,
       causticsIntensity: 0.35,
       causticsScale: 10.0,
@@ -175,6 +191,108 @@ export class WaterEffect extends EffectBase {
           max: 4,
           step: 0.05,
           default: 1.4
+        },
+
+        murkEnabled: {
+          type: 'checkbox',
+          label: 'Murk Enabled',
+          default: false
+        },
+        murkIntensity: {
+          type: 'slider',
+          label: 'Murk Intensity',
+          min: 0,
+          max: 2,
+          step: 0.01,
+          default: 0.65
+        },
+        murkColor: {
+          type: 'color',
+          label: 'Murk Color',
+          default: { r: 0.08, g: 0.20, b: 0.22 }
+        },
+        murkScale: {
+          type: 'slider',
+          label: 'Murk Scale',
+          min: 0.25,
+          max: 40,
+          step: 0.25,
+          default: 2.25
+        },
+        murkSpeed: {
+          type: 'slider',
+          label: 'Murk Speed',
+          min: 0,
+          max: 2,
+          step: 0.01,
+          default: 0.15
+        },
+        murkDepthLo: {
+          type: 'slider',
+          label: 'Murk Depth Lo',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.35
+        },
+        murkDepthHi: {
+          type: 'slider',
+          label: 'Murk Depth Hi',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.95
+        },
+
+        sandEnabled: {
+          type: 'checkbox',
+          label: 'Sand Enabled',
+          default: false
+        },
+        sandIntensity: {
+          type: 'slider',
+          label: 'Sand Intensity',
+          min: 0,
+          max: 2,
+          step: 0.01,
+          default: 0.65
+        },
+        sandColor: {
+          type: 'color',
+          label: 'Sand Color',
+          default: { r: 0.75, g: 0.68, b: 0.52 }
+        },
+        sandScale: {
+          type: 'slider',
+          label: 'Sand Scale',
+          min: 1,
+          max: 80,
+          step: 0.5,
+          default: 18.0
+        },
+        sandSpeed: {
+          type: 'slider',
+          label: 'Sand Speed',
+          min: 0,
+          max: 2,
+          step: 0.01,
+          default: 0.12
+        },
+        sandDepthLo: {
+          type: 'slider',
+          label: 'Sand Depth Lo',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.0
+        },
+        sandDepthHi: {
+          type: 'slider',
+          label: 'Sand Depth Hi',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.45
         },
 
         causticsEnabled: {
@@ -534,6 +652,22 @@ export class WaterEffect extends EffectBase {
     const tintStrength = typeof p.tintStrength === 'number' ? p.tintStrength : 0.65;
     const depthPower = typeof p.depthPower === 'number' ? p.depthPower : 1.4;
 
+    const murkEnabled = typeof p.murkEnabled === 'boolean' ? p.murkEnabled : false;
+    const murkIntensity = typeof p.murkIntensity === 'number' ? p.murkIntensity : 0.65;
+    const murkColor = p.murkColor ?? { r: 0.08, g: 0.20, b: 0.22 };
+    const murkScale = typeof p.murkScale === 'number' ? p.murkScale : 2.25;
+    const murkSpeed = typeof p.murkSpeed === 'number' ? p.murkSpeed : 0.15;
+    const murkDepthLo = typeof p.murkDepthLo === 'number' ? p.murkDepthLo : 0.35;
+    const murkDepthHi = typeof p.murkDepthHi === 'number' ? p.murkDepthHi : 0.95;
+
+    const sandEnabled = typeof p.sandEnabled === 'boolean' ? p.sandEnabled : false;
+    const sandIntensity = typeof p.sandIntensity === 'number' ? p.sandIntensity : 0.65;
+    const sandColor = p.sandColor ?? { r: 0.75, g: 0.68, b: 0.52 };
+    const sandScale = typeof p.sandScale === 'number' ? p.sandScale : 18.0;
+    const sandSpeed = typeof p.sandSpeed === 'number' ? p.sandSpeed : 0.12;
+    const sandDepthLo = typeof p.sandDepthLo === 'number' ? p.sandDepthLo : 0.0;
+    const sandDepthHi = typeof p.sandDepthHi === 'number' ? p.sandDepthHi : 0.45;
+
     const causticsEnabled = typeof p.causticsEnabled === 'boolean' ? p.causticsEnabled : false;
     const causticsIntensity = typeof p.causticsIntensity === 'number' ? p.causticsIntensity : 0.35;
     const causticsScale = typeof p.causticsScale === 'number' ? p.causticsScale : 10.0;
@@ -679,6 +813,22 @@ export class WaterEffect extends EffectBase {
         tintStrength,
         depthPower,
 
+        murkEnabled,
+        murkIntensity,
+        murkColor,
+        murkScale,
+        murkSpeed,
+        murkDepthLo,
+        murkDepthHi,
+
+        sandEnabled,
+        sandIntensity,
+        sandColor,
+        sandScale,
+        sandSpeed,
+        sandDepthLo,
+        sandDepthHi,
+
         // Caustics
         causticsEnabled,
         causticsIntensity,
@@ -726,6 +876,22 @@ export class WaterEffect extends EffectBase {
         tintColor,
         tintStrength,
         depthPower,
+
+        murkEnabled,
+        murkIntensity,
+        murkColor,
+        murkScale,
+        murkSpeed,
+        murkDepthLo,
+        murkDepthHi,
+
+        sandEnabled,
+        sandIntensity,
+        sandColor,
+        sandScale,
+        sandSpeed,
+        sandDepthLo,
+        sandDepthHi,
 
         causticsEnabled,
         causticsIntensity,

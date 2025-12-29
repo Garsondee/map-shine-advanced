@@ -845,6 +845,22 @@ export class DistortionManager extends EffectBase {
         uWaterTintStrength: { value: 0.65 },
         uWaterDepthPower: { value: 1.4 },
 
+        uWaterMurkEnabled: { value: 0.0 },
+        uWaterMurkIntensity: { value: 0.65 },
+        uWaterMurkColor: { value: new THREE.Color(0x153436) },
+        uWaterMurkScale: { value: 2.25 },
+        uWaterMurkSpeed: { value: 0.15 },
+        uWaterMurkDepthLo: { value: 0.35 },
+        uWaterMurkDepthHi: { value: 0.95 },
+
+        uWaterSandEnabled: { value: 0.0 },
+        uWaterSandIntensity: { value: 0.65 },
+        uWaterSandColor: { value: new THREE.Color(0xbfae84) },
+        uWaterSandScale: { value: 18.0 },
+        uWaterSandSpeed: { value: 0.12 },
+        uWaterSandDepthLo: { value: 0.0 },
+        uWaterSandDepthHi: { value: 0.45 },
+
         // Caustics (shallow-water highlights)
         uWaterCausticsEnabled: { value: 0.0 },
         uHasWaterMask: { value: 0.0 },
@@ -921,6 +937,22 @@ export class DistortionManager extends EffectBase {
         uniform vec3 uWaterTintColor;
         uniform float uWaterTintStrength;
         uniform float uWaterDepthPower;
+
+        uniform float uWaterMurkEnabled;
+        uniform float uWaterMurkIntensity;
+        uniform vec3 uWaterMurkColor;
+        uniform float uWaterMurkScale;
+        uniform float uWaterMurkSpeed;
+        uniform float uWaterMurkDepthLo;
+        uniform float uWaterMurkDepthHi;
+
+        uniform float uWaterSandEnabled;
+        uniform float uWaterSandIntensity;
+        uniform vec3 uWaterSandColor;
+        uniform float uWaterSandScale;
+        uniform float uWaterSandSpeed;
+        uniform float uWaterSandDepthLo;
+        uniform float uWaterSandDepthHi;
 
         uniform float uWaterCausticsEnabled;
         uniform float uHasWaterMask;
@@ -1023,6 +1055,15 @@ export class DistortionManager extends EffectBase {
           float w = 0.18 / (1.0 + s * 0.65);
           float c = smoothstep(1.0 - w, 1.0, ridge);
           return c;
+        }
+
+        vec2 aspectCorrectSceneUv(vec2 sceneUv);
+
+        vec2 aspectCorrectSceneUv(vec2 sceneUv) {
+          float w = max(uSceneRect.z, 1.0);
+          float h = max(uSceneRect.w, 1.0);
+          float s = min(w, h);
+          return vec2(sceneUv.x * (w / s), sceneUv.y * (h / s));
         }
 
         float shorelineFactor(sampler2D tex, vec2 uv) {
@@ -1177,7 +1218,7 @@ export class DistortionManager extends EffectBase {
           }
 
           // Water depth-based tint/absorption + caustics (pinned to map via sceneUv)
-          if ((uWaterTintEnabled > 0.5 || uWaterCausticsEnabled > 0.5 || uWaterCausticsDebug > 0.5 || uWaterFoamEnabled > 0.5) && uHasWaterMask > 0.5) {
+          if ((uWaterTintEnabled > 0.5 || uWaterMurkEnabled > 0.5 || uWaterSandEnabled > 0.5 || uWaterCausticsEnabled > 0.5 || uWaterCausticsDebug > 0.5 || uWaterFoamEnabled > 0.5) && uHasWaterMask > 0.5) {
             vec2 foundryPos = screenUvToFoundry(vUv);
             vec2 sceneUv = vUv;
             float sceneInBounds = 1.0;
@@ -1189,6 +1230,10 @@ export class DistortionManager extends EffectBase {
 
             float waterY = (uWaterMaskFlipY > 0.5) ? (1.0 - sceneUv.y) : sceneUv.y;
             vec2 waterUv = vec2(sceneUv.x, waterY);
+
+            vec2 sceneUvForIso = (uWaterMaskFlipY > 0.5) ? vec2(sceneUv.x, 1.0 - sceneUv.y) : sceneUv;
+            vec2 sceneUvIso = aspectCorrectSceneUv(sceneUvForIso);
+            vec2 waterUvIso = sceneUvIso;
 
             vec4 waterDepthSample = texture2D(tWaterMask, waterUv);
             float rawDepth = waterMaskValue(waterDepthSample) * sceneInBounds;
@@ -1225,6 +1270,74 @@ export class DistortionManager extends EffectBase {
 
             float depth = clamp(softDepth, 0.0, 1.0);
             depth = pow(depth, max(0.05, uWaterDepthPower));
+
+            float waterEdge = smoothstep(0.02, 0.22, clamp(softDepth, 0.0, 1.0));
+
+            float murkDamp = 1.0;
+
+            if (uWaterSandEnabled > 0.5) {
+              float sandDepthLo = clamp(uWaterSandDepthLo, 0.0, 1.0);
+              float sandDepthHi = clamp(uWaterSandDepthHi, 0.0, 1.0);
+              float sdLo = min(sandDepthLo, sandDepthHi - 0.001);
+              float sdHi = max(sandDepthHi, sdLo + 0.001);
+              float sandMask = 1.0 - smoothstep(sdLo, sdHi, depth);
+              float sandZoom = smoothstep(0.25, 0.55, zoomNorm);
+
+              vec2 windDir = uWaterWindDir;
+              float windLen = length(windDir);
+              windDir = (windLen > 1e-5) ? (windDir / windLen) : vec2(1.0, 0.0);
+              windUvDir = windDir;
+
+              vec2 sandUv = waterUvIso;
+
+              vec2 perp = vec2(-windUvDir.y, windUvDir.x);
+              vec2 adv = sandUv * max(0.01, uWaterSandScale);
+              adv -= windUvDir * (uTime * uWaterSandSpeed);
+              float along = dot(adv, windUvDir);
+              float across = dot(adv, perp);
+
+              vec2 p = vec2(along * 0.35, across * 1.25);
+              float n1 = snoise(torusNoiseCoords(p, 8.0));
+              float n2 = snoise(torusNoiseCoords(p * 1.9 + vec2(0.13, 0.71), 8.0));
+              float nn = clamp(0.5 + 0.5 * (0.65 * n1 + 0.35 * n2), 0.0, 1.0);
+              float ridge = 1.0 - abs(2.0 * nn - 1.0);
+              float grain = smoothstep(0.55, 0.90, ridge);
+
+              float sandAmt = clamp(uWaterSandIntensity, 0.0, 4.0) * sandMask * grain * sandZoom * waterEdge * nightVis * skyVig;
+              sandAmt = clamp(sandAmt * 0.35, 0.0, 1.0);
+              vec3 sandTint = mix(sceneColor.rgb, uWaterSandColor, 0.55);
+              sceneColor.rgb = mix(sceneColor.rgb, sandTint, sandAmt);
+              sceneColor.rgb += uWaterSandColor * (sandAmt * 0.06);
+            }
+
+            if (uWaterMurkEnabled > 0.5) {
+              float murkDepthLo = clamp(uWaterMurkDepthLo, 0.0, 1.0);
+              float murkDepthHi = clamp(uWaterMurkDepthHi, 0.0, 1.0);
+              float mdLo = min(murkDepthLo, murkDepthHi - 0.001);
+              float mdHi = max(murkDepthHi, mdLo + 0.001);
+              float murkMask = smoothstep(mdLo, mdHi, depth);
+
+              vec2 windDir = uWaterWindDir;
+              float windLen = length(windDir);
+              windDir = (windLen > 1e-5) ? (windDir / windLen) : vec2(1.0, 0.0);
+              windUvDir = windDir;
+
+              vec2 adv = waterUvIso * max(0.01, uWaterMurkScale);
+              adv -= windUvDir * (uTime * uWaterMurkSpeed);
+
+              float m = fbm(adv, 3, 2.1, 0.52);
+              float mm = clamp(0.5 + 0.5 * m, 0.0, 1.0);
+              float murkAmt = clamp(uWaterMurkIntensity, 0.0, 4.0) * murkMask * mix(0.55, 1.0, mm) * waterEdge * nightVis * skyVig;
+              murkAmt = clamp(murkAmt * 0.45, 0.0, 1.0);
+
+              float lum = dot(sceneColor.rgb, vec3(0.299, 0.587, 0.114));
+              vec3 desat = mix(sceneColor.rgb, vec3(lum), murkAmt * 0.55);
+              vec3 murkTint = mix(desat, uWaterMurkColor, murkAmt * 0.65);
+              sceneColor.rgb = mix(sceneColor.rgb, murkTint, murkAmt);
+              sceneColor.rgb *= (1.0 - 0.12 * murkAmt);
+
+              murkDamp = 1.0 - 0.65 * murkAmt;
+            }
 
             if (uWaterTintEnabled > 0.5) {
               float tintAmt = clamp(depth * uWaterTintStrength, 0.0, 1.0);
@@ -1271,11 +1384,12 @@ export class DistortionManager extends EffectBase {
               float lightGate = max(outdoor * cloudLit, indoor * windowBright);
 
               // Dual-layer caustics: a soft base + sharp detail
-              float cSharp = causticsPattern(sceneUv, uTime, uWaterCausticsScale, uWaterCausticsSpeed, uWaterCausticsSharpness);
-              float cSoft = causticsPattern(sceneUv, uTime * 0.85, uWaterCausticsScale * 0.55, uWaterCausticsSpeed * 0.65, max(0.1, uWaterCausticsSharpness * 0.35));
+              float cSharp = causticsPattern(sceneUvIso, uTime, uWaterCausticsScale, uWaterCausticsSpeed, uWaterCausticsSharpness);
+              float cSoft = causticsPattern(sceneUvIso, uTime * 0.85, uWaterCausticsScale * 0.55, uWaterCausticsSpeed * 0.65, max(0.1, uWaterCausticsSharpness * 0.35));
               float c = clamp(0.65 * cSoft + 0.95 * cSharp, 0.0, 1.0);
 
               float causticsAmt = uWaterCausticsIntensity * coverage;
+              causticsAmt *= murkDamp;
               causticsAmt *= edge * lightGate * nightVis * skyVig;
               vec3 causticsColor = mix(vec3(1.0, 1.0, 0.85), uWaterTintColor, 0.15);
               vec3 add = causticsColor * c * causticsAmt;
@@ -1712,6 +1826,40 @@ export class DistortionManager extends EffectBase {
       }
       au.uWaterTintStrength.value = Number.isFinite(waterSource?.params?.tintStrength) ? waterSource.params.tintStrength : 0.65;
       au.uWaterDepthPower.value = Number.isFinite(waterSource?.params?.depthPower) ? waterSource.params.depthPower : 1.4;
+
+      // Murkiness (subsurface suspended material)
+      const murkEnabled = !!(waterSource && waterSource.enabled && waterSource.mask && waterSource.params?.murkEnabled);
+      if (au.uWaterMurkEnabled) au.uWaterMurkEnabled.value = murkEnabled ? 1.0 : 0.0;
+      if (au.uWaterMurkIntensity) au.uWaterMurkIntensity.value = Number.isFinite(waterSource?.params?.murkIntensity) ? waterSource.params.murkIntensity : 0.65;
+      if (au.uWaterMurkColor && waterSource?.params?.murkColor) {
+        const c = waterSource.params.murkColor;
+        if (typeof c === 'string') {
+          au.uWaterMurkColor.value.set(c);
+        } else if (typeof c.r === 'number' && typeof c.g === 'number' && typeof c.b === 'number') {
+          au.uWaterMurkColor.value.setRGB(c.r, c.g, c.b);
+        }
+      }
+      if (au.uWaterMurkScale) au.uWaterMurkScale.value = Number.isFinite(waterSource?.params?.murkScale) ? waterSource.params.murkScale : 2.25;
+      if (au.uWaterMurkSpeed) au.uWaterMurkSpeed.value = Number.isFinite(waterSource?.params?.murkSpeed) ? waterSource.params.murkSpeed : 0.15;
+      if (au.uWaterMurkDepthLo) au.uWaterMurkDepthLo.value = Number.isFinite(waterSource?.params?.murkDepthLo) ? waterSource.params.murkDepthLo : 0.35;
+      if (au.uWaterMurkDepthHi) au.uWaterMurkDepthHi.value = Number.isFinite(waterSource?.params?.murkDepthHi) ? waterSource.params.murkDepthHi : 0.95;
+
+      // Sand bed detail (shallow)
+      const sandEnabled = !!(waterSource && waterSource.enabled && waterSource.mask && waterSource.params?.sandEnabled);
+      if (au.uWaterSandEnabled) au.uWaterSandEnabled.value = sandEnabled ? 1.0 : 0.0;
+      if (au.uWaterSandIntensity) au.uWaterSandIntensity.value = Number.isFinite(waterSource?.params?.sandIntensity) ? waterSource.params.sandIntensity : 0.65;
+      if (au.uWaterSandColor && waterSource?.params?.sandColor) {
+        const c = waterSource.params.sandColor;
+        if (typeof c === 'string') {
+          au.uWaterSandColor.value.set(c);
+        } else if (typeof c.r === 'number' && typeof c.g === 'number' && typeof c.b === 'number') {
+          au.uWaterSandColor.value.setRGB(c.r, c.g, c.b);
+        }
+      }
+      if (au.uWaterSandScale) au.uWaterSandScale.value = Number.isFinite(waterSource?.params?.sandScale) ? waterSource.params.sandScale : 18.0;
+      if (au.uWaterSandSpeed) au.uWaterSandSpeed.value = Number.isFinite(waterSource?.params?.sandSpeed) ? waterSource.params.sandSpeed : 0.12;
+      if (au.uWaterSandDepthLo) au.uWaterSandDepthLo.value = Number.isFinite(waterSource?.params?.sandDepthLo) ? waterSource.params.sandDepthLo : 0.0;
+      if (au.uWaterSandDepthHi) au.uWaterSandDepthHi.value = Number.isFinite(waterSource?.params?.sandDepthHi) ? waterSource.params.sandDepthHi : 0.45;
 
       // Caustics
       const causticsEnabled = !!(waterSource && waterSource.enabled && waterSource.mask && waterSource.params?.causticsEnabled);

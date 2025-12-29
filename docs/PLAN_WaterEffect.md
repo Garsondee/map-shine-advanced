@@ -7,6 +7,28 @@
 - [ ] **Non-goal:** Photoreal water simulation (no Navier–Stokes, no fluid sim).
 - [ ] **Goal:** A high-impact, performant “stylized water” system that reads a `_Water` mask texture.
 
+## Old module water system (reference feature inventory)
+
+The old Map Shine module implemented water as a **multi-layer screen-space composite**, not a simulation. Key behaviors worth preserving (but implemented in Three.js):
+
+- [x] **Primary mask**: `_Water` (used as a depth/coverage field).
+- [x] **Optional overrides/aux masks**:
+  - `_Shoreline` (explicit foam thickness)
+  - `_NoWater` (exclude distortion on certain tiles like trees/boats)
+  - `_Caustics` (additional caustics coverage independent of `_Water`)
+  - `_Puddle` (separate puddle treatment)
+- [x] **Wave distortion**: displacement-map driven refraction.
+- [x] **Shoreline swirl displacement**: extra localized distortion at water edges.
+- [x] **Depth displacement / parallax**: pseudo-underwater depth offset tied to mask value.
+- [x] **Wall-gap handling**: smearing to hide “holes” when depth displacement pushes UVs past mask boundaries.
+- [x] **Surface layer**:
+  - open-water foam (coverage/sharpness driven)
+  - specular highlight (normal from displacement + sun direction), gated by outdoors + cloud occlusion
+- [x] **Caustics**: procedural line/filament caustics with cloud occlusion.
+- [x] **Murkiness/sand**: subsurface noise to keep shallow water from looking flat.
+- [x] **Flow direction**: global flow vector to advect patterns.
+- [x] **Prewarm**: explicitly rendered water RTs during loading to avoid 45–65ms first-frame stalls.
+
 ## Rough reference notes from the old module (concepts only)
 
 - [x] Old module treated “water” as a **multi-layered screen-space composite** (distortion + tint + foam + caustics), not a simulation.
@@ -17,6 +39,39 @@
 - [x] It explicitly **prewarmed** water render textures during loading to avoid first-frame stalls.
 
 We should keep these *behaviors* but implement them cleanly in the Three/WebGL2 pipeline.
+
+## Current Three.js implementation status (as of this repo)
+
+The current implementation already covers a large portion of the old system, but with different building blocks:
+
+- [x] **Water mask loading**: `scripts/assets/loader.js` includes `water: { suffix: '_Water' }`.
+- [x] **Post pipeline integration**:
+  - `scripts/effects/WaterEffect.js` registers source `id: 'water'` into `DistortionManager`.
+  - `scripts/effects/DistortionManager.js` computes a composite distortion field and applies it to the scene.
+- [x] **Scene-locked sampling**: Distortion uses `screenUv -> Foundry -> sceneUv` mapping so ripples stay pinned.
+- [x] **Chromatic refraction**: RGB split implemented in the distortion apply pass.
+- [x] **Depth-based tint/absorption**: implemented (mask interpreted as depth).
+- [x] **Caustics**: implemented as a procedural pattern gated by:
+  - outdoors (`_Outdoors`)
+  - cloud shadows (`CloudEffect` target)
+  - window light (`WindowLightEffect` target)
+  - scene darkness/vignette parameters
+- [x] **Wind foam (open water)**: implemented as streaky foam driven by wind direction/speed.
+- [x] **Tile occluder suppression (screen-space)**: `DistortionManager` supports `tWaterOccluderAlpha` to suppress water where tiles are opaque.
+- [x] **Quarks integration (already exists, separate from WaterEffect)**:
+  - `scripts/particles/WeatherParticles.js` derives shoreline edge points from the `_Water` mask (CPU scan on texture change) and spawns:
+    - shoreline foam particles
+    - shoreline foam spray particles
+    - rain “water hit” splashes
+
+Main missing legacy behaviors:
+
+- [ ] `_Shoreline` explicit override mask (currently shoreline is inferred from gradients).
+- [ ] `_NoWater` explicit exclusion mask (current system only has screen-space occluder alpha, not an authored data mask).
+- [ ] Dedicated “depth displacement + wall smear” pass (old underwater parallax trick).
+- [ ] Puddles (`_Puddle`) as a separate treatment path.
+- [ ] Optional flow direction control (global + optional `_Flow`).
+- [ ] Water-specific prewarm step (Three.js equivalent).
 
 ## Primary Input: `_Water` mask
 
@@ -44,13 +99,15 @@ We should keep these *behaviors* but implement them cleanly in the Three/WebGL2 
 Findings so far:
 
 - [x] **Mask loading system exists:** `scripts/assets/loader.js` uses suffix-based masks.
-  - `_Water` entry is currently commented out.
+  - `_Water` entry is enabled.
 - [x] **Scene bundle wiring exists:** `SceneComposer.initialize()` returns `bundle.masks`.
 - [x] **A distortion path already has a ‘water’ slot:** `DistortionManager` has `tWaterMask`, `uWaterEnabled`, `waterRipple()`.
 
 Notes:
 
 - [ ] `DistortionManager` currently samples `tWaterMask` using `vUv`. For consistency with the heat path (scene-locked masks), we probably want water to use the same `sceneUv` mapping (and matching Y flip) so ripples stay pinned to the map and align to `_Water` exactly.
+
+  - This is now implemented: composite/apply shaders derive `sceneUv` using `uViewBounds + uSceneRect` and sample the water mask in that space.
 
 Planned wiring steps:
 
@@ -59,6 +116,8 @@ Planned wiring steps:
 - [ ] **Introduce a real `WaterEffect`** (not the stub) that:
   - registers a distortion source in `DistortionManager` (`id: 'water'`).
   - provides additional optional passes (foam, caustics, color grading) as the plan advances.
+
+  - These plumbing steps are now done.
 
 ## Visual Model (stylized, performant)
 
@@ -96,24 +155,24 @@ Everything is mask-driven. Depth controls intensity.
 
 ### Phase 0 — Plumbing + debug visualization (very simple)
 
-- [ ] Add `_Water` mask loading (uncomment/add `water: { suffix: '_Water', ... }` in AssetLoader).
+- [x] Add `_Water` mask loading (`water: { suffix: '_Water', ... }` in AssetLoader).
 - [ ] Add a simple debug mode that draws:
   - depth01 as grayscale overlay.
   - water/no-water threshold.
 - [ ] Confirm UV orientation (Y flip) matches authored textures.
-- [ ] Add an optional `_Shoreline` mask loading hook (future-proof), but keep it disabled until Phase 3.
-- [ ] Add an optional `_NoWater` mask loading hook (future-proof), but keep it disabled until Phase 6.
+- [ ] Add an optional `_Shoreline` mask loading hook.
+- [ ] Add an optional `_NoWater` mask loading hook.
 
 Deliverable: you can see the water mask aligned perfectly.
 
 ### Phase 1 — MVP: Water distortion only
 
-- [ ] Implement real `WaterEffect` (WebGL2 `ShaderMaterial` full-screen pass or via `DistortionManager`).
-- [ ] Register distortion source:
+- [x] Implement real `WaterEffect` by registering a `DistortionManager` source.
+- [x] Register distortion source:
   - mask: `_Water`
   - intensity: scaled by `depth01`
   - noise: existing `waterRipple()` in `DistortionManager`.
-- [ ] Ensure water distortion is **scene-UV pinned** (same convention as heat), not screen-UV.
+- [x] Ensure water distortion is **scene-UV pinned** (same convention as heat), not screen-UV.
 - [ ] Add parameters:
   - `distortionIntensity`
   - `frequency`
@@ -124,7 +183,7 @@ Deliverable: water areas shimmer/move convincingly at low cost.
 
 ### Phase 1b — Chromatic refraction (RGB split) (easy win)
 
-- [ ] Add “RGB split refraction” to the water distortion application:
+- [x] Add “RGB split refraction” to the water distortion application:
   - Sample scene color 3 times with slightly different offsets:
     - `uvR = uv + offset * (1.0 + chroma)`
     - `uvG = uv + offset`
@@ -142,7 +201,7 @@ Deliverable: “expensive-looking” refraction without extra buffers.
 
 ### Phase 2 — Water tint/absorption (depth-based color)
 
-- [ ] Add a post-process (or scene pass) that blends a water color under `_Water`.
+- [x] Add a post-process blend that tints pixels under `_Water`.
 - [ ] Depth controls:
   - shallow: lighter, more transparent
   - deep: darker, more saturated
@@ -181,25 +240,63 @@ Deliverable: water “feels outdoors” and reacts to weather/time-of-day.
 
 ### Phase 2c — Sand & grit micro-motion (easy win)
 
-Goal: keep shallow water from looking static by adding subtle sub-surface motion.
+Goal: add a **subsurface layer** that makes water feel like it contains suspended material (murk) and reveals bed texture (sand) without looking like surface foam.
 
-- [ ] Add a cheap “micro-detail” pattern under water, strongest in shallow regions:
-  - `shallowMask = smoothstep(shallowA, shallowB, 1.0 - depth01)`
-  - Use 1–2 octaves of noise (or a small tiling texture) advected over time.
-- [ ] Make it read as *bed detail*, not surface foam:
-  - affect tint/albedo slightly (not alpha)
-  - optionally modulate distortion intensity very subtly
-- [ ] Add parameters:
-  - `gritIntensity`
-  - `gritScale`
-  - `gritSpeed`
-  - `gritShallowOnly`
+This is a single additional “water sub-layer” computed in the existing `DistortionManager` apply pass (scene-UV pinned).
 
-Deliverable: shallow water has life even with low ripple speeds.
+#### Visual model
+
+- **Murkiness** (suspended silt/algae):
+  - Primarily affects **color/contrast/saturation**, not opacity.
+  - Stronger in **deeper** regions (default), but artist-controllable.
+  - Has low-frequency animated variation so it doesn’t look like a flat overlay.
+
+- **Sand bed detail** (shallow):
+  - Warm-ish, subtle **albedo modulation** only.
+  - Strongest in **shallow** water.
+  - Uses anisotropic noise aligned to a direction (use wind direction for now; later can switch to flow).
+
+#### Controls / parameters (WaterEffect -> DistortionManager)
+
+- Murkiness:
+  - `murkEnabled`
+  - `murkIntensity` (0..2)
+  - `murkColor` (RGB)
+  - `murkScale` (world/sceneUv frequency)
+  - `murkSpeed` (advection speed)
+  - `murkDepthLo`, `murkDepthHi` (depth range where murk ramps in)
+
+- Sand bed:
+  - `sandEnabled`
+  - `sandIntensity` (0..2)
+  - `sandColor` (RGB)
+  - `sandScale` (world/sceneUv frequency)
+  - `sandSpeed`
+  - `sandDepthLo`, `sandDepthHi` (depth range where sand fades out)
+
+#### Implementation notes
+
+- Use `sceneUv`/`waterUv` so patterns stay pinned to the map.
+- Multiply both effects by `waterVisible` and the same softened edge mask used by tint/chroma.
+- For alias stability:
+  - fade out the sand detail when zoomed out (`zoomNorm`) to prevent shimmer.
+- Do not add new passes or render targets.
+
+Deliverable: shallow water reads as “over sand/riverbed” and deep water reads as “murky”, even when distortion is subtle.
 
 ### Phase 3 — Shoreline foam (mask edge work)
 
-- [ ] Compute foam mask from `_Water`:
+- [x] Compute a shoreline factor from `_Water` gradients (shader-based, used as a helper for caustics).
+- [x] Spawn shoreline foam + spray particles from `_Water` edge points (Quarks, CPU scan on texture change).
+- [ ] Add `_Shoreline` override support:
+  - If `_Shoreline` exists, use it to drive foam thickness and optionally particle spawn density.
+  - If not, fall back to derived shoreline/edge points.
+
+Notes:
+
+- The old module had a dedicated foam layer with many controls (blur turbulence, breakup, suppression, crest foam). In Three.js we should treat this as a tiered system:
+  - **Low/Med**: particles only (cheaper, cinematic)
+  - **High**: optional additional shader foam pass for “continuous” shoreline banding
   - Approach A (fast): sample `_Water` at 4–8 offsets and detect gradient magnitude.
   - Approach B (higher quality): blurred `_Water` minus original to get shoreline band.
 - [ ] Optional override: if `_Shoreline` exists, use it to drive foam thickness instead of auto-detection.
@@ -255,10 +352,11 @@ Deliverable: water feels alive, still performant.
 ### Phase 6 — Interaction & integration polish
 
 - [ ] Respect roof/overhead masking rules (similar to precipitation dual-mask logic).
-- [ ] Add “NoWater” exclusion concept for tiles that should not distort (optional `_NoWater`).
-- [ ] Add scene-change lifecycle:
+- [x] Respect roof/overhead masking rules via `tRoofAlpha` and `tWaterOccluderAlpha` suppression in DistortionManager.
+- [ ] Add “NoWater” exclusion concept for authored exclusions (optional `_NoWater`) in addition to `tWaterOccluderAlpha`.
   - dispose render targets
   - rebuild lookup maps when `_Water` changes
+  - rebuild lookup maps when `_NoWater` / `_Shoreline` change
 - [ ] Add quality tiers:
   - low: distortion only
   - medium: +tint
@@ -268,9 +366,9 @@ Deliverable: water feels alive, still performant.
 
 - [ ] Prewarm the most expensive water passes during loading overlay (not on first animation frame).
   - Candidate prewarms (depending on which phases are enabled):
-    - shoreline blur buffer
-    - caustics buffer
-    - any downsampled intermediate render targets
+    - water composite/apply materials (compile)
+    - any downsampled intermediate render targets used for future shoreline/caustics buffers
+    - CPU shoreline/edge point generation (already done lazily on first texture use; consider moving to load time)
 
 ## Implementation notes (WebGL2)
 
@@ -296,6 +394,7 @@ Deliverable: water feels alive, still performant.
 ## Progress log (small chunks)
 
 - [x] Found `DistortionManager` already has `tWaterMask`/`uWaterEnabled` and `waterRipple()`.
-- [x] Found AssetLoader uses suffix masks and `_Water` is currently commented out.
+- [x] Found AssetLoader uses suffix masks and `_Water` is enabled.
 - [x] Old module used blurred water mask for shoreline detection, with optional `_Shoreline` override and optional `_NoWater` exclusion.
-- [ ] Next: decide UV convention (sceneUv vs vUv) for water distortion so it stays pinned and aligned.
+- [x] Water uses sceneUv convention so it stays pinned and aligned.
+- [ ] Next: implement `_Shoreline` override and `_NoWater` authored exclusion as first-class masks.

@@ -82,9 +82,6 @@ export class SceneComposer {
         const src = tileDoc?.texture?.src;
         if (typeof src !== 'string' || src.trim().length === 0) continue;
 
-        const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
-        if (Number.isFinite(foregroundElevation) && elev >= foregroundElevation) continue;
-
         const x = Number.isFinite(tileDoc?.x) ? tileDoc.x : 0;
         const y = Number.isFinite(tileDoc?.y) ? tileDoc.y : 0;
         const w = Number.isFinite(tileDoc?.width) ? tileDoc.width : 0;
@@ -176,6 +173,134 @@ export class SceneComposer {
     }
   }
 
+  _getFullSceneMaskTileBasePaths() {
+    try {
+      const tiles = canvas?.scene?.tiles;
+      const d = canvas?.dimensions;
+      const sr = d?.sceneRect;
+      if (!tiles || !sr) return [];
+
+      const sceneX = sr.x ?? 0;
+      const sceneY = sr.y ?? 0;
+      const sceneW = sr.width ?? 0;
+      const sceneH = sr.height ?? 0;
+      if (!sceneW || !sceneH) return [];
+      const tol = 1;
+
+      const out = new Set();
+      for (const tileDoc of tiles) {
+        if (tileDoc?.hidden) continue;
+        const src = tileDoc?.texture?.src;
+        if (typeof src !== 'string' || src.trim().length === 0) continue;
+
+        const x = Number.isFinite(tileDoc?.x) ? tileDoc.x : 0;
+        const y = Number.isFinite(tileDoc?.y) ? tileDoc.y : 0;
+        const w = Number.isFinite(tileDoc?.width) ? tileDoc.width : 0;
+        const h = Number.isFinite(tileDoc?.height) ? tileDoc.height : 0;
+        if (!w || !h) continue;
+
+        const coversScene = (
+          Math.abs(x - sceneX) <= tol &&
+          Math.abs(y - sceneY) <= tol &&
+          Math.abs(w - sceneW) <= tol &&
+          Math.abs(h - sceneH) <= tol
+        );
+        if (!coversScene) continue;
+
+        out.add(this.extractBasePath(src.trim()));
+      }
+
+      return Array.from(out);
+    } catch (e) {
+      return [];
+    }
+  }
+
+  async _buildUnionMaskForBasePaths(maskId, basePaths) {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+    if (!maskId || !Array.isArray(basePaths) || basePaths.length === 0) return null;
+
+    const registry = assetLoader.getEffectMaskRegistry?.() || {};
+    const def = registry?.[maskId] || null;
+    const suffix = def?.suffix;
+    if (typeof suffix !== 'string' || !suffix) return null;
+
+    const sourceMasks = [];
+    let outW = 0;
+    let outH = 0;
+
+    for (const basePath of basePaths) {
+      if (typeof basePath !== 'string' || !basePath.trim()) continue;
+      const masks = await this._loadMasksOnlyForBasePath(basePath.trim());
+      const m = masks.find((x) => x?.id === maskId || x?.type === maskId);
+      const tex = m?.texture;
+      const img = tex?.image;
+      if (!img) continue;
+
+      const w = img?.width ?? 0;
+      const h = img?.height ?? 0;
+      if (!w || !h) continue;
+
+      outW = Math.max(outW, w);
+      outH = Math.max(outH, h);
+      sourceMasks.push({ tex, img });
+    }
+
+    if (!sourceMasks.length || !outW || !outH) return null;
+
+    const canvasEl = document.createElement('canvas');
+    canvasEl.width = outW;
+    canvasEl.height = outH;
+    const ctx = canvasEl.getContext('2d');
+    if (!ctx) return null;
+
+    ctx.clearRect(0, 0, outW, outH);
+
+    let prevCompositeOp = null;
+    try {
+      prevCompositeOp = ctx.globalCompositeOperation;
+      ctx.globalCompositeOperation = 'lighten';
+    } catch (e) {
+      prevCompositeOp = null;
+    }
+
+    for (const s of sourceMasks) {
+      try {
+        ctx.drawImage(s.img, 0, 0, s.img.width, s.img.height, 0, 0, outW, outH);
+      } catch (e) {
+      }
+    }
+
+    if (prevCompositeOp !== null) {
+      try {
+        ctx.globalCompositeOperation = prevCompositeOp;
+      } catch (e) {
+      }
+    }
+
+    const outTex = new THREE.Texture(canvasEl);
+    outTex.needsUpdate = true;
+
+    const isDataTexture = ['normal', 'roughness', 'water'].includes(maskId);
+    if (THREE.SRGBColorSpace && !isDataTexture) {
+      outTex.colorSpace = THREE.SRGBColorSpace;
+    }
+
+    outTex.minFilter = THREE.LinearFilter;
+    outTex.magFilter = THREE.LinearFilter;
+    outTex.generateMipmaps = false;
+    outTex.flipY = false;
+
+    return {
+      id: maskId,
+      suffix,
+      type: maskId,
+      texture: outTex,
+      required: !!def?.required
+    };
+  }
+
   async _buildCompositeSceneMasks(layout, perBaseMasks) {
     const THREE = window.THREE;
     if (!THREE || !layout) return null;
@@ -207,6 +332,16 @@ export class SceneComposer {
 
       ctx.clearRect(0, 0, outW, outH);
 
+      let prevCompositeOp = null;
+      if (maskId === 'water') {
+        try {
+          prevCompositeOp = ctx.globalCompositeOperation;
+          ctx.globalCompositeOperation = 'lighten';
+        } catch (e) {
+          prevCompositeOp = null;
+        }
+      }
+
       let any = false;
       let desiredFlipY = null;
 
@@ -228,6 +363,13 @@ export class SceneComposer {
         try {
           ctx.drawImage(img, 0, 0, img.width, img.height, dx, 0, dw, outH);
           any = true;
+        } catch (e) {
+        }
+      }
+
+      if (prevCompositeOp !== null) {
+        try {
+          ctx.globalCompositeOperation = prevCompositeOp;
         } catch (e) {
         }
       }
@@ -568,6 +710,28 @@ export class SceneComposer {
         }
       } catch (e) {
       }
+    }
+
+    try {
+      const fullSceneBasePaths = this._getFullSceneMaskTileBasePaths();
+      if (fullSceneBasePaths.length > 1) {
+        const unionWater = await this._buildUnionMaskForBasePaths('water', fullSceneBasePaths);
+        if (unionWater) {
+          if (!result || typeof result !== 'object') result = { success: false, bundle: { masks: [] }, warnings: [] };
+          if (!result.bundle || typeof result.bundle !== 'object') result.bundle = { masks: [] };
+
+          const masks = Array.isArray(result.bundle.masks) ? result.bundle.masks : [];
+          const next = masks.filter((m) => (m?.id !== 'water' && m?.type !== 'water'));
+          next.push(unionWater);
+          result.bundle.masks = next;
+
+          // Treat this as a valid mask set even if no other masks were loaded.
+          // (We still want WaterEffect to run with the union mask.)
+          result.success = true;
+          result.bundle.isMapShineCompatible = true;
+        }
+      }
+    } catch (e) {
     }
 
     // Create bundle with Foundry's texture + any masks that loaded successfully

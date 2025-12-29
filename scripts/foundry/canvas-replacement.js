@@ -42,6 +42,7 @@ import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
 import { TokenManager } from '../scene/token-manager.js';
 import { TileManager } from '../scene/tile-manager.js';
+import { SurfaceRegistry } from '../scene/surface-registry.js';
 import { WallManager } from '../scene/wall-manager.js';
 import { DoorMeshManager } from '../scene/DoorMeshManager.js';
 import { DrawingManager } from '../scene/drawing-manager.js';
@@ -108,6 +109,9 @@ let tokenManager = null;
 
 /** @type {TileManager|null} */
 let tileManager = null;
+
+/** @type {SurfaceRegistry|null} */
+let surfaceRegistry = null;
 
 /** @type {WallManager|null} */
 let wallManager = null;
@@ -580,6 +584,8 @@ function onCanvasTearDown(canvas) {
     window.MapShine.maskManager = null;
     window.MapShine.tokenManager = null;
     window.MapShine.tileManager = null;
+    window.MapShine.surfaceRegistry = null;
+    window.MapShine.surfaceReport = null;
     window.MapShine.wallManager = null;
     window.MapShine.doorMeshManager = null;
     window.MapShine.fogEffect = null;
@@ -1034,6 +1040,11 @@ async function createThreeCanvas(scene) {
     tileManager.setWindowLightEffect(windowLightEffect); // Link for overhead tile lighting
     effectComposer.addUpdatable(tileManager); // Register for occlusion updates
     log.info('Tile manager initialized and synced');
+
+    surfaceRegistry = new SurfaceRegistry();
+    surfaceRegistry.initialize({ sceneComposer, tileManager });
+    mapShine.surfaceRegistry = surfaceRegistry;
+    mapShine.surfaceReport = surfaceRegistry.refresh();
 
     // Step 4c: Initialize wall manager
     wallManager = new WallManager(threeScene);
@@ -2492,6 +2503,12 @@ function destroyThreeCanvas() {
     tileManager.dispose();
     tileManager = null;
     log.debug('Tile manager disposed');
+  }
+
+  if (surfaceRegistry) {
+    surfaceRegistry.dispose();
+    surfaceRegistry = null;
+    log.debug('Surface registry disposed');
   }
 
   // Dispose wall manager

@@ -23,6 +23,11 @@ export const RenderLayers = {
 
 export const OVERLAY_THREE_LAYER = 31;
 
+export const TILE_FEATURE_LAYERS = {
+  CLOUD_SHADOW_BLOCKER: 23,
+  CLOUD_TOP_BLOCKER: 24
+};
+
 /**
  * Effect Composer - orchestrates layered effect rendering
  */

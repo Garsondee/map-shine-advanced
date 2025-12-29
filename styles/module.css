@@ -27,6 +27,46 @@
   will-change: transform;
 }
 
+/* Effect Stack UI Container */
+#map-shine-effect-stack {
+  font-family: var(--font-primary, 'Signika', sans-serif);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  max-height: 80vh;
+  overflow-y: auto;
+  padding-right: 8px;
+  box-sizing: border-box;
+  contain: layout style paint;
+  will-change: transform;
+}
+
+#map-shine-effect-stack .tp-dfwv {
+  max-height: 100%;
+  overflow-y: auto;
+}
+
+/* Localized vertical scrollbar styling for Effect Stack */
+#map-shine-effect-stack {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.6) rgba(0, 0, 0, 0.4);
+}
+
+#map-shine-effect-stack::-webkit-scrollbar {
+  width: 8px;
+}
+
+#map-shine-effect-stack::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+#map-shine-effect-stack::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 4px;
+}
+
+#map-shine-effect-stack::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.85);
+}
+
 /* Localized vertical scrollbar styling for Map Shine UI */
 #map-shine-ui {
   /* Firefox */

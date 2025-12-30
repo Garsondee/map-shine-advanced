@@ -1214,8 +1214,10 @@ export class TileManager {
           texture.needsUpdate = true;
           texture.flipY = needsUnpackFlipY;
           texture.colorSpace = THREE.SRGBColorSpace;
+          texture.generateMipmaps = false;
           texture.minFilter = THREE.LinearFilter;
           texture.magFilter = THREE.LinearFilter;
+          texture.anisotropy = 1;
           this.textureCache.set(texturePath, texture);
           return texture;
         }
@@ -1228,8 +1230,10 @@ export class TileManager {
           (texture) => {
             texture.colorSpace = THREE.SRGBColorSpace;
             texture.flipY = false;
+            texture.generateMipmaps = false;
             texture.minFilter = THREE.LinearFilter;
             texture.magFilter = THREE.LinearFilter;
+            texture.anisotropy = 1;
             this.textureCache.set(texturePath, texture);
             resolve(texture);
           },

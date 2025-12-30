@@ -85,6 +85,8 @@ export class LightingEffect extends EffectBase {
     this._publishedRoofAlphaTex = null;
     this._publishedWeatherRoofAlphaTex = null;
     this._publishedOutdoorsTex = null;
+
+    this._transparentTex = null;
   }
 
   static getControlSchema() {
@@ -128,6 +130,12 @@ export class LightingEffect extends EffectBase {
     const THREE = window.THREE;
     this.renderer = renderer;
     this.mainCamera = camera;
+
+    if (!this._transparentTex) {
+      const data = new Uint8Array([0, 0, 0, 0]);
+      this._transparentTex = new THREE.DataTexture(data, 1, 1);
+      this._transparentTex.needsUpdate = true;
+    }
 
     this.lightScene = new THREE.Scene();
     this.lightScene.background = new THREE.Color(0x000000); 
@@ -1285,16 +1293,14 @@ export class LightingEffect extends EffectBase {
       cu.tCloudShadow.value = (cloud && cloud.cloudShadowTarget)
         ? cloud.cloudShadowTarget.texture
         : null;
-      cu.tCloudTop.value = (cloud && cloud.cloudTopTarget)
-        ? cloud.cloudTopTarget.texture
-        : null;
+      cu.tCloudTop.value = this._transparentTex;
       // Drive cloud shadow opacity from CloudEffect params
       cu.uCloudShadowOpacity.value = (cloud && cloud.enabled && cloud.params)
-        ? cloud.params.shadowOpacity
+        ? (cloud.params.shadowOpacity ?? 0.0)
         : 0.0;
     } catch (e) {
       cu.tCloudShadow.value = null;
-      cu.tCloudTop.value = null;
+      cu.tCloudTop.value = this._transparentTex;
       cu.uCloudShadowOpacity.value = 0.0;
     }
 

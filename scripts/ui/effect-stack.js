@@ -937,12 +937,42 @@ export class EffectStackUI {
             label: 'CloudShadows',
             value: cloudShadowsEnabled,
             onToggle: async (next) => {
-              await tileDoc?.setFlag?.(moduleId, 'cloudShadowsEnabled', !!next);
+              const v = !!next;
+              const prior = cloudShadowsEnabled;
+              try {
+                if (tileDoc) {
+                  if (!tileDoc.flags) tileDoc.flags = {};
+                  if (!tileDoc.flags[moduleId]) tileDoc.flags[moduleId] = {};
+                  tileDoc.flags[moduleId].cloudShadowsEnabled = v;
+                }
+              } catch (e) {
+              }
+
               try {
                 const tm = window.MapShine?.tileManager;
                 const data = tm?.tileSprites?.get?.(tileDoc?.id);
                 if (data?.sprite) tm.updateSpriteTransform(data.sprite, tileDoc);
               } catch (e) {
+              }
+
+              try {
+                await tileDoc?.setFlag?.(moduleId, 'cloudShadowsEnabled', v);
+              } catch (e) {
+                try {
+                  if (tileDoc) {
+                    if (!tileDoc.flags) tileDoc.flags = {};
+                    if (!tileDoc.flags[moduleId]) tileDoc.flags[moduleId] = {};
+                    tileDoc.flags[moduleId].cloudShadowsEnabled = prior;
+                  }
+                } catch (_) {
+                }
+                try {
+                  const tm = window.MapShine?.tileManager;
+                  const data = tm?.tileSprites?.get?.(tileDoc?.id);
+                  if (data?.sprite) tm.updateSpriteTransform(data.sprite, tileDoc);
+                } catch (_) {
+                }
+                throw e;
               }
             }
           },
@@ -951,12 +981,42 @@ export class EffectStackUI {
             label: 'CloudTops',
             value: cloudTopsEnabled,
             onToggle: async (next) => {
-              await tileDoc?.setFlag?.(moduleId, 'cloudTopsEnabled', !!next);
+              const v = !!next;
+              const prior = cloudTopsEnabled;
+              try {
+                if (tileDoc) {
+                  if (!tileDoc.flags) tileDoc.flags = {};
+                  if (!tileDoc.flags[moduleId]) tileDoc.flags[moduleId] = {};
+                  tileDoc.flags[moduleId].cloudTopsEnabled = v;
+                }
+              } catch (e) {
+              }
+
               try {
                 const tm = window.MapShine?.tileManager;
                 const data = tm?.tileSprites?.get?.(tileDoc?.id);
                 if (data?.sprite) tm.updateSpriteTransform(data.sprite, tileDoc);
               } catch (e) {
+              }
+
+              try {
+                await tileDoc?.setFlag?.(moduleId, 'cloudTopsEnabled', v);
+              } catch (e) {
+                try {
+                  if (tileDoc) {
+                    if (!tileDoc.flags) tileDoc.flags = {};
+                    if (!tileDoc.flags[moduleId]) tileDoc.flags[moduleId] = {};
+                    tileDoc.flags[moduleId].cloudTopsEnabled = prior;
+                  }
+                } catch (_) {
+                }
+                try {
+                  const tm = window.MapShine?.tileManager;
+                  const data = tm?.tileSprites?.get?.(tileDoc?.id);
+                  if (data?.sprite) tm.updateSpriteTransform(data.sprite, tileDoc);
+                } catch (_) {
+                }
+                throw e;
               }
             }
           }

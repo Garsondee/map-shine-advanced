@@ -47,6 +47,8 @@ export class TileManager {
     
     /** @type {Map<string, THREE.Texture>} */
     this.textureCache = new Map();
+
+    this._texturePromises = new Map();
     
     /** @type {Map<string, {width: number, height: number, data: Uint8ClampedArray}>} */
     this.alphaMaskCache = new Map();
@@ -782,17 +784,32 @@ export class TileManager {
     sprite.userData.foundryTileId = tileDoc.id;
     sprite.userData.tileDoc = tileDoc;
 
+    sprite.userData.textureReady = false;
+    sprite.visible = false;
+
     // Load texture
     this.loadTileTexture(texturePath).then(texture => {
       material.map = texture;
       material.needsUpdate = true;
+
+      sprite.userData.textureReady = true;
+
+      // Canvas dimensions / sceneRect can still settle during initial scene load.
+      // Recompute transform at the moment the tile becomes visible to avoid
+      // late Y-mirroring / misalignment vs scene-space masks.
+      this.updateSpriteTransform(sprite, tileDoc);
+      this.updateSpriteVisibility(sprite, tileDoc);
+
+      try {
+        window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
+      } catch (_) {
+      }
     }).catch(error => {
       log.error(`Failed to load tile texture: ${texturePath}`, error);
     });
 
     // Set initial transform and visibility
     this.updateSpriteTransform(sprite, tileDoc);
-    this.updateSpriteVisibility(sprite, tileDoc);
     
     this.scene.add(sprite);
 
@@ -815,6 +832,11 @@ export class TileManager {
 
     this._tintDirty = true;
 
+    try {
+      window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
+    } catch (_) {
+    }
+
     log.debug(`Created tile sprite: ${tileDoc.id}`);
   }
 
@@ -834,12 +856,40 @@ export class TileManager {
 
     const { sprite } = spriteData;
 
+    const mergedFlags = (() => {
+      const base = (tileDoc && tileDoc.flags) ? tileDoc.flags : {};
+      const delta = (changes && changes.flags) ? changes.flags : null;
+      if (!delta) return base;
+
+      const out = { ...base, ...delta };
+      const moduleId = 'map-shine-advanced';
+      if (base?.[moduleId] || delta?.[moduleId]) {
+        out[moduleId] = { ...(base?.[moduleId] || {}), ...(delta?.[moduleId] || {}) };
+      }
+      return out;
+    })();
+
+    const targetDoc = {
+      id: tileDoc.id,
+      x: ('x' in changes) ? changes.x : tileDoc.x,
+      y: ('y' in changes) ? changes.y : tileDoc.y,
+      width: ('width' in changes) ? changes.width : tileDoc.width,
+      height: ('height' in changes) ? changes.height : tileDoc.height,
+      rotation: ('rotation' in changes) ? changes.rotation : tileDoc.rotation,
+      elevation: ('elevation' in changes) ? changes.elevation : tileDoc.elevation,
+      sort: ('sort' in changes) ? changes.sort : (tileDoc.sort ?? tileDoc.z),
+      z: ('z' in changes) ? changes.z : tileDoc.z,
+      hidden: ('hidden' in changes) ? changes.hidden : tileDoc.hidden,
+      alpha: ('alpha' in changes) ? changes.alpha : tileDoc.alpha,
+      flags: mergedFlags
+    };
+
     // Update transform if relevant properties changed
     if ('x' in changes || 'y' in changes || 'width' in changes ||
         'height' in changes || 'rotation' in changes ||
         'elevation' in changes || 'z' in changes ||
         'flags' in changes) {
-      this.updateSpriteTransform(sprite, tileDoc);
+      this.updateSpriteTransform(sprite, targetDoc);
     }
 
     // Update texture if changed
@@ -847,6 +897,11 @@ export class TileManager {
       this.loadTileTexture(changes.texture.src).then(texture => {
         sprite.material.map = texture;
         sprite.material.needsUpdate = true;
+
+        try {
+          window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
+        } catch (_) {
+        }
       }).catch(error => {
         log.error(`Failed to load updated tile texture`, error);
       });
@@ -854,7 +909,7 @@ export class TileManager {
 
     // Update visibility
     if ('hidden' in changes || 'alpha' in changes) {
-      this.updateSpriteVisibility(sprite, tileDoc);
+      this.updateSpriteVisibility(sprite, targetDoc);
     }
 
     // Update stored reference
@@ -911,8 +966,27 @@ export class TileManager {
   updateSpriteTransform(sprite, tileDoc) {
     const THREE = window.THREE;
 
-    const bypassFlag = tileDoc?.getFlag?.('map-shine-advanced', 'bypassEffects')
-      ?? tileDoc?.flags?.['map-shine-advanced']?.bypassEffects;
+    const moduleId = 'map-shine-advanced';
+    const getFlag = (doc, key) => {
+      try {
+        const v = doc?.getFlag?.(moduleId, key);
+        if (v !== undefined) return v;
+      } catch (_) {
+      }
+      try {
+        const v = doc?.flags?.[moduleId]?.[key];
+        if (v !== undefined) return v;
+      } catch (_) {
+      }
+      try {
+        const v = doc?._source?.flags?.[moduleId]?.[key];
+        if (v !== undefined) return v;
+      } catch (_) {
+      }
+      return undefined;
+    };
+
+    const bypassFlag = getFlag(tileDoc, 'bypassEffects');
     const bypassEffects = !!bypassFlag;
     const wasBypass = !!sprite.userData.bypassEffects;
     sprite.userData.bypassEffects = bypassEffects;
@@ -929,10 +1003,8 @@ export class TileManager {
       sprite.renderOrder = 0;
     }
 
-    const cloudShadowsFlag = tileDoc?.getFlag?.('map-shine-advanced', 'cloudShadowsEnabled')
-      ?? tileDoc?.flags?.['map-shine-advanced']?.cloudShadowsEnabled;
-    const cloudTopsFlag = tileDoc?.getFlag?.('map-shine-advanced', 'cloudTopsEnabled')
-      ?? tileDoc?.flags?.['map-shine-advanced']?.cloudTopsEnabled;
+    const cloudShadowsFlag = getFlag(tileDoc, 'cloudShadowsEnabled');
+    const cloudTopsFlag = getFlag(tileDoc, 'cloudTopsEnabled');
     const cloudShadowsEnabled = (cloudShadowsFlag === undefined) ? true : !!cloudShadowsFlag;
     const cloudTopsEnabled = (cloudTopsFlag === undefined) ? true : !!cloudTopsFlag;
 
@@ -961,7 +1033,7 @@ export class TileManager {
       }
     }
 
-    const flag = tileDoc?.getFlag?.('map-shine-advanced', 'overheadIsRoof') ?? tileDoc?.flags?.['map-shine-advanced']?.overheadIsRoof;
+    const flag = getFlag(tileDoc, 'overheadIsRoof');
     const isWeatherRoof = isOverhead && !!flag;
     const wasWeatherRoof = !!sprite.userData.isWeatherRoof;
     sprite.userData.isWeatherRoof = isWeatherRoof;
@@ -986,8 +1058,7 @@ export class TileManager {
       else sprite.layers.disable(TILE_FEATURE_LAYERS.CLOUD_TOP_BLOCKER);
     }
 
-    const occludesWaterFlag = tileDoc?.getFlag?.('map-shine-advanced', 'occludesWater')
-      ?? tileDoc?.flags?.['map-shine-advanced']?.occludesWater;
+    const occludesWaterFlag = getFlag(tileDoc, 'occludesWater');
     // Water occlusion is opt-in. Defaulting this to true for ground tiles makes the
     // water occluder render target fully opaque (most base tiles are opaque), which
     // suppresses water everywhere.
@@ -1070,6 +1141,11 @@ export class TileManager {
    * @param {TileDocument} tileDoc 
    */
   updateSpriteVisibility(sprite, tileDoc) {
+    if (sprite?.userData?.textureReady === false) {
+      sprite.visible = false;
+      return;
+    }
+
     // Hidden check
     const isHidden = tileDoc.hidden;
     const isGM = game.user?.isGM;
@@ -1106,21 +1182,69 @@ export class TileManager {
       return this.textureCache.get(texturePath);
     }
 
-    return new Promise((resolve, reject) => {
-      this.textureLoader.load(
-        texturePath,
-        (texture) => {
-          const THREE = window.THREE;
+    if (this._texturePromises.has(texturePath)) {
+      return this._texturePromises.get(texturePath);
+    }
+
+    const promise = (async () => {
+      const THREE = window.THREE;
+      if (!THREE) throw new Error('THREE.js not available');
+
+      // Prefer createImageBitmap for faster/off-thread decoding where supported.
+      // Fallback to THREE.TextureLoader when unavailable.
+      try {
+        if (typeof fetch === 'function' && typeof createImageBitmap === 'function') {
+          const res = await fetch(texturePath);
+          if (!res.ok) throw new Error(`Failed to fetch texture (${res.status})`);
+          const blob = await res.blob();
+          // Ensure a consistent UV convention across all tile textures.
+          // ImageBitmap can have different orientation semantics depending on
+          // browser/codec. Prefer pre-flipping at decode time; otherwise, fall
+          // back to WebGL unpack flip.
+          let bitmap = null;
+          let needsUnpackFlipY = false;
+          try {
+            bitmap = await createImageBitmap(blob, { imageOrientation: 'flipY' });
+          } catch (_) {
+            bitmap = await createImageBitmap(blob);
+            needsUnpackFlipY = true;
+          }
+
+          const texture = new THREE.Texture(bitmap);
+          texture.needsUpdate = true;
+          texture.flipY = needsUnpackFlipY;
           texture.colorSpace = THREE.SRGBColorSpace;
           texture.minFilter = THREE.LinearFilter;
           texture.magFilter = THREE.LinearFilter;
           this.textureCache.set(texturePath, texture);
-          resolve(texture);
-        },
-        undefined,
-        reject
-      );
-    });
+          return texture;
+        }
+      } catch (_) {
+      }
+
+      return await new Promise((resolve, reject) => {
+        this.textureLoader.load(
+          texturePath,
+          (texture) => {
+            texture.colorSpace = THREE.SRGBColorSpace;
+            texture.flipY = false;
+            texture.minFilter = THREE.LinearFilter;
+            texture.magFilter = THREE.LinearFilter;
+            this.textureCache.set(texturePath, texture);
+            resolve(texture);
+          },
+          undefined,
+          reject
+        );
+      });
+    })();
+
+    this._texturePromises.set(texturePath, promise);
+    try {
+      return await promise;
+    } finally {
+      this._texturePromises.delete(texturePath);
+    }
   }
 
   /**
@@ -1141,6 +1265,12 @@ export class TileManager {
 
     if (clearCache) {
       for (const texture of this.textureCache.values()) {
+        try {
+          if (texture?.image && typeof texture.image.close === 'function') {
+            texture.image.close();
+          }
+        } catch (_) {
+        }
         texture.dispose();
       }
       this.textureCache.clear();

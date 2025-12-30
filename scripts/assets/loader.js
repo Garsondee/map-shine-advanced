@@ -53,7 +53,7 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
   
   try {
     // Check cache first
-    const cacheKey = basePath;
+    const cacheKey = `${basePath}::${skipBaseTexture ? 'masks' : 'full'}`;
     if (assetCache.has(cacheKey)) {
       log.debug('Using cached asset bundle');
       return {
@@ -314,8 +314,40 @@ async function loadTextureAsync(path) {
       throw new Error(`Texture resource not accessible: ${absolutePath}`);
     }
     
-    // Create THREE.Texture from PIXI's loaded image
-    const threeTexture = new THREE.Texture(resource.source);
+    let texSource = resource.source;
+    try {
+      const shouldClone = Object.values(EFFECT_MASKS).some((m) => {
+        const suffix = m?.suffix;
+        return typeof suffix === 'string' && suffix.length > 0 && absolutePath.includes(`${suffix}.`);
+      });
+
+      if (
+        shouldClone &&
+        texSource &&
+        (
+          texSource instanceof HTMLImageElement ||
+          texSource instanceof HTMLCanvasElement ||
+          texSource instanceof OffscreenCanvas ||
+          texSource instanceof ImageBitmap
+        )
+      ) {
+        const w = Number(texSource?.naturalWidth ?? texSource?.videoWidth ?? texSource?.width ?? 0);
+        const h = Number(texSource?.naturalHeight ?? texSource?.videoHeight ?? texSource?.height ?? 0);
+        if (w > 0 && h > 0) {
+          const canvasEl = document.createElement('canvas');
+          canvasEl.width = w;
+          canvasEl.height = h;
+          const ctx = canvasEl.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(texSource, 0, 0, w, h);
+            texSource = canvasEl;
+          }
+        }
+      }
+    } catch (e) {
+    }
+
+    const threeTexture = new THREE.Texture(texSource);
     threeTexture.needsUpdate = true;
     
     // Configure texture settings
@@ -428,7 +460,12 @@ function createDefaultRoughnessTexture() {
 export function clearCache() {
   // Dispose all cached textures
   for (const bundle of assetCache.values()) {
-    bundle.baseTexture.dispose();
+    try {
+      if (bundle.baseTexture && typeof bundle.baseTexture.dispose === 'function') {
+        bundle.baseTexture.dispose();
+      }
+    } catch (e) {
+    }
     for (const mask of bundle.masks) {
       if (mask.texture) {
         mask.texture.dispose();

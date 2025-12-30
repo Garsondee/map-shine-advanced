@@ -4,7 +4,7 @@
  * @module effects/CloudEffect
  */
 
-import { EffectBase, RenderLayers, TILE_FEATURE_LAYERS } from './EffectComposer.js';
+import { EffectBase, RenderLayers, TILE_FEATURE_LAYERS, OVERLAY_THREE_LAYER } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
 
@@ -78,6 +78,12 @@ export class CloudEffect extends EffectBase {
 
     /** @type {THREE.Mesh|null} */
     this.baseMesh = null;
+
+    /** @type {THREE.Mesh|null} */
+    this.cloudTopOverlayMesh = null;
+
+    /** @type {THREE.ShaderMaterial|null} */
+    this.cloudTopOverlayMaterial = null;
 
     /** @type {THREE.Texture|null} */
     this.outdoorsMask = null;
@@ -208,6 +214,10 @@ export class CloudEffect extends EffectBase {
     this._lastCamX = null;
     this._lastCamY = null;
     this._lastCamZoom = null;
+    this._lastViewMinX = null;
+    this._lastViewMinY = null;
+    this._lastViewMaxX = null;
+    this._lastViewMaxY = null;
     this._motionCooldownFrames = 0;
 
     this._lastRenderFullWidth = 0;
@@ -220,6 +230,8 @@ export class CloudEffect extends EffectBase {
     this._blockersDirty = true;
     this._lastParamHash = null;
     this._lastElapsed = 0;
+
+    this._cloudTopDensityValid = false;
 
     this._blockerOverrides = null;
   }
@@ -251,8 +263,9 @@ export class CloudEffect extends EffectBase {
     overrides.length = 0;
 
     try {
-      this.mainScene.traverseVisible((obj) => {
+      this.mainScene.traverse((obj) => {
         if (!obj) return;
+        if (!obj.visible && obj.userData?.textureReady !== false) return;
         const mask = obj.layers?.mask;
         if (typeof mask !== 'number' || (mask & bit) === 0) return;
 
@@ -260,6 +273,8 @@ export class CloudEffect extends EffectBase {
         if (!m || !m.isSpriteMaterial) return;
 
         overrides.push({
+          obj,
+          visible: !!obj.visible,
           m,
           map: m.map,
           alphaMap: m.alphaMap,
@@ -282,6 +297,13 @@ export class CloudEffect extends EffectBase {
         m.depthWrite = false;
         m.blending = THREE.NoBlending;
         m.needsUpdate = true;
+
+        // IMPORTANT: tiles start life as invisible until their texture finishes loading.
+        // We still want them to contribute to blocker masks immediately so effect-stack
+        // overrides apply on first frame.
+        if (!obj.visible && obj.userData?.textureReady === false) {
+          obj.visible = true;
+        }
       });
 
       this.mainCamera.layers.set(layerId);
@@ -294,6 +316,7 @@ export class CloudEffect extends EffectBase {
         const o = overrides[i];
         const m = o.m;
         if (!m) continue;
+        if (o.obj) o.obj.visible = o.visible;
         m.map = o.map;
         m.alphaMap = o.alphaMap;
         if (m.color && typeof o.color === 'number') m.color.setHex(o.color);
@@ -768,6 +791,39 @@ export class CloudEffect extends EffectBase {
     const quadGeometry = new THREE.PlaneGeometry(2, 2);
     this.quadMesh = new THREE.Mesh(quadGeometry, this.densityMaterial);
     this.quadScene.add(this.quadMesh);
+
+    // Cloud tops overlay quad: rendered in OVERLAY_THREE_LAYER so it is never
+    // included in the post-processing chain (prevents water distortion affecting clouds).
+    this.cloudTopOverlayMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tCloudTop: { value: null }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tCloudTop;
+        varying vec2 vUv;
+        void main() {
+          gl_FragColor = texture2D(tCloudTop, vUv);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.NormalBlending
+    });
+
+    this.cloudTopOverlayMesh = new THREE.Mesh(quadGeometry, this.cloudTopOverlayMaterial);
+    this.cloudTopOverlayMesh.layers.set(OVERLAY_THREE_LAYER);
+    this.cloudTopOverlayMesh.renderOrder = 2000;
+    this.cloudTopOverlayMesh.frustumCulled = false;
+    this.cloudTopOverlayMesh.visible = false;
+    if (this.mainScene) this.mainScene.add(this.cloudTopOverlayMesh);
 
     log.info('CloudEffect initialized');
   }
@@ -1503,6 +1559,8 @@ export class CloudEffect extends EffectBase {
       this.cloudTopDensityTarget.setSize(iW, iH);
     }
 
+    this._cloudTopDensityValid = false;
+
     // Cloud top render target (RGBA for alpha blending)
     if (!this.cloudTopTarget) {
       this.cloudTopTarget = new THREE.WebGLRenderTarget(iW, iH, {
@@ -1847,15 +1905,15 @@ export class CloudEffect extends EffectBase {
   }
 
   render(renderer, scene, camera) {
-    if (!this.enabled || !this.densityMaterial || !this.shadowMaterial) return;
-
     const THREE = window.THREE;
     if (!THREE || !this.quadScene || !this.quadCamera) return;
+
+    if (!this.densityMaterial || !this.shadowMaterial) return;
 
     // Global Weather checkbox kill-switch.
     // If weather is disabled we still must render *neutral* targets so downstream
     // consumers (lighting/shadows/window light) immediately see "no clouds".
-    const weatherEnabled = !(weatherController && weatherController.enabled === false);
+    const weatherEnabled = !(weatherController && weatherController.enabled === false) && this.enabled;
 
     // Ensure render targets exist
     if (!this._tempSize) this._tempSize = new THREE.Vector2();
@@ -1879,14 +1937,15 @@ export class CloudEffect extends EffectBase {
     const previousLayersMask = this.mainCamera?.layers?.mask;
 
     try {
-      const p = this.params;
-      const paramHash = `${p.updateEveryNFrames}|${p.internalResolutionScale}|${p.cloudCover}|${p.noiseScale}|${p.noiseDetail}|${p.cloudSharpness}|${p.noiseTimeSpeed}|${p.domainWarpEnabled}|${p.domainWarpStrength}|${p.domainWarpScale}|${p.domainWarpSpeed}|${p.domainWarpTimeOffsetY}|${p.shadowOpacity}|${p.shadowSoftness}|${p.shadowOffsetScale}|${p.minShadowBrightness}|${p.cloudTopMode}|${p.cloudTopOpacity}|${p.cloudTopFadeStart}|${p.cloudTopFadeEnd}|${p.cloudBrightness}|${p.cloudTopShadingEnabled}|${p.cloudTopShadingStrength}|${p.cloudTopNormalStrength}|${p.cloudTopAOIntensity}|${p.cloudTopEdgeHighlight}|${p.windInfluence}|${p.driftSpeed}|${p.driftResponsiveness}|${p.driftMaxSpeed}|${p.layerParallaxBase}|${p.layer1Enabled}|${p.layer1Opacity}|${p.layer1Coverage}|${p.layer1Scale}|${p.layer1ParallaxMult}|${p.layer1SpeedMult}|${p.layer1DirDeg}|${p.layer2Enabled}|${p.layer2Opacity}|${p.layer2Coverage}|${p.layer2Scale}|${p.layer2ParallaxMult}|${p.layer2SpeedMult}|${p.layer2DirDeg}|${p.layer3Enabled}|${p.layer3Opacity}|${p.layer3Coverage}|${p.layer3Scale}|${p.layer3ParallaxMult}|${p.layer3SpeedMult}|${p.layer3DirDeg}|${p.layer4Enabled}|${p.layer4Opacity}|${p.layer4Coverage}|${p.layer4Scale}|${p.layer4ParallaxMult}|${p.layer4SpeedMult}|${p.layer4DirDeg}|${p.layer5Enabled}|${p.layer5Opacity}|${p.layer5Coverage}|${p.layer5Scale}|${p.layer5ParallaxMult}|${p.layer5SpeedMult}|${p.layer5DirDeg}`;
-      if (paramHash !== this._lastParamHash) {
-        this._lastParamHash = paramHash;
-        this._forceUpdateFrames = Math.max(this._forceUpdateFrames, 2);
+      try {
+        const p = this.params;
+        const paramHash = `${p.updateEveryNFrames}|${p.internalResolutionScale}|${p.cloudCover}|${p.noiseScale}|${p.noiseDetail}|${p.cloudSharpness}|${p.noiseTimeSpeed}|${p.domainWarpEnabled}|${p.domainWarpStrength}|${p.domainWarpScale}|${p.domainWarpSpeed}|${p.domainWarpTimeOffsetY}|${p.shadowOpacity}|${p.shadowSoftness}|${p.shadowOffsetScale}|${p.minShadowBrightness}|${p.cloudTopMode}|${p.cloudTopOpacity}|${p.cloudTopFadeStart}|${p.cloudTopFadeEnd}|${p.cloudBrightness}|${p.cloudTopShadingEnabled}|${p.cloudTopShadingStrength}|${p.cloudTopNormalStrength}|${p.cloudTopAOIntensity}|${p.cloudTopEdgeHighlight}|${p.windInfluence}|${p.driftSpeed}|${p.driftResponsiveness}|${p.driftMaxSpeed}|${p.layerParallaxBase}|${p.layer1Enabled}|${p.layer1Opacity}|${p.layer1Coverage}|${p.layer1Scale}|${p.layer1ParallaxMult}|${p.layer1SpeedMult}|${p.layer1DirDeg}|${p.layer2Enabled}|${p.layer2Opacity}|${p.layer2Coverage}|${p.layer2Scale}|${p.layer2ParallaxMult}|${p.layer2SpeedMult}|${p.layer2DirDeg}|${p.layer3Enabled}|${p.layer3Opacity}|${p.layer3Coverage}|${p.layer3Scale}|${p.layer3ParallaxMult}|${p.layer3SpeedMult}|${p.layer3DirDeg}|${p.layer4Enabled}|${p.layer4Opacity}|${p.layer4Coverage}|${p.layer4Scale}|${p.layer4ParallaxMult}|${p.layer4SpeedMult}|${p.layer4DirDeg}|${p.layer5Enabled}|${p.layer5Opacity}|${p.layer5Coverage}|${p.layer5Scale}|${p.layer5ParallaxMult}|${p.layer5SpeedMult}|${p.layer5DirDeg}`;
+        if (paramHash !== this._lastParamHash) {
+          this._lastParamHash = paramHash;
+          this._forceUpdateFrames = Math.max(this._forceUpdateFrames, 2);
+        }
+      } catch (e) {
       }
-    } catch (e) {
-    }
 
     // Temporal slicing (motion-aware): when the camera is moving we must update every frame
     // to avoid the perception of lag/jitter. When stable, skip heavy passes.
@@ -1899,6 +1958,16 @@ export class CloudEffect extends EffectBase {
     const cam = this.mainCamera || camera;
     const camX = cam?.position?.x ?? 0;
     const camY = cam?.position?.y ?? 0;
+
+    // View-bounds stability check: camera position/zoom alone is not sufficient.
+    // The shader is pinned to uViewBoundsMin/Max (derived from viewport size + zoom),
+    // which can change during startup/layout resize even if the camera doesn't move.
+    const ubMin = this.densityMaterial?.uniforms?.uViewBoundsMin?.value;
+    const ubMax = this.densityMaterial?.uniforms?.uViewBoundsMax?.value;
+    const viewMinX = (ubMin && Number.isFinite(ubMin.x)) ? ubMin.x : null;
+    const viewMinY = (ubMin && Number.isFinite(ubMin.y)) ? ubMin.y : null;
+    const viewMaxX = (ubMax && Number.isFinite(ubMax.x)) ? ubMax.x : null;
+    const viewMaxY = (ubMax && Number.isFinite(ubMax.y)) ? ubMax.y : null;
 
     // Use a sub-pixel threshold in screen space so we don't skip updates during slow/smooth pans.
     // If we skip while the view is moving, the world-pinned mapping in the density pass will lag
@@ -1917,6 +1986,27 @@ export class CloudEffect extends EffectBase {
       if (Math.abs(currentZoom - this._lastCamZoom) > zoomThreshold) moved = true;
     } else {
       moved = true;
+    }
+
+    // Also treat changes in computed view bounds as movement.
+    // This prevents long stalls where clouds don't refresh until updateEveryNFrames
+    // after the viewport size or base viewport dims settle.
+    if (viewMinX !== null && viewMinY !== null && viewMaxX !== null && viewMaxY !== null) {
+      if (this._lastViewMinX !== null && this._lastViewMinY !== null && this._lastViewMaxX !== null && this._lastViewMaxY !== null) {
+        const dvMinXPx = (viewMinX - this._lastViewMinX) * currentZoom;
+        const dvMinYPx = (viewMinY - this._lastViewMinY) * currentZoom;
+        const dvMaxXPx = (viewMaxX - this._lastViewMaxX) * currentZoom;
+        const dvMaxYPx = (viewMaxY - this._lastViewMaxY) * currentZoom;
+        const d2Px = dvMinXPx * dvMinXPx + dvMinYPx * dvMinYPx + dvMaxXPx * dvMaxXPx + dvMaxYPx * dvMaxYPx;
+        if (d2Px > (moveThresholdPx * moveThresholdPx)) moved = true;
+      } else {
+        moved = true;
+      }
+
+      this._lastViewMinX = viewMinX;
+      this._lastViewMinY = viewMinY;
+      this._lastViewMaxX = viewMaxX;
+      this._lastViewMaxY = viewMaxY;
     }
 
     this._lastCamX = camX;
@@ -2020,6 +2110,13 @@ export class CloudEffect extends EffectBase {
       } catch (e) {
       }
 
+      if (this.cloudTopOverlayMaterial?.uniforms) {
+        this.cloudTopOverlayMaterial.uniforms.tCloudTop.value = null;
+      }
+      if (this.cloudTopOverlayMesh) {
+        this.cloudTopOverlayMesh.visible = false;
+      }
+
       renderer.setRenderTarget(previousTarget);
       return;
     }
@@ -2029,8 +2126,7 @@ export class CloudEffect extends EffectBase {
       return;
     }
 
-    try {
-      if ((shouldUpdateThisFrame || shouldRecomposeThisFrame) && this.mainCamera && this.mainScene) {
+    if ((shouldUpdateThisFrame || shouldRecomposeThisFrame) && this.mainCamera && this.mainScene) {
         if (this.cloudShadowBlockerTarget) {
           this._renderTileBlockerLayer(renderer, this.cloudShadowBlockerTarget, TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
         }
@@ -2038,32 +2134,42 @@ export class CloudEffect extends EffectBase {
         if (this.cloudTopBlockerTarget) {
           this._renderTileBlockerLayer(renderer, this.cloudTopBlockerTarget, TILE_FEATURE_LAYERS.CLOUD_TOP_BLOCKER);
         }
-      }
-    } catch (e) {
-    } finally {
-      try {
-        if (this.mainCamera && typeof previousLayersMask === 'number') {
-          this.mainCamera.layers.mask = previousLayersMask;
-        }
-      } catch (e) {
-      }
     }
 
-    if (this._forceUpdateFrames > 0) this._forceUpdateFrames--;
     if (this._forceRecomposeFrames > 0) this._forceRecomposeFrames--;
     this._blockersDirty = false;
 
     if (!shouldUpdateThisFrame) {
-      // Pass 2a: Generate UNMASKED cloud shadow from density (for indoor consumers)
-      {
-        const su = this.shadowMaterial.uniforms;
-        const prevHasMask = su.uHasOutdoorsMask ? su.uHasOutdoorsMask.value : 0.0;
-        const prevMaskTex = su.tOutdoorsMask ? su.tOutdoorsMask.value : null;
+        // Pass 2a: Generate UNMASKED cloud shadow from density (for indoor consumers)
+        {
+          const su = this.shadowMaterial.uniforms;
+          const prevHasMask = su.uHasOutdoorsMask ? su.uHasOutdoorsMask.value : 0.0;
+          const prevMaskTex = su.tOutdoorsMask ? su.tOutdoorsMask.value : null;
 
-        if (su.uDensityMode) su.uDensityMode.value = 0.0;
-        if (su.uHasOutdoorsMask) su.uHasOutdoorsMask.value = 0.0;
-        if (su.tOutdoorsMask) su.tOutdoorsMask.value = null;
+          if (su.uDensityMode) su.uDensityMode.value = 0.0;
+          if (su.uHasOutdoorsMask) su.uHasOutdoorsMask.value = 0.0;
+          if (su.tOutdoorsMask) su.tOutdoorsMask.value = null;
 
+          this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
+
+          if (this.shadowMaterial.uniforms.tBlockerMask) {
+            this.shadowMaterial.uniforms.tBlockerMask.value = this.cloudShadowBlockerTarget?.texture ?? null;
+          }
+          if (this.shadowMaterial.uniforms.uHasBlockerMask) {
+            this.shadowMaterial.uniforms.uHasBlockerMask.value = this.cloudShadowBlockerTarget?.texture ? 1.0 : 0.0;
+          }
+          this.quadMesh.material = this.shadowMaterial;
+          renderer.setRenderTarget(this.cloudShadowRawTarget);
+          renderer.setClearColor(0xffffff, 1);
+          renderer.clear();
+          renderer.render(this.quadScene, this.quadCamera);
+
+          if (su.uHasOutdoorsMask) su.uHasOutdoorsMask.value = prevHasMask;
+          if (su.tOutdoorsMask) su.tOutdoorsMask.value = prevMaskTex;
+        }
+
+        // Pass 2b: Generate cloud shadow from density (OUTDOORS-MASKED)
+        if (this.shadowMaterial.uniforms.uDensityMode) this.shadowMaterial.uniforms.uDensityMode.value = 0.0;
         this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
 
         if (this.shadowMaterial.uniforms.tBlockerMask) {
@@ -2073,58 +2179,47 @@ export class CloudEffect extends EffectBase {
           this.shadowMaterial.uniforms.uHasBlockerMask.value = this.cloudShadowBlockerTarget?.texture ? 1.0 : 0.0;
         }
         this.quadMesh.material = this.shadowMaterial;
-        renderer.setRenderTarget(this.cloudShadowRawTarget);
+        renderer.setRenderTarget(this.cloudShadowTarget);
         renderer.setClearColor(0xffffff, 1);
         renderer.clear();
         renderer.render(this.quadScene, this.quadCamera);
 
-        if (su.uHasOutdoorsMask) su.uHasOutdoorsMask.value = prevHasMask;
-        if (su.tOutdoorsMask) su.tOutdoorsMask.value = prevMaskTex;
-      }
+        // Pass 4: Generate cloud tops (visible cloud layer with zoom fade)
+        if (this.cloudTopMaterial && this.cloudTopTarget) {
+          const usePacked = !!this.cloudTopDensityTarget && !!this._cloudTopDensityValid;
+          if (this.cloudTopMaterial.uniforms.uDensityMode) {
+            this.cloudTopMaterial.uniforms.uDensityMode.value = usePacked ? 1.0 : 0.0;
+          }
+          this.cloudTopMaterial.uniforms.tCloudDensity.value = usePacked
+            ? this.cloudTopDensityTarget.texture
+            : this.cloudDensityTarget.texture;
 
-      // Pass 2b: Generate cloud shadow from density (OUTDOORS-MASKED)
-      if (this.shadowMaterial.uniforms.uDensityMode) this.shadowMaterial.uniforms.uDensityMode.value = 0.0;
-      this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
+          if (this.cloudTopMaterial.uniforms.tBlockerMask) {
+            this.cloudTopMaterial.uniforms.tBlockerMask.value = this.cloudTopBlockerTarget?.texture ?? null;
+          }
+          if (this.cloudTopMaterial.uniforms.uHasBlockerMask) {
+            this.cloudTopMaterial.uniforms.uHasBlockerMask.value = this.cloudTopBlockerTarget?.texture ? 1.0 : 0.0;
+          }
 
-      if (this.shadowMaterial.uniforms.tBlockerMask) {
-        this.shadowMaterial.uniforms.tBlockerMask.value = this.cloudShadowBlockerTarget?.texture ?? null;
-      }
-      if (this.shadowMaterial.uniforms.uHasBlockerMask) {
-        this.shadowMaterial.uniforms.uHasBlockerMask.value = this.cloudShadowBlockerTarget?.texture ? 1.0 : 0.0;
-      }
-      this.quadMesh.material = this.shadowMaterial;
-      renderer.setRenderTarget(this.cloudShadowTarget);
-      renderer.setClearColor(0xffffff, 1);
-      renderer.clear();
-      renderer.render(this.quadScene, this.quadCamera);
-
-      // Pass 4: Generate cloud tops (visible cloud layer with zoom fade)
-      if (this.cloudTopMaterial && this.cloudTopTarget) {
-        const usePacked = !!this.cloudTopDensityTarget;
-        if (this.cloudTopMaterial.uniforms.uDensityMode) {
-          this.cloudTopMaterial.uniforms.uDensityMode.value = usePacked ? 1.0 : 0.0;
-        }
-        this.cloudTopMaterial.uniforms.tCloudDensity.value = usePacked
-          ? this.cloudTopDensityTarget.texture
-          : this.cloudDensityTarget.texture;
-
-        if (this.cloudTopMaterial.uniforms.tBlockerMask) {
-          this.cloudTopMaterial.uniforms.tBlockerMask.value = this.cloudTopBlockerTarget?.texture ?? null;
-        }
-        if (this.cloudTopMaterial.uniforms.uHasBlockerMask) {
-          this.cloudTopMaterial.uniforms.uHasBlockerMask.value = this.cloudTopBlockerTarget?.texture ? 1.0 : 0.0;
+          this.quadMesh.material = this.cloudTopMaterial;
+          renderer.setRenderTarget(this.cloudTopTarget);
+          renderer.setClearColor(0x000000, 0);
+          renderer.clear();
+          renderer.render(this.quadScene, this.quadCamera);
         }
 
-        this.quadMesh.material = this.cloudTopMaterial;
-        renderer.setRenderTarget(this.cloudTopTarget);
-        renderer.setClearColor(0x000000, 0);
-        renderer.clear();
-        renderer.render(this.quadScene, this.quadCamera);
+        if (this.cloudTopOverlayMaterial?.uniforms) {
+          this.cloudTopOverlayMaterial.uniforms.tCloudTop.value = this.cloudTopTarget?.texture || null;
+        }
+        if (this.cloudTopOverlayMesh) {
+          this.cloudTopOverlayMesh.visible = !!(this.enabled && this.cloudTopTarget && this.cloudTopTarget.texture);
+        }
+
+        renderer.setRenderTarget(previousTarget);
+        return;
       }
 
-      renderer.setRenderTarget(previousTarget);
-      return;
-    }
+    if (this._forceUpdateFrames > 0) this._forceUpdateFrames--;
 
     // Pass 1: Generate world-pinned cloud density (NO parallax) for shadows and other consumers
     if (this.densityMaterial.uniforms.uParallaxScale) this.densityMaterial.uniforms.uParallaxScale.value = 0.0;
@@ -2188,11 +2283,13 @@ export class CloudEffect extends EffectBase {
       renderer.setClearColor(0x000000, 1);
       renderer.clear();
       renderer.render(this.quadScene, this.quadCamera);
+
+      this._cloudTopDensityValid = true;
     }
 
     // Pass 4: Generate cloud tops (visible cloud layer with zoom fade)
     if (this.cloudTopMaterial && this.cloudTopTarget) {
-      const usePacked = !!this.cloudTopDensityTarget;
+      const usePacked = !!this.cloudTopDensityTarget && !!this._cloudTopDensityValid;
       if (this.cloudTopMaterial.uniforms.uDensityMode) {
         this.cloudTopMaterial.uniforms.uDensityMode.value = usePacked ? 1.0 : 0.0;
       }
@@ -2212,6 +2309,13 @@ export class CloudEffect extends EffectBase {
       renderer.setClearColor(0x000000, 0); // Transparent background
       renderer.clear();
       renderer.render(this.quadScene, this.quadCamera);
+    }
+
+    if (this.cloudTopOverlayMaterial?.uniforms) {
+      this.cloudTopOverlayMaterial.uniforms.tCloudTop.value = this.cloudTopTarget?.texture || null;
+    }
+    if (this.cloudTopOverlayMesh) {
+      this.cloudTopOverlayMesh.visible = !!(this.enabled && this.cloudTopTarget && this.cloudTopTarget.texture);
     }
 
     try {
@@ -2290,11 +2394,28 @@ export class CloudEffect extends EffectBase {
     } catch (e) {
     }
 
-    // Restore previous render target
+  } finally {
     renderer.setRenderTarget(previousTarget);
+    if (this.mainCamera && typeof previousLayersMask === 'number') this.mainCamera.layers.mask = previousLayersMask;
   }
+ }
 
   dispose() {
+    if (this.cloudTopOverlayMesh && this.mainScene) {
+      try {
+        this.mainScene.remove(this.cloudTopOverlayMesh);
+      } catch (_) {
+      }
+    }
+    this.cloudTopOverlayMesh = null;
+    if (this.cloudTopOverlayMaterial) {
+      try {
+        this.cloudTopOverlayMaterial.dispose();
+      } catch (_) {
+      }
+    }
+    this.cloudTopOverlayMaterial = null;
+
     if (this.cloudDensityTarget) {
       this.cloudDensityTarget.dispose();
       this.cloudDensityTarget = null;

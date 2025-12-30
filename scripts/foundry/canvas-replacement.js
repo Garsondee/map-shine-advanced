@@ -188,6 +188,9 @@ let _webglContextRestoredHandler = null;
  /** @type {boolean} */
  let transitionsInstalled = false;
 
+ /** @type {number} */
+ let createThreeCanvasGeneration = 0;
+
 /**
  * Initialize canvas replacement hooks
  * Uses Foundry's native hook system for v13 compatibility
@@ -614,6 +617,9 @@ async function createThreeCanvas(scene) {
   // Cleanup existing canvas if present
   destroyThreeCanvas();
 
+  const myGen = ++createThreeCanvasGeneration;
+  const isStale = () => myGen !== createThreeCanvasGeneration;
+
   const THREE = window.THREE;
   if (!THREE) {
     log.error('three.js not loaded');
@@ -634,6 +640,7 @@ async function createThreeCanvas(scene) {
       log.error('Lazy bootstrap failed:', e);
       return;
     }
+    if (isStale()) return;
     if (!mapShine.renderer) {
       log.error('Renderer still unavailable after lazy bootstrap. Aborting.');
       return;
@@ -815,6 +822,14 @@ async function createThreeCanvas(scene) {
       }
     );
 
+    if (isStale()) {
+      try {
+        destroyThreeCanvas();
+      } catch (e) {
+      }
+      return;
+    }
+
     log.info(`Scene composer initialized with ${bundle.masks.length} effect masks`);
 
     // CRITICAL: Expose sceneComposer early so effects can access groundZ during initialization
@@ -878,6 +893,14 @@ async function createThreeCanvas(scene) {
     // This allows precipitation, wind, etc. to update every frame and drive GPU effects
     // like the particle-based weather system without requiring manual console snippets.
     await weatherController.initialize();
+
+    if (isStale()) {
+      try {
+        destroyThreeCanvas();
+      } catch (e) {
+      }
+      return;
+    }
 
     // Apply persisted snapshot after initialize so we restore the most recent live weather.
     // (Initialize may run before flags are available in some edge cases; canvasReady ensures scene exists.)
@@ -1002,6 +1025,14 @@ async function createThreeCanvas(scene) {
     skyColorEffect = new SkyColorEffect();
     await effectComposer.registerEffect(skyColorEffect);
 
+    if (isStale()) {
+      try {
+        destroyThreeCanvas();
+      } catch (e) {
+      }
+      return;
+    }
+
     // Provide the base mesh and asset bundle to the effect
     const basePlane = sceneComposer.getBasePlane();
 
@@ -1017,6 +1048,14 @@ async function createThreeCanvas(scene) {
     overheadShadowsEffect.setBaseMesh(basePlane, bundle);
     buildingShadowsEffect.setBaseMesh(basePlane, bundle);
     cloudEffect.setBaseMesh(basePlane, bundle);
+
+    if (isStale()) {
+      try {
+        destroyThreeCanvas();
+      } catch (e) {
+      }
+      return;
+    }
 
     // Step 3b: Initialize grid renderer
     gridRenderer = new GridRenderer(threeScene);

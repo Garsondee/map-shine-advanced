@@ -714,22 +714,24 @@ export class SceneComposer {
 
     try {
       const fullSceneBasePaths = this._getFullSceneMaskTileBasePaths();
-      if (fullSceneBasePaths.length > 1) {
-        const unionWater = await this._buildUnionMaskForBasePaths('water', fullSceneBasePaths);
-        if (unionWater) {
-          if (!result || typeof result !== 'object') result = { success: false, bundle: { masks: [] }, warnings: [] };
-          if (!result.bundle || typeof result.bundle !== 'object') result.bundle = { masks: [] };
+      const moduleId = 'map-shine-advanced';
+      const unionWaterEnabled = foundryScene?.getFlag?.(moduleId, 'unionWaterMasks')
+        ?? foundryScene?.flags?.[moduleId]?.unionWaterMasks;
 
-          const masks = Array.isArray(result.bundle.masks) ? result.bundle.masks : [];
-          const next = masks.filter((m) => (m?.id !== 'water' && m?.type !== 'water'));
-          next.push(unionWater);
-          result.bundle.masks = next;
+      if (unionWaterEnabled && fullSceneBasePaths.length > 1) {
+          const unionWater = await this._buildUnionMaskForBasePaths('water', fullSceneBasePaths);
+          if (unionWater) {
+            if (!result || typeof result !== 'object') result = { success: false, bundle: { masks: [] }, warnings: [] };
+            if (!result.bundle || typeof result.bundle !== 'object') result.bundle = { masks: [] };
 
-          // Treat this as a valid mask set even if no other masks were loaded.
-          // (We still want WaterEffect to run with the union mask.)
-          result.success = true;
-          result.bundle.isMapShineCompatible = true;
-        }
+            const masks = Array.isArray(result.bundle.masks) ? result.bundle.masks : [];
+            const next = masks.filter((m) => (m?.id !== 'water' && m?.type !== 'water'));
+            next.push(unionWater);
+            result.bundle.masks = next;
+
+            result.success = true;
+            result.bundle.isMapShineCompatible = true;
+          }
       }
     } catch (e) {
     }

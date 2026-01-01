@@ -253,14 +253,14 @@ export class StateApplier {
       targetDarkness = Math.max(0, Math.min(1, targetDarkness));
 
       // Get current darkness
-      const currentDarkness = canvas?.environment?.darknessLevel ?? canvas.scene.darkness ?? 0.0;
+      const currentDarkness = canvas?.environment?.darknessLevel ?? canvas?.scene?.environment?.darknessLevel ?? 0.0;
 
       // Apply with debouncing to avoid rapid updates
       if (Math.abs(currentDarkness - targetDarkness) > 0.002) {
         if (this._darknessTimer) clearTimeout(this._darknessTimer);
         this._darknessTimer = setTimeout(async () => {
           try {
-            await canvas.scene.update({ darkness: targetDarkness });
+            await canvas.scene.update({ 'environment.darknessLevel': targetDarkness });
             log.debug(`Scene darkness updated: ${targetDarkness.toFixed(3)}`);
           } catch (error) {
             log.warn('Failed to update scene darkness:', error);

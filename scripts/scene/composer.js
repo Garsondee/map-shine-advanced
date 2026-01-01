@@ -484,6 +484,17 @@ export class SceneComposer {
     } catch (e) {
     }
 
+    // Prefer the scene background image when available. Many premium/complex maps
+    // use multiple full-scene tiles (e.g. *-Overlay) which are not the correct
+    // source for suffix-mask discovery.
+    try {
+      const bg = foundryScene?.background?.src;
+      if (typeof bg === 'string' && bg.trim().length > 0) {
+        return bg.trim();
+      }
+    } catch (e) {
+    }
+
     // Auto-detect: choose a likely full-scene "base" tile (common for multi-layer maps)
     try {
       const tiles = canvas?.scene?.tiles;
@@ -545,14 +556,6 @@ export class SceneComposer {
       }
 
       return bestSrc;
-    } catch (e) {
-    }
-
-    try {
-      const fallbackBg = foundryScene?.background?.src;
-      if (typeof fallbackBg === 'string' && fallbackBg.trim().length > 0) {
-        return fallbackBg.trim();
-      }
     } catch (e) {
     }
 

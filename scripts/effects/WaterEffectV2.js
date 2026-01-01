@@ -20,7 +20,7 @@ export class WaterEffectV2 extends EffectBase {
       waveStrength: 0.38,
       distortionStrengthPx: 25.28,
 
-      waveDirOffsetDeg: -90.0,
+      waveDirOffsetDeg: 0.0,
       advectionDirOffsetDeg: -180.0,
       advectionSpeed: 2.14,
       windDirResponsiveness: 10.0,
@@ -45,6 +45,10 @@ export class WaterEffectV2 extends EffectBase {
     this._quadCamera = null;
     this._quadMesh = null;
     this._material = null;
+
+    this._readBuffer = null;
+    this._writeBuffer = null;
+    this._inputTexture = null;
 
     this._viewBounds = null;
     this._sceneDimensions = null;
@@ -167,7 +171,7 @@ export class WaterEffectV2 extends EffectBase {
         uWindOffsetUv: { value: new THREE.Vector2(0.0, 0.0) },
         uWindTime: { value: 0.0 },
 
-        uWaveDirOffsetRad: { value: -Math.PI * 0.5 },
+        uWaveDirOffsetRad: { value: 0.0 },
 
         uSpecStrength: { value: 25.0 },
         uSpecPower: { value: 24.0 },
@@ -532,6 +536,13 @@ export class WaterEffectV2 extends EffectBase {
     if (this._material) {
       this._material.uniforms.tDiffuse.value = texture;
     }
+
+    this._inputTexture = texture;
+  }
+
+  setBuffers(readBuffer, writeBuffer) {
+    this._readBuffer = readBuffer;
+    this._writeBuffer = writeBuffer;
   }
 
   setRenderToScreen(isLast) {
@@ -628,7 +639,7 @@ export class WaterEffectV2 extends EffectBase {
     u.uDistortionStrengthPx.value = Number.isFinite(distPx) ? distPx : 3.0;
 
     if (u.uWaveDirOffsetRad) {
-      const deg = Number.isFinite(this.params?.waveDirOffsetDeg) ? this.params.waveDirOffsetDeg : 90.0;
+      const deg = Number.isFinite(this.params?.waveDirOffsetDeg) ? this.params.waveDirOffsetDeg : -180.0;
       u.uWaveDirOffsetRad.value = (deg * Math.PI) / 180.0;
     }
 
@@ -766,7 +777,14 @@ export class WaterEffectV2 extends EffectBase {
   }
 
   render(renderer, scene, camera) {
-    if (!this._material?.uniforms?.tDiffuse?.value) return;
+    if (!this._material) return;
+
+    const inputTexture = this._material.uniforms?.tDiffuse?.value || this._readBuffer?.texture || this._inputTexture;
+    if (!inputTexture) return;
+
+    if (this._material.uniforms?.tDiffuse) {
+      this._material.uniforms.tDiffuse.value = inputTexture;
+    }
 
     this._lastCamera = camera;
 

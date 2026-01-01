@@ -769,7 +769,7 @@ export class WindowLightEffect extends EffectBase {
       let d = (env && typeof env.darknessLevel === 'number') ? env.darknessLevel : null;
       if (d === null) {
         const scene = canvas?.scene;
-        d = (scene && typeof scene.darkness === 'number') ? scene.darkness : 0.0;
+        d = (scene && typeof scene?.environment?.darknessLevel === 'number') ? scene.environment.darknessLevel : 0.0;
       }
       u.uDarknessLevel.value = (typeof d === 'number' && isFinite(d)) ? Math.max(0.0, Math.min(1.0, d)) : 0.0;
     } catch (e) {
@@ -1048,7 +1048,7 @@ export class WindowLightEffect extends EffectBase {
         let d = (env && typeof env.darknessLevel === 'number') ? env.darknessLevel : null;
         if (d === null) {
           const scene = canvas?.scene;
-          d = (scene && typeof scene.darkness === 'number') ? scene.darkness : 0.0;
+          d = (scene && typeof scene?.environment?.darknessLevel === 'number') ? scene.environment.darknessLevel : 0.0;
         }
         u.uDarknessLevel.value = (typeof d === 'number' && isFinite(d)) ? Math.max(0.0, Math.min(1.0, d)) : 0.0;
       } catch (e) {

@@ -27,6 +27,10 @@ export class AsciiEffect extends EffectBase {
     this.lastLineHeight = null;
     this.lastPadX = null;
     this.lastPadY = null;
+
+    this._readBuffer = null;
+    this._writeBuffer = null;
+    this._inputTexture = null;
     
     // Parameters
     this.params = {
@@ -300,6 +304,13 @@ export class AsciiEffect extends EffectBase {
     if (this.material) {
       this.material.uniforms.tDiffuse.value = texture;
     }
+
+    this._inputTexture = texture;
+  }
+
+  setBuffers(readBuffer, writeBuffer) {
+    this._readBuffer = readBuffer;
+    this._writeBuffer = writeBuffer;
   }
 
   /**
@@ -369,7 +380,17 @@ export class AsciiEffect extends EffectBase {
    * Render the effect
    */
   render(renderer, scene, camera) {
-    if (!this.enabled || !this.material.uniforms.tDiffuse.value) return;
+    if (!this.material) return;
+
+    const inputTexture = this.material.uniforms?.tDiffuse?.value || this._readBuffer?.texture || this._inputTexture;
+    if (!inputTexture) return;
+
+    this.material.uniforms.tDiffuse.value = inputTexture;
+
+    const prevOpacity = this.material.uniforms?.uOpacity?.value;
+    if (!this.enabled && this.material.uniforms?.uOpacity) {
+      this.material.uniforms.uOpacity.value = 0.0;
+    }
     
     // Update grid size if resolution, line height, or padding changed
     if (
@@ -394,6 +415,10 @@ export class AsciiEffect extends EffectBase {
     renderer.render(this.quadScene, this.quadCamera);
     
     renderer.autoClear = oldAutoClear;
+
+    if (!this.enabled && this.material.uniforms?.uOpacity) {
+      this.material.uniforms.uOpacity.value = prevOpacity;
+    }
   }
   
   /**

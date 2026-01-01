@@ -21,6 +21,10 @@ export class ColorCorrectionEffect extends EffectBase {
     this.quadCamera = null;
     this.mesh = null;
     this.material = null;
+
+    this._readBuffer = null;
+    this._writeBuffer = null;
+    this._inputTexture = null;
     
     // NOTE: Defaults tuned to match Foundry PIXI brightness more closely.
     // Tone mapping is OFF by default to avoid darkening the scene.
@@ -211,6 +215,13 @@ export class ColorCorrectionEffect extends EffectBase {
     if (this.material) {
       this.material.uniforms.tDiffuse.value = texture;
     }
+
+    this._inputTexture = texture;
+  }
+
+  setBuffers(readBuffer, writeBuffer) {
+    this._readBuffer = readBuffer;
+    this._writeBuffer = writeBuffer;
   }
 
   /**
@@ -244,7 +255,11 @@ export class ColorCorrectionEffect extends EffectBase {
    * Render the effect
    */
   render(renderer, scene, camera) {
-    if (!this.enabled || !this.material.uniforms.tDiffuse.value) return;
+    if (!this.enabled || !this.material) return;
+
+    const inputTexture = this.material.uniforms?.tDiffuse?.value || this._readBuffer?.texture || this._inputTexture;
+    if (!inputTexture) return;
+    this.material.uniforms.tDiffuse.value = inputTexture;
     
     // Log once per 100 frames to verify it's running
     if (Math.random() < 0.01) {

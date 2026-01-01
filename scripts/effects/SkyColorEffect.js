@@ -649,12 +649,17 @@ export class SkyColorEffect extends EffectBase {
   }
 
   render(renderer, scene, camera) {
-    if (!this.enabled || !this.material) return;
+    if (!this.material) return;
 
     const inputTexture = this.readBuffer ? this.readBuffer.texture : this.material.uniforms.tDiffuse.value;
     if (!inputTexture) return;
 
     this.material.uniforms.tDiffuse.value = inputTexture;
+
+    const prevIntensity = this.material.uniforms?.uIntensity?.value;
+    if (!this.enabled && this.material.uniforms?.uIntensity) {
+      this.material.uniforms.uIntensity.value = 0.0;
+    }
 
     if (this.writeBuffer) {
       renderer.setRenderTarget(this.writeBuffer);
@@ -664,5 +669,9 @@ export class SkyColorEffect extends EffectBase {
     }
 
     renderer.render(this.quadScene, this.quadCamera);
+
+    if (!this.enabled && this.material.uniforms?.uIntensity) {
+      this.material.uniforms.uIntensity.value = prevIntensity;
+    }
   }
 }

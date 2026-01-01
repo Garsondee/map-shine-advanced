@@ -216,15 +216,49 @@ async function discoverAvailableFiles(basePath) {
     if (!filePicker) {
       throw new Error('FilePicker is not available');
     }
-    const result = await filePicker.browse('data', directory);
-    
-    if (!result || !result.files) {
+    const tried = new Set();
+    const dirsToTry = [];
+    const pushDir = (d) => {
+      if (typeof d !== 'string') return;
+      const trimmed = d.trim();
+      if (!trimmed) return;
+      if (tried.has(trimmed)) return;
+      tried.add(trimmed);
+      dirsToTry.push(trimmed);
+    };
+
+    pushDir(directory);
+    try {
+      if (directory.includes('%')) pushDir(decodeURIComponent(directory));
+    } catch (e) {
+    }
+    try {
+      if (directory.includes(' ')) pushDir(encodeURI(directory));
+    } catch (e) {
+    }
+
+    const allFiles = [];
+    for (const dir of dirsToTry) {
+      try {
+        const result = await filePicker.browse('data', dir);
+        if (!result || !result.files) {
+          continue;
+        }
+        for (const f of result.files) {
+          if (!allFiles.includes(f)) allFiles.push(f);
+        }
+      } catch (e) {
+        // Try next directory variant
+      }
+    }
+
+    if (!allFiles.length) {
       log.warn('FilePicker returned no files for directory:', directory);
       return [];
     }
 
-    log.debug(`FilePicker found ${result.files.length} files in ${directory}`);
-    return result.files;
+    log.debug(`FilePicker found ${allFiles.length} files in ${directory}`);
+    return allFiles;
     
   } catch (error) {
     log.warn('Failed to discover files via FilePicker:', error.message);
@@ -244,17 +278,27 @@ function findMaskInFiles(availableFiles, basePath, suffix) {
   // Extract base filename (without directory)
   const lastSlash = basePath.lastIndexOf('/');
   const baseFilename = lastSlash >= 0 ? basePath.substring(lastSlash + 1) : basePath;
+
+  const normalizeName = (name) => {
+    if (typeof name !== 'string') return '';
+    let out = name;
+    try {
+      out = decodeURIComponent(out);
+    } catch (e) {
+    }
+    return out.toLowerCase();
+  };
+  const normalizedAvailable = new Map();
+  for (const file of availableFiles) {
+    const filename = String(file).substring(String(file).lastIndexOf('/') + 1);
+    normalizedAvailable.set(normalizeName(filename), file);
+  }
   
   // Try to find a file matching the suffix pattern
   for (const format of SUPPORTED_FORMATS) {
     const expectedFilename = `${baseFilename}${suffix}.${format}`;
-    
-    // Check if any available file matches this pattern
-    const matchingFile = availableFiles.find(file => {
-      const filename = file.substring(file.lastIndexOf('/') + 1);
-      return filename === expectedFilename;
-    });
-    
+
+    const matchingFile = normalizedAvailable.get(normalizeName(expectedFilename));
     if (matchingFile) {
       log.debug(`Found mask: ${matchingFile}`);
       return matchingFile;

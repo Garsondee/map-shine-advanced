@@ -35,6 +35,8 @@ export class WindowLightEffect extends EffectBase {
     /** @type {THREE.ShaderMaterial|null} */
     this.material = null;
 
+    this._bundleBaseTexture = null;
+
     /** @type {THREE.WebGLRenderTarget|null} */
     this.lightTarget = null; // Render target for window light brightness (used by TileManager)
 
@@ -384,6 +386,8 @@ export class WindowLightEffect extends EffectBase {
   setBaseMesh(baseMesh, assetBundle) {
     this.baseMesh = baseMesh;
 
+    this._bundleBaseTexture = assetBundle?.baseTexture || null;
+
     const windowData = assetBundle.masks.find(m => m.id === 'windows' || m.id === 'structural');
     const outdoorsData = assetBundle.masks.find(m => m.id === 'outdoors');
     const specularData = assetBundle.masks.find(m => m.id === 'specular');
@@ -408,9 +412,20 @@ export class WindowLightEffect extends EffectBase {
   createOverlayMesh() {
     const THREE = window.THREE;
 
+    const baseMaterial = this.baseMesh?.material;
+    const baseMap =
+      baseMaterial?.map ||
+      baseMaterial?.uniforms?.uAlbedoMap?.value ||
+      this._bundleBaseTexture ||
+      null;
+
+    if (this.windowMask && this.params) {
+      this.params.textureStatus = 'Ready (Texture Found)';
+    }
+
     this.material = new THREE.ShaderMaterial({
       uniforms: {
-        uBaseMap: { value: (this.baseMesh && this.baseMesh.material && this.baseMesh.material.map) || null },
+        uBaseMap: { value: baseMap },
         uWindowMask: { value: this.windowMask },
         uOutdoorsMask: { value: this.outdoorsMask },
         uSpecularMask: { value: this.specularMask },
@@ -619,21 +634,20 @@ export class WindowLightEffect extends EffectBase {
         vec3 windowSample = texture2D(uWindowMask, vUv).rgb;
         float centerMask = msLuminance(windowSample);
 
-        vec2 t = uWindowTexelSize;
+        float blurScale = 1.0 + clamp(uSoftness, 0.0, 2.0) * 2.0;
+        vec2 t = uWindowTexelSize * blurScale;
         float maskN = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0, -t.y)).rgb);
         float maskS = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0,  t.y)).rgb);
         float maskE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, 0.0)).rgb);
         float maskW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, 0.0)).rgb);
 
-        float baseMask = (centerMask * 2.0 + maskN + maskS + maskE + maskW) / 6.0;
+        float baseMask = centerMask;
 
         // Mask shaping
-        // Treat softness as a half-width around maskThreshold so we always
-        // get a controllable falloff band instead of a hard clip when the
-        // threshold is raised.
-        float halfWidth = max(uSoftness, 1e-3);
-        float edgeLo = clamp(uMaskThreshold - halfWidth, 0.0, 1.0);
-        float edgeHi = clamp(uMaskThreshold + halfWidth, 0.0, 1.0);
+        // Use derivative-based smoothing so threshold remains predictable.
+        float w = max(fwidth(baseMask) * (1.0 + clamp(uSoftness, 0.0, 2.0) * 4.0), 1e-3);
+        float edgeLo = clamp(uMaskThreshold - w, 0.0, 1.0);
+        float edgeHi = clamp(uMaskThreshold + w, 0.0, 1.0);
         float m = smoothstep(edgeLo, edgeHi, baseMask);
         if (m <= 0.0) discard;
 
@@ -918,29 +932,30 @@ export class WindowLightEffect extends EffectBase {
     log.info('Window light target created for overhead tile lighting');
   }
 
-  /**
-   * Fragment shader that outputs just the window light brightness.
-   * Used for the light-only render target that TileManager samples.
-   */
   getLightOnlyFragmentShader() {
     return `
       uniform sampler2D uWindowMask;
       uniform sampler2D uOutdoorsMask;
+
       uniform float uHasOutdoorsMask;
       uniform vec2 uWindowTexelSize;
+
       uniform float uIntensity;
       uniform float uMaskThreshold;
       uniform float uSoftness;
+
       uniform float uMinCloudFactor;
       uniform float uCloudInfluence;
       uniform float uCloudLocalInfluence;
       uniform float uCloudDensityCurve;
-      uniform sampler2D uCloudShadowMap;
-      uniform float uHasCloudShadowMap;
-      uniform vec3 uColor;
 
       uniform float uDarknessLevel;
       uniform float uDarknessDimming;
+
+      uniform sampler2D uCloudShadowMap;
+      uniform float uHasCloudShadowMap;
+
+      uniform vec3 uColor;
 
       varying vec4 vClipPos;
       varying vec2 vUv;
@@ -950,35 +965,31 @@ export class WindowLightEffect extends EffectBase {
       }
 
       void main() {
-        // Sample window mask with blur
         vec3 windowSample = texture2D(uWindowMask, vUv).rgb;
         float centerMask = msLuminance(windowSample);
 
-        vec2 t = uWindowTexelSize;
+        float blurScale = 1.0 + clamp(uSoftness, 0.0, 2.0) * 2.0;
+        vec2 t = uWindowTexelSize * blurScale;
         float maskN = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0, -t.y)).rgb);
         float maskS = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0,  t.y)).rgb);
         float maskE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, 0.0)).rgb);
         float maskW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, 0.0)).rgb);
 
-        float baseMask = (centerMask * 2.0 + maskN + maskS + maskE + maskW) / 6.0;
+        float baseMask = centerMask;
 
-        // Mask shaping
-        float halfWidth = max(uSoftness, 1e-3);
-        float edgeLo = clamp(uMaskThreshold - halfWidth, 0.0, 1.0);
-        float edgeHi = clamp(uMaskThreshold + halfWidth, 0.0, 1.0);
+        float w = max(fwidth(baseMask) * (1.0 + clamp(uSoftness, 0.0, 2.0) * 4.0), 1e-3);
+        float edgeLo = clamp(uMaskThreshold - w, 0.0, 1.0);
+        float edgeHi = clamp(uMaskThreshold + w, 0.0, 1.0);
         float m = smoothstep(edgeLo, edgeHi, baseMask);
+        if (m <= 0.0) discard;
 
-        // Outdoors rejection - window light only affects indoors
         float indoorFactor = 1.0;
         if (uHasOutdoorsMask > 0.5) {
           float outdoorStrength = texture2D(uOutdoorsMask, vUv).r;
           indoorFactor = 1.0 - outdoorStrength;
+          if (indoorFactor <= 0.0) discard;
         }
 
-        // Cloud attenuation
-        // Do NOT use raw cloud cover (slider) for window light. The only thing
-        // that should dim this pass is the presence/content of the cloud
-        // density texture produced by CloudEffect.
         float cloudFactor = 1.0;
         if (uHasCloudShadowMap > 0.5) {
           vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
@@ -1008,12 +1019,9 @@ export class WindowLightEffect extends EffectBase {
         float darknessFactor = mix(1.0, night * night, dimAmt);
         float effIntensity = uIntensity * darknessFactor;
 
-        // Final light brightness (0-1 range, clamped)
         float lightBrightness = m * indoorFactor * cloudFactor * effIntensity;
         lightBrightness = clamp(lightBrightness, 0.0, 1.0);
 
-        // Output light brightness with color tint in RGB, brightness in alpha
-        // TileManager will use the RGB for tinting and alpha for intensity
         gl_FragColor = vec4(uColor * lightBrightness, lightBrightness);
       }
     `;

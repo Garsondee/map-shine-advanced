@@ -507,6 +507,9 @@ export class TweakpaneManager {
 
       const params = effectSnapshot.params || {};
       for (const [paramId, value] of Object.entries(params)) {
+        const def = effectData.schema?.parameters?.[paramId];
+        if (def?.readonly === true) continue;
+        if (def?.hidden === true && paramId !== 'enabled') continue;
         effectData.params[paramId] = value;
 
         if (effectData.bindings[paramId]) {
@@ -1309,7 +1312,14 @@ export class TweakpaneManager {
       }
 
       // Get current parameters
-      const params = { ...effectData.params };
+      const schemaParams = effectData.schema?.parameters || {};
+      const params = {};
+      for (const [paramId, value] of Object.entries(effectData.params || {})) {
+        const def = schemaParams[paramId];
+        if (def?.readonly === true) continue;
+        if (def?.hidden === true && paramId !== 'enabled') continue;
+        params[paramId] = value;
+      }
 
       // Get all settings
       const allSettings = scene.getFlag('map-shine-advanced', 'settings') || this.createDefaultSettings();
@@ -1421,6 +1431,9 @@ export class TweakpaneManager {
 
       // Update params object
       for (const [paramId, value] of Object.entries(savedParams)) {
+        const def = effectData.schema?.parameters?.[paramId];
+        if (def?.readonly === true) continue;
+        if (def?.hidden === true && paramId !== 'enabled') continue;
         if (effectData.params[paramId] !== undefined) {
           effectData.params[paramId] = value;
           
@@ -1467,6 +1480,8 @@ export class TweakpaneManager {
 
     // Reset all parameters to schema defaults
     for (const [paramId, paramDef] of Object.entries(effectData.schema.parameters || {})) {
+      if (paramDef?.readonly === true) continue;
+      if (paramDef?.hidden === true && paramId !== 'enabled') continue;
       effectData.params[paramId] = paramDef.default;
 
       // Refresh UI binding

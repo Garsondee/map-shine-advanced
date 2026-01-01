@@ -919,6 +919,8 @@ async function createThreeCanvas(scene) {
     const windowLightEffect = new WindowLightEffect();
     await effectComposer.registerEffect(windowLightEffect);
 
+    if (window.MapShine) window.MapShine.windowLightEffect = windowLightEffect;
+
     // Step 3.2: Register color correction effect (Post-Processing)
     const colorCorrectionEffect = new ColorCorrectionEffect();
     await effectComposer.registerEffect(colorCorrectionEffect);
@@ -1008,6 +1010,8 @@ async function createThreeCanvas(scene) {
     const bloomEffect = new BloomEffect();
     await effectComposer.registerEffect(bloomEffect);
 
+    if (window.MapShine) window.MapShine.bloomEffect = bloomEffect;
+
     // Step 3.8: Register Lensflare Effect
     const lensflareEffect = new LensflareEffect();
     await effectComposer.registerEffect(lensflareEffect);
@@ -1041,6 +1045,7 @@ async function createThreeCanvas(scene) {
     prismEffect.setBaseMesh(basePlane, bundle);
     waterEffect.setBaseMesh(basePlane, bundle);
     windowLightEffect.setBaseMesh(basePlane, bundle);
+    windowLightEffect.createOverlayMesh();
     windowLightEffect.createLightTarget();
     bushEffect.setBaseMesh(basePlane, bundle);
     treeEffect.setBaseMesh(basePlane, bundle);

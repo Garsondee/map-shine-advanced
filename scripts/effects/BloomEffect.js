@@ -50,6 +50,8 @@ export class BloomEffect extends EffectBase {
     this._tempNdc = null;
     this._tempWorld = null;
     this._tempDir = null;
+
+    this._bloomTarget = null;
   }
 
   /**
@@ -210,6 +212,37 @@ export class BloomEffect extends EffectBase {
     this.copyMaterial = new THREE.MeshBasicMaterial({ map: null });
     this.copyQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.copyMaterial);
     this.copyScene.add(this.copyQuad);
+
+    // Additive composite material for bloom overlay
+    this.bloomCompositeMaterial = new THREE.MeshBasicMaterial({
+      map: null,
+      transparent: true,
+      opacity: 1.0,
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+      depthWrite: false
+    });
+    this.bloomCompositeQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.bloomCompositeMaterial);
+    this.bloomCompositeScene = new THREE.Scene();
+    this.bloomCompositeScene.add(this.bloomCompositeQuad);
+
+    // Dedicated output for bloom so we never sample from the same RT we are writing to.
+    // This avoids undefined behavior that can manifest as a black screen.
+    try {
+      if (!this._bloomTarget) {
+        this._bloomTarget = new THREE.WebGLRenderTarget(size.width, size.height, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          format: THREE.RGBAFormat,
+          type: THREE.FloatType,
+          depthBuffer: false,
+          stencilBuffer: false
+        });
+      } else {
+        this._bloomTarget.setSize(size.width, size.height);
+      }
+    } catch (_) {
+    }
   }
 
   /**
@@ -308,7 +341,35 @@ export class BloomEffect extends EffectBase {
    * Render the effect
    */
   render(renderer, scene, camera) {
-    if (!this.enabled || !this.pass || !this.readBuffer) return;
+    if (!this.enabled) return;
+    if (!renderer || !this.readBuffer) return;
+
+    // Ensure we never black-hole the post chain.
+    const passthrough = () => {
+      if (this.renderToScreen || !this.writeBuffer) {
+        this.copyMaterial.map = this.readBuffer.texture;
+        renderer.setRenderTarget(null);
+        renderer.clear();
+        renderer.render(this.copyScene, this.copyCamera);
+        return;
+      }
+      this.copyMaterial.map = this.readBuffer.texture;
+      renderer.setRenderTarget(this.writeBuffer);
+      renderer.clear();
+      renderer.render(this.copyScene, this.copyCamera);
+    };
+
+    if (!this.pass) {
+      passthrough();
+      return;
+    }
+
+    if (!this._bloomTarget) {
+      // Without a dedicated target, bloom cannot safely copy its output forward.
+      // Fail safe by passing through.
+      passthrough();
+      return;
+    }
 
     try {
       const THREE = window.THREE;
@@ -406,6 +467,12 @@ export class BloomEffect extends EffectBase {
         u.tVision.value = visionTex;
       }
 
+      if (u?.uMaskEnabled) {
+        // TEMP: disable vision masking while we validate bloom pipeline.
+        // A bad/black vision texture would otherwise zero the entire frame.
+        u.uMaskEnabled.value = 0.0;
+      }
+
       // If we're using the fog RT (scene-space), enable scene-rect mapping.
       // If we're using Foundry's vision texture (screen-space), we should skip mapping.
       if (u?.uHasSceneRect) {
@@ -428,19 +495,37 @@ export class BloomEffect extends EffectBase {
     
     this.pass.render(
       renderer,
-      this.writeBuffer,
+      this._bloomTarget,
       this.readBuffer,
       0.01, // delta
       false // maskActive
     );
 
-    // Fix: UnrealBloomPass renders to readBuffer when not rendering to screen.
-    // We must copy the result to writeBuffer for the EffectComposer chain to work.
-    if (!this.renderToScreen && this.writeBuffer) {
-        this.copyMaterial.map = this.readBuffer.texture;
-        renderer.setRenderTarget(this.writeBuffer);
-        renderer.clear();
-        renderer.render(this.copyScene, this.copyCamera);
+    // Composite: start with base scene, then add bloom highlights.
+    const bloomTex = this._bloomTarget.texture;
+    if (!bloomTex) {
+      passthrough();
+      return;
+    }
+
+    const outTarget = (this.renderToScreen || !this.writeBuffer) ? null : this.writeBuffer;
+    const prevAutoClear = renderer.autoClear;
+    try {
+      renderer.setRenderTarget(outTarget);
+      renderer.autoClear = true;
+      renderer.clear();
+
+      // Base
+      this.copyMaterial.map = this.readBuffer.texture;
+      renderer.render(this.copyScene, this.copyCamera);
+
+      // Bloom overlay
+      renderer.autoClear = false;
+      this.bloomCompositeMaterial.map = bloomTex;
+      this.bloomCompositeMaterial.opacity = this.params?.blendOpacity ?? 1.0;
+      renderer.render(this.bloomCompositeScene, this.copyCamera);
+    } finally {
+      renderer.autoClear = prevAutoClear;
     }
   }
   
@@ -450,6 +535,13 @@ export class BloomEffect extends EffectBase {
   onResize(width, height) {
     if (this.pass) {
       this.pass.setSize(width, height);
+    }
+
+    try {
+      if (this._bloomTarget && (this._bloomTarget.width !== width || this._bloomTarget.height !== height)) {
+        this._bloomTarget.setSize(width, height);
+      }
+    } catch (_) {
     }
   }
 
@@ -470,6 +562,19 @@ export class BloomEffect extends EffectBase {
     }
     if (this.copyQuad) {
         this.copyQuad.geometry.dispose();
+    }
+
+    if (this.bloomCompositeMaterial) {
+      this.bloomCompositeMaterial.dispose();
+    }
+
+    if (this.bloomCompositeQuad) {
+      this.bloomCompositeQuad.geometry.dispose();
+    }
+
+    if (this._bloomTarget) {
+      this._bloomTarget.dispose();
+      this._bloomTarget = null;
     }
   }
 }

@@ -1710,9 +1710,13 @@ export class WeatherController {
 
     // Smoothly attack/decay the gust strength scalar
     const targetGust = this.isGusting ? 1.0 : 0.0;
-    // Attack fast (3.0), decay slower (1.0)
-    const lerpSpeed = this.isGusting ? 3.0 : 1.0; 
-    this.currentGustStrength += (targetGust - this.currentGustStrength) * lerpSpeed * dt;
+    // Attack fast, decay with a longer tail so gust-driven motion "coasts".
+    // Use exponential smoothing so behavior is framerate independent.
+    const attackRate = 6.0;
+    const decayRate = 0.8;
+    const rate = this.isGusting ? attackRate : decayRate;
+    const k = 1.0 - Math.exp(-Math.max(0.0, rate) * Math.max(0.0, dt));
+    this.currentGustStrength += (targetGust - this.currentGustStrength) * k;
 
 
     // --- Noise Generation ---
@@ -1730,9 +1734,11 @@ export class WeatherController {
       Math.sin(time * 1.3) * 0.25
     );
     
-    // Modulate gust noise by the smooth gust strength envelope
-    // Multiply by baseVar and gustStrength so the overall "Variability" slider and wind UI both scale this
-    const gustComponent = gustNoiseRaw * this.currentGustStrength * (baseVar * 2.0) * this.gustStrength;
+    // Convert gust noise into a 0..1 envelope so gusts can only ADD energy.
+    // This prevents gusts from temporarily cancelling wind (which can stall wind-driven effects).
+    const gustNoise01 = THREE.MathUtils.clamp(gustNoiseRaw * 0.5 + 0.5, 0.0, 1.0);
+    // Multiply by baseVar and gustStrength so the overall "Variability" slider and wind UI both scale this.
+    const gustComponent = gustNoise01 * this.currentGustStrength * (baseVar * 2.0) * this.gustStrength;
 
 
     // --- Apply to State ---
@@ -1745,7 +1751,11 @@ export class WeatherController {
     // The '0.2' ensures that even at 0 target wind, we can get small breezes if variability is high
     const magnitudeScale = Math.min(1.0, windBase + 0.2); 
 
-    let newSpeed = windBase + (meander + gustComponent) * magnitudeScale;
+    // Apply meander as signed (small) variation, but apply gust as strictly additive boost.
+    // This guarantees: during gusts, windSpeed never decreases relative to the non-gusting baseline.
+    const baseSpeed = windBase + meander * magnitudeScale;
+    const gustBoost = gustComponent * magnitudeScale;
+    let newSpeed = baseSpeed + gustBoost;
     this.currentState.windSpeed = THREE.MathUtils.clamp(newSpeed, 0, 1);
 
 

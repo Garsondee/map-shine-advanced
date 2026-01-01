@@ -12,16 +12,22 @@ export class WaterEffectV2 extends EffectBase {
     this.alwaysRender = true;
 
     this.params = {
-      tintStrength: 0.12,
-      tintColor: { r: 0.25, g: 0.45, b: 0.75 },
+      tintStrength: 0.37,
+      tintColor: { r: 0.0, g: 0.0, b: 0.0 },
 
-      waveScale: 18.0,
-      waveSpeed: 1.2,
-      waveStrength: 1.10,
-      distortionStrengthPx: 3.0,
+      waveScale: 25.0,
+      waveSpeed: 0.94,
+      waveStrength: 0.38,
+      distortionStrengthPx: 25.28,
 
-      specStrength: 0.25,
-      specPower: 3.0,
+      waveDirOffsetDeg: -90.0,
+      advectionDirOffsetDeg: -180.0,
+      advectionSpeed: 2.14,
+      windDirResponsiveness: 10.0,
+      useTargetWindDirection: true,
+
+      specStrength: 25.0,
+      specPower: 24.0,
 
       debugView: 0
     };
@@ -76,6 +82,11 @@ export class WaterEffectV2 extends EffectBase {
             'waveSpeed',
             'waveStrength',
             'distortionStrengthPx',
+            'waveDirOffsetDeg',
+            'advectionDirOffsetDeg',
+            'advectionSpeed',
+            'windDirResponsiveness',
+            'useTargetWindDirection',
             'specStrength',
             'specPower',
             'debugView'
@@ -84,16 +95,22 @@ export class WaterEffectV2 extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        tintStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.12 },
-        tintColor: { type: 'color', default: { r: 0.25, g: 0.45, b: 0.75 } },
+        tintStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.37 },
+        tintColor: { type: 'color', default: { r: 0.0, g: 0.0, b: 0.0 } },
 
-        waveScale: { type: 'slider', min: 1, max: 60, step: 0.5, default: 18.0 },
-        waveSpeed: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 1.2 },
-        waveStrength: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 1.10 },
-        distortionStrengthPx: { type: 'slider', min: 0, max: 64.0, step: 0.01, default: 3.0 },
+        waveScale: { type: 'slider', min: 1, max: 60, step: 0.5, default: 25.0 },
+        waveSpeed: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.94 },
+        waveStrength: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.38 },
+        distortionStrengthPx: { type: 'slider', min: 0, max: 64.0, step: 0.01, default: 25.28 },
 
-        specStrength: { type: 'slider', min: 0, max: 25.0, step: 0.01, default: 0.25 },
-        specPower: { type: 'slider', min: 1, max: 24, step: 0.5, default: 3.0 },
+        waveDirOffsetDeg: { type: 'slider', label: 'Wave Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: -90.0 },
+        advectionDirOffsetDeg: { type: 'slider', label: 'Advection Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: -180.0 },
+        advectionSpeed: { type: 'slider', label: 'Advection Speed', min: 0.0, max: 4.0, step: 0.01, default: 2.14 },
+        windDirResponsiveness: { type: 'slider', label: 'Wind Dir Responsiveness', min: 0.1, max: 10.0, step: 0.1, default: 10.0 },
+        useTargetWindDirection: { type: 'boolean', label: 'Use Target Wind Dir', default: true },
+
+        specStrength: { type: 'slider', min: 0, max: 250.0, step: 0.01, default: 25.0 },
+        specPower: { type: 'slider', min: 1, max: 24, step: 0.5, default: 24.0 },
 
         debugView: {
           type: 'list',
@@ -137,21 +154,23 @@ export class WaterEffectV2 extends EffectBase {
 
         uWaterDataTexelSize: { value: new THREE.Vector2(1 / 512, 1 / 512) },
 
-        uTintColor: { value: new THREE.Color(0.25, 0.45, 0.75) },
-        uTintStrength: { value: 0.12 },
+        uTintColor: { value: new THREE.Color(0.0, 0.0, 0.0) },
+        uTintStrength: { value: 0.37 },
 
-        uWaveScale: { value: 18.0 },
-        uWaveSpeed: { value: 1.2 },
-        uWaveStrength: { value: 1.10 },
-        uDistortionStrengthPx: { value: 3.0 },
+        uWaveScale: { value: 25.0 },
+        uWaveSpeed: { value: 0.94 },
+        uWaveStrength: { value: 0.38 },
+        uDistortionStrengthPx: { value: 25.28 },
 
         uWindDir: { value: new THREE.Vector2(1.0, 0.0) },
         uWindSpeed: { value: 0.0 },
         uWindOffsetUv: { value: new THREE.Vector2(0.0, 0.0) },
         uWindTime: { value: 0.0 },
 
-        uSpecStrength: { value: 0.25 },
-        uSpecPower: { value: 3.0 },
+        uWaveDirOffsetRad: { value: -Math.PI * 0.5 },
+
+        uSpecStrength: { value: 25.0 },
+        uSpecPower: { value: 24.0 },
         uDebugView: { value: 0.0 },
 
         uTime: { value: 0.0 },
@@ -189,6 +208,8 @@ export class WaterEffectV2 extends EffectBase {
         uniform float uWindSpeed;
         uniform vec2 uWindOffsetUv;
         uniform float uWindTime;
+
+        uniform float uWaveDirOffsetRad;
 
         uniform float uSpecStrength;
         uniform float uSpecPower;
@@ -279,6 +300,7 @@ export class WaterEffectV2 extends EffectBase {
           float wl = length(windF);
           windF = (wl > 1e-5) ? (windF / wl) : vec2(1.0, 0.0);
           vec2 wind = vec2(windF.x, -windF.y);
+          wind = rotate2D(wind, uWaveDirOffsetRad);
 
           vec2 uvF = warpUv(sceneUv);
           vec2 uv = vec2(uvF.x, 1.0 - uvF.y);
@@ -305,6 +327,7 @@ export class WaterEffectV2 extends EffectBase {
           float wl = length(windF);
           windF = (wl > 1e-5) ? (windF / wl) : vec2(1.0, 0.0);
           vec2 wind = vec2(windF.x, -windF.y);
+          wind = rotate2D(wind, uWaveDirOffsetRad);
 
           vec2 uvF = warpUv(sceneUv);
           vec2 uv = vec2(uvF.x, 1.0 - uvF.y);
@@ -604,11 +627,17 @@ export class WaterEffectV2 extends EffectBase {
     const distPx = this.params?.distortionStrengthPx;
     u.uDistortionStrengthPx.value = Number.isFinite(distPx) ? distPx : 3.0;
 
+    if (u.uWaveDirOffsetRad) {
+      const deg = Number.isFinite(this.params?.waveDirOffsetDeg) ? this.params.waveDirOffsetDeg : 90.0;
+      u.uWaveDirOffsetRad.value = (deg * Math.PI) / 180.0;
+    }
+
     if (u.uWindDir && u.uWindSpeed) {
       try {
         const wc = window.MapShine?.weatherController ?? window.canvas?.mapShine?.weatherController;
         const ws = (wc && typeof wc.getCurrentState === 'function') ? wc.getCurrentState() : (wc?.currentState ?? null);
-        const wd = ws?.windDirection;
+        const useTarget = !!this.params?.useTargetWindDirection;
+        const wd = useTarget ? (wc?.targetState?.windDirection ?? ws?.windDirection) : ws?.windDirection;
 
         const wx = Number.isFinite(wd?.x) ? wd.x : 1.0;
         const wy = Number.isFinite(wd?.y) ? wd.y : 0.0;
@@ -617,7 +646,8 @@ export class WaterEffectV2 extends EffectBase {
         const ny = len > 1e-6 ? (wy / len) : 0.0;
 
         if (this._smoothedWindDir) {
-          const k = 1.0 - Math.exp(-dtSeconds * 2.5);
+          const resp = Number.isFinite(this.params?.windDirResponsiveness) ? Math.max(0.05, this.params.windDirResponsiveness) : 2.5;
+          const k = 1.0 - Math.exp(-dtSeconds * resp);
           if (this._tempWindTarget) this._tempWindTarget.set(nx, ny);
           this._smoothedWindDir.lerp(this._tempWindTarget ?? this._smoothedWindDir, Math.min(1.0, Math.max(0.0, k)));
           u.uWindDir.value.set(this._smoothedWindDir.x, this._smoothedWindDir.y);
@@ -639,9 +669,25 @@ export class WaterEffectV2 extends EffectBase {
 
           // Tuned so windSpeed=1 moves the pattern noticeably but not wildly.
           // This is in scene pixels/second.
-          const pxPerSec = 35.0 + 220.0 * wSpeed01;
-          const du = (this._smoothedWindDir?.x ?? nx) * (pxPerSec * dtSeconds) / Math.max(1.0, sceneW);
-          const dv = (this._smoothedWindDir?.y ?? ny) * (pxPerSec * dtSeconds) / Math.max(1.0, sceneH);
+          const advMul = Number.isFinite(this.params?.advectionSpeed) ? Math.max(0.0, this.params.advectionSpeed) : 1.0;
+          const pxPerSec = (35.0 + 220.0 * wSpeed01) * advMul;
+
+          const baseDxF = (this._smoothedWindDir?.x ?? nx);
+          const baseDyF = (this._smoothedWindDir?.y ?? ny);
+          const adDeg = Number.isFinite(this.params?.advectionDirOffsetDeg) ? this.params.advectionDirOffsetDeg : 0.0;
+          const adRad = (adDeg * Math.PI) / 180.0;
+
+          const fx = baseDxF;
+          const fy = -baseDyF;
+          const cs = Math.cos(adRad);
+          const sn = Math.sin(adRad);
+          const rx = cs * fx - sn * fy;
+          const ry = sn * fx + cs * fy;
+          const dx = rx;
+          const dy = -ry;
+
+          const du = dx * (pxPerSec * dtSeconds) / Math.max(1.0, sceneW);
+          const dv = dy * (pxPerSec * dtSeconds) / Math.max(1.0, sceneH);
 
           this._windOffsetUv.x += du;
           this._windOffsetUv.y += dv;

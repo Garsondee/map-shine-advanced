@@ -27,7 +27,7 @@ import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
 import { BuildingShadowsEffect } from '../effects/BuildingShadowsEffect.js';
 import { CloudEffect } from '../effects/CloudEffect.js';
 import { DistortionManager } from '../effects/DistortionManager.js';
-import { WaterEffect } from '../effects/WaterEffect.js';
+import { WaterEffectV2 } from '../effects/WaterEffectV2.js';
 import { MaskDebugEffect } from '../effects/MaskDebugEffect.js';
 import { DebugLayerEffect } from '../effects/DebugLayerEffect.js';
 import { PlayerLightEffect } from '../effects/PlayerLightEffect.js';
@@ -960,8 +960,8 @@ async function createThreeCanvas(scene) {
     const prismEffect = new PrismEffect();
     await effectComposer.registerEffect(prismEffect);
 
-    // Step 3.5.05: Register Water Effect (MVP: drives DistortionManager using _Water)
-    const waterEffect = new WaterEffect();
+    // Step 3.5.05: Register Water Effect
+    const waterEffect = new WaterEffectV2();
     await effectComposer.registerEffect(waterEffect);
 
     // Step 3.5.1: Register World-Space Fog Effect (Fog of War)
@@ -1612,6 +1612,26 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     );
   }
 
+  if (distortionManager) {
+    const distortionSchema = DistortionManager.getControlSchema();
+
+    const onDistortionUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        distortionManager.enabled = value;
+      } else if (distortionManager.params && Object.prototype.hasOwnProperty.call(distortionManager.params, paramId)) {
+        distortionManager.params[paramId] = value;
+      }
+    };
+
+    uiManager.registerEffect(
+      'distortion-manager',
+      'Screen Distortion',
+      distortionSchema,
+      onDistortionUpdate,
+      'global'
+    );
+  }
+
   // --- Sky Color Settings (Global & Post) ---
   if (skyColorEffect) {
     const skySchema = SkyColorEffect.getControlSchema();
@@ -2153,32 +2173,9 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     );
   }
 
-  // --- Distortion Manager Settings ---
-  if (distortionManager) {
-    const distortionSchema = DistortionManager.getControlSchema();
-    
-    const onDistortionUpdate = (effectId, paramId, value) => {
-      if (paramId === 'enabled' || paramId === 'masterEnabled') {
-        distortionManager.enabled = value;
-        log.debug(`DistortionManager ${value ? 'enabled' : 'disabled'}`);
-      } else if (distortionManager.params && Object.prototype.hasOwnProperty.call(distortionManager.params, paramId)) {
-        distortionManager.params[paramId] = value;
-        log.debug(`Distortion.${paramId} = ${value}`);
-      }
-    };
-
-    uiManager.registerEffect(
-      'distortion',
-      'Screen Distortion',
-      distortionSchema,
-      onDistortionUpdate,
-      'global'
-    );
-  }
-
   // --- Water Settings ---
   if (waterEffect) {
-    const waterSchema = WaterEffect.getControlSchema();
+    const waterSchema = WaterEffectV2.getControlSchema();
 
     const onWaterUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {

@@ -2182,7 +2182,9 @@ _createSnowTexture() {
 
     const waterEffect = window.MapShine?.waterEffect;
     const waterEnabled = !!(waterEffect && waterEffect.enabled);
-    const waterTex = waterEffect?.waterMask || null;
+    const waterTex = (waterEffect && typeof waterEffect.getWaterMaskTexture === 'function')
+      ? waterEffect.getWaterMaskTexture()
+      : (waterEffect?.waterMask || null);
 
     if (this._waterHitShape) {
       if (waterEnabled && waterTex && waterTex.image) {

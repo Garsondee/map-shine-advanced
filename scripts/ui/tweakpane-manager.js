@@ -2599,29 +2599,33 @@ export class TweakpaneManager {
         }
       }
 
-      // Targeted assertion: Water enabled should actually enable/disable the DistortionManager source.
+      // Targeted assertion: Water enabled should actually enable/disable the Water effect.
       // This catches wiring issues where the UI toggles a flag but the visual output persists.
       try {
         const waterHandler = this.effectFolders?.water?._uiValidatorHandlers?.enabled;
         const originalWaterEnabled = originalEffects?.water?.enabled;
-        const dm = window.MapShine?.distortionManager;
         const waterEffect = window.MapShine?.effectComposer?.effects?.get?.('water');
 
         if (!waterHandler || originalWaterEnabled === undefined) {
           results.push({ kind: 'assert', paramId: 'water.enabled', status: 'SKIP', error: 'Water not registered' });
-        } else if (!dm?.sources) {
-          results.push({ kind: 'assert', paramId: 'water.enabled', status: 'SKIP', error: 'DistortionManager not available' });
-        } else if (!waterEffect?.waterMask) {
-          results.push({ kind: 'assert', paramId: 'water.enabled', status: 'SKIP', error: 'No water mask' });
+        } else if (!waterEffect) {
+          results.push({ kind: 'assert', paramId: 'water.enabled', status: 'SKIP', error: 'Water effect not available' });
         } else {
+          const maskTex = (typeof waterEffect.getWaterMaskTexture === 'function')
+            ? waterEffect.getWaterMaskTexture()
+            : waterEffect.waterMask;
+          if (!maskTex) {
+            results.push({ kind: 'assert', paramId: 'water.enabled', status: 'SKIP', error: 'No water mask' });
+            return;
+          }
+
           await safeInvoke(waterHandler, { value: false, last: true });
           await nextFrame();
           await nextFrame();
 
-          const srcOff = dm.sources.get('water');
-          const okOff = !srcOff || srcOff.enabled === false;
+          const okOff = waterEffect.enabled === false;
           if (!okOff) {
-            results.push({ kind: 'assert', paramId: 'water.enabled', status: 'FAIL', error: 'Distortion source still enabled after disabling water' });
+            results.push({ kind: 'assert', paramId: 'water.enabled', status: 'FAIL', error: 'Water effect still enabled after disabling water' });
           } else {
             results.push({ kind: 'assert', paramId: 'water.enabled', status: 'PASS' });
           }

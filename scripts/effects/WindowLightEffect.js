@@ -67,6 +67,9 @@ export class WindowLightEffect extends EffectBase {
       cloudInfluence: 0.8,     // How much clouds dim the light (0-1)
       nightDimming: 0.8,       // How much night dims the light (0-1)
 
+      useSkyTint: true,
+      skyTintStrength: 1.0,
+
       // Cloud shadow shaping (applied to cloudShadowRaw.screen before influence/cover mix)
       cloudShadowContrast: 1.2,
       cloudShadowBias: 0.0,
@@ -145,7 +148,7 @@ export class WindowLightEffect extends EffectBase {
           name: 'environment',
           label: 'Environment',
           type: 'inline',
-          parameters: ['cloudInfluence', 'nightDimming']
+          parameters: ['cloudInfluence', 'nightDimming', 'useSkyTint', 'skyTintStrength']
         },
         {
           name: 'cloudShadows',
@@ -214,6 +217,19 @@ export class WindowLightEffect extends EffectBase {
           max: 1.0,
           step: 0.01,
           default: 0.8
+        },
+        useSkyTint: {
+          type: 'boolean',
+          label: 'Use Sky Tint',
+          default: true
+        },
+        skyTintStrength: {
+          type: 'slider',
+          label: 'Sky Tint Strength',
+          min: 0.0,
+          max: 25.0,
+          step: 0.01,
+          default: 1.0
         },
         cloudShadowContrast: {
           type: 'slider',
@@ -370,6 +386,8 @@ export class WindowLightEffect extends EffectBase {
         uSkyIntensity: { value: 0.0 },
         uSkyTemperature: { value: 0.0 },
         uSkyTint: { value: 0.0 },
+        uUseSkyTint: { value: this.params.useSkyTint ? 1.0 : 0.0 },
+        uSkyTintStrength: { value: this.params.skyTintStrength },
 
         uCloudShadowContrast: { value: this.params.cloudShadowContrast },
         uCloudShadowBias: { value: this.params.cloudShadowBias },
@@ -441,6 +459,8 @@ export class WindowLightEffect extends EffectBase {
       uniform float uSkyIntensity;
       uniform float uSkyTemperature;
       uniform float uSkyTint;
+      uniform float uUseSkyTint;
+      uniform float uSkyTintStrength;
 
       uniform float uCloudShadowContrast;
       uniform float uCloudShadowBias;
@@ -524,10 +544,12 @@ export class WindowLightEffect extends EffectBase {
         float nightFactor = uDarknessLevel * uNightDimming;
         envFactor *= (1.0 - clamp(nightFactor, 0.0, 1.0));
 
-        float skyK = clamp(uSkyIntensity, 0.0, 1.0);
+        float skyK = clamp(uSkyIntensity, 0.0, 1.0) * step(0.5, uUseSkyTint) * max(uSkyTintStrength, 0.0);
+        float skyColorMix = clamp(skyK * 0.35, 0.0, 1.0);
+        float skyDimMix = clamp(skyK * 0.25, 0.0, 1.0);
         vec3 skyTinted = msApplySkyWhiteBalance(uColor, uSkyTemperature, uSkyTint);
-        vec3 finalColor = mix(uColor, skyTinted, skyK * 0.35);
-        envFactor *= (1.0 - skyK * 0.25);
+        vec3 finalColor = mix(uColor, skyTinted, skyColorMix);
+        envFactor *= (1.0 - skyDimMix);
 
         // 5. Final Light Composition
         vec3 finalLight = lightMap * finalColor * uIntensity * indoorFactor * envFactor;
@@ -666,6 +688,8 @@ export class WindowLightEffect extends EffectBase {
     this._applyThreeColor(u.uColor.value, this.params.color);
     u.uCloudInfluence.value = this.params.cloudInfluence;
     u.uNightDimming.value = this.params.nightDimming;
+    if (u.uUseSkyTint) u.uUseSkyTint.value = this.params.useSkyTint ? 1.0 : 0.0;
+    if (u.uSkyTintStrength) u.uSkyTintStrength.value = this.params.skyTintStrength;
     u.uCloudShadowContrast.value = this.params.cloudShadowContrast;
     u.uCloudShadowBias.value = this.params.cloudShadowBias;
     u.uCloudShadowGamma.value = this.params.cloudShadowGamma;
@@ -681,6 +705,8 @@ export class WindowLightEffect extends EffectBase {
       this._applyThreeColor(lu.uColor.value, this.params.color);
       lu.uCloudInfluence.value = this.params.cloudInfluence;
       lu.uNightDimming.value = this.params.nightDimming;
+      if (lu.uUseSkyTint) lu.uUseSkyTint.value = this.params.useSkyTint ? 1.0 : 0.0;
+      if (lu.uSkyTintStrength) lu.uSkyTintStrength.value = this.params.skyTintStrength;
       lu.uCloudShadowContrast.value = this.params.cloudShadowContrast;
       lu.uCloudShadowBias.value = this.params.cloudShadowBias;
       lu.uCloudShadowGamma.value = this.params.cloudShadowGamma;
@@ -754,6 +780,8 @@ export class WindowLightEffect extends EffectBase {
         uSkyIntensity: { value: 0.0 },
         uSkyTemperature: { value: 0.0 },
         uSkyTint: { value: 0.0 },
+        uUseSkyTint: { value: this.params.useSkyTint ? 1.0 : 0.0 },
+        uSkyTintStrength: { value: this.params.skyTintStrength },
 
         uCloudShadowContrast: { value: this.params.cloudShadowContrast },
         uCloudShadowBias: { value: this.params.cloudShadowBias },
@@ -798,6 +826,8 @@ export class WindowLightEffect extends EffectBase {
       uniform float uSkyIntensity;
       uniform float uSkyTemperature;
       uniform float uSkyTint;
+      uniform float uUseSkyTint;
+      uniform float uSkyTintStrength;
 
       uniform float uCloudShadowContrast;
       uniform float uCloudShadowBias;
@@ -850,10 +880,12 @@ export class WindowLightEffect extends EffectBase {
         float nightFactor = uDarknessLevel * uNightDimming;
         envFactor *= (1.0 - clamp(nightFactor, 0.0, 1.0));
 
-        float skyK = clamp(uSkyIntensity, 0.0, 1.0);
+        float skyK = clamp(uSkyIntensity, 0.0, 1.0) * step(0.5, uUseSkyTint) * max(uSkyTintStrength, 0.0);
+        float skyColorMix = clamp(skyK * 0.35, 0.0, 1.0);
+        float skyDimMix = clamp(skyK * 0.25, 0.0, 1.0);
         vec3 skyTinted = msApplySkyWhiteBalance(uColor, uSkyTemperature, uSkyTint);
-        vec3 finalColor = mix(uColor, skyTinted, skyK * 0.35);
-        envFactor *= (1.0 - skyK * 0.25);
+        vec3 finalColor = mix(uColor, skyTinted, skyColorMix);
+        envFactor *= (1.0 - skyDimMix);
 
         float finalBrightness = brightness * uIntensity * indoorFactor * envFactor;
         

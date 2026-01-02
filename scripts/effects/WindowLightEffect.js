@@ -367,6 +367,10 @@ export class WindowLightEffect extends EffectBase {
         uDarknessLevel: { value: 0.0 },
         uNightDimming: { value: this.params.nightDimming },
 
+        uSkyIntensity: { value: 0.0 },
+        uSkyTemperature: { value: 0.0 },
+        uSkyTint: { value: 0.0 },
+
         uCloudShadowContrast: { value: this.params.cloudShadowContrast },
         uCloudShadowBias: { value: this.params.cloudShadowBias },
         uCloudShadowGamma: { value: this.params.cloudShadowGamma },
@@ -434,6 +438,10 @@ export class WindowLightEffect extends EffectBase {
       uniform float uDarknessLevel;
       uniform float uNightDimming;
 
+      uniform float uSkyIntensity;
+      uniform float uSkyTemperature;
+      uniform float uSkyTint;
+
       uniform float uCloudShadowContrast;
       uniform float uCloudShadowBias;
       uniform float uCloudShadowGamma;
@@ -452,6 +460,15 @@ export class WindowLightEffect extends EffectBase {
 
       float msLuminance(vec3 c) {
         return dot(c, vec3(0.2126, 0.7152, 0.0722));
+      }
+
+      vec3 msApplySkyWhiteBalance(vec3 color, float temp, float tint) {
+        vec3 tempShift = vec3(1.0 + temp, 1.0, 1.0 - temp);
+        if (temp < 0.0) tempShift = vec3(1.0, 1.0, 1.0 - temp * 0.5);
+        else tempShift = vec3(1.0 + temp * 0.5, 1.0, 1.0);
+
+        vec3 tintShift = vec3(1.0, 1.0 + tint, 1.0);
+        return color * tempShift * tintShift;
       }
 
       void main() {
@@ -507,8 +524,13 @@ export class WindowLightEffect extends EffectBase {
         float nightFactor = uDarknessLevel * uNightDimming;
         envFactor *= (1.0 - clamp(nightFactor, 0.0, 1.0));
 
+        float skyK = clamp(uSkyIntensity, 0.0, 1.0);
+        vec3 skyTinted = msApplySkyWhiteBalance(uColor, uSkyTemperature, uSkyTint);
+        vec3 finalColor = mix(uColor, skyTinted, skyK * 0.35);
+        envFactor *= (1.0 - skyK * 0.25);
+
         // 5. Final Light Composition
-        vec3 finalLight = lightMap * uColor * uIntensity * indoorFactor * envFactor;
+        vec3 finalLight = lightMap * finalColor * uIntensity * indoorFactor * envFactor;
 
         // 6. Specular Glint
         if (uSpecularBoost > 0.0 && uHasSpecularMask > 0.5) {
@@ -549,12 +571,59 @@ export class WindowLightEffect extends EffectBase {
 
     let darkness = 0.0;
     try {
-        if (typeof canvas?.environment?.darknessLevel === 'number') darkness = canvas.environment.darknessLevel;
-        else if (typeof canvas?.scene?.environment?.darknessLevel === 'number') darkness = canvas.scene.environment.darknessLevel;
-    } catch(e) {}
-    this.material.uniforms.uDarknessLevel.value = Math.max(0.0, Math.min(1.0, darkness));
+      const le = window.MapShine?.lightingEffect;
+      if (le && typeof le.getEffectiveDarkness === 'function') {
+        darkness = le.getEffectiveDarkness();
+      } else if (typeof canvas?.environment?.darknessLevel === 'number') {
+        darkness = canvas.environment.darknessLevel;
+      } else if (typeof canvas?.scene?.environment?.darknessLevel === 'number') {
+        darkness = canvas.scene.environment.darknessLevel;
+      }
+    } catch (e) {}
+
+    darkness = (typeof darkness === 'number' && Number.isFinite(darkness))
+      ? Math.max(0.0, Math.min(1.0, darkness))
+      : 0.0;
+    this.material.uniforms.uDarknessLevel.value = darkness;
     if (this.lightMaterial?.uniforms?.uDarknessLevel) {
       this.lightMaterial.uniforms.uDarknessLevel.value = this.material.uniforms.uDarknessLevel.value;
+    }
+
+    // Sky Color influence (time-of-day grading)
+    try {
+      const sky = window.MapShine?.skyColorEffect;
+      const su = sky?.material?.uniforms;
+      const skyIntensity = (typeof sky?.params?.intensity === 'number' && Number.isFinite(sky.params.intensity))
+        ? Math.max(0.0, Math.min(1.0, sky.params.intensity))
+        : 0.0;
+      const skyTemp = (typeof su?.uTemperature?.value === 'number' && Number.isFinite(su.uTemperature.value))
+        ? Math.max(-1.0, Math.min(1.0, su.uTemperature.value))
+        : 0.0;
+      const skyTint = (typeof su?.uTint?.value === 'number' && Number.isFinite(su.uTint.value))
+        ? Math.max(-1.0, Math.min(1.0, su.uTint.value))
+        : 0.0;
+
+      if (this.material?.uniforms?.uSkyIntensity) {
+        this.material.uniforms.uSkyIntensity.value = skyIntensity;
+        this.material.uniforms.uSkyTemperature.value = skyTemp;
+        this.material.uniforms.uSkyTint.value = skyTint;
+      }
+      if (this.lightMaterial?.uniforms?.uSkyIntensity) {
+        this.lightMaterial.uniforms.uSkyIntensity.value = skyIntensity;
+        this.lightMaterial.uniforms.uSkyTemperature.value = skyTemp;
+        this.lightMaterial.uniforms.uSkyTint.value = skyTint;
+      }
+    } catch (e) {
+      if (this.material?.uniforms?.uSkyIntensity) {
+        this.material.uniforms.uSkyIntensity.value = 0.0;
+        this.material.uniforms.uSkyTemperature.value = 0.0;
+        this.material.uniforms.uSkyTint.value = 0.0;
+      }
+      if (this.lightMaterial?.uniforms?.uSkyIntensity) {
+        this.lightMaterial.uniforms.uSkyIntensity.value = 0.0;
+        this.lightMaterial.uniforms.uSkyTemperature.value = 0.0;
+        this.lightMaterial.uniforms.uSkyTint.value = 0.0;
+      }
     }
 
     // Cloud Shadows
@@ -682,6 +751,10 @@ export class WindowLightEffect extends EffectBase {
         uDarknessLevel: { value: 0.0 },
         uNightDimming: { value: this.params.nightDimming },
 
+        uSkyIntensity: { value: 0.0 },
+        uSkyTemperature: { value: 0.0 },
+        uSkyTint: { value: 0.0 },
+
         uCloudShadowContrast: { value: this.params.cloudShadowContrast },
         uCloudShadowBias: { value: this.params.cloudShadowBias },
         uCloudShadowGamma: { value: this.params.cloudShadowGamma },
@@ -722,6 +795,10 @@ export class WindowLightEffect extends EffectBase {
       uniform float uDarknessLevel;
       uniform float uNightDimming;
 
+      uniform float uSkyIntensity;
+      uniform float uSkyTemperature;
+      uniform float uSkyTint;
+
       uniform float uCloudShadowContrast;
       uniform float uCloudShadowBias;
       uniform float uCloudShadowGamma;
@@ -735,6 +812,15 @@ export class WindowLightEffect extends EffectBase {
 
       float msLuminance(vec3 c) {
         return dot(c, vec3(0.2126, 0.7152, 0.0722));
+      }
+
+      vec3 msApplySkyWhiteBalance(vec3 color, float temp, float tint) {
+        vec3 tempShift = vec3(1.0 + temp, 1.0, 1.0 - temp);
+        if (temp < 0.0) tempShift = vec3(1.0, 1.0, 1.0 - temp * 0.5);
+        else tempShift = vec3(1.0 + temp * 0.5, 1.0, 1.0);
+
+        vec3 tintShift = vec3(1.0, 1.0 + tint, 1.0);
+        return color * tempShift * tintShift;
       }
 
       void main() {
@@ -764,10 +850,15 @@ export class WindowLightEffect extends EffectBase {
         float nightFactor = uDarknessLevel * uNightDimming;
         envFactor *= (1.0 - clamp(nightFactor, 0.0, 1.0));
 
+        float skyK = clamp(uSkyIntensity, 0.0, 1.0);
+        vec3 skyTinted = msApplySkyWhiteBalance(uColor, uSkyTemperature, uSkyTint);
+        vec3 finalColor = mix(uColor, skyTinted, skyK * 0.35);
+        envFactor *= (1.0 - skyK * 0.25);
+
         float finalBrightness = brightness * uIntensity * indoorFactor * envFactor;
         
         // Output premultiplied color/brightness
-        gl_FragColor = vec4(uColor * finalBrightness, finalBrightness);
+        gl_FragColor = vec4(finalColor * finalBrightness, finalBrightness);
       }
     `;
   }

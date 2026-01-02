@@ -169,6 +169,10 @@ export class StateApplier {
 
       log.info(`Directed transition requested: preset=${presetId}, minutes=${transitionMinutes}`);
 
+      const minutesNum = typeof transitionMinutes === 'number' ? transitionMinutes : Number(transitionMinutes);
+      const safeMinutes = Number.isFinite(minutesNum) ? Math.max(0.1, Math.min(60.0, minutesNum)) : 5.0;
+      const durationSeconds = safeMinutes * 60.0;
+
       // Directed transitions must not be blocked by Dynamic Weather state (e.g. after refresh).
       // Force dynamic off before queuing.
       if (typeof weatherController.setDynamicEnabled === 'function') {
@@ -187,23 +191,28 @@ export class StateApplier {
       }
 
       const preset = schema.presets[presetId];
-      
-      // Queue the transition parameters
-      Object.entries(preset).forEach(([key, value]) => {
-        const queuedKey = `queued${key.charAt(0).toUpperCase() + key.slice(1)}`;
-        if (typeof weatherController.setQueuedTransitionParam === 'function') {
-          weatherController.setQueuedTransitionParam(queuedKey, value);
-        }
-      });
 
-      // Set transition duration and start
-      weatherController.presetTransitionDurationSeconds = transitionMinutes * 60;
-      
-      if (typeof weatherController.startQueuedTransition === 'function') {
-        weatherController.startQueuedTransition(transitionMinutes * 60);
+      if (typeof weatherController.presetTransitionDurationSeconds === 'number') {
+        weatherController.presetTransitionDurationSeconds = durationSeconds;
       }
 
-      log.info(`Started directed weather transition: ${presetId} (${transitionMinutes}min)`);
+      if (typeof weatherController.transitionToPreset === 'function') {
+        weatherController.transitionToPreset(preset, durationSeconds);
+      } else {
+        // Fallback: older/manual queue system
+        Object.entries(preset).forEach(([key, value]) => {
+          const queuedKey = `queued${key.charAt(0).toUpperCase() + key.slice(1)}`;
+          if (typeof weatherController.setQueuedTransitionParam === 'function') {
+            weatherController.setQueuedTransitionParam(queuedKey, value);
+          }
+        });
+
+        if (typeof weatherController.startQueuedTransition === 'function') {
+          weatherController.startQueuedTransition(durationSeconds);
+        }
+      }
+
+      log.info(`Started directed weather transition: ${presetId} (${safeMinutes}min)`);
     } catch (error) {
       log.error('Failed to start directed transition:', error);
       throw error;

@@ -1006,6 +1006,8 @@ async function createThreeCanvas(scene) {
     const distortionManager = new DistortionManager();
     await effectComposer.registerEffect(distortionManager);
 
+    if (window.MapShine) window.MapShine.distortionManager = distortionManager;
+
     // Step 3.7: Register Bloom Effect
     const bloomEffect = new BloomEffect();
     await effectComposer.registerEffect(bloomEffect);

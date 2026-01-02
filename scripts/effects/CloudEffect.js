@@ -2223,7 +2223,7 @@ export class CloudEffect extends EffectBase {
 
     // Pass 1: Generate world-pinned cloud density (NO parallax) for shadows and other consumers
     if (this.densityMaterial.uniforms.uParallaxScale) this.densityMaterial.uniforms.uParallaxScale.value = 0.0;
-    if (this.densityMaterial.uniforms.uCompositeMode) this.densityMaterial.uniforms.uCompositeMode.value = 1.0;
+    if (this.densityMaterial.uniforms.uCompositeMode) this.densityMaterial.uniforms.uCompositeMode.value = 0.0;
     this.quadMesh.material = this.densityMaterial;
     renderer.setRenderTarget(this.cloudDensityTarget);
     renderer.setClearColor(0x000000, 1);

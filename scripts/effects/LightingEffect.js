@@ -53,29 +53,18 @@ export class LightingEffect extends EffectBase {
     this.darknessSources = new Map(); 
     
     this.lightScene = null;     
-    this.lightTarget = null;    
     this.darknessScene = null;  
     this.darknessTarget = null; 
     this.roofAlphaTarget = null; 
     this.weatherRoofAlphaTarget = null;
-    this.quadScene = null;      
-    this.quadCamera = null;
-    this.compositeMaterial = null;
-    this.debugLightBufferMaterial = null;
-
     this._quadMesh = null;
 
-    this.windowMask = null;
     this.outdoorsMask = null;
-
-    this.windowLightMesh = null;
-    this.windowLightMaterial = null;
-
     this.outdoorsScene = null;
     this.outdoorsMesh = null;
     this.outdoorsMaterial = null;
     this.outdoorsTarget = null;
-
+    
     this._effectiveDarkness = null;
     
     this._tempSize = null; 
@@ -450,201 +439,9 @@ export class LightingEffect extends EffectBase {
 
     this._baseMesh = baseMesh;
 
-    const windowData = assetBundle.masks.find(m => m.id === 'windows' || m.id === 'structural');
     const outdoorsData = assetBundle.masks.find(m => m.id === 'outdoors');
 
-    this.windowMask = windowData?.texture || null;
     this.outdoorsMask = outdoorsData?.texture || null;
-
-    this._rebuildOutdoorsProjection();
-
-    if (!this.windowMask) {
-      if (this.windowLightMesh && this.lightScene) {
-        this.lightScene.remove(this.windowLightMesh);
-      }
-      this.windowLightMesh = null;
-      this.windowLightMaterial = null;
-      return;
-    }
-
-    // Create a world-space window light mesh that writes into the light buffer
-    const geometry = baseMesh.geometry;
-
-    this.windowLightMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        uWindowMask: { value: this.windowMask },
-        uOutdoorsMask: { value: this.outdoorsMask },
-        uHasOutdoorsMask: { value: this.outdoorsMask ? 1.0 : 0.0 },
-        uWindowTexelSize: {
-          value: (this.windowMask && this.windowMask.image)
-            ? new THREE.Vector2(1 / this.windowMask.image.width, 1 / this.windowMask.image.height)
-            : new THREE.Vector2(1 / 1024, 1 / 1024)
-        },
-        uIntensity: { value: 1.0 },
-        uMaskThreshold: { value: 0.1 },
-        uSoftness: { value: 0.2 },
-        uColor: { value: new THREE.Color(1.0, 0.96, 0.85) },
-        uCloudCover: { value: 0.0 },
-        uCloudInfluence: { value: 1.0 },
-        uMinCloudFactor: { value: 0.0 },
-        uCloudLocalInfluence: { value: 1.0 },
-        uCloudDensityCurve: { value: 1.0 },
-        uDarknessLevel: { value: 0.0 },
-        uDarknessDimming: { value: 0.5 },
-        uCloudShadowMap: { value: null },
-        uHasCloudShadowMap: { value: 0.0 },
-        uRgbShiftAmount: { value: 0.0 },
-        uRgbShiftAngle: { value: 0.0 }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        varying vec4 vClipPos;
-        void main() {
-          vUv = uv;
-          vClipPos = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          gl_Position = vClipPos;
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D uWindowMask;
-        uniform sampler2D uOutdoorsMask;
-        uniform float uHasOutdoorsMask;
-        uniform vec2 uWindowTexelSize;
-        uniform float uIntensity;
-        uniform float uMaskThreshold;
-        uniform float uSoftness;
-        uniform vec3 uColor;
-        uniform float uCloudCover;
-        uniform float uCloudInfluence;
-        uniform float uMinCloudFactor;
-        uniform float uCloudLocalInfluence;
-        uniform float uCloudDensityCurve;
-        uniform float uDarknessLevel;
-        uniform float uDarknessDimming;
-        uniform sampler2D uCloudShadowMap;
-        uniform float uHasCloudShadowMap;
-        uniform float uRgbShiftAmount;
-        uniform float uRgbShiftAngle;
-
-        varying vec2 vUv;
-        varying vec4 vClipPos;
-
-        float msLuminance(vec3 c) {
-          return dot(c, vec3(0.2126, 0.7152, 0.0722));
-        }
-
-        void main() {
-          if (uIntensity <= 0.0001) {
-            discard;
-          }
-
-          vec3 windowSample = texture2D(uWindowMask, vUv).rgb;
-          float centerMask = msLuminance(windowSample);
-
-          float blurScale = 1.0 + (uSoftness * 4.0);
-          vec2 t = uWindowTexelSize * blurScale;
-          float maskN = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0, -t.y)).rgb);
-          float maskS = msLuminance(texture2D(uWindowMask, vUv + vec2(0.0,  t.y)).rgb);
-          float maskE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, 0.0)).rgb);
-          float maskW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, 0.0)).rgb);
-          float maskNE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x, -t.y)).rgb);
-          float maskNW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x, -t.y)).rgb);
-          float maskSE = msLuminance(texture2D(uWindowMask, vUv + vec2( t.x,  t.y)).rgb);
-          float maskSW = msLuminance(texture2D(uWindowMask, vUv + vec2(-t.x,  t.y)).rgb);
-
-          float baseMask = (centerMask * 2.0 + maskN + maskS + maskE + maskW + maskNE + maskNW + maskSE + maskSW) / 10.0;
-
-          float halfWidth = max(uSoftness, 1e-3);
-          float edgeLo = clamp(uMaskThreshold - halfWidth, 0.0, 1.0);
-          float edgeHi = clamp(uMaskThreshold + halfWidth, 0.0, 1.0);
-          float m = smoothstep(edgeLo, edgeHi, baseMask);
-          if (m <= 0.0) discard;
-
-          float indoor = 1.0;
-          if (uHasOutdoorsMask > 0.5) {
-            float outdoorStrength = texture2D(uOutdoorsMask, vUv).r;
-            indoor = 1.0 - outdoorStrength;
-            if (indoor <= 0.0) discard;
-          }
-
-          // Cloud attenuation
-          // Do NOT use raw cloud cover (slider) for window light. The only thing
-          // that should dim this effect is the presence/content of the cloud
-          // density texture produced by CloudEffect.
-          float cloudFactor = 1.0;
-
-          // Sample cloud SHADOW FACTOR texture for spatial variation (animated clouds passing by)
-          // CloudEffect provides *shadow factor* (1 = fully lit, 0 = fully shadowed).
-          if (uHasCloudShadowMap > 0.5) {
-            // Cloud density is rendered in SCREEN SPACE, convert clip coords to screen UV
-            vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
-            float shadowFactor = texture2D(uCloudShadowMap, screenUV).r;
-
-            // Curve shaping: higher values make midtones darker (stronger shadows).
-            float curve = max(uCloudDensityCurve, 0.001);
-            shadowFactor = pow(clamp(shadowFactor, 0.0, 1.0), curve);
-
-            // uCloudLocalInfluence is exposed as [0,3] in UI. Remap to [0,1]
-            // so we don't extrapolate past 0..1 and accidentally invert/destroy intensity.
-            float localMix = clamp(uCloudLocalInfluence / 3.0, 0.0, 1.0);
-            cloudFactor = mix(1.0, shadowFactor, localMix);
-          }
-
-          cloudFactor = max(cloudFactor, uMinCloudFactor);
-
-          // Apply global influence shaping. When influence is high, clouds dim harder.
-          // influence = 0 => ignore clouds.
-          if (uCloudInfluence > 0.0001) {
-            cloudFactor = pow(max(cloudFactor, 1e-4), uCloudInfluence);
-          } else {
-            cloudFactor = 1.0;
-          }
-
-          float d = clamp(uDarknessLevel, 0.0, 1.0);
-          float dimAmt = clamp(uDarknessDimming, 0.0, 1.0);
-          float night = clamp(1.0 - d, 0.0, 1.0);
-          float darknessFactor = mix(1.0, night * night, dimAmt);
-
-          float strength = m * indoor * cloudFactor * uIntensity * darknessFactor;
-
-          vec3 lightColor = uColor * strength;
-
-          if (uRgbShiftAmount > 0.0001) {
-            float angle = uRgbShiftAngle;
-            vec2 dir = vec2(cos(angle), sin(angle));
-            vec2 shift = dir * uRgbShiftAmount * uWindowTexelSize;
-
-            float maskR = msLuminance(texture2D(uWindowMask, vUv + shift).rgb);
-            float maskG = baseMask;
-            float maskB = msLuminance(texture2D(uWindowMask, vUv - shift).rgb);
-
-            float denom = max(baseMask, 1e-3);
-            float rScale = maskR / denom;
-            float gScale = maskG / denom;
-            float bScale = maskB / denom;
-
-            lightColor.r *= rScale;
-            lightColor.g *= gScale;
-            lightColor.b *= bScale;
-          }
-
-          gl_FragColor = vec4(lightColor, 1.0);
-        }
-      `,
-      blending: THREE.AdditiveBlending,
-      transparent: true,
-      depthWrite: false,
-      depthTest: true
-    });
-
-    this.windowLightMesh = new THREE.Mesh(geometry, this.windowLightMaterial);
-    this.windowLightMesh.position.copy(baseMesh.position);
-    this.windowLightMesh.rotation.copy(baseMesh.rotation);
-    this.windowLightMesh.scale.copy(baseMesh.scale);
-
-    if (this.lightScene) {
-      this.lightScene.add(this.windowLightMesh);
-    }
 
     this._rebuildOutdoorsProjection();
   }
@@ -939,78 +736,6 @@ export class LightingEffect extends EffectBase {
     } catch (e) {
       u.uTreeShadowOpacity.value = 0.0;
       u.uTreeSelfShadowStrength.value = 1.0;
-    }
-
-    // Window light uniforms driven by WeatherController and WindowLightEffect
-    let cloudCover = 0.0;
-    try {
-      const state = weatherController?.getCurrentState?.();
-      if (state && typeof state.cloudCover === 'number') {
-        cloudCover = state.cloudCover;
-      }
-    } catch (e) {
-      // ignore
-    }
-
-    if (this.windowLightMaterial) {
-      const wu = this.windowLightMaterial.uniforms;
-      wu.uCloudCover.value = cloudCover;
-
-      const wl = window.MapShine?.windowLightEffect;
-      const wlActive = !!(wl && wl.enabled && wl.params && wl.params.hasWindowMask);
-      if (this.windowLightMesh) this.windowLightMesh.visible = wlActive;
-
-      if (wlActive) {
-        wu.uIntensity.value = wl.params.intensity ?? wu.uIntensity.value;
-        wu.uMaskThreshold.value = wl.params.maskThreshold ?? wu.uMaskThreshold.value;
-        wu.uSoftness.value = wl.params.softness ?? wu.uSoftness.value;
-        wu.uCloudInfluence.value = wl.params.cloudInfluence ?? wu.uCloudInfluence.value;
-        wu.uMinCloudFactor.value = wl.params.minCloudFactor ?? wu.uMinCloudFactor.value;
-        wu.uCloudLocalInfluence.value = wl.params.cloudLocalInfluence ?? wu.uCloudLocalInfluence.value;
-        wu.uCloudDensityCurve.value = wl.params.cloudDensityCurve ?? wu.uCloudDensityCurve.value;
-        wu.uRgbShiftAmount.value = wl.params.rgbShiftAmount ?? wu.uRgbShiftAmount.value;
-        if (typeof wl.params.rgbShiftAngle === 'number') {
-          wu.uRgbShiftAngle.value = wl.params.rgbShiftAngle * (Math.PI / 180.0);
-        }
-        setThreeColorLoose(wu.uColor.value, wl.params.color, 0xfff5dd);
-
-        if (wu.uDarknessDimming) {
-          const dd = wl.params.darknessDimming;
-          wu.uDarknessDimming.value = (typeof dd === 'number' && isFinite(dd)) ? Math.max(0.0, Math.min(1.0, dd)) : wu.uDarknessDimming.value;
-        }
-        if (wu.uDarknessLevel) {
-          let d = this.params?.darknessLevel;
-          try {
-            const env = canvas?.environment;
-            if (env && typeof env.darknessLevel === 'number') d = env.darknessLevel;
-          } catch (e) {
-          }
-          d = (typeof d === 'number' && isFinite(d)) ? Math.max(0.0, Math.min(1.0, d)) : 0.0;
-          wu.uDarknessLevel.value = d;
-        }
-      } else {
-        wu.uIntensity.value = 0.0;
-        wu.uHasCloudShadowMap.value = 0.0;
-      }
-
-      // Bind cloud DENSITY texture for spatially-varying dimming (not outdoors-masked shadow)
-      try {
-        const cloudEffect = window.MapShine?.cloudEffect;
-        const mm = window.MapShine?.maskManager;
-        const shadowRaw = mm ? mm.getTexture('cloudShadowRaw.screen') : null;
-        if (wlActive && shadowRaw) {
-          wu.uCloudShadowMap.value = shadowRaw;
-          wu.uHasCloudShadowMap.value = 1.0;
-        } else if (wlActive && cloudEffect?.cloudShadowRawTarget?.texture && cloudEffect.enabled) {
-          wu.uCloudShadowMap.value = cloudEffect.cloudShadowRawTarget.texture;
-          wu.uHasCloudShadowMap.value = 1.0;
-        } else {
-          wu.uCloudShadowMap.value = null;
-          wu.uHasCloudShadowMap.value = 0.0;
-        }
-      } catch (e) {
-        wu.uHasCloudShadowMap.value = 0.0;
-      }
     }
 
     // --- Shared sun/zoom data for screen-space shadows (overhead, building, bush) ---

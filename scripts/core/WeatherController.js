@@ -44,8 +44,8 @@ export class WeatherController {
     this.currentState = {
       precipitation: 0.0,
       precipType: PrecipitationType.NONE,
-      cloudCover: 0.41,
-      windSpeed: 0.07,
+      cloudCover: 0.93,
+      windSpeed: 0.25,
       windDirection: { x: -0.9063077870366499, y: 0.42261826174069944 }, // 205deg, upgraded to Vector2 in initialize() (Y-down world)
       fogDensity: 0.0,
       wetness: 0.0,
@@ -70,13 +70,22 @@ export class WeatherController {
     };
 
     /** @type {WeatherState} */
-    this.targetState = { ...this.currentState, windDirection: { ...this.currentState.windDirection } };
+    this.targetState = { 
+      precipitation: 0.88,
+      precipType: PrecipitationType.NONE,
+      cloudCover: 0.93,
+      windSpeed: 0.25,
+      windDirection: { x: -0.9063077870366499, y: 0.42261826174069944 },
+      fogDensity: 0.0,
+      wetness: 0.0,
+      freezeLevel: 0.0
+    };
 
     /** @type {WeatherState} */
     this.startState = { ...this.currentState, windDirection: { ...this.currentState.windDirection } };
 
     // Transition tracking
-    this.transitionDuration = 0;
+    this.transitionDuration = 13.3;
     this.transitionElapsed = 0;
     this.isTransitioning = false;
 
@@ -85,16 +94,16 @@ export class WeatherController {
     this.noiseOffset = 0;
 
     // Manual preset transition duration (used when selecting a preset)
-    this.presetTransitionDurationSeconds = 30.0;
+    this.presetTransitionDurationSeconds = undefined;
 
     // Wind Gust System
-    this.gustWaitMin = 5.0;   // Seconds to wait between gusts (min)
-    this.gustWaitMax = 13.5;  // Seconds to wait between gusts (max)
-    this.gustDuration = 2.8;  // Duration of a gust
+    this.gustWaitMin = 2.0;   // Seconds to wait between gusts (min)
+    this.gustWaitMax = 17.5;  // Seconds to wait between gusts (max)
+    this.gustDuration = 9.6;  // Duration of a gust
     this.gustTimer = 0;       // Countdown timer
     this.isGusting = false;   // Current state
     this.currentGustStrength = 0; // Smoothed gust value
-    this.gustStrength = 0.7;      // Multiplier for how strong gusts are compared to base wind
+    this.gustStrength = 0.5;      // Multiplier for how strong gusts are compared to base wind
 
     // Time of Day (0-24)
     this.timeOfDay = 6.6; // Tuned time of day
@@ -105,9 +114,9 @@ export class WeatherController {
     this.dynamicEnabled = false;
     this.dynamicPresetId = 'Temperate Plains';
     this.dynamicPaused = false;
-    this.dynamicEvolutionSpeed = 60.0;
+    this.dynamicEvolutionSpeed = 15.0;
 
-    this.dynamicPlanDurationSeconds = 360.0;
+    this.dynamicPlanDurationSeconds = undefined;
     this._dynamicPlanStrength = 0.0;
 
     this._dynamicInitialized = false;

@@ -72,17 +72,17 @@ export class BuildingShadowsEffect extends EffectBase {
 
     this.params = {
       enabled: true,
-      opacity: 0.4,
-      length: 0.075,
-      quality: 48,
-      sunLatitude: 0.1,
-      blurStrength: 0.7,
+      opacity: 0.75,
+      length: 0.06,
+      quality: 80,
+      sunLatitude: 0.03,
+      blurStrength: 0.3,
       // High-level blur control (0 = hard edge, 1 = very soft)
       penumbraRadiusNear: 0.0,
       penumbraRadiusFar: 0.06,
       penumbraSamples: 3,
       penumbraExponent: 1.0,
-      sunriseTime: 6.0,
+      sunriseTime: 8.0,
       sunsetTime: 18.0
     };
 

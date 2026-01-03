@@ -31,6 +31,7 @@ import { WaterEffectV2 } from '../effects/WaterEffectV2.js';
 import { MaskDebugEffect } from '../effects/MaskDebugEffect.js';
 import { DebugLayerEffect } from '../effects/DebugLayerEffect.js';
 import { PlayerLightEffect } from '../effects/PlayerLightEffect.js';
+import { CandleFlamesEffect } from '../effects/CandleFlamesEffect.js';
 import { MaskManager } from '../masks/MaskManager.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { FireSparksEffect } from '../particles/FireSparksEffect.js';
@@ -148,6 +149,8 @@ let lightingEffect = null;
 
 /** @type {LightningEffect|null} */
 let lightningEffect = null;
+
+let candleFlamesEffect = null;
 
 /** @type {WorldSpaceFogEffect|null} */
 let fogEffect = null;
@@ -593,6 +596,7 @@ function onCanvasTearDown(canvas) {
     window.MapShine.doorMeshManager = null;
     window.MapShine.fogEffect = null;
     window.MapShine.lightingEffect = null;
+    window.MapShine.candleFlamesEffect = null;
     window.MapShine.renderLoop = null;
     window.MapShine.cameraFollower = null;
     window.MapShine.pixiInputBridge = null;
@@ -605,6 +609,7 @@ function onCanvasTearDown(canvas) {
     window.MapShine.cloudEffect = null;
     // Keep renderer and capabilities - they're reusable
   }
+  candleFlamesEffect = null;
 }
 
 /**
@@ -980,6 +985,11 @@ async function createThreeCanvas(scene) {
 
     if (window.MapShine) window.MapShine.lightingEffect = lightingEffect;
 
+    candleFlamesEffect = new CandleFlamesEffect();
+    candleFlamesEffect.setLightingEffect(lightingEffect);
+    await effectComposer.registerEffect(candleFlamesEffect);
+    if (window.MapShine) window.MapShine.candleFlamesEffect = candleFlamesEffect;
+
     // Step 3.6.25: Register Animated Bushes (surface overlay, before shadows)
     const bushEffect = new BushEffect();
     await effectComposer.registerEffect(bushEffect);
@@ -1144,6 +1154,11 @@ async function createThreeCanvas(scene) {
     if (lightningEffect) {
       lightningEffect.setMapPointsSources(mapPointsManager);
       log.info('Map points wired to lightning effect');
+    }
+
+    if (candleFlamesEffect) {
+      candleFlamesEffect.setMapPointsSources(mapPointsManager);
+      log.info('Map points wired to candle flames effect');
     }
 
     // Step 5: Initialize interaction manager (Selection, Drag/Drop)
@@ -1711,6 +1726,26 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       lensflareSchema,
       onLensflareUpdate,
       'global'
+    );
+  }
+
+  const candleFlamesEffect = window.MapShine?.candleFlamesEffect;
+  if (candleFlamesEffect) {
+    const candleSchema = CandleFlamesEffect.getControlSchema();
+    const onCandleUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        candleFlamesEffect.applyParamChange('enabled', !!value);
+      } else {
+        candleFlamesEffect.applyParamChange(paramId, value);
+      }
+    };
+
+    uiManager.registerEffect(
+      'candle-flames',
+      'Candle Flames',
+      candleSchema,
+      onCandleUpdate,
+      'particle'
     );
   }
 
@@ -2628,6 +2663,8 @@ function destroyThreeCanvas() {
   fogEffect = null;
 
   lightningEffect = null;
+
+  candleFlamesEffect = null;
 
   // Dispose scene composer
   if (sceneComposer) {

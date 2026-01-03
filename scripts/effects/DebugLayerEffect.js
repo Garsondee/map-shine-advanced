@@ -18,7 +18,7 @@ export class DebugLayerEffect extends EffectBase {
       showCollisionPoint: true,
       onlyWhenTokenControlled: true,
       onlyForOwnedTokens: true,
-      maxDistanceUnits: 30
+      maxDistanceUnits: 9
     };
 
     this.scene = null;

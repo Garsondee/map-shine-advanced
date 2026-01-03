@@ -59,14 +59,15 @@ export class FogEffect extends EffectBase {
           name: 'fog',
           label: 'Fog of War',
           type: 'inline',
-          parameters: ['unexploredColor', 'exploredColor', 'exploredOpacity']
+          parameters: ['unexploredColor', 'exploredColor', 'exploredOpacity', 'softness']
         }
       ],
       parameters: {
         enabled: { type: 'boolean', default: true },
         unexploredColor: { type: 'color', default: '#000000', label: 'Unexplored' },
         exploredColor: { type: 'color', default: '#000000', label: 'Explored Tint' },
-        exploredOpacity: { type: 'slider', min: 0, max: 1, step: 0.05, default: 0.5, label: 'Explored Opacity' }
+        exploredOpacity: { type: 'slider', min: 0, max: 1, step: 0.05, default: 0.5, label: 'Explored Opacity' },
+        softness: { type: 'slider', min: 0, max: 10, step: 0.1, default: 2.0, label: 'Softness' }
       }
     };
   }

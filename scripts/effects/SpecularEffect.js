@@ -49,7 +49,7 @@ export class SpecularEffect extends EffectBase {
     this.params = {
       // Status
       textureStatus: 'Searching...',
-      hasSpecularMask: false,
+      hasSpecularMask: true,
 
       intensity: 0.5,           // Default shine intensity
       roughness: 0.0,
@@ -65,11 +65,11 @@ export class SpecularEffect extends EffectBase {
       // Layer 1 - Primary stripes
       stripe1Enabled: true,
       stripe1Frequency: 11.0,
-      stripe1Speed: -0.01,
+      stripe1Speed: 0,
       stripe1Angle: 115.0,
       stripe1Width: 0.21,
       stripe1Intensity: 5.0,
-      stripe1Parallax: 0.0,     // Parallax offset (0 = no parallax)
+      stripe1Parallax: 0.2,     // Parallax offset (0 = no parallax)
       stripe1Wave: 1.7,         // Stripe waviness amount
       stripe1Gaps: 0.31,        // Stripe breakup / shiny spots
       stripe1Softness: 2.14,    // Stripe edge softness (0=hard,5=very soft)
@@ -77,7 +77,7 @@ export class SpecularEffect extends EffectBase {
       // Layer 2 - Secondary stripes
       stripe2Enabled: true,
       stripe2Frequency: 15.5,
-      stripe2Speed: -0.02,      // Negative = opposite direction
+      stripe2Speed: 0,      // Negative = opposite direction
       stripe2Angle: 111.0,
       stripe2Width: 0.38,
       stripe2Intensity: 5.0,
@@ -89,11 +89,11 @@ export class SpecularEffect extends EffectBase {
       // Layer 3 - Tertiary stripes
       stripe3Enabled: true,
       stripe3Frequency: 5.0,
-      stripe3Speed: 0.29,
+      stripe3Speed: 0,
       stripe3Angle: 162.0,
       stripe3Width: 0.09,
       stripe3Intensity: 5.0,
-      stripe3Parallax: 1.0,
+      stripe3Parallax: -0.1,
       stripe3Wave: 0.4,
       stripe3Gaps: 0.37,
       stripe3Softness: 3.44,
@@ -106,8 +106,8 @@ export class SpecularEffect extends EffectBase {
 
       // Outdoor Cloud Specular (cloud shadows drive specular intensity outdoors)
       outdoorCloudSpecularEnabled: true,
-      outdoorStripeBlend: 0.3,     // How much stripes show outdoors (0=none, 1=full)
-      cloudSpecularIntensity: 1.0  // Intensity of cloud-driven specular outdoors
+      outdoorStripeBlend: 0.8,     // How much stripes show outdoors (0=none, 1=full)
+      cloudSpecularIntensity: 3.0  // Intensity of cloud-driven specular outdoors
     };
 
     this._tempScreenSize = null;
@@ -205,7 +205,7 @@ export class SpecularEffect extends EffectBase {
       parameters: {
         hasSpecularMask: {
           type: 'boolean',
-          default: false
+          default: true
         },
         textureStatus: {
           type: 'string',
@@ -285,8 +285,8 @@ export class SpecularEffect extends EffectBase {
           label: 'Layer 1 Speed',
           min: -1,
           max: 1,
-          step: 0.01,
-          default: -0.01,
+          step: 0.001,
+          default: 0,
           throttle: 100
         },
         stripe1Angle: {
@@ -322,7 +322,7 @@ export class SpecularEffect extends EffectBase {
           min: -2,
           max: 2,
           step: 0.1,
-          default: 0.0,
+          default: 0.2,
           throttle: 100
         },
         stripe1Wave: {
@@ -371,8 +371,8 @@ export class SpecularEffect extends EffectBase {
           label: 'Layer 2 Speed',
           min: -1,
           max: 1,
-          step: 0.01,
-          default: -0.02,
+          step: 0.001,
+          default: 0,
           throttle: 100
         },
         stripe2Angle: {
@@ -457,8 +457,8 @@ export class SpecularEffect extends EffectBase {
           label: 'Layer 3 Speed',
           min: -1,
           max: 1,
-          step: 0.01,
-          default: 0.29,
+          step: 0.001,
+          default: 0,
           throttle: 100
         },
         stripe3Angle: {
@@ -494,7 +494,7 @@ export class SpecularEffect extends EffectBase {
           min: -2,
           max: 2,
           step: 0.1,
-          default: 1.0,
+          default: -0.1,
           throttle: 100
         },
         stripe3Wave: {
@@ -568,7 +568,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.3,
+          default: 0.8,
           throttle: 100
         },
         cloudSpecularIntensity: {
@@ -577,7 +577,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 3,
           step: 0.01,
-          default: 1.0,
+          default: 3.0,
           throttle: 100
         }
       }
@@ -1482,6 +1482,15 @@ export class SpecularEffect extends EffectBase {
         float gaps,
         float softness
       ) {
+        // If speed is 0, freeze all time-based animation for this layer.
+        // (Demands like "set all speeds to 0" should result in a static pattern.)
+        float timeAnim = (abs(speed) > 0.000001) ? time : 0.0;
+
+        // Secondary animation (wave/pulse/gaps) used to run at a fixed rate regardless
+        // of speed, which made tiny speeds (e.g. 0.001) still look "fast".
+        // Treat speed=0.01 as "1x" so the existing defaults preserve the same feel.
+        float speedAnimScale = clamp(abs(speed) / 0.01, 0.0, 10.0);
+
         // Apply camera-based parallax offset
         // Parallax creates the illusion of depth by offsetting UV based on camera position
         // - parallaxDepth = 0: Layer moves with the map (no parallax)
@@ -1499,7 +1508,7 @@ export class SpecularEffect extends EffectBase {
 
         // Distort UVs for waviness
         if (wave > 0.0) {
-          float waveNoise = snoise(parallaxUv * 2.0 + time * 0.1);
+          float waveNoise = snoise(parallaxUv * 2.0 + timeAnim * (0.1 * speedAnimScale));
           parallaxUv += waveNoise * wave * 0.05;
         }
         
@@ -1513,7 +1522,7 @@ export class SpecularEffect extends EffectBase {
         );
         
         // Create scrolling stripes with time-based animation
-        float pos = rotUv.x * frequency + time * speed;
+        float pos = rotUv.x * frequency + timeAnim * speed;
         float stripe = fract(pos);
         
         // Map UI width (0-1) to an actual half-band size (0.02-0.48)
@@ -1540,12 +1549,12 @@ export class SpecularEffect extends EffectBase {
         float stripePattern = smoothstep(bandHalfWidth, innerRadius, d);
 
         // Subtle temporal pulse so stripes are not static
-        float pulse = 0.9 + 0.1 * sin(time * 0.7 + frequency * 1.23);
+        float pulse = 0.9 + 0.1 * sin(timeAnim * (0.7 * speedAnimScale) + frequency * 1.23);
         stripePattern *= pulse;
 
         // Apply gaps to break stripes into shiny spots
         if (gaps > 0.0) {
-          float gapNoise = snoise(rotUv * 5.0 + time * 0.2);
+          float gapNoise = snoise(rotUv * 5.0 + timeAnim * (0.2 * speedAnimScale));
           float normNoise = gapNoise * 0.5 + 0.5; // 0..1
           float gapMask = smoothstep(gaps, gaps + 0.2, normNoise);
           stripePattern *= gapMask;

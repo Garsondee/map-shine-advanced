@@ -31,7 +31,7 @@ export class ColorCorrectionEffect extends EffectBase {
     // See docs/CONTRAST-DARKNESS-ANALYSIS.md for rationale.
     this.params = {
       // 1. Input
-      exposure: 0.85,
+      exposure: 1.0,
       
       // 2. White Balance
       temperature: 0.0, // -1.0 (Blue) to 1.0 (Orange)
@@ -48,7 +48,7 @@ export class ColorCorrectionEffect extends EffectBase {
       liftColor: { r: 0, g: 0, b: 0 },
       gammaColor: { r: 0.5, g: 0.5, b: 0.5 },
       gainColor: { r: 1, g: 1, b: 1 },
-      masterGamma: 2.5,
+      masterGamma: 2.0,
       
       // 5. Tone Mapping
       toneMapping: 0,

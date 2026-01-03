@@ -344,6 +344,13 @@ export class TweakpaneManager {
     });
 
     globalFolder.addButton({
+      title: 'Copy Current Settings',
+      label: 'Debug'
+    }).on('click', async () => {
+      await this.copyCurrentSettingsToClipboard();
+    });
+
+    globalFolder.addButton({
       title: 'Dump Surface Report',
       label: 'Debug'
     }).on('click', () => {
@@ -1663,6 +1670,67 @@ export class TweakpaneManager {
       }
     } catch (error) {
       log.warn('Failed to copy non-default settings to clipboard, printing to console instead:', error);
+      console.log(dump);
+      ui.notifications.warn('Map Shine: Could not copy to clipboard. Dump printed to browser console.');
+    }
+  }
+
+  generateCurrentSettingsDump() {
+    const lines = [];
+
+    const scene = canvas?.scene;
+    const sceneName = scene?.name || 'Unknown Scene';
+    const sceneId = scene?.id || 'unknown-id';
+
+    lines.push('Map Shine Advanced - Current Effect Settings');
+    lines.push(`Scene: ${sceneName} (${sceneId})`);
+    lines.push(`Settings Mode: ${this.settingsMode}`);
+    lines.push(`User: ${game.user?.name || 'Unknown User'}`);
+    lines.push(`Timestamp: ${new Date().toISOString()}`);
+    lines.push('');
+
+    for (const [effectId, effectData] of Object.entries(this.effectFolders)) {
+      if (!effectData || !effectData.schema) continue;
+
+      const params = effectData.params || {};
+      const schemaParams = effectData.schema.parameters || {};
+
+      const effectLines = [];
+
+      // Effect enabled state (not necessarily present as a schema parameter)
+      const defaultEnabled = effectData.schema.enabled ?? true;
+      const currentEnabled = params.enabled ?? defaultEnabled;
+      effectLines.push(`enabled = ${JSON.stringify(currentEnabled)}`);
+
+      for (const [paramId, paramDef] of Object.entries(schemaParams)) {
+        if (paramId === 'enabled') continue;
+        const currentValue = params[paramId];
+        const formatted = this.formatParamValue(paramId, currentValue, paramDef);
+        effectLines.push(`${paramId} = ${formatted}`);
+      }
+
+      lines.push(`--- Effect: ${effectId} ---`);
+      for (const l of effectLines) {
+        lines.push(l);
+      }
+      lines.push('');
+    }
+
+    return lines.join('\n');
+  }
+
+  async copyCurrentSettingsToClipboard() {
+    const dump = this.generateCurrentSettingsDump();
+
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(dump);
+        ui.notifications.info('Map Shine: Current settings copied to clipboard');
+      } else {
+        throw new Error('Clipboard API not available');
+      }
+    } catch (error) {
+      log.warn('Failed to copy current settings to clipboard, printing to console instead:', error);
       console.log(dump);
       ui.notifications.warn('Map Shine: Could not copy to clipboard. Dump printed to browser console.');
     }
@@ -3231,6 +3299,37 @@ export class TweakpaneManager {
 
     const pointCount = group.points?.length || 0;
 
+    const h = canvas?.dimensions?.height;
+    const pointsListHtml = (pointCount > 0)
+      ? `
+        <div class="points-list" style="margin-top: 10px; max-height: 140px; overflow: auto;">
+          ${group.points.map((p, idx) => {
+            const x = Number(p?.x);
+            const yWorld = Number(p?.y);
+            const y = Number.isFinite(h) ? (h - yWorld) : yWorld;
+            const xTxt = Number.isFinite(x) ? x.toFixed(0) : '—';
+            const yTxt = Number.isFinite(y) ? y.toFixed(0) : '—';
+            return `
+              <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:4px 0; border-top: 1px solid rgba(255,255,255,0.06);">
+                <span style="font-size: 10px; color: #aaa;">#${idx + 1}: (${xTxt}, ${yTxt})</span>
+                <button type="button" class="remove-point-btn" data-point-index="${idx}" style="
+                  padding: 2px 8px;
+                  font-size: 10px;
+                  background: rgba(180, 60, 60, 0.65);
+                  border: none;
+                  border-radius: 3px;
+                  color: #eee;
+                  cursor: pointer;
+                ">
+                  <i class="fas fa-times"></i>
+                </button>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `
+      : `<div style="margin-top: 10px; font-size: 10px; color: #666;">No points yet.</div>`;
+
     const content = `
       <form class="group-edit-form">
         <div class="form-group">
@@ -3428,7 +3527,9 @@ export class TweakpaneManager {
         // Focus on group
         const bounds = mapPointsManager.getAreaBounds(groupId) || mapPointsManager._computeBounds(group.points);
         if (bounds) {
-          canvas.pan({ x: bounds.centerX, y: bounds.centerY });
+          const worldY = bounds.centerY;
+          const foundryY = Number.isFinite(h) ? (h - worldY) : worldY;
+          canvas.pan({ x: bounds.centerX, y: foundryY });
         }
         mapPointsManager.setShowVisualHelpers(true);
       }

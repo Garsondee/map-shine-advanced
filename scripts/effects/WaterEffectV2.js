@@ -12,17 +12,17 @@ export class WaterEffectV2 extends EffectBase {
     this.alwaysRender = true;
 
     this.params = {
-      tintStrength: 0.37,
-      tintColor: { r: 0.0, g: 0.0, b: 0.0 },
+      tintStrength: 0.15,
+      tintColor: { r: 0.1, g: 0.3, b: 0.48 },
 
       waveScale: 25.0,
       waveSpeed: 0.94,
-      waveStrength: 0.38,
-      distortionStrengthPx: 25.28,
+      waveStrength: 0.31,
+      distortionStrengthPx: 5.8,
 
       waveDirOffsetDeg: 0.0,
       advectionDirOffsetDeg: -180.0,
-      advectionSpeed: 2.14,
+      advectionSpeed: 0.41,
       windDirResponsiveness: 10.0,
       useTargetWindDirection: true,
 

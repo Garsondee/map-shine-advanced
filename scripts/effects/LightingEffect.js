@@ -32,21 +32,21 @@ export class LightingEffect extends EffectBase {
     // See docs/CONTRAST-DARKNESS-ANALYSIS.md for rationale.
     this.params = {
       enabled: true,
-      globalIllumination: 1.0, // Multiplier for ambient
-      lightIntensity: 0.8, // Master multiplier for dynamic lights
-      colorationStrength: 1.35,
-      darknessEffect: 0.5, // Scales Foundry's darknessLevel
+      globalIllumination: 2.0, // Multiplier for ambient
+      lightIntensity: 0.5, // Master multiplier for dynamic lights
+      colorationStrength: 3.0,
+      darknessEffect: 0.65, // Scales Foundry's darknessLevel
       darknessLevel: 0.0, // Read-only mostly, synced from canvas
 
       // Outdoor brightness control: adjusts outdoor areas relative to darkness level
       // At darkness 0: outdoors *= outdoorBrightness (boost daylight)
       // At darkness 1: outdoors *= (2.0 - outdoorBrightness) (dim night)
-      outdoorBrightness: 1.5, // 1.0 = no change, 2.0 = double brightness at day
+      outdoorBrightness: 1.0, // 1.0 = no change, 2.0 = double brightness at day
 
       wallInsetPx: 6.0,
 
-      debugShowLightBuffer: false,
-      debugLightBufferExposure: 1.0,
+      debugShowLightBuffer: undefined,
+      debugLightBufferExposure: undefined,
     };
 
     this.lights = new Map(); 
@@ -103,12 +103,12 @@ export class LightingEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.5 },
-        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.8, label: 'Light Intensity' },
-        colorationStrength: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.35, label: 'Coloration Strength' },
-        wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
-        darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Darkness Effect' },
-        outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 2.0, label: 'Outdoor Brightness' },
+        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.2 },
+        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 1.0, label: 'Light Intensity' },
+        colorationStrength: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.5, label: 'Coloration Strength' },
+        wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 8.0, label: 'Wall Inset (px)' },
+        darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.6, label: 'Darkness Effect' },
+        outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.8, label: 'Outdoor Brightness' },
         debugShowLightBuffer: { type: 'boolean', default: false },
         debugLightBufferExposure: { type: 'number', default: 1.0 },
       }
@@ -335,7 +335,19 @@ export class LightingEffect extends EffectBase {
 
           // 7. Blend Cloud Tops over the scene (zoom-dependent white overlay)
           vec4 cloudTop = texture2D(tCloudTop, vUv);
-          litColor = mix(litColor, cloudTop.rgb, cloudTop.a);
+          vec3 cloudRgb = cloudTop.rgb;
+          float cloudDark = mix(1.0, 0.25, clamp(uDarknessLevel, 0.0, 1.0));
+          if (uHasOutdoorsMask > 0.5) {
+            float outdoorStrength2 = texture2D(tOutdoorsMask, vUv).r;
+            float dayBoost2 = uOutdoorBrightness;
+            float nightDim2 = 2.0 - uOutdoorBrightness;
+            float outdoorMultiplier2 = mix(dayBoost2, nightDim2, uDarknessLevel);
+            float cloudOutdoorMult = mix(1.0, outdoorMultiplier2, outdoorStrength2);
+            cloudRgb *= cloudOutdoorMult;
+          }
+          cloudRgb *= cloudDark;
+          cloudRgb *= (1.0 - dMask);
+          litColor = mix(litColor, cloudRgb, cloudTop.a);
 
           gl_FragColor = vec4(litColor, baseColor.a);
         }

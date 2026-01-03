@@ -54,38 +54,38 @@ export class WindowLightEffect extends EffectBase {
     this.params = {
       // Status
       textureStatus: 'Searching...',
-      hasWindowMask: false,
+      hasWindowMask: undefined,
 
       // Core light controls
-      intensity: 10.0,
+      intensity: 0.7,
       color: { r: 1.0, g: 0.96, b: 0.85 }, // Warm window light
       
       // Mask shaping (Gamma/Gain model)
-      falloff: 2.2, // Gamma power for falloff shaping
+      falloff: 3.6, // Gamma power for falloff shaping
 
       // Environment
-      cloudInfluence: 0.8,     // How much clouds dim the light (0-1)
-      nightDimming: 0.8,       // How much night dims the light (0-1)
+      cloudInfluence: 1.0,     // How much clouds dim the light (0-1)
+      nightDimming: 1.0,       // How much night dims the light (0-1)
 
       useSkyTint: true,
-      skyTintStrength: 1.0,
+      skyTintStrength: 2.26,
 
       // Cloud shadow shaping (applied to cloudShadowRaw.screen before influence/cover mix)
-      cloudShadowContrast: 1.2,
-      cloudShadowBias: 0.0,
-      cloudShadowGamma: 1.0,
+      cloudShadowContrast: 4.0,
+      cloudShadowBias: 0.05,
+      cloudShadowGamma: 2.28,
       cloudShadowMinLight: 0.0,
 
       // Specular coupling
-      specularBoost: 3.0,
+      specularBoost: 5.0,
 
       // RGB Split (Refraction)
-      rgbShiftAmount: 5.0,  // pixels
-      rgbShiftAngle: 158.0, // degrees
+      rgbShiftAmount: 2.9,  // pixels
+      rgbShiftAngle: 76.0, // degrees
 
       // Overhead tile lighting
       lightOverheadTiles: true,
-      overheadLightIntensity: 0.2
+      overheadLightIntensity: 1.0
     };
   }
 
@@ -172,7 +172,7 @@ export class WindowLightEffect extends EffectBase {
       parameters: {
         hasWindowMask: {
           type: 'boolean',
-          default: false,
+          default: true,
           hidden: true
         },
         textureStatus: {
@@ -187,7 +187,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 25.0,
           step: 0.1,
-          default: 10.0
+          default: 15.0
         },
         falloff: {
           type: 'slider',
@@ -195,7 +195,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.1,
           max: 5.0,
           step: 0.1,
-          default: 2.2
+          default: 3.6
         },
         color: {
           type: 'color',
@@ -208,7 +208,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.8
+          default: 1.0
         },
         nightDimming: {
           type: 'slider',
@@ -216,7 +216,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.8
+          default: 1.0
         },
         useSkyTint: {
           type: 'boolean',
@@ -229,7 +229,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 25.0,
           step: 0.01,
-          default: 1.0
+          default: 2.26
         },
         cloudShadowContrast: {
           type: 'slider',
@@ -237,7 +237,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 4.0,
           step: 0.01,
-          default: 1.2
+          default: 4.0
         },
         cloudShadowBias: {
           type: 'slider',
@@ -245,7 +245,7 @@ export class WindowLightEffect extends EffectBase {
           min: -1.0,
           max: 1.0,
           step: 0.01,
-          default: 0.0
+          default: 0.05
         },
         cloudShadowGamma: {
           type: 'slider',
@@ -253,7 +253,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.1,
           max: 4.0,
           step: 0.01,
-          default: 1.0
+          default: 2.28
         },
         cloudShadowMinLight: {
           type: 'slider',
@@ -269,7 +269,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 20.0,
           step: 0.1,
-          default: 5.0
+          default: 2.9
         },
         rgbShiftAngle: {
           type: 'slider',
@@ -277,7 +277,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 360.0,
           step: 1.0,
-          default: 158.0
+          default: 76.0
         },
         specularBoost: {
           type: 'slider',
@@ -285,7 +285,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 5.0,
           step: 0.1,
-          default: 3.0
+          default: 5.0
         },
         lightOverheadTiles: {
           type: 'boolean',
@@ -727,8 +727,8 @@ export class WindowLightEffect extends EffectBase {
       }
     } catch (e) {}
 
-    if (this.material) this.material.uniforms.uResolution.value.set(w, h);
-    if (this.lightMaterial) this.lightMaterial.uniforms.uResolution.value.set(w, h);
+    if (this.material?.uniforms?.uResolution?.value) this.material.uniforms.uResolution.value.set(w, h);
+    if (this.lightMaterial?.uniforms?.uResolution?.value) this.lightMaterial.uniforms.uResolution.value.set(w, h);
     if (this.lightTarget) this.lightTarget.setSize(w, h);
   }
 
@@ -759,6 +759,7 @@ export class WindowLightEffect extends EffectBase {
 
     this.lightMaterial = new THREE.ShaderMaterial({
       uniforms: {
+        uResolution: { value: new THREE.Vector2(width, height) },
         uWindowMask: { value: this.windowMask },
         uOutdoorsMask: { value: this.outdoorsMask },
         uWindowTexelSize: {

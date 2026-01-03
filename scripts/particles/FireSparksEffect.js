@@ -183,6 +183,15 @@ class FireMaskShape {
     if (outdoorFactor > 1) outdoorFactor = 1;
     p._windSusceptibility = outdoorFactor;
 
+    {
+      const params = this.ownerEffect && this.ownerEffect.params ? this.ownerEffect.params : null;
+      const indoorTimeScale = params && typeof params.indoorTimeScale === 'number'
+        ? params.indoorTimeScale
+        : 0.6;
+      const clampedIndoor = Math.max(0.05, Math.min(1.0, indoorTimeScale));
+      p._msTimeScaleFactor = clampedIndoor + (1.0 - clampedIndoor) * outdoorFactor;
+    }
+
     // Indoor vs Outdoor behavior tweak:
     // - outdoorFactor ~= 1.0  -> fully exposed fire (legacy behavior)
     // - outdoorFactor ~= 0.0  -> fully indoors (under solid roof)
@@ -324,6 +333,9 @@ class FireSpinBehavior {
     let dt = delta;
     if (!Number.isFinite(dt)) return;
     dt = Math.min(Math.max(dt, 0), 0.1);
+    if (typeof particle._msTimeScaleFactor === 'number' && Number.isFinite(particle._msTimeScaleFactor)) {
+      dt *= Math.max(0.0, particle._msTimeScaleFactor);
+    }
     if (dt <= 0.0001) return;
 
     // If speed is 0 or undefined, do nothing
@@ -349,6 +361,58 @@ class FireSpinBehavior {
 
   clone() {
     return new FireSpinBehavior();
+  }
+}
+
+class ParticleTimeScaledBehavior {
+  constructor(inner) {
+    this.type = 'ParticleTimeScaled';
+    this.inner = inner;
+  }
+
+  initialize(particle, system) {
+    if (this.inner && typeof this.inner.initialize === 'function') {
+      this.inner.initialize(particle, system);
+    }
+  }
+
+  update(particle, delta, system) {
+    if (!this.inner || typeof delta !== 'number') return;
+
+    let dt = delta;
+    if (!Number.isFinite(dt)) return;
+    dt = Math.min(Math.max(dt, 0), 0.1);
+
+    if (particle && typeof particle._msTimeScaleFactor === 'number' && Number.isFinite(particle._msTimeScaleFactor)) {
+      dt *= Math.max(0.0, particle._msTimeScaleFactor);
+    }
+
+    if (dt <= 0.0001) return;
+
+    if (typeof this.inner.update === 'function') {
+      if (this.inner.update.length >= 3) {
+        this.inner.update(particle, dt, system);
+      } else {
+        this.inner.update(particle, dt);
+      }
+    }
+  }
+
+  frameUpdate(delta) {
+    if (this.inner && typeof this.inner.frameUpdate === 'function') {
+      this.inner.frameUpdate(delta);
+    }
+  }
+
+  reset() {
+    if (this.inner && typeof this.inner.reset === 'function') {
+      this.inner.reset();
+    }
+  }
+
+  clone() {
+    const innerClone = this.inner && typeof this.inner.clone === 'function' ? this.inner.clone() : this.inner;
+    return new ParticleTimeScaledBehavior(innerClone);
   }
 }
 
@@ -458,6 +522,8 @@ export class FireSparksEffect extends EffectBase {
       // <1.0 = indoor flames are shorter-lived (tighter, less buoyant).
       // This is applied in FireMaskShape.initialize when outdoorFactor ~ 0.
       indoorLifeScale: 0.75,
+
+      indoorTimeScale: 0.6,
 
       // ========== FLAME SHAPE ATLAS CONTROLS ==========
       // Global flame shape parameters (affect all animation frames)
@@ -747,7 +813,7 @@ export class FireSparksEffect extends EffectBase {
         { name: 'embers-shape', label: 'Embers - Shape', type: 'inline', parameters: ['emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax'] },
         { name: 'embers-look', label: 'Embers - Look', type: 'inline', parameters: ['emberOpacityMin', 'emberOpacityMax', 'emberColorBoostMin', 'emberColorBoostMax', 'emberStartColor', 'emberEndColor'] },
         { name: 'embers-physics', label: 'Embers - Physics', type: 'inline', parameters: ['emberUpdraft', 'emberCurlStrength'] },
-        { name: 'env', label: 'Environment', type: 'inline', parameters: ['windInfluence', 'lightIntensity', 'timeScale', 'indoorLifeScale', 'weatherPrecipKill', 'weatherWindKill'] },
+        { name: 'env', label: 'Environment', type: 'inline', parameters: ['windInfluence', 'lightIntensity', 'timeScale', 'indoorLifeScale', 'indoorTimeScale', 'weatherPrecipKill', 'weatherWindKill'] },
         { name: 'heat-distortion', label: 'Heat Distortion', type: 'inline', parameters: ['heatDistortionEnabled', 'heatDistortionIntensity', 'heatDistortionFrequency', 'heatDistortionSpeed'] }
       ],
       parameters: {
@@ -811,6 +877,8 @@ export class FireSparksEffect extends EffectBase {
         // Indoor vs outdoor lifetime scaling (applied only when particles are fully indoors)
         indoorLifeScale: { type: 'slider', label: 'Indoor Life Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.75 },
 
+        indoorTimeScale: { type: 'slider', label: 'Indoor Time Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.6 },
+
         // Weather guttering strength (spawn-time kill) for outdoor flames
         weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 1.55 },
         weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 1.15 },
@@ -865,43 +933,38 @@ export class FireSparksEffect extends EffectBase {
       this.fires.splice(i, 1);
     }
 
-    // Get all point groups targeting 'fire' or 'candleFlame'
+    // Map points integration: only the 'fire' effect target should drive the
+    // heavy particle-based flames. Candle flames are handled by CandleFlamesEffect.
     const fireGroups = mapPointsManager.getGroupsByEffect('fire');
-    const candleGroups = mapPointsManager.getGroupsByEffect('candleFlame');
     
-    const allGroups = [...fireGroups, ...candleGroups];
-    
-    if (allGroups.length === 0) {
+    if (fireGroups.length === 0) {
       log.debug('No map point fire sources found');
       return;
     }
 
     const BUCKET_SIZE = 2000;
     const fireBuckets = new Map();
-    const candleBuckets = new Map();
     
     const d = canvas?.dimensions;
-    const worldHeight = d?.height || 1000;
 
-    for (const group of allGroups) {
+    for (const group of fireGroups) {
       if (!group.points || group.points.length === 0) continue;
       
-      const isCandle = group.effectTarget === 'candleFlame';
       const intensity = group.emission?.intensity ?? 1.0;
-      const targetBuckets = isCandle ? candleBuckets : fireBuckets;
-      
+
       for (const point of group.points) {
-        // Convert to world coordinates (Foundry Y is inverted)
-        const worldX = point.x;
-        const worldY = worldHeight - point.y;
+        const worldX = point?.x;
+        const worldY = point?.y;
+
+        if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) continue;
         
         const bx = Math.floor(worldX / BUCKET_SIZE);
         const by = Math.floor(worldY / BUCKET_SIZE);
         const key = `${bx},${by}`;
-        let arr = targetBuckets.get(key);
+        let arr = fireBuckets.get(key);
         if (!arr) {
           arr = [];
-          targetBuckets.set(key, arr);
+          fireBuckets.set(key, arr);
         }
         arr.push(worldX, worldY, intensity);
       }
@@ -909,7 +972,6 @@ export class FireSparksEffect extends EffectBase {
 
     let totalPoints = 0;
     fireBuckets.forEach((arr) => { totalPoints += arr.length / 3; });
-    candleBuckets.forEach((arr) => { totalPoints += arr.length / 3; });
     log.info(`Aggregating ${totalPoints} map points into combined fire systems`);
 
     if (fireBuckets.size > 0) {
@@ -931,6 +993,11 @@ export class FireSparksEffect extends EffectBase {
           size: this.params.fireSize,
           height: this.params.fireHeight
         });
+
+        if (fireSystem && fireSystem.userData) {
+          fireSystem.userData._msEmissionScale = pointCount;
+          fireSystem.userData._msHeightSource = 'global';
+        }
 
         batch.addSystem(fireSystem);
         this.scene.add(fireSystem.emitter);
@@ -954,6 +1021,11 @@ export class FireSparksEffect extends EffectBase {
           height: this.params.fireHeight
         });
 
+        if (emberSystem && emberSystem.userData) {
+          emberSystem.userData._msEmissionScale = pointCount;
+          emberSystem.userData._msHeightSource = 'global';
+        }
+
         batch.addSystem(emberSystem);
         this.scene.add(emberSystem.emitter);
 
@@ -968,39 +1040,6 @@ export class FireSparksEffect extends EffectBase {
       });
     }
 
-    if (candleBuckets.size > 0) {
-      candleBuckets.forEach((arr, key) => {
-        if (!arr || arr.length < 3) return;
-        const pointsArray = new Float32Array(arr);
-        const shape = new MultiPointEmitterShape(pointsArray, this);
-        const pointCount = arr.length / 3;
-
-        const scale = 0.3;
-        const baseRate = this.params.globalFireRate ?? 4.0;
-        const rate = new IntervalValue(
-          baseRate * pointCount * 0.3 * scale,
-          baseRate * pointCount * 0.6 * scale
-        );
-
-        const candleSystem = this._createFireSystem({
-          shape,
-          rate,
-          size: this.params.fireSize * scale,
-          height: this.params.fireHeight * scale
-        });
-
-        batch.addSystem(candleSystem);
-        this.scene.add(candleSystem.emitter);
-
-        this.fires.push({
-          id: `mappoints_candle_${key}`,
-          system: candleSystem,
-          position: { x: 0, y: 0 },
-          isCandle: true,
-          pointCount
-        });
-      });
-    }
   }
 
   setAssetBundle(bundle) {
@@ -1119,6 +1158,8 @@ export class FireSparksEffect extends EffectBase {
         if (fireSystem && fireSystem.userData) {
           fireSystem.userData._msMaskWeight = weight;
           fireSystem.userData._msMaskKey = key;
+          fireSystem.userData._msEmissionScale = weight;
+          fireSystem.userData._msHeightSource = 'global';
         }
         batch.addSystem(fireSystem);
         if (this.scene) this.scene.add(fireSystem.emitter);
@@ -1136,6 +1177,8 @@ export class FireSparksEffect extends EffectBase {
           emberSystem.userData._msMaskWeight = weight;
           emberSystem.userData._msMaskKey = key;
           emberSystem.userData.isEmber = true;
+          emberSystem.userData._msEmissionScale = weight;
+          emberSystem.userData._msHeightSource = 'global';
         }
         batch.addSystem(emberSystem);
         if (this.scene) this.scene.add(emberSystem.emitter);
@@ -1449,9 +1492,9 @@ export class FireSparksEffect extends EffectBase {
       behaviors: [
           colorOverLife,
           sizeOverLife,
-          buoyancy,
+          new ParticleTimeScaledBehavior(buoyancy),
           windForce,
-          turbulence,
+          new ParticleTimeScaledBehavior(turbulence),
           new FireSpinBehavior(),
           
           // CHANGE: Animate from frame 0 to 63 over the particle's life.
@@ -1467,9 +1510,11 @@ export class FireSparksEffect extends EffectBase {
       windForce,
       ownerEffect: this,
       updraftForce: buoyancy,
-      baseUpdraftMag: height * 2.5,
+      baseUpdraftMag: height * 0.125,
       turbulence,
-      baseCurlStrength: fireCurlStrengthBase.clone()
+      baseCurlStrength: fireCurlStrengthBase.clone(),
+      _msEmissionScale: 1.0,
+      _msHeight: height
     };
 
     if (system.emitter) {
@@ -1519,6 +1564,14 @@ export class FireSparksEffect extends EffectBase {
     const emberCurlScale = new THREE.Vector3(30, 30, 30);
     const emberCurlStrengthBase = new THREE.Vector3(150, 150, 50);
 
+    const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(height * 0.4));
+    const windForce = new SmartWindBehavior();
+    const turbulence = new CurlNoiseField(
+      emberCurlScale,
+      emberCurlStrengthBase.clone(),
+      4.0
+    );
+
     const system = new ParticleSystem({
       duration: 1,
       looping: true,
@@ -1549,13 +1602,9 @@ export class FireSparksEffect extends EffectBase {
       behaviors: [
         // Updraft: likewise reduce the base magnitude so emberUpdraft stays in a sensible range
         // after the camera height/scale change.
-        new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(height * 0.4)),
-        new SmartWindBehavior(),
-        new CurlNoiseField(
-          emberCurlScale,
-          emberCurlStrengthBase.clone(),
-          4.0
-        ),
+        new ParticleTimeScaledBehavior(buoyancy),
+        windForce,
+        new ParticleTimeScaledBehavior(turbulence),
         new SizeOverLife(new PiecewiseBezier([[new Bezier(1, 0.9, 0.5, 0), 0]]))
       ]
     });
@@ -1564,13 +1613,15 @@ export class FireSparksEffect extends EffectBase {
     this._patchRoofMaskMaterial(material);
 
     system.userData = {
-      windForce: system.behaviors.find(b => b instanceof SmartWindBehavior),
-      updraftForce: system.behaviors.find(b => b instanceof ApplyForce && b.direction.z === 1),
+      windForce,
+      updraftForce: buoyancy,
       baseUpdraftMag: height * 0.4,
-      turbulence: system.behaviors.find(b => b instanceof CurlNoiseField),
+      turbulence,
       baseCurlStrength: emberCurlStrengthBase.clone(),
       isEmber: true,
-      ownerEffect: this
+      ownerEffect: this,
+      _msEmissionScale: 1.0,
+      _msHeight: height
     };
 
     if (system.emitter) {
@@ -1762,6 +1813,11 @@ export class FireSparksEffect extends EffectBase {
         size: radius * 0.8,
         height: height * 50.0
      });
+
+     if (system && system.userData) {
+       system.userData._msEmissionScale = intensity;
+       system.userData._msHeightSource = 'manual';
+     }
      // Position emitter at ground plane level
      system.emitter.position.set(x, y, groundZ);
      this.particleSystemRef.batchRenderer.addSystem(system);
@@ -1908,32 +1964,10 @@ export class FireSparksEffect extends EffectBase {
       }
     }
 
-    // 2. Update Global Fire Rate
+    // 2. Update emission/physics scaling
     // Scale by timeScale AND Temperature (Hotter = slightly faster burn)
     const timeScale = Math.max(0.1, p?.timeScale ?? 1.0);
     const effectiveTimeScale = timeScale * (0.8 + 0.4 * temp);
-
-    if (this.globalSystem) {
-      const baseRate = 200.0 * p.globalFireRate * effectiveTimeScale;
-      const emission = this.globalSystem.emissionOverTime;
-      if (emission && typeof emission.a === 'number') {
-        emission.a = baseRate * 0.8;
-        emission.b = baseRate * 1.2;
-      }
-    }
-    if (this.globalSystems && this.globalSystems.length) {
-      const baseRate = 200.0 * p.globalFireRate * effectiveTimeScale;
-      for (const sys of this.globalSystems) {
-        if (!sys) continue;
-        const weight = (sys.userData && typeof sys.userData._msMaskWeight === 'number') ? sys.userData._msMaskWeight : 1.0;
-        const emission = sys.emissionOverTime;
-        if (emission && typeof emission.a === 'number') {
-          const r = baseRate * weight;
-          emission.a = r * 0.8;
-          emission.b = r * 1.2;
-        }
-      }
-    }
 
     // 3. Environment & Bounds Logic
     const influence = (p && typeof p.windInfluence === 'number')
@@ -2021,6 +2055,29 @@ export class FireSparksEffect extends EffectBase {
 
       const isEmber = !!(sys.userData && sys.userData.isEmber);
 
+      // Emission rate
+      // Use a unified model where each system has an emission scale representing:
+      // - mask systems: bucket weight
+      // - map-point systems: pointCount
+      // - manual fires: intensity
+      const emissionScale = (sys.userData && Number.isFinite(sys.userData._msEmissionScale))
+        ? sys.userData._msEmissionScale
+        : 1.0;
+      const baseRate = 200.0 * (p2.globalFireRate ?? 0) * effectiveTimeScale;
+      if (sys.emissionOverTime && typeof sys.emissionOverTime.a === 'number') {
+        const r = baseRate * Math.max(0.0, emissionScale);
+        sys.emissionOverTime.a = r * 0.8;
+        sys.emissionOverTime.b = r * 1.2;
+      }
+
+      // Ember density is separate from fire density.
+      if (isEmber && sys.emissionOverTime && typeof sys.emissionOverTime.a === 'number') {
+        const emberBase = 40.0 * (p2.emberRate ?? 0) * effectiveTimeScale;
+        const r = emberBase * Math.max(0.0, emissionScale);
+        sys.emissionOverTime.a = r * 0.6;
+        sys.emissionOverTime.b = r * 1.0;
+      }
+
       // Wind Influence
       if (sys.userData) {
         const multiplier = isEmber ? 1.5 : 1.0;
@@ -2030,6 +2087,17 @@ export class FireSparksEffect extends EffectBase {
       // Apply Temperature Modifier to Physics (Updraft & Turbulence)
       const updraftParam = isEmber ? (p2.emberUpdraft ?? 1.0) : (p2.fireUpdraft ?? 1.0);
       const curlParam = isEmber ? (p2.emberCurlStrength ?? 1.0) : (p2.fireCurlStrength ?? 1.0);
+
+      // Height slider affects the baseline updraft magnitude for systems that follow
+      // global height. Manual fires keep their creation-time height.
+      if (sys.userData && sys.userData._msHeightSource === 'global') {
+        const h = Math.max(0.0, p2.fireHeight ?? 0);
+        if (isEmber) {
+          sys.userData.baseUpdraftMag = h * 0.4;
+        } else {
+          sys.userData.baseUpdraftMag = h * 0.125;
+        }
+      }
 
       if (sys.userData && sys.userData.updraftForce && typeof sys.userData.baseUpdraftMag === 'number') {
         const uf = sys.userData.updraftForce;
@@ -2076,6 +2144,13 @@ export class FireSparksEffect extends EffectBase {
           sys.startLife.a = lifeMin;
           sys.startLife.b = lifeMax;
         }
+
+        if (sys.startSize && typeof sys.startSize.a === 'number') {
+          const baseSizeMin = Math.max(0.1, p2.emberSizeMin ?? 1.0);
+          const baseSizeMax = Math.max(baseSizeMin, p2.emberSizeMax ?? baseSizeMin);
+          sys.startSize.a = baseSizeMin;
+          sys.startSize.b = baseSizeMax;
+        }
         if (sys.startColor && sys.startColor.a && sys.startColor.b) {
           sys.startColor.a.set(
             targetEmberStart.r * colorBoostMin,
@@ -2110,6 +2185,13 @@ export class FireSparksEffect extends EffectBase {
         if (sys.startLife && typeof sys.startLife.a === 'number') {
           sys.startLife.a = lifeMin;
           sys.startLife.b = lifeMax;
+        }
+
+        if (sys.startSize && typeof sys.startSize.a === 'number') {
+          const baseSizeMin = Math.max(0.1, p2.fireSizeMin ?? 1.0);
+          const baseSizeMax = Math.max(baseSizeMin, p2.fireSizeMax ?? baseSizeMin);
+          sys.startSize.a = baseSizeMin;
+          sys.startSize.b = baseSizeMax;
         }
         if (sys.startColor && sys.startColor.a && sys.startColor.b) {
           sys.startColor.a.set(

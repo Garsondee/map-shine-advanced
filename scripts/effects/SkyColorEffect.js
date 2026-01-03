@@ -20,7 +20,7 @@ export class SkyColorEffect extends EffectBase {
 
       // Master blend of sky grading vs base scene
       // Default 0.2 to provide subtle atmospheric grading - users can increase/decrease as desired
-      intensity: 0.2,
+      intensity: 1.0,
 
       // --- Time-of-day grading presets (blended by timeOfDay) ---
       // Note: These are applied only to outdoors (masked) and then blended by intensity.
@@ -44,7 +44,7 @@ export class SkyColorEffect extends EffectBase {
       dawnGrainStrength: 0.0,
 
       // Day
-      dayExposure: 0.0,
+      dayExposure: 0.5,
       dayTemperature: 0.0,
       dayTint: 0.0,
       dayBrightness: 0.0,
@@ -54,43 +54,43 @@ export class SkyColorEffect extends EffectBase {
       dayLiftColor: { r: 0.00, g: 0.00, b: 0.00 },
       dayGammaColor: { r: 0.50, g: 0.50, b: 0.50 },
       dayGainColor: { r: 1.00, g: 1.00, b: 1.00 },
-      dayMasterGamma: 1.00,
+      dayMasterGamma: 2.0,
       dayToneMapping: 0,
       dayVignetteStrength: 0.0,
       dayVignetteSoftness: 0.5,
       dayGrainStrength: 0.0,
 
       // Dusk
-      duskExposure: -0.10,
-      duskTemperature: 0.30,
+      duskExposure: 0.7,
+      duskTemperature: 1.0,
       duskTint: 0.05,
-      duskBrightness: 0.0,
-      duskContrast: 1.12,
-      duskSaturation: 1.18,
+      duskBrightness: -0.05,
+      duskContrast: 0.9,
+      duskSaturation: 1.15,
       duskVibrance: 0.15,
       duskLiftColor: { r: 0.00, g: 0.00, b: 0.00 },
       duskGammaColor: { r: 0.54, g: 0.52, b: 0.50 },
       duskGainColor: { r: 1.08, g: 1.02, b: 0.95 },
       duskMasterGamma: 1.00,
       duskToneMapping: 0,
-      duskVignetteStrength: 0.0,
-      duskVignetteSoftness: 0.5,
+      duskVignetteStrength: 0.72,
+      duskVignetteSoftness: 1.0,
       duskGrainStrength: 0.0,
 
       // Night
-      nightExposure: 1.00,
-      nightTemperature: -1.00,
-      nightTint: -0.25,
-      nightBrightness: 0.05,
+      nightExposure: 0.0,
+      nightTemperature: -0.5,
+      nightTint: 0.0,
+      nightBrightness: 0.0,
       nightContrast: 1.00,
-      nightSaturation: 0.50,
-      nightVibrance: 0.00,
+      nightSaturation: 0.33,
+      nightVibrance: -0.58,
       nightLiftColor: { r: 0.00, g: 0.00, b: 0.00 },
       nightGammaColor: { r: 1.00, g: 1.00, b: 1.00 },
       nightGainColor: { r: 1.00, g: 1.00, b: 1.00 },
-      nightMasterGamma: 0.50,
+      nightMasterGamma: 1.0,
       nightToneMapping: 0,
-      nightVignetteStrength: 1.00,
+      nightVignetteStrength: 0.25,
       nightVignetteSoftness: 1.00,
       nightGrainStrength: 0.0,
 
@@ -270,7 +270,7 @@ export class SkyColorEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.2,
+          default: 0.3,
           label: 'Intensity',
           throttle: 50
         },
@@ -428,7 +428,7 @@ export class SkyColorEffect extends EffectBase {
             cloudTopAlpha = texture2D(tCloudTop, vUv).a;
           }
 
-          float gradeMask = outdoors * (1.0 - cloudTopAlpha);
+          float gradeMask = outdoors;
 
           if (uIntensity <= 0.0 || gradeMask <= 0.0) {
             gl_FragColor = sceneColor;

@@ -41,6 +41,9 @@ export class CloudEffect extends EffectBase {
     this.cloudDensityTarget = null;
 
     /** @type {THREE.WebGLRenderTarget|null} */
+    this.cloudShadowDensityTarget = null;
+
+    /** @type {THREE.WebGLRenderTarget|null} */
     this.cloudShadowTarget = null;
 
     /** @type {THREE.WebGLRenderTarget|null} */
@@ -122,26 +125,35 @@ export class CloudEffect extends EffectBase {
       noiseScale: 0.5,        // Scale of noise pattern (higher = smaller clouds)
       noiseDetail: 4,         // Number of noise octaves (1-6)
       cloudSharpness: 0.0,    // Edge sharpness (0 = soft, 1 = hard)
-      noiseTimeSpeed: 0.01,
-      cloudBrightness: 0.99,   // Cloud top brightness
+      noiseTimeSpeed: 0.011,
+      cloudBrightness: 1.01,   // Cloud top brightness
 
       // Domain warping (wispy/swirly look)
       domainWarpEnabled: true,
       domainWarpStrength: 0.005,
       domainWarpScale: 1.05,
       domainWarpSpeed: 0.115,
-      domainWarpTimeOffsetY: 1.4,
+      domainWarpTimeOffsetY: 10,
 
       // Cloud top shading
       cloudTopShadingEnabled: true,
-      cloudTopShadingStrength: 2.0,
-      cloudTopNormalStrength: 0.99,
+      cloudTopShadingStrength: 0.99,
+      cloudTopNormalStrength: 0.96,
       cloudTopAOIntensity: 2.0,
-      cloudTopEdgeHighlight: 2.0,
+      cloudTopEdgeHighlight: 0,
+
+      cloudTopPeakDetailEnabled: false,
+      cloudTopPeakDetailStrength: 0.02,
+      cloudTopPeakDetailScale: 61.5,
+      cloudTopPeakDetailSpeed: 0.08,
+      cloudTopPeakDetailStart: 0.14,
+      cloudTopPeakDetailEnd: 0.82,
+
+      cloudTopSoftKnee: 2.6,
 
       // Shadow settings
-      shadowOpacity: 0.8,     // How dark cloud shadows are
-      shadowSoftness: 5.0,    // Blur amount for shadow edges
+      shadowOpacity: 1.0,     // How dark cloud shadows are
+      shadowSoftness: 1.0,    // Blur amount for shadow edges
       shadowOffsetScale: 0.3, // How far shadows offset based on sun angle
 
       // Cloud top visibility (zoom-dependent)
@@ -151,56 +163,57 @@ export class CloudEffect extends EffectBase {
       cloudTopFadeEnd: 0.39,   // Zoom level where cloud tops are fully visible
 
       // Wind drift
-      windInfluence: 1.0,     // How much wind affects cloud movement
-      driftSpeed: 0.02,       // Base drift speed multiplier
+      windInfluence: 1.5,     // How much wind affects cloud movement
+      driftSpeed: 0.01,       // Base drift speed multiplier
+      minDriftSpeed: 0.002,
 
-      driftResponsiveness: 2.5,
-      driftMaxSpeed: 0.05,
+      driftResponsiveness: 1.0,
+      driftMaxSpeed: 0.5,
 
       layerParallaxBase: 1.0,
 
       layer1Enabled: true,
-      layer1Opacity: 0.36,
-      layer1Coverage: 0.35,
-      layer1Scale: 0.85,
-      layer1ParallaxMult: 0.1,
-      layer1SpeedMult: 0.6,
+      layer1Opacity: 0.8,
+      layer1Coverage: 0.42,
+      layer1Scale: 1.34,
+      layer1ParallaxMult: 0,
+      layer1SpeedMult: 0.99,
       layer1DirDeg: -1.7,
 
       layer2Enabled: true,
-      layer2Opacity: 0.53,
-      layer2Coverage: 0.65,
-      layer2Scale: 0.95,
-      layer2ParallaxMult: 0.1,
-      layer2SpeedMult: 0.85,
+      layer2Opacity: 0.78,
+      layer2Coverage: 0.38,
+      layer2Scale: 1.22,
+      layer2ParallaxMult: 0,
+      layer2SpeedMult: 1.07,
       layer2DirDeg: -0.86,
 
       layer3Enabled: true,
-      layer3Opacity: 0.59,
-      layer3Coverage: 1.0,
-      layer3Scale: 1.0,
-      layer3ParallaxMult: 0.1,
-      layer3SpeedMult: 1.0,
+      layer3Opacity: 0.24,
+      layer3Coverage: 1.16,
+      layer3Scale: 3.0,
+      layer3ParallaxMult: 0,
+      layer3SpeedMult: 0.94,
       layer3DirDeg: 0.0,
 
       layer4Enabled: true,
-      layer4Opacity: 0.19,
-      layer4Coverage: 0.65,
-      layer4Scale: 3.0,
-      layer4ParallaxMult: 0.1,
-      layer4SpeedMult: 1.15,
+      layer4Opacity: 0.38,
+      layer4Coverage: 0.59,
+      layer4Scale: 1.72,
+      layer4ParallaxMult: 0,
+      layer4SpeedMult: 0.94,
       layer4DirDeg: 0.86,
 
       layer5Enabled: true,
-      layer5Opacity: 0.49,
-      layer5Coverage: 0.35,
-      layer5Scale: 2.83,
-      layer5ParallaxMult: 0.1,
-      layer5SpeedMult: 2.0,
-      layer5DirDeg: 1.7,
+      layer5Opacity: 0.22,
+      layer5Coverage: 0.51,
+      layer5Scale: 1.52,
+      layer5ParallaxMult: 0,
+      layer5SpeedMult: 1.07,
+      layer5DirDeg: -0.6,
 
       // Minimum shadow brightness (prevents crushing blacks)
-      minShadowBrightness: 0.25
+      minShadowBrightness: 0.0
     };
 
     // Performance: reusable objects
@@ -416,11 +429,25 @@ export class CloudEffect extends EffectBase {
           parameters: ['cloudTopShadingEnabled', 'cloudTopShadingStrength', 'cloudTopNormalStrength', 'cloudTopAOIntensity', 'cloudTopEdgeHighlight']
         },
         {
+          name: 'cloud-top-peaks',
+          label: 'Cloud Top Peaks',
+          type: 'inline',
+          separator: false,
+          parameters: ['cloudTopPeakDetailEnabled', 'cloudTopPeakDetailStrength', 'cloudTopPeakDetailScale', 'cloudTopPeakDetailSpeed', 'cloudTopPeakDetailStart', 'cloudTopPeakDetailEnd']
+        },
+        {
+          name: 'cloud-top-composite',
+          label: 'Cloud Top Composite',
+          type: 'inline',
+          separator: false,
+          parameters: ['cloudTopSoftKnee']
+        },
+        {
           name: 'wind',
           label: 'Wind & Drift',
           type: 'inline',
           separator: true,
-          parameters: ['windInfluence', 'driftSpeed', 'driftResponsiveness', 'driftMaxSpeed']
+          parameters: ['windInfluence', 'driftSpeed', 'minDriftSpeed', 'driftResponsiveness', 'driftMaxSpeed']
         },
         {
           name: 'layer-base',
@@ -501,7 +528,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 0.05,
           step: 0.001,
-          default: 0.01
+          default: 0.011
         },
         domainWarpEnabled: {
           type: 'boolean',
@@ -538,7 +565,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 10.0,
           step: 0.1,
-          default: 1.4
+          default: 10.0
         },
         shadowOpacity: {
           type: 'slider',
@@ -546,7 +573,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.8
+          default: 1.0
         },
         shadowSoftness: {
           type: 'slider',
@@ -554,7 +581,7 @@ export class CloudEffect extends EffectBase {
           min: 0.5,
           max: 10.0,
           step: 0.1,
-          default: 5.0
+          default: 1.0
         },
         shadowOffsetScale: {
           type: 'slider',
@@ -570,7 +597,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 0.5,
           step: 0.01,
-          default: 0.25
+          default: 0.0
         },
         cloudTopMode: {
           type: 'list',
@@ -620,6 +647,14 @@ export class CloudEffect extends EffectBase {
           max: 0.1,
           step: 0.001,
           default: 0.02
+        },
+        minDriftSpeed: {
+          type: 'slider',
+          label: 'Min Drift Speed',
+          min: 0.0,
+          max: 0.05,
+          step: 0.0005,
+          default: 0.001
         },
         driftResponsiveness: {
           type: 'slider',
@@ -728,6 +763,59 @@ export class CloudEffect extends EffectBase {
           max: 2.0,
           step: 0.01,
           default: 2.0
+        },
+        cloudTopPeakDetailEnabled: {
+          type: 'boolean',
+          label: 'Enable Peak Detail',
+          default: true
+        },
+        cloudTopPeakDetailStrength: {
+          type: 'slider',
+          label: 'Peak Detail Strength',
+          min: 0.0,
+          max: 0.5,
+          step: 0.01,
+          default: 0.1
+        },
+        cloudTopPeakDetailScale: {
+          type: 'slider',
+          label: 'Peak Detail Scale',
+          min: 1.0,
+          max: 64.0,
+          step: 0.5,
+          default: 12.0
+        },
+        cloudTopPeakDetailSpeed: {
+          type: 'slider',
+          label: 'Peak Detail Speed',
+          min: 0.0,
+          max: 0.5,
+          step: 0.01,
+          default: 0.06
+        },
+        cloudTopPeakDetailStart: {
+          type: 'slider',
+          label: 'Peak Start',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.72
+        },
+        cloudTopPeakDetailEnd: {
+          type: 'slider',
+          label: 'Peak End',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 1.0
+        },
+        cloudTopSoftKnee: {
+          type: 'slider',
+          label: 'Soft Knee',
+          min: 0.0,
+          max: 10.0,
+          step: 0.1,
+          default: 2.0
         }
       }
     };
@@ -768,7 +856,7 @@ export class CloudEffect extends EffectBase {
     this._tempVec2A = new THREE.Vector2();
     this._tempVec2B = new THREE.Vector2();
 
-    this._tintNight = new THREE.Vector3(0.4, 0.45, 0.6);
+    this._tintNight = new THREE.Vector3(0.13, 0.15, 0.2);
     this._tintSunrise = new THREE.Vector3(1.0, 0.7, 0.5);
     this._tintDay = new THREE.Vector3(1.0, 1.0, 1.0);
     this._tintSunset = new THREE.Vector3(1.0, 0.6, 0.4);
@@ -833,6 +921,7 @@ export class CloudEffect extends EffectBase {
    * Uses layered simplex noise for natural cloud shapes.
    * @private
    */
+
   _createDensityMaterial() {
     const THREE = window.THREE;
 
@@ -864,6 +953,12 @@ export class CloudEffect extends EffectBase {
         uParallaxScale: { value: 0.0 },
         // 0.0 = union blend (good for total occlusion), 1.0 = summed blend (helps layers read separately)
         uCompositeMode: { value: 0.0 },
+        // Soft-knee saturation applied ONLY in compositeMode=1 for cloud-top packed density.
+        // Higher values approach 1.0 faster; 0 disables.
+        uCompositeSoftKnee: { value: this.params.cloudTopSoftKnee },
+        // When enabled, discard pixels outside the scene rect.
+        // NOTE: Disabled for shadow density generation so sun-offset shadows have valid off-map samples.
+        uClipToScene: { value: 0.0 },
         uResolution: { value: new THREE.Vector2(1024, 1024) },
 
         // World-space coordinate conversion (view bounds in world coords)
@@ -899,6 +994,8 @@ export class CloudEffect extends EffectBase {
         uniform float uLayerWeight[5];
         uniform float uParallaxScale;
         uniform float uCompositeMode;
+        uniform float uCompositeSoftKnee;
+        uniform float uClipToScene;
         uniform vec2 uResolution;
         uniform vec2 uViewBoundsMin;
         uniform vec2 uViewBoundsMax;
@@ -959,6 +1056,12 @@ export class CloudEffect extends EffectBase {
           float parallax = uLayerParallax[layerIndex] * uParallaxScale;
           vec2 layerWorldPos = mix(baseWorldPos, cameraPinnedPos, parallax);
 
+          if (uClipToScene > 0.5) {
+            vec2 sceneMin = uSceneOrigin;
+            vec2 sceneMax = uSceneOrigin + uSceneSize;
+            layerWorldPos = clamp(layerWorldPos, sceneMin, sceneMax);
+          }
+
           float w = max(uSceneSize.x, 1.0);
           float h = max(uSceneSize.y, 1.0);
           float s = min(w, h);
@@ -1003,10 +1106,12 @@ export class CloudEffect extends EffectBase {
 
           // Clip clouds to the actual scene rect (exclude padding)
           vec2 sceneMax = uSceneOrigin + uSceneSize;
-          if (baseWorldPos.x < uSceneOrigin.x || baseWorldPos.y < uSceneOrigin.y ||
-              baseWorldPos.x > sceneMax.x || baseWorldPos.y > sceneMax.y) {
-            gl_FragColor = vec4(0.0);
-            return;
+          if (uClipToScene > 0.5) {
+            if (baseWorldPos.x < uSceneOrigin.x || baseWorldPos.y < uSceneOrigin.y ||
+                baseWorldPos.x > sceneMax.x || baseWorldPos.y > sceneMax.y) {
+              gl_FragColor = vec4(0.0);
+              return;
+            }
           }
 
           // Pinned-to-camera/screen position (full parallax)
@@ -1034,7 +1139,13 @@ export class CloudEffect extends EffectBase {
             composite = clamp(1.0 - inv, 0.0, 1.0);
           } else {
             // Summed blend reads more like stacked layers (helps parallax/direction differences show).
-            composite = clamp((l0 + l1 + l2 + l3 + l4) / 2.0, 0.0, 1.0);
+            float x = (l0 + l1 + l2 + l3 + l4) / 2.0;
+            // Soft-knee saturation prevents hard 1.0 plateaus when layers stack.
+            // As x increases, composite approaches 1.0 asymptotically.
+            float k = max(0.0, uCompositeSoftKnee);
+            if (k > 1e-5) composite = 1.0 - exp(-k * max(0.0, x));
+            else composite = clamp(x, 0.0, 1.0);
+            composite = clamp(composite, 0.0, 1.0);
           }
 
           // Output format:
@@ -1075,8 +1186,18 @@ export class CloudEffect extends EffectBase {
         uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         uZoom: { value: 1.0 },
         uMinBrightness: { value: this.params.minShadowBrightness },
-        // Sun offset for shadow displacement (in UV space)
-        uShadowOffsetUV: { value: new THREE.Vector2(0, 0) },
+        // Sun offset for shadow displacement (in WORLD space)
+        uShadowOffsetWorld: { value: new THREE.Vector2(0, 0) },
+
+        uViewBoundsMin: { value: new THREE.Vector2(0, 0) },
+        uViewBoundsMax: { value: new THREE.Vector2(1, 1) },
+        uSceneOrigin: { value: new THREE.Vector2(0, 0) },
+        uSceneSize: { value: new THREE.Vector2(1, 1) },
+
+        // The world-space bounds that the density texture covers.
+        // For shadows we render an overscanned density so offset+blur never samples out of range.
+        uDensityBoundsMin: { value: new THREE.Vector2(0, 0) },
+        uDensityBoundsMax: { value: new THREE.Vector2(1, 1) },
 
         // Per-tile blocker mask: 1.0 means this pixel should NOT receive cloud shadows
         tBlockerMask: { value: null },
@@ -1099,7 +1220,15 @@ export class CloudEffect extends EffectBase {
         uniform vec2 uTexelSize;
         uniform float uZoom;
         uniform float uMinBrightness;
-        uniform vec2 uShadowOffsetUV;
+        uniform vec2 uShadowOffsetWorld;
+
+        uniform vec2 uViewBoundsMin;
+        uniform vec2 uViewBoundsMax;
+        uniform vec2 uSceneOrigin;
+        uniform vec2 uSceneSize;
+
+        uniform vec2 uDensityBoundsMin;
+        uniform vec2 uDensityBoundsMax;
 
         uniform sampler2D tBlockerMask;
         uniform float uHasBlockerMask;
@@ -1112,9 +1241,20 @@ export class CloudEffect extends EffectBase {
         }
 
         void main() {
-          // Apply sun offset when sampling density for shadows
-          // This creates the shadow displacement effect
-          vec2 shadowUV = vUv + uShadowOffsetUV;
+          vec2 baseWorldPos = mix(uViewBoundsMin, uViewBoundsMax, vUv);
+          vec2 sceneMax = uSceneOrigin + uSceneSize;
+          if (baseWorldPos.x < uSceneOrigin.x || baseWorldPos.y < uSceneOrigin.y ||
+              baseWorldPos.x > sceneMax.x || baseWorldPos.y > sceneMax.y) {
+            gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+            return;
+          }
+
+          // Sample density in WORLD space to avoid screen-space seams and wrapping artefacts.
+          // Map world position into the density texture's UVs using the density bounds.
+          vec2 shadowWorldPos = baseWorldPos + uShadowOffsetWorld;
+          vec2 densitySize = max(uDensityBoundsMax - uDensityBoundsMin, vec2(1e-3));
+          vec2 shadowUV = (shadowWorldPos - uDensityBoundsMin) / densitySize;
+          shadowUV = clamp(shadowUV, vec2(0.0), vec2(1.0));
 
           // Apply blur for soft shadow edges
           // Scale blur by zoom so softness is consistent in world space
@@ -1127,7 +1267,7 @@ export class CloudEffect extends EffectBase {
           // 3x3 blur kernel - sample around the OFFSET position
           for (int dy = -1; dy <= 1; dy++) {
             for (int dx = -1; dx <= 1; dx++) {
-              vec2 sUv = shadowUV + vec2(float(dx), float(dy)) * stepUv;
+              vec2 sUv = clamp(shadowUV + vec2(float(dx), float(dy)) * stepUv, vec2(0.0), vec2(1.0));
               float w = 1.0;
               if (dx == 0 && dy == 0) w = 2.0; // Center bias
               float v = readDensity(sUv);
@@ -1201,6 +1341,13 @@ export class CloudEffect extends EffectBase {
         uAOIntensity: { value: 1.0 },
         uEdgeHighlight: { value: 1.0 },
 
+        uPeakDetailEnabled: { value: 1.0 },
+        uPeakDetailStrength: { value: this.params.cloudTopPeakDetailStrength },
+        uPeakDetailScale: { value: this.params.cloudTopPeakDetailScale },
+        uPeakDetailSpeed: { value: this.params.cloudTopPeakDetailSpeed },
+        uPeakDetailStart: { value: this.params.cloudTopPeakDetailStart },
+        uPeakDetailEnd: { value: this.params.cloudTopPeakDetailEnd },
+
         // Per-tile blocker mask: 1.0 means this pixel should NOT receive cloud tops
         tBlockerMask: { value: null },
         uHasBlockerMask: { value: 0.0 }
@@ -1235,16 +1382,34 @@ export class CloudEffect extends EffectBase {
         uniform float uAOIntensity;
         uniform float uEdgeHighlight;
 
+        uniform float uPeakDetailEnabled;
+        uniform float uPeakDetailStrength;
+        uniform float uPeakDetailScale;
+        uniform float uPeakDetailSpeed;
+        uniform float uPeakDetailStart;
+        uniform float uPeakDetailEnd;
+
         uniform sampler2D tBlockerMask;
         uniform float uHasBlockerMask;
 
         varying vec2 vUv;
 
+        float fbm2D(vec2 p);
+
+        float applyPeakDetail(vec2 uv, float d) {
+          float peakMask = smoothstep(uPeakDetailStart, uPeakDetailEnd, d);
+          float n = fbm2D(uv * uPeakDetailScale + vec2(uTime * uPeakDetailSpeed));
+          n = n * 2.0 - 1.0;
+          return clamp(d + n * uPeakDetailStrength * peakMask, 0.0, 1.0);
+        }
+
         float readDensity(vec2 uv) {
           vec4 t = texture2D(tCloudDensity, uv);
-          // Parallaxed cloud-top density stores composite in alpha.
-          // World density stores grayscale in RGB with alpha=1.
-          return (uDensityMode < 0.5) ? t.r : t.a;
+          float d = (uDensityMode < 0.5) ? t.r : t.a;
+          if (uPeakDetailEnabled > 0.5) {
+            d = applyPeakDetail(uv, d);
+          }
+          return d;
         }
 
         float hash21(vec2 p) {
@@ -1333,7 +1498,7 @@ export class CloudEffect extends EffectBase {
         void main() {
           // Sample cloud density (no sun offset - we want clouds directly overhead)
           vec4 densTex = texture2D(tCloudDensity, vUv);
-          float density = (uDensityMode < 0.5) ? densTex.r : densTex.a;
+          float density = readDensity(vUv);
           float dMid = densTex.r;
           float dInner = densTex.g;
           float dOuter = densTex.b;
@@ -1342,6 +1507,16 @@ export class CloudEffect extends EffectBase {
             dMid = density;
             dInner = density;
             dOuter = density;
+          }
+
+          if (uPeakDetailEnabled > 0.5) {
+            float peakMask = smoothstep(uPeakDetailStart, uPeakDetailEnd, density);
+            float n = fbm2D(vUv * uPeakDetailScale + vec2(uTime * uPeakDetailSpeed));
+            n = n * 2.0 - 1.0;
+            float d = n * uPeakDetailStrength * peakMask;
+            dMid = clamp(dMid + d * 0.75, 0.0, 1.0);
+            dInner = clamp(dInner + d * 0.55, 0.0, 1.0);
+            dOuter = clamp(dOuter + d * 0.35, 0.0, 1.0);
           }
 
           // Calculate zoom-based fade
@@ -1475,9 +1650,15 @@ export class CloudEffect extends EffectBase {
       // Fallback to noon
     }
 
+    // Normalize to [0, 24) to match clockface and other time-of-day systems.
+    hour = ((hour % 24) + 24) % 24;
+
     const tint = this._tintResult;
 
-    if (hour < 5 || hour >= 21) {
+    // Sunrise: 5-7 (night -> sunrise -> day)
+    // Sunset:  17-19 (day -> sunset -> night)
+    // Night:   19-5
+    if (hour < 5 || hour >= 19) {
       tint.copy(this._tintNight);
     } else if (hour < 6) {
       const t = hour - 5;
@@ -1485,13 +1666,13 @@ export class CloudEffect extends EffectBase {
     } else if (hour < 7) {
       const t = hour - 6;
       tint.lerpVectors(this._tintSunrise, this._tintDay, t);
-    } else if (hour < 18) {
+    } else if (hour < 17) {
       tint.copy(this._tintDay);
+    } else if (hour < 18) {
+      const t = hour - 17;
+      tint.lerpVectors(this._tintDay, this._tintSunset, t);
     } else if (hour < 19) {
       const t = hour - 18;
-      tint.lerpVectors(this._tintDay, this._tintSunset, t);
-    } else if (hour < 21) {
-      const t = (hour - 19) / 2;
       tint.lerpVectors(this._tintSunset, this._tintNight, t);
     }
 
@@ -1521,6 +1702,18 @@ export class CloudEffect extends EffectBase {
       });
     } else {
       this.cloudDensityTarget.setSize(iW, iH);
+    }
+
+    // Shadow density render target (overscanned world bounds; same resolution)
+    if (!this.cloudShadowDensityTarget) {
+      this.cloudShadowDensityTarget = new THREE.WebGLRenderTarget(iW, iH, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else {
+      this.cloudShadowDensityTarget.setSize(iW, iH);
     }
 
     // Cloud shadow render target
@@ -1644,7 +1837,9 @@ export class CloudEffect extends EffectBase {
     // makes the visual pattern appear to move the opposite direction. So we subtract displacement here
     // so clouds drift WITH the wind direction.
     const delta = timeInfo?.delta ?? 0.016;
-    const targetBaseSpeed = windSpeed * this.params.windInfluence * this.params.driftSpeed;
+    const windDrivenSpeed = windSpeed * this.params.windInfluence * this.params.driftSpeed;
+    const minDriftSpeed = Math.max(0.0, Number(this.params.minDriftSpeed) || 0.0);
+    const targetBaseSpeed = Math.max(windDrivenSpeed, minDriftSpeed);
     const responsiveness = Math.max(0.0, this.params.driftResponsiveness ?? 2.5);
     const maxSpeed = Math.max(0.0, this.params.driftMaxSpeed ?? 0.05);
     const lerpAlpha = responsiveness > 0.0 ? (1.0 - Math.exp(-responsiveness * delta)) : 1.0;
@@ -1734,8 +1929,8 @@ export class CloudEffect extends EffectBase {
         if (vLayerLen > vMax && vLayerLen > 1e-6) v.multiplyScalar(vMax / vLayerLen);
 
         const o = this._layerWindOffsets[i];
-        o.x = (o.x - v.x * delta) % 100.0;
-        o.y = (o.y - v.y * delta) % 100.0;
+        o.x = ((o.x - v.x * delta) % 100.0 + 100.0) % 100.0;
+        o.y = ((o.y - v.y * delta) % 100.0 + 100.0) % 100.0;
       }
     }
 
@@ -1800,6 +1995,7 @@ export class CloudEffect extends EffectBase {
     if (du.uLayerCoverMult) du.uLayerCoverMult.value = this._layerCoverMult;
     if (du.uLayerNoiseScaleMult) du.uLayerNoiseScaleMult.value = this._layerNoiseScaleMult;
     if (du.uLayerWeight) du.uLayerWeight.value = this._layerWeight;
+    if (du.uCompositeSoftKnee) du.uCompositeSoftKnee.value = Number(this.params.cloudTopSoftKnee) || 0.0;
     if (du.uSceneOrigin) du.uSceneOrigin.value.set(sceneX, sceneY);
     du.uSceneSize.value.set(sceneWidth, sceneHeight);
     du.uViewBoundsMin.value.set(viewMinX, viewMinY);
@@ -1814,18 +2010,48 @@ export class CloudEffect extends EffectBase {
     su.uMinBrightness.value = this.params.minShadowBrightness;
     su.uZoom.value = zoom;
 
-    // Calculate sun offset in UV SPACE for shadow displacement
-    // The offset is applied when sampling the density texture in the shadow pass
-    // This separates shadow position from cloud top position
+    if (su.uSceneOrigin) su.uSceneOrigin.value.set(sceneX, sceneY);
+    if (su.uSceneSize) su.uSceneSize.value.set(sceneWidth, sceneHeight);
+    if (su.uViewBoundsMin) su.uViewBoundsMin.value.set(viewMinX, viewMinY);
+    if (su.uViewBoundsMax) su.uViewBoundsMax.value.set(viewMaxX, viewMaxY);
+
+    // Calculate sun offset in WORLD SPACE for shadow displacement.
+    // Sampling density in world space avoids screen-space seams caused by UV wrapping.
     const offsetWorldUnits = this.params.shadowOffsetScale * 5000.0;
     if (this.sunDir) {
-      // Convert world offset to UV offset based on visible view size
-      const viewWidth = viewMaxX - viewMinX;
-      const viewHeight = viewMaxY - viewMinY;
-      const offsetUVx = (this.sunDir.x * offsetWorldUnits) / viewWidth;
-      const offsetUVy = (this.sunDir.y * offsetWorldUnits) / viewHeight;
-      su.uShadowOffsetUV.value.set(offsetUVx, offsetUVy);
+      su.uShadowOffsetWorld.value.set(
+        this.sunDir.x * offsetWorldUnits,
+        this.sunDir.y * offsetWorldUnits
+      );
+    } else {
+      su.uShadowOffsetWorld.value.set(0, 0);
     }
+
+    // Compute overscanned density bounds so offset+blur taps stay within the density texture.
+    // This prevents the blur kernel from sampling clamped texture edges (screen-space banding).
+    const viewWidth = viewMaxX - viewMinX;
+    const viewHeight = viewMaxY - viewMinY;
+    const iW = this.cloudDensityTarget?.width ?? 1024;
+    const iH = this.cloudDensityTarget?.height ?? 1024;
+    const worldPerPixelX = viewWidth / Math.max(1, iW);
+    const worldPerPixelY = viewHeight / Math.max(1, iH);
+
+    const blurPixels = (this.params.shadowSoftness ?? 0.0) * 20.0 * zoom;
+    const blurWorldX = blurPixels * worldPerPixelX;
+    const blurWorldY = blurPixels * worldPerPixelY;
+
+    const absOffX = Math.abs(su.uShadowOffsetWorld.value.x);
+    const absOffY = Math.abs(su.uShadowOffsetWorld.value.y);
+    const marginX = absOffX + blurWorldX * 2.0 + worldPerPixelX * 4.0;
+    const marginY = absOffY + blurWorldY * 2.0 + worldPerPixelY * 4.0;
+
+    const densityMinX = viewMinX - marginX;
+    const densityMinY = viewMinY - marginY;
+    const densityMaxX = viewMaxX + marginX;
+    const densityMaxY = viewMaxY + marginY;
+
+    if (su.uDensityBoundsMin) su.uDensityBoundsMin.value.set(densityMinX, densityMinY);
+    if (su.uDensityBoundsMax) su.uDensityBoundsMax.value.set(densityMaxX, densityMaxY);
 
     // Set outdoors mask for shadow material
     const le = window.MapShine?.lightingEffect;
@@ -1854,8 +2080,15 @@ export class CloudEffect extends EffectBase {
       if (tu.uAOIntensity) tu.uAOIntensity.value = Number(this.params.cloudTopAOIntensity) || 0.0;
       if (tu.uEdgeHighlight) tu.uEdgeHighlight.value = this.params.cloudTopEdgeHighlight;
 
+      if (tu.uPeakDetailEnabled) tu.uPeakDetailEnabled.value = this.params.cloudTopPeakDetailEnabled ? 1.0 : 0.0;
+      if (tu.uPeakDetailStrength) tu.uPeakDetailStrength.value = this.params.cloudTopPeakDetailStrength;
+      if (tu.uPeakDetailScale) tu.uPeakDetailScale.value = this.params.cloudTopPeakDetailScale;
+      if (tu.uPeakDetailSpeed) tu.uPeakDetailSpeed.value = this.params.cloudTopPeakDetailSpeed;
+      if (tu.uPeakDetailStart) tu.uPeakDetailStart.value = this.params.cloudTopPeakDetailStart;
+      if (tu.uPeakDetailEnd) tu.uPeakDetailEnd.value = this.params.cloudTopPeakDetailEnd;
+
       // Use a stronger lateral sun direction for cloud-top shading so it reads at midday.
-      // This does NOT affect ground shadows (those use uShadowOffsetUV).
+      // This does NOT affect ground shadows (those use uShadowOffsetWorld + overscanned density sampling).
       if (this.sunDir && tu.uSunDir) {
         if (!this._shadeSunDir) this._shadeSunDir = new THREE.Vector2(0.0, 1.0);
         this._shadeSunDir.copy(this.sunDir);
@@ -1939,7 +2172,7 @@ export class CloudEffect extends EffectBase {
     try {
       try {
         const p = this.params;
-        const paramHash = `${p.updateEveryNFrames}|${p.internalResolutionScale}|${p.cloudCover}|${p.noiseScale}|${p.noiseDetail}|${p.cloudSharpness}|${p.noiseTimeSpeed}|${p.domainWarpEnabled}|${p.domainWarpStrength}|${p.domainWarpScale}|${p.domainWarpSpeed}|${p.domainWarpTimeOffsetY}|${p.shadowOpacity}|${p.shadowSoftness}|${p.shadowOffsetScale}|${p.minShadowBrightness}|${p.cloudTopMode}|${p.cloudTopOpacity}|${p.cloudTopFadeStart}|${p.cloudTopFadeEnd}|${p.cloudBrightness}|${p.cloudTopShadingEnabled}|${p.cloudTopShadingStrength}|${p.cloudTopNormalStrength}|${p.cloudTopAOIntensity}|${p.cloudTopEdgeHighlight}|${p.windInfluence}|${p.driftSpeed}|${p.driftResponsiveness}|${p.driftMaxSpeed}|${p.layerParallaxBase}|${p.layer1Enabled}|${p.layer1Opacity}|${p.layer1Coverage}|${p.layer1Scale}|${p.layer1ParallaxMult}|${p.layer1SpeedMult}|${p.layer1DirDeg}|${p.layer2Enabled}|${p.layer2Opacity}|${p.layer2Coverage}|${p.layer2Scale}|${p.layer2ParallaxMult}|${p.layer2SpeedMult}|${p.layer2DirDeg}|${p.layer3Enabled}|${p.layer3Opacity}|${p.layer3Coverage}|${p.layer3Scale}|${p.layer3ParallaxMult}|${p.layer3SpeedMult}|${p.layer3DirDeg}|${p.layer4Enabled}|${p.layer4Opacity}|${p.layer4Coverage}|${p.layer4Scale}|${p.layer4ParallaxMult}|${p.layer4SpeedMult}|${p.layer4DirDeg}|${p.layer5Enabled}|${p.layer5Opacity}|${p.layer5Coverage}|${p.layer5Scale}|${p.layer5ParallaxMult}|${p.layer5SpeedMult}|${p.layer5DirDeg}`;
+        const paramHash = `${p.updateEveryNFrames}|${p.internalResolutionScale}|${p.cloudCover}|${p.noiseScale}|${p.noiseDetail}|${p.cloudSharpness}|${p.noiseTimeSpeed}|${p.domainWarpEnabled}|${p.domainWarpStrength}|${p.domainWarpScale}|${p.domainWarpSpeed}|${p.domainWarpTimeOffsetY}|${p.shadowOpacity}|${p.shadowSoftness}|${p.shadowOffsetScale}|${p.minShadowBrightness}|${p.cloudTopMode}|${p.cloudTopOpacity}|${p.cloudTopFadeStart}|${p.cloudTopFadeEnd}|${p.cloudBrightness}|${p.cloudTopShadingEnabled}|${p.cloudTopShadingStrength}|${p.cloudTopNormalStrength}|${p.cloudTopAOIntensity}|${p.cloudTopEdgeHighlight}|${p.cloudTopPeakDetailEnabled}|${p.cloudTopPeakDetailStrength}|${p.cloudTopPeakDetailScale}|${p.cloudTopPeakDetailSpeed}|${p.cloudTopPeakDetailStart}|${p.cloudTopPeakDetailEnd}|${p.cloudTopSoftKnee}|${p.windInfluence}|${p.driftSpeed}|${p.minDriftSpeed}|${p.driftResponsiveness}|${p.driftMaxSpeed}|${p.layerParallaxBase}|${p.layer1Enabled}|${p.layer1Opacity}|${p.layer1Coverage}|${p.layer1Scale}|${p.layer1ParallaxMult}|${p.layer1SpeedMult}|${p.layer1DirDeg}|${p.layer2Enabled}|${p.layer2Opacity}|${p.layer2Coverage}|${p.layer2Scale}|${p.layer2ParallaxMult}|${p.layer2SpeedMult}|${p.layer2DirDeg}|${p.layer3Enabled}|${p.layer3Opacity}|${p.layer3Coverage}|${p.layer3Scale}|${p.layer3ParallaxMult}|${p.layer3SpeedMult}|${p.layer3DirDeg}|${p.layer4Enabled}|${p.layer4Opacity}|${p.layer4Coverage}|${p.layer4Scale}|${p.layer4ParallaxMult}|${p.layer4SpeedMult}|${p.layer4DirDeg}|${p.layer5Enabled}|${p.layer5Opacity}|${p.layer5Coverage}|${p.layer5Scale}|${p.layer5ParallaxMult}|${p.layer5SpeedMult}|${p.layer5DirDeg}`;
         if (paramHash !== this._lastParamHash) {
           this._lastParamHash = paramHash;
           this._forceUpdateFrames = Math.max(this._forceUpdateFrames, 2);
@@ -2150,7 +2383,7 @@ export class CloudEffect extends EffectBase {
           if (su.uHasOutdoorsMask) su.uHasOutdoorsMask.value = 0.0;
           if (su.tOutdoorsMask) su.tOutdoorsMask.value = null;
 
-          this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
+          this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudShadowDensityTarget.texture;
 
           if (this.shadowMaterial.uniforms.tBlockerMask) {
             this.shadowMaterial.uniforms.tBlockerMask.value = this.cloudShadowBlockerTarget?.texture ?? null;
@@ -2170,7 +2403,7 @@ export class CloudEffect extends EffectBase {
 
         // Pass 2b: Generate cloud shadow from density (OUTDOORS-MASKED)
         if (this.shadowMaterial.uniforms.uDensityMode) this.shadowMaterial.uniforms.uDensityMode.value = 0.0;
-        this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
+        this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudShadowDensityTarget.texture;
 
         if (this.shadowMaterial.uniforms.tBlockerMask) {
           this.shadowMaterial.uniforms.tBlockerMask.value = this.cloudShadowBlockerTarget?.texture ?? null;
@@ -2221,9 +2454,33 @@ export class CloudEffect extends EffectBase {
 
     if (this._forceUpdateFrames > 0) this._forceUpdateFrames--;
 
-    // Pass 1: Generate world-pinned cloud density (NO parallax) for shadows and other consumers
+    // Pass 1a: Generate world-pinned cloud density for SHADOWS (overscanned bounds)
+    if (this.densityMaterial.uniforms.uClipToScene) this.densityMaterial.uniforms.uClipToScene.value = 0.0;
     if (this.densityMaterial.uniforms.uParallaxScale) this.densityMaterial.uniforms.uParallaxScale.value = 0.0;
     if (this.densityMaterial.uniforms.uCompositeMode) this.densityMaterial.uniforms.uCompositeMode.value = 0.0;
+
+    // Temporarily override density view bounds to cover the overscanned region.
+    const du = this.densityMaterial.uniforms;
+    const prevMinX = du.uViewBoundsMin.value.x;
+    const prevMinY = du.uViewBoundsMin.value.y;
+    const prevMaxX = du.uViewBoundsMax.value.x;
+    const prevMaxY = du.uViewBoundsMax.value.y;
+
+    const su = this.shadowMaterial.uniforms;
+    if (du.uViewBoundsMin && su.uDensityBoundsMin) du.uViewBoundsMin.value.copy(su.uDensityBoundsMin.value);
+    if (du.uViewBoundsMax && su.uDensityBoundsMax) du.uViewBoundsMax.value.copy(su.uDensityBoundsMax.value);
+
+    this.quadMesh.material = this.densityMaterial;
+    renderer.setRenderTarget(this.cloudShadowDensityTarget);
+    renderer.setClearColor(0x000000, 1);
+    renderer.clear();
+    renderer.render(this.quadScene, this.quadCamera);
+
+    // Restore normal view bounds for the standard density target.
+    du.uViewBoundsMin.value.set(prevMinX, prevMinY);
+    du.uViewBoundsMax.value.set(prevMaxX, prevMaxY);
+
+    // Pass 1b: Generate world-pinned cloud density (normal bounds) for other consumers
     this.quadMesh.material = this.densityMaterial;
     renderer.setRenderTarget(this.cloudDensityTarget);
     renderer.setClearColor(0x000000, 1);
@@ -2240,7 +2497,7 @@ export class CloudEffect extends EffectBase {
       if (su.uHasOutdoorsMask) su.uHasOutdoorsMask.value = 0.0;
       if (su.tOutdoorsMask) su.tOutdoorsMask.value = null;
 
-      this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
+      this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudShadowDensityTarget.texture;
 
       if (this.shadowMaterial.uniforms.tBlockerMask) {
         this.shadowMaterial.uniforms.tBlockerMask.value = this.cloudShadowBlockerTarget?.texture ?? null;
@@ -2260,7 +2517,7 @@ export class CloudEffect extends EffectBase {
 
     // Pass 2b: Generate cloud shadow from density (OUTDOORS-MASKED)
     if (this.shadowMaterial.uniforms.uDensityMode) this.shadowMaterial.uniforms.uDensityMode.value = 0.0;
-    this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudDensityTarget.texture;
+    this.shadowMaterial.uniforms.tCloudDensity.value = this.cloudShadowDensityTarget.texture;
 
     if (this.shadowMaterial.uniforms.tBlockerMask) {
       this.shadowMaterial.uniforms.tBlockerMask.value = this.cloudShadowBlockerTarget?.texture ?? null;
@@ -2276,6 +2533,7 @@ export class CloudEffect extends EffectBase {
 
     // Pass 3: Generate parallaxed multi-layer density for cloud tops (this MUST NOT drive ground shadows)
     if (this.cloudTopDensityTarget) {
+      if (this.densityMaterial.uniforms.uClipToScene) this.densityMaterial.uniforms.uClipToScene.value = 1.0;
       if (this.densityMaterial.uniforms.uParallaxScale) this.densityMaterial.uniforms.uParallaxScale.value = 1.0;
       if (this.densityMaterial.uniforms.uCompositeMode) this.densityMaterial.uniforms.uCompositeMode.value = 1.0;
       this.quadMesh.material = this.densityMaterial;
@@ -2419,6 +2677,10 @@ export class CloudEffect extends EffectBase {
     if (this.cloudDensityTarget) {
       this.cloudDensityTarget.dispose();
       this.cloudDensityTarget = null;
+    }
+    if (this.cloudShadowDensityTarget) {
+      this.cloudShadowDensityTarget.dispose();
+      this.cloudShadowDensityTarget = null;
     }
     if (this.cloudShadowTarget) {
       this.cloudShadowTarget.dispose();

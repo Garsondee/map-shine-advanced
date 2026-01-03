@@ -14,47 +14,47 @@ export class LightningEffect extends EffectBase {
     this.params = {
       enabled: true,
 
-      minDelayMs: 600,
-      maxDelayMs: 2400,
+      minDelayMs: 0,
+      maxDelayMs: 10000,
 
       burstMinStrikes: 1,
-      burstMaxStrikes: 3,
-      strikeDurationMs: 120,
-      strikeDelayMs: 60,
+      burstMaxStrikes: 5,
+      strikeDurationMs: 280,
+      strikeDelayMs: 105,
 
-      flickerChance: 0.15,
+      flickerChance: 1.0,
 
       outerColor: { r: 0.35, g: 0.65, b: 1.0 },
       coreColor: { r: 1.0, g: 1.0, b: 1.0 },
-      brightness: 2.2,
+      brightness: 10.0,
 
-      width: 26.0,
-      taper: 0.65,
-      glowStrength: 1.0,
+      width: 12.0,
+      taper: 0.72,
+      glowStrength: 2.0,
 
       zOffset: 2.0,
 
       overheadOrder: 0,
 
-      segments: 32,
-      curveAmount: 0.35,
-      macroDisplacement: 95.0,
-      microJitter: 18.0,
-      endPointRandomnessPx: 0.0,
+      segments: 28,
+      curveAmount: 0.32,
+      macroDisplacement: 14.0,
+      microJitter: 3.0,
+      endPointRandomnessPx: 41.0,
 
-      textureScrollSpeed: 6.0,
+      textureScrollSpeed: 30.0,
 
-      branchChance: 0.35,
-      branchMax: 2,
+      branchChance: 0.89,
+      branchMax: 3,
       branchLengthMin: 0.18,
-      branchLengthMax: 0.5,
+      branchLengthMax: 0.54,
       branchWidthScale: 0.55,
-      branchIntensityScale: 0.6,
+      branchIntensityScale: 0.39,
       branchDurationScale: 0.7,
-      branchForwardBias: 0.35,
-      branchPerpBias: 0.95,
+      branchForwardBias: 0.5,
+      branchPerpBias: 1.0,
 
-      wildArcChance: 0.1,
+      wildArcChance: 0.0,
 
       audioEnabled: false,
       audioStrikePath: '',

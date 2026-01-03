@@ -1056,7 +1056,7 @@ Current Weather:
       const saved = scene.getFlag('map-shine-advanced', 'controlState');
       if (saved) {
         // Merge with defaults to handle missing properties
-        this.controlState = { ...this.controlState, ...saved };
+        Object.assign(this.controlState, saved);
         log.info('Loaded control state from scene flags');
         return true;
       }

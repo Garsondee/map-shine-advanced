@@ -1826,7 +1826,9 @@ export class WeatherController {
     if (!this.startState || typeof this.startState !== 'object') {
       this.startState = { ...this.currentState };
     }
-    if (!(this.startState.windDirection instanceof THREE.Vector2)) {
+    // IMPORTANT: avoid aliasing windDirection objects (spread copy keeps references).
+    // startState must not share the same Vector2 instance as currentState.
+    if (!(this.startState.windDirection instanceof THREE.Vector2) || this.startState.windDirection === this.currentState.windDirection) {
       this.startState.windDirection = cloneWindDir(this.currentState.windDirection);
     }
     this._copyState(this.currentState, this.startState);
@@ -1835,7 +1837,8 @@ export class WeatherController {
     if (!this.targetState || typeof this.targetState !== 'object') {
       this.targetState = { ...this.currentState };
     }
-    if (!(this.targetState.windDirection instanceof THREE.Vector2)) {
+    // targetState must not share the same Vector2 instance as currentState.
+    if (!(this.targetState.windDirection instanceof THREE.Vector2) || this.targetState.windDirection === this.currentState.windDirection) {
       this.targetState.windDirection = cloneWindDir(targetState?.windDirection ?? this.currentState.windDirection);
     }
 

@@ -6,6 +6,11 @@ export class LoadingOverlay {
     this._contentEl = null;
     this._styleEl = null;
     this._token = 0;
+    this._progressCurrent = 0;
+    this._progressTarget = 0;
+    this._progressRaf = 0;
+    this._progressLastTs = 0;
+    this._autoProgress = null;
   }
 
   ensure() {
@@ -99,7 +104,7 @@ export class LoadingOverlay {
     bar.style.height = '100%';
     bar.style.borderRadius = '999px';
     bar.style.background = 'linear-gradient(90deg, rgba(0, 200, 255, 0.85), rgba(160, 120, 255, 0.85))';
-    bar.style.transition = 'width 120ms linear';
+    bar.style.transition = 'width 0ms linear';
 
     progress.appendChild(bar);
     content.appendChild(title);
@@ -154,10 +159,98 @@ export class LoadingOverlay {
     if (this.msgEl) this.msgEl.textContent = message || '';
   }
 
-  setProgress(value01) {
+  setProgress(value01, opts = undefined) {
     this.ensure();
     const v = Number.isFinite(value01) ? Math.max(0, Math.min(1, value01)) : 0;
-    if (this.barEl) this.barEl.style.width = `${Math.round(v * 100)}%`;
+    const immediate = !!opts?.immediate;
+    const keepAuto = !!opts?.keepAuto;
+    if (!keepAuto) this._autoProgress = null;
+    this._progressTarget = v;
+
+    if (immediate) {
+      this._progressCurrent = v;
+      this._applyProgress(this._progressCurrent);
+      this._stopProgressLoop();
+      return;
+    }
+
+    this._startProgressLoop();
+  }
+
+  startAutoProgress(target01, rate01PerSec = 0.01) {
+    this.ensure();
+    const t = Number.isFinite(target01) ? Math.max(0, Math.min(1, target01)) : 0;
+    const rate = Number.isFinite(rate01PerSec) ? Math.max(0, rate01PerSec) : 0.01;
+    this._autoProgress = { target: t, rate };
+    if (this._progressTarget < this._progressCurrent) this._progressTarget = this._progressCurrent;
+    this._startProgressLoop();
+  }
+
+  stopAutoProgress() {
+    this._autoProgress = null;
+  }
+
+  _applyProgress(value01) {
+    const v = Number.isFinite(value01) ? Math.max(0, Math.min(1, value01)) : 0;
+    if (this.barEl) this.barEl.style.width = `${Math.round(v * 1000) / 10}%`;
+  }
+
+  _resetProgress() {
+    this._autoProgress = null;
+    this._progressCurrent = 0;
+    this._progressTarget = 0;
+    this._applyProgress(0);
+    this._stopProgressLoop();
+  }
+
+  _stopProgressLoop() {
+    if (this._progressRaf) {
+      try {
+        cancelAnimationFrame(this._progressRaf);
+      } catch (_) {
+      }
+    }
+    this._progressRaf = 0;
+    this._progressLastTs = 0;
+  }
+
+  _startProgressLoop() {
+    if (this._progressRaf) return;
+    this._progressRaf = requestAnimationFrame((ts) => this._progressTick(ts));
+  }
+
+  _progressTick(ts) {
+    this._progressRaf = 0;
+    if (!this.el || !this.barEl) return;
+
+    if (!this._progressLastTs) this._progressLastTs = ts;
+    const dt = Math.min(0.05, Math.max(0, (ts - this._progressLastTs) / 1000));
+    this._progressLastTs = ts;
+
+    if (this._autoProgress && dt > 0) {
+      const t = this._autoProgress.target;
+      if (this._progressTarget < t) {
+        this._progressTarget = Math.min(t, this._progressTarget + this._autoProgress.rate * dt);
+      }
+    }
+
+    const diff = this._progressTarget - this._progressCurrent;
+    if (Math.abs(diff) < 0.0005) {
+      this._progressCurrent = this._progressTarget;
+    } else if (dt > 0) {
+      const k = 1 - Math.exp(-8 * dt);
+      this._progressCurrent += diff * k;
+    }
+
+    this._applyProgress(this._progressCurrent);
+
+    const needsMore = Math.abs(this._progressTarget - this._progressCurrent) >= 0.0005;
+    const needsAuto = !!this._autoProgress && this._progressTarget < this._autoProgress.target;
+    if (needsMore || needsAuto) {
+      this._progressRaf = requestAnimationFrame((nextTs) => this._progressTick(nextTs));
+    } else {
+      this._stopProgressLoop();
+    }
   }
 
   _setContentOpacity(opacity, durationMs = 0) {
@@ -170,7 +263,7 @@ export class LoadingOverlay {
   showBlack(message = 'Loading…') {
     this.ensure();
     this.setMessage(message);
-    this.setProgress(0);
+    this._resetProgress();
     this.el.style.display = 'flex';
     this.el.style.pointerEvents = 'auto';
     this.el.style.transitionDuration = '0ms';
@@ -184,7 +277,7 @@ export class LoadingOverlay {
   showLoading(message = 'Loading…') {
     this.ensure();
     this.setMessage(message);
-    this.setProgress(0);
+    this._resetProgress();
     this.el.style.display = 'flex';
     this.el.style.pointerEvents = 'auto';
     this.el.style.opacity = '1';
@@ -194,6 +287,7 @@ export class LoadingOverlay {
 
   hide() {
     if (!this.el) return;
+    this._resetProgress();
     this.el.classList.add('map-shine-loading-overlay--hidden');
     this.el.style.pointerEvents = 'none';
     this.el.style.display = 'none';

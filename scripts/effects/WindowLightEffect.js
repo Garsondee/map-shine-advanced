@@ -187,7 +187,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 25.0,
           step: 0.1,
-          default: 15.0
+          default: 0.7
         },
         falloff: {
           type: 'slider',
@@ -298,7 +298,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.05,
-          default: 0.2
+          default: 1.0
         }
       }
     };

@@ -86,7 +86,7 @@ export class DebugLayerEffect extends EffectBase {
         showCollisionPoint: { type: 'boolean', label: 'Hit Point', default: true },
         onlyWhenTokenControlled: { type: 'boolean', label: 'Only Controlled', default: true },
         onlyForOwnedTokens: { type: 'boolean', label: 'Only Owned', default: true },
-        maxDistanceUnits: { type: 'slider', label: 'Max Dist (u)', min: 1, max: 200, step: 1, default: 30, throttle: 50 }
+        maxDistanceUnits: { type: 'slider', label: 'Max Dist (u)', min: 1, max: 200, step: 1, default: 9, throttle: 50 }
       }
     };
   }

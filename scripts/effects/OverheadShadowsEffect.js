@@ -106,7 +106,7 @@ export class OverheadShadowsEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.5
+          default: 0.4
         },
         length: {
           type: 'slider',
@@ -114,7 +114,7 @@ export class OverheadShadowsEffect extends EffectBase {
           min: 0.0,
           max: 0.3,
           step: 0.005,
-          default: 0.2
+          default: 0.165
         },
         softness: {
           type: 'slider',
@@ -122,7 +122,7 @@ export class OverheadShadowsEffect extends EffectBase {
           min: 0.5,
           max: 5.0,
           step: 0.1,
-          default: 2.0
+          default: 3.0
         },
         sunLatitude: {
           type: 'slider',

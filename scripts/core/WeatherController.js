@@ -1938,7 +1938,7 @@ export class WeatherController {
         },
         dynamicEvolutionSpeed: {
           label: 'Evolution Speed (x)',
-          default: 60.0,
+          default: 15.0,
           min: 0.0,
           max: 600.0,
           step: 1.0,
@@ -1976,8 +1976,8 @@ export class WeatherController {
         dynamicBoundsFreezeLevelMin: { label: 'Temp Min', default: 0.0, min: 0.0, max: 1.0, step: 0.01, group: 'dynamicBounds', gmOnly: true },
         dynamicBoundsFreezeLevelMax: { label: 'Temp Max', default: 1.0, min: 0.0, max: 1.0, step: 0.01, group: 'dynamicBounds', gmOnly: true },
 
-        queuedPrecipitation: { label: 'Precipitation', default: 0.0, min: 0.0, max: 1.0, step: 0.01, group: 'queued', gmOnly: true },
-        queuedCloudCover: { label: 'Cloud Cover', default: 0.4, min: 0.0, max: 1.0, step: 0.01, group: 'queued', gmOnly: true },
+        queuedPrecipitation: { label: 'Precipitation', default: 0.88, min: 0.0, max: 1.0, step: 0.01, group: 'queued', gmOnly: true },
+        queuedCloudCover: { label: 'Cloud Cover', default: 0.93, min: 0.0, max: 1.0, step: 0.01, group: 'queued', gmOnly: true },
         queuedWindSpeed: { label: 'Wind Speed', default: 0.1, min: 0.0, max: 1.0, step: 0.01, group: 'queued', gmOnly: true },
         queuedWindDirection: { label: 'Wind Direction (deg)', default: 205.0, min: 0.0, max: 360.0, step: 1.0, group: 'queued', gmOnly: true },
         queuedFogDensity: { label: 'Fog Density', default: 0.0, min: 0.0, max: 1.0, step: 0.01, group: 'queued', gmOnly: true },
@@ -1992,7 +1992,7 @@ export class WeatherController {
         // Transition Controls
         transitionDuration: {
           label: 'Transition Time (s)',
-          default: 5.0,
+          default: 13.3,
           min: 0.1,
           max: 60.0,
           step: 0.1,
@@ -2028,7 +2028,7 @@ export class WeatherController {
         },
         cloudCover: {
           label: 'Cloud Cover',
-          default: 0.41,
+          default: 0.76,
           min: 0.0,
           max: 1.0,
           step: 0.01,
@@ -2045,7 +2045,7 @@ export class WeatherController {
         },
         windDirection: {
           label: 'Wind Direction (deg)',
-          default: 205.0,
+          default: 83.0,
           min: 0.0,
           max: 360.0,
           step: 1.0,
@@ -2080,7 +2080,7 @@ export class WeatherController {
         // Wind / Gust tuning
         gustWaitMin: {
           label: 'Gust Pause Min (s)',
-          default: 5.0,
+          default: 2.0,
           min: 0.0,
           max: 60.0,
           step: 0.5,
@@ -2088,7 +2088,7 @@ export class WeatherController {
         },
         gustWaitMax: {
           label: 'Gust Pause Max (s)',
-          default: 13.5,
+          default: 17.5,
           min: 0.0,
           max: 120.0,
           step: 0.5,
@@ -2096,7 +2096,7 @@ export class WeatherController {
         },
         gustDuration: {
           label: 'Gust Duration (s)',
-          default: 2.8,
+          default: 9.6,
           min: 0.1,
           max: 30.0,
           step: 0.1,
@@ -2104,7 +2104,7 @@ export class WeatherController {
         },
         gustStrength: {
           label: 'Gust Strength',
-          default: 0.7,
+          default: 0.5,
           min: 0.0,
           max: 3.0,
           step: 0.05,

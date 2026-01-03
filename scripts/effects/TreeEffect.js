@@ -222,25 +222,25 @@ export class TreeEffect extends EffectBase {
         }
       ],
       parameters: {
-        intensity: { type: 'slider', min: 0.0, max: 2.0, default: undefined },
-        windSpeedGlobal: { type: 'slider', label: 'Wind Strength', min: 0.0, max: 3.0, default: 0.04 },
-        windRampSpeed: { type: 'slider', label: 'Wind Responsiveness', min: 0.1, max: 10.0, default: 2.93 },
-        gustFrequency: { type: 'slider', label: 'Gust Spacing', min: 0.001, max: 0.1, default: 0.01 },
-        gustSpeed: { type: 'slider', label: 'Gust Speed', min: 0.0, max: 2.0, default: 0.52 },
-        branchBend: { type: 'slider', label: 'Branch Bend', min: 0.0, max: 0.1, step: 0.001, default: 0.037 },
+        intensity: { type: 'slider', min: 0.0, max: 2.0, default: 1.0 },
+        windSpeedGlobal: { type: 'slider', label: 'Wind Strength', min: 0.0, max: 3.0, default: 0.36304 },
+        windRampSpeed: { type: 'slider', label: 'Wind Responsiveness', min: 0.1, max: 10.0, default: 1.29804 },
+        gustFrequency: { type: 'slider', label: 'Gust Spacing', min: 0.001, max: 0.1, default: 0.00221 },
+        gustSpeed: { type: 'slider', label: 'Gust Speed', min: 0.0, max: 2.0, default: 0.15 },
+        branchBend: { type: 'slider', label: 'Branch Bend', min: 0.0, max: 0.1, step: 0.001, default: 0.033 },
         elasticity: { type: 'slider', label: 'Springiness', min: 0.5, max: 5.0, default: 5.0 },
-        flutterIntensity: { type: 'slider', label: 'Leaf Flutter Amount', min: 0.0, max: 0.005, step: 0.0001, default: 0.0014 },
-        flutterSpeed: { type: 'slider', label: 'Leaf Flutter Speed', min: 1.0, max: 20.0, default: 1.85 },
-        flutterScale: { type: 'slider', label: 'Leaf Cluster Size', min: 0.005, max: 0.1, default: 0.01 },
+        flutterIntensity: { type: 'slider', label: 'Leaf Flutter Amount', min: 0.0, max: 0.005, step: 0.0001, default: 0.0012 },
+        flutterSpeed: { type: 'slider', label: 'Leaf Flutter Speed', min: 1.0, max: 20.0, default: 1.5 },
+        flutterScale: { type: 'slider', label: 'Leaf Cluster Size', min: 0.005, max: 0.1, default: 0.02 },
         exposure: { type: 'slider', min: -2.0, max: 2.0, default: 0.0 },
         brightness: { type: 'slider', min: -0.5, max: 0.5, default: 0.0 },
         contrast: { type: 'slider', min: 0.5, max: 2.0, default: 1.0 },
         saturation: { type: 'slider', min: 0.0, max: 2.0, default: 1.1 },
         temperature: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
         tint: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
-        shadowOpacity: { type: 'slider', label: 'Shadow Opacity', min: 0.0, max: 1.0, default: 0.4 },
-        shadowLength: { type: 'slider', label: 'Shadow Length', min: 0.0, max: 0.2, default: 0.02 },
-        shadowSoftness: { type: 'slider', label: 'Shadow Softness', min: 0.5, max: 10.0, default: 5.0 }
+        shadowOpacity: { type: 'slider', label: 'Shadow Opacity', min: 0.0, max: 1.0, default: 0.3 },
+        shadowLength: { type: 'slider', label: 'Shadow Length', min: 0.0, max: 0.2, default: 0.08 },
+        shadowSoftness: { type: 'slider', label: 'Shadow Softness', min: 0.5, max: 10.0, default: 10.0 }
       }
     };
   }

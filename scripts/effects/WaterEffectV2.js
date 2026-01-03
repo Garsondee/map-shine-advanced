@@ -99,17 +99,17 @@ export class WaterEffectV2 extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        tintStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.37 },
-        tintColor: { type: 'color', default: { r: 0.0, g: 0.0, b: 0.0 } },
+        tintStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.15 },
+        tintColor: { type: 'color', default: { r: 0.1, g: 0.3, b: 0.48 } },
 
         waveScale: { type: 'slider', min: 1, max: 60, step: 0.5, default: 25.0 },
         waveSpeed: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.94 },
-        waveStrength: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.38 },
-        distortionStrengthPx: { type: 'slider', min: 0, max: 64.0, step: 0.01, default: 25.28 },
+        waveStrength: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.31 },
+        distortionStrengthPx: { type: 'slider', min: 0, max: 64.0, step: 0.01, default: 5.8 },
 
         waveDirOffsetDeg: { type: 'slider', label: 'Wave Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: -90.0 },
         advectionDirOffsetDeg: { type: 'slider', label: 'Advection Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: -180.0 },
-        advectionSpeed: { type: 'slider', label: 'Advection Speed', min: 0.0, max: 4.0, step: 0.01, default: 2.14 },
+        advectionSpeed: { type: 'slider', label: 'Advection Speed', min: 0.0, max: 4.0, step: 0.01, default: 0.41 },
         windDirResponsiveness: { type: 'slider', label: 'Wind Dir Responsiveness', min: 0.1, max: 10.0, step: 0.1, default: 10.0 },
         useTargetWindDirection: { type: 'boolean', label: 'Use Target Wind Dir', default: true },
 

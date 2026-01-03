@@ -819,7 +819,7 @@ export class FireSparksEffect extends EffectBase {
       parameters: {
         enabled: { type: 'checkbox', label: 'Fire Enabled', default: true },
         // Tuned default from scene: Global Intensity
-        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 4.0 },
+        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 2.5 },
         // Tuned default: low height for floor-level glyph fires
         fireHeight: { type: 'slider', label: 'Height', min: 1.0, max: 600.0, step: 1.0, default: 10.0 },
 
@@ -827,13 +827,13 @@ export class FireSparksEffect extends EffectBase {
         fireTemperature: { type: 'slider', label: 'Temperature', min: 0.0, max: 1.0, step: 0.05, default: 0.5 },
         fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 150.0, step: 1.0, default: 60.0 },
         fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 200.0, step: 1.0, default: 95.0 },
-        fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 6.0, step: 0.05, default: 2.3 },
-        fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 2.55 },
+        fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 6.0, step: 0.05, default: 1.35 },
+        fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 2.1 },
         // Defaults from Mad Scientist scene
         fireOpacityMin: { type: 'slider', label: 'Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.12 },
-        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
+        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.37 },
         fireColorBoostMin: { type: 'slider', label: 'Color Boost Min', min: 0.0, max: 4.0, step: 0.05, default: 0.0 },
-        fireColorBoostMax: { type: 'slider', label: 'Color Boost Max', min: 0.0, max: 12.0, step: 0.05, default: 1.75 },
+        fireColorBoostMax: { type: 'slider', label: 'Color Boost Max', min: 0.0, max: 12.0, step: 0.05, default: 2.15 },
         fireStartColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 } },
         fireEndColor: { type: 'color', default: { r: 0.8, g: 0.2, b: 0.05 } },
         fireSpinEnabled: { type: 'checkbox', label: 'Spin Enabled', default: true },
@@ -842,7 +842,7 @@ export class FireSparksEffect extends EffectBase {
 
         // ========== FLAME SHAPE ATLAS CONTROLS ==========
         // Global flame shape parameters - all animation frames share these
-        flameAtlasIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 4.0, step: 0.01, default: 2.0 },
+        flameAtlasIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 4.0, step: 0.01, default: 2.1 },
         flameAtlasOpacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.46 },
         flameAlphaGamma: { type: 'slider', label: 'Alpha Gamma', min: 0.1, max: 4.0, step: 0.05, default: 1.0 },
         flameNoiseScale: { type: 'slider', label: 'Noise Scale', min: 0.5, max: 10.0, step: 0.1, default: 1.1 },
@@ -854,40 +854,40 @@ export class FireSparksEffect extends EffectBase {
         flameCoreBrightness: { type: 'slider', label: 'Core Brightness', min: 0.0, max: 4.0, step: 0.05, default: 4.0 },
         flameCoreSize: { type: 'slider', label: 'Core Size', min: 0.01, max: 1.0, step: 0.01, default: 0.16 },
 
-        emberRate: { type: 'slider', label: 'Ember Density', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
-        emberSizeMin: { type: 'slider', label: 'Ember Size Min', min: 1.0, max: 40.0, step: 1.0, default: 13.0 },
-        emberSizeMax: { type: 'slider', label: 'Ember Size Max', min: 1.0, max: 60.0, step: 1.0, default: 22.0 },
-        emberLifeMin: { type: 'slider', label: 'Ember Life Min (s)', min: 0.1, max: 8.0, step: 0.1, default: 0.7 },
-        emberLifeMax: { type: 'slider', label: 'Ember Life Max (s)', min: 0.1, max: 12.0, step: 0.1, default: 3.6 },
-        emberOpacityMin: { type: 'slider', label: 'Ember Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.67 },
-        emberOpacityMax: { type: 'slider', label: 'Ember Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.89 },
+        emberRate: { type: 'slider', label: 'Ember Density', min: 0.0, max: 5.0, step: 0.1, default: 2.5 },
+        emberSizeMin: { type: 'slider', label: 'Ember Size Min', min: 1.0, max: 40.0, step: 1.0, default: 5.0 },
+        emberSizeMax: { type: 'slider', label: 'Ember Size Max', min: 1.0, max: 60.0, step: 1.0, default: 17.0 },
+        emberLifeMin: { type: 'slider', label: 'Ember Life Min (s)', min: 0.1, max: 8.0, step: 0.1, default: 1.0 },
+        emberLifeMax: { type: 'slider', label: 'Ember Life Max (s)', min: 0.1, max: 12.0, step: 0.1, default: 12.0 },
+        emberOpacityMin: { type: 'slider', label: 'Ember Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
+        emberOpacityMax: { type: 'slider', label: 'Ember Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
         emberColorBoostMin: { type: 'slider', label: 'Ember Color Boost Min', min: 0.0, max: 2.0, step: 0.05, default: 1.70 },
         emberColorBoostMax: { type: 'slider', label: 'Ember Color Boost Max', min: 0.0, max: 3.0, step: 0.05, default: 2.85 },
         emberStartColor: { type: 'color', default: { r: 1.0, g: 0.8, b: 0.4 } },
         emberEndColor: { type: 'color', default: { r: 1.0, g: 0.2, b: 0.0 } },
-        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 0.95 },
-        emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 1.6 },
+        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 0.25 },
+        emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 2.65 },
         fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.7 },
-        emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 6.05 },
+        emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 1.5 },
         // Wind Influence remains generic; Light Intensity and Time Scale match scene
-        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
+        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 4.5 },
         lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
-        timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 3.0 },
+        timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 1.75 },
 
         // Indoor vs outdoor lifetime scaling (applied only when particles are fully indoors)
-        indoorLifeScale: { type: 'slider', label: 'Indoor Life Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.75 },
+        indoorLifeScale: { type: 'slider', label: 'Indoor Life Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.5 },
 
-        indoorTimeScale: { type: 'slider', label: 'Indoor Time Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.6 },
+        indoorTimeScale: { type: 'slider', label: 'Indoor Time Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.15 },
 
         // Weather guttering strength (spawn-time kill) for outdoor flames
-        weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 1.55 },
-        weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 1.15 },
+        weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.5 },
+        weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.5 },
 
         // Heat Distortion Controls
-        heatDistortionEnabled: { type: 'checkbox', label: 'Enable Heat Haze', default: false },
-        heatDistortionIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 0.05, step: 0.001, default: 0.015 },
-        heatDistortionFrequency: { type: 'slider', label: 'Frequency', min: 1.0, max: 20.0, step: 0.5, default: 8.0 },
-        heatDistortionSpeed: { type: 'slider', label: 'Speed', min: 0.1, max: 3.0, step: 0.1, default: 1.0 }
+        heatDistortionEnabled: { type: 'checkbox', label: 'Enable Heat Haze', default: true },
+        heatDistortionIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 0.05, step: 0.001, default: 0.05 },
+        heatDistortionFrequency: { type: 'slider', label: 'Frequency', min: 1.0, max: 20.0, step: 0.5, default: 20.0 },
+        heatDistortionSpeed: { type: 'slider', label: 'Speed', min: 0.1, max: 3.0, step: 0.1, default: 3.0 }
       }
     };
   }

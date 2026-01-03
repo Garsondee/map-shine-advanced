@@ -344,6 +344,13 @@ export class TweakpaneManager {
     });
 
     globalFolder.addButton({
+      title: 'Copy Changed This Session',
+      label: 'Debug'
+    }).on('click', async () => {
+      await this.copyChangedSettingsToClipboard();
+    });
+
+    globalFolder.addButton({
       title: 'Copy Current Settings',
       label: 'Debug'
     }).on('click', async () => {
@@ -1550,7 +1557,7 @@ export class TweakpaneManager {
 
       // Enabled flag vs schema default
       const defaultEnabled = effectData.schema.enabled ?? true;
-      const currentEnabled = params.enabled ?? defaultEnabled;
+      const currentEnabled = (params.enabled === undefined) ? defaultEnabled : params.enabled;
       if (this.valuesDiffer(currentEnabled, defaultEnabled)) {
         effectLines.push(`enabled = ${JSON.stringify(currentEnabled)}`);
       }
@@ -1562,7 +1569,8 @@ export class TweakpaneManager {
       for (const [paramId, paramDef] of Object.entries(schemaParams)) {
         if (paramId === 'enabled') continue;
         const defaultValue = paramDef.default;
-        const currentValue = params[paramId];
+        const rawCurrentValue = params[paramId];
+        const currentValue = (rawCurrentValue === undefined) ? defaultValue : rawCurrentValue;
 
         if (!this.valuesDiffer(currentValue, defaultValue, paramDef)) continue;
 
@@ -1582,6 +1590,77 @@ export class TweakpaneManager {
 
     if (!anyDifferences) {
       lines.push('All effects are currently at their schema default values.');
+    }
+
+    return lines.join('\n');
+  }
+
+  generateChangedSettingsDump() {
+    const lines = [];
+
+    const scene = canvas?.scene;
+    const sceneName = scene?.name || 'Unknown Scene';
+    const sceneId = scene?.id || 'unknown-id';
+
+    lines.push('Map Shine Advanced - Changed Effect Settings');
+    lines.push(`Scene: ${sceneName} (${sceneId})`);
+    lines.push(`Settings Mode: ${this.settingsMode}`);
+    lines.push(`User: ${game.user?.name || 'Unknown User'}`);
+    lines.push(`Timestamp: ${new Date().toISOString()}`);
+    lines.push('');
+
+    const dirtyByEffect = new Map();
+    for (const key of this.dirtyParams) {
+      const [effectId, paramId] = String(key).split('.');
+      if (!effectId || !paramId) continue;
+      if (!dirtyByEffect.has(effectId)) dirtyByEffect.set(effectId, new Set());
+      dirtyByEffect.get(effectId).add(paramId);
+    }
+
+    let anyDifferences = false;
+
+    for (const [effectId, effectData] of Object.entries(this.effectFolders)) {
+      if (!effectData || !effectData.schema) continue;
+
+      const dirtySet = dirtyByEffect.get(effectId);
+      if (!dirtySet || dirtySet.size === 0) continue;
+
+      const params = effectData.params || {};
+      const schemaParams = effectData.schema.parameters || {};
+
+      const effectLines = [];
+
+      const defaultEnabled = effectData.schema.enabled ?? true;
+      const currentEnabled = (params.enabled === undefined) ? defaultEnabled : params.enabled;
+      if (dirtySet.has('enabled') && this.valuesDiffer(currentEnabled, defaultEnabled)) {
+        effectLines.push(`enabled = ${JSON.stringify(currentEnabled)}`);
+      }
+
+      for (const [paramId, paramDef] of Object.entries(schemaParams)) {
+        if (paramId === 'enabled') continue;
+        if (!dirtySet.has(paramId)) continue;
+
+        const defaultValue = paramDef.default;
+        const rawCurrentValue = params[paramId];
+        const currentValue = (rawCurrentValue === undefined) ? defaultValue : rawCurrentValue;
+        if (!this.valuesDiffer(currentValue, defaultValue, paramDef)) continue;
+
+        const formatted = this.formatParamValue(paramId, currentValue, paramDef);
+        effectLines.push(`${paramId} = ${formatted}`);
+      }
+
+      if (effectLines.length > 0) {
+        anyDifferences = true;
+        lines.push(`--- Effect: ${effectId} ---`);
+        for (const l of effectLines) {
+          lines.push(l);
+        }
+        lines.push('');
+      }
+    }
+
+    if (!anyDifferences) {
+      lines.push('No changed controls currently differ from schema defaults.');
     }
 
     return lines.join('\n');
@@ -1633,20 +1712,41 @@ export class TweakpaneManager {
     if (a === b) return false;
     if (a == null || b == null) return a !== b;
 
+    // Some persisted scene flags can deserialize numeric values as strings.
+    // If the schema expects a numeric control, normalize numeric strings
+    // before comparing so we don't report false non-default values.
+    if (paramDef && (paramDef.type === 'slider' || paramDef.type === 'number')) {
+      if (typeof a === 'string' && a.trim() !== '' && isFinite(Number(a))) a = Number(a);
+      if (typeof b === 'string' && b.trim() !== '' && isFinite(Number(b))) b = Number(b);
+    }
+
     // For numeric parameters, treat tiny floating point differences as
     // equal so that 0.7 and 0.7000000000000001 do not register as
     // non-default.
     if (typeof a === 'number' && typeof b === 'number') {
       if (!isFinite(a) || !isFinite(b)) return a !== b;
 
-      let eps;
-      if (paramDef && typeof paramDef.step === 'number' && paramDef.step > 0) {
-        eps = paramDef.step / 10;
-      } else {
-        eps = 1e-4;
+      // Snap/round to the control's step grid if available; otherwise
+      // use the same default step as formatParamValue (0.01).
+      const step = (paramDef && typeof paramDef.step === 'number' && paramDef.step > 0)
+        ? paramDef.step
+        : 0.01;
+
+      let snappedA = a;
+      let snappedB = b;
+      if (step > 0) {
+        snappedA = Math.round(a / step) * step;
+        snappedB = Math.round(b / step) * step;
       }
 
-      return Math.abs(a - b) > eps;
+      // Crush tiny near-zero values to 0 (avoid -0 and 1e-17 noise).
+      const tiny = step / 100;
+      if (Math.abs(snappedA) < tiny) snappedA = 0;
+      if (Math.abs(snappedB) < tiny) snappedB = 0;
+
+      let eps;
+      eps = step / 10;
+      return Math.abs(snappedA - snappedB) > eps;
     }
 
     // Fallback: deep compare via JSON
@@ -1670,6 +1770,29 @@ export class TweakpaneManager {
       }
     } catch (error) {
       log.warn('Failed to copy non-default settings to clipboard, printing to console instead:', error);
+      console.log(dump);
+      ui.notifications.warn('Map Shine: Could not copy to clipboard. Dump printed to browser console.');
+    }
+  }
+
+  /**
+   * Copy the changed-this-session settings dump to the clipboard, with a console fallback
+   * @returns {Promise<void>}
+   * @public
+   */
+  async copyChangedSettingsToClipboard() {
+    const dump = this.generateChangedSettingsDump();
+
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(dump);
+        ui.notifications.info('Map Shine: Session changes copied to clipboard');
+        this.dirtyParams.clear();
+      } else {
+        throw new Error('Clipboard API not available');
+      }
+    } catch (error) {
+      log.warn('Failed to copy changed settings to clipboard, printing to console instead:', error);
       console.log(dump);
       ui.notifications.warn('Map Shine: Could not copy to clipboard. Dump printed to browser console.');
     }

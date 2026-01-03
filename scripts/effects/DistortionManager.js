@@ -370,7 +370,7 @@ export class DistortionManager extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        globalIntensity: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.8, label: 'Global Intensity' },
+        globalIntensity: { type: 'slider', min: 0, max: 2, step: 0.01, default: 2.0, label: 'Global Intensity' },
         debugMode: { type: 'boolean', default: false, label: 'Debug Mode' },
         debugShowMask: { type: 'boolean', default: false, label: 'Show Mask' }
       }

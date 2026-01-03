@@ -68,7 +68,7 @@ export class MaskDebugEffect extends EffectBase {
         enabled: { type: 'boolean', default: false },
         maskId: {
           label: 'Mask',
-          default: 'outdoors.scene',
+          default: 'fire.scene',
           options: options ?? undefined
         },
         sampleSpace: {

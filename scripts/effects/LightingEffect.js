@@ -103,12 +103,12 @@ export class LightingEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.2 },
-        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 1.0, label: 'Light Intensity' },
-        colorationStrength: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.5, label: 'Coloration Strength' },
-        wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 8.0, label: 'Wall Inset (px)' },
-        darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.6, label: 'Darkness Effect' },
-        outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.8, label: 'Outdoor Brightness' },
+        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 2.0 },
+        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Light Intensity' },
+        colorationStrength: { type: 'slider', min: 0, max: 3, step: 0.05, default: 3.0, label: 'Coloration Strength' },
+        wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
+        darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.65, label: 'Darkness Effect' },
+        outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.0, label: 'Outdoor Brightness' },
         debugShowLightBuffer: { type: 'boolean', default: false },
         debugLightBufferExposure: { type: 'number', default: 1.0 },
       }

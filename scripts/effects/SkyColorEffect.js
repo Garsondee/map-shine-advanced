@@ -190,22 +190,30 @@ export class SkyColorEffect extends EffectBase {
     dawn.parameters.dawnVignetteSoftness.default = 1.00;
     dawn.parameters.dawnGrainStrength.default = 0.00;
 
-    // Override Night UI defaults to match the tuned SkyColorEffect defaults
-    night.parameters.nightExposure.default = 1.00;
-    night.parameters.nightTemperature.default = -1.00;
-    night.parameters.nightTint.default = -0.25;
-    night.parameters.nightBrightness.default = 0.05;
-    night.parameters.nightContrast.default = 1.00;
-    night.parameters.nightSaturation.default = 0.50;
-    night.parameters.nightVibrance.default = 0.00;
-    night.parameters.nightLiftColor.default = { r: 0.00, g: 0.00, b: 0.00 };
+    // Override Day UI defaults to match the current tuned scene values
+    day.parameters.dayExposure.default = 0.50;
+    day.parameters.dayMasterGamma.default = 2.00;
+
+    // Override Dusk UI defaults to match the current tuned scene values
+    dusk.parameters.duskExposure.default = 0.70;
+    dusk.parameters.duskTemperature.default = 1.00;
+    dusk.parameters.duskBrightness.default = -0.05;
+    dusk.parameters.duskContrast.default = 0.90;
+    dusk.parameters.duskSaturation.default = 1.15;
+    dusk.parameters.duskVignetteStrength.default = 0.72;
+    dusk.parameters.duskVignetteSoftness.default = 1.00;
+
+    // Override Night UI defaults to match the current tuned scene values
+    night.parameters.nightExposure.default = 0.00;
+    night.parameters.nightTemperature.default = -0.50;
+    night.parameters.nightTint.default = 0.00;
+    night.parameters.nightBrightness.default = 0.00;
+    night.parameters.nightSaturation.default = 0.33;
+    night.parameters.nightVibrance.default = -0.58;
     night.parameters.nightGammaColor.default = { r: 1.00, g: 1.00, b: 1.00 };
-    night.parameters.nightGainColor.default = { r: 1.00, g: 1.00, b: 1.00 };
-    night.parameters.nightMasterGamma.default = 0.50;
-    night.parameters.nightToneMapping.default = 0;
-    night.parameters.nightVignetteStrength.default = 1.00;
+    night.parameters.nightMasterGamma.default = 1.00;
+    night.parameters.nightVignetteStrength.default = 0.25;
     night.parameters.nightVignetteSoftness.default = 1.00;
-    night.parameters.nightGrainStrength.default = 0.00;
 
     return {
       enabled: true,
@@ -270,7 +278,7 @@ export class SkyColorEffect extends EffectBase {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.3,
+          default: 1.0,
           label: 'Intensity',
           throttle: 50
         },

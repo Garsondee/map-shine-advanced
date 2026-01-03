@@ -59,6 +59,7 @@ import { weatherController } from '../core/WeatherController.js';
 import { ControlsIntegration } from './controls-integration.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
 import { loadingOverlay } from '../ui/loading-overlay.js';
+import { stateApplier } from '../ui/state-applier.js';
 
 const log = createLogger('Canvas');
 
@@ -499,6 +500,11 @@ async function onCanvasReady(canvas) {
   if (!sceneSettings.isEnabled(scene)) {
     log.debug(`Scene not enabled for Map Shine, initializing UI-only mode: ${scene.name}`);
 
+    try {
+      if (window.MapShine) window.MapShine.stateApplier = stateApplier;
+    } catch (e) {
+    }
+
     if (!uiManager) {
       try {
         uiManager = new TweakpaneManager();
@@ -621,6 +627,11 @@ function onCanvasTearDown(canvas) {
 async function createThreeCanvas(scene) {
   // Cleanup existing canvas if present
   destroyThreeCanvas();
+
+  try {
+    if (window.MapShine) window.MapShine.stateApplier = stateApplier;
+  } catch (e) {
+  }
 
   const myGen = ++createThreeCanvasGeneration;
   const isStale = () => myGen !== createThreeCanvasGeneration;
@@ -1372,6 +1383,16 @@ async function createThreeCanvas(scene) {
       });
     } catch (e) {
       // Ignore wait errors
+    }
+
+    try {
+      const controlHour = window.MapShine?.controlPanel?.controlState?.timeOfDay;
+      const hour = Number.isFinite(controlHour) ? controlHour : Number(weatherController?.timeOfDay);
+      if (Number.isFinite(hour)) {
+        await stateApplier.applyTimeOfDay(hour, false, true);
+      }
+    } catch (e) {
+      log.debug('Time refresh jiggle failed:', e);
     }
 
     try {

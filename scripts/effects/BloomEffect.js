@@ -70,11 +70,11 @@ export class BloomEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        strength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 0.3 },
-        radius: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.15 },
-        threshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0 },
+        strength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 0.27 },
+        radius: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.32 },
+        threshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.98 },
         tintColor: { type: 'color', default: { r: 1, g: 1, b: 1 } },
-        blendOpacity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.8 },
+        blendOpacity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0 },
         // Tweakpane expects an options map: label -> value
         blendMode: {
           type: 'select',

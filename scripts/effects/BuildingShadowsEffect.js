@@ -138,7 +138,7 @@ export class BuildingShadowsEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.4
+          default: 0.75
         },
         length: {
           type: 'slider',
@@ -146,7 +146,7 @@ export class BuildingShadowsEffect extends EffectBase {
           min: 0.0,
           max: 0.3,
           step: 0.005,
-          default: 0.075
+          default: 0.06
         },
         quality: {
           type: 'slider',
@@ -154,7 +154,7 @@ export class BuildingShadowsEffect extends EffectBase {
           min: 8,
           max: 128,
           step: 1,
-          default: 48
+          default: 80
         },
         sunLatitude: {
           type: 'slider',
@@ -162,7 +162,7 @@ export class BuildingShadowsEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.1
+          default: 0.03
         },
         blurStrength: {
           type: 'slider',
@@ -170,7 +170,7 @@ export class BuildingShadowsEffect extends EffectBase {
           min: 0.0,
           max: 2.0,
           step: 0.05,
-          default: 0.7
+          default: 0.3
         },
         sunriseTime: {
           type: 'slider',
@@ -178,7 +178,7 @@ export class BuildingShadowsEffect extends EffectBase {
           min: 0.0,
           max: 24.0,
           step: 0.1,
-          default: 6.0
+          default: 8.0
         },
         sunsetTime: {
           type: 'slider',

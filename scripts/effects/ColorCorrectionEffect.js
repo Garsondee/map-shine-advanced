@@ -99,7 +99,7 @@ export class ColorCorrectionEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        exposure: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.85 },
+        exposure: { type: 'slider', min: 0, max: 5, step: 0.01, default: 1.0 },
         temperature: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
         tint: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
         
@@ -111,7 +111,7 @@ export class ColorCorrectionEffect extends EffectBase {
         liftColor: { type: 'color', default: { r: 0, g: 0, b: 0 } },
         gammaColor: { type: 'color', default: { r: 0.5, g: 0.5, b: 0.5 } },
         gainColor: { type: 'color', default: { r: 1, g: 1, b: 1 } },
-        masterGamma: { type: 'slider', min: 0.1, max: 3, step: 0.01, default: 2.5 },
+        masterGamma: { type: 'slider', min: 0.1, max: 3, step: 0.01, default: 2.0 },
         
         toneMapping: { 
           type: 'list', 

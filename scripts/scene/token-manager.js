@@ -146,6 +146,33 @@ export class TokenManager {
       if (!this._darknessTint) this._darknessTint = new THREE.Color(1, 1, 1);
       if (!this._ambientTint) this._ambientTint = new THREE.Color(1, 1, 1);
 
+      // If LightingEffect is active, token lighting is handled by the lighting composite.
+      // Keep token base colors neutral so lights can punch through the global darkness.
+      try {
+        const le = window.MapShine?.lightingEffect;
+        if (le && le.enabled) {
+          const globalTint = this._globalTint;
+          globalTint.setRGB(1, 1, 1);
+
+          const tintKey = 0xffffff;
+          if (!this._tintDirty && tintKey === this._lastTintKey) {
+            return;
+          }
+
+          this._lastTintKey = tintKey;
+          this._tintDirty = false;
+
+          for (const data of this.tokenSprites.values()) {
+            const { sprite } = data;
+            if (sprite && sprite.material) {
+              sprite.material.color.copy(globalTint);
+            }
+          }
+          return;
+        }
+      } catch (_) {
+      }
+
       const globalTint = this._globalTint;
       globalTint.setRGB(1, 1, 1);
 

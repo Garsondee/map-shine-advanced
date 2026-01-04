@@ -443,6 +443,25 @@ export class ControlsIntegration {
     const activeLayerName = canvas.activeLayer?.constructor?.name || canvas.activeLayer?.name || '';
     const isWallsActive = activeLayerName === 'WallsLayer' || activeLayerName === 'walls';
 
+    try {
+      const wallManager = window.MapShine?.wallManager;
+      if (wallManager?.updateVisibility) {
+        wallManager.updateVisibility();
+      }
+    } catch (_) {
+    }
+
+    try {
+      if (!isWallsActive) {
+        const im = window.MapShine?.interactionManager;
+        const preview = im?.wallDraw?.previewLine;
+        if (preview && preview.visible) {
+          preview.visible = false;
+        }
+      }
+    } catch (_) {
+    }
+
     if (isWallsActive) {
       if (this._wallsAreTransparent) {
         for (const wall of canvas.walls.placeables) this._restoreWallVisuals(wall);

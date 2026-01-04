@@ -2072,7 +2072,18 @@ export class PlayerLightEffect extends EffectBase {
 
     const coneLenPx = coneLenU / Math.max(pxToUnits, 1e-6);
     const widthScale = Math.max(0.001, this.params.flashlightBeamWidthScale ?? 1.0);
-    const widthPx = Math.tan(halfAngle) * coneLenPx * 2 * widthScale;
+    // Keep beam width stable regardless of cursor distance.
+    // Previously widthPx scaled with coneLenPx, which tracks the aim distance, causing the beam to widen
+    // as the focus point moved away from the token.
+    // Use a fixed reference length based on the configured beam length (still clamped by wall distance)
+    // so the flashlight always originates from a single point.
+    // IMPORTANT: width should track the *beam* length setting, not the cone max reach override.
+    // The cone max is intentionally inflated (see update(): flashlightLengthUnits * 4.0) to allow aiming
+    // far, but using it for width makes the beam start extremely wide.
+    const beamWidthLenU = Math.max(0.001, baseBeamLenU);
+    const beamRefLenU = blocked ? Math.min(edgeWallDistanceU, beamWidthLenU) : beamWidthLenU;
+    const beamRefLenPx = beamRefLenU / Math.max(pxToUnits, 1e-6);
+    const widthPx = Math.tan(halfAngle) * beamRefLenPx * 2 * widthScale;
     const wallT = (coneLenU > 0.0001) ? Math.max(0, Math.min(1, edgeWallDistanceU / coneLenU)) : 0.0;
 
     const beamMesh = this._flashlightBeamMesh;

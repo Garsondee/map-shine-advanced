@@ -311,8 +311,38 @@ export class TileManager {
       this._tempAmbient = new THREE.Color();
     }
     const globalTint = this._globalTint.set(1, 1, 1);
-    
+
+    let skipDarknessTint = false;
+
+    // If LightingEffect is active, tile lighting is handled by the lighting composite.
+    // Keep tile base colors neutral so lights can punch through the global darkness.
     try {
+      const le = window.MapShine?.lightingEffect;
+      if (le && le.enabled) {
+        globalTint.set(1, 1, 1);
+        skipDarknessTint = true;
+
+        const tintKey = 0xffffff;
+        if (this._tintDirty || tintKey !== this._lastTintKey) {
+          this._lastTintKey = tintKey;
+          this._tintDirty = false;
+
+          for (const data of this.tileSprites.values()) {
+            const { sprite } = data;
+            if (sprite && sprite.material) {
+              sprite.material.color.copy(globalTint);
+            }
+          }
+        }
+
+        // Store global tint for window light application (avoid per-tile cloning)
+        this._frameGlobalTint = globalTint;
+        // Continue with occlusion updates below; tinting is handled.
+      }
+    } catch (_) {
+    }
+    
+    if (!skipDarknessTint) try {
       const scene = canvas?.scene;
       const env = canvas?.environment;
       
@@ -353,19 +383,21 @@ export class TileManager {
       // Fallback to white if environment lookup fails
     }
 
-    const tr = Math.max(0, Math.min(255, (globalTint.r * 255 + 0.5) | 0));
-    const tg = Math.max(0, Math.min(255, (globalTint.g * 255 + 0.5) | 0));
-    const tb = Math.max(0, Math.min(255, (globalTint.b * 255 + 0.5) | 0));
-    const tintKey = (tr << 16) | (tg << 8) | tb;
+    if (!skipDarknessTint) {
+      const tr = Math.max(0, Math.min(255, (globalTint.r * 255 + 0.5) | 0));
+      const tg = Math.max(0, Math.min(255, (globalTint.g * 255 + 0.5) | 0));
+      const tb = Math.max(0, Math.min(255, (globalTint.b * 255 + 0.5) | 0));
+      const tintKey = (tr << 16) | (tg << 8) | tb;
 
-    if (this._tintDirty || tintKey !== this._lastTintKey) {
-      this._lastTintKey = tintKey;
-      this._tintDirty = false;
+      if (this._tintDirty || tintKey !== this._lastTintKey) {
+        this._lastTintKey = tintKey;
+        this._tintDirty = false;
 
-      for (const data of this.tileSprites.values()) {
-        const { sprite } = data;
-        if (!sprite.userData.isOverhead && sprite.material) {
-          sprite.material.color.copy(globalTint);
+        for (const data of this.tileSprites.values()) {
+          const { sprite } = data;
+          if (!sprite.userData.isOverhead && sprite.material) {
+            sprite.material.color.copy(globalTint);
+          }
         }
       }
     }
@@ -385,7 +417,7 @@ export class TileManager {
         // as the main LightingEffect composite (otherwise outdoor roofs stay too
         // bright as darkness increases).
         let overheadTint = globalTint;
-        try {
+        if (!skipDarknessTint) try {
           const le = window.MapShine?.lightingEffect;
           if (le && le.params && typeof le.params.outdoorBrightness === 'number' && weatherController && typeof weatherController.getRoofMaskIntensity === 'function') {
             const d = canvas.dimensions;
@@ -516,8 +548,7 @@ export class TileManager {
     if (!wle.params.lightOverheadTiles) {
       return;
     }
-    // Allow the effect to work even without a window mask if intensity > 0.9 (debug mode)
-    if (!wle.params.hasWindowMask && wle.params.overheadLightIntensity <= 0.9) {
+    if (!wle.params.hasWindowMask) {
       return;
     }
     if (!wle._enabled) return;
@@ -574,11 +605,6 @@ export class TileManager {
         sprite.material.color.r = Math.min(1.5, this._tempWindowOverheadBase.r + lightSample.r * intensity);
         sprite.material.color.g = Math.min(1.5, this._tempWindowOverheadBase.g + lightSample.g * intensity);
         sprite.material.color.b = Math.min(1.5, this._tempWindowOverheadBase.b + lightSample.b * intensity);
-      } else if (!wle.params.hasWindowMask && wle.params.overheadLightIntensity > 0.9) {
-        // Debug mode: when intensity is maxed, tint all overhead tiles slightly to verify the system works
-        sprite.material.color.r = Math.min(1.5, baseColor.r + 0.3);
-        sprite.material.color.g = Math.min(1.5, baseColor.g + 0.1);
-        sprite.material.color.b = Math.min(1.5, baseColor.b + 0.0);
       }
       // If no window light, the global tint is already applied - no action needed
     }
@@ -730,7 +756,30 @@ export class TileManager {
       }
     }
 
-    const finalBrightness = shaped * indoorFactor * wle.params.intensity;
+    let darkness = 0.0;
+    try {
+      const le = window.MapShine?.lightingEffect;
+      if (le && typeof le.getEffectiveDarkness === 'function') {
+        darkness = le.getEffectiveDarkness();
+      } else if (typeof canvas?.environment?.darknessLevel === 'number') {
+        darkness = canvas.environment.darknessLevel;
+      } else if (typeof canvas?.scene?.environment?.darknessLevel === 'number') {
+        darkness = canvas.scene.environment.darknessLevel;
+      }
+    } catch (_) {
+    }
+
+    darkness = (typeof darkness === 'number' && Number.isFinite(darkness))
+      ? Math.max(0.0, Math.min(1.0, darkness))
+      : 0.0;
+
+    const nightDimming = (typeof wle.params?.nightDimming === 'number' && Number.isFinite(wle.params.nightDimming))
+      ? Math.max(0.0, Math.min(1.0, wle.params.nightDimming))
+      : 1.0;
+
+    const envFactor = 1.0 - Math.max(0.0, Math.min(1.0, darkness * nightDimming));
+
+    const finalBrightness = shaped * indoorFactor * wle.params.intensity * envFactor;
 
     // Return the light color (from params) scaled by brightness
     const color = wle.params.color;
@@ -990,6 +1039,18 @@ export class TileManager {
     const bypassEffects = !!bypassFlag;
     const wasBypass = !!sprite.userData.bypassEffects;
     sprite.userData.bypassEffects = bypassEffects;
+
+    if (bypassEffects) {
+      try {
+        if (!this._warnedBypassTiles) this._warnedBypassTiles = new Set();
+        const id = tileDoc?.id;
+        if (id && !this._warnedBypassTiles.has(id)) {
+          this._warnedBypassTiles.add(id);
+          log.warn(`Tile has bypassEffects enabled (will ignore post-processing): ${id}`);
+        }
+      } catch (_) {
+      }
+    }
 
     // If bypass is enabled, render ONLY on the overlay layer so the tile is excluded
     // from the main scene render (and therefore from post-processing).

@@ -1711,16 +1711,21 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     }
   }
 
-  // --- Lighting / Tone Mapping Settings (Global & Post) ---
   if (lightingEffect) {
     const lightingSchema = LightingEffect.getControlSchema();
 
     const onLightingUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
         lightingEffect.enabled = value;
+        if (lightingEffect.params && Object.prototype.hasOwnProperty.call(lightingEffect.params, 'enabled')) {
+          lightingEffect.params.enabled = value;
+        }
         log.debug(`Lighting effect ${value ? 'enabled' : 'disabled'}`);
       } else if (lightingEffect.params && Object.prototype.hasOwnProperty.call(lightingEffect.params, paramId)) {
         lightingEffect.params[paramId] = value;
+        if (lightingEffect.params && Object.prototype.hasOwnProperty.call(lightingEffect.params, 'enabled')) {
+          lightingEffect.enabled = lightingEffect.params.enabled !== false;
+        }
         log.debug(`Lighting.${paramId} = ${value}`);
       }
     };

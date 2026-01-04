@@ -2641,16 +2641,14 @@ export class InteractionManager {
             const isClick = radiusPixels < 10;
 
             if (isClick) {
-                const distance = canvas.dimensions?.distance || 5;
-                dim = distance * 8; // Default dim
-                bright = distance * 4; // Default bright
-            } else {
-                // Convert Pixel Radius to Distance Units
-                // dim = radius * (distance / size)
-                const conversion = canvas.dimensions.distance / canvas.dimensions.size;
-                dim = radiusPixels * conversion;
-                bright = dim / 2;
+                return;
             }
+
+            // Convert Pixel Radius to Distance Units
+            // dim = radius * (distance / size)
+            const conversion = canvas.dimensions.distance / canvas.dimensions.size;
+            dim = radiusPixels * conversion;
+            bright = dim / 2;
 
             const data = {
                 x: startF.x,
@@ -3031,6 +3029,7 @@ export class InteractionManager {
           // Filter for tokens and walls
           const tokensToDelete = [];
           const wallsToDelete = [];
+          const lightsToDelete = [];
           const staleIds = [];
 
           for (const id of this.selection) {
@@ -3047,6 +3046,22 @@ export class InteractionManager {
               }
 
               tokensToDelete.push(tokenId);
+              continue;
+            }
+
+            if (this.lightIconManager && this.lightIconManager.lights.has(id)) {
+              const lightDoc = canvas.lighting?.get?.(id)?.document ?? canvas.scene?.lights?.get?.(id);
+              const lightDocExists = !!lightDoc;
+              if (!lightDocExists) {
+                staleIds.push(id);
+                continue;
+              }
+
+              if (!lightDoc.canUserModify(game.user, 'delete')) {
+                continue;
+              }
+
+              lightsToDelete.push(id);
               continue;
             }
 
@@ -3069,6 +3084,11 @@ export class InteractionManager {
           if (wallsToDelete.length > 0) {
             log.info(`Deleting ${wallsToDelete.length} walls`);
             await canvas.scene.deleteEmbeddedDocuments('Wall', wallsToDelete);
+          }
+
+          if (lightsToDelete.length > 0) {
+            log.info(`Deleting ${lightsToDelete.length} lights`);
+            await canvas.scene.deleteEmbeddedDocuments('AmbientLight', lightsToDelete);
           }
 
           this.clearSelection();

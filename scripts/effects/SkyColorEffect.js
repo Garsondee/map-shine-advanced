@@ -8,6 +8,9 @@ export class SkyColorEffect extends EffectBase {
   constructor() {
     super('sky-color', RenderLayers.POST_PROCESSING, 'low');
 
+    // Must run AFTER LightingEffect (priority=1) or it will be overwritten by
+    // the lighting composite.
+    // Also run well before ColorCorrectionEffect (priority=100).
     this.priority = 5;
     
     this.enabled = true;
@@ -335,6 +338,8 @@ export class SkyColorEffect extends EffectBase {
         tDiffuse: { value: null },
         tOutdoorsMask: { value: null },
         uHasOutdoorsMask: { value: 0.0 },
+        tRoofAlpha: { value: null },
+        uHasRoofAlpha: { value: 0.0 },
         tCloudTop: { value: null },
         uHasCloudTop: { value: 0.0 },
         uTime: { value: 0.0 },
@@ -372,6 +377,8 @@ export class SkyColorEffect extends EffectBase {
         uniform sampler2D tDiffuse;
         uniform sampler2D tOutdoorsMask;
         uniform float uHasOutdoorsMask;
+        uniform sampler2D tRoofAlpha;
+        uniform float uHasRoofAlpha;
         uniform sampler2D tCloudTop;
         uniform float uHasCloudTop;
         uniform vec2 uResolution;
@@ -431,12 +438,17 @@ export class SkyColorEffect extends EffectBase {
             outdoors = texture2D(tOutdoorsMask, vUv).r;
           }
 
+          float roofAlpha = 0.0;
+          if (uHasRoofAlpha > 0.5) {
+            roofAlpha = texture2D(tRoofAlpha, vUv).a;
+          }
+
           float cloudTopAlpha = 0.0;
           if (uHasCloudTop > 0.5) {
             cloudTopAlpha = texture2D(tCloudTop, vUv).a;
           }
 
-          float gradeMask = outdoors;
+          float gradeMask = max(outdoors, roofAlpha);
 
           if (uIntensity <= 0.0 || gradeMask <= 0.0) {
             gl_FragColor = sceneColor;
@@ -647,6 +659,20 @@ export class SkyColorEffect extends EffectBase {
           u.uHasOutdoorsMask.value = 1.0;
         } else {
           u.uHasOutdoorsMask.value = 0.0;
+        }
+      }
+
+      const roofTex = mm ? mm.getTexture('roofAlpha.screen') : null;
+      if (roofTex) {
+        u.tRoofAlpha.value = roofTex;
+        u.uHasRoofAlpha.value = 1.0;
+      } else {
+        const le2 = window.MapShine?.lightingEffect;
+        if (le2 && le2.roofAlphaTarget) {
+          u.tRoofAlpha.value = le2.roofAlphaTarget.texture;
+          u.uHasRoofAlpha.value = 1.0;
+        } else {
+          u.uHasRoofAlpha.value = 0.0;
         }
       }
     } catch (e) {

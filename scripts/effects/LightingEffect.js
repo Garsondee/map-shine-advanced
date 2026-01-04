@@ -45,8 +45,12 @@ export class LightingEffect extends EffectBase {
 
       wallInsetPx: 6.0,
 
+      negativeDarknessStrength: 1.0, // Controls subtractive darkness strength
+      darknessPunchGain: 2.0,
+
       debugShowLightBuffer: undefined,
       debugLightBufferExposure: undefined,
+      debugShowDarknessBuffer: undefined,
     };
 
     this.lights = new Map(); 
@@ -98,19 +102,29 @@ export class LightingEffect extends EffectBase {
           name: 'darkness',
           label: 'Darkness Response',
           type: 'inline',
-          parameters: ['darknessEffect', 'outdoorBrightness']
+          parameters: ['darknessEffect', 'outdoorBrightness', 'negativeDarknessStrength', 'darknessPunchGain']
+        },
+        {
+          name: 'debug',
+          label: 'Debug',
+          type: 'folder',
+          expanded: false,
+          parameters: ['debugShowLightBuffer', 'debugLightBufferExposure', 'debugShowDarknessBuffer']
         },
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
         globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 2.0 },
         lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Light Intensity' },
-        colorationStrength: { type: 'slider', min: 0, max: 3, step: 0.05, default: 3.0, label: 'Coloration Strength' },
+        colorationStrength: { type: 'slider', min: 0, max: 500, step: 0.05, default: 3.0, label: 'Coloration Strength' },
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
         darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.65, label: 'Darkness Effect' },
         outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.0, label: 'Outdoor Brightness' },
+        negativeDarknessStrength: { type: 'slider', min: 0, max: 3, step: 0.1, default: 1.0, label: 'Negative Darkness Strength' },
+        darknessPunchGain: { type: 'slider', min: 0, max: 10, step: 0.1, default: 2.0, label: 'Darkness Punch Gain' },
         debugShowLightBuffer: { type: 'boolean', default: false },
         debugLightBufferExposure: { type: 'number', default: 1.0 },
+        debugShowDarknessBuffer: { type: 'boolean', default: false },
       }
     };
   }
@@ -172,6 +186,8 @@ export class LightingEffect extends EffectBase {
         uTreeShadowLength: { value: 0.08 },
         uCompositeTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         uOutdoorBrightness: { value: 1.5 },
+        uNegativeDarknessStrength: { value: 1.0 },
+        uDarknessPunchGain: { value: 2.0 },
       },
       vertexShader: `
         varying vec2 vUv;
@@ -212,6 +228,8 @@ export class LightingEffect extends EffectBase {
         uniform float uTreeShadowLength;
         uniform vec2  uCompositeTexelSize;
         uniform float uOutdoorBrightness;
+        uniform float uNegativeDarknessStrength;
+        uniform float uDarknessPunchGain;
         varying vec2 vUv;
 
         vec3 adjustSaturation(vec3 color, float value) {
@@ -236,7 +254,10 @@ export class LightingEffect extends EffectBase {
           vec4 roofSample = texture2D(tRoofAlpha, vUv);
 
           float master = max(uLightIntensity, 0.0);
-          vec3 ambient = mix(uAmbientBrightest, uAmbientDarkness, uDarknessLevel) * max(uGlobalIllumination, 0.0);
+          float baseDarknessLevel = clamp(uDarknessLevel, 0.0, 1.0);
+          vec3 ambientDay = uAmbientBrightest * max(uGlobalIllumination, 0.0);
+          vec3 ambientNight = uAmbientDarkness * max(uGlobalIllumination, 0.0);
+          vec3 ambient = mix(ambientDay, ambientNight, baseDarknessLevel);
 
           float roofAlpha = roofSample.a;
           float lightVisibility = 1.0 - roofAlpha;
@@ -281,6 +302,9 @@ export class LightingEffect extends EffectBase {
 
           if (uHasOutdoorsMask > 0.5) {
             float outdoorStrength = texture2D(tOutdoorsMask, vUv).r;
+            // Roof pixels should behave like outdoors for global outdoor brightness.
+            // Otherwise roofs drawn over indoor areas will ignore the outdoor day/night response.
+            outdoorStrength = max(outdoorStrength, roofAlpha);
             shadowFactor = mix(1.0, shadowFactor, outdoorStrength);
             buildingFactor = mix(1.0, buildingFactor, outdoorStrength);
             bushFactor = mix(1.0, bushFactor, outdoorStrength);
@@ -302,10 +326,26 @@ export class LightingEffect extends EffectBase {
 
           vec3 safeLights = max(shadedLights, vec3(0.0));
           float lightI = max(max(safeLights.r, safeLights.g), safeLights.b);
+
           vec3 totalIllumination = shadedAmbient + vec3(lightI) * master;
 
+          // Mask-carving punch-through: compute a "punched" darkness mask by
+          // letting positive light reduce (carve holes in) the negative darkness mask.
           float dMask = clamp(darknessMask, 0.0, 1.0);
-          totalIllumination *= (1.0 - dMask);
+          float lightTermI = max(lightI * master, 0.0);
+          float punch = 1.0 - exp(-lightTermI * max(uDarknessPunchGain, 0.0));
+
+          // Also allow positive light to locally reduce the global (scene) darkness level,
+          // so normal lights can "punch through" night darkness even when there are no
+          // Darkness Source lights contributing to tDarkness.
+          float localDarknessLevel = clamp(baseDarknessLevel * (1.0 - punch * max(uNegativeDarknessStrength, 0.0)), 0.0, 1.0);
+          vec3 shadedAmbientPunched = mix(ambientDay, ambientNight, localDarknessLevel) * combinedShadowFactor;
+
+          float punchedMask = clamp(dMask - punch * max(uNegativeDarknessStrength, 0.0), 0.0, 1.0);
+
+          // Apply darkness only to ambient so direct lights can punch through.
+          vec3 ambientAfterDark = shadedAmbientPunched * (1.0 - punchedMask);
+          totalIllumination = ambientAfterDark + vec3(lightI) * master;
 
           bool badIllum = (totalIllumination.r != totalIllumination.r) ||
                           (totalIllumination.g != totalIllumination.g) ||
@@ -314,20 +354,24 @@ export class LightingEffect extends EffectBase {
             totalIllumination = ambient;
           }
 
-          vec3 minIllum = ambient * 0.1;
+          vec3 minIllum = mix(ambientDay, ambientNight, localDarknessLevel) * 0.1;
           totalIllumination = max(totalIllumination, minIllum);
 
           vec3 litColor = baseColor.rgb * totalIllumination;
 
           float reflection = perceivedBrightness(baseColor.rgb);
           vec3 coloration = shadedLights * master * reflection * max(uColorationStrength, 0.0);
-          coloration *= (1.0 - dMask);
+          // Coloration should not be suppressed by negative darkness; punch-through
+          // is handled via the punchedMask on ambient.
           litColor += coloration;
 
           if (uHasOutdoorsMask > 0.5) {
             float outdoorStrength = texture2D(tOutdoorsMask, vUv).r;
+            // Roof pixels should behave like outdoors for global outdoor brightness.
+            // Otherwise roofs drawn over indoor areas will ignore the outdoor day/night response.
+            outdoorStrength = max(outdoorStrength, roofAlpha);
             float dayBoost = uOutdoorBrightness;
-            float nightDim = 2.0 - uOutdoorBrightness;
+            float nightDim = clamp(2.0 - uOutdoorBrightness, 0.0, 1.0);
             float outdoorMultiplier = mix(dayBoost, nightDim, uDarknessLevel);
             float finalMultiplier = mix(1.0, outdoorMultiplier, outdoorStrength);
             litColor *= finalMultiplier;
@@ -337,16 +381,20 @@ export class LightingEffect extends EffectBase {
           vec4 cloudTop = texture2D(tCloudTop, vUv);
           vec3 cloudRgb = cloudTop.rgb;
           float cloudDark = mix(1.0, 0.25, clamp(uDarknessLevel, 0.0, 1.0));
+
           if (uHasOutdoorsMask > 0.5) {
             float outdoorStrength2 = texture2D(tOutdoorsMask, vUv).r;
+            // Roof pixels should be treated as outdoors for cloud-top grading.
+            outdoorStrength2 = max(outdoorStrength2, roofAlpha);
             float dayBoost2 = uOutdoorBrightness;
-            float nightDim2 = 2.0 - uOutdoorBrightness;
+            float nightDim2 = clamp(2.0 - uOutdoorBrightness, 0.0, 1.0);
             float outdoorMultiplier2 = mix(dayBoost2, nightDim2, uDarknessLevel);
             float cloudOutdoorMult = mix(1.0, outdoorMultiplier2, outdoorStrength2);
             cloudRgb *= cloudOutdoorMult;
           }
+
           cloudRgb *= cloudDark;
-          cloudRgb *= (1.0 - dMask);
+          cloudRgb *= (1.0 - min(punchedMask * 2.0, 1.0));
           litColor = mix(litColor, cloudRgb, cloudTop.a);
 
           gl_FragColor = vec4(litColor, baseColor.a);
@@ -386,6 +434,46 @@ export class LightingEffect extends EffectBase {
       transparent: false,
     });
     this.debugLightBufferMaterial.toneMapped = false;
+
+    this.debugDarknessBufferMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tDarkness: { value: null },
+        uStrength: { value: 1.0 },
+        tLight: { value: null },
+        uGain: { value: 2.0 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tDarkness;
+        uniform float uStrength;
+        uniform sampler2D tLight;
+        uniform float uGain;
+        varying vec2 vUv;
+
+        void main() {
+          float d = texture2D(tDarkness, vUv).r;
+          vec3 lrgb = texture2D(tLight, vUv).rgb;
+          float li = max(max(lrgb.r, lrgb.g), lrgb.b);
+          float punch = 1.0 - exp(-max(li, 0.0) * max(uGain, 0.0));
+          float punched = clamp(d - punch * max(uStrength, 0.0), 0.0, 1.0);
+          // Diagnostic view:
+          // R: final punched mask
+          // G: original darkness mask
+          // B: punch amount (from light buffer)
+          gl_FragColor = vec4(punched, d, punch, 1.0);
+        }
+      `,
+      depthWrite: false,
+      depthTest: false,
+      transparent: false,
+    });
+    this.debugDarknessBufferMaterial.toneMapped = false;
 
     this._quadMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.compositeMaterial);
     this.quadScene.add(this._quadMesh);
@@ -533,18 +621,18 @@ export class LightingEffect extends EffectBase {
 
   onLightUpdate(doc, changes) {
     const targetDoc = this._mergeLightDocChanges(doc, changes);
-    console.debug('[LightingEffect] onLightUpdate', targetDoc.id, targetDoc.config?.negative, targetDoc.config);
-    if (targetDoc?.config?.negative) {
-      console.debug('[LightingEffect] Creating/Updating darkness source for', targetDoc.id);
+    const isNegative = (targetDoc?.config?.negative === true) || (targetDoc?.negative === true);
+    if (isNegative) {
       if (this.darknessSources.has(targetDoc.id)) {
         this.darknessSources.get(targetDoc.id).updateData(targetDoc);
       } else {
         const source = new ThreeDarknessSource(targetDoc);
         source.init();
+
         this.darknessSources.set(targetDoc.id, source);
         if (source.mesh && this.darknessScene) this.darknessScene.add(source.mesh);
-        console.debug('[LightingEffect] Added darkness mesh to scene', targetDoc.id);
       }
+
       if (this.lights.has(targetDoc.id)) {
         const source = this.lights.get(targetDoc.id);
         if (source?.mesh) this.lightScene?.remove(source.mesh);
@@ -655,6 +743,19 @@ export class LightingEffect extends EffectBase {
     u.uLightIntensity.value = this.params.lightIntensity;
     u.uColorationStrength.value = this.params.colorationStrength;
     u.uOutdoorBrightness.value = this.params.outdoorBrightness;
+    u.uNegativeDarknessStrength.value = this.params.negativeDarknessStrength;
+
+    if (u.uDarknessPunchGain) {
+      u.uDarknessPunchGain.value = this.params.darknessPunchGain;
+    }
+
+    if (this.debugDarknessBufferMaterial?.uniforms?.uStrength) {
+      this.debugDarknessBufferMaterial.uniforms.uStrength.value = this.params.negativeDarknessStrength;
+    }
+
+    if (this.debugDarknessBufferMaterial?.uniforms?.uGain) {
+      this.debugDarknessBufferMaterial.uniforms.uGain.value = this.params.darknessPunchGain;
+    }
 
     try {
       const env = canvas?.environment;
@@ -952,9 +1053,8 @@ export class LightingEffect extends EffectBase {
     if (this.lightScene && this.mainCamera) {
       const prevMask = this.mainCamera.layers.mask;
       try {
-        // Always include default layer 0 and our overlay layer during light accumulation.
-        this.mainCamera.layers.enable(0);
-        this.mainCamera.layers.enable(OVERLAY_THREE_LAYER);
+        // Render all light meshes regardless of layer configuration.
+        this.mainCamera.layers.enableAll();
         renderer.render(this.lightScene, this.mainCamera);
       } finally {
         this.mainCamera.layers.mask = prevMask;
@@ -966,7 +1066,13 @@ export class LightingEffect extends EffectBase {
     renderer.setClearColor(0x000000, 1);
     renderer.clear();
     if (this.darknessScene && this.mainCamera) {
-      renderer.render(this.darknessScene, this.mainCamera);
+      const prevMask2 = this.mainCamera.layers.mask;
+      try {
+        this.mainCamera.layers.enableAll();
+        renderer.render(this.darknessScene, this.mainCamera);
+      } finally {
+        this.mainCamera.layers.mask = prevMask2;
+      }
     }
 
     // 2. Composite: use lightTarget as tLight and roofAlphaTarget as tRoofAlpha.
@@ -1047,6 +1153,12 @@ export class LightingEffect extends EffectBase {
       this.debugLightBufferMaterial.uniforms.tLight.value = this.lightTarget.texture;
       this.debugLightBufferMaterial.uniforms.uExposure.value = this.params.debugLightBufferExposure ?? 1.0;
       this._quadMesh.material = this.debugLightBufferMaterial;
+    } else if (this.params?.debugShowDarknessBuffer && this._quadMesh && this.debugDarknessBufferMaterial) {
+      this.debugDarknessBufferMaterial.uniforms.tDarkness.value = this.darknessTarget.texture;
+      this.debugDarknessBufferMaterial.uniforms.uStrength.value = this.params.negativeDarknessStrength ?? 1.0;
+      this.debugDarknessBufferMaterial.uniforms.tLight.value = this.lightTarget.texture;
+      this.debugDarknessBufferMaterial.uniforms.uGain.value = this.params.darknessPunchGain ?? 2.0;
+      this._quadMesh.material = this.debugDarknessBufferMaterial;
     } else if (this._quadMesh) {
       this._quadMesh.material = this.compositeMaterial;
     }

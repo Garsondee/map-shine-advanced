@@ -77,16 +77,103 @@ export class WallManager {
    * @private
    */
   setupHooks() {
-    Hooks.on('createWall', (doc) => this.create(doc));
-    Hooks.on('updateWall', (doc, changes) => this.update(doc, changes));
-    Hooks.on('deleteWall', (doc) => this.remove(doc.id));
+    Hooks.on('createWall', (doc) => {
+      this.create(doc);
+      setTimeout(() => {
+        try {
+          this.updateVisibility();
+        } catch (_) {
+        }
+      }, 0);
+      this._requestLightingRefresh();
+    });
+    Hooks.on('updateWall', (doc, changes) => {
+      this.update(doc, changes);
+      setTimeout(() => {
+        try {
+          this.updateVisibility();
+        } catch (_) {
+        }
+      }, 0);
+      this._requestLightingRefresh();
+    });
+    Hooks.on('deleteWall', (doc) => {
+      this.remove(doc.id);
+      setTimeout(() => {
+        try {
+          this.updateVisibility();
+        } catch (_) {
+        }
+      }, 0);
+      this._requestLightingRefresh();
+    });
+  }
+
+  _shouldShowWallLines() {
+    try {
+      const active = canvas?.activeLayer;
+      const activeName = active?.options?.name || active?.name || active?.constructor?.name || '';
+      if (active === canvas?.walls) return true;
+      return activeName === 'WallsLayer' || activeName === 'walls';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _requestLightingRefresh() {
+    try {
+      const fc = window.MapShine?.frameCoordinator;
+      if (fc?.forcePerceptionUpdate) {
+        setTimeout(() => {
+          try {
+            fc.forcePerceptionUpdate();
+          } catch (_) {
+          }
+        }, 0);
+
+        setTimeout(() => {
+          try {
+            const le = window.MapShine?.lightingEffect;
+            if (le?.forceRebuildLightGeometriesFromWalls) {
+              le.forceRebuildLightGeometriesFromWalls();
+            }
+          } catch (_) {
+          }
+        }, 0);
+
+        return;
+      }
+    } catch (_) {
+    }
+
+    try {
+      if (canvas?.perception?.update) {
+        setTimeout(() => {
+          try {
+            canvas.perception.update({ refreshVision: true, refreshLighting: true });
+          } catch (_) {
+          }
+        }, 0);
+
+        setTimeout(() => {
+          try {
+            const le = window.MapShine?.lightingEffect;
+            if (le?.forceRebuildLightGeometriesFromWalls) {
+              le.forceRebuildLightGeometriesFromWalls();
+            }
+          } catch (_) {
+          }
+        }, 0);
+      }
+    } catch (_) {
+    }
   }
 
   /**
    * Update visibility based on current active layer state
    */
   updateVisibility() {
-    const showLines = canvas.walls?.active ?? false;
+    const showLines = this._shouldShowWallLines();
     this.setVisibility(showLines);
   }
 
@@ -139,7 +226,7 @@ export class WallManager {
     group.userData = { wallId: doc.id };
 
     // Check if lines should be visible (active layer)
-    const showLines = canvas.walls?.active ?? false;
+    const showLines = this._shouldShowWallLines();
 
     // Get Coordinates
     const c = dataOverride.c || doc.c;
@@ -378,6 +465,7 @@ export class WallManager {
       log.debug(`WallManager.update: Recreating wall ${doc.id}`);
       this.remove(doc.id);
       this.create(doc, changes);
+      this._requestLightingRefresh();
     } else {
       log.debug(`WallManager.update: Update skipped for ${doc.id} (no relevant changes)`);
     }

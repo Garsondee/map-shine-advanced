@@ -313,11 +313,7 @@ export class TextureManagerUI {
 
       const events = [
         'pointerdown',
-        'pointerup',
-        'pointermove',
         'mousedown',
-        'mouseup',
-        'mousemove',
         'click',
         'dblclick',
         'wheel'

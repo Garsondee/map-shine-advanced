@@ -85,11 +85,7 @@ export class EffectStackUI {
 
       const events = [
         'pointerdown',
-        'pointerup',
-        'pointermove',
         'mousedown',
-        'mouseup',
-        'mousemove',
         'click',
         'dblclick',
         'wheel'

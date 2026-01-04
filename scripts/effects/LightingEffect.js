@@ -11,7 +11,7 @@ import { weatherController } from '../core/WeatherController.js';
 
 import { ThreeLightSource } from './ThreeLightSource.js'; // Import the class above
 import { ThreeDarknessSource } from './ThreeDarknessSource.js';
-import { OVERLAY_THREE_LAYER } from './EffectComposer.js';
+import { OVERLAY_THREE_LAYER, ROPE_MASK_LAYER } from './EffectComposer.js';
 
 const log = createLogger('LightingEffect');
 
@@ -51,6 +51,7 @@ export class LightingEffect extends EffectBase {
       debugShowLightBuffer: undefined,
       debugLightBufferExposure: undefined,
       debugShowDarknessBuffer: undefined,
+      debugShowRopeMask: undefined,
     };
 
     this.lights = new Map(); 
@@ -61,6 +62,7 @@ export class LightingEffect extends EffectBase {
     this.darknessTarget = null; 
     this.roofAlphaTarget = null; 
     this.weatherRoofAlphaTarget = null;
+    this.ropeMaskTarget = null;
     this._quadMesh = null;
 
     this.outdoorsMask = null;
@@ -78,7 +80,8 @@ export class LightingEffect extends EffectBase {
     this._publishedRoofAlphaTex = null;
     this._publishedWeatherRoofAlphaTex = null;
     this._publishedOutdoorsTex = null;
-
+    this._publishedRopeMaskTex = null;
+    
     this._transparentTex = null;
   }
 
@@ -109,7 +112,7 @@ export class LightingEffect extends EffectBase {
           label: 'Debug',
           type: 'folder',
           expanded: false,
-          parameters: ['debugShowLightBuffer', 'debugLightBufferExposure', 'debugShowDarknessBuffer']
+          parameters: ['debugShowLightBuffer', 'debugLightBufferExposure', 'debugShowDarknessBuffer', 'debugShowRopeMask']
         },
       ],
       parameters: {
@@ -125,6 +128,7 @@ export class LightingEffect extends EffectBase {
         debugShowLightBuffer: { type: 'boolean', default: false },
         debugLightBufferExposure: { type: 'number', default: 1.0 },
         debugShowDarknessBuffer: { type: 'boolean', default: false },
+        debugShowRopeMask: { type: 'boolean', default: false },
       }
     };
   }
@@ -159,6 +163,8 @@ export class LightingEffect extends EffectBase {
         tLight: { value: null },   
         tDarkness: { value: null }, 
         tRoofAlpha: { value: null }, 
+        tRopeMask: { value: null },
+        tWindowLight: { value: null },
         tOverheadShadow: { value: null }, 
         tBuildingShadow: { value: null }, 
         tBushShadow: { value: null }, 
@@ -166,6 +172,9 @@ export class LightingEffect extends EffectBase {
         tCloudShadow: { value: null }, 
         tCloudTop: { value: null }, 
         tOutdoorsMask: { value: null }, 
+        uHasRopeMask: { value: 0.0 },
+        uHasWindowLight: { value: 0.0 },
+        uRopeWindowLightBoost: { value: 0.0 },
         uDarknessLevel: { value: 0.0 },
         uAmbientBrightest: { value: new THREE.Color(1,1,1) },
         uAmbientDarkness: { value: new THREE.Color(0.1, 0.1, 0.2) },
@@ -201,6 +210,8 @@ export class LightingEffect extends EffectBase {
         uniform sampler2D tLight;
         uniform sampler2D tDarkness;
         uniform sampler2D tRoofAlpha;
+        uniform sampler2D tRopeMask;
+        uniform sampler2D tWindowLight;
         uniform sampler2D tOverheadShadow;
         uniform sampler2D tBuildingShadow;
         uniform sampler2D tBushShadow;
@@ -208,6 +219,9 @@ export class LightingEffect extends EffectBase {
         uniform sampler2D tCloudShadow;
         uniform sampler2D tCloudTop;
         uniform sampler2D tOutdoorsMask;
+        uniform float uHasRopeMask;
+        uniform float uHasWindowLight;
+        uniform float uRopeWindowLightBoost;
         uniform float uDarknessLevel;
         uniform vec3 uAmbientBrightest;
         uniform vec3 uAmbientDarkness;
@@ -249,9 +263,14 @@ export class LightingEffect extends EffectBase {
 
         void main() {
           vec4 baseColor = texture2D(tDiffuse, vUv);
-          vec4 lightSample = texture2D(tLight, vUv); 
+          vec4 lightSample = texture2D(tLight, vUv);
           float darknessMask = clamp(texture2D(tDarkness, vUv).r, 0.0, 1.0);
           vec4 roofSample = texture2D(tRoofAlpha, vUv);
+
+          float ropeMask = 0.0;
+          if (uHasRopeMask > 0.5) {
+            ropeMask = clamp(texture2D(tRopeMask, vUv).a, 0.0, 1.0);
+          }
 
           float master = max(uLightIntensity, 0.0);
           float baseDarknessLevel = clamp(uDarknessLevel, 0.0, 1.0);
@@ -259,7 +278,8 @@ export class LightingEffect extends EffectBase {
           vec3 ambientNight = uAmbientDarkness * max(uGlobalIllumination, 0.0);
           vec3 ambient = mix(ambientDay, ambientNight, baseDarknessLevel);
 
-          float roofAlpha = roofSample.a;
+          float roofAlphaRaw = roofSample.a;
+          float roofAlpha = roofAlphaRaw * (1.0 - ropeMask);
           float lightVisibility = 1.0 - roofAlpha;
 
           float shadowTex = texture2D(tOverheadShadow, vUv).r;
@@ -292,9 +312,9 @@ export class LightingEffect extends EffectBase {
           float treeCoverage = texture2D(tTreeShadow, vUv).g;
           float treeSelfMask = clamp(treeCoverage, 0.0, 1.0) * clamp(uTreeSelfShadowStrength, 0.0, 1.0);
 
-          float shadowFactor = mix(rawShadowFactor, 1.0, roofAlpha);
-          float buildingFactor = mix(rawBuildingFactor, 1.0, roofAlpha);
-          float bushFactor = mix(rawBushFactor, 1.0, roofAlpha);
+          float shadowFactor = mix(rawShadowFactor, 1.0, roofAlphaRaw);
+          float buildingFactor = mix(rawBuildingFactor, 1.0, roofAlphaRaw);
+          float bushFactor = mix(rawBushFactor, 1.0, roofAlphaRaw);
           float treeFactor = rawTreeFactor;
 
           bushFactor = mix(bushFactor, 1.0, bushSelfMask);
@@ -302,9 +322,7 @@ export class LightingEffect extends EffectBase {
 
           if (uHasOutdoorsMask > 0.5) {
             float outdoorStrength = texture2D(tOutdoorsMask, vUv).r;
-            // Roof pixels should behave like outdoors for global outdoor brightness.
-            // Otherwise roofs drawn over indoor areas will ignore the outdoor day/night response.
-            outdoorStrength = max(outdoorStrength, roofAlpha);
+            outdoorStrength = max(outdoorStrength, roofAlphaRaw);
             shadowFactor = mix(1.0, shadowFactor, outdoorStrength);
             buildingFactor = mix(1.0, buildingFactor, outdoorStrength);
             bushFactor = mix(1.0, bushFactor, outdoorStrength);
@@ -316,7 +334,7 @@ export class LightingEffect extends EffectBase {
           float kd = clamp(uOverheadShadowAffectsLights, 0.0, 1.0);
           vec3 shadedAmbient = ambient * combinedShadowFactor;
 
-          vec3 baseLights = lightSample.rgb * lightVisibility;
+          vec3 baseLights = lightSample.rgb * lightVisibility * (1.0 - ropeMask);
           bool badLight = (baseLights.r != baseLights.r) || (baseLights.g != baseLights.g) || (baseLights.b != baseLights.b);
           if (badLight) {
             baseLights = vec3(0.0);
@@ -324,26 +342,27 @@ export class LightingEffect extends EffectBase {
 
           vec3 shadedLights = mix(baseLights, baseLights * combinedShadowFactor, kd);
 
+          vec3 ropeWindowLights = vec3(0.0);
+          if (uHasWindowLight > 0.5 && uRopeWindowLightBoost > 0.0001 && ropeMask > 0.001) {
+            float ropeLuma = perceivedBrightness(baseColor.rgb);
+            float ropeGate = smoothstep(0.25, 0.6, ropeLuma);
+            ropeWindowLights = texture2D(tWindowLight, vUv).rgb * max(uRopeWindowLightBoost, 0.0) * ropeMask * ropeGate;
+          }
+
           vec3 safeLights = max(shadedLights, vec3(0.0));
           float lightI = max(max(safeLights.r, safeLights.g), safeLights.b);
 
           vec3 totalIllumination = shadedAmbient + vec3(lightI) * master;
 
-          // Mask-carving punch-through: compute a "punched" darkness mask by
-          // letting positive light reduce (carve holes in) the negative darkness mask.
           float dMask = clamp(darknessMask, 0.0, 1.0);
           float lightTermI = max(lightI * master, 0.0);
           float punch = 1.0 - exp(-lightTermI * max(uDarknessPunchGain, 0.0));
 
-          // Also allow positive light to locally reduce the global (scene) darkness level,
-          // so normal lights can "punch through" night darkness even when there are no
-          // Darkness Source lights contributing to tDarkness.
           float localDarknessLevel = clamp(baseDarknessLevel * (1.0 - punch * max(uNegativeDarknessStrength, 0.0)), 0.0, 1.0);
           vec3 shadedAmbientPunched = mix(ambientDay, ambientNight, localDarknessLevel) * combinedShadowFactor;
 
           float punchedMask = clamp(dMask - punch * max(uNegativeDarknessStrength, 0.0), 0.0, 1.0);
 
-          // Apply darkness only to ambient so direct lights can punch through.
           vec3 ambientAfterDark = shadedAmbientPunched * (1.0 - punchedMask);
           totalIllumination = ambientAfterDark + vec3(lightI) * master;
 
@@ -360,16 +379,14 @@ export class LightingEffect extends EffectBase {
           vec3 litColor = baseColor.rgb * totalIllumination;
 
           float reflection = perceivedBrightness(baseColor.rgb);
-          vec3 coloration = shadedLights * master * reflection * max(uColorationStrength, 0.0);
-          // Coloration should not be suppressed by negative darkness; punch-through
-          // is handled via the punchedMask on ambient.
+          vec3 coloration = safeLights * master * reflection * max(uColorationStrength, 0.0);
           litColor += coloration;
+
+          litColor += ropeWindowLights;
 
           if (uHasOutdoorsMask > 0.5) {
             float outdoorStrength = texture2D(tOutdoorsMask, vUv).r;
-            // Roof pixels should behave like outdoors for global outdoor brightness.
-            // Otherwise roofs drawn over indoor areas will ignore the outdoor day/night response.
-            outdoorStrength = max(outdoorStrength, roofAlpha);
+            outdoorStrength = max(outdoorStrength, roofAlphaRaw);
             float dayBoost = uOutdoorBrightness;
             float nightDim = clamp(2.0 - uOutdoorBrightness, 0.0, 1.0);
             float outdoorMultiplier = mix(dayBoost, nightDim, uDarknessLevel);
@@ -377,15 +394,13 @@ export class LightingEffect extends EffectBase {
             litColor *= finalMultiplier;
           }
 
-          // 7. Blend Cloud Tops over the scene (zoom-dependent white overlay)
           vec4 cloudTop = texture2D(tCloudTop, vUv);
           vec3 cloudRgb = cloudTop.rgb;
           float cloudDark = mix(1.0, 0.25, clamp(uDarknessLevel, 0.0, 1.0));
 
           if (uHasOutdoorsMask > 0.5) {
             float outdoorStrength2 = texture2D(tOutdoorsMask, vUv).r;
-            // Roof pixels should be treated as outdoors for cloud-top grading.
-            outdoorStrength2 = max(outdoorStrength2, roofAlpha);
+            outdoorStrength2 = max(outdoorStrength2, roofAlphaRaw);
             float dayBoost2 = uOutdoorBrightness;
             float nightDim2 = clamp(2.0 - uOutdoorBrightness, 0.0, 1.0);
             float outdoorMultiplier2 = mix(dayBoost2, nightDim2, uDarknessLevel);
@@ -399,7 +414,10 @@ export class LightingEffect extends EffectBase {
 
           gl_FragColor = vec4(litColor, baseColor.a);
         }
-      `
+      `,
+      depthWrite: false,
+      depthTest: false,
+      transparent: false,
     });
 
     this.debugLightBufferMaterial = new THREE.ShaderMaterial({
@@ -434,6 +452,31 @@ export class LightingEffect extends EffectBase {
       transparent: false,
     });
     this.debugLightBufferMaterial.toneMapped = false;
+
+    this.debugRopeMaskMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tRopeMask: { value: null },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tRopeMask;
+        varying vec2 vUv;
+        void main() {
+          float m = texture2D(tRopeMask, vUv).a;
+          gl_FragColor = vec4(m, m, m, 1.0);
+        }
+      `,
+      depthWrite: false,
+      depthTest: false,
+      transparent: false,
+    });
+    this.debugRopeMaskMaterial.toneMapped = false;
 
     this.debugDarknessBufferMaterial = new THREE.ShaderMaterial({
       uniforms: {
@@ -945,6 +988,17 @@ export class LightingEffect extends EffectBase {
       this.weatherRoofAlphaTarget.setSize(size.x, size.y);
     }
 
+    if (!this.ropeMaskTarget) {
+      this.ropeMaskTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else if (this.ropeMaskTarget.width !== size.x || this.ropeMaskTarget.height !== size.y) {
+      this.ropeMaskTarget.setSize(size.x, size.y);
+    }
+
     const hasOutdoorsProjection = !!(this.outdoorsScene && this.outdoorsMesh && this.outdoorsMask);
     if (hasOutdoorsProjection) {
       if (!this.outdoorsTarget) {
@@ -990,6 +1044,20 @@ export class LightingEffect extends EffectBase {
           });
         }
 
+        const ropeMaskTex = this.ropeMaskTarget?.texture;
+        if (ropeMaskTex && ropeMaskTex !== this._publishedRopeMaskTex) {
+          this._publishedRopeMaskTex = ropeMaskTex;
+          mm.setTexture('ropeMask.screen', ropeMaskTex, {
+            space: 'screenUv',
+            source: 'renderTarget',
+            channels: 'a',
+            uvFlipY: false,
+            lifecycle: 'dynamicPerFrame',
+            width: this.ropeMaskTarget?.width ?? null,
+            height: this.ropeMaskTarget?.height ?? null
+          });
+        }
+
         const outdoorsTex = this.outdoorsTarget?.texture;
         if (outdoorsTex && outdoorsTex !== this._publishedOutdoorsTex) {
           this._publishedOutdoorsTex = outdoorsTex;
@@ -1007,8 +1075,6 @@ export class LightingEffect extends EffectBase {
     } catch (e) {
     }
 
-    // 0. Render Roof Alpha Mask (overhead tiles only)
-    // We rely on TileManager tagging overhead tiles into ROOF_LAYER (20).
     const ROOF_LAYER = 20;
     const WEATHER_ROOF_LAYER = 21;
     const previousLayersMask = this.mainCamera.layers.mask;
@@ -1022,6 +1088,12 @@ export class LightingEffect extends EffectBase {
 
     this.mainCamera.layers.set(WEATHER_ROOF_LAYER);
     renderer.setRenderTarget(this.weatherRoofAlphaTarget);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    renderer.render(scene, this.mainCamera);
+
+    this.mainCamera.layers.set(ROPE_MASK_LAYER);
+    renderer.setRenderTarget(this.ropeMaskTarget);
     renderer.setClearColor(0x000000, 0);
     renderer.clear();
     renderer.render(scene, this.mainCamera);
@@ -1082,9 +1154,29 @@ export class LightingEffect extends EffectBase {
     cu.tDarkness.value = this.darknessTarget.texture;
     cu.tRoofAlpha.value = this.roofAlphaTarget.texture;
 
-    // Bind screen-space outdoors mask so we can avoid darkening
-    // building interiors in a way that is correctly pinned to the
-    // groundplane.
+    cu.tRopeMask.value = this.ropeMaskTarget?.texture ?? null;
+    cu.uHasRopeMask.value = this.ropeMaskTarget ? 1.0 : 0.0;
+
+    try {
+      const wle = window.MapShine?.windowLightEffect;
+      const tex = (wle && typeof wle.getLightTexture === 'function') ? wle.getLightTexture() : (wle?.lightTarget?.texture ?? null);
+      cu.tWindowLight.value = tex || this._transparentTex;
+      cu.uHasWindowLight.value = tex ? 1.0 : 0.0;
+    } catch (_) {
+      cu.tWindowLight.value = this._transparentTex;
+      cu.uHasWindowLight.value = 0.0;
+    }
+
+    try {
+      const ui = window.MapShine?.uiManager;
+      const rb = ui?.ropeBehaviorDefaults;
+      const ropeBoost = (rb && rb.rope && Number.isFinite(rb.rope.windowLightBoost)) ? rb.rope.windowLightBoost : 0.0;
+      const chainBoost = (rb && rb.chain && Number.isFinite(rb.chain.windowLightBoost)) ? rb.chain.windowLightBoost : 0.0;
+      cu.uRopeWindowLightBoost.value = Math.max(0.0, Math.max(ropeBoost, chainBoost));
+    } catch (_) {
+      cu.uRopeWindowLightBoost.value = 0.0;
+    }
+
     cu.tOutdoorsMask.value = (hasOutdoorsProjection && this.outdoorsTarget && this.outdoorsTarget.texture)
       ? this.outdoorsTarget.texture
       : null;
@@ -1149,7 +1241,10 @@ export class LightingEffect extends EffectBase {
 
     renderer.setRenderTarget(oldTarget);
 
-    if (this.params?.debugShowLightBuffer && this._quadMesh && this.debugLightBufferMaterial) {
+    if (this.params?.debugShowRopeMask && this._quadMesh && this.debugRopeMaskMaterial) {
+      this.debugRopeMaskMaterial.uniforms.tRopeMask.value = this.ropeMaskTarget?.texture ?? null;
+      this._quadMesh.material = this.debugRopeMaskMaterial;
+    } else if (this.params?.debugShowLightBuffer && this._quadMesh && this.debugLightBufferMaterial) {
       this.debugLightBufferMaterial.uniforms.tLight.value = this.lightTarget.texture;
       this.debugLightBufferMaterial.uniforms.uExposure.value = this.params.debugLightBufferExposure ?? 1.0;
       this._quadMesh.material = this.debugLightBufferMaterial;

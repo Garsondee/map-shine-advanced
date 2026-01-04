@@ -53,6 +53,7 @@ import { LightIconManager } from '../scene/light-icon-manager.js';
 import { InteractionManager } from '../scene/interaction-manager.js';
 import { GridRenderer } from '../scene/grid-renderer.js';
 import { MapPointsManager } from '../scene/map-points-manager.js';
+import { PhysicsRopeManager } from '../scene/physics-rope-manager.js';
 import { DropHandler } from './drop-handler.js';
 import { sceneDebug } from '../utils/scene-debug.js';
 import { weatherController } from '../core/WeatherController.js';
@@ -141,6 +142,9 @@ let gridRenderer = null;
 
 /** @type {MapPointsManager|null} */
 let mapPointsManager = null;
+
+/** @type {PhysicsRopeManager|null} */
+let physicsRopeManager = null;
 
 /** @type {DropHandler|null} */
 let dropHandler = null;
@@ -614,6 +618,7 @@ function onCanvasTearDown(canvas) {
     window.MapShine.interactionManager = null;
     window.MapShine.gridRenderer = null;
     window.MapShine.mapPointsManager = null;
+    window.MapShine.physicsRopeManager = null;
     window.MapShine.frameCoordinator = null;
     window.MapShine.waterEffect = null;
     window.MapShine.distortionManager = null;
@@ -1232,6 +1237,13 @@ async function createThreeCanvas(scene) {
       candleFlamesEffect.setMapPointsSources(mapPointsManager);
       log.info('Map points wired to candle flames effect');
     }
+
+    // Step 4i: Initialize physics ropes (rope/chain map points)
+    physicsRopeManager = new PhysicsRopeManager(threeScene, sceneComposer, mapPointsManager);
+    physicsRopeManager.initialize();
+    effectComposer.addUpdatable(physicsRopeManager);
+    mapShine.physicsRopeManager = physicsRopeManager;
+    log.info('Physics rope manager initialized');
 
     // Step 5: Initialize interaction manager (Selection, Drag/Drop)
     interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager, wallManager, lightIconManager);
@@ -2755,6 +2767,16 @@ function destroyThreeCanvas() {
     mapPointsManager.dispose();
     mapPointsManager = null;
     log.debug('Map points manager disposed');
+  }
+
+  if (physicsRopeManager) {
+    try {
+      physicsRopeManager.dispose();
+    } catch (e) {
+      log.warn('Failed to dispose PhysicsRopeManager', e);
+    }
+    physicsRopeManager = null;
+    log.debug('Physics rope manager disposed');
   }
 
   // Dispose effect composer

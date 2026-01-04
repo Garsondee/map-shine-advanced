@@ -107,6 +107,7 @@ export class InteractionManager {
       active: false,
       effectTarget: null, // e.g., 'smellyFlies', 'fire'
       groupType: 'area', // 'point', 'area', 'line'
+      ropeType: null,
       points: [], // Array of {x, y} in world coords
       snapToGrid: false, // Grid snapping OFF by default, Shift to enable
       previewGroup: null,
@@ -482,10 +483,11 @@ export class InteractionManager {
   /**
    * Start map point drawing mode
    * @param {string} effectTarget - Effect key (e.g., 'smellyFlies', 'fire')
-   * @param {'point'|'area'|'line'} [groupType='area'] - Type of group to create
+   * @param {'point'|'area'|'line'|'rope'} [groupType='area'] - Type of group to create
    * @param {boolean} [snapToGrid=false] - Whether to snap to grid by default
+   * @param {{ropeType?: 'rope'|'chain'}|null} [options=null] - Optional draw options
    */
-  startMapPointDrawing(effectTarget, groupType = 'area', snapToGrid = false) {
+  startMapPointDrawing(effectTarget, groupType = 'area', snapToGrid = false, options = null) {
     if (this.mapPointDraw.active) {
       this.cancelMapPointDrawing();
     }
@@ -493,6 +495,7 @@ export class InteractionManager {
     this.mapPointDraw.active = true;
     this.mapPointDraw.effectTarget = effectTarget;
     this.mapPointDraw.groupType = groupType;
+    this.mapPointDraw.ropeType = (options?.ropeType === 'rope' || options?.ropeType === 'chain') ? options.ropeType : null;
     this.mapPointDraw.points = [];
     this.mapPointDraw.editingGroupId = null;
     this.mapPointDraw.snapToGrid = snapToGrid;
@@ -558,7 +561,9 @@ export class InteractionManager {
       return;
     }
 
-    const { effectTarget, groupType, points, editingGroupId } = this.mapPointDraw;
+    const { effectTarget, groupType, ropeType, points, editingGroupId } = this.mapPointDraw;
+
+    const isRopeEffect = effectTarget === 'rope';
 
     // Validate minimum points
     if (groupType === 'area' && points.length < 3) {
@@ -567,6 +572,14 @@ export class InteractionManager {
     }
     if (groupType === 'line' && points.length < 2) {
       ui.notifications.warn('Line requires at least 2 points');
+      return;
+    }
+    if (groupType === 'rope' && points.length < 2) {
+      ui.notifications.warn('Rope requires at least 2 points');
+      return;
+    }
+    if (isRopeEffect && points.length < 2) {
+      ui.notifications.warn('Rope requires at least 2 points');
       return;
     }
 
@@ -596,16 +609,20 @@ export class InteractionManager {
         }
       } else {
         // Create new group
+        const isRope = isRopeEffect || groupType === 'rope';
+        const finalType = isRopeEffect ? 'line' : groupType;
+        const ropePreset = (ropeType === 'rope' || ropeType === 'chain') ? ropeType : 'chain';
         const group = await mapPointsManager.createGroup({
-          label: `${effectTarget} ${groupType}`,
-          type: groupType,
+          label: isRope ? 'Rope' : `${effectTarget} ${groupType}`,
+          type: finalType,
           points: points.map(p => ({ x: p.x, y: p.y })),
-          isEffectSource: true,
-          effectTarget: effectTarget
+          isEffectSource: isRope ? false : true,
+          effectTarget: isRopeEffect ? 'rope' : (isRope ? '' : effectTarget),
+          ropeType: isRopeEffect ? ropePreset : undefined
         });
 
         log.info(`Created map point group: ${group.id}`);
-        ui.notifications.info(`Created ${effectTarget} spawn ${groupType}`);
+        ui.notifications.info(isRope ? 'Created rope' : `Created ${effectTarget} spawn ${groupType}`);
       }
     } catch (e) {
       log.error('Failed to save map point group:', e);
@@ -842,6 +859,7 @@ export class InteractionManager {
       lightning: 0x00aaff,
       dust: 0xaaaaaa,
       smellyFlies: 0x00ff00,
+      rope: 0xccaa66,
       water: 0x0066ff,
       pressurisedSteam: 0xcccccc,
       cloudShadows: 0x666666,

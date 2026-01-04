@@ -23,6 +23,8 @@ export const RenderLayers = {
 
 export const OVERLAY_THREE_LAYER = 31;
 
+export const ROPE_MASK_LAYER = 25;
+
 export const TILE_FEATURE_LAYERS = {
   CLOUD_SHADOW_BLOCKER: 23,
   CLOUD_TOP_BLOCKER: 24

@@ -97,6 +97,42 @@ export class TweakpaneManager {
     /** @type {{scale:number}} Backing object for UI scale binding */
     this.uiScaleParams = { scale: this.uiScale };
 
+    this.ropeDefaults = {
+      ropeTexturePath: 'modules/map-shine-advanced/assets/rope.webp',
+      chainTexturePath: 'modules/map-shine-advanced/assets/rope.webp'
+    };
+
+    this.ropeBehaviorDefaults = {
+      rope: {
+        segmentLength: 12,
+        damping: 0.98,
+        windForce: 1.2,
+        springConstant: 0.6,
+        tapering: 0.55,
+        width: 22,
+        uvRepeatWorld: 64,
+        ropeEndStiffness: 0.25,
+        windowLightBoost: 10.0,
+        endFadeSize: 0.0,
+        endFadeStrength: 0.0
+      },
+      chain: {
+        segmentLength: 22,
+        damping: 0.92,
+        windForce: 0.25,
+        springConstant: 1.0,
+        tapering: 0.15,
+        width: 18,
+        uvRepeatWorld: 48,
+        ropeEndStiffness: 0.5,
+        windowLightBoost: 10.0,
+        endFadeSize: 0.0,
+        endFadeStrength: 0.0
+      }
+    };
+
+    this._ropesFolder = null;
+
     /** @type {number|null} Pending UI state save timeout */
     this._uiStateSaveTimeout = null;
 
@@ -119,6 +155,10 @@ export class TweakpaneManager {
    */
   async initialize(parentElement = document.body) {
     if (this.pane) {
+      try {
+        this.buildRopesSection();
+      } catch (e) {
+      }
       log.warn('TweakpaneManager already initialized');
       return;
     }
@@ -174,6 +214,8 @@ export class TweakpaneManager {
 
     // Build global controls
     this.buildGlobalControls();
+
+    this.buildRopesSection();
 
     // Build scene setup section (only for GMs)
     if (game.user.isGM) {
@@ -425,6 +467,168 @@ export class TweakpaneManager {
       this.accordionStates['global'] = ev.expanded;
       this.saveUIState();
     });
+  }
+
+  buildRopesSection() {
+    if (!this.pane) return;
+    if (this._ropesFolder) return;
+    try {
+      const existing = this.pane.element?.textContent;
+      if (typeof existing === 'string' && existing.includes('Ropes')) {
+        return;
+      }
+    } catch (e) {
+    }
+
+    const particleParent = this.ensureCategoryFolder('particle', 'Particles & VFX');
+
+    const folder = particleParent.addFolder({
+      title: 'Rope & Chain',
+      expanded: this.accordionStates['ropes'] ?? false
+    });
+
+    this._ropesFolder = folder;
+
+    try {
+      const saved = game.settings.get('map-shine-advanced', 'rope-default-textures');
+      if (saved && typeof saved === 'object') {
+        if (typeof saved.ropeTexturePath === 'string') this.ropeDefaults.ropeTexturePath = saved.ropeTexturePath;
+        if (typeof saved.chainTexturePath === 'string') this.ropeDefaults.chainTexturePath = saved.chainTexturePath;
+      }
+    } catch (e) {
+    }
+
+    try {
+      const saved = game.settings.get('map-shine-advanced', 'rope-default-behavior');
+      if (saved && typeof saved === 'object') {
+        for (const key of ['rope', 'chain']) {
+          const s = saved[key];
+          const t = this.ropeBehaviorDefaults[key];
+          if (!s || typeof s !== 'object' || !t) continue;
+          for (const k of Object.keys(t)) {
+            if (typeof s[k] === 'number' && Number.isFinite(s[k])) t[k] = s[k];
+          }
+        }
+      }
+    } catch (e) {
+    }
+
+    const saveAndRebuild = async () => {
+      try {
+        await game.settings.set('map-shine-advanced', 'rope-default-textures', {
+          ropeTexturePath: String(this.ropeDefaults.ropeTexturePath || ''),
+          chainTexturePath: String(this.ropeDefaults.chainTexturePath || '')
+        });
+      } catch (e) {
+      }
+
+      try {
+        await game.settings.set('map-shine-advanced', 'rope-default-behavior', {
+          rope: { ...this.ropeBehaviorDefaults.rope },
+          chain: { ...this.ropeBehaviorDefaults.chain }
+        });
+      } catch (e) {
+      }
+
+      try {
+        window.MapShine?.physicsRopeManager?.requestRebuild?.();
+      } catch (e) {
+      }
+    };
+
+    const onRopeTextureChange = (ev) => {
+      this.ropeDefaults.ropeTexturePath = ev.value;
+      void saveAndRebuild();
+    };
+
+    const onChainTextureChange = (ev) => {
+      this.ropeDefaults.chainTexturePath = ev.value;
+      void saveAndRebuild();
+    };
+
+    folder.addBinding(this.ropeDefaults, 'ropeTexturePath', { label: 'Rope Texture' }).on('change', onRopeTextureChange);
+    folder.addButton({ title: 'Browse Rope Texture' }).on('click', async () => {
+      const filePickerImpl = globalThis.foundry?.applications?.apps?.FilePicker?.implementation;
+      const FilePickerCls = filePickerImpl ?? globalThis.FilePicker;
+      if (!FilePickerCls) {
+        ui.notifications?.warn?.('FilePicker not available');
+        return;
+      }
+
+      const fp = new FilePickerCls({
+        type: 'image',
+        current: this.ropeDefaults.ropeTexturePath || '',
+        callback: async (path) => {
+          this.ropeDefaults.ropeTexturePath = path;
+          void saveAndRebuild();
+        }
+      });
+      fp.browse();
+    });
+
+    folder.addBlade({ view: 'separator' });
+
+    folder.addBinding(this.ropeDefaults, 'chainTexturePath', { label: 'Chain Texture' }).on('change', onChainTextureChange);
+    folder.addButton({ title: 'Browse Chain Texture' }).on('click', async () => {
+      const filePickerImpl = globalThis.foundry?.applications?.apps?.FilePicker?.implementation;
+      const FilePickerCls = filePickerImpl ?? globalThis.FilePicker;
+      if (!FilePickerCls) {
+        ui.notifications?.warn?.('FilePicker not available');
+        return;
+      }
+
+      const fp = new FilePickerCls({
+        type: 'image',
+        current: this.ropeDefaults.chainTexturePath || '',
+        callback: async (path) => {
+          this.ropeDefaults.chainTexturePath = path;
+          void saveAndRebuild();
+        }
+      });
+      fp.browse();
+    });
+
+    folder.on('fold', (ev) => {
+      this.accordionStates['ropes'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    folder.addBlade({ view: 'separator' });
+
+    const ropeFolder = folder.addFolder({
+      title: 'Rope Defaults',
+      expanded: this.accordionStates['ropes_defaults_rope'] ?? false
+    });
+    const chainFolder = folder.addFolder({
+      title: 'Chain Defaults',
+      expanded: this.accordionStates['ropes_defaults_chain'] ?? false
+    });
+
+    ropeFolder.on('fold', (ev) => {
+      this.accordionStates['ropes_defaults_rope'] = ev.expanded;
+      this.saveUIState();
+    });
+    chainFolder.on('fold', (ev) => {
+      this.accordionStates['ropes_defaults_chain'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    const bindDefaults = (container, obj) => {
+      container.addBinding(obj, 'segmentLength', { label: 'Segment Length', min: 4, max: 64, step: 1 }).on('change', saveAndRebuild);
+      container.addBinding(obj, 'damping', { label: 'Damping', min: 0.8, max: 0.999, step: 0.001 }).on('change', saveAndRebuild);
+      container.addBinding(obj, 'windForce', { label: 'Wind Force', min: 0, max: 4, step: 0.05 }).on('change', saveAndRebuild);
+      container.addBinding(obj, 'springConstant', { label: 'Spring', min: 0, max: 2, step: 0.05 }).on('change', saveAndRebuild);
+      container.addBinding(obj, 'width', { label: 'Width', min: 2, max: 80, step: 1 }).on('change', saveAndRebuild);
+      container.addBinding(obj, 'tapering', { label: 'Tapering', min: 0, max: 1, step: 0.01 }).on('change', saveAndRebuild);
+      container.addBinding(obj, 'uvRepeatWorld', { label: 'UV Repeat (px)', min: 4, max: 256, step: 1 }).on('change', saveAndRebuild);
+      container.addBinding(obj, 'ropeEndStiffness', { label: 'End Stiffness', min: 0, max: 1, step: 0.01 }).on('change', saveAndRebuild);
+      container.addBinding(obj, 'windowLightBoost', { label: 'Window Light Boost', min: 0, max: 50, step: 0.25 }).on('change', saveAndRebuild);
+      container.addBinding(obj, 'endFadeSize', { label: 'End Fade Size', min: 0, max: 0.5, step: 0.01 }).on('change', saveAndRebuild);
+      container.addBinding(obj, 'endFadeStrength', { label: 'End Fade Strength', min: 0, max: 1, step: 0.01 }).on('change', saveAndRebuild);
+    };
+
+    bindDefaults(ropeFolder, this.ropeBehaviorDefaults.rope);
+    bindDefaults(chainFolder, this.ropeBehaviorDefaults.chain);
   }
   
   onMasterResetToDefaults() {
@@ -3049,6 +3253,7 @@ export class TweakpaneManager {
 
     // Effect options from EFFECT_SOURCE_OPTIONS
     const effectOptions = {
+      rope: 'Rope',
       smellyFlies: 'Smelly Flies',
       fire: 'Fire Particles',
       candleFlame: 'Candle Flame',
@@ -3068,6 +3273,22 @@ export class TweakpaneManager {
       point: 'Single Point',
       line: 'Line'
     };
+
+    const ropeTypeOptions = {
+      rope: 'Rope (Flexible)',
+      chain: 'Chain (Heavy)'
+    };
+
+    const lastRopeType = (() => {
+      try {
+        const saved = game.settings.get('map-shine-advanced', 'rope-default-behavior');
+        if (saved && typeof saved === 'object') {
+          return (saved._lastRopeType === 'rope' || saved._lastRopeType === 'chain') ? saved._lastRopeType : 'chain';
+        }
+      } catch (e) {
+      }
+      return 'chain';
+    })();
 
     // Count existing groups
     const existingGroupCount = mapPointsManager?.groups?.size || 0;
@@ -3089,6 +3310,15 @@ export class TweakpaneManager {
           <select name="groupType" style="width: 100%;">
             ${Object.entries(groupTypeOptions).map(([key, label]) => 
               `<option value="${key}" ${key === 'area' ? 'selected' : ''}>${label}</option>`
+            ).join('')}
+          </select>
+        </div>
+
+        <div class="form-group rope-type-row" style="display:none;">
+          <label>Rope Type</label>
+          <select name="ropeType" style="width: 100%;">
+            ${Object.entries(ropeTypeOptions).map(([key, label]) =>
+              `<option value="${key}" ${key === lastRopeType ? 'selected' : ''}>${label}</option>`
             ).join('')}
           </select>
         </div>
@@ -3134,9 +3364,21 @@ export class TweakpaneManager {
           label: 'Start Drawing',
           callback: (html) => {
             const effectTarget = html.find('[name="effectTarget"]').val();
-            const groupType = html.find('[name="groupType"]').val();
+            const groupTypeRaw = html.find('[name="groupType"]').val();
             const snapToGrid = html.find('[name="snapToGrid"]').is(':checked');
-            interactionManager.startMapPointDrawing(effectTarget, groupType, snapToGrid);
+            const groupType = effectTarget === 'rope' ? 'line' : groupTypeRaw;
+            const ropeType = html.find('[name="ropeType"]').val();
+            const ropePreset = (ropeType === 'rope' || ropeType === 'chain') ? ropeType : 'chain';
+            try {
+              if (effectTarget === 'rope') {
+                const saved = game.settings.get('map-shine-advanced', 'rope-default-behavior');
+                const next = (saved && typeof saved === 'object') ? { ...saved } : {};
+                next._lastRopeType = ropePreset;
+                void game.settings.set('map-shine-advanced', 'rope-default-behavior', next);
+              }
+            } catch (e) {
+            }
+            interactionManager.startMapPointDrawing(effectTarget, groupType, snapToGrid, { ropeType: ropePreset });
           }
         },
         manage: {
@@ -3157,6 +3399,19 @@ export class TweakpaneManager {
         html.closest('.app.window-app')?.on('pointerdown', (ev) => {
           ev.stopPropagation();
         });
+
+        const updateGroupTypeForRope = () => {
+          const effectTarget = html.find('[name="effectTarget"]').val();
+          const typeSelect = html.find('[name="groupType"]');
+          const isRope = effectTarget === 'rope';
+          typeSelect.prop('disabled', isRope);
+          if (isRope) typeSelect.val('line');
+
+          html.find('.rope-type-row').css('display', isRope ? 'block' : 'none');
+        };
+
+        html.find('[name="effectTarget"]').on('change', updateGroupTypeForRope);
+        updateGroupTypeForRope();
 
         // Handle "Show existing" checkbox toggle
         html.find('[name="showExisting"]').on('change', (ev) => {
@@ -3184,6 +3439,7 @@ export class TweakpaneManager {
     // Effect options for editing
     const effectOptions = {
       '': 'None',
+      rope: 'Rope',
       smellyFlies: 'Smelly Flies',
       fire: 'Fire Particles',
       candleFlame: 'Candle Flame',
@@ -3223,7 +3479,7 @@ export class TweakpaneManager {
         const color = mapPointsManager.getEffectColor(group.effectTarget);
         const colorHex = '#' + color.toString(16).padStart(6, '0');
         const effectLabel = effectOptions[group.effectTarget] || group.effectTarget || 'None';
-        const typeLabel = groupTypeLabels[group.type] || group.type;
+        const typeLabel = group.effectTarget === 'rope' ? 'Rope' : (groupTypeLabels[group.type] || group.type);
         const pointCount = group.points?.length || 0;
         
         return `
@@ -3400,6 +3656,7 @@ export class TweakpaneManager {
     // Effect options
     const effectOptions = {
       '': 'None',
+      rope: 'Rope',
       smellyFlies: 'Smelly Flies',
       fire: 'Fire Particles',
       candleFlame: 'Candle Flame',
@@ -3419,6 +3676,43 @@ export class TweakpaneManager {
       point: 'Single Point',
       line: 'Line'
     };
+
+    const ropeTypeOptions = {
+      rope: 'Rope (Flexible)',
+      chain: 'Chain (Heavy)'
+    };
+
+    const ropeTypePresetDefaults = {
+      rope: {
+        ropeType: 'rope',
+        segmentLength: 12,
+        damping: 0.98,
+        windForce: 1.2,
+        springConstant: 0.6,
+        tapering: 0.55,
+        width: 22,
+        uvRepeatWorld: 64,
+        ropeEndStiffness: 0.25,
+        texturePath: group.texturePath || 'modules/map-shine-advanced/assets/rope.webp'
+      },
+      chain: {
+        ropeType: 'chain',
+        segmentLength: 22,
+        damping: 0.92,
+        windForce: 0.25,
+        springConstant: 1.0,
+        tapering: 0.15,
+        width: 18,
+        uvRepeatWorld: 48,
+        ropeEndStiffness: 0.5,
+        texturePath: group.texturePath || 'modules/map-shine-advanced/assets/rope.webp'
+      }
+    };
+
+    const ropeTypeValue = (group.ropeType === 'rope' || group.ropeType === 'chain') ? group.ropeType : 'chain';
+    const texturePathValue = (typeof group.texturePath === 'string' && group.texturePath.trim().length > 0)
+      ? group.texturePath.trim()
+      : 'modules/map-shine-advanced/assets/rope.webp';
 
     const pointCount = group.points?.length || 0;
 
@@ -3453,6 +3747,8 @@ export class TweakpaneManager {
       `
       : `<div style="margin-top: 10px; font-size: 10px; color: #666;">No points yet.</div>`;
 
+    const isRopeGroup = group.effectTarget === 'rope' || group.type === 'rope';
+
     const content = `
       <form class="group-edit-form">
         <div class="form-group">
@@ -3475,6 +3771,46 @@ export class TweakpaneManager {
             ).join('')}
           </select>
         </div>
+
+        <div class="rope-controls" style="display: ${isRopeGroup ? 'block' : 'none'};">
+          <hr style="margin: 12px 0; border: none; border-top: 1px solid #444;">
+          <div style="background: #1a1a2e; padding: 10px; border-radius: 4px;">
+            <div class="form-group">
+              <label>Rope Preset</label>
+              <select name="ropeType" style="width: 100%;">
+                ${Object.entries(ropeTypeOptions).map(([key, label]) =>
+                  `<option value="${key}" ${key === ropeTypeValue ? 'selected' : ''}>${label}</option>`
+                ).join('')}
+              </select>
+              <p class="notes" style="margin: 4px 0 0 0; font-size: 10px; color: #666;">
+                Presets set physics defaults (you can still edit values later).
+              </p>
+            </div>
+
+            <div class="form-group" style="display:flex; gap:6px; align-items:center;">
+              <label style="flex: 0 0 70px;">Texture</label>
+              <input type="text" name="ropeTexturePath" value="${texturePathValue}" style="flex: 1;" placeholder="modules/.../rope.webp">
+              <button type="button" class="rope-texture-browse" style="
+                padding: 4px 8px;
+                font-size: 10px;
+                background: #4a4a6a;
+                border: none;
+                border-radius: 3px;
+                color: #ddd;
+                cursor: pointer;
+              ">
+                <i class="fas fa-file-image"></i>
+              </button>
+            </div>
+
+            <div class="form-group">
+              <label>Segment Length</label>
+              <input type="range" name="ropeSegmentLength" min="6" max="64" step="1" value="${Number(group.segmentLength ?? (ropeTypePresetDefaults[ropeTypeValue]?.segmentLength ?? 20))}" style="width: 100%;">
+              <span class="rope-seglen-value" style="font-size: 10px; color: #888;"></span>
+            </div>
+          </div>
+        </div>
+
         <div class="form-group">
           <label>
             <input type="checkbox" name="isEffectSource" ${group.isEffectSource ? 'checked' : ''} style="margin-right: 6px;">
@@ -3535,16 +3871,38 @@ export class TweakpaneManager {
           icon: '<i class="fas fa-save"></i>',
           label: 'Save',
           callback: async (html) => {
+            const nextTypeRaw = html.find('[name="type"]').val();
+            const nextEffectRaw = html.find('[name="effectTarget"]').val();
+            const isRope = nextEffectRaw === 'rope' || nextTypeRaw === 'rope';
+            const nextType = isRope ? 'line' : nextTypeRaw;
+            const nextEffect = isRope ? 'rope' : nextEffectRaw;
+
             const updates = {
               label: html.find('[name="label"]').val(),
-              effectTarget: html.find('[name="effectTarget"]').val(),
-              type: html.find('[name="type"]').val(),
-              isEffectSource: html.find('[name="isEffectSource"]').is(':checked'),
+              effectTarget: nextEffect,
+              type: nextType,
+              isEffectSource: isRope ? false : html.find('[name="isEffectSource"]').is(':checked'),
               emission: {
                 ...group.emission,
                 intensity: parseFloat(html.find('[name="emissionIntensity"]').val())
               }
             };
+
+            if (isRope) {
+              const ropeType = html.find('[name="ropeType"]').val();
+              const presetKey = (ropeType === 'rope' || ropeType === 'chain') ? ropeType : 'chain';
+              const preset = ropeTypePresetDefaults[presetKey];
+              updates.ropeType = preset.ropeType;
+              updates.segmentLength = Number(html.find('[name="ropeSegmentLength"]').val()) || preset.segmentLength;
+              updates.texturePath = String(html.find('[name="ropeTexturePath"]').val() || preset.texturePath);
+              updates.damping = preset.damping;
+              updates.windForce = preset.windForce;
+              updates.springConstant = preset.springConstant;
+              updates.tapering = preset.tapering;
+              updates.width = preset.width;
+              updates.uvRepeatWorld = preset.uvRepeatWorld;
+              updates.ropeEndStiffness = preset.ropeEndStiffness;
+            }
             
             await mapPointsManager.updateGroup(groupId, updates);
             ui.notifications.info('Group updated');
@@ -3591,6 +3949,53 @@ export class TweakpaneManager {
         // Prevent UI clicks from leaking through to the underlying canvas.
         html.closest('.app.window-app')?.on('pointerdown', (ev) => {
           ev.stopPropagation();
+        });
+
+        const updateRopeControlsVisibility = () => {
+          const t = html.find('[name="type"]').val();
+          const e = html.find('[name="effectTarget"]').val();
+          const isRope = e === 'rope' || t === 'rope';
+          html.find('.rope-controls').css('display', isRope ? 'block' : 'none');
+          html.find('[name="effectTarget"]').prop('disabled', isRope);
+          html.find('[name="isEffectSource"]').prop('disabled', isRope);
+          html.find('[name="type"]').prop('disabled', isRope);
+          if (isRope) {
+            html.find('[name="effectTarget"]').val('rope');
+            html.find('[name="isEffectSource"]').prop('checked', false);
+            html.find('[name="type"]').val('line');
+          }
+        };
+
+        html.find('[name="type"]').on('change', updateRopeControlsVisibility);
+        html.find('[name="effectTarget"]').on('change', updateRopeControlsVisibility);
+        updateRopeControlsVisibility();
+
+        const updateSegLenText = () => {
+          const v = Number(html.find('[name="ropeSegmentLength"]').val());
+          html.find('.rope-seglen-value').text(Number.isFinite(v) ? `${v}px` : '');
+        };
+        html.find('[name="ropeSegmentLength"]').on('input', updateSegLenText);
+        updateSegLenText();
+
+        html.find('.rope-texture-browse').on('click', async (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+
+          const filePickerImpl = globalThis.foundry?.applications?.apps?.FilePicker?.implementation;
+          const FilePickerCls = filePickerImpl ?? globalThis.FilePicker;
+          if (!FilePickerCls) {
+            ui.notifications.warn('FilePicker not available');
+            return;
+          }
+
+          const fp = new FilePickerCls({
+            type: 'image',
+            current: html.find('[name="ropeTexturePath"]').val() || '',
+            callback: (path) => {
+              html.find('[name="ropeTexturePath"]').val(path);
+            }
+          });
+          fp.browse();
         });
 
         // Update intensity display
@@ -3693,6 +4098,47 @@ export function registerUISettings() {
     config: false,
     type: Object,
     default: {}
+  });
+
+  game.settings.register('map-shine-advanced', 'rope-default-textures', {
+    name: 'Rope Default Textures',
+    scope: 'world',
+    config: false,
+    type: Object,
+    default: {
+      ropeTexturePath: 'modules/map-shine-advanced/assets/rope.webp',
+      chainTexturePath: 'modules/map-shine-advanced/assets/rope.webp'
+    }
+  });
+
+  game.settings.register('map-shine-advanced', 'rope-default-behavior', {
+    name: 'Rope Default Behavior',
+    scope: 'world',
+    config: false,
+    type: Object,
+    default: {
+      rope: {
+        segmentLength: 12,
+        damping: 0.98,
+        windForce: 1.2,
+        springConstant: 0.6,
+        tapering: 0.55,
+        width: 22,
+        uvRepeatWorld: 64,
+        ropeEndStiffness: 0.25
+      },
+      chain: {
+        segmentLength: 22,
+        damping: 0.92,
+        windForce: 0.25,
+        springConstant: 1.0,
+        tapering: 0.15,
+        width: 18,
+        uvRepeatWorld: 48,
+        ropeEndStiffness: 0.5
+      },
+      _lastRopeType: 'chain'
+    }
   });
 
   log.info('UI settings registered');

@@ -488,7 +488,9 @@ export class MapPointsManager {
     const ropes = [];
     
     for (const group of this.groups.values()) {
-      if (group.type === 'rope' && group.points && group.points.length >= 2) {
+      const isLegacyRopeType = group.type === 'rope';
+      const isRopeEffectLine = group.type === 'line' && group.effectTarget === 'rope';
+      if ((isLegacyRopeType || isRopeEffectLine) && group.points && group.points.length >= 2) {
         ropes.push({
           group,
           points: group.points,

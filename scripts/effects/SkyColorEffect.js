@@ -340,6 +340,8 @@ export class SkyColorEffect extends EffectBase {
         uHasOutdoorsMask: { value: 0.0 },
         tRoofAlpha: { value: null },
         uHasRoofAlpha: { value: 0.0 },
+        tRopeMask: { value: null },
+        uHasRopeMask: { value: 0.0 },
         tCloudTop: { value: null },
         uHasCloudTop: { value: 0.0 },
         uTime: { value: 0.0 },
@@ -379,6 +381,8 @@ export class SkyColorEffect extends EffectBase {
         uniform float uHasOutdoorsMask;
         uniform sampler2D tRoofAlpha;
         uniform float uHasRoofAlpha;
+        uniform sampler2D tRopeMask;
+        uniform float uHasRopeMask;
         uniform sampler2D tCloudTop;
         uniform float uHasCloudTop;
         uniform vec2 uResolution;
@@ -443,12 +447,17 @@ export class SkyColorEffect extends EffectBase {
             roofAlpha = texture2D(tRoofAlpha, vUv).a;
           }
 
+          float ropeMask = 0.0;
+          if (uHasRopeMask > 0.5) {
+            ropeMask = texture2D(tRopeMask, vUv).a;
+          }
+
           float cloudTopAlpha = 0.0;
           if (uHasCloudTop > 0.5) {
             cloudTopAlpha = texture2D(tCloudTop, vUv).a;
           }
 
-          float gradeMask = max(outdoors, roofAlpha);
+          float gradeMask = max(max(outdoors, roofAlpha), ropeMask);
 
           if (uIntensity <= 0.0 || gradeMask <= 0.0) {
             gl_FragColor = sceneColor;
@@ -673,6 +682,20 @@ export class SkyColorEffect extends EffectBase {
           u.uHasRoofAlpha.value = 1.0;
         } else {
           u.uHasRoofAlpha.value = 0.0;
+        }
+      }
+
+      const ropeMaskTex = mm ? mm.getTexture('ropeMask.screen') : null;
+      if (ropeMaskTex) {
+        u.tRopeMask.value = ropeMaskTex;
+        u.uHasRopeMask.value = 1.0;
+      } else {
+        const le3 = window.MapShine?.lightingEffect;
+        if (le3 && le3.ropeMaskTarget) {
+          u.tRopeMask.value = le3.ropeMaskTarget.texture;
+          u.uHasRopeMask.value = 1.0;
+        } else {
+          u.uHasRopeMask.value = 0.0;
         }
       }
     } catch (e) {

@@ -11,7 +11,7 @@ import { weatherController } from '../core/WeatherController.js';
 
 import { ThreeLightSource } from './ThreeLightSource.js'; // Import the class above
 import { ThreeDarknessSource } from './ThreeDarknessSource.js';
-import { OVERLAY_THREE_LAYER, ROPE_MASK_LAYER } from './EffectComposer.js';
+import { ROPE_MASK_LAYER } from './EffectComposer.js';
 
 const log = createLogger('LightingEffect');
 
@@ -63,6 +63,7 @@ export class LightingEffect extends EffectBase {
     this.roofAlphaTarget = null; 
     this.weatherRoofAlphaTarget = null;
     this.ropeMaskTarget = null;
+    this.masksTarget = null;
     this._quadMesh = null;
 
     this.outdoorsMask = null;
@@ -83,6 +84,11 @@ export class LightingEffect extends EffectBase {
     this._publishedRopeMaskTex = null;
     
     this._transparentTex = null;
+
+    this._masksPackScene = null;
+    this._masksPackCamera = null;
+    this._masksPackMesh = null;
+    this._masksPackMaterial = null;
   }
 
   static getControlSchema() {
@@ -156,14 +162,46 @@ export class LightingEffect extends EffectBase {
 
     this.quadScene = new THREE.Scene();
     this.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-    
+
+    this._masksPackScene = new THREE.Scene();
+    this._masksPackCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._masksPackMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tRoofAlpha: { value: null },
+        tRopeMask: { value: null },
+        tOutdoorsMask: { value: null },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tRoofAlpha;
+        uniform sampler2D tRopeMask;
+        uniform sampler2D tOutdoorsMask;
+        varying vec2 vUv;
+
+        void main() {
+          float roofA = texture2D(tRoofAlpha, vUv).a;
+          float ropeA = texture2D(tRopeMask, vUv).a;
+          float outdoorsR = texture2D(tOutdoorsMask, vUv).r;
+          gl_FragColor = vec4(outdoorsR, ropeA, 0.0, roofA);
+        }
+      `,
+      depthWrite: false,
+      depthTest: false,
+      transparent: false,
+    });
+
     this.compositeMaterial = new THREE.ShaderMaterial({
       uniforms: {
         tDiffuse: { value: null }, 
         tLight: { value: null },   
         tDarkness: { value: null }, 
-        tRoofAlpha: { value: null }, 
-        tRopeMask: { value: null },
+        tMasks: { value: null },
         tWindowLight: { value: null },
         tOverheadShadow: { value: null }, 
         tBuildingShadow: { value: null }, 
@@ -171,8 +209,6 @@ export class LightingEffect extends EffectBase {
         tTreeShadow: { value: null }, 
         tCloudShadow: { value: null }, 
         tCloudTop: { value: null }, 
-        tOutdoorsMask: { value: null }, 
-        uHasRopeMask: { value: 0.0 },
         uHasWindowLight: { value: 0.0 },
         uRopeWindowLightBoost: { value: 0.0 },
         uDarknessLevel: { value: 0.0 },
@@ -188,12 +224,12 @@ export class LightingEffect extends EffectBase {
         uTreeShadowOpacity: { value: 0.0 },
         uTreeSelfShadowStrength: { value: 1.0 },
         uCloudShadowOpacity: { value: 0.0 },
-        uHasOutdoorsMask: { value: 0.0 },
         uShadowSunDir: { value: new THREE.Vector2(0, 1) },
         uShadowZoom: { value: 1.0 },
         uBushShadowLength: { value: 0.04 },
         uTreeShadowLength: { value: 0.08 },
         uCompositeTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
+        uViewportHeight: { value: 1024.0 },
         uOutdoorBrightness: { value: 1.5 },
         uNegativeDarknessStrength: { value: 1.0 },
         uDarknessPunchGain: { value: 2.0 },
@@ -209,8 +245,7 @@ export class LightingEffect extends EffectBase {
         uniform sampler2D tDiffuse;
         uniform sampler2D tLight;
         uniform sampler2D tDarkness;
-        uniform sampler2D tRoofAlpha;
-        uniform sampler2D tRopeMask;
+        uniform sampler2D tMasks;
         uniform sampler2D tWindowLight;
         uniform sampler2D tOverheadShadow;
         uniform sampler2D tBuildingShadow;
@@ -218,8 +253,6 @@ export class LightingEffect extends EffectBase {
         uniform sampler2D tTreeShadow;
         uniform sampler2D tCloudShadow;
         uniform sampler2D tCloudTop;
-        uniform sampler2D tOutdoorsMask;
-        uniform float uHasRopeMask;
         uniform float uHasWindowLight;
         uniform float uRopeWindowLightBoost;
         uniform float uDarknessLevel;
@@ -235,42 +268,30 @@ export class LightingEffect extends EffectBase {
         uniform float uTreeShadowOpacity;
         uniform float uTreeSelfShadowStrength;
         uniform float uCloudShadowOpacity;
-        uniform float uHasOutdoorsMask;
         uniform vec2  uShadowSunDir;
         uniform float uShadowZoom;
         uniform float uBushShadowLength;
         uniform float uTreeShadowLength;
         uniform vec2  uCompositeTexelSize;
+        uniform float uViewportHeight;
         uniform float uOutdoorBrightness;
         uniform float uNegativeDarknessStrength;
         uniform float uDarknessPunchGain;
         varying vec2 vUv;
 
-        vec3 adjustSaturation(vec3 color, float value) {
-          vec3 gray = vec3(dot(color, vec3(0.2126, 0.7152, 0.0722)));
-          return mix(gray, color, value);
-        }
-
         float perceivedBrightness(vec3 c) {
           return dot(c, vec3(0.2126, 0.7152, 0.0722));
-        }
-
-        vec3 reinhardJodie(vec3 c) {
-          float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-          vec3 tc = c / (c + 1.0);
-          return mix(c / (l + 1.0), tc, tc);
         }
 
         void main() {
           vec4 baseColor = texture2D(tDiffuse, vUv);
           vec4 lightSample = texture2D(tLight, vUv);
           float darknessMask = clamp(texture2D(tDarkness, vUv).r, 0.0, 1.0);
-          vec4 roofSample = texture2D(tRoofAlpha, vUv);
 
-          float ropeMask = 0.0;
-          if (uHasRopeMask > 0.5) {
-            ropeMask = clamp(texture2D(tRopeMask, vUv).a, 0.0, 1.0);
-          }
+          vec4 masks = texture2D(tMasks, vUv);
+          float outdoorStrengthBase = clamp(masks.r, 0.0, 1.0);
+          float ropeMask = clamp(masks.g, 0.0, 1.0);
+          float roofAlphaRaw = clamp(masks.a, 0.0, 1.0);
 
           float master = max(uLightIntensity, 0.0);
           float baseDarknessLevel = clamp(uDarknessLevel, 0.0, 1.0);
@@ -278,7 +299,6 @@ export class LightingEffect extends EffectBase {
           vec3 ambientNight = uAmbientDarkness * max(uGlobalIllumination, 0.0);
           vec3 ambient = mix(ambientDay, ambientNight, baseDarknessLevel);
 
-          float roofAlphaRaw = roofSample.a;
           float roofAlpha = roofAlphaRaw * (1.0 - ropeMask);
           float lightVisibility = 1.0 - roofAlpha;
 
@@ -291,13 +311,13 @@ export class LightingEffect extends EffectBase {
           float rawBuildingFactor = mix(1.0, buildingTex, buildingOpacity);
 
           vec2 bushDir = normalize(uShadowSunDir);
-          float bushPixelLen = uBushShadowLength * 1080.0 * max(uShadowZoom, 0.0001);
+          float bushPixelLen = uBushShadowLength * max(uViewportHeight, 1.0) * max(uShadowZoom, 0.0001);
           vec2 bushOffsetUv = bushDir * bushPixelLen * uCompositeTexelSize;
           float bushTex = texture2D(tBushShadow, vUv + bushOffsetUv).r;
           float bushOpacity = clamp(uBushShadowOpacity, 0.0, 1.0);
           float rawBushFactor = mix(1.0, bushTex, bushOpacity);
 
-          float treePixelLen = uTreeShadowLength * 1080.0 * max(uShadowZoom, 0.0001);
+          float treePixelLen = uTreeShadowLength * max(uViewportHeight, 1.0) * max(uShadowZoom, 0.0001);
           vec2 treeOffsetUv = bushDir * treePixelLen * uCompositeTexelSize;
           float treeTex = texture2D(tTreeShadow, vUv + treeOffsetUv).r;
           float treeOpacity = clamp(uTreeShadowOpacity, 0.0, 1.0);
@@ -307,27 +327,16 @@ export class LightingEffect extends EffectBase {
           float cloudOpacity = clamp(uCloudShadowOpacity, 0.0, 1.0);
           float cloudFactor = mix(1.0, cloudTex, cloudOpacity);
 
-          float bushCoverage = texture2D(tBushShadow, vUv).g;
-          float bushSelfMask = clamp(bushCoverage, 0.0, 1.0);
-          float treeCoverage = texture2D(tTreeShadow, vUv).g;
-          float treeSelfMask = clamp(treeCoverage, 0.0, 1.0) * clamp(uTreeSelfShadowStrength, 0.0, 1.0);
-
           float shadowFactor = mix(rawShadowFactor, 1.0, roofAlphaRaw);
           float buildingFactor = mix(rawBuildingFactor, 1.0, roofAlphaRaw);
           float bushFactor = mix(rawBushFactor, 1.0, roofAlphaRaw);
           float treeFactor = rawTreeFactor;
 
-          bushFactor = mix(bushFactor, 1.0, bushSelfMask);
-          treeFactor = mix(treeFactor, 1.0, treeSelfMask);
-
-          if (uHasOutdoorsMask > 0.5) {
-            float outdoorStrength = texture2D(tOutdoorsMask, vUv).r;
-            outdoorStrength = max(outdoorStrength, roofAlphaRaw);
-            shadowFactor = mix(1.0, shadowFactor, outdoorStrength);
-            buildingFactor = mix(1.0, buildingFactor, outdoorStrength);
-            bushFactor = mix(1.0, bushFactor, outdoorStrength);
-            treeFactor = mix(1.0, treeFactor, outdoorStrength);
-          }
+          float outdoorStrength = max(outdoorStrengthBase, roofAlphaRaw);
+          shadowFactor = mix(1.0, shadowFactor, outdoorStrength);
+          buildingFactor = mix(1.0, buildingFactor, outdoorStrength);
+          bushFactor = mix(1.0, bushFactor, outdoorStrength);
+          treeFactor = mix(1.0, treeFactor, outdoorStrength);
 
           float combinedShadowFactor = shadowFactor * buildingFactor * bushFactor * treeFactor * cloudFactor;
 
@@ -342,11 +351,9 @@ export class LightingEffect extends EffectBase {
 
           vec3 shadedLights = mix(baseLights, baseLights * combinedShadowFactor, kd);
 
-          vec3 ropeWindowLights = vec3(0.0);
-          if (uHasWindowLight > 0.5 && uRopeWindowLightBoost > 0.0001 && ropeMask > 0.001) {
-            float ropeLuma = perceivedBrightness(baseColor.rgb);
-            float ropeGate = smoothstep(0.25, 0.6, ropeLuma);
-            ropeWindowLights = texture2D(tWindowLight, vUv).rgb * max(uRopeWindowLightBoost, 0.0) * ropeMask * ropeGate;
+          vec3 windowLightIllum = vec3(0.0);
+          if (uHasWindowLight > 0.5) {
+            windowLightIllum = texture2D(tWindowLight, vUv).rgb;
           }
 
           vec3 safeLights = max(shadedLights, vec3(0.0));
@@ -360,6 +367,10 @@ export class LightingEffect extends EffectBase {
 
           float localDarknessLevel = clamp(baseDarknessLevel * (1.0 - punch * max(uNegativeDarknessStrength, 0.0)), 0.0, 1.0);
           vec3 shadedAmbientPunched = mix(ambientDay, ambientNight, localDarknessLevel) * combinedShadowFactor;
+
+          // Treat window light as an ambient-like illumination term, shaded by the
+          // same overhead/bush/tree/building/cloud factors.
+          shadedAmbientPunched += windowLightIllum * combinedShadowFactor;
 
           float punchedMask = clamp(dMask - punch * max(uNegativeDarknessStrength, 0.0), 0.0, 1.0);
 
@@ -382,31 +393,27 @@ export class LightingEffect extends EffectBase {
           vec3 coloration = safeLights * master * reflection * max(uColorationStrength, 0.0);
           litColor += coloration;
 
-          litColor += ropeWindowLights;
-
-          if (uHasOutdoorsMask > 0.5) {
-            float outdoorStrength = texture2D(tOutdoorsMask, vUv).r;
-            outdoorStrength = max(outdoorStrength, roofAlphaRaw);
-            float dayBoost = uOutdoorBrightness;
-            float nightDim = clamp(2.0 - uOutdoorBrightness, 0.0, 1.0);
-            float outdoorMultiplier = mix(dayBoost, nightDim, uDarknessLevel);
-            float finalMultiplier = mix(1.0, outdoorMultiplier, outdoorStrength);
-            litColor *= finalMultiplier;
+          // Optional rope boost: apply window lighting as illumination (albedo * light)
+          // instead of additive-on-top, to preserve saturation.
+          if (uHasWindowLight > 0.5 && uRopeWindowLightBoost > 0.0001 && ropeMask > 0.001) {
+            float ropeLuma = perceivedBrightness(baseColor.rgb);
+            float ropeGate = smoothstep(0.25, 0.6, ropeLuma);
+            vec3 ropeWindowIllum = windowLightIllum * max(uRopeWindowLightBoost, 0.0) * ropeMask * ropeGate;
+            litColor += baseColor.rgb * ropeWindowIllum;
           }
+
+          float dayBoost = uOutdoorBrightness;
+          float nightDim = clamp(2.0 - uOutdoorBrightness, 0.0, 1.0);
+          float outdoorMultiplier = mix(dayBoost, nightDim, uDarknessLevel);
+          float finalMultiplier = mix(1.0, outdoorMultiplier, outdoorStrength);
+          litColor *= finalMultiplier;
 
           vec4 cloudTop = texture2D(tCloudTop, vUv);
           vec3 cloudRgb = cloudTop.rgb;
           float cloudDark = mix(1.0, 0.25, clamp(uDarknessLevel, 0.0, 1.0));
 
-          if (uHasOutdoorsMask > 0.5) {
-            float outdoorStrength2 = texture2D(tOutdoorsMask, vUv).r;
-            outdoorStrength2 = max(outdoorStrength2, roofAlphaRaw);
-            float dayBoost2 = uOutdoorBrightness;
-            float nightDim2 = clamp(2.0 - uOutdoorBrightness, 0.0, 1.0);
-            float outdoorMultiplier2 = mix(dayBoost2, nightDim2, uDarknessLevel);
-            float cloudOutdoorMult = mix(1.0, outdoorMultiplier2, outdoorStrength2);
-            cloudRgb *= cloudOutdoorMult;
-          }
+          float cloudOutdoorMult = mix(1.0, outdoorMultiplier, outdoorStrength);
+          cloudRgb *= cloudOutdoorMult;
 
           cloudRgb *= cloudDark;
           cloudRgb *= (1.0 - min(punchedMask * 2.0, 1.0));
@@ -520,6 +527,9 @@ export class LightingEffect extends EffectBase {
 
     this._quadMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.compositeMaterial);
     this.quadScene.add(this._quadMesh);
+
+    this._masksPackMesh = new THREE.Mesh(this._quadMesh.geometry, this._masksPackMaterial);
+    this._masksPackScene.add(this._masksPackMesh);
 
     // Hooks to Foundry
     Hooks.on('createAmbientLight', (doc) => this.onLightUpdate(doc));
@@ -999,6 +1009,17 @@ export class LightingEffect extends EffectBase {
       this.ropeMaskTarget.setSize(size.x, size.y);
     }
 
+    if (!this.masksTarget) {
+      this.masksTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else if (this.masksTarget.width !== size.x || this.masksTarget.height !== size.y) {
+      this.masksTarget.setSize(size.x, size.y);
+    }
+
     const hasOutdoorsProjection = !!(this.outdoorsScene && this.outdoorsMesh && this.outdoorsMask);
     if (hasOutdoorsProjection) {
       if (!this.outdoorsTarget) {
@@ -1116,6 +1137,23 @@ export class LightingEffect extends EffectBase {
       renderer.setRenderTarget(prevTarget2);
     }
 
+    // 0.75 Pack single-channel masks into a single RGBA texture to reduce
+    // sampler pressure in the composite shader.
+    if (this.masksTarget && this._masksPackScene && this._masksPackCamera && this._masksPackMaterial) {
+      const prevTargetPack = renderer.getRenderTarget();
+      this._masksPackMaterial.uniforms.tRoofAlpha.value = this.roofAlphaTarget?.texture ?? this._transparentTex;
+      this._masksPackMaterial.uniforms.tRopeMask.value = this.ropeMaskTarget?.texture ?? this._transparentTex;
+      this._masksPackMaterial.uniforms.tOutdoorsMask.value = (hasOutdoorsProjection && this.outdoorsTarget?.texture)
+        ? this.outdoorsTarget.texture
+        : this._transparentTex;
+
+      renderer.setRenderTarget(this.masksTarget);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+      renderer.render(this._masksPackScene, this._masksPackCamera);
+      renderer.setRenderTarget(prevTargetPack);
+    }
+
     // 1. Accumulate Lights into lightTarget
     const oldTarget = renderer.getRenderTarget();
     renderer.setRenderTarget(this.lightTarget);
@@ -1152,10 +1190,11 @@ export class LightingEffect extends EffectBase {
     const cu = this.compositeMaterial.uniforms;
     cu.tLight.value = this.lightTarget.texture;
     cu.tDarkness.value = this.darknessTarget.texture;
-    cu.tRoofAlpha.value = this.roofAlphaTarget.texture;
-
-    cu.tRopeMask.value = this.ropeMaskTarget?.texture ?? null;
-    cu.uHasRopeMask.value = this.ropeMaskTarget ? 1.0 : 0.0;
+    cu.tMasks.value = this.masksTarget?.texture ?? this._transparentTex;
+    cu.uViewportHeight.value = size.y;
+    if (cu.uCompositeTexelSize?.value) {
+      cu.uCompositeTexelSize.value.set(1 / Math.max(1, size.x), 1 / Math.max(1, size.y));
+    }
 
     try {
       const wle = window.MapShine?.windowLightEffect;
@@ -1176,11 +1215,6 @@ export class LightingEffect extends EffectBase {
     } catch (_) {
       cu.uRopeWindowLightBoost.value = 0.0;
     }
-
-    cu.tOutdoorsMask.value = (hasOutdoorsProjection && this.outdoorsTarget && this.outdoorsTarget.texture)
-      ? this.outdoorsTarget.texture
-      : null;
-    cu.uHasOutdoorsMask.value = hasOutdoorsProjection ? 1.0 : 0.0;
 
     // Bind overhead shadow texture if available.
     try {

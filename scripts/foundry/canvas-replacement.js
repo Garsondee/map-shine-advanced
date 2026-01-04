@@ -1127,7 +1127,6 @@ async function createThreeCanvas(scene) {
     prismEffect.setBaseMesh(basePlane, bundle);
     waterEffect.setBaseMesh(basePlane, bundle);
     windowLightEffect.setBaseMesh(basePlane, bundle);
-    windowLightEffect.createOverlayMesh();
     windowLightEffect.createLightTarget();
     bushEffect.setBaseMesh(basePlane, bundle);
     treeEffect.setBaseMesh(basePlane, bundle);

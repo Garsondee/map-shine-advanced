@@ -567,12 +567,21 @@ export class WindowLightEffect extends EffectBase {
   }
 
   update(timeInfo) {
-    if (!this.material || !this.mesh) return;
+    const mat = this.material;
+    const lmat = this.lightMaterial;
+    const u = mat?.uniforms || null;
+    const lu = lmat?.uniforms || null;
 
-    this.mesh.visible = this._enabled && this.params.hasWindowMask;
-    if (!this.mesh.visible) return;
+    if (!u && !lu) return;
 
-    this.material.uniforms.uTime.value = timeInfo.elapsed;
+    if (this.mesh) {
+      this.mesh.visible = this._enabled && this.params.hasWindowMask;
+    }
+
+    if (!this._enabled || !this.params.hasWindowMask) return;
+
+    if (u?.uTime) u.uTime.value = timeInfo.elapsed;
+    if (lu?.uTime) lu.uTime.value = timeInfo.elapsed;
 
     // Sync environment
     let cloudCover = 0.0;
@@ -586,10 +595,9 @@ export class WindowLightEffect extends EffectBase {
             if (cloudEffect?.params?.cloudCover !== undefined) cloudCover = cloudEffect.params.cloudCover;
         }
     } catch(e) {}
-    this.material.uniforms.uCloudCover.value = Math.max(0.0, Math.min(1.0, cloudCover));
-    if (this.lightMaterial?.uniforms?.uCloudCover) {
-      this.lightMaterial.uniforms.uCloudCover.value = this.material.uniforms.uCloudCover.value;
-    }
+    const nextCloudCover = Math.max(0.0, Math.min(1.0, cloudCover));
+    if (u?.uCloudCover) u.uCloudCover.value = nextCloudCover;
+    if (lu?.uCloudCover) lu.uCloudCover.value = nextCloudCover;
 
     let darkness = 0.0;
     try {
@@ -606,10 +614,8 @@ export class WindowLightEffect extends EffectBase {
     darkness = (typeof darkness === 'number' && Number.isFinite(darkness))
       ? Math.max(0.0, Math.min(1.0, darkness))
       : 0.0;
-    this.material.uniforms.uDarknessLevel.value = darkness;
-    if (this.lightMaterial?.uniforms?.uDarknessLevel) {
-      this.lightMaterial.uniforms.uDarknessLevel.value = this.material.uniforms.uDarknessLevel.value;
-    }
+    if (u?.uDarknessLevel) u.uDarknessLevel.value = darkness;
+    if (lu?.uDarknessLevel) lu.uDarknessLevel.value = darkness;
 
     // Sky Color influence (time-of-day grading)
     try {
@@ -625,26 +631,26 @@ export class WindowLightEffect extends EffectBase {
         ? Math.max(-1.0, Math.min(1.0, su.uTint.value))
         : 0.0;
 
-      if (this.material?.uniforms?.uSkyIntensity) {
-        this.material.uniforms.uSkyIntensity.value = skyIntensity;
-        this.material.uniforms.uSkyTemperature.value = skyTemp;
-        this.material.uniforms.uSkyTint.value = skyTint;
+      if (u?.uSkyIntensity) {
+        u.uSkyIntensity.value = skyIntensity;
+        u.uSkyTemperature.value = skyTemp;
+        u.uSkyTint.value = skyTint;
       }
-      if (this.lightMaterial?.uniforms?.uSkyIntensity) {
-        this.lightMaterial.uniforms.uSkyIntensity.value = skyIntensity;
-        this.lightMaterial.uniforms.uSkyTemperature.value = skyTemp;
-        this.lightMaterial.uniforms.uSkyTint.value = skyTint;
+      if (lu?.uSkyIntensity) {
+        lu.uSkyIntensity.value = skyIntensity;
+        lu.uSkyTemperature.value = skyTemp;
+        lu.uSkyTint.value = skyTint;
       }
     } catch (e) {
-      if (this.material?.uniforms?.uSkyIntensity) {
-        this.material.uniforms.uSkyIntensity.value = 0.0;
-        this.material.uniforms.uSkyTemperature.value = 0.0;
-        this.material.uniforms.uSkyTint.value = 0.0;
+      if (u?.uSkyIntensity) {
+        u.uSkyIntensity.value = 0.0;
+        u.uSkyTemperature.value = 0.0;
+        u.uSkyTint.value = 0.0;
       }
-      if (this.lightMaterial?.uniforms?.uSkyIntensity) {
-        this.lightMaterial.uniforms.uSkyIntensity.value = 0.0;
-        this.lightMaterial.uniforms.uSkyTemperature.value = 0.0;
-        this.lightMaterial.uniforms.uSkyTint.value = 0.0;
+      if (lu?.uSkyIntensity) {
+        lu.uSkyIntensity.value = 0.0;
+        lu.uSkyTemperature.value = 0.0;
+        lu.uSkyTint.value = 0.0;
       }
     }
 
@@ -675,42 +681,44 @@ export class WindowLightEffect extends EffectBase {
           bindCloudShadow(this.lightMaterial, tex);
         }
     } catch (e) {
-        this.material.uniforms.uHasCloudShadowMap.value = 0.0;
-        if (this.lightMaterial?.uniforms?.uHasCloudShadowMap) {
-          this.lightMaterial.uniforms.uHasCloudShadowMap.value = 0.0;
+        if (u?.uHasCloudShadowMap) {
+          u.uHasCloudShadowMap.value = 0.0;
+        }
+        if (lu?.uHasCloudShadowMap) {
+          lu.uHasCloudShadowMap.value = 0.0;
         }
     }
 
     // Update Params
-    const u = this.material.uniforms;
-    u.uIntensity.value = this.params.intensity;
-    u.uFalloff.value = this.params.falloff;
-    this._applyThreeColor(u.uColor.value, this.params.color);
-    u.uCloudInfluence.value = this.params.cloudInfluence;
-    u.uNightDimming.value = this.params.nightDimming;
-    if (u.uUseSkyTint) u.uUseSkyTint.value = this.params.useSkyTint ? 1.0 : 0.0;
-    if (u.uSkyTintStrength) u.uSkyTintStrength.value = this.params.skyTintStrength;
-    u.uCloudShadowContrast.value = this.params.cloudShadowContrast;
-    u.uCloudShadowBias.value = this.params.cloudShadowBias;
-    u.uCloudShadowGamma.value = this.params.cloudShadowGamma;
-    u.uCloudShadowMinLight.value = this.params.cloudShadowMinLight;
-    u.uSpecularBoost.value = this.params.specularBoost;
-    u.uRgbShiftAmount.value = this.params.rgbShiftAmount;
-    u.uRgbShiftAngle.value = this.params.rgbShiftAngle * (Math.PI / 180.0);
+    if (u) {
+      if (u.uIntensity) u.uIntensity.value = this.params.intensity;
+      if (u.uFalloff) u.uFalloff.value = this.params.falloff;
+      if (u.uColor) this._applyThreeColor(u.uColor.value, this.params.color);
+      if (u.uCloudInfluence) u.uCloudInfluence.value = this.params.cloudInfluence;
+      if (u.uNightDimming) u.uNightDimming.value = this.params.nightDimming;
+      if (u.uUseSkyTint) u.uUseSkyTint.value = this.params.useSkyTint ? 1.0 : 0.0;
+      if (u.uSkyTintStrength) u.uSkyTintStrength.value = this.params.skyTintStrength;
+      if (u.uCloudShadowContrast) u.uCloudShadowContrast.value = this.params.cloudShadowContrast;
+      if (u.uCloudShadowBias) u.uCloudShadowBias.value = this.params.cloudShadowBias;
+      if (u.uCloudShadowGamma) u.uCloudShadowGamma.value = this.params.cloudShadowGamma;
+      if (u.uCloudShadowMinLight) u.uCloudShadowMinLight.value = this.params.cloudShadowMinLight;
+      if (u.uSpecularBoost) u.uSpecularBoost.value = this.params.specularBoost;
+      if (u.uRgbShiftAmount) u.uRgbShiftAmount.value = this.params.rgbShiftAmount;
+      if (u.uRgbShiftAngle) u.uRgbShiftAngle.value = this.params.rgbShiftAngle * (Math.PI / 180.0);
+    }
 
-    if (this.lightMaterial?.uniforms) {
-      const lu = this.lightMaterial.uniforms;
-      lu.uIntensity.value = this.params.intensity;
-      lu.uFalloff.value = this.params.falloff;
-      this._applyThreeColor(lu.uColor.value, this.params.color);
-      lu.uCloudInfluence.value = this.params.cloudInfluence;
-      lu.uNightDimming.value = this.params.nightDimming;
+    if (lu) {
+      if (lu.uIntensity) lu.uIntensity.value = this.params.intensity;
+      if (lu.uFalloff) lu.uFalloff.value = this.params.falloff;
+      if (lu.uColor) this._applyThreeColor(lu.uColor.value, this.params.color);
+      if (lu.uCloudInfluence) lu.uCloudInfluence.value = this.params.cloudInfluence;
+      if (lu.uNightDimming) lu.uNightDimming.value = this.params.nightDimming;
       if (lu.uUseSkyTint) lu.uUseSkyTint.value = this.params.useSkyTint ? 1.0 : 0.0;
       if (lu.uSkyTintStrength) lu.uSkyTintStrength.value = this.params.skyTintStrength;
-      lu.uCloudShadowContrast.value = this.params.cloudShadowContrast;
-      lu.uCloudShadowBias.value = this.params.cloudShadowBias;
-      lu.uCloudShadowGamma.value = this.params.cloudShadowGamma;
-      lu.uCloudShadowMinLight.value = this.params.cloudShadowMinLight;
+      if (lu.uCloudShadowContrast) lu.uCloudShadowContrast.value = this.params.cloudShadowContrast;
+      if (lu.uCloudShadowBias) lu.uCloudShadowBias.value = this.params.cloudShadowBias;
+      if (lu.uCloudShadowGamma) lu.uCloudShadowGamma.value = this.params.cloudShadowGamma;
+      if (lu.uCloudShadowMinLight) lu.uCloudShadowMinLight.value = this.params.cloudShadowMinLight;
     }
   }
 
@@ -752,7 +760,7 @@ export class WindowLightEffect extends EffectBase {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat,
-      type: THREE.UnsignedByteType
+      type: THREE.HalfFloatType
     });
 
     this.lightScene = new THREE.Scene();

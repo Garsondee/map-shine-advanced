@@ -336,6 +336,42 @@ export class ControlPanelManager {
     this.container.style.display = 'none'; // Initially hidden
     parentElement.appendChild(this.container);
 
+    {
+      const stop = (e) => {
+        try {
+          e.stopPropagation();
+        } catch (_) {
+        }
+      };
+
+      const stopAndPrevent = (e) => {
+        try {
+          e.preventDefault();
+        } catch (_) {
+        }
+        stop(e);
+      };
+
+      const events = [
+        'pointerdown',
+        'pointerup',
+        'pointermove',
+        'mousedown',
+        'mouseup',
+        'mousemove',
+        'click',
+        'dblclick',
+        'wheel'
+      ];
+
+      for (const type of events) {
+        if (type === 'wheel') this.container.addEventListener(type, stop, { passive: true });
+        else this.container.addEventListener(type, stop);
+      }
+
+      this.container.addEventListener('contextmenu', stopAndPrevent);
+    }
+
     // Create pane
     this.pane = new Tweakpane.Pane({
       title: 'Map Shine Control',
@@ -558,8 +594,8 @@ export class ControlPanelManager {
 
     // Mouse events for dragging
     face.addEventListener('mousedown', this._boundHandlers.onFaceMouseDown);
-    document.addEventListener('mousemove', this._boundHandlers.onDocMouseMove);
-    document.addEventListener('mouseup', this._boundHandlers.onDocMouseUp);
+    document.addEventListener('mousemove', this._boundHandlers.onDocMouseMove, { capture: true });
+    document.addEventListener('mouseup', this._boundHandlers.onDocMouseUp, { capture: true });
 
     // Touch events for mobile
     face.addEventListener('touchstart', this._boundHandlers.onFaceTouchStart);
@@ -687,8 +723,8 @@ export class ControlPanelManager {
       top: rect.top
     };
 
-    document.addEventListener('mousemove', this._boundHandlers.onDocPanelMouseMove);
-    document.addEventListener('mouseup', this._boundHandlers.onDocPanelMouseUp);
+    document.addEventListener('mousemove', this._boundHandlers.onDocPanelMouseMove, { capture: true });
+    document.addEventListener('mouseup', this._boundHandlers.onDocPanelMouseUp, { capture: true });
   }
 
   _onHeaderMouseMove(e) {
@@ -713,8 +749,8 @@ export class ControlPanelManager {
   _onHeaderMouseUp() {
     this._isDraggingPanel = false;
     this._dragStart = null;
-    document.removeEventListener('mousemove', this._boundHandlers.onDocPanelMouseMove);
-    document.removeEventListener('mouseup', this._boundHandlers.onDocPanelMouseUp);
+    document.removeEventListener('mousemove', this._boundHandlers.onDocPanelMouseMove, { capture: true });
+    document.removeEventListener('mouseup', this._boundHandlers.onDocPanelMouseUp, { capture: true });
   }
 
   /**
@@ -1176,13 +1212,13 @@ Current Weather:
       this.clockElements.face.removeEventListener('mousedown', this._boundHandlers.onFaceMouseDown);
       this.clockElements.face.removeEventListener('touchstart', this._boundHandlers.onFaceTouchStart);
     }
-    document.removeEventListener('mousemove', this._boundHandlers.onDocMouseMove);
-    document.removeEventListener('mouseup', this._boundHandlers.onDocMouseUp);
+    document.removeEventListener('mousemove', this._boundHandlers.onDocMouseMove, { capture: true });
+    document.removeEventListener('mouseup', this._boundHandlers.onDocMouseUp, { capture: true });
     document.removeEventListener('touchmove', this._boundHandlers.onDocTouchMove);
     document.removeEventListener('touchend', this._boundHandlers.onDocTouchEnd);
 
-    document.removeEventListener('mousemove', this._boundHandlers.onDocPanelMouseMove);
-    document.removeEventListener('mouseup', this._boundHandlers.onDocPanelMouseUp);
+    document.removeEventListener('mousemove', this._boundHandlers.onDocPanelMouseMove, { capture: true });
+    document.removeEventListener('mouseup', this._boundHandlers.onDocPanelMouseUp, { capture: true });
 
     if (this.headerOverlay) {
       this.headerOverlay.removeEventListener('mousedown', this._boundHandlers.onHeaderMouseDown);

@@ -295,6 +295,42 @@ export class TextureManagerUI {
     this.container.style.bottom = '20px';
     document.body.appendChild(this.container);
 
+    {
+      const stop = (e) => {
+        try {
+          e.stopPropagation();
+        } catch (_) {
+        }
+      };
+
+      const stopAndPrevent = (e) => {
+        try {
+          e.preventDefault();
+        } catch (_) {
+        }
+        stop(e);
+      };
+
+      const events = [
+        'pointerdown',
+        'pointerup',
+        'pointermove',
+        'mousedown',
+        'mouseup',
+        'mousemove',
+        'click',
+        'dblclick',
+        'wheel'
+      ];
+
+      for (const type of events) {
+        if (type === 'wheel') this.container.addEventListener(type, stop, { passive: true });
+        else this.container.addEventListener(type, stop);
+      }
+
+      this.container.addEventListener('contextmenu', stopAndPrevent);
+    }
+
     // Create pane
     this.pane = new Tweakpane.Pane({
       title: 'Texture Manager',
@@ -752,8 +788,8 @@ export class TextureManagerUI {
       this.container.style.left = `${startLeft}px`;
       this.container.style.top = `${startTop}px`;
 
-      document.addEventListener('mousemove', onMouseMove);
-      document.addEventListener('mouseup', onMouseUp);
+      document.addEventListener('mousemove', onMouseMove, { capture: true });
+      document.addEventListener('mouseup', onMouseUp, { capture: true });
       e.preventDefault();
       e.stopPropagation();
     };
@@ -774,8 +810,8 @@ export class TextureManagerUI {
 
     const onMouseUp = (e) => {
       isDragging = false;
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
+      document.removeEventListener('mousemove', onMouseMove, { capture: true });
+      document.removeEventListener('mouseup', onMouseUp, { capture: true });
       
       if (hasDragged && e) {
         e.preventDefault();

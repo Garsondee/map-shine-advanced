@@ -179,15 +179,25 @@ export class InteractionManager {
 
   _isEventFromUI(event) {
     const target = event?.target;
-    if (!(target instanceof Element)) return false;
+    const path = (event && typeof event.composedPath === 'function') ? event.composedPath() : null;
+    const elements = Array.isArray(path)
+      ? path.filter((n) => n instanceof Element)
+      : (target instanceof Element ? [target] : []);
 
-    if (target.closest('.window-app, .app.window-app, #ui, #sidebar, #navigation')) return true;
+    for (const el of elements) {
+      if (el.closest('.window-app, .app.window-app, #ui, #sidebar, #navigation')) return true;
+      if (el.closest('button, a, input, select, textarea, label')) return true;
 
-    if (target.closest('button, a, input, select, textarea, label')) return true;
+      if (el.closest('#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-loading-overlay')) return true;
+      if (el.closest('#map-point-context-menu')) return true;
 
-    if (target.closest('#map-shine-ui, #map-shine-texture-manager, #map-shine-loading-overlay')) return true;
-
-    if (target.closest('#map-point-context-menu')) return true;
+      const classList = el.classList;
+      if (classList && classList.length) {
+        for (const cls of classList) {
+          if (typeof cls === 'string' && cls.startsWith('tp-')) return true;
+        }
+      }
+    }
 
     return false;
   }
@@ -1290,6 +1300,8 @@ export class InteractionManager {
    */
   onDoubleClick(event) {
     try {
+        if (this._isEventFromUI(event)) return;
+
         // Handle Map Point Drawing Mode - double-click finishes drawing
         if (this.mapPointDraw.active) {
           this._finishMapPointDrawing();
@@ -1477,6 +1489,8 @@ export class InteractionManager {
    */
   onPointerDown(event) {
     try {
+        if (this._isEventFromUI(event)) return;
+
         // Handle Map Point Drawing Mode (takes priority over other interactions)
         if (this.mapPointDraw.active && event.button === 0) {
           const worldPos = this.screenToWorld(event.clientX, event.clientY);
@@ -2283,6 +2297,18 @@ export class InteractionManager {
    */
   onPointerMove(event) {
     try {
+        if (
+          this._isEventFromUI(event) &&
+          !this.dragState?.active &&
+          !this.dragSelect?.active &&
+          !this.wallDraw?.active &&
+          !this.lightPlacement?.active &&
+          !this.mapPointDraw?.active &&
+          !this.rightClickState?.active
+        ) {
+          return;
+        }
+
         // PERFORMANCE: Skip expensive hover detection if mouse is not over the canvas.
         // This prevents raycasting when hovering over Tweakpane UI or other overlays.
         // We still process active drags/draws since those need to track mouse globally.
@@ -2596,6 +2622,18 @@ export class InteractionManager {
    */
   async onPointerUp(event) {
     try {
+        if (
+          this._isEventFromUI(event) &&
+          !this.dragState?.active &&
+          !this.dragSelect?.active &&
+          !this.wallDraw?.active &&
+          !this.lightPlacement?.active &&
+          !this.mapPointDraw?.active &&
+          !this.rightClickState?.active
+        ) {
+          return;
+        }
+
         // Handle Right Click (HUD toggle)
         if (event.button === 2 && this.rightClickState.active) {
             const tokenId = this.rightClickState.tokenId;
@@ -3013,6 +3051,8 @@ export class InteractionManager {
    * @param {KeyboardEvent} event 
    */
   async onKeyDown(event) {
+    if (this._isEventFromUI(event)) return;
+
     // Intercept Delete/Backspace early so Foundry doesn't also process it.
     // (Otherwise you can get double-deletes and "does not exist" notifications.)
     if ((event.key === 'Delete' || event.key === 'Backspace') && (this.mapPointDraw.active || this.selection.size > 0)) {

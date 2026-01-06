@@ -821,7 +821,8 @@ export class PlayerLightEffect extends EffectBase {
 
         const torchMats = [this._torchFlameMat, this._torchSparksMat];
         for (let i = 0; i < torchMats.length; i++) {
-          const u = torchMats[i]?.uniforms;
+          const m = torchMats[i];
+          const u = m?.uniforms || m?.userData?._msRopeMaskUniforms;
           if (!u) continue;
           if (u.uInvScreenSize) u.uInvScreenSize.value.set(invW, invH);
           if (u.uRopeMask) u.uRopeMask.value = ropeMaskTex;
@@ -1320,55 +1321,38 @@ export class PlayerLightEffect extends EffectBase {
     tex.generateMipmaps = true;
     tex.minFilter = THREE.LinearMipmapLinearFilter;
     tex.magFilter = THREE.LinearFilter;
+    // Match other Quarks textures (cookie, particles) and avoid implicit UV inversion.
+    tex.flipY = false;
 
     this._torchTexture = tex;
 
-    const material = new THREE.ShaderMaterial({
+    const material = new THREE.MeshBasicMaterial({
+      map: tex,
       transparent: true,
       blending: THREE.AdditiveBlending,
       depthTest: true,
       depthWrite: false,
-      uniforms: {
-        uMap: { value: tex },
-        uOpacity: { value: 0.0 },
-        uColor: { value: new THREE.Color(1.0, 0.75, 0.35) },
-        uRopeMask: { value: null },
-        uHasRopeMask: { value: 0.0 },
-        uInvScreenSize: { value: new THREE.Vector2(1, 1) }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D uMap;
-        uniform float uOpacity;
-        uniform vec3 uColor;
-        uniform sampler2D uRopeMask;
-        uniform float uHasRopeMask;
-        uniform vec2 uInvScreenSize;
-        varying vec2 vUv;
-        void main() {
-          if (uOpacity <= 0.0001) discard;
-          if (uHasRopeMask > 0.5) {
-            vec2 suv = gl_FragCoord.xy * uInvScreenSize;
-            vec4 rm = texture2D(uRopeMask, suv);
-            float ropeMask = rm.a;
-            if (ropeMask > 0.001) discard;
-          }
-          vec4 texel = texture2D(uMap, vUv);
-          float a = texel.a * uOpacity;
-          if (a <= 0.0001) discard;
-          gl_FragColor = vec4(texel.rgb * uColor, a);
-        }
-      `
+      color: 0xffffff,
+      side: THREE.DoubleSide,
+      opacity: 0.0
     });
     material.toneMapped = false;
-    material.opacity = 0.0;
-    material.color = material.uniforms.uColor.value;
+
+    // Rope mask discard: inject into Quarks-compatible material shader.
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uRopeMask = { value: null };
+      shader.uniforms.uHasRopeMask = { value: 0.0 };
+      shader.uniforms.uInvScreenSize = { value: new THREE.Vector2(1, 1) };
+      material.userData._msRopeMaskUniforms = shader.uniforms;
+      shader.fragmentShader = shader.fragmentShader.replace(
+        'void main() {',
+        'uniform sampler2D uRopeMask;\nuniform float uHasRopeMask;\nuniform vec2 uInvScreenSize;\nvoid main() {'
+      );
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <clipping_planes_fragment>\n',
+        '#include <clipping_planes_fragment>\n\n  if (uHasRopeMask > 0.5) {\n    vec2 suv = gl_FragCoord.xy * uInvScreenSize;\n    vec4 rm = texture2D(uRopeMask, suv);\n    if (rm.a > 0.001) discard;\n  }\n'
+      );
+    };
     this._torchFlameMat = material;
 
     // Create particle system for torch
@@ -1456,52 +1440,32 @@ export class PlayerLightEffect extends EffectBase {
     sparkTex.flipY = false;
     this._torchSparksTexture = sparkTex;
 
-    const material = new THREE.ShaderMaterial({
+    const material = new THREE.MeshBasicMaterial({
+      map: sparkTex,
       transparent: true,
       blending: THREE.AdditiveBlending,
       depthTest: true,
       depthWrite: false,
-      uniforms: {
-        uMap: { value: sparkTex },
-        uOpacity: { value: 1.0 },
-        uColor: { value: new THREE.Color(0xffffff) },
-        uRopeMask: { value: null },
-        uHasRopeMask: { value: 0.0 },
-        uInvScreenSize: { value: new THREE.Vector2(1, 1) }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D uMap;
-        uniform float uOpacity;
-        uniform vec3 uColor;
-        uniform sampler2D uRopeMask;
-        uniform float uHasRopeMask;
-        uniform vec2 uInvScreenSize;
-        varying vec2 vUv;
-        void main() {
-          if (uOpacity <= 0.0001) discard;
-          if (uHasRopeMask > 0.5) {
-            vec2 suv = gl_FragCoord.xy * uInvScreenSize;
-            vec4 rm = texture2D(uRopeMask, suv);
-            float ropeMask = rm.a;
-            if (ropeMask > 0.001) discard;
-          }
-          vec4 texel = texture2D(uMap, vUv);
-          float a = texel.a * uOpacity;
-          if (a <= 0.0001) discard;
-          gl_FragColor = vec4(texel.rgb * uColor, a);
-        }
-      `
+      color: 0xffffff,
+      side: THREE.DoubleSide,
+      opacity: 1.0
     });
     material.toneMapped = false;
-    material.opacity = 1.0;
-    material.color = material.uniforms.uColor.value;
+
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uRopeMask = { value: null };
+      shader.uniforms.uHasRopeMask = { value: 0.0 };
+      shader.uniforms.uInvScreenSize = { value: new THREE.Vector2(1, 1) };
+      material.userData._msRopeMaskUniforms = shader.uniforms;
+      shader.fragmentShader = shader.fragmentShader.replace(
+        'void main() {',
+        'uniform sampler2D uRopeMask;\nuniform float uHasRopeMask;\nuniform vec2 uInvScreenSize;\nvoid main() {'
+      );
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <clipping_planes_fragment>\n',
+        '#include <clipping_planes_fragment>\n\n  if (uHasRopeMask > 0.5) {\n    vec2 suv = gl_FragCoord.xy * uInvScreenSize;\n    vec4 rm = texture2D(uRopeMask, suv);\n    if (rm.a > 0.001) discard;\n  }\n'
+      );
+    };
     this._torchSparksMat = material;
 
     const shape = new ConeEmitter({
@@ -2184,13 +2148,9 @@ export class PlayerLightEffect extends EffectBase {
       const minOpacity = ember ? 0.25 : 0.0;
       const opacity = Math.max(minOpacity, Math.min(1.0, finalIntensity));
       if (typeof mat.opacity === 'number') mat.opacity = opacity;
-      if (mat.uniforms?.uOpacity) mat.uniforms.uOpacity.value = opacity;
       if (mat.color && typeof mat.color.setRGB === 'function') {
         if (ember) mat.color.setRGB(0.9, 0.15, 0.08);
         else mat.color.setRGB(1.0, 0.75, 0.35);
-      }
-      if (mat.uniforms?.uColor && mat.color && typeof mat.uniforms.uColor.value?.copy === 'function') {
-        mat.uniforms.uColor.value.copy(mat.color);
       }
     }
 

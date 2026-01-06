@@ -88,7 +88,9 @@ export class MaskDebugEffect extends EffectBase {
             G: 'g',
             B: 'b',
             A: 'a',
-            Luma: 'luma'
+            Luma: 'luma',
+            RGB: 'rgb',
+            FlowDir: 'flowDir'
           }
         },
         mode: {
@@ -224,6 +226,23 @@ export class MaskDebugEffect extends EffectBase {
           return msLuminance(m.rgb);
         }
 
+        vec3 hsv2rgb(vec3 c) {
+          vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+          vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+          return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+        }
+
+        vec3 flowDirColor(vec4 m) {
+          vec2 v = m.rg * 2.0 - 1.0;
+          float mag = clamp(length(v), 0.0, 1.0);
+          float ang = atan(v.y, v.x);
+          float h = fract((ang / (6.28318530718)) + 1.0);
+          float val = mix(0.15, 1.0, mag);
+          vec3 rgb = hsv2rgb(vec3(h, 1.0, val));
+          rgb *= mix(0.25, 1.0, m.b);
+          return rgb;
+        }
+
         void main() {
           vec4 sceneColor = texture2D(tDiffuse, vUv);
 
@@ -244,16 +263,22 @@ export class MaskDebugEffect extends EffectBase {
           }
 
           vec4 m = texture2D(tMask, uv);
-          float v = sampleChannel(m);
 
-          if (uUseThreshold > 0.5) {
-            v = smoothstep(uLo, uHi, v);
+          vec3 maskColor = vec3(0.0);
+          if (uChannel < 4.5) {
+            float v = sampleChannel(m);
+            if (uUseThreshold > 0.5) {
+              v = smoothstep(uLo, uHi, v);
+            }
+            if (uInvert > 0.5) {
+              v = 1.0 - v;
+            }
+            maskColor = vec3(v);
+          } else if (uChannel < 5.5) {
+            maskColor = m.rgb;
+          } else {
+            maskColor = flowDirColor(m);
           }
-          if (uInvert > 0.5) {
-            v = 1.0 - v;
-          }
-
-          vec3 maskColor = vec3(v);
 
           if (uMode < 0.5) {
             gl_FragColor = vec4(maskColor, 1.0);
@@ -359,6 +384,8 @@ export class MaskDebugEffect extends EffectBase {
     else if (channel === 'g') u.uChannel.value = 1.0;
     else if (channel === 'b') u.uChannel.value = 2.0;
     else if (channel === 'a') u.uChannel.value = 3.0;
+    else if (channel === 'rgb') u.uChannel.value = 5.0;
+    else if (channel === 'flowDir') u.uChannel.value = 6.0;
     else u.uChannel.value = 4.0;
 
     u.uInvert.value = this.params.invert ? 1.0 : 0.0;

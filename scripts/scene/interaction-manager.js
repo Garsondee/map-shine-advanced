@@ -2176,52 +2176,71 @@ export class InteractionManager {
     if (this.tileManager && this.tileManager.getOverheadTileSprites) {
       const overheadSprites = this.tileManager.getOverheadTileSprites();
       if (overheadSprites.length > 0) {
-        const tileIntersects = this.raycaster.intersectObjects(overheadSprites, false);
+        // IMPORTANT: Tiles are rendered as THREE.Sprite (billboards). Under a
+        // perspective camera, sprite raycasting happens against the billboard
+        // plane, which drifts from the intended ground-aligned tile plane toward
+        // the edges of the view.
+        //
+        // For accurate hover picking, raycast once against the tile Z plane and
+        // then do a bounds/alpha test against tile docs.
 
-        if (tileIntersects.length > 0) {
-          const hit = tileIntersects[0];
-          const sprite = hit.object;
-          const tileId = sprite.userData.foundryTileId;
+        const THREE = window.THREE;
+        const sampleSprite = overheadSprites[0];
+        const targetZ = sampleSprite?.position?.z ?? 0;
+        const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -targetZ);
+        const worldPoint = new THREE.Vector3();
+        const intersection = this.raycaster.ray.intersectPlane(plane, worldPoint);
 
-          // Only treat this as a "real" hit if the pointer is over an
-          // opaque part of the roof sprite (alpha > 0.5). This prevents the
-          // roof from vanishing when hovering transparent gutters/holes.
-          if (this.tileManager.isWorldPointOpaque) {
+        let bestTileId = null;
+        let bestZ = -Infinity;
+
+        if (intersection) {
+          for (const sprite of overheadSprites) {
+            const tileId = sprite.userData.foundryTileId;
             const data = this.tileManager.tileSprites.get(tileId);
-            if (!data || !this.tileManager.isWorldPointOpaque(data, hit.point.x, hit.point.y)) {
-              // Hit is on a transparent pixel; ignore this tile for hover.
-              // Clear any prior hover-hidden tile if present.
-              if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
-                this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
-                this.hoveredOverheadTileId = null;
-              }
-              // Do not mark hitFound; allow tokens below to be hovered.
-              // Effectively treat as "no tile hit".
-              // Continue to the token hover logic below.
-              // (We early-return from this tile branch.)
-              //
-              // NOTE: We don't "continue" the outer function; we just skip
-              // setting hitFound here.
-              //
-              // So drop through to tokens.
-            } else {
-              if (this.hoveredOverheadTileId !== tileId) {
-                // Restore previous hovered tile if any
-                if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
-                  this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
-                }
+            if (!data) continue;
 
-                this.hoveredOverheadTileId = tileId;
-                if (this.tileManager.setTileHoverHidden) {
-                  this.tileManager.setTileHoverHidden(tileId, true);
-                }
-              }
+            // Quick AABB test in Foundry (top-left) space.
+            // Convert the plane hit point to Foundry Y-down.
+            const foundryPt = Coordinates.toFoundry(worldPoint.x, worldPoint.y);
+            const foundryY = foundryPt.y;
+            const foundryX = foundryPt.x;
 
-              hitFound = true;
+            const { tileDoc } = data;
+            const left = tileDoc.x;
+            const right = tileDoc.x + tileDoc.width;
+            const top = tileDoc.y;
+            const bottom = tileDoc.y + tileDoc.height;
+
+            if (foundryX < left || foundryX > right || foundryY < top || foundryY > bottom) continue;
+
+            // Pixel-opaque test (alpha > 0.5)
+            let opaqueHit = true;
+            if (typeof this.tileManager.isWorldPointOpaque === 'function') {
+              opaqueHit = this.tileManager.isWorldPointOpaque(data, worldPoint.x, worldPoint.y);
+            }
+            if (!opaqueHit) continue;
+
+            const z = sprite.position?.z ?? 0;
+            if (z >= bestZ) {
+              bestZ = z;
+              bestTileId = tileId;
             }
           }
+        }
+
+        if (bestTileId) {
+          if (this.hoveredOverheadTileId !== bestTileId) {
+            if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
+              this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
+            }
+            this.hoveredOverheadTileId = bestTileId;
+            if (this.tileManager.setTileHoverHidden) {
+              this.tileManager.setTileHoverHidden(bestTileId, true);
+            }
+          }
+          hitFound = true;
         } else if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
-          // No tile currently under cursor; restore any previously hidden tile
           this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
           this.hoveredOverheadTileId = null;
         }

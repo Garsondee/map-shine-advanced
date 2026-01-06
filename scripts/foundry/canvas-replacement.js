@@ -3475,19 +3475,28 @@ function setupResizeHandling() {
       }
 
       // Check if size actually changed
-      const currentWidth = renderer?.domElement?.width || 0;
-      const currentHeight = renderer?.domElement?.height || 0;
-      
-      // Account for device pixel ratio
-      const dpr = window.devicePixelRatio || 1;
-      const targetWidth = Math.floor(width * dpr);
-      const targetHeight = Math.floor(height * dpr);
+      let currentWidth = 0;
+      let currentHeight = 0;
+      try {
+        // renderer.domElement.width/height are drawing-buffer pixels, which are
+        // affected by DPR. For resize decisions we want CSS pixels.
+        const THREE = window.THREE;
+        const size = (renderer && typeof renderer.getSize === 'function' && THREE)
+          ? renderer.getSize(new THREE.Vector2())
+          : null;
+        currentWidth = size?.x || 0;
+        currentHeight = size?.y || 0;
+      } catch (_) {
+        currentWidth = 0;
+        currentHeight = 0;
+      }
 
-      if (targetWidth === currentWidth && targetHeight === currentHeight) {
+      if (Math.floor(width) === Math.floor(currentWidth) && Math.floor(height) === Math.floor(currentHeight)) {
         log.debug('Resize skipped - dimensions unchanged');
         return;
       }
 
+      const dpr = window.devicePixelRatio || 1;
       log.info(`Handling resize: ${width}x${height} (DPR: ${dpr})`);
       resize(width, height);
     }, 16);
@@ -3580,7 +3589,22 @@ export function resize(width, height) {
 
   // Update renderer size
   if (renderer) {
-    renderer.setSize(width, height);
+    // Keep DPR in sync so projection + raycasting match across the full viewport.
+    try {
+      const dpr = window.devicePixelRatio || 1;
+      if (typeof renderer.setPixelRatio === 'function') {
+        renderer.setPixelRatio(dpr);
+      }
+    } catch (_) {
+    }
+
+    // Avoid touching element CSS sizing (we control that via style=100%).
+    // WebGLRenderer signature is (w,h,updateStyle). WebGPURenderer ignores the third.
+    try {
+      renderer.setSize(width, height, false);
+    } catch (_) {
+      renderer.setSize(width, height);
+    }
   }
 
   // Update scene composer camera

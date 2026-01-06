@@ -531,6 +531,8 @@ export class EffectStackUI {
     out['cloudShadowBlocker.screen'] = 'cloudShadowBlocker.screen';
     out['cloudTopBlocker.screen'] = 'cloudTopBlocker.screen';
 
+    out['rainFlowMap.scene'] = 'rainFlowMap.scene';
+
     return out;
   }
 

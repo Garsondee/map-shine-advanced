@@ -14,6 +14,15 @@ export class LightningEffect extends EffectBase {
     this.params = {
       enabled: true,
 
+      outsideFlashEnabled: true,
+      outsideFlashGain: 1.5,
+      outsideFlashAttackMs: 25,
+      outsideFlashDecayMs: 650,
+      outsideFlashCurve: 1.6,
+      outsideFlashFlickerAmount: 0.25,
+      outsideFlashFlickerRate: 12.0,
+      outsideFlashMaxClamp: 4.0,
+
       minDelayMs: 0,
       maxDelayMs: 10000,
 
@@ -84,6 +93,17 @@ export class LightningEffect extends EffectBase {
     this._tempVec3A = null;
     this._tempVec3B = null;
     this._tempVec3C = null;
+
+    this._flashStartMs = -1;
+    this._flashPeak = 0.0;
+    this._flashValue = 0.0;
+    this._flashSeed = 0.0;
+
+    this._lastStrikeScreenUv = null;
+    this._lastStrikeDir = null;
+
+    this._envStrikeUv = { x: 0.0, y: 0.0 };
+    this._envStrikeDir = { x: 0.0, y: 0.0 };
   }
 
   static getControlSchema() {
@@ -109,6 +129,12 @@ export class LightningEffect extends EffectBase {
           parameters: ['segments', 'curveAmount', 'macroDisplacement', 'microJitter', 'endPointRandomnessPx', 'branchChance', 'branchMax', 'branchLengthMin', 'branchLengthMax', 'branchWidthScale', 'branchIntensityScale', 'branchDurationScale', 'branchForwardBias', 'branchPerpBias', 'wildArcChance']
         },
         {
+          name: 'outsideFlash',
+          label: 'Outside Flash',
+          type: 'inline',
+          parameters: ['outsideFlashEnabled', 'outsideFlashGain', 'outsideFlashAttackMs', 'outsideFlashDecayMs', 'outsideFlashCurve', 'outsideFlashFlickerAmount', 'outsideFlashFlickerRate', 'outsideFlashMaxClamp']
+        },
+        {
           name: 'audio',
           label: 'Audio',
           type: 'inline',
@@ -117,6 +143,15 @@ export class LightningEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
+
+        outsideFlashEnabled: { type: 'boolean', default: true, label: 'Flash Enabled' },
+        outsideFlashGain: { type: 'slider', min: 0, max: 5, step: 0.01, default: 1.5, label: 'Flash Gain' },
+        outsideFlashAttackMs: { type: 'slider', min: 0, max: 150, step: 1, default: 25, label: 'Attack (ms)' },
+        outsideFlashDecayMs: { type: 'slider', min: 50, max: 2500, step: 10, default: 650, label: 'Decay (ms)' },
+        outsideFlashCurve: { type: 'slider', min: 0.25, max: 4, step: 0.01, default: 1.6, label: 'Decay Curve' },
+        outsideFlashFlickerAmount: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.25, label: 'Flicker Amount' },
+        outsideFlashFlickerRate: { type: 'slider', min: 0, max: 40, step: 0.1, default: 12.0, label: 'Flicker Rate' },
+        outsideFlashMaxClamp: { type: 'slider', min: 0, max: 10, step: 0.05, default: 4.0, label: 'Flash Clamp' },
 
         minDelayMs: { type: 'slider', min: 0, max: 5000, step: 50, default: 0, label: 'Min Delay (ms)' },
         maxDelayMs: { type: 'slider', min: 0, max: 10000, step: 50, default: 10000, label: 'Max Delay (ms)' },
@@ -185,6 +220,11 @@ export class LightningEffect extends EffectBase {
     this._tempVec3B = new THREE.Vector3();
     this._tempVec3C = new THREE.Vector3();
 
+    this._lastStrikeScreenUv = new THREE.Vector2(0.5, 0.5);
+    this._lastStrikeDir = new THREE.Vector2(0.0, -1.0);
+
+    this._flashSeed = Math.random();
+
     this._noiseTexture = this._createNoiseTexture();
 
     this._createStrikePool();
@@ -232,6 +272,7 @@ export class LightningEffect extends EffectBase {
     if (!this._initialized) return;
     if (!this.enabled) {
       this._hideAllStrikes();
+      this._setFlash(0.0, timeInfo);
       return;
     }
 
@@ -302,6 +343,114 @@ export class LightningEffect extends EffectBase {
 
       strike.mesh.visible = intensity > 0.001;
     }
+
+    this._updateFlash(timeInfo);
+  }
+
+  _ensureEnvironment() {
+    const ms = window.MapShine;
+    if (!ms) return null;
+    if (!ms.environment) ms.environment = {};
+    return ms.environment;
+  }
+
+  _setFlash(v, timeInfo) {
+    const env = this._ensureEnvironment();
+    this._flashValue = v;
+    if (env) {
+      env.lightningFlash = v;
+      env.lightningFlash01 = (this.params.outsideFlashMaxClamp > 0.0) ? Math.max(0.0, Math.min(1.0, v / this.params.outsideFlashMaxClamp)) : 0.0;
+      env.lightningStrikeUv = this._envStrikeUv;
+      env.lightningStrikeDir = this._envStrikeDir;
+      env.lightningStrikeTime = timeInfo.elapsed;
+    }
+  }
+
+  _updateFlash(timeInfo) {
+    if (!this.params.outsideFlashEnabled) {
+      if (this._flashValue !== 0.0) this._setFlash(0.0, timeInfo);
+      return;
+    }
+
+    const nowMs = timeInfo.elapsed * 1000;
+    if (this._flashStartMs < 0) {
+      if (this._flashValue !== 0.0) this._setFlash(0.0, timeInfo);
+      return;
+    }
+
+    const attackMs = Math.max(0.0, this.params.outsideFlashAttackMs);
+    const decayMs = Math.max(1.0, this.params.outsideFlashDecayMs);
+    const curve = Math.max(0.01, this.params.outsideFlashCurve);
+    const dtMs = Math.max(0.0, nowMs - this._flashStartMs);
+
+    let env = 0.0;
+    if (attackMs > 0.0 && dtMs < attackMs) {
+      env = dtMs / attackMs;
+    } else {
+      const t = (dtMs - attackMs) / decayMs;
+      env = Math.pow(Math.max(0.0, 1.0 - t), curve);
+    }
+
+    let flash = env * Math.max(0.0, this._flashPeak) * Math.max(0.0, this.params.outsideFlashGain);
+
+    const flickAmt = Math.max(0.0, Math.min(1.0, this.params.outsideFlashFlickerAmount));
+    if (flickAmt > 0.0) {
+      const rate = Math.max(0.0, this.params.outsideFlashFlickerRate);
+      const w = 6.283185307179586 * rate;
+      const flick = 0.5 + 0.5 * Math.sin(timeInfo.elapsed * w + this._flashSeed * 31.7);
+      flash *= (1.0 - flickAmt) + flickAmt * flick;
+    }
+
+    const clampV = Math.max(0.0, this.params.outsideFlashMaxClamp);
+    if (clampV > 0.0) flash = Math.min(flash, clampV);
+
+    if (env <= 0.0001) {
+      this._flashStartMs = -1;
+      this._flashPeak = 0.0;
+      flash = 0.0;
+    }
+
+    if (flash !== this._flashValue) {
+      this._setFlash(flash, timeInfo);
+    }
+  }
+
+  _registerStrikeForFlash(start, end, intensity, timeInfo) {
+    const THREE = window.THREE;
+    if (!THREE || !this.camera || !this._tempVec3C) return;
+
+    const dirX = end.x - start.x;
+    const dirY = end.y - start.y;
+    const len = Math.max(1e-4, Math.sqrt(dirX * dirX + dirY * dirY));
+
+    if (this._lastStrikeDir) {
+      this._lastStrikeDir.set(dirX / len, dirY / len);
+    }
+
+    if (this._envStrikeDir) {
+      this._envStrikeDir.x = dirX / len;
+      this._envStrikeDir.y = dirY / len;
+    }
+
+    // Project the end point to screen UV so downstream screen-space effects can react.
+    this._tempVec3C.set(end.x, end.y, end.z);
+    this._tempVec3C.project(this.camera);
+
+    const u = this._tempVec3C.x * 0.5 + 0.5;
+    const v = this._tempVec3C.y * 0.5 + 0.5;
+
+    if (this._lastStrikeScreenUv) {
+      this._lastStrikeScreenUv.set(u, v);
+    }
+
+    if (this._envStrikeUv) {
+      this._envStrikeUv.x = u;
+      this._envStrikeUv.y = v;
+    }
+
+    // Trigger/refresh the outside flash envelope.
+    this._flashStartMs = timeInfo.elapsed * 1000;
+    this._flashPeak = Math.max(this._flashPeak, Math.max(0.0, intensity));
   }
 
   dispose() {
@@ -663,6 +812,8 @@ export class LightningEffect extends EffectBase {
       end.x = start.x + dirX * dist;
       end.y = start.y + dirY * dist;
     }
+
+    this._registerStrikeForFlash(start, end, strike.baseIntensity, timeInfo);
 
     const mainDx = end.x - start.x;
     const mainDy = end.y - start.y;

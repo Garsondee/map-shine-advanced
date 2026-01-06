@@ -256,7 +256,9 @@ export class BuildingShadowsEffect extends EffectBase {
           const int MAX_STEPS = 64;
           for (int i = 0; i < MAX_STEPS; i++) {
             float fi = float(i);
-            if (fi >= samples) break;
+            // Avoid early-break loops with gradient instructions (texture sampling)
+            // to keep derivatives well-defined across fragments.
+            if (fi >= samples) continue;
 
             float t = (samples > 1.0) ? (fi / (samples - 1.0)) : 0.0;
             vec2 baseUv = vUv + dir * (t * uLength);
@@ -281,7 +283,8 @@ export class BuildingShadowsEffect extends EffectBase {
             } else {
               // Penumbra blur
               for (int j = 0; j < maxPenumbra; j++) {
-                if (j >= taps) break;
+                // Avoid early-break for the same reason as the outer loop.
+                if (j >= taps) continue;
 
                 float fj = float(j);
                 float halfCount = (float(taps) - 1.0) * 0.5;

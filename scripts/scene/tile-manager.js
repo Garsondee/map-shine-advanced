@@ -285,6 +285,44 @@ export class TileManager {
     return alpha > 0.5;
   }
 
+  isUvOpaque(data, uv) {
+    const { sprite, tileDoc } = data;
+    const texture = sprite.material?.map;
+    const image = texture?.image;
+    if (!texture || !image || !uv) return false;
+
+    const u = uv.x;
+    const v = 1 - uv.y;
+
+    if (u < 0 || u > 1 || v < 0 || v > 1) return false;
+
+    const key = texture.uuid || image.src || texture.id || tileDoc.id;
+
+    let mask = this.alphaMaskCache.get(key);
+    if (!mask) {
+      try {
+        const canvasEl = document.createElement('canvas');
+        canvasEl.width = image.width;
+        canvasEl.height = image.height;
+        const ctx = canvasEl.getContext('2d');
+        if (!ctx) return true;
+        ctx.drawImage(image, 0, 0);
+        const imgData = ctx.getImageData(0, 0, image.width, image.height);
+        mask = { width: image.width, height: image.height, data: imgData.data };
+        this.alphaMaskCache.set(key, mask);
+      } catch (e) {
+        return true;
+      }
+    }
+
+    const ix = Math.floor(u * (mask.width - 1));
+    const iy = Math.floor(v * (mask.height - 1));
+    const index = (iy * mask.width + ix) * 4;
+    const alpha = mask.data[index + 3] / 255;
+
+    return alpha > 0.5;
+  }
+
   /**
    * Update tile states (occlusion animation)
    * @param {Object} timeInfo - Time information
@@ -1080,7 +1118,7 @@ export class TileManager {
     let zBase = groundZ + Z_FOREGROUND_OFFSET;
 
     const foregroundElevation = canvas.scene.foregroundElevation || 0;
-    const isOverhead = tileDoc.elevation >= foregroundElevation;
+    const isOverhead = (tileDoc.elevation >= foregroundElevation) || !!tileDoc.overhead;
     const wasOverhead = !!sprite.userData.isOverhead;
 
     // Store overhead status for update loop

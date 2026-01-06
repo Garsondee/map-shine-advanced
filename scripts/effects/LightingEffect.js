@@ -43,6 +43,15 @@ export class LightingEffect extends EffectBase {
       // At darkness 1: outdoors *= (2.0 - outdoorBrightness) (dim night)
       outdoorBrightness: 1.0, // 1.0 = no change, 2.0 = double brightness at day
 
+      lightningOutsideEnabled: true,
+      lightningOutsideGain: 1.25,
+
+      lightningOutsideShadowEnabled: true,
+      lightningOutsideShadowStrength: 0.75,
+      lightningOutsideShadowRadiusPx: 520.0,
+      lightningOutsideShadowEdgeGain: 6.0,
+      lightningOutsideShadowInvert: false,
+
       wallInsetPx: 6.0,
 
       negativeDarknessStrength: 1.0, // Controls subtractive darkness strength
@@ -114,6 +123,20 @@ export class LightingEffect extends EffectBase {
           parameters: ['darknessEffect', 'outdoorBrightness', 'negativeDarknessStrength', 'darknessPunchGain']
         },
         {
+          name: 'lightning',
+          label: 'Lightning (Outside)',
+          type: 'inline',
+          parameters: [
+            'lightningOutsideEnabled',
+            'lightningOutsideGain',
+            'lightningOutsideShadowEnabled',
+            'lightningOutsideShadowStrength',
+            'lightningOutsideShadowRadiusPx',
+            'lightningOutsideShadowEdgeGain',
+            'lightningOutsideShadowInvert'
+          ]
+        },
+        {
           name: 'debug',
           label: 'Debug',
           type: 'folder',
@@ -129,6 +152,13 @@ export class LightingEffect extends EffectBase {
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
         darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.65, label: 'Darkness Effect' },
         outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.0, label: 'Outdoor Brightness' },
+        lightningOutsideEnabled: { type: 'boolean', default: true, label: 'Enabled' },
+        lightningOutsideGain: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.25, label: 'Flash Gain' },
+        lightningOutsideShadowEnabled: { type: 'boolean', default: true, label: 'Edge Shadows' },
+        lightningOutsideShadowStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.75, label: 'Shadow Strength' },
+        lightningOutsideShadowRadiusPx: { type: 'slider', min: 0, max: 2500, step: 10, default: 520.0, label: 'Shadow Radius (px)' },
+        lightningOutsideShadowEdgeGain: { type: 'slider', min: 0, max: 25, step: 0.25, default: 6.0, label: 'Edge Gain' },
+        lightningOutsideShadowInvert: { type: 'boolean', default: false, label: 'Invert Side' },
         negativeDarknessStrength: { type: 'slider', min: 0, max: 3, step: 0.1, default: 1.0, label: 'Negative Darkness Strength' },
         darknessPunchGain: { type: 'slider', min: 0, max: 10, step: 0.1, default: 2.0, label: 'Darkness Punch Gain' },
         debugShowLightBuffer: { type: 'boolean', default: false },
@@ -231,6 +261,15 @@ export class LightingEffect extends EffectBase {
         uCompositeTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         uViewportHeight: { value: 1024.0 },
         uOutdoorBrightness: { value: 1.5 },
+        uLightningFlash01: { value: 0.0 },
+        uLightningOutsideGain: { value: 1.25 },
+        uLightningStrikeUv: { value: new THREE.Vector2(0.5, 0.5) },
+        uLightningStrikeDir: { value: new THREE.Vector2(0.0, -1.0) },
+        uLightningShadowEnabled: { value: 1.0 },
+        uLightningShadowStrength: { value: 0.75 },
+        uLightningShadowRadiusPx: { value: 520.0 },
+        uLightningShadowEdgeGain: { value: 6.0 },
+        uLightningShadowInvert: { value: 0.0 },
         uNegativeDarknessStrength: { value: 1.0 },
         uDarknessPunchGain: { value: 2.0 },
       },
@@ -275,6 +314,15 @@ export class LightingEffect extends EffectBase {
         uniform vec2  uCompositeTexelSize;
         uniform float uViewportHeight;
         uniform float uOutdoorBrightness;
+        uniform float uLightningFlash01;
+        uniform float uLightningOutsideGain;
+        uniform vec2  uLightningStrikeUv;
+        uniform vec2  uLightningStrikeDir;
+        uniform float uLightningShadowEnabled;
+        uniform float uLightningShadowStrength;
+        uniform float uLightningShadowRadiusPx;
+        uniform float uLightningShadowEdgeGain;
+        uniform float uLightningShadowInvert;
         uniform float uNegativeDarknessStrength;
         uniform float uDarknessPunchGain;
         varying vec2 vUv;
@@ -282,6 +330,8 @@ export class LightingEffect extends EffectBase {
         float perceivedBrightness(vec3 c) {
           return dot(c, vec3(0.2126, 0.7152, 0.0722));
         }
+
+        float msSaturate(float x) { return clamp(x, 0.0, 1.0); }
 
         void main() {
           vec4 baseColor = texture2D(tDiffuse, vUv);
@@ -405,6 +455,45 @@ export class LightingEffect extends EffectBase {
           float dayBoost = uOutdoorBrightness;
           float nightDim = clamp(2.0 - uOutdoorBrightness, 0.0, 1.0);
           float outdoorMultiplier = mix(dayBoost, nightDim, uDarknessLevel);
+
+          float flash01 = msSaturate(uLightningFlash01);
+          float flashGain = max(uLightningOutsideGain, 0.0);
+
+          float shadow = 0.0;
+          if (flash01 > 0.0001 && uLightningShadowEnabled > 0.5) {
+            vec2 ts = max(uCompositeTexelSize, vec2(1.0 / 4096.0));
+            vec2 suv = clamp(uLightningStrikeUv, vec2(0.001), vec2(0.999));
+
+            float sx1 = texture2D(tMasks, clamp(suv + vec2(ts.x, 0.0), vec2(0.001), vec2(0.999))).r;
+            float sx0 = texture2D(tMasks, clamp(suv - vec2(ts.x, 0.0), vec2(0.001), vec2(0.999))).r;
+            float sy1 = texture2D(tMasks, clamp(suv + vec2(0.0, ts.y), vec2(0.001), vec2(0.999))).r;
+            float sy0 = texture2D(tMasks, clamp(suv - vec2(0.0, ts.y), vec2(0.001), vec2(0.999))).r;
+
+            vec2 grad = vec2(sx1 - sx0, sy1 - sy0);
+            float gl2 = dot(grad, grad);
+            vec2 edgeN = (gl2 > 1e-6) ? (grad * inversesqrt(gl2)) : vec2(0.0, 1.0);
+
+            vec2 dir = uLightningStrikeDir;
+            float dl2 = dot(dir, dir);
+            dir = (dl2 > 1e-6) ? (dir * inversesqrt(dl2)) : vec2(0.0, -1.0);
+
+            float sideSign = (dot(edgeN, dir) >= 0.0) ? 1.0 : -1.0;
+            sideSign = mix(sideSign, -sideSign, step(0.5, uLightningShadowInvert));
+
+            float plane = sideSign * dot(edgeN, (vUv - suv));
+            float halfPlane = step(0.0, plane);
+
+            float edgeStrength = msSaturate(sqrt(gl2) * max(uLightningShadowEdgeGain, 0.0));
+
+            vec2 dv = (vUv - suv);
+            float distPx = length(dv / ts);
+            float radius = max(uLightningShadowRadiusPx, 0.0);
+            float distFactor = (radius > 0.5) ? (1.0 - smoothstep(0.0, radius, distPx)) : 1.0;
+
+            shadow = halfPlane * edgeStrength * distFactor * msSaturate(uLightningShadowStrength);
+          }
+
+          outdoorMultiplier *= (1.0 + flash01 * flashGain * (1.0 - shadow));
           float finalMultiplier = mix(1.0, outdoorMultiplier, outdoorStrength);
           litColor *= finalMultiplier;
 
@@ -797,6 +886,64 @@ export class LightingEffect extends EffectBase {
     u.uColorationStrength.value = this.params.colorationStrength;
     u.uOutdoorBrightness.value = this.params.outdoorBrightness;
     u.uNegativeDarknessStrength.value = this.params.negativeDarknessStrength;
+
+    // Lightning outside flash (published by LightningEffect)
+    try {
+      const env = window.MapShine?.environment;
+      const flash01 = (env && typeof env.lightningFlash01 === 'number' && Number.isFinite(env.lightningFlash01))
+        ? Math.max(0.0, Math.min(1.0, env.lightningFlash01))
+        : 0.0;
+
+      const strikeUv = (env && env.lightningStrikeUv && typeof env.lightningStrikeUv === 'object')
+        ? env.lightningStrikeUv
+        : null;
+      const strikeDir = (env && env.lightningStrikeDir && typeof env.lightningStrikeDir === 'object')
+        ? env.lightningStrikeDir
+        : null;
+
+      const enabled = !!this.params.lightningOutsideEnabled;
+      const gain = (typeof this.params.lightningOutsideGain === 'number' && Number.isFinite(this.params.lightningOutsideGain))
+        ? Math.max(0.0, this.params.lightningOutsideGain)
+        : 0.0;
+
+      const shadowEnabled = !!this.params.lightningOutsideShadowEnabled;
+      const shadowStrength = (typeof this.params.lightningOutsideShadowStrength === 'number' && Number.isFinite(this.params.lightningOutsideShadowStrength))
+        ? Math.max(0.0, Math.min(1.0, this.params.lightningOutsideShadowStrength))
+        : 0.0;
+      const shadowRadiusPx = (typeof this.params.lightningOutsideShadowRadiusPx === 'number' && Number.isFinite(this.params.lightningOutsideShadowRadiusPx))
+        ? Math.max(0.0, this.params.lightningOutsideShadowRadiusPx)
+        : 0.0;
+      const shadowEdgeGain = (typeof this.params.lightningOutsideShadowEdgeGain === 'number' && Number.isFinite(this.params.lightningOutsideShadowEdgeGain))
+        ? Math.max(0.0, this.params.lightningOutsideShadowEdgeGain)
+        : 0.0;
+      const shadowInvert = !!this.params.lightningOutsideShadowInvert;
+
+      if (u.uLightningFlash01) u.uLightningFlash01.value = enabled ? flash01 : 0.0;
+      if (u.uLightningOutsideGain) u.uLightningOutsideGain.value = enabled ? gain : 0.0;
+
+      if (u.uLightningStrikeUv?.value && strikeUv && typeof strikeUv.x === 'number' && typeof strikeUv.y === 'number') {
+        u.uLightningStrikeUv.value.set(strikeUv.x, strikeUv.y);
+      }
+
+      if (u.uLightningStrikeDir?.value && strikeDir && typeof strikeDir.x === 'number' && typeof strikeDir.y === 'number') {
+        u.uLightningStrikeDir.value.set(strikeDir.x, strikeDir.y);
+      }
+
+      if (u.uLightningShadowEnabled) u.uLightningShadowEnabled.value = (enabled && shadowEnabled) ? 1.0 : 0.0;
+      if (u.uLightningShadowStrength) u.uLightningShadowStrength.value = shadowStrength;
+      if (u.uLightningShadowRadiusPx) u.uLightningShadowRadiusPx.value = shadowRadiusPx;
+      if (u.uLightningShadowEdgeGain) u.uLightningShadowEdgeGain.value = shadowEdgeGain;
+      if (u.uLightningShadowInvert) u.uLightningShadowInvert.value = shadowInvert ? 1.0 : 0.0;
+    } catch (e) {
+      if (u.uLightningFlash01) u.uLightningFlash01.value = 0.0;
+      if (u.uLightningOutsideGain) u.uLightningOutsideGain.value = 0.0;
+
+      if (u.uLightningShadowEnabled) u.uLightningShadowEnabled.value = 0.0;
+      if (u.uLightningShadowStrength) u.uLightningShadowStrength.value = 0.0;
+      if (u.uLightningShadowRadiusPx) u.uLightningShadowRadiusPx.value = 0.0;
+      if (u.uLightningShadowEdgeGain) u.uLightningShadowEdgeGain.value = 0.0;
+      if (u.uLightningShadowInvert) u.uLightningShadowInvert.value = 0.0;
+    }
 
     if (u.uDarknessPunchGain) {
       u.uDarknessPunchGain.value = this.params.darknessPunchGain;

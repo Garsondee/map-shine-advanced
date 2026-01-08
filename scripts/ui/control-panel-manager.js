@@ -867,6 +867,7 @@ export class ControlPanelManager {
     controls.preset = parentFolder.addBinding(this.controlState, 'directedPresetId', {
       label: 'Weather',
       options: {
+        'Custom': 'Custom',
         'Clear (Dry)': 'Clear (Dry)',
         'Clear (Breezy)': 'Clear (Breezy)',
         'Partly Cloudy': 'Partly Cloudy',

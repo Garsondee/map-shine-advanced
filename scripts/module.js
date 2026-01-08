@@ -55,59 +55,168 @@ Hooks.once('init', async function() {
   // Foundry v13+ uses Record<string, SceneControl> with tools as Record<string, SceneControlTool>
   Hooks.on('getSceneControlButtons', (controls) => {
     try {
-      if (!(game.user?.isGM ?? false)) return;
+      const isGM = game.user?.isGM ?? false;
+      const allowPlayers = game.settings?.get?.('map-shine-advanced', 'allowPlayersToTogglePlayerLightMode') ?? true;
 
       // In Foundry v13+, controls is Record<string, SceneControl>
       // Access tokens control directly by key
       const tokenControls = controls?.tokens;
       if (!tokenControls?.tools) return;
 
-      // Avoid duplicate tool registration
-      if (tokenControls.tools['map-shine-config']) return;
+      if (isGM) {
+        if (!tokenControls.tools['map-shine-config']) {
+          tokenControls.tools['map-shine-config'] = {
+            name: 'map-shine-config',
+            title: 'Map Shine Config',
+            icon: 'fas fa-cog',
+            button: true,
+            order: 100,
+            visible: true,
+            toolclip: {
+              src: '',
+              heading: 'MAPSHINE.ToolTitle',
+              items: [{ paragraph: 'MAPSHINE.ToolDescription' }]
+            },
+            onChange: () => {
+              const uiManager = window.MapShine?.uiManager;
+              if (!uiManager) {
+                ui.notifications?.warn?.('Map Shine Configuration is not available yet. The scene may still be initializing.');
+                return;
+              }
+              uiManager.toggle();
+            }
+          };
+        }
 
-      // Configuration Panel button (existing TweakpaneManager)
-      tokenControls.tools['map-shine-config'] = {
-        name: 'map-shine-config',
-        title: 'Map Shine Config',
-        icon: 'fas fa-cog',
-        button: true,
-        order: 100, // Place at end of tools list
-        visible: game.user?.isGM ?? false,
-        toolclip: {
-          src: '',
-          heading: 'MAPSHINE.ToolTitle',
-          items: [{ paragraph: 'MAPSHINE.ToolDescription' }]
-        },
-        onChange: () => {
-          const uiManager = window.MapShine?.uiManager;
-          if (!uiManager) {
-            ui.notifications?.warn?.('Map Shine Configuration is not available yet. The scene may still be initializing.');
-            return;
-          }
-          uiManager.toggle();
+        if (!tokenControls.tools['map-shine-control']) {
+          tokenControls.tools['map-shine-control'] = {
+            name: 'map-shine-control',
+            title: 'Map Shine Control',
+            icon: 'fas fa-sliders-h',
+            button: true,
+            order: 101,
+            visible: true,
+            toolclip: {
+              src: '',
+              heading: 'MAPSHINE.ToolTitle',
+              items: [{ paragraph: 'MAPSHINE.ToolDescription' }]
+            },
+            onChange: () => {
+              const controlPanel = window.MapShine?.controlPanel;
+              if (!controlPanel) {
+                ui.notifications?.warn?.('Map Shine Control Panel is not available yet. The scene may still be initializing.');
+                return;
+              }
+              controlPanel.toggle();
+            }
+          };
+        }
+      }
+
+      const playerToolsVisible = isGM || allowPlayers;
+
+      const getControlledTokenDoc = () => {
+        try {
+          const controlled = canvas?.tokens?.controlled;
+          const token = (Array.isArray(controlled) && controlled.length > 0) ? controlled[0] : null;
+          return token?.document ?? null;
+        } catch (_) {
+          return null;
         }
       };
 
-      // Control Panel button (new ControlPanelManager)
-      tokenControls.tools['map-shine-control'] = {
-        name: 'map-shine-control',
-        title: 'Map Shine Control',
-        icon: 'fas fa-sliders-h',
-        button: true,
-        order: 101, // After config button
-        visible: game.user?.isGM ?? false,
-        toolclip: {
-          src: '',
-          heading: 'MAPSHINE.ToolTitle',
-          items: [{ paragraph: 'MAPSHINE.ToolDescription' }]
-        },
-        onChange: () => {
-          const controlPanel = window.MapShine?.controlPanel;
-          if (!controlPanel) {
-            ui.notifications?.warn?.('Map Shine Control Panel is not available yet. The scene may still be initializing.');
+      const getPlayerLightState = () => {
+        const tokenDoc = getControlledTokenDoc();
+        if (!tokenDoc) return { tokenDoc: null, enabled: false, mode: 'flashlight' };
+
+        const enabled = tokenDoc.getFlag?.('map-shine-advanced', 'playerLightEnabled');
+        const mode = tokenDoc.getFlag?.('map-shine-advanced', 'playerLightMode');
+
+        return {
+          tokenDoc,
+          enabled: (enabled === undefined || enabled === null) ? true : !!enabled,
+          mode: (mode === 'torch' || mode === 'flashlight') ? mode : 'flashlight'
+        };
+      };
+
+      const rerenderControls = () => {
+        try {
+          ui?.controls?.render?.(true);
+        } catch (_) {
+        }
+      };
+
+      const stNow = getPlayerLightState();
+      const torchActive = !!stNow.tokenDoc && stNow.enabled && stNow.mode === 'torch';
+      const flashlightActive = !!stNow.tokenDoc && stNow.enabled && stNow.mode === 'flashlight';
+
+      tokenControls.tools['map-shine-player-torch'] = {
+        name: 'map-shine-player-torch',
+        title: 'Player Light: Torch',
+        icon: 'fas fa-fire',
+        toggle: true,
+        order: 102,
+        visible: playerToolsVisible,
+        active: torchActive,
+        onChange: async () => {
+          if (!playerToolsVisible) {
+            ui.notifications?.warn?.('Only the GM can change Player Light mode.');
             return;
           }
-          controlPanel.toggle();
+
+          const { tokenDoc, enabled, mode } = getPlayerLightState();
+          if (!tokenDoc) {
+            ui.notifications?.warn?.('Select a token first.');
+            return;
+          }
+
+          try {
+            if (enabled && mode === 'torch') {
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightEnabled', false);
+            } else {
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightEnabled', true);
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightMode', 'torch');
+            }
+            rerenderControls();
+          } catch (e) {
+            console.error('Map Shine: failed to set player light mode', e);
+            ui.notifications?.warn?.('Failed to set Player Light mode.');
+          }
+        }
+      };
+
+      tokenControls.tools['map-shine-player-flashlight'] = {
+        name: 'map-shine-player-flashlight',
+        title: 'Player Light: Flashlight',
+        icon: 'fas fa-lightbulb',
+        toggle: true,
+        order: 103,
+        visible: playerToolsVisible,
+        active: flashlightActive,
+        onChange: async () => {
+          if (!playerToolsVisible) {
+            ui.notifications?.warn?.('Only the GM can change Player Light mode.');
+            return;
+          }
+
+          const { tokenDoc, enabled, mode } = getPlayerLightState();
+          if (!tokenDoc) {
+            ui.notifications?.warn?.('Select a token first.');
+            return;
+          }
+
+          try {
+            if (enabled && mode === 'flashlight') {
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightEnabled', false);
+            } else {
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightEnabled', true);
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightMode', 'flashlight');
+            }
+            rerenderControls();
+          } catch (e) {
+            console.error('Map Shine: failed to set player light mode', e);
+            ui.notifications?.warn?.('Failed to set Player Light mode.');
+          }
         }
       };
     } catch (e) {

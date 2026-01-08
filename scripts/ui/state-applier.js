@@ -185,12 +185,29 @@ export class StateApplier {
       }
 
       // Get preset values from WeatherController schema
-      const schema = weatherController.constructor?.getControlSchema?.();
-      if (!schema?.presets?.[presetId]) {
-        throw new Error(`Weather preset not found: ${presetId}`);
-      }
+      let preset = null;
+      if (presetId === 'Custom') {
+        const custom = window.MapShine?.controlPanel?.controlState?.directedCustomPreset;
+        const target = weatherController.targetState;
+        const windDir = target?.windDirection || { x: 1, y: 0 };
+        const windDirectionDegFromTarget =
+          (Math.atan2(-Number(windDir.y) || 0, Number(windDir.x) || 1) * 180) / Math.PI;
 
-      const preset = schema.presets[presetId];
+        preset = {
+          precipitation: Number(custom?.precipitation ?? target?.precipitation ?? 0.0),
+          cloudCover: Number(custom?.cloudCover ?? target?.cloudCover ?? 0.0),
+          windSpeed: Number(custom?.windSpeed ?? target?.windSpeed ?? 0.0),
+          windDirection: Number(custom?.windDirection ?? (windDirectionDegFromTarget < 0 ? windDirectionDegFromTarget + 360 : windDirectionDegFromTarget)),
+          fogDensity: Number(custom?.fogDensity ?? target?.fogDensity ?? 0.0),
+          freezeLevel: Number(custom?.freezeLevel ?? target?.freezeLevel ?? 0.0)
+        };
+      } else {
+        const schema = weatherController.constructor?.getControlSchema?.();
+        if (!schema?.presets?.[presetId]) {
+          throw new Error(`Weather preset not found: ${presetId}`);
+        }
+        preset = schema.presets[presetId];
+      }
 
       if (typeof weatherController.presetTransitionDurationSeconds === 'number') {
         weatherController.presetTransitionDurationSeconds = durationSeconds;

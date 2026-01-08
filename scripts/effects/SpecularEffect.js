@@ -998,7 +998,7 @@ export class SpecularEffect extends EffectBase {
     
     // Validate shader uniforms periodically (every 60 frames)
     if (timeInfo.frameCount % 60 === 0) {
-      this.validateShaderState();
+      this.validateShaderState(timeInfo);
     }
     
     // Update time uniform for animation
@@ -1214,11 +1214,17 @@ export class SpecularEffect extends EffectBase {
    * Validate shader state for errors
    * @private
    */
-  validateShaderState() {
-    const now = performance.now();
-    if (now - this.lastValidation < 1000) return; // Max once per second
-    
-    this.lastValidation = now;
+  validateShaderState(timeInfo = null) {
+    const nowS = (timeInfo && typeof timeInfo.elapsed === 'number') ? timeInfo.elapsed : null;
+    if (typeof nowS === 'number') {
+      if (typeof this.lastValidationS !== 'number') this.lastValidationS = -Infinity;
+      if ((nowS - this.lastValidationS) < 1.0) return; // Max once per second
+      this.lastValidationS = nowS;
+    } else {
+      const now = performance.now();
+      if (now - this.lastValidation < 1000) return; // Max once per second
+      this.lastValidation = now;
+    }
     
     const result = ShaderValidator.validateMaterialUniforms(this.material);
     

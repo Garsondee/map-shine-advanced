@@ -291,6 +291,16 @@ export function registerSettings() {
     default: false
   });
 
+  game.settings.register('map-shine-advanced', 'allowPlayersToTogglePlayerLightMode', {
+    name: 'Allow Players to Toggle Player Light',
+    hint: 'If disabled, only the GM can switch between torch and flashlight mode for player lights.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: true
+  });
+
   // Last used map point effect target (for quick placement)
   game.settings.register('map-shine-advanced', 'lastMapPointEffect', {
     name: 'Last Map Point Effect',

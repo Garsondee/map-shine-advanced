@@ -198,6 +198,9 @@ export class PlayerLightEffect extends EffectBase {
     this._torchGuttering = false;
     this._torchExtinguished = false;
 
+    this._torchWasActiveLastFrame = false;
+    this._torchPrevTokenId = null;
+
     this._distanceFade = 0;
 
     this._cookieTextures = {};
@@ -782,6 +785,10 @@ export class PlayerLightEffect extends EffectBase {
   }
 
   update(timeInfo) {
+    const torchWasActiveLastFrame = this._torchWasActiveLastFrame;
+    const torchPrevTokenId = this._torchPrevTokenId;
+    this._torchWasActiveLastFrame = false;
+
     if (window.MapShine?.isMapMakerMode) {
       this._setVisible(false);
       this._hideDynamicLightSources();
@@ -839,6 +846,9 @@ export class PlayerLightEffect extends EffectBase {
       return;
     }
 
+    this._torchPrevTokenId = tokenId;
+    const tokenIdChanged = torchPrevTokenId !== tokenId;
+
     const tokenSprite = window.MapShine?.tokenManager?.getTokenSprite?.(tokenId) ?? null;
     const tokenDoc = tokenSprite?.userData?.tokenDoc ?? null;
     const tokenObj = canvas?.tokens?.get?.(tokenId) ?? null;
@@ -847,6 +857,27 @@ export class PlayerLightEffect extends EffectBase {
       this._setVisible(false);
       this._hideDynamicLightSources();
       return;
+    }
+
+    try {
+      const tokenMode = tokenDoc.getFlag?.('map-shine-advanced', 'playerLightMode')
+        ?? tokenDoc?.flags?.['map-shine-advanced']?.playerLightMode;
+      if (tokenMode === 'torch' || tokenMode === 'flashlight') {
+        this.params.mode = tokenMode;
+      }
+    } catch (_) {
+    }
+
+    try {
+      const enabledFlag = tokenDoc.getFlag?.('map-shine-advanced', 'playerLightEnabled')
+        ?? tokenDoc?.flags?.['map-shine-advanced']?.playerLightEnabled;
+      const enabled = (enabledFlag === undefined || enabledFlag === null) ? true : !!enabledFlag;
+      if (!enabled) {
+        this._setVisible(false);
+        this._hideDynamicLightSources();
+        return;
+      }
+    } catch (_) {
     }
 
     if (!this._isAllowedForUser(tokenDoc)) {
@@ -903,6 +934,8 @@ export class PlayerLightEffect extends EffectBase {
     this._distanceFade = fade;
 
     const isTorchMode = this.params.mode === 'torch';
+
+    const torchExtinguishedBefore = this._torchExtinguished;
 
     if (!isTorchMode || !this.params.torchReigniteRequiresTouch) {
       this._torchExtinguished = false;
@@ -1112,9 +1145,13 @@ export class PlayerLightEffect extends EffectBase {
       return;
     }
 
-    this._updateTorch(timeInfo, tokenCenterWorld, clampedTargetWorld, blocked, distanceUnits, groundZ, fade, maxU);
+    const torchReignited = torchExtinguishedBefore && !this._torchExtinguished;
+    const snapTorchNow = tokenIdChanged || !torchWasActiveLastFrame || torchReignited;
+    this._updateTorch(timeInfo, tokenCenterWorld, clampedTargetWorld, blocked, distanceUnits, groundZ, fade, maxU, snapTorchNow);
     this._updateDynamicLightSources(timeInfo, tokenCenterWorld, clampedTargetWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc);
     this._setVisible(true, true);
+
+    this._torchWasActiveLastFrame = true;
   }
 
   render(renderer, scene, camera) {
@@ -2023,11 +2060,16 @@ export class PlayerLightEffect extends EffectBase {
     this._group.add(cookieMesh);
   }
 
-  _updateTorch(timeInfo, tokenCenterWorld, cursorWorld, blocked, distanceUnits, groundZ, distanceFade = 1.0, maxDistanceUnitsOverride = null) {
+  _updateTorch(timeInfo, tokenCenterWorld, cursorWorld, blocked, distanceUnits, groundZ, distanceFade = 1.0, maxDistanceUnitsOverride = null, snapNow = false) {
     if (!this._torchParticleSystem || !this._torchPos || !this._torchVel) return;
 
     const dt = typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016;
     const t = typeof timeInfo?.elapsed === 'number' ? timeInfo.elapsed : 0;
+
+    if (snapNow) {
+      this._torchPos.set(cursorWorld.x, cursorWorld.y, groundZ);
+      this._torchVel.set(0, 0, 0);
+    }
 
     const maxU = Math.max(0.001, (typeof maxDistanceUnitsOverride === 'number' ? maxDistanceUnitsOverride : this.params.torchMaxDistanceUnits));
     const inRange = distanceUnits <= maxU;

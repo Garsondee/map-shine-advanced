@@ -146,6 +146,8 @@ export class TweakpaneManager {
     this._uiValidatorRunning = false;
     this._uiValidatorButton = null;
     this._uiValidatorGlobalHandlers = {};
+
+    this._debugFolder = null;
   }
 
   /**
@@ -244,18 +246,19 @@ export class TweakpaneManager {
     // Load saved UI state (position, scale, accordion states)
     await this.loadUIState();
 
-    // Build global controls
-    this.buildGlobalControls();
-
-    this.buildRopesSection();
+    this.buildBrandingSection();
 
     // Build scene setup section (only for GMs)
     if (game.user.isGM) {
       this.buildSceneSetupSection();
     }
 
-    // Build branding section
-    this.buildBrandingSection();
+    // Build global controls
+    this.buildGlobalControls();
+
+    this.buildRopesSection();
+
+    this.buildDebugSection();
 
     // Start UI update loop
     this.startUILoop();
@@ -328,15 +331,6 @@ export class TweakpaneManager {
     const globalFolder = this.pane.addFolder({
       title: 'Global Controls',
       expanded: this.accordionStates['global'] ?? true
-    });
-
-    this._uiValidatorButton = globalFolder.addButton({
-      title: 'Run UI Validator',
-      label: 'Debug'
-    });
-
-    this._uiValidatorButton.on('click', async () => {
-      await this.runUIValidator();
     });
 
     // Map Maker Mode toggle
@@ -412,31 +406,101 @@ export class TweakpaneManager {
       this.openMapPointsManagerDialog();
     });
 
-    // Non-default settings dump (for debugging / default tuning)
-    globalFolder.addButton({
-      title: 'Copy Non-Default Settings',
-      label: 'Debug'
+    const masterResetButton = globalFolder.addButton({
+      title: 'Master Reset to Defaults',
+      label: 'Defaults'
+    });
+
+    masterResetButton.on('click', () => {
+      this.onMasterResetToDefaults();
+    });
+
+    this.undoButton = globalFolder.addButton({
+      title: 'Undo Last Master Reset',
+      label: 'Undo'
+    });
+
+    this.undoButton.on('click', () => {
+      this.onUndoMasterReset();
+    });
+
+    this.updateUndoButtonState();
+
+    // Track accordion state
+    globalFolder.on('fold', (ev) => {
+      this.accordionStates['global'] = ev.expanded;
+      this.saveUIState();
+    });
+  }
+
+  buildDebugSection() {
+    if (!this.pane) return;
+    if (this._debugFolder) return;
+
+    const debugFolder = this.pane.addFolder({
+      title: 'Developer Tools',
+      expanded: this.accordionStates['debug'] ?? false
+    });
+
+    this._debugFolder = debugFolder;
+
+    const uiFolder = debugFolder.addFolder({
+      title: 'UI',
+      expanded: this.accordionStates['debug_ui'] ?? false
+    });
+
+    this._uiValidatorButton = uiFolder.addButton({
+      title: 'Run UI Validator'
+    });
+
+    this._uiValidatorButton.on('click', async () => {
+      await this.runUIValidator();
+    });
+
+    uiFolder.on('fold', (ev) => {
+      this.accordionStates['debug_ui'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    debugFolder.addBlade({ view: 'separator' });
+
+    const settingsFolder = debugFolder.addFolder({
+      title: 'Settings',
+      expanded: this.accordionStates['debug_settings'] ?? false
+    });
+
+    settingsFolder.addButton({
+      title: 'Copy Non-Default Settings'
     }).on('click', async () => {
       await this.copyNonDefaultSettingsToClipboard();
     });
 
-    globalFolder.addButton({
-      title: 'Copy Changed This Session',
-      label: 'Debug'
+    settingsFolder.addButton({
+      title: 'Copy Changed This Session'
     }).on('click', async () => {
       await this.copyChangedSettingsToClipboard();
     });
 
-    globalFolder.addButton({
-      title: 'Copy Current Settings',
-      label: 'Debug'
+    settingsFolder.addButton({
+      title: 'Copy Current Settings'
     }).on('click', async () => {
       await this.copyCurrentSettingsToClipboard();
     });
 
-    globalFolder.addButton({
-      title: 'Dump Surface Report',
-      label: 'Debug'
+    settingsFolder.on('fold', (ev) => {
+      this.accordionStates['debug_settings'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    debugFolder.addBlade({ view: 'separator' });
+
+    const sceneFolder = debugFolder.addFolder({
+      title: 'Scene',
+      expanded: this.accordionStates['debug_scene'] ?? false
+    });
+
+    sceneFolder.addButton({
+      title: 'Dump Surface Report'
     }).on('click', () => {
       try {
         const report = window.MapShine?.surfaceRegistry?.refresh?.() || window.MapShine?.surfaceReport;
@@ -477,29 +541,13 @@ export class TweakpaneManager {
       }
     });
 
-    const masterResetButton = globalFolder.addButton({
-      title: 'Master Reset to Defaults',
-      label: 'Defaults'
+    sceneFolder.on('fold', (ev) => {
+      this.accordionStates['debug_scene'] = ev.expanded;
+      this.saveUIState();
     });
 
-    masterResetButton.on('click', () => {
-      this.onMasterResetToDefaults();
-    });
-
-    this.undoButton = globalFolder.addButton({
-      title: 'Undo Last Master Reset',
-      label: 'Undo'
-    });
-
-    this.undoButton.on('click', () => {
-      this.onUndoMasterReset();
-    });
-
-    this.updateUndoButtonState();
-
-    // Track accordion state
-    globalFolder.on('fold', (ev) => {
-      this.accordionStates['global'] = ev.expanded;
+    debugFolder.on('fold', (ev) => {
+      this.accordionStates['debug'] = ev.expanded;
       this.saveUIState();
     });
   }
@@ -896,7 +944,7 @@ export class TweakpaneManager {
   buildBrandingSection() {
     const brandingFolder = this.pane.addFolder({
       title: 'Support & Links',
-      expanded: this.accordionStates['branding'] ?? false
+      expanded: true
     });
 
     // Add HTML element for links
@@ -904,6 +952,11 @@ export class TweakpaneManager {
     linkContainer.style.padding = '8px';
     linkContainer.style.fontSize = '12px';
     linkContainer.innerHTML = `
+      <div style="margin-bottom: 10px;">
+        <a href="https://github.com/Garsondee/map-shine-advanced/issues" target="_blank" style="color: #66aaff;">
+          🐞 Report a Bug
+        </a>
+      </div>
       <div style="margin-bottom: 8px;">
         <strong>Support Development:</strong>
       </div>
@@ -927,6 +980,15 @@ export class TweakpaneManager {
     brandingFolder.on('fold', (ev) => {
       this.accordionStates['branding'] = ev.expanded;
       this.saveUIState();
+
+      if (!ev.expanded) {
+        setTimeout(() => {
+          try {
+            brandingFolder.expanded = true;
+          } catch (e) {
+          }
+        }, 0);
+      }
     });
   }
 
@@ -945,6 +1007,15 @@ export class TweakpaneManager {
       title: title,
       expanded: this.accordionStates[`cat_${categoryId}`] ?? false
     });
+
+    try {
+      const debugEl = this._debugFolder?.element;
+      const folderEl = folder?.element;
+      if (debugEl && folderEl && debugEl.parentNode && debugEl.parentNode === folderEl.parentNode) {
+        debugEl.parentNode.insertBefore(folderEl, debugEl);
+      }
+    } catch (e) {
+    }
 
     folder.on('fold', (ev) => {
       this.accordionStates[`cat_${categoryId}`] = ev.expanded;

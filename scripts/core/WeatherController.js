@@ -525,6 +525,10 @@ export class WeatherController {
     }
   }
 
+  scheduleSaveWeatherSnapshot() {
+    this._scheduleSaveWeatherSnapshot();
+  }
+
   async _saveWeatherSnapshotToScene() {
     try {
       if (!this._canEditSceneFlags()) return;

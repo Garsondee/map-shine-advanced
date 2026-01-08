@@ -83,6 +83,8 @@ class DoorMesh {
     this._animationStartTime = 0;
     this._animationStartProgress = 0;
     this._animationTargetProgress = 0;
+    this._animationDurationS = 0;
+    this._animationElapsedS = 0;
     
     // Mesh
     this.mesh = null;
@@ -322,23 +324,24 @@ class DoorMesh {
     
     this._isOpen = open;
     this._animating = true;
-    this._animationStartTime = performance.now();
     this._animationStartProgress = this._animationProgress;
     this._animationTargetProgress = open ? 1.0 : 0.0;
+    this._animationDurationS = Math.max(0.001, (Number(this.animation.duration) || 0) / 1000);
+    this._animationElapsedS = 0;
     
     log.debug(`Door ${this.wallDoc.id} (${this.style}) animating to ${open ? 'OPEN' : 'CLOSED'}`);
   }
   
   /**
    * Update animation state (called each frame)
-   * @param {number} elapsed - Elapsed time in seconds (unused, we use performance.now)
+   * @param {Object} timeInfo - Time info from TimeManager
    */
-  update(elapsed) {
+  update(timeInfo) {
     if (!this._animating) return;
-    
-    const now = performance.now();
-    const duration = this.animation.duration;
-    const rawProgress = (now - this._animationStartTime) / duration;
+
+    const dt = (timeInfo && typeof timeInfo.delta === 'number') ? timeInfo.delta : 0;
+    this._animationElapsedS += dt;
+    const rawProgress = this._animationDurationS > 0 ? (this._animationElapsedS / this._animationDurationS) : 1.0;
     
     if (rawProgress >= 1.0) {
       // Animation complete
@@ -647,7 +650,7 @@ export class DoorMeshManager {
     this._updateGlobalTint();
     for (const meshSet of this.doorMeshes.values()) {
       for (const doorMesh of meshSet) {
-        doorMesh.update(timeInfo.elapsed);
+        doorMesh.update(timeInfo);
       }
     }
   }

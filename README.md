@@ -5,7 +5,7 @@
 Map Shine Advanced is a Foundry VTT module that brings a Three.js-based renderer to Foundry with a focus on cinematic 2.5D battlemaps: PBR-style surface shading, mask-driven effects, particles, and a modern post-processing pipeline.
 
 - **Repo**: https://github.com/Garsondee/map-shine-advanced
-- **Status**: `0.2.0-dev` (active development)
+- **Status**: `0.1.5` (active development)
 
 ## What this module does
 
@@ -30,7 +30,7 @@ https://github.com/Garsondee/map-shine-advanced/releases/latest/download/module.
 1. Install and enable the module.
 2. Open a Scene.
 3. Open the Map Shine panel:
-   - In the Scene Controls (Tokens), click **Map Shine UI**.
+   - In the Scene Controls (Tokens), click **Map Shine Config** (cog) or **Map Shine Control** (sliders).
 4. In the panel, enable Map Shine for the current scene.
 
 ### Gameplay mode vs Map Maker mode

@@ -384,7 +384,9 @@ export class TokenManager {
     this.tokenSprites.set(tokenDoc.id, {
       sprite,
       tokenDoc,
-      lastUpdate: Date.now()
+      lastUpdate: Date.now(),
+      isSelected: false,
+      isHovered: false
     });
 
     this._tintDirty = true;
@@ -466,6 +468,14 @@ export class TokenManager {
     
     // CRITICAL: Update sprite userData so InteractionManager sees the new doc
     sprite.userData.tokenDoc = tokenDoc;
+
+    if ('name' in changes) {
+      this._refreshNameLabel(spriteData);
+    }
+
+    if ('name' in changes || 'displayName' in changes || 'disposition' in changes) {
+      this._updateNameLabelVisibility(spriteData);
+    }
 
     log.debug(`Updated token sprite: ${tokenDoc.id}`);
   }
@@ -715,6 +725,8 @@ export class TokenManager {
     if (!spriteData) return;
 
     const { sprite, tokenDoc } = spriteData;
+
+    spriteData.isSelected = !!selected;
     
     // Use square border instead of tint
     if (selected) {
@@ -722,16 +734,13 @@ export class TokenManager {
         this.createSelectionBorder(spriteData);
       }
       spriteData.selectionBorder.visible = true;
-      
-      // Also show name on selection? Usually yes.
-      this.setHover(tokenId, true);
     } else {
       if (spriteData.selectionBorder) {
         spriteData.selectionBorder.visible = false;
       }
-      // Hide name if not hovered (we'll need to track hover state separately, but for now assume deselect = hide)
-      this.setHover(tokenId, false);
     }
+
+    this._updateNameLabelVisibility(spriteData);
     
     // Reset tint
     sprite.material.color.setHex(0xffffff);
@@ -747,13 +756,79 @@ export class TokenManager {
     const spriteData = this.tokenSprites.get(tokenId);
     if (!spriteData) return;
 
-    // Create name label if needed
-    if (hovered && !spriteData.nameLabel) {
+    spriteData.isHovered = !!hovered;
+
+    this._updateNameLabelVisibility(spriteData);
+  }
+
+  _refreshNameLabel(spriteData) {
+    const label = spriteData?.nameLabel;
+    const sprite = spriteData?.sprite;
+    if (!label || !sprite) return;
+
+    try {
+      sprite.remove(label);
+    } catch (_) {
+    }
+
+    try {
+      const map = label.material?.map;
+      if (map) map.dispose();
+      label.material?.dispose?.();
+    } catch (_) {
+    }
+
+    spriteData.nameLabel = null;
+  }
+
+  _canViewMode(mode, spriteData) {
+    try {
+      const m = mode ?? CONST?.TOKEN_DISPLAY_MODES?.NONE;
+      if (m === CONST.TOKEN_DISPLAY_MODES.NONE) return false;
+      if (m === CONST.TOKEN_DISPLAY_MODES.ALWAYS) return true;
+      if (m === CONST.TOKEN_DISPLAY_MODES.CONTROL) return !!spriteData?.isSelected;
+
+      const hover = !!spriteData?.isHovered || !!canvas?.tokens?.layer?.highlightObjects;
+      if (m === CONST.TOKEN_DISPLAY_MODES.HOVER) return hover;
+
+      const isOwner = !!spriteData?.tokenDoc?.isOwner
+        || !!spriteData?.tokenDoc?.actor?.testUserPermission?.(game.user, 'OWNER')
+        || !!game?.user?.isGM;
+
+      if (m === CONST.TOKEN_DISPLAY_MODES.OWNER_HOVER) return isOwner && hover;
+      if (m === CONST.TOKEN_DISPLAY_MODES.OWNER) return isOwner;
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _updateNameLabelVisibility(spriteData) {
+    const tokenDoc = spriteData?.tokenDoc;
+    if (!tokenDoc) return;
+
+    let isOwner = false;
+    try {
+      isOwner = !!tokenDoc.isOwner || !!tokenDoc.actor?.testUserPermission?.(game.user, 'OWNER') || !!game?.user?.isGM;
+    } catch (_) {
+      isOwner = !!game?.user?.isGM;
+    }
+
+    let isSecret = false;
+    try {
+      isSecret = tokenDoc.disposition === CONST.TOKEN_DISPOSITIONS.SECRET && !isOwner;
+    } catch (_) {
+      isSecret = false;
+    }
+
+    const visible = !isSecret && this._canViewMode(tokenDoc.displayName, spriteData);
+
+    if (visible && !spriteData.nameLabel) {
       this.createNameLabel(spriteData);
     }
 
     if (spriteData.nameLabel) {
-      spriteData.nameLabel.visible = hovered;
+      spriteData.nameLabel.visible = visible;
     }
   }
 

@@ -998,6 +998,21 @@ export class WorldSpaceFogEffect extends EffectBase {
     // Check if fog should be bypassed
     const bypassFog = this._shouldBypassFog();
     this.fogMaterial.uniforms.uBypassFog.value = bypassFog ? 1.0 : 0.0;
+
+    // PREWARM: The first time fog becomes active (typically when the first token is selected),
+    // we don't want to pay the cost of loading/decoding the FogExploration texture and
+    // building the initial vision RT. Do that work in the background even while fog is
+    // bypassed (e.g. GM view with no controlled token).
+    const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
+    if (this.params.enabled && explorationEnabled) {
+      this._ensureExplorationLoadedFromFoundry();
+    }
+
+    // Also perform a single vision render when requested, even if fog is bypassed.
+    // This warms up the render path so the first token selection feels instant.
+    if (this._needsVisionUpdate) {
+      this._renderVisionMask();
+    }
     
     if (!this.params.enabled || bypassFog) {
       this.fogPlane.visible = false;
@@ -1058,8 +1073,6 @@ export class WorldSpaceFogEffect extends EffectBase {
     // Accumulate current vision into our self-maintained exploration texture
     // This runs every frame so that as the token moves, the explored area grows
     // explored = max(explored, vision)
-    const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
-
     this._ensureExplorationLoadedFromFoundry();
 
     // IMPORTANT: Don't accumulate (or save) exploration until we've loaded the

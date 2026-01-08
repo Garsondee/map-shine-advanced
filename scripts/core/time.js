@@ -45,9 +45,16 @@ export class TimeManager {
     /** @type {number} - Real-world time of last update (performance.now()) */
     this.lastUpdate = performance.now();
     
-    /** @type {number} - Time scale multiplier (1.0 = normal, 0.5 = half speed, 2.0 = double speed) */
+    /** @type {number} - Time scale multiplier (effective scale, includes pause transition) */
     this.scale = 1.0;
-    
+
+    this._userScale = 1.0;
+    this._pauseFactor = 1.0;
+    this._pauseTarget = 1.0;
+    this._pauseFrom = 1.0;
+    this._pauseT = 1.0;
+    this._pauseDuration = 0.0;
+
     /** @type {boolean} - Whether time is paused */
     this.paused = false;
     
@@ -98,14 +105,20 @@ export class TimeManager {
       realDelta = MAX_DELTA;
     }
 
-    // Apply pause and scaling
-    if (!this.paused) {
-      this.delta = realDelta * this.scale;
-      this.elapsed += this.delta;
-      this.frameCount++;
+    if (this._pauseT < 1.0) {
+      const d = this._pauseDuration > 0 ? this._pauseDuration : 0.0001;
+      this._pauseT = Math.min(1.0, this._pauseT + (realDelta / d));
+      const eased = 0.5 - 0.5 * Math.cos(Math.PI * this._pauseT);
+      this._pauseFactor = this._pauseFrom + (this._pauseTarget - this._pauseFrom) * eased;
     } else {
-      this.delta = 0.0;
+      this._pauseFactor = this._pauseTarget;
     }
+
+    this.scale = this._userScale * this._pauseFactor;
+    this.delta = realDelta * this.scale;
+    this.elapsed += this.delta;
+    this.frameCount++;
+    this.paused = this.scale <= 0.000001;
 
     // Update FPS counter
     this._fpsFrameCount++;
@@ -138,7 +151,14 @@ export class TimeManager {
    * Pause time progression
    */
   pause() {
-    if (this.paused) return;
+    if (this._pauseTarget === 0.0 && this._pauseFactor <= 0.000001) return;
+    this._pauseTarget = 0.0;
+    this._pauseFrom = this._pauseFactor;
+    this._pauseT = 1.0;
+    this._pauseDuration = 0.0;
+    this._pauseFactor = 0.0;
+    this.scale = 0.0;
+    this.delta = 0.0;
     this.paused = true;
     log.info('Time paused');
   }
@@ -147,7 +167,12 @@ export class TimeManager {
    * Resume time progression
    */
   resume() {
-    if (!this.paused) return;
+    if (this._pauseTarget === 1.0 && this._pauseFactor >= 0.999999) return;
+    this._pauseTarget = 1.0;
+    this._pauseFrom = this._pauseFactor;
+    this._pauseT = 1.0;
+    this._pauseDuration = 0.0;
+    this._pauseFactor = 1.0;
     this.paused = false;
     this.lastUpdate = performance.now(); // Reset to avoid large delta
     log.info('Time resumed');
@@ -164,6 +189,39 @@ export class TimeManager {
     }
   }
 
+  setFoundryPaused(paused, durationSeconds = null) {
+    const wantPaused = !!paused;
+    const target = wantPaused ? 0.0 : 1.0;
+    if (target === this._pauseTarget && this._pauseT >= 1.0) return;
+
+    const dur = Number.isFinite(durationSeconds)
+      ? Math.max(0, durationSeconds)
+      : (wantPaused ? 0.75 : 0.45);
+
+    if (dur <= 0) {
+      this._pauseTarget = target;
+      this._pauseFrom = target;
+      this._pauseT = 1.0;
+      this._pauseDuration = 0.0;
+      this._pauseFactor = target;
+      this.scale = this._userScale * this._pauseFactor;
+      this.delta = 0.0;
+      this.paused = this.scale <= 0.000001;
+      if (!wantPaused) {
+        this.lastUpdate = performance.now();
+      }
+      return;
+    }
+
+    this._pauseTarget = target;
+    this._pauseFrom = this._pauseFactor;
+    this._pauseT = 0.0;
+    this._pauseDuration = dur;
+    if (!wantPaused) {
+      this.lastUpdate = performance.now();
+    }
+  }
+
   /**
    * Set time scale
    * @param {number} scale - Time scale multiplier (1.0 = normal, 0.5 = half speed, etc.)
@@ -173,7 +231,7 @@ export class TimeManager {
       log.warn('Time scale cannot be negative, clamping to 0');
       scale = 0;
     }
-    this.scale = scale;
+    this._userScale = scale;
     log.info(`Time scale set to ${scale.toFixed(2)}x`);
   }
 
@@ -187,6 +245,12 @@ export class TimeManager {
     this.lastUpdate = performance.now();
     this._lastFpsUpdate = performance.now();
     this._fpsFrameCount = 0;
+    this._pauseFactor = 1.0;
+    this._pauseTarget = 1.0;
+    this._pauseFrom = 1.0;
+    this._pauseT = 1.0;
+    this._pauseDuration = 0.0;
+    this.paused = false;
     log.info('Time reset');
   }
 

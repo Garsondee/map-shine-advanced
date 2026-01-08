@@ -196,6 +196,9 @@ let _webglContextRestoredHandler = null;
  /** @type {boolean} */
  let transitionsInstalled = false;
 
+ /** @type {number|null} - Hook ID for pauseGame listener */
+ let pauseGameHookId = null;
+
  /** @type {number} */
  let createThreeCanvasGeneration = 0;
 
@@ -230,6 +233,20 @@ export function initialize() {
     
     // Hook into scene configuration changes (grid, padding, background, etc.)
     Hooks.on('updateScene', onUpdateScene);
+
+    // Hook into Foundry pause/unpause so we can smoothly ramp time scale to 0 and back.
+    if (!pauseGameHookId) {
+      pauseGameHookId = Hooks.on('pauseGame', (paused) => {
+        try {
+          const tm = window.MapShine?.timeManager || effectComposer?.getTimeManager?.();
+          if (tm && typeof tm.setFoundryPaused === 'function') {
+            tm.setFoundryPaused(!!paused);
+          }
+        } catch (e) {
+          // Ignore hook errors
+        }
+      });
+    }
 
      // Install transition wrapper so we can fade-to-black BEFORE Foundry tears down the old scene.
      // This must wrap an awaited method (Canvas.tearDown) to actually block the teardown.
@@ -919,6 +936,14 @@ async function createThreeCanvas(scene) {
     // Step 2: Initialize effect composer
     effectComposer = new EffectComposer(renderer, threeScene, camera);
     effectComposer.initialize(mapShine.capabilities);
+
+    // Ensure TimeManager immediately matches Foundry's current pause state.
+    try {
+      const paused = game?.paused ?? false;
+      effectComposer.getTimeManager()?.setFoundryPaused?.(paused, 0);
+    } catch (e) {
+      // Ignore
+    }
 
     try {
       loadingOverlay.setMessage('Initializing effects…');
@@ -1900,6 +1925,65 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
 
   let weatherPresetBuffer = null;
 
+  let customWeatherSyncTimeout = null;
+  const scheduleCustomWeatherRegimeSync = () => {
+    try {
+      if (!game?.user?.isGM) return;
+      if (!canvas?.scene) return;
+
+      if (customWeatherSyncTimeout) {
+        clearTimeout(customWeatherSyncTimeout);
+      }
+
+      customWeatherSyncTimeout = setTimeout(async () => {
+        customWeatherSyncTimeout = null;
+
+        // Ensure Directed mode is selected in the live-play control panel.
+        const target = weatherController?.targetState;
+        if (!target) return;
+
+        const windDir = target.windDirection || { x: 1, y: 0 };
+        let windDeg = (Math.atan2(-Number(windDir.y) || 0, Number(windDir.x) || 1) * 180) / Math.PI;
+        if (windDeg < 0) windDeg += 360;
+
+        const customPreset = {
+          precipitation: Number(target.precipitation) || 0.0,
+          cloudCover: Number(target.cloudCover) || 0.0,
+          windSpeed: Number(target.windSpeed) || 0.0,
+          windDirection: Number.isFinite(windDeg) ? windDeg : 0.0,
+          fogDensity: Number(target.fogDensity) || 0.0,
+          freezeLevel: Number(target.freezeLevel) || 0.0
+        };
+
+        const existing = canvas.scene.getFlag('map-shine-advanced', 'controlState');
+        const controlState = (existing && typeof existing === 'object') ? { ...existing } : {};
+        controlState.weatherMode = 'directed';
+        controlState.dynamicEnabled = false;
+        controlState.directedPresetId = 'Custom';
+        controlState.directedCustomPreset = customPreset;
+
+        await canvas.scene.setFlag('map-shine-advanced', 'controlState', controlState);
+
+        // Keep the in-memory UI model in sync if the panel is open.
+        const cp = window.MapShine?.controlPanel;
+        if (cp?.controlState) {
+          Object.assign(cp.controlState, controlState);
+          try {
+            cp.pane?.refresh();
+          } catch (_) {
+          }
+        }
+
+        // Persist the weather state itself, so refresh always restores the correct target.
+        try {
+          weatherController.scheduleSaveWeatherSnapshot?.();
+        } catch (_) {
+        }
+      }, 400);
+    } catch (e) {
+    }
+  };
+
   const onWeatherUpdate = (effectId, paramId, value) => {
     if (paramId === '_preset_begin') {
       weatherPresetBuffer = {};
@@ -2139,6 +2223,19 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         else if (paramId === 'snowFlutterStrength') st.flutterStrength = value;
       } else if (target[paramId] !== undefined) {
         target[paramId] = value;
+      }
+
+      // If the user manually edits the primary weather state via the main config,
+      // reflect that as a persisted 'Custom' directed regime in the live-play panel.
+      if (
+        paramId === 'precipitation' ||
+        paramId === 'cloudCover' ||
+        paramId === 'windSpeed' ||
+        paramId === 'windDirection' ||
+        paramId === 'fogDensity' ||
+        paramId === 'freezeLevel'
+      ) {
+        scheduleCustomWeatherRegimeSync();
       }
       
       // If we are NOT transitioning, we might want to snap startState too
@@ -2651,7 +2748,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       'Player Light',
       schema,
       onUpdate,
-      'debug'
+      'global'
     );
   }
 

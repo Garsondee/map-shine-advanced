@@ -2915,22 +2915,41 @@ export class InteractionManager {
                 const token = tokenDoc.object;
                 if (token) {
                     const origin = token.center;
-                    const collision = token.checkCollision(foundryPos, { mode: 'closest', type: 'move' });
-                    if (collision) {
-                        const dx = collision.x - origin.x;
-                        const dy = collision.y - origin.y;
-                        const dist = Math.sqrt(dx*dx + dy*dy);
-                        if (dist > 0) {
-                             const backDist = 2;
-                             const scale = Math.max(0, dist - backDist) / dist;
-                             const backX = origin.x + dx * scale;
-                             const backY = origin.y + dy * scale;
-                             const snapped = canvas.grid.getSnappedPoint({x: backX, y: backY}, {
-                                 mode: CONST.GRID_SNAPPING_MODES.CENTER
-                             });
-                             foundryPos = snapped;
+                    const gridSize = canvas.grid?.size || 100;
+                    const snapToCenter = (pt) => canvas.grid.getSnappedPoint(pt, { mode: CONST.GRID_SNAPPING_MODES.CENTER });
+
+                    // Always resolve against snapped grid centers so we don't land half-inside a wall/door.
+                    const desired = snapToCenter(foundryPos);
+
+                    // Diagonal-safe behavior: walk from origin towards desired, and pick the last
+                    // snapped tile center which does not collide.
+                    // Backtracking from the target can fail diagonally due to snap rounding.
+                    let lastValid = snapToCenter(origin);
+                    const dx = desired.x - origin.x;
+                    const dy = desired.y - origin.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+
+                    if (dist >= 1) {
+                        // Sample at quarter-grid intervals (bounded) and dedupe snapped points.
+                        const sampleStep = Math.max(1, gridSize * 0.25);
+                        const steps = Math.min(250, Math.ceil(dist / sampleStep));
+                        const seen = new Set();
+
+                        for (let i = 1; i <= steps; i++) {
+                            const t = i / steps;
+                            const sample = { x: origin.x + dx * t, y: origin.y + dy * t };
+                            const snapped = snapToCenter(sample);
+                            const key = `${snapped.x},${snapped.y}`;
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+
+                            const collision = token.checkCollision(snapped, { mode: 'closest', type: 'move' });
+                            if (collision) break;
+                            lastValid = snapped;
                         }
                     }
+
+                    foundryPos = lastValid;
                 }
 
                 // Adjust for center vs top-left

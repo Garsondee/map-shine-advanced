@@ -45,7 +45,7 @@ export class TweakpaneManager {
     this.running = false;
     
     /** @type {boolean} Whether panel is visible */
-    this.visible = true;
+    this.visible = false;
     
     /** @type {number|null} RAF handle for UI loop */
     this.rafHandle = null;
@@ -270,6 +270,9 @@ export class TweakpaneManager {
     // Initialize Effect Stack
     this.effectStack = new EffectStackUI();
     await this.effectStack.initialize();
+
+    // Start hidden by default for release; can be opened via the scene control button.
+    this.hide();
 
     log.info('Tweakpane UI initialized');
   }

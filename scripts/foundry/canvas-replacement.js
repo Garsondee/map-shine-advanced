@@ -508,6 +508,17 @@ async function onCanvasReady(canvas) {
   if (!sceneSettings.isEnabled(scene)) {
     log.debug(`Scene not enabled for Map Shine, initializing UI-only mode: ${scene.name}`);
 
+    if (!(game.user?.isGM ?? false)) {
+      // Scene not replaced by Three.js - dismiss the overlay so the user can interact with Foundry normally.
+      try {
+        loadingOverlay.fadeIn(500).catch(() => {});
+      } catch (e) {
+        log.debug('Loading overlay not available:', e);
+      }
+
+      return;
+    }
+
     try {
       if (window.MapShine) window.MapShine.stateApplier = stateApplier;
     } catch (e) {
@@ -1345,6 +1356,25 @@ async function createThreeCanvas(scene) {
           return result;
         };
         fogMgr._mapShineWrappedHandleReset = true;
+      }
+
+      if (fogMgr && typeof fogMgr.save === 'function' && !fogMgr._mapShineWrappedSave) {
+        const originalSave = fogMgr.save.bind(fogMgr);
+        fogMgr.save = async (...args) => {
+          try {
+            const fog = window.MapShine?.fogEffect;
+            if (fog && fog.params?.enabled !== false) {
+              return;
+            }
+            if (isMapMakerMode) {
+              return;
+            }
+            return await originalSave(...args);
+          } catch (_) {
+            return;
+          }
+        };
+        fogMgr._mapShineWrappedSave = true;
       }
     } catch (_) {
       // Ignore
@@ -2209,6 +2239,20 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
         windowLightEffect.enabled = value;
         log.debug(`WindowLight effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (paramId === 'rebuildRainFlowMap') {
+        try {
+          // Force regeneration even if the config didn't change.
+          windowLightEffect._rainFlowMapConfigKey = null;
+          windowLightEffect._ensureRainFlowMap();
+
+          const u = windowLightEffect.material?.uniforms;
+          const lu = windowLightEffect.lightMaterial?.uniforms;
+          if (u?.uRainFlowMap) u.uRainFlowMap.value = windowLightEffect._rainFlowMap;
+          if (lu?.uRainFlowMap) lu.uRainFlowMap.value = windowLightEffect._rainFlowMap;
+          if (u?.uHasRainFlowMap) u.uHasRainFlowMap.value = windowLightEffect._rainFlowMap ? 1.0 : 0.0;
+          if (lu?.uHasRainFlowMap) lu.uHasRainFlowMap.value = windowLightEffect._rainFlowMap ? 1.0 : 0.0;
+        } catch (e) {
+        }
       } else if (windowLightEffect.params && Object.prototype.hasOwnProperty.call(windowLightEffect.params, paramId)) {
         windowLightEffect.params[paramId] = value;
       }

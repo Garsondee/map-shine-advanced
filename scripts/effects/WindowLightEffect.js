@@ -102,6 +102,7 @@ export class WindowLightEffect extends EffectBase {
       rainOnGlassMaxOffsetPx: 1.25,
       rainOnGlassBlurPx: 0.0,
       rainOnGlassDistortionFeatherPx: 0.0,
+      rainOnGlassDistortionMasking: 1.0,
       rainOnGlassDarken: 0.25,
       rainOnGlassDarkenGamma: 1.25,
 
@@ -113,6 +114,7 @@ export class WindowLightEffect extends EffectBase {
       rainSplashMaskThreshold: 0.5,
       rainSplashMaskFeather: 0.15,
       rainSplashSpeed: 0.5,
+      rainSplashSpawnRate: 1.0,
       rainSplashRadiusPx: 6.0,
       rainSplashExpand: 2.0,
       rainSplashFadePow: 2.0,
@@ -124,9 +126,34 @@ export class WindowLightEffect extends EffectBase {
       rainSplashStreakStrength: 0.35,
       rainSplashStreakLengthPx: 24.0,
 
+      rainSplashAtlasTile0: true,
+      rainSplashAtlasTile1: true,
+      rainSplashAtlasTile2: true,
+      rainSplashAtlasTile3: true,
+
       rainNoiseScale: 2.0,
       rainNoiseDetail: 2.0,
       rainNoiseEvolution: 0.35,
+      rainRivuletAspect: 3.0,
+
+      rainRivuletGain: 1.0,
+      rainRivuletStrength: 1.0,
+      rainRivuletThreshold: 0.5,
+      rainRivuletFeather: 0.25,
+      rainRivuletGamma: 1.0,
+
+      rainRivuletSoftness: 0.0,
+
+      rainRivuletDistanceMasking: 0.0,
+      rainRivuletDistanceStart: 0.0,
+      rainRivuletDistanceEnd: 1.0,
+      rainRivuletDistanceFeather: 0.1,
+
+      rainRivuletRidgeMix: 0.0,
+      rainRivuletRidgeGain: 1.0,
+
+      rainFlowFlipDeadzone: 0.15,
+      rainFlowMaxTurnDeg: 180.0,
 
       rainOnGlassBoundaryFlowStrength: 1.0,
       rainFlowWidth: 0.25,
@@ -225,85 +252,166 @@ export class WindowLightEffect extends EffectBase {
         {
           name: 'lighting',
           label: 'Window Light',
-          type: 'inline',
+          type: 'folder',
+          expanded: true,
           parameters: ['intensity', 'falloff', 'color']
         },
         {
           name: 'environment',
           label: 'Environment',
-          type: 'inline',
+          type: 'folder',
+          expanded: false,
           parameters: ['cloudInfluence', 'nightDimming', 'useSkyTint', 'skyTintStrength']
         },
         {
           name: 'cloudShadows',
           label: 'Cloud Shadows',
-          type: 'inline',
+          type: 'folder',
+          expanded: false,
           parameters: ['cloudShadowContrast', 'cloudShadowBias', 'cloudShadowGamma', 'cloudShadowMinLight']
         },
         {
           name: 'refraction',
           label: 'Refraction (RGB)',
-          type: 'inline',
+          type: 'folder',
+          expanded: false,
           parameters: ['rgbShiftAmount', 'rgbShiftAngle']
         },
         {
-          name: 'rainOnGlass',
-          label: 'Rain On Glass',
+          name: 'overheads',
+          label: 'Overhead Tile Lighting',
           type: 'folder',
+          expanded: false,
+          parameters: ['lightOverheadTiles', 'overheadLightIntensity']
+        },
+        {
+          name: 'specular',
+          label: 'Specular Coupling',
+          type: 'folder',
+          expanded: false,
+          parameters: ['specularBoost']
+        },
+        {
+          name: 'rainCore',
+          label: 'Rain On Glass (Core)',
+          type: 'folder',
+          expanded: true,
           parameters: [
             'rainOnGlassEnabled',
             'rainOnGlassIntensity',
             'rainOnGlassPrecipStart',
             'rainOnGlassPrecipFull',
             'rainOnGlassSpeed',
-            'rainOnGlassBoundaryFlowStrength',
-            'rainFlowWidth',
-            'rainRoofPlateauStrength',
-            'rainRoofPlateauStart',
-            'rainRoofPlateauFeather',
-            'rainDebugRoofPlateau',
-            'rainDebugFlowMap',
-            'rainOnGlassMaxOffsetPx',
-            'rainOnGlassBlurPx',
-            'rainOnGlassDistortionFeatherPx',
-            'rainOnGlassDarken',
-            'rainOnGlassDarkenGamma',
+            'rainOnGlassDirectionDeg'
+          ]
+        },
+        {
+          name: 'rainNoise',
+          label: 'Rain On Glass (Noise & Rivulets)',
+          type: 'folder',
+          expanded: true,
+          parameters: [
             'rainNoiseScale',
             'rainNoiseDetail',
             'rainNoiseEvolution',
+            'rainRivuletAspect',
+            'rainRivuletGain',
+            'rainRivuletStrength',
+            'rainRivuletThreshold',
+            'rainRivuletFeather',
+            'rainRivuletGamma',
+            'rainRivuletSoftness',
+            'rainRivuletRidgeMix',
+            'rainRivuletRidgeGain'
+          ]
+        },
+        {
+          name: 'rainDistortion',
+          label: 'Rain On Glass (Distortion & Darken)',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'rainOnGlassMaxOffsetPx',
+            'rainOnGlassBlurPx',
+            'rainOnGlassDistortionFeatherPx',
+            'rainOnGlassDistortionMasking',
+            'rainOnGlassDarken',
+            'rainOnGlassDarkenGamma',
             'rainOnGlassBrightThreshold',
             'rainOnGlassBrightFeather'
           ]
         },
         {
-          name: 'rainSplashes',
-          label: 'Rain Splashes',
+          name: 'rainBoundaryFlow',
+          label: 'Rain On Glass (Boundary Flow)',
           type: 'folder',
+          expanded: false,
+          parameters: [
+            'rainOnGlassBoundaryFlowStrength',
+            'rainFlowWidth',
+            'rainRoofPlateauStrength',
+            'rainRoofPlateauStart',
+            'rainRoofPlateauFeather',
+            'rainRivuletDistanceMasking',
+            'rainRivuletDistanceStart',
+            'rainRivuletDistanceEnd',
+            'rainRivuletDistanceFeather'
+          ]
+        },
+        {
+          name: 'rainSplashesCore',
+          label: 'Rain Splashes (Core)',
+          type: 'folder',
+          expanded: false,
           parameters: [
             'rainSplashIntensity',
-            'rainSplashMaxOffsetPx',
+            'rainSplashSpawnRate',
+            'rainSplashSpeed',
+            'rainSplashLayers'
+          ]
+        },
+        {
+          name: 'rainSplashesShape',
+          label: 'Rain Splashes (Shape)',
+          type: 'folder',
+          expanded: false,
+          parameters: [
             'rainSplashScale',
-            'rainSplashMaskScale',
             'rainSplashThreshold',
+            'rainSplashMaskScale',
             'rainSplashMaskThreshold',
             'rainSplashMaskFeather',
-            'rainSplashSpeed',
             'rainSplashRadiusPx',
             'rainSplashExpand',
             'rainSplashFadePow',
-            'rainSplashLayers',
+            'rainSplashMaxOffsetPx'
+          ]
+        },
+        {
+          name: 'rainSplashesDrift',
+          label: 'Rain Splashes (Drift & Streaks)',
+          type: 'folder',
+          expanded: false,
+          parameters: [
             'rainSplashDriftPx',
             'rainSplashSizeJitter',
             'rainSplashBlob',
             'rainSplashStreakStrength',
-            'rainSplashStreakLengthPx'
+            'rainSplashStreakLengthPx',
+            'rainSplashAtlasTile0',
+            'rainSplashAtlasTile1',
+            'rainSplashAtlasTile2',
+            'rainSplashAtlasTile3'
           ]
         },
         {
           name: 'rainFlowDirection',
-          label: 'Flow Map (Direction)',
+          label: 'Flow Map (Direction & Motion)',
           type: 'folder',
+          expanded: false,
           parameters: [
+            'rainFlowFlipDeadzone',
+            'rainFlowMaxTurnDeg',
             'rainFlowInvertTangent',
             'rainFlowInvertNormal',
             'rainFlowSwapAxes',
@@ -318,7 +426,9 @@ export class WindowLightEffect extends EffectBase {
           name: 'rainFlowMapGen',
           label: 'Flow Map (Generation)',
           type: 'folder',
+          expanded: false,
           parameters: [
+            'rebuildRainFlowMap',
             'rainFlowMapMaxDim',
             'rainFlowMapMinDim',
             'rainFlowMapObstacleThreshold',
@@ -334,17 +444,22 @@ export class WindowLightEffect extends EffectBase {
           ]
         },
         {
-          name: 'lightning',
-          label: 'Lightning Flash (Window)',
-          type: 'inline',
-          parameters: ['lightningWindowEnabled', 'lightningWindowIntensityBoost', 'lightningWindowContrastBoost', 'lightningWindowRgbBoost']
+          name: 'rainDebug',
+          label: 'Rain Debug',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'rainDebugRoofPlateau',
+            'rainDebugFlowMap'
+          ]
         },
         {
-          name: 'advanced',
-          label: 'Advanced',
+          name: 'lightning',
+          label: 'Lightning Flash (Window)',
           type: 'folder',
-          parameters: ['specularBoost', 'lightOverheadTiles', 'overheadLightIntensity']
-        }
+          expanded: false,
+          parameters: ['lightningWindowEnabled', 'lightningWindowIntensityBoost', 'lightningWindowContrastBoost', 'lightningWindowRgbBoost']
+        },
       ],
       parameters: {
         hasWindowMask: {
@@ -548,6 +663,98 @@ export class WindowLightEffect extends EffectBase {
           step: 0.01,
           default: 0.35
         },
+        rainRivuletAspect: {
+          type: 'slider',
+          label: 'Rivulet Aspect',
+          min: 1.0,
+          max: 50.0,
+          step: 0.05,
+          default: 3.0
+        },
+        rainRivuletGain: {
+          type: 'slider',
+          label: 'Rivulet Gain',
+          min: 0.0,
+          max: 4.0,
+          step: 0.01,
+          default: 1.0
+        },
+        rainRivuletStrength: {
+          type: 'slider',
+          label: 'Rivulet Strength',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 1.0
+        },
+        rainRivuletThreshold: {
+          type: 'slider',
+          label: 'Rivulet Threshold',
+          min: 0.0,
+          max: 1.0,
+          step: 0.001,
+          default: 0.5
+        },
+        rainRivuletFeather: {
+          type: 'slider',
+          label: 'Rivulet Feather',
+          min: 0.0,
+          max: 1.0,
+          step: 0.001,
+          default: 0.25
+        },
+        rainRivuletGamma: {
+          type: 'slider',
+          label: 'Rivulet Gamma',
+          min: 0.1,
+          max: 4.0,
+          step: 0.01,
+          default: 1.0
+        },
+        rainRivuletSoftness: {
+          type: 'slider',
+          label: 'Rivulet Softness',
+          min: 0.0,
+          max: 15.0,
+          step: 0.001,
+          default: 0.0
+        },
+        rainRivuletRidgeMix: {
+          type: 'slider',
+          label: 'Ridge Mix',
+          min: 0.0,
+          max: 1.0,
+          step: 0.001,
+          default: 0.0
+        },
+        rainRivuletRidgeGain: {
+          type: 'slider',
+          label: 'Ridge Gain',
+          min: 0.0,
+          max: 8.0,
+          step: 0.01,
+          default: 1.0
+        },
+        rainSplashAtlasTile0: { type: 'boolean', label: 'Splash Tile 0', default: true },
+        rainSplashAtlasTile1: { type: 'boolean', label: 'Splash Tile 1', default: true },
+        rainSplashAtlasTile2: { type: 'boolean', label: 'Splash Tile 2', default: true },
+        rainSplashAtlasTile3: { type: 'boolean', label: 'Splash Tile 3', default: true },
+        rainFlowFlipDeadzone: {
+          type: 'slider',
+          label: 'Flip Deadzone',
+          min: 0.0,
+          max: 0.5,
+          step: 0.001,
+          default: 0.15
+        },
+        rainFlowMaxTurnDeg: {
+          type: 'slider',
+          label: 'Max Turn (deg)',
+          min: 0.0,
+          max: 180.0,
+          step: 1.0,
+          default: 180.0
+        },
         rainOnGlassBoundaryFlowStrength: {
           type: 'slider',
           label: 'Boundary Flow Strength',
@@ -585,7 +792,39 @@ export class WindowLightEffect extends EffectBase {
           label: 'Roof Plateau Feather',
           min: 0.0,
           max: 1.0,
-          step: 0.01,
+          step: 0.001,
+          default: 0.1
+        },
+        rainRivuletDistanceMasking: {
+          type: 'slider',
+          label: 'Rivulet Distance Masking',
+          min: 0.0,
+          max: 1.0,
+          step: 0.001,
+          default: 0.0
+        },
+        rainRivuletDistanceStart: {
+          type: 'slider',
+          label: 'Rivulet Distance Start',
+          min: 0.0,
+          max: 1.0,
+          step: 0.001,
+          default: 0.0
+        },
+        rainRivuletDistanceEnd: {
+          type: 'slider',
+          label: 'Rivulet Distance End',
+          min: 0.0,
+          max: 1.0,
+          step: 0.001,
+          default: 1.0
+        },
+        rainRivuletDistanceFeather: {
+          type: 'slider',
+          label: 'Rivulet Distance Feather',
+          min: 0.0,
+          max: 0.5,
+          step: 0.001,
           default: 0.1
         },
         rainDebugRoofPlateau: {
@@ -616,6 +855,11 @@ export class WindowLightEffect extends EffectBase {
           max: 1.0,
           step: 0.001,
           default: 0.5
+        },
+        rebuildRainFlowMap: {
+          type: 'button',
+          title: 'Rebuild Flow Map',
+          label: 'Rebuild'
         },
         rainFlowMapObstacleInvert: {
           type: 'boolean',
@@ -715,6 +959,14 @@ export class WindowLightEffect extends EffectBase {
           step: 0.25,
           default: 0.0
         },
+        rainOnGlassDistortionMasking: {
+          type: 'slider',
+          label: 'Distortion Masking',
+          min: 0.0,
+          max: 1.0,
+          step: 0.001,
+          default: 1.0
+        },
         rainOnGlassDarken: {
           type: 'slider',
           label: 'Darken',
@@ -794,6 +1046,14 @@ export class WindowLightEffect extends EffectBase {
           max: 10.0,
           step: 0.01,
           default: 0.5
+        },
+        rainSplashSpawnRate: {
+          type: 'slider',
+          label: 'Spawn Rate',
+          min: 0.1,
+          max: 50.0,
+          step: 0.1,
+          default: 1.0
         },
         rainSplashRadiusPx: {
           type: 'slider',
@@ -1020,7 +1280,7 @@ export class WindowLightEffect extends EffectBase {
     const srcTex = this.outdoorsMask;
     const img = srcTex?.image;
     // Bumped version to force regeneration with new relaxation logic
-    const FLOW_MAP_VERSION = 9; 
+    const FLOW_MAP_VERSION = 10; 
     
     if (!THREE || !srcTex || !img) {
       if (this._rainFlowMap) {
@@ -1053,6 +1313,10 @@ export class WindowLightEffect extends EffectBase {
     const defaultX = (typeof this.params.rainFlowMapDefaultX === 'number' && Number.isFinite(this.params.rainFlowMapDefaultX)) ? this.params.rainFlowMapDefaultX : 0.0;
     const defaultY = (typeof this.params.rainFlowMapDefaultY === 'number' && Number.isFinite(this.params.rainFlowMapDefaultY)) ? this.params.rainFlowMapDefaultY : 1.0;
 
+    const plateauStrength = Math.max(0.0, Math.min(1.0, (this.params.rainRoofPlateauStrength ?? 0.0)));
+    const plateauStart = Math.max(0.0, Math.min(1.0, (this.params.rainRoofPlateauStart ?? 0.4)));
+    const plateauFeather = Math.max(0.0, Math.min(1.0, (this.params.rainRoofPlateauFeather ?? 0.1)));
+
     const cfgKey = [
       FLOW_MAP_VERSION,
       srcTex.uuid,
@@ -1067,7 +1331,10 @@ export class WindowLightEffect extends EffectBase {
       kernel,
       relaxMix.toFixed(4),
       defaultX.toFixed(4),
-      defaultY.toFixed(4)
+      defaultY.toFixed(4),
+      plateauStrength.toFixed(4),
+      plateauStart.toFixed(4),
+      plateauFeather.toFixed(4)
     ].join(':');
 
     if (
@@ -1249,6 +1516,54 @@ export class WindowLightEffect extends EffectBase {
       writeBuf = tmp;
     }
 
+    const msSmoothstep = (edge0, edge1, x) => {
+      const denom = (edge1 - edge0);
+      if (Math.abs(denom) <= 1e-12) return x < edge0 ? 0.0 : 1.0;
+      const t = Math.max(0.0, Math.min(1.0, (x - edge0) / denom));
+      return t * t * (3.0 - 2.0 * t);
+    };
+
+    if (plateauStrength > 1e-6) {
+      let defX = defaultX;
+      let defY = defaultY;
+      const dLen = Math.sqrt(defX * defX + defY * defY);
+      if (dLen > 1e-6) {
+        defX /= dLen;
+        defY /= dLen;
+      } else {
+        defX = 0.0;
+        defY = 1.0;
+      }
+
+      const a = Math.max(0.0, Math.min(1.0, plateauStart));
+      const f = Math.max(1e-6, plateauFeather);
+
+      for (let i = 0; i < n; i++) {
+        const baseD = readBuf[i * 3 + 2];
+        const roof01 = msSmoothstep(a, Math.min(1.0, a + f), baseD);
+        const t = Math.max(0.0, Math.min(1.0, plateauStrength * roof01));
+        if (t <= 1e-6) continue;
+
+        const ix = i * 3;
+        const vx0 = readBuf[ix + 0];
+        const vy0 = readBuf[ix + 1];
+
+        let mx = vx0 + (defX - vx0) * t;
+        let my = vy0 + (defY - vy0) * t;
+        const mLen = Math.sqrt(mx * mx + my * my);
+        if (mLen > 1e-6) {
+          mx /= mLen;
+          my /= mLen;
+        } else {
+          mx = defX;
+          my = defY;
+        }
+
+        readBuf[ix + 0] = mx;
+        readBuf[ix + 1] = my;
+      }
+    }
+
     // --- Final Packing to Uint8 ---
     // We read from 'readBuf' because we swapped at the end of the loop
     const out = new Uint8Array(n * 4);
@@ -1371,6 +1686,7 @@ export class WindowLightEffect extends EffectBase {
         uRainMaxOffsetPx: { value: this.params.rainOnGlassMaxOffsetPx },
         uRainBlurPx: { value: this.params.rainOnGlassBlurPx },
         uRainDistortionFeatherPx: { value: this.params.rainOnGlassDistortionFeatherPx },
+        uRainDistortionMasking: { value: this.params.rainOnGlassDistortionMasking },
         uRainDarken: { value: this.params.rainOnGlassDarken },
         uRainDarkenGamma: { value: this.params.rainOnGlassDarkenGamma },
         uRainSplashIntensity: { value: this.params.rainSplashIntensity },
@@ -1381,6 +1697,7 @@ export class WindowLightEffect extends EffectBase {
         uRainSplashMaskThreshold: { value: this.params.rainSplashMaskThreshold },
         uRainSplashMaskFeather: { value: this.params.rainSplashMaskFeather },
         uRainSplashSpeed: { value: this.params.rainSplashSpeed },
+        uRainSplashSpawnRate: { value: this.params.rainSplashSpawnRate },
         uRainSplashRadiusPx: { value: this.params.rainSplashRadiusPx },
         uRainSplashExpand: { value: this.params.rainSplashExpand },
         uRainSplashFadePow: { value: this.params.rainSplashFadePow },
@@ -1390,9 +1707,28 @@ export class WindowLightEffect extends EffectBase {
         uRainSplashBlob: { value: this.params.rainSplashBlob },
         uRainSplashStreakStrength: { value: this.params.rainSplashStreakStrength },
         uRainSplashStreakLengthPx: { value: this.params.rainSplashStreakLengthPx },
+        uRainSplashAtlas: { value: null },
+        uHasRainSplashAtlas: { value: 0.0 },
+        uRainSplashAtlasTile0: { value: this.params.rainSplashAtlasTile0 ? 1.0 : 0.0 },
+        uRainSplashAtlasTile1: { value: this.params.rainSplashAtlasTile1 ? 1.0 : 0.0 },
+        uRainSplashAtlasTile2: { value: this.params.rainSplashAtlasTile2 ? 1.0 : 0.0 },
+        uRainSplashAtlasTile3: { value: this.params.rainSplashAtlasTile3 ? 1.0 : 0.0 },
         uRainNoiseScale: { value: this.params.rainNoiseScale },
         uRainNoiseDetail: { value: this.params.rainNoiseDetail },
         uRainNoiseEvolution: { value: this.params.rainNoiseEvolution },
+        uRainRivuletAspect: { value: this.params.rainRivuletAspect },
+        uRainRivuletGain: { value: this.params.rainRivuletGain },
+        uRainRivuletStrength: { value: this.params.rainRivuletStrength },
+        uRainRivuletThreshold: { value: this.params.rainRivuletThreshold },
+        uRainRivuletFeather: { value: this.params.rainRivuletFeather },
+        uRainRivuletGamma: { value: this.params.rainRivuletGamma },
+        uRainRivuletSoftness: { value: this.params.rainRivuletSoftness },
+        uRainRivuletDistanceMasking: { value: this.params.rainRivuletDistanceMasking },
+        uRainRivuletDistanceStart: { value: this.params.rainRivuletDistanceStart },
+        uRainRivuletDistanceEnd: { value: this.params.rainRivuletDistanceEnd },
+        uRainRivuletDistanceFeather: { value: this.params.rainRivuletDistanceFeather },
+        uRainRivuletRidgeMix: { value: this.params.rainRivuletRidgeMix },
+        uRainRivuletRidgeGain: { value: this.params.rainRivuletRidgeGain },
         uRainBrightThreshold: { value: this.params.rainOnGlassBrightThreshold },
         uRainBrightFeather: { value: this.params.rainOnGlassBrightFeather },
 
@@ -1404,6 +1740,8 @@ export class WindowLightEffect extends EffectBase {
         uRainFlowPerpScale: { value: this.params.rainFlowPerpScale },
         uRainFlowGlobalInfluence: { value: this.params.rainFlowGlobalInfluence },
         uRainFlowAngleOffset: { value: this.params.rainFlowAngleOffset * (Math.PI / 180.0) },
+        uRainFlowFlipDeadzone: { value: this.params.rainFlowFlipDeadzone },
+        uRainFlowMaxTurn: { value: (this.params.rainFlowMaxTurnDeg * Math.PI) / 180.0 },
 
         uLightningFlash01: { value: 0.0 },
         uLightningWindowEnabled: { value: this.params.lightningWindowEnabled ? 1.0 : 0.0 },
@@ -1498,6 +1836,7 @@ export class WindowLightEffect extends EffectBase {
       uniform float uRainMaxOffsetPx;
       uniform float uRainBlurPx;
       uniform float uRainDistortionFeatherPx;
+      uniform float uRainDistortionMasking;
       uniform float uRainDarken;
       uniform float uRainDarkenGamma;
       uniform float uRainSplashIntensity;
@@ -1508,6 +1847,7 @@ export class WindowLightEffect extends EffectBase {
       uniform float uRainSplashMaskThreshold;
       uniform float uRainSplashMaskFeather;
       uniform float uRainSplashSpeed;
+      uniform float uRainSplashSpawnRate;
       uniform float uRainSplashRadiusPx;
       uniform float uRainSplashExpand;
       uniform float uRainSplashFadePow;
@@ -1517,9 +1857,28 @@ export class WindowLightEffect extends EffectBase {
       uniform float uRainSplashBlob;
       uniform float uRainSplashStreakStrength;
       uniform float uRainSplashStreakLengthPx;
+      uniform sampler2D uRainSplashAtlas;
+      uniform float uHasRainSplashAtlas;
+      uniform float uRainSplashAtlasTile0;
+      uniform float uRainSplashAtlasTile1;
+      uniform float uRainSplashAtlasTile2;
+      uniform float uRainSplashAtlasTile3;
       uniform float uRainNoiseScale;
       uniform float uRainNoiseDetail;
       uniform float uRainNoiseEvolution;
+      uniform float uRainRivuletAspect;
+      uniform float uRainRivuletGain;
+      uniform float uRainRivuletStrength;
+      uniform float uRainRivuletThreshold;
+      uniform float uRainRivuletFeather;
+      uniform float uRainRivuletGamma;
+      uniform float uRainRivuletSoftness;
+      uniform float uRainRivuletDistanceMasking;
+      uniform float uRainRivuletDistanceStart;
+      uniform float uRainRivuletDistanceEnd;
+      uniform float uRainRivuletDistanceFeather;
+      uniform float uRainRivuletRidgeMix;
+      uniform float uRainRivuletRidgeGain;
       uniform float uRainBrightThreshold;
       uniform float uRainBrightFeather;
 
@@ -1531,6 +1890,8 @@ export class WindowLightEffect extends EffectBase {
       uniform float uRainFlowPerpScale;
       uniform float uRainFlowGlobalInfluence;
       uniform float uRainFlowAngleOffset;
+      uniform float uRainFlowFlipDeadzone;
+      uniform float uRainFlowMaxTurn;
 
       uniform float uLightningFlash01;
       uniform float uLightningWindowEnabled;
@@ -1667,22 +2028,19 @@ export class WindowLightEffect extends EffectBase {
           globalDir /= dLen;
           vec2 globalDirP = globalDir * aspectVec;
           float dpLen = max(1e-4, length(globalDirP));
-          globalDirP /= dpLen;
-          float angle = atan(globalDirP.x, -globalDirP.y);
-          float c = cos(angle);
-          float s = sin(angle);
-          mat2 rot = mat2(c, -s, s, c);
-          mat2 invRot = mat2(c, s, -s, c);
+          vec2 dirP = globalDirP / dpLen;
+          vec2 perpP = vec2(-dirP.y, dirP.x);
 
-          vec2 rotP = rot * p;
+          vec2 rotP = vec2(dot(p, perpP), dot(p, dirP));
 
           float flowZone = 0.0;
           vec2 flowDirRot = vec2(0.0, 1.0);
           float roofMask = 1.0;
+          float distToWall = 0.0;
           if (uHasRainFlowMap > 0.5) {
             vec4 flowSample = texture2D(uRainFlowMap, vUv);
 
-            float distToWall = flowSample.b;
+            distToWall = flowSample.b;
             float plateauStrength = clamp(uRainRoofPlateauStrength, 0.0, 1.0);
             float plateauStart = clamp(uRainRoofPlateauStart, 0.0, 1.0);
             float plateauFeather = max(1e-4, uRainRoofPlateauFeather);
@@ -1697,7 +2055,7 @@ export class WindowLightEffect extends EffectBase {
             float widthEff = max(width, 0.0001);
             float feather = max(0.02, widthEff * 0.25);
             flowZone = 1.0 - smoothstep(widthEff, widthEff + feather, distToWall);
-            float flowStrength = max(uRainFlowStrength, 0.0) * flowZone;
+            float flowStrength = clamp(max(uRainFlowStrength, 0.0) * flowZone, 0.0, 1.0);
 
             vec2 localN = flowSample.rg * 2.0 - 1.0;
             if (uRainFlowInvertNormal > 0.5) localN = -localN;
@@ -1707,14 +2065,42 @@ export class WindowLightEffect extends EffectBase {
             vec2 localTP = vec2(-localNP.y, localNP.x);
             if (uRainFlowInvertTangent > 0.5) localTP = -localTP;
             if (uRainFlowSwapAxes > 0.5) localTP = localTP.yx;
-            vec2 localTRot = rot * localTP;
+            vec2 localTRot = vec2(dot(localTP, perpP), dot(localTP, dirP));
             float ltLen = max(1e-4, length(localTRot));
             vec2 lfN = localTRot / ltLen;
             float oc = cos(uRainFlowAngleOffset);
             float os = sin(uRainFlowAngleOffset);
             vec2 desiredDirRot = mat2(oc, -os, os, oc) * vec2(0.0, 1.0);
-            lfN *= sign(dot(lfN, desiredDirRot) + 1e-6);
-            flowDirRot = normalize(mix(flowDirRot * uRainFlowGlobalInfluence, lfN, flowStrength));
+
+            float align = dot(lfN, desiredDirRot);
+            float dead = max(1e-6, clamp(uRainFlowFlipDeadzone, 0.0, 1.0));
+            float ambig = smoothstep(0.0, dead, abs(align));
+            float flipT = smoothstep(-dead, dead, align);
+            lfN = normalize(mix(-lfN, lfN, flipT) + desiredDirRot * 1e-3);
+            flowStrength *= ambig;
+            vec2 baseDir = flowDirRot;
+            float baseLen = max(1e-4, length(baseDir));
+            baseDir /= baseLen;
+
+            vec2 localDir = lfN;
+            float localLen = max(1e-4, length(localDir));
+            localDir /= localLen;
+
+            float gi = max(0.0, uRainFlowGlobalInfluence);
+            float wLocal = flowStrength;
+            float wBase = (1.0 - flowStrength) * gi;
+            float wTotal = max(1e-6, wBase + wLocal);
+            float wAngle = clamp(wLocal / wTotal, 0.0, 1.0);
+
+            float a0 = atan(baseDir.y, baseDir.x);
+            float a1 = atan(localDir.y, localDir.x);
+            float da = a1 - a0;
+            da = mod(da + 3.14159265, 6.2831853) - 3.14159265;
+
+            float maxTurn = clamp(uRainFlowMaxTurn, 0.0, 3.14159265);
+            da = clamp(da, -maxTurn, maxTurn);
+            float a = a0 + da * wAngle;
+            flowDirRot = vec2(cos(a), sin(a));
             flowDirRot = mat2(oc, -os, os, oc) * flowDirRot;
           }
 
@@ -1723,34 +2109,80 @@ export class WindowLightEffect extends EffectBase {
 
           vec2 rainUV = rotP * 2.0 + 0.5;
 
-          float t = uTime * max(0.0, uRainSpeed);
+          float tMove = uTime * max(0.0, uRainSpeed);
 
           float nScale = max(0.001, uRainNoiseScale);
           float detail = clamp(uRainNoiseDetail, 0.0, 3.0);
           float evo = max(0.0, uRainNoiseEvolution);
 
-          vec2 blurStep = uWindowTexelSize * max(0.0, uRainBlurPx) * nScale;
+          float rivAspect = max(1.0, uRainRivuletAspect);
+          vec2 aniso = vec2(rivAspect, 1.0 / rivAspect);
 
-          vec2 adv = flowDirRot * (t * 0.12) * uRainFlowAdvectScale;
-          vec2 q = rainUV * nScale + adv;
-          vec2 perp = vec2(-flowDirRot.y, flowDirRot.x);
-          q += flowDirRot * (t * evo * 0.06) * uRainFlowEvoScale;
-          q += perp * (t * evo * 0.02) * uRainFlowPerpScale;
+          vec2 blurStep = uWindowTexelSize * max(0.0, uRainBlurPx) * nScale * aniso;
+
+          vec2 flowN = flowDirRot;
+          float flowLen = max(1e-4, length(flowN));
+          flowN /= flowLen;
+          vec2 flowPerp = vec2(-flowN.y, flowN.x);
+
+          vec2 rainUVFlow = vec2(dot(rainUV, flowPerp), dot(rainUV, flowN));
+
+          vec2 adv = flowN * (tMove * 0.12) * uRainFlowAdvectScale;
+          vec2 advFlow = vec2(dot(adv, flowPerp), dot(adv, flowN));
+
+          vec2 q = (rainUVFlow * nScale + advFlow) * aniso;
+
+          vec2 evoVec = flowN * (uTime * evo * 0.06) * uRainFlowEvoScale + flowPerp * (uTime * evo * 0.02) * uRainFlowPerpScale;
+          vec2 evoFlow = vec2(dot(evoVec, flowPerp), dot(evoVec, flowN));
+          q += evoFlow * aniso;
 
           float n0 = msFbmBlurred(q, detail, blurStep);
 
           float eps = max(1.0, 6.0 / max(nScale, 0.001)) * max(uWindowTexelSize.x, uWindowTexelSize.y);
-          float nx = msFbmBlurred(q + vec2(eps, 0.0), detail, blurStep) - msFbmBlurred(q - vec2(eps, 0.0), detail, blurStep);
-          float ny = msFbmBlurred(q + vec2(0.0, eps), detail, blurStep) - msFbmBlurred(q - vec2(0.0, eps), detail, blurStep);
+          vec2 eps2 = vec2(eps * aniso.x, eps * aniso.y);
+          float nx = msFbmBlurred(q + vec2(eps2.x, 0.0), detail, blurStep) - msFbmBlurred(q - vec2(eps2.x, 0.0), detail, blurStep);
+          float ny = msFbmBlurred(q + vec2(0.0, eps2.y), detail, blurStep) - msFbmBlurred(q - vec2(0.0, eps2.y), detail, blurStep);
           vec2 grad = vec2(nx, ny);
 
-          vec2 unrotatedN = invRot * grad;
+          float ridge = abs(nx) / max(1e-6, 2.0 * eps2.x);
+          ridge = clamp(ridge * max(0.0, uRainRivuletRidgeGain), 0.0, 1.0);
+
+          float rivBase = clamp(n0, 0.0, 1.0);
+          float rivN = mix(rivBase, ridge, clamp(uRainRivuletRidgeMix, 0.0, 1.0));
+          rivN = clamp(rivN * max(0.0, uRainRivuletGain), 0.0, 1.0);
+          float rivThr = clamp(uRainRivuletThreshold, 0.0, 1.0);
+          float rivFea0 = max(1e-4, uRainRivuletFeather);
+          float rivSoft = clamp(uRainRivuletSoftness, 0.0, 1.0);
+          float rivFea = rivFea0 * (1.0 + 6.0 * rivSoft);
+          float rivM = smoothstep(rivThr - rivFea, rivThr + rivFea, rivN);
+          rivM = pow(rivM, max(0.01, uRainRivuletGamma));
+
+          float rivDistMaskRaw = 1.0;
+          if (uHasRainFlowMap > 0.5) {
+            float d = clamp(distToWall, 0.0, 1.0);
+            float s0 = clamp(uRainRivuletDistanceStart, 0.0, 1.0);
+            float e0 = clamp(uRainRivuletDistanceEnd, 0.0, 1.0);
+            float a = min(s0, e0);
+            float b = max(s0, e0);
+            float f = max(1e-4, uRainRivuletDistanceFeather);
+            float inM = smoothstep(a, min(1.0, a + f), d);
+            float outM = 1.0 - smoothstep(max(0.0, b - f), b, d);
+            rivDistMaskRaw = clamp(inM * outM, 0.0, 1.0);
+          }
+          float rivDistMask = mix(1.0, rivDistMaskRaw, clamp(uRainRivuletDistanceMasking, 0.0, 1.0));
+          rivM *= rivDistMask;
+
+          float distMasking = clamp(uRainDistortionMasking, 0.0, 1.0);
+          float distortGate = mix(1.0, rivM, distMasking);
+
+          vec2 gradRot = flowPerp * grad.x + flowN * grad.y;
+          vec2 unrotatedN = perpP * gradRot.x + dirP * gradRot.y;
           float nLen = max(1e-4, length(unrotatedN));
           vec2 n01 = unrotatedN / nLen;
 
           float maxOffsetPx = max(0.0, uRainMaxOffsetPx);
-          vec2 distortPx = n01 * maxOffsetPx;
-          rainNormal = normalize(vec3(n01, 1.0));
+          vec2 distortPx = n01 * maxOffsetPx * distortGate;
+          rainNormal = normalize(vec3(n01 * distortGate, 1.0));
           vec2 distUV = distortPx * uWindowTexelSize * rainKDist;
           float featherPx = max(0.0, uRainDistortionFeatherPx);
           vec2 stepUv = uWindowTexelSize * featherPx;
@@ -1777,7 +2209,7 @@ export class WindowLightEffect extends EffectBase {
           float srcFactor = smoothstep(0.0, edgeHi, srcMask);
           uv = uv - distUV * safetyFactor * srcFactor;
 
-          waterMask = pow(clamp(n0 * 1.35, 0.0, 1.0), 1.5) * rainKDarkDist;
+          waterMask = rivM * max(0.0, uRainRivuletStrength) * rainKDarkDist;
         }
 
         if (rainKSplash > 0.001 && uRainSplashIntensity > 0.001) {
@@ -1816,7 +2248,9 @@ export class WindowLightEffect extends EffectBase {
 
               float density = clamp(uRainSplashThreshold, 0.0, 1.0);
               float rnd = msHash21(cellId + fi * 19.19);
-              float spawn = smoothstep(density, min(1.0, density + 0.02), rnd);
+              float spawnK = max(0.001, uRainSplashSpawnRate);
+              float rndAdj = pow(clamp(rnd, 0.0, 1.0), 1.0 / spawnK);
+              float spawn = smoothstep(density, min(1.0, density + 0.02), rndAdj);
 
               float rate = max(0.01, uRainSplashSpeed) * (0.85 + fi * 0.25);
               float t0 = uTime * rate + rnd * 10.0;
@@ -1862,28 +2296,64 @@ export class WindowLightEffect extends EffectBase {
               float distBlobby = dist + edgeSigned * blob * max(1e-6, r0 * 0.25);
               float rNoisy = r * (1.0 + edgeSigned * blob * 0.22);
 
-              vec2 wP = windDir * aspectVec;
-              float wLen = max(1e-4, length(wP));
-              vec2 wN = wP / wLen;
-              vec2 wT = vec2(-wN.y, wN.x);
-              float along = dot(d, wN);
-              float perp = dot(d, wT);
+              float shape = 0.0;
+              if (uHasRainSplashAtlas > 0.5) {
+                vec2 localUv = d / max(1e-6, rMax);
+                localUv = localUv * 0.5 + 0.5;
 
-              float streakK = max(0.0, uRainSplashStreakStrength) * windK;
-              float streakDist = sqrt(perp * perp + (along / (1.0 + max(1e-6, streakLenUv / max(1e-6, r0)))) * (along / (1.0 + max(1e-6, streakLenUv / max(1e-6, r0)))));
+                if (any(lessThan(localUv, vec2(0.0))) || any(greaterThan(localUv, vec2(1.0)))) {
+                  shape = 0.0;
+                } else {
+                  float w0 = step(0.5, uRainSplashAtlasTile0);
+                  float w1 = step(0.5, uRainSplashAtlasTile1);
+                  float w2 = step(0.5, uRainSplashAtlasTile2);
+                  float w3 = step(0.5, uRainSplashAtlasTile3);
+                  float wSum = w0 + w1 + w2 + w3;
+                  if (wSum > 0.5) {
+                    float tileRnd = msHash21(cellId + vec2(11.7 + fi * 3.1, 7.9 + cycle * 0.13));
+                    float rPick = tileRnd * wSum;
+                    float t0 = w0;
+                    float t1 = t0 + w1;
+                    float t2 = t1 + w2;
 
-              float ringW = ringWBase;
-              ringW *= mix(0.8, 1.35, clamp(edgeNoise, 0.0, 1.0));
-              float innerR = max(0.0, rNoisy - ringW);
+                    float tileIndex;
+                    if (rPick < t0) tileIndex = 0.0;
+                    else if (rPick < t1) tileIndex = 1.0;
+                    else if (rPick < t2) tileIndex = 2.0;
+                    else tileIndex = 3.0;
 
-              float outerA = (1.0 - smoothstep(rNoisy, rNoisy + soft, distBlobby));
-              float innerA = (1.0 - smoothstep(innerR, innerR + soft, distBlobby));
-              float ring = clamp(outerA - innerA, 0.0, 1.0);
+                    float tx = mod(tileIndex, 2.0);
+                    float ty = floor(tileIndex / 2.0);
+                    vec2 atlasUv = (localUv + vec2(tx, ty)) * 0.5;
+                    shape = texture2D(uRainSplashAtlas, atlasUv).a;
+                  } else {
+                    shape = 0.0;
+                  }
+                }
+              } else {
+                vec2 wP = windDir * aspectVec;
+                float wLen = max(1e-4, length(wP));
+                vec2 wN = wP / wLen;
+                vec2 wT = vec2(-wN.y, wN.x);
+                float along = dot(d, wN);
+                float perp = dot(d, wT);
 
-              float outerS = (1.0 - smoothstep(rNoisy, rNoisy + soft, streakDist));
-              float innerS = (1.0 - smoothstep(innerR, innerR + soft, streakDist));
-              float ringStreak = clamp(outerS - innerS, 0.0, 1.0);
-              float shape = mix(ring, max(ring, ringStreak), streakK);
+                float streakK = max(0.0, uRainSplashStreakStrength) * windK;
+                float streakDist = sqrt(perp * perp + (along / (1.0 + max(1e-6, streakLenUv / max(1e-6, r0)))) * (along / (1.0 + max(1e-6, streakLenUv / max(1e-6, r0)))));
+
+                float ringW = ringWBase;
+                ringW *= mix(0.8, 1.35, clamp(edgeNoise, 0.0, 1.0));
+                float innerR = max(0.0, rNoisy - ringW);
+
+                float outerA = (1.0 - smoothstep(rNoisy, rNoisy + soft, distBlobby));
+                float innerA = (1.0 - smoothstep(innerR, innerR + soft, distBlobby));
+                float ring = clamp(outerA - innerA, 0.0, 1.0);
+
+                float outerS = (1.0 - smoothstep(rNoisy, rNoisy + soft, streakDist));
+                float innerS = (1.0 - smoothstep(innerR, innerR + soft, streakDist));
+                float ringStreak = clamp(outerS - innerS, 0.0, 1.0);
+                shape = mix(ring, max(ring, ringStreak), streakK);
+              }
 
               float splash = shape * envelope * spawn * maskGate * on;
 
@@ -2238,6 +2708,17 @@ export class WindowLightEffect extends EffectBase {
     } catch (e) {
     }
 
+    try {
+      const wpTex = window.MapShineParticles?.weatherParticles?.splashTexture || null;
+      if (u?.uRainSplashAtlas) u.uRainSplashAtlas.value = wpTex;
+      if (lu?.uRainSplashAtlas) lu.uRainSplashAtlas.value = wpTex;
+      if (u?.uHasRainSplashAtlas) u.uHasRainSplashAtlas.value = wpTex ? 1.0 : 0.0;
+      if (lu?.uHasRainSplashAtlas) lu.uHasRainSplashAtlas.value = wpTex ? 1.0 : 0.0;
+    } catch (e) {
+      if (u?.uHasRainSplashAtlas) u.uHasRainSplashAtlas.value = 0.0;
+      if (lu?.uHasRainSplashAtlas) lu.uHasRainSplashAtlas.value = 0.0;
+    }
+
     // Keep per-frame param uniforms in sync
     const applyRainParams = (uu) => {
       if (!uu) return;
@@ -2252,6 +2733,7 @@ export class WindowLightEffect extends EffectBase {
       if (uu.uRainMaxOffsetPx) uu.uRainMaxOffsetPx.value = this.params.rainOnGlassMaxOffsetPx;
       if (uu.uRainBlurPx) uu.uRainBlurPx.value = this.params.rainOnGlassBlurPx;
       if (uu.uRainDistortionFeatherPx) uu.uRainDistortionFeatherPx.value = this.params.rainOnGlassDistortionFeatherPx;
+      if (uu.uRainDistortionMasking) uu.uRainDistortionMasking.value = this.params.rainOnGlassDistortionMasking;
       if (uu.uRainDarken) uu.uRainDarken.value = this.params.rainOnGlassDarken;
       if (uu.uRainDarkenGamma) uu.uRainDarkenGamma.value = this.params.rainOnGlassDarkenGamma;
       if (uu.uRainSplashIntensity) uu.uRainSplashIntensity.value = this.params.rainSplashIntensity;
@@ -2262,6 +2744,7 @@ export class WindowLightEffect extends EffectBase {
       if (uu.uRainSplashMaskThreshold) uu.uRainSplashMaskThreshold.value = this.params.rainSplashMaskThreshold;
       if (uu.uRainSplashMaskFeather) uu.uRainSplashMaskFeather.value = this.params.rainSplashMaskFeather;
       if (uu.uRainSplashSpeed) uu.uRainSplashSpeed.value = this.params.rainSplashSpeed;
+      if (uu.uRainSplashSpawnRate) uu.uRainSplashSpawnRate.value = this.params.rainSplashSpawnRate;
       if (uu.uRainSplashRadiusPx) uu.uRainSplashRadiusPx.value = this.params.rainSplashRadiusPx;
       if (uu.uRainSplashExpand) uu.uRainSplashExpand.value = this.params.rainSplashExpand;
       if (uu.uRainSplashFadePow) uu.uRainSplashFadePow.value = this.params.rainSplashFadePow;
@@ -2271,9 +2754,26 @@ export class WindowLightEffect extends EffectBase {
       if (uu.uRainSplashBlob) uu.uRainSplashBlob.value = this.params.rainSplashBlob;
       if (uu.uRainSplashStreakStrength) uu.uRainSplashStreakStrength.value = this.params.rainSplashStreakStrength;
       if (uu.uRainSplashStreakLengthPx) uu.uRainSplashStreakLengthPx.value = this.params.rainSplashStreakLengthPx;
+      if (uu.uRainSplashAtlasTile0) uu.uRainSplashAtlasTile0.value = this.params.rainSplashAtlasTile0 ? 1.0 : 0.0;
+      if (uu.uRainSplashAtlasTile1) uu.uRainSplashAtlasTile1.value = this.params.rainSplashAtlasTile1 ? 1.0 : 0.0;
+      if (uu.uRainSplashAtlasTile2) uu.uRainSplashAtlasTile2.value = this.params.rainSplashAtlasTile2 ? 1.0 : 0.0;
+      if (uu.uRainSplashAtlasTile3) uu.uRainSplashAtlasTile3.value = this.params.rainSplashAtlasTile3 ? 1.0 : 0.0;
       if (uu.uRainNoiseScale) uu.uRainNoiseScale.value = this.params.rainNoiseScale;
       if (uu.uRainNoiseDetail) uu.uRainNoiseDetail.value = this.params.rainNoiseDetail;
       if (uu.uRainNoiseEvolution) uu.uRainNoiseEvolution.value = this.params.rainNoiseEvolution;
+      if (uu.uRainRivuletAspect) uu.uRainRivuletAspect.value = this.params.rainRivuletAspect;
+      if (uu.uRainRivuletGain) uu.uRainRivuletGain.value = this.params.rainRivuletGain;
+      if (uu.uRainRivuletStrength) uu.uRainRivuletStrength.value = this.params.rainRivuletStrength;
+      if (uu.uRainRivuletThreshold) uu.uRainRivuletThreshold.value = this.params.rainRivuletThreshold;
+      if (uu.uRainRivuletFeather) uu.uRainRivuletFeather.value = this.params.rainRivuletFeather;
+      if (uu.uRainRivuletGamma) uu.uRainRivuletGamma.value = this.params.rainRivuletGamma;
+      if (uu.uRainRivuletSoftness) uu.uRainRivuletSoftness.value = this.params.rainRivuletSoftness;
+      if (uu.uRainRivuletDistanceMasking) uu.uRainRivuletDistanceMasking.value = this.params.rainRivuletDistanceMasking;
+      if (uu.uRainRivuletDistanceStart) uu.uRainRivuletDistanceStart.value = this.params.rainRivuletDistanceStart;
+      if (uu.uRainRivuletDistanceEnd) uu.uRainRivuletDistanceEnd.value = this.params.rainRivuletDistanceEnd;
+      if (uu.uRainRivuletDistanceFeather) uu.uRainRivuletDistanceFeather.value = this.params.rainRivuletDistanceFeather;
+      if (uu.uRainRivuletRidgeMix) uu.uRainRivuletRidgeMix.value = this.params.rainRivuletRidgeMix;
+      if (uu.uRainRivuletRidgeGain) uu.uRainRivuletRidgeGain.value = this.params.rainRivuletRidgeGain;
       if (uu.uRainBrightThreshold) uu.uRainBrightThreshold.value = this.params.rainOnGlassBrightThreshold;
       if (uu.uRainBrightFeather) uu.uRainBrightFeather.value = this.params.rainOnGlassBrightFeather;
 
@@ -2285,6 +2785,8 @@ export class WindowLightEffect extends EffectBase {
       if (uu.uRainFlowPerpScale) uu.uRainFlowPerpScale.value = this.params.rainFlowPerpScale;
       if (uu.uRainFlowGlobalInfluence) uu.uRainFlowGlobalInfluence.value = this.params.rainFlowGlobalInfluence;
       if (uu.uRainFlowAngleOffset) uu.uRainFlowAngleOffset.value = this.params.rainFlowAngleOffset * (Math.PI / 180.0);
+      if (uu.uRainFlowFlipDeadzone) uu.uRainFlowFlipDeadzone.value = this.params.rainFlowFlipDeadzone;
+      if (uu.uRainFlowMaxTurn) uu.uRainFlowMaxTurn.value = (this.params.rainFlowMaxTurnDeg * Math.PI) / 180.0;
 
       if (uu.uLightningWindowEnabled) uu.uLightningWindowEnabled.value = this.params.lightningWindowEnabled ? 1.0 : 0.0;
       if (uu.uLightningWindowIntensityBoost) uu.uLightningWindowIntensityBoost.value = this.params.lightningWindowIntensityBoost;
@@ -2399,6 +2901,7 @@ export class WindowLightEffect extends EffectBase {
         uRainMaxOffsetPx: { value: this.params.rainOnGlassMaxOffsetPx },
         uRainBlurPx: { value: this.params.rainOnGlassBlurPx },
         uRainDistortionFeatherPx: { value: this.params.rainOnGlassDistortionFeatherPx },
+        uRainDistortionMasking: { value: this.params.rainOnGlassDistortionMasking },
         uRainDarken: { value: this.params.rainOnGlassDarken },
         uRainDarkenGamma: { value: this.params.rainOnGlassDarkenGamma },
         uRainSplashIntensity: { value: this.params.rainSplashIntensity },
@@ -2409,6 +2912,7 @@ export class WindowLightEffect extends EffectBase {
         uRainSplashMaskThreshold: { value: this.params.rainSplashMaskThreshold },
         uRainSplashMaskFeather: { value: this.params.rainSplashMaskFeather },
         uRainSplashSpeed: { value: this.params.rainSplashSpeed },
+        uRainSplashSpawnRate: { value: this.params.rainSplashSpawnRate },
         uRainSplashRadiusPx: { value: this.params.rainSplashRadiusPx },
         uRainSplashExpand: { value: this.params.rainSplashExpand },
         uRainSplashFadePow: { value: this.params.rainSplashFadePow },
@@ -2418,9 +2922,28 @@ export class WindowLightEffect extends EffectBase {
         uRainSplashBlob: { value: this.params.rainSplashBlob },
         uRainSplashStreakStrength: { value: this.params.rainSplashStreakStrength },
         uRainSplashStreakLengthPx: { value: this.params.rainSplashStreakLengthPx },
+        uRainSplashAtlas: { value: null },
+        uHasRainSplashAtlas: { value: 0.0 },
+        uRainSplashAtlasTile0: { value: this.params.rainSplashAtlasTile0 ? 1.0 : 0.0 },
+        uRainSplashAtlasTile1: { value: this.params.rainSplashAtlasTile1 ? 1.0 : 0.0 },
+        uRainSplashAtlasTile2: { value: this.params.rainSplashAtlasTile2 ? 1.0 : 0.0 },
+        uRainSplashAtlasTile3: { value: this.params.rainSplashAtlasTile3 ? 1.0 : 0.0 },
         uRainNoiseScale: { value: this.params.rainNoiseScale },
         uRainNoiseDetail: { value: this.params.rainNoiseDetail },
         uRainNoiseEvolution: { value: this.params.rainNoiseEvolution },
+        uRainRivuletAspect: { value: this.params.rainRivuletAspect },
+        uRainRivuletGain: { value: this.params.rainRivuletGain },
+        uRainRivuletStrength: { value: this.params.rainRivuletStrength },
+        uRainRivuletThreshold: { value: this.params.rainRivuletThreshold },
+        uRainRivuletFeather: { value: this.params.rainRivuletFeather },
+        uRainRivuletGamma: { value: this.params.rainRivuletGamma },
+        uRainRivuletSoftness: { value: this.params.rainRivuletSoftness },
+        uRainRivuletDistanceMasking: { value: this.params.rainRivuletDistanceMasking },
+        uRainRivuletDistanceStart: { value: this.params.rainRivuletDistanceStart },
+        uRainRivuletDistanceEnd: { value: this.params.rainRivuletDistanceEnd },
+        uRainRivuletDistanceFeather: { value: this.params.rainRivuletDistanceFeather },
+        uRainRivuletRidgeMix: { value: this.params.rainRivuletRidgeMix },
+        uRainRivuletRidgeGain: { value: this.params.rainRivuletRidgeGain },
         uRainBrightThreshold: { value: this.params.rainOnGlassBrightThreshold },
         uRainBrightFeather: { value: this.params.rainOnGlassBrightFeather },
 
@@ -2432,6 +2955,8 @@ export class WindowLightEffect extends EffectBase {
         uRainFlowPerpScale: { value: this.params.rainFlowPerpScale },
         uRainFlowGlobalInfluence: { value: this.params.rainFlowGlobalInfluence },
         uRainFlowAngleOffset: { value: this.params.rainFlowAngleOffset * (Math.PI / 180.0) },
+        uRainFlowFlipDeadzone: { value: this.params.rainFlowFlipDeadzone },
+        uRainFlowMaxTurn: { value: (this.params.rainFlowMaxTurnDeg * Math.PI) / 180.0 },
 
         uLightningFlash01: { value: 0.0 },
         uLightningWindowEnabled: { value: this.params.lightningWindowEnabled ? 1.0 : 0.0 },
@@ -2508,6 +3033,7 @@ export class WindowLightEffect extends EffectBase {
       uniform float uRainMaxOffsetPx;
       uniform float uRainBlurPx;
       uniform float uRainDistortionFeatherPx;
+      uniform float uRainDistortionMasking;
       uniform float uRainDarken;
       uniform float uRainDarkenGamma;
       uniform float uRainSplashIntensity;
@@ -2518,6 +3044,7 @@ export class WindowLightEffect extends EffectBase {
       uniform float uRainSplashMaskThreshold;
       uniform float uRainSplashMaskFeather;
       uniform float uRainSplashSpeed;
+      uniform float uRainSplashSpawnRate;
       uniform float uRainSplashRadiusPx;
       uniform float uRainSplashExpand;
       uniform float uRainSplashFadePow;
@@ -2527,9 +3054,28 @@ export class WindowLightEffect extends EffectBase {
       uniform float uRainSplashBlob;
       uniform float uRainSplashStreakStrength;
       uniform float uRainSplashStreakLengthPx;
+      uniform sampler2D uRainSplashAtlas;
+      uniform float uHasRainSplashAtlas;
+      uniform float uRainSplashAtlasTile0;
+      uniform float uRainSplashAtlasTile1;
+      uniform float uRainSplashAtlasTile2;
+      uniform float uRainSplashAtlasTile3;
       uniform float uRainNoiseScale;
       uniform float uRainNoiseDetail;
       uniform float uRainNoiseEvolution;
+      uniform float uRainRivuletAspect;
+      uniform float uRainRivuletGain;
+      uniform float uRainRivuletStrength;
+      uniform float uRainRivuletThreshold;
+      uniform float uRainRivuletFeather;
+      uniform float uRainRivuletGamma;
+      uniform float uRainRivuletSoftness;
+      uniform float uRainRivuletDistanceMasking;
+      uniform float uRainRivuletDistanceStart;
+      uniform float uRainRivuletDistanceEnd;
+      uniform float uRainRivuletDistanceFeather;
+      uniform float uRainRivuletRidgeMix;
+      uniform float uRainRivuletRidgeGain;
       uniform float uRainBrightThreshold;
       uniform float uRainBrightFeather;
 
@@ -2541,6 +3087,8 @@ export class WindowLightEffect extends EffectBase {
       uniform float uRainFlowPerpScale;
       uniform float uRainFlowGlobalInfluence;
       uniform float uRainFlowAngleOffset;
+      uniform float uRainFlowFlipDeadzone;
+      uniform float uRainFlowMaxTurn;
 
       uniform float uLightningFlash01;
       uniform float uLightningWindowEnabled;
@@ -2666,22 +3214,19 @@ export class WindowLightEffect extends EffectBase {
           globalDir /= dLen;
           vec2 globalDirP = globalDir * aspectVec;
           float dpLen = max(1e-4, length(globalDirP));
-          globalDirP /= dpLen;
-          float angle = atan(globalDirP.x, -globalDirP.y);
-          float c = cos(angle);
-          float s = sin(angle);
-          mat2 rot = mat2(c, -s, s, c);
-          mat2 invRot = mat2(c, s, -s, c);
+          vec2 dirP = globalDirP / dpLen;
+          vec2 perpP = vec2(-dirP.y, dirP.x);
 
-          vec2 rotP = rot * p;
+          vec2 rotP = vec2(dot(p, perpP), dot(p, dirP));
 
           float flowZone = 0.0;
           vec2 flowDirRot = vec2(0.0, 1.0);
           float roofMask = 1.0;
+          float distToWall = 0.0;
           if (uHasRainFlowMap > 0.5) {
             vec4 flowSample = texture2D(uRainFlowMap, vUv);
 
-            float distToWall = flowSample.b;
+            distToWall = flowSample.b;
             float plateauStrength = clamp(uRainRoofPlateauStrength, 0.0, 1.0);
             float plateauStart = clamp(uRainRoofPlateauStart, 0.0, 1.0);
             float plateauFeather = max(1e-4, uRainRoofPlateauFeather);
@@ -2697,7 +3242,7 @@ export class WindowLightEffect extends EffectBase {
             float widthEff = max(width, 0.0001);
             float feather = max(0.02, widthEff * 0.25);
             flowZone = 1.0 - smoothstep(widthEff, widthEff + feather, distToWall);
-            float flowStrength = max(uRainFlowStrength, 0.0) * flowZone;
+            float flowStrength = clamp(max(uRainFlowStrength, 0.0) * flowZone, 0.0, 1.0);
 
             vec2 localN = flowSample.rg * 2.0 - 1.0;
             if (uRainFlowInvertNormal > 0.5) localN = -localN;
@@ -2707,14 +3252,42 @@ export class WindowLightEffect extends EffectBase {
             vec2 localTP = vec2(-localNP.y, localNP.x);
             if (uRainFlowInvertTangent > 0.5) localTP = -localTP;
             if (uRainFlowSwapAxes > 0.5) localTP = localTP.yx;
-            vec2 localTRot = rot * localTP;
+            vec2 localTRot = vec2(dot(localTP, perpP), dot(localTP, dirP));
             float ltLen = max(1e-4, length(localTRot));
             vec2 lfN = localTRot / ltLen;
             float oc = cos(uRainFlowAngleOffset);
             float os = sin(uRainFlowAngleOffset);
             vec2 desiredDirRot = mat2(oc, -os, os, oc) * vec2(0.0, 1.0);
-            lfN *= sign(dot(lfN, desiredDirRot) + 1e-6);
-            flowDirRot = normalize(mix(flowDirRot * uRainFlowGlobalInfluence, lfN, flowStrength));
+
+            float align = dot(lfN, desiredDirRot);
+            float dead = max(1e-6, clamp(uRainFlowFlipDeadzone, 0.0, 1.0));
+            float ambig = smoothstep(0.0, dead, abs(align));
+            float flipT = smoothstep(-dead, dead, align);
+            lfN = normalize(mix(-lfN, lfN, flipT) + desiredDirRot * 1e-3);
+            flowStrength *= ambig;
+            vec2 baseDir = flowDirRot;
+            float baseLen = max(1e-4, length(baseDir));
+            baseDir /= baseLen;
+
+            vec2 localDir = lfN;
+            float localLen = max(1e-4, length(localDir));
+            localDir /= localLen;
+
+            float gi = max(0.0, uRainFlowGlobalInfluence);
+            float wLocal = flowStrength;
+            float wBase = (1.0 - flowStrength) * gi;
+            float wTotal = max(1e-6, wBase + wLocal);
+            float wAngle = clamp(wLocal / wTotal, 0.0, 1.0);
+
+            float a0 = atan(baseDir.y, baseDir.x);
+            float a1 = atan(localDir.y, localDir.x);
+            float da = a1 - a0;
+            da = mod(da + 3.14159265, 6.2831853) - 3.14159265;
+
+            float maxTurn = clamp(uRainFlowMaxTurn, 0.0, 3.14159265);
+            da = clamp(da, -maxTurn, maxTurn);
+            float a = a0 + da * wAngle;
+            flowDirRot = vec2(cos(a), sin(a));
             flowDirRot = mat2(oc, -os, os, oc) * flowDirRot;
           }
 
@@ -2723,34 +3296,80 @@ export class WindowLightEffect extends EffectBase {
 
           vec2 rainUV = rotP * 2.0 + 0.5;
 
-          float t = uTime * max(0.0, uRainSpeed);
+          float tMove = uTime * max(0.0, uRainSpeed);
 
           float nScale = max(0.001, uRainNoiseScale);
           float detail = clamp(uRainNoiseDetail, 0.0, 3.0);
           float evo = max(0.0, uRainNoiseEvolution);
 
-          vec2 blurStep = uWindowTexelSize * max(0.0, uRainBlurPx) * nScale;
+          float rivAspect = max(1.0, uRainRivuletAspect);
+          vec2 aniso = vec2(rivAspect, 1.0 / rivAspect);
 
-          vec2 adv = flowDirRot * (t * 0.12) * uRainFlowAdvectScale;
-          vec2 q = rainUV * nScale + adv;
-          vec2 perp = vec2(-flowDirRot.y, flowDirRot.x);
-          q += flowDirRot * (t * evo * 0.06) * uRainFlowEvoScale;
-          q += perp * (t * evo * 0.02) * uRainFlowPerpScale;
+          vec2 blurStep = uWindowTexelSize * max(0.0, uRainBlurPx) * nScale * aniso;
+
+          vec2 flowN = flowDirRot;
+          float flowLen = max(1e-4, length(flowN));
+          flowN /= flowLen;
+          vec2 flowPerp = vec2(-flowN.y, flowN.x);
+
+          vec2 rainUVFlow = vec2(dot(rainUV, flowPerp), dot(rainUV, flowN));
+
+          vec2 adv = flowN * (tMove * 0.12) * uRainFlowAdvectScale;
+          vec2 advFlow = vec2(dot(adv, flowPerp), dot(adv, flowN));
+
+          vec2 q = (rainUVFlow * nScale + advFlow) * aniso;
+
+          vec2 evoVec = flowN * (uTime * evo * 0.06) * uRainFlowEvoScale + flowPerp * (uTime * evo * 0.02) * uRainFlowPerpScale;
+          vec2 evoFlow = vec2(dot(evoVec, flowPerp), dot(evoVec, flowN));
+          q += evoFlow * aniso;
 
           float n0 = msFbmBlurred(q, detail, blurStep);
 
           float eps = max(1.0, 6.0 / max(nScale, 0.001)) * max(uWindowTexelSize.x, uWindowTexelSize.y);
-          float nx = msFbmBlurred(q + vec2(eps, 0.0), detail, blurStep) - msFbmBlurred(q - vec2(eps, 0.0), detail, blurStep);
-          float ny = msFbmBlurred(q + vec2(0.0, eps), detail, blurStep) - msFbmBlurred(q - vec2(0.0, eps), detail, blurStep);
+          vec2 eps2 = vec2(eps * aniso.x, eps * aniso.y);
+          float nx = msFbmBlurred(q + vec2(eps2.x, 0.0), detail, blurStep) - msFbmBlurred(q - vec2(eps2.x, 0.0), detail, blurStep);
+          float ny = msFbmBlurred(q + vec2(0.0, eps2.y), detail, blurStep) - msFbmBlurred(q - vec2(0.0, eps2.y), detail, blurStep);
           vec2 grad = vec2(nx, ny);
 
-          vec2 unrotatedN = invRot * grad;
+          float ridge = abs(nx) / max(1e-6, 2.0 * eps2.x);
+          ridge = clamp(ridge * max(0.0, uRainRivuletRidgeGain), 0.0, 1.0);
+
+          float rivBase = clamp(n0, 0.0, 1.0);
+          float rivN = mix(rivBase, ridge, clamp(uRainRivuletRidgeMix, 0.0, 1.0));
+          rivN = clamp(rivN * max(0.0, uRainRivuletGain), 0.0, 1.0);
+          float rivThr = clamp(uRainRivuletThreshold, 0.0, 1.0);
+          float rivFea0 = max(1e-4, uRainRivuletFeather);
+          float rivSoft = clamp(uRainRivuletSoftness, 0.0, 1.0);
+          float rivFea = rivFea0 * (1.0 + 6.0 * rivSoft);
+          float rivM = smoothstep(rivThr - rivFea, rivThr + rivFea, rivN);
+          rivM = pow(rivM, max(0.01, uRainRivuletGamma));
+
+          float rivDistMaskRaw = 1.0;
+          if (uHasRainFlowMap > 0.5) {
+            float d = clamp(distToWall, 0.0, 1.0);
+            float s0 = clamp(uRainRivuletDistanceStart, 0.0, 1.0);
+            float e0 = clamp(uRainRivuletDistanceEnd, 0.0, 1.0);
+            float a = min(s0, e0);
+            float b = max(s0, e0);
+            float f = max(1e-4, uRainRivuletDistanceFeather);
+            float inM = smoothstep(a, min(1.0, a + f), d);
+            float outM = 1.0 - smoothstep(max(0.0, b - f), b, d);
+            rivDistMaskRaw = clamp(inM * outM, 0.0, 1.0);
+          }
+          float rivDistMask = mix(1.0, rivDistMaskRaw, clamp(uRainRivuletDistanceMasking, 0.0, 1.0));
+          rivM *= rivDistMask;
+
+          float distMasking = clamp(uRainDistortionMasking, 0.0, 1.0);
+          float distortGate = mix(1.0, rivM, distMasking);
+
+          vec2 gradRot = flowPerp * grad.x + flowN * grad.y;
+          vec2 unrotatedN = perpP * gradRot.x + dirP * gradRot.y;
           float nLen = max(1e-4, length(unrotatedN));
           vec2 n01 = unrotatedN / nLen;
 
           float maxOffsetPx = max(0.0, uRainMaxOffsetPx);
-          vec2 distortPx = n01 * maxOffsetPx;
-          rainNormal = normalize(vec3(n01, 1.0));
+          vec2 distortPx = n01 * maxOffsetPx * distortGate;
+          rainNormal = normalize(vec3(n01 * distortGate, 1.0));
           vec2 distUV = distortPx * uWindowTexelSize * rainKDist;
           float featherPx = max(0.0, uRainDistortionFeatherPx);
           vec2 stepUv = uWindowTexelSize * featherPx;
@@ -2777,7 +3396,7 @@ export class WindowLightEffect extends EffectBase {
           float srcFactor = smoothstep(0.0, edgeHi, srcMask);
           uv = uv - distUV * safetyFactor * srcFactor;
 
-          waterMask = pow(clamp(n0 * 1.35, 0.0, 1.0), 1.5) * rainKDarkDist;
+          waterMask = rivM * max(0.0, uRainRivuletStrength) * rainKDarkDist;
         }
 
         if (rainKSplash > 0.001 && uRainSplashIntensity > 0.001) {
@@ -2815,7 +3434,9 @@ export class WindowLightEffect extends EffectBase {
 
               float density = clamp(uRainSplashThreshold, 0.0, 1.0);
               float rnd = msHash21(cellId + fi * 19.19);
-              float spawn = smoothstep(density, min(1.0, density + 0.02), rnd);
+              float spawnK = max(0.001, uRainSplashSpawnRate);
+              float rndAdj = pow(clamp(rnd, 0.0, 1.0), 1.0 / spawnK);
+              float spawn = smoothstep(density, min(1.0, density + 0.02), rndAdj);
 
               float rate = max(0.01, uRainSplashSpeed) * (0.85 + fi * 0.25);
               float t0 = uTime * rate + rnd * 10.0;
@@ -2861,28 +3482,64 @@ export class WindowLightEffect extends EffectBase {
               float distBlobby = dist + edgeSigned * blob * max(1e-6, r0 * 0.25);
               float rNoisy = r * (1.0 + edgeSigned * blob * 0.22);
 
-              vec2 wP = windDir * aspectVec;
-              float wLen = max(1e-4, length(wP));
-              vec2 wN = wP / wLen;
-              vec2 wT = vec2(-wN.y, wN.x);
-              float along = dot(d, wN);
-              float perp = dot(d, wT);
+              float shape = 0.0;
+              if (uHasRainSplashAtlas > 0.5) {
+                vec2 localUv = d / max(1e-6, rMax);
+                localUv = localUv * 0.5 + 0.5;
 
-              float streakK = max(0.0, uRainSplashStreakStrength) * windK;
-              float streakDist = sqrt(perp * perp + (along / (1.0 + max(1e-6, streakLenUv / max(1e-6, r0)))) * (along / (1.0 + max(1e-6, streakLenUv / max(1e-6, r0)))));
+                if (any(lessThan(localUv, vec2(0.0))) || any(greaterThan(localUv, vec2(1.0)))) {
+                  shape = 0.0;
+                } else {
+                  float w0 = step(0.5, uRainSplashAtlasTile0);
+                  float w1 = step(0.5, uRainSplashAtlasTile1);
+                  float w2 = step(0.5, uRainSplashAtlasTile2);
+                  float w3 = step(0.5, uRainSplashAtlasTile3);
+                  float wSum = w0 + w1 + w2 + w3;
+                  if (wSum > 0.5) {
+                    float tileRnd = msHash21(cellId + vec2(11.7 + fi * 3.1, 7.9 + cycle * 0.13));
+                    float rPick = tileRnd * wSum;
+                    float t0 = w0;
+                    float t1 = t0 + w1;
+                    float t2 = t1 + w2;
 
-              float ringW = ringWBase;
-              ringW *= mix(0.8, 1.35, clamp(edgeNoise, 0.0, 1.0));
-              float innerR = max(0.0, rNoisy - ringW);
+                    float tileIndex;
+                    if (rPick < t0) tileIndex = 0.0;
+                    else if (rPick < t1) tileIndex = 1.0;
+                    else if (rPick < t2) tileIndex = 2.0;
+                    else tileIndex = 3.0;
 
-              float outerA = (1.0 - smoothstep(rNoisy, rNoisy + soft, distBlobby));
-              float innerA = (1.0 - smoothstep(innerR, innerR + soft, distBlobby));
-              float ring = clamp(outerA - innerA, 0.0, 1.0);
+                    float tx = mod(tileIndex, 2.0);
+                    float ty = floor(tileIndex / 2.0);
+                    vec2 atlasUv = (localUv + vec2(tx, ty)) * 0.5;
+                    shape = texture2D(uRainSplashAtlas, atlasUv).a;
+                  } else {
+                    shape = 0.0;
+                  }
+                }
+              } else {
+                vec2 wP = windDir * aspectVec;
+                float wLen = max(1e-4, length(wP));
+                vec2 wN = wP / wLen;
+                vec2 wT = vec2(-wN.y, wN.x);
+                float along = dot(d, wN);
+                float perp = dot(d, wT);
 
-              float outerS = (1.0 - smoothstep(rNoisy, rNoisy + soft, streakDist));
-              float innerS = (1.0 - smoothstep(innerR, innerR + soft, streakDist));
-              float ringStreak = clamp(outerS - innerS, 0.0, 1.0);
-              float shape = mix(ring, max(ring, ringStreak), streakK);
+                float streakK = max(0.0, uRainSplashStreakStrength) * windK;
+                float streakDist = sqrt(perp * perp + (along / (1.0 + max(1e-6, streakLenUv / max(1e-6, r0)))) * (along / (1.0 + max(1e-6, streakLenUv / max(1e-6, r0)))));
+
+                float ringW = ringWBase;
+                ringW *= mix(0.8, 1.35, clamp(edgeNoise, 0.0, 1.0));
+                float innerR = max(0.0, rNoisy - ringW);
+
+                float outerA = (1.0 - smoothstep(rNoisy, rNoisy + soft, distBlobby));
+                float innerA = (1.0 - smoothstep(innerR, innerR + soft, distBlobby));
+                float ring = clamp(outerA - innerA, 0.0, 1.0);
+
+                float outerS = (1.0 - smoothstep(rNoisy, rNoisy + soft, streakDist));
+                float innerS = (1.0 - smoothstep(innerR, innerR + soft, streakDist));
+                float ringStreak = clamp(outerS - innerS, 0.0, 1.0);
+                shape = mix(ring, max(ring, ringStreak), streakK);
+              }
 
               float splash = shape * envelope * spawn * maskGate * on;
 

@@ -16,6 +16,7 @@
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
+import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('DoorMeshManager');
 
@@ -56,6 +57,9 @@ class DoorMesh {
     this.style = style;
     this.scene = scene;
     this.camera = camera;
+
+    const THREE = window.THREE;
+    this._globalTint = THREE ? new THREE.Color(0xffffff) : null;
     
     // Animation config with defaults
     this.animation = {
@@ -292,7 +296,21 @@ class DoorMesh {
     this.mesh.rotation.z = rotation;
     this.mesh.scale.set(scaleX, scaleY, 1);
     this.mesh.material.opacity = alpha;
+
+    // Respect scene darkness: multiply door animation tint by the global tint.
     this.mesh.material.color.setRGB(tintR, tintG, tintB);
+    if (this._globalTint) {
+      this.mesh.material.color.multiply(this._globalTint);
+    }
+  }
+
+  /**
+   * Update the global tint (scene darkness) applied to this door.
+   * @param {any} tint
+   */
+  setGlobalTint(tint) {
+    if (!this._globalTint || !tint) return;
+    this._globalTint.copy(tint);
   }
   
   /**
@@ -386,7 +404,15 @@ export class DoorMeshManager {
     
     /** @type {Map<string, THREE.Texture>} texturePath -> loaded texture */
     this.textureCache = new Map();
-    
+
+    const THREE = window.THREE;
+    this._globalTint = THREE ? new THREE.Color(0xffffff) : null;
+    this._daylightTint = THREE ? new THREE.Color(0xffffff) : null;
+    this._darknessTint = THREE ? new THREE.Color(0x242448) : null;
+    this._ambientTint = THREE ? new THREE.Color(0xffffff) : null;
+    this._skyTint = THREE ? new THREE.Color(0xffffff) : null;
+    this._lastTintKey = 0xffffff;
+
     this.initialized = false;
     
     log.debug('DoorMeshManager created');
@@ -500,6 +526,10 @@ export class DoorMeshManager {
           scene: this.scene,
           camera: this.camera
         });
+
+        if (this._globalTint) {
+          doorMesh.setGlobalTint(this._globalTint);
+        }
         meshSet.add(doorMesh);
       }
       
@@ -614,9 +644,82 @@ export class DoorMeshManager {
    * @param {Object} timeInfo - Time info from TimeManager
    */
   update(timeInfo) {
+    this._updateGlobalTint();
     for (const meshSet of this.doorMeshes.values()) {
       for (const doorMesh of meshSet) {
         doorMesh.update(timeInfo.elapsed);
+      }
+    }
+  }
+
+  _updateGlobalTint() {
+    if (!this._globalTint || !this._daylightTint || !this._darknessTint || !this._ambientTint || !this._skyTint) return;
+
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const globalTint = this._globalTint;
+    globalTint.setRGB(1, 1, 1);
+
+    try {
+      const scene = canvas?.scene;
+      const env = canvas?.environment;
+
+      if (scene?.environment?.darknessLevel !== undefined) {
+        let darkness = scene.environment.darknessLevel;
+        const le = window.MapShine?.lightingEffect;
+        if (le && typeof le.getEffectiveDarkness === 'function') {
+          darkness = le.getEffectiveDarkness();
+        }
+
+        const setThreeColor = (target, src, def) => {
+          try {
+            if (!src) { target.set(def); return target; }
+            if (src instanceof THREE.Color) { target.copy(src); return target; }
+            if (src.rgb) { target.setRGB(src.rgb[0], src.rgb[1], src.rgb[2]); return target; }
+            if (Array.isArray(src)) { target.setRGB(src[0], src[1], src[2]); return target; }
+            target.set(src); return target;
+          } catch (e) { target.set(def); return target; }
+        };
+
+        const daylight = setThreeColor(this._daylightTint, env?.colors?.ambientDaylight, 0xffffff);
+        const darknessColor = setThreeColor(this._darknessTint, env?.colors?.ambientDarkness, 0x242448);
+
+        this._ambientTint.copy(daylight).lerp(darknessColor, darkness);
+
+        const lightLevel = Math.max(1.0 - darkness, 0.25);
+        globalTint.copy(this._ambientTint).multiplyScalar(lightLevel);
+
+        // Apply time-of-day / sky color cast.
+        // WeatherController is the single source of truth for these environmental outputs.
+        // We blend (not multiply) to avoid crushing brightness.
+        try {
+          const envState = weatherController?.getEnvironment?.();
+          const skyColor = envState?.skyColor;
+          const skyIntensity = Number.isFinite(envState?.skyIntensity) ? envState.skyIntensity : 1.0;
+          if (skyColor && typeof skyColor.copy === 'function') {
+            // Keep the influence subtle: maximum 35% blend, scaled by skyIntensity.
+            const skyBlend = Math.max(0.0, Math.min(0.35, 0.35 * skyIntensity));
+            this._skyTint.copy(skyColor);
+            globalTint.lerp(this._skyTint, skyBlend);
+          }
+        } catch (_) {
+        }
+      }
+    } catch (_) {
+    }
+
+    const tr = Math.max(0, Math.min(255, (globalTint.r * 255 + 0.5) | 0));
+    const tg = Math.max(0, Math.min(255, (globalTint.g * 255 + 0.5) | 0));
+    const tb = Math.max(0, Math.min(255, (globalTint.b * 255 + 0.5) | 0));
+    const tintKey = (tr << 16) | (tg << 8) | tb;
+
+    if (tintKey === this._lastTintKey) return;
+    this._lastTintKey = tintKey;
+
+    for (const meshSet of this.doorMeshes.values()) {
+      for (const doorMesh of meshSet) {
+        doorMesh.setGlobalTint(globalTint);
       }
     }
   }

@@ -49,7 +49,9 @@ export class WorldSpaceFogEffect extends EffectBase {
       unexploredColor: '#000000',
       exploredColor: '#000000',
       exploredOpacity: 0.5,
-      softness: 2.0
+      softness: 6.0,
+      noiseStrength: 6.0,
+      noiseSpeed: 0.2
     };
 
     // Scene reference
@@ -107,6 +109,14 @@ export class WorldSpaceFogEffect extends EffectBase {
     this._lastCameraY = 0;
     this._lastCameraZoom = 1;
     this._cameraMovementThreshold = 50; // pixels
+
+    this._explorationLoadedFromFoundry = false;
+    this._explorationLoadAttempts = 0;
+    this._explorationDirty = false;
+    this._explorationCommitCount = 0;
+    this._saveExplorationDebounced = null;
+    this._isSavingExploration = false;
+    this._isLoadingExploration = false;
   }
 
   resetExploration() {
@@ -134,6 +144,14 @@ export class WorldSpaceFogEffect extends EffectBase {
     this._currentExplorationTarget = 'A';
     this._needsVisionUpdate = true;
     this._hasValidVision = false;
+
+    this._explorationDirty = false;
+    this._explorationCommitCount = 0;
+
+    // If Foundry resets fog exploration, the authoritative state is now "blank".
+    // Mark exploration as loaded so we don't stall accumulation while repeatedly
+    // trying to load a now-deleted FogExploration document.
+    this._explorationLoadedFromFoundry = true;
   }
 
   /**
@@ -147,7 +165,7 @@ export class WorldSpaceFogEffect extends EffectBase {
           name: 'fog',
           label: 'Fog of War',
           type: 'inline',
-          parameters: ['unexploredColor', 'exploredColor', 'exploredOpacity', 'softness']
+          parameters: ['unexploredColor', 'exploredColor', 'exploredOpacity', 'softness', 'noiseStrength', 'noiseSpeed']
         }
       ],
       parameters: {
@@ -155,7 +173,9 @@ export class WorldSpaceFogEffect extends EffectBase {
         unexploredColor: { type: 'color', default: '#000000', label: 'Unexplored' },
         exploredColor: { type: 'color', default: '#000000', label: 'Explored Tint' },
         exploredOpacity: { type: 'slider', min: 0, max: 1, step: 0.05, default: 0.5, label: 'Explored Opacity' },
-        softness: { type: 'slider', min: 0, max: 12, step: 0.5, default: 2.0, label: 'Edge Softness' }
+        softness: { type: 'slider', min: 0, max: 12, step: 0.5, default: 3.0, label: 'Edge Softness' },
+        noiseStrength: { type: 'slider', min: 0, max: 12, step: 0.5, default: 2.0, label: 'Edge Distortion (px)' },
+        noiseSpeed: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.2, label: 'Distortion Speed' }
       }
     };
   }
@@ -169,6 +189,15 @@ export class WorldSpaceFogEffect extends EffectBase {
 
     // Get scene dimensions from Foundry
     this._updateSceneDimensions();
+
+    // Respect Foundry scene fog colors if provided
+    try {
+      const colors = canvas?.scene?.fog?.colors;
+      if (colors?.unexplored) this.params.unexploredColor = colors.unexplored;
+      if (colors?.explored) this.params.exploredColor = colors.explored;
+    } catch (_) {
+      // Ignore
+    }
     
     // Create fallback textures
     const whiteData = new Uint8Array([255, 255, 255, 255]);
@@ -184,6 +213,21 @@ export class WorldSpaceFogEffect extends EffectBase {
     
     // Create self-maintained exploration render target
     this._createExplorationRenderTarget();
+
+    try {
+      const maxAniso = this.renderer?.capabilities?.getMaxAnisotropy?.() ?? 0;
+      if (maxAniso > 0) {
+        if (this.visionRenderTarget?.texture) this.visionRenderTarget.texture.anisotropy = maxAniso;
+        if (this._explorationTargetA?.texture) this._explorationTargetA.texture.anisotropy = maxAniso;
+        if (this._explorationTargetB?.texture) this._explorationTargetB.texture.anisotropy = maxAniso;
+      }
+    } catch (_) {
+    }
+
+    this._saveExplorationDebounced = foundry.utils.debounce(
+      this._saveExplorationToFoundry.bind(this),
+      2000
+    );
     
     // Create the fog overlay plane
     this._createFogPlane();
@@ -234,7 +278,8 @@ export class WorldSpaceFogEffect extends EffectBase {
     const { width, height } = this.sceneRect;
     
     // Use a reasonable resolution (can be lower than scene for performance)
-    const maxSize = 2048;
+    const maxTexSize = this.renderer?.capabilities?.maxTextureSize ?? 2048;
+    const maxSize = Math.min(4096, maxTexSize);
     const scale = Math.min(1, maxSize / Math.max(width, height));
     const rtWidth = Math.ceil(width * scale);
     const rtHeight = Math.ceil(height * scale);
@@ -251,6 +296,15 @@ export class WorldSpaceFogEffect extends EffectBase {
       depthBuffer: false,
       generateMipmaps: false
     });
+
+    try {
+      const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
+      if (isWebGL2 && typeof this.visionRenderTarget.samples === 'number') {
+        this.visionRenderTarget.samples = 4;
+      }
+    } catch (_) {
+      // Ignore
+    }
     
     // Create a scene for rendering vision polygons
     this.visionScene = new THREE.Scene();
@@ -286,7 +340,8 @@ export class WorldSpaceFogEffect extends EffectBase {
     const { width, height } = this.sceneRect;
     
     // Use same resolution as vision target
-    const maxSize = 2048;
+    const maxTexSize = this.renderer?.capabilities?.maxTextureSize ?? 2048;
+    const maxSize = Math.min(4096, maxTexSize);
     const scale = Math.min(1, maxSize / Math.max(width, height));
     const rtWidth = Math.ceil(width * scale);
     const rtHeight = Math.ceil(height * scale);
@@ -321,6 +376,23 @@ export class WorldSpaceFogEffect extends EffectBase {
       },
       vertexShader: `
         varying vec2 vUv;
+
+        float hash21(vec2 p) {
+          p = fract(p * vec2(123.34, 345.45));
+          p += dot(p, p + 34.345);
+          return fract(p.x * p.y);
+        }
+
+        float noise2(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          float a = hash21(i);
+          float b = hash21(i + vec2(1.0, 0.0));
+          float c = hash21(i + vec2(0.0, 1.0));
+          float d = hash21(i + vec2(1.0, 1.0));
+          vec2 u = f * f * (3.0 - 2.0 * f);
+          return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+        }
 
         float sampleBlur4(sampler2D tex, vec2 uv, vec2 texel) {
           float c = texture2D(tex, uv).r;
@@ -430,6 +502,9 @@ export class WorldSpaceFogEffect extends EffectBase {
     
     // Create shader material for fog compositing
     this.fogMaterial = new THREE.ShaderMaterial({
+      extensions: {
+        derivatives: true
+      },
       uniforms: {
         tVision: { value: this.visionRenderTarget.texture },
         tExplored: { value: this._fallbackBlack },
@@ -438,6 +513,10 @@ export class WorldSpaceFogEffect extends EffectBase {
         uExploredOpacity: { value: 0.5 },
         uBypassFog: { value: 0.0 },
         uSoftnessPx: { value: 2.0 },
+        uTime: { value: 0.0 },
+        uNoiseStrengthPx: { value: 0.0 },
+        uNoiseSpeed: { value: 0.0 },
+        uNoiseScale: { value: 3.0 },
         uVisionTexelSize: { value: new THREE.Vector2(1, 1) },
         uExploredTexelSize: { value: new THREE.Vector2(1, 1) }
       },
@@ -456,6 +535,10 @@ export class WorldSpaceFogEffect extends EffectBase {
         uniform float uExploredOpacity;
         uniform float uBypassFog;
         uniform float uSoftnessPx;
+        uniform float uTime;
+        uniform float uNoiseStrengthPx;
+        uniform float uNoiseSpeed;
+        uniform float uNoiseScale;
         uniform vec2 uVisionTexelSize;
         uniform vec2 uExploredTexelSize;
         
@@ -465,6 +548,23 @@ export class WorldSpaceFogEffect extends EffectBase {
         // linearly across it and we can reconstruct Foundry world coordinates.
         varying vec2 vUv;
 
+        float hash21(vec2 p) {
+          p = fract(p * vec2(123.34, 345.45));
+          p += dot(p, p + 34.345);
+          return fract(p.x * p.y);
+        }
+
+        float noise2(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          float a = hash21(i);
+          float b = hash21(i + vec2(1.0, 0.0));
+          float c = hash21(i + vec2(0.0, 1.0));
+          float d = hash21(i + vec2(1.0, 1.0));
+          vec2 u = f * f * (3.0 - 2.0 * f);
+          return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+        }
+
         float sampleBlur4(sampler2D tex, vec2 uv, vec2 texel) {
           float c = texture2D(tex, uv).r;
           float l = texture2D(tex, uv + vec2(-texel.x, 0.0)).r;
@@ -472,6 +572,30 @@ export class WorldSpaceFogEffect extends EffectBase {
           float d = texture2D(tex, uv + vec2(0.0, -texel.y)).r;
           float u = texture2D(tex, uv + vec2(0.0, texel.y)).r;
           return (c * 4.0 + l + r + d + u) / 8.0;
+        }
+
+        float sampleSoft(sampler2D tex, vec2 uv, vec2 texel, float radiusPx) {
+          float r = clamp(radiusPx, 0.0, 32.0);
+          if (r <= 0.01) return texture2D(tex, uv).r;
+
+          vec2 d1 = texel * max(1.0, r * 0.5);
+          vec2 d2 = texel * max(1.0, r);
+
+          float c = texture2D(tex, uv).r * 0.25;
+
+          float cross = 0.0;
+          cross += texture2D(tex, uv + vec2(d1.x, 0.0)).r;
+          cross += texture2D(tex, uv + vec2(-d1.x, 0.0)).r;
+          cross += texture2D(tex, uv + vec2(0.0, d1.y)).r;
+          cross += texture2D(tex, uv + vec2(0.0, -d1.y)).r;
+
+          float diag = 0.0;
+          diag += texture2D(tex, uv + vec2(d2.x, d2.y)).r;
+          diag += texture2D(tex, uv + vec2(-d2.x, d2.y)).r;
+          diag += texture2D(tex, uv + vec2(d2.x, -d2.y)).r;
+          diag += texture2D(tex, uv + vec2(-d2.x, -d2.y)).r;
+
+          return c + cross * 0.125 + diag * 0.0625;
         }
         
         void main() {
@@ -483,23 +607,41 @@ export class WorldSpaceFogEffect extends EffectBase {
           // Vision texture uses RGBA format, sample any channel (they're all the same)
           // UV needs Y-flip because Three.js plane UVs are bottom-left origin
           // but our vision camera renders with top-left origin (Foundry coords)
-          vec2 visionUv = vec2(vUv.x, 1.0 - vUv.y);
-          float vision = sampleBlur4(tVision, visionUv, uVisionTexelSize);
+          float t = uTime * uNoiseSpeed;
+          vec2 nUv = vUv * uNoiseScale + vec2(t * 0.11, t * 0.07);
+          float n0 = noise2(nUv);
+          float n1 = noise2(nUv + 17.31);
+          vec2 n = vec2(n0, n1) - 0.5;
+          float noiseUvScale = max(max(uVisionTexelSize.x, uVisionTexelSize.y), max(uExploredTexelSize.x, uExploredTexelSize.y));
+          vec2 uvWarp = n * (uNoiseStrengthPx * noiseUvScale);
+
+          vec2 visionUv = vec2(vUv.x, 1.0 - vUv.y) + uvWarp;
+          float vision = sampleSoft(tVision, visionUv, uVisionTexelSize, uSoftnessPx);
           
           // Exploration texture is in Foundry world space over the sceneRect.
           // The fog plane's geometry is also aligned to sceneRect, so we can
           // use vUv directly as local coordinates. However, the underlying
           // PIXI texture is vertically inverted relative to our plane, so we
           // flip Y once when sampling.
-          vec2 exploredUv = vec2(vUv.x, 1.0 - vUv.y);
-          float explored = sampleBlur4(tExplored, exploredUv, uExploredTexelSize);
-          
-          float threshold = 0.1;
-          float softnessVision = max(uVisionTexelSize.x, uVisionTexelSize.y) * uSoftnessPx;
-          float softnessExplored = max(uExploredTexelSize.x, uExploredTexelSize.y) * uSoftnessPx;
+          vec2 exploredUv = vec2(vUv.x, 1.0 - vUv.y) + uvWarp;
+          float explored = sampleSoft(tExplored, exploredUv, uExploredTexelSize, uSoftnessPx);
 
-          float visible = smoothstep(threshold - softnessVision, threshold + softnessVision, vision);
-          float exploredMask = smoothstep(threshold - softnessExplored, threshold + softnessExplored, explored);
+          float threshold = 0.5;
+          float softnessPx = max(uSoftnessPx, 0.0);
+
+          float dv = max(fwidth(vision), 1e-4);
+          float de = max(fwidth(explored), 1e-4);
+
+          float dVisPx = (vision - threshold) / dv;
+          float dExpPx = (explored - threshold) / de;
+
+          float visible = (softnessPx <= 0.01)
+            ? step(threshold, vision)
+            : smoothstep(-softnessPx, softnessPx, dVisPx);
+
+          float exploredMask = (softnessPx <= 0.01)
+            ? step(threshold, explored)
+            : smoothstep(-softnessPx, softnessPx, dExpPx);
 
           float fogAlpha = 1.0 - visible;
           float exploredAlpha = mix(1.0, uExploredOpacity, exploredMask);
@@ -597,14 +739,16 @@ export class WorldSpaceFogEffect extends EffectBase {
       if (child.geometry) child.geometry.dispose();
     }
     
-    // Resolve controlled tokens:
+    // Resolve vision tokens:
     // 1) Prefer MapShine's interactionManager selection (Three.js-driven UI)
     // 2) Fallback to Foundry's canvas.tokens.controlled
+    // 3) For non-GM users only: if nothing is selected/controlled, use all owned tokens
     let controlledTokens = [];
     const ms = window.MapShine;
     const interactionManager = ms?.interactionManager;
     const tokenManager = ms?.tokenManager;
     const selection = interactionManager?.selection;
+    const isGM = game?.user?.isGM ?? false;
 
     if (selection && tokenManager?.tokenSprites) {
       // Map selected IDs to Foundry Token placeables
@@ -620,6 +764,32 @@ export class WorldSpaceFogEffect extends EffectBase {
     // Fallback: use Foundry's native controlled tokens if MapShine selection is empty
     if (!controlledTokens.length) {
       controlledTokens = canvas?.tokens?.controlled || [];
+    }
+
+    // Player default: when nothing is selected/controlled, show combined vision of owned tokens.
+    if (!isGM && !controlledTokens.length) {
+      try {
+        const user = game?.user;
+        const placeables = canvas?.tokens?.placeables || [];
+        if (user && placeables.length) {
+          controlledTokens = placeables.filter(t => {
+            const doc = t?.document;
+            if (!doc) return false;
+            if (t?.isOwner === true) return true;
+            if (doc?.isOwner === true) return true;
+            if (typeof doc?.testUserPermission === 'function') {
+              try {
+                return doc.testUserPermission(user, 'OWNER');
+              } catch (_) {
+                return false;
+              }
+            }
+            return false;
+          });
+        }
+      } catch (_) {
+        // Ignore ownership resolution errors
+      }
     }
 
     // Debug: Log what we're working with (always log when we have controlled tokens but no vision yet)
@@ -888,11 +1058,30 @@ export class WorldSpaceFogEffect extends EffectBase {
     // Accumulate current vision into our self-maintained exploration texture
     // This runs every frame so that as the token moves, the explored area grows
     // explored = max(explored, vision)
-    this._accumulateExploration();
+    const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
+
+    this._ensureExplorationLoadedFromFoundry();
+
+    // IMPORTANT: Don't accumulate (or save) exploration until we've loaded the
+    // prior persisted state (or confirmed there is none). Otherwise we can start
+    // from black, mark dirty, and overwrite the existing FogExploration before
+    // the async load finishes.
+    if (explorationEnabled && !this._explorationLoadedFromFoundry) {
+      // Still render fog using the (currently black) exploration buffer.
+      // Accumulation will begin once load completes.
+      return;
+    }
+
+    if (explorationEnabled) {
+      this._accumulateExploration();
+      this._markExplorationDirty();
+    }
     
     // Use our self-maintained exploration texture (NOT Foundry's pre-populated one)
     // This ensures only areas we've actually seen with our token are marked explored
-    const exploredTex = this._getExplorationReadTarget()?.texture || this._fallbackBlack;
+    const exploredTex = explorationEnabled
+      ? (this._getExplorationReadTarget()?.texture || this._fallbackBlack)
+      : this._fallbackBlack;
     this.fogMaterial.uniforms.tExplored.value = exploredTex;
 
     // Update texel sizes for softness/AA in the fog shader
@@ -903,6 +1092,9 @@ export class WorldSpaceFogEffect extends EffectBase {
     this.fogMaterial.uniforms.uVisionTexelSize.value.set(1.0 / vtW, 1.0 / vtH);
     this.fogMaterial.uniforms.uExploredTexelSize.value.set(1.0 / etW, 1.0 / etH);
     this.fogMaterial.uniforms.uSoftnessPx.value = this.params.softness;
+    this.fogMaterial.uniforms.uTime.value = timeInfo?.elapsed ?? 0.0;
+    this.fogMaterial.uniforms.uNoiseStrengthPx.value = this.params.noiseStrength ?? 0.0;
+    this.fogMaterial.uniforms.uNoiseSpeed.value = this.params.noiseSpeed ?? 0.0;
     
     // Update color uniforms
     this.fogMaterial.uniforms.uUnexploredColor.value.set(this.params.unexploredColor);
@@ -911,7 +1103,6 @@ export class WorldSpaceFogEffect extends EffectBase {
     // If exploration is disabled, force explored opacity to 0 so only
     // current vision reveals the map. Otherwise respect the configured
     // exploredOpacity parameter.
-    const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
     this.fogMaterial.uniforms.uExploredOpacity.value = explorationEnabled
       ? this.params.exploredOpacity
       : 0.0;
@@ -947,6 +1138,16 @@ export class WorldSpaceFogEffect extends EffectBase {
       this._explorationTargetB.dispose();
     }
     this._createExplorationRenderTarget();
+
+    try {
+      const maxAniso = this.renderer?.capabilities?.getMaxAnisotropy?.() ?? 0;
+      if (maxAniso > 0) {
+        if (this.visionRenderTarget?.texture) this.visionRenderTarget.texture.anisotropy = maxAniso;
+        if (this._explorationTargetA?.texture) this._explorationTargetA.texture.anisotropy = maxAniso;
+        if (this._explorationTargetB?.texture) this._explorationTargetB.texture.anisotropy = maxAniso;
+      }
+    } catch (_) {
+    }
     
     // Update fog plane geometry and position
     if (this.fogPlane) {
@@ -956,6 +1157,276 @@ export class WorldSpaceFogEffect extends EffectBase {
     this._createFogPlane();
     
     this._needsVisionUpdate = true;
+    this._explorationLoadedFromFoundry = false;
+    this._explorationLoadAttempts = 0;
+  }
+
+  _markExplorationDirty() {
+    this._explorationDirty = true;
+    this._explorationCommitCount++;
+
+    const threshold = canvas?.fog?.constructor?.COMMIT_THRESHOLD ?? 70;
+    if (this._explorationCommitCount >= threshold) {
+      this._explorationCommitCount = 0;
+      if (this._saveExplorationDebounced) this._saveExplorationDebounced();
+    }
+  }
+
+  _ensureExplorationLoadedFromFoundry() {
+    if (this._explorationLoadedFromFoundry) return;
+    if (this._isLoadingExploration) return;
+
+    const tokenVisionEnabled = canvas?.scene?.tokenVision ?? false;
+    const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
+
+    if (!tokenVisionEnabled) {
+      this._explorationLoadedFromFoundry = true;
+      return;
+    }
+    if (!explorationEnabled) {
+      this._explorationLoadedFromFoundry = true;
+      return;
+    }
+
+    if (this._explorationLoadAttempts > 600) {
+      this._explorationLoadedFromFoundry = true;
+      return;
+    }
+
+    this._isLoadingExploration = true;
+
+    const FogExplorationCls = CONFIG?.FogExploration?.documentClass;
+    if (!FogExplorationCls || typeof FogExplorationCls.load !== 'function') {
+      this._explorationLoadedFromFoundry = true;
+      this._isLoadingExploration = false;
+      return;
+    }
+
+    FogExplorationCls.load().then((doc) => {
+      try {
+        const base64 = doc?.explored;
+        if (!doc || !base64) {
+          // No persisted fog exists yet for this user+scene (or it was reset).
+          // Treat this as a successful "load" of a blank state.
+          this._explorationLoadedFromFoundry = true;
+          return;
+        }
+
+        // Expose it for consistency with Foundry's own fog manager state.
+        try {
+          if (canvas?.fog && !canvas.fog.exploration) canvas.fog.exploration = doc;
+        } catch (_) {
+          // Ignore
+        }
+
+        this._explorationLoadedFromFoundry = true;
+
+        const THREE = window.THREE;
+        const loader = new THREE.TextureLoader();
+        loader.load(
+          base64,
+          (texture) => {
+            try {
+              // Avoid double Y-flips: our fog shader already flips explored sampling.
+              texture.flipY = false;
+              texture.needsUpdate = true;
+              this._renderLoadedExplorationTexture(texture);
+            } catch (e) {
+              log.warn('Failed to apply saved fog exploration texture', e);
+            } finally {
+              try { texture.dispose?.(); } catch (_) {}
+            }
+          },
+          undefined,
+          (err) => {
+            log.warn('Failed to load saved fog exploration texture', err);
+          }
+        );
+      } finally {
+        this._isLoadingExploration = false;
+      }
+    }).catch((e) => {
+      this._isLoadingExploration = false;
+      this._explorationLoadAttempts++;
+      if (Math.random() < 0.1) log.warn('FogExploration.load() failed', e);
+    });
+  }
+
+  _renderLoadedExplorationTexture(texture) {
+    if (!this.renderer) return;
+    if (!this._explorationTargetA || !this._explorationTargetB) return;
+
+    const THREE = window.THREE;
+
+    const copyMat = new THREE.MeshBasicMaterial({
+      map: texture,
+      blending: THREE.NoBlending,
+      depthWrite: false,
+      depthTest: false,
+      transparent: false
+    });
+    const copyQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), copyMat);
+    const copyScene = new THREE.Scene();
+    copyScene.add(copyQuad);
+
+    const currentTarget = this.renderer.getRenderTarget();
+    const currentClearColor = this.renderer.getClearColor(new THREE.Color());
+    const currentClearAlpha = this.renderer.getClearAlpha();
+
+    this.renderer.setClearColor(0x000000, 1);
+
+    this.renderer.setRenderTarget(this._explorationTargetA);
+    this.renderer.clear();
+    this.renderer.render(copyScene, this.explorationCamera);
+
+    this.renderer.setRenderTarget(this._explorationTargetB);
+    this.renderer.clear();
+    this.renderer.render(copyScene, this.explorationCamera);
+
+    this.renderer.setRenderTarget(currentTarget);
+    this.renderer.setClearColor(currentClearColor, currentClearAlpha);
+
+    copyQuad.geometry.dispose();
+    copyMat.dispose();
+
+    this._currentExplorationTarget = 'A';
+  }
+
+  async _saveExplorationToFoundry() {
+    const tokenVisionEnabled = canvas?.scene?.tokenVision ?? false;
+    const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
+    if (!tokenVisionEnabled || !explorationEnabled) return;
+    if (!this._explorationDirty) return;
+    if (this._isSavingExploration) return;
+    if (!this.renderer) return;
+
+    const explorationTarget = this._getExplorationReadTarget();
+    if (!explorationTarget) return;
+
+    this._isSavingExploration = true;
+
+    try {
+      const width = this._explorationRTWidth;
+      const height = this._explorationRTHeight;
+      const buffer = new Uint8Array(width * height * 4);
+      this.renderer.readRenderTargetPixels(explorationTarget, 0, 0, width, height, buffer);
+
+      const base64 = await this._encodeExplorationBase64(buffer, width, height);
+      if (!base64) return;
+
+      const fogMgr = canvas?.fog;
+      if (!fogMgr) return;
+
+      let doc = fogMgr.exploration;
+      const FogExplorationCls = CONFIG?.FogExploration?.documentClass;
+      if (!FogExplorationCls) return;
+
+      const updateData = {
+        scene: canvas?.scene?.id,
+        user: game?.user?.id,
+        explored: base64,
+        timestamp: Date.now()
+      };
+
+      if (!doc) {
+        // Match Foundry: create a new document and persist it
+        const tmp = new FogExplorationCls();
+        tmp.updateSource(updateData);
+        doc = await FogExplorationCls.create(tmp.toJSON(), { loadFog: false });
+        try { fogMgr.exploration = doc; } catch (_) {}
+      } else if (!doc.id) {
+        doc.updateSource(updateData);
+        doc = await doc.constructor.create(doc.toJSON(), { loadFog: false });
+        try { fogMgr.exploration = doc; } catch (_) {}
+      } else {
+        await doc.update(updateData, { loadFog: false });
+      }
+
+      this._explorationDirty = false;
+    } catch (e) {
+      log.warn('Failed to save fog exploration', e);
+    } finally {
+      this._isSavingExploration = false;
+    }
+  }
+
+  async _encodeExplorationBase64(buffer, width, height) {
+    try {
+      if (typeof OffscreenCanvas !== 'undefined') {
+        const offscreen = new OffscreenCanvas(width, height);
+        const ctx = offscreen.getContext('2d');
+        const imgData = ctx.createImageData(width, height);
+        const pixels = imgData.data;
+
+        const CHUNK_SIZE = 262144;
+        for (let i = 0; i < buffer.length; i += CHUNK_SIZE) {
+          const end = Math.min(i + CHUNK_SIZE, buffer.length);
+          for (let j = i; j < end; j += 4) {
+            const val = buffer[j];
+            pixels[j] = val;
+            pixels[j + 1] = val;
+            pixels[j + 2] = val;
+            pixels[j + 3] = 255;
+          }
+          if (end < buffer.length) {
+            await new Promise(resolve => setTimeout(resolve, 0));
+          }
+        }
+
+        ctx.putImageData(imgData, 0, 0);
+        const blob = await offscreen.convertToBlob({ type: 'image/webp', quality: 0.8 });
+        return await this._blobToDataURL(blob);
+      }
+
+      const canvasEl = document.createElement('canvas');
+      canvasEl.width = width;
+      canvasEl.height = height;
+      const ctx = canvasEl.getContext('2d');
+      const imgData = ctx.createImageData(width, height);
+      const pixels = imgData.data;
+
+      const CHUNK_SIZE = 262144;
+      for (let i = 0; i < buffer.length; i += CHUNK_SIZE) {
+        const end = Math.min(i + CHUNK_SIZE, buffer.length);
+        for (let j = i; j < end; j += 4) {
+          const val = buffer[j];
+          pixels[j] = val;
+          pixels[j + 1] = val;
+          pixels[j + 2] = val;
+          pixels[j + 3] = 255;
+        }
+        if (end < buffer.length) {
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      }
+
+      ctx.putImageData(imgData, 0, 0);
+
+      return await new Promise((resolve) => {
+        canvasEl.toBlob((blob) => {
+          if (blob) {
+            this._blobToDataURL(blob).then(resolve).catch(() => resolve(null));
+          } else {
+            try {
+              resolve(canvasEl.toDataURL('image/webp', 0.8));
+            } catch (_) {
+              resolve(null);
+            }
+          }
+        }, 'image/webp', 0.8);
+      });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _blobToDataURL(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
   }
 
   dispose() {

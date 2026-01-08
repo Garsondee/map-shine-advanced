@@ -205,7 +205,7 @@ class RopeInstance {
 
     const mat = new THREE.ShaderMaterial({
       transparent: true,
-      depthTest: true,
+      depthTest: false,
       depthWrite: false,
       side: THREE.DoubleSide,
       premultipliedAlpha: true,
@@ -285,7 +285,7 @@ class RopeInstance {
 
     this.mesh.layers.enable(ROPE_MASK_LAYER);
 
-    this.mesh.renderOrder = -10;
+    this.mesh.renderOrder = 100;
     this.mesh.frustumCulled = false;
     this.scene.add(this.mesh);
 

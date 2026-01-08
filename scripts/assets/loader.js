@@ -42,11 +42,15 @@ const assetCache = new Map();
  * @param {AssetLoadProgressCallback} [onProgress] - Progress callback
  * @param {Object} [options] - Loading options
  * @param {boolean} [options.skipBaseTexture=false] - Skip loading base texture (if already loaded by Foundry)
+ * @param {boolean} [options.suppressProbeErrors=false] - Suppress probe errors when called from UI
  * @returns {Promise<AssetLoadResult>} Loaded asset bundle
  * @public
  */
 export async function loadAssetBundle(basePath, onProgress = null, options = {}) {
-  const { skipBaseTexture = false } = options;
+  const {
+    skipBaseTexture = false,
+    suppressProbeErrors = false
+  } = options || {};
   log.info(`Loading asset bundle: ${basePath}${skipBaseTexture ? ' (masks only)' : ''}`);
   
   const warnings = [];
@@ -55,13 +59,20 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
     // Check cache first
     const cacheKey = `${basePath}::${skipBaseTexture ? 'masks' : 'full'}`;
     if (assetCache.has(cacheKey)) {
-      log.debug('Using cached asset bundle');
-      return {
-        success: true,
-        bundle: assetCache.get(cacheKey),
-        warnings: [],
-        error: null
-      };
+      const cached = assetCache.get(cacheKey);
+      const cachedMaskCount = Array.isArray(cached?.masks) ? cached.masks.length : 0;
+      // If the cached bundle has no masks, it may have been produced when
+      // FilePicker browsing was unavailable (common on player clients). Bypass
+      // cache so we can probe known suffix filenames directly.
+      if (cachedMaskCount > 0) {
+        log.debug('Using cached asset bundle');
+        return {
+          success: true,
+          bundle: cached,
+          warnings: [],
+          error: null
+        };
+      }
     }
 
     // Step 1: Load base texture (optional if Foundry already loaded it)
@@ -93,10 +104,21 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
 
       // Check if this mask exists in discovered files
       const maskFile = findMaskInFiles(availableFiles, basePath, maskDef.suffix);
-      
+
+      let maskTexture = null;
+      let resolvedMaskPath = null;
       if (maskFile) {
-        const maskTexture = await loadTextureAsync(maskFile);
-        if (maskTexture) {
+        resolvedMaskPath = maskFile;
+        maskTexture = await loadTextureAsync(maskFile);
+      } else if (!availableFiles.length && maskId === 'outdoors' && !suppressProbeErrors) {
+        const probed = await probeMaskTexture(basePath, maskDef.suffix, suppressProbeErrors);
+        if (probed) {
+          resolvedMaskPath = probed.path;
+          maskTexture = probed.texture;
+        }
+      }
+
+      if (maskTexture) {
           const isColorTexture = ['bush', 'tree'].includes(maskId);
           if (isColorTexture && THREE.SRGBColorSpace) {
             maskTexture.colorSpace = THREE.SRGBColorSpace;
@@ -120,8 +142,7 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
             texture: maskTexture,
             required: maskDef.required
           });
-          log.debug(`Loaded effect mask: ${maskId} from ${maskFile} (colorSpace: ${isColorTexture ? 'sRGB' : 'Default'}, mipmaps: ${(!!maskTexture.generateMipmaps).toString()})`);
-        }
+          log.debug(`Loaded effect mask: ${maskId} from ${resolvedMaskPath} (colorSpace: ${isColorTexture ? 'sRGB' : 'Default'}, mipmaps: ${(!!maskTexture.generateMipmaps).toString()})`);
       } else if (maskDef.required) {
         warnings.push(`Required mask missing: ${maskId} (${maskDef.suffix})`);
       }
@@ -195,6 +216,21 @@ async function loadBaseTexture(basePath) {
     }
   }
 
+  return null;
+}
+
+async function probeMaskTexture(basePath, suffix, suppressProbeErrors = false) {
+  for (const format of SUPPORTED_FORMATS) {
+    if (format === 'jpeg') continue;
+    const path = `${basePath}${suffix}.${format}`;
+    try {
+      const texture = await loadTextureAsync(path, suppressProbeErrors);
+      if (texture) {
+        return { path, texture };
+      }
+    } catch (e) {
+    }
+  }
   return null;
 }
 
@@ -340,7 +376,7 @@ function normalizePath(path) {
  * @returns {Promise<THREE.Texture>} Loaded texture
  * @private
  */
-async function loadTextureAsync(path) {
+async function loadTextureAsync(path, suppressProbeErrors = false) {
   const THREE = window.THREE;
   
   // Use Foundry's loadTexture which handles module paths correctly
@@ -414,6 +450,9 @@ async function loadTextureAsync(path) {
   } catch (error) {
     // Silently fail - this is expected during format probing
     // Only log at debug level to avoid console spam
+    if (!suppressProbeErrors) {
+      log.debug(`Texture load failed (expected during probing): ${absolutePath}`, error);
+    }
     throw error;
   }
 }

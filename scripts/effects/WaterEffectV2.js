@@ -40,6 +40,9 @@ export class WaterEffectV2 extends EffectBase {
     this._surfaceModel = new WaterSurfaceModel();
     this._waterData = null;
     this._lastWaterMaskUuid = null;
+    this._lastWaterMaskCacheKey = null;
+    this._waterMaskImageIds = new WeakMap();
+    this._nextWaterMaskImageId = 1;
 
     this._quadScene = null;
     this._quadCamera = null;
@@ -49,6 +52,8 @@ export class WaterEffectV2 extends EffectBase {
     this._readBuffer = null;
     this._writeBuffer = null;
     this._inputTexture = null;
+
+    this._waterOccluderAlpha = null;
 
     this._viewBounds = null;
     this._sceneDimensions = null;
@@ -156,6 +161,9 @@ export class WaterEffectV2 extends EffectBase {
         uHasWaterData: { value: 0.0 },
         uWaterEnabled: { value: 1.0 },
 
+        tWaterOccluderAlpha: { value: null },
+        uHasWaterOccluderAlpha: { value: 0.0 },
+
         uWaterDataTexelSize: { value: new THREE.Vector2(1 / 512, 1 / 512) },
 
         uTintColor: { value: new THREE.Color(0.0, 0.0, 0.0) },
@@ -197,6 +205,9 @@ export class WaterEffectV2 extends EffectBase {
         uniform sampler2D tWaterData;
         uniform float uHasWaterData;
         uniform float uWaterEnabled;
+
+        uniform sampler2D tWaterOccluderAlpha;
+        uniform float uHasWaterOccluderAlpha;
 
         uniform vec2 uWaterDataTexelSize;
 
@@ -396,6 +407,13 @@ export class WaterEffectV2 extends EffectBase {
           if (uHasSceneRect > 0.5) {
             vec2 foundryPos = screenUvToFoundry(vUv);
             sceneUv = foundryToSceneUv(foundryPos);
+            float inScene =
+              step(0.0, sceneUv.x) * step(sceneUv.x, 1.0) *
+              step(0.0, sceneUv.y) * step(sceneUv.y, 1.0);
+            if (inScene < 0.5) {
+              gl_FragColor = base;
+              return;
+            }
             sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
           }
 
@@ -406,6 +424,13 @@ export class WaterEffectV2 extends EffectBase {
 
           float inside = waterInsideFromSdf(sdf01);
           float shore = clamp(exposure01, 0.0, 1.0);
+
+          float waterOccluder = 0.0;
+          if (uHasWaterOccluderAlpha > 0.5) {
+            waterOccluder = texture2D(tWaterOccluderAlpha, vUv).a;
+          }
+          float waterVisible = 1.0 - clamp(waterOccluder, 0.0, 1.0);
+          inside *= waterVisible;
 
           if (uDebugView > 0.5) {
             float d = floor(uDebugView + 0.5);
@@ -538,6 +563,14 @@ export class WaterEffectV2 extends EffectBase {
     }
 
     this._inputTexture = texture;
+  }
+
+  setWaterOccluderAlphaTexture(texture) {
+    this._waterOccluderAlpha = texture || null;
+    if (this._material?.uniforms?.tWaterOccluderAlpha) {
+      this._material.uniforms.tWaterOccluderAlpha.value = this._waterOccluderAlpha;
+      this._material.uniforms.uHasWaterOccluderAlpha.value = this._waterOccluderAlpha ? 1.0 : 0.0;
+    }
   }
 
   setBuffers(readBuffer, writeBuffer) {
@@ -746,6 +779,14 @@ export class WaterEffectV2 extends EffectBase {
     u.uHasWaterData.value = this._waterData?.texture ? 1.0 : 0.0;
     u.uWaterEnabled.value = this.enabled ? 1.0 : 0.0;
 
+    if (u.tWaterOccluderAlpha && u.uHasWaterOccluderAlpha) {
+      const occ = this._waterOccluderAlpha
+        ?? window.MapShine?.distortionManager?.waterOccluderTarget?.texture
+        ?? null;
+      u.tWaterOccluderAlpha.value = occ;
+      u.uHasWaterOccluderAlpha.value = occ ? 1.0 : 0.0;
+    }
+
     if (u.uWaterDataTexelSize) {
       const tex = this._waterData?.texture;
       const img = tex?.image;
@@ -824,8 +865,8 @@ export class WaterEffectV2 extends EffectBase {
   _rebuildWaterDataIfNeeded(force) {
     if (!this.waterMask) return;
 
-    const uuid = this.waterMask.uuid;
-    if (!force && uuid && uuid === this._lastWaterMaskUuid && this._waterData?.texture) return;
+    const cacheKey = this._getWaterMaskCacheKey();
+    if (!force && cacheKey && cacheKey === this._lastWaterMaskCacheKey && this._waterData?.texture) return;
 
     try {
       this._waterData = this._surfaceModel.buildFromMaskTexture(this.waterMask, {
@@ -834,12 +875,32 @@ export class WaterEffectV2 extends EffectBase {
         sdfRangePx: 64,
         exposureWidthPx: 24
       });
-      this._lastWaterMaskUuid = uuid;
+      this._lastWaterMaskUuid = this.waterMask.uuid;
+      this._lastWaterMaskCacheKey = cacheKey;
     } catch (e) {
       this._waterData = null;
       this._lastWaterMaskUuid = null;
+      this._lastWaterMaskCacheKey = null;
       log.error('Failed to build WaterData texture', e);
     }
+  }
+
+  _getWaterMaskCacheKey() {
+    const tex = this.waterMask;
+    if (!tex) return null;
+    const img = tex.image;
+    const imgId = img ? this._getWaterMaskImageId(img) : 0;
+    const v = Number.isFinite(tex.version) ? tex.version : 0;
+    return `${tex.uuid}|img:${imgId}|v:${v}`;
+  }
+
+  _getWaterMaskImageId(img) {
+    if (!img || typeof img !== 'object') return 0;
+    const existing = this._waterMaskImageIds.get(img);
+    if (existing) return existing;
+    const id = this._nextWaterMaskImageId++;
+    this._waterMaskImageIds.set(img, id);
+    return id;
   }
 
   _updateViewBoundsFromCamera(camera, outVec4) {

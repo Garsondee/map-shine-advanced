@@ -49,6 +49,9 @@ export class TileManager {
     this.textureCache = new Map();
 
     this._texturePromises = new Map();
+
+    this._tileWaterMaskCache = new Map();
+    this._tileWaterMaskPromises = new Map();
     
     /** @type {Map<string, {width: number, height: number, data: Uint8ClampedArray}>} */
     this.alphaMaskCache = new Map();
@@ -73,6 +76,161 @@ export class TileManager {
     this.windowLightEffect = null;
     
     log.debug('TileManager created');
+  }
+
+  _deriveMaskPath(src, suffix) {
+    const s = String(src || '');
+    if (!s) return null;
+    const q = s.indexOf('?');
+    const base = q >= 0 ? s.slice(0, q) : s;
+    const query = q >= 0 ? s.slice(q) : '';
+
+    const dot = base.lastIndexOf('.');
+    if (dot < 0) return null;
+    const path = base.slice(0, dot);
+    const ext = base.slice(dot);
+    return `${path}${suffix}${ext}${query}`;
+  }
+
+  async loadTileWaterMaskTexture(tileDoc) {
+    const src = tileDoc?.texture?.src;
+    const maskPath = this._deriveMaskPath(src, '_Water');
+    if (!maskPath) return null;
+
+    const key = `${maskPath}`;
+    const cached = this._tileWaterMaskCache.get(key);
+    if (cached) return cached;
+
+    const pending = this._tileWaterMaskPromises.get(key);
+    if (pending) return pending;
+
+    const p = this.loadTileTexture(maskPath).then((tex) => {
+      if (!tex) return null;
+      this._tileWaterMaskCache.set(key, tex);
+      return tex;
+    }).catch(() => null).finally(() => {
+      this._tileWaterMaskPromises.delete(key);
+    });
+
+    this._tileWaterMaskPromises.set(key, p);
+    return p;
+  }
+
+  _createWaterOccluderMaterial(tileTexture, waterMaskTexture) {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        tTile: { value: tileTexture || null },
+        uHasTile: { value: tileTexture ? 1.0 : 0.0 },
+        tWaterMask: { value: waterMaskTexture || null },
+        uHasWaterMask: { value: waterMaskTexture ? 1.0 : 0.0 },
+        uOpacity: { value: 1.0 }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tTile;
+        uniform float uHasTile;
+        uniform sampler2D tWaterMask;
+        uniform float uHasWaterMask;
+        uniform float uOpacity;
+        varying vec2 vUv;
+
+        void main() {
+          float aTile = 1.0;
+          if (uHasTile > 0.5) {
+            aTile = texture2D(tTile, vUv).a;
+          }
+
+          float w = 0.0;
+          if (uHasWaterMask > 0.5) {
+            w = texture2D(tWaterMask, vUv).a;
+          }
+
+          float a = clamp(aTile * uOpacity, 0.0, 1.0);
+          a *= (1.0 - clamp(w, 0.0, 1.0));
+          gl_FragColor = vec4(0.0, 0.0, 0.0, a);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.NormalBlending
+    });
+
+    return material;
+  }
+
+  _ensureWaterOccluderMesh(spriteData, tileDoc) {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const sprite = spriteData?.sprite;
+    if (!sprite) return;
+
+    const occludesWater = !!sprite.userData?.occludesWater;
+    const existing = sprite.userData.waterOccluderMesh;
+
+    if (!occludesWater) {
+      if (existing) {
+        try {
+          this.scene.remove(existing);
+          existing.geometry?.dispose?.();
+          existing.material?.dispose?.();
+        } catch (_) {
+        }
+        sprite.userData.waterOccluderMesh = null;
+      }
+      return;
+    }
+
+    if (existing) return;
+
+    const geom = new THREE.PlaneGeometry(1, 1);
+    const mat = this._createWaterOccluderMaterial(sprite.material?.map ?? null, null);
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.matrixAutoUpdate = false;
+    mesh.layers.set(WATER_OCCLUDER_LAYER);
+    mesh.visible = !!sprite.visible;
+    mesh.renderOrder = 999;
+    this.scene.add(mesh);
+    sprite.userData.waterOccluderMesh = mesh;
+
+    this.loadTileWaterMaskTexture(tileDoc).then((maskTex) => {
+      const m = sprite.userData?.waterOccluderMesh;
+      if (!m || !m.material?.uniforms) return;
+      m.material.uniforms.tWaterMask.value = maskTex;
+      m.material.uniforms.uHasWaterMask.value = maskTex ? 1.0 : 0.0;
+    }).catch(() => {
+    });
+  }
+
+  _updateWaterOccluderMeshTransform(sprite, tileDoc) {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const mesh = sprite?.userData?.waterOccluderMesh;
+    if (!mesh) return;
+
+    mesh.position.copy(sprite.position);
+    mesh.scale.set(tileDoc.width, tileDoc.height, 1);
+    mesh.rotation.set(0, 0, 0);
+    if (tileDoc.rotation) {
+      mesh.rotation.z = THREE.MathUtils.degToRad(tileDoc.rotation);
+    }
+    mesh.updateMatrix();
+
+    if (mesh.material?.uniforms?.uOpacity) {
+      const a = ('alpha' in tileDoc) ? tileDoc.alpha : 1.0;
+      mesh.material.uniforms.uOpacity.value = Number.isFinite(a) ? a : 1.0;
+    }
   }
 
   /**
@@ -887,6 +1045,12 @@ export class TileManager {
       this.updateSpriteTransform(sprite, tileDoc);
       this.updateSpriteVisibility(sprite, tileDoc);
 
+      const spriteData = this.tileSprites.get(tileDoc.id);
+      if (spriteData) {
+        this._ensureWaterOccluderMesh(spriteData, tileDoc);
+        this._updateWaterOccluderMeshTransform(sprite, tileDoc);
+      }
+
       try {
         window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
       } catch (_) {
@@ -904,6 +1068,8 @@ export class TileManager {
       sprite,
       tileDoc
     });
+
+    this._ensureWaterOccluderMesh(this.tileSprites.get(tileDoc.id), tileDoc);
 
     if (sprite.userData.isOverhead) {
       this._overheadTileIds.add(tileDoc.id);
@@ -977,6 +1143,8 @@ export class TileManager {
         'elevation' in changes || 'z' in changes ||
         'flags' in changes) {
       this.updateSpriteTransform(sprite, targetDoc);
+      this._ensureWaterOccluderMesh(spriteData, targetDoc);
+      this._updateWaterOccluderMeshTransform(sprite, targetDoc);
     }
 
     // Update texture if changed
@@ -984,6 +1152,22 @@ export class TileManager {
       this.loadTileTexture(changes.texture.src).then(texture => {
         sprite.material.map = texture;
         sprite.material.needsUpdate = true;
+
+        const occ = sprite.userData?.waterOccluderMesh;
+        if (occ?.material?.uniforms?.tTile) {
+          occ.material.uniforms.tTile.value = texture;
+          if (occ.material.uniforms.uHasTile) {
+            occ.material.uniforms.uHasTile.value = texture ? 1.0 : 0.0;
+          }
+        }
+
+        this.loadTileWaterMaskTexture(targetDoc).then((maskTex) => {
+          const occ2 = sprite.userData?.waterOccluderMesh;
+          if (!occ2?.material?.uniforms) return;
+          occ2.material.uniforms.tWaterMask.value = maskTex;
+          occ2.material.uniforms.uHasWaterMask.value = maskTex ? 1.0 : 0.0;
+        }).catch(() => {
+        });
 
         try {
           window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
@@ -997,6 +1181,14 @@ export class TileManager {
     // Update visibility
     if ('hidden' in changes || 'alpha' in changes) {
       this.updateSpriteVisibility(sprite, targetDoc);
+      const occ = sprite.userData?.waterOccluderMesh;
+      if (occ) {
+        occ.visible = !!sprite.visible;
+      }
+      if (occ?.material?.uniforms?.uOpacity) {
+        const a = ('alpha' in targetDoc) ? targetDoc.alpha : 1.0;
+        occ.material.uniforms.uOpacity.value = Number.isFinite(a) ? a : 1.0;
+      }
     }
 
     // Update stored reference
@@ -1025,6 +1217,17 @@ export class TileManager {
     if (!spriteData) return;
 
     const { sprite } = spriteData;
+
+    const occ = sprite?.userData?.waterOccluderMesh;
+    if (occ) {
+      try {
+        this.scene.remove(occ);
+        occ.geometry?.dispose?.();
+        occ.material?.dispose?.();
+      } catch (_) {
+      }
+      sprite.userData.waterOccluderMesh = null;
+    }
 
     this.scene.remove(sprite);
     
@@ -1164,8 +1367,7 @@ export class TileManager {
     const occludesWater = (occludesWaterFlag === undefined) ? false : !!occludesWaterFlag;
     sprite.userData.occludesWater = occludesWater;
     if (!bypassEffects) {
-      if (occludesWater) sprite.layers.enable(WATER_OCCLUDER_LAYER);
-      else sprite.layers.disable(WATER_OCCLUDER_LAYER);
+      sprite.layers.disable(WATER_OCCLUDER_LAYER);
     }
 
     try {
@@ -1182,6 +1384,7 @@ export class TileManager {
       // modest renderOrder below the particle systems.
       if (sprite.material) {
         sprite.material.depthWrite = false;
+        sprite.material.depthTest = false;
         sprite.material.needsUpdate = true;
       }
       sprite.renderOrder = 10;
@@ -1196,8 +1399,9 @@ export class TileManager {
       }
 
       // If the sprite was previously overhead, restore depth writing.
-      if (sprite.material && sprite.material.depthWrite === false) {
+      if (sprite.material && (sprite.material.depthWrite === false || sprite.material.depthTest === false)) {
         sprite.material.depthWrite = true;
+        sprite.material.depthTest = true;
         sprite.material.needsUpdate = true;
       }
       sprite.renderOrder = 0;
@@ -1231,6 +1435,12 @@ export class TileManager {
     // 3. Rotation
     if (tileDoc.rotation) {
       sprite.material.rotation = THREE.MathUtils.degToRad(tileDoc.rotation);
+    }
+
+    const data = this.tileSprites.get(tileDoc.id);
+    if (data) {
+      this._ensureWaterOccluderMesh(data, tileDoc);
+      this._updateWaterOccluderMeshTransform(sprite, tileDoc);
     }
   }
 

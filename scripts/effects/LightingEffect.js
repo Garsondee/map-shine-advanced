@@ -1263,14 +1263,55 @@ export class LightingEffect extends EffectBase {
     this.mainCamera.layers.set(ROPE_MASK_LAYER);
     renderer.setRenderTarget(this.ropeMaskTarget);
     renderer.setClearColor(0x000000, 0);
-    renderer.clear();
-    renderer.render(scene, this.mainCamera);
 
-    // Restore camera layers and render target
+    const prevAutoClear = renderer.autoClear;
+    renderer.autoClear = false;
+    renderer.clear(true, true, true);
+
+    const _tmpEnabledTokenLayer = this._tmpEnabledTokenLayer || (this._tmpEnabledTokenLayer = []);
+    _tmpEnabledTokenLayer.length = 0;
+
+    try {
+      const tokenManager = window.MapShine?.tokenManager;
+      const tokenSprites = tokenManager?.tokenSprites;
+      if (tokenSprites && typeof tokenSprites.values === 'function') {
+        const ropeLayerMask = (1 << ROPE_MASK_LAYER);
+        for (const data of tokenSprites.values()) {
+          const sprite = data?.sprite;
+          if (!sprite?.layers) continue;
+          const had = (sprite.layers.mask & ropeLayerMask) !== 0;
+          if (!had) {
+            sprite.layers.enable(ROPE_MASK_LAYER);
+            _tmpEnabledTokenLayer.push(sprite);
+          }
+        }
+      }
+
+      const gl = renderer.getContext();
+      const prevMask = gl.getParameter(gl.COLOR_WRITEMASK);
+      try {
+        gl.colorMask(false, false, false, false);
+        renderer.render(scene, this.mainCamera);
+      } finally {
+        gl.colorMask(prevMask[0], prevMask[1], prevMask[2], prevMask[3]);
+      }
+    } catch (e) {
+    } finally {
+      try {
+        for (let i = 0; i < _tmpEnabledTokenLayer.length; i++) {
+          _tmpEnabledTokenLayer[i].layers.disable(ROPE_MASK_LAYER);
+        }
+      } catch (e) {
+      }
+    }
+
+    renderer.clear(true, false, false);
+    renderer.render(scene, this.mainCamera);
+    renderer.autoClear = prevAutoClear;
+
     this.mainCamera.layers.mask = previousLayersMask;
     renderer.setRenderTarget(previousTarget);
 
-    // 0.5 Render screen-space _Outdoors mask from the base plane only
     // into outdoorsTarget using the main camera. This produces a
     // screen-aligned outdoors factor we can safely sample with vUv in
     // the composite shader without introducing world-space pinning

@@ -786,7 +786,7 @@ export class EffectStackUI {
     for (const bp of basePaths) {
       if (this._bundleMaskCache.has(bp)) continue;
       try {
-        const res = await loadAssetBundle(bp, null, { skipBaseTexture: true });
+        const res = await loadAssetBundle(bp, null, { skipBaseTexture: true, suppressProbeErrors: true });
         const masks = res?.bundle?.masks || [];
         const foundIds = new Set(masks.map((m) => m?.id).filter(Boolean));
         this._bundleMaskCache.set(bp, { foundIds, loadError: null });

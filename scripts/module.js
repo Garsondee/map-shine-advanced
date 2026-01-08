@@ -55,6 +55,8 @@ Hooks.once('init', async function() {
   // Foundry v13+ uses Record<string, SceneControl> with tools as Record<string, SceneControlTool>
   Hooks.on('getSceneControlButtons', (controls) => {
     try {
+      if (!(game.user?.isGM ?? false)) return;
+
       // In Foundry v13+, controls is Record<string, SceneControl>
       // Access tokens control directly by key
       const tokenControls = controls?.tokens;

@@ -2043,6 +2043,22 @@ _createSnowTexture() {
     material.needsUpdate = true;
   }
 
+  _ensureBatchMaterialPatched(system, cacheProp) {
+    if (!system || !cacheProp) return null;
+    const br = this.batchRenderer;
+    if (!br || !br.systemToBatchIndex || !br.batches) return null;
+    const idx = br.systemToBatchIndex.get(system);
+    if (idx === undefined) return null;
+    const batch = br.batches[idx];
+    const mat = batch?.material || null;
+    if (!mat) return null;
+    if (this[cacheProp] !== mat || !mat.userData || !mat.userData.roofUniforms) {
+      this[cacheProp] = mat;
+      this._patchRoofMaskMaterial(mat);
+    }
+    return mat;
+  }
+
   update(dt, sceneBoundsVec4) {
     // Global Weather checkbox kill-switch.
     // When weather is disabled we must:
@@ -2229,7 +2245,18 @@ _createSnowTexture() {
     }
 
     // Update roof/outdoors texture and mask state from WeatherController
-    const roofTex = weatherController.roofMap || null;
+    let roofTex = weatherController.roofMap || null;
+    if (!roofTex) {
+      try {
+        const mm = window.MapShine?.maskManager;
+        const rec = mm?.getRecord ? mm.getRecord('outdoors.scene') : null;
+        if (rec?.texture) {
+          roofTex = rec.texture;
+          if (weatherController?.setRoofMap) weatherController.setRoofMap(roofTex);
+        }
+      } catch (e) {
+      }
+    }
     this._roofTexture = roofTex;
     
     // DUAL-MASK SYSTEM:
@@ -2272,6 +2299,9 @@ _createSnowTexture() {
     const snowTuning = weatherController.snowTuning || {};
     const baseRainIntensity = precip * (1.0 - freeze) * (rainTuning.intensityScale ?? 1.0);
     const snowIntensity = precip * freeze * (snowTuning.intensityScale ?? 1.0);
+
+    this._ensureBatchMaterialPatched(this.rainSystem, '_rainBatchMaterial');
+    this._ensureBatchMaterialPatched(this.snowSystem, '_snowBatchMaterial');
 
     if (this.rainSystem) {
         // Minimal per-frame work: just drive emission by precipitation/intensity.

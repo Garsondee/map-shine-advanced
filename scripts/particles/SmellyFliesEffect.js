@@ -773,6 +773,14 @@ class FlyBehavior {
  * Uses three.quarks ParticleSystem with custom FlyBehavior for AI-like movement
  */
 export class SmellyFliesEffect extends EffectBase {
+  static _shared = {
+    refCount: 0,
+    loadPromise: null,
+    flyTexture: null,
+    flyLandedTexture: null,
+    atlasTexture: null
+  };
+
   /**
    * Get the control schema for Tweakpane UI
    * @returns {Object}
@@ -907,6 +915,9 @@ export class SmellyFliesEffect extends EffectBase {
     
     /** @type {THREE.Texture} */
     this.atlasTexture = null;  // Combined 2-frame atlas
+
+    this._pendingRebuild = false;
+    this._rebuildQueued = false;
     
     /** @type {MapPointsManager} */
     this.mapPointsManager = null;
@@ -948,8 +959,8 @@ export class SmellyFliesEffect extends EffectBase {
       return;
     }
     
-    // Load fly texture
-    await this._loadTexture();
+    SmellyFliesEffect._shared.refCount++;
+    this._kickoffTextureLoad();
     
     log.info('SmellyFliesEffect initialized');
   }
@@ -959,7 +970,41 @@ export class SmellyFliesEffect extends EffectBase {
    * Frame 0 = flying, Frame 1 = landed/walking
    * @private
    */
-  async _loadTexture() {
+  _kickoffTextureLoad() {
+    const shared = SmellyFliesEffect._shared;
+    if (shared.atlasTexture) {
+      this.flyTexture = shared.flyTexture;
+      this.flyLandedTexture = shared.flyLandedTexture;
+      this.atlasTexture = shared.atlasTexture;
+      this._queueRebuildSystems();
+      return;
+    }
+
+    if (shared.loadPromise) {
+      shared.loadPromise.then(() => {
+        this.flyTexture = shared.flyTexture;
+        this.flyLandedTexture = shared.flyLandedTexture;
+        this.atlasTexture = shared.atlasTexture;
+        this._queueRebuildSystems();
+      });
+      return;
+    }
+
+    shared.loadPromise = this._loadTextureInternal().then(({ flyingTex, landedTex, atlasTexture }) => {
+      shared.flyTexture = flyingTex;
+      shared.flyLandedTexture = landedTex;
+      shared.atlasTexture = atlasTexture;
+
+      this.flyTexture = shared.flyTexture;
+      this.flyLandedTexture = shared.flyLandedTexture;
+      this.atlasTexture = shared.atlasTexture;
+      this._queueRebuildSystems();
+    }).catch((e) => {
+      log.warn('Failed to load fly textures:', e);
+    });
+  }
+
+  async _loadTextureInternal() {
     const THREE = window.THREE;
     const flyingPath = 'modules/map-shine-advanced/assets/fly.webp';
     const landedPath = 'modules/map-shine-advanced/assets/fly_landed.webp';
@@ -987,18 +1032,16 @@ export class SmellyFliesEffect extends EffectBase {
       loadTexture(flyingPath),
       loadTexture(landedPath)
     ]);
-    
-    this.flyTexture = flyingTex;
-    this.flyLandedTexture = landedTex;
-    
+
+    let atlasTexture;
     // Create a 2-frame horizontal atlas (side by side)
     // Frame 0 (left) = flying, Frame 1 (right) = landed
     if (flyingTex && landedTex) {
-      this.atlasTexture = this._createAtlas(flyingTex, landedTex);
+      atlasTexture = this._createAtlas(flyingTex, landedTex);
       log.debug('Fly atlas texture created (2 frames)');
     } else if (flyingTex) {
       // Fallback: use flying texture for both frames
-      this.atlasTexture = this._createAtlas(flyingTex, flyingTex);
+      atlasTexture = this._createAtlas(flyingTex, flyingTex);
       log.warn('Using flying texture for both frames (landed texture missing)');
     } else {
       // Create fallback
@@ -1015,11 +1058,13 @@ export class SmellyFliesEffect extends EffectBase {
       ctx.beginPath();
       ctx.ellipse(48, 16, 10, 6, 0, 0, Math.PI * 2);
       ctx.fill();
-      this.atlasTexture = new THREE.CanvasTexture(canvas);
-      this.atlasTexture.minFilter = THREE.LinearFilter;
-      this.atlasTexture.magFilter = THREE.LinearFilter;
+      atlasTexture = new THREE.CanvasTexture(canvas);
+      atlasTexture.minFilter = THREE.LinearFilter;
+      atlasTexture.magFilter = THREE.LinearFilter;
       log.warn('Using fallback fly atlas');
     }
+
+    return { flyingTex, landedTex, atlasTexture };
   }
   
   /**
@@ -1086,13 +1131,22 @@ export class SmellyFliesEffect extends EffectBase {
     }
     
     // Create systems for existing areas
-    this._rebuildSystems();
+    this._queueRebuildSystems();
     
     // Listen for changes
-    this._changeListener = () => this._rebuildSystems();
+    this._changeListener = () => this._queueRebuildSystems();
     if (manager) {
       manager.addChangeListener(this._changeListener);
     }
+  }
+
+  _queueRebuildSystems() {
+    if (this._rebuildQueued) return;
+    this._rebuildQueued = true;
+    setTimeout(() => {
+      this._rebuildQueued = false;
+      this._rebuildSystems();
+    }, 0);
   }
 
   /**
@@ -1439,10 +1493,27 @@ export class SmellyFliesEffect extends EffectBase {
   dispose() {
     this._disposeSystems();
     
-    if (this.flyTexture) {
-      this.flyTexture.dispose();
-      this.flyTexture = null;
+    const shared = SmellyFliesEffect._shared;
+    shared.refCount = Math.max(0, (shared.refCount || 0) - 1);
+    if (shared.refCount === 0) {
+      if (shared.flyTexture) {
+        try { shared.flyTexture.dispose(); } catch (_) {}
+      }
+      if (shared.flyLandedTexture) {
+        try { shared.flyLandedTexture.dispose(); } catch (_) {}
+      }
+      if (shared.atlasTexture) {
+        try { shared.atlasTexture.dispose(); } catch (_) {}
+      }
+      shared.flyTexture = null;
+      shared.flyLandedTexture = null;
+      shared.atlasTexture = null;
+      shared.loadPromise = null;
     }
+
+    this.flyTexture = null;
+    this.flyLandedTexture = null;
+    this.atlasTexture = null;
     
     if (this._changeListener && this.mapPointsManager) {
       this.mapPointsManager.removeChangeListener(this._changeListener);

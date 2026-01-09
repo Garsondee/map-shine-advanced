@@ -68,7 +68,7 @@ Supported formats:
 These are the masks currently discovered by the loader (`scripts/assets/loader.js`):
 
 - **`_Specular`**: Specular highlights mask
-- **`_Roughness`**: Roughness map
+- **`_Roughness`**: Roughness map (untested)
 - **`_Normal`**: Normal map
 - **`_Iridescence`**: Iridescence mask
 - **`_Prism`**: Prism/refraction mask

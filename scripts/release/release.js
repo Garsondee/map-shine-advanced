@@ -145,8 +145,8 @@ async function main() {
   moduleData.version = args.version;
   if (typeof moduleData.url === 'string' && moduleData.url.length > 0) {
     const baseUrl = moduleData.url.replace(/\/+$/, '');
-    moduleData.manifest = `${baseUrl}/releases/download/${args.version}/module.json`;
-    moduleData.download = `${baseUrl}/releases/download/${args.version}/module.zip`;
+    moduleData.manifest = `${baseUrl}/releases/latest/download/module.json`;
+    moduleData.download = `${baseUrl}/releases/latest/download/module.zip`;
   }
 
   await fs.promises.writeFile(moduleJsonPath, JSON.stringify(moduleData, null, 2) + '\n', 'utf8');

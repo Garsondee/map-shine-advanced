@@ -16,6 +16,9 @@ import { WindowLightEffect } from '../effects/WindowLightEffect.js';
 import { BushEffect } from '../effects/BushEffect.js';
 import { TreeEffect } from '../effects/TreeEffect.js';
 import { ColorCorrectionEffect } from '../effects/ColorCorrectionEffect.js';
+import { FilmGrainEffect } from '../effects/FilmGrainEffect.js';
+import { DotScreenEffect } from '../effects/DotScreenEffect.js';
+import { HalftoneEffect } from '../effects/HalftoneEffect.js';
 import { SharpenEffect } from '../effects/SharpenEffect.js';
 import { SkyColorEffect } from '../effects/SkyColorEffect.js';
 import { AsciiEffect } from '../effects/AsciiEffect.js';
@@ -27,6 +30,7 @@ import { PrismEffect } from '../effects/PrismEffect.js';
 import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
 import { BuildingShadowsEffect } from '../effects/BuildingShadowsEffect.js';
 import { CloudEffect } from '../effects/CloudEffect.js';
+import { AtmosphericFogEffect } from '../effects/AtmosphericFogEffect.js';
 import { DistortionManager } from '../effects/DistortionManager.js';
 import { WaterEffectV2 } from '../effects/WaterEffectV2.js';
 import { MaskDebugEffect } from '../effects/MaskDebugEffect.js';
@@ -369,7 +373,12 @@ function onUpdateScene(scene, changes, options, userId) {
         if (cs && typeof cs === 'object') {
           try {
             if (Number.isFinite(cs.timeOfDay)) {
-              weatherController.setTime?.(cs.timeOfDay);
+              const mins = Number(cs.timeTransitionMinutes) || 0;
+              if (mins > 0) {
+                void stateApplier.startTimeOfDayTransition(cs.timeOfDay, mins, false);
+              } else {
+                void stateApplier.applyTimeOfDay(cs.timeOfDay, false, true);
+              }
             }
 
             const applyDynamic = (typeof cs.weatherMode !== 'string') || cs.weatherMode === 'dynamic';
@@ -414,10 +423,6 @@ function onUpdateScene(scene, changes, options, userId) {
                 Object.assign(cp.controlState, cs);
               } else {
                 cp.controlState = { ...cs };
-              }
-              try {
-                cp._updateClock?.(cp.controlState.timeOfDay);
-              } catch (e) {
               }
               try {
                 cp.pane?.refresh?.();
@@ -578,8 +583,15 @@ async function onCanvasReady(canvas) {
 
   try {
     loadingOverlay.showBlack(`Loading ${scene?.name || 'scene'}…`);
-    loadingOverlay.setProgress(0.05);
-    loadingOverlay.startAutoProgress(0.1, 0.02);
+    loadingOverlay.configureStages([
+      { id: 'assets', label: 'Loading assets…', weight: 30 },
+      { id: 'effects', label: 'Initializing effects…', weight: 35 },
+      { id: 'scene', label: 'Syncing scene…', weight: 20 },
+      { id: 'final', label: 'Finalizing…', weight: 15 },
+    ]);
+    loadingOverlay.startStages();
+    loadingOverlay.setStage('assets', 0.05, undefined, { immediate: true });
+    loadingOverlay.startAutoProgress(0.08, 0.02);
   } catch (e) {
     log.debug('Loading overlay not available:', e);
   }
@@ -705,8 +717,15 @@ async function createThreeCanvas(scene) {
   try {
     try {
       loadingOverlay.showBlack(`Loading ${scene?.name || 'scene'}…`);
-      loadingOverlay.setProgress(0.05);
-      loadingOverlay.startAutoProgress(0.1, 0.02);
+      loadingOverlay.configureStages([
+        { id: 'assets', label: 'Loading assets…', weight: 30 },
+        { id: 'effects', label: 'Initializing effects…', weight: 35 },
+        { id: 'scene', label: 'Syncing scene…', weight: 20 },
+        { id: 'final', label: 'Finalizing…', weight: 15 },
+      ]);
+      loadingOverlay.startStages();
+      loadingOverlay.setStage('assets', 0.05, undefined, { immediate: true });
+      loadingOverlay.startAutoProgress(0.08, 0.02);
     } catch (e) {
       log.debug('Loading overlay not available:', e);
     }
@@ -895,9 +914,7 @@ async function createThreeCanvas(scene) {
           try {
             const denom = total > 0 ? total : 1;
             const v = Math.max(0, Math.min(1, loaded / denom));
-            loadingOverlay.setMessage(`Loading ${asset}…`);
-            // Reserve first 40% of the bar for asset/mask loading.
-            loadingOverlay.setProgress(0.05 + v * 0.35);
+            loadingOverlay.setStage('assets', v, `Loading ${asset}…`, { keepAuto: true });
           } catch (e) {
             // Ignore overlay errors
           }
@@ -974,22 +991,19 @@ async function createThreeCanvas(scene) {
     }
 
     try {
-      loadingOverlay.setMessage('Initializing effects…');
-      loadingOverlay.setProgress(0.45);
-      loadingOverlay.startAutoProgress(0.7, 0.015);
+      loadingOverlay.setStage('effects', 0.0, 'Initializing effects…', { immediate: true });
+      loadingOverlay.startAutoProgress(0.55, 0.015);
     } catch (e) {
       // Ignore overlay errors
     }
 
     let _effectInitIndex = 0;
-    const _effectInitTotal = 28;
+    const _effectInitTotal = 31;
     const _setEffectInitStep = (label) => {
       _effectInitIndex++;
       const t = Math.max(0, Math.min(1, _effectInitIndex / _effectInitTotal));
-      const p = 0.56 + t * 0.18;
       try {
-        loadingOverlay.setMessage(`Initializing ${label}…`);
-        loadingOverlay.setProgress(p, { keepAuto: true });
+        loadingOverlay.setStage('effects', t, `Initializing ${label}…`, { keepAuto: true });
       } catch (e) {
         // Ignore overlay errors
       }
@@ -1001,7 +1015,12 @@ async function createThreeCanvas(scene) {
     await weatherController.initialize();
 
     try {
-      loadingOverlay.setProgress(0.55, { keepAuto: true });
+      effectComposer.addUpdatable(weatherController);
+    } catch (_) {
+    }
+
+    try {
+      loadingOverlay.setStage('effects', 0.02, 'Initializing weather…', { keepAuto: true });
     } catch (e) {
       // Ignore overlay errors
     }
@@ -1036,23 +1055,38 @@ async function createThreeCanvas(scene) {
     const colorCorrectionEffect = new ColorCorrectionEffect();
     await effectComposer.registerEffect(colorCorrectionEffect);
 
-    // Step 3.3: Register sharpen effect (Post-Processing)
+    // Step 3.3: Register film grain effect (Post-Processing)
+    _setEffectInitStep('Film Grain');
+    const filmGrainEffect = new FilmGrainEffect();
+    await effectComposer.registerEffect(filmGrainEffect);
+
+    // Step 3.4: Register dot screen effect (Post-Processing)
+    _setEffectInitStep('Dot Screen');
+    const dotScreenEffect = new DotScreenEffect();
+    await effectComposer.registerEffect(dotScreenEffect);
+
+    // Step 3.5: Register halftone effect (Post-Processing)
+    _setEffectInitStep('Halftone');
+    const halftoneEffect = new HalftoneEffect();
+    await effectComposer.registerEffect(halftoneEffect);
+
+    // Step 3.6: Register sharpen effect (Post-Processing)
     _setEffectInitStep('Sharpen');
     const sharpenEffect = new SharpenEffect();
     await effectComposer.registerEffect(sharpenEffect);
 
-    // Step 3.4: Register ASCII Effect (Post-Processing)
+    // Step 3.7: Register ASCII Effect (Post-Processing)
     _setEffectInitStep('ASCII');
     const asciiEffect = new AsciiEffect();
     await effectComposer.registerEffect(asciiEffect);
     
-    // Step 3.5: Register Particle System (WebGPU/WebGL2)
+    // Step 3.8: Register Particle System (WebGPU/WebGL2)
     // CRITICAL: Must await to ensure batchRenderer is initialized before FireSparksEffect uses it
     _setEffectInitStep('Particles');
     const particleSystem = new ParticleSystem();
     await effectComposer.registerEffect(particleSystem);
 
-    // Step 3.6: Register Fire Sparks Effect and wire it to the ParticleSystem
+    // Step 3.9: Register Fire Sparks Effect and wire it to the ParticleSystem
     _setEffectInitStep('Fire');
     const fireSparksEffect = new FireSparksEffect();
     // Provide the particle backend so FireSparksEffect can create emitters and bind uniforms
@@ -1063,7 +1097,7 @@ async function createThreeCanvas(scene) {
       fireSparksEffect.setAssetBundle(bundle);
     }
 
-    // Step 3.6b: Register Smelly Flies Effect (smart particles with AI behavior)
+    // Step 3.10: Register Smelly Flies Effect (smart particles with AI behavior)
     _setEffectInitStep('Smelly Flies');
     const smellyFliesEffect = new SmellyFliesEffect();
     await effectComposer.registerEffect(smellyFliesEffect);
@@ -1080,17 +1114,17 @@ async function createThreeCanvas(scene) {
     lightningEffect = new LightningEffect();
     await effectComposer.registerEffect(lightningEffect);
 
-    // Step 3.7: Register Prism Effect
+    // Step 3.11: Register Prism Effect
     _setEffectInitStep('Prism');
     const prismEffect = new PrismEffect();
     await effectComposer.registerEffect(prismEffect);
 
-    // Step 3.8: Register Water Effect
+    // Step 3.12: Register Water Effect
     _setEffectInitStep('Water');
     const waterEffect = new WaterEffectV2();
     await effectComposer.registerEffect(waterEffect);
 
-    // Step 3.9: Register World-Space Fog Effect (Fog of War)
+    // Step 3.13: Register World-Space Fog Effect (Fog of War)
     // WorldSpaceFogEffect renders fog as a plane mesh in the Three.js scene.
     // This eliminates coordinate conversion issues between screen-space and world-space.
     // Vision is rendered to a world-space render target, exploration uses Foundry's texture.
@@ -1099,7 +1133,7 @@ async function createThreeCanvas(scene) {
     await effectComposer.registerEffect(fogEffect);
     log.info('WorldSpaceFogEffect registered');
 
-    // Step 3.10: Register Lighting Effect
+    // Step 3.14: Register Lighting Effect
     _setEffectInitStep('Lighting');
     lightingEffect = new LightingEffect();
     await effectComposer.registerEffect(lightingEffect);
@@ -1112,48 +1146,55 @@ async function createThreeCanvas(scene) {
     await effectComposer.registerEffect(candleFlamesEffect);
     if (window.MapShine) window.MapShine.candleFlamesEffect = candleFlamesEffect;
 
-    // Step 3.11: Register Animated Bushes (surface overlay, before shadows)
+    // Step 3.15: Register Animated Bushes (surface overlay, before shadows)
     _setEffectInitStep('Bushes');
     const bushEffect = new BushEffect();
     await effectComposer.registerEffect(bushEffect);
 
-    // Step 3.12: Register Animated Trees (High Canopy, above overhead)
+    // Step 3.16: Register Animated Trees (High Canopy, above overhead)
     _setEffectInitStep('Trees');
     const treeEffect = new TreeEffect();
     await effectComposer.registerEffect(treeEffect);
 
-    // Step 3.13: Register Overhead Shadows (post-lighting)
+    // Step 3.17: Register Overhead Shadows (post-lighting)
     _setEffectInitStep('Overhead Shadows');
     const overheadShadowsEffect = new OverheadShadowsEffect();
     await effectComposer.registerEffect(overheadShadowsEffect);
 
-    // Step 3.14: Register Building Shadows (post-lighting, environmental)
+    // Step 3.18: Register Building Shadows (post-lighting, environmental)
     _setEffectInitStep('Building Shadows');
     const buildingShadowsEffect = new BuildingShadowsEffect();
     await effectComposer.registerEffect(buildingShadowsEffect);
 
-    // Step 3.15: Register Cloud Effect (procedural cloud shadows)
+    // Step 3.19: Register Cloud Effect (procedural cloud shadows)
     _setEffectInitStep('Clouds');
     const cloudEffect = new CloudEffect();
     await effectComposer.registerEffect(cloudEffect);
 
     if (window.MapShine) window.MapShine.cloudEffect = cloudEffect;
 
-    // Step 3.16: Register Distortion Manager (centralized screen-space distortions)
+    // Step 3.19b: Register Atmospheric Fog Effect (weather-driven distance fog)
+    _setEffectInitStep('Atmospheric Fog');
+    const atmosphericFogEffect = new AtmosphericFogEffect();
+    await effectComposer.registerEffect(atmosphericFogEffect);
+
+    if (window.MapShine) window.MapShine.atmosphericFogEffect = atmosphericFogEffect;
+
+    // Step 3.20: Register Distortion Manager (centralized screen-space distortions)
     _setEffectInitStep('Distortion');
     const distortionManager = new DistortionManager();
     await effectComposer.registerEffect(distortionManager);
 
     if (window.MapShine) window.MapShine.distortionManager = distortionManager;
 
-    // Step 3.17: Register Bloom Effect
+    // Step 3.21: Register Bloom Effect
     _setEffectInitStep('Bloom');
     const bloomEffect = new BloomEffect();
     await effectComposer.registerEffect(bloomEffect);
 
     if (window.MapShine) window.MapShine.bloomEffect = bloomEffect;
 
-    // Step 3.18: Register Lensflare Effect
+    // Step 3.22: Register Lensflare Effect
     _setEffectInitStep('Lensflare');
     const lensflareEffect = new LensflareEffect();
     await effectComposer.registerEffect(lensflareEffect);
@@ -1200,8 +1241,8 @@ async function createThreeCanvas(scene) {
     cloudEffect.setBaseMesh(basePlane, bundle);
 
     try {
-      loadingOverlay.setProgress(0.75, { keepAuto: true });
-      loadingOverlay.startAutoProgress(0.92, 0.012);
+      loadingOverlay.setStage('scene', 0.0, 'Syncing scene…', { immediate: true });
+      loadingOverlay.startAutoProgress(0.85, 0.012);
     } catch (e) {
       // Ignore overlay errors
     }
@@ -1220,6 +1261,10 @@ async function createThreeCanvas(scene) {
     gridRenderer.updateGrid();
     log.info('Grid renderer initialized');
 
+    try {
+      loadingOverlay.setStage('scene', 0.15, 'Syncing grid…', { keepAuto: true });
+    } catch (_) {}
+
     // Step 4: Initialize token manager
     tokenManager = new TokenManager(threeScene);
     tokenManager.setEffectComposer(effectComposer); // Connect to main loop
@@ -1229,6 +1274,10 @@ async function createThreeCanvas(scene) {
     tokenManager.syncAllTokens();
     log.info('Token manager initialized and synced');
 
+    try {
+      loadingOverlay.setStage('scene', 0.35, 'Syncing tokens…', { keepAuto: true });
+    } catch (_) {}
+
     // Step 4b: Initialize tile manager
     tileManager = new TileManager(threeScene);
     tileManager.initialize();
@@ -1236,6 +1285,10 @@ async function createThreeCanvas(scene) {
     tileManager.setWindowLightEffect(windowLightEffect); // Link for overhead tile lighting
     effectComposer.addUpdatable(tileManager); // Register for occlusion updates
     log.info('Tile manager initialized and synced');
+
+    try {
+      loadingOverlay.setStage('scene', 0.55, 'Syncing tiles…', { keepAuto: true });
+    } catch (_) {}
 
     surfaceRegistry = new SurfaceRegistry();
     surfaceRegistry.initialize({ sceneComposer, tileManager });
@@ -1247,6 +1300,10 @@ async function createThreeCanvas(scene) {
     wallManager.initialize();
     // Sync happens in initialize
     log.info('Wall manager initialized');
+
+    try {
+      loadingOverlay.setStage('scene', 0.65, 'Syncing walls…', { keepAuto: true });
+    } catch (_) {}
 
     // Step 4c.1: Initialize door mesh manager (animated door graphics)
     doorMeshManager = new DoorMeshManager(threeScene, sceneComposer.camera);
@@ -1345,8 +1402,8 @@ async function createThreeCanvas(scene) {
     log.info('Controls integration initialized');
 
     try {
-      loadingOverlay.setProgress(0.9, { keepAuto: true });
-      loadingOverlay.startAutoProgress(0.97, 0.01);
+      loadingOverlay.setStage('final', 0.0, 'Finalizing…', { immediate: true });
+      loadingOverlay.startAutoProgress(0.98, 0.01);
     } catch (e) {
       // Ignore overlay errors
     }
@@ -1498,6 +1555,9 @@ async function createThreeCanvas(scene) {
         specularEffect,
         iridescenceEffect,
         colorCorrectionEffect,
+        filmGrainEffect,
+        dotScreenEffect,
+        halftoneEffect,
         sharpenEffect,
         asciiEffect,
         prismEffect,
@@ -1513,6 +1573,7 @@ async function createThreeCanvas(scene) {
         overheadShadowsEffect,
         buildingShadowsEffect,
         cloudEffect,
+        atmosphericFogEffect,
         bushEffect,
         treeEffect,
         waterEffect,
@@ -1533,11 +1594,20 @@ async function createThreeCanvas(scene) {
     // Only begin fading-in once we have proof that Three has actually rendered.
     // This prevents the overlay from fading out during shader compilation / first-frame stutter.
     try {
-      loadingOverlay.setMessage('Finalizing…');
-      loadingOverlay.setProgress(0.96, { keepAuto: true });
-      loadingOverlay.startAutoProgress(0.99, 0.008);
+      loadingOverlay.setStage('final', 0.4, 'Finalizing…', { keepAuto: true });
+      loadingOverlay.startAutoProgress(0.995, 0.008);
     } catch (e) {
       // Ignore overlay errors
+    }
+
+    // Wait until overhead tiles have decoded their textures. Otherwise roofs can pop in
+    // seconds after the main scene becomes visible.
+    try {
+      loadingOverlay.setStage('final', 0.55, 'Preparing overhead…', { keepAuto: true });
+    } catch (_) {}
+    try {
+      await tileManager?.waitForInitialTiles?.({ overheadOnly: true, timeoutMs: 12000 });
+    } catch (_) {
     }
 
     try {
@@ -1570,8 +1640,7 @@ async function createThreeCanvas(scene) {
     }
 
     try {
-      loadingOverlay.setMessage('Finished');
-      loadingOverlay.setProgress(1);
+      loadingOverlay.setStage('final', 1.0, 'Finished', { immediate: true });
       await loadingOverlay.fadeIn(5000);
     } catch (e) {
       // Ignore overlay errors
@@ -1588,6 +1657,9 @@ async function createThreeCanvas(scene) {
  * @param {SpecularEffect} specularEffect - The specular effect instance
  * @param {IridescenceEffect} iridescenceEffect - The iridescence effect instance
  * @param {ColorCorrectionEffect} colorCorrectionEffect - The color correction effect instance
+ * @param {FilmGrainEffect} filmGrainEffect - The film grain effect instance
+ * @param {DotScreenEffect} dotScreenEffect - The dot screen effect instance
+ * @param {HalftoneEffect} halftoneEffect - The halftone effect instance
  * @param {SharpenEffect} sharpenEffect - The sharpen effect instance
  * @param {AsciiEffect} asciiEffect - The ASCII effect instance
  * @param {PrismEffect} prismEffect - The prism effect instance
@@ -1606,7 +1678,7 @@ async function createThreeCanvas(scene) {
  * @param {DistortionManager} distortionManager - The centralized distortion manager
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, sharpenEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, smellyFliesEffect, dustMotesEffect, lightningEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, bushEffect, treeEffect, waterEffect, fogEffect, distortionManager, maskDebugEffect, debugLayerEffect, playerLightEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, filmGrainEffect, dotScreenEffect, halftoneEffect, sharpenEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, smellyFliesEffect, dustMotesEffect, lightningEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, atmosphericFogEffect, bushEffect, treeEffect, waterEffect, fogEffect, distortionManager, maskDebugEffect, debugLayerEffect, playerLightEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -2358,6 +2430,29 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     );
   }
 
+  // --- Atmospheric Fog (Weather Subcategory) ---
+  if (atmosphericFogEffect) {
+    const atmosphericFogSchema = AtmosphericFogEffect.getControlSchema();
+
+    const onAtmosphericFogUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        atmosphericFogEffect.enabled = !!value;
+        log.debug(`AtmosphericFog effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (atmosphericFogEffect.params && Object.prototype.hasOwnProperty.call(atmosphericFogEffect.params, paramId)) {
+        atmosphericFogEffect.params[paramId] = value;
+        log.debug(`AtmosphericFog.${paramId} =`, value);
+      }
+    };
+
+    uiManager.registerEffectUnderEffect(
+      'weather',
+      'atmosphericFog',
+      'Fog',
+      atmosphericFogSchema,
+      onAtmosphericFogUpdate
+    );
+  }
+
   // --- Window Light Settings ---
   if (windowLightEffect) {
     const windowSchema = WindowLightEffect.getControlSchema();
@@ -2697,6 +2792,69 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     );
 
     log.info('Color correction effect wired to UI');
+  }
+
+  if (filmGrainEffect) {
+    const schema = FilmGrainEffect.getControlSchema();
+
+    const onUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        filmGrainEffect.enabled = value;
+        log.debug(`FilmGrain effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (filmGrainEffect.params && Object.prototype.hasOwnProperty.call(filmGrainEffect.params, paramId)) {
+        filmGrainEffect.params[paramId] = value;
+      }
+    };
+
+    uiManager.registerEffect(
+      'filmGrain',
+      'Film Grain',
+      schema,
+      onUpdate,
+      'global'
+    );
+  }
+
+  if (dotScreenEffect) {
+    const schema = DotScreenEffect.getControlSchema();
+
+    const onUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        dotScreenEffect.enabled = value;
+        log.debug(`DotScreen effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (dotScreenEffect.params && Object.prototype.hasOwnProperty.call(dotScreenEffect.params, paramId)) {
+        dotScreenEffect.params[paramId] = value;
+      }
+    };
+
+    uiManager.registerEffect(
+      'dotScreen',
+      'Dot Screen',
+      schema,
+      onUpdate,
+      'global'
+    );
+  }
+
+  if (halftoneEffect) {
+    const schema = HalftoneEffect.getControlSchema();
+
+    const onUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        halftoneEffect.enabled = value;
+        log.debug(`Halftone effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (halftoneEffect.params && Object.prototype.hasOwnProperty.call(halftoneEffect.params, paramId)) {
+        halftoneEffect.params[paramId] = value;
+      }
+    };
+
+    uiManager.registerEffect(
+      'halftone',
+      'Halftone',
+      schema,
+      onUpdate,
+      'global'
+    );
   }
 
   if (sharpenEffect) {

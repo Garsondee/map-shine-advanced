@@ -117,6 +117,9 @@ export class WorldSpaceFogEffect extends EffectBase {
     this._saveExplorationDebounced = null;
     this._isSavingExploration = false;
     this._isLoadingExploration = false;
+
+    this._fullResTargetsReady = false;
+    this._fullResTargetsQueued = false;
   }
 
   resetExploration() {
@@ -208,11 +211,7 @@ export class WorldSpaceFogEffect extends EffectBase {
     this._fallbackBlack = new THREE.DataTexture(blackData, 1, 1, THREE.RGBAFormat);
     this._fallbackBlack.needsUpdate = true;
 
-    // Create world-space vision render target
-    this._createVisionRenderTarget();
-    
-    // Create self-maintained exploration render target
-    this._createExplorationRenderTarget();
+    this._createMinimalTargets();
 
     try {
       const maxAniso = this.renderer?.capabilities?.getMaxAnisotropy?.() ?? 0;
@@ -237,6 +236,188 @@ export class WorldSpaceFogEffect extends EffectBase {
     
     this._initialized = true;
     log.info('WorldSpaceFogEffect initialized');
+
+    this._queueUpgradeTargets();
+  }
+
+  _createMinimalTargets() {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    this._visionRTWidth = 1;
+    this._visionRTHeight = 1;
+    this._explorationRTWidth = 1;
+    this._explorationRTHeight = 1;
+
+    try {
+      if (this.visionRenderTarget) {
+        this.visionRenderTarget.dispose();
+        this.visionRenderTarget = null;
+      }
+    } catch (_) {
+    }
+
+    try {
+      if (this._explorationTargetA) {
+        this._explorationTargetA.dispose();
+        this._explorationTargetA = null;
+      }
+      if (this._explorationTargetB) {
+        this._explorationTargetB.dispose();
+        this._explorationTargetB = null;
+      }
+    } catch (_) {
+    }
+
+    this.visionRenderTarget = new THREE.WebGLRenderTarget(1, 1, {
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      stencilBuffer: false,
+      depthBuffer: false,
+      generateMipmaps: false
+    });
+
+    this.visionScene = new THREE.Scene();
+
+    const w = Math.max(1, this.sceneRect?.width ?? 1);
+    const h = Math.max(1, this.sceneRect?.height ?? 1);
+    this.visionCamera = new THREE.OrthographicCamera(
+      0, w,
+      h, 0,
+      0, 100
+    );
+    this.visionCamera.position.set(0, 0, 10);
+
+    this.visionMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      side: THREE.DoubleSide
+    });
+
+    const rtOptions = {
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      stencilBuffer: false,
+      depthBuffer: false,
+      generateMipmaps: false
+    };
+
+    this._explorationTargetA = new THREE.WebGLRenderTarget(1, 1, rtOptions);
+    this._explorationTargetB = new THREE.WebGLRenderTarget(1, 1, rtOptions);
+    this._currentExplorationTarget = 'A';
+
+    this.explorationScene = new THREE.Scene();
+    this.explorationCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this.explorationMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tPreviousExplored: { value: null },
+        tCurrentVision: { value: null }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+
+        float hash21(vec2 p) {
+          p = fract(p * vec2(123.34, 345.45));
+          p += dot(p, p + 34.345);
+          return fract(p.x * p.y);
+        }
+
+        float noise2(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          float a = hash21(i);
+          float b = hash21(i + vec2(1.0, 0.0));
+          float c = hash21(i + vec2(0.0, 1.0));
+          float d = hash21(i + vec2(1.0, 1.0));
+          vec2 u = f * f * (3.0 - 2.0 * f);
+          return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+        }
+
+        float sampleBlur4(sampler2D tex, vec2 uv, vec2 texel) {
+          float c = texture2D(tex, uv).r;
+          float l = texture2D(tex, uv + vec2(-texel.x, 0.0)).r;
+          float r = texture2D(tex, uv + vec2(texel.x, 0.0)).r;
+          float d = texture2D(tex, uv + vec2(0.0, -texel.y)).r;
+          float u = texture2D(tex, uv + vec2(0.0, texel.y)).r;
+          return (c * 4.0 + l + r + d + u) / 8.0;
+        }
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tPreviousExplored;
+        uniform sampler2D tCurrentVision;
+        varying vec2 vUv;
+        
+        void main() {
+          float prev = texture2D(tPreviousExplored, vUv).r;
+          float curr = texture2D(tCurrentVision, vUv).r;
+          float explored = max(prev, curr);
+          gl_FragColor = vec4(explored, explored, explored, 1.0);
+        }
+      `,
+      depthWrite: false,
+      depthTest: false
+    });
+
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.explorationMaterial);
+    this.explorationScene.add(quad);
+
+    this._fullResTargetsReady = false;
+  }
+
+  _queueUpgradeTargets() {
+    if (this._fullResTargetsQueued) return;
+    this._fullResTargetsQueued = true;
+
+    setTimeout(() => {
+      this._fullResTargetsQueued = false;
+      this._upgradeTargetsToFullRes();
+    }, 0);
+  }
+
+  _upgradeTargetsToFullRes() {
+    if (!this._initialized) return;
+    if (!this.renderer) return;
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    try {
+      if (this.visionRenderTarget) {
+        this.visionRenderTarget.dispose();
+        this.visionRenderTarget = null;
+      }
+      if (this._explorationTargetA) {
+        this._explorationTargetA.dispose();
+        this._explorationTargetA = null;
+      }
+      if (this._explorationTargetB) {
+        this._explorationTargetB.dispose();
+        this._explorationTargetB = null;
+      }
+    } catch (_) {
+    }
+
+    this._createVisionRenderTarget();
+    this._createExplorationRenderTarget();
+
+    try {
+      if (this.fogMaterial?.uniforms?.tVision && this.visionRenderTarget?.texture) {
+        this.fogMaterial.uniforms.tVision.value = this.visionRenderTarget.texture;
+      }
+    } catch (_) {
+    }
+
+    this._fullResTargetsReady = true;
+    this._explorationLoadedFromFoundry = false;
+    this._explorationLoadAttempts = 0;
+    this._needsVisionUpdate = true;
+    this._hasValidVision = false;
   }
 
   /**

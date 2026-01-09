@@ -2475,6 +2475,22 @@ export class WindowLightEffect extends EffectBase {
     if (lu?.uTime) lu.uTime.value = timeInfo.elapsed;
 
     // Sync environment
+    let fogDensity = 0.0;
+    try {
+      const wcDisabled = (weatherController && weatherController.enabled === false && weatherController.dynamicEnabled !== true);
+      if (!wcDisabled && weatherController?.getCurrentState) {
+        const state = weatherController.getCurrentState();
+        if (state && typeof state.fogDensity === 'number') fogDensity = state.fogDensity;
+      }
+    } catch (e) {}
+    fogDensity = (typeof fogDensity === 'number' && Number.isFinite(fogDensity))
+      ? Math.max(0.0, Math.min(1.0, fogDensity))
+      : 0.0;
+
+    // Full fog should reduce window light to 30% of its normal value.
+    const fogDim = 1.0 - 0.7 * fogDensity;
+    const effectiveIntensity = this.params.intensity * fogDim;
+
     let cloudCover = 0.0;
     try {
         const wcDisabled = (weatherController && weatherController.enabled === false && weatherController.dynamicEnabled !== true);
@@ -2582,7 +2598,7 @@ export class WindowLightEffect extends EffectBase {
 
     // Update Params
     if (u) {
-      if (u.uIntensity) u.uIntensity.value = this.params.intensity;
+      if (u.uIntensity) u.uIntensity.value = effectiveIntensity;
       if (u.uFalloff) u.uFalloff.value = this.params.falloff;
       if (u.uColor) this._applyThreeColor(u.uColor.value, this.params.color);
       if (u.uCloudInfluence) u.uCloudInfluence.value = this.params.cloudInfluence;
@@ -2599,7 +2615,7 @@ export class WindowLightEffect extends EffectBase {
     }
 
     if (lu) {
-      if (lu.uIntensity) lu.uIntensity.value = this.params.intensity;
+      if (lu.uIntensity) lu.uIntensity.value = effectiveIntensity;
       if (lu.uFalloff) lu.uFalloff.value = this.params.falloff;
       if (lu.uColor) this._applyThreeColor(lu.uColor.value, this.params.color);
       if (lu.uCloudInfluence) lu.uCloudInfluence.value = this.params.cloudInfluence;

@@ -35,10 +35,20 @@ export class ControlPanelManager {
     
     /** @type {boolean} Whether user is currently dragging clock hand */
     this.isDraggingClock = false;
+
+    /** @type {number|null} */
+    this._dragTimeTarget = null;
+
+    /** @type {number|null} */
+    this._lastTimeTargetApplied = null;
+
+    /** @type {number|null} */
+    this._lastTimeTransitionMinutesApplied = null;
     
     /** @type {Object} Runtime control state (saved to scene flags) */
     this.controlState = {
       timeOfDay: 12.0,
+      timeTransitionMinutes: 0.0,
       weatherMode: 'dynamic', // 'dynamic' | 'directed'
       // Dynamic mode
       dynamicEnabled: false,
@@ -54,6 +64,15 @@ export class ControlPanelManager {
     
     /** @type {Object} Cached DOM elements for clock */
     this.clockElements = {};
+
+    /** @type {HTMLElement|null} */
+    this._windArrow = null;
+
+    /** @type {HTMLElement|null} */
+    this._windStrengthBarInner = null;
+
+    /** @type {HTMLElement|null} */
+    this._windStrengthText = null;
     
     /** @type {Function} Debounced save function */
     this.debouncedSave = this._debounce(() => this._saveControlState(), 500);
@@ -237,6 +256,9 @@ export class ControlPanelManager {
       return;
     }
 
+    this._updateTimeUI(wc);
+    this._updateWindUI(wc);
+
     const isEnabled = wc.enabled !== false;
     const isDynamic = wc.dynamicEnabled === true;
     const isPaused = wc.dynamicPaused === true;
@@ -300,6 +322,74 @@ export class ControlPanelManager {
     els.progressWrap.style.display = 'none';
     els.barInner.style.animation = 'none';
     els.barInner.style.width = '0%';
+  }
+
+  _updateTimeUI(wc) {
+    if (!this.clockElements?.hand || !this.clockElements?.digital) return;
+    if (this.isDraggingClock) return;
+
+    let cur = null;
+    try {
+      cur = wc.getCurrentTime?.() ?? wc.timeOfDay;
+    } catch (e) {
+      cur = wc.timeOfDay;
+    }
+
+    const currentHour = Number.isFinite(Number(cur)) ? ((Number(cur) % 24) + 24) % 24 : null;
+    if (currentHour !== null) {
+      this._updateClock(currentHour);
+    }
+
+    // Always keep the ghost/target hand synced to the stored control target.
+    if (Number.isFinite(Number(this.controlState?.timeOfDay))) {
+      this._updateClockTarget(this.controlState.timeOfDay);
+    }
+  }
+
+  _updateWindUI(wc) {
+    if (!this._windArrow && !this._windStrengthBarInner && !this._windStrengthText) return;
+
+    let state = null;
+    try {
+      state = wc.getCurrentState?.() ?? wc.currentState;
+    } catch (e) {
+      state = wc.currentState;
+    }
+    if (!state) return;
+
+    if (this._windArrow && state.windDirection) {
+      const wd = state.windDirection;
+      const angleRad = Math.atan2(Number(wd.y) || 0, Number(wd.x) || 0);
+      const angleDeg = (angleRad * 180) / Math.PI;
+      this._windArrow.style.transform = `translate(-50%, 0%) rotate(${90 - angleDeg}deg)`;
+    }
+
+    const windSpeed = Math.max(0, Math.min(1, Number(state.windSpeed) || 0));
+    const pct = `${Math.round(windSpeed * 100)}%`;
+
+    if (this._windStrengthBarInner) {
+      this._windStrengthBarInner.style.width = `${windSpeed * 100}%`;
+    }
+    if (this._windStrengthText) {
+      this._windStrengthText.textContent = pct;
+    }
+  }
+
+  async _startTimeOfDayTransition(targetHour, transitionMinutes) {
+    try {
+      const minsNum = typeof transitionMinutes === 'number' ? transitionMinutes : Number(transitionMinutes);
+      const safeMinutes = Number.isFinite(minsNum) ? Math.max(0.1, Math.min(60.0, minsNum)) : 5.0;
+
+      // Persist immediately so other clients can't overwrite with old state mid-transition.
+      this.controlState.timeOfDay = ((targetHour % 24) + 24) % 24;
+      await this._saveControlState();
+
+      await stateApplier.startTimeOfDayTransition(this.controlState.timeOfDay, safeMinutes, true);
+      this._updateClockTarget(this.controlState.timeOfDay);
+    } catch (error) {
+      log.error('Failed to start time-of-day transition:', error);
+      ui.notifications?.error('Failed to start time transition');
+    }
   }
 
   /**
@@ -450,6 +540,15 @@ export class ControlPanelManager {
     const contentElement = timeFolder.element.querySelector('.tp-fldv_c') || timeFolder.element;
     contentElement.appendChild(this.clockElement);
 
+    timeFolder.addBinding(this.controlState, 'timeTransitionMinutes', {
+      label: 'Transition (min)',
+      min: 0.0,
+      max: 60.0,
+      step: 0.5
+    }).on('change', (ev) => {
+      if (ev?.last) this.debouncedSave();
+    });
+
     // Quick time buttons
     const quickTimes = {
       'Dawn': 6.0,
@@ -476,7 +575,12 @@ export class ControlPanelManager {
       btn.style.color = 'inherit';
       btn.style.cursor = 'pointer';
       btn.addEventListener('click', () => {
-        void this._setTimeOfDay(hour).then(() => this.debouncedSave());
+        const mins = Number(this.controlState.timeTransitionMinutes) || 0;
+        if (mins > 0) {
+          void this._startTimeOfDayTransition(hour, mins).then(() => this.debouncedSave());
+        } else {
+          void this._setTimeOfDay(hour).then(() => this.debouncedSave());
+        }
       });
       btnGrid.appendChild(btn);
     }
@@ -493,7 +597,7 @@ export class ControlPanelManager {
     const container = document.createElement('div');
     container.style.cssText = `
       width: 200px;
-      height: 210px;
+      height: auto;
       position: relative;
       margin: 10px auto;
     `;
@@ -556,6 +660,20 @@ export class ControlPanelManager {
       pointer-events: none;
     `;
 
+    const targetHand = document.createElement('div');
+    targetHand.style.cssText = `
+      position: absolute;
+      width: 3px;
+      height: 70px;
+      background: rgba(255,255,255,0.35);
+      left: 88px;
+      top: 15px;
+      transform-origin: 1.5px 75px;
+      border-radius: 2px;
+      pointer-events: none;
+      z-index: 1;
+    `;
+
     // Center dot
     const center = document.createElement('div');
     center.style.cssText = `
@@ -569,6 +687,30 @@ export class ControlPanelManager {
       z-index: 2;
     `;
 
+    const windArrow = document.createElement('div');
+    windArrow.style.position = 'absolute';
+    windArrow.style.left = '50%';
+    windArrow.style.top = '50%';
+    windArrow.style.width = '2px';
+    windArrow.style.height = '32px';
+    windArrow.style.background = 'rgba(255,255,255,0.85)';
+    windArrow.style.transformOrigin = '50% 100%';
+    windArrow.style.pointerEvents = 'none';
+    windArrow.style.zIndex = '3';
+    windArrow.style.transform = 'translate(-50%, 0%) rotate(0deg)';
+
+    const windArrowHead = document.createElement('div');
+    windArrowHead.style.position = 'absolute';
+    windArrowHead.style.left = '50%';
+    windArrowHead.style.top = '0';
+    windArrowHead.style.transform = 'translate(-50%, -50%)';
+    windArrowHead.style.width = '0';
+    windArrowHead.style.height = '0';
+    windArrowHead.style.borderLeft = '6px solid transparent';
+    windArrowHead.style.borderRight = '6px solid transparent';
+    windArrowHead.style.borderBottom = '10px solid rgba(255,255,255,0.85)';
+    windArrow.appendChild(windArrowHead);
+
     // Digital time display
     const digital = document.createElement('div');
     digital.style.cssText = `
@@ -580,13 +722,56 @@ export class ControlPanelManager {
       margin-top: 10px;
     `;
 
+    const windStrengthWrap = document.createElement('div');
+    windStrengthWrap.style.width = '180px';
+    windStrengthWrap.style.margin = '6px auto 10px';
+
+    const windStrengthMeta = document.createElement('div');
+    windStrengthMeta.style.display = 'flex';
+    windStrengthMeta.style.justifyContent = 'space-between';
+    windStrengthMeta.style.gap = '8px';
+    windStrengthMeta.style.fontSize = '11px';
+    windStrengthMeta.style.opacity = '0.92';
+
+    const windStrengthLabel = document.createElement('div');
+    windStrengthLabel.textContent = 'Wind';
+
+    const windStrengthText = document.createElement('div');
+    windStrengthText.textContent = '0%';
+
+    windStrengthMeta.appendChild(windStrengthLabel);
+    windStrengthMeta.appendChild(windStrengthText);
+
+    const windStrengthBarOuter = document.createElement('div');
+    windStrengthBarOuter.style.height = '6px';
+    windStrengthBarOuter.style.borderRadius = '999px';
+    windStrengthBarOuter.style.background = 'rgba(255,255,255,0.18)';
+    windStrengthBarOuter.style.overflow = 'hidden';
+    windStrengthBarOuter.style.marginTop = '4px';
+
+    const windStrengthBarInner = document.createElement('div');
+    windStrengthBarInner.style.height = '100%';
+    windStrengthBarInner.style.width = '0%';
+    windStrengthBarInner.style.background = 'rgba(80, 200, 255, 0.85)';
+    windStrengthBarInner.style.transition = 'width 120ms linear';
+    windStrengthBarOuter.appendChild(windStrengthBarInner);
+
+    windStrengthWrap.appendChild(windStrengthMeta);
+    windStrengthWrap.appendChild(windStrengthBarOuter);
+
     face.appendChild(hand);
+    face.appendChild(targetHand);
     face.appendChild(center);
+    face.appendChild(windArrow);
     container.appendChild(face);
     container.appendChild(digital);
+    container.appendChild(windStrengthWrap);
 
     // Store references
-    this.clockElements = { hand, digital, face };
+    this.clockElements = { hand, targetHand, digital, face };
+    this._windArrow = windArrow;
+    this._windStrengthBarInner = windStrengthBarInner;
+    this._windStrengthText = windStrengthText;
 
     // Mouse events for dragging
     face.addEventListener('mousedown', this._boundHandlers.onFaceMouseDown);
@@ -599,6 +784,13 @@ export class ControlPanelManager {
     document.addEventListener('touchend', this._boundHandlers.onDocTouchEnd);
 
     return container;
+  }
+
+  _updateClockTarget(hour) {
+    if (!this.clockElements.targetHand) return;
+    const shifted = ((hour - 12) % 24 + 24) % 24;
+    const angle = (shifted / 24) * 360;
+    this.clockElements.targetHand.style.transform = `rotate(${angle}deg)`;
   }
 
   /**
@@ -649,7 +841,20 @@ export class ControlPanelManager {
   _onClockMouseUp() {
     if (this.isDraggingClock) {
       this.isDraggingClock = false;
-      this.debouncedSave();
+
+      const target = this._dragTimeTarget;
+      this._dragTimeTarget = null;
+
+      if (typeof target === 'number' && Number.isFinite(target)) {
+        const mins = Number(this.controlState.timeTransitionMinutes) || 0;
+        if (mins > 0) {
+          void this._startTimeOfDayTransition(target, mins).then(() => this.debouncedSave());
+        } else {
+          void this._setTimeOfDay(target).then(() => this.debouncedSave());
+        }
+      } else {
+        this.debouncedSave();
+      }
     }
   }
 
@@ -697,8 +902,18 @@ export class ControlPanelManager {
     
     // Convert angle to 24h time with noon at top.
     const hour24 = (((angle / 360) * 24) + 12) % 24;
-    
-    void this._setTimeOfDay(hour24);
+
+    // During drag we only preview the target.
+    this._dragTimeTarget = hour24;
+    this.controlState.timeOfDay = hour24;
+    this._updateClockTarget(hour24);
+
+    // Provide immediate feedback while dragging.
+    const displayHour = Math.floor(hour24);
+    const displayMinute = Math.floor((hour24 % 1) * 60);
+    if (this.clockElements.digital) {
+      this.clockElements.digital.textContent = `${displayHour.toString().padStart(2, '0')}:${displayMinute.toString().padStart(2, '0')}`;
+    }
   }
 
   _onHeaderMouseDown(e) {
@@ -756,6 +971,7 @@ export class ControlPanelManager {
    */
   async _setTimeOfDay(hour) {
     this.controlState.timeOfDay = hour % 24;
+    this._updateClockTarget(this.controlState.timeOfDay);
     this._updateClock(hour);
     await this._applyControlState();
   }
@@ -956,8 +1172,28 @@ export class ControlPanelManager {
    */
   async _applyControlState() {
     try {
-      // Apply time of day using centralized logic
-      await stateApplier.applyTimeOfDay(this.controlState.timeOfDay, false); // Don't save here, handled by debouncedSave
+      const targetHour = ((Number(this.controlState.timeOfDay) % 24) + 24) % 24;
+      const transitionMinutes = Number(this.controlState.timeTransitionMinutes) || 0;
+      const shouldStartTransition =
+        transitionMinutes > 0 &&
+        (this._lastTimeTargetApplied === null ||
+          Math.abs(this._lastTimeTargetApplied - targetHour) > 1e-4 ||
+          this._lastTimeTransitionMinutesApplied === null ||
+          Math.abs(this._lastTimeTransitionMinutesApplied - transitionMinutes) > 1e-4);
+
+      const shouldApplyInstant =
+        transitionMinutes <= 0 &&
+        (this._lastTimeTargetApplied === null || Math.abs(this._lastTimeTargetApplied - targetHour) > 1e-4);
+
+      if (shouldStartTransition) {
+        this._lastTimeTargetApplied = targetHour;
+        this._lastTimeTransitionMinutesApplied = transitionMinutes;
+        await stateApplier.startTimeOfDayTransition(targetHour, transitionMinutes, false);
+      } else if (shouldApplyInstant) {
+        this._lastTimeTargetApplied = targetHour;
+        this._lastTimeTransitionMinutesApplied = transitionMinutes;
+        await stateApplier.applyTimeOfDay(targetHour, false); // Don't save here, handled by debouncedSave
+      }
 
       if (this._suppressInitialWeatherApply) {
         this._suppressInitialWeatherApply = false;

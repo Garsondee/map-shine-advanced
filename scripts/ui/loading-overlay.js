@@ -11,6 +11,77 @@ export class LoadingOverlay {
     this._progressRaf = 0;
     this._progressLastTs = 0;
     this._autoProgress = null;
+
+    this._stages = null;
+    this._stageState = null;
+  }
+
+  configureStages(stages) {
+    this._stages = Array.isArray(stages) ? stages.filter(Boolean) : null;
+    this._stageState = null;
+  }
+
+  startStages(opts = undefined) {
+    this.ensure();
+    const stages = Array.isArray(opts?.stages) ? opts.stages : this._stages;
+    if (!Array.isArray(stages) || stages.length === 0) {
+      this._stageState = null;
+      return;
+    }
+
+    const normalized = [];
+    let totalWeight = 0;
+    for (const s of stages) {
+      const id = String(s.id || '').trim();
+      if (!id) continue;
+      const weight = Number.isFinite(s.weight) ? Math.max(0, s.weight) : 1;
+      totalWeight += weight;
+      normalized.push({
+        id,
+        label: s.label ?? null,
+        weight
+      });
+    }
+    if (normalized.length === 0 || totalWeight <= 0) {
+      this._stageState = null;
+      return;
+    }
+
+    let acc = 0;
+    const ranges = new Map();
+    for (const s of normalized) {
+      const start = acc / totalWeight;
+      acc += s.weight;
+      const end = acc / totalWeight;
+      ranges.set(s.id, { start, end, label: s.label });
+    }
+
+    this._stageState = {
+      ranges,
+      currentStageId: null,
+      currentStageProgress: 0,
+    };
+  }
+
+  setStage(stageId, progress01 = 0, message = undefined, opts = undefined) {
+    this.ensure();
+    if (!this._stageState?.ranges) return;
+    const id = String(stageId || '').trim();
+    const range = this._stageState.ranges.get(id);
+    if (!range) return;
+
+    const p = Number.isFinite(progress01) ? Math.max(0, Math.min(1, progress01)) : 0;
+    this._stageState.currentStageId = id;
+    this._stageState.currentStageProgress = p;
+
+    const global = range.start + (range.end - range.start) * p;
+
+    const label = message ?? range.label;
+    if (label !== undefined && label !== null) {
+      this.setMessage(String(label));
+    }
+
+    this.setProgress(global, opts);
   }
 
   ensure() {

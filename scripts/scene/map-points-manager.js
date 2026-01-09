@@ -486,17 +486,29 @@ export class MapPointsManager {
    */
   getRopeConfigurations() {
     const ropes = [];
+
+    let lastRopeType = null;
+    try {
+      const saved = game?.settings?.get?.('map-shine-advanced', 'rope-default-behavior');
+      if (saved && typeof saved === 'object') {
+        const v = saved._lastRopeType;
+        if (v === 'rope' || v === 'chain') lastRopeType = v;
+      }
+    } catch (_) {
+    }
     
     for (const group of this.groups.values()) {
       const isLegacyRopeType = group.type === 'rope';
       const isRopeEffectLine = group.type === 'line' && group.effectTarget === 'rope';
       if ((isLegacyRopeType || isRopeEffectLine) && group.points && group.points.length >= 2) {
+        const ropeType = (group.ropeType === 'rope' || group.ropeType === 'chain') ? group.ropeType : (lastRopeType || 'chain');
+        const segLen = Number.isFinite(group.segmentLength) ? group.segmentLength : undefined;
         ropes.push({
           group,
           points: group.points,
-          ropeType: group.ropeType || 'chain',
+          ropeType,
           texturePath: group.texturePath,
-          segmentLength: group.segmentLength || 20
+          segmentLength: segLen
         });
       }
     }

@@ -11,6 +11,7 @@ import { TextureManagerUI } from './texture-manager.js';
 import { EffectStackUI } from './effect-stack.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../effects/EffectComposer.js';
 import * as sceneSettings from '../settings/scene-settings.js';
+import Coordinates from '../utils/coordinates.js';
 
 const log = createLogger('UI');
 
@@ -3718,7 +3719,8 @@ export class TweakpaneManager {
               const bounds = mapPointsManager.getAreaBounds(groupId) || mapPointsManager._computeBounds(group.points);
               if (bounds) {
                 // Pan canvas to center on group
-                canvas.pan({ x: bounds.centerX, y: bounds.centerY });
+                const foundryPos = Coordinates.toFoundry(bounds.centerX, bounds.centerY);
+                canvas.pan({ x: foundryPos.x, y: foundryPos.y });
                 // Ensure helpers are visible
                 mapPointsManager.setShowVisualHelpers(true);
                 html.find('[name="showHelpers"]').prop('checked', true);
@@ -3737,7 +3739,8 @@ export class TweakpaneManager {
           if (group && group.points && group.points.length > 0) {
             const bounds = mapPointsManager.getAreaBounds(groupId) || mapPointsManager._computeBounds(group.points);
             if (bounds) {
-              canvas.pan({ x: bounds.centerX, y: bounds.centerY });
+              const foundryPos = Coordinates.toFoundry(bounds.centerX, bounds.centerY);
+              canvas.pan({ x: foundryPos.x, y: foundryPos.y });
               mapPointsManager.setShowVisualHelpers(true);
               html.find('[name="showHelpers"]').prop('checked', true);
             }
@@ -3863,7 +3866,40 @@ export class TweakpaneManager {
     const isRopeGroup = group.effectTarget === 'rope' || group.type === 'rope';
 
     const content = `
-      <form class="group-edit-form">
+      <style>
+        form.group-edit-form.mapshine-map-point-edit .rope-controls,
+        form.group-edit-form.mapshine-map-point-edit .rope-controls * {
+          color: #ddd;
+        }
+        form.group-edit-form.mapshine-map-point-edit .rope-controls .notes {
+          color: #aaa;
+        }
+        form.group-edit-form.mapshine-map-point-edit .rope-controls input,
+        form.group-edit-form.mapshine-map-point-edit .rope-controls select {
+          background: rgba(0, 0, 0, 0.25);
+          color: #ddd;
+          border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+        form.group-edit-form.mapshine-map-point-edit .rope-controls input::placeholder {
+          color: rgba(255, 255, 255, 0.45);
+        }
+        form.group-edit-form.mapshine-map-point-edit .rope-texture-browse,
+        form.group-edit-form.mapshine-map-point-edit .add-points-btn,
+        form.group-edit-form.mapshine-map-point-edit .clear-points-btn,
+        form.group-edit-form.mapshine-map-point-edit .remove-point-btn {
+          width: auto !important;
+          min-width: 0;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          line-height: 1;
+        }
+        form.group-edit-form.mapshine-map-point-edit .points-list .remove-point-btn {
+          flex: 0 0 auto;
+        }
+      </style>
+      <form class="group-edit-form mapshine-map-point-edit">
         <div class="form-group">
           <label>Label</label>
           <input type="text" name="label" value="${group.label || ''}" style="width: 100%;" placeholder="Group name">
@@ -4062,6 +4098,16 @@ export class TweakpaneManager {
         // Prevent UI clicks from leaking through to the underlying canvas.
         html.closest('.app.window-app')?.on('pointerdown', (ev) => {
           ev.stopPropagation();
+        });
+
+        // Prevent accidental Dialog submission (and closure) when selecting files in FilePicker.
+        // Foundry Dialogs trigger the default button on Enter; FilePicker interactions can leak
+        // an Enter key event back into this window.
+        html.closest('.app.window-app')?.on('keydown', (ev) => {
+          if (ev.key === 'Enter' || ev.key === 'NumpadEnter') {
+            ev.preventDefault();
+            ev.stopPropagation();
+          }
         });
 
         const updateRopeControlsVisibility = () => {

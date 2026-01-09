@@ -1,4 +1,4 @@
-import { EffectBase, RenderLayers } from '../effects/EffectComposer.js';
+import { EffectBase, RenderLayers, OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
 import { BatchedRenderer } from '../libs/three.quarks.module.js';
@@ -58,7 +58,7 @@ export class ParticleSystem extends EffectBase {
    * @param {THREE.Scene} scene
    * @param {THREE.Camera} camera
    */
-  async initialize(renderer, scene, camera) {
+  initialize(renderer, scene, camera) {
     log.info('ParticleSystem.initialize called');
 
     if (DISABLE_ALL_PARTICLES) {
@@ -93,7 +93,6 @@ export class ParticleSystem extends EffectBase {
       //   overlay above overhead geometry.
       this.batchRenderer.renderOrder = 50;
       try {
-        const { OVERLAY_THREE_LAYER } = await import('../effects/EffectComposer.js');
         if (this.batchRenderer.layers && typeof this.batchRenderer.layers.enable === 'function') {
           this.batchRenderer.layers.enable(OVERLAY_THREE_LAYER);
         }

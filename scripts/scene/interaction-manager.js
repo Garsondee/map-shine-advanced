@@ -607,9 +607,30 @@ export class InteractionManager {
 
     try {
       if (editingGroupId) {
+        const existingGroup = mapPointsManager.getGroup(editingGroupId);
+        const isExistingRopeGroup = existingGroup?.effectTarget === 'rope' || existingGroup?.type === 'rope';
+        const updates = {
+          points: points.map(p => ({ x: p.x, y: p.y }))
+        };
+        if (isExistingRopeGroup) {
+          if (Object.prototype.hasOwnProperty.call(existingGroup, 'ropeType')) updates.ropeType = existingGroup.ropeType;
+          if (Object.prototype.hasOwnProperty.call(existingGroup, 'texturePath')) updates.texturePath = existingGroup.texturePath;
+          if (Object.prototype.hasOwnProperty.call(existingGroup, 'segmentLength')) updates.segmentLength = existingGroup.segmentLength;
+          if (Object.prototype.hasOwnProperty.call(existingGroup, 'damping')) updates.damping = existingGroup.damping;
+          if (Object.prototype.hasOwnProperty.call(existingGroup, 'windForce')) updates.windForce = existingGroup.windForce;
+          if (Object.prototype.hasOwnProperty.call(existingGroup, 'springConstant')) updates.springConstant = existingGroup.springConstant;
+          if (Object.prototype.hasOwnProperty.call(existingGroup, 'tapering')) updates.tapering = existingGroup.tapering;
+          if (Object.prototype.hasOwnProperty.call(existingGroup, 'width')) updates.width = existingGroup.width;
+          if (Object.prototype.hasOwnProperty.call(existingGroup, 'uvRepeatWorld')) updates.uvRepeatWorld = existingGroup.uvRepeatWorld;
+          if (Object.prototype.hasOwnProperty.call(existingGroup, 'zOffset')) updates.zOffset = existingGroup.zOffset;
+          if (Object.prototype.hasOwnProperty.call(existingGroup, 'ropeEndStiffness')) updates.ropeEndStiffness = existingGroup.ropeEndStiffness;
+          if (Object.prototype.hasOwnProperty.call(existingGroup, 'windowLightBoost')) updates.windowLightBoost = existingGroup.windowLightBoost;
+          if (Object.prototype.hasOwnProperty.call(existingGroup, 'endFadeSize')) updates.endFadeSize = existingGroup.endFadeSize;
+          if (Object.prototype.hasOwnProperty.call(existingGroup, 'endFadeStrength')) updates.endFadeStrength = existingGroup.endFadeStrength;
+        }
         // Update existing group with new points
         await mapPointsManager.updateGroup(editingGroupId, {
-          points: points.map(p => ({ x: p.x, y: p.y }))
+          ...updates
         });
         log.info(`Updated map point group: ${editingGroupId}`);
         ui.notifications.info(`Updated group with ${points.length} points`);
@@ -1142,7 +1163,8 @@ export class InteractionManager {
           case 'focus':
             const bounds = mapPointsManager.getAreaBounds(groupId);
             if (bounds) {
-              canvas.pan({ x: bounds.centerX, y: bounds.centerY });
+              const foundryPos = Coordinates.toFoundry(bounds.centerX, bounds.centerY);
+              canvas.pan({ x: foundryPos.x, y: foundryPos.y });
             }
             break;
             
@@ -2988,8 +3010,29 @@ export class InteractionManager {
 
           if (mapPointsManager && groupId && Array.isArray(points) && points.length > 0) {
             try {
-              await mapPointsManager.updateGroup(groupId, {
+              const existingGroup = mapPointsManager.getGroup(groupId);
+              const isExistingRopeGroup = existingGroup?.effectTarget === 'rope' || existingGroup?.type === 'rope';
+              const updates = {
                 points: points.map((p) => ({ x: p.x, y: p.y }))
+              };
+              if (isExistingRopeGroup) {
+                if (Object.prototype.hasOwnProperty.call(existingGroup, 'ropeType')) updates.ropeType = existingGroup.ropeType;
+                if (Object.prototype.hasOwnProperty.call(existingGroup, 'texturePath')) updates.texturePath = existingGroup.texturePath;
+                if (Object.prototype.hasOwnProperty.call(existingGroup, 'segmentLength')) updates.segmentLength = existingGroup.segmentLength;
+                if (Object.prototype.hasOwnProperty.call(existingGroup, 'damping')) updates.damping = existingGroup.damping;
+                if (Object.prototype.hasOwnProperty.call(existingGroup, 'windForce')) updates.windForce = existingGroup.windForce;
+                if (Object.prototype.hasOwnProperty.call(existingGroup, 'springConstant')) updates.springConstant = existingGroup.springConstant;
+                if (Object.prototype.hasOwnProperty.call(existingGroup, 'tapering')) updates.tapering = existingGroup.tapering;
+                if (Object.prototype.hasOwnProperty.call(existingGroup, 'width')) updates.width = existingGroup.width;
+                if (Object.prototype.hasOwnProperty.call(existingGroup, 'uvRepeatWorld')) updates.uvRepeatWorld = existingGroup.uvRepeatWorld;
+                if (Object.prototype.hasOwnProperty.call(existingGroup, 'zOffset')) updates.zOffset = existingGroup.zOffset;
+                if (Object.prototype.hasOwnProperty.call(existingGroup, 'ropeEndStiffness')) updates.ropeEndStiffness = existingGroup.ropeEndStiffness;
+                if (Object.prototype.hasOwnProperty.call(existingGroup, 'windowLightBoost')) updates.windowLightBoost = existingGroup.windowLightBoost;
+                if (Object.prototype.hasOwnProperty.call(existingGroup, 'endFadeSize')) updates.endFadeSize = existingGroup.endFadeSize;
+                if (Object.prototype.hasOwnProperty.call(existingGroup, 'endFadeStrength')) updates.endFadeStrength = existingGroup.endFadeStrength;
+              }
+              await mapPointsManager.updateGroup(groupId, {
+                ...updates
               });
 
               if (mapPointsManager.showVisualHelpers) {

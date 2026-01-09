@@ -119,6 +119,12 @@ export class WeatherController {
     this.dynamicPlanDurationSeconds = undefined;
     this._dynamicPlanStrength = 0.0;
 
+    /** @type {THREE.Texture|null} */
+    this.roofDistanceMap = null;
+
+    /** @type {number} */
+    this.roofDistanceMapMaxPx = 1.0;
+
     this._dynamicInitialized = false;
     this._dynamicSeed = 0;
     this._dynamicRngState = 0;
@@ -322,7 +328,19 @@ export class WeatherController {
     } else {
       this.roofMaskData = null;
       this.roofMaskSize = { width: 0, height: 0 };
+      this._disposeRoofDistanceMap();
     }
+  }
+
+  _disposeRoofDistanceMap() {
+    try {
+      if (this.roofDistanceMap) {
+        this.roofDistanceMap.dispose?.();
+      }
+    } catch (_) {
+    }
+    this.roofDistanceMap = null;
+    this.roofDistanceMapMaxPx = 1.0;
   }
 
   /**
@@ -363,11 +381,117 @@ export class WeatherController {
       
       this.roofMaskSize = { width: w, height: h };
       log.info(`Roof mask data extracted: ${w}x${h}`);
+
+      this._buildRoofDistanceMap();
       
     } catch (e) {
       log.warn('Failed to extract roof mask data:', e);
       this.roofMaskData = null;
+      this._disposeRoofDistanceMap();
     }
+  }
+
+  _buildRoofDistanceMap() {
+    if (!this.roofMaskData || !this.roofMaskSize?.width || !this.roofMaskSize?.height) {
+      this._disposeRoofDistanceMap();
+      return;
+    }
+
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const w = this.roofMaskSize.width;
+    const h = this.roofMaskSize.height;
+
+    // Build a distance-to-indoors field using a fast 2-pass chamfer transform.
+    // The mask is authored as outdoors=255 (white), indoors=0 (black).
+    // We compute distance for outdoor pixels to the nearest indoor pixel.
+    const INF = 1e9;
+    const dist = new Int32Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      const v = this.roofMaskData[i];
+      // Indoors threshold
+      dist[i] = v < 128 ? 0 : INF;
+    }
+
+    // Chamfer weights (scaled): orthogonal=3, diagonal=4.
+    const ORTH = 3;
+    const DIAG = 4;
+
+    // Forward pass
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      for (let x = 0; x < w; x++) {
+        const idx = row + x;
+        let d = dist[idx];
+        if (d === 0) continue;
+
+        if (x > 0) d = Math.min(d, dist[idx - 1] + ORTH);
+        if (y > 0) d = Math.min(d, dist[idx - w] + ORTH);
+        if (x > 0 && y > 0) d = Math.min(d, dist[idx - w - 1] + DIAG);
+        if (x < w - 1 && y > 0) d = Math.min(d, dist[idx - w + 1] + DIAG);
+
+        dist[idx] = d;
+      }
+    }
+
+    // Backward pass
+    for (let y = h - 1; y >= 0; y--) {
+      const row = y * w;
+      for (let x = w - 1; x >= 0; x--) {
+        const idx = row + x;
+        let d = dist[idx];
+        if (d === 0) continue;
+
+        if (x < w - 1) d = Math.min(d, dist[idx + 1] + ORTH);
+        if (y < h - 1) d = Math.min(d, dist[idx + w] + ORTH);
+        if (x < w - 1 && y < h - 1) d = Math.min(d, dist[idx + w + 1] + DIAG);
+        if (x > 0 && y < h - 1) d = Math.min(d, dist[idx + w - 1] + DIAG);
+
+        dist[idx] = d;
+      }
+    }
+
+    // Convert to pixels in Foundry scene space.
+    // The _Outdoors texture is mapped across sceneRect, so compute pixel scale.
+    const rect = canvas?.dimensions?.sceneRect;
+    const sceneW = Math.max(1, Number(rect?.width) || 1);
+    const sceneH = Math.max(1, Number(rect?.height) || 1);
+    const scaleX = sceneW / Math.max(1, w);
+    const scaleY = sceneH / Math.max(1, h);
+    const texelToPx = (scaleX + scaleY) * 0.5;
+
+    // Clamp range for 8-bit encoding.
+    // This should comfortably cover expected building buffer sizes.
+    const maxDistPx = 2048;
+    const maxDistTexel = Math.max(1, Math.floor(maxDistPx / texelToPx));
+    const maxDistWeight = Math.max(1, maxDistTexel * ORTH);
+
+    // Encode distance into an RGBA8 DataTexture, storing normalized distance in R.
+    const out = new Uint8Array(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const di = dist[i];
+      const clamped = di > maxDistWeight ? maxDistWeight : di;
+      const n = clamped / maxDistWeight;
+      const b = Math.max(0, Math.min(255, Math.round(n * 255)));
+      const o = i * 4;
+      out[o] = b;
+      out[o + 1] = b;
+      out[o + 2] = b;
+      out[o + 3] = 255;
+    }
+
+    this._disposeRoofDistanceMap();
+
+    const tex = new THREE.DataTexture(out, w, h, THREE.RGBAFormat);
+    tex.needsUpdate = true;
+    tex.flipY = this.roofMap?.flipY ?? false;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+
+    this.roofDistanceMap = tex;
+    this.roofDistanceMapMaxPx = maxDistWeight * (texelToPx / ORTH);
   }
 
   /**
@@ -414,6 +538,12 @@ export class WeatherController {
     if (!this.initialized) return;
     if (this.enabled === false && this.dynamicEnabled !== true) return;
 
+    const fc = Number(timeInfo?.frameCount);
+    if (Number.isFinite(fc)) {
+      if (this._msLastUpdateFrame === fc) return;
+      this._msLastUpdateFrame = fc;
+    }
+
     const dt = Math.min(timeInfo.delta, 0.25);
     const elapsed = timeInfo.elapsed;
 
@@ -454,6 +584,20 @@ export class WeatherController {
         if (this._canEditSceneFlags()) {
           this._weatherSnapshotPersistTimer = 0;
           void this._saveWeatherSnapshotToScene();
+
+          const scene = canvas?.scene;
+          if (scene) {
+            setTimeout(() => {
+              try {
+                const cmd = scene.getFlag('map-shine-advanced', 'weather-transition');
+                const startedAt = Number(cmd?.startedAt) || 0;
+                if (startedAt > 0 && startedAt === this._lastTransitionCommandStartedAt) {
+                  scene.unsetFlag('map-shine-advanced', 'weather-transition');
+                }
+              } catch (_) {
+              }
+            }, 0);
+          }
         }
       }
     } else {
@@ -1216,10 +1360,14 @@ export class WeatherController {
       const scene = canvas?.scene;
       if (!scene) return;
 
+      const startedAt = Date.now();
+      this._lastTransitionCommandStartedAt = startedAt;
+
       const cmd = {
         version: 1,
-        startedAt: Date.now(),
+        startedAt,
         duration: durationSeconds,
+        start: this._serializeWeatherState(this.startState),
         target: {
           precipitation: targetState.precipitation,
           cloudCover: targetState.cloudCover,
@@ -1234,14 +1382,6 @@ export class WeatherController {
       };
 
       await scene.setFlag('map-shine-advanced', 'weather-transition', cmd);
-
-      // Clear quickly so it doesn't re-trigger on scene reload.
-      setTimeout(() => {
-        try {
-          scene.unsetFlag('map-shine-advanced', 'weather-transition');
-        } catch (_) {
-        }
-      }, 1000);
     } catch (e) {
     }
   }
@@ -1261,6 +1401,13 @@ export class WeatherController {
         log.info(`applyTransitionCommand(startedAt=${startedAt}) duration=${duration}`);
       } catch (_) {
       }
+
+      const start = cmd.start;
+      if (start && typeof start === 'object') {
+        this._applySerializedWeatherState(start, this.startState);
+        this._applySerializedWeatherState(start, this.currentState);
+      }
+
       this.transitionTo({
         precipitation: Number(target.precipitation) || 0,
         cloudCover: Number(target.cloudCover) || 0,
@@ -1271,6 +1418,11 @@ export class WeatherController {
         precipType: PrecipitationType.NONE,
         wetness: 0.0
       }, duration);
+
+      const elapsedSeconds = startedAt > 0 ? (Date.now() - startedAt) / 1000.0 : 0;
+      if (Number.isFinite(elapsedSeconds) && elapsedSeconds > 0) {
+        this.transitionElapsed = Math.max(0, Math.min(elapsedSeconds, this.transitionDuration));
+      }
     } catch (e) {
     }
   }
@@ -2487,7 +2639,8 @@ export class WeatherController {
         ], expanded: false },
         { label: 'Environment', type: 'folder', parameters: ['roofMaskForceEnabled'] },
         { label: 'Simulation', type: 'folder', parameters: ['variability', 'transitionDuration', 'simulationSpeed'] },
-        { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'fogDensity', 'wetness', 'freezeLevel'], expanded: true },
+        { label: 'Fog', type: 'folder', parameters: ['fogDensity'], expanded: true },
+        { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'wetness', 'freezeLevel'], expanded: true },
         { label: 'Wind', type: 'folder', parameters: ['windSpeed', 'windDirection', 'gustWaitMin', 'gustWaitMax', 'gustDuration', 'gustStrength'], expanded: true },
         { label: 'Rain', type: 'folder', parameters: [
           'rainIntensityScale',

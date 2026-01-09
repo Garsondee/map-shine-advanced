@@ -17,6 +17,9 @@ export class StateApplier {
   constructor() {
     /** @type {number|null} Timer for debounced darkness updates */
     this._darknessTimer = null;
+
+    /** @type {number|null} */
+    this._timeTransitionIntervalId = null;
   }
 
   _getWeatherController() {
@@ -140,6 +143,83 @@ export class StateApplier {
       log.info('Weather state applied successfully');
     } catch (error) {
       log.error('Failed to apply weather state:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Start a smooth time-of-day transition.
+   * @param {number} targetHour - 0-24 hour value
+   * @param {number} transitionMinutes - Transition duration in minutes
+   * @param {boolean} [saveToScene=true]
+   * @returns {Promise<void>}
+   */
+  async startTimeOfDayTransition(targetHour, transitionMinutes, saveToScene = true) {
+    try {
+      const minutesNum = typeof transitionMinutes === 'number' ? transitionMinutes : Number(transitionMinutes);
+      const safeMinutes = Number.isFinite(minutesNum) ? Math.max(0.0, Math.min(60.0, minutesNum)) : 0.0;
+      const durationSeconds = safeMinutes * 60.0;
+
+      const wc = this._getWeatherController();
+      const current = wc?.getCurrentTime?.() ?? wc?.timeOfDay ?? window.MapShine?.controlPanel?.controlState?.timeOfDay;
+      const startHour = Number.isFinite(Number(current)) ? ((Number(current) % 24) + 24) % 24 : 12.0;
+
+      const tgt = ((Number(targetHour) % 24) + 24) % 24;
+
+      // Cancel any previous time transition.
+      if (this._timeTransitionIntervalId) {
+        clearInterval(this._timeTransitionIntervalId);
+        this._timeTransitionIntervalId = null;
+      }
+
+      // If duration is 0, apply immediately.
+      if (durationSeconds <= 0.001) {
+        await this.applyTimeOfDay(tgt, saveToScene, true);
+        return;
+      }
+
+      // Move along the shortest arc in circular time space.
+      let delta = tgt - startHour;
+      if (delta > 12) delta -= 24;
+      if (delta < -12) delta += 24;
+
+      const startMs = Date.now();
+      const durationMs = durationSeconds * 1000.0;
+
+      // Apply the first frame immediately.
+      await this.applyTimeOfDay(startHour, false, true);
+
+      return await new Promise((resolve, reject) => {
+        this._timeTransitionIntervalId = setInterval(() => {
+          try {
+            const elapsedMs = Date.now() - startMs;
+            const t = Math.max(0, Math.min(1, elapsedMs / durationMs));
+
+            const hour = ((startHour + delta * t) % 24 + 24) % 24;
+
+            // During the ramp we don't want to spam scene flags.
+            void this.applyTimeOfDay(hour, false, true);
+
+            if (t >= 1) {
+              if (this._timeTransitionIntervalId) {
+                clearInterval(this._timeTransitionIntervalId);
+                this._timeTransitionIntervalId = null;
+              }
+
+              // Final application persists.
+              void this.applyTimeOfDay(tgt, saveToScene, true).then(resolve).catch(reject);
+            }
+          } catch (e) {
+            if (this._timeTransitionIntervalId) {
+              clearInterval(this._timeTransitionIntervalId);
+              this._timeTransitionIntervalId = null;
+            }
+            reject(e);
+          }
+        }, 100);
+      });
+    } catch (error) {
+      log.error('Failed to start time-of-day transition:', error);
       throw error;
     }
   }
@@ -332,6 +412,11 @@ export class StateApplier {
     if (this._darknessTimer) {
       clearTimeout(this._darknessTimer);
       this._darknessTimer = null;
+    }
+
+    if (this._timeTransitionIntervalId) {
+      clearInterval(this._timeTransitionIntervalId);
+      this._timeTransitionIntervalId = null;
     }
   }
 }

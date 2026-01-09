@@ -58,6 +58,14 @@ export class TileManager {
 
     this._overheadTileIds = new Set();
     this._weatherRoofTileIds = new Set();
+
+    this._initialLoad = {
+      active: false,
+      pendingAll: 0,
+      pendingOverhead: 0,
+      trackedIds: new Set(),
+      waiters: []
+    };
     
     this.initialized = false;
     this.hooksRegistered = false;
@@ -359,9 +367,87 @@ export class TileManager {
       this.dispose(false); // false = don't clear cache
     }
 
+    this._initialLoad.active = true;
+    this._initialLoad.pendingAll = 0;
+    this._initialLoad.pendingOverhead = 0;
+    this._initialLoad.trackedIds = new Set();
+
+    const foregroundElevation = canvas.scene.foregroundElevation || 0;
     for (const tileDoc of tiles) {
+      const tileId = tileDoc?.id;
+      if (tileId) {
+        this._initialLoad.trackedIds.add(tileId);
+        this._initialLoad.pendingAll++;
+        const isOverhead = (tileDoc.elevation >= foregroundElevation) || !!tileDoc.overhead;
+        if (isOverhead) this._initialLoad.pendingOverhead++;
+      }
       this.createTileSprite(tileDoc);
     }
+
+    this._notifyInitialLoadWaiters();
+  }
+
+  _notifyInitialLoadWaiters() {
+    if (!this._initialLoad?.waiters?.length) return;
+
+    const doneAll = (this._initialLoad.pendingAll <= 0);
+    const doneOverhead = (this._initialLoad.pendingOverhead <= 0);
+
+    if (doneAll) {
+      this._initialLoad.active = false;
+    }
+
+    const remaining = [];
+    for (const w of this._initialLoad.waiters) {
+      if (!w) continue;
+      const ok = w.overheadOnly ? doneOverhead : doneAll;
+      if (ok) {
+        try { w.resolve(); } catch (_) {}
+      } else {
+        remaining.push(w);
+      }
+    }
+    this._initialLoad.waiters = remaining;
+  }
+
+  _markInitialTileLoaded(tileId, wasOverhead) {
+    if (!this._initialLoad.active) return;
+    if (!tileId) return;
+    if (!this._initialLoad.trackedIds?.has(tileId)) return;
+
+    this._initialLoad.trackedIds.delete(tileId);
+    this._initialLoad.pendingAll = Math.max(0, this._initialLoad.pendingAll - 1);
+    if (wasOverhead) {
+      this._initialLoad.pendingOverhead = Math.max(0, this._initialLoad.pendingOverhead - 1);
+    }
+
+    this._notifyInitialLoadWaiters();
+  }
+
+  waitForInitialTiles(opts = undefined) {
+    const overheadOnly = !!opts?.overheadOnly;
+    const timeoutMs = Number.isFinite(opts?.timeoutMs) ? Math.max(0, opts.timeoutMs) : 0;
+
+    const doneAll = (this._initialLoad.pendingAll <= 0);
+    const doneOverhead = (this._initialLoad.pendingOverhead <= 0);
+
+    if (overheadOnly ? doneOverhead : doneAll) {
+      return Promise.resolve();
+    }
+
+    let timeoutId = null;
+    return new Promise((resolve) => {
+      this._initialLoad.waiters.push({ resolve, overheadOnly });
+      if (timeoutMs > 0) {
+        timeoutId = setTimeout(() => {
+          try { resolve(); } catch (_) {}
+        }, timeoutMs);
+      }
+    }).finally(() => {
+      if (timeoutId) {
+        try { clearTimeout(timeoutId); } catch (_) {}
+      }
+    });
   }
 
   /**
@@ -1032,6 +1118,9 @@ export class TileManager {
     sprite.userData.textureReady = false;
     sprite.visible = false;
 
+    const foregroundElevation = canvas.scene.foregroundElevation || 0;
+    const isOverheadForLoad = (tileDoc.elevation >= foregroundElevation) || !!tileDoc.overhead;
+
     // Load texture
     this.loadTileTexture(texturePath).then(texture => {
       material.map = texture;
@@ -1055,8 +1144,12 @@ export class TileManager {
         window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
       } catch (_) {
       }
+
+      this._markInitialTileLoaded(tileDoc?.id, isOverheadForLoad);
     }).catch(error => {
       log.error(`Failed to load tile texture: ${texturePath}`, error);
+
+      this._markInitialTileLoaded(tileDoc?.id, isOverheadForLoad);
     });
 
     // Set initial transform and visibility
@@ -1238,6 +1331,11 @@ export class TileManager {
     this.tileSprites.delete(tileId);
     this._overheadTileIds.delete(tileId);
     this._weatherRoofTileIds.delete(tileId);
+
+    if (this._initialLoad.active && this._initialLoad.trackedIds?.has(tileId)) {
+      const wasOverhead = !!sprite?.userData?.isOverhead;
+      this._markInitialTileLoaded(tileId, wasOverhead);
+    }
     this._tintDirty = true;
     log.debug(`Removed tile sprite: ${tileId}`);
 

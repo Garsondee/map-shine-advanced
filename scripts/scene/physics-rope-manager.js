@@ -285,7 +285,7 @@ class RopeInstance {
 
     this.mesh.layers.enable(ROPE_MASK_LAYER);
 
-    this.mesh.renderOrder = 100;
+    this.mesh.renderOrder = 5;
     this.mesh.frustumCulled = false;
     this.scene.add(this.mesh);
 

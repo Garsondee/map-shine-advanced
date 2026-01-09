@@ -3661,10 +3661,16 @@ export class TweakpaneManager {
         },
         close: {
           icon: '<i class="fas fa-times"></i>',
-          label: 'Close'
+          label: 'Close',
+          callback: () => {
+            mapPointsManager.setShowVisualHelpers(false);
+          }
         }
       },
       default: 'close',
+      close: () => {
+        mapPointsManager.setShowVisualHelpers(false);
+      },
       render: (html) => {
         // Prevent UI clicks from leaking through to the underlying canvas.
         html.closest('.app.window-app')?.on('pointerdown', (ev) => {

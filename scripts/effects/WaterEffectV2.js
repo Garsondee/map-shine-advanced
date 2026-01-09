@@ -15,6 +15,16 @@ export class WaterEffectV2 extends EffectBase {
       tintStrength: 0.15,
       tintColor: { r: 0.1, g: 0.3, b: 0.48 },
 
+      maskChannel: 'auto',
+      maskInvert: false,
+      maskThreshold: 0.15,
+      maskBlurRadius: 0.0,
+      maskBlurPasses: 0,
+      maskExpandPx: 0.0,
+      buildResolution: 512,
+      sdfRangePx: 64,
+      shoreWidthPx: 24,
+
       waveScale: 25.0,
       waveSpeed: 0.94,
       waveStrength: 0.31,
@@ -39,6 +49,7 @@ export class WaterEffectV2 extends EffectBase {
 
     this._surfaceModel = new WaterSurfaceModel();
     this._waterData = null;
+    this._waterRawMask = null;
     this._lastWaterMaskUuid = null;
     this._lastWaterMaskCacheKey = null;
     this._waterMaskImageIds = new WeakMap();
@@ -87,6 +98,17 @@ export class WaterEffectV2 extends EffectBase {
           parameters: [
             'tintStrength',
             'tintColor',
+
+            'maskChannel',
+            'maskInvert',
+            'maskThreshold',
+            'maskBlurRadius',
+            'maskBlurPasses',
+            'maskExpandPx',
+            'buildResolution',
+            'sdfRangePx',
+            'shoreWidthPx',
+
             'waveScale',
             'waveSpeed',
             'waveStrength',
@@ -107,6 +129,27 @@ export class WaterEffectV2 extends EffectBase {
         tintStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.15 },
         tintColor: { type: 'color', default: { r: 0.1, g: 0.3, b: 0.48 } },
 
+        maskChannel: {
+          type: 'list',
+          label: 'Mask Channel',
+          options: {
+            Auto: 'auto',
+            Red: 'r',
+            Alpha: 'a',
+            Luma: 'luma'
+          },
+          default: 'auto'
+        },
+        maskInvert: { type: 'boolean', label: 'Invert Mask', default: false },
+        maskThreshold: { type: 'slider', label: 'Mask Threshold', min: 0.0, max: 1.0, step: 0.01, default: 0.15, throttle: 50 },
+        maskBlurRadius: { type: 'slider', label: 'Mask Blur Radius (px)', min: 0.0, max: 16.0, step: 0.1, default: 0.0, throttle: 50 },
+        maskBlurPasses: { type: 'slider', label: 'Mask Blur Passes', min: 0, max: 6, step: 1, default: 0, throttle: 50 },
+        maskExpandPx: { type: 'slider', label: 'Mask Expand/Contract (px)', min: -64.0, max: 64.0, step: 0.25, default: 0.0, throttle: 50 },
+
+        buildResolution: { type: 'list', label: 'Build Resolution', options: { 256: 256, 512: 512, 1024: 1024 }, default: 512 },
+        sdfRangePx: { type: 'slider', label: 'SDF Range (px)', min: 8, max: 256, step: 1, default: 64, throttle: 50 },
+        shoreWidthPx: { type: 'slider', label: 'Shore Width (px)', min: 1, max: 128, step: 1, default: 24, throttle: 50 },
+
         waveScale: { type: 'slider', min: 1, max: 60, step: 0.5, default: 25.0 },
         waveSpeed: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.94 },
         waveStrength: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.31 },
@@ -125,12 +168,15 @@ export class WaterEffectV2 extends EffectBase {
           type: 'list',
           options: {
             None: 0,
-            SDF: 1,
-            Exposure: 2,
-            Normal: 3,
-            Wave: 4,
-            Distortion: 5,
-            Time: 6
+            RawMask: 1,
+            FinalMask: 2,
+            SDF: 3,
+            Exposure: 4,
+            Normal: 5,
+            Wave: 6,
+            Distortion: 7,
+            Occluder: 8,
+            Time: 9
           },
           default: 0
         }
@@ -160,6 +206,9 @@ export class WaterEffectV2 extends EffectBase {
         tWaterData: { value: null },
         uHasWaterData: { value: 0.0 },
         uWaterEnabled: { value: 1.0 },
+
+        tWaterRawMask: { value: null },
+        uHasWaterRawMask: { value: 0.0 },
 
         tWaterOccluderAlpha: { value: null },
         uHasWaterOccluderAlpha: { value: 0.0 },
@@ -205,6 +254,9 @@ export class WaterEffectV2 extends EffectBase {
         uniform sampler2D tWaterData;
         uniform float uHasWaterData;
         uniform float uWaterEnabled;
+
+        uniform sampler2D tWaterRawMask;
+        uniform float uHasWaterRawMask;
 
         uniform sampler2D tWaterOccluderAlpha;
         uniform float uHasWaterOccluderAlpha;
@@ -435,26 +487,39 @@ export class WaterEffectV2 extends EffectBase {
           if (uDebugView > 0.5) {
             float d = floor(uDebugView + 0.5);
             if (d < 1.5) {
-              gl_FragColor = vec4(vec3(sdf01), 1.0);
+              if (uHasWaterRawMask < 0.5) {
+                gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+              } else {
+                float raw01 = texture2D(tWaterRawMask, sceneUv).r;
+                gl_FragColor = vec4(vec3(raw01), 1.0);
+              }
               return;
             }
             if (d < 2.5) {
-              gl_FragColor = vec4(vec3(exposure01), 1.0);
+              gl_FragColor = vec4(vec3(inside), 1.0);
               return;
             }
             if (d < 3.5) {
+              gl_FragColor = vec4(vec3(sdf01), 1.0);
+              return;
+            }
+            if (d < 4.5) {
+              gl_FragColor = vec4(vec3(exposure01), 1.0);
+              return;
+            }
+            if (d < 5.5) {
               vec2 nn = smoothFlow2D(sceneUv);
               gl_FragColor = vec4(nn * 0.5 + 0.5, 0.0, 1.0);
               return;
             }
 
-            if (d < 4.5) {
+            if (d < 6.5) {
               float wv = 0.5 + 0.5 * waveHeight(sceneUv, uWindTime);
               gl_FragColor = vec4(vec3(wv), 1.0);
               return;
             }
 
-            if (d < 5.5) {
+            if (d < 7.5) {
               vec2 waveGrad = waveGrad2D(sceneUv, uWindTime);
               vec2 flowN = smoothFlow2D(sceneUv);
               vec2 combinedVec = waveGrad * uWaveStrength + flowN * 0.35;
@@ -470,6 +535,11 @@ export class WaterEffectV2 extends EffectBase {
               vec2 pxOff = offsetUv / max(texel, vec2(1e-6));
               pxOff = clamp(pxOff / max(1.0, px), vec2(-1.0), vec2(1.0));
               gl_FragColor = vec4(pxOff * 0.5 + 0.5, 0.0, 1.0);
+              return;
+            }
+
+            if (d < 8.5) {
+              gl_FragColor = vec4(vec3(waterOccluder), 1.0);
               return;
             }
 
@@ -590,6 +660,7 @@ export class WaterEffectV2 extends EffectBase {
 
     if (!this.waterMask) {
       this._waterData = null;
+      this._waterRawMask = null;
       this._lastWaterMaskUuid = null;
       this._surfaceModel.dispose();
       return;
@@ -779,6 +850,11 @@ export class WaterEffectV2 extends EffectBase {
     u.uHasWaterData.value = this._waterData?.texture ? 1.0 : 0.0;
     u.uWaterEnabled.value = this.enabled ? 1.0 : 0.0;
 
+    if (u.tWaterRawMask && u.uHasWaterRawMask) {
+      u.tWaterRawMask.value = this._waterRawMask;
+      u.uHasWaterRawMask.value = this._waterRawMask ? 1.0 : 0.0;
+    }
+
     if (u.tWaterOccluderAlpha && u.uHasWaterOccluderAlpha) {
       const occ = this._waterOccluderAlpha
         ?? window.MapShine?.distortionManager?.waterOccluderTarget?.texture
@@ -843,6 +919,7 @@ export class WaterEffectV2 extends EffectBase {
   dispose() {
     this._surfaceModel.dispose();
     this._waterData = null;
+    this._waterRawMask = null;
 
     if (this._quadMesh) {
       this._quadMesh.geometry?.dispose?.();
@@ -870,15 +947,23 @@ export class WaterEffectV2 extends EffectBase {
 
     try {
       this._waterData = this._surfaceModel.buildFromMaskTexture(this.waterMask, {
-        resolution: 512,
-        threshold: 0.15,
-        sdfRangePx: 64,
-        exposureWidthPx: 24
+        resolution: Number.isFinite(this.params?.buildResolution) ? this.params.buildResolution : 512,
+        threshold: Number.isFinite(this.params?.maskThreshold) ? this.params.maskThreshold : 0.15,
+        channel: this.params?.maskChannel ?? 'auto',
+        invert: !!this.params?.maskInvert,
+        blurRadius: Number.isFinite(this.params?.maskBlurRadius) ? this.params.maskBlurRadius : 0.0,
+        blurPasses: Number.isFinite(this.params?.maskBlurPasses) ? this.params.maskBlurPasses : 0,
+        expandPx: Number.isFinite(this.params?.maskExpandPx) ? this.params.maskExpandPx : 0.0,
+        sdfRangePx: Number.isFinite(this.params?.sdfRangePx) ? this.params.sdfRangePx : 64,
+        exposureWidthPx: Number.isFinite(this.params?.shoreWidthPx) ? this.params.shoreWidthPx : 24
       });
+
+      this._waterRawMask = this._waterData?.rawMaskTexture || null;
       this._lastWaterMaskUuid = this.waterMask.uuid;
       this._lastWaterMaskCacheKey = cacheKey;
     } catch (e) {
       this._waterData = null;
+      this._waterRawMask = null;
       this._lastWaterMaskUuid = null;
       this._lastWaterMaskCacheKey = null;
       log.error('Failed to build WaterData texture', e);
@@ -891,7 +976,19 @@ export class WaterEffectV2 extends EffectBase {
     const img = tex.image;
     const imgId = img ? this._getWaterMaskImageId(img) : 0;
     const v = Number.isFinite(tex.version) ? tex.version : 0;
-    return `${tex.uuid}|img:${imgId}|v:${v}`;
+
+    const p = this.params ?? {};
+    const chan = (p.maskChannel === 'r' || p.maskChannel === 'a' || p.maskChannel === 'luma') ? p.maskChannel : 'auto';
+    const inv = p.maskInvert ? 1 : 0;
+    const th = Number.isFinite(p.maskThreshold) ? p.maskThreshold : 0.15;
+    const br = Number.isFinite(p.maskBlurRadius) ? p.maskBlurRadius : 0.0;
+    const bp = Number.isFinite(p.maskBlurPasses) ? p.maskBlurPasses : 0;
+    const ex = Number.isFinite(p.maskExpandPx) ? p.maskExpandPx : 0.0;
+    const res = Number.isFinite(p.buildResolution) ? p.buildResolution : 512;
+    const sdf = Number.isFinite(p.sdfRangePx) ? p.sdfRangePx : 64;
+    const shore = Number.isFinite(p.shoreWidthPx) ? p.shoreWidthPx : 24;
+
+    return `${tex.uuid}|img:${imgId}|v:${v}|c:${chan}|i:${inv}|t:${th}|br:${br}|bp:${bp}|ex:${ex}|res:${res}|sdf:${sdf}|sh:${shore}`;
   }
 
   _getWaterMaskImageId(img) {

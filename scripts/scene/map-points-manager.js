@@ -953,18 +953,24 @@ export class MapPointsManager {
     
     // Get ground plane Z for proper positioning
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
-    const helperZ = groundZ + 50; // Render above ground plane
+    const helperZ = groundZ + 2; // Render above ground plane
     
     // Create a group to hold all visual elements
     const helperGroup = new THREE.Group();
     helperGroup.name = `MapPointHelper_${id}`;
     helperGroup.renderOrder = 1000;
+    helperGroup.userData = {
+      ...(helperGroup.userData || {}),
+      type: 'mapPointHelper',
+      groupId: id,
+      helperZ
+    };
     
     if (group.type === 'point') {
       // Create visible point markers for each point
       for (let i = 0; i < group.points.length; i++) {
         const point = group.points[i];
-        const marker = this._createPointMarkerMesh(point.x, point.y, helperZ, color, i);
+        const marker = this._createPointMarkerMesh(point.x, point.y, helperZ, color, i, id);
         helperGroup.add(marker);
       }
       
@@ -988,12 +994,18 @@ export class MapPointsManager {
       });
       
       const line = new THREE.Line(lineGeo, lineMat);
+      line.userData = {
+        ...(line.userData || {}),
+        type: 'mapPointLine',
+        groupId: id,
+        helperZ
+      };
       helperGroup.add(line);
       
       // Add point markers at each vertex
       for (let i = 0; i < group.points.length; i++) {
         const point = group.points[i];
-        const marker = this._createPointMarkerMesh(point.x, point.y, helperZ + 1, color, i);
+        const marker = this._createPointMarkerMesh(point.x, point.y, helperZ + 1, color, i, id);
         helperGroup.add(marker);
       }
       
@@ -1024,6 +1036,12 @@ export class MapPointsManager {
         });
         
         const fillMesh = new THREE.Mesh(fillGeo, fillMat);
+        fillMesh.userData = {
+          ...(fillMesh.userData || {}),
+          type: 'mapPointFill',
+          groupId: id,
+          helperZ
+        };
         helperGroup.add(fillMesh);
         
         // Outline
@@ -1045,12 +1063,18 @@ export class MapPointsManager {
         });
         
         const outline = new THREE.Line(outlineGeo, outlineMat);
+        outline.userData = {
+          ...(outline.userData || {}),
+          type: 'mapPointOutline',
+          groupId: id,
+          helperZ
+        };
         helperGroup.add(outline);
         
         // Add point markers at each vertex
         for (let i = 0; i < group.points.length; i++) {
           const point = group.points[i];
-          const marker = this._createPointMarkerMesh(point.x, point.y, helperZ + 1, color, i);
+          const marker = this._createPointMarkerMesh(point.x, point.y, helperZ + 1, color, i, id);
           helperGroup.add(marker);
         }
       }
@@ -1114,6 +1138,18 @@ export class MapPointsManager {
     group.add(centerMesh);
 
     group.renderOrder = 1001 + index;
+    if (arguments.length >= 6) {
+      const groupId = arguments[5];
+      const data = {
+        type: 'mapPointHandle',
+        groupId,
+        pointIndex: index
+      };
+      group.userData = { ...(group.userData || {}), ...data };
+      group.traverse((child) => {
+        child.userData = { ...(child.userData || {}), ...data };
+      });
+    }
     return group;
   }
 

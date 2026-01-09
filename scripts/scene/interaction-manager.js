@@ -39,13 +39,17 @@ export class InteractionManager {
     // Drag state
     this.dragState = {
       active: false,
+      mode: null,
       leaderId: null, // ID of the token we clicked on
       object: null, // The PREVIEW sprite being dragged
       startPos: new THREE.Vector3(), // Initial position of the dragged object
       offset: new THREE.Vector3(), // Offset from center
       hasMoved: false,
       initialPositions: new Map(), // Map<string, THREE.Vector3> - Initial positions of all selected objects
-      previews: new Map() // Map<string, THREE.Sprite> - Drag previews
+      previews: new Map(), // Map<string, THREE.Sprite> - Drag previews
+      mapPointGroupId: null,
+      mapPointIndex: null,
+      mapPointPoints: null
     };
 
     this._pendingTokenMoveCleanup = {
@@ -645,6 +649,25 @@ export class InteractionManager {
     this.mapPointDraw.editingGroupId = null;
     this.mapPointDraw.previewGroup.visible = false;
     this._clearPointMarkers();
+    // Ensure we clear any existing preview geometry so it cannot remain visible
+    // due to stale buffer attributes/material state.
+    try {
+      const THREE = window.THREE;
+      if (THREE) {
+        this.mapPointDraw.previewLine.geometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+        this.mapPointDraw.previewPoints.geometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+      }
+    } catch (_) {
+    }
+    try {
+      // Reset fill geometry to an empty BufferGeometry
+      const THREE = window.THREE;
+      if (THREE && this.mapPointDraw.previewFill?.geometry) {
+        this.mapPointDraw.previewFill.geometry.dispose();
+        this.mapPointDraw.previewFill.geometry = new THREE.BufferGeometry();
+      }
+    } catch (_) {
+    }
     this._updateMapPointPreview();
     if (this.mapPointDraw.cursorPoint) {
       this.mapPointDraw.cursorPoint.visible = false;
@@ -762,7 +785,7 @@ export class InteractionManager {
 
     // Get ground Z
     const groundZ = this.sceneComposer?.groundZ ?? 1000;
-    const previewZ = groundZ + 10;
+    const previewZ = groundZ + 2;
 
     // Get effect color for markers
     const effectColor = this._getEffectColor(this.mapPointDraw.effectTarget);
@@ -1448,6 +1471,118 @@ export class InteractionManager {
       }
   }
 
+  _getMapPointHandleAtPosition(clientX, clientY) {
+    const mapPointsManager = window.MapShine?.mapPointsManager;
+    const camera = this.sceneComposer?.camera;
+    if (!mapPointsManager?.showVisualHelpers || !camera) return null;
+
+    const rect = this.canvasElement.getBoundingClientRect();
+    if (!rect || rect.width === 0 || rect.height === 0) return null;
+
+    this.updateMouseCoords({ clientX, clientY });
+    this.raycaster.setFromCamera(this.mouse, camera);
+
+    const helpers = Array.from(mapPointsManager.visualObjects?.values?.() ?? []);
+    if (!helpers.length) return null;
+
+    const intersects = this.raycaster.intersectObjects(helpers, true);
+    if (!intersects.length) return null;
+
+    for (const hit of intersects) {
+      let obj = hit.object;
+      while (obj) {
+        if (obj.userData?.type === 'mapPointHandle') {
+          return {
+            groupId: obj.userData.groupId,
+            pointIndex: obj.userData.pointIndex,
+            object: obj,
+            hitPoint: hit.point
+          };
+        }
+        obj = obj.parent;
+      }
+    }
+
+    return null;
+  }
+
+  _getMapPointHelperGroupFromObject(object) {
+    let obj = object;
+    while (obj) {
+      if (obj.userData?.type === 'mapPointHelper') return obj;
+      obj = obj.parent;
+    }
+    return null;
+  }
+
+  startMapPointHandleDrag(handleObject, hitPoint, groupId, pointIndex) {
+    const mapPointsManager = window.MapShine?.mapPointsManager;
+    const group = mapPointsManager?.getGroup?.(groupId);
+    if (!group || !Array.isArray(group.points) || !Number.isFinite(pointIndex)) return;
+    if (pointIndex < 0 || pointIndex >= group.points.length) return;
+
+    let handleRoot = handleObject;
+    while (
+      handleRoot?.parent &&
+      handleRoot.parent.userData?.type === 'mapPointHandle' &&
+      handleRoot.parent.userData?.groupId === groupId &&
+      handleRoot.parent.userData?.pointIndex === pointIndex
+    ) {
+      handleRoot = handleRoot.parent;
+    }
+
+    this.dragState.active = true;
+    this.dragState.mode = 'mapPointHandle';
+    this.dragState.object = handleRoot;
+    this.dragState.hasMoved = false;
+    this.dragState.mapPointGroupId = groupId;
+    this.dragState.mapPointIndex = pointIndex;
+    this.dragState.mapPointPoints = group.points.map((p) => ({ x: p.x, y: p.y }));
+    this.dragState.startPos.copy(handleRoot.position);
+    this.dragState.offset.subVectors(handleRoot.position, hitPoint);
+
+    if (window.MapShine?.cameraController) {
+      window.MapShine.cameraController.enabled = false;
+    }
+  }
+
+  _updateDraggedMapPointHelperGeometry() {
+    const groupId = this.dragState.mapPointGroupId;
+    const points = this.dragState.mapPointPoints;
+    if (!groupId || !Array.isArray(points) || points.length === 0) return;
+
+    const helperGroup = this._getMapPointHelperGroupFromObject(this.dragState.object);
+    if (!helperGroup) return;
+
+    const helperZ = helperGroup.userData?.helperZ ?? helperGroup.position?.z ?? 0;
+
+    const updateLineGeometry = (line, closeLoop) => {
+      const posAttr = line?.geometry?.getAttribute?.('position');
+      if (!posAttr) return;
+
+      const expectedCount = closeLoop ? (points.length + 1) : points.length;
+      if (posAttr.count !== expectedCount) return;
+
+      for (let i = 0; i < points.length; i++) {
+        posAttr.setXYZ(i, points[i].x, points[i].y, helperZ);
+      }
+      if (closeLoop) {
+        posAttr.setXYZ(points.length, points[0].x, points[0].y, helperZ);
+      }
+      posAttr.needsUpdate = true;
+      line.geometry.computeBoundingSphere?.();
+    };
+
+    for (const child of helperGroup.children) {
+      if (child?.userData?.type === 'mapPointLine') {
+        updateLineGeometry(child, false);
+      }
+      if (child?.userData?.type === 'mapPointOutline') {
+        updateLineGeometry(child, true);
+      }
+    }
+  }
+
   onWheel(event) {
     try {
       if (this._isEventFromUI(event)) return;
@@ -1517,6 +1652,14 @@ export class InteractionManager {
         if (event.button === 0) {
           const mapPointsManager = window.MapShine?.mapPointsManager;
           if (mapPointsManager?.showVisualHelpers) {
+            const handleHit = this._getMapPointHandleAtPosition(event.clientX, event.clientY);
+            if (handleHit) {
+              event.preventDefault();
+              event.stopPropagation();
+              this.startMapPointHandleDrag(handleHit.object, handleHit.hitPoint, handleHit.groupId, handleHit.pointIndex);
+              return;
+            }
+
             const clickedGroupId = this._getMapPointGroupAtPosition(event.clientX, event.clientY);
             if (clickedGroupId) {
               event.preventDefault();
@@ -2432,6 +2575,40 @@ export class InteractionManager {
              return;
         }
 
+        // Case 0.4: Map Point Handle Drag
+        if (this.dragState.active && this.dragState.mode === 'mapPointHandle') {
+          this.updateMouseCoords(event);
+          const targetZ = this.dragState.object?.position?.z ?? (this.sceneComposer?.groundZ ?? 0);
+          const worldPos = this.viewportToWorld(event.clientX, event.clientY, targetZ);
+          if (worldPos && this.dragState.object) {
+            let x = worldPos.x + this.dragState.offset.x;
+            let y = worldPos.y + this.dragState.offset.y;
+
+            if (event.shiftKey) {
+              const snapped = this.snapToGrid(
+                x,
+                y,
+                CONST.GRID_SNAPPING_MODES.CENTER | CONST.GRID_SNAPPING_MODES.VERTEX | CONST.GRID_SNAPPING_MODES.CORNER | CONST.GRID_SNAPPING_MODES.SIDE_MIDPOINT,
+                2
+              );
+              x = snapped.x;
+              y = snapped.y;
+            }
+
+            this.dragState.object.position.set(x, y, targetZ);
+            this.dragState.hasMoved = true;
+
+            const idx = this.dragState.mapPointIndex;
+            if (Array.isArray(this.dragState.mapPointPoints) && Number.isFinite(idx) && this.dragState.mapPointPoints[idx]) {
+              this.dragState.mapPointPoints[idx].x = x;
+              this.dragState.mapPointPoints[idx].y = y;
+            }
+
+            this._updateDraggedMapPointHelperGeometry();
+          }
+          return;
+        }
+
         // Case 0.5: Wall Endpoint Drag
         if (this.dragState.active && this.dragState.mode === 'wallEndpoint') {
             this.updateMouseCoords(event);
@@ -2792,6 +2969,44 @@ export class InteractionManager {
           }
           
           this.dragState.object = null;
+          return;
+        }
+
+        // Handle Map Point Handle Drag End
+        if (this.dragState.active && this.dragState.mode === 'mapPointHandle') {
+          const mapPointsManager = window.MapShine?.mapPointsManager;
+          const groupId = this.dragState.mapPointGroupId;
+          const points = this.dragState.mapPointPoints;
+
+          this.dragState.active = false;
+          this.dragState.mode = null;
+
+          // Re-enable camera controls
+          if (window.MapShine?.cameraController) {
+            window.MapShine.cameraController.enabled = true;
+          }
+
+          if (mapPointsManager && groupId && Array.isArray(points) && points.length > 0) {
+            try {
+              await mapPointsManager.updateGroup(groupId, {
+                points: points.map((p) => ({ x: p.x, y: p.y }))
+              });
+
+              if (mapPointsManager.showVisualHelpers) {
+                const group = mapPointsManager.getGroup(groupId);
+                if (group) {
+                  mapPointsManager.createVisualHelper(groupId, group);
+                }
+              }
+            } catch (e) {
+              log.error('Failed to update map point group from drag', e);
+            }
+          }
+
+          this.dragState.object = null;
+          this.dragState.mapPointGroupId = null;
+          this.dragState.mapPointIndex = null;
+          this.dragState.mapPointPoints = null;
           return;
         }
 

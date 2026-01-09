@@ -4,6 +4,28 @@ import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('SkyColorEffect');
 
+const clamp01 = (n) => Math.max(0, Math.min(1, n));
+
+const wrapHour24 = (h) => {
+  const hour = Number.isFinite(h) ? h : 0;
+  return ((hour % 24) + 24) % 24;
+};
+
+const smooth01 = (x) => x * x * (3 - 2 * x);
+
+const wrapDistHours = (a, b) => {
+  const d = Math.abs(a - b);
+  return Math.min(d, 24 - d);
+};
+
+const peakHour = (hour, center, widthHours) => {
+  const d = wrapDistHours(hour, center);
+  const t = clamp01(1 - d / Math.max(0.0001, widthHours));
+  return smooth01(t);
+};
+
+const lerp = (a, b, t) => a + (b - a) * t;
+
 export class SkyColorEffect extends EffectBase {
   constructor() {
     super('sky-color', RenderLayers.POST_PROCESSING, 'low');
@@ -24,6 +46,41 @@ export class SkyColorEffect extends EffectBase {
       // Master blend of sky grading vs base scene
       // Default 0.2 to provide subtle atmospheric grading - users can increase/decrease as desired
       intensity: 1.0,
+
+      saturationBoost: 0.15,
+      vibranceBoost: 0.15,
+
+      automationMode: 1,
+      sunriseHour: 6.0,
+      sunsetHour: 18.0,
+      goldenHourWidth: 2.5,
+      goldenStrength: 2.0,
+      goldenPower: 1.35,
+      nightFloor: 0.0,
+
+      analyticStrength: 1.75,
+
+      turbidity: 0.25,
+      rayleighStrength: 0.65,
+      mieStrength: 0.35,
+      forwardScatter: 0.25,
+
+      weatherInfluence: 1.0,
+      cloudToTurbidity: 1.0,
+      precipToTurbidity: 1.25,
+      overcastDesaturate: 0.35,
+      overcastContrastReduce: 0.25,
+
+      tempWarmAtHorizon: 0.85,
+      tempCoolAtNoon: -0.45,
+      nightCoolBoost: -0.25,
+      goldenSaturationBoost: 0.18,
+      nightSaturationFloor: 0.33,
+      hazeLift: 0.08,
+      hazeContrastLoss: 0.25,
+
+      autoIntensityEnabled: true,
+      autoIntensityStrength: 1.0,
 
       // --- Time-of-day grading presets (blended by timeOfDay) ---
       // Note: These are applied only to outdoors (masked) and then blended by intensity.
@@ -225,7 +282,41 @@ export class SkyColorEffect extends EffectBase {
           name: 'sky-color',
           label: 'Sky Color',
           type: 'inline',
-          parameters: ['intensity']
+          parameters: ['intensity', 'saturationBoost', 'vibranceBoost']
+        },
+        {
+          name: 'sky-automation',
+          label: 'Automation (Analytic)',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'automationMode',
+            'sunriseHour',
+            'sunsetHour',
+            'goldenHourWidth',
+            'goldenStrength',
+            'goldenPower',
+            'nightFloor',
+            'analyticStrength',
+            'turbidity',
+            'rayleighStrength',
+            'mieStrength',
+            'forwardScatter',
+            'weatherInfluence',
+            'cloudToTurbidity',
+            'precipToTurbidity',
+            'overcastDesaturate',
+            'overcastContrastReduce',
+            'tempWarmAtHorizon',
+            'tempCoolAtNoon',
+            'nightCoolBoost',
+            'goldenSaturationBoost',
+            'nightSaturationFloor',
+            'hazeLift',
+            'hazeContrastLoss',
+            'autoIntensityEnabled',
+            'autoIntensityStrength'
+          ]
         },
         {
           name: 'time-of-day',
@@ -285,6 +376,55 @@ export class SkyColorEffect extends EffectBase {
           label: 'Intensity',
           throttle: 50
         },
+        saturationBoost: {
+          type: 'slider',
+          min: -0.5,
+          max: 0.5,
+          step: 0.01,
+          default: 0.15,
+          label: 'Sat Boost',
+          throttle: 50
+        },
+        vibranceBoost: {
+          type: 'slider',
+          min: -0.5,
+          max: 0.5,
+          step: 0.01,
+          default: 0.15,
+          label: 'Vibrance',
+          throttle: 50
+        },
+        automationMode: {
+          type: 'list',
+          options: { 'Preset Blend (Legacy)': 0, 'Analytic (Sun + Weather)': 1 },
+          default: 1,
+          label: 'Automation Mode'
+        },
+        sunriseHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 6.0, label: 'Sunrise', throttle: 50 },
+        sunsetHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 18.0, label: 'Sunset', throttle: 50 },
+        goldenHourWidth: { type: 'slider', min: 0.25, max: 6.0, step: 0.05, default: 2.5, label: 'Golden Width', throttle: 50 },
+        goldenStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 2.0, label: 'Golden Strength', throttle: 50 },
+        goldenPower: { type: 'slider', min: 0.5, max: 3.0, step: 0.01, default: 1.35, label: 'Golden Power', throttle: 50 },
+        nightFloor: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.0, label: 'Night Floor', throttle: 50 },
+        analyticStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 1.75, label: 'Analytic Strength', throttle: 50 },
+        turbidity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.25, label: 'Turbidity', throttle: 50 },
+        rayleighStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.65, label: 'Rayleigh', throttle: 50 },
+        mieStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.35, label: 'Mie', throttle: 50 },
+        forwardScatter: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.25, label: 'Forward Scatter', throttle: 50 },
+        weatherInfluence: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Weather Influence', throttle: 50 },
+        cloudToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 1.0, label: 'Cloud→Turbidity', throttle: 50 },
+        precipToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 1.25, label: 'Precip→Turbidity', throttle: 50 },
+        overcastDesaturate: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.35, label: 'Overcast Desat', throttle: 50 },
+        overcastContrastReduce: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.25, label: 'Overcast Contrast', throttle: 50 },
+        tempWarmAtHorizon: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.85, label: 'Warm Horizon', throttle: 50 },
+        tempCoolAtNoon: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.45, label: 'Cool Noon', throttle: 50 },
+        nightCoolBoost: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.25, label: 'Night Cool', throttle: 50 },
+        goldenSaturationBoost: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.18, label: 'Golden Sat', throttle: 50 },
+        nightSaturationFloor: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.33, label: 'Night Sat Floor', throttle: 50 },
+        hazeLift: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.08, label: 'Haze Lift', throttle: 50 },
+        hazeContrastLoss: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.25, label: 'Haze Contrast', throttle: 50 },
+        autoIntensityEnabled: { type: 'boolean', default: true, label: 'Auto Intensity' },
+        autoIntensityStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Auto Strength', throttle: 50 },
         ...dawn.parameters,
         ...day.parameters,
         ...dusk.parameters,
@@ -342,6 +482,8 @@ export class SkyColorEffect extends EffectBase {
         uHasRoofAlpha: { value: 0.0 },
         tRopeMask: { value: null },
         uHasRopeMask: { value: 0.0 },
+        tTokenMask: { value: null },
+        uHasTokenMask: { value: 0.0 },
         tCloudTop: { value: null },
         uHasCloudTop: { value: 0.0 },
         uTime: { value: 0.0 },
@@ -383,6 +525,8 @@ export class SkyColorEffect extends EffectBase {
         uniform float uHasRoofAlpha;
         uniform sampler2D tRopeMask;
         uniform float uHasRopeMask;
+        uniform sampler2D tTokenMask;
+        uniform float uHasTokenMask;
         uniform sampler2D tCloudTop;
         uniform float uHasCloudTop;
         uniform vec2 uResolution;
@@ -452,12 +596,18 @@ export class SkyColorEffect extends EffectBase {
             ropeMask = texture2D(tRopeMask, vUv).a;
           }
 
+          float tokenMask = 0.0;
+          if (uHasTokenMask > 0.5) {
+            tokenMask = texture2D(tTokenMask, vUv).a;
+          }
+
           float cloudTopAlpha = 0.0;
           if (uHasCloudTop > 0.5) {
             cloudTopAlpha = texture2D(tCloudTop, vUv).a;
           }
 
-          float gradeMask = max(max(outdoors, roofAlpha), ropeMask);
+          float outdoorLike = max(outdoors, cloudTopAlpha);
+          float gradeMask = clamp(max(outdoorLike, tokenMask), 0.0, 1.0);
 
           if (uIntensity <= 0.0 || gradeMask <= 0.0) {
             gl_FragColor = sceneColor;
@@ -547,72 +697,200 @@ export class SkyColorEffect extends EffectBase {
 
     try {
       const hourRaw = weatherController?.timeOfDay ?? 12.0;
-      const hour = ((hourRaw % 24) + 24) % 24;
+      const hour = wrapHour24(hourRaw);
 
-      // Time-of-day weights (normalized)
-      const clamp01 = (n) => Math.max(0, Math.min(1, n));
-      const wrapDistHours = (a, b) => {
-        const d = Math.abs(a - b);
-        return Math.min(d, 24 - d);
-      };
-      const smooth01 = (x) => x * x * (3 - 2 * x);
-      const peak = (center, widthHours) => {
-        const d = wrapDistHours(hour, center);
-        const t = clamp01(1 - d / Math.max(0.0001, widthHours));
-        return smooth01(t);
-      };
-
-      const wDawn = peak(6.0, 3.0);
-      const wDay = peak(12.0, 5.5);
-      const wDusk = peak(18.0, 3.0);
-      const wNight = peak(0.0, 6.5);
-      const wSum = Math.max(0.0001, wDawn + wDay + wDusk + wNight);
-      const wd = wDawn / wSum;
-      const wday = wDay / wSum;
-      const wdu = wDusk / wSum;
-      const wn = wNight / wSum;
-
-      const blend4 = (a, b, c, d) => a * wd + b * wday + c * wdu + d * wn;
-      const blendColor4 = (a, b, c, d) => ({
-        r: a.r * wd + b.r * wday + c.r * wdu + d.r * wn,
-        g: a.g * wd + b.g * wday + c.g * wdu + d.g * wn,
-        b: a.b * wd + b.b * wday + c.b * wdu + d.b * wn
-      });
-
-      const dawnLift = this.params.dawnLiftColor;
-      const dawnGamma = this.params.dawnGammaColor;
-      const dawnGain = this.params.dawnGainColor;
-      const dayLift = this.params.dayLiftColor;
-      const dayGamma = this.params.dayGammaColor;
-      const dayGain = this.params.dayGainColor;
-      const duskLift = this.params.duskLiftColor;
-      const duskGamma = this.params.duskGammaColor;
-      const duskGain = this.params.duskGainColor;
-      const nightLift = this.params.nightLiftColor;
-      const nightGamma = this.params.nightGammaColor;
-      const nightGain = this.params.nightGainColor;
-
-      let exposure = blend4(this.params.dawnExposure, this.params.dayExposure, this.params.duskExposure, this.params.nightExposure);
-      const temperature = blend4(this.params.dawnTemperature, this.params.dayTemperature, this.params.duskTemperature, this.params.nightTemperature);
-      const tint = blend4(this.params.dawnTint, this.params.dayTint, this.params.duskTint, this.params.nightTint);
-      const brightness = blend4(this.params.dawnBrightness, this.params.dayBrightness, this.params.duskBrightness, this.params.nightBrightness);
-      let contrast = blend4(this.params.dawnContrast, this.params.dayContrast, this.params.duskContrast, this.params.nightContrast);
-      let saturation = blend4(this.params.dawnSaturation, this.params.daySaturation, this.params.duskSaturation, this.params.nightSaturation);
-      const vibrance = blend4(this.params.dawnVibrance, this.params.dayVibrance, this.params.duskVibrance, this.params.nightVibrance);
-      const lift = blendColor4(dawnLift, dayLift, duskLift, nightLift);
-      const gammaColor = blendColor4(dawnGamma, dayGamma, duskGamma, nightGamma);
-      const gainColor = blendColor4(dawnGain, dayGain, duskGain, nightGain);
-      const masterGamma = blend4(this.params.dawnMasterGamma, this.params.dayMasterGamma, this.params.duskMasterGamma, this.params.nightMasterGamma);
-      const vignetteStrength = blend4(this.params.dawnVignetteStrength, this.params.dayVignetteStrength, this.params.duskVignetteStrength, this.params.nightVignetteStrength);
-      const vignetteSoftness = blend4(this.params.dawnVignetteSoftness, this.params.dayVignetteSoftness, this.params.duskVignetteSoftness, this.params.nightVignetteSoftness);
-      const grainStrength = blend4(this.params.dawnGrainStrength, this.params.dayGrainStrength, this.params.duskGrainStrength, this.params.nightGrainStrength);
-
-      // Tone mapping isn't meaningfully blendable. Use the dominant stage.
+      let exposure = 0.0;
+      let temperature = 0.0;
+      let tint = 0.0;
+      let brightness = 0.0;
+      let contrast = 1.0;
+      let saturation = 1.0;
+      let vibrance = 0.0;
+      let liftR = 0.0;
+      let liftG = 0.0;
+      let liftB = 0.0;
+      let gammaR = 1.0;
+      let gammaG = 1.0;
+      let gammaB = 1.0;
+      let gainR = 1.0;
+      let gainG = 1.0;
+      let gainB = 1.0;
+      let masterGamma = 1.0;
       let toneMapping = this.params.dayToneMapping;
-      let wMax = wday;
-      if (wd > wMax) { wMax = wd; toneMapping = this.params.dawnToneMapping; }
-      if (wdu > wMax) { wMax = wdu; toneMapping = this.params.duskToneMapping; }
-      if (wn > wMax) { wMax = wn; toneMapping = this.params.nightToneMapping; }
+      let vignetteStrength = 0.0;
+      let vignetteSoftness = 0.5;
+      let grainStrength = 0.0;
+
+      if (this.params.automationMode === 1) {
+        const sunrise = wrapHour24(this.params.sunriseHour);
+        const sunset = wrapHour24(this.params.sunsetHour);
+
+        let dayProgress = 0.0;
+        if (sunrise < sunset) {
+          if (hour >= sunrise && hour <= sunset) {
+            dayProgress = (hour - sunrise) / Math.max(0.0001, sunset - sunrise);
+          } else {
+            dayProgress = -1.0;
+          }
+        } else {
+          const span = (24 - sunrise) + sunset;
+          if (hour >= sunrise) {
+            dayProgress = (hour - sunrise) / Math.max(0.0001, span);
+          } else if (hour <= sunset) {
+            dayProgress = (24 - sunrise + hour) / Math.max(0.0001, span);
+          } else {
+            dayProgress = -1.0;
+          }
+        }
+
+        const sunFactorRaw = dayProgress >= 0.0 ? Math.sin(Math.PI * clamp01(dayProgress)) : 0.0;
+        const dayFactor = Math.max(clamp01(this.params.nightFloor), clamp01(sunFactorRaw));
+
+        const goldenWidth = Math.max(0.0001, this.params.goldenHourWidth);
+        const goldenBase = clamp01(peakHour(hour, sunrise, goldenWidth) + peakHour(hour, sunset, goldenWidth));
+        const goldenPow = Math.pow(goldenBase, Math.max(0.0001, this.params.goldenPower ?? 1.0));
+        const golden = clamp01(goldenPow * Math.max(0.0, this.params.goldenStrength ?? 1.0));
+
+        const state = weatherController?.getCurrentState ? weatherController.getCurrentState() : null;
+        const cloudCover = clamp01(state?.cloudCover ?? 0.0);
+        const precipitation = clamp01(state?.precipitation ?? 0.0);
+        let overcast = clamp01(cloudCover * 0.8 + precipitation * 0.6);
+        let storm = precipitation;
+
+        const env = weatherController?.getEnvironment ? weatherController.getEnvironment() : null;
+        if (env) {
+          if (Number.isFinite(env.overcastFactor)) overcast = clamp01(env.overcastFactor);
+          if (Number.isFinite(env.stormFactor)) storm = clamp01(env.stormFactor);
+        }
+
+        let sceneDarkness = 0.0;
+        try {
+          sceneDarkness = clamp01(canvas?.environment?.darknessLevel ?? 0.0);
+        } catch (e) {
+          sceneDarkness = 0.0;
+        }
+
+        if (env && Number.isFinite(env.sceneDarkness)) {
+          sceneDarkness = clamp01(env.sceneDarkness);
+        }
+
+        const weatherInfluence = clamp01(this.params.weatherInfluence);
+        const turbidityBase = clamp01(this.params.turbidity);
+        const turbidityWeather = weatherInfluence * (
+          (this.params.cloudToTurbidity ?? 0.0) * cloudCover +
+          (this.params.precipToTurbidity ?? 0.0) * precipitation
+        );
+        const turbidityEff = clamp01(turbidityBase + turbidityWeather);
+
+        let effectiveDarkness = clamp01(
+          sceneDarkness +
+          (1.0 - dayFactor) * 0.25 +
+          overcast * 0.15 +
+          storm * 0.1
+        );
+
+        if (env && Number.isFinite(env.effectiveDarkness)) {
+          effectiveDarkness = clamp01(env.effectiveDarkness);
+        }
+
+        const rayleigh = clamp01(this.params.rayleighStrength);
+        const mie = clamp01(this.params.mieStrength);
+        const forward = clamp01(this.params.forwardScatter);
+
+        temperature =
+          (this.params.tempWarmAtHorizon ?? 0.0) * golden * (0.5 + 0.5 * mie) +
+          (this.params.tempCoolAtNoon ?? 0.0) * dayFactor * rayleigh +
+          (this.params.nightCoolBoost ?? 0.0) * effectiveDarkness;
+
+        const overcastDesat = clamp01(this.params.overcastDesaturate);
+        const overcastContrast = clamp01(this.params.overcastContrastReduce);
+        const hazeLoss = clamp01(this.params.hazeContrastLoss);
+
+        saturation = 1.0;
+        saturation += (this.params.goldenSaturationBoost ?? 0.0) * golden;
+        saturation *= 1.0 - overcastDesat * overcast * weatherInfluence;
+        saturation *= 1.0 - (turbidityEff * mie) * 0.35;
+        const satFloor = clamp01(this.params.nightSaturationFloor);
+        saturation = Math.max(satFloor, lerp(saturation, satFloor, effectiveDarkness * 0.75));
+
+        contrast = 1.0;
+        contrast *= 1.0 - overcastContrast * overcast * weatherInfluence;
+        contrast *= 1.0 - turbidityEff * mie * hazeLoss;
+        contrast *= 1.0 - effectiveDarkness * 0.2;
+        contrast = Math.max(0.5, Math.min(1.5, contrast));
+
+        const hazeLift = clamp01(this.params.hazeLift);
+        brightness = turbidityEff * mie * hazeLift;
+
+        exposure = 0.25 * dayFactor - 0.35 * effectiveDarkness - 0.10 * turbidityEff;
+        exposure += forward * golden * 0.05;
+        exposure = Math.max(-1.0, Math.min(1.0, exposure));
+
+        vibrance = (golden * 0.25 - overcast * 0.2) * (1.0 - effectiveDarkness);
+
+        const analyticStrength = Math.max(0.0, this.params.analyticStrength ?? 1.0);
+        temperature = Math.max(-1.0, Math.min(1.0, temperature * analyticStrength));
+        exposure = Math.max(-1.0, Math.min(1.0, exposure * analyticStrength));
+        brightness = Math.max(-0.5, Math.min(0.5, brightness * analyticStrength));
+        saturation = Math.max(0.0, Math.min(2.0, 1.0 + (saturation - 1.0) * analyticStrength));
+        contrast = Math.max(0.5, Math.min(1.5, 1.0 + (contrast - 1.0) * analyticStrength));
+        vibrance = Math.max(-1.0, Math.min(1.0, vibrance * analyticStrength));
+
+        const tNight = clamp01(effectiveDarkness);
+        vignetteStrength = lerp(this.params.dayVignetteStrength ?? 0.0, this.params.nightVignetteStrength ?? 0.0, tNight);
+        vignetteSoftness = lerp(this.params.dayVignetteSoftness ?? 0.5, this.params.nightVignetteSoftness ?? 0.5, tNight);
+        grainStrength = lerp(this.params.dayGrainStrength ?? 0.0, this.params.nightGrainStrength ?? 0.0, tNight);
+      } else {
+        const wDawn = peakHour(hour, 6.0, 3.0);
+        const wDay = peakHour(hour, 12.0, 5.5);
+        const wDusk = peakHour(hour, 18.0, 3.0);
+        const wNight = peakHour(hour, 0.0, 6.5);
+        const wSum = Math.max(0.0001, wDawn + wDay + wDusk + wNight);
+        const wd = wDawn / wSum;
+        const wday = wDay / wSum;
+        const wdu = wDusk / wSum;
+        const wn = wNight / wSum;
+
+        const dawnLift = this.params.dawnLiftColor;
+        const dawnGamma = this.params.dawnGammaColor;
+        const dawnGain = this.params.dawnGainColor;
+        const dayLift = this.params.dayLiftColor;
+        const dayGamma = this.params.dayGammaColor;
+        const dayGain = this.params.dayGainColor;
+        const duskLift = this.params.duskLiftColor;
+        const duskGamma = this.params.duskGammaColor;
+        const duskGain = this.params.duskGainColor;
+        const nightLift = this.params.nightLiftColor;
+        const nightGamma = this.params.nightGammaColor;
+        const nightGain = this.params.nightGainColor;
+
+        exposure = this.params.dawnExposure * wd + this.params.dayExposure * wday + this.params.duskExposure * wdu + this.params.nightExposure * wn;
+        temperature = this.params.dawnTemperature * wd + this.params.dayTemperature * wday + this.params.duskTemperature * wdu + this.params.nightTemperature * wn;
+        tint = this.params.dawnTint * wd + this.params.dayTint * wday + this.params.duskTint * wdu + this.params.nightTint * wn;
+        brightness = this.params.dawnBrightness * wd + this.params.dayBrightness * wday + this.params.duskBrightness * wdu + this.params.nightBrightness * wn;
+        contrast = this.params.dawnContrast * wd + this.params.dayContrast * wday + this.params.duskContrast * wdu + this.params.nightContrast * wn;
+        saturation = this.params.dawnSaturation * wd + this.params.daySaturation * wday + this.params.duskSaturation * wdu + this.params.nightSaturation * wn;
+        vibrance = this.params.dawnVibrance * wd + this.params.dayVibrance * wday + this.params.duskVibrance * wdu + this.params.nightVibrance * wn;
+        liftR = dawnLift.r * wd + dayLift.r * wday + duskLift.r * wdu + nightLift.r * wn;
+        liftG = dawnLift.g * wd + dayLift.g * wday + duskLift.g * wdu + nightLift.g * wn;
+        liftB = dawnLift.b * wd + dayLift.b * wday + duskLift.b * wdu + nightLift.b * wn;
+        gammaR = dawnGamma.r * wd + dayGamma.r * wday + duskGamma.r * wdu + nightGamma.r * wn;
+        gammaG = dawnGamma.g * wd + dayGamma.g * wday + duskGamma.g * wdu + nightGamma.g * wn;
+        gammaB = dawnGamma.b * wd + dayGamma.b * wday + duskGamma.b * wdu + nightGamma.b * wn;
+        gainR = dawnGain.r * wd + dayGain.r * wday + duskGain.r * wdu + nightGain.r * wn;
+        gainG = dawnGain.g * wd + dayGain.g * wday + duskGain.g * wdu + nightGain.g * wn;
+        gainB = dawnGain.b * wd + dayGain.b * wday + duskGain.b * wdu + nightGain.b * wn;
+        masterGamma = this.params.dawnMasterGamma * wd + this.params.dayMasterGamma * wday + this.params.duskMasterGamma * wdu + this.params.nightMasterGamma * wn;
+        vignetteStrength = this.params.dawnVignetteStrength * wd + this.params.dayVignetteStrength * wday + this.params.duskVignetteStrength * wdu + this.params.nightVignetteStrength * wn;
+        vignetteSoftness = this.params.dawnVignetteSoftness * wd + this.params.dayVignetteSoftness * wday + this.params.duskVignetteSoftness * wdu + this.params.nightVignetteSoftness * wn;
+        grainStrength = this.params.dawnGrainStrength * wd + this.params.dayGrainStrength * wday + this.params.duskGrainStrength * wdu + this.params.nightGrainStrength * wn;
+
+        let wMax = wday;
+        toneMapping = this.params.dayToneMapping;
+        if (wd > wMax) { wMax = wd; toneMapping = this.params.dawnToneMapping; }
+        if (wdu > wMax) { wMax = wdu; toneMapping = this.params.duskToneMapping; }
+        if (wn > wMax) { wMax = wn; toneMapping = this.params.nightToneMapping; }
+      }
 
       if (this.params.debugOverride) {
         // Manual override for core values (kept for compatibility)
@@ -624,6 +902,9 @@ export class SkyColorEffect extends EffectBase {
         this.params.saturation = saturation;
         this.params.contrast = contrast;
       }
+
+      saturation = Math.max(0.0, Math.min(2.0, saturation + (this.params.saturationBoost ?? 0.0)));
+      vibrance = Math.max(-1.0, Math.min(1.0, vibrance + (this.params.vibranceBoost ?? 0.0)));
 
       const u = this.material.uniforms;
       u.uTime.value = timeInfo.elapsed;
@@ -637,15 +918,23 @@ export class SkyColorEffect extends EffectBase {
       u.uSaturation.value = saturation;
       u.uVibrance.value = vibrance;
 
-      u.uLift.value.set(lift.r, lift.g, lift.b);
-      u.uGamma.value.set(Math.max(0.0001, gammaColor.r), Math.max(0.0001, gammaColor.g), Math.max(0.0001, gammaColor.b));
-      u.uGain.value.set(gainColor.r, gainColor.g, gainColor.b);
+      u.uLift.value.set(liftR, liftG, liftB);
+      u.uGamma.value.set(Math.max(0.0001, gammaR), Math.max(0.0001, gammaG), Math.max(0.0001, gammaB));
+      u.uGain.value.set(gainR, gainG, gainB);
       u.uMasterGamma.value = masterGamma ?? 1.0;
       u.uToneMapping.value = toneMapping;
       u.uVignetteStrength.value = vignetteStrength;
       u.uVignetteSoftness.value = vignetteSoftness;
       u.uGrainStrength.value = grainStrength;
-      u.uIntensity.value = this.params.intensity;
+      let effectiveIntensity = this.params.intensity;
+      if (this.params.automationMode === 1 && this.params.autoIntensityEnabled) {
+        const env = weatherController?.getEnvironment ? weatherController.getEnvironment() : null;
+        const skyIntensity = clamp01(env?.skyIntensity ?? 1.0);
+        const strength = clamp01(this.params.autoIntensityStrength);
+        effectiveIntensity *= lerp(1.0, skyIntensity, strength);
+      }
+
+      u.uIntensity.value = effectiveIntensity;
 
       const cloudEffect = window.MapShine?.cloudEffect;
       const cloudTopTex = cloudEffect?.cloudTopTarget?.texture ?? null;
@@ -696,6 +985,20 @@ export class SkyColorEffect extends EffectBase {
           u.uHasRopeMask.value = 1.0;
         } else {
           u.uHasRopeMask.value = 0.0;
+        }
+      }
+
+      const tokenMaskTex = mm ? mm.getTexture('tokenMask.screen') : null;
+      if (tokenMaskTex) {
+        u.tTokenMask.value = tokenMaskTex;
+        u.uHasTokenMask.value = 1.0;
+      } else {
+        const le4 = window.MapShine?.lightingEffect;
+        if (le4 && le4.tokenMaskTarget) {
+          u.tTokenMask.value = le4.tokenMaskTarget.texture;
+          u.uHasTokenMask.value = 1.0;
+        } else {
+          u.uHasTokenMask.value = 0.0;
         }
       }
     } catch (e) {

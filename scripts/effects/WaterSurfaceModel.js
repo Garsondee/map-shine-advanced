@@ -1,6 +1,7 @@
 export class WaterSurfaceModel {
   constructor() {
     this.texture = null;
+    this.rawMaskTexture = null;
     this.transform = null;
     this.resolution = 0;
     this.threshold = 0.0;
@@ -15,6 +16,11 @@ export class WaterSurfaceModel {
   buildFromMaskTexture(maskTexture, {
     resolution = 512,
     threshold = 0.15,
+    channel = 'auto',
+    invert = false,
+    blurRadius = 0.0,
+    blurPasses = 0,
+    expandPx = 0.0,
     sdfRangePx = 64,
     exposureWidthPx = 24
   } = {}) {
@@ -53,13 +59,96 @@ export class WaterSurfaceModel {
 
     this._useAlpha = this._detectUseAlpha(data);
 
+    const chan = (channel === 'r' || channel === 'a' || channel === 'luma') ? channel : 'auto';
+    const useAlpha = (chan === 'a') ? true : (chan === 'r' ? false : this._useAlpha);
+
+    const raw = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      const r = data[i * 4];
+      const g = data[i * 4 + 1];
+      const b = data[i * 4 + 2];
+      const a = data[i * 4 + 3];
+
+      let v;
+      if (chan === 'luma') {
+        v = Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b);
+      } else {
+        v = useAlpha ? a : r;
+      }
+
+      if (invert) v = 255 - v;
+      raw[i] = v;
+    }
+
+    const rawRgba = new Uint8Array(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const v = raw[i];
+      const o = i * 4;
+      rawRgba[o] = v;
+      rawRgba[o + 1] = v;
+      rawRgba[o + 2] = v;
+      rawRgba[o + 3] = 255;
+    }
+
+    const rawTex = new THREE.DataTexture(rawRgba, w, h, THREE.RGBAFormat, THREE.UnsignedByteType);
+    rawTex.minFilter = THREE.LinearFilter;
+    rawTex.magFilter = THREE.LinearFilter;
+    rawTex.wrapS = THREE.ClampToEdgeWrapping;
+    rawTex.wrapT = THREE.ClampToEdgeWrapping;
+    rawTex.generateMipmaps = false;
+    rawTex.flipY = false;
+    if ('colorSpace' in rawTex && THREE.NoColorSpace) {
+      rawTex.colorSpace = THREE.NoColorSpace;
+    }
+    rawTex.needsUpdate = true;
+    this.rawMaskTexture = rawTex;
+
+    const th = Math.max(0.0, Math.min(1.0, threshold));
+
+    let working = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      working[i] = raw[i] / 255.0;
+    }
+
+    const passes = Math.max(0, Math.floor(blurPasses));
+    const rPx = Math.max(0.0, blurRadius);
+    if (passes > 0 && rPx > 1e-4) {
+      const tmp = new Float32Array(w * h);
+      const rr = Math.max(0.5, rPx);
+      const radius = Math.min(16, Math.ceil(rr * 3.0));
+      const weights = new Float32Array(radius * 2 + 1);
+      let wsum = 0.0;
+      for (let j = -radius; j <= radius; j++) {
+        const ww = Math.exp(-0.5 * (j * j) / (rr * rr));
+        weights[j + radius] = ww;
+        wsum += ww;
+      }
+      for (let j = 0; j < weights.length; j++) weights[j] /= Math.max(1e-6, wsum);
+
+      const blur1D = (src, dst, dx, dy) => {
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            let acc = 0.0;
+            for (let k = -radius; k <= radius; k++) {
+              const xx = Math.max(0, Math.min(w - 1, x + k * dx));
+              const yy = Math.max(0, Math.min(h - 1, y + k * dy));
+              acc += src[yy * w + xx] * weights[k + radius];
+            }
+            dst[y * w + x] = acc;
+          }
+        }
+      };
+
+      for (let p = 0; p < passes; p++) {
+        blur1D(working, tmp, 1, 0);
+        blur1D(tmp, working, 0, 1);
+      }
+    }
+
     const mask = new Uint8Array(w * h);
     let hasWater = false;
     for (let i = 0; i < w * h; i++) {
-      const r = data[i * 4];
-      const a = data[i * 4 + 3];
-      const v = this._useAlpha ? a : r;
-      const on = v >= threshold * 255 ? 1 : 0;
+      const on = (working[i] >= th) ? 1 : 0;
       mask[i] = on;
       if (on) hasWater = true;
     }
@@ -67,6 +156,7 @@ export class WaterSurfaceModel {
 
     const distToLand = this._distanceTransform(mask, w, h, false);
     const distToWater = this._distanceTransform(mask, w, h, true);
+    const expand = Number.isFinite(expandPx) ? expandPx : 0.0;
 
     const out = new Uint8Array(w * h * 4);
     const sdfScale = Math.max(1e-3, sdfRangePx);
@@ -75,8 +165,9 @@ export class WaterSurfaceModel {
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const idx = y * w + x;
-        const isWater = mask[idx] === 1;
-        const sdfPx = isWater ? -distToLand[idx] : distToWater[idx];
+        const isWater0 = mask[idx] === 1;
+        const sdfPx0 = isWater0 ? -distToLand[idx] : distToWater[idx];
+        const sdfPx = sdfPx0 - expand;
 
         const sdf01 = this._clamp01(0.5 + (sdfPx / (2.0 * sdfScale)));
         const shoreDistInside = Math.max(0.0, -sdfPx);
@@ -120,6 +211,7 @@ export class WaterSurfaceModel {
 
     return {
       texture: this.texture,
+      rawMaskTexture: this.rawMaskTexture,
       transform: this.transform,
       resolution: this.resolution,
       threshold: this.threshold,
@@ -132,6 +224,12 @@ export class WaterSurfaceModel {
       this.texture.dispose();
     }
     this.texture = null;
+
+    if (this.rawMaskTexture && typeof this.rawMaskTexture.dispose === 'function') {
+      this.rawMaskTexture.dispose();
+    }
+    this.rawMaskTexture = null;
+
     this.transform = null;
     this._hasWater = false;
   }

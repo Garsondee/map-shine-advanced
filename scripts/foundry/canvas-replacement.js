@@ -16,6 +16,7 @@ import { WindowLightEffect } from '../effects/WindowLightEffect.js';
 import { BushEffect } from '../effects/BushEffect.js';
 import { TreeEffect } from '../effects/TreeEffect.js';
 import { ColorCorrectionEffect } from '../effects/ColorCorrectionEffect.js';
+import { SharpenEffect } from '../effects/SharpenEffect.js';
 import { SkyColorEffect } from '../effects/SkyColorEffect.js';
 import { AsciiEffect } from '../effects/AsciiEffect.js';
 import { BloomEffect } from '../effects/BloomEffect.js';
@@ -805,7 +806,22 @@ async function createThreeCanvas(scene) {
 
     threeCanvas = rendererCanvas; // Update reference
     const rect = threeCanvas.getBoundingClientRect();
-    renderer.setSize(rect.width, rect.height);
+    // Avoid setSize() overwriting our CSS sizing (width/height=100%).
+    // If updateStyle=true, three will set style width/height to fixed pixel values,
+    // preventing future container resizes from affecting the canvas element.
+    try {
+      const dpr = window.devicePixelRatio || 1;
+      if (typeof renderer.setPixelRatio === 'function') {
+        renderer.setPixelRatio(dpr);
+      }
+    } catch (_) {
+    }
+
+    try {
+      renderer.setSize(rect.width, rect.height, false);
+    } catch (_) {
+      renderer.setSize(rect.width, rect.height);
+    }
 
     // Robustness: Handle WebGL context loss/restoration.
     // Some UI operations or GPU resets can trigger a context loss; in that case we must
@@ -828,7 +844,19 @@ async function createThreeCanvas(scene) {
           // Re-apply sizing to ensure internal buffers are sane.
           const r = threeCanvas?.getBoundingClientRect?.();
           if (r && renderer) {
-            renderer.setSize(r.width, r.height);
+            try {
+              const dpr = window.devicePixelRatio || 1;
+              if (typeof renderer.setPixelRatio === 'function') {
+                renderer.setPixelRatio(dpr);
+              }
+            } catch (_) {
+            }
+
+            try {
+              renderer.setSize(r.width, r.height, false);
+            } catch (_) {
+              renderer.setSize(r.width, r.height);
+            }
             if (sceneComposer) sceneComposer.resize(r.width, r.height);
             if (effectComposer) effectComposer.resize(r.width, r.height);
           }
@@ -954,7 +982,7 @@ async function createThreeCanvas(scene) {
     }
 
     let _effectInitIndex = 0;
-    const _effectInitTotal = 27;
+    const _effectInitTotal = 28;
     const _setEffectInitStep = (label) => {
       _effectInitIndex++;
       const t = Math.max(0, Math.min(1, _effectInitIndex / _effectInitTotal));
@@ -986,11 +1014,6 @@ async function createThreeCanvas(scene) {
       return;
     }
 
-    // Apply persisted snapshot after initialize so we restore the most recent live weather.
-    // (Initialize may run before flags are available in some edge cases; canvasReady ensures scene exists.)
-    weatherController._loadWeatherSnapshotFromScene?.();
-    effectComposer.addUpdatable(weatherController);
-
     // Step 3: Register specular effect
     _setEffectInitStep('Specular');
     const specularEffect = new SpecularEffect();
@@ -1012,19 +1035,24 @@ async function createThreeCanvas(scene) {
     _setEffectInitStep('Color Correction');
     const colorCorrectionEffect = new ColorCorrectionEffect();
     await effectComposer.registerEffect(colorCorrectionEffect);
-    
-    // Step 3.3: Register ASCII Effect (Post-Processing)
+
+    // Step 3.3: Register sharpen effect (Post-Processing)
+    _setEffectInitStep('Sharpen');
+    const sharpenEffect = new SharpenEffect();
+    await effectComposer.registerEffect(sharpenEffect);
+
+    // Step 3.4: Register ASCII Effect (Post-Processing)
     _setEffectInitStep('ASCII');
     const asciiEffect = new AsciiEffect();
     await effectComposer.registerEffect(asciiEffect);
     
-    // Step 3.4: Register Particle System (WebGPU/WebGL2)
+    // Step 3.5: Register Particle System (WebGPU/WebGL2)
     // CRITICAL: Must await to ensure batchRenderer is initialized before FireSparksEffect uses it
     _setEffectInitStep('Particles');
     const particleSystem = new ParticleSystem();
     await effectComposer.registerEffect(particleSystem);
 
-    // Step 3.4: Register Fire Sparks Effect and wire it to the ParticleSystem
+    // Step 3.6: Register Fire Sparks Effect and wire it to the ParticleSystem
     _setEffectInitStep('Fire');
     const fireSparksEffect = new FireSparksEffect();
     // Provide the particle backend so FireSparksEffect can create emitters and bind uniforms
@@ -1035,7 +1063,7 @@ async function createThreeCanvas(scene) {
       fireSparksEffect.setAssetBundle(bundle);
     }
 
-    // Step 3.4b: Register Smelly Flies Effect (smart particles with AI behavior)
+    // Step 3.6b: Register Smelly Flies Effect (smart particles with AI behavior)
     _setEffectInitStep('Smelly Flies');
     const smellyFliesEffect = new SmellyFliesEffect();
     await effectComposer.registerEffect(smellyFliesEffect);
@@ -1052,17 +1080,17 @@ async function createThreeCanvas(scene) {
     lightningEffect = new LightningEffect();
     await effectComposer.registerEffect(lightningEffect);
 
-    // Step 3.5: Register Prism Effect
+    // Step 3.7: Register Prism Effect
     _setEffectInitStep('Prism');
     const prismEffect = new PrismEffect();
     await effectComposer.registerEffect(prismEffect);
 
-    // Step 3.5.05: Register Water Effect
+    // Step 3.8: Register Water Effect
     _setEffectInitStep('Water');
     const waterEffect = new WaterEffectV2();
     await effectComposer.registerEffect(waterEffect);
 
-    // Step 3.5.1: Register World-Space Fog Effect (Fog of War)
+    // Step 3.9: Register World-Space Fog Effect (Fog of War)
     // WorldSpaceFogEffect renders fog as a plane mesh in the Three.js scene.
     // This eliminates coordinate conversion issues between screen-space and world-space.
     // Vision is rendered to a world-space render target, exploration uses Foundry's texture.
@@ -1071,7 +1099,7 @@ async function createThreeCanvas(scene) {
     await effectComposer.registerEffect(fogEffect);
     log.info('WorldSpaceFogEffect registered');
 
-    // Step 3.6: Register Lighting Effect
+    // Step 3.10: Register Lighting Effect
     _setEffectInitStep('Lighting');
     lightingEffect = new LightingEffect();
     await effectComposer.registerEffect(lightingEffect);
@@ -1084,48 +1112,48 @@ async function createThreeCanvas(scene) {
     await effectComposer.registerEffect(candleFlamesEffect);
     if (window.MapShine) window.MapShine.candleFlamesEffect = candleFlamesEffect;
 
-    // Step 3.6.25: Register Animated Bushes (surface overlay, before shadows)
+    // Step 3.11: Register Animated Bushes (surface overlay, before shadows)
     _setEffectInitStep('Bushes');
     const bushEffect = new BushEffect();
     await effectComposer.registerEffect(bushEffect);
 
-    // Step 3.6.26: Register Animated Trees (High Canopy, above overhead)
+    // Step 3.12: Register Animated Trees (High Canopy, above overhead)
     _setEffectInitStep('Trees');
     const treeEffect = new TreeEffect();
     await effectComposer.registerEffect(treeEffect);
 
-    // Step 3.6.5: Register Overhead Shadows (post-lighting)
+    // Step 3.13: Register Overhead Shadows (post-lighting)
     _setEffectInitStep('Overhead Shadows');
     const overheadShadowsEffect = new OverheadShadowsEffect();
     await effectComposer.registerEffect(overheadShadowsEffect);
 
-    // Step 3.6.6: Register Building Shadows (post-lighting, environmental)
+    // Step 3.14: Register Building Shadows (post-lighting, environmental)
     _setEffectInitStep('Building Shadows');
     const buildingShadowsEffect = new BuildingShadowsEffect();
     await effectComposer.registerEffect(buildingShadowsEffect);
 
-    // Step 3.6.7: Register Cloud Effect (procedural cloud shadows)
+    // Step 3.15: Register Cloud Effect (procedural cloud shadows)
     _setEffectInitStep('Clouds');
     const cloudEffect = new CloudEffect();
     await effectComposer.registerEffect(cloudEffect);
 
     if (window.MapShine) window.MapShine.cloudEffect = cloudEffect;
 
-    // Step 3.6.8: Register Distortion Manager (centralized screen-space distortions)
+    // Step 3.16: Register Distortion Manager (centralized screen-space distortions)
     _setEffectInitStep('Distortion');
     const distortionManager = new DistortionManager();
     await effectComposer.registerEffect(distortionManager);
 
     if (window.MapShine) window.MapShine.distortionManager = distortionManager;
 
-    // Step 3.7: Register Bloom Effect
+    // Step 3.17: Register Bloom Effect
     _setEffectInitStep('Bloom');
     const bloomEffect = new BloomEffect();
     await effectComposer.registerEffect(bloomEffect);
 
     if (window.MapShine) window.MapShine.bloomEffect = bloomEffect;
 
-    // Step 3.8: Register Lensflare Effect
+    // Step 3.18: Register Lensflare Effect
     _setEffectInitStep('Lensflare');
     const lensflareEffect = new LensflareEffect();
     await effectComposer.registerEffect(lensflareEffect);
@@ -1470,6 +1498,7 @@ async function createThreeCanvas(scene) {
         specularEffect,
         iridescenceEffect,
         colorCorrectionEffect,
+        sharpenEffect,
         asciiEffect,
         prismEffect,
         lightingEffect,
@@ -1559,6 +1588,7 @@ async function createThreeCanvas(scene) {
  * @param {SpecularEffect} specularEffect - The specular effect instance
  * @param {IridescenceEffect} iridescenceEffect - The iridescence effect instance
  * @param {ColorCorrectionEffect} colorCorrectionEffect - The color correction effect instance
+ * @param {SharpenEffect} sharpenEffect - The sharpen effect instance
  * @param {AsciiEffect} asciiEffect - The ASCII effect instance
  * @param {PrismEffect} prismEffect - The prism effect instance
  * @param {LightingEffect} lightingEffect - The dynamic lighting effect instance
@@ -1576,7 +1606,7 @@ async function createThreeCanvas(scene) {
  * @param {DistortionManager} distortionManager - The centralized distortion manager
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, smellyFliesEffect, dustMotesEffect, lightningEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, bushEffect, treeEffect, waterEffect, fogEffect, distortionManager, maskDebugEffect, debugLayerEffect, playerLightEffect) {
+async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, sharpenEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, smellyFliesEffect, dustMotesEffect, lightningEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, bushEffect, treeEffect, waterEffect, fogEffect, distortionManager, maskDebugEffect, debugLayerEffect, playerLightEffect) {
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -2667,6 +2697,28 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     );
 
     log.info('Color correction effect wired to UI');
+  }
+
+  if (sharpenEffect) {
+    const sharpenSchema = SharpenEffect.getControlSchema();
+
+    const onSharpenUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        sharpenEffect.enabled = value;
+        log.debug(`Sharpen effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (sharpenEffect.params && Object.prototype.hasOwnProperty.call(sharpenEffect.params, paramId)) {
+        sharpenEffect.params[paramId] = value;
+        log.debug(`Sharpen.${paramId} =`, value);
+      }
+    };
+
+    uiManager.registerEffect(
+      'sharpen',
+      'Sharpen',
+      sharpenSchema,
+      onSharpenUpdate,
+      'global'
+    );
   }
 
   // --- ASCII Effect ---

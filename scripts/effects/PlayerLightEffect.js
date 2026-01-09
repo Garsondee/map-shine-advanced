@@ -84,6 +84,8 @@ export class PlayerLightEffect extends EffectBase {
       flashlightAngleDeg: 38,
       flashlightLengthUnits: 18,
       flashlightIntensity: 5.4,
+      flashlightBrokenness: 0.0,
+      flashlightWobble: 0.0,
 
       flashlightBeamAngleDeg: 38,
       flashlightBeamLengthUnits: 18,
@@ -214,6 +216,24 @@ export class PlayerLightEffect extends EffectBase {
     this._wanderNoiseX = new SimpleSmoothNoise({ amplitude: 1, scale: 1, seed: Math.random() * 1000 + 10 });
     this._wanderNoiseY = new SimpleSmoothNoise({ amplitude: 1, scale: 1, seed: Math.random() * 1000 + 20 });
 
+    this._flashlightMalfunctionNoise = new SimpleSmoothNoise({ amplitude: 1, scale: 1, seed: Math.random() * 1000 + 30 });
+    this._flashlightMalfunctionRandState = (Math.random() * 0xFFFFFFFF) >>> 0;
+    this._flashlightMalfunctionPhase = 0;
+    this._flashlightMalfunctionPhaseT = 0;
+    this._flashlightMalfunctionNextTime = 0;
+    this._flashlightMalfunctionDimTarget = 1.0;
+    this._flashlightMalfunctionDimDuration = 0;
+    this._flashlightMalfunctionFlickerDuration = 0;
+    this._flashlightMalfunctionDeadDuration = 0;
+    this._flashlightMalfunctionRecoverDuration = 0;
+    this._flashlightMalfunctionFlickerSpeed = 10.0;
+    this._flashlightMalfunctionFlickerDropT = 0.25;
+    this._flashlightMalfunctionFlickerPhase = 0;
+
+    this._flashlightWobbleNoiseA = new SimpleSmoothNoise({ amplitude: 1, scale: 1, seed: Math.random() * 1000 + 40 });
+    this._flashlightWobbleNoiseB = new SimpleSmoothNoise({ amplitude: 1, scale: 1, seed: Math.random() * 1000 + 50 });
+    this._flashlightWobbleNoiseR = new SimpleSmoothNoise({ amplitude: 1, scale: 1, seed: Math.random() * 1000 + 60 });
+
     this._group = null;
     this._torchSprite = null;
     this._torchParticleSystem = null;
@@ -238,6 +258,7 @@ export class PlayerLightEffect extends EffectBase {
     this._torchLightDoc = null;
     this._flashlightLightDoc = null;
     this._flashlightCookieWorld = null;
+    this._flashlightAimWorld = null;
 
     this._flashlightFinalIntensity = 0;
 
@@ -348,6 +369,8 @@ export class PlayerLightEffect extends EffectBase {
           expanded: false,
           parameters: [
             'flashlightIntensity',
+            'flashlightBrokenness',
+            'flashlightWobble',
             'flashlightBeamAngleDeg',
             'flashlightBeamLengthUnits',
             'flashlightBeamWidthScale',
@@ -442,6 +465,8 @@ export class PlayerLightEffect extends EffectBase {
         flashlightAngleDeg: { type: 'slider', label: 'Legacy Cone Angle (deg)', min: 5, max: 140, step: 1, default: 38, throttle: 50 },
         flashlightLengthUnits: { type: 'slider', label: 'Legacy Cone Length (u)', min: 1, max: 160, step: 1, default: 18, throttle: 50 },
         flashlightIntensity: { type: 'slider', label: 'Intensity', min: 0, max: 6, step: 0.01, default: 5.4, throttle: 50 },
+        flashlightBrokenness: { type: 'slider', label: 'Brokenness', min: 0, max: 1, step: 0.01, default: 0.0, throttle: 50 },
+        flashlightWobble: { type: 'slider', label: 'Wobble', min: 0, max: 1, step: 0.01, default: 0.0, throttle: 50 },
 
         flashlightBeamAngleDeg: { type: 'slider', label: 'Angle (deg)', min: 1, max: 160, step: 1, default: 38, throttle: 50 },
         flashlightBeamLengthUnits: { type: 'slider', label: 'Length (u)', min: 0.5, max: 240, step: 0.5, default: 18, throttle: 50 },
@@ -557,6 +582,7 @@ export class PlayerLightEffect extends EffectBase {
     this._tempScreenSize = new THREE.Vector2();
 
     this._flashlightCookieWorld = new THREE.Vector3();
+    this._flashlightAimWorld = new THREE.Vector3();
 
     this._visionMaskTexelSize = new THREE.Vector2(1, 1);
 
@@ -908,8 +934,12 @@ export class PlayerLightEffect extends EffectBase {
 
     const tokenCenterWorld = tokenSprite.position;
 
-    const dx = cursorWorld.x - tokenCenterWorld.x;
-    const dy = cursorWorld.y - tokenCenterWorld.y;
+    const aimWorld = (this.params.mode === 'flashlight')
+      ? this._getFlashlightAimWorld(timeInfo, tokenCenterWorld, cursorWorld, groundZ)
+      : cursorWorld;
+
+    const dx = aimWorld.x - tokenCenterWorld.x;
+    const dy = aimWorld.y - tokenCenterWorld.y;
     const distancePx = Math.hypot(dx, dy);
     const pxToUnits = this._pxToUnits();
     const distanceUnits = distancePx * pxToUnits;
@@ -981,12 +1011,12 @@ export class PlayerLightEffect extends EffectBase {
     let collisionWorld = null;
 
     // When blocked, we clamp the target to a safe point on the token-side of the wall.
-    let clampedTargetWorld = cursorWorld;
+    let clampedTargetWorld = aimWorld;
     let safeWallDistanceUnits = wallDistanceUnits;
 
     if (this.params.wallBlockEnabled) {
       try {
-        const destFoundry = Coordinates.toFoundry(cursorWorld.x, cursorWorld.y);
+        const destFoundry = Coordinates.toFoundry(aimWorld.x, aimWorld.y);
         let collision = null;
         const isFlashlightMode = this.params.mode === 'flashlight';
 
@@ -1139,8 +1169,8 @@ export class PlayerLightEffect extends EffectBase {
     if (this.params.mode === 'flashlight') {
       const flashlightMaxU = maxU;
       const flashlightConeMaxLenU = Math.max(0.5, this.params.flashlightLengthUnits) * 4.0;
-      this._updateFlashlight(timeInfo, tokenCenterWorld, cursorWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc, flashlightMaxU, flashlightConeMaxLenU);
-      this._updateDynamicLightSources(timeInfo, tokenCenterWorld, cursorWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc);
+      this._updateFlashlight(timeInfo, tokenCenterWorld, aimWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc, flashlightMaxU, flashlightConeMaxLenU);
+      this._updateDynamicLightSources(timeInfo, tokenCenterWorld, aimWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc);
       this._setVisible(true, false);
       return;
     }
@@ -1304,6 +1334,212 @@ export class PlayerLightEffect extends EffectBase {
     const d = canvas?.dimensions;
     if (!d || typeof d.distance !== 'number' || typeof d.size !== 'number' || d.size <= 0) return 1;
     return d.distance / d.size;
+  }
+
+  _flashlightRand() {
+    this._flashlightMalfunctionRandState = (this._flashlightMalfunctionRandState * 1664525 + 1013904223) >>> 0;
+    return this._flashlightMalfunctionRandState / 4294967296;
+  }
+
+  _resetFlashlightMalfunction(t = 0) {
+    this._flashlightMalfunctionPhase = 0;
+    this._flashlightMalfunctionPhaseT = 0;
+    this._flashlightMalfunctionNextTime = 0;
+  }
+
+  _getFlashlightBrokennessMultiplier(t, dt) {
+    const bRaw = this.params?.flashlightBrokenness;
+    const b = (typeof bRaw === 'number' && isFinite(bRaw)) ? Math.max(0, Math.min(1, bRaw)) : 0;
+
+    if (b <= 0.0001) {
+      this._resetFlashlightMalfunction(t);
+      return 1.0;
+    }
+
+    if (!isFinite(t) || t < 0) t = 0;
+    if (!isFinite(dt) || dt < 0) dt = 0;
+
+    if (!(this._flashlightMalfunctionNextTime > 0)) {
+      const initDelay = (10.0 + 15.0 * this._flashlightRand()) * (1.0 - 0.85 * b);
+      this._flashlightMalfunctionNextTime = t + Math.max(0.25, initDelay);
+    }
+
+    // Always-on subtle instability even when not actively malfunctioning.
+    let mult = 1.0 - 0.08 * b;
+    if (this._flashlightMalfunctionNoise) {
+      this._flashlightMalfunctionNoise.scale = 0.65 + 0.35 * b;
+      mult += 0.045 * b * this._flashlightMalfunctionNoise.value(t);
+    }
+
+    if (this._flashlightMalfunctionPhase === 0) {
+      if (t >= this._flashlightMalfunctionNextTime) {
+        this._flashlightMalfunctionPhase = 1;
+        this._flashlightMalfunctionPhaseT = 0;
+
+        const r0 = this._flashlightRand();
+        const r1 = this._flashlightRand();
+        const r2 = this._flashlightRand();
+        const r3 = this._flashlightRand();
+        const r4 = this._flashlightRand();
+
+        const severity = Math.max(0, Math.min(1, b));
+        const dimDepth = (0.12 + 0.70 * severity) * (0.35 + 0.65 * r0);
+        this._flashlightMalfunctionDimTarget = Math.max(0.06, 1.0 - dimDepth);
+
+        this._flashlightMalfunctionDimDuration = (0.06 + 0.55 * severity) * (0.5 + 1.1 * r1);
+        this._flashlightMalfunctionFlickerDuration = (0.10 + 1.45 * severity) * (0.5 + 1.0 * r2);
+        this._flashlightMalfunctionDeadDuration = (0.05 + 2.35 * severity) * (0.35 + 1.05 * r3);
+        this._flashlightMalfunctionRecoverDuration = (0.06 + 1.05 * severity) * (0.5 + 1.0 * r4);
+
+        this._flashlightMalfunctionFlickerSpeed = (6.0 + 22.0 * severity) * (0.7 + 0.9 * this._flashlightRand());
+        this._flashlightMalfunctionFlickerDropT = Math.max(0.01, Math.min(0.95, (0.05 + 0.55 * severity) * (0.3 + 0.7 * this._flashlightRand())));
+        this._flashlightMalfunctionFlickerPhase = this._flashlightRand() * Math.PI * 2;
+      }
+
+      return Math.max(0, Math.min(1.25, mult));
+    }
+
+    this._flashlightMalfunctionPhaseT += dt;
+
+    if (this._flashlightMalfunctionPhase === 1) {
+      const dur = Math.max(0.001, this._flashlightMalfunctionDimDuration);
+      const u = Math.max(0, Math.min(1, this._flashlightMalfunctionPhaseT / dur));
+      const s = u * u * (3 - 2 * u);
+      mult *= (1.0 * (1 - s) + this._flashlightMalfunctionDimTarget * s);
+      if (u >= 1.0) {
+        this._flashlightMalfunctionPhase = 2;
+        this._flashlightMalfunctionPhaseT = 0;
+      }
+      return Math.max(0, Math.min(1.25, mult));
+    }
+
+    if (this._flashlightMalfunctionPhase === 2) {
+      const dur = Math.max(0.001, this._flashlightMalfunctionFlickerDuration);
+      const u = Math.max(0, Math.min(1, this._flashlightMalfunctionPhaseT / dur));
+
+      let n = 0;
+      if (this._flashlightMalfunctionNoise) {
+        this._flashlightMalfunctionNoise.scale = this._flashlightMalfunctionFlickerSpeed;
+        this._flashlightMalfunctionNoise.amplitude = 1;
+        n = this._flashlightMalfunctionNoise.value(t);
+      }
+
+      const a = Math.max(0, Math.min(1, Math.abs(n)));
+      const dropT = this._flashlightMalfunctionFlickerDropT;
+      let f = (a <= dropT) ? 0.0 : (a - dropT) / Math.max(1e-6, (1.0 - dropT));
+      f = Math.max(0, Math.min(1, f));
+      f = f * f;
+
+      const strobe = 0.65 + 0.35 * Math.sin(t * (this._flashlightMalfunctionFlickerSpeed * 2.7) + this._flashlightMalfunctionFlickerPhase);
+      const flicker = (0.08 + 0.92 * f) * Math.max(0, strobe);
+
+      mult *= this._flashlightMalfunctionDimTarget * flicker;
+
+      if (u >= 1.0) {
+        this._flashlightMalfunctionPhase = 3;
+        this._flashlightMalfunctionPhaseT = 0;
+      }
+
+      return Math.max(0, Math.min(1.25, mult));
+    }
+
+    if (this._flashlightMalfunctionPhase === 3) {
+      const dur = Math.max(0.001, this._flashlightMalfunctionDeadDuration);
+      const u = Math.max(0, Math.min(1, this._flashlightMalfunctionPhaseT / dur));
+      mult = 0.0;
+      if (u >= 1.0) {
+        this._flashlightMalfunctionPhase = 4;
+        this._flashlightMalfunctionPhaseT = 0;
+      }
+      return 0.0;
+    }
+
+    if (this._flashlightMalfunctionPhase === 4) {
+      const dur = Math.max(0.001, this._flashlightMalfunctionRecoverDuration);
+      const u = Math.max(0, Math.min(1, this._flashlightMalfunctionPhaseT / dur));
+      const s = u * u * (3 - 2 * u);
+      const overshoot = (u < 0.12) ? (1.0 + (0.28 * b) * (1.0 - u / 0.12)) : 1.0;
+      mult *= (s * overshoot);
+
+      if (u >= 1.0) {
+        this._flashlightMalfunctionPhase = 0;
+        this._flashlightMalfunctionPhaseT = 0;
+        const minInterval = 2.5;
+        const maxInterval = 38.0;
+        const baseInterval = maxInterval * (1.0 - b) + minInterval * b;
+        const jitter = 0.55 + 1.15 * this._flashlightRand();
+        this._flashlightMalfunctionNextTime = t + Math.max(0.2, baseInterval * jitter);
+      }
+
+      return Math.max(0, Math.min(1.25, mult));
+    }
+
+    this._resetFlashlightMalfunction(t);
+    return 1.0;
+  }
+
+  _getFlashlightAimWorld(timeInfo, tokenCenterWorld, cursorWorld, groundZ) {
+    const wRaw = this.params?.flashlightWobble;
+    const w = (typeof wRaw === 'number' && isFinite(wRaw)) ? Math.max(0, Math.min(1, wRaw)) : 0;
+    if (w <= 0.0001 || !this._flashlightAimWorld) {
+      this._flashlightAimWorld?.set?.(cursorWorld.x, cursorWorld.y, groundZ);
+      return this._flashlightAimWorld || cursorWorld;
+    }
+
+    const t = typeof timeInfo?.elapsed === 'number' ? timeInfo.elapsed : 0;
+    const dx = cursorWorld.x - tokenCenterWorld.x;
+    const dy = cursorWorld.y - tokenCenterWorld.y;
+    const lenPx = Math.hypot(dx, dy);
+    if (!(lenPx > 1e-4)) {
+      this._flashlightAimWorld.set(cursorWorld.x, cursorWorld.y, groundZ);
+      return this._flashlightAimWorld;
+    }
+
+    const pxToUnits = this._pxToUnits();
+    const maxU = Math.max(0.001, this.params.flashlightMaxDistanceUnits) * 4.0;
+    const distU = lenPx * pxToUnits;
+    const distT = Math.max(0, Math.min(1, distU / maxU));
+
+    const baseSway = (0.003 + 0.030 * distT);
+    const microSway = (0.0015 + 0.010 * distT);
+
+    let nA = 0;
+    let nB = 0;
+    let nR = 0;
+    if (this._flashlightWobbleNoiseA) {
+      this._flashlightWobbleNoiseA.scale = 0.8 + 0.7 * w;
+      nA = this._flashlightWobbleNoiseA.value(t);
+    }
+    if (this._flashlightWobbleNoiseB) {
+      this._flashlightWobbleNoiseB.scale = 1.8 + 1.2 * w;
+      nB = this._flashlightWobbleNoiseB.value(t);
+    }
+    if (this._flashlightWobbleNoiseR) {
+      this._flashlightWobbleNoiseR.scale = 1.2 + 0.9 * w;
+      nR = this._flashlightWobbleNoiseR.value(t);
+    }
+
+    const micro = Math.sin(t * (18.0 + 26.0 * w) + this._flashlightMalfunctionRandState * 0.000001) * (0.7 + 0.3 * nB);
+
+    const angOff = (nA * 0.75 + nB * 0.25) * (baseSway * w) + micro * (microSway * w);
+
+    const dirX = dx / lenPx;
+    const dirY = dy / lenPx;
+
+    const c = Math.cos(angOff);
+    const s = Math.sin(angOff);
+    const wdirX = dirX * c - dirY * s;
+    const wdirY = dirX * s + dirY * c;
+
+    const radialPx = Math.max(-24, Math.min(24, nR * (Math.min(18, 0.012 * lenPx) * w)));
+    const wLenPx = Math.max(0, lenPx + radialPx);
+
+    this._flashlightAimWorld.set(
+      tokenCenterWorld.x + wdirX * wLenPx,
+      tokenCenterWorld.y + wdirY * wLenPx,
+      groundZ
+    );
+    return this._flashlightAimWorld;
   }
 
   _isAllowedForUser(tokenDoc) {
@@ -2237,7 +2473,9 @@ export class PlayerLightEffect extends EffectBase {
     const aimFalloff = Math.max(0, Math.min(1, invSq * rangeFade));
 
     // Do not turn off due to collision; collisions shorten the cone via wallDistanceUnits.
-    const intensity = (this.params.flashlightIntensity * aimFalloff) * Math.max(0, Math.min(1, distanceFade));
+    const rawIntensity = (this.params.flashlightIntensity * aimFalloff) * Math.max(0, Math.min(1, distanceFade));
+    const brokennessMult = this._getFlashlightBrokennessMultiplier(t, dt);
+    const intensity = rawIntensity * Math.max(0, Math.min(1.25, brokennessMult));
     this._flashlightFinalIntensity = intensity;
 
     const baseFlashlightIntensity = Math.max(1e-6, this.params.flashlightIntensity);
@@ -2282,9 +2520,10 @@ export class PlayerLightEffect extends EffectBase {
     const beamMesh = this._flashlightBeamMesh;
     const cookieMesh = this._flashlightCookieMesh;
     const originMesh = this._flashlightOriginMesh;
-    beamMesh.visible = true;
-    cookieMesh.visible = true;
-    if (originMesh) originMesh.visible = true;
+    const visible = intensity > 1e-4;
+    beamMesh.visible = visible;
+    cookieMesh.visible = visible;
+    if (originMesh) originMesh.visible = visible;
 
     // Place plane so that its left edge is at the token origin.
     // PlaneGeometry(1,1) is centered, so we offset by +0.5 in local X via position after rotation.
@@ -2583,6 +2822,13 @@ export class PlayerLightEffect extends EffectBase {
         const baseFlashlightIntensity = Math.max(1e-6, this.params.flashlightIntensity);
         const flashlightIntensityFactor = Math.max(0, Math.min(1, (this._flashlightFinalIntensity ?? 0) / baseFlashlightIntensity));
 
+        if (flashlightIntensityFactor <= 1e-4) {
+          if (flashSrc.mesh.parent) {
+            flashSrc.mesh.parent.remove(flashSrc.mesh);
+          }
+          return;
+        }
+
         // Aim distance factor in [0..1] for distance scaling
         const dx = cursorWorld.x - tokenCenterWorld.x;
         const dy = cursorWorld.y - tokenCenterWorld.y;
@@ -2654,8 +2900,9 @@ export class PlayerLightEffect extends EffectBase {
       this._torchSparksSystem.emitter.visible = visible && torchMode;
     }
     if (this._flashlightMesh) this._flashlightMesh.visible = false;
-    if (this._flashlightBeamMesh) this._flashlightBeamMesh.visible = visible && !torchMode;
-    if (this._flashlightCookieMesh) this._flashlightCookieMesh.visible = visible && !torchMode;
-    if (this._flashlightOriginMesh) this._flashlightOriginMesh.visible = visible && !torchMode;
+    const flashlightOn = visible && !torchMode && (typeof this._flashlightFinalIntensity === 'number') && this._flashlightFinalIntensity > 1e-4;
+    if (this._flashlightBeamMesh) this._flashlightBeamMesh.visible = flashlightOn;
+    if (this._flashlightCookieMesh) this._flashlightCookieMesh.visible = flashlightOn;
+    if (this._flashlightOriginMesh) this._flashlightOriginMesh.visible = flashlightOn;
   }
 }

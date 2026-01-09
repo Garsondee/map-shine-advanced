@@ -901,24 +901,15 @@ export class FireSparksEffect extends EffectBase {
     this.particleSystemRef = ps;
     log.info('Connected to ParticleSystem');
   }
-  
-  /**
-   * Set up fire sources from MapPointsManager (v1.x backwards compatibility)
-   * Creates AGGREGATED fire particle systems from all map point locations.
-   * 
-   * PERFORMANCE FIX: Instead of creating one ParticleSystem per point (which
-   * caused multi-second freezes on zoom-out with many fire sources), we now
-   * aggregate all points into a single MultiPointEmitterShape and create
-   * just 1-2 systems total (fire + embers).
-   * 
-   * @param {MapPointsManager} mapPointsManager - The map points manager instance
-   */
-  setMapPointsSources(mapPointsManager) {
-    this._lastMapPointsManager = mapPointsManager || null;
 
-    if (!mapPointsManager || !this.particleSystemRef?.batchRenderer) {
-      return;
-    }
+  _rebuildFromMapPoints() {
+    const mgr = this._lastMapPointsManager;
+    if (!mgr || !this.particleSystemRef?.batchRenderer) return;
+    this._rebuildMapPointSystems(mgr);
+  }
+
+  _rebuildMapPointSystems(mapPointsManager) {
+    if (!mapPointsManager || !this.particleSystemRef?.batchRenderer) return;
 
     const batch = this.particleSystemRef.batchRenderer;
     for (let i = this.fires.length - 1; i >= 0; i--) {
@@ -1039,7 +1030,57 @@ export class FireSparksEffect extends EffectBase {
         });
       });
     }
+  }
 
+  _detachMapPointsListener() {
+    const mgr = this._lastMapPointsManager;
+    if (mgr && this._mapPointsChangeListener) {
+      try {
+        mgr.removeChangeListener(this._mapPointsChangeListener);
+      } catch (_) {
+      }
+    }
+  }
+  
+  /**
+   * Set up fire sources from MapPointsManager (v1.x backwards compatibility)
+   * Creates AGGREGATED fire particle systems from all map point locations.
+   * 
+   * PERFORMANCE FIX: Instead of creating one ParticleSystem per point (which
+   * caused multi-second freezes on zoom-out with many fire sources), we now
+   * aggregate all points into a single MultiPointEmitterShape and create
+   * just 1-2 systems total (fire + embers).
+   * 
+   * @param {MapPointsManager} mapPointsManager - The map points manager instance
+   */
+  setMapPointsSources(mapPointsManager) {
+    const prevManager = this._lastMapPointsManager;
+    if (prevManager !== mapPointsManager) {
+      this._detachMapPointsListener();
+    }
+
+    this._lastMapPointsManager = mapPointsManager || null;
+
+    if (!this._mapPointsChangeListener) {
+      this._mapPointsChangeListener = () => {
+        // Never call setMapPointsSources() here; that would mutate the
+        // listeners array during MapPointsManager.notifyListeners().
+        this._rebuildFromMapPoints();
+      };
+    }
+
+    if (prevManager !== mapPointsManager && this._lastMapPointsManager) {
+      try {
+        this._lastMapPointsManager.addChangeListener(this._mapPointsChangeListener);
+      } catch (_) {
+      }
+    }
+
+    if (!mapPointsManager || !this.particleSystemRef?.batchRenderer) {
+      return;
+    }
+
+    this._rebuildMapPointSystems(mapPointsManager);
   }
 
   setAssetBundle(bundle) {
@@ -2269,10 +2310,10 @@ export class FireSparksEffect extends EffectBase {
   
   dispose() {
       this._destroyParticleSystems();
+      this._detachMapPointsListener();
       this._lastAssetBundle = null;
       this._lastMapPointsManager = null;
       
-      // Cleanup heat distortion
       const distortionManager = window.MapShine?.distortionManager;
       if (distortionManager) {
         distortionManager.unregisterSource('heat');

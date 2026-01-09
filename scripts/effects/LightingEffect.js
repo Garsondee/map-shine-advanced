@@ -72,6 +72,7 @@ export class LightingEffect extends EffectBase {
     this.roofAlphaTarget = null; 
     this.weatherRoofAlphaTarget = null;
     this.ropeMaskTarget = null;
+    this.tokenMaskTarget = null;
     this.masksTarget = null;
     this._quadMesh = null;
 
@@ -91,6 +92,7 @@ export class LightingEffect extends EffectBase {
     this._publishedWeatherRoofAlphaTex = null;
     this._publishedOutdoorsTex = null;
     this._publishedRopeMaskTex = null;
+    this._publishedTokenMaskTex = null;
     
     this._transparentTex = null;
 
@@ -200,6 +202,7 @@ export class LightingEffect extends EffectBase {
         tRoofAlpha: { value: null },
         tRopeMask: { value: null },
         tOutdoorsMask: { value: null },
+        tTokenMask: { value: null },
       },
       vertexShader: `
         varying vec2 vUv;
@@ -212,13 +215,15 @@ export class LightingEffect extends EffectBase {
         uniform sampler2D tRoofAlpha;
         uniform sampler2D tRopeMask;
         uniform sampler2D tOutdoorsMask;
+        uniform sampler2D tTokenMask;
         varying vec2 vUv;
 
         void main() {
           float roofA = texture2D(tRoofAlpha, vUv).a;
           float ropeA = texture2D(tRopeMask, vUv).a;
           float outdoorsR = texture2D(tOutdoorsMask, vUv).r;
-          gl_FragColor = vec4(outdoorsR, ropeA, 0.0, roofA);
+          float tokenA = texture2D(tTokenMask, vUv).a;
+          gl_FragColor = vec4(outdoorsR, ropeA, tokenA, roofA);
         }
       `,
       depthWrite: false,
@@ -341,6 +346,7 @@ export class LightingEffect extends EffectBase {
           vec4 masks = texture2D(tMasks, vUv);
           float outdoorStrengthBase = clamp(masks.r, 0.0, 1.0);
           float ropeMask = clamp(masks.g, 0.0, 1.0);
+          float tokenMask = clamp(masks.b, 0.0, 1.0);
           float roofAlphaRaw = clamp(masks.a, 0.0, 1.0);
 
           float master = max(uLightIntensity, 0.0);
@@ -1156,6 +1162,17 @@ export class LightingEffect extends EffectBase {
       this.ropeMaskTarget.setSize(size.x, size.y);
     }
 
+    if (!this.tokenMaskTarget) {
+      this.tokenMaskTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else if (this.tokenMaskTarget.width !== size.x || this.tokenMaskTarget.height !== size.y) {
+      this.tokenMaskTarget.setSize(size.x, size.y);
+    }
+
     if (!this.masksTarget) {
       this.masksTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
         minFilter: THREE.LinearFilter,
@@ -1226,6 +1243,20 @@ export class LightingEffect extends EffectBase {
           });
         }
 
+        const tokenMaskTex = this.tokenMaskTarget?.texture;
+        if (tokenMaskTex && tokenMaskTex !== this._publishedTokenMaskTex) {
+          this._publishedTokenMaskTex = tokenMaskTex;
+          mm.setTexture('tokenMask.screen', tokenMaskTex, {
+            space: 'screenUv',
+            source: 'renderTarget',
+            channels: 'a',
+            uvFlipY: false,
+            lifecycle: 'dynamicPerFrame',
+            width: this.tokenMaskTarget?.width ?? null,
+            height: this.tokenMaskTarget?.height ?? null
+          });
+        }
+
         const outdoorsTex = this.outdoorsTarget?.texture;
         if (outdoorsTex && outdoorsTex !== this._publishedOutdoorsTex) {
           this._publishedOutdoorsTex = outdoorsTex;
@@ -1245,6 +1276,7 @@ export class LightingEffect extends EffectBase {
 
     const ROOF_LAYER = 20;
     const WEATHER_ROOF_LAYER = 21;
+    const TOKEN_MASK_LAYER = 26;
     const previousLayersMask = this.mainCamera.layers.mask;
     const previousTarget = renderer.getRenderTarget();
 
@@ -1268,38 +1300,49 @@ export class LightingEffect extends EffectBase {
     renderer.autoClear = false;
     renderer.clear(true, true, true);
 
-    const _tmpEnabledTokenLayer = this._tmpEnabledTokenLayer || (this._tmpEnabledTokenLayer = []);
-    _tmpEnabledTokenLayer.length = 0;
+    renderer.render(scene, this.mainCamera);
+    renderer.autoClear = prevAutoClear;
+
+    this.mainCamera.layers.set(TOKEN_MASK_LAYER);
+    renderer.setRenderTarget(this.tokenMaskTarget);
+    renderer.setClearColor(0x000000, 0);
+
+    const prevAutoClear2 = renderer.autoClear;
+    renderer.autoClear = false;
+    renderer.clear(true, true, true);
+
+    const _tmpEnabledTokenMaskLayer = this._tmpEnabledTokenMaskLayer || (this._tmpEnabledTokenMaskLayer = []);
+    _tmpEnabledTokenMaskLayer.length = 0;
 
     try {
       const tokenManager = window.MapShine?.tokenManager;
       const tokenSprites = tokenManager?.tokenSprites;
       if (tokenSprites && typeof tokenSprites.values === 'function') {
-        const ropeLayerMask = (1 << ROPE_MASK_LAYER);
+        const tokenLayerMask = (1 << TOKEN_MASK_LAYER);
         for (const data of tokenSprites.values()) {
           const sprite = data?.sprite;
           if (!sprite?.layers) continue;
-          const had = (sprite.layers.mask & ropeLayerMask) !== 0;
+          const had = (sprite.layers.mask & tokenLayerMask) !== 0;
           if (!had) {
-            sprite.layers.enable(ROPE_MASK_LAYER);
-            _tmpEnabledTokenLayer.push(sprite);
+            sprite.layers.enable(TOKEN_MASK_LAYER);
+            _tmpEnabledTokenMaskLayer.push(sprite);
           }
         }
       }
 
       const gl = renderer.getContext();
-      const prevMask = gl.getParameter(gl.COLOR_WRITEMASK);
+      const prevMask2 = gl.getParameter(gl.COLOR_WRITEMASK);
       try {
         gl.colorMask(false, false, false, false);
         renderer.render(scene, this.mainCamera);
       } finally {
-        gl.colorMask(prevMask[0], prevMask[1], prevMask[2], prevMask[3]);
+        gl.colorMask(prevMask2[0], prevMask2[1], prevMask2[2], prevMask2[3]);
       }
     } catch (e) {
     } finally {
       try {
-        for (let i = 0; i < _tmpEnabledTokenLayer.length; i++) {
-          _tmpEnabledTokenLayer[i].layers.disable(ROPE_MASK_LAYER);
+        for (let i = 0; i < _tmpEnabledTokenMaskLayer.length; i++) {
+          _tmpEnabledTokenMaskLayer[i].layers.disable(TOKEN_MASK_LAYER);
         }
       } catch (e) {
       }
@@ -1307,7 +1350,7 @@ export class LightingEffect extends EffectBase {
 
     renderer.clear(true, false, false);
     renderer.render(scene, this.mainCamera);
-    renderer.autoClear = prevAutoClear;
+    renderer.autoClear = prevAutoClear2;
 
     this.mainCamera.layers.mask = previousLayersMask;
     renderer.setRenderTarget(previousTarget);
@@ -1331,6 +1374,7 @@ export class LightingEffect extends EffectBase {
       const prevTargetPack = renderer.getRenderTarget();
       this._masksPackMaterial.uniforms.tRoofAlpha.value = this.roofAlphaTarget?.texture ?? this._transparentTex;
       this._masksPackMaterial.uniforms.tRopeMask.value = this.ropeMaskTarget?.texture ?? this._transparentTex;
+      this._masksPackMaterial.uniforms.tTokenMask.value = this.tokenMaskTarget?.texture ?? this._transparentTex;
       this._masksPackMaterial.uniforms.tOutdoorsMask.value = (hasOutdoorsProjection && this.outdoorsTarget?.texture)
         ? this.outdoorsTarget.texture
         : this._transparentTex;

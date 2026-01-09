@@ -548,6 +548,51 @@ export class FireSparksEffect extends EffectBase {
     // _drawFlameInCell can safely read this.params during atlas generation.
     this.fireTexture = this._createFireTexture();
   }
+
+  _polygonAreaAbs(points) {
+    if (!points || points.length < 3) return 0;
+    let sum = 0;
+    for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+      const xi = points[i].x;
+      const yi = points[i].y;
+      const xj = points[j].x;
+      const yj = points[j].y;
+      if (![xi, yi, xj, yj].every(Number.isFinite)) continue;
+      sum += (xj * yi) - (xi * yj);
+    }
+    return Math.abs(sum) * 0.5;
+  }
+
+  _isPointInPolygon(x, y, polygon) {
+    let inside = false;
+    const n = polygon.length;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = polygon[i].x;
+      const yi = polygon[i].y;
+      const xj = polygon[j].x;
+      const yj = polygon[j].y;
+      if (!Number.isFinite(xi) || !Number.isFinite(yi) || !Number.isFinite(xj) || !Number.isFinite(yj)) continue;
+      if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  _getRandomPointInPolygon(polygon, bounds, maxAttempts = 25) {
+    if (!polygon || polygon.length < 3 || !bounds) return null;
+    const minX = bounds.minX;
+    const minY = bounds.minY;
+    const w = bounds.width;
+    const h = bounds.height;
+    if (![minX, minY, w, h].every(Number.isFinite) || w <= 0 || h <= 0) return null;
+    for (let i = 0; i < maxAttempts; i++) {
+      const x = minX + Math.random() * w;
+      const y = minY + Math.random() * h;
+      if (this._isPointInPolygon(x, y, polygon)) return { x, y };
+    }
+    return { x: bounds.centerX, y: bounds.centerY };
+  }
   
   /**
    * Create a procedural 8x8 flame atlas texture with 64 animation frames.
@@ -927,6 +972,11 @@ export class FireSparksEffect extends EffectBase {
     // Map points integration: only the 'fire' effect target should drive the
     // heavy particle-based flames. Candle flames are handled by CandleFlamesEffect.
     const fireGroups = mapPointsManager.getGroupsByEffect('fire');
+    const fireAreas = mapPointsManager.getAreasForEffect ? (mapPointsManager.getAreasForEffect('fire') || []) : [];
+    const fireAreasById = new Map();
+    for (const a of fireAreas) {
+      if (a && typeof a.groupId === 'string') fireAreasById.set(a.groupId, a);
+    }
     
     if (fireGroups.length === 0) {
       log.debug('No map point fire sources found');
@@ -937,11 +987,49 @@ export class FireSparksEffect extends EffectBase {
     const fireBuckets = new Map();
     
     const d = canvas?.dimensions;
+    const gridSize = (d && Number.isFinite(d.size)) ? d.size : 100;
 
     for (const group of fireGroups) {
+      if (!group || group.isBroken) continue;
       if (!group.points || group.points.length === 0) continue;
       
       const intensity = group.emission?.intensity ?? 1.0;
+      if (!Number.isFinite(intensity) || intensity <= 0) continue;
+
+      const isArea = group.type === 'area';
+      if (isArea) {
+        const area = fireAreasById.get(group.id);
+        const polygon = area?.points;
+        const bounds = area?.bounds;
+        if (!polygon || polygon.length < 3 || !bounds) continue;
+
+        const areaPx = this._polygonAreaAbs(polygon);
+        const cellArea = Math.max(1, gridSize * gridSize);
+        const areaCells = areaPx / cellArea;
+        const effectiveSources = Math.max(1, Math.min(5000, Math.round(areaCells)));
+        const sampleCount = Math.max(30, Math.min(3000, Math.round(effectiveSources * 40)));
+
+        const scalePerSample = effectiveSources / Math.max(1, sampleCount);
+        for (let i = 0; i < sampleCount; i++) {
+          const pt = this._getRandomPointInPolygon(polygon, bounds);
+          if (!pt) continue;
+          const worldX = pt.x;
+          const worldY = pt.y;
+          if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) continue;
+          const bx = Math.floor(worldX / BUCKET_SIZE);
+          const by = Math.floor(worldY / BUCKET_SIZE);
+          const key = `${bx},${by}`;
+          let bucket = fireBuckets.get(key);
+          if (!bucket) {
+            bucket = { coords: [], scale: 0 };
+            fireBuckets.set(key, bucket);
+          }
+          bucket.coords.push(worldX, worldY, intensity);
+          bucket.scale += scalePerSample;
+        }
+
+        continue;
+      }
 
       for (const point of group.points) {
         const worldX = point?.x;
@@ -952,30 +1040,36 @@ export class FireSparksEffect extends EffectBase {
         const bx = Math.floor(worldX / BUCKET_SIZE);
         const by = Math.floor(worldY / BUCKET_SIZE);
         const key = `${bx},${by}`;
-        let arr = fireBuckets.get(key);
-        if (!arr) {
-          arr = [];
-          fireBuckets.set(key, arr);
+        let bucket = fireBuckets.get(key);
+        if (!bucket) {
+          bucket = { coords: [], scale: 0 };
+          fireBuckets.set(key, bucket);
         }
-        arr.push(worldX, worldY, intensity);
+        bucket.coords.push(worldX, worldY, intensity);
+        bucket.scale += 1;
       }
     }
 
-    let totalPoints = 0;
-    fireBuckets.forEach((arr) => { totalPoints += arr.length / 3; });
-    log.info(`Aggregating ${totalPoints} map points into combined fire systems`);
+    let totalScale = 0;
+    let totalSamples = 0;
+    fireBuckets.forEach((bucket) => {
+      totalScale += bucket?.scale ?? 0;
+      totalSamples += (bucket?.coords?.length ?? 0) / 3;
+    });
+    log.info(`Aggregating ${totalScale.toFixed(2)} effective fire sources (${totalSamples} samples) into combined fire systems`);
 
     if (fireBuckets.size > 0) {
-      fireBuckets.forEach((arr, key) => {
+      fireBuckets.forEach((bucket, key) => {
+        const arr = bucket?.coords;
         if (!arr || arr.length < 3) return;
         const pointsArray = new Float32Array(arr);
         const shape = new MultiPointEmitterShape(pointsArray, this);
-        const pointCount = arr.length / 3;
+        const sourceScale = Math.max(0.01, bucket?.scale ?? (arr.length / 3));
 
         const baseRate = this.params.globalFireRate ?? 4.0;
         const rate = new IntervalValue(
-          baseRate * pointCount * 0.5,
-          baseRate * pointCount * 1.0
+          baseRate * sourceScale * 0.5,
+          baseRate * sourceScale * 1.0
         );
 
         const fireSystem = this._createFireSystem({
@@ -986,7 +1080,7 @@ export class FireSparksEffect extends EffectBase {
         });
 
         if (fireSystem && fireSystem.userData) {
-          fireSystem.userData._msEmissionScale = pointCount;
+          fireSystem.userData._msEmissionScale = sourceScale;
           fireSystem.userData._msHeightSource = 'global';
         }
 
@@ -998,12 +1092,12 @@ export class FireSparksEffect extends EffectBase {
           system: fireSystem,
           position: { x: 0, y: 0 },
           isCandle: false,
-          pointCount
+          pointCount: sourceScale
         });
 
         const emberRate = new IntervalValue(
-          (this.params.emberRate ?? 5.0) * pointCount * 0.3,
-          (this.params.emberRate ?? 5.0) * pointCount * 0.6
+          (this.params.emberRate ?? 5.0) * sourceScale * 0.3,
+          (this.params.emberRate ?? 5.0) * sourceScale * 0.6
         );
 
         const emberSystem = this._createEmberSystem({
@@ -1013,7 +1107,7 @@ export class FireSparksEffect extends EffectBase {
         });
 
         if (emberSystem && emberSystem.userData) {
-          emberSystem.userData._msEmissionScale = pointCount;
+          emberSystem.userData._msEmissionScale = sourceScale;
           emberSystem.userData._msHeightSource = 'global';
         }
 
@@ -1025,7 +1119,7 @@ export class FireSparksEffect extends EffectBase {
           system: emberSystem,
           position: { x: 0, y: 0 },
           isCandle: false,
-          pointCount,
+          pointCount: sourceScale,
           isEmber: true
         });
       });

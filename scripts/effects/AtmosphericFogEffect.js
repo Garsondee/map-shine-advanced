@@ -50,7 +50,11 @@ export class AtmosphericFogEffect extends EffectBase {
       // Fog appearance
       fogColor: '#c8d0d8',      // Slightly blue-gray fog
       fogColorNight: '#1a1a2e', // Darker blue at night
-      
+      skyTintStrength: 0.0,
+      nightColorStrength: 2.0,
+      darknessStrength: 1.0,
+      darknessColorMin: 0.25,
+
       // Fog behavior
       maxOpacity: 0.6,          // Maximum fog opacity at full density
       falloffStart: 0.1,        // Distance (0-1 of scene) where fog starts
@@ -113,7 +117,7 @@ export class AtmosphericFogEffect extends EffectBase {
           name: 'fog',
           label: 'Atmospheric Fog',
           type: 'inline',
-          parameters: ['fogColor', 'maxOpacity', 'falloffStart', 'falloffEnd', 'useIndoorMask']
+          parameters: ['fogColor', 'fogColorNight', 'skyTintStrength', 'nightColorStrength', 'darknessStrength', 'darknessColorMin', 'maxOpacity', 'falloffStart', 'falloffEnd', 'useIndoorMask']
         },
         {
           name: 'mask',
@@ -143,6 +147,11 @@ export class AtmosphericFogEffect extends EffectBase {
       parameters: {
         enabled: { type: 'boolean', default: true },
         fogColor: { type: 'color', default: '#c8d0d8', label: 'Fog Color' },
+        fogColorNight: { type: 'color', default: '#1a1a2e', label: 'Night Fog Color' },
+        skyTintStrength: { type: 'slider', min: 0, max: 10, step: 0.05, default: 0.0, label: 'Sky Tint Strength' },
+        nightColorStrength: { type: 'slider', min: 0, max: 10, step: 0.05, default: 2.0, label: 'Night Color Strength' },
+        darknessStrength: { type: 'slider', min: 0, max: 10, step: 0.05, default: 1.0, label: 'Darkness Strength' },
+        darknessColorMin: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.25, label: 'Darkness Min Color' },
         maxOpacity: { type: 'slider', min: 0, max: 1, step: 0.05, default: 0.85, label: 'Max Opacity' },
         falloffStart: { type: 'slider', min: 0, max: 1, step: 0.05, default: 0.1, label: 'Falloff Start' },
         falloffEnd: { type: 'slider', min: 0, max: 1, step: 0.05, default: 0.9, label: 'Falloff End' },
@@ -533,7 +542,64 @@ export class AtmosphericFogEffect extends EffectBase {
     }
 
     // Update params
-    u.uFogColor.value.set(this.params.fogColor);
+    try {
+      const clamp01 = (n) => Math.max(0, Math.min(1, n));
+      const expEase01 = (x) => 1.0 - Math.exp(-Math.max(0.0, x));
+      const baseFog = u.uFogColor.value;
+      baseFog.set(this.params.fogColor);
+
+      const env = weatherController?.getEnvironment ? weatherController.getEnvironment() : null;
+      const skyColor = env?.skyColor;
+      const skyIntensity = clamp01(env?.skyIntensity ?? 1.0);
+
+      let sceneDarkness = 0.0;
+      try {
+        sceneDarkness = canvas?.environment?.darknessLevel ?? canvas?.scene?.environment?.darknessLevel ?? 0.0;
+      } catch (_) {
+        sceneDarkness = 0.0;
+      }
+      if (env && Number.isFinite(env.sceneDarkness)) sceneDarkness = env.sceneDarkness;
+
+      const d01 = clamp01(sceneDarkness);
+
+      // 1) Night color: mix toward configured night fog color as scene darkness rises.
+      // Use exp easing so high strengths really slam into the night color.
+      const nightStrength = Math.max(0.0, Number(this.params.nightColorStrength ?? 2.0) || 0.0);
+      const nightMix = expEase01(d01 * nightStrength);
+      if (nightMix > 0.0001) {
+        const nightCol = (this._tempNightFog ||= new window.THREE.Color(0, 0, 0));
+        nightCol.set(this.params.fogColorNight);
+        baseFog.lerp(nightCol, Math.min(1.0, nightMix));
+      }
+
+      // 2) Sky tint: apply both a strong hue shift (lerp) and a multiplicative tint.
+      // We intentionally allow skyTintStrength > 1.0.
+      const skyStrength = Math.max(0.0, Number(this.params.skyTintStrength ?? 0.0) || 0.0);
+      if (skyStrength > 0.0 && skyColor && typeof skyColor.r === 'number') {
+        const skyK = skyStrength * skyIntensity;
+        const skyMix = expEase01(0.75 * skyK);
+        const skyMul = expEase01(0.25 * skyK);
+
+        const target = (this._tempSkyColor ||= new window.THREE.Color(1, 1, 1));
+        target.copy(skyColor);
+
+        const pre = (this._tempFogPreTint ||= new window.THREE.Color(1, 1, 1));
+        pre.copy(baseFog);
+
+        baseFog.lerp(target, Math.min(1.0, skyMix));
+
+        const mulCol = (this._tempFogMul ||= new window.THREE.Color(1, 1, 1));
+        mulCol.copy(pre).multiply(target);
+        baseFog.lerp(mulCol, Math.min(1.0, skyMul));
+      }
+
+      const darkStrength = Math.max(0.0, Number(this.params.darknessStrength ?? 1.0) || 0.0);
+      const darkInfluence = clamp01(clamp01(sceneDarkness) * darkStrength);
+      const darkMin = clamp01(Number(this.params.darknessColorMin ?? 0.25) || 0.25);
+      baseFog.multiplyScalar(1.0 - darkInfluence + darkInfluence * darkMin);
+    } catch (_) {
+      u.uFogColor.value.set(this.params.fogColor);
+    }
     u.uMaxOpacity.value = this.params.maxOpacity;
     u.uFalloffStart.value = this.params.falloffStart;
     u.uFalloffEnd.value = this.params.falloffEnd;

@@ -18,6 +18,9 @@ export class StateApplier {
     /** @type {number|null} Timer for debounced darkness updates */
     this._darknessTimer = null;
 
+    /** @type {number|null} Pending target darkness level to flush */
+    this._pendingDarknessTarget = null;
+
     /** @type {number|null} */
     this._timeTransitionIntervalId = null;
   }
@@ -361,15 +364,34 @@ export class StateApplier {
       // Get current darkness
       const currentDarkness = canvas?.environment?.darknessLevel ?? canvas?.scene?.environment?.darknessLevel ?? 0.0;
 
-      // Apply with debouncing to avoid rapid updates
+      // Schedule updates during rapid time changes (e.g. transitions) without starving the timer.
       if (Math.abs(currentDarkness - targetDarkness) > 0.002) {
-        if (this._darknessTimer) clearTimeout(this._darknessTimer);
+        this._pendingDarknessTarget = targetDarkness;
+
+        // If a flush is already scheduled, just update the pending value.
+        if (this._darknessTimer) return;
+
         this._darknessTimer = setTimeout(async () => {
+          // Allow new schedules while the async update is in-flight.
+          this._darknessTimer = null;
+
+          const pending = this._pendingDarknessTarget;
+          this._pendingDarknessTarget = null;
+          if (!Number.isFinite(pending)) return;
+
           try {
-            await canvas.scene.update({ 'environment.darknessLevel': targetDarkness });
-            log.debug(`Scene darkness updated: ${targetDarkness.toFixed(3)}`);
+            await canvas.scene.update({ 'environment.darknessLevel': pending });
+            log.debug(`Scene darkness updated: ${pending.toFixed(3)}`);
           } catch (error) {
             log.warn('Failed to update scene darkness:', error);
+          }
+
+          // If more updates were requested while we were updating, schedule another flush.
+          if (Number.isFinite(this._pendingDarknessTarget)) {
+            try {
+              await this._updateSceneDarkness(hour);
+            } catch (e) {
+            }
           }
         }, 100);
       }
@@ -413,6 +435,8 @@ export class StateApplier {
       clearTimeout(this._darknessTimer);
       this._darknessTimer = null;
     }
+
+    this._pendingDarknessTarget = null;
 
     if (this._timeTransitionIntervalId) {
       clearInterval(this._timeTransitionIntervalId);

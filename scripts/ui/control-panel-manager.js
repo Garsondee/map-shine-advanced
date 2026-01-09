@@ -44,6 +44,9 @@ export class ControlPanelManager {
 
     /** @type {number|null} */
     this._lastTimeTransitionMinutesApplied = null;
+
+    /** @type {boolean} */
+    this._didRevealTimeTarget = false;
     
     /** @type {Object} Runtime control state (saved to scene flags) */
     this.controlState = {
@@ -575,6 +578,7 @@ export class ControlPanelManager {
       btn.style.color = 'inherit';
       btn.style.cursor = 'pointer';
       btn.addEventListener('click', () => {
+        this._revealTimeTargetUI();
         const mins = Number(this.controlState.timeTransitionMinutes) || 0;
         if (mins > 0) {
           void this._startTimeOfDayTransition(hour, mins).then(() => this.debouncedSave());
@@ -673,6 +677,8 @@ export class ControlPanelManager {
       pointer-events: none;
       z-index: 1;
     `;
+
+    targetHand.style.display = 'none';
 
     // Center dot
     const center = document.createElement('div');
@@ -786,8 +792,20 @@ export class ControlPanelManager {
     return container;
   }
 
+  _revealTimeTargetUI() {
+    if (this._didRevealTimeTarget) return;
+    this._didRevealTimeTarget = true;
+    if (this.clockElements?.targetHand) {
+      this.clockElements.targetHand.style.display = '';
+    }
+  }
+
   _updateClockTarget(hour) {
     if (!this.clockElements.targetHand) return;
+
+    // Only show the ghost hand after the first user-driven target interaction.
+    if (!this._didRevealTimeTarget) return;
+
     const shifted = ((hour - 12) % 24 + 24) % 24;
     const angle = (shifted / 24) * 360;
     this.clockElements.targetHand.style.transform = `rotate(${angle}deg)`;
@@ -821,6 +839,7 @@ export class ControlPanelManager {
   _onClockMouseDown(e) {
     e.preventDefault();
     this.isDraggingClock = true;
+    this._revealTimeTargetUI();
     this._updateTimeFromMouse(e);
   }
 
@@ -866,6 +885,7 @@ export class ControlPanelManager {
   _onClockTouchStart(e) {
     e.preventDefault();
     this.isDraggingClock = true;
+    this._revealTimeTargetUI();
     const touch = e.touches[0];
     this._updateTimeFromMouse(touch);
   }

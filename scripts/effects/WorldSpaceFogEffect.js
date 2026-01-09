@@ -828,6 +828,7 @@ export class WorldSpaceFogEffect extends EffectBase {
           float exploredAlpha = mix(1.0, uExploredOpacity, exploredMask);
 
           vec3 fogColor = mix(uUnexploredColor, uExploredColor, exploredMask);
+
           float outAlpha = fogAlpha * exploredAlpha;
 
           if (outAlpha <= 0.001) {

@@ -1617,7 +1617,10 @@ export class InteractionManager {
 
       if (event.ctrlKey) event.preventDefault();
 
-      const isCtrl = game?.keyboard?.isModifierActive?.('CONTROL') ?? event.ctrlKey;
+      // Use actual event modifier state. Foundry's global modifier tracking can become stale
+      // (e.g. CONTROL reported active when it is not), which would incorrectly hijack wheel
+      // events and make normal zoom feel "stuck".
+      const isCtrl = event.ctrlKey;
       const isShift = event.shiftKey;
       if (!(isCtrl || isShift)) return;
 

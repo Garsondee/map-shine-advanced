@@ -132,7 +132,7 @@ async function main() {
   const moduleJsonPath = path.join(repoRoot, 'module.json');
   const readmePath = path.join(repoRoot, 'README.md');
 
-  const requiredDirs = ['scripts', 'styles', 'languages'].map((d) => path.join(repoRoot, d));
+  const requiredDirs = ['scripts', 'styles', 'languages', 'assets'].map((d) => path.join(repoRoot, d));
   for (const d of requiredDirs) {
     if (!(await pathExists(d))) throw new Error(`Missing required directory: ${d}`);
   }
@@ -151,7 +151,7 @@ async function main() {
 
   await fs.promises.writeFile(moduleJsonPath, JSON.stringify(moduleData, null, 2) + '\n', 'utf8');
 
-  const releaseDir = path.join(repoRoot, 'dist', 'releases', args.version);
+  const releaseDir = path.join(repoRoot, 'dist', 'releases', 'latest');
   const zipPath = path.join(releaseDir, 'module.zip');
   const moduleJsonCopyPath = path.join(releaseDir, 'module.json');
   const checksumsPath = path.join(releaseDir, 'checksums.txt');
@@ -171,6 +171,7 @@ async function main() {
   await copyDir(path.join(repoRoot, 'scripts'), path.join(stagingDir, 'scripts'));
   await copyDir(path.join(repoRoot, 'styles'), path.join(stagingDir, 'styles'));
   await copyDir(path.join(repoRoot, 'languages'), path.join(stagingDir, 'languages'));
+  await copyDir(path.join(repoRoot, 'assets'), path.join(stagingDir, 'assets'));
 
   const compressCmd = `Compress-Archive -Path (Join-Path ${psQuote(stagingDir)} '*') -DestinationPath ${psQuote(zipPath)} -Force`;
   runPowerShell(compressCmd);

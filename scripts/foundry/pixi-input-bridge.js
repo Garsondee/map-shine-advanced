@@ -199,6 +199,10 @@ export class PixiInputBridge {
     if (!this.enabled) return;
     if (!canvas?.stage || !canvas?.app?.view) return;
     
+    // Modifier-wheel is reserved for object interactions (rotate/scale) via InteractionManager.
+    // Avoid zoom conflicts by ignoring Ctrl/Shift wheel here.
+    if (event.ctrlKey || event.shiftKey) return;
+    
     event.preventDefault();
     
     // Zoom factor: scroll down = zoom out, scroll up = zoom in

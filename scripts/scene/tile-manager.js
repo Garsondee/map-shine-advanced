@@ -492,12 +492,37 @@ export class TileManager {
     const image = texture?.image;
     if (!texture || !image) return false;
 
+    const width = tileDoc.width;
+    const height = tileDoc.height;
+
     // Map world coords back to Foundry top-left space
     const sceneHeight = canvas.dimensions?.height || 10000;
+    const foundryX = worldX;
     const foundryY = sceneHeight - worldY;
 
-    const u = (worldX - tileDoc.x) / tileDoc.width;
-    const v = (foundryY - tileDoc.y) / tileDoc.height;
+    // Convert to tile local space (account for rotation around center)
+    const centerX = tileDoc.x + width / 2;
+    const centerY = tileDoc.y + height / 2;
+    const dx = foundryX - centerX;
+    const dy = foundryY - centerY;
+
+    const rotDeg = tileDoc.rotation || 0;
+    const r = (-rotDeg * Math.PI) / 180;
+    const c = Math.cos(r);
+    const s = Math.sin(r);
+    const lx = dx * c - dy * s;
+    const ly = dx * s + dy * c;
+
+    const localX = lx + width / 2;
+    const localY = ly + height / 2;
+
+    let u = localX / width;
+    let v = localY / height;
+
+    const scaleX = tileDoc.texture?.scaleX ?? 1;
+    const scaleY = tileDoc.texture?.scaleY ?? 1;
+    if (scaleX < 0) u = 1 - u;
+    if (scaleY < 0) v = 1 - v;
 
     if (u < 0 || u > 1 || v < 0 || v > 1) return false;
 

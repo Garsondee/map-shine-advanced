@@ -2353,8 +2353,7 @@ export class InteractionManager {
         // then do a bounds/alpha test against tile docs.
 
         const THREE = window.THREE;
-        const sampleSprite = overheadSprites[0];
-        const targetZ = sampleSprite?.position?.z ?? 0;
+        const targetZ = this.sceneComposer?.groundZ ?? 0;
         const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -targetZ);
         const worldPoint = new THREE.Vector3();
         const intersection = this.raycaster.ray.intersectPlane(plane, worldPoint);
@@ -2368,24 +2367,25 @@ export class InteractionManager {
             const data = this.tileManager.tileSprites.get(tileId);
             if (!data) continue;
 
-            // Quick AABB test in Foundry (top-left) space.
-            // Convert the plane hit point to Foundry Y-down.
-            const foundryPt = Coordinates.toFoundry(worldPoint.x, worldPoint.y);
-            const foundryY = foundryPt.y;
-            const foundryX = foundryPt.x;
-
-            const { tileDoc } = data;
-            const left = tileDoc.x;
-            const right = tileDoc.x + tileDoc.width;
-            const top = tileDoc.y;
-            const bottom = tileDoc.y + tileDoc.height;
-
-            if (foundryX < left || foundryX > right || foundryY < top || foundryY > bottom) continue;
-
             // Pixel-opaque test (alpha > 0.5)
+            // If available, this function also performs a rotation-aware bounds check.
             let opaqueHit = true;
             if (typeof this.tileManager.isWorldPointOpaque === 'function') {
               opaqueHit = this.tileManager.isWorldPointOpaque(data, worldPoint.x, worldPoint.y);
+            } else {
+              // Fallback: Quick AABB test in Foundry (top-left) space.
+              // Convert the plane hit point to Foundry Y-down.
+              const foundryPt = Coordinates.toFoundry(worldPoint.x, worldPoint.y);
+              const foundryY = foundryPt.y;
+              const foundryX = foundryPt.x;
+
+              const { tileDoc } = data;
+              const left = tileDoc.x;
+              const right = tileDoc.x + tileDoc.width;
+              const top = tileDoc.y;
+              const bottom = tileDoc.y + tileDoc.height;
+
+              opaqueHit = !(foundryX < left || foundryX > right || foundryY < top || foundryY > bottom);
             }
             if (!opaqueHit) continue;
 

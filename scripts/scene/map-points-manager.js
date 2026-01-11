@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import Coordinates from '../utils/coordinates.js';
 
 const log = createLogger('MapPointsManager');
 
@@ -243,7 +244,15 @@ export class MapPointsManager {
         migratedGroup.points = migratedGroup.points
           .filter(p => p && typeof p === 'object')
           .map(p => ({ x: Number(p.x), y: Number(p.y) }))
-          .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+          .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y))
+          // Legacy Map Shine (v1.x) stored points in Foundry coordinates (Y-down).
+          // Map Shine Advanced stores points in world coordinates (Y-up).
+          // If we don't convert here, legacy points appear vertically mirrored.
+          .map(p => {
+            if (!fromLegacy) return p;
+            const wp = Coordinates.toWorld(p.x, p.y);
+            return { x: wp.x, y: wp.y };
+          });
 
         if (migratedGroup.version !== (group.version ?? 0)) needsMigration = true;
         if (!migratedGroup.type || !['point', 'line', 'area', 'rope'].includes(migratedGroup.type)) {

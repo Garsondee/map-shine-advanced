@@ -6,6 +6,10 @@
 
 import { createLogger } from '../core/log.js';
 import { TimeManager } from '../core/time.js';
+import { globalProfiler } from '../core/profiler.js';
+import { globalLoadingProfiler } from '../core/loading-profiler.js';
+import { getCacheStats as getAssetCacheStats } from '../assets/loader.js';
+import { frameCoordinator } from '../core/frame-coordinator.js';
 
 const log = createLogger('EffectComposer');
 
@@ -149,10 +153,24 @@ export class EffectComposer {
     }
 
     this.effects.set(effect.id, effect);
-    // CRITICAL: Await async initialize methods to ensure effects are fully ready
-    // before subsequent code tries to use them (e.g., FireSparksEffect needs
-    // ParticleSystem.batchRenderer to be initialized before setAssetBundle)
-    await effect.initialize(this.renderer, this.scene, this.camera);
+    const lp = globalLoadingProfiler;
+    const doLoadProfile = !!lp?.enabled;
+    if (doLoadProfile) {
+      try {
+        lp.begin(`effect:${effect.id}:initialize`, { layer: effect?.layer?.name ?? null, requiredTier: effect?.requiredTier ?? null });
+      } catch (e) {
+      }
+    }
+    try {
+      await effect.initialize(this.renderer, this.scene, this.camera);
+    } finally {
+      if (doLoadProfile) {
+        try {
+          lp.end(`effect:${effect.id}:initialize`);
+        } catch (e) {
+        }
+      }
+    }
     this.invalidateRenderOrder();
     
     log.info(`Effect registered: ${effect.id} (layer: ${effect.layer.name})`);
@@ -262,10 +280,80 @@ export class EffectComposer {
     // Update centralized time (single source of truth)
     const timeInfo = this.timeManager.update();
 
+    const profiler = globalProfiler;
+    const doProfile = !!profiler?.enabled;
+    if (doProfile) profiler.beginFrame(timeInfo);
+
+    if (doProfile) {
+      try {
+        const now = performance.now();
+        if (profiler.shouldRecordResourceSample(now)) {
+          const info = this.renderer?.info;
+          const cache = (() => {
+            try {
+              return getAssetCacheStats();
+            } catch (e) {
+              return null;
+            }
+          })();
+          const fc = (() => {
+            try {
+              return frameCoordinator?.getMetrics?.() ?? null;
+            } catch (e) {
+              return null;
+            }
+          })();
+
+          const mem = (() => {
+            try {
+              const m = performance?.memory;
+              if (!m) return null;
+              return {
+                jsHeapSizeLimit: m.jsHeapSizeLimit,
+                totalJSHeapSize: m.totalJSHeapSize,
+                usedJSHeapSize: m.usedJSHeapSize
+              };
+            } catch (e) {
+              return null;
+            }
+          })();
+
+          profiler.maybeRecordResourceSample({
+            renderer: info ? {
+              render: info.render ? {
+                calls: info.render.calls,
+                triangles: info.render.triangles,
+                lines: info.render.lines,
+                points: info.render.points
+              } : null,
+              memory: info.memory ? {
+                geometries: info.memory.geometries,
+                textures: info.memory.textures
+              } : null,
+              programs: Array.isArray(info.programs) ? info.programs.length : null
+            } : null,
+            assetCache: cache,
+            frameCoordinator: fc,
+            perfMemory: mem,
+            effectCount: this.effects?.size ?? null,
+            renderTargets: this.renderTargets?.size ?? null
+          }, now);
+        }
+      } catch (e) {
+      }
+    }
+
     // Update registered updatables (managers, etc.)
     for (const updatable of this.updatables) {
       try {
+        let t0 = 0;
+        if (doProfile) t0 = performance.now();
         updatable.update(timeInfo);
+        if (doProfile) {
+          const dt = performance.now() - t0;
+          const name = updatable?.constructor?.name || updatable?.id || 'updatable';
+          profiler.recordUpdatable(name, dt);
+        }
       } catch (error) {
         log.error('Error updating updatable:', error);
       }
@@ -293,11 +381,16 @@ export class EffectComposer {
     for (const effect of sceneEffects) {
       try {
         // Allow scene effects to update internal state/uniforms
+        let t0 = 0;
+        if (doProfile) t0 = performance.now();
         effect.update(timeInfo);
+        if (doProfile) profiler.recordEffectUpdate(effect.id, performance.now() - t0);
 
         // Most scene effects rely on the main scene render, but render is
         // still available for those that need it (e.g., to sync materials)
+        if (doProfile) t0 = performance.now();
         effect.render(this.renderer, this.scene, this.camera);
+        if (doProfile) profiler.recordEffectRender(effect.id, performance.now() - t0);
       } catch (error) {
         log.error(`Scene effect update/render error (${effect.id}):`, error);
         this.handleEffectError(effect, error);
@@ -338,6 +431,7 @@ export class EffectComposer {
     // If no post-processing effects are active, we're done
     if (!usePostProcessing) {
       this._renderOverlayToScreen();
+      if (doProfile) profiler.endFrame();
       return;
     }
 
@@ -362,7 +456,10 @@ export class EffectComposer {
       
       try {
         // Update effect state with time info
+        let t0 = 0;
+        if (doProfile) t0 = performance.now();
         effect.update(timeInfo);
+        if (doProfile) profiler.recordEffectUpdate(effect.id, performance.now() - t0);
 
         // Configure effect inputs/outputs
         if (typeof effect.setInputTexture === 'function') {
@@ -387,7 +484,9 @@ export class EffectComposer {
         }
 
         // Let the effect render its full-screen pass
+        if (doProfile) t0 = performance.now();
         effect.render(this.renderer, this.scene, this.camera);
+        if (doProfile) profiler.recordEffectRender(effect.id, performance.now() - t0);
 
         // Ping-pong swap for next iteration
         if (!isLast) {
@@ -404,6 +503,7 @@ export class EffectComposer {
     }
 
     this._renderOverlayToScreen();
+    if (doProfile) profiler.endFrame();
   }
 
   /**
@@ -522,11 +622,26 @@ export class EffectComposer {
     }
     this.effects.clear();
 
+    // Clear updatables (managers, controllers, etc.)
+    try {
+      this.updatables.clear();
+    } catch (e) {
+    }
+
     // Dispose render targets
     for (const target of this.renderTargets.values()) {
       target.dispose();
     }
     this.renderTargets.clear();
+
+    // Dispose scene render target
+    try {
+      if (this.sceneRenderTarget) {
+        this.sceneRenderTarget.dispose();
+        this.sceneRenderTarget = null;
+      }
+    } catch (e) {
+    }
   }
 
   /**

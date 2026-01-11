@@ -58,8 +58,16 @@ export class FrameCoordinator {
       pixiSyncTime: 0,
       threeRenderTime: 0,
       totalFrameTime: 0,
-      droppedFrames: 0
+      droppedFrames: 0,
+      perceptionUpdateCalls: 0,
+      perceptionUpdateSkipped: 0,
+      perceptionUpdateCallsPerSec: 0
     };
+
+    this._perceptionUpdateMinIntervalMs = 100;
+    this._lastPerceptionUpdateTime = 0;
+    this._perceptionUpdateWindowStart = 0;
+    this._perceptionUpdateWindowCalls = 0;
   }
 
   /**
@@ -160,12 +168,46 @@ export class FrameCoordinator {
    */
   forcePerceptionUpdate() {
     try {
+      const now = performance.now();
+      if (this._lastPerceptionUpdateTime && (now - this._lastPerceptionUpdateTime) < this._perceptionUpdateMinIntervalMs) {
+        this._metrics.perceptionUpdateSkipped++;
+
+        if (!this._perceptionUpdateWindowStart) {
+          this._perceptionUpdateWindowStart = now;
+          this._perceptionUpdateWindowCalls = 0;
+        }
+
+        const dt = now - this._perceptionUpdateWindowStart;
+        if (dt >= 1000) {
+          this._metrics.perceptionUpdateCallsPerSec = this._perceptionUpdateWindowCalls;
+          this._perceptionUpdateWindowStart = now;
+          this._perceptionUpdateWindowCalls = 0;
+        }
+
+        return;
+      }
+
       // canvas.perception.update() forces Foundry to recompute vision/lighting
       if (canvas?.perception?.update) {
         canvas.perception.update({
           refreshVision: true,
           refreshLighting: true
         });
+
+        this._lastPerceptionUpdateTime = now;
+        this._metrics.perceptionUpdateCalls++;
+        this._perceptionUpdateWindowCalls++;
+
+        if (!this._perceptionUpdateWindowStart) {
+          this._perceptionUpdateWindowStart = now;
+        }
+
+        const dt = now - this._perceptionUpdateWindowStart;
+        if (dt >= 1000) {
+          this._metrics.perceptionUpdateCallsPerSec = this._perceptionUpdateWindowCalls;
+          this._perceptionUpdateWindowStart = now;
+          this._perceptionUpdateWindowCalls = 0;
+        }
       }
     } catch (e) {
       log.warn('Failed to force perception update:', e);

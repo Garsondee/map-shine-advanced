@@ -1,0 +1,97 @@
+{
+  "meta": {
+    "timestamp": "2026-01-11T00:37:42.345Z",
+    "browser": "chromium",
+    "headless": false,
+    "viewport": {
+      "width": null,
+      "height": null
+    },
+    "baseUrl": "http://localhost:30000",
+    "mode": "soloeffect",
+    "effectId": "cloud",
+    "effectFilter": null,
+    "warmupMs": 5000,
+    "sampleMs": 15000,
+    "soloWarmupMs": 5000,
+    "soloSampleMs": 15000,
+    "toggleSettleMs": 2000
+  },
+  "load": {
+    "serverMs": 9931,
+    "gotoMs": 1254,
+    "authMs": 2149,
+    "canvasReadyMs": 11399,
+    "mapShineReadyMs": 19691
+  },
+  "loading": {
+    "profile": null,
+    "effectInitMs": {}
+  },
+  "baseline": null,
+  "effects": [],
+  "solo": {
+    "minimalEnabledIds": [
+      "specular",
+      "colorCorrection",
+      "lighting"
+    ],
+    "baseline": {
+      "frames": 1457,
+      "totalMs": 15008.400000000001,
+      "fpsAvg": 97.07896911063136,
+      "frameMs": {
+        "avg": 10.300892244337682,
+        "min": 8.099999999998545,
+        "p50": 8.30000000000291,
+        "p95": 8.400000000001455,
+        "p99": 91.70000000000073,
+        "max": 700
+      },
+      "hitches": {
+        ">33ms": 18,
+        ">50ms": 17,
+        ">100ms": 14
+      }
+    },
+    "effects": [
+      {
+        "effectId": "cloud",
+        "variantEnabledIds": [
+          "specular",
+          "colorCorrection",
+          "lighting",
+          "cloud"
+        ],
+        "variant": {
+          "frames": 1801,
+          "totalMs": 15008.599999999999,
+          "fpsAvg": 119.99786788907693,
+          "frameMs": {
+            "avg": 8.333481399222654,
+            "min": 8.099999999998545,
+            "p50": 8.30000000000291,
+            "p95": 8.400000000001455,
+            "p99": 8.5,
+            "max": 8.5
+          },
+          "hitches": {
+            ">33ms": 0,
+            ">50ms": 0,
+            ">100ms": 0
+          }
+        },
+        "deltaVariantVsMinimal": {
+          "fpsAvg": 22.918898778445566,
+          "p50": 0,
+          "p95": 0,
+          "p99": -83.20000000000073,
+          "max": -691.5,
+          "hitches33": -18,
+          "hitches50": -17,
+          "hitches100": -14
+        }
+      }
+    ]
+  }
+}

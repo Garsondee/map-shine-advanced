@@ -431,6 +431,31 @@ export class MaskManager {
     } catch (e) {
     }
 
+    try {
+      if (this._quadMesh) {
+        try {
+          if (this._quadScene) this._quadScene.remove(this._quadMesh);
+        } catch (e) {
+        }
+
+        try {
+          if (this._quadMesh.geometry) this._quadMesh.geometry.dispose();
+        } catch (e) {
+        }
+
+        try {
+          const mat = this._quadMesh.material;
+          if (Array.isArray(mat)) {
+            for (const m of mat) m?.dispose?.();
+          } else {
+            mat?.dispose?.();
+          }
+        } catch (e) {
+        }
+      }
+    } catch (e) {
+    }
+
     this._boostMaterial = null;
     this._blurMaterial = null;
     this._opMaterial = null;

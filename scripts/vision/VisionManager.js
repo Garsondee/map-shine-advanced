@@ -84,6 +84,9 @@ export class VisionManager {
     
     // Cache the last computed vision state to detect if we actually need to rerender
     this._lastVisionHash = null;
+
+    /** @type {number[]} */
+    this._hookIds = [];
     
     // Register hooks
     this.setupHooks();
@@ -95,7 +98,7 @@ export class VisionManager {
     // Token hooks
     // Capture the changes object which contains the NEW position values
     // token.document may still have OLD values during the hook
-    Hooks.on('updateToken', (tokenDoc, changes) => { 
+    this._hookIds.push(Hooks.on('updateToken', (tokenDoc, changes) => { 
       // Only track position changes for controlled tokens
       if (this._controlledTokenIds.has(tokenDoc.id)) {
         if ('x' in changes || 'y' in changes) {
@@ -106,25 +109,25 @@ export class VisionManager {
         }
         this.needsUpdate = true;
       }
-    });
+    }));
     
     // CRITICAL: Track controlled tokens explicitly
     // This is the key hook for knowing which tokens to compute vision for
-    Hooks.on('controlToken', (token, controlled) => { 
+    this._hookIds.push(Hooks.on('controlToken', (token, controlled) => { 
       this._handleControlToken(token, controlled);
-    });
+    }));
     
-    Hooks.on('createToken', () => { this.needsUpdate = true; });
-    Hooks.on('deleteToken', (tokenDoc) => { 
+    this._hookIds.push(Hooks.on('createToken', () => { this.needsUpdate = true; }));
+    this._hookIds.push(Hooks.on('deleteToken', (tokenDoc) => { 
       this.pendingPositions.delete(tokenDoc.id);
       this._controlledTokenIds.delete(tokenDoc.id);
       this.needsUpdate = true; 
-    });
+    }));
     
     // refreshToken fires during token animation frames - gives us smooth "in-between" vision
     // This updates the FOV as the token moves, producing more realistic sight lines
     // PERFORMANCE: Throttle these updates to avoid recomputing vision 60x/sec during animation.
-    Hooks.on('refreshToken', (token) => {
+    this._hookIds.push(Hooks.on('refreshToken', (token) => {
       // Only update if this token is controlled AND has vision
       if (!this._controlledTokenIds.has(token.document?.id)) return;
       
@@ -140,24 +143,24 @@ export class VisionManager {
         // Mark for throttled update instead of immediate
         this._pendingThrottledUpdate = true;
       }
-    });
+    }));
     
     // Wall hooks - critical for self-computed vision
-    Hooks.on('createWall', () => { this.needsUpdate = true; });
-    Hooks.on('updateWall', () => { this.needsUpdate = true; });
-    Hooks.on('deleteWall', () => { this.needsUpdate = true; });
+    this._hookIds.push(Hooks.on('createWall', () => { this.needsUpdate = true; }));
+    this._hookIds.push(Hooks.on('updateWall', () => { this.needsUpdate = true; }));
+    this._hookIds.push(Hooks.on('deleteWall', () => { this.needsUpdate = true; }));
     
     // Scene hooks
-    Hooks.on('canvasReady', () => { 
+    this._hookIds.push(Hooks.on('canvasReady', () => { 
       this.pendingPositions.clear();
       this._controlledTokenIds.clear();
       this._lastVisionHash = null;
       this.needsUpdate = true; 
-    });
+    }));
     
     // Legacy hooks (may still fire in some Foundry versions)
-    Hooks.on('sightRefresh', () => { this.needsUpdate = true; });
-    Hooks.on('lightingRefresh', () => { this.needsUpdate = true; });
+    this._hookIds.push(Hooks.on('sightRefresh', () => { this.needsUpdate = true; }));
+    this._hookIds.push(Hooks.on('lightingRefresh', () => { this.needsUpdate = true; }));
   }
 
   /**
@@ -460,6 +463,20 @@ export class VisionManager {
   }
 
   dispose() {
+    // Unregister Foundry hooks
+    try {
+      if (this._hookIds && this._hookIds.length) {
+        for (const id of this._hookIds) {
+          try {
+            Hooks.off(id);
+          } catch (e) {
+          }
+        }
+      }
+    } catch (e) {
+    }
+    this._hookIds = [];
+
     this.renderTarget.dispose();
     this.material.dispose();
     // Geometry disposal is handled in update loop for now

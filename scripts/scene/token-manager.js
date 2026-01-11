@@ -60,6 +60,9 @@ export class TokenManager {
 
     /** @type {((tokenId: string) => void)|null} */
     this._onTokenMovementStart = null;
+
+    /** @type {number[]} */
+    this._hookIds = [];
     
     log.debug('TokenManager created');
   }
@@ -255,35 +258,35 @@ export class TokenManager {
     if (this.hooksRegistered) return;
 
     // Initial load when canvas is ready
-    Hooks.on('canvasReady', () => {
+    this._hookIds.push(Hooks.on('canvasReady', () => {
       log.debug('Canvas ready, syncing all tokens');
       this.syncAllTokens();
-    });
+    }));
 
     // Create new token
-    Hooks.on('createToken', (tokenDoc, options, userId) => {
+    this._hookIds.push(Hooks.on('createToken', (tokenDoc, options, userId) => {
       log.debug(`Token created: ${tokenDoc.id}`);
       this.createTokenSprite(tokenDoc);
-    });
+    }));
 
     // Update existing token
-    Hooks.on('updateToken', (tokenDoc, changes, options, userId) => {
+    this._hookIds.push(Hooks.on('updateToken', (tokenDoc, changes, options, userId) => {
       log.debug(`Token updated: ${tokenDoc.id}`, changes);
       this.updateTokenSprite(tokenDoc, changes, options);
-    });
+    }));
 
     // Delete token
-    Hooks.on('deleteToken', (tokenDoc, options, userId) => {
+    this._hookIds.push(Hooks.on('deleteToken', (tokenDoc, options, userId) => {
       log.debug(`Token deleted: ${tokenDoc.id}`);
       this.removeTokenSprite(tokenDoc.id);
-    });
+    }));
 
     // Refresh token (rendering changes)
-    Hooks.on('refreshToken', (token) => {
+    this._hookIds.push(Hooks.on('refreshToken', (token) => {
       log.debug(`Token refreshed: ${token.id}`);
       // Refresh typically means visual state changed (visibility, effects, etc.)
       this.refreshTokenSprite(token.document);
-    });
+    }));
 
     this.hooksRegistered = true;
     log.debug('Foundry hooks registered');
@@ -1038,6 +1041,21 @@ export class TokenManager {
    */
   dispose() {
     log.info(`Disposing TokenManager with ${this.tokenSprites.size} tokens`);
+
+    // Unregister Foundry hooks
+    try {
+      if (this._hookIds && this._hookIds.length) {
+        for (const id of this._hookIds) {
+          try {
+            Hooks.off(id);
+          } catch (e) {
+          }
+        }
+      }
+    } catch (e) {
+    }
+    this._hookIds = [];
+    this.hooksRegistered = false;
 
     // Remove all token sprites
     for (const [tokenId, data] of this.tokenSprites.entries()) {

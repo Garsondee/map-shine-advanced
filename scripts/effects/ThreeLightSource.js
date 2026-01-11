@@ -395,207 +395,89 @@ ${FoundryLightingShaderChunks.chroma}
             // Foundry VTT energy field (ported from energy-field.mjs).
 ${FoundryLightingShaderChunks.energyField}
           } else if (uAnimType > 4.5 && uAnimType < 5.5) {
-            // Foundry VTT bewitching wave (ported from bewitching-wave.mjs).
 ${FoundryLightingShaderChunks.bewitchingWave}
-          } else if (uAnimType > 5.5 && uAnimType < 6.5) {
-            // Foundry VTT revolving (ported from revolving-light.mjs).
+  } else if (uAnimType > 5.5 && uAnimType < 6.5) {
+    // Foundry VTT revolving (ported from revolving-light.mjs).
 ${FoundryLightingShaderChunks.revolving}
-          } else if (uAnimType > 6.5 && uAnimType < 7.5) {
-            // Foundry VTT siren (ported from siren-light.mjs).
+  } else if (uAnimType > 6.5 && uAnimType < 7.5) {
+    // Foundry VTT siren (ported from siren-light.mjs).
+    // Foundry siren uses torch coloration (brightnessPulse applied to color).
+    outColor *= uIntensity;
 ${FoundryLightingShaderChunks.siren}
-          } else if (uAnimType > 7.5 && uAnimType < 8.5) {
-            // Foundry VTT fog (ported from fog.mjs).
+  } else if (uAnimType > 7.5 && uAnimType < 8.5) {
+    // Foundry VTT fog (ported from fog.mjs).
 ${FoundryLightingShaderChunks.fog}
-          } else if (uAnimType > 8.5 && uAnimType < 9.5) {
-            // Foundry VTT sunburst (ported from sunburst.mjs).
+  } else if (uAnimType > 8.5 && uAnimType < 9.5) {
+    // Foundry VTT sunburst (ported from sunburst.mjs).
 ${FoundryLightingShaderChunks.sunburst}
-          } else if (uAnimType > 9.5 && uAnimType < 10.5) {
-            // Foundry VTT dome (ported from light-dome.mjs).
+  } else if (uAnimType > 9.5 && uAnimType < 10.5) {
+    // Foundry VTT dome (ported from light-dome.mjs).
 ${FoundryLightingShaderChunks.lightDome}
-          } else if (uAnimType > 10.5 && uAnimType < 11.5) {
-            // Foundry VTT emanation (ported from emanation.mjs).
+  } else if (uAnimType > 10.5 && uAnimType < 11.5) {
+    // Foundry VTT emanation (ported from emanation.mjs).
 ${FoundryLightingShaderChunks.emanation}
-          } else if (uAnimType > 11.5 && uAnimType < 12.5) {
-            // Foundry VTT hexa dome (ported from hexa-dome.mjs).
+  } else if (uAnimType > 11.5 && uAnimType < 12.5) {
+    // Foundry VTT hexa dome (ported from hexa-dome.mjs).
 ${FoundryLightingShaderChunks.hexaDome}
-          } else if (uAnimType > 12.5 && uAnimType < 13.5) {
-            // Foundry VTT ghost light (ported from ghost-light.mjs).
+  } else if (uAnimType > 12.5 && uAnimType < 13.5) {
+    // Foundry VTT ghost light (ported from ghost-light.mjs).
 ${FoundryLightingShaderChunks.ghostLight}
-          } else if (uAnimType > 13.5 && uAnimType < 14.5) {
-            // Foundry VTT vortex (ported from vortex.mjs).
+  } else if (uAnimType > 13.5 && uAnimType < 14.5) {
+    // Foundry VTT vortex (ported from vortex.mjs).
 ${FoundryLightingShaderChunks.vortex}
-          } else if (uAnimType > 14.5 && uAnimType < 15.5) {
-            // Foundry VTT swirling rainbow (ported from swirling-rainbow.mjs).
+  } else if (uAnimType > 14.5 && uAnimType < 15.5) {
+    // Foundry VTT swirling rainbow (ported from swirling-rainbow.mjs).
 ${FoundryLightingShaderChunks.swirlingRainbow}
-          } else if (uAnimType > 15.5 && uAnimType < 16.5) {
-            // Foundry VTT radial rainbow (ported from radial-rainbow.mjs).
+  } else if (uAnimType > 15.5 && uAnimType < 16.5) {
+    // Foundry VTT radial rainbow (ported from radial-rainbow.mjs).
 ${FoundryLightingShaderChunks.radialRainbow}
-          } else if (uAnimType > 16.5 && uAnimType < 17.5) {
-            // Foundry VTT force grid (ported from force-grid.mjs).
+  } else if (uAnimType > 16.5 && uAnimType < 17.5) {
+    // Foundry VTT force grid (ported from force-grid.mjs).
 ${FoundryLightingShaderChunks.forceGrid}
-          } else if (uAnimType > 17.5 && uAnimType < 18.5) {
-            // Foundry VTT star light (ported from star-light.mjs).
+  } else if (uAnimType > 17.5 && uAnimType < 18.5) {
+    // Foundry VTT star light (ported from star-light.mjs).
 ${FoundryLightingShaderChunks.starLight}
-          } else if (uAnimType > 18.5 && uAnimType < 19.5) {
-            // Foundry VTT smoke patch (ported from smoke-patch.mjs).
+  } else if (uAnimType > 18.5 && uAnimType < 19.5) {
+    // Foundry VTT smoke patch (ported from smoke-patch.mjs).
 ${FoundryLightingShaderChunks.smokePatch}
-          } else if (uAnimType > 19.5 && uAnimType < 20.5) {
-            // Foundry VTT torch (mimic coloration: brightnessPulse scales color).
+  } else if (uAnimType > 19.5 && uAnimType < 20.5) {
+    // Foundry VTT torch (mimic coloration: brightnessPulse scales color).
 ${FoundryLightingShaderChunks.torch}
-          } else if (uAnimType > 20.5 && uAnimType < 21.5) {
-            // Foundry VTT flame (mimic coloration: noisy inner/outer flame lobes).
+  } else if (uAnimType > 20.5 && uAnimType < 21.5) {
+    // Foundry VTT flame (mimic coloration: noisy inner/outer flame lobes).
 ${FoundryLightingShaderChunks.flame}
-          } else if (uAnimType > 21.5 && uAnimType < 22.5) {
-            // Foundry VTT pulse/reactivepulse (mimic illumination+coloration).
+  } else if (uAnimType > 21.5 && uAnimType < 22.5) {
+    // Foundry VTT pulse/reactivepulse (mimic illumination+coloration).
 ${FoundryLightingShaderChunks.pulse}
-          }
-
-          // Final Alpha calculation
-          float alpha = intensity * uAlpha * uIntensity * animAlphaMul;
-
-          float fairyBoost = (uAnimType > 1.5 && uAnimType < 2.5) ? 3.0 : 1.0;
-          alpha *= fairyBoost;
-
-          // Additive Output
-          gl_FragColor = vec4(outColor * uBrightness * (0.75 + 0.25 * fairyBoost), alpha);
-        }
-      `,
-      transparent: true,
-      // Standard additive: SrcAlpha * color + 1 * dest
-      blending: THREE.CustomBlending,
-      blendEquation: THREE.AddEquation,
-      blendSrc: THREE.SrcAlphaFactor,
-      blendDst: THREE.OneFactor,
-      depthWrite: false,
-      depthTest: false,
-    });
-
-    this.material.toneMapped = false;
-
-    this.updateData(this.document, true);
-
-    // Stable per-light seed in [0..1]
-    this.material.uniforms.uSeed.value = (this.animation.seed % 100000) / 100000;
   }
 
-  updateData(doc, forceRebuild = false) {
-    this.document = doc;
-    const config = doc.config;
-    const THREE = window.THREE;
+  // Final Alpha calculation
+  float alpha = intensity * uAlpha * animAlphaMul;
 
-    const prevRadiusPx = this._baseRadiusPx;
+  float fairyBoost = (uAnimType > 1.5 && uAnimType < 2.5) ? 3.0 : 1.0;
+  alpha *= fairyBoost;
 
-    // 1. Color Parsing
-    const c = new THREE.Color(1, 1, 1);
-    const colorInput = config.color;
+  // Additive Output
+  gl_FragColor = vec4(outColor * uBrightness * (0.75 + 0.25 * fairyBoost), alpha);
+}
 
-    if (colorInput) {
-      if (typeof colorInput === 'string') c.set(colorInput);
-      else if (typeof colorInput === 'number') c.setHex(colorInput);
-      else if (typeof colorInput === 'object' && colorInput.r !== undefined) c.copy(colorInput);
-    }
-    
-    // Reduced saturation boost (was 1.1, causing colors to be ~50% too intense)
-    const hsl = {};
-    c.getHSL(hsl);
-    if (hsl.s > 0) {
-      c.setHSL(hsl.h, Math.min(1.0, hsl.s * 1.05), hsl.l);
-    }
-    this.material.uniforms.uColor.value.copy(c);
+// ... rest of the code ...
 
-    // 2. Brightness / intensity logic (reduced by 25% to match Foundry VTT)
-    const luminosity = config.luminosity ?? 0.5;
-    const satBonus = (hsl.s > 0.2) ? 0.5 : 0.0;
-    this.material.uniforms.uBrightness.value = 1.2 + (luminosity * 1.5) + satBonus;
+animateFlickering(tMs, { speed = 5, intensity = 5, reverse = false, amplification = 1 } = {}) {
+  this.animateTime(tMs, { speed, intensity, reverse });
 
-    // 3. Geometry
-    const dim = config.dim || 0;
-    const bright = config.bright || 0;
-    const radius = Math.max(dim, bright);
-    
-    const d = canvas.dimensions;
-    const pxPerUnit = d.size / d.distance;
-    const rPx = radius * pxPerUnit;
-    const brightPx = bright * pxPerUnit;
-
-    const wallInsetPx = this._getWallInsetWorldPx();
-    const rPxInset = Math.max(0, rPx - wallInsetPx);
-    const brightPxInset = Math.max(0, brightPx - wallInsetPx);
-
-    if (this._lastInsetWorldPx === null) {
-      this._lastInsetWorldPx = wallInsetPx;
-      this._lastInsetUpdateAtSec = 0;
-    }
-
-    this._baseRadiusPx = rPxInset;
-    this._baseBrightRadiusPx = brightPxInset;
-    this._baseRatio = rPxInset > 0 ? (brightPxInset / rPxInset) : 1;
-
-    this.material.uniforms.uRadius.value = rPxInset;
-    this.material.uniforms.uBrightRadius.value = brightPxInset;
-    this.material.uniforms.uAlpha.value = config.alpha ?? 0.5;
-
-    // --- FOUNDRY ATTENUATION MATH ---
-    // Maps user input [0,1] to a non-linear shader curve [0,1]
-    const rawAttenuation = config.attenuation ?? 0.5;
-    const computedAttenuation = (Math.cos(Math.PI * Math.pow(rawAttenuation, 1.5)) - 1) / -2;
-    this.material.uniforms.uAttenuation.value = computedAttenuation;
-
-    // 4. Position
-    // Light meshes must be at the ground plane Z level (plus small offset)
-    // to align with the base plane after the camera/ground refactor.
-    const worldPos = Coordinates.toWorld(doc.x, doc.y);
-    const groundZ = this._getGroundZ();
-    const lightZ = groundZ + 0.1; // Slightly above ground plane
-
-    const radiusChanged = Math.abs((prevRadiusPx ?? 0) - (rPxInset ?? 0)) > 1e-3;
-    if (forceRebuild || !this.mesh || radiusChanged) {
-      this.rebuildGeometry(worldPos.x, worldPos.y, rPxInset, lightZ);
-    } else {
-      this.mesh.position.set(worldPos.x, worldPos.y, lightZ);
-    }
+  const amplitude = Math.max(0.0001, amplification * 0.45);
+  if (!this.animation.noise) {
+    this.animation.noise = new SmoothNoise({ amplitude, scale: 3, maxReferences: 2048 });
+  } else if (this.animation.noise.amplitude !== amplitude) {
+    this.animation.noise.amplitude = amplitude;
   }
 
-  _clamp(value, min, max) {
-    if (value < min) return min;
-    if (value > max) return max;
-    return value;
-  }
-
-  _mix(a, b, t) {
-    return (a * (1 - t)) + (b * t);
-  }
-
-  _getAnimationOptions() {
-    const a = this.document?.config?.animation;
-    const type = a?.type ?? null;
-    const speed = typeof a?.speed === 'number' ? a.speed : 5;
-    const intensity = typeof a?.intensity === 'number' ? a.intensity : 5;
-    const reverse = !!a?.reverse;
-    return { type, speed, intensity, reverse };
-  }
-
-  animateTime(tMs, { speed = 5, intensity = 5, reverse = false } = {}) {
-    let t = tMs;
-    if (reverse) t *= -1;
-    this.animation.time = ((speed * t) / 5000) + this.animation.seed;
-    return this.animation.time;
-  }
-
-  animateFlickering(tMs, { speed = 5, intensity = 5, reverse = false, amplification = 1 } = {}) {
-    this.animateTime(tMs, { speed, intensity, reverse });
-
-    const amplitude = amplification * 0.45;
-    if (!this.animation.noise) {
-      this.animation.noise = new SmoothNoise({ amplitude, scale: 3, maxReferences: 2048 });
-    } else if (this.animation.noise.amplitude !== amplitude) {
-      this.animation.noise.amplitude = amplitude;
-    }
-
-    const n = this.animation.noise.generate(this.animation.time);
-    const brightnessPulse = 0.55 + n;
-    const ratioPulse = (this._baseRatio * 0.9) + (n * 0.222);
-    return { brightnessPulse, ratioPulse };
+  const n = this.animation.noise.generate(this.animation.time);
+  const brightnessPulse = 0.55 + n;
+  const ratioPulse = (this._baseRatio * 0.9) + (n * 0.222);
+  return { brightnessPulse, ratioPulse };
+}
   }
 
   animateTorch(tMs, { speed = 5, intensity = 5, reverse = false } = {}) {

@@ -5,6 +5,8 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { globalProfiler } from '../core/profiler.js';
+import { globalLoadingProfiler } from '../core/loading-profiler.js';
 
 const log = createLogger('ConsoleHelpers');
 
@@ -331,6 +333,68 @@ export function installConsoleHelpers() {
   if (typeof window !== 'undefined') {
     if (!window.MapShine) window.MapShine = {};
     window.MapShine.debug = consoleHelpers;
+
+    window.MapShine.perf = {
+      start: (options = {}) => {
+        globalProfiler.start(options);
+        return globalProfiler;
+      },
+      stop: () => {
+        globalProfiler.stop();
+        return true;
+      },
+      clear: () => {
+        globalProfiler.clear();
+        return true;
+      },
+      summary: () => {
+        return globalProfiler.getSummary();
+      },
+      top: (kind = 'updatables', n = 10) => {
+        return globalProfiler.getTopContributors(kind, n);
+      },
+      exportJson: () => {
+        return globalProfiler.exportJson();
+      },
+      exportCsv: () => {
+        return globalProfiler.exportCsv();
+      },
+      exportAllJson: () => {
+        return {
+          perf: globalProfiler.exportJson(),
+          loading: globalLoadingProfiler.exportJson()
+        };
+      },
+      loading: {
+        start: () => {
+          globalLoadingProfiler.start();
+          return globalLoadingProfiler;
+        },
+        stop: () => {
+          globalLoadingProfiler.stop();
+          return true;
+        },
+        clear: () => {
+          globalLoadingProfiler.clear();
+          return true;
+        },
+        report: () => {
+          return globalLoadingProfiler.getReport();
+        },
+        summary: () => {
+          return globalLoadingProfiler.getSummary();
+        },
+        top: (n = 20, prefix = 'effect:') => {
+          return globalLoadingProfiler.getTopSpans(n, prefix);
+        },
+        exportJson: () => {
+          return globalLoadingProfiler.exportJson();
+        },
+        exportCsv: () => {
+          return globalLoadingProfiler.exportCsv();
+        }
+      }
+    };
     
     log.info('Console helpers installed: MapShine.debug');
     console.log('💡 Type MapShine.debug.help() for debugging commands');

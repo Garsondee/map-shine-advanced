@@ -1,0 +1,725 @@
+{
+  "meta": {
+    "timestamp": "2026-01-10T19:18:24.083Z",
+    "browser": "chromium",
+    "headless": false,
+    "viewport": {
+      "width": null,
+      "height": null
+    },
+    "baseUrl": "http://localhost:30005",
+    "mode": "complex",
+    "warmupMs": 5000,
+    "sampleMs": 180000,
+    "snapshotEveryMs": 5000
+  },
+  "load": {
+    "serverMs": 8348,
+    "gotoMs": 731,
+    "authMs": 1681,
+    "canvasReadyMs": 11764,
+    "mapShineReadyMs": 34200
+  },
+  "benchmarks": {
+    "complexIdle": {
+      "durationMs": 180000,
+      "frames": 11920,
+      "totalMs": 180018.59999999625,
+      "fpsAvg": 66.21537996629375,
+      "frameMs": {
+        "avg": 15.102231543623846,
+        "min": 8,
+        "p50": 16.60000000000582,
+        "p95": 16.900000000023283,
+        "p99": 25.10000000000582,
+        "max": 58.30000000000291
+      },
+      "hitches": {
+        ">33ms": 39,
+        ">50ms": 1,
+        ">100ms": 0
+      },
+      "snapshots": [
+        {
+          "t": 38045.09999999404,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 213236812,
+            "totalJSHeapSize": 293620888,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 61,
+            "textures": 71,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 43063,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 219293080,
+            "totalJSHeapSize": 295193752,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 61,
+            "textures": 71,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 48094.29999999702,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 217841578,
+            "totalJSHeapSize": 300421482,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 201,
+            "textures": 104,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 53068.5,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 224043315,
+            "totalJSHeapSize": 307224463,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 224,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 58071.79999999702,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 239565923,
+            "totalJSHeapSize": 309937275,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 214,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 63071.29999999702,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 250436443,
+            "totalJSHeapSize": 313345147,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 214,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 68059,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 258210768,
+            "totalJSHeapSize": 315966632,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 214,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 73069.19999999553,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 238936324,
+            "totalJSHeapSize": 319636648,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 214,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 78068.19999999553,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 249488268,
+            "totalJSHeapSize": 321995944,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 214,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 83065.39999999851,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 216331758,
+            "totalJSHeapSize": 322467142,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 214,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 88049.69999999553,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 222033938,
+            "totalJSHeapSize": 322467142,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 214,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 93065.39999999851,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 229684806,
+            "totalJSHeapSize": 322467142,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 214,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 98062.19999999553,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 236433072,
+            "totalJSHeapSize": 310146356,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 214,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 103072.39999999851,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 245298492,
+            "totalJSHeapSize": 310146356,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 214,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 108066.39999999851,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 233498796,
+            "totalJSHeapSize": 310146356,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 214,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 113064.59999999404,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 236309546,
+            "totalJSHeapSize": 310120510,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 214,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 118057.59999999404,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 244513326,
+            "totalJSHeapSize": 310120510,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 214,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 123060.19999999553,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 225343426,
+            "totalJSHeapSize": 310120510,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 214,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 128062.89999999851,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 225871938,
+            "totalJSHeapSize": 310150222,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 213,
+            "textures": 108,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 133073.8999999985,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 245946615,
+            "totalJSHeapSize": 309268227,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 138075.19999999553,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 238355319,
+            "totalJSHeapSize": 309268227,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 143077.59999999404,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 241690781,
+            "totalJSHeapSize": 309792465,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 148078,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 235792747,
+            "totalJSHeapSize": 309603271,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 153064.5,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 242998455,
+            "totalJSHeapSize": 309603271,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 158073.59999999404,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 250902391,
+            "totalJSHeapSize": 309603271,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 163077.5,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 239003381,
+            "totalJSHeapSize": 310913901,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 168074.29999999702,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 248277981,
+            "totalJSHeapSize": 310913901,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 173065.5,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 223717325,
+            "totalJSHeapSize": 310913901,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 178078.79999999702,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 253944825,
+            "totalJSHeapSize": 313797485,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 183062.5,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 233222989,
+            "totalJSHeapSize": 315894637,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 188076.5,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 223096729,
+            "totalJSHeapSize": 315894637,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 193068.09999999404,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 241279601,
+            "totalJSHeapSize": 316156781,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 198075.09999999404,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 230201429,
+            "totalJSHeapSize": 316156781,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 203069.3999999985,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 221581633,
+            "totalJSHeapSize": 314321773,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 208074.79999999702,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 242831917,
+            "totalJSHeapSize": 314321773,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 213074.19999999553,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 225000649,
+            "totalJSHeapSize": 314321773,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        },
+        {
+          "t": 218074.79999999702,
+          "paused": false,
+          "mem": {
+            "usedJSHeapSize": 241011193,
+            "totalJSHeapSize": 314321773,
+            "jsHeapSizeLimit": 4294967296
+          },
+          "rendererInfo": {
+            "programs": 50,
+            "geometries": 225,
+            "textures": 109,
+            "calls": 2,
+            "triangles": 2,
+            "points": 0,
+            "lines": 1
+          }
+        }
+      ]
+    }
+  },
+  "mapShine": {
+    "fps": 62,
+    "export": null,
+    "snapshot": {
+      "initialized": true,
+      "hasCanvasMapShine": true,
+      "hasRenderLoop": true,
+      "hasPerf": false,
+      "hasExportAllJson": false,
+      "effectCount": null,
+      "updatableCount": 7
+    }
+  }
+}

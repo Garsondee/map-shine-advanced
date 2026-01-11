@@ -5,12 +5,16 @@
   "scripts": {
     "build:tsl": "node scripts/build/build.js",
     "release": "node scripts/release/release.js",
-    "release:test": "node scripts/release/release.js --version 0.1.4 --force"
+    "release:test": "node scripts/release/release.js --version 0.1.4 --force",
+    "perf:test": "playwright test",
+    "perf:test:headed": "playwright test --headed",
+    "perf:install-browsers": "playwright install"
   },
   "dependencies": {
     "three": "^0.170.0" 
   },
   "devDependencies": {
-    "esbuild": "^0.24.0"
+    "esbuild": "^0.24.0",
+    "@playwright/test": "^1.47.2"
   }
 }

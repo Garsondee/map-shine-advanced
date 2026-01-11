@@ -1,0 +1,56 @@
+{
+  "meta": {
+    "timestamp": "2026-01-10T19:06:22.476Z",
+    "browser": "chromium",
+    "headless": false,
+    "viewport": {
+      "width": null,
+      "height": null
+    },
+    "baseUrl": "http://localhost:30004",
+    "mode": "idle",
+    "warmupMs": 5000,
+    "sampleMs": 15000
+  },
+  "load": {
+    "serverMs": 8581,
+    "gotoMs": 764,
+    "authMs": 4173,
+    "canvasReadyMs": 19456,
+    "mapShineReadyMs": 41321
+  },
+  "benchmarks": {
+    "idle": {
+      "durationMs": 15000,
+      "frames": 1128,
+      "totalMs": 15008.399999999994,
+      "fpsAvg": 75.15791156952109,
+      "frameMs": {
+        "avg": 13.305319148936166,
+        "min": 8,
+        "p50": 16.599999999998545,
+        "p95": 16.80000000000291,
+        "p99": 25,
+        "max": 75
+      },
+      "hitches": {
+        ">33ms": 6,
+        ">50ms": 3,
+        ">100ms": 0
+      }
+    }
+  },
+  "mapShine": {
+    "fps": 82,
+    "export": null,
+    "snapshot": {
+      "initialized": true,
+      "hasCanvasMapShine": true,
+      "hasRenderLoop": true,
+      "hasPerf": false,
+      "hasExportAllJson": false,
+      "effectCount": null,
+      "updatableCount": 7
+    }
+  }
+}

@@ -61,6 +61,8 @@ import { MapPointsManager } from '../scene/map-points-manager.js';
 import { PhysicsRopeManager } from '../scene/physics-rope-manager.js';
 import { DropHandler } from './drop-handler.js';
 import { sceneDebug } from '../utils/scene-debug.js';
+import { clearCache as clearAssetCache } from '../assets/loader.js';
+import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { weatherController } from '../core/WeatherController.js';
 import { ControlsIntegration } from './controls-integration.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
@@ -714,6 +716,15 @@ async function createThreeCanvas(scene) {
     }
   }
 
+  const lp = globalLoadingProfiler;
+  const doLoadProfile = !!lp?.enabled;
+  if (doLoadProfile) {
+    try {
+      lp.begin('sceneLoad', { sceneId: scene?.id ?? null, sceneName: scene?.name ?? null });
+    } catch (e) {
+    }
+  }
+
   try {
     try {
       loadingOverlay.showBlack(`Loading ${scene?.name || 'scene'}…`);
@@ -905,6 +916,12 @@ async function createThreeCanvas(scene) {
 
     // Step 1: Initialize scene composer
     sceneComposer = new SceneComposer();
+    if (doLoadProfile) {
+      try {
+        lp.begin('sceneComposer.initialize');
+      } catch (e) {
+      }
+    }
     const { scene: threeScene, camera, bundle } = await sceneComposer.initialize(
       scene,
       rect.width,
@@ -921,6 +938,12 @@ async function createThreeCanvas(scene) {
         }
       }
     );
+    if (doLoadProfile) {
+      try {
+        lp.end('sceneComposer.initialize');
+      } catch (e) {
+      }
+    }
 
     if (isStale()) {
       try {
@@ -1649,6 +1672,13 @@ async function createThreeCanvas(scene) {
   } catch (error) {
     log.error('Failed to initialize three.js scene:', error);
     destroyThreeCanvas();
+  } finally {
+    if (doLoadProfile) {
+      try {
+        lp.end('sceneLoad');
+      } catch (e) {
+      }
+    }
   }
 }
 
@@ -3173,6 +3203,12 @@ function destroyThreeCanvas() {
 
   // Restore Foundry's PIXI rendering
   restoreFoundryRendering();
+
+  try {
+    clearAssetCache();
+  } catch (e) {
+    log.warn('Failed to clear asset cache:', e);
+  }
 
   // Note: renderer is owned by MapShine global state, don't dispose here
   renderer = null;

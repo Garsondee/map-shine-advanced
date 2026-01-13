@@ -11,6 +11,8 @@ import { weatherController } from '../core/WeatherController.js';
 
 import { ThreeLightSource } from './ThreeLightSource.js'; // Import the class above
 import { ThreeDarknessSource } from './ThreeDarknessSource.js';
+import { LightRegistry } from './LightRegistry.js';
+import { MapShineLightAdapter } from './MapShineLightAdapter.js';
 import { ROPE_MASK_LAYER } from './EffectComposer.js';
 
 const log = createLogger('LightingEffect');
@@ -66,6 +68,16 @@ export class LightingEffect extends EffectBase {
     this.lights = new Map(); 
     this.darknessSources = new Map(); 
     
+    /**
+     * MapShine-native renderables (driven by scene flags) rendered using the
+     * existing ThreeLightSource shaders as an incremental step.
+     * @type {Map<string, ThreeLightSource>}
+     */
+    this.mapshineLights = new Map();
+
+    /** @type {Map<string, ThreeDarknessSource>} */
+    this.mapshineDarknessSources = new Map();
+    
     this.lightScene = null;     
     this.darknessScene = null;  
     this.darknessTarget = null; 
@@ -100,6 +112,31 @@ export class LightingEffect extends EffectBase {
     this._masksPackCamera = null;
     this._masksPackMesh = null;
     this._masksPackMaterial = null;
+
+    /**
+     * Unified data registry for lights (Foundry + future MapShine-native lights).
+     * Rendering is still performed by ThreeLightSource/ThreeDarknessSource.
+     * @type {LightRegistry}
+     */
+    this.lightRegistry = new LightRegistry();
+
+    /**
+     * Set of Foundry light IDs that are overridden by MapShine enhanced lights.
+     * These lights should not be rendered (to avoid double-lighting).
+     * Rebuilt whenever MapShine lights are reloaded from scene flags.
+     * @type {Set<string>}
+     */
+    this._overriddenFoundryLightIds = new Set();
+
+    /**
+     * Metadata for MapShine-native lights (targetLayers, cookies, etc.).
+     * Keyed by the prefixed id (e.g., 'mapshine:abc123').
+     * @type {Map<string, {targetLayers: 'ground'|'overhead'|'both', cookieTexture?: string, cookieRotation?: number, cookieScale?: number}>}
+     */
+    this._mapshineLightMeta = new Map();
+
+    /** @type {Array<{hook: string, fn: Function}>} */
+    this._hookRegistrations = [];
   }
 
   static getControlSchema() {
@@ -627,17 +664,277 @@ export class LightingEffect extends EffectBase {
     this._masksPackScene.add(this._masksPackMesh);
 
     // Hooks to Foundry
-    Hooks.on('createAmbientLight', (doc) => this.onLightUpdate(doc));
-    Hooks.on('updateAmbientLight', (doc, changes) => this.onLightUpdate(doc, changes));
-    Hooks.on('deleteAmbientLight', (doc) => this.onLightDelete(doc));
+    // Store refs so we can remove them in dispose() (avoid duplicate hook registrations
+    // on scene transitions / hot reload).
+    const createHandler = (doc) => this.onLightUpdate(doc);
+    const updateHandler = (doc, changes) => this.onLightUpdate(doc, changes);
+    const deleteHandler = (doc) => this.onLightDelete(doc);
+
+    Hooks.on('createAmbientLight', createHandler);
+    Hooks.on('updateAmbientLight', updateHandler);
+    Hooks.on('deleteAmbientLight', deleteHandler);
+    this._hookRegistrations.push({ hook: 'createAmbientLight', fn: createHandler });
+    this._hookRegistrations.push({ hook: 'updateAmbientLight', fn: updateHandler });
+    this._hookRegistrations.push({ hook: 'deleteAmbientLight', fn: deleteHandler });
     
     // Listen for lightingRefresh to rebuild any lights that were created before
     // Foundry computed their LOS polygons (fixes lights extending through walls
     // on initial creation/paste).
-    Hooks.on('lightingRefresh', () => this.onLightingRefresh());
+    const lightingRefreshHandler = () => this.onLightingRefresh();
+    Hooks.on('lightingRefresh', lightingRefreshHandler);
+    this._hookRegistrations.push({ hook: 'lightingRefresh', fn: lightingRefreshHandler });
+    
+    // Watch for scene-flag updates which might modify MapShine-native enhanced lights.
+    const updateSceneHandler = (sceneDoc, changes) => {
+      try {
+        if (!sceneDoc || !canvas?.scene) return;
+        if (sceneDoc.id !== canvas.scene.id) return;
+
+        const keys = changes && typeof changes === 'object' ? Object.keys(changes) : [];
+        const flagKeyChanged = keys.some((k) => k === 'flags' || (typeof k === 'string' && k.startsWith('flags.map-shine-advanced')));
+        const namespaceChanged = !!(changes?.flags && changes.flags['map-shine-advanced']);
+        if (!flagKeyChanged && !namespaceChanged) return;
+
+        this._reloadMapshineLightsFromScene();
+      } catch (_) {
+      }
+    };
+
+    Hooks.on('updateScene', updateSceneHandler);
+    this._hookRegistrations.push({ hook: 'updateScene', fn: updateSceneHandler });
     
     // Initial Load
     this.syncAllLights();
+  }
+
+  _toFoundryLikeDocForMapshineEntity(entity) {
+    const id = `mapshine:${entity.id}`;
+    const a = entity.animation;
+
+    return {
+      id,
+      x: entity.transform?.x ?? 0,
+      y: entity.transform?.y ?? 0,
+      config: {
+        dim: entity.photometry?.dim ?? 0,
+        bright: entity.photometry?.bright ?? 0,
+        attenuation: entity.photometry?.attenuation ?? 0.5,
+        alpha: entity.photometry?.alpha ?? 0.5,
+        luminosity: entity.photometry?.luminosity ?? 0.5,
+        color: entity.color,
+        cookieTexture: entity.cookieTexture,
+        cookieRotation: entity.cookieRotation,
+        cookieScale: entity.cookieScale,
+        animation: (a && typeof a === 'object')
+          ? {
+              type: a.type ?? null,
+              speed: a.speed,
+              intensity: a.intensity
+            }
+          : {}
+      }
+    };
+  }
+
+  _syncMapshineRenderables(entities) {
+    const keep = new Set();
+
+    // Three.js layer constants for layer-aware lighting
+    // These can be used in future to render ground-only vs overhead-only lights
+    const GROUND_LIGHT_LAYER = 22;
+    const OVERHEAD_LIGHT_LAYER = 23;
+
+    for (const entity of entities) {
+      if (!entity?.id) continue;
+      const id = `mapshine:${entity.id}`;
+      keep.add(id);
+
+      const doc = this._toFoundryLikeDocForMapshineEntity(entity);
+
+      // Store layer targeting metadata
+      const targetLayers = entity.targetLayers || 'both';
+      this._mapshineLightMeta.set(id, {
+        targetLayers,
+        cookieTexture: entity.cookieTexture,
+        cookieRotation: entity.cookieRotation,
+        cookieScale: entity.cookieScale
+      });
+
+      if (entity.isDarkness) {
+        if (this.mapshineLights.has(id)) {
+          const ls = this.mapshineLights.get(id);
+          if (ls?.mesh) this.lightScene?.remove(ls.mesh);
+          ls?.dispose?.();
+          this.mapshineLights.delete(id);
+        }
+
+        if (this.mapshineDarknessSources.has(id)) {
+          this.mapshineDarknessSources.get(id).updateData(doc);
+        } else {
+          const source = new ThreeDarknessSource(doc);
+          source.init();
+          this.mapshineDarknessSources.set(id, source);
+          if (source.mesh && this.darknessScene) {
+            // Assign Three.js layers based on targetLayers
+            this._applyLayerTargeting(source.mesh, targetLayers, GROUND_LIGHT_LAYER, OVERHEAD_LIGHT_LAYER);
+            this.darknessScene.add(source.mesh);
+          }
+        }
+      } else {
+        if (this.mapshineDarknessSources.has(id)) {
+          const ds = this.mapshineDarknessSources.get(id);
+          if (ds?.mesh) this.darknessScene?.remove(ds.mesh);
+          ds?.dispose?.();
+          this.mapshineDarknessSources.delete(id);
+        }
+
+        if (this.mapshineLights.has(id)) {
+          this.mapshineLights.get(id).updateData(doc);
+          // Update layer targeting on existing mesh
+          const src = this.mapshineLights.get(id);
+          if (src?.mesh) {
+            this._applyLayerTargeting(src.mesh, targetLayers, GROUND_LIGHT_LAYER, OVERHEAD_LIGHT_LAYER);
+          }
+        } else {
+          const source = new ThreeLightSource(doc);
+          source.init();
+          this.mapshineLights.set(id, source);
+          if (source.mesh && this.lightScene) {
+            // Assign Three.js layers based on targetLayers
+            this._applyLayerTargeting(source.mesh, targetLayers, GROUND_LIGHT_LAYER, OVERHEAD_LIGHT_LAYER);
+            this.lightScene.add(source.mesh);
+          }
+        }
+      }
+    }
+
+    for (const [id, src] of this.mapshineLights) {
+      if (keep.has(id)) continue;
+      try {
+        if (src?.mesh) this.lightScene?.remove(src.mesh);
+        src?.dispose?.();
+      } catch (_) {
+      }
+      this.mapshineLights.delete(id);
+      this._mapshineLightMeta.delete(id);
+    }
+
+    for (const [id, src] of this.mapshineDarknessSources) {
+      if (keep.has(id)) continue;
+      try {
+        if (src?.mesh) this.darknessScene?.remove(src.mesh);
+        src?.dispose?.();
+      } catch (_) {
+      }
+      this.mapshineDarknessSources.delete(id);
+      this._mapshineLightMeta.delete(id);
+    }
+  }
+
+  /**
+   * Apply Three.js layer targeting to a light mesh based on targetLayers setting.
+   * @param {THREE.Mesh} mesh
+   * @param {'ground'|'overhead'|'both'} targetLayers
+   * @param {number} groundLayer - Three.js layer for ground-only lights
+   * @param {number} overheadLayer - Three.js layer for overhead-only lights
+   * @private
+   */
+  _applyLayerTargeting(mesh, targetLayers, groundLayer, overheadLayer) {
+    if (!mesh?.layers) return;
+
+    // Always enable layer 0 (default) so the light renders in the combined pass
+    mesh.layers.enable(0);
+
+    // Enable/disable specific layers for future layer-filtered rendering
+    if (targetLayers === 'ground') {
+      mesh.layers.enable(groundLayer);
+      mesh.layers.disable(overheadLayer);
+    } else if (targetLayers === 'overhead') {
+      mesh.layers.disable(groundLayer);
+      mesh.layers.enable(overheadLayer);
+    } else {
+      // 'both' - enable both layers
+      mesh.layers.enable(groundLayer);
+      mesh.layers.enable(overheadLayer);
+    }
+  }
+
+  /**
+   * Get metadata for a MapShine-native light by its prefixed id.
+   * @param {string} id - Prefixed id (e.g., 'mapshine:abc123')
+   * @returns {{targetLayers: string, cookieTexture?: string, cookieRotation?: number, cookieScale?: number}|null}
+   */
+  getMapshineLightMeta(id) {
+    return this._mapshineLightMeta.get(id) || null;
+  }
+
+  /**
+   * Get all MapShine-native lights filtered by target layer.
+   * @param {'ground'|'overhead'|'both'} layer
+   * @returns {ThreeLightSource[]}
+   */
+  getMapshineLightsByLayer(layer) {
+    const result = [];
+    for (const [id, source] of this.mapshineLights) {
+      const meta = this._mapshineLightMeta.get(id);
+      const targetLayers = meta?.targetLayers || 'both';
+      if (targetLayers === layer || targetLayers === 'both' || layer === 'both') {
+        result.push(source);
+      }
+    }
+    return result;
+  }
+
+  _reloadMapshineLightsFromScene() {
+    try {
+      const msEntities = MapShineLightAdapter.readEntities(canvas?.scene);
+      this.lightRegistry.setMapshineEntities(msEntities);
+      this._rebuildOverriddenFoundrySet(msEntities);
+      this._syncMapshineRenderables(msEntities);
+      this._applyFoundryOverrides();
+    } catch (_) {
+      this.lightRegistry.setMapshineEntities([]);
+      this._overriddenFoundryLightIds.clear();
+      this._syncMapshineRenderables([]);
+    }
+  }
+
+  /**
+   * Rebuild the set of Foundry light IDs that should be suppressed because
+   * a MapShine enhanced light overrides them.
+   * @param {ILightEntity[]} entities
+   * @private
+   */
+  _rebuildOverriddenFoundrySet(entities) {
+    this._overriddenFoundryLightIds.clear();
+    if (!Array.isArray(entities)) return;
+
+    for (const e of entities) {
+      if (!e?.enabled) continue;
+      if (e.overrideFoundry && e.linkedFoundryLightId) {
+        this._overriddenFoundryLightIds.add(String(e.linkedFoundryLightId));
+      }
+    }
+  }
+
+  /**
+   * Hide or show Foundry light renderables based on override state.
+   * Called after MapShine lights are reloaded.
+   * @private
+   */
+  _applyFoundryOverrides() {
+    for (const [id, source] of this.lights.entries()) {
+      const suppressed = this._overriddenFoundryLightIds.has(id);
+      if (source?.mesh) {
+        source.mesh.visible = !suppressed;
+      }
+    }
+    for (const [id, source] of this.darknessSources.entries()) {
+      const suppressed = this._overriddenFoundryLightIds.has(id);
+      if (source?.mesh) {
+        source.mesh.visible = !suppressed;
+      }
+    }
   }
 
   _rebuildOutdoorsProjection() {
@@ -700,31 +997,22 @@ export class LightingEffect extends EffectBase {
     this.lights.clear();
     this.darknessSources.forEach(d => d.dispose());
     this.darknessSources.clear();
+
+    this.mapshineLights.forEach((l) => l?.dispose?.());
+    this.mapshineLights.clear();
+    this.mapshineDarknessSources.forEach((d) => d?.dispose?.());
+    this.mapshineDarknessSources.clear();
+    
+    // Reset registry + rebuild from Foundry.
+    this.lightRegistry.foundryLights.clear();
+    this.lightRegistry.foundryDarkness.clear();
+
+    // Load MapShine-native enhanced lights (if any) and build renderables.
+    this._reloadMapshineLightsFromScene();
+
+    this.lightRegistry.version++;
+
     canvas.lighting.placeables.forEach(p => this.onLightUpdate(p.document));
-  }
-
-  /**
-   * Called when Foundry finishes computing LOS polygons for all lights.
-   * Rebuilds any lights that were created before their LOS was available.
-   */
-  onLightingRefresh() {
-    if (!canvas.lighting) return;
-
-    this.lights.forEach((source) => {
-      if (!source) return;
-      if (!source._usingCircleFallback) return;
-
-      try {
-        // Force geometry rebuild now that LOS should be available.
-        source.updateData(source.document, true);
-
-        // Ensure the mesh is attached to the light scene.
-        if (source.mesh && this.lightScene && !source.mesh.parent) {
-          this.lightScene.add(source.mesh);
-        }
-      } catch (e) {
-      }
-    });
   }
 
   _mergeLightDocChanges(doc, changes) {
@@ -770,15 +1058,32 @@ export class LightingEffect extends EffectBase {
   onLightUpdate(doc, changes) {
     const targetDoc = this._mergeLightDocChanges(doc, changes);
     const isNegative = (targetDoc?.config?.negative === true) || (targetDoc?.negative === true);
+
+    // Update unified data model.
+    try {
+      const entity = LightRegistry.fromFoundryAmbientLightDoc(targetDoc);
+      this.lightRegistry.upsertFoundryEntity(entity);
+    } catch (_) {
+    }
+
+    // Check if this Foundry light is overridden by a MapShine enhanced light.
+    const isSuppressed = this._overriddenFoundryLightIds.has(targetDoc.id);
+
     if (isNegative) {
       if (this.darknessSources.has(targetDoc.id)) {
         this.darknessSources.get(targetDoc.id).updateData(targetDoc);
+        // Apply suppression visibility.
+        const src = this.darknessSources.get(targetDoc.id);
+        if (src?.mesh) src.mesh.visible = !isSuppressed;
       } else {
         const source = new ThreeDarknessSource(targetDoc);
         source.init();
 
         this.darknessSources.set(targetDoc.id, source);
-        if (source.mesh && this.darknessScene) this.darknessScene.add(source.mesh);
+        if (source.mesh && this.darknessScene) {
+          source.mesh.visible = !isSuppressed;
+          this.darknessScene.add(source.mesh);
+        }
       }
 
       if (this.lights.has(targetDoc.id)) {
@@ -792,22 +1097,33 @@ export class LightingEffect extends EffectBase {
 
     if (this.darknessSources.has(targetDoc.id)) {
       const ds = this.darknessSources.get(targetDoc.id);
-      if (ds?.mesh && this.darknessScene) this.darknessScene.remove(ds.mesh);
+      if (ds?.mesh) this.darknessScene?.remove(ds.mesh);
       ds?.dispose();
       this.darknessSources.delete(targetDoc.id);
     }
 
     if (this.lights.has(targetDoc.id)) {
       this.lights.get(targetDoc.id).updateData(targetDoc);
+      // Apply suppression visibility.
+      const src = this.lights.get(targetDoc.id);
+      if (src?.mesh) src.mesh.visible = !isSuppressed;
     } else {
       const source = new ThreeLightSource(targetDoc);
       source.init();
       this.lights.set(targetDoc.id, source);
-      if (source.mesh) this.lightScene.add(source.mesh);
+      if (source.mesh) {
+        source.mesh.visible = !isSuppressed;
+        this.lightScene.add(source.mesh);
+      }
     }
   }
 
   onLightDelete(doc) {
+    try {
+      this.lightRegistry.removeFoundryEntity(doc.id);
+    } catch (_) {
+    }
+
     if (this.darknessSources.has(doc.id)) {
       const source = this.darknessSources.get(doc.id);
       if (source.mesh && this.darknessScene) this.darknessScene.remove(source.mesh);
@@ -820,6 +1136,53 @@ export class LightingEffect extends EffectBase {
       if (source.mesh) this.lightScene.remove(source.mesh);
       source.dispose();
       this.lights.delete(doc.id);
+    }
+  }
+
+  /**
+   * Handle lightingRefresh hook - rebuilds lights that were created before
+   * Foundry computed their LOS polygons (fixes lights extending through walls)
+   */
+  onLightingRefresh() {
+    try {
+      // Rebuild all Foundry lights to pick up updated LOS polygons
+      for (const [id, source] of this.lights) {
+        if (source && source.document) {
+          source.updateData(source.document, true);
+        }
+      }
+      
+      // Also rebuild MapShine-native lights
+      for (const [id, source] of this.mapshineLights) {
+        if (source && source.document) {
+          source.updateData(source.document, true);
+        }
+      }
+    } catch (e) {
+      log.error('Failed to handle lightingRefresh:', e);
+    }
+  }
+
+  /**
+   * Force light geometry rebuilds after wall/door edits.
+   * WallManager calls this to ensure wall-clipped light polygons are updated.
+   */
+  forceRebuildLightGeometriesFromWalls() {
+    try {
+      for (const source of this.lights.values()) {
+        try {
+          if (source?.document) source.updateData(source.document, true);
+        } catch (_) {
+        }
+      }
+
+      for (const source of this.mapshineLights.values()) {
+        try {
+          if (source?.document) source.updateData(source.document, true);
+        } catch (_) {
+        }
+      }
+    } catch (_) {
     }
   }
 
@@ -849,25 +1212,6 @@ export class LightingEffect extends EffectBase {
 
     const THREE = window.THREE;
 
-    const setThreeColorLoose = (target, input, fallback = 0xffffff) => {
-      try {
-        if (!target) return;
-        if (input && typeof input === 'object' && 'r' in input && 'g' in input && 'b' in input) {
-          target.set(input.r, input.g, input.b);
-          return;
-        }
-        if (typeof input === 'string' || typeof input === 'number') {
-          target.set(input);
-          return;
-        }
-        target.set(fallback);
-      } catch (e) {
-        try {
-          target.set(fallback);
-        } catch (e2) {}
-      }
-    };
-
     // Sync Environment Data
     if (canvas.scene && canvas.environment) {
       this.params.darknessLevel = canvas.environment.darknessLevel;
@@ -879,8 +1223,17 @@ export class LightingEffect extends EffectBase {
       light.updateAnimation(timeInfo, this.params.darknessLevel);
     });
 
+    // Update MapShine-native lights using the same animation system for now.
+    this.mapshineLights.forEach((light) => {
+      light.updateAnimation(timeInfo, this.params.darknessLevel);
+    });
+
     // Update Animations for all darkness sources
     this.darknessSources.forEach(ds => {
+      ds.updateAnimation(timeInfo);
+    });
+
+    this.mapshineDarknessSources.forEach((ds) => {
       ds.updateAnimation(timeInfo);
     });
 
@@ -965,21 +1318,28 @@ export class LightingEffect extends EffectBase {
 
     try {
       const env = canvas?.environment;
-      const setThreeColor = (target, src, def) => {
+      const setThreeColorLoose = (target, input, fallback = 0xffffff) => {
         try {
-          if (!src) { target.set(def); return; }
-          if (src instanceof THREE.Color) { target.copy(src); return; }
-          if (src.rgb) { target.setRGB(src.rgb[0], src.rgb[1], src.rgb[2]); return; }
-          if (Array.isArray(src)) { target.setRGB(src[0], src[1], src[2]); return; }
-          target.set(src);
+          if (!target) return;
+          if (input && typeof input === 'object' && 'r' in input && 'g' in input && 'b' in input) {
+            target.set(input.r, input.g, input.b);
+            return;
+          }
+          if (typeof input === 'string' || typeof input === 'number') {
+            target.set(input);
+            return;
+          }
+          target.set(fallback);
         } catch (e) {
-          target.set(def);
+          try {
+            target.set(fallback);
+          } catch (e2) {}
         }
       };
 
       if (THREE && env?.colors && u.uAmbientBrightest?.value && u.uAmbientDarkness?.value) {
-        setThreeColor(u.uAmbientBrightest.value, env.colors.ambientDaylight, 0xffffff);
-        setThreeColor(u.uAmbientDarkness.value, env.colors.ambientDarkness, 0x242448);
+        setThreeColorLoose(u.uAmbientBrightest.value, env.colors.ambientDaylight, 0xffffff);
+        setThreeColorLoose(u.uAmbientDarkness.value, env.colors.ambientDarkness, 0x242448);
       }
     } catch (e) {
     }
@@ -1531,5 +1891,30 @@ export class LightingEffect extends EffectBase {
     if (this.compositeMaterial) {
       this.compositeMaterial.uniforms.tDiffuse.value = texture;
     }
+  }
+
+  dispose() {
+    for (const { hook, fn } of this._hookRegistrations) {
+      try {
+        Hooks.off(hook, fn);
+      } catch (_) {
+      }
+    }
+    this._hookRegistrations = [];
+
+    try {
+      this.lights.forEach((l) => l?.dispose?.());
+      this.lights.clear();
+      this.darknessSources.forEach((d) => d?.dispose?.());
+      this.darknessSources.clear();
+
+      this.mapshineLights.forEach((l) => l?.dispose?.());
+      this.mapshineLights.clear();
+      this.mapshineDarknessSources.forEach((d) => d?.dispose?.());
+      this.mapshineDarknessSources.clear();
+    } catch (_) {
+    }
+
+    super.dispose();
   }
 }

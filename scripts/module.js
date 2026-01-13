@@ -58,59 +58,97 @@ Hooks.once('init', async function() {
       const isGM = game.user?.isGM ?? false;
       const allowPlayers = game.settings?.get?.('map-shine-advanced', 'allowPlayersToTogglePlayerLightMode') ?? true;
 
-      // In Foundry v13+, controls is Record<string, SceneControl>
-      // Access tokens control directly by key
-      const tokenControls = controls?.tokens;
-      if (!tokenControls?.tools) return;
+      // NOTE: In Foundry v13, accessing ui.controls.tool (and in some builds, game.activeTool)
+      // can throw during early UI init because the SceneControls instance is not fully
+      // constructed yet. This hook may run before ui.controls is ready.
+      // Do not read active tool state here.
+
+      const getControl = (name) => {
+        try {
+          if (!controls) return null;
+
+          // Foundry versions differ:
+          // - Some pass an array of SceneControl definitions
+          // - Some pass a record keyed by layer name
+          if (Array.isArray(controls)) {
+            return controls.find((c) => c && (c.name === name)) ?? null;
+          }
+
+          if (Object.prototype.hasOwnProperty.call(controls, name)) {
+            return controls[name];
+          }
+        } catch (_) {
+        }
+        return null;
+      };
+
+      const ensureTool = (control, tool) => {
+        if (!control || !tool || !tool.name) return;
+
+        const tools = control.tools;
+        if (!tools) return;
+
+        // Foundry versions differ: tools can be an array or an object map.
+        if (Array.isArray(tools)) {
+          const exists = tools.some((t) => t && (t.name === tool.name));
+          if (!exists) tools.push(tool);
+          return;
+        }
+
+        if (typeof tools === 'object') {
+          if (!Object.prototype.hasOwnProperty.call(tools, tool.name)) {
+            tools[tool.name] = tool;
+          }
+        }
+      };
+
+      const tokenControls = getControl('tokens');
+      if (!tokenControls || !tokenControls.tools) return;
 
       if (isGM) {
-        if (!tokenControls.tools['map-shine-config']) {
-          tokenControls.tools['map-shine-config'] = {
-            name: 'map-shine-config',
-            title: 'Map Shine Config',
-            icon: 'fas fa-cog',
-            button: true,
-            order: 100,
-            visible: true,
-            toolclip: {
-              src: '',
-              heading: 'MAPSHINE.ToolTitle',
-              items: [{ paragraph: 'MAPSHINE.ToolDescription' }]
-            },
-            onChange: () => {
-              const uiManager = window.MapShine?.uiManager;
-              if (!uiManager) {
-                ui.notifications?.warn?.('Map Shine Configuration is not available yet. The scene may still be initializing.');
-                return;
-              }
-              uiManager.toggle();
+        ensureTool(tokenControls, {
+          name: 'map-shine-config',
+          title: 'Map Shine Config',
+          icon: 'fas fa-cog',
+          button: true,
+          order: 100,
+          visible: true,
+          toolclip: {
+            src: '',
+            heading: 'MAPSHINE.ToolTitle',
+            items: [{ paragraph: 'MAPSHINE.ToolDescription' }]
+          },
+          onChange: () => {
+            const uiManager = window.MapShine?.uiManager;
+            if (!uiManager) {
+              ui.notifications?.warn?.('Map Shine Configuration is not available yet. The scene may still be initializing.');
+              return;
             }
-          };
-        }
+            uiManager.toggle();
+          }
+        });
 
-        if (!tokenControls.tools['map-shine-control']) {
-          tokenControls.tools['map-shine-control'] = {
-            name: 'map-shine-control',
-            title: 'Map Shine Control',
-            icon: 'fas fa-sliders-h',
-            button: true,
-            order: 101,
-            visible: true,
-            toolclip: {
-              src: '',
-              heading: 'MAPSHINE.ToolTitle',
-              items: [{ paragraph: 'MAPSHINE.ToolDescription' }]
-            },
-            onChange: () => {
-              const controlPanel = window.MapShine?.controlPanel;
-              if (!controlPanel) {
-                ui.notifications?.warn?.('Map Shine Control Panel is not available yet. The scene may still be initializing.');
-                return;
-              }
-              controlPanel.toggle();
+        ensureTool(tokenControls, {
+          name: 'map-shine-control',
+          title: 'Map Shine Control',
+          icon: 'fas fa-sliders-h',
+          button: true,
+          order: 101,
+          visible: true,
+          toolclip: {
+            src: '',
+            heading: 'MAPSHINE.ToolTitle',
+            items: [{ paragraph: 'MAPSHINE.ToolDescription' }]
+          },
+          onChange: () => {
+            const controlPanel = window.MapShine?.controlPanel;
+            if (!controlPanel) {
+              ui.notifications?.warn?.('Map Shine Control Panel is not available yet. The scene may still be initializing.');
+              return;
             }
-          };
-        }
+            controlPanel.toggle();
+          }
+        });
       }
 
       const playerToolsVisible = isGM || allowPlayers;
@@ -150,7 +188,7 @@ Hooks.once('init', async function() {
       const torchActive = !!stNow.tokenDoc && stNow.enabled && stNow.mode === 'torch';
       const flashlightActive = !!stNow.tokenDoc && stNow.enabled && stNow.mode === 'flashlight';
 
-      tokenControls.tools['map-shine-player-torch'] = {
+      ensureTool(tokenControls, {
         name: 'map-shine-player-torch',
         title: 'Player Light: Torch',
         icon: 'fas fa-fire',
@@ -183,9 +221,9 @@ Hooks.once('init', async function() {
             ui.notifications?.warn?.('Failed to set Player Light mode.');
           }
         }
-      };
+      });
 
-      tokenControls.tools['map-shine-player-flashlight'] = {
+      ensureTool(tokenControls, {
         name: 'map-shine-player-flashlight',
         title: 'Player Light: Flashlight',
         icon: 'fas fa-lightbulb',
@@ -218,7 +256,22 @@ Hooks.once('init', async function() {
             ui.notifications?.warn?.('Failed to set Player Light mode.');
           }
         }
-      };
+      });
+
+      // Add MapShine Light tool to the Lighting control group
+      const lightingControls = getControl('lighting');
+      ensureTool(lightingControls, {
+        name: 'map-shine-enhanced-light',
+        order: 1.5,
+        title: 'MapShine Light',
+        icon: 'fa-solid fa-lightbulb',
+        visible: game.user.isGM,
+        onChange: () => {
+          try { ui?.controls?.render?.(true); } catch (_) {}
+          try { window.MapShine?.controlsIntegration?.inputRouter?.autoUpdate?.(); } catch (_) {}
+        }
+      });
+
     } catch (e) {
       console.error('Map Shine: failed to register scene control buttons', e);
     }

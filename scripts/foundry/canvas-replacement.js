@@ -46,6 +46,7 @@ import { WorldSpaceFogEffect } from '../effects/WorldSpaceFogEffect.js';
 import { RenderLoop } from '../core/render-loop.js';
 import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
+import { EnhancedLightInspector } from '../ui/enhanced-light-inspector.js';
 import { TokenManager } from '../scene/token-manager.js';
 import { TileManager } from '../scene/tile-manager.js';
 import { SurfaceRegistry } from '../scene/surface-registry.js';
@@ -55,6 +56,7 @@ import { DrawingManager } from '../scene/drawing-manager.js';
 import { NoteManager } from '../scene/note-manager.js';
 import { TemplateManager } from '../scene/template-manager.js';
 import { LightIconManager } from '../scene/light-icon-manager.js';
+import { EnhancedLightIconManager } from '../scene/enhanced-light-icon-manager.js';
 import { InteractionManager } from '../scene/interaction-manager.js';
 import { GridRenderer } from '../scene/grid-renderer.js';
 import { MapPointsManager } from '../scene/map-points-manager.js';
@@ -68,6 +70,9 @@ import { ControlsIntegration } from './controls-integration.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
 import { loadingOverlay } from '../ui/loading-overlay.js';
 import { stateApplier } from '../ui/state-applier.js';
+import { createEnhancedLightsApi } from '../effects/EnhancedLightsApi.js';
+import { OverlayUIManager } from '../ui/overlay-ui-manager.js';
+import { LightRingUI } from '../ui/light-ring-ui.js';
 
 const log = createLogger('Canvas');
 
@@ -114,6 +119,15 @@ let uiManager = null;
 /** @type {ControlPanelManager|null} */
 let controlPanel = null;
 
+/** @type {EnhancedLightInspector|null} */
+let enhancedLightInspector = null;
+
+/** @type {OverlayUIManager|null} */
+let overlayUIManager = null;
+
+/** @type {LightRingUI|null} */
+let lightRingUI = null;
+
 /** @type {TokenManager|null} */
 let tokenManager = null;
 
@@ -140,6 +154,9 @@ let templateManager = null;
 
 /** @type {LightIconManager|null} */
 let lightIconManager = null;
+
+/** @type {EnhancedLightIconManager|null} */
+let enhancedLightIconManager = null;
 
 /** @type {InteractionManager|null} */
 let interactionManager = null;
@@ -1354,6 +1371,11 @@ async function createThreeCanvas(scene) {
     lightIconManager.initialize();
     log.info('Light icon manager initialized');
 
+    // Step 4g.5: Initialize MapShine enhanced light icon manager
+    enhancedLightIconManager = new EnhancedLightIconManager(threeScene);
+    enhancedLightIconManager.initialize();
+    log.info('Enhanced light icon manager initialized');
+
     // Step 4h: Initialize map points manager (v1.x backwards compatibility)
     mapPointsManager = new MapPointsManager(threeScene);
     await mapPointsManager.initialize();
@@ -1393,6 +1415,25 @@ async function createThreeCanvas(scene) {
     interactionManager.initialize();
     effectComposer.addUpdatable(interactionManager); // Register for updates (HUD positioning)
     log.info('Interaction manager initialized');
+
+    // Step 5b: Initialize DOM overlay UI system (world-anchored overlays, ring UI)
+    overlayUIManager = new OverlayUIManager(threeCanvas, sceneComposer);
+    overlayUIManager.initialize();
+    effectComposer.addUpdatable(overlayUIManager);
+
+    lightRingUI = new LightRingUI(overlayUIManager);
+    lightRingUI.initialize();
+
+    try {
+      effectComposer.addUpdatable(lightRingUI);
+    } catch (_) {
+    }
+
+    // Expose for InteractionManager selection routing and debugging.
+    if (window.MapShine) {
+      window.MapShine.overlayUIManager = overlayUIManager;
+      window.MapShine.lightRingUI = lightRingUI;
+    }
 
     // Step 6: Initialize drop handler (for creating new items)
     dropHandler = new DropHandler(threeCanvas, sceneComposer);
@@ -1542,13 +1583,30 @@ async function createThreeCanvas(scene) {
     mapShine.noteManager = noteManager;
     mapShine.templateManager = templateManager;
     mapShine.lightIconManager = lightIconManager;
+    mapShine.enhancedLightIconManager = enhancedLightIconManager;
+    mapShine.enhancedLightInspector = enhancedLightInspector; // NEW: Expose enhanced light inspector
     mapShine.interactionManager = interactionManager; // NEW: Expose interaction manager
+    mapShine.overlayUIManager = overlayUIManager;
+    mapShine.lightRingUI = lightRingUI;
     mapShine.gridRenderer = gridRenderer; // NEW: Expose grid renderer
     mapShine.mapPointsManager = mapPointsManager; // NEW: Expose map points manager
     mapShine.weatherController = weatherController; // NEW: Expose weather controller
     mapShine.renderLoop = renderLoop; // CRITICAL: Expose render loop for diagnostics
     mapShine.sceneDebug = sceneDebug; // NEW: Expose scene debug helpers
+
+    // Dev authoring API for MapShine-native enhanced lights (scene-flag stored).
+    // This intentionally ships as a lightweight console tool until a full in-world editor
+    // is implemented.
+    try {
+      mapShine.enhancedLights = createEnhancedLightsApi();
+    } catch (_) {
+      mapShine.enhancedLights = null;
+    }
+
     mapShine.setMapMakerMode = setMapMakerMode; // NEW: Expose mode toggle for UI
+    // Expose current mode state so other systems (ControlsIntegration, effects) can query it.
+    // This must be set even if the user never toggles Map Maker mode.
+    mapShine.isMapMakerMode = isMapMakerMode;
     mapShine.controlsIntegration = controlsIntegration; // NEW: Expose controls integration
     // Expose sub-systems for debugging
     if (controlsIntegration) {
@@ -1558,6 +1616,15 @@ async function createThreeCanvas(scene) {
     }
     // Attach to canvas as well for convenience (used by console snippets)
     try { canvas.mapShine = mapShine; } catch (_) {}
+
+    // Ensure initial light gizmo visibility is correct. ControlsIntegration computes
+    // visibility based on active layer/tool, but it can run before managers are
+    // attached to window.MapShine during startup.
+    try {
+      controlsIntegration?._updateThreeGizmoVisibility?.();
+    } catch (_) {
+      // Ignore
+    }
 
     log.info('Specular effect registered and initialized');
 
@@ -1729,7 +1796,18 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     controlPanel = new ControlPanelManager();
     await controlPanel.initialize();
     window.MapShine.controlPanel = controlPanel;
-    log.info('Control Panel Manager created');
+    log.info('Control Panel created');
+  }
+
+  // Create Enhanced Light Inspector if not already created
+  if (!enhancedLightInspector) {
+    enhancedLightInspector = new EnhancedLightInspector();
+    enhancedLightInspector.initialize();
+    try {
+      if (window.MapShine) window.MapShine.enhancedLightInspector = enhancedLightInspector;
+    } catch (_) {
+    }
+    log.info('Enhanced Light Inspector created');
   }
 
   // Get Specular effect schema from effect class (centralized definition)
@@ -3024,6 +3102,38 @@ function destroyThreeCanvas() {
     log.debug('UI manager disposed');
   }
 
+  // Dispose Enhanced Light Inspector
+  if (enhancedLightInspector) {
+    enhancedLightInspector.dispose();
+    enhancedLightInspector = null;
+    log.debug('Enhanced Light Inspector disposed');
+  }
+
+  if (lightRingUI) {
+    try {
+      try {
+        if (effectComposer) effectComposer.removeUpdatable(lightRingUI);
+      } catch (_) {
+      }
+      if (typeof lightRingUI.dispose === 'function') lightRingUI.dispose();
+      else lightRingUI.hide();
+    } catch (_) {
+    }
+    lightRingUI = null;
+  }
+
+  if (overlayUIManager) {
+    try {
+      if (effectComposer) effectComposer.removeUpdatable(overlayUIManager);
+    } catch (_) {
+    }
+    try {
+      overlayUIManager.dispose();
+    } catch (_) {
+    }
+    overlayUIManager = null;
+  }
+
   // Dispose Control Panel manager
   if (controlPanel) {
     controlPanel.destroy();
@@ -3128,6 +3238,12 @@ function destroyThreeCanvas() {
     log.debug('Light icon manager disposed');
   }
 
+  if (enhancedLightIconManager) {
+    enhancedLightIconManager.dispose();
+    enhancedLightIconManager = null;
+    log.debug('Enhanced light icon manager disposed');
+  }
+
   // Dispose interaction manager
   if (interactionManager) {
     interactionManager.dispose();
@@ -3226,6 +3342,12 @@ export function setMapMakerMode(enabled) {
   
   isMapMakerMode = enabled;
   log.info(`Switching to ${enabled ? 'Map Maker' : 'Gameplay'} Mode`);
+
+  try {
+    if (window.MapShine) window.MapShine.isMapMakerMode = isMapMakerMode;
+  } catch (_) {
+    // Ignore
+  }
   
   if (enabled) {
     disableSystem(); // Hide Three.js, Show PIXI
@@ -3646,8 +3768,15 @@ function updateInputMode() {
       // canvas is hidden, so we also hide the icons here for logical
       // consistency.
       if (lightIconManager && lightIconManager.setVisibility) {
-        const showIcons = (finalLayer === 'LightingLayer') && !isMapMakerMode;
-        lightIconManager.setVisibility(showIcons);
+        const showLighting = (finalLayer === 'LightingLayer') && !isMapMakerMode;
+        const tool = ui?.controls?.tool?.name ?? game.activeTool;
+        const mapshineToolActive = tool === 'map-shine-enhanced-light';
+        lightIconManager.setVisibility(showLighting && !mapshineToolActive);
+      }
+
+      if (enhancedLightIconManager && enhancedLightIconManager.setVisibility) {
+        const showLighting = (finalLayer === 'LightingLayer') && !isMapMakerMode;
+        enhancedLightIconManager.setVisibility(showLighting);
       }
 
       if (wallManager && wallManager.setVisibility) {

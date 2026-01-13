@@ -40,9 +40,10 @@ export class VisionPolygonComputer {
    * @param {number} radius - Vision radius in pixels
    * @param {Wall[]} walls - Array of wall placeables (optional, defaults to canvas.walls.placeables)
    * @param {{x: number, y: number, width: number, height: number}} [sceneBounds] - Optional scene bounds to clip vision
+   * @param {{sense?: 'sight'|'light'}|null} [options] - Optional compute mode (defaults to 'sight')
    * @returns {number[]} Flat array [x0, y0, x1, y1, ...] in Foundry coordinates
    */
-  compute(center, radius, walls = null, sceneBounds = null) {
+  compute(center, radius, walls = null, sceneBounds = null, options = null) {
     if (!center || radius <= 0) {
       log.debug(`compute() early return: center=${JSON.stringify(center)}, radius=${radius}`);
       return [];
@@ -50,9 +51,13 @@ export class VisionPolygonComputer {
 
     // Get walls from canvas if not provided
     const allWalls = walls ?? canvas?.walls?.placeables ?? [];
+
+    const sense = (options && options.sense === 'light') ? 'light' : 'sight';
     
-    // Filter to vision-blocking walls only
-    const blockingWalls = this.filterVisionBlockingWalls(allWalls);
+    // Filter to blocking walls based on requested sense.
+    const blockingWalls = (sense === 'light')
+      ? this.filterLightBlockingWalls(allWalls)
+      : this.filterVisionBlockingWalls(allWalls);
     
     // Convert walls to segments
     const segments = this.wallsToSegments(blockingWalls, center, radius);
@@ -122,6 +127,28 @@ export class VisionPolygonComputer {
       // TODO: Handle one-way walls (doc.dir)
       // TODO: Handle limited sight walls (doc.sight === 10) with partial transparency
       
+      return true;
+    });
+  }
+
+  /**
+   * Filter walls that block light
+   * @param {Wall[]} walls - Array of wall placeables
+   * @returns {Wall[]} Walls that block light
+   */
+  filterLightBlockingWalls(walls) {
+    return walls.filter(wall => {
+      const doc = wall.document;
+      if (!doc) return false;
+
+      // CONST.WALL_SENSE_TYPES: 0=None, 10=Limited, 20=Normal
+      if (doc.light === 0) return false;
+
+      // Skip open doors.
+      if (doc.door > 0 && doc.ds === 1) return false;
+
+      // TODO: Handle one-way walls (doc.dir)
+      // TODO: Handle limited light walls (doc.light === 10) with partial transmission
       return true;
     });
   }

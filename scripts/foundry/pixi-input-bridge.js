@@ -53,6 +53,25 @@ export class PixiInputBridge {
     this._onWheel = this._onWheel.bind(this);
     this._onContextMenu = this._onContextMenu.bind(this);
   }
+
+  _isEventFromOverlayUI(event) {
+    try {
+      const target = event?.target;
+      const path = (event && typeof event.composedPath === 'function') ? event.composedPath() : null;
+      const elements = Array.isArray(path)
+        ? path.filter((n) => n instanceof Element)
+        : (target instanceof Element ? [target] : []);
+
+      for (const el of elements) {
+        if (el.closest('#map-shine-overlay-root, #map-shine-light-ring')) return true;
+        if (el.closest('[data-overlay-id], .map-shine-overlay-ui')) return true;
+      }
+
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
   
   /**
    * Initialize the input bridge
@@ -115,6 +134,14 @@ export class PixiInputBridge {
    */
   _onMouseDown(event) {
     if (!this.enabled) return;
+
+    if (this._isEventFromOverlayUI(event)) {
+      this._pendingRightDrag = false;
+      this._rightDragStartPos = null;
+      this._isDragging = false;
+      this._lastMousePos = null;
+      return;
+    }
     
     // Right mouse button for pan
     if (event.button === 2) {
@@ -133,6 +160,10 @@ export class PixiInputBridge {
   _onMouseMove(event) {
     if (!this.enabled) return;
     if (!canvas?.stage) return;
+
+    if (this._isEventFromOverlayUI(event)) {
+      return;
+    }
 
     if (this._pendingRightDrag && this._rightDragStartPos) {
       const dist = Math.hypot(
@@ -178,6 +209,11 @@ export class PixiInputBridge {
    * @private
    */
   _onMouseUp(event) {
+    if (this._isEventFromOverlayUI(event)) {
+      this._pendingRightDrag = false;
+      this._rightDragStartPos = null;
+    }
+
     if (this._isDragging) {
       this._isDragging = false;
       this._lastMousePos = null;
@@ -198,6 +234,10 @@ export class PixiInputBridge {
   _onWheel(event) {
     if (!this.enabled) return;
     if (!canvas?.stage || !canvas?.app?.view) return;
+
+    if (this._isEventFromOverlayUI(event)) {
+      return;
+    }
     
     // Modifier-wheel is reserved for object interactions (rotate/scale) via InteractionManager.
     // Avoid zoom conflicts by ignoring Ctrl/Shift wheel here.

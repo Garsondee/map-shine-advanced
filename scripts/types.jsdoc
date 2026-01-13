@@ -137,3 +137,35 @@
  * @property {*} value - Initial value
  * @property {boolean} [animatable] - Whether this uniform should animate over time
  */
+
+/**
+ * Unified light entity definition.
+ * This is a data model abstraction used by MapShine to represent both:
+ * - Foundry AmbientLight documents (adapted), and
+ * - MapShine-native enhanced lights (scene-flag authored).
+ *
+ * The renderer consumes `ILightEntity` regardless of source.
+ *
+ * @typedef {Object} ILightEntity
+ * @property {string} id
+ * @property {'foundry'|'mapshine'} sourceType
+ * @property {boolean} enabled
+ * @property {boolean} isDarkness
+ * @property {{x:number, y:number, z?:number}} transform - Foundry world coords (pixels). `z` is optional.
+ * @property {string|number|{r:number,g:number,b:number}} [color]
+ * @property {{dim:number, bright:number, attenuation?:number, alpha?:number, luminosity?:number}} photometry
+ * @property {{type?:string, speed?:number, intensity?:number}} [animation]
+ * @property {boolean} isStatic
+ * @property {string} [linkedFoundryLightId] - If set, this enhanced light was seeded from a Foundry AmbientLight.
+ * @property {boolean} [overrideFoundry] - If true, suppress the linked Foundry light to avoid double lighting.
+ * @property {'ground'|'overhead'|'both'} [targetLayers] - Which surface layers this light affects. Default 'both'.
+ * @property {string} [cookieTexture] - Optional path to a cookie/gobo texture for projected patterns.
+ * @property {number} [cookieRotation] - Rotation of the cookie texture in radians.
+ * @property {number} [cookieScale] - Scale factor for the cookie texture (1.0 = match light radius).
+ * @property {number} [activationRange]
+ * @property {number} [zMin]
+ * @property {number} [zMax]
+ * @property {boolean} castShadows
+ * @property {'hard'|'soft'} [shadowQuality]
+ * @property {any} [raw] - Backing source object (debug/interop)
+ */

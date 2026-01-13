@@ -36,6 +36,9 @@ export function getEffectMaskRegistry() {
 /** Asset cache to prevent redundant loads */
 const assetCache = new Map();
 
+ /** Generic texture cache for non-map assets (e.g. light cookies/gobos) */
+ const textureCache = new Map();
+
 /**
  * Load a complete asset bundle for a scene
  * @param {string} basePath - Base path to scene image (without extension)
@@ -369,6 +372,39 @@ function normalizePath(path) {
   return path;
 }
 
+ /**
+  * Load a single texture with caching.
+  * Intended for one-off textures which are not part of a scene's asset bundle
+  * (e.g. light cookie/gobo textures).
+  *
+  * @param {string} path
+  * @param {{suppressProbeErrors?: boolean, colorSpace?: any}} [options]
+  * @returns {Promise<THREE.Texture>}
+  */
+ export async function loadTexture(path, options = {}) {
+   const THREE = window.THREE;
+   const suppressProbeErrors = options?.suppressProbeErrors === true;
+   const key = normalizePath(String(path ?? ''));
+   if (!key) throw new Error('loadTexture requires a non-empty path');
+
+   const cached = textureCache.get(key);
+   if (cached) return cached;
+
+   const tex = await loadTextureAsync(key, suppressProbeErrors);
+   try {
+     if (options?.colorSpace !== undefined && tex) {
+       tex.colorSpace = options.colorSpace;
+     } else if (THREE?.NoColorSpace && tex) {
+       // Most generic textures are treated as data unless otherwise specified.
+       tex.colorSpace = THREE.NoColorSpace;
+     }
+   } catch (e) {
+   }
+
+   textureCache.set(key, tex);
+   return tex;
+ }
+
 /**
  * Load a texture asynchronously using Foundry's texture loading system
  * Silently fails for 404s to allow format fallback without console spam
@@ -562,8 +598,16 @@ export function clearCache() {
       }
     }
   }
-  
+
+  for (const tex of textureCache.values()) {
+    try {
+      tex?.dispose?.();
+    } catch (e) {
+    }
+  }
+
   assetCache.clear();
+  textureCache.clear();
   log.info('Asset cache cleared');
 }
 

@@ -7,8 +7,13 @@
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { VisionPolygonComputer } from '../vision/VisionPolygonComputer.js';
+import { EnhancedLightInspector } from '../ui/enhanced-light-inspector.js';
 
 const log = createLogger('InteractionManager');
+
+const _lightPreviewLosComputer = new VisionPolygonComputer();
+_lightPreviewLosComputer.circleSegments = 64;
 
 /**
  * InteractionManager - Handles mouse/keyboard interaction with the THREE.js scene
@@ -50,6 +55,21 @@ export class InteractionManager {
       mapPointGroupId: null,
       mapPointIndex: null,
       mapPointPoints: null
+    };
+
+    // Pending light interaction (disambiguate click-to-open-ring vs drag-to-move-light).
+    // We only open the ring on pointerup if the pointer hasn't moved past threshold.
+    this._pendingLight = {
+      active: false,
+      type: null, // 'foundry' | 'enhanced'
+      id: null,
+      sprite: null,
+      hitPoint: null,
+      canEdit: false,
+      startClientX: 0,
+      startClientY: 0,
+      thresholdPx: 8,
+      forceSheet: false,
     };
 
     this._pendingTokenMoveCleanup = {
@@ -106,6 +126,16 @@ export class InteractionManager {
       previewBorder: null
     };
 
+    // MapShine Enhanced Light Placement (separate from Foundry light placement)
+    this.enhancedLightPlacement = {
+      active: false,
+      start: new THREE.Vector3(),
+      current: new THREE.Vector3(),
+      previewGroup: null,
+      previewFill: null,
+      previewBorder: null
+    };
+
     // Map Point Drawing State
     this.mapPointDraw = {
       active: false,
@@ -127,6 +157,7 @@ export class InteractionManager {
     this.createSelectionOverlay();
     this.createDragMeasureOverlay();
     this.createLightPreview();
+    this.createEnhancedLightPreview();
     this.createMapPointPreview();
     
     /** @type {string|null} ID of currently hovered token */
@@ -150,6 +181,70 @@ export class InteractionManager {
     };
 
     log.debug('InteractionManager created');
+  }
+
+  _computeLightPreviewLocalPolygon(originWorld, radiusWorld) {
+    try {
+      const radius = Number(radiusWorld);
+      if (!Number.isFinite(radius) || radius <= 0) return null;
+
+      const sceneRect = canvas?.dimensions?.sceneRect;
+      const sceneBounds = sceneRect ? {
+        x: sceneRect.x,
+        y: sceneRect.y,
+        width: sceneRect.width,
+        height: sceneRect.height
+      } : null;
+
+      const originF = Coordinates.toFoundry(originWorld.x, originWorld.y);
+      const ptsF = _lightPreviewLosComputer.compute(originF, radius, null, sceneBounds, { sense: 'light' });
+      if (!ptsF || ptsF.length < 6) return null;
+
+      const THREE = window.THREE;
+      const local = [];
+      for (let i = 0; i < ptsF.length; i += 2) {
+        const w = Coordinates.toWorld(ptsF[i], ptsF[i + 1]);
+        local.push(new THREE.Vector2(w.x - originWorld.x, w.y - originWorld.y));
+      }
+      return local.length >= 3 ? local : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _updateLightPlacementPreviewGeometry(preview, originWorld, radiusWorld) {
+    try {
+      if (!preview?.previewFill || !preview?.previewBorder) return;
+      const THREE = window.THREE;
+
+      const radius = Math.max(0.1, Number(radiusWorld) || 0.1);
+
+      // Keep group scale at 1 so the shader works in world-units.
+      if (preview.previewGroup) preview.previewGroup.scale.set(1, 1, 1);
+
+      if (preview.previewFill?.material?.uniforms?.uRadius) {
+        preview.previewFill.material.uniforms.uRadius.value = radius;
+      }
+
+      const localPoly = this._computeLightPreviewLocalPolygon(originWorld, radius);
+      let geom;
+      if (localPoly && localPoly.length >= 3) {
+        const shape = new THREE.Shape(localPoly);
+        geom = new THREE.ShapeGeometry(shape);
+      } else {
+        geom = new THREE.CircleGeometry(radius, 64);
+      }
+
+      // Swap fill geometry
+      if (preview.previewFill.geometry) preview.previewFill.geometry.dispose();
+      preview.previewFill.geometry = geom;
+
+      // Rebuild border to match new fill
+      const borderGeom = new THREE.EdgesGeometry(geom);
+      if (preview.previewBorder.geometry) preview.previewBorder.geometry.dispose();
+      preview.previewBorder.geometry = borderGeom;
+    } catch (_) {
+    }
   }
 
   /**
@@ -194,6 +289,11 @@ export class InteractionManager {
 
       if (el.closest('#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-loading-overlay')) return true;
       if (el.closest('#map-point-context-menu')) return true;
+
+      // World-anchored overlays (e.g. LightRingUI) live in OverlayUIManager.
+      // These must be treated as UI even though we listen on window capture.
+      if (el.closest('#map-shine-overlay-root, #map-shine-light-ring')) return true;
+      if (el.closest('[data-overlay-id], .map-shine-overlay-ui')) return true;
 
       const classList = el.classList;
       if (classList && classList.length) {
@@ -344,16 +444,17 @@ export class InteractionManager {
     this.lightPlacement.previewGroup.name = 'LightPlacementPreview';
     this.lightPlacement.previewGroup.visible = false;
     // Z-index just above ground/floor but below tokens
-    this.lightPlacement.previewGroup.position.z = 5;
+    this.lightPlacement.previewGroup.position.z = 0;
 
     // Fill (Shader-based "Light Look")
-    const geometry = new THREE.CircleGeometry(1, 64);
+    const geometry = new THREE.CircleGeometry(0.1, 64);
     
     // Shader adapted from LightMesh.js but for Unit Circle (Radius 1)
     const material = new THREE.ShaderMaterial({
       uniforms: {
         uColor: { value: new THREE.Color(1.0, 1.0, 0.8) }, // Warm light default
-        uRatio: { value: 0.5 } // bright/dim ratio
+        uRatio: { value: 0.5 }, // bright/dim ratio
+        uRadius: { value: 0.1 }
       },
       vertexShader: `
         varying vec2 vLocalPos;
@@ -366,13 +467,16 @@ export class InteractionManager {
         varying vec2 vLocalPos;
         uniform vec3 uColor;
         uniform float uRatio;
+        uniform float uRadius;
 
         void main() {
           float dist = length(vLocalPos);
-          if (dist >= 1.0) discard;
+          if (dist >= uRadius) discard;
+
+          float d = dist / max(uRadius, 0.0001);
 
           // Falloff Logic
-          float dOuter = dist;
+          float dOuter = d;
           float innerFrac = clamp(uRatio, 0.0, 0.99);
 
           float coreRegion = 1.0 - smoothstep(0.0, innerFrac, dOuter);
@@ -417,6 +521,68 @@ export class InteractionManager {
 
     if (this.sceneComposer.scene) {
       this.sceneComposer.scene.add(this.lightPlacement.previewGroup);
+    }
+  }
+
+  /**
+   * Create MapShine enhanced light placement preview visuals
+   * @private
+   */
+  createEnhancedLightPreview() {
+    const THREE = window.THREE;
+
+    this.enhancedLightPlacement.previewGroup = new THREE.Group();
+    this.enhancedLightPlacement.previewGroup.name = 'EnhancedLightPlacementPreview';
+    this.enhancedLightPlacement.previewGroup.visible = false;
+    this.enhancedLightPlacement.previewGroup.position.z = 0;
+
+    // Fill (blue-tinted to distinguish from Foundry lights)
+    const geometry = new THREE.CircleGeometry(0.1, 64);
+    const material = new THREE.ShaderMaterial({
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      uniforms: {
+        uColor: { value: new THREE.Color(0x44aaff) },
+        uRadius: { value: 0.1 }
+      },
+      vertexShader: `
+        varying vec2 vLocalPos;
+        void main() {
+          vLocalPos = position.xy;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 uColor;
+        uniform float uRadius;
+        varying vec2 vLocalPos;
+        void main() {
+          float dist = length(vLocalPos);
+          if (dist >= uRadius) discard;
+          float d = dist / max(uRadius, 0.0001);
+          float alpha = (1.0 - smoothstep(0.7, 1.0, d)) * 0.3;
+          gl_FragColor = vec4(uColor, alpha);
+        }
+      `
+    });
+
+    this.enhancedLightPlacement.previewFill = new THREE.Mesh(geometry, material);
+    this.enhancedLightPlacement.previewGroup.add(this.enhancedLightPlacement.previewFill);
+
+    // Border (Blue solid to distinguish from Foundry yellow)
+    const borderGeo = new THREE.EdgesGeometry(geometry);
+    const borderMat = new THREE.LineBasicMaterial({
+      color: 0x44aaff,
+      transparent: true,
+      opacity: 0.8,
+      depthTest: false
+    });
+    this.enhancedLightPlacement.previewBorder = new THREE.LineSegments(borderGeo, borderMat);
+    this.enhancedLightPlacement.previewGroup.add(this.enhancedLightPlacement.previewBorder);
+
+    if (this.sceneComposer.scene) {
+      this.sceneComposer.scene.add(this.enhancedLightPlacement.previewGroup);
     }
   }
 
@@ -1261,6 +1427,10 @@ export class InteractionManager {
    */
   createDragPreviews() {
     this.dragState.previews.clear();
+
+    const THREE = window.THREE;
+    const _tmpPos = new THREE.Vector3();
+    const _tmpQuat = new THREE.Quaternion();
     
     for (const id of this.selection) {
       // Check Token
@@ -1294,12 +1464,23 @@ export class InteractionManager {
         continue;
       }
 
-      // Check Light
+      // Check Foundry Light
       if (this.lightIconManager && this.lightIconManager.lights.has(id)) {
           const original = this.lightIconManager.lights.get(id);
           const preview = original.clone();
 
           preview.matrixAutoUpdate = true;
+
+          // Preserve the icon's world transform (the original sprite is parented under a
+          // group with a Z offset; cloning and adding to the root scene loses that offset).
+          try {
+            original.getWorldPosition(_tmpPos);
+            original.getWorldQuaternion(_tmpQuat);
+            preview.position.copy(_tmpPos);
+            preview.quaternion.copy(_tmpQuat);
+          } catch (_) {
+          }
+
           preview.position.z = (preview.position.z ?? 0) + 0.01;
           preview.renderOrder = 9998;
 
@@ -1314,6 +1495,58 @@ export class InteractionManager {
 
           if (this.sceneComposer.scene) {
               this.sceneComposer.scene.add(preview);
+          }
+
+          this.dragState.previews.set(id, preview);
+          continue;
+      }
+
+      // Check MapShine Enhanced Light
+      const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+      if (enhancedLightIconManager && enhancedLightIconManager.lights.has(id)) {
+          const originalRoot = enhancedLightIconManager.getRootObject?.(id) || enhancedLightIconManager.lights.get(id);
+          if (!originalRoot) continue;
+
+          const preview = originalRoot.clone(true);
+
+          preview.matrixAutoUpdate = true;
+
+          // Preserve the gizmo's world transform (the original group is parented under a
+          // manager group with a Z offset; cloning and adding to the root scene loses that offset).
+          try {
+            originalRoot.getWorldPosition(_tmpPos);
+            originalRoot.getWorldQuaternion(_tmpQuat);
+            preview.position.copy(_tmpPos);
+            preview.quaternion.copy(_tmpQuat);
+          } catch (_) {
+          }
+
+          preview.position.z = (preview.position.z ?? 0) + 0.01;
+          preview.renderOrder = 9998;
+
+          // Make materials semi-transparent and render on top.
+          preview.traverse?.((obj) => {
+            try {
+              // Hide the radius gizmo in the drag preview. The LOS-based polygon
+              // does not update during drag, and the fill obscures the scene.
+              if (obj?.userData?.type === 'enhancedLightRadiusFill' || obj?.userData?.type === 'enhancedLightRadiusBorder') {
+                obj.visible = false;
+                return;
+              }
+
+              if (obj?.material) {
+                obj.material = obj.material.clone();
+                obj.material.opacity = 0.5;
+                obj.material.transparent = true;
+                obj.material.depthTest = false;
+                obj.material.depthWrite = false;
+              }
+            } catch (_) {
+            }
+          });
+
+          if (this.sceneComposer.scene) {
+            this.sceneComposer.scene.add(preview);
           }
 
           this.dragState.previews.set(id, preview);
@@ -1362,7 +1595,11 @@ export class InteractionManager {
         // ... existing wall code ...
 
         // 1.5 Check Lights (Lighting Layer)
-        if (canvas.activeLayer?.name === 'LightingLayer' && this.lightIconManager) {
+        // Prefer MapShine in-world light ring UI over Foundry's config sheet.
+        // Hold Alt (or Ctrl/Cmd) to force the Foundry sheet.
+        const _layerName = canvas.activeLayer?.name;
+        const _isLightingLayer = (_layerName === 'LightingLayer' || _layerName === 'lighting');
+        if (_isLightingLayer && this.lightIconManager) {
             const lightIcons = Array.from(this.lightIconManager.lights.values());
             const intersects = this.raycaster.intersectObjects(lightIcons, false);
             if (intersects.length > 0) {
@@ -1372,6 +1609,16 @@ export class InteractionManager {
                 const light = canvas.lighting.get(lightId);
                 
                 if (light && light.document.testUserPermission(game.user, "LIMITED")) {
+                    const forceSheet = !!(event.altKey || event.ctrlKey || event.metaKey);
+                    const ringUI = window.MapShine?.lightRingUI;
+                    if (!forceSheet && ringUI && typeof ringUI.show === 'function') {
+                        try {
+                          ringUI.show({ type: 'foundry', id: String(lightId) }, sprite);
+                          return;
+                        } catch (_) {
+                        }
+                    }
+
                     log.info(`Opening config for light ${lightId}`);
                     light.sheet.render(true);
                     return;
@@ -1447,6 +1694,8 @@ export class InteractionManager {
           id = targetObject.userData.tokenDoc.id;
       } else if (targetObject.userData.lightId) {
           id = targetObject.userData.lightId;
+      } else if (targetObject.userData.enhancedLightId) {
+          id = targetObject.userData.enhancedLightId;
       } else {
           return;
       }
@@ -1490,6 +1739,20 @@ export class InteractionManager {
       
       if (window.MapShine?.cameraController) {
         window.MapShine.cameraController.enabled = false;
+      }
+
+      // Enhanced lights: hide the LOS-based radius gizmo while dragging.
+      // The polygon does not update in real-time, so keeping it visible looks incorrect.
+      try {
+        const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+        if (enhancedLightIconManager && this.selection && this.selection.size > 0) {
+          for (const sid of this.selection) {
+            if (enhancedLightIconManager.lights?.has?.(sid)) {
+              enhancedLightIconManager.setDragging?.(sid, true);
+            }
+          }
+        }
+      } catch (_) {
       }
   }
 
@@ -1651,6 +1914,17 @@ export class InteractionManager {
     try {
         if (this._isEventFromUI(event)) return;
 
+        // Any new pointerdown cancels a pending light click unless we immediately re-arm it.
+        if (this._pendingLight?.active) {
+          this._pendingLight.active = false;
+          this._pendingLight.type = null;
+          this._pendingLight.id = null;
+          this._pendingLight.sprite = null;
+          this._pendingLight.hitPoint = null;
+          this._pendingLight.canEdit = false;
+          this._pendingLight.forceSheet = false;
+        }
+
         // Handle Map Point Drawing Mode (takes priority over other interactions)
         if (this.mapPointDraw.active && event.button === 0) {
           const worldPos = this.screenToWorld(event.clientX, event.clientY);
@@ -1722,12 +1996,58 @@ export class InteractionManager {
         const shouldOverrideRouter = isTokenLayerName && isTokenSelectTool;
         
         if (inputRouter && !inputRouter.shouldThreeReceiveInput()) {
-          if (shouldOverrideRouter) {
-            log.debug('onPointerDown overriding InputRouter block on Tokens layer; forcing THREE mode');
+          let allowOverride = shouldOverrideRouter;
+
+          // If the router is in PIXI mode (common on LightingLayer), we still want
+          // Three.js to be able to select Three-rendered light icons.
+          if (!allowOverride) {
             try {
-              inputRouter.forceThree?.('InteractionManager token click');
-            } catch (e) {
-              log.warn('Failed to force THREE mode on token click', e);
+              const camera = this.sceneComposer?.camera;
+              if (camera) {
+                this.updateMouseCoords(event);
+                this.raycaster.setFromCamera(this.mouse, camera);
+
+                // Check enhanced lights (MapShine)
+                const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+                const enhancedIcons = enhancedLightIconManager ? Array.from(enhancedLightIconManager.lights.values()) : [];
+                const hitEnhanced = enhancedIcons.length > 0 ? this.raycaster.intersectObjects(enhancedIcons, false) : [];
+
+                // Check Foundry lights (Three icon sprites)
+                const foundryIcons = (this.lightIconManager && this.lightIconManager.lights)
+                  ? Array.from(this.lightIconManager.lights.values())
+                  : [];
+                const hitFoundry = foundryIcons.length > 0 ? this.raycaster.intersectObjects(foundryIcons, false) : [];
+
+                if (hitEnhanced.length > 0 || hitFoundry.length > 0) {
+                  allowOverride = true;
+                  log.debug('onPointerDown overriding InputRouter block for Three.js light icon click');
+
+                  try {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    event.stopImmediatePropagation?.();
+                  } catch (_) {
+                  }
+
+                  try {
+                    inputRouter.forceThree?.('InteractionManager light click');
+                  } catch (e) {
+                    log.warn('Failed to force THREE mode on light click', e);
+                  }
+                }
+              }
+            } catch (_) {
+            }
+          }
+
+          if (allowOverride) {
+            if (shouldOverrideRouter) {
+              log.debug('onPointerDown overriding InputRouter block on Tokens layer; forcing THREE mode');
+              try {
+                inputRouter.forceThree?.('InteractionManager token click');
+              } catch (e) {
+                log.warn('Failed to force THREE mode on token click', e);
+              }
             }
             // Fall through and continue handling the click.
           } else {
@@ -1957,37 +2277,90 @@ export class InteractionManager {
         // 2.5. Native Light Placement (LightingLayer in Three.js Gameplay Mode)
         // When on the Lighting layer with the standard light tool active, allow the GM to
         // place AmbientLight documents directly from the 3D view without swapping modes.
-        const isLightingLayer = activeLayer === 'LightingLayer';
+        const isLightingLayer = (activeLayer === 'LightingLayer' || activeLayer === 'lighting');
         if (isLightingLayer) {
+          const activeTool = ui?.controls?.tool?.name ?? game.activeTool;
+          const isMapShineLightTool = activeTool === 'map-shine-enhanced-light';
+
           // 2.5a Check for Existing Lights (Select/Drag)
           // Prioritize interacting with existing lights over placing new ones
-          if (this.lightIconManager) {
-             const lightIcons = Array.from(this.lightIconManager.lights.values());
-             const intersects = this.raycaster.intersectObjects(lightIcons, false);
-             
-             if (intersects.length > 0) {
-                 const hit = intersects[0];
-                 const sprite = hit.object;
-                 const lightId = sprite.userData.lightId;
-                 const lightDoc = canvas.lighting.get(lightId)?.document;
+          // MapShine Enhanced Lights: always allow select/drag when LightingLayer is active
+          // (matches Foundry UX: you can always grab an existing light handle).
+          const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+          if (enhancedLightIconManager) {
+            const enhancedLightIcons = Array.from(enhancedLightIconManager.lights.values());
+            const intersects = this.raycaster.intersectObjects(enhancedLightIcons, false);
+            if (intersects.length > 0) {
+              const hit = intersects[0];
+              const sprite = hit.object;
+              const enhancedLightId = sprite.userData.enhancedLightId;
 
-                 if (lightDoc && lightDoc.canUserModify(game.user, "update")) {
-                     // Handle Selection
-                     const isSelected = this.selection.has(lightId);
-                     if (event.shiftKey) {
-                         if (!isSelected) this.selectObject(sprite);
-                     } else {
-                         if (!isSelected) {
-                             this.clearSelection();
-                             this.selectObject(sprite);
-                         }
-                     }
+              if (enhancedLightId) {
+                // Handle Selection (anyone can select/view; only GM can drag/edit)
+                const isSelected = this.selection.has(enhancedLightId);
+                if (event.shiftKey) {
+                  if (!isSelected) this.selectObject(sprite, { showRingUI: false });
+                } else {
+                  if (!isSelected) {
+                    this.clearSelection();
+                    this.selectObject(sprite, { showRingUI: false });
+                  }
+                }
 
-                     // Start Drag
-                     this.startDrag(sprite, hit.point);
-                     return;
-                 }
-             }
+                // Defer ring opening to pointerup; defer dragging until movement exceeds threshold.
+                this._pendingLight.active = true;
+                this._pendingLight.type = 'enhanced';
+                this._pendingLight.id = String(enhancedLightId);
+                this._pendingLight.sprite = sprite;
+                this._pendingLight.hitPoint = hit.point?.clone?.() ?? hit.point;
+                this._pendingLight.canEdit = !!game.user.isGM;
+                this._pendingLight.startClientX = event.clientX;
+                this._pendingLight.startClientY = event.clientY;
+                this._pendingLight.forceSheet = false;
+                return;
+              }
+            }
+          }
+
+          // Standard Foundry Light Tool: Check Foundry light icons
+          if (this.lightIconManager && !isMapShineLightTool) {
+            const lightIcons = Array.from(this.lightIconManager.lights.values());
+            const intersects = this.raycaster.intersectObjects(lightIcons, false);
+            
+            if (intersects.length > 0) {
+              const hit = intersects[0];
+              const sprite = hit.object;
+              const lightId = sprite.userData.lightId;
+              const lightDoc = canvas.lighting.get(lightId)?.document;
+
+              // Selection should work with LIMITED permission; editing/dragging requires update permission.
+              const canView = !!(lightDoc && lightDoc.testUserPermission(game.user, "LIMITED"));
+              const canEdit = !!(lightDoc && lightDoc.canUserModify(game.user, "update"));
+              if (canView) {
+                // Handle Selection
+                const isSelected = this.selection.has(lightId);
+                if (event.shiftKey) {
+                  if (!isSelected) this.selectObject(sprite, { showRingUI: false });
+                } else {
+                  if (!isSelected) {
+                    this.clearSelection();
+                    this.selectObject(sprite, { showRingUI: false });
+                  }
+                }
+
+                // Defer ring opening to pointerup; defer dragging until movement exceeds threshold.
+                this._pendingLight.active = true;
+                this._pendingLight.type = 'foundry';
+                this._pendingLight.id = String(lightId);
+                this._pendingLight.sprite = sprite;
+                this._pendingLight.hitPoint = hit.point?.clone?.() ?? hit.point;
+                this._pendingLight.canEdit = canEdit;
+                this._pendingLight.startClientX = event.clientX;
+                this._pendingLight.startClientY = event.clientY;
+                this._pendingLight.forceSheet = !!(event.altKey || event.ctrlKey || event.metaKey);
+                return;
+              }
+            }
           }
 
           // 2.5b Place New Light
@@ -1996,8 +2369,6 @@ export class InteractionManager {
             ui.notifications.warn('Only the GM can place lights in this mode.');
             return;
           }
-
-          if (!canvas.lighting) return;
 
           // Project onto ground plane for light placement
           const worldPos = this.viewportToWorld(event.clientX, event.clientY, groundZ);
@@ -2014,16 +2385,37 @@ export class InteractionManager {
           }
           const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
 
-          // Initialize Drag State
-          this.lightPlacement.active = true;
-          this.lightPlacement.start.set(snappedWorld.x, snappedWorld.y, 0);
-          this.lightPlacement.current.set(snappedWorld.x, snappedWorld.y, 0);
-          
-          // Initialize Visuals
-          this.lightPlacement.previewGroup.position.copy(this.lightPlacement.start);
-          this.lightPlacement.previewGroup.position.z = 5; // Keep above ground
-          this.lightPlacement.previewGroup.scale.set(0.1, 0.1, 1); // Tiny start
-          this.lightPlacement.previewGroup.visible = true;
+          if (isMapShineLightTool) {
+            // MapShine Enhanced Light Placement
+            this.enhancedLightPlacement.active = true;
+            this.enhancedLightPlacement.start.set(snappedWorld.x, snappedWorld.y, groundZ);
+            this.enhancedLightPlacement.current.set(snappedWorld.x, snappedWorld.y, groundZ);
+            
+            // Initialize Visuals
+            this.enhancedLightPlacement.previewGroup.position.copy(this.enhancedLightPlacement.start);
+            this.enhancedLightPlacement.previewGroup.position.z = groundZ + 0.05;
+            this.enhancedLightPlacement.previewGroup.scale.set(1, 1, 1);
+            this.enhancedLightPlacement.previewGroup.visible = true;
+
+            // Start with a tiny preview so the shader has a sane radius.
+            this._updateLightPlacementPreviewGeometry(this.enhancedLightPlacement, this.enhancedLightPlacement.start, 0.1);
+          } else {
+            // Foundry Light Placement
+            if (!canvas.lighting) return;
+            
+            this.lightPlacement.active = true;
+            this.lightPlacement.start.set(snappedWorld.x, snappedWorld.y, groundZ);
+            this.lightPlacement.current.set(snappedWorld.x, snappedWorld.y, groundZ);
+            
+            // Initialize Visuals
+            this.lightPlacement.previewGroup.position.copy(this.lightPlacement.start);
+            this.lightPlacement.previewGroup.position.z = groundZ + 0.05;
+            this.lightPlacement.previewGroup.scale.set(1, 1, 1);
+            this.lightPlacement.previewGroup.visible = true;
+
+            // Start with a tiny preview so the shader has a sane radius.
+            this._updateLightPlacementPreviewGeometry(this.lightPlacement, this.lightPlacement.start, 0.1);
+          }
 
           // Disable camera controls
           if (window.MapShine?.cameraController) {
@@ -2490,8 +2882,10 @@ export class InteractionManager {
           !this.dragSelect?.active &&
           !this.wallDraw?.active &&
           !this.lightPlacement?.active &&
+          !this.enhancedLightPlacement?.active &&
           !this.mapPointDraw?.active &&
-          !this.rightClickState?.active
+          !this.rightClickState?.active &&
+          !this._pendingLight?.active
         ) {
           return;
         }
@@ -2509,6 +2903,32 @@ export class InteractionManager {
                 log.debug(`Right click cancelled: moved ${dist.toFixed(1)}px (threshold ${this.rightClickState.threshold}px)`);
                 this.rightClickState.active = false; // It's a drag/pan, not a click
             }
+        }
+
+        // Pending light interaction: start drag only after crossing a screen-space threshold.
+        if (this._pendingLight?.active && !this.dragState?.active) {
+          const dx = event.clientX - this._pendingLight.startClientX;
+          const dy = event.clientY - this._pendingLight.startClientY;
+          const dist = Math.hypot(dx, dy);
+          if (dist > (this._pendingLight.thresholdPx ?? 8)) {
+            if (this._pendingLight.canEdit && this._pendingLight.sprite && this._pendingLight.hitPoint) {
+              // Hide ring if it was open for some reason; we are starting an actual drag.
+              try {
+                const ringUI = window.MapShine?.lightRingUI;
+                ringUI?.hide?.();
+              } catch (_) {
+              }
+
+              this.startDrag(this._pendingLight.sprite, this._pendingLight.hitPoint);
+            }
+
+            // Consume the pending state regardless of edit permission.
+            this._pendingLight.active = false;
+            this._pendingLight.type = null;
+            this._pendingLight.id = null;
+            this._pendingLight.sprite = null;
+            this._pendingLight.hitPoint = null;
+          }
         }
 
         // Case 0: Map Point Drawing Preview
@@ -2578,24 +2998,41 @@ export class InteractionManager {
         // Case 0.25: Light Placement Drag
         if (this.lightPlacement.active) {
              this.updateMouseCoords(event);
-             const worldPos = this.viewportToWorld(event.clientX, event.clientY, 0);
+             const targetZ = this.lightPlacement.start?.z ?? (this.sceneComposer?.groundZ ?? 0);
+             const worldPos = this.viewportToWorld(event.clientX, event.clientY, targetZ);
              if (worldPos) {
                  // Update current position (snap not strictly required for radius, but usually destination is free)
                  // Foundry's light drag usually doesn't snap destination unless Shift?
                  // Actually code says: "Snap the origin... Update the light radius... const radius = Math.hypot(destination.x - origin.x, ...)"
                  // Destination is raw event data usually.
-                 this.lightPlacement.current.set(worldPos.x, worldPos.y, 0);
+                 this.lightPlacement.current.set(worldPos.x, worldPos.y, targetZ);
                  
                  // Calculate radius in World Units
                  const dx = this.lightPlacement.current.x - this.lightPlacement.start.x;
                  const dy = this.lightPlacement.current.y - this.lightPlacement.start.y;
                  const radius = Math.sqrt(dx*dx + dy*dy);
+
+                 // Update Visuals: rebuild wall-clipped polygon geometry in real time.
+                 this._updateLightPlacementPreviewGeometry(this.lightPlacement, this.lightPlacement.start, Math.max(radius, 0.1));
+             }
+             return;
+        }
+
+        // Case 0.26: MapShine Enhanced Light Placement Drag
+        if (this.enhancedLightPlacement.active) {
+             this.updateMouseCoords(event);
+             const targetZ = this.enhancedLightPlacement.start?.z ?? (this.sceneComposer?.groundZ ?? 0);
+             const worldPos = this.viewportToWorld(event.clientX, event.clientY, targetZ);
+             if (worldPos) {
+                 this.enhancedLightPlacement.current.set(worldPos.x, worldPos.y, targetZ);
                  
-                 // Update Visuals
-                 // Circle geometry is radius 1, so we scale by radius
-                 // Minimum visibility
-                 const scale = Math.max(radius, 0.1);
-                 this.lightPlacement.previewGroup.scale.set(scale, scale, 1);
+                 // Calculate radius in World Units
+                 const dx = this.enhancedLightPlacement.current.x - this.enhancedLightPlacement.start.x;
+                 const dy = this.enhancedLightPlacement.current.y - this.enhancedLightPlacement.start.y;
+                 const radius = Math.sqrt(dx*dx + dy*dy);
+
+                 // Update Visuals: rebuild wall-clipped polygon geometry in real time.
+                 this._updateLightPlacementPreviewGeometry(this.enhancedLightPlacement, this.enhancedLightPlacement.start, Math.max(radius, 0.1));
              }
              return;
         }
@@ -2783,7 +3220,10 @@ export class InteractionManager {
           let y = worldPos.y + this.dragState.offset.y;
 
           // For light icon drags, we do NOT snap to grid; they should move freely.
-          const isLightDrag = this.lightIconManager && this.lightIconManager.lights && this.lightIconManager.lights.has(this.dragState.leaderId);
+          const isFoundryLightDrag = this.lightIconManager && this.lightIconManager.lights && this.lightIconManager.lights.has(this.dragState.leaderId);
+          const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+          const isEnhancedLightDrag = !!(enhancedLightIconManager && enhancedLightIconManager.lights && enhancedLightIconManager.lights.has(this.dragState.leaderId));
+          const isLightDrag = isFoundryLightDrag || isEnhancedLightDrag;
           
           // Snap to grid logic if Shift is NOT held and this is NOT a light drag
           if (!event.shiftKey && !isLightDrag) {
@@ -2850,8 +3290,48 @@ export class InteractionManager {
           !this.wallDraw?.active &&
           !this.lightPlacement?.active &&
           !this.mapPointDraw?.active &&
-          !this.rightClickState?.active
+          !this.rightClickState?.active &&
+          !this._pendingLight?.active
         ) {
+          return;
+        }
+
+        // Pending light click: only open the ring on a true click (no drag threshold exceeded).
+        if (this._pendingLight?.active) {
+          const sprite = this._pendingLight.sprite;
+          const id = this._pendingLight.id;
+          const type = this._pendingLight.type;
+          const forceSheet = !!this._pendingLight.forceSheet;
+
+          this._pendingLight.active = false;
+          this._pendingLight.type = null;
+          this._pendingLight.id = null;
+          this._pendingLight.sprite = null;
+          this._pendingLight.hitPoint = null;
+          this._pendingLight.canEdit = false;
+
+          if (sprite && id && type) {
+            try {
+              const ringUI = window.MapShine?.lightRingUI;
+              if (type === 'foundry') {
+                const light = canvas?.lighting?.get?.(id);
+                const doc = light?.document;
+                if (doc && doc.testUserPermission(game.user, 'LIMITED')) {
+                  if (forceSheet) {
+                    light?.sheet?.render?.(true);
+                  } else {
+                    ringUI?.show?.({ type: 'foundry', id: String(id) }, sprite);
+                  }
+                }
+              } else if (type === 'enhanced') {
+                const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+                const root = enhancedLightIconManager?.getRootObject?.(id) || sprite;
+                ringUI?.show?.({ type: 'enhanced', id: String(id) }, root);
+              }
+            } catch (_) {
+            }
+          }
+
           return;
         }
 
@@ -2947,6 +3427,66 @@ export class InteractionManager {
                 log.info(`Created AmbientLight at (${startF.x.toFixed(1)}, ${startF.y.toFixed(1)}) with dim radius ${dim.toFixed(1)}`);
             } catch (e) {
                 log.error('Failed to create AmbientLight', e);
+            }
+            
+            return;
+        }
+
+        // Handle MapShine Enhanced Light Placement End
+        if (this.enhancedLightPlacement.active) {
+            this.enhancedLightPlacement.active = false;
+            this.enhancedLightPlacement.previewGroup.visible = false;
+
+            // Re-enable camera controls
+            if (window.MapShine?.cameraController) {
+                window.MapShine.cameraController.enabled = true;
+            }
+
+            // Calculate final parameters
+            const startWorld = this.enhancedLightPlacement.start;
+            const currentWorld = this.enhancedLightPlacement.current;
+
+            // Convert to Foundry Coords
+            const startF = Coordinates.toFoundry(startWorld.x, startWorld.y);
+            const currentF = Coordinates.toFoundry(currentWorld.x, currentWorld.y);
+
+            // Calculate Radius in Pixels
+            const dx = currentF.x - startF.x;
+            const dy = currentF.y - startF.y;
+            const radiusPixels = Math.hypot(dx, dy);
+
+            // Minimum threshold to prevent accidental tiny lights
+            const isClick = radiusPixels < 10;
+            if (isClick) {
+                return;
+            }
+
+            // Convert Pixel Radius to Distance Units
+            const conversion = canvas.dimensions.distance / canvas.dimensions.size;
+            const dim = radiusPixels * conversion;
+            const bright = dim / 2;
+
+            // Create MapShine Enhanced Light via API
+            const enhancedLightsApi = window.MapShine?.enhancedLights;
+            if (!enhancedLightsApi) {
+                log.error('MapShine.enhancedLights API not available');
+                ui.notifications?.error?.('MapShine Enhanced Lights API not available');
+                return;
+            }
+
+            try {
+                await enhancedLightsApi.create({
+                    transform: { x: startF.x, y: startF.y },
+                    photometry: { bright, dim, alpha: 1.0, luminosity: 0.5, attenuation: 0.5 },
+                    color: '#ffffff',
+                    enabled: true,
+                    isDarkness: false,
+                    targetLayers: 'both'
+                });
+                log.info(`Created MapShine Enhanced Light at (${startF.x.toFixed(1)}, ${startF.y.toFixed(1)}) with dim radius ${dim.toFixed(1)}`);
+            } catch (e) {
+                log.error('Failed to create MapShine Enhanced Light', e);
+                ui.notifications?.error?.('Failed to create MapShine Enhanced Light');
             }
             
             return;
@@ -3156,6 +3696,8 @@ export class InteractionManager {
           // Commit change to Foundry for ALL selected objects
           const tokenUpdates = [];
           const lightUpdates = [];
+          let anyUpdates = false;
+          let anyEnhancedLightUpdates = false;
           
           // Use selection set
           for (const id of this.selection) {
@@ -3223,7 +3765,7 @@ export class InteractionManager {
                 continue;
             }
 
-            // Check Light
+            // Check Foundry Light
             if (this.lightIconManager && this.lightIconManager.lights.has(id)) {
                 const worldPos = preview.position;
                 const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
@@ -3231,9 +3773,45 @@ export class InteractionManager {
                 lightUpdates.push({ _id: id, x: foundryPos.x, y: foundryPos.y });
                 continue;
             }
+
+            // Check MapShine Enhanced Light
+            const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+            if (enhancedLightIconManager && enhancedLightIconManager.lights.has(id)) {
+                const worldPos = preview.position;
+                const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
+                
+                // Update via MapShine Enhanced Lights API
+                const enhancedLightsApi = window.MapShine?.enhancedLights;
+                if (enhancedLightsApi) {
+                    try {
+                        await enhancedLightsApi.update(id, { transform: { x: foundryPos.x, y: foundryPos.y } });
+                        log.info(`Updated MapShine Enhanced Light ${id} position`);
+                        anyUpdates = true;
+                        anyEnhancedLightUpdates = true;
+                    } catch (err) {
+                        log.error(`Failed to update MapShine Enhanced Light ${id}`, err);
+                    }
+                }
+                continue;
+            }
           }
-          
-          let anyUpdates = false;
+
+          // Re-enable enhanced light gizmos now that drag is ending.
+          // If enhanced light positions changed, force a gizmo resync so the LOS polygon matches.
+          try {
+            const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+            if (enhancedLightIconManager && this.selection && this.selection.size > 0) {
+              for (const sid of this.selection) {
+                if (enhancedLightIconManager.lights?.has?.(sid)) {
+                  enhancedLightIconManager.setDragging?.(sid, false);
+                }
+              }
+              if (anyEnhancedLightUpdates) {
+                enhancedLightIconManager.syncAllLights?.();
+              }
+            }
+          } catch (_) {
+          }
 
           if (tokenUpdates.length > 0) {
             log.info(`Updating ${tokenUpdates.length} tokens`);
@@ -3287,6 +3865,20 @@ export class InteractionManager {
         } else {
             this.dragState.active = false;
             this.dragState.object = null;
+
+            // Drag canceled / no movement: restore enhanced light gizmo visibility.
+            try {
+              const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+              if (enhancedLightIconManager && this.selection && this.selection.size > 0) {
+                for (const sid of this.selection) {
+                  if (enhancedLightIconManager.lights?.has?.(sid)) {
+                    enhancedLightIconManager.setDragging?.(sid, false);
+                  }
+                }
+              }
+            } catch (_) {
+            }
+
             this._clearAllDragPreviews();
         }
     } catch (error) {
@@ -3387,6 +3979,7 @@ export class InteractionManager {
           const tokensToDelete = [];
           const wallsToDelete = [];
           const lightsToDelete = [];
+          const enhancedLightsToDelete = [];
           const staleIds = [];
 
           for (const id of this.selection) {
@@ -3422,6 +4015,15 @@ export class InteractionManager {
               continue;
             }
 
+            // Check MapShine Enhanced Light
+            const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+            if (enhancedLightIconManager && enhancedLightIconManager.lights.has(id)) {
+              if (game.user.isGM) {
+                enhancedLightsToDelete.push(id);
+              }
+              continue;
+            }
+
             // Check Wall
             if (this.wallManager.walls.has(id)) {
                 wallsToDelete.push(id);
@@ -3446,6 +4048,20 @@ export class InteractionManager {
           if (lightsToDelete.length > 0) {
             log.info(`Deleting ${lightsToDelete.length} lights`);
             await canvas.scene.deleteEmbeddedDocuments('AmbientLight', lightsToDelete);
+          }
+
+          if (enhancedLightsToDelete.length > 0) {
+            log.info(`Deleting ${enhancedLightsToDelete.length} MapShine enhanced lights`);
+            const enhancedLightsApi = window.MapShine?.enhancedLights;
+            if (enhancedLightsApi) {
+              for (const id of enhancedLightsToDelete) {
+                try {
+                  await enhancedLightsApi.remove(id);
+                } catch (err) {
+                  log.error(`Failed to delete MapShine Enhanced Light ${id}`, err);
+                }
+              }
+            }
           }
 
           this.clearSelection();
@@ -3582,7 +4198,8 @@ export class InteractionManager {
    * Select an object
    * @param {THREE.Sprite} sprite 
    */
-  selectObject(sprite) {
+  selectObject(sprite, opts = undefined) {
+    const showRingUI = opts?.showRingUI !== false;
     let id;
     let isToken = false;
     if (sprite.userData.tokenDoc) {
@@ -3605,6 +4222,56 @@ export class InteractionManager {
         id = sprite.userData.lightId;
         // TODO: Visual selection for lights
         if (sprite.material) sprite.material.color.set(0x8888ff); // Tint blue
+
+        // Scale bump on selection so it reads clearly.
+        try {
+          const base = sprite?.userData?.baseScale;
+          if (base && Number.isFinite(base.x) && Number.isFinite(base.y)) {
+            sprite.scale.set(base.x * 1.15, base.y * 1.15, base.z ?? 1);
+          }
+        } catch (_) {
+        }
+
+        if (showRingUI) {
+          // Show MapShine light ring UI for Foundry lights.
+          try {
+            const ringUI = window.MapShine?.lightRingUI;
+            if (ringUI && typeof ringUI.show === 'function') {
+              ringUI.show({ type: 'foundry', id: String(id) }, sprite);
+            }
+          } catch (_) {
+          }
+        }
+    } else if (sprite.userData.enhancedLightId) {
+        id = sprite.userData.enhancedLightId;
+        // Visual selection for MapShine enhanced lights
+        if (sprite.material) sprite.material.color.set(0x44aaff); // Tint blue (MapShine color)
+
+        try {
+          const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+          enhancedLightIconManager?.setSelected?.(id, true);
+        } catch (_) {
+        }
+        
+        if (showRingUI) {
+          // Prefer the in-world ring UI over the older inspector panel.
+          try {
+            const ringUI = window.MapShine?.lightRingUI;
+            const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+            const root = enhancedLightIconManager?.getRootObject?.(id) || sprite;
+            if (ringUI && typeof ringUI.show === 'function') {
+              ringUI.show({ type: 'enhanced', id: String(id) }, root);
+            }
+          } catch (_) {
+          }
+        }
+
+        // Ensure the legacy inspector stays out of the way.
+        try {
+          const inspector = window.MapShine?.enhancedLightInspector;
+          inspector?.hide?.();
+        } catch (_) {
+        }
     } else {
         return;
     }
@@ -3634,10 +4301,30 @@ export class InteractionManager {
             // Ignore release errors
           }
       }
-      // Check Light
+      // Check Foundry Light
       if (this.lightIconManager && this.lightIconManager.lights.has(id)) {
           const sprite = this.lightIconManager.lights.get(id);
           if (sprite && sprite.material) sprite.material.color.set(0xffffff); // Reset tint
+
+          // Reset scale if we stored a baseScale.
+          try {
+            const base = sprite?.userData?.baseScale;
+            if (base && Number.isFinite(base.x) && Number.isFinite(base.y)) {
+              sprite.scale.set(base.x, base.y, base.z ?? 1);
+            }
+          } catch (_) {
+          }
+      }
+      // Check MapShine Enhanced Light
+      const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+      if (enhancedLightIconManager && enhancedLightIconManager.lights.has(id)) {
+          const sprite = enhancedLightIconManager.lights.get(id);
+          if (sprite && sprite.material) sprite.material.color.set(0x44aaff); // Reset to MapShine blue
+
+          try {
+            enhancedLightIconManager?.setSelected?.(id, false);
+          } catch (_) {
+          }
       }
       // Check Wall
       if (this.wallManager.walls.has(id)) {
@@ -3645,6 +4332,19 @@ export class InteractionManager {
       }
     }
     this.selection.clear();
+    
+    // Hide ring UI when clearing selection.
+    try {
+      const ringUI = window.MapShine?.lightRingUI;
+      ringUI?.hide?.();
+    } catch (_) {
+    }
+
+    // Hide enhanced light inspector when clearing selection
+    const inspector = window.MapShine?.enhancedLightInspector;
+    if (inspector) {
+      inspector.hide();
+    }
     
     // NOTE: Vision/fog updates are now handled by MapShine's world-space fog
     // effect, which also consults Foundry's controlled tokens for GM bypass.

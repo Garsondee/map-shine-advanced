@@ -145,7 +145,11 @@ export class LightIconManager {
       sprite.position.set(worldPos.x, worldPos.y, 0);
       sprite.scale.set(size, size, 1);
 
-      sprite.userData = { lightId: doc.id, type: 'ambientLight' };
+      sprite.userData = {
+        lightId: doc.id,
+        type: 'ambientLight',
+        baseScale: { x: size, y: size, z: 1 }
+      };
 
       this.group.add(sprite);
       this.lights.set(doc.id, sprite);

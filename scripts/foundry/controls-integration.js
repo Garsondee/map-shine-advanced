@@ -86,6 +86,38 @@ export class ControlsIntegration {
   }
 
   /**
+   * When ControlsIntegration is active, canvas-replacement's legacy input mode
+   * arbiter does not run its light-gizmo visibility updates. We replicate the
+   * minimum needed behavior here so Three.js light handles work in Gameplay mode.
+   * @private
+   */
+  _updateThreeGizmoVisibility() {
+    try {
+      if (!canvas?.ready) return;
+
+      const isMapMakerMode = !!window.MapShine?.isMapMakerMode;
+
+      const layerName = canvas.activeLayer?.name || canvas.activeLayer?.constructor?.name || '';
+      const showLighting = (layerName === 'LightingLayer' || layerName === 'lighting') && !isMapMakerMode;
+
+      const tool = ui?.controls?.tool?.name ?? game.activeTool;
+      const mapshineToolActive = tool === 'map-shine-enhanced-light';
+
+      const lightIconManager = window.MapShine?.lightIconManager;
+      if (lightIconManager?.setVisibility) {
+        lightIconManager.setVisibility(showLighting && !mapshineToolActive);
+      }
+
+      const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+      if (enhancedLightIconManager?.setVisibility) {
+        enhancedLightIconManager.setVisibility(showLighting);
+      }
+    } catch (_) {
+      // Ignore - visibility is best-effort
+    }
+  }
+
+  /**
    * One-shot camera sync is now handled by CameraFollower.initialize()
    * This method is kept for backwards compatibility but does nothing.
    * @private
@@ -132,6 +164,9 @@ export class ControlsIntegration {
       // Initial state sync
       this.layerVisibility.update();
       this.inputRouter.autoUpdate();
+
+      // Keep Three.js light gizmos in sync with the active layer/tool.
+      this._updateThreeGizmoVisibility();
       
       // Camera sync is now handled by CameraFollower
       // which was initialized before ControlsIntegration in canvas-replacement.js
@@ -556,34 +591,39 @@ export class ControlsIntegration {
     // Layer activation - update visibility and input routing
     const activateHookId = Hooks.on('activateCanvasLayer', (layer) => {
       if (this.state !== IntegrationState.ACTIVE) return;
-      
-      try {
-        log.debug(`Layer activated: ${layer?.constructor?.name || 'unknown'}`);
-        this.layerVisibility?.update();
-        this.inputRouter?.autoUpdate();
-        this._updateWallsVisualState();
-      } catch (error) {
-        this.handleError(error, 'activateCanvasLayer');
-      }
+
+      // Defer to next tick to ensure Foundry has finished switching layers/tools.
+      setTimeout(() => {
+        try {
+          log.debug(`Layer activated: ${layer?.constructor?.name || 'unknown'}`);
+          this.layerVisibility?.update();
+          this.inputRouter?.autoUpdate();
+          this._updateWallsVisualState();
+          this._updateThreeGizmoVisibility();
+        } catch (error) {
+          this.handleError(error, 'activateCanvasLayer');
+        }
+      }, 0);
     });
     this._hookIds.push({ name: 'activateCanvasLayer', id: activateHookId });
-    
+
     // Scene controls render - update input routing after tool changes
     const controlsHookId = Hooks.on('renderSceneControls', () => {
       if (this.state !== IntegrationState.ACTIVE) return;
-      
+
       // Defer to next tick to ensure Foundry has finished updating
       setTimeout(() => {
         try {
           this.inputRouter?.autoUpdate();
           this._updateWallsVisualState();
+          this._updateThreeGizmoVisibility();
         } catch (error) {
           this.handleError(error, 'renderSceneControls');
         }
       }, 0);
     });
     this._hookIds.push({ name: 'renderSceneControls', id: controlsHookId });
-    
+
     // Canvas pan - CameraFollower handles sync automatically each frame
     // This hook is kept for potential future use but does nothing currently
     const panHookId = Hooks.on('canvasPan', (canvas, position) => {
@@ -591,19 +631,19 @@ export class ControlsIntegration {
       // CameraFollower reads PIXI state each frame - no explicit sync needed
     });
     this._hookIds.push({ name: 'canvasPan', id: panHookId });
-    
+
     // Sidebar collapse - CameraFollower will pick up the change next frame
     const sidebarHookId = Hooks.on('collapseSidebar', () => {
       if (this.state !== IntegrationState.ACTIVE) return;
       // CameraFollower reads PIXI state each frame - no explicit sync needed
     });
     this._hookIds.push({ name: 'collapseSidebar', id: sidebarHookId });
-    
+
     // Token refresh - make PIXI token transparent (Three.js renders visuals)
     // This ensures newly created or refreshed tokens stay interactive but invisible
     const refreshTokenHookId = Hooks.on('refreshToken', (token) => {
       if (this.state !== IntegrationState.ACTIVE) return;
-      
+
       try {
         // Make token transparent but keep it interactive
         this.makeTokenTransparent(token);
@@ -671,11 +711,11 @@ export class ControlsIntegration {
       }, 50);
     });
     this._hookIds.push({ name: 'createWall', id: createWallHookId });
-    
+
     // Also handle createToken to catch initial creation
     const createTokenHookId = Hooks.on('createToken', (doc, options, userId) => {
       if (this.state !== IntegrationState.ACTIVE) return;
-      
+
       // Defer to allow Foundry to create the token object
       setTimeout(() => {
         try {
@@ -690,46 +730,6 @@ export class ControlsIntegration {
     });
     this._hookIds.push({ name: 'createToken', id: createTokenHookId });
 
-    const renderAppHookId = Hooks.on('renderApplication', (app) => {
-      if (this.state !== IntegrationState.ACTIVE) return;
-      try {
-        const cls = app?.constructor?.name;
-        if (cls !== 'SceneConfig') return;
-        setTimeout(() => {
-          try {
-            this.configurePixiOverlay();
-            this.layerVisibility?.update();
-            this.inputRouter?.autoUpdate();
-          } catch (e) {
-            this.handleError(e, 'renderApplication(SceneConfig)');
-          }
-        }, 0);
-      } catch (e) {
-        this.handleError(e, 'renderApplication');
-      }
-    });
-    this._hookIds.push({ name: 'renderApplication', id: renderAppHookId });
-
-    const closeAppHookId = Hooks.on('closeApplication', (app) => {
-      if (this.state !== IntegrationState.ACTIVE) return;
-      try {
-        const cls = app?.constructor?.name;
-        if (cls !== 'SceneConfig') return;
-        setTimeout(() => {
-          try {
-            this.configurePixiOverlay();
-            this.layerVisibility?.update();
-            this.inputRouter?.autoUpdate();
-          } catch (e) {
-            this.handleError(e, 'closeApplication(SceneConfig)');
-          }
-        }, 0);
-      } catch (e) {
-        this.handleError(e, 'closeApplication');
-      }
-    });
-    this._hookIds.push({ name: 'closeApplication', id: closeAppHookId });
-    
     log.debug(`Registered ${this._hookIds.length} integration hooks`);
   }
   
@@ -797,6 +797,7 @@ export class ControlsIntegration {
         this.configurePixiOverlay();
         this.layerVisibility?.update();
         this.inputRouter?.autoUpdate();
+        this._updateThreeGizmoVisibility();
         this.cameraSync?.forceFullSync();
         
         this.transition(IntegrationState.ACTIVE, 'Recovery successful');

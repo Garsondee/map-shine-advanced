@@ -72,6 +72,21 @@ export class InteractionManager {
       forceSheet: false,
     };
 
+    // Light translate gizmo (X/Y + center handle). This solves the UX issue where the
+    // LightRingUI blocks dragging the light icon by giving an offset handle that sits
+    // outside the ring's DOM hit area.
+    this._lightTranslate = {
+      group: null,
+      handles: [],
+      active: false,
+      selected: null, // {type:'foundry'|'enhanced', id:string}
+      axis: 'xy',
+      // Re-open ring after drag (so it follows the new position)
+      reopenRingAfterDrag: null, // {type:'foundry'|'enhanced', id:string}
+      // Screen-space offset from the light center (kept stable via /zoom)
+      offsetPx: { x: 140, y: 0 }
+    };
+
     this._pendingTokenMoveCleanup = {
       timeoutId: null,
       tokenIds: new Set()
@@ -163,6 +178,7 @@ export class InteractionManager {
     this.createLightPreview();
     this.createEnhancedLightPreview();
     this.createMapPointPreview();
+    this._createLightTranslateGizmo();
     
     /** @type {string|null} ID of currently hovered token */
     this.hoveredTokenId = null;
@@ -2098,6 +2114,96 @@ export class InteractionManager {
         this.updateMouseCoords(event);
         this.raycaster.setFromCamera(this.mouse, camera);
 
+        // 0. Light translate gizmo (red/green axes + center). This is intentionally
+        // checked early so it can override other interaction.
+        if (event.button === 0 && this._lightTranslate?.group?.visible && Array.isArray(this._lightTranslate.handles)) {
+          const prevMask = this.raycaster.layers?.mask;
+          try {
+            // Ensure we can hit-test overlay-layer gizmos.
+            this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
+            this.raycaster.layers.enable(0);
+          } catch (_) {
+          }
+
+          const hits = this.raycaster.intersectObjects(this._lightTranslate.handles, false);
+
+          try {
+            if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask;
+          } catch (_) {
+          }
+
+          if (hits && hits.length > 0) {
+            const hit = hits[0];
+            const obj = hit.object;
+            const axis = String(obj?.userData?.axis || 'xy');
+            const lightId = obj?.userData?.lightId;
+            const enhancedLightId = obj?.userData?.enhancedLightId;
+
+            const sel = enhancedLightId
+              ? { type: 'enhanced', id: String(enhancedLightId) }
+              : (lightId ? { type: 'foundry', id: String(lightId) } : null);
+
+            if (sel && this._canEditSelectedLight(sel)) {
+              // Keep selection consistent.
+              if (!this.selection.has(sel.id)) {
+                this.clearSelection();
+
+                // Select the corresponding icon/root object so visuals are correct.
+                try {
+                  if (sel.type === 'enhanced') {
+                    const mgr = window.MapShine?.enhancedLightIconManager;
+                    const sprite = mgr?.lights?.get?.(sel.id);
+                    if (sprite) this.selectObject(sprite, { showRingUI: false });
+                  } else {
+                    const sprite = this.lightIconManager?.lights?.get?.(sel.id);
+                    if (sprite) this.selectObject(sprite, { showRingUI: false });
+                  }
+                } catch (_) {
+                }
+              }
+
+              // Hide ring while dragging; we'll reopen after commit at the new position.
+              try {
+                const ringUI = window.MapShine?.lightRingUI;
+                ringUI?.hide?.();
+              } catch (_) {
+              }
+              this._lightTranslate.reopenRingAfterDrag = sel;
+
+              // Start drag at the LIGHT CENTER so offset is stable (not the handle hitpoint).
+              const center = this._getSelectedLightWorldPos(sel);
+              if (center) {
+                this.startDrag(obj, center);
+                this.dragState.mode = 'lightTranslate';
+                this.dragState.axis = axis;
+
+                // Enhanced light gizmo: hide radius ring during drag.
+                try {
+                  if (sel.type === 'enhanced') {
+                    const mgr = window.MapShine?.enhancedLightIconManager;
+                    mgr?.setDragging?.(sel.id, true);
+                  }
+                } catch (_) {
+                }
+
+                // Disable camera controls while dragging.
+                if (window.MapShine?.cameraController) {
+                  window.MapShine.cameraController.enabled = false;
+                }
+
+                try {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  event.stopImmediatePropagation?.();
+                } catch (_) {
+                }
+
+                return;
+              }
+            }
+          }
+        }
+
         log.debug('onPointerDown mouse NDC', {
           ndcX: this.mouse.x,
           ndcY: this.mouse.y
@@ -2574,6 +2680,235 @@ export class InteractionManager {
       if (canvas.tokens?.hud?.rendered && canvas.tokens.hud.object) {
           this.updateHUDPosition();
       }
+
+      this._updateLightTranslateGizmo();
+  }
+
+  _getEffectiveZoom() {
+    try {
+      const z0 = window.MapShine?.sceneComposer?.currentZoom;
+      if (typeof z0 === 'number' && isFinite(z0) && z0 > 0) return z0;
+    } catch (_) {
+    }
+
+    try {
+      const z1 = canvas?.stage?.scale?.x;
+      if (typeof z1 === 'number' && isFinite(z1) && z1 > 0) return z1;
+    } catch (_) {
+    }
+
+    return 1;
+  }
+
+  _createLightTranslateGizmo() {
+    try {
+      const THREE = window.THREE;
+      if (!THREE || !this.sceneComposer?.scene) return;
+
+      const g = new THREE.Group();
+      g.name = 'LightTranslateGizmo';
+      g.visible = false;
+      g.renderOrder = 10010;
+      g.layers.set(OVERLAY_THREE_LAYER);
+      // Also enable layer 0 so the default raycaster mask can hit the group descendants.
+      g.layers.enable(0);
+
+      const depthTest = false;
+      const depthWrite = false;
+
+      const matX = new THREE.MeshBasicMaterial({ color: 0xff3333, transparent: true, opacity: 0.95, depthTest, depthWrite });
+      const matY = new THREE.MeshBasicMaterial({ color: 0x33ff33, transparent: true, opacity: 0.95, depthTest, depthWrite });
+      const matC = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, depthTest, depthWrite });
+      matX.toneMapped = false;
+      matY.toneMapped = false;
+      matC.toneMapped = false;
+
+      // Sizes are in world pixels (ground plane is pixel space).
+      const axisLen = 58;
+      const axisThick = 6;
+      const centerSize = 14;
+      const arrowLen = 14;
+      const arrowRadius = 7;
+
+      // X axis handle (red)
+      const geoX = new THREE.BoxGeometry(axisLen, axisThick, 0.5);
+      const xHandle = new THREE.Mesh(geoX, matX);
+      xHandle.position.set(axisLen * 0.5, 0, 0);
+      xHandle.renderOrder = 10011;
+      xHandle.layers.set(OVERLAY_THREE_LAYER);
+      // Also enable layer 0 so the default raycaster mask can hit it.
+      xHandle.layers.enable(0);
+      xHandle.userData = { type: 'lightTranslateHandle', axis: 'x' };
+
+      // X arrowhead
+      const xArrowGeo = new THREE.ConeGeometry(arrowRadius, arrowLen, 16);
+      const xArrow = new THREE.Mesh(xArrowGeo, matX);
+      // Cone points +Y by default; rotate to +X.
+      xArrow.rotation.z = -Math.PI / 2;
+      xArrow.position.set(axisLen + arrowLen * 0.5, 0, 0);
+      xArrow.renderOrder = 10012;
+      xArrow.layers.set(OVERLAY_THREE_LAYER);
+      xArrow.layers.enable(0);
+      xArrow.userData = { type: 'lightTranslateHandle', axis: 'x' };
+
+      // Y axis handle (green)
+      const geoY = new THREE.BoxGeometry(axisThick, axisLen, 0.5);
+      const yHandle = new THREE.Mesh(geoY, matY);
+      yHandle.position.set(0, axisLen * 0.5, 0);
+      yHandle.renderOrder = 10011;
+      yHandle.layers.set(OVERLAY_THREE_LAYER);
+      yHandle.layers.enable(0);
+      yHandle.userData = { type: 'lightTranslateHandle', axis: 'y' };
+
+      // Y arrowhead
+      const yArrowGeo = new THREE.ConeGeometry(arrowRadius, arrowLen, 16);
+      const yArrow = new THREE.Mesh(yArrowGeo, matY);
+      yArrow.position.set(0, axisLen + arrowLen * 0.5, 0);
+      yArrow.renderOrder = 10012;
+      yArrow.layers.set(OVERLAY_THREE_LAYER);
+      yArrow.layers.enable(0);
+      yArrow.userData = { type: 'lightTranslateHandle', axis: 'y' };
+
+      // Center handle (free move)
+      const geoC = new THREE.BoxGeometry(centerSize, centerSize, 0.5);
+      const cHandle = new THREE.Mesh(geoC, matC);
+      cHandle.position.set(0, 0, 0);
+      cHandle.renderOrder = 10012;
+      cHandle.layers.set(OVERLAY_THREE_LAYER);
+      cHandle.layers.enable(0);
+      cHandle.userData = { type: 'lightTranslateHandle', axis: 'xy' };
+
+      g.add(xHandle);
+      g.add(xArrow);
+      g.add(yHandle);
+      g.add(yArrow);
+      g.add(cHandle);
+
+      this.sceneComposer.scene.add(g);
+      this._lightTranslate.group = g;
+      this._lightTranslate.handles = [xHandle, xArrow, yHandle, yArrow, cHandle];
+    } catch (_) {
+    }
+  }
+
+  _getSelectedLight() {
+    try {
+      if (!this.selection || this.selection.size !== 1) return null;
+      const id = Array.from(this.selection)[0];
+
+      const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+      if (enhancedLightIconManager?.lights?.has?.(id)) {
+        return { type: 'enhanced', id: String(id) };
+      }
+
+      if (this.lightIconManager?.lights?.has?.(id)) {
+        return { type: 'foundry', id: String(id) };
+      }
+    } catch (_) {
+    }
+    return null;
+  }
+
+  _canEditSelectedLight(sel) {
+    try {
+      if (!sel) return false;
+      if (sel.type === 'enhanced') return !!game.user.isGM;
+      if (sel.type === 'foundry') {
+        const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
+        return !!(doc && doc.canUserModify(game.user, 'update'));
+      }
+    } catch (_) {
+    }
+    return false;
+  }
+
+  _getSelectedLightWorldPos(sel) {
+    try {
+      const THREE = window.THREE;
+      if (!THREE) return null;
+      const v = new THREE.Vector3();
+
+      if (sel.type === 'enhanced') {
+        const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+        const root = enhancedLightIconManager?.getRootObject?.(sel.id);
+        if (root?.getWorldPosition) {
+          root.getWorldPosition(v);
+          return v;
+        }
+      }
+
+      if (sel.type === 'foundry') {
+        const sprite = this.lightIconManager?.lights?.get?.(sel.id);
+        if (sprite?.getWorldPosition) {
+          sprite.getWorldPosition(v);
+          return v;
+        }
+
+        const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
+        if (doc) {
+          const w = Coordinates.toWorld(doc.x, doc.y);
+          v.set(w.x, w.y, 0);
+          return v;
+        }
+      }
+    } catch (_) {
+    }
+    return null;
+  }
+
+  _updateLightTranslateGizmo() {
+    try {
+      const g = this._lightTranslate?.group;
+      if (!g) return;
+
+      // Never show while dragging anything.
+      if (this.dragState?.active) {
+        g.visible = false;
+        return;
+      }
+
+      const sel = this._getSelectedLight();
+      this._lightTranslate.selected = sel;
+      if (!sel || !this._canEditSelectedLight(sel)) {
+        g.visible = false;
+        return;
+      }
+
+      const pos = this._getSelectedLightWorldPos(sel);
+      if (!pos) {
+        g.visible = false;
+        return;
+      }
+
+      const groundZ = this.sceneComposer?.groundZ ?? 0;
+      const z = groundZ + 4.05;
+
+      const zoom = this._getEffectiveZoom();
+      const dx = (this._lightTranslate.offsetPx.x || 0) / zoom;
+      const dy = -(this._lightTranslate.offsetPx.y || 0) / zoom;
+
+      g.position.set(pos.x + dx, pos.y + dy, z);
+
+      // Keep gizmo a stable screen size.
+      const s = 1 / zoom;
+      g.scale.set(s, s, 1);
+
+      // Stamp the current selected light onto handle userData for ray-hit routing.
+      for (const h of this._lightTranslate.handles) {
+        if (!h?.userData) h.userData = {};
+        h.userData.lightType = sel.type;
+        if (sel.type === 'foundry') {
+          h.userData.lightId = sel.id;
+          h.userData.enhancedLightId = undefined;
+        } else {
+          h.userData.enhancedLightId = sel.id;
+          h.userData.lightId = undefined;
+        }
+      }
+
+      g.visible = true;
+    } catch (_) {
+    }
   }
 
   /**
@@ -2710,6 +3045,63 @@ export class InteractionManager {
     this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
 
     let hitFound = false;
+
+    // 0. Light translate gizmo hover (cursor affordance)
+    try {
+      if (this._lightTranslate?.group?.visible && Array.isArray(this._lightTranslate.handles) && this._lightTranslate.handles.length) {
+        const prevMask = this.raycaster.layers?.mask;
+        try {
+          // Allow hover hit-testing against overlay-layer gizmos.
+          this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
+          this.raycaster.layers.enable(0);
+        } catch (_) {
+        }
+
+        const hits = this.raycaster.intersectObjects(this._lightTranslate.handles, false);
+
+        try {
+          if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask;
+        } catch (_) {
+        }
+
+        if (hits && hits.length > 0) {
+          // Clear any lingering hover states so visuals/cursor don't fight.
+          try {
+            if (this.hoveredWallId) {
+              this.wallManager?.setHighlight?.(this.hoveredWallId, false);
+              this.hoveredWallId = null;
+            }
+          } catch (_) {
+          }
+          try {
+            if (this.hoveredTokenId) {
+              this.tokenManager?.setHover?.(this.hoveredTokenId, false);
+              this.hoveredTokenId = null;
+            }
+          } catch (_) {
+          }
+          try {
+            if (this.hoveredOverheadTileId && this.tileManager?.setTileHoverHidden) {
+              this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
+              this.hoveredOverheadTileId = null;
+            }
+          } catch (_) {
+          }
+          try {
+            if (this.hoveringTreeCanopy) {
+              const treeEffect = (window.MapShine || window.mapShine)?.treeEffect;
+              treeEffect?.setHoverHidden?.(false);
+              this.hoveringTreeCanopy = false;
+            }
+          } catch (_) {
+          }
+
+          this.canvasElement.style.cursor = 'pointer';
+          return;
+        }
+      }
+    } catch (_) {
+    }
 
     // 1. Check Walls (Priority for "near line" detection)
     // Only check walls if we are GM or on Wall Layer? Usually useful for everyone if interactive, but editing is GM.
@@ -3269,8 +3661,15 @@ export class InteractionManager {
           const leaderInitial = this.dragState.initialPositions.get(this.dragState.leaderId);
           if (!leaderInitial) return;
 
-          const deltaX = x - leaderInitial.x;
-          const deltaY = y - leaderInitial.y;
+          let deltaX = x - leaderInitial.x;
+          let deltaY = y - leaderInitial.y;
+
+          // Axis constraint for light translate gizmo.
+          if (this.dragState.mode === 'lightTranslate') {
+            const axis = String(this.dragState.axis || 'xy');
+            if (axis === 'x') deltaY = 0;
+            else if (axis === 'y') deltaX = 0;
+          }
 
           // Apply delta to ALL previews
           for (const [id, preview] of this.dragState.previews) {
@@ -4024,6 +4423,8 @@ export class InteractionManager {
           // Cleanup
           this.dragState.active = false;
           this.dragState.object = null;
+          this.dragState.mode = null;
+          this.dragState.axis = null;
 
           // For tokens: keep the ghost preview around until the authoritative update
           // actually starts moving the token (matching Foundry).
@@ -4045,6 +4446,26 @@ export class InteractionManager {
             // Lights and other drags should clean up immediately.
             this._clearAllDragPreviews();
           }
+
+          // Reopen ring UI after a translate drag so it stays attached to the moved light.
+          try {
+            const sel = this._lightTranslate?.reopenRingAfterDrag;
+            this._lightTranslate.reopenRingAfterDrag = null;
+            if (sel && (sel.type === 'foundry' || sel.type === 'enhanced')) {
+              const ringUI = window.MapShine?.lightRingUI;
+              if (ringUI?.show) {
+                if (sel.type === 'foundry') {
+                  const sprite = this.lightIconManager?.lights?.get?.(sel.id) || null;
+                  ringUI.show({ type: 'foundry', id: String(sel.id) }, sprite);
+                } else {
+                  const mgr = window.MapShine?.enhancedLightIconManager;
+                  const root = mgr?.getRootObject?.(sel.id) || mgr?.lights?.get?.(sel.id) || null;
+                  ringUI.show({ type: 'enhanced', id: String(sel.id) }, root);
+                }
+              }
+            }
+          } catch (_) {
+          }
           
           // If updates failed, we might want to revert, but for now we just clear state.
           // The previous code had revert logic, but it's complex with mixed types.
@@ -4053,6 +4474,8 @@ export class InteractionManager {
         } else {
             this.dragState.active = false;
             this.dragState.object = null;
+            this.dragState.mode = null;
+            this.dragState.axis = null;
 
             // Drag canceled / no movement: restore enhanced light gizmo visibility.
             try {
@@ -4068,6 +4491,26 @@ export class InteractionManager {
             }
 
             this._clearAllDragPreviews();
+
+            // If this was a translate attempt (but no movement), restore ring state.
+            try {
+              const sel = this._lightTranslate?.reopenRingAfterDrag;
+              this._lightTranslate.reopenRingAfterDrag = null;
+              if (sel && (sel.type === 'foundry' || sel.type === 'enhanced')) {
+                const ringUI = window.MapShine?.lightRingUI;
+                if (ringUI?.show) {
+                  if (sel.type === 'foundry') {
+                    const sprite = this.lightIconManager?.lights?.get?.(sel.id) || null;
+                    ringUI.show({ type: 'foundry', id: String(sel.id) }, sprite);
+                  } else {
+                    const mgr = window.MapShine?.enhancedLightIconManager;
+                    const root = mgr?.getRootObject?.(sel.id) || mgr?.lights?.get?.(sel.id) || null;
+                    ringUI.show({ type: 'enhanced', id: String(sel.id) }, root);
+                  }
+                }
+              }
+            } catch (_) {
+            }
         }
     } catch (error) {
         log.error('Error in onPointerUp:', error);

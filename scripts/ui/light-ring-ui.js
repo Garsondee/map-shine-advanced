@@ -186,10 +186,41 @@ export class LightRingUI {
 
     // Allow this overlay to receive pointer events without triggering selection/camera.
     // Use a small set of captures; wheel should not be stolen.
+    const _stopOverlayEvent = (e) => {
+      let isFormControl = false;
+      try {
+        const t = e?.target;
+        if (t instanceof Element) {
+          isFormControl = !!t.closest('button, a, input, select, textarea, label');
+        }
+      } catch (_) {
+      }
+
+      // Always stop propagation so this overlay never interacts with the scene.
+      try {
+        e.stopPropagation();
+      } catch (_) {
+      }
+      try {
+        e.stopImmediatePropagation?.();
+      } catch (_) {
+      }
+
+      // IMPORTANT:
+      // Do not call preventDefault for real form controls. Preventing default on
+      // pointer events can break checkbox toggles and input focus.
+      if (!isFormControl) {
+        try {
+          e.preventDefault();
+        } catch (_) {
+        }
+      }
+    };
+
     for (const type of ['pointerdown', 'mousedown', 'click', 'dblclick']) {
-      container.addEventListener(type, _stopAndPrevent);
+      container.addEventListener(type, _stopOverlayEvent);
     }
-    container.addEventListener('contextmenu', _stopAndPrevent);
+    container.addEventListener('contextmenu', _stopOverlayEvent);
 
     // IMPORTANT: keep the overlay handle itself 0x0 so OverlayUIManager's
     // translate(-50%, -50%) doesn't shift as children (details panel) change size.
@@ -256,7 +287,7 @@ export class LightRingUI {
       position: absolute;
       left: ${this._uiSize + 4}px;
       top: 0px;
-      width: 260px;
+      width: 420px;
       padding: 10px 10px;
       border-radius: 10px;
       background: rgba(20, 20, 24, 0.92);
@@ -270,8 +301,10 @@ export class LightRingUI {
       display: none;
     `);
 
-    details.addEventListener('pointerdown', _stopAndPrevent);
-    details.addEventListener('click', _stopAndPrevent);
+    // Stop events from reaching the canvas, but never prevent default for form controls
+    // (so checkboxes and inputs remain usable).
+    details.addEventListener('pointerdown', _stopOverlayEvent);
+    details.addEventListener('click', _stopOverlayEvent);
 
     const header = _createEl('div', `
       display: flex;
@@ -337,25 +370,42 @@ export class LightRingUI {
     const body = _createEl('div', `
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      align-items: center;
+      column-gap: 12px;
+      row-gap: 10px;
+      align-items: start;
     `);
 
-    const addField = (key, labelText, inputEl, storeEl = undefined) => {
+    const addField = (key, labelText, inputEl, storeEl = undefined, opts = undefined) => {
+      const field = _createEl('div', `
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        min-width: 0;
+      `);
+
       const rowLabel = _createEl('div', `
         font-size: 11px;
         opacity: 0.86;
+        line-height: 1.1;
       `);
       rowLabel.textContent = labelText;
 
       const wrap = _createEl('div', `
         display: flex;
-        justify-content: flex-end;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
       `);
       wrap.appendChild(inputEl);
 
-      body.appendChild(rowLabel);
-      body.appendChild(wrap);
+      field.appendChild(rowLabel);
+      field.appendChild(wrap);
+
+      if (opts?.span === 2) {
+        field.style.gridColumn = '1 / -1';
+      }
+
+      body.appendChild(field);
       this.fields.set(key, storeEl || inputEl);
     };
 
@@ -363,7 +413,7 @@ export class LightRingUI {
       const input = /** @type {HTMLInputElement} */(document.createElement('input'));
       input.type = type;
       input.style.width = '100%';
-      input.style.maxWidth = '135px';
+      input.style.maxWidth = '100%';
       input.style.height = '24px';
       input.style.borderRadius = '7px';
       input.style.border = '1px solid rgba(255,255,255,0.14)';
@@ -374,10 +424,27 @@ export class LightRingUI {
       return input;
     };
 
+    const makeCheckbox = () => {
+      const input = makeInput('checkbox');
+      // Reset text-input styling so checkboxes are aligned and clickable.
+      input.style.width = '18px';
+      input.style.maxWidth = '18px';
+      input.style.height = '18px';
+      input.style.margin = '0';
+      input.style.padding = '0';
+      input.style.borderRadius = '0';
+      input.style.border = 'none';
+      input.style.background = 'transparent';
+      input.style.appearance = 'auto';
+      input.style.webkitAppearance = 'auto';
+      input.style.flex = '0 0 auto';
+      return input;
+    };
+
     const makeSelect = () => {
       const sel = /** @type {HTMLSelectElement} */(document.createElement('select'));
       sel.style.width = '100%';
-      sel.style.maxWidth = '135px';
+      sel.style.maxWidth = '100%';
       sel.style.height = '24px';
       sel.style.borderRadius = '7px';
       sel.style.border = '1px solid rgba(255,255,255,0.14)';
@@ -389,15 +456,9 @@ export class LightRingUI {
     };
 
     // Details fields. These should cover most editing needs without opening the dialog.
-    const enabled = makeInput('checkbox');
-    enabled.style.width = '16px';
-    enabled.style.maxWidth = '16px';
-    enabled.style.height = '16px';
+    const enabled = makeCheckbox();
 
-    const negative = makeInput('checkbox');
-    negative.style.width = '16px';
-    negative.style.maxWidth = '16px';
-    negative.style.height = '16px';
+    const negative = makeCheckbox();
 
     const dim = makeInput('number');
     dim.step = '1';
@@ -434,10 +495,34 @@ export class LightRingUI {
     const animIntensity = makeInput('number');
     animIntensity.step = '0.5';
 
-    const cookieEnabled = makeInput('checkbox');
-    cookieEnabled.style.width = '16px';
-    cookieEnabled.style.maxWidth = '16px';
-    cookieEnabled.style.height = '16px';
+    const outputGain = makeInput('number');
+    outputGain.step = '0.05';
+    outputGain.min = '0';
+
+    const outerWeight = makeInput('number');
+    outerWeight.step = '0.05';
+    outerWeight.min = '0';
+
+    const innerWeight = makeInput('number');
+    innerWeight.step = '0.05';
+    innerWeight.min = '0';
+
+    const cookieEnabled = makeCheckbox();
+
+    const cookieStrength = makeInput('number');
+    cookieStrength.step = '0.1';
+    cookieStrength.min = '0';
+
+    const cookieContrast = makeInput('number');
+    cookieContrast.step = '0.1';
+    cookieContrast.min = '0';
+
+    const cookieGamma = makeInput('number');
+    cookieGamma.step = '0.1';
+    cookieGamma.min = '0.1';
+
+    const cookieInvert = makeCheckbox();
+    const cookieColorize = makeCheckbox();
 
     const cookieTexture = makeInput('text');
     cookieTexture.placeholder = this._defaultCookieTexture;
@@ -504,13 +589,21 @@ export class LightRingUI {
     addField('attenuation', 'Atten', attenuation);
     addField('luminosity', 'Lum', luminosity);
     addField('color', 'Color', color);
-    addField('animType', 'Anim Type', animType);
+    addField('animType', 'Anim Type', animType, undefined, { span: 2 });
     addField('animSpeed', 'Anim Speed', animSpeed);
     addField('animIntensity', 'Anim Int', animIntensity);
+    addField('outputGain', 'Output Gain', outputGain);
+    addField('outerWeight', 'Outer Weight', outerWeight);
+    addField('innerWeight', 'Inner Weight', innerWeight);
     addField('cookieEnabled', 'Cookie On', cookieEnabled);
-    addField('cookieTexture', 'Cookie', cookieWrap, cookieTexture);
+    addField('cookieTexture', 'Cookie', cookieWrap, cookieTexture, { span: 2 });
     addField('cookieRotation', 'Cookie Rot', cookieRotation);
     addField('cookieScale', 'Cookie Scale', cookieScale);
+    addField('cookieStrength', 'Cookie Strength', cookieStrength);
+    addField('cookieContrast', 'Cookie Contrast', cookieContrast);
+    addField('cookieGamma', 'Cookie Gamma', cookieGamma);
+    addField('cookieInvert', 'Cookie Invert', cookieInvert);
+    addField('cookieColorize', 'Cookie Colorize', cookieColorize);
     addField('targetLayers', 'Layers', targetLayers);
 
     details.appendChild(body);
@@ -968,6 +1061,15 @@ export class LightRingUI {
           update.color = String(el instanceof HTMLInputElement ? el.value : '#ffffff');
         } else if (key === 'targetLayers') {
           update.targetLayers = String(el instanceof HTMLSelectElement ? el.value : 'both');
+        } else if (key === 'outputGain') {
+          const v = parseFloat(el.value);
+          if (Number.isFinite(v)) update.outputGain = v;
+        } else if (key === 'outerWeight') {
+          const v = parseFloat(el.value);
+          if (Number.isFinite(v)) update.outerWeight = v;
+        } else if (key === 'innerWeight') {
+          const v = parseFloat(el.value);
+          if (Number.isFinite(v)) update.innerWeight = v;
         } else if (key === 'cookieEnabled') {
           update.cookieEnabled = !!(el instanceof HTMLInputElement ? el.checked : false);
         } else if (key === 'cookieTexture') {
@@ -979,6 +1081,19 @@ export class LightRingUI {
         } else if (key === 'cookieScale') {
           const v = parseFloat(el.value);
           if (Number.isFinite(v)) update.cookieScale = v;
+        } else if (key === 'cookieStrength') {
+          const v = parseFloat(el.value);
+          if (Number.isFinite(v)) update.cookieStrength = v;
+        } else if (key === 'cookieContrast') {
+          const v = parseFloat(el.value);
+          if (Number.isFinite(v)) update.cookieContrast = v;
+        } else if (key === 'cookieGamma') {
+          const v = parseFloat(el.value);
+          if (Number.isFinite(v)) update.cookieGamma = v;
+        } else if (key === 'cookieInvert') {
+          update.cookieInvert = !!(el instanceof HTMLInputElement ? el.checked : false);
+        } else if (key === 'cookieColorize') {
+          update.cookieColorize = !!(el instanceof HTMLInputElement ? el.checked : false);
         } else if (key === 'animType' || key === 'animSpeed' || key === 'animIntensity') {
           const cur = await api.get(id);
           const a0 = (cur && typeof cur.animation === 'object') ? cur.animation : {};
@@ -1017,7 +1132,11 @@ export class LightRingUI {
           update.config = { color: String(el.value || '#ffffff') };
         } else if (key === 'targetLayers') {
           // No direct Foundry equivalent.
+        } else if (key === 'outputGain' || key === 'outerWeight' || key === 'innerWeight') {
+          // Not supported by Foundry base lights; ignore.
         } else if (key === 'cookieTexture' || key === 'cookieRotation' || key === 'cookieScale') {
+          // Not supported by Foundry base lights; ignore.
+        } else if (key === 'cookieStrength' || key === 'cookieContrast' || key === 'cookieGamma' || key === 'cookieInvert' || key === 'cookieColorize') {
           // Not supported by Foundry base lights; ignore.
         } else if (key === 'animType' || key === 'animSpeed' || key === 'animIntensity') {
           const curAnim = doc.config?.animation ?? {};
@@ -1197,10 +1316,18 @@ export class LightRingUI {
         this._setField('animType', anim.type ?? '');
         this._setField('animSpeed', anim.speed ?? 5);
         this._setField('animIntensity', anim.intensity ?? 5);
+        this._setField('outputGain', data.outputGain ?? 1.0);
+        this._setField('outerWeight', data.outerWeight ?? 0.5);
+        this._setField('innerWeight', data.innerWeight ?? 0.5);
         this._setField('cookieEnabled', data.cookieEnabled === true);
         this._setField('cookieTexture', data.cookieTexture ?? this._defaultCookieTexture);
         this._setField('cookieRotation', data.cookieRotation ?? 0);
         this._setField('cookieScale', data.cookieScale ?? 1);
+        this._setField('cookieStrength', data.cookieStrength ?? 1.0);
+        this._setField('cookieContrast', data.cookieContrast ?? 1.0);
+        this._setField('cookieGamma', data.cookieGamma ?? 1.0);
+        this._setField('cookieInvert', data.cookieInvert === true);
+        this._setField('cookieColorize', data.cookieColorize === true);
         this._setField('targetLayers', data.targetLayers ?? 'both');
 
         this._updateAllMeters();
@@ -1245,6 +1372,14 @@ export class LightRingUI {
         this._setField('cookieTexture', '');
         this._setField('cookieRotation', 0);
         this._setField('cookieScale', 1);
+        this._setField('outputGain', 1.0);
+        this._setField('outerWeight', 0.5);
+        this._setField('innerWeight', 0.5);
+        this._setField('cookieStrength', 1.0);
+        this._setField('cookieContrast', 1.0);
+        this._setField('cookieGamma', 1.0);
+        this._setField('cookieInvert', false);
+        this._setField('cookieColorize', false);
         this._setField('targetLayers', 'both');
 
         this._updateAllMeters();

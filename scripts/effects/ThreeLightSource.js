@@ -159,6 +159,9 @@ export class ThreeLightSource {
         uBrightRadius: { value: 0 }, // Core radius (bright)
         uAlpha: { value: 0.5 },
         uAttenuation: { value: 0.5 },
+        uOutputGain: { value: 1.0 },
+        uOuterWeight: { value: 0.5 },
+        uInnerWeight: { value: 0.5 },
         uTime: { value: 0 },
         uAnimType: { value: 0 },
         uAnimIntensity: { value: 0 },
@@ -171,6 +174,11 @@ export class ThreeLightSource {
         uHasCookie: { value: 0.0 },
         uCookieRotation: { value: 0.0 },
         uCookieScale: { value: 1.0 },
+        uCookieStrength: { value: 1.0 },
+        uCookieContrast: { value: 1.0 },
+        uCookieGamma: { value: 1.0 },
+        uCookieInvert: { value: 0.0 },
+        uCookieColorize: { value: 0.0 },
       },
       vertexShader: `
         varying vec2 vPos;
@@ -186,6 +194,9 @@ export class ThreeLightSource {
         uniform float uBrightRadius;
         uniform float uAlpha;
         uniform float uAttenuation;
+        uniform float uOutputGain;
+        uniform float uOuterWeight;
+        uniform float uInnerWeight;
         uniform float uTime;
         uniform float uAnimType;
         uniform float uAnimIntensity;
@@ -197,6 +208,11 @@ export class ThreeLightSource {
         uniform float uHasCookie;
         uniform float uCookieRotation;
         uniform float uCookieScale;
+        uniform float uCookieStrength;
+        uniform float uCookieContrast;
+        uniform float uCookieGamma;
+        uniform float uCookieInvert;
+        uniform float uCookieColorize;
 
         float hash21(vec2 p) {
           p = fract(p * vec2(123.34, 456.21));
@@ -387,7 +403,10 @@ export class ThreeLightSource {
           // Base Dim Layer = 0.5 intensity.
           // Bright Boost Layer = 0.5 intensity.
           // Total Center Intensity = 1.0.
-          float intensity = (0.5 * outerAlpha) + (0.5 * innerAlpha);
+          float wOuter = max(uOuterWeight, 0.0);
+          float wInner = max(uInnerWeight, 0.0);
+          float wSum = max(0.0001, wOuter + wInner);
+          float intensity = (wOuter * outerAlpha + wInner * innerAlpha) / wSum;
 
           // Shader-driven animation factor and potential color shift.
           float animAlphaMul = 1.0;
@@ -404,9 +423,28 @@ export class ThreeLightSource {
 
             vec4 cookie = texture2D(tCookie, cuv);
             float cookieLuma = dot(cookie.rgb, vec3(0.2126, 0.7152, 0.0722));
-            cookieFactor = (cookie.a > 0.001) ? cookie.a : cookieLuma;
-            cookieFactor = clamp(cookieFactor, 0.0, 1.0);
-            outColor *= cookie.rgb;
+            float cookieMask = (cookie.a > 0.001) ? cookie.a : cookieLuma;
+            cookieMask = clamp(cookieMask, 0.0, 1.0);
+
+            // Cookie shaping controls:
+            // - strength: pushes dark areas darker so the pattern remains readable even
+            //   when the light is bright/saturated.
+            // - contrast/gamma: remap the cookie luminance.
+            // - invert: flip cookie mask.
+            float cm = cookieMask;
+            if (uCookieInvert > 0.5) cm = 1.0 - cm;
+            float cg = max(uCookieGamma, 0.0001);
+            cm = pow(clamp(cm, 0.0, 1.0), 1.0 / cg);
+            float cc = max(uCookieContrast, 0.0);
+            cm = clamp((cm - 0.5) * cc + 0.5, 0.0, 1.0);
+
+            float cs = max(uCookieStrength, 0.0);
+            cookieFactor = clamp(1.0 - (1.0 - cm) * cs, 0.0, 1.0);
+
+            // Optional cookie colorization (tint). Most gobos should be monochrome.
+            if (uCookieColorize > 0.5) {
+              outColor *= cookie.rgb;
+            }
           }
 
           // 1 = wave, 2 = fairy, 3 = chroma, 4 = energy field, 5 = bewitching wave
@@ -485,7 +523,7 @@ ${FoundryLightingShaderChunks.pulse}
           }
 
           // Final Alpha calculation
-          float alpha = intensity * uAlpha * uIntensity * animAlphaMul * cookieFactor;
+          float alpha = intensity * uAlpha * uIntensity * animAlphaMul * cookieFactor * max(uOutputGain, 0.0);
 
           float fairyBoost = (uAnimType > 1.5 && uAnimType < 2.5) ? 3.0 : 1.0;
           alpha *= fairyBoost;
@@ -569,6 +607,19 @@ ${FoundryLightingShaderChunks.pulse}
     this.material.uniforms.uBrightRadius.value = brightPxInset;
     this.material.uniforms.uAlpha.value = config.alpha ?? 0.5;
 
+    // Additional shaping/boost controls
+    // These are MapShine-only controls (Foundry documents won't set them), so we
+    // apply safe defaults when absent.
+    if (this.material.uniforms.uOutputGain) {
+      this.material.uniforms.uOutputGain.value = Number.isFinite(config.outputGain) ? config.outputGain : 1.0;
+    }
+    if (this.material.uniforms.uOuterWeight) {
+      this.material.uniforms.uOuterWeight.value = Number.isFinite(config.outerWeight) ? config.outerWeight : 0.5;
+    }
+    if (this.material.uniforms.uInnerWeight) {
+      this.material.uniforms.uInnerWeight.value = Number.isFinite(config.innerWeight) ? config.innerWeight : 0.5;
+    }
+
     // --- FOUNDRY ATTENUATION MATH ---
     // Maps user input [0,1] to a non-linear shader curve [0,1]
     const rawAttenuation = config.attenuation ?? 0.5;
@@ -625,8 +676,19 @@ ${FoundryLightingShaderChunks.pulse}
     const scale0 = Number.isFinite(config?.cookieScale) ? config.cookieScale : 1.0;
     const scale = (scale0 > 0) ? scale0 : 1.0;
 
+    const strength = Number.isFinite(config?.cookieStrength) ? config.cookieStrength : 1.0;
+    const contrast = Number.isFinite(config?.cookieContrast) ? config.cookieContrast : 1.0;
+    const gamma = Number.isFinite(config?.cookieGamma) ? config.cookieGamma : 1.0;
+    const invert = config?.cookieInvert === true;
+    const colorize = config?.cookieColorize === true;
+
     u.uCookieRotation.value = rotation;
     u.uCookieScale.value = scale;
+    u.uCookieStrength.value = strength;
+    u.uCookieContrast.value = contrast;
+    u.uCookieGamma.value = gamma;
+    u.uCookieInvert.value = invert ? 1.0 : 0.0;
+    u.uCookieColorize.value = colorize ? 1.0 : 0.0;
 
     if (!path) {
       this._cookiePath = null;

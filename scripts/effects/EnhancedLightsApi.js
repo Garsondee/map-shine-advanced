@@ -12,6 +12,15 @@ const FLAG_KEY = 'enhancedLights';
 const CURRENT_VERSION = 1;
 
 const DEFAULT_COOKIE_TEXTURE = `modules/${MODULE_ID}/assets/kenney assets/light_01.png`;
+const DEFAULT_COOKIE_STRENGTH = 1.0;
+const DEFAULT_COOKIE_CONTRAST = 1.0;
+const DEFAULT_COOKIE_GAMMA = 1.0;
+const DEFAULT_COOKIE_INVERT = false;
+const DEFAULT_COOKIE_COLORIZE = false;
+
+const DEFAULT_OUTPUT_GAIN = 1.0;
+const DEFAULT_OUTER_WEIGHT = 0.5;
+const DEFAULT_INNER_WEIGHT = 0.5;
 
 function _randomId() {
   try {
@@ -173,13 +182,23 @@ export function createEnhancedLightsApi() {
         isStatic: data.isStatic === true,
         castShadows: data.castShadows === true,
         shadowQuality: data.shadowQuality,
+        // Additional shaping/boost controls
+        outputGain: Number.isFinite(data.outputGain) ? data.outputGain : DEFAULT_OUTPUT_GAIN,
+        outerWeight: Number.isFinite(data.outerWeight) ? data.outerWeight : DEFAULT_OUTER_WEIGHT,
+        innerWeight: Number.isFinite(data.innerWeight) ? data.innerWeight : DEFAULT_INNER_WEIGHT,
         // Cookie/gobo texture support
         cookieEnabled: data.cookieEnabled === true,
         cookieTexture: (typeof data.cookieTexture === 'string' && data.cookieTexture)
           ? data.cookieTexture
           : DEFAULT_COOKIE_TEXTURE,
         cookieRotation: Number.isFinite(data.cookieRotation) ? data.cookieRotation : undefined,
-        cookieScale: Number.isFinite(data.cookieScale) ? data.cookieScale : undefined
+        cookieScale: Number.isFinite(data.cookieScale) ? data.cookieScale : undefined,
+        // Cookie shaping controls (boost visibility)
+        cookieStrength: Number.isFinite(data.cookieStrength) ? data.cookieStrength : DEFAULT_COOKIE_STRENGTH,
+        cookieContrast: Number.isFinite(data.cookieContrast) ? data.cookieContrast : DEFAULT_COOKIE_CONTRAST,
+        cookieGamma: Number.isFinite(data.cookieGamma) ? data.cookieGamma : DEFAULT_COOKIE_GAMMA,
+        cookieInvert: data.cookieInvert === true,
+        cookieColorize: data.cookieColorize === true
       };
 
       lights.push(light);
@@ -221,14 +240,49 @@ export function createEnhancedLightsApi() {
       const normalizedCookieEnabled = (changes.cookieEnabled !== undefined)
         ? (changes.cookieEnabled === true)
         : (cur.cookieEnabled === true);
+
+      const normalizedOutputGain = (changes.outputGain !== undefined)
+        ? (Number.isFinite(changes.outputGain) ? changes.outputGain : DEFAULT_OUTPUT_GAIN)
+        : (Number.isFinite(cur.outputGain) ? cur.outputGain : DEFAULT_OUTPUT_GAIN);
+      const normalizedOuterWeight = (changes.outerWeight !== undefined)
+        ? (Number.isFinite(changes.outerWeight) ? changes.outerWeight : DEFAULT_OUTER_WEIGHT)
+        : (Number.isFinite(cur.outerWeight) ? cur.outerWeight : DEFAULT_OUTER_WEIGHT);
+      const normalizedInnerWeight = (changes.innerWeight !== undefined)
+        ? (Number.isFinite(changes.innerWeight) ? changes.innerWeight : DEFAULT_INNER_WEIGHT)
+        : (Number.isFinite(cur.innerWeight) ? cur.innerWeight : DEFAULT_INNER_WEIGHT);
+
+      const normalizedCookieStrength = (changes.cookieStrength !== undefined)
+        ? (Number.isFinite(changes.cookieStrength) ? changes.cookieStrength : DEFAULT_COOKIE_STRENGTH)
+        : (Number.isFinite(cur.cookieStrength) ? cur.cookieStrength : DEFAULT_COOKIE_STRENGTH);
+      const normalizedCookieContrast = (changes.cookieContrast !== undefined)
+        ? (Number.isFinite(changes.cookieContrast) ? changes.cookieContrast : DEFAULT_COOKIE_CONTRAST)
+        : (Number.isFinite(cur.cookieContrast) ? cur.cookieContrast : DEFAULT_COOKIE_CONTRAST);
+      const normalizedCookieGamma = (changes.cookieGamma !== undefined)
+        ? (Number.isFinite(changes.cookieGamma) ? changes.cookieGamma : DEFAULT_COOKIE_GAMMA)
+        : (Number.isFinite(cur.cookieGamma) ? cur.cookieGamma : DEFAULT_COOKIE_GAMMA);
+      const normalizedCookieInvert = (changes.cookieInvert !== undefined)
+        ? (changes.cookieInvert === true)
+        : (cur.cookieInvert === true);
+      const normalizedCookieColorize = (changes.cookieColorize !== undefined)
+        ? (changes.cookieColorize === true)
+        : (cur.cookieColorize === true);
+
       const next = {
         ...cur,
         ...changes,
         targetLayers: normalizedTargetLayers,
+        outputGain: normalizedOutputGain,
+        outerWeight: normalizedOuterWeight,
+        innerWeight: normalizedInnerWeight,
         cookieEnabled: normalizedCookieEnabled,
         cookieTexture: normalizedCookieTexture,
         cookieRotation: normalizedCookieRotation,
         cookieScale: normalizedCookieScale,
+        cookieStrength: normalizedCookieStrength,
+        cookieContrast: normalizedCookieContrast,
+        cookieGamma: normalizedCookieGamma,
+        cookieInvert: normalizedCookieInvert,
+        cookieColorize: normalizedCookieColorize,
         transform: {
           ...(cur.transform || {}),
           ...(changes.transform || {}),

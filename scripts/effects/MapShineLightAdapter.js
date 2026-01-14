@@ -15,6 +15,14 @@ const DEFAULT_FLAG_KEYS = [
   'threeNativeLights'
 ];
 
+const DEFAULT_COOKIE_STRENGTH = 1.0;
+const DEFAULT_COOKIE_CONTRAST = 1.0;
+const DEFAULT_COOKIE_GAMMA = 1.0;
+
+const DEFAULT_OUTPUT_GAIN = 1.0;
+const DEFAULT_OUTER_WEIGHT = 0.5;
+const DEFAULT_INNER_WEIGHT = 0.5;
+
 function _getFlag(scene, key) {
   if (!scene || !key) return undefined;
 
@@ -149,11 +157,33 @@ export class MapShineLightAdapter {
         targetLayers: (src.targetLayers === 'ground' || src.targetLayers === 'overhead' || src.targetLayers === 'both')
           ? src.targetLayers
           : 'both',
+        // Additional shaping/boost controls
+        outputGain: (src.outputGain !== undefined)
+          ? _asFiniteNumber(src.outputGain, DEFAULT_OUTPUT_GAIN)
+          : DEFAULT_OUTPUT_GAIN,
+        outerWeight: (src.outerWeight !== undefined)
+          ? _asFiniteNumber(src.outerWeight, DEFAULT_OUTER_WEIGHT)
+          : DEFAULT_OUTER_WEIGHT,
+        innerWeight: (src.innerWeight !== undefined)
+          ? _asFiniteNumber(src.innerWeight, DEFAULT_INNER_WEIGHT)
+          : DEFAULT_INNER_WEIGHT,
         // Cookie/gobo texture support
         cookieEnabled: src.cookieEnabled === true,
         cookieTexture: (typeof src.cookieTexture === 'string' && src.cookieTexture) ? src.cookieTexture : undefined,
         cookieRotation: (src.cookieRotation !== undefined) ? _asFiniteNumber(src.cookieRotation, undefined) : undefined,
         cookieScale: (src.cookieScale !== undefined) ? _asFiniteNumber(src.cookieScale, undefined) : undefined,
+        // Cookie shaping controls (boost visibility)
+        cookieStrength: (src.cookieStrength !== undefined)
+          ? _asFiniteNumber(src.cookieStrength, DEFAULT_COOKIE_STRENGTH)
+          : DEFAULT_COOKIE_STRENGTH,
+        cookieContrast: (src.cookieContrast !== undefined)
+          ? _asFiniteNumber(src.cookieContrast, DEFAULT_COOKIE_CONTRAST)
+          : DEFAULT_COOKIE_CONTRAST,
+        cookieGamma: (src.cookieGamma !== undefined)
+          ? _asFiniteNumber(src.cookieGamma, DEFAULT_COOKIE_GAMMA)
+          : DEFAULT_COOKIE_GAMMA,
+        cookieInvert: src.cookieInvert === true,
+        cookieColorize: src.cookieColorize === true,
         activationRange: (src.activationRange !== undefined) ? _asFiniteNumber(src.activationRange, undefined) : undefined,
         zMin: (src.zMin !== undefined) ? _asFiniteNumber(src.zMin, undefined) : undefined,
         zMax: (src.zMax !== undefined) ? _asFiniteNumber(src.zMax, undefined) : undefined,

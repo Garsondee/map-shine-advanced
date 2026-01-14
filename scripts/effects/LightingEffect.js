@@ -722,10 +722,18 @@ export class LightingEffect extends EffectBase {
         alpha: entity.photometry?.alpha ?? 0.5,
         luminosity: entity.photometry?.luminosity ?? 0.5,
         color: entity.color,
+        outputGain: entity.outputGain,
+        outerWeight: entity.outerWeight,
+        innerWeight: entity.innerWeight,
         cookieEnabled: entity.cookieEnabled === true,
         cookieTexture: entity.cookieTexture,
         cookieRotation: entity.cookieRotation,
         cookieScale: entity.cookieScale,
+        cookieStrength: entity.cookieStrength,
+        cookieContrast: entity.cookieContrast,
+        cookieGamma: entity.cookieGamma,
+        cookieInvert: entity.cookieInvert === true,
+        cookieColorize: entity.cookieColorize === true,
         animation: (a && typeof a === 'object')
           ? {
               type: a.type ?? null,

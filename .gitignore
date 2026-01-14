@@ -1,7 +1,8 @@
 # Ignore the Foundry source code bundle
-foundryvttsourcecode/
-node_modules/
-gamesystemsourcecode/
-oldmapshinemodulecode/
-module-staging/
-dist/
+foundryvttsourcecode
+node_modules
+gamesystemsourcecode
+oldmapshinemodulecode
+module-staging
+dist
+oldmapshinemodulecode

@@ -616,7 +616,9 @@ ${FoundryLightingShaderChunks.pulse}
     const u = this.material?.uniforms;
     if (!u) return;
 
-    const path = (typeof config?.cookieTexture === 'string' && config.cookieTexture.trim())
+    const enabled = config?.cookieEnabled === true;
+
+    const path = (enabled && typeof config?.cookieTexture === 'string' && config.cookieTexture.trim())
       ? config.cookieTexture.trim()
       : null;
     const rotation = Number.isFinite(config?.cookieRotation) ? config.cookieRotation : 0.0;
@@ -764,9 +766,41 @@ ${FoundryLightingShaderChunks.pulse}
     const prevLayersMask = this.mesh?.layers?.mask;
     const prevRenderOrder = this.mesh?.renderOrder;
 
+    // Defensive: ensure we never have more than one mesh for the same light in the
+    // light scene. Duplicate additive meshes present as "brightness doubling".
+    try {
+      if (prevMeshParent?.children && typeof prevMeshParent.remove === 'function') {
+        for (let i = prevMeshParent.children.length - 1; i >= 0; i--) {
+          const c = prevMeshParent.children[i];
+          if (c && c !== this.mesh && c.userData?.lightId === this.id) {
+            prevMeshParent.remove(c);
+            try { c.geometry?.dispose?.(); } catch (_) {}
+          }
+        }
+      }
+    } catch (_) {
+    }
+
     if (this.mesh) {
-      this.mesh.geometry.dispose();
-      this.mesh.removeFromParent();
+      try {
+        this.mesh.geometry?.dispose?.();
+      } catch (_) {
+      }
+
+      // Remove explicitly from the previous parent. In some edge cases (hot reload,
+      // external scene manipulation) `removeFromParent()` can fail to detach the
+      // mesh that is still held by a parent reference we captured earlier.
+      try {
+        if (prevMeshParent && typeof prevMeshParent.remove === 'function') {
+          prevMeshParent.remove(this.mesh);
+        }
+      } catch (_) {
+      }
+
+      try {
+        this.mesh.removeFromParent();
+      } catch (_) {
+      }
     }
 
     let geometry;
@@ -894,6 +928,8 @@ ${FoundryLightingShaderChunks.pulse}
     }
 
     this.mesh = new THREE.Mesh(geometry, this.material);
+    this.mesh.userData = this.mesh.userData || {};
+    this.mesh.userData.lightId = this.id;
     // Position at ground plane Z level (passed from updateData)
     this.mesh.position.set(worldX, worldY, lightZ);
   

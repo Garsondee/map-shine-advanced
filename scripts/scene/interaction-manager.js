@@ -83,6 +83,10 @@ export class InteractionManager {
       el: null
     };
 
+    // Throttle enhanced light LOS-polygon refresh during drag.
+    this._enhancedLightDragRadiusHz = 15;
+    this._enhancedLightDragLastRadiusRefreshMs = 0;
+
     // Wall Draw state
     this.wallDraw = {
       active: false,
@@ -283,8 +287,28 @@ export class InteractionManager {
       ? path.filter((n) => n instanceof Element)
       : (target instanceof Element ? [target] : []);
 
+    // IMPORTANT:
+    // We listen on `window` in capture phase, so `event.target` can be unreliable in some
+    // cases (e.g. when other frameworks intercept/re-target events). To ensure we never
+    // treat UI clicks/drags (FilePicker, Dialogs, etc.) as scene interaction, also inspect
+    // the actual element stack under the pointer.
+    try {
+      const cx = event?.clientX;
+      const cy = event?.clientY;
+      if (Number.isFinite(cx) && Number.isFinite(cy) && typeof document?.elementsFromPoint === 'function') {
+        const stack = document.elementsFromPoint(cx, cy);
+        if (Array.isArray(stack) && stack.length) {
+          for (const el of stack) {
+            if (el instanceof Element) elements.push(el);
+          }
+        }
+      }
+    } catch (_) {
+    }
+
     for (const el of elements) {
-      if (el.closest('.window-app, .app.window-app, #ui, #sidebar, #navigation')) return true;
+      // Foundry VTT UI windows/dialogs (v11/v12+)
+      if (el.closest('.window-app, .app.window-app, .application, dialog, .dialog, .filepicker, #ui, #sidebar, #navigation')) return true;
       if (el.closest('button, a, input, select, textarea, label')) return true;
 
       if (el.closest('#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-loading-overlay')) return true;
@@ -1484,6 +1508,15 @@ export class InteractionManager {
           preview.position.z = (preview.position.z ?? 0) + 0.01;
           preview.renderOrder = 9998;
 
+          // Preserve radius metadata for LOS refresh (clone should copy userData, but be explicit).
+          try {
+            if (originalRoot?.userData && Object.prototype.hasOwnProperty.call(originalRoot.userData, 'radiusPixels')) {
+              preview.userData = preview.userData || {};
+              preview.userData.radiusPixels = originalRoot.userData.radiusPixels;
+            }
+          } catch (_) {
+          }
+
           if (original.material) {
               preview.material = original.material.clone();
               preview.material.opacity = 0.5;
@@ -1527,19 +1560,25 @@ export class InteractionManager {
           // Make materials semi-transparent and render on top.
           preview.traverse?.((obj) => {
             try {
-              // Hide the radius gizmo in the drag preview. The LOS-based polygon
-              // does not update during drag, and the fill obscures the scene.
-              if (obj?.userData?.type === 'enhancedLightRadiusFill' || obj?.userData?.type === 'enhancedLightRadiusBorder') {
-                obj.visible = false;
-                return;
-              }
-
               if (obj?.material) {
                 obj.material = obj.material.clone();
-                obj.material.opacity = 0.5;
                 obj.material.transparent = true;
                 obj.material.depthTest = false;
                 obj.material.depthWrite = false;
+
+                // IMPORTANT: Do not render any radius fill in the preview clone.
+                // Even a small opacity produces a white "wash" that reads as
+                // the light getting brighter only while dragging.
+                if (obj?.userData?.type === 'enhancedLightRadiusFill') {
+                  obj.material.opacity = 0.0;
+                  obj.visible = false;
+                } else if (obj?.userData?.type === 'enhancedLightRadiusBorder') {
+                  // Keep outline neutral + constant.
+                  obj.material.opacity = 0.35;
+                } else {
+                  // Icon and any other helper meshes.
+                  obj.material.opacity = 0.8;
+                }
               }
             } catch (_) {
             }
@@ -1739,20 +1778,6 @@ export class InteractionManager {
       
       if (window.MapShine?.cameraController) {
         window.MapShine.cameraController.enabled = false;
-      }
-
-      // Enhanced lights: hide the LOS-based radius gizmo while dragging.
-      // The polygon does not update in real-time, so keeping it visible looks incorrect.
-      try {
-        const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
-        if (enhancedLightIconManager && this.selection && this.selection.size > 0) {
-          for (const sid of this.selection) {
-            if (enhancedLightIconManager.lights?.has?.(sid)) {
-              enhancedLightIconManager.setDragging?.(sid, true);
-            }
-          }
-        }
-      } catch (_) {
       }
   }
 
@@ -2997,6 +3022,9 @@ export class InteractionManager {
 
         // Case 0.25: Light Placement Drag
         if (this.lightPlacement.active) {
+             // If the pointer is currently over UI (dialogs/filepickers), never update the
+             // scene-side placement preview.
+             if (this._isEventFromUI(event)) return;
              this.updateMouseCoords(event);
              const targetZ = this.lightPlacement.start?.z ?? (this.sceneComposer?.groundZ ?? 0);
              const worldPos = this.viewportToWorld(event.clientX, event.clientY, targetZ);
@@ -3020,6 +3048,9 @@ export class InteractionManager {
 
         // Case 0.26: MapShine Enhanced Light Placement Drag
         if (this.enhancedLightPlacement.active) {
+             // If the pointer is currently over UI (dialogs/filepickers), never update the
+             // scene-side placement preview.
+             if (this._isEventFromUI(event)) return;
              this.updateMouseCoords(event);
              const targetZ = this.enhancedLightPlacement.start?.z ?? (this.sceneComposer?.groundZ ?? 0);
              const worldPos = this.viewportToWorld(event.clientX, event.clientY, targetZ);
@@ -3247,7 +3278,154 @@ export class InteractionManager {
             if (initialPos) {
               preview.position.x = initialPos.x + deltaX;
               preview.position.y = initialPos.y + deltaY;
+            } 
+          }
+
+          // Enhanced lights: recompute the LOS-clipped radius polygon at ~15hz while dragging.
+          // This lets the user see the true end-state shape while moving the light.
+          try {
+            if (isEnhancedLightDrag) {
+              const enhancedLightIconManager2 = window.MapShine?.enhancedLightIconManager;
+              const lightingEffect = window.MapShine?.lightingEffect;
+              const hz = Math.max(1, Number(this._enhancedLightDragRadiusHz) || 90);
+              const intervalMs = 1000 / hz;
+              const nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+              if (enhancedLightIconManager2 && (nowMs - (this._enhancedLightDragLastRadiusRefreshMs || 0)) >= intervalMs) {
+                this._enhancedLightDragLastRadiusRefreshMs = nowMs;
+
+                for (const [pid, p] of this.dragState.previews) {
+                  if (enhancedLightIconManager2.lights?.has?.(pid)) {
+                    enhancedLightIconManager2.refreshRadiusGeometry?.(p);
+
+                    // Also update the actual MapShine light contribution while dragging so the
+                    // user sees the true lighting result in real time.
+                    try {
+                      const src = lightingEffect?.mapshineLights?.get?.(`mapshine:${pid}`);
+                      if (src?.document) {
+                        // Diagnostics: if the light appears to get ~2x brighter while dragging,
+                        // the most likely causes are:
+                        // 1) duplicate additive meshes for the same light (double contribution)
+                        // 2) the shader uniforms changing unexpectedly during drag updates
+                        // We only log when an anomaly is detected, and rate-limit logs.
+                        const dbgNow = nowMs;
+                        const dbgKey = `mapshine:${pid}`;
+                        if (!this._enhancedLightDragDebug) this._enhancedLightDragDebug = new Map();
+                        const dbg = this._enhancedLightDragDebug.get(dbgKey) || { lastLogMs: -Infinity };
+
+                        let before = null;
+                        try {
+                          const u = src.material?.uniforms;
+                          if (u) {
+                            before = {
+                              brightness: u.uBrightness?.value,
+                              alpha: u.uAlpha?.value,
+                              intensity: u.uIntensity?.value
+                            };
+                          }
+                        } catch (_) {
+                        }
+
+                        const foundryPos = Coordinates.toFoundry(p.position.x, p.position.y);
+                        // IMPORTANT: Do not create a new doc object here.
+                        // Re-creating the document can subtly change which fields are present
+                        // (and therefore perceived brightness). We only want to move the light.
+                        src.document.x = foundryPos.x;
+                        src.document.y = foundryPos.y;
+                        // Force rebuild so the wall-clipped polygon updates with position.
+                        src.updateData?.(src.document, true);
+
+                        try {
+                          // Mitigation: if we ever end up with duplicate meshes for the same light
+                          // in the light scene, brightness will roughly double due to additive blending.
+                          // Enforce that only src.mesh remains.
+                          try {
+                            if (src.mesh) {
+                              src.mesh.userData = src.mesh.userData || {};
+                              src.mesh.userData.lightId = src.id;
+                            }
+
+                            const sceneParent = lightingEffect?.lightScene;
+                            if (sceneParent?.children && Array.isArray(sceneParent.children) && typeof sceneParent.remove === 'function') {
+                              let found = 0;
+                              for (let i = sceneParent.children.length - 1; i >= 0; i--) {
+                                const c = sceneParent.children[i];
+                                // Match either by our explicit tag OR by material identity.
+                                // Material identity is important for legacy/orphan meshes which
+                                // may have been created before we started tagging userData.lightId.
+                                const isThisLight = (c?.userData?.lightId === src.id) || (c?.material === src.material);
+                                if (!isThisLight) continue;
+                                found++;
+
+                                // Keep the currently tracked mesh; remove any others.
+                                if (c !== src.mesh) {
+                                  sceneParent.remove(c);
+                                  try { c.geometry?.dispose?.(); } catch (_) {}
+                                }
+                              }
+                            }
+                          } catch (_) {
+                          }
+
+                          // Check for duplicate meshes under the light scene.
+                          const parent = src.mesh?.parent ?? lightingEffect?.lightScene;
+                          let dupeCount = 0;
+                          if (parent?.children && Array.isArray(parent.children)) {
+                            for (let i = 0; i < parent.children.length; i++) {
+                              const c = parent.children[i];
+                              const isThisLight = (c?.userData?.lightId === src.id) || (c?.material === src.material);
+                              if (isThisLight) dupeCount++;
+                            }
+                          }
+
+                          // Check for uniform drift.
+                          const u2 = src.material?.uniforms;
+                          const after = u2 ? {
+                            brightness: u2.uBrightness?.value,
+                            alpha: u2.uAlpha?.value,
+                            intensity: u2.uIntensity?.value
+                          } : null;
+
+                          const changed = !!(
+                            before && after &&
+                            ((Number.isFinite(before.brightness) && Number.isFinite(after.brightness) && Math.abs(before.brightness - after.brightness) > 1e-4) ||
+                             (Number.isFinite(before.alpha) && Number.isFinite(after.alpha) && Math.abs(before.alpha - after.alpha) > 1e-4) ||
+                             (Number.isFinite(before.intensity) && Number.isFinite(after.intensity) && Math.abs(before.intensity - after.intensity) > 1e-4))
+                          );
+
+                          const hasDupes = dupeCount > 1;
+                          const shouldLog = (hasDupes || changed) && ((dbgNow - (dbg.lastLogMs || 0)) > 350);
+                          if (shouldLog) {
+                            dbg.lastLogMs = dbgNow;
+                            this._enhancedLightDragDebug.set(dbgKey, dbg);
+                            log.warn(
+                              `Enhanced light drag anomaly for ${dbgKey}: ` +
+                              `dupeMeshes=${dupeCount}, ` +
+                              `uBrightness ${before?.brightness} -> ${after?.brightness}, ` +
+                              `uAlpha ${before?.alpha} -> ${after?.alpha}, ` +
+                              `uIntensity ${before?.intensity} -> ${after?.intensity}`
+                            );
+                          }
+
+                          // Last-resort guard: if brightness-related uniforms drift during the
+                          // drag update, restore them so the visual result stays stable.
+                          if (changed && before && u2) {
+                            try {
+                              if (u2.uBrightness && Number.isFinite(before.brightness)) u2.uBrightness.value = before.brightness;
+                              if (u2.uAlpha && Number.isFinite(before.alpha)) u2.uAlpha.value = before.alpha;
+                              if (u2.uIntensity && Number.isFinite(before.intensity)) u2.uIntensity.value = before.intensity;
+                            } catch (_) {
+                            }
+                          }
+                        } catch (_) {
+                        }
+                      }
+                    } catch (_) {
+                    }
+                  }
+                }
+              }
             }
+          } catch (_) {
           }
 
           if (this.dragMeasure.active && this.dragMeasure.el && canvas?.grid?.measurePath) {
@@ -3379,6 +3557,11 @@ export class InteractionManager {
                 window.MapShine.cameraController.enabled = true;
             }
 
+            // If the pointer is released over UI (dialogs/filepickers), never create a light.
+            if (this._isEventFromUI(event)) {
+                return;
+            }
+
             // Calculate final parameters
             const startWorld = this.lightPlacement.start;
             const currentWorld = this.lightPlacement.current;
@@ -3440,6 +3623,11 @@ export class InteractionManager {
             // Re-enable camera controls
             if (window.MapShine?.cameraController) {
                 window.MapShine.cameraController.enabled = true;
+            }
+
+            // If the pointer is released over UI (dialogs/filepickers), never create a light.
+            if (this._isEventFromUI(event)) {
+                return;
             }
 
             // Calculate final parameters

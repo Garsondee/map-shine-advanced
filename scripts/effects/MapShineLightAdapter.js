@@ -150,6 +150,7 @@ export class MapShineLightAdapter {
           ? src.targetLayers
           : 'both',
         // Cookie/gobo texture support
+        cookieEnabled: src.cookieEnabled === true,
         cookieTexture: (typeof src.cookieTexture === 'string' && src.cookieTexture) ? src.cookieTexture : undefined,
         cookieRotation: (src.cookieRotation !== undefined) ? _asFiniteNumber(src.cookieRotation, undefined) : undefined,
         cookieScale: (src.cookieScale !== undefined) ? _asFiniteNumber(src.cookieScale, undefined) : undefined,

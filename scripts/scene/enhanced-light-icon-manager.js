@@ -108,28 +108,15 @@ export class EnhancedLightIconManager {
     const fill = g.userData?.radiusFill;
     const icon = this.lights.get(key);
 
-    try {
-      if (border?.material) {
-        border.material.color.set(selected ? 0xffffff : 0x44aaff);
-        border.material.opacity = selected ? 0.9 : 0.55;
-        border.material.transparent = true;
-      }
-    } catch (_) {
-    }
-
-    try {
-      if (fill?.material) {
-        // Default fill is intentionally subtle to avoid bloom/post-fx.
-        fill.material.opacity = selected ? 0.12 : 0.06;
-        fill.material.transparent = true;
-      }
-    } catch (_) {
-    }
+    // IMPORTANT: Do not modify radius visuals (no tints, no opacity changes).
+    // The radius ring is a neutral indicator only.
+    void border;
+    void fill;
 
     try {
       if (icon?.material) {
-        // White = normal, MapShine blue tint = selected.
-        icon.material.color.set(selected ? 0x44aaff : 0xffffff);
+        // Keep the icon neutral; rely on scale for selection feedback.
+        icon.material.color.set(0xffffff);
         icon.material.opacity = 1.0;
         icon.material.transparent = true;
       }
@@ -164,6 +151,65 @@ export class EnhancedLightIconManager {
     // Keep the icon visible for interaction/feedback, but hide the LOS-based radius.
     if (fill) fill.visible = !dragging;
     if (border) border.visible = !dragging;
+  }
+
+  /**
+   * Recompute and rebuild the radius (LOS-clipped) gizmo geometry for a given object.
+   * Designed to support throttled updates while dragging by operating on either:
+   * - the authoritative gizmo group in this manager, or
+   * - a drag preview clone created by InteractionManager.
+   *
+   * @param {THREE.Object3D} rootObject
+   */
+  refreshRadiusGeometry(rootObject) {
+    try {
+      if (!rootObject) return;
+
+      const THREE = window.THREE;
+      const foundryPos = Coordinates.toFoundry(rootObject.position.x, rootObject.position.y);
+      const radiusPixels = Number(rootObject.userData?.radiusPixels);
+      if (!Number.isFinite(radiusPixels) || radiusPixels <= 0) return;
+
+      // Find the fill + border meshes on this object (works for both original + clones).
+      let fill = null;
+      let border = null;
+      rootObject.traverse?.((obj) => {
+        if (!obj?.userData?.type) return;
+        if (obj.userData.type === 'enhancedLightRadiusFill') fill = obj;
+        else if (obj.userData.type === 'enhancedLightRadiusBorder') border = obj;
+      });
+
+      if (!fill || !border) return;
+
+      const localPoly = this._computeLightLocalPolygon(foundryPos.x, foundryPos.y, radiusPixels);
+      let newFillGeometry;
+      if (localPoly && localPoly.length >= 3) {
+        const shape = new THREE.Shape(localPoly);
+        newFillGeometry = new THREE.ShapeGeometry(shape);
+      } else {
+        newFillGeometry = new THREE.CircleGeometry(Math.max(radiusPixels, 0.0001), this._fallbackCircleSegments);
+      }
+
+      const newBorderGeometry = new THREE.EdgesGeometry(newFillGeometry);
+
+      // Swap geometries (dispose old)
+      try {
+        fill.geometry?.dispose?.();
+      } catch (_) {
+      }
+      fill.geometry = newFillGeometry;
+
+      try {
+        border.geometry?.dispose?.();
+      } catch (_) {
+      }
+      border.geometry = newBorderGeometry;
+
+      // Keep these visible when refreshing (drag preview may toggle them).
+      fill.visible = true;
+      border.visible = true;
+    } catch (_) {
+    }
   }
 
   /**
@@ -294,11 +340,11 @@ export class EnhancedLightIconManager {
     lightGroup.position.set(worldPos.x, worldPos.y, 0);
     lightGroup.renderOrder = 9997;
 
-    // Dim-radius fill (blue, faint)
+    // Radius fill must be fully invisible (no tinting / no wash over the scene).
     const fillMat = new THREE.MeshBasicMaterial({
-      color: 0x1166aa,
+      color: 0xffffff,
       transparent: true,
-      opacity: 0.06,
+      opacity: 0.0,
       depthTest: false,
       depthWrite: false
     });
@@ -316,12 +362,13 @@ export class EnhancedLightIconManager {
     fill.position.z = 0;
     fill.renderOrder = 9996;
     fill.userData = { ...(fill.userData || {}), type: 'enhancedLightRadiusFill', enhancedLightId: id };
+    fill.visible = false;
 
     // Dim-radius border
     const borderMat = new THREE.LineBasicMaterial({
-      color: 0x44aaff,
+      color: 0xffffff,
       transparent: true,
-      opacity: 0.55,
+      opacity: 0.35,
       depthTest: false,
       depthWrite: false
     });
@@ -357,7 +404,8 @@ export class EnhancedLightIconManager {
       type: 'mapshineEnhancedLightGizmo',
       radiusFill: fill,
       radiusBorder: border,
-      icon: sprite
+      icon: sprite,
+      radiusPixels
     };
 
     this.group.add(lightGroup);

@@ -163,6 +163,8 @@ export class LightRingUI {
     ];
 
     this._startAngle = -Math.PI / 2; // top
+
+    this._defaultCookieTexture = 'modules/map-shine-advanced/assets/kenney assets/light_01.png';
   }
 
   initialize() {
@@ -339,7 +341,7 @@ export class LightRingUI {
       align-items: center;
     `);
 
-    const addField = (key, labelText, inputEl) => {
+    const addField = (key, labelText, inputEl, storeEl = undefined) => {
       const rowLabel = _createEl('div', `
         font-size: 11px;
         opacity: 0.86;
@@ -354,7 +356,7 @@ export class LightRingUI {
 
       body.appendChild(rowLabel);
       body.appendChild(wrap);
-      this.fields.set(key, inputEl);
+      this.fields.set(key, storeEl || inputEl);
     };
 
     const makeInput = (type) => {
@@ -432,8 +434,56 @@ export class LightRingUI {
     const animIntensity = makeInput('number');
     animIntensity.step = '0.5';
 
+    const cookieEnabled = makeInput('checkbox');
+    cookieEnabled.style.width = '16px';
+    cookieEnabled.style.maxWidth = '16px';
+    cookieEnabled.style.height = '16px';
+
     const cookieTexture = makeInput('text');
-    cookieTexture.placeholder = 'path/to/tex.webp';
+    cookieTexture.placeholder = this._defaultCookieTexture;
+
+    const cookieWrap = _createEl('div', `
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      width: 100%;
+    `);
+    cookieWrap.appendChild(cookieTexture);
+
+    const browseCookie = _createEl('button', `
+      height: 24px;
+      border-radius: 7px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(255,255,255,0.06);
+      color: rgba(255,255,255,0.9);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 0 8px;
+      flex: 0 0 auto;
+    `);
+    browseCookie.textContent = 'Browse';
+    browseCookie.addEventListener('click', async (e) => {
+      _stopAndPrevent(e);
+
+      const filePickerImpl = globalThis.foundry?.applications?.apps?.FilePicker?.implementation;
+      const FilePickerCls = filePickerImpl ?? globalThis.FilePicker;
+      if (!FilePickerCls) {
+        ui?.notifications?.warn?.('FilePicker not available');
+        return;
+      }
+
+      const cur = String(cookieTexture.value || this._defaultCookieTexture || '');
+      const fp = new FilePickerCls({
+        type: 'image',
+        current: cur,
+        callback: async (path) => {
+          cookieTexture.value = String(path || '').trim();
+          this._applyField('cookieTexture', cookieTexture);
+        }
+      });
+      fp.browse();
+    });
+    cookieWrap.appendChild(browseCookie);
 
     const cookieRotation = makeInput('number');
     cookieRotation.step = '5';
@@ -457,7 +507,8 @@ export class LightRingUI {
     addField('animType', 'Anim Type', animType);
     addField('animSpeed', 'Anim Speed', animSpeed);
     addField('animIntensity', 'Anim Int', animIntensity);
-    addField('cookieTexture', 'Cookie', cookieTexture);
+    addField('cookieEnabled', 'Cookie On', cookieEnabled);
+    addField('cookieTexture', 'Cookie', cookieWrap, cookieTexture);
     addField('cookieRotation', 'Cookie Rot', cookieRotation);
     addField('cookieScale', 'Cookie Scale', cookieScale);
     addField('targetLayers', 'Layers', targetLayers);
@@ -668,7 +719,6 @@ export class LightRingUI {
       `);
       b.textContent = text;
       b.addEventListener('pointerdown', _stopAndPrevent, { capture: true });
-      b.addEventListener('click', _stopAndPrevent, { capture: true });
       return b;
     };
 
@@ -918,8 +968,11 @@ export class LightRingUI {
           update.color = String(el instanceof HTMLInputElement ? el.value : '#ffffff');
         } else if (key === 'targetLayers') {
           update.targetLayers = String(el instanceof HTMLSelectElement ? el.value : 'both');
+        } else if (key === 'cookieEnabled') {
+          update.cookieEnabled = !!(el instanceof HTMLInputElement ? el.checked : false);
         } else if (key === 'cookieTexture') {
-          update.cookieTexture = String(el.value || '').trim();
+          const v = String(el.value || '').trim();
+          update.cookieTexture = v || this._defaultCookieTexture;
         } else if (key === 'cookieRotation') {
           const v = parseFloat(el.value);
           if (Number.isFinite(v)) update.cookieRotation = v;
@@ -1144,7 +1197,8 @@ export class LightRingUI {
         this._setField('animType', anim.type ?? '');
         this._setField('animSpeed', anim.speed ?? 5);
         this._setField('animIntensity', anim.intensity ?? 5);
-        this._setField('cookieTexture', data.cookieTexture ?? '');
+        this._setField('cookieEnabled', data.cookieEnabled === true);
+        this._setField('cookieTexture', data.cookieTexture ?? this._defaultCookieTexture);
         this._setField('cookieRotation', data.cookieRotation ?? 0);
         this._setField('cookieScale', data.cookieScale ?? 1);
         this._setField('targetLayers', data.targetLayers ?? 'both');

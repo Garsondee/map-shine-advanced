@@ -11,6 +11,8 @@ const MODULE_ID = 'map-shine-advanced';
 const FLAG_KEY = 'enhancedLights';
 const CURRENT_VERSION = 1;
 
+const DEFAULT_COOKIE_TEXTURE = `modules/${MODULE_ID}/assets/kenney assets/light_01.png`;
+
 function _randomId() {
   try {
     if (foundry?.utils?.randomID) return foundry.utils.randomID();
@@ -172,7 +174,10 @@ export function createEnhancedLightsApi() {
         castShadows: data.castShadows === true,
         shadowQuality: data.shadowQuality,
         // Cookie/gobo texture support
-        cookieTexture: (typeof data.cookieTexture === 'string' && data.cookieTexture) ? data.cookieTexture : undefined,
+        cookieEnabled: data.cookieEnabled === true,
+        cookieTexture: (typeof data.cookieTexture === 'string' && data.cookieTexture)
+          ? data.cookieTexture
+          : DEFAULT_COOKIE_TEXTURE,
         cookieRotation: Number.isFinite(data.cookieRotation) ? data.cookieRotation : undefined,
         cookieScale: Number.isFinite(data.cookieScale) ? data.cookieScale : undefined
       };
@@ -205,18 +210,22 @@ export function createEnhancedLightsApi() {
         : (cur.targetLayers ?? 'both');
 
       const normalizedCookieTexture = (changes.cookieTexture !== undefined)
-        ? ((typeof changes.cookieTexture === 'string' && changes.cookieTexture) ? changes.cookieTexture : undefined)
-        : cur.cookieTexture;
+        ? ((typeof changes.cookieTexture === 'string' && changes.cookieTexture) ? changes.cookieTexture : DEFAULT_COOKIE_TEXTURE)
+        : (cur.cookieTexture ?? DEFAULT_COOKIE_TEXTURE);
       const normalizedCookieRotation = (changes.cookieRotation !== undefined)
         ? (Number.isFinite(changes.cookieRotation) ? changes.cookieRotation : undefined)
         : cur.cookieRotation;
       const normalizedCookieScale = (changes.cookieScale !== undefined)
         ? (Number.isFinite(changes.cookieScale) ? changes.cookieScale : undefined)
         : cur.cookieScale;
+      const normalizedCookieEnabled = (changes.cookieEnabled !== undefined)
+        ? (changes.cookieEnabled === true)
+        : (cur.cookieEnabled === true);
       const next = {
         ...cur,
         ...changes,
         targetLayers: normalizedTargetLayers,
+        cookieEnabled: normalizedCookieEnabled,
         cookieTexture: normalizedCookieTexture,
         cookieRotation: normalizedCookieRotation,
         cookieScale: normalizedCookieScale,

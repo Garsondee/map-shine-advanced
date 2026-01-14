@@ -722,6 +722,7 @@ export class LightingEffect extends EffectBase {
         alpha: entity.photometry?.alpha ?? 0.5,
         luminosity: entity.photometry?.luminosity ?? 0.5,
         color: entity.color,
+        cookieEnabled: entity.cookieEnabled === true,
         cookieTexture: entity.cookieTexture,
         cookieRotation: entity.cookieRotation,
         cookieScale: entity.cookieScale,
@@ -748,6 +749,40 @@ export class LightingEffect extends EffectBase {
       if (!entity?.id) continue;
       const id = `mapshine:${entity.id}`;
       keep.add(id);
+
+      // Respect enabled flag: a disabled MapShine light should contribute nothing.
+      // We actively remove any existing renderables so toggling enabled is immediate.
+      if (entity.enabled === false) {
+        try {
+          if (this.mapshineLights.has(id)) {
+            const ls = this.mapshineLights.get(id);
+            if (ls?.mesh) this.lightScene?.remove(ls.mesh);
+            ls?.dispose?.();
+            this.mapshineLights.delete(id);
+          }
+        } catch (_) {
+        }
+
+        try {
+          if (this.mapshineDarknessSources.has(id)) {
+            const ds = this.mapshineDarknessSources.get(id);
+            if (ds?.mesh) this.darknessScene?.remove(ds.mesh);
+            ds?.dispose?.();
+            this.mapshineDarknessSources.delete(id);
+          }
+        } catch (_) {
+        }
+
+        // Still keep metadata up to date (e.g. targetLayers) if present.
+        const targetLayers = entity.targetLayers || 'both';
+        this._mapshineLightMeta.set(id, {
+          targetLayers,
+          cookieTexture: entity.cookieTexture,
+          cookieRotation: entity.cookieRotation,
+          cookieScale: entity.cookieScale
+        });
+        continue;
+      }
 
       const doc = this._toFoundryLikeDocForMapshineEntity(entity);
 

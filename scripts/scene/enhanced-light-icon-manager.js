@@ -8,8 +8,73 @@ import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { MapShineLightAdapter } from '../effects/MapShineLightAdapter.js';
 import { VisionPolygonComputer } from '../vision/VisionPolygonComputer.js';
+import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
 
 const log = createLogger('EnhancedLightIconManager');
+
+/**
+ * Creates a custom shader material for light icon sprites with a dark outline.
+ * The outline ensures visibility against bright/white backgrounds.
+ * @param {THREE.Texture} texture - The icon texture
+ * @returns {THREE.ShaderMaterial}
+ */
+function createOutlinedSpriteMaterial(texture) {
+  const THREE = window.THREE;
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      map: { value: texture },
+      outlineColor: { value: new THREE.Color(0x222222) },
+      outlineWidth: { value: 0.08 }
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        vec4 mvPosition = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+        vec2 scale = vec2(
+          length(modelMatrix[0].xyz),
+          length(modelMatrix[1].xyz)
+        );
+        mvPosition.xy += position.xy * scale;
+        gl_Position = projectionMatrix * mvPosition;
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D map;
+      uniform vec3 outlineColor;
+      uniform float outlineWidth;
+      varying vec2 vUv;
+
+      void main() {
+        vec4 texColor = texture2D(map, vUv);
+        float alpha = texColor.a;
+
+        // Sample neighbors to detect edges for outline
+        float outlineAlpha = 0.0;
+        float step = outlineWidth;
+        for (float x = -1.0; x <= 1.0; x += 1.0) {
+          for (float y = -1.0; y <= 1.0; y += 1.0) {
+            if (x == 0.0 && y == 0.0) continue;
+            vec2 offset = vec2(x, y) * step;
+            float neighborAlpha = texture2D(map, vUv + offset).a;
+            outlineAlpha = max(outlineAlpha, neighborAlpha);
+          }
+        }
+
+        // Dark outline where neighbors have alpha but current pixel doesn't
+        float outline = clamp(outlineAlpha - alpha, 0.0, 1.0);
+        vec3 finalColor = mix(texColor.rgb, outlineColor, outline * 0.9);
+        float finalAlpha = max(alpha, outline * 0.85);
+
+        gl_FragColor = vec4(finalColor, finalAlpha);
+      }
+    `,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false
+  });
+}
 
 const _gizmoLosComputer = new VisionPolygonComputer();
 _gizmoLosComputer.circleSegments = 64;
@@ -41,15 +106,42 @@ export class EnhancedLightIconManager {
     this.group.name = 'EnhancedLightIcons';
     this.group.position.z = 4.0;
     this.group.visible = false;
+    // Render icons in overlay layer to exclude from bloom and color correction
+    this.group.layers.set(OVERLAY_THREE_LAYER);
+    this.group.layers.enable(0); // Also enable layer 0 for raycasting
     this.scene.add(this.group);
 
     // Default icon. (We tint it blue-ish so it reads as "MapShine".)
     this.defaultIcon = 'icons/svg/light.svg';
 
+    // Sun Light icon.
+    this.sunIcon = 'icons/svg/sun.svg';
+
     // Fallback geometry (used when LOS polygon is unavailable)
     this._fallbackCircleSegments = 64;
 
     log.debug('EnhancedLightIconManager created');
+  }
+
+  /**
+   * Check if radius visualization should be visible based on global toggle.
+   * @returns {boolean}
+   */
+  _shouldShowRadiusVisualization() {
+    return window.MapShine?.tweakpaneManager?.globalParams?.showLightRadiusVisualization ?? true;
+  }
+
+  /**
+   * Refresh visibility of all radius visualizations based on global toggle.
+   */
+  refreshAll() {
+    const show = this._shouldShowRadiusVisualization();
+    for (const [id, g] of this.gizmos) {
+      const border = g.userData?.radiusBorder;
+      if (border) {
+        border.visible = show;
+      }
+    }
   }
 
   _computeLightLocalPolygon(foundryX, foundryY, radiusPx) {
@@ -114,13 +206,7 @@ export class EnhancedLightIconManager {
     void fill;
 
     try {
-      if (icon?.material) {
-        // Keep the icon neutral; rely on scale for selection feedback.
-        icon.material.color.set(0xffffff);
-        icon.material.opacity = 1.0;
-        icon.material.transparent = true;
-      }
-
+      // Icon materials may be ShaderMaterial (no .color / .opacity). Rely on scale only.
       // Slight size bump on selection so it reads clearly above the ring.
       const base = icon?.userData?.baseScale;
       if (icon && base && Number.isFinite(base.x) && Number.isFinite(base.y)) {
@@ -277,7 +363,15 @@ export class EnhancedLightIconManager {
       this.group.remove(g);
       try {
         const icon = g.userData?.icon;
-        if (icon?.material?.map) icon.material.map.dispose();
+        if (icon?.material?.uniforms?.map?.value) {
+          icon.material.uniforms.map.value.dispose();
+        }
+      } catch (_) {
+      }
+
+      try {
+        const icon = g.userData?.icon;
+        icon?.geometry?.dispose?.();
       } catch (_) {
       }
 
@@ -339,6 +433,9 @@ export class EnhancedLightIconManager {
     lightGroup.name = `EnhancedLightGizmo:${id}`;
     lightGroup.position.set(worldPos.x, worldPos.y, 0);
     lightGroup.renderOrder = 9997;
+    // Set gizmo group to overlay layer to exclude from bloom/CC
+    lightGroup.layers.set(OVERLAY_THREE_LAYER);
+    lightGroup.layers.enable(0); // Also enable layer 0 for raycasting
 
     // Radius fill must be fully invisible (no tinting / no wash over the scene).
     const fillMat = new THREE.MeshBasicMaterial({
@@ -361,6 +458,8 @@ export class EnhancedLightIconManager {
     const fill = new THREE.Mesh(fillGeometry, fillMat);
     fill.position.z = 0;
     fill.renderOrder = 9996;
+    fill.layers.set(OVERLAY_THREE_LAYER);
+    fill.layers.enable(0);
     fill.userData = { ...(fill.userData || {}), type: 'enhancedLightRadiusFill', enhancedLightId: id };
     fill.visible = false;
 
@@ -377,21 +476,74 @@ export class EnhancedLightIconManager {
     const border = new THREE.LineSegments(borderGeometry, borderMat);
     border.position.z = 0.01;
     border.renderOrder = 9997;
+    border.layers.set(OVERLAY_THREE_LAYER);
+    border.layers.enable(0);
     border.userData = { ...(border.userData || {}), type: 'enhancedLightRadiusBorder', enhancedLightId: id };
+    // Respect global visibility toggle for radius visualization
+    border.visible = this._shouldShowRadiusVisualization();
 
-    // Icon sprite (billboard)
+    // Icon mesh with outline shader (billboard via custom vertex shader)
     const size = 48;
-    const spriteMaterial = new THREE.SpriteMaterial({
+    // Create placeholder material - will be replaced when texture loads
+    const spriteMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        map: { value: null },
+        outlineColor: { value: new THREE.Color(0x222222) },
+        outlineWidth: { value: 0.08 }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          vec4 mvPosition = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+          vec2 scale = vec2(
+            length(modelMatrix[0].xyz),
+            length(modelMatrix[1].xyz)
+          );
+          mvPosition.xy += position.xy * scale;
+          gl_Position = projectionMatrix * mvPosition;
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D map;
+        uniform vec3 outlineColor;
+        uniform float outlineWidth;
+        varying vec2 vUv;
+
+        void main() {
+          vec4 texColor = texture2D(map, vUv);
+          float alpha = texColor.a;
+
+          float outlineAlpha = 0.0;
+          float step = outlineWidth;
+          for (float x = -1.0; x <= 1.0; x += 1.0) {
+            for (float y = -1.0; y <= 1.0; y += 1.0) {
+              if (x == 0.0 && y == 0.0) continue;
+              vec2 offset = vec2(x, y) * step;
+              float neighborAlpha = texture2D(map, vUv + offset).a;
+              outlineAlpha = max(outlineAlpha, neighborAlpha);
+            }
+          }
+
+          float outline = clamp(outlineAlpha - alpha, 0.0, 1.0);
+          vec3 finalColor = mix(texColor.rgb, outlineColor, outline * 0.9);
+          float finalAlpha = max(alpha, outline * 0.85);
+
+          gl_FragColor = vec4(finalColor, finalAlpha);
+        }
+      `,
       transparent: true,
-      opacity: 1.0,
-      color: 0xffffff,
       depthTest: false,
-      depthWrite: false
+      depthWrite: false,
+      toneMapped: false
     });
-    spriteMaterial.toneMapped = false;
-    const sprite = new THREE.Sprite(spriteMaterial);
+    const spriteGeometry = new THREE.PlaneGeometry(1, 1);
+    const sprite = new THREE.Mesh(spriteGeometry, spriteMaterial);
     sprite.scale.set(size, size, 1);
     sprite.position.set(0, 0, 0.05);
+    // Set to overlay layer to exclude from bloom/CC
+    sprite.layers.set(OVERLAY_THREE_LAYER);
+    sprite.layers.enable(0); // Also enable layer 0 for raycasting
     sprite.userData = { enhancedLightId: id, type: 'mapshineEnhancedLight', baseScale: { x: size, y: size, z: 1 } };
     sprite.renderOrder = 9998;
 
@@ -412,7 +564,8 @@ export class EnhancedLightIconManager {
     this.gizmos.set(id, lightGroup);
     this.lights.set(id, sprite);
 
-    const iconPath = this.defaultIcon;
+    const isSunLight = entity?.raw?.darknessResponse?.enabled === true;
+    const iconPath = isSunLight ? this.sunIcon : this.defaultIcon;
     this.textureLoader.load(iconPath, (texture) => {
       try {
         // Light might have been removed before the async load completes.
@@ -421,8 +574,11 @@ export class EnhancedLightIconManager {
         if ('colorSpace' in texture && THREE.SRGBColorSpace) {
           texture.colorSpace = THREE.SRGBColorSpace;
         }
-        sprite.material.map = texture;
-        sprite.material.needsUpdate = true;
+        // Update the shader uniform with the loaded texture
+        if (sprite.material.uniforms?.map) {
+          sprite.material.uniforms.map.value = texture;
+          sprite.material.needsUpdate = true;
+        }
       } catch (_) {
       }
     }, undefined, (err) => {
@@ -438,7 +594,11 @@ export class EnhancedLightIconManager {
       this.group.remove(g);
       try {
         const icon = g.userData?.icon;
-        if (icon?.material?.map) icon.material.map.dispose();
+        // Handle shader material with uniform texture
+        if (icon?.material?.uniforms?.map?.value) {
+          icon.material.uniforms.map.value.dispose();
+        }
+        icon?.geometry?.dispose?.();
       } catch (_) {
       }
 

@@ -524,6 +524,9 @@ export class LightRingUI {
     const cookieInvert = makeCheckbox();
     const cookieColorize = makeCheckbox();
 
+    const cookieTint = makeInput('color');
+    cookieTint.style.padding = '0';
+
     const cookieTexture = makeInput('text');
     cookieTexture.placeholder = this._defaultCookieTexture;
 
@@ -604,6 +607,7 @@ export class LightRingUI {
     addField('cookieGamma', 'Cookie Gamma', cookieGamma);
     addField('cookieInvert', 'Cookie Invert', cookieInvert);
     addField('cookieColorize', 'Cookie Colorize', cookieColorize);
+    addField('cookieTint', 'Cookie Tint', cookieTint);
     addField('targetLayers', 'Layers', targetLayers);
 
     details.appendChild(body);
@@ -832,6 +836,16 @@ export class LightRingUI {
     btnAnimCircle.style.top = `${Math.round(this._uiCenter + 6)}px`;
     btnAnimCircle.addEventListener('click', (e) => {
       _stopAndPrevent(e);
+      try {
+        const dlg = window.MapShine?.lightAnimDialog;
+        if (dlg && typeof dlg.show === 'function' && this.current) {
+          dlg.show(this.current, this._anchorObject);
+          return;
+        }
+      } catch (_) {
+      }
+
+      // Fallback: open details panel and focus the simple anim fields.
       details.style.display = 'block';
       btnToggle.textContent = 'Hide';
       try {
@@ -1094,6 +1108,8 @@ export class LightRingUI {
           update.cookieInvert = !!(el instanceof HTMLInputElement ? el.checked : false);
         } else if (key === 'cookieColorize') {
           update.cookieColorize = !!(el instanceof HTMLInputElement ? el.checked : false);
+        } else if (key === 'cookieTint') {
+          update.cookieTint = String(el instanceof HTMLInputElement ? el.value : '#ffffff');
         } else if (key === 'animType' || key === 'animSpeed' || key === 'animIntensity') {
           const cur = await api.get(id);
           const a0 = (cur && typeof cur.animation === 'object') ? cur.animation : {};
@@ -1138,6 +1154,8 @@ export class LightRingUI {
           // Not supported by Foundry base lights; ignore.
         } else if (key === 'cookieStrength' || key === 'cookieContrast' || key === 'cookieGamma' || key === 'cookieInvert' || key === 'cookieColorize') {
           // Not supported by Foundry base lights; ignore.
+        } else if (key === 'cookieTint') {
+          // Not supported by Foundry base lights; ignore.
         } else if (key === 'animType' || key === 'animSpeed' || key === 'animIntensity') {
           const curAnim = doc.config?.animation ?? {};
           const next = { ...curAnim };
@@ -1170,6 +1188,12 @@ export class LightRingUI {
    * @param {THREE.Object3D|null} anchorObject
    */
   async show(selection, anchorObject) {
+    // Respect global visibility toggle from Tweakpane
+    const showRingUI = window.MapShine?.tweakpaneManager?.globalParams?.showLightRingUI ?? true;
+    if (!showRingUI) {
+      return;
+    }
+
     this.initialize();
 
     this.current = selection;
@@ -1234,6 +1258,14 @@ export class LightRingUI {
     }
 
     await this._refreshFromSource();
+  }
+
+  /**
+   * Check if the Ring UI is currently open/visible.
+   * @returns {boolean}
+   */
+  isOpen() {
+    return this.current !== null && this.overlayManager?.isVisible?.('light-ring');
   }
 
   hide() {
@@ -1328,6 +1360,7 @@ export class LightRingUI {
         this._setField('cookieGamma', data.cookieGamma ?? 1.0);
         this._setField('cookieInvert', data.cookieInvert === true);
         this._setField('cookieColorize', data.cookieColorize === true);
+        this._setField('cookieTint', data.cookieTint ?? '#ffffff');
         this._setField('targetLayers', data.targetLayers ?? 'both');
 
         this._updateAllMeters();
@@ -1380,6 +1413,7 @@ export class LightRingUI {
         this._setField('cookieGamma', 1.0);
         this._setField('cookieInvert', false);
         this._setField('cookieColorize', false);
+        this._setField('cookieTint', '#ffffff');
         this._setField('targetLayers', 'both');
 
         this._updateAllMeters();

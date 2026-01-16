@@ -62,7 +62,12 @@ export class TweakpaneManager {
     /** @type {Object} Global parameters */
     this.globalParams = {
       mapMakerMode: false,
-      timeRate: 100 // 0-200%
+      timeRate: 100, // 0-200%
+      // Light authoring UI visibility toggles
+      showLightRingUI: true,
+      showLightTranslateGizmo: true,
+      showLightRadiusRings: true,
+      showLightRadiusVisualization: true
     };
     
     /** @type {Object<string, any>} Accordion expanded states */
@@ -379,6 +384,41 @@ export class TweakpaneManager {
       max: 2.0,
       step: 0.1
     }).on('change', onUiScaleChange);
+
+    // Light Authoring UI visibility folder
+    const lightAuthoringFolder = globalFolder.addFolder({
+      title: 'Light Authoring UI',
+      expanded: this.accordionStates['lightAuthoring'] ?? false
+    });
+
+    const onLightUIToggle = (param) => (ev) => {
+      this.globalParams[param] = ev.value;
+      this.onGlobalChange(param, ev.value);
+      this.saveUIState();
+    };
+
+    lightAuthoringFolder.addBinding(this.globalParams, 'showLightRingUI', {
+      label: 'Ring UI'
+    }).on('change', onLightUIToggle('showLightRingUI'));
+
+    lightAuthoringFolder.addBinding(this.globalParams, 'showLightTranslateGizmo', {
+      label: 'Translate Gizmo'
+    }).on('change', onLightUIToggle('showLightTranslateGizmo'));
+
+    lightAuthoringFolder.addBinding(this.globalParams, 'showLightRadiusRings', {
+      label: 'Radius Edit Rings'
+    }).on('change', onLightUIToggle('showLightRadiusRings'));
+
+    lightAuthoringFolder.addBinding(this.globalParams, 'showLightRadiusVisualization', {
+      label: 'Radius Visualization'
+    }).on('change', onLightUIToggle('showLightRadiusVisualization'));
+
+    lightAuthoringFolder.on('fold', (ev) => {
+      this.accordionStates['lightAuthoring'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    globalFolder.addBlade({ view: 'separator' });
 
     // Texture Manager Button
     globalFolder.addButton({
@@ -1556,6 +1596,20 @@ export class TweakpaneManager {
       } else {
         log.warn('TimeManager not available, cannot set time rate');
       }
+    } else if (param === 'showLightRingUI') {
+      // Hide/show Ring UI immediately if it's currently open
+      if (!value && window.MapShine?.lightRingUI?.isOpen()) {
+        window.MapShine.lightRingUI.hide();
+      }
+    } else if (param === 'showLightTranslateGizmo') {
+      // Hide translate gizmo immediately if disabled
+      const gizmoGroup = window.MapShine?.interactionManager?._lightTranslate?.group;
+      if (!value && gizmoGroup) {
+        gizmoGroup.visible = false;
+      }
+    } else if (param === 'showLightRadiusVisualization') {
+      // Trigger a refresh of the enhanced light icon manager to update radius visualization visibility
+      window.MapShine?.enhancedLightIconManager?.refreshAll?.();
     }
 
     this.saveUIState();

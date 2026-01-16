@@ -162,6 +162,7 @@
  * @property {string} [cookieTexture] - Optional path to a cookie/gobo texture for projected patterns.
  * @property {number} [cookieRotation] - Rotation of the cookie texture in radians.
  * @property {number} [cookieScale] - Scale factor for the cookie texture (1.0 = match light radius).
+ * @property {string} [cookieTint] - Tint color (hex) used when cookieColorize is enabled.
  * @property {number} [activationRange]
  * @property {number} [zMin]
  * @property {number} [zMax]

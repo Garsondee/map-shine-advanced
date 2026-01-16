@@ -73,6 +73,7 @@ import { stateApplier } from '../ui/state-applier.js';
 import { createEnhancedLightsApi } from '../effects/EnhancedLightsApi.js';
 import { OverlayUIManager } from '../ui/overlay-ui-manager.js';
 import { LightRingUI } from '../ui/light-ring-ui.js';
+import { LightAnimDialog } from '../ui/light-anim-dialog.js';
 
 const log = createLogger('Canvas');
 
@@ -127,6 +128,9 @@ let overlayUIManager = null;
 
 /** @type {LightRingUI|null} */
 let lightRingUI = null;
+
+/** @type {LightAnimDialog|null} */
+let lightAnimDialog = null;
 
 /** @type {TokenManager|null} */
 let tokenManager = null;
@@ -1424,8 +1428,16 @@ async function createThreeCanvas(scene) {
     lightRingUI = new LightRingUI(overlayUIManager);
     lightRingUI.initialize();
 
+    lightAnimDialog = new LightAnimDialog(overlayUIManager);
+    lightAnimDialog.initialize();
+
     try {
       effectComposer.addUpdatable(lightRingUI);
+    } catch (_) {
+    }
+
+    try {
+      effectComposer.addUpdatable(lightAnimDialog);
     } catch (_) {
     }
 
@@ -1433,6 +1445,7 @@ async function createThreeCanvas(scene) {
     if (window.MapShine) {
       window.MapShine.overlayUIManager = overlayUIManager;
       window.MapShine.lightRingUI = lightRingUI;
+      window.MapShine.lightAnimDialog = lightAnimDialog;
     }
 
     // Step 6: Initialize drop handler (for creating new items)
@@ -1588,6 +1601,7 @@ async function createThreeCanvas(scene) {
     mapShine.interactionManager = interactionManager; // NEW: Expose interaction manager
     mapShine.overlayUIManager = overlayUIManager;
     mapShine.lightRingUI = lightRingUI;
+    mapShine.lightAnimDialog = lightAnimDialog;
     mapShine.gridRenderer = gridRenderer; // NEW: Expose grid renderer
     mapShine.mapPointsManager = mapPointsManager; // NEW: Expose map points manager
     mapShine.weatherController = weatherController; // NEW: Expose weather controller
@@ -3122,6 +3136,19 @@ function destroyThreeCanvas() {
     lightRingUI = null;
   }
 
+  if (lightAnimDialog) {
+    try {
+      try {
+        if (effectComposer) effectComposer.removeUpdatable(lightAnimDialog);
+      } catch (_) {
+      }
+      if (typeof lightAnimDialog.dispose === 'function') lightAnimDialog.dispose();
+      else if (typeof lightAnimDialog.hide === 'function') lightAnimDialog.hide();
+    } catch (_) {
+    }
+    lightAnimDialog = null;
+  }
+
   if (overlayUIManager) {
     try {
       if (effectComposer) effectComposer.removeUpdatable(overlayUIManager);
@@ -3770,7 +3797,7 @@ function updateInputMode() {
       if (lightIconManager && lightIconManager.setVisibility) {
         const showLighting = (finalLayer === 'LightingLayer') && !isMapMakerMode;
         const tool = ui?.controls?.tool?.name ?? game.activeTool;
-        const mapshineToolActive = tool === 'map-shine-enhanced-light';
+        const mapshineToolActive = tool === 'map-shine-enhanced-light' || tool === 'map-shine-sun-light';
         lightIconManager.setVisibility(showLighting && !mapshineToolActive);
       }
 

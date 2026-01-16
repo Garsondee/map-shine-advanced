@@ -40,6 +40,14 @@ export class InteractionManager {
     
     /** @type {Set<string>} Set of selected object IDs (e.g. "Token.abc", "Tile.xyz") */
     this.selection = new Set();
+
+    // Copy/paste clipboard for lights.
+    // Stored as a plain serializable object so we can safely deep-clone and mutate.
+    this._lightClipboard = null;
+
+    // Track last pointer position (screen coords) so paste can place at cursor.
+    this._lastPointerClientX = null;
+    this._lastPointerClientY = null;
     
     // Drag state
     this.dragState = {
@@ -85,6 +93,55 @@ export class InteractionManager {
       reopenRingAfterDrag: null, // {type:'foundry'|'enhanced', id:string}
       // Screen-space offset from the light center (kept stable via /zoom)
       offsetPx: { x: 140, y: 0 }
+    };
+
+    // Light radius editing handles (drag to adjust bright/dim radii)
+    this._lightRadiusRings = {
+      group: null,
+      brightHandle: null,
+      dimHandle: null,
+      handles: [], // clickable handles for raycasting
+      selected: null, // {type:'foundry'|'enhanced', id:string}
+      dragging: null, // 'bright' | 'dim' | null
+      startRadius: 0,
+      startDistance: 0,
+      startBright: 0,
+      startDim: 0,
+      startClientX: 0,
+      startClientY: 0,
+      pendingType: null, // 'bright' | 'dim' | null
+      pendingRadius: null,
+      previewBright: null,
+      previewDim: null,
+      // Live-apply during drag (still throttled and finalized on pointer-up).
+      liveApplyHz: 15,
+      lastLiveApplyMs: 0,
+      liveInFlight: false,
+      liveQueued: null,
+      // Screen-space offset from the light center (kept stable via /zoom)
+      // Keep these outside the LightRingUI overlay so they're always usable.
+      offsetPx: { x: 140, y: 70 }
+    };
+
+    // HTML radius slider overlay (replaces the colored 3D radius handles).
+    this._radiusSliderUI = {
+      el: null,
+      dimEl: null,
+      brightPctEl: null,
+      dimValueEl: null,
+      brightValueEl: null,
+      visible: false,
+      // Cache last values to avoid UI flicker.
+      lastDimUnits: null,
+      lastBrightPct: null,
+      // Avoid recursive input->setValue->input loops.
+      suppressInput: false,
+    };
+
+    // Screen-space hover label for gizmos/handles.
+    this._uiHoverLabel = {
+      el: null,
+      visible: false
     };
 
     this._pendingTokenMoveCleanup = {
@@ -152,7 +209,8 @@ export class InteractionManager {
       current: new THREE.Vector3(),
       previewGroup: null,
       previewFill: null,
-      previewBorder: null
+      previewBorder: null,
+      tool: null
     };
 
     // Map Point Drawing State
@@ -175,10 +233,13 @@ export class InteractionManager {
     this.createSelectionBox();
     this.createSelectionOverlay();
     this.createDragMeasureOverlay();
+    this.createUIHoverLabelOverlay();
+    this.createRadiusSliderOverlay();
     this.createLightPreview();
     this.createEnhancedLightPreview();
     this.createMapPointPreview();
     this._createLightTranslateGizmo();
+    this._createLightRadiusRingsGizmo();
     
     /** @type {string|null} ID of currently hovered token */
     this.hoveredTokenId = null;
@@ -471,6 +532,298 @@ export class InteractionManager {
     el.style.display = 'none';
     document.body.appendChild(el);
     this.dragMeasure.el = el;
+  }
+
+  createUIHoverLabelOverlay() {
+    const el = document.createElement('div');
+    el.style.position = 'fixed';
+    el.style.pointerEvents = 'none';
+    el.style.zIndex = '10001';
+    el.style.padding = '4px 10px';
+    el.style.borderRadius = '6px';
+    el.style.backgroundColor = 'rgba(0,0,0,0.75)';
+    el.style.border = '1px solid rgba(255,255,255,0.12)';
+    el.style.color = 'rgba(255,255,255,0.92)';
+    el.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+    el.style.fontSize = '12px';
+    el.style.display = 'none';
+    document.body.appendChild(el);
+    this._uiHoverLabel.el = el;
+  }
+
+  createRadiusSliderOverlay() {
+    const root = document.createElement('div');
+    root.style.position = 'fixed';
+    root.style.pointerEvents = 'auto';
+    root.style.zIndex = '10002';
+    root.style.width = '260px';
+    root.style.padding = '10px 12px';
+    root.style.borderRadius = '10px';
+    root.style.background = 'rgba(20,20,24,0.92)';
+    root.style.border = '1px solid rgba(255,255,255,0.12)';
+    root.style.boxShadow = '0 10px 30px rgba(0,0,0,0.55)';
+    root.style.backdropFilter = 'blur(10px)';
+    root.style.webkitBackdropFilter = 'blur(10px)';
+    root.style.color = 'rgba(255,255,255,0.9)';
+    root.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+    root.style.fontSize = '12px';
+    root.style.display = 'none';
+
+    // Prevent camera/selection interactions when using sliders.
+    const stop = (e) => {
+      try { e.stopPropagation(); } catch (_) {}
+      try { e.stopImmediatePropagation?.(); } catch (_) {}
+      // Don't preventDefault on inputs; it can break dragging on some browsers.
+    };
+    for (const t of ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel']) {
+      root.addEventListener(t, stop, { capture: true });
+    }
+
+    const makeRow = (label) => {
+      const row = document.createElement('div');
+      row.style.display = 'flex';
+      row.style.flexDirection = 'column';
+      row.style.gap = '4px';
+      row.style.marginBottom = '8px';
+      const l = document.createElement('div');
+      l.textContent = label;
+      l.style.opacity = '0.85';
+      l.style.fontSize = '11px';
+      row.appendChild(l);
+      return { row, labelEl: l };
+    };
+
+    const makeRange = () => {
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.style.width = '100%';
+      input.style.margin = '0';
+      input.style.height = '18px';
+      return input;
+    };
+
+    const makeValue = () => {
+      const v = document.createElement('div');
+      v.style.opacity = '0.9';
+      v.style.fontSize = '11px';
+      v.style.textAlign = 'right';
+      return v;
+    };
+
+    const dimRow = makeRow('Dim Radius');
+    const dimWrap = document.createElement('div');
+    dimWrap.style.display = 'grid';
+    dimWrap.style.gridTemplateColumns = '1fr auto';
+    dimWrap.style.gap = '8px';
+    const dimEl = makeRange();
+    dimEl.min = '0';
+    dimEl.max = '200';
+    dimEl.step = '0.5';
+    const dimValue = makeValue();
+    dimWrap.appendChild(dimEl);
+    dimWrap.appendChild(dimValue);
+    dimRow.row.appendChild(dimWrap);
+    root.appendChild(dimRow.row);
+
+    const brightRow = makeRow('Bright (% of Dim)');
+    const brightWrap = document.createElement('div');
+    brightWrap.style.display = 'grid';
+    brightWrap.style.gridTemplateColumns = '1fr auto';
+    brightWrap.style.gap = '8px';
+    const brightPctEl = makeRange();
+    brightPctEl.min = '0';
+    brightPctEl.max = '100';
+    brightPctEl.step = '1';
+    const brightValue = makeValue();
+    brightWrap.appendChild(brightPctEl);
+    brightWrap.appendChild(brightValue);
+    brightRow.row.appendChild(brightWrap);
+    root.appendChild(brightRow.row);
+
+    const hint = document.createElement('div');
+    hint.textContent = 'Live update while dragging';
+    hint.style.opacity = '0.55';
+    hint.style.fontSize = '10px';
+    hint.style.marginTop = '2px';
+    root.appendChild(hint);
+
+    document.body.appendChild(root);
+
+    this._radiusSliderUI.el = root;
+    this._radiusSliderUI.dimEl = dimEl;
+    this._radiusSliderUI.brightPctEl = brightPctEl;
+    this._radiusSliderUI.dimValueEl = dimValue;
+    this._radiusSliderUI.brightValueEl = brightValue;
+
+    const onInput = () => {
+      if (this._radiusSliderUI.suppressInput) return;
+      void this._applyRadiusFromSlidersLive();
+    };
+
+    dimEl.addEventListener('input', onInput);
+    brightPctEl.addEventListener('input', onInput);
+
+    // Finalize on change (mouse up / keyboard).
+    dimEl.addEventListener('change', onInput);
+    brightPctEl.addEventListener('change', onInput);
+  }
+
+  _sceneUnitsPerPixel() {
+    try {
+      const dist = canvas?.dimensions?.distance;
+      const size = canvas?.dimensions?.size;
+      if (!Number.isFinite(dist) || !Number.isFinite(size) || size <= 0) return 1;
+      return dist / size;
+    } catch (_) {
+    }
+    return 1;
+  }
+
+  _getSelectedLightRadiiInSceneUnits(sel) {
+    try {
+      if (!sel) return null;
+
+      // Foundry docs store bright/dim in scene distance units.
+      if (sel.type === 'foundry') {
+        const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
+        if (!doc) return null;
+        const dimUnits = Number(doc.config?.dim ?? 0);
+        const brightUnits = Number(doc.config?.bright ?? 0);
+        if (!Number.isFinite(dimUnits) || !Number.isFinite(brightUnits)) return null;
+        const pct = (dimUnits > 1e-6) ? (brightUnits / dimUnits) * 100 : 0;
+        return { dimUnits: Math.max(0, dimUnits), brightPct: Math.max(0, Math.min(100, pct)) };
+      }
+
+      // Enhanced lights store bright/dim in pixels.
+      if (sel.type === 'enhanced') {
+        const radiiPx = this._getSelectedLightRadii(sel);
+        if (!radiiPx) return null;
+        const unitsPerPx = this._sceneUnitsPerPixel();
+        const dimUnits = Number(radiiPx.dim ?? 0) * unitsPerPx;
+        const brightUnits = Number(radiiPx.bright ?? 0) * unitsPerPx;
+        if (!Number.isFinite(dimUnits) || !Number.isFinite(brightUnits)) return null;
+        const pct = (dimUnits > 1e-6) ? (brightUnits / dimUnits) * 100 : 0;
+        return { dimUnits: Math.max(0, dimUnits), brightPct: Math.max(0, Math.min(100, pct)) };
+      }
+    } catch (_) {
+    }
+    return null;
+  }
+
+  async _commitRadiiSceneUnits(sel, dimUnits, brightPct) {
+    try {
+      if (!sel) return;
+      const dimU = Math.max(0, Number(dimUnits) || 0);
+      const pct = Math.max(0, Math.min(100, Number(brightPct) || 0));
+      const brightU = dimU * (pct / 100);
+
+      if (sel.type === 'foundry') {
+        const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
+        if (!doc) return;
+        await doc.update({
+          'config.dim': dimU,
+          'config.bright': brightU
+        });
+        return;
+      }
+
+      if (sel.type === 'enhanced') {
+        const api = window.MapShine?.enhancedLights;
+        if (!api?.update) return;
+        const unitsPerPx = this._sceneUnitsPerPixel();
+        const pxPerUnit = unitsPerPx > 1e-9 ? (1 / unitsPerPx) : 1;
+        await api.update(sel.id, {
+          photometry: {
+            dim: dimU * pxPerUnit,
+            bright: brightU * pxPerUnit
+          }
+        });
+      }
+    } catch (_) {
+    }
+  }
+
+  async _applyRadiusFromSlidersLive() {
+    try {
+      const ui = this._radiusSliderUI;
+      if (!ui?.el || !ui.dimEl || !ui.brightPctEl) return;
+      const sel = this._getSelectedLight();
+      if (!sel || !this._canEditSelectedLight(sel)) return;
+
+      const dimUnits = parseFloat(ui.dimEl.value);
+      const brightPct = parseFloat(ui.brightPctEl.value);
+      if (!Number.isFinite(dimUnits) || !Number.isFinite(brightPct)) return;
+
+      // Reuse the existing throttled live apply machinery.
+      this._lightRadiusRings.pendingType = 'both';
+      this._lightRadiusRings.pendingRadius = { dimUnits, brightPct };
+
+      const st = this._lightRadiusRings;
+      const nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      const hz = Math.max(1, Number(st.liveApplyHz) || 15);
+      const intervalMs = 1000 / hz;
+      if ((nowMs - (st.lastLiveApplyMs || 0)) < intervalMs) return;
+      st.lastLiveApplyMs = nowMs;
+
+      if (st.liveInFlight) {
+        st.liveQueued = { sel, radiusType: 'both', newRadius: { dimUnits, brightPct } };
+        return;
+      }
+
+      st.liveInFlight = true;
+      st.liveQueued = null;
+
+      const run = async () => {
+        try {
+          await this._commitRadiiSceneUnits(sel, dimUnits, brightPct);
+        } catch (_) {
+        } finally {
+          st.liveInFlight = false;
+          const q = st.liveQueued;
+          st.liveQueued = null;
+          if (q && q.radiusType === 'both' && q.newRadius) {
+            try {
+              const d2 = q.newRadius.dimUnits;
+              const p2 = q.newRadius.brightPct;
+              if (Number.isFinite(d2) && Number.isFinite(p2)) {
+                ui.suppressInput = true;
+                ui.dimEl.value = String(d2);
+                ui.brightPctEl.value = String(p2);
+                ui.suppressInput = false;
+              }
+              await this._commitRadiiSceneUnits(q.sel, d2, p2);
+            } catch (_) {
+              ui.suppressInput = false;
+            }
+          }
+        }
+      };
+
+      void run();
+    } catch (_) {
+    }
+  }
+
+  _showUIHoverLabel(text, clientX, clientY) {
+    try {
+      const el = this._uiHoverLabel?.el;
+      if (!el) return;
+      el.textContent = String(text || '');
+      el.style.left = `${clientX + 12}px`;
+      el.style.top = `${clientY + 12}px`;
+      el.style.display = 'block';
+      this._uiHoverLabel.visible = true;
+    } catch (_) {
+    }
+  }
+
+  _hideUIHoverLabel() {
+    try {
+      const el = this._uiHoverLabel?.el;
+      if (el) el.style.display = 'none';
+      if (this._uiHoverLabel) this._uiHoverLabel.visible = false;
+    } catch (_) {
+    }
   }
 
   /**
@@ -2204,6 +2557,73 @@ export class InteractionManager {
           }
         }
 
+        // 0b. Light radius handles (drag to adjust bright/dim radii)
+        if (event.button === 0 && this._lightRadiusRings?.group?.visible && Array.isArray(this._lightRadiusRings.handles)) {
+          const prevMask = this.raycaster.layers?.mask;
+          try {
+            this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
+            this.raycaster.layers.enable(0);
+          } catch (_) {
+          }
+
+          const hits = this.raycaster.intersectObjects(this._lightRadiusRings.handles, false);
+
+          try {
+            if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask;
+          } catch (_) {
+          }
+
+          if (hits && hits.length > 0) {
+            const hit = hits[0];
+            const obj = hit.object;
+            const radiusType = obj?.userData?.radiusType; // 'bright' or 'dim'
+
+            const sel = this._getSelectedLight();
+            if (sel && radiusType && this._canEditSelectedLight(sel)) {
+              const radii = this._getSelectedLightRadii(sel);
+              const startBright = radii?.bright ?? 0;
+              const startDim = radii?.dim ?? 0;
+              const startRadius = radiusType === 'bright' ? startBright : startDim;
+
+              // Capture the authoritative selection for the duration of the drag.
+              this._lightRadiusRings.selected = sel;
+
+              this._lightRadiusRings.dragging = radiusType;
+              this._lightRadiusRings.startRadius = startRadius || 0;
+              this._lightRadiusRings.startBright = startBright;
+              this._lightRadiusRings.startDim = startDim;
+              this._lightRadiusRings.startClientX = event.clientX;
+              this._lightRadiusRings.startClientY = event.clientY;
+              this._lightRadiusRings.pendingType = radiusType;
+              this._lightRadiusRings.pendingRadius = startRadius || 0;
+              this._lightRadiusRings.previewBright = startBright;
+              this._lightRadiusRings.previewDim = startDim;
+
+              // Start a pseudo-drag (we'll handle radius change in onPointerMove)
+              this.dragState.active = true;
+              this.dragState.mode = 'radiusEdit';
+              // Ensure the onPointerMove drag path doesn't early-return.
+              this.dragState.object = obj;
+
+              // Disable camera controls while dragging
+              if (window.MapShine?.cameraController) {
+                window.MapShine.cameraController.enabled = false;
+              }
+
+              this.canvasElement.style.cursor = 'ew-resize';
+
+              try {
+                event.preventDefault();
+                event.stopPropagation();
+                event.stopImmediatePropagation?.();
+              } catch (_) {
+              }
+
+              return;
+            }
+          }
+        }
+
         log.debug('onPointerDown mouse NDC', {
           ndcX: this.mouse.x,
           ndcY: this.mouse.y
@@ -2412,6 +2832,7 @@ export class InteractionManager {
         if (isLightingLayer) {
           const activeTool = ui?.controls?.tool?.name ?? game.activeTool;
           const isMapShineLightTool = activeTool === 'map-shine-enhanced-light';
+          const isMapShineSunLightTool = activeTool === 'map-shine-sun-light';
 
           // 2.5a Check for Existing Lights (Select/Drag)
           // Prioritize interacting with existing lights over placing new ones
@@ -2454,7 +2875,7 @@ export class InteractionManager {
           }
 
           // Standard Foundry Light Tool: Check Foundry light icons
-          if (this.lightIconManager && !isMapShineLightTool) {
+          if (this.lightIconManager && !isMapShineLightTool && !isMapShineSunLightTool) {
             const lightIcons = Array.from(this.lightIconManager.lights.values());
             const intersects = this.raycaster.intersectObjects(lightIcons, false);
             
@@ -2516,9 +2937,10 @@ export class InteractionManager {
           }
           const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
 
-          if (isMapShineLightTool) {
+          if (isMapShineLightTool || isMapShineSunLightTool) {
             // MapShine Enhanced Light Placement
             this.enhancedLightPlacement.active = true;
+            this.enhancedLightPlacement.tool = isMapShineSunLightTool ? 'map-shine-sun-light' : 'map-shine-enhanced-light';
             this.enhancedLightPlacement.start.set(snappedWorld.x, snappedWorld.y, groundZ);
             this.enhancedLightPlacement.current.set(snappedWorld.x, snappedWorld.y, groundZ);
             
@@ -2682,6 +3104,7 @@ export class InteractionManager {
       }
 
       this._updateLightTranslateGizmo();
+      this._updateLightRadiusRingsGizmo();
   }
 
   _getEffectiveZoom() {
@@ -2791,6 +3214,340 @@ export class InteractionManager {
     }
   }
 
+  /**
+   * Create draggable radius handles for adjusting light bright/dim radii.
+   * These are always-visible handles positioned near the selected light (not full rings).
+   */
+  _createLightRadiusRingsGizmo() {
+    try {
+      const THREE = window.THREE;
+      if (!THREE || !this.sceneComposer?.scene) return;
+
+      const g = new THREE.Group();
+      g.name = 'LightRadiusHandlesGizmo';
+      g.visible = false;
+      g.renderOrder = 10005;
+      g.layers.set(OVERLAY_THREE_LAYER);
+      g.layers.enable(0);
+
+      const depthTest = false;
+      const depthWrite = false;
+
+      // Bright radius handle (yellow/gold)
+      const brightMat = new THREE.MeshBasicMaterial({ color: 0xffdd44, transparent: true, opacity: 0.95, depthTest, depthWrite });
+      brightMat.toneMapped = false;
+
+      // Dim radius handle (cyan/blue)
+      const dimMat = new THREE.MeshBasicMaterial({ color: 0x44ddff, transparent: true, opacity: 0.95, depthTest, depthWrite });
+      dimMat.toneMapped = false;
+
+      // Handle geometry: small discs in the ground plane.
+      const handleRadius = 10;
+      const handleSegments = 24;
+
+      const brightGeo = new THREE.CircleGeometry(handleRadius, handleSegments);
+      const brightHandle = new THREE.Mesh(brightGeo, brightMat);
+      brightHandle.position.set(0, 0, 0);
+      brightHandle.renderOrder = 10006;
+      brightHandle.layers.set(OVERLAY_THREE_LAYER);
+      brightHandle.layers.enable(0);
+      brightHandle.userData = { type: 'lightRadiusHandle', radiusType: 'bright' };
+
+      const dimGeo = new THREE.CircleGeometry(handleRadius, handleSegments);
+      const dimHandle = new THREE.Mesh(dimGeo, dimMat);
+      dimHandle.position.set(0, -24, 0);
+      dimHandle.renderOrder = 10006;
+      dimHandle.layers.set(OVERLAY_THREE_LAYER);
+      dimHandle.layers.enable(0);
+      dimHandle.userData = { type: 'lightRadiusHandle', radiusType: 'dim' };
+
+      g.add(brightHandle);
+      g.add(dimHandle);
+
+      this.sceneComposer.scene.add(g);
+      this._lightRadiusRings.group = g;
+      this._lightRadiusRings.brightHandle = brightHandle;
+      this._lightRadiusRings.dimHandle = dimHandle;
+      this._lightRadiusRings.handles = [brightHandle, dimHandle];
+    } catch (_) {
+    }
+  }
+
+  /**
+   * Update the radius handles gizmo position and scale based on the selected light.
+   */
+  _updateLightRadiusRingsGizmo() {
+    try {
+      const g = this._lightRadiusRings?.group;
+      if (!g) return;
+
+      // We now use an HTML slider overlay instead of the colored 3D handles.
+      // Keep the 3D gizmo disabled.
+      g.visible = false;
+
+      // Respect global visibility toggle
+      const showRings = window.MapShine?.tweakpaneManager?.globalParams?.showLightRadiusRings ?? true;
+      if (!showRings) {
+        g.visible = false;
+        return;
+      }
+
+      // Hide while dragging anything else (but not while dragging radius).
+      if (this.dragState?.active && this.dragState.mode !== 'radiusEdit') {
+        g.visible = false;
+        return;
+      }
+
+      const sel = this._getSelectedLight();
+      this._lightRadiusRings.selected = sel;
+      const ui = this._radiusSliderUI;
+      if (!sel || !this._canEditSelectedLight(sel) || !ui?.el) {
+        if (ui?.el) ui.el.style.display = 'none';
+        return;
+      }
+
+      const pos = this._getSelectedLightWorldPos(sel);
+      if (!pos) {
+        if (ui?.el) ui.el.style.display = 'none';
+        return;
+      }
+      const groundZ = this.sceneComposer?.groundZ ?? 0;
+      const z = groundZ + 4.04; // Near translate gizmo, but slightly below
+
+      const zoom = this._getEffectiveZoom();
+      const dx = (this._lightRadiusRings.offsetPx?.x || 0) / zoom;
+      const dy = -(this._lightRadiusRings.offsetPx?.y || 0) / zoom;
+
+      // Project world->screen and place the overlay there.
+      try {
+        const THREE = window.THREE;
+        const cam = this.sceneComposer?.camera;
+        const el = ui.el;
+        if (THREE && cam && el) {
+          const rect = this.canvasElement.getBoundingClientRect();
+          const v = new THREE.Vector3(pos.x + dx, pos.y + dy, z);
+          v.project(cam);
+          const sx = rect.left + (v.x * 0.5 + 0.5) * rect.width;
+          const sy = rect.top + (-v.y * 0.5 + 0.5) * rect.height;
+          el.style.left = `${Math.round(sx)}px`;
+          el.style.top = `${Math.round(sy)}px`;
+          el.style.transform = 'translate(0px, 0px)';
+          el.style.display = 'block';
+        }
+      } catch (_) {
+      }
+
+      // Sync slider values from the authoritative light state.
+      try {
+        const r = this._getSelectedLightRadiiInSceneUnits(sel);
+        if (r && ui.dimEl && ui.brightPctEl && ui.dimValueEl && ui.brightValueEl) {
+          const dimU = Math.max(0, Math.min(200, r.dimUnits));
+          const pct = Math.max(0, Math.min(100, r.brightPct));
+
+          // Only update DOM values if they changed meaningfully.
+          const needsDim = (ui.lastDimUnits === null) || (Math.abs(ui.lastDimUnits - dimU) > 1e-3);
+          const needsPct = (ui.lastBrightPct === null) || (Math.abs(ui.lastBrightPct - pct) > 1e-3);
+          if (needsDim || needsPct) {
+            ui.suppressInput = true;
+            if (needsDim) ui.dimEl.value = String(dimU);
+            if (needsPct) ui.brightPctEl.value = String(Math.round(pct));
+            ui.suppressInput = false;
+            ui.lastDimUnits = dimU;
+            ui.lastBrightPct = pct;
+          }
+
+          const brightU = dimU * (pct / 100);
+          ui.dimValueEl.textContent = `${dimU.toFixed(1)}`;
+          ui.brightValueEl.textContent = `${Math.round(pct)}% (${brightU.toFixed(1)})`;
+        }
+      } catch (_) {
+      }
+    } catch (_) {
+    }
+  }
+
+  /**
+   * Preview a radius change during a drag (does not persist).
+   * @param {{type:'foundry'|'enhanced', id:string}} sel
+   * @param {'bright'|'dim'} radiusType
+   * @param {number} newRadius
+   */
+  _previewRadiusChange(sel, radiusType, newRadius) {
+    try {
+      this._lightRadiusRings.pendingType = radiusType;
+      this._lightRadiusRings.pendingRadius = newRadius;
+      if (radiusType === 'bright') this._lightRadiusRings.previewBright = newRadius;
+      else this._lightRadiusRings.previewDim = newRadius;
+    } catch (_) {
+    }
+  }
+
+  _applyPendingRadiusLive(sel) {
+    try {
+      const st = this._lightRadiusRings;
+      if (!st) return;
+
+      const radiusType = st.pendingType;
+      const newRadius = st.pendingRadius;
+      if (!radiusType || !Number.isFinite(newRadius)) return;
+
+      const nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      const hz = Math.max(1, Number(st.liveApplyHz) || 15);
+      const intervalMs = 1000 / hz;
+
+      // Throttle to keep Foundry doc updates and scene flag writes reasonable.
+      if ((nowMs - (st.lastLiveApplyMs || 0)) < intervalMs) return;
+      st.lastLiveApplyMs = nowMs;
+
+      // If an update is already in flight, queue the latest value.
+      if (st.liveInFlight) {
+        st.liveQueued = { sel, radiusType, newRadius };
+        return;
+      }
+
+      st.liveInFlight = true;
+      st.liveQueued = null;
+
+      const run = async () => {
+        try {
+          // Commit writes to the underlying doc/entity so the user sees true lighting.
+          await this._commitPendingRadius(sel);
+        } catch (_) {
+        } finally {
+          st.liveInFlight = false;
+
+          // If we missed a newer value while in flight, immediately apply it.
+          const q = st.liveQueued;
+          st.liveQueued = null;
+          if (q && q.sel && q.radiusType && Number.isFinite(q.newRadius)) {
+            try {
+              this._previewRadiusChange(q.sel, q.radiusType, q.newRadius);
+              this._applyPendingRadiusLive(q.sel);
+            } catch (_) {
+            }
+          }
+        }
+      };
+
+      void run();
+    } catch (_) {
+    }
+  }
+
+  /**
+   * Commit the pending radius change to the underlying document/entity.
+   * @param {{type:'foundry'|'enhanced', id:string}} sel
+   */
+  async _commitPendingRadius(sel) {
+    try {
+      const radiusType = this._lightRadiusRings.pendingType;
+      const newRadius = this._lightRadiusRings.pendingRadius;
+      if (!radiusType || !Number.isFinite(newRadius)) return;
+
+      if (sel.type === 'foundry') {
+        const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
+        if (!doc) return;
+
+        const gridSize = canvas?.scene?.grid?.size || 100;
+        const gridUnits = newRadius / gridSize;
+        const updateData = {};
+        if (radiusType === 'bright') updateData['config.bright'] = gridUnits;
+        else updateData['config.dim'] = gridUnits;
+        await doc.update(updateData);
+        return;
+      }
+
+      if (sel.type === 'enhanced') {
+        const api = window.MapShine?.enhancedLights;
+        if (!api?.update) return;
+
+        const updateData = { photometry: {} };
+        if (radiusType === 'bright') updateData.photometry.bright = newRadius;
+        else updateData.photometry.dim = newRadius;
+        await api.update(sel.id, updateData);
+      }
+    } catch (_) {
+    }
+  }
+
+  /**
+   * Commit the radius change and clean up drag state.
+   */
+  _commitRadiusChange() {
+    try {
+      const sel = this._lightRadiusRings?.selected;
+      if (sel) {
+        void this._commitPendingRadius(sel);
+      }
+
+      try {
+        this._hideUIHoverLabel();
+      } catch (_) {
+      }
+
+      // Re-enable camera controls
+      if (window.MapShine?.cameraController) {
+        window.MapShine.cameraController.enabled = true;
+      }
+
+      // Reset cursor
+      this.canvasElement.style.cursor = '';
+
+      // Clear drag state
+      this.dragState.active = false;
+      this.dragState.mode = null;
+      this.dragState.object = null;
+      this._lightRadiusRings.dragging = null;
+      this._lightRadiusRings.startRadius = 0;
+      this._lightRadiusRings.startDistance = 0;
+      this._lightRadiusRings.pendingType = null;
+      this._lightRadiusRings.pendingRadius = null;
+      this._lightRadiusRings.previewBright = null;
+      this._lightRadiusRings.previewDim = null;
+      this._lightRadiusRings.liveQueued = null;
+
+      // Refresh the Ring UI if it was open
+      const ringUI = window.MapShine?.lightRingUI;
+      if (ringUI?.isOpen?.()) {
+        ringUI._refreshFromSource?.();
+      }
+    } catch (_) {
+    }
+  }
+
+  /**
+   * Get the bright and dim radii for a selected light (in world pixels).
+   * @param {{type:'foundry'|'enhanced', id:string}} sel
+   * @returns {{bright:number, dim:number}|null}
+   */
+  _getSelectedLightRadii(sel) {
+    try {
+      if (sel.type === 'foundry') {
+        const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
+        if (doc) {
+          const gridSize = canvas?.scene?.grid?.size || 100;
+          return {
+            bright: (doc.config?.bright ?? 0) * gridSize,
+            dim: (doc.config?.dim ?? 0) * gridSize
+          };
+        }
+      } else if (sel.type === 'enhanced') {
+        // Use EnhancedLightsApi (async container) if available; fall back to cached scene flag.
+        const container = canvas?.scene?.getFlag?.('map-shine-advanced', 'enhancedLights');
+        const lights = container?.lights;
+        const data = Array.isArray(lights) ? lights.find((l) => String(l?.id) === String(sel.id)) : null;
+        if (data) {
+          return {
+            bright: Number(data.photometry?.bright ?? 0),
+            dim: Number(data.photometry?.dim ?? 0)
+          };
+        }
+      }
+    } catch (_) {
+    }
+    return null;
+  }
+
   _getSelectedLight() {
     try {
       if (!this.selection || this.selection.size !== 1) return null;
@@ -2860,6 +3617,13 @@ export class InteractionManager {
     try {
       const g = this._lightTranslate?.group;
       if (!g) return;
+
+      // Respect global visibility toggle from Tweakpane
+      const showGizmo = window.MapShine?.tweakpaneManager?.globalParams?.showLightTranslateGizmo ?? true;
+      if (!showGizmo) {
+        g.visible = false;
+        return;
+      }
 
       // Never show while dragging anything.
       if (this.dragState?.active) {
@@ -3103,6 +3867,39 @@ export class InteractionManager {
     } catch (_) {
     }
 
+    // 0b. Light radius handles hover (cursor affordance)
+    try {
+      if (this._lightRadiusRings?.group?.visible && Array.isArray(this._lightRadiusRings.handles) && this._lightRadiusRings.handles.length) {
+        const prevMask = this.raycaster.layers?.mask;
+        try {
+          this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
+          this.raycaster.layers.enable(0);
+        } catch (_) {
+        }
+
+        const hits = this.raycaster.intersectObjects(this._lightRadiusRings.handles, false);
+
+        try {
+          if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask;
+        } catch (_) {
+        }
+
+        if (hits && hits.length > 0) {
+          const obj = hits[0]?.object;
+          const t = String(obj?.userData?.radiusType || '');
+          const label = (t === 'bright') ? 'Bright Radius' : (t === 'dim' ? 'Dim Radius' : 'Light Radius');
+          this._showUIHoverLabel(label, event.clientX, event.clientY);
+          this.canvasElement.style.cursor = 'ew-resize';
+          return;
+        }
+      }
+    } catch (_) {
+    }
+
+    // If we didn't early-return for gizmo/handle hover, ensure the hover label is hidden.
+    // (We intentionally keep it visible while hovering the relevant handle.)
+    this._hideUIHoverLabel();
+
     // 1. Check Walls (Priority for "near line" detection)
     // Only check walls if we are GM or on Wall Layer? Usually useful for everyone if interactive, but editing is GM.
     // The user said "Foundry VTT... making sure it knows you meant to select that wall".
@@ -3305,6 +4102,19 @@ export class InteractionManager {
           !this._pendingLight?.active
         ) {
           return;
+        }
+
+        // Track last pointer position for paste placement.
+        // Only update when the pointer is actually over the canvas to avoid using
+        // stale values from dragging UI.
+        try {
+          const rect = this.canvasElement.getBoundingClientRect();
+          const inside = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
+          if (inside && !this._isEventFromUI(event)) {
+            this._lastPointerClientX = event.clientX;
+            this._lastPointerClientY = event.clientY;
+          }
+        } catch (_) {
         }
 
         // PERFORMANCE: Skip expensive hover detection if mouse is not over the canvas.
@@ -3615,14 +4425,60 @@ export class InteractionManager {
         // Case 2: Hover (if not dragging object)
         // PERFORMANCE: Only do expensive hover raycasting if mouse is over the canvas.
         // This prevents frame drops when hovering over Tweakpane UI.
-        if (!this.dragState.active || !this.dragState.object) {
+        if ((!this.dragState.active || !this.dragState.object) && this.dragState.mode !== 'radiusEdit') {
           if (isOverCanvas) {
             this.handleHover(event);
           }
           return;
         }
 
-        // Case 3: Object Drag
+        // Case 3a: Radius Edit Drag (special handling for light radius handles)
+        if (this.dragState.mode === 'radiusEdit' && this._lightRadiusRings?.dragging) {
+          this.updateMouseCoords(event);
+          
+          const sel = this._lightRadiusRings.selected;
+          if (sel) {
+            const zoom = this._getEffectiveZoom();
+            const dxPx = (event.clientX - (this._lightRadiusRings.startClientX || 0));
+            const deltaWorld = dxPx / Math.max(zoom, 0.0001);
+
+            const type = this._lightRadiusRings.dragging;
+            const startBright = this._lightRadiusRings.startBright ?? 0;
+            const startDim = this._lightRadiusRings.startDim ?? 0;
+
+            let newBright = startBright;
+            let newDim = startDim;
+
+            if (type === 'bright') {
+              newBright = Math.max(0, startBright + deltaWorld);
+              newBright = Math.min(newBright, startDim);
+            } else {
+              newDim = Math.max(0, startDim + deltaWorld);
+              newDim = Math.max(newDim, startBright);
+            }
+
+            // Snap to grid if Shift is NOT held
+            if (!event.shiftKey) {
+              const gridSize = canvas?.scene?.grid?.size || 100;
+              newBright = Math.round(newBright / gridSize) * gridSize;
+              newDim = Math.round(newDim / gridSize) * gridSize;
+            }
+
+            this._lightRadiusRings.previewBright = newBright;
+            this._lightRadiusRings.previewDim = newDim;
+
+            // Preview the radius change during drag.
+            if (type === 'bright') this._previewRadiusChange(sel, 'bright', newBright);
+            else this._previewRadiusChange(sel, 'dim', newDim);
+
+            // Apply continuously while dragging so lighting updates in real time.
+            // Still throttled + guarded against overlapping updates.
+            this._applyPendingRadiusLive(sel);
+          }
+          return;
+        }
+
+        // Case 3b: Object Drag
         this.dragState.hasMoved = true;
         this.updateMouseCoords(event);
         
@@ -3866,6 +4722,7 @@ export class InteractionManager {
           !this.dragSelect?.active &&
           !this.wallDraw?.active &&
           !this.lightPlacement?.active &&
+          !this.enhancedLightPlacement?.active &&
           !this.mapPointDraw?.active &&
           !this.rightClickState?.active &&
           !this._pendingLight?.active
@@ -3910,6 +4767,17 @@ export class InteractionManager {
           }
 
           return;
+        }
+
+        // Handle Radius Edit drag end
+        if (this.dragState?.mode === 'radiusEdit' && this._lightRadiusRings?.dragging) {
+          this._commitRadiusChange();
+          return;
+        }
+
+        try {
+          this._hideUIHoverLabel();
+        } catch (_) {
         }
 
         // Handle Right Click (HUD toggle)
@@ -4017,6 +4885,8 @@ export class InteractionManager {
         // Handle MapShine Enhanced Light Placement End
         if (this.enhancedLightPlacement.active) {
             this.enhancedLightPlacement.active = false;
+            const placementTool = this.enhancedLightPlacement.tool;
+            this.enhancedLightPlacement.tool = null;
             this.enhancedLightPlacement.previewGroup.visible = false;
 
             // Re-enable camera controls
@@ -4062,15 +4932,28 @@ export class InteractionManager {
             }
 
             try {
-                await enhancedLightsApi.create({
+                const createData = {
                     transform: { x: startF.x, y: startF.y },
                     photometry: { bright, dim, alpha: 1.0, luminosity: 0.5, attenuation: 0.5 },
                     color: '#ffffff',
                     enabled: true,
                     isDarkness: false,
                     targetLayers: 'both'
-                });
-                log.info(`Created MapShine Enhanced Light at (${startF.x.toFixed(1)}, ${startF.y.toFixed(1)}) with dim radius ${dim.toFixed(1)}`);
+                };
+
+                // Sun Light tool: seed with a darkness-driven intensity response.
+                if (placementTool === 'map-shine-sun-light') {
+                    createData.darknessResponse = {
+                        enabled: true,
+                        invert: true,
+                        exponent: 1.0,
+                        min: 0.0,
+                        max: 1.0
+                    };
+                }
+
+                await enhancedLightsApi.create(createData);
+                log.info(`Created MapShine ${placementTool === 'map-shine-sun-light' ? 'Sun Light' : 'Enhanced Light'} at (${startF.x.toFixed(1)}, ${startF.y.toFixed(1)}) with dim radius ${dim.toFixed(1)}`);
             } catch (e) {
                 log.error('Failed to create MapShine Enhanced Light', e);
                 ui.notifications?.error?.('Failed to create MapShine Enhanced Light');
@@ -4575,6 +5458,179 @@ export class InteractionManager {
   async onKeyDown(event) {
     if (this._isEventFromUI(event)) return;
 
+    const key = String(event.key || '').toLowerCase();
+    const isMod = !!(event.ctrlKey || event.metaKey);
+
+    // Copy/Paste for Three-native lights.
+    if (isMod && key === 'c') {
+      try {
+        const sel = this._getSelectedLight();
+        if (!sel) return;
+
+        if (sel.type === 'foundry') {
+          const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
+          if (!doc) return;
+
+          let obj;
+          try {
+            obj = (typeof doc.toObject === 'function') ? doc.toObject() : doc;
+          } catch (_) {
+            obj = doc;
+          }
+
+          let cloned;
+          try {
+            cloned = foundry?.utils?.duplicate ? foundry.utils.duplicate(obj) : JSON.parse(JSON.stringify(obj));
+          } catch (_) {
+            cloned = JSON.parse(JSON.stringify(obj));
+          }
+
+          // Ensure we don't carry IDs across.
+          try { delete cloned._id; } catch (_) {}
+          try { delete cloned.id; } catch (_) {}
+
+          this._lightClipboard = {
+            kind: 'foundry',
+            sourceX: doc.x,
+            sourceY: doc.y,
+            data: cloned
+          };
+        } else if (sel.type === 'enhanced') {
+          const api = window.MapShine?.enhancedLights;
+          if (!api?.get) return;
+          const data = await api.get(sel.id);
+          if (!data) return;
+
+          let cloned;
+          try {
+            cloned = JSON.parse(JSON.stringify(data));
+          } catch (_) {
+            cloned = data;
+          }
+
+          try { delete cloned.id; } catch (_) {}
+          // Never preserve Foundry overrides/links when duplicating.
+          try { delete cloned.linkedFoundryLightId; } catch (_) {}
+          try { delete cloned.overrideFoundry; } catch (_) {}
+
+          const sx = cloned?.transform?.x;
+          const sy = cloned?.transform?.y;
+          this._lightClipboard = {
+            kind: 'enhanced',
+            sourceX: Number.isFinite(sx) ? sx : null,
+            sourceY: Number.isFinite(sy) ? sy : null,
+            data: cloned
+          };
+        }
+
+        this._consumeKeyEvent(event);
+      } catch (_) {
+      }
+      return;
+    }
+
+    if (isMod && key === 'v') {
+      try {
+        const clip = this._lightClipboard;
+        if (!clip || !clip.kind || !clip.data) return;
+
+        const canEditScene = (() => {
+          try {
+            if (!canvas?.scene || !game?.user) return false;
+            if (game.user.isGM) return true;
+            if (typeof canvas.scene.canUserModify === 'function') return canvas.scene.canUserModify(game.user, 'update');
+          } catch (_) {
+          }
+          return false;
+        })();
+
+        if (!canEditScene) return;
+
+        // Determine paste position.
+        let pasteF = null;
+        try {
+          if (Number.isFinite(this._lastPointerClientX) && Number.isFinite(this._lastPointerClientY)) {
+            const w = this.screenToWorld(this._lastPointerClientX, this._lastPointerClientY);
+            if (w) pasteF = Coordinates.toFoundry(w.x, w.y);
+          }
+        } catch (_) {
+        }
+
+        if (!pasteF) {
+          // Fallback: offset from source position.
+          const grid = canvas?.dimensions?.size ?? 100;
+          const dx = grid * 0.5;
+          const dy = grid * 0.5;
+          const sx = Number.isFinite(clip.sourceX) ? clip.sourceX : (canvas?.dimensions?.sceneRect?.x ?? 0) + grid;
+          const sy = Number.isFinite(clip.sourceY) ? clip.sourceY : (canvas?.dimensions?.sceneRect?.y ?? 0) + grid;
+          pasteF = { x: sx + dx, y: sy + dy };
+        }
+
+        if (clip.kind === 'foundry') {
+          const base = clip.data;
+          if (!canvas?.scene?.createEmbeddedDocuments) return;
+
+          const createData = { ...base, x: pasteF.x, y: pasteF.y };
+          try { delete createData._id; } catch (_) {}
+          try { delete createData.id; } catch (_) {}
+
+          const created = await canvas.scene.createEmbeddedDocuments('AmbientLight', [createData]);
+          const newDoc = Array.isArray(created) ? created[0] : null;
+          const newId = newDoc?.id;
+          if (!newId) return;
+
+          // Select it (sprite may not exist yet if the icon texture is still loading).
+          this.clearSelection();
+          this.selection.add(newId);
+          const sprite = this.lightIconManager?.lights?.get?.(newId) || null;
+          if (sprite) {
+            this.selectObject(sprite);
+          } else {
+            const ringUI = window.MapShine?.lightRingUI;
+            ringUI?.show?.({ type: 'foundry', id: String(newId) }, null);
+          }
+        } else if (clip.kind === 'enhanced') {
+          const api = window.MapShine?.enhancedLights;
+          if (!api?.create) return;
+          const base = clip.data;
+
+          const createData = { ...base };
+          try { delete createData.id; } catch (_) {}
+          try { delete createData.linkedFoundryLightId; } catch (_) {}
+          try { delete createData.overrideFoundry; } catch (_) {}
+
+          // EnhancedLightsApi accepts either x/y or transform.x/y.
+          createData.transform = { x: pasteF.x, y: pasteF.y };
+
+          const newLight = await api.create(createData);
+          const newId = newLight?.id;
+          if (!newId) return;
+
+          this.clearSelection();
+          this.selection.add(String(newId));
+
+          // Prefer selecting via sprite when available, but we can always open the ring.
+          try {
+            const mgr = window.MapShine?.enhancedLightIconManager;
+            const sprite = mgr?.lights?.get?.(String(newId)) || null;
+            if (sprite) {
+              this.selectObject(sprite);
+            } else {
+              const ringUI = window.MapShine?.lightRingUI;
+              ringUI?.show?.({ type: 'enhanced', id: String(newId) }, null);
+            }
+          } catch (_) {
+            const ringUI = window.MapShine?.lightRingUI;
+            ringUI?.show?.({ type: 'enhanced', id: String(newId) }, null);
+          }
+        }
+
+        this._consumeKeyEvent(event);
+      } catch (_) {
+      }
+      return;
+    }
+
     // Intercept Delete/Backspace early so Foundry doesn't also process it.
     // (Otherwise you can get double-deletes and "does not exist" notifications.)
     if ((event.key === 'Delete' || event.key === 'Backspace') && (this.mapPointDraw.active || this.selection.size > 0)) {
@@ -4852,7 +5908,10 @@ export class InteractionManager {
     } else if (sprite.userData.lightId) {
         id = sprite.userData.lightId;
         // TODO: Visual selection for lights
-        if (sprite.material) sprite.material.color.set(0x8888ff); // Tint blue
+        try {
+          if (sprite?.material?.color?.set) sprite.material.color.set(0x8888ff); // Tint blue
+        } catch (_) {
+        }
 
         // Scale bump on selection so it reads clearly.
         try {
@@ -4876,7 +5935,7 @@ export class InteractionManager {
     } else if (sprite.userData.enhancedLightId) {
         id = sprite.userData.enhancedLightId;
         // Visual selection for MapShine enhanced lights
-        if (sprite.material) sprite.material.color.set(0x44aaff); // Tint blue (MapShine color)
+        // Do not tint here; enhanced light icons may use ShaderMaterial with no .color.
 
         try {
           const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
@@ -4935,7 +5994,10 @@ export class InteractionManager {
       // Check Foundry Light
       if (this.lightIconManager && this.lightIconManager.lights.has(id)) {
           const sprite = this.lightIconManager.lights.get(id);
-          if (sprite && sprite.material) sprite.material.color.set(0xffffff); // Reset tint
+          try {
+            if (sprite?.material?.color?.set) sprite.material.color.set(0xffffff); // Reset tint
+          } catch (_) {
+          }
 
           // Reset scale if we stored a baseScale.
           try {
@@ -4950,7 +6012,7 @@ export class InteractionManager {
       const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
       if (enhancedLightIconManager && enhancedLightIconManager.lights.has(id)) {
           const sprite = enhancedLightIconManager.lights.get(id);
-          if (sprite && sprite.material) sprite.material.color.set(0x44aaff); // Reset to MapShine blue
+          // Do not reset tint here; enhanced light icons may use ShaderMaterial with no .color.
 
           try {
             enhancedLightIconManager?.setSelected?.(id, false);

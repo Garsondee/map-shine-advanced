@@ -3,7 +3,7 @@
 ## Goal
 Build a lighting system that is designed **for MapShine’s Three.js renderer first**, not for Foundry VTT parity.
 
-## Implementation Status (as of 2026-01-12)
+## Implementation Status (as of 2026-01-14)
 
 ### Implemented
 - **Foundry light rendering in Three.js**
@@ -15,29 +15,44 @@ Build a lighting system that is designed **for MapShine’s Three.js renderer fi
 - **Three.js authoring basics (Gameplay Mode)**
   - Three-side selection/drag for light icons in `InteractionManager`.
   - Three-side placement previews for both Foundry lights and MapShine enhanced lights.
-- **Enhanced light editor UX (early)**
-  - `EnhancedLightInspector` exists (dockable/overlay panel) and is shown when selecting a MapShine enhanced light.
-  - `EnhancedLightIconManager` exists and draws a simple in-world gizmo (dim-radius fill + border + icon).
+- **In-world radial “Ring UI” (world-anchored quick edit)**
+  - `OverlayUIManager` exists for world-anchored DOM overlays.
+  - `LightRingUI` is implemented and can show for both Foundry lights and MapShine enhanced lights.
+  - Details panel includes common photometry fields plus cookie and advanced shaping controls.
+- **Transform gizmo (translate) for lights**
+  - `InteractionManager` includes an in-world translate gizmo (red X, green Y, center handle) for selected lights.
+  - Gizmo is offset from the Ring UI so lights remain movable while the overlay is open.
+- **Enhanced light editor UX**
+  - `EnhancedLightIconManager` draws an in-world gizmo (dim-radius fill + border + icon).
+  - `EnhancedLightInspector` still exists, but the Ring UI is the preferred workflow.
+- **Enhanced light data model + persistence (scene flags)**
+  - `EnhancedLightsApi` provides CRUD for MapShine enhanced lights in scene flags.
+  - Enhanced light schema supports cookies and per-light shaping controls.
 
 ### Partially Implemented
 - **Cookies / gobos for MapShine enhanced lights**
-  - Schema fields exist (`cookieTexture`, `cookieRotation`, `cookieScale`) and `ThreeLightSource` supports an optional cookie texture.
-  - Authoring UX is currently via the inspector (text path + numeric fields), not a curated picker.
+  - Cookie texture projection is supported by `ThreeLightSource`.
+  - Additional cookie shaping controls are supported (strength/contrast/gamma/invert + optional colorize).
+  - Authoring UX is functional (Ring UI fields), but still missing a curated picker / asset browser workflow.
 - **Layer routing (ground/overhead/both)**
-  - `targetLayers` exists in the enhanced light inspector and metadata is stored in `LightingEffect`.
-  - Rendering-level behavior is not yet fully enforced across the full scene pipeline.
+  - `targetLayers` exists and is stored/propagated through `LightingEffect`.
+  - Rendering-level behavior is not yet fully enforced across the full scene pipeline (light buffers still effectively behave as a unified pass).
+
+- **Per-light output shaping beyond Foundry parity**
+  - Implemented additional per-light controls used by the shader (e.g. `outputGain`, `outerWeight`, `innerWeight`).
+  - Still missing “authoring-grade” controls like falloff ramps/curves and blend modes.
 
 ### Not Yet Implemented (Planned)
-- **In-world radial “Ring UI”** (the elegant circular/radial quick-edit UI described below)
-- **Transform gizmos (W/E/R style)** for lights (translate/rotate/scale handles)
+- **Transform gizmos (W/E/R style)** for lights (rotate/scale handles)
 - **Inner/outer radius draggable rings** (separate from the current visualization ring)
 - **Falloff curve editor + baked 1D ramp texture workflow**
 - **Advanced light types** (spot, area, decals) and volumetric controls
 - **Static light caching** (`Texture_StaticLight`) and invalidation policy
 
 ### Current Behavior Note (why you see a dialog)
-- **Double-click on a Foundry light icon** currently calls `light.sheet.render(true)` (Foundry’s config sheet/dialog).
-- The planned “ring UI” is not hooked up for Foundry lights or enhanced lights yet, so selection shows gizmos/inspector (enhanced) or just selection (foundry), while double-click opens the Foundry sheet.
+- **Single click on a light** shows the MapShine Ring UI (Foundry and enhanced).
+- **For Foundry lights**, there are still workflows that can open Foundry’s config sheet (e.g. forced-sheet modifier paths).
+- MapShine enhanced lights are authored and persisted via scene flags; Foundry light documents are still supported as an input/source.
 
 This means:
 - Lighting is **author-authored** (map maker / GM), not derived from Foundry documents.
@@ -393,17 +408,295 @@ Two good patterns:
 - **Inline dropdown**:
   - Tap Animation wedge to open a small dropdown list anchored to the ring.
 
-Animation parameters for the ring:
-- **Type**: none / torch / candle / neon buzz / pulse / siren / etc.
-- **Speed**: compact slider.
-- **Intensity**: compact slider.
-- **Color shift** toggle (if supported by that animation).
+##### Animation Authoring UX (Anim Dialog)
+We also want a **separate “Anim” dialog** (opened by the Ring UI’s `Anim` button) that exposes a much larger parameter set than the ring itself.
 
-##### Presets (In-Ring)
-Add a **preset chip** at the top of the ring (e.g. “Torch”, “Neon”, “Window Beam”, “Custom”).
-- Tap to cycle presets.
-- Long-press to open the preset list.
+Goals:
+- Editing animation should be **fast**, **safe**, and **non-destructive**.
+- Any motion animation must be expressed as a **reliable loop** around an anchor so the light **never drifts** away from its intended placement.
+- The ring remains the “quick tweak” surface; the Anim dialog is for “designing behavior”.
 - Applying presets should keep transform and only change photometry/color/animation unless user explicitly chooses “Replace Everything”.
+
+Anim dialog layout (proposal):
+- **Header**:
+  - Enabled toggle
+  - Preset dropdown (Torch / Candle / Neon / Alarm / Window Beam / Magical Pulse / Custom)
+  - Seed (int) + Randomize button
+  - Play/Pause preview + Preview speed multiplier
+- **Groups** (tabs or collapsible panels):
+  - Global
+  - Motion
+  - Brightness
+  - Color
+  - Cookie
+  - Spot/Beam (spotlights only)
+  - Triggers
+  - Sync/Loop
+  - Debug
+
+Safety model (non-destructive, drift-free by construction):
+- Store a per-light **anchor** (base transform + base photometry + base color + base cookie state).
+- Animation evaluation outputs *only modifiers* (never writes back to the base values during update):
+  - position offset: `anchorPos + animatedOffset`
+  - rotation offset (cookie rotation / spot aim): `anchorRot + animatedRotOffset`
+  - intensity multiplier: `baseIntensity * m`
+  - bright/dim ratio modifier (optional)
+  - color shift modifier (HSV/Kelvin/RGB blend)
+  - cookie transform modifiers (uv offset / rotation / scale / warp)
+- Provide explicit actions:
+  - **Reset to Anchor** (drops all offsets to zero)
+  - **Re-capture Anchor from Current Base** (updates anchor from base values)
+  - **Bake Preview Into Base** (optional, guarded)
+
+#### Anim Parameter Catalog (Wide Net)
+This list is intentionally expansive; it’s a design target for the Anim dialog.
+
+##### 1) Global Animation Controls
+- **Enabled**: boolean
+- **Animation type**:
+  - none
+  - Foundry parity types (torch, flame, pulse, siren, etc.)
+  - custom id (library-driven)
+- **Seed / determinism**:
+  - seed value (int)
+  - randomize button
+  - deterministic mode (seeded hash only, never `Math.random` during updates)
+- **Speed**:
+  - global speed multiplier
+  - per-channel speed (motion / brightness / color / cookie)
+- **Amount**:
+  - global amount multiplier
+  - per-channel amount
+- **Phase**:
+  - phase offset (0..1)
+  - phase randomize
+- **Loop mode**:
+  - loop
+  - ping-pong
+  - stepped (hold)
+- **Loop duration**:
+  - seconds
+  - BPM mode (beats per minute)
+  - beat subdivision
+- **Waveform selection** (global default):
+  - sine
+  - triangle
+  - saw
+  - pulse (with duty)
+  - noise (looped)
+  - curve (custom)
+- **Clamps**:
+  - clamp min/max (per output)
+  - soft clamp / ease into clamp
+- **High-level toggles**:
+  - affect intensity
+  - affect color
+  - affect position
+  - affect cookie
+
+##### 2) Motion Animation (Position Offsets)
+Constraints:
+- All motion is an **offset around anchor**.
+- Must be mathematically closed over the loop (no drift).
+
+- **Motion enabled**: boolean
+- **Space**:
+  - world offsets
+  - local offsets (for oriented/spot lights)
+- **Amplitude**:
+  - max offset distance (px)
+  - independent ampX / ampY
+- **Safety**:
+  - hard clamp max offset
+  - soft clamp (ease near boundary)
+  - drift guard (enforce mean offset = 0 over cycle)
+
+Looping motion patterns:
+- **Orbit**:
+  - radius
+  - angular speed
+  - clockwise
+  - ellipse ratio
+  - start angle
+- **Lissajous**:
+  - ampX / ampY
+  - freqX / freqY
+  - phaseX / phaseY
+- **Figure-8**:
+  - width / height
+  - speed
+- **Bob / Sway**:
+  - sway amplitude
+  - bob amplitude
+  - sway speed
+- **Looped noise jitter**:
+  - noise amplitude
+  - noise frequency
+  - noise type (value/simplex)
+  - smoothing
+  - loop length
+- **Stepped patrol**:
+  - step size (grid / half-grid / pixels)
+  - dwell time
+  - deterministic path pattern (square/circle/seeded)
+
+##### 3) Brightness / Photometry Animation
+- **Intensity modulation**:
+  - amplitude
+  - waveform
+  - duty cycle (for pulse)
+  - floor clamp (min multiplier)
+  - ceiling clamp (max multiplier)
+  - bias/gamma (weight toward bright or dim)
+- **Flicker library**:
+  - torch
+  - candle
+  - fluorescent buzz
+  - neon sputter
+  - magical shimmer
+  - lightning flash (rare spikes)
+- **Radius modulation**:
+  - dim radius modulation amplitude
+  - bright radius modulation amplitude
+  - preserve total energy option (radius up => intensity down)
+- **Burst events**:
+  - burst probability
+  - burst intensity
+  - burst duration
+  - cooldown
+- **Noise controls**:
+  - noise scale
+  - noise octaves
+  - noise smoothing
+
+##### 4) Color Animation
+Color animation is applied as a controlled shift from the base color.
+
+- **Mode**:
+  - hue shift
+  - temperature shift (Kelvin)
+  - RGB tint oscillation
+  - palette cycling
+  - two-color blend
+- **Hue shift**:
+  - amplitude (degrees)
+  - speed
+  - waveform
+  - saturation compensation
+- **Temperature shift**:
+  - base temperature
+  - amplitude
+  - speed
+- **Saturation / value modulation**:
+  - sat amplitude
+  - value amplitude
+  - clamp
+- **Palette cycling**:
+  - palette list
+  - step duration
+  - interpolation (hard/smooth)
+- **Noise**:
+  - RGB jitter amplitude
+  - channel toggles
+
+##### 5) Cookie / Gobo Animation (Cookie Look)
+Treat the cookie as a mini projector; animate its transform and shaping.
+
+- **Cookie enabled**: boolean
+- **Texture**: asset id
+- **UV transform animation**:
+  - translateX / translateY amplitude
+  - translate speed
+  - rotate speed
+  - rotate wobble amplitude
+  - scale pulse amplitude
+  - anisotropic scale (stretch)
+- **Shaping modulation**:
+  - strength modulation
+  - contrast modulation
+  - gamma modulation
+  - invert pulses (rare)
+  - colorize toggling
+  - tint drift (hue/temp)
+- **Procedural cookie warp**:
+  - warp strength
+  - warp scale
+  - warp speed
+  - flow direction
+  - turbulence octaves
+- **Procedural generators (fallback)**:
+  - stripes (speed/width/softness)
+  - caustics ripples
+  - rotating fan blades
+  - TV static breakup
+  - leaf dapple (wind-driven)
+
+##### 6) Spot/Beam Animation (Spotlights)
+- **Aim wobble**:
+  - yaw amplitude
+  - pitch amplitude (if applicable)
+  - wobble speed
+  - wobble noise
+- **Cone animation**:
+  - cone angle pulse amplitude
+  - penumbra pulse amplitude
+  - breathing speed
+- **Volumetric (future)**:
+  - density pulse
+  - volumetric noise speed
+  - anisotropy wobble
+
+##### 7) Environment / System Coupling
+- **Scene darkness response**:
+  - intensity response curve
+  - temperature response curve
+- **Outdoors / Roof response**:
+  - outdoor-only / indoor-only
+  - roof visible gating (roofAlphaTarget)
+- **Weather coupling**:
+  - wind increases flicker
+  - rain reduces flame/pulse survival
+  - cloud cover dims window beams
+- **Proximity coupling**:
+  - brighten when tokens nearby
+  - pulse when a controlled token enters range
+  - distance curve
+
+##### 8) Triggered / Event-Driven Animation
+- **Trigger sources**:
+  - on token enters radius
+  - on combat start / round change
+  - on door open/close
+  - on macro / keybind
+- **Envelope**:
+  - attack
+  - decay
+  - sustain
+  - release
+- **One-shot vs sustained**:
+  - one-shot flash
+  - loop while condition is true
+  - cooldown
+
+##### 9) Synchronization / Loop Reliability
+- **Phase locking**:
+  - per-light (default)
+  - scene-synced (all clients consistent)
+  - sync group id (multiple lights share phase)
+- **Exact loop closure**:
+  - exact-period mode
+  - explicit noise loop length
+- **Safety**:
+  - never write animated state back into base values
+  - Bake button is explicit, not automatic
+
+##### 10) Debug / Visualization
+- show anchor vs animated position
+- show offset vector
+- show intensity multiplier readout
+- show current phase/time
+- freeze animation
+- solo this light’s animation
 
 ##### Multi-Light Editing
 When multiple lights are selected:

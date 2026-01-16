@@ -46,6 +46,21 @@ function _asFiniteNumber(x, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function _coerceAnimation(srcAnim) {
+  if (!srcAnim || typeof srcAnim !== 'object') return undefined;
+
+  // Preserve arbitrary animation payloads for MapShine-native authoring.
+  // The renderer will selectively consume fields it understands.
+  const a = { ...srcAnim };
+
+  if ('speed' in a) a.speed = _asFiniteNumber(a.speed, a.speed);
+  if ('intensity' in a) a.intensity = _asFiniteNumber(a.intensity, a.intensity);
+  if ('seed' in a) a.seed = _asFiniteNumber(a.seed, a.seed);
+  if ('reverse' in a) a.reverse = a.reverse === true;
+
+  return a;
+}
+
 /**
  * @returns {{version:number, lights:any[]}}
  */
@@ -145,11 +160,15 @@ export class MapShineLightAdapter {
             ? _asFiniteNumber(src.luminosity ?? src.photometry?.luminosity, 0.5)
             : undefined
         },
-        animation: (src.animation && typeof src.animation === 'object')
+        animation: _coerceAnimation(src.animation),
+        // Darkness-driven intensity response ("Sun Light").
+        darknessResponse: (src.darknessResponse && typeof src.darknessResponse === 'object')
           ? {
-              type: src.animation.type,
-              speed: _asFiniteNumber(src.animation.speed, undefined),
-              intensity: _asFiniteNumber(src.animation.intensity, undefined)
+              enabled: src.darknessResponse.enabled === true,
+              invert: src.darknessResponse.invert !== false,
+              exponent: _asFiniteNumber(src.darknessResponse.exponent, 1.0),
+              min: _asFiniteNumber(src.darknessResponse.min, 0.0),
+              max: _asFiniteNumber(src.darknessResponse.max, 1.0)
             }
           : undefined,
         isStatic: src.isStatic === true,
@@ -172,6 +191,7 @@ export class MapShineLightAdapter {
         cookieTexture: (typeof src.cookieTexture === 'string' && src.cookieTexture) ? src.cookieTexture : undefined,
         cookieRotation: (src.cookieRotation !== undefined) ? _asFiniteNumber(src.cookieRotation, undefined) : undefined,
         cookieScale: (src.cookieScale !== undefined) ? _asFiniteNumber(src.cookieScale, undefined) : undefined,
+        cookieTint: (typeof src.cookieTint === 'string' && src.cookieTint) ? src.cookieTint : undefined,
         // Cookie shaping controls (boost visibility)
         cookieStrength: (src.cookieStrength !== undefined)
           ? _asFiniteNumber(src.cookieStrength, DEFAULT_COOKIE_STRENGTH)

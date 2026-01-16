@@ -101,7 +101,7 @@ export class ControlsIntegration {
       const showLighting = (layerName === 'LightingLayer' || layerName === 'lighting') && !isMapMakerMode;
 
       const tool = ui?.controls?.tool?.name ?? game.activeTool;
-      const mapshineToolActive = tool === 'map-shine-enhanced-light';
+      const mapshineToolActive = tool === 'map-shine-enhanced-light' || tool === 'map-shine-sun-light';
 
       const lightIconManager = window.MapShine?.lightIconManager;
       if (lightIconManager?.setVisibility) {

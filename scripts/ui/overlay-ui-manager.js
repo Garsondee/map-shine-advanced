@@ -126,6 +126,15 @@ export class OverlayUIManager {
 
   /**
    * @param {string} id
+   * @returns {boolean}
+   */
+  isVisible(id) {
+    const h = this.overlays.get(String(id));
+    return !!h?.visible;
+  }
+
+  /**
+   * @param {string} id
    * @param {THREE.Object3D|null} object3d
    */
   setAnchorObject(id, object3d) {

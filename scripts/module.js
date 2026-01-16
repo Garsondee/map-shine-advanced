@@ -272,6 +272,18 @@ Hooks.once('init', async function() {
         }
       });
 
+      ensureTool(lightingControls, {
+        name: 'map-shine-sun-light',
+        order: 1.6,
+        title: 'MapShine Sun Light',
+        icon: 'fa-solid fa-sun',
+        visible: game.user.isGM,
+        onChange: () => {
+          try { ui?.controls?.render?.(true); } catch (_) {}
+          try { window.MapShine?.controlsIntegration?.inputRouter?.autoUpdate?.(); } catch (_) {}
+        }
+      });
+
     } catch (e) {
       console.error('Map Shine: failed to register scene control buttons', e);
     }

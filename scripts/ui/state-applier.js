@@ -336,17 +336,16 @@ export class StateApplier {
         const progress = (hour - 5) / 2;
         targetDarkness = 0.95 - progress * 0.65;
       } else if (hour >= 7 && hour < 8) {
-        // Early morning: 7am (0.3) -> 8am (0.2)
+        // Early morning: 7am (0.3) -> 8am (0.0)
         const progress = (hour - 7) / 1;
-        targetDarkness = 0.3 - progress * 0.1;
+        targetDarkness = 0.3 - progress * 0.3;
       } else if (hour >= 8 && hour < 17) {
-        // Day: 8am (0.2) -> 5pm (0.15)
-        const progress = (hour - 8) / 9;
-        targetDarkness = 0.2 - progress * 0.05;
+        // Day: 8am -> 5pm is full daylight
+        targetDarkness = 0.0;
       } else if (hour >= 17 && hour < 19) {
-        // Dusk: 5pm (0.15) -> 7pm (0.6)
+        // Dusk: 5pm (0.0) -> 7pm (0.6)
         const progress = (hour - 17) / 2;
-        targetDarkness = 0.15 + progress * 0.45;
+        targetDarkness = 0.0 + progress * 0.6;
       } else if (hour >= 19 && hour < 21) {
         // Evening: 7pm (0.6) -> 9pm (0.8)
         const progress = (hour - 19) / 2;

@@ -17,6 +17,7 @@ const DEFAULT_COOKIE_CONTRAST = 1.0;
 const DEFAULT_COOKIE_GAMMA = 1.0;
 const DEFAULT_COOKIE_INVERT = false;
 const DEFAULT_COOKIE_COLORIZE = false;
+const DEFAULT_COOKIE_TINT = '#ffffff';
 
 const DEFAULT_OUTPUT_GAIN = 1.0;
 const DEFAULT_OUTER_WEIGHT = 0.5;
@@ -38,6 +39,34 @@ function _randomId() {
 
 function _isObject(x) {
   return !!x && typeof x === 'object' && !Array.isArray(x);
+}
+
+function _clamp01(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(0, Math.min(1, v));
+}
+
+function _normalizeDarknessResponse(cur, next) {
+  const c0 = _isObject(cur) ? cur : {};
+  const n0 = _isObject(next) ? next : {};
+  const out = { ...c0, ...n0 };
+
+  // Defaults chosen to represent "Sun Light" behavior:
+  // - enabled off by default
+  // - invert on means "day=1" (scene darkness 0) and "night=0" (scene darkness 1)
+  if (out.enabled !== undefined) out.enabled = out.enabled === true;
+  if (out.invert !== undefined) out.invert = out.invert !== false;
+
+  if (out.exponent !== undefined) {
+    const e = Number(out.exponent);
+    out.exponent = Number.isFinite(e) ? Math.max(0.01, e) : 1.0;
+  }
+
+  if (out.min !== undefined) out.min = _clamp01(out.min);
+  if (out.max !== undefined) out.max = _clamp01(out.max);
+
+  return out;
 }
 
 function _canEditScene() {
@@ -179,6 +208,10 @@ export function createEnhancedLightsApi() {
           luminosity: Number.isFinite(data.luminosity) ? data.luminosity : (Number.isFinite(data.photometry?.luminosity) ? data.photometry.luminosity : 0.5)
         },
         animation: _isObject(data.animation) ? data.animation : undefined,
+        // Darkness-driven response ("Sun Light" intensity behavior)
+        darknessResponse: _isObject(data.darknessResponse)
+          ? _normalizeDarknessResponse(undefined, data.darknessResponse)
+          : undefined,
         isStatic: data.isStatic === true,
         castShadows: data.castShadows === true,
         shadowQuality: data.shadowQuality,
@@ -193,6 +226,9 @@ export function createEnhancedLightsApi() {
           : DEFAULT_COOKIE_TEXTURE,
         cookieRotation: Number.isFinite(data.cookieRotation) ? data.cookieRotation : undefined,
         cookieScale: Number.isFinite(data.cookieScale) ? data.cookieScale : undefined,
+        cookieTint: (typeof data.cookieTint === 'string' && data.cookieTint)
+          ? data.cookieTint
+          : DEFAULT_COOKIE_TINT,
         // Cookie shaping controls (boost visibility)
         cookieStrength: Number.isFinite(data.cookieStrength) ? data.cookieStrength : DEFAULT_COOKIE_STRENGTH,
         cookieContrast: Number.isFinite(data.cookieContrast) ? data.cookieContrast : DEFAULT_COOKIE_CONTRAST,
@@ -241,6 +277,10 @@ export function createEnhancedLightsApi() {
         ? (changes.cookieEnabled === true)
         : (cur.cookieEnabled === true);
 
+      const normalizedCookieTint = (changes.cookieTint !== undefined)
+        ? ((typeof changes.cookieTint === 'string' && changes.cookieTint) ? changes.cookieTint : DEFAULT_COOKIE_TINT)
+        : (cur.cookieTint ?? DEFAULT_COOKIE_TINT);
+
       const normalizedOutputGain = (changes.outputGain !== undefined)
         ? (Number.isFinite(changes.outputGain) ? changes.outputGain : DEFAULT_OUTPUT_GAIN)
         : (Number.isFinite(cur.outputGain) ? cur.outputGain : DEFAULT_OUTPUT_GAIN);
@@ -278,6 +318,7 @@ export function createEnhancedLightsApi() {
         cookieTexture: normalizedCookieTexture,
         cookieRotation: normalizedCookieRotation,
         cookieScale: normalizedCookieScale,
+        cookieTint: normalizedCookieTint,
         cookieStrength: normalizedCookieStrength,
         cookieContrast: normalizedCookieContrast,
         cookieGamma: normalizedCookieGamma,
@@ -294,7 +335,10 @@ export function createEnhancedLightsApi() {
           ...(changes.photometry || {}),
           dim: (changes.dim !== undefined) ? changes.dim : ((changes.photometry && changes.photometry.dim !== undefined) ? changes.photometry.dim : (cur.photometry?.dim ?? 0)),
           bright: (changes.bright !== undefined) ? changes.bright : ((changes.photometry && changes.photometry.bright !== undefined) ? changes.photometry.bright : (cur.photometry?.bright ?? 0))
-        }
+        },
+        darknessResponse: (changes.darknessResponse !== undefined)
+          ? _normalizeDarknessResponse(cur.darknessResponse, changes.darknessResponse)
+          : cur.darknessResponse
       };
 
       delete next.x;

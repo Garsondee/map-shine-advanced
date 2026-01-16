@@ -40,6 +40,14 @@ export class LightingEffect extends EffectBase {
       darknessEffect: 0.65, // Scales Foundry's darknessLevel
       darknessLevel: 0.0, // Read-only mostly, synced from canvas
 
+      // Light Animation Behaviour
+      // Global wind coupling for motion-animated lights (e.g. cableswing).
+      // Per-light motion tuning lives under document.config.animation.
+      lightAnimWindInfluence: 1.0,
+      // Controls how aggressively the _Outdoors mask gates wind:
+      // outdoorFactor = pow(outdoorsMask, lightAnimOutdoorPower)
+      lightAnimOutdoorPower: 2.0,
+
       // Outdoor brightness control: adjusts outdoor areas relative to darkness level
       // At darkness 0: outdoors *= outdoorBrightness (boost daylight)
       // At darkness 1: outdoors *= (2.0 - outdoorBrightness) (dim night)
@@ -58,6 +66,12 @@ export class LightingEffect extends EffectBase {
 
       negativeDarknessStrength: 1.0, // Controls subtractive darkness strength
       darknessPunchGain: 2.0,
+
+      // Sun Lights (indoor fill)
+      // Boost applied only to interior (low outdoors mask) regions.
+      sunIndoorGain: 1.0,
+      // Blur radius in pixels applied to the sun light buffer to soften edges.
+      sunBlurRadiusPx: 10.0,
 
       debugShowLightBuffer: undefined,
       debugLightBufferExposure: undefined,
@@ -79,13 +93,16 @@ export class LightingEffect extends EffectBase {
     this.mapshineDarknessSources = new Map();
     
     this.lightScene = null;     
+    this.sunLightScene = null;
     this.darknessScene = null;  
     this.darknessTarget = null; 
+    this.sunLightTarget = null;
     this.roofAlphaTarget = null; 
     this.weatherRoofAlphaTarget = null;
     this.ropeMaskTarget = null;
     this.tokenMaskTarget = null;
     this.masksTarget = null;
+    
     this._quadMesh = null;
 
     this.outdoorsMask = null;
@@ -131,7 +148,7 @@ export class LightingEffect extends EffectBase {
     /**
      * Metadata for MapShine-native lights (targetLayers, cookies, etc.).
      * Keyed by the prefixed id (e.g., 'mapshine:abc123').
-     * @type {Map<string, {targetLayers: 'ground'|'overhead'|'both', cookieTexture?: string, cookieRotation?: number, cookieScale?: number}>}
+     * @type {Map<string, {targetLayers: 'ground'|'overhead'|'both', cookieTexture?: string, cookieRotation?: number, cookieScale?: number, cookieTint?: string}>}
      */
     this._mapshineLightMeta = new Map();
 
@@ -160,6 +177,18 @@ export class LightingEffect extends EffectBase {
           label: 'Darkness Response',
           type: 'inline',
           parameters: ['darknessEffect', 'outdoorBrightness', 'negativeDarknessStrength', 'darknessPunchGain']
+        },
+        {
+          name: 'sun',
+          label: 'Sun Lights (Indoor Fill)',
+          type: 'inline',
+          parameters: ['sunIndoorGain', 'sunBlurRadiusPx']
+        },
+        {
+          name: 'lightAnim',
+          label: 'Light Animation Behaviour',
+          type: 'inline',
+          parameters: ['lightAnimWindInfluence', 'lightAnimOutdoorPower']
         },
         {
           name: 'lightning',
@@ -191,6 +220,8 @@ export class LightingEffect extends EffectBase {
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
         darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.65, label: 'Darkness Effect' },
         outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.0, label: 'Outdoor Brightness' },
+        lightAnimWindInfluence: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.0, label: 'Wind Influence' },
+        lightAnimOutdoorPower: { type: 'slider', min: 0, max: 6, step: 0.25, default: 2.0, label: 'Outdoor Power' },
         lightningOutsideEnabled: { type: 'boolean', default: true, label: 'Enabled' },
         lightningOutsideGain: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.25, label: 'Flash Gain' },
         lightningOutsideShadowEnabled: { type: 'boolean', default: true, label: 'Edge Shadows' },
@@ -200,6 +231,8 @@ export class LightingEffect extends EffectBase {
         lightningOutsideShadowInvert: { type: 'boolean', default: false, label: 'Invert Side' },
         negativeDarknessStrength: { type: 'slider', min: 0, max: 3, step: 0.1, default: 1.0, label: 'Negative Darkness Strength' },
         darknessPunchGain: { type: 'slider', min: 0, max: 10, step: 0.1, default: 2.0, label: 'Darkness Punch Gain' },
+        sunIndoorGain: { type: 'slider', min: 0, max: 20, step: 0.25, default: 1.0, label: 'Indoor Gain' },
+        sunBlurRadiusPx: { type: 'slider', min: 0, max: 40, step: 1, default: 10.0, label: 'Blur Radius (px)' },
         debugShowLightBuffer: { type: 'boolean', default: false },
         debugLightBufferExposure: { type: 'number', default: 1.0 },
         debugShowDarknessBuffer: { type: 'boolean', default: false },
@@ -221,6 +254,11 @@ export class LightingEffect extends EffectBase {
 
     this.lightScene = new THREE.Scene();
     this.lightScene.background = new THREE.Color(0x000000); 
+
+    // Separate buffer for Sun Lights (indoor fill). We composite this only into
+    // indoor areas so Sun Lights don't over-brighten outdoors.
+    this.sunLightScene = new THREE.Scene();
+    this.sunLightScene.background = new THREE.Color(0x000000);
 
     this.darknessScene = new THREE.Scene();
     this.darknessScene.background = new THREE.Color(0x000000);
@@ -272,6 +310,7 @@ export class LightingEffect extends EffectBase {
       uniforms: {
         tDiffuse: { value: null }, 
         tLight: { value: null },   
+        tSunLight: { value: null },
         tDarkness: { value: null }, 
         tMasks: { value: null },
         tWindowLight: { value: null },
@@ -303,6 +342,8 @@ export class LightingEffect extends EffectBase {
         uCompositeTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         uViewportHeight: { value: 1024.0 },
         uOutdoorBrightness: { value: 1.5 },
+        uSunIndoorGain: { value: 1.0 },
+        uSunBlurRadiusPx: { value: 10.0 },
         uLightningFlash01: { value: 0.0 },
         uLightningOutsideGain: { value: 1.25 },
         uLightningStrikeUv: { value: new THREE.Vector2(0.5, 0.5) },
@@ -325,6 +366,7 @@ export class LightingEffect extends EffectBase {
       fragmentShader: `
         uniform sampler2D tDiffuse;
         uniform sampler2D tLight;
+        uniform sampler2D tSunLight;
         uniform sampler2D tDarkness;
         uniform sampler2D tMasks;
         uniform sampler2D tWindowLight;
@@ -356,6 +398,8 @@ export class LightingEffect extends EffectBase {
         uniform vec2  uCompositeTexelSize;
         uniform float uViewportHeight;
         uniform float uOutdoorBrightness;
+        uniform float uSunIndoorGain;
+        uniform float uSunBlurRadiusPx;
         uniform float uLightningFlash01;
         uniform float uLightningOutsideGain;
         uniform vec2  uLightningStrikeUv;
@@ -374,6 +418,29 @@ export class LightingEffect extends EffectBase {
         }
 
         float msSaturate(float x) { return clamp(x, 0.0, 1.0); }
+
+        vec3 sampleSunLight(vec2 uv) {
+          // Small gaussian-ish blur kernel in screen UV to soften sun-light edges.
+          // Uses pixel radius converted to UV via uCompositeTexelSize.
+          float rpx = max(uSunBlurRadiusPx, 0.0);
+          if (rpx <= 0.001) {
+            return texture2D(tSunLight, uv).rgb;
+          }
+
+          vec2 o = uCompositeTexelSize * rpx;
+
+          vec3 c = vec3(0.0);
+          c += texture2D(tSunLight, uv).rgb * 4.0;
+          c += texture2D(tSunLight, uv + vec2( o.x, 0.0)).rgb * 2.0;
+          c += texture2D(tSunLight, uv + vec2(-o.x, 0.0)).rgb * 2.0;
+          c += texture2D(tSunLight, uv + vec2(0.0,  o.y)).rgb * 2.0;
+          c += texture2D(tSunLight, uv + vec2(0.0, -o.y)).rgb * 2.0;
+          c += texture2D(tSunLight, uv + vec2( o.x,  o.y)).rgb;
+          c += texture2D(tSunLight, uv + vec2( o.x, -o.y)).rgb;
+          c += texture2D(tSunLight, uv + vec2(-o.x,  o.y)).rgb;
+          c += texture2D(tSunLight, uv + vec2(-o.x, -o.y)).rgb;
+          return c * (1.0 / 16.0);
+        }
 
         void main() {
           vec4 baseColor = texture2D(tDiffuse, vUv);
@@ -452,10 +519,21 @@ export class LightingEffect extends EffectBase {
           vec3 safeLights = max(shadedLights, vec3(0.0));
           float lightI = max(max(safeLights.r, safeLights.g), safeLights.b);
 
+          // Sun Light (indoor fill) contribution: only apply in indoor regions.
+          // Indoors are represented by low outdoors mask values.
+          vec3 sunSample = max(sampleSunLight(vUv), vec3(0.0));
+          float sunI = max(max(sunSample.r, sunSample.g), sunSample.b);
+          float indoorGate = msSaturate(1.0 - outdoorStrengthBase);
+          // Match the same visibility gating applied to normal light buffer.
+          float dayBoostSun = uOutdoorBrightness;
+          float nightDimSun = clamp(2.0 - uOutdoorBrightness, 0.0, 1.0);
+          float sunOutdoorRef = mix(dayBoostSun, nightDimSun, uDarknessLevel);
+          sunI *= max(uSunIndoorGain, 0.0) * sunOutdoorRef * indoorGate * lightVisibility * (1.0 - ropeMask);
+
           vec3 totalIllumination = shadedAmbient + vec3(lightI) * master;
 
           float dMask = clamp(darknessMask, 0.0, 1.0);
-          float lightTermI = max(lightI * master, 0.0);
+          float lightTermI = max((lightI + sunI) * master, 0.0);
           float punch = 1.0 - exp(-lightTermI * max(uDarknessPunchGain, 0.0));
 
           float localDarknessLevel = clamp(baseDarknessLevel * (1.0 - punch * max(uNegativeDarknessStrength, 0.0)), 0.0, 1.0);
@@ -469,6 +547,10 @@ export class LightingEffect extends EffectBase {
 
           vec3 ambientAfterDark = shadedAmbientPunched * (1.0 - punchedMask);
           totalIllumination = ambientAfterDark + vec3(lightI) * master;
+
+          // Apply sun illumination after darkness is punched so it acts like
+          // a fill light for dim interiors without affecting outdoor exposure.
+          totalIllumination += vec3(sunI) * master;
 
           bool badIllum = (totalIllumination.r != totalIllumination.r) ||
                           (totalIllumination.g != totalIllumination.g) ||
@@ -710,6 +792,7 @@ export class LightingEffect extends EffectBase {
   _toFoundryLikeDocForMapshineEntity(entity) {
     const id = `mapshine:${entity.id}`;
     const a = entity.animation;
+    const dr = entity.darknessResponse;
 
     return {
       id,
@@ -725,21 +808,19 @@ export class LightingEffect extends EffectBase {
         outputGain: entity.outputGain,
         outerWeight: entity.outerWeight,
         innerWeight: entity.innerWeight,
+        darknessResponse: (dr && typeof dr === 'object') ? { ...dr } : undefined,
         cookieEnabled: entity.cookieEnabled === true,
         cookieTexture: entity.cookieTexture,
         cookieRotation: entity.cookieRotation,
         cookieScale: entity.cookieScale,
+        cookieTint: entity.cookieTint,
         cookieStrength: entity.cookieStrength,
         cookieContrast: entity.cookieContrast,
         cookieGamma: entity.cookieGamma,
         cookieInvert: entity.cookieInvert === true,
         cookieColorize: entity.cookieColorize === true,
         animation: (a && typeof a === 'object')
-          ? {
-              type: a.type ?? null,
-              speed: a.speed,
-              intensity: a.intensity
-            }
+          ? { ...a, type: a.type ?? null }
           : {}
       }
     };
@@ -764,7 +845,10 @@ export class LightingEffect extends EffectBase {
         try {
           if (this.mapshineLights.has(id)) {
             const ls = this.mapshineLights.get(id);
-            if (ls?.mesh) this.lightScene?.remove(ls.mesh);
+            if (ls?.mesh) {
+              this.lightScene?.remove(ls.mesh);
+              this.sunLightScene?.remove(ls.mesh);
+            }
             ls?.dispose?.();
             this.mapshineLights.delete(id);
           }
@@ -787,7 +871,8 @@ export class LightingEffect extends EffectBase {
           targetLayers,
           cookieTexture: entity.cookieTexture,
           cookieRotation: entity.cookieRotation,
-          cookieScale: entity.cookieScale
+          cookieScale: entity.cookieScale,
+          cookieTint: entity.cookieTint
         });
         continue;
       }
@@ -800,13 +885,17 @@ export class LightingEffect extends EffectBase {
         targetLayers,
         cookieTexture: entity.cookieTexture,
         cookieRotation: entity.cookieRotation,
-        cookieScale: entity.cookieScale
+        cookieScale: entity.cookieScale,
+        cookieTint: entity.cookieTint
       });
 
       if (entity.isDarkness) {
         if (this.mapshineLights.has(id)) {
           const ls = this.mapshineLights.get(id);
-          if (ls?.mesh) this.lightScene?.remove(ls.mesh);
+          if (ls?.mesh) {
+            this.lightScene?.remove(ls.mesh);
+            this.sunLightScene?.remove(ls.mesh);
+          }
           ls?.dispose?.();
           this.mapshineLights.delete(id);
         }
@@ -831,21 +920,43 @@ export class LightingEffect extends EffectBase {
           this.mapshineDarknessSources.delete(id);
         }
 
+        const isSunLight = entity?.darknessResponse?.enabled === true;
+
         if (this.mapshineLights.has(id)) {
           this.mapshineLights.get(id).updateData(doc);
           // Update layer targeting on existing mesh
           const src = this.mapshineLights.get(id);
           if (src?.mesh) {
+            // Move between scenes if the light changed type.
+            try {
+              if (isSunLight) {
+                this.lightScene?.remove(src.mesh);
+                if (this.sunLightScene && src.mesh?.parent !== this.sunLightScene) {
+                  this.sunLightScene.add(src.mesh);
+                }
+              } else {
+                this.sunLightScene?.remove(src.mesh);
+                if (this.lightScene && src.mesh?.parent !== this.lightScene) {
+                  this.lightScene.add(src.mesh);
+                }
+              }
+            } catch (_) {
+            }
             this._applyLayerTargeting(src.mesh, targetLayers, GROUND_LIGHT_LAYER, OVERHEAD_LIGHT_LAYER);
           }
         } else {
           const source = new ThreeLightSource(doc);
           source.init();
           this.mapshineLights.set(id, source);
-          if (source.mesh && this.lightScene) {
+          if (source.mesh && (this.lightScene || this.sunLightScene)) {
             // Assign Three.js layers based on targetLayers
             this._applyLayerTargeting(source.mesh, targetLayers, GROUND_LIGHT_LAYER, OVERHEAD_LIGHT_LAYER);
-            this.lightScene.add(source.mesh);
+
+            if (isSunLight) {
+              this.sunLightScene?.add(source.mesh);
+            } else {
+              this.lightScene?.add(source.mesh);
+            }
           }
         }
       }
@@ -854,7 +965,10 @@ export class LightingEffect extends EffectBase {
     for (const [id, src] of this.mapshineLights) {
       if (keep.has(id)) continue;
       try {
-        if (src?.mesh) this.lightScene?.remove(src.mesh);
+        if (src?.mesh) {
+          this.lightScene?.remove(src.mesh);
+          this.sunLightScene?.remove(src.mesh);
+        }
         src?.dispose?.();
       } catch (_) {
       }
@@ -905,7 +1019,7 @@ export class LightingEffect extends EffectBase {
   /**
    * Get metadata for a MapShine-native light by its prefixed id.
    * @param {string} id - Prefixed id (e.g., 'mapshine:abc123')
-   * @returns {{targetLayers: string, cookieTexture?: string, cookieRotation?: number, cookieScale?: number}|null}
+   * @returns {{targetLayers: string, cookieTexture?: string, cookieRotation?: number, cookieScale?: number, cookieTint?: string}|null}
    */
   getMapshineLightMeta(id) {
     return this._mapshineLightMeta.get(id) || null;
@@ -1012,8 +1126,16 @@ export class LightingEffect extends EffectBase {
   onResize(width, height) {
     const THREE = window.THREE;
     if (this.lightTarget) this.lightTarget.dispose();
+    if (this.sunLightTarget) this.sunLightTarget.dispose();
     if (this.darknessTarget) this.darknessTarget.dispose();
     this.lightTarget = new THREE.WebGLRenderTarget(width, height, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.HalfFloatType // HDR capable
+    });
+
+    this.sunLightTarget = new THREE.WebGLRenderTarget(width, height, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat,
@@ -1287,6 +1409,8 @@ export class LightingEffect extends EffectBase {
     u.uLightIntensity.value = this.params.lightIntensity;
     u.uColorationStrength.value = this.params.colorationStrength;
     u.uOutdoorBrightness.value = this.params.outdoorBrightness;
+    if (u.uSunIndoorGain) u.uSunIndoorGain.value = this.params.sunIndoorGain;
+    if (u.uSunBlurRadiusPx) u.uSunBlurRadiusPx.value = this.params.sunBlurRadiusPx;
     u.uNegativeDarknessStrength.value = this.params.negativeDarknessStrength;
 
     // Lightning outside flash (published by LightningEffect)
@@ -1519,6 +1643,17 @@ export class LightingEffect extends EffectBase {
       });
     } else if (this.lightTarget.width !== size.x || this.lightTarget.height !== size.y) {
       this.lightTarget.setSize(size.x, size.y);
+    }
+
+    if (!this.sunLightTarget) {
+      this.sunLightTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.HalfFloatType // HDR capable
+      });
+    } else if (this.sunLightTarget.width !== size.x || this.sunLightTarget.height !== size.y) {
+      this.sunLightTarget.setSize(size.x, size.y);
     }
 
     if (!this.darknessTarget) {
@@ -1806,6 +1941,21 @@ export class LightingEffect extends EffectBase {
       }
     }
 
+    // 1.25 Accumulate Sun Lights (indoor fill) into sunLightTarget
+    renderer.setRenderTarget(this.sunLightTarget);
+    renderer.setClearColor(0x000000, 1);
+    renderer.clear();
+
+    if (this.sunLightScene && this.mainCamera) {
+      const prevMaskSun = this.mainCamera.layers.mask;
+      try {
+        this.mainCamera.layers.enableAll();
+        renderer.render(this.sunLightScene, this.mainCamera);
+      } finally {
+        this.mainCamera.layers.mask = prevMaskSun;
+      }
+    }
+
     // 1.5 Accumulate Darkness into darknessTarget
     renderer.setRenderTarget(this.darknessTarget);
     renderer.setClearColor(0x000000, 1);
@@ -1824,6 +1974,7 @@ export class LightingEffect extends EffectBase {
     // Base scene texture comes from EffectComposer via setInputTexture(tDiffuse).
     const cu = this.compositeMaterial.uniforms;
     cu.tLight.value = this.lightTarget.texture;
+    cu.tSunLight.value = this.sunLightTarget?.texture ?? this._transparentTex;
     cu.tDarkness.value = this.darknessTarget.texture;
     cu.tMasks.value = this.masksTarget?.texture ?? this._transparentTex;
     cu.uViewportHeight.value = size.y;
@@ -1944,6 +2095,12 @@ export class LightingEffect extends EffectBase {
       }
     }
     this._hookRegistrations = [];
+
+    try {
+      this.sunLightTarget?.dispose?.();
+      this.sunLightTarget = null;
+    } catch (_) {
+    }
 
     try {
       this.lights.forEach((l) => l?.dispose?.());

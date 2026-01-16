@@ -6,8 +6,73 @@
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
+import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
 
 const log = createLogger('LightIconManager');
+
+/**
+ * Creates a custom shader material for light icon sprites with a dark outline.
+ * The outline ensures visibility against bright/white backgrounds.
+ * @param {THREE.Texture} texture - The icon texture
+ * @returns {THREE.ShaderMaterial}
+ */
+function createOutlinedSpriteMaterial(texture) {
+  const THREE = window.THREE;
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      map: { value: texture },
+      outlineColor: { value: new THREE.Color(0x222222) },
+      outlineWidth: { value: 0.08 }
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        vec4 mvPosition = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+        vec2 scale = vec2(
+          length(modelMatrix[0].xyz),
+          length(modelMatrix[1].xyz)
+        );
+        mvPosition.xy += position.xy * scale;
+        gl_Position = projectionMatrix * mvPosition;
+      }
+    `,
+    fragmentShader: `
+      uniform sampler2D map;
+      uniform vec3 outlineColor;
+      uniform float outlineWidth;
+      varying vec2 vUv;
+
+      void main() {
+        vec4 texColor = texture2D(map, vUv);
+        float alpha = texColor.a;
+
+        // Sample neighbors to detect edges for outline
+        float outlineAlpha = 0.0;
+        float step = outlineWidth;
+        for (float x = -1.0; x <= 1.0; x += 1.0) {
+          for (float y = -1.0; y <= 1.0; y += 1.0) {
+            if (x == 0.0 && y == 0.0) continue;
+            vec2 offset = vec2(x, y) * step;
+            float neighborAlpha = texture2D(map, vUv + offset).a;
+            outlineAlpha = max(outlineAlpha, neighborAlpha);
+          }
+        }
+
+        // Dark outline where neighbors have alpha but current pixel doesn't
+        float outline = clamp(outlineAlpha - alpha, 0.0, 1.0);
+        vec3 finalColor = mix(texColor.rgb, outlineColor, outline * 0.9);
+        float finalAlpha = max(alpha, outline * 0.85);
+
+        gl_FragColor = vec4(finalColor, finalAlpha);
+      }
+    `,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false
+  });
+}
 
 /**
  * LightIconManager - Synchronizes Foundry VTT ambient lights to THREE.js sprites
@@ -34,6 +99,9 @@ export class LightIconManager {
     // Z position will be set in initialize() once groundZ is available
     this.group.position.z = 4.0;
     this.group.visible = false;  // Start hidden until canvas-replacement drives visibility
+    // Render icons in overlay layer to exclude from bloom and color correction
+    this.group.layers.set(OVERLAY_THREE_LAYER);
+    this.group.layers.enable(0); // Also enable layer 0 for raycasting
     this.scene.add(this.group);
 
     // Default icon (Foundry core light icon)
@@ -110,8 +178,20 @@ export class LightIconManager {
     // Clear existing
     for (const sprite of this.lights.values()) {
       this.group.remove(sprite);
-      if (sprite.material.map) sprite.material.map.dispose();
-      sprite.material.dispose();
+      try {
+        if (sprite?.material?.uniforms?.map?.value) {
+          sprite.material.uniforms.map.value.dispose();
+        }
+      } catch (_) {
+      }
+      try {
+        sprite?.geometry?.dispose?.();
+      } catch (_) {
+      }
+      try {
+        sprite?.material?.dispose?.();
+      } catch (_) {
+      }
     }
     this.lights.clear();
 
@@ -131,19 +211,37 @@ export class LightIconManager {
     const iconPath = this.defaultIcon;
 
     this.textureLoader.load(iconPath, (texture) => {
+      const THREE = window.THREE;
       // Make sure the light still exists
       if (!canvas.lighting?.placeables?.some(l => l.id === doc.id)) return;
 
       const size = 48; // Fixed icon size in pixels
 
-      const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
-      const sprite = new THREE.Sprite(material);
+      // Ensure correct color space
+      try {
+        if (THREE && 'colorSpace' in texture && THREE.SRGBColorSpace) {
+          texture.colorSpace = THREE.SRGBColorSpace;
+        }
+      } catch (_) {
+      }
+
+      // Use custom outlined material for visibility on bright backgrounds
+      const material = createOutlinedSpriteMaterial(texture);
+      
+      // Create a mesh that acts like a sprite (billboard)
+      const geometry = new THREE.PlaneGeometry(1, 1);
+      const sprite = new THREE.Mesh(geometry, material);
 
       // Position: convert Foundry coordinates into Three.js world space so
       // icons line up exactly with the lighting overlay and base plane.
       const worldPos = Coordinates.toWorld(doc.x, doc.y);
       sprite.position.set(worldPos.x, worldPos.y, 0);
       sprite.scale.set(size, size, 1);
+
+      // Set to overlay layer to exclude from bloom/CC
+      sprite.layers.set(OVERLAY_THREE_LAYER);
+      sprite.layers.enable(0); // Also enable layer 0 for raycasting
+      sprite.renderOrder = 9999;
 
       sprite.userData = {
         lightId: doc.id,
@@ -196,7 +294,11 @@ export class LightIconManager {
     const sprite = this.lights.get(id);
     if (sprite) {
       this.group.remove(sprite);
-      if (sprite.material.map) sprite.material.map.dispose();
+      // Handle shader material with uniform texture
+      if (sprite.material.uniforms?.map?.value) {
+        sprite.material.uniforms.map.value.dispose();
+      }
+      sprite.geometry?.dispose?.();
       sprite.material.dispose();
       this.lights.delete(id);
     }
@@ -209,7 +311,11 @@ export class LightIconManager {
   dispose() {
     for (const sprite of this.lights.values()) {
       this.group.remove(sprite);
-      if (sprite.material.map) sprite.material.map.dispose();
+      // Handle shader material with uniform texture
+      if (sprite.material.uniforms?.map?.value) {
+        sprite.material.uniforms.map.value.dispose();
+      }
+      sprite.geometry?.dispose?.();
       sprite.material.dispose();
     }
     this.lights.clear();

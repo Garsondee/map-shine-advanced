@@ -6,6 +6,7 @@ import Coordinates from '../utils/coordinates.js';
 import { FoundryLightingShaderChunks } from './FoundryLightingShaderChunks.js';
 import { loadTexture } from '../assets/loader.js';
 import { VisionPolygonComputer } from '../vision/VisionPolygonComputer.js';
+import { weatherController } from '../core/WeatherController.js';
 
 const _lightLosComputer = new VisionPolygonComputer();
 
@@ -96,6 +97,64 @@ export class ThreeLightSource {
 
     this._lastInsetWorldPx = null;
     this._lastInsetUpdateAtSec = -Infinity;
+    this._lastInsetZoom = null;
+
+    // Motion animation state (e.g. wind-driven cable swing)
+    this._motion = {
+      hasAnchor: false,
+      anchorFoundryX: 0,
+      anchorFoundryY: 0,
+      offsetWorld: null,
+      velocityWorld: null,
+      tmpDirWorld: null,
+      tmpWorldPos: null,
+      gustNoise: null,
+    };
+  }
+
+  _getOutdoorFactorAtFoundryXY(x, y) {
+    try {
+      const rect = canvas?.dimensions?.sceneRect;
+      const sceneX = Number(rect?.x) || 0;
+      const sceneY = Number(rect?.y) || 0;
+      const sceneW = Number(rect?.width) || 1;
+      const sceneH = Number(rect?.height) || 1;
+
+      const u0 = (x - sceneX) / Math.max(1, sceneW);
+      // WeatherController.getRoofMaskIntensity reads mask data extracted from an HTMLCanvas
+      // (top-left origin), so v=0 is top and v=1 is bottom (no flip).
+      const v0 = (y - sceneY) / Math.max(1, sceneH);
+      const u = Math.max(0.0, Math.min(1.0, u0));
+      const v = Math.max(0.0, Math.min(1.0, v0));
+
+      const w = this._getWeatherController();
+      if (!w || typeof w.getRoofMaskIntensity !== 'function') return 1.0;
+      const f = w.getRoofMaskIntensity(u, v);
+      return (typeof f === 'number' && Number.isFinite(f)) ? Math.max(0.0, Math.min(1.0, f)) : 1.0;
+    } catch (_) {
+      return 1.0;
+    }
+  }
+
+  _getWeatherController() {
+    try {
+      const w0 = window.MapShine?.weatherController;
+      if (w0 && typeof w0.getCurrentState === 'function') return w0;
+    } catch (_) {
+    }
+
+    return weatherController;
+  }
+
+  _getGlobalLightAnimParams() {
+    const p = window.MapShine?.lightingEffect?.params;
+    const windInfluence = (p && typeof p.lightAnimWindInfluence === 'number' && Number.isFinite(p.lightAnimWindInfluence))
+      ? Math.max(0.0, p.lightAnimWindInfluence)
+      : 1.0;
+    const outdoorPower = (p && typeof p.lightAnimOutdoorPower === 'number' && Number.isFinite(p.lightAnimOutdoorPower))
+      ? Math.max(0.0, p.lightAnimOutdoorPower)
+      : 2.0;
+    return { windInfluence, outdoorPower };
   }
 
   _getWallInsetPx() {
@@ -107,40 +166,68 @@ export class ThreeLightSource {
     }
   }
 
+  _getWallInsetWorldPx() {
+    const insetPx = this._getWallInsetPx();
+    if (!insetPx) return 0;
+
+    // Keep the occlusion inset stable in SCREEN pixels.
+    // World units are Foundry pixels; convert screen-pixel inset to world units
+    // using the current zoom.
+    const zoom = this._getEffectiveZoom();
+    if (!Number.isFinite(zoom) || zoom <= 0) return insetPx;
+    return insetPx / zoom;
+  }
+
   _getEffectiveZoom() {
+    // Prefer deriving the zoom from the camera actually used to render the light
+    // accumulation pass. This is the most reliable way to get a world->screen
+    // mapping that matches what the user sees.
+    try {
+      const THREE = window.THREE;
+      const cam = window.MapShine?.lightingEffect?.mainCamera || window.MapShine?.sceneComposer?.camera;
+      if (cam) {
+        if (cam.isOrthographicCamera) {
+          const z = cam.zoom;
+          if (typeof z === 'number' && isFinite(z) && z > 0) return z;
+        } else if (cam.isPerspectiveCamera) {
+          const renderer = window.MapShine?.renderer;
+          const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+          const camZ = cam.position?.z;
+          const fovDeg = cam.fov;
+
+          if (THREE && renderer && typeof camZ === 'number' && isFinite(camZ) && typeof fovDeg === 'number' && isFinite(fovDeg)) {
+            const dist = Math.abs(camZ - groundZ);
+            if (dist > 0.0001) {
+              const size = new THREE.Vector2();
+              renderer.getDrawingBufferSize(size);
+              const hPx = size.y;
+              const fovRad = fovDeg * (Math.PI / 180);
+              const worldH = 2 * dist * Math.tan(fovRad * 0.5);
+              const z = hPx / Math.max(1e-6, worldH);
+              if (typeof z === 'number' && isFinite(z) && z > 0) return z;
+            }
+          }
+        }
+      }
+    } catch (_) {
+    }
+
     try {
       const z0 = window.MapShine?.sceneComposer?.currentZoom;
       if (typeof z0 === 'number' && isFinite(z0) && z0 > 0) return z0;
     } catch (_) {
     }
 
+    // Fallback: Foundry's PIXI stage scale.
     try {
-      const z1 = canvas?.stage?.scale?.x;
-      if (typeof z1 === 'number' && isFinite(z1) && z1 > 0) return z1;
+      const zStage = canvas?.stage?.scale?.x;
+      if (typeof zStage === 'number' && isFinite(zStage) && zStage > 0) return zStage;
     } catch (_) {
     }
 
     return 1;
   }
 
-  _getWallInsetWorldPx() {
-    const insetPx = this._getWallInsetPx();
-    if (!insetPx) return 0;
-
-    const paddedInsetPx = insetPx + 6;
-
-    const zoom = this._getEffectiveZoom();
-    if (!Number.isFinite(zoom) || zoom <= 0) return paddedInsetPx;
-    return paddedInsetPx / zoom;
-  }
-
-  /**
-   * Get the ground plane Z position from SceneComposer.
-   * Lights should be positioned at this Z level (plus a small offset)
-   * to align with the base plane after the camera/ground refactor.
-   * @returns {number} Ground Z position (default 1000)
-   * @private
-   */
   _getGroundZ() {
     const sceneComposer = window.MapShine?.sceneComposer;
     if (sceneComposer && typeof sceneComposer.groundZ === 'number') {
@@ -157,6 +244,9 @@ export class ThreeLightSource {
         uColor: { value: new THREE.Color() },
         uRadius: { value: 0 },       // Max radius (dim)
         uBrightRadius: { value: 0 }, // Core radius (bright)
+        // Shift the illumination center within the (stationary) LOS polygon.
+        // This allows Cable Swing to "move" the light without forcing geometry rebuilds.
+        uCenterOffset: { value: new THREE.Vector2(0, 0) },
         uAlpha: { value: 0.5 },
         uAttenuation: { value: 0.5 },
         uOutputGain: { value: 1.0 },
@@ -173,12 +263,15 @@ export class ThreeLightSource {
         tCookie: { value: null },
         uHasCookie: { value: 0.0 },
         uCookieRotation: { value: 0.0 },
+        // Per-frame additive cookie rotation (Cable Swing wobble).
+        uCookieRotationOffset: { value: 0.0 },
         uCookieScale: { value: 1.0 },
         uCookieStrength: { value: 1.0 },
         uCookieContrast: { value: 1.0 },
         uCookieGamma: { value: 1.0 },
         uCookieInvert: { value: 0.0 },
         uCookieColorize: { value: 0.0 },
+        uCookieTint: { value: new THREE.Color(1, 1, 1) },
       },
       vertexShader: `
         varying vec2 vPos;
@@ -192,6 +285,7 @@ export class ThreeLightSource {
         uniform vec3 uColor;
         uniform float uRadius;
         uniform float uBrightRadius;
+        uniform vec2  uCenterOffset;
         uniform float uAlpha;
         uniform float uAttenuation;
         uniform float uOutputGain;
@@ -207,12 +301,14 @@ export class ThreeLightSource {
         uniform sampler2D tCookie;
         uniform float uHasCookie;
         uniform float uCookieRotation;
+        uniform float uCookieRotationOffset;
         uniform float uCookieScale;
         uniform float uCookieStrength;
         uniform float uCookieContrast;
         uniform float uCookieGamma;
         uniform float uCookieInvert;
         uniform float uCookieColorize;
+        uniform vec3 uCookieTint;
 
         float hash21(vec2 p) {
           p = fract(p * vec2(123.34, 456.21));
@@ -368,10 +464,11 @@ export class ThreeLightSource {
         }
 
         void main() {
-          float distPx = length(vPos);
+          vec2 p = vPos - uCenterOffset;
+          float distPx = length(p);
           // Normalized distance [0..1]
           float r = distPx / uRadius; 
-          vec2 vUvs = (vPos / (max(uRadius, 1.0) * 2.0)) + vec2(0.5);
+          vec2 vUvs = (p / (max(uRadius, 1.0) * 2.0)) + vec2(0.5);
           float dist = r;
 
           if (r >= 1.0) discard;
@@ -418,7 +515,7 @@ export class ThreeLightSource {
           if (uHasCookie > 0.5) {
             vec2 cuv = vUvs - vec2(0.5);
             float cscale = max(uCookieScale, 0.0001);
-            cuv = rot(uCookieRotation) * (cuv / cscale);
+            cuv = rot(uCookieRotation + uCookieRotationOffset) * (cuv / cscale);
             cuv += vec2(0.5);
 
             vec4 cookie = texture2D(tCookie, cuv);
@@ -443,7 +540,7 @@ export class ThreeLightSource {
 
             // Optional cookie colorization (tint). Most gobos should be monochrome.
             if (uCookieColorize > 0.5) {
-              outColor *= cookie.rgb;
+              outColor *= (cookie.rgb * uCookieTint);
             }
           }
 
@@ -555,7 +652,13 @@ ${FoundryLightingShaderChunks.pulse}
     const config = doc.config;
     const THREE = window.THREE;
 
+    const docX = Number(doc?.x) || 0;
+    const docY = Number(doc?.y) || 0;
+
     const prevRadiusPx = this._baseRadiusPx;
+    const prevRenderRadiusPx = (typeof this._renderRadiusPx === 'number' && Number.isFinite(this._renderRadiusPx))
+      ? this._renderRadiusPx
+      : prevRadiusPx;
 
     // 1. Color Parsing
     const c = new THREE.Color(1, 1, 1);
@@ -581,30 +684,64 @@ ${FoundryLightingShaderChunks.pulse}
     this.material.uniforms.uBrightness.value = 1.2 + (luminosity * 1.5) + satBonus;
 
     // 3. Geometry
+
     const dim = config.dim || 0;
     const bright = config.bright || 0;
     const radius = Math.max(dim, bright);
-    
+
     const d = canvas.dimensions;
     const pxPerUnit = d.size / d.distance;
     const rPx = radius * pxPerUnit;
     const brightPx = bright * pxPerUnit;
 
     const wallInsetPx = this._getWallInsetWorldPx();
-    const rPxInset = Math.max(0, rPx - wallInsetPx);
-    const brightPxInset = Math.max(0, brightPx - wallInsetPx);
+
+    // IMPORTANT:
+    // Wall inset is a *masking* control (how much we shrink the wall-clipped polygon)
+    // and should NOT change the actual photometric radius of the light.
+    const rPxBase = Math.max(0, rPx);
+    const brightPxBase = Math.max(0, Math.min(brightPx, rPxBase));
+
+    // Cable Swing shifts the illumination center within the (stationary) LOS polygon.
+    // Expand the rendered radius by the max swing offset so the light doesn't clip
+    // against its own mesh boundary while moving.
+    const animCfg = config?.animation;
+    const motionPadPx = (animCfg?.type === 'cableswing')
+      ? Math.max(0, Number.isFinite(animCfg.motionMaxOffsetPx) ? animCfg.motionMaxOffsetPx : 0)
+      : 0;
+
+    // Safety overscan: the motion simulation can briefly overshoot, and geometry/
+    // clipper operations can slightly reduce available space. Add a small margin.
+    const motionPadOverscanPx = (motionPadPx > 0)
+      ? (motionPadPx * 1.75 + 12.0)
+      : 0;
+
+    // IMPORTANT:
+    // - uRadius/uBrightRadius define the actual photometric falloff size.
+    // - Cable Swing moves the falloff center via uCenterOffset, which means we need
+    //   extra "canvas" area (geometry) so the shifted falloff doesn't get clipped
+    //   by the mesh boundary.
+    // Therefore, we expand the rendered geometry radius, but we DO NOT expand the
+    // falloff radius uniforms.
+    const renderRadiusPx = rPxBase + motionPadOverscanPx;
 
     if (this._lastInsetWorldPx === null) {
       this._lastInsetWorldPx = wallInsetPx;
       this._lastInsetUpdateAtSec = 0;
+      try {
+        this._lastInsetZoom = this._getEffectiveZoom();
+      } catch (_) {
+        this._lastInsetZoom = null;
+      }
     }
 
-    this._baseRadiusPx = rPxInset;
-    this._baseBrightRadiusPx = brightPxInset;
-    this._baseRatio = rPxInset > 0 ? (brightPxInset / rPxInset) : 1;
+    this._baseRadiusPx = rPxBase;
+    this._baseBrightRadiusPx = brightPxBase;
+    this._baseRatio = rPxBase > 0 ? (brightPxBase / rPxBase) : 1;
+    this._renderRadiusPx = renderRadiusPx;
 
-    this.material.uniforms.uRadius.value = rPxInset;
-    this.material.uniforms.uBrightRadius.value = brightPxInset;
+    this.material.uniforms.uRadius.value = rPxBase;
+    this.material.uniforms.uBrightRadius.value = brightPxBase;
     this.material.uniforms.uAlpha.value = config.alpha ?? 0.5;
 
     // Additional shaping/boost controls
@@ -626,31 +763,55 @@ ${FoundryLightingShaderChunks.pulse}
     const computedAttenuation = (Math.cos(Math.PI * Math.pow(rawAttenuation, 1.5)) - 1) / -2;
     this.material.uniforms.uAttenuation.value = computedAttenuation;
 
+    // Cable Swing uses shader-space offsets. Reset them here so stale state doesn't
+    // persist across config edits or geometry rebuilds.
+    try {
+      const u = this.material?.uniforms;
+      if (u?.uCenterOffset?.value?.set) u.uCenterOffset.value.set(0, 0);
+      if (u?.uCookieRotationOffset) u.uCookieRotationOffset.value = 0.0;
+    } catch (_) {
+    }
+
     // Cookie/gobo texture support (optional).
     this._updateCookieFromConfig(config);
 
     // 4. Position
     // Light meshes must be at the ground plane Z level (plus small offset)
     // to align with the base plane after the camera/ground refactor.
-    const worldPos = Coordinates.toWorld(doc.x, doc.y);
+    const worldPos = Coordinates.toWorld(docX, docY);
     const groundZ = this._getGroundZ();
     const lightZ = groundZ + 0.1; // Slightly above ground plane
 
-    const radiusChanged = Math.abs((prevRadiusPx ?? 0) - (rPxInset ?? 0)) > 1e-3;
+    const radiusChanged = Math.abs((prevRenderRadiusPx ?? 0) - (renderRadiusPx ?? 0)) > 1e-3;
 
     // Wall-clipped LOS polygons depend on (x,y), not just radius. If a light moves near
     // walls, the polygon must be recomputed or the mask will be stale.
-    const positionChanged = !!(
-      this.mesh &&
-      (Math.abs((this.mesh.position?.x ?? 0) - worldPos.x) > 1e-3 ||
-       Math.abs((this.mesh.position?.y ?? 0) - worldPos.y) > 1e-3)
-    );
+    // IMPORTANT: Do not use mesh.position here because Cable Swing can apply a temporary
+    // offset which would incorrectly trigger positionChanged every time updateData runs.
+    const prevDocX = (typeof this._lastDocX === 'number' && Number.isFinite(this._lastDocX)) ? this._lastDocX : null;
+    const prevDocY = (typeof this._lastDocY === 'number' && Number.isFinite(this._lastDocY)) ? this._lastDocY : null;
+    const positionChanged = (prevDocX !== null && prevDocY !== null)
+      ? (Math.abs(prevDocX - docX) > 1e-3 || Math.abs(prevDocY - docY) > 1e-3)
+      : false;
+
+    // If the authored anchor moved (user dragged the light), reset motion so we don't
+    // carry over a large stale offset into the new location.
+    if (positionChanged) {
+      try {
+        if (this._motion?.offsetWorld) this._motion.offsetWorld.set(0, 0);
+        if (this._motion?.velocityWorld) this._motion.velocityWorld.set(0, 0);
+      } catch (_) {
+      }
+    }
 
     if (forceRebuild || !this.mesh || radiusChanged || positionChanged) {
-      this.rebuildGeometry(worldPos.x, worldPos.y, rPxInset, lightZ);
+      this.rebuildGeometry(worldPos.x, worldPos.y, renderRadiusPx, lightZ);
     } else {
       this.mesh.position.set(worldPos.x, worldPos.y, lightZ);
     }
+
+    this._lastDocX = docX;
+    this._lastDocY = docY;
   }
 
   _clamp(value, min, max) {
@@ -681,6 +842,14 @@ ${FoundryLightingShaderChunks.pulse}
     const gamma = Number.isFinite(config?.cookieGamma) ? config.cookieGamma : 1.0;
     const invert = config?.cookieInvert === true;
     const colorize = config?.cookieColorize === true;
+
+    try {
+      if (u.uCookieTint?.value) {
+        const tint = (typeof config?.cookieTint === 'string' && config.cookieTint) ? config.cookieTint : '#ffffff';
+        u.uCookieTint.value.set(tint);
+      }
+    } catch (_) {
+    }
 
     u.uCookieRotation.value = rotation;
     u.uCookieScale.value = scale;
@@ -795,7 +964,7 @@ ${FoundryLightingShaderChunks.pulse}
     return { pulse, ratioPulse };
   }
 
-  animateSoundPulse(dtMs, { speed = 5, intensity = 5, reverse = false } = {}) {
+  animateSoundPulse(dtMs, { speed = 5, intensity = 5, reverse = false, amplification = 1 } = {}) {
     let bassVal = 0;
     let midVal = 0;
     let trebVal = 0;
@@ -820,6 +989,229 @@ ${FoundryLightingShaderChunks.pulse}
     amplitude = amplitude * this._baseRatio;
     const ratioPulse = this._clamp(amplitude * 1.11, 0, 1);
     return { pulse: amplitude, ratioPulse };
+  }
+
+  _updateCableSwing(timeInfo, { speed = 5, intensity = 5, reverse = false } = {}) {
+    try {
+      const THREE = window.THREE;
+      if (!THREE || !this.mesh || !this.document) return;
+
+      // Safety clamp dt to avoid explosions on lag spikes.
+      const dt = Math.min(Math.max(Number(timeInfo?.delta) || 0, 0), 0.1);
+      if (dt <= 0.000001) return;
+
+      const tSec = Number(timeInfo?.elapsed) || 0;
+
+      if (!this._motion.offsetWorld) this._motion.offsetWorld = new THREE.Vector2(0, 0);
+      if (!this._motion.velocityWorld) this._motion.velocityWorld = new THREE.Vector2(0, 0);
+      if (!this._motion.tmpDirWorld) this._motion.tmpDirWorld = new THREE.Vector2(1, 0);
+
+      // Anchor is always the authored base position (Foundry coords).
+      // Dragging/editing the light updates doc.x/y and therefore the anchor.
+      const ax = Number(this.document.x) || 0;
+      const ay = Number(this.document.y) || 0;
+
+      const anim = this.document?.config?.animation || {};
+
+      const maxOffsetPx0 = Number.isFinite(anim.motionMaxOffsetPx) ? anim.motionMaxOffsetPx : 120;
+      const maxOffsetPx = Math.max(0.0, maxOffsetPx0);
+
+      // If the user clamps motion to ~0, snap back immediately.
+      if (maxOffsetPx <= 0.0001) {
+        this._motion.offsetWorld.set(0, 0);
+        this._motion.velocityWorld.set(0, 0);
+        try {
+          const u = this.material?.uniforms;
+          if (u?.uCenterOffset?.value?.set) u.uCenterOffset.value.set(0, 0);
+          if (u?.uCookieRotationOffset) u.uCookieRotationOffset.value = 0.0;
+        } catch (_) {
+        }
+        return;
+      }
+
+      // Spring tuning (world units/pixels).
+      const spring0 = Number.isFinite(anim.motionSpring) ? anim.motionSpring : 12.0;
+      const damping0 = Number.isFinite(anim.motionDamping) ? anim.motionDamping : 4.0;
+      const spring = Math.max(0.0, spring0);
+      const damping = Math.max(0.0, damping0);
+
+      const localWindInfluence0 = Number.isFinite(anim.motionWindInfluence)
+        ? anim.motionWindInfluence
+        : (this._clamp(intensity, 0, 10) / 10);
+      // Clamp to avoid values that immediately slam the motion to max offset,
+      // which looks like "no animation".
+      const localWindInfluence = Math.max(0.0, Math.min(3.0, localWindInfluence0));
+
+      const { windInfluence: globalWindInfluence, outdoorPower } = this._getGlobalLightAnimParams();
+
+      // Outdoor factor based on _Outdoors mask (world-space sampled).
+      const outdoorFactorRaw = this._getOutdoorFactorAtFoundryXY(ax, ay);
+      const outdoorFactor = Math.pow(outdoorFactorRaw, outdoorPower);
+
+      const w = this._getWeatherController();
+      const weather = (w && typeof w.getCurrentState === 'function')
+        ? w.getCurrentState()
+        : (w?.currentState ?? null);
+      const windSpeed01 = (weather && typeof weather.windSpeed === 'number' && Number.isFinite(weather.windSpeed))
+        ? Math.max(0.0, Math.min(1.0, weather.windSpeed))
+        : 0.0;
+
+      const windDirF = weather?.windDirection;
+
+      // Convert wind direction from Foundry (Y-down) to our THREE world (Y-up).
+      const dir = this._motion.tmpDirWorld;
+      dir.set(Number(windDirF?.x) || 1, -(Number(windDirF?.y) || 0));
+      if (dir.lengthSq() <= 1e-8) dir.set(1, 0);
+      dir.normalize();
+
+      // Cable swing should *visibly* animate even in constant wind. A pure spring
+      // toward a constant target settles into a static deflection.
+      //
+      // Add gentle time-varying gust + direction meander using SmoothNoise.
+      if (!this._motion.gustNoise) {
+        // Keep scale low so changes are smooth (not jittery).
+        this._motion.gustNoise = new SmoothNoise({ amplitude: 1.0, scale: 0.25, maxReferences: 2048 });
+      }
+
+      const seed = (Number.isFinite(this.animation?.seed) ? this.animation.seed : 0);
+      const seedSec = seed * 0.000013;
+      const gustN = this._motion.gustNoise.generate(tSec + seedSec); // 0..1
+      const gustSigned = (gustN * 2.0) - 1.0; // -1..1
+      const meanderN = this._motion.gustNoise.generate((tSec * 0.77) + seedSec + 123.456); // 0..1
+      const meanderSigned = (meanderN * 2.0) - 1.0;
+
+      // Wind magnitude variation: small oscillation around the base wind.
+      const gustStrength = 0.08 + 0.22 * windSpeed01;
+      const windSpeedVar = Math.max(0.0, Math.min(1.0, windSpeed01 + gustSigned * gustStrength));
+
+      // Direction meander: max ~20deg at full wind.
+      const maxAngleRad = (20.0 * Math.PI / 180.0) * windSpeedVar;
+      const ang = meanderSigned * maxAngleRad;
+      const ca = Math.cos(ang);
+      const sa = Math.sin(ang);
+
+      const bx = dir.x;
+      const by = dir.y;
+      dir.set(bx * ca - by * sa, bx * sa + by * ca);
+
+      const responsiveness = Math.max(0.0, Number.isFinite(anim.motionResponsiveness) ? anim.motionResponsiveness : speed);
+      const responseMul = (0.25 + 0.75 * responsiveness / 10);
+      // Use a smooth saturation curve instead of a hard clamp.
+      // Hard clamping causes the target to peg at maxOffset for most of the time in
+      // high wind, which looks like "no animation".
+      const windMulRaw = windSpeedVar * globalWindInfluence * localWindInfluence * outdoorFactor * responseMul;
+      const windMulSaturate = 1.0 - Math.exp(-Math.max(0.0, Math.min(10.0, windMulRaw)));
+      const windMul = Math.max(0.0, Math.min(1.0, windMulSaturate));
+
+      // --- Pendulum-style forcing ---
+      // We keep the mesh + LOS polygon anchored, and only swing the illumination center
+      // within the polygon using uCenterOffset.
+      if (!Number.isFinite(this._motion.swingPhase)) {
+        this._motion.swingPhase = ((seed * 0.000173) % 1.0) * Math.PI * 2.0;
+      }
+
+      // Oscillation speed derived from spring and responsiveness.
+      const omega = Math.max(0.5, Math.sqrt(Math.max(0.0, spring))) * (0.4 + 0.8 * (responsiveness / 10));
+      this._motion.swingPhase += omega * dt;
+      if (this._motion.swingPhase > Math.PI * 2.0) this._motion.swingPhase -= Math.PI * 2.0;
+
+      const perpX = -dir.y;
+      const perpY = dir.x;
+
+      // Base deflection downwind (mean angle) + back-and-forth swing around it.
+      // NOTE: We deliberately allow the along-wind oscillation to exceed the mean
+      // deflection at high wind so the swing can occasionally overshoot upwind.
+      const baseMag = maxOffsetPx * windMul * (0.25 + 0.30 * windSpeedVar);
+      const swingAlongMag = maxOffsetPx * windMul * (0.10 + 0.60 * windSpeedVar);
+      const swingPerpMag = maxOffsetPx * windMul * (0.12 + 0.45 * windSpeedVar);
+      const bobMag = maxOffsetPx * windMul * (0.03 + 0.10 * windSpeedVar);
+
+      const ph = this._motion.swingPhase;
+      const swing = Math.sin(ph);
+      const bob = Math.sin(ph * 0.5 + meanderSigned * 1.1);
+      const sway = Math.sin(ph + 0.6 + meanderSigned * 0.8);
+
+      // Modulate swing amplitude slightly with gust so gusts "pump" the motion.
+      const gustAmp = Math.max(0.6, Math.min(1.4, 1.0 + gustSigned * (0.15 + 0.20 * windSpeedVar)));
+
+      // Along-wind component can cross 0 (upwind) under strong wind.
+      const along = (baseMag + bobMag * bob) + (swingAlongMag * swing * gustAmp);
+      const perp = swingPerpMag * sway * gustAmp;
+
+      let targetX = dir.x * along + perpX * perp;
+      let targetY = dir.y * along + perpY * perp;
+
+      const off = this._motion.offsetWorld;
+      const vel = this._motion.velocityWorld;
+
+      // Damped spring toward target.
+      const axW = (spring * (targetX - off.x)) - (damping * vel.x);
+      const ayW = (spring * (targetY - off.y)) - (damping * vel.y);
+      vel.x += axW * dt;
+      vel.y += ayW * dt;
+      off.x += vel.x * dt;
+      off.y += vel.y * dt;
+
+      // Safety clamp (should be rare because target is already in bounds).
+      const len = Math.hypot(off.x, off.y);
+      if (len > maxOffsetPx) {
+        const s = maxOffsetPx / Math.max(1e-6, len);
+        off.x *= s;
+        off.y *= s;
+        vel.x *= 0.5;
+        vel.y *= 0.5;
+      }
+
+      // Cookie wobble: correlated with pendulum swing so it rocks back and forth.
+      const swing01 = (maxOffsetPx > 1e-3)
+        ? Math.min(1.0, Math.max(swingAlongMag, swingPerpMag) / maxOffsetPx)
+        : 0.0;
+      const rotAmpRad = (2.0 + 12.0 * windMul) * (Math.PI / 180.0) * (0.35 + 0.65 * swing01);
+      const rotNoiseN = this._motion.gustNoise.generate((tSec * 0.12) + seedSec + 654.321);
+      const rotNoiseSigned = (rotNoiseN * 2.0) - 1.0;
+      const rotDrift = rotAmpRad * 0.18 * rotNoiseSigned;
+      const rotOffset = rotAmpRad * (0.65 * swing + 0.20 * sway + 0.15 * bob) + rotDrift;
+
+      try {
+        const u = this.material?.uniforms;
+        if (u?.uCenterOffset?.value?.set) u.uCenterOffset.value.set(off.x, off.y);
+        if (u?.uCookieRotationOffset) u.uCookieRotationOffset.value = rotOffset;
+      } catch (_) {
+      }
+
+      // Optional runtime debug (off by default):
+      // window.MapShine.debugCableSwing = true;
+      // window.MapShine.debugCableSwingId = 'mapshine:...' (optional filter)
+      try {
+        const dbg = window.MapShine?.debugCableSwing === true;
+        const dbgId = window.MapShine?.debugCableSwingId;
+        if (dbg && (!dbgId || String(dbgId) === String(this.id))) {
+          if (!this._motion._dbgNextAt) this._motion._dbgNextAt = 0;
+          const now = Number(timeInfo?.elapsed) || 0;
+          if (now >= this._motion._dbgNextAt) {
+            this._motion._dbgNextAt = now + 1.0;
+            // eslint-disable-next-line no-console
+            console.log('[MapShine][CableSwing]', {
+              id: this.id,
+              windSpeed01,
+              windSpeedVar,
+              outdoorFactorRaw,
+              outdoorFactor,
+              globalWindInfluence,
+              localWindInfluence,
+              windMul,
+              windMulRaw,
+              maxOffsetPx,
+              offX: off.x,
+              offY: off.y,
+              type: this.document?.config?.animation?.type,
+            });
+          }
+        }
+      } catch (_) {
+      }
+    } catch (_) {
+    }
   }
 
   rebuildGeometry(worldX, worldY, radiusPx, lightZ) {
@@ -869,31 +1261,11 @@ ${FoundryLightingShaderChunks.pulse}
     let shapePoints = null;
 
     const wallInsetPx = this._getWallInsetWorldPx();
-    const isMapshine = typeof this.id === 'string' && this.id.startsWith('mapshine:');
-
     try {
-      const placeable = canvas.lighting?.get(this.id);
-      const lightSource = placeable?.lightSource ?? placeable?.source;
-      if (lightSource) {
-        // Prefer the LOS polygon, which is already clipped by walls.
-        const poly = lightSource.los || lightSource.shape;
-        const points = poly?.points;
-        if (points && points.length >= 6) {
-          shapePoints = [];
-          for (let i = 0; i < points.length; i += 2) {
-            const v = Coordinates.toWorld(points[i], points[i + 1]);
-            // Convert to local space around the light center
-            shapePoints.push(new THREE.Vector2(v.x - worldX, v.y - worldY));
-          }
-        }
-      }
-    } catch (e) { }
-
-    // MapShine-native lights (scene-flag lights) don't have a Foundry LightSource
-    // with a precomputed LOS polygon. Compute an approximation using our
-    // visibility-polygon raycaster against light-blocking walls.
-    if (!shapePoints && isMapshine) {
-      try {
+      // Three.js / MapShine wall masking: compute a wall-clipped visibility polygon
+      // from Foundry wall documents, rather than relying on Foundry's internal
+      // LightSource.los polygon.
+      if (typeof _lightLosComputer?.compute === 'function') {
         const sceneRect = canvas?.dimensions?.sceneRect;
         const sceneBounds = sceneRect ? {
           x: sceneRect.x,
@@ -903,83 +1275,88 @@ ${FoundryLightingShaderChunks.pulse}
         } : null;
 
         const centerF = { x: this.document?.x ?? 0, y: this.document?.y ?? 0 };
-        // radiusPx was already reduced by wallInset in updateData().
-        // Re-add it here so that rebuildGeometry() can apply the inset exactly once
-        // to both circle fallback and polygon shapes.
-        const computeRadiusPx = Math.max(0, radiusPx + wallInsetPx);
+
+        // radiusPx here is the rendered geometry radius. We add the inset so that
+        // when we shrink the polygon below, the resulting boundary aligns with
+        // the intended radius.
+        const computeRadiusPx = Math.max(0, (Number(radiusPx) || 0) + wallInsetPx);
         const ptsF = _lightLosComputer.compute(centerF, computeRadiusPx, null, sceneBounds, { sense: 'light' });
 
         if (ptsF && ptsF.length >= 6) {
           shapePoints = [];
           for (let i = 0; i < ptsF.length; i += 2) {
             const v = Coordinates.toWorld(ptsF[i], ptsF[i + 1]);
+            // Convert to local space around the light center
             shapePoints.push(new THREE.Vector2(v.x - worldX, v.y - worldY));
+
+          }
+
+          // Shrink the polygon by the wall inset thickness.
+          if (wallInsetPx > 0) {
+            let insetOk = false;
+            try {
+              const ClipperLib = window.ClipperLib;
+
+              if (ClipperLib) {
+                const scale = 100;
+                const path = [];
+                for (let i = 0; i < shapePoints.length; i++) {
+                  const p = shapePoints[i];
+                  path.push({ X: Math.round(p.x * scale), Y: Math.round(p.y * scale) });
+                }
+
+                const area = (pts) => {
+                  let a = 0;
+                  for (let i = 0; i < pts.length; i++) {
+                    const j = (i + 1) % pts.length;
+                    a += (pts[i].X * pts[j].Y - pts[j].X * pts[i].Y);
+                  }
+                  return a * 0.5;
+                };
+
+                if (area(path) < 0) path.reverse();
+
+                const co = new ClipperLib.ClipperOffset(2.0, 0.25 * scale);
+                co.AddPath(path, ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+                const out = new ClipperLib.Paths();
+                co.Execute(out, -wallInsetPx * scale);
+                if (out && out.length) {
+                  let best = out[0];
+                  let bestAbsArea = Math.abs(area(best));
+                  for (let i = 1; i < out.length; i++) {
+                    const a = Math.abs(area(out[i]));
+                    if (a > bestAbsArea) {
+                      best = out[i];
+                      bestAbsArea = a;
+                    }
+                  }
+
+                  if (best && best.length >= 3) {
+                    shapePoints = best.map((pt) => new THREE.Vector2(pt.X / scale, pt.Y / scale));
+                    insetOk = true;
+                  }
+                }
+              }
+            } catch (_) {
+            }
+
+            if (!insetOk) {
+              for (let i = 0; i < shapePoints.length; i++) {
+                const p = shapePoints[i];
+                const len = Math.hypot(p.x, p.y);
+                if (len > 1e-4) {
+                  const mul = Math.max(0, (len - wallInsetPx) / len);
+                  p.multiplyScalar(mul);
+                }
+              }
+            }
           }
         }
-      } catch (_) {
       }
+    } catch (_) {
     }
 
     if (shapePoints && shapePoints.length > 2) {
-      if (wallInsetPx > 0) {
-        let insetOk = false;
-        try {
-          const ClipperLib = window.ClipperLib;
-
-          if (ClipperLib) {
-            const scale = 100;
-            const path = [];
-            for (let i = 0; i < shapePoints.length; i++) {
-              const p = shapePoints[i];
-              path.push({ X: Math.round(p.x * scale), Y: Math.round(p.y * scale) });
-            }
-
-            const area = (pts) => {
-              let a = 0;
-              for (let i = 0; i < pts.length; i++) {
-                const j = (i + 1) % pts.length;
-                a += (pts[i].X * pts[j].Y - pts[j].X * pts[i].Y);
-              }
-              return a * 0.5;
-            };
-
-            if (area(path) < 0) path.reverse();
-
-            const co = new ClipperLib.ClipperOffset(2.0, 0.25 * scale);
-            co.AddPath(path, ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
-            const out = new ClipperLib.Paths();
-            co.Execute(out, -wallInsetPx * scale);
-            if (out && out.length) {
-              let best = out[0];
-              let bestAbsArea = Math.abs(area(best));
-              for (let i = 1; i < out.length; i++) {
-                const a = Math.abs(area(out[i]));
-                if (a > bestAbsArea) {
-                  best = out[i];
-                  bestAbsArea = a;
-                }
-              }
-              if (best && best.length >= 3) {
-                shapePoints = best.map((pt) => new THREE.Vector2(pt.X / scale, pt.Y / scale));
-                insetOk = true;
-              }
-            }
-          }
-        } catch (_) {
-        }
-
-        if (!insetOk) {
-          for (let i = 0; i < shapePoints.length; i++) {
-            const p = shapePoints[i];
-            const len = Math.hypot(p.x, p.y);
-            if (len > 1e-4) {
-              const mul = Math.max(0, (len - wallInsetPx) / len);
-              p.multiplyScalar(mul);
-            }
-          }
-        }
-      }
-
       const shape = new THREE.Shape(shapePoints);
       geometry = new THREE.ShapeGeometry(shape);
       this._usingCircleFallback = false;
@@ -1017,26 +1394,135 @@ ${FoundryLightingShaderChunks.pulse}
     const tSec = (timeInfo && typeof timeInfo.elapsed === 'number') ? timeInfo.elapsed : 0;
     const { type, speed, intensity, reverse } = this._getAnimationOptions();
 
+    // "Sun Light" / darkness-driven intensity response.
+    // This is a MapShine enhancement which modulates the light intensity based on
+    // the scene darkness level (0 = day, 1 = night).
+    let darknessMul = 1.0;
+    try {
+      const dr = this.document?.config?.darknessResponse;
+      if (dr && typeof dr === 'object' && dr.enabled === true) {
+        const d0 = (typeof globalDarkness === 'number' && Number.isFinite(globalDarkness)) ? globalDarkness : 0.0;
+        const d = Math.max(0.0, Math.min(1.0, d0));
+
+        // invert=true means "day=1" at darkness=0.
+        const invert = dr.invert !== false;
+        let x = invert ? (1.0 - d) : d;
+
+        const exp0 = (typeof dr.exponent === 'number' && Number.isFinite(dr.exponent)) ? dr.exponent : 1.0;
+        const exp = Math.max(0.01, exp0);
+        x = Math.pow(Math.max(0.0, Math.min(1.0, x)), exp);
+
+        const min0 = (typeof dr.min === 'number' && Number.isFinite(dr.min)) ? dr.min : 0.0;
+        const max0 = (typeof dr.max === 'number' && Number.isFinite(dr.max)) ? dr.max : 1.0;
+        const minV = Math.max(0.0, Math.min(1.0, min0));
+        const maxV = Math.max(0.0, Math.min(1.0, max0));
+
+        darknessMul = minV + (maxV - minV) * x;
+        // Keep a small floor so we don't hit degenerate states.
+        darknessMul = Math.max(0.0, darknessMul);
+      }
+    } catch (_) {
+    }
+
     const insetWorldPx = this._getWallInsetWorldPx();
-    const needsInsetUpdate = (this._lastInsetWorldPx === null) || (Math.abs(insetWorldPx - this._lastInsetWorldPx) > 0.5);
+    const zoomNow = this._getEffectiveZoom();
+    const zoomPrev = this._lastInsetZoom;
+    const zoomChanged = (zoomPrev === null)
+      || (!Number.isFinite(zoomPrev))
+      || (!Number.isFinite(zoomNow))
+      || (Math.abs(zoomNow - zoomPrev) / Math.max(1e-6, Math.abs(zoomPrev)) > 0.01);
+
+    // Inset is SCREEN-pixel stable, so the world-space inset changes with zoom.
+    // Rebuild the wall-clipped geometry when zoom changes so the perceived thickness remains stable.
+    const needsInsetUpdate = (this._lastInsetWorldPx === null)
+      || (Math.abs(insetWorldPx - this._lastInsetWorldPx) > 0.25)
+      || zoomChanged;
+
+    // Throttle rebuilds while zooming; we only need ~10Hz.
     if (needsInsetUpdate && (tSec - this._lastInsetUpdateAtSec) > 0.1) {
       try {
         this._lastInsetWorldPx = insetWorldPx;
         this._lastInsetUpdateAtSec = tSec;
+        this._lastInsetZoom = Number.isFinite(zoomNow) ? zoomNow : null;
         this.updateData(this.document, true);
       } catch (_) {
       }
+    }
+
+    // Optional runtime debug (off by default):
+    // window.MapShine.debugWallInset = true;
+    // window.MapShine.debugWallInsetId = 'mapshine:...' (optional filter)
+    try {
+      const dbg = window.MapShine?.debugWallInset === true;
+      const dbgId = window.MapShine?.debugWallInsetId;
+      if (dbg && (!dbgId || String(dbgId) === String(this.id))) {
+        if (!this._dbgInsetNextAt) this._dbgInsetNextAt = 0;
+        if (tSec >= this._dbgInsetNextAt) {
+          this._dbgInsetNextAt = tSec + 0.5;
+          const insetPx = this._getWallInsetPx();
+          let stageZoom = null;
+          let composerZoom = null;
+          let camInfo = null;
+          try {
+            const z = canvas?.stage?.scale?.x;
+            stageZoom = (typeof z === 'number' && Number.isFinite(z)) ? z : null;
+          } catch (_) {
+          }
+          try {
+            const z = window.MapShine?.sceneComposer?.currentZoom;
+            composerZoom = (typeof z === 'number' && Number.isFinite(z)) ? z : null;
+          } catch (_) {
+          }
+          try {
+            const cam = window.MapShine?.lightingEffect?.mainCamera || window.MapShine?.sceneComposer?.camera;
+            const groundZ = window.MapShine?.sceneComposer?.groundZ ?? null;
+            if (cam) {
+              camInfo = {
+                type: cam.isOrthographicCamera ? 'ortho' : (cam.isPerspectiveCamera ? 'perspective' : 'unknown'),
+                zoom: (typeof cam.zoom === 'number' && Number.isFinite(cam.zoom)) ? cam.zoom : null,
+                fov: (typeof cam.fov === 'number' && Number.isFinite(cam.fov)) ? cam.fov : null,
+                camZ: (typeof cam.position?.z === 'number' && Number.isFinite(cam.position.z)) ? cam.position.z : null,
+                groundZ,
+              };
+            }
+          } catch (_) {
+          }
+          // eslint-disable-next-line no-console
+          console.log('[MapShine][WallInset]', {
+            id: this.id,
+            zoomNow,
+            zoomPrev,
+            zoomChanged,
+            stageZoom,
+            composerZoom,
+            camInfo,
+            insetPx,
+            insetWorldPx,
+            lastInsetWorldPx: this._lastInsetWorldPx,
+            needsInsetUpdate,
+          });
+        }
+      }
+    } catch (_) {
     }
 
     const u = this.material.uniforms;
     // Reset to base values every frame; animated types will override.
     u.uRadius.value = this._baseRadiusPx;
     u.uBrightRadius.value = this._baseBrightRadiusPx;
-    u.uIntensity.value = 1.0;
+    u.uIntensity.value = darknessMul;
     u.uTime.value = this.animation.time;
     u.uAnimType.value = 0;
     u.uAnimIntensity.value = 0;
     u.uPulse.value = 0.0;
+
+    // Reset Cable Swing offsets unless the animation explicitly sets them.
+    if (u.uCenterOffset?.value?.set) u.uCenterOffset.value.set(0, 0);
+    if (u.uCookieRotationOffset) u.uCookieRotationOffset.value = 0.0;
+
+    if (type === 'cableswing') {
+      this._updateCableSwing(timeInfo, { speed, intensity, reverse });
+    }
 
     if (!type || this._baseRadiusPx <= 0) {
       return;
@@ -1044,21 +1530,21 @@ ${FoundryLightingShaderChunks.pulse}
 
     if (type === 'torch') {
       const { brightnessPulse, ratioPulse } = this.animateTorch(tMs, { speed, intensity, reverse });
-      u.uIntensity.value = brightnessPulse;
+      u.uIntensity.value = brightnessPulse * darknessMul;
       u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
       u.uAnimType.value = 20;
       u.uTime.value = this.animation.time;
     } else if (type === 'siren') {
       // Foundry siren uses animateTorch for brightnessPulse and a shader beam pattern.
       const { brightnessPulse, ratioPulse } = this.animateTorch(tMs, { speed, intensity, reverse });
-      u.uIntensity.value = brightnessPulse;
+      u.uIntensity.value = brightnessPulse * darknessMul;
       u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
       u.uAnimType.value = 7;
       u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
       u.uTime.value = this.animation.time;
     } else if (type === 'flame') {
       const { brightnessPulse, ratioPulse } = this.animateFlickering(tMs, { speed, intensity, reverse });
-      u.uIntensity.value = brightnessPulse;
+      u.uIntensity.value = brightnessPulse * darknessMul;
       u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
       u.uAnimType.value = 21;
       u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
@@ -1066,7 +1552,7 @@ ${FoundryLightingShaderChunks.pulse}
     } else if (type === 'pulse') {
       const { pulse, ratioPulse } = this.animatePulse(tMs, { speed, intensity, reverse });
       // Pulse drives a separate shader uniform; keep base intensity stable.
-      u.uIntensity.value = 1.0;
+      u.uIntensity.value = 1.0 * darknessMul;
       u.uPulse.value = pulse;
       u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
       u.uAnimType.value = 22;
@@ -1074,7 +1560,7 @@ ${FoundryLightingShaderChunks.pulse}
     } else if (type === 'reactivepulse') {
       const { pulse, ratioPulse } = this.animateSoundPulse(dtMs, { speed, intensity, reverse });
       // Reactive pulse drives the same pulse shader.
-      u.uIntensity.value = 1.0;
+      u.uIntensity.value = 1.0 * darknessMul;
       u.uPulse.value = pulse;
       u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
       u.uAnimType.value = 22;
@@ -1084,6 +1570,7 @@ ${FoundryLightingShaderChunks.pulse}
       u.uAnimType.value = 2;
       // Foundry fairy shaders expect the raw intensity scale (0..10).
       u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
+      u.uTime.value = this.animation.time;
       u.uTime.value = tSec;
     } else if (type === 'wave') {
       // Foundry wave is a shader-driven ripple pattern; drive via uTime + uAnimType.
@@ -1186,28 +1673,9 @@ ${FoundryLightingShaderChunks.pulse}
     // lazily once the LOS data exists.
     if (this._usingCircleFallback) {
       try {
-        const placeable = canvas.lighting?.get(this.id);
-        const lightSource = placeable?.lightSource ?? placeable?.source;
-        const poly = lightSource?.los;
-        const points = poly?.points;
-        if (points && points.length >= 6) {
-          const d = canvas.dimensions;
-          const config = this.document.config;
-          const dim = config.dim || 0;
-          const bright = config.bright || 0;
-          const radius = Math.max(dim, bright);
-          const pxPerUnit = d.size / d.distance;
-          const rPx = radius * pxPerUnit;
-
-          const wallInsetPx = this._getWallInsetWorldPx();
-          const rPxInset = Math.max(0, rPx - wallInsetPx);
-
-          const worldPos = Coordinates.toWorld(this.document.x, this.document.y);
-          const groundZ = this._getGroundZ();
-          const lightZ = groundZ + 0.1;
-
-          this.rebuildGeometry(worldPos.x, worldPos.y, rPxInset, lightZ);
-        }
+        // Force a rebuild using the MapShine/Three wall masking path.
+        // This avoids relying on Foundry's internal LightSource.los polygon.
+        this.updateData(this.document, true);
       } catch (e) {
       }
     }

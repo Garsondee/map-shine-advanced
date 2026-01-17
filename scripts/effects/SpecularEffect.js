@@ -51,7 +51,7 @@ export class SpecularEffect extends EffectBase {
       textureStatus: 'Searching...',
       hasSpecularMask: true,
 
-      intensity: 0.5,           // Default shine intensity
+      intensity: 0.75,           // Default shine intensity
       roughness: 0.0,
       lightDirection: { x: 0.6, y: 0.4, z: 0.7 },
       lightColor: { r: 1.0, g: 1.0, b: 1.0 },
@@ -219,7 +219,7 @@ export class SpecularEffect extends EffectBase {
           min: 0,
           max: 2,
           step: 0.01,
-          default: 0.5,
+          default: 0.75,
           throttle: 100
         },
         roughness: {

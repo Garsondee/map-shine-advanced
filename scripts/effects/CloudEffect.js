@@ -153,7 +153,7 @@ export class CloudEffect extends EffectBase {
 
       // Shadow settings
       shadowOpacity: 1.0,     // How dark cloud shadows are
-      shadowSoftness: 1.0,    // Blur amount for shadow edges
+      shadowSoftness: 0.9,    // Blur amount for shadow edges
       shadowOffsetScale: 0.3, // How far shadows offset based on sun angle
 
       // Cloud top visibility (zoom-dependent)
@@ -173,40 +173,40 @@ export class CloudEffect extends EffectBase {
       layerParallaxBase: 1.0,
 
       layer1Enabled: true,
-      layer1Opacity: 0.8,
-      layer1Coverage: 0.42,
+      layer1Opacity: 0.23,
+      layer1Coverage: 0.33,
       layer1Scale: 1.34,
       layer1ParallaxMult: 0,
       layer1SpeedMult: 0.99,
       layer1DirDeg: -1.7,
 
       layer2Enabled: true,
-      layer2Opacity: 0.78,
-      layer2Coverage: 0.38,
+      layer2Opacity: 0.25,
+      layer2Coverage: 0.72,
       layer2Scale: 1.22,
       layer2ParallaxMult: 0,
       layer2SpeedMult: 1.07,
       layer2DirDeg: -0.86,
 
       layer3Enabled: true,
-      layer3Opacity: 0.24,
-      layer3Coverage: 1.16,
+      layer3Opacity: 0.19,
+      layer3Coverage: 0.9,
       layer3Scale: 3.0,
       layer3ParallaxMult: 0,
       layer3SpeedMult: 0.94,
       layer3DirDeg: 0.0,
 
       layer4Enabled: true,
-      layer4Opacity: 0.38,
-      layer4Coverage: 0.59,
+      layer4Opacity: 0.17,
+      layer4Coverage: 0.46,
       layer4Scale: 1.72,
       layer4ParallaxMult: 0,
       layer4SpeedMult: 0.94,
       layer4DirDeg: 0.86,
 
       layer5Enabled: true,
-      layer5Opacity: 0.22,
-      layer5Coverage: 0.51,
+      layer5Opacity: 0.13,
+      layer5Coverage: 0.62,
       layer5Scale: 1.52,
       layer5ParallaxMult: 0,
       layer5SpeedMult: 1.07,
@@ -581,7 +581,7 @@ export class CloudEffect extends EffectBase {
           min: 0.5,
           max: 10.0,
           step: 0.1,
-          default: 2.1
+          default: 0.9
         },
         shadowOffsetScale: {
           type: 'slider',
@@ -681,41 +681,41 @@ export class CloudEffect extends EffectBase {
           default: 1.0
         },
         layer1Enabled: { type: 'boolean', label: 'Enabled', default: true },
-        layer1Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.8 },
+        layer1Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.23 },
         layer1Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 1.34 },
-        layer1Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.42 },
+        layer1Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.33 },
         layer1ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.0 },
         layer1SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.99 },
         layer1DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: -1.7 },
 
         layer2Enabled: { type: 'boolean', label: 'Enabled', default: true },
-        layer2Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.78 },
+        layer2Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.25 },
         layer2Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 1.22 },
-        layer2Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.38 },
+        layer2Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.72 },
         layer2ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.0 },
         layer2SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 1.07 },
         layer2DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: -0.86 },
 
         layer3Enabled: { type: 'boolean', label: 'Enabled', default: true },
-        layer3Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.24 },
+        layer3Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.19 },
         layer3Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 3.0 },
-        layer3Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 1.16 },
+        layer3Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.9 },
         layer3ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.0 },
         layer3SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.94 },
         layer3DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: 0.0 },
 
         layer4Enabled: { type: 'boolean', label: 'Enabled', default: true },
-        layer4Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.38 },
+        layer4Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.17 },
         layer4Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 1.72 },
-        layer4Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.59 },
+        layer4Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.46 },
         layer4ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.0 },
         layer4SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.94 },
         layer4DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: 0.86 },
 
         layer5Enabled: { type: 'boolean', label: 'Enabled', default: true },
-        layer5Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.22 },
+        layer5Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.13 },
         layer5Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 1.52 },
-        layer5Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.51 },
+        layer5Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.62 },
         layer5ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.0 },
         layer5SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 1.07 },
         layer5DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: -0.6 },

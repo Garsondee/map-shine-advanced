@@ -78,6 +78,7 @@ export class InteractionManager {
       startClientY: 0,
       thresholdPx: 8,
       forceSheet: false,
+      openRingOnPointerUp: true,
     };
 
     // Light translate gizmo (X/Y + center handle). This solves the UX issue where the
@@ -240,6 +241,7 @@ export class InteractionManager {
     this.createMapPointPreview();
     this._createLightTranslateGizmo();
     this._createLightRadiusRingsGizmo();
+    this._createSelectedLightOutline();
     
     /** @type {string|null} ID of currently hovered token */
     this.hoveredTokenId = null;
@@ -262,6 +264,106 @@ export class InteractionManager {
     };
 
     log.debug('InteractionManager created');
+  }
+
+  _createSelectedLightOutline() {
+    try {
+      const THREE = window.THREE;
+      if (!THREE) return;
+
+      const points = [
+        new THREE.Vector3(-0.5, -0.5, 0),
+        new THREE.Vector3(0.5, -0.5, 0),
+        new THREE.Vector3(0.5, 0.5, 0),
+        new THREE.Vector3(-0.5, 0.5, 0),
+        new THREE.Vector3(-0.5, -0.5, 0)
+      ];
+
+      const geom = new THREE.BufferGeometry().setFromPoints(points);
+      const mat = new THREE.LineBasicMaterial({
+        color: 0x33aaff,
+        transparent: true,
+        opacity: 0.95,
+        depthTest: false,
+        depthWrite: false
+      });
+
+      const line = new THREE.Line(geom, mat);
+      line.name = 'SelectedLightOutline';
+      line.visible = false;
+      line.renderOrder = 9999;
+      line.layers.set(OVERLAY_THREE_LAYER);
+      line.layers.enable(0); // harmless, but keeps it consistent with other overlay gizmos
+
+      if (this.sceneComposer?.scene) {
+        this.sceneComposer.scene.add(line);
+      }
+
+      this._selectedLightOutline = {
+        line,
+        basePaddingMul: 1.35,
+        zOffset: 0.02
+      };
+    } catch (_) {
+      this._selectedLightOutline = { line: null };
+    }
+  }
+
+  _hideSelectedLightOutline() {
+    try {
+      const l = this._selectedLightOutline?.line;
+      if (l) l.visible = false;
+    } catch (_) {
+    }
+  }
+
+  _updateSelectedLightOutline() {
+    try {
+      const entry = this._selectedLightOutline;
+      const line = entry?.line;
+      if (!line) return;
+
+      const sel = this._getSelectedLight();
+      if (!sel) {
+        line.visible = false;
+        return;
+      }
+
+      // Determine which object to follow + its icon scale.
+      let worldPos = null;
+      let icon = null;
+      if (sel.type === 'foundry') {
+        icon = this.lightIconManager?.lights?.get?.(sel.id) || null;
+        worldPos = this._getSelectedLightWorldPos(sel);
+      } else if (sel.type === 'enhanced') {
+        const mgr = window.MapShine?.enhancedLightIconManager;
+        icon = mgr?.lights?.get?.(sel.id) || null;
+        worldPos = this._getSelectedLightWorldPos(sel);
+      }
+
+      if (!worldPos) {
+        line.visible = false;
+        return;
+      }
+
+      // Fallback size if we can't read an icon scale.
+      let sx = 60;
+      let sy = 60;
+      try {
+        const s = icon?.scale;
+        if (s && Number.isFinite(s.x) && Number.isFinite(s.y)) {
+          sx = s.x;
+          sy = s.y;
+        }
+      } catch (_) {
+      }
+
+      const pad = (Number.isFinite(entry.basePaddingMul) ? entry.basePaddingMul : 1.35);
+      line.position.set(worldPos.x, worldPos.y, (worldPos.z ?? 0) + (entry.zOffset ?? 0.02));
+      line.scale.set(sx * pad, sy * pad, 1);
+      line.visible = true;
+    } catch (_) {
+    }
   }
 
   _computeLightPreviewLocalPolygon(originWorld, radiusWorld) {
@@ -404,6 +506,29 @@ export class InteractionManager {
       }
     }
 
+    return false;
+  }
+
+  _isTextEditingEvent(event) {
+    try {
+      const t = (event?.target instanceof Element) ? event.target : null;
+      const active = (document?.activeElement instanceof Element) ? document.activeElement : null;
+      const candidates = [t, active].filter(Boolean);
+      if (!candidates.length) return false;
+
+      for (const el of candidates) {
+        // Standard form controls.
+        if (el.closest('input, textarea, select')) return true;
+
+        // Contenteditable regions (some Foundry apps use this for rich text).
+        if (el.isContentEditable) return true;
+
+        // Some UI frameworks use role-based textboxes.
+        const role = el.getAttribute?.('role');
+        if (role === 'textbox' || role === 'searchbox' || role === 'combobox') return true;
+      }
+    } catch (_) {
+    }
     return false;
   }
 
@@ -824,6 +949,71 @@ export class InteractionManager {
       if (this._uiHoverLabel) this._uiHoverLabel.visible = false;
     } catch (_) {
     }
+  }
+
+  /**
+   * If the LightRingUI overlay is open and the user click-drags the overlay background,
+   * interpret that as a request to move the currently selected light.
+   *
+   * This avoids the awkward UX where selecting a light opens the ring UI, which then
+   * blocks dragging the light icon directly.
+   *
+   * IMPORTANT: We must not hijack interactions with real form controls or wedge-drags.
+   * @param {PointerEvent} event
+   * @returns {boolean} true if we armed a pending drag
+   */
+  _armPendingSelectedLightDragFromRingUI(event) {
+    try {
+      if (!event || event.button !== 0) return false;
+
+      const t = (event?.target instanceof Element) ? event.target : null;
+      if (!t) return false;
+
+      // Only consider events that originate from the LightRingUI overlay.
+      if (!t.closest('#map-shine-light-ring')) return false;
+
+      // Never hijack real form controls.
+      if (t.closest('button, a, input, select, textarea, label')) return false;
+
+      // Never hijack wedge-drag targets (SVG paths have their own drag semantics).
+      // Note: closest('path') works for SVGPathElement; including 'svg path' for clarity.
+      if (t.closest('svg path') || t.closest('path')) return false;
+
+      const sel = this._getSelectedLight();
+      if (!sel || !this._canEditSelectedLight(sel)) return false;
+
+      // Find the corresponding sprite to move.
+      let sprite = null;
+      if (sel.type === 'foundry') {
+        sprite = this.lightIconManager?.lights?.get?.(sel.id) || null;
+      } else if (sel.type === 'enhanced') {
+        const mgr = window.MapShine?.enhancedLightIconManager;
+        sprite = mgr?.lights?.get?.(sel.id) || null;
+      }
+      if (!sprite) return false;
+
+      // Anchor drag to the world point under the cursor so movement is delta-based
+      // (no sudden snapping of the light center to the cursor).
+      const groundZ = this.sceneComposer?.groundZ ?? 0;
+      const hitPoint = this.viewportToWorld(event.clientX, event.clientY, groundZ);
+      if (!hitPoint) return false;
+
+      this._pendingLight.active = true;
+      this._pendingLight.type = sel.type;
+      this._pendingLight.id = String(sel.id);
+      this._pendingLight.sprite = sprite;
+      this._pendingLight.hitPoint = hitPoint;
+      this._pendingLight.canEdit = true;
+      this._pendingLight.startClientX = event.clientX;
+      this._pendingLight.startClientY = event.clientY;
+      this._pendingLight.forceSheet = false;
+      // The ring is already open; don't re-open it on pointerup.
+      this._pendingLight.openRingOnPointerUp = false;
+
+      return true;
+    } catch (_) {
+    }
+    return false;
   }
 
   /**
@@ -2306,7 +2496,13 @@ export class InteractionManager {
    */
   onPointerDown(event) {
     try {
-        if (this._isEventFromUI(event)) return;
+        // Allow dragging a selected light even when the LightRingUI overlay is open.
+        // We interpret a click-drag on the ring background (not on wedges/inputs) as
+        // a move gesture.
+        if (this._isEventFromUI(event)) {
+          if (this._armPendingSelectedLightDragFromRingUI(event)) return;
+          return;
+        }
 
         // Any new pointerdown cancels a pending light click unless we immediately re-arm it.
         if (this._pendingLight?.active) {
@@ -2317,6 +2513,7 @@ export class InteractionManager {
           this._pendingLight.hitPoint = null;
           this._pendingLight.canEdit = false;
           this._pendingLight.forceSheet = false;
+          this._pendingLight.openRingOnPointerUp = true;
         }
 
         // Handle Map Point Drawing Mode (takes priority over other interactions)
@@ -2869,6 +3066,7 @@ export class InteractionManager {
                 this._pendingLight.startClientX = event.clientX;
                 this._pendingLight.startClientY = event.clientY;
                 this._pendingLight.forceSheet = false;
+                this._pendingLight.openRingOnPointerUp = true;
                 return;
               }
             }
@@ -2910,6 +3108,7 @@ export class InteractionManager {
                 this._pendingLight.startClientX = event.clientX;
                 this._pendingLight.startClientY = event.clientY;
                 this._pendingLight.forceSheet = !!(event.altKey || event.ctrlKey || event.metaKey);
+                this._pendingLight.openRingOnPointerUp = true;
                 return;
               }
             }
@@ -3098,29 +3297,14 @@ export class InteractionManager {
    * @param {TimeInfo} timeInfo 
    */
   update(timeInfo) {
-      // Keep HUD positioned correctly if open
-      if (canvas.tokens?.hud?.rendered && canvas.tokens.hud.object) {
-          this.updateHUDPosition();
-      }
-
-      this._updateLightTranslateGizmo();
-      this._updateLightRadiusRingsGizmo();
-  }
-
-  _getEffectiveZoom() {
-    try {
-      const z0 = window.MapShine?.sceneComposer?.currentZoom;
-      if (typeof z0 === 'number' && isFinite(z0) && z0 > 0) return z0;
-    } catch (_) {
+    // Keep HUD positioned correctly if open
+    if (canvas.tokens?.hud?.rendered && canvas.tokens.hud.object) {
+      this.updateHUDPosition();
     }
 
-    try {
-      const z1 = canvas?.stage?.scale?.x;
-      if (typeof z1 === 'number' && isFinite(z1) && z1 > 0) return z1;
-    } catch (_) {
-    }
-
-    return 1;
+    this._updateSelectedLightOutline();
+    this._updateLightTranslateGizmo();
+    this._updateLightRadiusRingsGizmo();
   }
 
   _createLightTranslateGizmo() {
@@ -4139,6 +4323,8 @@ export class InteractionManager {
           const dist = Math.hypot(dx, dy);
           if (dist > (this._pendingLight.thresholdPx ?? 8)) {
             if (this._pendingLight.canEdit && this._pendingLight.sprite && this._pendingLight.hitPoint) {
+              const reopenAfter = this._pendingLight.openRingOnPointerUp === false;
+
               // Hide ring if it was open for some reason; we are starting an actual drag.
               try {
                 const ringUI = window.MapShine?.lightRingUI;
@@ -4146,7 +4332,36 @@ export class InteractionManager {
               } catch (_) {
               }
 
+              // Hide the radius slider overlay immediately; the per-frame gizmo update will
+              // also keep it hidden while dragging.
+              try {
+                const ui = this._radiusSliderUI;
+                if (ui?.el) ui.el.style.display = 'none';
+              } catch (_) {
+              }
+
+              // If the drag was initiated from the ring UI, re-open it after commit so the
+              // UI stays attached to the moved light.
+              if (reopenAfter && this._pendingLight.type && this._pendingLight.id) {
+                this._lightTranslate.reopenRingAfterDrag = { type: this._pendingLight.type, id: String(this._pendingLight.id) };
+              }
+
               this.startDrag(this._pendingLight.sprite, this._pendingLight.hitPoint);
+
+              // Treat this like a translate drag so downstream code can reason about it.
+              if (reopenAfter) {
+                this.dragState.mode = 'lightTranslate';
+                this.dragState.axis = 'xy';
+
+                // Enhanced light gizmo: hide radius ring during drag.
+                try {
+                  if (this._pendingLight.type === 'enhanced') {
+                    const mgr = window.MapShine?.enhancedLightIconManager;
+                    mgr?.setDragging?.(String(this._pendingLight.id), true);
+                  }
+                } catch (_) {
+                }
+              }
             }
 
             // Consume the pending state regardless of edit permission.
@@ -4155,6 +4370,7 @@ export class InteractionManager {
             this._pendingLight.id = null;
             this._pendingLight.sprite = null;
             this._pendingLight.hitPoint = null;
+            this._pendingLight.openRingOnPointerUp = true;
           }
         }
 
@@ -4736,6 +4952,7 @@ export class InteractionManager {
           const id = this._pendingLight.id;
           const type = this._pendingLight.type;
           const forceSheet = !!this._pendingLight.forceSheet;
+          const openRingOnPointerUp = this._pendingLight.openRingOnPointerUp !== false;
 
           this._pendingLight.active = false;
           this._pendingLight.type = null;
@@ -4743,6 +4960,11 @@ export class InteractionManager {
           this._pendingLight.sprite = null;
           this._pendingLight.hitPoint = null;
           this._pendingLight.canEdit = false;
+          this._pendingLight.openRingOnPointerUp = true;
+
+          // Some gestures (e.g. click-drag on the ring overlay background) should not
+          // cause the ring UI to be re-opened on pointer-up.
+          if (!openRingOnPointerUp) return;
 
           if (sprite && id && type) {
             try {
@@ -5456,10 +5678,19 @@ export class InteractionManager {
    * @param {KeyboardEvent} event 
    */
   async onKeyDown(event) {
-    if (this._isEventFromUI(event)) return;
-
     const key = String(event.key || '').toLowerCase();
     const isMod = !!(event.ctrlKey || event.metaKey);
+
+    // We normally ignore all key events that originate from UI so that text fields,
+    // tweakpanes, dialogs, etc. behave normally.
+    //
+    // Exception: we still want Ctrl/Cmd+C and Ctrl/Cmd+V to work for selected lights
+    // even while the LightRingUI overlay is open.
+    const isCopyPaste = isMod && (key === 'c' || key === 'v');
+    if (this._isEventFromUI(event)) {
+      // If the user is actively typing/editing text, never hijack clipboard shortcuts.
+      if (!isCopyPaste || this._isTextEditingEvent(event)) return;
+    }
 
     // Copy/Paste for Three-native lights.
     if (isMod && key === 'c') {
@@ -6025,6 +6256,8 @@ export class InteractionManager {
       }
     }
     this.selection.clear();
+
+    this._hideSelectedLightOutline();
     
     // Hide ring UI when clearing selection.
     try {
@@ -6098,6 +6331,17 @@ export class InteractionManager {
     window.removeEventListener('keydown', this.boundHandlers.onKeyDown);
     
     this.clearSelection();
+
+    try {
+      const line = this._selectedLightOutline?.line;
+      if (line) {
+        line.parent?.remove?.(line);
+        line.geometry?.dispose?.();
+        line.material?.dispose?.();
+      }
+    } catch (_) {
+    }
+
     log.info('InteractionManager disposed');
   }
 }

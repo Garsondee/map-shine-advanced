@@ -490,10 +490,10 @@ export class FireSparksEffect extends EffectBase {
       emberEndColor: { r: 1.0, g: 0.2, b: 0.0 },
 
       // Physics controls (match Mad Scientist scene where provided)
-      fireUpdraft: 0.95,
-      emberUpdraft: 1.6,
+      fireUpdraft: 0.15,
+      emberUpdraft: 1.35,
       fireCurlStrength: 0.7,
-      emberCurlStrength: 6.05,
+      emberCurlStrength: 0.3,
 
       // Weather guttering controls (outdoor fire kill strength)
       // These scale how strongly precipitation and wind reduce fire lifetime
@@ -521,9 +521,9 @@ export class FireSparksEffect extends EffectBase {
       // 1.0 = indoor flames live as long as outdoor flames.
       // <1.0 = indoor flames are shorter-lived (tighter, less buoyant).
       // This is applied in FireMaskShape.initialize when outdoorFactor ~ 0.
-      indoorLifeScale: 0.75,
+      indoorLifeScale: 1.0,
 
-      indoorTimeScale: 0.6,
+      indoorTimeScale: 0.2,
 
       // ========== FLAME SHAPE ATLAS CONTROLS ==========
       // Global flame shape parameters (affect all animation frames)
@@ -910,19 +910,19 @@ export class FireSparksEffect extends EffectBase {
         emberColorBoostMax: { type: 'slider', label: 'Ember Color Boost Max', min: 0.0, max: 3.0, step: 0.05, default: 2.85 },
         emberStartColor: { type: 'color', default: { r: 1.0, g: 0.8, b: 0.4 } },
         emberEndColor: { type: 'color', default: { r: 1.0, g: 0.2, b: 0.0 } },
-        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 0.25 },
-        emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 2.65 },
+        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 0.15 },
+        emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 1.35 },
         fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.7 },
-        emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 1.5 },
+        emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.3 },
         // Wind Influence remains generic; Light Intensity and Time Scale match scene
         windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 4.5 },
         lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
-        timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 1.75 },
+        timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 3.0 },
 
         // Indoor vs outdoor lifetime scaling (applied only when particles are fully indoors)
-        indoorLifeScale: { type: 'slider', label: 'Indoor Life Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.5 },
+        indoorLifeScale: { type: 'slider', label: 'Indoor Life Scale', min: 0.05, max: 1.0, step: 0.05, default: 1.0 },
 
-        indoorTimeScale: { type: 'slider', label: 'Indoor Time Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.15 },
+        indoorTimeScale: { type: 'slider', label: 'Indoor Time Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.2 },
 
         // Weather guttering strength (spawn-time kill) for outdoor flames
         weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.5 },

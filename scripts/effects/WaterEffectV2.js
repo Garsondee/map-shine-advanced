@@ -17,10 +17,10 @@ export class WaterEffectV2 extends EffectBase {
 
       maskChannel: 'auto',
       maskInvert: false,
-      maskThreshold: 0.15,
+      maskThreshold: 0.05,
       maskBlurRadius: 0.0,
       maskBlurPasses: 0,
-      maskExpandPx: 0.0,
+      maskExpandPx: -1.8,
       buildResolution: 512,
       sdfRangePx: 64,
       shoreWidthPx: 24,
@@ -31,13 +31,13 @@ export class WaterEffectV2 extends EffectBase {
       distortionStrengthPx: 5.8,
 
       waveDirOffsetDeg: 0.0,
-      advectionDirOffsetDeg: -180.0,
+      advectionDirOffsetDeg: 0.0,
       advectionSpeed: 0.41,
-      windDirResponsiveness: 10.0,
+      windDirResponsiveness: 3.8,
       useTargetWindDirection: true,
 
-      specStrength: 25.0,
-      specPower: 24.0,
+      specStrength: 210.14,
+      specPower: 5.5,
 
       debugView: 0
     };
@@ -141,10 +141,10 @@ export class WaterEffectV2 extends EffectBase {
           default: 'auto'
         },
         maskInvert: { type: 'boolean', label: 'Invert Mask', default: false },
-        maskThreshold: { type: 'slider', label: 'Mask Threshold', min: 0.0, max: 1.0, step: 0.01, default: 0.15, throttle: 50 },
+        maskThreshold: { type: 'slider', label: 'Mask Threshold', min: 0.0, max: 1.0, step: 0.01, default: 0.05, throttle: 50 },
         maskBlurRadius: { type: 'slider', label: 'Mask Blur Radius (px)', min: 0.0, max: 16.0, step: 0.1, default: 0.0, throttle: 50 },
         maskBlurPasses: { type: 'slider', label: 'Mask Blur Passes', min: 0, max: 6, step: 1, default: 0, throttle: 50 },
-        maskExpandPx: { type: 'slider', label: 'Mask Expand/Contract (px)', min: -64.0, max: 64.0, step: 0.25, default: 0.0, throttle: 50 },
+        maskExpandPx: { type: 'slider', label: 'Mask Expand/Contract (px)', min: -64.0, max: 64.0, step: 0.25, default: -1.8, throttle: 50 },
 
         buildResolution: { type: 'list', label: 'Build Resolution', options: { 256: 256, 512: 512, 1024: 1024 }, default: 512 },
         sdfRangePx: { type: 'slider', label: 'SDF Range (px)', min: 8, max: 256, step: 1, default: 64, throttle: 50 },
@@ -155,14 +155,14 @@ export class WaterEffectV2 extends EffectBase {
         waveStrength: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.31 },
         distortionStrengthPx: { type: 'slider', min: 0, max: 64.0, step: 0.01, default: 5.8 },
 
-        waveDirOffsetDeg: { type: 'slider', label: 'Wave Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: -90.0 },
-        advectionDirOffsetDeg: { type: 'slider', label: 'Advection Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: -180.0 },
+        waveDirOffsetDeg: { type: 'slider', label: 'Wave Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
+        advectionDirOffsetDeg: { type: 'slider', label: 'Advection Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
         advectionSpeed: { type: 'slider', label: 'Advection Speed', min: 0.0, max: 4.0, step: 0.01, default: 0.41 },
-        windDirResponsiveness: { type: 'slider', label: 'Wind Dir Responsiveness', min: 0.1, max: 10.0, step: 0.1, default: 10.0 },
+        windDirResponsiveness: { type: 'slider', label: 'Wind Dir Responsiveness', min: 0.1, max: 10.0, step: 0.1, default: 3.8 },
         useTargetWindDirection: { type: 'boolean', label: 'Use Target Wind Dir', default: true },
 
-        specStrength: { type: 'slider', min: 0, max: 250.0, step: 0.01, default: 25.0 },
-        specPower: { type: 'slider', min: 1, max: 24, step: 0.5, default: 24.0 },
+        specStrength: { type: 'slider', min: 0, max: 250.0, step: 0.01, default: 210.14 },
+        specPower: { type: 'slider', min: 1, max: 24, step: 0.5, default: 5.5 },
 
         debugView: {
           type: 'list',
@@ -322,7 +322,14 @@ export class WaterEffectV2 extends EffectBase {
         }
 
         vec2 warpUv(vec2 sceneUv) {
-          vec2 uv = sceneUv + uWindOffsetUv;
+          // IMPORTANT: advecting by changing sampling coordinates is direction-inverted.
+          // If we want the *visible* pattern to move with the wind, we must subtract
+          // the accumulated offset from the sampling UVs.
+          // NOTE: We flip the Y component here to keep the advection drift in the same
+          // basis as the wave travel direction (which flips Foundry Y-down to math Y-up).
+          // Without this, high advectionSpeed can make the wave field appear Y-mirrored.
+          vec2 windOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
+          vec2 uv = sceneUv - windOffsetUv;
 
           // Large-scale domain warp to reduce obvious repetition across big bodies of water.
           float lf1 = fbmNoise(sceneUv * 0.23 + vec2(19.1, 7.3));
@@ -366,11 +373,14 @@ export class WaterEffectV2 extends EffectBase {
           vec2 windF = uWindDir;
           float wl = length(windF);
           windF = (wl > 1e-5) ? (windF / wl) : vec2(1.0, 0.0);
+          // WeatherController windDirection is in Foundry/world coordinates (Y-down).
+          // The wave phase math (dot(p, dir)) behaves like a standard math basis (Y-up).
+          // Convert by flipping Y so wave travel matches wind at 90/270 degrees.
           vec2 wind = vec2(windF.x, -windF.y);
           wind = rotate2D(wind, uWaveDirOffsetRad);
 
           vec2 uvF = warpUv(sceneUv);
-          vec2 uv = vec2(uvF.x, 1.0 - uvF.y);
+          vec2 uv = uvF;
           vec2 p = uv * uWaveScale;
 
           float h = 0.0;
@@ -393,11 +403,12 @@ export class WaterEffectV2 extends EffectBase {
           vec2 windF = uWindDir;
           float wl = length(windF);
           windF = (wl > 1e-5) ? (windF / wl) : vec2(1.0, 0.0);
+          // Keep consistent with waveHeight(): flip Foundry Y-down to math Y-up.
           vec2 wind = vec2(windF.x, -windF.y);
           wind = rotate2D(wind, uWaveDirOffsetRad);
 
           vec2 uvF = warpUv(sceneUv);
-          vec2 uv = vec2(uvF.x, 1.0 - uvF.y);
+          vec2 uv = uvF;
           vec2 p = uv * uWaveScale;
 
           float hDummy = 0.0;
@@ -410,7 +421,7 @@ export class WaterEffectV2 extends EffectBase {
           addWave(p, rotate2D(wind,  0.85), TAU * 2.49, 0.10, 3.35, (1.10 + 0.65 * sqrt(TAU * 2.49)), t, hDummy, g);
 
           // Normalize away the scale dependence so uWaveScale doesn't make razor-sharp gradients.
-          return vec2(g.x, -g.y) / max(uWaveScale, 1e-3);
+          return g / max(uWaveScale, 1e-3);
         }
 
         vec2 smoothFlow2D(vec2 sceneUv) {
@@ -792,14 +803,12 @@ export class WaterEffectV2 extends EffectBase {
           const adDeg = Number.isFinite(this.params?.advectionDirOffsetDeg) ? this.params.advectionDirOffsetDeg : 0.0;
           const adRad = (adDeg * Math.PI) / 180.0;
 
-          const fx = baseDxF;
-          const fy = -baseDyF;
+          // Keep advection in the same basis as sceneUv (Foundry sceneRect UVs, Y-down).
+          // Any Y-up conversions for wave math happen later in the shader.
           const cs = Math.cos(adRad);
           const sn = Math.sin(adRad);
-          const rx = cs * fx - sn * fy;
-          const ry = sn * fx + cs * fy;
-          const dx = rx;
-          const dy = -ry;
+          const dx = cs * baseDxF - sn * baseDyF;
+          const dy = sn * baseDxF + cs * baseDyF;
 
           const du = dx * (pxPerSec * dtSeconds) / Math.max(1.0, sceneW);
           const dv = dy * (pxPerSec * dtSeconds) / Math.max(1.0, sceneH);

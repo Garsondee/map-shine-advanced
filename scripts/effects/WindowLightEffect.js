@@ -62,7 +62,7 @@ export class WindowLightEffect extends EffectBase {
       hasWindowMask: undefined,
 
       // Core light controls
-      intensity: 0.7,
+      intensity: 13.6,
       color: { r: 1.0, g: 0.96, b: 0.85 }, // Warm window light
       
       // Mask shaping (Gamma/Gain model)
@@ -70,10 +70,10 @@ export class WindowLightEffect extends EffectBase {
 
       // Environment
       cloudInfluence: 1.0,     // How much clouds dim the light (0-1)
-      nightDimming: 1.0,       // How much night dims the light (0-1)
+      nightDimming: 0.8,       // How much night dims the light (0-1)
 
       useSkyTint: true,
-      skyTintStrength: 2.26,
+      skyTintStrength: 3.24,
 
       // Cloud shadow shaping (applied to cloudShadowRaw.screen before influence/cover mix)
       cloudShadowContrast: 4.0,
@@ -479,7 +479,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 25.0,
           step: 0.1,
-          default: 0.7
+          default: 13.6
         },
         falloff: {
           type: 'slider',
@@ -508,7 +508,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 1.0
+          default: 0.8
         },
         useSkyTint: {
           type: 'boolean',
@@ -521,7 +521,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 25.0,
           step: 0.01,
-          default: 2.26
+          default: 3.24
         },
         cloudShadowContrast: {
           type: 'slider',

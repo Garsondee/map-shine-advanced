@@ -15,7 +15,7 @@ export class LightningEffect extends EffectBase {
       enabled: true,
 
       outsideFlashEnabled: true,
-      outsideFlashGain: 1.5,
+      outsideFlashGain: 0.45,
       outsideFlashAttackMs: 25,
       outsideFlashDecayMs: 650,
       outsideFlashCurve: 1.6,
@@ -35,21 +35,21 @@ export class LightningEffect extends EffectBase {
 
       outerColor: { r: 0.35, g: 0.65, b: 1.0 },
       coreColor: { r: 1.0, g: 1.0, b: 1.0 },
-      brightness: 10.0,
+      brightness: 0.9,
 
       width: 12.0,
       taper: 0.72,
-      glowStrength: 2.0,
+      glowStrength: 1.0,
 
       zOffset: 2.0,
 
       overheadOrder: 0,
 
-      segments: 28,
+      segments: 34,
       curveAmount: 0.32,
       macroDisplacement: 14.0,
       microJitter: 3.0,
-      endPointRandomnessPx: 41.0,
+      endPointRandomnessPx: 114.0,
 
       textureScrollSpeed: 30.0,
 
@@ -145,7 +145,7 @@ export class LightningEffect extends EffectBase {
         enabled: { type: 'boolean', default: true, hidden: true },
 
         outsideFlashEnabled: { type: 'boolean', default: true, label: 'Flash Enabled' },
-        outsideFlashGain: { type: 'slider', min: 0, max: 5, step: 0.01, default: 1.5, label: 'Flash Gain' },
+        outsideFlashGain: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.45, label: 'Flash Gain' },
         outsideFlashAttackMs: { type: 'slider', min: 0, max: 150, step: 1, default: 25, label: 'Attack (ms)' },
         outsideFlashDecayMs: { type: 'slider', min: 50, max: 2500, step: 10, default: 650, label: 'Decay (ms)' },
         outsideFlashCurve: { type: 'slider', min: 0.25, max: 4, step: 0.01, default: 1.6, label: 'Decay Curve' },
@@ -164,10 +164,10 @@ export class LightningEffect extends EffectBase {
 
         outerColor: { type: 'color', default: { r: 0.35, g: 0.65, b: 1.0 }, label: 'Outer Color' },
         coreColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 }, label: 'Core Color' },
-        brightness: { type: 'slider', min: 0, max: 10, step: 0.05, default: 10.0, label: 'Brightness' },
+        brightness: { type: 'slider', min: 0, max: 10, step: 0.05, default: 0.9, label: 'Brightness' },
         width: { type: 'slider', min: 1, max: 120, step: 1, default: 12, label: 'Width (px-ish)' },
         taper: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.72, label: 'Taper' },
-        glowStrength: { type: 'slider', min: 0, max: 5, step: 0.05, default: 2.0, label: 'Glow Strength' },
+        glowStrength: { type: 'slider', min: 0, max: 5, step: 0.05, default: 1.0, label: 'Glow Strength' },
         zOffset: { type: 'slider', min: 0, max: 50, step: 0.25, default: 2.0, label: 'Z Offset' },
         overheadOrder: {
           type: 'list',
@@ -180,11 +180,11 @@ export class LightningEffect extends EffectBase {
         },
         textureScrollSpeed: { type: 'slider', min: 0, max: 30, step: 0.1, default: 30.0, label: 'Texture Scroll Speed' },
 
-        segments: { type: 'slider', min: 4, max: 96, step: 1, default: 28, label: 'Segments' },
+        segments: { type: 'slider', min: 4, max: 96, step: 1, default: 34, label: 'Segments' },
         curveAmount: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.32, label: 'Curve Amount' },
         macroDisplacement: { type: 'slider', min: 0, max: 400, step: 1, default: 14, label: 'Macro Displacement' },
         microJitter: { type: 'slider', min: 0, max: 120, step: 1, default: 3, label: 'Micro Jitter' },
-        endPointRandomnessPx: { type: 'slider', min: 0, max: 400, step: 1, default: 41, label: 'Endpoint Randomness' },
+        endPointRandomnessPx: { type: 'slider', min: 0, max: 400, step: 1, default: 114, label: 'Endpoint Randomness' },
 
         branchChance: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.89, label: 'Branch Chance' },
         branchMax: { type: 'slider', min: 0, max: 6, step: 1, default: 3, label: 'Branch Max' },

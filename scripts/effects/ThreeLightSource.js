@@ -926,7 +926,7 @@ ${FoundryLightingShaderChunks.pulse}
 
     const n = this.animation.noise.generate(this.animation.time);
     const brightnessPulse = 0.55 + n;
-    const ratioPulse = (this._baseRatio * 0.9) + (n * 0.222);
+    const ratioPulse = this._clamp(this._baseRatio * (0.9 + (n * 0.25)), 0, 1);
     return { brightnessPulse, ratioPulse };
   }
 

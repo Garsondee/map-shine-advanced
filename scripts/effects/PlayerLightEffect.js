@@ -53,7 +53,7 @@ export class PlayerLightEffect extends EffectBase {
     super('player-light', RenderLayers.ENVIRONMENTAL, 'low');
 
     this.priority = 9;
-    this.enabled = false;
+    this.enabled = true;
 
     this.params = {
       enabled: true,

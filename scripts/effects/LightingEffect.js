@@ -34,10 +34,10 @@ export class LightingEffect extends EffectBase {
     // See docs/CONTRAST-DARKNESS-ANALYSIS.md for rationale.
     this.params = {
       enabled: true,
-      globalIllumination: 2.0, // Multiplier for ambient
-      lightIntensity: 0.5, // Master multiplier for dynamic lights
+      globalIllumination: 1.0, // Multiplier for ambient
+      lightIntensity: 0.2, // Master multiplier for dynamic lights
       colorationStrength: 3.0,
-      darknessEffect: 0.65, // Scales Foundry's darknessLevel
+      darknessEffect: 0.5, // Scales Foundry's darknessLevel
       darknessLevel: 0.0, // Read-only mostly, synced from canvas
 
       // Light Animation Behaviour
@@ -51,7 +51,7 @@ export class LightingEffect extends EffectBase {
       // Outdoor brightness control: adjusts outdoor areas relative to darkness level
       // At darkness 0: outdoors *= outdoorBrightness (boost daylight)
       // At darkness 1: outdoors *= (2.0 - outdoorBrightness) (dim night)
-      outdoorBrightness: 1.0, // 1.0 = no change, 2.0 = double brightness at day
+      outdoorBrightness: 1.7, // 1.0 = no change, 2.0 = double brightness at day
 
       lightningOutsideEnabled: true,
       lightningOutsideGain: 1.25,
@@ -71,7 +71,7 @@ export class LightingEffect extends EffectBase {
       // Boost applied only to interior (low outdoors mask) regions.
       sunIndoorGain: 1.0,
       // Blur radius in pixels applied to the sun light buffer to soften edges.
-      sunBlurRadiusPx: 10.0,
+      sunBlurRadiusPx: 5.0,
 
       debugShowLightBuffer: undefined,
       debugLightBufferExposure: undefined,
@@ -214,12 +214,12 @@ export class LightingEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 2.0 },
-        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Light Intensity' },
+        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.0 },
+        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.2, label: 'Light Intensity' },
         colorationStrength: { type: 'slider', min: 0, max: 500, step: 0.05, default: 3.0, label: 'Coloration Strength' },
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
-        darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.65, label: 'Darkness Effect' },
-        outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.0, label: 'Outdoor Brightness' },
+        darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Darkness Effect' },
+        outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.7, label: 'Outdoor Brightness' },
         lightAnimWindInfluence: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.0, label: 'Wind Influence' },
         lightAnimOutdoorPower: { type: 'slider', min: 0, max: 6, step: 0.25, default: 2.0, label: 'Outdoor Power' },
         lightningOutsideEnabled: { type: 'boolean', default: true, label: 'Enabled' },
@@ -232,7 +232,7 @@ export class LightingEffect extends EffectBase {
         negativeDarknessStrength: { type: 'slider', min: 0, max: 3, step: 0.1, default: 1.0, label: 'Negative Darkness Strength' },
         darknessPunchGain: { type: 'slider', min: 0, max: 10, step: 0.1, default: 2.0, label: 'Darkness Punch Gain' },
         sunIndoorGain: { type: 'slider', min: 0, max: 20, step: 0.25, default: 1.0, label: 'Indoor Gain' },
-        sunBlurRadiusPx: { type: 'slider', min: 0, max: 40, step: 1, default: 10.0, label: 'Blur Radius (px)' },
+        sunBlurRadiusPx: { type: 'slider', min: 0, max: 40, step: 1, default: 5.0, label: 'Blur Radius (px)' },
         debugShowLightBuffer: { type: 'boolean', default: false },
         debugLightBufferExposure: { type: 'number', default: 1.0 },
         debugShowDarknessBuffer: { type: 'boolean', default: false },
@@ -318,16 +318,16 @@ export class LightingEffect extends EffectBase {
         tBuildingShadow: { value: null }, 
         tBushShadow: { value: null }, 
         tTreeShadow: { value: null }, 
-        tCloudShadow: { value: null }, 
-        tCloudTop: { value: null }, 
+        tCloudShadow: { value: null },
+        tCloudTop: { value: null },
         uHasWindowLight: { value: 0.0 },
         uRopeWindowLightBoost: { value: 0.0 },
         uDarknessLevel: { value: 0.0 },
-        uAmbientBrightest: { value: new THREE.Color(1,1,1) },
-        uAmbientDarkness: { value: new THREE.Color(0.1, 0.1, 0.2) },
+        uAmbientBrightest: { value: new THREE.Color(1, 1, 1) },
+        uAmbientDarkness: { value: new THREE.Color(0.141, 0.141, 0.282) },
         uGlobalIllumination: { value: 1.0 },
         uLightIntensity: { value: 1.0 },
-        uColorationStrength: { value: 1.35 },
+        uColorationStrength: { value: 1.0 },
         uOverheadShadowOpacity: { value: 0.0 },
         uOverheadShadowAffectsLights: { value: 0.75 },
         uBuildingShadowOpacity: { value: 0.0 },
@@ -335,23 +335,23 @@ export class LightingEffect extends EffectBase {
         uTreeShadowOpacity: { value: 0.0 },
         uTreeSelfShadowStrength: { value: 1.0 },
         uCloudShadowOpacity: { value: 0.0 },
-        uShadowSunDir: { value: new THREE.Vector2(0, 1) },
+        uShadowSunDir: { value: new THREE.Vector2(1, 0) },
         uShadowZoom: { value: 1.0 },
-        uBushShadowLength: { value: 0.04 },
-        uTreeShadowLength: { value: 0.08 },
-        uCompositeTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
-        uViewportHeight: { value: 1024.0 },
-        uOutdoorBrightness: { value: 1.5 },
+        uBushShadowLength: { value: 0.0 },
+        uTreeShadowLength: { value: 0.0 },
+        uCompositeTexelSize: { value: new THREE.Vector2(1, 1) },
+        uViewportHeight: { value: 1080.0 },
+        uOutdoorBrightness: { value: 1.0 },
         uSunIndoorGain: { value: 1.0 },
-        uSunBlurRadiusPx: { value: 10.0 },
+        uSunBlurRadiusPx: { value: 0.0 },
         uLightningFlash01: { value: 0.0 },
-        uLightningOutsideGain: { value: 1.25 },
+        uLightningOutsideGain: { value: 0.0 },
         uLightningStrikeUv: { value: new THREE.Vector2(0.5, 0.5) },
-        uLightningStrikeDir: { value: new THREE.Vector2(0.0, -1.0) },
-        uLightningShadowEnabled: { value: 1.0 },
-        uLightningShadowStrength: { value: 0.75 },
-        uLightningShadowRadiusPx: { value: 520.0 },
-        uLightningShadowEdgeGain: { value: 6.0 },
+        uLightningStrikeDir: { value: new THREE.Vector2(0.0, 1.0) },
+        uLightningShadowEnabled: { value: 0.0 },
+        uLightningShadowStrength: { value: 0.0 },
+        uLightningShadowRadiusPx: { value: 0.0 },
+        uLightningShadowEdgeGain: { value: 0.0 },
         uLightningShadowInvert: { value: 0.0 },
         uNegativeDarknessStrength: { value: 1.0 },
         uDarknessPunchGain: { value: 2.0 },
@@ -1404,14 +1404,14 @@ export class LightingEffect extends EffectBase {
 
     // Update Composite Uniforms
     const u = this.compositeMaterial.uniforms;
-    u.uDarknessLevel.value = this.getEffectiveDarkness();
-    u.uGlobalIllumination.value = this.params.globalIllumination;
-    u.uLightIntensity.value = this.params.lightIntensity;
-    u.uColorationStrength.value = this.params.colorationStrength;
-    u.uOutdoorBrightness.value = this.params.outdoorBrightness;
+    if (u.uDarknessLevel) u.uDarknessLevel.value = this.getEffectiveDarkness();
+    if (u.uGlobalIllumination) u.uGlobalIllumination.value = this.params.globalIllumination;
+    if (u.uLightIntensity) u.uLightIntensity.value = this.params.lightIntensity;
+    if (u.uColorationStrength) u.uColorationStrength.value = this.params.colorationStrength;
+    if (u.uOutdoorBrightness) u.uOutdoorBrightness.value = this.params.outdoorBrightness;
     if (u.uSunIndoorGain) u.uSunIndoorGain.value = this.params.sunIndoorGain;
     if (u.uSunBlurRadiusPx) u.uSunBlurRadiusPx.value = this.params.sunBlurRadiusPx;
-    u.uNegativeDarknessStrength.value = this.params.negativeDarknessStrength;
+    if (u.uNegativeDarknessStrength) u.uNegativeDarknessStrength.value = this.params.negativeDarknessStrength;
 
     // Lightning outside flash (published by LightningEffect)
     try {

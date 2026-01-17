@@ -44,9 +44,9 @@ export class WeatherController {
     this.currentState = {
       precipitation: 0.0,
       precipType: PrecipitationType.NONE,
-      cloudCover: 0.93,
-      windSpeed: 0.25,
-      windDirection: { x: -0.9063077870366499, y: 0.42261826174069944 }, // 205deg, upgraded to Vector2 in initialize() (Y-down world)
+      cloudCover: 0.5,
+      windSpeed: 0.3,
+      windDirection: { x: -0.9563047560005831, y: 0.29237170472273677 }, // 197deg, upgraded to Vector2 in initialize() (Y-down world)
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0
@@ -73,9 +73,9 @@ export class WeatherController {
     this.targetState = { 
       precipitation: 0.88,
       precipType: PrecipitationType.NONE,
-      cloudCover: 0.93,
-      windSpeed: 0.25,
-      windDirection: { x: -0.9063077870366499, y: 0.42261826174069944 },
+      cloudCover: 0.5,
+      windSpeed: 0.3,
+      windDirection: { x: -0.9563047560005831, y: 0.29237170472273677 },
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0
@@ -97,13 +97,13 @@ export class WeatherController {
     this.presetTransitionDurationSeconds = undefined;
 
     // Wind Gust System
-    this.gustWaitMin = 2.0;   // Seconds to wait between gusts (min)
-    this.gustWaitMax = 17.5;  // Seconds to wait between gusts (max)
-    this.gustDuration = 9.6;  // Duration of a gust
+    this.gustWaitMin = 4.0;   // Seconds to wait between gusts (min)
+    this.gustWaitMax = 42.0;  // Seconds to wait between gusts (max)
+    this.gustDuration = 15.5;  // Duration of a gust
     this.gustTimer = 0;       // Countdown timer
     this.isGusting = false;   // Current state
     this.currentGustStrength = 0; // Smoothed gust value
-    this.gustStrength = 0.5;      // Multiplier for how strong gusts are compared to base wind
+    this.gustStrength = 1.65;      // Multiplier for how strong gusts are compared to base wind
 
     // Time of Day (0-24)
     this.timeOfDay = 6.6; // Tuned time of day
@@ -2187,7 +2187,7 @@ export class WeatherController {
         },
         cloudCover: {
           label: 'Cloud Cover',
-          default: 0.76,
+          default: 0.5,
           min: 0.0,
           max: 1.0,
           step: 0.01,
@@ -2196,7 +2196,7 @@ export class WeatherController {
         // Wind base state (moved into dedicated Wind folder)
         windSpeed: {
           label: 'Base Wind Speed',
-          default: 0.0,
+          default: 0.3,
           min: 0.0,
           max: 1.0,
           step: 0.01,
@@ -2204,7 +2204,7 @@ export class WeatherController {
         },
         windDirection: {
           label: 'Wind Direction (deg)',
-          default: 83.0,
+          default: 197.0,
           min: 0.0,
           max: 360.0,
           step: 1.0,
@@ -2239,7 +2239,7 @@ export class WeatherController {
         // Wind / Gust tuning
         gustWaitMin: {
           label: 'Gust Pause Min (s)',
-          default: 2.0,
+          default: 4.0,
           min: 0.0,
           max: 60.0,
           step: 0.5,
@@ -2247,7 +2247,7 @@ export class WeatherController {
         },
         gustWaitMax: {
           label: 'Gust Pause Max (s)',
-          default: 17.5,
+          default: 42.0,
           min: 0.0,
           max: 120.0,
           step: 0.5,
@@ -2255,7 +2255,7 @@ export class WeatherController {
         },
         gustDuration: {
           label: 'Gust Duration (s)',
-          default: 9.6,
+          default: 15.5,
           min: 0.1,
           max: 30.0,
           step: 0.1,
@@ -2263,7 +2263,7 @@ export class WeatherController {
         },
         gustStrength: {
           label: 'Gust Strength',
-          default: 0.5,
+          default: 1.65,
           min: 0.0,
           max: 3.0,
           step: 0.05,

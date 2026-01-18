@@ -350,6 +350,9 @@ export class WaterEffectV2 extends EffectBase {
         uTime: { value: 0.0 },
         uResolution: { value: new THREE.Vector2(1, 1) },
 
+        // Zoom stability: scale pixel offsets by current zoom (zoom out => smaller offset in UV).
+        uZoom: { value: 1.0 },
+
         uViewBounds: { value: this._viewBounds },
         uSceneDimensions: { value: this._sceneDimensions },
         uSceneRect: { value: this._sceneRect },
@@ -425,6 +428,8 @@ export class WaterEffectV2 extends EffectBase {
 
         uniform float uTime;
         uniform vec2 uResolution;
+
+        uniform float uZoom;
 
         uniform vec4 uViewBounds;
         uniform vec2 uSceneDimensions;
@@ -694,7 +699,8 @@ export class WaterEffectV2 extends EffectBase {
               amp *= amp;
               vec2 texel = 1.0 / max(uResolution, vec2(1.0));
               float px = clamp(uDistortionStrengthPx, 0.0, 64.0);
-              vec2 offsetUv = combinedN * (px * texel) * amp * inside * max(0.35, shore);
+              float zoom = max(uZoom, 0.001);
+              vec2 offsetUv = combinedN * (px * texel) * amp * inside * max(0.35, shore) * zoom;
               vec2 pxOff = offsetUv / max(texel, vec2(1e-6));
               pxOff = clamp(pxOff / max(1.0, px), vec2(-1.0), vec2(1.0));
               gl_FragColor = vec4(pxOff * 0.5 + 0.5, 0.0, 1.0);
@@ -727,7 +733,8 @@ export class WaterEffectV2 extends EffectBase {
           amp *= amp;
           vec2 texel = 1.0 / max(uResolution, vec2(1.0));
           float px = clamp(uDistortionStrengthPx, 0.0, 64.0);
-          vec2 offsetUv = combinedN * (px * texel) * amp * inside * max(0.35, shore);
+          float zoom = max(uZoom, 0.001);
+          vec2 offsetUv = combinedN * (px * texel) * amp * inside * max(0.35, shore) * zoom;
 
           if (uDebugView > 4.5) {
             vec2 pxOff = offsetUv / max(texel, vec2(1e-6));
@@ -933,6 +940,12 @@ export class WaterEffectV2 extends EffectBase {
 
     const elapsed = Number.isFinite(timeInfo?.elapsed) ? timeInfo.elapsed : 0.0;
     u.uTime.value = elapsed;
+
+    if (u.uZoom) {
+      const sceneComposer = window.MapShine?.sceneComposer ?? window.canvas?.mapShine?.sceneComposer;
+      const z = sceneComposer?.currentZoom ?? (typeof sceneComposer?.getZoomScale === 'function' ? sceneComposer.getZoomScale() : 1.0);
+      u.uZoom.value = Number.isFinite(z) ? z : 1.0;
+    }
 
     const dtSeconds = (this._lastTimeValue === null) ? 0.0 : Math.max(0.0, elapsed - this._lastTimeValue);
 

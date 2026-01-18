@@ -22,7 +22,10 @@ const DISABLE_TILE_UPDATES = false;
 // Background < Foreground < Overhead, but differences are tiny.
 const Z_BACKGROUND_OFFSET = 0.01;
 const Z_FOREGROUND_OFFSET = 0.02;
-const Z_OVERHEAD_OFFSET = 0.03;
+// IMPORTANT: Overhead tiles must sit above tokens in Z so depth testing can
+// reliably keep roofs visible even when renderer object sorting is disabled.
+// Tokens use TOKEN_BASE_Z=0.06 (see TokenManager). Keep this slightly above.
+const Z_OVERHEAD_OFFSET = 0.08;
 
 const ROOF_LAYER = 20;
 const WEATHER_ROOF_LAYER = 21;
@@ -52,6 +55,11 @@ export class TileManager {
 
     this._tileWaterMaskCache = new Map();
     this._tileWaterMaskPromises = new Map();
+
+    // Resolved mask URL per tile base path (ignores query string so cache-busters don't break lookups)
+    // Key: tileBaseNoExt (no query, no extension), Value: resolved mask URL string OR null
+    this._tileWaterMaskResolvedUrl = new Map();
+    this._tileWaterMaskResolvePromises = new Map();
     
     /** @type {Map<string, {width: number, height: number, data: Uint8ClampedArray}>} */
     this.alphaMaskCache = new Map();
@@ -100,28 +108,134 @@ export class TileManager {
     return `${path}${suffix}${ext}${query}`;
   }
 
-  async loadTileWaterMaskTexture(tileDoc) {
+  _splitUrl(src) {
+    const s = String(src || '');
+    if (!s) return null;
+    const q = s.indexOf('?');
+    const base = q >= 0 ? s.slice(0, q) : s;
+    const query = q >= 0 ? s.slice(q) : '';
+    const dot = base.lastIndexOf('.');
+    if (dot < 0) return null;
+    return {
+      base,
+      query,
+      pathNoExt: base.slice(0, dot),
+      ext: base.slice(dot)
+    };
+  }
+
+  async _resolveTileWaterMaskUrl(tileDoc) {
     const src = tileDoc?.texture?.src;
-    const maskPath = this._deriveMaskPath(src, '_Water');
-    if (!maskPath) return null;
+    const parts = this._splitUrl(src);
+    if (!parts) return null;
 
-    const key = `${maskPath}`;
-    const cached = this._tileWaterMaskCache.get(key);
-    if (cached) return cached;
+    const key = parts.pathNoExt;
+    if (this._tileWaterMaskResolvedUrl.has(key)) {
+      return this._tileWaterMaskResolvedUrl.get(key);
+    }
 
-    const pending = this._tileWaterMaskPromises.get(key);
+    if (this._tileWaterMaskResolvePromises.has(key)) {
+      return this._tileWaterMaskResolvePromises.get(key);
+    }
+
+    const p = (async () => {
+      const exts = [parts.ext, '.webp', '.png', '.jpg', '.jpeg'];
+      const uniqueExts = [];
+      for (const e of exts) {
+        const ee = String(e || '').toLowerCase();
+        if (!ee) continue;
+        if (!uniqueExts.includes(ee)) uniqueExts.push(ee);
+      }
+
+      // Try without query first (most authored masks won't carry cache-buster query strings).
+      // Then try with query as a fallback.
+      const candidates = [];
+      for (const ext of uniqueExts) {
+        const baseNoQuery = `${parts.pathNoExt}_Water${ext}`;
+        candidates.push(baseNoQuery);
+        if (parts.query) candidates.push(`${baseNoQuery}${parts.query}`);
+      }
+
+      for (let i = 0; i < candidates.length; i++) {
+        const url = candidates[i];
+        try {
+          const tex = await this.loadTileTexture(url);
+          if (tex) {
+            this._tileWaterMaskCache.set(url, tex);
+            this._tileWaterMaskResolvedUrl.set(key, url);
+            return url;
+          }
+        } catch (_) {
+        }
+      }
+
+      this._tileWaterMaskResolvedUrl.set(key, null);
+      return null;
+    })();
+
+    this._tileWaterMaskResolvePromises.set(key, p);
+    try {
+      return await p;
+    } finally {
+      this._tileWaterMaskResolvePromises.delete(key);
+    }
+  }
+
+  async loadTileWaterMaskTexture(tileDoc) {
+    const resolvedUrl = await this._resolveTileWaterMaskUrl(tileDoc);
+    if (!resolvedUrl) return null;
+
+    const cached = this._tileWaterMaskCache.get(resolvedUrl);
+    if (cached) {
+      // Ensure correct color space even for cached textures
+      const THREE = window.THREE;
+      if (THREE && cached.colorSpace !== THREE.NoColorSpace) {
+        cached.colorSpace = THREE.NoColorSpace;
+        cached.needsUpdate = true;
+      }
+      return cached;
+    }
+
+    const pending = this._tileWaterMaskPromises.get(resolvedUrl);
     if (pending) return pending;
 
-    const p = this.loadTileTexture(maskPath).then((tex) => {
+    const p = this.loadTileTexture(resolvedUrl).then((tex) => {
       if (!tex) return null;
-      this._tileWaterMaskCache.set(key, tex);
+
+      // _Water is a data mask, not color. Ensure we don't apply sRGB decoding.
+      const THREE = window.THREE;
+      if (THREE) {
+        tex.colorSpace = THREE.NoColorSpace;
+        tex.needsUpdate = true;
+      }
+
+      this._tileWaterMaskCache.set(resolvedUrl, tex);
       return tex;
     }).catch(() => null).finally(() => {
-      this._tileWaterMaskPromises.delete(key);
+      this._tileWaterMaskPromises.delete(resolvedUrl);
     });
 
-    this._tileWaterMaskPromises.set(key, p);
+    this._tileWaterMaskPromises.set(resolvedUrl, p);
     return p;
+  }
+
+  _autoDetectWaterOccludersForAllTiles() {
+    // Retry auto-detection scene-wide (useful after initial tile load settles).
+    // This ensures every tile has a chance to resolve its own _Water mask.
+    for (const { sprite, tileDoc } of this.tileSprites.values()) {
+      if (!sprite || !tileDoc) continue;
+
+      // Respect explicit overrides.
+      const state = sprite.userData?._autoOccludesWaterState;
+      if (state === 'overridden' || state === 'enabled' || state === 'pending') continue;
+
+      // Trigger detection by clearing state and re-running transform.
+      sprite.userData._autoOccludesWaterState = null;
+      try {
+        this.updateSpriteTransform(sprite, tileDoc);
+      } catch (_) {
+      }
+    }
   }
 
   _createWaterOccluderMaterial(tileTexture, waterMaskTexture) {
@@ -151,6 +265,10 @@ export class TileManager {
         uniform float uOpacity;
         varying vec2 vUv;
 
+        float msLuminance(vec3 c) {
+          return dot(c, vec3(0.299, 0.587, 0.114));
+        }
+
         void main() {
           float aTile = 1.0;
           if (uHasTile > 0.5) {
@@ -159,7 +277,11 @@ export class TileManager {
 
           float w = 0.0;
           if (uHasWaterMask > 0.5) {
-            w = texture2D(tWaterMask, vUv).a;
+            // Tile _Water masks are luminance masks (in RGB) and may also have alpha.
+            // Use luminance as the primary mask and multiply by alpha to respect any
+            // authored transparency in the mask.
+            vec4 m = texture2D(tWaterMask, vUv);
+            w = msLuminance(m.rgb) * m.a;
           }
 
           float a = clamp(aTile * uOpacity, 0.0, 1.0);
@@ -170,7 +292,8 @@ export class TileManager {
       transparent: true,
       depthWrite: false,
       depthTest: false,
-      blending: THREE.NormalBlending
+      blending: THREE.NormalBlending,
+      toneMapped: false
     });
 
     return material;
@@ -199,7 +322,19 @@ export class TileManager {
       return;
     }
 
-    if (existing) return;
+    if (existing) {
+      // Keep uniforms in sync in case the mesh was created before the tile
+      // texture finished loading.
+      const tex = sprite.material?.map ?? null;
+      if (existing.material?.uniforms?.tTile) {
+        existing.material.uniforms.tTile.value = tex;
+        if (existing.material.uniforms.uHasTile) {
+          existing.material.uniforms.uHasTile.value = tex ? 1.0 : 0.0;
+        }
+      }
+      existing.visible = !!sprite.visible;
+      return;
+    }
 
     const geom = new THREE.PlaneGeometry(1, 1);
     const mat = this._createWaterOccluderMaterial(sprite.material?.map ?? null, null);
@@ -385,6 +520,21 @@ export class TileManager {
     }
 
     this._notifyInitialLoadWaiters();
+
+    // After tiles finish their initial texture load (or fail), do a scene-wide pass to
+    // resolve each tile's optional _Water mask and enable occlusion where present.
+    // Run twice: once immediately after initial load, and once shortly after to catch
+    // late-settling tile sources / async texture availability.
+    try {
+      this.waitForInitialTiles({ timeoutMs: 5000 }).then(() => {
+        this._autoDetectWaterOccludersForAllTiles();
+        setTimeout(() => {
+          try { this._autoDetectWaterOccludersForAllTiles(); } catch (_) {}
+        }, 750);
+      }).catch(() => {
+      });
+    } catch (_) {
+    }
   }
 
   _notifyInitialLoadWaiters() {
@@ -829,6 +979,12 @@ export class TileManager {
         // Close enough: snap to target to avoid tiny tails.
         sprite.material.opacity = targetAlpha;
       }
+
+      // Keep depth behavior consistent with fade-hidden roofs.
+      // When opacity is near-zero, disable depthWrite so invisible roofs don't occlude tokens.
+      // When visible, re-enable depthWrite so roofs can reliably appear above tokens.
+      sprite.material.depthTest = true;
+      sprite.material.depthWrite = (sprite.material.opacity ?? 1.0) > 0.01;
     }
 
     // Tell WeatherController whether any roof is currently being hover-hidden,
@@ -1163,6 +1319,20 @@ export class TileManager {
       if (spriteData) {
         this._ensureWaterOccluderMesh(spriteData, tileDoc);
         this._updateWaterOccluderMeshTransform(sprite, tileDoc);
+
+        // If the occluder mesh already exists (it may have been created while
+        // the tile texture was still loading), update its tile texture uniforms
+        // and visibility now that the sprite is ready.
+        const occ = sprite.userData?.waterOccluderMesh;
+        if (occ?.material?.uniforms?.tTile) {
+          occ.material.uniforms.tTile.value = texture;
+          if (occ.material.uniforms.uHasTile) {
+            occ.material.uniforms.uHasTile.value = texture ? 1.0 : 0.0;
+          }
+        }
+        if (occ) {
+          occ.visible = !!sprite.visible;
+        }
       }
 
       try {
@@ -1267,6 +1437,26 @@ export class TileManager {
 
     // Update texture if changed
     if ('texture' in changes && changes.texture?.src) {
+      // If the tile texture changes, its associated _Water mask may also change.
+      // Clear any cached resolution for this tile base path so we re-scan properly.
+      try {
+        const prevSrc = spriteData?.tileDoc?.texture?.src;
+        const nextSrc = changes.texture.src;
+        const prevParts = this._splitUrl(prevSrc);
+        const nextParts = this._splitUrl(nextSrc);
+        if (prevParts?.pathNoExt) this._tileWaterMaskResolvedUrl.delete(prevParts.pathNoExt);
+        if (nextParts?.pathNoExt) this._tileWaterMaskResolvedUrl.delete(nextParts.pathNoExt);
+      } catch (_) {
+      }
+
+      // Reset auto-detection state unless user explicitly overrode occlusion.
+      try {
+        if (sprite.userData?._autoOccludesWaterState !== 'overridden') {
+          sprite.userData._autoOccludesWaterState = null;
+        }
+      } catch (_) {
+      }
+
       this.loadTileTexture(changes.texture.src).then(texture => {
         sprite.material.map = texture;
         sprite.material.needsUpdate = true;
@@ -1286,6 +1476,12 @@ export class TileManager {
           occ2.material.uniforms.uHasWaterMask.value = maskTex ? 1.0 : 0.0;
         }).catch(() => {
         });
+
+        // Ensure the updated tile gets a chance to (re)detect its _Water mask.
+        try {
+          this._autoDetectWaterOccludersForAllTiles();
+        } catch (_) {
+        }
 
         try {
           window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
@@ -1484,10 +1680,55 @@ export class TileManager {
     }
 
     const occludesWaterFlag = getFlag(tileDoc, 'occludesWater');
-    // Water occlusion is opt-in. Defaulting this to true for ground tiles makes the
-    // water occluder render target fully opaque (most base tiles are opaque), which
-    // suppresses water everywhere.
-    const occludesWater = (occludesWaterFlag === undefined) ? false : !!occludesWaterFlag;
+    // Water occlusion behavior:
+    // - If the flag is explicitly set, it is authoritative.
+    // - If the flag is unset, auto-enable occlusion ONLY when a tile has a valid
+    //   _Water mask (boats, bridges, platforms). This avoids the old problem where
+    //   most opaque tiles would suppress water everywhere.
+    let occludesWater = false;
+    if (occludesWaterFlag !== undefined) {
+      occludesWater = !!occludesWaterFlag;
+      sprite.userData._autoOccludesWaterState = 'overridden';
+    } else {
+      const state = sprite.userData._autoOccludesWaterState;
+      if (state === 'enabled') {
+        occludesWater = true;
+      } else if (state === 'disabled' || state === 'pending') {
+        occludesWater = false;
+      } else {
+        // First time seeing this tile with no explicit override: check for a _Water mask.
+        sprite.userData._autoOccludesWaterState = 'pending';
+        try {
+          this.loadTileWaterMaskTexture(tileDoc).then((maskTex) => {
+            const spriteData = this.tileSprites.get(tileDoc.id);
+            const s = spriteData?.sprite;
+            if (!s) return;
+
+            if (maskTex) {
+              s.userData._autoOccludesWaterState = 'enabled';
+              s.userData.occludesWater = true;
+              this._ensureWaterOccluderMesh(spriteData, tileDoc);
+              this._updateWaterOccluderMeshTransform(s, tileDoc);
+            } else {
+              s.userData._autoOccludesWaterState = 'disabled';
+              s.userData.occludesWater = false;
+              this._ensureWaterOccluderMesh(spriteData, tileDoc);
+            }
+          }).catch(() => {
+            const spriteData = this.tileSprites.get(tileDoc.id);
+            const s = spriteData?.sprite;
+            if (!s) return;
+            s.userData._autoOccludesWaterState = 'disabled';
+            s.userData.occludesWater = false;
+          });
+        } catch (_) {
+          sprite.userData._autoOccludesWaterState = 'disabled';
+        }
+
+        occludesWater = false;
+      }
+    }
+
     sprite.userData.occludesWater = occludesWater;
     if (!bypassEffects) {
       sprite.layers.disable(WATER_OCCLUDER_LAYER);
@@ -1506,8 +1747,15 @@ export class TileManager {
       // geometry, but avoid writing new depth values and give them a
       // modest renderOrder below the particle systems.
       if (sprite.material) {
-        sprite.material.depthWrite = false;
-        sprite.material.depthTest = false;
+        // IMPORTANT:
+        // - depthTest must remain ON so roofs respect world depth.
+        // - depthWrite must be ON while the roof is visible so tokens can't
+        //   overdrawing it (especially if renderer sorting is disabled).
+        // - while a roof is fade-hidden (opacity ~0), depthWrite must be OFF
+        //   or it will continue occluding tokens even though it is invisible.
+        sprite.material.depthTest = true;
+        const initialAlpha = (tileDoc && typeof tileDoc.alpha === 'number') ? tileDoc.alpha : 1.0;
+        sprite.material.depthWrite = initialAlpha > 0.01;
         sprite.material.needsUpdate = true;
       }
       sprite.renderOrder = 10;
@@ -1596,6 +1844,18 @@ export class TileManager {
     } else {
       sprite.visible = !isHidden;
       sprite.material.opacity = tileDoc.alpha ?? 1;
+    }
+
+    // Keep water occluder mesh visibility/opacity synced. The occluder can be
+    // created before the sprite becomes visible (async texture load), so without
+    // this it may remain permanently invisible.
+    const occ = sprite?.userData?.waterOccluderMesh;
+    if (occ) {
+      occ.visible = !!sprite.visible;
+      if (occ.material?.uniforms?.uOpacity) {
+        const a = (tileDoc && typeof tileDoc.alpha === 'number') ? tileDoc.alpha : 1.0;
+        occ.material.uniforms.uOpacity.value = Number.isFinite(a) ? a : 1.0;
+      }
     }
 
     try {

@@ -31,6 +31,7 @@ export class WaterEffectV2 extends EffectBase {
       distortionStrengthPx: 5.8,
 
       waveDirOffsetDeg: 0.0,
+      waveAppearanceOffsetDeg: 0.0,
       advectionDirOffsetDeg: 0.0,
       advectionSpeed: 0.41,
       windDirResponsiveness: 3.8,
@@ -38,6 +39,34 @@ export class WaterEffectV2 extends EffectBase {
 
       specStrength: 210.14,
       specPower: 5.5,
+
+      foamStrength: 0.6,
+      foamThreshold: 0.65,
+      foamScale: 80.0,
+      foamColor: { r: 0.9, g: 0.95, b: 1.0 },
+      foamSpeed: 0.1,
+
+      foamCurlStrength: 0.12,
+      foamCurlScale: 2.2,
+      foamCurlSpeed: 0.06,
+
+      foamBreakupStrength1: 0.35,
+      foamBreakupScale1: 18.0,
+      foamBreakupSpeed1: 0.07,
+
+      foamBreakupStrength2: 0.20,
+      foamBreakupScale2: 6.5,
+      foamBreakupSpeed2: 0.03,
+
+      foamBlackPoint: 0.0,
+      foamWhitePoint: 1.0,
+      foamGamma: 1.0,
+      foamContrast: 1.0,
+      foamBrightness: 0.0,
+
+      floatingFoamStrength: 0.18,
+      floatingFoamCoverage: 0.22,
+      floatingFoamScale: 12.0,
 
       debugView: 0
     };
@@ -114,12 +143,40 @@ export class WaterEffectV2 extends EffectBase {
             'waveStrength',
             'distortionStrengthPx',
             'waveDirOffsetDeg',
+            'waveAppearanceOffsetDeg',
             'advectionDirOffsetDeg',
             'advectionSpeed',
             'windDirResponsiveness',
             'useTargetWindDirection',
             'specStrength',
             'specPower',
+
+            'foamStrength',
+            'foamColor',
+            'foamThreshold',
+            'foamScale',
+            'foamSpeed',
+
+            'foamCurlStrength',
+            'foamCurlScale',
+            'foamCurlSpeed',
+
+            'foamBreakupStrength1',
+            'foamBreakupScale1',
+            'foamBreakupSpeed1',
+            'foamBreakupStrength2',
+            'foamBreakupScale2',
+            'foamBreakupSpeed2',
+
+            'foamBlackPoint',
+            'foamWhitePoint',
+            'foamGamma',
+            'foamContrast',
+            'foamBrightness',
+
+            'floatingFoamStrength',
+            'floatingFoamCoverage',
+            'floatingFoamScale',
             'debugView'
           ]
         }
@@ -156,6 +213,7 @@ export class WaterEffectV2 extends EffectBase {
         distortionStrengthPx: { type: 'slider', min: 0, max: 64.0, step: 0.01, default: 5.8 },
 
         waveDirOffsetDeg: { type: 'slider', label: 'Wave Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
+        waveAppearanceOffsetDeg: { type: 'slider', label: 'Wave Appearance Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
         advectionDirOffsetDeg: { type: 'slider', label: 'Advection Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
         advectionSpeed: { type: 'slider', label: 'Advection Speed', min: 0.0, max: 4.0, step: 0.01, default: 0.41 },
         windDirResponsiveness: { type: 'slider', label: 'Wind Dir Responsiveness', min: 0.1, max: 10.0, step: 0.1, default: 3.8 },
@@ -163,6 +221,33 @@ export class WaterEffectV2 extends EffectBase {
 
         specStrength: { type: 'slider', min: 0, max: 250.0, step: 0.01, default: 210.14 },
         specPower: { type: 'slider', min: 1, max: 24, step: 0.5, default: 5.5 },
+
+        foamStrength: { type: 'slider', label: 'Foam Strength', min: 0, max: 1.0, step: 0.01, default: 0.6 },
+        foamColor: { type: 'color', label: 'Foam Color', default: { r: 0.9, g: 0.95, b: 1.0 } },
+        foamThreshold: { type: 'slider', label: 'Foam Width', min: 0.0, max: 1.0, step: 0.01, default: 0.65 },
+        foamScale: { type: 'slider', label: 'Foam Grain Scale', min: 1.0, max: 2000.0, step: 1.0, default: 80.0 },
+        foamSpeed: { type: 'slider', label: 'Foam Speed', min: 0.0, max: 1.5, step: 0.01, default: 0.1 },
+
+        foamCurlStrength: { type: 'slider', label: 'Foam Curl Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.12 },
+        foamCurlScale: { type: 'slider', label: 'Foam Curl Scale', min: 0.1, max: 30.0, step: 0.1, default: 2.2 },
+        foamCurlSpeed: { type: 'slider', label: 'Foam Curl Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.06 },
+
+        foamBreakupStrength1: { type: 'slider', label: 'Foam Breakup 1 Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
+        foamBreakupScale1: { type: 'slider', label: 'Foam Breakup 1 Scale', min: 0.1, max: 200.0, step: 0.1, default: 18.0 },
+        foamBreakupSpeed1: { type: 'slider', label: 'Foam Breakup 1 Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.07 },
+        foamBreakupStrength2: { type: 'slider', label: 'Foam Breakup 2 Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.20 },
+        foamBreakupScale2: { type: 'slider', label: 'Foam Breakup 2 Scale', min: 0.1, max: 100.0, step: 0.1, default: 6.5 },
+        foamBreakupSpeed2: { type: 'slider', label: 'Foam Breakup 2 Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.03 },
+
+        foamBlackPoint: { type: 'slider', label: 'Foam Black Point', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
+        foamWhitePoint: { type: 'slider', label: 'Foam White Point', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
+        foamGamma: { type: 'slider', label: 'Foam Gamma', min: 0.1, max: 4.0, step: 0.01, default: 1.0 },
+        foamContrast: { type: 'slider', label: 'Foam Contrast', min: 0.0, max: 3.0, step: 0.01, default: 1.0 },
+        foamBrightness: { type: 'slider', label: 'Foam Brightness', min: -1.0, max: 1.0, step: 0.01, default: 0.0 },
+
+        floatingFoamStrength: { type: 'slider', label: 'Floating Foam Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.18 },
+        floatingFoamCoverage: { type: 'slider', label: 'Floating Foam Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.22 },
+        floatingFoamScale: { type: 'slider', label: 'Floating Foam Scale', min: 0.1, max: 400.0, step: 0.5, default: 12.0 },
 
         debugView: {
           type: 'list',
@@ -229,9 +314,37 @@ export class WaterEffectV2 extends EffectBase {
         uWindTime: { value: 0.0 },
 
         uWaveDirOffsetRad: { value: 0.0 },
+        uWaveAppearanceRotRad: { value: 0.0 },
 
         uSpecStrength: { value: 25.0 },
         uSpecPower: { value: 24.0 },
+
+        uFoamColor: { value: new THREE.Color(0.9, 0.95, 1.0) },
+        uFoamStrength: { value: 0.0 },
+        uFoamThreshold: { value: 0.35 },
+        uFoamScale: { value: 80.0 },
+        uFoamSpeed: { value: 0.1 },
+
+        uFoamCurlStrength: { value: 0.12 },
+        uFoamCurlScale: { value: 2.2 },
+        uFoamCurlSpeed: { value: 0.06 },
+
+        uFoamBreakupStrength1: { value: 0.35 },
+        uFoamBreakupScale1: { value: 18.0 },
+        uFoamBreakupSpeed1: { value: 0.07 },
+        uFoamBreakupStrength2: { value: 0.20 },
+        uFoamBreakupScale2: { value: 6.5 },
+        uFoamBreakupSpeed2: { value: 0.03 },
+
+        uFoamBlackPoint: { value: 0.0 },
+        uFoamWhitePoint: { value: 1.0 },
+        uFoamGamma: { value: 1.0 },
+        uFoamContrast: { value: 1.0 },
+        uFoamBrightness: { value: 0.0 },
+
+        uFloatingFoamStrength: { value: 0.0 },
+        uFloatingFoamCoverage: { value: 0.0 },
+        uFloatingFoamScale: { value: 12.0 },
         uDebugView: { value: 0.0 },
 
         uTime: { value: 0.0 },
@@ -277,9 +390,37 @@ export class WaterEffectV2 extends EffectBase {
         uniform float uWindTime;
 
         uniform float uWaveDirOffsetRad;
+        uniform float uWaveAppearanceRotRad;
 
         uniform float uSpecStrength;
         uniform float uSpecPower;
+
+        uniform vec3 uFoamColor;
+        uniform float uFoamStrength;
+        uniform float uFoamThreshold;
+        uniform float uFoamScale;
+        uniform float uFoamSpeed;
+
+        uniform float uFoamCurlStrength;
+        uniform float uFoamCurlScale;
+        uniform float uFoamCurlSpeed;
+
+        uniform float uFoamBreakupStrength1;
+        uniform float uFoamBreakupScale1;
+        uniform float uFoamBreakupSpeed1;
+        uniform float uFoamBreakupStrength2;
+        uniform float uFoamBreakupScale2;
+        uniform float uFoamBreakupSpeed2;
+
+        uniform float uFoamBlackPoint;
+        uniform float uFoamWhitePoint;
+        uniform float uFoamGamma;
+        uniform float uFoamContrast;
+        uniform float uFoamBrightness;
+
+        uniform float uFloatingFoamStrength;
+        uniform float uFloatingFoamCoverage;
+        uniform float uFloatingFoamScale;
         uniform float uDebugView;
 
         uniform float uTime;
@@ -319,6 +460,17 @@ export class WaterEffectV2 extends EffectBase {
             amp *= 0.55;
           }
           return sum;
+        }
+
+        vec2 curlNoise2D(vec2 p) {
+          float e = 0.02;
+          float n1 = fbmNoise(p + vec2(0.0, e));
+          float n2 = fbmNoise(p - vec2(0.0, e));
+          float n3 = fbmNoise(p + vec2(e, 0.0));
+          float n4 = fbmNoise(p - vec2(e, 0.0));
+          float dndy = (n1 - n2) / (2.0 * e);
+          float dndx = (n3 - n4) / (2.0 * e);
+          return vec2(dndy, -dndx);
         }
 
         vec2 warpUv(vec2 sceneUv) {
@@ -562,6 +714,9 @@ export class WaterEffectV2 extends EffectBase {
           // Animated refraction / distortion.
           // Stability rule: pixel offsets must be in pixels then scaled by screen texel size.
           vec2 waveGrad = waveGrad2D(sceneUv, uWindTime);
+          // Appearance-only rotation: rotates the wave normal/distortion texture without changing
+          // the underlying wave travel direction (phase propagation).
+          waveGrad = rotate2D(waveGrad, uWaveAppearanceRotRad);
           vec2 flowN = smoothFlow2D(sceneUv);
           vec2 combinedVec = waveGrad * uWaveStrength + flowN * 0.35;
           combinedVec = combinedVec / (1.0 + 0.75 * length(combinedVec));
@@ -592,6 +747,70 @@ export class WaterEffectV2 extends EffectBase {
 
           float k = clamp(uTintStrength, 0.0, 1.0) * inside * shore;
           vec3 col = mix(refracted.rgb, uTintColor, k);
+
+          // Foam bubbles around shorelines (exposure01/shore), broken up with animated grain.
+          // shore: 0.0 in deep water, 1.0 at water boundary.
+          // Advect with wind, but at ~half the wave advection speed so foam lags behind waves.
+          vec2 foamSceneUv = sceneUv - (uWindOffsetUv * 0.5);
+
+          // Aspect-correct the foam noise basis so the foam grain stays square in world space.
+          float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+          vec2 foamBasis = vec2(foamSceneUv.x * sceneAspect, foamSceneUv.y);
+
+          // Curl-style flow warp (pseudo-curl from fbm gradient) to make foam motion less linear.
+          vec2 windUv = uWindDir;
+          // uWindDir is in Foundry/world coordinates (Y-down). Convert to a math-style basis (Y-up)
+          // for the curl field advection so it matches perceived wind direction.
+          windUv.y = -windUv.y;
+          float windLen = length(windUv);
+          windUv = (windLen > 1e-6) ? (windUv / windLen) : vec2(1.0, 0.0);
+          // foamBasis is aspect-corrected in X, so the wind vector must be expressed in that same basis.
+          vec2 windBasis = normalize(vec2(windUv.x * sceneAspect, windUv.y));
+          vec2 curlP = foamBasis * max(0.01, uFoamCurlScale) - windBasis * (uTime * uFoamCurlSpeed);
+          foamBasis += curlNoise2D(curlP) * clamp(uFoamCurlStrength, 0.0, 1.0);
+
+          vec2 foamUv = foamBasis * max(0.1, uFoamScale) + vec2(uTime * uFoamSpeed * 0.5);
+          float f1 = valueNoise(foamUv);
+          float f2 = valueNoise(foamUv * 1.7 + 1.2);
+          float bubbles = (f1 + f2) * 0.5;
+
+          // Animated breakup layers to add motion + patchiness to shoreline foam.
+          float b1 = fbmNoise(foamBasis * max(0.1, uFoamBreakupScale1) + vec2(uTime * uFoamBreakupSpeed1, -uTime * uFoamBreakupSpeed1 * 0.8));
+          float b2 = fbmNoise(foamBasis * max(0.1, uFoamBreakupScale2) + vec2(-uTime * uFoamBreakupSpeed2 * 0.6, uTime * uFoamBreakupSpeed2));
+          float breakup = 0.5 + 0.5 * (b1 * clamp(uFoamBreakupStrength1, 0.0, 1.0) + b2 * clamp(uFoamBreakupStrength2, 0.0, 1.0));
+          breakup = clamp(breakup, 0.0, 1.0);
+
+          float foamMask = shore + (bubbles * 0.3 - 0.15) + (breakup - 0.5) * 0.35;
+          float shoreFoamAmount = smoothstep(uFoamThreshold, uFoamThreshold - 0.15, foamMask);
+          shoreFoamAmount *= smoothstep(0.15, 0.85, breakup);
+          shoreFoamAmount *= inside * max(0.0, uFoamStrength);
+
+          // Floating foam: low-frequency clumps drifting with wind in open water.
+          // As they drift into shoreline foam, we add them together (so they visibly accumulate).
+          vec2 clumpUv = foamBasis * max(0.1, uFloatingFoamScale);
+          clumpUv += vec2(uTime * (0.02 + uFoamSpeed * 0.05), uTime * (0.01 + uFoamSpeed * 0.03));
+          float c1 = valueNoise(clumpUv);
+          float c2 = valueNoise(clumpUv * 2.1 + 5.2);
+          float c = c1 * 0.7 + c2 * 0.3;
+          float clumps = smoothstep(1.0 - clamp(uFloatingFoamCoverage, 0.0, 1.0), 1.0, c);
+          float grain = valueNoise(clumpUv * 4.0 + vec2(1.3, 7.9));
+          clumps *= smoothstep(0.30, 0.75, grain);
+
+          // Prefer deep water but allow drift into shore region for accumulation.
+          float deepMask = smoothstep(0.15, 0.65, 1.0 - shore);
+          float floatingFoamAmount = clumps * inside * max(0.0, uFloatingFoamStrength) * deepMask;
+
+          float foamAmount = clamp(shoreFoamAmount + floatingFoamAmount, 0.0, 1.0);
+
+          // Foam CC / curve shaping.
+          float bp = clamp(uFoamBlackPoint, 0.0, 1.0);
+          float wp = clamp(uFoamWhitePoint, 0.0, 1.0);
+          foamAmount = clamp((foamAmount - bp) / max(1e-5, wp - bp), 0.0, 1.0);
+          foamAmount = pow(foamAmount, max(0.01, uFoamGamma));
+          foamAmount = (foamAmount - 0.5) * max(0.0, uFoamContrast) + 0.5;
+          foamAmount = clamp(foamAmount + uFoamBrightness, 0.0, 1.0);
+
+          col = mix(col, uFoamColor, foamAmount);
 
           // Cheap specular highlight (adds motion/contrast, masked to water).
           vec2 g = waveGrad * uWaveStrength;
@@ -741,6 +960,113 @@ export class WaterEffectV2 extends EffectBase {
       u.uTintColor.value.setRGB(c.r, c.g, c.b);
     }
 
+    if (u.uFoamColor) {
+      const fColor = this.params?.foamColor;
+      if (fColor && (typeof fColor.r === 'number') && (typeof fColor.g === 'number') && (typeof fColor.b === 'number')) {
+        u.uFoamColor.value.setRGB(fColor.r, fColor.g, fColor.b);
+      }
+    }
+
+    if (u.uFoamStrength) {
+      const fs = this.params?.foamStrength;
+      u.uFoamStrength.value = Number.isFinite(fs) ? fs : 0.0;
+    }
+
+    if (u.uFoamThreshold) {
+      const ft = this.params?.foamThreshold;
+      // UI is expressed as "width" where higher values push foam further from shore.
+      // In shader space, larger cutoff values yield thinner foam, so invert.
+      const width01 = Number.isFinite(ft) ? Math.max(0.0, Math.min(1.0, ft)) : 0.65;
+      u.uFoamThreshold.value = 1.0 - width01;
+    }
+
+    if (u.uFoamScale) {
+      const fsc = this.params?.foamScale;
+      u.uFoamScale.value = Number.isFinite(fsc) ? fsc : 80.0;
+    }
+
+    if (u.uFoamSpeed) {
+      const fsp = this.params?.foamSpeed;
+      u.uFoamSpeed.value = Number.isFinite(fsp) ? fsp : 0.1;
+    }
+
+    if (u.uFoamCurlStrength) {
+      const v = this.params?.foamCurlStrength;
+      u.uFoamCurlStrength.value = Number.isFinite(v) ? v : 0.12;
+    }
+
+    if (u.uFoamCurlScale) {
+      const v = this.params?.foamCurlScale;
+      u.uFoamCurlScale.value = Number.isFinite(v) ? Math.max(0.01, v) : 2.2;
+    }
+
+    if (u.uFoamCurlSpeed) {
+      const v = this.params?.foamCurlSpeed;
+      u.uFoamCurlSpeed.value = Number.isFinite(v) ? v : 0.06;
+    }
+
+    if (u.uFoamBreakupStrength1) {
+      const v = this.params?.foamBreakupStrength1;
+      u.uFoamBreakupStrength1.value = Number.isFinite(v) ? v : 0.35;
+    }
+    if (u.uFoamBreakupScale1) {
+      const v = this.params?.foamBreakupScale1;
+      u.uFoamBreakupScale1.value = Number.isFinite(v) ? Math.max(0.01, v) : 18.0;
+    }
+    if (u.uFoamBreakupSpeed1) {
+      const v = this.params?.foamBreakupSpeed1;
+      u.uFoamBreakupSpeed1.value = Number.isFinite(v) ? v : 0.07;
+    }
+
+    if (u.uFoamBreakupStrength2) {
+      const v = this.params?.foamBreakupStrength2;
+      u.uFoamBreakupStrength2.value = Number.isFinite(v) ? v : 0.20;
+    }
+    if (u.uFoamBreakupScale2) {
+      const v = this.params?.foamBreakupScale2;
+      u.uFoamBreakupScale2.value = Number.isFinite(v) ? Math.max(0.01, v) : 6.5;
+    }
+    if (u.uFoamBreakupSpeed2) {
+      const v = this.params?.foamBreakupSpeed2;
+      u.uFoamBreakupSpeed2.value = Number.isFinite(v) ? v : 0.03;
+    }
+
+    if (u.uFoamBlackPoint) {
+      const v = this.params?.foamBlackPoint;
+      u.uFoamBlackPoint.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.0;
+    }
+    if (u.uFoamWhitePoint) {
+      const v = this.params?.foamWhitePoint;
+      u.uFoamWhitePoint.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
+    }
+    if (u.uFoamGamma) {
+      const v = this.params?.foamGamma;
+      u.uFoamGamma.value = Number.isFinite(v) ? Math.max(0.01, v) : 1.0;
+    }
+    if (u.uFoamContrast) {
+      const v = this.params?.foamContrast;
+      u.uFoamContrast.value = Number.isFinite(v) ? Math.max(0.0, v) : 1.0;
+    }
+    if (u.uFoamBrightness) {
+      const v = this.params?.foamBrightness;
+      u.uFoamBrightness.value = Number.isFinite(v) ? v : 0.0;
+    }
+
+    if (u.uFloatingFoamStrength) {
+      const s = this.params?.floatingFoamStrength;
+      u.uFloatingFoamStrength.value = Number.isFinite(s) ? s : 0.0;
+    }
+
+    if (u.uFloatingFoamCoverage) {
+      const cov = this.params?.floatingFoamCoverage;
+      u.uFloatingFoamCoverage.value = Number.isFinite(cov) ? Math.max(0.0, Math.min(1.0, cov)) : 0.22;
+    }
+
+    if (u.uFloatingFoamScale) {
+      const sc = this.params?.floatingFoamScale;
+      u.uFloatingFoamScale.value = Number.isFinite(sc) ? Math.max(0.1, sc) : 12.0;
+    }
+
     u.uDebugView.value = Number.isFinite(this.params?.debugView) ? this.params.debugView : 0.0;
 
     const waveScale = this.params?.waveScale;
@@ -756,6 +1082,11 @@ export class WaterEffectV2 extends EffectBase {
     if (u.uWaveDirOffsetRad) {
       const deg = Number.isFinite(this.params?.waveDirOffsetDeg) ? this.params.waveDirOffsetDeg : -180.0;
       u.uWaveDirOffsetRad.value = (deg * Math.PI) / 180.0;
+    }
+
+    if (u.uWaveAppearanceRotRad) {
+      const deg = Number.isFinite(this.params?.waveAppearanceOffsetDeg) ? this.params.waveAppearanceOffsetDeg : 0.0;
+      u.uWaveAppearanceRotRad.value = (deg * Math.PI) / 180.0;
     }
 
     if (u.uWindDir && u.uWindSpeed) {

@@ -37,7 +37,7 @@ export class CandleFlamesEffect extends EffectBase {
       glowMaxBuckets: 256,
       glowRadiusPx: 172.0,
       glowInnerRadiusScale: 0.2,
-      glowIntensity: 2.5,
+      glowIntensity: 0.42,
       glowFlickerStrength: 2.25,
       glowFlickerSpeed: 6.0,
       glowFlickerStrengthJitter: 0.75,
@@ -157,7 +157,7 @@ export class CandleFlamesEffect extends EffectBase {
         outdoorSway: { type: 'slider', min: 0, max: 0.25, step: 0.005, default: 0.25, label: 'Outdoor Sway' },
 
         glowEnabled: { type: 'boolean', default: true, label: 'Enabled' },
-        glowIntensity: { type: 'slider', min: 0, max: 2.5, step: 0.01, default: 2.5, label: 'Intensity' },
+        glowIntensity: { type: 'slider', min: 0, max: 2.5, step: 0.01, default: 0.42, label: 'Intensity' },
         glowFlickerStrength: { type: 'slider', min: 0, max: 10.0, step: 0.05, default: 2.25, label: 'Flicker Strength' },
         glowFlickerSpeed: { type: 'slider', min: 0, max: 25.0, step: 0.1, default: 6.0, label: 'Flicker Speed' },
         glowFlickerStrengthJitter: { type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.75, label: 'Flicker Strength Jitter' },

@@ -46,7 +46,7 @@ export class WeatherController {
       precipType: PrecipitationType.NONE,
       cloudCover: 0.5,
       windSpeed: 0.3,
-      windDirection: { x: -0.9563047560005831, y: 0.29237170472273677 }, // 197deg, upgraded to Vector2 in initialize() (Y-down world)
+      windDirection: { x: -0.30901699437494756, y: 0.9510565162951535 }, // 252deg, upgraded to Vector2 in initialize() (Y-down world)
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0
@@ -75,7 +75,7 @@ export class WeatherController {
       precipType: PrecipitationType.NONE,
       cloudCover: 0.5,
       windSpeed: 0.3,
-      windDirection: { x: -0.9563047560005831, y: 0.29237170472273677 },
+      windDirection: { x: -0.30901699437494756, y: 0.9510565162951535 },
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0
@@ -2204,7 +2204,7 @@ export class WeatherController {
         },
         windDirection: {
           label: 'Wind Direction (deg)',
-          default: 197.0,
+          default: 252.0,
           min: 0.0,
           max: 360.0,
           step: 1.0,

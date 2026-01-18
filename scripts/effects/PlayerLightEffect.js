@@ -273,7 +273,7 @@ export class PlayerLightEffect extends EffectBase {
 
   static getControlSchema() {
     return {
-      enabled: false,
+      enabled: true,
       groups: [
         {
           name: 'general',

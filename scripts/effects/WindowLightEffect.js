@@ -85,7 +85,7 @@ export class WindowLightEffect extends EffectBase {
       specularBoost: 5.0,
 
       // RGB Split (Refraction)
-      rgbShiftAmount: 2.9,  // pixels
+      rgbShiftAmount: 0.9,  // pixels
       rgbShiftAngle: 76.0, // degrees
 
       // Overhead tile lighting
@@ -559,13 +559,13 @@ export class WindowLightEffect extends EffectBase {
           type: 'slider',
           label: 'RGB Shift',
           min: 0.0,
-          max: 20.0,
-          step: 0.1,
-          default: 2.9
+          max: 12.0,
+          step: 0.01,
+          default: 0.9
         },
         rgbShiftAngle: {
           type: 'slider',
-          label: 'RGB Angle',
+          label: 'Angle (deg)',
           min: 0.0,
           max: 360.0,
           step: 1.0,

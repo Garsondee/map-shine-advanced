@@ -20,53 +20,72 @@ export class WaterEffectV2 extends EffectBase {
       maskThreshold: 0.05,
       maskBlurRadius: 0.0,
       maskBlurPasses: 0,
-      maskExpandPx: -1.8,
-      buildResolution: 512,
+      maskExpandPx: -1,
+      buildResolution: 1024,
       sdfRangePx: 64,
-      shoreWidthPx: 24,
+      shoreWidthPx: 101,
 
-      waveScale: 25.0,
-      waveSpeed: 0.94,
-      waveStrength: 0.31,
-      distortionStrengthPx: 5.8,
+      waveScale: 33.5,
+      waveSpeed: 0.16,
+      waveStrength: 0.57,
+      distortionStrengthPx: 16.93,
 
       waveDirOffsetDeg: 0.0,
       waveAppearanceOffsetDeg: 0.0,
       advectionDirOffsetDeg: 0.0,
-      advectionSpeed: 0.41,
+      advectionSpeed: 0.1,
       windDirResponsiveness: 3.8,
       useTargetWindDirection: true,
 
-      specStrength: 210.14,
-      specPower: 5.5,
+      specStrength: 28.08,
+      specPower: 24,
 
-      foamStrength: 0.6,
-      foamThreshold: 0.65,
-      foamScale: 80.0,
+      foamStrength: 0.79,
+      foamThreshold: 0.98,
+      foamScale: 443,
       foamColor: { r: 0.9, g: 0.95, b: 1.0 },
-      foamSpeed: 0.1,
+      foamSpeed: 0.18,
 
-      foamCurlStrength: 0.12,
-      foamCurlScale: 2.2,
-      foamCurlSpeed: 0.06,
+      foamCurlStrength: 0.01,
+      foamCurlScale: 30,
+      foamCurlSpeed: 0.04,
 
-      foamBreakupStrength1: 0.35,
-      foamBreakupScale1: 18.0,
-      foamBreakupSpeed1: 0.07,
+      foamBreakupStrength1: 1,
+      foamBreakupScale1: 5.2,
+      foamBreakupSpeed1: 0.2,
 
-      foamBreakupStrength2: 0.20,
-      foamBreakupScale2: 6.5,
-      foamBreakupSpeed2: 0.03,
+      foamBreakupStrength2: 1,
+      foamBreakupScale2: 90.6,
+      foamBreakupSpeed2: 0.28,
 
-      foamBlackPoint: 0.0,
-      foamWhitePoint: 1.0,
-      foamGamma: 1.0,
+      foamBlackPoint: 0.13,
+      foamWhitePoint: 0.5,
+      foamGamma: 0.54,
       foamContrast: 1.0,
       foamBrightness: 0.0,
 
-      floatingFoamStrength: 0.18,
-      floatingFoamCoverage: 0.22,
-      floatingFoamScale: 12.0,
+      floatingFoamStrength: 0.48,
+      floatingFoamCoverage: 0.2,
+      floatingFoamScale: 149.5,
+
+      sandEnabled: true,
+      sandIntensity: 0.5,
+      sandColor: { r: 0, g: 0, b: 0 },
+      sandChunkScale: 5.4,
+      sandChunkSpeed: 0.37,
+      sandGrainScale: 266,
+      sandGrainSpeed: 0.02,
+      sandBillowStrength: 0.51,
+
+      sandCoverage: 1,
+      sandChunkSoftness: 0.32,
+      sandSpeckCoverage: 0.47,
+      sandSpeckSoftness: 0.06,
+      sandDepthLo: 0,
+      sandDepthHi: 1,
+      sandAnisotropy: 0.66,
+      sandDistortionStrength: 0.01,
+      sandAdditive: 0.5,
 
       debugView: 0
     };
@@ -177,6 +196,24 @@ export class WaterEffectV2 extends EffectBase {
             'floatingFoamStrength',
             'floatingFoamCoverage',
             'floatingFoamScale',
+
+            'sandEnabled',
+            'sandIntensity',
+            'sandColor',
+            'sandChunkScale',
+            'sandChunkSpeed',
+            'sandGrainScale',
+            'sandGrainSpeed',
+            'sandBillowStrength',
+            'sandCoverage',
+            'sandChunkSoftness',
+            'sandSpeckCoverage',
+            'sandSpeckSoftness',
+            'sandDepthLo',
+            'sandDepthHi',
+            'sandAnisotropy',
+            'sandDistortionStrength',
+            'sandAdditive',
             'debugView'
           ]
         }
@@ -201,53 +238,72 @@ export class WaterEffectV2 extends EffectBase {
         maskThreshold: { type: 'slider', label: 'Mask Threshold', min: 0.0, max: 1.0, step: 0.01, default: 0.05, throttle: 50 },
         maskBlurRadius: { type: 'slider', label: 'Mask Blur Radius (px)', min: 0.0, max: 16.0, step: 0.1, default: 0.0, throttle: 50 },
         maskBlurPasses: { type: 'slider', label: 'Mask Blur Passes', min: 0, max: 6, step: 1, default: 0, throttle: 50 },
-        maskExpandPx: { type: 'slider', label: 'Mask Expand/Contract (px)', min: -64.0, max: 64.0, step: 0.25, default: -1.8, throttle: 50 },
+        maskExpandPx: { type: 'slider', label: 'Mask Expand/Contract (px)', min: -64.0, max: 64.0, step: 0.25, default: -1, throttle: 50 },
 
-        buildResolution: { type: 'list', label: 'Build Resolution', options: { 256: 256, 512: 512, 1024: 1024 }, default: 512 },
+        buildResolution: { type: 'list', label: 'Build Resolution', options: { 256: 256, 512: 512, 1024: 1024 }, default: 1024 },
         sdfRangePx: { type: 'slider', label: 'SDF Range (px)', min: 8, max: 256, step: 1, default: 64, throttle: 50 },
-        shoreWidthPx: { type: 'slider', label: 'Shore Width (px)', min: 1, max: 128, step: 1, default: 24, throttle: 50 },
+        shoreWidthPx: { type: 'slider', label: 'Shore Width (px)', min: 1, max: 128, step: 1, default: 101, throttle: 50 },
 
-        waveScale: { type: 'slider', min: 1, max: 60, step: 0.5, default: 25.0 },
-        waveSpeed: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.94 },
-        waveStrength: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.31 },
-        distortionStrengthPx: { type: 'slider', min: 0, max: 64.0, step: 0.01, default: 5.8 },
+        waveScale: { type: 'slider', min: 1, max: 60, step: 0.5, default: 33.5 },
+        waveSpeed: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.16 },
+        waveStrength: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.57 },
+        distortionStrengthPx: { type: 'slider', min: 0, max: 64.0, step: 0.01, default: 16.93 },
 
         waveDirOffsetDeg: { type: 'slider', label: 'Wave Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
         waveAppearanceOffsetDeg: { type: 'slider', label: 'Wave Appearance Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
         advectionDirOffsetDeg: { type: 'slider', label: 'Advection Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
-        advectionSpeed: { type: 'slider', label: 'Advection Speed', min: 0.0, max: 4.0, step: 0.01, default: 0.41 },
+        advectionSpeed: { type: 'slider', label: 'Advection Speed', min: 0.0, max: 4.0, step: 0.01, default: 0.1 },
         windDirResponsiveness: { type: 'slider', label: 'Wind Dir Responsiveness', min: 0.1, max: 10.0, step: 0.1, default: 3.8 },
         useTargetWindDirection: { type: 'boolean', label: 'Use Target Wind Dir', default: true },
 
-        specStrength: { type: 'slider', min: 0, max: 250.0, step: 0.01, default: 210.14 },
-        specPower: { type: 'slider', min: 1, max: 24, step: 0.5, default: 5.5 },
+        specStrength: { type: 'slider', min: 0, max: 250.0, step: 0.01, default: 28.08 },
+        specPower: { type: 'slider', min: 1, max: 24, step: 0.5, default: 24 },
 
-        foamStrength: { type: 'slider', label: 'Foam Strength', min: 0, max: 1.0, step: 0.01, default: 0.6 },
+        foamStrength: { type: 'slider', label: 'Foam Strength', min: 0, max: 1.0, step: 0.01, default: 0.79 },
         foamColor: { type: 'color', label: 'Foam Color', default: { r: 0.9, g: 0.95, b: 1.0 } },
-        foamThreshold: { type: 'slider', label: 'Foam Width', min: 0.0, max: 1.0, step: 0.01, default: 0.65 },
-        foamScale: { type: 'slider', label: 'Foam Grain Scale', min: 1.0, max: 2000.0, step: 1.0, default: 80.0 },
-        foamSpeed: { type: 'slider', label: 'Foam Speed', min: 0.0, max: 1.5, step: 0.01, default: 0.1 },
+        foamThreshold: { type: 'slider', label: 'Foam Width', min: 0.0, max: 1.0, step: 0.01, default: 0.98 },
+        foamScale: { type: 'slider', label: 'Foam Grain Scale', min: 1.0, max: 2000.0, step: 1.0, default: 443 },
+        foamSpeed: { type: 'slider', label: 'Foam Speed', min: 0.0, max: 1.5, step: 0.01, default: 0.18 },
 
-        foamCurlStrength: { type: 'slider', label: 'Foam Curl Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.12 },
-        foamCurlScale: { type: 'slider', label: 'Foam Curl Scale', min: 0.1, max: 30.0, step: 0.1, default: 2.2 },
-        foamCurlSpeed: { type: 'slider', label: 'Foam Curl Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.06 },
+        foamCurlStrength: { type: 'slider', label: 'Foam Curl Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.01 },
+        foamCurlScale: { type: 'slider', label: 'Foam Curl Scale', min: 0.1, max: 30.0, step: 0.1, default: 30 },
+        foamCurlSpeed: { type: 'slider', label: 'Foam Curl Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.04 },
 
-        foamBreakupStrength1: { type: 'slider', label: 'Foam Breakup 1 Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
-        foamBreakupScale1: { type: 'slider', label: 'Foam Breakup 1 Scale', min: 0.1, max: 200.0, step: 0.1, default: 18.0 },
-        foamBreakupSpeed1: { type: 'slider', label: 'Foam Breakup 1 Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.07 },
-        foamBreakupStrength2: { type: 'slider', label: 'Foam Breakup 2 Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.20 },
-        foamBreakupScale2: { type: 'slider', label: 'Foam Breakup 2 Scale', min: 0.1, max: 100.0, step: 0.1, default: 6.5 },
-        foamBreakupSpeed2: { type: 'slider', label: 'Foam Breakup 2 Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.03 },
+        foamBreakupStrength1: { type: 'slider', label: 'Foam Breakup 1 Strength', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        foamBreakupScale1: { type: 'slider', label: 'Foam Breakup 1 Scale', min: 0.1, max: 200.0, step: 0.1, default: 5.2 },
+        foamBreakupSpeed1: { type: 'slider', label: 'Foam Breakup 1 Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.2 },
+        foamBreakupStrength2: { type: 'slider', label: 'Foam Breakup 2 Strength', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        foamBreakupScale2: { type: 'slider', label: 'Foam Breakup 2 Scale', min: 0.1, max: 100.0, step: 0.1, default: 90.6 },
+        foamBreakupSpeed2: { type: 'slider', label: 'Foam Breakup 2 Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.28 },
 
-        foamBlackPoint: { type: 'slider', label: 'Foam Black Point', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
-        foamWhitePoint: { type: 'slider', label: 'Foam White Point', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
-        foamGamma: { type: 'slider', label: 'Foam Gamma', min: 0.1, max: 4.0, step: 0.01, default: 1.0 },
+        foamBlackPoint: { type: 'slider', label: 'Foam Black Point', min: 0.0, max: 1.0, step: 0.01, default: 0.13 },
+        foamWhitePoint: { type: 'slider', label: 'Foam White Point', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
+        foamGamma: { type: 'slider', label: 'Foam Gamma', min: 0.1, max: 4.0, step: 0.01, default: 0.54 },
         foamContrast: { type: 'slider', label: 'Foam Contrast', min: 0.0, max: 3.0, step: 0.01, default: 1.0 },
         foamBrightness: { type: 'slider', label: 'Foam Brightness', min: -1.0, max: 1.0, step: 0.01, default: 0.0 },
 
-        floatingFoamStrength: { type: 'slider', label: 'Floating Foam Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.18 },
-        floatingFoamCoverage: { type: 'slider', label: 'Floating Foam Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.22 },
-        floatingFoamScale: { type: 'slider', label: 'Floating Foam Scale', min: 0.1, max: 400.0, step: 0.5, default: 12.0 },
+        floatingFoamStrength: { type: 'slider', label: 'Floating Foam Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.48 },
+        floatingFoamCoverage: { type: 'slider', label: 'Floating Foam Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.2 },
+        floatingFoamScale: { type: 'slider', label: 'Floating Foam Scale', min: 0.1, max: 400.0, step: 0.5, default: 149.5 },
+
+        sandEnabled: { type: 'boolean', label: 'Sand Enabled', default: true },
+        sandIntensity: { type: 'slider', label: 'Sand Intensity', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
+        sandColor: { type: 'color', label: 'Sand Color', default: { r: 0, g: 0, b: 0 } },
+        sandChunkScale: { type: 'slider', label: 'Sand Chunk Scale', min: 0.1, max: 20.0, step: 0.1, default: 5.4 },
+        sandChunkSpeed: { type: 'slider', label: 'Sand Chunk Speed', min: 0.0, max: 3.0, step: 0.01, default: 0.37 },
+        sandGrainScale: { type: 'slider', label: 'Sand Grain Scale', min: 10.0, max: 400.0, step: 1.0, default: 266 },
+        sandGrainSpeed: { type: 'slider', label: 'Sand Grain Speed', min: 0.0, max: 5.0, step: 0.01, default: 0.02 },
+        sandBillowStrength: { type: 'slider', label: 'Sand Billow Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.51 },
+
+        sandCoverage: { type: 'slider', label: 'Sand Coverage', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        sandChunkSoftness: { type: 'slider', label: 'Sand Chunk Softness', min: 0.01, max: 0.5, step: 0.01, default: 0.32 },
+        sandSpeckCoverage: { type: 'slider', label: 'Sand Speck Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.47 },
+        sandSpeckSoftness: { type: 'slider', label: 'Sand Speck Softness', min: 0.01, max: 0.5, step: 0.01, default: 0.06 },
+        sandDepthLo: { type: 'slider', label: 'Sand Depth Lo', min: 0.0, max: 1.0, step: 0.01, default: 0 },
+        sandDepthHi: { type: 'slider', label: 'Sand Depth Hi', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        sandAnisotropy: { type: 'slider', label: 'Sand Anisotropy', min: 0.0, max: 1.0, step: 0.01, default: 0.66 },
+        sandDistortionStrength: { type: 'slider', label: 'Sand Distortion Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.01 },
+        sandAdditive: { type: 'slider', label: 'Sand Additive', min: 0.0, max: 0.5, step: 0.01, default: 0.5 },
 
         debugView: {
           type: 'list',
@@ -261,7 +317,8 @@ export class WaterEffectV2 extends EffectBase {
             Wave: 6,
             Distortion: 7,
             Occluder: 8,
-            Time: 9
+            Time: 9,
+            Sand: 10
           },
           default: 0
         }
@@ -298,15 +355,15 @@ export class WaterEffectV2 extends EffectBase {
         tWaterOccluderAlpha: { value: null },
         uHasWaterOccluderAlpha: { value: 0.0 },
 
-        uWaterDataTexelSize: { value: new THREE.Vector2(1 / 512, 1 / 512) },
+        uWaterDataTexelSize: { value: new THREE.Vector2(1 / this.params.buildResolution, 1 / this.params.buildResolution) },
 
-        uTintColor: { value: new THREE.Color(0.0, 0.0, 0.0) },
-        uTintStrength: { value: 0.37 },
+        uTintColor: { value: new THREE.Color(this.params.tintColor.r, this.params.tintColor.g, this.params.tintColor.b) },
+        uTintStrength: { value: this.params.tintStrength },
 
-        uWaveScale: { value: 25.0 },
-        uWaveSpeed: { value: 0.94 },
-        uWaveStrength: { value: 0.38 },
-        uDistortionStrengthPx: { value: 25.28 },
+        uWaveScale: { value: this.params.waveScale },
+        uWaveSpeed: { value: this.params.waveSpeed },
+        uWaveStrength: { value: this.params.waveStrength },
+        uDistortionStrengthPx: { value: this.params.distortionStrengthPx },
 
         uWindDir: { value: new THREE.Vector2(1.0, 0.0) },
         uWindSpeed: { value: 0.0 },
@@ -316,36 +373,56 @@ export class WaterEffectV2 extends EffectBase {
         uWaveDirOffsetRad: { value: 0.0 },
         uWaveAppearanceRotRad: { value: 0.0 },
 
-        uSpecStrength: { value: 25.0 },
-        uSpecPower: { value: 24.0 },
+        uSpecStrength: { value: this.params.specStrength },
+        uSpecPower: { value: this.params.specPower },
 
-        uFoamColor: { value: new THREE.Color(0.9, 0.95, 1.0) },
-        uFoamStrength: { value: 0.0 },
-        uFoamThreshold: { value: 0.35 },
-        uFoamScale: { value: 80.0 },
-        uFoamSpeed: { value: 0.1 },
+        uFoamColor: { value: new THREE.Color(this.params.foamColor.r, this.params.foamColor.g, this.params.foamColor.b) },
+        uFoamStrength: { value: this.params.foamStrength },
+        uFoamThreshold: { value: this.params.foamThreshold },
+        uFoamScale: { value: this.params.foamScale },
+        uFoamSpeed: { value: this.params.foamSpeed },
 
-        uFoamCurlStrength: { value: 0.12 },
-        uFoamCurlScale: { value: 2.2 },
-        uFoamCurlSpeed: { value: 0.06 },
+        uFoamCurlStrength: { value: this.params.foamCurlStrength },
+        uFoamCurlScale: { value: this.params.foamCurlScale },
+        uFoamCurlSpeed: { value: this.params.foamCurlSpeed },
 
-        uFoamBreakupStrength1: { value: 0.35 },
-        uFoamBreakupScale1: { value: 18.0 },
-        uFoamBreakupSpeed1: { value: 0.07 },
-        uFoamBreakupStrength2: { value: 0.20 },
-        uFoamBreakupScale2: { value: 6.5 },
-        uFoamBreakupSpeed2: { value: 0.03 },
+        uFoamBreakupStrength1: { value: this.params.foamBreakupStrength1 },
+        uFoamBreakupScale1: { value: this.params.foamBreakupScale1 },
+        uFoamBreakupSpeed1: { value: this.params.foamBreakupSpeed1 },
+        uFoamBreakupStrength2: { value: this.params.foamBreakupStrength2 },
+        uFoamBreakupScale2: { value: this.params.foamBreakupScale2 },
+        uFoamBreakupSpeed2: { value: this.params.foamBreakupSpeed2 },
 
-        uFoamBlackPoint: { value: 0.0 },
-        uFoamWhitePoint: { value: 1.0 },
-        uFoamGamma: { value: 1.0 },
-        uFoamContrast: { value: 1.0 },
-        uFoamBrightness: { value: 0.0 },
+        uFoamBlackPoint: { value: this.params.foamBlackPoint },
+        uFoamWhitePoint: { value: this.params.foamWhitePoint },
+        uFoamGamma: { value: this.params.foamGamma },
+        uFoamContrast: { value: this.params.foamContrast },
+        uFoamBrightness: { value: this.params.foamBrightness },
 
-        uFloatingFoamStrength: { value: 0.0 },
-        uFloatingFoamCoverage: { value: 0.0 },
-        uFloatingFoamScale: { value: 12.0 },
-        uDebugView: { value: 0.0 },
+        uFloatingFoamStrength: { value: this.params.floatingFoamStrength },
+        uFloatingFoamCoverage: { value: this.params.floatingFoamCoverage },
+        uFloatingFoamScale: { value: this.params.floatingFoamScale },
+
+        uSandEnabled: { value: this.params.sandEnabled ? 1.0 : 0.0 },
+        uSandIntensity: { value: this.params.sandIntensity },
+        uSandColor: { value: new THREE.Color(this.params.sandColor.r, this.params.sandColor.g, this.params.sandColor.b) },
+        uSandChunkScale: { value: this.params.sandChunkScale },
+        uSandChunkSpeed: { value: this.params.sandChunkSpeed },
+        uSandGrainScale: { value: this.params.sandGrainScale },
+        uSandGrainSpeed: { value: this.params.sandGrainSpeed },
+        uSandBillowStrength: { value: this.params.sandBillowStrength },
+
+        uSandCoverage: { value: this.params.sandCoverage },
+        uSandChunkSoftness: { value: this.params.sandChunkSoftness },
+        uSandSpeckCoverage: { value: this.params.sandSpeckCoverage },
+        uSandSpeckSoftness: { value: this.params.sandSpeckSoftness },
+        uSandDepthLo: { value: this.params.sandDepthLo },
+        uSandDepthHi: { value: this.params.sandDepthHi },
+        uSandAnisotropy: { value: this.params.sandAnisotropy },
+        uSandDistortionStrength: { value: this.params.sandDistortionStrength },
+        uSandAdditive: { value: this.params.sandAdditive },
+
+        uDebugView: { value: this.params.debugView },
 
         uTime: { value: 0.0 },
         uResolution: { value: new THREE.Vector2(1, 1) },
@@ -424,6 +501,26 @@ export class WaterEffectV2 extends EffectBase {
         uniform float uFloatingFoamStrength;
         uniform float uFloatingFoamCoverage;
         uniform float uFloatingFoamScale;
+
+        uniform float uSandEnabled;
+        uniform float uSandIntensity;
+        uniform vec3 uSandColor;
+        uniform float uSandChunkScale;
+        uniform float uSandChunkSpeed;
+        uniform float uSandGrainScale;
+        uniform float uSandGrainSpeed;
+        uniform float uSandBillowStrength;
+
+        uniform float uSandCoverage;
+        uniform float uSandChunkSoftness;
+        uniform float uSandSpeckCoverage;
+        uniform float uSandSpeckSoftness;
+        uniform float uSandDepthLo;
+        uniform float uSandDepthHi;
+        uniform float uSandAnisotropy;
+        uniform float uSandDistortionStrength;
+        uniform float uSandAdditive;
+
         uniform float uDebugView;
 
         uniform float uTime;
@@ -614,6 +711,82 @@ export class WaterEffectV2 extends EffectBase {
           return smoothstep(0.52, 0.48, sdf01);
         }
 
+        float sandMask(vec2 sceneUv, float shore, float inside, float sceneAspect) {
+          float sandEnabled = step(0.5, uSandEnabled);
+          if (sandEnabled < 0.5) return 0.0;
+
+          // Depth proxy: shore=0 deep water, shore=1 at edge.
+          float depth = clamp(1.0 - shore, 0.0, 1.0);
+          float dLo = clamp(uSandDepthLo, 0.0, 1.0);
+          float dHi = clamp(uSandDepthHi, 0.0, 1.0);
+          float lo = min(dLo, dHi - 0.001);
+          float hi = max(dHi, lo + 0.001);
+          float depthMask = smoothstep(lo, hi, depth);
+
+          // uWindOffsetUv is accumulated in Foundry sceneRect UVs (Y-down). For this shader's
+          // procedural advection basis, flip Y so visible motion matches perceived wind direction.
+          vec2 sandWindOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
+
+          vec2 sandSceneUv = sceneUv - (sandWindOffsetUv * max(0.0, uSandChunkSpeed));
+
+          // Optional extra distortion on sand itself (separate from refracted background).
+          float sandDist = clamp(uSandDistortionStrength, 0.0, 1.0);
+          if (sandDist > 1e-4) {
+            vec2 waveGrad = waveGrad2D(sceneUv, uWindTime);
+            waveGrad = rotate2D(waveGrad, uWaveAppearanceRotRad);
+            vec2 flowN = smoothFlow2D(sceneUv);
+            vec2 warp = waveGrad * uWaveStrength + flowN * 0.35;
+            sandSceneUv += warp * (0.045 * sandDist);
+          }
+
+          vec2 sandBasis = vec2(sandSceneUv.x * sceneAspect, sandSceneUv.y);
+
+          vec2 windF = uWindDir;
+          float wl = length(windF);
+          windF = (wl > 1e-6) ? (windF / wl) : vec2(1.0, 0.0);
+          // Match foam/wave conventions: convert Foundry Y-down to math-style Y-up.
+          windF.y = -windF.y;
+          vec2 windBasis = normalize(vec2(windF.x * sceneAspect, windF.y));
+          vec2 perp = vec2(-windBasis.y, windBasis.x);
+
+          float aniso = clamp(uSandAnisotropy, 0.0, 1.0);
+          float alongScale = mix(1.0, 0.35, aniso);
+          float acrossScale = mix(1.0, 3.0, aniso);
+          float along = dot(sandBasis, windBasis) * alongScale;
+          float across = dot(sandBasis, perp) * acrossScale;
+          sandBasis = windBasis * along + perp * across;
+
+          vec2 curlP = sandBasis * (0.5 + 1.25 * max(0.01, uSandChunkScale)) - windBasis * (uTime * (0.03 + 0.14 * max(0.0, uSandChunkSpeed)));
+          sandBasis += curlNoise2D(curlP) * clamp(uSandBillowStrength, 0.0, 1.0) * 0.35;
+
+          float chunkN = clamp(0.5 + 0.5 * fbmNoise(sandBasis * max(0.05, uSandChunkScale) + vec2(uTime * 0.05, -uTime * 0.04)), 0.0, 1.0);
+          float evolveN = clamp(0.5 + 0.5 * fbmNoise(sandBasis * max(0.03, uSandChunkScale * 0.65) + vec2(-uTime * 0.03, uTime * 0.02)), 0.0, 1.0);
+          float chunk = 0.55 * chunkN + 0.45 * evolveN;
+
+          float cov = clamp(uSandCoverage, 0.0, 1.0);
+          float chunkTh = mix(0.85, 0.45, cov);
+          float chunkSoft = max(0.001, uSandChunkSoftness);
+          float chunkMask = smoothstep(chunkTh, chunkTh + chunkSoft, chunk);
+
+          vec2 grainUv = sandBasis * max(1.0, uSandGrainScale);
+          grainUv += windBasis * (uTime * (0.08 + 0.35 * max(0.0, uSandGrainSpeed)));
+          grainUv += curlNoise2D(grainUv * 0.02 + vec2(uTime * 0.4, -uTime * 0.3)) * 0.65;
+
+          float g1 = valueNoise(grainUv + vec2(uTime * uSandGrainSpeed * 0.6));
+          float g2 = valueNoise(grainUv * 1.7 + 3.1 + vec2(-uTime * uSandGrainSpeed * 0.45));
+          float grit = (g1 * 0.65 + g2 * 0.35);
+
+          float speckCov = clamp(uSandSpeckCoverage, 0.0, 1.0);
+          float speckTh = mix(0.95, 0.55, speckCov);
+          float speckSoft = max(0.001, uSandSpeckSoftness);
+          float speck = smoothstep(speckTh, speckTh + speckSoft, grit);
+
+          float sandAlpha = speck * chunkMask * inside * depthMask;
+          sandAlpha *= clamp(uSandIntensity, 0.0, 1.0);
+          sandAlpha *= 1.15;
+          return sandAlpha;
+        }
+
         void main() {
           vec4 base = texture2D(tDiffuse, vUv);
 
@@ -712,8 +885,16 @@ export class WaterEffectV2 extends EffectBase {
               return;
             }
 
-            float t01 = fract(uTime * 0.25);
-            gl_FragColor = vec4(vec3(t01), 1.0);
+            if (d < 9.5) {
+              float t01 = fract(uTime * 0.25);
+              gl_FragColor = vec4(vec3(t01), 1.0);
+              return;
+            }
+
+            // Sand mask debug (10): show the computed sand contribution as grayscale.
+            float sandAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+            float sandMaskOut = sandMask(sceneUv, shore, inside, sandAspect);
+            gl_FragColor = vec4(vec3(clamp(sandMaskOut, 0.0, 1.0)), 1.0);
             return;
           }
 
@@ -754,6 +935,15 @@ export class WaterEffectV2 extends EffectBase {
 
           float k = clamp(uTintStrength, 0.0, 1.0) * inside * shore;
           vec3 col = mix(refracted.rgb, uTintColor, k);
+
+          // Underwater sand flurries: chunked patches with fine grain, advected with water flow.
+          float sandEnabled = step(0.5, uSandEnabled);
+          if (sandEnabled > 0.5) {
+            float sandAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+            float sandAlpha = sandMask(sceneUv, shore, inside, sandAspect);
+            col = mix(col, uSandColor, sandAlpha);
+            col += uSandColor * (sandAlpha * clamp(uSandAdditive, 0.0, 1.0));
+          }
 
           // Foam bubbles around shorelines (exposure01/shore), broken up with animated grain.
           // shore: 0.0 in deep water, 1.0 at water boundary.
@@ -971,6 +1161,79 @@ export class WaterEffectV2 extends EffectBase {
     const c = this.params?.tintColor;
     if (c && (typeof c.r === 'number') && (typeof c.g === 'number') && (typeof c.b === 'number')) {
       u.uTintColor.value.setRGB(c.r, c.g, c.b);
+    }
+
+    if (u.uSandEnabled) {
+      u.uSandEnabled.value = this.params?.sandEnabled ? 1.0 : 0.0;
+    }
+    if (u.uSandIntensity) {
+      const v = this.params?.sandIntensity;
+      u.uSandIntensity.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.18;
+    }
+    if (u.uSandColor) {
+      const sc = this.params?.sandColor;
+      if (typeof sc === 'string') {
+        u.uSandColor.value.set(sc);
+      } else if (sc && (typeof sc.r === 'number') && (typeof sc.g === 'number') && (typeof sc.b === 'number')) {
+        u.uSandColor.value.setRGB(sc.r, sc.g, sc.b);
+      }
+    }
+    if (u.uSandChunkScale) {
+      const v = this.params?.sandChunkScale;
+      u.uSandChunkScale.value = Number.isFinite(v) ? Math.max(0.01, v) : 2.4;
+    }
+    if (u.uSandChunkSpeed) {
+      const v = this.params?.sandChunkSpeed;
+      u.uSandChunkSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.35;
+    }
+    if (u.uSandGrainScale) {
+      const v = this.params?.sandGrainScale;
+      u.uSandGrainScale.value = Number.isFinite(v) ? Math.max(1.0, v) : 140.0;
+    }
+    if (u.uSandGrainSpeed) {
+      const v = this.params?.sandGrainSpeed;
+      u.uSandGrainSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 1.2;
+    }
+    if (u.uSandBillowStrength) {
+      const v = this.params?.sandBillowStrength;
+      u.uSandBillowStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.22;
+    }
+
+    if (u.uSandCoverage) {
+      const v = this.params?.sandCoverage;
+      u.uSandCoverage.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.35;
+    }
+    if (u.uSandChunkSoftness) {
+      const v = this.params?.sandChunkSoftness;
+      u.uSandChunkSoftness.value = Number.isFinite(v) ? Math.max(0.001, Math.min(1.0, v)) : 0.18;
+    }
+    if (u.uSandSpeckCoverage) {
+      const v = this.params?.sandSpeckCoverage;
+      u.uSandSpeckCoverage.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.25;
+    }
+    if (u.uSandSpeckSoftness) {
+      const v = this.params?.sandSpeckSoftness;
+      u.uSandSpeckSoftness.value = Number.isFinite(v) ? Math.max(0.001, Math.min(1.0, v)) : 0.10;
+    }
+    if (u.uSandDepthLo) {
+      const v = this.params?.sandDepthLo;
+      u.uSandDepthLo.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.15;
+    }
+    if (u.uSandDepthHi) {
+      const v = this.params?.sandDepthHi;
+      u.uSandDepthHi.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.90;
+    }
+    if (u.uSandAnisotropy) {
+      const v = this.params?.sandAnisotropy;
+      u.uSandAnisotropy.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.40;
+    }
+    if (u.uSandDistortionStrength) {
+      const v = this.params?.sandDistortionStrength;
+      u.uSandDistortionStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.25;
+    }
+    if (u.uSandAdditive) {
+      const v = this.params?.sandAdditive;
+      u.uSandAdditive.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.08;
     }
 
     if (u.uFoamColor) {

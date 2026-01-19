@@ -68,6 +68,20 @@ export class WaterEffectV2 extends EffectBase {
       floatingFoamCoverage: 0.2,
       floatingFoamScale: 149.5,
 
+      // GPU foam spray / tear-off
+      foamFlecksEnabled: true,
+      foamFlecksIntensity: 1.0,
+      foamTearEnabled: true,
+      foamTearStrength: 0.65,
+      foamTearScale: 750.0,
+      foamTearSpeed: 1.25,
+      foamTearDrift: 0.02,
+
+      // Detached foam turbulence (chunks blown around)
+      detachedTurbStrength: 0.35,
+      detachedTurbScale: 0.25,
+      detachedTurbSpeed: 0.35,
+
       sandEnabled: true,
       sandIntensity: 0.5,
       sandColor: { r: 0, g: 0, b: 0 },
@@ -217,6 +231,25 @@ export class WaterEffectV2 extends EffectBase {
             'debugView'
           ]
         }
+        ,
+        {
+          name: 'foam-spray',
+          label: 'Foam Spray (GPU)',
+          type: 'inline',
+          separator: true,
+          parameters: [
+            'foamFlecksEnabled',
+            'foamFlecksIntensity',
+            'foamTearEnabled',
+            'foamTearStrength',
+            'foamTearScale',
+            'foamTearSpeed',
+            'foamTearDrift',
+            'detachedTurbStrength',
+            'detachedTurbScale',
+            'detachedTurbSpeed'
+          ]
+        }
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
@@ -286,6 +319,18 @@ export class WaterEffectV2 extends EffectBase {
         floatingFoamCoverage: { type: 'slider', label: 'Floating Foam Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.2 },
         floatingFoamScale: { type: 'slider', label: 'Floating Foam Scale', min: 0.1, max: 400.0, step: 0.5, default: 149.5 },
 
+        foamFlecksEnabled: { type: 'boolean', label: 'Foam Flecks (GPU)', default: true },
+        foamFlecksIntensity: { type: 'slider', label: 'Flecks Intensity', min: 0.0, max: 6.0, step: 0.01, default: 1.0 },
+        foamTearEnabled: { type: 'boolean', label: 'Foam Tear-Off', default: true },
+        foamTearStrength: { type: 'slider', label: 'Tear Strength', min: 0.0, max: 2.0, step: 0.01, default: 0.65 },
+        foamTearScale: { type: 'slider', label: 'Tear Scale', min: 50.0, max: 3000.0, step: 1.0, default: 750.0 },
+        foamTearSpeed: { type: 'slider', label: 'Tear Speed (Signed)', min: -6.0, max: 6.0, step: 0.01, default: 1.25 },
+        foamTearDrift: { type: 'slider', label: 'Tear Drift (Signed UV)', min: -0.25, max: 0.25, step: 0.001, default: 0.02 },
+
+        detachedTurbStrength: { type: 'slider', label: 'Detached Turb Strength', min: 0.0, max: 2.0, step: 0.01, default: 0.35 },
+        detachedTurbScale: { type: 'slider', label: 'Detached Turb Scale', min: 0.05, max: 2.0, step: 0.01, default: 0.25 },
+        detachedTurbSpeed: { type: 'slider', label: 'Detached Turb Speed', min: 0.0, max: 2.0, step: 0.01, default: 0.35 },
+
         sandEnabled: { type: 'boolean', label: 'Sand Enabled', default: true },
         sandIntensity: { type: 'slider', label: 'Sand Intensity', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
         sandColor: { type: 'color', label: 'Sand Color', default: { r: 0, g: 0, b: 0 } },
@@ -318,7 +363,15 @@ export class WaterEffectV2 extends EffectBase {
             Distortion: 7,
             Occluder: 8,
             Time: 9,
-            Sand: 10
+            Sand: 10,
+            FoamMask: 11,
+            DetachedFoam: 12,
+            DetachedInBounds: 13,
+            DetachedSpawn: 14,
+            DetachedOriginInside: 15,
+            DetachedOriginFoam: 16,
+            DetachedOriginTear: 17,
+            DetachedSourceGate: 18
           },
           default: 0
         }
@@ -402,6 +455,22 @@ export class WaterEffectV2 extends EffectBase {
         uFloatingFoamStrength: { value: this.params.floatingFoamStrength },
         uFloatingFoamCoverage: { value: this.params.floatingFoamCoverage },
         uFloatingFoamScale: { value: this.params.floatingFoamScale },
+
+        // Shader-based foam flecks (spray dots)
+        uFoamFlecksEnabled: { value: this.params.foamFlecksEnabled ? 1.0 : 0.0 },
+        uFoamFlecksIntensity: { value: this.params.foamFlecksIntensity },
+
+        // GPU foam tear-off
+        uFoamTearEnabled: { value: this.params.foamTearEnabled ? 1.0 : 0.0 },
+        uFoamTearStrength: { value: this.params.foamTearStrength },
+        uFoamTearScale: { value: this.params.foamTearScale },
+        uFoamTearSpeed: { value: this.params.foamTearSpeed },
+        uFoamTearDrift: { value: this.params.foamTearDrift },
+
+        // Detached foam turbulence
+        uDetachedTurbStrength: { value: this.params.detachedTurbStrength },
+        uDetachedTurbScale: { value: this.params.detachedTurbScale },
+        uDetachedTurbSpeed: { value: this.params.detachedTurbSpeed },
 
         uSandEnabled: { value: this.params.sandEnabled ? 1.0 : 0.0 },
         uSandIntensity: { value: this.params.sandIntensity },
@@ -502,6 +571,22 @@ export class WaterEffectV2 extends EffectBase {
         uniform float uFloatingFoamCoverage;
         uniform float uFloatingFoamScale;
 
+        // Shader-based foam flecks (spray dots)
+        uniform float uFoamFlecksEnabled;
+        uniform float uFoamFlecksIntensity;
+
+        // GPU foam tear-off
+        uniform float uFoamTearEnabled;
+        uniform float uFoamTearStrength;
+        uniform float uFoamTearScale;
+        uniform float uFoamTearSpeed;
+        uniform float uFoamTearDrift;
+
+        // Detached foam turbulence
+        uniform float uDetachedTurbStrength;
+        uniform float uDetachedTurbScale;
+        uniform float uDetachedTurbSpeed;
+
         uniform float uSandEnabled;
         uniform float uSandIntensity;
         uniform vec3 uSandColor;
@@ -534,6 +619,8 @@ export class WaterEffectV2 extends EffectBase {
         uniform float uHasSceneRect;
 
         varying vec2 vUv;
+
+        float waterInsideFromSdf(float sdf01);
 
         float hash12(vec2 p) {
           vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -579,9 +666,7 @@ export class WaterEffectV2 extends EffectBase {
           // IMPORTANT: advecting by changing sampling coordinates is direction-inverted.
           // If we want the *visible* pattern to move with the wind, we must subtract
           // the accumulated offset from the sampling UVs.
-          // NOTE: We flip the Y component here to keep the advection drift in the same
-          // basis as the wave travel direction (which flips Foundry Y-down to math Y-up).
-          // Without this, high advectionSpeed can make the wave field appear Y-mirrored.
+          // Match wave math convention: convert Foundry Y-down drift to math Y-up.
           vec2 windOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
           vec2 uv = sceneUv - windOffsetUv;
 
@@ -603,6 +688,255 @@ export class WaterEffectV2 extends EffectBase {
           float s = sin(a);
           float c = cos(a);
           return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+        }
+
+        // --- SHADER-BASED FOAM FLECKS ---
+        // Generates high-frequency "spray" dots that move faster than foam with wind.
+        // Uses a widened foam mask so flecks appear around edges, simulating spray blown off crests.
+        float getShaderFlecks(vec2 sceneUv, float shore, float inside, float foamAmount) {
+          if (uFoamFlecksEnabled < 0.5 || uFoamFlecksIntensity < 0.01) return 0.0;
+
+          float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+
+          // Match wave convention: Weather wind is Y-down; flip to math Y-up for directional motion.
+          vec2 windF = uWindDir;
+          float windLen = length(windF);
+          windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
+          vec2 windDir = vec2(windF.x, -windF.y);
+          vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
+
+          // IMPORTANT: use monotonic wind-time (see JS integration) so gusts change speed
+          // without making the pattern reverse direction.
+          float tWind = uWindTime;
+
+          // Flecks move faster than foam (2-3x) to simulate being blown downwind.
+          float fleckSpeed = uFoamSpeed * 2.5 + 0.15;
+          vec2 fleckOffset = windBasis * (tWind * fleckSpeed);
+
+          // Use aspect-corrected basis like foam, but offset downwind
+          vec2 foamWindOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
+          vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
+          vec2 fleckBasis = vec2(foamSceneUv.x * sceneAspect, foamSceneUv.y);
+          // Shift flecks downwind from foam source
+          fleckBasis += windBasis * 0.02;
+
+          // High-frequency noise for individual fleck dots
+          // Multiple octaves at different scales for variety
+          vec2 fleckUv1 = fleckBasis * 800.0 - fleckOffset * 400.0;
+          vec2 fleckUv2 = fleckBasis * 1200.0 - fleckOffset * 600.0;
+          vec2 fleckUv3 = fleckBasis * 500.0 - fleckOffset * 250.0;
+
+          float n1 = valueNoise(fleckUv1);
+          float n2 = valueNoise(fleckUv2);
+          float n3 = valueNoise(fleckUv3);
+
+          // Sharp threshold to create distinct dots rather than smooth gradients
+          float threshold = 0.82;
+          float dot1 = smoothstep(threshold, threshold + 0.08, n1);
+          float dot2 = smoothstep(threshold + 0.02, threshold + 0.10, n2);
+          float dot3 = smoothstep(threshold - 0.02, threshold + 0.06, n3);
+
+          // Combine with varying weights
+          float fleckDots = dot1 * 0.5 + dot2 * 0.3 + dot3 * 0.2;
+
+          float fleckMask = smoothstep(0.2, 0.6, foamAmount);
+
+          // Wind speed modulation: more flecks in stronger wind
+          float windFactor = 0.3 + 0.7 * clamp(uWindSpeed, 0.0, 1.0);
+
+          // Final fleck intensity
+          float flecks = fleckDots * fleckMask * windFactor * clamp(uFoamFlecksIntensity, 0.0, 2.0);
+
+          return clamp(flecks, 0.0, 1.0);
+        }
+        // --- SHADER FLECKS END ---
+
+        float getFoamTearMask(vec2 sceneUv, float shore, float inside, float foamAmount) {
+          if (uFoamTearEnabled < 0.5) return 0.0;
+
+          float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+
+          vec2 windF = uWindDir;
+          float windLen = length(windF);
+          windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
+          vec2 windDir = vec2(windF.x, -windF.y);
+          vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
+
+          float wind01 = clamp(uWindSpeed, 0.0, 1.0);
+          float tWind = uWindTime;
+
+          // Noise domain in the same basis as foam so it tears at foam edges rather than swimming.
+          vec2 foamWindOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
+          vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
+          vec2 basis = vec2(foamSceneUv.x * sceneAspect, foamSceneUv.y);
+
+          float spd = uFoamTearSpeed;
+          vec2 adv = windBasis * (tWind * (0.35 + spd));
+          vec2 p = basis * max(0.1, uFoamTearScale) - adv * 2.5;
+
+          float n = valueNoise(p);
+          n = max(n, valueNoise(p * 1.7 + 3.1));
+
+          // Only tear where there is visible foam.
+          float gate = smoothstep(0.25, 0.85, foamAmount) * inside;
+
+          float tear = smoothstep(0.72, 0.98, n) * gate;
+          return clamp(tear, 0.0, 1.0);
+        }
+
+        float getFoamBaseAmount(vec2 sceneUv, float shore, float inside) {
+          vec2 foamWindOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
+          vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
+          float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+          vec2 foamBasis = vec2(foamSceneUv.x * sceneAspect, foamSceneUv.y);
+
+          vec2 windF = uWindDir;
+          float windLen = length(windF);
+          windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
+          vec2 windDir = vec2(windF.x, -windF.y);
+          vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
+
+          float wind01 = clamp(uWindSpeed, 0.0, 1.0);
+          float tWind = uWindTime;
+
+          vec2 curlP = foamBasis * max(0.01, uFoamCurlScale) - windBasis * (tWind * uFoamCurlSpeed);
+          foamBasis += curlNoise2D(curlP) * clamp(uFoamCurlStrength, 0.0, 1.0);
+
+          vec2 foamUv = foamBasis * max(0.1, uFoamScale) - windBasis * (tWind * uFoamSpeed * 0.5);
+          float f1 = valueNoise(foamUv);
+          float f2 = valueNoise(foamUv * 1.7 + 1.2);
+          float bubbles = (f1 + f2) * 0.5;
+
+          float b1 = fbmNoise(
+            foamBasis * max(0.1, uFoamBreakupScale1)
+          );
+          float b2 = fbmNoise(
+            foamBasis * max(0.1, uFoamBreakupScale2)
+          );
+          float breakup = 0.5 + 0.5 * (b1 * clamp(uFoamBreakupStrength1, 0.0, 1.0) + b2 * clamp(uFoamBreakupStrength2, 0.0, 1.0));
+          breakup = clamp(breakup, 0.0, 1.0);
+
+          // IMPORTANT: Avoid animated noise making foam *darker* (flickering dark speckles).
+          // Noise is allowed to ADD foam, but should not subtract it.
+          float bubblesAdd = max(0.0, bubbles - 0.5) * 0.30;
+          float breakupAdd = max(0.0, breakup - 0.5) * 0.35;
+          float foamMask = shore + bubblesAdd + breakupAdd;
+          float shoreFoamAmount = smoothstep(uFoamThreshold, uFoamThreshold - 0.15, foamMask);
+          shoreFoamAmount *= inside * max(0.0, uFoamStrength);
+
+          vec2 clumpUv = foamBasis * max(0.1, uFloatingFoamScale);
+          clumpUv -= windBasis * (tWind * (0.02 + uFoamSpeed * 0.05));
+          float c1 = valueNoise(clumpUv);
+          float c2 = valueNoise(clumpUv * 2.1 + 5.2);
+          float c = c1 * 0.7 + c2 * 0.3;
+          float clumps = smoothstep(1.0 - clamp(uFloatingFoamCoverage, 0.0, 1.0), 1.0, c);
+
+          float deepMask = smoothstep(0.15, 0.65, 1.0 - shore);
+          float floatingFoamAmount = clumps * inside * max(0.0, uFloatingFoamStrength) * deepMask;
+
+          float foamAmount = clamp(shoreFoamAmount + floatingFoamAmount, 0.0, 1.0);
+
+          float bp = clamp(uFoamBlackPoint, 0.0, 1.0);
+          float wp = clamp(uFoamWhitePoint, 0.0, 1.0);
+          foamAmount = clamp((foamAmount - bp) / max(1e-5, wp - bp), 0.0, 1.0);
+          foamAmount = pow(foamAmount, max(0.01, uFoamGamma));
+          foamAmount = (foamAmount - 0.5) * max(0.0, uFoamContrast) + 0.5;
+          foamAmount = clamp(foamAmount + uFoamBrightness, 0.0, 1.0);
+
+          return foamAmount;
+        }
+
+        vec4 getDetachedFoamSignals(vec2 sceneUv, float shore, float inside) {
+          if (uFoamTearEnabled < 0.5) return vec4(0.0);
+
+          // 1. Setup Standard Coordinates
+          float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+          vec2 windF = uWindDir;
+          float windLen = length(windF);
+          windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
+          vec2 windDir = vec2(windF.x, -windF.y);
+
+          float wind01 = clamp(uWindSpeed, 0.0, 1.0);
+          float tWind = uWindTime;
+
+          float signedSpd = clamp(uFoamTearSpeed, -3.0, 3.0);
+          float spd = clamp(abs(signedSpd), 0.1, 3.0);
+          float rate = 0.2 * spd;
+          float globalPhase = fract(tWind * rate);
+
+          // 4. Movement Logic (Float with Wind): advect a chunk field from upwind.
+          float spdSign = (signedSpd < 0.0) ? -1.0 : 1.0;
+          vec2 advDir = windDir * spdSign;
+
+          // NOTE: sceneUv is already normalized (0..1). The travel distance must be small
+          // in UV space, otherwise originUv goes out-of-bounds and the entire layer vanishes.
+          float windFactor = 0.15 + 0.85 * wind01;
+          float maxDist = (0.008 + 0.045 * spd) * windFactor;
+          float travelDist = globalPhase * maxDist;
+          // Add turbulence to the upwind sampling so detached chunks wobble/swerve instead of
+          // translating in a perfectly straight line. Uses dedicated detached turbulence params.
+          float turbStrength = clamp(uDetachedTurbStrength, 0.0, 2.0);
+          float turbAmp = (0.08 + 0.32 * spd) * maxDist * turbStrength;
+          float turbScale = max(0.1, uDetachedTurbScale);
+          float turbSpeed = uDetachedTurbSpeed;
+          vec2 basisT = vec2(sceneUv.x * sceneAspect, sceneUv.y) * (turbScale * 8.0);
+          vec2 windBasisT = normalize(vec2(advDir.x * sceneAspect, advDir.y));
+          vec2 curlP = basisT - windBasisT * (tWind * turbSpeed);
+          vec2 turb = curlNoise2D(curlP);
+          vec2 turbUv = vec2(turb.x / max(1e-6, sceneAspect), turb.y);
+          vec2 originUv = sceneUv - advDir * travelDist - turbUv * (turbAmp * (0.25 + 0.75 * globalPhase));
+          float inBounds = step(0.0, originUv.x) * step(originUv.x, 1.0) * step(0.0, originUv.y) * step(originUv.y, 1.0);
+          vec2 originUvClamped = clamp(originUv, vec2(0.0), vec2(1.0));
+
+          // 2. Define "Chunks" using a Grid IN ORIGIN SPACE so the pattern translates.
+          vec2 foamWindOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
+          vec2 foamSceneUvO = originUv - (foamWindOffsetUv * 0.5);
+          vec2 basisO = vec2(foamSceneUvO.x * sceneAspect, foamSceneUvO.y);
+          float chunkScale = max(10.0, uFoamTearScale * 0.15);
+
+          vec2 gridUv = basisO * chunkScale;
+          gridUv += fbmNoise(gridUv * 0.5) * 0.5;
+
+          vec2 gridId = floor(gridUv);
+          vec2 gridLocal = fract(gridUv) - 0.5;
+
+          // 3. Generate Lifecycle per Chunk
+          float cellSeed = hash12(gridId);
+          float spawnChance = smoothstep(0.92, 0.99, cellSeed);
+
+          // 5. Source Check
+          vec4 originData = texture2D(tWaterData, originUvClamped);
+          float originInside = waterInsideFromSdf(originData.r);
+          float originShore = clamp(originData.g, 0.0, 1.0);
+          float originInsideGate = step(0.5, originInside);
+
+          float originFoam = getFoamBaseAmount(originUv, originShore, originInside);
+          float originTear = getFoamTearMask(originUv, originShore, originInside, originFoam);
+
+          float tearStrength = clamp(uFoamTearStrength, 0.0, 3.0);
+          float originSpray = originTear * smoothstep(0.35, 0.95, originFoam) * tearStrength;
+          float originFoamFinal = clamp(originFoam - originSpray * 0.55, 0.0, 1.0);
+
+          // Detached foam should be sourced from *white foam presence* primarily.
+          // Gating strongly on originTear makes the layer vanish because originTear is a sparse/high-threshold mask.
+          float sourceGate = smoothstep(0.55, 0.88, originFoamFinal);
+          float tearHint = 0.35 + 0.65 * smoothstep(0.02, 0.25, originTear);
+
+          // 6. Shaping and Disintegration
+          float phase = fract(tWind * rate + cellSeed * 12.34);
+          float life = smoothstep(0.0, 0.1, phase) * (1.0 - smoothstep(0.6, 1.0, phase));
+
+          // Simple circular shape for clean white foam chunks (no dark noise erosion)
+          float shape = 1.0 - smoothstep(0.25, 0.4 + (phase * 0.3), length(gridLocal));
+
+          float strength = clamp(uFoamTearStrength, 0.0, 3.0);
+          float detached = shape * life * strength * sourceGate * tearHint * spawnChance * originInsideGate * inBounds * inside * 1.25;
+
+          return vec4(detached, inBounds, spawnChance, sourceGate);
+        }
+
+        float getDetachedFoam(vec2 sceneUv, float shore, float inside) {
+          return getDetachedFoamSignals(sceneUv, shore, inside).x;
         }
 
         float sharpSin(float phase, float sharpness, out float dHdPhase) {
@@ -733,7 +1067,10 @@ export class WaterEffectV2 extends EffectBase {
           float sandDist = clamp(uSandDistortionStrength, 0.0, 1.0);
           if (sandDist > 1e-4) {
             vec2 waveGrad = waveGrad2D(sceneUv, uWindTime);
-            waveGrad = rotate2D(waveGrad, uWaveAppearanceRotRad);
+            // Appearance-only rotation: rotate the normal/distortion field without changing
+            // wave phase propagation. Add a 90-degree correction so crest lines visually
+            // align perpendicular to the wind-driven travel direction.
+            waveGrad = rotate2D(waveGrad, uWaveAppearanceRotRad + 1.5707963);
             vec2 flowN = smoothFlow2D(sceneUv);
             vec2 warp = waveGrad * uWaveStrength + flowN * 0.35;
             sandSceneUv += warp * (0.045 * sandDist);
@@ -891,10 +1228,87 @@ export class WaterEffectV2 extends EffectBase {
               return;
             }
 
-            // Sand mask debug (10): show the computed sand contribution as grayscale.
-            float sandAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
-            float sandMaskOut = sandMask(sceneUv, shore, inside, sandAspect);
-            gl_FragColor = vec4(vec3(clamp(sandMaskOut, 0.0, 1.0)), 1.0);
+            if (d < 10.5) {
+              // Sand mask debug (10): show the computed sand contribution as grayscale.
+              float sandAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+              float sandMaskOut = sandMask(sceneUv, shore, inside, sandAspect);
+              gl_FragColor = vec4(vec3(clamp(sandMaskOut, 0.0, 1.0)), 1.0);
+              return;
+            }
+
+            if (d < 11.5) {
+              // Foam Mask Debug (11): final foam amount after CC + tear-off.
+
+              float foamAmount = getFoamBaseAmount(sceneUv, shore, inside);
+              float detachedFoam = getDetachedFoam(sceneUv, shore, inside);
+              detachedFoam *= (1.0 - smoothstep(0.15, 0.45, foamAmount));
+              foamAmount = clamp(foamAmount + detachedFoam, 0.0, 1.0);
+
+              gl_FragColor = vec4(vec3(foamAmount), 1.0);
+              return;
+            }
+
+            if (d < 12.5) {
+              // Detached Foam Debug (12): show detached foam contribution as grayscale.
+              vec4 sig = getDetachedFoamSignals(sceneUv, shore, inside);
+              float detachedFoam = sig.x;
+              // Boost for visibility while tuning; the real composite uses the un-boosted value.
+              gl_FragColor = vec4(vec3(clamp(detachedFoam * 8.0, 0.0, 1.0)), 1.0);
+              return;
+            }
+
+            if (d < 13.5) {
+              // Detached InBounds Debug (13)
+              vec4 sig = getDetachedFoamSignals(sceneUv, shore, inside);
+              gl_FragColor = vec4(vec3(sig.y), 1.0);
+              return;
+            }
+
+            if (d < 14.5) {
+              // Detached SpawnChance Debug (14)
+              vec4 sig = getDetachedFoamSignals(sceneUv, shore, inside);
+              gl_FragColor = vec4(vec3(clamp(sig.z, 0.0, 1.0)), 1.0);
+              return;
+            }
+
+            if (d < 15.5) {
+              // Detached OriginInside Debug (15)
+              vec4 originData = texture2D(tWaterData, sceneUv);
+              float originInside = waterInsideFromSdf(originData.r);
+              gl_FragColor = vec4(vec3(clamp(originInside, 0.0, 1.0)), 1.0);
+              return;
+            }
+
+            if (d < 16.5) {
+              // Detached OriginFoam Debug (16)
+              vec4 originData = texture2D(tWaterData, sceneUv);
+              float originInside = waterInsideFromSdf(originData.r);
+              float originShore = clamp(originData.g, 0.0, 1.0);
+              float originFoam = getFoamBaseAmount(sceneUv, originShore, originInside);
+              gl_FragColor = vec4(vec3(clamp(originFoam, 0.0, 1.0)), 1.0);
+              return;
+            }
+
+            if (d < 17.5) {
+              // Detached OriginTear Debug (17)
+              vec4 originData = texture2D(tWaterData, sceneUv);
+              float originInside = waterInsideFromSdf(originData.r);
+              float originShore = clamp(originData.g, 0.0, 1.0);
+              float originFoam = getFoamBaseAmount(sceneUv, originShore, originInside);
+              float originTear = getFoamTearMask(sceneUv, originShore, originInside, originFoam);
+              gl_FragColor = vec4(vec3(clamp(originTear, 0.0, 1.0)), 1.0);
+              return;
+            }
+
+            if (d < 18.5) {
+              // Detached SourceGate Debug (18)
+              vec4 sig = getDetachedFoamSignals(sceneUv, shore, inside);
+              gl_FragColor = vec4(vec3(clamp(sig.w, 0.0, 1.0)), 1.0);
+              return;
+            }
+
+            // Fall through: if the debug view isn't recognized, return magenta.
+            gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
             return;
           }
 
@@ -903,9 +1317,12 @@ export class WaterEffectV2 extends EffectBase {
           vec2 waveGrad = waveGrad2D(sceneUv, uWindTime);
           // Appearance-only rotation: rotates the wave normal/distortion texture without changing
           // the underlying wave travel direction (phase propagation).
-          waveGrad = rotate2D(waveGrad, uWaveAppearanceRotRad);
+          // Add a 90-degree correction so crest lines visually align perpendicular
+          // to the wind-driven travel direction.
+          waveGrad = rotate2D(waveGrad, uWaveAppearanceRotRad + 1.5707963);
           vec2 flowN = smoothFlow2D(sceneUv);
           vec2 combinedVec = waveGrad * uWaveStrength + flowN * 0.35;
+          
           combinedVec = combinedVec / (1.0 + 0.75 * length(combinedVec));
           float m = length(combinedVec);
           float dirMask = smoothstep(0.01, 0.06, m);
@@ -947,67 +1364,35 @@ export class WaterEffectV2 extends EffectBase {
 
           // Foam bubbles around shorelines (exposure01/shore), broken up with animated grain.
           // shore: 0.0 in deep water, 1.0 at water boundary.
-          // Advect with wind, but at ~half the wave advection speed so foam lags behind waves.
-          vec2 foamSceneUv = sceneUv - (uWindOffsetUv * 0.5);
+          float foamAmount = getFoamBaseAmount(sceneUv, shore, inside);
 
-          // Aspect-correct the foam noise basis so the foam grain stays square in world space.
-          float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
-          vec2 foamBasis = vec2(foamSceneUv.x * sceneAspect, foamSceneUv.y);
+          // GPU tear-off: break up white foam and blow fragments downwind.
+          float tearMask = getFoamTearMask(sceneUv, shore, inside, foamAmount);
+          float tearStrength = clamp(uFoamTearStrength, 0.0, 3.0);
+          float sprayFromFoam = tearMask * smoothstep(0.35, 0.95, foamAmount) * tearStrength;
 
-          // Curl-style flow warp (pseudo-curl from fbm gradient) to make foam motion less linear.
-          vec2 windUv = uWindDir;
-          // uWindDir is in Foundry/world coordinates (Y-down). Convert to a math-style basis (Y-up)
-          // for the curl field advection so it matches perceived wind direction.
-          windUv.y = -windUv.y;
-          float windLen = length(windUv);
-          windUv = (windLen > 1e-6) ? (windUv / windLen) : vec2(1.0, 0.0);
-          // foamBasis is aspect-corrected in X, so the wind vector must be expressed in that same basis.
-          vec2 windBasis = normalize(vec2(windUv.x * sceneAspect, windUv.y));
-          vec2 curlP = foamBasis * max(0.01, uFoamCurlScale) - windBasis * (uTime * uFoamCurlSpeed);
-          foamBasis += curlNoise2D(curlP) * clamp(uFoamCurlStrength, 0.0, 1.0);
+          float detachedFoam = getDetachedFoam(sceneUv, shore, inside);
+          detachedFoam *= (1.0 - smoothstep(0.15, 0.45, foamAmount));
+          float foamVisual = clamp(foamAmount + detachedFoam, 0.0, 1.0);
 
-          vec2 foamUv = foamBasis * max(0.1, uFoamScale) + vec2(uTime * uFoamSpeed * 0.5);
-          float f1 = valueNoise(foamUv);
-          float f2 = valueNoise(foamUv * 1.7 + 1.2);
-          float bubbles = (f1 + f2) * 0.5;
+          // Make the foam blend more opaque so underlying refracted dark detail
+          // (sand, refraction, etc.) does not shimmer through and read as "dark foam noise".
+          float foamAlpha = smoothstep(0.08, 0.35, foamVisual);
+          foamAlpha = pow(foamAlpha, 0.75);
+          col = mix(col, uFoamColor, foamAlpha);
 
-          // Animated breakup layers to add motion + patchiness to shoreline foam.
-          float b1 = fbmNoise(foamBasis * max(0.1, uFoamBreakupScale1) + vec2(uTime * uFoamBreakupSpeed1, -uTime * uFoamBreakupSpeed1 * 0.8));
-          float b2 = fbmNoise(foamBasis * max(0.1, uFoamBreakupScale2) + vec2(-uTime * uFoamBreakupSpeed2 * 0.6, uTime * uFoamBreakupSpeed2));
-          float breakup = 0.5 + 0.5 * (b1 * clamp(uFoamBreakupStrength1, 0.0, 1.0) + b2 * clamp(uFoamBreakupStrength2, 0.0, 1.0));
-          breakup = clamp(breakup, 0.0, 1.0);
+          // Shader-based foam flecks: high-frequency spray dots blown downwind
+          vec2 windUv2 = uWindDir;
+          float wLen2 = length(windUv2);
+          vec2 windF2 = (wLen2 > 1e-6) ? (windUv2 / wLen2) : vec2(1.0, 0.0);
+          vec2 windDir2 = vec2(windF2.x, -windF2.y);
+          vec2 sprayUv = sceneUv + windDir2 * clamp(uFoamTearDrift, -0.25, 0.25);
 
-          float foamMask = shore + (bubbles * 0.3 - 0.15) + (breakup - 0.5) * 0.35;
-          float shoreFoamAmount = smoothstep(uFoamThreshold, uFoamThreshold - 0.15, foamMask);
-          shoreFoamAmount *= smoothstep(0.15, 0.85, breakup);
-          shoreFoamAmount *= inside * max(0.0, uFoamStrength);
-
-          // Floating foam: low-frequency clumps drifting with wind in open water.
-          // As they drift into shoreline foam, we add them together (so they visibly accumulate).
-          vec2 clumpUv = foamBasis * max(0.1, uFloatingFoamScale);
-          clumpUv += vec2(uTime * (0.02 + uFoamSpeed * 0.05), uTime * (0.01 + uFoamSpeed * 0.03));
-          float c1 = valueNoise(clumpUv);
-          float c2 = valueNoise(clumpUv * 2.1 + 5.2);
-          float c = c1 * 0.7 + c2 * 0.3;
-          float clumps = smoothstep(1.0 - clamp(uFloatingFoamCoverage, 0.0, 1.0), 1.0, c);
-          float grain = valueNoise(clumpUv * 4.0 + vec2(1.3, 7.9));
-          clumps *= smoothstep(0.30, 0.75, grain);
-
-          // Prefer deep water but allow drift into shore region for accumulation.
-          float deepMask = smoothstep(0.15, 0.65, 1.0 - shore);
-          float floatingFoamAmount = clumps * inside * max(0.0, uFloatingFoamStrength) * deepMask;
-
-          float foamAmount = clamp(shoreFoamAmount + floatingFoamAmount, 0.0, 1.0);
-
-          // Foam CC / curve shaping.
-          float bp = clamp(uFoamBlackPoint, 0.0, 1.0);
-          float wp = clamp(uFoamWhitePoint, 0.0, 1.0);
-          foamAmount = clamp((foamAmount - bp) / max(1e-5, wp - bp), 0.0, 1.0);
-          foamAmount = pow(foamAmount, max(0.01, uFoamGamma));
-          foamAmount = (foamAmount - 0.5) * max(0.0, uFoamContrast) + 0.5;
-          foamAmount = clamp(foamAmount + uFoamBrightness, 0.0, 1.0);
-
-          col = mix(col, uFoamColor, foamAmount);
+          float shaderFlecks = getShaderFlecks(sprayUv, shore, inside, foamAlpha);
+          // Additive blend for bright spray dots
+          col += uFoamColor * shaderFlecks * 0.8;
+          // Add a softer "white spray" contribution driven by tear-off mask.
+          col += uFoamColor * sprayFromFoam * 0.22;
 
           // Cheap specular highlight (adds motion/contrast, masked to water).
           vec2 g = waveGrad * uWaveStrength;
@@ -1341,6 +1726,50 @@ export class WaterEffectV2 extends EffectBase {
     if (u.uFloatingFoamScale) {
       const sc = this.params?.floatingFoamScale;
       u.uFloatingFoamScale.value = Number.isFinite(sc) ? Math.max(0.1, sc) : 12.0;
+    }
+
+    // Shader-based foam flecks uniform sync
+    if (u.uFoamFlecksEnabled) {
+      u.uFoamFlecksEnabled.value = this.params?.foamFlecksEnabled ? 1.0 : 0.0;
+    }
+    if (u.uFoamFlecksIntensity) {
+      const fi = this.params?.foamFlecksIntensity;
+      u.uFoamFlecksIntensity.value = Number.isFinite(fi) ? Math.max(0.0, fi) : 1.0;
+    }
+
+    // GPU foam tear-off uniform sync
+    if (u.uFoamTearEnabled) {
+      u.uFoamTearEnabled.value = this.params?.foamTearEnabled ? 1.0 : 0.0;
+    }
+    if (u.uFoamTearStrength) {
+      const v = this.params?.foamTearStrength;
+      u.uFoamTearStrength.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.0;
+    }
+    if (u.uFoamTearScale) {
+      const v = this.params?.foamTearScale;
+      u.uFoamTearScale.value = Number.isFinite(v) ? Math.max(0.1, v) : 750.0;
+    }
+    if (u.uFoamTearSpeed) {
+      const v = this.params?.foamTearSpeed;
+      u.uFoamTearSpeed.value = Number.isFinite(v) ? v : 1.25;
+    }
+    if (u.uFoamTearDrift) {
+      const v = this.params?.foamTearDrift;
+      u.uFoamTearDrift.value = Number.isFinite(v) ? v : 0.02;
+    }
+
+    // Detached foam turbulence uniform sync
+    if (u.uDetachedTurbStrength) {
+      const v = this.params?.detachedTurbStrength;
+      u.uDetachedTurbStrength.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.35;
+    }
+    if (u.uDetachedTurbScale) {
+      const v = this.params?.detachedTurbScale;
+      u.uDetachedTurbScale.value = Number.isFinite(v) ? Math.max(0.05, v) : 0.25;
+    }
+    if (u.uDetachedTurbSpeed) {
+      const v = this.params?.detachedTurbSpeed;
+      u.uDetachedTurbSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.35;
     }
 
     u.uDebugView.value = Number.isFinite(this.params?.debugView) ? this.params.debugView : 0.0;

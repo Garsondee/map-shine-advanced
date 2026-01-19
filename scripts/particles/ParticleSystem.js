@@ -148,14 +148,19 @@ export class ParticleSystem extends EffectBase {
     let boundsVec4 = null;
     if (typeof canvas !== 'undefined' && canvas.dimensions) {
       const d = canvas.dimensions;
-      const sx = d.sceneX ?? 0;
-      const sy = d.sceneY ?? 0;
-      const sw = d.sceneWidth ?? d.width ?? 1000;
-      const sh = d.sceneHeight ?? d.height ?? 1000;
+      const rect = d.sceneRect;
+      const sx = rect?.x ?? d.sceneX ?? 0;
+      const sy = rect?.y ?? d.sceneY ?? 0;
+      const sw = rect?.width ?? d.sceneWidth ?? d.width ?? 1000;
+      const sh = rect?.height ?? d.sceneHeight ?? d.height ?? 1000;
+      const worldH = d.height ?? (sy + sh);
+      // Convert Foundry Y-down scene rect into Three.js Y-up bounds.
+      // We want uSceneBounds.y to be the *minY in world space*.
+      const syWorld = worldH - (sy + sh);
       const THREE = window.THREE;
       if (THREE) {
-        if (!this._sceneBounds) this._sceneBounds = new THREE.Vector4(sx, sy, sw, sh);
-        this._sceneBounds.set(sx, sy, sw, sh);
+        if (!this._sceneBounds) this._sceneBounds = new THREE.Vector4(sx, syWorld, sw, sh);
+        this._sceneBounds.set(sx, syWorld, sw, sh);
         boundsVec4 = this._sceneBounds;
       }
     }
@@ -204,6 +209,7 @@ export class ParticleSystem extends EffectBase {
     if (!camera) return;
     const systemMap = this.batchRenderer?.systemToBatchIndex;
     if (!systemMap || typeof systemMap.forEach !== 'function') return;
+    const batches = this.batchRenderer?.batches;
 
     if (!this._cullFrustum) this._cullFrustum = new THREE.Frustum();
     if (!this._cullProjScreenMatrix) this._cullProjScreenMatrix = new THREE.Matrix4();
@@ -221,6 +227,22 @@ export class ParticleSystem extends EffectBase {
       const emitter = ps.emitter;
       const ud = emitter.userData || (emitter.userData = {});
       if (ud.msAutoCull === false) return;
+
+      // MapShine overlay contract:
+      // EffectComposer renders layer 31 in a separate overlay pass and explicitly
+      // excludes it from the main scene render. If a Quarks VFXBatch stays on
+      // layer 0, it may render into the scene render target (and be affected by
+      // lighting/post) or be effectively hidden depending on the pipeline.
+      // Force every quarks batch onto the overlay layer so all particle systems
+      // render consistently.
+      try {
+        const idx = systemMap.get(ps);
+        const batch = (idx !== undefined && batches) ? batches[idx] : null;
+        if (batch?.layers?.set) {
+          batch.layers.set(OVERLAY_THREE_LAYER);
+        }
+      } catch (_) {
+      }
 
       const pos = emitter.position;
       const c = ud.msCullCenter;

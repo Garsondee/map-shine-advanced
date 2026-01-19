@@ -39,6 +39,400 @@ class RandomRectangleEmitter {
   update(system, delta) { /* no-op for now */ }
 }
 
+class FoamFleckEmitter {
+  constructor(parameters = {}) {
+    this.type = 'foam-fleck';
+    this.width = parameters.width ?? 1;
+    this.height = parameters.height ?? 1;
+    this.sceneX = parameters.sceneX ?? 0;
+    this.sceneY = parameters.sceneY ?? 0;
+    this.totalHeight = parameters.totalHeight ?? this.height;
+    this.centerX = parameters.centerX ?? (this.sceneX + this.width / 2);
+    this.centerY = parameters.centerY ?? (this.sceneY + this.height / 2);
+    this._offsetY = (this.totalHeight - this.sceneY - this.height);
+
+    /** @type {Float32Array|null} Packed [u,v,nx,ny,...] shoreline points */
+    this._shorePoints = null;
+    /** @type {Float32Array|null} Packed [u,v,...] interior points */
+    this._interiorPoints = null;
+
+    // Spawn distribution: 0 = only shore, 1 = only interior.
+    this.interiorRatio = 0.5;
+
+    // Wind snapshot (set by WeatherParticles.update)
+    this._windX = 1.0;
+    this._windY = 0.0;
+    this._windSpeed01 = 0.0;
+    this._windAccel01 = 0.0;
+
+    // WaterData + foam params snapshot (set by WeatherParticles.update)
+    this._waterData = null;
+    this._waterDataW = 0;
+    this._waterDataH = 0;
+    this._waterDataArr = null;
+
+    this._foamParams = null;
+    this._time = 0.0;
+  }
+
+  setShorePoints(points) {
+    this._shorePoints = points && points.length ? points : null;
+  }
+
+  setInteriorPoints(points) {
+    this._interiorPoints = points && points.length ? points : null;
+  }
+
+  setWind(dir, windSpeed01, windAccel01) {
+    const x = Number.isFinite(dir?.x) ? dir.x : 1.0;
+    const y = Number.isFinite(dir?.y) ? dir.y : 0.0;
+    const len = Math.hypot(x, y);
+    this._windX = len > 1e-6 ? (x / len) : 1.0;
+    this._windY = len > 1e-6 ? (y / len) : 0.0;
+    this._windSpeed01 = Number.isFinite(windSpeed01) ? Math.max(0.0, Math.min(1.0, windSpeed01)) : 0.0;
+    this._windAccel01 = Number.isFinite(windAccel01) ? Math.max(0.0, Math.min(1.0, windAccel01)) : 0.0;
+  }
+
+  setWaterDataTexture(tex) {
+    const img = tex?.image;
+    const data = img?.data;
+    const w = img?.width;
+    const h = img?.height;
+    if (data && w > 0 && h > 0) {
+      this._waterData = tex;
+      this._waterDataW = w;
+      this._waterDataH = h;
+      this._waterDataArr = data;
+    } else {
+      this._waterData = null;
+      this._waterDataW = 0;
+      this._waterDataH = 0;
+      this._waterDataArr = null;
+    }
+  }
+
+  setFoamParams(params, timeSeconds) {
+    this._foamParams = params || null;
+    this._time = Number.isFinite(timeSeconds) ? timeSeconds : 0.0;
+  }
+
+  _sampleWaterData(u, v) {
+    const arr = this._waterDataArr;
+    const w = this._waterDataW;
+    const h = this._waterDataH;
+    if (!arr || w <= 0 || h <= 0) return null;
+
+    const x = Math.max(0, Math.min(1, u));
+    const y = Math.max(0, Math.min(1, v));
+    const px = Math.max(0, Math.min(w - 1, Math.floor(x * (w - 1))));
+    const py = Math.max(0, Math.min(h - 1, Math.floor(y * (h - 1))));
+    const o = (py * w + px) * 4;
+
+    const r = arr[o] / 255.0;
+    const g = arr[o + 1] / 255.0;
+    const b = arr[o + 2] / 255.0;
+    const a = arr[o + 3] / 255.0;
+    return { r, g, b, a };
+  }
+
+  _hash12(ix, iy) {
+    // Cheap hash for CPU-side noise (not cryptographic).
+    const x = ix * 127.1 + iy * 311.7;
+    const s = Math.sin(x) * 43758.5453123;
+    return s - Math.floor(s);
+  }
+
+  _valueNoise(x, y) {
+    const ix = Math.floor(x);
+    const iy = Math.floor(y);
+    const fx = x - ix;
+    const fy = y - iy;
+    const ux = fx * fx * (3.0 - 2.0 * fx);
+    const uy = fy * fy * (3.0 - 2.0 * fy);
+
+    const a = this._hash12(ix, iy);
+    const b = this._hash12(ix + 1, iy);
+    const c = this._hash12(ix, iy + 1);
+    const d = this._hash12(ix + 1, iy + 1);
+
+    const ab = a + (b - a) * ux;
+    const cd = c + (d - c) * ux;
+    return ab + (cd - ab) * uy;
+  }
+
+  _smoothstep(edge0, edge1, x) {
+    const t = Math.max(0.0, Math.min(1.0, (x - edge0) / Math.max(1e-6, (edge1 - edge0))));
+    return t * t * (3.0 - 2.0 * t);
+  }
+
+  _fbmNoise(x, y) {
+    // Matches WaterEffectV2.fb mNoise() roughly (4 octaves).
+    let sum = 0.0;
+    let amp = 0.55;
+    let freq = 1.0;
+    for (let i = 0; i < 4; i++) {
+      sum += (this._valueNoise(x * freq, y * freq) - 0.5) * 2.0 * amp;
+      freq *= 2.0;
+      amp *= 0.55;
+    }
+    return sum;
+  }
+
+  _computeFoamAmount(u, v) {
+    // We approximate WaterEffectV2's foam amount. This is evaluated only on particle spawn
+    // attempts, not per-frame, so it stays cheap.
+    const p = this._foamParams;
+    const wd = this._sampleWaterData(u, v);
+    // If WaterData isn't available yet, don't hard-disable the entire effect.
+    // We fall back to "always eligible" so the system remains visible.
+    if (!wd) return 1.0;
+
+    const sdf01 = wd.r;
+    const exposure01 = wd.g;
+
+    // Match WaterEffectV2.waterInsideFromSdf(): smoothstep(0.52, 0.48, sdf01)
+    const inside = this._smoothstep(0.52, 0.48, sdf01);
+    const shore = Math.max(0.0, Math.min(1.0, exposure01));
+
+    const foamStrength = Number.isFinite(p?.foamStrength) ? Math.max(0.0, Math.min(1.0, p.foamStrength)) : 1.0;
+    const foamThreshold = Number.isFinite(p?.foamThreshold) ? Math.max(0.0, Math.min(1.0, p.foamThreshold)) : 0.98;
+    const foamScale = Number.isFinite(p?.foamScale) ? Math.max(0.1, p.foamScale) : 443.0;
+    const foamSpeed = Number.isFinite(p?.foamSpeed) ? p.foamSpeed : 0.18;
+    const b1Strength = Number.isFinite(p?.foamBreakupStrength1) ? Math.max(0.0, Math.min(1.0, p.foamBreakupStrength1)) : 1.0;
+    const b1Scale = Number.isFinite(p?.foamBreakupScale1) ? Math.max(0.1, p.foamBreakupScale1) : 5.2;
+    const b1Speed = Number.isFinite(p?.foamBreakupSpeed1) ? p.foamBreakupSpeed1 : 0.2;
+    const b2Strength = Number.isFinite(p?.foamBreakupStrength2) ? Math.max(0.0, Math.min(1.0, p.foamBreakupStrength2)) : 1.0;
+    const b2Scale = Number.isFinite(p?.foamBreakupScale2) ? Math.max(0.1, p.foamBreakupScale2) : 90.6;
+    const b2Speed = Number.isFinite(p?.foamBreakupSpeed2) ? p.foamBreakupSpeed2 : 0.28;
+    const floatingStrength = Number.isFinite(p?.floatingFoamStrength) ? Math.max(0.0, Math.min(1.0, p.floatingFoamStrength)) : 0.0;
+
+    const sceneAspect = (this.height > 1e-6) ? (this.width / this.height) : 1.0;
+    const t = this._time;
+
+    // Roughly mimic WaterEffectV2's foam advection basis: foamSceneUv = sceneUv - (uWindOffsetUv*0.5)
+    // We don't have uWindOffsetUv on CPU, so approximate it using time + foamSpeed in wind direction.
+    const driftX = (t * (0.02 + foamSpeed * 0.05)) * this._windX;
+    const driftY = (t * (0.01 + foamSpeed * 0.03)) * this._windY;
+    const foamSceneU = u - driftX * 0.5;
+    const foamSceneV = v - driftY * 0.5;
+
+    // WaterEffectV2 foamBasis: vec2(foamSceneUv.x * sceneAspect, foamSceneUv.y)
+    // (Curl warp omitted on CPU; breakup + bubbles is enough to align spawn with visible foam.)
+    const foamBasisX = foamSceneU * sceneAspect;
+    const foamBasisY = foamSceneV;
+
+    // Bubbles: valueNoise at foamScale, time-shifted
+    const foamUvX = foamBasisX * foamScale + (t * foamSpeed * 0.5);
+    const foamUvY = foamBasisY * foamScale + (t * foamSpeed * 0.5);
+    const f1 = this._valueNoise(foamUvX, foamUvY);
+    const f2 = this._valueNoise(foamUvX * 1.7 + 1.2, foamUvY * 1.7 + 1.2);
+    const bubbles = (f1 + f2) * 0.5;
+
+    // Breakup layers: fbmNoise at two scales.
+    const bb1 = this._fbmNoise(
+      foamBasisX * b1Scale + (t * b1Speed),
+      foamBasisY * b1Scale + (-t * b1Speed * 0.8)
+    );
+    const bb2 = this._fbmNoise(
+      foamBasisX * b2Scale + (-t * b2Speed * 0.6),
+      foamBasisY * b2Scale + (t * b2Speed)
+    );
+    let breakup = 0.5 + 0.5 * (bb1 * b1Strength + bb2 * b2Strength);
+    breakup = Math.max(0.0, Math.min(1.0, breakup));
+
+    // WaterEffectV2 foamMask shaping
+    let foamMask = shore + (bubbles * 0.3 - 0.15) + (breakup - 0.5) * 0.35;
+    let shoreFoamAmount = this._smoothstep(foamThreshold, foamThreshold - 0.15, foamMask);
+    shoreFoamAmount *= this._smoothstep(0.15, 0.85, breakup);
+    shoreFoamAmount *= inside * foamStrength;
+
+    // Floating foam: match shader clumps logic more closely.
+    let floatingFoamAmount = 0.0;
+    if (floatingStrength > 1e-4) {
+      const cov = Number.isFinite(p?.floatingFoamCoverage) ? Math.max(0.0, Math.min(1.0, p.floatingFoamCoverage)) : 0.2;
+      const scale = Number.isFinite(p?.floatingFoamScale) ? Math.max(0.1, p.floatingFoamScale) : 150.0;
+
+      // Use the same aspect-correct basis as shoreline foam so clumps align in world space.
+      const clumpUx = foamBasisX * scale + (t * (0.02 + foamSpeed * 0.05));
+      const clumpUy = foamBasisY * scale + (t * (0.01 + foamSpeed * 0.03));
+      const c1 = this._valueNoise(clumpUx, clumpUy);
+      const c2 = this._valueNoise(clumpUx * 2.1 + 5.2, clumpUy * 2.1 + 5.2);
+      const c = c1 * 0.7 + c2 * 0.3;
+      const clumps = this._smoothstep(1.0 - cov, 1.0, c);
+      const grain = this._valueNoise(clumpUx * 4.0 + 1.3, clumpUy * 4.0 + 7.9);
+      const gMask = this._smoothstep(0.30, 0.75, grain);
+      const deepMask = this._smoothstep(0.15, 0.65, 1.0 - shore);
+      floatingFoamAmount = clumps * gMask * inside * floatingStrength * deepMask;
+    }
+
+    let foamAmount = Math.max(0.0, Math.min(1.0, shoreFoamAmount + floatingFoamAmount));
+
+    // Apply the same CC shaping controls as the shader so "white foam" in UI corresponds
+    // to "spawn-eligible" on CPU.
+    const bp = Number.isFinite(p?.foamBlackPoint) ? Math.max(0.0, Math.min(1.0, p.foamBlackPoint)) : 0.13;
+    const wp = Number.isFinite(p?.foamWhitePoint) ? Math.max(0.0, Math.min(1.0, p.foamWhitePoint)) : 0.5;
+    foamAmount = Math.max(0.0, Math.min(1.0, (foamAmount - bp) / Math.max(1e-5, (wp - bp))));
+    const gamma = Number.isFinite(p?.foamGamma) ? Math.max(0.01, p.foamGamma) : 0.54;
+    foamAmount = Math.pow(foamAmount, gamma);
+    const contrast = Number.isFinite(p?.foamContrast) ? Math.max(0.0, p.foamContrast) : 1.0;
+    foamAmount = (foamAmount - 0.5) * contrast + 0.5;
+    const bright = Number.isFinite(p?.foamBrightness) ? p.foamBrightness : 0.0;
+    foamAmount = Math.max(0.0, Math.min(1.0, foamAmount + bright));
+
+    return foamAmount;
+  }
+
+  _spawnFromShore(particle) {
+    const pts = this._shorePoints;
+    if (!pts || pts.length < 4) return false;
+
+    const count = Math.floor(pts.length / 4);
+    if (count <= 0) return false;
+
+    const p = this._foamParams;
+    const attempts = Number.isFinite(p?.foamFlecksSpawnAttempts)
+      ? Math.max(1, Math.floor(p.foamFlecksSpawnAttempts))
+      : 8;
+    const outdoorsThreshold = Number.isFinite(p?.foamFlecksOutdoorsThreshold)
+      ? Math.max(0.0, Math.min(1.0, p.foamFlecksOutdoorsThreshold))
+      : 0.5;
+    const foamThresholdShore = Number.isFinite(p?.foamFlecksFoamThresholdShore)
+      ? Math.max(0.0, Math.min(1.0, p.foamFlecksFoamThresholdShore))
+      : 0.55;
+    const ignoreOutdoors = p?.foamFlecksDebugIgnoreOutdoors === true;
+    const ignoreFoamGate = p?.foamFlecksDebugIgnoreFoamGate === true;
+
+    // Outdoors-only gating: attempt a handful of samples.
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const idx = (Math.floor(Math.random() * count) * 4);
+      const u = pts[idx];
+      const v = pts[idx + 1];
+      const nx = pts[idx + 2];
+      const ny = pts[idx + 3];
+
+      // Outdoors mask: 0 = indoors, 1 = outdoors
+      const vMask = (weatherController?.roofMap?.flipY === true) ? (1.0 - v) : v;
+      const outdoor = weatherController?.getRoofMaskIntensity
+        ? weatherController.getRoofMaskIntensity(u, vMask)
+        : 1.0;
+      if (!ignoreOutdoors && outdoor < outdoorsThreshold) continue;
+
+      // Only spawn from "white" foam regions.
+      const foam01 = this._computeFoamAmount(u, v);
+      if (!ignoreFoamGate && foam01 < foamThresholdShore) continue;
+
+      const worldX = this.sceneX + u * this.width;
+      const worldY = this._offsetY + (1.0 - v) * this.height;
+
+      particle.position.x = worldX - this.centerX;
+      particle.position.y = worldY - this.centerY;
+      // Spawn slightly above the landing plane so flecks are visible airborne
+      // before FoamFleckBehavior transitions them into the landed state.
+      particle.position.z = 30 + Math.random() * 40;
+
+      // Initial motion: small upward hop + wind drift + edge normal kick.
+      const w = this._windSpeed01;
+      const a = this._windAccel01;
+      const hop = 90 + 320 * a + 120 * w;
+
+      // Slight push off the shoreline normal.
+      const nLen = Math.hypot(nx, ny);
+      const nX = nLen > 1e-6 ? (nx / nLen) : 1.0;
+      const nY = nLen > 1e-6 ? (ny / nLen) : 0.0;
+
+      const drift = (60 + 220 * w) * (0.25 + 0.75 * a);
+      const jitter = 35;
+
+      particle.velocity.set(
+        this._windX * drift + nX * (30 + 70 * w) + (Math.random() - 0.5) * jitter,
+        this._windY * drift + nY * (30 + 70 * w) + (Math.random() - 0.5) * jitter,
+        hop + (Math.random() * 60)
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  _spawnFromInterior(particle) {
+    const pts = this._interiorPoints;
+    if (!pts || pts.length < 2) return false;
+
+    const count = Math.floor(pts.length / 2);
+    const p = this._foamParams;
+    const attempts = Number.isFinite(p?.foamFlecksSpawnAttempts)
+      ? Math.max(1, Math.floor(p.foamFlecksSpawnAttempts))
+      : 8;
+    const outdoorsThreshold = Number.isFinite(p?.foamFlecksOutdoorsThreshold)
+      ? Math.max(0.0, Math.min(1.0, p.foamFlecksOutdoorsThreshold))
+      : 0.5;
+    const foamThresholdInterior = Number.isFinite(p?.foamFlecksFoamThresholdInterior)
+      ? Math.max(0.0, Math.min(1.0, p.foamFlecksFoamThresholdInterior))
+      : 0.62;
+    const ignoreOutdoors = p?.foamFlecksDebugIgnoreOutdoors === true;
+    const ignoreFoamGate = p?.foamFlecksDebugIgnoreFoamGate === true;
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const idx = (Math.floor(Math.random() * count) * 2);
+      const u = pts[idx];
+      const v = pts[idx + 1];
+
+      const vMask = (weatherController?.roofMap?.flipY === true) ? (1.0 - v) : v;
+      const outdoor = weatherController?.getRoofMaskIntensity
+        ? weatherController.getRoofMaskIntensity(u, vMask)
+        : 1.0;
+      if (!ignoreOutdoors && outdoor < outdoorsThreshold) continue;
+
+      // Interior flecks should come from floating foam clumps / bright foam, not arbitrary water.
+      const foam01 = this._computeFoamAmount(u, v);
+      if (!ignoreFoamGate && foam01 < foamThresholdInterior) continue;
+
+      const worldX = this.sceneX + u * this.width;
+      const worldY = this._offsetY + (1.0 - v) * this.height;
+
+      particle.position.x = worldX - this.centerX;
+      particle.position.y = worldY - this.centerY;
+      // Spawn slightly above the landing plane so interior-based flecks don't
+      // instantly enter the landed state on their first update.
+      particle.position.z = 30 + Math.random() * 40;
+
+      const w = this._windSpeed01;
+      const a = this._windAccel01;
+      const hop = 80 + 280 * a + 90 * w;
+      const drift = (80 + 280 * w) * (0.35 + 0.65 * a);
+      const jitter = 45;
+
+      particle.velocity.set(
+        this._windX * drift + (Math.random() - 0.5) * jitter,
+        this._windY * drift + (Math.random() - 0.5) * jitter,
+        hop + (Math.random() * 50)
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  initialize(particle) {
+    const preferInterior = Math.random() < this.interiorRatio;
+    const hasInterior = !!(this._interiorPoints && this._interiorPoints.length >= 2);
+    const hasShore = !!(this._shorePoints && this._shorePoints.length >= 4);
+
+    let ok = false;
+    if (preferInterior && hasInterior) ok = this._spawnFromInterior(particle);
+    if (!ok && hasShore) ok = this._spawnFromShore(particle);
+    if (!ok && hasInterior) ok = this._spawnFromInterior(particle);
+
+    if (!ok) {
+      // Nothing valid to spawn from.
+      if (typeof particle.life === 'number') particle.age = particle.life;
+      else particle.age = 1e9;
+    }
+  }
+
+  update(system, delta) { /* no-op */ }
+}
+
 class ShorelineFoamSprayEmitter {
   constructor(parameters = {}) {
     this.type = 'shoreline-foam-spray';
@@ -238,6 +632,7 @@ class WaterMaskedSplashEmitter {
 class WorldVolumeKillBehavior {
   constructor(min, max) {
     this.type = 'WorldVolumeKill';
+    this.enabled = true;
     this.min = min.clone();
     this.max = max.clone();
     // PERFORMANCE FIX: Reuse a single Vector3 for world-space transforms
@@ -249,6 +644,7 @@ class WorldVolumeKillBehavior {
   initialize(particle, system) { /* no-op */ }
 
   update(particle, delta, system) {
+    if (this.enabled === false) return;
     const p = particle.position;
     if (!p) return;
 
@@ -286,6 +682,177 @@ class WorldVolumeKillBehavior {
 
   clone() {
     return new WorldVolumeKillBehavior(this.min, this.max);
+  }
+
+  reset() { /* no-op */ }
+}
+
+class FoamFleckBehavior {
+  constructor() {
+    this.type = 'FoamFleck';
+    this.gravity = 950;
+    this.landedDuration = 1.6;
+
+    this._groundZ = null;
+    this._tempVec = null;
+
+    // Optional water flow data (from WaterEffectV2 tWaterData).
+    // Used only while landed to approximate "drift with water distortion".
+    this._waterDataArr = null;
+    this._waterDataW = 0;
+    this._waterDataH = 0;
+    this._sceneBounds = null; // THREE.Vector4(sceneX, sceneY, sceneW, sceneH)
+
+    this._windX = 1.0;
+    this._windY = 0.0;
+    this._windSpeed01 = 0.0;
+  }
+
+  setWaterDataTexture(tex, sceneBoundsVec4) {
+    const img = tex?.image;
+    const data = img?.data;
+    const w = img?.width;
+    const h = img?.height;
+    if (data && w > 0 && h > 0) {
+      this._waterDataArr = data;
+      this._waterDataW = w;
+      this._waterDataH = h;
+    } else {
+      this._waterDataArr = null;
+      this._waterDataW = 0;
+      this._waterDataH = 0;
+    }
+    this._sceneBounds = sceneBoundsVec4 || null;
+  }
+
+  setWind(dir, windSpeed01) {
+    const x = Number.isFinite(dir?.x) ? dir.x : 1.0;
+    const y = Number.isFinite(dir?.y) ? dir.y : 0.0;
+    const len = Math.hypot(x, y);
+    this._windX = len > 1e-6 ? (x / len) : 1.0;
+    this._windY = len > 1e-6 ? (y / len) : 0.0;
+    this._windSpeed01 = Number.isFinite(windSpeed01) ? Math.max(0.0, Math.min(1.0, windSpeed01)) : 0.0;
+  }
+
+  _getGroundZ() {
+    if (this._groundZ !== null) return this._groundZ;
+    const sceneComposer = window.MapShine?.sceneComposer;
+    if (sceneComposer && typeof sceneComposer.groundZ === 'number') {
+      this._groundZ = sceneComposer.groundZ;
+      return this._groundZ;
+    }
+    return 1000;
+  }
+
+  initialize(particle, system) {
+    if (!particle) return;
+    particle._landed = false;
+    particle._landedAgeStart = 0;
+    particle._landedBaseAlpha = undefined;
+    particle._landedPhase = undefined;
+  }
+
+  update(particle, delta, system) {
+    if (!particle || !particle.position) return;
+
+    // Airborne physics: apply gravity + mild drag.
+    if (!particle._landed && particle.velocity) {
+      // Keep flecks moving with evolving wind (not just their spawn impulse).
+      // This is a light continuous push, not a full force field.
+      const windAccel = 220 * this._windSpeed01;
+      particle.velocity.x += this._windX * windAccel * delta;
+      particle.velocity.y += this._windY * windAccel * delta;
+
+      particle.velocity.z -= this.gravity * delta;
+      particle.velocity.x *= 0.992;
+      particle.velocity.y *= 0.992;
+    }
+
+    // Landing detection in world space.
+    const groundZ = this._getGroundZ();
+    const landingZ = groundZ + 10;
+    let z = particle.position.z;
+    const THREE = window.THREE;
+    if (system && system.emitter && system.emitter.matrixWorld && THREE) {
+      if (!this._tempVec) this._tempVec = new THREE.Vector3();
+      this._tempVec.set(particle.position.x, particle.position.y, particle.position.z);
+      this._tempVec.applyMatrix4(system.emitter.matrixWorld);
+      z = this._tempVec.z;
+    }
+
+    if (!particle._landed && z <= landingZ) {
+      particle._landed = true;
+      particle._landedAgeStart = typeof particle.age === 'number' ? particle.age : 0;
+      particle._landedBaseAlpha = particle.color ? particle.color.w : 1.0;
+      particle._landedPhase = Math.random() * Math.PI * 2;
+      if (particle.velocity) particle.velocity.set(0, 0, 0);
+    }
+
+    // Landed: drift briefly (approximate water motion), then fade out and die.
+    if (particle._landed) {
+      const startAge = particle._landedAgeStart || 0;
+      const t = this.landedDuration > 1e-6
+        ? Math.min(Math.max((particle.age - startAge) / this.landedDuration, 0), 1)
+        : 1;
+
+      // Drift along wind, plus optional water flow field so they "stick" to water motion.
+      const driftSpeed = 18 + 65 * this._windSpeed01;
+      const phase = particle._landedPhase || 0;
+      const wobble = Math.sin((particle.age * 9.0) + phase) * 4.0;
+
+      let flowX = 0.0;
+      let flowY = 0.0;
+      const arr = this._waterDataArr;
+      const sb = this._sceneBounds;
+      if (arr && sb && this._waterDataW > 0 && this._waterDataH > 0 && system?.emitter?.matrixWorld) {
+        // Sample the BA channels of WaterData (packed flow normal) at the particle's world XY.
+        // Note: sceneBounds is Y-up. WaterEffectV2 samples tWaterData in sceneUv with V flipped.
+        const THREE = window.THREE;
+        if (THREE) {
+          if (!this._tempVec) this._tempVec = new THREE.Vector3();
+          this._tempVec.set(particle.position.x, particle.position.y, particle.position.z);
+          this._tempVec.applyMatrix4(system.emitter.matrixWorld);
+
+          const u = (this._tempVec.x - sb.x) / Math.max(1e-6, sb.z);
+          const v = 1.0 - ((this._tempVec.y - sb.y) / Math.max(1e-6, sb.w));
+          if (u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0) {
+            const w = this._waterDataW;
+            const h = this._waterDataH;
+            const px = Math.max(0, Math.min(w - 1, Math.floor(u * (w - 1))));
+            const py = Math.max(0, Math.min(h - 1, Math.floor(v * (h - 1))));
+            const o = (py * w + px) * 4;
+            const b = arr[o + 2] / 255.0;
+            const a = arr[o + 3] / 255.0;
+            flowX = b * 2.0 - 1.0;
+            flowY = a * 2.0 - 1.0;
+          }
+        }
+      }
+
+      const flowScale = 55; // tuned in world units/sec; only applies while landed
+      particle.position.x += (this._windX * driftSpeed + (-this._windY) * wobble + flowX * flowScale) * delta;
+      particle.position.y += (this._windY * driftSpeed + ( this._windX) * wobble + flowY * flowScale) * delta;
+      particle.position.z = 0;
+
+      if (particle.color) {
+        const baseA = (typeof particle._landedBaseAlpha === 'number') ? particle._landedBaseAlpha : particle.color.w;
+        particle.color.w = baseA * (1.0 - t);
+      }
+
+      if (t >= 1.0) {
+        if (typeof particle.life === 'number') particle.age = particle.life;
+        else particle.age = 1e9;
+      }
+    }
+  }
+
+  frameUpdate(delta) { /* no-op */ }
+
+  clone() {
+    const b = new FoamFleckBehavior();
+    b.gravity = this.gravity;
+    b.landedDuration = this.landedDuration;
+    return b;
   }
 
   reset() { /* no-op */ }
@@ -742,6 +1309,7 @@ export class WeatherParticles {
     this.snowTexture = this._createSnowTexture();
     this.splashTexture = this._createSplashTexture();
     this.foamTexture = this._createFoamTexture();
+    this.foamFleckTexture = this._createFoamFleckTexture();
     this.enabled = true;
     this._time = 0;
 
@@ -751,10 +1319,37 @@ export class WeatherParticles {
     this._waterHitPoints = null;
     this._waterHitShape = null;
 
+    this._waterFoamShape = null;
+
+    this._waterFoamMaskUuid = null;
+    this._waterFoamPoints = null;
+
+    // View-dependent foam.webp spawning:
+    // - We generate a global point cloud from the _Water hard edge.
+    // - Each frame we filter it to the camera-visible world rectangle and feed
+    //   only that subset to the foam emitter.
+    this._viewMinX = null;
+    this._viewMaxX = null;
+    this._viewMinY = null;
+    this._viewMaxY = null;
+    this._viewSceneX = null;
+    this._viewSceneY = null;
+    this._viewSceneW = null;
+    this._viewSceneH = null;
+    this._waterFoamViewBuffer = null;
+    this._waterFoamViewCount = 0;
+    this._waterFoamLastViewQU0 = null;
+    this._waterFoamLastViewQU1 = null;
+    this._waterFoamLastViewQV0 = null;
+    this._waterFoamLastViewQV1 = null;
+
     this._shoreFoamMaskUuid = null;
     this._shoreFoamPoints = null;
     this._shoreFoamShape = null;
     this._shoreFoamSprayShape = null;
+
+    this._foamFleckInteriorMaskUuid = null;
+    this._foamFleckInteriorPoints = null;
 
     this._waterMaskThreshold = 0.15;
     this._waterMaskStride = 2;
@@ -773,6 +1368,19 @@ export class WeatherParticles {
     this._foamBatchMaterial = null;
     this._foamSpraySystem = null;
     this._foamSprayBatchMaterial = null;
+
+    this._foamFleckSystem = null;
+    this._foamFleckMaterial = null;
+    this._foamFleckEmitter = null;
+    this._foamFleckBehavior = null;
+    this._foamFleckBatchMaterial = null;
+
+    this._foamFleckLastWindSpeed01 = 0.0;
+    this._foamFleckWindAccel01 = 0.0;
+    this._foamFleckLastGust = 0.0;
+    this._foamFleckLastMaxParticles = null;
+    this._foamFleckLastSizeMin = null;
+    this._foamFleckLastSizeMax = null;
 
     // ROOF / _OUTDOORS MASK INTEGRATION (high level):
     // - WeatherController owns the _Outdoors texture (roofMap) and two flags:
@@ -879,6 +1487,7 @@ export class WeatherParticles {
 
     if (this._foamSystem?.emitter) this._foamSystem.emitter.visible = v;
     if (this._foamSpraySystem?.emitter) this._foamSpraySystem.emitter.visible = v;
+    if (this._foamFleckSystem?.emitter) this._foamFleckSystem.emitter.visible = v;
   }
 
   _zeroWeatherEmissions() {
@@ -916,6 +1525,10 @@ export class WeatherParticles {
     if (this._foamSpraySystem?.emissionOverTime && typeof this._foamSpraySystem.emissionOverTime.value === 'number') {
       this._foamSpraySystem.emissionOverTime.value = 0;
     }
+
+    if (this._foamFleckSystem?.emissionOverTime && typeof this._foamFleckSystem.emissionOverTime.value === 'number') {
+      this._foamFleckSystem.emissionOverTime.value = 0;
+    }
   }
 
   _createRainTexture() {
@@ -931,6 +1544,35 @@ export class WeatherParticles {
     texture.generateMipmaps = true;
     texture.needsUpdate = true;
     return texture;
+  }
+
+  _createFoamFleckTexture() {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+
+    // Small dot texture for 1–2px foam flecks. CanvasTexture keeps this
+    // dependency-free and avoids new asset files.
+    const size = 16;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    ctx.clearRect(0, 0, size, size);
+    ctx.fillStyle = 'rgba(255,255,255,1)';
+    // 2px dot centered.
+    ctx.fillRect((size / 2) - 1, (size / 2) - 1, 2, 2);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.generateMipmaps = false;
+    tex.minFilter = THREE.LinearFilter;
+    // Crisp dot: avoid blur so it reads as 1-2px rather than a soft smudge.
+    tex.magFilter = THREE.NearestFilter;
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.needsUpdate = true;
+    return tex;
   }
 
 _createSnowTexture() {
@@ -1226,6 +1868,8 @@ _createSnowTexture() {
     const sceneH = d?.sceneHeight ?? d?.height ?? 2000;
     const sceneX = d?.sceneX ?? 0;
     const sceneY = d?.sceneY ?? 0;
+    const totalH = d?.height ?? (sceneY + sceneH);
+    const sceneYWorld = totalH - (sceneY + sceneH);
     
     // Scene rectangle comes directly from Foundry's canvas.dimensions.
     // This gives us the true playable area in world units (top-left origin).
@@ -1285,25 +1929,27 @@ _createSnowTexture() {
     //     * set renderOrder=50 on the ParticleSystem configs below.
     //   Combined with ParticleSystem's BatchedRenderer.renderOrder=50 this
     //   guarantees weather batches draw after tiles and appear as an overlay.
-    log.info(`WeatherParticles: scene bounds [${sceneX}, ${sceneY}, ${sceneW}x${sceneH}]`);
+    log.info(`WeatherParticles: scene bounds [${sceneX}, ${sceneYWorld}, ${sceneW}x${sceneH}]`);
 
     const centerX = sceneX + sceneW / 2;
-    const centerY = sceneY + sceneH / 2;
+    const centerY = sceneYWorld + sceneH / 2;
 
     const maskParams = {
       width: sceneW,
       height: sceneH,
       sceneX,
       sceneY,
-      totalHeight: d?.height ?? sceneH,
+      totalHeight: totalH,
       centerX,
       centerY
     };
 
     this._splashShape = new RandomRectangleEmitter({ width: sceneW, height: sceneH });
     this._waterHitShape = new WaterMaskedSplashEmitter(maskParams);
+    this._waterFoamShape = new WaterMaskedSplashEmitter(maskParams);
     this._shoreFoamShape = new ShorelineFoamEmitter(maskParams);
     this._shoreFoamSprayShape = new ShorelineFoamSprayEmitter(maskParams);
+    this._foamFleckEmitter = new FoamFleckEmitter(maskParams);
     // Place the weather emitters well above the ground plane so rain/snow
     // have room to fall before hitting the map. Use SceneComposer.weatherEmitterZ
     // when available so all systems share a single canonical emitter height.
@@ -1311,15 +1957,18 @@ _createSnowTexture() {
     // World volume in world space: scene rectangle in X/Y, groundZ..worldTopZ in Z.
     // We keep a tall band here so strong gravity/wind forces do not immediately
     // cull particles before they have a chance to render.
-    const volumeMin = new THREE.Vector3(sceneX, sceneY, groundZ);
-    const volumeMax = new THREE.Vector3(sceneX + sceneW, sceneY + sceneH, worldTopZ);
+    const volumeMin = new THREE.Vector3(sceneX, sceneYWorld, groundZ);
+    const volumeMax = new THREE.Vector3(sceneX + sceneW, sceneYWorld + sceneH, worldTopZ);
     const killBehavior = new WorldVolumeKillBehavior(volumeMin, volumeMax);
+    // Foam flecks use local-space particles, so debugging is much easier if we can
+    // toggle their kill volume independently.
+    this._foamFleckKillBehavior = new WorldVolumeKillBehavior(volumeMin, volumeMax);
     
     // For snow we want flakes to be able to rest on the ground (z ~= groundZ) and
     // fade out instead of being culled the instant they touch the floor.
     // Use a slightly relaxed kill volume in Z so the SnowFloorBehavior can
     // manage their lifetime once they land.
-    const snowVolumeMin = new THREE.Vector3(sceneX, sceneY, groundZ - 100);
+    const snowVolumeMin = new THREE.Vector3(sceneX, sceneYWorld, groundZ - 100);
     const snowKillBehavior = new WorldVolumeKillBehavior(snowVolumeMin, volumeMax);
     
     // --- COMMON OVER-LIFE BEHAVIORS ---
@@ -1627,7 +2276,7 @@ _createSnowTexture() {
       worldSpace: true,
       maxParticles: 2500,
       emissionOverTime: new ConstantValue(0),
-      shape: this._shoreFoamShape,
+      shape: this._waterFoamShape,
       material: foamMaterial,
       renderOrder: 50,
       renderMode: RenderMode.BillBoard,
@@ -1684,7 +2333,7 @@ _createSnowTexture() {
       worldSpace: true,
       maxParticles: 3500,
       emissionOverTime: new ConstantValue(0),
-      shape: this._shoreFoamSprayShape,
+      shape: this._waterFoamShape,
       material: foamSprayMaterial,
       renderOrder: 50,
       renderMode: RenderMode.BillBoard,
@@ -1712,6 +2361,65 @@ _createSnowTexture() {
       }
     } catch (e) {
       log.warn('Failed to patch foam spray batch material:', e);
+    }
+
+    // --- FOAM FLECKS (wind-acceleration lift) ---
+    // Outdoors-only: actual spawn is gated in FoamFleckEmitter using the roof mask.
+    // Emission rate is driven in update() by wind acceleration (windSpeed increasing).
+    const foamFleckMaterial = new THREE.MeshBasicMaterial({
+      map: this.foamFleckTexture,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.AdditiveBlending,
+      color: 0xffffff,
+      opacity: 1.0
+    });
+    this._foamFleckMaterial = foamFleckMaterial;
+
+    const foamFleckBehavior = new FoamFleckBehavior();
+    this._foamFleckBehavior = foamFleckBehavior;
+
+    this._foamFleckSystem = new ParticleSystem({
+      duration: 1,
+      looping: true,
+      prewarm: false,
+      startLife: new IntervalValue(0.6, 1.2),
+      startSpeed: new ConstantValue(0),
+      startSize: new IntervalValue(2.0, 4.5),
+      startColor: new ColorRange(new Vector4(1.0, 1.0, 1.0, 1.0), new Vector4(1.0, 1.0, 1.0, 1.0)),
+      worldSpace: false,
+      maxParticles: 1200,
+      emissionOverTime: new ConstantValue(0),
+      shape: this._foamFleckEmitter,
+      material: foamFleckMaterial,
+      renderOrder: 50,
+      renderMode: RenderMode.BillBoard,
+      startRotation: new IntervalValue(0, Math.PI * 2),
+      behaviors: [foamFleckBehavior, this._foamFleckKillBehavior]
+    });
+
+    this._foamFleckSystem.emitter.position.set(centerX, centerY, groundZ + 10);
+    this._foamFleckSystem.emitter.rotation.set(0, 0, 0);
+    this._foamFleckSystem.emitter.layers.set(OVERLAY_THREE_LAYER);
+    if (this.scene) this.scene.add(this._foamFleckSystem.emitter);
+    this.batchRenderer.addSystem(this._foamFleckSystem);
+
+    // Batch material caching is useful for consistent render settings even though
+    // we don't inject roof masking into this shader.
+    try {
+      const idx = this.batchRenderer.systemToBatchIndex?.get(this._foamFleckSystem);
+      if (idx !== undefined && this.batchRenderer.batches && this.batchRenderer.batches[idx]) {
+        const batch = this.batchRenderer.batches[idx];
+        if (batch.material) {
+          this._foamFleckBatchMaterial = batch.material;
+          if (batch.layers && typeof batch.layers.set === 'function') {
+            batch.layers.set(OVERLAY_THREE_LAYER);
+          }
+        }
+      }
+    } catch (e) {
+      log.warn('Failed to cache foam fleck batch material:', e);
     }
 
     // --- SNOW ---
@@ -1840,10 +2548,10 @@ _createSnowTexture() {
     const THREE = window.THREE;
     if (!material || !THREE) return;
 
-    // Avoid double-patching the same material
-    if (material.userData && material.userData.roofUniforms) {
-      return;
-    }
+    // Quarks can rebuild/replace ShaderMaterial shader strings after we initially patch.
+    // So we treat this patcher as *idempotent*: reuse existing uniforms when present,
+    // but re-inject the GLSL if it is missing.
+    const existingUniforms = material.userData?.roofUniforms || null;
 
     // These uniforms live on material.userData so WeatherParticles.update can
     // drive them every frame. They are then wired into either the real
@@ -1857,7 +2565,7 @@ _createSnowTexture() {
     // Logic:
     // - Show rain if: (outdoors AND roof hidden) OR (roof visible - rain lands on roof)
     // - Hide rain if: indoors AND no visible roof overhead
-    const uniforms = {
+    const uniforms = existingUniforms || {
       uRoofMap: { value: null },
       uRoofAlphaMap: { value: null },
       // (sceneX, sceneY, sceneWidth, sceneHeight) in world units
@@ -1870,7 +2578,10 @@ _createSnowTexture() {
       uScreenSize: { value: new THREE.Vector2(1920, 1080) },
       uWaterMask: { value: null },
       uWaterMaskEnabled: { value: 0.0 },
-      uWaterMaskThreshold: { value: 0.15 }
+      uWaterMaskThreshold: { value: 0.15 },
+      // When > 0.5, flip the V coordinate when sampling uWaterMask.
+      // Use this to match Three.js texture flipY conventions.
+      uWaterMaskFlipY: { value: 0.0 }
     };
 
     // Store for per-frame updates in update()
@@ -1881,7 +2592,9 @@ _createSnowTexture() {
 
     // The GLSL fragment code for dual-mask precipitation visibility.
     // This is shared between ShaderMaterial and onBeforeCompile paths.
+    const maskMarker = 'MS_ROOF_WATER_MASK';
     const fragmentMaskCode =
+      '  // ' + maskMarker + '\n' +
       '  // DUAL-MASK PRECIPITATION VISIBILITY\n' +
       '  // uRoofMap: _Outdoors mask (world-space, white=outdoors, black=indoors)\n' +
       '  // uRoofAlphaMap: screen-space roof alpha (alpha>0 = roof visible)\n' +
@@ -1931,7 +2644,10 @@ _createSnowTexture() {
       '      discard;\n' +
       '    }\n' +
       '    if (uWaterMaskEnabled > 0.5) {\n' +
-      '      float wm = texture2D(uWaterMask, uvMask).r;\n' +
+      '      vec2 uvWater = uvMask;\n' +
+      '      if (uWaterMaskFlipY > 0.5) uvWater.y = 1.0 - uvWater.y;\n' +
+      '      vec4 m = texture2D(uWaterMask, uvWater);\n' +
+      '      float wm = dot(m.rgb, vec3(0.299, 0.587, 0.114)) * m.a;\n' +
       '      if (wm < uWaterMaskThreshold) discard;\n' +
       '    }\n' +
       '  }\n';
@@ -1950,26 +2666,48 @@ _createSnowTexture() {
       uni.uWaterMask = uniforms.uWaterMask;
       uni.uWaterMaskEnabled = uniforms.uWaterMaskEnabled;
       uni.uWaterMaskThreshold = uniforms.uWaterMaskThreshold;
+      uni.uWaterMaskFlipY = uniforms.uWaterMaskFlipY;
 
       if (typeof material.vertexShader === 'string') {
         // All quarks billboard variants use an `offset` attribute plus
         // #include <soft_vertex>. We piggyback on that include to compute a
         // world-space position once per vertex, without depending on quarks'
         // internal naming of matrices.
-        material.vertexShader = material.vertexShader
-          .replace(
-            'void main() {',
-            'varying vec3 vRoofWorldPos;\nvoid main() {'
-          )
-          .replace(
-            '#include <soft_vertex>',
-            '#include <soft_vertex>\n  vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;'
-          );
+        //
+        // IMPORTANT: For foam.webp we need the mask to clip the *sprite shape*, not
+        // just the particle center. Quarks billboards offset the quad corners via
+        // `rotatedPosition` in the vertex shader. We add that same offset to our
+        // world position so vRoofWorldPos interpolates across the quad.
+        if (!material.vertexShader.includes('varying vec3 vRoofWorldPos')) {
+          material.vertexShader = material.vertexShader
+            .replace(
+              'void main() {',
+              'varying vec3 vRoofWorldPos;\nvoid main() {'
+            );
+        }
+        const legacyAssign = 'vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;';
+        const upgradedAssign = 'vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;\n  vRoofWorldPos.xy += rotatedPosition;';
+        if (material.vertexShader.includes(legacyAssign) && !material.vertexShader.includes('vRoofWorldPos.xy += rotatedPosition')) {
+          material.vertexShader = material.vertexShader.replace(legacyAssign, upgradedAssign);
+        }
+        if (!material.vertexShader.includes('vRoofWorldPos =')) {
+          material.vertexShader = material.vertexShader
+            .replace(
+              '#include <soft_vertex>',
+              '#include <soft_vertex>\n  ' + upgradedAssign
+            );
+        }
       }
 
       if (typeof material.fragmentShader === 'string') {
-        material.fragmentShader = material.fragmentShader
-          .replace(
+        let fs = material.fragmentShader;
+
+        // Only (re)inject if missing. Prevents runaway growth if _patchRoofMaskMaterial
+        // is called repeatedly (which it is).
+        const needsInject = !fs.includes(maskMarker);
+
+        if (needsInject) {
+          fs = fs.replace(
             'void main() {',
             'varying vec3 vRoofWorldPos;\n' +
             'uniform sampler2D uRoofMap;\n' +
@@ -1981,12 +2719,21 @@ _createSnowTexture() {
             'uniform sampler2D uWaterMask;\n' +
             'uniform float uWaterMaskEnabled;\n' +
             'uniform float uWaterMaskThreshold;\n' +
+            'uniform float uWaterMaskFlipY;\n' +
             'void main() {'
-          )
-          .replace(
-            '#include <soft_fragment>',
-            fragmentMaskCode + '#include <soft_fragment>'
           );
+
+          // Quarks shader variants should include <soft_fragment>, but some builds/materials
+          // may not. If the include isn't present, fall back to injecting the mask block
+          // at the top of main().
+          if (fs.includes('#include <soft_fragment>')) {
+            fs = fs.replace('#include <soft_fragment>', fragmentMaskCode + '#include <soft_fragment>');
+          } else {
+            fs = fs.replace('void main() {', 'void main() {\n' + fragmentMaskCode);
+          }
+
+          material.fragmentShader = fs;
+        }
       }
 
       material.needsUpdate = true;
@@ -2008,6 +2755,7 @@ _createSnowTexture() {
       shader.uniforms.uWaterMask = uniforms.uWaterMask;
       shader.uniforms.uWaterMaskEnabled = uniforms.uWaterMaskEnabled;
       shader.uniforms.uWaterMaskThreshold = uniforms.uWaterMaskThreshold;
+      shader.uniforms.uWaterMaskFlipY = uniforms.uWaterMaskFlipY;
 
       shader.vertexShader = shader.vertexShader
         .replace(
@@ -2016,11 +2764,20 @@ _createSnowTexture() {
         )
         .replace(
           '#include <soft_vertex>',
-          '#include <soft_vertex>\n  vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;'
+          '#include <soft_vertex>\n  vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;\n  vRoofWorldPos.xy += rotatedPosition;'
         );
 
-      shader.fragmentShader = shader.fragmentShader
-        .replace(
+      // If this material was previously patched (center-only), upgrade it to
+      // per-vertex world position so the water mask clips the sprite shape.
+      const legacyAssign = 'vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;';
+      const upgradedAssign = 'vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;\n  vRoofWorldPos.xy += rotatedPosition;';
+      if (shader.vertexShader.includes(legacyAssign) && !shader.vertexShader.includes('vRoofWorldPos.xy += rotatedPosition')) {
+        shader.vertexShader = shader.vertexShader.replace(legacyAssign, upgradedAssign);
+      }
+
+      let fs = shader.fragmentShader;
+      if (!fs.includes(maskMarker)) {
+        fs = fs.replace(
           'void main() {',
           'varying vec3 vRoofWorldPos;\n' +
           'uniform sampler2D uRoofMap;\n' +
@@ -2032,12 +2789,18 @@ _createSnowTexture() {
           'uniform sampler2D uWaterMask;\n' +
           'uniform float uWaterMaskEnabled;\n' +
           'uniform float uWaterMaskThreshold;\n' +
+          'uniform float uWaterMaskFlipY;\n' +
           'void main() {'
-        )
-        .replace(
-          '#include <soft_fragment>',
-          fragmentMaskCode + '#include <soft_fragment>'
         );
+
+        if (fs.includes('#include <soft_fragment>')) {
+          fs = fs.replace('#include <soft_fragment>', fragmentMaskCode + '#include <soft_fragment>');
+        } else {
+          fs = fs.replace('void main() {', 'void main() {\n' + fragmentMaskCode);
+        }
+
+        shader.fragmentShader = fs;
+      }
     };
 
     material.needsUpdate = true;
@@ -2052,7 +2815,30 @@ _createSnowTexture() {
     const batch = br.batches[idx];
     const mat = batch?.material || null;
     if (!mat) return null;
-    if (this[cacheProp] !== mat || !mat.userData || !mat.userData.roofUniforms) {
+
+    // Ensure the actual rendered VFXBatch/SpriteBatch object is on the overlay layer.
+    // EffectComposer renders layer 31 in a dedicated overlay pass.
+    try {
+      if (batch && batch.layers && typeof batch.layers.set === 'function') {
+        batch.layers.set(OVERLAY_THREE_LAYER);
+      }
+    } catch (_) {
+    }
+
+    const marker = 'MS_ROOF_WATER_MASK';
+    const needsShaderPatch = !!(
+      mat &&
+      mat.isShaderMaterial === true &&
+      (
+        (typeof mat.fragmentShader === 'string' && !mat.fragmentShader.includes(marker)) ||
+        !mat.uniforms ||
+        !mat.uniforms.uWaterMaskThreshold ||
+        !mat.uniforms.uWaterMaskEnabled ||
+        !mat.uniforms.uWaterMask
+      )
+    );
+
+    if (this[cacheProp] !== mat || !mat.userData || !mat.userData.roofUniforms || needsShaderPatch) {
       this[cacheProp] = mat;
       this._patchRoofMaskMaterial(mat);
     }
@@ -2081,6 +2867,37 @@ _createSnowTexture() {
     // Three.quarks explodes if given MS instead of Seconds.
     const safeDt = dt > 1.0 ? dt / 1000 : dt;
     this._time += safeDt;
+
+    // Wind acceleration signal for foam flecks (spawn only when wind speed increases).
+    const windSpeed01 = Number.isFinite(weather.windSpeed) ? Math.max(0.0, Math.min(1.0, weather.windSpeed)) : 0.0;
+    if (safeDt > 1e-6) {
+      const dWind = windSpeed01 - (this._foamFleckLastWindSpeed01 ?? 0.0);
+      this._foamFleckLastWindSpeed01 = windSpeed01;
+      // Only positive acceleration contributes.
+      const accel = dWind > 0 ? (dWind / safeDt) : 0.0;
+
+      // Gust ramp-up also represents wind increasing in the moment-to-moment feel.
+      // WeatherController.currentGustStrength is a 0..1 envelope with fast attack.
+      const gust = Number.isFinite(weatherController?.currentGustStrength) ? weatherController.currentGustStrength : 0.0;
+      const dGust = gust - (this._foamFleckLastGust ?? 0.0);
+      this._foamFleckLastGust = gust;
+      const gustAccel = dGust > 0 ? (dGust / safeDt) : 0.0;
+
+      // Normalize to 0..1 with tuned max acceleration values.
+      // These are intentionally small so the signal is non-zero during normal gust attacks
+      // and preset transitions.
+      const maxWindAccel = 0.08;
+      const maxGustAccel = 2.5;
+      const accel01 = Math.max(
+        Math.max(0.0, Math.min(1.0, accel / maxWindAccel)),
+        Math.max(0.0, Math.min(1.0, gustAccel / maxGustAccel))
+      );
+      // Smooth to avoid flicker.
+      const k = 1.0 - Math.exp(-safeDt * 6.0);
+      this._foamFleckWindAccel01 = (this._foamFleckWindAccel01 ?? 0.0) + (accel01 - (this._foamFleckWindAccel01 ?? 0.0)) * k;
+    } else {
+      this._foamFleckLastWindSpeed01 = windSpeed01;
+    }
 
     const THREE = window.THREE;
 
@@ -2150,6 +2967,16 @@ _createSnowTexture() {
       const emitCX = (minX + maxX) * 0.5;
       const emitCY = (minY + maxY) * 0.5;
 
+      // Cache the camera-visible world rectangle for view-dependent foam.webp spawning.
+      this._viewMinX = minX;
+      this._viewMaxX = maxX;
+      this._viewMinY = minY;
+      this._viewMaxY = maxY;
+      this._viewSceneX = sceneX;
+      this._viewSceneY = sceneY;
+      this._viewSceneW = sceneW;
+      this._viewSceneH = sceneH;
+
       if (this.rainSystem?.emitter && this.rainSystem.emitterShape) {
         const shape = this.rainSystem.emitterShape;
         if (typeof shape.width === 'number') shape.width = emitW;
@@ -2164,6 +2991,26 @@ _createSnowTexture() {
         if (typeof shape.height === 'number') shape.height = emitH;
         this.snowSystem.emitter.position.x = emitCX;
         this.snowSystem.emitter.position.y = emitCY;
+      }
+
+      // Foam flecks: keep the rendered dot ~pixel-sized across zoom levels.
+      // Billboards use world units for size; to approximate a 1–2px dot in screen space,
+      // scale by 1/zoom (bigger world size when zoomed out, smaller when zoomed in).
+      if (this._foamFleckSystem?.startSize && typeof this._foamFleckSystem.startSize.a === 'number') {
+        const p = window.MapShine?.waterEffect?.params || {};
+        const pxMin = Number.isFinite(p.foamFlecksSizePxMin) ? Math.max(0.05, p.foamFlecksSizePxMin) : 1.8;
+        const pxMax = Number.isFinite(p.foamFlecksSizePxMax) ? Math.max(pxMin, p.foamFlecksSizePxMax) : 3.2;
+        const worldMin = Number.isFinite(p.foamFlecksSizeWorldMin) ? Math.max(0.0, p.foamFlecksSizeWorldMin) : 0.95;
+        const worldMax = Number.isFinite(p.foamFlecksSizeWorldMax) ? Math.max(0.0, p.foamFlecksSizeWorldMax) : 1.55;
+        const invZoom = 1.0 / Math.max(1e-6, zoom);
+        const sizeMin = Math.max(worldMin, pxMin * invZoom);
+        const sizeMax = Math.max(worldMax, pxMax * invZoom);
+        if (sizeMin !== this._foamFleckLastSizeMin || sizeMax !== this._foamFleckLastSizeMax) {
+          this._foamFleckLastSizeMin = sizeMin;
+          this._foamFleckLastSizeMax = sizeMax;
+          this._foamFleckSystem.startSize.a = sizeMin;
+          this._foamFleckSystem.startSize.b = sizeMax;
+        }
       }
     }
 
@@ -2201,6 +3048,20 @@ _createSnowTexture() {
     const waterTex = (waterEffect && typeof waterEffect.getWaterMaskTexture === 'function')
       ? waterEffect.getWaterMaskTexture()
       : (waterEffect?.waterMask || null);
+    const waterDataTex = (waterEffect && typeof waterEffect.getWaterDataTexture === 'function')
+      ? waterEffect.getWaterDataTexture()
+      : null;
+
+    // Provide WaterEffectV2 data + params to the foam fleck emitter/behavior.
+    // This is used for spawn gating ("spawn only where foam is white") and for landed drift
+    // (sample water flow field from WaterData BA channels).
+    if (this._foamFleckEmitter) {
+      this._foamFleckEmitter.setWaterDataTexture(waterDataTex);
+      this._foamFleckEmitter.setFoamParams(waterEffect?.params || null, this._time);
+    }
+    if (this._foamFleckBehavior) {
+      this._foamFleckBehavior.setWaterDataTexture(waterDataTex, this._sceneBounds);
+    }
 
     if (this._waterHitShape) {
       if (waterEnabled && waterTex && waterTex.image) {
@@ -2222,6 +3083,39 @@ _createSnowTexture() {
       }
     }
 
+    // Water-wide foam points: drive foam.webp systems to spawn anywhere in water (not just edges).
+    if (this._waterFoamShape) {
+      if (waterEnabled && waterTex && waterTex.image) {
+        const uuid = waterTex.uuid;
+        if (uuid !== this._waterFoamMaskUuid) {
+          this._waterFoamMaskUuid = uuid;
+          // Hard-edge point cloud: spawn only near the white/black transition of the _Water mask.
+          // Use a modest stride so we get a dense-enough boundary without huge point counts.
+          const stride = Math.max(1, this._waterMaskStride);
+          this._waterFoamPoints = this._generateWaterHardEdgePoints(
+            waterTex,
+            0.5,
+            stride,
+            Math.max(this._waterMaskMaxPoints, 24000)
+          );
+
+          // Reset view-filter cache when the underlying mask changes.
+          this._waterFoamLastViewQU0 = null;
+          this._waterFoamLastViewQU1 = null;
+          this._waterFoamLastViewQV0 = null;
+          this._waterFoamLastViewQV1 = null;
+        }
+
+        // View-dependent spawn: only provide points within the camera-visible rectangle.
+        const viewPts = this._getViewFilteredWaterFoamPoints();
+        this._waterFoamShape.setPoints(viewPts || this._waterFoamPoints);
+      } else if (this._waterFoamMaskUuid !== null) {
+        this._waterFoamMaskUuid = null;
+        this._waterFoamPoints = null;
+        this._waterFoamShape.clearPoints();
+      }
+    }
+
     if (this._shoreFoamShape) {
       if (waterEnabled && waterTex && waterTex.image) {
         const uuid = waterTex.uuid;
@@ -2235,13 +3129,35 @@ _createSnowTexture() {
           );
           this._shoreFoamShape.setPoints(this._shoreFoamPoints);
           if (this._shoreFoamSprayShape) this._shoreFoamSprayShape.setPoints(this._shoreFoamPoints);
+          if (this._foamFleckEmitter) this._foamFleckEmitter.setShorePoints(this._shoreFoamPoints);
         }
       } else if (this._shoreFoamMaskUuid !== null) {
         this._shoreFoamMaskUuid = null;
         this._shoreFoamPoints = null;
         this._shoreFoamShape.clearPoints();
         if (this._shoreFoamSprayShape) this._shoreFoamSprayShape.clearPoints();
+        if (this._foamFleckEmitter) this._foamFleckEmitter.setShorePoints(null);
       }
+    }
+
+    // Interior water points (proxy for floating foam spawn locations)
+    if (waterEnabled && waterTex && waterTex.image) {
+      const uuid = waterTex.uuid;
+      if (uuid !== this._foamFleckInteriorMaskUuid) {
+        this._foamFleckInteriorMaskUuid = uuid;
+        // Larger stride to keep this cheap; we only need a coarse point cloud.
+        this._foamFleckInteriorPoints = this._generateWaterInteriorPoints(
+          waterTex,
+          this._waterMaskThreshold,
+          Math.max(2, this._waterMaskStride * 3),
+          8000
+        );
+        if (this._foamFleckEmitter) this._foamFleckEmitter.setInteriorPoints(this._foamFleckInteriorPoints);
+      }
+    } else if (this._foamFleckInteriorMaskUuid !== null) {
+      this._foamFleckInteriorMaskUuid = null;
+      this._foamFleckInteriorPoints = null;
+      if (this._foamFleckEmitter) this._foamFleckEmitter.setInteriorPoints(null);
     }
 
     // Update roof/outdoors texture and mask state from WeatherController
@@ -2267,6 +3183,12 @@ _createSnowTexture() {
     // - Show rain if: (outdoors AND roof hidden) OR (roof visible - rain lands on roof)
     // - Hide rain if: indoors AND no visible roof overhead
     const roofMaskEnabled = !!roofTex;
+    // Outdoors-only intent:
+    // - If an _Outdoors mask exists, we can enforce it.
+    // - If it does not exist, we treat everything as outdoors (same behavior as
+    //   WeatherController.getRoofMaskIntensity fallback), otherwise the effect
+    //   would never run on maps without an _Outdoors asset.
+    const outdoorsMaskAvailable = !weatherController?.roofMaskData || !!roofTex;
     
     // Get the roof alpha texture from LightingEffect (screen-space overhead tile visibility)
     let roofAlphaTexture = null;
@@ -2302,6 +3224,8 @@ _createSnowTexture() {
 
     this._ensureBatchMaterialPatched(this.rainSystem, '_rainBatchMaterial');
     this._ensureBatchMaterialPatched(this.snowSystem, '_snowBatchMaterial');
+    this._ensureBatchMaterialPatched(this._foamSystem, '_foamBatchMaterial');
+    this._ensureBatchMaterialPatched(this._foamSpraySystem, '_foamSprayBatchMaterial');
 
     if (this.rainSystem) {
         // Minimal per-frame work: just drive emission by precipitation/intensity.
@@ -2567,13 +3491,14 @@ _createSnowTexture() {
     }
 
     if (this._foamSystem) {
-      const foamEnabled = !!(waterEffect?.params?.shoreFoamEnabled);
+      const foamEnabled = (waterEffect?.params?.shoreFoamEnabled ?? true) === true;
       const foamIntensity = waterEffect?.params?.shoreFoamIntensity ?? 1.0;
       const windSpeed = weather.windSpeed || 0;
 
       let foamEmission = 0;
-      if (foamEnabled && waterEnabled && this._shoreFoamPoints && this._shoreFoamPoints.length) {
-        foamEmission = (10 + 60 * windSpeed) * foamIntensity;
+      if (foamEnabled && waterEnabled && this._waterFoamPoints && this._waterFoamPoints.length) {
+        // Keep shoreline-derived tuning but distribute spawns across water.
+        foamEmission = (8 + 45 * windSpeed) * foamIntensity;
       }
 
       if (this._foamSystem.emissionOverTime && typeof this._foamSystem.emissionOverTime.value === 'number') {
@@ -2591,13 +3516,13 @@ _createSnowTexture() {
     }
 
     if (this._foamSpraySystem) {
-      const foamEnabled = !!(waterEffect?.params?.shoreFoamEnabled);
+      const foamEnabled = (waterEffect?.params?.shoreFoamEnabled ?? true) === true;
       const foamIntensity = waterEffect?.params?.shoreFoamIntensity ?? 1.0;
       const windSpeed = weather.windSpeed || 0;
 
       let foamEmission = 0;
-      if (foamEnabled && waterEnabled && this._shoreFoamPoints && this._shoreFoamPoints.length) {
-        foamEmission = (25 + 140 * windSpeed) * foamIntensity;
+      if (foamEnabled && waterEnabled && this._waterFoamPoints && this._waterFoamPoints.length) {
+        foamEmission = (14 + 85 * windSpeed) * foamIntensity;
       }
 
       if (this._foamSpraySystem.emissionOverTime && typeof this._foamSpraySystem.emissionOverTime.value === 'number') {
@@ -2609,6 +3534,139 @@ _createSnowTexture() {
         const w = Math.max(0.0, Math.min(1.0, windSpeed));
         this._foamSprayBehavior.peakOpacity = (0.22 + 0.28 * w) * (0.6 + 0.4 * i) * darknessBrightnessScale;
         this._foamSprayBehavior.peakTime = 0.10;
+      }
+    }
+
+    // Foam flecks: only when we have an outdoors mask (outdoors-only rule) and water+foam are active.
+    if (this._foamFleckSystem) {
+      const flecksEnabled = (waterEffect?.params?.foamFlecksEnabled ?? true) === true;
+      const flecksIntensity = waterEffect?.params?.foamFlecksIntensity ?? 1.0;
+      const maxParticles = waterEffect?.params?.foamFlecksMaxParticles;
+      const floatingStrength = waterEffect?.params?.floatingFoamStrength ?? 0.0;
+
+      const p = waterEffect?.params || {};
+      const debugForceOn = p.foamFlecksDebugForceOn === true;
+      const debugDisableKill = p.foamFlecksDebugDisableKill === true;
+      const debugIgnoreOutdoors = p.foamFlecksDebugIgnoreOutdoors === true;
+
+      // Allow tuning maxParticles from the Water UI.
+      const mp = Number.isFinite(maxParticles) ? Math.max(0, Math.floor(maxParticles)) : 1200;
+      if (this._foamFleckLastMaxParticles !== mp) {
+        this._foamFleckLastMaxParticles = mp;
+        this._foamFleckSystem.maxParticles = mp;
+      }
+
+      // Refresh batch material reference (Quarks may rebuild batches/materials).
+      // We rely on this to enforce the dot texture binding.
+      try {
+        const idx = this.batchRenderer?.systemToBatchIndex?.get(this._foamFleckSystem);
+        const batch = (idx !== undefined) ? this.batchRenderer?.batches?.[idx] : null;
+        if (batch?.material && this._foamFleckBatchMaterial !== batch.material) {
+          this._foamFleckBatchMaterial = batch.material;
+        }
+      } catch (_) {
+      }
+
+      // Decide spawn mix: if floating foam is enabled in the water shader, bias towards interior.
+      if (this._foamFleckEmitter) {
+        const mix = Math.max(0.0, Math.min(1.0, floatingStrength));
+        const overrideRatio = Number.isFinite(p.foamFlecksInteriorRatio) ? p.foamFlecksInteriorRatio : -1.0;
+        if (overrideRatio >= 0.0) {
+          this._foamFleckEmitter.interiorRatio = Math.max(0.0, Math.min(1.0, overrideRatio));
+        } else {
+          this._foamFleckEmitter.interiorRatio = 0.15 + 0.70 * mix;
+        }
+        this._foamFleckEmitter.setWind(weather.windDirection, windSpeed01, this._foamFleckWindAccel01);
+      }
+      if (this._foamFleckBehavior) {
+        this._foamFleckBehavior.setWind(weather.windDirection, windSpeed01);
+        // Live-tune physics from Water UI.
+        const g = Number.isFinite(p.foamFlecksGravity) ? Math.max(0.0, p.foamFlecksGravity) : 950;
+        const ld = Number.isFinite(p.foamFlecksLandedDuration) ? Math.max(0.0, p.foamFlecksLandedDuration) : 1.6;
+        if (this._foamFleckBehavior.gravity !== g) this._foamFleckBehavior.gravity = g;
+        if (this._foamFleckBehavior.landedDuration !== ld) this._foamFleckBehavior.landedDuration = ld;
+      }
+
+      // Debug: allow disabling kill volume to prove/disprove kill-culling.
+      if (this._foamFleckKillBehavior) {
+        this._foamFleckKillBehavior.enabled = !debugDisableKill;
+      }
+
+      // CRITICAL: Foam flecks use local-space particle positions (relative to emitter).
+      // The kill behavior converts local->world using emitter.matrixWorld, but our render
+      // pipeline doesn't guarantee the scene graph updates matrices before Quarks updates.
+      // Force the emitter matrix to be correct so world-space kill bounds work.
+      try {
+        this._foamFleckSystem.emitter.updateMatrixWorld(true);
+      } catch (_) {
+      }
+
+      // Live-tune lifetime (mutate existing IntervalValue).
+      if (this._foamFleckSystem.startLife && typeof this._foamFleckSystem.startLife.a === 'number') {
+        const lifeMin = Number.isFinite(p.foamFlecksLifeMin) ? Math.max(0.01, p.foamFlecksLifeMin) : 0.6;
+        const lifeMax = Number.isFinite(p.foamFlecksLifeMax) ? Math.max(lifeMin, p.foamFlecksLifeMax) : 1.2;
+        this._foamFleckSystem.startLife.a = lifeMin;
+        this._foamFleckSystem.startLife.b = lifeMax;
+      }
+
+      const accel01 = this._foamFleckWindAccel01 || 0.0;
+      const gust01 = Number.isFinite(weatherController?.currentGustStrength)
+        ? Math.max(0.0, Math.min(1.0, weatherController.currentGustStrength))
+        : 0.0;
+      // Combined "wind is increasing" signal: use accel spikes AND gust envelope.
+      // This keeps flecks visible during an active gust even if accel01 is momentarily small.
+      const gustLiftScale = Number.isFinite(p.foamFlecksGustLiftScale) ? Math.max(0.0, p.foamFlecksGustLiftScale) : 0.25;
+      const lift01 = Math.max(accel01, gust01 * gustLiftScale);
+      const hasSources = !!(
+        (this._shoreFoamPoints && this._shoreFoamPoints.length >= 4) ||
+        (this._foamFleckInteriorPoints && this._foamFleckInteriorPoints.length >= 2)
+      );
+
+      let emission = 0;
+      // Note: this intentionally triggers only when wind is increasing.
+      // We keep a very small threshold so it is visible during normal preset transitions.
+      const base = Number.isFinite(p.foamFlecksEmissionBase) ? Math.max(0.0, p.foamFlecksEmissionBase) : 60;
+      const liftScale = Number.isFinite(p.foamFlecksEmissionLiftScale) ? Math.max(0.0, p.foamFlecksEmissionLiftScale) : 2400;
+      const liftMin = Number.isFinite(p.foamFlecksEmissionLiftMin) ? Math.max(0.0, p.foamFlecksEmissionLiftMin) : 0.01;
+
+      if ((debugForceOn || flecksEnabled) && (debugForceOn || ((debugIgnoreOutdoors || outdoorsMaskAvailable) && waterEnabled && hasSources && lift01 > liftMin))) {
+        const i = Math.max(0.0, Math.min(6.0, flecksIntensity));
+        // Quarks spawns roughly: emissionPerSecond * dt. With dt ~0.02, small values are effectively invisible.
+        // Use a higher baseline and a linear accel term so normal gust attacks produce visible flecks.
+        const accelTerm = liftScale * (debugForceOn ? 1.0 : lift01);
+        const windTerm = 0.35 + 1.65 * windSpeed01;
+        const intensityTerm = 0.25 + 0.75 * (i / 6.0);
+        emission = (base + accelTerm) * windTerm * intensityTerm;
+      }
+
+      if (this._foamFleckSystem.emissionOverTime && typeof this._foamFleckSystem.emissionOverTime.value === 'number') {
+        this._foamFleckSystem.emissionOverTime.value = emission;
+      }
+
+      // Ensure the SpriteBatch material for flecks actually uses the dot texture.
+      // BatchedRenderer may merge/clone materials; enforce by setting common uniforms.
+      if (this._foamFleckBatchMaterial && this.foamFleckTexture) {
+        const m = this._foamFleckBatchMaterial;
+        try {
+          if (m.uniforms?.map) m.uniforms.map.value = this.foamFleckTexture;
+          if (m.uniforms?.tMap) m.uniforms.tMap.value = this.foamFleckTexture;
+          if (m.uniforms?.uMap) m.uniforms.uMap.value = this.foamFleckTexture;
+          // Some Quarks material variants still use the standard material.map field.
+          m.map = this.foamFleckTexture;
+        } catch (_) {
+        }
+      }
+
+      // Couple brightness to darkness like other weather so dots aren't self-illuminated.
+      if (this._foamFleckMaterial) {
+        const op = Number.isFinite(p.foamFlecksOpacity) ? Math.max(0.0, p.foamFlecksOpacity) : 1.0;
+        this._foamFleckMaterial.opacity = op * darknessBrightnessScale;
+        this._foamFleckMaterial.needsUpdate = true;
+      }
+      if (this._foamFleckSystem.material) {
+        const op = Number.isFinite(p.foamFlecksOpacity) ? Math.max(0.0, p.foamFlecksOpacity) : 1.0;
+        this._foamFleckSystem.material.opacity = op * darknessBrightnessScale;
+        this._foamFleckSystem.material.needsUpdate = true;
       }
     }
 
@@ -2637,6 +3695,7 @@ _createSnowTexture() {
       u.uWaterMaskEnabled.value = (waterEnabled && !!waterTex) ? 1.0 : 0.0;
       u.uWaterMaskThreshold.value = this._waterMaskThreshold;
       u.uWaterMask.value = waterTex;
+      if (u.uWaterMaskFlipY) u.uWaterMaskFlipY.value = (waterTex && waterTex.flipY === true) ? 1.0 : 0.0;
     }
 
     if (this._foamBatchMaterial && this._foamBatchMaterial.userData && this._foamBatchMaterial.userData.roofUniforms) {
@@ -2651,6 +3710,23 @@ _createSnowTexture() {
       u.uWaterMaskEnabled.value = (waterEnabled && !!waterTex) ? 1.0 : 0.0;
       u.uWaterMaskThreshold.value = this._waterMaskThreshold;
       u.uWaterMask.value = waterTex;
+      if (u.uWaterMaskFlipY) u.uWaterMaskFlipY.value = (waterTex && waterTex.flipY === true) ? 1.0 : 0.0;
+
+      // Quarks may rebuild ShaderMaterial.uniforms; also drive the live ShaderMaterial uniforms directly.
+      const smu = this._foamBatchMaterial.uniforms;
+      if (smu) {
+        if (smu.uRoofMaskEnabled) smu.uRoofMaskEnabled.value = u.uRoofMaskEnabled.value;
+        if (smu.uHasRoofAlphaMap) smu.uHasRoofAlphaMap.value = u.uHasRoofAlphaMap.value;
+        if (smu.uSceneBounds && u.uSceneBounds) smu.uSceneBounds.value = u.uSceneBounds.value;
+        if (smu.uRoofMap) smu.uRoofMap.value = u.uRoofMap.value;
+        if (smu.uRoofAlphaMap) smu.uRoofAlphaMap.value = u.uRoofAlphaMap.value;
+        if (smu.uScreenSize && u.uScreenSize) smu.uScreenSize.value = u.uScreenSize.value;
+
+        if (smu.uWaterMaskEnabled) smu.uWaterMaskEnabled.value = u.uWaterMaskEnabled.value;
+        if (smu.uWaterMaskThreshold) smu.uWaterMaskThreshold.value = u.uWaterMaskThreshold.value;
+        if (smu.uWaterMask) smu.uWaterMask.value = u.uWaterMask.value;
+        if (smu.uWaterMaskFlipY && u.uWaterMaskFlipY) smu.uWaterMaskFlipY.value = u.uWaterMaskFlipY.value;
+      }
     }
 
     if (this._foamSprayMaterial && this._foamSprayMaterial.userData && this._foamSprayMaterial.userData.roofUniforms) {
@@ -2665,6 +3741,7 @@ _createSnowTexture() {
       u.uWaterMaskEnabled.value = (waterEnabled && !!waterTex) ? 1.0 : 0.0;
       u.uWaterMaskThreshold.value = this._waterMaskThreshold;
       u.uWaterMask.value = waterTex;
+      if (u.uWaterMaskFlipY) u.uWaterMaskFlipY.value = (waterTex && waterTex.flipY === true) ? 1.0 : 0.0;
     }
 
     if (this._foamSprayBatchMaterial && this._foamSprayBatchMaterial.userData && this._foamSprayBatchMaterial.userData.roofUniforms) {
@@ -2679,6 +3756,23 @@ _createSnowTexture() {
       u.uWaterMaskEnabled.value = (waterEnabled && !!waterTex) ? 1.0 : 0.0;
       u.uWaterMaskThreshold.value = this._waterMaskThreshold;
       u.uWaterMask.value = waterTex;
+      if (u.uWaterMaskFlipY) u.uWaterMaskFlipY.value = (waterTex && waterTex.flipY === true) ? 1.0 : 0.0;
+
+      // Quarks may rebuild ShaderMaterial.uniforms; also drive the live ShaderMaterial uniforms directly.
+      const smu = this._foamSprayBatchMaterial.uniforms;
+      if (smu) {
+        if (smu.uRoofMaskEnabled) smu.uRoofMaskEnabled.value = u.uRoofMaskEnabled.value;
+        if (smu.uHasRoofAlphaMap) smu.uHasRoofAlphaMap.value = u.uHasRoofAlphaMap.value;
+        if (smu.uSceneBounds && u.uSceneBounds) smu.uSceneBounds.value = u.uSceneBounds.value;
+        if (smu.uRoofMap) smu.uRoofMap.value = u.uRoofMap.value;
+        if (smu.uRoofAlphaMap) smu.uRoofAlphaMap.value = u.uRoofAlphaMap.value;
+        if (smu.uScreenSize && u.uScreenSize) smu.uScreenSize.value = u.uScreenSize.value;
+
+        if (smu.uWaterMaskEnabled) smu.uWaterMaskEnabled.value = u.uWaterMaskEnabled.value;
+        if (smu.uWaterMaskThreshold) smu.uWaterMaskThreshold.value = u.uWaterMaskThreshold.value;
+        if (smu.uWaterMask) smu.uWaterMask.value = u.uWaterMask.value;
+        if (smu.uWaterMaskFlipY && u.uWaterMaskFlipY) smu.uWaterMaskFlipY.value = u.uWaterMaskFlipY.value;
+      }
     }
 
     if (this.snowSystem) {
@@ -2869,10 +3963,194 @@ _createSnowTexture() {
       if (this._foamSpraySystem.emitter?.parent) this._foamSpraySystem.emitter.parent.remove(this._foamSpraySystem.emitter);
     }
 
+    if (this._foamFleckSystem) {
+      this.batchRenderer.deleteSystem(this._foamFleckSystem);
+      if (this._foamFleckSystem.emitter?.parent) this._foamFleckSystem.emitter.parent.remove(this._foamFleckSystem.emitter);
+    }
+
     if (this.rainTexture) this.rainTexture.dispose();
     if (this.snowTexture) this.snowTexture.dispose();
     if (this.splashTexture) this.splashTexture.dispose();
     if (this.foamTexture) this.foamTexture.dispose();
+    if (this.foamFleckTexture) this.foamFleckTexture.dispose();
+  }
+
+  _generateWaterHardEdgePoints(maskTexture, edgeThreshold = 0.5, stride = 2, maxPoints = 24000) {
+    const image = maskTexture?.image;
+    if (!image) return null;
+
+    const w = image.width;
+    const h = image.height;
+    if (!w || !h) return null;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    try {
+      ctx.drawImage(image, 0, 0);
+    } catch (e) {
+      return null;
+    }
+
+    let img;
+    try {
+      img = ctx.getImageData(0, 0, w, h);
+    } catch (e) {
+      return null;
+    }
+
+    const data = img.data;
+
+    // Reservoir sampling so we get a uniform subset of boundary pixels.
+    const max = Math.max(1, maxPoints | 0);
+    const out = new Float32Array(max * 2);
+    let filled = 0;
+    let eligible = 0;
+
+    const s = Math.max(1, stride | 0);
+    const sample = (x, y) => {
+      const ix = (y * w + x) * 4;
+      const r = data[ix] / 255;
+      const g = data[ix + 1] / 255;
+      const b = data[ix + 2] / 255;
+      const a = data[ix + 3] / 255;
+      return (0.299 * r + 0.587 * g + 0.114 * b) * a;
+    };
+
+    for (let y = 1; y < h - 1; y += s) {
+      for (let x = 1; x < w - 1; x += s) {
+        const v = sample(x, y);
+        // Spawn on the boundary but stay on the "inside" (water/white) side.
+        if (v < edgeThreshold) continue;
+
+        const left = sample(x - 1, y);
+        const right = sample(x + 1, y);
+        const up = sample(x, y - 1);
+        const down = sample(x, y + 1);
+
+        const isBoundary = (left < edgeThreshold) || (right < edgeThreshold) || (up < edgeThreshold) || (down < edgeThreshold);
+        if (!isBoundary) continue;
+
+        const u = x / w;
+        const vv = y / h;
+
+        if (filled < max) {
+          const o = filled * 2;
+          out[o] = u;
+          out[o + 1] = vv;
+          filled++;
+        } else {
+          const j = Math.floor(Math.random() * (eligible + 1));
+          if (j < max) {
+            const o = j * 2;
+            out[o] = u;
+            out[o + 1] = vv;
+          }
+        }
+        eligible++;
+      }
+    }
+
+    if (filled < 1) return null;
+    if (filled === max) return out;
+    const trimmed = new Float32Array(filled * 2);
+    trimmed.set(out.subarray(0, filled * 2));
+    return trimmed;
+  }
+
+  _getViewFilteredWaterFoamPoints() {
+    const pts = this._waterFoamPoints;
+    if (!pts || pts.length < 2) return null;
+
+    const minX = this._viewMinX;
+    const maxX = this._viewMaxX;
+    const minY = this._viewMinY;
+    const maxY = this._viewMaxY;
+    const sceneX = this._viewSceneX;
+    const sceneY = this._viewSceneY;
+    const sceneW = this._viewSceneW;
+    const sceneH = this._viewSceneH;
+
+    if (
+      !Number.isFinite(minX) || !Number.isFinite(maxX) ||
+      !Number.isFinite(minY) || !Number.isFinite(maxY) ||
+      !Number.isFinite(sceneX) || !Number.isFinite(sceneY) ||
+      !Number.isFinite(sceneW) || !Number.isFinite(sceneH) ||
+      sceneW <= 1e-6 || sceneH <= 1e-6
+    ) {
+      return null;
+    }
+
+    // Convert the visible WORLD rect (Y-up) to mask UVs (u: left->right, v: top->bottom).
+    let u0 = (minX - sceneX) / sceneW;
+    let u1 = (maxX - sceneX) / sceneW;
+    const vTop = 1.0 - ((maxY - sceneY) / sceneH);
+    const vBottom = 1.0 - ((minY - sceneY) / sceneH);
+    let v0 = Math.min(vTop, vBottom);
+    let v1 = Math.max(vTop, vBottom);
+
+    // Clamp to texture UV range.
+    u0 = Math.max(0.0, Math.min(1.0, u0));
+    u1 = Math.max(0.0, Math.min(1.0, u1));
+    v0 = Math.max(0.0, Math.min(1.0, v0));
+    v1 = Math.max(0.0, Math.min(1.0, v1));
+
+    // Quantize to avoid re-filtering every single frame for tiny camera drift.
+    const q = 256;
+    const qU0 = Math.floor(u0 * q);
+    const qU1 = Math.floor(u1 * q);
+    const qV0 = Math.floor(v0 * q);
+    const qV1 = Math.floor(v1 * q);
+    if (
+      qU0 === this._waterFoamLastViewQU0 &&
+      qU1 === this._waterFoamLastViewQU1 &&
+      qV0 === this._waterFoamLastViewQV0 &&
+      qV1 === this._waterFoamLastViewQV1
+    ) {
+      return (this._waterFoamViewBuffer && this._waterFoamViewCount > 0)
+        ? this._waterFoamViewBuffer.subarray(0, this._waterFoamViewCount * 2)
+        : null;
+    }
+    this._waterFoamLastViewQU0 = qU0;
+    this._waterFoamLastViewQU1 = qU1;
+    this._waterFoamLastViewQV0 = qV0;
+    this._waterFoamLastViewQV1 = qV1;
+
+    const maxPoints = Math.max(1, Math.min(this._waterMaskMaxPoints, 24000) | 0);
+    if (!this._waterFoamViewBuffer || this._waterFoamViewBuffer.length < maxPoints * 2) {
+      this._waterFoamViewBuffer = new Float32Array(maxPoints * 2);
+    }
+
+    const count = Math.floor(pts.length / 2);
+    let filled = 0;
+    let eligible = 0;
+    for (let i = 0; i < count; i++) {
+      const o = i * 2;
+      const u = pts[o];
+      const v = pts[o + 1];
+      if (u < u0 || u > u1 || v < v0 || v > v1) continue;
+
+      if (filled < maxPoints) {
+        const outO = filled * 2;
+        this._waterFoamViewBuffer[outO] = u;
+        this._waterFoamViewBuffer[outO + 1] = v;
+        filled++;
+      } else {
+        const j = Math.floor(Math.random() * (eligible + 1));
+        if (j < maxPoints) {
+          const outO = j * 2;
+          this._waterFoamViewBuffer[outO] = u;
+          this._waterFoamViewBuffer[outO + 1] = v;
+        }
+      }
+      eligible++;
+    }
+
+    this._waterFoamViewCount = filled;
+    return filled > 0 ? this._waterFoamViewBuffer.subarray(0, filled * 2) : null;
   }
 
   _generateWaterSplashPoints(maskTexture, threshold = 0.15, stride = 2, maxPoints = 20000) {
@@ -2903,7 +4181,13 @@ _createSnowTexture() {
     }
 
     const data = img.data;
-    const pts = [];
+
+    // Reservoir sampling so the point cloud isn't biased towards the top-left
+    // of the image when we cap at maxPoints.
+    const max = Math.max(1, maxPoints | 0);
+    const out = new Float32Array(max * 2);
+    let filled = 0;
+    let seen = 0;
 
     const s = Math.max(1, stride | 0);
     for (let y = 0; y < h; y += s) {
@@ -2911,19 +4195,32 @@ _createSnowTexture() {
       for (let x = 0; x < w; x += s) {
         const i = (row + x) * 4;
         const r = data[i] / 255;
-        if (r >= threshold) {
-          pts.push(x / w);
-          pts.push(y / h);
-          if (pts.length >= maxPoints * 2) {
-            y = h;
-            break;
+        if (r < threshold) continue;
+
+        const u = x / w;
+        const v = y / h;
+        if (filled < max) {
+          const o = filled * 2;
+          out[o] = u;
+          out[o + 1] = v;
+          filled++;
+        } else {
+          const j = Math.floor(Math.random() * (seen + 1));
+          if (j < max) {
+            const o = j * 2;
+            out[o] = u;
+            out[o + 1] = v;
           }
         }
+        seen++;
       }
     }
 
-    if (pts.length < 2) return null;
-    return new Float32Array(pts);
+    if (filled < 1) return null;
+    if (filled === max) return out;
+    const trimmed = new Float32Array(filled * 2);
+    trimmed.set(out.subarray(0, filled * 2));
+    return trimmed;
   }
 
   _generateWaterEdgePoints(maskTexture, threshold = 0.15, stride = 2, maxPoints = 12000) {
@@ -2954,7 +4251,13 @@ _createSnowTexture() {
     }
 
     const data = img.data;
-    const pts = [];
+
+    // Reservoir sampling so the capped point cloud represents the full mask,
+    // not just the top-left scan order.
+    const max = Math.max(1, maxPoints | 0);
+    const out = new Float32Array(max * 4);
+    let filled = 0;
+    let seen = 0;
 
     const s = Math.max(1, stride | 0);
     const sample = (x, y) => {
@@ -2985,19 +4288,111 @@ _createSnowTexture() {
           ny = 0;
         }
 
-        pts.push(x / w);
-        pts.push(y / h);
-        pts.push(nx);
-        pts.push(-ny);
+        const u = x / w;
+        const v = y / h;
 
-        if (pts.length >= maxPoints * 4) {
-          y = h;
-          break;
+        if (filled < max) {
+          const o = filled * 4;
+          out[o] = u;
+          out[o + 1] = v;
+          out[o + 2] = nx;
+          out[o + 3] = -ny;
+          filled++;
+        } else {
+          const j = Math.floor(Math.random() * (seen + 1));
+          if (j < max) {
+            const o = j * 4;
+            out[o] = u;
+            out[o + 1] = v;
+            out[o + 2] = nx;
+            out[o + 3] = -ny;
+          }
         }
+        seen++;
       }
     }
 
-    if (pts.length < 4) return null;
-    return new Float32Array(pts);
+    if (filled < 1) return null;
+    if (filled === max) return out;
+    const trimmed = new Float32Array(filled * 4);
+    trimmed.set(out.subarray(0, filled * 4));
+    return trimmed;
+  }
+
+  _generateWaterInteriorPoints(maskTexture, threshold = 0.15, stride = 6, maxPoints = 8000) {
+    const image = maskTexture?.image;
+    if (!image) return null;
+
+    const w = image.width;
+    const h = image.height;
+    if (!w || !h) return null;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    try {
+      ctx.drawImage(image, 0, 0);
+    } catch (e) {
+      return null;
+    }
+
+    let img;
+    try {
+      img = ctx.getImageData(0, 0, w, h);
+    } catch (e) {
+      return null;
+    }
+
+    const data = img.data;
+
+    // Reservoir sampling so capped interior points represent the full mask.
+    const max = Math.max(1, maxPoints | 0);
+    const out = new Float32Array(max * 2);
+    let filled = 0;
+    let seen = 0;
+
+    const s = Math.max(1, stride | 0);
+    const sample = (x, y) => {
+      const ix = (y * w + x) * 4;
+      return data[ix] / 255;
+    };
+
+    // Interior = water pixel with all 4 neighbors also water.
+    for (let y = 1; y < h - 1; y += s) {
+      for (let x = 1; x < w - 1; x += s) {
+        const r = sample(x, y);
+        if (r < threshold) continue;
+        if (sample(x - 1, y) < threshold) continue;
+        if (sample(x + 1, y) < threshold) continue;
+        if (sample(x, y - 1) < threshold) continue;
+        if (sample(x, y + 1) < threshold) continue;
+
+        const u = x / w;
+        const v = y / h;
+        if (filled < max) {
+          const o = filled * 2;
+          out[o] = u;
+          out[o + 1] = v;
+          filled++;
+        } else {
+          const j = Math.floor(Math.random() * (seen + 1));
+          if (j < max) {
+            const o = j * 2;
+            out[o] = u;
+            out[o + 1] = v;
+          }
+        }
+        seen++;
+      }
+    }
+
+    if (filled < 1) return null;
+    if (filled === max) return out;
+    const trimmed = new Float32Array(filled * 2);
+    trimmed.set(out.subarray(0, filled * 2));
+    return trimmed;
   }
 }

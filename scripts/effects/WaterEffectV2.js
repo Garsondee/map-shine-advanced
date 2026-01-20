@@ -30,6 +30,40 @@ export class WaterEffectV2 extends EffectBase {
       waveStrength: 0.57,
       distortionStrengthPx: 16.93,
 
+      // Distortion masking (shader-side; does not rebuild water data)
+      distortionEdgeCenter: 0.5,
+      distortionEdgeFeather: 0.02,
+      distortionEdgeGamma: 1.0,
+      distortionShoreRemapLo: 0.0,
+      distortionShoreRemapHi: 1.0,
+      distortionShorePow: 1.0,
+      distortionShoreMin: 0.35,
+
+      // Rain-hit surface distortion (precipitation driven)
+      rainDistortionEnabled: true,
+      rainDistortionUseWeather: true,
+      rainDistortionPrecipitationOverride: 0.0,
+      rainDistortionSplit: 0.5,
+      rainDistortionBlend: 0.08,
+      rainDistortionGlobalStrength: 1.0,
+
+      rainIndoorDampingEnabled: true,
+      rainIndoorDampingStrength: 1.0,
+
+      rainRippleStrengthPx: 3.0,
+      rainRippleScale: 220.0,
+      rainRippleSpeed: 1.2,
+      rainRippleDensity: 0.35,
+      rainRippleSharpness: 1.5,
+
+      rainStormStrengthPx: 14.0,
+      rainStormScale: 900.0,
+      rainStormSpeed: 1.8,
+      rainStormCurl: 1.0,
+
+      rainMaxCombinedStrengthPx: 24.0,
+
+      lockWaveTravelToWind: true,
       waveDirOffsetDeg: 0.0,
       waveAppearanceOffsetDeg: 0.0,
       advectionDirOffsetDeg: 0.0,
@@ -68,19 +102,41 @@ export class WaterEffectV2 extends EffectBase {
       floatingFoamCoverage: 0.2,
       floatingFoamScale: 149.5,
 
-      // GPU foam spray / tear-off
+      // foam.webp particle systems (WeatherParticles)
+      shoreFoamEnabled: true,
+      shoreFoamIntensity: 1.0,
+
+      foamPlumeEnabled: true,
+      foamPlumeSpawnMode: 'waterEdge',
+      foamPlumeMaxParticles: 2500,
+      foamPlumeEmissionBase: 8.0,
+      foamPlumeEmissionWindScale: 45.0,
+      foamPlumeLifeMin: 0.6,
+      foamPlumeLifeMax: 1.4,
+      foamPlumeSizeMin: 40.0,
+      foamPlumeSizeMax: 90.0,
+      foamPlumeOpacity: 1.0,
+      foamPlumePeakOpacity: 0.65,
+      foamPlumePeakTime: 0.18,
+      foamPlumeStartScale: 0.5,
+      foamPlumeMaxScale: 2.2,
+      foamPlumeSpinMin: -0.18,
+      foamPlumeSpinMax: 0.18,
+      foamPlumeUseAdditive: false,
+      foamPlumeColor: { r: 1.0, g: 1.0, b: 1.0 },
+
+      // Large-scale noise masking for foam.webp particles (break up / intermittent reveal)
+      foamParticleNoiseEnabled: true,
+      foamParticleNoiseStrength: 1.0,
+      foamParticleNoiseScale: 6.0,
+      foamParticleNoiseSpeed: 0.35,
+      foamParticleNoiseCoverage: 0.55,
+      foamParticleNoiseSoftness: 0.08,
+      foamParticleNoiseAttempts: 6,
+
+      // GPU foam flecks (high-frequency spray dots)
       foamFlecksEnabled: true,
       foamFlecksIntensity: 1.0,
-      foamTearEnabled: true,
-      foamTearStrength: 0.65,
-      foamTearScale: 750.0,
-      foamTearSpeed: 1.25,
-      foamTearDrift: 0.02,
-
-      // Detached foam turbulence (chunks blown around)
-      detachedTurbStrength: 0.35,
-      detachedTurbScale: 0.25,
-      detachedTurbSpeed: 0.35,
 
       sandEnabled: true,
       sandIntensity: 0.5,
@@ -147,6 +203,10 @@ export class WaterEffectV2 extends EffectBase {
     this._lastTimeValue = null;
     this._timeStallFrames = 0;
     this._timeStallLogged = false;
+
+    this._lastDefinesKey = null;
+    this._lastWaterDataTexW = 0;
+    this._lastWaterDataTexH = 0;
   }
 
   static getControlSchema() {
@@ -175,6 +235,7 @@ export class WaterEffectV2 extends EffectBase {
             'waveSpeed',
             'waveStrength',
             'distortionStrengthPx',
+            'lockWaveTravelToWind',
             'waveDirOffsetDeg',
             'waveAppearanceOffsetDeg',
             'advectionDirOffsetDeg',
@@ -230,8 +291,89 @@ export class WaterEffectV2 extends EffectBase {
             'sandAdditive',
             'debugView'
           ]
-        }
-        ,
+        },
+        {
+          name: 'rain-distortion',
+          label: 'Rain Distortion (Precipitation)',
+          type: 'inline',
+          separator: true,
+          parameters: [
+            'rainDistortionEnabled',
+            'rainDistortionUseWeather',
+            'rainDistortionPrecipitationOverride',
+            'rainDistortionSplit',
+            'rainDistortionBlend',
+            'rainDistortionGlobalStrength',
+
+            'rainIndoorDampingEnabled',
+            'rainIndoorDampingStrength',
+
+            'rainRippleStrengthPx',
+            'rainRippleScale',
+            'rainRippleSpeed',
+            'rainRippleDensity',
+            'rainRippleSharpness',
+
+            'rainStormStrengthPx',
+            'rainStormScale',
+            'rainStormSpeed',
+            'rainStormCurl',
+
+            'rainMaxCombinedStrengthPx'
+          ]
+        },
+        {
+          name: 'distortion-masking',
+          label: 'Distortion Masking',
+          type: 'inline',
+          separator: true,
+          parameters: [
+            'distortionEdgeCenter',
+            'distortionEdgeFeather',
+            'distortionEdgeGamma',
+            'distortionShoreRemapLo',
+            'distortionShoreRemapHi',
+            'distortionShorePow',
+            'distortionShoreMin',
+          ]
+        },
+        {
+          name: 'foam-particles',
+          label: 'Foam Particles (foam.webp)',
+          type: 'inline',
+          separator: true,
+          parameters: [
+            'shoreFoamEnabled',
+            'shoreFoamIntensity',
+
+            'foamPlumeEnabled',
+            'foamPlumeSpawnMode',
+            'foamPlumeMaxParticles',
+            'foamPlumeEmissionBase',
+            'foamPlumeEmissionWindScale',
+            'foamPlumeLifeMin',
+            'foamPlumeLifeMax',
+            'foamPlumeSizeMin',
+            'foamPlumeSizeMax',
+            'foamPlumeOpacity',
+            'foamPlumePeakOpacity',
+            'foamPlumePeakTime',
+            'foamPlumeStartScale',
+            'foamPlumeMaxScale',
+            'foamPlumeSpinMin',
+            'foamPlumeSpinMax',
+            'foamPlumeUseAdditive',
+            'foamPlumeColor',
+
+            'foamParticleNoiseEnabled',
+            'foamParticleNoiseStrength',
+            'foamParticleNoiseScale',
+            'foamParticleNoiseSpeed',
+            'foamParticleNoiseCoverage',
+            'foamParticleNoiseSoftness',
+            'foamParticleNoiseAttempts'
+          ]
+        },
         {
           name: 'foam-spray',
           label: 'Foam Spray (GPU)',
@@ -239,15 +381,7 @@ export class WaterEffectV2 extends EffectBase {
           separator: true,
           parameters: [
             'foamFlecksEnabled',
-            'foamFlecksIntensity',
-            'foamTearEnabled',
-            'foamTearStrength',
-            'foamTearScale',
-            'foamTearSpeed',
-            'foamTearDrift',
-            'detachedTurbStrength',
-            'detachedTurbScale',
-            'detachedTurbSpeed'
+            'foamFlecksIntensity'
           ]
         }
       ],
@@ -282,8 +416,40 @@ export class WaterEffectV2 extends EffectBase {
         waveStrength: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.57 },
         distortionStrengthPx: { type: 'slider', min: 0, max: 64.0, step: 0.01, default: 16.93 },
 
-        waveDirOffsetDeg: { type: 'slider', label: 'Wave Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
-        waveAppearanceOffsetDeg: { type: 'slider', label: 'Wave Appearance Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
+        distortionEdgeCenter: { type: 'slider', label: 'Edge Center', min: 0.0, max: 1.0, step: 0.001, default: 0.5 },
+        distortionEdgeFeather: { type: 'slider', label: 'Edge Feather', min: 0.0, max: 0.2, step: 0.001, default: 0.02 },
+        distortionEdgeGamma: { type: 'slider', label: 'Edge Gamma', min: 0.05, max: 4.0, step: 0.01, default: 1.0 },
+        distortionShoreRemapLo: { type: 'slider', label: 'Shore Start', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
+        distortionShoreRemapHi: { type: 'slider', label: 'Shore End', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
+        distortionShorePow: { type: 'slider', label: 'Shore Curve', min: 0.05, max: 6.0, step: 0.01, default: 1.0 },
+        distortionShoreMin: { type: 'slider', label: 'Shore Min', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
+
+        rainDistortionEnabled: { type: 'boolean', label: 'Enabled', default: true },
+        rainDistortionUseWeather: { type: 'boolean', label: 'Use Weather Precipitation', default: true },
+        rainDistortionPrecipitationOverride: { type: 'slider', label: 'Precipitation Override', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
+        rainDistortionSplit: { type: 'slider', label: 'Ripple→Storm Split', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
+        rainDistortionBlend: { type: 'slider', label: 'Blend Width', min: 0.0, max: 0.25, step: 0.005, default: 0.08 },
+        rainDistortionGlobalStrength: { type: 'slider', label: 'Global Strength', min: 0.0, max: 2.0, step: 0.01, default: 1.0 },
+
+        rainIndoorDampingEnabled: { type: 'boolean', label: 'Dampen Indoors (_Outdoors)', default: true },
+        rainIndoorDampingStrength: { type: 'slider', label: 'Indoor Damp Strength', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
+
+        rainRippleStrengthPx: { type: 'slider', label: 'Ripples Strength (px)', min: 0.0, max: 64.0, step: 0.01, default: 3.0 },
+        rainRippleScale: { type: 'slider', label: 'Ripples Scale', min: 1.0, max: 2000.0, step: 1.0, default: 220.0 },
+        rainRippleSpeed: { type: 'slider', label: 'Ripples Speed', min: 0.0, max: 5.0, step: 0.01, default: 1.2 },
+        rainRippleDensity: { type: 'slider', label: 'Ripples Density', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
+        rainRippleSharpness: { type: 'slider', label: 'Ripples Sharpness', min: 0.1, max: 5.0, step: 0.01, default: 1.5 },
+
+        rainStormStrengthPx: { type: 'slider', label: 'Storm Strength (px)', min: 0.0, max: 64.0, step: 0.01, default: 14.0 },
+        rainStormScale: { type: 'slider', label: 'Storm Scale', min: 1.0, max: 2000.0, step: 1.0, default: 900.0 },
+        rainStormSpeed: { type: 'slider', label: 'Storm Speed', min: 0.0, max: 5.0, step: 0.01, default: 1.8 },
+        rainStormCurl: { type: 'slider', label: 'Storm Curl', min: 0.0, max: 3.0, step: 0.01, default: 1.0 },
+
+        rainMaxCombinedStrengthPx: { type: 'slider', label: 'Max Combined (px)', min: 0.0, max: 64.0, step: 0.1, default: 24.0 },
+
+        lockWaveTravelToWind: { type: 'boolean', label: 'Lock Wave Travel To Wind', default: true },
+        waveDirOffsetDeg: { type: 'slider', label: 'Wave Travel Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
+        waveAppearanceOffsetDeg: { type: 'slider', label: 'Wave Facing Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
         advectionDirOffsetDeg: { type: 'slider', label: 'Advection Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
         advectionSpeed: { type: 'slider', label: 'Advection Speed', min: 0.0, max: 4.0, step: 0.01, default: 0.1 },
         windDirResponsiveness: { type: 'slider', label: 'Wind Dir Responsiveness', min: 0.1, max: 10.0, step: 0.1, default: 3.8 },
@@ -319,17 +485,47 @@ export class WaterEffectV2 extends EffectBase {
         floatingFoamCoverage: { type: 'slider', label: 'Floating Foam Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.2 },
         floatingFoamScale: { type: 'slider', label: 'Floating Foam Scale', min: 0.1, max: 400.0, step: 0.5, default: 149.5 },
 
+        shoreFoamEnabled: { type: 'boolean', label: 'Foam Particles Enabled', default: true },
+        shoreFoamIntensity: { type: 'slider', label: 'Foam Particles Intensity', min: 0.0, max: 6.0, step: 0.01, default: 1.0 },
+
+        foamPlumeEnabled: { type: 'boolean', label: 'Plume Enabled', default: true },
+        foamPlumeSpawnMode: {
+          type: 'list',
+          label: 'Plume Spawn Mode',
+          options: {
+            WaterEdge: 'waterEdge',
+            Shoreline: 'shoreline'
+          },
+          default: 'waterEdge'
+        },
+        
+        foamPlumeMaxParticles: { type: 'slider', label: 'Plume Max Particles', min: 0, max: 20000, step: 1, default: 2500 },
+        foamPlumeEmissionBase: { type: 'slider', label: 'Plume Emission Base', min: 0.0, max: 500.0, step: 0.1, default: 8.0 },
+        foamPlumeEmissionWindScale: { type: 'slider', label: 'Plume Emission Wind Scale', min: 0.0, max: 1500.0, step: 0.1, default: 45.0 },
+        foamPlumeLifeMin: { type: 'slider', label: 'Plume Life Min', min: 0.01, max: 10.0, step: 0.01, default: 0.6 },
+        foamPlumeLifeMax: { type: 'slider', label: 'Plume Life Max', min: 0.01, max: 10.0, step: 0.01, default: 1.4 },
+        foamPlumeSizeMin: { type: 'slider', label: 'Plume Size Min', min: 0.1, max: 500.0, step: 0.1, default: 40.0 },
+        foamPlumeSizeMax: { type: 'slider', label: 'Plume Size Max', min: 0.1, max: 700.0, step: 0.1, default: 90.0 },
+        foamPlumeOpacity: { type: 'slider', label: 'Plume Opacity', min: 0.0, max: 2.0, step: 0.01, default: 1.0 },
+        foamPlumePeakOpacity: { type: 'slider', label: 'Plume Peak Opacity', min: 0.0, max: 2.0, step: 0.01, default: 0.65 },
+        foamPlumePeakTime: { type: 'slider', label: 'Plume Peak Time', min: 0.01, max: 0.6, step: 0.01, default: 0.18 },
+        foamPlumeStartScale: { type: 'slider', label: 'Plume Start Scale', min: 0.01, max: 5.0, step: 0.01, default: 0.5 },
+        foamPlumeMaxScale: { type: 'slider', label: 'Plume Max Scale', min: 0.01, max: 10.0, step: 0.01, default: 2.2 },
+        foamPlumeSpinMin: { type: 'slider', label: 'Plume Spin Min', min: -5.0, max: 5.0, step: 0.01, default: -0.18 },
+        foamPlumeSpinMax: { type: 'slider', label: 'Plume Spin Max', min: -5.0, max: 5.0, step: 0.01, default: 0.18 },
+        foamPlumeUseAdditive: { type: 'boolean', label: 'Plume Additive Blend', default: false },
+        foamPlumeColor: { type: 'color', label: 'Plume Color', default: { r: 1.0, g: 1.0, b: 1.0 } },
+
+        foamParticleNoiseEnabled: { type: 'boolean', label: 'Noise Mask Enabled', default: true },
+        foamParticleNoiseStrength: { type: 'slider', label: 'Noise Mask Strength', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
+        foamParticleNoiseScale: { type: 'slider', label: 'Noise Scale', min: 0.1, max: 80.0, step: 0.1, default: 6.0 },
+        foamParticleNoiseSpeed: { type: 'slider', label: 'Noise Speed', min: 0.0, max: 5.0, step: 0.01, default: 0.35 },
+        foamParticleNoiseCoverage: { type: 'slider', label: 'Noise Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.55 },
+        foamParticleNoiseSoftness: { type: 'slider', label: 'Noise Softness', min: 0.0, max: 0.5, step: 0.005, default: 0.08 },
+        foamParticleNoiseAttempts: { type: 'slider', label: 'Noise Spawn Attempts', min: 1, max: 32, step: 1, default: 6 },
+
         foamFlecksEnabled: { type: 'boolean', label: 'Foam Flecks (GPU)', default: true },
         foamFlecksIntensity: { type: 'slider', label: 'Flecks Intensity', min: 0.0, max: 6.0, step: 0.01, default: 1.0 },
-        foamTearEnabled: { type: 'boolean', label: 'Foam Tear-Off', default: true },
-        foamTearStrength: { type: 'slider', label: 'Tear Strength', min: 0.0, max: 2.0, step: 0.01, default: 0.65 },
-        foamTearScale: { type: 'slider', label: 'Tear Scale', min: 50.0, max: 3000.0, step: 1.0, default: 750.0 },
-        foamTearSpeed: { type: 'slider', label: 'Tear Speed (Signed)', min: -6.0, max: 6.0, step: 0.01, default: 1.25 },
-        foamTearDrift: { type: 'slider', label: 'Tear Drift (Signed UV)', min: -0.25, max: 0.25, step: 0.001, default: 0.02 },
-
-        detachedTurbStrength: { type: 'slider', label: 'Detached Turb Strength', min: 0.0, max: 2.0, step: 0.01, default: 0.35 },
-        detachedTurbScale: { type: 'slider', label: 'Detached Turb Scale', min: 0.05, max: 2.0, step: 0.01, default: 0.25 },
-        detachedTurbSpeed: { type: 'slider', label: 'Detached Turb Speed', min: 0.0, max: 2.0, step: 0.01, default: 0.35 },
 
         sandEnabled: { type: 'boolean', label: 'Sand Enabled', default: true },
         sandIntensity: { type: 'slider', label: 'Sand Intensity', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
@@ -364,14 +560,7 @@ export class WaterEffectV2 extends EffectBase {
             Occluder: 8,
             Time: 9,
             Sand: 10,
-            FoamMask: 11,
-            DetachedFoam: 12,
-            DetachedInBounds: 13,
-            DetachedSpawn: 14,
-            DetachedOriginInside: 15,
-            DetachedOriginFoam: 16,
-            DetachedOriginTear: 17,
-            DetachedSourceGate: 18
+            FoamMask: 11
           },
           default: 0
         }
@@ -396,6 +585,7 @@ export class WaterEffectV2 extends EffectBase {
     this._windTime = 0.0;
 
     this._material = new THREE.ShaderMaterial({
+      defines: {},
       uniforms: {
         tDiffuse: { value: null },
         tWaterData: { value: null },
@@ -418,11 +608,47 @@ export class WaterEffectV2 extends EffectBase {
         uWaveStrength: { value: this.params.waveStrength },
         uDistortionStrengthPx: { value: this.params.distortionStrengthPx },
 
+        // Distortion masking controls
+        uDistortionEdgeCenter: { value: this.params.distortionEdgeCenter },
+        uDistortionEdgeFeather: { value: this.params.distortionEdgeFeather },
+        uDistortionEdgeGamma: { value: this.params.distortionEdgeGamma },
+        uDistortionShoreRemapLo: { value: this.params.distortionShoreRemapLo },
+        uDistortionShoreRemapHi: { value: this.params.distortionShoreRemapHi },
+        uDistortionShorePow: { value: this.params.distortionShorePow },
+        uDistortionShoreMin: { value: this.params.distortionShoreMin },
+
+        // Rain-hit distortion uniforms
+        uRainEnabled: { value: 1.0 },
+        uRainPrecipitation: { value: 0.0 },
+        uRainSplit: { value: this.params.rainDistortionSplit },
+        uRainBlend: { value: this.params.rainDistortionBlend },
+        uRainGlobalStrength: { value: this.params.rainDistortionGlobalStrength },
+
+        // Outdoors mask for indoor damping (world-space scene UV)
+        tOutdoorsMask: { value: null },
+        uHasOutdoorsMask: { value: 0.0 },
+        uRainIndoorDampingEnabled: { value: this.params.rainIndoorDampingEnabled === false ? 0.0 : 1.0 },
+        uRainIndoorDampingStrength: { value: this.params.rainIndoorDampingStrength },
+
+        uRainRippleStrengthPx: { value: this.params.rainRippleStrengthPx },
+        uRainRippleScale: { value: this.params.rainRippleScale },
+        uRainRippleSpeed: { value: this.params.rainRippleSpeed },
+        uRainRippleDensity: { value: this.params.rainRippleDensity },
+        uRainRippleSharpness: { value: this.params.rainRippleSharpness },
+
+        uRainStormStrengthPx: { value: this.params.rainStormStrengthPx },
+        uRainStormScale: { value: this.params.rainStormScale },
+        uRainStormSpeed: { value: this.params.rainStormSpeed },
+        uRainStormCurl: { value: this.params.rainStormCurl },
+
+        uRainMaxCombinedStrengthPx: { value: this.params.rainMaxCombinedStrengthPx },
+
         uWindDir: { value: new THREE.Vector2(1.0, 0.0) },
         uWindSpeed: { value: 0.0 },
         uWindOffsetUv: { value: new THREE.Vector2(0.0, 0.0) },
         uWindTime: { value: 0.0 },
 
+        uLockWaveTravelToWind: { value: 1.0 },
         uWaveDirOffsetRad: { value: 0.0 },
         uWaveAppearanceRotRad: { value: 0.0 },
 
@@ -457,22 +683,8 @@ export class WaterEffectV2 extends EffectBase {
         uFloatingFoamScale: { value: this.params.floatingFoamScale },
 
         // Shader-based foam flecks (spray dots)
-        uFoamFlecksEnabled: { value: this.params.foamFlecksEnabled ? 1.0 : 0.0 },
         uFoamFlecksIntensity: { value: this.params.foamFlecksIntensity },
 
-        // GPU foam tear-off
-        uFoamTearEnabled: { value: this.params.foamTearEnabled ? 1.0 : 0.0 },
-        uFoamTearStrength: { value: this.params.foamTearStrength },
-        uFoamTearScale: { value: this.params.foamTearScale },
-        uFoamTearSpeed: { value: this.params.foamTearSpeed },
-        uFoamTearDrift: { value: this.params.foamTearDrift },
-
-        // Detached foam turbulence
-        uDetachedTurbStrength: { value: this.params.detachedTurbStrength },
-        uDetachedTurbScale: { value: this.params.detachedTurbScale },
-        uDetachedTurbSpeed: { value: this.params.detachedTurbSpeed },
-
-        uSandEnabled: { value: this.params.sandEnabled ? 1.0 : 0.0 },
         uSandIntensity: { value: this.params.sandIntensity },
         uSandColor: { value: new THREE.Color(this.params.sandColor.r, this.params.sandColor.g, this.params.sandColor.b) },
         uSandChunkScale: { value: this.params.sandChunkScale },
@@ -496,13 +708,15 @@ export class WaterEffectV2 extends EffectBase {
         uTime: { value: 0.0 },
         uResolution: { value: new THREE.Vector2(1, 1) },
 
-        // Zoom stability: scale pixel offsets by current zoom (zoom out => smaller offset in UV).
         uZoom: { value: 1.0 },
 
         uViewBounds: { value: this._viewBounds },
         uSceneDimensions: { value: this._sceneDimensions },
         uSceneRect: { value: this._sceneRect },
-        uHasSceneRect: { value: 0.0 }
+        uHasSceneRect: { value: 0.0 },
+
+        // Scene/environment coupling
+        uSceneDarkness: { value: 0.0 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -533,11 +747,44 @@ export class WaterEffectV2 extends EffectBase {
         uniform float uWaveStrength;
         uniform float uDistortionStrengthPx;
 
+        uniform float uDistortionEdgeCenter;
+        uniform float uDistortionEdgeFeather;
+        uniform float uDistortionEdgeGamma;
+        uniform float uDistortionShoreRemapLo;
+        uniform float uDistortionShoreRemapHi;
+        uniform float uDistortionShorePow;
+        uniform float uDistortionShoreMin;
+
+        uniform float uRainEnabled;
+        uniform float uRainPrecipitation;
+        uniform float uRainSplit;
+        uniform float uRainBlend;
+        uniform float uRainGlobalStrength;
+
+        uniform sampler2D tOutdoorsMask;
+        uniform float uHasOutdoorsMask;
+        uniform float uRainIndoorDampingEnabled;
+        uniform float uRainIndoorDampingStrength;
+
+        uniform float uRainRippleStrengthPx;
+        uniform float uRainRippleScale;
+        uniform float uRainRippleSpeed;
+        uniform float uRainRippleDensity;
+        uniform float uRainRippleSharpness;
+
+        uniform float uRainStormStrengthPx;
+        uniform float uRainStormScale;
+        uniform float uRainStormSpeed;
+        uniform float uRainStormCurl;
+
+        uniform float uRainMaxCombinedStrengthPx;
+
         uniform vec2 uWindDir;
         uniform float uWindSpeed;
         uniform vec2 uWindOffsetUv;
         uniform float uWindTime;
 
+        uniform float uLockWaveTravelToWind;
         uniform float uWaveDirOffsetRad;
         uniform float uWaveAppearanceRotRad;
 
@@ -572,22 +819,8 @@ export class WaterEffectV2 extends EffectBase {
         uniform float uFloatingFoamScale;
 
         // Shader-based foam flecks (spray dots)
-        uniform float uFoamFlecksEnabled;
         uniform float uFoamFlecksIntensity;
 
-        // GPU foam tear-off
-        uniform float uFoamTearEnabled;
-        uniform float uFoamTearStrength;
-        uniform float uFoamTearScale;
-        uniform float uFoamTearSpeed;
-        uniform float uFoamTearDrift;
-
-        // Detached foam turbulence
-        uniform float uDetachedTurbStrength;
-        uniform float uDetachedTurbScale;
-        uniform float uDetachedTurbSpeed;
-
-        uniform float uSandEnabled;
         uniform float uSandIntensity;
         uniform vec3 uSandColor;
         uniform float uSandChunkScale;
@@ -617,6 +850,8 @@ export class WaterEffectV2 extends EffectBase {
         uniform vec2 uSceneDimensions;
         uniform vec4 uSceneRect;
         uniform float uHasSceneRect;
+
+        uniform float uSceneDarkness;
 
         varying vec2 vUv;
 
@@ -649,6 +884,121 @@ export class WaterEffectV2 extends EffectBase {
             amp *= 0.55;
           }
           return sum;
+        }
+
+        float safe01(float v) {
+          return clamp(v, 0.0, 1.0);
+        }
+
+        vec2 safeNormalize2(vec2 v) {
+          float l = length(v);
+          return (l > 1e-6) ? (v / l) : vec2(0.0, 0.0);
+        }
+
+        vec2 curlNoise2D(vec2 p);
+
+        // Procedural raindrop ripple vector field.
+        // Samples a 3x3 neighborhood of cells to reduce visible grid repetition.
+        float rainRipple(vec2 uv, float t, out vec2 dirOut) {
+          float sc = max(1.0, uRainRippleScale);
+          vec2 p = uv * sc;
+          vec2 baseCell = floor(p);
+          vec2 f = fract(p) - 0.5;
+
+          float density = clamp(uRainRippleDensity, 0.0, 1.0);
+          float sharp = max(0.1, uRainRippleSharpness);
+          float width = 0.06 / sharp;
+
+          vec2 vAccum = vec2(0.0);
+          float wAccum = 0.0;
+
+          for (int yi = 0; yi < 3; yi++) {
+            for (int xi = 0; xi < 3; xi++) {
+              vec2 o = vec2(float(xi - 1), float(yi - 1));
+              vec2 cell = baseCell + o;
+
+              float rnd = hash12(cell);
+              float cellActive = step(1.0 - density, rnd);
+              if (cellActive < 0.5) continue;
+
+              float phase01 = fract(t * max(0.0, uRainRippleSpeed) + rnd);
+
+              // Local vector within the neighbor cell
+              vec2 gv = f - o;
+              float r = length(gv);
+              float ringCenter = mix(0.06, 0.48, phase01);
+
+              float ring = exp(-pow((r - ringCenter) / max(0.001, width), 2.0));
+              float wobble = 0.5 + 0.5 * sin((r - ringCenter) * (40.0 * sharp) - t * (6.0 + 8.0 * sharp));
+              float amp = ring * wobble;
+
+              vec2 dir = safeNormalize2(gv);
+              vAccum += dir * amp;
+              wAccum += amp;
+            }
+          }
+
+          // Saturating normalization so multiple overlapping ripples don't instantly clamp.
+          float a = 1.0 - exp(-wAccum * 1.6);
+          dirOut = safeNormalize2(vAccum);
+          return safe01(a);
+        }
+
+        // Storm distortion vector field (harsh turbulent noise).
+        vec2 rainStorm(vec2 uv, float t) {
+          float sc = max(1.0, uRainStormScale);
+          float sp = max(0.0, uRainStormSpeed);
+          vec2 p = uv * sc + vec2(t * sp * 0.25, -t * sp * 0.21);
+          vec2 c = curlNoise2D(p);
+          c *= max(0.0, uRainStormCurl);
+          return c;
+        }
+
+        vec2 computeRainOffsetPx(vec2 uv) {
+          if (uRainEnabled < 0.5) return vec2(0.0);
+
+          float p = safe01(uRainPrecipitation);
+          float split = safe01(uRainSplit);
+          float blend = clamp(uRainBlend, 0.0, 0.25);
+
+          // Crossfade: 0..split = ripple growth, split..1 = storm dominance.
+          float wStorm = (blend > 1e-6)
+            ? smoothstep(split - blend, split + blend, p)
+            : step(split, p);
+          float wRipple = (1.0 - wStorm) * smoothstep(0.0, max(1e-4, split), p);
+
+          vec2 rippleDir = vec2(0.0);
+          float rippleAmt = rainRipple(uv, uTime, rippleDir);
+          float ripplePx = clamp(uRainRippleStrengthPx, 0.0, 64.0);
+          vec2 rippleOffPx = rippleDir * rippleAmt * ripplePx;
+
+          vec2 stormV = rainStorm(uv, uTime);
+          float stormLen = length(stormV);
+          vec2 stormDir = (stormLen > 1e-6) ? (stormV / stormLen) : vec2(0.0);
+          float stormAmt = clamp(stormLen, 0.0, 1.0);
+          float stormPx = clamp(uRainStormStrengthPx, 0.0, 64.0);
+          vec2 stormOffPx = stormDir * stormAmt * stormPx;
+
+          vec2 offPx = (rippleOffPx * wRipple + stormOffPx * wStorm) * clamp(uRainGlobalStrength, 0.0, 2.0);
+
+          // Optional indoor damping using _Outdoors mask.
+          // - If no mask is available, treat everything as outdoors.
+          float outdoorStrength = 1.0;
+          if (uHasOutdoorsMask > 0.5) {
+            outdoorStrength = texture2D(tOutdoorsMask, uv).r;
+          }
+          float dampStrength = clamp(uRainIndoorDampingStrength, 0.0, 1.0);
+          float indoorMult = (uRainIndoorDampingEnabled > 0.5) ? mix(1.0, outdoorStrength, dampStrength) : 1.0;
+          offPx *= indoorMult;
+
+          // Safety clamp to prevent violent tearing.
+          float maxPx = clamp(uRainMaxCombinedStrengthPx, 0.0, 64.0);
+          float lenPx = length(offPx);
+          if (maxPx > 1e-4 && lenPx > maxPx) {
+            offPx *= (maxPx / max(1e-6, lenPx));
+          }
+
+          return offPx;
         }
 
         vec2 curlNoise2D(vec2 p) {
@@ -693,8 +1043,9 @@ export class WaterEffectV2 extends EffectBase {
         // --- SHADER-BASED FOAM FLECKS ---
         // Generates high-frequency "spray" dots that move faster than foam with wind.
         // Uses a widened foam mask so flecks appear around edges, simulating spray blown off crests.
+        #ifdef USE_FOAM_FLECKS
         float getShaderFlecks(vec2 sceneUv, float shore, float inside, float foamAmount) {
-          if (uFoamFlecksEnabled < 0.5 || uFoamFlecksIntensity < 0.01) return 0.0;
+          if (uFoamFlecksIntensity < 0.01) return 0.0;
 
           float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
 
@@ -749,40 +1100,12 @@ export class WaterEffectV2 extends EffectBase {
 
           return clamp(flecks, 0.0, 1.0);
         }
-        // --- SHADER FLECKS END ---
-
-        float getFoamTearMask(vec2 sceneUv, float shore, float inside, float foamAmount) {
-          if (uFoamTearEnabled < 0.5) return 0.0;
-
-          float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
-
-          vec2 windF = uWindDir;
-          float windLen = length(windF);
-          windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
-          vec2 windDir = vec2(windF.x, -windF.y);
-          vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
-
-          float wind01 = clamp(uWindSpeed, 0.0, 1.0);
-          float tWind = uWindTime;
-
-          // Noise domain in the same basis as foam so it tears at foam edges rather than swimming.
-          vec2 foamWindOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
-          vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
-          vec2 basis = vec2(foamSceneUv.x * sceneAspect, foamSceneUv.y);
-
-          float spd = uFoamTearSpeed;
-          vec2 adv = windBasis * (tWind * (0.35 + spd));
-          vec2 p = basis * max(0.1, uFoamTearScale) - adv * 2.5;
-
-          float n = valueNoise(p);
-          n = max(n, valueNoise(p * 1.7 + 3.1));
-
-          // Only tear where there is visible foam.
-          float gate = smoothstep(0.25, 0.85, foamAmount) * inside;
-
-          float tear = smoothstep(0.72, 0.98, n) * gate;
-          return clamp(tear, 0.0, 1.0);
+        #else
+        float getShaderFlecks(vec2 sceneUv, float shore, float inside, float foamAmount) {
+          return 0.0;
         }
+        #endif
+        // --- SHADER FLECKS END ---
 
         float getFoamBaseAmount(vec2 sceneUv, float shore, float inside) {
           vec2 foamWindOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
@@ -846,99 +1169,6 @@ export class WaterEffectV2 extends EffectBase {
           return foamAmount;
         }
 
-        vec4 getDetachedFoamSignals(vec2 sceneUv, float shore, float inside) {
-          if (uFoamTearEnabled < 0.5) return vec4(0.0);
-
-          // 1. Setup Standard Coordinates
-          float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
-          vec2 windF = uWindDir;
-          float windLen = length(windF);
-          windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
-          vec2 windDir = vec2(windF.x, -windF.y);
-
-          float wind01 = clamp(uWindSpeed, 0.0, 1.0);
-          float tWind = uWindTime;
-
-          float signedSpd = clamp(uFoamTearSpeed, -3.0, 3.0);
-          float spd = clamp(abs(signedSpd), 0.1, 3.0);
-          float rate = 0.2 * spd;
-          float globalPhase = fract(tWind * rate);
-
-          // 4. Movement Logic (Float with Wind): advect a chunk field from upwind.
-          float spdSign = (signedSpd < 0.0) ? -1.0 : 1.0;
-          vec2 advDir = windDir * spdSign;
-
-          // NOTE: sceneUv is already normalized (0..1). The travel distance must be small
-          // in UV space, otherwise originUv goes out-of-bounds and the entire layer vanishes.
-          float windFactor = 0.15 + 0.85 * wind01;
-          float maxDist = (0.008 + 0.045 * spd) * windFactor;
-          float travelDist = globalPhase * maxDist;
-          // Add turbulence to the upwind sampling so detached chunks wobble/swerve instead of
-          // translating in a perfectly straight line. Uses dedicated detached turbulence params.
-          float turbStrength = clamp(uDetachedTurbStrength, 0.0, 2.0);
-          float turbAmp = (0.08 + 0.32 * spd) * maxDist * turbStrength;
-          float turbScale = max(0.1, uDetachedTurbScale);
-          float turbSpeed = uDetachedTurbSpeed;
-          vec2 basisT = vec2(sceneUv.x * sceneAspect, sceneUv.y) * (turbScale * 8.0);
-          vec2 windBasisT = normalize(vec2(advDir.x * sceneAspect, advDir.y));
-          vec2 curlP = basisT - windBasisT * (tWind * turbSpeed);
-          vec2 turb = curlNoise2D(curlP);
-          vec2 turbUv = vec2(turb.x / max(1e-6, sceneAspect), turb.y);
-          vec2 originUv = sceneUv - advDir * travelDist - turbUv * (turbAmp * (0.25 + 0.75 * globalPhase));
-          float inBounds = step(0.0, originUv.x) * step(originUv.x, 1.0) * step(0.0, originUv.y) * step(originUv.y, 1.0);
-          vec2 originUvClamped = clamp(originUv, vec2(0.0), vec2(1.0));
-
-          // 2. Define "Chunks" using a Grid IN ORIGIN SPACE so the pattern translates.
-          vec2 foamWindOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
-          vec2 foamSceneUvO = originUv - (foamWindOffsetUv * 0.5);
-          vec2 basisO = vec2(foamSceneUvO.x * sceneAspect, foamSceneUvO.y);
-          float chunkScale = max(10.0, uFoamTearScale * 0.15);
-
-          vec2 gridUv = basisO * chunkScale;
-          gridUv += fbmNoise(gridUv * 0.5) * 0.5;
-
-          vec2 gridId = floor(gridUv);
-          vec2 gridLocal = fract(gridUv) - 0.5;
-
-          // 3. Generate Lifecycle per Chunk
-          float cellSeed = hash12(gridId);
-          float spawnChance = smoothstep(0.92, 0.99, cellSeed);
-
-          // 5. Source Check
-          vec4 originData = texture2D(tWaterData, originUvClamped);
-          float originInside = waterInsideFromSdf(originData.r);
-          float originShore = clamp(originData.g, 0.0, 1.0);
-          float originInsideGate = step(0.5, originInside);
-
-          float originFoam = getFoamBaseAmount(originUv, originShore, originInside);
-          float originTear = getFoamTearMask(originUv, originShore, originInside, originFoam);
-
-          float tearStrength = clamp(uFoamTearStrength, 0.0, 3.0);
-          float originSpray = originTear * smoothstep(0.35, 0.95, originFoam) * tearStrength;
-          float originFoamFinal = clamp(originFoam - originSpray * 0.55, 0.0, 1.0);
-
-          // Detached foam should be sourced from *white foam presence* primarily.
-          // Gating strongly on originTear makes the layer vanish because originTear is a sparse/high-threshold mask.
-          float sourceGate = smoothstep(0.55, 0.88, originFoamFinal);
-          float tearHint = 0.35 + 0.65 * smoothstep(0.02, 0.25, originTear);
-
-          // 6. Shaping and Disintegration
-          float phase = fract(tWind * rate + cellSeed * 12.34);
-          float life = smoothstep(0.0, 0.1, phase) * (1.0 - smoothstep(0.6, 1.0, phase));
-
-          // Simple circular shape for clean white foam chunks (no dark noise erosion)
-          float shape = 1.0 - smoothstep(0.25, 0.4 + (phase * 0.3), length(gridLocal));
-
-          float strength = clamp(uFoamTearStrength, 0.0, 3.0);
-          float detached = shape * life * strength * sourceGate * tearHint * spawnChance * originInsideGate * inBounds * inside * 1.25;
-
-          return vec4(detached, inBounds, spawnChance, sourceGate);
-        }
-
-        float getDetachedFoam(vec2 sceneUv, float shore, float inside) {
-          return getDetachedFoamSignals(sceneUv, shore, inside).x;
-        }
-
         float sharpSin(float phase, float sharpness, out float dHdPhase) {
           float s = sin(phase);
           float a = max(abs(s), 1e-5);
@@ -965,7 +1195,11 @@ export class WaterEffectV2 extends EffectBase {
           // The wave phase math (dot(p, dir)) behaves like a standard math basis (Y-up).
           // Convert by flipping Y so wave travel matches wind at 90/270 degrees.
           vec2 wind = vec2(windF.x, -windF.y);
-          wind = rotate2D(wind, uWaveDirOffsetRad);
+          // If locked, waveSpeed-driven phase propagation always moves along the wind direction.
+          // The travel offset becomes an *advanced* override for intentionally decoupling waves
+          // from wind direction.
+          float travelRot = (uLockWaveTravelToWind > 0.5) ? 0.0 : uWaveDirOffsetRad;
+          wind = rotate2D(wind, travelRot);
 
           vec2 uvF = warpUv(sceneUv);
           vec2 uv = uvF;
@@ -991,9 +1225,10 @@ export class WaterEffectV2 extends EffectBase {
           vec2 windF = uWindDir;
           float wl = length(windF);
           windF = (wl > 1e-5) ? (windF / wl) : vec2(1.0, 0.0);
-          // Keep consistent with waveHeight(): flip Foundry Y-down to math Y-up.
+          // Keep consistent with waveHeight(): flip Foundry Y-down to math-style Y-up.
           vec2 wind = vec2(windF.x, -windF.y);
-          wind = rotate2D(wind, uWaveDirOffsetRad);
+          float travelRot = (uLockWaveTravelToWind > 0.5) ? 0.0 : uWaveDirOffsetRad;
+          wind = rotate2D(wind, travelRot);
 
           vec2 uvF = warpUv(sceneUv);
           vec2 uv = uvF;
@@ -1019,11 +1254,7 @@ export class WaterEffectV2 extends EffectBase {
           s += texture2D(tWaterData, sceneUv - vec2(e.x, 0.0)).ba;
           s += texture2D(tWaterData, sceneUv + vec2(0.0, e.y)).ba;
           s += texture2D(tWaterData, sceneUv - vec2(0.0, e.y)).ba;
-          s += texture2D(tWaterData, sceneUv + vec2(e.x, e.y)).ba;
-          s += texture2D(tWaterData, sceneUv + vec2(-e.x, e.y)).ba;
-          s += texture2D(tWaterData, sceneUv + vec2(e.x, -e.y)).ba;
-          s += texture2D(tWaterData, sceneUv + vec2(-e.x, -e.y)).ba;
-          s *= (1.0 / 9.0);
+          s *= (1.0 / 5.0);
           return s * 2.0 - 1.0;
         }
 
@@ -1041,14 +1272,37 @@ export class WaterEffectV2 extends EffectBase {
           return (foundryPos - sceneOrigin) / max(sceneSize, vec2(1e-5));
         }
 
+        float remap01(float v, float lo, float hi) {
+          return clamp((v - lo) / max(1e-5, hi - lo), 0.0, 1.0);
+        }
+
+        float shoreFactor(float shore01) {
+          float lo = clamp(uDistortionShoreRemapLo, 0.0, 1.0);
+          float hi = clamp(uDistortionShoreRemapHi, 0.0, 1.0);
+          float a = min(lo, hi - 1e-4);
+          float b = max(hi, a + 1e-4);
+          float s = remap01(clamp(shore01, 0.0, 1.0), a, b);
+          s = pow(s, max(0.01, uDistortionShorePow));
+          return max(clamp(uDistortionShoreMin, 0.0, 1.0), clamp(s, 0.0, 1.0));
+        }
+
+        // Water interior factor used by all water visuals (foam/sand/tint/etc.).
+        // Keep this stable and independent from the distortion masking controls.
         float waterInsideFromSdf(float sdf01) {
           return smoothstep(0.52, 0.48, sdf01);
         }
 
-        float sandMask(vec2 sceneUv, float shore, float inside, float sceneAspect) {
-          float sandEnabled = step(0.5, uSandEnabled);
-          if (sandEnabled < 0.5) return 0.0;
+        // Distortion-only interior factor: lets you tune where distortions begin/end
+        // without changing the underlying water appearance.
+        float distortionInsideFromSdf(float sdf01) {
+          float c = clamp(uDistortionEdgeCenter, 0.0, 1.0);
+          float f = max(0.0, uDistortionEdgeFeather);
+          float inside = (f > 1e-6) ? smoothstep(c + f, c - f, sdf01) : step(sdf01, c);
+          inside = pow(clamp(inside, 0.0, 1.0), max(0.01, uDistortionEdgeGamma));
+          return inside;
+        }
 
+        float sandMask(vec2 sceneUv, float shore, float inside, float sceneAspect) {
           // Depth proxy: shore=0 deep water, shore=1 at edge.
           float depth = clamp(1.0 - shore, 0.0, 1.0);
           float dLo = clamp(uSandDepthLo, 0.0, 1.0);
@@ -1162,6 +1416,9 @@ export class WaterEffectV2 extends EffectBase {
           float waterVisible = 1.0 - clamp(waterOccluder, 0.0, 1.0);
           inside *= waterVisible;
 
+          float distInside = distortionInsideFromSdf(sdf01) * waterVisible;
+          float distMask = distInside * shoreFactor(shore);
+
           if (uDebugView > 0.5) {
             float d = floor(uDebugView + 0.5);
             if (d < 1.5) {
@@ -1190,13 +1447,11 @@ export class WaterEffectV2 extends EffectBase {
               gl_FragColor = vec4(nn * 0.5 + 0.5, 0.0, 1.0);
               return;
             }
-
             if (d < 6.5) {
               float wv = 0.5 + 0.5 * waveHeight(sceneUv, uWindTime);
               gl_FragColor = vec4(vec3(wv), 1.0);
               return;
             }
-
             if (d < 7.5) {
               vec2 waveGrad = waveGrad2D(sceneUv, uWindTime);
               vec2 flowN = smoothFlow2D(sceneUv);
@@ -1210,105 +1465,46 @@ export class WaterEffectV2 extends EffectBase {
               vec2 texel = 1.0 / max(uResolution, vec2(1.0));
               float px = clamp(uDistortionStrengthPx, 0.0, 64.0);
               float zoom = max(uZoom, 0.001);
-              vec2 offsetUv = combinedN * (px * texel) * amp * inside * max(0.35, shore) * zoom;
+              vec2 offsetUv = combinedN * (px * texel) * amp * distMask * zoom;
+
+              // Add rain-hit distortion in px-space (converted to UV).
+              vec2 rainOffPx = computeRainOffsetPx(sceneUv);
+              offsetUv += (rainOffPx * texel) * distMask * zoom;
               vec2 pxOff = offsetUv / max(texel, vec2(1e-6));
               pxOff = clamp(pxOff / max(1.0, px), vec2(-1.0), vec2(1.0));
               gl_FragColor = vec4(pxOff * 0.5 + 0.5, 0.0, 1.0);
               return;
             }
-
             if (d < 8.5) {
               gl_FragColor = vec4(vec3(waterOccluder), 1.0);
               return;
             }
-
             if (d < 9.5) {
               float t01 = fract(uTime * 0.25);
               gl_FragColor = vec4(vec3(t01), 1.0);
               return;
             }
-
             if (d < 10.5) {
-              // Sand mask debug (10): show the computed sand contribution as grayscale.
               float sandAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+              #ifdef USE_SAND
               float sandMaskOut = sandMask(sceneUv, shore, inside, sandAspect);
+              #else
+              float sandMaskOut = 0.0;
+              #endif
               gl_FragColor = vec4(vec3(clamp(sandMaskOut, 0.0, 1.0)), 1.0);
               return;
             }
-
             if (d < 11.5) {
-              // Foam Mask Debug (11): final foam amount after CC + tear-off.
-
               float foamAmount = getFoamBaseAmount(sceneUv, shore, inside);
-              float detachedFoam = getDetachedFoam(sceneUv, shore, inside);
-              detachedFoam *= (1.0 - smoothstep(0.15, 0.45, foamAmount));
-              foamAmount = clamp(foamAmount + detachedFoam, 0.0, 1.0);
-
-              gl_FragColor = vec4(vec3(foamAmount), 1.0);
+              gl_FragColor = vec4(vec3(clamp(foamAmount, 0.0, 1.0)), 1.0);
               return;
             }
-
-            if (d < 12.5) {
-              // Detached Foam Debug (12): show detached foam contribution as grayscale.
-              vec4 sig = getDetachedFoamSignals(sceneUv, shore, inside);
-              float detachedFoam = sig.x;
-              // Boost for visibility while tuning; the real composite uses the un-boosted value.
-              gl_FragColor = vec4(vec3(clamp(detachedFoam * 8.0, 0.0, 1.0)), 1.0);
-              return;
-            }
-
-            if (d < 13.5) {
-              // Detached InBounds Debug (13)
-              vec4 sig = getDetachedFoamSignals(sceneUv, shore, inside);
-              gl_FragColor = vec4(vec3(sig.y), 1.0);
-              return;
-            }
-
-            if (d < 14.5) {
-              // Detached SpawnChance Debug (14)
-              vec4 sig = getDetachedFoamSignals(sceneUv, shore, inside);
-              gl_FragColor = vec4(vec3(clamp(sig.z, 0.0, 1.0)), 1.0);
-              return;
-            }
-
-            if (d < 15.5) {
-              // Detached OriginInside Debug (15)
-              vec4 originData = texture2D(tWaterData, sceneUv);
-              float originInside = waterInsideFromSdf(originData.r);
-              gl_FragColor = vec4(vec3(clamp(originInside, 0.0, 1.0)), 1.0);
-              return;
-            }
-
-            if (d < 16.5) {
-              // Detached OriginFoam Debug (16)
-              vec4 originData = texture2D(tWaterData, sceneUv);
-              float originInside = waterInsideFromSdf(originData.r);
-              float originShore = clamp(originData.g, 0.0, 1.0);
-              float originFoam = getFoamBaseAmount(sceneUv, originShore, originInside);
-              gl_FragColor = vec4(vec3(clamp(originFoam, 0.0, 1.0)), 1.0);
-              return;
-            }
-
-            if (d < 17.5) {
-              // Detached OriginTear Debug (17)
-              vec4 originData = texture2D(tWaterData, sceneUv);
-              float originInside = waterInsideFromSdf(originData.r);
-              float originShore = clamp(originData.g, 0.0, 1.0);
-              float originFoam = getFoamBaseAmount(sceneUv, originShore, originInside);
-              float originTear = getFoamTearMask(sceneUv, originShore, originInside, originFoam);
-              gl_FragColor = vec4(vec3(clamp(originTear, 0.0, 1.0)), 1.0);
-              return;
-            }
-
-            if (d < 18.5) {
-              // Detached SourceGate Debug (18)
-              vec4 sig = getDetachedFoamSignals(sceneUv, shore, inside);
-              gl_FragColor = vec4(vec3(clamp(sig.w, 0.0, 1.0)), 1.0);
-              return;
-            }
-
-            // Fall through: if the debug view isn't recognized, return magenta.
             gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+            return;
+          }
+
+          if (inside < 0.01) {
+            gl_FragColor = base;
             return;
           }
 
@@ -1322,7 +1518,7 @@ export class WaterEffectV2 extends EffectBase {
           waveGrad = rotate2D(waveGrad, uWaveAppearanceRotRad + 1.5707963);
           vec2 flowN = smoothFlow2D(sceneUv);
           vec2 combinedVec = waveGrad * uWaveStrength + flowN * 0.35;
-          
+
           combinedVec = combinedVec / (1.0 + 0.75 * length(combinedVec));
           float m = length(combinedVec);
           float dirMask = smoothstep(0.01, 0.06, m);
@@ -1332,14 +1528,11 @@ export class WaterEffectV2 extends EffectBase {
           vec2 texel = 1.0 / max(uResolution, vec2(1.0));
           float px = clamp(uDistortionStrengthPx, 0.0, 64.0);
           float zoom = max(uZoom, 0.001);
-          vec2 offsetUv = combinedN * (px * texel) * amp * inside * max(0.35, shore) * zoom;
+          vec2 offsetUv = combinedN * (px * texel) * amp * distMask * zoom;
 
-          if (uDebugView > 4.5) {
-            vec2 pxOff = offsetUv / max(texel, vec2(1e-6));
-            pxOff = clamp(pxOff / max(1.0, px), vec2(-1.0), vec2(1.0));
-            gl_FragColor = vec4(pxOff * 0.5 + 0.5, 0.0, 1.0);
-            return;
-          }
+          // Rain-hit distortion in px-space.
+          vec2 rainOffPx = computeRainOffsetPx(sceneUv);
+          offsetUv += (rainOffPx * texel) * distMask * zoom;
 
           // Multi-tap refraction along the offset direction to reduce razor-sharp edges.
           vec2 uv0 = clamp(vUv + offsetUv * 0.55, vec2(0.001), vec2(0.999));
@@ -1354,45 +1547,44 @@ export class WaterEffectV2 extends EffectBase {
           vec3 col = mix(refracted.rgb, uTintColor, k);
 
           // Underwater sand flurries: chunked patches with fine grain, advected with water flow.
-          float sandEnabled = step(0.5, uSandEnabled);
-          if (sandEnabled > 0.5) {
-            float sandAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
-            float sandAlpha = sandMask(sceneUv, shore, inside, sandAspect);
-            col = mix(col, uSandColor, sandAlpha);
-            col += uSandColor * (sandAlpha * clamp(uSandAdditive, 0.0, 1.0));
-          }
+          #ifdef USE_SAND
+          float sandAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+          float sandAlpha = sandMask(sceneUv, shore, inside, sandAspect);
+          col = mix(col, uSandColor, sandAlpha);
+          col += uSandColor * (sandAlpha * clamp(uSandAdditive, 0.0, 1.0));
+          #endif
 
           // Foam bubbles around shorelines (exposure01/shore), broken up with animated grain.
           // shore: 0.0 in deep water, 1.0 at water boundary.
           float foamAmount = getFoamBaseAmount(sceneUv, shore, inside);
 
-          // GPU tear-off: break up white foam and blow fragments downwind.
-          float tearMask = getFoamTearMask(sceneUv, shore, inside, foamAmount);
-          float tearStrength = clamp(uFoamTearStrength, 0.0, 3.0);
-          float sprayFromFoam = tearMask * smoothstep(0.35, 0.95, foamAmount) * tearStrength;
-
-          float detachedFoam = getDetachedFoam(sceneUv, shore, inside);
-          detachedFoam *= (1.0 - smoothstep(0.15, 0.45, foamAmount));
-          float foamVisual = clamp(foamAmount + detachedFoam, 0.0, 1.0);
+          float foamVisual = clamp(foamAmount, 0.0, 1.0);
 
           // Make the foam blend more opaque so underlying refracted dark detail
           // (sand, refraction, etc.) does not shimmer through and read as "dark foam noise".
           float foamAlpha = smoothstep(0.08, 0.35, foamVisual);
           foamAlpha = pow(foamAlpha, 0.75);
-          col = mix(col, uFoamColor, foamAlpha);
+
+          // Foam should not appear self-illuminated.
+          // - Use the already-lit scene color (after Lighting/shadows) as the local light proxy.
+          // - Also apply the global scene darkness scalar so foam becomes very dark at night.
+          float sceneLuma = dot(col, vec3(0.299, 0.587, 0.114));
+          float darkness = clamp(uSceneDarkness, 0.0, 1.0);
+          float foamDarkScale = mix(1.0, 0.08, darkness);
+          float foamLightScale = clamp(sceneLuma * 1.15, 0.0, 1.0);
+          vec3 foamCol = uFoamColor * max(0.02, foamLightScale) * foamDarkScale;
+          col = mix(col, foamCol, foamAlpha);
 
           // Shader-based foam flecks: high-frequency spray dots blown downwind
           vec2 windUv2 = uWindDir;
           float wLen2 = length(windUv2);
           vec2 windF2 = (wLen2 > 1e-6) ? (windUv2 / wLen2) : vec2(1.0, 0.0);
           vec2 windDir2 = vec2(windF2.x, -windF2.y);
-          vec2 sprayUv = sceneUv + windDir2 * clamp(uFoamTearDrift, -0.25, 0.25);
+          vec2 sprayUv = sceneUv;
 
           float shaderFlecks = getShaderFlecks(sprayUv, shore, inside, foamAlpha);
           // Additive blend for bright spray dots
-          col += uFoamColor * shaderFlecks * 0.8;
-          // Add a softer "white spray" contribution driven by tear-off mask.
-          col += uFoamColor * sprayFromFoam * 0.22;
+          col += foamCol * shaderFlecks * 0.8;
 
           // Cheap specular highlight (adds motion/contrast, masked to water).
           vec2 g = waveGrad * uWaveStrength;
@@ -1428,6 +1620,15 @@ export class WaterEffectV2 extends EffectBase {
       depthWrite: false,
       depthTest: false
     });
+
+    const sandEnabled = !!this.params?.sandEnabled;
+    const flecksEnabled = !!this.params?.foamFlecksEnabled;
+    this._material.defines = {
+      ...(sandEnabled ? { USE_SAND: 1 } : {}),
+      ...(flecksEnabled ? { USE_FOAM_FLECKS: 1 } : {})
+    };
+    this._lastDefinesKey = `${sandEnabled ? 1 : 0}|${flecksEnabled ? 1 : 0}`;
+    this._material.needsUpdate = true;
 
     this._quadMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._material);
     this._quadScene.add(this._quadMesh);
@@ -1513,6 +1714,38 @@ export class WaterEffectV2 extends EffectBase {
     const THREE = window.THREE;
     const u = this._material.uniforms;
 
+    // Global scene darkness coupling (0 = fully lit, 1 = max darkness).
+    // Used to prevent surface foam from appearing self-illuminated at night.
+    if (u.uSceneDarkness) {
+      let sceneDarkness = 0;
+      try {
+        const le = window.MapShine?.lightingEffect ?? window.canvas?.mapShine?.lightingEffect;
+        if (le && typeof le.getEffectiveDarkness === 'function') {
+          sceneDarkness = le.getEffectiveDarkness();
+        } else if (typeof canvas !== 'undefined' && canvas?.scene?.environment?.darknessLevel !== undefined) {
+          sceneDarkness = canvas.scene.environment.darknessLevel;
+        }
+      } catch (e) {
+        // Keep default.
+      }
+      sceneDarkness = Math.max(0, Math.min(1, sceneDarkness));
+      u.uSceneDarkness.value = sceneDarkness;
+    }
+
+	const sandEnabled = !!this.params?.sandEnabled;
+	const flecksEnabled = !!this.params?.foamFlecksEnabled;
+	const definesKey = `${sandEnabled ? 1 : 0}|${flecksEnabled ? 1 : 0}`;
+	if (this._lastDefinesKey !== definesKey) {
+	  const d = this._material.defines || {};
+	  if (sandEnabled) d.USE_SAND = 1;
+	  else delete d.USE_SAND;
+	  if (flecksEnabled) d.USE_FOAM_FLECKS = 1;
+	  else delete d.USE_FOAM_FLECKS;
+	  this._material.defines = d;
+	  this._material.needsUpdate = true;
+	  this._lastDefinesKey = definesKey;
+	}
+
     const elapsed = Number.isFinite(timeInfo?.elapsed) ? timeInfo.elapsed : 0.0;
     u.uTime.value = elapsed;
 
@@ -1548,9 +1781,6 @@ export class WaterEffectV2 extends EffectBase {
       u.uTintColor.value.setRGB(c.r, c.g, c.b);
     }
 
-    if (u.uSandEnabled) {
-      u.uSandEnabled.value = this.params?.sandEnabled ? 1.0 : 0.0;
-    }
     if (u.uSandIntensity) {
       const v = this.params?.sandIntensity;
       u.uSandIntensity.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.18;
@@ -1729,48 +1959,11 @@ export class WaterEffectV2 extends EffectBase {
     }
 
     // Shader-based foam flecks uniform sync
-    if (u.uFoamFlecksEnabled) {
-      u.uFoamFlecksEnabled.value = this.params?.foamFlecksEnabled ? 1.0 : 0.0;
-    }
     if (u.uFoamFlecksIntensity) {
       const fi = this.params?.foamFlecksIntensity;
       u.uFoamFlecksIntensity.value = Number.isFinite(fi) ? Math.max(0.0, fi) : 1.0;
     }
 
-    // GPU foam tear-off uniform sync
-    if (u.uFoamTearEnabled) {
-      u.uFoamTearEnabled.value = this.params?.foamTearEnabled ? 1.0 : 0.0;
-    }
-    if (u.uFoamTearStrength) {
-      const v = this.params?.foamTearStrength;
-      u.uFoamTearStrength.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.0;
-    }
-    if (u.uFoamTearScale) {
-      const v = this.params?.foamTearScale;
-      u.uFoamTearScale.value = Number.isFinite(v) ? Math.max(0.1, v) : 750.0;
-    }
-    if (u.uFoamTearSpeed) {
-      const v = this.params?.foamTearSpeed;
-      u.uFoamTearSpeed.value = Number.isFinite(v) ? v : 1.25;
-    }
-    if (u.uFoamTearDrift) {
-      const v = this.params?.foamTearDrift;
-      u.uFoamTearDrift.value = Number.isFinite(v) ? v : 0.02;
-    }
-
-    // Detached foam turbulence uniform sync
-    if (u.uDetachedTurbStrength) {
-      const v = this.params?.detachedTurbStrength;
-      u.uDetachedTurbStrength.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.35;
-    }
-    if (u.uDetachedTurbScale) {
-      const v = this.params?.detachedTurbScale;
-      u.uDetachedTurbScale.value = Number.isFinite(v) ? Math.max(0.05, v) : 0.25;
-    }
-    if (u.uDetachedTurbSpeed) {
-      const v = this.params?.detachedTurbSpeed;
-      u.uDetachedTurbSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.35;
-    }
 
     u.uDebugView.value = Number.isFinite(this.params?.debugView) ? this.params.debugView : 0.0;
 
@@ -1784,9 +1977,148 @@ export class WaterEffectV2 extends EffectBase {
     const distPx = this.params?.distortionStrengthPx;
     u.uDistortionStrengthPx.value = Number.isFinite(distPx) ? distPx : 3.0;
 
+    // Distortion masking (shader-side)
+    if (u.uDistortionEdgeCenter) {
+      const v = this.params?.distortionEdgeCenter;
+      u.uDistortionEdgeCenter.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.5;
+    }
+    if (u.uDistortionEdgeFeather) {
+      const v = this.params?.distortionEdgeFeather;
+      u.uDistortionEdgeFeather.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.5, v)) : 0.02;
+    }
+    if (u.uDistortionEdgeGamma) {
+      const v = this.params?.distortionEdgeGamma;
+      u.uDistortionEdgeGamma.value = Number.isFinite(v) ? Math.max(0.01, Math.min(12.0, v)) : 1.0;
+    }
+    if (u.uDistortionShoreRemapLo) {
+      const v = this.params?.distortionShoreRemapLo;
+      u.uDistortionShoreRemapLo.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.0;
+    }
+    if (u.uDistortionShoreRemapHi) {
+      const v = this.params?.distortionShoreRemapHi;
+      u.uDistortionShoreRemapHi.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
+    }
+    if (u.uDistortionShorePow) {
+      const v = this.params?.distortionShorePow;
+      u.uDistortionShorePow.value = Number.isFinite(v) ? Math.max(0.01, Math.min(12.0, v)) : 1.0;
+    }
+    if (u.uDistortionShoreMin) {
+      const v = this.params?.distortionShoreMin;
+      u.uDistortionShoreMin.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.35;
+    }
+
+    // Rain distortion (precipitation driven)
+    if (u.uRainEnabled && u.uRainPrecipitation) {
+      const rainEnabled = this.params?.rainDistortionEnabled === false ? 0.0 : 1.0;
+      u.uRainEnabled.value = rainEnabled;
+
+      let precip = 0.0;
+      try {
+        if (this.params?.rainDistortionUseWeather === false) {
+          precip = Number.isFinite(this.params?.rainDistortionPrecipitationOverride)
+            ? this.params.rainDistortionPrecipitationOverride
+            : 0.0;
+        } else {
+          const wc = window.MapShine?.weatherController ?? window.canvas?.mapShine?.weatherController;
+          const ws = (wc && typeof wc.getCurrentState === 'function') ? wc.getCurrentState() : (wc?.currentState ?? null);
+          precip = Number.isFinite(ws?.precipitation) ? ws.precipitation : 0.0;
+        }
+      } catch (_) {
+        precip = 0.0;
+      }
+      precip = Math.max(0.0, Math.min(1.0, precip));
+      u.uRainPrecipitation.value = precip;
+
+      if (u.uRainSplit) {
+        const v = this.params?.rainDistortionSplit;
+        u.uRainSplit.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.5;
+      }
+      if (u.uRainBlend) {
+        const v = this.params?.rainDistortionBlend;
+        u.uRainBlend.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.25, v)) : 0.08;
+      }
+      if (u.uRainGlobalStrength) {
+        const v = this.params?.rainDistortionGlobalStrength;
+        u.uRainGlobalStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(2.0, v)) : 1.0;
+      }
+
+      // Optional indoor damping driven by _Outdoors
+      if (u.uRainIndoorDampingEnabled) {
+        u.uRainIndoorDampingEnabled.value = this.params?.rainIndoorDampingEnabled === false ? 0.0 : 1.0;
+      }
+      if (u.uRainIndoorDampingStrength) {
+        const v = this.params?.rainIndoorDampingStrength;
+        u.uRainIndoorDampingStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
+      }
+
+      if (u.tOutdoorsMask && u.uHasOutdoorsMask) {
+        let outdoorsTex = null;
+        try {
+          const mm = window.MapShine?.maskManager;
+          outdoorsTex = mm ? mm.getTexture('outdoors.scene') : null;
+          if (!outdoorsTex) {
+            const wle = window.MapShine?.windowLightEffect;
+            const cloud = window.MapShine?.cloudEffect;
+            outdoorsTex = wle?.outdoorsMask || cloud?.outdoorsMask || null;
+          }
+        } catch (_) {
+          outdoorsTex = null;
+        }
+        u.tOutdoorsMask.value = outdoorsTex;
+        u.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
+      }
+
+      if (u.uRainRippleStrengthPx) {
+        const v = this.params?.rainRippleStrengthPx;
+        u.uRainRippleStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, Math.min(64.0, v)) : 3.0;
+      }
+      if (u.uRainRippleScale) {
+        const v = this.params?.rainRippleScale;
+        u.uRainRippleScale.value = Number.isFinite(v) ? Math.max(1.0, v) : 220.0;
+      }
+      if (u.uRainRippleSpeed) {
+        const v = this.params?.rainRippleSpeed;
+        u.uRainRippleSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 1.2;
+      }
+      if (u.uRainRippleDensity) {
+        const v = this.params?.rainRippleDensity;
+        u.uRainRippleDensity.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.35;
+      }
+      if (u.uRainRippleSharpness) {
+        const v = this.params?.rainRippleSharpness;
+        u.uRainRippleSharpness.value = Number.isFinite(v) ? Math.max(0.1, Math.min(5.0, v)) : 1.5;
+      }
+
+      if (u.uRainStormStrengthPx) {
+        const v = this.params?.rainStormStrengthPx;
+        u.uRainStormStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, Math.min(64.0, v)) : 14.0;
+      }
+      if (u.uRainStormScale) {
+        const v = this.params?.rainStormScale;
+        u.uRainStormScale.value = Number.isFinite(v) ? Math.max(1.0, v) : 900.0;
+      }
+      if (u.uRainStormSpeed) {
+        const v = this.params?.rainStormSpeed;
+        u.uRainStormSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 1.8;
+      }
+      if (u.uRainStormCurl) {
+        const v = this.params?.rainStormCurl;
+        u.uRainStormCurl.value = Number.isFinite(v) ? Math.max(0.0, Math.min(3.0, v)) : 1.0;
+      }
+
+      if (u.uRainMaxCombinedStrengthPx) {
+        const v = this.params?.rainMaxCombinedStrengthPx;
+        u.uRainMaxCombinedStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, Math.min(64.0, v)) : 24.0;
+      }
+    }
+
     if (u.uWaveDirOffsetRad) {
-      const deg = Number.isFinite(this.params?.waveDirOffsetDeg) ? this.params.waveDirOffsetDeg : -180.0;
+      const deg = Number.isFinite(this.params?.waveDirOffsetDeg) ? this.params.waveDirOffsetDeg : 0.0;
       u.uWaveDirOffsetRad.value = (deg * Math.PI) / 180.0;
+    }
+
+    if (u.uLockWaveTravelToWind) {
+      u.uLockWaveTravelToWind.value = this.params?.lockWaveTravelToWind === false ? 0.0 : 1.0;
     }
 
     if (u.uWaveAppearanceRotRad) {
@@ -1913,7 +2245,11 @@ export class WaterEffectV2 extends EffectBase {
       const img = tex?.image;
       const w = img && img.width ? img.width : (this._waterData?.resolution || 512);
       const h = img && img.height ? img.height : (this._waterData?.resolution || 512);
-      u.uWaterDataTexelSize.value.set(1 / Math.max(1, w), 1 / Math.max(1, h));
+      if (w !== this._lastWaterDataTexW || h !== this._lastWaterDataTexH) {
+        u.uWaterDataTexelSize.value.set(1 / Math.max(1, w), 1 / Math.max(1, h));
+        this._lastWaterDataTexW = w;
+        this._lastWaterDataTexH = h;
+      }
     }
 
     const d = canvas?.dimensions;

@@ -1398,6 +1398,13 @@ export class WeatherParticles {
     this._waterFoamLastViewQV0 = null;
     this._waterFoamLastViewQV1 = null;
 
+    // Tile-driven foam.webp spawning:
+    // We allow per-tile _Water masks to contribute *additional* spawn locations.
+    // These are cached per tile and merged with the global scene _Water points.
+    this._tileWaterFoamCache = new Map(); // tileId -> { key, hardPts, edgePts }
+    this._tileWaterFoamMergedPts = null; // Float32Array (u,v) in scene UVs
+    this._tileShoreFoamMergedPts = null; // Float32Array (u,v,nx,ny) in scene UVs
+
     this._shoreFoamMaskUuid = null;
     this._shoreFoamPoints = null;
     this._shoreFoamShape = null;
@@ -3085,6 +3092,9 @@ _createSnowTexture() {
       ? waterEffect.getWaterDataTexture()
       : null;
 
+    // Tile manager provides per-tile _Water mask textures (already loaded for water occluders).
+    const tileManager = window.MapShine?.tileManager || null;
+
     // Provide WaterEffectV2 data + params to the foam fleck emitter/behavior.
     // This is used for spawn gating ("spawn only where foam is white") and for landed drift
     // (sample water flow field from WaterData BA channels).
@@ -3147,9 +3157,18 @@ _createSnowTexture() {
           this._waterFoamLastViewQV1 = null;
         }
 
+        // Merge in any per-tile foam edge points (if available). These are in the same
+        // scene UV coordinate system as the global _Water mask.
+        this._refreshTileFoamPoints(tileManager);
+        const merged = this._mergeUvPointSets(
+          this._waterFoamPoints,
+          this._tileWaterFoamMergedPts,
+          Math.max(this._waterMaskMaxPoints, 24000)
+        );
+
         // View-dependent spawn: only provide points within the camera-visible rectangle.
-        const viewPts = this._getViewFilteredWaterFoamPoints();
-        this._waterFoamShape.setPoints(viewPts || this._waterFoamPoints);
+        const viewPts = this._getViewFilteredUvPoints(merged);
+        this._waterFoamShape.setPoints(viewPts || merged);
       } else if (this._waterFoamMaskUuid !== null) {
         this._waterFoamMaskUuid = null;
         this._waterFoamPoints = null;
@@ -3171,6 +3190,12 @@ _createSnowTexture() {
           this._shoreFoamShape.setPoints(this._shoreFoamPoints);
           if (this._foamFleckEmitter) this._foamFleckEmitter.setShorePoints(this._shoreFoamPoints);
         }
+
+        // Always allow tiles to contribute additional shoreline points.
+        this._refreshTileFoamPoints(tileManager);
+        const mergedEdge = this._mergeEdgePointSets(this._shoreFoamPoints, this._tileShoreFoamMergedPts, 16000);
+        this._shoreFoamShape.setPoints(mergedEdge);
+        if (this._foamFleckEmitter) this._foamFleckEmitter.setShorePoints(mergedEdge);
       } else if (this._shoreFoamMaskUuid !== null) {
         this._shoreFoamMaskUuid = null;
         this._shoreFoamPoints = null;
@@ -4090,6 +4115,584 @@ _createSnowTexture() {
     if (filled === max) return out;
     const trimmed = new Float32Array(filled * 2);
     trimmed.set(out.subarray(0, filled * 2));
+    return trimmed;
+  }
+
+  _getViewFilteredUvPoints(pts) {
+    if (!pts || pts.length < 2) return null;
+
+    const minX = this._viewMinX;
+    const maxX = this._viewMaxX;
+    const minY = this._viewMinY;
+    const maxY = this._viewMaxY;
+    const sceneX = this._viewSceneX;
+    const sceneY = this._viewSceneY;
+    const sceneW = this._viewSceneW;
+    const sceneH = this._viewSceneH;
+
+    if (
+      !Number.isFinite(minX) || !Number.isFinite(maxX) ||
+      !Number.isFinite(minY) || !Number.isFinite(maxY) ||
+      !Number.isFinite(sceneX) || !Number.isFinite(sceneY) ||
+      !Number.isFinite(sceneW) || !Number.isFinite(sceneH) ||
+      sceneW <= 1e-6 || sceneH <= 1e-6
+    ) {
+      return null;
+    }
+
+    // Convert the visible WORLD rect (Y-up) to mask UVs (u: left->right, v: top->bottom).
+    let u0 = (minX - sceneX) / sceneW;
+    let u1 = (maxX - sceneX) / sceneW;
+    const vTop = 1.0 - ((maxY - sceneY) / sceneH);
+    const vBottom = 1.0 - ((minY - sceneY) / sceneH);
+    let v0 = Math.min(vTop, vBottom);
+    let v1 = Math.max(vTop, vBottom);
+
+    // Clamp to texture UV range.
+    u0 = Math.max(0.0, Math.min(1.0, u0));
+    u1 = Math.max(0.0, Math.min(1.0, u1));
+    v0 = Math.max(0.0, Math.min(1.0, v0));
+    v1 = Math.max(0.0, Math.min(1.0, v1));
+
+    // Quantize to avoid re-filtering every single frame for tiny camera drift.
+    const q = 256;
+    const qU0 = Math.floor(u0 * q);
+    const qU1 = Math.floor(u1 * q);
+    const qV0 = Math.floor(v0 * q);
+    const qV1 = Math.floor(v1 * q);
+    if (
+      qU0 === this._waterFoamLastViewQU0 &&
+      qU1 === this._waterFoamLastViewQU1 &&
+      qV0 === this._waterFoamLastViewQV0 &&
+      qV1 === this._waterFoamLastViewQV1
+    ) {
+      return (this._waterFoamViewBuffer && this._waterFoamViewCount > 0)
+        ? this._waterFoamViewBuffer.subarray(0, this._waterFoamViewCount * 2)
+        : null;
+    }
+    this._waterFoamLastViewQU0 = qU0;
+    this._waterFoamLastViewQU1 = qU1;
+    this._waterFoamLastViewQV0 = qV0;
+    this._waterFoamLastViewQV1 = qV1;
+
+    const maxPoints = Math.max(1, Math.min(this._waterMaskMaxPoints, 24000) | 0);
+    if (!this._waterFoamViewBuffer || this._waterFoamViewBuffer.length < maxPoints * 2) {
+      this._waterFoamViewBuffer = new Float32Array(maxPoints * 2);
+    }
+
+    const count = Math.floor(pts.length / 2);
+    let filled = 0;
+    let eligible = 0;
+    for (let i = 0; i < count; i++) {
+      const o = i * 2;
+      const u = pts[o];
+      const v = pts[o + 1];
+      if (u < u0 || u > u1 || v < v0 || v > v1) continue;
+
+      if (filled < maxPoints) {
+        const outO = filled * 2;
+        this._waterFoamViewBuffer[outO] = u;
+        this._waterFoamViewBuffer[outO + 1] = v;
+        filled++;
+      } else {
+        const j = Math.floor(Math.random() * (eligible + 1));
+        if (j < maxPoints) {
+          const outO = j * 2;
+          this._waterFoamViewBuffer[outO] = u;
+          this._waterFoamViewBuffer[outO + 1] = v;
+        }
+      }
+      eligible++;
+    }
+
+    this._waterFoamViewCount = filled;
+    return filled > 0 ? this._waterFoamViewBuffer.subarray(0, filled * 2) : null;
+  }
+
+  _mergeUvPointSets(aPts, bPts, maxPoints = 24000) {
+    const a = aPts && aPts.length >= 2 ? aPts : null;
+    const b = bPts && bPts.length >= 2 ? bPts : null;
+    if (!a && !b) return null;
+    if (!b) return a;
+    if (!a) return b;
+
+    const aCount = Math.floor(a.length / 2);
+    const bCount = Math.floor(b.length / 2);
+    const max = Math.max(1, maxPoints | 0);
+    const total = aCount + bCount;
+
+    if (total <= max) {
+      const out = new Float32Array(total * 2);
+      out.set(a, 0);
+      out.set(b, aCount * 2);
+      return out;
+    }
+
+    // Reservoir sample across the concatenated stream.
+    const out = new Float32Array(max * 2);
+    let filled = 0;
+    let seen = 0;
+
+    const push = (u, v) => {
+      if (filled < max) {
+        const o = filled * 2;
+        out[o] = u;
+        out[o + 1] = v;
+        filled++;
+      } else {
+        const j = Math.floor(Math.random() * (seen + 1));
+        if (j < max) {
+          const o = j * 2;
+          out[o] = u;
+          out[o + 1] = v;
+        }
+      }
+      seen++;
+    };
+
+    for (let i = 0; i < aCount; i++) {
+      const o = i * 2;
+      push(a[o], a[o + 1]);
+    }
+    for (let i = 0; i < bCount; i++) {
+      const o = i * 2;
+      push(b[o], b[o + 1]);
+    }
+
+    if (filled < 1) return null;
+    if (filled === max) return out;
+    const trimmed = new Float32Array(filled * 2);
+    trimmed.set(out.subarray(0, filled * 2));
+    return trimmed;
+  }
+
+  _mergeEdgePointSets(aPts, bPts, maxPoints = 16000) {
+    const a = aPts && aPts.length >= 4 ? aPts : null;
+    const b = bPts && bPts.length >= 4 ? bPts : null;
+    if (!a && !b) return null;
+    if (!b) return a;
+    if (!a) return b;
+
+    const aCount = Math.floor(a.length / 4);
+    const bCount = Math.floor(b.length / 4);
+    const max = Math.max(1, maxPoints | 0);
+    const total = aCount + bCount;
+
+    if (total <= max) {
+      const out = new Float32Array(total * 4);
+      out.set(a, 0);
+      out.set(b, aCount * 4);
+      return out;
+    }
+
+    const out = new Float32Array(max * 4);
+    let filled = 0;
+    let seen = 0;
+
+    const push = (u, v, nx, ny) => {
+      if (filled < max) {
+        const o = filled * 4;
+        out[o] = u;
+        out[o + 1] = v;
+        out[o + 2] = nx;
+        out[o + 3] = ny;
+        filled++;
+      } else {
+        const j = Math.floor(Math.random() * (seen + 1));
+        if (j < max) {
+          const o = j * 4;
+          out[o] = u;
+          out[o + 1] = v;
+          out[o + 2] = nx;
+          out[o + 3] = ny;
+        }
+      }
+      seen++;
+    };
+
+    for (let i = 0; i < aCount; i++) {
+      const o = i * 4;
+      push(a[o], a[o + 1], a[o + 2], a[o + 3]);
+    }
+    for (let i = 0; i < bCount; i++) {
+      const o = i * 4;
+      push(b[o], b[o + 1], b[o + 2], b[o + 3]);
+    }
+
+    if (filled < 1) return null;
+    if (filled === max) return out;
+    const trimmed = new Float32Array(filled * 4);
+    trimmed.set(out.subarray(0, filled * 4));
+    return trimmed;
+  }
+
+  _refreshTileFoamPoints(tileManager) {
+    if (!tileManager || !tileManager.tileSprites) {
+      this._tileWaterFoamMergedPts = null;
+      this._tileShoreFoamMergedPts = null;
+      return;
+    }
+
+    const bounds = this._sceneBounds;
+    if (!bounds || !Number.isFinite(bounds.x) || !Number.isFinite(bounds.y) || bounds.z <= 1e-6 || bounds.w <= 1e-6) {
+      this._tileWaterFoamMergedPts = null;
+      this._tileShoreFoamMergedPts = null;
+      return;
+    }
+
+    const totalH = (typeof canvas !== 'undefined' && canvas?.dimensions?.height) ? canvas.dimensions.height : null;
+    if (!Number.isFinite(totalH) || totalH <= 0) {
+      this._tileWaterFoamMergedPts = null;
+      this._tileShoreFoamMergedPts = null;
+      return;
+    }
+
+    const tileHardSets = [];
+    const tileEdgeSets = [];
+
+    for (const [tileId, spriteData] of tileManager.tileSprites.entries()) {
+      const tileDoc = spriteData?.tileDoc;
+      const sprite = spriteData?.sprite;
+      if (!tileDoc || !sprite) continue;
+
+      // Only consider tiles that have a resolved/loaded per-tile _Water mask.
+      const occ = sprite.userData?.waterOccluderMesh;
+      const maskTex = occ?.material?.uniforms?.tWaterMask?.value ?? null;
+      const img = maskTex?.image;
+      if (!maskTex || !img) continue;
+
+      const rotDeg = Number.isFinite(tileDoc.rotation) ? tileDoc.rotation : 0;
+      const key = `${maskTex.uuid}|${tileDoc.x}|${tileDoc.y}|${tileDoc.width}|${tileDoc.height}|${rotDeg}|${bounds.x}|${bounds.y}|${bounds.z}|${bounds.w}|${totalH}`;
+      const prev = this._tileWaterFoamCache.get(tileId);
+      if (prev && prev.key === key) {
+        if (prev.hardPts && prev.hardPts.length >= 2) tileHardSets.push(prev.hardPts);
+        if (prev.edgePts && prev.edgePts.length >= 4) tileEdgeSets.push(prev.edgePts);
+        continue;
+      }
+
+      const hardPts = this._generateTileWaterHardEdgePoints(maskTex, tileDoc, bounds, totalH, 0.5, Math.max(1, this._waterMaskStride), 12000);
+      const edgePts = this._generateTileWaterEdgePoints(maskTex, tileDoc, bounds, totalH, this._waterMaskThreshold, Math.max(1, this._waterMaskStride), 8000);
+
+      this._tileWaterFoamCache.set(tileId, { key, hardPts, edgePts });
+
+      if (hardPts && hardPts.length >= 2) tileHardSets.push(hardPts);
+      if (edgePts && edgePts.length >= 4) tileEdgeSets.push(edgePts);
+    }
+
+    // Clean up cache entries for deleted tiles.
+    try {
+      for (const id of this._tileWaterFoamCache.keys()) {
+        if (!tileManager.tileSprites.has(id)) this._tileWaterFoamCache.delete(id);
+      }
+    } catch (_) {
+    }
+
+    this._tileWaterFoamMergedPts = this._mergeManyUvPointSets(tileHardSets, 24000);
+    this._tileShoreFoamMergedPts = this._mergeManyEdgePointSets(tileEdgeSets, 16000);
+  }
+
+  _mergeManyUvPointSets(sets, maxPoints = 24000) {
+    if (!sets || sets.length < 1) return null;
+    if (sets.length === 1) return sets[0];
+
+    // Reservoir sample across all sets.
+    const max = Math.max(1, maxPoints | 0);
+    const out = new Float32Array(max * 2);
+    let filled = 0;
+    let seen = 0;
+
+    for (const s of sets) {
+      if (!s || s.length < 2) continue;
+      const count = Math.floor(s.length / 2);
+      for (let i = 0; i < count; i++) {
+        const o = i * 2;
+        const u = s[o];
+        const v = s[o + 1];
+        if (filled < max) {
+          const outO = filled * 2;
+          out[outO] = u;
+          out[outO + 1] = v;
+          filled++;
+        } else {
+          const j = Math.floor(Math.random() * (seen + 1));
+          if (j < max) {
+            const outO = j * 2;
+            out[outO] = u;
+            out[outO + 1] = v;
+          }
+        }
+        seen++;
+      }
+    }
+
+    if (filled < 1) return null;
+    if (filled === max) return out;
+    const trimmed = new Float32Array(filled * 2);
+    trimmed.set(out.subarray(0, filled * 2));
+    return trimmed;
+  }
+
+  _mergeManyEdgePointSets(sets, maxPoints = 16000) {
+    if (!sets || sets.length < 1) return null;
+    if (sets.length === 1) return sets[0];
+
+    const max = Math.max(1, maxPoints | 0);
+    const out = new Float32Array(max * 4);
+    let filled = 0;
+    let seen = 0;
+
+    for (const s of sets) {
+      if (!s || s.length < 4) continue;
+      const count = Math.floor(s.length / 4);
+      for (let i = 0; i < count; i++) {
+        const o = i * 4;
+        const u = s[o];
+        const v = s[o + 1];
+        const nx = s[o + 2];
+        const ny = s[o + 3];
+        if (filled < max) {
+          const outO = filled * 4;
+          out[outO] = u;
+          out[outO + 1] = v;
+          out[outO + 2] = nx;
+          out[outO + 3] = ny;
+          filled++;
+        } else {
+          const j = Math.floor(Math.random() * (seen + 1));
+          if (j < max) {
+            const outO = j * 4;
+            out[outO] = u;
+            out[outO + 1] = v;
+            out[outO + 2] = nx;
+            out[outO + 3] = ny;
+          }
+        }
+        seen++;
+      }
+    }
+
+    if (filled < 1) return null;
+    if (filled === max) return out;
+    const trimmed = new Float32Array(filled * 4);
+    trimmed.set(out.subarray(0, filled * 4));
+    return trimmed;
+  }
+
+  _tileMaskSampleLumaA(data, w, x, y) {
+    const ix = (y * w + x) * 4;
+    const r = data[ix] / 255;
+    const g = data[ix + 1] / 255;
+    const b = data[ix + 2] / 255;
+    const a = data[ix + 3] / 255;
+    return (0.299 * r + 0.587 * g + 0.114 * b) * a;
+  }
+
+  _tileLocalUvToSceneUv(u, v, tileDoc, sceneBounds, totalH) {
+    // Local tile UV -> Foundry coords (Y-down)
+    const fx0 = tileDoc.x + u * tileDoc.width;
+    const fy0 = tileDoc.y + v * tileDoc.height;
+
+    // Apply tile rotation about its center in Foundry coords.
+    const rotDeg = Number.isFinite(tileDoc.rotation) ? tileDoc.rotation : 0;
+    let fx = fx0;
+    let fy = fy0;
+    if (Math.abs(rotDeg) > 1e-5) {
+      const rad = (rotDeg * Math.PI) / 180;
+      const cx = tileDoc.x + tileDoc.width * 0.5;
+      const cy = tileDoc.y + tileDoc.height * 0.5;
+      const dx = fx0 - cx;
+      const dy = fy0 - cy;
+      const c = Math.cos(rad);
+      const s = Math.sin(rad);
+      fx = cx + dx * c - dy * s;
+      fy = cy + dx * s + dy * c;
+    }
+
+    // Foundry (Y-down) -> world (Y-up)
+    const wx = fx;
+    const wy = totalH - fy;
+
+    // World -> scene UV (v top->bottom)
+    const su = (wx - sceneBounds.x) / sceneBounds.z;
+    const sv = 1.0 - ((wy - sceneBounds.y) / sceneBounds.w);
+    return [su, sv];
+  }
+
+  _rotateWorldNormal(nx, ny, tileDoc) {
+    const rotDeg = Number.isFinite(tileDoc.rotation) ? tileDoc.rotation : 0;
+    if (Math.abs(rotDeg) <= 1e-5) return [nx, ny];
+    const rad = (rotDeg * Math.PI) / 180;
+    const c = Math.cos(rad);
+    const s = Math.sin(rad);
+    return [nx * c - ny * s, nx * s + ny * c];
+  }
+
+  _generateTileWaterHardEdgePoints(maskTexture, tileDoc, sceneBounds, totalH, edgeThreshold = 0.5, stride = 2, maxPoints = 12000) {
+    const image = maskTexture?.image;
+    if (!image) return null;
+    const w = image.width;
+    const h = image.height;
+    if (!w || !h) return null;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    try {
+      ctx.drawImage(image, 0, 0);
+    } catch (_) {
+      return null;
+    }
+    let img;
+    try {
+      img = ctx.getImageData(0, 0, w, h);
+    } catch (_) {
+      return null;
+    }
+    const data = img.data;
+
+    const max = Math.max(1, maxPoints | 0);
+    const out = new Float32Array(max * 2);
+    let filled = 0;
+    let eligible = 0;
+
+    const s = Math.max(1, stride | 0);
+    const sample = (x, y) => this._tileMaskSampleLumaA(data, w, x, y);
+
+    for (let y = 1; y < h - 1; y += s) {
+      for (let x = 1; x < w - 1; x += s) {
+        const v = sample(x, y);
+        if (v < edgeThreshold) continue;
+
+        const left = sample(x - 1, y);
+        const right = sample(x + 1, y);
+        const up = sample(x, y - 1);
+        const down = sample(x, y + 1);
+        const isBoundary = (left < edgeThreshold) || (right < edgeThreshold) || (up < edgeThreshold) || (down < edgeThreshold);
+        if (!isBoundary) continue;
+
+        const uLocal = x / w;
+        const vLocal = y / h;
+        const [su, sv] = this._tileLocalUvToSceneUv(uLocal, vLocal, tileDoc, sceneBounds, totalH);
+        if (su < 0.0 || su > 1.0 || sv < 0.0 || sv > 1.0) continue;
+
+        if (filled < max) {
+          const o = filled * 2;
+          out[o] = su;
+          out[o + 1] = sv;
+          filled++;
+        } else {
+          const j = Math.floor(Math.random() * (eligible + 1));
+          if (j < max) {
+            const o = j * 2;
+            out[o] = su;
+            out[o + 1] = sv;
+          }
+        }
+        eligible++;
+      }
+    }
+
+    if (filled < 1) return null;
+    if (filled === max) return out;
+    const trimmed = new Float32Array(filled * 2);
+    trimmed.set(out.subarray(0, filled * 2));
+    return trimmed;
+  }
+
+  _generateTileWaterEdgePoints(maskTexture, tileDoc, sceneBounds, totalH, threshold = 0.15, stride = 2, maxPoints = 8000) {
+    const image = maskTexture?.image;
+    if (!image) return null;
+    const w = image.width;
+    const h = image.height;
+    if (!w || !h) return null;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    try {
+      ctx.drawImage(image, 0, 0);
+    } catch (_) {
+      return null;
+    }
+    let img;
+    try {
+      img = ctx.getImageData(0, 0, w, h);
+    } catch (_) {
+      return null;
+    }
+    const data = img.data;
+
+    const max = Math.max(1, maxPoints | 0);
+    const out = new Float32Array(max * 4);
+    let filled = 0;
+    let seen = 0;
+
+    const s = Math.max(1, stride | 0);
+    const sample = (x, y) => this._tileMaskSampleLumaA(data, w, x, y);
+
+    for (let y = 1; y < h - 1; y += s) {
+      for (let x = 1; x < w - 1; x += s) {
+        const c0 = sample(x, y);
+        if (c0 < threshold) continue;
+
+        const rl = sample(x - 1, y);
+        const rr = sample(x + 1, y);
+        const ru = sample(x, y - 1);
+        const rd = sample(x, y + 1);
+        const isEdge = (rl < threshold) || (rr < threshold) || (ru < threshold) || (rd < threshold);
+        if (!isEdge) continue;
+
+        // Gradient points from dark->bright. Convert mask Y-down to world Y-up by flipping ny.
+        let nx = rr - rl;
+        let ny = -(rd - ru);
+        const len = Math.sqrt(nx * nx + ny * ny);
+        if (len > 1e-6) {
+          nx /= len;
+          ny /= len;
+        } else {
+          nx = 1.0;
+          ny = 0.0;
+        }
+
+        // Rotate into world space if the tile is rotated.
+        const rN = this._rotateWorldNormal(nx, ny, tileDoc);
+        nx = rN[0];
+        ny = rN[1];
+
+        const uLocal = x / w;
+        const vLocal = y / h;
+        const [su, sv] = this._tileLocalUvToSceneUv(uLocal, vLocal, tileDoc, sceneBounds, totalH);
+        if (su < 0.0 || su > 1.0 || sv < 0.0 || sv > 1.0) continue;
+
+        if (filled < max) {
+          const o = filled * 4;
+          out[o] = su;
+          out[o + 1] = sv;
+          out[o + 2] = nx;
+          out[o + 3] = ny;
+          filled++;
+        } else {
+          const j = Math.floor(Math.random() * (seen + 1));
+          if (j < max) {
+            const o = j * 4;
+            out[o] = su;
+            out[o + 1] = sv;
+            out[o + 2] = nx;
+            out[o + 3] = ny;
+          }
+        }
+        seen++;
+      }
+    }
+
+    if (filled < 1) return null;
+    if (filled === max) return out;
+    const trimmed = new Float32Array(filled * 4);
+    trimmed.set(out.subarray(0, filled * 4));
     return trimmed;
   }
 

@@ -2570,8 +2570,16 @@ _createSnowTexture() {
       uWaterMaskThreshold: { value: 0.15 },
       // When > 0.5, flip the V coordinate when sampling uWaterMask.
       // Use this to match Three.js texture flipY conventions.
-      uWaterMaskFlipY: { value: 0.0 }
+      uWaterMaskFlipY: { value: 0.0 },
+      // Screen-space tile-driven water occluder alpha (from DistortionManager.waterOccluderTarget)
+      tWaterOccluderAlpha: { value: null },
+      uHasWaterOccluderAlpha: { value: 0.0 }
     };
+
+    // Upgrade older cached uniform packs in-place.
+    // (We reuse material.userData.roofUniforms to keep this patcher idempotent.)
+    if (!uniforms.tWaterOccluderAlpha) uniforms.tWaterOccluderAlpha = { value: null };
+    if (!uniforms.uHasWaterOccluderAlpha) uniforms.uHasWaterOccluderAlpha = { value: 0.0 };
 
     // Store for per-frame updates in update()
     material.userData = material.userData || {};
@@ -2644,6 +2652,16 @@ _createSnowTexture() {
       '      msWaterFade *= waterFade;\n' +
       '      if (msWaterFade <= 0.001) discard;\n' +
       '    }\n' +
+      '    // Tile-driven _Water masking (screen-space) via DistortionManager water occluder target.\n' +
+      '    // This suppresses plume particles under tiles whose per-tile _Water masks indicate\n' +
+      '    // no water (i.e., non-water regions of bridges/shore tiles).\n' +
+      '    if (uHasWaterOccluderAlpha > 0.5) {\n' +
+      '      vec2 screenUv2 = gl_FragCoord.xy / uScreenSize;\n' +
+      '      float occA = texture2D(tWaterOccluderAlpha, screenUv2).a;\n' +
+      '      float visible = 1.0 - clamp(occA, 0.0, 1.0);\n' +
+      '      msWaterFade *= visible;\n' +
+      '      if (msWaterFade <= 0.001) discard;\n' +
+      '    }\n' +
       '  }\n';
 
     if (isShaderMat) {
@@ -2661,6 +2679,8 @@ _createSnowTexture() {
       uni.uWaterMaskEnabled = uniforms.uWaterMaskEnabled;
       uni.uWaterMaskThreshold = uniforms.uWaterMaskThreshold;
       uni.uWaterMaskFlipY = uniforms.uWaterMaskFlipY;
+      uni.tWaterOccluderAlpha = uniforms.tWaterOccluderAlpha;
+      uni.uHasWaterOccluderAlpha = uniforms.uHasWaterOccluderAlpha;
 
       if (typeof material.vertexShader === 'string') {
         // All quarks billboard variants use an `offset` attribute plus
@@ -2716,6 +2736,8 @@ _createSnowTexture() {
             'uniform float uWaterMaskEnabled;\n' +
             'uniform float uWaterMaskThreshold;\n' +
             'uniform float uWaterMaskFlipY;\n' +
+            'uniform sampler2D tWaterOccluderAlpha;\n' +
+            'uniform float uHasWaterOccluderAlpha;\n' +
             'void main() {\n' +
             '  float msWaterFade = 1.0;'
           );
@@ -2756,6 +2778,8 @@ _createSnowTexture() {
       shader.uniforms.uWaterMaskEnabled = uniforms.uWaterMaskEnabled;
       shader.uniforms.uWaterMaskThreshold = uniforms.uWaterMaskThreshold;
       shader.uniforms.uWaterMaskFlipY = uniforms.uWaterMaskFlipY;
+      shader.uniforms.tWaterOccluderAlpha = uniforms.tWaterOccluderAlpha;
+      shader.uniforms.uHasWaterOccluderAlpha = uniforms.uHasWaterOccluderAlpha;
 
       const hasRotatedPosition = /\brotatedPosition\b/.test(shader.vertexShader);
 
@@ -2793,6 +2817,8 @@ _createSnowTexture() {
           'uniform float uWaterMaskEnabled;\n' +
           'uniform float uWaterMaskThreshold;\n' +
           'uniform float uWaterMaskFlipY;\n' +
+          'uniform sampler2D tWaterOccluderAlpha;\n' +
+          'uniform float uHasWaterOccluderAlpha;\n' +
           'void main() {\n' +
           '  float msWaterFade = 1.0;'
         );
@@ -3054,6 +3080,7 @@ _createSnowTexture() {
     const waterTex = (waterEffect && typeof waterEffect.getWaterMaskTexture === 'function')
       ? waterEffect.getWaterMaskTexture()
       : (waterEffect?.waterMask || null);
+    const waterOccTex = window.MapShine?.distortionManager?.waterOccluderTarget?.texture ?? null;
     const waterDataTex = (waterEffect && typeof waterEffect.getWaterDataTexture === 'function')
       ? waterEffect.getWaterDataTexture()
       : null;
@@ -3739,6 +3766,11 @@ _createSnowTexture() {
       u.uWaterMaskThreshold.value = this._waterMaskThreshold;
       u.uWaterMask.value = waterTex;
       if (u.uWaterMaskFlipY) u.uWaterMaskFlipY.value = (waterTex && waterTex.flipY === true) ? 1.0 : 0.0;
+
+      if (u.uHasWaterOccluderAlpha && u.tWaterOccluderAlpha) {
+        u.tWaterOccluderAlpha.value = waterOccTex;
+        u.uHasWaterOccluderAlpha.value = waterOccTex ? 1.0 : 0.0;
+      }
     }
 
     if (this._foamBatchMaterial && this._foamBatchMaterial.userData && this._foamBatchMaterial.userData.roofUniforms) {
@@ -3755,6 +3787,11 @@ _createSnowTexture() {
       u.uWaterMask.value = waterTex;
       if (u.uWaterMaskFlipY) u.uWaterMaskFlipY.value = (waterTex && waterTex.flipY === true) ? 1.0 : 0.0;
 
+      if (u.uHasWaterOccluderAlpha && u.tWaterOccluderAlpha) {
+        u.tWaterOccluderAlpha.value = waterOccTex;
+        u.uHasWaterOccluderAlpha.value = waterOccTex ? 1.0 : 0.0;
+      }
+
       // Quarks may rebuild ShaderMaterial.uniforms; also drive the live ShaderMaterial uniforms directly.
       const smu = this._foamBatchMaterial.uniforms;
       if (smu) {
@@ -3769,6 +3806,9 @@ _createSnowTexture() {
         if (smu.uWaterMaskThreshold) smu.uWaterMaskThreshold.value = u.uWaterMaskThreshold.value;
         if (smu.uWaterMask) smu.uWaterMask.value = u.uWaterMask.value;
         if (smu.uWaterMaskFlipY && u.uWaterMaskFlipY) smu.uWaterMaskFlipY.value = u.uWaterMaskFlipY.value;
+
+        if (smu.tWaterOccluderAlpha && u.tWaterOccluderAlpha) smu.tWaterOccluderAlpha.value = u.tWaterOccluderAlpha.value;
+        if (smu.uHasWaterOccluderAlpha && u.uHasWaterOccluderAlpha) smu.uHasWaterOccluderAlpha.value = u.uHasWaterOccluderAlpha.value;
       }
     }
 

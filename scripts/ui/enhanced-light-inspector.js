@@ -352,7 +352,9 @@ export class EnhancedLightInspector {
    * Hide inspector
    */
   hide() {
-    this.container.style.display = 'none';
+    if (this.container?.style) {
+      this.container.style.display = 'none';
+    }
     this.visible = false;
     this.currentLightId = null;
     this.currentLightData = null;

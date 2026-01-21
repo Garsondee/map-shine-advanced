@@ -152,7 +152,7 @@ export class CloudEffect extends EffectBase {
       cloudTopSoftKnee: 2.6,
 
       // Shadow settings
-      shadowOpacity: 1.0,     // How dark cloud shadows are
+      shadowOpacity: 0.7,     // How dark cloud shadows are
       shadowSoftness: 0.9,    // Blur amount for shadow edges
       shadowOffsetScale: 0.3, // How far shadows offset based on sun angle
 
@@ -573,7 +573,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.85
+          default: 0.7
         },
         shadowSoftness: {
           type: 'slider',

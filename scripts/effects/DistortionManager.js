@@ -881,7 +881,16 @@ export class DistortionManager extends EffectBase {
         uWaterCausticsEdgeLo: { value: 0.05 },
         uWaterCausticsEdgeHi: { value: 0.55 },
         uWaterCausticsEdgeBlurTexels: { value: 6.0 },
+
+        uWaterCausticsBrightnessMaskEnabled: { value: 0.0 },
+        uWaterCausticsBrightnessThreshold: { value: 0.55 },
+        uWaterCausticsBrightnessSoftness: { value: 0.20 },
+        uWaterCausticsBrightnessGamma: { value: 1.0 },
         uWaterCausticsDebug: { value: 0.0 },
+
+        // Water-only cloud shadow caustics suppression
+        uWaterCloudCausticsKill: { value: 0.0 },
+        uWaterCloudCausticsCurve: { value: 1.0 },
 
         uWaterFoamEnabled: { value: 0.0 },
         uWaterFoamIntensity: { value: 1.0 },
@@ -972,7 +981,15 @@ export class DistortionManager extends EffectBase {
         uniform float uWaterCausticsEdgeLo;
         uniform float uWaterCausticsEdgeHi;
         uniform float uWaterCausticsEdgeBlurTexels;
+
+        uniform float uWaterCausticsBrightnessMaskEnabled;
+        uniform float uWaterCausticsBrightnessThreshold;
+        uniform float uWaterCausticsBrightnessSoftness;
+        uniform float uWaterCausticsBrightnessGamma;
         uniform float uWaterCausticsDebug;
+
+        uniform float uWaterCloudCausticsKill;
+        uniform float uWaterCloudCausticsCurve;
 
         uniform float uWaterFoamEnabled;
         uniform float uWaterFoamIntensity;
@@ -1109,6 +1126,10 @@ export class DistortionManager extends EffectBase {
           float e2 = waterMaskValue(e2s);
           float w2 = waterMaskValue(w2s);
           return (c * 4.0 + (n + s + e + w) * 2.0 + (ne + nw + se + sw) + (n2 + s2 + e2 + w2)) / 20.0;
+        }
+
+        float msLuminance(vec3 c) {
+          return dot(c, vec3(0.299, 0.587, 0.114));
         }
         
         void main() {
@@ -1371,8 +1392,16 @@ export class DistortionManager extends EffectBase {
 
               float cloudLit = 1.0;
               if (uHasCloudShadow > 0.5 && uHasSceneRect > 0.5) {
-                cloudLit = texture2D(tCloudShadow, sceneUv).r;
+                cloudLit = texture2D(tCloudShadow, vUv).r;
               }
+
+              // Water-specific caustics suppression in cloud shadows.
+              // cloudLit: 1 = lit, 0 = fully shadowed.
+              float cloudShadow = clamp(1.0 - cloudLit, 0.0, 1.0);
+              float killStrength = clamp(uWaterCloudCausticsKill, 0.0, 1.0);
+              float killCurve = max(0.01, uWaterCloudCausticsCurve);
+              float killAmt = killStrength * pow(cloudShadow, killCurve);
+              cloudLit *= max(0.0, 1.0 - killAmt);
 
               float windowBright = 0.0;
               if (uHasWindowLight > 0.5) {
@@ -1383,6 +1412,16 @@ export class DistortionManager extends EffectBase {
 
               float lightGate = max(outdoor * cloudLit, indoor * windowBright);
 
+              float brightnessGate = 1.0;
+              if (uWaterCausticsBrightnessMaskEnabled > 0.5) {
+                float lum = msLuminance(sceneColor.rgb);
+                float th = max(0.0, uWaterCausticsBrightnessThreshold);
+                float soft = max(0.0, uWaterCausticsBrightnessSoftness);
+                float g = smoothstep(th, th + soft, lum);
+                g = pow(max(g, 0.0), max(0.01, uWaterCausticsBrightnessGamma));
+                brightnessGate = clamp(g, 0.0, 1.0);
+              }
+
               // Dual-layer caustics: a soft base + sharp detail
               float cSharp = causticsPattern(sceneUvIso, uTime, uWaterCausticsScale, uWaterCausticsSpeed, uWaterCausticsSharpness);
               float cSoft = causticsPattern(sceneUvIso, uTime * 0.85, uWaterCausticsScale * 0.55, uWaterCausticsSpeed * 0.65, max(0.1, uWaterCausticsSharpness * 0.35));
@@ -1390,7 +1429,7 @@ export class DistortionManager extends EffectBase {
 
               float causticsAmt = uWaterCausticsIntensity * coverage;
               causticsAmt *= murkDamp;
-              causticsAmt *= edge * lightGate * nightVis * skyVig;
+              causticsAmt *= edge * lightGate * brightnessGate * nightVis * skyVig;
               vec3 causticsColor = mix(vec3(1.0, 1.0, 0.85), uWaterTintColor, 0.15);
               vec3 add = causticsColor * c * causticsAmt;
               sceneColor.rgb += add * 1.35;
@@ -1871,6 +1910,34 @@ export class DistortionManager extends EffectBase {
       if (au.uWaterCausticsEdgeLo) au.uWaterCausticsEdgeLo.value = Number.isFinite(waterSource?.params?.causticsEdgeLo) ? waterSource.params.causticsEdgeLo : 0.05;
       if (au.uWaterCausticsEdgeHi) au.uWaterCausticsEdgeHi.value = Number.isFinite(waterSource?.params?.causticsEdgeHi) ? waterSource.params.causticsEdgeHi : 0.55;
       if (au.uWaterCausticsEdgeBlurTexels) au.uWaterCausticsEdgeBlurTexels.value = Number.isFinite(waterSource?.params?.causticsEdgeBlurTexels) ? waterSource.params.causticsEdgeBlurTexels : 6.0;
+
+      // Caustics brightness masking (gate caustics to bright scene areas)
+      if (au.uWaterCausticsBrightnessMaskEnabled) {
+        const v = waterSource?.params?.causticsBrightnessMaskEnabled === true;
+        au.uWaterCausticsBrightnessMaskEnabled.value = v ? 1.0 : 0.0;
+      }
+      if (au.uWaterCausticsBrightnessThreshold) {
+        const v = waterSource?.params?.causticsBrightnessThreshold;
+        au.uWaterCausticsBrightnessThreshold.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.55;
+      }
+      if (au.uWaterCausticsBrightnessSoftness) {
+        const v = waterSource?.params?.causticsBrightnessSoftness;
+        au.uWaterCausticsBrightnessSoftness.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.20;
+      }
+      if (au.uWaterCausticsBrightnessGamma) {
+        const v = waterSource?.params?.causticsBrightnessGamma;
+        au.uWaterCausticsBrightnessGamma.value = Number.isFinite(v) ? Math.max(0.01, v) : 1.0;
+      }
+
+      // Water-only cloud shadow caustics suppression (driven by WaterEffectV2)
+      if (au.uWaterCloudCausticsKill) {
+        const v = waterSource?.params?.cloudShadowCausticsKill;
+        au.uWaterCloudCausticsKill.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.0;
+      }
+      if (au.uWaterCloudCausticsCurve) {
+        const v = waterSource?.params?.cloudShadowCausticsCurve;
+        au.uWaterCloudCausticsCurve.value = Number.isFinite(v) ? Math.max(0.01, v) : 1.0;
+      }
 
       const foamEnabled = !!(waterSource && waterSource.enabled && waterSource.mask && waterSource.params?.windFoamEnabled);
       if (au.uWaterFoamEnabled) au.uWaterFoamEnabled.value = foamEnabled ? 1.0 : 0.0;

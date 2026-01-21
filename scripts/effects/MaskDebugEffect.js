@@ -13,7 +13,7 @@ export class MaskDebugEffect extends EffectBase {
 
     this.params = {
       enabled: false,
-      maskId: 'fire.scene',
+      maskId: 'water.scene',
       sampleSpace: 'auto',
       channel: 'r',
       invert: false,
@@ -68,7 +68,7 @@ export class MaskDebugEffect extends EffectBase {
         enabled: { type: 'boolean', default: false },
         maskId: {
           label: 'Mask',
-          default: 'fire.scene',
+          default: 'water.scene',
           options: options ?? undefined
         },
         sampleSpace: {

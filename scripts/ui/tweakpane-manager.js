@@ -3329,7 +3329,7 @@ export class TweakpaneManager {
 
             const occludesWaterFlag = tileDoc?.getFlag?.('map-shine-advanced', 'occludesWater')
               ?? tileDoc?.flags?.['map-shine-advanced']?.occludesWater;
-            const expectedOccludesWater = (occludesWaterFlag === undefined) ? !expectedOverhead : !!occludesWaterFlag;
+            const expectedOccludesWater = !!occludesWaterFlag;
             const waterOccEnabled = layerEnabled(sprite, WATER_OCCLUDER_LAYER);
             if (waterOccEnabled !== expectedOccludesWater) {
               results.push({ kind: 'surface', effectId: tileId, paramId: 'layers.waterOccluder', status: 'FAIL', error: `layer=${WATER_OCCLUDER_LAYER} enabled=${waterOccEnabled} expected=${expectedOccludesWater}` });

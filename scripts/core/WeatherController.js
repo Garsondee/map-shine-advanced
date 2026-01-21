@@ -44,9 +44,9 @@ export class WeatherController {
     this.currentState = {
       precipitation: 0.0,
       precipType: PrecipitationType.NONE,
-      cloudCover: 0.5,
-      windSpeed: 0.3,
-      windDirection: { x: -0.30901699437494756, y: 0.9510565162951535 }, // 252deg, upgraded to Vector2 in initialize() (Y-down world)
+      cloudCover: 0.0,
+      windSpeed: 0.18,
+      windDirection: { x: 0, y: -1 }, // 90deg, upgraded to Vector2 in initialize() (Y-down world)
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0
@@ -73,9 +73,9 @@ export class WeatherController {
     this.targetState = { 
       precipitation: 0.88,
       precipType: PrecipitationType.NONE,
-      cloudCover: 0.5,
-      windSpeed: 0.3,
-      windDirection: { x: -0.30901699437494756, y: 0.9510565162951535 },
+      cloudCover: 0.0,
+      windSpeed: 0.18,
+      windDirection: { x: 0, y: -1 },
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0
@@ -99,11 +99,11 @@ export class WeatherController {
     // Wind Gust System
     this.gustWaitMin = 4.0;   // Seconds to wait between gusts (min)
     this.gustWaitMax = 42.0;  // Seconds to wait between gusts (max)
-    this.gustDuration = 15.5;  // Duration of a gust
+    this.gustDuration = 9.0;  // Duration of a gust
     this.gustTimer = 0;       // Countdown timer
     this.isGusting = false;   // Current state
     this.currentGustStrength = 0; // Smoothed gust value
-    this.gustStrength = 1.65;      // Multiplier for how strong gusts are compared to base wind
+    this.gustStrength = 1.0;      // Multiplier for how strong gusts are compared to base wind
 
     // Time of Day (0-24)
     this.timeOfDay = 6.6; // Tuned time of day
@@ -204,7 +204,7 @@ export class WeatherController {
 
     // Per-system tuning parameters for precipitation visuals
     this.rainTuning = {
-      intensityScale: 0.8,
+      intensityScale: 2.85,
       streakLength: 0.18,
       dropSize: 3.1,
       dropSizeMin: 1.4,
@@ -224,7 +224,7 @@ export class WeatherController {
 
       // Per-tile splash tuning (4 atlas tiles / splash archetypes)
       // Splash 1: Thin clean ring
-      splash1IntensityScale: 5.3,
+      splash1IntensityScale: 8.45,
       splash1LifeMin: 0.20,
       splash1LifeMax: 0.35,
       splash1SizeMin: 8.0,
@@ -232,7 +232,7 @@ export class WeatherController {
       splash1OpacityPeak: 0.05,
 
       // Splash 2: Thick broken ring
-      splash2IntensityScale: 5.85,
+      splash2IntensityScale: 8.7,
       splash2LifeMin: 0.09,
       splash2LifeMax: 0.22,
       splash2SizeMin: 2.0,
@@ -240,7 +240,7 @@ export class WeatherController {
       splash2OpacityPeak: 0.05,
 
       // Splash 3: Droplets-only pattern
-      splash3IntensityScale: 5.95,
+      splash3IntensityScale: 9.1,
       splash3LifeMin: 0.20,
       splash3LifeMax: 0.79,
       splash3SizeMin: 6.0,
@@ -2187,7 +2187,7 @@ export class WeatherController {
         },
         cloudCover: {
           label: 'Cloud Cover',
-          default: 0.5,
+          default: 0.0,
           min: 0.0,
           max: 1.0,
           step: 0.01,
@@ -2196,7 +2196,7 @@ export class WeatherController {
         // Wind base state (moved into dedicated Wind folder)
         windSpeed: {
           label: 'Base Wind Speed',
-          default: 0.3,
+          default: 0.18,
           min: 0.0,
           max: 1.0,
           step: 0.01,
@@ -2204,7 +2204,7 @@ export class WeatherController {
         },
         windDirection: {
           label: 'Wind Direction (deg)',
-          default: 252.0,
+          default: 90.0,
           min: 0.0,
           max: 360.0,
           step: 1.0,
@@ -2255,7 +2255,7 @@ export class WeatherController {
         },
         gustDuration: {
           label: 'Gust Duration (s)',
-          default: 15.5,
+          default: 9.0,
           min: 0.1,
           max: 30.0,
           step: 0.1,
@@ -2263,7 +2263,7 @@ export class WeatherController {
         },
         gustStrength: {
           label: 'Gust Strength',
-          default: 1.65,
+          default: 1.0,
           min: 0.0,
           max: 3.0,
           step: 0.05,
@@ -2273,7 +2273,7 @@ export class WeatherController {
         // Rain tuning
         rainIntensityScale: {
           label: 'Rain Intensity Scale',
-          default: 0.8,
+          default: 2.85,
           min: 0.0,
           max: 6.0,
           step: 0.05,
@@ -2348,7 +2348,7 @@ export class WeatherController {
         // Splash 1: Thin clean ring
         rainSplash1IntensityScale: {
           label: 'Splash 1 (Thin Ring) Intensity',
-          default: 5.3,
+          default: 8.45,
           min: 0.0,
           max: 10.0,
           step: 0.05,
@@ -2398,7 +2398,7 @@ export class WeatherController {
         // Splash 2: Thick broken ring
         rainSplash2IntensityScale: {
           label: 'Splash 2 (Broken Ring) Intensity',
-          default: 5.85,
+          default: 8.7,
           min: 0.0,
           max: 10.0,
           step: 0.05,
@@ -2448,7 +2448,7 @@ export class WeatherController {
         // Splash 3: Droplets-only pattern
         rainSplash3IntensityScale: {
           label: 'Splash 3 (Droplets) Intensity',
-          default: 5.95,
+          default: 9.1,
           min: 0.0,
           max: 10.0,
           step: 0.05,

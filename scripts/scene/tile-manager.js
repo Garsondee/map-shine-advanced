@@ -520,21 +520,6 @@ export class TileManager {
     }
 
     this._notifyInitialLoadWaiters();
-
-    // After tiles finish their initial texture load (or fail), do a scene-wide pass to
-    // resolve each tile's optional _Water mask and enable occlusion where present.
-    // Run twice: once immediately after initial load, and once shortly after to catch
-    // late-settling tile sources / async texture availability.
-    try {
-      this.waitForInitialTiles({ timeoutMs: 5000 }).then(() => {
-        this._autoDetectWaterOccludersForAllTiles();
-        setTimeout(() => {
-          try { this._autoDetectWaterOccludersForAllTiles(); } catch (_) {}
-        }, 750);
-      }).catch(() => {
-      });
-    } catch (_) {
-    }
   }
 
   _notifyInitialLoadWaiters() {
@@ -1453,6 +1438,7 @@ export class TileManager {
       try {
         if (sprite.userData?._autoOccludesWaterState !== 'overridden') {
           sprite.userData._autoOccludesWaterState = null;
+          sprite.userData._autoOccludesWaterRequestKey = null;
         }
       } catch (_) {
       }
@@ -1469,17 +1455,12 @@ export class TileManager {
           }
         }
 
-        this.loadTileWaterMaskTexture(targetDoc).then((maskTex) => {
-          const occ2 = sprite.userData?.waterOccluderMesh;
-          if (!occ2?.material?.uniforms) return;
-          occ2.material.uniforms.tWaterMask.value = maskTex;
-          occ2.material.uniforms.uHasWaterMask.value = maskTex ? 1.0 : 0.0;
-        }).catch(() => {
-        });
-
-        // Ensure the updated tile gets a chance to (re)detect its _Water mask.
+        // Kick auto-detection again for the new tile texture. This will:
+        // - enable water occlusion if a matching _Water mask exists
+        // - update the water occluder mesh's mask uniforms
+        // - safely no-op (with cached null) if no mask exists
         try {
-          this._autoDetectWaterOccludersForAllTiles();
+          this.updateSpriteTransform(sprite, targetDoc);
         } catch (_) {
         }
 
@@ -1680,52 +1661,81 @@ export class TileManager {
     }
 
     const occludesWaterFlag = getFlag(tileDoc, 'occludesWater');
+
     // Water occlusion behavior:
     // - If the flag is explicitly set, it is authoritative.
-    // - If the flag is unset, auto-enable occlusion ONLY when a tile has a valid
-    //   _Water mask (boats, bridges, platforms). This avoids the old problem where
-    //   most opaque tiles would suppress water everywhere.
+    // - If the flag is unset, attempt to auto-detect a matching _Water mask.
+    //   This is cached per tile base path so scenes with many tiles won't spam requests.
     let occludesWater = false;
     if (occludesWaterFlag !== undefined) {
       occludesWater = !!occludesWaterFlag;
       sprite.userData._autoOccludesWaterState = 'overridden';
+      sprite.userData._autoOccludesWaterRequestKey = null;
     } else {
-      const state = sprite.userData._autoOccludesWaterState;
+      const state = sprite.userData?._autoOccludesWaterState;
       if (state === 'enabled') {
         occludesWater = true;
-      } else if (state === 'disabled' || state === 'pending') {
+      } else if (state === 'disabled') {
         occludesWater = false;
       } else {
-        // First time seeing this tile with no explicit override: check for a _Water mask.
-        sprite.userData._autoOccludesWaterState = 'pending';
-        try {
+        // Unknown state (or pending). Default to disabled until the async probe resolves.
+        occludesWater = false;
+
+        // Only kick a new probe if we're not already waiting.
+        if (state !== 'pending') {
+          sprite.userData._autoOccludesWaterState = 'pending';
+          const tileId = tileDoc?.id ?? '';
+          const src = tileDoc?.texture?.src ?? '';
+          const requestKey = `${tileId}|${src}`;
+          sprite.userData._autoOccludesWaterRequestKey = requestKey;
+
           this.loadTileWaterMaskTexture(tileDoc).then((maskTex) => {
-            const spriteData = this.tileSprites.get(tileDoc.id);
-            const s = spriteData?.sprite;
-            if (!s) return;
+            // Tile could have been removed or changed while awaiting.
+            const current = this.tileSprites.get(tileId);
+            const s = current?.sprite;
+            if (!s || s !== sprite) return;
+
+            if (s.userData?._autoOccludesWaterState === 'overridden') return;
+            if (s.userData?._autoOccludesWaterRequestKey !== requestKey) return;
 
             if (maskTex) {
               s.userData._autoOccludesWaterState = 'enabled';
               s.userData.occludesWater = true;
-              this._ensureWaterOccluderMesh(spriteData, tileDoc);
-              this._updateWaterOccluderMeshTransform(s, tileDoc);
+
+              // Ensure occluder mesh exists and update its uniforms immediately.
+              try {
+                this._ensureWaterOccluderMesh(current, tileDoc);
+                this._updateWaterOccluderMeshTransform(s, tileDoc);
+                const occ = s.userData?.waterOccluderMesh;
+                if (occ?.material?.uniforms?.tWaterMask) {
+                  occ.material.uniforms.tWaterMask.value = maskTex;
+                  if (occ.material.uniforms.uHasWaterMask) {
+                    occ.material.uniforms.uHasWaterMask.value = 1.0;
+                  }
+                }
+              } catch (_) {
+              }
             } else {
               s.userData._autoOccludesWaterState = 'disabled';
               s.userData.occludesWater = false;
-              this._ensureWaterOccluderMesh(spriteData, tileDoc);
+              try {
+                this._ensureWaterOccluderMesh(current, tileDoc);
+              } catch (_) {
+              }
             }
           }).catch(() => {
-            const spriteData = this.tileSprites.get(tileDoc.id);
-            const s = spriteData?.sprite;
-            if (!s) return;
+            const current = this.tileSprites.get(tileDoc?.id);
+            const s = current?.sprite;
+            if (!s || s !== sprite) return;
+            if (s.userData?._autoOccludesWaterState === 'overridden') return;
             s.userData._autoOccludesWaterState = 'disabled';
             s.userData.occludesWater = false;
+            try {
+              this._ensureWaterOccluderMesh(current, tileDoc);
+            } catch (_) {
+            }
           });
-        } catch (_) {
-          sprite.userData._autoOccludesWaterState = 'disabled';
         }
-
-        occludesWater = false;
       }
     }
 

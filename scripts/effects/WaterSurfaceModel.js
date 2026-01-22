@@ -1,3 +1,7 @@
+import { createLogger } from '../core/log.js';
+
+const log = createLogger('WaterSurfaceModel');
+
 export class WaterSurfaceModel {
   constructor() {
     this.texture = null;
@@ -35,8 +39,14 @@ export class WaterSurfaceModel {
     const w = this.resolution;
     const h = this.resolution;
 
+    log.info('buildFromMaskTexture called', { resolution, threshold, channel, invert });
+
     const img = maskTexture?.image;
     if (!img) {
+      log.warn('buildFromMaskTexture: No image found on input maskTexture.');
+    }
+    if (!img) {
+      log.warn('buildFromMaskTexture: build failed, returning null because image was missing.');
       this._hasWater = false;
       this.transform = new THREE.Vector4(0, 0, 1, 1);
       return null;
@@ -47,6 +57,7 @@ export class WaterSurfaceModel {
     canvas.height = h;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) {
+      log.warn('buildFromMaskTexture: Failed to get 2D context.');
       this._hasWater = false;
       this.transform = new THREE.Vector4(0, 0, 1, 1);
       return null;
@@ -208,6 +219,8 @@ export class WaterSurfaceModel {
 
     this.texture = tex;
     this.transform = new THREE.Vector4(0, 0, 1, 1);
+
+    log.info('buildFromMaskTexture: Successfully built water data texture.', { hasWater: this._hasWater });
 
     return {
       texture: this.texture,

@@ -42,7 +42,29 @@ export class MaskDebugEffect extends EffectBase {
   }
 
   static getControlSchema(maskOptions = null) {
-    const options = (maskOptions && typeof maskOptions === 'object') ? maskOptions : null;
+    let options = (maskOptions && typeof maskOptions === 'object') ? { ...maskOptions } : {};
+
+    // Ensure critical masks for debugging are always available
+    const requiredMasks = {
+      'Water Mask': 'water.scene',
+      'Water Data': 'water.data',
+      'Roof Alpha': 'weather.roof.alpha',
+      'Token Mask': 'weather.token.mask'
+    };
+
+    for (const key in requiredMasks) {
+      const id = requiredMasks[key];
+      let found = false;
+      for (const optKey in options) {
+        if (options[optKey] === id) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        options[key] = id;
+      }
+    }
 
     return {
       enabled: false,

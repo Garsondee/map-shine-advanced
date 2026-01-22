@@ -190,14 +190,75 @@ export class ParticleSystem extends EffectBase {
       // We preserve this for backwards compatibility with tuned particle parameters.
       const dt = clampedDelta * 0.001 * baseScale * simSpeed;
 
+      const ms = window.MapShine;
+      const doTimings = ms?.debugQuarksTimings === true;
+      let tStart = 0;
+      let tAfterWeather = 0;
+      let tAfterCull = 0;
+      if (doTimings) tStart = performance.now();
+
       // Update weather systems (pass dt and scene bounds if available)
       if (this.weatherParticles) {
         this.weatherParticles.update(dt, boundsVec4);
       }
 
+      if (doTimings) tAfterWeather = performance.now();
+
       this._applyQuarksCulling();
 
+      if (doTimings) tAfterCull = performance.now();
+
       this.batchRenderer.update(dt); // Quarks expects seconds
+
+      if (doTimings) {
+        const tEnd = performance.now();
+        const wpMs = tAfterWeather - tStart;
+        const cullMs = tAfterCull - tAfterWeather;
+        const quarksMs = tEnd - tAfterCull;
+
+        const acc = this._msPerfAcc || (this._msPerfAcc = { frames: 0, wpMs: 0, cullMs: 0, quarksMs: 0, lastLogFrame: 0 });
+        acc.frames++;
+        acc.wpMs += wpMs;
+        acc.cullMs += cullMs;
+        acc.quarksMs += quarksMs;
+
+        const logEvery = Number.isFinite(ms?.debugQuarksTimingsEvery) ? Math.max(1, Math.floor(ms.debugQuarksTimingsEvery)) : 60;
+        if (acc.frames - acc.lastLogFrame >= logEvery) {
+          const denom = Math.max(1, acc.frames - acc.lastLogFrame);
+          const avgWp = acc.wpMs / denom;
+          const avgCull = acc.cullMs / denom;
+          const avgQuarks = acc.quarksMs / denom;
+
+          acc.wpMs = 0;
+          acc.cullMs = 0;
+          acc.quarksMs = 0;
+          acc.lastLogFrame = acc.frames;
+
+          const wp = this.weatherParticles;
+          const rainE = wp?.rainSystem?.emissionOverTime?.value;
+          const snowE = wp?.snowSystem?.emissionOverTime?.value;
+
+          const payload = {
+            avgMs: {
+              weatherParticlesUpdate: Number(avgWp.toFixed(3)),
+              quarksCulling: Number(avgCull.toFixed(3)),
+              batchRendererUpdate: Number(avgQuarks.toFixed(3))
+            },
+            dt,
+            emission: {
+              rain: Number.isFinite(rainE) ? Math.round(rainE) : null,
+              snow: Number.isFinite(snowE) ? Math.round(snowE) : null
+            },
+            batches: this.batchRenderer?.batches?.length ?? null
+          };
+
+          log.info('[Perf][Quarks]', payload);
+          try {
+            console.log('[Perf][Quarks]', payload);
+          } catch (_) {
+          }
+        }
+      }
     }
   }
 

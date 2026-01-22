@@ -37,7 +37,16 @@ export class WaterEffectV2 extends EffectBase {
       waveScale: 32,
       waveSpeed: 0.18,
       waveStrength: 0.62,
+      waveSpeedUseWind: false,
+      waveSpeedWindMinFactor: 0.35,
+      waveStrengthUseWind: false,
+      waveStrengthWindMinFactor: 0.65,
       distortionStrengthPx: 5.38,
+
+      // Refraction sampling controls
+      refractionMultiTapEnabled: false,
+      chromaticAberrationEnabled: false,
+      chromaticAberrationStrengthPx: 0.75,
 
       waveIndoorDampingEnabled: true,
       waveIndoorDampingStrength: 1.0,
@@ -51,6 +60,16 @@ export class WaterEffectV2 extends EffectBase {
       distortionShoreRemapHi: 1.0,
       distortionShorePow: 1.0,
       distortionShoreMin: 0.35,
+
+      // Shoreline-only high-frequency distortion (fed into DistortionManager)
+      shoreNoiseDistortionEnabled: true,
+      shoreNoiseDistortionStrengthPx: 2.25,
+      shoreNoiseDistortionFrequency: 220.0,
+      shoreNoiseDistortionSpeed: 0.65,
+      // Controls how quickly the noise fades out from the shore toward the interior.
+      // Expressed in water mask "depth" (0..1): lower => thinner band near edges.
+      shoreNoiseDistortionFadeLo: 0.06,
+      shoreNoiseDistortionFadeHi: 0.28,
 
       // Rain-hit surface distortion (precipitation driven)
       rainDistortionEnabled: true,
@@ -166,7 +185,19 @@ export class WaterEffectV2 extends EffectBase {
       foamPlumeSpinMin: -0.18,
       foamPlumeSpinMax: 0.25,
       foamPlumeUseAdditive: true,
+      foamPlumeAdditiveBoost: 1.0,
       foamPlumeColor: { r: 1.0, g: 1.0, b: 1.0 },
+
+      foamPlumeRandomOpacityMin: 1.0,
+      foamPlumeRandomOpacityMax: 1.0,
+
+      foamPlumeRadialAlphaEnabled: false,
+      foamPlumeRadialInnerPos: 0.0,
+      foamPlumeRadialMidPos: 0.5,
+      foamPlumeRadialInnerOpacity: 1.0,
+      foamPlumeRadialMidOpacity: 1.0,
+      foamPlumeRadialOuterOpacity: 1.0,
+      foamPlumeRadialCurve: 1.0,
 
       // Large-scale noise masking for foam.webp particles (break up / intermittent reveal)
       foamParticleNoiseEnabled: true,
@@ -176,6 +207,13 @@ export class WaterEffectV2 extends EffectBase {
       foamParticleNoiseCoverage: 0.46,
       foamParticleNoiseSoftness: 0.5,
       foamParticleNoiseAttempts: 4,
+
+      // Simple foam.webp spawner (WeatherParticles)
+      simpleFoamEnabled: false,
+      simpleFoamThreshold: 0.5,
+      simpleFoamStride: 4,
+      simpleFoamMaxPoints: 20000,
+      simpleFoamDebugFlipV: false,
 
       // GPU foam flecks (high-frequency spray dots)
       foamFlecksEnabled: false,
@@ -256,6 +294,13 @@ export class WaterEffectV2 extends EffectBase {
       maskUseAlpha: 0.0,
       edgeSoftnessTexels: 0.0,
 
+      shoreNoiseEnabled: true,
+      shoreNoiseStrengthPx: 2.25,
+      shoreNoiseFrequency: 220.0,
+      shoreNoiseSpeed: 0.65,
+      shoreNoiseFadeLo: 0.06,
+      shoreNoiseFadeHi: 0.28,
+
       causticsEnabled: true,
       causticsIntensity: 0.25,
       causticsScale: 60.4,
@@ -277,41 +322,142 @@ export class WaterEffectV2 extends EffectBase {
       enabled: true,
       groups: [
         {
-          name: 'water',
-          label: 'Water',
-          type: 'inline',
+          name: 'appearance',
+          label: 'Appearance',
+          type: 'folder',
+          expanded: false,
           parameters: [
             'tintStrength',
-            'tintColor',
-
+            'tintColor'
+          ]
+        },
+        {
+          name: 'mask-shoreline',
+          label: 'Mask & Shoreline',
+          type: 'folder',
+          expanded: false,
+          parameters: [
             'maskChannel',
             'maskInvert',
             'maskThreshold',
             'maskBlurRadius',
             'maskBlurPasses',
             'maskExpandPx',
+
             'buildResolution',
             'sdfRangePx',
-            'shoreWidthPx',
-
+            'shoreWidthPx'
+          ]
+        },
+        {
+          name: 'waves',
+          label: 'Waves',
+          type: 'folder',
+          expanded: false,
+          parameters: [
             'waveScale',
             'waveSpeed',
             'waveStrength',
-            'distortionStrengthPx',
 
             'waveIndoorDampingEnabled',
             'waveIndoorDampingStrength',
-            'waveIndoorMinFactor',
+            'waveIndoorMinFactor'
+          ]
+        },
+        {
+          name: 'wind-flow',
+          label: 'Wind & Flow',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'waveSpeedUseWind',
+            'waveSpeedWindMinFactor',
+            'waveStrengthUseWind',
+            'waveStrengthWindMinFactor',
+
             'lockWaveTravelToWind',
+            'useTargetWindDirection',
+            'windDirResponsiveness',
+
             'waveDirOffsetDeg',
             'waveAppearanceOffsetDeg',
             'advectionDirOffsetDeg',
-            'advectionSpeed',
-            'windDirResponsiveness',
-            'useTargetWindDirection',
-            'specStrength',
-            'specPower',
+            'advectionSpeed'
+          ]
+        },
+        {
+          name: 'refraction-distortion',
+          label: 'Refraction & Distortion',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'distortionStrengthPx',
 
+            'shoreNoiseDistortionEnabled',
+            'shoreNoiseDistortionStrengthPx',
+            'shoreNoiseDistortionFrequency',
+            'shoreNoiseDistortionSpeed',
+            'shoreNoiseDistortionFadeLo',
+            'shoreNoiseDistortionFadeHi',
+
+            'refractionMultiTapEnabled',
+            'chromaticAberrationEnabled',
+            'chromaticAberrationStrengthPx'
+          ]
+        },
+        {
+          name: 'distortion-masking',
+          label: 'Distortion Masking',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'distortionEdgeCenter',
+            'distortionEdgeFeather',
+            'distortionEdgeGamma',
+            'distortionShoreRemapLo',
+            'distortionShoreRemapHi',
+            'distortionShorePow',
+            'distortionShoreMin'
+          ]
+        },
+        {
+          name: 'specular',
+          label: 'Specular',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'specStrength',
+            'specPower'
+          ]
+        },
+        {
+          name: 'specular-advanced',
+          label: 'Specular (Advanced)',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'specSunAzimuthDeg',
+            'specSunElevationDeg',
+            'specSunIntensity',
+            'specNormalStrength',
+            'specNormalScale',
+            'specRoughnessMin',
+            'specRoughnessMax',
+            'specF0',
+            'specMaskGamma',
+            'specSkyTint',
+            'specShoreBias',
+            'specDistortionNormalStrength',
+            'specAnisotropy',
+            'specAnisoRatio'
+          ]
+        },
+        {
+          name: 'foam-surface',
+          label: 'Foam (Surface)',
+          type: 'folder',
+          expanded: false,
+          parameters: [
             'foamStrength',
             'foamColor',
             'foamThreshold',
@@ -337,8 +483,15 @@ export class WaterEffectV2 extends EffectBase {
 
             'floatingFoamStrength',
             'floatingFoamCoverage',
-            'floatingFoamScale',
-
+            'floatingFoamScale'
+          ]
+        },
+        {
+          name: 'sand',
+          label: 'Sand / Sediment',
+          type: 'folder',
+          expanded: false,
+          parameters: [
             'sandEnabled',
             'sandIntensity',
             'sandColor',
@@ -355,22 +508,21 @@ export class WaterEffectV2 extends EffectBase {
             'sandDepthHi',
             'sandAnisotropy',
             'sandDistortionStrength',
-            'sandAdditive',
-            'debugView'
+            'sandAdditive'
           ]
         },
         {
           name: 'rain-distortion',
           label: 'Rain Distortion (Precipitation)',
-          type: 'inline',
-          separator: true,
+          type: 'folder',
+          expanded: false,
           parameters: [
             'rainDistortionEnabled',
             'rainDistortionUseWeather',
             'rainDistortionPrecipitationOverride',
+            'rainDistortionGlobalStrength',
             'rainDistortionSplit',
             'rainDistortionBlend',
-            'rainDistortionGlobalStrength',
 
             'rainIndoorDampingEnabled',
             'rainIndoorDampingStrength',
@@ -392,8 +544,8 @@ export class WaterEffectV2 extends EffectBase {
         {
           name: 'caustics',
           label: 'Caustics (Underwater)',
-          type: 'inline',
-          separator: true,
+          type: 'folder',
+          expanded: false,
           parameters: [
             'causticsEnabled',
             'causticsIntensity',
@@ -407,51 +559,14 @@ export class WaterEffectV2 extends EffectBase {
             'causticsBrightnessMaskEnabled',
             'causticsBrightnessThreshold',
             'causticsBrightnessSoftness',
-            'causticsBrightnessGamma',
-          ]
-        },
-        {
-          name: 'distortion-masking',
-          label: 'Distortion Masking',
-          type: 'inline',
-          separator: true,
-          parameters: [
-            'distortionEdgeCenter',
-            'distortionEdgeFeather',
-            'distortionEdgeGamma',
-            'distortionShoreRemapLo',
-            'distortionShoreRemapHi',
-            'distortionShorePow',
-            'distortionShoreMin',
-          ]
-        },
-        {
-          name: 'specular-advanced',
-          label: 'Specular (Advanced)',
-          type: 'inline',
-          separator: true,
-          parameters: [
-            'specSunAzimuthDeg',
-            'specSunElevationDeg',
-            'specSunIntensity',
-            'specNormalStrength',
-            'specNormalScale',
-            'specRoughnessMin',
-            'specRoughnessMax',
-            'specF0',
-            'specMaskGamma',
-            'specSkyTint',
-            'specShoreBias',
-            'specDistortionNormalStrength',
-            'specAnisotropy',
-            'specAnisoRatio'
+            'causticsBrightnessGamma'
           ]
         },
         {
           name: 'cloud-shadows-water',
-          label: 'Cloud Shadows (Water)',
-          type: 'inline',
-          separator: true,
+          label: 'Cloud Shadows',
+          type: 'folder',
+          expanded: false,
           parameters: [
             'cloudShadowEnabled',
             'cloudShadowDarkenStrength',
@@ -465,8 +580,8 @@ export class WaterEffectV2 extends EffectBase {
         {
           name: 'foam-particles',
           label: 'Foam Particles (foam.webp)',
-          type: 'inline',
-          separator: true,
+          type: 'folder',
+          expanded: false,
           parameters: [
             'shoreFoamEnabled',
             'shoreFoamIntensity',
@@ -488,7 +603,19 @@ export class WaterEffectV2 extends EffectBase {
             'foamPlumeSpinMin',
             'foamPlumeSpinMax',
             'foamPlumeUseAdditive',
+            'foamPlumeAdditiveBoost',
             'foamPlumeColor',
+
+            'foamPlumeRandomOpacityMin',
+            'foamPlumeRandomOpacityMax',
+
+            'foamPlumeRadialAlphaEnabled',
+            'foamPlumeRadialInnerPos',
+            'foamPlumeRadialMidPos',
+            'foamPlumeRadialInnerOpacity',
+            'foamPlumeRadialMidOpacity',
+            'foamPlumeRadialOuterOpacity',
+            'foamPlumeRadialCurve',
 
             'foamParticleNoiseEnabled',
             'foamParticleNoiseStrength',
@@ -500,20 +627,42 @@ export class WaterEffectV2 extends EffectBase {
           ]
         },
         {
+          name: 'foam-simple-spawner',
+          label: 'Simple Foam Spawner (Debug)',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'simpleFoamEnabled',
+            'simpleFoamThreshold',
+            'simpleFoamStride',
+            'simpleFoamMaxPoints',
+            'simpleFoamDebugFlipV'
+          ]
+        },
+        {
           name: 'foam-spray',
           label: 'Foam Spray (GPU)',
-          type: 'inline',
-          separator: true,
+          type: 'folder',
+          expanded: false,
           parameters: [
             'foamFlecksEnabled',
             'foamFlecksIntensity'
+          ]
+        },
+        {
+          name: 'debug',
+          label: 'Debug',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'debugView'
           ]
         }
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        tintStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.2 },
-        tintColor: { type: 'color', default: { r: 0.1, g: 0.3, b: 0.48 } },
+        tintStrength: { type: 'slider', label: 'Tint Strength', min: 0, max: 1, step: 0.01, default: 0.2 },
+        tintColor: { type: 'color', label: 'Tint Color', default: { r: 0.1, g: 0.3, b: 0.48 } },
 
         cloudShadowEnabled: { type: 'boolean', label: 'Enabled', default: true },
         cloudShadowDarkenStrength: { type: 'slider', label: 'Darken Strength', min: 0.0, max: 2.0, step: 0.01, default: 1.25 },
@@ -544,10 +693,25 @@ export class WaterEffectV2 extends EffectBase {
         sdfRangePx: { type: 'slider', label: 'SDF Range (px)', min: 8, max: 256, step: 1, default: 40, throttle: 50 },
         shoreWidthPx: { type: 'slider', label: 'Shore Width (px)', min: 1, max: 128, step: 1, default: 128, throttle: 50 },
 
-        waveScale: { type: 'slider', min: 1, max: 60, step: 0.5, default: 32 },
-        waveSpeed: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.18 },
-        waveStrength: { type: 'slider', min: 0, max: 2.0, step: 0.01, default: 0.62 },
-        distortionStrengthPx: { type: 'slider', min: 0, max: 64.0, step: 0.01, default: 5.38 },
+        waveScale: { type: 'slider', label: 'Wave Scale', min: 1, max: 60, step: 0.5, default: 32 },
+        waveSpeed: { type: 'slider', label: 'Wave Speed', min: 0, max: 2.0, step: 0.01, default: 0.18 },
+        waveStrength: { type: 'slider', label: 'Wave Strength', min: 0, max: 2.0, step: 0.01, default: 0.62 },
+        waveSpeedUseWind: { type: 'boolean', label: 'Wave Speed Linked To Wind', default: false },
+        waveSpeedWindMinFactor: { type: 'slider', label: 'Wave Speed @ Wind=0', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
+        waveStrengthUseWind: { type: 'boolean', label: 'Wave Strength Linked To Wind', default: false },
+        waveStrengthWindMinFactor: { type: 'slider', label: 'Wave Strength @ Wind=0', min: 0.0, max: 1.0, step: 0.01, default: 0.65 },
+        distortionStrengthPx: { type: 'slider', label: 'Distortion Strength (px)', min: 0, max: 64.0, step: 0.01, default: 5.38 },
+
+        shoreNoiseDistortionEnabled: { type: 'boolean', label: 'Shore Noise Enabled', default: true },
+        shoreNoiseDistortionStrengthPx: { type: 'slider', label: 'Shore Noise Strength (px)', min: 0.0, max: 64.0, step: 0.01, default: 2.25 },
+        shoreNoiseDistortionFrequency: { type: 'slider', label: 'Shore Noise Frequency', min: 0.1, max: 1200.0, step: 0.1, default: 220.0 },
+        shoreNoiseDistortionSpeed: { type: 'slider', label: 'Shore Noise Speed', min: 0.0, max: 5.0, step: 0.01, default: 0.65 },
+        shoreNoiseDistortionFadeLo: { type: 'slider', label: 'Shore Noise Fade Lo', min: 0.0, max: 1.0, step: 0.001, default: 0.06 },
+        shoreNoiseDistortionFadeHi: { type: 'slider', label: 'Shore Noise Fade Hi', min: 0.0, max: 1.0, step: 0.001, default: 0.28 },
+
+        refractionMultiTapEnabled: { type: 'boolean', label: 'Refraction Multi-Tap (Blur)', default: false },
+        chromaticAberrationEnabled: { type: 'boolean', label: 'Chromatic Aberration (RGB Shift)', default: false },
+        chromaticAberrationStrengthPx: { type: 'slider', label: 'RGB Shift Strength (px)', min: 0.0, max: 6.0, step: 0.01, default: 0.75 },
 
         waveIndoorDampingEnabled: { type: 'boolean', label: 'Dampen Indoors (_Outdoors)', default: true },
         waveIndoorDampingStrength: { type: 'slider', label: 'Indoor Damp Strength', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
@@ -606,8 +770,8 @@ export class WaterEffectV2 extends EffectBase {
         windDirResponsiveness: { type: 'slider', label: 'Wind Dir Responsiveness', min: 0.1, max: 10.0, step: 0.1, default: 1.4 },
         useTargetWindDirection: { type: 'boolean', label: 'Use Target Wind Dir', default: true },
 
-        specStrength: { type: 'slider', min: 0, max: 250.0, step: 0.01, default: 250 },
-        specPower: { type: 'slider', min: 1, max: 24, step: 0.5, default: 1 },
+        specStrength: { type: 'slider', label: 'Specular Strength', min: 0, max: 250.0, step: 0.01, default: 250 },
+        specPower: { type: 'slider', label: 'Specular Power', min: 1, max: 24, step: 0.5, default: 1 },
 
         specSunAzimuthDeg: { type: 'slider', label: 'Sun Azimuth (deg)', min: 0.0, max: 360.0, step: 1.0, default: 225.0 },
         specSunElevationDeg: { type: 'slider', label: 'Sun Elevation (deg)', min: 1.0, max: 90.0, step: 1.0, default: 65.0 },
@@ -681,7 +845,19 @@ export class WaterEffectV2 extends EffectBase {
         foamPlumeSpinMin: { type: 'slider', label: 'Plume Spin Min', min: -5.0, max: 5.0, step: 0.01, default: -0.18 },
         foamPlumeSpinMax: { type: 'slider', label: 'Plume Spin Max', min: -5.0, max: 5.0, step: 0.01, default: 0.25 },
         foamPlumeUseAdditive: { type: 'boolean', label: 'Plume Additive Blend', default: true },
+        foamPlumeAdditiveBoost: { type: 'slider', label: 'Plume Additive Boost', min: 0.0, max: 20.0, step: 0.01, default: 1.0 },
         foamPlumeColor: { type: 'color', label: 'Plume Color', default: { r: 1.0, g: 1.0, b: 1.0 } },
+
+        foamPlumeRandomOpacityMin: { type: 'slider', label: 'Plume Random Opacity Min', min: 0.0, max: 5.0, step: 0.01, default: 1.0 },
+        foamPlumeRandomOpacityMax: { type: 'slider', label: 'Plume Random Opacity Max', min: 0.0, max: 5.0, step: 0.01, default: 1.0 },
+
+        foamPlumeRadialAlphaEnabled: { type: 'boolean', label: 'Plume Radial Opacity Enabled', default: false },
+        foamPlumeRadialInnerPos: { type: 'slider', label: 'Plume Radial Inner Pos', min: 0.0, max: 1.0, step: 0.001, default: 0.0 },
+        foamPlumeRadialMidPos: { type: 'slider', label: 'Plume Radial Mid Pos', min: 0.0, max: 1.0, step: 0.001, default: 0.5 },
+        foamPlumeRadialInnerOpacity: { type: 'slider', label: 'Plume Radial Inner Opacity', min: 0.0, max: 5.0, step: 0.01, default: 1.0 },
+        foamPlumeRadialMidOpacity: { type: 'slider', label: 'Plume Radial Mid Opacity', min: 0.0, max: 5.0, step: 0.01, default: 1.0 },
+        foamPlumeRadialOuterOpacity: { type: 'slider', label: 'Plume Radial Outer Opacity', min: 0.0, max: 5.0, step: 0.01, default: 1.0 },
+        foamPlumeRadialCurve: { type: 'slider', label: 'Plume Radial Curve', min: 0.1, max: 4.0, step: 0.01, default: 1.0 },
 
         foamParticleNoiseEnabled: { type: 'boolean', label: 'Noise Mask Enabled', default: true },
         foamParticleNoiseStrength: { type: 'slider', label: 'Noise Mask Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.05 },
@@ -689,7 +865,13 @@ export class WaterEffectV2 extends EffectBase {
         foamParticleNoiseSpeed: { type: 'slider', label: 'Noise Speed', min: 0.0, max: 5.0, step: 0.01, default: 0 },
         foamParticleNoiseCoverage: { type: 'slider', label: 'Noise Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.46 },
         foamParticleNoiseSoftness: { type: 'slider', label: 'Noise Softness', min: 0.0, max: 0.5, step: 0.005, default: 0.5 },
-        foamParticleNoiseAttempts: { type: 'slider', label: 'Noise Spawn Attempts', min: 1, max: 32, step: 1, default: 4 },
+        foamParticleNoiseAttempts: { type: 'slider', label: 'Noise Attempts', min: 1, max: 8, step: 1, default: 2 },
+
+        simpleFoamEnabled: { type: 'boolean', label: 'Enable Simple Spawner', default: false },
+        simpleFoamThreshold: { type: 'slider', label: 'Spawn Threshold', min: 0.01, max: 1.0, step: 0.01, default: 0.5 },
+        simpleFoamStride: { type: 'slider', label: 'Scan Stride', min: 1, max: 32, step: 1, default: 4 },
+        simpleFoamMaxPoints: { type: 'number', label: 'Max Points', min: 10, max: 50000, step: 10, default: 20000 },
+        simpleFoamDebugFlipV: { type: 'boolean', label: 'Debug Flip V', default: false },
 
         foamFlecksEnabled: { type: 'boolean', label: 'Foam Flecks (GPU)', default: false },
         foamFlecksIntensity: { type: 'slider', label: 'Flecks Intensity', min: 0.0, max: 6.0, step: 0.01, default: 6 },
@@ -774,6 +956,8 @@ export class WaterEffectV2 extends EffectBase {
         uWaveSpeed: { value: this.params.waveSpeed },
         uWaveStrength: { value: this.params.waveStrength },
         uDistortionStrengthPx: { value: this.params.distortionStrengthPx },
+
+        uChromaticAberrationStrengthPx: { value: this.params.chromaticAberrationStrengthPx },
 
         uWaveIndoorDampingEnabled: { value: this.params.waveIndoorDampingEnabled === false ? 0.0 : 1.0 },
         uWaveIndoorDampingStrength: { value: this.params.waveIndoorDampingStrength },
@@ -945,6 +1129,8 @@ export class WaterEffectV2 extends EffectBase {
         uniform float uWaveSpeed;
         uniform float uWaveStrength;
         uniform float uDistortionStrengthPx;
+
+        uniform float uChromaticAberrationStrengthPx;
 
         uniform float uWaveIndoorDampingEnabled;
         uniform float uWaveIndoorDampingStrength;
@@ -1795,14 +1981,36 @@ export class WaterEffectV2 extends EffectBase {
           // Specular uses the raw field and is faded separately to avoid "cutout" artifacts.
           vec2 offsetUv = offsetUvRaw * distMask;
 
-          // Multi-tap refraction along the offset direction to reduce razor-sharp edges.
-          vec2 uv0 = clamp(vUv + offsetUv * 0.55, vec2(0.001), vec2(0.999));
           vec2 uv1 = clamp(vUv + offsetUv, vec2(0.001), vec2(0.999));
+
+          // Default: single-tap refraction (bandwidth efficient).
+          // Optional: multi-tap smoothing and chromatic aberration are enabled via defines.
+          #ifdef USE_WATER_REFRACTION_MULTITAP
+          vec2 uv0 = clamp(vUv + offsetUv * 0.55, vec2(0.001), vec2(0.999));
           vec2 uv2 = clamp(vUv + offsetUv * 1.55, vec2(0.001), vec2(0.999));
           vec4 refracted =
             texture2D(tDiffuse, uv0) * 0.25 +
             texture2D(tDiffuse, uv1) * 0.50 +
             texture2D(tDiffuse, uv2) * 0.25;
+          #else
+          vec4 refracted = texture2D(tDiffuse, uv1);
+          #endif
+
+          #ifdef USE_WATER_CHROMATIC_ABERRATION
+          vec2 texel2 = 1.0 / max(uResolution, vec2(1.0));
+          float caPx = clamp(uChromaticAberrationStrengthPx, 0.0, 12.0);
+          vec2 dir = offsetUv;
+          float dirLen = length(dir);
+          vec2 dirN = (dirLen > 1e-6) ? (dir / dirLen) : vec2(1.0, 0.0);
+          
+          vec2 caUv = dirN * (caPx * texel2) * clamp(0.25 + 2.0 * distMask, 0.0, 2.5) * zoom;
+
+          vec2 uvR = clamp(uv1 + caUv, vec2(0.001), vec2(0.999));
+          vec2 uvB = clamp(uv1 - caUv, vec2(0.001), vec2(0.999));
+          float rr = texture2D(tDiffuse, uvR).r;
+          float bb = texture2D(tDiffuse, uvB).b;
+          refracted.rgb = vec3(rr, refracted.g, bb);
+          #endif
 
           float k = clamp(uTintStrength, 0.0, 1.0) * inside * shore;
           vec3 col = mix(refracted.rgb, uTintColor, k);
@@ -2103,13 +2311,19 @@ export class WaterEffectV2 extends EffectBase {
 
 	const sandEnabled = !!this.params?.sandEnabled;
 	const flecksEnabled = !!this.params?.foamFlecksEnabled;
-	const definesKey = `${sandEnabled ? 1 : 0}|${flecksEnabled ? 1 : 0}`;
+	const multiTapEnabled = this.params?.refractionMultiTapEnabled === true;
+	const chromEnabled = this.params?.chromaticAberrationEnabled === true;
+	const definesKey = `${sandEnabled ? 1 : 0}|${flecksEnabled ? 1 : 0}|${multiTapEnabled ? 1 : 0}|${chromEnabled ? 1 : 0}`;
 	if (this._lastDefinesKey !== definesKey) {
 	  const d = this._material.defines || {};
 	  if (sandEnabled) d.USE_SAND = 1;
 	  else delete d.USE_SAND;
 	  if (flecksEnabled) d.USE_FOAM_FLECKS = 1;
 	  else delete d.USE_FOAM_FLECKS;
+	  if (multiTapEnabled) d.USE_WATER_REFRACTION_MULTITAP = 1;
+	  else delete d.USE_WATER_REFRACTION_MULTITAP;
+	  if (chromEnabled) d.USE_WATER_CHROMATIC_ABERRATION = 1;
+	  else delete d.USE_WATER_CHROMATIC_ABERRATION;
 	  this._material.defines = d;
 	  this._material.needsUpdate = true;
 	  this._lastDefinesKey = definesKey;
@@ -2141,6 +2355,18 @@ export class WaterEffectV2 extends EffectBase {
           }
           if (typeof dm.updateSourceParams === 'function') {
             const p = this._distortionWaterParams;
+
+            p.shoreNoiseEnabled = this.params?.shoreNoiseDistortionEnabled !== false;
+            p.shoreNoiseStrengthPx = Number.isFinite(this.params?.shoreNoiseDistortionStrengthPx) ? this.params.shoreNoiseDistortionStrengthPx : 2.25;
+            p.shoreNoiseFrequency = Number.isFinite(this.params?.shoreNoiseDistortionFrequency) ? this.params.shoreNoiseDistortionFrequency : 220.0;
+            p.shoreNoiseSpeed = Number.isFinite(this.params?.shoreNoiseDistortionSpeed) ? this.params.shoreNoiseDistortionSpeed : 0.65;
+            p.shoreNoiseFadeLo = Number.isFinite(this.params?.shoreNoiseDistortionFadeLo) ? this.params.shoreNoiseDistortionFadeLo : 0.06;
+            p.shoreNoiseFadeHi = Number.isFinite(this.params?.shoreNoiseDistortionFadeHi) ? this.params.shoreNoiseDistortionFadeHi : 0.28;
+
+            // Provide WaterData so DistortionManager can derive a shoreline band pinned to
+            // the true land/water boundary (exposure01 == 0 at the edge).
+            p.waterDataTexture = this.getWaterDataTexture?.() ?? null;
+
             p.causticsEnabled = this.params?.causticsEnabled !== false;
             p.causticsIntensity = Number.isFinite(this.params?.causticsIntensity) ? this.params.causticsIntensity : 0.25;
             p.causticsScale = Number.isFinite(this.params?.causticsScale) ? this.params.causticsScale : 60.4;
@@ -2172,6 +2398,11 @@ export class WaterEffectV2 extends EffectBase {
       const sceneComposer = window.MapShine?.sceneComposer ?? window.canvas?.mapShine?.sceneComposer;
       const z = sceneComposer?.currentZoom ?? (typeof sceneComposer?.getZoomScale === 'function' ? sceneComposer.getZoomScale() : 1.0);
       u.uZoom.value = Number.isFinite(z) ? z : 1.0;
+    }
+
+    if (u.uChromaticAberrationStrengthPx) {
+      const v = this.params?.chromaticAberrationStrengthPx;
+      u.uChromaticAberrationStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.75;
     }
 
     const dtSeconds = (this._lastTimeValue === null) ? 0.0 : Math.max(0.0, elapsed - this._lastTimeValue);
@@ -2386,12 +2617,42 @@ export class WaterEffectV2 extends EffectBase {
 
     u.uDebugView.value = Number.isFinite(this.params?.debugView) ? this.params.debugView : 0.0;
 
+    // Optional wind-link scaling for wave animation controls.
+    // windSpeed is treated as 0..1 (WeatherController normalized), and we lerp
+    // from a configurable minimum factor at wind=0 up to 1 at wind=1.
+    let _windSpeed01ForWaves = null;
+    try {
+      const wc = window.MapShine?.weatherController ?? window.canvas?.mapShine?.weatherController;
+      const ws = (wc && typeof wc.getCurrentState === 'function') ? wc.getCurrentState() : (wc?.currentState ?? null);
+      const wSpeed = ws?.windSpeed;
+      _windSpeed01ForWaves = Number.isFinite(wSpeed) ? Math.max(0.0, Math.min(1.0, wSpeed)) : 0.0;
+    } catch (_) {
+      _windSpeed01ForWaves = 0.0;
+    }
+
     const waveScale = this.params?.waveScale;
     u.uWaveScale.value = Number.isFinite(waveScale) ? waveScale : 32.0;
     const waveSpeed = this.params?.waveSpeed;
-    u.uWaveSpeed.value = Number.isFinite(waveSpeed) ? waveSpeed : 0.18;
+    let waveSpeedValue = Number.isFinite(waveSpeed) ? waveSpeed : 0.18;
+    if (this.params?.waveSpeedUseWind === true) {
+      const minF = Number.isFinite(this.params?.waveSpeedWindMinFactor)
+        ? Math.max(0.0, Math.min(1.0, this.params.waveSpeedWindMinFactor))
+        : 0.35;
+      const s = Number.isFinite(_windSpeed01ForWaves) ? _windSpeed01ForWaves : 0.0;
+      waveSpeedValue *= (minF + (1.0 - minF) * s);
+    }
+    u.uWaveSpeed.value = waveSpeedValue;
+
     const waveStrength = this.params?.waveStrength;
-    u.uWaveStrength.value = Number.isFinite(waveStrength) ? waveStrength : 0.62;
+    let waveStrengthValue = Number.isFinite(waveStrength) ? waveStrength : 0.62;
+    if (this.params?.waveStrengthUseWind === true) {
+      const minF = Number.isFinite(this.params?.waveStrengthWindMinFactor)
+        ? Math.max(0.0, Math.min(1.0, this.params.waveStrengthWindMinFactor))
+        : 0.65;
+      const s = Number.isFinite(_windSpeed01ForWaves) ? _windSpeed01ForWaves : 0.0;
+      waveStrengthValue *= (minF + (1.0 - minF) * s);
+    }
+    u.uWaveStrength.value = waveStrengthValue;
 
     const distPx = this.params?.distortionStrengthPx;
     u.uDistortionStrengthPx.value = Number.isFinite(distPx) ? distPx : 5.38;
@@ -2888,6 +3149,18 @@ export class WaterEffectV2 extends EffectBase {
       this._waterRawMask = this._waterData?.rawMaskTexture || null;
       this._lastWaterMaskUuid = this.waterMask.uuid;
       this._lastWaterMaskCacheKey = cacheKey;
+
+      // Register the generated data texture so it can be used by other systems (e.g. MaskDebugEffect)
+      const mm = window.MapShine?.maskManager;
+      if (mm && this._waterData?.texture) {
+        mm.setTexture('water.data', this._waterData.texture, {
+          source: 'derived',
+          space: 'sceneUv',
+          lifecycle: 'staticPerScene',
+          uvFlipY: false, // Data textures are generated consistently, no flip
+          channels: 'rgba'
+        });
+      }
     } catch (e) {
       this._waterData = null;
       this._waterRawMask = null;

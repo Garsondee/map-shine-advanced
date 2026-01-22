@@ -19,6 +19,43 @@ import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('WeatherParticles');
+const MAX_SPLASHES = 5000;
+
+// Avoid per-frame allocations in update(): splash tuning reads are table-driven.
+const SPLASH_TUNING_KEYS = [
+  {
+    intensity: 'splash1IntensityScale',
+    lifeMin: 'splash1LifeMin',
+    lifeMax: 'splash1LifeMax',
+    sizeMin: 'splash1SizeMin',
+    sizeMax: 'splash1SizeMax',
+    peak: 'splash1OpacityPeak'
+  },
+  {
+    intensity: 'splash2IntensityScale',
+    lifeMin: 'splash2LifeMin',
+    lifeMax: 'splash2LifeMax',
+    sizeMin: 'splash2SizeMin',
+    sizeMax: 'splash2SizeMax',
+    peak: 'splash2OpacityPeak'
+  },
+  {
+    intensity: 'splash3IntensityScale',
+    lifeMin: 'splash3LifeMin',
+    lifeMax: 'splash3LifeMax',
+    sizeMin: 'splash3SizeMin',
+    sizeMax: 'splash3SizeMax',
+    peak: 'splash3OpacityPeak'
+  },
+  {
+    intensity: 'splash4IntensityScale',
+    lifeMin: 'splash4LifeMin',
+    lifeMax: 'splash4LifeMax',
+    sizeMin: 'splash4SizeMin',
+    sizeMax: 'splash4SizeMax',
+    peak: 'splash4OpacityPeak'
+  }
+];
 
 class RandomRectangleEmitter {
   constructor(parameters = {}) {
@@ -1286,6 +1323,12 @@ class FoamPlumeBehavior {
     this.maxScale = 2.2;
     this.spinMin = -0.18;
     this.spinMax = 0.18;
+
+    // Per-particle random opacity scalar applied on top of peakOpacity.
+    // This is evaluated once at spawn time and then kept stable for the life
+    // of the particle.
+    this.randomOpacityMin = 1.0;
+    this.randomOpacityMax = 1.0;
   }
 
   initialize(particle, system) {
@@ -1295,6 +1338,13 @@ class FoamPlumeBehavior {
     }
     if (particle.color) {
       particle._foamBaseAlpha = particle.color.w;
+    }
+    if (typeof particle._foamOpacityRand !== 'number') {
+      const o0 = Number.isFinite(this.randomOpacityMin) ? this.randomOpacityMin : 1.0;
+      const o1 = Number.isFinite(this.randomOpacityMax) ? this.randomOpacityMax : 1.0;
+      const lo = Math.min(o0, o1);
+      const hi = Math.max(o0, o1);
+      particle._foamOpacityRand = lo + (hi - lo) * Math.random();
     }
     if (typeof particle.rotation === 'number' && typeof particle._foamSpinSpeed !== 'number') {
       const s0 = Number.isFinite(this.spinMin) ? this.spinMin : -0.18;
@@ -1328,7 +1378,8 @@ class FoamPlumeBehavior {
     a01 = a01 * a01;
 
     if (particle.color) {
-      particle.color.w = a01 * this.peakOpacity;
+      const r = (typeof particle._foamOpacityRand === 'number') ? particle._foamOpacityRand : 1.0;
+      particle.color.w = a01 * this.peakOpacity * r;
     }
 
     if (typeof particle.rotation === 'number' && typeof particle._foamSpinSpeed === 'number') {
@@ -1346,6 +1397,8 @@ class FoamPlumeBehavior {
     b.maxScale = this.maxScale;
     b.spinMin = this.spinMin;
     b.spinMax = this.spinMax;
+    b.randomOpacityMin = this.randomOpacityMin;
+    b.randomOpacityMax = this.randomOpacityMax;
     return b;
   }
 
@@ -1378,6 +1431,10 @@ export class WeatherParticles {
 
     this._waterFoamMaskUuid = null;
     this._waterFoamPoints = null;
+    this._waterFoamPointsKey = null;
+
+    this._simpleFoamLastEnabled = null;
+    this._simpleFoamLastPointCount = null;
 
     // View-dependent foam.webp spawning:
     // - We generate a global point cloud from the _Water hard edge.
@@ -1421,6 +1478,10 @@ export class WeatherParticles {
     this._splashMaterial = null;
     this._foamMaterial = null;
 
+    // Cached foam material uniforms & shader patch state.
+    this._lastFoamAdditiveBoost = null;
+    this._lastFoamBatchAdditiveBoost = null;
+
     this._foamPlumeBehavior = null;
 
     this._foamSystem = null;
@@ -1440,6 +1501,15 @@ export class WeatherParticles {
     this._foamFleckLastMaxParticles = null;
     this._foamFleckLastSizeMin = null;
     this._foamFleckLastSizeMax = null;
+
+    // Cache last-applied material tuning to avoid per-frame churn.
+    this._lastFoamOpacity = null;
+    this._lastFoamBlendMode = null;
+    this._lastFoamColorKey = null;
+    this._lastFoamBatchBlendMode = null;
+
+    this._lastFoamFleckOpacity = null;
+    this._lastFoamFleckSystemOpacity = null;
 
     // ROOF / _OUTDOORS MASK INTEGRATION (high level):
     // - WeatherController owns the _Outdoors texture (roofMap) and two flags:
@@ -1629,22 +1699,23 @@ export class WeatherParticles {
     return tex;
   }
 
-_createSnowTexture() {
-  // 1. INCREASE RESOLUTION
-  // Bumped from 32 to 64 per cell. This creates a 128x128 texture.
-  // This ensures flakes look crisp when they fall close to the camera.
-  const cellSize = 64;
-  const grid = 2;
-  const totalSize = cellSize * grid;
+  _createSnowTexture() {
+    // 1. INCREASE RESOLUTION
+    // Bumped from 32 to 64 per cell. This creates a 128x128 texture.
+    // This ensures flakes look crisp when they fall close to the camera.
+    const cellSize = 64;
+    const grid = 2;
+    const totalSize = cellSize * grid;
 
-  const canvas = document.createElement('canvas');
-  canvas.width = totalSize;
-  canvas.height = totalSize;
-  const ctx = canvas.getContext('2d');
+    const canvas = document.createElement('canvas');
+    canvas.width = totalSize;
+    canvas.height = totalSize;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
 
-  const drawFlakeInCell = (cellX, cellY, variant) => {
-    const cx = cellX * cellSize + cellSize / 2;
-    const cy = cellY * cellSize + cellSize / 2;
+    const drawFlakeInCell = (cellX, cellY, variant) => {
+      const cx = cellX * cellSize + cellSize / 2;
+      const cy = cellY * cellSize + cellSize / 2;
     
     // 2. PADDING
     // We leave a roughly 4px gap between the flake and the cell edge.
@@ -1731,26 +1802,26 @@ _createSnowTexture() {
     ctx.restore(); // Reset translation for next cell
   };
 
-  // Generate the 4 variants
-  drawFlakeInCell(0, 0, 0);
-  drawFlakeInCell(1, 0, 1);
-  drawFlakeInCell(0, 1, 2);
-  drawFlakeInCell(1, 1, 3);
+    // Generate the 4 variants
+    drawFlakeInCell(0, 0, 0);
+    drawFlakeInCell(1, 0, 1);
+    drawFlakeInCell(0, 1, 2);
+    drawFlakeInCell(1, 1, 3);
 
-  const tex = new window.THREE.CanvasTexture(canvas);
-  const THREE = window.THREE;
+    const tex = new window.THREE.CanvasTexture(canvas);
+    const THREE = window.THREE;
 
-  if (THREE) {
-    // 5. BETTER FILTERING
-    // Use LinearMipmapLinear so it looks smooth (not pixelated) at a distance,
-    // but retains the crisp shape when close.
-    tex.minFilter = THREE.LinearMipmapLinearFilter;
-    tex.magFilter = THREE.LinearFilter;
-    tex.needsUpdate = true;
+    if (THREE) {
+      // 5. BETTER FILTERING
+      // Use LinearMipmapLinear so it looks smooth (not pixelated) at a distance,
+      // but retains the crisp shape when close.
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.needsUpdate = true;
+    }
+
+    return tex;
   }
-
-  return tex;
-}
 
   _createSplashTexture() {
     // Build a 2x2 atlas of unique splash shapes (4 variants) so each
@@ -2312,6 +2383,9 @@ _createSnowTexture() {
       opacity: 1.0
     });
 
+    foamMaterial.userData = foamMaterial.userData || {};
+    foamMaterial.userData.msFoamPlume = true;
+
     this._foamMaterial = foamMaterial;
     this._patchRoofMaskMaterial(this._foamMaterial);
 
@@ -2581,12 +2655,30 @@ _createSnowTexture() {
       // Screen-space tile-driven water occluder alpha (from DistortionManager.waterOccluderTarget)
       tWaterOccluderAlpha: { value: null },
       uHasWaterOccluderAlpha: { value: 0.0 }
+      ,
+      // Foam plume post-alpha shaping (foam.webp only)
+      uFoamAdditiveBoost: { value: 1.0 },
+      uFoamRadialEnabled: { value: 0.0 },
+      uFoamRadialInnerPos: { value: 0.0 },
+      uFoamRadialMidPos: { value: 0.5 },
+      uFoamRadialInnerOpacity: { value: 1.0 },
+      uFoamRadialMidOpacity: { value: 1.0 },
+      uFoamRadialOuterOpacity: { value: 1.0 },
+      uFoamRadialCurve: { value: 1.0 }
     };
 
     // Upgrade older cached uniform packs in-place.
     // (We reuse material.userData.roofUniforms to keep this patcher idempotent.)
     if (!uniforms.tWaterOccluderAlpha) uniforms.tWaterOccluderAlpha = { value: null };
     if (!uniforms.uHasWaterOccluderAlpha) uniforms.uHasWaterOccluderAlpha = { value: 0.0 };
+    if (!uniforms.uFoamAdditiveBoost) uniforms.uFoamAdditiveBoost = { value: 1.0 };
+    if (!uniforms.uFoamRadialEnabled) uniforms.uFoamRadialEnabled = { value: 0.0 };
+    if (!uniforms.uFoamRadialInnerPos) uniforms.uFoamRadialInnerPos = { value: 0.0 };
+    if (!uniforms.uFoamRadialMidPos) uniforms.uFoamRadialMidPos = { value: 0.5 };
+    if (!uniforms.uFoamRadialInnerOpacity) uniforms.uFoamRadialInnerOpacity = { value: 1.0 };
+    if (!uniforms.uFoamRadialMidOpacity) uniforms.uFoamRadialMidOpacity = { value: 1.0 };
+    if (!uniforms.uFoamRadialOuterOpacity) uniforms.uFoamRadialOuterOpacity = { value: 1.0 };
+    if (!uniforms.uFoamRadialCurve) uniforms.uFoamRadialCurve = { value: 1.0 };
 
     // Store for per-frame updates in update()
     material.userData = material.userData || {};
@@ -2671,6 +2763,44 @@ _createSnowTexture() {
       '    }\n' +
       '  }\n';
 
+    const isFoamPlume = material.userData?.msFoamPlume === true;
+    const foamMarker = 'MS_FOAM_PLUME_ALPHA';
+    const foamUniformsCode =
+      'uniform float uFoamAdditiveBoost;\n' +
+      'uniform float uFoamRadialEnabled;\n' +
+      'uniform float uFoamRadialInnerPos;\n' +
+      'uniform float uFoamRadialMidPos;\n' +
+      'uniform float uFoamRadialInnerOpacity;\n' +
+      'uniform float uFoamRadialMidOpacity;\n' +
+      'uniform float uFoamRadialOuterOpacity;\n' +
+      'uniform float uFoamRadialCurve;\n';
+    const foamAlphaCode =
+      '  // ' + foamMarker + '\n' +
+      '  {\n' +
+      '    // Additive strength boost (used to compensate for low per-particle opacity)\n' +
+      '    // NOTE: this is only intended for foam.webp plume particles.\n' +
+      '    gl_FragColor.a *= max(0.0, uFoamAdditiveBoost);\n' +
+      '    \n' +
+      '    // Optional radial opacity gradient (center->edge) driven by vUv.\n' +
+      '    if (uFoamRadialEnabled > 0.5) {\n' +
+      '      vec2 d = vUv - vec2(0.5);\n' +
+      '      float r = clamp(length(d) * 2.0, 0.0, 1.0);\n' +
+      '      float p0 = clamp(uFoamRadialInnerPos, 0.0, 1.0);\n' +
+      '      float p1 = clamp(uFoamRadialMidPos, 0.0, 1.0);\n' +
+      '      if (p1 < p0) { float tmp = p0; p0 = p1; p1 = tmp; }\n' +
+      '      float curve = max(0.001, uFoamRadialCurve);\n' +
+      '      float t01 = (p1 > p0) ? clamp((r - p0) / (p1 - p0), 0.0, 1.0) : step(p0, r);\n' +
+      '      float t12 = (1.0 > p1) ? clamp((r - p1) / (1.0 - p1), 0.0, 1.0) : step(p1, r);\n' +
+      '      t01 = pow(t01, curve);\n' +
+      '      t12 = pow(t12, curve);\n' +
+      '      float a01 = mix(uFoamRadialInnerOpacity, uFoamRadialMidOpacity, t01);\n' +
+      '      float a12 = mix(uFoamRadialMidOpacity, uFoamRadialOuterOpacity, t12);\n' +
+      '      float sel = step(p1, r);\n' +
+      '      float radialA = mix(a01, a12, sel);\n' +
+      '      gl_FragColor.a *= max(0.0, radialA);\n' +
+      '    }\n' +
+      '  }\n';
+
     if (isShaderMat) {
       // Directly patch the quarks SpriteBatch ShaderMaterial in place. This is
       // the path used for the actual batched rain/snow draw calls produced by
@@ -2688,6 +2818,14 @@ _createSnowTexture() {
       uni.uWaterMaskFlipY = uniforms.uWaterMaskFlipY;
       uni.tWaterOccluderAlpha = uniforms.tWaterOccluderAlpha;
       uni.uHasWaterOccluderAlpha = uniforms.uHasWaterOccluderAlpha;
+      uni.uFoamAdditiveBoost = uniforms.uFoamAdditiveBoost;
+      uni.uFoamRadialEnabled = uniforms.uFoamRadialEnabled;
+      uni.uFoamRadialInnerPos = uniforms.uFoamRadialInnerPos;
+      uni.uFoamRadialMidPos = uniforms.uFoamRadialMidPos;
+      uni.uFoamRadialInnerOpacity = uniforms.uFoamRadialInnerOpacity;
+      uni.uFoamRadialMidOpacity = uniforms.uFoamRadialMidOpacity;
+      uni.uFoamRadialOuterOpacity = uniforms.uFoamRadialOuterOpacity;
+      uni.uFoamRadialCurve = uniforms.uFoamRadialCurve;
 
       if (typeof material.vertexShader === 'string') {
         // All quarks billboard variants use an `offset` attribute plus
@@ -2763,6 +2901,22 @@ _createSnowTexture() {
 
           material.fragmentShader = fs;
         }
+
+        if (isFoamPlume && !material.fragmentShader.includes(foamMarker)) {
+          // Ensure foam plume alpha shaping runs before soft particles + tonemapping.
+          // Keep the existing water/roof discard logic intact.
+          // 1) Declare uniforms at global scope
+          material.fragmentShader = material.fragmentShader.replace(
+            'void main() {',
+            foamUniformsCode + 'void main() {'
+          );
+          // 2) Inject alpha shaping inside main, before soft particles
+          material.fragmentShader = material.fragmentShader.replace(
+            '#include <soft_fragment>',
+            foamAlphaCode + '#include <soft_fragment>'
+          );
+          material.needsUpdate = true;
+        }
       }
 
       material.needsUpdate = true;
@@ -2787,6 +2941,14 @@ _createSnowTexture() {
       shader.uniforms.uWaterMaskFlipY = uniforms.uWaterMaskFlipY;
       shader.uniforms.tWaterOccluderAlpha = uniforms.tWaterOccluderAlpha;
       shader.uniforms.uHasWaterOccluderAlpha = uniforms.uHasWaterOccluderAlpha;
+      shader.uniforms.uFoamAdditiveBoost = uniforms.uFoamAdditiveBoost;
+      shader.uniforms.uFoamRadialEnabled = uniforms.uFoamRadialEnabled;
+      shader.uniforms.uFoamRadialInnerPos = uniforms.uFoamRadialInnerPos;
+      shader.uniforms.uFoamRadialMidPos = uniforms.uFoamRadialMidPos;
+      shader.uniforms.uFoamRadialInnerOpacity = uniforms.uFoamRadialInnerOpacity;
+      shader.uniforms.uFoamRadialMidOpacity = uniforms.uFoamRadialMidOpacity;
+      shader.uniforms.uFoamRadialOuterOpacity = uniforms.uFoamRadialOuterOpacity;
+      shader.uniforms.uFoamRadialCurve = uniforms.uFoamRadialCurve;
 
       const hasRotatedPosition = /\brotatedPosition\b/.test(shader.vertexShader);
 
@@ -2839,6 +3001,19 @@ _createSnowTexture() {
 
         shader.fragmentShader = fs;
       }
+
+      if (isFoamPlume && !shader.fragmentShader.includes(foamMarker) && shader.fragmentShader.includes('#include <soft_fragment>')) {
+        // Declare uniforms at global scope
+        shader.fragmentShader = shader.fragmentShader.replace(
+          'void main() {',
+          foamUniformsCode + 'void main() {'
+        );
+        // Inject alpha shaping inside main
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <soft_fragment>',
+          foamAlphaCode + '#include <soft_fragment>'
+        );
+      }
     };
 
     material.needsUpdate = true;
@@ -2854,6 +3029,12 @@ _createSnowTexture() {
     const mat = batch?.material || null;
     if (!mat) return null;
 
+    // Mark foam materials so _patchRoofMaskMaterial can inject foam-only shader logic.
+    if (cacheProp === '_foamBatchMaterial') {
+      mat.userData = mat.userData || {};
+      mat.userData.msFoamPlume = true;
+    }
+
     // Ensure the actual rendered VFXBatch/SpriteBatch object is on the overlay layer.
     // EffectComposer renders layer 31 in a dedicated overlay pass.
     try {
@@ -2863,22 +3044,45 @@ _createSnowTexture() {
     } catch (_) {
     }
 
-    const marker = 'MS_ROOF_WATER_MASK';
-    const needsShaderPatch = !!(
-      mat &&
-      mat.isShaderMaterial === true &&
-      (
-        (typeof mat.fragmentShader === 'string' && !mat.fragmentShader.includes(marker)) ||
-        !mat.uniforms ||
-        !mat.uniforms.uWaterMaskThreshold ||
-        !mat.uniforms.uWaterMaskEnabled ||
-        !mat.uniforms.uWaterMask
-      )
+    // PERFORMANCE: avoid scanning large shader strings every frame.
+    // We treat the material as "already patched" if:
+    // - our userData flag is set
+    // - fragment/vertex shader string references are unchanged
+    // - critical uniforms exist
+    const ud = mat.userData || (mat.userData = {});
+    const isShaderMat = mat.isShaderMaterial === true;
+    const fsRef = isShaderMat ? mat.fragmentShader : null;
+    const vsRef = isShaderMat ? mat.vertexShader : null;
+    const uniformsOk = !isShaderMat || !!(
+      mat.uniforms &&
+      mat.uniforms.uWaterMaskThreshold &&
+      mat.uniforms.uWaterMaskEnabled &&
+      mat.uniforms.uWaterMask &&
+      mat.uniforms.uRoofMap &&
+      mat.uniforms.uSceneBounds
+    );
+    const alreadyPatched = !!(
+      ud._msRoofMaskPatched === true &&
+      ud._msRoofMaskPatchedFs === fsRef &&
+      ud._msRoofMaskPatchedVs === vsRef &&
+      ud.roofUniforms &&
+      uniformsOk
     );
 
-    if (this[cacheProp] !== mat || !mat.userData || !mat.userData.roofUniforms || needsShaderPatch) {
+    if (this[cacheProp] !== mat || !alreadyPatched) {
       this[cacheProp] = mat;
       this._patchRoofMaskMaterial(mat);
+      // Record shader references after patching.
+      if (mat.userData) {
+        mat.userData._msRoofMaskPatched = true;
+        if (mat.isShaderMaterial === true) {
+          mat.userData._msRoofMaskPatchedFs = mat.fragmentShader;
+          mat.userData._msRoofMaskPatchedVs = mat.vertexShader;
+        } else {
+          mat.userData._msRoofMaskPatchedFs = null;
+          mat.userData._msRoofMaskPatchedVs = null;
+        }
+      }
     }
     return mat;
   }
@@ -2900,6 +3104,32 @@ _createSnowTexture() {
 
     const weather = weatherController.getCurrentState();
     if (!weather) return;
+
+    const ms = window.MapShine;
+    const debugDisableWeatherSplashes = ms?.debugDisableWeatherSplashes === true;
+    const debugDisableWeatherFoam = ms?.debugDisableWeatherFoam === true;
+    const debugDisableWeatherBehaviors = ms?.debugDisableWeatherBehaviors === true;
+
+    // Splash LOD: splashes are tiny micro-detail; when zoomed out, reduce them aggressively.
+    // Optional tuning via console: window.MapShine.weatherSplashScale = 0..1
+    const sceneComposer = window.MapShine?.sceneComposer;
+    const zoom = sceneComposer?.currentZoom || 1.0;
+    const splashZoomLod = (zoom < 1.0) ? Math.max(0.15, zoom) : 1.0;
+    const splashGlobalScale = Number.isFinite(ms?.weatherSplashScale) ? Math.max(0.0, ms.weatherSplashScale) : 1.0;
+    const splashEmissionScale = splashGlobalScale * splashZoomLod * splashZoomLod;
+
+    const dbgKey = `${debugDisableWeatherSplashes ? 1 : 0}|${debugDisableWeatherFoam ? 1 : 0}|${debugDisableWeatherBehaviors ? 1 : 0}`;
+    if (dbgKey !== this._lastDebugKey) {
+      this._lastDebugKey = dbgKey;
+      try {
+        console.log('[WeatherParticles] Debug flags', {
+          debugDisableWeatherSplashes,
+          debugDisableWeatherFoam,
+          debugDisableWeatherBehaviors
+        });
+      } catch (_) {
+      }
+    }
     
     // Safety check: if dt is unexpectedly in MS (e.g. 16.6), clamp it.
     // Three.quarks explodes if given MS instead of Seconds.
@@ -2942,10 +3172,8 @@ _createSnowTexture() {
     // Phase 1 (Quarks perf): view-dependent emission bounds.
     // Reduce spawn area to the camera-visible rectangle (+ margin) instead of the full map.
     // We keep the _Outdoors mask projection in full-scene coordinates via uSceneBounds.
-    const sceneComposer = window.MapShine?.sceneComposer;
     const mainCamera = sceneComposer?.camera;
     if (THREE && sceneComposer && mainCamera) {
-      const zoom = sceneComposer.currentZoom || 1.0;
       const viewportWidth = sceneComposer.baseViewportWidth || window.innerWidth;
       const viewportHeight = sceneComposer.baseViewportHeight || window.innerHeight;
 
@@ -3095,6 +3323,34 @@ _createSnowTexture() {
     // Tile manager provides per-tile _Water mask textures (already loaded for water occluders).
     const tileManager = window.MapShine?.tileManager || null;
 
+    // Determine the effective V flip for CPU-side sampling of the _Water mask.
+    // This must match how water-related textures are interpreted elsewhere (WaterEffectV2/Distortion/etc.)
+    // so that any point clouds derived from _Water align with the rendered water.
+    let waterFlipV = false;
+    if (waterEnabled && waterTex && waterTex.image) {
+      try {
+        if (Number.isFinite(waterParams?.maskFlipY)) {
+          waterFlipV = waterParams.maskFlipY > 0.5;
+        } else {
+          // Prefer MaskManager metadata when available; it represents the correct scene-UV sampling
+          // orientation for the authored mask (and may account for pre-flipped ImageBitmap decode).
+          const mm = window.MapShine?.maskManager;
+          const rec = mm?.getRecord ? mm.getRecord('water.scene') : null;
+          if (rec && typeof rec.uvFlipY === 'boolean') {
+            waterFlipV = rec.uvFlipY;
+          } else if (typeof waterTex?.flipY === 'boolean') {
+            waterFlipV = waterTex.flipY === true;
+          } else {
+            waterFlipV = false;
+          }
+        }
+        // Debug escape hatch: force invert if needed for a given scene.
+        if (waterParams?.foamPlumeDebugFlipV === true) waterFlipV = !waterFlipV;
+      } catch (_) {
+        waterFlipV = waterTex?.flipY === true;
+      }
+    }
+
     // Provide WaterEffectV2 data + params to the foam fleck emitter/behavior.
     // This is used for spawn gating ("spawn only where foam is white") and for landed drift
     // (sample water flow field from WaterData BA channels).
@@ -3116,14 +3372,15 @@ _createSnowTexture() {
 
     if (this._waterHitShape) {
       if (waterEnabled && waterTex && waterTex.image) {
-        const uuid = waterTex.uuid;
-        if (uuid !== this._waterHitMaskUuid) {
-          this._waterHitMaskUuid = uuid;
+        const uuidKey = `${waterTex.uuid}|fv:${waterFlipV ? 1 : 0}`;
+        if (uuidKey !== this._waterHitMaskUuid) {
+          this._waterHitMaskUuid = uuidKey;
           this._waterHitPoints = this._generateWaterSplashPoints(
             waterTex,
             this._waterMaskThreshold,
             this._waterMaskStride,
-            this._waterMaskMaxPoints
+            this._waterMaskMaxPoints,
+            waterFlipV
           );
           this._waterHitShape.setPoints(this._waterHitPoints);
         }
@@ -3134,87 +3391,62 @@ _createSnowTexture() {
       }
     }
 
-    // Water-wide foam points: drive foam.webp systems to spawn anywhere in water (not just edges).
+    // Simple foam spawner: drive foam.webp systems from a direct _Water mask scan.
     if (this._waterFoamShape) {
-      if (waterEnabled && waterTex && waterTex.image) {
-        const uuid = waterTex.uuid;
-        if (uuid !== this._waterFoamMaskUuid) {
-          this._waterFoamMaskUuid = uuid;
-          // Hard-edge point cloud: spawn only near the white/black transition of the _Water mask.
-          // Use a modest stride so we get a dense-enough boundary without huge point counts.
-          const stride = Math.max(1, this._waterMaskStride);
+      const simpleFoamEnabled = !!waterParams?.simpleFoamEnabled;
+      const active = waterEnabled && waterTex && waterTex.image && simpleFoamEnabled;
+
+      if (this._simpleFoamLastEnabled !== active) {
+        this._simpleFoamLastEnabled = active;
+        log.info(`SimpleFoamSpawner: ${active ? 'enabled' : 'disabled'}`);
+      }
+
+      if (active) {
+        const flipV = waterParams?.simpleFoamDebugFlipV ? !waterFlipV : waterFlipV;
+        const threshold = waterParams.simpleFoamThreshold ?? 0.5;
+        const stride = waterParams.simpleFoamStride ?? 4;
+        const maxPoints = waterParams.simpleFoamMaxPoints ?? 20000;
+
+        const pointsKey = `${waterTex.uuid}|simpleEdge|th:${threshold}|st:${stride}|max:${maxPoints}|fv:${flipV ? 1 : 0}`;
+
+        if (pointsKey !== this._waterFoamPointsKey) {
+          this._waterFoamPointsKey = pointsKey;
+          log.info('SimpleFoamSpawner: rebuilding points', { threshold, stride, maxPoints, flipV });
           this._waterFoamPoints = this._generateWaterHardEdgePoints(
             waterTex,
-            0.5,
+            threshold,
             stride,
-            Math.max(this._waterMaskMaxPoints, 24000)
+            maxPoints,
+            flipV
           );
-
-          // Reset view-filter cache when the underlying mask changes.
-          this._waterFoamLastViewQU0 = null;
-          this._waterFoamLastViewQU1 = null;
-          this._waterFoamLastViewQV0 = null;
-          this._waterFoamLastViewQV1 = null;
         }
-
-        // Merge in any per-tile foam edge points (if available). These are in the same
-        // scene UV coordinate system as the global _Water mask.
-        this._refreshTileFoamPoints(tileManager);
-        const merged = this._mergeUvPointSets(
-          this._waterFoamPoints,
-          this._tileWaterFoamMergedPts,
-          Math.max(this._waterMaskMaxPoints, 24000)
-        );
-
-        // View-dependent spawn: only provide points within the camera-visible rectangle.
-        const viewPts = this._getViewFilteredUvPoints(merged);
-        this._waterFoamShape.setPoints(viewPts || merged);
-      } else if (this._waterFoamMaskUuid !== null) {
-        this._waterFoamMaskUuid = null;
+        const pointCount = this._waterFoamPoints ? (this._waterFoamPoints.length / 2) : 0;
+        if (pointCount !== this._simpleFoamLastPointCount) {
+          this._simpleFoamLastPointCount = pointCount;
+          log.info(`SimpleFoamSpawner: setting ${pointCount} points`);
+        }
+        this._waterFoamShape.setPoints(this._waterFoamPoints);
+      } else if (this._waterFoamPoints) {
         this._waterFoamPoints = null;
+        this._waterFoamPointsKey = null;
+        this._simpleFoamLastPointCount = 0;
         this._waterFoamShape.clearPoints();
       }
     }
 
-    if (this._shoreFoamShape) {
-      if (waterEnabled && waterTex && waterTex.image) {
-        const uuid = waterTex.uuid;
-        if (uuid !== this._shoreFoamMaskUuid) {
-          this._shoreFoamMaskUuid = uuid;
-          this._shoreFoamPoints = this._generateWaterEdgePoints(
-            waterTex,
-            this._waterMaskThreshold,
-            this._waterMaskStride,
-            12000
-          );
-          this._shoreFoamShape.setPoints(this._shoreFoamPoints);
-          if (this._foamFleckEmitter) this._foamFleckEmitter.setShorePoints(this._shoreFoamPoints);
-        }
-
-        // Always allow tiles to contribute additional shoreline points.
-        this._refreshTileFoamPoints(tileManager);
-        const mergedEdge = this._mergeEdgePointSets(this._shoreFoamPoints, this._tileShoreFoamMergedPts, 16000);
-        this._shoreFoamShape.setPoints(mergedEdge);
-        if (this._foamFleckEmitter) this._foamFleckEmitter.setShorePoints(mergedEdge);
-      } else if (this._shoreFoamMaskUuid !== null) {
-        this._shoreFoamMaskUuid = null;
-        this._shoreFoamPoints = null;
-        this._shoreFoamShape.clearPoints();
-        if (this._foamFleckEmitter) this._foamFleckEmitter.setShorePoints(null);
-      }
-    }
 
     // Interior water points (proxy for floating foam spawn locations)
     if (waterEnabled && waterTex && waterTex.image) {
-      const uuid = waterTex.uuid;
-      if (uuid !== this._foamFleckInteriorMaskUuid) {
-        this._foamFleckInteriorMaskUuid = uuid;
+      const uuidKey = `${waterTex.uuid}|fv:${waterFlipV ? 1 : 0}`;
+      if (uuidKey !== this._foamFleckInteriorMaskUuid) {
+        this._foamFleckInteriorMaskUuid = uuidKey;
         // Larger stride to keep this cheap; we only need a coarse point cloud.
         this._foamFleckInteriorPoints = this._generateWaterInteriorPoints(
           waterTex,
           this._waterMaskThreshold,
           Math.max(2, this._waterMaskStride * 3),
-          8000
+          8000,
+          waterFlipV
         );
         if (this._foamFleckEmitter) this._foamFleckEmitter.setInteriorPoints(this._foamFleckInteriorPoints);
       }
@@ -3278,6 +3510,13 @@ _createSnowTexture() {
       // LightingEffect not available
     }
     const hasRoofAlphaMap = !!roofAlphaTexture;
+
+    // DIAGNOSTIC: allow disabling the precipitation roof/outdoors masking at runtime.
+    // Toggle via console: window.MapShine.disableWeatherRoofMask = true/false
+    // This helps A/B test whether the mask sampling/discard path is a major GPU cost.
+    const debugDisableWeatherRoofMask = window.MapShine?.disableWeatherRoofMask === true;
+    const effectiveRoofMaskEnabled = roofMaskEnabled && !debugDisableWeatherRoofMask;
+    const effectiveHasRoofAlphaMap = hasRoofAlphaMap && !debugDisableWeatherRoofMask;
 
     const precip = weather.precipitation || 0;
     const freeze = weather.freezeLevel || 0;
@@ -3345,11 +3584,9 @@ _createSnowTexture() {
           const targetOpacity = THREE.MathUtils.clamp(alphaScale * 1.2, 0.0, 1.0);
           if (this._rainMaterial) {
             this._rainMaterial.opacity = targetOpacity;
-            this._rainMaterial.needsUpdate = true;
           }
           if (this.rainSystem.material) {
             this.rainSystem.material.opacity = targetOpacity;
-            this.rainSystem.material.needsUpdate = true;
           }
 
           // Particle alpha
@@ -3366,26 +3603,26 @@ _createSnowTexture() {
         // Apply roof mask uniforms for rain (base material)
         if (this._rainMaterial && this._rainMaterial.userData && this._rainMaterial.userData.roofUniforms) {
           const uniforms = this._rainMaterial.userData.roofUniforms;
-          uniforms.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
-          uniforms.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
+          uniforms.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+          uniforms.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
           if (this._sceneBounds) {
             uniforms.uSceneBounds.value.copy(this._sceneBounds);
           }
           uniforms.uRoofMap.value = this._roofTexture;
-          uniforms.uRoofAlphaMap.value = roofAlphaTexture;
+          uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
           uniforms.uScreenSize.value.set(screenWidth, screenHeight);
         }
 
         // Also drive the batch ShaderMaterial uniforms used by quarks for rain.
         if (this._rainBatchMaterial && this._rainBatchMaterial.userData && this._rainBatchMaterial.userData.roofUniforms) {
           const uniforms = this._rainBatchMaterial.userData.roofUniforms;
-          uniforms.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
-          uniforms.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
+          uniforms.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+          uniforms.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
           if (this._sceneBounds) {
             uniforms.uSceneBounds.value.copy(this._sceneBounds);
           }
           uniforms.uRoofMap.value = this._roofTexture;
-          uniforms.uRoofAlphaMap.value = roofAlphaTexture;
+          uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
           uniforms.uScreenSize.value.set(screenWidth, screenHeight);
         }
     }
@@ -3405,69 +3642,25 @@ _createSnowTexture() {
           splashPrecipFactor = THREE ? THREE.MathUtils.clamp(t, 0.0, 1.0) : Math.max(0, Math.min(1, t));
         }
 
-        const perSplash = [
-          {
-            system: this.splashSystems[0],
-            tuning: {
-              intensity: rainTuning.splash1IntensityScale,
-              lifeMin: rainTuning.splash1LifeMin,
-              lifeMax: rainTuning.splash1LifeMax,
-              sizeMin: rainTuning.splash1SizeMin,
-              sizeMax: rainTuning.splash1SizeMax,
-              peak:    rainTuning.splash1OpacityPeak
-            },
-            alphaBehavior: this._splashAlphaBehaviors?.[0]
-          },
-          {
-            system: this.splashSystems[1],
-            tuning: {
-              intensity: rainTuning.splash2IntensityScale,
-              lifeMin: rainTuning.splash2LifeMin,
-              lifeMax: rainTuning.splash2LifeMax,
-              sizeMin: rainTuning.splash2SizeMin,
-              sizeMax: rainTuning.splash2SizeMax,
-              peak:    rainTuning.splash2OpacityPeak
-            },
-            alphaBehavior: this._splashAlphaBehaviors?.[1]
-          },
-          {
-            system: this.splashSystems[2],
-            tuning: {
-              intensity: rainTuning.splash3IntensityScale,
-              lifeMin: rainTuning.splash3LifeMin,
-              lifeMax: rainTuning.splash3LifeMax,
-              sizeMin: rainTuning.splash3SizeMin,
-              sizeMax: rainTuning.splash3SizeMax,
-              peak:    rainTuning.splash3OpacityPeak
-            },
-            alphaBehavior: this._splashAlphaBehaviors?.[2]
-          },
-          {
-            system: this.splashSystems[3],
-            tuning: {
-              intensity: rainTuning.splash4IntensityScale,
-              lifeMin: rainTuning.splash4LifeMin,
-              lifeMax: rainTuning.splash4LifeMax,
-              sizeMin: rainTuning.splash4SizeMin,
-              sizeMax: rainTuning.splash4SizeMax,
-              peak:    rainTuning.splash4OpacityPeak
-            },
-            alphaBehavior: this._splashAlphaBehaviors?.[3]
-          }
-        ];
-
-        for (const entry of perSplash) {
-          const system = entry.system;
+        for (let i = 0; i < 4; i++) {
+          const system = this.splashSystems[i];
           if (!system) continue;
 
-          const t = entry.tuning || {};
+          const keys = SPLASH_TUNING_KEYS[i];
+          const alphaBehavior = this._splashAlphaBehaviors?.[i];
+          const intensityScale = rainTuning[keys.intensity];
+          const lifeMinT = rainTuning[keys.lifeMin];
+          const lifeMaxT = rainTuning[keys.lifeMax];
+          const sizeMinT = rainTuning[keys.sizeMin];
+          const sizeMaxT = rainTuning[keys.sizeMax];
+          const peakT = rainTuning[keys.peak];
 
           // Base emission scaled by rain intensity, precipitation curve, and per-splash intensity.
-          const splashIntensityScale = t.intensity ?? 0.0;
+          const splashIntensityScale = intensityScale ?? 0.0;
           let splashEmission = 0;
-          if (baseIntensity > 0 && splashIntensityScale > 0 && splashPrecipFactor > 0) {
+          if (!debugDisableWeatherSplashes && baseIntensity > 0 && splashIntensityScale > 0 && splashPrecipFactor > 0) {
             // 200 splashes/sec at full intensity, further scaled per splash and precipitation factor.
-            splashEmission = 200 * baseIntensity * splashIntensityScale * splashPrecipFactor;
+            splashEmission = 200 * baseIntensity * splashIntensityScale * splashPrecipFactor * splashEmissionScale;
           }
 
           // PERFORMANCE: Mutate existing values instead of creating new objects every frame
@@ -3476,37 +3669,56 @@ _createSnowTexture() {
             emissionVal.value = splashEmission;
           }
 
+          // A/B perf testing: allow turning off splash rendering entirely.
+          try {
+            if (system.emitter) system.emitter.visible = !debugDisableWeatherSplashes;
+          } catch (_) {
+          }
+
+          // Reduce Quarks overhead by pausing splash systems when not emitting.
+          // (Quarks has non-trivial per-system update even at 0 spawn rate.)
+          try {
+            const shouldRun = !debugDisableWeatherSplashes && splashEmission > 0.0001;
+            const ud = system.emitter?.userData || null;
+            const prev = ud ? ud._msSplashActive : undefined;
+            if (ud) ud._msSplashActive = shouldRun;
+            if (prev !== shouldRun) {
+              if (shouldRun) system.play?.(); else system.pause?.();
+            }
+          } catch (_) {
+          }
+
           // --- Lifetime Tuning for this splash ---
-          const lifeMin = Math.max(0.001, t.lifeMin ?? 0.1);
-          const lifeMax = Math.max(lifeMin, t.lifeMax ?? 0.2);
+          const lifeMin = Math.max(0.001, lifeMinT ?? 0.1);
+          const lifeMax = Math.max(lifeMin, lifeMaxT ?? 0.2);
           if (system.startLife && typeof system.startLife.a === 'number') {
             system.startLife.a = lifeMin;
             system.startLife.b = lifeMax;
           }
 
           // --- Size Tuning for this splash ---
-          const sizeMin = t.sizeMin ?? 12.0;
-          const sizeMax = Math.max(sizeMin, t.sizeMax ?? 24.0);
+          const sizeMin = sizeMinT ?? 12.0;
+          const sizeMax = Math.max(sizeMin, sizeMaxT ?? 24.0);
           if (system.startSize && typeof system.startSize.a === 'number') {
             system.startSize.a = sizeMin;
             system.startSize.b = sizeMax;
           }
 
           // --- Opacity Peak Tuning for this splash ---
-          const peak = (t.peak ?? 0.10) * darknessBrightnessScale;
-          if (entry.alphaBehavior) {
-            entry.alphaBehavior.peakOpacity = peak;
+          const peak = (peakT ?? 0.10) * darknessBrightnessScale;
+          if (alphaBehavior) {
+            alphaBehavior.peakOpacity = peak;
           }
         }
 
         // --- Mask Uniforms ---
         if (this._splashMaterial && this._splashMaterial.userData.roofUniforms) {
            const u = this._splashMaterial.userData.roofUniforms;
-           u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
-           u.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
+           u.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+           u.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
            if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
            u.uRoofMap.value = this._roofTexture;
-           u.uRoofAlphaMap.value = roofAlphaTexture;
+           u.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
            u.uScreenSize.value.set(screenWidth, screenHeight);
         }
 
@@ -3514,11 +3726,11 @@ _createSnowTexture() {
           for (const mat of this._splashBatchMaterials) {
             if (!mat || !mat.userData || !mat.userData.roofUniforms) continue;
             const u = mat.userData.roofUniforms;
-            u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
-            u.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
+            u.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+            u.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
             if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
             u.uRoofMap.value = this._roofTexture;
-            u.uRoofAlphaMap.value = roofAlphaTexture;
+            u.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
             u.uScreenSize.value.set(screenWidth, screenHeight);
           }
         }
@@ -3539,8 +3751,8 @@ _createSnowTexture() {
         if (!sys) continue;
 
         let emission = 0;
-        if (waterEnabled && this._waterHitPoints && baseIntensity > 0 && splashPrecipFactor > 0) {
-          emission = 80 * baseIntensity * splashPrecipFactor;
+        if (!debugDisableWeatherSplashes && waterEnabled && this._waterHitPoints && baseIntensity > 0 && splashPrecipFactor > 0) {
+          emission = 80 * baseIntensity * splashPrecipFactor * splashEmissionScale;
         }
 
         if (sys.emissionOverTime && typeof sys.emissionOverTime.value === 'number') {
@@ -3550,10 +3762,33 @@ _createSnowTexture() {
         if (entry.alphaBehavior) {
           entry.alphaBehavior.peakOpacity = 0.27 * darknessBrightnessScale;
         }
+
+        // Allow turning off splash rendering entirely for A/B perf testing.
+        try {
+          if (sys.emitter) sys.emitter.visible = !debugDisableWeatherSplashes;
+        } catch (_) {
+        }
+
+        // Pause when not emitting to avoid per-system overhead.
+        try {
+          const shouldRun = !debugDisableWeatherSplashes && emission > 0.0001;
+          const ud = sys.emitter?.userData || null;
+          const prev = ud ? ud._msSplashActive : undefined;
+          if (ud) ud._msSplashActive = shouldRun;
+          if (prev !== shouldRun) {
+            if (shouldRun) sys.play?.(); else sys.pause?.();
+          }
+        } catch (_) {
+        }
       }
     }
 
-    if (this._foamSystem) {
+    if (this._foamSystem && !debugDisableWeatherFoam) {
+      // Ensure re-enable restores visibility.
+      try {
+        if (this._foamSystem.emitter) this._foamSystem.emitter.visible = true;
+      } catch (_) {
+      }
       const foamEnabled = (waterParams?.shoreFoamEnabled ?? true) === true;
       const foamIntensity = Number.isFinite(waterParams?.shoreFoamIntensity) ? waterParams.shoreFoamIntensity : 1.0;
       const windSpeed = weather.windSpeed || 0;
@@ -3608,16 +3843,75 @@ _createSnowTexture() {
       const plumeOpacity = Number.isFinite(waterParams?.foamPlumeOpacity) ? Math.max(0.0, waterParams.foamPlumeOpacity) : 1.0;
       const plumeColor = waterParams?.foamPlumeColor;
       if (this._foamMaterial) {
-        this._foamMaterial.opacity = plumeOpacity * darknessBrightnessScale;
-        if (plumeColor && typeof plumeColor.r === 'number') {
-          this._foamMaterial.color.setRGB(plumeColor.r, plumeColor.g, plumeColor.b);
+        const nextOpacity = plumeOpacity * darknessBrightnessScale;
+        if (nextOpacity !== this._lastFoamOpacity) {
+          this._lastFoamOpacity = nextOpacity;
+          this._foamMaterial.opacity = nextOpacity;
         }
-        this._foamMaterial.blending = (waterParams?.foamPlumeUseAdditive === true) ? THREE.AdditiveBlending : THREE.NormalBlending;
-        this._foamMaterial.needsUpdate = true;
+        if (plumeColor && typeof plumeColor.r === 'number') {
+          const key = `${plumeColor.r}|${plumeColor.g}|${plumeColor.b}`;
+          if (key !== this._lastFoamColorKey) {
+            this._lastFoamColorKey = key;
+            this._foamMaterial.color.setRGB(plumeColor.r, plumeColor.g, plumeColor.b);
+          }
+        }
+
+        const nextBlend = (waterParams?.foamPlumeUseAdditive === true) ? THREE.AdditiveBlending : THREE.NormalBlending;
+        if (nextBlend !== this._lastFoamBlendMode) {
+          this._lastFoamBlendMode = nextBlend;
+          this._foamMaterial.blending = nextBlend;
+          this._foamMaterial.needsUpdate = true;
+        }
+
+        // Shader-side alpha shaping controls (foam.webp only)
+        const u = this._foamMaterial.userData?.roofUniforms || null;
+        if (u) {
+          const additiveBoost = Number.isFinite(waterParams?.foamPlumeAdditiveBoost)
+            ? Math.max(0.0, waterParams.foamPlumeAdditiveBoost)
+            : 1.0;
+          const boost = (waterParams?.foamPlumeUseAdditive === true) ? additiveBoost : 1.0;
+          if (boost !== this._lastFoamAdditiveBoost) {
+            this._lastFoamAdditiveBoost = boost;
+            u.uFoamAdditiveBoost.value = boost;
+          }
+
+          const radialEnabled = (waterParams?.foamPlumeRadialAlphaEnabled === true) ? 1.0 : 0.0;
+          u.uFoamRadialEnabled.value = radialEnabled;
+          u.uFoamRadialInnerPos.value = Number.isFinite(waterParams?.foamPlumeRadialInnerPos) ? waterParams.foamPlumeRadialInnerPos : 0.0;
+          u.uFoamRadialMidPos.value = Number.isFinite(waterParams?.foamPlumeRadialMidPos) ? waterParams.foamPlumeRadialMidPos : 0.5;
+          u.uFoamRadialInnerOpacity.value = Number.isFinite(waterParams?.foamPlumeRadialInnerOpacity) ? waterParams.foamPlumeRadialInnerOpacity : 1.0;
+          u.uFoamRadialMidOpacity.value = Number.isFinite(waterParams?.foamPlumeRadialMidOpacity) ? waterParams.foamPlumeRadialMidOpacity : 1.0;
+          u.uFoamRadialOuterOpacity.value = Number.isFinite(waterParams?.foamPlumeRadialOuterOpacity) ? waterParams.foamPlumeRadialOuterOpacity : 1.0;
+          u.uFoamRadialCurve.value = Number.isFinite(waterParams?.foamPlumeRadialCurve) ? Math.max(0.1, waterParams.foamPlumeRadialCurve) : 1.0;
+        }
       }
       if (this._foamBatchMaterial) {
-        this._foamBatchMaterial.blending = (waterParams?.foamPlumeUseAdditive === true) ? THREE.AdditiveBlending : THREE.NormalBlending;
-        this._foamBatchMaterial.needsUpdate = true;
+        const nextBlend = (waterParams?.foamPlumeUseAdditive === true) ? THREE.AdditiveBlending : THREE.NormalBlending;
+        if (nextBlend !== this._lastFoamBatchBlendMode) {
+          this._lastFoamBatchBlendMode = nextBlend;
+          this._foamBatchMaterial.blending = nextBlend;
+          this._foamBatchMaterial.needsUpdate = true;
+        }
+
+        const u = this._foamBatchMaterial.userData?.roofUniforms || null;
+        if (u) {
+          const additiveBoost = Number.isFinite(waterParams?.foamPlumeAdditiveBoost)
+            ? Math.max(0.0, waterParams.foamPlumeAdditiveBoost)
+            : 1.0;
+          const boost = (waterParams?.foamPlumeUseAdditive === true) ? additiveBoost : 1.0;
+          if (boost !== this._lastFoamBatchAdditiveBoost) {
+            this._lastFoamBatchAdditiveBoost = boost;
+            u.uFoamAdditiveBoost.value = boost;
+          }
+
+          u.uFoamRadialEnabled.value = (waterParams?.foamPlumeRadialAlphaEnabled === true) ? 1.0 : 0.0;
+          u.uFoamRadialInnerPos.value = Number.isFinite(waterParams?.foamPlumeRadialInnerPos) ? waterParams.foamPlumeRadialInnerPos : 0.0;
+          u.uFoamRadialMidPos.value = Number.isFinite(waterParams?.foamPlumeRadialMidPos) ? waterParams.foamPlumeRadialMidPos : 0.5;
+          u.uFoamRadialInnerOpacity.value = Number.isFinite(waterParams?.foamPlumeRadialInnerOpacity) ? waterParams.foamPlumeRadialInnerOpacity : 1.0;
+          u.uFoamRadialMidOpacity.value = Number.isFinite(waterParams?.foamPlumeRadialMidOpacity) ? waterParams.foamPlumeRadialMidOpacity : 1.0;
+          u.uFoamRadialOuterOpacity.value = Number.isFinite(waterParams?.foamPlumeRadialOuterOpacity) ? waterParams.foamPlumeRadialOuterOpacity : 1.0;
+          u.uFoamRadialCurve.value = Number.isFinite(waterParams?.foamPlumeRadialCurve) ? Math.max(0.1, waterParams.foamPlumeRadialCurve) : 1.0;
+        }
       }
 
       if (this._foamPlumeBehavior) {
@@ -3628,12 +3922,34 @@ _createSnowTexture() {
         this._foamPlumeBehavior.maxScale = Number.isFinite(waterParams?.foamPlumeMaxScale) ? Math.max(0.01, waterParams.foamPlumeMaxScale) : 2.2;
         this._foamPlumeBehavior.spinMin = Number.isFinite(waterParams?.foamPlumeSpinMin) ? waterParams.foamPlumeSpinMin : -0.18;
         this._foamPlumeBehavior.spinMax = Number.isFinite(waterParams?.foamPlumeSpinMax) ? waterParams.foamPlumeSpinMax : 0.18;
+
+        // Spawn-time random opacity multiplier bounds.
+        this._foamPlumeBehavior.randomOpacityMin = Number.isFinite(waterParams?.foamPlumeRandomOpacityMin)
+          ? Math.max(0.0, waterParams.foamPlumeRandomOpacityMin)
+          : 1.0;
+        this._foamPlumeBehavior.randomOpacityMax = Number.isFinite(waterParams?.foamPlumeRandomOpacityMax)
+          ? Math.max(0.0, waterParams.foamPlumeRandomOpacityMax)
+          : 1.0;
+      }
+    } else if (this._foamSystem) {
+      // A/B perf testing: allow disabling foam systems without changing scene settings.
+      try {
+        if (this._foamSystem.emissionOverTime && typeof this._foamSystem.emissionOverTime.value === 'number') {
+          this._foamSystem.emissionOverTime.value = 0;
+        }
+        if (this._foamSystem.emitter) this._foamSystem.emitter.visible = false;
+      } catch (_) {
       }
     }
 
 
     // Foam flecks: only when we have an outdoors mask (outdoors-only rule) and water+foam are active.
-    if (this._foamFleckSystem) {
+    if (this._foamFleckSystem && !debugDisableWeatherFoam) {
+      // Ensure re-enable restores visibility.
+      try {
+        if (this._foamFleckSystem.emitter) this._foamFleckSystem.emitter.visible = true;
+      } catch (_) {
+      }
       const flecksEnabled = (waterEffect?.params?.foamFlecksEnabled ?? true) === true;
       const flecksIntensity = waterEffect?.params?.foamFlecksIntensity ?? 1.0;
       const maxParticles = waterEffect?.params?.foamFlecksMaxParticles;
@@ -3755,13 +4071,28 @@ _createSnowTexture() {
       // Couple brightness to darkness like other weather so dots aren't self-illuminated.
       if (this._foamFleckMaterial) {
         const op = Number.isFinite(p.foamFlecksOpacity) ? Math.max(0.0, p.foamFlecksOpacity) : 1.0;
-        this._foamFleckMaterial.opacity = op * darknessBrightnessScale;
-        this._foamFleckMaterial.needsUpdate = true;
+        const nextOpacity = op * darknessBrightnessScale;
+        if (nextOpacity !== this._lastFoamFleckOpacity) {
+          this._lastFoamFleckOpacity = nextOpacity;
+          this._foamFleckMaterial.opacity = nextOpacity;
+        }
       }
       if (this._foamFleckSystem.material) {
         const op = Number.isFinite(p.foamFlecksOpacity) ? Math.max(0.0, p.foamFlecksOpacity) : 1.0;
-        this._foamFleckSystem.material.opacity = op * darknessBrightnessScale;
-        this._foamFleckSystem.material.needsUpdate = true;
+        const nextOpacity = op * darknessBrightnessScale;
+        if (nextOpacity !== this._lastFoamFleckSystemOpacity) {
+          this._lastFoamFleckSystemOpacity = nextOpacity;
+          this._foamFleckSystem.material.opacity = nextOpacity;
+        }
+      }
+    } else if (this._foamFleckSystem) {
+      // A/B perf testing: allow disabling foam flecks without changing scene settings.
+      try {
+        if (this._foamFleckSystem.emissionOverTime && typeof this._foamFleckSystem.emissionOverTime.value === 'number') {
+          this._foamFleckSystem.emissionOverTime.value = 0;
+        }
+        if (this._foamFleckSystem.emitter) this._foamFleckSystem.emitter.visible = false;
+      } catch (_) {
       }
     }
 
@@ -3769,22 +4100,22 @@ _createSnowTexture() {
       for (const mat of this._waterHitSplashBatchMaterials) {
         if (!mat || !mat.userData || !mat.userData.roofUniforms) continue;
         const u = mat.userData.roofUniforms;
-        u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
-        u.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
+        u.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+        u.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
         if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
         u.uRoofMap.value = this._roofTexture;
-        u.uRoofAlphaMap.value = roofAlphaTexture;
+        u.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
         u.uScreenSize.value.set(screenWidth, screenHeight);
       }
     }
 
     if (this._foamMaterial && this._foamMaterial.userData && this._foamMaterial.userData.roofUniforms) {
       const u = this._foamMaterial.userData.roofUniforms;
-      u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
-      u.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
+      u.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+      u.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
       if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
       u.uRoofMap.value = this._roofTexture;
-      u.uRoofAlphaMap.value = roofAlphaTexture;
+      u.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
       u.uScreenSize.value.set(screenWidth, screenHeight);
 
       u.uWaterMaskEnabled.value = (waterEnabled && !!waterTex) ? 1.0 : 0.0;
@@ -3800,11 +4131,11 @@ _createSnowTexture() {
 
     if (this._foamBatchMaterial && this._foamBatchMaterial.userData && this._foamBatchMaterial.userData.roofUniforms) {
       const u = this._foamBatchMaterial.userData.roofUniforms;
-      u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
-      u.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
+      u.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+      u.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
       if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
       u.uRoofMap.value = this._roofTexture;
-      u.uRoofAlphaMap.value = roofAlphaTexture;
+      u.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
       u.uScreenSize.value.set(screenWidth, screenHeight);
 
       u.uWaterMaskEnabled.value = (waterEnabled && !!waterTex) ? 1.0 : 0.0;
@@ -3867,38 +4198,38 @@ _createSnowTexture() {
 
         // Scale curl noise strength based on tuning so users can dial swirl intensity.
         if (this._snowCurl && this._snowCurlBaseStrength) {
-          const curlStrength = snowTuning.curlStrength ?? 1.0;
+          const curlStrength = debugDisableWeatherBehaviors ? 0.0 : (snowTuning.curlStrength ?? 1.0);
           this._snowCurl.strength.copy(this._snowCurlBaseStrength).multiplyScalar(curlStrength);
         }
 
         // Drive per-flake flutter wobble from tuning so Snow Flutter Strength has effect.
         if (this._snowFlutter) {
-          const flutterStrength = snowTuning.flutterStrength ?? 1.0;
+          const flutterStrength = debugDisableWeatherBehaviors ? 0.0 : (snowTuning.flutterStrength ?? 1.0);
           this._snowFlutter.strength = flutterStrength;
         }
         // Apply roof mask uniforms for snow (base material)
         if (this._snowMaterial && this._snowMaterial.userData && this._snowMaterial.userData.roofUniforms) {
           const uniforms = this._snowMaterial.userData.roofUniforms;
-          uniforms.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
-          uniforms.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
+          uniforms.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+          uniforms.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
           if (this._sceneBounds) {
             uniforms.uSceneBounds.value.copy(this._sceneBounds);
           }
           uniforms.uRoofMap.value = this._roofTexture;
-          uniforms.uRoofAlphaMap.value = roofAlphaTexture;
+          uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
           uniforms.uScreenSize.value.set(screenWidth, screenHeight);
         }
 
         // Also drive the batch ShaderMaterial uniforms used by quarks for snow.
         if (this._snowBatchMaterial && this._snowBatchMaterial.userData && this._snowBatchMaterial.userData.roofUniforms) {
           const uniforms = this._snowBatchMaterial.userData.roofUniforms;
-          uniforms.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
-          uniforms.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
+          uniforms.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+          uniforms.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
           if (this._sceneBounds) {
             uniforms.uSceneBounds.value.copy(this._sceneBounds);
           }
           uniforms.uRoofMap.value = this._roofTexture;
-          uniforms.uRoofAlphaMap.value = roofAlphaTexture;
+          uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
           uniforms.uScreenSize.value.set(screenWidth, screenHeight);
         }
     }
@@ -3933,7 +4264,7 @@ _createSnowTexture() {
           windTurbulenceFactor = THREE.MathUtils.clamp((windSpeed - 0.5) / 0.5, 0, 1);
         }
 
-        const curlStrength = rainTuning.curlStrength ?? 1.0;
+        const curlStrength = debugDisableWeatherBehaviors ? 0.0 : (rainTuning.curlStrength ?? 1.0);
         const curlScale = windTurbulenceFactor * curlStrength;
         this._rainCurl.strength.copy(this._rainCurlBaseStrength).multiplyScalar(curlScale);
       }
@@ -4032,7 +4363,7 @@ _createSnowTexture() {
     if (this.foamFleckTexture) this.foamFleckTexture.dispose();
   }
 
-  _generateWaterHardEdgePoints(maskTexture, edgeThreshold = 0.5, stride = 2, maxPoints = 24000) {
+  _generateWaterHardEdgePoints(maskTexture, edgeThreshold = 0.5, stride = 2, maxPoints = 24000, flipV = false) {
     const image = maskTexture?.image;
     if (!image) return null;
 
@@ -4068,8 +4399,16 @@ _createSnowTexture() {
     let eligible = 0;
 
     const s = Math.max(1, stride | 0);
-    const sample = (x, y) => {
-      const ix = (y * w + x) * 4;
+    // IMPORTANT: `v` stored in the output point list is expected to be in the same
+    // top-down scene-UV convention used throughout WeatherParticles (because spawn
+    // conversion uses worldY = (1 - v) * height).
+    // When the water mask is effectively flipped for sampling, we must flip the
+    // *source pixel lookup* rather than flipping the returned v, or the spawn
+    // will be double-inverted.
+    const yToImg = (yy) => (flipV ? (h - 1 - yy) : yy);
+    const sample = (x, yScene) => {
+      const yImg = yToImg(yScene);
+      const ix = (yImg * w + x) * 4;
       const r = data[ix] / 255;
       const g = data[ix + 1] / 255;
       const b = data[ix + 2] / 255;
@@ -4092,6 +4431,7 @@ _createSnowTexture() {
         if (!isBoundary) continue;
 
         const u = x / w;
+        // Keep v in top-down scene UV.
         const vv = y / h;
 
         if (filled < max) {
@@ -4105,6 +4445,146 @@ _createSnowTexture() {
             const o = j * 2;
             out[o] = u;
             out[o + 1] = vv;
+          }
+        }
+        eligible++;
+      }
+    }
+
+    if (filled < 1) return null;
+    if (filled === max) return out;
+    const trimmed = new Float32Array(filled * 2);
+    trimmed.set(out.subarray(0, filled * 2));
+    return trimmed;
+  }
+
+  _generateWaterDataBoundaryInsetPoints(waterDataTexture, insetPx = 1.0, bandPx = 2.0, stride = 2, maxPoints = 24000, flipV = false) {
+    const img = waterDataTexture?.image;
+    const data = img?.data;
+    const w = img?.width;
+    const h = img?.height;
+    if (!data || !w || !h) return null;
+
+    const ip = Math.max(0.0, Number.isFinite(insetPx) ? insetPx : 1.0);
+    const bp = Math.max(0.0, Number.isFinite(bandPx) ? bandPx : 0.0);
+
+    const max = Math.max(1, maxPoints | 0);
+    const out = new Float32Array(max * 2);
+    let filled = 0;
+    let eligible = 0;
+    const s = Math.max(1, stride | 0);
+
+    // Same convention as _generateWaterHardEdgePoints: output v is top-down scene UV.
+    // Apply flipV only to the underlying pixel lookup.
+    const yToImg = (yy) => (flipV ? (h - 1 - yy) : yy);
+    const sdfAt = (x, yScene) => {
+      const xx = Math.max(0, Math.min(w - 1, x));
+      const yImg0 = yToImg(yScene);
+      const yy = Math.max(0, Math.min(h - 1, yImg0));
+      return data[(yy * w + xx) * 4] / 255;
+    };
+
+    for (let y = 1; y < h - 1; y += s) {
+      for (let x = 1; x < w - 1; x += s) {
+        const yImg = yToImg(y);
+        const idx = (yImg * w + x) * 4;
+        const sdf01 = data[idx] / 255;
+
+        // Only consider inside-water pixels (WaterSurfaceModel encodes inside water as sdf01 < 0.5).
+        if (sdf01 >= 0.5) continue;
+
+        // Boundary detection: any neighbor outside water.
+        const isBoundary = (sdfAt(x - 1, y) >= 0.5) || (sdfAt(x + 1, y) >= 0.5) || (sdfAt(x, y - 1) >= 0.5) || (sdfAt(x, y + 1) >= 0.5);
+        if (!isBoundary) continue;
+
+        // WaterData stores the SDF gradient (normal) in BA in [0,1]. This points toward increasing sdf
+        // (i.e. out of water). We move *against* it to step just inside the water.
+        const nx = (data[idx + 2] / 255 - 0.5) * 2.0;
+        const ny = (data[idx + 3] / 255 - 0.5) * 2.0;
+        const nLen = Math.hypot(nx, ny);
+        const nX = nLen > 1e-6 ? (nx / nLen) : 1.0;
+        const nY = nLen > 1e-6 ? (ny / nLen) : 0.0;
+
+        const step = ip + (bp > 0 ? Math.random() * bp : 0.0);
+        const sx = Math.round(x - nX * step);
+        const sy = Math.round(y - nY * step);
+
+        // Ensure the in-set point is still inside water.
+        if (sdfAt(sx, sy) >= 0.5) continue;
+
+        const u = sx / w;
+        const v = sy / h;
+
+        if (filled < max) {
+          const o = filled * 2;
+          out[o] = u;
+          out[o + 1] = v;
+          filled++;
+        } else {
+          const j = Math.floor(Math.random() * (eligible + 1));
+          if (j < max) {
+            const o = j * 2;
+            out[o] = u;
+            out[o + 1] = v;
+          }
+        }
+        eligible++;
+      }
+    }
+
+    if (filled < 1) return null;
+    if (filled === max) return out;
+    const trimmed = new Float32Array(filled * 2);
+    trimmed.set(out.subarray(0, filled * 2));
+    return trimmed;
+  }
+
+  _generateWaterDataInsetEdgePoints(waterDataTexture, insetPx = 1.0, bandPx = 2.0, exposureWidthPx = 128.0, stride = 2, maxPoints = 24000) {
+    const img = waterDataTexture?.image;
+    const data = img?.data;
+    const w = img?.width;
+    const h = img?.height;
+    if (!data || !w || !h) return null;
+
+    const ew = Math.max(1e-3, Number.isFinite(exposureWidthPx) ? exposureWidthPx : 128.0);
+    const ip = Math.max(0.0, Number.isFinite(insetPx) ? insetPx : 1.0);
+    const bp = Math.max(1e-3, Number.isFinite(bandPx) ? bandPx : 2.0);
+
+    // exposure01 is distance-inside-water normalized by exposureWidthPx.
+    // exposure01 == 0 exactly at boundary; we want just-inside-water.
+    const lo = Math.min(0.999, Math.max(0.0, ip / ew));
+    const hi = Math.min(1.0, Math.max(lo + 1e-6, (ip + bp) / ew));
+
+    const max = Math.max(1, maxPoints | 0);
+    const out = new Float32Array(max * 2);
+    let filled = 0;
+    let eligible = 0;
+    const s = Math.max(1, stride | 0);
+
+    for (let y = 1; y < h - 1; y += s) {
+      for (let x = 1; x < w - 1; x += s) {
+        const idx = (y * w + x) * 4;
+        const sdf01 = data[idx] / 255;
+        const exposure01 = data[idx + 1] / 255;
+
+        // Only allow points inside water. In WaterSurfaceModel, sdf01 < 0.5 corresponds to inside water.
+        if (sdf01 >= 0.5) continue;
+        if (exposure01 < lo || exposure01 > hi) continue;
+
+        const u = x / w;
+        const v = y / h;
+
+        if (filled < max) {
+          const o = filled * 2;
+          out[o] = u;
+          out[o + 1] = v;
+          filled++;
+        } else {
+          const j = Math.floor(Math.random() * (eligible + 1));
+          if (j < max) {
+            const o = j * 2;
+            out[o] = u;
+            out[o + 1] = v;
           }
         }
         eligible++;
@@ -4349,6 +4829,7 @@ _createSnowTexture() {
 
     const tileHardSets = [];
     const tileEdgeSets = [];
+    let anyTileChanged = false;
 
     for (const [tileId, spriteData] of tileManager.tileSprites.entries()) {
       const tileDoc = spriteData?.tileDoc;
@@ -4361,34 +4842,109 @@ _createSnowTexture() {
       const img = maskTex?.image;
       if (!maskTex || !img) continue;
 
-      const rotDeg = Number.isFinite(tileDoc.rotation) ? tileDoc.rotation : 0;
-      const key = `${maskTex.uuid}|${tileDoc.x}|${tileDoc.y}|${tileDoc.width}|${tileDoc.height}|${rotDeg}|${bounds.x}|${bounds.y}|${bounds.z}|${bounds.w}|${totalH}`;
-      const prev = this._tileWaterFoamCache.get(tileId);
-      if (prev && prev.key === key) {
-        if (prev.hardPts && prev.hardPts.length >= 2) tileHardSets.push(prev.hardPts);
-        if (prev.edgePts && prev.edgePts.length >= 4) tileEdgeSets.push(prev.edgePts);
-        continue;
+      // Use the live THREE sprite transform for movement responsiveness.
+      // During interactive drag, Foundry may refresh the tile display before
+      // committing document changes.
+      const wPx = (sprite.scale && Number.isFinite(sprite.scale.x)) ? sprite.scale.x : tileDoc.width;
+      const hPx = (sprite.scale && Number.isFinite(sprite.scale.y)) ? sprite.scale.y : tileDoc.height;
+
+      const centerX = Number.isFinite(sprite.position?.x) ? sprite.position.x : (tileDoc.x + tileDoc.width * 0.5);
+      const centerYFoundry = Number.isFinite(sprite.position?.y)
+        ? (totalH - sprite.position.y)
+        : (tileDoc.y + tileDoc.height * 0.5);
+
+      const xFoundry = centerX - wPx * 0.5;
+      const yFoundry = centerYFoundry - hPx * 0.5;
+
+      let rotDeg = Number.isFinite(tileDoc.rotation) ? tileDoc.rotation : 0;
+      const rRad = sprite.material?.rotation;
+      if (Number.isFinite(rRad)) {
+        rotDeg = (rRad * 180) / Math.PI;
       }
 
-      const hardPts = this._generateTileWaterHardEdgePoints(maskTex, tileDoc, bounds, totalH, 0.5, Math.max(1, this._waterMaskStride), 12000);
-      const edgePts = this._generateTileWaterEdgePoints(maskTex, tileDoc, bounds, totalH, this._waterMaskThreshold, Math.max(1, this._waterMaskStride), 8000);
+      const liveTile = {
+        x: xFoundry,
+        y: yFoundry,
+        width: wPx,
+        height: hPx,
+        rotation: rotDeg
+      };
 
-      this._tileWaterFoamCache.set(tileId, { key, hardPts, edgePts });
+      // Split cache into:
+      // - scanKey: changes only when the mask texture or sampling params change
+      // - transformKey: changes when the tile moves/resizes/rotates
+      const scanKey = `${maskTex.uuid}|${this._waterMaskThreshold}|${this._waterMaskStride}`;
+      const transformKey = `${xFoundry}|${yFoundry}|${wPx}|${hPx}|${rotDeg}|${bounds.x}|${bounds.y}|${bounds.z}|${bounds.w}|${totalH}`;
 
-      if (hardPts && hardPts.length >= 2) tileHardSets.push(hardPts);
-      if (edgePts && edgePts.length >= 4) tileEdgeSets.push(edgePts);
+      let entry = this._tileWaterFoamCache.get(tileId);
+      if (!entry) {
+        entry = {
+          scanKey: null,
+          transformKey: null,
+          localHardPts: null,
+          localEdgePts: null,
+          hardPts: null,
+          edgePts: null
+        };
+        this._tileWaterFoamCache.set(tileId, entry);
+      }
+
+      // Re-scan mask pixels ONLY when the mask/params change.
+      if (entry.scanKey !== scanKey) {
+        entry.scanKey = scanKey;
+        entry.localHardPts = this._generateTileLocalWaterHardEdgePoints(
+          maskTex,
+          0.5,
+          Math.max(1, this._waterMaskStride),
+          12000
+        );
+        entry.localEdgePts = this._generateTileLocalWaterEdgePoints(
+          maskTex,
+          this._waterMaskThreshold,
+          Math.max(1, this._waterMaskStride),
+          8000
+        );
+        entry.transformKey = null; // force re-transform
+        anyTileChanged = true;
+      }
+
+      // Re-transform cached local points whenever the tile moves/resizes/rotates.
+      if (entry.transformKey !== transformKey) {
+        entry.transformKey = transformKey;
+        entry.hardPts = this._transformTileLocalUvPointsToSceneUv(entry.localHardPts, liveTile, bounds, totalH);
+        entry.edgePts = this._transformTileLocalEdgePointsToSceneUv(entry.localEdgePts, liveTile, bounds, totalH);
+        anyTileChanged = true;
+      }
+
+      if (entry.hardPts && entry.hardPts.length >= 2) tileHardSets.push(entry.hardPts);
+      if (entry.edgePts && entry.edgePts.length >= 4) tileEdgeSets.push(entry.edgePts);
     }
 
     // Clean up cache entries for deleted tiles.
     try {
+      let deletedAny = false;
       for (const id of this._tileWaterFoamCache.keys()) {
-        if (!tileManager.tileSprites.has(id)) this._tileWaterFoamCache.delete(id);
+        if (!tileManager.tileSprites.has(id)) {
+          this._tileWaterFoamCache.delete(id);
+          deletedAny = true;
+        }
       }
+      if (deletedAny) anyTileChanged = true;
     } catch (_) {
     }
 
     this._tileWaterFoamMergedPts = this._mergeManyUvPointSets(tileHardSets, 24000);
     this._tileShoreFoamMergedPts = this._mergeManyEdgePointSets(tileEdgeSets, 16000);
+
+    // IMPORTANT: if tile-derived point sets change but the camera doesn't move,
+    // our view-filter cache (quantized by view rect) must be invalidated or we
+    // will keep returning stale filtered points until the next pan/zoom.
+    if (anyTileChanged) {
+      this._waterFoamLastViewQU0 = null;
+      this._waterFoamLastViewQU1 = null;
+      this._waterFoamLastViewQV0 = null;
+      this._waterFoamLastViewQV1 = null;
+    }
   }
 
   _mergeManyUvPointSets(sets, maxPoints = 24000) {
@@ -4527,7 +5083,63 @@ _createSnowTexture() {
     return [nx * c - ny * s, nx * s + ny * c];
   }
 
-  _generateTileWaterHardEdgePoints(maskTexture, tileDoc, sceneBounds, totalH, edgeThreshold = 0.5, stride = 2, maxPoints = 12000) {
+  _transformTileLocalUvPointsToSceneUv(localPts, tileDoc, sceneBounds, totalH) {
+    if (!localPts || localPts.length < 2) return null;
+    const count = Math.floor(localPts.length / 2);
+    const out = new Float32Array(count * 2);
+    let filled = 0;
+    for (let i = 0; i < count; i++) {
+      const o = i * 2;
+      const uLocal = localPts[o];
+      const vLocal = localPts[o + 1];
+      const [su, sv] = this._tileLocalUvToSceneUv(uLocal, vLocal, tileDoc, sceneBounds, totalH);
+      if (su < 0.0 || su > 1.0 || sv < 0.0 || sv > 1.0) continue;
+      const oo = filled * 2;
+      out[oo] = su;
+      out[oo + 1] = sv;
+      filled++;
+    }
+    if (filled < 1) return null;
+    if (filled === count) return out;
+    const trimmed = new Float32Array(filled * 2);
+    trimmed.set(out.subarray(0, filled * 2));
+    return trimmed;
+  }
+
+  _transformTileLocalEdgePointsToSceneUv(localPts, tileDoc, sceneBounds, totalH) {
+    if (!localPts || localPts.length < 4) return null;
+    const count = Math.floor(localPts.length / 4);
+    const out = new Float32Array(count * 4);
+    let filled = 0;
+    for (let i = 0; i < count; i++) {
+      const o = i * 4;
+      const uLocal = localPts[o];
+      const vLocal = localPts[o + 1];
+      let nx = localPts[o + 2];
+      let ny = localPts[o + 3];
+
+      const [su, sv] = this._tileLocalUvToSceneUv(uLocal, vLocal, tileDoc, sceneBounds, totalH);
+      if (su < 0.0 || su > 1.0 || sv < 0.0 || sv > 1.0) continue;
+
+      const rN = this._rotateWorldNormal(nx, ny, tileDoc);
+      nx = rN[0];
+      ny = rN[1];
+
+      const oo = filled * 4;
+      out[oo] = su;
+      out[oo + 1] = sv;
+      out[oo + 2] = nx;
+      out[oo + 3] = ny;
+      filled++;
+    }
+    if (filled < 1) return null;
+    if (filled === count) return out;
+    const trimmed = new Float32Array(filled * 4);
+    trimmed.set(out.subarray(0, filled * 4));
+    return trimmed;
+  }
+
+  _generateTileLocalWaterHardEdgePoints(maskTexture, edgeThreshold = 0.5, stride = 2, maxPoints = 12000) {
     const image = maskTexture?.image;
     if (!image) return null;
     const w = image.width;
@@ -4574,20 +5186,18 @@ _createSnowTexture() {
 
         const uLocal = x / w;
         const vLocal = y / h;
-        const [su, sv] = this._tileLocalUvToSceneUv(uLocal, vLocal, tileDoc, sceneBounds, totalH);
-        if (su < 0.0 || su > 1.0 || sv < 0.0 || sv > 1.0) continue;
 
         if (filled < max) {
           const o = filled * 2;
-          out[o] = su;
-          out[o + 1] = sv;
+          out[o] = uLocal;
+          out[o + 1] = vLocal;
           filled++;
         } else {
           const j = Math.floor(Math.random() * (eligible + 1));
           if (j < max) {
             const o = j * 2;
-            out[o] = su;
-            out[o + 1] = sv;
+            out[o] = uLocal;
+            out[o + 1] = vLocal;
           }
         }
         eligible++;
@@ -4601,7 +5211,7 @@ _createSnowTexture() {
     return trimmed;
   }
 
-  _generateTileWaterEdgePoints(maskTexture, tileDoc, sceneBounds, totalH, threshold = 0.15, stride = 2, maxPoints = 8000) {
+  _generateTileLocalWaterEdgePoints(maskTexture, threshold = 0.15, stride = 2, maxPoints = 8000) {
     const image = maskTexture?.image;
     if (!image) return null;
     const w = image.width;
@@ -4658,20 +5268,13 @@ _createSnowTexture() {
           ny = 0.0;
         }
 
-        // Rotate into world space if the tile is rotated.
-        const rN = this._rotateWorldNormal(nx, ny, tileDoc);
-        nx = rN[0];
-        ny = rN[1];
-
         const uLocal = x / w;
         const vLocal = y / h;
-        const [su, sv] = this._tileLocalUvToSceneUv(uLocal, vLocal, tileDoc, sceneBounds, totalH);
-        if (su < 0.0 || su > 1.0 || sv < 0.0 || sv > 1.0) continue;
 
         if (filled < max) {
           const o = filled * 4;
-          out[o] = su;
-          out[o + 1] = sv;
+          out[o] = uLocal;
+          out[o + 1] = vLocal;
           out[o + 2] = nx;
           out[o + 3] = ny;
           filled++;
@@ -4679,8 +5282,8 @@ _createSnowTexture() {
           const j = Math.floor(Math.random() * (seen + 1));
           if (j < max) {
             const o = j * 4;
-            out[o] = su;
-            out[o + 1] = sv;
+            out[o] = uLocal;
+            out[o + 1] = vLocal;
             out[o + 2] = nx;
             out[o + 3] = ny;
           }
@@ -4788,7 +5391,7 @@ _createSnowTexture() {
     return filled > 0 ? this._waterFoamViewBuffer.subarray(0, filled * 2) : null;
   }
 
-  _generateWaterSplashPoints(maskTexture, threshold = 0.15, stride = 2, maxPoints = 20000) {
+  _generateWaterSplashPoints(maskTexture, threshold = 0.15, stride = 2, maxPoints = 20000, flipV = false) {
     const image = maskTexture?.image;
     if (!image) return null;
 
@@ -4817,6 +5420,8 @@ _createSnowTexture() {
 
     const data = img.data;
 
+    const yToImg = (yy) => (flipV ? (h - 1 - yy) : yy);
+
     // Reservoir sampling so the point cloud isn't biased towards the top-left
     // of the image when we cap at maxPoints.
     const max = Math.max(1, maxPoints | 0);
@@ -4826,7 +5431,7 @@ _createSnowTexture() {
 
     const s = Math.max(1, stride | 0);
     for (let y = 0; y < h; y += s) {
-      const row = y * w;
+      const row = yToImg(y) * w;
       for (let x = 0; x < w; x += s) {
         const i = (row + x) * 4;
         const r = data[i] / 255;
@@ -4858,7 +5463,7 @@ _createSnowTexture() {
     return trimmed;
   }
 
-  _generateWaterEdgePoints(maskTexture, threshold = 0.15, stride = 2, maxPoints = 12000) {
+  _generateSimpleFoamPoints(maskTexture, threshold = 0.5, stride = 4, maxPoints = 20000, flipV = false) {
     const image = maskTexture?.image;
     if (!image) return null;
 
@@ -4886,61 +5491,34 @@ _createSnowTexture() {
     }
 
     const data = img.data;
+    const yToImg = (yy) => (flipV ? (h - 1 - yy) : yy);
 
-    // Reservoir sampling so the capped point cloud represents the full mask,
-    // not just the top-left scan order.
     const max = Math.max(1, maxPoints | 0);
-    const out = new Float32Array(max * 4);
+    const out = new Float32Array(max * 2);
     let filled = 0;
     let seen = 0;
 
     const s = Math.max(1, stride | 0);
-    const sample = (x, y) => {
-      const ix = (y * w + x) * 4;
-      return data[ix] / 255;
-    };
-
-    for (let y = 1; y < h - 1; y += s) {
-      for (let x = 1; x < w - 1; x += s) {
-        const r = sample(x, y);
+    for (let y = 0; y < h; y += s) {
+      const row = yToImg(y) * w;
+      for (let x = 0; x < w; x += s) {
+        const i = (row + x) * 4;
+        const r = data[i] / 255;
         if (r < threshold) continue;
-
-        const rl = sample(x - 1, y);
-        const rr = sample(x + 1, y);
-        const ru = sample(x, y - 1);
-        const rd = sample(x, y + 1);
-        const isEdge = (rl < threshold) || (rr < threshold) || (ru < threshold) || (rd < threshold);
-        if (!isEdge) continue;
-
-        let nx = rr - rl;
-        let ny = rd - ru;
-        const len = Math.sqrt(nx * nx + ny * ny);
-        if (len > 1e-5) {
-          nx /= len;
-          ny /= len;
-        } else {
-          nx = 1;
-          ny = 0;
-        }
 
         const u = x / w;
         const v = y / h;
-
         if (filled < max) {
-          const o = filled * 4;
+          const o = filled * 2;
           out[o] = u;
           out[o + 1] = v;
-          out[o + 2] = nx;
-          out[o + 3] = -ny;
           filled++;
         } else {
           const j = Math.floor(Math.random() * (seen + 1));
           if (j < max) {
-            const o = j * 4;
+            const o = j * 2;
             out[o] = u;
             out[o + 1] = v;
-            out[o + 2] = nx;
-            out[o + 3] = -ny;
           }
         }
         seen++;
@@ -4949,12 +5527,12 @@ _createSnowTexture() {
 
     if (filled < 1) return null;
     if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 4);
-    trimmed.set(out.subarray(0, filled * 4));
+    const trimmed = new Float32Array(filled * 2);
+    trimmed.set(out.subarray(0, filled * 2));
     return trimmed;
   }
 
-  _generateWaterInteriorPoints(maskTexture, threshold = 0.15, stride = 6, maxPoints = 8000) {
+  _generateWaterInteriorPoints(maskTexture, threshold = 0.15, stride = 6, maxPoints = 8000, flipV = false) {
     const image = maskTexture?.image;
     if (!image) return null;
 
@@ -4991,7 +5569,8 @@ _createSnowTexture() {
 
     const s = Math.max(1, stride | 0);
     const sample = (x, y) => {
-      const ix = (y * w + x) * 4;
+      const yy = flipV ? (h - 1 - y) : y;
+      const ix = (yy * w + x) * 4;
       return data[ix] / 255;
     };
 

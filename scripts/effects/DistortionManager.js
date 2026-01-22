@@ -296,8 +296,11 @@ export class DistortionManager extends EffectBase {
   constructor() {
     super('distortion-manager', RenderLayers.POST_PROCESSING, 'low');
     
-    // Render after lighting but before color correction
-    this.priority = 75;
+    // Render after lighting and after WaterEffectV2 (priority=80), but before
+    // late post steps like ColorCorrectionEffect (priority=100).
+    // If this runs before WaterEffectV2, the water pass will overwrite any
+    // water-masked distortion (including shoreline noise), making it invisible.
+    this.priority = 85;
     this.alwaysRender = false;
     
     /** @type {Map<string, DistortionSource>} */
@@ -343,7 +346,8 @@ export class DistortionManager extends EffectBase {
       globalIntensity: 2.0,
       // Debug visualization
       debugMode: false,
-      debugShowMask: false
+      debugShowMask: false,
+      debugShowWaterShoreBand: false
     };
   }
 
@@ -365,14 +369,15 @@ export class DistortionManager extends EffectBase {
           label: 'Debug',
           type: 'inline',
           collapsed: true,
-          parameters: ['debugMode', 'debugShowMask']
+          parameters: ['debugMode', 'debugShowMask', 'debugShowWaterShoreBand']
         }
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
         globalIntensity: { type: 'slider', min: 0, max: 2, step: 0.01, default: 2.0, label: 'Global Intensity' },
         debugMode: { type: 'boolean', default: false, label: 'Debug Mode' },
-        debugShowMask: { type: 'boolean', default: false, label: 'Show Mask' }
+        debugShowMask: { type: 'boolean', default: false, label: 'Show Distortion Mask' },
+        debugShowWaterShoreBand: { type: 'boolean', default: false, label: 'Show Water Shore Band' }
       }
     };
   }
@@ -565,9 +570,11 @@ export class DistortionManager extends EffectBase {
         uHeatFrequency: { value: 8.0 },
         uHeatSpeed: { value: 1.0 },
         
-        // Future source slots
+        // Water source
         tWaterMask: { value: null },
+        tWaterData: { value: null },
         uWaterEnabled: { value: 0.0 },
+        uHasWaterData: { value: 0.0 },
         uWaterMaskFlipY: { value: 0.0 },
         uWaterMaskUseAlpha: { value: 0.0 },
         uWaterMaskTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
@@ -575,11 +582,18 @@ export class DistortionManager extends EffectBase {
         uWaterIntensity: { value: 0.02 },
         uWaterFrequency: { value: 4.0 },
         uWaterSpeed: { value: 1.0 },
+        uWaterShoreNoiseEnabled: { value: 0.0 },
+        uWaterShoreNoiseStrengthPx: { value: 2.25 },
+        uWaterShoreNoiseFrequency: { value: 220.0 },
+        uWaterShoreNoiseSpeed: { value: 0.65 },
+        uWaterShoreNoiseFadeLo: { value: 0.06 },
+        uWaterShoreNoiseFadeHi: { value: 0.28 },
 
-        // Water occluders (screen-space alpha)
+        // Water occluder alpha (screen-space)
         tWaterOccluderAlpha: { value: null },
         uHasWaterOccluderAlpha: { value: 0.0 },
         
+        // Magic source
         tMagicMask: { value: null },
         uMagicEnabled: { value: 0.0 },
         uMagicIntensity: { value: 0.03 },
@@ -619,7 +633,9 @@ export class DistortionManager extends EffectBase {
         
         // Water source
         uniform sampler2D tWaterMask;
+        uniform sampler2D tWaterData;
         uniform float uWaterEnabled;
+        uniform float uHasWaterData;
         uniform float uWaterMaskFlipY;
         uniform float uWaterMaskUseAlpha;
         uniform vec2 uWaterMaskTexelSize;
@@ -627,6 +643,12 @@ export class DistortionManager extends EffectBase {
         uniform float uWaterIntensity;
         uniform float uWaterFrequency;
         uniform float uWaterSpeed;
+        uniform float uWaterShoreNoiseEnabled;
+        uniform float uWaterShoreNoiseStrengthPx;
+        uniform float uWaterShoreNoiseFrequency;
+        uniform float uWaterShoreNoiseSpeed;
+        uniform float uWaterShoreNoiseFadeLo;
+        uniform float uWaterShoreNoiseFadeHi;
 
         // Water occluder alpha (screen-space)
         uniform sampler2D tWaterOccluderAlpha;
@@ -700,6 +722,32 @@ export class DistortionManager extends EffectBase {
           float w = waterMaskValue(texture2D(tex, safeClampUv(uv - vec2(stepUv.x, 0.0))));
           return (c * 4.0 + (n + s + e + w) * 2.0) / 12.0;
         }
+
+        float band01(float x, float lo, float hi) {
+          // A simple unit-height "ring" between [lo, hi].
+          // Used to build an interior shoreline band even for binary masks.
+          float a = smoothstep(lo, hi, x);
+          float b = smoothstep(hi, hi + (hi - lo) + 1e-6, x);
+          return clamp(a - b, 0.0, 1.0);
+        }
+
+        float waterInsideFromSdf(float sdf01) {
+          // Match WaterEffectV2/WeatherParticles: smoothstep(0.52, 0.48, sdf01)
+          return smoothstep(0.52, 0.48, sdf01);
+        }
+
+        vec2 shoreMicroNoise(vec2 uv, float time, float frequency, float speed) {
+          // High-frequency, map-pinned noise. No rejection sampling; just a few octaves.
+          vec2 p = uv * frequency;
+          float t = time * speed;
+          float n1 = snoise(p + vec2(t * 0.90, -t * 0.75));
+          float n2 = snoise(p * 1.9 + vec2(-t * 1.10, t * 0.95));
+          float n3 = snoise(p * 3.7 + vec2(t * 1.55, t * 1.25));
+          // Return a 2D offset (not scalar) so it reads like chaotic surface turbulence.
+          float nx = n1 * 0.60 + n2 * 0.28 + n3 * 0.12;
+          float ny = n1 * 0.25 + n2 * 0.55 + n3 * 0.20;
+          return vec2(nx, ny);
+        }
         
         void main() {
           vec2 totalOffset = vec2(0.0);
@@ -768,6 +816,49 @@ export class DistortionManager extends EffectBase {
             totalOffset += waterOffset * waterMask;
             totalMask = max(totalMask, waterMask);
             waterOnlyMask = max(waterOnlyMask, waterMask);
+
+            // Shoreline-only high-frequency noise.
+            // This is intended to "cling to shores" and fade out into the interior.
+            // Prefer using WaterData (distance-to-land) when available.
+            // exposure01 (WaterData.g) is 0 exactly at the land/water boundary and increases
+            // into the interior, giving us a shoreline band pinned to the black/land side.
+            // Fallback: derive a stable inner-edge band from a small blur of the water mask.
+            if (uWaterShoreNoiseEnabled > 0.5 && uWaterShoreNoiseStrengthPx > 0.0) {
+              float lo = clamp(min(uWaterShoreNoiseFadeLo, uWaterShoreNoiseFadeHi), 0.0, 0.99);
+              float hi = clamp(max(uWaterShoreNoiseFadeLo, uWaterShoreNoiseFadeHi), lo + 1e-4, 1.0);
+
+              float shoreBand = 0.0;
+              if (uHasWaterData > 0.5) {
+                vec4 wd = texture2D(tWaterData, sceneUv);
+                float sdf01 = wd.r;
+                float exposure01 = wd.g;
+                float inside = waterInsideFromSdf(sdf01);
+
+                // 1 at the boundary, fades to 0 into the interior.
+                shoreBand = (1.0 - smoothstep(lo, hi, clamp(exposure01, 0.0, 1.0))) * inside;
+              } else {
+                // Use a fixed small blur for band derivation so it works even when the main
+                // water distortion edge softness is 0.
+                vec2 bandStepUv = max(uWaterMaskTexelSize, vec2(1.0 / 4096.0)) * 2.0;
+                float softEdge = blur5TapMask(tWaterMask, waterUv, bandStepUv) * sceneInBounds;
+                softEdge *= (1.0 - waterOccluder);
+
+                // The blurred mask transitions from 0..1 across the shoreline.
+                // Create a controllable interior band by taking a narrow "ring" within that transition.
+                shoreBand = band01(clamp(softEdge, 0.0, 1.0), lo, hi);
+              }
+
+              // Ensure it's strictly inside water and respects tile-driven occlusion.
+              shoreBand *= waterMask;
+
+              // Convert pixel amplitude to UV amplitude for resolution stability.
+              vec2 texel = 1.0 / max(uResolution, vec2(1.0));
+              float px = clamp(uWaterShoreNoiseStrengthPx, 0.0, 64.0);
+              float ampUv = px * max(texel.x, texel.y);
+              vec2 micro = shoreMicroNoise(waterUv, uTime, max(0.01, uWaterShoreNoiseFrequency), uWaterShoreNoiseSpeed);
+              totalOffset += micro * ampUv * shoreBand;
+              totalMask = max(totalMask, shoreBand);
+            }
           }
           
           // Apply roof masking if needed (distortion only under roofs)
@@ -813,6 +904,7 @@ export class DistortionManager extends EffectBase {
         tScene: { value: null },
         tDistortion: { value: null },
         tWaterMask: { value: null },
+        tWaterData: { value: null },
         tWaterOccluderAlpha: { value: null },
         uWaterMaskFlipY: { value: 0.0 },
         uWaterMaskUseAlpha: { value: 0.0 },
@@ -833,6 +925,11 @@ export class DistortionManager extends EffectBase {
         uHasSceneRect: { value: 0.0 },
         uDebugMode: { value: 0.0 },
         uDebugShowMask: { value: 0.0 },
+        uDebugShowWaterShoreBand: { value: 0.0 },
+
+        // Shoreline-noise params (mirrors composite; used for debug visualization)
+        uWaterShoreNoiseFadeLo: { value: 0.06 },
+        uWaterShoreNoiseFadeHi: { value: 0.28 },
 
         // Water-only chromatic refraction (RGB split)
         uWaterChromaEnabled: { value: 0.0 },
@@ -864,6 +961,7 @@ export class DistortionManager extends EffectBase {
         // Caustics (shallow-water highlights)
         uWaterCausticsEnabled: { value: 0.0 },
         uHasWaterMask: { value: 0.0 },
+        uHasWaterData: { value: 0.0 },
         uHasWaterOccluderAlpha: { value: 0.0 },
         uHasOutdoorsMask: { value: 0.0 },
         uHasCloudShadow: { value: 0.0 },
@@ -918,6 +1016,7 @@ export class DistortionManager extends EffectBase {
         uniform sampler2D tScene;
         uniform sampler2D tDistortion;
         uniform sampler2D tWaterMask;
+        uniform sampler2D tWaterData;
         uniform sampler2D tWaterOccluderAlpha;
         uniform float uWaterMaskFlipY;
         uniform float uWaterMaskUseAlpha;
@@ -937,6 +1036,10 @@ export class DistortionManager extends EffectBase {
         uniform float uHasSceneRect;
         uniform float uDebugMode;
         uniform float uDebugShowMask;
+        uniform float uDebugShowWaterShoreBand;
+
+        uniform float uWaterShoreNoiseFadeLo;
+        uniform float uWaterShoreNoiseFadeHi;
 
         uniform float uWaterChromaEnabled;
         uniform float uWaterChroma;
@@ -965,6 +1068,7 @@ export class DistortionManager extends EffectBase {
 
         uniform float uWaterCausticsEnabled;
         uniform float uHasWaterMask;
+        uniform float uHasWaterData;
         uniform float uHasWaterOccluderAlpha;
         uniform float uHasOutdoorsMask;
         uniform float uHasCloudShadow;
@@ -1098,6 +1202,16 @@ export class DistortionManager extends EffectBase {
           return clamp(grad * 4.0, 0.0, 1.0);
         }
 
+        float band01(float x, float lo, float hi) {
+          float a = smoothstep(lo, hi, x);
+          float b = smoothstep(hi, hi + (hi - lo) + 1e-6, x);
+          return clamp(a - b, 0.0, 1.0);
+        }
+
+        float waterInsideFromSdf(float sdf01) {
+          return smoothstep(0.52, 0.48, sdf01);
+        }
+
         float blur13Tap(sampler2D tex, vec2 uv, vec2 stepUv) {
           vec4 cs = texture2D(tex, safeClampUv(uv));
           vec4 ns = texture2D(tex, safeClampUv(uv + vec2(0.0, stepUv.y)));
@@ -1199,47 +1313,6 @@ export class DistortionManager extends EffectBase {
 
             // Derive a softened water mask directly from the water mask texture.
             // Using the composite alpha here can produce sharp edges due to encoding/thresholding.
-            vec2 foundryPos = screenUvToFoundry(vUv);
-            vec2 sceneUv = vUv;
-            float sceneInBounds = 1.0;
-            if (uHasSceneRect > 0.5) {
-              sceneUv = foundryToSceneUv(foundryPos);
-              sceneInBounds = inUnitSquare(sceneUv);
-              sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
-            }
-
-            float waterY = (uWaterMaskFlipY > 0.5) ? (1.0 - sceneUv.y) : sceneUv.y;
-            vec2 waterUv = vec2(sceneUv.x, waterY);
-            float rawWater = waterMaskValue(texture2D(tWaterMask, waterUv)) * sceneInBounds;
-            float edgeBlurTexels = clamp(uWaterEdgeSoftnessTexels, 0.0, 64.0);
-            vec2 edgeStepUv = max(uWaterMaskTexelSize, vec2(1.0 / 4096.0)) * edgeBlurTexels;
-            float softWater = (edgeBlurTexels > 0.01)
-              ? blur13Tap(tWaterMask, waterUv, edgeStepUv) * sceneInBounds
-              : rawWater;
-
-            // Gate softly (prevents global bleed, keeps edges smooth).
-            float waterEdge = smoothstep(0.02, 0.22, clamp(softWater, 0.0, 1.0));
-
-            waterEdge *= waterVisible;
-
-            // Scale by softened water mask so dispersion fades out at edges.
-            float chroma = clamp(uWaterChroma * waterEdge * nightVis * skyVig, 0.0, 1.0);
-            float shift = min(offLen * chroma, maxOffsetUv);
-            vec2 chromaOffset = dir * shift;
-
-            vec2 uvR = safeClampUv(distortedUv + chromaOffset);
-            vec2 uvG = distortedUv;
-            vec2 uvB = safeClampUv(distortedUv - chromaOffset);
-
-            float r = texture2D(tScene, uvR).r;
-            float g = texture2D(tScene, uvG).g;
-            float b = texture2D(tScene, uvB).b;
-
-            sceneColor.rgb = vec3(r, g, b);
-          }
-
-          // Water depth-based tint/absorption + caustics (pinned to map via sceneUv)
-          if ((uWaterTintEnabled > 0.5 || uWaterMurkEnabled > 0.5 || uWaterSandEnabled > 0.5 || uWaterCausticsEnabled > 0.5 || uWaterCausticsDebug > 0.5 || uWaterFoamEnabled > 0.5) && uHasWaterMask > 0.5) {
             vec2 foundryPos = screenUvToFoundry(vUv);
             vec2 sceneUv = vUv;
             float sceneInBounds = 1.0;
@@ -1483,7 +1556,43 @@ export class DistortionManager extends EffectBase {
           
           // Debug visualization
           if (uDebugMode > 0.5) {
-            if (uDebugShowMask > 0.5) {
+            if (uDebugShowWaterShoreBand > 0.5 && uHasWaterMask > 0.5) {
+              vec2 foundryPos = screenUvToFoundry(vUv);
+              vec2 sceneUv = vUv;
+              float sceneInBounds = 1.0;
+              if (uHasSceneRect > 0.5) {
+                sceneUv = foundryToSceneUv(foundryPos);
+                sceneInBounds = inUnitSquare(sceneUv);
+                sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
+              }
+
+              float waterY = (uWaterMaskFlipY > 0.5) ? (1.0 - sceneUv.y) : sceneUv.y;
+              vec2 waterUv = vec2(sceneUv.x, waterY);
+
+              float raw = waterMaskValue(texture2D(tWaterMask, waterUv)) * sceneInBounds;
+              float lo = clamp(min(uWaterShoreNoiseFadeLo, uWaterShoreNoiseFadeHi), 0.0, 0.99);
+              float hi = clamp(max(uWaterShoreNoiseFadeLo, uWaterShoreNoiseFadeHi), lo + 1e-4, 1.0);
+              float shoreBand = 0.0;
+              float mid = 0.0;
+              if (uHasWaterData > 0.5) {
+                vec4 wd = texture2D(tWaterData, sceneUv);
+                float sdf01 = wd.r;
+                float exposure01 = wd.g;
+                float inside = waterInsideFromSdf(sdf01);
+                shoreBand = (1.0 - smoothstep(lo, hi, clamp(exposure01, 0.0, 1.0))) * inside;
+                shoreBand *= waterVisible;
+                mid = exposure01;
+              } else {
+                vec2 bandStepUv = max(uWaterMaskTexelSize, vec2(1.0 / 4096.0)) * 2.0;
+                float soft = blur13Tap(tWaterMask, waterUv, bandStepUv) * sceneInBounds;
+                soft *= waterVisible;
+                shoreBand = band01(clamp(soft, 0.0, 1.0), lo, hi);
+                mid = soft;
+              }
+
+              // Visualize: R = shore band, G = exposure/soft edge, B = raw mask
+              sceneColor.rgb = vec3(shoreBand, mid, raw);
+            } else if (uDebugShowMask > 0.5) {
               // Show mask as red overlay
               sceneColor.rgb = mix(sceneColor.rgb, vec3(1.0, 0.0, 0.0), mask * 0.5);
             } else {
@@ -1769,6 +1878,12 @@ export class DistortionManager extends EffectBase {
     if (waterSource && waterSource.enabled && waterSource.mask) {
       u.uWaterEnabled.value = 1.0;
       u.tWaterMask.value = waterSource.mask;
+
+      if (u.tWaterData && u.uHasWaterData) {
+        const wd = waterSource.params?.waterDataTexture ?? null;
+        u.tWaterData.value = wd;
+        u.uHasWaterData.value = wd ? 1.0 : 0.0;
+      }
       if (u.uWaterMaskFlipY) {
         const v = Number.isFinite(waterSource.params?.maskFlipY)
           ? waterSource.params.maskFlipY
@@ -1792,12 +1907,45 @@ export class DistortionManager extends EffectBase {
       u.uWaterIntensity.value = waterSource.params.intensity;
       u.uWaterFrequency.value = waterSource.params.frequency;
       u.uWaterSpeed.value = waterSource.params.speed;
+
+      if (u.uWaterShoreNoiseEnabled) {
+        u.uWaterShoreNoiseEnabled.value = waterSource.params?.shoreNoiseEnabled ? 1.0 : 0.0;
+      }
+      if (u.uWaterShoreNoiseStrengthPx) {
+        const v = Number.isFinite(waterSource.params?.shoreNoiseStrengthPx) ? waterSource.params.shoreNoiseStrengthPx : 0.0;
+        u.uWaterShoreNoiseStrengthPx.value = Math.max(0.0, Math.min(64.0, v));
+      }
+      if (u.uWaterShoreNoiseFrequency) {
+        const v = Number.isFinite(waterSource.params?.shoreNoiseFrequency) ? waterSource.params.shoreNoiseFrequency : 220.0;
+        u.uWaterShoreNoiseFrequency.value = Math.max(0.01, v);
+      }
+      if (u.uWaterShoreNoiseSpeed) {
+        const v = Number.isFinite(waterSource.params?.shoreNoiseSpeed) ? waterSource.params.shoreNoiseSpeed : 0.65;
+        u.uWaterShoreNoiseSpeed.value = v;
+      }
+      if (u.uWaterShoreNoiseFadeLo) {
+        const v = Number.isFinite(waterSource.params?.shoreNoiseFadeLo) ? waterSource.params.shoreNoiseFadeLo : 0.06;
+        u.uWaterShoreNoiseFadeLo.value = Math.max(0.0, Math.min(1.0, v));
+      }
+      if (u.uWaterShoreNoiseFadeHi) {
+        const v = Number.isFinite(waterSource.params?.shoreNoiseFadeHi) ? waterSource.params.shoreNoiseFadeHi : 0.28;
+        u.uWaterShoreNoiseFadeHi.value = Math.max(0.0, Math.min(1.0, v));
+      }
     } else {
       u.uWaterEnabled.value = 0.0;
+      if (u.tWaterData) u.tWaterData.value = null;
+      if (u.uHasWaterData) u.uHasWaterData.value = 0.0;
       if (u.uWaterMaskFlipY) u.uWaterMaskFlipY.value = 0.0;
       if (u.uWaterMaskUseAlpha) u.uWaterMaskUseAlpha.value = 0.0;
       if (u.uWaterMaskTexelSize) u.uWaterMaskTexelSize.value.set(1 / 2048, 1 / 2048);
       if (u.uWaterEdgeSoftnessTexels) u.uWaterEdgeSoftnessTexels.value = 0.0;
+
+      if (u.uWaterShoreNoiseEnabled) u.uWaterShoreNoiseEnabled.value = 0.0;
+      if (u.uWaterShoreNoiseStrengthPx) u.uWaterShoreNoiseStrengthPx.value = 0.0;
+      if (u.uWaterShoreNoiseFrequency) u.uWaterShoreNoiseFrequency.value = 220.0;
+      if (u.uWaterShoreNoiseSpeed) u.uWaterShoreNoiseSpeed.value = 0.65;
+      if (u.uWaterShoreNoiseFadeLo) u.uWaterShoreNoiseFadeLo.value = 0.06;
+      if (u.uWaterShoreNoiseFadeHi) u.uWaterShoreNoiseFadeHi.value = 0.28;
     }
 
     // Water chromatic refraction (apply pass)
@@ -2110,6 +2258,31 @@ export class DistortionManager extends EffectBase {
     if (au) {
       au.uDebugMode.value = this.params.debugMode ? 1.0 : 0.0;
       au.uDebugShowMask.value = this.params.debugShowMask ? 1.0 : 0.0;
+      if (au.uDebugShowWaterShoreBand) {
+        au.uDebugShowWaterShoreBand.value = this.params.debugShowWaterShoreBand ? 1.0 : 0.0;
+      }
+    }
+
+    // Provide shoreline-noise fade params to apply pass for debug visualization.
+    if (au && waterSource && waterSource.enabled && waterSource.mask) {
+      if (au.tWaterData && au.uHasWaterData) {
+        const wd = waterSource.params?.waterDataTexture ?? null;
+        au.tWaterData.value = wd;
+        au.uHasWaterData.value = wd ? 1.0 : 0.0;
+      }
+      if (au.uWaterShoreNoiseFadeLo) {
+        const v = Number.isFinite(waterSource.params?.shoreNoiseFadeLo) ? waterSource.params.shoreNoiseFadeLo : 0.06;
+        au.uWaterShoreNoiseFadeLo.value = Math.max(0.0, Math.min(1.0, v));
+      }
+      if (au.uWaterShoreNoiseFadeHi) {
+        const v = Number.isFinite(waterSource.params?.shoreNoiseFadeHi) ? waterSource.params.shoreNoiseFadeHi : 0.28;
+        au.uWaterShoreNoiseFadeHi.value = Math.max(0.0, Math.min(1.0, v));
+      }
+    } else if (au) {
+      if (au.tWaterData) au.tWaterData.value = null;
+      if (au.uHasWaterData) au.uHasWaterData.value = 0.0;
+      if (au.uWaterShoreNoiseFadeLo) au.uWaterShoreNoiseFadeLo.value = 0.06;
+      if (au.uWaterShoreNoiseFadeHi) au.uWaterShoreNoiseFadeHi.value = 0.28;
     }
   }
 

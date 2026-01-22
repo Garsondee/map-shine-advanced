@@ -1498,7 +1498,16 @@ export class TileManager {
   refreshTileSprite(tileDoc) {
     const spriteData = this.tileSprites.get(tileDoc.id);
     if (!spriteData) return;
-    
+
+    // refreshTile fires frequently during interactive transforms (drag/resize/rotate).
+    // Keep our THREE sprite transform in sync even if the updateTile hook hasn't
+    // been committed yet.
+    try {
+      this.updateSpriteTransform(spriteData.sprite, tileDoc);
+    } catch (_) {
+    }
+
+    // Visibility/opacity can also change during refresh.
     this.updateSpriteVisibility(spriteData.sprite, tileDoc);
   }
 

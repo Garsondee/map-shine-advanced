@@ -1932,8 +1932,13 @@ export class CloudEffect extends EffectBase {
       const vLen = this._windVelocity.length();
       if (vLen > maxSpeed && vLen > 1e-6) this._windVelocity.multiplyScalar(maxSpeed / vLen);
 
-      this._windOffset.x = (this._windOffset.x - this._windVelocity.x * delta) % 100.0;
-      this._windOffset.y = (this._windOffset.y - this._windVelocity.y * delta) % 100.0;
+      // IMPORTANT: Do NOT modulo-wrap offsets.
+      // Wrapping introduces a discontinuity which looks like clouds "teleporting".
+      this._windOffset.x -= this._windVelocity.x * delta;
+      this._windOffset.y -= this._windVelocity.y * delta;
+
+      if (!Number.isFinite(this._windOffset.x)) this._windOffset.x = 0.0;
+      if (!Number.isFinite(this._windOffset.y)) this._windOffset.y = 0.0;
     }
 
     // Multi-layer offsets: subtle speed + direction differences, plus parallax handled in shader
@@ -2004,8 +2009,13 @@ export class CloudEffect extends EffectBase {
         if (vLayerLen > vMax && vLayerLen > 1e-6) v.multiplyScalar(vMax / vLayerLen);
 
         const o = this._layerWindOffsets[i];
-        o.x = ((o.x - v.x * delta) % 100.0 + 100.0) % 100.0;
-        o.y = ((o.y - v.y * delta) % 100.0 + 100.0) % 100.0;
+        // IMPORTANT: Do NOT modulo-wrap offsets.
+        // Wrapping introduces a discontinuity which looks like clouds "teleporting".
+        o.x -= v.x * delta;
+        o.y -= v.y * delta;
+
+        if (!Number.isFinite(o.x)) o.x = 0.0;
+        if (!Number.isFinite(o.y)) o.y = 0.0;
       }
 
       // PERF: Keep uLayerWindOffsets uniform as a flat typed array so Three.js can upload it

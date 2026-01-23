@@ -286,9 +286,10 @@ export class IridescenceEffect extends EffectBase {
 
     // Listen for light updates
     if (typeof Hooks !== 'undefined') {
-      Hooks.on('createAmbientLight', this.onLightCreatedBound);
-      Hooks.on('updateAmbientLight', this.onLightUpdatedBound);
-      Hooks.on('deleteAmbientLight', this.onLightDeletedBound);
+      this._hookIds = [];
+      this._hookIds.push(['createAmbientLight', Hooks.on('createAmbientLight', this.onLightCreatedBound)]);
+      this._hookIds.push(['updateAmbientLight', Hooks.on('updateAmbientLight', this.onLightUpdatedBound)]);
+      this._hookIds.push(['deleteAmbientLight', Hooks.on('deleteAmbientLight', this.onLightDeletedBound)]);
     }
 
     // Initial sync
@@ -668,6 +669,20 @@ export class IridescenceEffect extends EffectBase {
   }
 
   dispose() {
+    // Unregister Foundry hooks using correct two-argument signature
+    try {
+      if (this._hookIds && this._hookIds.length) {
+        for (const [hookName, hookId] of this._hookIds) {
+          try {
+            Hooks.off(hookName, hookId);
+          } catch (e) {
+          }
+        }
+      }
+    } catch (e) {
+    }
+    this._hookIds = [];
+    
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry = null; // We don't own geometry (cloned ref or shared)

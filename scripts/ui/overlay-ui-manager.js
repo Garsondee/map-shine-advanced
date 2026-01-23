@@ -46,6 +46,13 @@ export class OverlayUIManager {
     this._tmpWorld = null;
     this._tmpNdc = null;
 
+    // PERF: reuse projected return object (avoid allocating {x,y,behind} per overlay per frame)
+    this._tmpProjected = { x: 0, y: 0, behind: false };
+
+    // PERF: cache canvas bounding rect to avoid per-frame DOMRect allocations.
+    this._rectCache = { left: 0, top: 0, width: 0, height: 0, ts: 0 };
+    this._rectCacheMaxAgeMs = 250;
+
     this._lastRect = null;
   }
 
@@ -180,17 +187,41 @@ export class OverlayUIManager {
     h.lockedScreenPos = null;
   }
 
-  _getCanvasRect() {
+  _getCanvasRectCached(force = false) {
     const el = this.canvasElement;
     if (!el) return null;
 
-    try {
-      // PERF: getBoundingClientRect allocates but this should be ok;
-      // if needed we can throttle later.
-      return el.getBoundingClientRect();
-    } catch (_) {
-      return null;
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    const cache = this._rectCache;
+    const maxAge = (typeof this._rectCacheMaxAgeMs === 'number') ? this._rectCacheMaxAgeMs : 250;
+
+    if (!force && cache && cache.width > 0 && cache.height > 0 && (now - (cache.ts || 0)) < maxAge) {
+      return cache;
     }
+
+    let rect;
+    try {
+      rect = el.getBoundingClientRect();
+    } catch (_) {
+      rect = null;
+    }
+
+    if (rect) {
+      cache.left = rect.left;
+      cache.top = rect.top;
+      cache.width = rect.width;
+      cache.height = rect.height;
+    }
+
+    if (!cache.width || !cache.height) {
+      cache.left = 0;
+      cache.top = 0;
+      cache.width = window.innerWidth;
+      cache.height = window.innerHeight;
+    }
+
+    cache.ts = now;
+    return cache;
   }
 
   _getCamera() {
@@ -228,10 +259,11 @@ export class OverlayUIManager {
     // Values outside that range are not visible (including "behind" the camera).
     const behind = (ndc.z < -1) || (ndc.z > 1);
 
-    const x = (ndc.x * 0.5 + 0.5) * rect.width + rect.left;
-    const y = (-ndc.y * 0.5 + 0.5) * rect.height + rect.top;
-
-    return { x, y, behind };
+    const out = this._tmpProjected;
+    out.x = (ndc.x * 0.5 + 0.5) * rect.width + rect.left;
+    out.y = (-ndc.y * 0.5 + 0.5) * rect.height + rect.top;
+    out.behind = behind;
+    return out;
   }
 
   update(_timeInfo) {
@@ -240,7 +272,7 @@ export class OverlayUIManager {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    const rect = this._getCanvasRect();
+    const rect = this._getCanvasRectCached();
     if (!rect) return;
     this._lastRect = rect;
 
@@ -249,36 +281,55 @@ export class OverlayUIManager {
     for (const h of this.overlays.values()) {
       if (!h.visible) continue;
 
+      const el = h.el;
+      if (!el) continue;
+
       // If locked, stay at a fixed screen-space position.
       if (h.lockedToScreen && h.lockedScreenPos) {
-        h.el.style.left = `${h.lockedScreenPos.x}px`;
-        h.el.style.top = `${h.lockedScreenPos.y}px`;
-        h.el.style.transform = 'translate(-50%, -50%)';
+        const leftCss = `${Math.round(h.lockedScreenPos.x)}px`;
+        const topCss = `${Math.round(h.lockedScreenPos.y)}px`;
+
+        if (h._lastLeft !== leftCss) {
+          el.style.left = leftCss;
+          h._lastLeft = leftCss;
+        }
+        if (h._lastTop !== topCss) {
+          el.style.top = topCss;
+          h._lastTop = topCss;
+        }
+        if (h._lastTransform !== 'translate(-50%, -50%)') {
+          el.style.transform = 'translate(-50%, -50%)';
+          h._lastTransform = 'translate(-50%, -50%)';
+        }
         continue;
       }
 
-      const anchorWorld = (() => {
-        if (h.anchorObject) {
-          try {
-            return this._tmpWorld.copy(h.anchorObject.getWorldPosition(this._tmpWorld));
-          } catch (_) {
-            return null;
-          }
+      let anchorWorld = null;
+      if (h.anchorObject) {
+        try {
+          h.anchorObject.getWorldPosition(this._tmpWorld);
+          anchorWorld = this._tmpWorld;
+        } catch (_) {
+          anchorWorld = null;
         }
-        if (h.anchorWorld) {
-          return this._tmpWorld.copy(h.anchorWorld);
-        }
-        return null;
-      })();
+      } else if (h.anchorWorld) {
+        anchorWorld = this._tmpWorld.copy(h.anchorWorld);
+      }
 
       if (!anchorWorld) {
-        h.el.style.transform = 'translate(-9999px, -9999px)';
+        if (h._lastTransform !== 'translate(-9999px, -9999px)') {
+          el.style.transform = 'translate(-9999px, -9999px)';
+          h._lastTransform = 'translate(-9999px, -9999px)';
+        }
         continue;
       }
 
       const projected = this._projectWorldToScreen(anchorWorld, rect);
       if (!projected || projected.behind) {
-        h.el.style.transform = 'translate(-9999px, -9999px)';
+        if (h._lastTransform !== 'translate(-9999px, -9999px)') {
+          el.style.transform = 'translate(-9999px, -9999px)';
+          h._lastTransform = 'translate(-9999px, -9999px)';
+        }
         continue;
       }
 
@@ -291,10 +342,23 @@ export class OverlayUIManager {
         y = _clamp(y, m, window.innerHeight - m);
       }
 
-      h.el.style.left = `${x}px`;
-      h.el.style.top = `${y}px`;
+      const leftCss = `${Math.round(x)}px`;
+      const topCss = `${Math.round(y)}px`;
+
+      if (h._lastLeft !== leftCss) {
+        el.style.left = leftCss;
+        h._lastLeft = leftCss;
+      }
+      if (h._lastTop !== topCss) {
+        el.style.top = topCss;
+        h._lastTop = topCss;
+      }
+
       // Allow overlay content to handle its own centering offsets.
-      h.el.style.transform = 'translate(-50%, -50%)';
+      if (h._lastTransform !== 'translate(-50%, -50%)') {
+        el.style.transform = 'translate(-50%, -50%)';
+        h._lastTransform = 'translate(-50%, -50%)';
+      }
     }
   }
 

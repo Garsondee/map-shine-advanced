@@ -254,6 +254,18 @@ export class InteractionManager {
     /** @type {string|null} ID of token whose HUD is currently open */
     this.openHudTokenId = null;
 
+    // Performance: cache canvas bounding rect and reuse scratch vectors for per-frame UI projection.
+    // Avoids repeated DOMRect allocations + style object allocations which can trigger Firefox CC.
+    this._canvasRectCache = { left: 0, top: 0, width: 0, height: 0, ts: 0 };
+    this._canvasRectCacheMaxAgeMs = 250;
+    this._tempVec3HUD = new THREE.Vector3();
+    this._tempVec3UI = new THREE.Vector3();
+    this._viewportToWorldPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+    this._viewportToWorldTarget = new THREE.Vector3();
+    this._viewportToWorldLastZ = null;
+    this._hudLastCss = { left: null, top: null, transform: null };
+    this._hudStyledEl = null;
+
     this.boundHandlers = {
       onPointerDown: this.onPointerDown.bind(this),
       onPointerMove: this.onPointerMove.bind(this),
@@ -3307,6 +3319,41 @@ export class InteractionManager {
     this._updateLightRadiusRingsGizmo();
   }
 
+  _getCanvasRectCached(force = false) {
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    const cache = this._canvasRectCache;
+    const maxAge = (typeof this._canvasRectCacheMaxAgeMs === 'number') ? this._canvasRectCacheMaxAgeMs : 250;
+
+    if (!force && cache && cache.width > 0 && cache.height > 0 && (now - (cache.ts || 0)) < maxAge) {
+      return cache;
+    }
+
+    let rect;
+    try {
+      rect = this.canvasElement?.getBoundingClientRect?.();
+    } catch (_) {
+      rect = null;
+    }
+
+    if (rect) {
+      cache.left = rect.left;
+      cache.top = rect.top;
+      cache.width = rect.width;
+      cache.height = rect.height;
+    }
+
+    // Fallback if canvas rect is invalid (e.g. not yet laid out)
+    if (!cache.width || !cache.height) {
+      cache.left = 0;
+      cache.top = 0;
+      cache.width = window.innerWidth;
+      cache.height = window.innerHeight;
+    }
+
+    cache.ts = now;
+    return cache;
+  }
+
   _createLightTranslateGizmo() {
     try {
       const THREE = window.THREE;
@@ -3508,15 +3555,27 @@ export class InteractionManager {
         const cam = this.sceneComposer?.camera;
         const el = ui.el;
         if (THREE && cam && el) {
-          const rect = this.canvasElement.getBoundingClientRect();
-          const v = new THREE.Vector3(pos.x + dx, pos.y + dy, z);
+          const rect = this._getCanvasRectCached();
+          const v = this._tempVec3UI;
+          v.set(pos.x + dx, pos.y + dy, z);
           v.project(cam);
           const sx = rect.left + (v.x * 0.5 + 0.5) * rect.width;
           const sy = rect.top + (-v.y * 0.5 + 0.5) * rect.height;
-          el.style.left = `${Math.round(sx)}px`;
-          el.style.top = `${Math.round(sy)}px`;
-          el.style.transform = 'translate(0px, 0px)';
-          el.style.display = 'block';
+
+          const leftCss = `${Math.round(sx)}px`;
+          const topCss = `${Math.round(sy)}px`;
+
+          if (ui._lastLeft !== leftCss) {
+            el.style.left = leftCss;
+            ui._lastLeft = leftCss;
+          }
+          if (ui._lastTop !== topCss) {
+            el.style.top = topCss;
+            ui._lastTop = topCss;
+          }
+
+          if (el.style.transform !== 'translate(0px, 0px)') el.style.transform = 'translate(0px, 0px)';
+          if (el.style.display !== 'block') el.style.display = 'block';
         }
       } catch (_) {
       }
@@ -3884,33 +3943,25 @@ export class InteractionManager {
       
       // CRITICAL: Ensure camera matrices are up to date for accurate projection
       // This fixes "lag" or "parallax" where the HUD trails behind the camera
-      this.sceneComposer.camera.updateMatrixWorld();
-      this.sceneComposer.camera.updateProjectionMatrix();
+      const cam = this.sceneComposer?.camera;
+      if (!cam) return;
+      cam.updateMatrixWorld();
 
       // Project world position to screen coordinates
       // We use the sprite's position (which is center bottom usually, or center? TokenManager puts it at center)
       // Token sprites are centered.
-      const pos = sprite.position.clone();
-      pos.project(this.sceneComposer.camera);
+      const pos = this._tempVec3HUD;
+      pos.copy(sprite.position);
+      pos.project(cam);
       
       // Convert NDC to CSS pixels
       // NDC: [-1, 1] -> CSS: [0, width/height]
       // Y is inverted in CSS (0 at top) vs NDC (1 at top)
-      let rect = this.canvasElement.getBoundingClientRect();
-      
-      // Fallback if canvas rect is zero (e.g. not yet layout)
-      // This fixes the "Top Left" (0,0) issue if rect is invalid
-      let width = rect.width;
-      let height = rect.height;
-      let left = rect.left;
-      let top = rect.top;
-
-      if (width === 0 || height === 0) {
-          width = window.innerWidth;
-          height = window.innerHeight;
-          left = 0;
-          top = 0;
-      }
+      const rect = this._getCanvasRectCached();
+      const width = rect.width;
+      const height = rect.height;
+      const left = rect.left;
+      const top = rect.top;
       
       // Calculate Screen Coordinates
       // NDC X [-1, 1] -> [0, Width]
@@ -3930,7 +3981,8 @@ export class InteractionManager {
       
       if (hud.element) {
           // hud.element might be jQuery object or raw DOM or array
-          const hudEl = (hud.element instanceof jQuery || (hud.element.jquery)) ? hud.element[0] : hud.element;
+          const hasJq = (typeof jQuery !== 'undefined');
+          const hudEl = (hasJq && (hud.element instanceof jQuery || hud.element.jquery)) ? hud.element[0] : hud.element;
           
           if (hudEl) {
               // CRITICAL FIX: Reparent HUD to body to avoid parent scaling issues (Parallax)
@@ -3964,20 +4016,32 @@ export class InteractionManager {
               // when Foundry's native layout expects a slightly smaller canvas zoom.
               const finalScale = scale * 1.25;
 
-              const style = {
-                  left: `${x}px`,
-                  top: `${y}px`,
-                  transform: `translate(-50%, -50%) scale(${finalScale})`,
-                  transformOrigin: 'center center',
-                  zIndex: '100',
-                  pointerEvents: 'auto',
-                  position: 'fixed' // Use fixed to match screen coords
-              };
+              // Avoid per-frame style object allocations and jQuery .css overhead.
+              // Only touch CSS properties if they changed meaningfully.
+              const leftCss = `${Math.round(x)}px`;
+              const topCss = `${Math.round(y)}px`;
+              const transformCss = `translate(-50%, -50%) scale(${finalScale})`;
 
-              if (typeof hud.element.css === 'function') {
-                  hud.element.css(style);
-              } else if (hudEl.style) {
-                  Object.assign(hudEl.style, style);
+              if (this._hudStyledEl !== hudEl) {
+                  hudEl.style.transformOrigin = 'center center';
+                  hudEl.style.zIndex = '100';
+                  hudEl.style.pointerEvents = 'auto';
+                  hudEl.style.position = 'fixed';
+                  this._hudStyledEl = hudEl;
+              }
+
+              const last = this._hudLastCss;
+              if (last.left !== leftCss) {
+                  hudEl.style.left = leftCss;
+                  last.left = leftCss;
+              }
+              if (last.top !== topCss) {
+                  hudEl.style.top = topCss;
+                  last.top = topCss;
+              }
+              if (last.transform !== transformCss) {
+                  hudEl.style.transform = transformCss;
+                  last.transform = transformCss;
               }
           }
       }
@@ -6005,7 +6069,7 @@ export class InteractionManager {
    * @param {PointerEvent} event 
    */
   updateMouseCoords(event) {
-    const rect = this.canvasElement.getBoundingClientRect();
+    const rect = this._getCanvasRectCached();
     this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
   }
@@ -6021,7 +6085,7 @@ export class InteractionManager {
     // updateMouseCoords expects an event-like object with clientX/Y
     // We can just reuse the logic here or call updateMouseCoords if we construct a fake event
     // But easier to just recalculate NDC directly since we have the raw coords
-    const rect = this.canvasElement.getBoundingClientRect();
+    const rect = this._getCanvasRectCached();
     const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
     const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
     
@@ -6035,13 +6099,13 @@ export class InteractionManager {
     this.mouse.set(ndcX, ndcY);
     this.raycaster.setFromCamera(this.mouse, camera);
 
-    // Create a plane at targetZ facing up (normal = 0,0,1)
-    // Plane constant 'w' in Ax + By + Cz + w = 0
-    // 0x + 0y + 1z - targetZ = 0  =>  z = targetZ
-    // THREE.Plane takes (normal, constant) where constant is -distance from origin along normal
-    const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -targetZ);
-    
-    const target = new THREE.Vector3();
+    // Reuse cached plane + target to avoid per-call allocations.
+    const plane = this._viewportToWorldPlane;
+    if (this._viewportToWorldLastZ !== targetZ) {
+      plane.constant = -targetZ;
+      this._viewportToWorldLastZ = targetZ;
+    }
+    const target = this._viewportToWorldTarget;
     const intersection = this.raycaster.ray.intersectPlane(plane, target);
     
     return intersection || null;

@@ -108,10 +108,12 @@ export class CloudEffect extends EffectBase {
     this._layerWindVelocities = null; // Lazy init as Array<THREE.Vector2>
     this._layerSpeedMult = [0.6, 0.85, 1.0, 1.15, 1.3];
     this._layerDirAngle = [-0.03, -0.015, 0.0, 0.015, 0.03];
-    this._layerParallax = [0.05, 0.12, 0.2, 0.28, 0.35];
-    this._layerCoverMult = [0.35, 0.65, 1.0, 0.65, 0.35];
-    this._layerNoiseScaleMult = [0.85, 0.95, 1.0, 1.15, 1.3];
-    this._layerWeight = [0.35, 0.65, 1.0, 0.65, 0.35];
+    // PERF: Use typed arrays for uniform arrays to avoid per-frame flatten() work and
+    // reduce JS engine property lookup overhead during uniform uploads.
+    this._layerParallax = new Float32Array([0.05, 0.12, 0.2, 0.28, 0.35]);
+    this._layerCoverMult = new Float32Array([0.35, 0.65, 1.0, 0.65, 0.35]);
+    this._layerNoiseScaleMult = new Float32Array([0.85, 0.95, 1.0, 1.15, 1.3]);
+    this._layerWeight = new Float32Array([0.35, 0.65, 1.0, 0.65, 0.35]);
 
     this.params = {
       enabled: true,
@@ -218,6 +220,58 @@ export class CloudEffect extends EffectBase {
 
     // Performance: reusable objects
     this._tempSize = null;
+
+    // Performance: pooled override state for blocker renders (avoid per-frame allocations)
+    this._overrideObjects = [];
+    this._overrideProps = [];
+    this._overrideCount = 0;
+
+    // Performance: reusable config objects for maskManager.setTexture
+    this._maskTextureConfigCloudShadow = {
+      space: 'screenUv',
+      source: 'renderTarget',
+      channels: 'r',
+      uvFlipY: false,
+      lifecycle: 'dynamicPerFrame',
+      width: null,
+      height: null
+    };
+    this._maskTextureConfigCloudShadowRaw = {
+      space: 'screenUv',
+      source: 'renderTarget',
+      channels: 'r',
+      uvFlipY: false,
+      lifecycle: 'dynamicPerFrame',
+      width: null,
+      height: null
+    };
+    this._maskTextureConfigCloudDensity = {
+      space: 'screenUv',
+      source: 'renderTarget',
+      channels: 'r',
+      uvFlipY: false,
+      lifecycle: 'dynamicPerFrame',
+      width: null,
+      height: null
+    };
+    this._maskTextureConfigCloudShadowBlocker = {
+      space: 'screenUv',
+      source: 'renderTarget',
+      channels: 'rgba',
+      uvFlipY: false,
+      lifecycle: 'dynamicPerFrame',
+      width: null,
+      height: null
+    };
+    this._maskTextureConfigCloudTopBlocker = {
+      space: 'screenUv',
+      source: 'renderTarget',
+      channels: 'rgba',
+      uvFlipY: false,
+      lifecycle: 'dynamicPerFrame',
+      width: null,
+      height: null
+    };
     this._lastUpdateHash = null;
 
     this._tempVec2A = null;
@@ -241,12 +295,9 @@ export class CloudEffect extends EffectBase {
     this._forceUpdateFrames = 0;
     this._forceRecomposeFrames = 0;
     this._blockersDirty = true;
-    this._lastParamHash = null;
     this._lastElapsed = 0;
 
     this._cloudTopDensityValid = false;
-
-    this._blockerOverrides = null;
   }
 
   requestUpdate(frames = 2) {
@@ -271,9 +322,8 @@ export class CloudEffect extends EffectBase {
     if (!THREE || !renderer || !target || !this.mainCamera || !this.mainScene) return;
 
     const bit = 1 << layerId;
-    if (!this._blockerOverrides) this._blockerOverrides = [];
-    const overrides = this._blockerOverrides;
-    overrides.length = 0;
+
+    this._overrideCount = 0;
 
     try {
       this.mainScene.traverse((obj) => {
@@ -285,20 +335,40 @@ export class CloudEffect extends EffectBase {
         const m = obj.material;
         if (!m || !m.isSpriteMaterial) return;
 
-        overrides.push({
-          obj,
-          visible: !!obj.visible,
-          m,
-          map: m.map,
-          alphaMap: m.alphaMap,
-          opacity: m.opacity,
-          transparent: m.transparent,
-          alphaTest: m.alphaTest,
-          depthTest: m.depthTest,
-          depthWrite: m.depthWrite,
-          blending: m.blending,
-          color: m.color ? m.color.getHex() : null
-        });
+        // Expand pool if needed
+        if (this._overrideCount >= this._overrideObjects.length) {
+          this._overrideObjects.push(null);
+          this._overrideProps.push({
+            visible: true,
+            m: null,
+            map: null,
+            alphaMap: null,
+            opacity: 1.0,
+            transparent: false,
+            alphaTest: 0.0,
+            depthTest: false,
+            depthWrite: false,
+            blending: 0,
+            color: null
+          });
+        }
+
+        // Save state
+        const index = this._overrideCount;
+        this._overrideObjects[index] = obj;
+        const props = this._overrideProps[index];
+        props.visible = !!obj.visible;
+        props.m = m;
+        props.map = m.map;
+        props.alphaMap = m.alphaMap;
+        props.opacity = m.opacity;
+        props.transparent = m.transparent;
+        props.alphaTest = m.alphaTest;
+        props.depthTest = m.depthTest;
+        props.depthWrite = m.depthWrite;
+        props.blending = m.blending;
+        props.color = m.color ? m.color.getHex() : null;
+        this._overrideCount++;
 
         m.map = null;
         m.alphaMap = null;
@@ -325,23 +395,28 @@ export class CloudEffect extends EffectBase {
       renderer.clear();
       renderer.render(this.mainScene, this.mainCamera);
     } finally {
-      for (let i = overrides.length - 1; i >= 0; i--) {
-        const o = overrides[i];
-        const m = o.m;
-        if (!m) continue;
-        if (o.obj) o.obj.visible = o.visible;
-        m.map = o.map;
-        m.alphaMap = o.alphaMap;
-        if (m.color && typeof o.color === 'number') m.color.setHex(o.color);
-        m.opacity = o.opacity;
-        m.transparent = o.transparent;
-        m.alphaTest = o.alphaTest;
-        m.depthTest = o.depthTest;
-        m.depthWrite = o.depthWrite;
-        m.blending = o.blending;
-        m.needsUpdate = true;
+      for (let i = this._overrideCount - 1; i >= 0; i--) {
+        const obj = this._overrideObjects[i];
+        const props = this._overrideProps[i];
+        const m = props?.m;
+        if (obj) obj.visible = props.visible;
+        if (m) {
+          m.map = props.map;
+          m.alphaMap = props.alphaMap;
+          if (m.color && typeof props.color === 'number') m.color.setHex(props.color);
+          m.opacity = props.opacity;
+          m.transparent = props.transparent;
+          m.alphaTest = props.alphaTest;
+          m.depthTest = props.depthTest;
+          m.depthWrite = props.depthWrite;
+          m.blending = props.blending;
+          m.needsUpdate = true;
+        }
+
+        // Clear references to avoid holding objects longer than necessary.
+        this._overrideObjects[i] = null;
+        props.m = null;
       }
-      overrides.length = 0;
     }
   }
 
@@ -846,6 +921,10 @@ export class CloudEffect extends EffectBase {
       new THREE.Vector2(0, 0)
     ];
 
+    // PERF: Flat uniform array for uLayerWindOffsets (vec2[5]) to avoid Three.js flatten()
+    // repeatedly calling Vector2.toArray during uploads.
+    this._layerWindOffsetsFlat = new Float32Array(10);
+
     this._layerWindVelocities = [
       new THREE.Vector2(0, 0),
       new THREE.Vector2(0, 0),
@@ -939,13 +1018,8 @@ export class CloudEffect extends EffectBase {
         uDomainWarpScale: { value: this.params.domainWarpScale },
         uDomainWarpSpeed: { value: this.params.domainWarpSpeed },
         uDomainWarpTimeOffsetY: { value: this.params.domainWarpTimeOffsetY },
-        uLayerWindOffsets: { value: this._layerWindOffsets || [
-          new THREE.Vector2(0, 0),
-          new THREE.Vector2(0, 0),
-          new THREE.Vector2(0, 0),
-          new THREE.Vector2(0, 0),
-          new THREE.Vector2(0, 0)
-        ] },
+        // NOTE: Use flat Float32Array so setValueV2fArray can skip flatten() entirely.
+        uLayerWindOffsets: { value: this._layerWindOffsetsFlat || new Float32Array(10) },
         uLayerParallax: { value: this._layerParallax },
         uLayerCoverMult: { value: this._layerCoverMult },
         uLayerNoiseScaleMult: { value: this._layerNoiseScaleMult },
@@ -1933,6 +2007,18 @@ export class CloudEffect extends EffectBase {
         o.x = ((o.x - v.x * delta) % 100.0 + 100.0) % 100.0;
         o.y = ((o.y - v.y * delta) % 100.0 + 100.0) % 100.0;
       }
+
+      // PERF: Keep uLayerWindOffsets uniform as a flat typed array so Three.js can upload it
+      // directly (skipping flatten() + Vector2.toArray overhead).
+      if (this._layerWindOffsetsFlat) {
+        const flat = this._layerWindOffsetsFlat;
+        for (let i = 0; i < this._layerWindOffsets.length; i++) {
+          const o = this._layerWindOffsets[i];
+          const j = i * 2;
+          flat[j] = o.x;
+          flat[j + 1] = o.y;
+        }
+      }
     }
 
     // Calculate sun direction for shadow offset
@@ -1989,13 +2075,8 @@ export class CloudEffect extends EffectBase {
     if (du.uDomainWarpSpeed) du.uDomainWarpSpeed.value = this.params.domainWarpSpeed;
     if (du.uDomainWarpTimeOffsetY) du.uDomainWarpTimeOffsetY.value = this.params.domainWarpTimeOffsetY;
 
-    if (du.uLayerWindOffsets && this._layerWindOffsets) {
-      du.uLayerWindOffsets.value = this._layerWindOffsets;
-    }
-    if (du.uLayerParallax) du.uLayerParallax.value = this._layerParallax;
-    if (du.uLayerCoverMult) du.uLayerCoverMult.value = this._layerCoverMult;
-    if (du.uLayerNoiseScaleMult) du.uLayerNoiseScaleMult.value = this._layerNoiseScaleMult;
-    if (du.uLayerWeight) du.uLayerWeight.value = this._layerWeight;
+    // PERF: Do not replace uniform.value objects/arrays per frame.
+    // We mutate the underlying typed arrays in place.
     if (du.uCompositeSoftKnee) du.uCompositeSoftKnee.value = Number(this.params.cloudTopSoftKnee) || 0.0;
     if (du.uSceneOrigin) du.uSceneOrigin.value.set(sceneX, sceneY);
     du.uSceneSize.value.set(sceneWidth, sceneHeight);
@@ -2171,27 +2252,17 @@ export class CloudEffect extends EffectBase {
     const previousLayersMask = this.mainCamera?.layers?.mask;
 
     try {
-      try {
-        const p = this.params;
-        const paramHash = `${p.updateEveryNFrames}|${p.internalResolutionScale}|${p.cloudCover}|${p.noiseScale}|${p.noiseDetail}|${p.cloudSharpness}|${p.noiseTimeSpeed}|${p.domainWarpEnabled}|${p.domainWarpStrength}|${p.domainWarpScale}|${p.domainWarpSpeed}|${p.domainWarpTimeOffsetY}|${p.shadowOpacity}|${p.shadowSoftness}|${p.shadowOffsetScale}|${p.minShadowBrightness}|${p.cloudTopMode}|${p.cloudTopOpacity}|${p.cloudTopFadeStart}|${p.cloudTopFadeEnd}|${p.cloudBrightness}|${p.cloudTopShadingEnabled}|${p.cloudTopShadingStrength}|${p.cloudTopNormalStrength}|${p.cloudTopAOIntensity}|${p.cloudTopEdgeHighlight}|${p.cloudTopPeakDetailEnabled}|${p.cloudTopPeakDetailStrength}|${p.cloudTopPeakDetailScale}|${p.cloudTopPeakDetailSpeed}|${p.cloudTopPeakDetailStart}|${p.cloudTopPeakDetailEnd}|${p.cloudTopSoftKnee}|${p.windInfluence}|${p.driftSpeed}|${p.minDriftSpeed}|${p.driftResponsiveness}|${p.driftMaxSpeed}|${p.layerParallaxBase}|${p.layer1Enabled}|${p.layer1Opacity}|${p.layer1Coverage}|${p.layer1Scale}|${p.layer1ParallaxMult}|${p.layer1SpeedMult}|${p.layer1DirDeg}|${p.layer2Enabled}|${p.layer2Opacity}|${p.layer2Coverage}|${p.layer2Scale}|${p.layer2ParallaxMult}|${p.layer2SpeedMult}|${p.layer2DirDeg}|${p.layer3Enabled}|${p.layer3Opacity}|${p.layer3Coverage}|${p.layer3Scale}|${p.layer3ParallaxMult}|${p.layer3SpeedMult}|${p.layer3DirDeg}|${p.layer4Enabled}|${p.layer4Opacity}|${p.layer4Coverage}|${p.layer4Scale}|${p.layer4ParallaxMult}|${p.layer4SpeedMult}|${p.layer4DirDeg}|${p.layer5Enabled}|${p.layer5Opacity}|${p.layer5Coverage}|${p.layer5Scale}|${p.layer5ParallaxMult}|${p.layer5SpeedMult}|${p.layer5DirDeg}`;
-        if (paramHash !== this._lastParamHash) {
-          this._lastParamHash = paramHash;
-          this._forceUpdateFrames = Math.max(this._forceUpdateFrames, 2);
-        }
-      } catch (e) {
-      }
+      // Temporal slicing (motion-aware): when the camera is moving we must update every frame
+      // to avoid the perception of lag/jitter. When stable, skip heavy passes.
+      const n = (this.params && typeof this.params.updateEveryNFrames === 'number')
+        ? (this.params.updateEveryNFrames | 0)
+        : 1;
+      const updateEvery = Math.max(1, n);
 
-    // Temporal slicing (motion-aware): when the camera is moving we must update every frame
-    // to avoid the perception of lag/jitter. When stable, skip heavy passes.
-    const n = (this.params && typeof this.params.updateEveryNFrames === 'number')
-      ? (this.params.updateEveryNFrames | 0)
-      : 1;
-    const updateEvery = Math.max(1, n);
-
-    const currentZoom = this._getEffectiveZoom();
-    const cam = this.mainCamera || camera;
-    const camX = cam?.position?.x ?? 0;
-    const camY = cam?.position?.y ?? 0;
+      const currentZoom = this._getEffectiveZoom();
+      const cam = this.mainCamera || camera;
+      const camX = cam?.position?.x ?? 0;
+      const camY = cam?.position?.y ?? 0;
 
     // View-bounds stability check: camera position/zoom alone is not sufficient.
     // The shader is pinned to uViewBoundsMin/Max (derived from viewport size + zoom),
@@ -2302,43 +2373,28 @@ export class CloudEffect extends EffectBase {
           const shadowTex = this.cloudShadowTarget?.texture;
           if (shadowTex && shadowTex !== this._publishedCloudShadowTex) {
             this._publishedCloudShadowTex = shadowTex;
-            mm.setTexture('cloudShadow.screen', shadowTex, {
-              space: 'screenUv',
-              source: 'renderTarget',
-              channels: 'r',
-              uvFlipY: false,
-              lifecycle: 'dynamicPerFrame',
-              width: this.cloudShadowTarget?.width ?? null,
-              height: this.cloudShadowTarget?.height ?? null
-            });
+            const cfg = this._maskTextureConfigCloudShadow;
+            cfg.width = this.cloudShadowTarget?.width ?? null;
+            cfg.height = this.cloudShadowTarget?.height ?? null;
+            mm.setTexture('cloudShadow.screen', shadowTex, cfg);
           }
 
           const shadowRawTex = this.cloudShadowRawTarget?.texture;
           if (shadowRawTex && shadowRawTex !== this._publishedCloudShadowRawTex) {
             this._publishedCloudShadowRawTex = shadowRawTex;
-            mm.setTexture('cloudShadowRaw.screen', shadowRawTex, {
-              space: 'screenUv',
-              source: 'renderTarget',
-              channels: 'r',
-              uvFlipY: false,
-              lifecycle: 'dynamicPerFrame',
-              width: this.cloudShadowRawTarget?.width ?? null,
-              height: this.cloudShadowRawTarget?.height ?? null
-            });
+            const cfg = this._maskTextureConfigCloudShadowRaw;
+            cfg.width = this.cloudShadowRawTarget?.width ?? null;
+            cfg.height = this.cloudShadowRawTarget?.height ?? null;
+            mm.setTexture('cloudShadowRaw.screen', shadowRawTex, cfg);
           }
 
           const densityTex = this.cloudDensityTarget?.texture;
           if (densityTex && densityTex !== this._publishedCloudDensityTex) {
             this._publishedCloudDensityTex = densityTex;
-            mm.setTexture('cloudDensity.screen', densityTex, {
-              space: 'screenUv',
-              source: 'renderTarget',
-              channels: 'r',
-              uvFlipY: false,
-              lifecycle: 'dynamicPerFrame',
-              width: this.cloudDensityTarget?.width ?? null,
-              height: this.cloudDensityTarget?.height ?? null
-            });
+            const cfg = this._maskTextureConfigCloudDensity;
+            cfg.width = this.cloudDensityTarget?.width ?? null;
+            cfg.height = this.cloudDensityTarget?.height ?? null;
+            mm.setTexture('cloudDensity.screen', densityTex, cfg);
           }
         }
       } catch (e) {
@@ -2583,71 +2639,46 @@ export class CloudEffect extends EffectBase {
         const shadowTex = this.cloudShadowTarget?.texture;
         if (shadowTex && shadowTex !== this._publishedCloudShadowTex) {
           this._publishedCloudShadowTex = shadowTex;
-          mm.setTexture('cloudShadow.screen', shadowTex, {
-            space: 'screenUv',
-            source: 'renderTarget',
-            channels: 'r',
-            uvFlipY: false,
-            lifecycle: 'dynamicPerFrame',
-            width: this.cloudShadowTarget?.width ?? null,
-            height: this.cloudShadowTarget?.height ?? null
-          });
+          const cfg = this._maskTextureConfigCloudShadow;
+          cfg.width = this.cloudShadowTarget?.width ?? null;
+          cfg.height = this.cloudShadowTarget?.height ?? null;
+          mm.setTexture('cloudShadow.screen', shadowTex, cfg);
         }
 
         const shadowRawTex = this.cloudShadowRawTarget?.texture;
         if (shadowRawTex && shadowRawTex !== this._publishedCloudShadowRawTex) {
           this._publishedCloudShadowRawTex = shadowRawTex;
-          mm.setTexture('cloudShadowRaw.screen', shadowRawTex, {
-            space: 'screenUv',
-            source: 'renderTarget',
-            channels: 'r',
-            uvFlipY: false,
-            lifecycle: 'dynamicPerFrame',
-            width: this.cloudShadowRawTarget?.width ?? null,
-            height: this.cloudShadowRawTarget?.height ?? null
-          });
+          const cfg = this._maskTextureConfigCloudShadowRaw;
+          cfg.width = this.cloudShadowRawTarget?.width ?? null;
+          cfg.height = this.cloudShadowRawTarget?.height ?? null;
+          mm.setTexture('cloudShadowRaw.screen', shadowRawTex, cfg);
         }
 
         const densityTex = this.cloudDensityTarget?.texture;
         if (densityTex && densityTex !== this._publishedCloudDensityTex) {
           this._publishedCloudDensityTex = densityTex;
-          mm.setTexture('cloudDensity.screen', densityTex, {
-            space: 'screenUv',
-            source: 'renderTarget',
-            channels: 'r',
-            uvFlipY: false,
-            lifecycle: 'dynamicPerFrame',
-            width: this.cloudDensityTarget?.width ?? null,
-            height: this.cloudDensityTarget?.height ?? null
-          });
+          const cfg = this._maskTextureConfigCloudDensity;
+          cfg.width = this.cloudDensityTarget?.width ?? null;
+          cfg.height = this.cloudDensityTarget?.height ?? null;
+          mm.setTexture('cloudDensity.screen', densityTex, cfg);
         }
 
         const shadowBlockerTex = this.cloudShadowBlockerTarget?.texture;
         if (shadowBlockerTex && shadowBlockerTex !== this._publishedCloudShadowBlockerTex) {
           this._publishedCloudShadowBlockerTex = shadowBlockerTex;
-          mm.setTexture('cloudShadowBlocker.screen', shadowBlockerTex, {
-            space: 'screenUv',
-            source: 'renderTarget',
-            channels: 'rgba',
-            uvFlipY: false,
-            lifecycle: 'dynamicPerFrame',
-            width: this.cloudShadowBlockerTarget?.width ?? null,
-            height: this.cloudShadowBlockerTarget?.height ?? null
-          });
+          const cfg = this._maskTextureConfigCloudShadowBlocker;
+          cfg.width = this.cloudShadowBlockerTarget?.width ?? null;
+          cfg.height = this.cloudShadowBlockerTarget?.height ?? null;
+          mm.setTexture('cloudShadowBlocker.screen', shadowBlockerTex, cfg);
         }
 
         const topBlockerTex = this.cloudTopBlockerTarget?.texture;
         if (topBlockerTex && topBlockerTex !== this._publishedCloudTopBlockerTex) {
           this._publishedCloudTopBlockerTex = topBlockerTex;
-          mm.setTexture('cloudTopBlocker.screen', topBlockerTex, {
-            space: 'screenUv',
-            source: 'renderTarget',
-            channels: 'rgba',
-            uvFlipY: false,
-            lifecycle: 'dynamicPerFrame',
-            width: this.cloudTopBlockerTarget?.width ?? null,
-            height: this.cloudTopBlockerTarget?.height ?? null
-          });
+          const cfg = this._maskTextureConfigCloudTopBlocker;
+          cfg.width = this.cloudTopBlockerTarget?.width ?? null;
+          cfg.height = this.cloudTopBlockerTarget?.height ?? null;
+          mm.setTexture('cloudTopBlocker.screen', topBlockerTex, cfg);
         }
       }
     } catch (e) {

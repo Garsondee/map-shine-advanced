@@ -447,6 +447,29 @@ export class TweakpaneManager {
       this.openMapPointsManagerDialog();
     });
 
+    globalFolder.addButton({
+      title: 'Scene Reset (Rebuild)',
+      label: 'Tools'
+    }).on('click', async () => {
+      try {
+        const fn = window.MapShine?.resetScene;
+        if (typeof fn !== 'function') {
+          ui.notifications.warn('Map Shine: Scene reset not available');
+          return;
+        }
+        await fn();
+      } catch (e) {
+        try {
+          ui.notifications.error('Map Shine: Scene reset failed (see console)');
+        } catch (_) {
+        }
+        try {
+          console.error('[MapShine] Scene reset failed', e);
+        } catch (_) {
+        }
+      }
+    });
+
     const masterResetButton = globalFolder.addButton({
       title: 'Master Reset to Defaults',
       label: 'Defaults'

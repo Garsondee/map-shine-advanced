@@ -416,6 +416,9 @@ export class DoorMeshManager {
     this._skyTint = THREE ? new THREE.Color(0xffffff) : null;
     this._lastTintKey = 0xffffff;
 
+    /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
+    this._hookIds = [];
+
     this.initialized = false;
     
     log.debug('DoorMeshManager created');
@@ -439,19 +442,19 @@ export class DoorMeshManager {
    */
   _setupHooks() {
     // Wall created - check if it has a door mesh
-    Hooks.on('createWall', (doc) => {
+    this._hookIds.push(['createWall', Hooks.on('createWall', (doc) => {
       this._createDoorMeshes(doc);
-    });
+    })]);
     
     // Wall updated - handle door state changes and animation config changes
-    Hooks.on('updateWall', (doc, changes) => {
+    this._hookIds.push(['updateWall', Hooks.on('updateWall', (doc, changes) => {
       this._handleWallUpdate(doc, changes);
-    });
+    })]);
     
     // Wall deleted - remove door meshes
-    Hooks.on('deleteWall', (doc) => {
+    this._hookIds.push(['deleteWall', Hooks.on('deleteWall', (doc) => {
       this._destroyDoorMeshes(doc.id);
-    });
+    })]);
   }
   
   /**
@@ -731,6 +734,20 @@ export class DoorMeshManager {
    * Dispose of all resources
    */
   dispose() {
+    // Unregister Foundry hooks using correct two-argument signature
+    try {
+      if (this._hookIds && this._hookIds.length) {
+        for (const [hookName, hookId] of this._hookIds) {
+          try {
+            Hooks.off(hookName, hookId);
+          } catch (e) {
+          }
+        }
+      }
+    } catch (e) {
+    }
+    this._hookIds = [];
+
     // Dispose all door meshes
     for (const [wallId, meshSet] of this.doorMeshes) {
       for (const doorMesh of meshSet) {

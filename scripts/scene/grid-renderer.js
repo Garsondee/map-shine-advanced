@@ -40,6 +40,9 @@ export class GridRenderer {
 
     this.initialized = false;
     this.hooksRegistered = false;
+
+    /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
+    this._hookIds = [];
     
     log.debug('GridRenderer created');
   }
@@ -125,12 +128,12 @@ export class GridRenderer {
     if (this.hooksRegistered) return;
 
     // Initial draw
-    Hooks.on('canvasReady', () => {
+    this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
       this.updateGrid();
-    });
+    })]);
 
     // Update on grid settings change
-    Hooks.on('updateScene', (scene, changes) => {
+    this._hookIds.push(['updateScene', Hooks.on('updateScene', (scene, changes) => {
       if (scene.id !== canvas.scene?.id) return;
       
       // Check for grid-related changes
@@ -138,7 +141,7 @@ export class GridRenderer {
         log.info('Grid settings changed, updating grid');
         this.updateGrid();
       }
-    });
+    })]);
     
     this.hooksRegistered = true;
   }
@@ -426,6 +429,21 @@ export class GridRenderer {
    * @public
    */
   dispose() {
+    // Unregister Foundry hooks using correct two-argument signature
+    try {
+      if (this._hookIds && this._hookIds.length) {
+        for (const [hookName, hookId] of this._hookIds) {
+          try {
+            Hooks.off(hookName, hookId);
+          } catch (e) {
+          }
+        }
+      }
+    } catch (e) {
+    }
+    this._hookIds = [];
+    this.hooksRegistered = false;
+
     if (this.gridMesh) {
       this.scene.remove(this.gridMesh);
       this.gridMesh.geometry.dispose();

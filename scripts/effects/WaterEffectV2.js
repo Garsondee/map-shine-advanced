@@ -5,6 +5,20 @@ import { DistortionLayer } from './DistortionManager.js';
 
 const log = createLogger('WaterEffectV2');
 
+// Pre-allocated NDC corner coordinates for frustum intersection (avoids per-frame allocations)
+const _ndcCorners = [
+  [-1, -1],
+  [1, -1],
+  [-1, 1],
+  [1, 1]
+];
+
+// Bitmask flags for shader defines (avoids per-frame string allocations)
+const DEF_SAND = 1 << 0;
+const DEF_FOAM_FLECKS = 1 << 1;
+const DEF_MULTITAP = 1 << 2;
+const DEF_CHROM_AB = 1 << 3;
+
 export class WaterEffectV2 extends EffectBase {
   constructor() {
     super('water', RenderLayers.POST_PROCESSING, 'low');
@@ -13,7 +27,7 @@ export class WaterEffectV2 extends EffectBase {
     this.alwaysRender = true;
 
     this.params = {
-      tintStrength: 0.2,
+      tintStrength: 0.25,
       tintColor: { r: 0.1, g: 0.3, b: 0.48 },
 
       cloudShadowEnabled: true,
@@ -26,64 +40,68 @@ export class WaterEffectV2 extends EffectBase {
 
       maskChannel: 'auto',
       maskInvert: false,
-      maskThreshold: 0.5,
+      maskThreshold: 1,
       maskBlurRadius: 0.0,
       maskBlurPasses: 0,
-      maskExpandPx: -1.3,
+      maskExpandPx: 1,
       buildResolution: 1024,
-      sdfRangePx: 40,
-      shoreWidthPx: 128,
+      sdfRangePx: 126,
+      shoreWidthPx: 50,
 
-      waveScale: 32,
-      waveSpeed: 0.18,
-      waveStrength: 0.62,
+      waveScale: 28,
+      waveSpeed: 0.25,
+      waveStrength: 0.25,
 
       // Wave texture enhancement controls
       // Domain warp reduces visible repetition across large water bodies.
-      waveWarpLargeStrength: 0.22,
-      waveWarpSmallStrength: 0.06,
-      waveWarpMicroStrength: 0.02,
-      waveWarpTimeSpeed: 0.03,
+      waveWarpLargeStrength: 0.25,
+      waveWarpSmallStrength: 0.1,
+      waveWarpMicroStrength: 0.03,
+      waveWarpTimeSpeed: 0.015,
 
       // Slow evolution of wave "sea state" (alternating calmer/rougher).
       waveEvolutionEnabled: true,
-      waveEvolutionSpeed: 0.08,
-      waveEvolutionAmount: 0.35,
-      waveEvolutionScale: 0.18,
+      waveEvolutionSpeed: 0.5,
+      waveEvolutionAmount: 1,
+      waveEvolutionScale: 0.5,
 
-      waveSpeedUseWind: false,
-      waveSpeedWindMinFactor: 0.35,
-      waveStrengthUseWind: false,
-      waveStrengthWindMinFactor: 0.65,
-      distortionStrengthPx: 5.38,
+      waveSpeedUseWind: true,
+      waveSpeedWindMinFactor: 0.05,
+      waveStrengthUseWind: true,
+      waveStrengthWindMinFactor: 0.05,
+      distortionStrengthPx: 5.8,
 
       // Refraction sampling controls
-      refractionMultiTapEnabled: false,
-      chromaticAberrationEnabled: false,
-      chromaticAberrationStrengthPx: 0.75,
+      refractionMultiTapEnabled: true,
+      chromaticAberrationEnabled: true,
+      chromaticAberrationStrengthPx: 2.02,
+      chromaticAberrationEdgeCenter: 0.5,
+      chromaticAberrationEdgeFeather: 0.06,
+      chromaticAberrationEdgeGamma: 1.0,
+      chromaticAberrationEdgeMin: 0.0,
 
       waveIndoorDampingEnabled: true,
       waveIndoorDampingStrength: 1.0,
-      waveIndoorMinFactor: 0.2,
+      waveIndoorMinFactor: 0.05,
 
       // Distortion masking (shader-side; does not rebuild water data)
-      distortionEdgeCenter: 0.447,
+      distortionEdgeCenter: 0.504,
       distortionEdgeFeather: 0.051,
       distortionEdgeGamma: 1.0,
       distortionShoreRemapLo: 0.0,
       distortionShoreRemapHi: 1.0,
-      distortionShorePow: 1.0,
-      distortionShoreMin: 0.35,
+      distortionShorePow: 0.78,
+      distortionShoreMin: 0.68,
 
       // Shoreline-only high-frequency distortion (fed into DistortionManager)
       shoreNoiseDistortionEnabled: true,
-      shoreNoiseDistortionStrengthPx: 2.25,
-      shoreNoiseDistortionFrequency: 220.0,
-      shoreNoiseDistortionSpeed: 0.65,
+      shoreNoiseDistortionStrengthPx: 0.02,
+      shoreNoiseDistortionFrequency: 995.7,
+      shoreNoiseDistortionSpeed: 1.52,
       // Controls how quickly the noise fades out from the shore toward the interior.
       // Expressed in water mask "depth" (0..1): lower => thinner band near edges.
-      shoreNoiseDistortionFadeLo: 0.06,
-      shoreNoiseDistortionFadeHi: 0.28,
+      shoreNoiseDistortionFadeLo: 0,
+      shoreNoiseDistortionFadeHi: 0.132,
 
       // Rain-hit surface distortion (precipitation driven)
       rainDistortionEnabled: true,
@@ -97,21 +115,21 @@ export class WaterEffectV2 extends EffectBase {
       rainIndoorDampingStrength: 1.0,
 
       causticsEnabled: true,
-      causticsIntensity: 0.25,
-      causticsScale: 60.4,
-      causticsSpeed: 1.83,
-      causticsSharpness: 1.36,
-      causticsEdgeLo: 0.5,
+      causticsIntensity: 1.14,
+      causticsScale: 33.4,
+      causticsSpeed: 1.05,
+      causticsSharpness: 0.1,
+      causticsEdgeLo: 0,
       causticsEdgeHi: 1,
-      causticsEdgeBlurTexels: 4,
+      causticsEdgeBlurTexels: 0,
 
       causticsBrightnessMaskEnabled: true,
-      causticsBrightnessThreshold: 0.12,
-      causticsBrightnessSoftness: 0.12,
-      causticsBrightnessGamma: 0.85,
+      causticsBrightnessThreshold: 0.25,
+      causticsBrightnessSoftness: 0.55,
+      causticsBrightnessGamma: 0.62,
 
       causticsDebug: false,
-      causticsIgnoreLightGate: false,
+      causticsIgnoreLightGate: true,
 
       rainRippleStrengthPx: 64,
       rainRippleScale: 269,
@@ -119,49 +137,49 @@ export class WaterEffectV2 extends EffectBase {
       rainRippleDensity: 1,
       rainRippleSharpness: 2.41,
 
-      rainStormStrengthPx: 52.41,
-      rainStormScale: 117,
-      rainStormSpeed: 2.74,
-      rainStormCurl: 0.96,
+      rainStormStrengthPx: 64,
+      rainStormScale: 204,
+      rainStormSpeed: 5,
+      rainStormCurl: 0.3,
 
       rainMaxCombinedStrengthPx: 45.4,
 
-      lockWaveTravelToWind: true,
-      waveDirOffsetDeg: -46,
+      lockWaveTravelToWind: false,
+      waveDirOffsetDeg: -42,
       waveAppearanceOffsetDeg: 0.0,
       advectionDirOffsetDeg: 0.0,
-      advectionSpeed: 0.15,
-      windDirResponsiveness: 1.4,
+      advectionSpeed: 0.23,
+      windDirResponsiveness: 5.7,
       useTargetWindDirection: true,
 
       specStrength: 250,
       specPower: 1,
 
-      specSunAzimuthDeg: 225.0,
-      specSunElevationDeg: 65.0,
-      specSunIntensity: 5,
-      specNormalStrength: 4.31,
-      specNormalScale: 0.018,
-      specRoughnessMin: 0.001,
-      specRoughnessMax: 0.091,
-      specF0: 0.086,
-      specMaskGamma: 3.67,
+      specSunAzimuthDeg: 48,
+      specSunElevationDeg: 67,
+      specSunIntensity: 1.32,
+      specNormalStrength: 5,
+      specNormalScale: 0.205,
+      specRoughnessMin: 0.396,
+      specRoughnessMax: 0.873,
+      specF0: 0.12,
+      specMaskGamma: 3.2,
       specSkyTint: 1.0,
-      specShoreBias: 0.75,
+      specShoreBias: 0.61,
 
-      specDistortionNormalStrength: 1.21,
+      specDistortionNormalStrength: 1.14,
       specAnisotropy: 0.2,
       specAnisoRatio: 3.0,
 
-      foamStrength: 0.32,
-      foamThreshold: 0.93,
-      foamScale: 560,
+      foamStrength: 0.25,
+      foamThreshold: 0.87,
+      foamScale: 1,
       foamColor: { r: 5, g: 5, b: 5 },
       foamSpeed: 0.39,
 
       foamCurlStrength: 0.34,
       foamCurlScale: 25.6,
-      foamCurlSpeed: 0.17,
+      foamCurlSpeed: 0.01,
 
       foamBreakupStrength1: 1,
       foamBreakupScale1: 16.9,
@@ -178,8 +196,8 @@ export class WaterEffectV2 extends EffectBase {
       foamBrightness: 0.0,
 
       floatingFoamStrength: 1,
-      floatingFoamCoverage: 0.15,
-      floatingFoamScale: 10,
+      floatingFoamCoverage: 0.13,
+      floatingFoamScale: 2,
 
       // foam.webp particle systems (WeatherParticles)
       shoreFoamEnabled: true,
@@ -187,35 +205,35 @@ export class WaterEffectV2 extends EffectBase {
 
       foamPlumeEnabled: true,
       foamPlumeSpawnMode: 'waterEdge',
-      foamPlumeMaxParticles: 100,
-      foamPlumeEmissionBase: 8.0,
-      foamPlumeEmissionWindScale: 54.3,
-      foamPlumeLifeMin: 1.13,
-      foamPlumeLifeMax: 2.44,
-      foamPlumeSizeMin: 21,
-      foamPlumeSizeMax: 78.7,
-      foamPlumeOpacity: 0.1,
-      foamPlumePeakOpacity: 0.05,
-      foamPlumePeakTime: 0.25,
-      foamPlumeStartScale: 0.01,
-      foamPlumeMaxScale: 5.48,
-      foamPlumeSpinMin: -0.18,
-      foamPlumeSpinMax: 0.25,
-      foamPlumeWindDriftScale: 0.0,
+      foamPlumeMaxParticles: 1681,
+      foamPlumeEmissionBase: 15,
+      foamPlumeEmissionWindScale: 191.3,
+      foamPlumeLifeMin: 1.5,
+      foamPlumeLifeMax: 2.7,
+      foamPlumeSizeMin: 15,
+      foamPlumeSizeMax: 36.1,
+      foamPlumeOpacity: 0.23,
+      foamPlumePeakOpacity: 0.04,
+      foamPlumePeakTime: 0.12,
+      foamPlumeStartScale: 1.24,
+      foamPlumeMaxScale: 10,
+      foamPlumeSpinMin: -0.14,
+      foamPlumeSpinMax: 0.19,
+      foamPlumeWindDriftScale: 0.25,
       foamPlumeUseAdditive: true,
-      foamPlumeAdditiveBoost: 1.0,
+      foamPlumeAdditiveBoost: 1.5,
       foamPlumeColor: { r: 1.0, g: 1.0, b: 1.0 },
 
-      foamPlumeRandomOpacityMin: 1.0,
-      foamPlumeRandomOpacityMax: 1.0,
+      foamPlumeRandomOpacityMin: 1.94,
+      foamPlumeRandomOpacityMax: 4.06,
 
-      foamPlumeRadialAlphaEnabled: false,
+      foamPlumeRadialAlphaEnabled: true,
       foamPlumeRadialInnerPos: 0.0,
       foamPlumeRadialMidPos: 0.5,
-      foamPlumeRadialInnerOpacity: 1.0,
-      foamPlumeRadialMidOpacity: 1.0,
-      foamPlumeRadialOuterOpacity: 1.0,
-      foamPlumeRadialCurve: 1.0,
+      foamPlumeRadialInnerOpacity: 5,
+      foamPlumeRadialMidOpacity: 0.58,
+      foamPlumeRadialOuterOpacity: 0.31,
+      foamPlumeRadialCurve: 0.1,
 
       // Large-scale noise masking for foam.webp particles (break up / intermittent reveal)
       foamParticleNoiseEnabled: true,
@@ -227,10 +245,10 @@ export class WaterEffectV2 extends EffectBase {
       foamParticleNoiseAttempts: 4,
 
       // Simple foam.webp spawner (WeatherParticles)
-      simpleFoamEnabled: false,
-      simpleFoamThreshold: 0.5,
-      simpleFoamStride: 4,
-      simpleFoamMaxPoints: 20000,
+      simpleFoamEnabled: true,
+      simpleFoamThreshold: 0.96,
+      simpleFoamStride: 3,
+      simpleFoamMaxPoints: 2040,
       simpleFoamDebugFlipV: false,
 
       // GPU foam flecks (high-frequency spray dots)
@@ -239,22 +257,22 @@ export class WaterEffectV2 extends EffectBase {
       foamFlecksWindDriftScale: 1.0,
 
       sandEnabled: true,
-      sandIntensity: 0.5,
+      sandIntensity: 0.18,
       sandColor: { r: 0, g: 0, b: 0 },
-      sandChunkScale: 17.5,
-      sandChunkSpeed: 1.12,
-      sandGrainScale: 37,
-      sandGrainSpeed: 0,
-      sandBillowStrength: 0.55,
+      sandChunkScale: 5.4,
+      sandChunkSpeed: 0.3,
+      sandGrainScale: 400,
+      sandGrainSpeed: 1.81,
+      sandBillowStrength: 0.24,
 
       sandCoverage: 1,
-      sandChunkSoftness: 0.37,
-      sandSpeckCoverage: 0.81,
-      sandSpeckSoftness: 0.33,
-      sandDepthLo: 0,
+      sandChunkSoftness: 0.12,
+      sandSpeckCoverage: 1,
+      sandSpeckSoftness: 0.39,
+      sandDepthLo: 0.23,
       sandDepthHi: 1,
-      sandAnisotropy: 1,
-      sandDistortionStrength: 0,
+      sandAnisotropy: 0.54,
+      sandDistortionStrength: 0.01,
       sandAdditive: 0,
 
       debugView: 0
@@ -309,9 +327,12 @@ export class WaterEffectV2 extends EffectBase {
     this._timeStallFrames = 0;
     this._timeStallLogged = false;
 
-    this._lastDefinesKey = null;
+    /** @type {number} */
+    this._lastDefinesKey = 0;
     this._lastWaterDataTexW = 0;
     this._lastWaterDataTexH = 0;
+
+    this._tempSize = null;
 
     this._distortionWaterParams = {
       maskFlipY: 0.0,
@@ -319,26 +340,56 @@ export class WaterEffectV2 extends EffectBase {
       edgeSoftnessTexels: 0.0,
 
       shoreNoiseEnabled: true,
-      shoreNoiseStrengthPx: 2.25,
-      shoreNoiseFrequency: 220.0,
-      shoreNoiseSpeed: 0.65,
-      shoreNoiseFadeLo: 0.06,
-      shoreNoiseFadeHi: 0.28,
+      shoreNoiseStrengthPx: 0.02,
+      shoreNoiseFrequency: 995.7,
+      shoreNoiseSpeed: 1.52,
+      shoreNoiseFadeLo: 0.0,
+      shoreNoiseFadeHi: 0.132,
 
       causticsEnabled: true,
-      causticsIntensity: 0.25,
-      causticsScale: 60.4,
-      causticsSpeed: 1.83,
-      causticsSharpness: 1.36,
-      causticsEdgeLo: 0.5,
+      causticsIntensity: 1.14,
+      causticsScale: 33.4,
+      causticsSpeed: 1.05,
+      causticsSharpness: 0.1,
+      causticsEdgeLo: 0.0,
       causticsEdgeHi: 1.0,
-      causticsEdgeBlurTexels: 4.0,
+      causticsEdgeBlurTexels: 0.0,
 
       causticsBrightnessMaskEnabled: true,
-      causticsBrightnessThreshold: 0.12,
-      causticsBrightnessSoftness: 0.12,
-      causticsBrightnessGamma: 0.85,
+      causticsBrightnessThreshold: 0.25,
+      causticsBrightnessSoftness: 0.55,
+      causticsBrightnessGamma: 0.62,
     };
+  }
+
+  clearCaches() {
+    // Force all cached water data derived from the _Water mask to rebuild.
+    // Also clears the published MaskManager derived texture so downstream systems refresh.
+    try {
+      this._surfaceModel?.dispose?.();
+    } catch (_) {
+    }
+
+    this._waterData = null;
+    this._waterRawMask = null;
+    this._lastWaterMaskUuid = null;
+    this._lastWaterMaskCacheKey = null;
+    this._lastWaterDataTexW = 0;
+    this._lastWaterDataTexH = 0;
+
+    try {
+      const mm = window.MapShine?.maskManager;
+      if (mm && typeof mm.setTexture === 'function') {
+        mm.setTexture('water.data', null);
+      }
+    } catch (_) {
+    }
+
+    // Rebuild immediately if possible so the next frame has valid data.
+    try {
+      this._rebuildWaterDataIfNeeded(true);
+    } catch (_) {
+    }
   }
 
   static getControlSchema() {
@@ -353,6 +404,15 @@ export class WaterEffectV2 extends EffectBase {
           parameters: [
             'tintStrength',
             'tintColor'
+          ]
+        },
+        {
+          name: 'tools',
+          label: 'Tools',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'clearCaches'
           ]
         },
         {
@@ -436,7 +496,11 @@ export class WaterEffectV2 extends EffectBase {
 
             'refractionMultiTapEnabled',
             'chromaticAberrationEnabled',
-            'chromaticAberrationStrengthPx'
+            'chromaticAberrationStrengthPx',
+            'chromaticAberrationEdgeCenter',
+            'chromaticAberrationEdgeFeather',
+            'chromaticAberrationEdgeGamma',
+            'chromaticAberrationEdgeMin'
           ]
         },
         {
@@ -699,7 +763,17 @@ export class WaterEffectV2 extends EffectBase {
         }
       ],
       parameters: {
-        enabled: { type: 'boolean', default: true, hidden: true },
+        clearCaches: {
+          type: 'button',
+          title: '🧹 Clear Water Caches',
+          default: false,
+          hidden: false
+        },
+        enabled: {
+          type: 'boolean',
+          default: true,
+          hidden: true
+        },
         tintStrength: { type: 'slider', label: 'Tint Strength', min: 0, max: 1, step: 0.01, default: 0.2 },
         tintColor: { type: 'color', label: 'Tint Color', default: { r: 0.1, g: 0.3, b: 0.48 } },
 
@@ -761,6 +835,10 @@ export class WaterEffectV2 extends EffectBase {
         refractionMultiTapEnabled: { type: 'boolean', label: 'Refraction Multi-Tap (Blur)', default: false },
         chromaticAberrationEnabled: { type: 'boolean', label: 'Chromatic Aberration (RGB Shift)', default: false },
         chromaticAberrationStrengthPx: { type: 'slider', label: 'RGB Shift Strength (px)', min: 0.0, max: 6.0, step: 0.01, default: 0.75 },
+        chromaticAberrationEdgeCenter: { type: 'slider', label: 'RGB Edge Center', min: 0.0, max: 1.0, step: 0.001, default: 0.5 },
+        chromaticAberrationEdgeFeather: { type: 'slider', label: 'RGB Edge Feather', min: 0.0, max: 0.2, step: 0.001, default: 0.06 },
+        chromaticAberrationEdgeGamma: { type: 'slider', label: 'RGB Edge Gamma', min: 0.05, max: 4.0, step: 0.01, default: 1.0 },
+        chromaticAberrationEdgeMin: { type: 'slider', label: 'RGB Edge Min', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
 
         waveIndoorDampingEnabled: { type: 'boolean', label: 'Dampen Indoors (_Outdoors)', default: true },
         waveIndoorDampingStrength: { type: 'slider', label: 'Indoor Damp Strength', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
@@ -969,6 +1047,7 @@ export class WaterEffectV2 extends EffectBase {
         }
       }
     };
+
   }
 
   initialize(renderer, scene, camera) {
@@ -982,28 +1061,24 @@ export class WaterEffectV2 extends EffectBase {
     this._sceneDimensions = new THREE.Vector2(1, 1);
     this._sceneRect = new THREE.Vector4(0, 0, 1, 1);
 
-    this._smoothedWindDir = new THREE.Vector2(1.0, 0.0);
-    this._tempWindTarget = new THREE.Vector2(1.0, 0.0);
-    this._windOffsetUv = new THREE.Vector2(0.0, 0.0);
-    this._windTime = 0.0;
+    const tint = this.params?.tintColor || { r: 0.1, g: 0.3, b: 0.48 };
 
     this._material = new THREE.ShaderMaterial({
-      defines: {},
       uniforms: {
         tDiffuse: { value: null },
         tWaterData: { value: null },
         uHasWaterData: { value: 0.0 },
-        uWaterEnabled: { value: 1.0 },
+        uWaterEnabled: { value: this.enabled ? 1.0 : 0.0 },
 
         tWaterRawMask: { value: null },
         uHasWaterRawMask: { value: 0.0 },
 
-        tWaterOccluderAlpha: { value: null },
-        uHasWaterOccluderAlpha: { value: 0.0 },
+        tWaterOccluderAlpha: { value: this._waterOccluderAlpha },
+        uHasWaterOccluderAlpha: { value: this._waterOccluderAlpha ? 1.0 : 0.0 },
 
-        uWaterDataTexelSize: { value: new THREE.Vector2(1 / this.params.buildResolution, 1 / this.params.buildResolution) },
+        uWaterDataTexelSize: { value: new THREE.Vector2(1.0 / 1024.0, 1.0 / 1024.0) },
 
-        uTintColor: { value: new THREE.Color(this.params.tintColor.r, this.params.tintColor.g, this.params.tintColor.b) },
+        uTintColor: { value: new THREE.Color(tint.r, tint.g, tint.b) },
         uTintStrength: { value: this.params.tintStrength },
 
         uWaveScale: { value: this.params.waveScale },
@@ -1022,6 +1097,10 @@ export class WaterEffectV2 extends EffectBase {
         uWaveEvolutionScale: { value: this.params.waveEvolutionScale },
 
         uChromaticAberrationStrengthPx: { value: this.params.chromaticAberrationStrengthPx },
+        uChromaticAberrationEdgeCenter: { value: this.params.chromaticAberrationEdgeCenter },
+        uChromaticAberrationEdgeFeather: { value: this.params.chromaticAberrationEdgeFeather },
+        uChromaticAberrationEdgeGamma: { value: this.params.chromaticAberrationEdgeGamma },
+        uChromaticAberrationEdgeMin: { value: this.params.chromaticAberrationEdgeMin },
 
         uWaveIndoorDampingEnabled: { value: this.params.waveIndoorDampingEnabled === false ? 0.0 : 1.0 },
         uWaveIndoorDampingStrength: { value: this.params.waveIndoorDampingStrength },
@@ -1205,6 +1284,10 @@ export class WaterEffectV2 extends EffectBase {
         uniform float uWaveEvolutionScale;
 
         uniform float uChromaticAberrationStrengthPx;
+        uniform float uChromaticAberrationEdgeCenter;
+        uniform float uChromaticAberrationEdgeFeather;
+        uniform float uChromaticAberrationEdgeGamma;
+        uniform float uChromaticAberrationEdgeMin;
 
         uniform float uWaveIndoorDampingEnabled;
         uniform float uWaveIndoorDampingStrength;
@@ -1512,12 +1595,29 @@ export class WaterEffectV2 extends EffectBase {
           // These strengths are user-tweakable because some maps want a calmer, cleaner look.
           float timeWarp = uTime * max(0.0, uWaveWarpTimeSpeed);
 
-          float lf1 = fbmNoise(sceneUv * 0.23 + vec2(19.1, 7.3) + vec2(timeWarp * 0.07, -timeWarp * 0.05));
-          float lf2 = fbmNoise(sceneUv * 0.23 + vec2(3.7, 23.9) + vec2(-timeWarp * 0.04, timeWarp * 0.06));
-          uv += vec2(lf1, lf2) * clamp(uWaveWarpLargeStrength, 0.0, 1.0);
+          // Wind-stretched warp coordinates to create elongated "streaks" downwind.
+          // This reduces the repeating "scrolling wallpaper" look on large water bodies.
+          float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+          vec2 windF = uWindDir;
+          float wl = length(windF);
+          windF = (wl > 1e-6) ? (windF / wl) : vec2(1.0, 0.0);
+          vec2 windDir = vec2(windF.x, -windF.y);
+          vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
+          vec2 windPerp = vec2(-windBasis.y, windBasis.x);
+          vec2 basis = vec2(sceneUv.x * sceneAspect, sceneUv.y);
+          float along = dot(basis, windBasis);
+          float across = dot(basis, windPerp);
+          vec2 streakUv = windBasis * (along * 2.75) + windPerp * (across * 1.0);
 
-          float n1 = fbmNoise(uv * 2.1 + vec2(13.7, 9.2) + vec2(timeWarp * 0.11, timeWarp * 0.09));
-          float n2 = fbmNoise(uv * 2.1 + vec2(41.3, 27.9) + vec2(-timeWarp * 0.08, timeWarp * 0.10));
+          // Tiny oscillation so the warp field evolves at a slightly different cadence than the waves.
+          float largeWarpPulse = 0.90 + 0.10 * sin(uTime * 0.27);
+
+          float lf1 = fbmNoise(streakUv * 0.23 + vec2(19.1, 7.3) + vec2(timeWarp * 0.07, -timeWarp * 0.05));
+          float lf2 = fbmNoise(streakUv * 0.23 + vec2(3.7, 23.9) + vec2(-timeWarp * 0.04, timeWarp * 0.06));
+          uv += vec2(lf1, lf2) * clamp(uWaveWarpLargeStrength, 0.0, 1.0) * largeWarpPulse;
+
+          float n1 = fbmNoise((uv * 2.1) + vec2(13.7, 9.2) + vec2(timeWarp * 0.11, timeWarp * 0.09));
+          float n2 = fbmNoise((uv * 2.1) + vec2(41.3, 27.9) + vec2(-timeWarp * 0.08, timeWarp * 0.10));
           uv += vec2(n1, n2) * clamp(uWaveWarpSmallStrength, 0.0, 1.0);
 
           float n3 = fbmNoise(uv * 4.7 + vec2(7.9, 19.1) + vec2(timeWarp * 0.15, -timeWarp * 0.12));
@@ -1686,7 +1786,11 @@ export class WaterEffectV2 extends EffectBase {
           float d;
           float w = sharpSin(phase, sharpness, d);
           h += amp * w;
-          gSceneUv += amp * d * (k * dir) * uWaveScale;
+
+          // Mild Gerstner-style "bunching": sharpen crests by increasing the gradient contribution
+          // near peaks without needing true geometric displacement.
+          float bunch = 1.0 + 0.35 * abs(w);
+          gSceneUv += amp * d * (k * dir) * uWaveScale * bunch;
         }
 
         float waveHeight(vec2 sceneUv, float t) {
@@ -1716,13 +1820,29 @@ export class WaterEffectV2 extends EffectBase {
           float evoAmt = clamp(uWaveEvolutionAmount, 0.0, 1.0);
           float evo = mix(1.0 - evoAmt, 1.0 + evoAmt, sea01);
 
+          // Slow, rhythmic "sea-state breathing" so water energy rises/falls over time.
+          float breathing = 0.8 + 0.2 * sin(uTime * 0.5);
+          float wavePulse = evo * breathing;
+
+          // Dual-octave blending:
+          // - Swell: large wavelength, aligned to wind.
+          // - Chop: smaller, faster waves angled away from wind to create interference.
+          vec2 swellP = p;
+          vec2 chopP = p * 2.5;
+          vec2 crossWind = rotate2D(wind, 0.78);
+          float chopBreathing = 0.7 + 0.3 * cos(uTime * 0.7);
+          float chopPulse = evo * chopBreathing;
+
           // Directional sum-of-sines (spread around wind) with sharp crests.
           // Amplitudes sum to ~1.0 for stable output scaling.
-          addWave(p, rotate2D(wind, -0.80), TAU * 0.57, 0.35 * evo, 2.30, (1.10 + 0.65 * sqrt(TAU * 0.57)), t, h, gDummy);
-          addWave(p, rotate2D(wind, -0.35), TAU * 0.91, 0.25 * evo, 2.55, (1.10 + 0.65 * sqrt(TAU * 0.91)), t, h, gDummy);
-          addWave(p, rotate2D(wind,  0.00), TAU * 1.37, 0.18 * evo, 2.85, (1.10 + 0.65 * sqrt(TAU * 1.37)), t, h, gDummy);
-          addWave(p, rotate2D(wind,  0.40), TAU * 1.83, 0.12 * evo, 3.10, (1.10 + 0.65 * sqrt(TAU * 1.83)), t, h, gDummy);
-          addWave(p, rotate2D(wind,  0.85), TAU * 2.49, 0.10 * evo, 3.35, (1.10 + 0.65 * sqrt(TAU * 2.49)), t, h, gDummy);
+          // Swell layer (3 waves)
+          addWave(swellP, rotate2D(wind, -0.60), TAU * 0.55, 0.40 * wavePulse, 2.20, (1.05 + 0.62 * sqrt(TAU * 0.55)), t, h, gDummy);
+          addWave(swellP, rotate2D(wind, -0.15), TAU * 0.92, 0.28 * wavePulse, 2.55, (1.05 + 0.62 * sqrt(TAU * 0.92)), t, h, gDummy);
+          addWave(swellP, rotate2D(wind,  0.20), TAU * 1.35, 0.16 * wavePulse, 2.85, (1.05 + 0.62 * sqrt(TAU * 1.35)), t, h, gDummy);
+
+          // Cross-chop layer (2 waves) - tighter scale and significant angle offset
+          addWave(chopP, rotate2D(crossWind,  0.25), TAU * 1.85, 0.10 * chopPulse, 3.10, (1.18 + 0.72 * sqrt(TAU * 1.85)), t, h, gDummy);
+          addWave(chopP, rotate2D(crossWind, -0.35), TAU * 2.60, 0.06 * chopPulse, 3.35, (1.18 + 0.72 * sqrt(TAU * 2.60)), t, h, gDummy);
 
           return h;
         }
@@ -1749,11 +1869,23 @@ export class WaterEffectV2 extends EffectBase {
           float evoAmt = clamp(uWaveEvolutionAmount, 0.0, 1.0);
           float evo = mix(1.0 - evoAmt, 1.0 + evoAmt, sea01);
 
-          addWave(p, rotate2D(wind, -0.80), TAU * 0.57, 0.35 * evo, 2.30, (1.10 + 0.65 * sqrt(TAU * 0.57)), t, hDummy, g);
-          addWave(p, rotate2D(wind, -0.35), TAU * 0.91, 0.25 * evo, 2.55, (1.10 + 0.65 * sqrt(TAU * 0.91)), t, hDummy, g);
-          addWave(p, rotate2D(wind,  0.00), TAU * 1.37, 0.18 * evo, 2.85, (1.10 + 0.65 * sqrt(TAU * 1.37)), t, hDummy, g);
-          addWave(p, rotate2D(wind,  0.40), TAU * 1.83, 0.12 * evo, 3.10, (1.10 + 0.65 * sqrt(TAU * 1.83)), t, hDummy, g);
-          addWave(p, rotate2D(wind,  0.85), TAU * 2.49, 0.10 * evo, 3.35, (1.10 + 0.65 * sqrt(TAU * 2.49)), t, hDummy, g);
+          float breathing = 0.8 + 0.2 * sin(uTime * 0.5);
+          float wavePulse = evo * breathing;
+
+          vec2 swellP = p;
+          vec2 chopP = p * 2.5;
+          vec2 crossWind = rotate2D(wind, 0.78);
+          float chopBreathing = 0.7 + 0.3 * cos(uTime * 0.7);
+          float chopPulse = evo * chopBreathing;
+
+          // Swell layer
+          addWave(swellP, rotate2D(wind, -0.60), TAU * 0.55, 0.40 * wavePulse, 2.20, (1.05 + 0.62 * sqrt(TAU * 0.55)), t, hDummy, g);
+          addWave(swellP, rotate2D(wind, -0.15), TAU * 0.92, 0.28 * wavePulse, 2.55, (1.05 + 0.62 * sqrt(TAU * 0.92)), t, hDummy, g);
+          addWave(swellP, rotate2D(wind,  0.20), TAU * 1.35, 0.16 * wavePulse, 2.85, (1.05 + 0.62 * sqrt(TAU * 1.35)), t, hDummy, g);
+
+          // Cross-chop layer
+          addWave(chopP, rotate2D(crossWind,  0.25), TAU * 1.85, 0.10 * chopPulse, 3.10, (1.18 + 0.72 * sqrt(TAU * 1.85)), t, hDummy, g);
+          addWave(chopP, rotate2D(crossWind, -0.35), TAU * 2.60, 0.06 * chopPulse, 3.35, (1.18 + 0.72 * sqrt(TAU * 2.60)), t, hDummy, g);
 
           // Normalize away the scale dependence so uWaveScale doesn't make razor-sharp gradients.
           return g / max(uWaveScale, 1e-3);
@@ -1812,6 +1944,16 @@ export class WaterEffectV2 extends EffectBase {
           float inside = (f > 1e-6) ? smoothstep(c + f, c - f, sdf01) : step(sdf01, c);
           inside = pow(clamp(inside, 0.0, 1.0), max(0.01, uDistortionEdgeGamma));
           return inside;
+        }
+
+        // Chromatic aberration edge fade. This is separate from distortion masking so you can
+        // keep refraction strong near the shore while fading out RGB splitting to avoid seams.
+        float chromaticInsideFromSdf(float sdf01) {
+          float c = clamp(uChromaticAberrationEdgeCenter, 0.0, 1.0);
+          float f = max(0.0, uChromaticAberrationEdgeFeather);
+          float inside = (f > 1e-6) ? smoothstep(c + f, c - f, sdf01) : step(sdf01, c);
+          inside = pow(clamp(inside, 0.0, 1.0), max(0.01, uChromaticAberrationEdgeGamma));
+          return max(clamp(uChromaticAberrationEdgeMin, 0.0, 1.0), inside);
         }
 
         float sandMask(vec2 sceneUv, float shore, float inside, float sceneAspect) {
@@ -2101,7 +2243,8 @@ export class WaterEffectV2 extends EffectBase {
           float dirLen = length(dir);
           vec2 dirN = (dirLen > 1e-6) ? (dir / dirLen) : vec2(1.0, 0.0);
           
-          vec2 caUv = dirN * (caPx * texel2) * clamp(0.25 + 2.0 * distMask, 0.0, 2.5) * zoom;
+          float caEdgeMask = chromaticInsideFromSdf(sdf01);
+          vec2 caUv = dirN * (caPx * texel2) * clamp(0.25 + 2.0 * distMask, 0.0, 2.5) * zoom * caEdgeMask;
 
           vec2 uvR = clamp(uv1 + caUv, vec2(0.001), vec2(0.999));
           vec2 uvB = clamp(uv1 - caUv, vec2(0.001), vec2(0.999));
@@ -2282,17 +2425,18 @@ export class WaterEffectV2 extends EffectBase {
 
     const sandEnabled = !!this.params?.sandEnabled;
     const flecksEnabled = !!this.params?.foamFlecksEnabled;
-    this._material.defines = {
-      ...(sandEnabled ? { USE_SAND: 1 } : {}),
-      ...(flecksEnabled ? { USE_FOAM_FLECKS: 1 } : {})
-    };
-    this._lastDefinesKey = `${sandEnabled ? 1 : 0}|${flecksEnabled ? 1 : 0}`;
+    // Avoid object-spread allocations; mutate defines object directly.
+    const initDefines = {};
+    if (sandEnabled) initDefines.USE_SAND = 1;
+    if (flecksEnabled) initDefines.USE_FOAM_FLECKS = 1;
+    this._material.defines = initDefines;
+    this._lastDefinesKey = (sandEnabled ? DEF_SAND : 0) | (flecksEnabled ? DEF_FOAM_FLECKS : 0);
     this._material.needsUpdate = true;
 
     this._quadMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._material);
     this._quadScene.add(this._quadMesh);
 
-    const size = new THREE.Vector2();
+    const size = this._tempSize ?? (this._tempSize = new THREE.Vector2());
     renderer.getDrawingBufferSize(size);
     this.onResize(size.x, size.y);
 
@@ -2411,7 +2555,10 @@ export class WaterEffectV2 extends EffectBase {
 	const flecksEnabled = !!this.params?.foamFlecksEnabled;
 	const multiTapEnabled = this.params?.refractionMultiTapEnabled === true;
 	const chromEnabled = this.params?.chromaticAberrationEnabled === true;
-	const definesKey = `${sandEnabled ? 1 : 0}|${flecksEnabled ? 1 : 0}|${multiTapEnabled ? 1 : 0}|${chromEnabled ? 1 : 0}`;
+	const definesKey = (sandEnabled ? DEF_SAND : 0)
+	  | (flecksEnabled ? DEF_FOAM_FLECKS : 0)
+	  | (multiTapEnabled ? DEF_MULTITAP : 0)
+	  | (chromEnabled ? DEF_CHROM_AB : 0);
 	if (this._lastDefinesKey !== definesKey) {
 	  const d = this._material.defines || {};
 	  if (sandEnabled) d.USE_SAND = 1;
@@ -2504,6 +2651,23 @@ export class WaterEffectV2 extends EffectBase {
     if (u.uChromaticAberrationStrengthPx) {
       const v = this.params?.chromaticAberrationStrengthPx;
       u.uChromaticAberrationStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.75;
+    }
+
+    if (u.uChromaticAberrationEdgeCenter) {
+      const v = this.params?.chromaticAberrationEdgeCenter;
+      u.uChromaticAberrationEdgeCenter.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.5;
+    }
+    if (u.uChromaticAberrationEdgeFeather) {
+      const v = this.params?.chromaticAberrationEdgeFeather;
+      u.uChromaticAberrationEdgeFeather.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.5, v)) : 0.06;
+    }
+    if (u.uChromaticAberrationEdgeGamma) {
+      const v = this.params?.chromaticAberrationEdgeGamma;
+      u.uChromaticAberrationEdgeGamma.value = Number.isFinite(v) ? Math.max(0.01, v) : 1.0;
+    }
+    if (u.uChromaticAberrationEdgeMin) {
+      const v = this.params?.chromaticAberrationEdgeMin;
+      u.uChromaticAberrationEdgeMin.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.0;
     }
 
     const dtSeconds = (this._lastTimeValue === null) ? 0.0 : Math.max(0.0, elapsed - this._lastTimeValue);
@@ -3372,19 +3536,12 @@ export class WaterEffectV2 extends EffectBase {
       const world = this._tempWorld ?? (this._tempWorld = new THREE.Vector3());
       const dir = this._tempDir ?? (this._tempDir = new THREE.Vector3());
 
-      const corners = [
-        [-1, -1],
-        [1, -1],
-        [-1, 1],
-        [1, 1]
-      ];
-
       let minX = Infinity;
       let minY = Infinity;
       let maxX = -Infinity;
       let maxY = -Infinity;
 
-      for (const c of corners) {
+      for (const c of _ndcCorners) {
         ndc.set(c[0], c[1], 0.5);
         world.copy(ndc).unproject(camera);
         dir.copy(world).sub(camera.position);

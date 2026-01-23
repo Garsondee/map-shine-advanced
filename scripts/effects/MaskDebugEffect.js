@@ -3,6 +3,14 @@ import { createLogger } from '../core/log.js';
 
 const log = createLogger('MaskDebugEffect');
 
+// Pre-allocated NDC corner coordinates for frustum intersection (avoids per-frame allocations)
+const _ndcCorners = [
+  [-1, -1],
+  [1, -1],
+  [-1, 1],
+  [1, 1]
+];
+
 export class MaskDebugEffect extends EffectBase {
   constructor() {
     super('mask-debug', RenderLayers.POST_PROCESSING, 'low');
@@ -461,16 +469,9 @@ export class MaskDebugEffect extends EffectBase {
     let maxX = -Infinity;
     let maxY = -Infinity;
 
-    const corners = [
-      [-1, -1],
-      [1, -1],
-      [-1, 1],
-      [1, 1]
-    ];
-
-    for (let i = 0; i < corners.length; i++) {
-      const cx = corners[i][0];
-      const cy = corners[i][1];
+    for (let i = 0; i < _ndcCorners.length; i++) {
+      const cx = _ndcCorners[i][0];
+      const cy = _ndcCorners[i][1];
 
       ndc.set(cx, cy, 0.5);
       world.copy(ndc).unproject(camera);

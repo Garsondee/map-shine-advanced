@@ -101,6 +101,9 @@ export class EnhancedLightIconManager {
     this.initialized = false;
     this.hooksRegistered = false;
 
+    /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
+    this._hookIds = [];
+
     // Group for all enhanced light icons
     this.group = new THREE.Group();
     this.group.name = 'EnhancedLightIcons';
@@ -321,11 +324,11 @@ export class EnhancedLightIconManager {
   setupHooks() {
     if (this.hooksRegistered) return;
 
-    Hooks.on('canvasReady', () => {
+    this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
       this.syncAllLights();
-    });
+    })]);
 
-    Hooks.on('updateScene', (sceneDoc, changes) => {
+    this._hookIds.push(['updateScene', Hooks.on('updateScene', (sceneDoc, changes) => {
       try {
         if (!sceneDoc || !canvas?.scene) return;
         if (sceneDoc.id !== canvas.scene.id) return;
@@ -338,7 +341,7 @@ export class EnhancedLightIconManager {
         this.syncAllLights();
       } catch (_) {
       }
-    });
+    })]);
 
     this.hooksRegistered = true;
   }
@@ -590,6 +593,21 @@ export class EnhancedLightIconManager {
    * Dispose all resources.
    */
   dispose() {
+    // Unregister Foundry hooks using correct two-argument signature
+    try {
+      if (this._hookIds && this._hookIds.length) {
+        for (const [hookName, hookId] of this._hookIds) {
+          try {
+            Hooks.off(hookName, hookId);
+          } catch (e) {
+          }
+        }
+      }
+    } catch (e) {
+    }
+    this._hookIds = [];
+    this.hooksRegistered = false;
+
     for (const g of this.gizmos.values()) {
       this.group.remove(g);
       try {

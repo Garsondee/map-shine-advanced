@@ -6610,6 +6610,11 @@ var BufferAttribute = class {
     this.normalized = normalized;
     this.usage = StaticDrawUsage;
     this.updateRanges = [];
+    // PERF: updateRanges is used by WebGLAttributes.updateBuffer() to issue partial bufferSubData
+    // uploads. Some systems (like three.quarks) addUpdateRange() every frame for multiple
+    // attributes. Avoid per-frame object allocations by pooling update range objects.
+    this._msUpdateRangePool = [];
+    this._msUpdateRangePoolIndex = 0;
     this.gpuType = FloatType;
     this.version = 0;
   }
@@ -6623,10 +6628,19 @@ var BufferAttribute = class {
     return this;
   }
   addUpdateRange(start, count) {
-    this.updateRanges.push({ start, count });
+    const pool = this._msUpdateRangePool;
+    const idx = this._msUpdateRangePoolIndex++;
+    let range = pool[idx];
+    if (range === void 0) {
+      range = pool[idx] = { start: 0, count: 0 };
+    }
+    range.start = start;
+    range.count = count;
+    this.updateRanges.push(range);
   }
   clearUpdateRanges() {
     this.updateRanges.length = 0;
+    this._msUpdateRangePoolIndex = 0;
   }
   copy(source) {
     this.name = source.name;
@@ -19129,6 +19143,10 @@ var InterleavedBuffer = class {
     this.count = array !== void 0 ? array.length / stride : 0;
     this.usage = StaticDrawUsage;
     this.updateRanges = [];
+    // PERF: Same pooling strategy as BufferAttribute.updateRanges to avoid per-frame
+    // allocations when callers repeatedly addUpdateRange().
+    this._msUpdateRangePool = [];
+    this._msUpdateRangePoolIndex = 0;
     this.version = 0;
     this.uuid = generateUUID();
   }
@@ -19142,10 +19160,19 @@ var InterleavedBuffer = class {
     return this;
   }
   addUpdateRange(start, count) {
-    this.updateRanges.push({ start, count });
+    const pool = this._msUpdateRangePool;
+    const idx = this._msUpdateRangePoolIndex++;
+    let range = pool[idx];
+    if (range === void 0) {
+      range = pool[idx] = { start: 0, count: 0 };
+    }
+    range.start = start;
+    range.count = count;
+    this.updateRanges.push(range);
   }
   clearUpdateRanges() {
     this.updateRanges.length = 0;
+    this._msUpdateRangePoolIndex = 0;
   }
   copy(source) {
     this.array = new source.array.constructor(source.array);

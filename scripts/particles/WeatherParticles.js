@@ -1464,6 +1464,7 @@ export class WeatherParticles {
     this._splashShape = null;
 
     this._waterHitMaskUuid = null;
+    this._waterHitMaskFlipV = null;
     this._waterHitPoints = null;
     this._waterHitShape = null;
 
@@ -1473,8 +1474,25 @@ export class WeatherParticles {
     this._waterFoamPoints = null;
     this._waterFoamPointsKey = null;
 
+    // Foam plume point clouds:
+    // - _waterFoamPlumePoints: merged scene+tile hard-edge UV points (view-filtered)
+    // - _waterFoamPlumeBasePoints: merged scene+tile hard-edge UV points (full scene)
+    this._waterFoamPlumePoints = null;
+    this._waterFoamPlumeBasePoints = null;
+    this._waterFoamPlumePointsKey = null;
+
+    this._waterFoamPlumeUuid = null;
+    this._waterFoamPlumeFlipV = null;
+    this._waterFoamPlumeStride = null;
+    this._waterFoamPlumeMaxPoints = null;
+    this._waterFoamPlumeTileRev = null;
+
     this._simpleFoamLastEnabled = null;
     this._simpleFoamLastPointCount = null;
+
+    this._foamFleckInteriorMaskFlipV = null;
+    this._foamFleckInteriorStride = null;
+    this._foamFleckInteriorMaxPoints = null;
 
     // View-dependent foam.webp spawning:
     // - We generate a global point cloud from the _Water hard edge.
@@ -1498,13 +1516,25 @@ export class WeatherParticles {
     // Tile-driven foam.webp spawning:
     // We allow per-tile _Water masks to contribute *additional* spawn locations.
     // These are cached per tile and merged with the global scene _Water points.
-    this._tileWaterFoamCache = new Map(); // tileId -> { key, hardPts, edgePts }
+    this._tileWaterFoamCache = new Map(); // tileId -> { scanKey, transformKey, localHardPts, localEdgePts, localInteriorPts, hardPts, edgePts, interiorPts }
     this._tileWaterFoamMergedPts = null; // Float32Array (u,v) in scene UVs
     this._tileShoreFoamMergedPts = null; // Float32Array (u,v,nx,ny) in scene UVs
+    this._tileWaterInteriorMergedPts = null; // Float32Array (u,v) in scene UVs
+    this._tileFoamRevision = 0;
 
     this._shoreFoamMaskUuid = null;
     this._shoreFoamPoints = null;
     this._shoreFoamShape = null;
+    this._shoreFoamViewPoints = null;
+
+    // View-filtering cache for shoreline points (u,v,nx,ny)
+    this._shoreFoamViewBuffer = null;
+    this._shoreFoamViewCount = 0;
+    this._shoreFoamLastViewQU0 = null;
+    this._shoreFoamLastViewQU1 = null;
+    this._shoreFoamLastViewQV0 = null;
+    this._shoreFoamLastViewQV1 = null;
+    this._shoreFoamPointsKey = null;
 
     this._foamFleckInteriorMaskUuid = null;
     this._foamFleckInteriorPoints = null;
@@ -1632,7 +1662,183 @@ export class WeatherParticles {
     // instead of allocating a new one every frame.
     this._tempWindDir = new window.THREE.Vector3();
 
+    // PERF: Cache pixel readbacks for mask textures (getImageData is expensive and allocates).
+    // Many point-generation functions were creating a new canvas + ImageData on each call.
+    this._maskPixelCache = new Map();
+    this._maskReadCanvas = null;
+    this._maskReadCtx = null;
+
     this._initSystems();
+  }
+
+  clearWaterCaches() {
+    // Clear all caches involved in water/foam spawning (scene mask scans + per-tile point sets).
+    // This is intended as a runtime recovery tool when tiles are added/removed or masks are edited.
+    try {
+      if (this._tileWaterFoamCache && this._tileWaterFoamCache.size > 0) {
+        this._tileWaterFoamCache.clear();
+      }
+    } catch (_) {
+    }
+
+    this._tileWaterFoamMergedPts = null;
+    this._tileShoreFoamMergedPts = null;
+    this._tileWaterInteriorMergedPts = null;
+    this._tileFoamRevision = (this._tileFoamRevision | 0) + 1;
+
+    // Invalidate view-filter caches so we don't keep returning stale subsets.
+    this._waterFoamLastViewQU0 = null;
+    this._waterFoamLastViewQU1 = null;
+    this._waterFoamLastViewQV0 = null;
+    this._waterFoamLastViewQV1 = null;
+
+    this._shoreFoamLastViewQU0 = null;
+    this._shoreFoamLastViewQU1 = null;
+    this._shoreFoamLastViewQV0 = null;
+    this._shoreFoamLastViewQV1 = null;
+
+    // Force rebuild of derived point clouds.
+    this._waterFoamPlumePointsKey = null;
+    this._waterFoamPlumePoints = null;
+    this._waterFoamPlumeBasePoints = null;
+
+    this._waterFoamPlumeUuid = null;
+    this._waterFoamPlumeFlipV = null;
+    this._waterFoamPlumeStride = null;
+    this._waterFoamPlumeMaxPoints = null;
+    this._waterFoamPlumeTileRev = null;
+
+    this._shoreFoamPointsKey = null;
+    this._shoreFoamPoints = null;
+    this._shoreFoamViewPoints = null;
+
+    // Simple foam spawner caches.
+    this._waterFoamMaskUuid = null;
+    this._waterFoamPoints = null;
+    this._waterFoamPointsKey = null;
+    this._simpleFoamLastEnabled = null;
+    this._simpleFoamLastPointCount = null;
+
+    this._simpleFoamMaskUuid = null;
+    this._simpleFoamMaskFlipV = null;
+    this._simpleFoamThreshold = null;
+    this._simpleFoamStride = null;
+    this._simpleFoamMaxPoints = null;
+
+    // Water-hit splash caches (avoid per-frame string keys)
+    this._waterHitMaskUuid = null;
+    this._waterHitMaskFlipV = null;
+
+    // Interior caches (used by foam flecks).
+    this._foamFleckInteriorMaskUuid = null;
+    this._foamFleckInteriorMaskFlipV = null;
+    this._foamFleckInteriorStride = null;
+    this._foamFleckInteriorMaxPoints = null;
+    this._foamFleckInteriorPoints = null;
+
+    // Clear active shape points immediately.
+    try {
+      if (this._waterFoamShape) this._waterFoamShape.clearPoints();
+      if (this._shoreFoamShape) this._shoreFoamShape.clearPoints();
+      if (this._foamFleckEmitter) {
+        this._foamFleckEmitter.setShorePoints(null);
+        this._foamFleckEmitter.setInteriorPoints(null);
+      }
+    } catch (_) {
+    }
+  }
+
+  _getViewFilteredEdgePoints(pts) {
+    if (!pts || pts.length < 4) return null;
+
+    const minX = this._viewMinX;
+    const maxX = this._viewMaxX;
+    const minY = this._viewMinY;
+    const maxY = this._viewMaxY;
+    const sceneX = this._viewSceneX;
+    const sceneY = this._viewSceneY;
+    const sceneW = this._viewSceneW;
+    const sceneH = this._viewSceneH;
+
+    if (
+      !Number.isFinite(minX) || !Number.isFinite(maxX) ||
+      !Number.isFinite(minY) || !Number.isFinite(maxY) ||
+      !Number.isFinite(sceneX) || !Number.isFinite(sceneY) ||
+      !Number.isFinite(sceneW) || !Number.isFinite(sceneH) ||
+      sceneW <= 1e-6 || sceneH <= 1e-6
+    ) {
+      return null;
+    }
+
+    // Convert the visible WORLD rect (Y-up) to mask UVs (u: left->right, v: top->bottom).
+    let u0 = (minX - sceneX) / sceneW;
+    let u1 = (maxX - sceneX) / sceneW;
+    const vTop = 1.0 - ((maxY - sceneY) / sceneH);
+    const vBottom = 1.0 - ((minY - sceneY) / sceneH);
+    let v0 = Math.min(vTop, vBottom);
+    let v1 = Math.max(vTop, vBottom);
+
+    u0 = Math.max(0.0, Math.min(1.0, u0));
+    u1 = Math.max(0.0, Math.min(1.0, u1));
+    v0 = Math.max(0.0, Math.min(1.0, v0));
+    v1 = Math.max(0.0, Math.min(1.0, v1));
+
+    const q = 256;
+    const qU0 = Math.floor(u0 * q);
+    const qU1 = Math.floor(u1 * q);
+    const qV0 = Math.floor(v0 * q);
+    const qV1 = Math.floor(v1 * q);
+    if (
+      qU0 === this._shoreFoamLastViewQU0 &&
+      qU1 === this._shoreFoamLastViewQU1 &&
+      qV0 === this._shoreFoamLastViewQV0 &&
+      qV1 === this._shoreFoamLastViewQV1
+    ) {
+      return (this._shoreFoamViewBuffer && this._shoreFoamViewCount > 0)
+        ? this._shoreFoamViewBuffer.subarray(0, this._shoreFoamViewCount * 4)
+        : null;
+    }
+    this._shoreFoamLastViewQU0 = qU0;
+    this._shoreFoamLastViewQU1 = qU1;
+    this._shoreFoamLastViewQV0 = qV0;
+    this._shoreFoamLastViewQV1 = qV1;
+
+    const maxPoints = 16000;
+    if (!this._shoreFoamViewBuffer || this._shoreFoamViewBuffer.length < maxPoints * 4) {
+      this._shoreFoamViewBuffer = new Float32Array(maxPoints * 4);
+    }
+
+    const count = Math.floor(pts.length / 4);
+    let filled = 0;
+    let eligible = 0;
+    for (let i = 0; i < count; i++) {
+      const o = i * 4;
+      const u = pts[o];
+      const v = pts[o + 1];
+      if (u < u0 || u > u1 || v < v0 || v > v1) continue;
+
+      if (filled < maxPoints) {
+        const oo = filled * 4;
+        this._shoreFoamViewBuffer[oo] = u;
+        this._shoreFoamViewBuffer[oo + 1] = v;
+        this._shoreFoamViewBuffer[oo + 2] = pts[o + 2];
+        this._shoreFoamViewBuffer[oo + 3] = pts[o + 3];
+        filled++;
+      } else {
+        const j = Math.floor(Math.random() * (eligible + 1));
+        if (j < maxPoints) {
+          const oo = j * 4;
+          this._shoreFoamViewBuffer[oo] = u;
+          this._shoreFoamViewBuffer[oo + 1] = v;
+          this._shoreFoamViewBuffer[oo + 2] = pts[o + 2];
+          this._shoreFoamViewBuffer[oo + 3] = pts[o + 3];
+        }
+      }
+      eligible++;
+    }
+
+    this._shoreFoamViewCount = filled;
+    return filled > 0 ? this._shoreFoamViewBuffer.subarray(0, filled * 4) : null;
   }
 
   _setWeatherSystemsVisible(visible) {
@@ -2658,6 +2864,10 @@ export class WeatherParticles {
     const THREE = window.THREE;
     if (!material || !THREE) return;
 
+    // PERF: Avoid forcing recompiles unless we actually change shader source or compilation hooks.
+    // Unconditional material.needsUpdate triggers program churn which shows up as getUniformList()
+    // in profilers and can cause heavy Cycle Collection.
+
     // Quarks can rebuild/replace ShaderMaterial shader strings after we initially patch.
     // So we treat this patcher as *idempotent*: reuse existing uniforms when present,
     // but re-inject the GLSL if it is missing.
@@ -2867,7 +3077,10 @@ export class WeatherParticles {
       uni.uFoamRadialOuterOpacity = uniforms.uFoamRadialOuterOpacity;
       uni.uFoamRadialCurve = uniforms.uFoamRadialCurve;
 
+      let shaderChanged = false;
+
       if (typeof material.vertexShader === 'string') {
+        const beforeVS = material.vertexShader;
         // All quarks billboard variants use an `offset` attribute plus
         // #include <soft_vertex>. We piggyback on that include to compute a
         // world-space position once per vertex, without depending on quarks'
@@ -2898,9 +3111,12 @@ export class WeatherParticles {
               '#include <soft_vertex>\n  ' + desiredAssign
             );
         }
+
+        if (material.vertexShader !== beforeVS) shaderChanged = true;
       }
 
       if (typeof material.fragmentShader === 'string') {
+        const beforeFS = material.fragmentShader;
         let fs = material.fragmentShader;
 
         // Only (re)inject if missing. Prevents runaway growth if _patchRoofMaskMaterial
@@ -2940,6 +3156,7 @@ export class WeatherParticles {
           }
 
           material.fragmentShader = fs;
+          shaderChanged = true;
         }
 
         if (isFoamPlume && !material.fragmentShader.includes(foamMarker)) {
@@ -2955,11 +3172,13 @@ export class WeatherParticles {
             '#include <soft_fragment>',
             foamAlphaCode + '#include <soft_fragment>'
           );
-          material.needsUpdate = true;
+          shaderChanged = true;
         }
+
+        if (material.fragmentShader !== beforeFS) shaderChanged = true;
       }
 
-      material.needsUpdate = true;
+      if (shaderChanged) material.needsUpdate = true;
       return;
     }
 
@@ -2968,7 +3187,17 @@ export class WeatherParticles {
     // from our MeshBasicMaterial template. The injected code is the same as
     // above; the only difference is that we edit the temporary `shader`
     // object instead of the final ShaderMaterial instance.
-    material.onBeforeCompile = (shader) => {
+    const ud = material.userData || (material.userData = {});
+    const alreadyInstalled = ud._msRoofMaskOnBeforeCompileInstalled === true && typeof ud._msRoofMaskOnBeforeCompileFn === 'function';
+    const needInstall = !alreadyInstalled;
+
+    if (!needInstall) {
+      // Uniform objects are shared and mutated per-frame by update(), so we don't need to
+      // reinstall onBeforeCompile or force a recompile.
+      return;
+    }
+
+    const fn = (shader) => {
       shader.uniforms.uRoofMap = uniforms.uRoofMap;
       shader.uniforms.uRoofAlphaMap = uniforms.uRoofAlphaMap;
       shader.uniforms.uSceneBounds = uniforms.uSceneBounds;
@@ -3056,6 +3285,9 @@ export class WeatherParticles {
       }
     };
 
+    material.onBeforeCompile = fn;
+    ud._msRoofMaskOnBeforeCompileInstalled = true;
+    ud._msRoofMaskOnBeforeCompileFn = fn;
     material.needsUpdate = true;
   }
 
@@ -3410,22 +3642,30 @@ export class WeatherParticles {
       this._shoreFoamShape.setFoamParams(waterParams, this._time);
     }
 
+    // Refresh per-tile _Water point caches. These add spawn locations for water tiles (boats, rivers, etc.).
+    // Note: this is cached internally and only rescans when the mask/texture/stride changes.
+    this._refreshTileFoamPoints(tileManager);
+
     if (this._waterHitShape) {
       if (waterEnabled && waterTex && waterTex.image) {
-        const uuidKey = `${waterTex.uuid}|fv:${waterFlipV ? 1 : 0}`;
-        if (uuidKey !== this._waterHitMaskUuid) {
-          this._waterHitMaskUuid = uuidKey;
+        // Avoid per-frame string allocations; track uuid + flip as separate fields.
+        const uuid = waterTex.uuid;
+        const flipV = waterFlipV === true;
+        if (uuid !== this._waterHitMaskUuid || flipV !== this._waterHitMaskFlipV) {
+          this._waterHitMaskUuid = uuid;
+          this._waterHitMaskFlipV = flipV;
           this._waterHitPoints = this._generateWaterSplashPoints(
             waterTex,
             this._waterMaskThreshold,
             this._waterMaskStride,
             this._waterMaskMaxPoints,
-            waterFlipV
+            flipV
           );
           this._waterHitShape.setPoints(this._waterHitPoints);
         }
-      } else if (this._waterHitMaskUuid !== null) {
+      } else if (this._waterHitMaskUuid !== null || this._waterHitMaskFlipV !== null) {
         this._waterHitMaskUuid = null;
+        this._waterHitMaskFlipV = null;
         this._waterHitPoints = null;
         this._waterHitShape.clearPoints();
       }
@@ -3447,10 +3687,20 @@ export class WeatherParticles {
         const stride = waterParams.simpleFoamStride ?? 4;
         const maxPoints = waterParams.simpleFoamMaxPoints ?? 20000;
 
-        const pointsKey = `${waterTex.uuid}|simpleEdge|th:${threshold}|st:${stride}|max:${maxPoints}|fv:${flipV ? 1 : 0}`;
+        const uuid = waterTex.uuid;
+        if (
+          uuid !== this._simpleFoamMaskUuid
+          || (flipV === true) !== this._simpleFoamMaskFlipV
+          || threshold !== this._simpleFoamThreshold
+          || stride !== this._simpleFoamStride
+          || maxPoints !== this._simpleFoamMaxPoints
+        ) {
+          this._simpleFoamMaskUuid = uuid;
+          this._simpleFoamMaskFlipV = flipV === true;
+          this._simpleFoamThreshold = threshold;
+          this._simpleFoamStride = stride;
+          this._simpleFoamMaxPoints = maxPoints;
 
-        if (pointsKey !== this._waterFoamPointsKey) {
-          this._waterFoamPointsKey = pointsKey;
           log.info('SimpleFoamSpawner: rebuilding points', { threshold, stride, maxPoints, flipV });
           this._waterFoamPoints = this._generateWaterHardEdgePoints(
             waterTex,
@@ -3470,28 +3720,162 @@ export class WeatherParticles {
         this._waterFoamPoints = null;
         this._waterFoamPointsKey = null;
         this._simpleFoamLastPointCount = 0;
+        this._simpleFoamMaskUuid = null;
+        this._simpleFoamMaskFlipV = null;
+        this._simpleFoamThreshold = null;
+        this._simpleFoamStride = null;
+        this._simpleFoamMaxPoints = null;
         this._waterFoamShape.clearPoints();
+      }
+    }
+
+    // Foam plume spawning (waterEdge): use merged scene + tile hard-edge points, then view-filter.
+    // This keeps foam.webp emission stable even when the authored water is made from multiple tiles.
+    if (this._waterFoamShape) {
+      const plumeActive = waterEnabled && waterTex && waterTex.image;
+
+      if (plumeActive) {
+        const stride = Math.max(1, this._waterMaskStride);
+        const maxPoints = Math.max(1, Math.min(this._waterMaskMaxPoints, 24000) | 0);
+
+        const uuid = waterTex.uuid;
+        const flipV = waterFlipV === true;
+        const tileRev = this._tileFoamRevision;
+        if (
+          uuid !== this._waterFoamPlumeUuid
+          || flipV !== this._waterFoamPlumeFlipV
+          || stride !== this._waterFoamPlumeStride
+          || maxPoints !== this._waterFoamPlumeMaxPoints
+          || tileRev !== this._waterFoamPlumeTileRev
+        ) {
+          this._waterFoamPlumeUuid = uuid;
+          this._waterFoamPlumeFlipV = flipV;
+          this._waterFoamPlumeStride = stride;
+          this._waterFoamPlumeMaxPoints = maxPoints;
+          this._waterFoamPlumeTileRev = tileRev;
+
+          const sceneHard = this._generateWaterHardEdgePoints(
+            waterTex,
+            0.5,
+            stride,
+            maxPoints,
+            flipV
+          );
+
+          // Merge the global scene hard-edge with per-tile hard edges.
+          // IMPORTANT: if there are many tiles, the global merged tile buffer can starve
+          // individual tiles. Build a view-local tile merge so visible tiles always contribute.
+          const u0 = this._viewSceneX / this._viewSceneW;
+          const u1 = (this._viewSceneX + this._viewSceneW) / this._viewSceneW;
+          const v0 = 0.0;
+          const v1 = 1.0;
+          const tileSets = this._collectTilePointSetsInView('hard', u0, u1, v0, v1);
+          const tileViewMerged = this._mergeManyUvPointSets(tileSets, 8000);
+          this._waterFoamPlumeBasePoints = this._mergeUvPointSets(sceneHard, tileViewMerged, maxPoints, 512);
+        }
+
+        this._waterFoamPlumePoints = this._getViewFilteredUvPoints(this._waterFoamPlumeBasePoints);
+      } else {
+        this._waterFoamPlumePointsKey = null;
+        this._waterFoamPlumePoints = null;
+        this._waterFoamPlumeBasePoints = null;
+
+        this._waterFoamPlumeUuid = null;
+        this._waterFoamPlumeFlipV = null;
+        this._waterFoamPlumeStride = null;
+        this._waterFoamPlumeMaxPoints = null;
+        this._waterFoamPlumeTileRev = null;
+      }
+
+      // Do not override the simpleFoam debug spawner when it is active.
+      if (!(waterParams?.simpleFoamEnabled === true)) {
+        this._waterFoamShape.setPoints(this._waterFoamPlumePoints);
+      }
+    }
+
+    // Shoreline points with normals: used for foam plume 'shoreline' spawn mode and foam flecks edge emission.
+    if (this._shoreFoamShape || this._foamFleckEmitter) {
+      const active = waterEnabled && waterTex && waterTex.image;
+      if (active) {
+        const stride = Math.max(1, this._waterMaskStride);
+        const maxPoints = 16000;
+        const uuid = waterTex.uuid;
+        const key = `${uuid}|shoreEdge|st:${stride}|max:${maxPoints}|fv:${waterFlipV ? 1 : 0}|tileRev:${this._tileFoamRevision}`;
+
+        if (key !== this._shoreFoamPointsKey) {
+          this._shoreFoamPointsKey = key;
+          const sceneEdge = this._generateWaterEdgePoints(
+            waterTex,
+            this._waterMaskThreshold,
+            stride,
+            maxPoints,
+            waterFlipV
+          );
+          const u0 = this._viewSceneX / this._viewSceneW;
+          const u1 = (this._viewSceneX + this._viewSceneW) / this._viewSceneW;
+          const v0 = 0.0;
+          const v1 = 1.0;
+          const tileSets = this._collectTilePointSetsInView('edge', u0, u1, v0, v1);
+          const tileViewMerged = this._mergeManyEdgePointSets(tileSets, 8000);
+          this._shoreFoamPoints = this._mergeEdgePointSets(sceneEdge, tileViewMerged, maxPoints, 512);
+        }
+
+        const viewShore = this._getViewFilteredEdgePoints(this._shoreFoamPoints);
+        this._shoreFoamViewPoints = viewShore;
+        if (this._shoreFoamShape) this._shoreFoamShape.setPoints(viewShore);
+        if (this._foamFleckEmitter) this._foamFleckEmitter.setShorePoints(viewShore);
+      } else {
+        this._shoreFoamPointsKey = null;
+        this._shoreFoamPoints = null;
+        this._shoreFoamViewPoints = null;
+        if (this._shoreFoamShape) this._shoreFoamShape.clearPoints();
+        if (this._foamFleckEmitter) this._foamFleckEmitter.setShorePoints(null);
       }
     }
 
 
     // Interior water points (proxy for floating foam spawn locations)
     if (waterEnabled && waterTex && waterTex.image) {
-      const uuidKey = `${waterTex.uuid}|fv:${waterFlipV ? 1 : 0}`;
-      if (uuidKey !== this._foamFleckInteriorMaskUuid) {
-        this._foamFleckInteriorMaskUuid = uuidKey;
-        // Larger stride to keep this cheap; we only need a coarse point cloud.
-        this._foamFleckInteriorPoints = this._generateWaterInteriorPoints(
+      // Avoid per-frame string allocations; track uuid + flip as separate fields.
+      const uuid = waterTex.uuid;
+      const flipV = waterFlipV === true;
+      // Larger stride to keep this cheap; we only need a coarse point cloud.
+      const stride = Math.max(2, this._waterMaskStride * 3);
+      const maxPoints = 8000;
+      const u0 = this._viewSceneX / this._viewSceneW;
+      const u1 = (this._viewSceneX + this._viewSceneW) / this._viewSceneW;
+      const v0 = 0.0;
+      const v1 = 1.0;
+
+      if (
+        uuid !== this._foamFleckInteriorMaskUuid
+        || flipV !== this._foamFleckInteriorMaskFlipV
+        || stride !== this._foamFleckInteriorStride
+        || maxPoints !== this._foamFleckInteriorMaxPoints
+      ) {
+        this._foamFleckInteriorMaskUuid = uuid;
+        this._foamFleckInteriorMaskFlipV = flipV;
+        this._foamFleckInteriorStride = stride;
+        this._foamFleckInteriorMaxPoints = maxPoints;
+
+        const sceneInterior = this._generateWaterInteriorPoints(
           waterTex,
           this._waterMaskThreshold,
-          Math.max(2, this._waterMaskStride * 3),
-          8000,
-          waterFlipV
+          stride,
+          maxPoints,
+          flipV
         );
-        if (this._foamFleckEmitter) this._foamFleckEmitter.setInteriorPoints(this._foamFleckInteriorPoints);
+        const tileSets = this._collectTilePointSetsInView('interior', u0, u1, v0, v1);
+        const tileViewMerged = this._mergeManyUvPointSets(tileSets, 4000);
+        this._foamFleckInteriorPoints = this._mergeUvPointSets(sceneInterior, tileViewMerged, maxPoints, 256);
       }
-    } else if (this._foamFleckInteriorMaskUuid !== null) {
+
+      if (this._foamFleckEmitter) this._foamFleckEmitter.setInteriorPoints(this._foamFleckInteriorPoints);
+    } else if (this._foamFleckInteriorMaskUuid !== null || this._foamFleckInteriorMaskFlipV !== null) {
       this._foamFleckInteriorMaskUuid = null;
+      this._foamFleckInteriorMaskFlipV = null;
+      this._foamFleckInteriorStride = null;
+      this._foamFleckInteriorMaxPoints = null;
       this._foamFleckInteriorPoints = null;
       if (this._foamFleckEmitter) this._foamFleckEmitter.setInteriorPoints(null);
     }
@@ -3852,7 +4236,9 @@ export class WeatherParticles {
       } catch (_) {
       }
 
-      const plumePointSet = (plumeMode === 'shoreline') ? this._shoreFoamPoints : this._waterFoamPoints;
+      const plumePointSet = (plumeMode === 'shoreline')
+        ? this._shoreFoamViewPoints
+        : ((waterParams?.simpleFoamEnabled === true) ? this._waterFoamPoints : this._waterFoamPlumePoints);
       const hasPlumePoints = !!(plumePointSet && plumePointSet.length);
       let foamEmission = 0;
       if (plumeEnabled && waterEnabled && hasPlumePoints) {
@@ -4410,36 +4796,64 @@ export class WeatherParticles {
     if (this.splashTexture) this.splashTexture.dispose();
     if (this.foamTexture) this.foamTexture.dispose();
     if (this.foamFleckTexture) this.foamFleckTexture.dispose();
+
+    try { this._maskPixelCache?.clear?.(); } catch (_) {}
+    this._maskReadCanvas = null;
+    this._maskReadCtx = null;
   }
 
-  _generateWaterHardEdgePoints(maskTexture, edgeThreshold = 0.5, stride = 2, maxPoints = 24000, flipV = false) {
+  _getStableSrc(src) {
+    try {
+      const s = String(src || '');
+      if (!s) return '';
+      const q = s.indexOf('?');
+      return q >= 0 ? s.slice(0, q) : s;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  _getMaskPixelData(maskTexture) {
     const image = maskTexture?.image;
     if (!image) return null;
-
     const w = image.width;
     const h = image.height;
     if (!w || !h) return null;
 
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
+    const src = this._getStableSrc(image.src) || this._getStableSrc(maskTexture?.source?.data?.src) || this._getStableSrc(maskTexture?.userData?.src) || '';
+    const key = `${src}|${w}|${h}`;
+    const cached = this._maskPixelCache.get(key);
+    if (cached && cached.data && cached.width === w && cached.height === h) return cached;
 
     try {
+      if (!this._maskReadCanvas) {
+        this._maskReadCanvas = document.createElement('canvas');
+      }
+      const canvas = this._maskReadCanvas;
+      if (canvas.width !== w) canvas.width = w;
+      if (canvas.height !== h) canvas.height = h;
+      if (!this._maskReadCtx) {
+        this._maskReadCtx = canvas.getContext('2d');
+      }
+      const ctx = this._maskReadCtx;
+      if (!ctx) return null;
+      ctx.clearRect(0, 0, w, h);
       ctx.drawImage(image, 0, 0);
-    } catch (e) {
+      const img = ctx.getImageData(0, 0, w, h);
+      const entry = { width: w, height: h, data: img.data };
+      this._maskPixelCache.set(key, entry);
+      return entry;
+    } catch (_) {
       return null;
     }
+  }
 
-    let img;
-    try {
-      img = ctx.getImageData(0, 0, w, h);
-    } catch (e) {
-      return null;
-    }
-
-    const data = img.data;
+  _generateWaterHardEdgePoints(maskTexture, edgeThreshold = 0.5, stride = 2, maxPoints = 24000, flipV = false) {
+    const entry = this._getMaskPixelData(maskTexture);
+    if (!entry) return null;
+    const w = entry.width;
+    const h = entry.height;
+    const data = entry.data;
 
     // Reservoir sampling so we get a uniform subset of boundary pixels.
     const max = Math.max(1, maxPoints | 0);
@@ -4738,7 +5152,7 @@ export class WeatherParticles {
     return filled > 0 ? this._waterFoamViewBuffer.subarray(0, filled * 2) : null;
   }
 
-  _mergeUvPointSets(aPts, bPts, maxPoints = 24000) {
+  _mergeUvPointSets(aPts, bPts, maxPoints = 24000, minBPoints = 0) {
     const a = aPts && aPts.length >= 2 ? aPts : null;
     const b = bPts && bPts.length >= 2 ? bPts : null;
     if (!a && !b) return null;
@@ -4757,35 +5171,95 @@ export class WeatherParticles {
       return out;
     }
 
-    // Reservoir sample across the concatenated stream.
+    // Stratified merge:
+    // - Ensure the secondary set (typically tile points) contributes at least a small quota.
+    // - Then fill the remainder with reservoir sampling across the combined stream.
+    const minB = Math.max(0, Math.min(max, (minBPoints | 0)));
+    const wantB = Math.min(bCount, minB);
+    const wantA = Math.min(aCount, Math.max(0, max - wantB));
+
     const out = new Float32Array(max * 2);
     let filled = 0;
-    let seen = 0;
 
-    const push = (u, v) => {
-      if (filled < max) {
-        const o = filled * 2;
-        out[o] = u;
-        out[o + 1] = v;
-        filled++;
-      } else {
-        const j = Math.floor(Math.random() * (seen + 1));
-        if (j < max) {
-          const o = j * 2;
-          out[o] = u;
-          out[o + 1] = v;
+    const sampleInto = (src, srcCount, take, stride) => {
+      if (!src || srcCount <= 0 || take <= 0) return;
+      if (take >= srcCount) {
+        for (let i = 0; i < srcCount; i++) {
+          const o = i * stride;
+          const oo = filled * stride;
+          out[oo] = src[o];
+          out[oo + 1] = src[o + 1];
+          filled++;
+          if (filled >= max) return;
         }
+        return;
       }
-      seen++;
+
+      // Reservoir sample from this source set.
+      const tmp = new Float32Array(take * stride);
+      let tf = 0;
+      let seen = 0;
+      const push = (a0, a1) => {
+        if (tf < take) {
+          const to = tf * stride;
+          tmp[to] = a0;
+          tmp[to + 1] = a1;
+          tf++;
+        } else {
+          const j = Math.floor(Math.random() * (seen + 1));
+          if (j < take) {
+            const to = j * stride;
+            tmp[to] = a0;
+            tmp[to + 1] = a1;
+          }
+        }
+        seen++;
+      };
+      for (let i = 0; i < srcCount; i++) {
+        const o = i * stride;
+        push(src[o], src[o + 1]);
+      }
+      for (let i = 0; i < tf; i++) {
+        const o = i * stride;
+        const oo = filled * stride;
+        out[oo] = tmp[o];
+        out[oo + 1] = tmp[o + 1];
+        filled++;
+        if (filled >= max) return;
+      }
     };
 
-    for (let i = 0; i < aCount; i++) {
-      const o = i * 2;
-      push(a[o], a[o + 1]);
-    }
-    for (let i = 0; i < bCount; i++) {
-      const o = i * 2;
-      push(b[o], b[o + 1]);
+    // Take a guaranteed sample from tiles first, then from the scene.
+    sampleInto(b, bCount, wantB, 2);
+    sampleInto(a, aCount, wantA, 2);
+
+    // If we still have capacity (rare), fill with reservoir across remaining points.
+    if (filled < max) {
+      let seen = 0;
+      const push = (u, v) => {
+        if (filled < max) {
+          const o = filled * 2;
+          out[o] = u;
+          out[o + 1] = v;
+          filled++;
+        } else {
+          const j = Math.floor(Math.random() * (seen + 1));
+          if (j < max) {
+            const o = j * 2;
+            out[o] = u;
+            out[o + 1] = v;
+          }
+        }
+        seen++;
+      };
+      for (let i = 0; i < aCount; i++) {
+        const o = i * 2;
+        push(a[o], a[o + 1]);
+      }
+      for (let i = 0; i < bCount; i++) {
+        const o = i * 2;
+        push(b[o], b[o + 1]);
+      }
     }
 
     if (filled < 1) return null;
@@ -4795,7 +5269,7 @@ export class WeatherParticles {
     return trimmed;
   }
 
-  _mergeEdgePointSets(aPts, bPts, maxPoints = 16000) {
+  _mergeEdgePointSets(aPts, bPts, maxPoints = 16000, minBPoints = 0) {
     const a = aPts && aPts.length >= 4 ? aPts : null;
     const b = bPts && bPts.length >= 4 ? bPts : null;
     if (!a && !b) return null;
@@ -4816,36 +5290,243 @@ export class WeatherParticles {
 
     const out = new Float32Array(max * 4);
     let filled = 0;
+
+    const minB = Math.max(0, Math.min(max, (minBPoints | 0)));
+    const wantB = Math.min(bCount, minB);
+    const wantA = Math.min(aCount, Math.max(0, max - wantB));
+
+    const sampleInto = (src, srcCount, take) => {
+      if (!src || srcCount <= 0 || take <= 0) return;
+      if (take >= srcCount) {
+        for (let i = 0; i < srcCount; i++) {
+          const o = i * 4;
+          const oo = filled * 4;
+          out[oo] = src[o];
+          out[oo + 1] = src[o + 1];
+          out[oo + 2] = src[o + 2];
+          out[oo + 3] = src[o + 3];
+          filled++;
+          if (filled >= max) return;
+        }
+        return;
+      }
+
+      const tmp = new Float32Array(take * 4);
+      let tf = 0;
+      let seen = 0;
+      const push = (u, v, nx, ny) => {
+        if (tf < take) {
+          const to = tf * 4;
+          tmp[to] = u;
+          tmp[to + 1] = v;
+          tmp[to + 2] = nx;
+          tmp[to + 3] = ny;
+          tf++;
+        } else {
+          const j = Math.floor(Math.random() * (seen + 1));
+          if (j < take) {
+            const to = j * 4;
+            tmp[to] = u;
+            tmp[to + 1] = v;
+            tmp[to + 2] = nx;
+            tmp[to + 3] = ny;
+          }
+        }
+        seen++;
+      };
+      for (let i = 0; i < srcCount; i++) {
+        const o = i * 4;
+        push(src[o], src[o + 1], src[o + 2], src[o + 3]);
+      }
+      for (let i = 0; i < tf; i++) {
+        const o = i * 4;
+        const oo = filled * 4;
+        out[oo] = tmp[o];
+        out[oo + 1] = tmp[o + 1];
+        out[oo + 2] = tmp[o + 2];
+        out[oo + 3] = tmp[o + 3];
+        filled++;
+        if (filled >= max) return;
+      }
+    };
+
+    // Take a guaranteed sample from tiles first, then from the scene.
+    sampleInto(b, bCount, wantB);
+    sampleInto(a, aCount, wantA);
+
+    if (filled < 1) return null;
+    if (filled === max) return out;
+    const trimmed = new Float32Array(filled * 4);
+    trimmed.set(out.subarray(0, filled * 4));
+    return trimmed;
+  }
+
+  _collectTilePointSetsInView(kind, u0, u1, v0, v1) {
+    const out = [];
+    if (!this._tileWaterFoamCache || this._tileWaterFoamCache.size < 1) return out;
+
+    // Expand view slightly so we keep stable spawn as the camera moves.
+    const padU = 0.02;
+    const padV = 0.02;
+    const U0 = (u0 ?? 0) - padU;
+    const U1 = (u1 ?? 1) + padU;
+    const V0 = (v0 ?? 0) - padV;
+    const V1 = (v1 ?? 1) + padV;
+
+    for (const entry of this._tileWaterFoamCache.values()) {
+      if (!entry) continue;
+      const b = entry.sceneUvBounds;
+      if (!b) continue;
+      if (b.u1 < U0 || b.u0 > U1 || b.v1 < V0 || b.v0 > V1) continue;
+
+      const pts = (kind === 'edge') ? entry.edgePts : (kind === 'interior' ? entry.interiorPts : entry.hardPts);
+      if (!pts) continue;
+      if (kind === 'edge') {
+        if (pts.length >= 4) out.push(pts);
+      } else {
+        if (pts.length >= 2) out.push(pts);
+      }
+    }
+    return out;
+  }
+
+  _generateTileLocalWaterInteriorPoints(maskTexture, tileAlphaMask = null, threshold = 0.15, stride = 6, maxPoints = 8000) {
+    const entry = this._getMaskPixelData(maskTexture);
+    if (!entry) return null;
+    const w = entry.width;
+    const h = entry.height;
+    const data = entry.data;
+
+    const sampleAlpha = (uLocal, vLocal) => {
+      if (!tileAlphaMask || !tileAlphaMask.data) return 1.0;
+      const aw = tileAlphaMask.width;
+      const ah = tileAlphaMask.height;
+      if (!aw || !ah) return 1.0;
+      const ax = Math.max(0, Math.min(aw - 1, Math.floor(uLocal * (aw - 1))));
+      const ay = Math.max(0, Math.min(ah - 1, Math.floor(vLocal * (ah - 1))));
+      const ai = (ay * aw + ax) * 4;
+      return tileAlphaMask.data[ai + 3] / 255;
+    };
+
+    // Reservoir sampling so capped interior points represent the full tile mask.
+    const max = Math.max(1, maxPoints | 0);
+    const out = new Float32Array(max * 2);
+    let filled = 0;
     let seen = 0;
 
-    const push = (u, v, nx, ny) => {
-      if (filled < max) {
-        const o = filled * 4;
-        out[o] = u;
-        out[o + 1] = v;
-        out[o + 2] = nx;
-        out[o + 3] = ny;
-        filled++;
-      } else {
-        const j = Math.floor(Math.random() * (seen + 1));
-        if (j < max) {
-          const o = j * 4;
+    const s = Math.max(1, stride | 0);
+    const sample = (x, y) => {
+      const uLocal = x / w;
+      const vLocal = y / h;
+      const aTile = sampleAlpha(uLocal, vLocal);
+      return this._tileMaskSampleLumaA(data, w, x, y) * aTile;
+    };
+
+    // Interior = water pixel with all 4 neighbors also water.
+    for (let y = 1; y < h - 1; y += s) {
+      for (let x = 1; x < w - 1; x += s) {
+        const r = sample(x, y);
+        if (r < threshold) continue;
+        if (sample(x - 1, y) < threshold) continue;
+        if (sample(x + 1, y) < threshold) continue;
+        if (sample(x, y - 1) < threshold) continue;
+        if (sample(x, y + 1) < threshold) continue;
+
+        const u = x / w;
+        const v = y / h;
+        if (filled < max) {
+          const o = filled * 2;
+          out[o] = u;
+          out[o + 1] = v;
+          filled++;
+        } else {
+          const j = Math.floor(Math.random() * (seen + 1));
+          if (j < max) {
+            const o = j * 2;
+            out[o] = u;
+            out[o + 1] = v;
+          }
+        }
+        seen++;
+      }
+    }
+
+    if (filled < 1) return null;
+    if (filled === max) return out;
+    const trimmed = new Float32Array(filled * 2);
+    trimmed.set(out.subarray(0, filled * 2));
+    return trimmed;
+  }
+
+  _generateWaterEdgePoints(maskTexture, threshold = 0.15, stride = 2, maxPoints = 16000, flipV = false) {
+    const entry = this._getMaskPixelData(maskTexture);
+    if (!entry) return null;
+    const w = entry.width;
+    const h = entry.height;
+    const data = entry.data;
+    const yToImg = (yy) => (flipV ? (h - 1 - yy) : yy);
+
+    const max = Math.max(1, maxPoints | 0);
+    const out = new Float32Array(max * 4);
+    let filled = 0;
+    let seen = 0;
+
+    const s = Math.max(1, stride | 0);
+    const sample = (x, yScene) => {
+      const yImg = yToImg(yScene);
+      const ix = (yImg * w + x) * 4;
+      const r = data[ix] / 255;
+      const g = data[ix + 1] / 255;
+      const b = data[ix + 2] / 255;
+      const a = data[ix + 3] / 255;
+      return (0.299 * r + 0.587 * g + 0.114 * b) * a;
+    };
+
+    for (let y = 1; y < h - 1; y += s) {
+      for (let x = 1; x < w - 1; x += s) {
+        const c0 = sample(x, y);
+        if (c0 < threshold) continue;
+
+        const rl = sample(x - 1, y);
+        const rr = sample(x + 1, y);
+        const ru = sample(x, y - 1);
+        const rd = sample(x, y + 1);
+        const isEdge = (rl < threshold) || (rr < threshold) || (ru < threshold) || (rd < threshold);
+        if (!isEdge) continue;
+
+        // Gradient points from dark->bright. Convert mask Y-down to world Y-up by flipping ny.
+        let nx = rr - rl;
+        let ny = -(rd - ru);
+        const len = Math.sqrt(nx * nx + ny * ny);
+        if (len > 1e-6) {
+          nx /= len;
+          ny /= len;
+        } else {
+          nx = 1.0;
+          ny = 0.0;
+        }
+
+        const u = x / w;
+        const v = y / h;
+        if (filled < max) {
+          const o = filled * 4;
           out[o] = u;
           out[o + 1] = v;
           out[o + 2] = nx;
           out[o + 3] = ny;
+          filled++;
+        } else {
+          const j = Math.floor(Math.random() * (seen + 1));
+          if (j < max) {
+            const o = j * 4;
+            out[o] = u;
+            out[o + 1] = v;
+            out[o + 2] = nx;
+            out[o + 3] = ny;
+          }
         }
+        seen++;
       }
-      seen++;
-    };
-
-    for (let i = 0; i < aCount; i++) {
-      const o = i * 4;
-      push(a[o], a[o + 1], a[o + 2], a[o + 3]);
-    }
-    for (let i = 0; i < bCount; i++) {
-      const o = i * 4;
-      push(b[o], b[o + 1], b[o + 2], b[o + 3]);
     }
 
     if (filled < 1) return null;
@@ -4856,16 +5537,69 @@ export class WeatherParticles {
   }
 
   _refreshTileFoamPoints(tileManager) {
+    let anyTileChanged = false;
+
+    // Even when we can't rebuild point sets (missing tileManager/bounds/canvas), we must
+    // still prune stale cache entries. Otherwise removed tiles can keep contributing.
     if (!tileManager || !tileManager.tileSprites) {
+      try {
+        if (this._tileWaterFoamCache && this._tileWaterFoamCache.size > 0) {
+          this._tileWaterFoamCache.clear();
+          anyTileChanged = true;
+        }
+      } catch (_) {
+      }
+
       this._tileWaterFoamMergedPts = null;
       this._tileShoreFoamMergedPts = null;
+      this._tileWaterInteriorMergedPts = null;
+
+      if (anyTileChanged) {
+        this._tileFoamRevision = (this._tileFoamRevision | 0) + 1;
+        this._waterFoamLastViewQU0 = null;
+        this._waterFoamLastViewQU1 = null;
+        this._waterFoamLastViewQV0 = null;
+        this._waterFoamLastViewQV1 = null;
+        this._shoreFoamLastViewQU0 = null;
+        this._shoreFoamLastViewQU1 = null;
+        this._shoreFoamLastViewQV0 = null;
+        this._shoreFoamLastViewQV1 = null;
+      }
       return;
+    }
+
+    // Prune deleted tiles up-front so we don't keep using stale per-tile points.
+    try {
+      if (this._tileWaterFoamCache && this._tileWaterFoamCache.size > 0) {
+        const toDelete = [];
+        for (const id of this._tileWaterFoamCache.keys()) {
+          if (!tileManager.tileSprites.has(id)) toDelete.push(id);
+        }
+        if (toDelete.length > 0) {
+          for (const id of toDelete) this._tileWaterFoamCache.delete(id);
+          anyTileChanged = true;
+        }
+      }
+    } catch (_) {
     }
 
     const bounds = this._sceneBounds;
     if (!bounds || !Number.isFinite(bounds.x) || !Number.isFinite(bounds.y) || bounds.z <= 1e-6 || bounds.w <= 1e-6) {
       this._tileWaterFoamMergedPts = null;
       this._tileShoreFoamMergedPts = null;
+      this._tileWaterInteriorMergedPts = null;
+
+      if (anyTileChanged) {
+        this._tileFoamRevision = (this._tileFoamRevision | 0) + 1;
+        this._waterFoamLastViewQU0 = null;
+        this._waterFoamLastViewQU1 = null;
+        this._waterFoamLastViewQV0 = null;
+        this._waterFoamLastViewQV1 = null;
+        this._shoreFoamLastViewQU0 = null;
+        this._shoreFoamLastViewQU1 = null;
+        this._shoreFoamLastViewQV0 = null;
+        this._shoreFoamLastViewQV1 = null;
+      }
       return;
     }
 
@@ -4873,23 +5607,116 @@ export class WeatherParticles {
     if (!Number.isFinite(totalH) || totalH <= 0) {
       this._tileWaterFoamMergedPts = null;
       this._tileShoreFoamMergedPts = null;
+      this._tileWaterInteriorMergedPts = null;
+
+      if (anyTileChanged) {
+        this._tileFoamRevision = (this._tileFoamRevision | 0) + 1;
+        this._waterFoamLastViewQU0 = null;
+        this._waterFoamLastViewQU1 = null;
+        this._waterFoamLastViewQV0 = null;
+        this._waterFoamLastViewQV1 = null;
+        this._shoreFoamLastViewQU0 = null;
+        this._shoreFoamLastViewQU1 = null;
+        this._shoreFoamLastViewQV0 = null;
+        this._shoreFoamLastViewQV1 = null;
+      }
       return;
     }
 
     const tileHardSets = [];
     const tileEdgeSets = [];
-    let anyTileChanged = false;
+    const tileInteriorSets = [];
+
+    const debug = !!(this._waterParams && this._waterParams.debugTileFoamPoints);
 
     for (const [tileId, spriteData] of tileManager.tileSprites.entries()) {
       const tileDoc = spriteData?.tileDoc;
       const sprite = spriteData?.sprite;
       if (!tileDoc || !sprite) continue;
 
-      // Only consider tiles that have a resolved/loaded per-tile _Water mask.
-      const occ = sprite.userData?.waterOccluderMesh;
-      const maskTex = occ?.material?.uniforms?.tWaterMask?.value ?? null;
-      const img = maskTex?.image;
-      if (!maskTex || !img) continue;
+      // Consider ANY tile that has (or can load) a per-tile _Water mask.
+      // Don't depend on waterOccluderMesh because many tiles (boats/decals) may carry
+      // a _Water mask intended for spawn locations without being treated as an occluder.
+      let maskTex = sprite.userData?.tileWaterMaskTexture ?? null;
+      if (!maskTex) {
+        const occ = sprite.userData?.waterOccluderMesh;
+        maskTex = occ?.material?.uniforms?.tWaterMask?.value ?? null;
+      }
+      let img = maskTex?.image;
+
+      // If we don't have a ready texture yet, kick an async load and skip for now.
+      if (!maskTex || !img) {
+        const src = tileDoc?.texture?.src ?? '';
+        const requestKey = `${tileId}|${src}`;
+        if (sprite.userData?._msTileWaterMaskRequestKey !== requestKey) {
+          sprite.userData._msTileWaterMaskRequestKey = requestKey;
+          try {
+            const p = tileManager.loadTileWaterMaskTexture(tileDoc);
+            if (p && typeof p.then === 'function') {
+              p.then((tex) => {
+                if (!tex) return;
+                // Tile could have been removed or changed while awaiting.
+                const current = tileManager.tileSprites.get(tileId);
+                const s = current?.sprite;
+                if (!s || s !== sprite) return;
+                if (s.userData?._msTileWaterMaskRequestKey !== requestKey) return;
+                s.userData.tileWaterMaskTexture = tex;
+              }).catch(() => {
+              });
+            }
+          } catch (_) {
+          }
+        }
+        if (debug) {
+          try {
+            console.debug('[MapShine][Foam] tile skipped (mask not ready)', {
+              tileId,
+              src,
+              hasOcc: !!sprite.userData?.waterOccluderMesh,
+              hasCached: !!sprite.userData?.tileWaterMaskTexture
+            });
+          } catch (_) {
+          }
+        }
+        continue;
+      }
+
+      // If the tile texture has transparency, respect it so we don't generate spawn points
+      // in invisible parts of the tile (non-rectangular boats, alpha-cutout water decals, etc.).
+      const tileTex = sprite.material?.map ?? null;
+      const tileImg = tileTex?.image ?? null;
+      let tileAlphaMask = null;
+      if (tileTex && tileImg && tileManager?.alphaMaskCache) {
+        const _stableAlphaKey = (src) => {
+          try {
+            const s = String(src || '');
+            if (!s) return '';
+            const q = s.indexOf('?');
+            return q >= 0 ? s.slice(0, q) : s;
+          } catch (_) {
+            return '';
+          }
+        };
+        const stableSrc = _stableAlphaKey(tileImg.src);
+        const key = stableSrc || tileImg.src || tileDoc.id;
+        tileAlphaMask = tileManager.alphaMaskCache.get(key) || null;
+        if (!tileAlphaMask) {
+          try {
+            const canvasEl = document.createElement('canvas');
+            canvasEl.width = tileImg.width;
+            canvasEl.height = tileImg.height;
+            const ctx = canvasEl.getContext('2d');
+            if (ctx) {
+              ctx.drawImage(tileImg, 0, 0);
+              const imgData = ctx.getImageData(0, 0, tileImg.width, tileImg.height);
+              tileAlphaMask = { width: tileImg.width, height: tileImg.height, data: imgData.data };
+              tileManager.alphaMaskCache.set(key, tileAlphaMask);
+            }
+          } catch (_) {
+            tileAlphaMask = null;
+          }
+        }
+      }
 
       // Use the live THREE sprite transform for movement responsiveness.
       // During interactive drag, Foundry may refresh the tile display before
@@ -4922,7 +5749,21 @@ export class WeatherParticles {
       // Split cache into:
       // - scanKey: changes only when the mask texture or sampling params change
       // - transformKey: changes when the tile moves/resizes/rotates
-      const scanKey = `${maskTex.uuid}|${this._waterMaskThreshold}|${this._waterMaskStride}`;
+      // Use stable, URL-based keys instead of THREE Texture UUIDs.
+      // UUIDs change when textures are recreated (scene reset, reload), causing unnecessary rescans.
+      const _stripQuery = (src) => {
+        try {
+          const s = String(src || '');
+          if (!s) return '';
+          const q = s.indexOf('?');
+          return q >= 0 ? s.slice(0, q) : s;
+        } catch (_) {
+          return '';
+        }
+      };
+      const maskKey = _stripQuery(maskTex?.image?.src || maskTex?.source?.data?.src || maskTex?.userData?.src || '') || (maskTex?.name || '');
+      const tileKey = _stripQuery(tileImg?.src || '') || tileDoc.id;
+      const scanKey = `${maskKey}|${tileKey}|${this._waterMaskThreshold}|${this._waterMaskStride}`;
       const transformKey = `${xFoundry}|${yFoundry}|${wPx}|${hPx}|${rotDeg}|${bounds.x}|${bounds.y}|${bounds.z}|${bounds.w}|${totalH}`;
 
       let entry = this._tileWaterFoamCache.get(tileId);
@@ -4932,29 +5773,41 @@ export class WeatherParticles {
           transformKey: null,
           localHardPts: null,
           localEdgePts: null,
+          localInteriorPts: null,
           hardPts: null,
-          edgePts: null
+          edgePts: null,
+          interiorPts: null,
+          sceneUvBounds: null
         };
         this._tileWaterFoamCache.set(tileId, entry);
+      }
+
+      // Backfill older cache entries created before we introduced `sceneUvBounds`.
+      if (!Object.prototype.hasOwnProperty.call(entry, 'sceneUvBounds')) {
+        entry.sceneUvBounds = null;
+        anyTileChanged = true;
       }
 
       // Re-scan mask pixels ONLY when the mask/params change.
       if (entry.scanKey !== scanKey) {
         entry.scanKey = scanKey;
-        entry.localHardPts = this._generateTileLocalWaterHardEdgePoints(
-          maskTex,
-          0.5,
-          Math.max(1, this._waterMaskStride),
-          12000
-        );
-        entry.localEdgePts = this._generateTileLocalWaterEdgePoints(
-          maskTex,
-          this._waterMaskThreshold,
-          Math.max(1, this._waterMaskStride),
-          8000
-        );
-        entry.transformKey = null; // force re-transform
+        entry.localHardPts = this._generateTileLocalWaterHardEdgePoints(maskTex, tileAlphaMask, this._waterMaskThreshold, this._waterMaskStride, 24000);
+        entry.localEdgePts = this._generateTileLocalWaterEdgePoints(maskTex, tileAlphaMask, this._waterMaskThreshold, Math.max(1, Math.floor(this._waterMaskStride * 0.5)), 16000);
+        entry.localInteriorPts = this._generateTileLocalWaterInteriorPoints(maskTex, tileAlphaMask, this._waterMaskThreshold, Math.max(1, Math.floor(this._waterMaskStride * 2.0)), 8000);
+        entry.transformKey = null; // force transform refresh
         anyTileChanged = true;
+
+        if (debug) {
+          try {
+            console.debug('[MapShine][Foam] tile scan rebuilt', {
+              tileId,
+              hard: entry.localHardPts ? (entry.localHardPts.length / 2) : 0,
+              edge: entry.localEdgePts ? (entry.localEdgePts.length / 4) : 0,
+              interior: entry.localInteriorPts ? (entry.localInteriorPts.length / 2) : 0
+            });
+          } catch (_) {
+          }
+        }
       }
 
       // Re-transform cached local points whenever the tile moves/resizes/rotates.
@@ -4962,28 +5815,53 @@ export class WeatherParticles {
         entry.transformKey = transformKey;
         entry.hardPts = this._transformTileLocalUvPointsToSceneUv(entry.localHardPts, liveTile, bounds, totalH);
         entry.edgePts = this._transformTileLocalEdgePointsToSceneUv(entry.localEdgePts, liveTile, bounds, totalH);
+        entry.interiorPts = this._transformTileLocalUvPointsToSceneUv(entry.localInteriorPts, liveTile, bounds, totalH);
         anyTileChanged = true;
+      }
+
+      // Cache a cheap axis-aligned scene-UV bounds for quick view intersection tests.
+      // NOTE: This intentionally ignores rotation; it's only used as a conservative
+      // inclusion test for whether the tile is near the camera view.
+      // Also compute this for older cache entries after hot reloads.
+      if (!entry.sceneUvBounds) {
+        try {
+          const fx0 = liveTile.x;
+          const fy0 = liveTile.y;
+          const fx1 = liveTile.x + liveTile.width;
+          const fy1 = liveTile.y + liveTile.height;
+
+          const wx0 = fx0;
+          const wy0 = totalH - fy0;
+          const wx1 = fx1;
+          const wy1 = totalH - fy1;
+
+          const uA = (wx0 - bounds.x) / bounds.z;
+          const vA = 1.0 - ((wy0 - bounds.y) / bounds.w);
+          const uB = (wx1 - bounds.x) / bounds.z;
+          const vB = 1.0 - ((wy1 - bounds.y) / bounds.w);
+
+          const u0 = Math.min(uA, uB);
+          const u1 = Math.max(uA, uB);
+          const v0 = Math.min(vA, vB);
+          const v1 = Math.max(vA, vB);
+          entry.sceneUvBounds = { u0, u1, v0, v1 };
+        } catch (_) {
+          entry.sceneUvBounds = null;
+        }
       }
 
       if (entry.hardPts && entry.hardPts.length >= 2) tileHardSets.push(entry.hardPts);
       if (entry.edgePts && entry.edgePts.length >= 4) tileEdgeSets.push(entry.edgePts);
-    }
-
-    // Clean up cache entries for deleted tiles.
-    try {
-      let deletedAny = false;
-      for (const id of this._tileWaterFoamCache.keys()) {
-        if (!tileManager.tileSprites.has(id)) {
-          this._tileWaterFoamCache.delete(id);
-          deletedAny = true;
-        }
-      }
-      if (deletedAny) anyTileChanged = true;
-    } catch (_) {
+      if (entry.interiorPts && entry.interiorPts.length >= 2) tileInteriorSets.push(entry.interiorPts);
     }
 
     this._tileWaterFoamMergedPts = this._mergeManyUvPointSets(tileHardSets, 24000);
     this._tileShoreFoamMergedPts = this._mergeManyEdgePointSets(tileEdgeSets, 16000);
+    this._tileWaterInteriorMergedPts = this._mergeManyUvPointSets(tileInteriorSets, 8000);
+
+    if (anyTileChanged) {
+      this._tileFoamRevision = (this._tileFoamRevision | 0) + 1;
+    }
 
     // IMPORTANT: if tile-derived point sets change but the camera doesn't move,
     // our view-filter cache (quantized by view rect) must be invalidated or we
@@ -4993,6 +5871,11 @@ export class WeatherParticles {
       this._waterFoamLastViewQU1 = null;
       this._waterFoamLastViewQV0 = null;
       this._waterFoamLastViewQV1 = null;
+
+      this._shoreFoamLastViewQU0 = null;
+      this._shoreFoamLastViewQU1 = null;
+      this._shoreFoamLastViewQV0 = null;
+      this._shoreFoamLastViewQV1 = null;
     }
   }
 
@@ -5001,10 +5884,61 @@ export class WeatherParticles {
     if (sets.length === 1) return sets[0];
 
     // Reservoir sample across all sets.
+    // IMPORTANT: ensure each set contributes *some* points when possible.
     const max = Math.max(1, maxPoints | 0);
     const out = new Float32Array(max * 2);
     let filled = 0;
     let seen = 0;
+
+    const minPerSet = 32;
+    // First pass: guaranteed small quota per set.
+    for (const s of sets) {
+      if (!s || s.length < 2 || filled >= max) continue;
+      const count = Math.floor(s.length / 2);
+      const take = Math.min(count, minPerSet, max - filled);
+      if (take <= 0) continue;
+
+      if (take >= count) {
+        for (let i = 0; i < count && filled < max; i++) {
+          const o = i * 2;
+          const oo = filled * 2;
+          out[oo] = s[o];
+          out[oo + 1] = s[o + 1];
+          filled++;
+        }
+      } else {
+        // Reservoir sample from this set into a temp buffer.
+        const tmp = new Float32Array(take * 2);
+        let tf = 0;
+        let tSeen = 0;
+        for (let i = 0; i < count; i++) {
+          const o = i * 2;
+          const u = s[o];
+          const v = s[o + 1];
+          if (tf < take) {
+            const to = tf * 2;
+            tmp[to] = u;
+            tmp[to + 1] = v;
+            tf++;
+          } else {
+            const j = Math.floor(Math.random() * (tSeen + 1));
+            if (j < take) {
+              const to = j * 2;
+              tmp[to] = u;
+              tmp[to + 1] = v;
+            }
+          }
+          tSeen++;
+        }
+        for (let i = 0; i < tf && filled < max; i++) {
+          const o = i * 2;
+          const oo = filled * 2;
+          out[oo] = tmp[o];
+          out[oo + 1] = tmp[o + 1];
+          filled++;
+        }
+      }
+    }
 
     for (const s of sets) {
       if (!s || s.length < 2) continue;
@@ -5045,6 +5979,65 @@ export class WeatherParticles {
     const out = new Float32Array(max * 4);
     let filled = 0;
     let seen = 0;
+
+    const minPerSet = 32;
+    // First pass: guaranteed small quota per set.
+    for (const s of sets) {
+      if (!s || s.length < 4 || filled >= max) continue;
+      const count = Math.floor(s.length / 4);
+      const take = Math.min(count, minPerSet, max - filled);
+      if (take <= 0) continue;
+
+      if (take >= count) {
+        for (let i = 0; i < count && filled < max; i++) {
+          const o = i * 4;
+          const oo = filled * 4;
+          out[oo] = s[o];
+          out[oo + 1] = s[o + 1];
+          out[oo + 2] = s[o + 2];
+          out[oo + 3] = s[o + 3];
+          filled++;
+        }
+      } else {
+        const tmp = new Float32Array(take * 4);
+        let tf = 0;
+        let tSeen = 0;
+        for (let i = 0; i < count; i++) {
+          const o = i * 4;
+          const u = s[o];
+          const v = s[o + 1];
+          const nx = s[o + 2];
+          const ny = s[o + 3];
+          if (tf < take) {
+            const to = tf * 4;
+            tmp[to] = u;
+            tmp[to + 1] = v;
+            tmp[to + 2] = nx;
+            tmp[to + 3] = ny;
+            tf++;
+          } else {
+            const j = Math.floor(Math.random() * (tSeen + 1));
+            if (j < take) {
+              const to = j * 4;
+              tmp[to] = u;
+              tmp[to + 1] = v;
+              tmp[to + 2] = nx;
+              tmp[to + 3] = ny;
+            }
+          }
+          tSeen++;
+        }
+        for (let i = 0; i < tf && filled < max; i++) {
+          const o = i * 4;
+          const oo = filled * 4;
+          out[oo] = tmp[o];
+          out[oo + 1] = tmp[o + 1];
+          out[oo + 2] = tmp[o + 2];
+          out[oo + 3] = tmp[o + 3];
+          filled++;
+        }
+      }
+    }
 
     for (const s of sets) {
       if (!s || s.length < 4) continue;
@@ -5188,30 +6181,12 @@ export class WeatherParticles {
     return trimmed;
   }
 
-  _generateTileLocalWaterHardEdgePoints(maskTexture, edgeThreshold = 0.5, stride = 2, maxPoints = 12000) {
-    const image = maskTexture?.image;
-    if (!image) return null;
-    const w = image.width;
-    const h = image.height;
-    if (!w || !h) return null;
-
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-    try {
-      ctx.drawImage(image, 0, 0);
-    } catch (_) {
-      return null;
-    }
-    let img;
-    try {
-      img = ctx.getImageData(0, 0, w, h);
-    } catch (_) {
-      return null;
-    }
-    const data = img.data;
+  _generateTileLocalWaterHardEdgePoints(maskTexture, tileAlphaMask = null, edgeThreshold = 0.5, stride = 2, maxPoints = 12000) {
+    const entry = this._getMaskPixelData(maskTexture);
+    if (!entry) return null;
+    const w = entry.width;
+    const h = entry.height;
+    const data = entry.data;
 
     const max = Math.max(1, maxPoints | 0);
     const out = new Float32Array(max * 2);
@@ -5219,7 +6194,22 @@ export class WeatherParticles {
     let eligible = 0;
 
     const s = Math.max(1, stride | 0);
-    const sample = (x, y) => this._tileMaskSampleLumaA(data, w, x, y);
+    const sampleAlpha = (uLocal, vLocal) => {
+      if (!tileAlphaMask || !tileAlphaMask.data) return 1.0;
+      const aw = tileAlphaMask.width;
+      const ah = tileAlphaMask.height;
+      if (!aw || !ah) return 1.0;
+      const ax = Math.max(0, Math.min(aw - 1, Math.floor(uLocal * (aw - 1))));
+      const ay = Math.max(0, Math.min(ah - 1, Math.floor(vLocal * (ah - 1))));
+      const ai = (ay * aw + ax) * 4;
+      return tileAlphaMask.data[ai + 3] / 255;
+    };
+    const sample = (x, y) => {
+      const uLocal = x / w;
+      const vLocal = y / h;
+      const aTile = sampleAlpha(uLocal, vLocal);
+      return this._tileMaskSampleLumaA(data, w, x, y) * aTile;
+    };
 
     for (let y = 1; y < h - 1; y += s) {
       for (let x = 1; x < w - 1; x += s) {
@@ -5260,30 +6250,12 @@ export class WeatherParticles {
     return trimmed;
   }
 
-  _generateTileLocalWaterEdgePoints(maskTexture, threshold = 0.15, stride = 2, maxPoints = 8000) {
-    const image = maskTexture?.image;
-    if (!image) return null;
-    const w = image.width;
-    const h = image.height;
-    if (!w || !h) return null;
-
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-    try {
-      ctx.drawImage(image, 0, 0);
-    } catch (_) {
-      return null;
-    }
-    let img;
-    try {
-      img = ctx.getImageData(0, 0, w, h);
-    } catch (_) {
-      return null;
-    }
-    const data = img.data;
+  _generateTileLocalWaterEdgePoints(maskTexture, tileAlphaMask = null, threshold = 0.15, stride = 2, maxPoints = 8000) {
+    const entry = this._getMaskPixelData(maskTexture);
+    if (!entry) return null;
+    const w = entry.width;
+    const h = entry.height;
+    const data = entry.data;
 
     const max = Math.max(1, maxPoints | 0);
     const out = new Float32Array(max * 4);
@@ -5291,7 +6263,22 @@ export class WeatherParticles {
     let seen = 0;
 
     const s = Math.max(1, stride | 0);
-    const sample = (x, y) => this._tileMaskSampleLumaA(data, w, x, y);
+    const sampleAlpha = (uLocal, vLocal) => {
+      if (!tileAlphaMask || !tileAlphaMask.data) return 1.0;
+      const aw = tileAlphaMask.width;
+      const ah = tileAlphaMask.height;
+      if (!aw || !ah) return 1.0;
+      const ax = Math.max(0, Math.min(aw - 1, Math.floor(uLocal * (aw - 1))));
+      const ay = Math.max(0, Math.min(ah - 1, Math.floor(vLocal * (ah - 1))));
+      const ai = (ay * aw + ax) * 4;
+      return tileAlphaMask.data[ai + 3] / 255;
+    };
+    const sample = (x, y) => {
+      const uLocal = x / w;
+      const vLocal = y / h;
+      const aTile = sampleAlpha(uLocal, vLocal);
+      return this._tileMaskSampleLumaA(data, w, x, y) * aTile;
+    };
 
     for (let y = 1; y < h - 1; y += s) {
       for (let x = 1; x < w - 1; x += s) {
@@ -5441,33 +6428,11 @@ export class WeatherParticles {
   }
 
   _generateWaterSplashPoints(maskTexture, threshold = 0.15, stride = 2, maxPoints = 20000, flipV = false) {
-    const image = maskTexture?.image;
-    if (!image) return null;
-
-    const w = image.width;
-    const h = image.height;
-    if (!w || !h) return null;
-
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-
-    try {
-      ctx.drawImage(image, 0, 0);
-    } catch (e) {
-      return null;
-    }
-
-    let img;
-    try {
-      img = ctx.getImageData(0, 0, w, h);
-    } catch (e) {
-      return null;
-    }
-
-    const data = img.data;
+    const entry = this._getMaskPixelData(maskTexture);
+    if (!entry) return null;
+    const w = entry.width;
+    const h = entry.height;
+    const data = entry.data;
 
     const yToImg = (yy) => (flipV ? (h - 1 - yy) : yy);
 
@@ -5513,33 +6478,11 @@ export class WeatherParticles {
   }
 
   _generateSimpleFoamPoints(maskTexture, threshold = 0.5, stride = 4, maxPoints = 20000, flipV = false) {
-    const image = maskTexture?.image;
-    if (!image) return null;
-
-    const w = image.width;
-    const h = image.height;
-    if (!w || !h) return null;
-
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-
-    try {
-      ctx.drawImage(image, 0, 0);
-    } catch (e) {
-      return null;
-    }
-
-    let img;
-    try {
-      img = ctx.getImageData(0, 0, w, h);
-    } catch (e) {
-      return null;
-    }
-
-    const data = img.data;
+    const entry = this._getMaskPixelData(maskTexture);
+    if (!entry) return null;
+    const w = entry.width;
+    const h = entry.height;
+    const data = entry.data;
     const yToImg = (yy) => (flipV ? (h - 1 - yy) : yy);
 
     const max = Math.max(1, maxPoints | 0);
@@ -5582,33 +6525,11 @@ export class WeatherParticles {
   }
 
   _generateWaterInteriorPoints(maskTexture, threshold = 0.15, stride = 6, maxPoints = 8000, flipV = false) {
-    const image = maskTexture?.image;
-    if (!image) return null;
-
-    const w = image.width;
-    const h = image.height;
-    if (!w || !h) return null;
-
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-
-    try {
-      ctx.drawImage(image, 0, 0);
-    } catch (e) {
-      return null;
-    }
-
-    let img;
-    try {
-      img = ctx.getImageData(0, 0, w, h);
-    } catch (e) {
-      return null;
-    }
-
-    const data = img.data;
+    const entry = this._getMaskPixelData(maskTexture);
+    if (!entry) return null;
+    const w = entry.width;
+    const h = entry.height;
+    const data = entry.data;
 
     // Reservoir sampling so capped interior points represent the full mask.
     const max = Math.max(1, maxPoints | 0);

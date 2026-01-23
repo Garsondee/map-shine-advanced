@@ -212,6 +212,9 @@ let collapseSidebarHookId = null;
  /** @type {number|null} - Interval ID for periodic FPS logging */
  let fpsLogIntervalId = null;
 
+/** @type {boolean} */
+let sceneResetInProgress = false;
+
 /** @type {Function|null} */
 let _webglContextLostHandler = null;
 
@@ -1325,6 +1328,11 @@ async function createThreeCanvas(scene) {
     // Step 4b: Initialize tile manager
     tileManager = new TileManager(threeScene);
     tileManager.setSpecularEffect(specularEffect);
+    // Route water occluder meshes into DistortionManager's dedicated scene so
+    // the occluder render pass avoids traversing the full world scene.
+    try {
+      tileManager.setWaterOccluderScene(distortionManager?.waterOccluderScene ?? null);
+    } catch (_) {}
     tileManager.initialize();
     tileManager.syncAllTiles();
     tileManager.setWindowLightEffect(windowLightEffect); // Link for overhead tile lighting
@@ -1619,6 +1627,7 @@ async function createThreeCanvas(scene) {
     }
 
     mapShine.setMapMakerMode = setMapMakerMode; // NEW: Expose mode toggle for UI
+    mapShine.resetScene = resetScene;
     // Expose current mode state so other systems (ControlsIntegration, effects) can query it.
     // This must be set even if the user never toggles Map Maker mode.
     mapShine.isMapMakerMode = isMapMakerMode;
@@ -2728,6 +2737,32 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
         waterEffect.enabled = !!value;
         log.debug(`Water effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (paramId === 'clearCaches') {
+        let didAnything = false;
+
+        try {
+          if (typeof waterEffect.clearCaches === 'function') {
+            waterEffect.clearCaches();
+            didAnything = true;
+          }
+        } catch (_) {
+        }
+
+        try {
+          const particleSystem = window.MapShineParticles;
+          const wp = particleSystem?.weatherParticles;
+          if (wp && typeof wp.clearWaterCaches === 'function') {
+            wp.clearWaterCaches();
+            didAnything = true;
+          }
+        } catch (_) {
+        }
+
+        try {
+          if (didAnything) ui.notifications.info('Cleared Water caches');
+          else ui.notifications.warn('No Water caches available to clear');
+        } catch (_) {
+        }
       } else if (waterEffect.params && Object.prototype.hasOwnProperty.call(waterEffect.params, paramId)) {
         waterEffect.params[paramId] = value;
       }
@@ -3381,6 +3416,71 @@ export function setMapMakerMode(enabled) {
     disableSystem(); // Hide Three.js, Show PIXI
   } else {
     enableSystem(); // Show Three.js, Hide PIXI layers
+  }
+}
+
+/**
+ * Force-rebuild the MapShine scene from scratch.
+ * This is a recovery tool for when caches or render targets become stale.
+ * @public
+ */
+export async function resetScene(options = undefined) {
+  if (sceneResetInProgress) return;
+  sceneResetInProgress = true;
+
+  try {
+    const scene = canvas?.scene;
+    if (!scene) {
+      try {
+        ui?.notifications?.warn?.('Map Shine: No active scene to reset');
+      } catch (_) {
+      }
+      return;
+    }
+
+    const prevMapMakerMode = !!isMapMakerMode;
+
+    try {
+      ui?.notifications?.info?.('Map Shine: Resetting scene (rebuilding Three.js)…');
+    } catch (_) {
+    }
+
+    try {
+      const w = window.MapShine?.waterEffect;
+      if (w && typeof w.clearCaches === 'function') w.clearCaches();
+    } catch (_) {
+    }
+
+    try {
+      const particleSystem = window.MapShineParticles;
+      const wp = particleSystem?.weatherParticles;
+      if (wp && typeof wp.clearWaterCaches === 'function') wp.clearWaterCaches();
+    } catch (_) {
+    }
+
+    await createThreeCanvas(scene);
+
+    // Preserve user mode across rebuilds.
+    try {
+      if (prevMapMakerMode) setMapMakerMode(true);
+    } catch (_) {
+    }
+
+    try {
+      ui?.notifications?.info?.('Map Shine: Scene reset complete');
+    } catch (_) {
+    }
+  } catch (e) {
+    try {
+      log.error('Scene reset failed:', e);
+    } catch (_) {
+    }
+    try {
+      ui?.notifications?.error?.('Map Shine: Scene reset failed (see console)');
+    } catch (_) {
+    }
+  } finally {
+    sceneResetInProgress = false;
   }
 }
 

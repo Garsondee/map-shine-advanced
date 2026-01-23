@@ -25,6 +25,9 @@ export class TemplateManager {
     this.initialized = false;
     this.hooksRegistered = false;
     
+    /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
+    this._hookIds = [];
+    
     // Group for all templates
     this.group = new THREE.Group();
     this.group.name = 'Templates';
@@ -60,17 +63,17 @@ export class TemplateManager {
   setupHooks() {
     if (this.hooksRegistered) return;
 
-    Hooks.on('createMeasuredTemplate', (doc) => this.create(doc));
-    Hooks.on('updateMeasuredTemplate', (doc, changes) => this.update(doc, changes));
-    Hooks.on('deleteMeasuredTemplate', (doc) => this.remove(doc.id));
+    this._hookIds.push(['createMeasuredTemplate', Hooks.on('createMeasuredTemplate', (doc) => this.create(doc))]);
+    this._hookIds.push(['updateMeasuredTemplate', Hooks.on('updateMeasuredTemplate', (doc, changes) => this.update(doc, changes))]);
+    this._hookIds.push(['deleteMeasuredTemplate', Hooks.on('deleteMeasuredTemplate', (doc) => this.remove(doc.id))]);
     
-    Hooks.on('canvasReady', () => {
+    this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
         this.syncAllTemplates();
         this.updateVisibility();
-    });
+    })]);
 
-    Hooks.on('activateTemplateLayer', () => this.setVisibility(false));
-    Hooks.on('deactivateTemplateLayer', () => this.setVisibility(true));
+    this._hookIds.push(['activateTemplateLayer', Hooks.on('activateTemplateLayer', () => this.setVisibility(false))]);
+    this._hookIds.push(['deactivateTemplateLayer', Hooks.on('deactivateTemplateLayer', () => this.setVisibility(true))]);
 
     this.hooksRegistered = true;
   }
@@ -224,6 +227,21 @@ export class TemplateManager {
    * @public
    */
   dispose() {
+      // Unregister Foundry hooks using correct two-argument signature
+      try {
+        if (this._hookIds && this._hookIds.length) {
+          for (const [hookName, hookId] of this._hookIds) {
+            try {
+              Hooks.off(hookName, hookId);
+            } catch (e) {
+            }
+          }
+        }
+      } catch (e) {
+      }
+      this._hookIds = [];
+      this.hooksRegistered = false;
+      
       this.group.clear();
       this.scene.remove(this.group);
       this.templates.clear();

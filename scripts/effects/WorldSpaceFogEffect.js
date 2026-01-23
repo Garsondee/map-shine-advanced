@@ -57,6 +57,9 @@ export class WorldSpaceFogEffect extends EffectBase {
     // Scene reference
     this.mainScene = null;
     
+    /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
+    this._hookIds = [];
+    
     // The fog overlay plane mesh
     this.fogPlane = null;
     this.fogMaterial = null;
@@ -117,6 +120,22 @@ export class WorldSpaceFogEffect extends EffectBase {
     this._saveExplorationDebounced = null;
     this._isSavingExploration = false;
     this._isLoadingExploration = false;
+
+    // PERF: Saving fog exploration requires a GPU->CPU readback + image encode.
+    // On large scenes, this can stall the renderer for ~1s. Rate-limit saves so
+    // they cannot happen repeatedly and create periodic hitching.
+    this._lastExplorationSaveMs = 0;
+    this._minExplorationSaveIntervalMs = 30000;
+
+    // PERF: Reuse buffers for fog exploration saves to reduce GC pressure.
+    // Note: this does NOT eliminate the GPU->CPU stall from readRenderTargetPixels,
+    // but it does avoid repeated large allocations.
+    this._explorationSaveBuffer = null; // Uint8Array
+    this._explorationReadbackTileBuffer = null; // Uint8Array
+    this._explorationReadbackTileSize = 256;
+    this._explorationEncodeCanvas = null; // OffscreenCanvas | HTMLCanvasElement
+    this._explorationEncodeCtx = null; // OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D
+    this._explorationEncodeImageData = null; // ImageData
 
     this._fullResTargetsReady = false;
     this._fullResTargetsQueued = false;
@@ -460,7 +479,9 @@ export class WorldSpaceFogEffect extends EffectBase {
     
     // Use a reasonable resolution (can be lower than scene for performance)
     const maxTexSize = this.renderer?.capabilities?.maxTextureSize ?? 2048;
-    const maxSize = Math.min(4096, maxTexSize);
+    // PERF: Keep fog RT size modest. 4096^2 readbacks (exploration persistence)
+    // can be extremely expensive and cause long-task hitches.
+    const maxSize = Math.min(2048, maxTexSize);
     const scale = Math.min(1, maxSize / Math.max(width, height));
     const rtWidth = Math.ceil(width * scale);
     const rtHeight = Math.ceil(height * scale);
@@ -522,7 +543,9 @@ export class WorldSpaceFogEffect extends EffectBase {
     
     // Use same resolution as vision target
     const maxTexSize = this.renderer?.capabilities?.maxTextureSize ?? 2048;
-    const maxSize = Math.min(4096, maxTexSize);
+    // PERF: Match vision target cap. This directly impacts the cost of
+    // readRenderTargetPixels when persisting exploration.
+    const maxSize = Math.min(2048, maxTexSize);
     const scale = Math.min(1, maxSize / Math.max(width, height));
     const rtWidth = Math.ceil(width * scale);
     const rtHeight = Math.ceil(height * scale);
@@ -885,7 +908,7 @@ export class WorldSpaceFogEffect extends EffectBase {
     // - Walls change
     
     // We'll trigger updates on these hooks
-    Hooks.on('controlToken', (token, controlled) => {
+    this._hookIds.push(['controlToken', Hooks.on('controlToken', (token, controlled) => {
       // When token control changes, ensure Foundry recomputes
       // perception so that vision polygons exist before we
       // render the vision mask for the newly controlled token.
@@ -893,10 +916,10 @@ export class WorldSpaceFogEffect extends EffectBase {
       frameCoordinator.forcePerceptionUpdate();
       this._needsVisionUpdate = true;
       this._hasValidVision = false; // Reset until we get valid LOS polygons
-    });
-    Hooks.on('updateToken', () => { this._needsVisionUpdate = true; });
-    Hooks.on('sightRefresh', () => { this._needsVisionUpdate = true; });
-    Hooks.on('lightingRefresh', () => { this._needsVisionUpdate = true; });
+    })]);
+    this._hookIds.push(['updateToken', Hooks.on('updateToken', () => { this._needsVisionUpdate = true; })]);
+    this._hookIds.push(['sightRefresh', Hooks.on('sightRefresh', () => { this._needsVisionUpdate = true; })]);
+    this._hookIds.push(['lightingRefresh', Hooks.on('lightingRefresh', () => { this._needsVisionUpdate = true; })]);
     
     // Initial render: force perception so that any starting
     // controlled token (or vision source) has a valid LOS
@@ -1495,16 +1518,35 @@ export class WorldSpaceFogEffect extends EffectBase {
     if (this._isSavingExploration) return;
     if (!this.renderer) return;
 
+    // PERF: Rate-limit saves to avoid regular long-task stalls.
+    // Keep exploration dirty so it will eventually persist.
+    const nowMs = Date.now();
+    const minInterval = Number(this._minExplorationSaveIntervalMs) || 0;
+    if (minInterval > 0 && (nowMs - (Number(this._lastExplorationSaveMs) || 0)) < minInterval) {
+      return;
+    }
+
     const explorationTarget = this._getExplorationReadTarget();
     if (!explorationTarget) return;
 
     this._isSavingExploration = true;
 
+    // Mark save attempt time up-front so back-to-back triggers don't queue
+    // multiple expensive readbacks.
+    this._lastExplorationSaveMs = nowMs;
+
     try {
       const width = this._explorationRTWidth;
       const height = this._explorationRTHeight;
-      const buffer = new Uint8Array(width * height * 4);
-      this.renderer.readRenderTargetPixels(explorationTarget, 0, 0, width, height, buffer);
+      const required = Math.max(0, Math.floor(width * height * 4));
+      if (!this._explorationSaveBuffer || this._explorationSaveBuffer.length !== required) {
+        this._explorationSaveBuffer = new Uint8Array(required);
+      }
+      const buffer = this._explorationSaveBuffer;
+
+      // PERF: Large single-call readbacks can cause long stalls.
+      // Read the render target in smaller tiles and yield between batches.
+      await this._readRenderTargetPixelsTiled(explorationTarget, width, height, buffer);
 
       const base64 = await this._encodeExplorationBase64(buffer, width, height);
       if (!base64) return;
@@ -1545,42 +1587,86 @@ export class WorldSpaceFogEffect extends EffectBase {
     }
   }
 
-  async _encodeExplorationBase64(buffer, width, height) {
-    try {
-      if (typeof OffscreenCanvas !== 'undefined') {
-        const offscreen = new OffscreenCanvas(width, height);
-        const ctx = offscreen.getContext('2d');
-        const imgData = ctx.createImageData(width, height);
-        const pixels = imgData.data;
+  async _readRenderTargetPixelsTiled(renderTarget, width, height, outBuffer) {
+    if (!this.renderer) return;
+    if (!renderTarget) return;
+    if (!outBuffer) return;
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
 
-        const CHUNK_SIZE = 262144;
-        for (let i = 0; i < buffer.length; i += CHUNK_SIZE) {
-          const end = Math.min(i + CHUNK_SIZE, buffer.length);
-          for (let j = i; j < end; j += 4) {
-            const val = buffer[j];
-            pixels[j] = val;
-            pixels[j + 1] = val;
-            pixels[j + 2] = val;
-            pixels[j + 3] = 255;
-          }
-          if (end < buffer.length) {
-            await new Promise(resolve => setTimeout(resolve, 0));
-          }
+    const tileSize = Math.max(32, Math.min(1024, Math.floor(this._explorationReadbackTileSize || 256)));
+    const maxBytes = tileSize * tileSize * 4;
+    if (!this._explorationReadbackTileBuffer || this._explorationReadbackTileBuffer.byteLength !== maxBytes) {
+      this._explorationReadbackTileBuffer = new Uint8Array(maxBytes);
+    }
+    const tileBuf = this._explorationReadbackTileBuffer;
+
+    let tilesSinceYield = 0;
+    const yieldEvery = 8;
+
+    for (let y0 = 0; y0 < height; y0 += tileSize) {
+      const th = Math.min(tileSize, height - y0);
+      for (let x0 = 0; x0 < width; x0 += tileSize) {
+        const tw = Math.min(tileSize, width - x0);
+        const needed = tw * th * 4;
+        const view = tileBuf.subarray(0, needed);
+
+        // This call is synchronous; keeping tw/th small reduces worst-case stall.
+        this.renderer.readRenderTargetPixels(renderTarget, x0, y0, tw, th, view);
+
+        // Copy into the final packed buffer.
+        // Render target data is bottom-left origin in WebGL space; the encoding path
+        // already expects the raw buffer in the same orientation as readRenderTargetPixels.
+        for (let row = 0; row < th; row++) {
+          const srcOff = row * tw * 4;
+          const dstOff = ((y0 + row) * width + x0) * 4;
+          outBuffer.set(view.subarray(srcOff, srcOff + tw * 4), dstOff);
         }
 
-        ctx.putImageData(imgData, 0, 0);
-        const blob = await offscreen.convertToBlob({ type: 'image/webp', quality: 0.8 });
-        return await this._blobToDataURL(blob);
+        tilesSinceYield++;
+        if (tilesSinceYield >= yieldEvery) {
+          tilesSinceYield = 0;
+          await new Promise(resolve => setTimeout(resolve, 0));
+          if (!this.renderer) return;
+        }
+      }
+    }
+  }
+
+  async _encodeExplorationBase64(buffer, width, height) {
+    try {
+      const useOffscreen = (typeof OffscreenCanvas !== 'undefined');
+
+      if (!this._explorationEncodeCanvas || !this._explorationEncodeCtx) {
+        if (useOffscreen) {
+          this._explorationEncodeCanvas = new OffscreenCanvas(width, height);
+          this._explorationEncodeCtx = this._explorationEncodeCanvas.getContext('2d');
+        } else {
+          const canvasEl = document.createElement('canvas');
+          canvasEl.width = width;
+          canvasEl.height = height;
+          this._explorationEncodeCanvas = canvasEl;
+          this._explorationEncodeCtx = canvasEl.getContext('2d');
+        }
       }
 
-      const canvasEl = document.createElement('canvas');
-      canvasEl.width = width;
-      canvasEl.height = height;
-      const ctx = canvasEl.getContext('2d');
-      const imgData = ctx.createImageData(width, height);
+      const canvasEl = this._explorationEncodeCanvas;
+      const ctx = this._explorationEncodeCtx;
+      if (!canvasEl || !ctx) return null;
+
+      // Ensure correct canvas size.
+      if (canvasEl.width !== width) canvasEl.width = width;
+      if (canvasEl.height !== height) canvasEl.height = height;
+
+      // Ensure ImageData is correct size.
+      if (!this._explorationEncodeImageData || this._explorationEncodeImageData.width !== width || this._explorationEncodeImageData.height !== height) {
+        this._explorationEncodeImageData = ctx.createImageData(width, height);
+      }
+
+      const imgData = this._explorationEncodeImageData;
       const pixels = imgData.data;
 
       const CHUNK_SIZE = 262144;
+      let yieldCounter = 0;
       for (let i = 0; i < buffer.length; i += CHUNK_SIZE) {
         const end = Math.min(i + CHUNK_SIZE, buffer.length);
         for (let j = i; j < end; j += 4) {
@@ -1590,12 +1676,21 @@ export class WorldSpaceFogEffect extends EffectBase {
           pixels[j + 2] = val;
           pixels[j + 3] = 255;
         }
+        // Yield occasionally to keep UI responsive, but avoid allocating a Promise for every chunk.
         if (end < buffer.length) {
-          await new Promise(resolve => setTimeout(resolve, 0));
+          yieldCounter++;
+          if ((yieldCounter % 8) === 0) {
+            await new Promise(resolve => setTimeout(resolve, 0));
+          }
         }
       }
 
       ctx.putImageData(imgData, 0, 0);
+
+      if (useOffscreen && typeof canvasEl.convertToBlob === 'function') {
+        const blob = await canvasEl.convertToBlob({ type: 'image/webp', quality: 0.8 });
+        return await this._blobToDataURL(blob);
+      }
 
       return await new Promise((resolve) => {
         canvasEl.toBlob((blob) => {
@@ -1625,6 +1720,20 @@ export class WorldSpaceFogEffect extends EffectBase {
   }
 
   dispose() {
+    // Unregister Foundry hooks using correct two-argument signature
+    try {
+      if (this._hookIds && this._hookIds.length) {
+        for (const [hookName, hookId] of this._hookIds) {
+          try {
+            Hooks.off(hookName, hookId);
+          } catch (e) {
+          }
+        }
+      }
+    } catch (e) {
+    }
+    this._hookIds = [];
+    
     if (this.fogPlane && this.mainScene) {
       this.mainScene.remove(this.fogPlane);
       this.fogPlane.geometry.dispose();
@@ -1648,6 +1757,13 @@ export class WorldSpaceFogEffect extends EffectBase {
     
     if (this._fallbackWhite) this._fallbackWhite.dispose();
     if (this._fallbackBlack) this._fallbackBlack.dispose();
+
+    // Release reusable save buffers
+    this._explorationSaveBuffer = null;
+    this._explorationReadbackTileBuffer = null;
+    this._explorationEncodeCanvas = null;
+    this._explorationEncodeCtx = null;
+    this._explorationEncodeImageData = null;
     
     this._initialized = false;
     log.info('WorldSpaceFogEffect disposed');

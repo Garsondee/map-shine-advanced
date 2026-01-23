@@ -27,6 +27,9 @@ export class NoteManager {
     this.initialized = false;
     this.hooksRegistered = false;
     
+    /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
+    this._hookIds = [];
+    
     // Group for all notes
     this.group = new THREE.Group();
     this.group.name = 'Notes';
@@ -65,17 +68,17 @@ export class NoteManager {
   setupHooks() {
     if (this.hooksRegistered) return;
 
-    Hooks.on('createNote', (doc) => this.create(doc));
-    Hooks.on('updateNote', (doc, changes) => this.update(doc, changes));
-    Hooks.on('deleteNote', (doc) => this.remove(doc.id));
+    this._hookIds.push(['createNote', Hooks.on('createNote', (doc) => this.create(doc))]);
+    this._hookIds.push(['updateNote', Hooks.on('updateNote', (doc, changes) => this.update(doc, changes))]);
+    this._hookIds.push(['deleteNote', Hooks.on('deleteNote', (doc) => this.remove(doc.id))]);
     
-    Hooks.on('canvasReady', () => {
+    this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
         this.syncAllNotes();
         this.updateVisibility();
-    });
+    })]);
 
-    Hooks.on('activateNotesLayer', () => this.setVisibility(false));
-    Hooks.on('deactivateNotesLayer', () => this.setVisibility(true));
+    this._hookIds.push(['activateNotesLayer', Hooks.on('activateNotesLayer', () => this.setVisibility(false))]);
+    this._hookIds.push(['deactivateNotesLayer', Hooks.on('deactivateNotesLayer', () => this.setVisibility(true))]);
 
     this.hooksRegistered = true;
   }
@@ -174,6 +177,21 @@ export class NoteManager {
    * @public
    */
   dispose() {
+      // Unregister Foundry hooks using correct two-argument signature
+      try {
+        if (this._hookIds && this._hookIds.length) {
+          for (const [hookName, hookId] of this._hookIds) {
+            try {
+              Hooks.off(hookName, hookId);
+            } catch (e) {
+            }
+          }
+        }
+      } catch (e) {
+      }
+      this._hookIds = [];
+      this.hooksRegistered = false;
+      
       this.group.clear();
       this.scene.remove(this.group);
       this.notes.clear();

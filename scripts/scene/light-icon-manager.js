@@ -93,6 +93,9 @@ export class LightIconManager {
     this.initialized = false;
     this.hooksRegistered = false;
 
+    /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
+    this._hookIds = [];
+
     // Group for all light icons
     this.group = new THREE.Group();
     this.group.name = 'LightIcons';
@@ -135,14 +138,14 @@ export class LightIconManager {
   setupHooks() {
     if (this.hooksRegistered) return;
 
-    Hooks.on('createAmbientLight', (doc) => this.create(doc));
-    Hooks.on('updateAmbientLight', (doc, changes) => this.update(doc, changes));
-    Hooks.on('deleteAmbientLight', (doc) => this.remove(doc.id));
+    this._hookIds.push(['createAmbientLight', Hooks.on('createAmbientLight', (doc) => this.create(doc))]);
+    this._hookIds.push(['updateAmbientLight', Hooks.on('updateAmbientLight', (doc, changes) => this.update(doc, changes))]);
+    this._hookIds.push(['deleteAmbientLight', Hooks.on('deleteAmbientLight', (doc) => this.remove(doc.id))]);
 
     // Resync on canvas ready (scene change)
-    Hooks.on('canvasReady', () => {
+    this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
       this.syncAllLights();
-    });
+    })]);
 
     this.hooksRegistered = true;
   }
@@ -309,6 +312,21 @@ export class LightIconManager {
    * @public
    */
   dispose() {
+    // Unregister Foundry hooks using correct two-argument signature
+    try {
+      if (this._hookIds && this._hookIds.length) {
+        for (const [hookName, hookId] of this._hookIds) {
+          try {
+            Hooks.off(hookName, hookId);
+          } catch (e) {
+          }
+        }
+      }
+    } catch (e) {
+    }
+    this._hookIds = [];
+    this.hooksRegistered = false;
+
     for (const sprite of this.lights.values()) {
       this.group.remove(sprite);
       // Handle shader material with uniform texture

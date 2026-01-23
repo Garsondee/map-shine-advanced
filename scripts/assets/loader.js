@@ -112,12 +112,25 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
       let resolvedMaskPath = null;
       if (maskFile) {
         resolvedMaskPath = maskFile;
-        maskTexture = await loadTextureAsync(maskFile);
+        try {
+          maskTexture = await loadTextureAsync(maskFile);
+        } catch (e) {
+          const msg = `Failed to load mask: ${maskId} (${maskDef.suffix}) from ${maskFile}`;
+          if (maskDef.required) {
+            throw new Error(msg);
+          }
+          warnings.push(msg);
+          maskTexture = null;
+        }
       } else if (!availableFiles.length && maskId === 'outdoors' && !suppressProbeErrors) {
-        const probed = await probeMaskTexture(basePath, maskDef.suffix, suppressProbeErrors);
-        if (probed) {
-          resolvedMaskPath = probed.path;
-          maskTexture = probed.texture;
+        try {
+          const probed = await probeMaskTexture(basePath, maskDef.suffix, suppressProbeErrors);
+          if (probed) {
+            resolvedMaskPath = probed.path;
+            maskTexture = probed.texture;
+          }
+        } catch (e) {
+          // Probing is best-effort; ignore errors.
         }
       }
 

@@ -36,6 +36,9 @@ export class WallManager {
     
     this.initialized = false;
     
+    /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
+    this._hookIds = [];
+    
     // Group for all wall objects
     this.wallGroup = new THREE.Group();
     this.wallGroup.name = 'Walls';
@@ -77,7 +80,7 @@ export class WallManager {
    * @private
    */
   setupHooks() {
-    Hooks.on('createWall', (doc) => {
+    this._hookIds.push(['createWall', Hooks.on('createWall', (doc) => {
       this.create(doc);
       setTimeout(() => {
         try {
@@ -86,8 +89,8 @@ export class WallManager {
         }
       }, 0);
       this._requestLightingRefresh();
-    });
-    Hooks.on('updateWall', (doc, changes) => {
+    })]);
+    this._hookIds.push(['updateWall', Hooks.on('updateWall', (doc, changes) => {
       this.update(doc, changes);
       setTimeout(() => {
         try {
@@ -96,8 +99,8 @@ export class WallManager {
         }
       }, 0);
       this._requestLightingRefresh();
-    });
-    Hooks.on('deleteWall', (doc) => {
+    })]);
+    this._hookIds.push(['deleteWall', Hooks.on('deleteWall', (doc) => {
       this.remove(doc.id);
       setTimeout(() => {
         try {
@@ -106,7 +109,7 @@ export class WallManager {
         }
       }, 0);
       this._requestLightingRefresh();
-    });
+    })]);
   }
 
   _shouldShowWallLines() {
@@ -542,6 +545,20 @@ export class WallManager {
    * Dispose and cleanup
    */
   dispose() {
+    // Unregister Foundry hooks using correct two-argument signature
+    try {
+      if (this._hookIds && this._hookIds.length) {
+        for (const [hookName, hookId] of this._hookIds) {
+          try {
+            Hooks.off(hookName, hookId);
+          } catch (e) {
+          }
+        }
+      }
+    } catch (e) {
+    }
+    this._hookIds = [];
+    
     this.walls.forEach((group, id) => this.remove(id));
     this.walls.clear();
     this.scene.remove(this.wallGroup);

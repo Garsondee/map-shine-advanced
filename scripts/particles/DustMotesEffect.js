@@ -637,6 +637,10 @@ export class DustMotesEffect extends EffectBase {
       return;
     }
 
+    // PERF: Avoid forcing shader recompiles unless we actually modify shader source or
+    // install an onBeforeCompile hook. Unnecessary material.needsUpdate can lead to
+    // program churn (getUniformList) and downstream Cycle Collection.
+
     const uniforms = {
       uWindowLightTex: { value: null },
       uHasWindowLightTex: { value: 0.0 },
@@ -705,31 +709,44 @@ export class DustMotesEffect extends EffectBase {
       uni.uDebugForceVisible = uniforms.uDebugForceVisible;
 
       if (typeof material.fragmentShader === 'string') {
-        material.fragmentShader = material.fragmentShader
-          .replace(
-            'void main() {',
-            'uniform sampler2D uWindowLightTex;\n' +
-            'uniform float uHasWindowLightTex;\n' +
-            'uniform vec2 uWindowScreenSize;\n' +
-            'uniform float uBaseDarkness;\n' +
-            'uniform float uLightMin;\n' +
-            'uniform float uLightMax;\n' +
-            'uniform float uLightIntensity;\n' +
-            'uniform float uLightTintInfluence;\n' +
-            'uniform float uDustBrightness;\n' +
-            'uniform float uDustOpacity;\n' +
-            'uniform float uDebugShowLight;\n' +
-            'uniform float uDebugForceVisible;\n' +
-            'void main() {'
-          )
-          .replace(/(^[ \t]*#include <soft_fragment>)/m, fragmentBlock + '$1');
+        const marker = 'MS_WINDOW_LIGHT_DUST_MOTES';
+        let fs = material.fragmentShader;
+        const hadMarker = fs.includes(marker);
+        if (!hadMarker) {
+          const beforeFS = fs;
+          fs = fs
+            .replace(
+              'void main() {',
+              '// ' + marker + '\n' +
+              'uniform sampler2D uWindowLightTex;\n' +
+              'uniform float uHasWindowLightTex;\n' +
+              'uniform vec2 uWindowScreenSize;\n' +
+              'uniform float uBaseDarkness;\n' +
+              'uniform float uLightMin;\n' +
+              'uniform float uLightMax;\n' +
+              'uniform float uLightIntensity;\n' +
+              'uniform float uLightTintInfluence;\n' +
+              'uniform float uDustBrightness;\n' +
+              'uniform float uDustOpacity;\n' +
+              'uniform float uDebugShowLight;\n' +
+              'uniform float uDebugForceVisible;\n' +
+              'void main() {'
+            )
+            .replace(/(^[ \t]*#include <soft_fragment>)/m, fragmentBlock + '$1');
+          if (fs !== beforeFS) {
+            material.fragmentShader = fs;
+            material.needsUpdate = true;
+          }
+        }
       }
-
-      material.needsUpdate = true;
       return;
     }
 
-    material.onBeforeCompile = (shader) => {
+    const ud = material.userData || (material.userData = {});
+    const alreadyInstalled = ud._msWindowLightOnBeforeCompileInstalled === true && typeof ud._msWindowLightOnBeforeCompileFn === 'function';
+    if (alreadyInstalled) return;
+
+    const fn = (shader) => {
       shader.uniforms.uWindowLightTex = uniforms.uWindowLightTex;
       shader.uniforms.uHasWindowLightTex = uniforms.uHasWindowLightTex;
       shader.uniforms.uWindowScreenSize = uniforms.uWindowScreenSize;
@@ -746,6 +763,7 @@ export class DustMotesEffect extends EffectBase {
       shader.fragmentShader = shader.fragmentShader
         .replace(
           'void main() {',
+          '// MS_WINDOW_LIGHT_DUST_MOTES\n' +
           'uniform sampler2D uWindowLightTex;\n' +
           'uniform float uHasWindowLightTex;\n' +
           'uniform vec2 uWindowScreenSize;\n' +
@@ -763,6 +781,9 @@ export class DustMotesEffect extends EffectBase {
         .replace(/(^[ \t]*#include <soft_fragment>)/m, fragmentBlock + '$1');
     };
 
+    material.onBeforeCompile = fn;
+    ud._msWindowLightOnBeforeCompileInstalled = true;
+    ud._msWindowLightOnBeforeCompileFn = fn;
     material.needsUpdate = true;
   }
 

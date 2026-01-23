@@ -46,6 +46,36 @@ export class SceneComposer {
 
     /** @type {number|undefined} Preferred emitter Z for world-space weather volumes */
     this.weatherEmitterZ = undefined;
+
+    // Track owned GPU resources so scene transitions don't leak.
+    /** @type {THREE.Mesh|null} */
+    this._backgroundMesh = null;
+    /** @type {THREE.Mesh|null} */
+    this._backFaceMesh = null;
+    /** @type {Set<THREE.Texture>} */
+    this._ownedTextures = new Set();
+  }
+
+  _markOwnedTexture(texture) {
+    if (!texture) return texture;
+    try {
+      if (!texture.userData) texture.userData = {};
+      texture.userData._mapShineOwned = true;
+      this._ownedTextures.add(texture);
+    } catch (e) {
+    }
+    return texture;
+  }
+
+  _disposeOwnedTexture(texture) {
+    if (!texture) return;
+    try {
+      const owned = !!texture?.userData?._mapShineOwned || this._ownedTextures.has(texture);
+      if (owned && typeof texture.dispose === 'function') {
+        texture.dispose();
+      }
+    } catch (e) {
+    }
   }
 
   async _loadMasksOnlyForBasePath(basePath, options = {}) {
@@ -279,7 +309,7 @@ export class SceneComposer {
       }
     }
 
-    const outTex = new THREE.Texture(canvasEl);
+    const outTex = this._markOwnedTexture(new THREE.Texture(canvasEl));
     outTex.needsUpdate = true;
 
     const isDataTexture = ['normal', 'roughness', 'water'].includes(maskId);
@@ -343,15 +373,11 @@ export class SceneComposer {
       }
 
       let any = false;
-      let desiredFlipY = null;
 
       for (const seg of layout.segments) {
         const masks = perBaseMasks.get(seg.basePath) || [];
         const m = masks.find((x) => x?.id === maskId || x?.type === maskId);
         const tex = m?.texture;
-        if (desiredFlipY === null && tex && typeof tex.flipY === 'boolean') {
-          desiredFlipY = tex.flipY;
-        }
         const img = tex?.image;
         if (!img) continue;
 
@@ -376,7 +402,7 @@ export class SceneComposer {
 
       if (!any) continue;
 
-      const outTex = new THREE.Texture(canvasEl);
+      const outTex = this._markOwnedTexture(new THREE.Texture(canvasEl));
       outTex.needsUpdate = true;
 
       const isDataTexture = ['normal', 'roughness', 'water'].includes(maskId);
@@ -388,9 +414,9 @@ export class SceneComposer {
       outTex.magFilter = THREE.LinearFilter;
       outTex.generateMipmaps = false;
 
-      // Preserve the original mask texture's flipY convention so the composite
-      // behaves identically to the single-image (scene background) case.
-      outTex.flipY = desiredFlipY === null ? outTex.flipY : desiredFlipY;
+      // Invariant: MapShine mask textures use flipY=false, and coordinate
+      // alignment is handled via geometry/shader conventions.
+      outTex.flipY = false;
 
       compositeMasks.push({
         id: maskId,
@@ -462,7 +488,7 @@ export class SceneComposer {
 
     if (!any) return null;
 
-    const outTex = new THREE.Texture(canvasEl);
+    const outTex = this._markOwnedTexture(new THREE.Texture(canvasEl));
     outTex.needsUpdate = true;
     if (THREE.SRGBColorSpace) {
       outTex.colorSpace = THREE.SRGBColorSpace;
@@ -497,10 +523,9 @@ export class SceneComposer {
 
     // Auto-detect: choose a likely full-scene "base" tile (common for multi-layer maps)
     try {
-      const tiles = canvas?.scene?.tiles;
       const d = canvas?.dimensions;
       const sr = d?.sceneRect;
-      if (!tiles || !sr) return null;
+      if (!sr) return null;
 
       const sceneX = sr.x ?? 0;
       const sceneY = sr.y ?? 0;
@@ -510,12 +535,23 @@ export class SceneComposer {
 
       const foregroundElevation = canvas?.scene?.foregroundElevation ?? Number.POSITIVE_INFINITY;
 
+      // IMPORTANT:
+      // Only consider large "ground" tiles as mask sources.
+      // If we allow any tile to be chosen here, small props (boats, decals) can
+      // accidentally become the suffix-mask discovery source, causing their _Water
+      // mask to be treated as a scene-wide water mask and stretched across the map.
+      const candidates = this._getLargeSceneMaskTiles?.() || [];
+      if (!Array.isArray(candidates) || candidates.length === 0) return null;
+
       let bestSrc = null;
       let bestScore = -Infinity;
 
-      for (const tileDoc of tiles) {
+      for (const entry of candidates) {
+        const tileDoc = entry?.tileDoc;
         const src = tileDoc?.texture?.src;
         if (typeof src !== 'string' || src.trim().length === 0) continue;
+
+        if (tileDoc?.hidden) continue;
 
         let score = 0;
 
@@ -829,7 +865,7 @@ export class SceneComposer {
     }
 
     // Create THREE.Texture from the same image source
-    const threeTexture = new THREE.Texture(resource.source);
+    const threeTexture = this._markOwnedTexture(new THREE.Texture(resource.source));
     threeTexture.needsUpdate = true;
     // Use sRGB for correct color in lighting calculations
     if (THREE.SRGBColorSpace) {
@@ -889,6 +925,7 @@ export class SceneComposer {
     const GROUND_Z = 1000; // Canonical ground plane Z position
     bgMesh.position.set(worldWidth / 2, worldHeight / 2, GROUND_Z - 0.1);
     this.scene.add(bgMesh);
+    this._backgroundMesh = bgMesh;
 
     // Use SCENE dimensions for geometry to prevent stretching texture across padding
     const geometry = new THREE.PlaneGeometry(sceneWidth, sceneHeight);
@@ -928,6 +965,7 @@ export class SceneComposer {
     const backMesh = new THREE.Mesh(geometry, backMaterial);
     backMesh.name = 'BasePlane_Back';
     this.basePlaneMesh.add(backMesh);
+    this._backFaceMesh = backMesh;
     
     // Position at world center at the canonical ground Z
     // This value (1000) is the canonical groundZ that all other layers reference
@@ -1122,7 +1160,8 @@ export class SceneComposer {
    * @private
    */
   getZoomLimits() {
-    const { innerWidth, innerHeight } = window;
+    const vw = this.baseViewportWidth ?? window.innerWidth;
+    const vh = this.baseViewportHeight ?? window.innerHeight;
     const width = this.foundrySceneData.width;
     const height = this.foundrySceneData.height;
     const gridSize = this.foundrySceneData.gridSize;
@@ -1134,7 +1173,7 @@ export class SceneComposer {
     const paddedHeight = height + (2 * padding);
     let minScale = CONFIG?.Canvas?.minZoom;
     if (minScale === undefined) {
-      minScale = Math.min(innerWidth / paddedWidth, innerHeight / paddedHeight, 1);
+      minScale = Math.min(vw / paddedWidth, vh / paddedHeight, 1);
     }
     
     // Max scale: zoom in to see ~3 grid cells
@@ -1143,7 +1182,7 @@ export class SceneComposer {
     let maxScale = CONFIG?.Canvas?.maxZoom;
     if (maxScale === undefined) {
       const factor = 3; // 3 grid cells visible at max zoom
-      maxScale = Math.max(Math.min(innerWidth / gridSize, innerHeight / gridSize) / factor, minScale);
+      maxScale = Math.max(Math.min(vw / gridSize, vh / gridSize) / factor, minScale);
     }
     
     return { min: minScale, max: maxScale };
@@ -1174,10 +1213,12 @@ export class SceneComposer {
     
     // Store zoom level
     this.currentZoom = newZoom;
-    
-    // Apply FOV zoom: higher zoom = narrower FOV
-    // Clamp FOV to reasonable range (1° to 170°)
-    const newFov = Math.max(1, Math.min(170, this.baseFov / newZoom));
+
+    // Apply FOV zoom using tan-half formulation for mathematical consistency
+    // with resize(). This preserves stable zoom across viewport changes.
+    const baseTan = this.baseFovTanHalf || Math.tan((this.baseFovRadians || (this.baseFov * Math.PI / 180)) / 2);
+    const fovRad = 2 * Math.atan(baseTan / newZoom);
+    const newFov = Math.max(1, Math.min(170, fovRad * (180 / Math.PI)));
     this.camera.fov = newFov;
     this.camera.updateProjectionMatrix();
 
@@ -1214,9 +1255,61 @@ export class SceneComposer {
    * Dispose scene resources
    */
   dispose() {
+    // Dispose bundle textures (masks + base) if we own them.
+    try {
+      const bundle = this.currentBundle;
+      if (bundle?.masks && Array.isArray(bundle.masks)) {
+        for (const m of bundle.masks) {
+          this._disposeOwnedTexture(m?.texture);
+        }
+      }
+      this._disposeOwnedTexture(bundle?.baseTexture);
+    } catch (e) {
+    }
+
+    // Dispose background mesh resources (not covered by basePlaneMesh disposal).
+    if (this._backgroundMesh) {
+      try {
+        if (this._backgroundMesh.parent) this._backgroundMesh.parent.remove(this._backgroundMesh);
+        if (this._backgroundMesh.geometry) this._backgroundMesh.geometry.dispose();
+        if (this._backgroundMesh.material) this._backgroundMesh.material.dispose();
+      } catch (e) {
+      }
+      this._backgroundMesh = null;
+    }
+
     if (this.basePlaneMesh) {
+      // Dispose any child mesh materials (e.g., the red debug back-face) to avoid leaks.
+      try {
+        this.basePlaneMesh.traverse((obj) => {
+          if (!obj || !obj.isMesh) return;
+          if (obj === this.basePlaneMesh) return;
+          const mat = obj.material;
+          if (Array.isArray(mat)) {
+            for (const m of mat) {
+              try { m?.dispose?.(); } catch (e) {}
+            }
+          } else {
+            try { mat?.dispose?.(); } catch (e) {}
+          }
+
+          // Only dispose child geometry if it's distinct from the base plane geometry.
+          try {
+            if (obj.geometry && obj.geometry !== this.basePlaneMesh.geometry) obj.geometry.dispose();
+          } catch (e) {
+          }
+        });
+      } catch (e) {
+      }
+
       this.basePlaneMesh.geometry.dispose();
-      this.basePlaneMesh.material.dispose();
+      if (Array.isArray(this.basePlaneMesh.material)) {
+        for (const m of this.basePlaneMesh.material) {
+          try { m?.dispose?.(); } catch (e) {}
+        }
+      } else {
+        this.basePlaneMesh.material.dispose();
+      }
       this.basePlaneMesh = null;
     }
 
@@ -1227,6 +1320,11 @@ export class SceneComposer {
 
     this.camera = null;
     this.currentBundle = null;
+
+    try {
+      this._ownedTextures.clear();
+    } catch (e) {
+    }
 
     log.info('Scene composer disposed');
   }

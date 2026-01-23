@@ -41,6 +41,9 @@ export class TileManager {
    */
   constructor(scene) {
     this.scene = scene;
+
+    /** @type {THREE.Scene|null} */
+    this.waterOccluderScene = null;
     
     /** @type {Map<string, {sprite: THREE.Sprite, tileDoc: TileDocument}>} */
     this.tileSprites = new Map();
@@ -83,6 +86,9 @@ export class TileManager {
     this.initialized = false;
     this.hooksRegistered = false;
     
+    /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
+    this._hookIds = [];
+    
     // PERFORMANCE: Reusable color objects to avoid per-frame allocations
     this._globalTint = null;      // Lazy init when THREE is available
     this._tempDaylight = null;
@@ -91,6 +97,12 @@ export class TileManager {
 
     this._lastTintKey = null;
     this._tintDirty = true;
+
+    this._waterCacheInvalidation = {
+      pending: false,
+      timer: null,
+      lastTileId: null
+    };
     
     // Window light effect reference for overhead tile lighting
     /** @type {WindowLightEffect|null} */
@@ -100,6 +112,102 @@ export class TileManager {
     this.specularEffect = null;
     
     log.debug('TileManager created');
+  }
+
+  /**
+   * Provide a dedicated scene for water occluder meshes.
+   * Rendering occluders from a separate scene avoids traversing the entire
+   * world scene during the occluder pass.
+   * @param {THREE.Scene|null} scene
+   */
+  setWaterOccluderScene(scene) {
+    const next = scene || null;
+    if (this.waterOccluderScene === next) return;
+
+    const prev = this.waterOccluderScene;
+    this.waterOccluderScene = next;
+
+    // Migrate any existing occluder meshes between scenes.
+    try {
+      if (!prev && !next) return;
+      for (const { sprite } of this.tileSprites.values()) {
+        const occ = sprite?.userData?.waterOccluderMesh;
+        if (!occ) continue;
+        try {
+          if (prev) prev.remove(occ);
+        } catch (_) {
+        }
+        try {
+          if (next) next.add(occ);
+          else this.scene.add(occ);
+        } catch (_) {
+        }
+      }
+    } catch (_) {
+    }
+  }
+
+  _getWaterOccluderScene() {
+    return this.waterOccluderScene || this.scene;
+  }
+
+  _scheduleWaterCacheInvalidation(tileId = null) {
+    // Debounce to avoid spamming rebuilds when a user drags/resizes tiles.
+    this._waterCacheInvalidation.lastTileId = tileId;
+    if (this._waterCacheInvalidation.pending) return;
+    this._waterCacheInvalidation.pending = true;
+
+    try {
+      if (this._waterCacheInvalidation.timer) {
+        clearTimeout(this._waterCacheInvalidation.timer);
+        this._waterCacheInvalidation.timer = null;
+      }
+    } catch (_) {
+    }
+
+    this._waterCacheInvalidation.timer = setTimeout(() => {
+      this._waterCacheInvalidation.pending = false;
+      this._waterCacheInvalidation.timer = null;
+
+      // WaterEffectV2 cache
+      try {
+        const waterEffect = window.MapShine?.waterEffect;
+        if (waterEffect && typeof waterEffect.clearCaches === 'function') {
+          waterEffect.clearCaches();
+        }
+      } catch (_) {
+      }
+
+      // WeatherParticles tile foam cache
+      try {
+        const particleSystem = window.MapShineParticles;
+        const wp = particleSystem?.weatherParticles;
+        if (wp && typeof wp.clearWaterCaches === 'function') {
+          wp.clearWaterCaches();
+        }
+      } catch (_) {
+      }
+    }, 150);
+  }
+
+  _invalidateTileWaterMaskCachesForTile(tileDoc, changes = null) {
+    // Ensure we don't keep using stale per-tile _Water mask textures when a tile changes.
+    try {
+      const src = (changes?.texture?.src !== undefined) ? changes.texture.src : tileDoc?.texture?.src;
+      const parts = this._splitUrl(src);
+      if (parts?.pathNoExt) this._tileWaterMaskResolvedUrl.delete(parts.pathNoExt);
+    } catch (_) {
+    }
+
+    // If we have a resolved URL cached for this tile base, drop the texture cache entry too.
+    // (Resolved URL cache stores url-by-base; if cleared above, we can't reliably look it up.)
+    try {
+      // Conservative approach: clear all per-tile water mask caches. This path is not hot.
+      this._tileWaterMaskCache?.clear?.();
+      this._tileWaterMaskPromises?.clear?.();
+      this._tileWaterMaskResolvePromises?.clear?.();
+    } catch (_) {
+    }
   }
 
   setSpecularEffect(specularEffect) {
@@ -440,7 +548,7 @@ export class TileManager {
     if (!occludesWater) {
       if (existing) {
         try {
-          this.scene.remove(existing);
+          this._getWaterOccluderScene().remove(existing);
           existing.geometry?.dispose?.();
           existing.material?.dispose?.();
         } catch (_) {
@@ -471,7 +579,7 @@ export class TileManager {
     mesh.layers.set(WATER_OCCLUDER_LAYER);
     mesh.visible = !!sprite.visible;
     mesh.renderOrder = 999;
-    this.scene.add(mesh);
+    this._getWaterOccluderScene().add(mesh);
     sprite.userData.waterOccluderMesh = mesh;
 
     this.loadTileWaterMaskTexture(tileDoc).then((maskTex) => {
@@ -542,37 +650,53 @@ export class TileManager {
     if (this.hooksRegistered) return;
 
     // Initial load when canvas is ready
-    Hooks.on('canvasReady', () => {
+    this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
       log.debug('Canvas ready, syncing all tiles');
       this.syncAllTiles();
-    });
+    })]);
 
     // Create new tile
-    Hooks.on('createTile', (tileDoc, options, userId) => {
+    this._hookIds.push(['createTile', Hooks.on('createTile', (tileDoc, options, userId) => {
       log.debug(`Tile created: ${tileDoc.id}`);
       this.createTileSprite(tileDoc);
-    });
+
+      this._invalidateTileWaterMaskCachesForTile(tileDoc);
+      this._scheduleWaterCacheInvalidation(tileDoc?.id);
+    })]);
 
     // Update existing tile
-    Hooks.on('updateTile', (tileDoc, changes, options, userId) => {
+    this._hookIds.push(['updateTile', Hooks.on('updateTile', (tileDoc, changes, options, userId) => {
       log.debug(`Tile updated: ${tileDoc.id}`, changes);
       this.updateTileSprite(tileDoc, changes);
-    });
+
+      // Only invalidate if the update could affect tile water contributions.
+      const keys = changes && typeof changes === 'object' ? Object.keys(changes) : null;
+      const relevant = !keys || keys.some((k) => (
+        k === 'x' || k === 'y' || k === 'width' || k === 'height' || k === 'rotation' || k === 'texture' || k === 'flags'
+      ));
+      if (relevant) {
+        this._invalidateTileWaterMaskCachesForTile(tileDoc, changes);
+        this._scheduleWaterCacheInvalidation(tileDoc?.id);
+      }
+    })]);
 
     // Delete tile
-    Hooks.on('deleteTile', (tileDoc, options, userId) => {
+    this._hookIds.push(['deleteTile', Hooks.on('deleteTile', (tileDoc, options, userId) => {
       log.debug(`Tile deleted: ${tileDoc.id}`);
       this.removeTileSprite(tileDoc.id);
-    });
+
+      this._invalidateTileWaterMaskCachesForTile(tileDoc);
+      this._scheduleWaterCacheInvalidation(tileDoc?.id);
+    })]);
 
     // Refresh tile (rendering changes)
-    Hooks.on('refreshTile', (tile) => {
+    this._hookIds.push(['refreshTile', Hooks.on('refreshTile', (tile) => {
       log.debug(`Tile refreshed: ${tile.id}`);
       this.refreshTileSprite(tile.document);
-    });
+    })]);
 
     // Scene updates (foregroundElevation changes)
-    Hooks.on('updateScene', (scene, changes) => {
+    this._hookIds.push(['updateScene', Hooks.on('updateScene', (scene, changes) => {
       if (scene.id !== canvas.scene?.id) return;
       
       if ('foregroundElevation' in changes) {
@@ -581,7 +705,7 @@ export class TileManager {
           this.updateSpriteTransform(sprite, tileDoc);
         }
       }
-    });
+    })]);
 
     this.hooksRegistered = true;
     log.debug('Foundry hooks registered');
@@ -789,7 +913,17 @@ export class TileManager {
 
     if (u < 0 || u > 1 || v < 0 || v > 1) return false;
 
-    const key = texture.uuid || image.src || texture.id || tileDoc.id;
+    const key = (() => {
+      try {
+        const src = String(image?.src || '');
+        if (src) {
+          const q = src.indexOf('?');
+          return q >= 0 ? src.slice(0, q) : src;
+        }
+      } catch (_) {
+      }
+      return tileDoc.id;
+    })();
 
     let mask = this.alphaMaskCache.get(key);
     if (!mask) {
@@ -828,7 +962,17 @@ export class TileManager {
 
     if (u < 0 || u > 1 || v < 0 || v > 1) return false;
 
-    const key = texture.uuid || image.src || texture.id || tileDoc.id;
+    const key = (() => {
+      try {
+        const src = String(image?.src || '');
+        if (src) {
+          const q = src.indexOf('?');
+          return q >= 0 ? src.slice(0, q) : src;
+        }
+      } catch (_) {
+      }
+      return tileDoc.id;
+    })();
 
     let mask = this.alphaMaskCache.get(key);
     if (!mask) {
@@ -1762,7 +1906,7 @@ export class TileManager {
     const occ = sprite?.userData?.waterOccluderMesh;
     if (occ) {
       try {
-        this.scene.remove(occ);
+        this._getWaterOccluderScene().remove(occ);
         occ.geometry?.dispose?.();
         occ.material?.dispose?.();
       } catch (_) {
@@ -2207,6 +2351,21 @@ export class TileManager {
   dispose(clearCache = true) {
     log.info(`Disposing TileManager with ${this.tileSprites.size} tiles`);
 
+    // Unregister Foundry hooks using correct two-argument signature
+    try {
+      if (this._hookIds && this._hookIds.length) {
+        for (const [hookName, hookId] of this._hookIds) {
+          try {
+            Hooks.off(hookName, hookId);
+          } catch (e) {
+          }
+        }
+      }
+    } catch (e) {
+    }
+    this._hookIds = [];
+    this.hooksRegistered = false;
+
     for (const { sprite } of this.tileSprites.values()) {
       this.scene.remove(sprite);
       sprite.material?.dispose();
@@ -2226,6 +2385,28 @@ export class TileManager {
         texture.dispose();
       }
       this.textureCache.clear();
+      
+      // Clear alpha mask cache (large Uint8ClampedArray buffers)
+      this.alphaMaskCache.clear();
+      
+      // Clear water mask caches
+      for (const tex of this._tileWaterMaskCache.values()) {
+        try { tex?.dispose?.(); } catch (_) {}
+      }
+      this._tileWaterMaskCache.clear();
+      this._tileWaterMaskPromises.clear();
+      this._tileWaterMaskResolvedUrl.clear();
+      this._tileWaterMaskResolvePromises.clear();
+      
+      // Clear specular mask caches
+      for (const tex of this._tileSpecularMaskCache.values()) {
+        try { tex?.dispose?.(); } catch (_) {}
+      }
+      this._tileSpecularMaskCache.clear();
+      this._tileSpecularMaskPromises.clear();
+      this._tileSpecularMaskResolvedUrl.clear();
+      this._tileSpecularMaskResolvePromises.clear();
+      
       this.initialized = false;
     }
   }

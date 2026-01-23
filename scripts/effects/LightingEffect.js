@@ -1383,24 +1383,24 @@ export class LightingEffect extends EffectBase {
       // (Ambient colors sync omitted here to keep this patch focused.)
     }
 
-    // Update Animations for all lights
-    this.lights.forEach(light => {
+    // Update Animations for all lights (avoid per-frame closure allocations)
+    for (const light of this.lights.values()) {
       light.updateAnimation(timeInfo, this.params.darknessLevel);
-    });
+    }
 
     // Update MapShine-native lights using the same animation system for now.
-    this.mapshineLights.forEach((light) => {
+    for (const light of this.mapshineLights.values()) {
       light.updateAnimation(timeInfo, this.params.darknessLevel);
-    });
+    }
 
     // Update Animations for all darkness sources
-    this.darknessSources.forEach(ds => {
+    for (const ds of this.darknessSources.values()) {
       ds.updateAnimation(timeInfo);
-    });
+    }
 
-    this.mapshineDarknessSources.forEach((ds) => {
+    for (const ds of this.mapshineDarknessSources.values()) {
       ds.updateAnimation(timeInfo);
-    });
+    }
 
     // Update Composite Uniforms
     const u = this.compositeMaterial.uniforms;
@@ -1869,12 +1869,13 @@ export class LightingEffect extends EffectBase {
       }
 
       const gl = renderer.getContext();
-      const prevMask2 = gl.getParameter(gl.COLOR_WRITEMASK);
+      // Avoid per-frame allocation from gl.getParameter(gl.COLOR_WRITEMASK)
+      // Default WebGL state is [true, true, true, true], restore to that after render
       try {
         gl.colorMask(false, false, false, false);
         renderer.render(scene, this.mainCamera);
       } finally {
-        gl.colorMask(prevMask2[0], prevMask2[1], prevMask2[2], prevMask2[3]);
+        gl.colorMask(true, true, true, true);
       }
     } catch (e) {
     } finally {

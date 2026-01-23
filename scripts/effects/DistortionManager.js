@@ -17,6 +17,14 @@ import { createLogger } from '../core/log.js';
 
 const log = createLogger('DistortionManager');
 
+// Pre-allocated NDC corner coordinates for frustum intersection (avoids per-frame allocations)
+const _ndcCorners = [
+  [-1, -1],
+  [1, -1],
+  [-1, 1],
+  [1, 1]
+];
+
 /**
  * Distortion layer enumeration - determines render order and masking behavior
  */
@@ -310,6 +318,12 @@ export class DistortionManager extends EffectBase {
     this.distortionTarget = null;
 
     this.waterOccluderTarget = null;
+
+    // Water occluder render is a separate pass; rendering the full main scene here
+    // forces a full scene traversal and updateMatrixWorld on everything.
+    // Instead we maintain a dedicated scene with only occluder meshes.
+    this.waterOccluderScene = null;
+    this._waterOccluderScale = 0.5;
     
     // Blur passes for mask expansion
     this.blurTargetA = null;
@@ -391,6 +405,10 @@ export class DistortionManager extends EffectBase {
     
     this.renderer = renderer;
     this.mainCamera = camera;
+
+    // Dedicated scene for water occluders (only).
+    // This avoids traversing/updating the full main scene graph during the occluder pass.
+    this.waterOccluderScene = new THREE.Scene();
     
     this._tempSize = new THREE.Vector2();
     this._tempNdc = new THREE.Vector3();
@@ -439,7 +457,10 @@ export class DistortionManager extends EffectBase {
     this.distortionTarget = new THREE.WebGLRenderTarget(width, height, rtOptions);
 
     // Tile alpha occluder (screen-space) for water effects
-    this.waterOccluderTarget = new THREE.WebGLRenderTarget(width, height, {
+    const occluderScale = Number(this._waterOccluderScale) || 1.0;
+    const occW = Math.max(1, Math.floor(width * occluderScale));
+    const occH = Math.max(1, Math.floor(height * occluderScale));
+    this.waterOccluderTarget = new THREE.WebGLRenderTarget(occW, occH, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat,
@@ -2345,16 +2366,9 @@ export class DistortionManager extends EffectBase {
     let maxX = -Infinity;
     let maxY = -Infinity;
 
-    const corners = [
-      [-1, -1],
-      [1, -1],
-      [-1, 1],
-      [1, 1]
-    ];
-
-    for (let i = 0; i < corners.length; i++) {
-      const cx = corners[i][0];
-      const cy = corners[i][1];
+    for (let i = 0; i < _ndcCorners.length; i++) {
+      const cx = _ndcCorners[i][0];
+      const cy = _ndcCorners[i][1];
 
       // A point on the near plane in world space
       ndc.set(cx, cy, 0.5);
@@ -2470,7 +2484,10 @@ export class DistortionManager extends EffectBase {
     }
 
     if (this.waterOccluderTarget) {
-      this.waterOccluderTarget.setSize(width, height);
+      const occluderScale = Number(this._waterOccluderScale) || 1.0;
+      const occW = Math.max(1, Math.floor(width * occluderScale));
+      const occH = Math.max(1, Math.floor(height * occluderScale));
+      this.waterOccluderTarget.setSize(occW, occH);
     }
     
     const blurScale = 0.5;
@@ -2545,10 +2562,14 @@ export class DistortionManager extends EffectBase {
       this._passThroughMaterial.dispose();
       this._passThroughMaterial = null;
     }
+
+    this.waterOccluderScene = null;
   }
 
   _renderWaterOccluders(renderer, scene) {
     if (!this.waterOccluderTarget || !this.mainCamera) return;
+
+    const occluderScene = this.waterOccluderScene ?? scene;
 
     const TILE_OCCLUDER_LAYER = 22;
     const prevTarget = renderer.getRenderTarget();
@@ -2561,7 +2582,7 @@ export class DistortionManager extends EffectBase {
       renderer.setClearColor(0x000000, 0);
       renderer.autoClear = true;
       renderer.clear();
-      renderer.render(scene, this.mainCamera);
+      renderer.render(occluderScene, this.mainCamera);
     } finally {
       this.mainCamera.layers.mask = prevMask;
       renderer.autoClear = prevAutoClear;

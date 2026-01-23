@@ -61,7 +61,7 @@ export class TokenManager {
     /** @type {((tokenId: string) => void)|null} */
     this._onTokenMovementStart = null;
 
-    /** @type {number[]} */
+    /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
     this._hookIds = [];
     
     log.debug('TokenManager created');
@@ -258,35 +258,35 @@ export class TokenManager {
     if (this.hooksRegistered) return;
 
     // Initial load when canvas is ready
-    this._hookIds.push(Hooks.on('canvasReady', () => {
+    this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
       log.debug('Canvas ready, syncing all tokens');
       this.syncAllTokens();
-    }));
+    })]);
 
     // Create new token
-    this._hookIds.push(Hooks.on('createToken', (tokenDoc, options, userId) => {
+    this._hookIds.push(['createToken', Hooks.on('createToken', (tokenDoc, options, userId) => {
       log.debug(`Token created: ${tokenDoc.id}`);
       this.createTokenSprite(tokenDoc);
-    }));
+    })]);
 
     // Update existing token
-    this._hookIds.push(Hooks.on('updateToken', (tokenDoc, changes, options, userId) => {
+    this._hookIds.push(['updateToken', Hooks.on('updateToken', (tokenDoc, changes, options, userId) => {
       log.debug(`Token updated: ${tokenDoc.id}`, changes);
       this.updateTokenSprite(tokenDoc, changes, options);
-    }));
+    })]);
 
     // Delete token
-    this._hookIds.push(Hooks.on('deleteToken', (tokenDoc, options, userId) => {
+    this._hookIds.push(['deleteToken', Hooks.on('deleteToken', (tokenDoc, options, userId) => {
       log.debug(`Token deleted: ${tokenDoc.id}`);
       this.removeTokenSprite(tokenDoc.id);
-    }));
+    })]);
 
     // Refresh token (rendering changes)
-    this._hookIds.push(Hooks.on('refreshToken', (token) => {
+    this._hookIds.push(['refreshToken', Hooks.on('refreshToken', (token) => {
       log.debug(`Token refreshed: ${token.id}`);
       // Refresh typically means visual state changed (visibility, effects, etc.)
       this.refreshTokenSprite(token.document);
-    }));
+    })]);
 
     this.hooksRegistered = true;
     log.debug('Foundry hooks registered');
@@ -1042,12 +1042,12 @@ export class TokenManager {
   dispose() {
     log.info(`Disposing TokenManager with ${this.tokenSprites.size} tokens`);
 
-    // Unregister Foundry hooks
+    // Unregister Foundry hooks using correct two-argument signature
     try {
       if (this._hookIds && this._hookIds.length) {
-        for (const id of this._hookIds) {
+        for (const [hookName, hookId] of this._hookIds) {
           try {
-            Hooks.off(id);
+            Hooks.off(hookName, hookId);
           } catch (e) {
           }
         }

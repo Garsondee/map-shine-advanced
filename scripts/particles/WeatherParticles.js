@@ -377,7 +377,8 @@ class FoamFleckEmitter {
       const nX = nLen > 1e-6 ? (nx / nLen) : 1.0;
       const nY = nLen > 1e-6 ? (ny / nLen) : 0.0;
 
-      const drift = (60 + 220 * w) * (0.25 + 0.75 * a);
+      const driftScale = Number.isFinite(p?.foamFlecksWindDriftScale) ? Math.max(0.0, p.foamFlecksWindDriftScale) : 1.0;
+      const drift = (60 + 220 * w) * (0.25 + 0.75 * a) * driftScale;
       const jitter = 35;
 
       particle.velocity.set(
@@ -436,7 +437,8 @@ class FoamFleckEmitter {
       const w = this._windSpeed01;
       const a = this._windAccel01;
       const hop = 80 + 280 * a + 90 * w;
-      const drift = (80 + 280 * w) * (0.35 + 0.65 * a);
+      const driftScale = Number.isFinite(p?.foamFlecksWindDriftScale) ? Math.max(0.0, p.foamFlecksWindDriftScale) : 1.0;
+      const drift = (80 + 280 * w) * (0.35 + 0.65 * a) * driftScale;
       const jitter = 45;
 
       particle.velocity.set(
@@ -824,6 +826,10 @@ class FoamFleckBehavior {
     this.gravity = 950;
     this.landedDuration = 1.6;
 
+    // Scales how strongly foam flecks drift with wind direction.
+    // 0 = no wind-driven drift, 1 = current default behavior.
+    this.windDriftScale = 1.0;
+
     this._groundZ = null;
     this._tempVec = null;
 
@@ -890,7 +896,8 @@ class FoamFleckBehavior {
     if (!particle._landed && particle.velocity) {
       // Keep flecks moving with evolving wind (not just their spawn impulse).
       // This is a light continuous push, not a full force field.
-      const windAccel = 220 * this._windSpeed01;
+      const s = Number.isFinite(this.windDriftScale) ? Math.max(0.0, this.windDriftScale) : 1.0;
+      const windAccel = 220 * this._windSpeed01 * s;
       particle.velocity.x += this._windX * windAccel * delta;
       particle.velocity.y += this._windY * windAccel * delta;
 
@@ -927,7 +934,8 @@ class FoamFleckBehavior {
         : 1;
 
       // Drift along wind, plus optional water flow field so they "stick" to water motion.
-      const driftSpeed = 18 + 65 * this._windSpeed01;
+      const s = Number.isFinite(this.windDriftScale) ? Math.max(0.0, this.windDriftScale) : 1.0;
+      const driftSpeed = (18 + 65 * this._windSpeed01) * s;
       const phase = particle._landedPhase || 0;
       const wobble = Math.sin((particle.age * 9.0) + phase) * 4.0;
 
@@ -983,6 +991,7 @@ class FoamFleckBehavior {
     const b = new FoamFleckBehavior();
     b.gravity = this.gravity;
     b.landedDuration = this.landedDuration;
+    b.windDriftScale = this.windDriftScale;
     return b;
   }
 
@@ -1324,11 +1333,27 @@ class FoamPlumeBehavior {
     this.spinMin = -0.18;
     this.spinMax = 0.18;
 
+    // Wind-driven drift (world units / second).
+    // Controlled from WaterEffectV2 params: foamPlumeWindDriftScale.
+    this.windDriftScale = 0.0;
+    this._windX = 1.0;
+    this._windY = 0.0;
+    this._windSpeed01 = 0.0;
+
     // Per-particle random opacity scalar applied on top of peakOpacity.
     // This is evaluated once at spawn time and then kept stable for the life
     // of the particle.
     this.randomOpacityMin = 1.0;
     this.randomOpacityMax = 1.0;
+  }
+
+  setWind(dir, windSpeed01) {
+    const x = Number.isFinite(dir?.x) ? dir.x : 1.0;
+    const y = Number.isFinite(dir?.y) ? dir.y : 0.0;
+    const len = Math.hypot(x, y);
+    this._windX = len > 1e-6 ? (x / len) : 1.0;
+    this._windY = len > 1e-6 ? (y / len) : 0.0;
+    this._windSpeed01 = Number.isFinite(windSpeed01) ? Math.max(0.0, Math.min(1.0, windSpeed01)) : 0.0;
   }
 
   initialize(particle, system) {
@@ -1385,6 +1410,17 @@ class FoamPlumeBehavior {
     if (typeof particle.rotation === 'number' && typeof particle._foamSpinSpeed === 'number') {
       particle.rotation += particle._foamSpinSpeed * delta;
     }
+
+    // Optional wind drift to keep foam.webp plume particles flowing downwind.
+    // Only apply if the Particle has a position (Quarks particles always should).
+    if (particle.position) {
+      const s = Number.isFinite(this.windDriftScale) ? Math.max(0.0, this.windDriftScale) : 0.0;
+      if (s > 0.0) {
+        const driftSpeed = (20 + 120 * this._windSpeed01) * s;
+        particle.position.x += this._windX * driftSpeed * delta;
+        particle.position.y += this._windY * driftSpeed * delta;
+      }
+    }
   }
 
   frameUpdate(delta) { /* no-op */ }
@@ -1399,6 +1435,10 @@ class FoamPlumeBehavior {
     b.spinMax = this.spinMax;
     b.randomOpacityMin = this.randomOpacityMin;
     b.randomOpacityMax = this.randomOpacityMax;
+    b.windDriftScale = this.windDriftScale;
+    b._windX = this._windX;
+    b._windY = this._windY;
+    b._windSpeed01 = this._windSpeed01;
     return b;
   }
 
@@ -3923,6 +3963,13 @@ export class WeatherParticles {
         this._foamPlumeBehavior.spinMin = Number.isFinite(waterParams?.foamPlumeSpinMin) ? waterParams.foamPlumeSpinMin : -0.18;
         this._foamPlumeBehavior.spinMax = Number.isFinite(waterParams?.foamPlumeSpinMax) ? waterParams.foamPlumeSpinMax : 0.18;
 
+        // Wind drift for foam.webp plume particles.
+        this._foamPlumeBehavior.setWind(weather.windDirection, windSpeed01);
+        const driftScale = Number.isFinite(waterParams?.foamPlumeWindDriftScale)
+          ? Math.max(0.0, waterParams.foamPlumeWindDriftScale)
+          : 0.0;
+        if (this._foamPlumeBehavior.windDriftScale !== driftScale) this._foamPlumeBehavior.windDriftScale = driftScale;
+
         // Spawn-time random opacity multiplier bounds.
         this._foamPlumeBehavior.randomOpacityMin = Number.isFinite(waterParams?.foamPlumeRandomOpacityMin)
           ? Math.max(0.0, waterParams.foamPlumeRandomOpacityMin)
@@ -3991,6 +4038,8 @@ export class WeatherParticles {
       }
       if (this._foamFleckBehavior) {
         this._foamFleckBehavior.setWind(weather.windDirection, windSpeed01);
+        const driftScale = Number.isFinite(p.foamFlecksWindDriftScale) ? Math.max(0.0, p.foamFlecksWindDriftScale) : 1.0;
+        if (this._foamFleckBehavior.windDriftScale !== driftScale) this._foamFleckBehavior.windDriftScale = driftScale;
         // Live-tune physics from Water UI.
         const g = Number.isFinite(p.foamFlecksGravity) ? Math.max(0.0, p.foamFlecksGravity) : 950;
         const ld = Number.isFinite(p.foamFlecksLandedDuration) ? Math.max(0.0, p.foamFlecksLandedDuration) : 1.6;

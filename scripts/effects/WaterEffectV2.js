@@ -37,6 +37,20 @@ export class WaterEffectV2 extends EffectBase {
       waveScale: 32,
       waveSpeed: 0.18,
       waveStrength: 0.62,
+
+      // Wave texture enhancement controls
+      // Domain warp reduces visible repetition across large water bodies.
+      waveWarpLargeStrength: 0.22,
+      waveWarpSmallStrength: 0.06,
+      waveWarpMicroStrength: 0.02,
+      waveWarpTimeSpeed: 0.03,
+
+      // Slow evolution of wave "sea state" (alternating calmer/rougher).
+      waveEvolutionEnabled: true,
+      waveEvolutionSpeed: 0.08,
+      waveEvolutionAmount: 0.35,
+      waveEvolutionScale: 0.18,
+
       waveSpeedUseWind: false,
       waveSpeedWindMinFactor: 0.35,
       waveStrengthUseWind: false,
@@ -95,6 +109,9 @@ export class WaterEffectV2 extends EffectBase {
       causticsBrightnessThreshold: 0.12,
       causticsBrightnessSoftness: 0.12,
       causticsBrightnessGamma: 0.85,
+
+      causticsDebug: false,
+      causticsIgnoreLightGate: false,
 
       rainRippleStrengthPx: 64,
       rainRippleScale: 269,
@@ -184,6 +201,7 @@ export class WaterEffectV2 extends EffectBase {
       foamPlumeMaxScale: 5.48,
       foamPlumeSpinMin: -0.18,
       foamPlumeSpinMax: 0.25,
+      foamPlumeWindDriftScale: 0.0,
       foamPlumeUseAdditive: true,
       foamPlumeAdditiveBoost: 1.0,
       foamPlumeColor: { r: 1.0, g: 1.0, b: 1.0 },
@@ -218,6 +236,7 @@ export class WaterEffectV2 extends EffectBase {
       // GPU foam flecks (high-frequency spray dots)
       foamFlecksEnabled: false,
       foamFlecksIntensity: 6,
+      foamFlecksWindDriftScale: 1.0,
 
       sandEnabled: true,
       sandIntensity: 0.5,
@@ -257,6 +276,11 @@ export class WaterEffectV2 extends EffectBase {
     this._quadScene = null;
     this._quadCamera = null;
     this._quadMesh = null;
+
+    // Wind is used to drive pattern advection and wave phase. If we respond equally
+    // fast to rising and falling wind, the wave "boost" decays unnaturally quickly.
+    // We apply asymmetric smoothing: fast attack, slow release.
+    this._smoothedWindSpeed01 = 0.0;
     this._material = null;
 
     this._readBuffer = null;
@@ -358,6 +382,16 @@ export class WaterEffectV2 extends EffectBase {
             'waveScale',
             'waveSpeed',
             'waveStrength',
+
+            'waveWarpLargeStrength',
+            'waveWarpSmallStrength',
+            'waveWarpMicroStrength',
+            'waveWarpTimeSpeed',
+
+            'waveEvolutionEnabled',
+            'waveEvolutionSpeed',
+            'waveEvolutionAmount',
+            'waveEvolutionScale',
 
             'waveIndoorDampingEnabled',
             'waveIndoorDampingStrength',
@@ -559,7 +593,10 @@ export class WaterEffectV2 extends EffectBase {
             'causticsBrightnessMaskEnabled',
             'causticsBrightnessThreshold',
             'causticsBrightnessSoftness',
-            'causticsBrightnessGamma'
+            'causticsBrightnessGamma',
+
+            'causticsDebug',
+            'causticsIgnoreLightGate'
           ]
         },
         {
@@ -602,6 +639,7 @@ export class WaterEffectV2 extends EffectBase {
             'foamPlumeMaxScale',
             'foamPlumeSpinMin',
             'foamPlumeSpinMax',
+            'foamPlumeWindDriftScale',
             'foamPlumeUseAdditive',
             'foamPlumeAdditiveBoost',
             'foamPlumeColor',
@@ -646,7 +684,8 @@ export class WaterEffectV2 extends EffectBase {
           expanded: false,
           parameters: [
             'foamFlecksEnabled',
-            'foamFlecksIntensity'
+            'foamFlecksIntensity',
+            'foamFlecksWindDriftScale'
           ]
         },
         {
@@ -696,6 +735,16 @@ export class WaterEffectV2 extends EffectBase {
         waveScale: { type: 'slider', label: 'Wave Scale', min: 1, max: 60, step: 0.5, default: 32 },
         waveSpeed: { type: 'slider', label: 'Wave Speed', min: 0, max: 2.0, step: 0.01, default: 0.18 },
         waveStrength: { type: 'slider', label: 'Wave Strength', min: 0, max: 2.0, step: 0.01, default: 0.62 },
+
+        waveWarpLargeStrength: { type: 'slider', label: 'Warp Large', min: 0.0, max: 1.0, step: 0.01, default: 0.22 },
+        waveWarpSmallStrength: { type: 'slider', label: 'Warp Small', min: 0.0, max: 0.5, step: 0.01, default: 0.06 },
+        waveWarpMicroStrength: { type: 'slider', label: 'Warp Micro', min: 0.0, max: 0.25, step: 0.005, default: 0.02 },
+        waveWarpTimeSpeed: { type: 'slider', label: 'Warp Time Speed', min: 0.0, max: 0.25, step: 0.005, default: 0.03 },
+
+        waveEvolutionEnabled: { type: 'boolean', label: 'Sea State Evolution', default: true },
+        waveEvolutionSpeed: { type: 'slider', label: 'Evolution Speed', min: 0.0, max: 0.5, step: 0.005, default: 0.08 },
+        waveEvolutionAmount: { type: 'slider', label: 'Evolution Amount', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
+        waveEvolutionScale: { type: 'slider', label: 'Evolution Scale', min: 0.01, max: 2.0, step: 0.01, default: 0.18 },
         waveSpeedUseWind: { type: 'boolean', label: 'Wave Speed Linked To Wind', default: false },
         waveSpeedWindMinFactor: { type: 'slider', label: 'Wave Speed @ Wind=0', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
         waveStrengthUseWind: { type: 'boolean', label: 'Wave Strength Linked To Wind', default: false },
@@ -748,6 +797,9 @@ export class WaterEffectV2 extends EffectBase {
         causticsBrightnessThreshold: { type: 'slider', label: 'Brightness Threshold', min: 0.0, max: 2.0, step: 0.01, default: 0.12 },
         causticsBrightnessSoftness: { type: 'slider', label: 'Brightness Softness', min: 0.0, max: 1.0, step: 0.01, default: 0.12 },
         causticsBrightnessGamma: { type: 'slider', label: 'Brightness Gamma', min: 0.1, max: 4.0, step: 0.01, default: 0.85 },
+
+        causticsDebug: { type: 'boolean', label: 'Debug View (Mask/Shoreline)', default: false },
+        causticsIgnoreLightGate: { type: 'boolean', label: 'Ignore Light Gate (Force)', default: false },
 
         rainRippleStrengthPx: { type: 'slider', label: 'Ripples Strength (px)', min: 0.0, max: 64.0, step: 0.01, default: 64 },
         rainRippleScale: { type: 'slider', label: 'Ripples Scale', min: 1.0, max: 2000.0, step: 1.0, default: 269 },
@@ -844,6 +896,7 @@ export class WaterEffectV2 extends EffectBase {
         foamPlumeMaxScale: { type: 'slider', label: 'Plume Max Scale', min: 0.01, max: 10.0, step: 0.01, default: 5.48 },
         foamPlumeSpinMin: { type: 'slider', label: 'Plume Spin Min', min: -5.0, max: 5.0, step: 0.01, default: -0.18 },
         foamPlumeSpinMax: { type: 'slider', label: 'Plume Spin Max', min: -5.0, max: 5.0, step: 0.01, default: 0.25 },
+        foamPlumeWindDriftScale: { type: 'slider', label: 'Plume Wind Drift', min: 0.0, max: 3.0, step: 0.01, default: 0.0 },
         foamPlumeUseAdditive: { type: 'boolean', label: 'Plume Additive Blend', default: true },
         foamPlumeAdditiveBoost: { type: 'slider', label: 'Plume Additive Boost', min: 0.0, max: 20.0, step: 0.01, default: 1.0 },
         foamPlumeColor: { type: 'color', label: 'Plume Color', default: { r: 1.0, g: 1.0, b: 1.0 } },
@@ -875,6 +928,7 @@ export class WaterEffectV2 extends EffectBase {
 
         foamFlecksEnabled: { type: 'boolean', label: 'Foam Flecks (GPU)', default: false },
         foamFlecksIntensity: { type: 'slider', label: 'Flecks Intensity', min: 0.0, max: 6.0, step: 0.01, default: 6 },
+        foamFlecksWindDriftScale: { type: 'slider', label: 'Wind Drift Scale', min: 0.0, max: 3.0, step: 0.01, default: 1.0 },
 
         sandEnabled: { type: 'boolean', label: 'Sand Enabled', default: true },
         sandIntensity: { type: 'slider', label: 'Sand Intensity', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
@@ -956,6 +1010,16 @@ export class WaterEffectV2 extends EffectBase {
         uWaveSpeed: { value: this.params.waveSpeed },
         uWaveStrength: { value: this.params.waveStrength },
         uDistortionStrengthPx: { value: this.params.distortionStrengthPx },
+
+        uWaveWarpLargeStrength: { value: this.params.waveWarpLargeStrength },
+        uWaveWarpSmallStrength: { value: this.params.waveWarpSmallStrength },
+        uWaveWarpMicroStrength: { value: this.params.waveWarpMicroStrength },
+        uWaveWarpTimeSpeed: { value: this.params.waveWarpTimeSpeed },
+
+        uWaveEvolutionEnabled: { value: this.params.waveEvolutionEnabled === false ? 0.0 : 1.0 },
+        uWaveEvolutionSpeed: { value: this.params.waveEvolutionSpeed },
+        uWaveEvolutionAmount: { value: this.params.waveEvolutionAmount },
+        uWaveEvolutionScale: { value: this.params.waveEvolutionScale },
 
         uChromaticAberrationStrengthPx: { value: this.params.chromaticAberrationStrengthPx },
 
@@ -1129,6 +1193,16 @@ export class WaterEffectV2 extends EffectBase {
         uniform float uWaveSpeed;
         uniform float uWaveStrength;
         uniform float uDistortionStrengthPx;
+
+        uniform float uWaveWarpLargeStrength;
+        uniform float uWaveWarpSmallStrength;
+        uniform float uWaveWarpMicroStrength;
+        uniform float uWaveWarpTimeSpeed;
+
+        uniform float uWaveEvolutionEnabled;
+        uniform float uWaveEvolutionSpeed;
+        uniform float uWaveEvolutionAmount;
+        uniform float uWaveEvolutionScale;
 
         uniform float uChromaticAberrationStrengthPx;
 
@@ -1435,17 +1509,33 @@ export class WaterEffectV2 extends EffectBase {
           vec2 uv = sceneUv - windOffsetUv;
 
           // Large-scale domain warp to reduce obvious repetition across big bodies of water.
-          float lf1 = fbmNoise(sceneUv * 0.23 + vec2(19.1, 7.3));
-          float lf2 = fbmNoise(sceneUv * 0.23 + vec2(3.7, 23.9));
-          uv += vec2(lf1, lf2) * 0.22;
+          // These strengths are user-tweakable because some maps want a calmer, cleaner look.
+          float timeWarp = uTime * max(0.0, uWaveWarpTimeSpeed);
 
-          float n1 = fbmNoise(uv * 2.1 + vec2(13.7, 9.2));
-          float n2 = fbmNoise(uv * 2.1 + vec2(41.3, 27.9));
-          uv += vec2(n1, n2) * 0.06;
-          float n3 = fbmNoise(uv * 4.7 + vec2(7.9, 19.1));
-          float n4 = fbmNoise(uv * 4.7 + vec2(29.4, 3.3));
-          uv += vec2(n3, n4) * 0.02;
+          float lf1 = fbmNoise(sceneUv * 0.23 + vec2(19.1, 7.3) + vec2(timeWarp * 0.07, -timeWarp * 0.05));
+          float lf2 = fbmNoise(sceneUv * 0.23 + vec2(3.7, 23.9) + vec2(-timeWarp * 0.04, timeWarp * 0.06));
+          uv += vec2(lf1, lf2) * clamp(uWaveWarpLargeStrength, 0.0, 1.0);
+
+          float n1 = fbmNoise(uv * 2.1 + vec2(13.7, 9.2) + vec2(timeWarp * 0.11, timeWarp * 0.09));
+          float n2 = fbmNoise(uv * 2.1 + vec2(41.3, 27.9) + vec2(-timeWarp * 0.08, timeWarp * 0.10));
+          uv += vec2(n1, n2) * clamp(uWaveWarpSmallStrength, 0.0, 1.0);
+
+          float n3 = fbmNoise(uv * 4.7 + vec2(7.9, 19.1) + vec2(timeWarp * 0.15, -timeWarp * 0.12));
+          float n4 = fbmNoise(uv * 4.7 + vec2(29.4, 3.3) + vec2(-timeWarp * 0.13, -timeWarp * 0.10));
+          uv += vec2(n3, n4) * clamp(uWaveWarpMicroStrength, 0.0, 1.0);
           return uv;
+        }
+
+        float waveSeaState(vec2 sceneUv) {
+          // Produces a slowly evolving 0..1 scalar that makes the wave field
+          // alternate between calmer and more energetic states.
+          if (uWaveEvolutionEnabled < 0.5) return 0.5;
+
+          float sp = max(0.0, uWaveEvolutionSpeed);
+          float sc = max(0.01, uWaveEvolutionScale);
+          float n = fbmNoise(sceneUv * sc + vec2(uTime * sp * 0.23, -uTime * sp * 0.19));
+          float phase = uTime * sp + n * 2.7;
+          return 0.5 + 0.5 * sin(phase);
         }
 
         vec2 rotate2D(vec2 v, float a) {
@@ -1622,13 +1712,17 @@ export class WaterEffectV2 extends EffectBase {
           float h = 0.0;
           vec2 gDummy = vec2(0.0);
 
+          float sea01 = waveSeaState(sceneUv);
+          float evoAmt = clamp(uWaveEvolutionAmount, 0.0, 1.0);
+          float evo = mix(1.0 - evoAmt, 1.0 + evoAmt, sea01);
+
           // Directional sum-of-sines (spread around wind) with sharp crests.
           // Amplitudes sum to ~1.0 for stable output scaling.
-          addWave(p, rotate2D(wind, -0.80), TAU * 0.57, 0.35, 2.30, (1.10 + 0.65 * sqrt(TAU * 0.57)), t, h, gDummy);
-          addWave(p, rotate2D(wind, -0.35), TAU * 0.91, 0.25, 2.55, (1.10 + 0.65 * sqrt(TAU * 0.91)), t, h, gDummy);
-          addWave(p, rotate2D(wind,  0.00), TAU * 1.37, 0.18, 2.85, (1.10 + 0.65 * sqrt(TAU * 1.37)), t, h, gDummy);
-          addWave(p, rotate2D(wind,  0.40), TAU * 1.83, 0.12, 3.10, (1.10 + 0.65 * sqrt(TAU * 1.83)), t, h, gDummy);
-          addWave(p, rotate2D(wind,  0.85), TAU * 2.49, 0.10, 3.35, (1.10 + 0.65 * sqrt(TAU * 2.49)), t, h, gDummy);
+          addWave(p, rotate2D(wind, -0.80), TAU * 0.57, 0.35 * evo, 2.30, (1.10 + 0.65 * sqrt(TAU * 0.57)), t, h, gDummy);
+          addWave(p, rotate2D(wind, -0.35), TAU * 0.91, 0.25 * evo, 2.55, (1.10 + 0.65 * sqrt(TAU * 0.91)), t, h, gDummy);
+          addWave(p, rotate2D(wind,  0.00), TAU * 1.37, 0.18 * evo, 2.85, (1.10 + 0.65 * sqrt(TAU * 1.37)), t, h, gDummy);
+          addWave(p, rotate2D(wind,  0.40), TAU * 1.83, 0.12 * evo, 3.10, (1.10 + 0.65 * sqrt(TAU * 1.83)), t, h, gDummy);
+          addWave(p, rotate2D(wind,  0.85), TAU * 2.49, 0.10 * evo, 3.35, (1.10 + 0.65 * sqrt(TAU * 2.49)), t, h, gDummy);
 
           return h;
         }
@@ -1651,11 +1745,15 @@ export class WaterEffectV2 extends EffectBase {
           float hDummy = 0.0;
           vec2 g = vec2(0.0);
 
-          addWave(p, rotate2D(wind, -0.80), TAU * 0.57, 0.35, 2.30, (1.10 + 0.65 * sqrt(TAU * 0.57)), t, hDummy, g);
-          addWave(p, rotate2D(wind, -0.35), TAU * 0.91, 0.25, 2.55, (1.10 + 0.65 * sqrt(TAU * 0.91)), t, hDummy, g);
-          addWave(p, rotate2D(wind,  0.00), TAU * 1.37, 0.18, 2.85, (1.10 + 0.65 * sqrt(TAU * 1.37)), t, hDummy, g);
-          addWave(p, rotate2D(wind,  0.40), TAU * 1.83, 0.12, 3.10, (1.10 + 0.65 * sqrt(TAU * 1.83)), t, hDummy, g);
-          addWave(p, rotate2D(wind,  0.85), TAU * 2.49, 0.10, 3.35, (1.10 + 0.65 * sqrt(TAU * 2.49)), t, hDummy, g);
+          float sea01 = waveSeaState(sceneUv);
+          float evoAmt = clamp(uWaveEvolutionAmount, 0.0, 1.0);
+          float evo = mix(1.0 - evoAmt, 1.0 + evoAmt, sea01);
+
+          addWave(p, rotate2D(wind, -0.80), TAU * 0.57, 0.35 * evo, 2.30, (1.10 + 0.65 * sqrt(TAU * 0.57)), t, hDummy, g);
+          addWave(p, rotate2D(wind, -0.35), TAU * 0.91, 0.25 * evo, 2.55, (1.10 + 0.65 * sqrt(TAU * 0.91)), t, hDummy, g);
+          addWave(p, rotate2D(wind,  0.00), TAU * 1.37, 0.18 * evo, 2.85, (1.10 + 0.65 * sqrt(TAU * 1.37)), t, hDummy, g);
+          addWave(p, rotate2D(wind,  0.40), TAU * 1.83, 0.12 * evo, 3.10, (1.10 + 0.65 * sqrt(TAU * 1.83)), t, hDummy, g);
+          addWave(p, rotate2D(wind,  0.85), TAU * 2.49, 0.10 * evo, 3.35, (1.10 + 0.65 * sqrt(TAU * 2.49)), t, hDummy, g);
 
           // Normalize away the scale dependence so uWaveScale doesn't make razor-sharp gradients.
           return g / max(uWaveScale, 1e-3);
@@ -2381,6 +2479,9 @@ export class WaterEffectV2 extends EffectBase {
             p.causticsBrightnessSoftness = Number.isFinite(this.params?.causticsBrightnessSoftness) ? this.params.causticsBrightnessSoftness : 0.12;
             p.causticsBrightnessGamma = Number.isFinite(this.params?.causticsBrightnessGamma) ? this.params.causticsBrightnessGamma : 0.85;
 
+            p.causticsDebug = this.params?.causticsDebug === true;
+            p.causticsIgnoreLightGate = this.params?.causticsIgnoreLightGate === true;
+
             p.cloudShadowCausticsKill = Number.isFinite(this.params?.cloudShadowCausticsKill) ? this.params.cloudShadowCausticsKill : 1.0;
             p.cloudShadowCausticsCurve = Number.isFinite(this.params?.cloudShadowCausticsCurve) ? this.params.cloudShadowCausticsCurve : 0.1;
 
@@ -2657,6 +2758,39 @@ export class WaterEffectV2 extends EffectBase {
     const distPx = this.params?.distortionStrengthPx;
     u.uDistortionStrengthPx.value = Number.isFinite(distPx) ? distPx : 5.38;
 
+    if (u.uWaveWarpLargeStrength) {
+      const v = this.params?.waveWarpLargeStrength;
+      u.uWaveWarpLargeStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.22;
+    }
+    if (u.uWaveWarpSmallStrength) {
+      const v = this.params?.waveWarpSmallStrength;
+      u.uWaveWarpSmallStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.06;
+    }
+    if (u.uWaveWarpMicroStrength) {
+      const v = this.params?.waveWarpMicroStrength;
+      u.uWaveWarpMicroStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.02;
+    }
+    if (u.uWaveWarpTimeSpeed) {
+      const v = this.params?.waveWarpTimeSpeed;
+      u.uWaveWarpTimeSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.03;
+    }
+
+    if (u.uWaveEvolutionEnabled) {
+      u.uWaveEvolutionEnabled.value = this.params?.waveEvolutionEnabled === false ? 0.0 : 1.0;
+    }
+    if (u.uWaveEvolutionSpeed) {
+      const v = this.params?.waveEvolutionSpeed;
+      u.uWaveEvolutionSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.08;
+    }
+    if (u.uWaveEvolutionAmount) {
+      const v = this.params?.waveEvolutionAmount;
+      u.uWaveEvolutionAmount.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.35;
+    }
+    if (u.uWaveEvolutionScale) {
+      const v = this.params?.waveEvolutionScale;
+      u.uWaveEvolutionScale.value = Number.isFinite(v) ? Math.max(0.01, v) : 0.18;
+    }
+
     if (u.uWaveIndoorDampingEnabled) {
       u.uWaveIndoorDampingEnabled.value = this.params?.waveIndoorDampingEnabled === false ? 0.0 : 1.0;
     }
@@ -2892,7 +3026,21 @@ export class WaterEffectV2 extends EffectBase {
         }
 
         const wSpeed = ws?.windSpeed;
-        const wSpeed01 = Number.isFinite(wSpeed) ? Math.max(0.0, Math.min(1.0, wSpeed)) : 0.0;
+        const wSpeed01Raw = Number.isFinite(wSpeed) ? Math.max(0.0, Math.min(1.0, wSpeed)) : 0.0;
+
+        // Asymmetric smoothing (fast gain, slow loss).
+        // Desired behavior: wind-driven wave speed-ups should decay at ~half the rate
+        // that they build up.
+        const resp = Number.isFinite(this.params?.windDirResponsiveness) ? Math.max(0.05, this.params.windDirResponsiveness) : 2.5;
+        const respUp = resp;
+        const respDown = resp * 0.5;
+        const current = Number.isFinite(this._smoothedWindSpeed01) ? this._smoothedWindSpeed01 : 0.0;
+        const target = wSpeed01Raw;
+        const useResp = target > current ? respUp : respDown;
+        const kSpeed = 1.0 - Math.exp(-dtSeconds * useResp);
+        this._smoothedWindSpeed01 = current + (target - current) * Math.min(1.0, Math.max(0.0, kSpeed));
+        const wSpeed01 = this._smoothedWindSpeed01;
+
         u.uWindSpeed.value = wSpeed01;
 
         // Coherent pattern advection driven by wind direction + gusty wind speed.
@@ -2940,6 +3088,7 @@ export class WaterEffectV2 extends EffectBase {
       } catch (_) {
         u.uWindDir.value.set(1.0, 0.0);
         u.uWindSpeed.value = 0.0;
+        this._smoothedWindSpeed01 = 0.0;
         if (u.uWindOffsetUv && this._windOffsetUv) {
           u.uWindOffsetUv.value.set(this._windOffsetUv.x, this._windOffsetUv.y);
         }

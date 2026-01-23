@@ -60,6 +60,11 @@ export class TileManager {
     // Key: tileBaseNoExt (no query, no extension), Value: resolved mask URL string OR null
     this._tileWaterMaskResolvedUrl = new Map();
     this._tileWaterMaskResolvePromises = new Map();
+
+    this._tileSpecularMaskCache = new Map();
+    this._tileSpecularMaskPromises = new Map();
+    this._tileSpecularMaskResolvedUrl = new Map();
+    this._tileSpecularMaskResolvePromises = new Map();
     
     /** @type {Map<string, {width: number, height: number, data: Uint8ClampedArray}>} */
     this.alphaMaskCache = new Map();
@@ -90,8 +95,24 @@ export class TileManager {
     // Window light effect reference for overhead tile lighting
     /** @type {WindowLightEffect|null} */
     this.windowLightEffect = null;
+
+    /** @type {SpecularEffect|null} */
+    this.specularEffect = null;
     
     log.debug('TileManager created');
+  }
+
+  setSpecularEffect(specularEffect) {
+    this.specularEffect = specularEffect || null;
+  }
+
+  _tileWantsSpecular(tileDoc) {
+    try {
+      const f = tileDoc?.flags?.['map-shine-advanced'];
+      return !!f?.enableSpecular;
+    } catch (_) {
+      return false;
+    }
   }
 
   _deriveMaskPath(src, suffix) {
@@ -216,6 +237,113 @@ export class TileManager {
     });
 
     this._tileWaterMaskPromises.set(resolvedUrl, p);
+    return p;
+  }
+
+  async _resolveTileSpecularMaskUrl(tileDoc) {
+    if (!this._tileWantsSpecular(tileDoc)) return null;
+    const src = tileDoc?.texture?.src;
+    const parts = this._splitUrl(src);
+    if (!parts) return null;
+
+    const key = parts.pathNoExt;
+    if (this._tileSpecularMaskResolvedUrl.has(key)) {
+      return this._tileSpecularMaskResolvedUrl.get(key);
+    }
+
+    if (this._tileSpecularMaskResolvePromises.has(key)) {
+      return this._tileSpecularMaskResolvePromises.get(key);
+    }
+
+    const p = (async () => {
+      // Specular masks are optional per tile (opt-in via enableSpecular), but when
+      // enabled we should tolerate the mask being authored in a different file
+      // format than the tile texture (png vs jpg/webp, etc.).
+      const exts = [
+        String(parts.ext || '').toLowerCase(),
+        '.webp',
+        '.png',
+        '.jpg',
+        '.jpeg'
+      ];
+      const uniqueExts = [];
+      for (const e of exts) {
+        const ee = String(e || '').toLowerCase();
+        if (!ee) continue;
+        if (!uniqueExts.includes(ee)) uniqueExts.push(ee);
+      }
+
+      // Try without query first (most authored masks won't carry cache-buster query strings).
+      // Then try with query as a fallback.
+      const candidates = [];
+      for (const ext of uniqueExts) {
+        const baseNoQuery = `${parts.pathNoExt}_Specular${ext}`;
+        candidates.push(baseNoQuery);
+        if (parts.query) candidates.push(`${baseNoQuery}${parts.query}`);
+      }
+
+      for (let i = 0; i < candidates.length; i++) {
+        const url = candidates[i];
+        try {
+          const tex = await this.loadTileTexture(url);
+          if (tex) {
+            this._tileSpecularMaskCache.set(url, tex);
+            this._tileSpecularMaskResolvedUrl.set(key, url);
+            return url;
+          }
+        } catch (_) {
+        }
+      }
+
+      this._tileSpecularMaskResolvedUrl.set(key, null);
+
+      try {
+        log.debug(`No _Specular mask found for enabled tile ${tileDoc?.id || '(unknown)'}: ${candidates.join(', ')}`);
+      } catch (_) {
+      }
+
+      return null;
+    })();
+
+    this._tileSpecularMaskResolvePromises.set(key, p);
+    try {
+      return await p;
+    } finally {
+      this._tileSpecularMaskResolvePromises.delete(key);
+    }
+  }
+
+  async loadTileSpecularMaskTexture(tileDoc) {
+    const resolvedUrl = await this._resolveTileSpecularMaskUrl(tileDoc);
+    if (!resolvedUrl) return null;
+
+    const cached = this._tileSpecularMaskCache.get(resolvedUrl);
+    if (cached) {
+      const THREE = window.THREE;
+      if (THREE && cached.colorSpace !== THREE.NoColorSpace) {
+        cached.colorSpace = THREE.NoColorSpace;
+        cached.needsUpdate = true;
+      }
+      return cached;
+    }
+
+    const pending = this._tileSpecularMaskPromises.get(resolvedUrl);
+    if (pending) return pending;
+
+    const p = this.loadTileTexture(resolvedUrl).then((tex) => {
+      if (!tex) return null;
+      const THREE = window.THREE;
+      if (THREE) {
+        tex.colorSpace = THREE.NoColorSpace;
+        tex.needsUpdate = true;
+      }
+      this._tileSpecularMaskCache.set(resolvedUrl, tex);
+      return tex;
+    }).catch(() => null).finally(() => {
+      this._tileSpecularMaskPromises.delete(resolvedUrl);
+    });
+
+    this._tileSpecularMaskPromises.set(resolvedUrl, p);
     return p;
   }
 
@@ -1300,6 +1428,21 @@ export class TileManager {
       this.updateSpriteTransform(sprite, tileDoc);
       this.updateSpriteVisibility(sprite, tileDoc);
 
+      // Bind per-tile specular overlay if a matching _Specular mask exists and enabled.
+      try {
+        if (this.specularEffect && this._tileWantsSpecular(tileDoc)) {
+          this.loadTileSpecularMaskTexture(tileDoc).then((specTex) => {
+            if (!specTex) {
+              this.specularEffect.unbindTileSprite(tileDoc.id);
+              return;
+            }
+            this.specularEffect.bindTileSprite(tileDoc, sprite, specTex);
+          }).catch(() => {
+          });
+        }
+      } catch (_) {
+      }
+
       const spriteData = this.tileSprites.get(tileDoc.id);
       if (spriteData) {
         this._ensureWaterOccluderMesh(spriteData, tileDoc);
@@ -1341,6 +1484,18 @@ export class TileManager {
       sprite,
       tileDoc
     });
+
+    // Kick specular resolve early (texture load is async, but we can probe now).
+    try {
+      if (this.specularEffect && this._tileWantsSpecular(tileDoc)) {
+        this.loadTileSpecularMaskTexture(tileDoc).then((specTex) => {
+          if (!specTex) return;
+          this.specularEffect.bindTileSprite(tileDoc, sprite, specTex);
+        }).catch(() => {
+        });
+      }
+    } catch (_) {
+    }
 
     this._ensureWaterOccluderMesh(this.tileSprites.get(tileDoc.id), tileDoc);
 
@@ -1410,6 +1565,9 @@ export class TileManager {
       flags: mergedFlags
     };
 
+    // Specular masks are opt-in per tile.
+    const wantsSpecular = this._tileWantsSpecular(targetDoc);
+
     // Update transform if relevant properties changed
     if ('x' in changes || 'y' in changes || 'width' in changes ||
         'height' in changes || 'rotation' in changes ||
@@ -1418,6 +1576,45 @@ export class TileManager {
       this.updateSpriteTransform(sprite, targetDoc);
       this._ensureWaterOccluderMesh(spriteData, targetDoc);
       this._updateWaterOccluderMeshTransform(sprite, targetDoc);
+
+      try {
+        this.specularEffect?.syncTileSpriteTransform?.(tileDoc.id, sprite);
+      } catch (_) {
+      }
+
+      // If specular was toggled off via flags, remove any existing overlay.
+      // If toggled on, we'll bind below (and/or on the next texture load).
+      if ('flags' in changes) {
+        try {
+          if (!wantsSpecular) {
+            this.specularEffect?.unbindTileSprite?.(tileDoc.id);
+          } else if (this.specularEffect) {
+            // Specular was enabled (or remains enabled) but may not be bound yet.
+            // Bind immediately without requiring a texture change.
+            try {
+              const prevSrc = spriteData?.tileDoc?.texture?.src;
+              const prevParts = this._splitUrl(prevSrc);
+              if (prevParts?.pathNoExt) this._tileSpecularMaskResolvedUrl.delete(prevParts.pathNoExt);
+            } catch (_) {
+            }
+
+            const docForMask = {
+              id: tileDoc.id,
+              texture: { src: spriteData?.tileDoc?.texture?.src || tileDoc?.texture?.src },
+              flags: targetDoc.flags
+            };
+            this.loadTileSpecularMaskTexture(docForMask).then((specTex) => {
+              if (!specTex) {
+                this.specularEffect?.unbindTileSprite?.(tileDoc.id);
+                return;
+              }
+              this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, specTex);
+            }).catch(() => {
+            });
+          }
+        } catch (_) {
+        }
+      }
     }
 
     // Update texture if changed
@@ -1446,6 +1643,36 @@ export class TileManager {
       this.loadTileTexture(changes.texture.src).then(texture => {
         sprite.material.map = texture;
         sprite.material.needsUpdate = true;
+
+        // If the tile texture changes, its associated _Specular mask may also change.
+        try {
+          const prevSrc = spriteData?.tileDoc?.texture?.src;
+          const nextSrc = changes.texture.src;
+          const prevParts = this._splitUrl(prevSrc);
+          const nextParts = this._splitUrl(nextSrc);
+          if (prevParts?.pathNoExt) this._tileSpecularMaskResolvedUrl.delete(prevParts.pathNoExt);
+          if (nextParts?.pathNoExt) this._tileSpecularMaskResolvedUrl.delete(nextParts.pathNoExt);
+        } catch (_) {
+        }
+
+        try {
+          if (this.specularEffect) {
+            if (!wantsSpecular) {
+              this.specularEffect.unbindTileSprite(tileDoc.id);
+            } else {
+              const nextDoc = { texture: { src: changes.texture.src }, flags: targetDoc.flags };
+              this.loadTileSpecularMaskTexture(nextDoc).then((specTex) => {
+                if (!specTex) {
+                  this.specularEffect.unbindTileSprite(tileDoc.id);
+                  return;
+                }
+                this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, specTex);
+              }).catch(() => {
+              });
+            }
+          }
+        } catch (_) {
+        }
 
         const occ = sprite.userData?.waterOccluderMesh;
         if (occ?.material?.uniforms?.tTile) {
@@ -1507,6 +1734,11 @@ export class TileManager {
     } catch (_) {
     }
 
+    try {
+      this.specularEffect?.syncTileSpriteTransform?.(tileDoc.id, spriteData.sprite);
+    } catch (_) {
+    }
+
     // Visibility/opacity can also change during refresh.
     this.updateSpriteVisibility(spriteData.sprite, tileDoc);
   }
@@ -1521,6 +1753,11 @@ export class TileManager {
     if (!spriteData) return;
 
     const { sprite } = spriteData;
+
+    try {
+      this.specularEffect?.unbindTileSprite?.(tileId);
+    } catch (_) {
+    }
 
     const occ = sprite?.userData?.waterOccluderMesh;
     if (occ) {

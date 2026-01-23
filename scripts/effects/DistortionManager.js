@@ -985,6 +985,7 @@ export class DistortionManager extends EffectBase {
         uWaterCausticsBrightnessSoftness: { value: 0.20 },
         uWaterCausticsBrightnessGamma: { value: 1.0 },
         uWaterCausticsDebug: { value: 0.0 },
+        uWaterCausticsIgnoreLightGate: { value: 0.0 },
 
         // Water-only cloud shadow caustics suppression
         uWaterCloudCausticsKill: { value: 0.0 },
@@ -1091,6 +1092,7 @@ export class DistortionManager extends EffectBase {
         uniform float uWaterCausticsBrightnessSoftness;
         uniform float uWaterCausticsBrightnessGamma;
         uniform float uWaterCausticsDebug;
+        uniform float uWaterCausticsIgnoreLightGate;
 
         uniform float uWaterCloudCausticsKill;
         uniform float uWaterCloudCausticsCurve;
@@ -1302,15 +1304,10 @@ export class DistortionManager extends EffectBase {
           
           vec4 sceneColor = texture2D(tScene, distortedUv);
 
-          // Water chromatic refraction (RGB split)
-          // Uses the distortion direction as the dispersion axis and clamps the maximum
-          // per-channel shift in pixels to avoid harsh/nausating separation.
-          if (uWaterChromaEnabled > 0.5 && uWaterChroma > 0.0 && uHasWaterMask > 0.5) {
-            float maxOffsetUv = (uWaterChromaMaxPixels * night) * max(texelSize.x, texelSize.y);
-
-            float offLen = length(zoomedOffset);
-            vec2 dir = offLen > 1e-6 ? (zoomedOffset / offLen) : vec2(0.0, 0.0);
-
+          // Water shading (tint/murk/sand/caustics/foam).
+          // IMPORTANT: This must NOT be gated by chromatic refraction.
+          // Otherwise caustics will never render when chroma is disabled.
+          if (uHasWaterMask > 0.5) {
             // Derive a softened water mask directly from the water mask texture.
             // Using the composite alpha here can produce sharp edges due to encoding/thresholding.
             vec2 foundryPos = screenUvToFoundry(vUv);
@@ -1328,6 +1325,24 @@ export class DistortionManager extends EffectBase {
             vec2 sceneUvForIso = (uWaterMaskFlipY > 0.5) ? vec2(sceneUv.x, 1.0 - sceneUv.y) : sceneUv;
             vec2 sceneUvIso = aspectCorrectSceneUv(sceneUvForIso);
             vec2 waterUvIso = sceneUvIso;
+
+            // Water chromatic refraction (RGB split)
+            // Uses the distortion direction as the dispersion axis and clamps the maximum
+            // per-channel shift in pixels to avoid harsh/nausating separation.
+            if (uWaterChromaEnabled > 0.5 && uWaterChroma > 0.0) {
+              float maxOffsetUv = (uWaterChromaMaxPixels * night) * max(texelSize.x, texelSize.y);
+
+              float offLen = length(zoomedOffset);
+              vec2 dir = offLen > 1e-6 ? (zoomedOffset / offLen) : vec2(0.0, 0.0);
+
+              float chroma = clamp(uWaterChroma, 0.0, 4.0);
+              vec2 chromaUv = dir * min(maxOffsetUv, chroma * maxOffsetUv);
+              vec2 uvR = safeClampUv(vUv + chromaUv);
+              vec2 uvB = safeClampUv(vUv - chromaUv);
+              float rr = texture2D(tScene, uvR).r;
+              float bb = texture2D(tScene, uvB).b;
+              sceneColor.rgb = vec3(rr, sceneColor.g, bb);
+            }
 
             vec4 waterDepthSample = texture2D(tWaterMask, waterUv);
             float rawDepth = waterMaskValue(waterDepthSample) * sceneInBounds;
@@ -1484,6 +1499,9 @@ export class DistortionManager extends EffectBase {
               }
 
               float lightGate = max(outdoor * cloudLit, indoor * windowBright);
+              if (uWaterCausticsIgnoreLightGate > 0.5) {
+                lightGate = 1.0;
+              }
 
               float brightnessGate = 1.0;
               if (uWaterCausticsBrightnessMaskEnabled > 0.5) {
@@ -2075,6 +2093,16 @@ export class DistortionManager extends EffectBase {
       if (au.uWaterCausticsBrightnessGamma) {
         const v = waterSource?.params?.causticsBrightnessGamma;
         au.uWaterCausticsBrightnessGamma.value = Number.isFinite(v) ? Math.max(0.01, v) : 1.0;
+      }
+
+      // Caustics debugging/override (driven by WaterEffectV2)
+      if (au.uWaterCausticsDebug) {
+        const v = waterSource?.params?.causticsDebug === true;
+        au.uWaterCausticsDebug.value = v ? 1.0 : 0.0;
+      }
+      if (au.uWaterCausticsIgnoreLightGate) {
+        const v = waterSource?.params?.causticsIgnoreLightGate === true;
+        au.uWaterCausticsIgnoreLightGate.value = v ? 1.0 : 0.0;
       }
 
       // Water-only cloud shadow caustics suppression (driven by WaterEffectV2)

@@ -41,6 +41,15 @@ export class SpecularEffect extends EffectBase {
     /** @type {THREE.ShaderMaterial|null} */
     this.material = null;
 
+    /** @type {Set<THREE.ShaderMaterial>} */
+    this._materials = new Set();
+
+    /** @type {THREE.Scene|null} */
+    this._scene = null;
+
+    /** @type {Map<string, {mesh: THREE.Mesh, material: THREE.ShaderMaterial, sprite: THREE.Object3D}>} */
+    this._tileOverlays = new Map();
+
     // Light tracking
     this.lights = new Map();
     this.maxLights = 64;
@@ -132,7 +141,17 @@ export class SpecularEffect extends EffectBase {
     
     // Update uniform immediately if material exists
     // This ensures the effect turns off even if the update loop stops
-    if (this.material && this.material.uniforms.uEffectEnabled) {
+    // NOTE: EffectBase may set enabled during super() construction.
+    // At that point, our constructor hasn't initialized _materials yet.
+    const mats = this._materials;
+    if (mats && typeof mats[Symbol.iterator] === 'function') {
+      for (const mat of mats) {
+        if (mat?.uniforms?.uEffectEnabled) {
+          mat.uniforms.uEffectEnabled.value = value;
+        }
+      }
+    } else if (this.material?.uniforms?.uEffectEnabled) {
+      // Fallback for legacy single-material path.
       this.material.uniforms.uEffectEnabled.value = value;
     }
   }
@@ -592,6 +611,8 @@ export class SpecularEffect extends EffectBase {
    */
   initialize(renderer, scene, camera) {
     log.info('Initializing specular effect');
+
+    this._scene = scene || null;
     
     // Bound handlers for cleanup
     this.onLightCreatedBound = this.onLightCreated.bind(this);
@@ -653,6 +674,124 @@ export class SpecularEffect extends EffectBase {
   }
 
   /**
+   * Bind a per-tile specular overlay to an existing tile sprite.
+   * This keeps tiles as sprites (fast), and renders specular as an additive mesh.
+   * @param {TileDocument} tileDoc
+   * @param {THREE.Object3D} sprite
+   * @param {THREE.Texture} specularMask
+   */
+  bindTileSprite(tileDoc, sprite, specularMask) {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const tileId = tileDoc?.id;
+    if (!tileId || !sprite || !specularMask) return;
+
+    // Ensure we have a scene to attach into.
+    if (!this._scene) return;
+
+    // If already bound, just update the textures.
+    const existing = this._tileOverlays.get(tileId);
+    if (existing?.material?.uniforms?.uSpecularMap) {
+      existing.material.uniforms.uAlbedoMap.value = sprite?.material?.map || this._getFallbackAlbedoTexture();
+      existing.material.uniforms.uSpecularMap.value = specularMask;
+      this._syncTileOverlayTransform(tileId, sprite);
+      return;
+    }
+
+    const geom = new THREE.PlaneGeometry(1, 1);
+    const baseMap = sprite?.material?.map || this._getFallbackAlbedoTexture();
+    const mat = this._createMaterialInstance({
+      baseTexture: baseMap,
+      specularMask,
+      roughnessMask: null,
+      normalMap: null,
+      outputMode: 1.0,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      depthTest: false
+    });
+
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.matrixAutoUpdate = false;
+    mesh.frustumCulled = false;
+
+    // Render above the tile sprite.
+    try {
+      mesh.renderOrder = (typeof sprite.renderOrder === 'number') ? (sprite.renderOrder + 1) : 1;
+    } catch (_) {
+    }
+
+    // Put it on the same layers as the sprite (important for roof/overlay passes).
+    try {
+      mesh.layers.mask = sprite.layers.mask;
+    } catch (_) {
+    }
+
+    this._scene.add(mesh);
+    this._tileOverlays.set(tileId, { mesh, material: mat, sprite });
+
+    this._syncTileOverlayTransform(tileId, sprite);
+  }
+
+  /**
+   * Remove a bound tile overlay.
+   * @param {string} tileId
+   */
+  unbindTileSprite(tileId) {
+    const entry = tileId ? this._tileOverlays.get(tileId) : null;
+    if (!entry) return;
+    try {
+      this._scene?.remove?.(entry.mesh);
+    } catch (_) {
+    }
+    try {
+      entry.mesh?.geometry?.dispose?.();
+      entry.material?.dispose?.();
+    } catch (_) {
+    }
+    this._materials.delete(entry.material);
+    this._tileOverlays.delete(tileId);
+  }
+
+  /**
+   * Called by TileManager when a sprite's transform changes.
+   * @param {string} tileId
+   * @param {THREE.Object3D} sprite
+   */
+  syncTileSpriteTransform(tileId, sprite) {
+    if (!tileId || !sprite) return;
+    this._syncTileOverlayTransform(tileId, sprite);
+  }
+
+  _syncTileOverlayTransform(tileId, sprite) {
+    const entry = this._tileOverlays.get(tileId);
+    if (!entry?.mesh || !sprite) return;
+    try {
+      // Ensure world matrix is current.
+      sprite.updateMatrixWorld?.(true);
+    } catch (_) {
+    }
+    try {
+      entry.mesh.matrix.copy(sprite.matrixWorld);
+      entry.mesh.visible = !!sprite.visible;
+
+      // Keep layering/sorting in sync. Tile renderOrder and layers can change
+      // after initial bind during scene sync, elevation transitions, etc.
+      try {
+        entry.mesh.renderOrder = (typeof sprite.renderOrder === 'number') ? (sprite.renderOrder + 1) : entry.mesh.renderOrder;
+      } catch (_) {
+      }
+      try {
+        entry.mesh.layers.mask = sprite.layers.mask;
+      } catch (_) {
+      }
+    } catch (_) {
+    }
+  }
+
+  /**
    * Create PBR shader material
    * @param {THREE.Texture} baseTexture - Albedo/diffuse texture
    * @private
@@ -667,26 +806,60 @@ export class SpecularEffect extends EffectBase {
     this.validationErrors = [];
     this.lastValidation = 0;
     
-    this.material = new THREE.ShaderMaterial({
+    this.material = this._createMaterialInstance({
+      baseTexture: safeBase,
+      specularMask: this.specularMask,
+      roughnessMask: this.roughnessMask,
+      normalMap: this.normalMap,
+      outputMode: 0.0,
+      transparent: false
+    });
+    
+    log.debug('PBR material created');
+    
+    // Initial sync of light data to the new material
+    this.updateLightUniforms();
+  }
+
+  _createMaterialInstance({
+    baseTexture,
+    specularMask,
+    roughnessMask,
+    normalMap,
+    outputMode = 0.0,
+    transparent = false,
+    blending = null,
+    depthWrite = true,
+    depthTest = true
+  } = {}) {
+    const THREE = window.THREE;
+    const safeBase = baseTexture || this._getFallbackAlbedoTexture();
+
+    const mat = new THREE.ShaderMaterial({
       uniforms: {
         // Textures
         uAlbedoMap: { value: safeBase },
-        uSpecularMap: { value: this.specularMask },
-        uRoughnessMap: { value: this.roughnessMask || safeBase },
-        uNormalMap: { value: this.normalMap || safeBase },
-        
+        uSpecularMap: { value: specularMask || this.specularMask },
+        uRoughnessMap: { value: roughnessMask || safeBase },
+        uNormalMap: { value: normalMap || safeBase },
+
         // Texture availability flags
-        uHasRoughnessMap: { value: this.roughnessMask !== null },
-        uHasNormalMap: { value: this.normalMap !== null },
-        
+        uHasRoughnessMap: { value: roughnessMask !== null && roughnessMask !== undefined },
+        uHasNormalMap: { value: normalMap !== null && normalMap !== undefined },
+
         // Effect enabled state (for pass-through)
         uEffectEnabled: { value: this._enabled },
-        
+
+        // Output mode
+        // 0 = full (albedo + specular)
+        // 1 = specular only (for additive overlays like tiles)
+        uOutputMode: { value: outputMode },
+
         // Effect parameters
         uSpecularIntensity: { value: this.params.intensity },
         uRoughness: { value: this.params.roughness },
         uMetallic: { value: this.params.metallic },
-        
+
         // Lighting
         uLightDirection: { value: new THREE.Vector3(
           this.params.lightDirection.x,
@@ -698,63 +871,63 @@ export class SpecularEffect extends EffectBase {
           this.params.lightColor.g,
           this.params.lightColor.b
         ) },
-        
+
         // Camera
         uCameraPosition: { value: new THREE.Vector3() },
-        uCameraOffset: { value: new THREE.Vector2(0, 0) }, // Orthographic camera pan offset
-        
+        uCameraOffset: { value: new THREE.Vector2(0, 0) },
+
         // Time (for animation)
         uTime: { value: 0.0 },
-        
+
         // Multi-layer stripe system
         uStripeEnabled: { value: this.params.stripeEnabled },
         uStripeBlendMode: { value: this.params.stripeBlendMode },
         uParallaxStrength: { value: this.params.parallaxStrength },
         uStripeMaskThreshold: { value: this.params.stripeMaskThreshold },
-        
+
         // Layer 1
-        uStripe1Enabled:   { value: this.params.stripe1Enabled },
+        uStripe1Enabled: { value: this.params.stripe1Enabled },
         uStripe1Frequency: { value: this.params.stripe1Frequency },
-        uStripe1Speed:     { value: this.params.stripe1Speed },
-        uStripe1Angle:     { value: this.params.stripe1Angle },
-        uStripe1Width:     { value: this.params.stripe1Width },
+        uStripe1Speed: { value: this.params.stripe1Speed },
+        uStripe1Angle: { value: this.params.stripe1Angle },
+        uStripe1Width: { value: this.params.stripe1Width },
         uStripe1Intensity: { value: this.params.stripe1Intensity },
-        uStripe1Parallax:  { value: this.params.stripe1Parallax },
-        uStripe1Wave:      { value: this.params.stripe1Wave },
-        uStripe1Gaps:      { value: this.params.stripe1Gaps },
-        uStripe1Softness:  { value: this.params.stripe1Softness },
-        
+        uStripe1Parallax: { value: this.params.stripe1Parallax },
+        uStripe1Wave: { value: this.params.stripe1Wave },
+        uStripe1Gaps: { value: this.params.stripe1Gaps },
+        uStripe1Softness: { value: this.params.stripe1Softness },
+
         // Layer 2
-        uStripe2Enabled:   { value: this.params.stripe2Enabled },
+        uStripe2Enabled: { value: this.params.stripe2Enabled },
         uStripe2Frequency: { value: this.params.stripe2Frequency },
-        uStripe2Speed:     { value: this.params.stripe2Speed },
-        uStripe2Angle:     { value: this.params.stripe2Angle },
-        uStripe2Width:     { value: this.params.stripe2Width },
+        uStripe2Speed: { value: this.params.stripe2Speed },
+        uStripe2Angle: { value: this.params.stripe2Angle },
+        uStripe2Width: { value: this.params.stripe2Width },
         uStripe2Intensity: { value: this.params.stripe2Intensity },
-        uStripe2Parallax:  { value: this.params.stripe2Parallax },
-        uStripe2Wave:      { value: this.params.stripe2Wave },
-        uStripe2Gaps:      { value: this.params.stripe2Gaps },
-        uStripe2Softness:  { value: this.params.stripe2Softness },
-        
+        uStripe2Parallax: { value: this.params.stripe2Parallax },
+        uStripe2Wave: { value: this.params.stripe2Wave },
+        uStripe2Gaps: { value: this.params.stripe2Gaps },
+        uStripe2Softness: { value: this.params.stripe2Softness },
+
         // Layer 3
-        uStripe3Enabled:   { value: this.params.stripe3Enabled },
+        uStripe3Enabled: { value: this.params.stripe3Enabled },
         uStripe3Frequency: { value: this.params.stripe3Frequency },
-        uStripe3Speed:     { value: this.params.stripe3Speed },
-        uStripe3Angle:     { value: this.params.stripe3Angle },
-        uStripe3Width:     { value: this.params.stripe3Width },
+        uStripe3Speed: { value: this.params.stripe3Speed },
+        uStripe3Angle: { value: this.params.stripe3Angle },
+        uStripe3Width: { value: this.params.stripe3Width },
         uStripe3Intensity: { value: this.params.stripe3Intensity },
-        uStripe3Parallax:  { value: this.params.stripe3Parallax },
-        uStripe3Wave:      { value: this.params.stripe3Wave },
-        uStripe3Gaps:      { value: this.params.stripe3Gaps },
-        uStripe3Softness:  { value: this.params.stripe3Softness },
-        
+        uStripe3Parallax: { value: this.params.stripe3Parallax },
+        uStripe3Wave: { value: this.params.stripe3Wave },
+        uStripe3Gaps: { value: this.params.stripe3Gaps },
+        uStripe3Softness: { value: this.params.stripe3Softness },
+
         // Micro Sparkle
         uSparkleEnabled: { value: this.params.sparkleEnabled },
         uSparkleIntensity: { value: this.params.sparkleIntensity },
         uSparkleScale: { value: this.params.sparkleScale },
         uSparkleSpeed: { value: this.params.sparkleSpeed },
 
-        // Outdoor cloud specular (cloud shadows drive specular intensity outdoors)
+        // Outdoor cloud specular
         uOutdoorCloudSpecularEnabled: { value: this.params.outdoorCloudSpecularEnabled },
         uOutdoorStripeBlend: { value: this.params.outdoorStripeBlend },
         uCloudSpecularIntensity: { value: this.params.cloudSpecularIntensity },
@@ -767,13 +940,7 @@ export class SpecularEffect extends EffectBase {
         uCloudShadowMap: { value: null },
         uScreenSize: { value: new THREE.Vector2(1, 1) },
 
-        // Foundry scene darkness (0 = light, 1 = dark)
         uDarknessLevel: { value: 0.0 },
-
-        // Foundry ambient environment colors (linear RGB), approximated
-        // from canvas.environment.colors when available. These are used
-        // to tint the base albedo so our "neutral" scene brightness and
-        // color temperature more closely match Foundry's PIXI pipeline.
         uAmbientDaylight: { value: new THREE.Color(1.0, 1.0, 1.0) },
         uAmbientDarkness: { value: new THREE.Color(0.14, 0.14, 0.28) },
         uAmbientBrightest: { value: new THREE.Color(1.0, 1.0, 1.0) },
@@ -784,18 +951,20 @@ export class SpecularEffect extends EffectBase {
         lightColor: { value: new Float32Array(this.maxLights * 3) },
         lightConfig: { value: new Float32Array(this.maxLights * 4) }
       },
-      
       vertexShader: this.getVertexShader(),
       fragmentShader: this.getFragmentShader(),
-      
       side: THREE.DoubleSide,
-      transparent: false
+      transparent: !!transparent,
+      depthWrite: !!depthWrite,
+      depthTest: !!depthTest
     });
-    
-    log.debug('PBR material created');
-    
-    // Initial sync of light data to the new material
-    this.updateLightUniforms();
+
+    if (blending) {
+      mat.blending = blending;
+    }
+
+    this._materials.add(mat);
+    return mat;
   }
 
   _getFallbackAlbedoTexture() {
@@ -1001,81 +1170,89 @@ export class SpecularEffect extends EffectBase {
       this.validateShaderState(timeInfo);
     }
     
-    // Update time uniform for animation
-    this.material.uniforms.uTime.value = timeInfo.elapsed;
-    
-    // Update uniforms from parameters
-    this.material.uniforms.uSpecularIntensity.value = this.params.intensity;
-    this.material.uniforms.uRoughness.value = this.params.roughness;
-    
-    // Update light direction
-    this.material.uniforms.uLightDirection.value.set(
-      this.params.lightDirection.x,
-      this.params.lightDirection.y,
-      this.params.lightDirection.z
-    ).normalize();
-    
-    // Update light color
-    this.material.uniforms.uLightColor.value.set(
-      this.params.lightColor.r,
-      this.params.lightColor.g,
-      this.params.lightColor.b
-    );
-    
-    // Update stripe parameters
-    this.material.uniforms.uStripeEnabled.value = this.params.stripeEnabled;
-    this.material.uniforms.uStripeBlendMode.value = this.params.stripeBlendMode;
-    this.material.uniforms.uParallaxStrength.value = this.params.parallaxStrength;
-    this.material.uniforms.uStripeMaskThreshold.value = this.params.stripeMaskThreshold;
-    
-    // Update sparkle parameters
-    this.material.uniforms.uSparkleEnabled.value = this.params.sparkleEnabled;
-    this.material.uniforms.uSparkleIntensity.value = this.params.sparkleIntensity;
-    this.material.uniforms.uSparkleScale.value = this.params.sparkleScale;
-    this.material.uniforms.uSparkleSpeed.value = this.params.sparkleSpeed;
+    for (const mat of this._materials) {
+      if (!mat?.uniforms) continue;
 
-    // Outdoor cloud specular
-    if (this.material.uniforms.uOutdoorCloudSpecularEnabled) {
-      this.material.uniforms.uOutdoorCloudSpecularEnabled.value = this.params.outdoorCloudSpecularEnabled;
-      this.material.uniforms.uOutdoorStripeBlend.value = this.params.outdoorStripeBlend;
-      this.material.uniforms.uCloudSpecularIntensity.value = this.params.cloudSpecularIntensity;
+      // Update time uniform for animation
+      if (mat.uniforms.uTime) mat.uniforms.uTime.value = timeInfo.elapsed;
+
+      // Update uniforms from parameters
+      if (mat.uniforms.uSpecularIntensity) mat.uniforms.uSpecularIntensity.value = this.params.intensity;
+      if (mat.uniforms.uRoughness) mat.uniforms.uRoughness.value = this.params.roughness;
+
+      // Update light direction
+      if (mat.uniforms.uLightDirection?.value?.set) {
+        mat.uniforms.uLightDirection.value.set(
+          this.params.lightDirection.x,
+          this.params.lightDirection.y,
+          this.params.lightDirection.z
+        ).normalize();
+      }
+
+      // Update light color
+      if (mat.uniforms.uLightColor?.value?.set) {
+        mat.uniforms.uLightColor.value.set(
+          this.params.lightColor.r,
+          this.params.lightColor.g,
+          this.params.lightColor.b
+        );
+      }
+
+      // Update stripe parameters
+      if (mat.uniforms.uStripeEnabled) mat.uniforms.uStripeEnabled.value = this.params.stripeEnabled;
+      if (mat.uniforms.uStripeBlendMode) mat.uniforms.uStripeBlendMode.value = this.params.stripeBlendMode;
+      if (mat.uniforms.uParallaxStrength) mat.uniforms.uParallaxStrength.value = this.params.parallaxStrength;
+      if (mat.uniforms.uStripeMaskThreshold) mat.uniforms.uStripeMaskThreshold.value = this.params.stripeMaskThreshold;
+
+      // Update sparkle parameters
+      if (mat.uniforms.uSparkleEnabled) mat.uniforms.uSparkleEnabled.value = this.params.sparkleEnabled;
+      if (mat.uniforms.uSparkleIntensity) mat.uniforms.uSparkleIntensity.value = this.params.sparkleIntensity;
+      if (mat.uniforms.uSparkleScale) mat.uniforms.uSparkleScale.value = this.params.sparkleScale;
+      if (mat.uniforms.uSparkleSpeed) mat.uniforms.uSparkleSpeed.value = this.params.sparkleSpeed;
+
+      // Outdoor cloud specular
+      if (mat.uniforms.uOutdoorCloudSpecularEnabled) {
+        mat.uniforms.uOutdoorCloudSpecularEnabled.value = this.params.outdoorCloudSpecularEnabled;
+      }
+      if (mat.uniforms.uOutdoorStripeBlend) mat.uniforms.uOutdoorStripeBlend.value = this.params.outdoorStripeBlend;
+      if (mat.uniforms.uCloudSpecularIntensity) mat.uniforms.uCloudSpecularIntensity.value = this.params.cloudSpecularIntensity;
+
+      // Layer 1
+      if (mat.uniforms.uStripe1Enabled) mat.uniforms.uStripe1Enabled.value = this.params.stripe1Enabled;
+      if (mat.uniforms.uStripe1Frequency) mat.uniforms.uStripe1Frequency.value = this.params.stripe1Frequency;
+      if (mat.uniforms.uStripe1Speed) mat.uniforms.uStripe1Speed.value = this.params.stripe1Speed;
+      if (mat.uniforms.uStripe1Angle) mat.uniforms.uStripe1Angle.value = this.params.stripe1Angle;
+      if (mat.uniforms.uStripe1Width) mat.uniforms.uStripe1Width.value = this.params.stripe1Width;
+      if (mat.uniforms.uStripe1Intensity) mat.uniforms.uStripe1Intensity.value = this.params.stripe1Intensity;
+      if (mat.uniforms.uStripe1Parallax) mat.uniforms.uStripe1Parallax.value = this.params.stripe1Parallax;
+      if (mat.uniforms.uStripe1Wave) mat.uniforms.uStripe1Wave.value = this.params.stripe1Wave;
+      if (mat.uniforms.uStripe1Gaps) mat.uniforms.uStripe1Gaps.value = this.params.stripe1Gaps;
+      if (mat.uniforms.uStripe1Softness) mat.uniforms.uStripe1Softness.value = this.params.stripe1Softness;
+
+      // Layer 2
+      if (mat.uniforms.uStripe2Enabled) mat.uniforms.uStripe2Enabled.value = this.params.stripe2Enabled;
+      if (mat.uniforms.uStripe2Frequency) mat.uniforms.uStripe2Frequency.value = this.params.stripe2Frequency;
+      if (mat.uniforms.uStripe2Speed) mat.uniforms.uStripe2Speed.value = this.params.stripe2Speed;
+      if (mat.uniforms.uStripe2Angle) mat.uniforms.uStripe2Angle.value = this.params.stripe2Angle;
+      if (mat.uniforms.uStripe2Width) mat.uniforms.uStripe2Width.value = this.params.stripe2Width;
+      if (mat.uniforms.uStripe2Intensity) mat.uniforms.uStripe2Intensity.value = this.params.stripe2Intensity;
+      if (mat.uniforms.uStripe2Parallax) mat.uniforms.uStripe2Parallax.value = this.params.stripe2Parallax;
+      if (mat.uniforms.uStripe2Wave) mat.uniforms.uStripe2Wave.value = this.params.stripe2Wave;
+      if (mat.uniforms.uStripe2Gaps) mat.uniforms.uStripe2Gaps.value = this.params.stripe2Gaps;
+      if (mat.uniforms.uStripe2Softness) mat.uniforms.uStripe2Softness.value = this.params.stripe2Softness;
+
+      // Layer 3
+      if (mat.uniforms.uStripe3Enabled) mat.uniforms.uStripe3Enabled.value = this.params.stripe3Enabled;
+      if (mat.uniforms.uStripe3Frequency) mat.uniforms.uStripe3Frequency.value = this.params.stripe3Frequency;
+      if (mat.uniforms.uStripe3Speed) mat.uniforms.uStripe3Speed.value = this.params.stripe3Speed;
+      if (mat.uniforms.uStripe3Angle) mat.uniforms.uStripe3Angle.value = this.params.stripe3Angle;
+      if (mat.uniforms.uStripe3Width) mat.uniforms.uStripe3Width.value = this.params.stripe3Width;
+      if (mat.uniforms.uStripe3Intensity) mat.uniforms.uStripe3Intensity.value = this.params.stripe3Intensity;
+      if (mat.uniforms.uStripe3Parallax) mat.uniforms.uStripe3Parallax.value = this.params.stripe3Parallax;
+      if (mat.uniforms.uStripe3Wave) mat.uniforms.uStripe3Wave.value = this.params.stripe3Wave;
+      if (mat.uniforms.uStripe3Gaps) mat.uniforms.uStripe3Gaps.value = this.params.stripe3Gaps;
+      if (mat.uniforms.uStripe3Softness) mat.uniforms.uStripe3Softness.value = this.params.stripe3Softness;
     }
-    
-    // Layer 1
-    this.material.uniforms.uStripe1Enabled.value   = this.params.stripe1Enabled;
-    this.material.uniforms.uStripe1Frequency.value = this.params.stripe1Frequency;
-    this.material.uniforms.uStripe1Speed.value     = this.params.stripe1Speed;
-    this.material.uniforms.uStripe1Angle.value     = this.params.stripe1Angle;
-    this.material.uniforms.uStripe1Width.value     = this.params.stripe1Width;
-    this.material.uniforms.uStripe1Intensity.value = this.params.stripe1Intensity;
-    this.material.uniforms.uStripe1Parallax.value  = this.params.stripe1Parallax;
-    this.material.uniforms.uStripe1Wave.value      = this.params.stripe1Wave;
-    this.material.uniforms.uStripe1Gaps.value      = this.params.stripe1Gaps;
-    this.material.uniforms.uStripe1Softness.value  = this.params.stripe1Softness;
-    
-    // Layer 2
-    this.material.uniforms.uStripe2Enabled.value   = this.params.stripe2Enabled;
-    this.material.uniforms.uStripe2Frequency.value = this.params.stripe2Frequency;
-    this.material.uniforms.uStripe2Speed.value     = this.params.stripe2Speed;
-    this.material.uniforms.uStripe2Angle.value     = this.params.stripe2Angle;
-    this.material.uniforms.uStripe2Width.value     = this.params.stripe2Width;
-    this.material.uniforms.uStripe2Intensity.value = this.params.stripe2Intensity;
-    this.material.uniforms.uStripe2Parallax.value  = this.params.stripe2Parallax;
-    this.material.uniforms.uStripe2Wave.value      = this.params.stripe2Wave;
-    this.material.uniforms.uStripe2Gaps.value      = this.params.stripe2Gaps;
-    this.material.uniforms.uStripe2Softness.value  = this.params.stripe2Softness;
-    
-    // Layer 3
-    this.material.uniforms.uStripe3Enabled.value   = this.params.stripe3Enabled;
-    this.material.uniforms.uStripe3Frequency.value = this.params.stripe3Frequency;
-    this.material.uniforms.uStripe3Speed.value     = this.params.stripe3Speed;
-    this.material.uniforms.uStripe3Angle.value     = this.params.stripe3Angle;
-    this.material.uniforms.uStripe3Width.value     = this.params.stripe3Width;
-    this.material.uniforms.uStripe3Intensity.value = this.params.stripe3Intensity;
-    this.material.uniforms.uStripe3Parallax.value  = this.params.stripe3Parallax;
-    this.material.uniforms.uStripe3Wave.value      = this.params.stripe3Wave;
-    this.material.uniforms.uStripe3Gaps.value      = this.params.stripe3Gaps;
-    this.material.uniforms.uStripe3Softness.value  = this.params.stripe3Softness;
 
     // Update Foundry darkness level and ambient environment colors
     try {
@@ -1087,12 +1264,18 @@ export class SpecularEffect extends EffectBase {
         if (le && typeof le.getEffectiveDarkness === 'function') {
           darkness = le.getEffectiveDarkness();
         }
-        this.material.uniforms.uDarknessLevel.value = darkness;
+        for (const mat of this._materials) {
+          if (mat?.uniforms?.uDarknessLevel) {
+            mat.uniforms.uDarknessLevel.value = darkness;
+          }
+        }
       }
 
       const colors = env?.colors;
       if (colors) {
-        const uniforms = this.material.uniforms;
+        for (const mat of this._materials) {
+          const uniforms = mat?.uniforms;
+          if (!uniforms) continue;
 
         const applyColor = (src, targetColor) => {
           if (!src || !targetColor) return;
@@ -1114,9 +1297,10 @@ export class SpecularEffect extends EffectBase {
           targetColor.setRGB(r, g, b);
         };
 
-        applyColor(colors.ambientDaylight,  uniforms.uAmbientDaylight.value);
-        applyColor(colors.ambientDarkness,  uniforms.uAmbientDarkness.value);
-        applyColor(colors.ambientBrightest, uniforms.uAmbientBrightest.value);
+          applyColor(colors.ambientDaylight,  uniforms.uAmbientDaylight?.value);
+          applyColor(colors.ambientDarkness,  uniforms.uAmbientDarkness?.value);
+          applyColor(colors.ambientBrightest, uniforms.uAmbientBrightest?.value);
+        }
       }
     } catch (e) {
       // If canvas or environment are not ready, keep previous values.
@@ -1134,22 +1318,26 @@ export class SpecularEffect extends EffectBase {
     
     // Update camera position for view-dependent effects
     // Safety check: ensure camera position is valid
-    if (isFinite(camera.position.x) && isFinite(camera.position.y) && isFinite(camera.position.z)) {
-      this.material.uniforms.uCameraPosition.value.copy(camera.position);
-    } else {
-      log.warn('Camera position contains NaN/Infinity, using fallback');
-      this.material.uniforms.uCameraPosition.value.set(0, 0, 100);
+    for (const mat of this._materials) {
+      if (!mat?.uniforms?.uCameraPosition?.value) continue;
+      if (isFinite(camera.position.x) && isFinite(camera.position.y) && isFinite(camera.position.z)) {
+        mat.uniforms.uCameraPosition.value.copy(camera.position);
+      } else {
+        log.warn('Camera position contains NaN/Infinity, using fallback');
+        mat.uniforms.uCameraPosition.value.set(0, 0, 100);
+      }
     }
     
     // Update uCameraOffset for parallax effects
-    if (camera.isPerspectiveCamera) {
-      // For perspective camera, use camera position as offset
-      this.material.uniforms.uCameraOffset.value.set(camera.position.x, camera.position.y);
-    } else if (camera.isOrthographicCamera) {
-      // For orthographic cameras, track the frustum center (actual pan position)
-      const centerX = (camera.left + camera.right) / 2;
-      const centerY = (camera.top + camera.bottom) / 2;
-      this.material.uniforms.uCameraOffset.value.set(centerX, centerY);
+    for (const mat of this._materials) {
+      if (!mat?.uniforms?.uCameraOffset?.value?.set) continue;
+      if (camera.isPerspectiveCamera) {
+        mat.uniforms.uCameraOffset.value.set(camera.position.x, camera.position.y);
+      } else if (camera.isOrthographicCamera) {
+        const centerX = (camera.left + camera.right) / 2;
+        const centerY = (camera.top + camera.bottom) / 2;
+        mat.uniforms.uCameraOffset.value.set(centerX, centerY);
+      }
     }
 
     // Bind CloudEffect shadow texture for sun-break specular boost.
@@ -1157,10 +1345,14 @@ export class SpecularEffect extends EffectBase {
     // render target which may be recreated/resized.
     try {
       const THREE = window.THREE;
-      if (THREE && this.material.uniforms.uScreenSize) {
+      if (THREE) {
         if (!this._tempScreenSize) this._tempScreenSize = new THREE.Vector2();
         renderer.getDrawingBufferSize(this._tempScreenSize);
-        this.material.uniforms.uScreenSize.value.set(this._tempScreenSize.x, this._tempScreenSize.y);
+        for (const mat of this._materials) {
+          if (mat?.uniforms?.uScreenSize?.value?.set) {
+            mat.uniforms.uScreenSize.value.set(this._tempScreenSize.x, this._tempScreenSize.y);
+          }
+        }
 
         const mm = window.MapShine?.maskManager;
         const tex = mm ? mm.getTexture('cloudShadow.screen') : null;
@@ -1170,41 +1362,40 @@ export class SpecularEffect extends EffectBase {
           const cloud = window.MapShine?.cloudEffect;
           const fallbackTex = cloud?.cloudShadowTarget?.texture || null;
           hasCloud = !!(cloud && cloud.enabled && fallbackTex);
-          if (this.material.uniforms.uCloudShadowMap) {
-            this.material.uniforms.uCloudShadowMap.value = hasCloud ? fallbackTex : null;
-          }
-          if (this.material.uniforms.uHasCloudShadowMap) {
-            this.material.uniforms.uHasCloudShadowMap.value = hasCloud;
+          for (const mat of this._materials) {
+            if (mat?.uniforms?.uCloudShadowMap) mat.uniforms.uCloudShadowMap.value = hasCloud ? fallbackTex : null;
+            if (mat?.uniforms?.uHasCloudShadowMap) mat.uniforms.uHasCloudShadowMap.value = hasCloud;
           }
         }
 
-        if (this.material.uniforms.uHasCloudShadowMap) {
-          this.material.uniforms.uHasCloudShadowMap.value = hasCloud;
-        }
-        if (this.material.uniforms.uCloudShadowMap) {
-          this.material.uniforms.uCloudShadowMap.value = hasCloud ? (tex || this.material.uniforms.uCloudShadowMap.value) : null;
+        for (const mat of this._materials) {
+          if (mat?.uniforms?.uHasCloudShadowMap) mat.uniforms.uHasCloudShadowMap.value = hasCloud;
+          if (mat?.uniforms?.uCloudShadowMap) {
+            mat.uniforms.uCloudShadowMap.value = hasCloud ? (tex || mat.uniforms.uCloudShadowMap.value) : null;
+          }
         }
 
-        if (this.material.uniforms.uRoofMap && this.material.uniforms.uRoofMaskEnabled && this.material.uniforms.uSceneBounds) {
-          const roofTex = weatherController?.roofMap || null;
-          this.material.uniforms.uRoofMap.value = roofTex;
-          this.material.uniforms.uRoofMaskEnabled.value = roofTex ? 1.0 : 0.0;
-
-          const d = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
-          if (d) {
+        const roofTex = weatherController?.roofMap || null;
+        const d = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
+        for (const mat of this._materials) {
+          if (mat?.uniforms?.uRoofMap) mat.uniforms.uRoofMap.value = roofTex;
+          if (mat?.uniforms?.uRoofMaskEnabled) mat.uniforms.uRoofMaskEnabled.value = roofTex ? 1.0 : 0.0;
+          if (d && mat?.uniforms?.uSceneBounds?.value?.set) {
             const sx = d.sceneX ?? 0;
             const sy = d.sceneY ?? 0;
             const sw = d.sceneWidth ?? d.width ?? 1;
             const sh = d.sceneHeight ?? d.height ?? 1;
-            this.material.uniforms.uSceneBounds.value.set(sx, sy, sw, sh);
+            mat.uniforms.uSceneBounds.value.set(sx, sy, sw, sh);
           }
         }
       }
     } catch (e) {
-      if (this.material.uniforms.uHasCloudShadowMap) this.material.uniforms.uHasCloudShadowMap.value = false;
-      if (this.material.uniforms.uCloudShadowMap) this.material.uniforms.uCloudShadowMap.value = null;
-      if (this.material.uniforms.uRoofMap) this.material.uniforms.uRoofMap.value = null;
-      if (this.material.uniforms.uRoofMaskEnabled) this.material.uniforms.uRoofMaskEnabled.value = 0.0;
+      for (const mat of this._materials) {
+        if (mat?.uniforms?.uHasCloudShadowMap) mat.uniforms.uHasCloudShadowMap.value = false;
+        if (mat?.uniforms?.uCloudShadowMap) mat.uniforms.uCloudShadowMap.value = null;
+        if (mat?.uniforms?.uRoofMap) mat.uniforms.uRoofMap.value = null;
+        if (mat?.uniforms?.uRoofMaskEnabled) mat.uniforms.uRoofMaskEnabled.value = 0.0;
+      }
     }
     
     // Material is already applied to mesh, so normal scene render handles it
@@ -1269,10 +1460,19 @@ export class SpecularEffect extends EffectBase {
     Hooks.off('updateAmbientLight', this.onLightUpdatedBound);
     Hooks.off('deleteAmbientLight', this.onLightDeletedBound);
 
-    if (this.material) {
-      this.material.dispose();
-      this.material = null;
+    for (const tileId of Array.from(this._tileOverlays.keys())) {
+      this.unbindTileSprite(tileId);
     }
+
+    for (const mat of Array.from(this._materials)) {
+      try {
+        mat?.dispose?.();
+      } catch (_) {
+      }
+    }
+    this._materials.clear();
+    this.material = null;
+    this._scene = null;
     log.info('Specular effect disposed');
   }
 
@@ -1312,6 +1512,8 @@ export class SpecularEffect extends EffectBase {
       uniform bool uHasNormalMap;
       
       uniform bool uEffectEnabled;
+
+      uniform float uOutputMode;
       
       uniform float uSpecularIntensity;
       uniform float uRoughness;
@@ -1617,12 +1819,17 @@ export class SpecularEffect extends EffectBase {
         vec3 ambientTint = mix(uAmbientDaylight, uAmbientDarkness, safeDarkness);
         
         // If effect is disabled, just render the base albedo with standard lighting
+        // (or transparent black if we're in specular-only mode).
         if (!uEffectEnabled) {
           // Tint the base albedo by the ambient environment so the Three.js
           // base plane lives in roughly the same color/brightness space as
           // Foundry's background lighting pass.
-          vec3 baseAlbedo = albedo.rgb * ambientTint;
-          gl_FragColor = vec4(baseAlbedo, albedo.a);
+          if (uOutputMode > 0.5) {
+            gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0);
+          } else {
+            vec3 baseAlbedo = albedo.rgb * ambientTint;
+            gl_FragColor = vec4(baseAlbedo, albedo.a);
+          }
           return;
         }
         
@@ -1811,10 +2018,14 @@ export class SpecularEffect extends EffectBase {
         // finalColor = vec3(layer3); // Show layer 3 only
         // finalColor = specularMask.rgb; // Show specular mask only
 
-        // Apply tone mapping to compress bright highlights and avoid clipping
-        finalColor = reinhardJodie(finalColor);
-        
-        gl_FragColor = vec4(finalColor, albedo.a);
+        // Output routing:
+        // - Full mode: albedo + specular (tone mapped)
+        // - Specular-only: specular only (tone mapped), intended for additive overlays
+        vec3 outColor = (uOutputMode > 0.5) ? litSpecular : finalColor;
+        outColor = reinhardJodie(outColor);
+
+        float outA = (uOutputMode > 0.5) ? clamp(specularStrength, 0.0, 1.0) : albedo.a;
+        gl_FragColor = vec4(outColor, outA);
       }
     `;
   }

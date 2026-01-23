@@ -1324,6 +1324,7 @@ async function createThreeCanvas(scene) {
 
     // Step 4b: Initialize tile manager
     tileManager = new TileManager(threeScene);
+    tileManager.setSpecularEffect(specularEffect);
     tileManager.initialize();
     tileManager.syncAllTiles();
     tileManager.setWindowLightEffect(windowLightEffect); // Link for overhead tile lighting

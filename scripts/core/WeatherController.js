@@ -44,9 +44,9 @@ export class WeatherController {
     this.currentState = {
       precipitation: 0.0,
       precipType: PrecipitationType.NONE,
-      cloudCover: 0.0,
-      windSpeed: 0.18,
-      windDirection: { x: 0, y: -1 }, // 90deg, upgraded to Vector2 in initialize() (Y-down world)
+      cloudCover: 0.26,
+      windSpeed: 1.0,
+      windDirection: { x: -0.992546151641322, y: -0.12186934340514748 }, // 173deg, upgraded to Vector2 in initialize() (Y-down world)
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0
@@ -73,9 +73,9 @@ export class WeatherController {
     this.targetState = { 
       precipitation: 0.88,
       precipType: PrecipitationType.NONE,
-      cloudCover: 0.0,
-      windSpeed: 0.18,
-      windDirection: { x: 0, y: -1 },
+      cloudCover: 0.26,
+      windSpeed: 1.0,
+      windDirection: { x: -0.992546151641322, y: -0.12186934340514748 },
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0
@@ -97,13 +97,13 @@ export class WeatherController {
     this.presetTransitionDurationSeconds = undefined;
 
     // Wind Gust System
-    this.gustWaitMin = 4.0;   // Seconds to wait between gusts (min)
-    this.gustWaitMax = 42.0;  // Seconds to wait between gusts (max)
-    this.gustDuration = 9.0;  // Duration of a gust
+    this.gustWaitMin = 1.0;   // Seconds to wait between gusts (min)
+    this.gustWaitMax = 11.5;  // Seconds to wait between gusts (max)
+    this.gustDuration = 3.9;  // Duration of a gust
     this.gustTimer = 0;       // Countdown timer
     this.isGusting = false;   // Current state
     this.currentGustStrength = 0; // Smoothed gust value
-    this.gustStrength = 1.0;      // Multiplier for how strong gusts are compared to base wind
+    this.gustStrength = 2.5;      // Multiplier for how strong gusts are compared to base wind
 
     // Time of Day (0-24)
     this.timeOfDay = 6.6; // Tuned time of day
@@ -204,7 +204,7 @@ export class WeatherController {
 
     // Per-system tuning parameters for precipitation visuals
     this.rainTuning = {
-      intensityScale: 2.85,
+      intensityScale: 1.0,
       streakLength: 0.18,
       dropSize: 3.1,
       dropSizeMin: 1.4,
@@ -673,6 +673,24 @@ export class WeatherController {
     this._scheduleSaveWeatherSnapshot();
   }
 
+  /**
+   * Persist the current weather snapshot to the scene immediately (no debounce).
+   * Used by scene publishing to ensure compendium exports reproduce the current weather exactly.
+   * @returns {Promise<void>}
+   * @public
+   */
+  async saveWeatherSnapshotNow() {
+    try {
+      if (this._weatherSnapshotSaveTimeout) {
+        clearTimeout(this._weatherSnapshotSaveTimeout);
+        this._weatherSnapshotSaveTimeout = null;
+      }
+      await this._saveWeatherSnapshotToScene();
+    } catch (e) {
+      log.warn('Failed to save weather snapshot immediately:', e);
+    }
+  }
+
   async _saveWeatherSnapshotToScene() {
     try {
       if (!this._canEditSceneFlags()) return;
@@ -799,6 +817,40 @@ export class WeatherController {
       log.info(`Loaded weather snapshot from scene flags (updatedAt=${stored.updatedAt ?? 'unknown'})`);
     } catch (e) {
       log.warn('Failed to load weather snapshot from scene flags:', e);
+    }
+  }
+
+  /**
+   * Persist the current dynamic weather state to the scene immediately (no debounce).
+   * @returns {Promise<void>}
+   * @public
+   */
+  async saveDynamicStateNow() {
+    try {
+      if (this._dynamicStateSaveTimeout) {
+        clearTimeout(this._dynamicStateSaveTimeout);
+        this._dynamicStateSaveTimeout = null;
+      }
+      await this._saveDynamicStateToScene();
+    } catch (e) {
+      // Safe no-op.
+    }
+  }
+
+  /**
+   * Persist the queued/manual transition target to the scene immediately (no debounce).
+   * @returns {Promise<void>}
+   * @public
+   */
+  async saveQueuedTransitionTargetNow() {
+    try {
+      if (this._queuedTransitionSaveTimeout) {
+        clearTimeout(this._queuedTransitionSaveTimeout);
+        this._queuedTransitionSaveTimeout = null;
+      }
+      await this._saveQueuedTransitionTargetToScene();
+    } catch (e) {
+      // Safe no-op.
     }
   }
 
@@ -1851,6 +1903,45 @@ export class WeatherController {
    * @param {number} dt - Delta time
    * @private
    */
+  _hashFloat01(n) {
+    // Deterministic pseudo-random hash -> [0,1). Keep this allocation-free and fast.
+    // n is expected to be an integer (or close to it).
+    const s = Math.sin(n * 127.1 + 311.7) * 43758.5453123;
+    return s - Math.floor(s);
+  }
+
+  _valueNoise1D01(x) {
+    // 1D value noise in [0,1] using smooth interpolation between hashed lattice points.
+    const x0 = Math.floor(x);
+    const xf = x - x0;
+    const u = xf * xf * (3.0 - 2.0 * xf); // smoothstep
+    const a = this._hashFloat01(x0);
+    const b = this._hashFloat01(x0 + 1);
+    return a + (b - a) * u;
+  }
+
+  _fbm1D01(x, octaves = 3) {
+    // Fractal Brownian Motion (FBM) over 1D value noise -> [0,1].
+    // Using lacunarity=2, gain=0.5 to approximate pink-ish noise.
+    let sum = 0.0;
+    let amp = 1.0;
+    let freq = 1.0;
+    let norm = 0.0;
+
+    for (let i = 0; i < octaves; i++) {
+      sum += this._valueNoise1D01(x * freq) * amp;
+      norm += amp;
+      amp *= 0.5;
+      freq *= 2.0;
+    }
+
+    return norm > 0 ? (sum / norm) : 0.0;
+  }
+
+  _getPinkNoise01(time) {
+    return this._fbm1D01(time, 3);
+  }
+
   _applyVariability(time, dt) {
     const baseVar = this.variability;
 
@@ -1888,20 +1979,14 @@ export class WeatherController {
     
     // 1. Base Meander (Always active, low frequency)
     // Gives the wind a "living" feeling even when not gusting
-    const meander = Math.sin(time * 0.2 + this.noiseOffset) * baseVar * 0.1;
+    const meanderNoiseSigned = (this._getPinkNoise01(time * 0.06 + this.noiseOffset) * 2.0 - 1.0);
+    const meander = meanderNoiseSigned * baseVar * 0.1;
 
     // 2. Gust Noise (High frequency turbulence)
     // Only audible/visible when gust strength is high
-    // Composite sine waves for "ragged" feel
-    const gustNoiseRaw = (
-      Math.sin(time * 3.0 + this.noiseOffset * 2) * 0.5 + 
-      Math.cos(time * 7.0 + this.noiseOffset * 3) * 0.25 +
-      Math.sin(time * 1.3) * 0.25
-    );
-    
-    // Convert gust noise into a 0..1 envelope so gusts can only ADD energy.
-    // This prevents gusts from temporarily cancelling wind (which can stall wind-driven effects).
-    const gustNoise01 = THREE.MathUtils.clamp(gustNoiseRaw * 0.5 + 0.5, 0.0, 1.0);
+    // FBM gives organic "texture" without the pendulum wobble of sine waves.
+    // Keep this as a 0..1 envelope so gusts can only ADD energy.
+    const gustNoise01 = this._getPinkNoise01(time * 0.9 + this.noiseOffset * 10.0);
     // Multiply by baseVar and gustStrength so the overall "Variability" slider and wind UI both scale this.
     const gustComponent = gustNoise01 * this.currentGustStrength * (baseVar * 2.0) * this.gustStrength;
 
@@ -1927,7 +2012,8 @@ export class WeatherController {
     // Wind Direction = Target + Meander
     // IMPORTANT: do NOT integrate from currentState each frame (random-walk drift can eventually reverse wind).
     // Instead, treat variability as a bounded perturbation around the *target* direction.
-    const dirMeander = Math.cos(time * 0.15 + this.noiseOffset) * baseVar * 0.5; // Radians
+    const dirNoiseSigned = (this._getPinkNoise01(time * 0.04 + this.noiseOffset * 3.0 + 100.0) * 2.0 - 1.0);
+    const dirMeander = dirNoiseSigned * baseVar * 0.5; // Radians
     // windDirection is stored in Foundry/world coordinates (Y-down).
     // Convert to a math angle (Y-up) for perturbation, then convert back.
     const baseAngle = Math.atan2(-this.targetState.windDirection.y, this.targetState.windDirection.x);
@@ -2187,7 +2273,7 @@ export class WeatherController {
         },
         cloudCover: {
           label: 'Cloud Cover',
-          default: 0.0,
+          default: 0.26,
           min: 0.0,
           max: 1.0,
           step: 0.01,
@@ -2196,7 +2282,7 @@ export class WeatherController {
         // Wind base state (moved into dedicated Wind folder)
         windSpeed: {
           label: 'Base Wind Speed',
-          default: 0.18,
+          default: 1.0,
           min: 0.0,
           max: 1.0,
           step: 0.01,
@@ -2204,7 +2290,7 @@ export class WeatherController {
         },
         windDirection: {
           label: 'Wind Direction (deg)',
-          default: 90.0,
+          default: 173.0,
           min: 0.0,
           max: 360.0,
           step: 1.0,
@@ -2239,7 +2325,7 @@ export class WeatherController {
         // Wind / Gust tuning
         gustWaitMin: {
           label: 'Gust Pause Min (s)',
-          default: 4.0,
+          default: 1.0,
           min: 0.0,
           max: 60.0,
           step: 0.5,
@@ -2247,7 +2333,7 @@ export class WeatherController {
         },
         gustWaitMax: {
           label: 'Gust Pause Max (s)',
-          default: 42.0,
+          default: 11.5,
           min: 0.0,
           max: 120.0,
           step: 0.5,
@@ -2255,7 +2341,7 @@ export class WeatherController {
         },
         gustDuration: {
           label: 'Gust Duration (s)',
-          default: 9.0,
+          default: 3.9,
           min: 0.1,
           max: 30.0,
           step: 0.1,
@@ -2263,7 +2349,7 @@ export class WeatherController {
         },
         gustStrength: {
           label: 'Gust Strength',
-          default: 1.0,
+          default: 2.5,
           min: 0.0,
           max: 3.0,
           step: 0.05,
@@ -2273,7 +2359,7 @@ export class WeatherController {
         // Rain tuning
         rainIntensityScale: {
           label: 'Rain Intensity Scale',
-          default: 2.85,
+          default: 1.0,
           min: 0.0,
           max: 6.0,
           step: 0.05,

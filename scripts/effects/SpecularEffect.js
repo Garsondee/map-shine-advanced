@@ -60,7 +60,7 @@ export class SpecularEffect extends EffectBase {
       textureStatus: 'Searching...',
       hasSpecularMask: true,
 
-      intensity: 0.75,           // Default shine intensity
+      intensity: 0.83,           // Default shine intensity
       roughness: 0.0,
       lightDirection: { x: 0.6, y: 0.4, z: 0.7 },
       lightColor: { r: 1.0, g: 1.0, b: 1.0 },
@@ -116,7 +116,7 @@ export class SpecularEffect extends EffectBase {
       // Outdoor Cloud Specular (cloud shadows drive specular intensity outdoors)
       outdoorCloudSpecularEnabled: true,
       outdoorStripeBlend: 0.8,     // How much stripes show outdoors (0=none, 1=full)
-      cloudSpecularIntensity: 3.0  // Intensity of cloud-driven specular outdoors
+      cloudSpecularIntensity: 0.37  // Intensity of cloud-driven specular outdoors
     };
 
     this._tempScreenSize = null;

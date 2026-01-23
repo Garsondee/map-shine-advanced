@@ -145,13 +145,13 @@ export class CloudEffect extends EffectBase {
       cloudTopEdgeHighlight: 0,
 
       cloudTopPeakDetailEnabled: false,
-      cloudTopPeakDetailStrength: 0.02,
-      cloudTopPeakDetailScale: 61.5,
+      cloudTopPeakDetailStrength: 0.32,
+      cloudTopPeakDetailScale: 92.5,
       cloudTopPeakDetailSpeed: 0.08,
       cloudTopPeakDetailStart: 0.14,
       cloudTopPeakDetailEnd: 0.82,
 
-      cloudTopSoftKnee: 2.6,
+      cloudTopSoftKnee: 1.8,
 
       // Shadow settings
       shadowOpacity: 0.7,     // How dark cloud shadows are
@@ -165,17 +165,17 @@ export class CloudEffect extends EffectBase {
       cloudTopFadeEnd: 0.39,   // Zoom level where cloud tops are fully visible
 
       // Wind drift
-      windInfluence: 1.5,     // How much wind affects cloud movement
+      windInfluence: 1.33,     // How much wind affects cloud movement
       driftSpeed: 0.01,       // Base drift speed multiplier
       minDriftSpeed: 0.002,
 
-      driftResponsiveness: 1.0,
+      driftResponsiveness: 0.4,
       driftMaxSpeed: 0.5,
 
       layerParallaxBase: 1.0,
 
       layer1Enabled: true,
-      layer1Opacity: 0.23,
+      layer1Opacity: 0.35,
       layer1Coverage: 0.33,
       layer1Scale: 1.34,
       layer1ParallaxMult: 0,
@@ -183,8 +183,8 @@ export class CloudEffect extends EffectBase {
       layer1DirDeg: -1.7,
 
       layer2Enabled: true,
-      layer2Opacity: 0.25,
-      layer2Coverage: 0.72,
+      layer2Opacity: 0.7,
+      layer2Coverage: 0.57,
       layer2Scale: 1.22,
       layer2ParallaxMult: 0,
       layer2SpeedMult: 1.07,

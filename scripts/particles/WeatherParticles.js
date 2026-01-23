@@ -4556,7 +4556,12 @@ export class WeatherParticles {
       u.uWaterMaskEnabled.value = (waterEnabled && !!waterTex) ? 1.0 : 0.0;
       u.uWaterMaskThreshold.value = this._waterMaskThreshold;
       u.uWaterMask.value = waterTex;
-      if (u.uWaterMaskFlipY) u.uWaterMaskFlipY.value = (waterTex && waterTex.flipY === true) ? 1.0 : 0.0;
+      // IMPORTANT: Keep shader-side _Water sampling orientation consistent with CPU-side
+      // point generation (waterFlipV) and with WaterEffectV2/MaskManager metadata.
+      // Using `waterTex.flipY` here can be incorrect depending on how the underlying
+      // ImageBitmap was decoded/uploaded, which results in foam.webp particles being
+      // clipped against a vertically inverted mask.
+      if (u.uWaterMaskFlipY) u.uWaterMaskFlipY.value = waterFlipV ? 1.0 : 0.0;
 
       if (u.uHasWaterOccluderAlpha && u.tWaterOccluderAlpha) {
         u.tWaterOccluderAlpha.value = waterOccTex;
@@ -4576,7 +4581,7 @@ export class WeatherParticles {
       u.uWaterMaskEnabled.value = (waterEnabled && !!waterTex) ? 1.0 : 0.0;
       u.uWaterMaskThreshold.value = this._waterMaskThreshold;
       u.uWaterMask.value = waterTex;
-      if (u.uWaterMaskFlipY) u.uWaterMaskFlipY.value = (waterTex && waterTex.flipY === true) ? 1.0 : 0.0;
+      if (u.uWaterMaskFlipY) u.uWaterMaskFlipY.value = waterFlipV ? 1.0 : 0.0;
 
       if (u.uHasWaterOccluderAlpha && u.tWaterOccluderAlpha) {
         u.tWaterOccluderAlpha.value = waterOccTex;

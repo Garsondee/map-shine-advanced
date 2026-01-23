@@ -23,7 +23,7 @@ export class MaskDebugEffect extends EffectBase {
       enabled: false,
       maskId: 'water.scene',
       sampleSpace: 'auto',
-      channel: 'r',
+      channel: 'rgb',
       invert: false,
       thresholdEnabled: false,
       thresholdLo: 0.0,

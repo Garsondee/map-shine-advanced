@@ -48,36 +48,36 @@ export class WaterEffectV2 extends EffectBase {
       sdfRangePx: 126,
       shoreWidthPx: 50,
 
-      waveScale: 28,
-      waveSpeed: 0.25,
-      waveStrength: 0.25,
+      waveScale: 10,
+      waveSpeed: 0.34,
+      waveStrength: 1.09,
 
       // Wave texture enhancement controls
       // Domain warp reduces visible repetition across large water bodies.
-      waveWarpLargeStrength: 0.25,
-      waveWarpSmallStrength: 0.1,
-      waveWarpMicroStrength: 0.03,
+      waveWarpLargeStrength: 0.26,
+      waveWarpSmallStrength: 0.11,
+      waveWarpMicroStrength: 0.035,
       waveWarpTimeSpeed: 0.015,
 
       // Slow evolution of wave "sea state" (alternating calmer/rougher).
       waveEvolutionEnabled: true,
-      waveEvolutionSpeed: 0.5,
+      waveEvolutionSpeed: 0.17,
       waveEvolutionAmount: 1,
-      waveEvolutionScale: 0.5,
+      waveEvolutionScale: 1,
 
       waveSpeedUseWind: true,
-      waveSpeedWindMinFactor: 0.05,
+      waveSpeedWindMinFactor: 1,
       waveStrengthUseWind: true,
-      waveStrengthWindMinFactor: 0.05,
-      distortionStrengthPx: 5.8,
+      waveStrengthWindMinFactor: 1,
+      distortionStrengthPx: 9.97,
 
       // Refraction sampling controls
       refractionMultiTapEnabled: true,
       chromaticAberrationEnabled: true,
-      chromaticAberrationStrengthPx: 2.02,
-      chromaticAberrationEdgeCenter: 0.5,
-      chromaticAberrationEdgeFeather: 0.06,
-      chromaticAberrationEdgeGamma: 1.0,
+      chromaticAberrationStrengthPx: 2.17,
+      chromaticAberrationEdgeCenter: 0,
+      chromaticAberrationEdgeFeather: 0.042,
+      chromaticAberrationEdgeGamma: 0.05,
       chromaticAberrationEdgeMin: 0.0,
 
       waveIndoorDampingEnabled: true,
@@ -85,19 +85,19 @@ export class WaterEffectV2 extends EffectBase {
       waveIndoorMinFactor: 0.05,
 
       // Distortion masking (shader-side; does not rebuild water data)
-      distortionEdgeCenter: 0.504,
-      distortionEdgeFeather: 0.051,
-      distortionEdgeGamma: 1.0,
+      distortionEdgeCenter: 0.406,
+      distortionEdgeFeather: 0.2,
+      distortionEdgeGamma: 0.36,
       distortionShoreRemapLo: 0.0,
       distortionShoreRemapHi: 1.0,
-      distortionShorePow: 0.78,
-      distortionShoreMin: 0.68,
+      distortionShorePow: 0.91,
+      distortionShoreMin: 0.66,
 
       // Shoreline-only high-frequency distortion (fed into DistortionManager)
       shoreNoiseDistortionEnabled: true,
       shoreNoiseDistortionStrengthPx: 0.02,
       shoreNoiseDistortionFrequency: 995.7,
-      shoreNoiseDistortionSpeed: 1.52,
+      shoreNoiseDistortionSpeed: 1.16,
       // Controls how quickly the noise fades out from the shore toward the interior.
       // Expressed in water mask "depth" (0..1): lower => thinner band near edges.
       shoreNoiseDistortionFadeLo: 0,
@@ -115,9 +115,9 @@ export class WaterEffectV2 extends EffectBase {
       rainIndoorDampingStrength: 1.0,
 
       causticsEnabled: true,
-      causticsIntensity: 1.14,
+      causticsIntensity: 1.67,
       causticsScale: 33.4,
-      causticsSpeed: 1.05,
+      causticsSpeed: 2.21,
       causticsSharpness: 0.1,
       causticsEdgeLo: 0,
       causticsEdgeHi: 1,
@@ -125,7 +125,7 @@ export class WaterEffectV2 extends EffectBase {
 
       causticsBrightnessMaskEnabled: true,
       causticsBrightnessThreshold: 0.25,
-      causticsBrightnessSoftness: 0.55,
+      causticsBrightnessSoftness: 0.25,
       causticsBrightnessGamma: 0.62,
 
       causticsDebug: false,
@@ -148,8 +148,8 @@ export class WaterEffectV2 extends EffectBase {
       waveDirOffsetDeg: -42,
       waveAppearanceOffsetDeg: 0.0,
       advectionDirOffsetDeg: 0.0,
-      advectionSpeed: 0.23,
-      windDirResponsiveness: 5.7,
+      advectionSpeed: 1.29,
+      windDirResponsiveness: 10,
       useTargetWindDirection: true,
 
       specStrength: 250,
@@ -160,44 +160,44 @@ export class WaterEffectV2 extends EffectBase {
       specSunIntensity: 1.32,
       specNormalStrength: 5,
       specNormalScale: 0.205,
-      specRoughnessMin: 0.396,
-      specRoughnessMax: 0.873,
+      specRoughnessMin: 0.107,
+      specRoughnessMax: 0.841,
       specF0: 0.12,
-      specMaskGamma: 3.2,
+      specMaskGamma: 1.24,
       specSkyTint: 1.0,
-      specShoreBias: 0.61,
+      specShoreBias: 0.81,
 
-      specDistortionNormalStrength: 1.14,
-      specAnisotropy: 0.2,
-      specAnisoRatio: 3.0,
+      specDistortionNormalStrength: 1,
+      specAnisotropy: 0.21,
+      specAnisoRatio: 1,
 
-      foamStrength: 0.25,
-      foamThreshold: 0.87,
-      foamScale: 1,
-      foamColor: { r: 5, g: 5, b: 5 },
-      foamSpeed: 0.39,
+      foamStrength: 0.66,
+      foamThreshold: 0.92,
+      foamScale: 1225,
+      foamColor: { r: 6, g: 6, b: 5 },
+      foamSpeed: 1.5,
 
-      foamCurlStrength: 0.34,
-      foamCurlScale: 25.6,
-      foamCurlSpeed: 0.01,
+      foamCurlStrength: 0.13,
+      foamCurlScale: 11.3,
+      foamCurlSpeed: 0.1,
 
-      foamBreakupStrength1: 1,
-      foamBreakupScale1: 16.9,
-      foamBreakupSpeed1: 0.09,
+      foamBreakupStrength1: 0.61,
+      foamBreakupScale1: 6.5,
+      foamBreakupSpeed1: 0.6,
 
-      foamBreakupStrength2: 1,
-      foamBreakupScale2: 4.2,
-      foamBreakupSpeed2: 0.06,
+      foamBreakupStrength2: 0.44,
+      foamBreakupScale2: 2.6,
+      foamBreakupSpeed2: 0.16,
 
-      foamBlackPoint: 0,
+      foamBlackPoint: 0.05,
       foamWhitePoint: 1,
-      foamGamma: 1,
-      foamContrast: 1.0,
-      foamBrightness: 0.0,
+      foamGamma: 0.62,
+      foamContrast: 1.64,
+      foamBrightness: 0.01,
 
-      floatingFoamStrength: 1,
-      floatingFoamCoverage: 0.13,
-      floatingFoamScale: 2,
+      floatingFoamStrength: 0.33,
+      floatingFoamCoverage: 0.24,
+      floatingFoamScale: 75.5,
 
       // foam.webp particle systems (WeatherParticles)
       shoreFoamEnabled: true,
@@ -206,8 +206,8 @@ export class WaterEffectV2 extends EffectBase {
       foamPlumeEnabled: true,
       foamPlumeSpawnMode: 'waterEdge',
       foamPlumeMaxParticles: 1681,
-      foamPlumeEmissionBase: 15,
-      foamPlumeEmissionWindScale: 191.3,
+      foamPlumeEmissionBase: 52.9,
+      foamPlumeEmissionWindScale: 93.5,
       foamPlumeLifeMin: 1.5,
       foamPlumeLifeMax: 2.7,
       foamPlumeSizeMin: 15,
@@ -221,7 +221,7 @@ export class WaterEffectV2 extends EffectBase {
       foamPlumeSpinMax: 0.19,
       foamPlumeWindDriftScale: 0.25,
       foamPlumeUseAdditive: true,
-      foamPlumeAdditiveBoost: 1.5,
+      foamPlumeAdditiveBoost: 1.68,
       foamPlumeColor: { r: 1.0, g: 1.0, b: 1.0 },
 
       foamPlumeRandomOpacityMin: 1.94,
@@ -229,14 +229,14 @@ export class WaterEffectV2 extends EffectBase {
 
       foamPlumeRadialAlphaEnabled: true,
       foamPlumeRadialInnerPos: 0.0,
-      foamPlumeRadialMidPos: 0.5,
+      foamPlumeRadialMidPos: 0.149,
       foamPlumeRadialInnerOpacity: 5,
       foamPlumeRadialMidOpacity: 0.58,
       foamPlumeRadialOuterOpacity: 0.31,
       foamPlumeRadialCurve: 0.1,
 
       // Large-scale noise masking for foam.webp particles (break up / intermittent reveal)
-      foamParticleNoiseEnabled: true,
+      foamParticleNoiseEnabled: false,
       foamParticleNoiseStrength: 0.05,
       foamParticleNoiseScale: 14.3,
       foamParticleNoiseSpeed: 0,
@@ -246,7 +246,7 @@ export class WaterEffectV2 extends EffectBase {
 
       // Simple foam.webp spawner (WeatherParticles)
       simpleFoamEnabled: true,
-      simpleFoamThreshold: 0.96,
+      simpleFoamThreshold: 0.19,
       simpleFoamStride: 3,
       simpleFoamMaxPoints: 2040,
       simpleFoamDebugFlipV: false,
@@ -342,14 +342,14 @@ export class WaterEffectV2 extends EffectBase {
       shoreNoiseEnabled: true,
       shoreNoiseStrengthPx: 0.02,
       shoreNoiseFrequency: 995.7,
-      shoreNoiseSpeed: 1.52,
+      shoreNoiseSpeed: 1.16,
       shoreNoiseFadeLo: 0.0,
       shoreNoiseFadeHi: 0.132,
 
       causticsEnabled: true,
-      causticsIntensity: 1.14,
+      causticsIntensity: 1.67,
       causticsScale: 33.4,
-      causticsSpeed: 1.05,
+      causticsSpeed: 2.21,
       causticsSharpness: 0.1,
       causticsEdgeLo: 0.0,
       causticsEdgeHi: 1.0,
@@ -357,7 +357,7 @@ export class WaterEffectV2 extends EffectBase {
 
       causticsBrightnessMaskEnabled: true,
       causticsBrightnessThreshold: 0.25,
-      causticsBrightnessSoftness: 0.55,
+      causticsBrightnessSoftness: 0.25,
       causticsBrightnessGamma: 0.62,
     };
   }
@@ -1644,6 +1644,29 @@ export class WaterEffectV2 extends EffectBase {
           return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
         }
 
+        float hash11(float p) {
+          return fract(sin(p) * 43758.5453123);
+        }
+
+        void waveMods(vec2 lf, float seed, out float kMul, out float dirRot) {
+          // lf is expected to be in roughly [-1, 1] (fbmNoise output).
+          float a = lf.x;
+          float b = lf.y;
+
+          // Per-wave randomization based on a stable seed.
+          float r1 = hash11(seed * 13.17 + 1.0);
+          float r2 = hash11(seed * 29.73 + 2.0);
+
+          // Slowly varying direction jitter (radians).
+          // Keep this fairly small to avoid obvious "curving" waves.
+          dirRot = clamp((a * (0.20 + 0.60 * r1) + b * (0.20 + 0.60 * r2)) * 0.35, -0.55, 0.55);
+
+          // Slowly varying frequency jitter.
+          // This is the key anti-repetition trick: the wave field is no longer stationary.
+          float km = 1.0 + (a * (0.15 + 0.25 * r2) + b * (0.10 + 0.25 * r1)) * 0.10;
+          kMul = clamp(km, 0.75, 1.25);
+        }
+
         // --- SHADER-BASED FOAM FLECKS ---
         // Generates high-frequency "spray" dots that move faster than foam with wind.
         // Uses a widened foam mask so flecks appear around edges, simulating spray blown off crests.
@@ -1813,6 +1836,13 @@ export class WaterEffectV2 extends EffectBase {
           vec2 uv = uvF;
           vec2 p = uv * uWaveScale;
 
+          // Low-frequency spatial modulation to break up far-zoom repeating patterns.
+          // This keeps the close-up look while preventing a single global "wallpaper" wave field.
+          vec2 lf = vec2(
+            fbmNoise(sceneUv * 0.11 + vec2(11.3, 17.9)),
+            fbmNoise(sceneUv * 0.11 + vec2(37.1, 5.7))
+          );
+
           float h = 0.0;
           vec2 gDummy = vec2(0.0);
 
@@ -1828,7 +1858,8 @@ export class WaterEffectV2 extends EffectBase {
           // - Swell: large wavelength, aligned to wind.
           // - Chop: smaller, faster waves angled away from wind to create interference.
           vec2 swellP = p;
-          vec2 chopP = p * 2.5;
+          // Use an irrational-ish multiplier to avoid obvious commensurate ratios.
+          vec2 chopP = p * 2.618;
           vec2 crossWind = rotate2D(wind, 0.78);
           float chopBreathing = 0.7 + 0.3 * cos(uTime * 0.7);
           float chopPulse = evo * chopBreathing;
@@ -1836,13 +1867,26 @@ export class WaterEffectV2 extends EffectBase {
           // Directional sum-of-sines (spread around wind) with sharp crests.
           // Amplitudes sum to ~1.0 for stable output scaling.
           // Swell layer (3 waves)
-          addWave(swellP, rotate2D(wind, -0.60), TAU * 0.55, 0.40 * wavePulse, 2.20, (1.05 + 0.62 * sqrt(TAU * 0.55)), t, h, gDummy);
-          addWave(swellP, rotate2D(wind, -0.15), TAU * 0.92, 0.28 * wavePulse, 2.55, (1.05 + 0.62 * sqrt(TAU * 0.92)), t, h, gDummy);
-          addWave(swellP, rotate2D(wind,  0.20), TAU * 1.35, 0.16 * wavePulse, 2.85, (1.05 + 0.62 * sqrt(TAU * 1.35)), t, h, gDummy);
+          float kMul0; float r0; waveMods(lf, 1.0, kMul0, r0);
+          float k0 = (TAU * 0.61) * kMul0;
+          addWave(swellP, rotate2D(wind, -0.60 + r0), k0, 0.40 * wavePulse, 2.20, (1.05 + 0.62 * sqrt(k0)), t, h, gDummy);
+
+          float kMul1; float r1; waveMods(lf, 2.0, kMul1, r1);
+          float k1 = (TAU * 0.97) * kMul1;
+          addWave(swellP, rotate2D(wind, -0.15 + r1), k1, 0.28 * wavePulse, 2.55, (1.05 + 0.62 * sqrt(k1)), t, h, gDummy);
+
+          float kMul2; float r2; waveMods(lf, 3.0, kMul2, r2);
+          float k2 = (TAU * 1.43) * kMul2;
+          addWave(swellP, rotate2D(wind,  0.20 + r2), k2, 0.16 * wavePulse, 2.85, (1.05 + 0.62 * sqrt(k2)), t, h, gDummy);
 
           // Cross-chop layer (2 waves) - tighter scale and significant angle offset
-          addWave(chopP, rotate2D(crossWind,  0.25), TAU * 1.85, 0.10 * chopPulse, 3.10, (1.18 + 0.72 * sqrt(TAU * 1.85)), t, h, gDummy);
-          addWave(chopP, rotate2D(crossWind, -0.35), TAU * 2.60, 0.06 * chopPulse, 3.35, (1.18 + 0.72 * sqrt(TAU * 2.60)), t, h, gDummy);
+          float kMul3; float r3; waveMods(lf, 4.0, kMul3, r3);
+          float k3 = (TAU * 1.88) * kMul3;
+          addWave(chopP, rotate2D(crossWind,  0.25 + r3), k3, 0.10 * chopPulse, 3.10, (1.18 + 0.72 * sqrt(k3)), t, h, gDummy);
+
+          float kMul4; float r4; waveMods(lf, 5.0, kMul4, r4);
+          float k4 = (TAU * 2.71) * kMul4;
+          addWave(chopP, rotate2D(crossWind, -0.35 + r4), k4, 0.06 * chopPulse, 3.35, (1.18 + 0.72 * sqrt(k4)), t, h, gDummy);
 
           return h;
         }
@@ -1862,6 +1906,12 @@ export class WaterEffectV2 extends EffectBase {
           vec2 uv = uvF;
           vec2 p = uv * uWaveScale;
 
+          // Must match waveHeight(): same low-frequency modulation so normals/distortion stay coherent.
+          vec2 lf = vec2(
+            fbmNoise(sceneUv * 0.11 + vec2(11.3, 17.9)),
+            fbmNoise(sceneUv * 0.11 + vec2(37.1, 5.7))
+          );
+
           float hDummy = 0.0;
           vec2 g = vec2(0.0);
 
@@ -1873,19 +1923,32 @@ export class WaterEffectV2 extends EffectBase {
           float wavePulse = evo * breathing;
 
           vec2 swellP = p;
-          vec2 chopP = p * 2.5;
+          vec2 chopP = p * 2.618;
           vec2 crossWind = rotate2D(wind, 0.78);
           float chopBreathing = 0.7 + 0.3 * cos(uTime * 0.7);
           float chopPulse = evo * chopBreathing;
 
           // Swell layer
-          addWave(swellP, rotate2D(wind, -0.60), TAU * 0.55, 0.40 * wavePulse, 2.20, (1.05 + 0.62 * sqrt(TAU * 0.55)), t, hDummy, g);
-          addWave(swellP, rotate2D(wind, -0.15), TAU * 0.92, 0.28 * wavePulse, 2.55, (1.05 + 0.62 * sqrt(TAU * 0.92)), t, hDummy, g);
-          addWave(swellP, rotate2D(wind,  0.20), TAU * 1.35, 0.16 * wavePulse, 2.85, (1.05 + 0.62 * sqrt(TAU * 1.35)), t, hDummy, g);
+          float kMul0; float r0; waveMods(lf, 1.0, kMul0, r0);
+          float k0 = (TAU * 0.61) * kMul0;
+          addWave(swellP, rotate2D(wind, -0.60 + r0), k0, 0.40 * wavePulse, 2.20, (1.05 + 0.62 * sqrt(k0)), t, hDummy, g);
+
+          float kMul1; float r1; waveMods(lf, 2.0, kMul1, r1);
+          float k1 = (TAU * 0.97) * kMul1;
+          addWave(swellP, rotate2D(wind, -0.15 + r1), k1, 0.28 * wavePulse, 2.55, (1.05 + 0.62 * sqrt(k1)), t, hDummy, g);
+
+          float kMul2; float r2; waveMods(lf, 3.0, kMul2, r2);
+          float k2 = (TAU * 1.43) * kMul2;
+          addWave(swellP, rotate2D(wind,  0.20 + r2), k2, 0.16 * wavePulse, 2.85, (1.05 + 0.62 * sqrt(k2)), t, hDummy, g);
 
           // Cross-chop layer
-          addWave(chopP, rotate2D(crossWind,  0.25), TAU * 1.85, 0.10 * chopPulse, 3.10, (1.18 + 0.72 * sqrt(TAU * 1.85)), t, hDummy, g);
-          addWave(chopP, rotate2D(crossWind, -0.35), TAU * 2.60, 0.06 * chopPulse, 3.35, (1.18 + 0.72 * sqrt(TAU * 2.60)), t, hDummy, g);
+          float kMul3; float r3; waveMods(lf, 4.0, kMul3, r3);
+          float k3 = (TAU * 1.88) * kMul3;
+          addWave(chopP, rotate2D(crossWind,  0.25 + r3), k3, 0.10 * chopPulse, 3.10, (1.18 + 0.72 * sqrt(k3)), t, hDummy, g);
+
+          float kMul4; float r4; waveMods(lf, 5.0, kMul4, r4);
+          float k4 = (TAU * 2.71) * kMul4;
+          addWave(chopP, rotate2D(crossWind, -0.35 + r4), k4, 0.06 * chopPulse, 3.35, (1.18 + 0.72 * sqrt(k4)), t, hDummy, g);
 
           // Normalize away the scale dependence so uWaveScale doesn't make razor-sharp gradients.
           return g / max(uWaveScale, 1e-3);

@@ -156,6 +156,71 @@ export class TweakpaneManager {
     this._debugFolder = null;
   }
 
+  _getProperty(obj, path) {
+    if (!obj || typeof obj !== 'object') return undefined;
+    if (Object.prototype.hasOwnProperty.call(obj, path)) return obj[path];
+
+    const utils = globalThis.foundry?.utils;
+    if (utils?.getProperty) {
+      try {
+        return utils.getProperty(obj, path);
+      } catch (e) {
+      }
+    }
+
+    const parts = String(path).split('.');
+    let cur = obj;
+    for (const p of parts) {
+      if (!cur || typeof cur !== 'object') return undefined;
+      cur = cur[p];
+    }
+    return cur;
+  }
+
+  _setProperty(obj, path, value) {
+    const utils = globalThis.foundry?.utils;
+    if (utils?.setProperty) {
+      try {
+        utils.setProperty(obj, path, value);
+        return;
+      } catch (e) {
+      }
+    }
+
+    const parts = String(path).split('.');
+    let cur = obj;
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      if (i === parts.length - 1) {
+        cur[p] = value;
+      } else {
+        if (!cur[p] || typeof cur[p] !== 'object') cur[p] = {};
+        cur = cur[p];
+      }
+    }
+  }
+
+  _deepMergeObjects(base, override) {
+    const out = (base && typeof base === 'object')
+      ? (Array.isArray(base) ? base.slice() : { ...base })
+      : {};
+
+    if (!override || typeof override !== 'object') return out;
+
+    for (const [k, v] of Object.entries(override)) {
+      // Undefined values are not persisted in Foundry flags; omit to keep merge stable.
+      if (v === undefined) continue;
+
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        out[k] = this._deepMergeObjects(out[k], v);
+      } else {
+        out[k] = v;
+      }
+    }
+
+    return out;
+  }
+
   /**
    * Initialize the UI panel
    * @param {HTMLElement} [parentElement] - Optional parent element (defaults to body)
@@ -931,6 +996,12 @@ export class TweakpaneManager {
       this.revertToMapMaker();
     });
 
+    setupFolder.addButton({
+      title: 'Publish Scene Settings (Compendium)'
+    }).on('click', async () => {
+      await this.publishSceneSettingsToMap();
+    });
+
     // Enable / Upgrade Map Shine Advanced for this scene
     const scene = canvas?.scene;
     const isEnabled = !!scene && scene.getFlag('map-shine-advanced', 'enabled') === true;
@@ -1657,14 +1728,16 @@ export class TweakpaneManager {
       const allSettings = scene.getFlag('map-shine-advanced', 'settings') || {};
       
       // Start with Map Maker settings
-      let params = {};
-      if (allSettings.mapMaker?.effects?.[effectId]) {
-        params = { ...allSettings.mapMaker.effects[effectId] };
-      }
+      const params = {};
+      const base = allSettings.mapMaker?.effects?.[effectId] || {};
+      const gm = (this.settingsMode === 'gm' ? (allSettings.gm?.effects?.[effectId] || {}) : {});
+      const merged = this._deepMergeObjects(base, gm);
 
-      // Apply GM overrides if in GM mode and overrides exist
-      if (this.settingsMode === 'gm' && allSettings.gm?.effects?.[effectId]) {
-        params = { ...params, ...allSettings.gm.effects[effectId] };
+      // Materialize the params object in the schema's paramId namespace (including dotted IDs).
+      const schemaParams = schema?.parameters || {};
+      for (const paramId of Object.keys(schemaParams)) {
+        const v = this._getProperty(merged, paramId);
+        if (v !== undefined) params[paramId] = v;
       }
 
       // Apply player overrides (client-local, disable only)
@@ -1720,7 +1793,9 @@ export class TweakpaneManager {
         const def = schemaParams[paramId];
         if (def?.readonly === true) continue;
         if (def?.hidden === true && paramId !== 'enabled') continue;
-        params[paramId] = value;
+        const v = this._sanitizeSerializableValue(value);
+        if (v === undefined) continue;
+        this._setProperty(params, paramId, v);
       }
 
       // Get all settings
@@ -1777,6 +1852,228 @@ export class TweakpaneManager {
 
     for (const effectId of toSave) {
       await this.saveEffectParameters(effectId);
+    }
+  }
+
+  _mergeEffectParams(base, override) {
+    return this._deepMergeObjects(base, override);
+  }
+
+  _sanitizeSerializableValue(value) {
+    if (value === undefined) return undefined;
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) return null;
+      // Avoid -0 mismatches.
+      if (Object.is(value, -0)) return 0;
+    }
+    return value;
+  }
+
+  _buildEffectiveEffectsSnapshot(allSettings) {
+    const mapMakerEffects = allSettings?.mapMaker?.effects || {};
+    const gmEffects = allSettings?.gm?.effects || {};
+
+    const merged = {};
+
+    // Start from all Map Maker effects.
+    for (const [effectId, params] of Object.entries(mapMakerEffects)) {
+      merged[effectId] = { ...(params || {}) };
+    }
+
+    // Apply GM overrides as a per-effect shallow merge (GM tier is sparse).
+    for (const [effectId, gmParams] of Object.entries(gmEffects)) {
+      merged[effectId] = this._mergeEffectParams(merged[effectId], gmParams);
+    }
+
+    // Finally, overwrite with current UI values for registered effects.
+    // This ensures publishing always reflects the current on-screen state,
+    // even if autosave debounce has not flushed yet.
+    for (const [effectId, effectData] of Object.entries(this.effectFolders)) {
+      const schemaParams = effectData.schema?.parameters || {};
+      const params = {};
+      for (const [paramId, value] of Object.entries(effectData.params || {})) {
+        const def = schemaParams[paramId];
+        if (def?.readonly === true) continue;
+        if (def?.hidden === true && paramId !== 'enabled') continue;
+        const v = this._sanitizeSerializableValue(value);
+        if (v === undefined) continue;
+        this._setProperty(params, paramId, v);
+      }
+
+      // Do not drop previously saved parameters which may not currently be exposed in the UI
+      // (e.g. deprecated params, schema changes, or hidden/internal tuning). Publishing should
+      // reproduce the scene exactly, so we preserve existing data and overlay current UI values.
+      merged[effectId] = this._deepMergeObjects(merged[effectId], params);
+    }
+
+    return merged;
+  }
+
+  _stableStringify(value) {
+    const seen = new WeakSet();
+    const walk = (v) => {
+      if (v === null || typeof v !== 'object') return v;
+      if (seen.has(v)) return null;
+      seen.add(v);
+
+      if (Array.isArray(v)) return v.map(walk);
+
+      const out = {};
+      const keys = Object.keys(v).sort();
+      for (const k of keys) out[k] = walk(v[k]);
+      return out;
+    };
+    return JSON.stringify(walk(value));
+  }
+
+  _findFirstEffectsDiff(a, b) {
+    const aObj = (a && typeof a === 'object') ? a : {};
+    const bObj = (b && typeof b === 'object') ? b : {};
+
+    const aEffects = Object.keys(aObj).sort();
+    const bEffects = Object.keys(bObj).sort();
+    const aSet = new Set(aEffects);
+    const bSet = new Set(bEffects);
+
+    for (const id of aEffects) {
+      if (!bSet.has(id)) return { effectId: id, reason: 'missing_in_stored' };
+    }
+    for (const id of bEffects) {
+      if (!aSet.has(id)) return { effectId: id, reason: 'extra_in_stored' };
+    }
+
+    for (const effectId of aEffects) {
+      const pa = aObj[effectId] && typeof aObj[effectId] === 'object' ? aObj[effectId] : {};
+      const pb = bObj[effectId] && typeof bObj[effectId] === 'object' ? bObj[effectId] : {};
+      const ka = Object.keys(pa).sort();
+      const kb = Object.keys(pb).sort();
+      const kas = new Set(ka);
+      const kbs = new Set(kb);
+
+      for (const k of ka) {
+        if (!kbs.has(k)) return { effectId, paramId: k, reason: 'param_missing_in_stored', a: pa[k] };
+      }
+      for (const k of kb) {
+        if (!kas.has(k)) return { effectId, paramId: k, reason: 'param_extra_in_stored', b: pb[k] };
+      }
+
+      for (const k of ka) {
+        const sa = this._stableStringify(pa[k]);
+        const sb = this._stableStringify(pb[k]);
+        if (sa !== sb) return { effectId, paramId: k, reason: 'param_value_mismatch', a: pa[k], b: pb[k] };
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Publish the current scene's settings into the Map Maker tier so they export/import
+   * with the Scene (compendium-friendly). Publishing always snapshots the CURRENT state
+   * (including GM overrides and current weather), and then clears the GM override tier.
+   *
+   * @returns {Promise<void>}
+   * @public
+   */
+  async publishSceneSettingsToMap() {
+    const scene = canvas?.scene;
+    if (!scene) {
+      ui.notifications?.warn?.('Map Shine: No active scene to publish.');
+      return;
+    }
+
+    if (!game?.user?.isGM) {
+      ui.notifications?.warn?.('Map Shine: Only the GM can publish scene settings.');
+      return;
+    }
+
+    if (this._uiValidatorActive) {
+      ui.notifications?.warn?.('Map Shine: Cannot publish while validator is running.');
+      return;
+    }
+
+    const startMs = Date.now();
+
+    try {
+      // Persist weather/time state first so the compendium export reproduces it exactly.
+      const wc = window.MapShine?.weatherController || window.weatherController;
+      if (wc?.saveWeatherSnapshotNow) {
+        await wc.saveWeatherSnapshotNow();
+      }
+      if (wc?.saveDynamicStateNow) {
+        await wc.saveDynamicStateNow();
+      }
+      if (wc?.saveQueuedTransitionTargetNow) {
+        await wc.saveQueuedTransitionTargetNow();
+      }
+
+      // Also persist ControlPanel controlState if available (authoritative live-play state).
+      // This is separate from weather-snapshot but helps reproduce the exact UI+authority state.
+      try {
+        const cs = window.MapShine?.controlPanel?.controlState;
+        if (cs && typeof cs === 'object') {
+          await scene.setFlag('map-shine-advanced', 'controlState', cs);
+        }
+      } catch (e) {
+      }
+
+      const current = scene.getFlag('map-shine-advanced', 'settings') || this.createDefaultSettings();
+
+      const publishedEffects = this._buildEffectiveEffectsSnapshot(current);
+
+      // Preserve non-effect settings that may exist (renderer/performance), but publish the
+      // current EFFECT state as the compendium baseline.
+      const nextSettings = {
+        ...current,
+        mapMaker: {
+          ...(current.mapMaker || {}),
+          enabled: true,
+          version: (current.mapMaker?.version || '0.2.0'),
+          effects: publishedEffects
+        },
+        gm: null
+      };
+
+      // Ensure the scene itself is enabled for Map Shine.
+      await scene.setFlag('map-shine-advanced', 'enabled', true);
+      await scene.setFlag('map-shine-advanced', 'settings', nextSettings);
+
+      // Verify readback.
+      const storedEnabled = scene.getFlag('map-shine-advanced', 'enabled') === true;
+      const storedSettings = scene.getFlag('map-shine-advanced', 'settings');
+      const storedEffects = storedSettings?.mapMaker?.effects || null;
+
+      // Normalize for Foundry flag serialization (undefined keys are dropped).
+      const okEffects = this._stableStringify(storedEffects) === this._stableStringify(publishedEffects);
+      const okEnabled = storedEnabled === true;
+      const okClearedGm = storedSettings?.gm === null;
+
+      let okWeather = true;
+      try {
+        const ws = scene.getFlag('map-shine-advanced', 'weather-snapshot');
+        if (!ws || typeof ws !== 'object') okWeather = false;
+        else if (Number.isFinite(ws.updatedAt) && ws.updatedAt < startMs) okWeather = false;
+      } catch (e) {
+        okWeather = false;
+      }
+
+      if (!okEnabled || !okEffects || !okClearedGm || !okWeather) {
+        const diff = okEffects ? null : this._findFirstEffectsDiff(publishedEffects, storedEffects);
+        log.error('Scene publish verification failed', {
+          okEnabled,
+          okEffects,
+          okClearedGm,
+          okWeather,
+          firstEffectsDiff: diff
+        });
+        ui.notifications?.error?.('Map Shine: Publish failed verification. Check console for details.');
+        return;
+      }
+
+      ui.notifications?.info?.('Map Shine: Published scene settings (compendium-ready).');
+    } catch (e) {
+      log.error('Failed to publish scene settings:', e);
+      ui.notifications?.error?.('Map Shine: Failed to publish scene settings. Check console for details.');
     }
   }
 

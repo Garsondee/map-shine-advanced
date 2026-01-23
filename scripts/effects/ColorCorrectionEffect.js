@@ -40,8 +40,8 @@ export class ColorCorrectionEffect extends EffectBase {
       // 3. Basic Adjustments
       brightness: 0.0,  // Neutral (was 0.01)
       contrast: 1.0,    // Neutral (was 1.01)
-      saturation: 1.0,
-      vibrance: 0.0,
+      saturation: 0.9,
+      vibrance: -0.15,
       
       // 4. Color Grading (Lift/Gamma/Gain)
       // We use flat properties for Tweakpane compatibility (vectors can be tricky)

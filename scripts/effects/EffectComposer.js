@@ -10,6 +10,7 @@ import { globalProfiler } from '../core/profiler.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { getCacheStats as getAssetCacheStats } from '../assets/loader.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
+import { getGlobalFrameState } from '../core/frame-state.js';
 
 const log = createLogger('EffectComposer');
 
@@ -279,6 +280,16 @@ export class EffectComposer {
 
     // Update centralized time (single source of truth)
     const timeInfo = this.timeManager.update();
+
+    // P3.2: Update frame-consistent camera state
+    // All screen-space effects should use this snapshot for consistent sampling
+    try {
+      const frameState = getGlobalFrameState();
+      const sceneComposer = window.MapShine?.sceneComposer;
+      frameState.update(this.camera, sceneComposer, canvas, timeInfo.frameCount, timeInfo.delta);
+    } catch (e) {
+      // Frame state update is non-critical; ignore errors
+    }
 
     const profiler = globalProfiler;
     const doProfile = !!profiler?.enabled;
@@ -699,6 +710,19 @@ export class EffectBase {
    */
   initialize(renderer, scene, camera) {
     // Override in subclass
+  }
+
+  /**
+   * P1.1: Get a promise that resolves when the effect is fully ready
+   * Effects that load textures or perform async GPU operations should override this
+   * to return a promise that resolves when all resources are loaded and ready.
+   * 
+   * Default implementation returns an immediately resolved promise.
+   * 
+   * @returns {Promise<void>} Promise that resolves when effect is ready
+   */
+  getReadinessPromise() {
+    return Promise.resolve();
   }
 
   /**

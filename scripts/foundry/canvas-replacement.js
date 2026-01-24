@@ -93,6 +93,13 @@ let isMapMakerMode = false;
  */
 let mapMakerFogState = null;
 
+/**
+ * P0.3: Capture snapshot of Foundry layer state on initialization
+ * Restored on teardown instead of force-resetting to defaults
+ * @type {{ layerVisibility: Map<string, boolean>, rendererBgAlpha: number|null }|null}
+ */
+let foundryStateSnapshot = null;
+
 /** @type {boolean} */
 let isHooked = false;
 
@@ -764,6 +771,85 @@ function onCanvasTearDown(canvas) {
  * @returns {Promise<void>}
  * @private
  */
+/**
+ * P0.3: Capture Foundry layer visibility state before enabling MapShine
+ * This snapshot is restored on teardown instead of force-resetting to defaults
+ * @private
+ */
+function captureFoundryStateSnapshot() {
+  if (foundryStateSnapshot) return; // Already captured
+
+  foundryStateSnapshot = {
+    layerVisibility: new Map(),
+    rendererBgAlpha: null
+  };
+
+  // Capture layer visibility
+  const layerNames = [
+    'background', 'grid', 'primary', 'tokens', 'tiles', 'lighting',
+    'sounds', 'templates', 'drawings', 'notes', 'walls',
+    'weather', 'environment', 'regions', 'controls', 'fog', 'visibility'
+  ];
+
+  for (const name of layerNames) {
+    const layer = canvas[name];
+    if (layer) {
+      foundryStateSnapshot.layerVisibility.set(name, layer.visible);
+    }
+  }
+
+  // Capture PIXI renderer background alpha
+  if (canvas.app?.renderer?.background) {
+    foundryStateSnapshot.rendererBgAlpha = canvas.app.renderer.background.alpha;
+  }
+
+  log.debug('P0.3: Captured Foundry state snapshot', foundryStateSnapshot);
+}
+
+/**
+ * P0.3: Restore Foundry layer visibility state from snapshot
+ * Replaces the old "force to defaults" approach
+ * @private
+ */
+function restoreFoundryStateFromSnapshot() {
+  if (!foundryStateSnapshot) {
+    log.warn('P0.3: No state snapshot available, falling back to legacy restore');
+    restoreFoundryRendering();
+    return;
+  }
+
+  log.info('P0.3: Restoring Foundry state from snapshot');
+
+  // Restore layer visibility
+  for (const [name, wasVisible] of foundryStateSnapshot.layerVisibility) {
+    const layer = canvas[name];
+    if (layer) {
+      layer.visible = wasVisible;
+    }
+  }
+
+  // Restore PIXI renderer background alpha
+  if (foundryStateSnapshot.rendererBgAlpha !== null && canvas.app?.renderer?.background) {
+    canvas.app.renderer.background.alpha = foundryStateSnapshot.rendererBgAlpha;
+  }
+
+  // Restore token alphas
+  if (canvas.tokens?.placeables) {
+    for (const token of canvas.tokens.placeables) {
+      if (token.mesh) token.mesh.alpha = 1;
+      if (token.icon) token.icon.alpha = 1;
+      if (token.border) token.border.alpha = 1;
+    }
+  }
+
+  // Restore visibility layer filter if it was enabled
+  if (canvas.visibility?.filter) {
+    canvas.visibility.filter.enabled = true;
+  }
+
+  foundryStateSnapshot = null;
+}
+
 async function createThreeCanvas(scene) {
   // Cleanup existing canvas if present
   destroyThreeCanvas();
@@ -827,6 +913,9 @@ async function createThreeCanvas(scene) {
     } catch (e) {
       log.debug('Loading overlay not available:', e);
     }
+
+    // P0.3: Capture Foundry state before modifying it
+    captureFoundryStateSnapshot();
 
     // Set default mode - actual canvas configuration happens after ControlsIntegration init
     isMapMakerMode = false; // Default to Gameplay Mode
@@ -1588,6 +1677,24 @@ async function createThreeCanvas(scene) {
     // Step 8.5: Set up resize handling
     setupResizeHandling();
 
+    // P0.4: Set up WebGL context loss/restore handlers
+    // On context restore, trigger full scene rebuild to recreate GPU resources
+    if (threeCanvas) {
+      threeCanvas.addEventListener('webglcontextlost', (event) => {
+        event.preventDefault();
+        log.warn('P0.4: WebGL context lost - pausing render loop');
+        if (renderLoop && renderLoop.running()) {
+          renderLoop.stop();
+        }
+      }, false);
+
+      threeCanvas.addEventListener('webglcontextrestored', () => {
+        log.info('P0.4: WebGL context restored - rebuilding scene');
+        // Trigger full scene rebuild to recreate render targets and re-upload textures
+        resetScene(canvas.scene);
+      }, false);
+    }
+
     // Step 9: Initialize Frame Coordinator for PIXI/Three.js synchronization
     // This hooks into Foundry's ticker to ensure we render after PIXI updates complete
     if (!frameCoordinatorInitialized) {
@@ -1796,13 +1903,39 @@ async function createThreeCanvas(scene) {
       // Ignore overlay errors
     }
 
-    // Wait until overhead tiles have decoded their textures. Otherwise roofs can pop in
-    // seconds after the main scene becomes visible.
+    // P1.2: Wait for all effects to be ready before fading overlay
+    // This ensures textures are loaded and GPU operations are complete
     try {
-      loadingOverlay.setStage('final', 0.55, 'Preparing overhead…', { keepAuto: true });
+      loadingOverlay.setStage('final', 0.45, 'Finishing textures…', { keepAuto: true });
     } catch (_) {}
     try {
-      await tileManager?.waitForInitialTiles?.({ overheadOnly: true, timeoutMs: 12000 });
+      const effectReadinessPromises = [];
+      for (const effect of effectComposer.effects.values()) {
+        if (typeof effect.getReadinessPromise === 'function') {
+          const promise = effect.getReadinessPromise();
+          if (promise && typeof promise.then === 'function') {
+            effectReadinessPromises.push(promise);
+          }
+        }
+      }
+      
+      if (effectReadinessPromises.length > 0) {
+        await Promise.race([
+          Promise.all(effectReadinessPromises),
+          new Promise(r => setTimeout(r, 15000)) // 15s timeout
+        ]);
+      }
+    } catch (e) {
+      log.debug('Effect readiness wait failed:', e);
+    }
+
+    // P1.3: Wait for all tiles (not just overhead) to decode their textures
+    // This prevents pop-in of ground/water tiles after the overlay fades
+    try {
+      loadingOverlay.setStage('final', 0.50, 'Preparing tiles…', { keepAuto: true });
+    } catch (_) {}
+    try {
+      await tileManager?.waitForInitialTiles?.({ overheadOnly: false, timeoutMs: 15000 });
     } catch (_) {
     }
 
@@ -3609,13 +3742,30 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     const asciiSchema = AsciiEffect.getControlSchema();
     
     const onAsciiUpdate = (effectId, paramId, value) => {
-       if (paramId === 'enabled' || paramId === 'masterEnabled') {
-         asciiEffect.enabled = value;
-         log.debug(`Ascii effect ${value ? 'enabled' : 'disabled'}`);
-       } else {
-         asciiEffect.params[paramId] = value;
-         // Params are read in update() loop
-       }
+      if (paramId === 'enabled') {
+        const enabled = !!value;
+        if (asciiEffect.params && Object.prototype.hasOwnProperty.call(asciiEffect.params, 'enabled')) {
+          asciiEffect.params.enabled = enabled;
+        }
+
+        // masterEnabled is a global gate; it must never force-enable ASCII.
+        const master = asciiEffect._masterEnabled !== false;
+        asciiEffect.enabled = enabled && master;
+        log.debug(`Ascii effect ${asciiEffect.enabled ? 'enabled' : 'disabled'}`);
+        return;
+      }
+
+      if (paramId === 'masterEnabled') {
+        asciiEffect._masterEnabled = !!value;
+        const local = !!(asciiEffect.params?.enabled);
+        asciiEffect.enabled = local && asciiEffect._masterEnabled;
+        log.debug(`Ascii effect ${asciiEffect.enabled ? 'enabled' : 'disabled'}`);
+        return;
+      }
+
+      if (asciiEffect.params && Object.prototype.hasOwnProperty.call(asciiEffect.params, paramId)) {
+        asciiEffect.params[paramId] = value;
+      }
     };
     
     uiManager.registerEffect(
@@ -4101,6 +4251,13 @@ function restoreMapMakerFogOverride() {
 
 /**
  * Enable the Three.js System (Gameplay Mode)
+ * 
+ * INPUT INVARIANT (P0.1 - BIG-PICTURE-SYSTEMS-REVIEW):
+ * Three.js is the PRIMARY interaction handler in Gameplay Mode.
+ * - Three.js canvas: pointerEvents='auto' (receives input)
+ * - PIXI canvas: pointerEvents='none' (transparent overlay, InputRouter enables for edit tools)
+ * - ControlsIntegration.InputRouter manages tool-based switching
+ * 
  * @private
  */
 function enableSystem() {
@@ -4114,17 +4271,17 @@ function enableSystem() {
     renderLoop.start();
   }
   
-  // Three.js Canvas: visible but render-only (no interaction)
+  // Three.js Canvas: visible and interactive (PRIMARY interaction handler)
   threeCanvas.style.opacity = '1';
-  threeCanvas.style.zIndex = '1'; // Below PIXI
-  threeCanvas.style.pointerEvents = 'none'; // Three.js is render-only
+  threeCanvas.style.zIndex = '1'; // Below PIXI (but PIXI is transparent)
+  threeCanvas.style.pointerEvents = 'auto'; // Three.js receives input in Gameplay Mode
   
-  // PIXI Canvas: on top, handles ALL interaction
+  // PIXI Canvas: transparent overlay, input controlled by InputRouter
   const pixiCanvas = canvas.app?.view;
   if (pixiCanvas) {
-    pixiCanvas.style.opacity = '1'; // Visible for overlay layers
+    pixiCanvas.style.opacity = '1'; // Keep visible for overlay layers (drawings, templates, notes)
     pixiCanvas.style.zIndex = '10'; // On top
-    pixiCanvas.style.pointerEvents = 'auto'; // PIXI handles ALL interaction
+    pixiCanvas.style.pointerEvents = 'none'; // Default to pass-through; InputRouter enables for edit tools
   }
   
   // CRITICAL: Set PIXI renderer background to transparent

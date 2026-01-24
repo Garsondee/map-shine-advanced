@@ -61,6 +61,14 @@ export class AsciiEffect extends EffectBase {
       contrast: 1.66,
       brightness: 0.18
     };
+
+    // Ensure the EffectComposer gating matches the user-facing enabled flag.
+    // EffectBase defaults to enabled=true, but ASCII should start disabled.
+    this.enabled = !!this.params.enabled;
+
+    // Global gate (driven by UI "masterEnabled" updates). This should never
+    // force-enable the effect; it only prevents rendering when false.
+    this._masterEnabled = true;
     
     // Character sets
     this.charSets = {

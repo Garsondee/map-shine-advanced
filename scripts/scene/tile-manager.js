@@ -68,6 +68,11 @@ export class TileManager {
     this._tileSpecularMaskPromises = new Map();
     this._tileSpecularMaskResolvedUrl = new Map();
     this._tileSpecularMaskResolvePromises = new Map();
+
+    // Cache directory listings so we can avoid 404 spam when probing optional mask files.
+    // Key: directory path (with trailing slash), Value: string[] of file paths
+    this._dirFileListCache = new Map();
+    this._dirFileListPromises = new Map();
     
     /** @type {Map<string, {width: number, height: number, data: Uint8ClampedArray}>} */
     this.alphaMaskCache = new Map();
@@ -257,6 +262,61 @@ export class TileManager {
     };
   }
 
+  _getDirectoryFromPath(path) {
+    try {
+      const s = String(path || '');
+      const i = s.lastIndexOf('/');
+      if (i < 0) return '';
+      return s.slice(0, i + 1);
+    } catch (_) {
+      return '';
+    }
+  }
+
+  async _listDirectoryFiles(directory) {
+    const dir = String(directory || '').trim();
+    if (!dir) return [];
+
+    if (this._dirFileListCache.has(dir)) {
+      return this._dirFileListCache.get(dir) || [];
+    }
+
+    if (this._dirFileListPromises.has(dir)) {
+      return this._dirFileListPromises.get(dir);
+    }
+
+    const p = (async () => {
+      try {
+        const filePickerImpl = globalThis.foundry?.applications?.apps?.FilePicker?.implementation;
+        const filePicker = filePickerImpl ?? globalThis.FilePicker;
+        if (!filePicker) throw new Error('FilePicker is not available');
+        const result = await filePicker.browse('data', dir);
+        const files = Array.isArray(result?.files) ? result.files : [];
+        this._dirFileListCache.set(dir, files);
+        return files;
+      } catch (_) {
+        // If FilePicker fails (permissions, non-data source, etc.) fall back to fetch probing.
+        this._dirFileListCache.set(dir, []);
+        return [];
+      } finally {
+        this._dirFileListPromises.delete(dir);
+      }
+    })();
+
+    this._dirFileListPromises.set(dir, p);
+    return p;
+  }
+
+  async _fileExistsViaFilePicker(pathNoQuery) {
+    const p = String(pathNoQuery || '');
+    if (!p) return false;
+    const dir = this._getDirectoryFromPath(p);
+    if (!dir) return false;
+    const files = await this._listDirectoryFiles(dir);
+    if (!files || !files.length) return false;
+    return files.includes(p);
+  }
+
   async _resolveTileWaterMaskUrl(tileDoc) {
     const src = tileDoc?.texture?.src;
     const parts = this._splitUrl(src);
@@ -289,9 +349,26 @@ export class TileManager {
         if (parts.query) candidates.push(`${baseNoQuery}${parts.query}`);
       }
 
+      // Prefer avoiding 404 spam by checking existence via FilePicker before loading.
+      // If FilePicker returns an empty list (unavailable/failed), we'll fall back to probing.
+      let hasFilePickerListing = false;
+      try {
+        const dir = this._getDirectoryFromPath(parts.base);
+        const files = await this._listDirectoryFiles(dir);
+        hasFilePickerListing = Array.isArray(files) && files.length > 0;
+      } catch (_) {
+        hasFilePickerListing = false;
+      }
+
       for (let i = 0; i < candidates.length; i++) {
         const url = candidates[i];
         try {
+          if (hasFilePickerListing) {
+            // Only probe the no-query form against the directory listing.
+            const noQuery = url.split('?')[0];
+            const exists = await this._fileExistsViaFilePicker(noQuery);
+            if (!exists) continue;
+          }
           const tex = await this.loadTileTexture(url);
           if (tex) {
             this._tileWaterMaskCache.set(url, tex);
@@ -845,7 +922,9 @@ export class TileManager {
       if (tileId) {
         this._initialLoad.trackedIds.add(tileId);
         this._initialLoad.pendingAll++;
-        const isOverhead = (tileDoc.elevation >= foregroundElevation) || !!tileDoc.overhead;
+        // P0.2: Use Foundry v12+ canonical overhead detection (elevation >= foregroundElevation)
+        // Deprecated: tileDoc.overhead (may be removed in v14)
+        const isOverhead = tileDoc.elevation >= foregroundElevation;
         if (isOverhead) this._initialLoad.pendingOverhead++;
       }
       this.createTileSprite(tileDoc);
@@ -1644,7 +1723,8 @@ export class TileManager {
     sprite.visible = false;
 
     const foregroundElevation = canvas.scene.foregroundElevation || 0;
-    const isOverheadForLoad = (tileDoc.elevation >= foregroundElevation) || !!tileDoc.overhead;
+    // P0.2: Use Foundry v12+ canonical overhead detection (elevation >= foregroundElevation)
+    const isOverheadForLoad = tileDoc.elevation >= foregroundElevation;
 
     // Load texture
     this.loadTileTexture(texturePath).then(texture => {
@@ -2107,7 +2187,9 @@ export class TileManager {
     let zBase = groundZ + Z_FOREGROUND_OFFSET;
 
     const foregroundElevation = canvas.scene.foregroundElevation || 0;
-    const isOverhead = (tileDoc.elevation >= foregroundElevation) || !!tileDoc.overhead;
+    // P0.2: Use Foundry v12+ canonical overhead detection (elevation >= foregroundElevation)
+    // Deprecated: tileDoc.overhead (may be removed in v14)
+    const isOverhead = tileDoc.elevation >= foregroundElevation;
     const wasOverhead = !!sprite.userData.isOverhead;
 
     // Store overhead status for update loop

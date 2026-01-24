@@ -1194,6 +1194,7 @@ export class WaterEffectV2 extends EffectBase {
         // Outdoors mask for indoor damping (world-space scene UV)
         tOutdoorsMask: { value: null },
         uHasOutdoorsMask: { value: 0.0 },
+        uOutdoorsMaskFlipY: { value: 0.0 },
         uRainIndoorDampingEnabled: { value: this.params.rainIndoorDampingEnabled === false ? 0.0 : 1.0 },
         uRainIndoorDampingStrength: { value: this.params.rainIndoorDampingStrength },
 
@@ -1401,6 +1402,7 @@ export class WaterEffectV2 extends EffectBase {
 
         uniform sampler2D tOutdoorsMask;
         uniform float uHasOutdoorsMask;
+        uniform float uOutdoorsMaskFlipY;
         uniform float uRainIndoorDampingEnabled;
         uniform float uRainIndoorDampingStrength;
 
@@ -1542,6 +1544,8 @@ export class WaterEffectV2 extends EffectBase {
         varying vec2 vUv;
 
         float waterInsideFromSdf(float sdf01);
+
+        float sampleOutdoorsMask(vec2 sceneUv01);
 
         float hash12(vec2 p) {
           vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -1770,7 +1774,7 @@ export class WaterEffectV2 extends EffectBase {
           // - If no mask is available, treat everything as outdoors.
           float outdoorStrength = 1.0;
           if (uHasOutdoorsMask > 0.5) {
-            outdoorStrength = texture2D(tOutdoorsMask, uv).r;
+            outdoorStrength = sampleOutdoorsMask(uv);
           }
           float dampStrength = clamp(uRainIndoorDampingStrength, 0.0, 1.0);
           float indoorMult = (uRainIndoorDampingEnabled > 0.5) ? mix(1.0, outdoorStrength, dampStrength) : 1.0;
@@ -1797,17 +1801,18 @@ export class WaterEffectV2 extends EffectBase {
           return vec2(dndy, -dndx);
         }
 
-        vec2 warpUv(vec2 sceneUv) {
+        vec2 warpUv(vec2 sceneUv, float motion01) {
           // IMPORTANT: advecting by changing sampling coordinates is direction-inverted.
           // If we want the *visible* pattern to move with the wind, we must subtract
           // the accumulated offset from the sampling UVs.
           // Match wave math convention: convert Foundry Y-down drift to math Y-up.
-          vec2 windOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
+          float m = clamp(motion01, 0.0, 1.0);
+          vec2 windOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y) * m;
           vec2 uv = sceneUv - windOffsetUv;
 
           // Large-scale domain warp to reduce obvious repetition across big bodies of water.
           // These strengths are user-tweakable because some maps want a calmer, cleaner look.
-          float timeWarp = uTime * max(0.0, uWaveWarpTimeSpeed);
+          float timeWarp = uTime * max(0.0, uWaveWarpTimeSpeed) * m;
 
           // Wind-stretched warp coordinates to create elongated "streaks" downwind.
           // This reduces the repeating "scrolling wallpaper" look on large water bodies.
@@ -1840,12 +1845,13 @@ export class WaterEffectV2 extends EffectBase {
           return uv;
         }
 
-        float waveSeaState(vec2 sceneUv) {
+        float waveSeaState(vec2 sceneUv, float motion01) {
           // Produces a slowly evolving 0..1 scalar that makes the wave field
           // alternate between calmer and more energetic states.
           if (uWaveEvolutionEnabled < 0.5) return 0.5;
 
           float sp = max(0.0, uWaveEvolutionSpeed);
+          sp *= clamp(motion01, 0.0, 1.0);
           float sc = max(0.01, uWaveEvolutionScale);
           float n = fbmNoise(sceneUv * sc + vec2(uTime * sp * 0.23, -uTime * sp * 0.19));
           float phase = uTime * sp + n * 2.7;
@@ -2030,7 +2036,7 @@ export class WaterEffectV2 extends EffectBase {
           gSceneUv += amp * d * (k * dir) * uWaveScale * bunch;
         }
 
-        float waveHeight(vec2 sceneUv, float t) {
+        float waveHeight(vec2 sceneUv, float t, float motion01) {
           const float TAU = 6.2831853;
 
           vec2 windF = uWindDir;
@@ -2046,7 +2052,7 @@ export class WaterEffectV2 extends EffectBase {
           float travelRot = (uLockWaveTravelToWind > 0.5) ? 0.0 : uWaveDirOffsetRad;
           wind = rotate2D(wind, travelRot);
 
-          vec2 uvF = warpUv(sceneUv);
+          vec2 uvF = warpUv(sceneUv, motion01);
           vec2 uv = uvF;
           vec2 p = uv * uWaveScale;
 
@@ -2060,12 +2066,12 @@ export class WaterEffectV2 extends EffectBase {
           float h = 0.0;
           vec2 gDummy = vec2(0.0);
 
-          float sea01 = waveSeaState(sceneUv);
+          float sea01 = waveSeaState(sceneUv, motion01);
           float evoAmt = clamp(uWaveEvolutionAmount, 0.0, 1.0);
           float evo = mix(1.0 - evoAmt, 1.0 + evoAmt, sea01);
 
           // Slow, rhythmic "sea-state breathing" so water energy rises/falls over time.
-          float breathing = 0.8 + 0.2 * sin(uTime * 0.5);
+          float breathing = 0.8 + 0.2 * sin(uTime * 0.5 * clamp(motion01, 0.0, 1.0));
           float wavePulse = evo * breathing;
 
           // Dual-octave blending:
@@ -2075,7 +2081,7 @@ export class WaterEffectV2 extends EffectBase {
           // Use an irrational-ish multiplier to avoid obvious commensurate ratios.
           vec2 chopP = p * 2.618;
           vec2 crossWind = rotate2D(wind, 0.78);
-          float chopBreathing = 0.7 + 0.3 * cos(uTime * 0.7);
+          float chopBreathing = 0.7 + 0.3 * cos(uTime * 0.7 * clamp(motion01, 0.0, 1.0));
           float chopPulse = evo * chopBreathing;
 
           // Directional sum-of-sines (spread around wind) with sharp crests.
@@ -2105,7 +2111,7 @@ export class WaterEffectV2 extends EffectBase {
           return h;
         }
 
-        vec2 waveGrad2D(vec2 sceneUv, float t) {
+        vec2 waveGrad2D(vec2 sceneUv, float t, float motion01) {
           const float TAU = 6.2831853;
 
           vec2 windF = uWindDir;
@@ -2116,7 +2122,7 @@ export class WaterEffectV2 extends EffectBase {
           float travelRot = (uLockWaveTravelToWind > 0.5) ? 0.0 : uWaveDirOffsetRad;
           wind = rotate2D(wind, travelRot);
 
-          vec2 uvF = warpUv(sceneUv);
+          vec2 uvF = warpUv(sceneUv, motion01);
           vec2 uv = uvF;
           vec2 p = uv * uWaveScale;
 
@@ -2129,17 +2135,17 @@ export class WaterEffectV2 extends EffectBase {
           float hDummy = 0.0;
           vec2 g = vec2(0.0);
 
-          float sea01 = waveSeaState(sceneUv);
+          float sea01 = waveSeaState(sceneUv, motion01);
           float evoAmt = clamp(uWaveEvolutionAmount, 0.0, 1.0);
           float evo = mix(1.0 - evoAmt, 1.0 + evoAmt, sea01);
 
-          float breathing = 0.8 + 0.2 * sin(uTime * 0.5);
+          float breathing = 0.8 + 0.2 * sin(uTime * 0.5 * clamp(motion01, 0.0, 1.0));
           float wavePulse = evo * breathing;
 
           vec2 swellP = p;
           vec2 chopP = p * 2.618;
           vec2 crossWind = rotate2D(wind, 0.78);
-          float chopBreathing = 0.7 + 0.3 * cos(uTime * 0.7);
+          float chopBreathing = 0.7 + 0.3 * cos(uTime * 0.7 * clamp(motion01, 0.0, 1.0));
           float chopPulse = evo * chopBreathing;
 
           // Swell layer
@@ -2191,6 +2197,14 @@ export class WaterEffectV2 extends EffectBase {
           vec2 sceneOrigin = uSceneRect.xy;
           vec2 sceneSize = uSceneRect.zw;
           return (foundryPos - sceneOrigin) / max(sceneSize, vec2(1e-5));
+        }
+
+        float sampleOutdoorsMask(vec2 sceneUv01) {
+          // sceneUv01 is normalized to sceneRect.
+          // Respect mask UV convention: some loaded textures are flipped.
+          float y = (uOutdoorsMaskFlipY > 0.5) ? (1.0 - sceneUv01.y) : sceneUv01.y;
+          vec2 uv = vec2(sceneUv01.x, y);
+          return texture2D(tOutdoorsMask, uv).r;
         }
 
         float remap01(float v, float lo, float hi) {
@@ -2251,7 +2265,7 @@ export class WaterEffectV2 extends EffectBase {
           // Optional extra distortion on sand itself (separate from refracted background).
           float sandDist = clamp(uSandDistortionStrength, 0.0, 1.0);
           if (sandDist > 1e-4) {
-            vec2 waveGrad = waveGrad2D(sceneUv, uWindTime);
+            vec2 waveGrad = waveGrad2D(sceneUv, uWindTime, 1.0);
             // Appearance-only rotation: rotate the normal/distortion field without changing
             // wave phase propagation. Add a 90-degree correction so crest lines visually
             // align perpendicular to the wind-driven travel direction.
@@ -2319,9 +2333,12 @@ export class WaterEffectV2 extends EffectBase {
           }
 
           vec2 sceneUv = vUv;
+          vec2 worldSceneUv = vUv;
           if (uHasSceneRect > 0.5) {
             vec2 foundryPos = screenUvToFoundry(vUv);
             sceneUv = foundryToSceneUv(foundryPos);
+            // worldSceneUv must be in sceneRect-normalized space, matching foundryToSceneUv.
+            worldSceneUv = sceneUv;
             float inScene =
               step(0.0, sceneUv.x) * step(sceneUv.x, 1.0) *
               step(0.0, sceneUv.y) * step(sceneUv.y, 1.0);
@@ -2379,17 +2396,17 @@ export class WaterEffectV2 extends EffectBase {
               return;
             }
             if (d < 6.5) {
-              float wv = 0.5 + 0.5 * waveHeight(sceneUv, uWindTime);
+              float wv = 0.5 + 0.5 * waveHeight(sceneUv, uWindTime, 1.0);
               gl_FragColor = vec4(vec3(wv), 1.0);
               return;
             }
             if (d < 7.5) {
-              vec2 waveGrad = waveGrad2D(sceneUv, uWindTime);
+              vec2 waveGrad = waveGrad2D(sceneUv, uWindTime, 1.0);
               vec2 flowN = smoothFlow2D(sceneUv);
 
               float outdoorStrength = 1.0;
               if (uHasOutdoorsMask > 0.5) {
-                outdoorStrength = texture2D(tOutdoorsMask, sceneUv).r;
+                outdoorStrength = sampleOutdoorsMask(worldSceneUv);
               }
               float dampStrength = clamp(uWaveIndoorDampingStrength, 0.0, 1.0);
               float minFactor = clamp(uWaveIndoorMinFactor, 0.0, 1.0);
@@ -2412,11 +2429,19 @@ export class WaterEffectV2 extends EffectBase {
               vec2 offsetUv = combinedN * (px * texel) * amp * distMask * zoom;
 
               // Add rain-hit distortion in px-space (converted to UV).
-              vec2 rainOffPx = computeRainOffsetPx(sceneUv);
+              vec2 rainOffPx = computeRainOffsetPx(worldSceneUv);
               offsetUv += (rainOffPx * texel) * distMask * zoom;
               vec2 pxOff = offsetUv / max(texel, vec2(1e-6));
               pxOff = clamp(pxOff / max(1.0, px), vec2(-1.0), vec2(1.0));
               gl_FragColor = vec4(pxOff * 0.5 + 0.5, 0.0, 1.0);
+              return;
+            }
+            if (d < 12.5) {
+              float outdoorStrength = 1.0;
+              if (uHasOutdoorsMask > 0.5) {
+                outdoorStrength = sampleOutdoorsMask(worldSceneUv);
+              }
+              gl_FragColor = vec4(vec3(clamp(outdoorStrength, 0.0, 1.0)), 1.0);
               return;
             }
             if (d < 8.5) {
@@ -2454,7 +2479,7 @@ export class WaterEffectV2 extends EffectBase {
 
           // Animated refraction / distortion.
           // Stability rule: pixel offsets must be in pixels then scaled by screen texel size.
-          vec2 waveGrad = waveGrad2D(sceneUv, uWindTime);
+          vec2 waveGrad = waveGrad2D(sceneUv, uWindTime, 1.0);
           // Appearance-only rotation: rotates the wave normal/distortion texture without changing
           // the underlying wave travel direction (phase propagation).
           // Add a 90-degree correction so crest lines visually align perpendicular
@@ -2464,9 +2489,10 @@ export class WaterEffectV2 extends EffectBase {
 
           // Indoor / covered damping driven by _Outdoors mask.
           // _Outdoors: 1 = outdoors, 0 = indoors/covered.
+          // Use worldSceneUv (world-space normalized) for mask sampling, not water-local sceneUv.
           float outdoorStrength = 1.0;
           if (uHasOutdoorsMask > 0.5) {
-            outdoorStrength = texture2D(tOutdoorsMask, sceneUv).r;
+            outdoorStrength = sampleOutdoorsMask(worldSceneUv);
           }
 
           float dampStrength = clamp(uWaveIndoorDampingStrength, 0.0, 1.0);
@@ -2474,10 +2500,18 @@ export class WaterEffectV2 extends EffectBase {
           float targetFactor = mix(minFactor, 1.0, clamp(outdoorStrength, 0.0, 1.0));
           float indoorDamp = (uWaveIndoorDampingEnabled > 0.5) ? mix(1.0, targetFactor, dampStrength) : 1.0;
 
+          // Motion damping: slows time-driven evolution and advection indoors.
+          // Use the same indoorDamp factor so users can tune both amplitude + motion together.
+          float indoorMotion = clamp(indoorDamp, 0.0, 1.0);
+
           float waveStrength = uWaveStrength * indoorDamp;
           float distortionPx = uDistortionStrengthPx * indoorDamp;
 
-          vec2 combinedVec = waveGrad * waveStrength + flowN * 0.35;
+          // Recompute wave/flow using locally-damped time so indoor water moves less.
+          float localWindTime = uWindTime * indoorMotion;
+          vec2 waveGradLocal = waveGrad2D(sceneUv, localWindTime, indoorMotion);
+          vec2 flowNLocal = smoothFlow2D(sceneUv);
+          vec2 combinedVec = waveGradLocal * waveStrength + flowNLocal * 0.35;
 
           combinedVec = combinedVec / (1.0 + 0.75 * length(combinedVec));
           float m = length(combinedVec);
@@ -2491,7 +2525,7 @@ export class WaterEffectV2 extends EffectBase {
           vec2 offsetUvRaw = combinedN * (px * texel) * amp * zoom;
 
           // Rain-hit distortion in px-space.
-          vec2 rainOffPx = computeRainOffsetPx(sceneUv);
+          vec2 rainOffPx = computeRainOffsetPx(worldSceneUv);
           offsetUvRaw += (rainOffPx * texel) * zoom;
 
           // Apply shoreline + occluder gating to the *refraction* offset.
@@ -3247,9 +3281,11 @@ export class WaterEffectV2 extends EffectBase {
     // Outdoors mask (world-space scene UV). Used by wave indoor damping and rain indoor damping.
     if (u.tOutdoorsMask && u.uHasOutdoorsMask) {
       let outdoorsTex = null;
+      let outdoorsRec = null;
       try {
         const mm = window.MapShine?.maskManager;
         outdoorsTex = mm ? mm.getTexture('outdoors.scene') : null;
+        outdoorsRec = mm ? mm.getRecord?.('outdoors.scene') : null;
         if (!outdoorsTex) {
           const wle = window.MapShine?.windowLightEffect;
           const cloud = window.MapShine?.cloudEffect;
@@ -3257,9 +3293,18 @@ export class WaterEffectV2 extends EffectBase {
         }
       } catch (_) {
         outdoorsTex = null;
+        outdoorsRec = null;
       }
       u.tOutdoorsMask.value = outdoorsTex;
       u.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
+
+      // Respect the stored mask UV convention when sampling in shaders.
+      // Prefer MaskManager metadata; fallback to texture.flipY.
+      if (u.uOutdoorsMaskFlipY) {
+        const metaFlipY = (outdoorsRec && typeof outdoorsRec.uvFlipY === 'boolean') ? outdoorsRec.uvFlipY : null;
+        const flip = (metaFlipY !== null) ? metaFlipY : (outdoorsTex?.flipY ?? false);
+        u.uOutdoorsMaskFlipY.value = flip ? 1.0 : 0.0;
+      }
     }
 
     // Cloud shadow texture (screen-space render target). CloudEffect is world-pinned

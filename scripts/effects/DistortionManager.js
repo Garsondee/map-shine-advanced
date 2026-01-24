@@ -932,6 +932,7 @@ export class DistortionManager extends EffectBase {
         uWaterMaskTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
         uWaterEdgeSoftnessTexels: { value: 0.0 },
         tOutdoorsMask: { value: null },
+        uOutdoorsMaskFlipY: { value: 0.0 },
         tCloudShadow: { value: null },
         tWindowLight: { value: null },
         uResolution: { value: new THREE.Vector2(1, 1) },
@@ -1045,6 +1046,7 @@ export class DistortionManager extends EffectBase {
         uniform vec2 uWaterMaskTexelSize;
         uniform float uWaterEdgeSoftnessTexels;
         uniform sampler2D tOutdoorsMask;
+        uniform float uOutdoorsMaskFlipY;
         uniform sampler2D tCloudShadow;
         uniform sampler2D tWindowLight;
         uniform vec2 uResolution;
@@ -1387,7 +1389,8 @@ export class DistortionManager extends EffectBase {
 
             float outdoorStrength = 1.0;
             if (uHasOutdoorsMask > 0.5) {
-              outdoorStrength = texture2D(tOutdoorsMask, sceneUv).r;
+              float oy = (uOutdoorsMaskFlipY > 0.5) ? (1.0 - sceneUv.y) : sceneUv.y;
+              outdoorStrength = texture2D(tOutdoorsMask, vec2(sceneUv.x, oy)).r;
             }
 
             // Debug override: show mask + shoreline so we can verify mapping/uniforms
@@ -2184,8 +2187,14 @@ export class DistortionManager extends EffectBase {
       try {
         const mm = window.MapShine?.maskManager;
         const outdoorsTex = mm ? mm.getTexture('outdoors.scene') : null;
+        const outdoorsRec = mm ? mm.getRecord?.('outdoors.scene') : null;
         if (au.tOutdoorsMask) au.tOutdoorsMask.value = outdoorsTex;
         if (au.uHasOutdoorsMask) au.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
+        if (au.uOutdoorsMaskFlipY) {
+          const metaFlipY = (outdoorsRec && typeof outdoorsRec.uvFlipY === 'boolean') ? outdoorsRec.uvFlipY : null;
+          const flip = (metaFlipY !== null) ? metaFlipY : (outdoorsTex?.flipY ?? false);
+          au.uOutdoorsMaskFlipY.value = flip ? 1.0 : 0.0;
+        }
 
         if (!outdoorsTex) {
           const wle = window.MapShine?.windowLightEffect;
@@ -2193,6 +2202,7 @@ export class DistortionManager extends EffectBase {
           const fallback = wle?.outdoorsMask || cloud?.outdoorsMask || null;
           if (au.tOutdoorsMask) au.tOutdoorsMask.value = fallback;
           if (au.uHasOutdoorsMask) au.uHasOutdoorsMask.value = fallback ? 1.0 : 0.0;
+          if (au.uOutdoorsMaskFlipY) au.uOutdoorsMaskFlipY.value = (fallback?.flipY ?? false) ? 1.0 : 0.0;
         }
       } catch (e) {
       }

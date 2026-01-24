@@ -98,6 +98,10 @@ export class TileManager {
     this._lastTintKey = null;
     this._tintDirty = true;
 
+    // Cache for expensive per-mask image analysis used by water occluder heuristics.
+    // Keyed by resolved mask URL.
+    this._waterMaskCoverageCache = new Map();
+
     this._waterCacheInvalidation = {
       pending: false,
       timer: null,
@@ -535,6 +539,63 @@ export class TileManager {
     return material;
   }
 
+  _estimateWaterMaskCoverage01(maskTex, cacheKey = null) {
+    // Returns average mask coverage in [0..1], where 1 means "water everywhere".
+    // Uses a downsampled CPU readback to avoid heavy per-pixel work.
+    try {
+      if (cacheKey && this._waterMaskCoverageCache.has(cacheKey)) {
+        return this._waterMaskCoverageCache.get(cacheKey);
+      }
+    } catch (_) {
+    }
+
+    let coverage = null;
+    try {
+      const image = maskTex?.image;
+      const w = image?.width ?? 0;
+      const h = image?.height ?? 0;
+      if (!image || w <= 0 || h <= 0) return null;
+
+      const canvasEl = document.createElement('canvas');
+      // Keep this small; we only need an average.
+      const outW = Math.min(64, w);
+      const outH = Math.min(64, h);
+      canvasEl.width = outW;
+      canvasEl.height = outH;
+      const ctx = canvasEl.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return null;
+
+      ctx.clearRect(0, 0, outW, outH);
+      ctx.drawImage(image, 0, 0, outW, outH);
+      const img = ctx.getImageData(0, 0, outW, outH);
+      const data = img?.data;
+      if (!data) return null;
+
+      let sum = 0;
+      const n = outW * outH;
+      for (let i = 0; i < data.length; i += 4) {
+        // Luminance * alpha
+        const r = data[i] / 255;
+        const g = data[i + 1] / 255;
+        const b = data[i + 2] / 255;
+        const a = data[i + 3] / 255;
+        const lum = (0.299 * r + 0.587 * g + 0.114 * b);
+        sum += lum * a;
+      }
+      coverage = n > 0 ? (sum / n) : null;
+    } catch (_) {
+      coverage = null;
+    }
+
+    try {
+      if (cacheKey && coverage !== null && Number.isFinite(coverage)) {
+        this._waterMaskCoverageCache.set(cacheKey, coverage);
+      }
+    } catch (_) {
+    }
+    return coverage;
+  }
+
   _ensureWaterOccluderMesh(spriteData, tileDoc) {
     const THREE = window.THREE;
     if (!THREE) return;
@@ -585,8 +646,27 @@ export class TileManager {
     this.loadTileWaterMaskTexture(tileDoc).then((maskTex) => {
       const m = sprite.userData?.waterOccluderMesh;
       if (!m || !m.material?.uniforms) return;
-      m.material.uniforms.tWaterMask.value = maskTex;
-      m.material.uniforms.uHasWaterMask.value = maskTex ? 1.0 : 0.0;
+
+      // Defensive heuristic:
+      // If the tile's _Water mask is effectively "all water" (nearly white everywhere),
+      // then using it for occlusion would produce near-zero occluder alpha and cause
+      // WaterEffect tint/distortion to apply across the whole tile. That makes props
+      // (boats) look like they're not receiving the same grading as the scene.
+      //
+      // In that degenerate case, ignore the mask and fall back to tile alpha occlusion.
+      let effectiveMask = maskTex;
+      try {
+        const resolvedUrl = spriteData?.resolvedWaterMaskUrl ?? null;
+        const coverage = (maskTex && maskTex.image) ? this._estimateWaterMaskCoverage01(maskTex, resolvedUrl || null) : null;
+        if (coverage !== null && Number.isFinite(coverage) && coverage > 0.98) {
+          effectiveMask = null;
+        }
+      } catch (_) {
+        effectiveMask = maskTex;
+      }
+
+      m.material.uniforms.tWaterMask.value = effectiveMask;
+      m.material.uniforms.uHasWaterMask.value = effectiveMask ? 1.0 : 0.0;
     }).catch(() => {
     });
   }
@@ -1548,6 +1628,13 @@ export class TileManager {
     const sprite = new THREE.Sprite(material);
     sprite.name = `Tile_${tileDoc.id}`;
     sprite.matrixAutoUpdate = false;
+
+    // Defensive: tiles should participate in the main scene render (post-processed).
+    // Only tiles with bypassEffects enabled are moved to the overlay layer.
+    try {
+      sprite.layers.disable(OVERLAY_THREE_LAYER);
+    } catch (_) {
+    }
     
     // Store Foundry data
     sprite.userData.foundryTileId = tileDoc.id;
@@ -1993,6 +2080,15 @@ export class TileManager {
       // Reset to default layer when leaving bypass mode.
       sprite.layers.set(0);
       sprite.renderOrder = 0;
+    } else {
+      // Defensive: ensure tiles never render in the overlay pass unless explicitly bypassing effects.
+      // If a tile is accidentally left with OVERLAY_THREE_LAYER enabled, it can be drawn twice:
+      // once post-processed (main scene) and again unprocessed (overlay), making it appear like
+      // color correction is "not working" for that tile.
+      try {
+        sprite.layers.disable(OVERLAY_THREE_LAYER);
+      } catch (_) {
+      }
     }
 
     const cloudShadowsFlag = getFlag(tileDoc, 'cloudShadowsEnabled');

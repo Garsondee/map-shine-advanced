@@ -1665,10 +1665,60 @@ export class WeatherParticles {
     // PERF: Cache pixel readbacks for mask textures (getImageData is expensive and allocates).
     // Many point-generation functions were creating a new canvas + ImageData on each call.
     this._maskPixelCache = new Map();
+    this._maskPixelCacheMaxEntries = 48;
     this._maskReadCanvas = null;
     this._maskReadCtx = null;
 
+    // Dirty-check state for roof-mask uniform propagation to batch materials.
+    this._lastSplashRoofMaskEnabled = null;
+    this._lastSplashHasRoofAlphaMap = null;
+    this._lastSplashRoofTexUuid = null;
+    this._lastSplashRoofAlphaUuid = null;
+    this._lastSplashScreenW = null;
+    this._lastSplashScreenH = null;
+    this._lastSplashSceneBoundsX = null;
+    this._lastSplashSceneBoundsY = null;
+    this._lastSplashSceneBoundsW = null;
+    this._lastSplashSceneBoundsH = null;
+
+    // Shoreline rebuild cache fields (avoid per-frame string key allocation).
+    this._shoreFoamMaskUuid = null;
+    this._shoreFoamMaskVersion = null;
+    this._shoreFoamMaskW = null;
+    this._shoreFoamMaskH = null;
+    this._shoreFoamStride = null;
+    this._shoreFoamMaxPoints = null;
+    this._shoreFoamFlipV = null;
+    this._shoreFoamTileRev = null;
+
+    // Track precipitation edge transitions so we can clear existing splashes
+    // when the slider abruptly goes to 0.
+    this._lastPrecipitation = null;
+
     this._initSystems();
+  }
+
+  _clearAllRainSplashes() {
+    // three.quarks keeps live particles in `system.particles` and indexes the
+    // active range via `system.particleNum`. If precipitation drops to 0 and we
+    // pause the system, existing particles can remain frozen in place.
+    const clearSystem = (sys) => {
+      if (!sys) return;
+      try {
+        if (sys.particles && typeof sys.particles.length === 'number') sys.particles.length = 0;
+        if (typeof sys.particleNum === 'number') sys.particleNum = 0;
+        if (sys.emissionState && typeof sys.emissionState.waitEmiting === 'number') sys.emissionState.waitEmiting = 0;
+      } catch (_) {
+      }
+    };
+
+    if (this.splashSystem) clearSystem(this.splashSystem);
+    if (this.splashSystems && this.splashSystems.length) {
+      for (const s of this.splashSystems) clearSystem(s);
+    }
+    if (this._waterHitSplashSystems && this._waterHitSplashSystems.length) {
+      for (const entry of this._waterHitSplashSystems) clearSystem(entry?.system);
+    }
   }
 
   clearWaterCaches() {
@@ -3368,6 +3418,7 @@ export class WeatherParticles {
     // other particle effects (fire, dust, etc.) may still be active.
     if (weatherController && weatherController.enabled === false) {
       this._zeroWeatherEmissions();
+      this._clearAllRainSplashes();
       this._setWeatherSystemsVisible(false);
       return;
     }
@@ -3800,10 +3851,36 @@ export class WeatherParticles {
         const stride = Math.max(1, this._waterMaskStride);
         const maxPoints = 16000;
         const uuid = waterTex.uuid;
-        const key = `${uuid}|shoreEdge|st:${stride}|max:${maxPoints}|fv:${waterFlipV ? 1 : 0}|tileRev:${this._tileFoamRevision}`;
+        const maskVersion = (typeof waterTex.version === 'number') ? waterTex.version : 0;
+        const img = waterTex?.image;
+        const maskW = img?.width ?? null;
+        const maskH = img?.height ?? null;
+        const flipV = waterFlipV === true;
+        const tileRev = this._tileFoamRevision;
 
-        if (key !== this._shoreFoamPointsKey) {
-          this._shoreFoamPointsKey = key;
+        // PERF: Replace string key with direct field comparisons to avoid per-frame string allocation.
+        const needsRebuild = (
+          uuid !== this._shoreFoamMaskUuid
+          || maskVersion !== this._shoreFoamMaskVersion
+          || maskW !== this._shoreFoamMaskW
+          || maskH !== this._shoreFoamMaskH
+          || stride !== this._shoreFoamStride
+          || maxPoints !== this._shoreFoamMaxPoints
+          || flipV !== this._shoreFoamFlipV
+          || tileRev !== this._shoreFoamTileRev
+        );
+
+        if (needsRebuild) {
+          this._shoreFoamPointsKey = null; // Clear legacy string key
+          this._shoreFoamMaskUuid = uuid;
+          this._shoreFoamMaskVersion = maskVersion;
+          this._shoreFoamMaskW = maskW;
+          this._shoreFoamMaskH = maskH;
+          this._shoreFoamStride = stride;
+          this._shoreFoamMaxPoints = maxPoints;
+          this._shoreFoamFlipV = flipV;
+          this._shoreFoamTileRev = tileRev;
+
           const sceneEdge = this._generateWaterEdgePoints(
             waterTex,
             this._waterMaskThreshold,
@@ -3826,6 +3903,14 @@ export class WeatherParticles {
         if (this._foamFleckEmitter) this._foamFleckEmitter.setShorePoints(viewShore);
       } else {
         this._shoreFoamPointsKey = null;
+        this._shoreFoamMaskUuid = null;
+        this._shoreFoamMaskVersion = null;
+        this._shoreFoamMaskW = null;
+        this._shoreFoamMaskH = null;
+        this._shoreFoamStride = null;
+        this._shoreFoamMaxPoints = null;
+        this._shoreFoamFlipV = null;
+        this._shoreFoamTileRev = null;
         this._shoreFoamPoints = null;
         this._shoreFoamViewPoints = null;
         if (this._shoreFoamShape) this._shoreFoamShape.clearPoints();
@@ -3943,6 +4028,14 @@ export class WeatherParticles {
     const effectiveHasRoofAlphaMap = hasRoofAlphaMap && !debugDisableWeatherRoofMask;
 
     const precip = weather.precipitation || 0;
+
+    // If precipitation abruptly goes to 0, force-clear any existing splashes.
+    // Otherwise, paused splash systems can leave particles frozen on the ground.
+    const prevPrecip = (this._lastPrecipitation ?? precip);
+    if (prevPrecip > 1e-6 && precip <= 1e-6) {
+      this._clearAllRainSplashes();
+    }
+    this._lastPrecipitation = precip;
     const freeze = weather.freezeLevel || 0;
     const rainTuning = weatherController.rainTuning || {};
     const snowTuning = weatherController.snowTuning || {};
@@ -4136,26 +4229,60 @@ export class WeatherParticles {
         }
 
         // --- Mask Uniforms ---
-        if (this._splashMaterial && this._splashMaterial.userData.roofUniforms) {
-           const u = this._splashMaterial.userData.roofUniforms;
-           u.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
-           u.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
-           if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
-           u.uRoofMap.value = this._roofTexture;
-           u.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
-           u.uScreenSize.value.set(screenWidth, screenHeight);
-        }
+        // PERF: Dirty-check to avoid per-frame uniform updates when nothing changed.
+        const roofTexUuid = this._roofTexture?.uuid ?? null;
+        const roofAlphaUuid = roofAlphaTexture?.uuid ?? null;
+        const sbX = this._sceneBounds?.x ?? null;
+        const sbY = this._sceneBounds?.y ?? null;
+        const sbW = this._sceneBounds?.z ?? null;
+        const sbH = this._sceneBounds?.w ?? null;
 
-        if (this._splashBatchMaterials && this._splashBatchMaterials.length > 0) {
-          for (const mat of this._splashBatchMaterials) {
-            if (!mat || !mat.userData || !mat.userData.roofUniforms) continue;
-            const u = mat.userData.roofUniforms;
-            u.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
-            u.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
-            if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
-            u.uRoofMap.value = this._roofTexture;
-            u.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
-            u.uScreenSize.value.set(screenWidth, screenHeight);
+        const splashRoofUniformsDirty = (
+          effectiveRoofMaskEnabled !== this._lastSplashRoofMaskEnabled
+          || effectiveHasRoofAlphaMap !== this._lastSplashHasRoofAlphaMap
+          || roofTexUuid !== this._lastSplashRoofTexUuid
+          || roofAlphaUuid !== this._lastSplashRoofAlphaUuid
+          || screenWidth !== this._lastSplashScreenW
+          || screenHeight !== this._lastSplashScreenH
+          || sbX !== this._lastSplashSceneBoundsX
+          || sbY !== this._lastSplashSceneBoundsY
+          || sbW !== this._lastSplashSceneBoundsW
+          || sbH !== this._lastSplashSceneBoundsH
+        );
+
+        if (splashRoofUniformsDirty) {
+          this._lastSplashRoofMaskEnabled = effectiveRoofMaskEnabled;
+          this._lastSplashHasRoofAlphaMap = effectiveHasRoofAlphaMap;
+          this._lastSplashRoofTexUuid = roofTexUuid;
+          this._lastSplashRoofAlphaUuid = roofAlphaUuid;
+          this._lastSplashScreenW = screenWidth;
+          this._lastSplashScreenH = screenHeight;
+          this._lastSplashSceneBoundsX = sbX;
+          this._lastSplashSceneBoundsY = sbY;
+          this._lastSplashSceneBoundsW = sbW;
+          this._lastSplashSceneBoundsH = sbH;
+
+          if (this._splashMaterial && this._splashMaterial.userData.roofUniforms) {
+             const u = this._splashMaterial.userData.roofUniforms;
+             u.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+             u.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+             if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
+             u.uRoofMap.value = this._roofTexture;
+             u.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+             u.uScreenSize.value.set(screenWidth, screenHeight);
+          }
+
+          if (this._splashBatchMaterials && this._splashBatchMaterials.length > 0) {
+            for (const mat of this._splashBatchMaterials) {
+              if (!mat || !mat.userData || !mat.userData.roofUniforms) continue;
+              const u = mat.userData.roofUniforms;
+              u.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+              u.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+              if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
+              u.uRoofMap.value = this._roofTexture;
+              u.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+              u.uScreenSize.value.set(screenWidth, screenHeight);
+            }
           }
         }
     }
@@ -4531,7 +4658,20 @@ export class WeatherParticles {
       }
     }
 
-    if (this._waterHitSplashBatchMaterials && this._waterHitSplashBatchMaterials.length > 0) {
+    // PERF: Reuse the splashRoofUniformsDirty flag computed above for water-hit splash materials.
+    // If the flag wasn't computed (splashSystems block didn't run), compute it now.
+    const waterHitDirty = (typeof splashRoofUniformsDirty !== 'undefined')
+      ? splashRoofUniformsDirty
+      : (
+          effectiveRoofMaskEnabled !== this._lastSplashRoofMaskEnabled
+          || effectiveHasRoofAlphaMap !== this._lastSplashHasRoofAlphaMap
+          || (this._roofTexture?.uuid ?? null) !== this._lastSplashRoofTexUuid
+          || (roofAlphaTexture?.uuid ?? null) !== this._lastSplashRoofAlphaUuid
+          || screenWidth !== this._lastSplashScreenW
+          || screenHeight !== this._lastSplashScreenH
+        );
+
+    if (waterHitDirty && this._waterHitSplashBatchMaterials && this._waterHitSplashBatchMaterials.length > 0) {
       for (const mat of this._waterHitSplashBatchMaterials) {
         if (!mat || !mat.userData || !mat.userData.roofUniforms) continue;
         const u = mat.userData.roofUniforms;
@@ -4825,10 +4965,31 @@ export class WeatherParticles {
     const h = image.height;
     if (!w || !h) return null;
 
+    // Build a cache key that includes texture uuid and version to detect content changes.
+    const uuid = maskTexture?.uuid || '';
+    const version = (typeof maskTexture?.version === 'number') ? maskTexture.version : 0;
     const src = this._getStableSrc(image.src) || this._getStableSrc(maskTexture?.source?.data?.src) || this._getStableSrc(maskTexture?.userData?.src) || '';
-    const key = `${src}|${w}|${h}`;
+    const key = `${src}|${uuid}|v:${version}|${w}|${h}`;
+
     const cached = this._maskPixelCache.get(key);
-    if (cached && cached.data && cached.width === w && cached.height === h) return cached;
+    if (cached && cached.data && cached.width === w && cached.height === h) {
+      // LRU touch: move to end of Map iteration order.
+      try {
+        this._maskPixelCache.delete(key);
+        this._maskPixelCache.set(key, cached);
+      } catch (_) {}
+      return cached;
+    }
+
+    // Evict stale versions of the same texture (different version number).
+    if (uuid) {
+      try {
+        const prefix = `${src}|${uuid}|v:`;
+        for (const k of this._maskPixelCache.keys()) {
+          if (k !== key && k.startsWith(prefix)) this._maskPixelCache.delete(k);
+        }
+      } catch (_) {}
+    }
 
     try {
       if (!this._maskReadCanvas) {
@@ -4847,6 +5008,19 @@ export class WeatherParticles {
       const img = ctx.getImageData(0, 0, w, h);
       const entry = { width: w, height: h, data: img.data };
       this._maskPixelCache.set(key, entry);
+
+      // LRU eviction: keep cache size bounded.
+      try {
+        const maxEntries = Number.isFinite(this._maskPixelCacheMaxEntries)
+          ? Math.max(8, Math.floor(this._maskPixelCacheMaxEntries))
+          : 48;
+        while (this._maskPixelCache.size > maxEntries) {
+          const oldest = this._maskPixelCache.keys().next().value;
+          if (oldest === undefined) break;
+          this._maskPixelCache.delete(oldest);
+        }
+      } catch (_) {}
+
       return entry;
     } catch (_) {
       return null;
@@ -4867,33 +5041,61 @@ export class WeatherParticles {
     let eligible = 0;
 
     const s = Math.max(1, stride | 0);
+    // PERF: Precompute constants to avoid repeated division inside the loop.
+    const inv65025 = 1.0 / (255.0 * 255.0);
+    const hMinus1 = h - 1;
+    const wMinus1 = w - 1;
+
     // IMPORTANT: `v` stored in the output point list is expected to be in the same
     // top-down scene-UV convention used throughout WeatherParticles (because spawn
     // conversion uses worldY = (1 - v) * height).
     // When the water mask is effectively flipped for sampling, we must flip the
     // *source pixel lookup* rather than flipping the returned v, or the spawn
     // will be double-inverted.
-    const yToImg = (yy) => (flipV ? (h - 1 - yy) : yy);
-    const sample = (x, yScene) => {
-      const yImg = yToImg(yScene);
-      const ix = (yImg * w + x) * 4;
-      const r = data[ix] / 255;
-      const g = data[ix + 1] / 255;
-      const b = data[ix + 2] / 255;
-      const a = data[ix + 3] / 255;
-      return (0.299 * r + 0.587 * g + 0.114 * b) * a;
-    };
 
-    for (let y = 1; y < h - 1; y += s) {
-      for (let x = 1; x < w - 1; x += s) {
-        const v = sample(x, y);
+    for (let y = 1; y < hMinus1; y += s) {
+      const yImg = flipV ? (hMinus1 - y) : y;
+      const row = yImg * w;
+      const rowUp = (flipV ? (yImg + 1) : (yImg - 1)) * w;
+      const rowDown = (flipV ? (yImg - 1) : (yImg + 1)) * w;
+
+      for (let x = 1; x < wMinus1; x += s) {
+        // Inline sample for center pixel.
+        const ix = (row + x) << 2;
+        const aC = data[ix + 3];
+        if (aC === 0) continue;
+        const lumC = 0.299 * data[ix] + 0.587 * data[ix + 1] + 0.114 * data[ix + 2];
+        const v = lumC * aC * inv65025;
         // Spawn on the boundary but stay on the "inside" (water/white) side.
         if (v < edgeThreshold) continue;
 
-        const left = sample(x - 1, y);
-        const right = sample(x + 1, y);
-        const up = sample(x, y - 1);
-        const down = sample(x, y + 1);
+        // Inline sample for left neighbor.
+        const ixL = (row + (x - 1)) << 2;
+        const aL = data[ixL + 3];
+        const left = (aL === 0)
+          ? 0.0
+          : ((0.299 * data[ixL] + 0.587 * data[ixL + 1] + 0.114 * data[ixL + 2]) * aL * inv65025);
+
+        // Inline sample for right neighbor.
+        const ixR = (row + (x + 1)) << 2;
+        const aR = data[ixR + 3];
+        const right = (aR === 0)
+          ? 0.0
+          : ((0.299 * data[ixR] + 0.587 * data[ixR + 1] + 0.114 * data[ixR + 2]) * aR * inv65025);
+
+        // Inline sample for up neighbor.
+        const ixU = (rowUp + x) << 2;
+        const aU = data[ixU + 3];
+        const up = (aU === 0)
+          ? 0.0
+          : ((0.299 * data[ixU] + 0.587 * data[ixU + 1] + 0.114 * data[ixU + 2]) * aU * inv65025);
+
+        // Inline sample for down neighbor.
+        const ixD = (rowDown + x) << 2;
+        const aD = data[ixD + 3];
+        const down = (aD === 0)
+          ? 0.0
+          : ((0.299 * data[ixD] + 0.587 * data[ixD + 1] + 0.114 * data[ixD + 2]) * aD * inv65025);
 
         const isBoundary = (left < edgeThreshold) || (right < edgeThreshold) || (up < edgeThreshold) || (down < edgeThreshold);
         if (!isBoundary) continue;
@@ -4920,10 +5122,7 @@ export class WeatherParticles {
     }
 
     if (filled < 1) return null;
-    if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 2);
-    trimmed.set(out.subarray(0, filled * 2));
-    return trimmed;
+    return out.subarray(0, filled * 2);
   }
 
   _generateWaterDataBoundaryInsetPoints(waterDataTexture, insetPx = 1.0, bandPx = 2.0, stride = 2, maxPoints = 24000, flipV = false) {
@@ -5002,9 +5201,7 @@ export class WeatherParticles {
 
     if (filled < 1) return null;
     if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 2);
-    trimmed.set(out.subarray(0, filled * 2));
-    return trimmed;
+    return out.subarray(0, filled * 2);
   }
 
   _generateWaterDataInsetEdgePoints(waterDataTexture, insetPx = 1.0, bandPx = 2.0, exposureWidthPx = 128.0, stride = 2, maxPoints = 24000) {
@@ -5060,10 +5257,7 @@ export class WeatherParticles {
     }
 
     if (filled < 1) return null;
-    if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 2);
-    trimmed.set(out.subarray(0, filled * 2));
-    return trimmed;
+    return out.subarray(0, filled * 2);
   }
 
   _getViewFilteredUvPoints(pts) {
@@ -5186,57 +5380,51 @@ export class WeatherParticles {
     const out = new Float32Array(max * 2);
     let filled = 0;
 
-    const sampleInto = (src, srcCount, take, stride) => {
-      if (!src || srcCount <= 0 || take <= 0) return;
-      if (take >= srcCount) {
-        for (let i = 0; i < srcCount; i++) {
-          const o = i * stride;
-          const oo = filled * stride;
+    // Reservoir sample a subset of points from src directly into `out`, starting at `filled`.
+    const sampleInto = (src, srcCount, take) => {
+      if (!src || srcCount <= 0 || take <= 0 || filled >= max) return;
+      const takeN = Math.min(take, max - filled);
+      if (takeN <= 0) return;
+
+      if (takeN >= srcCount) {
+        for (let i = 0; i < srcCount && filled < max; i++) {
+          const o = i * 2;
+          const oo = filled * 2;
           out[oo] = src[o];
           out[oo + 1] = src[o + 1];
           filled++;
-          if (filled >= max) return;
         }
         return;
       }
 
-      // Reservoir sample from this source set.
-      const tmp = new Float32Array(take * stride);
-      let tf = 0;
+      const start = filled;
+      let picked = 0;
       let seen = 0;
-      const push = (a0, a1) => {
-        if (tf < take) {
-          const to = tf * stride;
-          tmp[to] = a0;
-          tmp[to + 1] = a1;
-          tf++;
+      for (let i = 0; i < srcCount; i++) {
+        const o = i * 2;
+        const u = src[o];
+        const v = src[o + 1];
+        if (picked < takeN) {
+          const oo = (start + picked) * 2;
+          out[oo] = u;
+          out[oo + 1] = v;
+          picked++;
         } else {
           const j = Math.floor(Math.random() * (seen + 1));
-          if (j < take) {
-            const to = j * stride;
-            tmp[to] = a0;
-            tmp[to + 1] = a1;
+          if (j < takeN) {
+            const oo = (start + j) * 2;
+            out[oo] = u;
+            out[oo + 1] = v;
           }
         }
         seen++;
-      };
-      for (let i = 0; i < srcCount; i++) {
-        const o = i * stride;
-        push(src[o], src[o + 1]);
       }
-      for (let i = 0; i < tf; i++) {
-        const o = i * stride;
-        const oo = filled * stride;
-        out[oo] = tmp[o];
-        out[oo + 1] = tmp[o + 1];
-        filled++;
-        if (filled >= max) return;
-      }
+      filled += picked;
     };
 
     // Take a guaranteed sample from tiles first, then from the scene.
-    sampleInto(b, bCount, wantB, 2);
-    sampleInto(a, aCount, wantA, 2);
+    sampleInto(b, bCount, wantB);
+    sampleInto(a, aCount, wantA);
 
     // If we still have capacity (rare), fill with reservoir across remaining points.
     if (filled < max) {
@@ -5268,10 +5456,7 @@ export class WeatherParticles {
     }
 
     if (filled < 1) return null;
-    if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 2);
-    trimmed.set(out.subarray(0, filled * 2));
-    return trimmed;
+    return out.subarray(0, filled * 2);
   }
 
   _mergeEdgePointSets(aPts, bPts, maxPoints = 16000, minBPoints = 0) {
@@ -5301,9 +5486,12 @@ export class WeatherParticles {
     const wantA = Math.min(aCount, Math.max(0, max - wantB));
 
     const sampleInto = (src, srcCount, take) => {
-      if (!src || srcCount <= 0 || take <= 0) return;
-      if (take >= srcCount) {
-        for (let i = 0; i < srcCount; i++) {
+      if (!src || srcCount <= 0 || take <= 0 || filled >= max) return;
+      const takeN = Math.min(take, max - filled);
+      if (takeN <= 0) return;
+
+      if (takeN >= srcCount) {
+        for (let i = 0; i < srcCount && filled < max; i++) {
           const o = i * 4;
           const oo = filled * 4;
           out[oo] = src[o];
@@ -5311,48 +5499,39 @@ export class WeatherParticles {
           out[oo + 2] = src[o + 2];
           out[oo + 3] = src[o + 3];
           filled++;
-          if (filled >= max) return;
         }
         return;
       }
 
-      const tmp = new Float32Array(take * 4);
-      let tf = 0;
+      const start = filled;
+      let picked = 0;
       let seen = 0;
-      const push = (u, v, nx, ny) => {
-        if (tf < take) {
-          const to = tf * 4;
-          tmp[to] = u;
-          tmp[to + 1] = v;
-          tmp[to + 2] = nx;
-          tmp[to + 3] = ny;
-          tf++;
+      for (let i = 0; i < srcCount; i++) {
+        const o = i * 4;
+        const u = src[o];
+        const v = src[o + 1];
+        const nx = src[o + 2];
+        const ny = src[o + 3];
+        if (picked < takeN) {
+          const oo = (start + picked) * 4;
+          out[oo] = u;
+          out[oo + 1] = v;
+          out[oo + 2] = nx;
+          out[oo + 3] = ny;
+          picked++;
         } else {
           const j = Math.floor(Math.random() * (seen + 1));
-          if (j < take) {
-            const to = j * 4;
-            tmp[to] = u;
-            tmp[to + 1] = v;
-            tmp[to + 2] = nx;
-            tmp[to + 3] = ny;
+          if (j < takeN) {
+            const oo = (start + j) * 4;
+            out[oo] = u;
+            out[oo + 1] = v;
+            out[oo + 2] = nx;
+            out[oo + 3] = ny;
           }
         }
         seen++;
-      };
-      for (let i = 0; i < srcCount; i++) {
-        const o = i * 4;
-        push(src[o], src[o + 1], src[o + 2], src[o + 3]);
       }
-      for (let i = 0; i < tf; i++) {
-        const o = i * 4;
-        const oo = filled * 4;
-        out[oo] = tmp[o];
-        out[oo + 1] = tmp[o + 1];
-        out[oo + 2] = tmp[o + 2];
-        out[oo + 3] = tmp[o + 3];
-        filled++;
-        if (filled >= max) return;
-      }
+      filled += picked;
     };
 
     // Take a guaranteed sample from tiles first, then from the scene.
@@ -5360,10 +5539,7 @@ export class WeatherParticles {
     sampleInto(a, aCount, wantA);
 
     if (filled < 1) return null;
-    if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 4);
-    trimmed.set(out.subarray(0, filled * 4));
-    return trimmed;
+    return out.subarray(0, filled * 4);
   }
 
   _collectTilePointSetsInView(kind, u0, u1, v0, v1) {
@@ -5457,10 +5633,7 @@ export class WeatherParticles {
     }
 
     if (filled < 1) return null;
-    if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 2);
-    trimmed.set(out.subarray(0, filled * 2));
-    return trimmed;
+    return out.subarray(0, filled * 2);
   }
 
   _generateWaterEdgePoints(maskTexture, threshold = 0.15, stride = 2, maxPoints = 16000, flipV = false) {
@@ -5535,10 +5708,7 @@ export class WeatherParticles {
     }
 
     if (filled < 1) return null;
-    if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 4);
-    trimmed.set(out.subarray(0, filled * 4));
-    return trimmed;
+    return out.subarray(0, filled * 4);
   }
 
   _refreshTileFoamPoints(tileManager) {
@@ -5912,36 +6082,30 @@ export class WeatherParticles {
           filled++;
         }
       } else {
-        // Reservoir sample from this set into a temp buffer.
-        const tmp = new Float32Array(take * 2);
-        let tf = 0;
+        // Reservoir sample from this set directly into the output buffer.
+        const start = filled;
+        let picked = 0;
         let tSeen = 0;
         for (let i = 0; i < count; i++) {
           const o = i * 2;
           const u = s[o];
           const v = s[o + 1];
-          if (tf < take) {
-            const to = tf * 2;
-            tmp[to] = u;
-            tmp[to + 1] = v;
-            tf++;
+          if (picked < take) {
+            const oo = (start + picked) * 2;
+            out[oo] = u;
+            out[oo + 1] = v;
+            picked++;
           } else {
             const j = Math.floor(Math.random() * (tSeen + 1));
             if (j < take) {
-              const to = j * 2;
-              tmp[to] = u;
-              tmp[to + 1] = v;
+              const oo = (start + j) * 2;
+              out[oo] = u;
+              out[oo + 1] = v;
             }
           }
           tSeen++;
         }
-        for (let i = 0; i < tf && filled < max; i++) {
-          const o = i * 2;
-          const oo = filled * 2;
-          out[oo] = tmp[o];
-          out[oo + 1] = tmp[o + 1];
-          filled++;
-        }
+        filled += picked;
       }
     }
 
@@ -5970,10 +6134,7 @@ export class WeatherParticles {
     }
 
     if (filled < 1) return null;
-    if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 2);
-    trimmed.set(out.subarray(0, filled * 2));
-    return trimmed;
+    return out.subarray(0, filled * 2);
   }
 
   _mergeManyEdgePointSets(sets, maxPoints = 16000) {
@@ -6004,8 +6165,9 @@ export class WeatherParticles {
           filled++;
         }
       } else {
-        const tmp = new Float32Array(take * 4);
-        let tf = 0;
+        // Reservoir sample from this set directly into the output buffer.
+        const start = filled;
+        let picked = 0;
         let tSeen = 0;
         for (let i = 0; i < count; i++) {
           const o = i * 4;
@@ -6013,34 +6175,26 @@ export class WeatherParticles {
           const v = s[o + 1];
           const nx = s[o + 2];
           const ny = s[o + 3];
-          if (tf < take) {
-            const to = tf * 4;
-            tmp[to] = u;
-            tmp[to + 1] = v;
-            tmp[to + 2] = nx;
-            tmp[to + 3] = ny;
-            tf++;
+          if (picked < take) {
+            const oo = (start + picked) * 4;
+            out[oo] = u;
+            out[oo + 1] = v;
+            out[oo + 2] = nx;
+            out[oo + 3] = ny;
+            picked++;
           } else {
             const j = Math.floor(Math.random() * (tSeen + 1));
             if (j < take) {
-              const to = j * 4;
-              tmp[to] = u;
-              tmp[to + 1] = v;
-              tmp[to + 2] = nx;
-              tmp[to + 3] = ny;
+              const oo = (start + j) * 4;
+              out[oo] = u;
+              out[oo + 1] = v;
+              out[oo + 2] = nx;
+              out[oo + 3] = ny;
             }
           }
           tSeen++;
         }
-        for (let i = 0; i < tf && filled < max; i++) {
-          const o = i * 4;
-          const oo = filled * 4;
-          out[oo] = tmp[o];
-          out[oo + 1] = tmp[o + 1];
-          out[oo + 2] = tmp[o + 2];
-          out[oo + 3] = tmp[o + 3];
-          filled++;
-        }
+        filled += picked;
       }
     }
 
@@ -6075,10 +6229,7 @@ export class WeatherParticles {
     }
 
     if (filled < 1) return null;
-    if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 4);
-    trimmed.set(out.subarray(0, filled * 4));
-    return trimmed;
+    return out.subarray(0, filled * 4);
   }
 
   _tileMaskSampleLumaA(data, w, x, y) {
@@ -6147,10 +6298,7 @@ export class WeatherParticles {
       filled++;
     }
     if (filled < 1) return null;
-    if (filled === count) return out;
-    const trimmed = new Float32Array(filled * 2);
-    trimmed.set(out.subarray(0, filled * 2));
-    return trimmed;
+    return out.subarray(0, filled * 2);
   }
 
   _transformTileLocalEdgePointsToSceneUv(localPts, tileDoc, sceneBounds, totalH) {
@@ -6180,10 +6328,7 @@ export class WeatherParticles {
       filled++;
     }
     if (filled < 1) return null;
-    if (filled === count) return out;
-    const trimmed = new Float32Array(filled * 4);
-    trimmed.set(out.subarray(0, filled * 4));
-    return trimmed;
+    return out.subarray(0, filled * 4);
   }
 
   _generateTileLocalWaterHardEdgePoints(maskTexture, tileAlphaMask = null, edgeThreshold = 0.5, stride = 2, maxPoints = 12000) {
@@ -6249,10 +6394,7 @@ export class WeatherParticles {
     }
 
     if (filled < 1) return null;
-    if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 2);
-    trimmed.set(out.subarray(0, filled * 2));
-    return trimmed;
+    return out.subarray(0, filled * 2);
   }
 
   _generateTileLocalWaterEdgePoints(maskTexture, tileAlphaMask = null, threshold = 0.15, stride = 2, maxPoints = 8000) {
@@ -6334,10 +6476,7 @@ export class WeatherParticles {
     }
 
     if (filled < 1) return null;
-    if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 4);
-    trimmed.set(out.subarray(0, filled * 4));
-    return trimmed;
+    return out.subarray(0, filled * 4);
   }
 
   _getViewFilteredWaterFoamPoints() {
@@ -6476,10 +6615,7 @@ export class WeatherParticles {
     }
 
     if (filled < 1) return null;
-    if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 2);
-    trimmed.set(out.subarray(0, filled * 2));
-    return trimmed;
+    return out.subarray(0, filled * 2);
   }
 
   _generateSimpleFoamPoints(maskTexture, threshold = 0.5, stride = 4, maxPoints = 20000, flipV = false) {
@@ -6523,10 +6659,7 @@ export class WeatherParticles {
     }
 
     if (filled < 1) return null;
-    if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 2);
-    trimmed.set(out.subarray(0, filled * 2));
-    return trimmed;
+    return out.subarray(0, filled * 2);
   }
 
   _generateWaterInteriorPoints(maskTexture, threshold = 0.15, stride = 6, maxPoints = 8000, flipV = false) {
@@ -6579,9 +6712,6 @@ export class WeatherParticles {
     }
 
     if (filled < 1) return null;
-    if (filled === max) return out;
-    const trimmed = new Float32Array(filled * 2);
-    trimmed.set(out.subarray(0, filled * 2));
-    return trimmed;
+    return out.subarray(0, filled * 2);
   }
 }

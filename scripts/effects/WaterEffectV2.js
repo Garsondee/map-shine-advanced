@@ -137,10 +137,35 @@ export class WaterEffectV2 extends EffectBase {
       rainRippleDensity: 1,
       rainRippleSharpness: 2.41,
 
+      // Rain ripple appearance (advanced)
+      rainRippleJitter: 0.35,
+      rainRippleRadiusMin: 0.03,
+      rainRippleRadiusMax: 0.52,
+      rainRippleWidthScale: 1.0,
+      rainRippleSecondaryEnabled: true,
+      rainRippleSecondaryStrength: 0.55,
+      rainRippleSecondaryPhaseOffset: 0.37,
+
       rainStormStrengthPx: 64,
       rainStormScale: 204,
       rainStormSpeed: 5,
       rainStormCurl: 0.3,
+
+      // Heavy rain smash field (advanced)
+      rainStormRateBase: 2.0,
+      rainStormRateSpeedScale: 4.0,
+      rainStormSizeMin: 0.07,
+      rainStormSizeMax: 0.24,
+      rainStormWidthMinScale: 0.10,
+      rainStormWidthMaxScale: 0.22,
+      rainStormDecay: 6.0,
+      rainStormCoreWeight: 0.65,
+      rainStormRingWeight: 0.95,
+      rainStormSwirlStrength: 0.35,
+      rainStormMicroEnabled: true,
+      rainStormMicroStrength: 0.25,
+      rainStormMicroScale: 0.85,
+      rainStormMicroSpeed: 1.25,
 
       rainMaxCombinedStrengthPx: 45.4,
 
@@ -631,10 +656,33 @@ export class WaterEffectV2 extends EffectBase {
             'rainRippleDensity',
             'rainRippleSharpness',
 
+            'rainRippleJitter',
+            'rainRippleRadiusMin',
+            'rainRippleRadiusMax',
+            'rainRippleWidthScale',
+            'rainRippleSecondaryEnabled',
+            'rainRippleSecondaryStrength',
+            'rainRippleSecondaryPhaseOffset',
+
             'rainStormStrengthPx',
             'rainStormScale',
             'rainStormSpeed',
             'rainStormCurl',
+
+            'rainStormRateBase',
+            'rainStormRateSpeedScale',
+            'rainStormSizeMin',
+            'rainStormSizeMax',
+            'rainStormWidthMinScale',
+            'rainStormWidthMaxScale',
+            'rainStormDecay',
+            'rainStormCoreWeight',
+            'rainStormRingWeight',
+            'rainStormSwirlStrength',
+            'rainStormMicroEnabled',
+            'rainStormMicroStrength',
+            'rainStormMicroScale',
+            'rainStormMicroSpeed',
 
             'rainMaxCombinedStrengthPx'
           ]
@@ -862,6 +910,40 @@ export class WaterEffectV2 extends EffectBase {
         rainIndoorDampingEnabled: { type: 'boolean', label: 'Dampen Indoors (_Outdoors)', default: true },
         rainIndoorDampingStrength: { type: 'slider', label: 'Indoor Damp Strength', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
 
+        rainRippleStrengthPx: { type: 'slider', label: 'Ripple Strength (px)', min: 0.0, max: 64.0, step: 0.01, default: 64.0 },
+        rainRippleScale: { type: 'slider', label: 'Ripple Scale', min: 1.0, max: 2000.0, step: 1.0, default: 269.0 },
+        rainRippleSpeed: { type: 'slider', label: 'Ripple Speed', min: 0.0, max: 10.0, step: 0.01, default: 4.26 },
+        rainRippleDensity: { type: 'slider', label: 'Ripple Density', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
+        rainRippleSharpness: { type: 'slider', label: 'Ripple Sharpness', min: 0.1, max: 5.0, step: 0.01, default: 2.41 },
+
+        rainRippleJitter: { type: 'slider', label: 'Ripple Jitter', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
+        rainRippleRadiusMin: { type: 'slider', label: 'Ripple Radius Min', min: 0.0, max: 0.5, step: 0.001, default: 0.03 },
+        rainRippleRadiusMax: { type: 'slider', label: 'Ripple Radius Max', min: 0.05, max: 0.95, step: 0.001, default: 0.52 },
+        rainRippleWidthScale: { type: 'slider', label: 'Ripple Width Scale', min: 0.1, max: 3.0, step: 0.01, default: 1.0 },
+        rainRippleSecondaryEnabled: { type: 'boolean', label: 'Secondary Ring', default: true },
+        rainRippleSecondaryStrength: { type: 'slider', label: 'Secondary Strength', min: 0.0, max: 2.0, step: 0.01, default: 0.55 },
+        rainRippleSecondaryPhaseOffset: { type: 'slider', label: 'Secondary Phase Offset', min: 0.0, max: 1.0, step: 0.01, default: 0.37 },
+
+        rainStormStrengthPx: { type: 'slider', label: 'Storm Strength (px)', min: 0.0, max: 64.0, step: 0.01, default: 64.0 },
+        rainStormScale: { type: 'slider', label: 'Storm Scale', min: 1.0, max: 2000.0, step: 1.0, default: 204.0 },
+        rainStormSpeed: { type: 'slider', label: 'Storm Speed', min: 0.0, max: 10.0, step: 0.01, default: 5.0 },
+        rainStormCurl: { type: 'slider', label: 'Swirl / Chaos', min: 0.0, max: 3.0, step: 0.01, default: 0.3 },
+
+        rainStormRateBase: { type: 'slider', label: 'Impact Rate Base', min: 0.0, max: 10.0, step: 0.01, default: 2.0 },
+        rainStormRateSpeedScale: { type: 'slider', label: 'Impact Rate vs Speed', min: 0.0, max: 20.0, step: 0.01, default: 4.0 },
+        rainStormSizeMin: { type: 'slider', label: 'Impact Size Min', min: 0.01, max: 1.0, step: 0.001, default: 0.07 },
+        rainStormSizeMax: { type: 'slider', label: 'Impact Size Max', min: 0.01, max: 1.0, step: 0.001, default: 0.24 },
+        rainStormWidthMinScale: { type: 'slider', label: 'Ring Width Min', min: 0.01, max: 1.0, step: 0.001, default: 0.10 },
+        rainStormWidthMaxScale: { type: 'slider', label: 'Ring Width Max', min: 0.01, max: 1.0, step: 0.001, default: 0.22 },
+        rainStormDecay: { type: 'slider', label: 'Impact Decay', min: 0.1, max: 20.0, step: 0.01, default: 6.0 },
+        rainStormCoreWeight: { type: 'slider', label: 'Core Weight', min: 0.0, max: 2.0, step: 0.01, default: 0.65 },
+        rainStormRingWeight: { type: 'slider', label: 'Ring Weight', min: 0.0, max: 2.0, step: 0.01, default: 0.95 },
+        rainStormSwirlStrength: { type: 'slider', label: 'Swirl Strength', min: 0.0, max: 2.0, step: 0.01, default: 0.35 },
+        rainStormMicroEnabled: { type: 'boolean', label: 'Micro Chop', default: true },
+        rainStormMicroStrength: { type: 'slider', label: 'Micro Strength', min: 0.0, max: 2.0, step: 0.01, default: 0.25 },
+        rainStormMicroScale: { type: 'slider', label: 'Micro Scale', min: 0.01, max: 5.0, step: 0.01, default: 0.85 },
+        rainStormMicroSpeed: { type: 'slider', label: 'Micro Speed', min: 0.0, max: 10.0, step: 0.01, default: 1.25 },
+
         causticsEnabled: { type: 'boolean', label: 'Caustics Enabled', default: true },
         causticsIntensity: { type: 'slider', label: 'Caustics Intensity', min: 0.0, max: 4.0, step: 0.01, default: 0.25 },
         causticsScale: { type: 'slider', label: 'Caustics Scale', min: 0.1, max: 200.0, step: 0.1, default: 60.4 },
@@ -878,19 +960,6 @@ export class WaterEffectV2 extends EffectBase {
 
         causticsDebug: { type: 'boolean', label: 'Debug View (Mask/Shoreline)', default: false },
         causticsIgnoreLightGate: { type: 'boolean', label: 'Ignore Light Gate (Force)', default: false },
-
-        rainRippleStrengthPx: { type: 'slider', label: 'Ripples Strength (px)', min: 0.0, max: 64.0, step: 0.01, default: 64 },
-        rainRippleScale: { type: 'slider', label: 'Ripples Scale', min: 1.0, max: 2000.0, step: 1.0, default: 269 },
-        rainRippleSpeed: { type: 'slider', label: 'Ripples Speed', min: 0.0, max: 5.0, step: 0.01, default: 4.26 },
-        rainRippleDensity: { type: 'slider', label: 'Ripples Density', min: 0.0, max: 1.0, step: 0.01, default: 1 },
-        rainRippleSharpness: { type: 'slider', label: 'Ripples Sharpness', min: 0.1, max: 5.0, step: 0.01, default: 2.41 },
-
-        rainStormStrengthPx: { type: 'slider', label: 'Storm Strength (px)', min: 0.0, max: 64.0, step: 0.01, default: 52.41 },
-        rainStormScale: { type: 'slider', label: 'Storm Scale', min: 1.0, max: 2000.0, step: 1.0, default: 117 },
-        rainStormSpeed: { type: 'slider', label: 'Storm Speed', min: 0.0, max: 5.0, step: 0.01, default: 2.74 },
-        rainStormCurl: { type: 'slider', label: 'Storm Curl', min: 0.0, max: 3.0, step: 0.01, default: 0.96 },
-
-        rainMaxCombinedStrengthPx: { type: 'slider', label: 'Max Combined (px)', min: 0.0, max: 64.0, step: 0.1, default: 45.4 },
 
         lockWaveTravelToWind: { type: 'boolean', label: 'Lock Wave Travel To Wind', default: true },
         waveDirOffsetDeg: { type: 'slider', label: 'Wave Travel Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: -46 },
@@ -1144,10 +1213,33 @@ export class WaterEffectV2 extends EffectBase {
         uRainRippleDensity: { value: this.params.rainRippleDensity },
         uRainRippleSharpness: { value: this.params.rainRippleSharpness },
 
+        uRainRippleJitter: { value: this.params.rainRippleJitter },
+        uRainRippleRadiusMin: { value: this.params.rainRippleRadiusMin },
+        uRainRippleRadiusMax: { value: this.params.rainRippleRadiusMax },
+        uRainRippleWidthScale: { value: this.params.rainRippleWidthScale },
+        uRainRippleSecondaryEnabled: { value: this.params.rainRippleSecondaryEnabled === false ? 0.0 : 1.0 },
+        uRainRippleSecondaryStrength: { value: this.params.rainRippleSecondaryStrength },
+        uRainRippleSecondaryPhaseOffset: { value: this.params.rainRippleSecondaryPhaseOffset },
+
         uRainStormStrengthPx: { value: this.params.rainStormStrengthPx },
         uRainStormScale: { value: this.params.rainStormScale },
         uRainStormSpeed: { value: this.params.rainStormSpeed },
         uRainStormCurl: { value: this.params.rainStormCurl },
+
+        uRainStormRateBase: { value: this.params.rainStormRateBase },
+        uRainStormRateSpeedScale: { value: this.params.rainStormRateSpeedScale },
+        uRainStormSizeMin: { value: this.params.rainStormSizeMin },
+        uRainStormSizeMax: { value: this.params.rainStormSizeMax },
+        uRainStormWidthMinScale: { value: this.params.rainStormWidthMinScale },
+        uRainStormWidthMaxScale: { value: this.params.rainStormWidthMaxScale },
+        uRainStormDecay: { value: this.params.rainStormDecay },
+        uRainStormCoreWeight: { value: this.params.rainStormCoreWeight },
+        uRainStormRingWeight: { value: this.params.rainStormRingWeight },
+        uRainStormSwirlStrength: { value: this.params.rainStormSwirlStrength },
+        uRainStormMicroEnabled: { value: this.params.rainStormMicroEnabled === false ? 0.0 : 1.0 },
+        uRainStormMicroStrength: { value: this.params.rainStormMicroStrength },
+        uRainStormMicroScale: { value: this.params.rainStormMicroScale },
+        uRainStormMicroSpeed: { value: this.params.rainStormMicroSpeed },
 
         uRainMaxCombinedStrengthPx: { value: this.params.rainMaxCombinedStrengthPx },
 
@@ -1327,10 +1419,33 @@ export class WaterEffectV2 extends EffectBase {
         uniform float uRainRippleDensity;
         uniform float uRainRippleSharpness;
 
+        uniform float uRainRippleJitter;
+        uniform float uRainRippleRadiusMin;
+        uniform float uRainRippleRadiusMax;
+        uniform float uRainRippleWidthScale;
+        uniform float uRainRippleSecondaryEnabled;
+        uniform float uRainRippleSecondaryStrength;
+        uniform float uRainRippleSecondaryPhaseOffset;
+
         uniform float uRainStormStrengthPx;
         uniform float uRainStormScale;
         uniform float uRainStormSpeed;
         uniform float uRainStormCurl;
+
+        uniform float uRainStormRateBase;
+        uniform float uRainStormRateSpeedScale;
+        uniform float uRainStormSizeMin;
+        uniform float uRainStormSizeMax;
+        uniform float uRainStormWidthMinScale;
+        uniform float uRainStormWidthMaxScale;
+        uniform float uRainStormDecay;
+        uniform float uRainStormCoreWeight;
+        uniform float uRainStormRingWeight;
+        uniform float uRainStormSwirlStrength;
+        uniform float uRainStormMicroEnabled;
+        uniform float uRainStormMicroStrength;
+        uniform float uRainStormMicroScale;
+        uniform float uRainStormMicroSpeed;
 
         uniform float uRainMaxCombinedStrengthPx;
 
@@ -1434,6 +1549,11 @@ export class WaterEffectV2 extends EffectBase {
           return fract((p3.x + p3.y) * p3.z);
         }
 
+        vec2 hash22(vec2 p) {
+          float n = hash12(p);
+          return vec2(n, hash12(p + n + 19.19));
+        }
+
         float valueNoise(vec2 p) {
           vec2 i = floor(p);
           vec2 f = fract(p);
@@ -1480,6 +1600,18 @@ export class WaterEffectV2 extends EffectBase {
           float sharp = max(0.1, uRainRippleSharpness);
           float width = 0.06 / sharp;
 
+          // Break up the grid:
+          // - jitter impact centers inside each cell
+          // - vary ring radius/width per-cell
+          // - add a secondary micro-ring per hit to avoid perfect regularity
+          float jitterAmt = clamp(uRainRippleJitter, 0.0, 1.0);
+          float rMinBase = clamp(uRainRippleRadiusMin, 0.0, 0.95);
+          float rMaxBase = clamp(uRainRippleRadiusMax, rMinBase + 0.001, 0.95);
+          float widthScale = clamp(uRainRippleWidthScale, 0.05, 5.0);
+          float secEnabled = (uRainRippleSecondaryEnabled > 0.5) ? 1.0 : 0.0;
+          float secStrength = max(0.0, uRainRippleSecondaryStrength);
+          float secPhaseOff = fract(max(0.0, uRainRippleSecondaryPhaseOffset));
+
           vec2 vAccum = vec2(0.0);
           float wAccum = 0.0;
 
@@ -1494,14 +1626,26 @@ export class WaterEffectV2 extends EffectBase {
 
               float phase01 = fract(t * max(0.0, uRainRippleSpeed) + rnd);
 
-              // Local vector within the neighbor cell
-              vec2 gv = f - o;
-              float r = length(gv);
-              float ringCenter = mix(0.06, 0.48, phase01);
+              vec2 jitter = (hash22(cell + vec2(7.1, 19.3)) - 0.5) * jitterAmt;
+              float rMin = mix(rMinBase, min(rMinBase + 0.12, rMaxBase), hash12(cell + vec2(3.3, 11.7)));
+              float rMax = mix(max(rMinBase + 0.18, rMin), rMaxBase, hash12(cell + vec2(13.9, 2.1)));
+              float cellWidth = width * widthScale * mix(0.75, 1.35, hash12(cell + vec2(5.7, 29.1)));
 
-              float ring = exp(-pow((r - ringCenter) / max(0.001, width), 2.0));
+              // Local vector within the neighbor cell
+              vec2 gv = (f - o) - jitter;
+              float r = length(gv);
+              float ringCenter = mix(rMin, rMax, phase01);
+
+              float ring = exp(-pow((r - ringCenter) / max(0.001, cellWidth), 2.0));
               float wobble = 0.5 + 0.5 * sin((r - ringCenter) * (40.0 * sharp) - t * (6.0 + 8.0 * sharp));
               float amp = ring * wobble;
+
+              // Secondary ring: slightly delayed and shifted to reduce obvious periodicity.
+              float phase02 = fract(phase01 + secPhaseOff + (rnd - 0.5) * 0.2);
+              float ringCenter2 = mix(rMin, rMax, phase02);
+              float ring2 = exp(-pow((r - ringCenter2) / max(0.001, cellWidth * 1.25), 2.0));
+              float wobble2 = 0.5 + 0.5 * sin((r - ringCenter2) * (28.0 * sharp) - t * (4.0 + 6.0 * sharp));
+              amp += ring2 * wobble2 * secStrength * secEnabled;
 
               vec2 dir = safeNormalize2(gv);
               vAccum += dir * amp;
@@ -1519,10 +1663,80 @@ export class WaterEffectV2 extends EffectBase {
         vec2 rainStorm(vec2 uv, float t) {
           float sc = max(1.0, uRainStormScale);
           float sp = max(0.0, uRainStormSpeed);
-          vec2 p = uv * sc + vec2(t * sp * 0.25, -t * sp * 0.21);
-          vec2 c = curlNoise2D(p);
-          c *= max(0.0, uRainStormCurl);
-          return c;
+
+          // Heavy rain should feel like the surface is being pelted from above.
+          // Instead of scrolling a noise field, we time-reseed per-cell "impact" events
+          // which expand/decay in place. This produces an evolving smash/chop pattern.
+          vec2 p = uv * sc;
+          vec2 baseCell = floor(p);
+          vec2 f = fract(p) - 0.5;
+
+          float rate = max(0.0, uRainStormRateBase) + sp * max(0.0, uRainStormRateSpeedScale);
+          float chaos = max(0.0, uRainStormCurl);
+
+          vec2 vAccum = vec2(0.0);
+          float wAccum = 0.0;
+
+          for (int yi = 0; yi < 3; yi++) {
+            for (int xi = 0; xi < 3; xi++) {
+              vec2 o = vec2(float(xi - 1), float(yi - 1));
+              vec2 cell = baseCell + o;
+
+              float cellSeed = hash12(cell);
+              float timeSeed = t * rate + cellSeed * 11.0;
+              float k = floor(timeSeed);
+              float phase = fract(timeSeed);
+
+              // Event seed changes every impact (time slice) but stays stable spatially.
+              float e = hash12(cell + vec2(k, k * 1.23));
+              vec2 jitter = (hash22(cell + vec2(k, k * 0.77) + vec2(17.3, 9.1)) - 0.5) * 0.95;
+
+              vec2 gv = (f - o) - jitter;
+              float r = length(gv);
+
+              float sizeMin = max(0.001, uRainStormSizeMin);
+              float sizeMax = max(sizeMin, uRainStormSizeMax);
+              float size = mix(sizeMin, sizeMax, hash12(cell + vec2(5.1, 13.7)));
+
+              float wMin = max(0.001, uRainStormWidthMinScale);
+              float wMax = max(wMin, uRainStormWidthMaxScale);
+              float width = max(0.001, size * mix(wMin, wMax, hash12(cell + vec2(29.9, 3.7))));
+
+              // Fast decay so impacts feel like sharp hits rather than persistent waves.
+              float env = exp(-phase * max(0.0, uRainStormDecay));
+
+              // Combine a tight central punch with an expanding ring.
+              float core = exp(-pow(r / max(1e-4, size * 0.55), 2.0));
+              float ringCenter = phase * size;
+              float ring = exp(-pow((r - ringCenter) / max(1e-4, width), 2.0));
+
+              float coreW = max(0.0, uRainStormCoreWeight);
+              float ringW = max(0.0, uRainStormRingWeight);
+              float amp = (core * coreW + ring * ringW) * env;
+              amp *= mix(0.65, 1.25, e);
+
+              vec2 dir = safeNormalize2(gv);
+              vec2 tan = vec2(-dir.y, dir.x);
+              float swirl = (e - 0.5) * 2.0;
+
+              vec2 local = dir * amp;
+              local += tan * amp * max(0.0, uRainStormSwirlStrength) * swirl * chaos;
+
+              vAccum += local;
+              wAccum += amp;
+            }
+          }
+
+          // Add a subtle evolving micro-chop component (no directional scrolling).
+          if (uRainStormMicroEnabled > 0.5) {
+            float microSc = max(0.0, uRainStormMicroScale);
+            float microSp = max(0.0, uRainStormMicroSpeed);
+            float micro = fbmNoise(uv * (sc * microSc) + vec2(sin(t * microSp), cos(t * microSp * 1.13)) * 2.3);
+            vAccum += vec2(micro, -micro) * max(0.0, uRainStormMicroStrength) * chaos;
+          }
+
+          float a = 1.0 - exp(-wAccum * 1.15);
+          return safeNormalize2(vAccum) * safe01(a);
         }
 
         vec2 computeRainOffsetPx(vec2 uv) {
@@ -3192,6 +3406,34 @@ export class WaterEffectV2 extends EffectBase {
         u.uRainRippleSharpness.value = Number.isFinite(v) ? Math.max(0.1, Math.min(5.0, v)) : 2.41;
       }
 
+      if (u.uRainRippleJitter) {
+        const v = this.params?.rainRippleJitter;
+        u.uRainRippleJitter.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.35;
+      }
+      if (u.uRainRippleRadiusMin) {
+        const v = this.params?.rainRippleRadiusMin;
+        u.uRainRippleRadiusMin.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.95, v)) : 0.03;
+      }
+      if (u.uRainRippleRadiusMax) {
+        const v = this.params?.rainRippleRadiusMax;
+        u.uRainRippleRadiusMax.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.95, v)) : 0.52;
+      }
+      if (u.uRainRippleWidthScale) {
+        const v = this.params?.rainRippleWidthScale;
+        u.uRainRippleWidthScale.value = Number.isFinite(v) ? Math.max(0.05, Math.min(5.0, v)) : 1.0;
+      }
+      if (u.uRainRippleSecondaryEnabled) {
+        u.uRainRippleSecondaryEnabled.value = this.params?.rainRippleSecondaryEnabled === false ? 0.0 : 1.0;
+      }
+      if (u.uRainRippleSecondaryStrength) {
+        const v = this.params?.rainRippleSecondaryStrength;
+        u.uRainRippleSecondaryStrength.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.55;
+      }
+      if (u.uRainRippleSecondaryPhaseOffset) {
+        const v = this.params?.rainRippleSecondaryPhaseOffset;
+        u.uRainRippleSecondaryPhaseOffset.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.37;
+      }
+
       if (u.uRainStormStrengthPx) {
         const v = this.params?.rainStormStrengthPx;
         u.uRainStormStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, Math.min(64.0, v)) : 52.41;
@@ -3207,6 +3449,62 @@ export class WaterEffectV2 extends EffectBase {
       if (u.uRainStormCurl) {
         const v = this.params?.rainStormCurl;
         u.uRainStormCurl.value = Number.isFinite(v) ? Math.max(0.0, Math.min(3.0, v)) : 0.96;
+      }
+
+      if (u.uRainStormRateBase) {
+        const v = this.params?.rainStormRateBase;
+        u.uRainStormRateBase.value = Number.isFinite(v) ? Math.max(0.0, v) : 2.0;
+      }
+      if (u.uRainStormRateSpeedScale) {
+        const v = this.params?.rainStormRateSpeedScale;
+        u.uRainStormRateSpeedScale.value = Number.isFinite(v) ? Math.max(0.0, v) : 4.0;
+      }
+      if (u.uRainStormSizeMin) {
+        const v = this.params?.rainStormSizeMin;
+        u.uRainStormSizeMin.value = Number.isFinite(v) ? Math.max(0.001, v) : 0.07;
+      }
+      if (u.uRainStormSizeMax) {
+        const v = this.params?.rainStormSizeMax;
+        u.uRainStormSizeMax.value = Number.isFinite(v) ? Math.max(0.001, v) : 0.24;
+      }
+      if (u.uRainStormWidthMinScale) {
+        const v = this.params?.rainStormWidthMinScale;
+        u.uRainStormWidthMinScale.value = Number.isFinite(v) ? Math.max(0.001, v) : 0.10;
+      }
+      if (u.uRainStormWidthMaxScale) {
+        const v = this.params?.rainStormWidthMaxScale;
+        u.uRainStormWidthMaxScale.value = Number.isFinite(v) ? Math.max(0.001, v) : 0.22;
+      }
+      if (u.uRainStormDecay) {
+        const v = this.params?.rainStormDecay;
+        u.uRainStormDecay.value = Number.isFinite(v) ? Math.max(0.0, v) : 6.0;
+      }
+      if (u.uRainStormCoreWeight) {
+        const v = this.params?.rainStormCoreWeight;
+        u.uRainStormCoreWeight.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.65;
+      }
+      if (u.uRainStormRingWeight) {
+        const v = this.params?.rainStormRingWeight;
+        u.uRainStormRingWeight.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.95;
+      }
+      if (u.uRainStormSwirlStrength) {
+        const v = this.params?.rainStormSwirlStrength;
+        u.uRainStormSwirlStrength.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.35;
+      }
+      if (u.uRainStormMicroEnabled) {
+        u.uRainStormMicroEnabled.value = this.params?.rainStormMicroEnabled === false ? 0.0 : 1.0;
+      }
+      if (u.uRainStormMicroStrength) {
+        const v = this.params?.rainStormMicroStrength;
+        u.uRainStormMicroStrength.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.25;
+      }
+      if (u.uRainStormMicroScale) {
+        const v = this.params?.rainStormMicroScale;
+        u.uRainStormMicroScale.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.85;
+      }
+      if (u.uRainStormMicroSpeed) {
+        const v = this.params?.rainStormMicroSpeed;
+        u.uRainStormMicroSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 1.25;
       }
 
       if (u.uRainMaxCombinedStrengthPx) {

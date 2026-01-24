@@ -1235,6 +1235,25 @@ export class TweakpaneManager {
             callback(effectId, '_preset_begin', selected);
           }
 
+          // Optional preset teardown: reset any parameters not explicitly mentioned in the preset.
+          // This prevents feature flags from "sticking" when switching between presets.
+          if (schema.presetApplyDefaults === true) {
+            for (const [paramId, paramDef] of Object.entries(schema.parameters || {})) {
+              if (paramId === 'enabled') continue;
+              if (!paramDef || !Object.prototype.hasOwnProperty.call(paramDef, 'default')) continue;
+
+              effectData.params[paramId] = paramDef.default;
+
+              if (effectData.bindings[paramId]) {
+                effectData.bindings[paramId].refresh();
+              }
+
+              if (callback) {
+                callback(effectId, paramId, paramDef.default);
+              }
+            }
+          }
+
           for (const [paramId, value] of Object.entries(presetDef)) {
             const paramDef = schema.parameters?.[paramId];
             if (!paramDef) continue;
@@ -1408,6 +1427,25 @@ export class TweakpaneManager {
             callback(effectId, '_preset_begin', selected);
           }
 
+          // Optional preset teardown: reset any parameters not explicitly mentioned in the preset.
+          // This prevents feature flags from "sticking" when switching between presets.
+          if (schema.presetApplyDefaults === true) {
+            for (const [paramId, paramDef] of Object.entries(schema.parameters || {})) {
+              if (paramId === 'enabled') continue;
+              if (!paramDef || !Object.prototype.hasOwnProperty.call(paramDef, 'default')) continue;
+
+              effectData.params[paramId] = paramDef.default;
+
+              if (effectData.bindings[paramId]) {
+                effectData.bindings[paramId].refresh();
+              }
+
+              if (callback) {
+                callback(effectId, paramId, paramDef.default);
+              }
+            }
+          }
+
           for (const [paramId, value] of Object.entries(presetDef)) {
             const paramDef = schema.parameters?.[paramId];
             if (!paramDef) continue;
@@ -1470,6 +1508,13 @@ export class TweakpaneManager {
     const initialCallback = this.effectCallbacks.get(effectId) || updateCallback;
     if (initialCallback && effectData && effectData.params) {
       for (const [paramId, value] of Object.entries(effectData.params)) {
+        const def = effectData.schema?.parameters?.[paramId];
+        // Do not push readonly (status-only) or hidden parameters into the effect.
+        // These are typically driven by the effect itself (e.g. texture discovery state)
+        // and pushing UI defaults can clobber authoritative runtime values.
+        if (def?.readonly === true) continue;
+        if (def?.hidden === true && paramId !== 'enabled') continue;
+
         initialCallback(effectId, paramId, value);
       }
     }

@@ -165,6 +165,69 @@ let enhancedLightIconManager = null;
 /** @type {InteractionManager|null} */
 let interactionManager = null;
 
+// Foundry draws the drag-select rectangle in PIXI (ControlsLayer.drawSelect).
+// Since we keep the PIXI canvas visible for overlays (drawings/templates), we must
+// suppress that rectangle in Gameplay mode so our custom selection visuals can own it.
+let _mapShineOrigDrawSelect = null;
+let _mapShineSelectSuppressed = false;
+
+function _updateFoundrySelectRectSuppression(forceValue = null) {
+  // Suppress Foundry selection rectangle when:
+  // - MapShine is running and we are in Gameplay mode
+  // - and our InteractionManager selection box is enabled
+  let suppress = false;
+  try {
+    const im = window.MapShine?.interactionManager;
+    const enabled = im?.selectionBoxParams?.enabled !== false;
+    suppress = !isMapMakerMode && enabled;
+  } catch (_) {
+    suppress = !isMapMakerMode;
+  }
+
+  if (typeof forceValue === 'boolean') suppress = forceValue;
+
+  // Avoid redundant patching.
+  if (_mapShineSelectSuppressed === suppress) return;
+  _mapShineSelectSuppressed = suppress;
+
+  try {
+    const controls = canvas?.controls;
+    if (!controls) return;
+
+    const selectGfx = controls.select;
+    const current = controls.drawSelect;
+
+    if (suppress) {
+      if (!_mapShineOrigDrawSelect && typeof current === 'function') {
+        _mapShineOrigDrawSelect = current.bind(controls);
+      }
+
+      controls.drawSelect = ({ x, y, width, height } = {}) => {
+        try {
+          if (selectGfx?.clear) selectGfx.clear();
+          if (selectGfx) selectGfx.visible = false;
+        } catch (_) {
+        }
+      };
+
+      try {
+        if (selectGfx?.clear) selectGfx.clear();
+        if (selectGfx) selectGfx.visible = false;
+      } catch (_) {
+      }
+    } else {
+      if (_mapShineOrigDrawSelect) {
+        controls.drawSelect = _mapShineOrigDrawSelect;
+      }
+      try {
+        if (selectGfx) selectGfx.visible = true;
+      } catch (_) {
+      }
+    }
+  } catch (_) {
+  }
+}
+
 /** @type {GridRenderer|null} */
 let gridRenderer = null;
 
@@ -1429,6 +1492,25 @@ async function createThreeCanvas(scene) {
     effectComposer.addUpdatable(interactionManager); // Register for updates (HUD positioning)
     log.info('Interaction manager initialized');
 
+    // Sync Selection Box UI params (loaded from scene settings) into the InteractionManager.
+    // initializeUI() runs earlier during startup, before InteractionManager exists.
+    try {
+      const sel = uiManager?.effectFolders?.selectionBox;
+      const params = sel?.params;
+      if (params && typeof params === 'object') {
+        for (const [k, v] of Object.entries(params)) {
+          if (typeof interactionManager.applySelectionBoxParamChange === 'function') {
+            interactionManager.applySelectionBoxParamChange(k, v);
+          }
+        }
+      }
+    } catch (_) {
+    }
+
+    // Ensure Foundry's native PIXI selection rectangle is suppressed in Gameplay mode.
+    // (In Map Maker mode, we want the native selection box.)
+    _updateFoundrySelectRectSuppression();
+
     // Step 5b: Initialize DOM overlay UI system (world-anchored overlays, ring UI)
     overlayUIManager = new OverlayUIManager(threeCanvas, sceneComposer);
     overlayUIManager.initialize();
@@ -1813,6 +1895,491 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     uiManager = new TweakpaneManager();
     await uiManager.initialize();
     log.info('UI Manager created');
+  }
+
+  // --- Selection Box UI (Gameplay drag-select visuals) ---
+  try {
+    const selectionSchema = {
+      enabled: true,
+      presetApplyDefaults: true,
+      presets: {
+        Blueprint: {
+          outlineColor: { r: 0.2, g: 0.75, b: 1.0 },
+          outlineWidthPx: 2,
+          outlineAlpha: 0.95,
+          fillAlpha: 0.02,
+          cornerRadiusPx: 2,
+          borderStyle: 'solid',
+          glowEnabled: true,
+          glowAlpha: 0.22,
+          glowSizePx: 22,
+          pulseEnabled: false,
+          pattern: 'grid',
+          patternScalePx: 22,
+          patternAlpha: 0.14,
+          patternLineWidthPx: 1,
+          shadowEnabled: true,
+          shadowOpacity: 0.22,
+          shadowFeather: 0.08,
+          shadowOffsetPx: 18,
+          labelEnabled: false,
+          labelClampToViewport: true
+        },
+        'Marching Ants': {
+          outlineColor: { r: 1.0, g: 1.0, b: 1.0 },
+          outlineWidthPx: 2,
+          outlineAlpha: 0.95,
+          fillAlpha: 0.0,
+          cornerRadiusPx: 0,
+          borderStyle: 'marching',
+          dashLengthPx: 10,
+          dashGapPx: 6,
+          dashSpeed: 180,
+          glowEnabled: false,
+          pulseEnabled: false,
+          pattern: 'none',
+          shadowEnabled: true,
+          shadowOpacity: 0.18,
+          shadowFeather: 0.06,
+          shadowOffsetPx: 12,
+          labelEnabled: true,
+          labelAlpha: 0.75,
+          labelFontSizePx: 12,
+          labelClampToViewport: true
+        },
+        'Neon Minimal': {
+          outlineColor: { r: 0.6, g: 1.0, b: 0.85 },
+          outlineWidthPx: 2,
+          outlineAlpha: 0.9,
+          fillAlpha: 0.01,
+          cornerRadiusPx: 3,
+          borderStyle: 'solid',
+          glowEnabled: true,
+          glowAlpha: 0.35,
+          glowSizePx: 28,
+          pulseEnabled: true,
+          pulseSpeed: 1.4,
+          pulseStrength: 0.7,
+          pattern: 'none',
+          shadowEnabled: true,
+          shadowOpacity: 0.2,
+          shadowFeather: 0.1,
+          shadowOffsetPx: 22,
+          labelEnabled: false,
+          labelClampToViewport: true
+        },
+        Scanner: {
+          outlineColor: { r: 0.95, g: 0.35, b: 1.0 },
+          outlineWidthPx: 2,
+          outlineAlpha: 0.9,
+          fillAlpha: 0.02,
+          cornerRadiusPx: 2,
+          borderStyle: 'dashed',
+          dashLengthPx: 14,
+          dashGapPx: 10,
+          glowEnabled: true,
+          glowAlpha: 0.18,
+          glowSizePx: 18,
+          pulseEnabled: true,
+          pulseSpeed: 2.2,
+          pulseStrength: 0.55,
+          pattern: 'diagonal',
+          patternScalePx: 16,
+          patternAlpha: 0.18,
+          patternLineWidthPx: 1,
+          shadowEnabled: true,
+          shadowOpacity: 0.22,
+          shadowFeather: 0.08,
+          shadowOffsetPx: 26,
+          labelEnabled: true,
+          labelAlpha: 0.85,
+          labelFontSizePx: 12,
+          labelClampToViewport: true
+        },
+        'Cyber Gradient': {
+          outlineColor: { r: 0.2, g: 0.85, b: 1.0 },
+          outlineWidthPx: 2,
+          outlineAlpha: 1.0,
+          fillAlpha: 0.01,
+          cornerRadiusPx: 2,
+          borderStyle: 'solid',
+          gradientEnabled: true,
+          gradientSpeed: 0.8,
+          gradientColorA: { r: 0.0, g: 1.0, b: 1.0 },
+          gradientColorB: { r: 1.0, g: 0.0, b: 1.0 },
+          glowEnabled: true,
+          glowAlpha: 0.35,
+          glowSizePx: 30,
+          pulseEnabled: false,
+          pattern: 'none',
+          shadowEnabled: true,
+          shadowOpacity: 0.18,
+          shadowFeather: 0.08,
+          shadowOffsetPx: 20,
+          labelEnabled: false,
+          labelClampToViewport: true
+        },
+        'Tech Brackets': {
+          outlineColor: { r: 0.25, g: 0.9, b: 0.6 },
+          outlineWidthPx: 2,
+          outlineAlpha: 0.95,
+          fillAlpha: 0.0,
+          cornerRadiusPx: 0,
+          borderStyle: 'solid',
+          techBracketsEnabled: true,
+          techBracketAlpha: 0.95,
+          techBracketLengthPx: 22,
+          techBracketWidthPx: 3,
+          reticleEnabled: true,
+          reticleAlpha: 0.08,
+          reticleWidthPx: 1,
+          glowEnabled: true,
+          glowAlpha: 0.2,
+          glowSizePx: 18,
+          pulseEnabled: false,
+          pattern: 'none',
+          shadowEnabled: true,
+          shadowOpacity: 0.2,
+          shadowFeather: 0.08,
+          shadowOffsetPx: 16,
+          labelEnabled: false,
+          labelClampToViewport: true
+        },
+        Glass: {
+          outlineColor: { r: 0.75, g: 0.85, b: 1.0 },
+          outlineWidthPx: 1,
+          outlineAlpha: 0.8,
+          fillAlpha: 0.01,
+          cornerRadiusPx: 6,
+          borderStyle: 'solid',
+          glassEnabled: true,
+          glassBlurPx: 6,
+          glowEnabled: false,
+          pulseEnabled: false,
+          pattern: 'none',
+          shadowEnabled: true,
+          shadowOpacity: 0.12,
+          shadowFeather: 0.12,
+          shadowOffsetPx: 14,
+          labelEnabled: false,
+          labelClampToViewport: true
+        },
+        'Illuminated Grid': {
+          outlineColor: { r: 0.25, g: 0.8, b: 1.0 },
+          outlineWidthPx: 2,
+          outlineAlpha: 0.95,
+          fillAlpha: 0.0,
+          cornerRadiusPx: 2,
+          borderStyle: 'solid',
+          glowEnabled: true,
+          glowAlpha: 0.22,
+          glowSizePx: 24,
+          pulseEnabled: false,
+          pattern: 'none',
+          shadowEnabled: true,
+          shadowOpacity: 0.14,
+          shadowFeather: 0.1,
+          shadowOffsetPx: 14,
+          illuminationEnabled: true,
+          illuminationIntensity: 0.45,
+          illuminationGridScalePx: 26,
+          illuminationScrollSpeed: 0.35,
+          illuminationColor: { r: 0.25, g: 0.85, b: 1.0 },
+          labelEnabled: false,
+          labelClampToViewport: true
+        },
+        'Double Border': {
+          outlineColor: { r: 0.25, g: 0.85, b: 1.0 },
+          outlineWidthPx: 2,
+          outlineAlpha: 0.9,
+          fillAlpha: 0.02,
+          cornerRadiusPx: 2,
+          borderStyle: 'solid',
+          glowEnabled: true,
+          glowAlpha: 0.18,
+          glowSizePx: 18,
+          pulseEnabled: false,
+          pattern: 'grid',
+          patternScalePx: 20,
+          patternAlpha: 0.12,
+          patternLineWidthPx: 1,
+          doubleBorderEnabled: true,
+          doubleBorderInsetPx: 3,
+          doubleBorderWidthPx: 1,
+          doubleBorderAlpha: 0.55,
+          doubleBorderStyle: 'dashed',
+          shadowEnabled: true,
+          shadowOpacity: 0.18,
+          shadowFeather: 0.08,
+          shadowOffsetPx: 16,
+          labelEnabled: false,
+          labelClampToViewport: true
+        },
+        'Double Marching': {
+          outlineColor: { r: 1.0, g: 1.0, b: 1.0 },
+          outlineWidthPx: 2,
+          outlineAlpha: 0.95,
+          fillAlpha: 0.0,
+          cornerRadiusPx: 0,
+          borderStyle: 'marching',
+          dashLengthPx: 10,
+          dashGapPx: 6,
+          dashSpeed: 200,
+          glowEnabled: false,
+          pulseEnabled: false,
+          pattern: 'none',
+          doubleBorderEnabled: true,
+          doubleBorderInsetPx: 4,
+          doubleBorderWidthPx: 1,
+          doubleBorderAlpha: 0.65,
+          doubleBorderStyle: 'marching',
+          shadowEnabled: true,
+          shadowOpacity: 0.14,
+          shadowFeather: 0.06,
+          shadowOffsetPx: 12,
+          labelEnabled: true,
+          labelAlpha: 0.75,
+          labelFontSizePx: 12,
+          labelClampToViewport: true
+        }
+      },
+      groups: [
+        {
+          name: 'appearance',
+          label: 'Selection Box',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'enabled',
+            'outlineColor',
+            'outlineWidthPx',
+            'outlineAlpha',
+            'fillAlpha',
+            'cornerRadiusPx'
+          ]
+        },
+        {
+          name: 'border',
+          label: 'Border Style',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'borderStyle',
+            'dashLengthPx',
+            'dashGapPx',
+            'dashSpeed'
+          ]
+        },
+        {
+          name: 'doubleBorder',
+          label: 'Double Border',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'doubleBorderEnabled',
+            'doubleBorderInsetPx',
+            'doubleBorderWidthPx',
+            'doubleBorderAlpha',
+            'doubleBorderStyle'
+          ]
+        },
+        {
+          name: 'glow',
+          label: 'Glow',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'glowEnabled',
+            'glowAlpha',
+            'glowSizePx'
+          ]
+        },
+        {
+          name: 'pulse',
+          label: 'Pulse',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'pulseEnabled',
+            'pulseSpeed',
+            'pulseStrength'
+          ]
+        },
+        {
+          name: 'pattern',
+          label: 'Fill Pattern',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'pattern',
+            'patternScalePx',
+            'patternAlpha',
+            'patternLineWidthPx'
+          ]
+        },
+        {
+          name: 'extras',
+          label: 'Extras',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'glassEnabled',
+            'glassBlurPx',
+            'gradientEnabled',
+            'gradientSpeed',
+            'gradientColorA',
+            'gradientColorB',
+            'reticleEnabled',
+            'reticleAlpha',
+            'reticleWidthPx',
+            'techBracketsEnabled',
+            'techBracketAlpha',
+            'techBracketLengthPx',
+            'techBracketWidthPx'
+          ]
+        },
+        {
+          name: 'shadow',
+          label: 'Shadow',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'shadowEnabled',
+            'shadowOpacity',
+            'shadowFeather',
+            'shadowOffsetPx',
+            'shadowZOffset'
+          ]
+        },
+        {
+          name: 'illumination',
+          label: 'Illumination',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'illuminationEnabled',
+            'illuminationIntensity',
+            'illuminationGridScalePx',
+            'illuminationScrollSpeed',
+            'illuminationColor'
+          ]
+        },
+        {
+          name: 'label',
+          label: 'Label',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'labelEnabled',
+            'labelAlpha',
+            'labelFontSizePx',
+            'labelClampToViewport'
+          ]
+        }
+      ],
+      parameters: {
+        enabled: { type: 'boolean', label: 'Enabled', default: true },
+
+        outlineColor: { type: 'color', label: 'Outline Color', default: { r: 0.314, g: 0.784, b: 1.0 } },
+        outlineWidthPx: { type: 'slider', label: 'Outline Width (px)', min: 0, max: 8, step: 1, default: 2 },
+        outlineAlpha: { type: 'slider', label: 'Outline Alpha', min: 0, max: 1, step: 0.01, default: 0.9 },
+        fillAlpha: { type: 'slider', label: 'Fill Alpha', min: 0, max: 0.25, step: 0.005, default: 0.035 },
+        cornerRadiusPx: { type: 'slider', label: 'Corner Radius (px)', min: 0, max: 16, step: 1, default: 2 },
+
+        borderStyle: {
+          type: 'dropdown',
+          label: 'Style',
+          options: { Solid: 'solid', Dashed: 'dashed', 'Marching Ants': 'marching' },
+          default: 'solid'
+        },
+        dashLengthPx: { type: 'slider', label: 'Dash Length (px)', min: 1, max: 40, step: 1, default: 10 },
+        dashGapPx: { type: 'slider', label: 'Dash Gap (px)', min: 0, max: 40, step: 1, default: 6 },
+        dashSpeed: { type: 'slider', label: 'Dash Speed (px/s)', min: 0, max: 600, step: 10, default: 120 },
+
+        doubleBorderEnabled: { type: 'boolean', label: 'Enabled', default: false },
+        doubleBorderInsetPx: { type: 'slider', label: 'Inset (px)', min: 0, max: 30, step: 1, default: 3 },
+        doubleBorderWidthPx: { type: 'slider', label: 'Width (px)', min: 0, max: 8, step: 1, default: 1 },
+        doubleBorderAlpha: { type: 'slider', label: 'Alpha', min: 0, max: 1, step: 0.01, default: 0.5 },
+        doubleBorderStyle: {
+          type: 'dropdown',
+          label: 'Style',
+          options: { Solid: 'solid', Dashed: 'dashed', 'Marching Ants': 'marching' },
+          default: 'dashed'
+        },
+
+        glowEnabled: { type: 'boolean', label: 'Enabled', default: true },
+        glowAlpha: { type: 'slider', label: 'Glow Alpha', min: 0, max: 1, step: 0.01, default: 0.12 },
+        glowSizePx: { type: 'slider', label: 'Glow Size (px)', min: 0, max: 80, step: 1, default: 18 },
+
+        pulseEnabled: { type: 'boolean', label: 'Enabled', default: false },
+        pulseSpeed: { type: 'slider', label: 'Speed', min: 0.1, max: 10, step: 0.1, default: 2.0 },
+        pulseStrength: { type: 'slider', label: 'Strength', min: 0, max: 1, step: 0.01, default: 0.5 },
+
+        pattern: {
+          type: 'dropdown',
+          label: 'Pattern',
+          options: { None: 'none', Grid: 'grid', Diagonal: 'diagonal', Dots: 'dots' },
+          default: 'none'
+        },
+        patternScalePx: { type: 'slider', label: 'Scale (px)', min: 4, max: 80, step: 1, default: 18 },
+        patternAlpha: { type: 'slider', label: 'Alpha', min: 0, max: 1, step: 0.01, default: 0.14 },
+        patternLineWidthPx: { type: 'slider', label: 'Line Width (px)', min: 1, max: 6, step: 1, default: 1 },
+
+        glassEnabled: { type: 'boolean', label: 'Glass Blur', default: false },
+        glassBlurPx: { type: 'slider', label: 'Blur (px)', min: 0, max: 20, step: 1, default: 4 },
+
+        gradientEnabled: { type: 'boolean', label: 'Gradient Stroke', default: false },
+        gradientSpeed: { type: 'slider', label: 'Gradient Speed', min: 0, max: 3, step: 0.05, default: 0.6 },
+        gradientColorA: { type: 'color', label: 'Gradient A', default: { r: 0.0, g: 1.0, b: 1.0 } },
+        gradientColorB: { type: 'color', label: 'Gradient B', default: { r: 1.0, g: 0.0, b: 1.0 } },
+
+        reticleEnabled: { type: 'boolean', label: 'Reticle', default: false },
+        reticleAlpha: { type: 'slider', label: 'Reticle Alpha', min: 0, max: 1, step: 0.01, default: 0.12 },
+        reticleWidthPx: { type: 'slider', label: 'Reticle Width (px)', min: 1, max: 6, step: 1, default: 1 },
+
+        techBracketsEnabled: { type: 'boolean', label: 'Tech Brackets', default: false },
+        techBracketAlpha: { type: 'slider', label: 'Bracket Alpha', min: 0, max: 1, step: 0.01, default: 0.9 },
+        techBracketLengthPx: { type: 'slider', label: 'Bracket Length (px)', min: 4, max: 80, step: 1, default: 18 },
+        techBracketWidthPx: { type: 'slider', label: 'Bracket Width (px)', min: 1, max: 12, step: 1, default: 2 },
+
+        shadowEnabled: { type: 'boolean', label: 'Enabled', default: true },
+        shadowOpacity: { type: 'slider', label: 'Opacity', min: 0, max: 1, step: 0.01, default: 0.26 },
+        shadowFeather: { type: 'slider', label: 'Feather', min: 0, max: 0.3, step: 0.005, default: 0.08 },
+        shadowOffsetPx: { type: 'slider', label: 'Offset (px)', min: 0, max: 120, step: 1, default: 18 },
+        shadowZOffset: { type: 'slider', label: 'Z Offset', min: 0, max: 2.0, step: 0.01, default: 0.12 },
+
+        illuminationEnabled: { type: 'boolean', label: 'Enabled', default: false },
+        illuminationIntensity: { type: 'slider', label: 'Intensity', min: 0, max: 2.0, step: 0.01, default: 0.35 },
+        illuminationGridScalePx: { type: 'slider', label: 'Grid Scale', min: 4, max: 120, step: 1, default: 24 },
+        illuminationScrollSpeed: { type: 'slider', label: 'Scroll Speed', min: -3, max: 3, step: 0.01, default: 0.25 },
+        illuminationColor: { type: 'color', label: 'Color', default: { r: 0.3, g: 0.85, b: 1.0 } },
+
+        labelEnabled: { type: 'boolean', label: 'Enabled', default: false },
+        labelAlpha: { type: 'slider', label: 'Alpha', min: 0, max: 1, step: 0.01, default: 0.85 },
+        labelFontSizePx: { type: 'slider', label: 'Font Size (px)', min: 8, max: 24, step: 1, default: 12 },
+        labelClampToViewport: { type: 'boolean', label: 'Clamp to Viewport', default: true }
+      }
+    };
+
+    const onSelectionUpdate = (effectId, paramId, value) => {
+      const im = window.MapShine?.interactionManager;
+      if (im && typeof im.applySelectionBoxParamChange === 'function') {
+        im.applySelectionBoxParamChange(paramId, value);
+      }
+      if (paramId === 'enabled') {
+        _updateFoundrySelectRectSuppression();
+      }
+    };
+
+    uiManager.registerEffect(
+      'selectionBox',
+      'Selection Box',
+      selectionSchema,
+      onSelectionUpdate,
+      'global'
+    );
+  } catch (e) {
+    log.warn('Failed to register Selection Box UI controls', e);
   }
 
   // Create Control Panel manager if not already created
@@ -3404,6 +3971,10 @@ export function setMapMakerMode(enabled) {
   if (isMapMakerMode === enabled) return;
   
   isMapMakerMode = enabled;
+
+  // In Map Maker mode, Foundry should own drag-select visuals (PIXI).
+  // In Gameplay mode, MapShine should own drag-select visuals (DOM + Three shadow).
+  _updateFoundrySelectRectSuppression();
   log.info(`Switching to ${enabled ? 'Map Maker' : 'Gameplay'} Mode`);
 
   try {

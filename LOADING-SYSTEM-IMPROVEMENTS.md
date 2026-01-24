@@ -370,11 +370,11 @@ loadingOverlay.configureStages([
 
 ---
 
-### P2: Medium-Impact, Medium-Effort Improvements
-
-#### P2.1: Lazy Effect Initialization
-**Effort**: 6-8 hours  
-**Impact**: 10-20% faster load for scenes with disabled effects
+ ### P2: Medium-Impact, Medium-Effort Improvements
+ 
+ #### P2.1: Lazy Effect Initialization
+ **Effort**: 6-8 hours  
+ **Impact**: 10-20% faster load for scenes with disabled effects
 
 ```javascript
 // Current: All 31 effects initialize regardless of enabled state
@@ -390,178 +390,178 @@ if (specularEffect.params?.enabled !== false) {
 }
 ```
 
-**Benefits**:
-- Faster initial load if many effects disabled
-- Effects still available but don't consume startup time
-- Requires tracking which effects are enabled by default
+### Making Parallelization Safe (So It Doesn’t Break Effects)
 
----
+ Parallelizing *loading* in MapShine is not just a performance change; it changes initialization ordering. In this codebase, several effects and managers have **implicit dependencies** (and sometimes “hidden” runtime assumptions) that are satisfied today only because everything is strictly serialized.
 
-#### P2.2: Streaming Tile Texture Upload
-**Effort**: 8-10 hours  
-**Impact**: 50-70% faster tile loading (eliminates 15s wait)
+ This section defines a safer architecture for P1.1/P1.2 that keeps those assumptions explicit, so we can parallelize without destabilizing the render chain.
 
-```javascript
-// Current: Wait for all tiles to decode before fade
-await tileManager.waitForInitialTiles({ overheadOnly: false, timeoutMs: 15000 });
+ ### Why naive parallelization breaks the system
 
-// Proposed: Stream tile uploads during finalization
-const tileUploadStream = tileManager.createTextureUploadStream({
-  maxConcurrent: 4,
-  prioritize: ['overhead', 'ground'],  // Load overhead first
-  timeout: 20000
-});
+ - **Hidden effect dependencies**
+   - Example: `FireSparksEffect` requires `ParticleSystem` to exist and be wired (`setParticleSystem`) *before* `FireSparksEffect.initialize()`.
+   - Example: `CandleFlamesEffect` depends on `LightingEffect` and expects `setLightingEffect()` before init.
+   - Many effects assume `weatherController`, `sceneComposer`, or other globals are already initialized.
 
-// Start streaming but don't block
-tileUploadStream.start();
+ - **Two-phase effect setup is real but currently informal**
+   - Phase A: `effect.initialize(renderer, scene, camera)` (allocates materials, targets, binds uniforms)
+   - Phase B: `effect.setBaseMesh(basePlane, bundle)` / `effect.setAssetBundle(bundle)` (binds textures and scene resources)
+   - Today the code does Phase A in a long sequence, then does Phase B in a single block. If we parallelize Phase A without also formalizing Phase B + activation rules, effects can become “visible” to the pipeline while only half-configured.
 
-// Fade overlay while tiles continue uploading
-await loadingOverlay.fadeIn(5000);
+ - **Activation timing matters (especially for post-processing)**
+   - Some post effects must render a pass-through even when “disabled/unready”, otherwise the chain can output black.
+   - If effects are added to the composer while still unconfigured, early frames can break because required textures/uniforms are null.
 
-// Continue uploading in background
-tileUploadStream.onProgress((loaded, total) => {
-  // Update HUD or log
-});
-```
+ - **Stale loads are unavoidable**
+   - Scene switches, `canvasTearDown`, context restore, or reload can overlap in-flight async tasks.
+   - Without cancellation / staleness checks at each awaited step, results from an old scene can be applied to a new one.
 
-**Benefits**:
-- Eliminates blocking wait for tile textures
-- Prioritizes overhead tiles (visible first)
-- Continues uploading in background after overlay fades
-- Prevents 15s timeout hangs
+ ### Safety Invariants (must hold even with parallelism)
 
----
+ - **Invariant: no stale writes**
+   - Any async completion must verify it belongs to the current “load session” before mutating `window.MapShine.*`, the scene graph, or effect state.
 
-#### P2.3: Asset Bundle Caching & Versioning
-**Effort**: 4-5 hours  
-**Impact**: 90% faster reload of same scene (skip asset phase)
+ - **Invariant: explicit dependency ordering**
+   - If effect B references effect A, that relationship must be declared and enforced.
 
-```javascript
-// Current: Cache key is just basePath + skipBaseTexture
-const cacheKey = `${basePath}::${skipBaseTexture ? 'masks' : 'full'}`;
+ - **Invariant: effects must be safe when unready**
+   - An effect that participates in the post chain must always produce output (pass-through) even if its assets aren’t ready.
+   - An effect that renders scene meshes must be hidden/disabled until it has required inputs.
 
-// Proposed: Include file modification time and version
-const cacheKey = `${basePath}::${skipBaseTexture}::${fileModTime}::v${BUNDLE_VERSION}`;
+ - **Invariant: deterministic final graph**
+   - Parallel loading must not change the final set of registered effects, their IDs, or their layer ordering.
 
-// Store in IndexedDB instead of memory
-const cachedBundle = await assetBundleCache.get(cacheKey);
-if (cachedBundle && !isStale(cachedBundle)) {
-  return cachedBundle;
-}
-```
+ ### Proposed: a “Load Session” and a phased loader
 
-**Benefits**:
-- Reload same scene: 1-3s → 0.2-0.5s
-- Persists across page reloads
-- Invalidates on file changes or version bump
-- Requires IndexedDB integration
+ Implement (conceptually) a `LoadSession` object created once per `createThreeCanvas()` call:
 
----
+ - `sessionId` (monotonic increment)
+ - `isStale()` predicate wired to teardown/rebuild
+ - optional `loggerPrefix` and profiling hooks
 
-#### P2.4: Smart Format Detection
-**Effort**: 3-4 hours  
-**Impact**: 20-30% faster format probing (fewer HTTP requests)
+ All async operations (asset load, effect init, manager init) must check `isStale()` before applying results.
 
-```javascript
-// Current: Try all formats for each mask
-for (const format of SUPPORTED_FORMATS) {  // webp, png, jpg
-  const path = `${basePath}${suffix}.${format}`;
-  const texture = await loadTextureAsync(path);
-  if (texture) break;
-}
+ Then restructure loading into explicit phases:
 
-// Proposed: Detect server capabilities once
-const serverFormats = await detectServerFormats();  // HEAD requests to test formats
-// Returns: { webp: true, png: true, jpg: true }
+ 1) **Phase 0: Preflight / globals**
+    - Create renderer + `EffectComposer`
+    - Initialize *required* global controllers (e.g. `weatherController.initialize()`)
+    - Establish `FrameState` / time manager
 
-// Then only try available formats
-for (const format of SUPPORTED_FORMATS) {
-  if (!serverFormats[format]) continue;
-  const texture = await loadTextureAsync(path);
-  if (texture) break;
-}
-```
+ 2) **Phase 1: Assets (P1.1)**
+    - Discover files once
+    - Load masks in parallel with strict concurrency limits
+    - Produce a *stable* `MapAssetBundle` (same keys/order every time)
 
-**Benefits**:
-- Reduces format probing from 3 attempts to 1-2
-- Saves ~100-200ms per mask
-- Caches format detection across scenes
+ 3) **Phase 2: Effect init (P1.2)**
+    - Instantiate all effects
+    - Wire explicit dependencies (`setParticleSystem`, `setLightingEffect`, etc.)
+    - Run `initialize()` in topological batches (parallel within batch)
+    - Keep effects *inactive* until Phase 3 completes
 
----
+ 4) **Phase 3: Bind scene resources / activate**
+    - Call `setBaseMesh(basePlane, bundle)` and `setAssetBundle(bundle)` in dependency order
+    - Await `getReadinessPromise()` for effects that declare readiness work
+    - Only then flip effects to “active” (or allow them into the post chain)
 
-### P3: High-Impact, High-Effort Improvements
+ ### P1.1 (Parallel Asset Discovery) — safe design
 
-#### P3.1: Incremental Scene Rendering
-**Effort**: 12-16 hours  
-**Impact**: Perceived load time improvement, better responsiveness
+ The loader is currently “discover once, then `await` each mask load in a loop”. That is correct but slow.
 
-```javascript
-// Current: Wait for all initialization before rendering
-await createThreeCanvas(scene);
-// ... all initialization ...
-renderLoop.start();
+ A safe parallel version must:
 
-// Proposed: Start render loop early, render incrementally
-renderLoop.start();  // Start immediately after canvas creation
+ - **Limit concurrency**
+   - `foundry.canvas.loadTexture()` can trigger decode + GPU upload; too many concurrent calls can spike memory and crash weaker GPUs.
+   - Target concurrency: 4 (safe default), optionally 6 on high tier.
 
-// Render placeholder/base scene
-await sceneComposer.initialize(foundryScene, ...);
-renderLoop.render();  // Render base plane
+ - **Preserve output stability**
+   - Regardless of completion order, the returned `bundle.masks` should be assembled deterministically (e.g., in registry order).
 
-// Initialize effects incrementally
-for (const effect of effectsToRegister) {
-  await effectComposer.registerEffect(effect);
-  renderLoop.render();  // Render with new effect
-}
+ - **Use per-mask best-effort error isolation**
+   - A single bad mask must not fail the entire bundle unless it is truly required.
 
-// Initialize managers incrementally
-for (const manager of managersToInit) {
-  await manager.initialize();
-  renderLoop.render();  // Render with new manager
-}
-```
+ - **Support staleness**
+   - If the load session becomes stale mid-flight, discard results.
 
-**Benefits**:
-- User sees something rendering immediately
-- Perceived load time much faster
-- Can show "loading" animation overlaid on scene
-- Requires careful state management
+ Concrete plan:
 
----
+ - Add a small concurrency limiter (semaphore) inside `loader.js`.
+ - Create one async task per mask (only if the file exists from FilePicker browse).
+ - Run tasks through the limiter (default concurrency 4; optionally 6 on high tier).
+ - Collect results into a `Map(maskId -> maskRecord|null)`.
+ - Emit `bundle.masks` deterministically in registry order.
+ - Do not mutate caches or globals if `session.isStale()`.
 
-#### P3.2: Adaptive Loading Strategy
-**Effort**: 10-12 hours  
-**Impact**: 20-40% faster load on slow connections
+### P1.2 (Parallel Effect Initialization) — safe design
 
-```javascript
-// Proposed: Detect network speed and adjust loading strategy
-const networkInfo = navigator.connection;
-const effectiveType = networkInfo?.effectiveType;  // '4g', '3g', '2g'
+ **Do not** simply do `Promise.all(effects.map(registerEffect))`.
 
-if (effectiveType === '2g' || effectiveType === '3g') {
-  // Slow connection: Skip non-essential assets
-  loadingStrategy = {
-    skipOptionalMasks: true,
-    reduceTextureQuality: true,
-    parallelRequests: 2,  // Reduce from 6
-    tileStreamLimit: 2
-  };
-} else if (effectiveType === '4g') {
-  // Fast connection: Aggressive parallelization
-  loadingStrategy = {
-    skipOptionalMasks: false,
-    reduceTextureQuality: false,
-    parallelRequests: 8,
-    tileStreamLimit: 6
-  };
-}
-```
+ Instead, formalize dependencies and initialization phases.
 
-**Benefits**:
-- Adapts to network conditions
-- Faster load on slow connections
-- Better UX on mobile/poor networks
-- Requires feature detection
+ #### Step 1: Declare dependencies explicitly
+
+ Maintain a small “effect init spec” table near the effect registration site:
+
+ - `id`
+ - `factory()` (constructs the instance)
+ - `deps` (other effect IDs that must be initialized first)
+ - `wire(ctx)` hook (runs before initialize; sets cross-references)
+ - `bind(ctx)` hook (runs after all effects are initialized; attaches base mesh, bundles)
+ - `activation` (when it is allowed to render)
+
+ This makes dependencies reviewable and prevents regressions.
+
+ #### Step 2: Topological batching with concurrency limits
+
+ - Compute batches: all effects whose deps are satisfied are eligible to initialize in the same batch.
+ - Run each batch with `Promise.all`.
+ - Apply an upper bound (similar to texture loading) if a batch would otherwise be large.
+
+ #### Step 3: Separate “registered” from “active”
+
+ Effects should be allowed to exist in the composer without participating in rendering until ready.
+
+ Options:
+
+ - Add an `effect.active` concept (preferred):
+   - `registerEffect()` initializes and stores, but the composer only updates/renders `active` effects.
+ - Or keep `active` implicit via “enabled” parameters, but ensure post effects still do pass-through.
+
+ The key is: parallel init must not allow half-configured effects to render.
+
+ #### Step 4: Preserve strict wiring points via deps
+
+ Some wiring must remain strictly ordered, and should be declared in the dependency table:
+
+ - `ParticleSystem` must initialize before `FireSparksEffect` (and anything else that uses its backend).
+ - `LightingEffect` must initialize before any effect that consumes its targets (roof alpha, packed masks, cookies, etc.).
+
+### Tile parity fix: remove deprecated `tileDoc.overhead` (Foundry v14)
+
+This is a correctness change and should be implemented independently of loading parallelization.
+
+Concrete plan:
+
+- In `TileManager`, compute overhead **only** as:
+  - `isOverhead = tileDoc.elevation >= canvas.scene.foregroundElevation`
+- Remove any fallback to `tileDoc.overhead`.
+- For “roof” semantics, prefer Foundry’s `tileDoc.restrictions.weather` (when available), then merge with MapShine’s `overheadIsRoof` flag.
+- Guard for older Foundry versions:
+  - If `restrictions` is missing, treat as `{weather:false, light:false}`.
+- Add debug logging when `tileDoc.overhead` is present so we can verify we aren’t relying on it.
+
+### Implementation sequencing (to avoid breaking everything)
+
+1) **Land the tile overhead parity fix first** (low risk, isolated, easy to validate).
+2) **Land P1.1 with a concurrency cap** (still returns the same bundle shape).
+3) **Introduce effect dependency table + phased activation without parallelism**
+  - Keep initialization serial, but enforce the new rules.
+  - This flushes out hidden dependencies safely.
+4) **Enable parallelism batch-by-batch**
+  - Start with a small independent batch.
+  - Expand gradually.
+5) **Add diagnostics**
+  - If an effect becomes active without required inputs, throw in debug builds.
 
 ---
 

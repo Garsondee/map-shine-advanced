@@ -5,8 +5,34 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { globalLoadingProfiler } from '../core/loading-profiler.js';
 
 const log = createLogger('AssetLoader');
+
+let _lpSeq = 0;
+
+class Semaphore {
+  constructor(max = 4) {
+    this.max = max;
+    this.current = 0;
+    this.queue = [];
+  }
+
+  async acquire() {
+    if (this.current < this.max) {
+      this.current++;
+      return;
+    }
+    await new Promise(resolve => this.queue.push(resolve));
+    this.current++;
+  }
+
+  release() {
+    this.current--;
+    const resolve = this.queue.shift();
+    if (resolve) resolve();
+  }
+}
 
 /** Supported image formats in priority order */
 const SUPPORTED_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
@@ -55,6 +81,10 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
     suppressProbeErrors = false
   } = options || {};
   log.info(`Loading asset bundle: ${basePath}${skipBaseTexture ? ' (masks only)' : ''}`);
+
+  const lp = globalLoadingProfiler;
+  const doLoadProfile = !!lp?.enabled;
+  const spanToken = doLoadProfile ? (++_lpSeq) : 0;
   
   const warnings = [];
   
@@ -95,46 +125,87 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
     }
 
     // Step 2: Discover available files in directory using FilePicker
-    const availableFiles = await discoverAvailableFiles(basePath);
-    log.debug(`Discovered ${availableFiles.length} files in directory`);
-
-    // Step 3: Load only masks that actually exist
-    const masks = [];
-    let loaded = skipBaseTexture ? 0 : 1;
-
-    for (const [maskId, maskDef] of Object.entries(EFFECT_MASKS)) {
-      if (onProgress) onProgress(loaded, Object.keys(EFFECT_MASKS).length + 1, maskDef.description);
-
-      // Check if this mask exists in discovered files
-      const maskFile = findMaskInFiles(availableFiles, basePath, maskDef.suffix);
-
-      let maskTexture = null;
-      let resolvedMaskPath = null;
-      if (maskFile) {
-        resolvedMaskPath = maskFile;
+    let availableFiles = [];
+    if (doLoadProfile) {
+      try {
+        lp.begin(`assetLoader.discoverAvailableFiles:${spanToken}`, { basePath });
+      } catch (e) {
+      }
+    }
+    try {
+      availableFiles = await discoverAvailableFiles(basePath);
+    } finally {
+      if (doLoadProfile) {
         try {
-          maskTexture = await loadTextureAsync(maskFile);
+          lp.end(`assetLoader.discoverAvailableFiles:${spanToken}`, { files: availableFiles?.length ?? 0 });
         } catch (e) {
-          const msg = `Failed to load mask: ${maskId} (${maskDef.suffix}) from ${maskFile}`;
-          if (maskDef.required) {
-            throw new Error(msg);
-          }
-          warnings.push(msg);
-          maskTexture = null;
-        }
-      } else if (!availableFiles.length && maskId === 'outdoors' && !suppressProbeErrors) {
-        try {
-          const probed = await probeMaskTexture(basePath, maskDef.suffix, suppressProbeErrors);
-          if (probed) {
-            resolvedMaskPath = probed.path;
-            maskTexture = probed.texture;
-          }
-        } catch (e) {
-          // Probing is best-effort; ignore errors.
         }
       }
+    }
+    log.debug(`Discovered ${availableFiles.length} files in directory`);
 
-      if (maskTexture) {
+    // Step 3: Load masks in parallel with concurrency limit
+    const semaphore = new Semaphore(4);
+    const maskEntries = Object.entries(EFFECT_MASKS);
+    let loaded = skipBaseTexture ? 0 : 1;
+    const totalMasks = maskEntries.length;
+    
+    const maskPromises = maskEntries.map(async ([maskId, maskDef]) => {
+      await semaphore.acquire();
+      try {
+        // Report progress
+        if (onProgress) {
+          const current = loaded;
+          onProgress(current, totalMasks + 1, maskDef.description);
+        }
+        loaded++;
+
+        // Check if this mask exists in discovered files
+        const maskFile = findMaskInFiles(availableFiles, basePath, maskDef.suffix);
+
+        let maskTexture = null;
+        let resolvedMaskPath = null;
+        if (maskFile) {
+          resolvedMaskPath = maskFile;
+          try {
+            const spanId = doLoadProfile ? `assetLoader.maskTexture:${spanToken}:${maskId}` : null;
+            if (doLoadProfile) {
+              try {
+                lp.begin(spanId, { maskId, path: maskFile });
+              } catch (e) {
+              }
+            }
+            try {
+              maskTexture = await loadTextureAsync(maskFile);
+            } finally {
+              if (doLoadProfile) {
+                try {
+                  lp.end(spanId, { ok: !!maskTexture });
+                } catch (e) {
+                }
+              }
+            }
+          } catch (e) {
+            const msg = `Failed to load mask: ${maskId} (${maskDef.suffix}) from ${maskFile}`;
+            if (maskDef.required) {
+              throw new Error(msg);
+            }
+            warnings.push(msg);
+            maskTexture = null;
+          }
+        } else if (!availableFiles.length && maskId === 'outdoors' && !suppressProbeErrors) {
+          try {
+            const probed = await probeMaskTexture(basePath, maskDef.suffix, suppressProbeErrors);
+            if (probed) {
+              resolvedMaskPath = probed.path;
+              maskTexture = probed.texture;
+            }
+          } catch (e) {
+            // Probing is best-effort; ignore errors.
+          }
+        }
+
+        if (maskTexture) {
           const isColorTexture = ['bush', 'tree'].includes(maskId);
           if (isColorTexture && THREE.SRGBColorSpace) {
             maskTexture.colorSpace = THREE.SRGBColorSpace;
@@ -151,20 +222,26 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
             maskTexture.needsUpdate = true;
           }
           
-          masks.push({
+          log.debug(`Loaded effect mask: ${maskId} from ${resolvedMaskPath} (colorSpace: ${isColorTexture ? 'sRGB' : 'Default'}, mipmaps: ${(!!maskTexture.generateMipmaps).toString()})`);
+          return {
             id: maskId,
             suffix: maskDef.suffix,
             type: maskId,
             texture: maskTexture,
             required: maskDef.required
-          });
-          log.debug(`Loaded effect mask: ${maskId} from ${resolvedMaskPath} (colorSpace: ${isColorTexture ? 'sRGB' : 'Default'}, mipmaps: ${(!!maskTexture.generateMipmaps).toString()})`);
-      } else if (maskDef.required) {
-        warnings.push(`Required mask missing: ${maskId} (${maskDef.suffix})`);
+          };
+        } else if (maskDef.required) {
+          warnings.push(`Required mask missing: ${maskId} (${maskDef.suffix})`);
+        }
+        return null;
+      } finally {
+        semaphore.release();
       }
+    });
 
-      loaded++;
-    }
+    // Wait for all masks to load and collect results in registry order
+    const maskResults = await Promise.all(maskPromises);
+    const masks = maskResults.filter(m => m !== null);
 
     // Step 4: Apply intelligent fallbacks
     applyIntelligentFallbacks(masks, warnings);
@@ -258,6 +335,15 @@ async function probeMaskTexture(basePath, suffix, suppressProbeErrors = false) {
  * @private
  */
 async function discoverAvailableFiles(basePath) {
+  const lp = globalLoadingProfiler;
+  const doLoadProfile = !!lp?.enabled;
+  const spanToken = doLoadProfile ? (++_lpSeq) : 0;
+  if (doLoadProfile) {
+    try {
+      lp.begin(`assetLoader.discoverAvailableFiles.inner:${spanToken}`, { basePath });
+    } catch (e) {
+    }
+  }
   try {
     // Extract directory path from base path
     const lastSlash = basePath.lastIndexOf('/');
@@ -297,9 +383,23 @@ async function discoverAvailableFiles(basePath) {
     }
 
     const allFiles = [];
+    let browseIndex = 0;
     for (const dir of dirsToTry) {
       try {
+        const spanId = doLoadProfile ? `assetLoader.filePicker.browse:${spanToken}:${browseIndex++}` : null;
+        if (doLoadProfile) {
+          try {
+            lp.begin(spanId, { dir });
+          } catch (e) {
+          }
+        }
         const result = await filePicker.browse('data', dir);
+        if (doLoadProfile) {
+          try {
+            lp.end(spanId, { files: result?.files?.length ?? 0 });
+          } catch (e) {
+          }
+        }
         if (!result || !result.files) {
           continue;
         }
@@ -322,6 +422,13 @@ async function discoverAvailableFiles(basePath) {
   } catch (error) {
     log.warn('Failed to discover files via FilePicker:', error.message);
     return [];
+  } finally {
+    if (doLoadProfile) {
+      try {
+        lp.end(`assetLoader.discoverAvailableFiles.inner:${spanToken}`);
+      } catch (e) {
+      }
+    }
   }
 }
 
@@ -427,11 +534,20 @@ function normalizePath(path) {
  */
 async function loadTextureAsync(path, suppressProbeErrors = false) {
   const THREE = window.THREE;
+  const lp = globalLoadingProfiler;
+  const doLoadProfile = !!lp?.enabled;
+  const spanToken = doLoadProfile ? (++_lpSeq) : 0;
   
   // Use Foundry's loadTexture which handles module paths correctly
   const absolutePath = normalizePath(path);
   
   try {
+    if (doLoadProfile) {
+      try {
+        lp.begin(`assetLoader.loadTextureAsync:${spanToken}`, { path: absolutePath });
+      } catch (e) {
+      }
+    }
     // Use Foundry's built-in texture loading (via PIXI)
     // Don't use fallback - let it throw on 404 so we can try next format
     const loadTextureFn = globalThis.foundry?.canvas?.loadTexture ?? globalThis.loadTexture;
@@ -452,6 +568,13 @@ async function loadTextureAsync(path, suppressProbeErrors = false) {
     
     let texSource = resource.source;
     try {
+      const cloneSpanId = doLoadProfile ? `assetLoader.cloneTexSource:${spanToken}` : null;
+      if (doLoadProfile) {
+        try {
+          lp.begin(cloneSpanId, { path: absolutePath });
+        } catch (e) {
+        }
+      }
       const shouldClone = Object.values(EFFECT_MASKS).some((m) => {
         const suffix = m?.suffix;
         return typeof suffix === 'string' && suffix.length > 0 && absolutePath.includes(`${suffix}.`);
@@ -480,6 +603,12 @@ async function loadTextureAsync(path, suppressProbeErrors = false) {
           }
         }
       }
+      if (doLoadProfile) {
+        try {
+          lp.end(cloneSpanId, { cloned: texSource !== resource.source });
+        } catch (e) {
+        }
+      }
     } catch (e) {
     }
 
@@ -494,6 +623,12 @@ async function loadTextureAsync(path, suppressProbeErrors = false) {
     threeTexture.generateMipmaps = true;
     
     log.debug(`Successfully loaded: ${absolutePath}`);
+    if (doLoadProfile) {
+      try {
+        lp.end(`assetLoader.loadTextureAsync:${spanToken}`, { ok: true });
+      } catch (e) {
+      }
+    }
     return threeTexture;
     
   } catch (error) {
@@ -501,6 +636,12 @@ async function loadTextureAsync(path, suppressProbeErrors = false) {
     // Only log at debug level to avoid console spam
     if (!suppressProbeErrors) {
       log.debug(`Texture load failed (expected during probing): ${absolutePath}`, error);
+    }
+    if (doLoadProfile) {
+      try {
+        lp.end(`assetLoader.loadTextureAsync:${spanToken}`, { ok: false, message: String(error?.message ?? error) });
+      } catch (e) {
+      }
     }
     throw error;
   }

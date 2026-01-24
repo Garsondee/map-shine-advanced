@@ -1232,188 +1232,125 @@ async function createThreeCanvas(scene) {
       return;
     }
 
-    // Step 3: Register specular effect
-    _setEffectInitStep('Specular');
-    const specularEffect = new SpecularEffect();
-    await effectComposer.registerEffect(specularEffect);
-
-    // Step 3.1: Register iridescence effect
-    _setEffectInitStep('Iridescence');
-    const iridescenceEffect = new IridescenceEffect();
-    await effectComposer.registerEffect(iridescenceEffect);
-
-    // Step 3.1.5: Register window lighting effect
-    _setEffectInitStep('Window Lights');
-    const windowLightEffect = new WindowLightEffect();
-    await effectComposer.registerEffect(windowLightEffect);
-
-    if (window.MapShine) window.MapShine.windowLightEffect = windowLightEffect;
-
-    // Step 3.2: Register color correction effect (Post-Processing)
-    _setEffectInitStep('Color Correction');
-    const colorCorrectionEffect = new ColorCorrectionEffect();
-    await effectComposer.registerEffect(colorCorrectionEffect);
-
-    // Step 3.3: Register film grain effect (Post-Processing)
-    _setEffectInitStep('Film Grain');
-    const filmGrainEffect = new FilmGrainEffect();
-    await effectComposer.registerEffect(filmGrainEffect);
-
-    // Step 3.4: Register dot screen effect (Post-Processing)
-    _setEffectInitStep('Dot Screen');
-    const dotScreenEffect = new DotScreenEffect();
-    await effectComposer.registerEffect(dotScreenEffect);
-
-    // Step 3.5: Register halftone effect (Post-Processing)
-    _setEffectInitStep('Halftone');
-    const halftoneEffect = new HalftoneEffect();
-    await effectComposer.registerEffect(halftoneEffect);
-
-    // Step 3.6: Register sharpen effect (Post-Processing)
-    _setEffectInitStep('Sharpen');
-    const sharpenEffect = new SharpenEffect();
-    await effectComposer.registerEffect(sharpenEffect);
-
-    // Step 3.7: Register ASCII Effect (Post-Processing)
-    _setEffectInitStep('ASCII');
-    const asciiEffect = new AsciiEffect();
-    await effectComposer.registerEffect(asciiEffect);
+    // P1.2: Parallel Effect Initialization (Conservative Two-Phase Approach)
+    // Phase 1: Register independent effects in parallel (no inter-effect dependencies)
+    const independentEffects = [];
     
-    // Step 3.8: Register Particle System (WebGPU/WebGL2)
-    // CRITICAL: Must await to ensure batchRenderer is initialized before FireSparksEffect uses it
+    const registerIndependentEffect = async (name, EffectClass) => {
+      _setEffectInitStep(name);
+      const effect = new EffectClass();
+      await effectComposer.registerEffect(effect);
+      return { name, effect };
+    };
+
+    const independentPromises = [
+      registerIndependentEffect('Specular', SpecularEffect),
+      registerIndependentEffect('Iridescence', IridescenceEffect),
+      registerIndependentEffect('Window Lights', WindowLightEffect),
+      registerIndependentEffect('Color Correction', ColorCorrectionEffect),
+      registerIndependentEffect('Film Grain', FilmGrainEffect),
+      registerIndependentEffect('Dot Screen', DotScreenEffect),
+      registerIndependentEffect('Halftone', HalftoneEffect),
+      registerIndependentEffect('Sharpen', SharpenEffect),
+      registerIndependentEffect('ASCII', AsciiEffect),
+      registerIndependentEffect('Smelly Flies', SmellyFliesEffect),
+      registerIndependentEffect('Lightning', LightningEffect),
+      registerIndependentEffect('Prism', PrismEffect),
+      registerIndependentEffect('Water', WaterEffectV2),
+      registerIndependentEffect('Fog', WorldSpaceFogEffect),
+      registerIndependentEffect('Bushes', BushEffect),
+      registerIndependentEffect('Trees', TreeEffect),
+      registerIndependentEffect('Overhead Shadows', OverheadShadowsEffect),
+      registerIndependentEffect('Building Shadows', BuildingShadowsEffect),
+      registerIndependentEffect('Clouds', CloudEffect),
+      registerIndependentEffect('Atmospheric Fog', AtmosphericFogEffect),
+      registerIndependentEffect('Distortion', DistortionManager),
+      registerIndependentEffect('Bloom', BloomEffect),
+      registerIndependentEffect('Lensflare', LensflareEffect),
+      registerIndependentEffect('Mask Debug', MaskDebugEffect),
+      registerIndependentEffect('Debug Layers', DebugLayerEffect),
+      registerIndependentEffect('Player Lights', PlayerLightEffect),
+      registerIndependentEffect('Sky Color', SkyColorEffect)
+    ];
+
+    const independentResults = await Promise.all(independentPromises);
+    const effectMap = new Map(independentResults.map(r => [r.name, r.effect]));
+
+    const specularEffect = effectMap.get('Specular');
+    const iridescenceEffect = effectMap.get('Iridescence');
+    const windowLightEffect = effectMap.get('Window Lights');
+    const colorCorrectionEffect = effectMap.get('Color Correction');
+    const filmGrainEffect = effectMap.get('Film Grain');
+    const dotScreenEffect = effectMap.get('Dot Screen');
+    const halftoneEffect = effectMap.get('Halftone');
+    const sharpenEffect = effectMap.get('Sharpen');
+    const asciiEffect = effectMap.get('ASCII');
+    const smellyFliesEffect = effectMap.get('Smelly Flies');
+    const lightningEffect_temp = effectMap.get('Lightning');
+    const prismEffect = effectMap.get('Prism');
+    const waterEffect = effectMap.get('Water');
+    const fogEffect_temp = effectMap.get('Fog');
+    const bushEffect = effectMap.get('Bushes');
+    const treeEffect = effectMap.get('Trees');
+    const overheadShadowsEffect = effectMap.get('Overhead Shadows');
+    const buildingShadowsEffect = effectMap.get('Building Shadows');
+    const cloudEffect = effectMap.get('Clouds');
+    const atmosphericFogEffect = effectMap.get('Atmospheric Fog');
+    const distortionManager = effectMap.get('Distortion');
+    const bloomEffect = effectMap.get('Bloom');
+    const lensflareEffect = effectMap.get('Lensflare');
+    const maskDebugEffect = effectMap.get('Mask Debug');
+    const debugLayerEffect = effectMap.get('Debug Layers');
+    const playerLightEffect = effectMap.get('Player Lights');
+    const skyColorEffect_temp = effectMap.get('Sky Color');
+
+    // Assign to module-level variables for later reference
+    lightningEffect = lightningEffect_temp;
+    fogEffect = fogEffect_temp;
+    skyColorEffect = skyColorEffect_temp;
+
+    // Wire up window light effect
+    if (window.MapShine) window.MapShine.windowLightEffect = windowLightEffect;
+    if (window.MapShine) window.MapShine.cloudEffect = cloudEffect;
+    if (window.MapShine) window.MapShine.atmosphericFogEffect = atmosphericFogEffect;
+    if (window.MapShine) window.MapShine.distortionManager = distortionManager;
+    if (window.MapShine) window.MapShine.bloomEffect = bloomEffect;
+
+    // Phase 2: Register dependent effects sequentially (must maintain order)
+    // Step 3.8: Register Particle System (must be before FireSparksEffect)
     _setEffectInitStep('Particles');
     const particleSystem = new ParticleSystem();
     await effectComposer.registerEffect(particleSystem);
 
-    // Step 3.9: Register Fire Sparks Effect and wire it to the ParticleSystem
+    // Step 3.9: Register Fire Sparks Effect (depends on ParticleSystem)
     _setEffectInitStep('Fire');
     const fireSparksEffect = new FireSparksEffect();
-    // Provide the particle backend so FireSparksEffect can create emitters and bind uniforms
     fireSparksEffect.setParticleSystem(particleSystem);
     await effectComposer.registerEffect(fireSparksEffect);
-    // Pass asset bundle to check for _Fire mask (after particle system is wired)
     if (bundle) {
       fireSparksEffect.setAssetBundle(bundle);
     }
 
-    // Step 3.10: Register Smelly Flies Effect (smart particles with AI behavior)
-    _setEffectInitStep('Smelly Flies');
-    const smellyFliesEffect = new SmellyFliesEffect();
-    await effectComposer.registerEffect(smellyFliesEffect);
-
+    // Step 3.10: Register Dust Motes (can use particle system if needed)
     _setEffectInitStep('Dust Motes');
     const dustMotesEffect = new DustMotesEffect();
     await effectComposer.registerEffect(dustMotesEffect);
-
     if (bundle) {
       dustMotesEffect.setAssetBundle(bundle);
     }
 
-    _setEffectInitStep('Lightning');
-    lightningEffect = new LightningEffect();
-    await effectComposer.registerEffect(lightningEffect);
-
-    // Step 3.11: Register Prism Effect
-    _setEffectInitStep('Prism');
-    const prismEffect = new PrismEffect();
-    await effectComposer.registerEffect(prismEffect);
-
-    // Step 3.12: Register Water Effect
-    _setEffectInitStep('Water');
-    const waterEffect = new WaterEffectV2();
-    await effectComposer.registerEffect(waterEffect);
-
-    // Step 3.13: Register World-Space Fog Effect (Fog of War)
-    // WorldSpaceFogEffect renders fog as a plane mesh in the Three.js scene.
-    // This eliminates coordinate conversion issues between screen-space and world-space.
-    // Vision is rendered to a world-space render target, exploration uses Foundry's texture.
-    _setEffectInitStep('Fog');
-    fogEffect = new WorldSpaceFogEffect();
-    await effectComposer.registerEffect(fogEffect);
-    log.info('WorldSpaceFogEffect registered');
-
-    // Step 3.14: Register Lighting Effect
+    // Step 3.14: Register Lighting Effect (must be before CandleFlamesEffect)
     _setEffectInitStep('Lighting');
     lightingEffect = new LightingEffect();
     await effectComposer.registerEffect(lightingEffect);
-
     if (window.MapShine) window.MapShine.lightingEffect = lightingEffect;
 
+    // Step 3.15: Register Candle Flames (depends on LightingEffect)
     _setEffectInitStep('Candle Flames');
-    candleFlamesEffect = new CandleFlamesEffect();
+    const candleFlamesEffect = new CandleFlamesEffect();
     candleFlamesEffect.setLightingEffect(lightingEffect);
     await effectComposer.registerEffect(candleFlamesEffect);
     if (window.MapShine) window.MapShine.candleFlamesEffect = candleFlamesEffect;
-
-    // Step 3.15: Register Animated Bushes (surface overlay, before shadows)
-    _setEffectInitStep('Bushes');
-    const bushEffect = new BushEffect();
-    await effectComposer.registerEffect(bushEffect);
-
-    // Step 3.16: Register Animated Trees (High Canopy, above overhead)
-    _setEffectInitStep('Trees');
-    const treeEffect = new TreeEffect();
-    await effectComposer.registerEffect(treeEffect);
-
-    // Step 3.17: Register Overhead Shadows (post-lighting)
-    _setEffectInitStep('Overhead Shadows');
-    const overheadShadowsEffect = new OverheadShadowsEffect();
-    await effectComposer.registerEffect(overheadShadowsEffect);
-
-    // Step 3.18: Register Building Shadows (post-lighting, environmental)
-    _setEffectInitStep('Building Shadows');
-    const buildingShadowsEffect = new BuildingShadowsEffect();
-    await effectComposer.registerEffect(buildingShadowsEffect);
-
-    // Step 3.19: Register Cloud Effect (procedural cloud shadows)
-    _setEffectInitStep('Clouds');
-    const cloudEffect = new CloudEffect();
-    await effectComposer.registerEffect(cloudEffect);
-
-    if (window.MapShine) window.MapShine.cloudEffect = cloudEffect;
-
-    // Step 3.19b: Register Atmospheric Fog Effect (weather-driven distance fog)
-    _setEffectInitStep('Atmospheric Fog');
-    const atmosphericFogEffect = new AtmosphericFogEffect();
-    await effectComposer.registerEffect(atmosphericFogEffect);
-
-    if (window.MapShine) window.MapShine.atmosphericFogEffect = atmosphericFogEffect;
-
-    // Step 3.20: Register Distortion Manager (centralized screen-space distortions)
-    _setEffectInitStep('Distortion');
-    const distortionManager = new DistortionManager();
-    await effectComposer.registerEffect(distortionManager);
-
-    if (window.MapShine) window.MapShine.distortionManager = distortionManager;
-
-    // Step 3.21: Register Bloom Effect
-    _setEffectInitStep('Bloom');
-    const bloomEffect = new BloomEffect();
-    await effectComposer.registerEffect(bloomEffect);
-
-    if (window.MapShine) window.MapShine.bloomEffect = bloomEffect;
-
-    // Step 3.22: Register Lensflare Effect
-    _setEffectInitStep('Lensflare');
-    const lensflareEffect = new LensflareEffect();
-    await effectComposer.registerEffect(lensflareEffect);
-
-    _setEffectInitStep('Mask Debug');
-    const maskDebugEffect = new MaskDebugEffect();
-    await effectComposer.registerEffect(maskDebugEffect);
-
-    _setEffectInitStep('Debug Layers');
-    const debugLayerEffect = new DebugLayerEffect();
-    await effectComposer.registerEffect(debugLayerEffect);
-
-    _setEffectInitStep('Player Lights');
-    const playerLightEffect = new PlayerLightEffect();
-    await effectComposer.registerEffect(playerLightEffect);
-
-    // Step 7: Create Sky Color Effect (post-lighting color grading for sky/outdoors)
-    _setEffectInitStep('Sky Color');
-    skyColorEffect = new SkyColorEffect();
-    await effectComposer.registerEffect(skyColorEffect);
 
     if (isStale()) {
       try {

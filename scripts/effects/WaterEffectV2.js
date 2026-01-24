@@ -223,6 +223,7 @@ export class WaterEffectV2 extends EffectBase {
       floatingFoamStrength: 0.33,
       floatingFoamCoverage: 0.24,
       floatingFoamScale: 75.5,
+      floatingFoamWaveDistortion: 0.5,
 
       // foam.webp particle systems (WeatherParticles)
       shoreFoamEnabled: true,
@@ -606,7 +607,8 @@ export class WaterEffectV2 extends EffectBase {
 
             'floatingFoamStrength',
             'floatingFoamCoverage',
-            'floatingFoamScale'
+            'floatingFoamScale',
+            'floatingFoamWaveDistortion'
           ]
         },
         {
@@ -1013,7 +1015,8 @@ export class WaterEffectV2 extends EffectBase {
 
         floatingFoamStrength: { type: 'slider', label: 'Floating Foam Strength', min: 0.0, max: 1.0, step: 0.01, default: 1 },
         floatingFoamCoverage: { type: 'slider', label: 'Floating Foam Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.15 },
-        floatingFoamScale: { type: 'slider', label: 'Floating Foam Scale', min: 0.1, max: 400.0, step: 0.5, default: 10 },
+        floatingFoamScale: { type: 'slider', label: 'Floating Foam Scale', min: 1, max: 200, step: 0.5, default: 75.5 },
+        floatingFoamWaveDistortion: { type: 'slider', label: 'Wave Distortion', min: 0.0, max: 2.0, step: 0.01, default: 0.5 },
 
         shoreFoamEnabled: { type: 'boolean', label: 'Foam Particles Enabled', default: true },
         shoreFoamIntensity: { type: 'slider', label: 'Foam Particles Intensity', min: 0.0, max: 6.0, step: 0.01, default: 6 },
@@ -1300,6 +1303,7 @@ export class WaterEffectV2 extends EffectBase {
         uFloatingFoamStrength: { value: this.params.floatingFoamStrength },
         uFloatingFoamCoverage: { value: this.params.floatingFoamCoverage },
         uFloatingFoamScale: { value: this.params.floatingFoamScale },
+        uFloatingFoamWaveDistortion: { value: this.params.floatingFoamWaveDistortion },
 
         // Shader-based foam flecks (spray dots)
         uFoamFlecksIntensity: { value: this.params.foamFlecksIntensity },
@@ -1503,6 +1507,7 @@ export class WaterEffectV2 extends EffectBase {
         uniform float uFloatingFoamStrength;
         uniform float uFloatingFoamCoverage;
         uniform float uFloatingFoamScale;
+        uniform float uFloatingFoamWaveDistortion;
 
         // Shader-based foam flecks (spray dots)
         uniform float uFoamFlecksIntensity;
@@ -1546,6 +1551,8 @@ export class WaterEffectV2 extends EffectBase {
         float waterInsideFromSdf(float sdf01);
 
         float sampleOutdoorsMask(vec2 sceneUv01);
+
+        vec2 waveGrad2D(vec2 sceneUv, float t, float motion01);
 
         float hash12(vec2 p) {
           vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -1996,6 +2003,13 @@ export class WaterEffectV2 extends EffectBase {
 
           vec2 clumpUv = foamBasis * max(0.1, uFloatingFoamScale);
           clumpUv -= windBasis * (tWind * (0.02 + uFoamSpeed * 0.05));
+          
+          // Apply wave distortion to floating foam clumps
+          if (uFloatingFoamWaveDistortion > 0.01) {
+            vec2 waveGrad = waveGrad2D(sceneUv, uTime, 1.0);
+            clumpUv += waveGrad * clamp(uFloatingFoamWaveDistortion, 0.0, 2.0) * 0.1;
+          }
+          
           float c1 = valueNoise(clumpUv);
           float c2 = valueNoise(clumpUv * 2.1 + 5.2);
           float c = c1 * 0.7 + c2 * 0.3;
@@ -2004,7 +2018,13 @@ export class WaterEffectV2 extends EffectBase {
           float deepMask = smoothstep(0.15, 0.65, 1.0 - shore);
           float floatingFoamAmount = clumps * inside * max(0.0, uFloatingFoamStrength) * deepMask;
 
-          float foamAmount = clamp(shoreFoamAmount + floatingFoamAmount, 0.0, 1.0);
+          // Additional floating foam layer: appears anywhere the authored _Water mask is white.
+          // Uses the raw water mask when available; falls back to "inside" if not.
+          float raw01 = (uHasWaterRawMask > 0.5) ? texture2D(tWaterRawMask, sceneUv).r : inside;
+          float rawMask = smoothstep(0.70, 0.95, clamp(raw01, 0.0, 1.0));
+          float floatingFoamMaskAmount = clumps * inside * max(0.0, uFloatingFoamStrength) * rawMask;
+
+          float foamAmount = clamp(shoreFoamAmount + floatingFoamAmount + floatingFoamMaskAmount, 0.0, 1.0);
 
           float bp = clamp(uFoamBlackPoint, 0.0, 1.0);
           float wp = clamp(uFoamWhitePoint, 0.0, 1.0);
@@ -3182,6 +3202,11 @@ export class WaterEffectV2 extends EffectBase {
     if (u.uFloatingFoamScale) {
       const sc = this.params?.floatingFoamScale;
       u.uFloatingFoamScale.value = Number.isFinite(sc) ? Math.max(0.1, sc) : 12.0;
+    }
+
+    if (u.uFloatingFoamWaveDistortion) {
+      const wd = this.params?.floatingFoamWaveDistortion;
+      u.uFloatingFoamWaveDistortion.value = Number.isFinite(wd) ? Math.max(0.0, wd) : 0.5;
     }
 
     // Shader-based foam flecks uniform sync

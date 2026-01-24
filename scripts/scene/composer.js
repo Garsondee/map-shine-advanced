@@ -7,8 +7,11 @@
 import { createLogger } from '../core/log.js';
 import * as assetLoader from '../assets/loader.js';
 import { weatherController } from '../core/WeatherController.js';
+import { globalLoadingProfiler } from '../core/loading-profiler.js';
 
 const log = createLogger('SceneComposer');
+
+let _lpSeq = 0;
 
 // Perspective strength multiplier for the camera.
 // 1.0  = mathematically exact 1:1 ground-plane mapping (stronger perspective)
@@ -609,6 +612,10 @@ export class SceneComposer {
   async initialize(foundryScene, viewportWidth, viewportHeight, options = {}) {
     log.info(`Initializing scene: ${foundryScene?.name || 'unnamed'}`);
 
+    const lp = globalLoadingProfiler;
+    const doLoadProfile = !!lp?.enabled;
+    const spanToken = doLoadProfile ? (++_lpSeq) : 0;
+
     const THREE = window.THREE;
     if (!THREE) {
       throw new Error('three.js not loaded');
@@ -661,7 +668,22 @@ export class SceneComposer {
     if (hasBackgroundImage) {
       // Use Foundry's already-loaded background texture instead of reloading
       // Foundry's canvas.primary.background.texture is already loaded and accessible
-      baseTexture = await this.getFoundryBackgroundTexture(foundryScene);
+      if (doLoadProfile) {
+        try {
+          lp.begin(`sceneComposer.getFoundryBackgroundTexture:${spanToken}`);
+        } catch (e) {
+        }
+      }
+      try {
+        baseTexture = await this.getFoundryBackgroundTexture(foundryScene);
+      } finally {
+        if (doLoadProfile) {
+          try {
+            lp.end(`sceneComposer.getFoundryBackgroundTexture:${spanToken}`);
+          } catch (e) {
+          }
+        }
+      }
       if (!baseTexture) {
         log.warn('Could not access Foundry background texture, using fallback');
       }
@@ -672,38 +694,98 @@ export class SceneComposer {
     // Load effect masks if we have a background path
     let result = { success: false, bundle: { masks: [] }, warnings: [] };
     if (bgPath) {
-      result = await assetLoader.loadAssetBundle(
-        bgPath,
-        (loaded, total, asset) => {
-          log.debug(`Asset loading: ${loaded}/${total} - ${asset}`);
-          try {
-            if (typeof options?.onProgress === 'function') {
-              options.onProgress(loaded, total, asset);
+      if (doLoadProfile) {
+        try {
+          lp.begin(`sceneComposer.loadAssetBundle:${spanToken}`, { basePath: bgPath });
+        } catch (e) {
+        }
+      }
+      try {
+        result = await assetLoader.loadAssetBundle(
+          bgPath,
+          (loaded, total, asset) => {
+            log.debug(`Asset loading: ${loaded}/${total} - ${asset}`);
+            try {
+              if (typeof options?.onProgress === 'function') {
+                options.onProgress(loaded, total, asset);
+              }
+            } catch (e) {
+              log.warn('Asset progress callback failed:', e);
             }
+          },
+          { skipBaseTexture: true } // Skip base texture since we got it from Foundry
+        );
+      } finally {
+        if (doLoadProfile) {
+          try {
+            lp.end(`sceneComposer.loadAssetBundle:${spanToken}`);
           } catch (e) {
-            log.warn('Asset progress callback failed:', e);
           }
-        },
-        { skipBaseTexture: true } // Skip base texture since we got it from Foundry
-      );
+        }
+      }
     }
 
     this._maskCompositeInfo = null;
     this._albedoCompositeInfo = null;
     let compositeLayout = null;
     try {
+      if (doLoadProfile) {
+        try {
+          lp.begin(`sceneComposer.composite.layout:${spanToken}`);
+        } catch (e) {
+        }
+      }
       const tileCandidates = this._getLargeSceneMaskTiles();
       const layout = this._computeSceneMaskCompositeLayout(tileCandidates);
       compositeLayout = layout;
+      if (doLoadProfile) {
+        try {
+          lp.end(`sceneComposer.composite.layout:${spanToken}`, { segments: layout?.segments?.length ?? 0 });
+        } catch (e) {
+        }
+      }
+
       if (layout) {
         const perBaseMasks = new Map();
-        for (const seg of layout.segments) {
-          if (!seg?.basePath || perBaseMasks.has(seg.basePath)) continue;
-          const masks = await this._loadMasksOnlyForBasePath(seg.basePath);
-          perBaseMasks.set(seg.basePath, masks);
+        if (doLoadProfile) {
+          try {
+            lp.begin(`sceneComposer.composite.loadPerBaseMasks:${spanToken}`, { bases: layout?.segments?.length ?? 0 });
+          } catch (e) {
+          }
+        }
+        try {
+          for (const seg of layout.segments) {
+            if (!seg?.basePath || perBaseMasks.has(seg.basePath)) continue;
+            const masks = await this._loadMasksOnlyForBasePath(seg.basePath);
+            perBaseMasks.set(seg.basePath, masks);
+          }
+        } finally {
+          if (doLoadProfile) {
+            try {
+              lp.end(`sceneComposer.composite.loadPerBaseMasks:${spanToken}`, { uniqueBases: perBaseMasks.size });
+            } catch (e) {
+            }
+          }
         }
 
-        const composite = await this._buildCompositeSceneMasks(layout, perBaseMasks);
+        if (doLoadProfile) {
+          try {
+            lp.begin(`sceneComposer.composite.buildMasks:${spanToken}`, { uniqueBases: perBaseMasks.size });
+          } catch (e) {
+          }
+        }
+        let composite = null;
+        try {
+          composite = await this._buildCompositeSceneMasks(layout, perBaseMasks);
+        } finally {
+          if (doLoadProfile) {
+            try {
+              lp.end(`sceneComposer.composite.buildMasks:${spanToken}`, { outW: composite?.width ?? null, outH: composite?.height ?? null, maskCount: composite?.masks?.length ?? 0 });
+            } catch (e) {
+            }
+          }
+        }
+
         if (composite?.masks?.length) {
           result = {
             success: true,
@@ -729,11 +811,29 @@ export class SceneComposer {
         }
       }
     } catch (e) {
+      if (doLoadProfile) {
+        try {
+          lp.mark(`sceneComposer.composite.error:${spanToken}`, { message: String(e?.message ?? e) });
+        } catch (e2) {
+        }
+      }
     }
 
     if (!hasBackgroundImage && !baseTexture && compositeLayout) {
       try {
+        if (doLoadProfile) {
+          try {
+            lp.begin(`sceneComposer.composite.buildAlbedo:${spanToken}`);
+          } catch (e) {
+          }
+        }
         const compositeAlbedo = await this._buildCompositeSceneAlbedo(compositeLayout);
+        if (doLoadProfile) {
+          try {
+            lp.end(`sceneComposer.composite.buildAlbedo:${spanToken}`, { outW: compositeAlbedo?.width ?? null, outH: compositeAlbedo?.height ?? null });
+          } catch (e) {
+          }
+        }
         if (compositeAlbedo?.texture) {
           baseTexture = compositeAlbedo.texture;
           this._albedoCompositeInfo = {
@@ -748,6 +848,12 @@ export class SceneComposer {
           };
         }
       } catch (e) {
+        if (doLoadProfile) {
+          try {
+            lp.mark(`sceneComposer.composite.albedoError:${spanToken}`, { message: String(e?.message ?? e) });
+          } catch (e2) {
+          }
+        }
       }
     }
 
@@ -758,21 +864,43 @@ export class SceneComposer {
         ?? foundryScene?.flags?.[moduleId]?.unionWaterMasks;
 
       if (unionWaterEnabled && fullSceneBasePaths.length > 1) {
-          const unionWater = await this._buildUnionMaskForBasePaths('water', fullSceneBasePaths);
-          if (unionWater) {
-            if (!result || typeof result !== 'object') result = { success: false, bundle: { masks: [] }, warnings: [] };
-            if (!result.bundle || typeof result.bundle !== 'object') result.bundle = { masks: [] };
-
-            const masks = Array.isArray(result.bundle.masks) ? result.bundle.masks : [];
-            const next = masks.filter((m) => (m?.id !== 'water' && m?.type !== 'water'));
-            next.push(unionWater);
-            result.bundle.masks = next;
-
-            result.success = true;
-            result.bundle.isMapShineCompatible = true;
+        if (doLoadProfile) {
+          try {
+            lp.begin(`sceneComposer.unionMasks.water:${spanToken}`, { basePaths: fullSceneBasePaths.length });
+          } catch (e) {
           }
+        }
+        let unionWater = null;
+        try {
+          unionWater = await this._buildUnionMaskForBasePaths('water', fullSceneBasePaths);
+        } finally {
+          if (doLoadProfile) {
+            try {
+              lp.end(`sceneComposer.unionMasks.water:${spanToken}`, { success: !!unionWater });
+            } catch (e) {
+            }
+          }
+        }
+        if (unionWater) {
+          if (!result || typeof result !== 'object') result = { success: false, bundle: { masks: [] }, warnings: [] };
+          if (!result.bundle || typeof result.bundle !== 'object') result.bundle = { masks: [] };
+
+          const masks = Array.isArray(result.bundle.masks) ? result.bundle.masks : [];
+          const next = masks.filter((m) => (m?.id !== 'water' && m?.type !== 'water'));
+          next.push(unionWater);
+          result.bundle.masks = next;
+
+          result.success = true;
+          result.bundle.isMapShineCompatible = true;
+        }
       }
     } catch (e) {
+      if (doLoadProfile) {
+        try {
+          lp.mark(`sceneComposer.unionMasks.error:${spanToken}`, { message: String(e?.message ?? e) });
+        } catch (e2) {
+        }
+      }
     }
 
     // Create bundle with Foundry's texture + any masks that loaded successfully
@@ -801,10 +929,40 @@ export class SceneComposer {
     }
 
     // Create base plane mesh (with texture or fallback color)
-    this.createBasePlane(baseTexture);
+    if (doLoadProfile) {
+      try {
+        lp.begin(`sceneComposer.createBasePlane:${spanToken}`);
+      } catch (e) {
+      }
+    }
+    try {
+      this.createBasePlane(baseTexture);
+    } finally {
+      if (doLoadProfile) {
+        try {
+          lp.end(`sceneComposer.createBasePlane:${spanToken}`);
+        } catch (e) {
+        }
+      }
+    }
 
     // Setup perspective camera with FOV-based zoom
-    this.setupCamera(viewportWidth, viewportHeight);
+    if (doLoadProfile) {
+      try {
+        lp.begin(`sceneComposer.setupCamera:${spanToken}`);
+      } catch (e) {
+      }
+    }
+    try {
+      this.setupCamera(viewportWidth, viewportHeight);
+    } finally {
+      if (doLoadProfile) {
+        try {
+          lp.end(`sceneComposer.setupCamera:${spanToken}`);
+        } catch (e) {
+        }
+      }
+    }
 
     log.info(`Scene initialized: ${this.currentBundle.masks.length} effect masks available`);
     if (result.warnings && result.warnings.length > 0) {

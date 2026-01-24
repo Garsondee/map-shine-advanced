@@ -60,7 +60,11 @@ export class ControlPanelManager {
       dynamicPaused: false,
       // Directed mode
       directedPresetId: 'Clear (Dry)',
-      directedTransitionMinutes: 5.0
+      directedTransitionMinutes: 5.0,
+      // Wind controls
+      windSpeed: 0.5,
+      windDirection: 180.0,
+      gustiness: 'moderate' // 'calm', 'light', 'moderate', 'strong', 'extreme'
     };
 
     this._suppressInitialWeatherApply = false;
@@ -1037,6 +1041,9 @@ export class ControlPanelManager {
     // Directed mode controls (initially hidden)
     this.directedControls = this._buildDirectedControls(weatherFolder);
 
+    // Wind controls (always visible)
+    this.windControls = this._buildWindControls(weatherFolder);
+
     // Show/hide appropriate controls based on current mode
     this._updateWeatherControls(weatherFolder);
   }
@@ -1145,6 +1152,52 @@ export class ControlPanelManager {
   }
 
   /**
+   * Build wind controls
+   * @param {Tweakpane.Folder} parentFolder
+   * @returns {Object} Control references
+   * @private
+   */
+  _buildWindControls(parentFolder) {
+    const controls = {};
+
+    controls.speed = parentFolder.addBinding(this.controlState, 'windSpeed', {
+      label: 'Wind Speed',
+      min: 0.0,
+      max: 1.0,
+      step: 0.05
+    }).on('change', (ev) => {
+      void this._applyWindState();
+      if (ev?.last) this.debouncedSave();
+    });
+
+    controls.direction = parentFolder.addBinding(this.controlState, 'windDirection', {
+      label: 'Direction (°)',
+      min: 0,
+      max: 360,
+      step: 5
+    }).on('change', (ev) => {
+      void this._applyWindState();
+      if (ev?.last) this.debouncedSave();
+    });
+
+    controls.gustiness = parentFolder.addBinding(this.controlState, 'gustiness', {
+      label: 'Gustiness',
+      options: {
+        'Calm': 'calm',
+        'Light': 'light',
+        'Moderate': 'moderate',
+        'Strong': 'strong',
+        'Extreme': 'extreme'
+      }
+    }).on('change', (ev) => {
+      void this._applyWindState();
+      if (ev?.last) this.debouncedSave();
+    });
+
+    return controls;
+  }
+
+  /**
    * Update visibility of weather controls based on mode
    * @param {Tweakpane.Folder} weatherFolder
    * @private
@@ -1237,6 +1290,75 @@ export class ControlPanelManager {
   }
 
   /**
+   * Apply wind state to weather controller
+   * @private
+   */
+  async _applyWindState() {
+    try {
+      const weatherController = coreWeatherController || window.MapShine?.weatherController || window.weatherController;
+      if (!weatherController) {
+        log.warn('WeatherController not available for wind application');
+        return;
+      }
+
+      // Convert wind direction from degrees to radians
+      const directionRad = (this.controlState.windDirection * Math.PI) / 180.0;
+
+      const dirX = Math.cos(directionRad);
+      const dirY = Math.sin(directionRad);
+
+      // WeatherController.update() derives currentState from targetState every frame.
+      // So, to make the override "stick", we must write to targetState.
+      // Also: windDirection is expected to be a THREE.Vector2 after initialize(); never replace it.
+      const applyToState = (state) => {
+        if (!state) return;
+        state.windSpeed = this.controlState.windSpeed;
+
+        const wd = state.windDirection;
+        if (wd && typeof wd.set === 'function') {
+          wd.set(dirX, dirY);
+          if (typeof wd.normalize === 'function') wd.normalize();
+        } else {
+          // Fallback for early init / unexpected shapes
+          state.windDirection = { x: dirX, y: dirY };
+        }
+      };
+
+      applyToState(weatherController.targetState);
+
+      // Mirror to currentState so the change is visible immediately this frame
+      // (even before the next WeatherController.update()).
+      applyToState(weatherController.currentState);
+
+      // Apply gustiness settings to gust parameters
+      const gustinessMap = {
+        'calm': { waitMin: 5.0, waitMax: 15.0, duration: 1.5, strength: 1.0 },
+        'light': { waitMin: 3.0, waitMax: 10.0, duration: 2.5, strength: 1.5 },
+        'moderate': { waitMin: 1.0, waitMax: 11.5, duration: 3.9, strength: 2.5 },
+        'strong': { waitMin: 0.5, waitMax: 8.0, duration: 5.0, strength: 4.0 },
+        'extreme': { waitMin: 0.2, waitMax: 5.0, duration: 6.5, strength: 6.0 }
+      };
+
+      const gustConfig = gustinessMap[this.controlState.gustiness] || gustinessMap['moderate'];
+      
+      if (typeof weatherController.gustWaitMin !== 'undefined') {
+        weatherController.gustWaitMin = gustConfig.waitMin;
+        weatherController.gustWaitMax = gustConfig.waitMax;
+        weatherController.gustDuration = gustConfig.duration;
+        weatherController.gustStrength = gustConfig.strength;
+      }
+
+      log.debug('Applied wind state:', {
+        speed: this.controlState.windSpeed,
+        direction: this.controlState.windDirection,
+        gustiness: this.controlState.gustiness
+      });
+    } catch (error) {
+      log.error('Failed to apply wind state:', error);
+    }
+  }
+
+  /**
    * Start directed weather transition using centralized StateApplier
    * @private
    */
@@ -1273,13 +1395,17 @@ export class ControlPanelManager {
   _resetToDefaults() {
     this.controlState = {
       timeOfDay: 12.0,
+      timeTransitionMinutes: 0.0,
       weatherMode: 'dynamic',
       dynamicEnabled: false,
       dynamicPresetId: 'Temperate Plains',
       dynamicEvolutionSpeed: 60.0,
       dynamicPaused: false,
       directedPresetId: 'Clear (Dry)',
-      directedTransitionMinutes: 5.0
+      directedTransitionMinutes: 5.0,
+      windSpeed: 0.5,
+      windDirection: 180.0,
+      gustiness: 'moderate'
     };
 
     this._updateClock(12.0);

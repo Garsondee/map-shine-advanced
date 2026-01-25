@@ -17,6 +17,23 @@ import { createLogger } from '../core/log.js';
 
 const log = createLogger('DistortionManager');
 
+function normalizeRgb01(c, fallback = { r: 0, g: 0, b: 0 }) {
+  if (!c || typeof c !== 'object') return fallback;
+  let r = (typeof c.r === 'number') ? c.r : fallback.r;
+  let g = (typeof c.g === 'number') ? c.g : fallback.g;
+  let b = (typeof c.b === 'number') ? c.b : fallback.b;
+  const maxv = Math.max(r, g, b);
+  if (maxv > 1.0) {
+    r /= 255.0;
+    g /= 255.0;
+    b /= 255.0;
+  }
+  r = Math.max(0.0, Math.min(1.0, r));
+  g = Math.max(0.0, Math.min(1.0, g));
+  b = Math.max(0.0, Math.min(1.0, b));
+  return { r, g, b };
+}
+
 // Pre-allocated NDC corner coordinates for frustum intersection (avoids per-frame allocations)
 const _ndcCorners = [
   [-1, -1],
@@ -972,6 +989,13 @@ export class DistortionManager extends EffectBase {
         uWaterMurkDepthLo: { value: 0.35 },
         uWaterMurkDepthHi: { value: 0.95 },
 
+        uWaterMurkGrainScale: { value: 340.0 },
+        uWaterMurkGrainSpeed: { value: 0.45 },
+        uWaterMurkGrainStrength: { value: 0.65 },
+        uWaterMurkOcclusionStrength: { value: 0.55 },
+        uWaterMurkOcclusionSoftness: { value: 0.2 },
+        uWaterMurkContrast: { value: 1.6 },
+
         uWaterSandEnabled: { value: 0.0 },
         uWaterSandIntensity: { value: 0.65 },
         uWaterSandColor: { value: new THREE.Color(0xbfae84) },
@@ -979,6 +1003,7 @@ export class DistortionManager extends EffectBase {
         uWaterSandSpeed: { value: 0.12 },
         uWaterSandDepthLo: { value: 0.0 },
         uWaterSandDepthHi: { value: 0.45 },
+        uWaterSandContrast: { value: 1.35 },
 
         // Caustics (shallow-water highlights)
         uWaterCausticsEnabled: { value: 0.0 },
@@ -1082,6 +1107,13 @@ export class DistortionManager extends EffectBase {
         uniform float uWaterMurkDepthLo;
         uniform float uWaterMurkDepthHi;
 
+        uniform float uWaterMurkGrainScale;
+        uniform float uWaterMurkGrainSpeed;
+        uniform float uWaterMurkGrainStrength;
+        uniform float uWaterMurkOcclusionStrength;
+        uniform float uWaterMurkOcclusionSoftness;
+        uniform float uWaterMurkContrast;
+
         uniform float uWaterSandEnabled;
         uniform float uWaterSandIntensity;
         uniform vec3 uWaterSandColor;
@@ -1089,6 +1121,7 @@ export class DistortionManager extends EffectBase {
         uniform float uWaterSandSpeed;
         uniform float uWaterSandDepthLo;
         uniform float uWaterSandDepthHi;
+        uniform float uWaterSandContrast;
 
         uniform float uWaterCausticsEnabled;
         uniform float uHasWaterMask;
@@ -1435,6 +1468,9 @@ export class DistortionManager extends EffectBase {
               float nn = clamp(0.5 + 0.5 * (0.65 * n1 + 0.35 * n2), 0.0, 1.0);
               float ridge = 1.0 - abs(2.0 * nn - 1.0);
               float grain = smoothstep(0.55, 0.90, ridge);
+              float sandContrast = max(0.01, uWaterSandContrast);
+              // Contrast curve around mid-gray. Higher contrast tightens and deepens the pattern.
+              grain = clamp(0.5 + (grain - 0.5) * sandContrast, 0.0, 1.0);
 
               float sandAmt = clamp(uWaterSandIntensity, 0.0, 4.0) * sandMask * grain * sandZoom * waterEdge * nightVis * skyVig;
               sandAmt = clamp(sandAmt * 0.35, 0.0, 1.0);
@@ -1468,6 +1504,51 @@ export class DistortionManager extends EffectBase {
               vec3 murkTint = mix(desat, uWaterMurkColor, murkAmt * 0.65);
               sceneColor.rgb = mix(sceneColor.rgb, murkTint, murkAmt);
               sceneColor.rgb *= (1.0 - 0.12 * murkAmt);
+
+              // Grainy silt occlusion: high-frequency dirt that locally blocks/softens
+              // details beneath the water. This is modeled as a selective micro-blur
+              // combined with local darkening.
+              float occlStrength = clamp(uWaterMurkOcclusionStrength, 0.0, 1.0);
+              float grainStrength = clamp(uWaterMurkGrainStrength, 0.0, 2.0);
+              float grainScale = max(0.01, uWaterMurkGrainScale);
+              float grainSpeed = max(0.0, uWaterMurkGrainSpeed);
+
+              vec2 gAdv = waterUvIso * grainScale;
+              gAdv -= windUvDir * (uTime * grainSpeed);
+
+              // Use a ridged FBM to get "gritty" clusters instead of smooth blobs.
+              float g1 = fbm(gAdv, 2, 2.05, 0.55);
+              float gg = clamp(0.5 + 0.5 * g1, 0.0, 1.0);
+              float ridge = 1.0 - abs(2.0 * gg - 1.0);
+              float grit = smoothstep(0.55, 0.90, ridge);
+              grit *= clamp(grainStrength, 0.0, 1.0);
+
+              float soft = clamp(uWaterMurkOcclusionSoftness, 0.0, 1.0);
+              float thLo = mix(0.70, 0.35, soft);
+              float thHi = mix(0.92, 0.65, soft);
+              float gritMask = smoothstep(thLo, thHi, grit);
+
+              float murkContrast = max(0.01, uWaterMurkContrast);
+              gritMask = clamp(0.5 + (gritMask - 0.5) * murkContrast, 0.0, 1.0);
+
+              float occl = occlStrength * gritMask * murkAmt;
+              occl = clamp(occl, 0.0, 1.0);
+
+              if (occl > 0.001) {
+                // Micro blur in screen space: sample the already-distorted scene
+                // to avoid mismatch with refraction.
+                vec2 blurStep = texelSize * (1.5 + 1.5 * (1.0 - zoomNorm));
+                vec3 c0 = sceneColor.rgb;
+                vec3 c1 = texture2D(tScene, safeClampUv(distortedUv + vec2( blurStep.x, 0.0))).rgb;
+                vec3 c2 = texture2D(tScene, safeClampUv(distortedUv + vec2(-blurStep.x, 0.0))).rgb;
+                vec3 c3 = texture2D(tScene, safeClampUv(distortedUv + vec2(0.0,  blurStep.y))).rgb;
+                vec3 c4 = texture2D(tScene, safeClampUv(distortedUv + vec2(0.0, -blurStep.y))).rgb;
+                vec3 blurColor = (c0 * 2.0 + c1 + c2 + c3 + c4) / 6.0;
+
+                // Blend to blurColor to "hide" detail, then darken slightly.
+                sceneColor.rgb = mix(sceneColor.rgb, blurColor, occl);
+                sceneColor.rgb *= (1.0 - 0.28 * occl);
+              }
 
               murkDamp = 1.0 - 0.65 * murkAmt;
             }
@@ -2065,13 +2146,21 @@ export class DistortionManager extends EffectBase {
         if (typeof c === 'string') {
           au.uWaterMurkColor.value.set(c);
         } else if (typeof c.r === 'number' && typeof c.g === 'number' && typeof c.b === 'number') {
-          au.uWaterMurkColor.value.setRGB(c.r, c.g, c.b);
+          const c01 = normalizeRgb01(c, { r: 0.082, g: 0.204, b: 0.212 });
+          au.uWaterMurkColor.value.setRGB(c01.r, c01.g, c01.b);
         }
       }
       if (au.uWaterMurkScale) au.uWaterMurkScale.value = Number.isFinite(waterSource?.params?.murkScale) ? waterSource.params.murkScale : 2.25;
       if (au.uWaterMurkSpeed) au.uWaterMurkSpeed.value = Number.isFinite(waterSource?.params?.murkSpeed) ? waterSource.params.murkSpeed : 0.15;
       if (au.uWaterMurkDepthLo) au.uWaterMurkDepthLo.value = Number.isFinite(waterSource?.params?.murkDepthLo) ? waterSource.params.murkDepthLo : 0.35;
       if (au.uWaterMurkDepthHi) au.uWaterMurkDepthHi.value = Number.isFinite(waterSource?.params?.murkDepthHi) ? waterSource.params.murkDepthHi : 0.95;
+
+      if (au.uWaterMurkGrainScale) au.uWaterMurkGrainScale.value = Number.isFinite(waterSource?.params?.murkGrainScale) ? waterSource.params.murkGrainScale : 340.0;
+      if (au.uWaterMurkGrainSpeed) au.uWaterMurkGrainSpeed.value = Number.isFinite(waterSource?.params?.murkGrainSpeed) ? waterSource.params.murkGrainSpeed : 0.45;
+      if (au.uWaterMurkGrainStrength) au.uWaterMurkGrainStrength.value = Number.isFinite(waterSource?.params?.murkGrainStrength) ? waterSource.params.murkGrainStrength : 0.65;
+      if (au.uWaterMurkOcclusionStrength) au.uWaterMurkOcclusionStrength.value = Number.isFinite(waterSource?.params?.murkOcclusionStrength) ? waterSource.params.murkOcclusionStrength : 0.55;
+      if (au.uWaterMurkOcclusionSoftness) au.uWaterMurkOcclusionSoftness.value = Number.isFinite(waterSource?.params?.murkOcclusionSoftness) ? waterSource.params.murkOcclusionSoftness : 0.2;
+      if (au.uWaterMurkContrast) au.uWaterMurkContrast.value = Number.isFinite(waterSource?.params?.murkContrast) ? waterSource.params.murkContrast : 1.6;
 
       // Sand bed detail (shallow)
       const sandEnabled = !!(waterSource && waterSource.enabled && waterSource.mask && waterSource.params?.sandEnabled);
@@ -2082,9 +2171,11 @@ export class DistortionManager extends EffectBase {
         if (typeof c === 'string') {
           au.uWaterSandColor.value.set(c);
         } else if (typeof c.r === 'number' && typeof c.g === 'number' && typeof c.b === 'number') {
-          au.uWaterSandColor.value.setRGB(c.r, c.g, c.b);
+          const c01 = normalizeRgb01(c, { r: 0.75, g: 0.68, b: 0.52 });
+          au.uWaterSandColor.value.setRGB(c01.r, c01.g, c01.b);
         }
       }
+      if (au.uWaterSandContrast) au.uWaterSandContrast.value = Number.isFinite(waterSource?.params?.sandContrast) ? waterSource.params.sandContrast : 1.35;
       if (au.uWaterSandScale) au.uWaterSandScale.value = Number.isFinite(waterSource?.params?.sandScale) ? waterSource.params.sandScale : 18.0;
       if (au.uWaterSandSpeed) au.uWaterSandSpeed.value = Number.isFinite(waterSource?.params?.sandSpeed) ? waterSource.params.sandSpeed : 0.12;
       if (au.uWaterSandDepthLo) au.uWaterSandDepthLo.value = Number.isFinite(waterSource?.params?.sandDepthLo) ? waterSource.params.sandDepthLo : 0.0;

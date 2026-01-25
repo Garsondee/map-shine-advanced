@@ -193,7 +193,12 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
             warnings.push(msg);
             maskTexture = null;
           }
-        } else if (!availableFiles.length && maskId === 'outdoors' && !suppressProbeErrors) {
+        } else if (!availableFiles.length) {
+          // Some storage backends and client contexts cannot browse directories via
+          // FilePicker (or return an empty list). In that case we still want suffix
+          // masks to work if the user has placed them at the expected filenames.
+          //
+          // Probe is best-effort and should be quiet when suppressProbeErrors is true.
           try {
             const probed = await probeMaskTexture(basePath, maskDef.suffix, suppressProbeErrors);
             if (probed) {

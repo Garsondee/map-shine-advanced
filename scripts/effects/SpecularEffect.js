@@ -62,6 +62,7 @@ export class SpecularEffect extends EffectBase {
 
       intensity: 0.83,           // Default shine intensity
       roughness: 0.0,
+      metallic: 0.0,             // Metallic factor (unused in current shader but defined for completeness)
       lightDirection: { x: 0.6, y: 0.4, z: 0.7 },
       lightColor: { r: 1.0, g: 1.0, b: 1.0 },
       
@@ -1978,10 +1979,10 @@ export class SpecularEffect extends EffectBase {
         // Combine: base 1.0 + stripe contribution + cloud specular + sparkles
         float totalModulator = 1.0 + stripeContribution + cloudSpecular + (sparkleVal * uSparkleIntensity);
 
-        // Global stripe brightness threshold: only allow shine on the
-        // brightest parts of the specular mask. 0 = full mask, 1 = only
-        // near-white texels.
-        if (uStripeMaskThreshold > 0.0) {
+        // Stripe brightness threshold: only allow shine on the brightest parts
+        // of the specular mask when stripes are enabled. 0 = full mask, 1 = only
+        // near-white texels. This should NOT gate the base specular shine.
+        if (uStripeEnabled && uStripeMaskThreshold > 0.0) {
           float thresholdMask = smoothstep(uStripeMaskThreshold, 1.0, specularStrength);
           totalModulator *= thresholdMask;
         }

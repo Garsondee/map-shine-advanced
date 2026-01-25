@@ -5,6 +5,23 @@ import { DistortionLayer } from './DistortionManager.js';
 
 const log = createLogger('WaterEffectV2');
 
+function normalizeRgb01(c, fallback = { r: 0, g: 0, b: 0 }) {
+  if (!c || typeof c !== 'object') return fallback;
+  let r = (typeof c.r === 'number') ? c.r : fallback.r;
+  let g = (typeof c.g === 'number') ? c.g : fallback.g;
+  let b = (typeof c.b === 'number') ? c.b : fallback.b;
+  const maxv = Math.max(r, g, b);
+  if (maxv > 1.0) {
+    r /= 255.0;
+    g /= 255.0;
+    b /= 255.0;
+  }
+  r = Math.max(0.0, Math.min(1.0, r));
+  g = Math.max(0.0, Math.min(1.0, g));
+  b = Math.max(0.0, Math.min(1.0, b));
+  return { r, g, b };
+}
+
 // Pre-allocated NDC corner coordinates for frustum intersection (avoids per-frame allocations)
 const _ndcCorners = [
   [-1, -1],
@@ -282,9 +299,25 @@ export class WaterEffectV2 extends EffectBase {
       foamFlecksIntensity: 6,
       foamFlecksWindDriftScale: 1.0,
 
+      murkEnabled: false,
+      murkIntensity: 0.65,
+      murkColor: { r: 0.082, g: 0.204, b: 0.212 },
+      murkScale: 2.25,
+      murkSpeed: 0.15,
+      murkDepthLo: 0.35,
+      murkDepthHi: 0.95,
+
+      murkGrainScale: 340.0,
+      murkGrainSpeed: 0.45,
+      murkGrainStrength: 0.65,
+      murkOcclusionStrength: 0.55,
+      murkOcclusionSoftness: 0.2,
+      murkContrast: 1.6,
+
       sandEnabled: true,
       sandIntensity: 0.18,
       sandColor: { r: 0, g: 0, b: 0 },
+      sandContrast: 1.35,
       sandChunkScale: 5.4,
       sandChunkSpeed: 0.3,
       sandGrainScale: 400,
@@ -364,6 +397,19 @@ export class WaterEffectV2 extends EffectBase {
       maskFlipY: 0.0,
       maskUseAlpha: 0.0,
       edgeSoftnessTexels: 0.0,
+
+      murkEnabled: false,
+      murkIntensity: 0.65,
+      murkColor: { r: 0.082, g: 0.204, b: 0.212 },
+      murkScale: 2.25,
+      murkSpeed: 0.15,
+      murkDepthLo: 0.35,
+      murkDepthHi: 0.95,
+      murkGrainScale: 340.0,
+      murkGrainSpeed: 0.45,
+      murkGrainStrength: 0.65,
+      murkOcclusionStrength: 0.55,
+      murkOcclusionSoftness: 0.2,
 
       shoreNoiseEnabled: true,
       shoreNoiseStrengthPx: 0.02,
@@ -620,6 +666,7 @@ export class WaterEffectV2 extends EffectBase {
             'sandEnabled',
             'sandIntensity',
             'sandColor',
+            'sandContrast',
             'sandChunkScale',
             'sandChunkSpeed',
             'sandGrainScale',
@@ -800,6 +847,27 @@ export class WaterEffectV2 extends EffectBase {
             'foamFlecksEnabled',
             'foamFlecksIntensity',
             'foamFlecksWindDriftScale'
+          ]
+        },
+        {
+          name: 'murkiness',
+          label: 'Murkiness (Silt / Mud)',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'murkEnabled',
+            'murkIntensity',
+            'murkColor',
+            'murkScale',
+            'murkSpeed',
+            'murkDepthLo',
+            'murkDepthHi',
+            'murkGrainScale',
+            'murkGrainSpeed',
+            'murkGrainStrength',
+            'murkOcclusionStrength',
+            'murkOcclusionSoftness',
+            'murkContrast'
           ]
         },
         {
@@ -1080,9 +1148,24 @@ export class WaterEffectV2 extends EffectBase {
         foamFlecksIntensity: { type: 'slider', label: 'Flecks Intensity', min: 0.0, max: 6.0, step: 0.01, default: 6 },
         foamFlecksWindDriftScale: { type: 'slider', label: 'Wind Drift Scale', min: 0.0, max: 3.0, step: 0.01, default: 1.0 },
 
+        murkEnabled: { type: 'boolean', label: 'Enabled', default: false },
+        murkIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 2.0, step: 0.01, default: 0.65 },
+        murkColor: { type: 'color', label: 'Color', default: { r: 0.082, g: 0.204, b: 0.212 } },
+        murkScale: { type: 'slider', label: 'Cloud Scale', min: 0.1, max: 12.0, step: 0.01, default: 2.25 },
+        murkSpeed: { type: 'slider', label: 'Cloud Speed', min: 0.0, max: 2.0, step: 0.01, default: 0.15 },
+        murkDepthLo: { type: 'slider', label: 'Depth Lo', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
+        murkDepthHi: { type: 'slider', label: 'Depth Hi', min: 0.0, max: 1.0, step: 0.01, default: 0.95 },
+        murkGrainScale: { type: 'slider', label: 'Grain Scale', min: 10.0, max: 1200.0, step: 1.0, default: 340.0 },
+        murkGrainSpeed: { type: 'slider', label: 'Grain Speed', min: 0.0, max: 3.0, step: 0.01, default: 0.45 },
+        murkGrainStrength: { type: 'slider', label: 'Grain Strength', min: 0.0, max: 2.0, step: 0.01, default: 0.65 },
+        murkOcclusionStrength: { type: 'slider', label: 'Occlusion Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.55 },
+        murkOcclusionSoftness: { type: 'slider', label: 'Occlusion Softness', min: 0.0, max: 1.0, step: 0.01, default: 0.2 },
+        murkContrast: { type: 'slider', label: 'Contrast', min: 0.25, max: 4.0, step: 0.01, default: 1.6 },
+
         sandEnabled: { type: 'boolean', label: 'Sand Enabled', default: true },
         sandIntensity: { type: 'slider', label: 'Sand Intensity', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
         sandColor: { type: 'color', label: 'Sand Color', default: { r: 0, g: 0, b: 0 } },
+        sandContrast: { type: 'slider', label: 'Sand Contrast', min: 0.25, max: 4.0, step: 0.01, default: 1.35 },
         sandChunkScale: { type: 'slider', label: 'Sand Chunk Scale', min: 0.1, max: 20.0, step: 0.1, default: 17.5 },
         sandChunkSpeed: { type: 'slider', label: 'Sand Chunk Speed', min: 0.0, max: 3.0, step: 0.01, default: 1.12 },
         sandGrainScale: { type: 'slider', label: 'Sand Grain Scale', min: 10.0, max: 400.0, step: 1.0, default: 37 },
@@ -1309,7 +1392,8 @@ export class WaterEffectV2 extends EffectBase {
         uFoamFlecksIntensity: { value: this.params.foamFlecksIntensity },
 
         uSandIntensity: { value: this.params.sandIntensity },
-        uSandColor: { value: new THREE.Color(this.params.sandColor.r, this.params.sandColor.g, this.params.sandColor.b) },
+        uSandColor: { value: new THREE.Color(0.0, 0.0, 0.0) },
+        uSandContrast: { value: this.params.sandContrast },
         uSandChunkScale: { value: this.params.sandChunkScale },
         uSandChunkSpeed: { value: this.params.sandChunkSpeed },
         uSandGrainScale: { value: this.params.sandGrainScale },
@@ -1514,6 +1598,7 @@ export class WaterEffectV2 extends EffectBase {
 
         uniform float uSandIntensity;
         uniform vec3 uSandColor;
+        uniform float uSandContrast;
         uniform float uSandChunkScale;
         uniform float uSandChunkSpeed;
         uniform float uSandGrainScale;
@@ -2324,6 +2409,9 @@ export class WaterEffectV2 extends EffectBase {
           float chunkSoft = max(0.001, uSandChunkSoftness);
           float chunkMask = smoothstep(chunkTh, chunkTh + chunkSoft, chunk);
 
+          float sandContrast = max(0.01, uSandContrast);
+          chunkMask = pow(clamp(chunkMask, 0.0, 1.0), sandContrast);
+
           vec2 grainUv = sandBasis * max(1.0, uSandGrainScale);
           grainUv += windBasis * (uTime * (0.08 + 0.35 * max(0.0, uSandGrainSpeed)));
           grainUv += curlNoise2D(grainUv * 0.02 + vec2(uTime * 0.4, -uTime * 0.3)) * 0.65;
@@ -2336,6 +2424,8 @@ export class WaterEffectV2 extends EffectBase {
           float speckTh = mix(0.95, 0.55, speckCov);
           float speckSoft = max(0.001, uSandSpeckSoftness);
           float speck = smoothstep(speckTh, speckTh + speckSoft, grit);
+
+          speck = pow(clamp(speck, 0.0, 1.0), sandContrast);
 
           float sandAlpha = speck * chunkMask * inside * depthMask;
           sandAlpha *= clamp(uSandIntensity, 0.0, 1.0);
@@ -2932,6 +3022,23 @@ export class WaterEffectV2 extends EffectBase {
           if (typeof dm.updateSourceParams === 'function') {
             const p = this._distortionWaterParams;
 
+            p.murkEnabled = this.params?.murkEnabled === true;
+            p.murkIntensity = Number.isFinite(this.params?.murkIntensity) ? this.params.murkIntensity : 0.65;
+            p.murkColor = normalizeRgb01(this.params?.murkColor, { r: 0.082, g: 0.204, b: 0.212 });
+            p.murkScale = Number.isFinite(this.params?.murkScale) ? this.params.murkScale : 2.25;
+            p.murkSpeed = Number.isFinite(this.params?.murkSpeed) ? this.params.murkSpeed : 0.15;
+            p.murkDepthLo = Number.isFinite(this.params?.murkDepthLo) ? this.params.murkDepthLo : 0.35;
+            p.murkDepthHi = Number.isFinite(this.params?.murkDepthHi) ? this.params.murkDepthHi : 0.95;
+            p.murkGrainScale = Number.isFinite(this.params?.murkGrainScale) ? this.params.murkGrainScale : 340.0;
+            p.murkGrainSpeed = Number.isFinite(this.params?.murkGrainSpeed) ? this.params.murkGrainSpeed : 0.45;
+            p.murkGrainStrength = Number.isFinite(this.params?.murkGrainStrength) ? this.params.murkGrainStrength : 0.65;
+            p.murkOcclusionStrength = Number.isFinite(this.params?.murkOcclusionStrength) ? this.params.murkOcclusionStrength : 0.55;
+            p.murkOcclusionSoftness = Number.isFinite(this.params?.murkOcclusionSoftness) ? this.params.murkOcclusionSoftness : 0.2;
+            p.murkContrast = Number.isFinite(this.params?.murkContrast) ? this.params.murkContrast : 1.6;
+
+            // Reuse WaterEffectV2 sand contrast to tighten DistortionManager's subsurface sand.
+            p.sandContrast = Number.isFinite(this.params?.sandContrast) ? this.params.sandContrast : 1.35;
+
             p.shoreNoiseEnabled = this.params?.shoreNoiseDistortionEnabled !== false;
             p.shoreNoiseStrengthPx = Number.isFinite(this.params?.shoreNoiseDistortionStrengthPx) ? this.params.shoreNoiseDistortionStrengthPx : 2.25;
             p.shoreNoiseFrequency = Number.isFinite(this.params?.shoreNoiseDistortionFrequency) ? this.params.shoreNoiseDistortionFrequency : 220.0;
@@ -3036,8 +3143,13 @@ export class WaterEffectV2 extends EffectBase {
       if (typeof sc === 'string') {
         u.uSandColor.value.set(sc);
       } else if (sc && (typeof sc.r === 'number') && (typeof sc.g === 'number') && (typeof sc.b === 'number')) {
-        u.uSandColor.value.setRGB(sc.r, sc.g, sc.b);
+        const c01 = normalizeRgb01(sc, { r: 0.0, g: 0.0, b: 0.0 });
+        u.uSandColor.value.setRGB(c01.r, c01.g, c01.b);
       }
+    }
+    if (u.uSandContrast) {
+      const v = this.params?.sandContrast;
+      u.uSandContrast.value = Number.isFinite(v) ? Math.max(0.01, v) : 1.35;
     }
     if (u.uSandChunkScale) {
       const v = this.params?.sandChunkScale;

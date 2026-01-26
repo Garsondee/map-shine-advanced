@@ -2824,8 +2824,27 @@ export class InteractionManager {
         }
 
         // 2. Check Tokens
+        // Tokens may be rendered on the overlay layer (31) to draw above post-processing.
+        // Ensure raycasting includes that layer, otherwise tokens won't be clickable/draggable.
+        const prevRayMask = this.raycaster.layers?.mask;
+        try {
+          // Initialize layers if not present
+          if (!this.raycaster.layers) {
+            this.raycaster.layers = new THREE.Layers();
+          }
+          // Enable both layer 0 (default) and layer 31 (overlay)
+          this.raycaster.layers.set(0);
+          this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
+        } catch (_) {
+        }
+
         const interactables = this.tokenManager.getAllTokenSprites();
         const intersects = this.raycaster.intersectObjects(interactables, false);
+
+        try {
+          if (typeof prevRayMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevRayMask;
+        } catch (_) {
+        }
 
         if (intersects.length > 0) {
           const hit = intersects[0];
@@ -3754,7 +3773,28 @@ export class InteractionManager {
           return;
         }
 
+        // Tokens may be rendered on the overlay layer (31) to draw above post-processing.
+        // Ensure raycasting includes that layer, otherwise tokens won't be clickable/draggable.
+        const prevTokenRayMask = this.raycaster.layers?.mask;
+        try {
+          // Initialize layers if not present
+          if (!this.raycaster.layers) {
+            this.raycaster.layers = new THREE.Layers();
+          }
+          // Enable both layer 0 (default) and layer 31 (overlay)
+          this.raycaster.layers.set(0);
+          this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
+        } catch (_) {
+        }
+
         const intersects = this.raycaster.intersectObjects(tokenSprites, false);
+
+        try {
+          if (typeof prevTokenRayMask === 'number' && this.raycaster.layers) {
+            this.raycaster.layers.mask = prevTokenRayMask;
+          }
+        } catch (_) {
+        }
 
         log.debug('onPointerDown left-click tokenIntersects', { count: intersects.length });
 
@@ -4875,8 +4915,22 @@ export class InteractionManager {
     }
 
     // 3. Check Tokens
+    // Tokens may be rendered on the overlay layer (31) to draw above post-processing.
+    // Ensure raycasting includes that layer, otherwise tokens won't be clickable/draggable.
+    const prevRayMask = this.raycaster.layers?.mask;
+    try {
+      this.raycaster.layers?.enable?.(OVERLAY_THREE_LAYER);
+      this.raycaster.layers?.enable?.(0);
+    } catch (_) {
+    }
+
     const interactables = this.tokenManager.getAllTokenSprites();
     const intersects = this.raycaster.intersectObjects(interactables, false);
+
+    try {
+      if (typeof prevRayMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevRayMask;
+    } catch (_) {
+    }
 
     if (intersects.length > 0) {
       const hit = intersects[0];
@@ -5359,11 +5413,13 @@ export class InteractionManager {
         this.dragState.hasMoved = true;
         this.updateMouseCoords(event);
         
-        // Raycast to find world position on the z-plane of the object
-        // Use the object's current Z for the intersection plane
-        const targetZ = this.dragState.object.position.z;
+        // Raycast to find world position on a stable plane.
+        // For token drags we project onto the ground plane to avoid coupling drag X/Y
+        // to the token's Z (elevation) under a perspective camera.
+        const isTokenDrag = !!(this.tokenManager?.tokenSprites?.has?.(this.dragState.leaderId));
+        const targetZ = isTokenDrag ? (this.sceneComposer?.groundZ ?? 0) : this.dragState.object.position.z;
         
-        // Get world position at the target Z plane
+        // Get world position at the chosen Z plane
         const worldPos = this.viewportToWorld(event.clientX, event.clientY, targetZ);
         
         if (worldPos) {
@@ -5381,8 +5437,10 @@ export class InteractionManager {
           const isEnhancedLightDrag = !!(enhancedLightIconManager && enhancedLightIconManager.lights && enhancedLightIconManager.lights.has(this.dragState.leaderId));
           const isLightDrag = isFoundryLightDrag || isEnhancedLightDrag;
           
-          // Snap to grid logic if Shift is NOT held and this is NOT a light drag
-          if (!event.shiftKey && !isLightDrag) {
+          // Snap to grid logic if Shift is NOT held and this is NOT a light drag.
+          // For tokens, avoid per-move snapping: it can make the drag feel "stuck"
+          // (especially near collision boundaries). We snap on commit instead.
+          if (!event.shiftKey && !isLightDrag && !isTokenDrag) {
             const foundryPos = Coordinates.toFoundry(x, y);
             const snapped = this.snapToGrid(foundryPos.x, foundryPos.y);
             const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
@@ -6091,65 +6149,17 @@ export class InteractionManager {
                 const worldPos = preview.position;
                 let foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
                 
-                // COLLISION CHECK (Tokens Only)
-                // ... (Collision logic moved here or reused)
+                // Drag commit (tokens): do not run client-side collision stepping.
+                // It can incorrectly clamp moves and make tokens feel "stuck" in certain regions.
+                // Snap to grid center (when applicable), then let Foundry enforce collisions.
                 const token = tokenDoc.object;
-                if (token) {
-                    try {
-                        const origin = token.center;
-                        const grid = canvas?.grid;
-                        const isGridless = !!(grid && grid.type === CONST.GRID_TYPES.GRIDLESS);
-
-                        // In GRIDLESS, snapping to grid centers is not meaningful and can cause
-                        // no-op moves which never emit an authoritative movement-start.
-                        if (isGridless || !grid || typeof grid.getSnappedPoint !== 'function') {
-                            const collision = token.checkCollision(foundryPos, { mode: 'closest', type: 'move' });
-                            if (collision) {
-                                // Blocked: treat as no-op, and avoid generating an update.
-                                foundryPos = origin;
-                            }
-                        } else {
-                            const gridSize = (typeof grid.size === 'number' && grid.size > 0) ? grid.size : 100;
-                            const snapToCenter = (pt) => grid.getSnappedPoint(pt, { mode: CONST.GRID_SNAPPING_MODES.CENTER });
-
-                            // Always resolve against snapped grid centers so we don't land half-inside a wall/door.
-                            const desired = snapToCenter(foundryPos);
-
-                            // Diagonal-safe behavior: walk from origin towards desired, and pick the last
-                            // snapped tile center which does not collide.
-                            // Backtracking from the target can fail diagonally due to snap rounding.
-                            let lastValid = snapToCenter(origin);
-                            const dx = desired.x - origin.x;
-                            const dy = desired.y - origin.y;
-                            const dist = Math.sqrt(dx * dx + dy * dy);
-
-                            if (dist >= 1) {
-                                // Sample at quarter-grid intervals (bounded) and dedupe snapped points.
-                                const sampleStep = Math.max(1, gridSize * 0.25);
-                                const steps = Math.min(250, Math.ceil(dist / sampleStep));
-                                const seen = new Set();
-
-                                for (let i = 1; i <= steps; i++) {
-                                    const t = i / steps;
-                                    const sample = { x: origin.x + dx * t, y: origin.y + dy * t };
-                                    const snapped = snapToCenter(sample);
-                                    const key = `${snapped.x},${snapped.y}`;
-                                    if (seen.has(key)) continue;
-                                    seen.add(key);
-
-                                    const collision = token.checkCollision(snapped, { mode: 'closest', type: 'move' });
-                                    if (collision) break;
-                                    lastValid = snapped;
-                                }
-                            }
-
-                            foundryPos = lastValid;
-                        }
-                    } catch (e) {
-                        // If collision math fails for any reason, do not risk leaving a stuck preview.
-                        // Treat as no-op and let drag cleanup happen immediately.
-                        foundryPos = token.center;
-                    }
+                try {
+                  const grid = canvas?.grid;
+                  const isGridless = !!(grid && grid.type === CONST.GRID_TYPES.GRIDLESS);
+                  if (!isGridless && grid && typeof grid.getSnappedPoint === 'function') {
+                    foundryPos = grid.getSnappedPoint(foundryPos, { mode: CONST.GRID_SNAPPING_MODES.CENTER });
+                  }
+                } catch (_) {
                 }
 
                 // Adjust for center vs top-left

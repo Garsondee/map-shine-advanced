@@ -194,12 +194,13 @@ Hooks.once('init', async function() {
 
         return {
           tokenDoc,
-          enabled: (enabled === undefined || enabled === null) ? true : !!enabled,
+          enabled: (enabled === undefined || enabled === null) ? false : !!enabled,
           mode: (mode === 'torch' || mode === 'flashlight') ? mode : 'flashlight'
         };
       };
 
       const rerenderControls = () => {
+        try { ui?.controls?.render?.(true); } catch (_) {}
         try {
           ui?.controls?.render?.(true);
         } catch (_) {
@@ -207,8 +208,9 @@ Hooks.once('init', async function() {
       };
 
       const stNow = getPlayerLightState();
-      const torchActive = !!stNow.tokenDoc && stNow.enabled && stNow.mode === 'torch';
-      const flashlightActive = !!stNow.tokenDoc && stNow.enabled && stNow.mode === 'flashlight';
+      const globalPlayerLightEnabled = !!(window.MapShine?.playerLightEffect?.enabled);
+      const torchActive = globalPlayerLightEnabled && !!stNow.tokenDoc && stNow.enabled && stNow.mode === 'torch';
+      const flashlightActive = globalPlayerLightEnabled && !!stNow.tokenDoc && stNow.enabled && stNow.mode === 'flashlight';
 
       ensureTool(tokenControls, {
         name: 'map-shine-player-torch',
@@ -221,6 +223,12 @@ Hooks.once('init', async function() {
         onChange: async () => {
           if (!playerToolsVisible) {
             ui.notifications?.warn?.('Only the GM can change Player Light mode.');
+            return;
+          }
+
+          if (!window.MapShine?.playerLightEffect?.enabled) {
+            ui.notifications?.warn?.('Player Light is disabled for this map.');
+            rerenderControls();
             return;
           }
 
@@ -256,6 +264,12 @@ Hooks.once('init', async function() {
         onChange: async () => {
           if (!playerToolsVisible) {
             ui.notifications?.warn?.('Only the GM can change Player Light mode.');
+            return;
+          }
+
+          if (!window.MapShine?.playerLightEffect?.enabled) {
+            ui.notifications?.warn?.('Player Light is disabled for this map.');
+            rerenderControls();
             return;
           }
 

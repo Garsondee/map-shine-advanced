@@ -897,7 +897,7 @@ export class PlayerLightEffect extends EffectBase {
     try {
       const enabledFlag = tokenDoc.getFlag?.('map-shine-advanced', 'playerLightEnabled')
         ?? tokenDoc?.flags?.['map-shine-advanced']?.playerLightEnabled;
-      const enabled = (enabledFlag === undefined || enabledFlag === null) ? true : !!enabledFlag;
+      const enabled = (enabledFlag === undefined || enabledFlag === null) ? false : !!enabledFlag;
       if (!enabled) {
         this._setVisible(false);
         this._hideDynamicLightSources();

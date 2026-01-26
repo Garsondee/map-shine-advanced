@@ -119,8 +119,64 @@ export class TileManager {
 
     /** @type {SpecularEffect|null} */
     this.specularEffect = null;
+
+    // Cache renderer-derived values for texture filtering.
+    this._maxAnisotropy = null;
     
     log.debug('TileManager created');
+  }
+
+  _getRenderer() {
+    return window.MapShine?.renderer || null;
+  }
+
+  _getMaxAnisotropy() {
+    if (typeof this._maxAnisotropy === 'number') return this._maxAnisotropy;
+    const renderer = this._getRenderer();
+    const max = renderer?.capabilities?.getMaxAnisotropy?.();
+    this._maxAnisotropy = (typeof max === 'number' && max > 0) ? max : 1;
+    return this._maxAnisotropy;
+  }
+
+  _isPowerOfTwo(value) {
+    const v = value | 0;
+    return v > 0 && (v & (v - 1)) === 0;
+  }
+
+  _getTextureDimensions(texture) {
+    const img = texture?.image;
+    if (!img) return { w: 0, h: 0 };
+    const w = Number(img?.naturalWidth ?? img?.videoWidth ?? img?.width ?? 0);
+    const h = Number(img?.naturalHeight ?? img?.videoHeight ?? img?.height ?? 0);
+    return { w, h };
+  }
+
+  _configureTileTextureFiltering(texture, role = 'ALBEDO') {
+    const THREE = window.THREE;
+    if (!THREE || !texture) return;
+
+    // ALBEDO textures need mipmaps for stable minification when zoomed out.
+    // DATA_MASK textures should remain linear/no-mipmap to preserve data semantics.
+    if (role === 'DATA_MASK') {
+      texture.generateMipmaps = false;
+      texture.minFilter = THREE.LinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.anisotropy = 1;
+      texture.needsUpdate = true;
+      return;
+    }
+
+    const renderer = this._getRenderer();
+    const isWebGL2 = !!renderer?.capabilities?.isWebGL2;
+    const { w, h } = this._getTextureDimensions(texture);
+    const isPot = this._isPowerOfTwo(w) && this._isPowerOfTwo(h);
+    const canMipmap = isWebGL2 || isPot;
+
+    texture.generateMipmaps = canMipmap;
+    texture.minFilter = canMipmap ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.anisotropy = canMipmap ? Math.min(16, this._getMaxAnisotropy()) : 1;
+    texture.needsUpdate = true;
   }
 
   /**
@@ -379,7 +435,7 @@ export class TileManager {
             const exists = await this._fileExistsViaFilePicker(noQuery);
             if (!exists) continue;
           }
-          const tex = await this.loadTileTexture(url);
+          const tex = await this.loadTileTexture(url, { role: 'DATA_MASK' });
           if (tex) {
             this._tileWaterMaskCache.set(url, tex);
             this._tileWaterMaskResolvedUrl.set(key, url);
@@ -419,7 +475,7 @@ export class TileManager {
     const pending = this._tileWaterMaskPromises.get(resolvedUrl);
     if (pending) return pending;
 
-    const p = this.loadTileTexture(resolvedUrl).then((tex) => {
+    const p = this.loadTileTexture(resolvedUrl, { role: 'DATA_MASK' }).then((tex) => {
       if (!tex) return null;
 
       // _Water is a data mask, not color. Ensure we don't apply sRGB decoding.
@@ -501,7 +557,7 @@ export class TileManager {
             const exists = await this._fileExistsViaFilePicker(noQuery);
             if (!exists) continue;
           }
-          const tex = await this.loadTileTexture(url);
+          const tex = await this.loadTileTexture(url, { role: 'DATA_MASK' });
           if (tex) {
             this._tileSpecularMaskCache.set(url, tex);
             this._tileSpecularMaskResolvedUrl.set(key, url);
@@ -546,7 +602,7 @@ export class TileManager {
     const pending = this._tileSpecularMaskPromises.get(resolvedUrl);
     if (pending) return pending;
 
-    const p = this.loadTileTexture(resolvedUrl).then((tex) => {
+    const p = this.loadTileTexture(resolvedUrl, { role: 'DATA_MASK' }).then((tex) => {
       if (!tex) return null;
       const THREE = window.THREE;
       if (THREE) {
@@ -2470,9 +2526,10 @@ export class TileManager {
   /**
    * Load texture with caching
    * @param {string} texturePath 
+   * @param {{role?: 'ALBEDO'|'DATA_MASK'}} [options]
    * @returns {Promise<THREE.Texture>}
    */
-  async loadTileTexture(texturePath) {
+  async loadTileTexture(texturePath, options = {}) {
     if (this.textureCache.has(texturePath)) {
       return this.textureCache.get(texturePath);
     }
@@ -2484,6 +2541,8 @@ export class TileManager {
     const promise = (async () => {
       const THREE = window.THREE;
       if (!THREE) throw new Error('THREE.js not available');
+
+      const role = options?.role || 'ALBEDO';
 
       // Prefer createImageBitmap for faster/off-thread decoding where supported.
       // Fallback to THREE.TextureLoader when unavailable.
@@ -2506,13 +2565,10 @@ export class TileManager {
           }
 
           const texture = new THREE.Texture(bitmap);
-          texture.needsUpdate = true;
           texture.flipY = needsUnpackFlipY;
-          texture.colorSpace = THREE.SRGBColorSpace;
-          texture.generateMipmaps = false;
-          texture.minFilter = THREE.LinearFilter;
-          texture.magFilter = THREE.LinearFilter;
-          texture.anisotropy = 1;
+          texture.colorSpace = (role === 'DATA_MASK') ? THREE.NoColorSpace : THREE.SRGBColorSpace;
+          this._configureTileTextureFiltering(texture, role);
+          texture.needsUpdate = true;
           this.textureCache.set(texturePath, texture);
           return texture;
         }
@@ -2523,12 +2579,10 @@ export class TileManager {
         this.textureLoader.load(
           texturePath,
           (texture) => {
-            texture.colorSpace = THREE.SRGBColorSpace;
+            texture.colorSpace = (role === 'DATA_MASK') ? THREE.NoColorSpace : THREE.SRGBColorSpace;
             texture.flipY = false;
-            texture.generateMipmaps = false;
-            texture.minFilter = THREE.LinearFilter;
-            texture.magFilter = THREE.LinearFilter;
-            texture.anisotropy = 1;
+            this._configureTileTextureFiltering(texture, role);
+            texture.needsUpdate = true;
             this.textureCache.set(texturePath, texture);
             resolve(texture);
           },

@@ -75,8 +75,137 @@ export class TokenManager {
 
     /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
     this._hookIds = [];
+
+    // Cache renderer-derived values for texture filtering.
+    this._maxAnisotropy = null;
     
     log.debug('TokenManager created');
+  }
+
+  _getRenderer() {
+    return this.effectComposer?.renderer || window.MapShine?.renderer || null;
+  }
+
+  _getMaxAnisotropy() {
+    if (typeof this._maxAnisotropy === 'number') return this._maxAnisotropy;
+    const renderer = this._getRenderer();
+    const max = renderer?.capabilities?.getMaxAnisotropy?.();
+    this._maxAnisotropy = (typeof max === 'number' && max > 0) ? max : 1;
+    return this._maxAnisotropy;
+  }
+
+  _isPowerOfTwo(value) {
+    const v = value | 0;
+    return v > 0 && (v & (v - 1)) === 0;
+  }
+
+  _getTextureDimensions(texture) {
+    const img = texture?.image;
+    if (!img) return { w: 0, h: 0 };
+    const w = Number(img?.naturalWidth ?? img?.videoWidth ?? img?.width ?? 0);
+    const h = Number(img?.naturalHeight ?? img?.videoHeight ?? img?.height ?? 0);
+    return { w, h };
+  }
+
+  _configureTokenTextureFiltering(texture) {
+    const THREE = window.THREE;
+    if (!THREE || !texture) return;
+
+    // Mipmaps are critical for stable, smooth minification when zoomed out.
+    // WebGL1 requires POT textures for mipmaps; WebGL2 supports NPOT.
+    const renderer = this._getRenderer();
+    const isWebGL2 = !!renderer?.capabilities?.isWebGL2;
+    const { w, h } = this._getTextureDimensions(texture);
+    const isPot = this._isPowerOfTwo(w) && this._isPowerOfTwo(h);
+    const canMipmap = isWebGL2 || isPot;
+
+    texture.generateMipmaps = canMipmap;
+    texture.minFilter = canMipmap ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.anisotropy = canMipmap ? Math.min(16, this._getMaxAnisotropy()) : 1;
+    texture.needsUpdate = true;
+  }
+
+  /**
+   * Apply current scene lighting tint to a single sprite
+   * Used when a new token is created to immediately pick up scene lighting
+   * @param {THREE.Sprite} sprite - Token sprite to tint
+   * @private
+   */
+  _applyLightingTintToSprite(sprite) {
+    if (!sprite || !sprite.material) return;
+
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    if (!this._globalTint) this._globalTint = new THREE.Color(1, 1, 1);
+    if (!this._daylightTint) this._daylightTint = new THREE.Color(1, 1, 1);
+    if (!this._darknessTint) this._darknessTint = new THREE.Color(1, 1, 1);
+    if (!this._ambientTint) this._ambientTint = new THREE.Color(1, 1, 1);
+
+    try {
+      const le = window.MapShine?.lightingEffect;
+      if (le && le.enabled) {
+        sprite.material.color.setRGB(1, 1, 1);
+        return;
+      }
+    } catch (_) {
+    }
+
+    const globalTint = this._globalTint;
+    globalTint.setRGB(1, 1, 1);
+
+    try {
+      const scene = canvas?.scene;
+      const env = canvas?.environment;
+
+      if (scene?.environment?.darknessLevel !== undefined) {
+        let darkness = scene.environment.darknessLevel;
+        const le = window.MapShine?.lightingEffect;
+        if (le && typeof le.getEffectiveDarkness === 'function') {
+          darkness = le.getEffectiveDarkness();
+        }
+
+        const getThreeColor = (src, def, out) => {
+          try {
+            if (!out) out = new THREE.Color(def);
+            if (!src) {
+              out.set(def);
+              return out;
+            }
+            if (src instanceof THREE.Color) {
+              out.copy(src);
+              return out;
+            }
+            if (src.rgb) {
+              out.setRGB(src.rgb[0], src.rgb[1], src.rgb[2]);
+              return out;
+            }
+            if (Array.isArray(src)) {
+              out.setRGB(src[0], src[1], src[2]);
+              return out;
+            }
+            out.set(src);
+            return out;
+          } catch (e) {
+            out.set(def);
+            return out;
+          }
+        };
+
+        const daylight = getThreeColor(env?.colors?.ambientDaylight, 0xffffff, this._daylightTint);
+        const darknessColor = getThreeColor(env?.colors?.ambientDarkness, 0x242448, this._darknessTint);
+
+        const ambientTint = this._ambientTint.copy(daylight).lerp(darknessColor, darkness);
+
+        const lightLevel = Math.max(1.0 - darkness, 0.25);
+
+        globalTint.copy(ambientTint).multiplyScalar(lightLevel);
+      }
+    } catch (e) {
+    }
+
+    sprite.material.color.copy(globalTint);
   }
 
   setColorCorrectionParams(params) {
@@ -110,6 +239,17 @@ export class TokenManager {
     shader.uniforms.uTokenContrast.value = p.contrast ?? 1.0;
     shader.uniforms.uTokenSaturation.value = p.saturation ?? 1.0;
     shader.uniforms.uTokenGamma.value = p.gamma ?? 1.0;
+
+    // Update window light texture
+    try {
+      const wle = window.MapShine?.windowLightEffect;
+      const tex = (wle && typeof wle.getLightTexture === 'function') ? wle.getLightTexture() : (wle?.lightTarget?.texture ?? null);
+      if (shader.uniforms.tWindowLight) {
+        shader.uniforms.tWindowLight.value = tex || null;
+        shader.uniforms.uHasWindowLight.value = tex ? 1.0 : 0.0;
+      }
+    } catch (_) {
+    }
   }
 
   _ensureTokenColorCorrection(material) {
@@ -128,6 +268,9 @@ export class TokenManager {
       shader.uniforms.uTokenContrast = { value: 1.0 };
       shader.uniforms.uTokenSaturation = { value: 1.0 };
       shader.uniforms.uTokenGamma = { value: 1.0 };
+      shader.uniforms.tWindowLight = { value: null };
+      shader.uniforms.uHasWindowLight = { value: 0.0 };
+      shader.uniforms.uWindowLightScreenSize = { value: new window.THREE.Vector2(1, 1) };
 
       const uniformBlock = `
 uniform float uTokenCCEnabled;
@@ -138,6 +281,9 @@ uniform float uTokenBrightness;
 uniform float uTokenContrast;
 uniform float uTokenSaturation;
 uniform float uTokenGamma;
+uniform sampler2D tWindowLight;
+uniform float uHasWindowLight;
+uniform vec2 uWindowLightScreenSize;
 
 vec3 ms_applyTokenWhiteBalance(vec3 color, float temp, float tint) {
   vec3 tempShift = vec3(1.0 + temp, 1.0, 1.0 - temp);
@@ -163,6 +309,13 @@ vec3 ms_applyTokenColorCorrection(vec3 color) {
   color = pow(color, vec3(1.0 / max(uTokenGamma, 0.0001)));
   return color;
 }
+
+vec3 ms_applyWindowLight(vec3 color) {
+  if (uHasWindowLight < 0.5) return color;
+  vec2 wuv = gl_FragCoord.xy / max(uWindowLightScreenSize, vec2(1.0));
+  vec3 windowLight = texture2D(tWindowLight, clamp(wuv, vec2(0.001), vec2(0.999))).rgb;
+  return color + windowLight;
+}
 `;
 
       // Inject uniforms + helper functions.
@@ -172,13 +325,13 @@ vec3 ms_applyTokenColorCorrection(vec3 color) {
       );
 
       // SpriteMaterial's fragment shader does not consistently include <output_fragment>
-      // across Three versions. Apply CC using a robust set of fallbacks.
+      // across Three versions. Apply CC and window light using a robust set of fallbacks.
       let patched = false;
 
       if (shader.fragmentShader.includes('#include <output_fragment>')) {
         shader.fragmentShader = shader.fragmentShader.replace(
           '#include <output_fragment>',
-          `#include <output_fragment>\n  gl_FragColor.rgb = ms_applyTokenColorCorrection(gl_FragColor.rgb);`
+          `#include <output_fragment>\n  gl_FragColor.rgb = ms_applyTokenColorCorrection(gl_FragColor.rgb);\n  gl_FragColor.rgb = ms_applyWindowLight(gl_FragColor.rgb);`
         );
         patched = true;
       }
@@ -188,7 +341,7 @@ vec3 ms_applyTokenColorCorrection(vec3 color) {
       if (!patched && shader.fragmentShader.includes('gl_FragColor = vec4( outgoingLight, diffuseColor.a );')) {
         shader.fragmentShader = shader.fragmentShader.replace(
           'gl_FragColor = vec4( outgoingLight, diffuseColor.a );',
-          'gl_FragColor = vec4( ms_applyTokenColorCorrection(outgoingLight), diffuseColor.a );'
+          `vec3 ccLight = ms_applyTokenColorCorrection(outgoingLight);\n  ccLight = ms_applyWindowLight(ccLight);\n  gl_FragColor = vec4( ccLight, diffuseColor.a );`
         );
         patched = true;
       }
@@ -198,7 +351,7 @@ vec3 ms_applyTokenColorCorrection(vec3 color) {
       if (!patched && shader.fragmentShader.includes('gl_FragColor = vec4( outgoingLight, diffuseColor.a );')) {
         shader.fragmentShader = shader.fragmentShader.replace(
           'gl_FragColor = vec4( outgoingLight, diffuseColor.a );',
-          'gl_FragColor = vec4( ms_applyTokenColorCorrection(outgoingLight), diffuseColor.a );'
+          `vec3 ccLight = ms_applyTokenColorCorrection(outgoingLight);\n  ccLight = ms_applyWindowLight(ccLight);\n  gl_FragColor = vec4( ccLight, diffuseColor.a );`
         );
         patched = true;
       }
@@ -209,7 +362,7 @@ vec3 ms_applyTokenColorCorrection(vec3 color) {
       if (!patched) {
         shader.fragmentShader = shader.fragmentShader.replace(
           /}\s*$/,
-          `  gl_FragColor.rgb = ms_applyTokenColorCorrection(gl_FragColor.rgb);\n}`
+          `  gl_FragColor.rgb = ms_applyTokenColorCorrection(gl_FragColor.rgb);\n  gl_FragColor.rgb = ms_applyWindowLight(gl_FragColor.rgb);\n}`
         );
       }
 
@@ -265,6 +418,24 @@ vec3 ms_applyTokenColorCorrection(vec3 color) {
    * @param {TimeInfo} timeInfo 
    */
   update(timeInfo) {
+    // Update window light texture for all tokens
+    try {
+      const wle = window.MapShine?.windowLightEffect;
+      const tex = (wle && typeof wle.getLightTexture === 'function') ? wle.getLightTexture() : (wle?.lightTarget?.texture ?? null);
+      const hasWindowLight = tex ? 1.0 : 0.0;
+      
+      for (const data of this.tokenSprites.values()) {
+        const shader = data?.sprite?.material?.userData?._msTokenCCShader;
+        if (shader?.uniforms) {
+          if (shader.uniforms.tWindowLight) {
+            shader.uniforms.tWindowLight.value = tex || null;
+            shader.uniforms.uHasWindowLight.value = hasWindowLight;
+          }
+        }
+      }
+    } catch (_) {
+    }
+
     // Process active animations
     for (const [tokenId, anim] of this.activeAnimations.entries()) {
       // Update elapsed time
@@ -473,13 +644,7 @@ vec3 ms_applyTokenColorCorrection(vec3 color) {
    * @param {TokenDocument} tokenDoc - Foundry token document
    * @private
    */
-  createTokenSprite(tokenDoc) {
-    // Skip if already exists
-    if (this.tokenSprites.has(tokenDoc.id)) {
-      log.warn(`Token sprite already exists: ${tokenDoc.id}`);
-      return;
-    }
-
+  async createTokenSprite(tokenDoc) {
     const THREE = window.THREE;
     if (!THREE) {
       log.error('THREE.js not available');
@@ -497,8 +662,10 @@ vec3 ms_applyTokenColorCorrection(vec3 color) {
     const material = new THREE.SpriteMaterial({
       transparent: true,
       alphaTest: 0.1, // Discard fully transparent pixels
-      depthTest: true,
-      depthWrite: true,
+      // Render tokens in the overlay pass so they draw AFTER post-processing passes
+      // like WaterEffectV2. This prevents water distortion/tint from affecting tokens.
+      depthTest: false,
+      depthWrite: false,
       sizeAttenuation: true, // Enable perspective scaling - tokens should scale with the world
       side: THREE.DoubleSide // CRITICAL: Prevent culling when projection matrix is flipped
     });
@@ -508,9 +675,17 @@ vec3 ms_applyTokenColorCorrection(vec3 color) {
     const sprite = new THREE.Sprite(material);
     sprite.name = `Token_${tokenDoc.id}`;
     sprite.matrixAutoUpdate = false;
-    
-    // Store Foundry data in userData
-    sprite.userData.foundryTokenId = tokenDoc.id;
+
+    // Render tokens above post-processing (e.g. water) using the overlay layer.
+    // EffectComposer explicitly renders this layer to screen after post.
+    sprite.layers.set(OVERLAY_THREE_LAYER);
+
+    // Store token metadata
+    sprite.userData = {
+      tokenId: tokenDoc.id,
+      type: 'token',
+    };
+
     sprite.userData.tokenDoc = tokenDoc;
     sprite.userData._removed = false;
 
@@ -551,7 +726,10 @@ vec3 ms_applyTokenColorCorrection(vec3 color) {
       isHovered: false
     });
 
+    // Apply current lighting tint immediately so new tokens (e.g., copy-pasted)
+    // pick up scene lighting right away instead of waiting for next update() call
     this._tintDirty = true;
+    this._applyLightingTintToSprite(sprite);
 
     log.debug(`Created token sprite: ${tokenDoc.id} at (${tokenDoc.x}, ${tokenDoc.y}, z=${sprite.position.z})`);
   }
@@ -1166,8 +1344,8 @@ vec3 ms_applyTokenColorCorrection(vec3 color) {
         (texture) => {
           // Configure texture
           texture.colorSpace = THREE.SRGBColorSpace;
-          texture.minFilter = THREE.LinearFilter;
-          texture.magFilter = THREE.LinearFilter;
+          this._configureTokenTextureFiltering(texture);
+          texture.needsUpdate = true;
           
           // Cache for reuse
           this.textureCache.set(texturePath, texture);

@@ -716,7 +716,7 @@ export class SpecularEffect extends EffectBase {
       transparent: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
-      depthTest: false
+      depthTest: true
     });
 
     const mesh = new THREE.Mesh(geom, mat);

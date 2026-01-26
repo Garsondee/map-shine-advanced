@@ -76,7 +76,8 @@ export class TweakpaneManager {
         brightness: 0.0,
         contrast: 1.0,
         saturation: 1.0,
-        gamma: 1.0
+        gamma: 1.0,
+        windowLightIntensity: 1.0
       }
     };
     
@@ -123,27 +124,35 @@ export class TweakpaneManager {
         segmentLength: 12,
         damping: 0.98,
         windForce: 1.2,
-        springConstant: 0.6,
+        bendStiffness: 0.5,
         tapering: 0.55,
         width: 22,
         uvRepeatWorld: 64,
-        ropeEndStiffness: 0.25,
         windowLightBoost: 10.0,
         endFadeSize: 0.0,
-        endFadeStrength: 0.0
+        endFadeStrength: 0.0,
+        gravityStrength: 1.0,
+        slackFactor: 1.05,
+        windGustAmount: 0.5,
+        invertWindDirection: false,
+        constraintIterations: 6
       },
       chain: {
         segmentLength: 22,
         damping: 0.92,
         windForce: 0.25,
-        springConstant: 1.0,
+        bendStiffness: 0.5,
         tapering: 0.15,
         width: 18,
         uvRepeatWorld: 48,
-        ropeEndStiffness: 0.5,
         windowLightBoost: 10.0,
         endFadeSize: 0.0,
-        endFadeStrength: 0.0
+        endFadeStrength: 0.0,
+        gravityStrength: 1.0,
+        slackFactor: 1.02,
+        windGustAmount: 0.5,
+        invertWindDirection: false,
+        constraintIterations: 6
       }
     };
 
@@ -574,6 +583,13 @@ export class TweakpaneManager {
       step: 0.01
     }).on('change', onTokenCCChange('tint'));
 
+    tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'windowLightIntensity', {
+      label: 'Window Light Intensity',
+      min: 0,
+      max: 2,
+      step: 0.01
+    }).on('change', onTokenCCChange('windowLightIntensity'));
+
     tokenCCFolder.addButton({
       title: 'Reset Token CC'
     }).on('click', () => {
@@ -585,6 +601,7 @@ export class TweakpaneManager {
       this.globalParams.tokenColorCorrection.contrast = 1.0;
       this.globalParams.tokenColorCorrection.saturation = 1.0;
       this.globalParams.tokenColorCorrection.gamma = 1.0;
+      this.globalParams.tokenColorCorrection.windowLightIntensity = 1.0;
 
       // Refresh bindings under this folder.
       try {
@@ -952,14 +969,33 @@ export class TweakpaneManager {
     });
 
     const bindDefaults = (container, obj) => {
+      container.addBlade({ view: 'separator' });
       container.addBinding(obj, 'segmentLength', { label: 'Segment Length', min: 4, max: 64, step: 1 }).on('change', saveAndRebuild);
+      
+      container.addBlade({ view: 'separator' });
       container.addBinding(obj, 'damping', { label: 'Damping', min: 0.8, max: 0.999, step: 0.001 }).on('change', saveAndRebuild);
+      
+      container.addBlade({ view: 'separator' });
       container.addBinding(obj, 'windForce', { label: 'Wind Force', min: 0, max: 4, step: 0.05 }).on('change', saveAndRebuild);
-      container.addBinding(obj, 'springConstant', { label: 'Spring', min: 0, max: 2, step: 0.05 }).on('change', saveAndRebuild);
+      container.addBinding(obj, 'windGustAmount', { label: 'Wind Gust Amount', min: 0, max: 1, step: 0.05 }).on('change', saveAndRebuild);
+      if (Object.prototype.hasOwnProperty.call(obj, 'invertWindDirection')) {
+        container.addBinding(obj, 'invertWindDirection', { label: 'Invert Wind Direction' }).on('change', saveAndRebuild);
+      }
+      
+      container.addBlade({ view: 'separator' });
+      container.addBinding(obj, 'gravityStrength', { label: 'Gravity Strength', min: 0, max: 2, step: 0.05 }).on('change', saveAndRebuild);
+      container.addBinding(obj, 'slackFactor', { label: 'Slack Factor', min: 1.0, max: 2.0, step: 0.05 }).on('change', saveAndRebuild);
+      
+      container.addBlade({ view: 'separator' });
+      container.addBinding(obj, 'bendStiffness', { label: 'Bend Stiffness', min: 0, max: 2, step: 0.01 }).on('change', saveAndRebuild);
+      container.addBinding(obj, 'constraintIterations', { label: 'Constraint Iterations', min: 1, max: 20, step: 1 }).on('change', saveAndRebuild);
+      
+      container.addBlade({ view: 'separator' });
       container.addBinding(obj, 'width', { label: 'Width', min: 2, max: 80, step: 1 }).on('change', saveAndRebuild);
       container.addBinding(obj, 'tapering', { label: 'Tapering', min: 0, max: 1, step: 0.01 }).on('change', saveAndRebuild);
       container.addBinding(obj, 'uvRepeatWorld', { label: 'UV Repeat (px)', min: 4, max: 256, step: 1 }).on('change', saveAndRebuild);
-      container.addBinding(obj, 'ropeEndStiffness', { label: 'End Stiffness', min: 0, max: 1, step: 0.01 }).on('change', saveAndRebuild);
+      
+      container.addBlade({ view: 'separator' });
       container.addBinding(obj, 'windowLightBoost', { label: 'Window Light Boost', min: 0, max: 50, step: 0.25 }).on('change', saveAndRebuild);
       container.addBinding(obj, 'endFadeSize', { label: 'End Fade Size', min: 0, max: 0.5, step: 0.01 }).on('change', saveAndRebuild);
       container.addBinding(obj, 'endFadeStrength', { label: 'End Fade Strength', min: 0, max: 1, step: 0.01 }).on('change', saveAndRebuild);
@@ -3297,7 +3333,22 @@ export class TweakpaneManager {
 
       // Restore global params
       if (state.globalParams) {
-        Object.assign(this.globalParams, state.globalParams);
+        // NOTE: state.globalParams is persisted across versions.
+        // We must merge nested objects defensively so newly added parameters
+        // (like tokenColorCorrection.windowLightIntensity) don't disappear.
+        const { tokenColorCorrection, ...rest } = state.globalParams;
+        Object.assign(this.globalParams, rest);
+        if (tokenColorCorrection && typeof tokenColorCorrection === 'object') {
+          if (!this.globalParams.tokenColorCorrection) this.globalParams.tokenColorCorrection = {};
+          Object.assign(this.globalParams.tokenColorCorrection, tokenColorCorrection);
+        }
+
+        // Backwards-compatible defaults for newly added token controls
+        if (this.globalParams.tokenColorCorrection) {
+          if (this.globalParams.tokenColorCorrection.windowLightIntensity === undefined) {
+            this.globalParams.tokenColorCorrection.windowLightIntensity = 1.0;
+          }
+        }
       }
 
       // Restore scale

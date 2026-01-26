@@ -1,6 +1,6 @@
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
-import { ROPE_MASK_LAYER } from '../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER, ROPE_MASK_LAYER } from '../effects/EffectComposer.js';
 
 const log = createLogger('PhysicsRopeManager');
 
@@ -11,21 +11,31 @@ const ROPE_PRESETS = {
     segmentLength: 12,
     damping: 0.98,
     windForce: 1.2,
-    springConstant: 0.6,
+    bendStiffness: 0.5,
     tapering: 0.55,
     width: 22,
     uvRepeatWorld: 64,
-    zOffset: 0.025
+    zOffset: 0.025,
+    gravityStrength: 1.0,
+    slackFactor: 1.05,
+    windGustAmount: 0.5,
+    invertWindDirection: false,
+    constraintIterations: 6
   },
   chain: {
     segmentLength: 22,
     damping: 0.92,
     windForce: 0.25,
-    springConstant: 1.0,
+    bendStiffness: 0.5,
     tapering: 0.15,
     width: 18,
     uvRepeatWorld: 48,
-    zOffset: 0.026
+    zOffset: 0.026,
+    gravityStrength: 1.0,
+    slackFactor: 1.02,
+    windGustAmount: 0.5,
+    invertWindDirection: false,
+    constraintIterations: 6
   }
 };
 
@@ -62,6 +72,12 @@ class RopeInstance {
     this.config = config;
     this.texture = texture;
 
+    // Simulation Z is in a physics space (pixels-ish). `zOffset` is meant as a tiny render lift
+    // above the map to avoid z-fighting. Using `zOffset` as a physical anchor height causes
+    // extreme sag because gravity is in pixel units.
+    this._anchorZ = 0.0;
+    this._renderZOffset = Number.isFinite(config.zOffset) ? config.zOffset : 0.025;
+
     this._buildSimulation(config.anchorPoints);
     this._buildMesh();
 
@@ -74,60 +90,62 @@ class RopeInstance {
     const n = pts.length;
 
     this.count = n;
+
+    // 3D position arrays
     this.posX = new Float32Array(n);
     this.posY = new Float32Array(n);
+    this.posZ = new Float32Array(n);
+
     this.prevX = new Float32Array(n);
     this.prevY = new Float32Array(n);
-    this.restX = new Float32Array(n);
-    this.restY = new Float32Array(n);
+    this.prevZ = new Float32Array(n);
+
     this.locked = new Uint8Array(n);
 
+    // Initialize points flat at the anchor height
     for (let i = 0; i < n; i++) {
       const p = pts[i];
       this.posX[i] = p.x;
       this.posY[i] = p.y;
-      this.prevX[i] = p.x;
-      this.prevY[i] = p.y;
+      this.posZ[i] = this._anchorZ;
+
+      this.prevX[i] = this.posX[i];
+      this.prevY[i] = this.posY[i];
+      this.prevZ[i] = this.posZ[i];
     }
 
+    // Lock start and end points
     if (n >= 1) this.locked[0] = 1;
     if (n >= 2) this.locked[n - 1] = 1;
 
+    // SLACK_FACTOR > 1.0 creates extra length, allowing gravity to pull the center down
+    const SLACK_FACTOR = Number.isFinite(this.config.slackFactor) ? this.config.slackFactor : 1.05;
+
     this.segLen = new Float32Array(Math.max(0, n - 1));
+    this.bendLen = new Float32Array(Math.max(0, n - 2));
+
+    // Calculate straight-line path length
+    let totalDist = 0;
     for (let i = 0; i < n - 1; i++) {
       const dx = this.posX[i + 1] - this.posX[i];
       const dy = this.posY[i + 1] - this.posY[i];
-      this.segLen[i] = Math.sqrt(dx * dx + dy * dy) || this.config.segmentLength;
+      totalDist += Math.sqrt(dx * dx + dy * dy);
     }
 
-    this._recomputeRestPositions();
+    // Distribute slack evenly
+    const targetTotalLength = totalDist * SLACK_FACTOR;
+    const targetSegLen = targetTotalLength / (n - 1);
 
-    this._restDist = new Float32Array(n);
-    let cum = 0;
-    this._restDist[0] = 0;
     for (let i = 0; i < n - 1; i++) {
-      cum += this.segLen[i];
-      this._restDist[i + 1] = cum;
+      this.segLen[i] = targetSegLen;
+    }
+
+    // Setup bending constraints (distance between i and i+2)
+    for (let i = 0; i < n - 2; i++) {
+      this.bendLen[i] = this.segLen[i] + this.segLen[i + 1];
     }
 
     this._dist = new Float32Array(n);
-  }
-
-  _recomputeRestPositions() {
-    const n = this.count;
-    if (n < 2) return;
-
-    const sx = this.posX[0];
-    const sy = this.posY[0];
-    const ex = this.posX[n - 1];
-    const ey = this.posY[n - 1];
-
-    const denom = n - 1;
-    for (let i = 0; i < n; i++) {
-      const t = i / denom;
-      this.restX[i] = sx + (ex - sx) * t;
-      this.restY[i] = sy + (ey - sy) * t;
-    }
   }
 
   _subdivide(anchorPoints, segmentLength) {
@@ -248,10 +266,6 @@ class RopeInstance {
           if (texel.a <= 0.0001) discard;
 
           float a = texel.a;
-          // Treat uMap as straight-alpha (common for authoring). Premultiply here so
-          // partially transparent edge pixels never contribute more than opaque pixels.
-          // Use extra coverage attenuation to prevent matte/bleed RGB in edge pixels
-          // from becoming brighter than the rope core.
           vec3 base = texel.rgb * a;
 
           float endSize = clamp(uEndFadeSize, 0.0, 0.5);
@@ -266,14 +280,9 @@ class RopeInstance {
           if (uHasWindowLight > 0.5 && uWindowBoost > 0.0001) {
             vec2 suv = gl_FragCoord.xy * uInvScreenSize;
             vec4 wl = texture2D(uWindowLight, suv);
-            
-            // FIX: Multiply the light by the pixel's alpha (a).
-            // Using (a * a) restricts the light to the solid core of the rope,
-            // preventing the semi-transparent "fuzz" from glowing white.
             base += wl.rgb * uWindowBoost * (a * a);
           }
 
-          // Additive blending: output non-premultiplied, RGB is energy.
           gl_FragColor = vec4(base, a);
         }
       `
@@ -283,6 +292,9 @@ class RopeInstance {
     this.material = mat;
     this.mesh = new THREE.Mesh(geo, mat);
 
+    // Render in overlay so the rope doesn't get fully occluded by overhead tiles.
+    // We still place it near the overhead Z band so perspective/parallax stays consistent.
+    this.mesh.layers.set(OVERLAY_THREE_LAYER);
     this.mesh.layers.enable(ROPE_MASK_LAYER);
 
     this.mesh.renderOrder = 5;
@@ -296,123 +308,156 @@ class RopeInstance {
 
   update(timeInfo) {
     const dtRaw = typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016;
-    const dt = Math.min(Math.max(dtRaw, 0), 0.1);
-    if (dt <= 0.00001) return;
+    const dt = Math.min(Math.max(dtRaw, 0.001), 0.05);
 
     try {
       const u = this.material?.uniforms;
       if (u?.uEndFadeSize) u.uEndFadeSize.value = Number.isFinite(this.config.endFadeSize) ? this.config.endFadeSize : 0.0;
       if (u?.uEndFadeStrength) u.uEndFadeStrength.value = Number.isFinite(this.config.endFadeStrength) ? this.config.endFadeStrength : 0.0;
-    } catch (_) {
-    }
+    } catch (_) {}
 
     const n = this.count;
     if (n < 2) return;
 
     const damping = Number.isFinite(this.config.damping) ? this.config.damping : 0.98;
-    const windForce = Number.isFinite(this.config.windForce) ? this.config.windForce : 1.0;
-    const springConstant = Number.isFinite(this.config.springConstant) ? this.config.springConstant : 0.5;
+    const bendStiffness = (Number.isFinite(this.config.bendStiffness) ? this.config.bendStiffness : 0.5) * 0.5;
 
+    // --- Weather / Wind ---
     const wState = weatherController.getCurrentState?.();
     const wSpeed = wState && Number.isFinite(wState.windSpeed) ? wState.windSpeed : 0;
     const wDir = wState && wState.windDirection;
-    const wdx = wDir && Number.isFinite(wDir.x) ? wDir.x : 0;
+    const wdx = wDir && Number.isFinite(wDir.x) ? wDir.x : 1;
     const wdy = wDir && Number.isFinite(wDir.y) ? wDir.y : 0;
 
-    const windX = wdx;
-    const windY = -wdy;
+    // Wind Strength Scalar
+    const windForceMag = (Number.isFinite(this.config.windForce) ? this.config.windForce : 1.0) * wSpeed * 1000;
 
+    // Wind Noise (Gusts)
+    const time = performance.now();
+    const gustAmount = Number.isFinite(this.config.windGustAmount) ? this.config.windGustAmount : 0.5;
+    const globalGust = (Math.sin(time * 0.0005) + Math.cos(time * 0.0013)) * 0.5 + 0.5;
+
+    // Gravity on Z-axis (Pixels/s^2) - configurable strength
+    const gravityStrength = Number.isFinite(this.config.gravityStrength) ? this.config.gravityStrength : 1.0;
+    const GRAVITY_Z = -1200 * gravityStrength;
+
+    // Roof Occlusion for Wind
+    const mid = (n / 2) | 0;
     let windMask = 1.0;
     try {
       const d = canvas?.dimensions;
-      const sceneX = d?.sceneRect?.x ?? d?.sceneX ?? 0;
-      const sceneY = d?.sceneRect?.y ?? d?.sceneY ?? 0;
-      const sceneW = d?.sceneRect?.width ?? d?.sceneWidth ?? d?.width ?? 10000;
-      const sceneH = d?.sceneRect?.height ?? d?.sceneHeight ?? d?.height ?? 10000;
-      const sceneTotalH = d?.height ?? (sceneY + sceneH);
-
-      const mid = (n / 2) | 0;
-      const worldX = this.posX[mid];
-      const worldY = this.posY[mid];
-      const foundryY = sceneTotalH - worldY;
-
-      const u = (worldX - sceneX) / sceneW;
-      const v = (foundryY - sceneY) / sceneH;
-
-      const outdoor = weatherController.getRoofMaskIntensity?.(u, v);
-      if (Number.isFinite(outdoor)) {
-        const indoorMin = 0.02;
-        windMask = indoorMin + (1.0 - indoorMin) * Math.max(0.0, Math.min(1.0, outdoor));
+      if (d) {
+        const outdoor = weatherController.getRoofMaskIntensity?.(
+          (this.posX[mid] - d.sceneRect.x) / d.sceneRect.width,
+          (d.sceneRect.height - (this.posY[mid] - d.sceneRect.y)) / d.sceneRect.height
+        );
+        if (Number.isFinite(outdoor)) windMask = 0.1 + 0.9 * outdoor;
       }
-    } catch (_) {
-      windMask = 1.0;
-    }
+    } catch (_) {}
 
-    const windMag = wSpeed * 300.0 * windForce * windMask;
+    const windVecX = wdx * windForceMag * windMask;
+    const windVecY = wdy * windForceMag * windMask;
 
+    // The UI (and some other systems) can treat wind direction as the direction
+    // the wind is COMING FROM rather than GOING TO. Allow inverting so the rope
+    // can match the user's mental model.
+    const windSign = this.config?.invertWindDirection ? -1.0 : 1.0;
+
+    // 1. Verlet Integration (3D)
     for (let i = 0; i < n; i++) {
       if (this.locked[i]) continue;
 
       const x = this.posX[i];
       const y = this.posY[i];
-      const vx = x - this.prevX[i];
-      const vy = y - this.prevY[i];
+      const z = this.posZ[i];
 
+      const px = this.prevX[i];
+      const py = this.prevY[i];
+      const pz = this.prevZ[i];
+
+      let vx = (x - px) * damping;
+      let vy = (y - py) * damping;
+      let vz = (z - pz) * damping;
+
+      // Wind Gust Variation
+      const nodeGust = Math.sin(time * 0.003 + i * 0.2) * 0.5;
+      const gust = ((globalGust - 0.5) * 1.0) + nodeGust;
+      const totalWindMult = Math.max(0.0, 1.0 + gustAmount * gust);
+
+      // Apply Forces
+      vx += (windVecX * windSign) * totalWindMult * dt * dt;
+      vy += (windVecY * windSign) * totalWindMult * dt * dt;
+      vz += GRAVITY_Z * dt * dt;
+
+      // Update
       this.prevX[i] = x;
       this.prevY[i] = y;
+      this.prevZ[i] = z;
 
-      const norm = i / (n - 1);
-      const centerFactor = Math.sin(norm * Math.PI);
-
-      const rx = (this.restX[i] - x) * springConstant;
-      const ry = (this.restY[i] - y) * springConstant;
-
-      const wx = windX * windMag * (0.3 + 0.7 * centerFactor);
-      const wy = windY * windMag * (0.3 + 0.7 * centerFactor);
-
-      this.posX[i] = x + vx * damping + (wx + rx) * dt;
-      this.posY[i] = y + vy * damping + (wy + ry) * dt;
+      this.posX[i] = x + vx;
+      this.posY[i] = y + vy;
+      this.posZ[i] = z + vz;
     }
 
-    const iterations = 10;
+    // 2. Constraint Solver
+    const iterations = Number.isFinite(this.config.constraintIterations) ? Math.max(1, Math.min(20, this.config.constraintIterations)) : 6;
     for (let it = 0; it < iterations; it++) {
-      const forward = (it % 2) === 0;
-      const start = forward ? 0 : (n - 2);
-      const end = forward ? (n - 1) : -1;
-      const step = forward ? 1 : -1;
+      // Distance Constraints
+      for (let i = 0; i < n - 1; i++) {
+        const i1 = i;
+        const i2 = i + 1;
 
-      for (let i = start; i !== end; i += step) {
-        const x1 = this.posX[i];
-        const y1 = this.posY[i];
-        const x2 = this.posX[i + 1];
-        const y2 = this.posY[i + 1];
+        const dx = this.posX[i2] - this.posX[i1];
+        const dy = this.posY[i2] - this.posY[i1];
+        const dz = this.posZ[i2] - this.posZ[i1];
 
-        const dx = x2 - x1;
-        const dy = y2 - y1;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 0.0001) continue;
+        const distSq = dx * dx + dy * dy + dz * dz;
+        const dist = Math.sqrt(distSq) || 0.001;
 
-        const target = this.segLen[i];
-        const diff = target - dist;
+        const diff = (dist - this.segLen[i]) / dist;
+        const correction = diff * 0.5;
 
-        const normSeg = i / Math.max(1, n - 2);
-        const distFromNearestEnd = Math.min(normSeg, 1.0 - normSeg); // 0 at ends, 0.5 at center
+        const cx = dx * correction;
+        const cy = dy * correction;
+        const cz = dz * correction;
 
-        const ropeEndStiffness = Number.isFinite(this.config.ropeEndStiffness) ? this.config.ropeEndStiffness : 0.3;
-        const endBoost = 1.0 - Math.min(1.0, distFromNearestEnd * 2.0); // 1 at ends -> 0 near center
-        const stiffnessFactor = 1.0 + ropeEndStiffness * endBoost;
-        const correctionStrength = 0.5 * stiffnessFactor;
-
-        const ox = (dx / dist) * diff * correctionStrength;
-        const oy = (dy / dist) * diff * correctionStrength;
-
-        if (!this.locked[i]) {
-          this.posX[i] = x1 - ox;
-          this.posY[i] = y1 - oy;
+        if (!this.locked[i1]) {
+          this.posX[i1] += cx;
+          this.posY[i1] += cy;
+          this.posZ[i1] += cz;
         }
-        if (!this.locked[i + 1]) {
-          this.posX[i + 1] = x2 + ox;
-          this.posY[i + 1] = y2 + oy;
+        if (!this.locked[i2]) {
+          this.posX[i2] -= cx;
+          this.posY[i2] -= cy;
+          this.posZ[i2] -= cz;
+        }
+      }
+
+      // Bending Constraints
+      if (bendStiffness > 0.01) {
+        for (let i = 0; i < n - 2; i++) {
+          const i1 = i;
+          const i3 = i + 2;
+
+          const dx = this.posX[i3] - this.posX[i1];
+          const dy = this.posY[i3] - this.posY[i1];
+          const dz = this.posZ[i3] - this.posZ[i1];
+
+          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 0.001;
+          const diff = (dist - this.bendLen[i]) / dist;
+
+          const correction = diff * 0.5 * bendStiffness;
+
+          if (!this.locked[i1]) {
+            this.posX[i1] += dx * correction;
+            this.posY[i1] += dy * correction;
+            this.posZ[i1] += dz * correction;
+          }
+          if (!this.locked[i3]) {
+            this.posX[i3] -= dx * correction;
+            this.posY[i3] -= dy * correction;
+            this.posZ[i3] -= dz * correction;
+          }
         }
       }
     }
@@ -426,17 +471,38 @@ class RopeInstance {
     if (!this.geometry || !this._positions || !this._uvs || !this._ropeT || n < 2) return;
 
     const groundZ = this.sceneComposer?.groundZ;
-    const zBase = Number.isFinite(groundZ) ? groundZ : 0;
-    const z = zBase + (Number.isFinite(this.config.zOffset) ? this.config.zOffset : 0.025);
+    // Place ropes just under overhead tiles (TileManager uses Z_OVERHEAD_OFFSET=0.08).
+    // Keep this slightly below that so roofs can occlude the rope cleanly.
+    const ROPE_BASE_Z_OFFSET = 0.07;
+    const zBase = (Number.isFinite(groundZ) ? groundZ : 0) + ROPE_BASE_Z_OFFSET;
+
+    // Render Z scaling: keep the visual sag subtle while still letting Z influence constraints.
+    // This prevents large perspective “dips” as the camera moves.
+    const Z_RENDER_SCALE = 0.02;
 
     const baseHalfWidth = (Number.isFinite(this.config.width) ? this.config.width : 20) * 0.5;
     const tapering = Number.isFinite(this.config.tapering) ? this.config.tapering : 0.5;
     const uvRepeatWorld = Number.isFinite(this.config.uvRepeatWorld) ? this.config.uvRepeatWorld : 64;
 
+    // Recalculate UVs based on actual 3D length to prevent stretching
+    if (!this._dist || this._dist.length !== n) this._dist = new Float32Array(n);
+    let cum = 0;
+    this._dist[0] = 0;
+    for (let i = 1; i < n; i++) {
+      const dx = this.posX[i] - this.posX[i - 1];
+      const dy = this.posY[i] - this.posY[i - 1];
+      const dz = this.posZ[i] - this.posZ[i - 1];
+      cum += Math.sqrt(dx * dx + dy * dy + dz * dz);
+      this._dist[i] = cum;
+    }
+
     for (let i = 0; i < n; i++) {
       const x = this.posX[i];
       const y = this.posY[i];
+      // Add global Z offset to simulated Z
+      const z = (this.posZ[i] * Z_RENDER_SCALE) + zBase + this._renderZOffset;
 
+      // Ribbon calculation (billboarded to camera in 2D plane)
       let tx = 1;
       let ty = 0;
       if (i < n - 1) {
@@ -468,7 +534,7 @@ class RopeInstance {
       this._positions[p1 + 1] = y - ny * hw;
       this._positions[p1 + 2] = z;
 
-      const d = (this._restDist && this._restDist.length === n) ? this._restDist[i] : 0;
+      const d = (this._dist && this._dist.length === n) ? this._dist[i] : 0;
       const u = uvRepeatWorld > 0 ? (d / uvRepeatWorld) : 0;
       const u0 = vi * 2;
       const u1 = (vi + 1) * 2;
@@ -488,13 +554,8 @@ class RopeInstance {
     this.geometry.attributes.uv.needsUpdate = true;
     this.geometry.attributes.aRopeT.needsUpdate = true;
 
-    if (forceBoundsUpdate) {
-      this.geometry.computeBoundingBox();
-      this.geometry.computeBoundingSphere();
-    } else {
-      this.geometry.boundingBox = null;
-      this.geometry.boundingSphere = null;
-    }
+    this.geometry.computeBoundingBox();
+    this.geometry.computeBoundingSphere();
   }
 
   dispose() {
@@ -848,12 +909,16 @@ export class PhysicsRopeManager {
         segmentLength: Number.isFinite(group.segmentLength) ? group.segmentLength : (Number.isFinite(cfg.segmentLength) ? cfg.segmentLength : (Number.isFinite(behaviorDefaults?.segmentLength) ? behaviorDefaults.segmentLength : preset.segmentLength)),
         damping: Number.isFinite(group.damping) ? group.damping : (Number.isFinite(behaviorDefaults?.damping) ? behaviorDefaults.damping : preset.damping),
         windForce: Number.isFinite(group.windForce) ? group.windForce : (Number.isFinite(behaviorDefaults?.windForce) ? behaviorDefaults.windForce : preset.windForce),
-        springConstant: Number.isFinite(group.springConstant) ? group.springConstant : (Number.isFinite(behaviorDefaults?.springConstant) ? behaviorDefaults.springConstant : preset.springConstant),
+        windGustAmount: Number.isFinite(group.windGustAmount) ? group.windGustAmount : (Number.isFinite(behaviorDefaults?.windGustAmount) ? behaviorDefaults.windGustAmount : preset.windGustAmount),
+        invertWindDirection: typeof group.invertWindDirection === 'boolean' ? group.invertWindDirection : (typeof behaviorDefaults?.invertWindDirection === 'boolean' ? behaviorDefaults.invertWindDirection : !!preset.invertWindDirection),
+        gravityStrength: Number.isFinite(group.gravityStrength) ? group.gravityStrength : (Number.isFinite(behaviorDefaults?.gravityStrength) ? behaviorDefaults.gravityStrength : preset.gravityStrength),
+        slackFactor: Number.isFinite(group.slackFactor) ? group.slackFactor : (Number.isFinite(behaviorDefaults?.slackFactor) ? behaviorDefaults.slackFactor : preset.slackFactor),
+        constraintIterations: Number.isFinite(group.constraintIterations) ? group.constraintIterations : (Number.isFinite(behaviorDefaults?.constraintIterations) ? behaviorDefaults.constraintIterations : preset.constraintIterations),
+        bendStiffness: Number.isFinite(group.bendStiffness) ? group.bendStiffness : (Number.isFinite(behaviorDefaults?.bendStiffness) ? behaviorDefaults.bendStiffness : preset.bendStiffness),
         tapering: Number.isFinite(group.tapering) ? group.tapering : (Number.isFinite(behaviorDefaults?.tapering) ? behaviorDefaults.tapering : preset.tapering),
         width: Number.isFinite(group.width) ? group.width : (Number.isFinite(behaviorDefaults?.width) ? behaviorDefaults.width : preset.width),
         uvRepeatWorld: Number.isFinite(group.uvRepeatWorld) ? group.uvRepeatWorld : (Number.isFinite(behaviorDefaults?.uvRepeatWorld) ? behaviorDefaults.uvRepeatWorld : preset.uvRepeatWorld),
         zOffset: Number.isFinite(group.zOffset) ? group.zOffset : preset.zOffset,
-        ropeEndStiffness: Number.isFinite(group.ropeEndStiffness) ? group.ropeEndStiffness : (Number.isFinite(behaviorDefaults?.ropeEndStiffness) ? behaviorDefaults.ropeEndStiffness : 0.3),
         windowLightBoost: Number.isFinite(group.windowLightBoost) ? group.windowLightBoost : (Number.isFinite(behaviorDefaults?.windowLightBoost) ? behaviorDefaults.windowLightBoost : 0.0),
         endFadeSize: Number.isFinite(group.endFadeSize) ? group.endFadeSize : (Number.isFinite(behaviorDefaults?.endFadeSize) ? behaviorDefaults.endFadeSize : 0.0),
         endFadeStrength: Number.isFinite(group.endFadeStrength) ? group.endFadeStrength : (Number.isFinite(behaviorDefaults?.endFadeStrength) ? behaviorDefaults.endFadeStrength : 0.0)
@@ -863,12 +928,10 @@ export class PhysicsRopeManager {
       if (existing) {
         const sameTexture = existing.config?.texturePath === merged.texturePath;
         const sameSeg = existing.config?.segmentLength === merged.segmentLength;
-
         if (sameTexture && sameSeg) {
           existing.config = merged;
           continue;
         }
-
         existing.dispose();
         this._ropes.delete(id);
       }
@@ -876,10 +939,10 @@ export class PhysicsRopeManager {
       let tex = null;
       try {
         tex = await this._loadTexture(merged.texturePath);
-      } catch (e) {
+      } catch (_) {
         try {
           tex = await this._loadTexture(DEFAULT_TEXTURE_PATH);
-        } catch (e2) {
+        } catch (_) {
           tex = null;
         }
       }

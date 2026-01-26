@@ -287,6 +287,14 @@ export class WaterEffectV2 extends EffectBase {
       foamParticleNoiseSoftness: 0.5,
       foamParticleNoiseAttempts: 4,
 
+      // Secondary noise masking for foam.webp particles (typically smaller scale)
+      foamParticleNoise2Enabled: true,
+      foamParticleNoise2Strength: 0.25,
+      foamParticleNoise2Scale: 55.0,
+      foamParticleNoise2Speed: 0.35,
+      foamParticleNoise2Coverage: 0.75,
+      foamParticleNoise2Softness: 0.06,
+
       // Simple foam.webp spawner (WeatherParticles)
       simpleFoamEnabled: true,
       simpleFoamThreshold: 0.19,
@@ -822,7 +830,14 @@ export class WaterEffectV2 extends EffectBase {
             'foamParticleNoiseSpeed',
             'foamParticleNoiseCoverage',
             'foamParticleNoiseSoftness',
-            'foamParticleNoiseAttempts'
+            'foamParticleNoiseAttempts',
+
+            'foamParticleNoise2Enabled',
+            'foamParticleNoise2Strength',
+            'foamParticleNoise2Scale',
+            'foamParticleNoise2Speed',
+            'foamParticleNoise2Coverage',
+            'foamParticleNoise2Softness'
           ]
         },
         {
@@ -1130,13 +1145,20 @@ export class WaterEffectV2 extends EffectBase {
         foamPlumeRadialOuterOpacity: { type: 'slider', label: 'Plume Radial Outer Opacity', min: 0.0, max: 5.0, step: 0.01, default: 1.0 },
         foamPlumeRadialCurve: { type: 'slider', label: 'Plume Radial Curve', min: 0.1, max: 4.0, step: 0.01, default: 1.0 },
 
-        foamParticleNoiseEnabled: { type: 'boolean', label: 'Noise Mask Enabled', default: true },
-        foamParticleNoiseStrength: { type: 'slider', label: 'Noise Mask Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.05 },
-        foamParticleNoiseScale: { type: 'slider', label: 'Noise Scale', min: 0.1, max: 80.0, step: 0.1, default: 14.3 },
-        foamParticleNoiseSpeed: { type: 'slider', label: 'Noise Speed', min: 0.0, max: 5.0, step: 0.01, default: 0 },
-        foamParticleNoiseCoverage: { type: 'slider', label: 'Noise Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.46 },
-        foamParticleNoiseSoftness: { type: 'slider', label: 'Noise Softness', min: 0.0, max: 0.5, step: 0.005, default: 0.5 },
-        foamParticleNoiseAttempts: { type: 'slider', label: 'Noise Attempts', min: 1, max: 8, step: 1, default: 2 },
+        foamParticleNoiseEnabled: { type: 'boolean', label: 'Cutout Noise (Large) Enabled', default: true },
+        foamParticleNoiseStrength: { type: 'slider', label: 'Cutout Noise (Large) Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.05 },
+        foamParticleNoiseScale: { type: 'slider', label: 'Cutout Noise (Large) Scale', min: 0.1, max: 120.0, step: 0.1, default: 14.3 },
+        foamParticleNoiseSpeed: { type: 'slider', label: 'Cutout Noise (Large) Evolution Speed', min: 0.0, max: 5.0, step: 0.01, default: 0 },
+        foamParticleNoiseCoverage: { type: 'slider', label: 'Cutout Noise (Large) Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.46 },
+        foamParticleNoiseSoftness: { type: 'slider', label: 'Cutout Noise (Large) Softness', min: 0.0, max: 0.5, step: 0.005, default: 0.5 },
+        foamParticleNoiseAttempts: { type: 'slider', label: 'Cutout Noise Spawn Attempts', min: 1, max: 8, step: 1, default: 2 },
+
+        foamParticleNoise2Enabled: { type: 'boolean', label: 'Cutout Noise (Small) Enabled', default: true },
+        foamParticleNoise2Strength: { type: 'slider', label: 'Cutout Noise (Small) Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.25 },
+        foamParticleNoise2Scale: { type: 'slider', label: 'Cutout Noise (Small) Scale', min: 0.1, max: 300.0, step: 0.1, default: 55.0 },
+        foamParticleNoise2Speed: { type: 'slider', label: 'Cutout Noise (Small) Evolution Speed', min: 0.0, max: 10.0, step: 0.01, default: 0.35 },
+        foamParticleNoise2Coverage: { type: 'slider', label: 'Cutout Noise (Small) Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.75 },
+        foamParticleNoise2Softness: { type: 'slider', label: 'Cutout Noise (Small) Softness', min: 0.0, max: 0.5, step: 0.005, default: 0.06 },
 
         simpleFoamEnabled: { type: 'boolean', label: 'Enable Simple Spawner', default: false },
         simpleFoamThreshold: { type: 'slider', label: 'Spawn Threshold', min: 0.01, max: 1.0, step: 0.01, default: 0.5 },

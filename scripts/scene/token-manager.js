@@ -67,7 +67,8 @@ export class TokenManager {
       brightness: 0.0,
       contrast: 1.0,
       saturation: 1.0,
-      gamma: 1.0
+      gamma: 1.0,
+      windowLightIntensity: 1.0
     };
 
     /** @type {((tokenId: string) => void)|null} */
@@ -247,6 +248,14 @@ export class TokenManager {
       if (shader.uniforms.tWindowLight) {
         shader.uniforms.tWindowLight.value = tex || null;
         shader.uniforms.uHasWindowLight.value = tex ? 1.0 : 0.0;
+        if (shader.uniforms.uWindowLightScreenSize?.value?.set) {
+          const w = wle?.lightTarget?.width ?? window.innerWidth ?? 1;
+          const h = wle?.lightTarget?.height ?? window.innerHeight ?? 1;
+          shader.uniforms.uWindowLightScreenSize.value.set(w, h);
+        }
+        if (shader.uniforms.uWindowLightIntensity) {
+          shader.uniforms.uWindowLightIntensity.value = p.windowLightIntensity ?? 1.0;
+        }
       }
     } catch (_) {
     }
@@ -271,6 +280,7 @@ export class TokenManager {
       shader.uniforms.tWindowLight = { value: null };
       shader.uniforms.uHasWindowLight = { value: 0.0 };
       shader.uniforms.uWindowLightScreenSize = { value: new window.THREE.Vector2(1, 1) };
+      shader.uniforms.uWindowLightIntensity = { value: 1.0 };
 
       const uniformBlock = `
 uniform float uTokenCCEnabled;
@@ -284,6 +294,7 @@ uniform float uTokenGamma;
 uniform sampler2D tWindowLight;
 uniform float uHasWindowLight;
 uniform vec2 uWindowLightScreenSize;
+uniform float uWindowLightIntensity;
 
 vec3 ms_applyTokenWhiteBalance(vec3 color, float temp, float tint) {
   vec3 tempShift = vec3(1.0 + temp, 1.0, 1.0 - temp);
@@ -314,7 +325,11 @@ vec3 ms_applyWindowLight(vec3 color) {
   if (uHasWindowLight < 0.5) return color;
   vec2 wuv = gl_FragCoord.xy / max(uWindowLightScreenSize, vec2(1.0));
   vec3 windowLight = texture2D(tWindowLight, clamp(wuv, vec2(0.001), vec2(0.999))).rgb;
-  return color + windowLight;
+  // Treat the window light texture as an illumination term.
+  // Multiplicative lighting reads more like "light" (preserves saturation)
+  // than pure additive, which can look like grey fog on tokens.
+  vec3 illum = max(windowLight, vec3(0.0)) * max(uWindowLightIntensity, 0.0);
+  return color * (vec3(1.0) + illum);
 }
 `;
 
@@ -423,6 +438,8 @@ vec3 ms_applyWindowLight(vec3 color) {
       const wle = window.MapShine?.windowLightEffect;
       const tex = (wle && typeof wle.getLightTexture === 'function') ? wle.getLightTexture() : (wle?.lightTarget?.texture ?? null);
       const hasWindowLight = tex ? 1.0 : 0.0;
+      const w = wle?.lightTarget?.width ?? window.innerWidth ?? 1;
+      const h = wle?.lightTarget?.height ?? window.innerHeight ?? 1;
       
       for (const data of this.tokenSprites.values()) {
         const shader = data?.sprite?.material?.userData?._msTokenCCShader;
@@ -430,6 +447,9 @@ vec3 ms_applyWindowLight(vec3 color) {
           if (shader.uniforms.tWindowLight) {
             shader.uniforms.tWindowLight.value = tex || null;
             shader.uniforms.uHasWindowLight.value = hasWindowLight;
+            if (shader.uniforms.uWindowLightScreenSize?.value?.set) {
+              shader.uniforms.uWindowLightScreenSize.value.set(w, h);
+            }
           }
         }
       }

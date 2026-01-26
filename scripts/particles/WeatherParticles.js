@@ -525,23 +525,74 @@ class ShorelineFoamEmitter {
     return t * t * (3.0 - 2.0 * t);
   }
 
+  _evolvingNoise01(u, v, scale, speed, seed) {
+    // "Evolving" noise: smoothly morph between two unrelated noise fields over time.
+    // This avoids obvious panning/translation while still animating the pattern.
+    const s = Number.isFinite(speed) ? speed : 0.0;
+    const sc = Number.isFinite(scale) ? Math.max(1e-6, scale) : 1.0;
+    const t = this._time;
+
+    // Speed of 0 -> static field.
+    if (Math.abs(s) <= 1e-6) {
+      const ox = this._hash12(seed * 11 + 1, seed * 17 + 2) * 1024.0;
+      const oy = this._hash12(seed * 13 + 3, seed * 19 + 4) * 1024.0;
+      return this._valueNoise(u * sc + ox, v * sc + oy);
+    }
+
+    const phase = t * s;
+    const i = Math.floor(phase);
+    const f = phase - i;
+    const w = f * f * (3.0 - 2.0 * f);
+
+    const ox1 = this._hash12(i + seed * 11 + 1, seed * 17 + 2) * 1024.0;
+    const oy1 = this._hash12(i + seed * 13 + 3, seed * 19 + 4) * 1024.0;
+    const ox2 = this._hash12(i + 1 + seed * 11 + 1, seed * 17 + 2) * 1024.0;
+    const oy2 = this._hash12(i + 1 + seed * 13 + 3, seed * 19 + 4) * 1024.0;
+
+    const n1 = this._valueNoise(u * sc + ox1, v * sc + oy1);
+    const n2 = this._valueNoise(u * sc + ox2, v * sc + oy2);
+    return n1 + (n2 - n1) * w;
+  }
+
   _noiseGate(u, v) {
     const p = this._foamParams;
     if (!p || p.foamParticleNoiseEnabled !== true) return 1.0;
 
-    const strength = Number.isFinite(p.foamParticleNoiseStrength) ? Math.max(0.0, Math.min(1.0, p.foamParticleNoiseStrength)) : 1.0;
-    if (strength <= 1e-6) return 1.0;
+    const strength1 = Number.isFinite(p.foamParticleNoiseStrength) ? Math.max(0.0, Math.min(1.0, p.foamParticleNoiseStrength)) : 1.0;
+    const enabled2 = p.foamParticleNoise2Enabled === true;
+    const strength2 = enabled2
+      ? (Number.isFinite(p.foamParticleNoise2Strength) ? Math.max(0.0, Math.min(1.0, p.foamParticleNoise2Strength)) : 1.0)
+      : 0.0;
+    if (strength1 <= 1e-6 && strength2 <= 1e-6) return 1.0;
 
-    const scale = Number.isFinite(p.foamParticleNoiseScale) ? Math.max(0.01, p.foamParticleNoiseScale) : 6.0;
-    const speed = Number.isFinite(p.foamParticleNoiseSpeed) ? p.foamParticleNoiseSpeed : 0.35;
-    const coverage = Number.isFinite(p.foamParticleNoiseCoverage) ? Math.max(0.0, Math.min(1.0, p.foamParticleNoiseCoverage)) : 0.55;
-    const softness = Number.isFinite(p.foamParticleNoiseSoftness) ? Math.max(0.0, Math.min(0.5, p.foamParticleNoiseSoftness)) : 0.08;
+    // Noise #1 (typically "large" cutout)
+    const scale1 = Number.isFinite(p.foamParticleNoiseScale) ? Math.max(0.01, p.foamParticleNoiseScale) : 6.0;
+    const speed1 = Number.isFinite(p.foamParticleNoiseSpeed) ? p.foamParticleNoiseSpeed : 0.35;
+    const coverage1 = Number.isFinite(p.foamParticleNoiseCoverage) ? Math.max(0.0, Math.min(1.0, p.foamParticleNoiseCoverage)) : 0.55;
+    const soft1 = Number.isFinite(p.foamParticleNoiseSoftness) ? Math.max(0.0, Math.min(0.5, p.foamParticleNoiseSoftness)) : 0.08;
 
-    const t = this._time;
-    const n = this._valueNoise(u * scale + t * speed, v * scale + t * speed * 0.73);
-    const threshold = 1.0 - coverage;
-    const mask = this._smoothstep(threshold - softness, threshold + softness, n);
-    return (1.0 - strength) + strength * mask;
+    const n1 = this._evolvingNoise01(u, v, scale1, speed1, 101);
+    const th1 = 1.0 - coverage1;
+    const m1 = this._smoothstep(th1 - soft1, th1 + soft1, n1);
+
+    // Noise #2 (typically "small" cutout)
+    let m2 = 1.0;
+    if (strength2 > 1e-6) {
+      const scale2 = Number.isFinite(p.foamParticleNoise2Scale) ? Math.max(0.01, p.foamParticleNoise2Scale) : 35.0;
+      const speed2 = Number.isFinite(p.foamParticleNoise2Speed) ? p.foamParticleNoise2Speed : 0.35;
+      const coverage2 = Number.isFinite(p.foamParticleNoise2Coverage) ? Math.max(0.0, Math.min(1.0, p.foamParticleNoise2Coverage)) : 0.55;
+      const soft2 = Number.isFinite(p.foamParticleNoise2Softness) ? Math.max(0.0, Math.min(0.5, p.foamParticleNoise2Softness)) : 0.08;
+
+      const n2 = this._evolvingNoise01(u, v, scale2, speed2, 203);
+      const th2 = 1.0 - coverage2;
+      m2 = this._smoothstep(th2 - soft2, th2 + soft2, n2);
+    }
+
+    // Each noise has an independent "strength" (blend toward passthrough), then we
+    // intersect them so both can carve out regions.
+    const g1 = (1.0 - strength1) + strength1 * m1;
+    const g2 = (1.0 - strength2) + strength2 * m2;
+    return Math.max(0.0, Math.min(1.0, g1 * g2));
   }
 
   setPoints(points) {
@@ -666,23 +717,67 @@ class WaterMaskedSplashEmitter {
     return t * t * (3.0 - 2.0 * t);
   }
 
+  _evolvingNoise01(u, v, scale, speed, seed) {
+    const s = Number.isFinite(speed) ? speed : 0.0;
+    const sc = Number.isFinite(scale) ? Math.max(1e-6, scale) : 1.0;
+    const t = this._time;
+
+    if (Math.abs(s) <= 1e-6) {
+      const ox = this._hash12(seed * 11 + 1, seed * 17 + 2) * 1024.0;
+      const oy = this._hash12(seed * 13 + 3, seed * 19 + 4) * 1024.0;
+      return this._valueNoise(u * sc + ox, v * sc + oy);
+    }
+
+    const phase = t * s;
+    const i = Math.floor(phase);
+    const f = phase - i;
+    const w = f * f * (3.0 - 2.0 * f);
+
+    const ox1 = this._hash12(i + seed * 11 + 1, seed * 17 + 2) * 1024.0;
+    const oy1 = this._hash12(i + seed * 13 + 3, seed * 19 + 4) * 1024.0;
+    const ox2 = this._hash12(i + 1 + seed * 11 + 1, seed * 17 + 2) * 1024.0;
+    const oy2 = this._hash12(i + 1 + seed * 13 + 3, seed * 19 + 4) * 1024.0;
+
+    const n1 = this._valueNoise(u * sc + ox1, v * sc + oy1);
+    const n2 = this._valueNoise(u * sc + ox2, v * sc + oy2);
+    return n1 + (n2 - n1) * w;
+  }
+
   _noiseGate(u, v) {
     const p = this._foamParams;
     if (!p || p.foamParticleNoiseEnabled !== true) return 1.0;
 
-    const strength = Number.isFinite(p.foamParticleNoiseStrength) ? Math.max(0.0, Math.min(1.0, p.foamParticleNoiseStrength)) : 1.0;
-    if (strength <= 1e-6) return 1.0;
+    const strength1 = Number.isFinite(p.foamParticleNoiseStrength) ? Math.max(0.0, Math.min(1.0, p.foamParticleNoiseStrength)) : 1.0;
+    const enabled2 = p.foamParticleNoise2Enabled === true;
+    const strength2 = enabled2
+      ? (Number.isFinite(p.foamParticleNoise2Strength) ? Math.max(0.0, Math.min(1.0, p.foamParticleNoise2Strength)) : 1.0)
+      : 0.0;
+    if (strength1 <= 1e-6 && strength2 <= 1e-6) return 1.0;
 
-    const scale = Number.isFinite(p.foamParticleNoiseScale) ? Math.max(0.01, p.foamParticleNoiseScale) : 6.0;
-    const speed = Number.isFinite(p.foamParticleNoiseSpeed) ? p.foamParticleNoiseSpeed : 0.35;
-    const coverage = Number.isFinite(p.foamParticleNoiseCoverage) ? Math.max(0.0, Math.min(1.0, p.foamParticleNoiseCoverage)) : 0.55;
-    const softness = Number.isFinite(p.foamParticleNoiseSoftness) ? Math.max(0.0, Math.min(0.5, p.foamParticleNoiseSoftness)) : 0.08;
+    const scale1 = Number.isFinite(p.foamParticleNoiseScale) ? Math.max(0.01, p.foamParticleNoiseScale) : 6.0;
+    const speed1 = Number.isFinite(p.foamParticleNoiseSpeed) ? p.foamParticleNoiseSpeed : 0.35;
+    const coverage1 = Number.isFinite(p.foamParticleNoiseCoverage) ? Math.max(0.0, Math.min(1.0, p.foamParticleNoiseCoverage)) : 0.55;
+    const soft1 = Number.isFinite(p.foamParticleNoiseSoftness) ? Math.max(0.0, Math.min(0.5, p.foamParticleNoiseSoftness)) : 0.08;
 
-    const t = this._time;
-    const n = this._valueNoise(u * scale + t * speed, v * scale + t * speed * 0.73);
-    const threshold = 1.0 - coverage;
-    const mask = this._smoothstep(threshold - softness, threshold + softness, n);
-    return (1.0 - strength) + strength * mask;
+    const n1 = this._evolvingNoise01(u, v, scale1, speed1, 101);
+    const th1 = 1.0 - coverage1;
+    const m1 = this._smoothstep(th1 - soft1, th1 + soft1, n1);
+
+    let m2 = 1.0;
+    if (strength2 > 1e-6) {
+      const scale2 = Number.isFinite(p.foamParticleNoise2Scale) ? Math.max(0.01, p.foamParticleNoise2Scale) : 35.0;
+      const speed2 = Number.isFinite(p.foamParticleNoise2Speed) ? p.foamParticleNoise2Speed : 0.35;
+      const coverage2 = Number.isFinite(p.foamParticleNoise2Coverage) ? Math.max(0.0, Math.min(1.0, p.foamParticleNoise2Coverage)) : 0.55;
+      const soft2 = Number.isFinite(p.foamParticleNoise2Softness) ? Math.max(0.0, Math.min(0.5, p.foamParticleNoise2Softness)) : 0.08;
+
+      const n2 = this._evolvingNoise01(u, v, scale2, speed2, 203);
+      const th2 = 1.0 - coverage2;
+      m2 = this._smoothstep(th2 - soft2, th2 + soft2, n2);
+    }
+
+    const g1 = (1.0 - strength1) + strength1 * m1;
+    const g2 = (1.0 - strength2) + strength2 * m2;
+    return Math.max(0.0, Math.min(1.0, g1 * g2));
   }
 
   setPoints(points) {

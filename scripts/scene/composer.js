@@ -57,6 +57,11 @@ export class SceneComposer {
     this._backFaceMesh = null;
     /** @type {Set<THREE.Texture>} */
     this._ownedTextures = new Set();
+
+    // Cache the last successful basePath used for suffix-mask discovery so that
+    // scene rebuilds (including grid type changes) do not depend on transient
+    // canvas/tile readiness.
+    this._lastMaskBasePath = null;
   }
 
   _markOwnedTexture(texture) {
@@ -92,12 +97,102 @@ export class SceneComposer {
     return [];
   }
 
-  _getLargeSceneMaskTiles() {
+  _iterTileDocs(foundryScene = null) {
     try {
-      const tiles = canvas?.scene?.tiles;
-      const d = canvas?.dimensions;
-      const sr = d?.sceneRect;
-      if (!tiles || !sr) return [];
+      let tiles = canvas?.scene?.tiles ?? null;
+      if (!tiles || (typeof tiles.size === 'number' && tiles.size === 0)) {
+        tiles = foundryScene?.tiles ?? null;
+      }
+      if (!tiles) return [];
+
+      if (Array.isArray(tiles)) return tiles;
+      if (Array.isArray(tiles?.contents)) return tiles.contents;
+      if (typeof tiles?.values === 'function') return Array.from(tiles.values());
+      return [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  async _probeBestMaskBasePath(foundryScene = null) {
+    // Robust mask-source resolution:
+    // When the scene has no background and tile heuristics fail (common during
+    // grid/dimension rebuilds), probe candidate basePaths and pick the one that
+    // actually contains the expected suffix masks.
+    try {
+      const tiles = this._iterTileDocs(foundryScene);
+      if (!tiles.length) return null;
+
+      const candidates = new Set();
+      for (const tileDoc of tiles) {
+        if (tileDoc?.hidden) continue;
+        const src = tileDoc?.texture?.src;
+        if (typeof src !== 'string' || src.trim().length === 0) continue;
+        const basePath = this.extractBasePath(src.trim());
+        if (basePath) candidates.add(basePath);
+      }
+
+      if (!candidates.size) return null;
+
+      const keyMasks = ['specular', 'water', 'outdoors'];
+
+      let bestPath = null;
+      let bestScore = -Infinity;
+
+      for (const basePath of candidates) {
+        const masks = await this._loadMasksOnlyForBasePath(basePath, { suppressProbeErrors: true });
+        if (!Array.isArray(masks) || masks.length === 0) continue;
+
+        const ids = new Set(masks.map((m) => String(m?.id ?? m?.type ?? '').toLowerCase()).filter(Boolean));
+
+        // Score:
+        // - Prefer more masks overall.
+        // - Strongly prefer presence of the key masks that gate many effects.
+        let score = masks.length;
+        for (const k of keyMasks) {
+          if (ids.has(k)) score += 10;
+        }
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestPath = basePath;
+        }
+
+        // If we found a basePath with all key masks, stop early.
+        if (keyMasks.every((k) => ids.has(k))) {
+          bestPath = basePath;
+          break;
+        }
+      }
+
+      return bestPath;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  _getLargeSceneMaskTiles(foundryScene = null) {
+    try {
+      // Prefer canvas data when available, but fall back to the provided Foundry scene.
+      // During some grid transitions (notably hex), canvas state can be temporarily
+      // inconsistent while Foundry is rebuilding dimensions.
+      let tiles = canvas?.scene?.tiles ?? null;
+      if (!tiles || (typeof tiles.size === 'number' && tiles.size === 0)) {
+        tiles = foundryScene?.tiles ?? null;
+      }
+      const d = canvas?.dimensions ?? foundryScene?.dimensions;
+
+      if (!tiles || !d) return [];
+
+      // Prefer explicit sceneRect, otherwise derive from dimension fields.
+      const sr = d.sceneRect ?? {
+        x: Number.isFinite(d.sceneX) ? d.sceneX : 0,
+        y: Number.isFinite(d.sceneY) ? d.sceneY : 0,
+        width: d.sceneWidth ?? d.width ?? 0,
+        height: d.sceneHeight ?? d.height ?? 0
+      };
+
+      if (!sr || !Number.isFinite(sr.width) || !Number.isFinite(sr.height)) return [];
 
       const sceneX = sr.x ?? 0;
       const sceneY = sr.y ?? 0;
@@ -111,7 +206,11 @@ export class SceneComposer {
       const minArea = sceneW * sceneH * 0.2;
       const out = [];
 
-      for (const tileDoc of tiles) {
+      // tiles may be an Array, a Foundry Collection (with .contents), or something iterable.
+      const tileIter = Array.isArray(tiles)
+        ? tiles
+        : (Array.isArray(tiles?.contents) ? tiles.contents : (tiles?.values?.() ?? tiles));
+      for (const tileDoc of tileIter) {
         const src = tileDoc?.texture?.src;
         if (typeof src !== 'string' || src.trim().length === 0) continue;
 
@@ -138,14 +237,20 @@ export class SceneComposer {
       out.sort((a, b) => (a.rect.x - b.rect.x));
       return out;
     } catch (e) {
-      return [];
     }
+    return [];
   }
 
-  _computeSceneMaskCompositeLayout(tiles) {
+  _computeSceneMaskCompositeLayout(tiles, foundryScene = null) {
     try {
-      const d = canvas?.dimensions;
-      const sr = d?.sceneRect;
+      const d = canvas?.dimensions ?? foundryScene?.dimensions;
+      const sr = d?.sceneRect ?? {
+        x: Number.isFinite(d.sceneX) ? d.sceneX : 0,
+        y: Number.isFinite(d.sceneY) ? d.sceneY : 0,
+        width: d.sceneWidth ?? d.width ?? 0,
+        height: d.sceneHeight ?? d.height ?? 0
+      };
+
       if (!sr) return null;
 
       const sceneX = sr.x ?? 0;
@@ -526,8 +631,13 @@ export class SceneComposer {
 
     // Auto-detect: choose a likely full-scene "base" tile (common for multi-layer maps)
     try {
-      const d = canvas?.dimensions;
-      const sr = d?.sceneRect;
+      const d = canvas?.dimensions ?? foundryScene?.dimensions;
+      const sr = d?.sceneRect ?? (d ? {
+        x: Number.isFinite(d.sceneX) ? d.sceneX : 0,
+        y: Number.isFinite(d.sceneY) ? d.sceneY : 0,
+        width: d.sceneWidth ?? d.width ?? 0,
+        height: d.sceneHeight ?? d.height ?? 0
+      } : null);
       if (!sr) return null;
 
       const sceneX = sr.x ?? 0;
@@ -543,8 +653,39 @@ export class SceneComposer {
       // If we allow any tile to be chosen here, small props (boats, decals) can
       // accidentally become the suffix-mask discovery source, causing their _Water
       // mask to be treated as a scene-wide water mask and stretched across the map.
-      const candidates = this._getLargeSceneMaskTiles?.() || [];
-      if (!Array.isArray(candidates) || candidates.length === 0) return null;
+      const candidates = this._getLargeSceneMaskTiles?.(foundryScene) || [];
+      if (!Array.isArray(candidates) || candidates.length === 0) {
+        // Fallback: choose the largest visible tile in the scene.
+        // Some scenes (especially with non-square grid geometry) may temporarily
+        // fail our “sceneRect-aligned” heuristic due to fractional offsets.
+        let tiles = canvas?.scene?.tiles ?? foundryScene?.tiles ?? null;
+        if (tiles && typeof tiles.size === 'number' && tiles.size === 0) tiles = foundryScene?.tiles ?? null;
+
+        const iter = Array.isArray(tiles)
+          ? tiles
+          : (Array.isArray(tiles?.contents) ? tiles.contents : (tiles?.values?.() ?? null));
+
+        if (iter) {
+          let best = null;
+          let bestArea = -Infinity;
+          for (const tileDoc of iter) {
+            const src = tileDoc?.texture?.src;
+            if (typeof src !== 'string' || src.trim().length === 0) continue;
+            if (tileDoc?.hidden) continue;
+
+            const w = Number.isFinite(tileDoc?.width) ? tileDoc.width : 0;
+            const h = Number.isFinite(tileDoc?.height) ? tileDoc.height : 0;
+            const area = Math.max(0, w * h);
+            if (area > bestArea) {
+              bestArea = area;
+              best = src.trim();
+            }
+          }
+          if (best) return best;
+        }
+
+        return null;
+      }
 
       let bestSrc = null;
       let bestScore = -Infinity;
@@ -631,12 +772,25 @@ export class SceneComposer {
       throw new Error('Scene has no dimensions data');
     }
 
-    // Store Foundry scene data with safe defaults
+    // Store Foundry scene data with safe defaults.
+    // Foundry v13 uses background.offsetX/offsetY (not shiftX/shiftY) as the primary
+    // mechanism to align the map image to the grid. These offsets are already reflected
+    // in `foundryScene.dimensions.sceneX/sceneY`.
     this.foundrySceneData = {
+      // Full canvas dimensions (includes padding)
       width: foundryScene.dimensions.width || 1000,
       height: foundryScene.dimensions.height || 1000,
+
+      // Scene rectangle (actual map bounds within the padded canvas)
+      sceneX: Number.isFinite(foundryScene.dimensions.sceneX) ? foundryScene.dimensions.sceneX : 0,
+      sceneY: Number.isFinite(foundryScene.dimensions.sceneY) ? foundryScene.dimensions.sceneY : 0,
       sceneWidth: foundryScene.dimensions.sceneWidth || foundryScene.dimensions.width || 1000,
       sceneHeight: foundryScene.dimensions.sceneHeight || foundryScene.dimensions.height || 1000,
+
+      // Useful for debugging/diagnostics
+      backgroundOffsetX: Number.isFinite(foundryScene.background?.offsetX) ? foundryScene.background.offsetX : 0,
+      backgroundOffsetY: Number.isFinite(foundryScene.background?.offsetY) ? foundryScene.background.offsetY : 0,
+
       gridSize: foundryScene.grid?.size || 100,
       gridType: foundryScene.grid?.type || 1,
       padding: foundryScene.padding || 0,
@@ -663,6 +817,14 @@ export class SceneComposer {
       bgPath = this.extractBasePath(maskSourceSrc);
       log.info(`Mask source: ${maskSourceSrc}`);
       log.info(`Loading effect masks for: ${bgPath}`);
+    }
+
+    // If mask source resolution failed (or a previous run discovered a good basePath),
+    // use a cached/probed basePath. This is critical for robustness during grid
+    // type changes where canvas/tile readiness can be transient.
+    if (!bgPath && this._lastMaskBasePath) {
+      bgPath = this._lastMaskBasePath;
+      log.info(`Using cached mask basePath: ${bgPath}`);
     }
 
     if (hasBackgroundImage) {
@@ -725,6 +887,34 @@ export class SceneComposer {
       }
     }
 
+    // Robust fallback: if bgPath is missing OR the loaded bundle contains zero masks,
+    // probe tile basePaths to locate the basePath that actually has suffix masks.
+    // This makes mask loading independent of grid type and resilient to transient
+    // canvas/tile readiness during grid/dimension rebuilds.
+    if (!bgPath || !(result?.bundle?.masks?.length > 0)) {
+      const maxAttempts = 6;
+      const retryDelayMs = 50;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          const probed = await this._probeBestMaskBasePath(foundryScene);
+          if (probed) {
+            bgPath = probed;
+            log.info(`Probed mask basePath: ${bgPath}`);
+            result = await assetLoader.loadAssetBundle(bgPath, null, { skipBaseTexture: true, suppressProbeErrors: true });
+          }
+        } catch (e) {
+          // Ignore and retry
+        }
+
+        if (result?.bundle?.masks?.length > 0) break;
+        await new Promise((r) => setTimeout(r, retryDelayMs));
+      }
+    }
+
+    if (bgPath && (result?.bundle?.masks?.length > 0)) {
+      this._lastMaskBasePath = bgPath;
+    }
+
     this._maskCompositeInfo = null;
     this._albedoCompositeInfo = null;
     let compositeLayout = null;
@@ -735,8 +925,8 @@ export class SceneComposer {
         } catch (e) {
         }
       }
-      const tileCandidates = this._getLargeSceneMaskTiles();
-      const layout = this._computeSceneMaskCompositeLayout(tileCandidates);
+      const tileCandidates = this._getLargeSceneMaskTiles(foundryScene);
+      const layout = this._computeSceneMaskCompositeLayout(tileCandidates, foundryScene);
       compositeLayout = layout;
       if (doLoadProfile) {
         try {
@@ -1125,10 +1315,18 @@ export class SceneComposer {
     this.basePlaneMesh.add(backMesh);
     this._backFaceMesh = backMesh;
     
-    // Position at world center at the canonical ground Z
-    // This value (1000) is the canonical groundZ that all other layers reference
-    // With camera at Z=2000, this gives distanceToGround=1000 for clean 1:1 pixel mapping
-    this.basePlaneMesh.position.set(worldWidth / 2, worldHeight / 2, GROUND_Z);
+    // Position the map plane at the center of the scene rectangle.
+    // Scene rectangle coordinates are in Foundry canvas space (top-left origin, Y-down).
+    // Our Three world uses Y-up, so we invert using the full canvas height.
+    const sceneX = this.foundrySceneData.sceneX ?? 0;
+    const sceneY = this.foundrySceneData.sceneY ?? 0;
+    const sceneCenterX = sceneX + (sceneWidth / 2);
+    const sceneCenterYFoundry = sceneY + (sceneHeight / 2);
+    const sceneCenterYWorld = worldHeight - sceneCenterYFoundry;
+
+    // This value (1000) is the canonical groundZ that all other layers reference.
+    // With camera at Z=2000, this gives distanceToGround=1000 for clean 1:1 pixel mapping.
+    this.basePlaneMesh.position.set(sceneCenterX, sceneCenterYWorld, GROUND_Z);
     
     // CRITICAL: Foundry uses Y-down coordinates (0 at top, H at bottom). 
     // Three.js uses Y-up (0 at bottom, H at top).
@@ -1141,7 +1339,7 @@ export class SceneComposer {
     this.basePlaneMesh.scale.y = -1; 
     
     this.scene.add(this.basePlaneMesh);
-    log.info(`Base plane added: size ${worldWidth}x${worldHeight}, pos (${worldWidth/2}, ${worldHeight/2}, 0)`);
+    log.info(`Base plane added: canvas ${worldWidth}x${worldHeight}, sceneRect (${sceneX}, ${sceneY}, ${sceneWidth}, ${sceneHeight})`);
   }
 
   /**
@@ -1168,9 +1366,15 @@ export class SceneComposer {
     const worldWidth = this.foundrySceneData.width;
     const worldHeight = this.foundrySceneData.height;
 
-    // Center of the world (where camera looks)
-    const centerX = worldWidth / 2;
-    const centerY = worldHeight / 2;
+    // Center the camera on the *scene rectangle* (actual map bounds), not the padded canvas.
+    // This matches BasePlane/Grid placement and Foundry's default view behavior.
+    const sceneX = this.foundrySceneData.sceneX ?? 0;
+    const sceneY = this.foundrySceneData.sceneY ?? 0;
+    const sceneW = this.foundrySceneData.sceneWidth ?? worldWidth;
+    const sceneH = this.foundrySceneData.sceneHeight ?? worldHeight;
+    const centerX = sceneX + (sceneW / 2);
+    const centerYFoundry = sceneY + (sceneH / 2);
+    const centerY = worldHeight - centerYFoundry;
 
     // FIXED CAMERA HEIGHT - never changes during zoom
     // This is the key to stability: ground plane is always at a predictable

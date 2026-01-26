@@ -365,9 +365,12 @@ globalValidator.registerSanityChecker('specular', (params, schema) => {
   // Delegate to existing logic by reusing getSpecularEffectiveState where appropriate
   const state = getSpecularEffectiveState(params);
   return {
-    valid: state.effective,
+    // Specular masks are optional per-map. When a map lacks the _Specular texture,
+    // the effect becomes ineffective, but that's not an invalid configuration.
+    // Treat this as a warning (status indicator) rather than a hard error.
+    valid: true,
     warnings: state.effective ? [] : state.reasons,
-    errors: state.effective ? [] : state.reasons,
+    errors: [],
     fixes: null
   };
 });

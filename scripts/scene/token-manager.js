@@ -58,6 +58,18 @@ export class TokenManager {
     this._lastTintKey = null;
     this._tintDirty = true;
 
+    this._tokenCCDirty = true;
+    this.tokenColorCorrection = {
+      enabled: true,
+      exposure: 1.0,
+      temperature: 0.0,
+      tint: 0.0,
+      brightness: 0.0,
+      contrast: 1.0,
+      saturation: 1.0,
+      gamma: 1.0
+    };
+
     /** @type {((tokenId: string) => void)|null} */
     this._onTokenMovementStart = null;
 
@@ -65,6 +77,147 @@ export class TokenManager {
     this._hookIds = [];
     
     log.debug('TokenManager created');
+  }
+
+  setColorCorrectionParams(params) {
+    if (!params || typeof params !== 'object') return;
+    Object.assign(this.tokenColorCorrection, params);
+    this._tokenCCDirty = true;
+    this.applyColorCorrectionToAllTokens();
+  }
+
+  applyColorCorrectionToAllTokens() {
+    for (const data of this.tokenSprites.values()) {
+      const mat = data?.sprite?.material;
+      if (mat) {
+        this._ensureTokenColorCorrection(mat);
+        this._applyTokenColorCorrectionUniforms(mat);
+      }
+    }
+    this._tokenCCDirty = false;
+  }
+
+  _applyTokenColorCorrectionUniforms(material) {
+    const shader = material?.userData?._msTokenCCShader;
+    if (!shader?.uniforms) return;
+
+    const p = this.tokenColorCorrection;
+    shader.uniforms.uTokenCCEnabled.value = p.enabled ? 1.0 : 0.0;
+    shader.uniforms.uTokenExposure.value = p.exposure ?? 1.0;
+    shader.uniforms.uTokenTemperature.value = p.temperature ?? 0.0;
+    shader.uniforms.uTokenTint.value = p.tint ?? 0.0;
+    shader.uniforms.uTokenBrightness.value = p.brightness ?? 0.0;
+    shader.uniforms.uTokenContrast.value = p.contrast ?? 1.0;
+    shader.uniforms.uTokenSaturation.value = p.saturation ?? 1.0;
+    shader.uniforms.uTokenGamma.value = p.gamma ?? 1.0;
+  }
+
+  _ensureTokenColorCorrection(material) {
+    if (!material || material.userData?._msTokenCCInstalled) return;
+
+    material.userData._msTokenCCInstalled = true;
+    material.onBeforeCompile = (shader) => {
+      // Store shader reference so we can update uniforms live without recompiling.
+      material.userData._msTokenCCShader = shader;
+
+      shader.uniforms.uTokenCCEnabled = { value: 1.0 };
+      shader.uniforms.uTokenExposure = { value: 1.0 };
+      shader.uniforms.uTokenTemperature = { value: 0.0 };
+      shader.uniforms.uTokenTint = { value: 0.0 };
+      shader.uniforms.uTokenBrightness = { value: 0.0 };
+      shader.uniforms.uTokenContrast = { value: 1.0 };
+      shader.uniforms.uTokenSaturation = { value: 1.0 };
+      shader.uniforms.uTokenGamma = { value: 1.0 };
+
+      const uniformBlock = `
+uniform float uTokenCCEnabled;
+uniform float uTokenExposure;
+uniform float uTokenTemperature;
+uniform float uTokenTint;
+uniform float uTokenBrightness;
+uniform float uTokenContrast;
+uniform float uTokenSaturation;
+uniform float uTokenGamma;
+
+vec3 ms_applyTokenWhiteBalance(vec3 color, float temp, float tint) {
+  vec3 tempShift = vec3(1.0 + temp, 1.0, 1.0 - temp);
+  if (temp < 0.0) tempShift = vec3(1.0, 1.0, 1.0 - temp * 0.5);
+  else tempShift = vec3(1.0 + temp * 0.5, 1.0, 1.0);
+
+  vec3 tintShift = vec3(1.0, 1.0 + tint, 1.0);
+  return color * tempShift * tintShift;
+}
+
+vec3 ms_applyTokenColorCorrection(vec3 color) {
+  if (uTokenCCEnabled < 0.5) return color;
+
+  color *= uTokenExposure;
+  color = ms_applyTokenWhiteBalance(color, uTokenTemperature, uTokenTint);
+  color += uTokenBrightness;
+  color = (color - 0.5) * uTokenContrast + 0.5;
+
+  float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+  color = mix(vec3(luma), color, uTokenSaturation);
+
+  color = max(color, vec3(0.0));
+  color = pow(color, vec3(1.0 / max(uTokenGamma, 0.0001)));
+  return color;
+}
+`;
+
+      // Inject uniforms + helper functions.
+      shader.fragmentShader = shader.fragmentShader.replace(
+        'void main() {',
+        `${uniformBlock}\nvoid main() {`
+      );
+
+      // SpriteMaterial's fragment shader does not consistently include <output_fragment>
+      // across Three versions. Apply CC using a robust set of fallbacks.
+      let patched = false;
+
+      if (shader.fragmentShader.includes('#include <output_fragment>')) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <output_fragment>',
+          `#include <output_fragment>\n  gl_FragColor.rgb = ms_applyTokenColorCorrection(gl_FragColor.rgb);`
+        );
+        patched = true;
+      }
+
+      // Common SpriteMaterial pattern (Three r150+):
+      // gl_FragColor = vec4( outgoingLight, diffuseColor.a );
+      if (!patched && shader.fragmentShader.includes('gl_FragColor = vec4( outgoingLight, diffuseColor.a );')) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          'gl_FragColor = vec4( outgoingLight, diffuseColor.a );',
+          'gl_FragColor = vec4( ms_applyTokenColorCorrection(outgoingLight), diffuseColor.a );'
+        );
+        patched = true;
+      }
+
+      // Another common pattern:
+      // gl_FragColor = vec4( outgoingLight, diffuseColor.a );\n#include <tonemapping_fragment>...
+      if (!patched && shader.fragmentShader.includes('gl_FragColor = vec4( outgoingLight, diffuseColor.a );')) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          'gl_FragColor = vec4( outgoingLight, diffuseColor.a );',
+          'gl_FragColor = vec4( ms_applyTokenColorCorrection(outgoingLight), diffuseColor.a );'
+        );
+        patched = true;
+      }
+
+      // Final fallback: if we failed to identify the assignment site, at least patch
+      // gl_FragColor after it has been written by appending right before the end.
+      // This is intentionally conservative and should never break compilation.
+      if (!patched) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          /}\s*$/,
+          `  gl_FragColor.rgb = ms_applyTokenColorCorrection(gl_FragColor.rgb);\n}`
+        );
+      }
+
+      // Push current UI values into uniforms.
+      this._applyTokenColorCorrectionUniforms(material);
+    };
+
+    material.needsUpdate = true;
   }
 
   /**
@@ -247,6 +400,10 @@ export class TokenManager {
           sprite.material.color.copy(globalTint);
         }
       }
+
+      if (this._tokenCCDirty) {
+        this.applyColorCorrectionToAllTokens();
+      }
     }
   }
 
@@ -345,6 +502,8 @@ export class TokenManager {
       sizeAttenuation: true, // Enable perspective scaling - tokens should scale with the world
       side: THREE.DoubleSide // CRITICAL: Prevent culling when projection matrix is flipped
     });
+
+    this._ensureTokenColorCorrection(material);
 
     const sprite = new THREE.Sprite(material);
     sprite.name = `Token_${tokenDoc.id}`;
@@ -560,19 +719,26 @@ export class TokenManager {
    */
   updateSpriteTransform(sprite, tokenDoc, animate = false) {
     // Get grid size for proper scaling
-    const gridSize = canvas.grid?.size || 100;
+    const grid = canvas?.grid;
+    const gridSizeX = (grid && typeof grid.sizeX === 'number' && grid.sizeX > 0)
+      ? grid.sizeX
+      : ((grid && typeof grid.size === 'number' && grid.size > 0) ? grid.size : 100);
+    const gridSizeY = (grid && typeof grid.sizeY === 'number' && grid.sizeY > 0)
+      ? grid.sizeY
+      : ((grid && typeof grid.size === 'number' && grid.size > 0) ? grid.size : 100);
+    const gridSize = Math.max(gridSizeX, gridSizeY);
     
     // Get texture scale factors (default to 1)
     const scaleX = tokenDoc.texture?.scaleX ?? 1;
     const scaleY = tokenDoc.texture?.scaleY ?? 1;
     
     // Token width/height are in grid units, convert to pixels AND apply texture scale
-    const widthPx = tokenDoc.width * gridSize * scaleX;
-    const heightPx = tokenDoc.height * gridSize * scaleY;
+    const widthPx = tokenDoc.width * gridSizeX * scaleX;
+    const heightPx = tokenDoc.height * gridSizeY * scaleY;
     
     // Convert Foundry position (top-left origin) to THREE.js (center origin)
-    const rectWidth = tokenDoc.width * gridSize;
-    const rectHeight = tokenDoc.height * gridSize;
+    const rectWidth = tokenDoc.width * gridSizeX;
+    const rectHeight = tokenDoc.height * gridSizeY;
     const centerX = tokenDoc.x + rectWidth / 2;
     
     // Invert Y for Standard Coordinate System

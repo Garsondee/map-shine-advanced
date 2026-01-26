@@ -5736,7 +5736,15 @@ export class InteractionManager {
 
             // Convert Pixel Radius to Distance Units
             // dim = radius * (distance / size)
-            const conversion = canvas.dimensions.distance / canvas.dimensions.size;
+            const d = canvas?.dimensions;
+            const grid = canvas?.grid;
+            const gridSizeX = (grid && typeof grid.sizeX === 'number' && grid.sizeX > 0) ? grid.sizeX : null;
+            const gridSizeY = (grid && typeof grid.sizeY === 'number' && grid.sizeY > 0) ? grid.sizeY : null;
+            const pxPerGrid = (gridSizeX && gridSizeY)
+              ? (0.5 * (gridSizeX + gridSizeY))
+              : (d?.size ?? 100);
+            const distPerGrid = (d && typeof d.distance === 'number' && d.distance > 0) ? d.distance : 1;
+            const conversion = distPerGrid / pxPerGrid;
             dim = radiusPixels * conversion;
             bright = dim / 2;
 
@@ -5802,7 +5810,15 @@ export class InteractionManager {
             }
 
             // Convert Pixel Radius to Distance Units
-            const conversion = canvas.dimensions.distance / canvas.dimensions.size;
+            const d = canvas?.dimensions;
+            const grid = canvas?.grid;
+            const gridSizeX = (grid && typeof grid.sizeX === 'number' && grid.sizeX > 0) ? grid.sizeX : null;
+            const gridSizeY = (grid && typeof grid.sizeY === 'number' && grid.sizeY > 0) ? grid.sizeY : null;
+            const pxPerGrid = (gridSizeX && gridSizeY)
+              ? (0.5 * (gridSizeX + gridSizeY))
+              : (d?.size ?? 100);
+            const distPerGrid = (d && typeof d.distance === 'number' && d.distance > 0) ? d.distance : 1;
+            const conversion = distPerGrid / pxPerGrid;
             const dim = radiusPixels * conversion;
             const bright = dim / 2;
 
@@ -6059,6 +6075,7 @@ export class InteractionManager {
           const lightUpdates = [];
           let anyUpdates = false;
           let anyEnhancedLightUpdates = false;
+          let tokenUpdateSucceeded = false;
           
           // Use selection set
           for (const id of this.selection) {
@@ -6078,49 +6095,83 @@ export class InteractionManager {
                 // ... (Collision logic moved here or reused)
                 const token = tokenDoc.object;
                 if (token) {
-                    const origin = token.center;
-                    const gridSize = canvas.grid?.size || 100;
-                    const snapToCenter = (pt) => canvas.grid.getSnappedPoint(pt, { mode: CONST.GRID_SNAPPING_MODES.CENTER });
+                    try {
+                        const origin = token.center;
+                        const grid = canvas?.grid;
+                        const isGridless = !!(grid && grid.type === CONST.GRID_TYPES.GRIDLESS);
 
-                    // Always resolve against snapped grid centers so we don't land half-inside a wall/door.
-                    const desired = snapToCenter(foundryPos);
+                        // In GRIDLESS, snapping to grid centers is not meaningful and can cause
+                        // no-op moves which never emit an authoritative movement-start.
+                        if (isGridless || !grid || typeof grid.getSnappedPoint !== 'function') {
+                            const collision = token.checkCollision(foundryPos, { mode: 'closest', type: 'move' });
+                            if (collision) {
+                                // Blocked: treat as no-op, and avoid generating an update.
+                                foundryPos = origin;
+                            }
+                        } else {
+                            const gridSize = (typeof grid.size === 'number' && grid.size > 0) ? grid.size : 100;
+                            const snapToCenter = (pt) => grid.getSnappedPoint(pt, { mode: CONST.GRID_SNAPPING_MODES.CENTER });
 
-                    // Diagonal-safe behavior: walk from origin towards desired, and pick the last
-                    // snapped tile center which does not collide.
-                    // Backtracking from the target can fail diagonally due to snap rounding.
-                    let lastValid = snapToCenter(origin);
-                    const dx = desired.x - origin.x;
-                    const dy = desired.y - origin.y;
-                    const dist = Math.sqrt(dx * dx + dy * dy);
+                            // Always resolve against snapped grid centers so we don't land half-inside a wall/door.
+                            const desired = snapToCenter(foundryPos);
 
-                    if (dist >= 1) {
-                        // Sample at quarter-grid intervals (bounded) and dedupe snapped points.
-                        const sampleStep = Math.max(1, gridSize * 0.25);
-                        const steps = Math.min(250, Math.ceil(dist / sampleStep));
-                        const seen = new Set();
+                            // Diagonal-safe behavior: walk from origin towards desired, and pick the last
+                            // snapped tile center which does not collide.
+                            // Backtracking from the target can fail diagonally due to snap rounding.
+                            let lastValid = snapToCenter(origin);
+                            const dx = desired.x - origin.x;
+                            const dy = desired.y - origin.y;
+                            const dist = Math.sqrt(dx * dx + dy * dy);
 
-                        for (let i = 1; i <= steps; i++) {
-                            const t = i / steps;
-                            const sample = { x: origin.x + dx * t, y: origin.y + dy * t };
-                            const snapped = snapToCenter(sample);
-                            const key = `${snapped.x},${snapped.y}`;
-                            if (seen.has(key)) continue;
-                            seen.add(key);
+                            if (dist >= 1) {
+                                // Sample at quarter-grid intervals (bounded) and dedupe snapped points.
+                                const sampleStep = Math.max(1, gridSize * 0.25);
+                                const steps = Math.min(250, Math.ceil(dist / sampleStep));
+                                const seen = new Set();
 
-                            const collision = token.checkCollision(snapped, { mode: 'closest', type: 'move' });
-                            if (collision) break;
-                            lastValid = snapped;
+                                for (let i = 1; i <= steps; i++) {
+                                    const t = i / steps;
+                                    const sample = { x: origin.x + dx * t, y: origin.y + dy * t };
+                                    const snapped = snapToCenter(sample);
+                                    const key = `${snapped.x},${snapped.y}`;
+                                    if (seen.has(key)) continue;
+                                    seen.add(key);
+
+                                    const collision = token.checkCollision(snapped, { mode: 'closest', type: 'move' });
+                                    if (collision) break;
+                                    lastValid = snapped;
+                                }
+                            }
+
+                            foundryPos = lastValid;
                         }
+                    } catch (e) {
+                        // If collision math fails for any reason, do not risk leaving a stuck preview.
+                        // Treat as no-op and let drag cleanup happen immediately.
+                        foundryPos = token.center;
                     }
-
-                    foundryPos = lastValid;
                 }
 
                 // Adjust for center vs top-left
-                const width = tokenDoc.width * canvas.grid.size;
-                const height = tokenDoc.height * canvas.grid.size;
-                const finalX = foundryPos.x - width / 2;
-                const finalY = foundryPos.y - height / 2;
+                const wPx = (token && typeof token.w === 'number' && token.w > 0)
+                  ? token.w
+                  : (tokenDoc.width * (canvas?.grid?.size || canvas?.dimensions?.size || 100));
+                const hPx = (token && typeof token.h === 'number' && token.h > 0)
+                  ? token.h
+                  : (tokenDoc.height * (canvas?.grid?.size || canvas?.dimensions?.size || 100));
+
+                const finalX = foundryPos.x - wPx / 2;
+                const finalY = foundryPos.y - hPx / 2;
+
+                // If collision resolution produced a no-op, do not submit an update.
+                // This avoids the "ghost" preview getting stuck waiting for movement-start that never occurs.
+                if (
+                  typeof tokenDoc.x === 'number' && typeof tokenDoc.y === 'number' &&
+                  Math.abs(finalX - tokenDoc.x) < 0.5 &&
+                  Math.abs(finalY - tokenDoc.y) < 0.5
+                ) {
+                  continue;
+                }
                 
                 tokenUpdates.push({ _id: id, x: finalX, y: finalY });
                 continue;
@@ -6179,6 +6230,7 @@ export class InteractionManager {
             anyUpdates = true;
             try {
               await canvas.scene.updateEmbeddedDocuments('Token', tokenUpdates);
+              tokenUpdateSucceeded = true;
             } catch (err) {
               log.error('Failed to update token positions', err);
             }
@@ -6202,7 +6254,7 @@ export class InteractionManager {
 
           // For tokens: keep the ghost preview around until the authoritative update
           // actually starts moving the token (matching Foundry).
-          if (tokenUpdates.length > 0) {
+          if (tokenUpdates.length > 0 && tokenUpdateSucceeded) {
             for (const upd of tokenUpdates) {
               if (upd?._id) this._pendingTokenMoveCleanup.tokenIds.add(upd._id);
             }
@@ -6288,6 +6340,16 @@ export class InteractionManager {
         }
     } catch (error) {
         log.error('Error in onPointerUp:', error);
+
+        // Never leave drag previews stuck in the scene if commit fails.
+        try {
+          this.dragState.active = false;
+          this.dragState.object = null;
+          this.dragState.mode = null;
+          this.dragState.axis = null;
+          this._clearAllDragPreviews();
+        } catch (_) {
+        }
     }
   }
 

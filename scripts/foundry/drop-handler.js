@@ -196,9 +196,15 @@ export class DropHandler {
     
     // Center token on drop point
     let { x, y } = position;
-    const gridSize = canvas.grid?.size || 100;
-    x -= (tokenDoc.width * gridSize) / 2;
-    y -= (tokenDoc.height * gridSize) / 2;
+    const grid = canvas?.grid;
+    const gridSizeX = (grid && typeof grid.sizeX === 'number' && grid.sizeX > 0)
+      ? grid.sizeX
+      : ((grid && typeof grid.size === 'number' && grid.size > 0) ? grid.size : 100);
+    const gridSizeY = (grid && typeof grid.sizeY === 'number' && grid.sizeY > 0)
+      ? grid.sizeY
+      : ((grid && typeof grid.size === 'number' && grid.size > 0) ? grid.size : 100);
+    x -= (tokenDoc.width * gridSizeX) / 2;
+    y -= (tokenDoc.height * gridSizeY) / 2;
 
     // Snap to grid if enabled
     if (snap && canvas.grid) {

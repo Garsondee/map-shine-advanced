@@ -67,7 +67,17 @@ export class TweakpaneManager {
       showLightRingUI: true,
       showLightTranslateGizmo: true,
       showLightRadiusRings: true,
-      showLightRadiusVisualization: true
+      showLightRadiusVisualization: true,
+      tokenColorCorrection: {
+        enabled: true,
+        exposure: 1.0,
+        temperature: 0.0,
+        tint: 0.0,
+        brightness: 0.0,
+        contrast: 1.0,
+        saturation: 1.0,
+        gamma: 1.0
+      }
     };
     
     /** @type {Object<string, any>} Accordion expanded states */
@@ -482,6 +492,122 @@ export class TweakpaneManager {
       this.accordionStates['lightAuthoring'] = ev.expanded;
       this.saveUIState();
     });
+
+    globalFolder.addBlade({ view: 'separator' });
+
+    const tokensFolder = globalFolder.addFolder({
+      title: 'Tokens',
+      expanded: this.accordionStates['tokens'] ?? false
+    });
+
+    const tokenCCFolder = tokensFolder.addFolder({
+      title: 'Color Correction',
+      expanded: this.accordionStates['token_cc'] ?? false
+    });
+
+    const applyTokenCC = () => {
+      try {
+        const tm = window.MapShine?.tokenManager;
+        if (tm && typeof tm.setColorCorrectionParams === 'function') {
+          tm.setColorCorrectionParams(this.globalParams.tokenColorCorrection);
+        }
+      } catch (_) {
+      }
+    };
+
+    const onTokenCCChange = (param) => (ev) => {
+      this.globalParams.tokenColorCorrection[param] = ev.value;
+      applyTokenCC();
+      this.saveUIState();
+    };
+
+    tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'enabled', {
+      label: 'Enabled'
+    }).on('change', onTokenCCChange('enabled'));
+
+    tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'exposure', {
+      label: 'Exposure',
+      min: 0,
+      max: 3,
+      step: 0.01
+    }).on('change', onTokenCCChange('exposure'));
+
+    tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'brightness', {
+      label: 'Brightness',
+      min: -0.5,
+      max: 0.5,
+      step: 0.01
+    }).on('change', onTokenCCChange('brightness'));
+
+    tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'contrast', {
+      label: 'Contrast',
+      min: 0,
+      max: 2,
+      step: 0.01
+    }).on('change', onTokenCCChange('contrast'));
+
+    tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'saturation', {
+      label: 'Saturation',
+      min: 0,
+      max: 2,
+      step: 0.01
+    }).on('change', onTokenCCChange('saturation'));
+
+    tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'gamma', {
+      label: 'Gamma',
+      min: 0.2,
+      max: 3,
+      step: 0.01
+    }).on('change', onTokenCCChange('gamma'));
+
+    tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'temperature', {
+      label: 'Temperature',
+      min: -1,
+      max: 1,
+      step: 0.01
+    }).on('change', onTokenCCChange('temperature'));
+
+    tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'tint', {
+      label: 'Tint',
+      min: -1,
+      max: 1,
+      step: 0.01
+    }).on('change', onTokenCCChange('tint'));
+
+    tokenCCFolder.addButton({
+      title: 'Reset Token CC'
+    }).on('click', () => {
+      this.globalParams.tokenColorCorrection.enabled = true;
+      this.globalParams.tokenColorCorrection.exposure = 1.0;
+      this.globalParams.tokenColorCorrection.temperature = 0.0;
+      this.globalParams.tokenColorCorrection.tint = 0.0;
+      this.globalParams.tokenColorCorrection.brightness = 0.0;
+      this.globalParams.tokenColorCorrection.contrast = 1.0;
+      this.globalParams.tokenColorCorrection.saturation = 1.0;
+      this.globalParams.tokenColorCorrection.gamma = 1.0;
+
+      // Refresh bindings under this folder.
+      try {
+        tokenCCFolder.refresh();
+      } catch (_) {
+      }
+
+      applyTokenCC();
+      this.saveUIState();
+    });
+
+    tokenCCFolder.on('fold', (ev) => {
+      this.accordionStates['token_cc'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    tokensFolder.on('fold', (ev) => {
+      this.accordionStates['tokens'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    // Push initial state into TokenManager so the UI and runtime match.
+    applyTokenCC();
 
     globalFolder.addBlade({ view: 'separator' });
 

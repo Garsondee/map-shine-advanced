@@ -1,16 +1,19 @@
 /**
  * @fileoverview Grid renderer - renders the battlemap grid
- * Uses off-screen canvas to generate grid texture for performance
+ * Uses shader-based grid plane for performance and flexibility
  * Supports Square and Hex grids based on Foundry settings
  * @module scene/grid-renderer
  */
 
 import { createLogger } from '../core/log.js';
+import { getGlobalFrameState } from '../core/frame-state.js';
+import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
 
 const log = createLogger('GridRenderer');
 
-// Z-position offset for grid (just above ground, below tiles)
-// This is an OFFSET added to groundZ, not an absolute value
+// Z-position offset for grid.
+// Note: The grid is rendered as an overlay (no depth test) so this value is mostly
+// informational; we keep it slightly above groundZ to avoid any edge-case coplanar issues.
 const GRID_Z_OFFSET = 0.01;
 
 /**
@@ -25,17 +28,31 @@ export class GridRenderer {
     
     /** @type {THREE.Mesh|null} */
     this.gridMesh = null;
-    
-    /** @type {THREE.Texture|null} */
-    this.gridTexture = null;
+
+    /** @type {THREE.ShaderMaterial|null} */
+    this.gridMaterial = null;
+
+    /** @type {boolean} */
+    this._isUpdatableRegistered = false;
+
+    /** @type {number} */
+    this._lastResolution = -1;
     
     // Grid settings
+    // Parity-first: default behavior uses Foundry's scene grid settings.
+    // Overrides are optional and disabled by default.
     this.settings = {
-      style: 'solid', // solid, dashed, dotted
-      thickness: 3.0,
-      colorOverride: null, // Use null to use Foundry color
-      alphaOverride: 0.1, // Use null to use Foundry alpha
-      dashArray: []
+      style: null,
+      useStyleOverride: false,
+
+      thickness: 1,
+      useThicknessOverride: false,
+
+      colorOverride: '#000000',
+      useColorOverride: false,
+
+      alphaOverride: 0.2,
+      useAlphaOverride: false
     };
 
     this.initialized = false;
@@ -56,36 +73,51 @@ export class GridRenderer {
       enabled: true,
       parameters: {
         style: {
-          label: 'Style',
+          label: 'Style (Override)',
           options: {
-            'Solid': 'solid',
-            'Dashed': 'dashed',
-            'Dotted': 'dotted'
+            'Solid Lines': 'solidLines',
+            'Dashed Lines': 'dashedLines',
+            'Dotted Lines': 'dottedLines',
+            'Square Points': 'squarePoints',
+            'Diamond Points': 'diamondPoints',
+            'Round Points': 'roundPoints'
           },
-          default: 'solid'
+          default: 'solidLines'
+        },
+        useStyleOverride: {
+          label: 'Override Style',
+          default: false
         },
         thickness: {
-          label: 'Thickness',
-          min: 0.5,
-          max: 5.0,
-          step: 0.5,
-          default: 3.0
+          label: 'Thickness (Override)',
+          min: 1,
+          max: 10,
+          step: 1,
+          default: 1
+        },
+        useThicknessOverride: {
+          label: 'Override Thickness',
+          default: false
         },
         colorOverride: {
           label: 'Color (Override)',
           default: '#000000',
-          optional: true // Logic to handle null/undefined if UI supports it, else we assume hex
+          optional: true
         },
         useColorOverride: {
           label: 'Override Color',
           default: false
         },
         alphaOverride: {
-          label: 'Opacity',
+          label: 'Opacity (Override)',
           min: 0.0,
           max: 1.0,
           step: 0.05,
-          default: 0.1
+          default: 0.2
+        },
+        useAlphaOverride: {
+          label: 'Override Opacity',
+          default: false
         }
       }
     };
@@ -100,10 +132,37 @@ export class GridRenderer {
     if (param in this.settings) {
       this.settings[param] = value;
       this.updateGrid();
-    } else if (param === 'useColorOverride') {
-      // Special handling if needed, or just store it
-      this.settings.useColorOverride = value;
-      this.updateGrid();
+    }
+  }
+
+  /**
+   * Optional integration point so the renderer can be updated every frame.
+   * EffectComposer will call update(timeInfo).
+   * @param {TimeInfo} _timeInfo
+   */
+  update(_timeInfo) {
+    // Keep the AA resolution uniform in sync with camera zoom.
+    // This is required for parity with Foundry, where grid thickness is stable across zoom.
+    try {
+      if (!this.gridMaterial) return;
+      if (!this.gridMaterial.uniforms) return;
+
+      const frameState = getGlobalFrameState();
+      const viewH = (frameState.viewMaxY - frameState.viewMinY) || 0;
+      if (!(viewH > 0)) return;
+
+      // Our world units are pixels (at zoom=1), so pixels-per-world-unit is screenHeight / viewHeight.
+      const pixelsPerWorldUnit = frameState.screenHeight / viewH;
+      const gridSize = this.gridMaterial.uniforms.uGridSize?.value || (canvas?.grid?.size || 1);
+      const resolution = pixelsPerWorldUnit * gridSize;
+
+      if (!Number.isFinite(resolution)) return;
+      if (Math.abs(resolution - this._lastResolution) < 1e-4) return;
+
+      this._lastResolution = resolution;
+      this.gridMaterial.uniforms.uResolution.value = resolution;
+    } catch (e) {
+      // Non-critical; avoid cascading failures.
     }
   }
 
@@ -137,7 +196,9 @@ export class GridRenderer {
       if (scene.id !== canvas.scene?.id) return;
       
       // Check for grid-related changes
-      if ('grid' in changes || 'shiftX' in changes || 'shiftY' in changes) {
+      // Foundry v13 uses background.offsetX/offsetY (not shiftX/shiftY) to align map art to the grid.
+      // These changes can affect perceived alignment and should trigger a refresh.
+      if ('grid' in changes || 'background' in changes || 'width' in changes || 'height' in changes || 'padding' in changes) {
         log.info('Grid settings changed, updating grid');
         this.updateGrid();
       }
@@ -163,11 +224,9 @@ export class GridRenderer {
       this.gridMesh.material.dispose();
       this.gridMesh = null;
     }
-    
-    if (this.gridTexture) {
-      this.gridTexture.dispose();
-      this.gridTexture = null;
-    }
+
+    this.gridMaterial = null;
+    this._lastResolution = -1;
 
     // Don't render if gridless or invisible
     if (canvas.grid.type === CONST.GRID_TYPES.GRIDLESS || canvas.grid.alpha === 0) {
@@ -175,253 +234,362 @@ export class GridRenderer {
       return;
     }
 
-    // Create grid texture via off-screen canvas
-    this.gridTexture = this.createGridTexture();
-    
-    if (!this.gridTexture) {
-      log.error('Failed to create grid texture');
-      return;
-    }
-
     const THREE = window.THREE;
-    const width = canvas.dimensions.width;
-    const height = canvas.dimensions.height;
-    
-    // Create plane mesh
-    const geometry = new THREE.PlaneGeometry(width, height);
-    
-    // Determine opacity
-    const baseOpacity = this.settings.alphaOverride !== null ? this.settings.alphaOverride : canvas.grid.alpha;
-    const opacity = Math.pow(Math.max(0, Math.min(1, baseOpacity)), 2.2);
-    
-    const material = new THREE.MeshBasicMaterial({
-      map: this.gridTexture,
+    if (!THREE) return;
+
+    // Match SceneComposer positioning: draw the grid only over the scene rectangle.
+    // This prevents the grid from rendering in the padded canvas area and ensures
+    // it overlays the base map plane exactly.
+    const dims = canvas.dimensions;
+    const worldHeight = Number(dims.height || 1);
+    const sceneX = Number.isFinite(dims.sceneX) ? dims.sceneX : 0;
+    const sceneY = Number.isFinite(dims.sceneY) ? dims.sceneY : 0;
+    const sceneW = Number(dims.sceneWidth || dims.width || 1);
+    const sceneH = Number(dims.sceneHeight || dims.height || 1);
+
+    // Create plane mesh over the sceneRect (actual map bounds)
+    const geometry = new THREE.PlaneGeometry(sceneW, sceneH);
+
+    // Determine effective settings (parity-first)
+    const grid = canvas.grid;
+
+    const styleKey = this.settings.useStyleOverride
+      ? (this.settings.style || grid.style)
+      : grid.style;
+
+    const thicknessPx = this.settings.useThicknessOverride
+      ? (Number(this.settings.thickness) || grid.thickness || 1)
+      : (grid.thickness || 1);
+
+    const colorStr = (this.settings.useColorOverride && this.settings.colorOverride)
+      ? this.settings.colorOverride
+      : grid.color;
+
+    const alpha = this.settings.useAlphaOverride
+      ? (Number(this.settings.alphaOverride) || 0)
+      : (grid.alpha || 0);
+
+    // Foundry's grid shader uses numeric style codes 0..5
+    const styleCode = this._getFoundryStyleCode(styleKey);
+
+    // Use normalized thickness (grid-space units)
+    const gridSize = Number(grid.size || 1);
+    const thickness = thicknessPx / Math.max(1, gridSize);
+
+    const color = new THREE.Color(colorStr || '#000000');
+
+    // ShaderMaterial to mirror Foundry's GridShader logic.
+    // We compute in Foundry pixel space (Y-down) by converting from our world-space (Y-up).
+    const material = new THREE.ShaderMaterial({
       transparent: true,
-      opacity: opacity,
-      depthWrite: false, // Don't write depth, so it acts as overlay
-      depthTest: true
+      depthWrite: false,
+      // The grid should always be visible above tiles/tokens/etc.
+      // We render it in the overlay pass and disable depth testing so it cannot be occluded.
+      depthTest: false,
+      uniforms: {
+        uCanvasHeight: { value: Number(canvas.dimensions.height || 1) },
+        uGridSize: { value: gridSize },
+        uType: { value: Number(grid.type || 0) },
+        uStyle: { value: styleCode },
+        uThickness: { value: thickness },
+        uResolution: { value: 1.0 },
+        uColor: { value: new THREE.Vector3(color.r, color.g, color.b) },
+        uAlpha: { value: Math.max(0, Math.min(1, Number(alpha))) }
+      },
+      vertexShader: this._getVertexShaderSource(),
+      fragmentShader: this._getFragmentShaderSource()
     });
+
+    this.gridMaterial = material;
 
     this.gridMesh = new THREE.Mesh(geometry, material);
     this.gridMesh.name = 'GridOverlay';
-    
-    // Position center (Foundry coordinates are Top-Left)
-    // Convert to World Coordinates
-    const sceneWidth = canvas.dimensions.width;
-    const sceneHeight = canvas.dimensions.height;
+    // Ensure the grid is rendered after all post-processing as a true overlay.
+    // (EffectComposer renders OVERLAY_THREE_LAYER separately directly to screen.)
+    this.gridMesh.layers.set(OVERLAY_THREE_LAYER);
+    this.gridMesh.renderOrder = 2000;
     
     // Position grid relative to groundZ
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
-    this.gridMesh.position.set(sceneWidth / 2, sceneHeight / 2, groundZ + GRID_Z_OFFSET);
-    
-    // Flip Y to match texture
-    this.gridMesh.scale.y = -1; 
-    
+    const centerX = sceneX + (sceneW / 2);
+    const centerYFoundry = sceneY + (sceneH / 2);
+    const centerYWorld = worldHeight - centerYFoundry;
+    this.gridMesh.position.set(centerX, centerYWorld, groundZ + GRID_Z_OFFSET);
+
     this.scene.add(this.gridMesh);
-    log.info(`Grid rendered: ${canvas.grid.type} size ${canvas.grid.size} style ${this.settings.style}`);
+    log.info(`Grid rendered (shader): type ${grid.type}, size ${grid.size}, style ${styleKey}`);
+
+    // Force initial resolution update (if FrameState is available)
+    try {
+      this.update();
+    } catch (_) {
+    }
   }
 
-  /**
-   * Create a texture containing the grid pattern
-   * @returns {THREE.Texture}
-   * @private
-   */
-  createGridTexture() {
-    const THREE = window.THREE;
-    const grid = canvas.grid;
-    const dim = canvas.dimensions;
+  _getFoundryStyleCode(styleKey) {
+    // Back-compat for older saved values
+    if (styleKey === 'solid') styleKey = 'solidLines';
+    if (styleKey === 'dashed') styleKey = 'dashedLines';
+    if (styleKey === 'dotted') styleKey = 'dottedLines';
 
-    const renderer = window.MapShine?.renderer;
-    const maxTex = renderer?.capabilities?.maxTextureSize;
-    const maxTextureSize = Number.isFinite(maxTex) ? Math.max(256, Math.floor(maxTex)) : 4096;
-    
-    // Create a canvas large enough to hold the grid
-    // WARNING: Creating a massive canvas for the whole map is bad for memory
-    // Optimization: Create a repeatable texture? 
-    // Hex grids are seamless but complex. Square grids are easy.
-    // Foundry draws the grid on a PIXI Graphics object.
-    // Maybe we can extract that?
-    
-    const makeContext = (w, h) => {
-      const c = document.createElement('canvas');
-      c.width = Math.max(1, Math.floor(w));
-      c.height = Math.max(1, Math.floor(h));
-      const ctx = c.getContext('2d');
-      return { canvasEl: c, ctx };
-    };
+    switch (styleKey) {
+      case 'solidLines':
+        return 0;
+      case 'dashedLines':
+        return 1;
+      case 'dottedLines':
+        return 2;
+      case 'squarePoints':
+        return 3;
+      case 'diamondPoints':
+        return 4;
+      case 'roundPoints':
+        return 5;
+      default:
+        return 0;
+    }
+  }
 
-    // Square grids: create a small repeatable texture tile to avoid gigantic canvases.
-    // Hex grids: keep full draw (complex tiling) but downscale if needed.
-    let canvasEl;
-    let ctx;
-    let texRepeatX = 1;
-    let texRepeatY = 1;
+  _getVertexShaderSource() {
+    return `
+      varying vec3 vWorldPos;
 
-    if (!grid.isHexagonal) {
-      const s = Math.max(1, Math.floor(grid.size || 1));
-      ({ canvasEl, ctx } = makeContext(s, s));
-      if (!ctx) return null;
-
-      texRepeatX = (dim.width || 1) / s;
-      texRepeatY = (dim.height || 1) / s;
-    } else {
-      const w0 = dim.width || 1;
-      const h0 = dim.height || 1;
-      const scale = Math.min(1.0, maxTextureSize / Math.max(w0, h0));
-      ({ canvasEl, ctx } = makeContext(Math.round(w0 * scale), Math.round(h0 * scale)));
-      if (!ctx) return null;
-      try {
-        ctx.scale(scale, scale);
-      } catch (e) {
+      void main() {
+        vec4 world = modelMatrix * vec4(position, 1.0);
+        vWorldPos = world.xyz;
+        gl_Position = projectionMatrix * viewMatrix * world;
       }
-    }
-
-    // Configure Style
-    const color = (this.settings.useColorOverride && this.settings.colorOverride) 
-      ? this.settings.colorOverride 
-      : grid.color;
-      
-    ctx.strokeStyle = new THREE.Color(color).getStyle();
-    ctx.lineWidth = this.settings.thickness || 1;
-    ctx.globalAlpha = 1.0; // We handle alpha in the material
-
-    // Configure Dash Array
-    if (this.settings.style === 'dashed') {
-      const dash = Math.max(4, grid.size / 8);
-      ctx.setLineDash([dash, dash]);
-    } else if (this.settings.style === 'dotted') {
-      const dot = Math.max(1, this.settings.thickness);
-      // Calculate gap so that (dot + gap) divides grid.size evenly
-      // Target ~8 dots per cell
-      const divisions = 8;
-      const patternLength = grid.size / divisions;
-      const gap = Math.max(1, patternLength - dot);
-      
-      ctx.setLineDash([dot, gap]);
-      ctx.lineCap = 'round';
-    } else {
-      ctx.setLineDash([]); // Solid
-    }
-
-    if (grid.isHexagonal) {
-      this.drawHexGrid(ctx, grid, dim);
-    } else {
-      // Draw a single cell-sized tile: only the top and left edges.
-      // Repeating this texture yields a full grid without double-thick seams.
-      const s = Math.max(1, Math.floor(grid.size || 1));
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(s, 0);
-      ctx.moveTo(0, 0);
-      ctx.lineTo(0, s);
-      ctx.stroke();
-    }
-    
-    const texture = new THREE.CanvasTexture(canvasEl);
-    texture.minFilter = THREE.LinearFilter; // Or NearestFilter for crisp lines
-    texture.magFilter = THREE.LinearFilter;
-    texture.anisotropy = 16; // Better looking at angles (though we are top-down)
-
-    if (!grid.isHexagonal) {
-      texture.wrapS = THREE.RepeatWrapping;
-      texture.wrapT = THREE.RepeatWrapping;
-      texture.repeat.set(texRepeatX, texRepeatY);
-    }
-    
-    return texture;
+    `;
   }
 
-  /**
-   * Draw square grid
-   * @param {CanvasRenderingContext2D} ctx 
-   * @param {BaseGrid} grid 
-   * @param {CanvasDimensions} dim 
-   * @private
-   */
-  drawSquareGrid(ctx, grid, dim) {
-    const w = dim.width;
-    const h = dim.height;
-    const s = grid.size;
-    
-    ctx.beginPath();
-    
-    // Verticals
-    for (let x = 0; x <= w; x += s) {
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, h);
-    }
-    
-    // Horizontals
-    for (let y = 0; y <= h; y += s) {
-      ctx.moveTo(0, y);
-      ctx.lineTo(w, y);
-    }
-    
-    ctx.stroke();
-  }
+  _getFragmentShaderSource() {
+    // Port of Foundry's GridShader core logic (simplified for Three.js).
+    // Computes grid coverage in grid-space units and anti-aliases using a resolution uniform.
+    return `
+      precision highp float;
 
-  /**
-   * Draw hex grid
-   * @param {CanvasRenderingContext2D} ctx 
-   * @param {BaseGrid} grid 
-   * @param {CanvasDimensions} dim 
-   * @private
-   */
-  drawHexGrid(ctx, grid, dim) {
-    // Access the grid's polygon points or calculation logic
-    // Foundry's HexagonalGrid is complex.
-    // Let's use grid.getPolygon(row, col) if available, or iterate rows/cols
-    
-    // This can be expensive for large maps.
-    // Optimization: Draw *one* hex pattern tile and repeat it?
-    // Hex grids tile but not simply as a square texture.
-    
-    // For now, draw naive implementation (draw all polygons)
-    // This is a one-time cost at scene load.
-    
-    // This requires knowing rows/cols
-    // canvas.grid.grid gives us the implementation
-    
-    const implementation = canvas.grid.grid;
-    if (!implementation) return;
+      varying vec3 vWorldPos;
 
-    // Iterate approximate bounds
-    // We can loop through rows and columns based on dimensions
-    
-    // Let's try to be smart: use Foundry's getGridPositionFromPixels
-    // Iterate through all cells...
-    
-    // Simplified: Iterate pixels? No.
-    // Iterate grid coordinates.
-    
-    // How many rows/cols?
-    // height / (size * ?) 
-    // width / (size * ?)
-    
-    // Let's assume a safe upper bound and iterate
-    const cols = Math.ceil(dim.width / grid.size) * 2; // *2 for safety with hex offset
-    const rows = Math.ceil(dim.height / grid.size) * 2;
-    
-    ctx.beginPath();
-    
-    for (let r = -1; r <= rows; r++) {
-      for (let c = -1; c <= cols; c++) {
-        const poly = implementation.getPolygon(r, c);
-        if (poly) {
-          // poly is array of points [x,y, x,y, ...]
-          const points = poly.points;
-          if (points && points.length >= 2) {
-            ctx.moveTo(points[0], points[1]);
-            for (let i = 2; i < points.length; i += 2) {
-              ctx.lineTo(points[i], points[i+1]);
+      uniform float uCanvasHeight;
+      uniform float uGridSize;
+      uniform int uType;
+      uniform int uStyle;
+      uniform float uThickness;
+      uniform float uResolution;
+      uniform vec3 uColor;
+      uniform float uAlpha;
+
+      const float PI = 3.141592653589793;
+      const float SQRT3 = 1.7320508075688772;
+      const float SQRT1_2 = 0.7071067811865476;
+      const float SQRT1_3 = 0.5773502691896257;
+
+      // Grid type constants (must match CONST.GRID_TYPES)
+      const int TYPE_SQUARE = 1;
+      const int TYPE_HEXODDR = 2;
+      const int TYPE_HEXEVENR = 3;
+      const int TYPE_HEXODDQ = 4;
+      const int TYPE_HEXEVENQ = 5;
+
+      bool TYPE_IS_SQUARE_FN() { return uType == TYPE_SQUARE; }
+      bool TYPE_IS_HEXAGONAL_FN() { return (TYPE_HEXODDR <= uType) && (uType <= TYPE_HEXEVENQ); }
+      bool TYPE_IS_HEXAGONAL_COLUMNS_FN() { return (uType == TYPE_HEXODDQ) || (uType == TYPE_HEXEVENQ); }
+      bool TYPE_IS_HEXAGONAL_EVEN_FN() { return (uType == TYPE_HEXEVENR) || (uType == TYPE_HEXEVENQ); }
+
+      float antialiasedStep(float edge, float x) {
+        return clamp(((x - edge) * uResolution) + 0.5, 0.0, 1.0);
+      }
+
+      float lineCoverage(float distance, float thickness, float alignment) {
+        float alpha0 = antialiasedStep((0.0 - alignment) * thickness, distance);
+        float alpha1 = antialiasedStep((1.0 - alignment) * thickness, distance);
+        return alpha0 - alpha1;
+      }
+
+      float lineCoverage(float distance, float thickness) {
+        return lineCoverage(distance, thickness, 0.5);
+      }
+
+      vec2 pointToCube(vec2 p) {
+        float x = p.x;
+        float y = p.y;
+        float q;
+        float r;
+        float e = TYPE_IS_HEXAGONAL_EVEN_FN() ? 1.0 : 0.0;
+        if ( TYPE_IS_HEXAGONAL_COLUMNS_FN() ) {
+          q = ((2.0 * SQRT1_3) * x) - (2.0 / 3.0);
+          r = (-0.5 * (q + e)) + y;
+        } else {
+          r = ((2.0 * SQRT1_3) * y) - (2.0 / 3.0);
+          q = (-0.5 * (r + e)) + x;
+        }
+        return vec2(q, r);
+      }
+
+      vec2 cubeToPoint(vec2 a) {
+        float q = a[0];
+        float r = a[1];
+        float x;
+        float y;
+        float e = TYPE_IS_HEXAGONAL_EVEN_FN() ? 1.0 : 0.0;
+        if ( TYPE_IS_HEXAGONAL_COLUMNS_FN() ) {
+          x = (SQRT3 / 2.0) * (q + (2.0 / 3.0));
+          y = (0.5 * (q + e)) + r;
+        } else {
+          y = (SQRT3 / 2.0) * (r + (2.0 / 3.0));
+          x = (0.5 * (r + e)) + q;
+        }
+        return vec2(x, y);
+      }
+
+      vec2 cubeRound(vec2 a) {
+        float q = a[0];
+        float r = a[1];
+        float s = -q - r;
+        float iq = floor(q + 0.5);
+        float ir = floor(r + 0.5);
+        float is = floor(s + 0.5);
+        float dq = abs(iq - q);
+        float dr = abs(ir - r);
+        float ds = abs(is - s);
+        if ( (dq > dr) && (dq > ds) ) {
+          iq = -ir - is;
+        } else if ( dr > ds ) {
+          ir = -iq - is;
+        } else {
+          is = -iq - ir;
+        }
+        return vec2(iq, ir);
+      }
+
+      vec2 nearestVertex(vec2 p) {
+        if ( TYPE_IS_SQUARE_FN() ) {
+          return floor(p + 0.5);
+        }
+
+        if ( TYPE_IS_HEXAGONAL_FN() ) {
+          vec2 c = cubeToPoint(cubeRound(pointToCube(p)));
+          vec2 d = p - c;
+          float a = atan(d.y, d.x);
+          if ( TYPE_IS_HEXAGONAL_COLUMNS_FN() ) {
+            a = floor((a / (PI / 3.0)) + 0.5) * (PI / 3.0);
+          } else {
+            a = (floor(a / (PI / 3.0)) + 0.5) * (PI / 3.0);
+          }
+          return c + (vec2(cos(a), sin(a)) * SQRT1_3);
+        }
+
+        return floor(p + 0.5);
+      }
+
+      float edgeDistance(vec2 p) {
+        if ( TYPE_IS_SQUARE_FN() ) {
+          vec2 d = abs(p - floor(p + 0.5));
+          return min(d.x, d.y);
+        }
+
+        if ( TYPE_IS_HEXAGONAL_FN() ) {
+          vec2 a = pointToCube(p);
+          vec2 b = cubeRound(a);
+          vec2 c = b - a;
+          float q = c[0];
+          float r = c[1];
+          float s = -q - r;
+          return (2.0 - (abs(q - r) + abs(r - s) + abs(s - q))) * 0.25;
+        }
+
+        return 0.0;
+      }
+
+      vec3 edgeOffset(vec2 p) {
+        if ( TYPE_IS_SQUARE_FN() ) {
+          vec2 d = abs(p - floor(p + 0.5));
+          return vec3(max(d.x, d.y), min(d.x, d.y), 1.0);
+        }
+
+        if ( TYPE_IS_HEXAGONAL_FN() ) {
+          vec2 c = cubeToPoint(cubeRound(pointToCube(p)));
+          vec2 d = p - c;
+          float a = atan(d.y, d.x);
+          if ( TYPE_IS_HEXAGONAL_COLUMNS_FN() ) {
+            a = (floor(a / (PI / 3.0)) + 0.5) * (PI / 3.0);
+          } else {
+            a = floor((a / (PI / 3.0)) + 0.5) * (PI / 3.0);
+          }
+          vec2 n = vec2(cos(a), sin(a));
+          return vec3((0.5 * SQRT1_3) + dot(d, vec2(-n.y, n.x)), 0.5 - dot(d, n), SQRT1_3);
+        }
+
+        return vec3(0.0);
+      }
+
+      float drawGrid(vec2 point, int style, float thickness) {
+        float alpha;
+
+        // Points
+        if ( style == 3 ) {
+          vec2 offset = abs(nearestVertex(point) - point);
+          float distance = max(offset.x, offset.y);
+          alpha = lineCoverage(distance, thickness);
+        }
+        else if ( style == 4 ) {
+          vec2 offset = abs(nearestVertex(point) - point);
+          float distance = (offset.x + offset.y) * SQRT1_2;
+          alpha = lineCoverage(distance, thickness);
+        }
+        else if ( style == 5 ) {
+          float distance = distance(point, nearestVertex(point));
+          alpha = lineCoverage(distance, thickness);
+        }
+
+        // Solid lines
+        else if ( style == 0 ) {
+          float distance = edgeDistance(point);
+          alpha = lineCoverage(distance, thickness);
+        }
+
+        // Dashed / Dotted
+        else {
+          vec3 o = edgeOffset(point);
+          if ( (style == 1) && TYPE_IS_HEXAGONAL_FN() ) {
+            float padding = thickness * ((1.0 - SQRT1_3) * 0.5);
+            o.x += padding;
+            o.z += (padding * 2.0);
+          }
+
+          float intervals = o.z * 0.5 / thickness;
+          if ( intervals < 0.5 ) {
+            alpha = lineCoverage(o.y, thickness);
+          } else {
+            float interval = thickness * (2.0 * (intervals / floor(intervals + 0.5)));
+            float dx = o.x - (floor((o.x / interval) + 0.5) * interval);
+            float dy = o.y;
+
+            if ( style == 2 ) {
+              alpha = lineCoverage(length(vec2(dx, dy)), thickness);
+            } else {
+              alpha = min(lineCoverage(dx, thickness), lineCoverage(dy, thickness));
             }
-            ctx.lineTo(points[0], points[1]); // Close loop
           }
         }
+
+        return alpha;
       }
-    }
-    
-    ctx.stroke();
+
+      void main() {
+        if (uAlpha <= 0.0) discard;
+        if (uGridSize <= 0.0) discard;
+
+        // Convert our world-space (Y-up) to Foundry pixel space (Y-down)
+        vec2 pixelCoord = vec2(vWorldPos.x, uCanvasHeight - vWorldPos.y);
+        vec2 gridCoord = pixelCoord / uGridSize;
+
+        float a = drawGrid(gridCoord, uStyle, uThickness);
+        if (a <= 0.0) discard;
+
+        gl_FragColor = vec4(uColor, uAlpha * a);
+      }
+    `;
   }
 
   /**
@@ -449,13 +617,9 @@ export class GridRenderer {
       this.gridMesh.geometry.dispose();
       this.gridMesh.material.dispose();
     }
-    
-    if (this.gridTexture) {
-      this.gridTexture.dispose();
-    }
-    
+
     this.gridMesh = null;
-    this.gridTexture = null;
+    this.gridMaterial = null;
     this.initialized = false;
     
     log.info('GridRenderer disposed');

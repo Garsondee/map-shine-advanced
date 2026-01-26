@@ -659,8 +659,13 @@ export class SpecularEffect extends EffectBase {
     }
 
     if (!this.specularMask) {
-      log.warn('No specular mask found, effect will have no visible result');
-      this.enabled = false;
+      // Scene-wide specular on the base plane is optional.
+      // Some scenes only need per-tile specular overlays (e.g., a single glossy prop tile)
+      // while other tiles intentionally have no mask.
+      //
+      // Important: Do NOT disable the entire effect here, because that would also disable
+      // per-tile overlays (they share the same uEffectEnabled uniform).
+      log.warn('No scene-wide _Specular mask found for base mesh; base specular disabled but per-tile overlays may still render');
       return;
     }
     
@@ -1122,40 +1127,57 @@ export class SpecularEffect extends EffectBase {
   }
 
   updateLightUniforms() {
-    if (!this.material) return;
+    // Apply light state to every material instance (base plane + any tile overlays).
+    // The base mesh may not have a scene-wide _Specular mask, but tile overlays can still exist.
+    if (!this._materials || this._materials.size === 0) return;
     
     const lightsArray = Array.from(this.lights.values());
     const num = lightsArray.length;
     
-    this.material.uniforms.numLights.value = num;
-    
-    const lightPos = this.material.uniforms.lightPosition.value;
-    const lightCol = this.material.uniforms.lightColor.value;
-    const lightCfg = this.material.uniforms.lightConfig.value;
+    for (const mat of this._materials) {
+      const uniforms = mat?.uniforms;
+      if (!uniforms?.numLights || !uniforms?.lightPosition || !uniforms?.lightColor || !uniforms?.lightConfig) continue;
 
-    // Pixels per distance unit
-    const pixelsPerUnit = canvas.dimensions.size / canvas.dimensions.distance;
+      uniforms.numLights.value = num;
 
-    for (let i = 0; i < num; i++) {
-      const l = lightsArray[i];
-      const i3 = i * 3;
-      const i4 = i * 4;
-      
-      lightPos[i3] = l.position.x;
-      lightPos[i3 + 1] = l.position.y;
-      lightPos[i3 + 2] = 0;
-      
-      lightCol[i3] = l.color.r;
-      lightCol[i3 + 1] = l.color.g;
-      lightCol[i3 + 2] = l.color.b;
-      
-      const radiusPx = l.radius * pixelsPerUnit;
-      const brightPx = l.bright * pixelsPerUnit;
-      
-      lightCfg[i4] = radiusPx;
-      lightCfg[i4 + 1] = brightPx;
-      lightCfg[i4 + 2] = l.attenuation;
-      lightCfg[i4 + 3] = 0;
+      const lightPos = uniforms.lightPosition.value;
+      const lightCol = uniforms.lightColor.value;
+      const lightCfg = uniforms.lightConfig.value;
+
+    // Pixels per distance unit.
+    // Foundry stores light radii in distance units, but pixel size can differ for hex grids.
+    // Prefer grid.sizeX/sizeY when available.
+    const d = canvas?.dimensions;
+    const grid = canvas?.grid;
+    const gridSizeX = (grid && typeof grid.sizeX === 'number' && grid.sizeX > 0) ? grid.sizeX : null;
+    const gridSizeY = (grid && typeof grid.sizeY === 'number' && grid.sizeY > 0) ? grid.sizeY : null;
+    const pxPerGrid = (gridSizeX && gridSizeY)
+      ? (0.5 * (gridSizeX + gridSizeY))
+      : (d?.size ?? 100);
+    const distPerGrid = (d && typeof d.distance === 'number' && d.distance > 0) ? d.distance : 1;
+    const pixelsPerUnit = pxPerGrid / distPerGrid;
+
+      for (let i = 0; i < num; i++) {
+        const l = lightsArray[i];
+        const i3 = i * 3;
+        const i4 = i * 4;
+
+        lightPos[i3] = l.position.x;
+        lightPos[i3 + 1] = l.position.y;
+        lightPos[i3 + 2] = 0;
+
+        lightCol[i3] = l.color.r;
+        lightCol[i3 + 1] = l.color.g;
+        lightCol[i3 + 2] = l.color.b;
+
+        const radiusPx = l.radius * pixelsPerUnit;
+        const brightPx = l.bright * pixelsPerUnit;
+
+        lightCfg[i4] = radiusPx;
+        lightCfg[i4 + 1] = brightPx;
+        lightCfg[i4 + 2] = l.attenuation;
+        lightCfg[i4 + 3] = 0;
+      }
     }
   }
 
@@ -1164,7 +1186,9 @@ export class SpecularEffect extends EffectBase {
    * @param {TimeInfo} timeInfo - Centralized time information
    */
   update(timeInfo) {
-    if (!this.material) return;
+    // The base mesh material may not exist if the scene has no scene-wide _Specular mask,
+    // but per-tile overlay materials can still exist and must keep animating.
+    if (!this._materials || this._materials.size === 0) return;
     
     // Validate shader uniforms periodically (every 60 frames)
     if (timeInfo.frameCount % 60 === 0) {
@@ -1315,7 +1339,9 @@ export class SpecularEffect extends EffectBase {
    * @param {THREE.Camera} camera
    */
   render(renderer, scene, camera) {
-    if (!this.material) return;
+    // The base mesh material may not exist if the scene has no scene-wide _Specular mask,
+    // but per-tile overlay materials can still receive per-frame uniforms.
+    if (!this._materials || this._materials.size === 0) return;
     
     // Update camera position for view-dependent effects
     // Safety check: ensure camera position is valid
@@ -1382,11 +1408,17 @@ export class SpecularEffect extends EffectBase {
           if (mat?.uniforms?.uRoofMap) mat.uniforms.uRoofMap.value = roofTex;
           if (mat?.uniforms?.uRoofMaskEnabled) mat.uniforms.uRoofMaskEnabled.value = roofTex ? 1.0 : 0.0;
           if (d && mat?.uniforms?.uSceneBounds?.value?.set) {
-            const sx = d.sceneX ?? 0;
-            const sy = d.sceneY ?? 0;
-            const sw = d.sceneWidth ?? d.width ?? 1;
-            const sh = d.sceneHeight ?? d.height ?? 1;
-            mat.uniforms.uSceneBounds.value.set(sx, sy, sw, sh);
+            const rect = d.sceneRect;
+            const sx = rect?.x ?? d.sceneX ?? 0;
+            const syFoundry = rect?.y ?? d.sceneY ?? 0;
+            const sw = rect?.width ?? d.sceneWidth ?? d.width ?? 1;
+            const sh = rect?.height ?? d.sceneHeight ?? d.height ?? 1;
+            const worldH = d.height ?? (syFoundry + sh);
+
+            // Convert Foundry Y-down scene rect into Three.js Y-up bounds.
+            // We store minY in world space so shaders can project vWorldPosition.xy.
+            const syWorld = worldH - (syFoundry + sh);
+            mat.uniforms.uSceneBounds.value.set(sx, syWorld, sw, sh);
           }
         }
       }
@@ -1418,7 +1450,12 @@ export class SpecularEffect extends EffectBase {
       this.lastValidation = now;
     }
     
-    const result = ShaderValidator.validateMaterialUniforms(this.material);
+    // The base mesh material can be null when a scene has no scene-wide _Specular mask.
+    // In that case, validate any available material instance (e.g. per-tile overlays).
+    const matToValidate = this.material || (this._materials ? this._materials.values().next().value : null);
+    if (!matToValidate) return;
+
+    const result = ShaderValidator.validateMaterialUniforms(matToValidate);
     
     if (!result.valid) {
       this.validationErrors = result.errors;

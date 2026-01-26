@@ -524,10 +524,19 @@ export class LensflareEffect extends EffectBase {
     // Convert Foundry (top-left, Y-down) coords to world (Y-up) using Coordinates utility
     // Then elevate slightly to avoid z-fighting with the ground.
     const worldPos = Coordinates.toWorld(doc.x, doc.y);
+    const d = canvas?.dimensions;
+    const grid = canvas?.grid;
+    const gridSizeX = (grid && typeof grid.sizeX === 'number' && grid.sizeX > 0) ? grid.sizeX : null;
+    const gridSizeY = (grid && typeof grid.sizeY === 'number' && grid.sizeY > 0) ? grid.sizeY : null;
+    const pxPerGrid = (gridSizeX && gridSizeY)
+      ? (0.5 * (gridSizeX + gridSizeY))
+      : (d?.size ?? 100);
+    const distPerGrid = (d && typeof d.distance === 'number' && d.distance > 0) ? d.distance : 1;
+    const pxPerUnit = pxPerGrid / distPerGrid;
     lensflare.position.set(
       worldPos.x,
       worldPos.y,
-      (doc.elevation || 0) * canvas.dimensions.size / canvas.dimensions.distance + 50
+      (doc.elevation || 0) * pxPerUnit + 50
     );
 
     scene.add(lensflare);
@@ -621,10 +630,19 @@ export class LensflareEffect extends EffectBase {
 
     if ('x' in changes || 'y' in changes || 'elevation' in changes) {
       const worldPos = Coordinates.toWorld(targetDoc.x, targetDoc.y);
+      const d = canvas?.dimensions;
+      const grid = canvas?.grid;
+      const gridSizeX = (grid && typeof grid.sizeX === 'number' && grid.sizeX > 0) ? grid.sizeX : null;
+      const gridSizeY = (grid && typeof grid.sizeY === 'number' && grid.sizeY > 0) ? grid.sizeY : null;
+      const pxPerGrid = (gridSizeX && gridSizeY)
+        ? (0.5 * (gridSizeX + gridSizeY))
+        : (d?.size ?? 100);
+      const distPerGrid = (d && typeof d.distance === 'number' && d.distance > 0) ? d.distance : 1;
+      const pxPerUnit = pxPerGrid / distPerGrid;
       flare.position.set(
         worldPos.x,
         worldPos.y,
-        (targetDoc.elevation || 0) * canvas.dimensions.size / canvas.dimensions.distance + 50
+        (targetDoc.elevation || 0) * pxPerUnit + 50
       );
     }
     

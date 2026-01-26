@@ -973,11 +973,13 @@ export class PlayerLightEffect extends EffectBase {
 
     if (isTorchMode && this.params.torchReigniteRequiresTouch) {
       try {
-        const gridSize = canvas?.dimensions?.size ?? 100;
+        const grid = canvas?.grid;
+        const gridSizeX = (grid && typeof grid.sizeX === 'number' && grid.sizeX > 0) ? grid.sizeX : (canvas?.dimensions?.size ?? 100);
+        const gridSizeY = (grid && typeof grid.sizeY === 'number' && grid.sizeY > 0) ? grid.sizeY : (canvas?.dimensions?.size ?? 100);
         const scaleX = tokenDoc?.texture?.scaleX ?? 1;
         const scaleY = tokenDoc?.texture?.scaleY ?? 1;
-        const wPx = (tokenDoc?.width ?? 1) * gridSize * scaleX;
-        const hPx = (tokenDoc?.height ?? 1) * gridSize * scaleY;
+        const wPx = (tokenDoc?.width ?? 1) * gridSizeX * scaleX;
+        const hPx = (tokenDoc?.height ?? 1) * gridSizeY * scaleY;
         const tokenRadiusPx = 0.5 * Math.max(0, Math.min(wPx, hPx));
         const tokenRadiusU = tokenRadiusPx * pxToUnits;
         const extraU = Math.max(0, this.params.torchReigniteTouchExtraUnits ?? 0);
@@ -1332,8 +1334,17 @@ export class PlayerLightEffect extends EffectBase {
 
   _pxToUnits() {
     const d = canvas?.dimensions;
-    if (!d || typeof d.distance !== 'number' || typeof d.size !== 'number' || d.size <= 0) return 1;
-    return d.distance / d.size;
+    if (!d || typeof d.distance !== 'number' || d.distance <= 0) return 1;
+
+    // Prefer grid.sizeX/sizeY when available (hex grids can differ from dimensions.size).
+    const grid = canvas?.grid;
+    const gridSizeX = (grid && typeof grid.sizeX === 'number' && grid.sizeX > 0) ? grid.sizeX : null;
+    const gridSizeY = (grid && typeof grid.sizeY === 'number' && grid.sizeY > 0) ? grid.sizeY : null;
+    const pxPerGrid = (gridSizeX && gridSizeY)
+      ? (0.5 * (gridSizeX + gridSizeY))
+      : (typeof d.size === 'number' && d.size > 0 ? d.size : 100);
+
+    return d.distance / pxPerGrid;
   }
 
   _flashlightRand() {
@@ -2451,11 +2462,13 @@ export class PlayerLightEffect extends EffectBase {
     const lenPx = Math.hypot(this._tempA.x, this._tempA.y);
     const lenU = lenPx * pxToUnits;
 
-    const gridSize = canvas?.dimensions?.size ?? 100;
+    const grid = canvas?.grid;
+    const gridSizeX = (grid && typeof grid.sizeX === 'number' && grid.sizeX > 0) ? grid.sizeX : (canvas?.dimensions?.size ?? 100);
+    const gridSizeY = (grid && typeof grid.sizeY === 'number' && grid.sizeY > 0) ? grid.sizeY : (canvas?.dimensions?.size ?? 100);
     const scaleX = tokenDoc?.texture?.scaleX ?? 1;
     const scaleY = tokenDoc?.texture?.scaleY ?? 1;
-    const wPx = (tokenDoc?.width ?? 1) * gridSize * scaleX;
-    const hPx = (tokenDoc?.height ?? 1) * gridSize * scaleY;
+    const wPx = (tokenDoc?.width ?? 1) * gridSizeX * scaleX;
+    const hPx = (tokenDoc?.height ?? 1) * gridSizeY * scaleY;
     const tokenRadiusPx = 0.5 * Math.max(0, Math.min(wPx, hPx));
     const tokenRadiusU = tokenRadiusPx * pxToUnits;
     const beamStartPx = Math.max(0, tokenRadiusPx);

@@ -454,7 +454,7 @@ async function waitForThreeFrames(
  * @param {string} userId - User who made the change
  * @private
  */
-function onUpdateScene(scene, changes, options, userId) {
+async function onUpdateScene(scene, changes, _options, _userId) {
   // Only process if this is the current scene and Map Shine is enabled
   if (!canvas?.scene || scene.id !== canvas.scene.id) return;
   if (!sceneSettings.isEnabled(scene)) return;
@@ -556,25 +556,74 @@ function onUpdateScene(scene, changes, options, userId) {
   } catch (e) {
   }
   
+  // Grid changes should NOT require a full Three.js scene rebuild.
+  // Rebuilding can race with Foundry's internal canvas updates and briefly leave `canvas.ready=false`,
+  // which breaks ControlsIntegration initialization.
+  if ('grid' in changes) {
+    try {
+      gridRenderer?.updateGrid?.();
+    } catch (_) {
+    }
+  }
+
   // Check for changes that require full reinitialization
+  // NOTE: Some grid changes (type/size/distance) can change canvas.dimensions, sceneRect, and snapping geometry.
+  // Those DO require a rebuild so the camera, base plane, effect bounds, and render targets stay consistent.
+  // Purely visual grid changes (style/thickness/color/alpha) should not rebuild.
+  const gridChanges = changes.grid && typeof changes.grid === 'object' ? changes.grid : null;
+  const gridGeometryChanged = !!(gridChanges && (
+    Object.prototype.hasOwnProperty.call(gridChanges, 'type') ||
+    Object.prototype.hasOwnProperty.call(gridChanges, 'size') ||
+    Object.prototype.hasOwnProperty.call(gridChanges, 'distance')
+  ));
+
   const requiresReinit = [
-    'grid',           // Grid size, type, style changes
     'padding',        // Scene padding changes
     'background',     // Background image changes
     'width',          // Scene dimension changes
     'height',
     'backgroundColor' // Background color changes
   ].some(key => key in changes);
+
+  const shouldReinit = requiresReinit || gridGeometryChanged;
   
-  if (requiresReinit) {
+  if (shouldReinit) {
     log.info('Scene configuration changed, reinitializing Map Shine canvas');
     
     // Defer to next frame to ensure Foundry has finished updating
     setTimeout(async () => {
-      destroyThreeCanvas();
       await createThreeCanvas(scene);
     }, 0);
   }
+}
+
+async function _waitForFoundryCanvasReady({ timeoutMs = 15000 } = {}) {
+  const start = Date.now();
+  const pollMs = 50;
+
+  while ((Date.now() - start) < timeoutMs) {
+    try {
+      const issues = [];
+      if (!canvas?.ready) issues.push('Canvas not ready');
+      if (!canvas?.stage) issues.push('Stage not initialized');
+      if (!canvas?.app?.renderer) issues.push('Renderer not available');
+      if (!canvas?.app?.view) issues.push('Canvas view not available');
+
+      // Match ControlsIntegration expectations
+      const requiredLayers = ['tokens', 'walls', 'lighting', 'controls'];
+      for (const name of requiredLayers) {
+        if (!canvas?.[name]) issues.push(`Missing layer: ${name}`);
+      }
+
+      if (issues.length === 0) return true;
+    } catch (_) {
+      // Keep polling
+    }
+
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+
+  return false;
 }
 
 /**
@@ -899,6 +948,21 @@ async function createThreeCanvas(scene) {
   }
 
   try {
+    // Scene updates (like changing grid type/style) can momentarily put the Foundry canvas into
+    // a partially-initialized state. Wait for it to be stable before we touch layers or
+    // initialize ControlsIntegration.
+    try {
+      const ok = await _waitForFoundryCanvasReady({ timeoutMs: 15000 });
+      if (!ok) {
+        log.warn('Foundry canvas not ready after timeout; aborting MapShine scene init');
+        return;
+      }
+    } catch (_) {
+      // If the wait fails unexpectedly, continue; later steps may still succeed.
+    }
+
+    if (isStale()) return;
+
     try {
       loadingOverlay.showBlack(`Loading ${scene?.name || 'scene'}…`);
       loadingOverlay.configureStages([
@@ -1363,18 +1427,26 @@ async function createThreeCanvas(scene) {
     // Provide the base mesh and asset bundle to the effect
     const basePlane = sceneComposer.getBasePlane();
 
-    specularEffect.setBaseMesh(basePlane, bundle);
-    iridescenceEffect.setBaseMesh(basePlane, bundle);
-    prismEffect.setBaseMesh(basePlane, bundle);
-    waterEffect.setBaseMesh(basePlane, bundle);
-    windowLightEffect.setBaseMesh(basePlane, bundle);
-    windowLightEffect.createLightTarget();
-    bushEffect.setBaseMesh(basePlane, bundle);
-    treeEffect.setBaseMesh(basePlane, bundle);
-    lightingEffect.setBaseMesh(basePlane, bundle);
-    overheadShadowsEffect.setBaseMesh(basePlane, bundle);
-    buildingShadowsEffect.setBaseMesh(basePlane, bundle);
-    cloudEffect.setBaseMesh(basePlane, bundle);
+    const _safeSetBaseMesh = (label, fn) => {
+      try {
+        fn();
+      } catch (e) {
+        log.error(`Failed to wire base mesh for ${label}`, e);
+      }
+    };
+
+    _safeSetBaseMesh('Specular', () => specularEffect?.setBaseMesh?.(basePlane, bundle));
+    _safeSetBaseMesh('Iridescence', () => iridescenceEffect?.setBaseMesh?.(basePlane, bundle));
+    _safeSetBaseMesh('Prism', () => prismEffect?.setBaseMesh?.(basePlane, bundle));
+    _safeSetBaseMesh('Water', () => waterEffect?.setBaseMesh?.(basePlane, bundle));
+    _safeSetBaseMesh('Window Lights', () => windowLightEffect?.setBaseMesh?.(basePlane, bundle));
+    _safeSetBaseMesh('Window Lights Target', () => windowLightEffect?.createLightTarget?.());
+    _safeSetBaseMesh('Bushes', () => bushEffect?.setBaseMesh?.(basePlane, bundle));
+    _safeSetBaseMesh('Trees', () => treeEffect?.setBaseMesh?.(basePlane, bundle));
+    _safeSetBaseMesh('Lighting', () => lightingEffect?.setBaseMesh?.(basePlane, bundle));
+    _safeSetBaseMesh('Overhead Shadows', () => overheadShadowsEffect?.setBaseMesh?.(basePlane, bundle));
+    _safeSetBaseMesh('Building Shadows', () => buildingShadowsEffect?.setBaseMesh?.(basePlane, bundle));
+    _safeSetBaseMesh('Clouds', () => cloudEffect?.setBaseMesh?.(basePlane, bundle));
 
     try {
       loadingOverlay.setStage('scene', 0.0, 'Syncing scene…', { immediate: true });
@@ -1395,6 +1467,10 @@ async function createThreeCanvas(scene) {
     gridRenderer = new GridRenderer(threeScene);
     gridRenderer.initialize();
     gridRenderer.updateGrid();
+    try {
+      if (effectComposer) effectComposer.addUpdatable(gridRenderer);
+    } catch (_) {
+    }
     log.info('Grid renderer initialized');
 
     try {
@@ -1591,7 +1667,10 @@ async function createThreeCanvas(scene) {
       sceneComposer,
       effectComposer
     });
-    await controlsIntegration.initialize();
+    {
+      const ok = await controlsIntegration.initialize();
+      if (!ok) throw new Error('ControlsIntegration initialization failed');
+    }
     
     log.info('Controls integration initialized');
 
@@ -1678,6 +1757,34 @@ async function createThreeCanvas(scene) {
           return result;
         };
         fogMgr._mapShineWrappedHandleReset = true;
+      }
+
+      // IMPORTANT:
+      // Foundry's FogManager.commit() schedules a *privately stored* debounced save function
+      // (bound during FogManager.initialize()). Wrapping fogMgr.save is not sufficient because
+      // commit() can still trigger the original internal save path, which performs texture
+      // extraction + worker compression. If our Three.js fog replacement is active, we want
+      // to fully prevent Foundry from attempting to persist fog exploration.
+      if (fogMgr && typeof fogMgr.commit === 'function' && !fogMgr._mapShineWrappedCommit) {
+        const originalCommit = fogMgr.commit.bind(fogMgr);
+        fogMgr.commit = (...args) => {
+          try {
+            // In Map Maker mode, PIXI is the authoritative renderer; allow Foundry fog to work normally.
+            if (isMapMakerMode) return originalCommit(...args);
+
+            // In Gameplay mode with MapShine fog enabled, MapShine owns exploration persistence.
+            const fog = window.MapShine?.fogEffect;
+            if (fog && fog.params?.enabled !== false) {
+              return;
+            }
+
+            // Otherwise, fall back to Foundry's native behavior.
+            return originalCommit(...args);
+          } catch (_) {
+            return;
+          }
+        };
+        fogMgr._mapShineWrappedCommit = true;
       }
 
       if (fogMgr && typeof fogMgr.save === 'function' && !fogMgr._mapShineWrappedSave) {
@@ -1791,6 +1898,7 @@ async function createThreeCanvas(scene) {
 
     // Initialize Tweakpane UI
     try {
+      if (isStale()) return;
       await initializeUI(
         specularEffect,
         iridescenceEffect,
@@ -3970,6 +4078,10 @@ function destroyThreeCanvas() {
 
   // Dispose grid renderer
   if (gridRenderer) {
+    try {
+      if (effectComposer) effectComposer.removeUpdatable(gridRenderer);
+    } catch (_) {
+    }
     gridRenderer.dispose();
     gridRenderer = null;
     log.debug('Grid renderer disposed');

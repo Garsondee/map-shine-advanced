@@ -223,13 +223,23 @@ export class TileManager {
     this.specularEffect = specularEffect || null;
   }
 
-  _tileWantsSpecular(tileDoc) {
+  _getTileSpecularMode(tileDoc) {
+    // Tri-state:
+    // - true  => force enable and attempt to bind
+    // - false => force disable and never bind
+    // - unset => auto-detect by probing for a matching _Specular file
     try {
       const f = tileDoc?.flags?.['map-shine-advanced'];
-      return !!f?.enableSpecular;
+      if (f?.enableSpecular === true) return 'enabled';
+      if (f?.enableSpecular === false) return 'disabled';
+      return 'auto';
     } catch (_) {
-      return false;
+      return 'auto';
     }
+  }
+
+  _tileAllowsSpecular(tileDoc) {
+    return this._getTileSpecularMode(tileDoc) !== 'disabled';
   }
 
   _deriveMaskPath(src, suffix) {
@@ -430,7 +440,7 @@ export class TileManager {
   }
 
   async _resolveTileSpecularMaskUrl(tileDoc) {
-    if (!this._tileWantsSpecular(tileDoc)) return null;
+    if (!this._tileAllowsSpecular(tileDoc)) return null;
     const src = tileDoc?.texture?.src;
     const parts = this._splitUrl(src);
     if (!parts) return null;
@@ -471,9 +481,26 @@ export class TileManager {
         if (parts.query) candidates.push(`${baseNoQuery}${parts.query}`);
       }
 
+      // Prefer avoiding 404 spam by checking existence via FilePicker before loading.
+      // If FilePicker returns an empty list (unavailable/failed), we'll fall back to probing.
+      let hasFilePickerListing = false;
+      try {
+        const dir = this._getDirectoryFromPath(parts.base);
+        const files = await this._listDirectoryFiles(dir);
+        hasFilePickerListing = Array.isArray(files) && files.length > 0;
+      } catch (_) {
+        hasFilePickerListing = false;
+      }
+
       for (let i = 0; i < candidates.length; i++) {
         const url = candidates[i];
         try {
+          if (hasFilePickerListing) {
+            // Only probe the no-query form against the directory listing.
+            const noQuery = url.split('?')[0];
+            const exists = await this._fileExistsViaFilePicker(noQuery);
+            if (!exists) continue;
+          }
           const tex = await this.loadTileTexture(url);
           if (tex) {
             this._tileSpecularMaskCache.set(url, tex);
@@ -1356,8 +1383,6 @@ export class TileManager {
 
         for (const token of sources) {
           // Token center
-          const tx = token.document.x + token.document.width / 2 * (canvas.dimensions.size || 100); // Wait, width/height are grid units?
-          // token.document.width is in grid units. token.w is pixels.
           const txPx = token.x + token.w / 2;
           const tyPx = token.y + token.h / 2;
 
@@ -1741,7 +1766,7 @@ export class TileManager {
 
       // Bind per-tile specular overlay if a matching _Specular mask exists and enabled.
       try {
-        if (this.specularEffect && this._tileWantsSpecular(tileDoc)) {
+        if (this.specularEffect && this._tileAllowsSpecular(tileDoc)) {
           this.loadTileSpecularMaskTexture(tileDoc).then((specTex) => {
             if (!specTex) {
               this.specularEffect.unbindTileSprite(tileDoc.id);
@@ -1798,7 +1823,7 @@ export class TileManager {
 
     // Kick specular resolve early (texture load is async, but we can probe now).
     try {
-      if (this.specularEffect && this._tileWantsSpecular(tileDoc)) {
+      if (this.specularEffect && this._tileAllowsSpecular(tileDoc)) {
         this.loadTileSpecularMaskTexture(tileDoc).then((specTex) => {
           if (!specTex) return;
           this.specularEffect.bindTileSprite(tileDoc, sprite, specTex);
@@ -1876,8 +1901,8 @@ export class TileManager {
       flags: mergedFlags
     };
 
-    // Specular masks are opt-in per tile.
-    const wantsSpecular = this._tileWantsSpecular(targetDoc);
+    // Specular masks can be forced on/off, or auto-detected when unset.
+    const allowsSpecular = this._tileAllowsSpecular(targetDoc);
 
     // Update transform if relevant properties changed
     if ('x' in changes || 'y' in changes || 'width' in changes ||
@@ -1897,7 +1922,7 @@ export class TileManager {
       // If toggled on, we'll bind below (and/or on the next texture load).
       if ('flags' in changes) {
         try {
-          if (!wantsSpecular) {
+          if (!allowsSpecular) {
             this.specularEffect?.unbindTileSprite?.(tileDoc.id);
           } else if (this.specularEffect) {
             // Specular was enabled (or remains enabled) but may not be bound yet.
@@ -1968,7 +1993,7 @@ export class TileManager {
 
         try {
           if (this.specularEffect) {
-            if (!wantsSpecular) {
+            if (!allowsSpecular) {
               this.specularEffect.unbindTileSprite(tileDoc.id);
             } else {
               const nextDoc = { texture: { src: changes.texture.src }, flags: targetDoc.flags };

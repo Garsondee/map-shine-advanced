@@ -543,8 +543,17 @@ export class IridescenceEffect extends EffectBase {
     const lightCol = this.material.uniforms.lightColor.value;
     const lightCfg = this.material.uniforms.lightConfig.value;
 
-    // Pixels per distance unit
-    const pixelsPerUnit = (canvas && canvas.dimensions) ? (canvas.dimensions.size / canvas.dimensions.distance) : 1.0;
+    // Pixels per distance unit.
+    // Prefer grid.sizeX/sizeY when available (hex grids can differ from dimensions.size).
+    const d = canvas?.dimensions;
+    const grid = canvas?.grid;
+    const gridSizeX = (grid && typeof grid.sizeX === 'number' && grid.sizeX > 0) ? grid.sizeX : null;
+    const gridSizeY = (grid && typeof grid.sizeY === 'number' && grid.sizeY > 0) ? grid.sizeY : null;
+    const pxPerGrid = (gridSizeX && gridSizeY)
+      ? (0.5 * (gridSizeX + gridSizeY))
+      : (d?.size ?? 100);
+    const distPerGrid = (d && typeof d.distance === 'number' && d.distance > 0) ? d.distance : 1;
+    const pixelsPerUnit = pxPerGrid / distPerGrid;
 
     for (let i = 0; i < num; i++) {
       const l = lightsArray[i];

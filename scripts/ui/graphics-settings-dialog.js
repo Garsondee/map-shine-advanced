@@ -105,6 +105,23 @@ export class GraphicsSettingsDialog {
       this.refreshStatus();
     });
 
+    globalFolder.addBinding(this.manager.state, 'renderResolutionPreset', {
+      label: 'Render Resolution',
+      options: {
+        'Native': 'native',
+        '3840x2160 (4K)': '3840x2160',
+        '2560x1440 (1440p)': '2560x1440',
+        '1920x1080 (1080p)': '1920x1080',
+        '1600x900 (900p)': '1600x900',
+        '1280x720 (720p)': '1280x720',
+        '1024x576': '1024x576',
+        '800x450': '800x450'
+      }
+    }).on('change', (ev) => {
+      this.manager.setRenderResolutionPreset(ev.value);
+      this.manager.saveState();
+    });
+
     globalFolder.addButton({
       title: 'Enable All'
     }).on('click', () => {

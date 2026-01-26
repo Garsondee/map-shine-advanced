@@ -3061,8 +3061,6 @@ export class InteractionManager {
 
       if (this.dragState?.active) return;
 
-      if (event.ctrlKey) event.preventDefault();
-
       // Use actual event modifier state. Foundry's global modifier tracking can become stale
       // (e.g. CONTROL reported active when it is not), which would incorrectly hijack wheel
       // events and make normal zoom feel "stuck".
@@ -3083,6 +3081,8 @@ export class InteractionManager {
 
       event.delta = dy;
       event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
       layer._onMouseWheel?.(event);
     } catch (err) {
       log.error('Error in onWheel:', err);

@@ -140,6 +140,19 @@ let graphicsSettings = null;
 /** @type {EffectCapabilitiesRegistry|null} */
 let effectCapabilitiesRegistry = null;
 
+function _applyRenderResolutionToRenderer(viewportWidthCss, viewportHeightCss) {
+  if (!renderer || typeof renderer.setPixelRatio !== 'function') return;
+
+  try {
+    const baseDpr = window.devicePixelRatio || 1;
+    const effective = graphicsSettings?.computeEffectivePixelRatio
+      ? graphicsSettings.computeEffectivePixelRatio(viewportWidthCss, viewportHeightCss, baseDpr)
+      : baseDpr;
+    renderer.setPixelRatio(effective);
+  } catch (_) {
+  }
+}
+
 /** @type {EnhancedLightInspector|null} */
 let enhancedLightInspector = null;
 
@@ -733,7 +746,16 @@ async function onCanvasReady(canvas) {
     try {
       if (!effectCapabilitiesRegistry) effectCapabilitiesRegistry = new EffectCapabilitiesRegistry();
       if (!graphicsSettings) {
-        graphicsSettings = new GraphicsSettingsManager(null, effectCapabilitiesRegistry);
+        graphicsSettings = new GraphicsSettingsManager(null, effectCapabilitiesRegistry, {
+          onApplyRenderResolution: () => {
+            try {
+              if (!threeCanvas) return;
+              const rect = threeCanvas.getBoundingClientRect();
+              resize(rect.width, rect.height);
+            } catch (_) {
+            }
+          }
+        });
         await graphicsSettings.initialize();
         if (window.MapShine) window.MapShine.graphicsSettings = graphicsSettings;
       }
@@ -1106,13 +1128,7 @@ async function createThreeCanvas(scene) {
     // Avoid setSize() overwriting our CSS sizing (width/height=100%).
     // If updateStyle=true, three will set style width/height to fixed pixel values,
     // preventing future container resizes from affecting the canvas element.
-    try {
-      const dpr = window.devicePixelRatio || 1;
-      if (typeof renderer.setPixelRatio === 'function') {
-        renderer.setPixelRatio(dpr);
-      }
-    } catch (_) {
-    }
+    _applyRenderResolutionToRenderer(rect.width, rect.height);
 
     try {
       renderer.setSize(rect.width, rect.height, false);
@@ -1141,13 +1157,7 @@ async function createThreeCanvas(scene) {
           // Re-apply sizing to ensure internal buffers are sane.
           const r = threeCanvas?.getBoundingClientRect?.();
           if (r && renderer) {
-            try {
-              const dpr = window.devicePixelRatio || 1;
-              if (typeof renderer.setPixelRatio === 'function') {
-                renderer.setPixelRatio(dpr);
-              }
-            } catch (_) {
-            }
+            _applyRenderResolutionToRenderer(r.width, r.height);
 
             try {
               renderer.setSize(r.width, r.height, false);
@@ -1155,7 +1165,18 @@ async function createThreeCanvas(scene) {
               renderer.setSize(r.width, r.height);
             }
             if (sceneComposer) sceneComposer.resize(r.width, r.height);
-            if (effectComposer) effectComposer.resize(r.width, r.height);
+            if (effectComposer) {
+              // EffectComposer expects drawing-buffer pixels.
+              try {
+                const THREE = window.THREE;
+                const buf = (renderer && typeof renderer.getDrawingBufferSize === 'function' && THREE)
+                  ? renderer.getDrawingBufferSize(new THREE.Vector2())
+                  : null;
+                effectComposer.resize(buf?.width ?? buf?.x ?? r.width, buf?.height ?? buf?.y ?? r.height);
+              } catch (_) {
+                effectComposer.resize(r.width, r.height);
+              }
+            }
           }
         } catch (e) {
           log.warn('Resize failed during context restore', e);
@@ -1436,7 +1457,16 @@ async function createThreeCanvas(scene) {
 
     try {
       if (!graphicsSettings) {
-        graphicsSettings = new GraphicsSettingsManager(effectComposer, effectCapabilitiesRegistry);
+        graphicsSettings = new GraphicsSettingsManager(effectComposer, effectCapabilitiesRegistry, {
+          onApplyRenderResolution: () => {
+            try {
+              if (!threeCanvas) return;
+              const rect = threeCanvas.getBoundingClientRect();
+              resize(rect.width, rect.height);
+            } catch (_) {
+            }
+          }
+        });
         await graphicsSettings.initialize();
         if (window.MapShine) window.MapShine.graphicsSettings = graphicsSettings;
       }
@@ -5146,14 +5176,8 @@ export function resize(width, height) {
 
   // Update renderer size
   if (renderer) {
-    // Keep DPR in sync so projection + raycasting match across the full viewport.
-    try {
-      const dpr = window.devicePixelRatio || 1;
-      if (typeof renderer.setPixelRatio === 'function') {
-        renderer.setPixelRatio(dpr);
-      }
-    } catch (_) {
-    }
+    // Apply effective pixel ratio (Render Resolution preset) while keeping CSS full-screen.
+    _applyRenderResolutionToRenderer(width, height);
 
     // Avoid touching element CSS sizing (we control that via style=100%).
     // WebGLRenderer signature is (w,h,updateStyle). WebGPURenderer ignores the third.
@@ -5171,6 +5195,15 @@ export function resize(width, height) {
 
   // Update effect composer render targets
   if (effectComposer) {
-    effectComposer.resize(width, height);
+    // EffectComposer expects drawing-buffer pixels.
+    try {
+      const THREE = window.THREE;
+      const size = (renderer && typeof renderer.getDrawingBufferSize === 'function' && THREE)
+        ? renderer.getDrawingBufferSize(new THREE.Vector2())
+        : null;
+      effectComposer.resize(size?.width ?? size?.x ?? width, size?.height ?? size?.y ?? height);
+    } catch (_) {
+      effectComposer.resize(width, height);
+    }
   }
 }

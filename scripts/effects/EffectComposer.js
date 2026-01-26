@@ -599,26 +599,45 @@ export class EffectComposer {
    * @param {number} height - New height
    */
   resize(width, height) {
+    // IMPORTANT:
+    // The canvas has a CSS size (width/height) but the renderer has an internal drawing
+    // buffer size which is affected by renderer pixelRatio.
+    // All render targets and resolution uniforms MUST track drawing-buffer pixels.
+    let renderW = Math.max(1, Math.floor(width || 1));
+    let renderH = Math.max(1, Math.floor(height || 1));
+
+    try {
+      if (this.renderer?.getDrawingBufferSize) {
+        if (!this._sizeVec2) this._sizeVec2 = new window.THREE.Vector2();
+        const size = this._sizeVec2;
+        this.renderer.getDrawingBufferSize(size);
+        renderW = Math.max(1, Math.floor(size.width || size.x || renderW));
+        renderH = Math.max(1, Math.floor(size.height || size.y || renderH));
+      }
+    } catch (e) {
+      // Fall back to provided values.
+    }
+
     // Resize scene render target
     if (this.sceneRenderTarget) {
-      this.sceneRenderTarget.setSize(width, height);
-      log.debug(`Resized scene render target: ${width}x${height}`);
+      this.sceneRenderTarget.setSize(renderW, renderH);
+      log.debug(`Resized scene render target: ${renderW}x${renderH}`);
     }
 
     // Resize all named render targets
     for (const [name, target] of this.renderTargets.entries()) {
-      target.setSize(width, height);
-      log.debug(`Resized render target: ${name} (${width}x${height})`);
+      target.setSize(renderW, renderH);
+      log.debug(`Resized render target: ${name} (${renderW}x${renderH})`);
     }
 
     // Notify all effects of resize
     for (const effect of this.effects.values()) {
       if (effect.onResize) {
-        effect.onResize(width, height);
+        effect.onResize(renderW, renderH);
       }
     }
 
-    log.info(`EffectComposer resized to ${width}x${height}`);
+    log.info(`EffectComposer resized to ${renderW}x${renderH}`);
   }
 
   /**

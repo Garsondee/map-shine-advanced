@@ -17,6 +17,7 @@ const log = createLogger('GraphicsSettings');
 /**
  * @typedef {Object} GraphicsSettingsState
  * @property {boolean} globalDisableAll
+ * @property {string} renderResolutionPreset
  * @property {Object<string, {enabled?: boolean}>} effectOverrides
  */
 
@@ -24,14 +25,19 @@ export class GraphicsSettingsManager {
   /**
    * @param {import('../effects/EffectComposer.js').EffectComposer|null} effectComposer
    * @param {import('../effects/effect-capabilities-registry.js').EffectCapabilitiesRegistry|null} capabilitiesRegistry
+   * @param {{onApplyRenderResolution?: Function}|null} [options]
    */
-  constructor(effectComposer, capabilitiesRegistry) {
+  constructor(effectComposer, capabilitiesRegistry, options = null) {
     this.effectComposer = effectComposer;
     this.capabilitiesRegistry = capabilitiesRegistry;
+
+    /** @type {Function|null} */
+    this._onApplyRenderResolution = options?.onApplyRenderResolution ?? null;
 
     /** @type {GraphicsSettingsState} */
     this.state = {
       globalDisableAll: false,
+      renderResolutionPreset: 'native',
       effectOverrides: {}
     };
 
@@ -69,8 +75,75 @@ export class GraphicsSettingsManager {
    */
   async initialize() {
     this.loadState();
+
+    try {
+      this._onApplyRenderResolution?.();
+    } catch (e) {
+      log.warn('Failed to apply render resolution during initialize', e);
+    }
+
     await this.dialog.initialize();
     this.applyOverrides();
+  }
+
+  /**
+   * @returns {string}
+   */
+  getRenderResolutionPreset() {
+    return this.state?.renderResolutionPreset || 'native';
+  }
+
+  /**
+   * Compute effective renderer pixel ratio based on a familiar resolution preset.
+   *
+   * Notes:
+   * - The canvas remains full-screen in CSS.
+   * - We lower the drawing-buffer resolution by lowering renderer pixelRatio.
+   * - If the viewport aspect ratio differs from the preset, we fit the preset inside
+   *   the viewport while preserving the viewport aspect (pixelRatio is uniform).
+   *
+   * @param {number} viewportWidthCss
+   * @param {number} viewportHeightCss
+   * @param {number} basePixelRatio
+   * @returns {number}
+   */
+  computeEffectivePixelRatio(viewportWidthCss, viewportHeightCss, basePixelRatio) {
+    const preset = this.getRenderResolutionPreset();
+    const base = Math.max(0.1, Number(basePixelRatio) || 1);
+
+    if (!viewportWidthCss || !viewportHeightCss) return base;
+    if (!preset || preset === 'native') return base;
+
+    const match = String(preset).match(/^(\d+)x(\d+)$/i);
+    if (!match) return base;
+
+    const targetW = Math.max(1, Number(match[1]) || 1);
+    const targetH = Math.max(1, Number(match[2]) || 1);
+
+    // Pixel ratio is relative to CSS pixels, so ratio = targetPixels / cssPixels.
+    const prFromW = targetW / viewportWidthCss;
+    const prFromH = targetH / viewportHeightCss;
+    const desired = Math.min(prFromW, prFromH);
+
+    // Never upscale above base DPR.
+    const capped = Math.min(base, desired);
+
+    // Clamp to a sane minimum to avoid creating tiny render targets.
+    return Math.max(0.1, capped);
+  }
+
+  /**
+   * @param {string} preset
+   */
+  setRenderResolutionPreset(preset) {
+    const value = preset || 'native';
+    this.state.renderResolutionPreset = value;
+
+    try {
+      this._onApplyRenderResolution?.();
+    } catch (e) {
+      log.warn('Failed to apply render resolution', e);
+    }
   }
 
   /**
@@ -218,6 +291,7 @@ export class GraphicsSettingsManager {
       if (!parsed || typeof parsed !== 'object') return;
 
       if (typeof parsed.globalDisableAll === 'boolean') this.state.globalDisableAll = parsed.globalDisableAll;
+      if (typeof parsed.renderResolutionPreset === 'string') this.state.renderResolutionPreset = parsed.renderResolutionPreset;
       if (parsed.effectOverrides && typeof parsed.effectOverrides === 'object') this.state.effectOverrides = parsed.effectOverrides;
 
       log.debug('Loaded graphics overrides');

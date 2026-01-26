@@ -153,6 +153,28 @@ Hooks.once('init', async function() {
 
       const playerToolsVisible = isGM || allowPlayers;
 
+      ensureTool(tokenControls, {
+        name: 'map-shine-graphics-settings',
+        title: 'Map Shine Graphics Settings',
+        icon: 'fas fa-desktop',
+        button: true,
+        order: 102,
+        visible: playerToolsVisible,
+        toolclip: {
+          src: '',
+          heading: 'MAPSHINE.ToolTitle',
+          items: [{ paragraph: 'MAPSHINE.ToolDescription' }]
+        },
+        onChange: () => {
+          const graphicsSettings = window.MapShine?.graphicsSettings;
+          if (!graphicsSettings) {
+            ui.notifications?.warn?.('Map Shine Graphics Settings is not available yet. The scene may still be initializing.');
+            return;
+          }
+          graphicsSettings.toggle();
+        }
+      });
+
       const getControlledTokenDoc = () => {
         try {
           const controlled = canvas?.tokens?.controlled;
@@ -193,7 +215,7 @@ Hooks.once('init', async function() {
         title: 'Player Light: Torch',
         icon: 'fas fa-fire',
         toggle: true,
-        order: 102,
+        order: 103,
         visible: playerToolsVisible,
         active: torchActive,
         onChange: async () => {
@@ -228,7 +250,7 @@ Hooks.once('init', async function() {
         title: 'Player Light: Flashlight',
         icon: 'fas fa-lightbulb',
         toggle: true,
-        order: 103,
+        order: 104,
         visible: playerToolsVisible,
         active: flashlightActive,
         onChange: async () => {

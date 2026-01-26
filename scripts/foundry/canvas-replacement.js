@@ -74,6 +74,8 @@ import { createEnhancedLightsApi } from '../effects/EnhancedLightsApi.js';
 import { OverlayUIManager } from '../ui/overlay-ui-manager.js';
 import { LightRingUI } from '../ui/light-ring-ui.js';
 import { LightAnimDialog } from '../ui/light-anim-dialog.js';
+import { EffectCapabilitiesRegistry } from '../effects/effect-capabilities-registry.js';
+import { GraphicsSettingsManager } from '../ui/graphics-settings-manager.js';
 
 const log = createLogger('Canvas');
 
@@ -126,6 +128,17 @@ let uiManager = null;
 
 /** @type {ControlPanelManager|null} */
 let controlPanel = null;
+
+/**
+ * ESSENTIAL FEATURE:
+ * Per-client Graphics Settings (Players/GMs) to disable or reduce effect intensity.
+ * This must remain safe to toggle during live play.
+ * @type {GraphicsSettingsManager|null}
+ */
+let graphicsSettings = null;
+
+/** @type {EffectCapabilitiesRegistry|null} */
+let effectCapabilitiesRegistry = null;
 
 /** @type {EnhancedLightInspector|null} */
 let enhancedLightInspector = null;
@@ -712,6 +725,20 @@ async function onCanvasReady(canvas) {
       } catch (e) {
         log.error('Failed to initialize Map Shine Control Panel in UI-only mode:', e);
       }
+    }
+
+    // Graphics Settings (Essential Feature)
+    // Even in UI-only mode, we create the dialog so the scene-control button does not dead-end.
+    // In this mode there are no live effects to toggle; the UI will remain minimal.
+    try {
+      if (!effectCapabilitiesRegistry) effectCapabilitiesRegistry = new EffectCapabilitiesRegistry();
+      if (!graphicsSettings) {
+        graphicsSettings = new GraphicsSettingsManager(null, effectCapabilitiesRegistry);
+        await graphicsSettings.initialize();
+        if (window.MapShine) window.MapShine.graphicsSettings = graphicsSettings;
+      }
+    } catch (e) {
+      log.warn('Failed to initialize Graphics Settings in UI-only mode', e);
     }
 
      // Scene not replaced by Three.js - dismiss the overlay so the user can interact with Foundry normally.
@@ -1368,6 +1395,82 @@ async function createThreeCanvas(scene) {
     const playerLightEffect = effectMap.get('Player Lights');
     const skyColorEffect_temp = effectMap.get('Sky Color');
 
+    // --- Graphics Settings (Essential Feature) ---
+    // Create once per canvas lifecycle, register known effects, and expose globally.
+    try {
+      if (!effectCapabilitiesRegistry) effectCapabilitiesRegistry = new EffectCapabilitiesRegistry();
+
+      // Minimal first-pass: enabled toggles only. We will extend to intensity+subfeatures per effect.
+      effectCapabilitiesRegistry.register({ effectId: 'specular', displayName: 'Metallic / Specular', category: 'surface', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'iridescence', displayName: 'Iridescence / Holographic', category: 'surface', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'water', displayName: 'Water', category: 'water', performanceImpact: 'high' });
+      effectCapabilitiesRegistry.register({ effectId: 'fog', displayName: 'Fog of War', category: 'global', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'bloom', displayName: 'Bloom', category: 'global', performanceImpact: 'high' });
+      effectCapabilitiesRegistry.register({ effectId: 'lensflare', displayName: 'Lensflare', category: 'global', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'clouds', displayName: 'Clouds', category: 'atmospheric', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'overhead-shadows', displayName: 'Overhead Shadows', category: 'structure', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'building-shadows', displayName: 'Building Shadows', category: 'structure', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'distortion', displayName: 'Distortion', category: 'global', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'fire-sparks', displayName: 'Fire & Embers', category: 'particle', performanceImpact: 'high' });
+      effectCapabilitiesRegistry.register({ effectId: 'dust-motes', displayName: 'Dust Motes', category: 'particle', performanceImpact: 'low' });
+      effectCapabilitiesRegistry.register({ effectId: 'smelly-flies', displayName: 'Smelly Flies', category: 'particle', performanceImpact: 'low' });
+      effectCapabilitiesRegistry.register({ effectId: 'lightning', displayName: 'Lightning', category: 'particle', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'atmospheric-fog', displayName: 'Atmospheric Fog', category: 'atmospheric', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'ascii', displayName: 'ASCII', category: 'global', performanceImpact: 'high' });
+      effectCapabilitiesRegistry.register({ effectId: 'halftone', displayName: 'Halftone', category: 'global', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'dot-screen', displayName: 'Dot Screen', category: 'global', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'film-grain', displayName: 'Film Grain', category: 'global', performanceImpact: 'low' });
+      effectCapabilitiesRegistry.register({ effectId: 'color-correction', displayName: 'Color Correction', category: 'global', performanceImpact: 'low' });
+      effectCapabilitiesRegistry.register({ effectId: 'sharpen', displayName: 'Sharpen', category: 'global', performanceImpact: 'low' });
+      effectCapabilitiesRegistry.register({ effectId: 'prism', displayName: 'Prism / Refraction', category: 'surface', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'sky-color', displayName: 'Sky Color', category: 'global', performanceImpact: 'low' });
+      effectCapabilitiesRegistry.register({ effectId: 'player-light', displayName: 'Player Lights', category: 'global', performanceImpact: 'low' });
+      effectCapabilitiesRegistry.register({ effectId: 'window-light', displayName: 'Window Lights', category: 'surface', performanceImpact: 'low' });
+      effectCapabilitiesRegistry.register({ effectId: 'trees', displayName: 'Animated Trees (Canopy)', category: 'surface', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'bushes', displayName: 'Animated Bushes', category: 'surface', performanceImpact: 'medium' });
+      effectCapabilitiesRegistry.register({ effectId: 'candle-flames', displayName: 'Candle Flames', category: 'particle', performanceImpact: 'low' });
+      effectCapabilitiesRegistry.register({ effectId: 'lighting', displayName: 'Lighting', category: 'global', performanceImpact: 'high' });
+    } catch (e) {
+      log.warn('Failed to register effect capabilities (Graphics Settings)', e);
+    }
+
+    try {
+      if (!graphicsSettings) {
+        graphicsSettings = new GraphicsSettingsManager(effectComposer, effectCapabilitiesRegistry);
+        await graphicsSettings.initialize();
+        if (window.MapShine) window.MapShine.graphicsSettings = graphicsSettings;
+      }
+
+      // Wire instances so the manager can toggle safely.
+      graphicsSettings.registerEffectInstance('specular', specularEffect);
+      graphicsSettings.registerEffectInstance('iridescence', iridescenceEffect);
+      graphicsSettings.registerEffectInstance('window-light', windowLightEffect);
+      graphicsSettings.registerEffectInstance('color-correction', colorCorrectionEffect);
+      graphicsSettings.registerEffectInstance('film-grain', filmGrainEffect);
+      graphicsSettings.registerEffectInstance('dot-screen', dotScreenEffect);
+      graphicsSettings.registerEffectInstance('halftone', halftoneEffect);
+      graphicsSettings.registerEffectInstance('sharpen', sharpenEffect);
+      graphicsSettings.registerEffectInstance('ascii', asciiEffect);
+      graphicsSettings.registerEffectInstance('smelly-flies', smellyFliesEffect);
+      graphicsSettings.registerEffectInstance('lightning', lightningEffect_temp);
+      graphicsSettings.registerEffectInstance('prism', prismEffect);
+      graphicsSettings.registerEffectInstance('water', waterEffect);
+      graphicsSettings.registerEffectInstance('fog', fogEffect_temp);
+      graphicsSettings.registerEffectInstance('bushes', bushEffect);
+      graphicsSettings.registerEffectInstance('trees', treeEffect);
+      graphicsSettings.registerEffectInstance('overhead-shadows', overheadShadowsEffect);
+      graphicsSettings.registerEffectInstance('building-shadows', buildingShadowsEffect);
+      graphicsSettings.registerEffectInstance('clouds', cloudEffect);
+      graphicsSettings.registerEffectInstance('atmospheric-fog', atmosphericFogEffect);
+      graphicsSettings.registerEffectInstance('distortion', distortionManager);
+      graphicsSettings.registerEffectInstance('bloom', bloomEffect);
+      graphicsSettings.registerEffectInstance('lensflare', lensflareEffect);
+      graphicsSettings.registerEffectInstance('player-light', playerLightEffect);
+      graphicsSettings.registerEffectInstance('sky-color', skyColorEffect_temp);
+    } catch (e) {
+      log.warn('Failed to initialize/wire Graphics Settings manager', e);
+    }
+
     // Assign to module-level variables for later reference
     lightningEffect = lightningEffect_temp;
     fogEffect = fogEffect_temp;
@@ -1395,6 +1498,12 @@ async function createThreeCanvas(scene) {
       fireSparksEffect.setAssetBundle(bundle);
     }
 
+    try {
+      graphicsSettings?.registerEffectInstance('fire-sparks', fireSparksEffect);
+      graphicsSettings?.applyOverrides?.();
+    } catch (_) {
+    }
+
     // Step 3.10: Register Dust Motes (can use particle system if needed)
     _setEffectInitStep('Dust Motes');
     const dustMotesEffect = new DustMotesEffect();
@@ -1403,11 +1512,23 @@ async function createThreeCanvas(scene) {
       dustMotesEffect.setAssetBundle(bundle);
     }
 
+    try {
+      graphicsSettings?.registerEffectInstance('dust-motes', dustMotesEffect);
+      graphicsSettings?.applyOverrides?.();
+    } catch (_) {
+    }
+
     // Step 3.14: Register Lighting Effect (must be before CandleFlamesEffect)
     _setEffectInitStep('Lighting');
     lightingEffect = new LightingEffect();
     await effectComposer.registerEffect(lightingEffect);
     if (window.MapShine) window.MapShine.lightingEffect = lightingEffect;
+
+    try {
+      graphicsSettings?.registerEffectInstance('lighting', lightingEffect);
+      graphicsSettings?.applyOverrides?.();
+    } catch (_) {
+    }
 
     // Step 3.15: Register Candle Flames (depends on LightingEffect)
     _setEffectInitStep('Candle Flames');
@@ -1415,6 +1536,12 @@ async function createThreeCanvas(scene) {
     candleFlamesEffect.setLightingEffect(lightingEffect);
     await effectComposer.registerEffect(candleFlamesEffect);
     if (window.MapShine) window.MapShine.candleFlamesEffect = candleFlamesEffect;
+
+    try {
+      graphicsSettings?.registerEffectInstance('candle-flames', candleFlamesEffect);
+      graphicsSettings?.applyOverrides?.();
+    } catch (_) {
+    }
 
     if (isStale()) {
       try {
@@ -3964,6 +4091,15 @@ function destroyThreeCanvas() {
     controlPanel.destroy();
     controlPanel = null;
     log.debug('Control Panel manager disposed');
+  }
+
+  if (graphicsSettings) {
+    try {
+      graphicsSettings.dispose();
+    } catch (e) {
+      log.warn('Failed to dispose Graphics Settings manager', e);
+    }
+    graphicsSettings = null;
   }
 
   // Dispose camera follower

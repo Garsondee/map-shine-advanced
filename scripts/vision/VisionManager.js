@@ -58,6 +58,11 @@ export class VisionManager {
       side: window.THREE.DoubleSide
     });
 
+    // PERFORMANCE: Reuse a persistent full-visibility quad.
+    // Creating/disposing PlaneGeometry repeatedly is unnecessary churn.
+    this._fullQuadGeometry = new window.THREE.PlaneGeometry(width, height);
+    this._fullQuadMesh = new window.THREE.Mesh(this._fullQuadGeometry, this.material);
+
     // State tracking
     this.needsUpdate = true;
     
@@ -257,6 +262,17 @@ export class VisionManager {
     this.camera.top = height / 2;
     this.camera.bottom = height / -2;
     this.camera.updateProjectionMatrix();
+
+    // Keep the cached full-visibility quad in sync with the render target size.
+    try {
+      this._fullQuadGeometry?.dispose?.();
+    } catch (_) {
+    }
+    try {
+      this._fullQuadGeometry = new window.THREE.PlaneGeometry(width, height);
+      if (this._fullQuadMesh) this._fullQuadMesh.geometry = this._fullQuadGeometry;
+    } catch (_) {
+    }
     
     this.converter.resize(width, height);
     this.needsUpdate = true;
@@ -268,7 +284,8 @@ export class VisionManager {
   clearScene() {
     while (this.scene.children.length > 0) {
       const child = this.scene.children[0];
-      if (child.geometry) child.geometry.dispose();
+      // Avoid disposing our cached quad geometry; we reuse it.
+      if (child.geometry && child !== this._fullQuadMesh) child.geometry.dispose();
       this.scene.remove(child);
     }
   }
@@ -284,9 +301,8 @@ export class VisionManager {
       if (this.needsUpdate) {
         this.clearScene();
 
-        const quadGeometry = new window.THREE.PlaneGeometry(this.width, this.height);
-        const quadMesh = new window.THREE.Mesh(quadGeometry, this.material);
-        this.scene.add(quadMesh);
+        // Reuse cached quad.
+        this.scene.add(this._fullQuadMesh);
 
         const currentTarget = this.renderer.getRenderTarget();
         this.renderer.setRenderTarget(this.renderTarget);
@@ -326,38 +342,40 @@ export class VisionManager {
     // Get scene bounds for clipping vision to scene interior (not padded area)
     // canvas.dimensions.sceneRect is the actual scene, not including padding
     const sceneRect = canvas?.dimensions?.sceneRect;
-    const sceneBounds = sceneRect ? {
-      x: sceneRect.x,
-      y: sceneRect.y,
-      width: sceneRect.width,
-      height: sceneRect.height
-    } : null;
-    
-    // 2. Get CONTROLLED tokens with vision (not ALL tokens)
-    // This is the key optimization - we only compute vision for tokens the user controls
-    const tokens = (canvas?.tokens?.placeables ?? []).filter(token => {
-      const tokenId = token.document?.id;
-      if (!tokenId) return false;
-      
-      // Skip hidden tokens
-      if (token.document?.hidden) return false;
-      
-      // CRITICAL: Only process controlled tokens
-      if (!this._controlledTokenIds.has(tokenId)) return false;
-      
-      // Check if token has vision
-      if (gsm) {
-        return gsm.hasTokenVision(token);
-      }
-      
-      // Fallback checks
-      return token.hasSight || token.document?.sight?.enabled;
-    });
+
+    let sceneBounds = null;
+    if (sceneRect) {
+      if (!this._tempSceneBounds) this._tempSceneBounds = { x: 0, y: 0, width: 0, height: 0 };
+      this._tempSceneBounds.x = sceneRect.x;
+      this._tempSceneBounds.y = sceneRect.y;
+      this._tempSceneBounds.width = sceneRect.width;
+      this._tempSceneBounds.height = sceneRect.height;
+      sceneBounds = this._tempSceneBounds;
+    }
 
     let tokenCount = 0;
 
-    // 3. Compute vision for each token
-    for (const token of tokens) {
+    // 2. Compute vision for CONTROLLED tokens with vision (not ALL tokens)
+    // This is the key optimization - we only compute vision for tokens the user controls.
+    const placeables = canvas?.tokens?.placeables ?? [];
+    for (let ti = 0; ti < placeables.length; ti++) {
+      const token = placeables[ti];
+      const doc = token?.document;
+      const tokenId = doc?.id;
+      if (!tokenId) continue;
+
+      // Skip hidden tokens
+      if (doc?.hidden) continue;
+
+      // Only process controlled tokens
+      if (!this._controlledTokenIds.has(tokenId)) continue;
+
+      // Check if token has vision
+      const hasVision = gsm
+        ? gsm.hasTokenVision(token)
+        : (token.hasSight || doc?.sight?.enabled);
+      if (!hasVision) continue;
+
       // Get vision radius
       let radiusPixels = 0;
       
@@ -367,9 +385,6 @@ export class VisionManager {
           radiusPixels = gsm.distanceToPixels(distRadius);
         }
       }
-      
-      // Get token document once for this iteration
-      const doc = token.document;
       
       // Fallback radius extraction
       if (!(radiusPixels > 0)) {
@@ -397,14 +412,13 @@ export class VisionManager {
       const tokenHeight = (doc.height ?? 1) * (canvas.dimensions?.size ?? 100);
       
       // Check for pending position update (authoritative from hook)
-      const pendingPos = this.pendingPositions.get(doc.id);
+      const pendingPos = this.pendingPositions.get(tokenId);
       const tokenX = pendingPos?.x ?? doc.x;
       const tokenY = pendingPos?.y ?? doc.y;
-      
-      const center = {
-        x: tokenX + tokenWidth / 2,
-        y: tokenY + tokenHeight / 2
-      };
+
+      const center = this._tempCenter;
+      center.x = tokenX + tokenWidth / 2;
+      center.y = tokenY + tokenHeight / 2;
 
       // Compute visibility polygon using our own algorithm
       // Pass sceneBounds to clip vision to scene interior (not padded region)
@@ -426,9 +440,7 @@ export class VisionManager {
 
     // 4. If no tokens with vision, show entire scene (GM view or no vision tokens)
     if (tokenCount === 0) {
-      const quadGeometry = new window.THREE.PlaneGeometry(this.width, this.height);
-      const quadMesh = new window.THREE.Mesh(quadGeometry, this.material);
-      this.scene.add(quadMesh);
+      this.scene.add(this._fullQuadMesh);
     }
 
     if (Math.random() < 0.01) {
@@ -478,6 +490,10 @@ export class VisionManager {
     this._hookIds = [];
 
     this.renderTarget.dispose();
+    try {
+      this._fullQuadGeometry?.dispose?.();
+    } catch (_) {
+    }
     this.material.dispose();
     // Geometry disposal is handled in update loop for now
   }

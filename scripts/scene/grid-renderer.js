@@ -43,16 +43,16 @@ export class GridRenderer {
     // Overrides are optional and disabled by default.
     this.settings = {
       style: null,
-      useStyleOverride: false,
+      useStyleOverride: true,
 
-      thickness: 1,
-      useThicknessOverride: false,
+      thickness: 2,
+      useThicknessOverride: true,
 
       colorOverride: '#000000',
-      useColorOverride: false,
+      useColorOverride: true,
 
-      alphaOverride: 0.2,
-      useAlphaOverride: false
+      alphaOverride: 0.05,
+      useAlphaOverride: true
     };
 
     this.initialized = false;
@@ -86,18 +86,18 @@ export class GridRenderer {
         },
         useStyleOverride: {
           label: 'Override Style',
-          default: false
+          default: true
         },
         thickness: {
           label: 'Thickness (Override)',
           min: 1,
           max: 10,
           step: 1,
-          default: 1
+          default: 2
         },
         useThicknessOverride: {
           label: 'Override Thickness',
-          default: false
+          default: true
         },
         colorOverride: {
           label: 'Color (Override)',
@@ -106,18 +106,18 @@ export class GridRenderer {
         },
         useColorOverride: {
           label: 'Override Color',
-          default: false
+          default: true
         },
         alphaOverride: {
           label: 'Opacity (Override)',
           min: 0.0,
           max: 1.0,
           step: 0.05,
-          default: 0.2
+          default: 0.05
         },
         useAlphaOverride: {
           label: 'Override Opacity',
-          default: false
+          default: true
         }
       }
     };

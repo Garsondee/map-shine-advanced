@@ -3789,7 +3789,11 @@ export class WeatherParticles {
           if (rec && typeof rec.uvFlipY === 'boolean') {
             waterFlipV = rec.uvFlipY;
           } else if (typeof waterTex?.flipY === 'boolean') {
-            waterFlipV = waterTex.flipY === true;
+            // THREE.Texture.flipY refers to how the texture is uploaded/sampled in WebGL.
+            // Our mask UVs (uvMask) are authored in scene-UV space (Y-down), so when a texture
+            // has flipY=false (common for masks we force to avoid extra flips), we must flip V
+            // ourselves to sample it correctly.
+            waterFlipV = waterTex.flipY === false;
           } else {
             waterFlipV = false;
           }
@@ -3797,7 +3801,8 @@ export class WeatherParticles {
         // Debug escape hatch: force invert if needed for a given scene.
         if (waterParams?.foamPlumeDebugFlipV === true) waterFlipV = !waterFlipV;
       } catch (_) {
-        waterFlipV = waterTex?.flipY === true;
+        // Keep fallback consistent with the branch above.
+        waterFlipV = waterTex?.flipY === false;
       }
     }
 

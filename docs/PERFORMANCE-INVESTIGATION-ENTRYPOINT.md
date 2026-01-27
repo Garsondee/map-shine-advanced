@@ -1,5 +1,17 @@
 # Map Shine Advanced – Performance Investigation (Entrypoint → Outwards)
 
+## Status: In Progress (Major Optimizations Complete)
+
+**Completed Optimizations:**
+- **Idle frame skipping** (`RenderLoop`): Render at reduced FPS (15 FPS default) when camera is static.
+- **Bloom early-exit** (`BloomEffect`): Skip expensive bloom passes when disabled or strength ≈ 0.
+- **Particle culling reuse** (`ParticleSystem`): Eliminated per-frame object allocations in Quarks culling.
+- **Mask pixel cache LRU** (`WeatherParticles`): Byte-budgeted cache eviction to prevent memory explosion.
+- **PIXI camera sync** (`RenderLoop`): Use PIXI stage pivot/scale to detect camera motion (avoids 1-frame latency).
+- **Token animation rendering** (`TokenManager` + `RenderLoop`): Force continuous rendering during token moves via `requestContinuousRender()`.
+
+**Result:** FPS counter shows significant improvement; idle scenes drop to 15 FPS, camera pans stay smooth, token movement is now smooth even with idle throttling.
+
 ## Scope
 
 This document is a **slow, code-driven performance investigation** starting at the module entrypoint (`scripts/module.js`) and working outward through initialization and runtime wiring.
@@ -1175,6 +1187,90 @@ Recommended measurements:
 - Profile the worst-case cost of:
   - `_getMaskPixelData()`
   - `_generateWaterHardEdgePoints()` and tile-local point generation
+
+
+---
+
+## Regression checklist (Render Invalidation + Bloom)
+
+- **Idle scene throttling**
+  - Leave the scene completely static (no camera motion, no token motion).
+  - Expected:
+    - GPU/CPU usage drops.
+    - Three render visually remains correct.
+
+- **Camera pan/zoom stability**
+  - Pan and zoom continuously.
+  - Expected:
+    - No "steppy" camera motion.
+    - Door interaction icons do not drift/lag behind the map.
+
+- **Token movement smoothness**
+  - Move a token across multiple grid squares.
+  - Expected:
+    - Movement is smooth (no low-FPS stutter) even if the camera stays still.
+
+- **Bloom 'obviously on'**
+  - Set bloom:
+    - `strength = 2.5`
+    - `threshold = 0.2`
+    - `radius = 0.3`
+    - `blendOpacity = 1.0`
+  - Expected:
+    - Very obvious glow around bright areas.
+
+- **Bloom toggle safety**
+  - Disable bloom via Graphics Settings (per-client).
+  - Expected:
+    - No black screen.
+    - Post stack still renders normally.
+
+- **Bloom effectively disabled**
+  - Set bloom `strength = 0` or `blendOpacity = 0`.
+  - Expected:
+    - No glow.
+    - No black screen.
+    - No significant GPU cost increase vs bloom fully off.
+
+---
+
+## Next Priority: Vision System Throttling
+
+After the render invalidation improvements, the **Vision system** is the next high-impact optimization target.
+
+### Problem
+
+The vision system (`VisionManager` + `VisionPolygonComputer`) is triggered by the `refreshToken` hook, which fires **~60 times per second during token animation**. Each call recomputes vision polygons, which involves:
+- Scanning all walls for intersections
+- Creating new objects for endpoints, angles, and intersection points
+- Allocating temporary vectors for geometric calculations
+
+With many tokens animating simultaneously (or even one token moving while other players have vision enabled), this creates steady GC pressure and CPU load.
+
+### Solution approach
+
+**Object pooling + throttling** (similar to what was done for particle systems):
+
+1. **Pool objects in `VisionPolygonComputer`**:
+   - Reuse `_endpointMap`, `_seenAnglesSet`, `_endpointsPool`, `_intersectionsPool` across frames
+   - Reuse temporary vectors (`_tempClosest`) in geometric calculations
+   - Use numeric keys instead of string keys to avoid string allocation
+
+2. **Throttle `VisionManager.update()` on `refreshToken` hook**:
+   - Add a throttle timer (e.g., 100ms = 10 updates/sec max)
+   - Allow immediate updates for wall changes, token create/delete
+   - Defer `refreshToken` updates during animation bursts
+
+### Expected impact
+
+- Reduced GC pressure during token movement
+- Smoother pans/zooms when vision is enabled
+- More predictable CPU usage during multiplayer sessions
+
+### Files to modify
+
+- `scripts/vision/VisionManager.js`
+- `scripts/vision/VisionPolygonComputer.js`
 
 Recommended mitigations (design-level; not implementing here):
 

@@ -696,9 +696,10 @@ vec3 ms_applyWindowLight(vec3 color) {
     sprite.name = `Token_${tokenDoc.id}`;
     sprite.matrixAutoUpdate = false;
 
-    // Render tokens above post-processing (e.g. water) using the overlay layer.
-    // EffectComposer explicitly renders this layer to screen after post.
-    sprite.layers.set(OVERLAY_THREE_LAYER);
+    // Render tokens in the main scene (layer 0) so they are included in the
+    // LightingEffect + post-processing chain.
+    // Water/Distortion passes should mask tokens out using tokenMask.screen.
+    sprite.layers.set(0);
 
     // Store token metadata
     sprite.userData = {
@@ -1046,6 +1047,20 @@ vec3 ms_applyWindowLight(vec3 color) {
   startAnimation(tokenId, attributes, duration) {
     // Cancel existing (overwrite)
     this.activeAnimations.delete(tokenId);
+
+    // Ensure smooth visuals while tokens animate.
+    // Without this, idle frame skipping can throttle rendering (camera is static),
+    // which makes movement appear "steppy".
+    try {
+      const rl = window.MapShine?.renderLoop;
+      if (rl?.requestContinuousRender) {
+        // Add a small buffer to cover timing jitter.
+        rl.requestContinuousRender((Number(duration) || 0) + 50);
+      } else if (rl?.requestRender) {
+        rl.requestRender();
+      }
+    } catch (_) {
+    }
 
     // Capture start values and calculate diffs
     const animAttributes = attributes.map(attr => ({

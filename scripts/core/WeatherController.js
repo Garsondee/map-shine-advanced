@@ -44,9 +44,9 @@ export class WeatherController {
     this.currentState = {
       precipitation: 0.0,
       precipType: PrecipitationType.NONE,
-      cloudCover: 0.26,
-      windSpeed: 1.0,
-      windDirection: { x: -0.992546151641322, y: -0.12186934340514748 }, // 173deg, upgraded to Vector2 in initialize() (Y-down world)
+      cloudCover: 0.0,
+      windSpeed: 0.44,
+      windDirection: { x: 1, y: 0 }, // 0deg, upgraded to Vector2 in initialize() (Y-down world)
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0
@@ -71,11 +71,11 @@ export class WeatherController {
 
     /** @type {WeatherState} */
     this.targetState = { 
-      precipitation: 0.88,
+      precipitation: 0.0,
       precipType: PrecipitationType.NONE,
-      cloudCover: 0.26,
-      windSpeed: 1.0,
-      windDirection: { x: -0.992546151641322, y: -0.12186934340514748 },
+      cloudCover: 0.0,
+      windSpeed: 0.44,
+      windDirection: { x: 1, y: 0 },
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0
@@ -99,11 +99,11 @@ export class WeatherController {
     // Wind Gust System
     this.gustWaitMin = 1.0;   // Seconds to wait between gusts (min)
     this.gustWaitMax = 11.5;  // Seconds to wait between gusts (max)
-    this.gustDuration = 3.9;  // Duration of a gust
+    this.gustDuration = 7.4;  // Duration of a gust
     this.gustTimer = 0;       // Countdown timer
     this.isGusting = false;   // Current state
     this.currentGustStrength = 0; // Smoothed gust value
-    this.gustStrength = 2.5;      // Multiplier for how strong gusts are compared to base wind
+    this.gustStrength = 1.0;      // Multiplier for how strong gusts are compared to base wind
 
     // Time of Day (0-24)
     this.timeOfDay = 6.6; // Tuned time of day
@@ -2273,7 +2273,7 @@ export class WeatherController {
         },
         cloudCover: {
           label: 'Cloud Cover',
-          default: 0.26,
+          default: 0.0,
           min: 0.0,
           max: 1.0,
           step: 0.01,
@@ -2282,7 +2282,7 @@ export class WeatherController {
         // Wind base state (moved into dedicated Wind folder)
         windSpeed: {
           label: 'Base Wind Speed',
-          default: 1.0,
+          default: 0.44,
           min: 0.0,
           max: 1.0,
           step: 0.01,
@@ -2290,7 +2290,7 @@ export class WeatherController {
         },
         windDirection: {
           label: 'Wind Direction (deg)',
-          default: 173.0,
+          default: 0.0,
           min: 0.0,
           max: 360.0,
           step: 1.0,
@@ -2341,7 +2341,7 @@ export class WeatherController {
         },
         gustDuration: {
           label: 'Gust Duration (s)',
-          default: 3.9,
+          default: 7.4,
           min: 0.1,
           max: 30.0,
           step: 0.1,
@@ -2349,7 +2349,7 @@ export class WeatherController {
         },
         gustStrength: {
           label: 'Gust Strength',
-          default: 2.5,
+          default: 1.0,
           min: 0.0,
           max: 3.0,
           step: 0.05,

@@ -34,7 +34,7 @@ export class LightingEffect extends EffectBase {
     // See docs/CONTRAST-DARKNESS-ANALYSIS.md for rationale.
     this.params = {
       enabled: true,
-      globalIllumination: 1.0, // Multiplier for ambient
+      globalIllumination: 1.2, // Multiplier for ambient
       lightIntensity: 0.2, // Master multiplier for dynamic lights
       colorationStrength: 3.0,
       darknessEffect: 0.5, // Scales Foundry's darknessLevel
@@ -214,7 +214,7 @@ export class LightingEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.0 },
+        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.2 },
         lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.2, label: 'Light Intensity' },
         colorationStrength: { type: 'slider', min: 0, max: 500, step: 0.05, default: 3.0, label: 'Coloration Strength' },
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },

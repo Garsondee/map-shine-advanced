@@ -31,7 +31,12 @@ export class ColorCorrectionEffect extends EffectBase {
     // See docs/CONTRAST-DARKNESS-ANALYSIS.md for rationale.
     this.params = {
       // 1. Input
-      exposure: 1.0,
+      exposure: 0.9,
+
+      // Dynamic Exposure (eye adaptation). Multiplies exposure at runtime.
+      // This is intentionally not user-authored in the ColorCorrection UI; it is driven
+      // by DynamicExposureManager.
+      dynamicExposure: 1.0,
       
       // 2. White Balance
       temperature: 0.0, // -1.0 (Blue) to 1.0 (Orange)
@@ -99,14 +104,14 @@ export class ColorCorrectionEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        exposure: { type: 'slider', min: 0, max: 5, step: 0.01, default: 1.0 },
+        exposure: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.9 },
         temperature: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
         tint: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
         
         brightness: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.0 },
         contrast: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0 },
-        saturation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0 },
-        vibrance: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
+        saturation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.9 },
+        vibrance: { type: 'slider', min: -1, max: 1, step: 0.01, default: -0.15 },
         
         liftColor: { type: 'color', default: { r: 0, g: 0, b: 0 } },
         gammaColor: { type: 'color', default: { r: 0.5, g: 0.5, b: 0.5 } },
@@ -178,6 +183,7 @@ export class ColorCorrectionEffect extends EffectBase {
         
         // Params
         uExposure: { value: 1.0 },
+        uDynamicExposure: { value: 1.0 },
         uTemperature: { value: 0.0 },
         uTint: { value: 0.0 },
         uBrightness: { value: 0.0 },
@@ -219,6 +225,17 @@ export class ColorCorrectionEffect extends EffectBase {
     this._inputTexture = texture;
   }
 
+  /**
+   * Get the current pre-color-correction input texture.
+   * This is used by systems like DynamicExposureManager to sample the scene
+   * without creating a feedback loop.
+   *
+   * @returns {THREE.Texture|null}
+   */
+  getInputTexture() {
+    return this.material?.uniforms?.tDiffuse?.value ?? this._readBuffer?.texture ?? this._inputTexture ?? null;
+  }
+
   setBuffers(readBuffer, writeBuffer) {
     this._readBuffer = readBuffer;
     this._writeBuffer = writeBuffer;
@@ -236,6 +253,7 @@ export class ColorCorrectionEffect extends EffectBase {
     u.uTime.value = timeInfo.elapsed;
     
     u.uExposure.value = p.exposure;
+    u.uDynamicExposure.value = p.dynamicExposure ?? 1.0;
     u.uTemperature.value = p.temperature;
     u.uTint.value = p.tint;
     u.uBrightness.value = p.brightness;
@@ -309,6 +327,7 @@ export class ColorCorrectionEffect extends EffectBase {
       
       // Params
       uniform float uExposure;
+      uniform float uDynamicExposure;
       uniform float uTemperature;
       uniform float uTint;
       uniform float uBrightness;
@@ -367,7 +386,7 @@ export class ColorCorrectionEffect extends EffectBase {
         vec3 color = texel.rgb;
         
         // 1. Exposure
-        color *= uExposure;
+        color *= (uExposure * max(uDynamicExposure, 0.0));
         
         // 2. White Balance
         color = applyWhiteBalance(color, uTemperature, uTint);

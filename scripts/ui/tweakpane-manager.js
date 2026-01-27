@@ -78,6 +78,24 @@ export class TweakpaneManager {
         saturation: 1.0,
         gamma: 1.0,
         windowLightIntensity: 1.0
+      },
+      dynamicExposure: {
+        enabled: true,
+        minExposure: 0.5,
+        maxExposure: 2.5,
+        probeHz: 8,
+        tauBrighten: 15.0,
+        tauDarken: 15.0
+      },
+      dynamicExposureDebug: {
+        subjectTokenId: '',
+        measuredLuma: 0.0,
+        outdoors: 0.0,
+        targetExposure: 1.0,
+        appliedExposure: 1.0,
+        screenU: 0.0,
+        screenV: 0.0,
+        lastProbeAgeSeconds: 0.0
       }
     };
     
@@ -173,6 +191,9 @@ export class TweakpaneManager {
     this._uiValidatorGlobalHandlers = {};
 
     this._debugFolder = null;
+
+    /** @type {Array<any>|null} */
+    this._dynamicExposureDebugBindings = null;
   }
 
   _getProperty(obj, path) {
@@ -618,6 +639,138 @@ export class TweakpaneManager {
       this.saveUIState();
     });
 
+    const dynamicExposureFolder = tokensFolder.addFolder({
+      title: 'Dynamic Exposure',
+      expanded: this.accordionStates['token_dynamicExposure'] ?? false
+    });
+
+    const applyDynamicExposure = () => {
+      try {
+        const dem = window.MapShine?.dynamicExposureManager;
+        if (dem && typeof dem.setParams === 'function') {
+          dem.setParams(this.globalParams.dynamicExposure);
+        }
+      } catch (_) {
+      }
+    };
+
+    const onDynamicExposureChange = (param) => (ev) => {
+      this.globalParams.dynamicExposure[param] = ev.value;
+      applyDynamicExposure();
+      this.saveUIState();
+    };
+
+    dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'enabled', {
+      label: 'Enabled'
+    }).on('change', onDynamicExposureChange('enabled'));
+
+    dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'minExposure', {
+      label: 'Min Exposure',
+      min: 0.1,
+      max: 4,
+      step: 0.01
+    }).on('change', onDynamicExposureChange('minExposure'));
+
+    dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'maxExposure', {
+      label: 'Max Exposure',
+      min: 0.1,
+      max: 8,
+      step: 0.01
+    }).on('change', onDynamicExposureChange('maxExposure'));
+
+    dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'probeHz', {
+      label: 'Probe Hz',
+      min: 0.5,
+      max: 30,
+      step: 0.5
+    }).on('change', onDynamicExposureChange('probeHz'));
+
+    dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'tauBrighten', {
+      label: 'Decay Up (s)',
+      min: 0.05,
+      max: 30,
+      step: 0.01
+    }).on('change', onDynamicExposureChange('tauBrighten'));
+
+    dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'tauDarken', {
+      label: 'Decay Down (s)',
+      min: 0.05,
+      max: 30,
+      step: 0.01
+    }).on('change', onDynamicExposureChange('tauDarken'));
+
+    const dynamicExposureDebugFolder = dynamicExposureFolder.addFolder({
+      title: 'Debug (Selected Token)',
+      expanded: this.accordionStates['token_dynamicExposure_debug'] ?? false
+    });
+
+    // These bindings are updated by the UI loop (see startUILoop patch below).
+    this._dynamicExposureDebugBindings = [];
+
+    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'subjectTokenId', {
+      label: 'Subject',
+      readonly: true
+    }));
+    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'measuredLuma', {
+      label: 'Luma',
+      readonly: true
+    }));
+    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'outdoors', {
+      label: 'Outdoors',
+      readonly: true
+    }));
+    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'targetExposure', {
+      label: 'Target',
+      readonly: true
+    }));
+    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'appliedExposure', {
+      label: 'Applied',
+      readonly: true
+    }));
+
+    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'screenU', {
+      label: 'U',
+      readonly: true
+    }));
+    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'screenV', {
+      label: 'V',
+      readonly: true
+    }));
+
+    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'lastProbeAgeSeconds', {
+      label: 'Probe Age (s)',
+      readonly: true
+    }));
+
+    dynamicExposureDebugFolder.on('fold', (ev) => {
+      this.accordionStates['token_dynamicExposure_debug'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    dynamicExposureFolder.addButton({
+      title: 'Reset Dynamic Exposure'
+    }).on('click', () => {
+      this.globalParams.dynamicExposure.enabled = true;
+      this.globalParams.dynamicExposure.minExposure = 0.5;
+      this.globalParams.dynamicExposure.maxExposure = 2.5;
+      this.globalParams.dynamicExposure.probeHz = 8;
+      this.globalParams.dynamicExposure.tauBrighten = 15.0;
+      this.globalParams.dynamicExposure.tauDarken = 15.0;
+
+      try {
+        dynamicExposureFolder.refresh();
+      } catch (_) {
+      }
+
+      applyDynamicExposure();
+      this.saveUIState();
+    });
+
+    dynamicExposureFolder.on('fold', (ev) => {
+      this.accordionStates['token_dynamicExposure'] = ev.expanded;
+      this.saveUIState();
+    });
+
     tokensFolder.on('fold', (ev) => {
       this.accordionStates['tokens'] = ev.expanded;
       this.saveUIState();
@@ -625,6 +778,9 @@ export class TweakpaneManager {
 
     // Push initial state into TokenManager so the UI and runtime match.
     applyTokenCC();
+
+    // Push initial state into DynamicExposureManager (if available).
+    applyDynamicExposure();
 
     globalFolder.addBlade({ view: 'separator' });
 
@@ -1936,8 +2092,22 @@ export class TweakpaneManager {
       
       // Start with Map Maker settings
       const params = {};
-      const base = allSettings.mapMaker?.effects?.[effectId] || {};
-      const gm = (this.settingsMode === 'gm' ? (allSettings.gm?.effects?.[effectId] || {}) : {});
+      const resolveEffectKey = (id) => {
+        if (id === 'window-light') return ['window-light', 'windowLight'];
+        return [id];
+      };
+
+      const getTierEffectParams = (tier, id) => {
+        const keys = resolveEffectKey(id);
+        for (const k of keys) {
+          const v = tier?.effects?.[k];
+          if (v && typeof v === 'object') return v;
+        }
+        return {};
+      };
+
+      const base = getTierEffectParams(allSettings.mapMaker, effectId);
+      const gm = (this.settingsMode === 'gm' ? getTierEffectParams(allSettings.gm, effectId) : {});
       const merged = this._deepMergeObjects(base, gm);
 
       // Materialize the params object in the schema's paramId namespace (including dotted IDs).
@@ -2460,6 +2630,14 @@ export class TweakpaneManager {
       // both would produce duplicate `enabled` lines in the dump.
       for (const [paramId, paramDef] of Object.entries(schemaParams)) {
         if (paramId === 'enabled') continue;
+
+        // Skip runtime/status-only fields and non-user-tunable params.
+        // These can legitimately differ from defaults without indicating
+        // a user-authored non-default setting.
+        if (paramId === 'textureStatus') continue;
+        if (paramDef?.readonly === true) continue;
+        if (paramDef?.hidden === true) continue;
+
         const defaultValue = paramDef.default;
         const rawCurrentValue = params[paramId];
         const currentValue = (rawCurrentValue === undefined) ? defaultValue : rawCurrentValue;
@@ -3189,6 +3367,34 @@ export class TweakpaneManager {
         this.perf.warningCount = 0;
       }
 
+      // Dynamic Exposure debug monitoring (read-only fields)
+      try {
+        const dem = window.MapShine?.dynamicExposureManager;
+        const src = dem?.debugState;
+        const dst = this.globalParams?.dynamicExposureDebug;
+        if (src && dst) {
+          dst.subjectTokenId = String(src.subjectTokenId ?? '');
+          dst.measuredLuma = Number.isFinite(src.measuredLuma) ? src.measuredLuma : 0.0;
+          dst.outdoors = Number.isFinite(src.outdoors) ? src.outdoors : 0.0;
+          dst.targetExposure = Number.isFinite(src.targetExposure) ? src.targetExposure : 1.0;
+          dst.appliedExposure = Number.isFinite(src.appliedExposure) ? src.appliedExposure : 1.0;
+          dst.screenU = Number.isFinite(src.screenU) ? src.screenU : 0.0;
+          dst.screenV = Number.isFinite(src.screenV) ? src.screenV : 0.0;
+          dst.lastProbeAgeSeconds = Number.isFinite(src.lastProbeAgeSeconds) ? src.lastProbeAgeSeconds : 0.0;
+
+          const bindings = this._dynamicExposureDebugBindings;
+          if (Array.isArray(bindings)) {
+            for (const b of bindings) {
+              try {
+                b?.refresh?.();
+              } catch (_) {
+              }
+            }
+          }
+        }
+      } catch (_) {
+      }
+
       // Continue loop
       this.rafHandle = requestAnimationFrame(uiLoop);
     };
@@ -3336,11 +3542,16 @@ export class TweakpaneManager {
         // NOTE: state.globalParams is persisted across versions.
         // We must merge nested objects defensively so newly added parameters
         // (like tokenColorCorrection.windowLightIntensity) don't disappear.
-        const { tokenColorCorrection, ...rest } = state.globalParams;
+        const { tokenColorCorrection, dynamicExposure, ...rest } = state.globalParams;
         Object.assign(this.globalParams, rest);
         if (tokenColorCorrection && typeof tokenColorCorrection === 'object') {
           if (!this.globalParams.tokenColorCorrection) this.globalParams.tokenColorCorrection = {};
           Object.assign(this.globalParams.tokenColorCorrection, tokenColorCorrection);
+        }
+
+        if (dynamicExposure && typeof dynamicExposure === 'object') {
+          if (!this.globalParams.dynamicExposure) this.globalParams.dynamicExposure = {};
+          Object.assign(this.globalParams.dynamicExposure, dynamicExposure);
         }
 
         // Backwards-compatible defaults for newly added token controls
@@ -3348,6 +3559,16 @@ export class TweakpaneManager {
           if (this.globalParams.tokenColorCorrection.windowLightIntensity === undefined) {
             this.globalParams.tokenColorCorrection.windowLightIntensity = 1.0;
           }
+        }
+
+        // Backwards-compatible defaults for newly added Dynamic Exposure controls
+        if (this.globalParams.dynamicExposure) {
+          if (this.globalParams.dynamicExposure.enabled === undefined) this.globalParams.dynamicExposure.enabled = true;
+          if (this.globalParams.dynamicExposure.minExposure === undefined) this.globalParams.dynamicExposure.minExposure = 0.5;
+          if (this.globalParams.dynamicExposure.maxExposure === undefined) this.globalParams.dynamicExposure.maxExposure = 2.5;
+          if (this.globalParams.dynamicExposure.probeHz === undefined) this.globalParams.dynamicExposure.probeHz = 8;
+          if (this.globalParams.dynamicExposure.tauBrighten === undefined) this.globalParams.dynamicExposure.tauBrighten = 15.0;
+          if (this.globalParams.dynamicExposure.tauDarken === undefined) this.globalParams.dynamicExposure.tauDarken = 15.0;
         }
       }
 

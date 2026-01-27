@@ -218,6 +218,20 @@ class RopeInstance {
     if (tex) {
       tex.wrapS = THREE.RepeatWrapping;
       tex.wrapT = THREE.ClampToEdgeWrapping;
+      // Ropes are thin geometry; mipmaps often make them look overly blurry when zoomed out.
+      // Prefer crisp minification and rely on anisotropy for angled sampling.
+      tex.generateMipmaps = false;
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+
+      try {
+        const renderer = window.MapShine?.effectComposer?.renderer;
+        if (renderer?.capabilities?.getMaxAnisotropy) {
+          tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+        }
+      } catch (_) {
+      }
+
       tex.needsUpdate = true;
     }
 
@@ -333,7 +347,8 @@ class RopeInstance {
     const windForceMag = (Number.isFinite(this.config.windForce) ? this.config.windForce : 1.0) * wSpeed * 1000;
 
     // Wind Noise (Gusts)
-    const time = performance.now();
+    // Use TimeManager time so all effects stay in sync (and support pause/scale).
+    const time = (typeof timeInfo?.elapsed === 'number') ? (timeInfo.elapsed * 1000.0) : performance.now();
     const gustAmount = Number.isFinite(this.config.windGustAmount) ? this.config.windGustAmount : 0.5;
     const globalGust = (Math.sin(time * 0.0005) + Math.cos(time * 0.0013)) * 0.5 + 0.5;
 
@@ -848,9 +863,19 @@ export class PhysicsRopeManager {
           tex.needsUpdate = true;
           tex.wrapS = THREE.RepeatWrapping;
           tex.wrapT = THREE.ClampToEdgeWrapping;
-          tex.minFilter = THREE.LinearMipmapLinearFilter;
+          // Ropes are visually thin; mipmaps tend to wash them out when zoomed out.
+          // Prefer crisp minification + anisotropy.
+          tex.minFilter = THREE.LinearFilter;
           tex.magFilter = THREE.LinearFilter;
-          tex.generateMipmaps = true;
+          tex.generateMipmaps = false;
+
+          try {
+            const renderer = window.MapShine?.effectComposer?.renderer;
+            if (renderer?.capabilities?.getMaxAnisotropy) {
+              tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+            }
+          } catch (_) {
+          }
           return tex;
         }
       }

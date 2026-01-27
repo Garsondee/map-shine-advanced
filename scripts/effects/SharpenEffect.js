@@ -29,9 +29,9 @@ export class SharpenEffect extends EffectBase {
 
     this.params = {
       enabled: false,
-      amount: 0.35,
-      radiusPx: 1.0,
-      threshold: 0.0
+      amount: 0.5,
+      radiusPx: 3.5,
+      threshold: 0.045
     };
   }
 
@@ -48,9 +48,9 @@ export class SharpenEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: false, hidden: true },
-        amount: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.35 },
-        radiusPx: { type: 'slider', min: 0.0, max: 6.0, step: 0.1, default: 1.0 },
-        threshold: { type: 'slider', min: 0.0, max: 0.25, step: 0.005, default: 0.0 }
+        amount: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.5 },
+        radiusPx: { type: 'slider', min: 0.0, max: 6.0, step: 0.1, default: 3.5 },
+        threshold: { type: 'slider', min: 0.0, max: 0.25, step: 0.005, default: 0.045 }
       },
       presets: {
         'Off': { amount: 0.0, radiusPx: 1.0, threshold: 0.0 },

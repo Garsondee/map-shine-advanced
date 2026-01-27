@@ -713,7 +713,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 1.5
+          default: 1.33
         },
         driftSpeed: {
           type: 'slider',
@@ -737,7 +737,7 @@ export class CloudEffect extends EffectBase {
           min: 0.1,
           max: 10.0,
           step: 0.1,
-          default: 1.0
+          default: 0.4
         },
         driftMaxSpeed: {
           type: 'slider',
@@ -756,7 +756,7 @@ export class CloudEffect extends EffectBase {
           default: 1.0
         },
         layer1Enabled: { type: 'boolean', label: 'Enabled', default: true },
-        layer1Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.23 },
+        layer1Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
         layer1Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 1.34 },
         layer1Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.33 },
         layer1ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.0 },
@@ -764,9 +764,9 @@ export class CloudEffect extends EffectBase {
         layer1DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: -1.7 },
 
         layer2Enabled: { type: 'boolean', label: 'Enabled', default: true },
-        layer2Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.25 },
+        layer2Opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.7 },
         layer2Scale: { type: 'slider', label: 'Scale Mult', min: 0.25, max: 3.0, step: 0.01, default: 1.22 },
-        layer2Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.72 },
+        layer2Coverage: { type: 'slider', label: 'Coverage Mult', min: 0.0, max: 2.0, step: 0.01, default: 0.57 },
         layer2ParallaxMult: { type: 'slider', label: 'Parallax Mult', min: 0.0, max: 2.5, step: 0.01, default: 0.0 },
         layer2SpeedMult: { type: 'slider', label: 'Speed Mult', min: 0.0, max: 2.0, step: 0.01, default: 1.07 },
         layer2DirDeg: { type: 'slider', label: 'Direction Offset (deg)', min: -10.0, max: 10.0, step: 0.1, default: -0.86 },
@@ -851,7 +851,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 0.5,
           step: 0.01,
-          default: 0.02
+          default: 0.32
         },
         cloudTopPeakDetailScale: {
           type: 'slider',
@@ -859,7 +859,7 @@ export class CloudEffect extends EffectBase {
           min: 1.0,
           max: 200.0,
           step: 0.5,
-          default: 61.5
+          default: 92.5
         },
         cloudTopPeakDetailSpeed: {
           type: 'slider',
@@ -891,7 +891,7 @@ export class CloudEffect extends EffectBase {
           min: 0.0,
           max: 10.0,
           step: 0.1,
-          default: 2.6
+          default: 1.8
         }
       }
     };

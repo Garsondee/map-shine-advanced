@@ -66,6 +66,7 @@ import { sceneDebug } from '../utils/scene-debug.js';
 import { clearCache as clearAssetCache } from '../assets/loader.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { weatherController } from '../core/WeatherController.js';
+import { DynamicExposureManager } from '../core/DynamicExposureManager.js';
 import { ControlsIntegration } from './controls-integration.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
 import { loadingOverlay } from '../ui/loading-overlay.js';
@@ -167,6 +168,9 @@ let lightAnimDialog = null;
 
 /** @type {TokenManager|null} */
 let tokenManager = null;
+
+/** @type {DynamicExposureManager|null} */
+let dynamicExposureManager = null;
 
 /** @type {TileManager|null} */
 let tileManager = null;
@@ -1508,6 +1512,7 @@ async function createThreeCanvas(scene) {
 
     // Wire up window light effect
     if (window.MapShine) window.MapShine.windowLightEffect = windowLightEffect;
+    if (window.MapShine) window.MapShine.colorCorrectionEffect = colorCorrectionEffect;
     if (window.MapShine) window.MapShine.cloudEffect = cloudEffect;
     if (window.MapShine) window.MapShine.atmosphericFogEffect = atmosphericFogEffect;
     if (window.MapShine) window.MapShine.distortionManager = distortionManager;
@@ -1642,6 +1647,30 @@ async function createThreeCanvas(scene) {
     // Sync existing tokens immediately (we're already in canvasReady, so the hook won't fire)
     tokenManager.syncAllTokens();
     log.info('Token manager initialized and synced');
+
+    // Step 4a: Dynamic Exposure Manager (token-based eye adaptation)
+    try {
+      if (!dynamicExposureManager) {
+        dynamicExposureManager = new DynamicExposureManager({
+          renderer,
+          camera,
+          weatherController,
+          tokenManager,
+          colorCorrectionEffect
+        });
+      } else {
+        dynamicExposureManager.renderer = renderer;
+        dynamicExposureManager.camera = camera;
+        dynamicExposureManager.setWeatherController?.(weatherController);
+        dynamicExposureManager.setTokenManager?.(tokenManager);
+        dynamicExposureManager.setColorCorrectionEffect?.(colorCorrectionEffect);
+      }
+
+      effectComposer.addUpdatable(dynamicExposureManager);
+      if (window.MapShine) window.MapShine.dynamicExposureManager = dynamicExposureManager;
+    } catch (e) {
+      log.warn('Failed to initialize DynamicExposureManager', e);
+    }
 
     try {
       loadingOverlay.setStage('scene', 0.35, 'Syncing tokens…', { keepAuto: true });
@@ -2613,50 +2642,64 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         }
       ],
       parameters: {
-        enabled: { type: 'boolean', label: 'Enabled', default: true },
+        enabled: { type: 'boolean', label: 'Enable Selection Box', default: true },
 
-        outlineColor: { type: 'color', label: 'Outline Color', default: { r: 0.314, g: 0.784, b: 1.0 } },
-        outlineWidthPx: { type: 'slider', label: 'Outline Width (px)', min: 0, max: 8, step: 1, default: 2 },
-        outlineAlpha: { type: 'slider', label: 'Outline Alpha', min: 0, max: 1, step: 0.01, default: 0.9 },
-        fillAlpha: { type: 'slider', label: 'Fill Alpha', min: 0, max: 0.25, step: 0.005, default: 0.035 },
-        cornerRadiusPx: { type: 'slider', label: 'Corner Radius (px)', min: 0, max: 16, step: 1, default: 2 },
+        outlineColor: { type: 'color', label: 'Outline Color', default: { r: 0.2, g: 0.75, b: 1.0 } },
+        outlineWidthPx: { type: 'slider', label: 'Outline Width (px)', min: 1, max: 12, step: 1, default: 2 },
+        outlineAlpha: { type: 'slider', label: 'Outline Alpha', min: 0, max: 1, step: 0.01, default: 0.95 },
+
+        fillAlpha: { type: 'slider', label: 'Fill Alpha', min: 0, max: 1, step: 0.01, default: 0.02 },
+        cornerRadiusPx: { type: 'slider', label: 'Corner Radius (px)', min: 0, max: 24, step: 1, default: 2 },
 
         borderStyle: {
-          type: 'dropdown',
-          label: 'Style',
-          options: { Solid: 'solid', Dashed: 'dashed', 'Marching Ants': 'marching' },
+          type: 'list',
+          label: 'Border Style',
+          options: {
+            Solid: 'solid',
+            Dashed: 'dashed',
+            Marching: 'marching'
+          },
           default: 'solid'
         },
-        dashLengthPx: { type: 'slider', label: 'Dash Length (px)', min: 1, max: 40, step: 1, default: 10 },
-        dashGapPx: { type: 'slider', label: 'Dash Gap (px)', min: 0, max: 40, step: 1, default: 6 },
-        dashSpeed: { type: 'slider', label: 'Dash Speed (px/s)', min: 0, max: 600, step: 10, default: 120 },
+        dashLengthPx: { type: 'slider', label: 'Dash Length (px)', min: 1, max: 48, step: 1, default: 10 },
+        dashGapPx: { type: 'slider', label: 'Dash Gap (px)', min: 0, max: 48, step: 1, default: 6 },
+        dashSpeed: { type: 'slider', label: 'Dash Speed', min: 0, max: 600, step: 1, default: 180 },
 
-        doubleBorderEnabled: { type: 'boolean', label: 'Enabled', default: false },
-        doubleBorderInsetPx: { type: 'slider', label: 'Inset (px)', min: 0, max: 30, step: 1, default: 3 },
-        doubleBorderWidthPx: { type: 'slider', label: 'Width (px)', min: 0, max: 8, step: 1, default: 1 },
-        doubleBorderAlpha: { type: 'slider', label: 'Alpha', min: 0, max: 1, step: 0.01, default: 0.5 },
+        doubleBorderEnabled: { type: 'boolean', label: 'Double Border', default: false },
+        doubleBorderInsetPx: { type: 'slider', label: 'Inset (px)', min: 0, max: 24, step: 1, default: 3 },
+        doubleBorderWidthPx: { type: 'slider', label: 'Width (px)', min: 1, max: 12, step: 1, default: 1 },
+        doubleBorderAlpha: { type: 'slider', label: 'Alpha', min: 0, max: 1, step: 0.01, default: 0.55 },
         doubleBorderStyle: {
-          type: 'dropdown',
+          type: 'list',
           label: 'Style',
-          options: { Solid: 'solid', Dashed: 'dashed', 'Marching Ants': 'marching' },
+          options: {
+            Solid: 'solid',
+            Dashed: 'dashed',
+            Marching: 'marching'
+          },
           default: 'dashed'
         },
 
-        glowEnabled: { type: 'boolean', label: 'Enabled', default: true },
-        glowAlpha: { type: 'slider', label: 'Glow Alpha', min: 0, max: 1, step: 0.01, default: 0.12 },
-        glowSizePx: { type: 'slider', label: 'Glow Size (px)', min: 0, max: 80, step: 1, default: 18 },
+        glowEnabled: { type: 'boolean', label: 'Glow', default: true },
+        glowAlpha: { type: 'slider', label: 'Glow Alpha', min: 0, max: 1, step: 0.01, default: 0.22 },
+        glowSizePx: { type: 'slider', label: 'Glow Size (px)', min: 0, max: 80, step: 1, default: 22 },
 
-        pulseEnabled: { type: 'boolean', label: 'Enabled', default: false },
-        pulseSpeed: { type: 'slider', label: 'Speed', min: 0.1, max: 10, step: 0.1, default: 2.0 },
-        pulseStrength: { type: 'slider', label: 'Strength', min: 0, max: 1, step: 0.01, default: 0.5 },
+        pulseEnabled: { type: 'boolean', label: 'Pulse', default: false },
+        pulseSpeed: { type: 'slider', label: 'Pulse Speed', min: 0, max: 6, step: 0.01, default: 1.4 },
+        pulseStrength: { type: 'slider', label: 'Pulse Strength', min: 0, max: 2.0, step: 0.01, default: 0.7 },
 
         pattern: {
-          type: 'dropdown',
+          type: 'list',
           label: 'Pattern',
-          options: { None: 'none', Grid: 'grid', Diagonal: 'diagonal', Dots: 'dots' },
-          default: 'none'
+          options: {
+            None: 'none',
+            Grid: 'grid',
+            Diagonal: 'diagonal',
+            Dots: 'dots'
+          },
+          default: 'grid'
         },
-        patternScalePx: { type: 'slider', label: 'Scale (px)', min: 4, max: 80, step: 1, default: 18 },
+        patternScalePx: { type: 'slider', label: 'Scale (px)', min: 4, max: 120, step: 1, default: 22 },
         patternAlpha: { type: 'slider', label: 'Alpha', min: 0, max: 1, step: 0.01, default: 0.14 },
         patternLineWidthPx: { type: 'slider', label: 'Line Width (px)', min: 1, max: 6, step: 1, default: 1 },
 
@@ -2678,7 +2721,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         techBracketWidthPx: { type: 'slider', label: 'Bracket Width (px)', min: 1, max: 12, step: 1, default: 2 },
 
         shadowEnabled: { type: 'boolean', label: 'Enabled', default: true },
-        shadowOpacity: { type: 'slider', label: 'Opacity', min: 0, max: 1, step: 0.01, default: 0.26 },
+        shadowOpacity: { type: 'slider', label: 'Opacity', min: 0, max: 1, step: 0.01, default: 0.22 },
         shadowFeather: { type: 'slider', label: 'Feather', min: 0, max: 0.3, step: 0.005, default: 0.08 },
         shadowOffsetPx: { type: 'slider', label: 'Offset (px)', min: 0, max: 120, step: 1, default: 18 },
         shadowZOffset: { type: 'slider', label: 'Z Offset', min: 0, max: 2.0, step: 0.01, default: 0.12 },
@@ -4644,11 +4687,14 @@ function updateLayerVisibility() {
   if (canvas.drawings) canvas.drawings.visible = true;
 
   // 2. Dynamic Layers - Show only if using the corresponding tool
-  const activeLayer = canvas.activeLayer?.name;
+  const activeLayerObj = canvas.activeLayer;
+  const activeLayerName = activeLayerObj?.options?.name || activeLayerObj?.name || '';
+  const activeLayerCtor = activeLayerObj?.constructor?.name || '';
+  const isActiveLayer = (name) => (activeLayerName === name) || (activeLayerCtor === name);
   
   // Helper to toggle PIXI layer vs Three.js Manager
   const toggleLayer = (pixiLayerName, manager, forceHideThree = false) => {
-    const isActive = activeLayer === pixiLayerName;
+    const isActive = isActiveLayer(pixiLayerName);
     const layer = canvas.layers.find(l => l.name === pixiLayerName); // V12 safer access?
     
     // Show PIXI layer if active
@@ -4668,7 +4714,7 @@ function updateLayerVisibility() {
   // If Walls Layer is active, show PIXI walls, hide Three.js wall edit lines.
   // If not active, hide PIXI walls, show Three.js wall edit lines.
   if (canvas.walls) {
-      const isWallsActive = activeLayer === 'WallsLayer';
+      const isWallsActive = isActiveLayer('WallsLayer') || isActiveLayer('walls');
 
       canvas.walls.visible = true;
       canvas.walls.interactiveChildren = true;
@@ -4716,7 +4762,7 @@ function updateLayerVisibility() {
 
   // Tiles
   if (canvas.tiles) {
-      const isTilesActive = activeLayer === 'TilesLayer';
+      const isTilesActive = isActiveLayer('TilesLayer') || isActiveLayer('tiles');
       canvas.tiles.visible = isTilesActive;
       if (tileManager) {
           tileManager.setVisibility(!isTilesActive && !isMapMakerMode);
@@ -4735,13 +4781,13 @@ function updateLayerVisibility() {
       // Note: canvas.lighting, canvas.sounds, etc.
       // V12 Regions is canvas.regions
       if (layer) {
-          layer.visible = (activeLayer === name);
+          layer.visible = isActiveLayer(name) || isActiveLayer(name.replace('Layer', '').toLowerCase());
       }
   });
   
   // Regions Layer (V12 specific check)
   if (canvas.regions) {
-      canvas.regions.visible = (activeLayer === 'RegionLayer');
+      canvas.regions.visible = isActiveLayer('RegionLayer') || isActiveLayer('regions');
   }
 }
 
@@ -4795,7 +4841,9 @@ function updateInputMode() {
     // avoid double-rendering. Do this *before* deciding who gets input.
     updateLayerVisibility();
 
-    const activeLayer = canvas.activeLayer?.name;
+    const activeLayerObj = canvas.activeLayer;
+    const activeLayerName = activeLayerObj?.options?.name || activeLayerObj?.name || '';
+    const activeLayerCtor = activeLayerObj?.constructor?.name || '';
     
     // Tools that require PIXI interaction
     // Basically any layer that isn't TokenLayer (assuming we handle Tokens in 3D eventually? 
@@ -4819,7 +4867,9 @@ function updateInputMode() {
       'DrawingsLayer',
       'NotesLayer',
       'RegionLayer',
-      'TilesLayer'
+      'regions',
+      'TilesLayer',
+      'tiles'
     ];
     
     // Drive Three.js wall line visibility and PIXI input routing based on the
@@ -4829,8 +4879,11 @@ function updateInputMode() {
     setTimeout(() => {
       if (!canvas?.ready || isMapMakerMode) return;
 
-      const finalLayer = canvas.activeLayer?.name;
-      const isEditMode = editLayers.some(l => finalLayer === l);
+      const finalLayerObj = canvas.activeLayer;
+      const finalLayerName = finalLayerObj?.options?.name || finalLayerObj?.name || '';
+      const finalLayerCtor = finalLayerObj?.constructor?.name || '';
+      const isFinalLayer = (name) => (finalLayerName === name) || (finalLayerCtor === name);
+      const isEditMode = editLayers.some(l => finalLayerName === l || finalLayerCtor === l);
 
       // Drive Three.js light icon visibility from a single source of truth.
       // In Gameplay mode (Three.js active), show light icons only when the
@@ -4839,28 +4892,28 @@ function updateInputMode() {
       // canvas is hidden, so we also hide the icons here for logical
       // consistency.
       if (lightIconManager && lightIconManager.setVisibility) {
-        const showLighting = (finalLayer === 'LightingLayer') && !isMapMakerMode;
+        const showLighting = (isFinalLayer('LightingLayer') || isFinalLayer('lighting')) && !isMapMakerMode;
         const tool = ui?.controls?.tool?.name ?? game.activeTool;
         const mapshineToolActive = tool === 'map-shine-enhanced-light' || tool === 'map-shine-sun-light';
         lightIconManager.setVisibility(showLighting && !mapshineToolActive);
       }
 
       if (enhancedLightIconManager && enhancedLightIconManager.setVisibility) {
-        const showLighting = (finalLayer === 'LightingLayer') && !isMapMakerMode;
+        const showLighting = (isFinalLayer('LightingLayer') || isFinalLayer('lighting')) && !isMapMakerMode;
         enhancedLightIconManager.setVisibility(showLighting);
       }
 
       if (wallManager && wallManager.setVisibility) {
-        const showThreeWalls = finalLayer === 'WallsLayer' && !isMapMakerMode;
+        const showThreeWalls = (isFinalLayer('WallsLayer') || isFinalLayer('walls')) && !isMapMakerMode;
         wallManager.setVisibility(showThreeWalls);
       }
 
       if (isEditMode) {
         pixiCanvas.style.pointerEvents = 'auto';
-        log.debug(`Input Mode: PIXI (Edit: ${finalLayer})`);
+        log.debug(`Input Mode: PIXI (Edit: ${finalLayerCtor || finalLayerName})`);
       } else {
         pixiCanvas.style.pointerEvents = 'none'; // Pass through to Three.js
-        log.debug(`Input Mode: THREE.js (Gameplay: ${finalLayer})`);
+        log.debug(`Input Mode: THREE.js (Gameplay: ${finalLayerCtor || finalLayerName})`);
       }
     }, 0);
 }

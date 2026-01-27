@@ -37,6 +37,10 @@ export class RenderLoop {
     this._lastPixiPivotX = null;
     this._lastPixiPivotY = null;
     this._lastPixiZoom = null;
+
+    // When set, we temporarily bypass idle frame skipping and render every RAF.
+    // This is used for time-critical animations (token movement, drags, etc.).
+    this._continuousRenderUntilMs = 0;
     
     /** @type {number|null} */
     this.animationFrameId = null;
@@ -92,9 +96,32 @@ export class RenderLoop {
     this._lastPixiPivotX = null;
     this._lastPixiPivotY = null;
     this._lastPixiZoom = null;
+
+    this._continuousRenderUntilMs = 0;
     
     // Kick off the loop
     this.animationFrameId = requestAnimationFrame(this.render);
+  }
+
+  /**
+   * Temporarily bypass idle frame skipping.
+   * Useful for smooth movement animations where a low render rate looks "steppy".
+   * @param {number} durationMs
+   */
+  requestContinuousRender(durationMs) {
+    const d = Number(durationMs);
+    if (!Number.isFinite(d) || d <= 0) {
+      this._forceNextRender = true;
+      return;
+    }
+
+    const until = performance.now() + Math.max(0, d);
+    if (!this._continuousRenderUntilMs || until > this._continuousRenderUntilMs) {
+      this._continuousRenderUntilMs = until;
+    }
+
+    // Ensure the very next frame renders even if we're currently idle-throttled.
+    this._forceNextRender = true;
   }
 
   /**
@@ -143,6 +170,8 @@ export class RenderLoop {
     // When an EffectComposer is present, it owns the full render pipeline
     if (this.effectComposer) {
       try {
+        const inContinuousWindow = now < (this._continuousRenderUntilMs || 0);
+
         // Idle throttling: if camera is not moving, render at a reduced rate.
         // Prefer PIXI camera state (stage pivot/scale) to avoid 1-frame latency.
         const stage = canvas?.stage;
@@ -180,7 +209,17 @@ export class RenderLoop {
           : this._idleFps;
         const idleIntervalMs = 1000 / Math.max(1, idleFps);
 
-        let shouldRender = this._forceNextRender || cameraChanged;
+        // Effects may request continuous rendering while they are active
+        // (e.g. particle systems) so they don't animate at the idle FPS.
+        let effectWantsContinuous = false;
+        try {
+          if (this.effectComposer?.wantsContinuousRender) {
+            effectWantsContinuous = !!this.effectComposer.wantsContinuousRender();
+          }
+        } catch (_) {
+        }
+
+        let shouldRender = inContinuousWindow || effectWantsContinuous || this._forceNextRender || cameraChanged;
         if (!shouldRender) {
           const since = now - (this._lastComposerRenderTime || 0);
           if (since >= idleIntervalMs) shouldRender = true;

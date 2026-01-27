@@ -193,11 +193,11 @@ export class InteractionManager {
     this.selectionBoxParams = {
       enabled: true,
 
-      outlineColor: { r: 0.314, g: 0.784, b: 1.0 },
+      outlineColor: { r: 0.2, g: 0.75, b: 1.0 },
       outlineWidthPx: 2,
-      outlineAlpha: 0.9,
+      outlineAlpha: 0.95,
 
-      fillAlpha: 0.035,
+      fillAlpha: 0.02,
 
       // Glassmorphism (DOM backdrop filter)
       glassEnabled: false,
@@ -236,8 +236,8 @@ export class InteractionManager {
       cornerRadiusPx: 2,
 
       glowEnabled: true,
-      glowAlpha: 0.12,
-      glowSizePx: 18,
+      glowAlpha: 0.22,
+      glowSizePx: 22,
 
       // Animated pulse (primarily affects glow + outline alpha)
       pulseEnabled: false,
@@ -245,13 +245,13 @@ export class InteractionManager {
       pulseStrength: 0.5,
 
       // Fill pattern overlay
-      pattern: 'none', // 'none' | 'grid' | 'diagonal' | 'dots'
-      patternScalePx: 18,
+      pattern: 'grid', // 'none' | 'grid' | 'diagonal' | 'dots'
+      patternScalePx: 22,
       patternAlpha: 0.14,
       patternLineWidthPx: 1,
 
       shadowEnabled: true,
-      shadowOpacity: 0.26,
+      shadowOpacity: 0.22,
       shadowFeather: 0.08,
       shadowOffsetPx: 18,
       shadowZOffset: 0.12,

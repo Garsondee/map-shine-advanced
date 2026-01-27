@@ -22,6 +22,16 @@ import { SmartWindBehavior } from './SmartWindBehavior.js';
 
 const log = createLogger('FireSparksEffect');
 
+const _FIRE_PALETTE_COLD_START = { r: 0.8, g: 0.3, b: 0.1 };
+const _FIRE_PALETTE_COLD_END = { r: 0.2, g: 0.0, b: 0.0 };
+const _FIRE_PALETTE_HOT_START = { r: 0.2, g: 0.6, b: 1.0 };
+const _FIRE_PALETTE_HOT_END = { r: 0.0, g: 0.1, b: 0.8 };
+
+const _FIRE_STD_START_DEFAULT = { r: 1.0, g: 1.0, b: 1.0 };
+const _FIRE_STD_END_DEFAULT = { r: 0.8, g: 0.2, b: 0.05 };
+const _EMBER_STD_START_DEFAULT = { r: 1.0, g: 0.8, b: 0.4 };
+const _EMBER_STD_END_DEFAULT = { r: 1.0, g: 0.2, b: 0.0 };
+
 /**
  * Emitter shape that spawns particles from a precomputed list of valid
  * coordinates sampled from the _Fire mask.
@@ -419,6 +429,12 @@ class ParticleTimeScaledBehavior {
 export class FireSparksEffect extends EffectBase {
   constructor() {
     super('fire-sparks', RenderLayers.PARTICLES, 'low');
+
+    // This effect is a continuous animation (particle atlas + simulation). When active,
+    // we must render every RAF; otherwise it will look "choppy" under idle throttling.
+    // We gate *actual* activation via isActive().
+    this.requiresContinuousRender = true;
+
     this.fires = [];
     this.particleSystemRef = null; 
     this.globalSystem = null;
@@ -434,6 +450,12 @@ export class FireSparksEffect extends EffectBase {
     this._tempVec2 = null; // Lazy init when THREE is available
     this._reusableIntervalValue = null;
     this._reusableConstantValue = null;
+    this._tempSystems = [];
+
+    this._tempTargetFireStart = { r: 1.0, g: 1.0, b: 1.0 };
+    this._tempTargetFireEnd = { r: 1.0, g: 0.2, b: 0.0 };
+    this._tempTargetEmberStart = { r: 1.0, g: 0.8, b: 0.4 };
+    this._tempTargetEmberEnd = { r: 1.0, g: 0.2, b: 0.0 };
     // Per-system reusable color objects (keyed by system reference)
     this._systemColorCache = new WeakMap();
     
@@ -456,13 +478,13 @@ export class FireSparksEffect extends EffectBase {
       // Updated default from scene
       lightIntensity: 5.0,
 
-      // Fire fine controls (defaults from Mad Scientist scene)
-      fireSizeMin: 60.0,
-      fireSizeMax: 95.0,
-      fireLifeMin: 2.3,
-      fireLifeMax: 2.55,
-      fireOpacityMin: 0.2,
-      fireOpacityMax: 0.8,
+      // Fire fine controls (defaults)
+      fireSizeMin: 23,
+      fireSizeMax: 80,
+      fireLifeMin: 2.95,
+      fireLifeMax: 3.7,
+      fireOpacityMin: 0.54,
+      fireOpacityMax: 0.97,
       fireColorBoostMin: 0.0,
       fireColorBoostMax: 1.35,
       fireSpinEnabled: true,
@@ -480,8 +502,8 @@ export class FireSparksEffect extends EffectBase {
       emberLifeMax: 3.6,
       emberOpacityMin: 0.67,
       emberOpacityMax: 0.89,
-      emberColorBoostMin: 1.70,
-      emberColorBoostMax: 2.85,
+      emberColorBoostMin: 0.7,
+      emberColorBoostMax: 1.95,
 
       // New color controls
       fireStartColor: { r: 1.0, g: 1.0, b: 1.0 },
@@ -491,9 +513,9 @@ export class FireSparksEffect extends EffectBase {
 
       // Physics controls (match Mad Scientist scene where provided)
       fireUpdraft: 0.15,
-      emberUpdraft: 1.35,
+      emberUpdraft: 6.05,
       fireCurlStrength: 0.7,
-      emberCurlStrength: 0.3,
+      emberCurlStrength: 0.55,
 
       // Weather guttering controls (outdoor fire kill strength)
       // These scale how strongly precipitation and wind reduce fire lifetime
@@ -510,7 +532,7 @@ export class FireSparksEffect extends EffectBase {
       // ========== HEAT DISTORTION CONTROLS ==========
       // Heat distortion creates a rippling heat haze effect around fire sources
       heatDistortionEnabled: false,
-      heatDistortionIntensity: 0.015, // Strength of UV offset (0.0 - 0.05)
+      heatDistortionIntensity: 0.011, // Strength of UV offset (0.0 - 0.05)
       heatDistortionFrequency: 8.0,   // Noise frequency for shimmer pattern
       heatDistortionSpeed: 1.0,       // Animation speed multiplier
       heatDistortionBlurRadius: 4.0,  // Blur radius for mask expansion
@@ -521,9 +543,9 @@ export class FireSparksEffect extends EffectBase {
       // 1.0 = indoor flames live as long as outdoor flames.
       // <1.0 = indoor flames are shorter-lived (tighter, less buoyant).
       // This is applied in FireMaskShape.initialize when outdoorFactor ~ 0.
-      indoorLifeScale: 1.0,
+      indoorLifeScale: 0.75,
 
-      indoorTimeScale: 0.2,
+      indoorTimeScale: 1,
 
       // ========== FLAME SHAPE ATLAS CONTROLS ==========
       // Global flame shape parameters (affect all animation frames)
@@ -534,7 +556,7 @@ export class FireSparksEffect extends EffectBase {
       flameHeight: 0.5,             // Vertical scale of flame shape
       flameEdgeSoftness: 1.0,       // Edge falloff softness
       flameCoreBrightness: 4.0,     // Core intensity multiplier
-      flameCoreSize: 0.16,          // Size of hot core relative to flame
+      flameCoreSize: 0.37,          // Size of hot core relative to flame
       // Master intensity for all flame sprites
       flameAtlasIntensity: 2.0,
       // Global opacity multiplier for all sprites
@@ -547,6 +569,15 @@ export class FireSparksEffect extends EffectBase {
     // Create procedural flame atlas texture after params are initialized so
     // _drawFlameInCell can safely read this.params during atlas generation.
     this.fireTexture = this._createFireTexture();
+  }
+
+  isActive() {
+    if (!this.settings?.enabled) return false;
+    if (this.globalSystem || this.globalEmbers) return true;
+    if (this.globalSystems && this.globalSystems.length) return true;
+    if (this.globalEmberSystems && this.globalEmberSystems.length) return true;
+    if (this.fires && this.fires.length) return true;
+    return false;
   }
 
   _polygonAreaAbs(points) {
@@ -870,13 +901,12 @@ export class FireSparksEffect extends EffectBase {
 
         // Temperature (0.0 = Arctic/Chilled, 1.0 = Blue Bunsen)
         fireTemperature: { type: 'slider', label: 'Temperature', min: 0.0, max: 1.0, step: 0.05, default: 0.5 },
-        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 150.0, step: 1.0, default: 60.0 },
-        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 200.0, step: 1.0, default: 95.0 },
-        fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 6.0, step: 0.05, default: 1.35 },
-        fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 2.1 },
-        // Defaults from Mad Scientist scene
-        fireOpacityMin: { type: 'slider', label: 'Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.12 },
-        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.37 },
+        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 150.0, step: 1.0, default: 23 },
+        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 200.0, step: 1.0, default: 80 },
+        fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 6.0, step: 0.05, default: 2.95 },
+        fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 3.7 },
+        fireOpacityMin: { type: 'slider', label: 'Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.54 },
+        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.97 },
         fireColorBoostMin: { type: 'slider', label: 'Color Boost Min', min: 0.0, max: 4.0, step: 0.05, default: 0.0 },
         fireColorBoostMax: { type: 'slider', label: 'Color Boost Max', min: 0.0, max: 12.0, step: 0.05, default: 2.15 },
         fireStartColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 } },
@@ -897,7 +927,7 @@ export class FireSparksEffect extends EffectBase {
         flameHeight: { type: 'slider', label: 'Height', min: 0.2, max: 3.0, step: 0.05, default: 0.5 },
         flameEdgeSoftness: { type: 'slider', label: 'Edge Softness', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
         flameCoreBrightness: { type: 'slider', label: 'Core Brightness', min: 0.0, max: 4.0, step: 0.05, default: 4.0 },
-        flameCoreSize: { type: 'slider', label: 'Core Size', min: 0.01, max: 1.0, step: 0.01, default: 0.16 },
+        flameCoreSize: { type: 'slider', label: 'Core Size', min: 0.01, max: 1.0, step: 0.01, default: 0.37 },
 
         emberRate: { type: 'slider', label: 'Ember Density', min: 0.0, max: 5.0, step: 0.1, default: 2.5 },
         emberSizeMin: { type: 'slider', label: 'Ember Size Min', min: 1.0, max: 40.0, step: 1.0, default: 5.0 },
@@ -906,23 +936,23 @@ export class FireSparksEffect extends EffectBase {
         emberLifeMax: { type: 'slider', label: 'Ember Life Max (s)', min: 0.1, max: 12.0, step: 0.1, default: 12.0 },
         emberOpacityMin: { type: 'slider', label: 'Ember Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
         emberOpacityMax: { type: 'slider', label: 'Ember Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
-        emberColorBoostMin: { type: 'slider', label: 'Ember Color Boost Min', min: 0.0, max: 2.0, step: 0.05, default: 1.70 },
-        emberColorBoostMax: { type: 'slider', label: 'Ember Color Boost Max', min: 0.0, max: 3.0, step: 0.05, default: 2.85 },
+        emberColorBoostMin: { type: 'slider', label: 'Ember Color Boost Min', min: 0.0, max: 2.0, step: 0.05, default: 0.7 },
+        emberColorBoostMax: { type: 'slider', label: 'Ember Color Boost Max', min: 0.0, max: 3.0, step: 0.05, default: 1.95 },
         emberStartColor: { type: 'color', default: { r: 1.0, g: 0.8, b: 0.4 } },
         emberEndColor: { type: 'color', default: { r: 1.0, g: 0.2, b: 0.0 } },
         fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 0.15 },
-        emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 1.35 },
+        emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 6.05 },
         fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.7 },
-        emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.3 },
+        emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.55 },
         // Wind Influence remains generic; Light Intensity and Time Scale match scene
         windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 4.5 },
         lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
         timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 3.0 },
 
         // Indoor vs outdoor lifetime scaling (applied only when particles are fully indoors)
-        indoorLifeScale: { type: 'slider', label: 'Indoor Life Scale', min: 0.05, max: 1.0, step: 0.05, default: 1.0 },
+        indoorLifeScale: { type: 'slider', label: 'Indoor Life Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.75 },
 
-        indoorTimeScale: { type: 'slider', label: 'Indoor Time Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.2 },
+        indoorTimeScale: { type: 'slider', label: 'Indoor Time Scale', min: 0.05, max: 1.0, step: 0.05, default: 1.0 },
 
         // Weather guttering strength (spawn-time kill) for outdoor flames
         weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.5 },
@@ -930,7 +960,7 @@ export class FireSparksEffect extends EffectBase {
 
         // Heat Distortion Controls
         heatDistortionEnabled: { type: 'checkbox', label: 'Enable Heat Haze', default: true },
-        heatDistortionIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 0.05, step: 0.001, default: 0.05 },
+        heatDistortionIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 0.05, step: 0.001, default: 0.011 },
         heatDistortionFrequency: { type: 'slider', label: 'Frequency', min: 1.0, max: 20.0, step: 0.5, default: 20.0 },
         heatDistortionSpeed: { type: 'slider', label: 'Speed', min: 0.1, max: 3.0, step: 0.1, default: 3.0 }
       }
@@ -1648,6 +1678,7 @@ export class FireSparksEffect extends EffectBase {
       baseUpdraftMag: height * 0.125,
       turbulence,
       baseCurlStrength: fireCurlStrengthBase.clone(),
+      _msColorOverLife: colorOverLife,
       _msEmissionScale: 1.0,
       _msHeight: height
     };
@@ -2046,38 +2077,31 @@ export class FireSparksEffect extends EffectBase {
     const tempPhysMod = 0.75 + (temp * 0.5);
 
     // 2. Calculate Color Targets
-    // We define 3 palettes and lerp between them based on 'temp' slider
-    const lerpRGB = (c1, c2, f) => ({
-      r: c1.r + (c2.r - c1.r) * f,
-      g: c1.g + (c2.g - c1.g) * f,
-      b: c1.b + (c2.b - c1.b) * f
-    });
+    // Avoid per-frame object allocation by writing into cached temp objects.
+    const stdStart = p.fireStartColor || _FIRE_STD_START_DEFAULT;
+    const stdEnd = p.fireEndColor || _FIRE_STD_END_DEFAULT;
 
-    // Palette Definitions
-    // Cold: Deep reds, struggling flame
-    const coldStart = { r: 0.8, g: 0.3, b: 0.1 };
-    const coldEnd   = { r: 0.2, g: 0.0, b: 0.0 };
-
-    // Standard: The user's specific inputs from params (Orange/Yellow default)
-    const stdStart  = p.fireStartColor || { r: 1.0, g: 1.0, b: 1.0 };
-    const stdEnd    = p.fireEndColor || { r: 0.8, g: 0.2, b: 0.05 };
-
-    // Hot: Bunsen Blue/White
-    const hotStart  = { r: 0.2, g: 0.6, b: 1.0 }; // Bright Cyan/Blue core
-    const hotEnd    = { r: 0.0, g: 0.1, b: 0.8 }; // Deep Blue edges
-
-    let targetFireStart, targetFireEnd;
+    const targetFireStart = this._tempTargetFireStart;
+    const targetFireEnd = this._tempTargetFireEnd;
 
     if (temp <= 0.5) {
-      // Lerp Cold -> Standard
-      const f = temp * 2.0; // 0..1
-      targetFireStart = lerpRGB(coldStart, stdStart, f);
-      targetFireEnd   = lerpRGB(coldEnd, stdEnd, f);
+      const f = temp * 2.0;
+      targetFireStart.r = _FIRE_PALETTE_COLD_START.r + (stdStart.r - _FIRE_PALETTE_COLD_START.r) * f;
+      targetFireStart.g = _FIRE_PALETTE_COLD_START.g + (stdStart.g - _FIRE_PALETTE_COLD_START.g) * f;
+      targetFireStart.b = _FIRE_PALETTE_COLD_START.b + (stdStart.b - _FIRE_PALETTE_COLD_START.b) * f;
+
+      targetFireEnd.r = _FIRE_PALETTE_COLD_END.r + (stdEnd.r - _FIRE_PALETTE_COLD_END.r) * f;
+      targetFireEnd.g = _FIRE_PALETTE_COLD_END.g + (stdEnd.g - _FIRE_PALETTE_COLD_END.g) * f;
+      targetFireEnd.b = _FIRE_PALETTE_COLD_END.b + (stdEnd.b - _FIRE_PALETTE_COLD_END.b) * f;
     } else {
-      // Lerp Standard -> Hot
-      const f = (temp - 0.5) * 2.0; // 0..1
-      targetFireStart = lerpRGB(stdStart, hotStart, f);
-      targetFireEnd   = lerpRGB(stdEnd, hotEnd, f);
+      const f = (temp - 0.5) * 2.0;
+      targetFireStart.r = stdStart.r + (_FIRE_PALETTE_HOT_START.r - stdStart.r) * f;
+      targetFireStart.g = stdStart.g + (_FIRE_PALETTE_HOT_START.g - stdStart.g) * f;
+      targetFireStart.b = stdStart.b + (_FIRE_PALETTE_HOT_START.b - stdStart.b) * f;
+
+      targetFireEnd.r = stdEnd.r + (_FIRE_PALETTE_HOT_END.r - stdEnd.r) * f;
+      targetFireEnd.g = stdEnd.g + (_FIRE_PALETTE_HOT_END.g - stdEnd.g) * f;
+      targetFireEnd.b = stdEnd.b + (_FIRE_PALETTE_HOT_END.b - stdEnd.b) * f;
     }
     // --- TEMPERATURE LOGIC END ---
 
@@ -2144,8 +2168,9 @@ export class FireSparksEffect extends EffectBase {
       this._sceneBounds.set(sx, sy, sw, sh);
     }
 
-    // Collect systems
-    const systems = [];
+    // Collect systems (reuse array to avoid per-frame allocations)
+    const systems = this._tempSystems;
+    systems.length = 0;
     if (this.globalSystem) systems.push(this.globalSystem);
     if (this.globalEmbers) systems.push(this.globalEmbers);
     if (this.globalSystems && this.globalSystems.length) systems.push(...this.globalSystems);
@@ -2155,8 +2180,6 @@ export class FireSparksEffect extends EffectBase {
     }
 
     const p2 = this.params;
-    const clamp01 = x => Math.max(0.0, Math.min(1.0, x));
-
     for (const sys of systems) {
       if (!sys) continue;
 
@@ -2256,23 +2279,33 @@ export class FireSparksEffect extends EffectBase {
         const lifeMin = Math.max(0.01, baseEmberLifeMin / effectiveTimeScale);
         const lifeMax = Math.max(lifeMin, baseEmberLifeMax / effectiveTimeScale);
 
-        const opacityMin = clamp01(p2.emberOpacityMin ?? 0.4);
-        const opacityMax = Math.max(opacityMin, clamp01(p2.emberOpacityMax ?? 1.0));
+        const opacityMin = Math.max(0.0, Math.min(1.0, p2.emberOpacityMin ?? 0.4));
+        const opacityMax = Math.max(opacityMin, Math.max(0.0, Math.min(1.0, p2.emberOpacityMax ?? 1.0)));
         const colorBoostMin = p2.emberColorBoostMin ?? 0.9;
         const colorBoostMax = Math.max(colorBoostMin, p2.emberColorBoostMax ?? 1.5);
 
-        const emberStdStart = p2.emberStartColor || { r: 1.0, g: 0.8, b: 0.4 };
-        const emberStdEnd   = p2.emberEndColor || { r: 1.0, g: 0.2, b: 0.0 };
-
-        let targetEmberStart, targetEmberEnd;
+        const emberStdStart = p2.emberStartColor || _EMBER_STD_START_DEFAULT;
+        const emberStdEnd = p2.emberEndColor || _EMBER_STD_END_DEFAULT;
+        const targetEmberStart = this._tempTargetEmberStart;
+        const targetEmberEnd = this._tempTargetEmberEnd;
         if (temp <= 0.5) {
           const f = temp * 2.0;
-          targetEmberStart = lerpRGB(coldStart, emberStdStart, f);
-          targetEmberEnd   = lerpRGB(coldEnd, emberStdEnd, f);
+          targetEmberStart.r = _FIRE_PALETTE_COLD_START.r + (emberStdStart.r - _FIRE_PALETTE_COLD_START.r) * f;
+          targetEmberStart.g = _FIRE_PALETTE_COLD_START.g + (emberStdStart.g - _FIRE_PALETTE_COLD_START.g) * f;
+          targetEmberStart.b = _FIRE_PALETTE_COLD_START.b + (emberStdStart.b - _FIRE_PALETTE_COLD_START.b) * f;
+
+          targetEmberEnd.r = _FIRE_PALETTE_COLD_END.r + (emberStdEnd.r - _FIRE_PALETTE_COLD_END.r) * f;
+          targetEmberEnd.g = _FIRE_PALETTE_COLD_END.g + (emberStdEnd.g - _FIRE_PALETTE_COLD_END.g) * f;
+          targetEmberEnd.b = _FIRE_PALETTE_COLD_END.b + (emberStdEnd.b - _FIRE_PALETTE_COLD_END.b) * f;
         } else {
           const f = (temp - 0.5) * 2.0;
-          targetEmberStart = lerpRGB(emberStdStart, hotStart, f);
-          targetEmberEnd   = lerpRGB(emberStdEnd, hotEnd, f);
+          targetEmberStart.r = emberStdStart.r + (_FIRE_PALETTE_HOT_START.r - emberStdStart.r) * f;
+          targetEmberStart.g = emberStdStart.g + (_FIRE_PALETTE_HOT_START.g - emberStdStart.g) * f;
+          targetEmberStart.b = emberStdStart.b + (_FIRE_PALETTE_HOT_START.b - emberStdStart.b) * f;
+
+          targetEmberEnd.r = emberStdEnd.r + (_FIRE_PALETTE_HOT_END.r - emberStdEnd.r) * f;
+          targetEmberEnd.g = emberStdEnd.g + (_FIRE_PALETTE_HOT_END.g - emberStdEnd.g) * f;
+          targetEmberEnd.b = emberStdEnd.b + (_FIRE_PALETTE_HOT_END.b - emberStdEnd.b) * f;
         }
 
         if (sys.startLife && typeof sys.startLife.a === 'number') {
@@ -2312,8 +2345,8 @@ export class FireSparksEffect extends EffectBase {
 
         const rawOpMin = p2.fireOpacityMin ?? 0.25;
         const rawOpMax = p2.fireOpacityMax ?? 0.68;
-        const opacityMin = clamp01(rawOpMin * 0.4);
-        const opacityMax = Math.max(opacityMin, clamp01(rawOpMax * 0.5));
+        const opacityMin = Math.max(0.0, Math.min(1.0, rawOpMin * 0.4));
+        const opacityMax = Math.max(opacityMin, Math.max(0.0, Math.min(1.0, rawOpMax * 0.5)));
         const colorBoostMin = p2.fireColorBoostMin ?? 0.8;
         const colorBoostMax = Math.max(colorBoostMin, p2.fireColorBoostMax ?? 1.2);
 
@@ -2343,22 +2376,20 @@ export class FireSparksEffect extends EffectBase {
           );
         }
 
-        if (Array.isArray(sys.behaviors)) {
-          const col = sys.behaviors.find(b => b && (b.type === 'ColorOverLife' || b.constructor?.name === 'ColorOverLife'));
-          if (col && col.color && col.color.a && col.color.b) {
-            col.color.a.set(
-              targetFireStart.r * colorBoostMax,
-              targetFireStart.g * colorBoostMax,
-              targetFireStart.b * colorBoostMax,
-              1.0
-            );
-            col.color.b.set(
-              targetFireEnd.r * colorBoostMax,
-              targetFireEnd.g * colorBoostMax,
-              targetFireEnd.b * colorBoostMax,
-              0.0
-            );
-          }
+        const col = sys.userData?._msColorOverLife;
+        if (col && col.color && col.color.a && col.color.b) {
+          col.color.a.set(
+            targetFireStart.r * colorBoostMax,
+            targetFireStart.g * colorBoostMax,
+            targetFireStart.b * colorBoostMax,
+            1.0
+          );
+          col.color.b.set(
+            targetFireEnd.r * colorBoostMax,
+            targetFireEnd.g * colorBoostMax,
+            targetFireEnd.b * colorBoostMax,
+            0.0
+          );
         }
       }
 

@@ -47,8 +47,8 @@ export class SkyColorEffect extends EffectBase {
       // Default 0.2 to provide subtle atmospheric grading - users can increase/decrease as desired
       intensity: 1.0,
 
-      saturationBoost: 0.5,
-      vibranceBoost: 0.5,
+      saturationBoost: 0.35,
+      vibranceBoost: 0.0,
 
       automationMode: 1,
       sunriseHour: 6.0,
@@ -66,9 +66,9 @@ export class SkyColorEffect extends EffectBase {
       forwardScatter: 0.3,
 
       weatherInfluence: 0.7,
-      cloudToTurbidity: 0.27,
+      cloudToTurbidity: 0.25,
       precipToTurbidity: 0.72,
-      overcastDesaturate: 0.22,
+      overcastDesaturate: 0.2,
       overcastContrastReduce: 0.22,
 
       tempWarmAtHorizon: 0.85,
@@ -76,8 +76,8 @@ export class SkyColorEffect extends EffectBase {
       nightCoolBoost: -0.25,
       goldenSaturationBoost: 0.18,
       nightSaturationFloor: 0.33,
-      hazeLift: 0.1,
-      hazeContrastLoss: 0.1,
+      hazeLift: 0.12,
+      hazeContrastLoss: 0.0,
 
       autoIntensityEnabled: true,
       autoIntensityStrength: 1.0,
@@ -381,7 +381,7 @@ export class SkyColorEffect extends EffectBase {
           min: -0.5,
           max: 0.5,
           step: 0.01,
-          default: 0.5,
+          default: 0.35,
           label: 'Sat Boost',
           throttle: 50
         },
@@ -390,7 +390,7 @@ export class SkyColorEffect extends EffectBase {
           min: -0.5,
           max: 0.5,
           step: 0.01,
-          default: 0.5,
+          default: 0.0,
           label: 'Vibrance',
           throttle: 50
         },
@@ -412,17 +412,17 @@ export class SkyColorEffect extends EffectBase {
         mieStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.35, label: 'Mie', throttle: 50 },
         forwardScatter: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.3, label: 'Forward Scatter', throttle: 50 },
         weatherInfluence: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.7, label: 'Weather Influence', throttle: 50 },
-        cloudToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.27, label: 'Cloud→Turbidity', throttle: 50 },
+        cloudToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.25, label: 'Cloud→Turbidity', throttle: 50 },
         precipToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.72, label: 'Precip→Turbidity', throttle: 50 },
-        overcastDesaturate: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.22, label: 'Overcast Desat', throttle: 50 },
+        overcastDesaturate: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.2, label: 'Overcast Desat', throttle: 50 },
         overcastContrastReduce: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.22, label: 'Overcast Contrast', throttle: 50 },
         tempWarmAtHorizon: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.85, label: 'Warm Horizon', throttle: 50 },
         tempCoolAtNoon: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.45, label: 'Cool Noon', throttle: 50 },
         nightCoolBoost: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.25, label: 'Night Cool', throttle: 50 },
         goldenSaturationBoost: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.18, label: 'Golden Sat', throttle: 50 },
         nightSaturationFloor: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.33, label: 'Night Sat Floor', throttle: 50 },
-        hazeLift: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.1, label: 'Haze Lift', throttle: 50 },
-        hazeContrastLoss: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.1, label: 'Haze Contrast', throttle: 50 },
+        hazeLift: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.12, label: 'Haze Lift', throttle: 50 },
+        hazeContrastLoss: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.0, label: 'Haze Contrast', throttle: 50 },
         autoIntensityEnabled: { type: 'boolean', default: true, label: 'Auto Intensity' },
         autoIntensityStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Auto Strength', throttle: 50 },
         ...dawn.parameters,

@@ -82,6 +82,31 @@ export class EffectComposer {
     log.info('EffectComposer created');
   }
 
+  /**
+   * Query whether the renderer should bypass idle throttling and render every RAF.
+   * This is used for effects that animate continuously (e.g. particle systems)
+   * so they don't appear "choppy" at the idle render rate.
+   *
+   * NOTE: This is intentionally cheap; it runs once per RAF in RenderLoop.
+   *
+   * @returns {boolean}
+   */
+  wantsContinuousRender() {
+    for (const effect of this.effects.values()) {
+      if (!effect || !effect.enabled) continue;
+      if (!effect.requiresContinuousRender) continue;
+      try {
+        if (typeof effect.isActive === 'function') {
+          if (!effect.isActive()) continue;
+        }
+      } catch (_) {
+        // If an effect's isActive() throws, fail safe by treating it as active.
+      }
+      return true;
+    }
+    return false;
+  }
+
   _renderOverlayToScreen() {
     const THREE = window.THREE;
     if (!THREE || !this.scene || !this.camera) return;
@@ -719,6 +744,21 @@ export class EffectBase {
     this.enabled = true;
     this.priority = 0;
     this.alwaysRender = false;
+
+    // When true, RenderLoop will bypass idle FPS throttling while this effect is active.
+    // Use this for continuous animations like particle systems.
+    this.requiresContinuousRender = false;
+  }
+
+  /**
+   * Optional hook used by EffectComposer.wantsContinuousRender().
+   * Effects with dynamic activation (e.g. particles only when sources exist)
+   * can override this.
+   *
+   * @returns {boolean}
+   */
+  isActive() {
+    return !!this.enabled;
   }
 
   /**

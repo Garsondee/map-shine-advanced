@@ -112,7 +112,7 @@ export class MaskDebugEffect extends EffectBase {
         },
         channel: {
           label: 'Channel',
-          default: 'r',
+          default: 'rgb',
           options: {
             R: 'r',
             G: 'g',

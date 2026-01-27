@@ -28,7 +28,7 @@ export class HalftoneEffect extends EffectBase {
       radius: 4.0,
       shape: 1,
       scatter: 0.0,
-      strength: 0.85,
+      strength: 0.69,
       blendingMode: 1,
       greyscale: false
     };
@@ -47,7 +47,7 @@ export class HalftoneEffect extends EffectBase {
       ],
       parameters: {
         enabled: { type: 'boolean', default: false, hidden: true },
-        strength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.85 },
+        strength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.69 },
         radius: { type: 'slider', min: 1.0, max: 16.0, step: 0.25, default: 4.0 },
         shape: {
           type: 'select',

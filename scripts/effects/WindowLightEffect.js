@@ -14,7 +14,7 @@ const log = createLogger('WindowLightEffect');
 
 export class WindowLightEffect extends EffectBase {
   constructor() {
-    super('windowLight', RenderLayers.SURFACE_EFFECTS, 'low');
+    super('window-light', RenderLayers.SURFACE_EFFECTS, 'low');
 
     this.priority = 12; // After base material, alongside other surface overlays
     this.alwaysRender = false;
@@ -62,18 +62,18 @@ export class WindowLightEffect extends EffectBase {
       hasWindowMask: undefined,
 
       // Core light controls
-      intensity: 13.6,
+      intensity: 25,
       color: { r: 1.0, g: 0.96, b: 0.85 }, // Warm window light
       
       // Mask shaping (Gamma/Gain model)
-      falloff: 3.6, // Gamma power for falloff shaping
+      falloff: 5, // Gamma power for falloff shaping
 
       // Environment
       cloudInfluence: 1.0,     // How much clouds dim the light (0-1)
-      nightDimming: 0.8,       // How much night dims the light (0-1)
+      nightDimming: 1,       // How much night dims the light (0-1)
 
       useSkyTint: true,
-      skyTintStrength: 3.24,
+      skyTintStrength: 3.62,
 
       // Cloud shadow shaping (applied to cloudShadowRaw.screen before influence/cover mix)
       cloudShadowContrast: 4.0,
@@ -85,7 +85,7 @@ export class WindowLightEffect extends EffectBase {
       specularBoost: 5.0,
 
       // RGB Split (Refraction)
-      rgbShiftAmount: 0.9,  // pixels
+      rgbShiftAmount: 1.9,  // pixels
       rgbShiftAngle: 76.0, // degrees
 
       // Overhead tile lighting
@@ -479,7 +479,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 25.0,
           step: 0.1,
-          default: 13.6
+          default: 25
         },
         falloff: {
           type: 'slider',
@@ -487,7 +487,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.1,
           max: 5.0,
           step: 0.1,
-          default: 3.6
+          default: 5
         },
         color: {
           type: 'color',
@@ -508,7 +508,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.8
+          default: 1
         },
         useSkyTint: {
           type: 'boolean',
@@ -521,7 +521,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 25.0,
           step: 0.01,
-          default: 3.24
+          default: 3.62
         },
         cloudShadowContrast: {
           type: 'slider',
@@ -561,7 +561,7 @@ export class WindowLightEffect extends EffectBase {
           min: 0.0,
           max: 12.0,
           step: 0.01,
-          default: 0.9
+          default: 1.9
         },
         rgbShiftAngle: {
           type: 'slider',

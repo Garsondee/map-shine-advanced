@@ -1760,7 +1760,24 @@ export class WeatherParticles {
     // PERF: Cache pixel readbacks for mask textures (getImageData is expensive and allocates).
     // Many point-generation functions were creating a new canvas + ImageData on each call.
     this._maskPixelCache = new Map();
+    // PERF: Limit memory use of cached mask readbacks.
+    // These caches store full-resolution RGBA buffers (w*h*4). On large maps this can
+    // explode memory usage if we only cap by entry count.
+    this._maskPixelCacheBytes = 0;
     this._maskPixelCacheMaxEntries = 48;
+    this._maskPixelCacheMaxBytes = (() => {
+      try {
+        const dm = navigator?.deviceMemory;
+        // Conservative defaults; browsers may omit deviceMemory.
+        if (Number.isFinite(dm)) {
+          if (dm <= 4) return 32 * 1024 * 1024;
+          if (dm <= 8) return 64 * 1024 * 1024;
+          return 128 * 1024 * 1024;
+        }
+      } catch (_) {
+      }
+      return 64 * 1024 * 1024;
+    })();
     this._maskReadCanvas = null;
     this._maskReadCtx = null;
 
@@ -1791,6 +1808,21 @@ export class WeatherParticles {
     this._lastPrecipitation = null;
 
     this._initSystems();
+  }
+
+  _deleteMaskPixelCacheEntry(key) {
+    try {
+      const entry = this._maskPixelCache.get(key);
+      const bytes = entry?.byteLength ?? entry?.data?.byteLength;
+      if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes > 0) {
+        this._maskPixelCacheBytes = Math.max(0, (this._maskPixelCacheBytes || 0) - bytes);
+      }
+    } catch (_) {
+    }
+    try {
+      this._maskPixelCache.delete(key);
+    } catch (_) {
+    }
   }
 
   _clearAllRainSplashes() {
@@ -5038,6 +5070,7 @@ export class WeatherParticles {
     if (this.foamFleckTexture) this.foamFleckTexture.dispose();
 
     try { this._maskPixelCache?.clear?.(); } catch (_) {}
+    this._maskPixelCacheBytes = 0;
     this._maskReadCanvas = null;
     this._maskReadCtx = null;
   }
@@ -5081,7 +5114,7 @@ export class WeatherParticles {
       try {
         const prefix = `${src}|${uuid}|v:`;
         for (const k of this._maskPixelCache.keys()) {
-          if (k !== key && k.startsWith(prefix)) this._maskPixelCache.delete(k);
+          if (k !== key && k.startsWith(prefix)) this._deleteMaskPixelCacheEntry(k);
         }
       } catch (_) {}
     }
@@ -5101,18 +5134,28 @@ export class WeatherParticles {
       ctx.clearRect(0, 0, w, h);
       ctx.drawImage(image, 0, 0);
       const img = ctx.getImageData(0, 0, w, h);
-      const entry = { width: w, height: h, data: img.data };
+      const entry = { width: w, height: h, data: img.data, byteLength: img.data?.byteLength ?? (w * h * 4) };
       this._maskPixelCache.set(key, entry);
+      if (typeof entry.byteLength === 'number' && Number.isFinite(entry.byteLength) && entry.byteLength > 0) {
+        this._maskPixelCacheBytes = (this._maskPixelCacheBytes || 0) + entry.byteLength;
+      }
 
       // LRU eviction: keep cache size bounded.
       try {
         const maxEntries = Number.isFinite(this._maskPixelCacheMaxEntries)
           ? Math.max(8, Math.floor(this._maskPixelCacheMaxEntries))
           : 48;
-        while (this._maskPixelCache.size > maxEntries) {
+
+        const maxBytes = Number.isFinite(this._maskPixelCacheMaxBytes)
+          ? Math.max(8 * 1024 * 1024, Math.floor(this._maskPixelCacheMaxBytes))
+          : 64 * 1024 * 1024;
+
+        while (this._maskPixelCache.size > maxEntries || (this._maskPixelCacheBytes || 0) > maxBytes) {
           const oldest = this._maskPixelCache.keys().next().value;
           if (oldest === undefined) break;
-          this._maskPixelCache.delete(oldest);
+          // Always evict from the front of the Map, which is our LRU order.
+          // Update our byte accounting so large masks don't accumulate silently.
+          this._deleteMaskPixelCacheEntry(oldest);
         }
       } catch (_) {}
 

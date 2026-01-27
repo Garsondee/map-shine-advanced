@@ -341,7 +341,17 @@ export class ParticleSystem extends EffectBase {
       const visible = this._cullFrustum.intersectsSphere(this._cullSphere);
       ud._msLastCullVisible = visible;
       ud._msLastCullRadius = radius;
-      ud._msLastCullCenter = { x: this._cullCenter.x, y: this._cullCenter.y, z: this._cullCenter.z };
+      // PERF: Avoid per-frame allocations in culling.
+      // This is called once per Quarks system per frame; allocating an object here
+      // creates steady GC pressure when many systems exist.
+      let lastCenter = ud._msLastCullCenter;
+      if (!lastCenter || typeof lastCenter !== 'object') {
+        lastCenter = { x: 0, y: 0, z: 0 };
+        ud._msLastCullCenter = lastCenter;
+      }
+      lastCenter.x = this._cullCenter.x;
+      lastCenter.y = this._cullCenter.y;
+      lastCenter.z = this._cullCenter.z;
       const wasCulled = !!ud._msCulled;
       emitter.visible = visible;
       if (visible) {

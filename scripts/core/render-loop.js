@@ -17,6 +17,26 @@ export class RenderLoop {
     this.scene = scene;
     this.camera = camera;
     this.effectComposer = effectComposer;
+
+    // PERFORMANCE: When the scene is visually static, rendering the full pipeline
+    // at 60fps is wasteful. We throttle rendering while idle, but still keep a
+    // low-frequency refresh so uniforms/state don't get stuck.
+    this._forceNextRender = true;
+    this._lastComposerRenderTime = 0;
+    this._idleFps = 15;
+
+    // Camera snapshot for cheap motion detection.
+    this._lastCamX = null;
+    this._lastCamY = null;
+    this._lastCamZ = null;
+    this._lastCamZoom = null;
+
+    // Foundry/PIXI is the authoritative camera during pan/zoom.
+    // Using the Three camera here can introduce a 1-frame delay because the camera
+    // is synced from PIXI inside EffectComposer.render() via CameraFollower.
+    this._lastPixiPivotX = null;
+    this._lastPixiPivotY = null;
+    this._lastPixiZoom = null;
     
     /** @type {number|null} */
     this.animationFrameId = null;
@@ -61,6 +81,17 @@ export class RenderLoop {
     this.lastFpsUpdate = this.lastFrameTime;
     this.frameCount = 0;
     this.framesThisSecond = 0;
+
+    this._forceNextRender = true;
+    this._lastComposerRenderTime = 0;
+    this._lastCamX = null;
+    this._lastCamY = null;
+    this._lastCamZ = null;
+    this._lastCamZoom = null;
+
+    this._lastPixiPivotX = null;
+    this._lastPixiPivotY = null;
+    this._lastPixiZoom = null;
     
     // Kick off the loop
     this.animationFrameId = requestAnimationFrame(this.render);
@@ -112,7 +143,72 @@ export class RenderLoop {
     // When an EffectComposer is present, it owns the full render pipeline
     if (this.effectComposer) {
       try {
-        this.effectComposer.render(deltaTime);
+        // Idle throttling: if camera is not moving, render at a reduced rate.
+        // Prefer PIXI camera state (stage pivot/scale) to avoid 1-frame latency.
+        const stage = canvas?.stage;
+        const pixiPivotX = stage?.pivot?.x;
+        const pixiPivotY = stage?.pivot?.y;
+        const pixiZoom = stage?.scale?.x;
+
+        let cameraChanged = false;
+        if (typeof pixiPivotX === 'number' && typeof pixiPivotY === 'number' && typeof pixiZoom === 'number') {
+          cameraChanged = (
+            pixiPivotX !== this._lastPixiPivotX ||
+            pixiPivotY !== this._lastPixiPivotY ||
+            pixiZoom !== this._lastPixiZoom
+          );
+        } else {
+          const cam = this.camera;
+          const camX = cam?.position?.x;
+          const camY = cam?.position?.y;
+          const camZ = cam?.position?.z;
+          const camZoom = cam?.zoom;
+          cameraChanged = (
+            camX !== this._lastCamX ||
+            camY !== this._lastCamY ||
+            camZ !== this._lastCamZ ||
+            camZoom !== this._lastCamZoom
+          );
+        }
+
+        // Allow runtime tuning (primarily for perf testing).
+        // IMPORTANT: keep idle interval <= 100ms, otherwise TimeManager clamps delta
+        // and animations will slow down when the user re-enables them.
+        const ms = window.MapShine;
+        const idleFps = Number.isFinite(ms?.renderIdleFps)
+          ? Math.max(5, Math.min(60, Math.floor(ms.renderIdleFps)))
+          : this._idleFps;
+        const idleIntervalMs = 1000 / Math.max(1, idleFps);
+
+        let shouldRender = this._forceNextRender || cameraChanged;
+        if (!shouldRender) {
+          const since = now - (this._lastComposerRenderTime || 0);
+          if (since >= idleIntervalMs) shouldRender = true;
+        }
+
+        if (shouldRender) {
+          this.effectComposer.render(deltaTime);
+          this._lastComposerRenderTime = now;
+          this._forceNextRender = false;
+
+          // Refresh caches after rendering.
+          try {
+            if (typeof pixiPivotX === 'number') this._lastPixiPivotX = pixiPivotX;
+            if (typeof pixiPivotY === 'number') this._lastPixiPivotY = pixiPivotY;
+            if (typeof pixiZoom === 'number') this._lastPixiZoom = pixiZoom;
+          } catch (_) {
+          }
+
+          // Fallback cache for non-Foundry environments.
+          try {
+            const cam = this.camera;
+            this._lastCamX = cam?.position?.x;
+            this._lastCamY = cam?.position?.y;
+            this._lastCamZ = cam?.position?.z;
+            this._lastCamZoom = cam?.zoom;
+          } catch (_) {
+          }
+        }
       } catch (error) {
         log.error('Effect composer render error:', error);
       }
@@ -180,6 +276,15 @@ export class RenderLoop {
    */
   setEffectComposer(composer) {
     this.effectComposer = composer;
+    this._forceNextRender = true;
     log.debug('Effect composer set');
+  }
+
+  /**
+   * Request a full render on the next animation frame.
+   * Use this from interactions/hooks that change visible state.
+   */
+  requestRender() {
+    this._forceNextRender = true;
   }
 }

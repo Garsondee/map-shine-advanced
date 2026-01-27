@@ -399,7 +399,13 @@ export class BloomEffect extends EffectBase {
     // Update blend material so we can control how the bloom glows over the scene
     if (this.pass.blendMaterial) {
       const THREE = window.THREE;
-      this.pass.blendMaterial.opacity = p.blendOpacity;
+      // Our vendored UnrealBloomPass uses CopyShader uniforms for opacity.
+      // Setting a non-uniform property can be ignored depending on the material type.
+      try {
+        const u = this.pass?.copyUniforms || this.pass?.blendMaterial?.uniforms;
+        if (u?.opacity?.value !== undefined) u.opacity.value = p.blendOpacity;
+      } catch (_) {
+      }
       
       let targetBlending = THREE.AdditiveBlending;
       if (p.blendMode === 'screen') {
@@ -480,7 +486,6 @@ export class BloomEffect extends EffectBase {
    * Render the effect
    */
   render(renderer, scene, camera) {
-    if (!this.enabled) return;
     if (!renderer || !this.readBuffer) return;
 
     // Ensure we never black-hole the post chain.
@@ -498,14 +503,20 @@ export class BloomEffect extends EffectBase {
       renderer.render(this.copyScene, this.copyCamera);
     };
 
-    if (!this.pass) {
+    // PERFORMANCE: UnrealBloomPass is expensive (multiple full-screen mips).
+    // If bloom is effectively disabled, skip the entire pass and just blit the input.
+    // This preserves the post chain and avoids extra mask/composite passes.
+    const p = this.params;
+    // IMPORTANT: Even if the effect is disabled (this.enabled = false), we must still
+    // write something to the output buffer. EffectComposer clears the current output
+    // target before calling effect.render(), so returning early would produce a black
+    // frame and break the entire post-processing chain.
+    if (!this.enabled || !p?.enabled || !(p.strength > 1e-6) || !(p.blendOpacity > 1e-6)) {
       passthrough();
       return;
     }
 
-    if (!this._bloomTarget) {
-      // Without a dedicated target, bloom cannot safely copy its output forward.
-      // Fail safe by passing through.
+    if (!this.pass) {
       passthrough();
       return;
     }
@@ -688,39 +699,33 @@ export class BloomEffect extends EffectBase {
     // (unless it was doing something time-based which it isn't).
     // The 'maskActive' param is also usually false for full screen post.
     
-    this.pass.render(
-      renderer,
-      this._bloomTarget,
-      this._maskedInputTarget,
-      0.01, // delta
-      false // maskActive
-    );
-
-    // Composite: start with base scene, then add bloom highlights.
-    const bloomTex = this._bloomTarget.texture;
-    if (!bloomTex) {
+    // IMPORTANT:
+    // Our vendored UnrealBloomPass writes its final blend into the *readBuffer* render target
+    // (see three.custom.js UnrealBloomPass.render: it setsRenderTarget(readBuffer)).
+    // To make bloom work without patching the vendor file, we run the pass with readBuffer
+    // pointing at our masked scene target.
+    try {
+      this.pass.render(
+        renderer,
+        null,
+        this._maskedInputTarget,
+        0.01,
+        false
+      );
+    } catch (_) {
       passthrough();
       return;
     }
 
+    // Copy the final (masked scene + bloom) forward into the post chain output.
     const outTarget = (this.renderToScreen || !this.writeBuffer) ? null : this.writeBuffer;
-    const prevAutoClear = renderer.autoClear;
     try {
+      this.copyMaterial.map = this._maskedInputTarget.texture;
       renderer.setRenderTarget(outTarget);
-      renderer.autoClear = true;
       renderer.clear();
-
-      // Base
-      this.copyMaterial.map = this.readBuffer.texture;
       renderer.render(this.copyScene, this.copyCamera);
-
-      // Bloom overlay
-      renderer.autoClear = false;
-      if (this._compositeMaterial?.uniforms?.tBloom) this._compositeMaterial.uniforms.tBloom.value = bloomTex;
-      if (this._compositeMaterial?.uniforms?.opacity) this._compositeMaterial.uniforms.opacity.value = this.params?.blendOpacity ?? 1.0;
-      renderer.render(this.bloomCompositeScene, this.copyCamera);
-    } finally {
-      renderer.autoClear = prevAutoClear;
+    } catch (_) {
+      passthrough();
     }
   }
   

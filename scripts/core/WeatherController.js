@@ -29,6 +29,7 @@ export const PrecipitationType = {
  * @property {number} fogDensity - 0.0 to 1.0
  * @property {number} wetness - Accumulation logic (lagging behind precipitation)
  * @property {number} freezeLevel - Determines if accumulation is puddles or snow (0.0 = warm, 1.0 = frozen)
+ * @property {number} ashIntensity - 0.0 (none) to 1.0 (heavy ash fall)
  */
 
 /**
@@ -49,7 +50,8 @@ export class WeatherController {
       windDirection: { x: 1, y: 0 }, // 0deg, upgraded to Vector2 in initialize() (Y-down world)
       fogDensity: 0.0,
       wetness: 0.0,
-      freezeLevel: 0.0
+      freezeLevel: 0.0,
+      ashIntensity: 0.0 // 0.0 (none) to 1.0 (heavy ash fall)
     };
 
     /**
@@ -66,7 +68,8 @@ export class WeatherController {
       windDirection: { x: 1, y: 0 },
       fogDensity: 0.0,
       wetness: 0.0,
-      freezeLevel: 0.0
+      freezeLevel: 0.0,
+      ashIntensity: 0.0
     };
 
     /** @type {WeatherState} */
@@ -78,7 +81,8 @@ export class WeatherController {
       windDirection: { x: 1, y: 0 },
       fogDensity: 0.0,
       wetness: 0.0,
-      freezeLevel: 0.0
+      freezeLevel: 0.0,
+      ashIntensity: 0.0
     };
 
     /** @type {WeatherState} */
@@ -166,7 +170,8 @@ export class WeatherController {
       windSpeed: 0.1,
       windDirectionDeg: 205.0,
       fogDensity: 0.0,
-      freezeLevel: 0.0
+      freezeLevel: 0.0,
+      ashIntensity: 0.0
     };
     this._queuedTransitionSaveTimeout = null;
     this._queuedTransitionSaveDebounceMs = 1000;
@@ -264,6 +269,49 @@ export class WeatherController {
       windInfluence: 0.85,
       curlStrength: 11.25,
       flutterStrength: 4.65
+    };
+
+    // Ash precipitation tuning (WeatherParticles + AshGeometry)
+    this.ashTuning = {
+      intensityScale: 1.0,
+      emissionRate: 300,
+      sizeMin: 10,
+      sizeMax: 16,
+      lifeMin: 5,
+      lifeMax: 8,
+      speedMin: 120,
+      speedMax: 200,
+      opacityStartMin: 0.75,
+      opacityStartMax: 0.5,
+      opacityEnd: 0.0,
+      colorStart: { r: 0.45, g: 0.42, b: 0.38 },
+      colorEnd: { r: 0.35, g: 0.32, b: 0.28 },
+      brightness: 1.0,
+      gravityScale: 1.0,
+      windInfluence: 1.0,
+      curlStrength: 0.6,
+      clusterHoldMin: 2.5,
+      clusterHoldMax: 7.0,
+      clusterRadiusMin: 300,
+      clusterRadiusMax: 1800,
+      clusterBoostMin: 0.55,
+      clusterBoostMax: 1.45,
+      emberEmissionRate: 25,
+      emberSizeMin: 6,
+      emberSizeMax: 12,
+      emberLifeMin: 2.5,
+      emberLifeMax: 4.0,
+      emberSpeedMin: 180,
+      emberSpeedMax: 260,
+      emberOpacityStartMin: 0.9,
+      emberOpacityStartMax: 0.4,
+      emberOpacityEnd: 0.0,
+      emberColorStart: { r: 1.0, g: 0.25, b: 0.05 },
+      emberColorEnd: { r: 0.35, g: 0.32, b: 0.28 },
+      emberBrightness: 1.0,
+      emberGravityScale: 0.75,
+      emberWindInfluence: 1.0,
+      emberCurlStrength: 1.0
     };
   }
 
@@ -629,7 +677,8 @@ export class WeatherController {
       },
       fogDensity: Number(state?.fogDensity) || 0.0,
       wetness: Number(state?.wetness) || 0.0,
-      freezeLevel: Number(state?.freezeLevel) || 0.0
+      freezeLevel: Number(state?.freezeLevel) || 0.0,
+      ashIntensity: Number(state?.ashIntensity) || 0.0
     };
   }
 
@@ -642,6 +691,7 @@ export class WeatherController {
     dest.fogDensity = Number(serialized.fogDensity) || 0.0;
     dest.wetness = Number(serialized.wetness) || 0.0;
     dest.freezeLevel = Number(serialized.freezeLevel) || 0.0;
+    dest.ashIntensity = Number(serialized.ashIntensity) || 0.0;
 
     const wx = Number(serialized.windDirection?.x);
     const wy = Number(serialized.windDirection?.y);
@@ -1320,6 +1370,7 @@ export class WeatherController {
     this._queuedTransitionTarget.windDirectionDeg = angleDeg < 0 ? (angleDeg + 360) : angleDeg;
     this._queuedTransitionTarget.fogDensity = s.fogDensity ?? 0.0;
     this._queuedTransitionTarget.freezeLevel = s.freezeLevel ?? 0.0;
+    this._queuedTransitionTarget.ashIntensity = s.ashIntensity ?? 0.0;
 
     this._scheduleSaveQueuedTransitionTarget();
   }
@@ -1334,6 +1385,7 @@ export class WeatherController {
     else if (paramId === 'queuedWindDirection') this._queuedTransitionTarget.windDirectionDeg = n;
     else if (paramId === 'queuedFogDensity') this._queuedTransitionTarget.fogDensity = n;
     else if (paramId === 'queuedFreezeLevel') this._queuedTransitionTarget.freezeLevel = n;
+    else if (paramId === 'queuedAshIntensity') this._queuedTransitionTarget.ashIntensity = n;
     else return;
 
     this._scheduleSaveQueuedTransitionTarget();
@@ -1384,6 +1436,7 @@ export class WeatherController {
     const rad = (Number(q.windDirectionDeg) * Math.PI) / 180;
     const precipitation = Number(q.precipitation) || 0.0;
     const freezeLevel = Number(q.freezeLevel) || 0.0;
+    const ashIntensity = Number(q.ashIntensity) || 0.0;
 
     let precipType = PrecipitationType.NONE;
     if (precipitation < 0.05) {
@@ -1401,6 +1454,7 @@ export class WeatherController {
       windDirection: { x: Math.cos(rad), y: -Math.sin(rad) },
       fogDensity: q.fogDensity,
       freezeLevel,
+      ashIntensity,
       precipType,
       wetness: 0.0
     };
@@ -1429,7 +1483,8 @@ export class WeatherController {
             y: targetState.windDirection?.y ?? 0
           },
           fogDensity: targetState.fogDensity,
-          freezeLevel: targetState.freezeLevel
+          freezeLevel: targetState.freezeLevel,
+          ashIntensity: targetState.ashIntensity ?? 0.0
         }
       };
 
@@ -1467,6 +1522,7 @@ export class WeatherController {
         windDirection: { x: Number(target.windDirection?.x) || 1, y: Number(target.windDirection?.y) || 0 },
         fogDensity: Number(target.fogDensity) || 0,
         freezeLevel: Number(target.freezeLevel) || 0,
+        ashIntensity: Number(target.ashIntensity) || 0,
         precipType: PrecipitationType.NONE,
         wetness: 0.0
       }, duration);
@@ -1498,6 +1554,7 @@ export class WeatherController {
       assign('windDirectionDeg', 'windDirectionDeg');
       assign('fogDensity', 'fogDensity');
       assign('freezeLevel', 'freezeLevel');
+      assign('ashIntensity', 'ashIntensity');
     } catch (e) {
     }
   }
@@ -1536,7 +1593,8 @@ export class WeatherController {
           windSpeed: q.windSpeed,
           windDirectionDeg: q.windDirectionDeg,
           fogDensity: q.fogDensity,
-          freezeLevel: q.freezeLevel
+          freezeLevel: q.freezeLevel,
+          ashIntensity: q.ashIntensity
         }
       });
     } catch (e) {
@@ -1846,6 +1904,7 @@ export class WeatherController {
     dest.windSpeed = source.windSpeed;
     dest.fogDensity = source.fogDensity;
     dest.freezeLevel = source.freezeLevel;
+    dest.ashIntensity = source.ashIntensity ?? 0.0;
     // wetness is derived, don't copy (or handle separately)
     
     if (source.windDirection && dest.windDirection) {
@@ -1874,6 +1933,7 @@ export class WeatherController {
     this.currentState.windSpeed = THREE.MathUtils.lerp(start.windSpeed, end.windSpeed, t);
     this.currentState.fogDensity = THREE.MathUtils.lerp(start.fogDensity, end.fogDensity, t);
     this.currentState.freezeLevel = THREE.MathUtils.lerp(start.freezeLevel, end.freezeLevel, t);
+    this.currentState.ashIntensity = THREE.MathUtils.lerp(start.ashIntensity ?? 0.0, end.ashIntensity ?? 0.0, t);
 
     // Vector lerp for wind direction
     if (
@@ -2089,6 +2149,7 @@ export class WeatherController {
     this.targetState.windSpeed = Number(targetState?.windSpeed) || 0.0;
     this.targetState.fogDensity = Number(targetState?.fogDensity) || 0.0;
     this.targetState.freezeLevel = Number(targetState?.freezeLevel) || 0.0;
+    this.targetState.ashIntensity = Number(targetState?.ashIntensity) || 0.0;
 
     const wd = targetState?.windDirection;
     if (wd && this.targetState.windDirection?.set) {
@@ -2227,6 +2288,7 @@ export class WeatherController {
         queuedWindDirection: { label: 'Wind Direction (deg)', default: 205.0, min: 0.0, max: 360.0, step: 1.0, group: 'queued', gmOnly: true },
         queuedFogDensity: { label: 'Fog Density', default: 0.0, min: 0.0, max: 1.0, step: 0.01, group: 'queued', gmOnly: true },
         queuedFreezeLevel: { label: 'Temperature (Rain <-> Snow)', default: 0.0, min: 0.0, max: 1.0, step: 0.01, group: 'queued', gmOnly: true },
+        queuedAshIntensity: { label: 'Ash Intensity', default: 0.0, min: 0.0, max: 1.0, step: 0.01, group: 'queued', gmOnly: true },
         queueFromCurrent: { type: 'button', title: 'Queue From Current', group: 'queued', gmOnly: true },
         startQueuedTransition: { type: 'button', title: 'Start Transition', group: 'queued', gmOnly: true },
         enabled: {
@@ -2315,6 +2377,14 @@ export class WeatherController {
         },
         freezeLevel: {
           label: 'Temperature (Rain <-> Snow)',
+          default: 0.0,
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          group: 'manual'
+        },
+        ashIntensity: {
+          label: 'Ash Intensity',
           default: 0.0,
           min: 0.0,
           max: 1.0,

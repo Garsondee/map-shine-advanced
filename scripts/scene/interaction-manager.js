@@ -38,6 +38,25 @@ export class InteractionManager {
 
     this.raycaster = new THREE.Raycaster();
     this.mouse = new THREE.Vector2();
+
+    // Debug visualization for overhead hover hit testing.
+    // Enable via:
+    //   window.MapShine.interactionManager.setOverheadHoverDebug(true)
+    // or:
+    //   window.MapShine.interactionManager._debugOverheadHover.enabled = true
+    this._debugOverheadHover = {
+      enabled: false,
+      group: null,
+      marker: null,
+      ray: null,
+      label: null,
+      last: {
+        tileId: null,
+        uv: null,
+        point: null,
+        opaque: null
+      }
+    };
     
     /** @type {Set<string>} Set of selected object IDs (e.g. "Token.abc", "Tile.xyz") */
     this.selection = new Set();
@@ -389,6 +408,240 @@ export class InteractionManager {
     };
 
     log.debug('InteractionManager created');
+  }
+
+  setOverheadHoverDebug(enabled) {
+    this._debugOverheadHover.enabled = !!enabled;
+    if (this._debugOverheadHover.enabled) {
+      // Ensure objects exist immediately so the user can diagnose cases where the
+      // raycast never hits (misalignment / layer mask issues).
+      try {
+        this._ensureOverheadHoverDebugObjects();
+        if (this._debugOverheadHover.group) this._debugOverheadHover.group.visible = true;
+      } catch (_) {
+      }
+    }
+    if (!this._debugOverheadHover.enabled) {
+      try {
+        if (this._debugOverheadHover.group) this._debugOverheadHover.group.visible = false;
+      } catch (_) {
+      }
+      try {
+        if (this._debugOverheadHover.label) this._debugOverheadHover.label.style.display = 'none';
+      } catch (_) {
+      }
+    }
+  }
+
+  _ensureOverheadHoverDebugObjects() {
+    if (this._debugOverheadHover.group) return;
+    const THREE = window.THREE;
+    if (!THREE) return;
+    const scene = this.sceneComposer?.scene;
+    if (!scene) return;
+
+    const g = new THREE.Group();
+    g.name = 'OverheadHoverDebug';
+    g.visible = false;
+    g.renderOrder = 10050;
+    g.layers.set(OVERLAY_THREE_LAYER);
+    g.layers.enable(0);
+
+    const depthTest = false;
+    const depthWrite = false;
+    const mat = new THREE.LineBasicMaterial({ color: 0xff33ff, transparent: true, opacity: 0.95, depthTest, depthWrite });
+    mat.toneMapped = false;
+
+    // Small crosshair in the XY plane.
+    const size = 18;
+    const pts = [
+      new THREE.Vector3(-size, 0, 0), new THREE.Vector3(size, 0, 0),
+      new THREE.Vector3(0, -size, 0), new THREE.Vector3(0, size, 0)
+    ];
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    const marker = new THREE.LineSegments(geo, mat);
+    marker.renderOrder = 10051;
+    marker.layers.set(OVERLAY_THREE_LAYER);
+    marker.layers.enable(0);
+    g.add(marker);
+
+    // Optional ray line from camera to hit point (updated per-frame when enabled).
+    const rayGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+    const rayMat = new THREE.LineBasicMaterial({ color: 0x33ffff, transparent: true, opacity: 0.55, depthTest, depthWrite });
+    rayMat.toneMapped = false;
+    const ray = new THREE.Line(rayGeo, rayMat);
+    ray.renderOrder = 10050;
+    ray.layers.set(OVERLAY_THREE_LAYER);
+    ray.layers.enable(0);
+    g.add(ray);
+
+    // Billboard quad outline (what THREE.Sprite raycasting targets).
+    const quadGeo = new THREE.BufferGeometry();
+    quadGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(15), 3));
+    const quadMat = new THREE.LineBasicMaterial({ color: 0xffff33, transparent: true, opacity: 0.85, depthTest, depthWrite });
+    quadMat.toneMapped = false;
+    const quad = new THREE.Line(quadGeo, quadMat);
+    quad.name = 'OverheadHoverDebugQuad';
+    quad.renderOrder = 10049;
+    quad.layers.set(OVERLAY_THREE_LAYER);
+    quad.layers.enable(0);
+    quad.frustumCulled = false;
+    g.add(quad);
+
+    scene.add(g);
+    this._debugOverheadHover.group = g;
+    this._debugOverheadHover.marker = marker;
+    this._debugOverheadHover.ray = ray;
+    this._debugOverheadHover.quad = quad;
+
+    // Temp vectors to avoid allocations in debug updates.
+    this._debugOverheadHover._tmpRight = new THREE.Vector3();
+    this._debugOverheadHover._tmpUp = new THREE.Vector3();
+    this._debugOverheadHover._tmpCorner = new THREE.Vector3();
+
+    // Small DOM label near the cursor showing tileId + UV.
+    try {
+      const el = document.createElement('div');
+      el.style.position = 'fixed';
+      el.style.zIndex = '10002';
+      el.style.pointerEvents = 'none';
+      el.style.padding = '2px 6px';
+      el.style.borderRadius = '4px';
+      el.style.background = 'rgba(0,0,0,0.65)';
+      el.style.border = '1px solid rgba(255,255,255,0.15)';
+      el.style.color = 'rgba(255,255,255,0.9)';
+      el.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+      el.style.fontSize = '11px';
+      el.style.display = 'none';
+      document.body.appendChild(el);
+      this._debugOverheadHover.label = el;
+    } catch (_) {
+    }
+  }
+
+  _updateOverheadHoverDebug(event, hit, opaqueHit) {
+    if (!this._debugOverheadHover?.enabled) return;
+    this._ensureOverheadHoverDebugObjects();
+    const dbg = this._debugOverheadHover;
+    if (!dbg.group || !dbg.marker || !dbg.ray) return;
+
+    if (!hit) {
+      dbg.group.visible = false;
+      try {
+        if (dbg.label) dbg.label.style.display = 'none';
+      } catch (_) {
+      }
+      return;
+    }
+
+    const THREE = window.THREE;
+    const p = hit.point;
+    if (!p || !THREE) return;
+
+    dbg.group.visible = true;
+    dbg.marker.position.copy(p);
+    dbg.marker.position.z += 0.5;
+
+    // Draw the sprite billboard quad outline so we can see if the ray target is
+    // offset/scaled relative to the rendered texture.
+    try {
+      const sprite = hit?.object;
+      const cam = this.sceneComposer?.camera;
+      const quad = dbg.quad;
+      const right = dbg._tmpRight;
+      const up = dbg._tmpUp;
+      const corner = dbg._tmpCorner;
+
+      // Use world-space basis + origin so the debug quad matches the raycaster target
+      // even when tiles are parented under transformed groups.
+      const origin = dbg._tmpOrigin || (dbg._tmpOrigin = new THREE.Vector3());
+
+      if (sprite && cam && quad && right && up && corner) {
+        cam.getWorldQuaternion(_tmpQuat);
+        right.set(1, 0, 0).applyQuaternion(_tmpQuat);
+        up.set(0, 1, 0).applyQuaternion(_tmpQuat);
+
+        sprite.getWorldPosition(origin);
+
+        const sx = sprite.scale?.x ?? 1;
+        const sy = sprite.scale?.y ?? 1;
+        const cx = sprite.center?.x ?? 0.5;
+        const cy = sprite.center?.y ?? 0.5;
+
+        // Sprite local corners (in sprite units), respecting anchor center.
+        // left/right extents are [-cx, 1-cx] scaled by sprite.scale.
+        const x0 = (-cx) * sx;
+        const x1 = (1 - cx) * sx;
+        const y0 = (-cy) * sy;
+        const y1 = (1 - cy) * sy;
+
+        const attr = quad.geometry.getAttribute('position');
+        const arr = attr.array;
+
+        const writeCorner = (idx, x, y) => {
+          corner.copy(origin);
+          corner.addScaledVector(right, x);
+          corner.addScaledVector(up, y);
+          // Nudge above the sprite so the line is always visible.
+          corner.z += 0.4;
+          arr[idx + 0] = corner.x;
+          arr[idx + 1] = corner.y;
+          arr[idx + 2] = corner.z;
+        };
+
+        // CCW loop, 5th point closes.
+        writeCorner(0, x0, y0);
+        writeCorner(3, x1, y0);
+        writeCorner(6, x1, y1);
+        writeCorner(9, x0, y1);
+        writeCorner(12, x0, y0);
+
+        attr.needsUpdate = true;
+        quad.visible = true;
+      } else if (dbg.quad) {
+        dbg.quad.visible = false;
+      }
+    } catch (_) {
+    }
+
+    // Update ray line
+    try {
+      const cam = this.sceneComposer?.camera;
+      if (cam) {
+        cam.getWorldPosition(_tmpPos);
+        const arr = dbg.ray.geometry.attributes.position.array;
+        arr[0] = _tmpPos.x;
+        arr[1] = _tmpPos.y;
+        arr[2] = _tmpPos.z;
+        arr[3] = p.x;
+        arr[4] = p.y;
+        arr[5] = p.z;
+        dbg.ray.geometry.attributes.position.needsUpdate = true;
+      }
+    } catch (_) {
+    }
+
+    // Marker color indicates opaque vs transparent pixel
+    try {
+      const c = opaqueHit ? 0x33ff33 : 0xff3333;
+      dbg.marker.material.color.setHex(c);
+    } catch (_) {
+    }
+
+    // Label next to cursor
+    try {
+      if (dbg.label && event) {
+        const tileId = hit?.object?.userData?.foundryTileId;
+        const uv = hit?.uv;
+        const u = (uv && Number.isFinite(uv.x)) ? uv.x.toFixed(3) : 'n/a';
+        const v = (uv && Number.isFinite(uv.y)) ? uv.y.toFixed(3) : 'n/a';
+        dbg.label.textContent = `roofHit: ${tileId || 'n/a'}  uv(${u}, ${v})  opaque=${opaqueHit ? '1' : '0'}`;
+        dbg.label.style.left = `${event.clientX + 14}px`;
+        dbg.label.style.top = `${event.clientY + 14}px`;
+        dbg.label.style.display = 'block';
+      }
+    } catch (_) {
+    }
   }
 
   _createSelectedLightOutline() {
@@ -3937,6 +4190,77 @@ export class InteractionManager {
     this._updateSelectedLightOutline();
     this._updateLightTranslateGizmo();
     this._updateLightRadiusRingsGizmo();
+
+    // Overhead hover debug: keep an always-on marker + label so we can diagnose
+    // pointer-to-ray mapping even when there are no sprite hits.
+    try {
+      this._updateOverheadHoverDebugIdle();
+    } catch (_) {
+    }
+  }
+
+  _updateOverheadHoverDebugIdle() {
+    if (!this._debugOverheadHover?.enabled) return;
+
+    this._ensureOverheadHoverDebugObjects();
+    const dbg = this._debugOverheadHover;
+    if (!dbg?.group || !dbg.marker || !dbg.ray) return;
+
+    const cam = this.sceneComposer?.camera;
+    if (!cam) return;
+
+    // Prefer the most recent pointer coords (updated in onPointerMove / handleHover).
+    const clientX = (typeof this._lastPointerClientX === 'number') ? this._lastPointerClientX : null;
+    const clientY = (typeof this._lastPointerClientY === 'number') ? this._lastPointerClientY : null;
+    if (clientX == null || clientY == null) return;
+
+    // Update ray from mouse NDC.
+    const ndc = this._tempVec2HoverNdc || (this._tempVec2HoverNdc = new window.THREE.Vector2());
+    const rect = this._getCanvasRectCached();
+    ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+
+    this.raycaster.setFromCamera(ndc, cam);
+
+    // Project onto the ground plane (Z=0) just to show where the ray is in world
+    // space even if we never hit an overhead sprite.
+    const THREE = window.THREE;
+    const plane = this._overheadDebugPlane || (this._overheadDebugPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0));
+    const hitPoint = this._overheadDebugPoint || (this._overheadDebugPoint = new THREE.Vector3());
+    const ok = this.raycaster.ray.intersectPlane(plane, hitPoint);
+    if (!ok) return;
+
+    dbg.group.visible = true;
+    dbg.marker.position.copy(hitPoint);
+    dbg.marker.position.z += 0.5;
+
+    // Ray line from camera to projected point.
+    cam.getWorldPosition(_tmpPos);
+    const arr = dbg.ray.geometry.attributes.position.array;
+    arr[0] = _tmpPos.x;
+    arr[1] = _tmpPos.y;
+    arr[2] = _tmpPos.z;
+    arr[3] = hitPoint.x;
+    arr[4] = hitPoint.y;
+    arr[5] = hitPoint.z;
+    dbg.ray.geometry.attributes.position.needsUpdate = true;
+
+    // Hide quad when we don't have a tile hit yet.
+    try {
+      if (dbg.quad) dbg.quad.visible = false;
+    } catch (_) {
+    }
+
+    // Always show a label with NDC + rect so we can diagnose offset mapping.
+    try {
+      if (dbg.label) {
+        dbg.label.textContent = `roofDebug: ndc(${ndc.x.toFixed(3)}, ${ndc.y.toFixed(3)}) rect(l=${rect.left.toFixed(1)} t=${rect.top.toFixed(1)} w=${rect.width.toFixed(1)} h=${rect.height.toFixed(1)})`;
+        dbg.label.style.left = `${clientX + 14}px`;
+        dbg.label.style.top = `${clientY + 14}px`;
+        dbg.label.style.display = 'block';
+      }
+    } catch (_) {
+    }
   }
 
   _getCanvasRectCached(force = false) {
@@ -4673,6 +4997,22 @@ export class InteractionManager {
    * @private
    */
   handleHover(event) {
+    // Ensure camera matrices are current before any raycasting.
+    // A stale camera matrixWorld can cause systematic pick offsets.
+    try {
+      const cam = this.sceneComposer?.camera;
+      cam?.updateMatrixWorld?.(true);
+      cam?.updateProjectionMatrix?.();
+    } catch (_) {
+    }
+
+    // Tiles have matrixAutoUpdate=false. Ensure the scene graph is up to date so
+    // Raycaster sees correct matrixWorld values.
+    try {
+      this.sceneComposer?.scene?.updateMatrixWorld?.(true);
+    } catch (_) {
+    }
+
     this.updateMouseCoords(event);
     this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
 
@@ -4768,7 +5108,137 @@ export class InteractionManager {
     // (We intentionally keep it visible while hovering the relevant handle.)
     this._hideUIHoverLabel();
 
-    // 1. Check Walls (Priority for "near line" detection)
+    // 1. Check Overhead Tiles (for hover-to-hide behavior)
+    // IMPORTANT: This must run BEFORE wall hover detection.
+    // Wall raycasting uses a large line threshold (for UX when selecting walls),
+    // which can otherwise steal hover from roofs/overhead tiles (especially indoors).
+    if (this.tileManager && this.tileManager.getOverheadTileSprites) {
+      const overheadSprites = this.tileManager.getOverheadTileSprites();
+      if (overheadSprites.length > 0) {
+        // IMPORTANT: Tiles are rendered as THREE.Sprite (billboards). Under a
+        // perspective camera, sprite raycasting happens against the billboard
+        // plane, which drifts from the intended ground-aligned tile plane toward
+        // the edges of the view.
+        //
+        // For accurate hover picking, raycast once against the tile Z plane and
+        // then do a bounds/alpha test against tile docs.
+
+        const THREE = window.THREE;
+        let bestTileId = null;
+        let bestZ = -Infinity;
+        let bestHit = null;
+        let bestOpaque = true;
+
+        // Reuse temp for world-position Z ranking.
+        const zPos = this._tempVec3ZRank || (this._tempVec3ZRank = new THREE.Vector3());
+
+        // Raycast against the actual overhead sprites (billboards).
+        // This aligns hit-testing with what the user sees on screen under a perspective camera.
+        //
+        // IMPORTANT: Overhead sprites are rendered with ROOF_LAYER enabled (see TileManager).
+        // The THREE.Raycaster respects layers, so we must enable ROOF_LAYER here or all
+        // overhead picking will silently miss.
+        const prevMask = this.raycaster.layers?.mask;
+        try {
+          this.raycaster.layers.enable(20); // ROOF_LAYER
+          this.raycaster.layers.enable(0);
+        } catch (_) {
+        }
+
+        const hits = this.raycaster.intersectObjects(overheadSprites, false);
+
+        try {
+          if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask;
+        } catch (_) {
+        }
+        if (hits && hits.length > 0) {
+          for (let i = 0; i < hits.length; i++) {
+            const hit = hits[i];
+            const sprite = hit?.object;
+            const tileId = sprite?.userData?.foundryTileId;
+            if (!tileId) continue;
+
+            const data = this.tileManager.tileSprites.get(tileId);
+            if (!data) continue;
+
+            // Only apply hover-to-hide to tiles that are explicitly configured
+            // as roofs, or which have a non-NONE occlusion mode (typical roof setup).
+            // This prevents hiding decorative overhead tiles unexpectedly.
+            try {
+              const tileDoc = data.tileDoc;
+              const occlusionMode = tileDoc?.occlusion?.mode ?? CONST.TILE_OCCLUSION_MODES.NONE;
+              const hoverEligible = !!sprite.userData.isWeatherRoof || (occlusionMode !== CONST.TILE_OCCLUSION_MODES.NONE);
+              if (!hoverEligible) continue;
+            } catch (_) {
+            }
+
+            // Pixel-opaque test using UV from the sprite raycast.
+            let opaqueHit = true;
+            if (typeof this.tileManager.isUvOpaque === 'function' && hit?.uv) {
+              try {
+                opaqueHit = this.tileManager.isUvOpaque(data, hit.uv);
+              } catch (_) {
+                opaqueHit = true;
+              }
+            }
+            if (!opaqueHit) continue;
+
+            // Rank by world Z, not local Z (tiles may be parented under transformed groups).
+            let z = 0;
+            try {
+              sprite.getWorldPosition(zPos);
+              z = zPos.z;
+            } catch (_) {
+              z = sprite.position?.z ?? 0;
+            }
+            if (z >= bestZ) {
+              bestZ = z;
+              bestTileId = tileId;
+              bestHit = hit;
+              bestOpaque = opaqueHit;
+            }
+          }
+        }
+
+        // Update debug marker for the winning hit (or hide when no hit).
+        this._updateOverheadHoverDebug(event, bestHit, bestOpaque);
+
+        // NOTE: We intentionally do not implement a world-space "sticky hover" fallback here.
+        // The hover test is now based on sprite raycast UVs (screen-aligned). Mixing in a
+        // ground-plane bounds check can reintroduce misalignment.
+
+        if (bestTileId) {
+          // Clear wall hover highlight while a roof is being hover-hidden.
+          // Otherwise the wall selection affordance can fight with the roof UX.
+          try {
+            if (this.hoveredWallId) {
+              this.wallManager?.setHighlight?.(this.hoveredWallId, false);
+              this.hoveredWallId = null;
+            }
+          } catch (_) {
+          }
+
+          if (this.hoveredOverheadTileId !== bestTileId) {
+            if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
+              this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
+            }
+            this.hoveredOverheadTileId = bestTileId;
+            if (this.tileManager.setTileHoverHidden) {
+              this.tileManager.setTileHoverHidden(bestTileId, true);
+            }
+          }
+          hitFound = true;
+        } else if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
+          this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
+          this.hoveredOverheadTileId = null;
+        }
+      }
+    }
+
+    // If we hit an overhead tile, don't hover walls/tokens through it.
+    if (hitFound) return;
+
+    // 2. Check Walls (Priority for "near line" detection)
     // Only check walls if we are GM or on Wall Layer? Usually useful for everyone if interactive, but editing is GM.
     // The user said "Foundry VTT... making sure it knows you meant to select that wall".
     // We'll enable it for GM mainly for editing, or everyone for doors?
@@ -4812,84 +5282,6 @@ export class InteractionManager {
 
     // If we hit a wall, we might still want to check tokens if the wall didn't claim it?
     // But if we are "near a line", we probably want the line.
-    if (hitFound) return;
-
-    // 2. Check Overhead Tiles (for hover-to-hide behavior)
-    if (this.tileManager && this.tileManager.getOverheadTileSprites) {
-      const overheadSprites = this.tileManager.getOverheadTileSprites();
-      if (overheadSprites.length > 0) {
-        // IMPORTANT: Tiles are rendered as THREE.Sprite (billboards). Under a
-        // perspective camera, sprite raycasting happens against the billboard
-        // plane, which drifts from the intended ground-aligned tile plane toward
-        // the edges of the view.
-        //
-        // For accurate hover picking, raycast once against the tile Z plane and
-        // then do a bounds/alpha test against tile docs.
-
-        const THREE = window.THREE;
-        const targetZ = this.sceneComposer?.groundZ ?? 0;
-        const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -targetZ);
-        const worldPoint = new THREE.Vector3();
-        const intersection = this.raycaster.ray.intersectPlane(plane, worldPoint);
-
-        let bestTileId = null;
-        let bestZ = -Infinity;
-
-        if (intersection) {
-          for (const sprite of overheadSprites) {
-            const tileId = sprite.userData.foundryTileId;
-            const data = this.tileManager.tileSprites.get(tileId);
-            if (!data) continue;
-
-            // Pixel-opaque test (alpha > 0.5)
-            // If available, this function also performs a rotation-aware bounds check.
-            let opaqueHit = true;
-            if (typeof this.tileManager.isWorldPointOpaque === 'function') {
-              opaqueHit = this.tileManager.isWorldPointOpaque(data, worldPoint.x, worldPoint.y);
-            } else {
-              // Fallback: Quick AABB test in Foundry (top-left) space.
-              // Convert the plane hit point to Foundry Y-down.
-              const foundryPt = Coordinates.toFoundry(worldPoint.x, worldPoint.y);
-              const foundryY = foundryPt.y;
-              const foundryX = foundryPt.x;
-
-              const { tileDoc } = data;
-              const left = tileDoc.x;
-              const right = tileDoc.x + tileDoc.width;
-              const top = tileDoc.y;
-              const bottom = tileDoc.y + tileDoc.height;
-
-              opaqueHit = !(foundryX < left || foundryX > right || foundryY < top || foundryY > bottom);
-            }
-            if (!opaqueHit) continue;
-
-            const z = sprite.position?.z ?? 0;
-            if (z >= bestZ) {
-              bestZ = z;
-              bestTileId = tileId;
-            }
-          }
-        }
-
-        if (bestTileId) {
-          if (this.hoveredOverheadTileId !== bestTileId) {
-            if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
-              this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
-            }
-            this.hoveredOverheadTileId = bestTileId;
-            if (this.tileManager.setTileHoverHidden) {
-              this.tileManager.setTileHoverHidden(bestTileId, true);
-            }
-          }
-          hitFound = true;
-        } else if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
-          this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
-          this.hoveredOverheadTileId = null;
-        }
-      }
-    }
-
-    // If we hit an overhead tile, don't hover tokens through it
     if (hitFound) return;
 
     const mapShine = window.MapShine || window.mapShine;
@@ -6243,7 +6635,57 @@ export class InteractionManager {
             log.info(`Updating ${tokenUpdates.length} tokens`);
             anyUpdates = true;
             try {
-              await canvas.scene.updateEmbeddedDocuments('Token', tokenUpdates);
+              // Foundry: "Unrestrained Movement" UI toggle is implemented as the client setting
+              // `core.unconstrainedMovement`. When active (and the user is a GM), Foundry's
+              // native drag workflow passes constrainOptions {ignoreWalls:true, ignoreCost:true}.
+              //
+              // Our Three.js drag workflow updates token docs directly, so we must forward the
+              // equivalent movement options or Foundry will still constrain the movement.
+              const unconstrainedMovement = !!(
+                game?.user?.isGM &&
+                game?.settings?.get?.('core', 'unconstrainedMovement')
+              );
+
+              const updateOptions = {};
+              if (unconstrainedMovement) {
+                /** @type {Record<string, any>} */
+                const movement = {};
+
+                for (const upd of tokenUpdates) {
+                  const id = String(upd?._id ?? '');
+                  if (!id) continue;
+
+                  // Movement waypoints use top-left x/y (same coordinate space as TokenDocument.x/y).
+                  // Include some extra fields where available to match Foundry's internal waypoint shape.
+                  const tokenData = this.tokenManager?.tokenSprites?.get?.(id);
+                  const tokenDoc = tokenData?.tokenDoc;
+
+                  const waypoint = {
+                    x: upd.x,
+                    y: upd.y,
+                    explicit: true,
+                    checkpoint: true
+                  };
+
+                  if (tokenDoc) {
+                    if (typeof tokenDoc.elevation === 'number') waypoint.elevation = tokenDoc.elevation;
+                    if (typeof tokenDoc.width === 'number') waypoint.width = tokenDoc.width;
+                    if (typeof tokenDoc.height === 'number') waypoint.height = tokenDoc.height;
+                    if (tokenDoc.shape != null) waypoint.shape = tokenDoc.shape;
+                    if (typeof tokenDoc.movementAction === 'string') waypoint.action = tokenDoc.movementAction;
+                  }
+
+                  movement[id] = {
+                    waypoints: [waypoint],
+                    method: 'dragging',
+                    constrainOptions: { ignoreWalls: true, ignoreCost: true }
+                  };
+                }
+
+                updateOptions.movement = movement;
+              }
+
+              await canvas.scene.updateEmbeddedDocuments('Token', tokenUpdates, updateOptions);
               tokenUpdateSucceeded = true;
             } catch (err) {
               log.error('Failed to update token positions', err);

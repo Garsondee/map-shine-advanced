@@ -90,6 +90,11 @@ export class TileManager {
     
     this.initialized = false;
     this.hooksRegistered = false;
+
+    // Global visibility gate used by canvas-replacement when switching tools/modes.
+    // When false, tile sprites must remain hidden even if Foundry emits refresh/update
+    // hooks (e.g. while editing tiles in PIXI).
+    this._globalVisible = true;
     
     /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
     this._hookIds = [];
@@ -102,6 +107,18 @@ export class TileManager {
 
     this._lastTintKey = null;
     this._tintDirty = true;
+
+    this._overheadCCDirty = true;
+    this.overheadColorCorrection = {
+      enabled: true,
+      exposure: 1.0,
+      temperature: 0.0,
+      tint: 0.0,
+      brightness: 0.0,
+      contrast: 1.0,
+      saturation: 1.0,
+      gamma: 1.0
+    };
 
     // Cache for expensive per-mask image analysis used by water occluder heuristics.
     // Keyed by resolved mask URL.
@@ -124,6 +141,134 @@ export class TileManager {
     this._maxAnisotropy = null;
     
     log.debug('TileManager created');
+  }
+
+  setOverheadColorCorrectionParams(params) {
+    if (!params || typeof params !== 'object') return;
+    Object.assign(this.overheadColorCorrection, params);
+    this._overheadCCDirty = true;
+    this.applyColorCorrectionToAllOverheadTiles();
+  }
+
+  applyColorCorrectionToAllOverheadTiles() {
+    for (const data of this.tileSprites.values()) {
+      const sprite = data?.sprite;
+      const mat = sprite?.material;
+      if (!mat) continue;
+      this._ensureOverheadColorCorrection(mat);
+      this._applyOverheadColorCorrectionUniforms(sprite, mat);
+    }
+    this._overheadCCDirty = false;
+  }
+
+  _applyOverheadColorCorrectionUniforms(sprite, material) {
+    const shader = material?.userData?._msOverheadCCShader;
+    if (!shader?.uniforms) return;
+
+    const p = this.overheadColorCorrection;
+    const isOverhead = !!sprite?.userData?.isOverhead;
+
+    shader.uniforms.uOverheadCCEnabled.value = (p.enabled && isOverhead) ? 1.0 : 0.0;
+    shader.uniforms.uOverheadExposure.value = p.exposure ?? 1.0;
+    shader.uniforms.uOverheadTemperature.value = p.temperature ?? 0.0;
+    shader.uniforms.uOverheadTint.value = p.tint ?? 0.0;
+    shader.uniforms.uOverheadBrightness.value = p.brightness ?? 0.0;
+    shader.uniforms.uOverheadContrast.value = p.contrast ?? 1.0;
+    shader.uniforms.uOverheadSaturation.value = p.saturation ?? 1.0;
+    shader.uniforms.uOverheadGamma.value = p.gamma ?? 1.0;
+  }
+
+  _ensureOverheadColorCorrection(material) {
+    if (!material || material.userData?._msOverheadCCInstalled) return;
+
+    material.userData._msOverheadCCInstalled = true;
+    material.onBeforeCompile = (shader) => {
+      material.userData._msOverheadCCShader = shader;
+
+      shader.uniforms.uOverheadCCEnabled = { value: 1.0 };
+      shader.uniforms.uOverheadExposure = { value: 1.0 };
+      shader.uniforms.uOverheadTemperature = { value: 0.0 };
+      shader.uniforms.uOverheadTint = { value: 0.0 };
+      shader.uniforms.uOverheadBrightness = { value: 0.0 };
+      shader.uniforms.uOverheadContrast = { value: 1.0 };
+      shader.uniforms.uOverheadSaturation = { value: 1.0 };
+      shader.uniforms.uOverheadGamma = { value: 1.0 };
+
+      const uniformBlock = `
+uniform float uOverheadCCEnabled;
+uniform float uOverheadExposure;
+uniform float uOverheadTemperature;
+uniform float uOverheadTint;
+uniform float uOverheadBrightness;
+uniform float uOverheadContrast;
+uniform float uOverheadSaturation;
+uniform float uOverheadGamma;
+
+vec3 ms_applyOverheadWhiteBalance(vec3 color, float temp, float tint) {
+  vec3 tempShift = vec3(1.0 + temp, 1.0, 1.0 - temp);
+  if (temp < 0.0) tempShift = vec3(1.0, 1.0, 1.0 - temp * 0.5);
+  else tempShift = vec3(1.0 + temp * 0.5, 1.0, 1.0);
+
+  vec3 tintShift = vec3(1.0, 1.0 + tint, 1.0);
+  return color * tempShift * tintShift;
+}
+
+vec3 ms_applyOverheadColorCorrection(vec3 color) {
+  if (uOverheadCCEnabled < 0.5) return color;
+
+  color *= uOverheadExposure;
+  color = ms_applyOverheadWhiteBalance(color, uOverheadTemperature, uOverheadTint);
+  color += uOverheadBrightness;
+  color = (color - 0.5) * uOverheadContrast + 0.5;
+
+  float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+  color = mix(vec3(luma), color, uOverheadSaturation);
+
+  color = max(color, vec3(0.0));
+  color = pow(color, vec3(1.0 / max(uOverheadGamma, 0.0001)));
+  return color;
+}
+`;
+
+      shader.fragmentShader = shader.fragmentShader.replace(
+        'void main() {',
+        `${uniformBlock}\nvoid main() {`
+      );
+
+      let patched = false;
+
+      if (shader.fragmentShader.includes('#include <output_fragment>')) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <output_fragment>',
+          `#include <output_fragment>\n  gl_FragColor.rgb = ms_applyOverheadColorCorrection(gl_FragColor.rgb);`
+        );
+        patched = true;
+      }
+
+      if (!patched && shader.fragmentShader.includes('gl_FragColor = vec4( outgoingLight, diffuseColor.a );')) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          'gl_FragColor = vec4( outgoingLight, diffuseColor.a );',
+          `vec3 ccLight = ms_applyOverheadColorCorrection(outgoingLight);\n  gl_FragColor = vec4( ccLight, diffuseColor.a );`
+        );
+        patched = true;
+      }
+
+      if (!patched) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          /}\s*$/,
+          `  gl_FragColor.rgb = ms_applyOverheadColorCorrection(gl_FragColor.rgb);\n}`
+        );
+      }
+
+      try {
+        const tileId = material?.userData?._msTileId;
+        const sprite = tileId ? this.tileSprites.get(tileId)?.sprite : null;
+        if (sprite) this._applyOverheadColorCorrectionUniforms(sprite, material);
+      } catch (_) {
+      }
+    };
+
+    material.needsUpdate = true;
   }
 
   _getRenderer() {
@@ -179,6 +324,40 @@ export class TileManager {
     texture.needsUpdate = true;
   }
 
+  _normalizeTileTextureSource(texture, role = 'ALBEDO') {
+    if (!texture || role === 'DATA_MASK') return texture;
+
+    const img = texture.image;
+    if (!img) return texture;
+
+    const ImageBitmapCtor = globalThis.ImageBitmap;
+    const isBitmap = ImageBitmapCtor && img instanceof ImageBitmapCtor;
+    if (!isBitmap) return texture;
+
+    const w = Number(img?.width ?? 0);
+    const h = Number(img?.height ?? 0);
+    if (!(w > 0 && h > 0)) return texture;
+
+    try {
+      const canvasEl = document.createElement('canvas');
+      canvasEl.width = w;
+      canvasEl.height = h;
+      const ctx = canvasEl.getContext('2d');
+      if (!ctx) return texture;
+      ctx.drawImage(img, 0, 0, w, h);
+      texture.image = canvasEl;
+      texture.needsUpdate = true;
+      try {
+        if (typeof img.close === 'function') img.close();
+      } catch (_) {
+      }
+    } catch (_) {
+      return texture;
+    }
+
+    return texture;
+  }
+
   /**
    * Provide a dedicated scene for water occluder meshes.
    * Rendering occluders from a separate scene avoids traversing the entire
@@ -210,6 +389,54 @@ export class TileManager {
       }
     } catch (_) {
     }
+  }
+
+  isWorldPointInTileBounds(data, worldX, worldY) {
+    const { tileDoc } = data;
+    if (!tileDoc) return false;
+
+    const width = tileDoc.width;
+    const height = tileDoc.height;
+
+    const scaleX = tileDoc.texture?.scaleX ?? 1;
+    const scaleY = tileDoc.texture?.scaleY ?? 1;
+
+    // Foundry tile docs store the base dimensions, with texture.scaleX/scaleY applied
+    // around the tile center. Our hover/bounds math must use the displayed size.
+    const dispW = width * Math.abs(scaleX || 1);
+    const dispH = height * Math.abs(scaleY || 1);
+
+    if (!Number.isFinite(dispW) || !Number.isFinite(dispH) || dispW <= 0 || dispH <= 0) return false;
+
+    // Map world coords back to Foundry top-left space
+    const sceneHeight = canvas.dimensions?.height || 10000;
+    const foundryX = worldX;
+    const foundryY = sceneHeight - worldY;
+
+    // Convert to tile local space (account for rotation around center)
+    const centerX = tileDoc.x + width / 2;
+    const centerY = tileDoc.y + height / 2;
+    const dx = foundryX - centerX;
+    const dy = foundryY - centerY;
+
+    const rotDeg = tileDoc.rotation || 0;
+    const r = (-rotDeg * Math.PI) / 180;
+    const c = Math.cos(r);
+    const s = Math.sin(r);
+    const lx = dx * c - dy * s;
+    const ly = dx * s + dy * c;
+
+    // Convert to displayed local space (scaled around center).
+    const localX = lx + dispW / 2;
+    const localY = ly + dispH / 2;
+
+    let u = localX / dispW;
+    let v = localY / dispH;
+
+    if (scaleX < 0) u = 1 - u;
+    if (scaleY < 0) v = 1 - v;
+
+    return !(u < 0 || u > 1 || v < 0 || v > 1);
   }
 
   _getWaterOccluderScene() {
@@ -415,8 +642,8 @@ export class TileManager {
         if (parts.query) candidates.push(`${baseNoQuery}${parts.query}`);
       }
 
-      // Prefer avoiding 404 spam by checking existence via FilePicker before loading.
-      // If FilePicker returns an empty list (unavailable/failed), we'll fall back to probing.
+      // Strict no-probing policy: do not make any network requests for optional
+      // masks unless we can confirm the file exists via FilePicker directory listing.
       let hasFilePickerListing = false;
       try {
         const dir = this._getDirectoryFromPath(parts.base);
@@ -424,6 +651,12 @@ export class TileManager {
         hasFilePickerListing = Array.isArray(files) && files.length > 0;
       } catch (_) {
         hasFilePickerListing = false;
+      }
+
+      if (!hasFilePickerListing) {
+        // Cannot confirm existence without probing; do nothing.
+        this._tileWaterMaskResolvedUrl.set(key, null);
+        return null;
       }
 
       for (let i = 0; i < candidates.length; i++) {
@@ -537,8 +770,8 @@ export class TileManager {
         if (parts.query) candidates.push(`${baseNoQuery}${parts.query}`);
       }
 
-      // Prefer avoiding 404 spam by checking existence via FilePicker before loading.
-      // If FilePicker returns an empty list (unavailable/failed), we'll fall back to probing.
+      // Strict no-probing policy: do not make any network requests for optional
+      // masks unless we can confirm the file exists via FilePicker directory listing.
       let hasFilePickerListing = false;
       try {
         const dir = this._getDirectoryFromPath(parts.base);
@@ -546,6 +779,12 @@ export class TileManager {
         hasFilePickerListing = Array.isArray(files) && files.length > 0;
       } catch (_) {
         hasFilePickerListing = false;
+      }
+
+      if (!hasFilePickerListing) {
+        // Cannot confirm existence without probing; do nothing.
+        this._tileSpecularMaskResolvedUrl.set(key, null);
+        return null;
       }
 
       for (let i = 0; i < candidates.length; i++) {
@@ -889,11 +1128,10 @@ export class TileManager {
   setupHooks() {
     if (this.hooksRegistered) return;
 
-    // Initial load when canvas is ready
-    this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
-      log.debug('Canvas ready, syncing all tiles');
-      this.syncAllTiles();
-    })]);
+    // NOTE: We intentionally do NOT register a canvasReady hook here.
+    // canvas-replacement.js explicitly calls syncAllTiles() after initialize(),
+    // so a canvasReady hook would cause double-creation of tile sprites,
+    // leaving orphan sprites in the scene that don't respond to updates.
 
     // Create new tile
     this._hookIds.push(['createTile', Hooks.on('createTile', (tileDoc, options, userId) => {
@@ -958,11 +1196,12 @@ export class TileManager {
    * @public
    */
   setVisibility(visible) {
+    this._globalVisible = !!visible;
     for (const { sprite, tileDoc } of this.tileSprites.values()) {
       if (!sprite) continue;
       
       // If turning ON, respect the tile's document hidden state
-      if (visible) {
+      if (this._globalVisible) {
         sprite.visible = !tileDoc.hidden;
       } else {
         // If turning OFF, always hide
@@ -972,8 +1211,8 @@ export class TileManager {
   }
 
   /**
-   * Sync all existing tiles from Foundry to THREE.js
-   * Called on canvasReady
+   * Sync all existing tiles from Foundry to THREE.js.
+   * Called explicitly by canvas-replacement.js after initialize().
    * @public
    */
   syncAllTiles() {
@@ -999,15 +1238,19 @@ export class TileManager {
     this._initialLoad.pendingOverhead = 0;
     this._initialLoad.trackedIds = new Set();
 
-    const foregroundElevation = canvas.scene.foregroundElevation || 0;
+    const foregroundElevation = Number.isFinite(canvas.scene.foregroundElevation)
+      ? canvas.scene.foregroundElevation
+      : 0;
     for (const tileDoc of tiles) {
       const tileId = tileDoc?.id;
       if (tileId) {
         this._initialLoad.trackedIds.add(tileId);
         this._initialLoad.pendingAll++;
-        // P0.2: Use Foundry v12+ canonical overhead detection (elevation >= foregroundElevation)
-        // Deprecated: tileDoc.overhead (may be removed in v14)
-        const isOverhead = tileDoc.elevation >= foregroundElevation;
+        // Overhead detection:
+        // - Preferred (v12+): elevation > foregroundElevation
+        // - Back-compat: tileDoc.overhead (some worlds/systems still set this)
+        const elev = Number.isFinite(tileDoc.elevation) ? tileDoc.elevation : 0;
+        const isOverhead = (elev > foregroundElevation) || (tileDoc.overhead === true);
         if (isOverhead) this._initialLoad.pendingOverhead++;
       }
       this.createTileSprite(tileDoc);
@@ -1103,7 +1346,35 @@ export class TileManager {
     const data = this.tileSprites.get(tileId);
     if (!data) return;
 
+    // Hover-hide is an overhead-only UX feature.
+    // If a tile is not overhead, ensure it cannot be left permanently hidden
+    // due to a stale hoverHidden flag from a previous overhead classification.
+    try {
+      const isOverhead = !!data?.sprite?.userData?.isOverhead;
+      if (!isOverhead) {
+        data.hoverHidden = false;
+        // Re-apply normal visibility immediately in case the tile was stuck at opacity 0.
+        try {
+          if (data.sprite && data.tileDoc) this.updateSpriteVisibility(data.sprite, data.tileDoc);
+        } catch (_) {
+        }
+        return;
+      }
+    } catch (_) {
+    }
+
     data.hoverHidden = !!hidden;
+
+    // Hover-hide uses a smooth alpha animation in update(). If RenderLoop is
+    // currently idle-throttled, the fade can appear to "start" and then stall
+    // visually. Request a short continuous-render window so the fade completes.
+    try {
+      const rl = window.MapShine?.renderLoop;
+      // Fade speed in update() is 0.5 alpha/sec, so a full 0->1 takes ~2000ms.
+      // Add margin for throttling jitter.
+      rl?.requestContinuousRender?.(2500);
+    } catch (_) {
+    }
   }
 
   /**
@@ -1123,6 +1394,12 @@ export class TileManager {
 
     const width = tileDoc.width;
     const height = tileDoc.height;
+    const scaleX = tileDoc.texture?.scaleX ?? 1;
+    const scaleY = tileDoc.texture?.scaleY ?? 1;
+
+    // Use displayed size for UV mapping.
+    const dispW = width * Math.abs(scaleX || 1);
+    const dispH = height * Math.abs(scaleY || 1);
 
     // Map world coords back to Foundry top-left space
     const sceneHeight = canvas.dimensions?.height || 10000;
@@ -1142,14 +1419,13 @@ export class TileManager {
     const lx = dx * c - dy * s;
     const ly = dx * s + dy * c;
 
-    const localX = lx + width / 2;
-    const localY = ly + height / 2;
+    // Convert into displayed local space (scaled around center).
+    const localX = lx + dispW / 2;
+    const localY = ly + dispH / 2;
 
-    let u = localX / width;
-    let v = localY / height;
+    let u = localX / dispW;
+    let v = localY / dispH;
 
-    const scaleX = tileDoc.texture?.scaleX ?? 1;
-    const scaleY = tileDoc.texture?.scaleY ?? 1;
     if (scaleX < 0) u = 1 - u;
     if (scaleY < 0) v = 1 - v;
 
@@ -1248,6 +1524,12 @@ export class TileManager {
    */
   update(timeInfo) {
     if (DISABLE_TILE_UPDATES) return;
+
+    // If tiles are globally hidden (e.g. TilesLayer active in PIXI), do not run
+    // occlusion/hover fade updates. This prevents hidden tiles from being
+    // re-shown by later updateSpriteVisibility calls.
+    if (!this._globalVisible) return;
+
     const dt = timeInfo.delta;
     const canvasTokens = canvas.tokens?.placeables || [];
     // We care about controlled tokens or the observed token
@@ -1363,6 +1645,8 @@ export class TileManager {
     // Store global tint for window light application (avoid per-tile cloning)
     this._frameGlobalTint = globalTint;
 
+    let anyOverheadFadeInProgress = false;
+
     for (const tileId of this._overheadTileIds) {
       const data = this.tileSprites.get(tileId);
       if (!data) continue;
@@ -1461,11 +1745,21 @@ export class TileManager {
       
       // Smoothly interpolate alpha
       // Use a ~2 second time constant for hover/occlusion fades
-      const currentAlpha = sprite.material.opacity;
+      const currentAlphaRaw = sprite.material.opacity;
+      const currentAlpha = Number.isFinite(currentAlphaRaw) ? currentAlphaRaw : targetAlpha;
       const diff = targetAlpha - currentAlpha;
       const absDiff = Math.abs(diff);
 
       if (absDiff > 0.0005) {
+        anyOverheadFadeInProgress = true;
+        // Ensure the fade keeps rendering smoothly even if the scene is otherwise idle.
+        // (This is intentionally inside the per-tile loop so any new targetAlpha change
+        // immediately extends the continuous-render window.)
+        try {
+          const rl = window.MapShine?.renderLoop;
+          rl?.requestContinuousRender?.(2500);
+        } catch (_) {
+        }
         // Move opacity toward target at a fixed rate of 0.5 per second,
         // so a full 0->1 transition takes about 2 seconds regardless of
         // frame rate.
@@ -1482,6 +1776,16 @@ export class TileManager {
       // When visible, re-enable depthWrite so roofs can reliably appear above tokens.
       sprite.material.depthTest = true;
       sprite.material.depthWrite = (sprite.material.opacity ?? 1.0) > 0.01;
+    }
+
+    // If any overhead tile is mid-fade, ensure we keep rendering at full rate
+    // long enough for the animation to settle.
+    if (anyOverheadFadeInProgress) {
+      try {
+        const rl = window.MapShine?.renderLoop;
+        rl?.requestContinuousRender?.(250);
+      } catch (_) {
+      }
     }
 
     // Tell WeatherController whether any roof is currently being hover-hidden,
@@ -1785,6 +2089,10 @@ export class TileManager {
       side: THREE.DoubleSide
     });
 
+    // Used by the overhead color correction shader patch to look up the owning sprite.
+    // This avoids storing a direct sprite reference on the material (which can be disposed).
+    material.userData._msTileId = tileDoc.id;
+
     const sprite = new THREE.Sprite(material);
     sprite.name = `Tile_${tileDoc.id}`;
     sprite.matrixAutoUpdate = false;
@@ -1803,9 +2111,21 @@ export class TileManager {
     sprite.userData.textureReady = false;
     sprite.visible = false;
 
-    const foregroundElevation = canvas.scene.foregroundElevation || 0;
-    // P0.2: Use Foundry v12+ canonical overhead detection (elevation >= foregroundElevation)
-    const isOverheadForLoad = tileDoc.elevation >= foregroundElevation;
+    // Install overhead CC shader patch early so it compiles with the material.
+    // Uniform values will be populated once overhead classification is known.
+    try {
+      this._ensureOverheadColorCorrection(material);
+    } catch (_) {
+    }
+
+    const foregroundElevation = Number.isFinite(canvas.scene.foregroundElevation)
+      ? canvas.scene.foregroundElevation
+      : 0;
+    // Overhead detection:
+    // - Preferred (v12+): elevation > foregroundElevation
+    // - Back-compat: tileDoc.overhead
+    const elevForLoad = Number.isFinite(tileDoc.elevation) ? tileDoc.elevation : 0;
+    const isOverheadForLoad = (elevForLoad > foregroundElevation) || (tileDoc.overhead === true);
 
     // Load texture
     this.loadTileTexture(texturePath).then(texture => {
@@ -1895,6 +2215,12 @@ export class TileManager {
       this._overheadTileIds.add(tileDoc.id);
     } else {
       this._overheadTileIds.delete(tileDoc.id);
+    }
+
+    // Keep overhead CC uniforms in sync with overhead status.
+    try {
+      if (sprite.material) this._applyOverheadColorCorrectionUniforms(sprite, sprite.material);
+    } catch (_) {
     }
 
     if (sprite.userData.isWeatherRoof) {
@@ -2267,20 +2593,46 @@ export class TileManager {
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
     let zBase = groundZ + Z_FOREGROUND_OFFSET;
 
-    const foregroundElevation = canvas.scene.foregroundElevation || 0;
-    // P0.2: Use Foundry v12+ canonical overhead detection (elevation >= foregroundElevation)
-    // Deprecated: tileDoc.overhead (may be removed in v14)
-    const isOverhead = tileDoc.elevation >= foregroundElevation;
+    const foregroundElevation = Number.isFinite(canvas.scene.foregroundElevation)
+      ? canvas.scene.foregroundElevation
+      : 0;
+    // Overhead detection:
+    // - Preferred (v12+): elevation > foregroundElevation
+    // - Back-compat: tileDoc.overhead
+    const elev = Number.isFinite(tileDoc.elevation) ? tileDoc.elevation : 0;
+    const isOverhead = (elev > foregroundElevation) || (tileDoc.overhead === true);
     const wasOverhead = !!sprite.userData.isOverhead;
 
     // Store overhead status for update loop
     sprite.userData.isOverhead = isOverhead;
+
+    try {
+      if (sprite.material) {
+        this._ensureOverheadColorCorrection(sprite.material);
+        this._applyOverheadColorCorrectionUniforms(sprite, sprite.material);
+      }
+    } catch (_) {
+    }
     if (wasOverhead !== isOverhead) {
       this._tintDirty = true;
       const tileId = tileDoc?.id;
       if (tileId) {
         if (isOverhead) this._overheadTileIds.add(tileId);
         else this._overheadTileIds.delete(tileId);
+      }
+
+      // If a tile stops being overhead, clear any hover-hidden state so it
+      // doesn't remain invisible as a ground tile.
+      if (wasOverhead && !isOverhead) {
+        try {
+          const data = tileId ? this.tileSprites.get(tileId) : null;
+          if (data?.hoverHidden) {
+            data.hoverHidden = false;
+            // Restore normal visibility immediately.
+            this.updateSpriteVisibility(sprite, tileDoc);
+          }
+        } catch (_) {
+        }
       }
     }
 
@@ -2449,6 +2801,13 @@ export class TileManager {
     
     const width = tileDoc.width;
     const height = tileDoc.height;
+
+    const scaleX = tileDoc.texture?.scaleX ?? 1;
+    const scaleY = tileDoc.texture?.scaleY ?? 1;
+    const signX = (scaleX < 0) ? -1 : 1;
+    const signY = (scaleY < 0) ? -1 : 1;
+    const dispW = width * Math.abs(scaleX || 1);
+    const dispH = height * Math.abs(scaleY || 1);
     
     // Center of tile in Foundry coords
     const centerX = tileDoc.x + width / 2;
@@ -2459,7 +2818,9 @@ export class TileManager {
     const worldY = sceneHeight - centerY;
     
     sprite.position.set(centerX, worldY, zPosition);
-    sprite.scale.set(width, height, 1);
+    // Preserve Foundry's negative scaleX/scaleY semantics (flip) by applying
+    // the sign to the THREE.Sprite scale.
+    sprite.scale.set(dispW * signX, dispH * signY, 1);
     sprite.updateMatrix();
     
     // 3. Rotation
@@ -2480,6 +2841,13 @@ export class TileManager {
    * @param {TileDocument} tileDoc 
    */
   updateSpriteVisibility(sprite, tileDoc) {
+    // Global visibility override: if the TileManager is globally hidden,
+    // do not allow per-tile visibility to re-enable the sprite.
+    if (!this._globalVisible) {
+      try { sprite.visible = false; } catch (_) {}
+      return;
+    }
+
     if (sprite?.userData?.textureReady === false) {
       sprite.visible = false;
       return;
@@ -2505,15 +2873,30 @@ export class TileManager {
       sprite.material.opacity = tileDoc.alpha ?? 1;
     }
 
+    // If this tile is currently hover-hidden, force opacity to zero so that
+    // refreshTile/update hooks don't fight the hover fade in update().
+    try {
+      const data = this.tileSprites.get(tileDoc?.id);
+      // Hover-hide is overhead-only; never force-hide ground tiles.
+      if (data?.hoverHidden && sprite?.userData?.isOverhead) {
+        sprite.material.opacity = 0;
+      }
+    } catch (_) {
+    }
+
     // Keep water occluder mesh visibility/opacity synced. The occluder can be
     // created before the sprite becomes visible (async texture load), so without
     // this it may remain permanently invisible.
+    // IMPORTANT: Also respect hover-hidden state so the occluder doesn't linger
+    // when the tile sprite fades out during hover-hide.
     const occ = sprite?.userData?.waterOccluderMesh;
     if (occ) {
       occ.visible = !!sprite.visible;
       if (occ.material?.uniforms?.uOpacity) {
-        const a = (tileDoc && typeof tileDoc.alpha === 'number') ? tileDoc.alpha : 1.0;
-        occ.material.uniforms.uOpacity.value = Number.isFinite(a) ? a : 1.0;
+        // Use sprite's material opacity (which includes hover-hidden fades)
+        // rather than just tileDoc.alpha
+        const spriteOpacity = sprite?.material?.opacity ?? 1.0;
+        occ.material.uniforms.uOpacity.value = Number.isFinite(spriteOpacity) ? spriteOpacity : 1.0;
       }
     }
 
@@ -2531,7 +2914,9 @@ export class TileManager {
    */
   async loadTileTexture(texturePath, options = {}) {
     if (this.textureCache.has(texturePath)) {
-      return this.textureCache.get(texturePath);
+      const cached = this.textureCache.get(texturePath);
+      this._normalizeTileTextureSource(cached, options?.role || 'ALBEDO');
+      return cached;
     }
 
     if (this._texturePromises.has(texturePath)) {
@@ -2546,28 +2931,54 @@ export class TileManager {
 
       // Prefer createImageBitmap for faster/off-thread decoding where supported.
       // Fallback to THREE.TextureLoader when unavailable.
+      // Debug flag: window.MapShine.disableImageBitmapTiles = true to bypass
+      // ImageBitmap decode (helps diagnose Y-flip or upload path issues).
       try {
-        if (typeof fetch === 'function' && typeof createImageBitmap === 'function') {
+        const disableImageBitmapTiles = window.MapShine?.disableImageBitmapTiles === true;
+        if (!disableImageBitmapTiles && typeof fetch === 'function' && typeof createImageBitmap === 'function') {
           const res = await fetch(texturePath);
           if (!res.ok) throw new Error(`Failed to fetch texture (${res.status})`);
           const blob = await res.blob();
-          // Ensure a consistent UV convention across all tile textures.
-          // ImageBitmap can have different orientation semantics depending on
-          // browser/codec. Prefer pre-flipping at decode time; otherwise, fall
-          // back to WebGL unpack flip.
+          // Keep tile textures in the same orientation as THREE.TextureLoader
+          // so sprite UVs remain consistent across browsers.
+          // NOTE: Some browsers/drivers have inconsistent ImageBitmap upload/orientation
+          // behavior with WebGL UNPACK_FLIP_Y, so we copy to a canvas to stabilize.
           let bitmap = null;
-          let needsUnpackFlipY = false;
           try {
-            bitmap = await createImageBitmap(blob, { imageOrientation: 'flipY' });
+            bitmap = await createImageBitmap(blob, { imageOrientation: 'none' });
           } catch (_) {
             bitmap = await createImageBitmap(blob);
-            needsUnpackFlipY = true;
           }
 
-          const texture = new THREE.Texture(bitmap);
-          texture.flipY = needsUnpackFlipY;
+          let texSource = bitmap;
+          try {
+            const w = Number(bitmap?.width ?? 0);
+            const h = Number(bitmap?.height ?? 0);
+            if (w > 0 && h > 0) {
+              const canvasEl = document.createElement('canvas');
+              canvasEl.width = w;
+              canvasEl.height = h;
+              const ctx = canvasEl.getContext('2d');
+              if (ctx) {
+                ctx.drawImage(bitmap, 0, 0, w, h);
+                texSource = canvasEl;
+              }
+            }
+          } catch (_) {
+          }
+          try {
+            if (texSource !== bitmap && bitmap && typeof bitmap.close === 'function') bitmap.close();
+          } catch (_) {
+          }
+
+          const texture = new THREE.Texture(texSource);
+          // three.js default UV convention expects textures to be flipped vertically
+          // (flipY=true) for typical 2D images. We only disable flipY for data masks
+          // where we control sampling explicitly.
+          texture.flipY = (role === 'DATA_MASK') ? false : true;
           texture.colorSpace = (role === 'DATA_MASK') ? THREE.NoColorSpace : THREE.SRGBColorSpace;
           this._configureTileTextureFiltering(texture, role);
+          this._normalizeTileTextureSource(texture, role);
           texture.needsUpdate = true;
           this.textureCache.set(texturePath, texture);
           return texture;
@@ -2580,8 +2991,9 @@ export class TileManager {
           texturePath,
           (texture) => {
             texture.colorSpace = (role === 'DATA_MASK') ? THREE.NoColorSpace : THREE.SRGBColorSpace;
-            texture.flipY = false;
+            texture.flipY = (role === 'DATA_MASK') ? false : true;
             this._configureTileTextureFiltering(texture, role);
+            this._normalizeTileTextureSource(texture, role);
             texture.needsUpdate = true;
             this.textureCache.set(texturePath, texture);
             resolve(texture);
@@ -2608,20 +3020,24 @@ export class TileManager {
   dispose(clearCache = true) {
     log.info(`Disposing TileManager with ${this.tileSprites.size} tiles`);
 
-    // Unregister Foundry hooks using correct two-argument signature
-    try {
-      if (this._hookIds && this._hookIds.length) {
-        for (const [hookName, hookId] of this._hookIds) {
-          try {
-            Hooks.off(hookName, hookId);
-          } catch (e) {
+    // Only unregister Foundry hooks on full dispose (clearCache=true).
+    // When called with clearCache=false (e.g., from syncAllTiles to clear
+    // existing sprites before re-syncing), we want to keep hooks active.
+    if (clearCache) {
+      try {
+        if (this._hookIds && this._hookIds.length) {
+          for (const [hookName, hookId] of this._hookIds) {
+            try {
+              Hooks.off(hookName, hookId);
+            } catch (e) {
+            }
           }
         }
+      } catch (e) {
       }
-    } catch (e) {
+      this._hookIds = [];
+      this.hooksRegistered = false;
     }
-    this._hookIds = [];
-    this.hooksRegistered = false;
 
     for (const { sprite } of this.tileSprites.values()) {
       this.scene.remove(sprite);

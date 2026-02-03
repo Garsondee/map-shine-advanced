@@ -27,6 +27,7 @@ import { LightingEffect } from '../effects/LightingEffect.js';
 import { LightningEffect } from '../effects/LightningEffect.js';
 import { LensflareEffect } from '../effects/LensflareEffect.js';
 import { PrismEffect } from '../effects/PrismEffect.js';
+import { DazzleOverlayEffect } from '../effects/DazzleOverlayEffect.js';
 import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
 import { BuildingShadowsEffect } from '../effects/BuildingShadowsEffect.js';
 import { CloudEffect } from '../effects/CloudEffect.js';
@@ -40,6 +41,7 @@ import { CandleFlamesEffect } from '../effects/CandleFlamesEffect.js';
 import { MaskManager } from '../masks/MaskManager.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { FireSparksEffect } from '../particles/FireSparksEffect.js';
+import { AshDisturbanceEffect } from '../particles/AshDisturbanceEffect.js';
 import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { DustMotesEffect } from '../particles/DustMotesEffect.js';
 import { WorldSpaceFogEffect } from '../effects/WorldSpaceFogEffect.js';
@@ -150,7 +152,8 @@ function _applyRenderResolutionToRenderer(viewportWidthCss, viewportHeightCss) {
       ? graphicsSettings.computeEffectivePixelRatio(viewportWidthCss, viewportHeightCss, baseDpr)
       : baseDpr;
     renderer.setPixelRatio(effective);
-  } catch (_) {
+  } catch (e) {
+    log.warn('Failed to apply render resolution:', e);
   }
 }
 
@@ -285,6 +288,9 @@ let lightningEffect = null;
 
 let candleFlamesEffect = null;
 
+/** @type {AshDisturbanceEffect|null} */
+let ashDisturbanceEffect = null;
+
 /** @type {WorldSpaceFogEffect|null} */
 let fogEffect = null;
 
@@ -333,6 +339,21 @@ let _webglContextRestoredHandler = null;
  /** @type {number} */
  let createThreeCanvasGeneration = 0;
 
+ function _getActiveSceneForCanvasConfig() {
+   try {
+     if (canvas?.scene) return canvas.scene;
+   } catch (_) {
+   }
+
+   try {
+     // Different Foundry versions expose the active scene differently.
+     return game?.scenes?.current ?? game?.scenes?.active ?? game?.scenes?.viewed ?? null;
+   } catch (_) {
+   }
+
+   return null;
+ }
+
 /**
  * Initialize canvas replacement hooks
  * Uses Foundry's native hook system for v13 compatibility
@@ -350,10 +371,17 @@ export function initialize() {
     // This hook is called BEFORE the PIXI.Application is created, allowing us
     // to set transparent: true so the PIXI canvas can show Three.js underneath
     Hooks.on('canvasConfig', (config) => {
-      log.info('Configuring PIXI canvas for transparency');
-      config.transparent = true;
-      // Also set backgroundAlpha to 0 for good measure
-      config.backgroundAlpha = 0;
+      try {
+        const scene = _getActiveSceneForCanvasConfig();
+        if (!scene || !sceneSettings.isEnabled(scene)) return;
+
+        log.info('Configuring PIXI canvas for transparency');
+        config.transparent = true;
+        // Also set backgroundAlpha to 0 for good measure
+        config.backgroundAlpha = 0;
+      } catch (_) {
+        // Ignore - if we cannot resolve the active scene, don't mutate Foundry defaults.
+      }
     });
     
     // Hook into canvas ready event (when canvas is fully initialized)
@@ -1383,6 +1411,7 @@ async function createThreeCanvas(scene) {
       registerIndependentEffect('Distortion', DistortionManager),
       registerIndependentEffect('Bloom', BloomEffect),
       registerIndependentEffect('Lensflare', LensflareEffect),
+      registerIndependentEffect('Dazzle Overlay', DazzleOverlayEffect),
       registerIndependentEffect('Mask Debug', MaskDebugEffect),
       registerIndependentEffect('Debug Layers', DebugLayerEffect),
       registerIndependentEffect('Player Lights', PlayerLightEffect),
@@ -1415,6 +1444,7 @@ async function createThreeCanvas(scene) {
     const distortionManager = effectMap.get('Distortion');
     const bloomEffect = effectMap.get('Bloom');
     const lensflareEffect = effectMap.get('Lensflare');
+    const dazzleOverlayEffect = effectMap.get('Dazzle Overlay');
     const maskDebugEffect = effectMap.get('Mask Debug');
     const debugLayerEffect = effectMap.get('Debug Layers');
     const playerLightEffect = effectMap.get('Player Lights');
@@ -1517,6 +1547,7 @@ async function createThreeCanvas(scene) {
     if (window.MapShine) window.MapShine.atmosphericFogEffect = atmosphericFogEffect;
     if (window.MapShine) window.MapShine.distortionManager = distortionManager;
     if (window.MapShine) window.MapShine.bloomEffect = bloomEffect;
+    if (window.MapShine) window.MapShine.dazzleOverlayEffect = dazzleOverlayEffect;
 
     // Phase 2: Register dependent effects sequentially (must maintain order)
     // Step 3.8: Register Particle System (must be before FireSparksEffect)
@@ -1549,6 +1580,20 @@ async function createThreeCanvas(scene) {
 
     try {
       graphicsSettings?.registerEffectInstance('dust-motes', dustMotesEffect);
+      graphicsSettings?.applyOverrides?.();
+    } catch (_) {
+    }
+
+    // Step 3.11: Register Ash Disturbance (token movement bursts)
+    _setEffectInitStep('Ash Disturbance');
+    ashDisturbanceEffect = new AshDisturbanceEffect();
+    await effectComposer.registerEffect(ashDisturbanceEffect);
+    if (bundle) {
+      ashDisturbanceEffect.setAssetBundle(bundle);
+    }
+
+    try {
+      graphicsSettings?.registerEffectInstance('ash-disturbance', ashDisturbanceEffect);
       graphicsSettings?.applyOverrides?.();
     } catch (_) {
     }
@@ -1643,6 +1688,14 @@ async function createThreeCanvas(scene) {
     tokenManager = new TokenManager(threeScene);
     tokenManager.setEffectComposer(effectComposer); // Connect to main loop
     tokenManager.initialize();
+
+    // Wire token movement hook for ash disturbance
+    try {
+      tokenManager.setOnTokenMovementStart((tokenId) => {
+        ashDisturbanceEffect?.handleTokenMovement?.(tokenId);
+      });
+    } catch (_) {
+    }
     
     // Sync existing tokens immediately (we're already in canvasReady, so the hook won't fire)
     tokenManager.syncAllTokens();
@@ -2008,6 +2061,7 @@ async function createThreeCanvas(scene) {
     mapShine.smellyFliesEffect = smellyFliesEffect; // Smart particle swarms
     mapShine.dustMotesEffect = dustMotesEffect;
     mapShine.lightningEffect = lightningEffect;
+    mapShine.ashDisturbanceEffect = ashDisturbanceEffect;
     mapShine.waterEffect = waterEffect;
     mapShine.fogEffect = fogEffect; // Fog of War (world-space plane mesh)
     mapShine.skyColorEffect = skyColorEffect; // NEW: Expose SkyColorEffect
@@ -3770,6 +3824,141 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     );
   }
 
+  // --- Ash Disturbance Settings ---
+  if (ashDisturbanceEffect) {
+    const ashSchema = AshDisturbanceEffect.getControlSchema();
+
+    const onAshUpdate = (effectId, paramId, value) => {
+      ashDisturbanceEffect.applyParamChange(paramId, value);
+    };
+
+    uiManager.registerEffect(
+      'ash-disturbance',
+      'Ash Disturbance',
+      ashSchema,
+      onAshUpdate,
+      'particle'
+    );
+    log.info('Ash UI: registered Ash Disturbance controls (Particles).');
+  }
+
+  // --- Ash Precipitation Settings ---
+  try {
+    const ashTuning = weatherController.ashTuning || {};
+    const ashWeatherSchema = {
+      enabled: true,
+      groups: [
+        { name: 'ash', label: 'Ashfall', type: 'inline', parameters: ['ashIntensity', 'ashIntensityScale', 'ashEmissionRate'] },
+        { name: 'ash-appearance', label: 'Ash Appearance', type: 'inline', separator: true, parameters: ['ashSizeMin', 'ashSizeMax', 'ashLifeMin', 'ashLifeMax', 'ashSpeedMin', 'ashSpeedMax', 'ashOpacityStartMin', 'ashOpacityStartMax', 'ashOpacityEnd', 'ashColorStart', 'ashColorEnd', 'ashBrightness'] },
+        { name: 'ash-motion', label: 'Ash Motion', type: 'inline', separator: true, parameters: ['ashGravityScale', 'ashWindInfluence', 'ashCurlStrength'] },
+        { name: 'ash-cluster', label: 'Ash Clustering', type: 'inline', separator: true, parameters: ['ashClusterHoldMin', 'ashClusterHoldMax', 'ashClusterRadiusMin', 'ashClusterRadiusMax', 'ashClusterBoostMin', 'ashClusterBoostMax'] },
+        { name: 'embers', label: 'Embers', type: 'inline', separator: true, parameters: ['emberEmissionRate', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'emberSpeedMin', 'emberSpeedMax', 'emberOpacityStartMin', 'emberOpacityStartMax', 'emberOpacityEnd', 'emberColorStart', 'emberColorEnd', 'emberBrightness', 'emberGravityScale', 'emberWindInfluence', 'emberCurlStrength'] }
+      ],
+      parameters: {
+        ashIntensity: { label: 'Ash Intensity', type: 'slider', default: weatherController.targetState.ashIntensity ?? 0.0, min: 0.0, max: 1.0, step: 0.01 },
+        ashIntensityScale: { label: 'Intensity Scale', type: 'slider', default: ashTuning.intensityScale ?? 1.0, min: 0.0, max: 4.0, step: 0.05 },
+        ashEmissionRate: { label: 'Emission Rate', type: 'slider', default: ashTuning.emissionRate ?? 300, min: 0, max: 2400, step: 10 },
+        ashSizeMin: { label: 'Size Min', type: 'slider', default: ashTuning.sizeMin ?? 10, min: 1, max: 60, step: 1 },
+        ashSizeMax: { label: 'Size Max', type: 'slider', default: ashTuning.sizeMax ?? 16, min: 2, max: 80, step: 1 },
+        ashLifeMin: { label: 'Life Min (s)', type: 'slider', default: ashTuning.lifeMin ?? 5, min: 0.2, max: 12, step: 0.1 },
+        ashLifeMax: { label: 'Life Max (s)', type: 'slider', default: ashTuning.lifeMax ?? 8, min: 0.2, max: 18, step: 0.1 },
+        ashSpeedMin: { label: 'Fall Speed Min', type: 'slider', default: ashTuning.speedMin ?? 120, min: 0, max: 600, step: 5 },
+        ashSpeedMax: { label: 'Fall Speed Max', type: 'slider', default: ashTuning.speedMax ?? 200, min: 0, max: 900, step: 5 },
+        ashOpacityStartMin: { label: 'Opacity Start Min', type: 'slider', default: ashTuning.opacityStartMin ?? 0.75, min: 0.0, max: 1.0, step: 0.01 },
+        ashOpacityStartMax: { label: 'Opacity Start Max', type: 'slider', default: ashTuning.opacityStartMax ?? 0.5, min: 0.0, max: 1.0, step: 0.01 },
+        ashOpacityEnd: { label: 'Opacity End', type: 'slider', default: ashTuning.opacityEnd ?? 0.0, min: 0.0, max: 1.0, step: 0.01 },
+        ashColorStart: { type: 'color', label: 'Color Start', default: ashTuning.colorStart ?? { r: 0.45, g: 0.42, b: 0.38 } },
+        ashColorEnd: { type: 'color', label: 'Color End', default: ashTuning.colorEnd ?? { r: 0.35, g: 0.32, b: 0.28 } },
+        ashBrightness: { label: 'Brightness', type: 'slider', default: ashTuning.brightness ?? 1.0, min: 0.0, max: 3.0, step: 0.05 },
+        ashGravityScale: { label: 'Gravity Scale', type: 'slider', default: ashTuning.gravityScale ?? 1.0, min: 0.0, max: 3.0, step: 0.05 },
+        ashWindInfluence: { label: 'Wind Influence', type: 'slider', default: ashTuning.windInfluence ?? 1.0, min: 0.0, max: 4.0, step: 0.05 },
+        ashCurlStrength: { label: 'Curl Strength', type: 'slider', default: ashTuning.curlStrength ?? 0.6, min: 0.0, max: 3.0, step: 0.05 },
+        ashClusterHoldMin: { label: 'Cluster Hold Min (s)', type: 'slider', default: ashTuning.clusterHoldMin ?? 2.5, min: 0.5, max: 12, step: 0.1 },
+        ashClusterHoldMax: { label: 'Cluster Hold Max (s)', type: 'slider', default: ashTuning.clusterHoldMax ?? 7.0, min: 0.5, max: 18, step: 0.1 },
+        ashClusterRadiusMin: { label: 'Cluster Radius Min', type: 'slider', default: ashTuning.clusterRadiusMin ?? 300, min: 50, max: 3000, step: 10 },
+        ashClusterRadiusMax: { label: 'Cluster Radius Max', type: 'slider', default: ashTuning.clusterRadiusMax ?? 1800, min: 100, max: 4000, step: 10 },
+        ashClusterBoostMin: { label: 'Cluster Boost Min', type: 'slider', default: ashTuning.clusterBoostMin ?? 0.55, min: 0.0, max: 2.0, step: 0.05 },
+        ashClusterBoostMax: { label: 'Cluster Boost Max', type: 'slider', default: ashTuning.clusterBoostMax ?? 1.45, min: 0.0, max: 3.0, step: 0.05 },
+        emberEmissionRate: { label: 'Ember Rate', type: 'slider', default: ashTuning.emberEmissionRate ?? 25, min: 0, max: 400, step: 1 },
+        emberSizeMin: { label: 'Ember Size Min', type: 'slider', default: ashTuning.emberSizeMin ?? 6, min: 1, max: 50, step: 1 },
+        emberSizeMax: { label: 'Ember Size Max', type: 'slider', default: ashTuning.emberSizeMax ?? 12, min: 2, max: 70, step: 1 },
+        emberLifeMin: { label: 'Ember Life Min (s)', type: 'slider', default: ashTuning.emberLifeMin ?? 2.5, min: 0.2, max: 12, step: 0.1 },
+        emberLifeMax: { label: 'Ember Life Max (s)', type: 'slider', default: ashTuning.emberLifeMax ?? 4.0, min: 0.2, max: 16, step: 0.1 },
+        emberSpeedMin: { label: 'Ember Speed Min', type: 'slider', default: ashTuning.emberSpeedMin ?? 180, min: 0, max: 800, step: 5 },
+        emberSpeedMax: { label: 'Ember Speed Max', type: 'slider', default: ashTuning.emberSpeedMax ?? 260, min: 0, max: 1000, step: 5 },
+        emberOpacityStartMin: { label: 'Ember Opacity Min', type: 'slider', default: ashTuning.emberOpacityStartMin ?? 0.9, min: 0.0, max: 1.0, step: 0.01 },
+        emberOpacityStartMax: { label: 'Ember Opacity Max', type: 'slider', default: ashTuning.emberOpacityStartMax ?? 0.4, min: 0.0, max: 1.0, step: 0.01 },
+        emberOpacityEnd: { label: 'Ember Opacity End', type: 'slider', default: ashTuning.emberOpacityEnd ?? 0.0, min: 0.0, max: 1.0, step: 0.01 },
+        emberColorStart: { type: 'color', label: 'Ember Color Start', default: ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.05 } },
+        emberColorEnd: { type: 'color', label: 'Ember Color End', default: ashTuning.emberColorEnd ?? { r: 0.35, g: 0.32, b: 0.28 } },
+        emberBrightness: { label: 'Ember Brightness', type: 'slider', default: ashTuning.emberBrightness ?? 1.0, min: 0.0, max: 5.0, step: 0.05 },
+        emberGravityScale: { label: 'Ember Gravity Scale', type: 'slider', default: ashTuning.emberGravityScale ?? 0.75, min: 0.0, max: 3.0, step: 0.05 },
+        emberWindInfluence: { label: 'Ember Wind Influence', type: 'slider', default: ashTuning.emberWindInfluence ?? 1.0, min: 0.0, max: 4.0, step: 0.05 },
+        emberCurlStrength: { label: 'Ember Curl Strength', type: 'slider', default: ashTuning.emberCurlStrength ?? 1.0, min: 0.0, max: 3.0, step: 0.05 }
+      }
+    };
+
+    const onAshWeatherUpdate = (effectId, paramId, value) => {
+      if (paramId === 'ashIntensity') {
+        weatherController.targetState.ashIntensity = value;
+        return;
+      }
+
+      if (!weatherController.ashTuning) weatherController.ashTuning = {};
+      const t = weatherController.ashTuning;
+
+      if (paramId === 'ashIntensityScale') t.intensityScale = value;
+      else if (paramId === 'ashEmissionRate') t.emissionRate = value;
+      else if (paramId === 'ashSizeMin') t.sizeMin = value;
+      else if (paramId === 'ashSizeMax') t.sizeMax = value;
+      else if (paramId === 'ashLifeMin') t.lifeMin = value;
+      else if (paramId === 'ashLifeMax') t.lifeMax = value;
+      else if (paramId === 'ashSpeedMin') t.speedMin = value;
+      else if (paramId === 'ashSpeedMax') t.speedMax = value;
+      else if (paramId === 'ashOpacityStartMin') t.opacityStartMin = value;
+      else if (paramId === 'ashOpacityStartMax') t.opacityStartMax = value;
+      else if (paramId === 'ashOpacityEnd') t.opacityEnd = value;
+      else if (paramId === 'ashColorStart') t.colorStart = value;
+      else if (paramId === 'ashColorEnd') t.colorEnd = value;
+      else if (paramId === 'ashBrightness') t.brightness = value;
+      else if (paramId === 'ashGravityScale') t.gravityScale = value;
+      else if (paramId === 'ashWindInfluence') t.windInfluence = value;
+      else if (paramId === 'ashCurlStrength') t.curlStrength = value;
+      else if (paramId === 'ashClusterHoldMin') t.clusterHoldMin = value;
+      else if (paramId === 'ashClusterHoldMax') t.clusterHoldMax = value;
+      else if (paramId === 'ashClusterRadiusMin') t.clusterRadiusMin = value;
+      else if (paramId === 'ashClusterRadiusMax') t.clusterRadiusMax = value;
+      else if (paramId === 'ashClusterBoostMin') t.clusterBoostMin = value;
+      else if (paramId === 'ashClusterBoostMax') t.clusterBoostMax = value;
+      else if (paramId === 'emberEmissionRate') t.emberEmissionRate = value;
+      else if (paramId === 'emberSizeMin') t.emberSizeMin = value;
+      else if (paramId === 'emberSizeMax') t.emberSizeMax = value;
+      else if (paramId === 'emberLifeMin') t.emberLifeMin = value;
+      else if (paramId === 'emberLifeMax') t.emberLifeMax = value;
+      else if (paramId === 'emberSpeedMin') t.emberSpeedMin = value;
+      else if (paramId === 'emberSpeedMax') t.emberSpeedMax = value;
+      else if (paramId === 'emberOpacityStartMin') t.emberOpacityStartMin = value;
+      else if (paramId === 'emberOpacityStartMax') t.emberOpacityStartMax = value;
+      else if (paramId === 'emberOpacityEnd') t.emberOpacityEnd = value;
+      else if (paramId === 'emberColorStart') t.emberColorStart = value;
+      else if (paramId === 'emberColorEnd') t.emberColorEnd = value;
+      else if (paramId === 'emberBrightness') t.emberBrightness = value;
+      else if (paramId === 'emberGravityScale') t.emberGravityScale = value;
+      else if (paramId === 'emberWindInfluence') t.emberWindInfluence = value;
+      else if (paramId === 'emberCurlStrength') t.emberCurlStrength = value;
+    };
+
+    uiManager.registerEffect(
+      'ash-weather',
+      'Ash (Weather)',
+      ashWeatherSchema,
+      onAshWeatherUpdate,
+      'particle'
+    );
+    log.info('Ash UI: registered Ash (Weather) controls (Particles).');
+  } catch (e) {
+    log.warn('Ash UI: failed to register Ash weather controls:', e);
+  }
   // Add a simple windvane indicator inside the Weather UI folder that reflects
   // the live scene wind direction from WeatherController.currentState.
   try {
@@ -3895,6 +4084,63 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     );
 
     log.info('Color correction effect wired to UI');
+  }
+
+  // --- Overhead Layer Color Correction (Tiles Only) ---
+  if (tileManager) {
+    const overheadCCSchema = {
+      enabled: true,
+      groups: [
+        {
+          name: 'exposure',
+          label: 'Exposure & WB',
+          type: 'inline',
+          parameters: ['exposure', 'temperature', 'tint']
+        },
+        {
+          name: 'basics',
+          label: 'Basic Adjustments',
+          type: 'inline',
+          parameters: ['contrast', 'brightness', 'saturation', 'gamma']
+        }
+      ],
+      parameters: {
+        enabled: { type: 'boolean', default: true, hidden: true },
+        exposure: { type: 'slider', min: 0, max: 3, step: 0.01, default: 1.0 },
+        brightness: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.0 },
+        contrast: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0 },
+        saturation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0 },
+        gamma: { type: 'slider', min: 0.2, max: 3, step: 0.01, default: 1.0 },
+        temperature: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
+        tint: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 }
+      }
+    };
+
+    const onOverheadCCUpdate = (effectId, paramId, value) => {
+      try {
+        if (paramId === 'enabled' || paramId === 'masterEnabled') {
+          tileManager.setOverheadColorCorrectionParams({ enabled: !!value });
+          return;
+        }
+        tileManager.setOverheadColorCorrectionParams({ [paramId]: value });
+      } catch (_) {
+      }
+    };
+
+    uiManager.registerEffect(
+      'overheadColorCorrection',
+      'Overhead Layer Color',
+      overheadCCSchema,
+      onOverheadCCUpdate,
+      'global'
+    );
+
+    // Ensure runtime matches the loaded scene params.
+    try {
+      const params = uiManager?.effectFolders?.overheadColorCorrection?.params;
+      if (params) tileManager.setOverheadColorCorrectionParams(params);
+    } catch (_) {
+    }
   }
 
   if (filmGrainEffect) {
@@ -4521,6 +4767,11 @@ function restoreMapMakerFogOverride() {
 function enableSystem() {
   if (!threeCanvas) return;
 
+  // Hard safety: ensure PIXI's primary/tile visuals are suppressed immediately
+  // in Gameplay/Hybrid mode, even if ControlsIntegration is still initializing
+  // or legacy visibility code hasn't run yet.
+  _enforceGameplayPixiSuppression();
+
   // Leaving Map Maker mode - restore any temporary fog/visibility overrides.
   restoreMapMakerFogOverride();
   
@@ -4555,20 +4806,118 @@ function enableSystem() {
       // Re-initialize to restore hooks and layer management
       controlsIntegration.initialize().then(() => {
         log.info('ControlsIntegration re-enabled after Map Maker mode');
+
+        // After ControlsIntegration re-enables, re-assert PIXI suppression in
+        // Gameplay/Hybrid mode. This prevents a brief window where PIXI primary
+        // can render roof/overhead tiles before layer visibility updates settle.
+        _enforceGameplayPixiSuppression();
       }).catch(err => {
         log.warn('Failed to re-enable ControlsIntegration:', err);
         configureFoundryCanvas();
+
+        // Legacy fallback path; still enforce suppression.
+        _enforceGameplayPixiSuppression();
       });
     } else if (state === 'active') {
       controlsIntegration.layerVisibility?.update();
       controlsIntegration.inputRouter?.autoUpdate();
+
+      _enforceGameplayPixiSuppression();
     } else {
       // Fallback to legacy configuration
       configureFoundryCanvas();
+
+      _enforceGameplayPixiSuppression();
     }
   } else {
     // Fallback to legacy configuration
     configureFoundryCanvas();
+
+    _enforceGameplayPixiSuppression();
+  }
+}
+
+/**
+ * Hard safety: Suppress PIXI visuals that are replaced by Three.js in Gameplay/Hybrid mode.
+ *
+ * Why this exists:
+ * - During mode switches (Map Maker -> Gameplay) or ControlsIntegration re-init,
+ *   Foundry can briefly make canvas.primary / tiles visible again.
+ * - That creates a duplicate roof/overhead tile rendered by PIXI which will not
+ *   respond to MapShine's hover-hide logic (Three.js).
+ *
+ * This function is intentionally idempotent and safe to call frequently.
+ * @private
+ */
+function _enforceGameplayPixiSuppression() {
+  try {
+    if (!canvas?.ready) return;
+    if (isMapMakerMode) return;
+
+    // V12+: primary can render tiles/overheads/roofs. Keep it hidden in gameplay.
+    try {
+      if (canvas.primary) canvas.primary.visible = false;
+    } catch (_) {
+    }
+
+    // If the Tiles layer is actively being edited, allow normal visuals.
+    // Otherwise, keep placeables nearly transparent to avoid double-rendering.
+    let isTilesActive = false;
+    try {
+      const activeLayerObj = canvas.activeLayer;
+      const activeLayerName = activeLayerObj?.options?.name || activeLayerObj?.name || '';
+      const activeLayerCtor = activeLayerObj?.constructor?.name || '';
+      isTilesActive = (activeLayerName === 'TilesLayer') || (activeLayerName === 'tiles') || (activeLayerCtor === 'TilesLayer');
+    } catch (_) {
+      isTilesActive = false;
+    }
+
+    // When not editing tiles, fully hide PIXI tile visuals (alpha=0) so no
+    // faint duplicate remains visible when Three.js roofs fade to opacity 0.
+    // (We still keep placeables interactive for Foundry tooling.)
+    const alpha = isTilesActive ? 1 : 0;
+
+    // If the Tiles tool is active, prefer PIXI for tile editing visuals and hide
+    // Three.js tiles to prevent a duplicate "second roof" copy.
+    // When the Tiles tool is not active, prefer Three.js for tiles so hover-hide
+    // works and we keep full rendering control.
+    try {
+      const tm = window.MapShine?.tileManager;
+      if (tm?.setVisibility) tm.setVisibility(!isTilesActive);
+    } catch (_) {
+    }
+
+    try {
+      if (canvas.tiles?.placeables) {
+        for (const tile of canvas.tiles.placeables) {
+          if (!tile) continue;
+          try {
+            tile.visible = true;
+            tile.interactive = true;
+            tile.interactiveChildren = true;
+          } catch (_) {
+          }
+          try {
+            if (tile.mesh) tile.mesh.alpha = alpha;
+          } catch (_) {
+          }
+          try {
+            if (tile.texture) tile.texture.alpha = alpha;
+          } catch (_) {
+          }
+          try {
+            if (Array.isArray(tile.children)) {
+              for (const child of tile.children) {
+                if (child && typeof child.alpha === 'number') child.alpha = alpha;
+              }
+            }
+          } catch (_) {
+          }
+        }
+      }
+    } catch (_) {
+    }
+  } catch (_) {
   }
 }
 
@@ -4662,6 +5011,11 @@ function updateLayerVisibility() {
   // These are rendered by Three.js
   if (canvas.background) canvas.background.visible = false;
   if (canvas.grid) canvas.grid.visible = false;
+  // V12+: canvas.primary is a core container for primary scene visuals.
+  // If this remains visible in Hybrid/Gameplay mode, tiles (including overhead/roof)
+  // can be rendered by PIXI *in addition* to our Three.js TileManager, creating
+  // a "duplicate" tile that will not respond to MapShine hover fading.
+  if (canvas.primary) canvas.primary.visible = false;
   if (canvas.weather) canvas.weather.visible = false;
   if (canvas.environment) canvas.environment.visible = false; // V12+
 
@@ -4765,6 +5119,9 @@ function updateLayerVisibility() {
       const isTilesActive = isActiveLayer('TilesLayer') || isActiveLayer('tiles');
       canvas.tiles.visible = isTilesActive;
       if (tileManager) {
+          // While actively editing tiles, prefer PIXI tile visuals and hide
+          // Three.js tiles to avoid double-rendering (duplicate roofs).
+          // Otherwise, prefer Three.js tiles for gameplay/hover-hide.
           tileManager.setVisibility(!isTilesActive && !isMapMakerMode);
       }
   }

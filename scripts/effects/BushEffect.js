@@ -139,7 +139,7 @@ export class BushEffect extends EffectBase {
           name: 'bush-phys',
           label: 'Wind Physics',
           type: 'inline',
-          parameters: ['windSpeedGlobal', 'windRampSpeed', 'gustFrequency', 'gustSpeed', 'branchBend', 'elasticity']
+          parameters: ['windSpeedGlobal', 'windRampSpeed', 'branchBend', 'elasticity']
         },
         {
           name: 'bush-flutter',
@@ -164,8 +164,6 @@ export class BushEffect extends EffectBase {
         intensity: { type: 'slider', min: 0.0, max: 2.0, default: undefined },
         windSpeedGlobal: { type: 'slider', label: 'Wind Strength', min: 0.0, max: 3.0, default: 0.04 },
         windRampSpeed: { type: 'slider', label: 'Wind Responsiveness', min: 0.1, max: 10.0, default: 2.93 },
-        gustFrequency: { type: 'slider', label: 'Gust Spacing', min: 0.01, max: 0.5, default: 0.01 },
-        gustSpeed: { type: 'slider', label: 'Gust Speed', min: 0.0, max: 2.0, default: 0.52 },
         branchBend: { type: 'slider', label: 'Branch Bend', min: 0.0, max: 0.05, step: 0.001, default: 0.037 },
         elasticity: { type: 'slider', label: 'Springiness', min: 0.5, max: 5.0, default: 5.0 },
         flutterIntensity: { type: 'slider', label: 'Leaf Flutter Amount', min: 0.0, max: 0.005, step: 0.0001, default: 0.0014 },
@@ -398,7 +396,7 @@ export class BushEffect extends EffectBase {
         uWindSpeed: { value: 0.0 },
         
         // Params
-        uIntensity: { value: this.params.intensity },
+        uIntensity: { value: (this.params.intensity ?? 1.0) },
         uWindSpeedGlobal: { value: this.params.windSpeedGlobal },
         uGustFrequency: { value: this.params.gustFrequency },
         uGustSpeed: { value: this.params.gustSpeed },
@@ -648,7 +646,7 @@ export class BushEffect extends EffectBase {
     }
 
     // --- Parameter Sync ---
-    u.uIntensity.value = this.params.intensity;
+    u.uIntensity.value = (this.params.intensity ?? 1.0);
     u.uWindSpeedGlobal.value = this.params.windSpeedGlobal;
     u.uGustFrequency.value = this.params.gustFrequency;
     u.uGustSpeed.value = this.params.gustSpeed;

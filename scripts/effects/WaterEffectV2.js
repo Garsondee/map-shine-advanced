@@ -1444,6 +1444,10 @@ export class WaterEffectV2 extends EffectBase {
         uSceneRect: { value: this._sceneRect },
         uHasSceneRect: { value: 0.0 },
 
+        // Token mask (screen-space). Used to prevent water refraction/tint from affecting tokens.
+        tTokenMask: { value: null },
+        uHasTokenMask: { value: 0.0 },
+
         // Scene/environment coupling
         uSceneDarkness: { value: 0.0 }
       },
@@ -1648,6 +1652,9 @@ export class WaterEffectV2 extends EffectBase {
         uniform vec2 uSceneDimensions;
         uniform vec4 uSceneRect;
         uniform float uHasSceneRect;
+
+        uniform sampler2D tTokenMask;
+        uniform float uHasTokenMask;
 
         uniform vec3 uSkyColor;
         uniform float uSkyIntensity;
@@ -2462,6 +2469,17 @@ export class WaterEffectV2 extends EffectBase {
           if (isEnabled < 0.5) {
             gl_FragColor = base;
             return;
+          }
+
+          // Tokens should not be refracted/tinted by water. Since tokens now render into the
+          // main scene buffer, we need to explicitly mask them out of this screen-space pass.
+          if (uHasTokenMask > 0.5) {
+            float tm = texture2D(tTokenMask, vUv).a;
+            float tokenCut = smoothstep(0.1, 0.9, tm);
+            if (tokenCut > 0.01) {
+              gl_FragColor = base;
+              return;
+            }
           }
 
           vec2 sceneUv = vUv;
@@ -3464,6 +3482,23 @@ export class WaterEffectV2 extends EffectBase {
         const flip = (metaFlipY !== null) ? metaFlipY : (outdoorsTex?.flipY ?? false);
         u.uOutdoorsMaskFlipY.value = flip ? 1.0 : 0.0;
       }
+    }
+
+    // Token mask (screen-space). Prevent water pass from distorting/tinting tokens.
+    if (u.tTokenMask && u.uHasTokenMask) {
+      let tokenTex = null;
+      try {
+        const mm = window.MapShine?.maskManager;
+        tokenTex = mm ? mm.getTexture('tokenMask.screen') : null;
+        if (!tokenTex) {
+          const le = window.MapShine?.lightingEffect;
+          tokenTex = le?.tokenMaskTarget?.texture || null;
+        }
+      } catch (_) {
+        tokenTex = null;
+      }
+      u.tTokenMask.value = tokenTex;
+      u.uHasTokenMask.value = tokenTex ? 1.0 : 0.0;
     }
 
     // Cloud shadow texture (screen-space render target). CloudEffect is world-pinned

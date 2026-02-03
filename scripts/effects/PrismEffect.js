@@ -342,7 +342,8 @@ export class PrismEffect extends EffectBase {
     this.mesh.scale.copy(this.baseMesh.scale);
     
     // Render order (above tiles, below particles)
-    this.mesh.renderOrder = 15;
+    // TileManager uses renderOrder=10 for overhead tiles; keep Prism below that so roofs occlude it.
+    this.mesh.renderOrder = 5;
     
     this.scene.add(this.mesh);
     this.mesh.visible = this._enabled;

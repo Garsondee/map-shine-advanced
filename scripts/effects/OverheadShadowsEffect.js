@@ -456,16 +456,29 @@ export class OverheadShadowsEffect extends EffectBase {
 
     const overrides = [];
     const roofMaskBit = 1 << ROOF_LAYER;
+    const tileManager = window.MapShine?.tileManager;
     this.mainScene.traverse((object) => {
       if (!object.isSprite || !object.layers || !object.material) return;
 
       // Directly test the ROOF_LAYER bit to avoid Layers.test() argument issues.
       if ((object.layers.mask & roofMaskBit) === 0) return;
 
+      // If this roof sprite corresponds to a hover-hidden tile, it must not
+      // contribute to the roof mask/shadows. Otherwise, the tile may appear to
+      // "not fully disappear" because OverheadShadowsEffect continues to darken
+      // the scene beneath it.
+      let hoverHidden = false;
+      try {
+        const tileId = object.userData?.foundryTileId;
+        const data = tileId ? tileManager?.tileSprites?.get(tileId) : null;
+        hoverHidden = !!data?.hoverHidden;
+      } catch (_) {
+      }
+
       const mat = object.material;
       if (typeof mat.opacity !== 'number') return;
       overrides.push({ object, opacity: mat.opacity });
-      mat.opacity = 1.0;
+      mat.opacity = hoverHidden ? 0.0 : 1.0;
     });
 
     // Pass 1: render overhead tiles into roofTarget (alpha mask)

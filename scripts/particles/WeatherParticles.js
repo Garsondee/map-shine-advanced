@@ -1546,10 +1546,13 @@ export class WeatherParticles {
     this.scene = scene;
     this.rainSystem = null;
     this.snowSystem = null;
+    this.ashSystem = null;
+    this.ashEmberSystem = null;
     this.splashSystem = null;
     this.splashSystems = [];
     this.rainTexture = this._createRainTexture();
     this.snowTexture = this._createSnowTexture();
+    this.ashTexture = this._createAshTexture();
     this.splashTexture = this._createSplashTexture();
     this.foamTexture = this._createFoamTexture();
     this.foamFleckTexture = this._createFoamFleckTexture();
@@ -1640,6 +1643,8 @@ export class WeatherParticles {
 
     this._rainMaterial = null;
     this._snowMaterial = null;
+    this._ashMaterial = null;
+    this._ashEmberMaterial = null;
     this._splashMaterial = null;
     this._foamMaterial = null;
 
@@ -1724,12 +1729,37 @@ export class WeatherParticles {
 
     this._rainBaseGravity = 2500;
     this._snowBaseGravity = 3000;
+    this._ashBaseGravity = 1800; // Ash falls slower than snow
+
+    this._ashWindForce = null;
+    this._ashGravityForce = null;
+    this._ashCurl = null;
+    this._ashCurlBaseStrength = null;
+    this._ashColorOverLife = null;
+    this._ashEmberWindForce = null;
+    this._ashEmberGravityForce = null;
+    this._ashEmberCurl = null;
+    this._ashEmberCurlBaseStrength = null;
+    this._ashEmberColorOverLife = null;
+
+    // Ash clustering (uneven distribution)
+    this._ashClusterTimer = 0.0;
+    this._ashClusterCenter = { x: 0, y: 0 };
+    this._ashClusterRadius = 0.0;
+    this._ashBaseEmitterW = null;
+    this._ashBaseEmitterH = null;
 
     /** @type {THREE.ShaderMaterial|null} quarks batch material for rain */
     this._rainBatchMaterial = null;
 
     /** @type {THREE.ShaderMaterial|null} quarks batch material for snow */
     this._snowBatchMaterial = null;
+
+    /** @type {THREE.ShaderMaterial|null} quarks batch material for ash */
+    this._ashBatchMaterial = null;
+
+    /** @type {THREE.ShaderMaterial|null} quarks batch material for ash embers */
+    this._ashEmberBatchMaterial = null;
 
     /** @type {THREE.ShaderMaterial|null} quarks batch material for splashes */
     this._splashBatchMaterial = null;
@@ -2023,6 +2053,8 @@ export class WeatherParticles {
 
     if (this.rainSystem?.emitter) this.rainSystem.emitter.visible = v;
     if (this.snowSystem?.emitter) this.snowSystem.emitter.visible = v;
+    if (this.ashSystem?.emitter) this.ashSystem.emitter.visible = v;
+    if (this.ashEmberSystem?.emitter) this.ashEmberSystem.emitter.visible = v;
 
     if (this.splashSystem?.emitter) this.splashSystem.emitter.visible = v;
     if (this.splashSystems && this.splashSystems.length) {
@@ -2047,6 +2079,12 @@ export class WeatherParticles {
     }
     if (this.snowSystem?.emissionOverTime && typeof this.snowSystem.emissionOverTime.value === 'number') {
       this.snowSystem.emissionOverTime.value = 0;
+    }
+    if (this.ashSystem?.emissionOverTime && typeof this.ashSystem.emissionOverTime.value === 'number') {
+      this.ashSystem.emissionOverTime.value = 0;
+    }
+    if (this.ashEmberSystem?.emissionOverTime && typeof this.ashEmberSystem.emissionOverTime.value === 'number') {
+      this.ashEmberSystem.emissionOverTime.value = 0;
     }
 
     if (this.splashSystem?.emissionOverTime && typeof this.splashSystem.emissionOverTime.value === 'number') {
@@ -2238,6 +2276,106 @@ export class WeatherParticles {
       // 5. BETTER FILTERING
       // Use LinearMipmapLinear so it looks smooth (not pixelated) at a distance,
       // but retains the crisp shape when close.
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.needsUpdate = true;
+    }
+
+    return tex;
+  }
+
+  /**
+   * Create a 2x2 atlas texture for ash particles.
+   * Ash flakes are irregular, grey/charcoal colored fragments.
+   * @returns {THREE.CanvasTexture}
+   */
+  _createAshTexture() {
+    const cellSize = 64;
+    const grid = 2;
+    const totalSize = cellSize * grid;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = totalSize;
+    canvas.height = totalSize;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    const drawAshInCell = (cellX, cellY, variant) => {
+      const cx = cellX * cellSize + cellSize / 2;
+      const cy = cellY * cellSize + cellSize / 2;
+      const maxRadius = (cellSize / 2) - 4;
+
+      ctx.save();
+      ctx.translate(cx, cy);
+
+      // Ash has a subtle dark glow/haze
+      const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, maxRadius);
+      glow.addColorStop(0, 'rgba(80, 75, 70, 0.7)');
+      glow.addColorStop(0.4, 'rgba(60, 55, 50, 0.3)');
+      glow.addColorStop(1, 'rgba(40, 35, 30, 0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(0, 0, maxRadius, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Draw irregular ash fragment shapes
+      ctx.fillStyle = 'rgba(90, 85, 80, 0.85)';
+      ctx.strokeStyle = 'rgba(50, 45, 40, 0.6)';
+      ctx.lineWidth = 1;
+
+      if (variant === 0) {
+        // Variant 1: Irregular polygon (burnt paper fragment)
+        ctx.beginPath();
+        ctx.moveTo(-maxRadius * 0.3, -maxRadius * 0.4);
+        ctx.lineTo(maxRadius * 0.2, -maxRadius * 0.35);
+        ctx.lineTo(maxRadius * 0.4, maxRadius * 0.1);
+        ctx.lineTo(maxRadius * 0.1, maxRadius * 0.4);
+        ctx.lineTo(-maxRadius * 0.35, maxRadius * 0.25);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      } else if (variant === 1) {
+        // Variant 2: Curved fragment
+        ctx.beginPath();
+        ctx.ellipse(0, 0, maxRadius * 0.4, maxRadius * 0.25, Math.PI / 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      } else if (variant === 2) {
+        // Variant 3: Jagged shard
+        ctx.beginPath();
+        ctx.moveTo(0, -maxRadius * 0.45);
+        ctx.lineTo(maxRadius * 0.3, -maxRadius * 0.1);
+        ctx.lineTo(maxRadius * 0.15, maxRadius * 0.35);
+        ctx.lineTo(-maxRadius * 0.2, maxRadius * 0.3);
+        ctx.lineTo(-maxRadius * 0.35, 0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      } else {
+        // Variant 4: Small clump
+        ctx.beginPath();
+        ctx.arc(0, 0, maxRadius * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        // Add a smaller attached piece
+        ctx.beginPath();
+        ctx.arc(maxRadius * 0.25, maxRadius * 0.15, maxRadius * 0.15, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
+    };
+
+    // Generate the 4 variants
+    drawAshInCell(0, 0, 0);
+    drawAshInCell(1, 0, 1);
+    drawAshInCell(0, 1, 2);
+    drawAshInCell(1, 1, 3);
+
+    const tex = new window.THREE.CanvasTexture(canvas);
+    const THREE = window.THREE;
+
+    if (THREE) {
       tex.minFilter = THREE.LinearMipmapLinearFilter;
       tex.magFilter = THREE.LinearFilter;
       tex.needsUpdate = true;
@@ -3027,6 +3165,184 @@ export class WeatherParticles {
     this._rainCurl = rainCurl;
     this._rainCurlBaseStrength = rainCurl.strength.clone();
 
+    // --- ASH ---
+    // Ash precipitation: slower, heavier than snow, grey/charcoal colored
+    const ashMaterial = new THREE.MeshBasicMaterial({
+      map: this.ashTexture,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.NormalBlending, // Normal blending for darker particles
+      color: 0x605550, // Grey/charcoal tint
+      opacity: 0.85,
+      side: THREE.DoubleSide
+    });
+
+    this._ashMaterial = ashMaterial;
+    this._patchRoofMaskMaterial(this._ashMaterial);
+
+    // Ash falls slower than snow with less wind response
+    const ashGravity = new ApplyForce(new THREE.Vector3(0, 0, -1), new ConstantValue(this._ashBaseGravity));
+    const ashWind = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(400)); // Less wind influence
+
+    // Gentle curl noise for ash - less energetic than snow
+    const ashCurl = new CurlNoiseField(
+      new THREE.Vector3(1200, 1200, 1500),   // Larger spatial scale (lazier cells)
+      new THREE.Vector3(80, 80, 20),         // Weaker swirl strength
+      0.04                                    // Slower time evolution
+    );
+
+    // Ash color over life: fade from grey to slightly darker
+    const ashColorOverLife = new ColorOverLife(new ColorRange(
+      new Vector4(0.4, 0.38, 0.35, 0.8),  // Start: grey with good alpha
+      new Vector4(0.3, 0.28, 0.25, 0.3)   // End: darker, faded
+    ));
+
+    this.ashSystem = new ParticleSystem({
+      duration: 6,
+      looping: true,
+      prewarm: true,
+      startLife: new IntervalValue(5, 8), // Longer life than snow
+      startSpeed: new IntervalValue(120, 200), // Slower than snow
+      startSize: new IntervalValue(10, 16), // Slightly larger than snow
+      startColor: new ColorRange(new Vector4(0.45, 0.42, 0.38, 0.75), new Vector4(0.35, 0.32, 0.28, 0.5)),
+      worldSpace: true,
+      maxParticles: 6000,
+      emissionOverTime: new ConstantValue(0),
+      shape: new RandomRectangleEmitter({ width: sceneW, height: sceneH }),
+      material: ashMaterial,
+      renderOrder: 48, // Slightly below snow
+      renderMode: RenderMode.BillBoard,
+      uTileCount: 2,
+      vTileCount: 2,
+      startTileIndex: new IntervalValue(0, 4),
+      startRotation: new IntervalValue(0, Math.PI * 2),
+      behaviors: [
+        ashGravity,
+        ashWind,
+        ashCurl,
+        ashColorOverLife,
+        new SnowFloorBehavior(), // Reuse floor behavior
+        new RainFadeInBehavior(),
+        snowKillBehavior // Reuse kill behavior
+      ],
+    });
+
+    this.ashSystem.emitter.position.set(centerX, centerY, safeEmitterZ);
+    this.ashSystem.emitter.rotation.set(Math.PI, 0, 0);
+
+    if (this.scene) this.scene.add(this.ashSystem.emitter);
+    this.batchRenderer.addSystem(this.ashSystem);
+
+    // Cache base emitter dimensions for clustering.
+    this._ashBaseEmitterW = sceneW;
+    this._ashBaseEmitterH = sceneH;
+
+    // --- ASH EMBERS ---
+    // Small percentage of glowing embers that cool from red -> orange -> grey.
+    const ashEmberMaterial = new THREE.MeshBasicMaterial({
+      map: this.ashTexture,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.AdditiveBlending,
+      color: 0xff6a2a,
+      opacity: 1.0,
+      side: THREE.DoubleSide
+    });
+
+    this._ashEmberMaterial = ashEmberMaterial;
+    this._patchRoofMaskMaterial(this._ashEmberMaterial);
+
+    const ashEmberGravity = new ApplyForce(new THREE.Vector3(0, 0, -1), new ConstantValue(this._ashBaseGravity * 0.75));
+    const ashEmberWind = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(650));
+    const ashEmberCurl = new CurlNoiseField(
+      new THREE.Vector3(900, 900, 1200),
+      new THREE.Vector3(140, 140, 40),
+      0.08
+    );
+
+    const ashEmberColorOverLife = new ColorOverLife(new ColorRange(
+      new Vector4(1.0, 0.25, 0.05, 0.9),
+      new Vector4(0.35, 0.32, 0.28, 0.0)
+    ));
+
+    this.ashEmberSystem = new ParticleSystem({
+      duration: 4,
+      looping: true,
+      prewarm: true,
+      startLife: new IntervalValue(2.5, 4.0),
+      startSpeed: new IntervalValue(180, 260),
+      startSize: new IntervalValue(6, 12),
+      startColor: new ColorRange(new Vector4(1.0, 0.35, 0.1, 0.9), new Vector4(0.9, 0.4, 0.1, 0.4)),
+      worldSpace: true,
+      maxParticles: 600,
+      emissionOverTime: new ConstantValue(0),
+      shape: new RandomRectangleEmitter({ width: sceneW, height: sceneH }),
+      material: ashEmberMaterial,
+      renderOrder: 49,
+      renderMode: RenderMode.BillBoard,
+      uTileCount: 2,
+      vTileCount: 2,
+      startTileIndex: new IntervalValue(0, 4),
+      startRotation: new IntervalValue(0, Math.PI * 2),
+      behaviors: [
+        ashEmberGravity,
+        ashEmberWind,
+        ashEmberCurl,
+        ashEmberColorOverLife,
+        new SnowFloorBehavior(),
+        new RainFadeInBehavior(),
+        snowKillBehavior
+      ],
+    });
+
+    this.ashEmberSystem.emitter.position.set(centerX, centerY, safeEmitterZ);
+    this.ashEmberSystem.emitter.rotation.set(Math.PI, 0, 0);
+    if (this.scene) this.scene.add(this.ashEmberSystem.emitter);
+    this.batchRenderer.addSystem(this.ashEmberSystem);
+
+    try {
+      const emberIdx = this.batchRenderer.systemToBatchIndex?.get(this.ashEmberSystem);
+      if (emberIdx !== undefined && this.batchRenderer.batches && this.batchRenderer.batches[emberIdx]) {
+        const batch = this.batchRenderer.batches[emberIdx];
+        if (batch.material) {
+          this._ashEmberBatchMaterial = batch.material;
+          this._ashEmberBatchMaterial.side = THREE.DoubleSide;
+          this._patchRoofMaskMaterial(this._ashEmberBatchMaterial);
+        }
+      }
+    } catch (e) {
+      log.warn('Failed to patch ash ember batch material for roof mask:', e);
+    }
+
+    // Patch the quarks batch material used for ash
+    try {
+      const ashIdx = this.batchRenderer.systemToBatchIndex?.get(this.ashSystem);
+      if (ashIdx !== undefined && this.batchRenderer.batches && this.batchRenderer.batches[ashIdx]) {
+        const batch = this.batchRenderer.batches[ashIdx];
+        if (batch.material) {
+          this._ashBatchMaterial = batch.material;
+          this._ashBatchMaterial.side = THREE.DoubleSide;
+          this._patchRoofMaskMaterial(this._ashBatchMaterial);
+        }
+      }
+    } catch (e) {
+      log.warn('Failed to patch ash batch material for roof mask:', e);
+    }
+
+    // Cache ash force references
+    this._ashWindForce = ashWind;
+    this._ashGravityForce = ashGravity;
+    this._ashCurl = ashCurl;
+    this._ashCurlBaseStrength = ashCurl.strength.clone();
+    this._ashColorOverLife = ashColorOverLife;
+    this._ashEmberWindForce = ashEmberWind;
+    this._ashEmberGravityForce = ashEmberGravity;
+    this._ashEmberCurl = ashEmberCurl;
+    this._ashEmberCurlBaseStrength = ashEmberCurl.strength.clone();
+    this._ashEmberColorOverLife = ashEmberColorOverLife;
+
      log.info(`Weather systems initialized. Area: ${sceneW}x${sceneH}`);
   }
 
@@ -3707,6 +4023,28 @@ export class WeatherParticles {
         if (typeof shape.height === 'number') shape.height = emitH;
         this.snowSystem.emitter.position.x = emitCX;
         this.snowSystem.emitter.position.y = emitCY;
+      }
+
+      if (this.ashSystem?.emitter && this.ashSystem.emitterShape) {
+        const shape = this.ashSystem.emitterShape;
+        const clusterRadius = this._ashClusterRadius || Math.max(300, Math.min(1800, emitW * 0.35));
+        const width = Math.max(1, Math.min(emitW, clusterRadius * 2));
+        const height = Math.max(1, Math.min(emitH, clusterRadius * 2));
+        if (typeof shape.width === 'number') shape.width = width;
+        if (typeof shape.height === 'number') shape.height = height;
+        this.ashSystem.emitter.position.x = this._ashClusterCenter.x || emitCX;
+        this.ashSystem.emitter.position.y = this._ashClusterCenter.y || emitCY;
+      }
+
+      if (this.ashEmberSystem?.emitter && this.ashEmberSystem.emitterShape) {
+        const shape = this.ashEmberSystem.emitterShape;
+        const clusterRadius = this._ashClusterRadius || Math.max(300, Math.min(1800, emitW * 0.35));
+        const width = Math.max(1, Math.min(emitW, clusterRadius * 2));
+        const height = Math.max(1, Math.min(emitH, clusterRadius * 2));
+        if (typeof shape.width === 'number') shape.width = width;
+        if (typeof shape.height === 'number') shape.height = height;
+        this.ashEmberSystem.emitter.position.x = this._ashClusterCenter.x || emitCX;
+        this.ashEmberSystem.emitter.position.y = this._ashClusterCenter.y || emitCY;
       }
 
       // Foam flecks: keep the rendered dot ~pixel-sized across zoom levels.
@@ -4946,6 +5284,219 @@ export class WeatherParticles {
         }
     }
 
+    // --- ASH SYSTEM UPDATE ---
+    // Ash is controlled by a separate ashIntensity parameter from WeatherController
+    if (this.ashSystem) {
+      this._ensureBatchMaterialPatched(this.ashSystem, '_ashBatchMaterial');
+
+      const ashTuning = weatherController.ashTuning || {};
+      const ashIntensity = weather.ashIntensity ?? 0;
+      const intensityScale = ashTuning.intensityScale ?? 1.0;
+      const tunedIntensity = Math.max(0.0, ashIntensity * intensityScale);
+
+      // Uneven ash distribution: pick a drifting cluster center every few seconds.
+      if (this._ashClusterTimer <= 0) {
+        const holdMin = ashTuning.clusterHoldMin ?? 2.5;
+        const holdMax = ashTuning.clusterHoldMax ?? 7.0;
+        const holdRange = Math.max(0.1, holdMax - holdMin);
+        this._ashClusterTimer = Math.max(0.1, holdMin + Math.random() * holdRange);
+
+        const sx = this._sceneBounds?.x ?? 0;
+        const sy = this._sceneBounds?.y ?? 0;
+        const sw = this._sceneBounds?.z ?? 10000;
+        const sh = this._sceneBounds?.w ?? 10000;
+        this._ashClusterCenter.x = sx + Math.random() * sw;
+        this._ashClusterCenter.y = sy + Math.random() * sh;
+
+        const radiusMin = Math.max(10, ashTuning.clusterRadiusMin ?? 300);
+        const radiusMax = Math.max(radiusMin, ashTuning.clusterRadiusMax ?? 1800);
+        this._ashClusterRadius = radiusMin + Math.random() * (radiusMax - radiusMin);
+      }
+      this._ashClusterTimer -= Math.max(0, safeDt || 0);
+
+      // Modulate ash emission based on distance from cluster center to get uneven bands.
+      let clusterBoost = 1.0;
+      if (this._ashClusterRadius > 0 && this.ashSystem.emitter) {
+        const ex = this.ashSystem.emitter.position.x;
+        const ey = this.ashSystem.emitter.position.y;
+        const dx = ex - this._ashClusterCenter.x;
+        const dy = ey - this._ashClusterCenter.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const t = 1.0 - Math.min(1.0, dist / this._ashClusterRadius);
+        const boostMin = ashTuning.clusterBoostMin ?? 0.55;
+        const boostMax = ashTuning.clusterBoostMax ?? 1.45;
+        clusterBoost = boostMin + (boostMax - boostMin) * t;
+      }
+      
+      const ashEmission = this.ashSystem.emissionOverTime;
+      if (ashEmission && typeof ashEmission.value === 'number') {
+        const rate = ashTuning.emissionRate ?? 300;
+        ashEmission.value = rate * tunedIntensity * clusterBoost;
+      }
+
+      // Ash particle size - slightly larger than snow
+      const ashSMin = ashTuning.sizeMin ?? 10;
+      const ashSMax = ashTuning.sizeMax ?? 16;
+      if (this.ashSystem.startSize && typeof this.ashSystem.startSize.a === 'number') {
+        this.ashSystem.startSize.a = ashSMin;
+        this.ashSystem.startSize.b = Math.max(ashSMin, ashSMax);
+      }
+
+      // Ash lifetime
+      if (this.ashSystem.startLife && typeof this.ashSystem.startLife.a === 'number') {
+        const lifeMin = ashTuning.lifeMin ?? 5;
+        const lifeMax = ashTuning.lifeMax ?? 8;
+        this.ashSystem.startLife.a = lifeMin;
+        this.ashSystem.startLife.b = Math.max(lifeMin, lifeMax);
+      }
+
+      // Ash fall speed
+      if (this.ashSystem.startSpeed && typeof this.ashSystem.startSpeed.a === 'number') {
+        const speedMin = ashTuning.speedMin ?? 120;
+        const speedMax = ashTuning.speedMax ?? 200;
+        this.ashSystem.startSpeed.a = speedMin;
+        this.ashSystem.startSpeed.b = Math.max(speedMin, speedMax);
+      }
+
+      // Ash brightness: darker particles, less affected by scene darkness
+      const ashBrightness = (ashTuning.brightness ?? 1.0) * darknessBrightnessScale;
+      const clampedAshB = THREE ? THREE.MathUtils.clamp(ashBrightness, 0.0, 3.0) : ashBrightness;
+      const ashAlphaScale = clampedAshB / 3.0;
+      const ashMinAlpha = (ashTuning.opacityStartMin ?? 0.75) * ashAlphaScale;
+      const ashMaxAlpha = (ashTuning.opacityStartMax ?? 0.5) * ashAlphaScale;
+      if (this.ashSystem.startColor && this.ashSystem.startColor.a && this.ashSystem.startColor.b) {
+        const cStart = ashTuning.colorStart ?? { r: 0.45, g: 0.42, b: 0.38 };
+        const cEnd = ashTuning.colorEnd ?? { r: 0.35, g: 0.32, b: 0.28 };
+        this.ashSystem.startColor.a.set(cStart.r, cStart.g, cStart.b, ashMinAlpha);
+        this.ashSystem.startColor.b.set(cEnd.r, cEnd.g, cEnd.b, ashMaxAlpha);
+      }
+
+      if (this._ashColorOverLife?.color?.a && this._ashColorOverLife.color?.b) {
+        const cStart = ashTuning.colorStart ?? { r: 0.45, g: 0.42, b: 0.38 };
+        const cEnd = ashTuning.colorEnd ?? { r: 0.35, g: 0.32, b: 0.28 };
+        const endAlpha = Math.max(0.0, ashTuning.opacityEnd ?? 0.0);
+        this._ashColorOverLife.color.a.set(cStart.r, cStart.g, cStart.b, ashMinAlpha);
+        this._ashColorOverLife.color.b.set(cEnd.r, cEnd.g, cEnd.b, endAlpha);
+      }
+
+      // Scale curl noise for ash
+      if (this._ashCurl && this._ashCurlBaseStrength) {
+        const curlStrength = debugDisableWeatherBehaviors ? 0.0 : (ashTuning.curlStrength ?? 0.6);
+        this._ashCurl.strength.copy(this._ashCurlBaseStrength).multiplyScalar(curlStrength);
+      }
+
+      // Apply roof mask uniforms for ash (base material)
+      if (this._ashMaterial && this._ashMaterial.userData && this._ashMaterial.userData.roofUniforms) {
+        const uniforms = this._ashMaterial.userData.roofUniforms;
+        uniforms.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+        uniforms.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+        if (this._sceneBounds) {
+          uniforms.uSceneBounds.value.copy(this._sceneBounds);
+        }
+        uniforms.uRoofMap.value = this._roofTexture;
+        uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+        uniforms.uScreenSize.value.set(screenWidth, screenHeight);
+      }
+
+      // Also drive the batch ShaderMaterial uniforms used by quarks for ash
+      if (this._ashBatchMaterial && this._ashBatchMaterial.userData && this._ashBatchMaterial.userData.roofUniforms) {
+        const uniforms = this._ashBatchMaterial.userData.roofUniforms;
+        uniforms.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+        uniforms.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+        if (this._sceneBounds) {
+          uniforms.uSceneBounds.value.copy(this._sceneBounds);
+        }
+        uniforms.uRoofMap.value = this._roofTexture;
+        uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+        uniforms.uScreenSize.value.set(screenWidth, screenHeight);
+      }
+    }
+
+    if (this.ashEmberSystem) {
+      this._ensureBatchMaterialPatched(this.ashEmberSystem, '_ashEmberBatchMaterial');
+      const ashTuning = weatherController.ashTuning || {};
+      const ashIntensity = weather.ashIntensity ?? 0;
+      const intensityScale = ashTuning.intensityScale ?? 1.0;
+      const tunedIntensity = Math.max(0.0, ashIntensity * intensityScale);
+
+      const emberEmission = this.ashEmberSystem.emissionOverTime;
+      if (emberEmission && typeof emberEmission.value === 'number') {
+        const rate = ashTuning.emberEmissionRate ?? 25;
+        emberEmission.value = rate * tunedIntensity;
+      }
+
+      if (this.ashEmberSystem.startSize && typeof this.ashEmberSystem.startSize.a === 'number') {
+        const emberSizeMin = ashTuning.emberSizeMin ?? 6;
+        const emberSizeMax = ashTuning.emberSizeMax ?? 12;
+        this.ashEmberSystem.startSize.a = emberSizeMin;
+        this.ashEmberSystem.startSize.b = Math.max(emberSizeMin, emberSizeMax);
+      }
+
+      if (this.ashEmberSystem.startLife && typeof this.ashEmberSystem.startLife.a === 'number') {
+        const emberLifeMin = ashTuning.emberLifeMin ?? 2.5;
+        const emberLifeMax = ashTuning.emberLifeMax ?? 4.0;
+        this.ashEmberSystem.startLife.a = emberLifeMin;
+        this.ashEmberSystem.startLife.b = Math.max(emberLifeMin, emberLifeMax);
+      }
+
+      if (this.ashEmberSystem.startSpeed && typeof this.ashEmberSystem.startSpeed.a === 'number') {
+        const emberSpeedMin = ashTuning.emberSpeedMin ?? 180;
+        const emberSpeedMax = ashTuning.emberSpeedMax ?? 260;
+        this.ashEmberSystem.startSpeed.a = emberSpeedMin;
+        this.ashEmberSystem.startSpeed.b = Math.max(emberSpeedMin, emberSpeedMax);
+      }
+
+      const emberBrightness = (ashTuning.emberBrightness ?? 1.0) * darknessBrightnessScale;
+      const clampedEmberB = THREE ? THREE.MathUtils.clamp(emberBrightness, 0.0, 5.0) : emberBrightness;
+      const emberAlphaScale = clampedEmberB / 5.0;
+      const emberMinAlpha = (ashTuning.emberOpacityStartMin ?? 0.9) * emberAlphaScale;
+      const emberMaxAlpha = (ashTuning.emberOpacityStartMax ?? 0.4) * emberAlphaScale;
+
+      if (this.ashEmberSystem.startColor && this.ashEmberSystem.startColor.a && this.ashEmberSystem.startColor.b) {
+        const emberStart = ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.05 };
+        const emberEnd = ashTuning.emberColorEnd ?? { r: 0.35, g: 0.32, b: 0.28 };
+        this.ashEmberSystem.startColor.a.set(emberStart.r, emberStart.g, emberStart.b, emberMinAlpha);
+        this.ashEmberSystem.startColor.b.set(emberEnd.r, emberEnd.g, emberEnd.b, emberMaxAlpha);
+      }
+
+      if (this._ashEmberColorOverLife?.color?.a && this._ashEmberColorOverLife.color?.b) {
+        const emberStart = ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.05 };
+        const emberEnd = ashTuning.emberColorEnd ?? { r: 0.35, g: 0.32, b: 0.28 };
+        const emberEndAlpha = Math.max(0.0, ashTuning.emberOpacityEnd ?? 0.0);
+        this._ashEmberColorOverLife.color.a.set(emberStart.r, emberStart.g, emberStart.b, emberMinAlpha);
+        this._ashEmberColorOverLife.color.b.set(emberEnd.r, emberEnd.g, emberEnd.b, emberEndAlpha);
+      }
+
+      if (this._ashEmberCurl && this._ashEmberCurlBaseStrength) {
+        const emberCurlStrength = debugDisableWeatherBehaviors ? 0.0 : (ashTuning.emberCurlStrength ?? 1.0);
+        this._ashEmberCurl.strength.copy(this._ashEmberCurlBaseStrength).multiplyScalar(emberCurlStrength);
+      }
+
+      if (this._ashEmberMaterial && this._ashEmberMaterial.userData && this._ashEmberMaterial.userData.roofUniforms) {
+        const uniforms = this._ashEmberMaterial.userData.roofUniforms;
+        uniforms.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+        uniforms.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+        if (this._sceneBounds) {
+          uniforms.uSceneBounds.value.copy(this._sceneBounds);
+        }
+        uniforms.uRoofMap.value = this._roofTexture;
+        uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+        uniforms.uScreenSize.value.set(screenWidth, screenHeight);
+      }
+
+      if (this._ashEmberBatchMaterial && this._ashEmberBatchMaterial.userData && this._ashEmberBatchMaterial.userData.roofUniforms) {
+        const uniforms = this._ashEmberBatchMaterial.userData.roofUniforms;
+        uniforms.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+        uniforms.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+        if (this._sceneBounds) {
+          uniforms.uSceneBounds.value.copy(this._sceneBounds);
+        }
+        uniforms.uRoofMap.value = this._roofTexture;
+        uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+        uniforms.uScreenSize.value.set(screenWidth, screenHeight);
+      }
+    }
+
     // --- WIND & GRAVITY COUPLING ---
     if (THREE && (this._rainWindForce || this._snowWindForce || this._rainGravityForce || this._snowGravityForce)) {
       const windSpeed = weather.windSpeed || 0; // 0-1 scalar
@@ -5009,6 +5560,38 @@ export class WeatherParticles {
         this._snowGravityForce.magnitude.value = this._snowBaseGravity * snowGravScale;
       }
 
+      // Ash: Wind and gravity coupling (less responsive than snow)
+      const ashTuning = weatherController.ashTuning || {};
+      if (this._ashWindForce && this._ashWindForce.direction) {
+        this._ashWindForce.direction.set(baseDir.x, baseDir.y, 0);
+        if (this._ashWindForce.magnitude && typeof this._ashWindForce.magnitude.value === 'number') {
+          const baseMag = 400; // Less wind influence than snow
+          const align = THREE.MathUtils.clamp(windSpeed, 0, 1);
+          const windInfluence = ashTuning.windInfluence ?? 1.0;
+          this._ashWindForce.magnitude.value = baseMag * align * 0.7 * windInfluence;
+        }
+      }
+
+      if (this._ashEmberWindForce && this._ashEmberWindForce.direction) {
+        this._ashEmberWindForce.direction.set(baseDir.x, baseDir.y, 0);
+        if (this._ashEmberWindForce.magnitude && typeof this._ashEmberWindForce.magnitude.value === 'number') {
+          const baseMag = 650;
+          const align = THREE.MathUtils.clamp(windSpeed, 0, 1);
+          const windInfluence = ashTuning.emberWindInfluence ?? 1.0;
+          this._ashEmberWindForce.magnitude.value = baseMag * align * 0.9 * windInfluence;
+        }
+      }
+
+      if (this._ashGravityForce && this._ashGravityForce.magnitude && typeof this._ashGravityForce.magnitude.value === 'number') {
+        const gravScale = ashTuning.gravityScale ?? 1.0;
+        this._ashGravityForce.magnitude.value = this._ashBaseGravity * gravScale;
+      }
+
+      if (this._ashEmberGravityForce && this._ashEmberGravityForce.magnitude && typeof this._ashEmberGravityForce.magnitude.value === 'number') {
+        const emberGravScale = ashTuning.emberGravityScale ?? 0.75;
+        this._ashEmberGravityForce.magnitude.value = this._ashBaseGravity * 0.75 * emberGravScale;
+      }
+
       // Splashes: Wind coupling (> 25%)
       // PERFORMANCE: Mutate existing ConstantValue instead of creating new one
       if (this._splashWindForces && this._splashWindForces.length > 0) {
@@ -5041,6 +5624,16 @@ export class WeatherParticles {
       if (this.snowSystem.emitter.parent) this.snowSystem.emitter.parent.remove(this.snowSystem.emitter);
     }
 
+    if (this.ashSystem) {
+      this.batchRenderer.deleteSystem(this.ashSystem);
+      if (this.ashSystem.emitter.parent) this.ashSystem.emitter.parent.remove(this.ashSystem.emitter);
+    }
+
+    if (this.ashEmberSystem) {
+      this.batchRenderer.deleteSystem(this.ashEmberSystem);
+      if (this.ashEmberSystem.emitter.parent) this.ashEmberSystem.emitter.parent.remove(this.ashEmberSystem.emitter);
+    }
+
     if (this.splashSystems && this.splashSystems.length) {
       for (const sys of this.splashSystems) {
         if (!sys) continue;
@@ -5070,6 +5663,7 @@ export class WeatherParticles {
 
     if (this.rainTexture) this.rainTexture.dispose();
     if (this.snowTexture) this.snowTexture.dispose();
+    if (this.ashTexture) this.ashTexture.dispose();
     if (this.splashTexture) this.splashTexture.dispose();
     if (this.foamTexture) this.foamTexture.dispose();
     if (this.foamFleckTexture) this.foamFleckTexture.dispose();

@@ -69,6 +69,42 @@ export class LayerVisibilityManager {
     // Detect custom layers on construction
     this.detectCustomLayers();
   }
+
+  _setPixiTileVisualAlpha(alpha) {
+    if (!canvas?.tiles?.placeables) return;
+    for (const tile of canvas.tiles.placeables) {
+      if (!tile) continue;
+      try {
+        // Keep the placeable interactive, but hide its visual output.
+        // Foundry tile visuals are typically a Sprite (tile.mesh) plus additional children.
+        tile.visible = true;
+        tile.interactive = true;
+        tile.interactiveChildren = true;
+      } catch (_) {
+      }
+
+      try {
+        if (tile.mesh) tile.mesh.alpha = alpha;
+      } catch (_) {
+      }
+
+      try {
+        // Some Foundry versions use a primary sprite child for the tile texture.
+        if (tile.texture) tile.texture.alpha = alpha;
+      } catch (_) {
+      }
+
+      try {
+        // Defensive: ensure any other child graphics are also hidden.
+        if (Array.isArray(tile.children)) {
+          for (const child of tile.children) {
+            if (child && typeof child.alpha === 'number') child.alpha = alpha;
+          }
+        }
+      } catch (_) {
+      }
+    }
+  }
   
   /**
    * Detect custom layers added by other modules
@@ -120,6 +156,17 @@ export class LayerVisibilityManager {
     for (const name of this.editOnlyLayers) {
       const isActive = this.isLayerActive(name, activeName);
       this.setLayerVisibility(name, isActive, isActive ? 'edit-active' : 'edit-inactive');
+
+      // Tiles layer is a special case:
+      // - In Gameplay/Hybrid mode, Three.js renders tiles.
+      // - But we still sometimes need the PIXI Tiles tool for editing.
+      // We keep the layer itself toggleable for edit mode, but *force* its
+      // placeables fully invisible when not actively editing to prevent
+      // double-rendering ("ghost" duplicate tiles).
+      if (name === 'tiles') {
+        if (isActive) this._setPixiTileVisualAlpha(1);
+        else this._setPixiTileVisualAlpha(0);
+      }
     }
     
     // Preserve custom layers (always visible)

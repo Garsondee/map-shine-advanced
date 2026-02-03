@@ -134,7 +134,7 @@ export class SceneComposer {
 
       if (!candidates.size) return null;
 
-      const keyMasks = ['specular', 'water', 'outdoors'];
+      const keyMasks = ['specular', 'outdoors'];
 
       let bestPath = null;
       let bestScore = -Infinity;
@@ -200,7 +200,9 @@ export class SceneComposer {
       const sceneH = sr.height ?? 0;
       if (!sceneW || !sceneH) return [];
 
-      const foregroundElevation = canvas?.scene?.foregroundElevation ?? Number.POSITIVE_INFINITY;
+      const foregroundElevation = Number.isFinite(canvas?.scene?.foregroundElevation)
+        ? canvas.scene.foregroundElevation
+        : Number.POSITIVE_INFINITY;
 
       const tol = 1;
       const minArea = sceneW * sceneH * 0.2;
@@ -213,6 +215,17 @@ export class SceneComposer {
       for (const tileDoc of tileIter) {
         const src = tileDoc?.texture?.src;
         if (typeof src !== 'string' || src.trim().length === 0) continue;
+
+        // Exclude overhead/roof tiles from composite candidates.
+        // These composites are used to build scene-wide masks and (optionally) a base albedo.
+        // If an overhead tile is included, its color can be baked into the ground pass and
+        // appear as a persistent "ghost" when the actual overhead sprite fades out.
+        try {
+          const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
+          const isOverhead = (Number.isFinite(foregroundElevation) ? (elev > foregroundElevation) : false) || (tileDoc?.overhead === true);
+          if (isOverhead) continue;
+        } catch (e) {
+        }
 
         const x = Number.isFinite(tileDoc?.x) ? tileDoc.x : 0;
         const y = Number.isFinite(tileDoc?.y) ? tileDoc.y : 0;
@@ -318,6 +331,10 @@ export class SceneComposer {
       const sr = d?.sceneRect;
       if (!tiles || !sr) return [];
 
+      const foregroundElevation = Number.isFinite(canvas?.scene?.foregroundElevation)
+        ? canvas.scene.foregroundElevation
+        : Number.POSITIVE_INFINITY;
+
       const sceneX = sr.x ?? 0;
       const sceneY = sr.y ?? 0;
       const sceneW = sr.width ?? 0;
@@ -328,6 +345,16 @@ export class SceneComposer {
       const out = new Set();
       for (const tileDoc of tiles) {
         if (tileDoc?.hidden) continue;
+
+        // Exclude overhead/roof tiles from union-mask basePaths.
+        // Union masks are intended for scene-wide ground masks, not roofs.
+        try {
+          const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
+          const isOverhead = (Number.isFinite(foregroundElevation) ? (elev > foregroundElevation) : false) || (tileDoc?.overhead === true);
+          if (isOverhead) continue;
+        } catch (e) {
+        }
+
         const src = tileDoc?.texture?.src;
         if (typeof src !== 'string' || src.trim().length === 0) continue;
 

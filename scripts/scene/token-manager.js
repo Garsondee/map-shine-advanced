@@ -83,6 +83,17 @@ export class TokenManager {
     log.debug('TokenManager created');
   }
 
+  /**
+   * Returns true if TokenManager is currently animating the given token.
+   * This is used by systems like DynamicExposureManager to avoid sampling state
+   * while a token is moving across many tiles.
+   * @param {string} tokenId
+   */
+  isTokenAnimating(tokenId) {
+    if (!tokenId) return false;
+    return this.activeAnimations?.has(tokenId) === true;
+  }
+
   _getRenderer() {
     return this.effectComposer?.renderer || window.MapShine?.renderer || null;
   }

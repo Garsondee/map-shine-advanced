@@ -474,8 +474,13 @@ export class LightingEffect extends EffectBase {
           float bushPixelLen = uBushShadowLength * max(uViewportHeight, 1.0) * max(uShadowZoom, 0.0001);
           vec2 bushOffsetUv = bushDir * bushPixelLen * uCompositeTexelSize;
           float bushTex = texture2D(tBushShadow, vUv + bushOffsetUv).r;
+          // Bush shadow target packs coverage in G (see BushEffect shadow shader).
+          // If the current pixel is part of the bush itself, don't apply bush shadows
+          // to it (prevents the shadow from appearing on top of the bush overlay).
+          float bushSelfCoverage = texture2D(tBushShadow, vUv).g;
           float bushOpacity = clamp(uBushShadowOpacity, 0.0, 1.0);
           float rawBushFactor = mix(1.0, bushTex, bushOpacity);
+          rawBushFactor = mix(rawBushFactor, 1.0, clamp(bushSelfCoverage, 0.0, 1.0));
 
           float treePixelLen = uTreeShadowLength * max(uViewportHeight, 1.0) * max(uShadowZoom, 0.0001);
           vec2 treeOffsetUv = bushDir * treePixelLen * uCompositeTexelSize;
@@ -1328,29 +1333,6 @@ export class LightingEffect extends EffectBase {
     }
   }
 
-  /**
-   * Force light geometry rebuilds after wall/door edits.
-   * WallManager calls this to ensure wall-clipped light polygons are updated.
-   */
-  forceRebuildLightGeometriesFromWalls() {
-    try {
-      for (const source of this.lights.values()) {
-        try {
-          if (source?.document) source.updateData(source.document, true);
-        } catch (_) {
-        }
-      }
-
-      for (const source of this.mapshineLights.values()) {
-        try {
-          if (source?.document) source.updateData(source.document, true);
-        } catch (_) {
-        }
-      }
-    } catch (_) {
-    }
-  }
-
   getEffectiveDarkness() {
     let d = this.params?.darknessLevel;
     try {
@@ -1358,7 +1340,7 @@ export class LightingEffect extends EffectBase {
       if (env && typeof env.darknessLevel === 'number') {
         d = env.darknessLevel;
       }
-    } catch (e) {
+    } catch (_) {
     }
 
     d = (typeof d === 'number' && isFinite(d)) ? d : 0.0;
@@ -1369,6 +1351,55 @@ export class LightingEffect extends EffectBase {
     const eff = Math.max(0.0, Math.min(1.0, d * scale));
     this._effectiveDarkness = eff;
     return eff;
+  }
+
+  _getEffectiveZoom() {
+    // Prefer sceneComposer.currentZoom (FOV-based zoom system)
+    try {
+      const sceneComposer = window.MapShine?.sceneComposer;
+      const z0 = sceneComposer?.currentZoom;
+      if (typeof z0 === 'number' && isFinite(z0) && z0 > 0) return z0;
+    } catch (_) {
+    }
+
+    const cam = this.mainCamera;
+    if (!cam) return 1.0;
+
+    // OrthographicCamera: zoom is a direct property
+    if (cam.isOrthographicCamera) {
+      const z = cam.zoom;
+      if (typeof z === 'number' && isFinite(z) && z > 0) return z;
+      return 1.0;
+    }
+
+    // PerspectiveCamera fallback: derive zoom from FOV + camera distance.
+    // This matches the FOV-based zoom system used elsewhere.
+    try {
+      const THREE = window.THREE;
+      const renderer = this.renderer;
+      const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+      const camZ = cam.position?.z;
+      const fovDeg = cam.fov;
+
+      if (THREE && renderer && typeof camZ === 'number' && isFinite(camZ) && typeof fovDeg === 'number' && isFinite(fovDeg)) {
+        const dist = Math.abs(camZ - groundZ);
+        if (dist > 0.0001) {
+          // PERF: reuse temp vector if available
+          if (!this._tempSize) this._tempSize = new THREE.Vector2();
+          const size = this._tempSize;
+          renderer.getDrawingBufferSize(size);
+          const hPx = size.y;
+
+          const fovRad = fovDeg * (Math.PI / 180);
+          const worldH = 2.0 * dist * Math.tan(fovRad * 0.5);
+          const z = hPx / Math.max(1e-6, worldH);
+          if (typeof z === 'number' && isFinite(z) && z > 0) return z;
+        }
+      }
+    } catch (_) {
+    }
+
+    return 1.0;
   }
 
   update(timeInfo) {
@@ -1818,81 +1849,127 @@ export class LightingEffect extends EffectBase {
     const previousLayersMask = this.mainCamera.layers.mask;
     const previousTarget = renderer.getRenderTarget();
 
-    this.mainCamera.layers.set(ROOF_LAYER);
-    renderer.setRenderTarget(this.roofAlphaTarget);
-    renderer.setClearColor(0x000000, 0);
-    renderer.clear();
-    renderer.render(scene, this.mainCamera);
-
-    this.mainCamera.layers.set(WEATHER_ROOF_LAYER);
-    renderer.setRenderTarget(this.weatherRoofAlphaTarget);
-    renderer.setClearColor(0x000000, 0);
-    renderer.clear();
-    renderer.render(scene, this.mainCamera);
-
-    this.mainCamera.layers.set(ROPE_MASK_LAYER);
-    renderer.setRenderTarget(this.ropeMaskTarget);
-    renderer.setClearColor(0x000000, 0);
-
-    const prevAutoClear = renderer.autoClear;
-    renderer.autoClear = false;
-    renderer.clear(true, true, true);
-
-    renderer.render(scene, this.mainCamera);
-    renderer.autoClear = prevAutoClear;
-
-    this.mainCamera.layers.set(TOKEN_MASK_LAYER);
-    renderer.setRenderTarget(this.tokenMaskTarget);
-    renderer.setClearColor(0x000000, 0);
-
-    const prevAutoClear2 = renderer.autoClear;
-    renderer.autoClear = false;
-    renderer.clear(true, true, true);
-
+    // IMPORTANT: This block mutates camera layers and render targets.
+    // If it throws, and we don't restore in a finally, the camera can get
+    // stuck on ROOF_LAYER, making it look like "only overhead tiles render".
+    const roofOverrides = [];
+    let prevAutoClear = renderer.autoClear;
+    let prevAutoClear2 = renderer.autoClear;
     const _tmpEnabledTokenMaskLayer = this._tmpEnabledTokenMaskLayer || (this._tmpEnabledTokenMaskLayer = []);
-    _tmpEnabledTokenMaskLayer.length = 0;
 
     try {
-      const tokenManager = window.MapShine?.tokenManager;
-      const tokenSprites = tokenManager?.tokenSprites;
-      if (tokenSprites && typeof tokenSprites.values === 'function') {
-        const tokenLayerMask = (1 << TOKEN_MASK_LAYER);
-        for (const data of tokenSprites.values()) {
-          const sprite = data?.sprite;
-          if (!sprite?.layers) continue;
-          const had = (sprite.layers.mask & tokenLayerMask) !== 0;
-          if (!had) {
-            sprite.layers.enable(TOKEN_MASK_LAYER);
-            _tmpEnabledTokenMaskLayer.push(sprite);
+      // Before rendering roof layers, temporarily hide any hover-hidden tiles
+      // so they don't appear in the roofAlphaTarget. This prevents hover-hidden
+      // tiles from lingering visually even though their sprite opacity is 0.
+      const roofMaskBit = 1 << ROOF_LAYER;
+      const weatherRoofMaskBit = 1 << WEATHER_ROOF_LAYER;
+      const tileManager = window.MapShine?.tileManager;
+
+      scene.traverse((object) => {
+        if (!object.isSprite || !object.layers || !object.material) return;
+
+        const isRoof = (object.layers.mask & roofMaskBit) !== 0;
+        const isWeatherRoof = (object.layers.mask & weatherRoofMaskBit) !== 0;
+        if (!isRoof && !isWeatherRoof) return;
+
+        let hoverHidden = false;
+        try {
+          const tileId = object.userData?.foundryTileId;
+          const data = tileId ? tileManager?.tileSprites?.get(tileId) : null;
+          hoverHidden = !!data?.hoverHidden;
+        } catch (_) {
+        }
+
+        const mat = object.material;
+        if (typeof mat.opacity !== 'number') return;
+        roofOverrides.push({ object, opacity: mat.opacity });
+        mat.opacity = hoverHidden ? 0.0 : mat.opacity;
+      });
+
+      this.mainCamera.layers.set(ROOF_LAYER);
+      renderer.setRenderTarget(this.roofAlphaTarget);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+      renderer.render(scene, this.mainCamera);
+
+      this.mainCamera.layers.set(WEATHER_ROOF_LAYER);
+      renderer.setRenderTarget(this.weatherRoofAlphaTarget);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+      renderer.render(scene, this.mainCamera);
+
+      this.mainCamera.layers.set(ROPE_MASK_LAYER);
+      renderer.setRenderTarget(this.ropeMaskTarget);
+      renderer.setClearColor(0x000000, 0);
+
+      prevAutoClear = renderer.autoClear;
+      renderer.autoClear = false;
+      renderer.clear(true, true, true);
+      renderer.render(scene, this.mainCamera);
+      renderer.autoClear = prevAutoClear;
+
+      this.mainCamera.layers.set(TOKEN_MASK_LAYER);
+      renderer.setRenderTarget(this.tokenMaskTarget);
+      renderer.setClearColor(0x000000, 0);
+
+      prevAutoClear2 = renderer.autoClear;
+      renderer.autoClear = false;
+      renderer.clear(true, true, true);
+
+      _tmpEnabledTokenMaskLayer.length = 0;
+
+      try {
+        const tokenManager = window.MapShine?.tokenManager;
+        const tokenSprites = tokenManager?.tokenSprites;
+        if (tokenSprites && typeof tokenSprites.values === 'function') {
+          const tokenLayerMask = (1 << TOKEN_MASK_LAYER);
+          for (const data of tokenSprites.values()) {
+            const sprite = data?.sprite;
+            if (!sprite?.layers) continue;
+            const had = (sprite.layers.mask & tokenLayerMask) !== 0;
+            if (!had) {
+              sprite.layers.enable(TOKEN_MASK_LAYER);
+              _tmpEnabledTokenMaskLayer.push(sprite);
+            }
           }
         }
-      }
 
-      const gl = renderer.getContext();
-      // Avoid per-frame allocation from gl.getParameter(gl.COLOR_WRITEMASK)
-      // Default WebGL state is [true, true, true, true], restore to that after render
-      try {
-        gl.colorMask(false, false, false, false);
-        renderer.render(scene, this.mainCamera);
-      } finally {
-        gl.colorMask(true, true, true, true);
-      }
-    } catch (e) {
-    } finally {
-      try {
-        for (let i = 0; i < _tmpEnabledTokenMaskLayer.length; i++) {
-          _tmpEnabledTokenMaskLayer[i].layers.disable(TOKEN_MASK_LAYER);
+        const gl = renderer.getContext();
+        // Avoid per-frame allocation from gl.getParameter(gl.COLOR_WRITEMASK)
+        // Default WebGL state is [true, true, true, true], restore to that after render
+        try {
+          gl.colorMask(false, false, false, false);
+          renderer.render(scene, this.mainCamera);
+        } finally {
+          gl.colorMask(true, true, true, true);
         }
       } catch (e) {
+      } finally {
+        try {
+          for (let i = 0; i < _tmpEnabledTokenMaskLayer.length; i++) {
+            _tmpEnabledTokenMaskLayer[i].layers.disable(TOKEN_MASK_LAYER);
+          }
+        } catch (e) {
+        }
       }
+
+      renderer.clear(true, false, false);
+      renderer.render(scene, this.mainCamera);
+      renderer.autoClear = prevAutoClear2;
+    } finally {
+      // Restore original opacities even if an intermediate render pass threw.
+      try {
+        for (const { object, opacity } of roofOverrides) {
+          if (object?.material) object.material.opacity = opacity;
+        }
+      } catch (_) {
+      }
+
+      // Always restore camera layers and render target.
+      try { this.mainCamera.layers.mask = previousLayersMask; } catch (_) {}
+      try { renderer.setRenderTarget(previousTarget); } catch (_) {}
+      try { renderer.autoClear = prevAutoClear2; } catch (_) {}
     }
-
-    renderer.clear(true, false, false);
-    renderer.render(scene, this.mainCamera);
-    renderer.autoClear = prevAutoClear2;
-
-    this.mainCamera.layers.mask = previousLayersMask;
-    renderer.setRenderTarget(previousTarget);
 
     // into outdoorsTarget using the main camera. This produces a
     // screen-aligned outdoors factor we can safely sample with vUv in

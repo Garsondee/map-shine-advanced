@@ -60,7 +60,30 @@ export class DynamicExposureManager {
 
       // HDR luminance encoding scale for RGBA8 probe output
       // lumaEncoded = clamp(luma / lumaScale, 0..1)
-      lumaScale: 4.0
+      lumaScale: 4.0,
+
+      // --- Dazzle Overlay (fullscreen flash) ---
+      dazzleEnabled: true,
+      // Absolute brightness trigger (measured scene luma under token)
+      dazzleBrightLumaThreshold: 3.0,
+      dazzleBrightGain: 0.65,
+
+      // Indoors -> outdoors transition trigger (roof mask change)
+      dazzleOutdoorsThreshold: 0.7,
+      dazzleOutdoorsGain: 0.85,
+
+      // Environmental gates
+      dazzleMaxDarkness: 0.15,
+      dazzleMaxCloudCover: 0.60,
+
+      // Dazzle envelope
+      // When a trigger fires, intensity ramps up to a peak over this duration, then decays back to 0.
+      // This avoids re-triggering each tile as the token moves.
+      dazzleRampSeconds: 3.0,
+      dazzleDecaySeconds: 2.5,
+
+      // Minimum time between separate dazzle events (after returning to near-zero)
+      dazzleCooldownSeconds: 0.35
     };
 
     // Internal state
@@ -74,8 +97,21 @@ export class DynamicExposureManager {
     this._shockLog = 0.0;
     this._prevLogLuma = null;
 
+    // Fullscreen dazzle overlay intensity (0..1)
+    this._dazzle = 0.0;
+    this._dazzlePeak = 0.0;
+    this._dazzlePhase = 'idle'; // 'idle' | 'ramp' | 'decay'
+    this._dazzlePhaseT = 0.0;
+    this._dazzleCooldownT = 0.0;
+    this._prevOutdoors = null;
+
     this._probeTimer = 0.0;
     this._lastProbeElapsed = 0.0;
+
+    // Used to suppress sampling while the subject token is animating.
+    // We only want to adapt once at the final destination rather than flickering
+    // across intermediate tiles.
+    this._wasSubjectAnimating = false;
 
     // Cached reusable objects (avoid allocations in update)
     const THREE = window.THREE;
@@ -98,6 +134,7 @@ export class DynamicExposureManager {
       outdoors: 0.0,
       targetExposure: 1.0,
       appliedExposure: 1.0,
+      dazzle: 0.0,
       screenU: 0.0,
       screenV: 0.0,
       lastProbeAgeSeconds: 0.0
@@ -395,6 +432,163 @@ export class DynamicExposureManager {
     this.debugState.appliedExposure = this._appliedExposure;
   }
 
+  _getSceneDarkness01() {
+    try {
+      const le = window.MapShine?.lightingEffect;
+      if (le && typeof le.getEffectiveDarkness === 'function') {
+        const d = le.getEffectiveDarkness();
+        return (typeof d === 'number' && Number.isFinite(d)) ? Math.max(0.0, Math.min(1.0, d)) : 0.0;
+      }
+    } catch (_) {
+    }
+    try {
+      const env = canvas?.environment;
+      const d = env?.darknessLevel;
+      return (typeof d === 'number' && Number.isFinite(d)) ? Math.max(0.0, Math.min(1.0, d)) : 0.0;
+    } catch (_) {
+    }
+    return 0.0;
+  }
+
+  _getCloudCover01() {
+    try {
+      const wc = this.weatherController ?? window.MapShine?.weatherController ?? window.MapShine?.weather;
+      if (!wc) return 0.0;
+      const state = (typeof wc.getCurrentState === 'function') ? wc.getCurrentState() : (wc.currentState ?? null);
+      const c = state?.cloudCover;
+      return (typeof c === 'number' && Number.isFinite(c)) ? Math.max(0.0, Math.min(1.0, c)) : 0.0;
+    } catch (_) {
+    }
+    return 0.0;
+  }
+
+  _updateDazzleOverlay(dt, outdoors) {
+    const p = this.params;
+
+    // Clamp dt (protect against huge frame gaps causing envelope jumps).
+    const dts = Math.max(0.0, Math.min(0.25, Number(dt) || 0.0));
+
+    const enabled = p.dazzleEnabled !== false;
+    if (!enabled) {
+      this._dazzle = 0.0;
+      this._dazzlePeak = 0.0;
+      this._dazzlePhase = 'idle';
+      this._dazzlePhaseT = 0.0;
+      this._dazzleCooldownT = 0.0;
+      this._prevOutdoors = outdoors;
+      this.debugState.dazzle = 0.0;
+      return;
+    }
+
+    // Environmental gating (for the outdoors transition trigger).
+    const darkness = this._getSceneDarkness01();
+    const cloudCover = this._getCloudCover01();
+    const gate =
+      (darkness <= (Number.isFinite(p.dazzleMaxDarkness) ? p.dazzleMaxDarkness : 0.15)) &&
+      (cloudCover <= (Number.isFinite(p.dazzleMaxCloudCover) ? p.dazzleMaxCloudCover : 0.60));
+
+    let triggerStrength = 0.0;
+
+    // Trigger A: absolute brightness under token.
+    const luma = Math.max(0.0, this._measuredLuma || 0.0);
+    const thr = Math.max(0.0, Number(p.dazzleBrightLumaThreshold) || 0.0);
+    if (thr > 0.0 && luma > thr) {
+      const gain = Math.max(0.0, Number(p.dazzleBrightGain) || 0.0);
+      const over = (luma - thr) / Math.max(1e-5, thr);
+      triggerStrength = Math.max(triggerStrength, gain * Math.min(1.0, over));
+    }
+
+    // Trigger B: indoors -> outdoors transition.
+    const prev = this._prevOutdoors;
+    this._prevOutdoors = outdoors;
+    if (gate && Number.isFinite(prev)) {
+      const oThr = Math.max(0.0, Math.min(1.0, Number(p.dazzleOutdoorsThreshold) || 0.7));
+      const wasIndoors = prev < oThr;
+      const nowOutdoors = outdoors >= oThr;
+      if (wasIndoors && nowOutdoors) {
+        const gain = Math.max(0.0, Number(p.dazzleOutdoorsGain) || 0.0);
+        // Stronger when stepping into "more outdoors".
+        const step = Math.max(0.0, outdoors - prev);
+        triggerStrength = Math.max(triggerStrength, gain * Math.min(1.0, step / Math.max(1e-5, 1.0 - oThr)));
+      }
+    }
+
+    // Cooldown timer (only active while idle).
+    if (this._dazzlePhase === 'idle' && this._dazzleCooldownT > 0.0) {
+      this._dazzleCooldownT = Math.max(0.0, this._dazzleCooldownT - dts);
+    }
+
+    // If a trigger fires:
+    // - If idle and not cooling down -> start a new event
+    // - If already active -> allow raising peak (but do not restart the ramp)
+    if (triggerStrength > 0.0) {
+      const s = Math.max(0.0, Math.min(1.0, triggerStrength));
+
+      if (this._dazzlePhase === 'idle') {
+        if (this._dazzleCooldownT <= 0.0) {
+          this._dazzlePhase = 'ramp';
+          this._dazzlePhaseT = 0.0;
+          this._dazzlePeak = s;
+        }
+      } else {
+        // Active (ramp/decay): don't retrigger each tile, but do allow a stronger event to push peak upward.
+        this._dazzlePeak = Math.max(this._dazzlePeak, s);
+      }
+    }
+
+    // Advance envelope.
+    const ramp = Math.max(0.05, Number(p.dazzleRampSeconds) || 3.0);
+    const decay = Math.max(0.05, Number(p.dazzleDecaySeconds) || 2.5);
+
+    if (this._dazzlePhase === 'ramp') {
+      this._dazzlePhaseT += dts;
+      const t01 = Math.max(0.0, Math.min(1.0, this._dazzlePhaseT / ramp));
+
+      // Ease-in to feel like an "eye adjustment" rather than a linear UI tween.
+      const eased = t01 * t01 * (3.0 - 2.0 * t01);
+      this._dazzle = this._dazzlePeak * eased;
+
+      if (t01 >= 1.0) {
+        this._dazzlePhase = 'decay';
+        this._dazzlePhaseT = 0.0;
+        // Snap to peak at the end of the ramp.
+        this._dazzle = this._dazzlePeak;
+      }
+    } else if (this._dazzlePhase === 'decay') {
+      this._dazzlePhaseT += dts;
+      const a = 1.0 - Math.exp(-dts / decay);
+      this._dazzle = this._dazzle + (0.0 - this._dazzle) * a;
+
+      // Done when near-neutral.
+      if (this._dazzle < 0.0025) {
+        this._dazzle = 0.0;
+        this._dazzlePeak = 0.0;
+        this._dazzlePhase = 'idle';
+        this._dazzlePhaseT = 0.0;
+        this._dazzleCooldownT = Math.max(0.0, Number(p.dazzleCooldownSeconds) || 0.35);
+      }
+    } else {
+      // idle
+      this._dazzle = 0.0;
+      this._dazzlePeak = 0.0;
+    }
+
+    this._dazzle = Math.max(0.0, Math.min(1.0, this._dazzle));
+    this.debugState.dazzle = this._dazzle;
+  }
+
+  _applyToDazzleOverlay() {
+    const de = this;
+    const e = window.MapShine?.dazzleOverlayEffect;
+    if (!e?.params) return;
+
+    const k = (de.params.enabled && de.params.dazzleEnabled !== false) ? (de._dazzle || 0.0) : 0.0;
+
+    e.params.intensity = k;
+    // Keep this effect disabled unless it's actually visible.
+    e.enabled = k > 0.002;
+  }
+
   _applyToColorCorrection() {
     const cc = this.colorCorrectionEffect ?? window.MapShine?.colorCorrectionEffect;
     if (!cc?.params) return;
@@ -432,6 +626,25 @@ export class DynamicExposureManager {
 
     const dt = Math.min(0.25, Math.max(0.0, Number(timeInfo?.delta) || 0.0));
 
+    // If the token is currently animating, do NOT probe/switch states as it
+    // crosses many tiles. We'll sample once when the movement finishes.
+    const isAnimating = !!(this.tokenManager?.isTokenAnimating?.(this._subjectTokenId));
+    if (this._wasSubjectAnimating && !isAnimating) {
+      // Movement just ended: force an immediate probe next update.
+      const hz = Math.max(0.1, Number(this.params?.probeHz) || 8);
+      const interval = 1.0 / hz;
+      this._probeTimer = interval;
+    }
+    this._wasSubjectAnimating = isAnimating;
+
+    if (isAnimating) {
+      // Keep applying the existing exposure smoothly (decay continues), but
+      // freeze inputs (luma/outdoors) and avoid dazzle triggers during motion.
+      this._decayAndApplyExposure(dt);
+      this._applyToColorCorrection();
+      return;
+    }
+
     // Compute outdoors under the token (CPU lookup).
     let outdoors = 1.0;
     try {
@@ -465,6 +678,10 @@ export class DynamicExposureManager {
     this._updateDazzleImpulse(outdoors);
     this._decayAndApplyExposure(dt);
     this._applyToColorCorrection();
+
+    // Fullscreen dazzle overlay
+    this._updateDazzleOverlay(dt, outdoors);
+    this._applyToDazzleOverlay();
   }
 
   dispose() {

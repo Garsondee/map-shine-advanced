@@ -31,6 +31,11 @@ export class CloudEffect extends EffectBase {
     this.priority = 5; // Before OverheadShadowsEffect (10)
     this.alwaysRender = true;
 
+    // Clouds are time-based animation (wind drift + procedural noise time).
+    // If we allow RenderLoop idle throttling, clouds will appear to only move
+    // during camera motion (since that's when the pipeline re-renders).
+    this.requiresContinuousRender = true;
+
     /** @type {THREE.ShaderMaterial|null} */
     this.densityMaterial = null;
 
@@ -120,7 +125,7 @@ export class CloudEffect extends EffectBase {
 
       // Performance
       internalResolutionScale: 0.5,
-      updateEveryNFrames: 3,
+      updateEveryNFrames: 1,
 
       // Cloud generation
       cloudCover: 0.5,        // Base cloud coverage (0-1), driven by WeatherController
@@ -298,6 +303,15 @@ export class CloudEffect extends EffectBase {
     this._lastElapsed = 0;
 
     this._cloudTopDensityValid = false;
+  }
+
+  isActive() {
+    // Only force continuous rendering while clouds are enabled and weather isn't globally disabled.
+    // (If weather is disabled, CloudEffect.render() produces neutral textures and we don't need
+    // per-frame updates.)
+    if (!this.enabled) return false;
+    if (weatherController && weatherController.enabled === false) return false;
+    return true;
   }
 
   requestUpdate(frames = 2) {
@@ -2262,83 +2276,10 @@ export class CloudEffect extends EffectBase {
     const previousLayersMask = this.mainCamera?.layers?.mask;
 
     try {
-      // Temporal slicing (motion-aware): when the camera is moving we must update every frame
-      // to avoid the perception of lag/jitter. When stable, skip heavy passes.
-      const n = (this.params && typeof this.params.updateEveryNFrames === 'number')
-        ? (this.params.updateEveryNFrames | 0)
-        : 1;
-      const updateEvery = Math.max(1, n);
-
-      const currentZoom = this._getEffectiveZoom();
-      const cam = this.mainCamera || camera;
-      const camX = cam?.position?.x ?? 0;
-      const camY = cam?.position?.y ?? 0;
-
-    // View-bounds stability check: camera position/zoom alone is not sufficient.
-    // The shader is pinned to uViewBoundsMin/Max (derived from viewport size + zoom),
-    // which can change during startup/layout resize even if the camera doesn't move.
-    const ubMin = this.densityMaterial?.uniforms?.uViewBoundsMin?.value;
-    const ubMax = this.densityMaterial?.uniforms?.uViewBoundsMax?.value;
-    const viewMinX = (ubMin && Number.isFinite(ubMin.x)) ? ubMin.x : null;
-    const viewMinY = (ubMin && Number.isFinite(ubMin.y)) ? ubMin.y : null;
-    const viewMaxX = (ubMax && Number.isFinite(ubMax.x)) ? ubMax.x : null;
-    const viewMaxY = (ubMax && Number.isFinite(ubMax.y)) ? ubMax.y : null;
-
-    // Use a sub-pixel threshold in screen space so we don't skip updates during slow/smooth pans.
-    // If we skip while the view is moving, the world-pinned mapping in the density pass will lag
-    // behind the camera and look like jitter.
-    const moveThresholdPx = 0.25;
-    const zoomThreshold = 1e-5;
-
-    let moved = false;
-    if (this._lastCamX !== null && this._lastCamY !== null && this._lastCamZoom !== null) {
-      const dx = camX - this._lastCamX;
-      const dy = camY - this._lastCamY;
-      const dxPx = dx * currentZoom;
-      const dyPx = dy * currentZoom;
-      const d2Px = dxPx * dxPx + dyPx * dyPx;
-      if (d2Px > (moveThresholdPx * moveThresholdPx)) moved = true;
-      if (Math.abs(currentZoom - this._lastCamZoom) > zoomThreshold) moved = true;
-    } else {
-      moved = true;
-    }
-
-    // Also treat changes in computed view bounds as movement.
-    // This prevents long stalls where clouds don't refresh until updateEveryNFrames
-    // after the viewport size or base viewport dims settle.
-    if (viewMinX !== null && viewMinY !== null && viewMaxX !== null && viewMaxY !== null) {
-      if (this._lastViewMinX !== null && this._lastViewMinY !== null && this._lastViewMaxX !== null && this._lastViewMaxY !== null) {
-        const dvMinXPx = (viewMinX - this._lastViewMinX) * currentZoom;
-        const dvMinYPx = (viewMinY - this._lastViewMinY) * currentZoom;
-        const dvMaxXPx = (viewMaxX - this._lastViewMaxX) * currentZoom;
-        const dvMaxYPx = (viewMaxY - this._lastViewMaxY) * currentZoom;
-        const d2Px = dvMinXPx * dvMinXPx + dvMinYPx * dvMinYPx + dvMaxXPx * dvMaxXPx + dvMaxYPx * dvMaxYPx;
-        if (d2Px > (moveThresholdPx * moveThresholdPx)) moved = true;
-      } else {
-        moved = true;
-      }
-
-      this._lastViewMinX = viewMinX;
-      this._lastViewMinY = viewMinY;
-      this._lastViewMaxX = viewMaxX;
-      this._lastViewMaxY = viewMaxY;
-    }
-
-    this._lastCamX = camX;
-    this._lastCamY = camY;
-    this._lastCamZoom = currentZoom;
-
-    if (moved) {
-      this._motionCooldownFrames = 2;
-    } else if (this._motionCooldownFrames > 0) {
-      this._motionCooldownFrames--;
-    }
-
-    const viewIsStable = this._motionCooldownFrames === 0;
-
-    this._frameCounter = (this._frameCounter + 1) >>> 0;
-    const shouldUpdateThisFrame = (updateEvery <= 1) || !viewIsStable || (this._forceUpdateFrames > 0) || ((this._frameCounter % updateEvery) === 0);
-    const shouldRecomposeThisFrame = (this._forceRecomposeFrames > 0) || this._blockersDirty;
+      // Cloud shadows/tops look noticeably worse when temporally sliced.
+      // Always update every frame; keep requestUpdate/requestRecompose hooks for external callers.
+      const shouldUpdateThisFrame = true;
+      const shouldRecomposeThisFrame = (this._forceRecomposeFrames > 0) || this._blockersDirty;
 
     // If weather is disabled, clear textures to neutral values and skip all
     // simulation work.

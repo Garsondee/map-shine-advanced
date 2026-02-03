@@ -43,6 +43,7 @@ const EFFECT_MASKS = {
   roughness: { suffix: '_Roughness', required: false, description: 'Roughness/smoothness map' },
   normal: { suffix: '_Normal', required: false, description: 'Normal map for lighting detail' },
   fire: { suffix: '_Fire', required: false, description: 'Fire effect mask' },
+  ash: { suffix: '_Ash', required: false, description: 'Ash disturbance mask' },
   dust: { suffix: '_Dust', required: false, description: 'Dust motes mask' },
   outdoors: { suffix: '_Outdoors', required: false, description: 'Indoor/outdoor area mask' },
   iridescence: { suffix: '_Iridescence', required: false, description: 'Iridescence effect mask' },
@@ -54,6 +55,10 @@ const EFFECT_MASKS = {
   water: { suffix: '_Water', required: false, description: 'Water depth mask (data)' },
   // emissive: { suffix: '_Emissive', required: false, description: 'Self-illumination mask' }
 };
+
+// These masks gate many systems (specular, roof/outdoor logic, water, particles).
+// If a cached bundle is missing any of these, we should not trust the cache.
+const CRITICAL_MASK_IDS = new Set(['specular', 'outdoors']);
 
 export function getEffectMaskRegistry() {
   return EFFECT_MASKS;
@@ -72,13 +77,15 @@ const assetCache = new Map();
  * @param {Object} [options] - Loading options
  * @param {boolean} [options.skipBaseTexture=false] - Skip loading base texture (if already loaded by Foundry)
  * @param {boolean} [options.suppressProbeErrors=false] - Suppress probe errors when called from UI
+ * @param {boolean} [options.bypassCache=false] - Bypass the asset cache (forces a reload/probe)
  * @returns {Promise<AssetLoadResult>} Loaded asset bundle
  * @public
  */
 export async function loadAssetBundle(basePath, onProgress = null, options = {}) {
   const {
     skipBaseTexture = false,
-    suppressProbeErrors = false
+    suppressProbeErrors = false,
+    bypassCache = false
   } = options || {};
   log.info(`Loading asset bundle: ${basePath}${skipBaseTexture ? ' (masks only)' : ''}`);
 
@@ -91,20 +98,37 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
   try {
     // Check cache first
     const cacheKey = `${basePath}::${skipBaseTexture ? 'masks' : 'full'}`;
-    if (assetCache.has(cacheKey)) {
+    if (!bypassCache && assetCache.has(cacheKey)) {
       const cached = assetCache.get(cacheKey);
       const cachedMaskCount = Array.isArray(cached?.masks) ? cached.masks.length : 0;
       // If the cached bundle has no masks, it may have been produced when
       // FilePicker browsing was unavailable (common on player clients). Bypass
       // cache so we can probe known suffix filenames directly.
       if (cachedMaskCount > 0) {
-        log.debug('Using cached asset bundle');
-        return {
-          success: true,
-          bundle: cached,
-          warnings: [],
-          error: null
-        };
+        // Only trust cache if it contains all critical masks.
+        // If a critical mask was missing due to a transient FilePicker issue,
+        // we must re-probe so the effect can become active.
+        const cachedIds = new Set(
+          cached.masks
+            .map((m) => String(m?.id || m?.type || '').toLowerCase())
+            .filter(Boolean)
+        );
+
+        const missingCritical = Array.from(CRITICAL_MASK_IDS).filter((id) => !cachedIds.has(id));
+        if (missingCritical.length === 0) {
+          log.debug('Using cached asset bundle');
+          return {
+            success: true,
+            bundle: cached,
+            warnings: [],
+            error: null
+          };
+        }
+
+        log.warn('Cached asset bundle missing critical masks; reloading', {
+          basePath,
+          missingCritical
+        });
       }
     }
 
@@ -149,19 +173,26 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
     const maskEntries = Object.entries(EFFECT_MASKS);
     let loaded = skipBaseTexture ? 0 : 1;
     const totalMasks = maskEntries.length;
-    
+
     const maskPromises = maskEntries.map(async ([maskId, maskDef]) => {
       await semaphore.acquire();
       try {
-        // Report progress
-        if (onProgress) {
+        // Check if this mask exists in discovered files
+        const maskFile = findMaskInFiles(availableFiles, basePath, maskDef.suffix);
+
+        // Fast-path: if an optional water mask is not present, skip the loading step entirely
+        // so we don't stall on a map that doesn't use water at all.
+        if (!maskFile && maskId === 'water' && !maskDef.required) {
+          loaded++;
+          return null;
+        }
+
+        // Report progress for masks we actually attempt to load (or required misses).
+        if (onProgress && (maskFile || maskDef.required)) {
           const current = loaded;
           onProgress(current, totalMasks + 1, maskDef.description);
         }
         loaded++;
-
-        // Check if this mask exists in discovered files
-        const maskFile = findMaskInFiles(availableFiles, basePath, maskDef.suffix);
 
         let maskTexture = null;
         let resolvedMaskPath = null;
@@ -193,21 +224,6 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
             warnings.push(msg);
             maskTexture = null;
           }
-        } else if (!availableFiles.length) {
-          // Some storage backends and client contexts cannot browse directories via
-          // FilePicker (or return an empty list). In that case we still want suffix
-          // masks to work if the user has placed them at the expected filenames.
-          //
-          // Probe is best-effort and should be quiet when suppressProbeErrors is true.
-          try {
-            const probed = await probeMaskTexture(basePath, maskDef.suffix, suppressProbeErrors);
-            if (probed) {
-              resolvedMaskPath = probed.path;
-              maskTexture = probed.texture;
-            }
-          } catch (e) {
-            // Probing is best-effort; ignore errors.
-          }
         }
 
         if (maskTexture) {
@@ -221,6 +237,9 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
           }
 
           if (!isColorTexture) {
+            // Mask UVs are authored in scene-UV space (top-left origin). Keep flipY=false
+            // and rely on shader-side V inversion so all mask sampling is consistent.
+            maskTexture.flipY = false;
             maskTexture.generateMipmaps = false;
             maskTexture.minFilter = THREE.LinearFilter;
             maskTexture.magFilter = THREE.LinearFilter;
@@ -232,6 +251,7 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
             id: maskId,
             suffix: maskDef.suffix,
             type: maskId,
+            path: resolvedMaskPath,
             texture: maskTexture,
             required: maskDef.required
           };
@@ -318,18 +338,40 @@ async function loadBaseTexture(basePath) {
 }
 
 async function probeMaskTexture(basePath, suffix, suppressProbeErrors = false) {
-  for (const format of SUPPORTED_FORMATS) {
-    if (format === 'jpeg') continue;
-    const path = `${basePath}${suffix}.${format}`;
-    try {
-      const texture = await loadTextureAsync(path, suppressProbeErrors);
-      if (texture) {
-        return { path, texture };
-      }
-    } catch (e) {
-    }
-  }
+  // IMPORTANT: Do not issue any network probing requests (HEAD/GET) for optional
+  // masks. Some hosting setups surface these as noisy "errors" in the browser.
+  // Runtime mask loading should be driven by FilePicker discovery only.
+  //
+  // This helper is retained for backwards-compatibility but intentionally does
+  // not attempt to load any asset.
+  void basePath;
+  void suffix;
+  void suppressProbeErrors;
   return null;
+}
+
+/**
+ * Probe for a mask file by attempting to load the expected suffix filename.
+ * This is intended for diagnostics and edge-case recovery.
+ *
+ * @param {string} basePath
+ * @param {string} suffix
+ * @param {{suppressProbeErrors?: boolean}} [options]
+ * @returns {Promise<{path: string} | null>}
+ */
+export async function probeMaskFile(basePath, suffix, options = {}) {
+  // IMPORTANT: This must not generate network requests for missing files.
+  // We only report a mask as present if FilePicker directory listing includes it.
+  void options;
+  try {
+    const availableFiles = await discoverAvailableFiles(basePath);
+    if (!Array.isArray(availableFiles) || availableFiles.length === 0) return null;
+    const maskFile = findMaskInFiles(availableFiles, basePath, suffix);
+    if (!maskFile) return null;
+    return { path: maskFile };
+  } catch (_) {
+    return null;
+  }
 }
 
 /**

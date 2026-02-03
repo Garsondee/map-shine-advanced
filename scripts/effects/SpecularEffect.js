@@ -41,6 +41,9 @@ export class SpecularEffect extends EffectBase {
     /** @type {THREE.ShaderMaterial|null} */
     this.material = null;
 
+    /** @type {string[]} */
+    this.validationErrors = [];
+
     /** @type {Set<THREE.ShaderMaterial>} */
     this._materials = new Set();
 
@@ -781,7 +784,17 @@ export class SpecularEffect extends EffectBase {
     }
     try {
       entry.mesh.matrix.copy(sprite.matrixWorld);
-      entry.mesh.visible = !!sprite.visible;
+      // Keep overlay visibility in sync with the underlying tile sprite.
+      // IMPORTANT: Tile hover-hide fades via sprite.material.opacity without toggling sprite.visible.
+      // If we only mirror sprite.visible here, the specular overlay can remain visible
+      // while the tile has faded out, which looks like a "second copy" that won't disappear.
+      let spriteOpacity = 1.0;
+      try {
+        const o = sprite?.material?.opacity;
+        if (typeof o === 'number' && Number.isFinite(o)) spriteOpacity = o;
+      } catch (_) {
+      }
+      entry.mesh.visible = !!sprite.visible && spriteOpacity > 0.01;
 
       // Keep layering/sorting in sync. Tile renderOrder and layers can change
       // after initial bind during scene sync, elevation transitions, etc.
@@ -1279,6 +1292,32 @@ export class SpecularEffect extends EffectBase {
       if (mat.uniforms.uStripe3Softness) mat.uniforms.uStripe3Softness.value = this.params.stripe3Softness;
     }
 
+    // Keep per-tile overlay visibility synced with tile hover fading.
+    // Tile hover-hide is driven by sprite.material.opacity, not sprite.visible, so
+    // we must re-evaluate overlay visibility each frame (not only on transform sync).
+    try {
+      if (this._tileOverlays && this._tileOverlays.size > 0) {
+        for (const entry of this._tileOverlays.values()) {
+          const mesh = entry?.mesh;
+          const sprite = entry?.sprite;
+          if (!mesh || !sprite) continue;
+
+          let spriteOpacity = 1.0;
+          try {
+            const o = sprite?.material?.opacity;
+            if (typeof o === 'number' && Number.isFinite(o)) spriteOpacity = o;
+          } catch (_) {
+          }
+
+          // Mirror the same cutoff used by TileManager for depthWrite and by
+          // SpecularEffect._syncTileOverlayTransform.
+          const shouldShow = !!sprite.visible && spriteOpacity > 0.01;
+          if (mesh.visible !== shouldShow) mesh.visible = shouldShow;
+        }
+      }
+    } catch (_) {
+    }
+
     // Update Foundry darkness level and ambient environment colors
     try {
       const scene = canvas?.scene;
@@ -1467,7 +1506,8 @@ export class SpecularEffect extends EffectBase {
       }
     } else {
       // Clear errors on success
-      if (this.validationErrors.length > 0) {
+      const errs = Array.isArray(this.validationErrors) ? this.validationErrors : [];
+      if (errs.length > 0) {
         log.info('Shader validation passed, errors cleared');
         this.validationErrors = [];
       }
@@ -1484,9 +1524,10 @@ export class SpecularEffect extends EffectBase {
    * @public
    */
   getValidationStatus() {
+    const errs = Array.isArray(this.validationErrors) ? this.validationErrors : [];
     return {
-      valid: this.validationErrors.length === 0,
-      errors: this.validationErrors
+      valid: errs.length === 0,
+      errors: errs
     };
   }
 

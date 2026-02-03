@@ -941,6 +941,7 @@ export class DistortionManager extends EffectBase {
       uniforms: {
         tScene: { value: null },
         tDistortion: { value: null },
+        tTokenMask: { value: null },
         tWaterMask: { value: null },
         tWaterData: { value: null },
         tWaterOccluderAlpha: { value: null },
@@ -1014,6 +1015,8 @@ export class DistortionManager extends EffectBase {
         uHasCloudShadow: { value: 0.0 },
         uHasWindowLight: { value: 0.0 },
 
+        uHasTokenMask: { value: 0.0 },
+
         // Environment gating (scene darkness + time-of-day vignette)
         uSceneDarkness: { value: 0.0 },
         uSkyVignetteStrength: { value: 0.0 },
@@ -1063,6 +1066,7 @@ export class DistortionManager extends EffectBase {
       fragmentShader: `
         uniform sampler2D tScene;
         uniform sampler2D tDistortion;
+        uniform sampler2D tTokenMask;
         uniform sampler2D tWaterMask;
         uniform sampler2D tWaterData;
         uniform sampler2D tWaterOccluderAlpha;
@@ -1130,6 +1134,8 @@ export class DistortionManager extends EffectBase {
         uniform float uHasOutdoorsMask;
         uniform float uHasCloudShadow;
         uniform float uHasWindowLight;
+
+        uniform float uHasTokenMask;
 
         uniform float uSceneDarkness;
         uniform float uSkyVignetteStrength;
@@ -1343,7 +1349,16 @@ export class DistortionManager extends EffectBase {
           float zoomNorm = clamp(zoom / zoomMax, 0.0, 1.0);
 
           float mask01 = clamp(mask, 0.0, 1.0);
-          vec2 scaledOffset = offset * zoomNorm * mask01;
+
+          // Tokens should not be distorted/tinted by post-process effects.
+          // tokenMask is authored in screen UV space, alpha = 1 inside token silhouette.
+          float tokenMask01 = 0.0;
+          if (uHasTokenMask > 0.5) {
+            tokenMask01 = smoothstep(0.1, 0.9, texture2D(tTokenMask, vUv).a);
+          }
+          float tokenKeep = 1.0 - tokenMask01;
+
+          vec2 scaledOffset = offset * zoomNorm * mask01 * tokenKeep;
 
           // Clamp maximum distortion in pixels. Also reduce the allowed pixel shift
           // when zoomed out so the effect doesn't dominate the scene.
@@ -1359,6 +1374,14 @@ export class DistortionManager extends EffectBase {
           vec2 distortedUv = safeClampUv(vUv + zoomedOffset);
           
           vec4 sceneColor = texture2D(tScene, distortedUv);
+
+          // If we are on a token pixel, skip all water shading (tint/chroma/caustics/foam)
+          // and return the undistorted scene. This prevents token edges picking up any
+          // sampling artifacts from distorted UVs.
+          if (tokenKeep < 0.5) {
+            gl_FragColor = texture2D(tScene, vUv);
+            return;
+          }
 
           // Water shading (tint/murk/sand/caustics/foam).
           // IMPORTANT: This must NOT be gated by chromatic refraction.
@@ -2316,6 +2339,22 @@ export class DistortionManager extends EffectBase {
       } catch (e) {
         if (au.tCloudShadow) au.tCloudShadow.value = null;
         if (au.uHasCloudShadow) au.uHasCloudShadow.value = 0.0;
+      }
+
+      // Token mask (LightingEffect tokenMaskTarget, published via MaskManager).
+      // This is screen-space and is used to prevent distortion + water shading from affecting tokens.
+      try {
+        const mm = window.MapShine?.maskManager;
+        let tokenMaskTex = mm ? mm.getTexture('tokenMask.screen') : null;
+        if (!tokenMaskTex) {
+          const le = window.MapShine?.lightingEffect;
+          tokenMaskTex = le?.tokenMaskTarget?.texture || null;
+        }
+        if (au.tTokenMask) au.tTokenMask.value = tokenMaskTex;
+        if (au.uHasTokenMask) au.uHasTokenMask.value = tokenMaskTex ? 1.0 : 0.0;
+      } catch (_) {
+        if (au.tTokenMask) au.tTokenMask.value = null;
+        if (au.uHasTokenMask) au.uHasTokenMask.value = 0.0;
       }
 
       // Window light brightness (WindowLightEffect light target alpha)

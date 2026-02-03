@@ -331,6 +331,10 @@ export class IridescenceEffect extends EffectBase {
     this.material = new THREE.ShaderMaterial({
       uniforms: {
         uIridescenceMask: { value: this.iridescenceMask },
+        // Screen-space overhead/roof alpha map from LightingEffect.
+        // Used to ensure Iridescence never renders "above" overhead tiles.
+        uRoofAlphaMap: { value: null },
+        uHasRoofAlphaMap: { value: 0.0 },
         uTime: { value: 0.0 },
         uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
 
@@ -382,7 +386,8 @@ export class IridescenceEffect extends EffectBase {
 
     // Slight offset to prevent z-fighting (though Additive + DepthWrite False helps)
     // We'll use renderOrder to ensure it draws after base
-    this.mesh.renderOrder = 10; // Base is usually 0
+    // TileManager uses renderOrder=10 for overhead tiles; keep Iridescence below that so roofs occlude it.
+    this.mesh.renderOrder = 5; // Base is usually 0
 
     // Add to scene
     this.scene.add(this.mesh);
@@ -585,6 +590,25 @@ export class IridescenceEffect extends EffectBase {
     this.mesh.visible = this._enabled;
     if (!this._enabled) return;
 
+    // Sync roof alpha map (screen-space) from LightingEffect.
+    // This prevents Iridescence from "floating" above overhead tiles when the
+    // roof sprite depthWrite is disabled during hover-fade.
+    try {
+      const le = window.MapShine?.lightingEffect;
+      const tex = le?.roofAlphaTarget?.texture || null;
+      const has = tex ? 1.0 : 0.0;
+      const u = this.material.uniforms;
+      if (u.uRoofAlphaMap) u.uRoofAlphaMap.value = tex;
+      if (u.uHasRoofAlphaMap) u.uHasRoofAlphaMap.value = has;
+      // Keep resolution aligned to the roof alpha target when available.
+      const w = le?.roofAlphaTarget?.width;
+      const h = le?.roofAlphaTarget?.height;
+      if (tex && Number.isFinite(w) && Number.isFinite(h) && u.uResolution?.value?.set) {
+        u.uResolution.value.set(w, h);
+      }
+    } catch (_) {
+    }
+
     // Update uniforms
     this.material.uniforms.uTime.value = timeInfo.elapsed;
     this.material.uniforms.uIntensity.value = this.params.intensity;
@@ -720,6 +744,8 @@ export class IridescenceEffect extends EffectBase {
   getFragmentShader() {
     return `
       uniform sampler2D uIridescenceMask;
+      uniform sampler2D uRoofAlphaMap;
+      uniform float uHasRoofAlphaMap;
       uniform float uTime;
       uniform vec2 uResolution;
 
@@ -758,6 +784,15 @@ export class IridescenceEffect extends EffectBase {
       }
 
       void main() {
+        // If a roof alpha map is available, use it as authoritative occlusion.
+        // This is screen-space, matching how roofs are sampled/hidden.
+        if (uHasRoofAlphaMap > 0.5) {
+          vec2 roofUV = gl_FragCoord.xy / uResolution.xy;
+          float roofA = texture2D(uRoofAlphaMap, roofUV).a;
+          // If a roof pixel is present on screen, Iridescence should not draw there.
+          if (roofA > 0.05) discard;
+        }
+
         // 1. Get mask value (luminance from R channel)
         float rawMask = texture2D(uIridescenceMask, vUv).r;
 

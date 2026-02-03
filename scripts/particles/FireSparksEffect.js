@@ -529,6 +529,23 @@ export class FireSparksEffect extends EffectBase {
       // Updated default from scene: Time Scale = 3.0
       timeScale: 3.0,
 
+      // ========== ZOOM-BASED PARTICLE LOD ==========
+      // Rendering lots of fire can get expensive when zoomed out because many
+      // emitters remain visible at once. This LOD scales emission down as the
+      // camera zoom decreases (zoomed-out).
+      //
+      // IMPORTANT: This only reduces density; it never increases emission when
+      // zoomed-in. (Multiplier clamps to 1.0 at zoom >= 1.0.)
+      zoomLodEnabled: true,
+      // Zoom level at which LOD reaches the minimum multiplier.
+      // Example: 0.5 means "at half zoom and below, emit at min multiplier".
+      zoomLodMinZoom: 0.5,
+      // Minimum emission multiplier when zoomed out.
+      zoomLodMinMultiplier: 0.25,
+      // Curve exponent for the blend between minMultiplier and 1.0.
+      // Higher = more aggressive reduction as you zoom out.
+      zoomLodCurve: 2.0,
+
       // ========== HEAT DISTORTION CONTROLS ==========
       // Heat distortion creates a rippling heat haze effect around fire sources
       heatDistortionEnabled: false,
@@ -2128,6 +2145,24 @@ export class FireSparksEffect extends EffectBase {
     const timeScale = Math.max(0.1, p?.timeScale ?? 1.0);
     const effectiveTimeScale = timeScale * (0.8 + 0.4 * temp);
 
+    // Zoom-based particle LOD (reduce emission as we zoom out).
+    // Uses SceneComposer's authoritative zoom value.
+    const sceneZoom = (window.MapShine?.sceneComposer && typeof window.MapShine.sceneComposer.currentZoom === 'number')
+      ? window.MapShine.sceneComposer.currentZoom
+      : 1.0;
+
+    let zoomEmissionMult = 1.0;
+    if (p?.zoomLodEnabled) {
+      const minZoom = Math.max(0.01, Math.min(1.0, p.zoomLodMinZoom ?? 0.5));
+      const minMult = Math.max(0.0, Math.min(1.0, p.zoomLodMinMultiplier ?? 0.25));
+      const curve = Math.max(0.01, p.zoomLodCurve ?? 2.0);
+
+      // Clamp to [minZoom, 1.0] so we never *increase* emission beyond baseline.
+      const z = Math.max(minZoom, Math.min(1.0, Number.isFinite(sceneZoom) ? sceneZoom : 1.0));
+      const t = (z - minZoom) / Math.max(0.0001, (1.0 - minZoom));
+      zoomEmissionMult = minMult + (1.0 - minMult) * Math.pow(Math.max(0.0, Math.min(1.0, t)), curve);
+    }
+
     // 3. Environment & Bounds Logic
     const influence = (p && typeof p.windInfluence === 'number')
       ? p.windInfluence
@@ -2221,7 +2256,7 @@ export class FireSparksEffect extends EffectBase {
       const emissionScale = (sys.userData && Number.isFinite(sys.userData._msEmissionScale))
         ? sys.userData._msEmissionScale
         : 1.0;
-      const baseRate = 200.0 * (p2.globalFireRate ?? 0) * effectiveTimeScale;
+      const baseRate = 200.0 * (p2.globalFireRate ?? 0) * effectiveTimeScale * zoomEmissionMult;
       if (sys.emissionOverTime && typeof sys.emissionOverTime.a === 'number') {
         const r = baseRate * Math.max(0.0, emissionScale);
         sys.emissionOverTime.a = r * 0.8;
@@ -2230,7 +2265,7 @@ export class FireSparksEffect extends EffectBase {
 
       // Ember density is separate from fire density.
       if (isEmber && sys.emissionOverTime && typeof sys.emissionOverTime.a === 'number') {
-        const emberBase = 40.0 * (p2.emberRate ?? 0) * effectiveTimeScale;
+        const emberBase = 40.0 * (p2.emberRate ?? 0) * effectiveTimeScale * zoomEmissionMult;
         const r = emberBase * Math.max(0.0, emissionScale);
         sys.emissionOverTime.a = r * 0.6;
         sys.emissionOverTime.b = r * 1.0;

@@ -9,6 +9,7 @@ import { stateApplier } from './state-applier.js';
 import { globalValidator, getSpecularEffectiveState, getStripeDependencyState } from './parameter-validator.js';
 import { TextureManagerUI } from './texture-manager.js';
 import { EffectStackUI } from './effect-stack.js';
+import { DiagnosticCenterManager } from './diagnostic-center.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../effects/EffectComposer.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import Coordinates from '../utils/coordinates.js';
@@ -125,6 +126,9 @@ export class TweakpaneManager {
 
     /** @type {EffectStackUI|null} */
     this.effectStack = null;
+
+    /** @type {DiagnosticCenterManager|null} */
+    this.diagnosticCenter = null;
 
     /** @type {number} UI scale factor */
     this.uiScale = 1.0;
@@ -384,6 +388,10 @@ export class TweakpaneManager {
     // Initialize Effect Stack
     this.effectStack = new EffectStackUI();
     await this.effectStack.initialize();
+
+    // Initialize Diagnostic Center
+    this.diagnosticCenter = new DiagnosticCenterManager();
+    await this.diagnosticCenter.initialize();
 
     // Start hidden by default for release; can be opened via the scene control button.
     this.hide();
@@ -800,6 +808,15 @@ export class TweakpaneManager {
     }).on('click', () => {
       if (this.effectStack) {
         this.effectStack.toggle();
+      }
+    });
+
+    globalFolder.addButton({
+      title: 'Open Diagnostic Center',
+      label: 'Tools'
+    }).on('click', () => {
+      if (this.diagnosticCenter) {
+        this.diagnosticCenter.toggle();
       }
     });
 
@@ -1677,6 +1694,7 @@ export class TweakpaneManager {
         water: 'Water',
         structure: 'Objects & Structures',
         particle: 'Particles & VFX',
+        ash: 'Ash',
         global: 'Global & Post',
         debug: 'Debug'
       };

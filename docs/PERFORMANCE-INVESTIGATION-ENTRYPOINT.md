@@ -353,7 +353,7 @@ From `createThreeCanvas(scene)`:
 - `interactionManager`
 - `overlayUIManager`
 - `lightRingUI`
-- `lightAnimDialog`
+- `lightEditor`
 - `cameraFollower`
 
 Separately:

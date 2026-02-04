@@ -100,12 +100,9 @@ export class ControlsIntegration {
       const layerName = canvas.activeLayer?.name || canvas.activeLayer?.constructor?.name || '';
       const showLighting = (layerName === 'LightingLayer' || layerName === 'lighting') && !isMapMakerMode;
 
-      const tool = ui?.controls?.tool?.name ?? game.activeTool;
-      const mapshineToolActive = tool === 'map-shine-enhanced-light' || tool === 'map-shine-sun-light';
-
       const lightIconManager = window.MapShine?.lightIconManager;
       if (lightIconManager?.setVisibility) {
-        lightIconManager.setVisibility(showLighting && !mapshineToolActive);
+        lightIconManager.setVisibility(showLighting);
       }
 
       const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;

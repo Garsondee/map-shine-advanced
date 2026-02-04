@@ -86,11 +86,7 @@ export class InputRouter {
      */
     this.threeOnlyTools = new Set([
       // Token tools handled by Three.js
-      'target',
-      // MapShine enhanced light tool handled by Three.js InteractionManager
-      'map-shine-enhanced-light',
-      // MapShine Sun Light tool handled by Three.js InteractionManager
-      'map-shine-sun-light'
+      'target'
     ]);
     
     /**

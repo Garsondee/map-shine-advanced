@@ -154,6 +154,76 @@ export class LightingEffect extends EffectBase {
 
     /** @type {Array<{hook: string, fn: Function}>} */
     this._hookRegistrations = [];
+
+    /** @type {number|null} */
+    this._syncRetryTimeoutId = null;
+    this._syncFailCount = 0;
+  }
+
+  _getFoundryLightDocById(id) {
+    if (!id) return null;
+
+    const key = String(id);
+
+    try {
+      const doc = canvas?.scene?.lights?.get?.(key);
+      if (doc) return doc;
+    } catch (_) {
+    }
+
+    try {
+      const placeable = canvas?.lighting?.get?.(key);
+      const doc = placeable?.document;
+      if (doc) return doc;
+    } catch (_) {
+    }
+
+    try {
+      const placeable = canvas?.lighting?.placeables?.find?.((p) => String(p?.document?.id) === key);
+      const doc = placeable?.document;
+      if (doc) return doc;
+    } catch (_) {
+    }
+
+    return null;
+  }
+
+  _getFoundryEnhancementConfigFallback(id) {
+    if (!id) return null;
+    const scene = canvas?.scene;
+    if (!scene) return null;
+
+    let raw;
+    try {
+      // Prefer Foundry's flag accessor; during early initialization the flags
+      // may not be fully materialized on scene.flags yet, but getFlag works.
+      raw = scene.getFlag?.('map-shine-advanced', 'lightEnhancements');
+    } catch (_) {
+      raw = null;
+    }
+
+    if (raw === null || raw === undefined) {
+      try {
+        raw = scene?.flags?.['map-shine-advanced']?.lightEnhancements;
+      } catch (_) {
+        raw = null;
+      }
+    }
+
+    const container = Array.isArray(raw)
+      ? { lights: raw }
+      : (raw && typeof raw === 'object')
+        ? raw
+        : null;
+
+    const list = Array.isArray(container?.lights)
+      ? container.lights
+      : (Array.isArray(container?.items) ? container.items : []);
+
+    const entry = list.find?.((e) => String(e?.id ?? '') === String(id)) ?? null;
+    const cfg = entry?.config ?? entry;
+    if (cfg && typeof cfg === 'object') return cfg;
+    return null;
   }
 
   static getControlSchema() {
@@ -677,7 +747,6 @@ export class LightingEffect extends EffectBase {
       depthTest: false,
       transparent: false,
     });
-    this.debugLightBufferMaterial.toneMapped = false;
 
     this.debugRopeMaskMaterial = new THREE.ShaderMaterial({
       uniforms: {
@@ -702,7 +771,6 @@ export class LightingEffect extends EffectBase {
       depthTest: false,
       transparent: false,
     });
-    this.debugRopeMaskMaterial.toneMapped = false;
 
     this.debugDarknessBufferMaterial = new THREE.ShaderMaterial({
       uniforms: {
@@ -742,7 +810,6 @@ export class LightingEffect extends EffectBase {
       depthTest: false,
       transparent: false,
     });
-    this.debugDarknessBufferMaterial.toneMapped = false;
 
     this._quadMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.compositeMaterial);
     this.quadScene.add(this._quadMesh);
@@ -771,7 +838,8 @@ export class LightingEffect extends EffectBase {
     Hooks.on('lightingRefresh', lightingRefreshHandler);
     this._hookRegistrations.push({ hook: 'lightingRefresh', fn: lightingRefreshHandler });
     
-    // Watch for scene-flag updates which might modify MapShine-native enhanced lights.
+    // Watch for scene-flag updates which might modify MapShine-native enhanced lights
+    // or Foundry-first light enhancements.
     const updateSceneHandler = (sceneDoc, changes) => {
       try {
         if (!sceneDoc || !canvas?.scene) return;
@@ -783,6 +851,15 @@ export class LightingEffect extends EffectBase {
         if (!flagKeyChanged && !namespaceChanged) return;
 
         this._reloadMapshineLightsFromScene();
+
+        const enhancementStore = window.MapShine?.lightEnhancementStore;
+        if (enhancementStore && typeof enhancementStore.load === 'function') {
+          enhancementStore.load(sceneDoc)
+            .then(() => {
+              canvas?.lighting?.placeables?.forEach?.((p) => this.onLightUpdate(p.document));
+            })
+            .catch(() => {});
+        }
       } catch (_) {
       }
     };
@@ -799,22 +876,60 @@ export class LightingEffect extends EffectBase {
     const a = entity.animation;
     const dr = entity.darknessResponse;
 
+    // 1) Defaults/snapshot values from the MapShine entity (scene flags)
+    let x = entity.transform?.x ?? 0;
+    let y = entity.transform?.y ?? 0;
+
+    let dim = entity.photometry?.dim ?? 0;
+    let bright = entity.photometry?.bright ?? 0;
+    let attenuation = entity.photometry?.attenuation ?? 0.5;
+    let alpha = entity.photometry?.alpha ?? 0.5;
+    let luminosity = entity.photometry?.luminosity ?? 0.5;
+    let color = entity.color;
+
+    // 2) Critical: if this MapShine light is linked to a Foundry light, override
+    // the snapshot physical light properties with the live Foundry document.
+    // Enhancements (cookie/output shaping) still come from flags.
+    if (entity.linkedFoundryLightId) {
+      const doc = this._getFoundryLightDocById(entity.linkedFoundryLightId);
+      if (doc) {
+        x = Number(doc?.x ?? x);
+        y = Number(doc?.y ?? y);
+
+        const c = doc?.config ?? {};
+        dim = Number(c?.dim ?? dim);
+        bright = Number(c?.bright ?? bright);
+        if (Number.isFinite(c?.attenuation)) attenuation = c.attenuation;
+        if (Number.isFinite(c?.alpha)) alpha = c.alpha;
+        if (Number.isFinite(c?.luminosity)) luminosity = c.luminosity;
+        if (c?.color !== undefined) color = c.color;
+      }
+    }
+
+    const hasCookieTex = (typeof entity.cookieTexture === 'string' && entity.cookieTexture.trim());
+    const cookieEnabled = (entity.cookieEnabled === true) || (entity.cookieEnabled === undefined && !!hasCookieTex);
+
     return {
       id,
-      x: entity.transform?.x ?? 0,
-      y: entity.transform?.y ?? 0,
+      x,
+      y,
       config: {
-        dim: entity.photometry?.dim ?? 0,
-        bright: entity.photometry?.bright ?? 0,
-        attenuation: entity.photometry?.attenuation ?? 0.5,
-        alpha: entity.photometry?.alpha ?? 0.5,
-        luminosity: entity.photometry?.luminosity ?? 0.5,
-        color: entity.color,
+        dim,
+        bright,
+        attenuation,
+        alpha,
+        luminosity,
+        color,
+
+        // MapShine-only shaping
         outputGain: entity.outputGain,
         outerWeight: entity.outerWeight,
         innerWeight: entity.innerWeight,
+
         darknessResponse: (dr && typeof dr === 'object') ? { ...dr } : undefined,
-        cookieEnabled: entity.cookieEnabled === true,
+
+        // Cookie params always come from flags
+        cookieEnabled,
         cookieTexture: entity.cookieTexture,
         cookieRotation: entity.cookieRotation,
         cookieScale: entity.cookieScale,
@@ -824,6 +939,7 @@ export class LightingEffect extends EffectBase {
         cookieGamma: entity.cookieGamma,
         cookieInvert: entity.cookieInvert === true,
         cookieColorize: entity.cookieColorize === true,
+
         animation: (a && typeof a === 'object')
           ? { ...a, type: a.type ?? null }
           : {}
@@ -1162,7 +1278,68 @@ export class LightingEffect extends EffectBase {
   }
 
   syncAllLights() {
-    if (!canvas.lighting) return;
+    // During Foundry startup, LightingEffect.initialize() can run before the lighting
+    // layer has finished constructing its placeables. If we sync too early, we can
+    // miss applying enhancements (cookies) until a later user-driven update.
+    // Make this deterministic by retrying briefly and falling back to scene docs.
+    let lightingReady = false;
+    let docs = [];
+
+    try {
+      const placeables = canvas?.lighting?.placeables;
+      if (Array.isArray(placeables) && placeables.length > 0) {
+        lightingReady = true;
+        docs = placeables.map((p) => p?.document).filter(Boolean);
+      }
+    } catch (_) {
+    }
+
+    // Fallback: build from scene light documents even if placeables aren't ready yet.
+    // This ensures cookies/enhancements can still apply on first render.
+    if (docs.length === 0) {
+      try {
+        const sceneLights = canvas?.scene?.lights;
+        const list = Array.isArray(sceneLights?.contents)
+          ? sceneLights.contents
+          : (typeof sceneLights?.forEach === 'function')
+            ? (() => {
+              const tmp = [];
+              sceneLights.forEach((d) => tmp.push(d));
+              return tmp;
+            })()
+            : [];
+        if (list.length > 0) docs = list;
+      } catch (_) {
+      }
+    }
+
+    // If we still don't have any docs but the scene claims there are lights, retry.
+    // This catches the common race where placeables are created just after we initialize.
+    try {
+      const expected = Number(canvas?.scene?.lights?.size ?? 0);
+      const haveAny = docs.length > 0;
+      if (!haveAny && expected > 0) {
+        this._syncFailCount = Math.min(20, (this._syncFailCount || 0) + 1);
+        const delayMs = Math.min(4000, 100 * Math.pow(2, Math.max(0, this._syncFailCount - 1)));
+        if (this._syncRetryTimeoutId !== null) {
+          try { clearTimeout(this._syncRetryTimeoutId); } catch (_) {}
+          this._syncRetryTimeoutId = null;
+        }
+        this._syncRetryTimeoutId = setTimeout(() => {
+          this.syncAllLights();
+        }, delayMs);
+        return;
+      }
+    } catch (_) {
+    }
+
+    // We reached a stable enough state to build lights; clear any pending retry.
+    if (this._syncRetryTimeoutId !== null) {
+      try { clearTimeout(this._syncRetryTimeoutId); } catch (_) {}
+      this._syncRetryTimeoutId = null;
+    }
+    this._syncFailCount = 0;
+
     this.lights.forEach(l => l.dispose());
     this.lights.clear();
     this.darknessSources.forEach(d => d.dispose());
@@ -1182,11 +1359,29 @@ export class LightingEffect extends EffectBase {
 
     this.lightRegistry.version++;
 
-    canvas.lighting.placeables.forEach(p => this.onLightUpdate(p.document));
+    // If placeables are ready, prefer them (they reflect visibility/hidden state);
+    // otherwise use the doc fallback gathered above.
+    if (lightingReady) {
+      try {
+        canvas.lighting.placeables.forEach(p => this.onLightUpdate(p.document));
+      } catch (_) {
+        docs.forEach((d) => this.onLightUpdate(d));
+      }
+    } else {
+      docs.forEach((d) => this.onLightUpdate(d));
+    }
+
+    // Ensure a frame is rendered after a full rebuild even if the render loop is
+    // currently idle-throttled.
+    try {
+      window.MapShine?.renderLoop?.requestRender?.();
+      window.MapShine?.renderLoop?.requestContinuousRender?.(100);
+    } catch (_) {
+    }
   }
 
   _mergeLightDocChanges(doc, changes) {
-    if (!doc || !changes || typeof changes !== 'object') return doc;
+    if (!doc) return doc;
 
     let base;
     try {
@@ -1194,6 +1389,16 @@ export class LightingEffect extends EffectBase {
     } catch (_) {
       base = doc;
     }
+
+    // Foundry toObject() often returns _id instead of id; normalize for downstream lookups.
+    if (base && base.id === undefined && base._id !== undefined) {
+      base = { ...base, id: base._id };
+    }
+
+    // Common path: on initial sync or create events we often call onLightUpdate(doc)
+    // without a changes payload. Always return a plain object so downstream merging
+    // (including MapShine enhancements like cookies) behaves consistently.
+    if (!changes || typeof changes !== 'object') return base;
 
     let expandedChanges = changes;
     try {
@@ -1207,13 +1412,17 @@ export class LightingEffect extends EffectBase {
 
     try {
       if (foundry?.utils?.mergeObject) {
-        return foundry.utils.mergeObject(base, expandedChanges, {
+        const merged = foundry.utils.mergeObject(base, expandedChanges, {
           inplace: false,
           overwrite: true,
           recursive: true,
           insertKeys: true,
           insertValues: true
         });
+        if (merged && merged.id === undefined && merged._id !== undefined) {
+          merged.id = merged._id;
+        }
+        return merged;
       }
     } catch (_) {
     }
@@ -1222,11 +1431,103 @@ export class LightingEffect extends EffectBase {
     if (base?.config || expandedChanges?.config) {
       merged.config = { ...(base?.config ?? {}), ...(expandedChanges?.config ?? {}) };
     }
+    if (merged && merged.id === undefined && merged._id !== undefined) {
+      merged.id = merged._id;
+    }
     return merged;
   }
 
+  _applyFoundryEnhancements(doc) {
+    if (!doc) return doc;
+
+    const docId = doc.id ?? doc._id;
+    if (!docId) return doc;
+
+    const store = window.MapShine?.lightEnhancementStore;
+    const enhancement = store?.getCached?.(docId);
+    let config = enhancement?.config;
+
+    // If the in-memory cache isn't populated for some reason, fall back to directly
+    // reading scene flags synchronously so enhancements can't temporarily "drop"
+    // during Foundry doc updates.
+    if (!config || typeof config !== 'object') {
+      config = this._getFoundryEnhancementConfigFallback(docId);
+    }
+
+    if (!config || typeof config !== 'object') return doc;
+
+    // Normalize numeric types (scene flags can sometimes deserialize numbers as strings).
+    const n = (v, d) => {
+      const x = (typeof v === 'string') ? Number(v) : v;
+      return Number.isFinite(x) ? x : d;
+    };
+
+    const normalized = {
+      ...config,
+      cookieRotation: (config.cookieRotation !== undefined) ? n(config.cookieRotation, undefined) : undefined,
+      cookieScale: (config.cookieScale !== undefined) ? n(config.cookieScale, undefined) : undefined,
+      cookieStrength: (config.cookieStrength !== undefined) ? n(config.cookieStrength, 1.0) : undefined,
+      cookieContrast: (config.cookieContrast !== undefined) ? n(config.cookieContrast, 1.0) : undefined,
+      cookieGamma: (config.cookieGamma !== undefined) ? n(config.cookieGamma, 1.0) : undefined,
+      outputGain: (config.outputGain !== undefined) ? n(config.outputGain, 1.0) : undefined,
+      outerWeight: (config.outerWeight !== undefined) ? n(config.outerWeight, 0.5) : undefined,
+      innerWeight: (config.innerWeight !== undefined) ? n(config.innerWeight, 0.5) : undefined,
+    };
+
+    // Only allow enhancement-owned keys to merge into Foundry's config.
+    // This prevents legacy/stale keys stored in scene flags (e.g. luminosity/alpha)
+    // from overriding the live Foundry light configuration after a reload.
+    const enh = {};
+    const allow = (k) => {
+      if (normalized[k] !== undefined) enh[k] = normalized[k];
+    };
+
+    // Cookie/gobo
+    allow('cookieEnabled');
+    allow('cookieTexture');
+    allow('cookieRotation');
+    allow('cookieScale');
+    allow('cookieTint');
+    allow('cookieStrength');
+    allow('cookieContrast');
+    allow('cookieGamma');
+    allow('cookieInvert');
+    allow('cookieColorize');
+
+    // Output shaping
+    allow('outputGain');
+    allow('outerWeight');
+    allow('innerWeight');
+
+    // Layer targeting
+    allow('targetLayers');
+
+    // Darkness response (sun lights)
+    allow('darknessResponse');
+
+    if (Object.keys(enh).length === 0) return { ...doc, id: docId };
+
+    return {
+      ...doc,
+      id: docId,
+      config: {
+        ...(doc?.config ?? {}),
+        ...enh
+      }
+    };
+  }
+
   onLightUpdate(doc, changes) {
-    const targetDoc = this._mergeLightDocChanges(doc, changes);
+    const mergedDoc = this._mergeLightDocChanges(doc, changes);
+    const targetDoc = this._applyFoundryEnhancements(mergedDoc);
+
+    const targetLayers = (targetDoc?.config?.targetLayers === 'ground' || targetDoc?.config?.targetLayers === 'overhead')
+      ? targetDoc.config.targetLayers
+      : 'both';
+
+    const GROUND_LIGHT_LAYER = 22;
+    const OVERHEAD_LIGHT_LAYER = 23;
+
     const isNegative = (targetDoc?.config?.negative === true) || (targetDoc?.negative === true);
 
     // Update unified data model.
@@ -1236,35 +1537,65 @@ export class LightingEffect extends EffectBase {
     } catch (_) {
     }
 
-    // Check if this Foundry light is overridden by a MapShine enhanced light.
     const isSuppressed = this._overriddenFoundryLightIds.has(targetDoc.id);
+
+    // If this Foundry light is overridden by a linked MapShine light, update that
+    // MapShine renderable immediately so physical properties stay authoritative.
+    if (isSuppressed) {
+      try {
+        for (const msEntity of this.lightRegistry.mapshineLights.values()) {
+          if (!msEntity?.enabled) continue;
+          if (msEntity.overrideFoundry !== true) continue;
+          if (String(msEntity.linkedFoundryLightId ?? '') !== String(targetDoc.id)) continue;
+
+          const msId = `mapshine:${msEntity.id}`;
+          const msDoc = this._toFoundryLikeDocForMapshineEntity(msEntity);
+          if (msEntity.isDarkness) {
+            const ds = this.mapshineDarknessSources.get(msId);
+            if (ds) ds.updateData(msDoc);
+          } else {
+            const ls = this.mapshineLights.get(msId);
+            if (ls) ls.updateData(msDoc);
+          }
+        }
+      } catch (_) {
+      }
+    }
+
+    const isSunLight = targetDoc?.config?.darknessResponse?.enabled === true;
 
     if (isNegative) {
       if (this.darknessSources.has(targetDoc.id)) {
         this.darknessSources.get(targetDoc.id).updateData(targetDoc);
-        // Apply suppression visibility.
         const src = this.darknessSources.get(targetDoc.id);
-        if (src?.mesh) src.mesh.visible = !isSuppressed;
+        if (src?.mesh) {
+          src.mesh.visible = !isSuppressed;
+          this._applyLayerTargeting(src.mesh, targetLayers, GROUND_LIGHT_LAYER, OVERHEAD_LIGHT_LAYER);
+        }
       } else {
         const source = new ThreeDarknessSource(targetDoc);
         source.init();
-
         this.darknessSources.set(targetDoc.id, source);
         if (source.mesh && this.darknessScene) {
           source.mesh.visible = !isSuppressed;
+          this._applyLayerTargeting(source.mesh, targetLayers, GROUND_LIGHT_LAYER, OVERHEAD_LIGHT_LAYER);
           this.darknessScene.add(source.mesh);
         }
       }
 
       if (this.lights.has(targetDoc.id)) {
         const source = this.lights.get(targetDoc.id);
-        if (source?.mesh) this.lightScene?.remove(source.mesh);
+        if (source?.mesh) {
+          this.lightScene?.remove(source.mesh);
+          this.sunLightScene?.remove(source.mesh);
+        }
         source?.dispose();
         this.lights.delete(targetDoc.id);
       }
       return;
     }
 
+    // Ensure any prior darkness source is disposed when switching to a normal light.
     if (this.darknessSources.has(targetDoc.id)) {
       const ds = this.darknessSources.get(targetDoc.id);
       if (ds?.mesh) this.darknessScene?.remove(ds.mesh);
@@ -1273,17 +1604,31 @@ export class LightingEffect extends EffectBase {
     }
 
     if (this.lights.has(targetDoc.id)) {
-      this.lights.get(targetDoc.id).updateData(targetDoc);
-      // Apply suppression visibility.
       const src = this.lights.get(targetDoc.id);
-      if (src?.mesh) src.mesh.visible = !isSuppressed;
+      src.updateData(targetDoc);
+      if (src?.mesh) {
+        src.mesh.visible = !isSuppressed;
+        try {
+          if (isSunLight) {
+            this.lightScene?.remove(src.mesh);
+            if (this.sunLightScene && src.mesh?.parent !== this.sunLightScene) this.sunLightScene.add(src.mesh);
+          } else {
+            this.sunLightScene?.remove(src.mesh);
+            if (this.lightScene && src.mesh?.parent !== this.lightScene) this.lightScene.add(src.mesh);
+          }
+        } catch (_) {
+        }
+        this._applyLayerTargeting(src.mesh, targetLayers, GROUND_LIGHT_LAYER, OVERHEAD_LIGHT_LAYER);
+      }
     } else {
       const source = new ThreeLightSource(targetDoc);
       source.init();
       this.lights.set(targetDoc.id, source);
-      if (source.mesh) {
+      if (source.mesh && (this.lightScene || this.sunLightScene)) {
         source.mesh.visible = !isSuppressed;
-        this.lightScene.add(source.mesh);
+        this._applyLayerTargeting(source.mesh, targetLayers, GROUND_LIGHT_LAYER, OVERHEAD_LIGHT_LAYER);
+        if (isSunLight) this.sunLightScene?.add(source.mesh);
+        else this.lightScene?.add(source.mesh);
       }
     }
   }
@@ -1312,17 +1657,24 @@ export class LightingEffect extends EffectBase {
   /**
    * Handle lightingRefresh hook - rebuilds lights that were created before
    * Foundry computed their LOS polygons (fixes lights extending through walls)
+   * 
+   * CRITICAL: We must re-apply enhancements before calling updateData() because
+   * source.document may be stale (missing cookie config). If we call updateData()
+   * with a doc that has no cookieTexture, _updateCookieFromConfig() will CLEAR
+   * the cookie. See docs/LIGHT-COOKIE-RESET-ISSUE.md for full analysis.
    */
   onLightingRefresh() {
     try {
       // Rebuild all Foundry lights to pick up updated LOS polygons
+      // Re-apply enhancements to ensure cookies aren't cleared by stale documents
       for (const [id, source] of this.lights) {
         if (source && source.document) {
-          source.updateData(source.document, true);
+          const enhancedDoc = this._applyFoundryEnhancements(source.document);
+          source.updateData(enhancedDoc, true);
         }
       }
       
-      // Also rebuild MapShine-native lights
+      // Also rebuild MapShine-native lights (these store enhancements directly)
       for (const [id, source] of this.mapshineLights) {
         if (source && source.document) {
           source.updateData(source.document, true);
@@ -2166,6 +2518,12 @@ export class LightingEffect extends EffectBase {
   }
 
   dispose() {
+    if (this._syncRetryTimeoutId !== null) {
+      try { clearTimeout(this._syncRetryTimeoutId); } catch (_) {}
+      this._syncRetryTimeoutId = null;
+    }
+    this._syncFailCount = 0;
+
     for (const { hook, fn } of this._hookRegistrations) {
       try {
         Hooks.off(hook, fn);

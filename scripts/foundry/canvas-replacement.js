@@ -74,9 +74,9 @@ import { frameCoordinator } from '../core/frame-coordinator.js';
 import { loadingOverlay } from '../ui/loading-overlay.js';
 import { stateApplier } from '../ui/state-applier.js';
 import { createEnhancedLightsApi } from '../effects/EnhancedLightsApi.js';
+import { LightEnhancementStore } from '../effects/LightEnhancementStore.js';
 import { OverlayUIManager } from '../ui/overlay-ui-manager.js';
-import { LightRingUI } from '../ui/light-ring-ui.js';
-import { LightAnimDialog } from '../ui/light-anim-dialog.js';
+import { LightEditorTweakpane } from '../ui/light-editor-tweakpane.js';
 import { EffectCapabilitiesRegistry } from '../effects/effect-capabilities-registry.js';
 import { GraphicsSettingsManager } from '../ui/graphics-settings-manager.js';
 
@@ -163,11 +163,8 @@ let enhancedLightInspector = null;
 /** @type {OverlayUIManager|null} */
 let overlayUIManager = null;
 
-/** @type {LightRingUI|null} */
-let lightRingUI = null;
-
-/** @type {LightAnimDialog|null} */
-let lightAnimDialog = null;
+/** @type {LightEditorTweakpane|null} */
+let lightEditor = null;
 
 /** @type {TokenManager|null} */
 let tokenManager = null;
@@ -497,7 +494,11 @@ async function waitForThreeFrames(
 
     if (meetsDelay && meetsFrames && meetsCalls) return true;
 
-    await new Promise(resolve => requestAnimationFrame(resolve));
+    // Use Promise.race to ensure we don't hang if tab is backgrounded (rAF pauses)
+    await Promise.race([
+      new Promise(resolve => requestAnimationFrame(resolve)),
+      new Promise(resolve => setTimeout(resolve, 100)) // Fallback: max 100ms per iteration
+    ]);
   }
 
   return false;
@@ -709,7 +710,11 @@ async function onCanvasReady(canvas) {
     const startTime = Date.now();
     let lastLogTime = startTime;
     
-    while (!window.MapShine?.initialized && (Date.now() - startTime) < MAX_WAIT_MS) {
+    while (
+      !window.MapShine?.initialized &&
+      !window.MapShine?.bootstrapComplete &&
+      (Date.now() - startTime) < MAX_WAIT_MS
+    ) {
       await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
       
       // Log progress every 2 seconds to show we're still waiting
@@ -721,6 +726,13 @@ async function onCanvasReady(canvas) {
     }
 
     if (!window.MapShine?.initialized) {
+      if (window.MapShine?.bootstrapComplete) {
+        const err = window.MapShine?.bootstrapError ? ` (${window.MapShine.bootstrapError})` : '';
+        log.error(`Bootstrap failed - module did not initialize${err}`);
+        ui.notifications.error('Map Shine: Initialization failed. Check console for details.');
+        return;
+      }
+
       log.error('Bootstrap timeout - module did not initialize in time');
       ui.notifications.error('Map Shine: Initialization timeout. Try refreshing the page.');
       return;
@@ -981,8 +993,31 @@ function restoreFoundryStateFromSnapshot() {
 }
 
 async function createThreeCanvas(scene) {
+  // Section timing for performance diagnosis
+  const _sectionTimings = {};
+  const _sectionStart = (name) => { _sectionTimings[name] = { start: performance.now() }; };
+  const _sectionEnd = (name) => {
+    if (_sectionTimings[name]) {
+      _sectionTimings[name].end = performance.now();
+      _sectionTimings[name].durationMs = _sectionTimings[name].end - _sectionTimings[name].start;
+    }
+  };
+  const _logSectionTimings = () => {
+    const entries = Object.entries(_sectionTimings)
+      .filter(([, v]) => typeof v.durationMs === 'number')
+      .sort((a, b) => b[1].durationMs - a[1].durationMs);
+    log.info('createThreeCanvas section timings (slowest first):');
+    for (const [name, { durationMs }] of entries) {
+      log.info(`  ${name}: ${durationMs.toFixed(1)}ms`);
+    }
+    window.MapShine._sectionTimings = _sectionTimings;
+  };
+
+  _sectionStart('total');
+  _sectionStart('cleanup');
   // Cleanup existing canvas if present
   destroyThreeCanvas();
+  _sectionEnd('cleanup');
 
   try {
     if (window.MapShine) window.MapShine.stateApplier = stateApplier;
@@ -1235,6 +1270,7 @@ async function createThreeCanvas(scene) {
     }
 
     // Step 1: Initialize scene composer
+    _sectionStart('sceneComposer.initialize');
     sceneComposer = new SceneComposer();
     if (doLoadProfile) {
       try {
@@ -1264,6 +1300,7 @@ async function createThreeCanvas(scene) {
       } catch (e) {
       }
     }
+    _sectionEnd('sceneComposer.initialize');
 
     if (isStale()) {
       try {
@@ -1376,50 +1413,68 @@ async function createThreeCanvas(scene) {
       return;
     }
 
-    // P1.2: Parallel Effect Initialization (Conservative Two-Phase Approach)
-    // Phase 1: Register independent effects in parallel (no inter-effect dependencies)
-    const independentEffects = [];
+    // P1.2: Sequential Effect Initialization (Option C - for timing comparison)
+    // Each effect is initialized one-by-one so we can identify slow effects and
+    // avoid GPU/driver contention from parallel shader compilation.
+    _sectionStart('effectInit');
+    const effectMap = new Map();
     
-    const registerIndependentEffect = async (name, EffectClass) => {
-      _setEffectInitStep(name);
-      const effect = new EffectClass();
-      await effectComposer.registerEffect(effect);
-      return { name, effect };
-    };
-
-    const independentPromises = [
-      registerIndependentEffect('Specular', SpecularEffect),
-      registerIndependentEffect('Iridescence', IridescenceEffect),
-      registerIndependentEffect('Window Lights', WindowLightEffect),
-      registerIndependentEffect('Color Correction', ColorCorrectionEffect),
-      registerIndependentEffect('Film Grain', FilmGrainEffect),
-      registerIndependentEffect('Dot Screen', DotScreenEffect),
-      registerIndependentEffect('Halftone', HalftoneEffect),
-      registerIndependentEffect('Sharpen', SharpenEffect),
-      registerIndependentEffect('ASCII', AsciiEffect),
-      registerIndependentEffect('Smelly Flies', SmellyFliesEffect),
-      registerIndependentEffect('Lightning', LightningEffect),
-      registerIndependentEffect('Prism', PrismEffect),
-      registerIndependentEffect('Water', WaterEffectV2),
-      registerIndependentEffect('Fog', WorldSpaceFogEffect),
-      registerIndependentEffect('Bushes', BushEffect),
-      registerIndependentEffect('Trees', TreeEffect),
-      registerIndependentEffect('Overhead Shadows', OverheadShadowsEffect),
-      registerIndependentEffect('Building Shadows', BuildingShadowsEffect),
-      registerIndependentEffect('Clouds', CloudEffect),
-      registerIndependentEffect('Atmospheric Fog', AtmosphericFogEffect),
-      registerIndependentEffect('Distortion', DistortionManager),
-      registerIndependentEffect('Bloom', BloomEffect),
-      registerIndependentEffect('Lensflare', LensflareEffect),
-      registerIndependentEffect('Dazzle Overlay', DazzleOverlayEffect),
-      registerIndependentEffect('Mask Debug', MaskDebugEffect),
-      registerIndependentEffect('Debug Layers', DebugLayerEffect),
-      registerIndependentEffect('Player Lights', PlayerLightEffect),
-      registerIndependentEffect('Sky Color', SkyColorEffect)
+    const independentEffectDefs = [
+      ['Specular', SpecularEffect],
+      ['Iridescence', IridescenceEffect],
+      ['Window Lights', WindowLightEffect],
+      ['Color Correction', ColorCorrectionEffect],
+      ['Film Grain', FilmGrainEffect],
+      ['Dot Screen', DotScreenEffect],
+      ['Halftone', HalftoneEffect],
+      ['Sharpen', SharpenEffect],
+      ['ASCII', AsciiEffect],
+      ['Smelly Flies', SmellyFliesEffect],
+      ['Lightning', LightningEffect],
+      ['Prism', PrismEffect],
+      ['Water', WaterEffectV2],
+      ['Fog', WorldSpaceFogEffect],
+      ['Bushes', BushEffect],
+      ['Trees', TreeEffect],
+      ['Overhead Shadows', OverheadShadowsEffect],
+      ['Building Shadows', BuildingShadowsEffect],
+      ['Clouds', CloudEffect],
+      ['Atmospheric Fog', AtmosphericFogEffect],
+      ['Distortion', DistortionManager],
+      ['Bloom', BloomEffect],
+      ['Lensflare', LensflareEffect],
+      ['Dazzle Overlay', DazzleOverlayEffect],
+      ['Mask Debug', MaskDebugEffect],
+      ['Debug Layers', DebugLayerEffect],
+      ['Player Lights', PlayerLightEffect],
+      ['Sky Color', SkyColorEffect]
     ];
 
-    const independentResults = await Promise.all(independentPromises);
-    const effectMap = new Map(independentResults.map(r => [r.name, r.effect]));
+    // Sequential initialization with per-effect timing
+    const effectTimings = [];
+    for (const [name, EffectClass] of independentEffectDefs) {
+      _setEffectInitStep(name);
+      const t0 = performance.now();
+      const effect = new EffectClass();
+      await effectComposer.registerEffect(effect);
+      const dt = performance.now() - t0;
+      effectTimings.push({ name, durationMs: dt });
+      effectMap.set(name, effect);
+    }
+
+    // Log per-effect timings (top 10 slowest)
+    try {
+      effectTimings.sort((a, b) => b.durationMs - a.durationMs);
+      const top10 = effectTimings.slice(0, 10);
+      log.info('Effect init timings (top 10 slowest):');
+      for (const { name, durationMs } of top10) {
+        log.info(`  ${name}: ${durationMs.toFixed(1)}ms`);
+      }
+      window.MapShine._effectInitTimings = effectTimings;
+    } catch (_) {}
+    _sectionEnd('effectInit');
+    
+    _setEffectInitStep('Wiring');
 
     const specularEffect = effectMap.get('Specular');
     const iridescenceEffect = effectMap.get('Iridescence');
@@ -1598,6 +1653,20 @@ async function createThreeCanvas(scene) {
     } catch (_) {
     }
 
+    // Step 3.13.5: Initialize LightEnhancementStore BEFORE LightingEffect
+    // CRITICAL: The enhancement store must be created and loaded before LightingEffect.initialize()
+    // runs, otherwise the first syncAllLights() will fail to apply cookie enhancements.
+    // See docs/LIGHT-COOKIE-RESET-ISSUE.md for full analysis.
+    _setEffectInitStep('Light Enhancement Store');
+    try {
+      mapShine.lightEnhancementStore = new LightEnhancementStore();
+      await mapShine.lightEnhancementStore.load?.();
+      log.info('LightEnhancementStore loaded before LightingEffect');
+    } catch (e) {
+      log.warn('Failed to initialize LightEnhancementStore early:', e);
+      mapShine.lightEnhancementStore = null;
+    }
+
     // Step 3.14: Register Lighting Effect (must be before CandleFlamesEffect)
     _setEffectInitStep('Lighting');
     lightingEffect = new LightingEffect();
@@ -1634,12 +1703,16 @@ async function createThreeCanvas(scene) {
     // Provide the base mesh and asset bundle to the effect
     const basePlane = sceneComposer.getBasePlane();
 
+    _sectionStart('setBaseMesh');
     const _safeSetBaseMesh = (label, fn) => {
+      const t0 = performance.now();
       try {
         fn();
       } catch (e) {
         log.error(`Failed to wire base mesh for ${label}`, e);
       }
+      const dt = performance.now() - t0;
+      if (dt > 50) log.info(`  setBaseMesh(${label}): ${dt.toFixed(1)}ms`);
     };
 
     _safeSetBaseMesh('Specular', () => specularEffect?.setBaseMesh?.(basePlane, bundle));
@@ -1654,7 +1727,9 @@ async function createThreeCanvas(scene) {
     _safeSetBaseMesh('Overhead Shadows', () => overheadShadowsEffect?.setBaseMesh?.(basePlane, bundle));
     _safeSetBaseMesh('Building Shadows', () => buildingShadowsEffect?.setBaseMesh?.(basePlane, bundle));
     _safeSetBaseMesh('Clouds', () => cloudEffect?.setBaseMesh?.(basePlane, bundle));
+    _sectionEnd('setBaseMesh');
 
+    _sectionStart('sceneSync');
     try {
       loadingOverlay.setStage('scene', 0.0, 'Syncing scene…', { immediate: true });
       loadingOverlay.startAutoProgress(0.85, 0.012);
@@ -1852,32 +1927,23 @@ async function createThreeCanvas(scene) {
     // (In Map Maker mode, we want the native selection box.)
     _updateFoundrySelectRectSuppression();
 
-    // Step 5b: Initialize DOM overlay UI system (world-anchored overlays, ring UI)
+    // Step 5b: Initialize DOM overlay UI system (world-anchored overlays)
     overlayUIManager = new OverlayUIManager(threeCanvas, sceneComposer);
     overlayUIManager.initialize();
     effectComposer.addUpdatable(overlayUIManager);
 
-    lightRingUI = new LightRingUI(overlayUIManager);
-    lightRingUI.initialize();
-
-    lightAnimDialog = new LightAnimDialog(overlayUIManager);
-    lightAnimDialog.initialize();
+    lightEditor = new LightEditorTweakpane(overlayUIManager);
+    lightEditor.initialize();
 
     try {
-      effectComposer.addUpdatable(lightRingUI);
-    } catch (_) {
-    }
-
-    try {
-      effectComposer.addUpdatable(lightAnimDialog);
+      effectComposer.addUpdatable(lightEditor);
     } catch (_) {
     }
 
     // Expose for InteractionManager selection routing and debugging.
     if (window.MapShine) {
       window.MapShine.overlayUIManager = overlayUIManager;
-      window.MapShine.lightRingUI = lightRingUI;
-      window.MapShine.lightAnimDialog = lightAnimDialog;
+      window.MapShine.lightEditor = lightEditor;
     }
 
     // Step 6: Initialize drop handler (for creating new items)
@@ -1913,6 +1979,8 @@ async function createThreeCanvas(scene) {
     
     log.info('Controls integration initialized');
 
+    _sectionEnd('sceneSync');
+    _sectionStart('finalization');
     try {
       loadingOverlay.setStage('final', 0.0, 'Finalizing…', { immediate: true });
       loadingOverlay.startAutoProgress(0.98, 0.01);
@@ -2082,8 +2150,7 @@ async function createThreeCanvas(scene) {
     mapShine.enhancedLightInspector = enhancedLightInspector; // NEW: Expose enhanced light inspector
     mapShine.interactionManager = interactionManager; // NEW: Expose interaction manager
     mapShine.overlayUIManager = overlayUIManager;
-    mapShine.lightRingUI = lightRingUI;
-    mapShine.lightAnimDialog = lightAnimDialog;
+    mapShine.lightEditor = lightEditor;
     mapShine.gridRenderer = gridRenderer; // NEW: Expose grid renderer
     mapShine.mapPointsManager = mapPointsManager; // NEW: Expose map points manager
     mapShine.weatherController = weatherController; // NEW: Expose weather controller
@@ -2098,6 +2165,9 @@ async function createThreeCanvas(scene) {
     } catch (_) {
       mapShine.enhancedLights = null;
     }
+
+    // NOTE: LightEnhancementStore is now initialized earlier (before LightingEffect)
+    // to fix the cookie reset issue. See Step 3.13.5 above.
 
     mapShine.setMapMakerMode = setMapMakerMode; // NEW: Expose mode toggle for UI
     mapShine.resetScene = resetScene;
@@ -2137,6 +2207,7 @@ async function createThreeCanvas(scene) {
     }, 5000);
 
     // Initialize Tweakpane UI
+    _sectionStart('fin.initializeUI');
     try {
       if (isStale()) return;
       await initializeUI(
@@ -2178,6 +2249,7 @@ async function createThreeCanvas(scene) {
     } catch (e) {
       log.error('Failed to initialize UI:', e);
     }
+    _sectionEnd('fin.initializeUI');
 
     // Only begin fading-in once we have proof that Three has actually rendered.
     // This prevents the overlay from fading out during shader compilation / first-frame stutter.
@@ -2190,6 +2262,7 @@ async function createThreeCanvas(scene) {
 
     // P1.2: Wait for all effects to be ready before fading overlay
     // This ensures textures are loaded and GPU operations are complete
+    _sectionStart('fin.effectReadiness');
     try {
       loadingOverlay.setStage('final', 0.45, 'Finishing textures…', { keepAuto: true });
     } catch (_) {}
@@ -2213,9 +2286,11 @@ async function createThreeCanvas(scene) {
     } catch (e) {
       log.debug('Effect readiness wait failed:', e);
     }
+    _sectionEnd('fin.effectReadiness');
 
     // P1.3: Wait for all tiles (not just overhead) to decode their textures
     // This prevents pop-in of ground/water tiles after the overlay fades
+    _sectionStart('fin.waitForTiles');
     try {
       loadingOverlay.setStage('final', 0.50, 'Preparing tiles…', { keepAuto: true });
     } catch (_) {}
@@ -2223,7 +2298,9 @@ async function createThreeCanvas(scene) {
       await tileManager?.waitForInitialTiles?.({ overheadOnly: false, timeoutMs: 15000 });
     } catch (_) {
     }
+    _sectionEnd('fin.waitForTiles');
 
+    _sectionStart('fin.waitForThreeFrames');
     try {
       await waitForThreeFrames(renderer, renderLoop, 6, 12000, {
         minCalls: 1,
@@ -2233,6 +2310,7 @@ async function createThreeCanvas(scene) {
     } catch (e) {
       // Ignore wait errors
     }
+    _sectionEnd('fin.waitForThreeFrames');
 
     try {
       const controlHour = window.MapShine?.controlPanel?.controlState?.timeOfDay;
@@ -2253,11 +2331,29 @@ async function createThreeCanvas(scene) {
       log.debug('Time refresh jiggle failed:', e);
     }
 
+    _sectionStart('fin.fadeIn');
     try {
       loadingOverlay.setStage('final', 1.0, 'Finished', { immediate: true });
       await loadingOverlay.fadeIn(5000);
     } catch (e) {
       // Ignore overlay errors
+    }
+    _sectionEnd('fin.fadeIn');
+    _sectionEnd('finalization');
+    _sectionEnd('total');
+    _logSectionTimings();
+
+    // Wall-clock load timer report (module.js sets MapShine._loadTimerStartMs).
+    try {
+      const ms = performance.now();
+      const start = window.MapShine?._loadTimerStartMs;
+      if (typeof start === 'number') {
+        const durationMs = ms - start;
+        window.MapShine._lastLoadFinishedAtMs = ms;
+        window.MapShine._lastLoadDurationMs = durationMs;
+        log.info(`Load complete (wall-clock): ${durationMs.toFixed(1)}ms`);
+      }
+    } catch (_) {
     }
 
   } catch (error) {
@@ -4367,30 +4463,17 @@ function destroyThreeCanvas() {
     log.debug('Enhanced Light Inspector disposed');
   }
 
-  if (lightRingUI) {
+  if (lightEditor) {
     try {
       try {
-        if (effectComposer) effectComposer.removeUpdatable(lightRingUI);
+        if (effectComposer) effectComposer.removeUpdatable(lightEditor);
       } catch (_) {
       }
-      if (typeof lightRingUI.dispose === 'function') lightRingUI.dispose();
-      else lightRingUI.hide();
+      if (typeof lightEditor.dispose === 'function') lightEditor.dispose();
+      else if (typeof lightEditor.hide === 'function') lightEditor.hide();
     } catch (_) {
     }
-    lightRingUI = null;
-  }
-
-  if (lightAnimDialog) {
-    try {
-      try {
-        if (effectComposer) effectComposer.removeUpdatable(lightAnimDialog);
-      } catch (_) {
-      }
-      if (typeof lightAnimDialog.dispose === 'function') lightAnimDialog.dispose();
-      else if (typeof lightAnimDialog.hide === 'function') lightAnimDialog.hide();
-    } catch (_) {
-    }
-    lightAnimDialog = null;
+    lightEditor = null;
   }
 
   if (overlayUIManager) {
@@ -5250,9 +5333,7 @@ function updateInputMode() {
       // consistency.
       if (lightIconManager && lightIconManager.setVisibility) {
         const showLighting = (isFinalLayer('LightingLayer') || isFinalLayer('lighting')) && !isMapMakerMode;
-        const tool = ui?.controls?.tool?.name ?? game.activeTool;
-        const mapshineToolActive = tool === 'map-shine-enhanced-light' || tool === 'map-shine-sun-light';
-        lightIconManager.setVisibility(showLighting && !mapshineToolActive);
+        lightIconManager.setVisibility(showLighting);
       }
 
       if (enhancedLightIconManager && enhancedLightIconManager.setVisibility) {

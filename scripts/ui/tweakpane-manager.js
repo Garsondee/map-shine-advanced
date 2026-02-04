@@ -65,7 +65,6 @@ export class TweakpaneManager {
       mapMakerMode: false,
       timeRate: 100, // 0-200%
       // Light authoring UI visibility toggles
-      showLightRingUI: true,
       showLightTranslateGizmo: true,
       showLightRadiusRings: true,
       showLightRadiusVisualization: true,
@@ -509,10 +508,6 @@ export class TweakpaneManager {
       this.onGlobalChange(param, ev.value);
       this.saveUIState();
     };
-
-    lightAuthoringFolder.addBinding(this.globalParams, 'showLightRingUI', {
-      label: 'Ring UI'
-    }).on('change', onLightUIToggle('showLightRingUI'));
 
     lightAuthoringFolder.addBinding(this.globalParams, 'showLightTranslateGizmo', {
       label: 'Translate Gizmo'
@@ -2070,11 +2065,6 @@ export class TweakpaneManager {
         log.debug(`Time scale set to ${(value / 100).toFixed(2)}x`);
       } else {
         log.warn('TimeManager not available, cannot set time rate');
-      }
-    } else if (param === 'showLightRingUI') {
-      // Hide/show Ring UI immediately if it's currently open
-      if (!value && window.MapShine?.lightRingUI?.isOpen()) {
-        window.MapShine.lightRingUI.hide();
       }
     } else if (param === 'showLightTranslateGizmo') {
       // Hide translate gizmo immediately if disabled

@@ -536,7 +536,8 @@ function normalizePath(path) {
   // For all other paths (relative or root-relative), return as-is
   // The browser will resolve them correctly relative to the current page
   // This allows Foundry's routing system to handle modules/, worlds/, etc.
-  return path;
+  // Encode spaces to avoid URL resolution failures for module asset paths.
+  return path.includes(' ') ? path.replace(/ /g, '%20') : path;
 }
 
  /**

@@ -1,4 +1,4 @@
-/**
+    /**
  * @fileoverview ThreeLightSource
  * Replicates Foundry VTT's PointLightSource logic in Three.js
  */
@@ -7,8 +7,10 @@ import { FoundryLightingShaderChunks } from './FoundryLightingShaderChunks.js';
 import { loadTexture } from '../assets/loader.js';
 import { VisionPolygonComputer } from '../vision/VisionPolygonComputer.js';
 import { weatherController } from '../core/WeatherController.js';
+import { createLogger } from '../core/log.js';
 
 const _lightLosComputer = new VisionPolygonComputer();
+const log = createLogger('ThreeLightSource');
 
 class SmoothNoise {
   constructor({ amplitude = 1, scale = 1, maxReferences = 256 } = {}) {
@@ -69,8 +71,25 @@ export class ThreeLightSource {
 
     this._meshParent = null;
 
+    // Use a deterministic seed so animated lights (torch/flame/fairy/etc.) and
+    // any cookie wobble remain visually stable across reloads and between clients.
+    const seed = (() => {
+      try {
+        const s = String(document?.id ?? '');
+        let h = 2166136261;
+        for (let i = 0; i < s.length; i++) {
+          h ^= s.charCodeAt(i);
+          // FNV-1a style mixing
+          h = Math.imul(h, 16777619);
+        }
+        return Math.abs(h) % 100000;
+      } catch (_) {
+        return 1;
+      }
+    })();
+
     this.animation = {
-      seed: Math.floor(Math.random() * 100000),
+      seed,
       time: 0,
       noise: null,
       reactiveSoundAmplitude: 0
@@ -84,6 +103,9 @@ export class ThreeLightSource {
     this._cookiePath = null;
     this._cookieTexture = null;
     this._cookieLoadVersion = 0;
+    this._cookieRetryTimeoutId = null;
+    this._cookieFailCount = 0;
+    this._cookieDebugState = { path: null, enabled: null };
 
     /**
      * Track whether we are currently using a simple circular geometry
@@ -520,7 +542,10 @@ export class ThreeLightSource {
 
             vec4 cookie = texture2D(tCookie, cuv);
             float cookieLuma = dot(cookie.rgb, vec3(0.2126, 0.7152, 0.0722));
-            float cookieMask = (cookie.a > 0.001) ? cookie.a : cookieLuma;
+            // Use alpha when the texture actually encodes transparency; otherwise fall back
+            // to luminance so opaque gobos still modulate the light.
+            float hasAlpha = step(cookie.a, 0.999);
+            float cookieMask = mix(cookieLuma, cookie.a, hasAlpha);
             cookieMask = clamp(cookieMask, 0.0, 1.0);
 
             // Cookie shaping controls:
@@ -530,18 +555,18 @@ export class ThreeLightSource {
             // - invert: flip cookie mask.
             float cm = cookieMask;
             if (uCookieInvert > 0.5) cm = 1.0 - cm;
-            float cg = max(uCookieGamma, 0.0001);
+            // Clamp gamma away from 0 to prevent cookie controls from completely
+            // zeroing out light contribution.
+            float cg = clamp(uCookieGamma, 0.25, 8.0);
             cm = pow(clamp(cm, 0.0, 1.0), 1.0 / cg);
-            float cc = max(uCookieContrast, 0.0);
-            cm = clamp((cm - 0.5) * cc + 0.5, 0.0, 1.0);
+            float cc = uCookieContrast;
+            cm = (cm - 0.5) * cc + 0.5;
 
             float cs = max(uCookieStrength, 0.0);
             cookieFactor = clamp(1.0 - (1.0 - cm) * cs, 0.0, 1.0);
 
-            // Optional cookie colorization (tint). Most gobos should be monochrome.
-            if (uCookieColorize > 0.5) {
-              outColor *= (cookie.rgb * uCookieTint);
-            }
+            // Allow cookies to fully cut out light (high-contrast gobos).
+            cookieFactor = clamp(cookieFactor, 0.0, 1.0);
           }
 
           // 1 = wave, 2 = fairy, 3 = chroma, 4 = energy field, 5 = bewitching wave
@@ -552,71 +577,71 @@ export class ThreeLightSource {
           if (uAnimType > 0.5 && uAnimType < 1.5) {
             // Wave: moving concentric ripples.
             // Keep the modulation mostly in the mid falloff like Foundry.
-${FoundryLightingShaderChunks.wave}
+            ${FoundryLightingShaderChunks.wave}
           } else if (uAnimType > 1.5 && uAnimType < 2.5) {
             // Foundry VTT fairy-light (ported 1:1 from fairy-light.mjs coloration shader).
             // Uses fbm-based distortions + rainbow coloration.
-${FoundryLightingShaderChunks.fairy}
+            ${FoundryLightingShaderChunks.fairy}
           } else if (uAnimType > 2.5 && uAnimType < 3.5) {
             // Foundry VTT chroma (ported from chroma.mjs).
-${FoundryLightingShaderChunks.chroma}
+            ${FoundryLightingShaderChunks.chroma}
           } else if (uAnimType > 3.5 && uAnimType < 4.5) {
             // Foundry VTT energy field (ported from energy-field.mjs).
-${FoundryLightingShaderChunks.energyField}
+            ${FoundryLightingShaderChunks.energyField}
           } else if (uAnimType > 4.5 && uAnimType < 5.5) {
             // Foundry VTT bewitching wave (ported from bewitching-wave.mjs).
-${FoundryLightingShaderChunks.bewitchingWave}
+            ${FoundryLightingShaderChunks.bewitchingWave}
           } else if (uAnimType > 5.5 && uAnimType < 6.5) {
             // Foundry VTT revolving (ported from revolving-light.mjs).
-${FoundryLightingShaderChunks.revolving}
+            ${FoundryLightingShaderChunks.revolving}
           } else if (uAnimType > 6.5 && uAnimType < 7.5) {
             // Foundry VTT siren (ported from siren-light.mjs).
-${FoundryLightingShaderChunks.siren}
+            ${FoundryLightingShaderChunks.siren}
           } else if (uAnimType > 7.5 && uAnimType < 8.5) {
             // Foundry VTT fog (ported from fog.mjs).
-${FoundryLightingShaderChunks.fog}
+            ${FoundryLightingShaderChunks.fog}
           } else if (uAnimType > 8.5 && uAnimType < 9.5) {
             // Foundry VTT sunburst (ported from sunburst.mjs).
-${FoundryLightingShaderChunks.sunburst}
+            ${FoundryLightingShaderChunks.sunburst}
           } else if (uAnimType > 9.5 && uAnimType < 10.5) {
             // Foundry VTT dome (ported from light-dome.mjs).
-${FoundryLightingShaderChunks.lightDome}
+            ${FoundryLightingShaderChunks.lightDome}
           } else if (uAnimType > 10.5 && uAnimType < 11.5) {
             // Foundry VTT emanation (ported from emanation.mjs).
-${FoundryLightingShaderChunks.emanation}
+            ${FoundryLightingShaderChunks.emanation}
           } else if (uAnimType > 11.5 && uAnimType < 12.5) {
             // Foundry VTT hexa dome (ported from hexa-dome.mjs).
-${FoundryLightingShaderChunks.hexaDome}
+            ${FoundryLightingShaderChunks.hexaDome}
           } else if (uAnimType > 12.5 && uAnimType < 13.5) {
             // Foundry VTT ghost light (ported from ghost-light.mjs).
-${FoundryLightingShaderChunks.ghostLight}
+            ${FoundryLightingShaderChunks.ghostLight}
           } else if (uAnimType > 13.5 && uAnimType < 14.5) {
             // Foundry VTT vortex (ported from vortex.mjs).
-${FoundryLightingShaderChunks.vortex}
+            ${FoundryLightingShaderChunks.vortex}
           } else if (uAnimType > 14.5 && uAnimType < 15.5) {
             // Foundry VTT swirling rainbow (ported from swirling-rainbow.mjs).
-${FoundryLightingShaderChunks.swirlingRainbow}
+            ${FoundryLightingShaderChunks.swirlingRainbow}
           } else if (uAnimType > 15.5 && uAnimType < 16.5) {
             // Foundry VTT radial rainbow (ported from radial-rainbow.mjs).
-${FoundryLightingShaderChunks.radialRainbow}
+            ${FoundryLightingShaderChunks.radialRainbow}
           } else if (uAnimType > 16.5 && uAnimType < 17.5) {
             // Foundry VTT force grid (ported from force-grid.mjs).
-${FoundryLightingShaderChunks.forceGrid}
+            ${FoundryLightingShaderChunks.forceGrid}
           } else if (uAnimType > 17.5 && uAnimType < 18.5) {
             // Foundry VTT star light (ported from star-light.mjs).
-${FoundryLightingShaderChunks.starLight}
+            ${FoundryLightingShaderChunks.starLight}
           } else if (uAnimType > 18.5 && uAnimType < 19.5) {
             // Foundry VTT smoke patch (ported from smoke-patch.mjs).
-${FoundryLightingShaderChunks.smokePatch}
+            ${FoundryLightingShaderChunks.smokePatch}
           } else if (uAnimType > 19.5 && uAnimType < 20.5) {
             // Foundry VTT torch (mimic coloration: brightnessPulse scales color).
-${FoundryLightingShaderChunks.torch}
+            ${FoundryLightingShaderChunks.torch}
           } else if (uAnimType > 20.5 && uAnimType < 21.5) {
             // Foundry VTT flame (mimic coloration: noisy inner/outer flame lobes).
-${FoundryLightingShaderChunks.flame}
+            ${FoundryLightingShaderChunks.flame}
           } else if (uAnimType > 21.5 && uAnimType < 22.5) {
             // Foundry VTT pulse/reactivepulse (mimic illumination+coloration).
-${FoundryLightingShaderChunks.pulse}
+            ${FoundryLightingShaderChunks.pulse}
           }
 
           // Final Alpha calculation
@@ -625,8 +650,12 @@ ${FoundryLightingShaderChunks.pulse}
           float fairyBoost = (uAnimType > 1.5 && uAnimType < 2.5) ? 3.0 : 1.0;
           alpha *= fairyBoost;
 
+          // Apply cookie factor to color output to keep cookies visible even if
+          // downstream compositing ignores alpha modulation for the light buffer.
+          float cookieColorMul = (uHasCookie > 0.5) ? cookieFactor : 1.0;
+
           // Additive Output
-          gl_FragColor = vec4(outColor * uBrightness * (0.75 + 0.25 * fairyBoost), alpha);
+          gl_FragColor = vec4(outColor * uBrightness * (0.75 + 0.25 * fairyBoost) * cookieColorMul, alpha);
         }
       `,
       transparent: true,
@@ -643,6 +672,14 @@ ${FoundryLightingShaderChunks.pulse}
 
     this.updateData(this.document, true);
 
+    try {
+      log.info('[COOKIE DEBUG] light-init', {
+        id: this.id,
+        hasDoc: !!this.document
+      });
+    } catch (_) {
+    }
+
     // Stable per-light seed in [0..1]
     this.material.uniforms.uSeed.value = (this.animation.seed % 100000) / 100000;
   }
@@ -651,6 +688,21 @@ ${FoundryLightingShaderChunks.pulse}
     this.document = doc;
     const config = doc.config;
     const THREE = window.THREE;
+
+    try {
+      const cookieEnabled = config?.cookieEnabled === true;
+      const cookieTexture = (typeof config?.cookieTexture === 'string' && config.cookieTexture.trim())
+        ? config.cookieTexture.trim()
+        : null;
+      if (cookieEnabled || cookieTexture) {
+        log.info('[COOKIE DEBUG] light-update', {
+          id: this.id,
+          cookieEnabled,
+          cookieTexture
+        });
+      }
+    } catch (_) {
+    }
 
     const docX = Number(doc?.x) || 0;
     const docY = Number(doc?.y) || 0;
@@ -828,11 +880,13 @@ ${FoundryLightingShaderChunks.pulse}
     const u = this.material?.uniforms;
     if (!u) return;
 
-    const enabled = config?.cookieEnabled === true;
+    const hasTexture = (typeof config?.cookieTexture === 'string' && config.cookieTexture.trim());
+    const enabled = (config?.cookieEnabled === true) || (config?.cookieEnabled === undefined && !!hasTexture);
 
-    const path = (enabled && typeof config?.cookieTexture === 'string' && config.cookieTexture.trim())
+    const path = (enabled && hasTexture)
       ? config.cookieTexture.trim()
       : null;
+
     const rotation = Number.isFinite(config?.cookieRotation) ? config.cookieRotation : 0.0;
     const scale0 = Number.isFinite(config?.cookieScale) ? config.cookieScale : 1.0;
     const scale = (scale0 > 0) ? scale0 : 1.0;
@@ -860,8 +914,25 @@ ${FoundryLightingShaderChunks.pulse}
     u.uCookieColorize.value = colorize ? 1.0 : 0.0;
 
     if (!path) {
+      try {
+        if (this._cookiePath) {
+          log.info('[COOKIE DEBUG] cookie-clear', {
+            id: this.id,
+            previousPath: this._cookiePath,
+            enabled,
+            hasTexture: !!hasTexture
+          });
+        }
+      } catch (_) {
+      }
+
+      if (this._cookieRetryTimeoutId !== null) {
+        try { clearTimeout(this._cookieRetryTimeoutId); } catch (_) {}
+        this._cookieRetryTimeoutId = null;
+      }
       this._cookiePath = null;
       this._cookieTexture = null;
+      this._cookieFailCount = 0;
       u.tCookie.value = null;
       u.uHasCookie.value = 0.0;
       return;
@@ -874,28 +945,202 @@ ${FoundryLightingShaderChunks.pulse}
     }
 
     // Kick off an async load; keep the light usable while the cookie arrives.
+    // IMPORTANT: Cookie loading must be resilient during Foundry startup.
+    // Foundry's PIXI texture pipeline can transiently fail before the scene is fully ready.
+    // If we fail once and never retry, cookies appear "broken" after reload until the user
+    // touches the light again. We therefore retry with backoff while the cookie remains enabled.
+    const prevPath = this._cookiePath;
+    if (prevPath !== path) {
+      this._cookieFailCount = 0;
+      if (this._cookieRetryTimeoutId !== null) {
+        try { clearTimeout(this._cookieRetryTimeoutId); } catch (_) {}
+        this._cookieRetryTimeoutId = null;
+      }
+    }
+
     this._cookiePath = path;
     this._cookieTexture = null;
     const version = ++this._cookieLoadVersion;
     u.tCookie.value = null;
     u.uHasCookie.value = 0.0;
 
-    loadTexture(path, { suppressProbeErrors: true })
-      .then((tex) => {
-        if (this._cookieLoadVersion !== version) return;
-        this._cookieTexture = tex;
-        if (this.material?.uniforms) {
-          this.material.uniforms.tCookie.value = tex;
-          this.material.uniforms.uHasCookie.value = 1.0;
-        }
-      })
-      .catch(() => {
-        if (this._cookieLoadVersion !== version) return;
-        if (this.material?.uniforms) {
-          this.material.uniforms.tCookie.value = null;
-          this.material.uniforms.uHasCookie.value = 0.0;
-        }
-      });
+    try {
+      const dbg = this._cookieDebugState || (this._cookieDebugState = { path: null, enabled: null });
+      if (dbg.path !== path || dbg.enabled !== enabled) {
+        log.info('[COOKIE DEBUG] cookie-config', {
+          id: this.id,
+          enabled,
+          hasTexture: !!hasTexture,
+          path,
+          strength,
+          contrast,
+          gamma,
+          invert,
+          colorize,
+          scale,
+          rotation
+        });
+        dbg.path = path;
+        dbg.enabled = enabled;
+      }
+    } catch (_) {
+    }
+
+    const attemptLoad = () => {
+      loadTexture(path, { suppressProbeErrors: true })
+        .then((tex) => {
+          if (this._cookieLoadVersion !== version) return;
+          if (this._cookiePath !== path) return;
+
+          if (this._cookieRetryTimeoutId !== null) {
+            try { clearTimeout(this._cookieRetryTimeoutId); } catch (_) {}
+            this._cookieRetryTimeoutId = null;
+          }
+          this._cookieFailCount = 0;
+
+          try {
+            const THREE = window.THREE;
+            if (THREE && tex) {
+              tex.wrapS = THREE.ClampToEdgeWrapping;
+              tex.wrapT = THREE.ClampToEdgeWrapping;
+              tex.minFilter = THREE.LinearFilter;
+              tex.magFilter = THREE.LinearFilter;
+              tex.generateMipmaps = false;
+              if (THREE.NoColorSpace) tex.colorSpace = THREE.NoColorSpace;
+              tex.flipY = false;
+              tex.needsUpdate = true;
+            }
+          } catch (_) {
+          }
+
+          this._cookieTexture = tex;
+          if (this.material?.uniforms) {
+            this.material.uniforms.tCookie.value = tex;
+            this.material.uniforms.uHasCookie.value = 1.0;
+          }
+
+          try {
+            const img = tex?.image ?? null;
+            const w = Number(img?.naturalWidth ?? img?.videoWidth ?? img?.width ?? 0) || undefined;
+            const h = Number(img?.naturalHeight ?? img?.videoHeight ?? img?.height ?? 0) || undefined;
+            log.info('[COOKIE DEBUG] cookie-load-success', {
+              id: this.id,
+              path,
+              width: w,
+              height: h,
+              hasImage: !!img
+            });
+          } catch (_) {
+          }
+
+          // Make the update visible immediately even if the render loop is currently idle-throttled.
+          try {
+            window.MapShine?.renderLoop?.requestContinuousRender?.(300);
+          } catch (_) {
+          }
+        })
+        .catch((err) => {
+          if (this._cookieLoadVersion !== version) return;
+          if (this._cookiePath !== path) return;
+
+          const handleFailure = (failureErr) => {
+            try {
+              log.warn('[COOKIE DEBUG] cookie-load-failed', {
+                id: this.id,
+                path,
+                message: String(failureErr?.message ?? failureErr ?? 'unknown')
+              });
+            } catch (_) {
+            }
+
+            // Keep cookie disabled until it successfully loads, but retry automatically.
+            if (this.material?.uniforms) {
+              this.material.uniforms.tCookie.value = null;
+              this.material.uniforms.uHasCookie.value = 0.0;
+            }
+
+            this._cookieFailCount = Math.min(20, (this._cookieFailCount || 0) + 1);
+            const delayMs = Math.min(8000, 250 * Math.pow(2, Math.max(0, this._cookieFailCount - 1)));
+            if (this._cookieRetryTimeoutId !== null) {
+              try { clearTimeout(this._cookieRetryTimeoutId); } catch (_) {}
+              this._cookieRetryTimeoutId = null;
+            }
+
+            this._cookieRetryTimeoutId = setTimeout(() => {
+              // Only retry if the cookie is still the active request.
+              if (this._cookieLoadVersion !== version) return;
+              if (this._cookiePath !== path) return;
+              attemptLoad();
+            }, delayMs);
+          };
+
+          // Fallback: use THREE.TextureLoader directly if Foundry loadTexture fails.
+          let fallbackStarted = false;
+          try {
+            const THREE = window.THREE;
+            if (THREE?.TextureLoader) {
+              fallbackStarted = true;
+              const loader = new THREE.TextureLoader();
+              const url = encodeURI(path);
+              loader.load(
+                url,
+                (tex) => {
+                  if (this._cookieLoadVersion !== version) return;
+                  if (this._cookiePath !== path) return;
+
+                  try {
+                    tex.wrapS = THREE.ClampToEdgeWrapping;
+                    tex.wrapT = THREE.ClampToEdgeWrapping;
+                    tex.minFilter = THREE.LinearFilter;
+                    tex.magFilter = THREE.LinearFilter;
+                    tex.generateMipmaps = false;
+                    if (THREE.NoColorSpace) tex.colorSpace = THREE.NoColorSpace;
+                    tex.flipY = false;
+                    tex.needsUpdate = true;
+                  } catch (_) {
+                  }
+
+                  this._cookieTexture = tex;
+                  if (this.material?.uniforms) {
+                    this.material.uniforms.tCookie.value = tex;
+                    this.material.uniforms.uHasCookie.value = 1.0;
+                  }
+
+                  try {
+                    const img = tex?.image ?? null;
+                    const w = Number(img?.naturalWidth ?? img?.videoWidth ?? img?.width ?? 0) || undefined;
+                    const h = Number(img?.naturalHeight ?? img?.videoHeight ?? img?.height ?? 0) || undefined;
+                    log.info('[COOKIE DEBUG] cookie-load-success-fallback', {
+                      id: this.id,
+                      path,
+                      width: w,
+                      height: h,
+                      hasImage: !!img
+                    });
+                  } catch (_) {
+                  }
+
+                  try {
+                    window.MapShine?.renderLoop?.requestContinuousRender?.(300);
+                  } catch (_) {
+                  }
+                },
+                undefined,
+                (fallbackErr) => {
+                  handleFailure(fallbackErr ?? err);
+                }
+              );
+            }
+          } catch (_) {
+          }
+
+          if (!fallbackStarted) {
+            handleFailure(err);
+          }
+        });
+    };
+
+    attemptLoad();
   }
 
   _getAnimationOptions() {
@@ -1081,8 +1326,13 @@ ${FoundryLightingShaderChunks.pulse}
       const meanderSigned = (meanderN * 2.0) - 1.0;
 
       // Wind magnitude variation: small oscillation around the base wind.
-      const gustStrength = 0.08 + 0.22 * windSpeed01;
-      const windSpeedVar = Math.max(0.0, Math.min(1.0, windSpeed01 + gustSigned * gustStrength));
+      // Provide a subtle idle baseline so cable swing still animates when wind is calm,
+      // while honoring per-light motion influence (localWindInfluence) later in windMul.
+      const intensity01 = this._clamp(intensity, 0, 10) / 10;
+      const idleWindBase = Math.max(0.0, Math.min(0.35, 0.08 + intensity01 * 0.12));
+      const windBase = Math.max(windSpeed01, idleWindBase);
+      const gustStrength = 0.08 + 0.22 * windBase;
+      const windSpeedVar = Math.max(0.0, Math.min(1.0, windBase + gustSigned * gustStrength));
 
       // Direction meander: max ~20deg at full wind.
       const maxAngleRad = (20.0 * Math.PI / 180.0) * windSpeedVar;
@@ -1682,6 +1932,10 @@ ${FoundryLightingShaderChunks.pulse}
   }
 
   dispose() {
+    if (this._cookieRetryTimeoutId !== null) {
+      try { clearTimeout(this._cookieRetryTimeoutId); } catch (_) {}
+      this._cookieRetryTimeoutId = null;
+    }
     if (this.mesh) {
       this.mesh.geometry.dispose();
       this.mesh.material.dispose();

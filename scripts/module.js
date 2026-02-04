@@ -26,6 +26,16 @@ const MapShine = window.MapShine ?? {
   camera: null
 };
 
+// Wall-clock load timer (starts at module evaluation time).
+// This measures the full time from module load to "Finished" in createThreeCanvas.
+try {
+  if (typeof MapShine._loadTimerStartMs !== 'number') {
+    MapShine._loadTimerStartMs = performance.now();
+  }
+} catch (_) {
+  // Ignore
+}
+
 // Expose module state globally (idempotent)
 window.MapShine = MapShine;
 
@@ -294,32 +304,6 @@ Hooks.once('init', async function() {
         }
       });
 
-      // Add MapShine Light tool to the Lighting control group
-      const lightingControls = getControl('lighting');
-      ensureTool(lightingControls, {
-        name: 'map-shine-enhanced-light',
-        order: 1.5,
-        title: 'MapShine Light',
-        icon: 'fa-solid fa-lightbulb',
-        visible: game.user.isGM,
-        onChange: () => {
-          try { ui?.controls?.render?.(true); } catch (_) {}
-          try { window.MapShine?.controlsIntegration?.inputRouter?.autoUpdate?.(); } catch (_) {}
-        }
-      });
-
-      ensureTool(lightingControls, {
-        name: 'map-shine-sun-light',
-        order: 1.6,
-        title: 'MapShine Sun Light',
-        icon: 'fa-solid fa-sun',
-        visible: game.user.isGM,
-        onChange: () => {
-          try { ui?.controls?.render?.(true); } catch (_) {}
-          try { window.MapShine?.controlsIntegration?.inputRouter?.autoUpdate?.(); } catch (_) {}
-        }
-      });
-
     } catch (e) {
       console.error('Map Shine: failed to register scene control buttons', e);
     }
@@ -426,6 +410,9 @@ Hooks.once('ready', async function() {
   
   // Update global state
   Object.assign(MapShine, state);
+  // Record bootstrap completion even if initialization failed.
+  MapShine.bootstrapComplete = true;
+  MapShine.bootstrapError = state?.error ?? null;
 
   try {
     if (!state?.initialized) {

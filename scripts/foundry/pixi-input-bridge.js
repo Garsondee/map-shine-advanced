@@ -63,7 +63,7 @@ export class PixiInputBridge {
         : (target instanceof Element ? [target] : []);
 
       for (const el of elements) {
-        if (el.closest('#map-shine-overlay-root, #map-shine-light-ring')) return true;
+        if (el.closest('#map-shine-overlay-root')) return true;
         if (el.closest('[data-overlay-id], .map-shine-overlay-ui')) return true;
       }
 

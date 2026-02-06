@@ -464,7 +464,8 @@ async function waitForThreeFrames(
   {
     minCalls = 1,
     minDelayMs = 0,
-    stableCallsFrames = 2
+    stableCallsFrames = 2,
+    allowHiddenResolve = true
   } = {}
 ) {
   const startTime = performance.now();
@@ -492,7 +493,10 @@ async function waitForThreeFrames(
     const meetsFrames = framesAdvanced >= minFrames;
     const meetsCalls = !Number.isFinite(calls) ? true : (callsStable >= stableCallsFrames);
 
+    const isHidden = allowHiddenResolve && typeof document !== 'undefined' && document.hidden;
+
     if (meetsDelay && meetsFrames && meetsCalls) return true;
+    if (isHidden && meetsDelay && meetsCalls) return true;
 
     // Use Promise.race to ensure we don't hang if tab is backgrounded (rAF pauses)
     await Promise.race([

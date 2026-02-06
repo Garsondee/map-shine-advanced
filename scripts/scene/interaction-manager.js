@@ -366,6 +366,10 @@ export class InteractionManager {
     this.hoveredWallId = null;
     /** @type {string|null} ID of currently hovered overhead tile */
     this.hoveredOverheadTileId = null;
+    /** @type {string|null} ID of overhead tile pending hover-hide debounce */
+    this._pendingOverheadTileId = null;
+    /** @type {number} Timestamp when overhead hover debounce started */
+    this._overheadHoverStartMs = 0;
     this.hoveringTreeCanopy = false;
     
     /** @type {string|null} ID of token whose HUD is currently open */
@@ -5094,15 +5098,29 @@ export class InteractionManager {
             if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
               this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
             }
+            this.hoveredOverheadTileId = null;
+          }
+
+          if (this._pendingOverheadTileId !== bestTileId) {
+            this._pendingOverheadTileId = bestTileId;
+            this._overheadHoverStartMs = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+          }
+
+          const nowMs = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+          if (nowMs - this._overheadHoverStartMs >= 1000) {
             this.hoveredOverheadTileId = bestTileId;
+            this._pendingOverheadTileId = null;
             if (this.tileManager.setTileHoverHidden) {
               this.tileManager.setTileHoverHidden(bestTileId, true);
             }
           }
           hitFound = true;
-        } else if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
-          this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
-          this.hoveredOverheadTileId = null;
+        } else {
+          if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
+            this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
+            this.hoveredOverheadTileId = null;
+          }
+          this._pendingOverheadTileId = null;
         }
       }
     }

@@ -1469,6 +1469,9 @@ export class ThreeLightSource {
     const prevMeshParent = this.mesh?.parent ?? this._meshParent;
     const prevLayersMask = this.mesh?.layers?.mask;
     const prevRenderOrder = this.mesh?.renderOrder;
+    // Preserve visibility state so darkness-gated lights don't flash for one
+    // frame when zoom triggers a geometry rebuild (new Mesh defaults to visible=true).
+    const prevVisible = this.mesh ? this.mesh.visible : undefined;
 
     // Defensive: ensure we never have more than one mesh for the same light in the
     // light scene. Duplicate additive meshes present as "brightness doubling".
@@ -1630,6 +1633,12 @@ export class ThreeLightSource {
     }
     if (typeof prevRenderOrder === 'number') {
       this.mesh.renderOrder = prevRenderOrder;
+    }
+
+    // Restore the previous mesh's visibility state so darkness-gated lights
+    // don't flash visible for one frame during zoom-triggered geometry rebuilds.
+    if (prevVisible !== undefined) {
+      this.mesh.visible = prevVisible;
     }
 
     if (prevMeshParent && typeof prevMeshParent.add === 'function') {

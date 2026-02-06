@@ -14,11 +14,11 @@ import {
   SizeOverLife,
   PiecewiseBezier,
   Bezier,
-  CurlNoiseField,
-  FrameOverLife
+  CurlNoiseField
 } from '../libs/three.quarks.module.js';
 import { weatherController } from '../core/WeatherController.js';
 import { SmartWindBehavior } from './SmartWindBehavior.js';
+import { BLOOM_HOTSPOT_LAYER } from '../effects/EffectComposer.js';
 
 const log = createLogger('FireSparksEffect');
 
@@ -564,28 +564,21 @@ export class FireSparksEffect extends EffectBase {
 
       indoorTimeScale: 1,
 
-      // ========== FLAME SHAPE ATLAS CONTROLS ==========
-      // Global flame shape parameters (affect all animation frames)
-      flameNoiseScale: 1.1,         // Frequency of noise distortion
-      flameNoiseStrength: 1.0,      // How much noise distorts the shape
-      flameTaper: 0.0,              // Vertical taper (0=no taper, 1=full taper to point)
-      flameWidth: 0.5,              // Horizontal scale of flame shape
-      flameHeight: 0.5,             // Vertical scale of flame shape
-      flameEdgeSoftness: 1.0,       // Edge falloff softness
-      flameCoreBrightness: 4.0,     // Core intensity multiplier
-      flameCoreSize: 0.37,          // Size of hot core relative to flame
-      // Master intensity for all flame sprites
-      flameAtlasIntensity: 2.0,
-      // Global opacity multiplier for all sprites
-      flameAtlasOpacity: 0.46,
-      // Non-linear alpha response for the atlas. 1.0 = linear, >1.0 = tighter
-      // cores with softer edges, <1.0 = broader, softer flames.
-      flameAlphaGamma: 1.0
+      // ========== FLAME TEXTURE CONTROLS ==========
+      // Controls for the flame.webp sprite appearance and UV transforms.
+      flameTextureOpacity: 0.85,
+      flameTextureBrightness: 1.0,
+      flameTextureScaleX: 1.0,
+      flameTextureScaleY: 1.0,
+      flameTextureOffsetX: 0.0,
+      flameTextureOffsetY: 0.0,
+      flameTextureRotation: 0.0,
+      flameTextureFlipX: false,
+      flameTextureFlipY: false
     };
 
-    // Create procedural flame atlas texture after params are initialized so
-    // _drawFlameInCell can safely read this.params during atlas generation.
-    this.fireTexture = this._createFireTexture();
+    // Fire texture is loaded lazily via _ensureFireTexture.
+    this.fireTexture = null;
   }
 
   isActive() {
@@ -641,235 +634,6 @@ export class FireSparksEffect extends EffectBase {
     }
     return { x: bounds.centerX, y: bounds.centerY };
   }
-  
-  /**
-   * Create a procedural 8x8 flame atlas texture with 64 animation frames.
-   * Increased from 4x4 to 8x8 for 60fps-equivalent smoothness.
-   * @returns {THREE.CanvasTexture}
-   */
-  _createFireTexture() {
-    const THREE = window.THREE;
-    if (!THREE) return null;
-
-    // Build an 8x8 atlas of flame animation frames (64 frames)
-    const cellSize = 128;  // Keep 128px for crisp detail
-    const grid = 8;        // Total size: 1024x1024
-
-    // IMPORTANT: Store grid size immediately so _drawFlameInCell knows we are in 8x8 mode
-    this._flameAtlasGrid = grid;
-    this._flameAtlasCellSize = cellSize;
-
-    const totalSize = cellSize * grid; 
-
-    const canvas = document.createElement('canvas');
-    canvas.width = totalSize;
-    canvas.height = totalSize;
-    const ctx = canvas.getContext('2d');
-
-    // Store canvas reference/context for later atlas regeneration.
-    this._flameAtlasCanvas = canvas;
-    this._flameAtlasCtx = ctx;
-
-    // Generate all 64 flame tiles procedurally
-    for (let row = 0; row < grid; row++) {
-      for (let col = 0; col < grid; col++) {
-        this._drawFlameInCell(ctx, col, row, cellSize);
-      }
-    }
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.minFilter = THREE.NearestFilter;
-    texture.magFilter = THREE.LinearFilter;
-    texture.generateMipmaps = false;
-    texture.needsUpdate = true;
-
-    return texture;
-  }
-
-
-  /**
-   * Simplex-like 2D noise function for procedural flame shapes.
-   * Uses a combination of sine waves to approximate organic noise.
-   * @param {number} x - X coordinate
-   * @param {number} y - Y coordinate
-   * @param {number} seed - Per-tile seed for variation
-   * @returns {number} Noise value in range [-1, 1]
-   */
-  _flameNoise(x, y, seed = 0) {
-    // Multi-octave sine-based noise approximation
-    
-    // CHANGE: Removed "* 127.1". 
-    // The 'seed' passed from _drawFlameInCell is already calculated as a 
-    // continuous phase (0 to 2PI). Multiplying it destroys the continuity.
-    const s = seed; 
-
-    let n = 0;
-    n += Math.sin(x * 1.0 + y * 1.7 + s) * 0.5;
-    n += Math.sin(x * 2.3 - y * 1.9 + s * 1.3) * 0.25;
-    n += Math.sin(x * 4.1 + y * 3.7 + s * 0.7) * 0.125;
-    n += Math.sin(x * 7.9 - y * 6.3 + s * 2.1) * 0.0625;
-    return n;
-  }
-
-  /**
-   * Draw a single flame shape into a cell of the atlas.
-   * For an 8x8 atlas, tileIndex 0-63 represents animation frames with evolving noise phase.
-   * @param {CanvasRenderingContext2D} ctx - Canvas context
-   * @param {number} cellX - Cell X index (0-7)
-   * @param {number} cellY - Cell Y index (0-7)
-   * @param {number} cellSize - Size of each cell in pixels
-   */
-  _drawFlameInCell(ctx, cellX, cellY, cellSize) {
-    const p = this.params || {};
-    // Ensure we default to 8 if not set, though _createFireTexture sets it now.
-    const grid = this._flameAtlasGrid || 8; 
-    const tileIndex = cellY * grid + cellX; // 0-63 for 8x8 grid
-
-    // For animation: use tileIndex as a time phase offset (0 to 1 over 64 frames)
-    const timePhase = tileIndex / (grid * grid); // 0.0 to ~0.98
-
-    // Get per-tile parameters (fall back to globals)
-    // For animation frames, we use global params since all frames share the same base shape
-    const getTileParam = (baseName, globalName) => {
-      const globalKey = `flame${globalName}`;
-      return p[globalKey] !== undefined ? p[globalKey] : 1.0;
-    };
-
-    const noiseScale = getTileParam('NoiseScale', 'NoiseScale');
-    const noiseStrength = getTileParam('NoiseStrength', 'NoiseStrength');
-    const taper = getTileParam('Taper', 'Taper');
-    const widthScale = getTileParam('Width', 'Width') || 1.0;
-    const heightScale = getTileParam('Height', 'Height') || 1.0;
-    const edgeSoftness = getTileParam('EdgeSoftness', 'EdgeSoftness');
-    const coreBrightness = p.flameCoreBrightness !== undefined ? p.flameCoreBrightness : 1.0;
-    const coreSize = p.flameCoreSize !== undefined ? p.flameCoreSize : 0.3;
-
-    // Global atlas intensity controls
-    const atlasIntensity = (typeof p.flameAtlasIntensity === 'number') ? p.flameAtlasIntensity : 1.0;
-    const atlasOpacity = (typeof p.flameAtlasOpacity === 'number') ? p.flameAtlasOpacity : 1.0;
-    const alphaGamma = (typeof p.flameAlphaGamma === 'number') ? p.flameAlphaGamma : 1.0;
-
-    // Animation seed: base seed + time phase offset for smooth evolution
-    // The timePhase creates a continuous animation loop across all 64 frames
-    const baseSeed = 42.0; // Fixed base seed for consistent flame shape
-    const animationSpeed = 2.0 * Math.PI; // One full cycle over 64 frames
-    const seed = baseSeed + timePhase * animationSpeed;
-
-    const imgData = ctx.createImageData(cellSize, cellSize);
-    const data = imgData.data;
-
-    const cx = cellSize / 2;
-    const cy = cellSize / 2;
-
-    for (let py = 0; py < cellSize; py++) {
-      for (let px = 0; px < cellSize; px++) {
-        // Normalized coordinates centered on cell (-1 to 1)
-        const nx = ((px - cx) / (cellSize * 0.5)) / widthScale;
-        const ny = ((py - cy) / (cellSize * 0.5)) / heightScale;
-
-        // Vertical position (0 = bottom, 1 = top of flame)
-        // Flame grows upward, so invert Y
-        const vPos = 1.0 - (ny + 1.0) * 0.5; // 0 at bottom, 1 at top
-
-        let flameMask;
-        let verticalMask;
-
-        // All animation frames use the same tapered ellipse with noisy edge
-        // The noise phase evolves with tileIndex to create animation
-
-        // Base flame shape: ellipse that tapers toward the top
-        // Width narrows as we go up based on taper parameter
-        const taperFactor = 1.0 - taper * vPos;
-        const effectiveWidth = Math.max(0.1, taperFactor);
-
-        // Distance from center axis (horizontal)
-        const hDist = Math.abs(nx) / effectiveWidth;
-
-        // Add noise distortion to the edge - seed evolves with timePhase for animation
-        const noiseX = px * noiseScale * 0.05;
-        const noiseY = py * noiseScale * 0.05;
-        const noise = this._flameNoise(noiseX, noiseY, seed) * noiseStrength;
-
-        // Flame mask: 1.0 inside, 0.0 outside
-        // Use smoothstep for soft edges
-        const edgeThreshold = 0.8 + noise;
-        const innerEdge = Math.max(0, edgeThreshold - edgeSoftness);
-        flameMask = 1.0 - this._smoothstep(innerEdge, edgeThreshold, hDist);
-
-        // Vertical falloff: fade out at top and bottom
-        const topFade = 1.0 - this._smoothstep(0.7, 1.0, vPos);
-        const bottomFade = this._smoothstep(0.0, 0.15, vPos);
-        verticalMask = topFade * bottomFade;
-
-        // Core brightness: hotter in the center
-        const coreDist = Math.sqrt(nx * nx + (ny + 0.3) * (ny + 0.3)); // Core offset downward
-        const coreIntensity = (1.0 - this._smoothstep(0, coreSize * 2, coreDist)) * coreBrightness;
-
-        // Shape alpha before global/persprite opacity controls
-        let shapeAlpha = flameMask * verticalMask;
-        shapeAlpha = Math.max(0, Math.min(1, shapeAlpha));
-
-        // Apply non-linear shaping and global alpha multipliers
-        const shapedAlpha = Math.pow(shapeAlpha, alphaGamma);
-        let alpha = shapedAlpha * atlasIntensity * atlasOpacity;
-        alpha = Math.max(0, Math.min(1, alpha));
-
-        // Color: white core fading to orange/red at edges
-        // Use the underlying shape alpha to drive color temperature so opacity
-        // controls do not desaturate or cool the flame, only its visibility.
-        const temp = shapeAlpha * (0.5 + 0.5 * coreIntensity);
-        const r = Math.min(1.0, 0.3 + temp * 0.7 + coreIntensity * 0.3);
-        const g = Math.min(1.0, 0.1 + temp * 0.6 + coreIntensity * 0.4);
-        const b = Math.min(1.0, temp * 0.2 + coreIntensity * 0.6);
-
-        const idx = (py * cellSize + px) * 4;
-        data[idx] = Math.floor(r * 255);
-        data[idx + 1] = Math.floor(g * 255);
-        data[idx + 2] = Math.floor(b * 255);
-        data[idx + 3] = Math.floor(alpha * 255);
-      }
-    }
-
-    ctx.putImageData(imgData, cellX * cellSize, cellY * cellSize);
-  }
-
-  /**
-   * Smoothstep interpolation function.
-   * @param {number} edge0 - Lower edge
-   * @param {number} edge1 - Upper edge
-   * @param {number} x - Input value
-   * @returns {number} Smoothly interpolated value
-   */
-  _smoothstep(edge0, edge1, x) {
-    const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
-    return t * t * (3 - 2 * t);
-  }
-
-  /**
-   * Regenerate the flame atlas texture when shape parameters change.
-   * Call this after modifying any flame shape params.
-   */
-  regenerateFlameAtlas() {
-    if (!this._flameAtlasCanvas || !this._flameAtlasCtx || !this.fireTexture) {
-      return;
-    }
-
-    const ctx = this._flameAtlasCtx;
-    const cellSize = this._flameAtlasCellSize;
-
-    // Clear and redraw all tiles in the current atlas grid (8x8 animation frames by default)
-    const grid = this._flameAtlasGrid || 8;
-    ctx.clearRect(0, 0, this._flameAtlasCanvas.width, this._flameAtlasCanvas.height);
-    for (let row = 0; row < grid; row++) {
-      for (let col = 0; col < grid; col++) {
-        this._drawFlameInCell(ctx, col, row, cellSize);
-      }
-    }
-
-    // Mark texture for update
-    this.fireTexture.needsUpdate = true;
-    log.debug('Flame atlas regenerated');
-  }
 
   _ensureEmberTexture() {
     const THREE = window.THREE;
@@ -885,6 +649,128 @@ export class FireSparksEffect extends EffectBase {
 
     return this.emberTexture;
   }
+
+  _ensureFireTexture() {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+
+    if (!this.fireTexture) {
+      const texture = new THREE.TextureLoader().load('modules/map-shine-advanced/assets/flame.webp', (loaded) => {
+        let finalTexture = loaded;
+        const spriteTexture = this._createFireSpriteTexture(loaded.image);
+        if (spriteTexture) {
+          finalTexture = spriteTexture;
+          if (typeof loaded.dispose === 'function') {
+            loaded.dispose();
+          }
+        }
+        finalTexture.minFilter = THREE.LinearMipmapLinearFilter;
+        finalTexture.magFilter = THREE.LinearFilter;
+        finalTexture.generateMipmaps = true;
+        finalTexture.needsUpdate = true;
+        this.fireTexture = finalTexture;
+        this._applyFireTextureSettings(finalTexture);
+        this._updateFireTextureSettings();
+      });
+      texture.minFilter = THREE.LinearMipmapLinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.generateMipmaps = true;
+      this.fireTexture = texture;
+      this._applyFireTextureSettings(texture);
+    }
+
+    return this.fireTexture;
+  }
+
+  _createFireSpriteTexture(image) {
+    const THREE = window.THREE;
+    if (!THREE || !image) return null;
+
+    const width = image.width;
+    const height = image.height;
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    ctx.drawImage(image, 0, 0, width, height);
+    const imgData = ctx.getImageData(0, 0, width, height);
+    const data = imgData.data;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const alpha = data[i + 3];
+      if (alpha === 0) {
+        data[i] = 0;
+        data[i + 1] = 0;
+        data[i + 2] = 0;
+      } else {
+        data[i] = 255;
+        data[i + 1] = 255;
+        data[i + 2] = 255;
+      }
+    }
+
+    ctx.putImageData(imgData, 0, 0);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.premultiplyAlpha = true;
+    return texture;
+  }
+
+  _applyFireTextureSettings(texture) {
+    const THREE = window.THREE;
+    if (!texture || !THREE) return;
+
+    const p = this.params || {};
+    const scaleX = Math.max(0.01, p.flameTextureScaleX ?? 1.0);
+    const scaleY = Math.max(0.01, p.flameTextureScaleY ?? 1.0);
+    const flipX = !!p.flameTextureFlipX;
+    const flipY = !!p.flameTextureFlipY;
+
+    // Keep rotation centered so offsets behave predictably with flips and tiling.
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.center.set(0.5, 0.5);
+    texture.rotation = p.flameTextureRotation ?? 0.0;
+
+    const repeatX = (flipX ? -1 : 1) * scaleX;
+    const repeatY = (flipY ? -1 : 1) * scaleY;
+    texture.repeat.set(repeatX, repeatY);
+
+    const offsetX = p.flameTextureOffsetX ?? 0.0;
+    const offsetY = p.flameTextureOffsetY ?? 0.0;
+    texture.offset.set(flipX ? 1.0 - offsetX : offsetX, flipY ? 1.0 - offsetY : offsetY);
+    texture.needsUpdate = true;
+  }
+
+  _updateFireTextureSettings() {
+    if (!this.fireTexture) return;
+    this._applyFireTextureSettings(this.fireTexture);
+
+    const brightness = Math.max(0.0, this.params?.flameTextureBrightness ?? 1.0);
+    const opacity = Math.max(0.0, Math.min(1.0, this.params?.flameTextureOpacity ?? 1.0));
+
+    const systems = this._tempSystems;
+    systems.length = 0;
+    if (this.globalSystem) systems.push(this.globalSystem);
+    if (this.globalSystems && this.globalSystems.length) systems.push(...this.globalSystems);
+    if (this.fires && this.fires.length) systems.push(...this.fires.map((f) => f?.system).filter(Boolean));
+
+    for (const sys of systems) {
+      const mat = sys?.material;
+      if (!mat) continue;
+      if (this.fireTexture) {
+        mat.map = this.fireTexture;
+        mat.alphaMap = null;
+      }
+      mat.opacity = opacity;
+      if (mat.color) mat.color.setScalar(brightness);
+      mat.needsUpdate = true;
+    }
+  }
   
   static getControlSchema() {
     return {
@@ -895,12 +781,21 @@ export class FireSparksEffect extends EffectBase {
         { name: 'fire-look', label: 'Fire - Look', type: 'inline', parameters: ['fireOpacityMin', 'fireOpacityMax', 'fireColorBoostMin', 'fireColorBoostMax', 'fireStartColor', 'fireEndColor'] },
         { name: 'fire-spin', label: 'Fire - Spin', type: 'inline', parameters: ['fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax'] },
         { name: 'fire-physics', label: 'Fire - Physics', type: 'inline', parameters: ['fireUpdraft', 'fireCurlStrength'] },
-        // Flame Shape Atlas Controls (Global) - all 16 animation frames share these parameters
         {
-          name: 'flame-atlas-global',
-          label: 'Flame Atlas (Animation)',
+          name: 'flame-texture',
+          label: 'Flame Texture (Sprite)',
           type: 'inline',
-          parameters: ['flameAtlasIntensity', 'flameAtlasOpacity', 'flameAlphaGamma', 'flameNoiseScale', 'flameNoiseStrength', 'flameTaper', 'flameWidth', 'flameHeight', 'flameEdgeSoftness', 'flameCoreBrightness', 'flameCoreSize']
+          parameters: [
+            'flameTextureOpacity',
+            'flameTextureBrightness',
+            'flameTextureScaleX',
+            'flameTextureScaleY',
+            'flameTextureOffsetX',
+            'flameTextureOffsetY',
+            'flameTextureRotation',
+            'flameTextureFlipX',
+            'flameTextureFlipY'
+          ]
         },
         { name: 'embers-main', label: 'Embers - Main', type: 'inline', parameters: ['emberRate'] },
         { name: 'embers-shape', label: 'Embers - Shape', type: 'inline', parameters: ['emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax'] },
@@ -932,19 +827,16 @@ export class FireSparksEffect extends EffectBase {
         fireSpinSpeedMin: { type: 'slider', label: 'Spin Speed Min (rad/s)', min: 0.0, max: 50.0, step: 0.1, default: 0.2 },
         fireSpinSpeedMax: { type: 'slider', label: 'Spin Speed Max (rad/s)', min: 0.0, max: 50.0, step: 0.1, default: 0.7 },
 
-        // ========== FLAME SHAPE ATLAS CONTROLS ==========
-        // Global flame shape parameters - all animation frames share these
-        flameAtlasIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 4.0, step: 0.01, default: 2.1 },
-        flameAtlasOpacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.46 },
-        flameAlphaGamma: { type: 'slider', label: 'Alpha Gamma', min: 0.1, max: 4.0, step: 0.05, default: 1.0 },
-        flameNoiseScale: { type: 'slider', label: 'Noise Scale', min: 0.5, max: 10.0, step: 0.1, default: 1.1 },
-        flameNoiseStrength: { type: 'slider', label: 'Noise Strength', min: 0.0, max: 2.0, step: 0.01, default: 1.0 },
-        flameTaper: { type: 'slider', label: 'Taper', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
-        flameWidth: { type: 'slider', label: 'Width', min: 0.2, max: 3.0, step: 0.05, default: 0.5 },
-        flameHeight: { type: 'slider', label: 'Height', min: 0.2, max: 3.0, step: 0.05, default: 0.5 },
-        flameEdgeSoftness: { type: 'slider', label: 'Edge Softness', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
-        flameCoreBrightness: { type: 'slider', label: 'Core Brightness', min: 0.0, max: 4.0, step: 0.05, default: 4.0 },
-        flameCoreSize: { type: 'slider', label: 'Core Size', min: 0.01, max: 1.0, step: 0.01, default: 0.37 },
+        // ========== FLAME TEXTURE CONTROLS ==========
+        flameTextureOpacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.85 },
+        flameTextureBrightness: { type: 'slider', label: 'Brightness', min: 0.0, max: 3.0, step: 0.01, default: 1.0 },
+        flameTextureScaleX: { type: 'slider', label: 'Scale X', min: 0.05, max: 4.0, step: 0.05, default: 1.0 },
+        flameTextureScaleY: { type: 'slider', label: 'Scale Y', min: 0.05, max: 4.0, step: 0.05, default: 1.0 },
+        flameTextureOffsetX: { type: 'slider', label: 'Offset X', min: -1.0, max: 1.0, step: 0.01, default: 0.0 },
+        flameTextureOffsetY: { type: 'slider', label: 'Offset Y', min: -1.0, max: 1.0, step: 0.01, default: 0.0 },
+        flameTextureRotation: { type: 'slider', label: 'Rotation (rad)', min: -3.14, max: 3.14, step: 0.01, default: 0.0 },
+        flameTextureFlipX: { type: 'checkbox', label: 'Flip X', default: false },
+        flameTextureFlipY: { type: 'checkbox', label: 'Flip Y', default: false },
 
         emberRate: { type: 'slider', label: 'Ember Density', min: 0.0, max: 5.0, step: 0.1, default: 2.5 },
         emberSizeMin: { type: 'slider', label: 'Ember Size Min', min: 1.0, max: 40.0, step: 1.0, default: 5.0 },
@@ -1577,11 +1469,10 @@ export class FireSparksEffect extends EffectBase {
     const { shape, rate, size, height } = opts;
     const THREE = window.THREE;
     
+    const fireTexture = this._ensureFireTexture();
     const material = new THREE.MeshBasicMaterial({
-      // Use the procedural flame atlas as the particle texture. This mirrors
-      // WeatherParticles' splash atlas usage and ensures point sprites sample
-      // our 2x2 flame tiles instead of a legacy generic sprite.
-      map: this.fireTexture,
+      map: fireTexture,
+      alphaMap: null,
       transparent: true,
       depthWrite: false, // Essential for fire to not occlude itself
       depthTest: true,   // Allow it to sit behind tokens/walls
@@ -1632,8 +1523,8 @@ export class FireSparksEffect extends EffectBase {
     const opacityMin = Math.max(0.0, Math.min(1.0, p.fireOpacityMin ?? 0.3));
     const opacityMax = Math.max(opacityMin, Math.min(1.0, p.fireOpacityMax ?? 1.0));
 
-    const colorBoostMin = p.fireColorBoostMin ?? 0.8;
-    const colorBoostMax = Math.max(colorBoostMin, p.fireColorBoostMax ?? 1.2);
+    const colorBoostMin = Math.max(0.01, 1.0 + (p.fireColorBoostMin ?? 0.0));
+    const colorBoostMax = Math.max(colorBoostMin, 1.0 + (p.fireColorBoostMax ?? 0.0));
 
     const fireStart = p.fireStartColor || { r: 1.2, g: 1.0, b: 0.6 };
     const fireEnd = p.fireEndColor || { r: 0.8, g: 0.2, b: 0.05 };
@@ -1665,25 +1556,22 @@ export class FireSparksEffect extends EffectBase {
       material: material,
       renderMode: RenderMode.BillBoard,
       renderOrder: 50,
-      // 4x4 flame atlas: 16 animation frames
-      uTileCount: 8,
-      vTileCount: 8,
-      // Start at frame 0 - FrameOverLife will animate through all 16 frames
+      // Single-frame flame texture
+      uTileCount: 1,
+      vTileCount: 1,
+      // Start at frame 0
       startTileIndex: new ConstantValue(0),
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [
-          colorOverLife,
-          sizeOverLife,
-          new ParticleTimeScaledBehavior(buoyancy),
-          windForce,
-          new ParticleTimeScaledBehavior(turbulence),
-          new FireSpinBehavior(),
-          
-          // CHANGE: Animate from frame 0 to 63 over the particle's life.
-          // Using Bezier control points (0, 21, 42, 63) for linear interpolation.
-          new FrameOverLife(new PiecewiseBezier([[new Bezier(0, 21, 42, 63), 0]]))
+        windForce,
+        buoyancy,
+        turbulence,
+        new FireSpinBehavior(),
+        colorOverLife
       ]
     });
+
+    this._updateFireTextureSettings();
     
     // Patch the material to support roof/outdoors masking
     this._patchRoofMaskMaterial(material);
@@ -1791,6 +1679,13 @@ export class FireSparksEffect extends EffectBase {
         new SizeOverLife(new PiecewiseBezier([[new Bezier(1, 0.9, 0.5, 0), 0]]))
       ]
     });
+
+    try {
+      if (system?.emitter?.layers?.enable) {
+        system.emitter.layers.enable(BLOOM_HOTSPOT_LAYER);
+      }
+    } catch (_) {
+    }
 
     // Patch the material to support roof/outdoors masking
     this._patchRoofMaskMaterial(material);
@@ -2062,19 +1957,9 @@ export class FireSparksEffect extends EffectBase {
       }
     }
 
-    // Regenerate flame atlas when any flame shape parameter changes
-    if (paramId.startsWith('flame') || paramId.startsWith('flame1') || 
-        paramId.startsWith('flame2') || paramId.startsWith('flame3') || 
-        paramId.startsWith('flame4')) {
-      // Debounce regeneration to avoid excessive redraws during slider drags
-      if (this._flameAtlasRegenerateTimeout) {
-        clearTimeout(this._flameAtlasRegenerateTimeout);
-      }
-      this._flameAtlasRegenerateTimeout = setTimeout(() => {
-        this.regenerateFlameAtlas();
-        this._flameAtlasRegenerateTimeout = null;
-      }, 50);
-      }
+    if (paramId.startsWith('flameTexture')) {
+      this._updateFireTextureSettings();
+    }
   }
 
   update(timeInfo) {
@@ -2242,6 +2127,16 @@ export class FireSparksEffect extends EffectBase {
               u.uResolution.value.set(resX, resY);
               if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
             }
+            const desiredMap = (sys.userData && sys.userData.isEmber) ? this.emberTexture : this.fireTexture;
+            if (desiredMap) {
+              try {
+                if (batchMat.uniforms?.map) batchMat.uniforms.map.value = desiredMap;
+                if (batchMat.uniforms?.tMap) batchMat.uniforms.tMap.value = desiredMap;
+                if (batchMat.uniforms?.uMap) batchMat.uniforms.uMap.value = desiredMap;
+                batchMat.map = desiredMap;
+              } catch (_) {
+              }
+            }
           }
         }
       }
@@ -2316,8 +2211,8 @@ export class FireSparksEffect extends EffectBase {
 
         const opacityMin = Math.max(0.0, Math.min(1.0, p2.emberOpacityMin ?? 0.4));
         const opacityMax = Math.max(opacityMin, Math.max(0.0, Math.min(1.0, p2.emberOpacityMax ?? 1.0)));
-        const colorBoostMin = p2.emberColorBoostMin ?? 0.9;
-        const colorBoostMax = Math.max(colorBoostMin, p2.emberColorBoostMax ?? 1.5);
+        const colorBoostMin = Math.max(0.01, 1.0 + (p2.emberColorBoostMin ?? 0.0));
+        const colorBoostMax = Math.max(colorBoostMin, 1.0 + (p2.emberColorBoostMax ?? 0.0));
 
         const emberStdStart = p2.emberStartColor || _EMBER_STD_START_DEFAULT;
         const emberStdEnd = p2.emberEndColor || _EMBER_STD_END_DEFAULT;
@@ -2382,8 +2277,8 @@ export class FireSparksEffect extends EffectBase {
         const rawOpMax = p2.fireOpacityMax ?? 0.68;
         const opacityMin = Math.max(0.0, Math.min(1.0, rawOpMin * 0.4));
         const opacityMax = Math.max(opacityMin, Math.max(0.0, Math.min(1.0, rawOpMax * 0.5)));
-        const colorBoostMin = p2.fireColorBoostMin ?? 0.8;
-        const colorBoostMax = Math.max(colorBoostMin, p2.fireColorBoostMax ?? 1.2);
+        const colorBoostMin = Math.max(0.01, 1.0 + (p2.fireColorBoostMin ?? 0.0));
+        const colorBoostMax = Math.max(colorBoostMin, 1.0 + (p2.fireColorBoostMax ?? 0.0));
 
         if (sys.startLife && typeof sys.startLife.a === 'number') {
           sys.startLife.a = lifeMin;

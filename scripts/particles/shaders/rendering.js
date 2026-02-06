@@ -371,7 +371,18 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
 
         vec4 col;
 
-        if (vType == 2.0) {
+        if (vType == 0.0) {
+          // FIRE: sample the atlas texture and apply a soft radial mask
+          // to avoid hard square silhouettes when viewed from above.
+          vec2 p = uv - vec2(0.5);
+          float r = length(p);
+          float edge = 0.5;
+          float inner = 0.22;
+          float radialMask = 1.0 - smoothstep(inner, edge, r);
+
+          vec4 texCol = texture2D(uParticleTexture, uv);
+          col = vec4(texCol.rgb * vColor.rgb, texCol.a * vColor.a * radialMask);
+        } else if (vType == 2.0) {
           // RAIN: render as a streak aligned with the projected motion direction.
           // We build a thin, soft-edged line mask in the point sprite quad using
           // vMotionDir (in screen space) as the "along" axis.
@@ -408,9 +419,7 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
         }
 
         // Global alpha scale (scene bounds, enable flags, life cycle).
-        if (vType != 0.0) {
-          col.a *= vAlpha;
-        }
+        col.a *= vAlpha;
 
         // FINAL SAFETY GUARD:
         // If the computed colour contains NaNs (from upstream data issues),

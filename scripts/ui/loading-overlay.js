@@ -380,7 +380,7 @@ export class LoadingOverlay {
 
     this._setContentOpacity(1, 0);
     this.el.style.backgroundColor = 'rgba(0, 0, 0, 0)';
-    await new Promise(resolve => requestAnimationFrame(resolve));
+    await this._nextFrame();
     this._setContentOpacity(0, contentMs);
     this.el.style.backgroundColor = 'rgba(0, 0, 0, 1)';
     await this._sleep(durationMs);
@@ -401,7 +401,7 @@ export class LoadingOverlay {
 
     this._setContentOpacity(1, 0);
     this.el.style.backgroundColor = 'rgba(0, 0, 0, 1)';
-    await new Promise(resolve => requestAnimationFrame(resolve));
+    await this._nextFrame();
     this._setContentOpacity(0, contentMs);
     this.el.style.backgroundColor = 'rgba(0, 0, 0, 0)';
     await this._sleep(durationMs);
@@ -411,6 +411,23 @@ export class LoadingOverlay {
 
   _sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  _nextFrame() {
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      try {
+        requestAnimationFrame(() => finish());
+      } catch (_) {
+        // Ignore rAF errors in non-visual contexts.
+      }
+      setTimeout(finish, 50);
+    });
   }
 }
 

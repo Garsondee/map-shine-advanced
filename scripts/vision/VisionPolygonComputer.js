@@ -163,6 +163,9 @@ export class VisionPolygonComputer {
     const segments = outSegments ?? [];
     let writeIndex = segments.length;
     const radiusSq = radius * radius;
+    const WALL_DIRECTION_BOTH = 0;
+    const WALL_DIRECTION_LEFT = 1;
+    const WALL_DIRECTION_RIGHT = 2;
     
     for (const wall of walls) {
       const doc = wall?.document;
@@ -184,6 +187,18 @@ export class VisionPolygonComputer {
       const ay = c[1];
       const bx = c[2];
       const by = c[3];
+
+      // Directional walls only block rays from one side. Match Foundry's orient2dFast
+      // convention where a negative orientation means LEFT, positive means RIGHT.
+      const dir = doc.dir ?? WALL_DIRECTION_BOTH;
+      if (dir !== WALL_DIRECTION_BOTH) {
+        // orient2dFast(a, b, c) = (a.y - c.y) * (b.x - c.x) - (a.x - c.x) * (b.y - c.y)
+        const orient = (ay - center.y) * (bx - center.x) - (ax - center.x) * (by - center.y);
+        if (orient !== 0) {
+          const side = orient < 0 ? WALL_DIRECTION_LEFT : WALL_DIRECTION_RIGHT;
+          if (side !== dir) continue;
+        }
+      }
       
       // Quick rejection: skip segments entirely outside vision radius
       // Check if either endpoint is within radius, or if segment intersects radius circle

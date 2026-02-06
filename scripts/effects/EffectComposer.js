@@ -26,6 +26,7 @@ export const RenderLayers = {
   POST_PROCESSING: { order: 500, name: 'PostProcessing', requiresDepth: false }
 };
 
+export const BLOOM_HOTSPOT_LAYER = 30;
 export const OVERLAY_THREE_LAYER = 31;
 
 export const ROPE_MASK_LAYER = 25;

@@ -4,7 +4,7 @@
  * @module effects/BloomEffect
  */
 
-import { EffectBase, RenderLayers } from './EffectComposer.js';
+import { BLOOM_HOTSPOT_LAYER, EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { FoundryFogBridge } from '../vision/FoundryFogBridge.js';
 
@@ -41,6 +41,7 @@ export class BloomEffect extends EffectBase {
       radius: 0.82,
       threshold: 0.86,
       tintColor: { r: 1, g: 1, b: 1 },
+      sparksHotspotIntensity: 0.0,
       // Controls how the bloom layer blends over the base scene
       blendOpacity: 1.0,
       blendMode: 'add' // 'add', 'screen', 'soft'
@@ -67,6 +68,14 @@ export class BloomEffect extends EffectBase {
     this._maskCamera = null;
     this._maskQuad = null;
 
+    this._emberHotspotTarget = null;
+    this._emberHotspotScene = null;
+    this._emberHotspotCompositeScene = null;
+    this._emberHotspotCompositeMaterial = null;
+    this._emberHotspotCompositeQuad = null;
+
+    this._hotspotCompositeTarget = null;
+
     this._compositeMaterial = null;
   }
 
@@ -81,7 +90,7 @@ export class BloomEffect extends EffectBase {
           name: 'bloom',
           label: 'Bloom Settings',
           type: 'inline',
-          parameters: ['strength', 'radius', 'threshold', 'tintColor', 'blendOpacity', 'blendMode']
+          parameters: ['strength', 'radius', 'threshold', 'sparksHotspotIntensity', 'tintColor', 'blendOpacity', 'blendMode']
         }
       ],
       parameters: {
@@ -89,6 +98,7 @@ export class BloomEffect extends EffectBase {
         strength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 0.63 },
         radius: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.82 },
         threshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.86 },
+        sparksHotspotIntensity: { type: 'slider', label: 'Ember Hotspots', min: 0, max: 10, step: 0.05, default: 0.0 },
         tintColor: { type: 'color', default: { r: 1, g: 1, b: 1 } },
         blendOpacity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0 },
         // Tweakpane expects an options map: label -> value
@@ -380,7 +390,72 @@ export class BloomEffect extends EffectBase {
       } else {
         this._maskedInputTarget.setSize(size.width, size.height);
       }
+
+      if (!this._emberHotspotTarget) {
+        this._emberHotspotTarget = new THREE.WebGLRenderTarget(size.width, size.height, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          format: THREE.RGBAFormat,
+          type: THREE.FloatType,
+          depthBuffer: false,
+          stencilBuffer: false
+        });
+      } else {
+        this._emberHotspotTarget.setSize(size.width, size.height);
+      }
+
+      if (!this._hotspotCompositeTarget) {
+        this._hotspotCompositeTarget = new THREE.WebGLRenderTarget(size.width, size.height, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          format: THREE.RGBAFormat,
+          type: THREE.FloatType,
+          depthBuffer: false,
+          stencilBuffer: false
+        });
+      } else {
+        this._hotspotCompositeTarget.setSize(size.width, size.height);
+      }
     } catch (_) {
+    }
+
+    // Ember hotspot extraction scene (renders the main scene but with a layer mask)
+    if (!this._emberHotspotScene) this._emberHotspotScene = scene;
+
+    // Composite material for: maskedScene + emberHotspots * intensity
+    if (!this._emberHotspotCompositeMaterial) {
+      this._emberHotspotCompositeMaterial = new THREE.ShaderMaterial({
+        transparent: false,
+        depthTest: false,
+        depthWrite: false,
+        uniforms: {
+          tScene: { value: null },
+          tHot: { value: null },
+          uHotIntensity: { value: 0.0 }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = vec4(position.xy, 0.0, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform sampler2D tScene;
+          uniform sampler2D tHot;
+          uniform float uHotIntensity;
+          varying vec2 vUv;
+          void main() {
+            vec4 s = texture2D(tScene, vUv);
+            vec4 h = texture2D(tHot, vUv);
+            gl_FragColor = s + h * uHotIntensity;
+          }
+        `
+      });
+      this._emberHotspotCompositeScene = new THREE.Scene();
+      const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._emberHotspotCompositeMaterial);
+      this._emberHotspotCompositeQuad = quad;
+      this._emberHotspotCompositeScene.add(quad);
     }
   }
 
@@ -694,6 +769,44 @@ export class BloomEffect extends EffectBase {
       passthrough();
       return;
     }
+
+    // Optional ember hotspot injection: render ember-only layer into hotspot RT, then composite
+    // it into _maskedInputTarget so it only seeds bloom (does not change base scene render).
+    if ((p.sparksHotspotIntensity ?? 0) > 1e-6 && this._emberHotspotTarget && this._emberHotspotCompositeMaterial) {
+      const prevTarget = renderer.getRenderTarget();
+      const prevMask = camera?.layers?.mask;
+      try {
+        if (camera?.layers) {
+          camera.layers.set(BLOOM_HOTSPOT_LAYER);
+        }
+        renderer.setRenderTarget(this._emberHotspotTarget);
+        renderer.clear();
+        renderer.render(scene, camera);
+
+        this._emberHotspotCompositeMaterial.uniforms.tScene.value = this._maskedInputTarget.texture;
+        this._emberHotspotCompositeMaterial.uniforms.tHot.value = this._emberHotspotTarget.texture;
+        this._emberHotspotCompositeMaterial.uniforms.uHotIntensity.value = Math.max(0.0, p.sparksHotspotIntensity ?? 0.0);
+
+        // IMPORTANT: Do NOT sample from and render into the same target.
+        // Render the composite into a separate target, then swap.
+        if (this._hotspotCompositeTarget) {
+          renderer.setRenderTarget(this._hotspotCompositeTarget);
+          renderer.clear();
+          renderer.render(this._emberHotspotCompositeScene, this.copyCamera);
+          const tmp = this._maskedInputTarget;
+          this._maskedInputTarget = this._hotspotCompositeTarget;
+          this._hotspotCompositeTarget = tmp;
+        }
+      } catch (_) {
+        // Fail-safe: ignore hotspot injection if anything goes wrong.
+      } finally {
+        try {
+          if (camera?.layers) camera.layers.mask = prevMask;
+        } catch (_) {
+        }
+        renderer.setRenderTarget(prevTarget);
+      }
+    }
     
     // We pass a dummy deltaTime because UnrealBloomPass doesn't strictly use it for animation
     // (unless it was doing something time-based which it isn't).
@@ -745,6 +858,14 @@ export class BloomEffect extends EffectBase {
       if (this._maskedInputTarget && (this._maskedInputTarget.width !== width || this._maskedInputTarget.height !== height)) {
         this._maskedInputTarget.setSize(width, height);
       }
+
+      if (this._hotspotCompositeTarget && (this._hotspotCompositeTarget.width !== width || this._hotspotCompositeTarget.height !== height)) {
+        this._hotspotCompositeTarget.setSize(width, height);
+      }
+
+      if (this._emberHotspotTarget && (this._emberHotspotTarget.width !== width || this._emberHotspotTarget.height !== height)) {
+        this._emberHotspotTarget.setSize(width, height);
+      }
     } catch (_) {
     }
   }
@@ -790,6 +911,25 @@ export class BloomEffect extends EffectBase {
     if (this._maskedInputTarget) {
       this._maskedInputTarget.dispose();
       this._maskedInputTarget = null;
+    }
+
+    if (this._emberHotspotTarget) {
+      this._emberHotspotTarget.dispose();
+      this._emberHotspotTarget = null;
+    }
+
+    if (this._hotspotCompositeTarget) {
+      this._hotspotCompositeTarget.dispose();
+      this._hotspotCompositeTarget = null;
+    }
+
+    if (this._emberHotspotCompositeMaterial) {
+      this._emberHotspotCompositeMaterial.dispose();
+      this._emberHotspotCompositeMaterial = null;
+    }
+
+    if (this._emberHotspotCompositeQuad) {
+      this._emberHotspotCompositeQuad.geometry.dispose();
     }
   }
 }

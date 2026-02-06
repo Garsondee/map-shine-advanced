@@ -1201,16 +1201,19 @@ export class LightingEffect extends EffectBase {
    * @private
    */
   _applyFoundryOverrides() {
+    const sceneDarkness = this._getSceneDarknessLevel();
     for (const [id, source] of this.lights.entries()) {
       const suppressed = this._overriddenFoundryLightIds.has(id);
+      const isActive = this._isLightActiveForDarkness(source?.document, sceneDarkness);
       if (source?.mesh) {
-        source.mesh.visible = !suppressed;
+        source.mesh.visible = isActive && !suppressed;
       }
     }
     for (const [id, source] of this.darknessSources.entries()) {
       const suppressed = this._overriddenFoundryLightIds.has(id);
+      const isActive = this._isLightActiveForDarkness(source?.document, sceneDarkness);
       if (source?.mesh) {
-        source.mesh.visible = !suppressed;
+        source.mesh.visible = isActive && !suppressed;
       }
     }
   }
@@ -1520,6 +1523,7 @@ export class LightingEffect extends EffectBase {
   onLightUpdate(doc, changes) {
     const mergedDoc = this._mergeLightDocChanges(doc, changes);
     const targetDoc = this._applyFoundryEnhancements(mergedDoc);
+    const sceneDarkness = this._getSceneDarknessLevel();
 
     const targetLayers = (targetDoc?.config?.targetLayers === 'ground' || targetDoc?.config?.targetLayers === 'overhead')
       ? targetDoc.config.targetLayers
@@ -1569,7 +1573,8 @@ export class LightingEffect extends EffectBase {
         this.darknessSources.get(targetDoc.id).updateData(targetDoc);
         const src = this.darknessSources.get(targetDoc.id);
         if (src?.mesh) {
-          src.mesh.visible = !isSuppressed;
+          const isActive = this._isLightActiveForDarkness(targetDoc, sceneDarkness);
+          src.mesh.visible = isActive && !isSuppressed;
           this._applyLayerTargeting(src.mesh, targetLayers, GROUND_LIGHT_LAYER, OVERHEAD_LIGHT_LAYER);
         }
       } else {
@@ -1577,7 +1582,8 @@ export class LightingEffect extends EffectBase {
         source.init();
         this.darknessSources.set(targetDoc.id, source);
         if (source.mesh && this.darknessScene) {
-          source.mesh.visible = !isSuppressed;
+          const isActive = this._isLightActiveForDarkness(targetDoc, sceneDarkness);
+          source.mesh.visible = isActive && !isSuppressed;
           this._applyLayerTargeting(source.mesh, targetLayers, GROUND_LIGHT_LAYER, OVERHEAD_LIGHT_LAYER);
           this.darknessScene.add(source.mesh);
         }
@@ -1607,7 +1613,8 @@ export class LightingEffect extends EffectBase {
       const src = this.lights.get(targetDoc.id);
       src.updateData(targetDoc);
       if (src?.mesh) {
-        src.mesh.visible = !isSuppressed;
+        const isActive = this._isLightActiveForDarkness(targetDoc, sceneDarkness);
+        src.mesh.visible = isActive && !isSuppressed;
         try {
           if (isSunLight) {
             this.lightScene?.remove(src.mesh);
@@ -1625,7 +1632,8 @@ export class LightingEffect extends EffectBase {
       source.init();
       this.lights.set(targetDoc.id, source);
       if (source.mesh && (this.lightScene || this.sunLightScene)) {
-        source.mesh.visible = !isSuppressed;
+        const isActive = this._isLightActiveForDarkness(targetDoc, sceneDarkness);
+        source.mesh.visible = isActive && !isSuppressed;
         this._applyLayerTargeting(source.mesh, targetLayers, GROUND_LIGHT_LAYER, OVERHEAD_LIGHT_LAYER);
         if (isSunLight) this.sunLightScene?.add(source.mesh);
         else this.lightScene?.add(source.mesh);
@@ -1665,12 +1673,17 @@ export class LightingEffect extends EffectBase {
    */
   onLightingRefresh() {
     try {
+      const sceneDarkness = this._getSceneDarknessLevel();
+
       // Rebuild all Foundry lights to pick up updated LOS polygons
       // Re-apply enhancements to ensure cookies aren't cleared by stale documents
       for (const [id, source] of this.lights) {
         if (source && source.document) {
           const enhancedDoc = this._applyFoundryEnhancements(source.document);
           source.updateData(enhancedDoc, true);
+          const isSuppressed = this._overriddenFoundryLightIds.has(source.id);
+          const isActive = this._isLightActiveForDarkness(enhancedDoc, sceneDarkness);
+          if (source.mesh) source.mesh.visible = isActive && !isSuppressed;
         }
       }
       
@@ -1678,6 +1691,8 @@ export class LightingEffect extends EffectBase {
       for (const [id, source] of this.mapshineLights) {
         if (source && source.document) {
           source.updateData(source.document, true);
+          const isActive = this._isLightActiveForDarkness(source.document, sceneDarkness);
+          if (source.mesh) source.mesh.visible = isActive;
         }
       }
     } catch (e) {
@@ -1703,6 +1718,45 @@ export class LightingEffect extends EffectBase {
     const eff = Math.max(0.0, Math.min(1.0, d * scale));
     this._effectiveDarkness = eff;
     return eff;
+  }
+
+  _getSceneDarknessLevel() {
+    let d = this.params?.darknessLevel;
+    try {
+      const env = canvas?.environment;
+      if (env && typeof env.darknessLevel === 'number') {
+        d = env.darknessLevel;
+      }
+    } catch (_) {
+    }
+
+    return (typeof d === 'number' && isFinite(d)) ? Math.max(0.0, Math.min(1.0, d)) : 0.0;
+  }
+
+  _isLightActiveForDarkness(doc, darknessLevel) {
+    if (!doc) return false;
+
+    if (doc.hidden === true) return false;
+
+    const config = doc.config ?? {};
+    const angle = Number(config.angle ?? 360);
+    const dim = Number(config.dim ?? 0);
+    const bright = Number(config.bright ?? 0);
+    const radius = Math.max(dim, bright);
+
+    if (!(radius > 0) || !(angle > 0)) return false;
+
+    const range = (config.darkness && typeof config.darkness === 'object') ? config.darkness : {};
+    const min0 = Number.isFinite(range.min) ? range.min : 0.0;
+    const max0 = Number.isFinite(range.max) ? range.max : 1.0;
+    const min = Math.max(0.0, Math.min(1.0, Math.min(min0, max0)));
+    const max = Math.max(0.0, Math.min(1.0, Math.max(min0, max0)));
+
+    const d = (typeof darknessLevel === 'number' && Number.isFinite(darknessLevel))
+      ? Math.max(0.0, Math.min(1.0, darknessLevel))
+      : 0.0;
+
+    return d >= min && d <= max;
   }
 
   _getEffectiveZoom() {
@@ -1766,23 +1820,39 @@ export class LightingEffect extends EffectBase {
       // (Ambient colors sync omitted here to keep this patch focused.)
     }
 
-    // Update Animations for all lights (avoid per-frame closure allocations)
+    const sceneDarkness = this._getSceneDarknessLevel();
+
+    // Update animations first, THEN apply darkness gating visibility.
+    // updateAnimation() can trigger rebuildGeometry() (e.g. zoom-driven wall
+    // inset updates), which replaces the mesh. Setting visibility before the
+    // animation would target the OLD mesh, leaving the NEW mesh visible=true
+    // for one frame — causing the flicker on darkness-gated lights during zoom.
     for (const light of this.lights.values()) {
-      light.updateAnimation(timeInfo, this.params.darknessLevel);
+      light.updateAnimation(timeInfo, sceneDarkness);
+      const isActive = this._isLightActiveForDarkness(light.document, sceneDarkness);
+      const isSuppressed = this._overriddenFoundryLightIds.has(light.id);
+      if (light.mesh) light.mesh.visible = isActive && !isSuppressed;
     }
 
     // Update MapShine-native lights using the same animation system for now.
     for (const light of this.mapshineLights.values()) {
-      light.updateAnimation(timeInfo, this.params.darknessLevel);
+      light.updateAnimation(timeInfo, sceneDarkness);
+      const isActive = this._isLightActiveForDarkness(light.document, sceneDarkness);
+      if (light.mesh) light.mesh.visible = isActive;
     }
 
     // Update Animations for all darkness sources
     for (const ds of this.darknessSources.values()) {
       ds.updateAnimation(timeInfo);
+      const isActive = this._isLightActiveForDarkness(ds.document, sceneDarkness);
+      const isSuppressed = this._overriddenFoundryLightIds.has(ds.id);
+      if (ds.mesh) ds.mesh.visible = isActive && !isSuppressed;
     }
 
     for (const ds of this.mapshineDarknessSources.values()) {
       ds.updateAnimation(timeInfo);
+      const isActive = this._isLightActiveForDarkness(ds.document, sceneDarkness);
+      if (ds.mesh) ds.mesh.visible = isActive;
     }
 
     // Update Composite Uniforms

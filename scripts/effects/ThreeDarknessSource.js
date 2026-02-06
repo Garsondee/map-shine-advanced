@@ -362,6 +362,9 @@ export class ThreeDarknessSource {
 
   rebuildGeometry(worldX, worldY, radiusPx, z) {
     const THREE = window.THREE;
+    // Preserve visibility state so darkness-gated sources don't flash for one
+    // frame when a geometry rebuild creates a new Mesh (defaults to visible=true).
+    const prevVisible = this.mesh ? this.mesh.visible : undefined;
     if (this.mesh) {
       this.mesh.geometry.dispose();
       this.mesh.removeFromParent();
@@ -399,6 +402,12 @@ export class ThreeDarknessSource {
     this.mesh = new THREE.Mesh(geometry, this.material);
     this.mesh.position.set(worldX, worldY, z);
     this.mesh.renderOrder = 95;
+
+    // Restore the previous mesh's visibility state so darkness-gated sources
+    // don't flash visible for one frame during geometry rebuilds.
+    if (prevVisible !== undefined) {
+      this.mesh.visible = prevVisible;
+    }
   }
 
   updateAnimation(timeInfo) {

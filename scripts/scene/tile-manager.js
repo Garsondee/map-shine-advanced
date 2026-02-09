@@ -31,6 +31,38 @@ const ROOF_LAYER = 20;
 const WEATHER_ROOF_LAYER = 21;
 const WATER_OCCLUDER_LAYER = 22;
 
+// Track whether we've already logged the deprecated tileDoc.overhead warning
+// to avoid spamming the console for every tile on every scene load.
+let _loggedOverheadDeprecation = false;
+
+/**
+ * Determine whether a tile is overhead based solely on its elevation relative
+ * to the scene's foregroundElevation. This matches Foundry v12+ behavior.
+ *
+ * The legacy `tileDoc.overhead` boolean is intentionally ignored — Foundry
+ * removed it and elevation is the single source of truth.
+ *
+ * @param {object} tileDoc - The tile document
+ * @returns {boolean}
+ */
+export function isTileOverhead(tileDoc) {
+  const foregroundElevation = Number.isFinite(canvas.scene?.foregroundElevation)
+    ? canvas.scene.foregroundElevation
+    : 0;
+  const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
+
+  // Debug: warn once if the deprecated property is still set on any tile doc.
+  if (!_loggedOverheadDeprecation && tileDoc?.overhead !== undefined) {
+    _loggedOverheadDeprecation = true;
+    log.debug(
+      'Tile document has deprecated "overhead" property — MapShine ignores it and uses elevation >= foregroundElevation instead.',
+      { tileId: tileDoc?.id, overhead: tileDoc.overhead, elevation: elev, foregroundElevation }
+    );
+  }
+
+  return elev >= foregroundElevation;
+}
+
 /**
  * TileManager - Synchronizes Foundry VTT tiles to THREE.js sprites
  * Handles layering (Background/Foreground/Overhead) and reactive updates
@@ -1238,20 +1270,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     this._initialLoad.pendingOverhead = 0;
     this._initialLoad.trackedIds = new Set();
 
-    const foregroundElevation = Number.isFinite(canvas.scene.foregroundElevation)
-      ? canvas.scene.foregroundElevation
-      : 0;
     for (const tileDoc of tiles) {
       const tileId = tileDoc?.id;
       if (tileId) {
         this._initialLoad.trackedIds.add(tileId);
         this._initialLoad.pendingAll++;
-        // Overhead detection:
-        // - Preferred (v12+): elevation > foregroundElevation
-        // - Back-compat: tileDoc.overhead (some worlds/systems still set this)
-        const elev = Number.isFinite(tileDoc.elevation) ? tileDoc.elevation : 0;
-        const isOverhead = (elev > foregroundElevation) || (tileDoc.overhead === true);
-        if (isOverhead) this._initialLoad.pendingOverhead++;
+        if (isTileOverhead(tileDoc)) this._initialLoad.pendingOverhead++;
       }
       this.createTileSprite(tileDoc);
     }
@@ -2118,14 +2142,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     } catch (_) {
     }
 
-    const foregroundElevation = Number.isFinite(canvas.scene.foregroundElevation)
-      ? canvas.scene.foregroundElevation
-      : 0;
-    // Overhead detection:
-    // - Preferred (v12+): elevation > foregroundElevation
-    // - Back-compat: tileDoc.overhead
-    const elevForLoad = Number.isFinite(tileDoc.elevation) ? tileDoc.elevation : 0;
-    const isOverheadForLoad = (elevForLoad > foregroundElevation) || (tileDoc.overhead === true);
+    const isOverheadForLoad = isTileOverhead(tileDoc);
 
     // Load texture
     this.loadTileTexture(texturePath).then(texture => {
@@ -2593,14 +2610,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
     let zBase = groundZ + Z_FOREGROUND_OFFSET;
 
-    const foregroundElevation = Number.isFinite(canvas.scene.foregroundElevation)
-      ? canvas.scene.foregroundElevation
-      : 0;
-    // Overhead detection:
-    // - Preferred (v12+): elevation > foregroundElevation
-    // - Back-compat: tileDoc.overhead
-    const elev = Number.isFinite(tileDoc.elevation) ? tileDoc.elevation : 0;
-    const isOverhead = (elev > foregroundElevation) || (tileDoc.overhead === true);
+    const isOverhead = isTileOverhead(tileDoc);
     const wasOverhead = !!sprite.userData.isOverhead;
 
     // Store overhead status for update loop

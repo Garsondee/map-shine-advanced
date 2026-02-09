@@ -8,6 +8,7 @@ import { createLogger } from '../core/log.js';
 import * as assetLoader from '../assets/loader.js';
 import { weatherController } from '../core/WeatherController.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
+import { isTileOverhead } from './tile-manager.js';
 
 const log = createLogger('SceneComposer');
 
@@ -200,10 +201,6 @@ export class SceneComposer {
       const sceneH = sr.height ?? 0;
       if (!sceneW || !sceneH) return [];
 
-      const foregroundElevation = Number.isFinite(canvas?.scene?.foregroundElevation)
-        ? canvas.scene.foregroundElevation
-        : Number.POSITIVE_INFINITY;
-
       const tol = 1;
       const minArea = sceneW * sceneH * 0.2;
       const out = [];
@@ -221,9 +218,7 @@ export class SceneComposer {
         // If an overhead tile is included, its color can be baked into the ground pass and
         // appear as a persistent "ghost" when the actual overhead sprite fades out.
         try {
-          const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
-          const isOverhead = (Number.isFinite(foregroundElevation) ? (elev > foregroundElevation) : false) || (tileDoc?.overhead === true);
-          if (isOverhead) continue;
+          if (isTileOverhead(tileDoc)) continue;
         } catch (e) {
         }
 
@@ -331,10 +326,6 @@ export class SceneComposer {
       const sr = d?.sceneRect;
       if (!tiles || !sr) return [];
 
-      const foregroundElevation = Number.isFinite(canvas?.scene?.foregroundElevation)
-        ? canvas.scene.foregroundElevation
-        : Number.POSITIVE_INFINITY;
-
       const sceneX = sr.x ?? 0;
       const sceneY = sr.y ?? 0;
       const sceneW = sr.width ?? 0;
@@ -349,9 +340,7 @@ export class SceneComposer {
         // Exclude overhead/roof tiles from union-mask basePaths.
         // Union masks are intended for scene-wide ground masks, not roofs.
         try {
-          const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
-          const isOverhead = (Number.isFinite(foregroundElevation) ? (elev > foregroundElevation) : false) || (tileDoc?.overhead === true);
-          if (isOverhead) continue;
+          if (isTileOverhead(tileDoc)) continue;
         } catch (e) {
         }
 
@@ -673,8 +662,6 @@ export class SceneComposer {
       const sceneH = sr.height ?? (d?.sceneHeight ?? d?.height ?? 0);
       if (!sceneW || !sceneH) return null;
 
-      const foregroundElevation = canvas?.scene?.foregroundElevation ?? Number.POSITIVE_INFINITY;
-
       // IMPORTANT:
       // Only consider large "ground" tiles as mask sources.
       // If we allow any tile to be chosen here, small props (boats, decals) can
@@ -727,8 +714,7 @@ export class SceneComposer {
         let score = 0;
 
         // Prefer non-overhead tiles
-        const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
-        if (Number.isFinite(foregroundElevation) && elev >= foregroundElevation) score -= 1000;
+        if (isTileOverhead(tileDoc)) score -= 1000;
 
         // Prefer tiles that cover the full sceneRect
         const tol = 1;

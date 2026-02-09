@@ -71,8 +71,8 @@ export class TokenManager {
       windowLightIntensity: 1.0
     };
 
-    /** @type {((tokenId: string) => void)|null} */
-    this._onTokenMovementStart = null;
+    /** @type {Array<(tokenId: string) => void>} */
+    this._onTokenMovementStartListeners = [];
 
     /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
     this._hookIds = [];
@@ -401,10 +401,26 @@ vec3 ms_applyWindowLight(vec3 color) {
 
   /**
    * Register a callback invoked when a token begins moving (authoritative update).
+   * Replaces all existing listeners with a single callback (legacy API).
+   * Prefer addOnTokenMovementStart() for non-exclusive listeners.
    * @param {(tokenId: string) => void} callback
    */
   setOnTokenMovementStart(callback) {
-    this._onTokenMovementStart = typeof callback === 'function' ? callback : null;
+    this._onTokenMovementStartListeners = [];
+    if (typeof callback === 'function') {
+      this._onTokenMovementStartListeners.push(callback);
+    }
+  }
+
+  /**
+   * Add a callback invoked when a token begins moving (authoritative update).
+   * Unlike setOnTokenMovementStart, this does NOT replace existing listeners.
+   * @param {(tokenId: string) => void} callback
+   */
+  addOnTokenMovementStart(callback) {
+    if (typeof callback === 'function') {
+      this._onTokenMovementStartListeners.push(callback);
+    }
   }
 
   /**
@@ -997,9 +1013,8 @@ vec3 ms_applyWindowLight(vec3 color) {
       }
 
       if (attributes.length > 0) {
-        try {
-          if (this._onTokenMovementStart) this._onTokenMovementStart(tokenDoc.id);
-        } catch (_) {
+        for (const cb of this._onTokenMovementStartListeners) {
+          try { cb(tokenDoc.id); } catch (_) {}
         }
         // Calculate duration based on distance
         const dist = Math.hypot(sprite.position.x - centerX, sprite.position.y - centerY);
@@ -1034,9 +1049,8 @@ vec3 ms_applyWindowLight(vec3 color) {
       Math.abs(sprite.position.y - centerY) > 0.1 ||
       Math.abs(sprite.position.z - zPosition) > 0.1
     ) {
-      try {
-        if (this._onTokenMovementStart) this._onTokenMovementStart(tokenDoc.id);
-      } catch (_) {
+      for (const cb of this._onTokenMovementStartListeners) {
+        try { cb(tokenDoc.id); } catch (_) {}
       }
     }
     sprite.position.set(centerX, centerY, zPosition);

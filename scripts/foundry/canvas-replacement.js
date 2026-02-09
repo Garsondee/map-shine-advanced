@@ -5,46 +5,58 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { safeCall, safeCallAsync, safeDispose, Severity } from '../core/safe-call.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import { SceneComposer } from '../scene/composer.js';
 import { CameraFollower } from './camera-follower.js';
 import { PixiInputBridge } from './pixi-input-bridge.js';
 import { EffectComposer } from '../effects/EffectComposer.js';
-import { SpecularEffect } from '../effects/SpecularEffect.js';
-import { IridescenceEffect } from '../effects/IridescenceEffect.js';
-import { WindowLightEffect } from '../effects/WindowLightEffect.js';
-import { BushEffect } from '../effects/BushEffect.js';
-import { TreeEffect } from '../effects/TreeEffect.js';
-import { ColorCorrectionEffect } from '../effects/ColorCorrectionEffect.js';
-import { FilmGrainEffect } from '../effects/FilmGrainEffect.js';
-import { DotScreenEffect } from '../effects/DotScreenEffect.js';
-import { HalftoneEffect } from '../effects/HalftoneEffect.js';
-import { SharpenEffect } from '../effects/SharpenEffect.js';
-import { SkyColorEffect } from '../effects/SkyColorEffect.js';
-import { AsciiEffect } from '../effects/AsciiEffect.js';
-import { BloomEffect } from '../effects/BloomEffect.js';
+// Dependent effects still constructed directly in createThreeCanvas
 import { LightingEffect } from '../effects/LightingEffect.js';
-import { LightningEffect } from '../effects/LightningEffect.js';
-import { LensflareEffect } from '../effects/LensflareEffect.js';
-import { PrismEffect } from '../effects/PrismEffect.js';
-import { DazzleOverlayEffect } from '../effects/DazzleOverlayEffect.js';
-import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
-import { BuildingShadowsEffect } from '../effects/BuildingShadowsEffect.js';
-import { CloudEffect } from '../effects/CloudEffect.js';
-import { AtmosphericFogEffect } from '../effects/AtmosphericFogEffect.js';
-import { DistortionManager } from '../effects/DistortionManager.js';
-import { WaterEffectV2 } from '../effects/WaterEffectV2.js';
-import { MaskDebugEffect } from '../effects/MaskDebugEffect.js';
-import { DebugLayerEffect } from '../effects/DebugLayerEffect.js';
-import { PlayerLightEffect } from '../effects/PlayerLightEffect.js';
 import { CandleFlamesEffect } from '../effects/CandleFlamesEffect.js';
 import { MaskManager } from '../masks/MaskManager.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { FireSparksEffect } from '../particles/FireSparksEffect.js';
 import { AshDisturbanceEffect } from '../particles/AshDisturbanceEffect.js';
-import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { DustMotesEffect } from '../particles/DustMotesEffect.js';
-import { WorldSpaceFogEffect } from '../effects/WorldSpaceFogEffect.js';
+// Effect wiring — tables, helpers, and re-exported effect classes (for static getControlSchema() calls)
+import {
+  getIndependentEffectDefs,
+  registerAllCapabilities,
+  wireGraphicsSettings,
+  readLazySkipIds,
+  wireBaseMeshes,
+  exposeEffectsEarly,
+  // Effect classes re-exported for initializeUI's static getControlSchema() calls
+  SpecularEffect,
+  IridescenceEffect,
+  WindowLightEffect,
+  ColorCorrectionEffect,
+  FilmGrainEffect,
+  DotScreenEffect,
+  HalftoneEffect,
+  SharpenEffect,
+  AsciiEffect,
+  SmellyFliesEffect,
+  LightningEffect,
+  PrismEffect,
+  WaterEffectV2,
+  WorldSpaceFogEffect,
+  BushEffect,
+  TreeEffect,
+  OverheadShadowsEffect,
+  BuildingShadowsEffect,
+  CloudEffect,
+  AtmosphericFogEffect,
+  DistortionManager,
+  BloomEffect,
+  LensflareEffect,
+  DazzleOverlayEffect,
+  MaskDebugEffect,
+  DebugLayerEffect,
+  PlayerLightEffect,
+  SkyColorEffect
+} from './effect-wiring.js';
 import { RenderLoop } from '../core/render-loop.js';
 import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
@@ -65,7 +77,7 @@ import { MapPointsManager } from '../scene/map-points-manager.js';
 import { PhysicsRopeManager } from '../scene/physics-rope-manager.js';
 import { DropHandler } from './drop-handler.js';
 import { sceneDebug } from '../utils/scene-debug.js';
-import { clearCache as clearAssetCache } from '../assets/loader.js';
+import { clearCache as clearAssetCache, warmupBundleTextures } from '../assets/loader.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { weatherController } from '../core/WeatherController.js';
 import { DynamicExposureManager } from '../core/DynamicExposureManager.js';
@@ -79,6 +91,10 @@ import { OverlayUIManager } from '../ui/overlay-ui-manager.js';
 import { LightEditorTweakpane } from '../ui/light-editor-tweakpane.js';
 import { EffectCapabilitiesRegistry } from '../effects/effect-capabilities-registry.js';
 import { GraphicsSettingsManager } from '../ui/graphics-settings-manager.js';
+import { LoadSession } from '../core/load-session.js';
+import { ResizeHandler } from './resize-handler.js';
+import { ModeManager } from './mode-manager.js';
+import { wireMapPointsToEffects, exposeGlobals } from './manager-wiring.js';
 
 const log = createLogger('Canvas');
 
@@ -146,15 +162,13 @@ let effectCapabilitiesRegistry = null;
 function _applyRenderResolutionToRenderer(viewportWidthCss, viewportHeightCss) {
   if (!renderer || typeof renderer.setPixelRatio !== 'function') return;
 
-  try {
+  safeCall(() => {
     const baseDpr = window.devicePixelRatio || 1;
     const effective = graphicsSettings?.computeEffectivePixelRatio
       ? graphicsSettings.computeEffectivePixelRatio(viewportWidthCss, viewportHeightCss, baseDpr)
       : baseDpr;
     renderer.setPixelRatio(effective);
-  } catch (e) {
-    log.warn('Failed to apply render resolution:', e);
-  }
+  }, 'applyRenderResolution', Severity.DEGRADED);
 }
 
 /** @type {EnhancedLightInspector|null} */
@@ -212,14 +226,11 @@ function _updateFoundrySelectRectSuppression(forceValue = null) {
   // Suppress Foundry selection rectangle when:
   // - MapShine is running and we are in Gameplay mode
   // - and our InteractionManager selection box is enabled
-  let suppress = false;
-  try {
+  let suppress = safeCall(() => {
     const im = window.MapShine?.interactionManager;
     const enabled = im?.selectionBoxParams?.enabled !== false;
-    suppress = !isMapMakerMode && enabled;
-  } catch (_) {
-    suppress = !isMapMakerMode;
-  }
+    return !isMapMakerMode && enabled;
+  }, 'selectRect.checkSuppression', Severity.COSMETIC, { fallback: !isMapMakerMode });
 
   if (typeof forceValue === 'boolean') suppress = forceValue;
 
@@ -227,7 +238,7 @@ function _updateFoundrySelectRectSuppression(forceValue = null) {
   if (_mapShineSelectSuppressed === suppress) return;
   _mapShineSelectSuppressed = suppress;
 
-  try {
+  safeCall(() => {
     const controls = canvas?.controls;
     if (!controls) return;
 
@@ -240,29 +251,25 @@ function _updateFoundrySelectRectSuppression(forceValue = null) {
       }
 
       controls.drawSelect = ({ x, y, width, height } = {}) => {
-        try {
+        safeCall(() => {
           if (selectGfx?.clear) selectGfx.clear();
           if (selectGfx) selectGfx.visible = false;
-        } catch (_) {
-        }
+        }, 'selectRect.clearGfx', Severity.COSMETIC);
       };
 
-      try {
+      safeCall(() => {
         if (selectGfx?.clear) selectGfx.clear();
         if (selectGfx) selectGfx.visible = false;
-      } catch (_) {
-      }
+      }, 'selectRect.hideGfx', Severity.COSMETIC);
     } else {
       if (_mapShineOrigDrawSelect) {
         controls.drawSelect = _mapShineOrigDrawSelect;
       }
-      try {
+      safeCall(() => {
         if (selectGfx) selectGfx.visible = true;
-      } catch (_) {
-      }
+      }, 'selectRect.showGfx', Severity.COSMETIC);
     }
-  } catch (_) {
-  }
+  }, 'selectRect.patch', Severity.COSMETIC);
 }
 
 /** @type {GridRenderer|null} */
@@ -318,6 +325,12 @@ let collapseSidebarHookId = null;
 /** @type {boolean} */
 let sceneResetInProgress = false;
 
+/** @type {ResizeHandler|null} */
+let resizeHandler = null;
+
+/** @type {ModeManager|null} */
+let modeManager = null;
+
 /** @type {Function|null} */
 let _webglContextLostHandler = null;
 
@@ -333,22 +346,12 @@ let _webglContextRestoredHandler = null;
  /** @type {number|null} - Hook ID for pauseGame listener */
  let pauseGameHookId = null;
 
- /** @type {number} */
- let createThreeCanvasGeneration = 0;
-
  function _getActiveSceneForCanvasConfig() {
-   try {
+   return safeCall(() => {
      if (canvas?.scene) return canvas.scene;
-   } catch (_) {
-   }
-
-   try {
      // Different Foundry versions expose the active scene differently.
      return game?.scenes?.current ?? game?.scenes?.active ?? game?.scenes?.viewed ?? null;
-   } catch (_) {
-   }
-
-   return null;
+   }, 'getActiveSceneForCanvasConfig', Severity.COSMETIC, { fallback: null });
  }
 
 /**
@@ -368,17 +371,14 @@ export function initialize() {
     // This hook is called BEFORE the PIXI.Application is created, allowing us
     // to set transparent: true so the PIXI canvas can show Three.js underneath
     Hooks.on('canvasConfig', (config) => {
-      try {
+      safeCall(() => {
         const scene = _getActiveSceneForCanvasConfig();
         if (!scene || !sceneSettings.isEnabled(scene)) return;
 
         log.info('Configuring PIXI canvas for transparency');
         config.transparent = true;
-        // Also set backgroundAlpha to 0 for good measure
         config.backgroundAlpha = 0;
-      } catch (_) {
-        // Ignore - if we cannot resolve the active scene, don't mutate Foundry defaults.
-      }
+      }, 'canvasConfig.transparency', Severity.COSMETIC);
     });
     
     // Hook into canvas ready event (when canvas is fully initialized)
@@ -393,14 +393,12 @@ export function initialize() {
     // Hook into Foundry pause/unpause so we can smoothly ramp time scale to 0 and back.
     if (!pauseGameHookId) {
       pauseGameHookId = Hooks.on('pauseGame', (paused) => {
-        try {
+        safeCall(() => {
           const tm = window.MapShine?.timeManager || effectComposer?.getTimeManager?.();
           if (tm && typeof tm.setFoundryPaused === 'function') {
             tm.setFoundryPaused(!!paused);
           }
-        } catch (e) {
-          // Ignore hook errors
-        }
+        }, 'pauseGame.hook', Severity.COSMETIC);
       });
     }
 
@@ -422,7 +420,7 @@ function installCanvasTransitionWrapper() {
   if (transitionsInstalled) return;
   transitionsInstalled = true;
 
-  try {
+  safeCall(() => {
     const CanvasCls = globalThis.foundry?.canvas?.Canvas;
     const proto = CanvasCls?.prototype;
     if (!proto?.tearDown) {
@@ -434,26 +432,22 @@ function installCanvasTransitionWrapper() {
 
     const original = proto.tearDown;
     const wrapped = async function(...args) {
-      try {
+      await safeCallAsync(async () => {
         const scene = this.scene;
         if (scene && sceneSettings.isEnabled(scene)) {
           loadingOverlay.showLoading('Switching scenes…');
-          await loadingOverlay.fadeToBlack(5000);
+          await loadingOverlay.fadeToBlack(2000, 600);
           loadingOverlay.setMessage('Loading…');
           loadingOverlay.setProgress(0, { immediate: true });
         }
-      } catch (e) {
-        log.warn('Scene transition fade failed:', e);
-      }
+      }, 'sceneTransition.fade', Severity.DEGRADED);
       return original.apply(this, args);
     };
 
     wrapped.__mapShineWrapped = true;
     proto.tearDown = wrapped;
     log.info('Installed Canvas.tearDown transition wrapper');
-  } catch (e) {
-    log.warn('Failed to install scene transition wrapper:', e);
-  }
+  }, 'installCanvasTransitionWrapper', Severity.DEGRADED);
 }
 
 async function waitForThreeFrames(
@@ -523,110 +517,98 @@ async function onUpdateScene(scene, changes, _options, _userId) {
   if (!sceneSettings.isEnabled(scene)) return;
 
   // Weather authority sync (GM flags replicated to all clients)
-  try {
-    if (changes?.flags?.['map-shine-advanced']) {
-      const ns = changes.flags['map-shine-advanced'];
+  safeCall(() => {
+    if (!changes?.flags?.['map-shine-advanced']) return;
+    const ns = changes.flags['map-shine-advanced'];
 
-      if (Object.prototype.hasOwnProperty.call(ns, 'controlState')) {
-        const cs = scene.getFlag('map-shine-advanced', 'controlState');
-        if (cs && typeof cs === 'object') {
-          try {
-            if (Number.isFinite(cs.timeOfDay)) {
-              const mins = Number(cs.timeTransitionMinutes) || 0;
-              if (mins > 0) {
-                void stateApplier.startTimeOfDayTransition(cs.timeOfDay, mins, false);
-              } else {
-                void stateApplier.applyTimeOfDay(cs.timeOfDay, false, true);
-              }
+    if (Object.prototype.hasOwnProperty.call(ns, 'controlState')) {
+      const cs = scene.getFlag('map-shine-advanced', 'controlState');
+      if (cs && typeof cs === 'object') {
+        safeCall(() => {
+          if (Number.isFinite(cs.timeOfDay)) {
+            const mins = Number(cs.timeTransitionMinutes) || 0;
+            if (mins > 0) {
+              void stateApplier.startTimeOfDayTransition(cs.timeOfDay, mins, false);
+            } else {
+              void stateApplier.applyTimeOfDay(cs.timeOfDay, false, true);
             }
-
-            const applyDynamic = (typeof cs.weatherMode !== 'string') || cs.weatherMode === 'dynamic';
-
-            if (applyDynamic) {
-              if (typeof cs.dynamicEnabled === 'boolean') {
-                if (typeof weatherController.setDynamicEnabled === 'function') {
-                  weatherController.setDynamicEnabled(cs.dynamicEnabled);
-                } else {
-                  weatherController.dynamicEnabled = cs.dynamicEnabled;
-                }
-              }
-
-              if (typeof cs.dynamicPresetId === 'string' && cs.dynamicPresetId) {
-                if (typeof weatherController.setDynamicPreset === 'function') {
-                  weatherController.setDynamicPreset(cs.dynamicPresetId);
-                } else {
-                  weatherController.dynamicPresetId = cs.dynamicPresetId;
-                }
-              }
-
-              if (Number.isFinite(cs.dynamicEvolutionSpeed)) {
-                if (typeof weatherController.setDynamicEvolutionSpeed === 'function') {
-                  weatherController.setDynamicEvolutionSpeed(cs.dynamicEvolutionSpeed);
-                } else {
-                  weatherController.dynamicEvolutionSpeed = cs.dynamicEvolutionSpeed;
-                }
-              }
-
-              if (typeof cs.dynamicPaused === 'boolean') {
-                if (typeof weatherController.setDynamicPaused === 'function') {
-                  weatherController.setDynamicPaused(cs.dynamicPaused);
-                } else {
-                  weatherController.dynamicPaused = cs.dynamicPaused;
-                }
-              }
-            }
-
-            const cp = window.MapShine?.controlPanel;
-            if (cp) {
-              if (cp.controlState && typeof cp.controlState === 'object') {
-                Object.assign(cp.controlState, cs);
-              } else {
-                cp.controlState = { ...cs };
-              }
-              try {
-                cp.pane?.refresh?.();
-              } catch (e) {
-              }
-            }
-          } catch (e) {
           }
-        }
-      }
 
-      if (Object.prototype.hasOwnProperty.call(ns, 'weather-transition')) {
-        const cmd = scene.getFlag('map-shine-advanced', 'weather-transition');
-        if (cmd) {
-          weatherController.applyTransitionCommand?.(cmd);
-        }
-      }
+          const applyDynamic = (typeof cs.weatherMode !== 'string') || cs.weatherMode === 'dynamic';
 
-      if (Object.prototype.hasOwnProperty.call(ns, 'weather-dynamic')) {
-        weatherController._loadDynamicStateFromScene?.();
-        try {
-          uiManager?.updateControlStates?.('weather');
-        } catch (e) {
-        }
-      }
+          if (applyDynamic) {
+            if (typeof cs.dynamicEnabled === 'boolean') {
+              if (typeof weatherController.setDynamicEnabled === 'function') {
+                weatherController.setDynamicEnabled(cs.dynamicEnabled);
+              } else {
+                weatherController.dynamicEnabled = cs.dynamicEnabled;
+              }
+            }
 
-      if (Object.prototype.hasOwnProperty.call(ns, 'weather-transitionTarget')) {
-        weatherController._loadQueuedTransitionTargetFromScene?.();
-      }
+            if (typeof cs.dynamicPresetId === 'string' && cs.dynamicPresetId) {
+              if (typeof weatherController.setDynamicPreset === 'function') {
+                weatherController.setDynamicPreset(cs.dynamicPresetId);
+              } else {
+                weatherController.dynamicPresetId = cs.dynamicPresetId;
+              }
+            }
 
-      if (Object.prototype.hasOwnProperty.call(ns, 'weather-snapshot')) {
-        weatherController._loadWeatherSnapshotFromScene?.();
+            if (Number.isFinite(cs.dynamicEvolutionSpeed)) {
+              if (typeof weatherController.setDynamicEvolutionSpeed === 'function') {
+                weatherController.setDynamicEvolutionSpeed(cs.dynamicEvolutionSpeed);
+              } else {
+                weatherController.dynamicEvolutionSpeed = cs.dynamicEvolutionSpeed;
+              }
+            }
+
+            if (typeof cs.dynamicPaused === 'boolean') {
+              if (typeof weatherController.setDynamicPaused === 'function') {
+                weatherController.setDynamicPaused(cs.dynamicPaused);
+              } else {
+                weatherController.dynamicPaused = cs.dynamicPaused;
+              }
+            }
+          }
+
+          const cp = window.MapShine?.controlPanel;
+          if (cp) {
+            if (cp.controlState && typeof cp.controlState === 'object') {
+              Object.assign(cp.controlState, cs);
+            } else {
+              cp.controlState = { ...cs };
+            }
+            safeCall(() => cp.pane?.refresh?.(), 'controlPanel.refresh', Severity.COSMETIC);
+          }
+        }, 'updateScene.controlState', Severity.DEGRADED);
       }
     }
-  } catch (e) {
-  }
+
+    if (Object.prototype.hasOwnProperty.call(ns, 'weather-transition')) {
+      const cmd = scene.getFlag('map-shine-advanced', 'weather-transition');
+      if (cmd) {
+        weatherController.applyTransitionCommand?.(cmd);
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(ns, 'weather-dynamic')) {
+      weatherController._loadDynamicStateFromScene?.();
+      safeCall(() => uiManager?.updateControlStates?.('weather'), 'updateScene.weatherUI', Severity.COSMETIC);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(ns, 'weather-transitionTarget')) {
+      weatherController._loadQueuedTransitionTargetFromScene?.();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(ns, 'weather-snapshot')) {
+      weatherController._loadWeatherSnapshotFromScene?.();
+    }
+  }, 'updateScene.weatherSync', Severity.DEGRADED);
   
   // Grid changes should NOT require a full Three.js scene rebuild.
   // Rebuilding can race with Foundry's internal canvas updates and briefly leave `canvas.ready=false`,
   // which breaks ControlsIntegration initialization.
   if ('grid' in changes) {
-    try {
-      gridRenderer?.updateGrid?.();
-    } catch (_) {
-    }
+    safeCall(() => gridRenderer?.updateGrid?.(), 'updateScene.gridRefresh', Severity.COSMETIC);
   }
 
   // Check for changes that require full reinitialization
@@ -752,91 +734,75 @@ async function onCanvasReady(canvas) {
 
     if (!(game.user?.isGM ?? false)) {
       // Scene not replaced by Three.js - dismiss the overlay so the user can interact with Foundry normally.
-      try {
-        loadingOverlay.fadeIn(500).catch(() => {});
-      } catch (e) {
-        log.debug('Loading overlay not available:', e);
-      }
-
+      safeCall(() => loadingOverlay.fadeIn(500).catch(() => {}), 'overlay.fadeIn', Severity.COSMETIC);
       return;
     }
 
-    try {
-      if (window.MapShine) window.MapShine.stateApplier = stateApplier;
-    } catch (e) {
-    }
+    safeCall(() => { if (window.MapShine) window.MapShine.stateApplier = stateApplier; }, 'exposeStateApplier', Severity.COSMETIC);
 
     if (!uiManager) {
-      try {
+      await safeCallAsync(async () => {
         uiManager = new TweakpaneManager();
         await uiManager.initialize();
         window.MapShine.uiManager = uiManager;
         log.info('Map Shine UI initialized in UI-only mode');
-      } catch (e) {
-        log.error('Failed to initialize Map Shine UI in UI-only mode:', e);
-      }
+      }, 'uiManager.init(UI-only)', Severity.DEGRADED);
     }
 
     if (!controlPanel) {
-      try {
+      await safeCallAsync(async () => {
         controlPanel = new ControlPanelManager();
         await controlPanel.initialize();
         window.MapShine.controlPanel = controlPanel;
         log.info('Map Shine Control Panel initialized in UI-only mode');
-      } catch (e) {
-        log.error('Failed to initialize Map Shine Control Panel in UI-only mode:', e);
-      }
+      }, 'controlPanel.init(UI-only)', Severity.DEGRADED);
     }
 
     // Graphics Settings (Essential Feature)
     // Even in UI-only mode, we create the dialog so the scene-control button does not dead-end.
     // In this mode there are no live effects to toggle; the UI will remain minimal.
-    try {
+    await safeCallAsync(async () => {
       if (!effectCapabilitiesRegistry) effectCapabilitiesRegistry = new EffectCapabilitiesRegistry();
       if (!graphicsSettings) {
         graphicsSettings = new GraphicsSettingsManager(null, effectCapabilitiesRegistry, {
           onApplyRenderResolution: () => {
-            try {
+            safeCall(() => {
               if (!threeCanvas) return;
               const rect = threeCanvas.getBoundingClientRect();
               resize(rect.width, rect.height);
-            } catch (_) {
-            }
+            }, 'graphicsSettings.resize', Severity.COSMETIC);
           }
         });
         await graphicsSettings.initialize();
         if (window.MapShine) window.MapShine.graphicsSettings = graphicsSettings;
       }
-    } catch (e) {
-      log.warn('Failed to initialize Graphics Settings in UI-only mode', e);
-    }
+    }, 'graphicsSettings.init(UI-only)', Severity.DEGRADED);
 
      // Scene not replaced by Three.js - dismiss the overlay so the user can interact with Foundry normally.
-     try {
-       loadingOverlay.fadeIn(500).catch(() => {});
-     } catch (e) {
-       log.debug('Loading overlay not available:', e);
-     }
+     safeCall(() => loadingOverlay.fadeIn(500).catch(() => {}), 'overlay.fadeIn', Severity.COSMETIC);
 
     return;
   }
 
   log.info(`Initializing Map Shine canvas for scene: ${scene.name}`);
 
-  try {
+  safeCall(() => {
     loadingOverlay.showBlack(`Loading ${scene?.name || 'scene'}…`);
+    loadingOverlay.setSceneName(scene?.name || 'scene');
     loadingOverlay.configureStages([
-      { id: 'assets', label: 'Loading assets…', weight: 30 },
-      { id: 'effects', label: 'Initializing effects…', weight: 35 },
-      { id: 'scene', label: 'Syncing scene…', weight: 20 },
-      { id: 'final', label: 'Finalizing…', weight: 15 },
+      { id: 'assets.discover', label: 'Discovering assets…', weight: 5 },
+      { id: 'assets.load',     label: 'Loading textures…', weight: 25 },
+      { id: 'effects.core',    label: 'Core effects…', weight: 15 },
+      { id: 'effects.deps',    label: 'Dependent effects…', weight: 10 },
+      { id: 'effects.wire',    label: 'Wiring effects…', weight: 5 },
+      { id: 'scene.managers',  label: 'Scene managers…', weight: 15 },
+      { id: 'scene.sync',      label: 'Syncing objects…', weight: 15 },
+      { id: 'final',           label: 'Finalizing…', weight: 10 },
     ]);
     loadingOverlay.startStages();
-    loadingOverlay.setStage('assets', 0.05, undefined, { immediate: true });
+    loadingOverlay.setStage('assets.discover', 0.0, undefined, { immediate: true });
     loadingOverlay.startAutoProgress(0.08, 0.02);
-  } catch (e) {
-    log.debug('Loading overlay not available:', e);
-  }
+  }, 'overlay.configureStages', Severity.COSMETIC);
 
   // Create three.js canvas overlay
   await createThreeCanvas(scene);
@@ -853,29 +819,19 @@ function onCanvasTearDown(canvas) {
 
   // CRITICAL: Pause time manager immediately to stop all animations
   if (effectComposer?.timeManager) {
-    try {
-      effectComposer.timeManager.pause();
-    } catch (e) {
-      log.warn('Failed to pause time manager:', e);
-    }
+    safeDispose(() => effectComposer.timeManager.pause(), 'timeManager.pause');
   }
 
   // Dispose frame coordinator (removes PIXI ticker hook)
   if (frameCoordinatorInitialized) {
-    try {
+    safeDispose(() => {
       frameCoordinator.dispose();
       frameCoordinatorInitialized = false;
-    } catch (e) {
-      log.warn('Failed to dispose frame coordinator:', e);
-    }
+    }, 'frameCoordinator.dispose');
   }
 
   if (window.MapShine?.maskManager && typeof window.MapShine.maskManager.dispose === 'function') {
-    try {
-      window.MapShine.maskManager.dispose();
-    } catch (e) {
-      log.warn('Failed to dispose MaskManager:', e);
-    }
+    safeDispose(() => window.MapShine.maskManager.dispose(), 'MaskManager.dispose');
   }
 
   // Cleanup three.js canvas
@@ -1023,13 +979,11 @@ async function createThreeCanvas(scene) {
   destroyThreeCanvas();
   _sectionEnd('cleanup');
 
-  try {
-    if (window.MapShine) window.MapShine.stateApplier = stateApplier;
-  } catch (e) {
-  }
+  safeCall(() => { if (window.MapShine) window.MapShine.stateApplier = stateApplier; }, 'exposeStateApplier', Severity.COSMETIC);
 
-  const myGen = ++createThreeCanvasGeneration;
-  const isStale = () => myGen !== createThreeCanvasGeneration;
+  // LoadSession replaces the old generation-counter closure.
+  // It provides isStale(), AbortSignal, and diagnostics.
+  const session = LoadSession.start(scene);
 
   const THREE = window.THREE;
   if (!THREE) {
@@ -1042,16 +996,15 @@ async function createThreeCanvas(scene) {
   if (!mapShine || !mapShine.renderer) {
     // Try a lazy bootstrap as a recovery path
     log.warn('MapShine renderer missing, attempting lazy bootstrap...');
-    try {
+    const bootstrapOk = await safeCallAsync(async () => {
       const mod = await import('../core/bootstrap.js');
       const state = await mod.bootstrap({ verbose: false, skipSceneInit: true });
       Object.assign(window.MapShine, state);
       mapShine = window.MapShine;
-    } catch (e) {
-      log.error('Lazy bootstrap failed:', e);
-      return;
-    }
-    if (isStale()) return;
+      return true;
+    }, 'lazyBootstrap', Severity.CRITICAL);
+    if (!bootstrapOk) return;
+    if (session.isStale()) return;
     if (!mapShine.renderer) {
       log.error('Renderer still unavailable after lazy bootstrap. Aborting.');
       return;
@@ -1061,42 +1014,42 @@ async function createThreeCanvas(scene) {
   const lp = globalLoadingProfiler;
   const doLoadProfile = !!lp?.enabled;
   if (doLoadProfile) {
-    try {
-      lp.begin('sceneLoad', { sceneId: scene?.id ?? null, sceneName: scene?.name ?? null });
-    } catch (e) {
-    }
+    safeCall(() => lp.begin('sceneLoad', { sceneId: scene?.id ?? null, sceneName: scene?.name ?? null }), 'lp.begin(sceneLoad)', Severity.COSMETIC);
   }
 
   try {
     // Scene updates (like changing grid type/style) can momentarily put the Foundry canvas into
     // a partially-initialized state. Wait for it to be stable before we touch layers or
     // initialize ControlsIntegration.
-    try {
+    const canvasOk = await safeCallAsync(async () => {
       const ok = await _waitForFoundryCanvasReady({ timeoutMs: 15000 });
       if (!ok) {
         log.warn('Foundry canvas not ready after timeout; aborting MapShine scene init');
-        return;
+        return false;
       }
-    } catch (_) {
-      // If the wait fails unexpectedly, continue; later steps may still succeed.
-    }
+      return true;
+    }, 'waitForFoundryCanvas', Severity.DEGRADED, { fallback: true });
+    if (canvasOk === false) return;
 
-    if (isStale()) return;
+    if (session.isStale()) return;
 
-    try {
+    safeCall(() => {
       loadingOverlay.showBlack(`Loading ${scene?.name || 'scene'}…`);
+      loadingOverlay.setSceneName(scene?.name || 'scene');
       loadingOverlay.configureStages([
-        { id: 'assets', label: 'Loading assets…', weight: 30 },
-        { id: 'effects', label: 'Initializing effects…', weight: 35 },
-        { id: 'scene', label: 'Syncing scene…', weight: 20 },
-        { id: 'final', label: 'Finalizing…', weight: 15 },
+        { id: 'assets.discover', label: 'Discovering assets…', weight: 5 },
+        { id: 'assets.load',     label: 'Loading textures…', weight: 25 },
+        { id: 'effects.core',    label: 'Core effects…', weight: 15 },
+        { id: 'effects.deps',    label: 'Dependent effects…', weight: 10 },
+        { id: 'effects.wire',    label: 'Wiring effects…', weight: 5 },
+        { id: 'scene.managers',  label: 'Scene managers…', weight: 15 },
+        { id: 'scene.sync',      label: 'Syncing objects…', weight: 15 },
+        { id: 'final',           label: 'Finalizing…', weight: 10 },
       ]);
       loadingOverlay.startStages();
-      loadingOverlay.setStage('assets', 0.05, undefined, { immediate: true });
+      loadingOverlay.setStage('assets.discover', 0.0, undefined, { immediate: true });
       loadingOverlay.startAutoProgress(0.08, 0.02);
-    } catch (e) {
-      log.debug('Loading overlay not available:', e);
-    }
+    }, 'overlay.configureStages(create)', Severity.COSMETIC);
 
     // P0.3: Capture Foundry state before modifying it
     captureFoundryStateSnapshot();
@@ -1201,72 +1154,51 @@ async function createThreeCanvas(scene) {
     // preventing future container resizes from affecting the canvas element.
     _applyRenderResolutionToRenderer(rect.width, rect.height);
 
-    try {
-      renderer.setSize(rect.width, rect.height, false);
-    } catch (_) {
-      renderer.setSize(rect.width, rect.height);
-    }
+    safeCall(() => renderer.setSize(rect.width, rect.height, false), 'renderer.setSize', Severity.DEGRADED, {
+      onError: () => renderer.setSize(rect.width, rect.height)
+    });
 
     // Robustness: Handle WebGL context loss/restoration.
     // Some UI operations or GPU resets can trigger a context loss; in that case we must
     // stop the RAF loop (otherwise we can wind up in a broken render state) and then
     // attempt to resume when the context restores.
-    try {
+    safeCall(() => {
       _webglContextLostHandler = (ev) => {
-        try { ev.preventDefault(); } catch (_) {}
+        safeCall(() => ev.preventDefault(), 'contextLost.preventDefault', Severity.COSMETIC);
         log.warn('WebGL context lost - pausing render loop');
-        try {
-          if (renderLoop?.running()) renderLoop.stop();
-        } catch (e) {
-          log.warn('Failed to stop render loop after context loss', e);
-        }
+        safeDispose(() => { if (renderLoop?.running()) renderLoop.stop(); }, 'renderLoop.stop(contextLost)');
       };
 
       _webglContextRestoredHandler = () => {
         log.info('WebGL context restored - attempting to resume rendering');
-        try {
-          // Re-apply sizing to ensure internal buffers are sane.
+        safeCall(() => {
           const r = threeCanvas?.getBoundingClientRect?.();
           if (r && renderer) {
             _applyRenderResolutionToRenderer(r.width, r.height);
-
-            try {
-              renderer.setSize(r.width, r.height, false);
-            } catch (_) {
-              renderer.setSize(r.width, r.height);
-            }
+            safeCall(() => renderer.setSize(r.width, r.height, false), 'renderer.setSize(restore)', Severity.DEGRADED, {
+              onError: () => renderer.setSize(r.width, r.height)
+            });
             if (sceneComposer) sceneComposer.resize(r.width, r.height);
             if (effectComposer) {
-              // EffectComposer expects drawing-buffer pixels.
-              try {
+              const buf = safeCall(() => {
                 const THREE = window.THREE;
-                const buf = (renderer && typeof renderer.getDrawingBufferSize === 'function' && THREE)
+                return (renderer && typeof renderer.getDrawingBufferSize === 'function' && THREE)
                   ? renderer.getDrawingBufferSize(new THREE.Vector2())
                   : null;
-                effectComposer.resize(buf?.width ?? buf?.x ?? r.width, buf?.height ?? buf?.y ?? r.height);
-              } catch (_) {
-                effectComposer.resize(r.width, r.height);
-              }
+              }, 'getDrawingBufferSize', Severity.COSMETIC, { fallback: null });
+              effectComposer.resize(buf?.width ?? buf?.x ?? r.width, buf?.height ?? buf?.y ?? r.height);
             }
           }
-        } catch (e) {
-          log.warn('Resize failed during context restore', e);
-        }
+        }, 'contextRestore.resize', Severity.DEGRADED);
 
-        try {
-          if (renderLoop && !renderLoop.running()) {
-            renderLoop.start();
-          }
-        } catch (e) {
-          log.warn('Failed to restart render loop after context restore', e);
-        }
+        safeCall(() => {
+          if (renderLoop && !renderLoop.running()) renderLoop.start();
+        }, 'renderLoop.start(contextRestore)', Severity.DEGRADED);
       };
 
       threeCanvas.addEventListener('webglcontextlost', _webglContextLostHandler, false);
       threeCanvas.addEventListener('webglcontextrestored', _webglContextRestoredHandler, false);
-    } catch (e) {
-      log.warn('Failed to register WebGL context loss handlers', e);
-    }
+    }, 'registerWebGLContextHandlers', Severity.DEGRADED);
 
     // Ensure regions outside the Foundry world bounds remain black; padded region is covered by a background plane
     if (renderer.setClearColor) {
@@ -1276,52 +1208,51 @@ async function createThreeCanvas(scene) {
     // Step 1: Initialize scene composer
     _sectionStart('sceneComposer.initialize');
     sceneComposer = new SceneComposer();
-    if (doLoadProfile) {
-      try {
-        lp.begin('sceneComposer.initialize');
-      } catch (e) {
-      }
-    }
+    if (doLoadProfile) safeCall(() => lp.begin('sceneComposer.initialize'), 'lp.begin', Severity.COSMETIC);
     const { scene: threeScene, camera, bundle } = await sceneComposer.initialize(
       scene,
       rect.width,
       rect.height,
       {
         onProgress: (loaded, total, asset) => {
-          try {
+          safeCall(() => {
             const denom = total > 0 ? total : 1;
             const v = Math.max(0, Math.min(1, loaded / denom));
-            loadingOverlay.setStage('assets', v, `Loading ${asset}…`, { keepAuto: true });
-          } catch (e) {
-            // Ignore overlay errors
-          }
+            loadingOverlay.setStage('assets.load', v, `Loading ${asset}…`, { keepAuto: true });
+          }, 'overlay.assetProgress', Severity.COSMETIC);
         }
       }
     );
-    if (doLoadProfile) {
-      try {
-        lp.end('sceneComposer.initialize');
-      } catch (e) {
-      }
-    }
+    if (doLoadProfile) safeCall(() => lp.end('sceneComposer.initialize'), 'lp.end', Severity.COSMETIC);
     _sectionEnd('sceneComposer.initialize');
 
-    if (isStale()) {
-      try {
-        destroyThreeCanvas();
-      } catch (e) {
-      }
+    if (session.isStale()) {
+      safeDispose(() => destroyThreeCanvas(), 'destroyThreeCanvas(stale)');
       return;
     }
 
     log.info(`Scene composer initialized with ${bundle.masks.length} effect masks`);
+
+    // Eagerly upload all mask textures to the GPU during loading.
+    // Without this, Three.js defers gl.texImage2D to the first render frame,
+    // causing a massive stall (potentially hundreds of ms for 10+ large masks).
+    _sectionStart('gpu.textureWarmup');
+    safeCall(() => {
+      const warmupResult = warmupBundleTextures(renderer, bundle, (uploaded, total) => {
+        safeCall(() => loadingOverlay.setStage('assets.load', 1.0, `GPU upload ${uploaded}/${total}…`, { keepAuto: true }), 'overlay.gpuWarmup', Severity.COSMETIC);
+      });
+      if (warmupResult.totalMs > 50) {
+        log.info(`GPU texture warmup took ${warmupResult.totalMs.toFixed(0)}ms for ${warmupResult.uploaded} textures`);
+      }
+    }, 'gpu.textureWarmup', Severity.DEGRADED);
+    _sectionEnd('gpu.textureWarmup');
 
     // CRITICAL: Expose sceneComposer early so effects can access groundZ during initialization
     mapShine.sceneComposer = sceneComposer;
 
     mapShine.maskManager = new MaskManager();
     mapShine.maskManager.setRenderer(renderer);
-    try {
+    safeCall(() => {
       const mm = mapShine.maskManager;
       if (mm && bundle?.masks && Array.isArray(bundle.masks)) {
         for (const m of bundle.masks) {
@@ -1342,13 +1273,11 @@ async function createThreeCanvas(scene) {
         mm.defineDerivedMask('roofClear.screen', { op: 'invert', input: 'roofVisible.screen' });
         mm.defineDerivedMask('precipVisibility.screen', { op: 'max', a: 'outdoors.screen', b: 'roofClear.screen' });
       }
-    } catch (e) {
-      log.warn('Failed to initialize MaskManager registry for bundle masks:', e);
-    }
+    }, 'MaskManager.registerBundleMasks', Severity.DEGRADED);
 
     // Wire the _Outdoors (roof/indoor) mask into the WeatherController so
     // precipitation effects (rain, snow, puddles) can respect covered areas.
-    try {
+    safeCall(() => {
       if (bundle?.masks?.length) {
         const outdoorsMask = bundle.masks.find(m => m.id === 'outdoors' || m.type === 'outdoors');
         if (outdoorsMask?.texture && weatherController?.setRoofMap) {
@@ -1358,39 +1287,31 @@ async function createThreeCanvas(scene) {
           log.debug('No _Outdoors mask texture found for this scene');
         }
       }
-    } catch (e) {
-      log.warn('Failed to apply _Outdoors roof mask to WeatherController:', e);
-    }
+    }, 'weatherController.setRoofMap', Severity.DEGRADED);
 
     // Step 2: Initialize effect composer
     effectComposer = new EffectComposer(renderer, threeScene, camera);
     effectComposer.initialize(mapShine.capabilities);
 
     // Ensure TimeManager immediately matches Foundry's current pause state.
-    try {
+    safeCall(() => {
       const paused = game?.paused ?? false;
       effectComposer.getTimeManager()?.setFoundryPaused?.(paused, 0);
-    } catch (e) {
-      // Ignore
-    }
+    }, 'timeManager.syncPause', Severity.COSMETIC);
 
-    try {
-      loadingOverlay.setStage('effects', 0.0, 'Initializing effects…', { immediate: true });
+    safeCall(() => {
+      loadingOverlay.setStage('effects.core', 0.0, 'Initializing effects…', { immediate: true });
       loadingOverlay.startAutoProgress(0.55, 0.015);
-    } catch (e) {
-      // Ignore overlay errors
-    }
+    }, 'overlay.effectsCore', Severity.COSMETIC);
 
-    let _effectInitIndex = 0;
-    const _effectInitTotal = 31;
+    // Progress tracker for dependent effects (Phase 2).
+    // Independent effects use registerEffectBatch with its own onProgress.
+    let _depEffectIndex = 0;
+    const _depEffectTotal = 7; // Particles, Fire, Dust, Ash, LightEnhancementStore, Lighting, CandleFlames
     const _setEffectInitStep = (label) => {
-      _effectInitIndex++;
-      const t = Math.max(0, Math.min(1, _effectInitIndex / _effectInitTotal));
-      try {
-        loadingOverlay.setStage('effects', t, `Initializing ${label}…`, { keepAuto: true });
-      } catch (e) {
-        // Ignore overlay errors
-      }
+      _depEffectIndex++;
+      const t = Math.max(0, Math.min(1, _depEffectIndex / _depEffectTotal));
+      safeCall(() => loadingOverlay.setStage('effects.deps', t, `Initializing ${label}…`, { keepAuto: true }), 'overlay.depEffect', Severity.COSMETIC);
     };
 
     // Ensure WeatherController is initialized and driven by the centralized TimeManager.
@@ -1398,87 +1319,70 @@ async function createThreeCanvas(scene) {
     // like the particle-based weather system without requiring manual console snippets.
     await weatherController.initialize();
 
-    try {
-      effectComposer.addUpdatable(weatherController);
-    } catch (_) {
-    }
+    safeCall(() => effectComposer.addUpdatable(weatherController), 'effectComposer.addUpdatable(weather)', Severity.DEGRADED);
 
-    try {
-      loadingOverlay.setStage('effects', 0.02, 'Initializing weather…', { keepAuto: true });
-    } catch (e) {
-      // Ignore overlay errors
-    }
+    safeCall(() => loadingOverlay.setStage('effects.core', 0.02, 'Initializing weather…', { keepAuto: true }), 'overlay.weather', Severity.COSMETIC);
 
-    if (isStale()) {
-      try {
-        destroyThreeCanvas();
-      } catch (e) {
-      }
+    if (session.isStale()) {
+      safeDispose(() => destroyThreeCanvas(), 'destroyThreeCanvas(stale)');
       return;
     }
 
-    // P1.2: Sequential Effect Initialization (Option C - for timing comparison)
-    // Each effect is initialized one-by-one so we can identify slow effects and
-    // avoid GPU/driver contention from parallel shader compilation.
+    // P1.2: Parallel Effect Initialization via registerEffectBatch().
+    // All independent effects are constructed first (synchronous), then their
+    // initialize() calls run concurrently with a concurrency limit of 4 to
+    // avoid GPU/driver contention from too many simultaneous shader compilations.
+    // Map insertion order is preserved so render order is deterministic.
     _sectionStart('effectInit');
     const effectMap = new Map();
-    
-    const independentEffectDefs = [
-      ['Specular', SpecularEffect],
-      ['Iridescence', IridescenceEffect],
-      ['Window Lights', WindowLightEffect],
-      ['Color Correction', ColorCorrectionEffect],
-      ['Film Grain', FilmGrainEffect],
-      ['Dot Screen', DotScreenEffect],
-      ['Halftone', HalftoneEffect],
-      ['Sharpen', SharpenEffect],
-      ['ASCII', AsciiEffect],
-      ['Smelly Flies', SmellyFliesEffect],
-      ['Lightning', LightningEffect],
-      ['Prism', PrismEffect],
-      ['Water', WaterEffectV2],
-      ['Fog', WorldSpaceFogEffect],
-      ['Bushes', BushEffect],
-      ['Trees', TreeEffect],
-      ['Overhead Shadows', OverheadShadowsEffect],
-      ['Building Shadows', BuildingShadowsEffect],
-      ['Clouds', CloudEffect],
-      ['Atmospheric Fog', AtmosphericFogEffect],
-      ['Distortion', DistortionManager],
-      ['Bloom', BloomEffect],
-      ['Lensflare', LensflareEffect],
-      ['Dazzle Overlay', DazzleOverlayEffect],
-      ['Mask Debug', MaskDebugEffect],
-      ['Debug Layers', DebugLayerEffect],
-      ['Player Lights', PlayerLightEffect],
-      ['Sky Color', SkyColorEffect]
-    ];
 
-    // Sequential initialization with per-effect timing
-    const effectTimings = [];
+    const independentEffectDefs = getIndependentEffectDefs();
+
+    // Construct all effect instances (synchronous) and build name→instance map
+    const effectInstances = [];
+    const nameByEffectId = new Map();
     for (const [name, EffectClass] of independentEffectDefs) {
-      _setEffectInitStep(name);
-      const t0 = performance.now();
       const effect = new EffectClass();
-      await effectComposer.registerEffect(effect);
-      const dt = performance.now() - t0;
-      effectTimings.push({ name, durationMs: dt });
+      effectInstances.push(effect);
       effectMap.set(name, effect);
+      nameByEffectId.set(effect.id, name);
     }
 
+    // P2.1: Pre-read graphics settings from localStorage to find disabled effects.
+    // Effects the user has disabled don't need shader compilation during loading —
+    // they'll be lazily initialized if the user re-enables them later.
+    const lazySkipIds = readLazySkipIds();
+
+    // Initialize in parallel (concurrency=4) with progress reporting.
+    // Effects in lazySkipIds are deferred (added to Map but not initialized).
+    const batchResult = await effectComposer.registerEffectBatch(effectInstances, {
+      concurrency: 4,
+      skipIds: lazySkipIds,
+      onProgress: (completed, total, effectId) => {
+        const t = Math.max(0, Math.min(1, completed / total));
+        const label = nameByEffectId.get(effectId) || effectId;
+        safeCall(() => loadingOverlay.setStage('effects.core', t, `Initialized ${label}…`, { keepAuto: true }), 'overlay.effectBatch', Severity.COSMETIC);
+      }
+    });
+
     // Log per-effect timings (top 10 slowest)
-    try {
-      effectTimings.sort((a, b) => b.durationMs - a.durationMs);
+    safeCall(() => {
+      const effectTimings = (batchResult?.timings || [])
+        .map(t => ({ name: nameByEffectId.get(t.id) || t.id, durationMs: t.durationMs }))
+        .sort((a, b) => b.durationMs - a.durationMs);
       const top10 = effectTimings.slice(0, 10);
+      const deferredCount = batchResult?.deferred?.length || 0;
+      log.info(`Effect batch init: ${batchResult.registered.length} registered, ${deferredCount} deferred (lazy), ${batchResult.skipped.length} skipped (concurrency=4)`);
       log.info('Effect init timings (top 10 slowest):');
       for (const { name, durationMs } of top10) {
         log.info(`  ${name}: ${durationMs.toFixed(1)}ms`);
       }
       window.MapShine._effectInitTimings = effectTimings;
-    } catch (_) {}
+    }, 'logEffectTimings', Severity.COSMETIC);
     _sectionEnd('effectInit');
     
-    _setEffectInitStep('Wiring');
+    // Switch to wiring/graphics-settings stage
+    safeCall(() => loadingOverlay.setStage('effects.wire', 0.0, 'Wiring effects…', { keepAuto: true }), 'overlay.wire', Severity.COSMETIC);
 
     const specularEffect = effectMap.get('Specular');
     const iridescenceEffect = effectMap.get('Iridescence');
@@ -1511,104 +1415,41 @@ async function createThreeCanvas(scene) {
 
     // --- Graphics Settings (Essential Feature) ---
     // Create once per canvas lifecycle, register known effects, and expose globally.
-    try {
+    safeCall(() => {
       if (!effectCapabilitiesRegistry) effectCapabilitiesRegistry = new EffectCapabilitiesRegistry();
+      registerAllCapabilities(effectCapabilitiesRegistry);
+    }, 'registerEffectCapabilities', Severity.DEGRADED);
 
-      // Minimal first-pass: enabled toggles only. We will extend to intensity+subfeatures per effect.
-      effectCapabilitiesRegistry.register({ effectId: 'specular', displayName: 'Metallic / Specular', category: 'surface', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'iridescence', displayName: 'Iridescence / Holographic', category: 'surface', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'water', displayName: 'Water', category: 'water', performanceImpact: 'high' });
-      effectCapabilitiesRegistry.register({ effectId: 'fog', displayName: 'Fog of War', category: 'global', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'bloom', displayName: 'Bloom', category: 'global', performanceImpact: 'high' });
-      effectCapabilitiesRegistry.register({ effectId: 'lensflare', displayName: 'Lensflare', category: 'global', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'clouds', displayName: 'Clouds', category: 'atmospheric', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'overhead-shadows', displayName: 'Overhead Shadows', category: 'structure', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'building-shadows', displayName: 'Building Shadows', category: 'structure', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'distortion', displayName: 'Distortion', category: 'global', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'fire-sparks', displayName: 'Fire & Embers', category: 'particle', performanceImpact: 'high' });
-      effectCapabilitiesRegistry.register({ effectId: 'dust-motes', displayName: 'Dust Motes', category: 'particle', performanceImpact: 'low' });
-      effectCapabilitiesRegistry.register({ effectId: 'smelly-flies', displayName: 'Smelly Flies', category: 'particle', performanceImpact: 'low' });
-      effectCapabilitiesRegistry.register({ effectId: 'lightning', displayName: 'Lightning', category: 'particle', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'atmospheric-fog', displayName: 'Atmospheric Fog', category: 'atmospheric', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'ascii', displayName: 'ASCII', category: 'global', performanceImpact: 'high' });
-      effectCapabilitiesRegistry.register({ effectId: 'halftone', displayName: 'Halftone', category: 'global', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'dot-screen', displayName: 'Dot Screen', category: 'global', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'film-grain', displayName: 'Film Grain', category: 'global', performanceImpact: 'low' });
-      effectCapabilitiesRegistry.register({ effectId: 'color-correction', displayName: 'Color Correction', category: 'global', performanceImpact: 'low' });
-      effectCapabilitiesRegistry.register({ effectId: 'sharpen', displayName: 'Sharpen', category: 'global', performanceImpact: 'low' });
-      effectCapabilitiesRegistry.register({ effectId: 'prism', displayName: 'Prism / Refraction', category: 'surface', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'sky-color', displayName: 'Sky Color', category: 'global', performanceImpact: 'low' });
-      effectCapabilitiesRegistry.register({ effectId: 'player-light', displayName: 'Player Lights', category: 'global', performanceImpact: 'low' });
-      effectCapabilitiesRegistry.register({ effectId: 'window-light', displayName: 'Window Lights', category: 'surface', performanceImpact: 'low' });
-      effectCapabilitiesRegistry.register({ effectId: 'trees', displayName: 'Animated Trees (Canopy)', category: 'surface', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'bushes', displayName: 'Animated Bushes', category: 'surface', performanceImpact: 'medium' });
-      effectCapabilitiesRegistry.register({ effectId: 'candle-flames', displayName: 'Candle Flames', category: 'particle', performanceImpact: 'low' });
-      effectCapabilitiesRegistry.register({ effectId: 'lighting', displayName: 'Lighting', category: 'global', performanceImpact: 'high' });
-    } catch (e) {
-      log.warn('Failed to register effect capabilities (Graphics Settings)', e);
-    }
-
-    try {
+    await safeCallAsync(async () => {
       if (!graphicsSettings) {
         graphicsSettings = new GraphicsSettingsManager(effectComposer, effectCapabilitiesRegistry, {
           onApplyRenderResolution: () => {
-            try {
+            safeCall(() => {
               if (!threeCanvas) return;
               const rect = threeCanvas.getBoundingClientRect();
               resize(rect.width, rect.height);
-            } catch (_) {
-            }
+            }, 'graphicsSettings.resize', Severity.COSMETIC);
           }
         });
         await graphicsSettings.initialize();
         if (window.MapShine) window.MapShine.graphicsSettings = graphicsSettings;
       }
 
-      // Wire instances so the manager can toggle safely.
-      graphicsSettings.registerEffectInstance('specular', specularEffect);
-      graphicsSettings.registerEffectInstance('iridescence', iridescenceEffect);
-      graphicsSettings.registerEffectInstance('window-light', windowLightEffect);
-      graphicsSettings.registerEffectInstance('color-correction', colorCorrectionEffect);
-      graphicsSettings.registerEffectInstance('film-grain', filmGrainEffect);
-      graphicsSettings.registerEffectInstance('dot-screen', dotScreenEffect);
-      graphicsSettings.registerEffectInstance('halftone', halftoneEffect);
-      graphicsSettings.registerEffectInstance('sharpen', sharpenEffect);
-      graphicsSettings.registerEffectInstance('ascii', asciiEffect);
-      graphicsSettings.registerEffectInstance('smelly-flies', smellyFliesEffect);
-      graphicsSettings.registerEffectInstance('lightning', lightningEffect_temp);
-      graphicsSettings.registerEffectInstance('prism', prismEffect);
-      graphicsSettings.registerEffectInstance('water', waterEffect);
-      graphicsSettings.registerEffectInstance('fog', fogEffect_temp);
-      graphicsSettings.registerEffectInstance('bushes', bushEffect);
-      graphicsSettings.registerEffectInstance('trees', treeEffect);
-      graphicsSettings.registerEffectInstance('overhead-shadows', overheadShadowsEffect);
-      graphicsSettings.registerEffectInstance('building-shadows', buildingShadowsEffect);
-      graphicsSettings.registerEffectInstance('clouds', cloudEffect);
-      graphicsSettings.registerEffectInstance('atmospheric-fog', atmosphericFogEffect);
-      graphicsSettings.registerEffectInstance('distortion', distortionManager);
-      graphicsSettings.registerEffectInstance('bloom', bloomEffect);
-      graphicsSettings.registerEffectInstance('lensflare', lensflareEffect);
-      graphicsSettings.registerEffectInstance('player-light', playerLightEffect);
-      graphicsSettings.registerEffectInstance('sky-color', skyColorEffect_temp);
-    } catch (e) {
-      log.warn('Failed to initialize/wire Graphics Settings manager', e);
-    }
+      // Wire all effect instances so the manager can toggle them safely.
+      wireGraphicsSettings(graphicsSettings, effectMap);
+    }, 'graphicsSettings.initAndWire', Severity.DEGRADED);
 
     // Assign to module-level variables for later reference
     lightningEffect = lightningEffect_temp;
     fogEffect = fogEffect_temp;
     skyColorEffect = skyColorEffect_temp;
 
-    // Wire up window light effect
-    if (window.MapShine) window.MapShine.windowLightEffect = windowLightEffect;
-    if (window.MapShine) window.MapShine.colorCorrectionEffect = colorCorrectionEffect;
-    if (window.MapShine) window.MapShine.cloudEffect = cloudEffect;
-    if (window.MapShine) window.MapShine.atmosphericFogEffect = atmosphericFogEffect;
-    if (window.MapShine) window.MapShine.distortionManager = distortionManager;
-    if (window.MapShine) window.MapShine.bloomEffect = bloomEffect;
-    if (window.MapShine) window.MapShine.dazzleOverlayEffect = dazzleOverlayEffect;
+    // Expose a subset of effects on window.MapShine early — needed by cross-references
+    exposeEffectsEarly(window.MapShine, effectMap);
 
     // Phase 2: Register dependent effects sequentially (must maintain order)
+    safeCall(() => loadingOverlay.setStage('effects.deps', 0.0, 'Initializing particles…', { keepAuto: true }), 'overlay.deps', Severity.COSMETIC);
+
     // Step 3.8: Register Particle System (must be before FireSparksEffect)
     _setEffectInitStep('Particles');
     const particleSystem = new ParticleSystem();
@@ -1623,11 +1464,7 @@ async function createThreeCanvas(scene) {
       fireSparksEffect.setAssetBundle(bundle);
     }
 
-    try {
-      graphicsSettings?.registerEffectInstance('fire-sparks', fireSparksEffect);
-      graphicsSettings?.applyOverrides?.();
-    } catch (_) {
-    }
+    safeCall(() => { graphicsSettings?.registerEffectInstance('fire-sparks', fireSparksEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(fire-sparks)', Severity.COSMETIC);
 
     // Step 3.10: Register Dust Motes (can use particle system if needed)
     _setEffectInitStep('Dust Motes');
@@ -1637,11 +1474,7 @@ async function createThreeCanvas(scene) {
       dustMotesEffect.setAssetBundle(bundle);
     }
 
-    try {
-      graphicsSettings?.registerEffectInstance('dust-motes', dustMotesEffect);
-      graphicsSettings?.applyOverrides?.();
-    } catch (_) {
-    }
+    safeCall(() => { graphicsSettings?.registerEffectInstance('dust-motes', dustMotesEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(dust-motes)', Severity.COSMETIC);
 
     // Step 3.11: Register Ash Disturbance (token movement bursts)
     _setEffectInitStep('Ash Disturbance');
@@ -1651,25 +1484,20 @@ async function createThreeCanvas(scene) {
       ashDisturbanceEffect.setAssetBundle(bundle);
     }
 
-    try {
-      graphicsSettings?.registerEffectInstance('ash-disturbance', ashDisturbanceEffect);
-      graphicsSettings?.applyOverrides?.();
-    } catch (_) {
-    }
+    safeCall(() => { graphicsSettings?.registerEffectInstance('ash-disturbance', ashDisturbanceEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(ash-disturbance)', Severity.COSMETIC);
 
     // Step 3.13.5: Initialize LightEnhancementStore BEFORE LightingEffect
     // CRITICAL: The enhancement store must be created and loaded before LightingEffect.initialize()
     // runs, otherwise the first syncAllLights() will fail to apply cookie enhancements.
     // See docs/LIGHT-COOKIE-RESET-ISSUE.md for full analysis.
     _setEffectInitStep('Light Enhancement Store');
-    try {
+    await safeCallAsync(async () => {
       mapShine.lightEnhancementStore = new LightEnhancementStore();
       await mapShine.lightEnhancementStore.load?.();
       log.info('LightEnhancementStore loaded before LightingEffect');
-    } catch (e) {
-      log.warn('Failed to initialize LightEnhancementStore early:', e);
-      mapShine.lightEnhancementStore = null;
-    }
+    }, 'LightEnhancementStore.init', Severity.DEGRADED, {
+      onError: () => { mapShine.lightEnhancementStore = null; }
+    });
 
     // Step 3.14: Register Lighting Effect (must be before CandleFlamesEffect)
     _setEffectInitStep('Lighting');
@@ -1677,11 +1505,7 @@ async function createThreeCanvas(scene) {
     await effectComposer.registerEffect(lightingEffect);
     if (window.MapShine) window.MapShine.lightingEffect = lightingEffect;
 
-    try {
-      graphicsSettings?.registerEffectInstance('lighting', lightingEffect);
-      graphicsSettings?.applyOverrides?.();
-    } catch (_) {
-    }
+    safeCall(() => { graphicsSettings?.registerEffectInstance('lighting', lightingEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(lighting)', Severity.COSMETIC);
 
     // Step 3.15: Register Candle Flames (depends on LightingEffect)
     _setEffectInitStep('Candle Flames');
@@ -1690,62 +1514,39 @@ async function createThreeCanvas(scene) {
     await effectComposer.registerEffect(candleFlamesEffect);
     if (window.MapShine) window.MapShine.candleFlamesEffect = candleFlamesEffect;
 
-    try {
-      graphicsSettings?.registerEffectInstance('candle-flames', candleFlamesEffect);
-      graphicsSettings?.applyOverrides?.();
-    } catch (_) {
-    }
+    safeCall(() => { graphicsSettings?.registerEffectInstance('candle-flames', candleFlamesEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(candle-flames)', Severity.COSMETIC);
 
-    if (isStale()) {
-      try {
-        destroyThreeCanvas();
-      } catch (e) {
-      }
+    // Add dependent effects to the shared effectMap so initializeUI and
+    // cross-wiring code can access all effects by display name.
+    effectMap.set('Particle System', particleSystem);
+    effectMap.set('Fire Sparks', fireSparksEffect);
+    effectMap.set('Dust Motes', dustMotesEffect);
+    effectMap.set('Ash Disturbance', ashDisturbanceEffect);
+    effectMap.set('Lighting', lightingEffect);
+    effectMap.set('Candle Flames', candleFlamesEffect);
+
+    if (session.isStale()) {
+      safeDispose(() => destroyThreeCanvas(), 'destroyThreeCanvas(stale)');
       return;
     }
 
-    // Provide the base mesh and asset bundle to the effect
+    // Provide the base mesh and asset bundle to surface/environmental effects
     const basePlane = sceneComposer.getBasePlane();
 
     _sectionStart('setBaseMesh');
-    const _safeSetBaseMesh = (label, fn) => {
-      const t0 = performance.now();
-      try {
-        fn();
-      } catch (e) {
-        log.error(`Failed to wire base mesh for ${label}`, e);
-      }
-      const dt = performance.now() - t0;
-      if (dt > 50) log.info(`  setBaseMesh(${label}): ${dt.toFixed(1)}ms`);
-    };
-
-    _safeSetBaseMesh('Specular', () => specularEffect?.setBaseMesh?.(basePlane, bundle));
-    _safeSetBaseMesh('Iridescence', () => iridescenceEffect?.setBaseMesh?.(basePlane, bundle));
-    _safeSetBaseMesh('Prism', () => prismEffect?.setBaseMesh?.(basePlane, bundle));
-    _safeSetBaseMesh('Water', () => waterEffect?.setBaseMesh?.(basePlane, bundle));
-    _safeSetBaseMesh('Window Lights', () => windowLightEffect?.setBaseMesh?.(basePlane, bundle));
-    _safeSetBaseMesh('Window Lights Target', () => windowLightEffect?.createLightTarget?.());
-    _safeSetBaseMesh('Bushes', () => bushEffect?.setBaseMesh?.(basePlane, bundle));
-    _safeSetBaseMesh('Trees', () => treeEffect?.setBaseMesh?.(basePlane, bundle));
-    _safeSetBaseMesh('Lighting', () => lightingEffect?.setBaseMesh?.(basePlane, bundle));
-    _safeSetBaseMesh('Overhead Shadows', () => overheadShadowsEffect?.setBaseMesh?.(basePlane, bundle));
-    _safeSetBaseMesh('Building Shadows', () => buildingShadowsEffect?.setBaseMesh?.(basePlane, bundle));
-    _safeSetBaseMesh('Clouds', () => cloudEffect?.setBaseMesh?.(basePlane, bundle));
+    wireBaseMeshes(effectMap, basePlane, bundle, (label, dt) => {
+      log.info(`  setBaseMesh(${label}): ${dt.toFixed(1)}ms`);
+    });
     _sectionEnd('setBaseMesh');
 
     _sectionStart('sceneSync');
-    try {
-      loadingOverlay.setStage('scene', 0.0, 'Syncing scene…', { immediate: true });
+    safeCall(() => {
+      loadingOverlay.setStage('scene.managers', 0.0, 'Syncing scene…', { immediate: true });
       loadingOverlay.startAutoProgress(0.85, 0.012);
-    } catch (e) {
-      // Ignore overlay errors
-    }
+    }, 'overlay.sceneManagers', Severity.COSMETIC);
 
-    if (isStale()) {
-      try {
-        destroyThreeCanvas();
-      } catch (e) {
-      }
+    if (session.isStale()) {
+      safeDispose(() => destroyThreeCanvas(), 'destroyThreeCanvas(stale)');
       return;
     }
 
@@ -1753,35 +1554,22 @@ async function createThreeCanvas(scene) {
     gridRenderer = new GridRenderer(threeScene);
     gridRenderer.initialize();
     gridRenderer.updateGrid();
-    try {
-      if (effectComposer) effectComposer.addUpdatable(gridRenderer);
-    } catch (_) {
-    }
+    safeCall(() => { if (effectComposer) effectComposer.addUpdatable(gridRenderer); }, 'addUpdatable(grid)', Severity.COSMETIC);
     log.info('Grid renderer initialized');
 
-    try {
-      loadingOverlay.setStage('scene', 0.15, 'Syncing grid…', { keepAuto: true });
-    } catch (_) {}
+    safeCall(() => loadingOverlay.setStage('scene.managers', 0.25, 'Syncing grid…', { keepAuto: true }), 'overlay.grid', Severity.COSMETIC);
 
     // Step 4: Initialize token manager
     tokenManager = new TokenManager(threeScene);
     tokenManager.setEffectComposer(effectComposer); // Connect to main loop
     tokenManager.initialize();
 
-    // Wire token movement hook for ash disturbance
-    try {
-      tokenManager.setOnTokenMovementStart((tokenId) => {
-        ashDisturbanceEffect?.handleTokenMovement?.(tokenId);
-      });
-    } catch (_) {
-    }
-    
     // Sync existing tokens immediately (we're already in canvasReady, so the hook won't fire)
     tokenManager.syncAllTokens();
     log.info('Token manager initialized and synced');
 
     // Step 4a: Dynamic Exposure Manager (token-based eye adaptation)
-    try {
+    safeCall(() => {
       if (!dynamicExposureManager) {
         dynamicExposureManager = new DynamicExposureManager({
           renderer,
@@ -1800,31 +1588,23 @@ async function createThreeCanvas(scene) {
 
       effectComposer.addUpdatable(dynamicExposureManager);
       if (window.MapShine) window.MapShine.dynamicExposureManager = dynamicExposureManager;
-    } catch (e) {
-      log.warn('Failed to initialize DynamicExposureManager', e);
-    }
+    }, 'DynamicExposureManager.init', Severity.DEGRADED);
 
-    try {
-      loadingOverlay.setStage('scene', 0.35, 'Syncing tokens…', { keepAuto: true });
-    } catch (_) {}
+    safeCall(() => loadingOverlay.setStage('scene.sync', 0.0, 'Syncing tokens…', { keepAuto: true }), 'overlay.tokens', Severity.COSMETIC);
 
     // Step 4b: Initialize tile manager
     tileManager = new TileManager(threeScene);
     tileManager.setSpecularEffect(specularEffect);
     // Route water occluder meshes into DistortionManager's dedicated scene so
     // the occluder render pass avoids traversing the full world scene.
-    try {
-      tileManager.setWaterOccluderScene(distortionManager?.waterOccluderScene ?? null);
-    } catch (_) {}
+    safeCall(() => tileManager.setWaterOccluderScene(distortionManager?.waterOccluderScene ?? null), 'tileManager.setWaterOccluder', Severity.COSMETIC);
     tileManager.initialize();
     tileManager.syncAllTiles();
     tileManager.setWindowLightEffect(windowLightEffect); // Link for overhead tile lighting
     effectComposer.addUpdatable(tileManager); // Register for occlusion updates
     log.info('Tile manager initialized and synced');
 
-    try {
-      loadingOverlay.setStage('scene', 0.55, 'Syncing tiles…', { keepAuto: true });
-    } catch (_) {}
+    safeCall(() => loadingOverlay.setStage('scene.sync', 0.35, 'Syncing tiles…', { keepAuto: true }), 'overlay.tiles', Severity.COSMETIC);
 
     surfaceRegistry = new SurfaceRegistry();
     surfaceRegistry.initialize({ sceneComposer, tileManager });
@@ -1837,67 +1617,38 @@ async function createThreeCanvas(scene) {
     // Sync happens in initialize
     log.info('Wall manager initialized');
 
-    try {
-      loadingOverlay.setStage('scene', 0.65, 'Syncing walls…', { keepAuto: true });
-    } catch (_) {}
+    safeCall(() => loadingOverlay.setStage('scene.sync', 0.55, 'Syncing walls…', { keepAuto: true }), 'overlay.walls', Severity.COSMETIC);
 
-    // Step 4c.1: Initialize door mesh manager (animated door graphics)
+    // P1.3: Parallel initialization of independent lightweight managers.
+    // These managers only create THREE objects and register Foundry hooks — they
+    // don't depend on each other or on tokens/tiles/walls, so it's safe to run
+    // them concurrently. MapPointsManager is async and included in the batch.
+    safeCall(() => loadingOverlay.setStage('scene.sync', 0.7, 'Syncing remaining objects…', { keepAuto: true }), 'overlay.remaining', Severity.COSMETIC);
+
     doorMeshManager = new DoorMeshManager(threeScene, sceneComposer.camera);
-    doorMeshManager.initialize();
-    effectComposer.addUpdatable(doorMeshManager); // Register for animation updates
-    log.info('Door mesh manager initialized');
-
-    // Step 4d: Initialize drawing manager (Three.js drawings)
     drawingManager = new DrawingManager(threeScene);
-    drawingManager.initialize();
-    log.info('Drawing manager initialized');
-
-    // Step 4e: Initialize note manager
     noteManager = new NoteManager(threeScene);
-    noteManager.initialize();
-    log.info('Note manager initialized');
-
-    // Step 4f: Initialize template manager
     templateManager = new TemplateManager(threeScene);
-    templateManager.initialize();
-    log.info('Template manager initialized');
-
-    // Step 4g: Initialize light icon manager
     lightIconManager = new LightIconManager(threeScene);
-    lightIconManager.initialize();
-    log.info('Light icon manager initialized');
-
-    // Step 4g.5: Initialize MapShine enhanced light icon manager
     enhancedLightIconManager = new EnhancedLightIconManager(threeScene);
-    enhancedLightIconManager.initialize();
-    log.info('Enhanced light icon manager initialized');
-
-    // Step 4h: Initialize map points manager (v1.x backwards compatibility)
     mapPointsManager = new MapPointsManager(threeScene);
-    await mapPointsManager.initialize();
-    log.info('Map points manager initialized');
+
+    // Initialize all in parallel (most are synchronous; mapPointsManager is async)
+    await Promise.all([
+      Promise.resolve(doorMeshManager.initialize()),
+      Promise.resolve(drawingManager.initialize()),
+      Promise.resolve(noteManager.initialize()),
+      Promise.resolve(templateManager.initialize()),
+      Promise.resolve(lightIconManager.initialize()),
+      Promise.resolve(enhancedLightIconManager.initialize()),
+      mapPointsManager.initialize(),
+    ]);
+
+    effectComposer.addUpdatable(doorMeshManager);
+    log.info('Parallel manager batch initialized (Door, Drawing, Note, Template, LightIcon, EnhancedLightIcon, MapPoints)');
 
     // Wire map points to particle effects (fire, candle flame, smelly flies, etc.)
-    if (fireSparksEffect && mapPointsManager.groups.size > 0) {
-      fireSparksEffect.setMapPointsSources(mapPointsManager);
-      log.info('Map points wired to fire effect');
-    }
-    
-    // Wire smelly flies to map points (always wire, even if no groups yet - it listens for changes)
-    if (smellyFliesEffect) {
-      smellyFliesEffect.setMapPointsSources(mapPointsManager);
-      log.info('Map points wired to smelly flies effect');
-    }
-
-    if (lightningEffect) {
-      lightningEffect.setMapPointsSources(mapPointsManager);
-      log.info('Map points wired to lightning effect');
-    }
-
-    if (candleFlamesEffect) {
-      candleFlamesEffect.setMapPointsSources(mapPointsManager);
-      log.info('Map points wired to candle flames effect');
-    }
+    wireMapPointsToEffects(effectMap, mapPointsManager);
 
     // Step 4i: Initialize physics ropes (rope/chain map points)
     physicsRopeManager = new PhysicsRopeManager(threeScene, sceneComposer, mapPointsManager);
@@ -1912,9 +1663,17 @@ async function createThreeCanvas(scene) {
     effectComposer.addUpdatable(interactionManager); // Register for updates (HUD positioning)
     log.info('Interaction manager initialized');
 
+    // Wire token movement hook for ash disturbance.
+    // MUST be after InteractionManager.initialize() which also registers a listener.
+    safeCall(() => {
+      tokenManager.addOnTokenMovementStart((tokenId) => {
+        ashDisturbanceEffect?.handleTokenMovement?.(tokenId);
+      });
+    }, 'wireAshDisturbance', Severity.COSMETIC);
+
     // Sync Selection Box UI params (loaded from scene settings) into the InteractionManager.
     // initializeUI() runs earlier during startup, before InteractionManager exists.
-    try {
+    safeCall(() => {
       const sel = uiManager?.effectFolders?.selectionBox;
       const params = sel?.params;
       if (params && typeof params === 'object') {
@@ -1924,12 +1683,15 @@ async function createThreeCanvas(scene) {
           }
         }
       }
-    } catch (_) {
-    }
+    }, 'syncSelectionBoxParams', Severity.COSMETIC);
 
     // Ensure Foundry's native PIXI selection rectangle is suppressed in Gameplay mode.
     // (In Map Maker mode, we want the native selection box.)
-    _updateFoundrySelectRectSuppression();
+    if (modeManager) {
+      modeManager.updateSelectRectSuppression();
+    } else {
+      _updateFoundrySelectRectSuppression();
+    }
 
     // Step 5b: Initialize DOM overlay UI system (world-anchored overlays)
     overlayUIManager = new OverlayUIManager(threeCanvas, sceneComposer);
@@ -1939,10 +1701,7 @@ async function createThreeCanvas(scene) {
     lightEditor = new LightEditorTweakpane(overlayUIManager);
     lightEditor.initialize();
 
-    try {
-      effectComposer.addUpdatable(lightEditor);
-    } catch (_) {
-    }
+    safeCall(() => effectComposer.addUpdatable(lightEditor), 'addUpdatable(lightEditor)', Severity.COSMETIC);
 
     // Expose for InteractionManager selection routing and debugging.
     if (window.MapShine) {
@@ -1985,24 +1744,46 @@ async function createThreeCanvas(scene) {
 
     _sectionEnd('sceneSync');
     _sectionStart('finalization');
-    try {
+    safeCall(() => {
       loadingOverlay.setStage('final', 0.0, 'Finalizing…', { immediate: true });
       loadingOverlay.startAutoProgress(0.98, 0.01);
-    } catch (e) {
-      // Ignore overlay errors
-    }
+    }, 'overlay.final', Severity.COSMETIC);
 
-    // Step 7: Ensure Foundry UI layers are above our canvas
-    ensureUILayering();
+    // Step 7: Create ModeManager and ensure Foundry UI layers are above our canvas
+    if (modeManager) {
+      safeDispose(() => modeManager.dispose(), 'modeManager.dispose');
+    }
+    modeManager = new ModeManager({
+      threeCanvas,
+      renderLoop: null, // set after renderLoop is created below
+      controlsIntegration,
+      tileManager,
+      wallManager,
+      lightIconManager,
+      enhancedLightIconManager
+    });
+    modeManager.ensureUILayering();
 
     // Step 8: Start render loop
     renderLoop = new RenderLoop(renderer, threeScene, camera, effectComposer);
     renderLoop.start();
+    // Update ModeManager with the now-created renderLoop reference
+    if (modeManager) modeManager._deps.renderLoop = renderLoop;
 
     log.info('Render loop started');
 
-    // Step 8.5: Set up resize handling
-    setupResizeHandling();
+    // Step 8.5: Set up resize handling via extracted ResizeHandler
+    if (resizeHandler) {
+      safeDispose(() => resizeHandler.dispose(), 'resizeHandler.dispose');
+    }
+    resizeHandler = new ResizeHandler({
+      canvas: threeCanvas,
+      renderer,
+      sceneComposer,
+      effectComposer,
+      graphicsSettings
+    });
+    resizeHandler.setup();
 
     // P0.4: Set up WebGL context loss/restore handlers
     // On context restore, trigger full scene rebuild to recreate GPU resources
@@ -2027,17 +1808,18 @@ async function createThreeCanvas(scene) {
     if (!frameCoordinatorInitialized) {
       frameCoordinatorInitialized = frameCoordinator.initialize();
       if (frameCoordinatorInitialized) {
-        // Register fog effect for synchronized texture extraction
+        // Register fog effect for synchronized vision rendering.
+        // This runs AFTER Foundry's PIXI tick has recomputed LOS polygons,
+        // so token.vision.los is guaranteed to be fresh.
         frameCoordinator.onPostPixi((frameState) => {
-          // fogEffect may be null during teardown or if initialization failed;
-          // in that case, just skip fog work for this frame.
           const fog = fogEffect;
           if (!fog) return;
-
-          // Force vision update when needed so fog textures are current
-          // before Three.js renders.
-          if (fog._needsVisionUpdate) {
-            fog._renderVisionMask();
+          // The git version uses _needsVisionUpdate + _renderVisionMask() in update().
+          // Just mark it dirty so the next Three.js render picks up fresh LOS data.
+          if (typeof fog.syncVisionFromPixi === 'function') {
+            fog.syncVisionFromPixi();
+          } else if (fog._needsVisionUpdate !== undefined) {
+            fog._needsVisionUpdate = true;
           }
         });
         
@@ -2048,154 +1830,76 @@ async function createThreeCanvas(scene) {
     }
     mapShine.frameCoordinator = frameCoordinator;
 
-    // Ensure MapShine fog exploration resets when Foundry fog is reset via UI (Lighting controls).
-    // Foundry's reset button calls canvas.fog.reset(), which triggers canvas.fog._handleReset() on clients.
-    // Our WorldSpaceFogEffect keeps its own GPU exploration history, so we must clear it explicitly.
-    try {
+    // Notify WorldSpaceFogEffect when Foundry fog is reset via UI (Lighting controls).
+    // Foundry's reset button calls canvas.fog.reset() → canvas.fog._handleReset().
+    // Foundry handles clearing its own exploration textures natively; we just notify
+    // the effect so it can log/respond if needed.
+    safeCall(() => {
       const fogMgr = canvas?.fog;
       if (fogMgr && typeof fogMgr._handleReset === 'function' && !fogMgr._mapShineWrappedHandleReset) {
         const originalHandleReset = fogMgr._handleReset.bind(fogMgr);
         fogMgr._handleReset = async (...args) => {
           const result = await originalHandleReset(...args);
-          try {
+          safeCall(() => {
             const fog = window.MapShine?.fogEffect;
             if (fog && typeof fog.resetExploration === 'function') {
               fog.resetExploration();
             }
-          } catch (_) {
-            // Ignore
-          }
+          }, 'fogReset.exploration', Severity.COSMETIC);
           return result;
         };
         fogMgr._mapShineWrappedHandleReset = true;
       }
 
-      // IMPORTANT:
-      // Foundry's FogManager.commit() schedules a *privately stored* debounced save function
-      // (bound during FogManager.initialize()). Wrapping fogMgr.save is not sufficient because
-      // commit() can still trigger the original internal save path, which performs texture
-      // extraction + worker compression. If our Three.js fog replacement is active, we want
-      // to fully prevent Foundry from attempting to persist fog exploration.
+      // Suppress Foundry's native fog commit/save when our WorldSpaceFogEffect
+      // is active. The native PIXI fog pipeline tries to extract and compress
+      // fog buffers, but since we've taken over fog rendering with Three.js,
+      // those PIXI textures are in a bad state and cause IndexSizeError crashes.
+      // We handle fog persistence ourselves via _saveExplorationToFoundry().
       if (fogMgr && typeof fogMgr.commit === 'function' && !fogMgr._mapShineWrappedCommit) {
         const originalCommit = fogMgr.commit.bind(fogMgr);
-        fogMgr.commit = (...args) => {
-          try {
-            // In Map Maker mode, PIXI is the authoritative renderer; allow Foundry fog to work normally.
-            if (isMapMakerMode) return originalCommit(...args);
-
-            // In Gameplay mode with MapShine fog enabled, MapShine owns exploration persistence.
-            const fog = window.MapShine?.fogEffect;
-            if (fog && fog.params?.enabled !== false) {
-              return;
-            }
-
-            // Otherwise, fall back to Foundry's native behavior.
-            return originalCommit(...args);
-          } catch (_) {
-            return;
-          }
+        fogMgr.commit = function(...args) {
+          // Only suppress if our fog effect is initialized and enabled
+          const fog = window.MapShine?.fogEffect;
+          if (fog?._initialized && fog?.params?.enabled) return;
+          return originalCommit(...args);
         };
         fogMgr._mapShineWrappedCommit = true;
       }
-
       if (fogMgr && typeof fogMgr.save === 'function' && !fogMgr._mapShineWrappedSave) {
         const originalSave = fogMgr.save.bind(fogMgr);
-        fogMgr.save = async (...args) => {
-          try {
-            const fog = window.MapShine?.fogEffect;
-            if (fog && fog.params?.enabled !== false) {
-              return;
-            }
-            if (isMapMakerMode) {
-              return;
-            }
-            return await originalSave(...args);
-          } catch (_) {
-            return;
-          }
+        fogMgr.save = async function(...args) {
+          const fog = window.MapShine?.fogEffect;
+          if (fog?._initialized && fog?.params?.enabled) return;
+          return originalSave(...args);
         };
         fogMgr._mapShineWrappedSave = true;
       }
-    } catch (_) {
-      // Ignore
-    }
+    }, 'wrapFogManager', Severity.DEGRADED);
 
-    // Expose for diagnostics (after render loop is created)
-    mapShine.sceneComposer = sceneComposer;
-    mapShine.effectComposer = effectComposer;
-    mapShine.specularEffect = specularEffect;
-    mapShine.iridescenceEffect = iridescenceEffect;
-    mapShine.windowLightEffect = windowLightEffect;
-    mapShine.bushEffect = bushEffect;
-    mapShine.treeEffect = treeEffect;
-    mapShine.overheadShadowsEffect = overheadShadowsEffect;
-    mapShine.buildingShadowsEffect = buildingShadowsEffect;
-    mapShine.smellyFliesEffect = smellyFliesEffect; // Smart particle swarms
-    mapShine.dustMotesEffect = dustMotesEffect;
-    mapShine.lightningEffect = lightningEffect;
-    mapShine.ashDisturbanceEffect = ashDisturbanceEffect;
-    mapShine.waterEffect = waterEffect;
-    mapShine.fogEffect = fogEffect; // Fog of War (world-space plane mesh)
-    mapShine.skyColorEffect = skyColorEffect; // NEW: Expose SkyColorEffect
-    mapShine.distortionManager = distortionManager;
-    mapShine.debugLayerEffect = debugLayerEffect;
-    mapShine.playerLightEffect = playerLightEffect;
-    mapShine.cameraFollower = cameraFollower; // Three.js camera follows PIXI
-    mapShine.pixiInputBridge = pixiInputBridge; // Pan/zoom input bridge
-    mapShine.tokenManager = tokenManager; // NEW: Expose token manager for diagnostics
-    mapShine.tileManager = tileManager; // NEW: Expose tile manager for diagnostics
-    mapShine.wallManager = wallManager; // NEW: Expose wall manager
-    mapShine.doorMeshManager = doorMeshManager; // Animated door graphics
-    mapShine.drawingManager = drawingManager; // NEW: Expose drawing manager
-    mapShine.noteManager = noteManager;
-    mapShine.templateManager = templateManager;
-    mapShine.lightIconManager = lightIconManager;
-    mapShine.enhancedLightIconManager = enhancedLightIconManager;
-    mapShine.enhancedLightInspector = enhancedLightInspector; // NEW: Expose enhanced light inspector
-    mapShine.interactionManager = interactionManager; // NEW: Expose interaction manager
-    mapShine.overlayUIManager = overlayUIManager;
-    mapShine.lightEditor = lightEditor;
-    mapShine.gridRenderer = gridRenderer; // NEW: Expose grid renderer
-    mapShine.mapPointsManager = mapPointsManager; // NEW: Expose map points manager
-    mapShine.weatherController = weatherController; // NEW: Expose weather controller
-    mapShine.renderLoop = renderLoop; // CRITICAL: Expose render loop for diagnostics
-    mapShine.sceneDebug = sceneDebug; // NEW: Expose scene debug helpers
+    // Expose all managers, effects, and functions on window.MapShine for diagnostics
+    exposeGlobals(mapShine, {
+      effectMap,
+      sceneComposer, effectComposer, cameraFollower, pixiInputBridge,
+      tokenManager, tileManager, wallManager, doorMeshManager,
+      drawingManager, noteManager, templateManager, lightIconManager,
+      enhancedLightIconManager, enhancedLightInspector, interactionManager,
+      overlayUIManager, lightEditor, gridRenderer, mapPointsManager,
+      weatherController, renderLoop, sceneDebug, controlsIntegration,
+      dynamicExposureManager, physicsRopeManager,
+      setMapMakerMode, resetScene, isMapMakerMode
+    });
 
     // Dev authoring API for MapShine-native enhanced lights (scene-flag stored).
-    // This intentionally ships as a lightweight console tool until a full in-world editor
-    // is implemented.
-    try {
-      mapShine.enhancedLights = createEnhancedLightsApi();
-    } catch (_) {
-      mapShine.enhancedLights = null;
-    }
+    mapShine.enhancedLights = safeCall(() => createEnhancedLightsApi(), 'createEnhancedLightsApi', Severity.DEGRADED, { fallback: null });
 
-    // NOTE: LightEnhancementStore is now initialized earlier (before LightingEffect)
-    // to fix the cookie reset issue. See Step 3.13.5 above.
-
-    mapShine.setMapMakerMode = setMapMakerMode; // NEW: Expose mode toggle for UI
-    mapShine.resetScene = resetScene;
-    // Expose current mode state so other systems (ControlsIntegration, effects) can query it.
-    // This must be set even if the user never toggles Map Maker mode.
-    mapShine.isMapMakerMode = isMapMakerMode;
-    mapShine.controlsIntegration = controlsIntegration; // NEW: Expose controls integration
-    // Expose sub-systems for debugging
-    if (controlsIntegration) {
-      mapShine.cameraSync = controlsIntegration.cameraSync; // May be null now
-      mapShine.inputRouter = controlsIntegration.inputRouter;
-      mapShine.layerVisibility = controlsIntegration.layerVisibility;
-    }
     // Attach to canvas as well for convenience (used by console snippets)
-    try { canvas.mapShine = mapShine; } catch (_) {}
+    safeCall(() => { canvas.mapShine = mapShine; }, 'canvas.mapShine', Severity.COSMETIC);
 
     // Ensure initial light gizmo visibility is correct. ControlsIntegration computes
     // visibility based on active layer/tool, but it can run before managers are
     // attached to window.MapShine during startup.
-    try {
-      controlsIntegration?._updateThreeGizmoVisibility?.();
-    } catch (_) {
-      // Ignore
-    }
+    safeCall(() => controlsIntegration?._updateThreeGizmoVisibility?.(), 'gizmoVisibility.init', Severity.COSMETIC);
 
     log.info('Specular effect registered and initialized');
 
@@ -2212,65 +1916,28 @@ async function createThreeCanvas(scene) {
 
     // Initialize Tweakpane UI
     _sectionStart('fin.initializeUI');
-    try {
-      if (isStale()) return;
-      await initializeUI(
-        specularEffect,
-        iridescenceEffect,
-        colorCorrectionEffect,
-        filmGrainEffect,
-        dotScreenEffect,
-        halftoneEffect,
-        sharpenEffect,
-        asciiEffect,
-        prismEffect,
-        lightingEffect,
-        skyColorEffect,
-        bloomEffect,
-        lensflareEffect,
-        fireSparksEffect,
-        smellyFliesEffect,
-        dustMotesEffect,
-        lightningEffect,
-        windowLightEffect,
-        overheadShadowsEffect,
-        buildingShadowsEffect,
-        cloudEffect,
-        atmosphericFogEffect,
-        bushEffect,
-        treeEffect,
-        waterEffect,
-        fogEffect,
-        distortionManager,
-        maskDebugEffect,
-        debugLayerEffect,
-        playerLightEffect
-      );
+    await safeCallAsync(async () => {
+      if (session.isStale()) return;
+      await initializeUI(effectMap);
 
       // Ensure the scene loads with the last persisted weather snapshot even if UI initialization
       // (Control Panel / Tweakpane) applied other defaults during startup.
       weatherController._loadWeatherSnapshotFromScene?.();
-    } catch (e) {
-      log.error('Failed to initialize UI:', e);
-    }
+    }, 'initializeUI', Severity.DEGRADED);
     _sectionEnd('fin.initializeUI');
 
     // Only begin fading-in once we have proof that Three has actually rendered.
     // This prevents the overlay from fading out during shader compilation / first-frame stutter.
-    try {
+    safeCall(() => {
       loadingOverlay.setStage('final', 0.4, 'Finalizing…', { keepAuto: true });
       loadingOverlay.startAutoProgress(0.995, 0.008);
-    } catch (e) {
-      // Ignore overlay errors
-    }
+    }, 'overlay.finalProgress', Severity.COSMETIC);
 
     // P1.2: Wait for all effects to be ready before fading overlay
     // This ensures textures are loaded and GPU operations are complete
     _sectionStart('fin.effectReadiness');
-    try {
-      loadingOverlay.setStage('final', 0.45, 'Finishing textures…', { keepAuto: true });
-    } catch (_) {}
-    try {
+    safeCall(() => loadingOverlay.setStage('final', 0.45, 'Finishing textures…', { keepAuto: true }), 'overlay.textures', Severity.COSMETIC);
+    await safeCallAsync(async () => {
       const effectReadinessPromises = [];
       for (const effect of effectComposer.effects.values()) {
         if (typeof effect.getReadinessPromise === 'function') {
@@ -2287,68 +1954,61 @@ async function createThreeCanvas(scene) {
           new Promise(r => setTimeout(r, 15000)) // 15s timeout
         ]);
       }
-    } catch (e) {
-      log.debug('Effect readiness wait failed:', e);
-    }
+    }, 'effectReadinessWait', Severity.COSMETIC);
     _sectionEnd('fin.effectReadiness');
 
     // P1.3: Wait for all tiles (not just overhead) to decode their textures
     // This prevents pop-in of ground/water tiles after the overlay fades
     _sectionStart('fin.waitForTiles');
-    try {
-      loadingOverlay.setStage('final', 0.50, 'Preparing tiles…', { keepAuto: true });
-    } catch (_) {}
-    try {
+    safeCall(() => loadingOverlay.setStage('final', 0.50, 'Preparing tiles…', { keepAuto: true }), 'overlay.prepareTiles', Severity.COSMETIC);
+    await safeCallAsync(async () => {
       await tileManager?.waitForInitialTiles?.({ overheadOnly: false, timeoutMs: 15000 });
-    } catch (_) {
-    }
+    }, 'waitForInitialTiles', Severity.COSMETIC);
     _sectionEnd('fin.waitForTiles');
 
     _sectionStart('fin.waitForThreeFrames');
-    try {
+    await safeCallAsync(async () => {
       await waitForThreeFrames(renderer, renderLoop, 6, 12000, {
         minCalls: 1,
         stableCallsFrames: 3,
         minDelayMs: 350
       });
-    } catch (e) {
-      // Ignore wait errors
-    }
+    }, 'waitForThreeFrames', Severity.COSMETIC);
     _sectionEnd('fin.waitForThreeFrames');
 
-    try {
+    await safeCallAsync(async () => {
       const controlHour = window.MapShine?.controlPanel?.controlState?.timeOfDay;
       const hour = Number.isFinite(controlHour) ? controlHour : Number(weatherController?.timeOfDay);
       if (Number.isFinite(hour)) {
         await stateApplier.applyTimeOfDay(hour, false, true);
-
-        try {
+        safeCall(() => {
           const cloudEffect = window.MapShine?.cloudEffect;
           if (cloudEffect) {
             if (typeof cloudEffect.requestRecompose === 'function') cloudEffect.requestRecompose(3);
             if (typeof cloudEffect.requestUpdate === 'function') cloudEffect.requestUpdate(3);
           }
-        } catch (e) {
-        }
+        }, 'cloudEffect.recompose', Severity.COSMETIC);
       }
-    } catch (e) {
-      log.debug('Time refresh jiggle failed:', e);
-    }
+    }, 'timeOfDay.refresh', Severity.COSMETIC);
 
     _sectionStart('fin.fadeIn');
-    try {
-      loadingOverlay.setStage('final', 1.0, 'Finished', { immediate: true });
-      await loadingOverlay.fadeIn(5000);
-    } catch (e) {
-      // Ignore overlay errors
-    }
+    await safeCallAsync(async () => {
+      const elapsed = loadingOverlay.getElapsedSeconds();
+      const readyMsg = elapsed > 0 ? `Ready! (${elapsed.toFixed(1)}s)` : 'Ready!';
+      loadingOverlay.setStage('final', 1.0, readyMsg, { immediate: true });
+      await loadingOverlay.fadeIn(2000, 800);
+    }, 'overlay.fadeIn', Severity.COSMETIC);
     _sectionEnd('fin.fadeIn');
     _sectionEnd('finalization');
     _sectionEnd('total');
     _logSectionTimings();
 
+    // Mark the load session as successfully completed (records duration).
+    session.finish();
+    if (window.MapShine) window.MapShine._loadSession = session;
+
     // Wall-clock load timer report (module.js sets MapShine._loadTimerStartMs).
-    try {
+    safeCall(() => {
       const ms = performance.now();
       const start = window.MapShine?._loadTimerStartMs;
       if (typeof start === 'number') {
@@ -2357,49 +2017,60 @@ async function createThreeCanvas(scene) {
         window.MapShine._lastLoadDurationMs = durationMs;
         log.info(`Load complete (wall-clock): ${durationMs.toFixed(1)}ms`);
       }
-    } catch (_) {
-    }
+    }, 'wallClockTimer', Severity.COSMETIC);
 
   } catch (error) {
     log.error('Failed to initialize three.js scene:', error);
+    session.abort();
     destroyThreeCanvas();
   } finally {
-    if (doLoadProfile) {
-      try {
-        lp.end('sceneLoad');
-      } catch (e) {
-      }
-    }
+    if (doLoadProfile) safeCall(() => lp.end('sceneLoad'), 'lp.end(sceneLoad)', Severity.COSMETIC);
   }
 }
 
 /**
- * Initialize Tweakpane UI and register effects
- * @param {SpecularEffect} specularEffect - The specular effect instance
- * @param {IridescenceEffect} iridescenceEffect - The iridescence effect instance
- * @param {ColorCorrectionEffect} colorCorrectionEffect - The color correction effect instance
- * @param {FilmGrainEffect} filmGrainEffect - The film grain effect instance
- * @param {DotScreenEffect} dotScreenEffect - The dot screen effect instance
- * @param {HalftoneEffect} halftoneEffect - The halftone effect instance
- * @param {SharpenEffect} sharpenEffect - The sharpen effect instance
- * @param {AsciiEffect} asciiEffect - The ASCII effect instance
- * @param {PrismEffect} prismEffect - The prism effect instance
- * @param {LightingEffect} lightingEffect - The dynamic lighting effect instance
- * @param {SkyColorEffect} skyColorEffect - The sky color grading effect instance
- * @param {BloomEffect} bloomEffect - The bloom effect instance
- * @param {LensflareEffect} lensflareEffect - The lensflare effect instance
- * @param {WindowLightEffect} windowLightEffect - The window lighting effect instance
- * @param {OverheadShadowsEffect} overheadShadowsEffect - The overhead shadows effect instance
- * @param {BuildingShadowsEffect} buildingShadowsEffect - The building shadows effect instance
- * @param {CloudEffect} cloudEffect - The procedural cloud shadows effect instance
- * @param {BushEffect} bushEffect - The animated bushes surface effect instance
- * @param {TreeEffect} treeEffect - The animated trees surface effect instance
- * @param {WaterEffect} waterEffect - The water effect instance
- * @param {FogEffect} fogEffect - The fog of war effect instance
- * @param {DistortionManager} distortionManager - The centralized distortion manager
+ * Initialize Tweakpane UI and register effects.
+ * 
+ * All effect instances are passed via a single Map keyed by display name,
+ * eliminating the previous 30+ positional parameters.
+ * 
+ * @param {Map<string, EffectBase>} effectMap - Display-name → effect-instance map
  * @private
  */
-async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEffect, filmGrainEffect, dotScreenEffect, halftoneEffect, sharpenEffect, asciiEffect, prismEffect, lightingEffect, skyColorEffect, bloomEffect, lensflareEffect, fireSparksEffect, smellyFliesEffect, dustMotesEffect, lightningEffect, windowLightEffect, overheadShadowsEffect, buildingShadowsEffect, cloudEffect, atmosphericFogEffect, bushEffect, treeEffect, waterEffect, fogEffect, distortionManager, maskDebugEffect, debugLayerEffect, playerLightEffect) {
+async function initializeUI(effectMap) {
+  // Destructure all needed effect references from the map.
+  // Variable names match those used throughout the function body so no further changes needed.
+  const specularEffect = effectMap.get('Specular');
+  const iridescenceEffect = effectMap.get('Iridescence');
+  const colorCorrectionEffect = effectMap.get('Color Correction');
+  const filmGrainEffect = effectMap.get('Film Grain');
+  const dotScreenEffect = effectMap.get('Dot Screen');
+  const halftoneEffect = effectMap.get('Halftone');
+  const sharpenEffect = effectMap.get('Sharpen');
+  const asciiEffect = effectMap.get('ASCII');
+  const prismEffect = effectMap.get('Prism');
+  const lightingEffect = effectMap.get('Lighting');
+  const skyColorEffect = effectMap.get('Sky Color');
+  const bloomEffect = effectMap.get('Bloom');
+  const lensflareEffect = effectMap.get('Lensflare');
+  const fireSparksEffect = effectMap.get('Fire Sparks');
+  const smellyFliesEffect = effectMap.get('Smelly Flies');
+  const dustMotesEffect = effectMap.get('Dust Motes');
+  const lightningEffect = effectMap.get('Lightning');
+  const windowLightEffect = effectMap.get('Window Lights');
+  const overheadShadowsEffect = effectMap.get('Overhead Shadows');
+  const buildingShadowsEffect = effectMap.get('Building Shadows');
+  const cloudEffect = effectMap.get('Clouds');
+  const atmosphericFogEffect = effectMap.get('Atmospheric Fog');
+  const bushEffect = effectMap.get('Bushes');
+  const treeEffect = effectMap.get('Trees');
+  const waterEffect = effectMap.get('Water');
+  const fogEffect = effectMap.get('Fog');
+  const distortionManager = effectMap.get('Distortion');
+  const maskDebugEffect = effectMap.get('Mask Debug');
+  const debugLayerEffect = effectMap.get('Debug Layers');
+  const playerLightEffect = effectMap.get('Player Lights');
+  const ashDisturbanceEffect = effectMap.get('Ash Disturbance');
   // Expose TimeManager BEFORE creating UI so Global Controls can access it
   if (window.MapShine.effectComposer) {
     window.MapShine.timeManager = window.MapShine.effectComposer.getTimeManager();
@@ -2416,7 +2087,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
   }
 
   // --- Selection Box UI (Gameplay drag-select visuals) ---
-  try {
+  safeCall(() => {
     const selectionSchema = {
       enabled: true,
       presetApplyDefaults: true,
@@ -2899,7 +2570,11 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         im.applySelectionBoxParamChange(paramId, value);
       }
       if (paramId === 'enabled') {
-        _updateFoundrySelectRectSuppression();
+        if (modeManager) {
+          modeManager.updateSelectRectSuppression();
+        } else {
+          _updateFoundrySelectRectSuppression();
+        }
       }
     };
 
@@ -2910,9 +2585,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       onSelectionUpdate,
       'global'
     );
-  } catch (e) {
-    log.warn('Failed to register Selection Box UI controls', e);
-  }
+  }, 'registerSelectionBoxUI', Severity.DEGRADED);
 
   // Create Control Panel manager if not already created
   if (!controlPanel) {
@@ -2926,10 +2599,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
   if (!enhancedLightInspector) {
     enhancedLightInspector = new EnhancedLightInspector();
     enhancedLightInspector.initialize();
-    try {
-      if (window.MapShine) window.MapShine.enhancedLightInspector = enhancedLightInspector;
-    } catch (_) {
-    }
+    safeCall(() => { if (window.MapShine) window.MapShine.enhancedLightInspector = enhancedLightInspector; }, 'exposeEnhancedLightInspector', Severity.COSMETIC);
     log.info('Enhanced Light Inspector created');
   }
 
@@ -3233,14 +2903,14 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     );
   }
 
-  const candleFlamesEffect = window.MapShine?.candleFlamesEffect;
-  if (candleFlamesEffect) {
+  const candleFlamesEffect_ = effectMap.get('Candle Flames');
+  if (candleFlamesEffect_) {
     const candleSchema = CandleFlamesEffect.getControlSchema();
     const onCandleUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
-        candleFlamesEffect.applyParamChange('enabled', !!value);
+        candleFlamesEffect_.applyParamChange('enabled', !!value);
       } else {
-        candleFlamesEffect.applyParamChange(paramId, value);
+        candleFlamesEffect_.applyParamChange(paramId, value);
       }
     };
 
@@ -3260,7 +2930,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
 
   let customWeatherSyncTimeout = null;
   const scheduleCustomWeatherRegimeSync = () => {
-    try {
+    safeCall(() => {
       if (!game?.user?.isGM) return;
       if (!canvas?.scene) return;
 
@@ -3301,20 +2971,13 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         const cp = window.MapShine?.controlPanel;
         if (cp?.controlState) {
           Object.assign(cp.controlState, controlState);
-          try {
-            cp.pane?.refresh();
-          } catch (_) {
-          }
+          safeCall(() => cp.pane?.refresh(), 'weatherSync.paneRefresh', Severity.COSMETIC);
         }
 
         // Persist the weather state itself, so refresh always restores the correct target.
-        try {
-          weatherController.scheduleSaveWeatherSnapshot?.();
-        } catch (_) {
-        }
+        safeCall(() => weatherController.scheduleSaveWeatherSnapshot?.(), 'weatherSync.saveSnapshot', Severity.COSMETIC);
       }, 400);
-    } catch (e) {
-    }
+    }, 'scheduleCustomWeatherRegimeSync', Severity.COSMETIC);
   };
 
   const onWeatherUpdate = (effectId, paramId, value) => {
@@ -3356,7 +3019,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
        log.debug(`Weather system ${value ? 'enabled' : 'disabled'}`);
 
        // Force immediate visual response (no need to wait for the next natural update).
-       try {
+       safeCall(() => {
          const cloudEffect = window.MapShine?.cloudEffect;
          if (cloudEffect) cloudEffect.needsUpdate = true;
 
@@ -3374,8 +3037,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
              wp._zeroWeatherEmissions();
            }
          }
-       } catch (e) {
-       }
+       }, 'weather.forceVisualResponse', Severity.COSMETIC);
     } else if (paramId === 'dynamicEnabled') {
       if (typeof weatherController.setDynamicEnabled === 'function') {
         weatherController.setDynamicEnabled(!!value);
@@ -3383,10 +3045,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         weatherController.dynamicEnabled = !!value;
         if (weatherController.dynamicEnabled) weatherController.enabled = true;
       }
-      try {
-        uiManager?.updateControlStates?.('weather');
-      } catch (e) {
-      }
+      safeCall(() => uiManager?.updateControlStates?.('weather'), 'weather.updateControlStates', Severity.COSMETIC);
     } else if (paramId === 'dynamicPresetId') {
       if (typeof weatherController.setDynamicPreset === 'function') {
         weatherController.setDynamicPreset(value);
@@ -3693,7 +3352,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
         windowLightEffect.enabled = value;
         log.debug(`WindowLight effect ${value ? 'enabled' : 'disabled'}`);
       } else if (paramId === 'rebuildRainFlowMap') {
-        try {
+        safeCall(() => {
           // Force regeneration even if the config didn't change.
           windowLightEffect._rainFlowMapConfigKey = null;
           windowLightEffect._ensureRainFlowMap();
@@ -3704,8 +3363,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
           if (lu?.uRainFlowMap) lu.uRainFlowMap.value = windowLightEffect._rainFlowMap;
           if (u?.uHasRainFlowMap) u.uHasRainFlowMap.value = windowLightEffect._rainFlowMap ? 1.0 : 0.0;
           if (lu?.uHasRainFlowMap) lu.uHasRainFlowMap.value = windowLightEffect._rainFlowMap ? 1.0 : 0.0;
-        } catch (e) {
-        }
+        }, 'windowLight.rebuildRainFlowMap', Severity.COSMETIC);
       } else if (windowLightEffect.params && Object.prototype.hasOwnProperty.call(windowLightEffect.params, paramId)) {
         windowLightEffect.params[paramId] = value;
       }
@@ -3839,29 +3497,26 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       } else if (paramId === 'clearCaches') {
         let didAnything = false;
 
-        try {
+        safeCall(() => {
           if (typeof waterEffect.clearCaches === 'function') {
             waterEffect.clearCaches();
             didAnything = true;
           }
-        } catch (_) {
-        }
+        }, 'water.clearCaches', Severity.COSMETIC);
 
-        try {
+        safeCall(() => {
           const particleSystem = window.MapShineParticles;
           const wp = particleSystem?.weatherParticles;
           if (wp && typeof wp.clearWaterCaches === 'function') {
             wp.clearWaterCaches();
             didAnything = true;
           }
-        } catch (_) {
-        }
+        }, 'water.clearWeatherCaches', Severity.COSMETIC);
 
-        try {
+        safeCall(() => {
           if (didAnything) ui.notifications.info('Cleared Water caches');
           else ui.notifications.warn('No Water caches available to clear');
-        } catch (_) {
-        }
+        }, 'water.clearCachesNotify', Severity.COSMETIC);
       } else if (waterEffect.params && Object.prototype.hasOwnProperty.call(waterEffect.params, paramId)) {
         waterEffect.params[paramId] = value;
       }
@@ -3943,7 +3598,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
   }
 
   // --- Ash Precipitation Settings ---
-  try {
+  safeCall(() => {
     const ashTuning = weatherController.ashTuning || {};
     const ashWeatherSchema = {
       enabled: true,
@@ -4056,12 +3711,10 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       'particle'
     );
     log.info('Ash UI: registered Ash (Weather) controls (Particles).');
-  } catch (e) {
-    log.warn('Ash UI: failed to register Ash weather controls:', e);
-  }
+  }, 'registerAshWeatherUI', Severity.DEGRADED);
   // Add a simple windvane indicator inside the Weather UI folder that reflects
   // the live scene wind direction from WeatherController.currentState.
-  try {
+  safeCall(() => {
     const weatherFolderData = uiManager.effectFolders?.weather;
     const folderElement = weatherFolderData?.folder?.element;
     if (folderElement) {
@@ -4129,9 +3782,7 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
       }
       windVaneIntervalId = setInterval(updateWindVane, 200);
     }
-  } catch (e) {
-    log.warn('Failed to add windvane UI indicator:', e);
-  }
+  }, 'windvaneUI', Severity.COSMETIC);
 
   // Manually sync the initial values into the UI manager's storage for this effect
   // because registerEffect loads from scene settings or defaults, but we want to sync 
@@ -4217,14 +3868,13 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     };
 
     const onOverheadCCUpdate = (effectId, paramId, value) => {
-      try {
+      safeCall(() => {
         if (paramId === 'enabled' || paramId === 'masterEnabled') {
           tileManager.setOverheadColorCorrectionParams({ enabled: !!value });
           return;
         }
         tileManager.setOverheadColorCorrectionParams({ [paramId]: value });
-      } catch (_) {
-      }
+      }, 'overheadCC.update', Severity.COSMETIC);
     };
 
     uiManager.registerEffect(
@@ -4236,11 +3886,10 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
     );
 
     // Ensure runtime matches the loaded scene params.
-    try {
+    safeCall(() => {
       const params = uiManager?.effectFolders?.overheadColorCorrection?.params;
       if (params) tileManager.setOverheadColorCorrectionParams(params);
-    } catch (_) {
-    }
+    }, 'overheadCC.syncParams', Severity.COSMETIC);
   }
 
   if (filmGrainEffect) {
@@ -4370,19 +4019,15 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
   }
 
   if (maskDebugEffect) {
-    const ids = (() => {
-      try {
-        const mm = window.MapShine?.maskManager;
-        const list = mm ? mm.listIds() : [];
-        const o = {};
-        for (const id of list) {
-          o[id] = id;
-        }
-        return o;
-      } catch (e) {
-        return null;
+    const ids = safeCall(() => {
+      const mm = window.MapShine?.maskManager;
+      const list = mm ? mm.listIds() : [];
+      const o = {};
+      for (const id of list) {
+        o[id] = id;
       }
-    })();
+      return o;
+    }, 'maskDebug.listIds', Severity.COSMETIC, { fallback: null });
 
     const schema = MaskDebugEffect.getControlSchema(ids);
     const onUpdate = (effectId, paramId, value) => {
@@ -4441,7 +4086,10 @@ async function initializeUI(specularEffect, iridescenceEffect, colorCorrectionEf
 function destroyThreeCanvas() {
   log.info('Destroying Three.js canvas');
   // Clean up resize handling first
-  cleanupResizeHandling();
+  if (resizeHandler) {
+    safeDispose(() => resizeHandler.dispose(), 'resizeHandler.dispose');
+    resizeHandler = null;
+  }
 
   // Clear any timers created by this module
   if (fpsLogIntervalId !== null) {
@@ -4468,27 +4116,17 @@ function destroyThreeCanvas() {
   }
 
   if (lightEditor) {
-    try {
-      try {
-        if (effectComposer) effectComposer.removeUpdatable(lightEditor);
-      } catch (_) {
-      }
+    safeDispose(() => { if (effectComposer) effectComposer.removeUpdatable(lightEditor); }, 'removeUpdatable(lightEditor)');
+    safeDispose(() => {
       if (typeof lightEditor.dispose === 'function') lightEditor.dispose();
       else if (typeof lightEditor.hide === 'function') lightEditor.hide();
-    } catch (_) {
-    }
+    }, 'lightEditor.dispose');
     lightEditor = null;
   }
 
   if (overlayUIManager) {
-    try {
-      if (effectComposer) effectComposer.removeUpdatable(overlayUIManager);
-    } catch (_) {
-    }
-    try {
-      overlayUIManager.dispose();
-    } catch (_) {
-    }
+    safeDispose(() => { if (effectComposer) effectComposer.removeUpdatable(overlayUIManager); }, 'removeUpdatable(overlayUI)');
+    safeDispose(() => overlayUIManager.dispose(), 'overlayUIManager.dispose');
     overlayUIManager = null;
   }
 
@@ -4500,11 +4138,7 @@ function destroyThreeCanvas() {
   }
 
   if (graphicsSettings) {
-    try {
-      graphicsSettings.dispose();
-    } catch (e) {
-      log.warn('Failed to dispose Graphics Settings manager', e);
-    }
+    safeDispose(() => graphicsSettings.dispose(), 'graphicsSettings.dispose');
     graphicsSettings = null;
   }
 
@@ -4620,10 +4254,7 @@ function destroyThreeCanvas() {
 
   // Dispose grid renderer
   if (gridRenderer) {
-    try {
-      if (effectComposer) effectComposer.removeUpdatable(gridRenderer);
-    } catch (_) {
-    }
+    safeDispose(() => { if (effectComposer) effectComposer.removeUpdatable(gridRenderer); }, 'removeUpdatable(grid)');
     gridRenderer.dispose();
     gridRenderer = null;
     log.debug('Grid renderer disposed');
@@ -4637,11 +4268,7 @@ function destroyThreeCanvas() {
   }
 
   if (physicsRopeManager) {
-    try {
-      physicsRopeManager.dispose();
-    } catch (e) {
-      log.warn('Failed to dispose PhysicsRopeManager', e);
-    }
+    safeDispose(() => physicsRopeManager.dispose(), 'physicsRopeManager.dispose');
     physicsRopeManager = null;
     log.debug('Physics rope manager disposed');
   }
@@ -4669,33 +4296,28 @@ function destroyThreeCanvas() {
 
   // Remove canvas element
   if (threeCanvas) {
-    try {
-      if (_webglContextLostHandler) {
-        threeCanvas.removeEventListener('webglcontextlost', _webglContextLostHandler);
-      }
-      if (_webglContextRestoredHandler) {
-        threeCanvas.removeEventListener('webglcontextrestored', _webglContextRestoredHandler);
-      }
-    } catch (_) {
-      // Ignore
-    } finally {
-      _webglContextLostHandler = null;
-      _webglContextRestoredHandler = null;
-    }
+    safeDispose(() => {
+      if (_webglContextLostHandler) threeCanvas.removeEventListener('webglcontextlost', _webglContextLostHandler);
+      if (_webglContextRestoredHandler) threeCanvas.removeEventListener('webglcontextrestored', _webglContextRestoredHandler);
+    }, 'removeContextHandlers');
+    _webglContextLostHandler = null;
+    _webglContextRestoredHandler = null;
 
     threeCanvas.remove();
     threeCanvas = null;
     log.debug('Three.js canvas removed');
   }
 
-  // Restore Foundry's PIXI rendering
-  restoreFoundryRendering();
-
-  try {
-    clearAssetCache();
-  } catch (e) {
-    log.warn('Failed to clear asset cache:', e);
+  // Restore Foundry's PIXI rendering via ModeManager (or legacy fallback)
+  if (modeManager) {
+    modeManager.restoreFoundryRendering();
+    modeManager.dispose();
+    modeManager = null;
+  } else {
+    restoreFoundryRendering();
   }
+
+  safeDispose(() => clearAssetCache(), 'clearAssetCache');
 
   // Note: renderer is owned by MapShine global state, don't dispose here
   renderer = null;
@@ -4709,25 +4331,10 @@ function destroyThreeCanvas() {
  * @public
  */
 export function setMapMakerMode(enabled) {
-  if (isMapMakerMode === enabled) return;
-  
-  isMapMakerMode = enabled;
-
-  // In Map Maker mode, Foundry should own drag-select visuals (PIXI).
-  // In Gameplay mode, MapShine should own drag-select visuals (DOM + Three shadow).
-  _updateFoundrySelectRectSuppression();
-  log.info(`Switching to ${enabled ? 'Map Maker' : 'Gameplay'} Mode`);
-
-  try {
-    if (window.MapShine) window.MapShine.isMapMakerMode = isMapMakerMode;
-  } catch (_) {
-    // Ignore
-  }
-  
-  if (enabled) {
-    disableSystem(); // Hide Three.js, Show PIXI
-  } else {
-    enableSystem(); // Show Three.js, Hide PIXI layers
+  if (modeManager) {
+    modeManager.setMapMakerMode(enabled);
+    // Keep module-scope flag in sync for any remaining legacy references
+    isMapMakerMode = modeManager.isMapMakerMode;
   }
 }
 
@@ -4743,54 +4350,34 @@ export async function resetScene(options = undefined) {
   try {
     const scene = canvas?.scene;
     if (!scene) {
-      try {
-        ui?.notifications?.warn?.('Map Shine: No active scene to reset');
-      } catch (_) {
-      }
+      safeCall(() => ui?.notifications?.warn?.('Map Shine: No active scene to reset'), 'resetScene.noScene', Severity.COSMETIC);
       return;
     }
 
-    const prevMapMakerMode = !!isMapMakerMode;
+    const prevMapMakerMode = !!(modeManager?.isMapMakerMode ?? isMapMakerMode);
 
-    try {
-      ui?.notifications?.info?.('Map Shine: Resetting scene (rebuilding Three.js)…');
-    } catch (_) {
-    }
+    safeCall(() => ui?.notifications?.info?.('Map Shine: Resetting scene (rebuilding Three.js)…'), 'resetScene.notify', Severity.COSMETIC);
 
-    try {
+    safeCall(() => {
       const w = window.MapShine?.waterEffect;
       if (w && typeof w.clearCaches === 'function') w.clearCaches();
-    } catch (_) {
-    }
+    }, 'resetScene.clearWaterCaches', Severity.COSMETIC);
 
-    try {
+    safeCall(() => {
       const particleSystem = window.MapShineParticles;
       const wp = particleSystem?.weatherParticles;
       if (wp && typeof wp.clearWaterCaches === 'function') wp.clearWaterCaches();
-    } catch (_) {
-    }
+    }, 'resetScene.clearWeatherCaches', Severity.COSMETIC);
 
     await createThreeCanvas(scene);
 
     // Preserve user mode across rebuilds.
-    try {
-      if (prevMapMakerMode) setMapMakerMode(true);
-    } catch (_) {
-    }
+    safeCall(() => { if (prevMapMakerMode) setMapMakerMode(true); }, 'resetScene.restoreMode', Severity.COSMETIC);
 
-    try {
-      ui?.notifications?.info?.('Map Shine: Scene reset complete');
-    } catch (_) {
-    }
+    safeCall(() => ui?.notifications?.info?.('Map Shine: Scene reset complete'), 'resetScene.done', Severity.COSMETIC);
   } catch (e) {
-    try {
-      log.error('Scene reset failed:', e);
-    } catch (_) {
-    }
-    try {
-      ui?.notifications?.error?.('Map Shine: Scene reset failed (see console)');
-    } catch (_) {
-    }
+    safeCall(() => log.error('Scene reset failed:', e), 'resetScene.logError', Severity.COSMETIC);
+    safeCall(() => ui?.notifications?.error?.('Map Shine: Scene reset failed (see console)'), 'resetScene.notifyError', Severity.COSMETIC);
   } finally {
     sceneResetInProgress = false;
   }
@@ -4811,19 +4398,17 @@ function applyMapMakerFogOverride() {
 
   // In Map Maker mode, fog/visibility can black out the entire map for GMs
   // when no token vision source is active. Hide them to keep the map editable.
-  try {
+  safeCall(() => {
     if (canvas.fog) canvas.fog.visible = false;
     if (canvas.visibility) canvas.visibility.visible = false;
     if (canvas.visibility?.filter) canvas.visibility.filter.enabled = false;
-  } catch (_) {
-    // Ignore - structure may vary by Foundry version
-  }
+  }, 'applyMapMakerFogOverride', Severity.COSMETIC);
 }
 
 function restoreMapMakerFogOverride() {
   if (!mapMakerFogState) return;
 
-  try {
+  safeCall(() => {
     if (canvas?.fog && mapMakerFogState.fogVisible !== null) {
       canvas.fog.visible = mapMakerFogState.fogVisible;
     }
@@ -4833,11 +4418,8 @@ function restoreMapMakerFogOverride() {
     if (canvas?.visibility?.filter && mapMakerFogState.visibilityFilterEnabled !== null) {
       canvas.visibility.filter.enabled = mapMakerFogState.visibilityFilterEnabled;
     }
-  } catch (_) {
-    // Ignore
-  } finally {
-    mapMakerFogState = null;
-  }
+  }, 'restoreMapMakerFogOverride', Severity.COSMETIC);
+  mapMakerFogState = null;
 }
 
 /**
@@ -4937,27 +4519,21 @@ function enableSystem() {
  * @private
  */
 function _enforceGameplayPixiSuppression() {
-  try {
+  safeCall(() => {
     if (!canvas?.ready) return;
     if (isMapMakerMode) return;
 
     // V12+: primary can render tiles/overheads/roofs. Keep it hidden in gameplay.
-    try {
-      if (canvas.primary) canvas.primary.visible = false;
-    } catch (_) {
-    }
+    safeCall(() => { if (canvas.primary) canvas.primary.visible = false; }, 'pixiSuppress.primary', Severity.COSMETIC);
 
     // If the Tiles layer is actively being edited, allow normal visuals.
     // Otherwise, keep placeables nearly transparent to avoid double-rendering.
-    let isTilesActive = false;
-    try {
+    const isTilesActive = safeCall(() => {
       const activeLayerObj = canvas.activeLayer;
       const activeLayerName = activeLayerObj?.options?.name || activeLayerObj?.name || '';
       const activeLayerCtor = activeLayerObj?.constructor?.name || '';
-      isTilesActive = (activeLayerName === 'TilesLayer') || (activeLayerName === 'tiles') || (activeLayerCtor === 'TilesLayer');
-    } catch (_) {
-      isTilesActive = false;
-    }
+      return (activeLayerName === 'TilesLayer') || (activeLayerName === 'tiles') || (activeLayerCtor === 'TilesLayer');
+    }, 'pixiSuppress.checkTilesActive', Severity.COSMETIC, { fallback: false });
 
     // When not editing tiles, fully hide PIXI tile visuals (alpha=0) so no
     // faint duplicate remains visible when Three.js roofs fade to opacity 0.
@@ -4968,44 +4544,31 @@ function _enforceGameplayPixiSuppression() {
     // Three.js tiles to prevent a duplicate "second roof" copy.
     // When the Tiles tool is not active, prefer Three.js for tiles so hover-hide
     // works and we keep full rendering control.
-    try {
+    safeCall(() => {
       const tm = window.MapShine?.tileManager;
       if (tm?.setVisibility) tm.setVisibility(!isTilesActive);
-    } catch (_) {
-    }
+    }, 'pixiSuppress.tileVisibility', Severity.COSMETIC);
 
-    try {
+    safeCall(() => {
       if (canvas.tiles?.placeables) {
         for (const tile of canvas.tiles.placeables) {
           if (!tile) continue;
-          try {
+          safeCall(() => {
             tile.visible = true;
             tile.interactive = true;
             tile.interactiveChildren = true;
-          } catch (_) {
-          }
-          try {
             if (tile.mesh) tile.mesh.alpha = alpha;
-          } catch (_) {
-          }
-          try {
             if (tile.texture) tile.texture.alpha = alpha;
-          } catch (_) {
-          }
-          try {
             if (Array.isArray(tile.children)) {
               for (const child of tile.children) {
                 if (child && typeof child.alpha === 'number') child.alpha = alpha;
               }
             }
-          } catch (_) {
-          }
+          }, 'pixiSuppress.tile', Severity.COSMETIC);
         }
       }
-    } catch (_) {
-    }
-  } catch (_) {
-  }
+    }, 'pixiSuppress.tiles', Severity.COSMETIC);
+  }, 'enforceGameplayPixiSuppression', Severity.COSMETIC);
 }
 
 /**
@@ -5162,7 +4725,7 @@ function updateLayerVisibility() {
 
       const makeWallTransparent = (wall) => {
         if (!wall) return;
-        try {
+        safeCall(() => {
           const ALPHA = 0.01;
           if (wall.line) wall.line.alpha = ALPHA;
           if (wall.direction) wall.direction.alpha = ALPHA;
@@ -5174,13 +4737,12 @@ function updateLayerVisibility() {
           wall.visible = true;
           wall.interactive = true;
           wall.interactiveChildren = true;
-        } catch (_) {
-        }
+        }, 'makeWallTransparent', Severity.COSMETIC);
       };
 
       const restoreWallVisuals = (wall) => {
         if (!wall) return;
-        try {
+        safeCall(() => {
           if (wall.line) wall.line.alpha = 1;
           if (wall.direction) wall.direction.alpha = 1;
           if (wall.endpoints) wall.endpoints.alpha = 1;
@@ -5188,8 +4750,7 @@ function updateLayerVisibility() {
             wall.doorControl.visible = true;
             wall.doorControl.alpha = 1;
           }
-        } catch (_) {
-        }
+        }, 'restoreWallVisuals', Severity.COSMETIC);
       };
 
       if (Array.isArray(canvas.walls.placeables)) {
@@ -5517,188 +5078,20 @@ export function getCanvas() {
   return threeCanvas;
 }
 
-/**
- * Set up resize handling for the Three.js canvas
- * Uses ResizeObserver for container changes and window resize as fallback
- * @private
- */
-function setupResizeHandling() {
-  // Clean up any existing handlers first
-  cleanupResizeHandling();
-
-  if (!threeCanvas) {
-    log.warn('Cannot set up resize handling - no canvas');
-    return;
-  }
-
-  const container = threeCanvas.parentElement;
-  if (!container) {
-    log.warn('Cannot set up resize handling - no container');
-    return;
-  }
-
-  /**
-   * Debounced resize handler to avoid excessive updates
-   * @param {number} width 
-   * @param {number} height 
-   */
-  const handleResize = (width, height) => {
-    // Clear any pending debounce
-    if (resizeDebounceTimer) {
-      clearTimeout(resizeDebounceTimer);
-    }
-
-    // Debounce resize events (16ms = ~60fps, prevents excessive updates during drag)
-    resizeDebounceTimer = setTimeout(() => {
-      // Validate dimensions
-      if (width <= 0 || height <= 0) {
-        log.debug(`Ignoring invalid resize dimensions: ${width}x${height}`);
-        return;
-      }
-
-      // Check if size actually changed
-      let currentWidth = 0;
-      let currentHeight = 0;
-      try {
-        // renderer.domElement.width/height are drawing-buffer pixels, which are
-        // affected by DPR. For resize decisions we want CSS pixels.
-        const THREE = window.THREE;
-        const size = (renderer && typeof renderer.getSize === 'function' && THREE)
-          ? renderer.getSize(new THREE.Vector2())
-          : null;
-        currentWidth = size?.x || 0;
-        currentHeight = size?.y || 0;
-      } catch (_) {
-        currentWidth = 0;
-        currentHeight = 0;
-      }
-
-      if (Math.floor(width) === Math.floor(currentWidth) && Math.floor(height) === Math.floor(currentHeight)) {
-        log.debug('Resize skipped - dimensions unchanged');
-        return;
-      }
-
-      const dpr = window.devicePixelRatio || 1;
-      log.info(`Handling resize: ${width}x${height} (DPR: ${dpr})`);
-      resize(width, height);
-    }, 16);
-  };
-
-  // Method 1: ResizeObserver (preferred - handles sidebar, popouts, etc.)
-  if (typeof ResizeObserver !== 'undefined') {
-    resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        // Use contentRect for accurate dimensions (excludes padding/border)
-        const { width, height } = entry.contentRect;
-        handleResize(width, height);
-      }
-    });
-
-    resizeObserver.observe(container);
-    log.debug('ResizeObserver attached to canvas container');
-  } else {
-    log.warn('ResizeObserver not available - falling back to window resize only');
-  }
-
-  // Method 2: Window resize event (fallback and additional coverage)
-  windowResizeHandler = () => {
-    if (!threeCanvas) return;
-    const rect = threeCanvas.getBoundingClientRect();
-    handleResize(rect.width, rect.height);
-  };
-
-  window.addEventListener('resize', windowResizeHandler);
-  log.debug('Window resize listener attached');
-
-  // Method 3: Listen for Foundry sidebar collapse/expand which changes canvas area
-  // The 'collapseSidebar' hook fires when sidebar is toggled
-  collapseSidebarHookId = Hooks.on('collapseSidebar', () => {
-    // Delay slightly to let DOM update
-    setTimeout(() => {
-      if (threeCanvas) {
-        const rect = threeCanvas.getBoundingClientRect();
-        handleResize(rect.width, rect.height);
-      }
-    }, 50);
-  });
-
-  log.info('Resize handling initialized');
-}
+// NOTE: setupResizeHandling() and cleanupResizeHandling() have been extracted
+// to foundry/resize-handler.js (ResizeHandler class). The module-scope
+// resizeObserver/windowResizeHandler/resizeDebounceTimer/collapseSidebarHookId
+// variables above are now unused but kept temporarily for backward compat.
 
 /**
- * Clean up resize handling resources
- * @private
- */
-function cleanupResizeHandling() {
-  // Clear debounce timer
-  if (resizeDebounceTimer) {
-    clearTimeout(resizeDebounceTimer);
-    resizeDebounceTimer = null;
-  }
-
-  // Disconnect ResizeObserver
-  if (resizeObserver) {
-    resizeObserver.disconnect();
-    resizeObserver = null;
-    log.debug('ResizeObserver disconnected');
-  }
-
-  // Remove window resize listener
-  if (windowResizeHandler) {
-    window.removeEventListener('resize', windowResizeHandler);
-    windowResizeHandler = null;
-    log.debug('Window resize listener removed');
-  }
-
-  // Remove collapseSidebar hook
-  if (collapseSidebarHookId !== null) {
-    Hooks.off('collapseSidebar', collapseSidebarHookId);
-    collapseSidebarHookId = null;
-    log.debug('collapseSidebar hook removed');
-  }
-}
-
-/**
- * Handle canvas resize events
+ * Handle canvas resize events.
+ * Delegates to the ResizeHandler instance which owns all resize logic.
  * @param {number} width - New width
  * @param {number} height - New height
  * @public
  */
 export function resize(width, height) {
-  if (!threeCanvas) return;
-
-  log.debug(`Canvas resized: ${width}x${height}`);
-
-  // Update renderer size
-  if (renderer) {
-    // Apply effective pixel ratio (Render Resolution preset) while keeping CSS full-screen.
-    _applyRenderResolutionToRenderer(width, height);
-
-    // Avoid touching element CSS sizing (we control that via style=100%).
-    // WebGLRenderer signature is (w,h,updateStyle). WebGPURenderer ignores the third.
-    try {
-      renderer.setSize(width, height, false);
-    } catch (_) {
-      renderer.setSize(width, height);
-    }
-  }
-
-  // Update scene composer camera
-  if (sceneComposer) {
-    sceneComposer.resize(width, height);
-  }
-
-  // Update effect composer render targets
-  if (effectComposer) {
-    // EffectComposer expects drawing-buffer pixels.
-    try {
-      const THREE = window.THREE;
-      const size = (renderer && typeof renderer.getDrawingBufferSize === 'function' && THREE)
-        ? renderer.getDrawingBufferSize(new THREE.Vector2())
-        : null;
-      effectComposer.resize(size?.width ?? size?.x ?? width, size?.height ?? size?.y ?? height);
-    } catch (_) {
-      effectComposer.resize(width, height);
-    }
+  if (resizeHandler) {
+    resizeHandler.resize(width, height);
   }
 }

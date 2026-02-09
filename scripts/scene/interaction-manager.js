@@ -7,14 +7,14 @@
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
-import { VisionPolygonComputer } from '../vision/VisionPolygonComputer.js';
 import { EnhancedLightInspector } from '../ui/enhanced-light-inspector.js';
 import { SelectionBoxEffect } from '../effects/SelectionBoxEffect.js';
+import { MapPointDrawHandler } from './map-point-interaction.js';
+import { LightInteractionHandler } from './light-interaction.js';
+import { SelectionBoxHandler } from './selection-box-interaction.js';
+import { safeCall, safeDispose, Severity } from '../core/safe-call.js';
 
 const log = createLogger('InteractionManager');
-
-const _lightPreviewLosComputer = new VisionPolygonComputer();
-_lightPreviewLosComputer.circleSegments = 64;
 
 /**
  * InteractionManager - Handles mouse/keyboard interaction with the THREE.js scene
@@ -332,33 +332,31 @@ export class InteractionManager {
     };
 
 
-    // Map Point Drawing State
-    this.mapPointDraw = {
-      active: false,
-      effectTarget: null, // e.g., 'smellyFlies', 'fire'
-      groupType: 'area', // 'point', 'area', 'line'
-      ropeType: null,
-      points: [], // Array of {x, y} in world coords
-      snapToGrid: false, // Grid snapping OFF by default, Shift to enable
-      previewGroup: null,
-      previewLine: null,
-      previewPoints: null,
-      previewFill: null,
-      cursorPoint: null, // Preview of where next point will be placed
-      pointMarkers: [] // Individual point marker meshes for better visibility
-    };
+    // Map Point Drawing — delegated to extracted handler
+    /** @type {MapPointDrawHandler} */
+    this.mapPointDrawHandler = new MapPointDrawHandler(this);
+    // Backward-compatible alias so existing code referencing this.mapPointDraw.* still works
+    this.mapPointDraw = this.mapPointDrawHandler.state;
+
+    // Light Interaction — delegated to extracted handler
+    /** @type {LightInteractionHandler} */
+    this.lightHandler = new LightInteractionHandler(this);
+
+    // Selection Box — delegated to extracted handler
+    /** @type {SelectionBoxHandler} */
+    this.selectionBoxHandler = new SelectionBoxHandler(this);
     
     // Create drag select visuals (Three.js mesh kept for compatibility)
-    this.createSelectionBox();
+    this.selectionBoxHandler.createSelectionBox();
     this.selectionBoxEffect.initialize();
     this.createDragMeasureOverlay();
-    this.createUIHoverLabelOverlay();
-    this.createRadiusSliderOverlay();
-    this.createLightPreview();
-    this.createMapPointPreview();
-    this._createLightTranslateGizmo();
-    this._createLightRadiusRingsGizmo();
-    this._createSelectedLightOutline();
+    this.lightHandler.createUIHoverLabelOverlay();
+    this.lightHandler.createRadiusSliderOverlay();
+    this.lightHandler.createLightPreview();
+    this.mapPointDrawHandler.createPreview();
+    this.lightHandler.createTranslateGizmo();
+    this.lightHandler.createRadiusRingsGizmo();
+    this.lightHandler.createSelectedLightOutline();
     
     /** @type {string|null} ID of currently hovered token */
     this.hoveredTokenId = null;
@@ -404,21 +402,14 @@ export class InteractionManager {
     if (this._debugOverheadHover.enabled) {
       // Ensure objects exist immediately so the user can diagnose cases where the
       // raycast never hits (misalignment / layer mask issues).
-      try {
+      safeCall(() => {
         this._ensureOverheadHoverDebugObjects();
         if (this._debugOverheadHover.group) this._debugOverheadHover.group.visible = true;
-      } catch (_) {
-      }
+      }, 'overheadHoverDebug.enable', Severity.COSMETIC);
     }
     if (!this._debugOverheadHover.enabled) {
-      try {
-        if (this._debugOverheadHover.group) this._debugOverheadHover.group.visible = false;
-      } catch (_) {
-      }
-      try {
-        if (this._debugOverheadHover.label) this._debugOverheadHover.label.style.display = 'none';
-      } catch (_) {
-      }
+      safeCall(() => { if (this._debugOverheadHover.group) this._debugOverheadHover.group.visible = false; }, 'overheadHoverDebug.hideGroup', Severity.COSMETIC);
+      safeCall(() => { if (this._debugOverheadHover.label) this._debugOverheadHover.label.style.display = 'none'; }, 'overheadHoverDebug.hideLabel', Severity.COSMETIC);
     }
   }
 
@@ -489,7 +480,7 @@ export class InteractionManager {
     this._debugOverheadHover._tmpCorner = new THREE.Vector3();
 
     // Small DOM label near the cursor showing tileId + UV.
-    try {
+    safeCall(() => {
       const el = document.createElement('div');
       el.style.position = 'fixed';
       el.style.zIndex = '10002';
@@ -504,8 +495,7 @@ export class InteractionManager {
       el.style.display = 'none';
       document.body.appendChild(el);
       this._debugOverheadHover.label = el;
-    } catch (_) {
-    }
+    }, 'overheadHoverDebug.createLabel', Severity.COSMETIC);
   }
 
   _updateOverheadHoverDebug(event, hit, opaqueHit) {
@@ -516,10 +506,7 @@ export class InteractionManager {
 
     if (!hit) {
       dbg.group.visible = false;
-      try {
-        if (dbg.label) dbg.label.style.display = 'none';
-      } catch (_) {
-      }
+      safeCall(() => { if (dbg.label) dbg.label.style.display = 'none'; }, 'overheadDebug.hideLabel', Severity.COSMETIC);
       return;
     }
 
@@ -533,7 +520,7 @@ export class InteractionManager {
 
     // Draw the sprite billboard quad outline so we can see if the ray target is
     // offset/scaled relative to the rendered texture.
-    try {
+    safeCall(() => {
       const sprite = hit?.object;
       const cam = this.sceneComposer?.camera;
       const quad = dbg.quad;
@@ -590,11 +577,10 @@ export class InteractionManager {
       } else if (dbg.quad) {
         dbg.quad.visible = false;
       }
-    } catch (_) {
-    }
+    }, 'overheadDebug.quad', Severity.COSMETIC);
 
     // Update ray line
-    try {
+    safeCall(() => {
       const cam = this.sceneComposer?.camera;
       if (cam) {
         cam.getWorldPosition(_tmpPos);
@@ -607,18 +593,16 @@ export class InteractionManager {
         arr[5] = p.z;
         dbg.ray.geometry.attributes.position.needsUpdate = true;
       }
-    } catch (_) {
-    }
+    }, 'overheadDebug.ray', Severity.COSMETIC);
 
     // Marker color indicates opaque vs transparent pixel
-    try {
+    safeCall(() => {
       const c = opaqueHit ? 0x33ff33 : 0xff3333;
       dbg.marker.material.color.setHex(c);
-    } catch (_) {
-    }
+    }, 'overheadDebug.markerColor', Severity.COSMETIC);
 
     // Label next to cursor
-    try {
+    safeCall(() => {
       if (dbg.label && event) {
         const tileId = hit?.object?.userData?.foundryTileId;
         const uv = hit?.uv;
@@ -629,173 +613,15 @@ export class InteractionManager {
         dbg.label.style.top = `${event.clientY + 14}px`;
         dbg.label.style.display = 'block';
       }
-    } catch (_) {
-    }
+    }, 'overheadDebug.label', Severity.COSMETIC);
   }
 
-  _createSelectedLightOutline() {
-    try {
-      const THREE = window.THREE;
-      if (!THREE) return;
-
-      const points = [
-        new THREE.Vector3(-0.5, -0.5, 0),
-        new THREE.Vector3(0.5, -0.5, 0),
-        new THREE.Vector3(0.5, 0.5, 0),
-        new THREE.Vector3(-0.5, 0.5, 0),
-        new THREE.Vector3(-0.5, -0.5, 0)
-      ];
-
-      const geom = new THREE.BufferGeometry().setFromPoints(points);
-      const mat = new THREE.LineBasicMaterial({
-        color: 0x33aaff,
-        transparent: true,
-        opacity: 0.95,
-        depthTest: false,
-        depthWrite: false
-      });
-
-      const line = new THREE.Line(geom, mat);
-      line.name = 'SelectedLightOutline';
-      line.visible = false;
-      line.renderOrder = 9999;
-      line.layers.set(OVERLAY_THREE_LAYER);
-      line.layers.enable(0); // harmless, but keeps it consistent with other overlay gizmos
-
-      if (this.sceneComposer?.scene) {
-        this.sceneComposer.scene.add(line);
-      }
-
-      this._selectedLightOutline = {
-        line,
-        basePaddingMul: 1.35,
-        zOffset: 0.02
-      };
-    } catch (_) {
-      this._selectedLightOutline = { line: null };
-    }
-  }
-
-  _hideSelectedLightOutline() {
-    try {
-      const l = this._selectedLightOutline?.line;
-      if (l) l.visible = false;
-    } catch (_) {
-    }
-  }
-
-  _updateSelectedLightOutline() {
-    try {
-      const entry = this._selectedLightOutline;
-      const line = entry?.line;
-      if (!line) return;
-
-      const sel = this._getSelectedLight();
-      if (!sel) {
-        line.visible = false;
-        return;
-      }
-
-      // Determine which object to follow + its icon scale.
-      let worldPos = null;
-      let icon = null;
-      if (sel.type === 'foundry') {
-        icon = this.lightIconManager?.lights?.get?.(sel.id) || null;
-        worldPos = this._getSelectedLightWorldPos(sel);
-      } else if (sel.type === 'enhanced') {
-        const mgr = window.MapShine?.enhancedLightIconManager;
-        icon = mgr?.lights?.get?.(sel.id) || null;
-        worldPos = this._getSelectedLightWorldPos(sel);
-      }
-
-      if (!worldPos) {
-        line.visible = false;
-        return;
-      }
-
-      // Fallback size if we can't read an icon scale.
-      let sx = 60;
-      let sy = 60;
-      try {
-        const s = icon?.scale;
-        if (s && Number.isFinite(s.x) && Number.isFinite(s.y)) {
-          sx = s.x;
-          sy = s.y;
-        }
-      } catch (_) {
-      }
-
-      const pad = (Number.isFinite(entry.basePaddingMul) ? entry.basePaddingMul : 1.35);
-      line.position.set(worldPos.x, worldPos.y, (worldPos.z ?? 0) + (entry.zOffset ?? 0.02));
-      line.scale.set(sx * pad, sy * pad, 1);
-      line.visible = true;
-    } catch (_) {
-    }
-  }
-
-  _computeLightPreviewLocalPolygon(originWorld, radiusWorld) {
-    try {
-      const radius = Number(radiusWorld);
-      if (!Number.isFinite(radius) || radius <= 0) return null;
-
-      const sceneRect = canvas?.dimensions?.sceneRect;
-      const sceneBounds = sceneRect ? {
-        x: sceneRect.x,
-        y: sceneRect.y,
-        width: sceneRect.width,
-        height: sceneRect.height
-      } : null;
-
-      const originF = Coordinates.toFoundry(originWorld.x, originWorld.y);
-      const ptsF = _lightPreviewLosComputer.compute(originF, radius, null, sceneBounds, { sense: 'light' });
-      if (!ptsF || ptsF.length < 6) return null;
-
-      const THREE = window.THREE;
-      const local = [];
-      for (let i = 0; i < ptsF.length; i += 2) {
-        const w = Coordinates.toWorld(ptsF[i], ptsF[i + 1]);
-        local.push(new THREE.Vector2(w.x - originWorld.x, w.y - originWorld.y));
-      }
-      return local.length >= 3 ? local : null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  _updateLightPlacementPreviewGeometry(preview, originWorld, radiusWorld) {
-    try {
-      if (!preview?.previewFill || !preview?.previewBorder) return;
-      const THREE = window.THREE;
-
-      const radius = Math.max(0.1, Number(radiusWorld) || 0.1);
-
-      // Keep group scale at 1 so the shader works in world-units.
-      if (preview.previewGroup) preview.previewGroup.scale.set(1, 1, 1);
-
-      if (preview.previewFill?.material?.uniforms?.uRadius) {
-        preview.previewFill.material.uniforms.uRadius.value = radius;
-      }
-
-      const localPoly = this._computeLightPreviewLocalPolygon(originWorld, radius);
-      let geom;
-      if (localPoly && localPoly.length >= 3) {
-        const shape = new THREE.Shape(localPoly);
-        geom = new THREE.ShapeGeometry(shape);
-      } else {
-        geom = new THREE.CircleGeometry(radius, 64);
-      }
-
-      // Swap fill geometry
-      if (preview.previewFill.geometry) preview.previewFill.geometry.dispose();
-      preview.previewFill.geometry = geom;
-
-      // Rebuild border to match new fill
-      const borderGeom = new THREE.EdgesGeometry(geom);
-      if (preview.previewBorder.geometry) preview.previewBorder.geometry.dispose();
-      preview.previewBorder.geometry = borderGeom;
-    } catch (_) {
-    }
-  }
+  // ── Light outline/preview methods — delegated to LightInteractionHandler ──
+  _createSelectedLightOutline() { this.lightHandler.createSelectedLightOutline(); }
+  _hideSelectedLightOutline() { this.lightHandler.hideSelectedLightOutline(); }
+  _updateSelectedLightOutline() { this.lightHandler.updateSelectedLightOutline(); }
+  _computeLightPreviewLocalPolygon(o, r) { return this.lightHandler.computeLightPreviewLocalPolygon(o, r); }
+  _updateLightPlacementPreviewGeometry(p, o, r) { this.lightHandler.updateLightPlacementPreviewGeometry(p, o, r); }
 
   /**
    * Remove any existing drag previews and clear pending cleanup state.
@@ -838,7 +664,7 @@ export class InteractionManager {
     // cases (e.g. when other frameworks intercept/re-target events). To ensure we never
     // treat UI clicks/drags (FilePicker, Dialogs, etc.) as scene interaction, also inspect
     // the actual element stack under the pointer.
-    try {
+    safeCall(() => {
       const cx = event?.clientX;
       const cy = event?.clientY;
       if (Number.isFinite(cx) && Number.isFinite(cy) && typeof document?.elementsFromPoint === 'function') {
@@ -849,8 +675,7 @@ export class InteractionManager {
           }
         }
       }
-    } catch (_) {
-    }
+    }, 'isOverUI.elementsFromPoint', Severity.COSMETIC);
 
     for (const el of elements) {
       // Foundry VTT UI windows/dialogs (v11/v12+)
@@ -877,7 +702,7 @@ export class InteractionManager {
   }
 
   _isTextEditingEvent(event) {
-    try {
+    return safeCall(() => {
       const t = (event?.target instanceof Element) ? event.target : null;
       const active = (document?.activeElement instanceof Element) ? document.activeElement : null;
       const candidates = [t, active].filter(Boolean);
@@ -894,9 +719,8 @@ export class InteractionManager {
         const role = el.getAttribute?.('role');
         if (role === 'textbox' || role === 'searchbox' || role === 'combobox') return true;
       }
-    } catch (_) {
-    }
-    return false;
+      return false;
+    }, 'isTextEditingEvent', Severity.COSMETIC, { fallback: false });
   }
 
   /**
@@ -924,10 +748,7 @@ export class InteractionManager {
 
     // When a token actually starts moving due to the authoritative update,
     // remove the ghost preview so the animated token is visible.
-    try {
-      this.tokenManager?.setOnTokenMovementStart?.((tokenId) => this._onTokenMovementStart(tokenId));
-    } catch (_) {
-    }
+    safeCall(() => this.tokenManager?.addOnTokenMovementStart?.((tokenId) => this._onTokenMovementStart(tokenId)), 'init.wireTokenMovement', Severity.COSMETIC);
 
     const rect = this.canvasElement.getBoundingClientRect();
     log.info('InteractionManager initialized (Three.js token interaction enabled)', {
@@ -938,528 +759,25 @@ export class InteractionManager {
   }
 
   _consumeKeyEvent(event) {
-    try {
+    safeCall(() => {
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
-    } catch (_) {
-    }
+    }, 'consumeKeyEvent', Severity.COSMETIC);
   }
 
-  /**
-   * Create selection box visuals
-   * @private
-   */
-  createSelectionBox() {
-    const THREE = window.THREE;
-    
-    // Semi-transparent blue fill
-    const geometry = new THREE.PlaneGeometry(1, 1);
-    const material = new THREE.MeshBasicMaterial({ 
-      color: 0x3388ff, 
-      transparent: true, 
-      opacity: 0.2,
-      depthTest: false,
-      side: THREE.DoubleSide
-    });
-    
-    this.dragSelect.mesh = new THREE.Mesh(geometry, material);
-    this.dragSelect.mesh.visible = false;
-    this.dragSelect.mesh.name = 'SelectionBoxFill';
-    this.dragSelect.mesh.layers.set(OVERLAY_THREE_LAYER);
-    // Ensure it renders on top
-    this.dragSelect.mesh.renderOrder = 9999;
-    
-    // Blue border
-    const borderGeo = new THREE.EdgesGeometry(geometry);
-    const borderMat = new THREE.LineBasicMaterial({ 
-      color: 0x3388ff, 
-      transparent: true, 
-      opacity: 0.8,
-      depthTest: false
-    });
-    
-    this.dragSelect.border = new THREE.LineSegments(borderGeo, borderMat);
-    this.dragSelect.border.visible = false;
-    this.dragSelect.border.name = 'SelectionBoxBorder';
-    this.dragSelect.border.layers.set(OVERLAY_THREE_LAYER);
-    this.dragSelect.border.renderOrder = 10000;
-    
-    // Add to scene via SceneComposer
-    if (this.sceneComposer.scene) {
-      this.sceneComposer.scene.add(this.dragSelect.mesh);
-      this.sceneComposer.scene.add(this.dragSelect.border);
-    }
-  }
-
-  /**
-   * Create a screen-space DOM overlay for drag selection.
-   * This ensures the visual rectangle matches Foundry's PIXI selection box,
-   * which is also screen-space, regardless of perspective.
-   * @private
-   */
-  createSelectionOverlay() {
-    const el = document.createElement('div');
-    el.style.position = 'fixed';
-    el.style.pointerEvents = 'none';
-    el.style.zIndex = '9999';
-    el.style.display = 'none';
-    el.style.left = '0px';
-    el.style.top = '0px';
-    el.style.width = '0px';
-    el.style.height = '0px';
-
-    // SVG overlay (border styles + patterns)
-    const SVG_NS = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(SVG_NS, 'svg');
-    svg.setAttribute('width', '100%');
-    svg.setAttribute('height', '100%');
-    svg.setAttribute('preserveAspectRatio', 'none');
-    svg.style.position = 'absolute';
-    svg.style.left = '0';
-    svg.style.top = '0';
-    svg.style.width = '100%';
-    svg.style.height = '100%';
-    svg.style.overflow = 'visible';
-
-    const defs = document.createElementNS(SVG_NS, 'defs');
-    svg.appendChild(defs);
-
-    // Unique IDs to avoid collisions with other SVGS in the DOM.
-    const ids = {
-      basePatternGrid: `msSelGrid_${Math.random().toString(16).slice(2)}`,
-      basePatternDiag: `msSelDiag_${Math.random().toString(16).slice(2)}`,
-      basePatternDots: `msSelDots_${Math.random().toString(16).slice(2)}`
-    };
-
-    const baseRect = document.createElementNS(SVG_NS, 'rect');
-    const patternRect = document.createElementNS(SVG_NS, 'rect');
-    const strokeRect = document.createElementNS(SVG_NS, 'rect');
-
-    baseRect.setAttribute('x', '0');
-    baseRect.setAttribute('y', '0');
-    patternRect.setAttribute('x', '0');
-    patternRect.setAttribute('y', '0');
-    strokeRect.setAttribute('x', '0');
-    strokeRect.setAttribute('y', '0');
-
-    // Draw order: fill -> pattern -> stroke
-    svg.appendChild(baseRect);
-    svg.appendChild(patternRect);
-    svg.appendChild(strokeRect);
-
-    // Label
-    const labelEl = document.createElement('div');
-    labelEl.style.position = 'absolute';
-    labelEl.style.left = '6px';
-    labelEl.style.top = '6px';
-    labelEl.style.padding = '2px 6px';
-    labelEl.style.borderRadius = '4px';
-    labelEl.style.background = 'rgba(0,0,0,0.45)';
-    labelEl.style.color = 'white';
-    labelEl.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-    labelEl.style.fontWeight = '600';
-    labelEl.style.letterSpacing = '0.2px';
-    labelEl.style.pointerEvents = 'none';
-    labelEl.style.display = 'none';
-
-    el.appendChild(svg);
-    el.appendChild(labelEl);
-    document.body.appendChild(el);
-
-    this.dragSelect.overlayEl = el;
-    this._selectionOverlay.svg = svg;
-    this._selectionOverlay.defs = defs;
-    this._selectionOverlay.baseRect = baseRect;
-    this._selectionOverlay.patternRect = patternRect;
-    this._selectionOverlay.strokeRect = strokeRect;
-    this._selectionOverlay.labelEl = labelEl;
-    this._selectionOverlay.ids = ids;
-
-    this._ensureSelectionPatterns();
-    this._applySelectionOverlayStyles();
-  }
-
-  _ensureSelectionPatterns() {
-    const ov = this._selectionOverlay;
-    if (!ov?.defs || !ov?.ids) return;
-    const SVG_NS = 'http://www.w3.org/2000/svg';
-    const defs = ov.defs;
-
-    // Grid pattern
-    const grid = document.createElementNS(SVG_NS, 'pattern');
-    grid.setAttribute('id', ov.ids.basePatternGrid);
-    grid.setAttribute('patternUnits', 'userSpaceOnUse');
-    grid.setAttribute('width', '18');
-    grid.setAttribute('height', '18');
-    const gridPath = document.createElementNS(SVG_NS, 'path');
-    gridPath.setAttribute('d', 'M 18 0 L 0 0 0 18');
-    gridPath.setAttribute('fill', 'none');
-    gridPath.setAttribute('stroke', 'rgba(255,255,255,0.2)');
-    gridPath.setAttribute('stroke-width', '1');
-    grid.appendChild(gridPath);
-    defs.appendChild(grid);
-    ov._gridPath = gridPath;
-
-    // Diagonal pattern
-    const diag = document.createElementNS(SVG_NS, 'pattern');
-    diag.setAttribute('id', ov.ids.basePatternDiag);
-    diag.setAttribute('patternUnits', 'userSpaceOnUse');
-    diag.setAttribute('width', '16');
-    diag.setAttribute('height', '16');
-    const diagPath = document.createElementNS(SVG_NS, 'path');
-    diagPath.setAttribute('d', 'M -4 16 L 16 -4 M 0 20 L 20 0');
-    diagPath.setAttribute('fill', 'none');
-    diagPath.setAttribute('stroke', 'rgba(255,255,255,0.2)');
-    diagPath.setAttribute('stroke-width', '1');
-    diag.appendChild(diagPath);
-    defs.appendChild(diag);
-    ov._diagPath = diagPath;
-
-    // Dots pattern
-    const dots = document.createElementNS(SVG_NS, 'pattern');
-    dots.setAttribute('id', ov.ids.basePatternDots);
-    dots.setAttribute('patternUnits', 'userSpaceOnUse');
-    dots.setAttribute('width', '18');
-    dots.setAttribute('height', '18');
-    const dot = document.createElementNS(SVG_NS, 'circle');
-    dot.setAttribute('cx', '9');
-    dot.setAttribute('cy', '9');
-    dot.setAttribute('r', '1.5');
-    dot.setAttribute('fill', 'rgba(255,255,255,0.25)');
-    dots.appendChild(dot);
-    defs.appendChild(dots);
-    ov._dot = dot;
-  }
-
-  /**
-   * Create a world-space shadow mesh for drag selection.
-   * This is rendered on the ground plane so it naturally perspective-distorts
-   * with the camera and feels like a shadow cast onto the scene.
-   * @private
-   */
-  createSelectionShadow() {
-    const THREE = window.THREE;
-    if (!THREE || !this.sceneComposer?.scene) return;
-
-    // Avoid double-creating on hot reloads.
-    if (this.dragSelect.shadowMesh) {
-      try { this.sceneComposer.scene.remove(this.dragSelect.shadowMesh); } catch (_) {}
-      try { this.dragSelect.shadowMesh.geometry?.dispose?.(); } catch (_) {}
-      try { this.dragSelect.shadowMaterial?.dispose?.(); } catch (_) {}
-      this.dragSelect.shadowMesh = null;
-      this.dragSelect.shadowMaterial = null;
-    }
-
-    const geometry = new THREE.PlaneGeometry(1, 1);
-    const material = new THREE.ShaderMaterial({
-      transparent: true,
-      depthTest: true,
-      depthWrite: false,
-      uniforms: {
-        uOpacity: { value: 0.26 },
-        // Feather is in UV units; 0.08 ~= soft edge.
-        uFeather: { value: 0.08 }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform float uOpacity;
-        uniform float uFeather;
-        varying vec2 vUv;
-
-        void main() {
-          // Distance to nearest edge (0 at border, ~0.5 at center)
-          float edgeDist = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
-          float feather = max(uFeather, 0.0001);
-          float alpha = smoothstep(0.0, feather, edgeDist);
-          alpha *= uOpacity;
-          gl_FragColor = vec4(0.0, 0.0, 0.0, alpha);
-        }
-      `
-    });
-    material.toneMapped = false;
-
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.visible = false;
-    mesh.name = 'SelectionBoxShadow';
-    // Draw after the map/ground so it can't be overwritten by later opaque draws,
-    // but still below most overlays (tokens, UI).
-    mesh.renderOrder = 500;
-
-    this.dragSelect.shadowMesh = mesh;
-    this.dragSelect.shadowMaterial = material;
-    this.sceneComposer.scene.add(mesh);
-
-    this._applySelectionShadowParams();
-  }
-
-  _applySelectionOverlayStyles() {
-    const el = this.dragSelect.overlayEl;
-    if (!el) return;
-
-    const p = this.selectionBoxParams || {};
-    const enabled = p.enabled !== false;
-    // Only hide persistently if disabled and not currently dragging.
-    if (!enabled && !this.dragSelect?.active) {
-      el.style.display = 'none';
-    }
-
-    const outline = p.outlineColor || { r: 0.314, g: 0.784, b: 1.0 };
-    const outlineAlpha = Number.isFinite(p.outlineAlpha) ? p.outlineAlpha : 0.9;
-    const outlineWidth = Number.isFinite(p.outlineWidthPx) ? p.outlineWidthPx : 2;
-    const fillAlpha = Number.isFinite(p.fillAlpha) ? p.fillAlpha : 0.035;
-
-    const cornerRadius = Number.isFinite(p.cornerRadiusPx) ? p.cornerRadiusPx : 2;
-
-    const rgb255 = (c) => Math.max(0, Math.min(255, Math.round((Number(c) || 0) * 255)));
-    const r = rgb255(outline.r);
-    const g = rgb255(outline.g);
-    const b = rgb255(outline.b);
-
-    // Cache for animation step (pulse/marching) without re-parsing colors.
-    const ov = this._selectionOverlay;
-    if (ov) {
-      ov.strokeRgb = { r, g, b };
-      ov.strokeAlpha = Math.max(0, Math.min(1, outlineAlpha));
-      ov.fillAlpha = Math.max(0, Math.min(1, fillAlpha));
-      ov.glowAlpha = Number.isFinite(p.glowAlpha) ? Math.max(0, Math.min(1, p.glowAlpha)) : 0.12;
-    }
-
-    // Update SVG elements if present
-    const strokeRect = ov?.strokeRect;
-    const baseRect = ov?.baseRect;
-    const patternRect = ov?.patternRect;
-    const svg = ov?.svg;
-    if (strokeRect && baseRect && patternRect && svg) {
-      // Base fill
-      baseRect.setAttribute('fill', `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, fillAlpha))})`);
-
-      // Border
-      strokeRect.setAttribute('fill', 'none');
-      strokeRect.setAttribute('stroke', `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, outlineAlpha))})`);
-      strokeRect.setAttribute('stroke-width', `${Math.max(0, outlineWidth)}`);
-      strokeRect.setAttribute('rx', `${Math.max(0, cornerRadius)}`);
-      strokeRect.setAttribute('ry', `${Math.max(0, cornerRadius)}`);
-
-      // Pattern overlay
-      const pattern = (typeof p.pattern === 'string') ? p.pattern : 'none';
-      const patternAlpha = Number.isFinite(p.patternAlpha) ? Math.max(0, Math.min(1, p.patternAlpha)) : 0.14;
-      const scale = Number.isFinite(p.patternScalePx) ? Math.max(4, p.patternScalePx) : 18;
-      const lw = Number.isFinite(p.patternLineWidthPx) ? Math.max(1, p.patternLineWidthPx) : 1;
-
-      patternRect.setAttribute('rx', `${Math.max(0, cornerRadius)}`);
-      patternRect.setAttribute('ry', `${Math.max(0, cornerRadius)}`);
-      patternRect.setAttribute('opacity', `${patternAlpha}`);
-
-      if (pattern === 'grid') {
-        patternRect.setAttribute('fill', `url(#${ov.ids.basePatternGrid})`);
-        try {
-          const gridPattern = ov.defs.querySelector(`#${ov.ids.basePatternGrid}`);
-          if (gridPattern) {
-            gridPattern.setAttribute('width', `${scale}`);
-            gridPattern.setAttribute('height', `${scale}`);
-          }
-          if (ov._gridPath) {
-            ov._gridPath.setAttribute('stroke', `rgba(${r}, ${g}, ${b}, 1.0)`);
-            ov._gridPath.setAttribute('stroke-width', `${lw}`);
-            ov._gridPath.setAttribute('d', `M ${scale} 0 L 0 0 0 ${scale}`);
-          }
-        } catch (_) {
-        }
-      } else if (pattern === 'diagonal') {
-        patternRect.setAttribute('fill', `url(#${ov.ids.basePatternDiag})`);
-        try {
-          const diagPattern = ov.defs.querySelector(`#${ov.ids.basePatternDiag}`);
-          if (diagPattern) {
-            diagPattern.setAttribute('width', `${scale}`);
-            diagPattern.setAttribute('height', `${scale}`);
-          }
-          if (ov._diagPath) {
-            ov._diagPath.setAttribute('stroke', `rgba(${r}, ${g}, ${b}, 1.0)`);
-            ov._diagPath.setAttribute('stroke-width', `${lw}`);
-            ov._diagPath.setAttribute('d', `M ${-Math.round(scale * 0.25)} ${scale} L ${scale} ${-Math.round(scale * 0.25)} M 0 ${scale + Math.round(scale * 0.25)} L ${scale + Math.round(scale * 0.25)} 0`);
-          }
-        } catch (_) {
-        }
-      } else if (pattern === 'dots') {
-        patternRect.setAttribute('fill', `url(#${ov.ids.basePatternDots})`);
-        try {
-          const dotsPattern = ov.defs.querySelector(`#${ov.ids.basePatternDots}`);
-          if (dotsPattern) {
-            dotsPattern.setAttribute('width', `${scale}`);
-            dotsPattern.setAttribute('height', `${scale}`);
-          }
-          if (ov._dot) {
-            ov._dot.setAttribute('cx', `${scale * 0.5}`);
-            ov._dot.setAttribute('cy', `${scale * 0.5}`);
-            ov._dot.setAttribute('r', `${Math.max(1.0, scale * 0.08)}`);
-            ov._dot.setAttribute('fill', `rgba(${r}, ${g}, ${b}, 1.0)`);
-          }
-        } catch (_) {
-        }
-      } else {
-        patternRect.setAttribute('fill', 'none');
-      }
-
-      // Border style: solid/dashed/marching
-      const borderStyle = (typeof p.borderStyle === 'string') ? p.borderStyle : 'solid';
-      const dashLen = Number.isFinite(p.dashLengthPx) ? Math.max(1, p.dashLengthPx) : 10;
-      const dashGap = Number.isFinite(p.dashGapPx) ? Math.max(0, p.dashGapPx) : 6;
-      if (borderStyle === 'dashed' || borderStyle === 'marching') {
-        strokeRect.setAttribute('stroke-dasharray', `${dashLen} ${dashGap}`);
-      } else {
-        strokeRect.removeAttribute('stroke-dasharray');
-        strokeRect.removeAttribute('stroke-dashoffset');
-      }
-
-      // Glow (via CSS filter, simple and performant)
-      const glowEnabled = p.glowEnabled !== false;
-      const glowAlpha = Number.isFinite(p.glowAlpha) ? p.glowAlpha : 0.12;
-      const glowSize = Number.isFinite(p.glowSizePx) ? p.glowSizePx : 18;
-      if (glowEnabled && glowAlpha > 0 && glowSize > 0) {
-        svg.style.filter = `drop-shadow(0 0 ${Math.round(glowSize)}px rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, glowAlpha))}))`;
-      } else {
-        svg.style.filter = 'none';
-      }
-    } else {
-      // Fallback: basic div styling
-      el.style.border = `${Math.max(0, outlineWidth)}px solid rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, outlineAlpha))})`;
-      el.style.backgroundColor = `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, fillAlpha))})`;
-    }
-
-    // Label settings
-    if (ov?.labelEl) {
-      const fontSize = Number.isFinite(p.labelFontSizePx) ? Math.max(8, p.labelFontSizePx) : 12;
-      const la = Number.isFinite(p.labelAlpha) ? Math.max(0, Math.min(1, p.labelAlpha)) : 0.85;
-      ov.labelEl.style.fontSize = `${Math.round(fontSize)}px`;
-      ov.labelEl.style.opacity = `${la}`;
-    }
-  }
-
-  _updateSelectionOverlayGeometry(w, h) {
-    const ov = this._selectionOverlay;
-    if (!ov?.svg || !ov.baseRect || !ov.strokeRect || !ov.patternRect) return;
-
-    const ww = Math.max(0, Math.floor(w));
-    const hh = Math.max(0, Math.floor(h));
-    if (ww === ov.lastW && hh === ov.lastH) return;
-    ov.lastW = ww;
-    ov.lastH = hh;
-
-    ov.svg.setAttribute('viewBox', `0 0 ${Math.max(1, ww)} ${Math.max(1, hh)}`);
-
-    ov.baseRect.setAttribute('width', `${Math.max(0, ww)}`);
-    ov.baseRect.setAttribute('height', `${Math.max(0, hh)}`);
-    ov.patternRect.setAttribute('width', `${Math.max(0, ww)}`);
-    ov.patternRect.setAttribute('height', `${Math.max(0, hh)}`);
-    ov.strokeRect.setAttribute('width', `${Math.max(0, ww)}`);
-    ov.strokeRect.setAttribute('height', `${Math.max(0, hh)}`);
-  }
-
-  _updateSelectionOverlayAnimation(timeInfo) {
-    const p = this.selectionBoxParams || {};
-    const ov = this._selectionOverlay;
-    if (!ov?.strokeRect || !ov?.svg) return;
-
-    // Only animate while visible (dragging) to avoid background work.
-    if (!this.dragSelect?.active || !this.dragSelect?.dragging) return;
-
-    const dt = Number(timeInfo?.delta) || 0;
-    ov.time += dt;
-
-    const borderStyle = (typeof p.borderStyle === 'string') ? p.borderStyle : 'solid';
-    if (borderStyle === 'marching') {
-      const speed = Number.isFinite(p.dashSpeed) ? p.dashSpeed : 120;
-      ov.dashOffset -= speed * dt;
-      ov.strokeRect.setAttribute('stroke-dashoffset', `${ov.dashOffset}`);
-    }
-
-    if (p.pulseEnabled) {
-      const speed = Number.isFinite(p.pulseSpeed) ? p.pulseSpeed : 2.0;
-      const strength = Number.isFinite(p.pulseStrength) ? Math.max(0, Math.min(1, p.pulseStrength)) : 0.5;
-      const pulse = 0.5 + 0.5 * Math.sin(ov.time * speed * Math.PI * 2.0);
-      const glowK = 1.0 - strength + strength * pulse;
-
-      const r = ov.strokeRgb?.r ?? 80;
-      const g = ov.strokeRgb?.g ?? 200;
-      const b = ov.strokeRgb?.b ?? 255;
-
-      const outlineAlpha = (ov.strokeAlpha ?? 0.9) * (0.8 + 0.2 * glowK);
-      ov.strokeRect.setAttribute('stroke', `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, outlineAlpha))})`);
-
-      if (p.glowEnabled !== false) {
-        const baseGlowA = ov.glowAlpha ?? 0.12;
-        const glowA = Math.max(0, Math.min(1, baseGlowA * (0.6 + 0.8 * glowK)));
-        const glowSize = Number.isFinite(p.glowSizePx) ? p.glowSizePx : 18;
-        ov.svg.style.filter = `drop-shadow(0 0 ${Math.round(glowSize)}px rgba(${r}, ${g}, ${b}, ${glowA}))`;
-      }
-    }
-  }
-
-  _applySelectionShadowParams() {
-    const mat = this.dragSelect.shadowMaterial;
-    if (!mat?.uniforms) return;
-    const p = this.selectionBoxParams || {};
-
-    if (mat.uniforms.uOpacity) {
-      const v = Number(p.shadowOpacity);
-      mat.uniforms.uOpacity.value = Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.26;
-    }
-    if (mat.uniforms.uFeather) {
-      const v = Number(p.shadowFeather);
-      mat.uniforms.uFeather.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.5, v)) : 0.08;
-    }
-  }
-
-  _updateSelectionShadowFromDrag() {
-    const THREE = window.THREE;
-    if (!THREE) return;
-    const mesh = this.dragSelect.shadowMesh;
-    if (!mesh) return;
-
-    const start = this.dragSelect.start;
-    const current = this.dragSelect.current;
-    const minX = Math.min(start.x, current.x);
-    const maxX = Math.max(start.x, current.x);
-    const minY = Math.min(start.y, current.y);
-    const maxY = Math.max(start.y, current.y);
-
-    const w = Math.max(0.001, maxX - minX);
-    const h = Math.max(0.001, maxY - minY);
-    const cx = (minX + maxX) * 0.5;
-    const cy = (minY + maxY) * 0.5;
-
-    // Offset shadow in screen-pixel terms, converted into world pixels via zoom.
-    const p = this.selectionBoxParams || {};
-    const zoom = this._getEffectiveZoom?.() ?? 1.0;
-    const offsetPx = Number.isFinite(p.shadowOffsetPx) ? p.shadowOffsetPx : 18;
-    const ox = offsetPx / Math.max(zoom, 0.0001);
-    const oy = -offsetPx / Math.max(zoom, 0.0001);
-
-    const groundZ = this.sceneComposer?.groundZ ?? 0;
-    const zOff = Number.isFinite(p.shadowZOffset) ? p.shadowZOffset : 0.12;
-    mesh.position.set(cx + ox, cy + oy, groundZ + zOff);
-    mesh.scale.set(w, h, 1);
-    mesh.visible = (p.enabled !== false) && (p.shadowEnabled !== false);
-  }
-
-  _hideSelectionShadow() {
-    if (this.dragSelect.shadowMesh) this.dragSelect.shadowMesh.visible = false;
-  }
-
-  applySelectionBoxParamChange(paramId, value) {
-    if (!paramId) return;
-    try {
-      this.selectionBoxEffect?.applyParamChange?.(paramId, value);
-    } catch (_) {
-    }
-  }
+  // ── Selection Box methods — delegated to SelectionBoxHandler ────────────
+  createSelectionBox() { this.selectionBoxHandler.createSelectionBox(); }
+  createSelectionOverlay() { this.selectionBoxHandler.createSelectionOverlay(); }
+  _ensureSelectionPatterns() { this.selectionBoxHandler.ensureSelectionPatterns(); }
+  createSelectionShadow() { this.selectionBoxHandler.createSelectionShadow(); }
+  _applySelectionOverlayStyles() { this.selectionBoxHandler.applySelectionOverlayStyles(); }
+  _updateSelectionOverlayGeometry(w, h) { this.selectionBoxHandler.updateSelectionOverlayGeometry(w, h); }
+  _updateSelectionOverlayAnimation(ti) { this.selectionBoxHandler.updateSelectionOverlayAnimation(ti); }
+  _applySelectionShadowParams() { this.selectionBoxHandler.applySelectionShadowParams(); }
+  _updateSelectionShadowFromDrag() { this.selectionBoxHandler.updateSelectionShadowFromDrag(); }
+  _hideSelectionShadow() { this.selectionBoxHandler.hideSelectionShadow(); }
+  applySelectionBoxParamChange(id, v) { this.selectionBoxHandler.applyParamChange(id, v); }
 
   createDragMeasureOverlay() {
     const el = document.createElement('div');
@@ -1477,487 +795,18 @@ export class InteractionManager {
     this.dragMeasure.el = el;
   }
 
-  createUIHoverLabelOverlay() {
-    const el = document.createElement('div');
-    el.style.position = 'fixed';
-    el.style.pointerEvents = 'none';
-    el.style.zIndex = '10001';
-    el.style.padding = '4px 10px';
-    el.style.borderRadius = '6px';
-    el.style.backgroundColor = 'rgba(0,0,0,0.75)';
-    el.style.border = '1px solid rgba(255,255,255,0.12)';
-    el.style.color = 'rgba(255,255,255,0.92)';
-    el.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-    el.style.fontSize = '12px';
-    el.style.display = 'none';
-    document.body.appendChild(el);
-    this._uiHoverLabel.el = el;
-  }
+  createUIHoverLabelOverlay() { this.lightHandler.createUIHoverLabelOverlay(); }
 
-  createRadiusSliderOverlay() {
-    const root = document.createElement('div');
-    root.style.position = 'fixed';
-    root.style.pointerEvents = 'auto';
-    root.style.zIndex = '10002';
-    root.style.width = '260px';
-    root.style.padding = '10px 12px';
-    root.style.borderRadius = '10px';
-    root.style.background = 'rgba(20,20,24,0.92)';
-    root.style.border = '1px solid rgba(255,255,255,0.12)';
-    root.style.boxShadow = '0 10px 30px rgba(0,0,0,0.55)';
-    root.style.backdropFilter = 'blur(10px)';
-    root.style.webkitBackdropFilter = 'blur(10px)';
-    root.style.color = 'rgba(255,255,255,0.9)';
-    root.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-    root.style.fontSize = '12px';
-    root.style.display = 'none';
-
-    // Prevent camera/selection interactions when using sliders.
-    const stop = (e) => {
-      try { e.stopPropagation(); } catch (_) {}
-      try { e.stopImmediatePropagation?.(); } catch (_) {}
-      // Don't preventDefault on inputs; it can break dragging on some browsers.
-    };
-    for (const t of ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel']) {
-      root.addEventListener(t, stop, { capture: true });
-    }
-
-    const makeRow = (label) => {
-      const row = document.createElement('div');
-      row.style.display = 'flex';
-      row.style.flexDirection = 'column';
-      row.style.gap = '4px';
-      row.style.marginBottom = '8px';
-      const l = document.createElement('div');
-      l.textContent = label;
-      l.style.opacity = '0.85';
-      l.style.fontSize = '11px';
-      row.appendChild(l);
-      return { row, labelEl: l };
-    };
-
-    const makeRange = () => {
-      const input = document.createElement('input');
-      input.type = 'range';
-      input.style.width = '100%';
-      input.style.margin = '0';
-      input.style.height = '18px';
-      return input;
-    };
-
-    const makeValue = () => {
-      const v = document.createElement('div');
-      v.style.opacity = '0.9';
-      v.style.fontSize = '11px';
-      v.style.textAlign = 'right';
-      return v;
-    };
-
-    const dimRow = makeRow('Dim Radius');
-    const dimWrap = document.createElement('div');
-    dimWrap.style.display = 'grid';
-    dimWrap.style.gridTemplateColumns = '1fr auto';
-    dimWrap.style.gap = '8px';
-    const dimEl = makeRange();
-    dimEl.min = '0';
-    dimEl.max = '200';
-    dimEl.step = '0.5';
-    const dimValue = makeValue();
-    dimWrap.appendChild(dimEl);
-    dimWrap.appendChild(dimValue);
-    dimRow.row.appendChild(dimWrap);
-    root.appendChild(dimRow.row);
-
-    const brightRow = makeRow('Bright (% of Dim)');
-    const brightWrap = document.createElement('div');
-    brightWrap.style.display = 'grid';
-    brightWrap.style.gridTemplateColumns = '1fr auto';
-    brightWrap.style.gap = '8px';
-    const brightPctEl = makeRange();
-    brightPctEl.min = '0';
-    brightPctEl.max = '100';
-    brightPctEl.step = '1';
-    const brightValue = makeValue();
-    brightWrap.appendChild(brightPctEl);
-    brightWrap.appendChild(brightValue);
-    brightRow.row.appendChild(brightWrap);
-    root.appendChild(brightRow.row);
-
-    const hint = document.createElement('div');
-    hint.textContent = 'Live update while dragging';
-    hint.style.opacity = '0.55';
-    hint.style.fontSize = '10px';
-    hint.style.marginTop = '2px';
-    root.appendChild(hint);
-
-    document.body.appendChild(root);
-
-    this._radiusSliderUI.el = root;
-    this._radiusSliderUI.dimEl = dimEl;
-    this._radiusSliderUI.brightPctEl = brightPctEl;
-    this._radiusSliderUI.dimValueEl = dimValue;
-    this._radiusSliderUI.brightValueEl = brightValue;
-
-    const onInput = () => {
-      if (this._radiusSliderUI.suppressInput) return;
-      void this._applyRadiusFromSlidersLive();
-    };
-
-    dimEl.addEventListener('input', onInput);
-    brightPctEl.addEventListener('input', onInput);
-
-    // Finalize on change (mouse up / keyboard).
-    dimEl.addEventListener('change', onInput);
-    brightPctEl.addEventListener('change', onInput);
-  }
-
-  _sceneUnitsPerPixel() {
-    try {
-      const dist = canvas?.dimensions?.distance;
-      const size = canvas?.dimensions?.size;
-      if (!Number.isFinite(dist) || !Number.isFinite(size) || size <= 0) return 1;
-      return dist / size;
-    } catch (_) {
-    }
-    return 1;
-  }
-
-  _getSelectedLightRadiiInSceneUnits(sel) {
-    try {
-      if (!sel) return null;
-
-      // Foundry docs store bright/dim in scene distance units.
-      if (sel.type === 'foundry') {
-        const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
-        if (!doc) return null;
-        const dimUnits = Number(doc.config?.dim ?? 0);
-        const brightUnits = Number(doc.config?.bright ?? 0);
-        if (!Number.isFinite(dimUnits) || !Number.isFinite(brightUnits)) return null;
-        const pct = (dimUnits > 1e-6) ? (brightUnits / dimUnits) * 100 : 0;
-        return { dimUnits: Math.max(0, dimUnits), brightPct: Math.max(0, Math.min(100, pct)) };
-      }
-
-      // Enhanced lights store bright/dim in pixels.
-      if (sel.type === 'enhanced') {
-        const radiiPx = this._getSelectedLightRadii(sel);
-        if (!radiiPx) return null;
-        const unitsPerPx = this._sceneUnitsPerPixel();
-        const dimUnits = Number(radiiPx.dim ?? 0) * unitsPerPx;
-        const brightUnits = Number(radiiPx.bright ?? 0) * unitsPerPx;
-        if (!Number.isFinite(dimUnits) || !Number.isFinite(brightUnits)) return null;
-        const pct = (dimUnits > 1e-6) ? (brightUnits / dimUnits) * 100 : 0;
-        return { dimUnits: Math.max(0, dimUnits), brightPct: Math.max(0, Math.min(100, pct)) };
-      }
-    } catch (_) {
-    }
-    return null;
-  }
-
-  _getSelectedLights() {
-    try {
-      if (!this.selection || this.selection.size === 0) return [];
-
-      const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
-      const out = [];
-
-      for (const id of this.selection) {
-        if (this.lightIconManager?.lights?.has?.(id)) {
-          out.push({ type: 'foundry', id: String(id) });
-          continue;
-        }
-
-        if (enhancedLightIconManager?.lights?.has?.(id)) {
-          out.push({ type: 'enhanced', id: String(id) });
-        }
-      }
-
-      return out;
-    } catch (_) {
-      return [];
-    }
-  }
-
-  async _commitRadiiSceneUnits(sel, dimUnits, brightPct) {
-    try {
-      if (!sel) return;
-      const dimU = Math.max(0, Number(dimUnits) || 0);
-      const pct = Math.max(0, Math.min(100, Number(brightPct) || 0));
-      const brightU = dimU * (pct / 100);
-
-      if (sel.type === 'foundry') {
-        const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
-        if (!doc) return;
-        await doc.update({
-          'config.dim': dimU,
-          'config.bright': brightU
-        });
-        return;
-      }
-
-      if (sel.type === 'enhanced') {
-        const api = window.MapShine?.enhancedLights;
-        if (!api?.update) return;
-        const unitsPerPx = this._sceneUnitsPerPixel();
-        const pxPerUnit = unitsPerPx > 1e-9 ? (1 / unitsPerPx) : 1;
-        await api.update(sel.id, {
-          photometry: {
-            dim: dimU * pxPerUnit,
-            bright: brightU * pxPerUnit
-          }
-        });
-      }
-    } catch (_) {
-    }
-  }
-
-  async _applyRadiusFromSlidersLive() {
-    try {
-      const ui = this._radiusSliderUI;
-      if (!ui?.el || !ui.dimEl || !ui.brightPctEl) return;
-      const sel = this._getSelectedLight();
-      if (!sel || !this._canEditSelectedLight(sel)) return;
-
-      const dimUnits = parseFloat(ui.dimEl.value);
-      const brightPct = parseFloat(ui.brightPctEl.value);
-      if (!Number.isFinite(dimUnits) || !Number.isFinite(brightPct)) return;
-
-      // Reuse the existing throttled live apply machinery.
-      this._lightRadiusRings.pendingType = 'both';
-      this._lightRadiusRings.pendingRadius = { dimUnits, brightPct };
-
-      const st = this._lightRadiusRings;
-      const nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-      const hz = Math.max(1, Number(st.liveApplyHz) || 15);
-      const intervalMs = 1000 / hz;
-      if ((nowMs - (st.lastLiveApplyMs || 0)) < intervalMs) return;
-      st.lastLiveApplyMs = nowMs;
-
-      if (st.liveInFlight) {
-        st.liveQueued = { sel, radiusType: 'both', newRadius: { dimUnits, brightPct } };
-        return;
-      }
-
-      st.liveInFlight = true;
-      st.liveQueued = null;
-
-      const run = async () => {
-        try {
-          await this._commitRadiiSceneUnits(sel, dimUnits, brightPct);
-        } catch (_) {
-        } finally {
-          st.liveInFlight = false;
-          const q = st.liveQueued;
-          st.liveQueued = null;
-          if (q && q.radiusType === 'both' && q.newRadius) {
-            try {
-              const d2 = q.newRadius.dimUnits;
-              const p2 = q.newRadius.brightPct;
-              if (Number.isFinite(d2) && Number.isFinite(p2)) {
-                ui.suppressInput = true;
-                ui.dimEl.value = String(d2);
-                ui.brightPctEl.value = String(p2);
-                ui.suppressInput = false;
-              }
-              await this._commitRadiiSceneUnits(q.sel, d2, p2);
-            } catch (_) {
-              ui.suppressInput = false;
-            }
-          }
-        }
-      };
-
-      void run();
-    } catch (_) {
-    }
-  }
-
-  _showUIHoverLabel(text, clientX, clientY) {
-    try {
-      const el = this._uiHoverLabel?.el;
-      if (!el) return;
-      el.textContent = String(text || '');
-      el.style.left = `${clientX + 12}px`;
-      el.style.top = `${clientY + 12}px`;
-      el.style.display = 'block';
-      this._uiHoverLabel.visible = true;
-    } catch (_) {
-    }
-  }
-
-  _hideUIHoverLabel() {
-    try {
-      const el = this._uiHoverLabel?.el;
-      if (el) el.style.display = 'none';
-      if (this._uiHoverLabel) this._uiHoverLabel.visible = false;
-    } catch (_) {
-    }
-  }
-
-  /**
-   * Create light placement preview visuals
-   * @private
-   */
-  createLightPreview() {
-    const THREE = window.THREE;
-
-    this.lightPlacement.previewGroup = new THREE.Group();
-    this.lightPlacement.previewGroup.name = 'LightPlacementPreview';
-    this.lightPlacement.previewGroup.visible = false;
-    // Z-index just above ground/floor but below tokens
-    this.lightPlacement.previewGroup.position.z = 0;
-
-    // Fill (Shader-based "Light Look")
-    const geometry = new THREE.CircleGeometry(0.1, 64);
-    
-    // Shader adapted from LightMesh.js but for Unit Circle (Radius 1)
-    const material = new THREE.ShaderMaterial({
-      uniforms: {
-        uColor: { value: new THREE.Color(1.0, 1.0, 0.8) }, // Warm light default
-        uRatio: { value: 0.5 }, // bright/dim ratio
-        uRadius: { value: 0.1 }
-      },
-      vertexShader: `
-        varying vec2 vLocalPos;
-        void main() {
-          vLocalPos = position.xy;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        varying vec2 vLocalPos;
-        uniform vec3 uColor;
-        uniform float uRatio;
-        uniform float uRadius;
-
-        void main() {
-          float dist = length(vLocalPos);
-          if (dist >= uRadius) discard;
-
-          float d = dist / max(uRadius, 0.0001);
-
-          // Falloff Logic
-          float dOuter = d;
-          float innerFrac = clamp(uRatio, 0.0, 0.99);
-
-          float coreRegion = 1.0 - smoothstep(0.0, innerFrac, dOuter);
-          float haloRegion = 1.0 - smoothstep(innerFrac, 1.0, dOuter);
-
-          // Bright core, soft halo
-          float coreIntensity = pow(coreRegion, 1.2) * 2.0;
-          float haloIntensity = pow(haloRegion, 1.0) * 0.6; 
-
-          float intensity = (coreIntensity + haloIntensity) * 2.0;
-          
-          // Output with additive-friendly alpha
-          gl_FragColor = vec4(uColor * intensity, intensity); 
-        }
-      `,
-      transparent: true,
-      depthWrite: false,
-      depthTest: false,
-      // Use CustomBlending to match LightingEffect's "Modulate & Add" formula:
-      // Final = Dst + (Dst * Src)
-      // This ensures the preview looks correct on dark backgrounds instead of washing them out.
-      blending: THREE.CustomBlending,
-      blendEquation: THREE.AddEquation,
-      blendSrc: THREE.DstColorFactor,
-      blendDst: THREE.OneFactor,
-      side: THREE.DoubleSide
-    });
-
-    this.lightPlacement.previewFill = new THREE.Mesh(geometry, material);
-    this.lightPlacement.previewGroup.add(this.lightPlacement.previewFill);
-
-    // Border (Yellow solid)
-    const borderGeo = new THREE.EdgesGeometry(geometry);
-    const borderMat = new THREE.LineBasicMaterial({
-      color: 0xFFFFBB,
-      transparent: true,
-      opacity: 0.8,
-      depthTest: false
-    });
-    this.lightPlacement.previewBorder = new THREE.LineSegments(borderGeo, borderMat);
-    this.lightPlacement.previewGroup.add(this.lightPlacement.previewBorder);
-
-    if (this.sceneComposer.scene) {
-      this.sceneComposer.scene.add(this.lightPlacement.previewGroup);
-    }
-  }
-
-
-  /**
-   * Create map point drawing preview visuals
-   * @private
-   */
-  createMapPointPreview() {
-    const THREE = window.THREE;
-
-    this.mapPointDraw.previewGroup = new THREE.Group();
-    this.mapPointDraw.previewGroup.name = 'MapPointDrawPreview';
-    this.mapPointDraw.previewGroup.visible = false;
-    this.mapPointDraw.previewGroup.renderOrder = 9998;
-    this.mapPointDraw.previewGroup.layers.set(OVERLAY_THREE_LAYER);
-
-    // Line connecting points
-    const lineGeo = new THREE.BufferGeometry();
-    lineGeo.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
-    const lineMat = new THREE.LineBasicMaterial({
-      color: 0x00ff00,
-      transparent: true,
-      opacity: 0.9,
-      depthTest: false,
-      linewidth: 2
-    });
-    this.mapPointDraw.previewLine = new THREE.Line(lineGeo, lineMat);
-    this.mapPointDraw.previewLine.layers.set(OVERLAY_THREE_LAYER);
-    this.mapPointDraw.previewGroup.add(this.mapPointDraw.previewLine);
-
-    // Legacy points object (kept for compatibility but we use markers now)
-    const pointsGeo = new THREE.BufferGeometry();
-    pointsGeo.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
-    const pointsMat = new THREE.PointsMaterial({
-      color: 0x00ff00,
-      size: 16,
-      sizeAttenuation: false,
-      depthTest: false
-    });
-    this.mapPointDraw.previewPoints = new THREE.Points(pointsGeo, pointsMat);
-    this.mapPointDraw.previewPoints.layers.set(OVERLAY_THREE_LAYER);
-    this.mapPointDraw.previewGroup.add(this.mapPointDraw.previewPoints);
-
-    // Semi-transparent fill for area (will be updated dynamically)
-    const fillGeo = new THREE.BufferGeometry();
-    const fillMat = new THREE.MeshBasicMaterial({
-      color: 0x00ff00,
-      transparent: true,
-      opacity: 0.15,
-      depthTest: false,
-      side: THREE.DoubleSide
-    });
-    this.mapPointDraw.previewFill = new THREE.Mesh(fillGeo, fillMat);
-    this.mapPointDraw.previewFill.layers.set(OVERLAY_THREE_LAYER);
-    this.mapPointDraw.previewGroup.add(this.mapPointDraw.previewFill);
-
-    // Cursor point preview (shows where next point will be placed)
-    const cursorGeo = new THREE.RingGeometry(12, 16, 32);
-    const cursorMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 0.8,
-      depthTest: false,
-      side: THREE.DoubleSide
-    });
-    this.mapPointDraw.cursorPoint = new THREE.Mesh(cursorGeo, cursorMat);
-    this.mapPointDraw.cursorPoint.visible = false;
-    this.mapPointDraw.previewGroup.add(this.mapPointDraw.cursorPoint);
-
-    // Initialize point markers array
-    this.mapPointDraw.pointMarkers = [];
-
-    if (this.sceneComposer.scene) {
-      this.sceneComposer.scene.add(this.mapPointDraw.previewGroup);
-    }
-  }
+  // ── Light UI/slider/query methods — delegated to LightInteractionHandler ──
+  createRadiusSliderOverlay() { this.lightHandler.createRadiusSliderOverlay(); }
+  _sceneUnitsPerPixel() { return this.lightHandler.sceneUnitsPerPixel(); }
+  _getSelectedLightRadiiInSceneUnits(sel) { return this.lightHandler.getSelectedLightRadiiInSceneUnits(sel); }
+  _getSelectedLights() { return this.lightHandler.getSelectedLights(); }
+  async _commitRadiiSceneUnits(sel, d, b) { return this.lightHandler.commitRadiiSceneUnits(sel, d, b); }
+  async _applyRadiusFromSlidersLive() { return this.lightHandler.applyRadiusFromSlidersLive(); }
+  _showUIHoverLabel(t, x, y) { this.lightHandler.showUIHoverLabel(t, x, y); }
+  _hideUIHoverLabel() { this.lightHandler.hideUIHoverLabel(); }
+  createLightPreview() { this.lightHandler.createLightPreview(); }
 
   /**
    * Start map point drawing mode
@@ -1967,762 +816,24 @@ export class InteractionManager {
    * @param {{ropeType?: 'rope'|'chain'}|null} [options=null] - Optional draw options
    */
   startMapPointDrawing(effectTarget, groupType = 'area', snapToGrid = false, options = null) {
-    if (this.mapPointDraw.active) {
-      this.cancelMapPointDrawing();
-    }
-
-    this.mapPointDraw.active = true;
-    this.mapPointDraw.effectTarget = effectTarget;
-    this.mapPointDraw.groupType = groupType;
-    this.mapPointDraw.ropeType = (options?.ropeType === 'rope' || options?.ropeType === 'chain') ? options.ropeType : null;
-    this.mapPointDraw.points = [];
-    this.mapPointDraw.editingGroupId = null;
-    this.mapPointDraw.snapToGrid = snapToGrid;
-    this.mapPointDraw.previewGroup.visible = true;
-
-    // Clear any existing point markers
-    this._clearPointMarkers();
-
-    // Update preview color based on effect
-    const color = this._getEffectColor(effectTarget);
-    if (this.mapPointDraw.previewLine.material) {
-      this.mapPointDraw.previewLine.material.color.setHex(color);
-    }
-    if (this.mapPointDraw.previewPoints.material) {
-      this.mapPointDraw.previewPoints.material.color.setHex(color);
-    }
-    if (this.mapPointDraw.previewFill.material) {
-      this.mapPointDraw.previewFill.material.color.setHex(color);
-    }
-
-    // Save last used effect target
-    this._saveLastEffectTarget(effectTarget);
-
-    log.info(`Started map point drawing: ${effectTarget} (${groupType}), snap=${snapToGrid}`);
-    const snapMsg = snapToGrid ? 'Hold Shift to disable grid snap.' : 'Hold Shift to enable grid snap.';
-    ui.notifications.info(`Click to place points. ${snapMsg} Double-click or Enter to finish. Escape to cancel.`);
+    this.mapPointDrawHandler.start(effectTarget, groupType, snapToGrid, options);
   }
 
   /**
    * Cancel map point drawing mode
    */
   cancelMapPointDrawing() {
-    // If we were editing an existing group, restore its visual helper
-    if (this.mapPointDraw.editingGroupId) {
-      const mapPointsManager = window.MapShine?.mapPointsManager;
-      if (mapPointsManager?.showVisualHelpers) {
-        const group = mapPointsManager.getGroup(this.mapPointDraw.editingGroupId);
-        if (group) {
-          mapPointsManager.createVisualHelper(this.mapPointDraw.editingGroupId, group);
-        }
-      }
-    }
-
-    this.mapPointDraw.active = false;
-    this.mapPointDraw.points = [];
-    this.mapPointDraw.editingGroupId = null;
-    this.mapPointDraw.previewGroup.visible = false;
-    this._clearPointMarkers();
-    this._updateMapPointPreview();
-    if (this.mapPointDraw.cursorPoint) {
-      this.mapPointDraw.cursorPoint.visible = false;
-    }
-    log.info('Map point drawing cancelled');
+    this.mapPointDrawHandler.cancel();
   }
 
-  /**
-   * Finish map point drawing and create/update the group
-   * @private
-   */
-  async _finishMapPointDrawing() {
-    if (!this.mapPointDraw.active || this.mapPointDraw.points.length < 1) {
-      this.cancelMapPointDrawing();
-      return;
-    }
+  /** @deprecated Delegate to mapPointDrawHandler.finish() */
+  async _finishMapPointDrawing() { return this.mapPointDrawHandler.finish(); }
 
-    const { effectTarget, groupType, ropeType, points, editingGroupId } = this.mapPointDraw;
+  /** @deprecated Delegate to mapPointDrawHandler.getLastEffectTarget() */
+  getLastEffectTarget() { return this.mapPointDrawHandler.getLastEffectTarget(); }
 
-    const isRopeEffect = effectTarget === 'rope';
-
-    // Validate minimum points
-    if (groupType === 'area' && points.length < 3) {
-      ui.notifications.warn('Area requires at least 3 points');
-      return;
-    }
-    if (groupType === 'line' && points.length < 2) {
-      ui.notifications.warn('Line requires at least 2 points');
-      return;
-    }
-    if (groupType === 'rope' && points.length < 2) {
-      ui.notifications.warn('Rope requires at least 2 points');
-      return;
-    }
-    if (isRopeEffect && points.length < 2) {
-      ui.notifications.warn('Rope requires at least 2 points');
-      return;
-    }
-
-    // Get MapPointsManager
-    const mapPointsManager = window.MapShine?.mapPointsManager;
-    if (!mapPointsManager) {
-      log.error('MapPointsManager not available');
-      this.cancelMapPointDrawing();
-      return;
-    }
-
-    try {
-      if (editingGroupId) {
-        const existingGroup = mapPointsManager.getGroup(editingGroupId);
-        const isExistingRopeGroup = existingGroup?.effectTarget === 'rope' || existingGroup?.type === 'rope';
-        const updates = {
-          points: points.map(p => ({ x: p.x, y: p.y }))
-        };
-        if (isExistingRopeGroup) {
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'ropeType')) updates.ropeType = existingGroup.ropeType;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'texturePath')) updates.texturePath = existingGroup.texturePath;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'segmentLength')) updates.segmentLength = existingGroup.segmentLength;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'damping')) updates.damping = existingGroup.damping;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'windForce')) updates.windForce = existingGroup.windForce;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'windGustAmount')) updates.windGustAmount = existingGroup.windGustAmount;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'invertWindDirection')) updates.invertWindDirection = existingGroup.invertWindDirection;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'gravityStrength')) updates.gravityStrength = existingGroup.gravityStrength;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'slackFactor')) updates.slackFactor = existingGroup.slackFactor;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'constraintIterations')) updates.constraintIterations = existingGroup.constraintIterations;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'bendStiffness')) updates.bendStiffness = existingGroup.bendStiffness;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'tapering')) updates.tapering = existingGroup.tapering;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'width')) updates.width = existingGroup.width;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'uvRepeatWorld')) updates.uvRepeatWorld = existingGroup.uvRepeatWorld;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'zOffset')) updates.zOffset = existingGroup.zOffset;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'windowLightBoost')) updates.windowLightBoost = existingGroup.windowLightBoost;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'endFadeSize')) updates.endFadeSize = existingGroup.endFadeSize;
-          if (Object.prototype.hasOwnProperty.call(existingGroup, 'endFadeStrength')) updates.endFadeStrength = existingGroup.endFadeStrength;
-        }
-        // Update existing group with new points
-        await mapPointsManager.updateGroup(editingGroupId, {
-          ...updates
-        });
-        log.info(`Updated map point group: ${editingGroupId}`);
-        ui.notifications.info(`Updated group with ${points.length} points`);
-        
-        // Refresh visual helper
-        if (mapPointsManager.showVisualHelpers) {
-          const group = mapPointsManager.getGroup(editingGroupId);
-          if (group) {
-            mapPointsManager.createVisualHelper(editingGroupId, group);
-          }
-        }
-      } else {
-        // Create new group
-        const isRope = isRopeEffect || groupType === 'rope';
-        const finalType = isRopeEffect ? 'line' : groupType;
-        const ropePreset = (ropeType === 'rope' || ropeType === 'chain') ? ropeType : 'chain';
-        const group = await mapPointsManager.createGroup({
-          label: isRope ? 'Rope' : `${effectTarget} ${groupType}`,
-          type: finalType,
-          points: points.map(p => ({ x: p.x, y: p.y })),
-          isEffectSource: isRope ? false : true,
-          effectTarget: isRopeEffect ? 'rope' : (isRope ? '' : effectTarget),
-          ropeType: isRopeEffect ? ropePreset : undefined
-        });
-
-        log.info(`Created map point group: ${group.id}`);
-        ui.notifications.info(isRope ? 'Created rope' : `Created ${effectTarget} spawn ${groupType}`);
-      }
-    } catch (e) {
-      log.error('Failed to save map point group:', e);
-      ui.notifications.error('Failed to save spawn area');
-    }
-
-    // Reset state
-    this.mapPointDraw.active = false;
-    this.mapPointDraw.points = [];
-    this.mapPointDraw.editingGroupId = null;
-    this.mapPointDraw.previewGroup.visible = false;
-    this._clearPointMarkers();
-    // Ensure we clear any existing preview geometry so it cannot remain visible
-    // due to stale buffer attributes/material state.
-    try {
-      const THREE = window.THREE;
-      if (THREE) {
-        this.mapPointDraw.previewLine.geometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
-        this.mapPointDraw.previewPoints.geometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
-      }
-    } catch (_) {
-    }
-    try {
-      // Reset fill geometry to an empty BufferGeometry
-      const THREE = window.THREE;
-      if (THREE && this.mapPointDraw.previewFill?.geometry) {
-        this.mapPointDraw.previewFill.geometry.dispose();
-        this.mapPointDraw.previewFill.geometry = new THREE.BufferGeometry();
-      }
-    } catch (_) {
-    }
-    this._updateMapPointPreview();
-    if (this.mapPointDraw.cursorPoint) {
-      this.mapPointDraw.cursorPoint.visible = false;
-    }
-  }
-
-  /**
-   * Add a point to the current map point drawing
-   * @param {number} worldX - World X coordinate
-   * @param {number} worldY - World Y coordinate
-   * @param {boolean} shiftHeld - Whether shift key is held
-   * @private
-   */
-  _addMapPoint(worldX, worldY, shiftHeld = false) {
-    if (!this.mapPointDraw.active) return;
-
-    // Snapping logic: 
-    // - If snapToGrid is ON (default OFF): snap unless Shift is held
-    // - If snapToGrid is OFF (default): only snap when Shift IS held
-    let x = worldX;
-    let y = worldY;
-    const shouldSnap = this.mapPointDraw.snapToGrid ? !shiftHeld : shiftHeld;
-    
-    if (shouldSnap) {
-      // Use resolution=2 for half-grid subdivisions (2x2 = 4 snap points per grid cell)
-      const snapped = this.snapToGrid(worldX, worldY, CONST.GRID_SNAPPING_MODES.CENTER | CONST.GRID_SNAPPING_MODES.VERTEX | CONST.GRID_SNAPPING_MODES.CORNER | CONST.GRID_SNAPPING_MODES.SIDE_MIDPOINT, 2);
-      x = snapped.x;
-      y = snapped.y;
-    }
-
-    this.mapPointDraw.points.push({ x, y });
-    this._updateMapPointPreview();
-
-    log.debug(`Added map point: (${x}, ${y}), total: ${this.mapPointDraw.points.length}, snapped=${shouldSnap}`);
-  }
-
-  /**
-   * Clear all point marker meshes
-   * @private
-   */
-  _clearPointMarkers() {
-    const THREE = window.THREE;
-    for (const marker of this.mapPointDraw.pointMarkers) {
-      if (marker.geometry) marker.geometry.dispose();
-      if (marker.material) marker.material.dispose();
-      this.mapPointDraw.previewGroup.remove(marker);
-    }
-    this.mapPointDraw.pointMarkers = [];
-  }
-
-  /**
-   * Create a point marker mesh at the given position
-   * @param {number} x - World X
-   * @param {number} y - World Y
-   * @param {number} z - World Z
-   * @param {number} color - Hex color
-   * @param {number} index - Point index (for numbering)
-   * @returns {THREE.Group}
-   * @private
-   */
-  _createPointMarker(x, y, z, color, index) {
-    const THREE = window.THREE;
-    const group = new THREE.Group();
-    group.position.set(x, y, z);
-
-    // Outer ring (white border)
-    const outerRing = new THREE.RingGeometry(18, 24, 32);
-    const outerMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 0.9,
-      depthTest: false,
-      side: THREE.DoubleSide
-    });
-    const outerMesh = new THREE.Mesh(outerRing, outerMat);
-    group.add(outerMesh);
-
-    // Inner filled circle (effect color)
-    const innerCircle = new THREE.CircleGeometry(16, 32);
-    const innerMat = new THREE.MeshBasicMaterial({
-      color: color,
-      transparent: true,
-      opacity: 0.8,
-      depthTest: false,
-      side: THREE.DoubleSide
-    });
-    const innerMesh = new THREE.Mesh(innerCircle, innerMat);
-    innerMesh.position.z = 0.1; // Slightly in front
-    group.add(innerMesh);
-
-    // Center dot (darker)
-    const centerDot = new THREE.CircleGeometry(4, 16);
-    const centerMat = new THREE.MeshBasicMaterial({
-      color: 0x000000,
-      transparent: true,
-      opacity: 0.6,
-      depthTest: false,
-      side: THREE.DoubleSide
-    });
-    const centerMesh = new THREE.Mesh(centerDot, centerMat);
-    centerMesh.position.z = 0.2;
-    group.add(centerMesh);
-
-    group.renderOrder = 10000 + index;
-    return group;
-  }
-
-  /**
-   * Update the map point preview visuals
-   * @private
-   */
-  _updateMapPointPreview(cursorX = null, cursorY = null) {
-    const THREE = window.THREE;
-    const { points, groupType, previewLine, previewPoints, previewFill, cursorPoint } = this.mapPointDraw;
-
-    // Get ground Z
-    const groundZ = this.sceneComposer?.groundZ ?? 1000;
-    const previewZ = groundZ + 2;
-
-    // Get effect color for markers
-    const effectColor = this._getEffectColor(this.mapPointDraw.effectTarget);
-
-    // Build positions array (include cursor position if provided)
-    const allPoints = [...points];
-    if (cursorX !== null && cursorY !== null && this.mapPointDraw.active) {
-      allPoints.push({ x: cursorX, y: cursorY });
-    }
-
-    // Update line
-    const linePositions = [];
-    for (const p of allPoints) {
-      linePositions.push(p.x, p.y, previewZ);
-    }
-    // Close the loop for area type
-    if (groupType === 'area' && allPoints.length > 2) {
-      linePositions.push(allPoints[0].x, allPoints[0].y, previewZ);
-    }
-    previewLine.geometry.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
-    previewLine.geometry.attributes.position.needsUpdate = true;
-
-    // Update legacy points (kept for fallback)
-    const pointPositions = [];
-    for (const p of points) {
-      pointPositions.push(p.x, p.y, previewZ);
-    }
-    previewPoints.geometry.setAttribute('position', new THREE.Float32BufferAttribute(pointPositions, 3));
-    previewPoints.geometry.attributes.position.needsUpdate = true;
-
-    // Update point markers - create new ones if needed, update positions
-    // First, ensure we have the right number of markers
-    while (this.mapPointDraw.pointMarkers.length < points.length) {
-      const idx = this.mapPointDraw.pointMarkers.length;
-      const marker = this._createPointMarker(0, 0, previewZ, effectColor, idx);
-      this.mapPointDraw.previewGroup.add(marker);
-      this.mapPointDraw.pointMarkers.push(marker);
-    }
-    // Remove excess markers
-    while (this.mapPointDraw.pointMarkers.length > points.length) {
-      const marker = this.mapPointDraw.pointMarkers.pop();
-      if (marker) {
-        marker.traverse((child) => {
-          if (child.geometry) child.geometry.dispose();
-          if (child.material) child.material.dispose();
-        });
-        this.mapPointDraw.previewGroup.remove(marker);
-      }
-    }
-    // Update marker positions
-    for (let i = 0; i < points.length; i++) {
-      const marker = this.mapPointDraw.pointMarkers[i];
-      if (marker) {
-        marker.position.set(points[i].x, points[i].y, previewZ + 1);
-      }
-    }
-
-    // Update cursor preview position
-    if (cursorPoint && cursorX !== null && cursorY !== null && this.mapPointDraw.active) {
-      cursorPoint.position.set(cursorX, cursorY, previewZ + 2);
-      cursorPoint.visible = true;
-      // Update cursor color to match effect
-      if (cursorPoint.material) {
-        cursorPoint.material.color.setHex(effectColor);
-        cursorPoint.material.opacity = 0.6;
-      }
-    } else if (cursorPoint) {
-      cursorPoint.visible = false;
-    }
-
-    // Update fill for area type
-    if (groupType === 'area' && allPoints.length >= 3) {
-      const shape = new THREE.Shape();
-      shape.moveTo(allPoints[0].x, allPoints[0].y);
-      for (let i = 1; i < allPoints.length; i++) {
-        shape.lineTo(allPoints[i].x, allPoints[i].y);
-      }
-      shape.closePath();
-
-      const fillGeo = new THREE.ShapeGeometry(shape);
-      // Offset Z
-      const posAttr = fillGeo.getAttribute('position');
-      for (let i = 0; i < posAttr.count; i++) {
-        posAttr.setZ(i, previewZ - 1);
-      }
-      posAttr.needsUpdate = true;
-
-      previewFill.geometry.dispose();
-      previewFill.geometry = fillGeo;
-    }
-  }
-
-  /**
-   * Get color for an effect type
-   * @param {string} effectTarget
-   * @returns {number} Hex color
-   * @private
-   */
-  _getEffectColor(effectTarget) {
-    const colors = {
-      fire: 0xff4400,
-      candleFlame: 0xffaa00,
-      sparks: 0xffff00,
-      lightning: 0x00aaff,
-      dust: 0xaaaaaa,
-      smellyFlies: 0x00ff00,
-      rope: 0xccaa66,
-      water: 0x0066ff,
-      pressurisedSteam: 0xcccccc,
-      cloudShadows: 0x666666,
-      canopy: 0x228822,
-      structuralShadows: 0x444444
-    };
-    return colors[effectTarget] || 0x00ff00;
-  }
-
-  /**
-   * Save the last used effect target to client settings
-   * @param {string} effectTarget
-   * @private
-   */
-  _saveLastEffectTarget(effectTarget) {
-    try {
-      game.settings.set('map-shine-advanced', 'lastMapPointEffect', effectTarget);
-    } catch (e) {
-      // Setting may not be registered yet, store in localStorage as fallback
-      localStorage.setItem('map-shine-lastMapPointEffect', effectTarget);
-    }
-  }
-
-  /**
-   * Get the last used effect target
-   * @returns {string}
-   */
-  getLastEffectTarget() {
-    try {
-      return game.settings.get('map-shine-advanced', 'lastMapPointEffect') || 'smellyFlies';
-    } catch (e) {
-      return localStorage.getItem('map-shine-lastMapPointEffect') || 'smellyFlies';
-    }
-  }
-
-  /**
-   * Start adding points to an existing group
-   * @param {string} groupId - ID of the group to add points to
-   */
-  startAddPointsToGroup(groupId) {
-    const mapPointsManager = window.MapShine?.mapPointsManager;
-    if (!mapPointsManager) return;
-
-    const group = mapPointsManager.getGroup(groupId);
-    if (!group) {
-      ui.notifications.warn('Group not found');
-      return;
-    }
-
-    // Set up state for adding points to existing group
-    this.mapPointDraw.active = true;
-    this.mapPointDraw.effectTarget = group.effectTarget;
-    this.mapPointDraw.groupType = group.type;
-    this.mapPointDraw.points = [...group.points]; // Start with existing points
-    this.mapPointDraw.snapToGrid = false;
-    this.mapPointDraw.editingGroupId = groupId; // Track that we're editing, not creating
-    this.mapPointDraw.previewGroup.visible = true;
-
-    // Clear any existing point markers and rebuild
-    this._clearPointMarkers();
-
-    // Update preview color based on effect
-    const color = this._getEffectColor(group.effectTarget);
-    if (this.mapPointDraw.previewLine.material) {
-      this.mapPointDraw.previewLine.material.color.setHex(color);
-    }
-    if (this.mapPointDraw.previewPoints.material) {
-      this.mapPointDraw.previewPoints.material.color.setHex(color);
-    }
-    if (this.mapPointDraw.previewFill.material) {
-      this.mapPointDraw.previewFill.material.color.setHex(color);
-    }
-
-    // Update preview to show existing points
-    this._updateMapPointPreview();
-
-    // Hide the visual helper for this group while editing
-    mapPointsManager.removeVisualObject(groupId);
-
-    log.info(`Started adding points to group: ${groupId} (${group.label})`);
-    ui.notifications.info(`Adding points to "${group.label}". Click to add. Enter to save. Escape to cancel.`);
-  }
-
-  /**
-   * Get the map point group ID at a screen position (if visual helpers are visible)
-   * @param {number} clientX - Screen X for menu position
-   * @param {number} clientY - Screen Y for menu position
-   * @returns {string|null} Group ID or null if no group at position
-   * @private
-   */
-  _getMapPointGroupAtPosition(clientX, clientY) {
-    const mapPointsManager = window.MapShine?.mapPointsManager;
-    if (!mapPointsManager?.showVisualHelpers) return null;
-    
-    const worldPos = this.screenToWorld(clientX, clientY);
-    if (!worldPos) return null;
-
-    // Check each group's visual helper for intersection
-    const clickRadius = 30; // Pixel tolerance for clicking on points/lines
-    
-    for (const [groupId, group] of mapPointsManager.groups) {
-      if (!group.points || group.points.length === 0) continue;
-      
-      // Check if click is near any point in the group
-      for (const point of group.points) {
-        const dx = worldPos.x - point.x;
-        const dy = worldPos.y - point.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        
-        if (dist < clickRadius) {
-          return groupId;
-        }
-      }
-      
-      // For areas, also check if click is inside the polygon
-      if (group.type === 'area' && group.points.length >= 3) {
-        if (mapPointsManager._isPointInPolygon(worldPos.x, worldPos.y, group.points)) {
-          return groupId;
-        }
-      }
-      
-      // For lines, check if click is near any line segment
-      if (group.type === 'line' && group.points.length >= 2) {
-        for (let i = 0; i < group.points.length - 1; i++) {
-          const p1 = group.points[i];
-          const p2 = group.points[i + 1];
-          const dist = this._pointToLineDistance(worldPos.x, worldPos.y, p1.x, p1.y, p2.x, p2.y);
-          if (dist < clickRadius) {
-            return groupId;
-          }
-        }
-      }
-    }
-    
-    return null;
-  }
-
-  /**
-   * Calculate distance from a point to a line segment
-   * @private
-   */
-  _pointToLineDistance(px, py, x1, y1, x2, y2) {
-    const dx = x2 - x1;
-    const dy = y2 - y1;
-    const lengthSq = dx * dx + dy * dy;
-    
-    if (lengthSq === 0) {
-      // Line segment is a point
-      return Math.sqrt((px - x1) * (px - x1) + (py - y1) * (py - y1));
-    }
-    
-    // Project point onto line, clamped to segment
-    let t = ((px - x1) * dx + (py - y1) * dy) / lengthSq;
-    t = Math.max(0, Math.min(1, t));
-    
-    const projX = x1 + t * dx;
-    const projY = y1 + t * dy;
-    
-    return Math.sqrt((px - projX) * (px - projX) + (py - projY) * (py - projY));
-  }
-
-  /**
-   * Show context menu for a map point group
-   * @param {string} groupId - Group ID
-   * @param {number} clientX - Screen X for menu position
-   * @param {number} clientY - Screen Y for menu position
-   * @private
-   */
-  _showMapPointContextMenu(groupId, clientX, clientY) {
-    const mapPointsManager = window.MapShine?.mapPointsManager;
-    const uiManager = window.MapShine?.uiManager;
-    
-    if (!mapPointsManager) return;
-    
-    const group = mapPointsManager.getGroup(groupId);
-    if (!group) return;
-
-    // Create context menu element
-    const existingMenu = document.getElementById('map-point-context-menu');
-    if (existingMenu) existingMenu.remove();
-
-    const menu = document.createElement('div');
-    menu.id = 'map-point-context-menu';
-    menu.style.cssText = `
-      position: fixed;
-      left: ${clientX}px;
-      top: ${clientY}px;
-      background: #1a1a2e;
-      border: 1px solid #444;
-      border-radius: 4px;
-      padding: 4px 0;
-      min-width: 160px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-      z-index: 100000;
-      font-family: var(--font-primary);
-      font-size: 12px;
-    `;
-
-    const menuItems = [
-      { icon: 'fa-edit', label: 'Edit Group', action: 'edit' },
-      { icon: 'fa-plus-circle', label: 'Add Points', action: 'addPoints' },
-      { icon: 'fa-crosshairs', label: 'Focus', action: 'focus' },
-      { icon: 'fa-copy', label: 'Duplicate', action: 'duplicate' },
-      { divider: true },
-      { icon: 'fa-eye-slash', label: 'Hide Helpers', action: 'hideHelpers' },
-      { divider: true },
-      { icon: 'fa-trash', label: 'Delete', action: 'delete', danger: true }
-    ];
-
-    for (const item of menuItems) {
-      if (item.divider) {
-        const divider = document.createElement('div');
-        divider.style.cssText = 'height: 1px; background: #444; margin: 4px 0;';
-        menu.appendChild(divider);
-        continue;
-      }
-
-      const menuItem = document.createElement('div');
-      menuItem.style.cssText = `
-        padding: 6px 12px;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        color: ${item.danger ? '#ff6666' : '#ddd'};
-        transition: background 0.1s;
-      `;
-      menuItem.innerHTML = `<i class="fas ${item.icon}" style="width: 14px;"></i> ${item.label}`;
-      
-      menuItem.addEventListener('mouseenter', () => {
-        menuItem.style.background = item.danger ? '#4a2a2a' : '#3a3a4e';
-      });
-      menuItem.addEventListener('mouseleave', () => {
-        menuItem.style.background = 'transparent';
-      });
-      
-      menuItem.addEventListener('click', async () => {
-        menu.remove();
-        
-        switch (item.action) {
-          case 'edit':
-            if (uiManager?.openGroupEditDialog) {
-              uiManager.openGroupEditDialog(groupId);
-            }
-            break;
-            
-          case 'focus':
-            const bounds = mapPointsManager.getAreaBounds(groupId);
-            if (bounds) {
-              const foundryPos = Coordinates.toFoundry(bounds.centerX, bounds.centerY);
-              canvas.pan({ x: foundryPos.x, y: foundryPos.y });
-            }
-            break;
-            
-          case 'duplicate':
-            const newGroup = await mapPointsManager.createGroup({
-              ...group,
-              id: undefined, // Generate new ID
-              label: `${group.label} (copy)`
-            });
-
-            log.info(`Created map point group: ${newGroup.id}`);
-            ui.notifications.info(`Duplicated: ${newGroup.label}`);
-            // Refresh helpers
-            if (mapPointsManager.showVisualHelpers) {
-              mapPointsManager.setShowVisualHelpers(false);
-              mapPointsManager.setShowVisualHelpers(true);
-            }
-            break;
-            
-          case 'addPoints':
-            this.startAddPointsToGroup(groupId);
-            break;
-            
-          case 'hideHelpers':
-            mapPointsManager.setShowVisualHelpers(false);
-            break;
-            
-          case 'delete':
-            const confirmed = await Dialog.confirm({
-              title: 'Delete Map Point Group',
-              content: `<p>Delete "${group.label || 'this group'}"?</p>`,
-              yes: () => true,
-              no: () => false
-            });
-            if (confirmed) {
-              const ok = await mapPointsManager.deleteGroup(groupId);
-              if (ok) {
-                ui.notifications.info('Group deleted');
-              } else {
-                ui.notifications.warn('Failed to delete group (insufficient permissions or save error).');
-              }
-            }
-            break;
-        }
-      });
-      
-      menu.appendChild(menuItem);
-    }
-
-    // Add header showing group name
-    const header = document.createElement('div');
-    header.style.cssText = `
-      padding: 6px 12px 8px;
-      font-weight: bold;
-      color: #aaa;
-      font-size: 11px;
-      border-bottom: 1px solid #444;
-      margin-bottom: 4px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    `;
-    header.textContent = group.label || 'Map Point Group';
-    menu.insertBefore(header, menu.firstChild);
-
-    document.body.appendChild(menu);
-
-    // Close menu when clicking elsewhere
-    const closeMenu = (e) => {
-      if (!menu.contains(e.target)) {
-        menu.remove();
-        document.removeEventListener('pointerdown', closeMenu);
-      }
-    };
-    
-    // Delay adding listener to prevent immediate close
-    setTimeout(() => {
-      document.addEventListener('pointerdown', closeMenu);
-    }, 10);
-
-    // Adjust position if menu goes off-screen
-    const rect = menu.getBoundingClientRect();
-    if (rect.right > window.innerWidth) {
-      menu.style.left = `${clientX - rect.width}px`;
-    }
-    if (rect.bottom > window.innerHeight) {
-      menu.style.top = `${clientY - rect.height}px`;
-    }
-  }
+  /** @deprecated Delegate to mapPointDrawHandler.startAddPointsToGroup() */
+  startAddPointsToGroup(groupId) { this.mapPointDrawHandler.startAddPointsToGroup(groupId); }
 
   /**
    * Create drag previews for selected tokens
@@ -2776,25 +887,23 @@ export class InteractionManager {
 
           // Preserve the icon's world transform (the original sprite is parented under a
           // group with a Z offset; cloning and adding to the root scene loses that offset).
-          try {
+          safeCall(() => {
             original.getWorldPosition(_tmpPos);
             original.getWorldQuaternion(_tmpQuat);
             preview.position.copy(_tmpPos);
             preview.quaternion.copy(_tmpQuat);
-          } catch (_) {
-          }
+          }, 'dragPreview.copyTransform', Severity.COSMETIC);
 
           preview.position.z = (preview.position.z ?? 0) + 0.01;
           preview.renderOrder = 9998;
 
           // Preserve radius metadata for LOS refresh (clone should copy userData, but be explicit).
-          try {
+          safeCall(() => {
             if (originalRoot?.userData && Object.prototype.hasOwnProperty.call(originalRoot.userData, 'radiusPixels')) {
               preview.userData = preview.userData || {};
               preview.userData.radiusPixels = originalRoot.userData.radiusPixels;
             }
-          } catch (_) {
-          }
+          }, 'dragPreview.copyRadius', Severity.COSMETIC);
 
           if (original.material) {
               preview.material = original.material.clone();
@@ -2825,20 +934,19 @@ export class InteractionManager {
 
           // Preserve the gizmo's world transform (the original group is parented under a
           // manager group with a Z offset; cloning and adding to the root scene loses that offset).
-          try {
+          safeCall(() => {
             originalRoot.getWorldPosition(_tmpPos);
             originalRoot.getWorldQuaternion(_tmpQuat);
             preview.position.copy(_tmpPos);
             preview.quaternion.copy(_tmpQuat);
-          } catch (_) {
-          }
+          }, 'dragPreview.enhancedCopyTransform', Severity.COSMETIC);
 
           preview.position.z = (preview.position.z ?? 0) + 0.01;
           preview.renderOrder = 9998;
 
           // Make materials semi-transparent and render on top.
           preview.traverse?.((obj) => {
-            try {
+            safeCall(() => {
               if (obj?.material) {
                 obj.material = obj.material.clone();
                 obj.material.transparent = true;
@@ -2859,8 +967,7 @@ export class InteractionManager {
                   obj.material.opacity = 0.8;
                 }
               }
-            } catch (_) {
-            }
+            }, 'dragPreview.cloneMaterial', Severity.COSMETIC);
           });
 
           if (this.sceneComposer.scene) {
@@ -2900,7 +1007,7 @@ export class InteractionManager {
 
         // Handle Map Point Drawing Mode - double-click finishes drawing
         if (this.mapPointDraw.active) {
-          this._finishMapPointDrawing();
+          this.mapPointDrawHandler.finish();
           event.preventDefault();
           return;
         }
@@ -2929,11 +1036,8 @@ export class InteractionManager {
                     const forceSheet = !!(event.altKey || event.ctrlKey || event.metaKey);
                     const lightEditor = window.MapShine?.lightEditor;
                     if (!forceSheet && lightEditor && typeof lightEditor.show === 'function') {
-                        try {
-                          lightEditor.show({ type: 'foundry', id: String(lightId) }, sprite);
-                          return;
-                        } catch (_) {
-                        }
+                        const shown = safeCall(() => { lightEditor.show({ type: 'foundry', id: String(lightId) }, sprite); return true; }, 'dblClick.lightEditor.show', Severity.COSMETIC, { fallback: false });
+                        if (shown) return;
                     }
 
                     log.info(`Opening config for light ${lightId}`);
@@ -2970,24 +1074,16 @@ export class InteractionManager {
         // Tokens may be rendered on the overlay layer (31) to draw above post-processing.
         // Ensure raycasting includes that layer, otherwise tokens won't be clickable/draggable.
         const prevRayMask = this.raycaster.layers?.mask;
-        try {
-          // Initialize layers if not present
-          if (!this.raycaster.layers) {
-            this.raycaster.layers = new THREE.Layers();
-          }
-          // Enable both layer 0 (default) and layer 31 (overlay)
+        safeCall(() => {
+          if (!this.raycaster.layers) this.raycaster.layers = new THREE.Layers();
           this.raycaster.layers.set(0);
           this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
-        } catch (_) {
-        }
+        }, 'dblClick.setRayLayers', Severity.COSMETIC);
 
         const interactables = this.tokenManager.getAllTokenSprites();
         const intersects = this.raycaster.intersectObjects(interactables, false);
 
-        try {
-          if (typeof prevRayMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevRayMask;
-        } catch (_) {
-        }
+        safeCall(() => { if (typeof prevRayMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevRayMask; }, 'dblClick.restoreRayLayers', Severity.COSMETIC);
 
         if (intersects.length > 0) {
           const hit = intersects[0];
@@ -3018,6 +1114,7 @@ export class InteractionManager {
         log.error('Error in onDoubleClick:', error);
     }
   }
+
 
   /**
    * Helper to start drag operation
@@ -3078,120 +1175,10 @@ export class InteractionManager {
       }
   }
 
-  _getMapPointHandleAtPosition(clientX, clientY) {
-    const mapPointsManager = window.MapShine?.mapPointsManager;
-    const camera = this.sceneComposer?.camera;
-    if (!mapPointsManager?.showVisualHelpers || !camera) return null;
-
-    const rect = this.canvasElement.getBoundingClientRect();
-    if (!rect || rect.width === 0 || rect.height === 0) return null;
-
-    this.updateMouseCoords({ clientX, clientY });
-    this.raycaster.setFromCamera(this.mouse, camera);
-
-    const helpers = Array.from(mapPointsManager.visualObjects?.values?.() ?? []);
-    if (!helpers.length) return null;
-
-    const intersects = this.raycaster.intersectObjects(helpers, true);
-    if (!intersects.length) return null;
-
-    for (const hit of intersects) {
-      let obj = hit.object;
-      while (obj) {
-        if (obj.userData?.type === 'mapPointHandle') {
-          return {
-            groupId: obj.userData.groupId,
-            pointIndex: obj.userData.pointIndex,
-            object: obj,
-            hitPoint: hit.point
-          };
-        }
-        obj = obj.parent;
-      }
-    }
-
-    return null;
-  }
-
-  _getMapPointHelperGroupFromObject(object) {
-    let obj = object;
-    while (obj) {
-      if (obj.userData?.type === 'mapPointHelper') return obj;
-      obj = obj.parent;
-    }
-    return null;
-  }
-
-  startMapPointHandleDrag(handleObject, hitPoint, groupId, pointIndex) {
-    const mapPointsManager = window.MapShine?.mapPointsManager;
-    const group = mapPointsManager?.getGroup?.(groupId);
-    if (!group || !Array.isArray(group.points) || !Number.isFinite(pointIndex)) return;
-    if (pointIndex < 0 || pointIndex >= group.points.length) return;
-
-    let handleRoot = handleObject;
-    while (
-      handleRoot?.parent &&
-      handleRoot.parent.userData?.type === 'mapPointHandle' &&
-      handleRoot.parent.userData?.groupId === groupId &&
-      handleRoot.parent.userData?.pointIndex === pointIndex
-    ) {
-      handleRoot = handleRoot.parent;
-    }
-
-    this.dragState.active = true;
-    this.dragState.mode = 'mapPointHandle';
-    this.dragState.object = handleRoot;
-    this.dragState.hasMoved = false;
-    this.dragState.mapPointGroupId = groupId;
-    this.dragState.mapPointIndex = pointIndex;
-    this.dragState.mapPointPoints = group.points.map((p) => ({ x: p.x, y: p.y }));
-    this.dragState.startPos.copy(handleRoot.position);
-    this.dragState.offset.subVectors(handleRoot.position, hitPoint);
-
-    if (window.MapShine?.cameraController) {
-      window.MapShine.cameraController.enabled = false;
-    }
-  }
-
-  _updateDraggedMapPointHelperGeometry() {
-    const groupId = this.dragState.mapPointGroupId;
-    const points = this.dragState.mapPointPoints;
-    if (!groupId || !Array.isArray(points) || points.length === 0) return;
-
-    const helperGroup = this._getMapPointHelperGroupFromObject(this.dragState.object);
-    if (!helperGroup) return;
-
-    const helperZ = helperGroup.userData?.helperZ ?? helperGroup.position?.z ?? 0;
-
-    const updateLineGeometry = (line, closeLoop) => {
-      const posAttr = line?.geometry?.getAttribute?.('position');
-      if (!posAttr) return;
-
-      const expectedCount = closeLoop ? (points.length + 1) : points.length;
-      if (posAttr.count !== expectedCount) return;
-
-      for (let i = 0; i < points.length; i++) {
-        posAttr.setXYZ(i, points[i].x, points[i].y, helperZ);
-      }
-      if (closeLoop) {
-        posAttr.setXYZ(points.length, points[0].x, points[0].y, helperZ);
-      }
-      posAttr.needsUpdate = true;
-      line.geometry.computeBoundingSphere?.();
-    };
-
-    for (const child of helperGroup.children) {
-      if (child?.userData?.type === 'mapPointLine') {
-        updateLineGeometry(child, false);
-      }
-      if (child?.userData?.type === 'mapPointOutline') {
-        updateLineGeometry(child, true);
-      }
-    }
-  }
+  // ── Map Point Handle methods — delegated to MapPointDrawHandler ──────────
 
   onWheel(event) {
-    try {
+    safeCall(() => {
       if (this._isEventFromUI(event)) return;
 
       const rect = this.canvasElement.getBoundingClientRect();
@@ -3223,9 +1210,7 @@ export class InteractionManager {
       event.stopPropagation();
       event.stopImmediatePropagation();
       layer._onMouseWheel?.(event);
-    } catch (err) {
-      log.error('Error in onWheel:', err);
-    }
+    }, 'onWheel', Severity.DEGRADED);
   }
 
   /**
@@ -3254,7 +1239,7 @@ export class InteractionManager {
         if (this.mapPointDraw.active && event.button === 0) {
           const worldPos = this.screenToWorld(event.clientX, event.clientY);
           if (worldPos) {
-            this._addMapPoint(worldPos.x, worldPos.y, event.shiftKey);
+            this.mapPointDrawHandler.addPoint(worldPos.x, worldPos.y, event.shiftKey);
             event.preventDefault();
             event.stopPropagation();
             return;
@@ -3263,11 +1248,11 @@ export class InteractionManager {
 
         // Handle right-click on map point helpers (context menu)
         if (event.button === 2) {
-          const clickedGroupId = this._getMapPointGroupAtPosition(event.clientX, event.clientY);
+          const clickedGroupId = this.mapPointDrawHandler.getGroupAtPosition(event.clientX, event.clientY);
           if (clickedGroupId) {
             event.preventDefault();
             event.stopPropagation();
-            this._showMapPointContextMenu(clickedGroupId, event.clientX, event.clientY);
+            this.mapPointDrawHandler.showContextMenu(clickedGroupId, event.clientX, event.clientY);
             return;
           }
         }
@@ -3276,15 +1261,15 @@ export class InteractionManager {
         if (event.button === 0) {
           const mapPointsManager = window.MapShine?.mapPointsManager;
           if (mapPointsManager?.showVisualHelpers) {
-            const handleHit = this._getMapPointHandleAtPosition(event.clientX, event.clientY);
+            const handleHit = this.mapPointDrawHandler.getHandleAtPosition(event.clientX, event.clientY);
             if (handleHit) {
               event.preventDefault();
               event.stopPropagation();
-              this.startMapPointHandleDrag(handleHit.object, handleHit.hitPoint, handleHit.groupId, handleHit.pointIndex);
+              this.mapPointDrawHandler.startHandleDrag(handleHit.object, handleHit.hitPoint, handleHit.groupId, handleHit.pointIndex);
               return;
             }
 
-            const clickedGroupId = this._getMapPointGroupAtPosition(event.clientX, event.clientY);
+            const clickedGroupId = this.mapPointDrawHandler.getGroupAtPosition(event.clientX, event.clientY);
             if (clickedGroupId) {
               event.preventDefault();
               event.stopPropagation();
@@ -3326,7 +1311,7 @@ export class InteractionManager {
           // If the router is in PIXI mode (common on LightingLayer), we still want
           // Three.js to be able to select Three-rendered light icons.
           if (!allowOverride) {
-            try {
+            safeCall(() => {
               const camera = this.sceneComposer?.camera;
               if (camera) {
                 this.updateMouseCoords(event);
@@ -3346,33 +1331,17 @@ export class InteractionManager {
                 if (hitEnhanced.length > 0 || hitFoundry.length > 0) {
                   allowOverride = true;
                   log.debug('onPointerDown overriding InputRouter block for Three.js light icon click');
-
-                  try {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    event.stopImmediatePropagation?.();
-                  } catch (_) {
-                  }
-
-                  try {
-                    inputRouter.forceThree?.('InteractionManager light click');
-                  } catch (e) {
-                    log.warn('Failed to force THREE mode on light click', e);
-                  }
+                  safeCall(() => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.(); }, 'pointerDown.consumeForLight', Severity.COSMETIC);
+                  safeCall(() => inputRouter.forceThree?.('InteractionManager light click'), 'pointerDown.forceThreeLight', Severity.DEGRADED);
                 }
               }
-            } catch (_) {
-            }
+            }, 'pointerDown.lightOverrideCheck', Severity.COSMETIC);
           }
 
           if (allowOverride) {
             if (shouldOverrideRouter) {
               log.debug('onPointerDown overriding InputRouter block on Tokens layer; forcing THREE mode');
-              try {
-                inputRouter.forceThree?.('InteractionManager token click');
-              } catch (e) {
-                log.warn('Failed to force THREE mode on token click', e);
-              }
+              safeCall(() => inputRouter.forceThree?.('InteractionManager token click'), 'pointerDown.forceThreeToken', Severity.DEGRADED);
             }
             // Fall through and continue handling the click.
           } else {
@@ -3402,19 +1371,11 @@ export class InteractionManager {
         // checked early so it can override other interaction.
         if (event.button === 0 && this._lightTranslate?.group?.visible && Array.isArray(this._lightTranslate.handles)) {
           const prevMask = this.raycaster.layers?.mask;
-          try {
-            // Ensure we can hit-test overlay-layer gizmos.
-            this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
-            this.raycaster.layers.enable(0);
-          } catch (_) {
-          }
+          safeCall(() => { this.raycaster.layers.enable(OVERLAY_THREE_LAYER); this.raycaster.layers.enable(0); }, 'pointerDown.gizmoLayers', Severity.COSMETIC);
 
           const hits = this.raycaster.intersectObjects(this._lightTranslate.handles, false);
 
-          try {
-            if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask;
-          } catch (_) {
-          }
+          safeCall(() => { if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask; }, 'pointerDown.restoreGizmoLayers', Severity.COSMETIC);
 
           if (hits && hits.length > 0) {
             const hit = hits[0];
@@ -3433,7 +1394,7 @@ export class InteractionManager {
                 this.clearSelection();
 
                 // Select the corresponding icon/root object so visuals are correct.
-                try {
+                safeCall(() => {
                   if (sel.type === 'enhanced') {
                     const mgr = window.MapShine?.enhancedLightIconManager;
                     const sprite = mgr?.lights?.get?.(sel.id);
@@ -3442,8 +1403,7 @@ export class InteractionManager {
                     const sprite = this.lightIconManager?.lights?.get?.(sel.id);
                     if (sprite) this.selectObject(sprite, { showLightEditor: false });
                   }
-                } catch (_) {
-                }
+                }, 'pointerDown.selectIcon', Severity.COSMETIC);
               }
 
               // Start drag at the LIGHT CENTER so offset is stable (not the handle hitpoint).
@@ -3454,25 +1414,14 @@ export class InteractionManager {
                 this.dragState.axis = axis;
 
                 // Enhanced light gizmo: hide radius ring during drag.
-                try {
-                  if (sel.type === 'enhanced') {
-                    const mgr = window.MapShine?.enhancedLightIconManager;
-                    mgr?.setDragging?.(sel.id, true);
-                  }
-                } catch (_) {
-                }
+                safeCall(() => { if (sel.type === 'enhanced') { const mgr = window.MapShine?.enhancedLightIconManager; mgr?.setDragging?.(sel.id, true); } }, 'pointerDown.setDragging', Severity.COSMETIC);
 
                 // Disable camera controls while dragging.
                 if (window.MapShine?.cameraController) {
                   window.MapShine.cameraController.enabled = false;
                 }
 
-                try {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  event.stopImmediatePropagation?.();
-                } catch (_) {
-                }
+                safeCall(() => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.(); }, 'pointerDown.consumeGizmoDrag', Severity.COSMETIC);
 
                 return;
               }
@@ -3483,18 +1432,11 @@ export class InteractionManager {
         // 0b. Light radius handles (drag to adjust bright/dim radii)
         if (event.button === 0 && this._lightRadiusRings?.group?.visible && Array.isArray(this._lightRadiusRings.handles)) {
           const prevMask = this.raycaster.layers?.mask;
-          try {
-            this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
-            this.raycaster.layers.enable(0);
-          } catch (_) {
-          }
+          safeCall(() => { this.raycaster.layers.enable(OVERLAY_THREE_LAYER); this.raycaster.layers.enable(0); }, 'pointerDown.radiusLayers', Severity.COSMETIC);
 
           const hits = this.raycaster.intersectObjects(this._lightRadiusRings.handles, false);
 
-          try {
-            if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask;
-          } catch (_) {
-          }
+          safeCall(() => { if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask; }, 'pointerDown.restoreRadiusLayers', Severity.COSMETIC);
 
           if (hits && hits.length > 0) {
             const hit = hits[0];
@@ -3535,12 +1477,7 @@ export class InteractionManager {
 
               this.canvasElement.style.cursor = 'ew-resize';
 
-              try {
-                event.preventDefault();
-                event.stopPropagation();
-                event.stopImmediatePropagation?.();
-              } catch (_) {
-              }
+              safeCall(() => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.(); }, 'pointerDown.consumeRadiusDrag', Severity.COSMETIC);
 
               return;
             }
@@ -3559,7 +1496,7 @@ export class InteractionManager {
         // Handle Right Click (Potential HUD or Door Lock/Unlock)
         if (event.button === 2) {
             // Toggle Foundry light disable via MapShine icons (so disabled lights can be re-enabled).
-            try {
+            safeCall(() => {
               const layerName = canvas.activeLayer?.name;
               const isLightingLayer = (layerName === 'LightingLayer' || layerName === 'lighting');
               if (isLightingLayer && this.lightIconManager) {
@@ -3580,8 +1517,7 @@ export class InteractionManager {
                   }
                 }
               }
-            } catch (_) {
-            }
+            }, 'pointerDown.rightClickLightToggle', Severity.COSMETIC);
 
             const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
             log.debug('onPointerDown right-click wallIntersects', { count: wallIntersects.length });
@@ -3912,25 +1848,15 @@ export class InteractionManager {
         // Tokens may be rendered on the overlay layer (31) to draw above post-processing.
         // Ensure raycasting includes that layer, otherwise tokens won't be clickable/draggable.
         const prevTokenRayMask = this.raycaster.layers?.mask;
-        try {
-          // Initialize layers if not present
-          if (!this.raycaster.layers) {
-            this.raycaster.layers = new THREE.Layers();
-          }
-          // Enable both layer 0 (default) and layer 31 (overlay)
+        safeCall(() => {
+          if (!this.raycaster.layers) this.raycaster.layers = new THREE.Layers();
           this.raycaster.layers.set(0);
           this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
-        } catch (_) {
-        }
+        }, 'pointerDown.tokenRayLayers', Severity.COSMETIC);
 
         const intersects = this.raycaster.intersectObjects(tokenSprites, false);
 
-        try {
-          if (typeof prevTokenRayMask === 'number' && this.raycaster.layers) {
-            this.raycaster.layers.mask = prevTokenRayMask;
-          }
-        } catch (_) {
-        }
+        safeCall(() => { if (typeof prevTokenRayMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevTokenRayMask; }, 'pointerDown.restoreTokenRayLayers', Severity.COSMETIC);
 
         log.debug('onPointerDown left-click tokenIntersects', { count: intersects.length });
 
@@ -3983,16 +1909,14 @@ export class InteractionManager {
           // Also drive Foundry's native token control so cursor/selection/HUD
           // behavior matches core. This uses the underlying PIXI token object
           // but is triggered from our Three.js hit test.
-          try {
+          safeCall(() => {
             const fvttToken = canvas.tokens?.get(tokenDoc.id);
             if (fvttToken) {
               const releaseOthers = !event.shiftKey;
               // Do not pan camera here; CameraSync keeps Three.js aligned.
               fvttToken.control({ releaseOthers, pan: false });
             }
-          } catch (err) {
-            log.warn('Failed to sync selection to Foundry token', err);
-          }
+          }, 'pointerDown.syncFoundryToken', Severity.DEGRADED);
           
         } else {
           // Clicked empty space - deselect all unless shift held
@@ -4015,10 +1939,7 @@ export class InteractionManager {
           this.dragSelect.dragging = false;
 
           // Defensive: ensure any previous shadow is hidden before we begin.
-          try {
-            this.selectionBoxEffect?._hideSelectionShadow?.();
-          } catch (_) {
-          }
+          safeCall(() => this.selectionBoxEffect?._hideSelectionShadow?.(), 'pointerDown.hideSelectionShadow', Severity.COSMETIC);
           
           // World-space start for selection math (ground plane)
           const worldPos = this.viewportToWorld(event.clientX, event.clientY, groundZ);
@@ -4061,10 +1982,7 @@ export class InteractionManager {
     }
 
     // Animate selection overlay styles (marching ants, pulsing glow)
-    try {
-      this.selectionBoxEffect?.update?.(timeInfo);
-    } catch (_) {
-    }
+    safeCall(() => this.selectionBoxEffect?.update?.(timeInfo), 'update.selectionBox', Severity.COSMETIC);
 
     this._updateSelectedLightOutline();
     this._updateLightTranslateGizmo();
@@ -4072,10 +1990,7 @@ export class InteractionManager {
 
     // Overhead hover debug: keep an always-on marker + label so we can diagnose
     // pointer-to-ray mapping even when there are no sprite hits.
-    try {
-      this._updateOverheadHoverDebugIdle();
-    } catch (_) {
-    }
+    safeCall(() => this._updateOverheadHoverDebugIdle(), 'update.overheadDebugIdle', Severity.COSMETIC);
   }
 
   _updateOverheadHoverDebugIdle() {
@@ -4125,21 +2040,17 @@ export class InteractionManager {
     dbg.ray.geometry.attributes.position.needsUpdate = true;
 
     // Hide quad when we don't have a tile hit yet.
-    try {
-      if (dbg.quad) dbg.quad.visible = false;
-    } catch (_) {
-    }
+    safeCall(() => { if (dbg.quad) dbg.quad.visible = false; }, 'overheadDebugIdle.hideQuad', Severity.COSMETIC);
 
     // Always show a label with NDC + rect so we can diagnose offset mapping.
-    try {
+    safeCall(() => {
       if (dbg.label) {
         dbg.label.textContent = `roofDebug: ndc(${ndc.x.toFixed(3)}, ${ndc.y.toFixed(3)}) rect(l=${rect.left.toFixed(1)} t=${rect.top.toFixed(1)} w=${rect.width.toFixed(1)} h=${rect.height.toFixed(1)})`;
         dbg.label.style.left = `${clientX + 14}px`;
         dbg.label.style.top = `${clientY + 14}px`;
         dbg.label.style.display = 'block';
       }
-    } catch (_) {
-    }
+    }, 'overheadDebugIdle.label', Severity.COSMETIC);
   }
 
   _getCanvasRectCached(force = false) {
@@ -4151,12 +2062,7 @@ export class InteractionManager {
       return cache;
     }
 
-    let rect;
-    try {
-      rect = this.canvasElement?.getBoundingClientRect?.();
-    } catch (_) {
-      rect = null;
-    }
+    const rect = safeCall(() => this.canvasElement?.getBoundingClientRect?.(), 'getCanvasRect', Severity.COSMETIC, { fallback: null });
 
     if (rect) {
       cache.left = rect.left;
@@ -4177,566 +2083,20 @@ export class InteractionManager {
     return cache;
   }
 
-  _createLightTranslateGizmo() {
-    try {
-      const THREE = window.THREE;
-      if (!THREE || !this.sceneComposer?.scene) return;
-
-      const g = new THREE.Group();
-      g.name = 'LightTranslateGizmo';
-      g.visible = false;
-      g.renderOrder = 10010;
-      g.layers.set(OVERLAY_THREE_LAYER);
-      // Also enable layer 0 so the default raycaster mask can hit the group descendants.
-      g.layers.enable(0);
-
-      const depthTest = false;
-      const depthWrite = false;
-
-      const matX = new THREE.MeshBasicMaterial({ color: 0xff3333, transparent: true, opacity: 0.95, depthTest, depthWrite });
-      const matY = new THREE.MeshBasicMaterial({ color: 0x33ff33, transparent: true, opacity: 0.95, depthTest, depthWrite });
-      const matC = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, depthTest, depthWrite });
-      matX.toneMapped = false;
-      matY.toneMapped = false;
-      matC.toneMapped = false;
-
-      // Sizes are in world pixels (ground plane is pixel space).
-      const axisLen = 58;
-      const axisThick = 6;
-      const centerSize = 14;
-      const arrowLen = 14;
-      const arrowRadius = 7;
-
-      // X axis handle (red)
-      const geoX = new THREE.BoxGeometry(axisLen, axisThick, 0.5);
-      const xHandle = new THREE.Mesh(geoX, matX);
-      xHandle.position.set(axisLen * 0.5, 0, 0);
-      xHandle.renderOrder = 10011;
-      xHandle.layers.set(OVERLAY_THREE_LAYER);
-      // Also enable layer 0 so the default raycaster mask can hit it.
-      xHandle.layers.enable(0);
-      xHandle.userData = { type: 'lightTranslateHandle', axis: 'x' };
-
-      // X arrowhead
-      const xArrowGeo = new THREE.ConeGeometry(arrowRadius, arrowLen, 16);
-      const xArrow = new THREE.Mesh(xArrowGeo, matX);
-      // Cone points +Y by default; rotate to +X.
-      xArrow.rotation.z = -Math.PI / 2;
-      xArrow.position.set(axisLen + arrowLen * 0.5, 0, 0);
-      xArrow.renderOrder = 10012;
-      xArrow.layers.set(OVERLAY_THREE_LAYER);
-      xArrow.layers.enable(0);
-      xArrow.userData = { type: 'lightTranslateHandle', axis: 'x' };
-
-      // Y axis handle (green)
-      const geoY = new THREE.BoxGeometry(axisThick, axisLen, 0.5);
-      const yHandle = new THREE.Mesh(geoY, matY);
-      yHandle.position.set(0, axisLen * 0.5, 0);
-      yHandle.renderOrder = 10011;
-      yHandle.layers.set(OVERLAY_THREE_LAYER);
-      yHandle.layers.enable(0);
-      yHandle.userData = { type: 'lightTranslateHandle', axis: 'y' };
-
-      // Y arrowhead
-      const yArrowGeo = new THREE.ConeGeometry(arrowRadius, arrowLen, 16);
-      const yArrow = new THREE.Mesh(yArrowGeo, matY);
-      yArrow.position.set(0, axisLen + arrowLen * 0.5, 0);
-      yArrow.renderOrder = 10012;
-      yArrow.layers.set(OVERLAY_THREE_LAYER);
-      yArrow.layers.enable(0);
-      yArrow.userData = { type: 'lightTranslateHandle', axis: 'y' };
-
-      // Center handle (free move)
-      const geoC = new THREE.BoxGeometry(centerSize, centerSize, 0.5);
-      const cHandle = new THREE.Mesh(geoC, matC);
-      cHandle.position.set(0, 0, 0);
-      cHandle.renderOrder = 10012;
-      cHandle.layers.set(OVERLAY_THREE_LAYER);
-      cHandle.layers.enable(0);
-      cHandle.userData = { type: 'lightTranslateHandle', axis: 'xy' };
-
-      g.add(xHandle);
-      g.add(xArrow);
-      g.add(yHandle);
-      g.add(yArrow);
-      g.add(cHandle);
-
-      this.sceneComposer.scene.add(g);
-      this._lightTranslate.group = g;
-      this._lightTranslate.handles = [xHandle, xArrow, yHandle, yArrow, cHandle];
-    } catch (_) {
-    }
-  }
-
-  /**
-   * Create draggable radius handles for adjusting light bright/dim radii.
-   * These are always-visible handles positioned near the selected light (not full rings).
-   */
-  _createLightRadiusRingsGizmo() {
-    try {
-      const THREE = window.THREE;
-      if (!THREE || !this.sceneComposer?.scene) return;
-
-      const g = new THREE.Group();
-      g.name = 'LightRadiusHandlesGizmo';
-      g.visible = false;
-      g.renderOrder = 10005;
-      g.layers.set(OVERLAY_THREE_LAYER);
-      g.layers.enable(0);
-
-      const depthTest = false;
-      const depthWrite = false;
-
-      // Bright radius handle (yellow/gold)
-      const brightMat = new THREE.MeshBasicMaterial({ color: 0xffdd44, transparent: true, opacity: 0.95, depthTest, depthWrite });
-      brightMat.toneMapped = false;
-
-      // Dim radius handle (cyan/blue)
-      const dimMat = new THREE.MeshBasicMaterial({ color: 0x44ddff, transparent: true, opacity: 0.95, depthTest, depthWrite });
-      dimMat.toneMapped = false;
-
-      // Handle geometry: small discs in the ground plane.
-      const handleRadius = 10;
-      const handleSegments = 24;
-
-      const brightGeo = new THREE.CircleGeometry(handleRadius, handleSegments);
-      const brightHandle = new THREE.Mesh(brightGeo, brightMat);
-      brightHandle.position.set(0, 0, 0);
-      brightHandle.renderOrder = 10006;
-      brightHandle.layers.set(OVERLAY_THREE_LAYER);
-      brightHandle.layers.enable(0);
-      brightHandle.userData = { type: 'lightRadiusHandle', radiusType: 'bright' };
-
-      const dimGeo = new THREE.CircleGeometry(handleRadius, handleSegments);
-      const dimHandle = new THREE.Mesh(dimGeo, dimMat);
-      dimHandle.position.set(0, -24, 0);
-      dimHandle.renderOrder = 10006;
-      dimHandle.layers.set(OVERLAY_THREE_LAYER);
-      dimHandle.layers.enable(0);
-      dimHandle.userData = { type: 'lightRadiusHandle', radiusType: 'dim' };
-
-      g.add(brightHandle);
-      g.add(dimHandle);
-
-      this.sceneComposer.scene.add(g);
-      this._lightRadiusRings.group = g;
-      this._lightRadiusRings.brightHandle = brightHandle;
-      this._lightRadiusRings.dimHandle = dimHandle;
-      this._lightRadiusRings.handles = [brightHandle, dimHandle];
-    } catch (_) {
-    }
-  }
-
-  /**
-   * Update the radius handles gizmo position and scale based on the selected light.
-   */
-  _updateLightRadiusRingsGizmo() {
-    try {
-      const g = this._lightRadiusRings?.group;
-      if (!g) return;
-
-      // We now use an HTML slider overlay instead of the colored 3D handles.
-      // Keep the 3D gizmo disabled.
-      g.visible = false;
-
-      // Respect global visibility toggle
-      const showRings = window.MapShine?.tweakpaneManager?.globalParams?.showLightRadiusRings ?? true;
-      if (!showRings) {
-        g.visible = false;
-        return;
-      }
-
-      // Hide while dragging anything else (but not while dragging radius).
-      if (this.dragState?.active && this.dragState.mode !== 'radiusEdit') {
-        g.visible = false;
-        return;
-      }
-
-      const sel = this._getSelectedLight();
-      this._lightRadiusRings.selected = sel;
-      const ui = this._radiusSliderUI;
-      if (!sel || !this._canEditSelectedLight(sel) || !ui?.el) {
-        if (ui?.el) ui.el.style.display = 'none';
-        return;
-      }
-
-      const pos = this._getSelectedLightWorldPos(sel);
-      if (!pos) {
-        if (ui?.el) ui.el.style.display = 'none';
-        return;
-      }
-      const groundZ = this.sceneComposer?.groundZ ?? 0;
-      const z = groundZ + 4.04; // Near translate gizmo, but slightly below
-
-      const zoom = this._getEffectiveZoom();
-      const dx = (this._lightRadiusRings.offsetPx?.x || 0) / zoom;
-      const dy = -(this._lightRadiusRings.offsetPx?.y || 0) / zoom;
-
-      // Project world->screen and place the overlay there.
-      try {
-        const THREE = window.THREE;
-        const cam = this.sceneComposer?.camera;
-        const el = ui.el;
-        if (THREE && cam && el) {
-          const rect = this._getCanvasRectCached();
-          const v = this._tempVec3UI;
-          v.set(pos.x + dx, pos.y + dy, z);
-          v.project(cam);
-          const sx = rect.left + (v.x * 0.5 + 0.5) * rect.width;
-          const sy = rect.top + (-v.y * 0.5 + 0.5) * rect.height;
-
-          const leftCss = `${Math.round(sx)}px`;
-          const topCss = `${Math.round(sy)}px`;
-
-          if (ui._lastLeft !== leftCss) {
-            el.style.left = leftCss;
-            ui._lastLeft = leftCss;
-          }
-          if (ui._lastTop !== topCss) {
-            el.style.top = topCss;
-            ui._lastTop = topCss;
-          }
-
-          if (el.style.transform !== 'translate(0px, 0px)') el.style.transform = 'translate(0px, 0px)';
-          if (el.style.display !== 'block') el.style.display = 'block';
-        }
-      } catch (_) {
-      }
-
-      // Sync slider values from the authoritative light state.
-      try {
-        const r = this._getSelectedLightRadiiInSceneUnits(sel);
-        if (r && ui.dimEl && ui.brightPctEl && ui.dimValueEl && ui.brightValueEl) {
-          const dimU = Math.max(0, Math.min(200, r.dimUnits));
-          const pct = Math.max(0, Math.min(100, r.brightPct));
-
-          // Only update DOM values if they changed meaningfully.
-          const needsDim = (ui.lastDimUnits === null) || (Math.abs(ui.lastDimUnits - dimU) > 1e-3);
-          const needsPct = (ui.lastBrightPct === null) || (Math.abs(ui.lastBrightPct - pct) > 1e-3);
-          if (needsDim || needsPct) {
-            ui.suppressInput = true;
-            if (needsDim) ui.dimEl.value = String(dimU);
-            if (needsPct) ui.brightPctEl.value = String(Math.round(pct));
-            ui.suppressInput = false;
-            ui.lastDimUnits = dimU;
-            ui.lastBrightPct = pct;
-          }
-
-          const brightU = dimU * (pct / 100);
-          ui.dimValueEl.textContent = `${dimU.toFixed(1)}`;
-          ui.brightValueEl.textContent = `${Math.round(pct)}% (${brightU.toFixed(1)})`;
-        }
-      } catch (_) {
-      }
-    } catch (_) {
-    }
-  }
-
-  /**
-   * Preview a radius change during a drag (does not persist).
-   * @param {{type:'foundry'|'enhanced', id:string}} sel
-   * @param {'bright'|'dim'} radiusType
-   * @param {number} newRadius
-   */
-  _previewRadiusChange(sel, radiusType, newRadius) {
-    try {
-      this._lightRadiusRings.pendingType = radiusType;
-      this._lightRadiusRings.pendingRadius = newRadius;
-      if (radiusType === 'bright') this._lightRadiusRings.previewBright = newRadius;
-      else this._lightRadiusRings.previewDim = newRadius;
-    } catch (_) {
-    }
-  }
-
-  _applyPendingRadiusLive(sel) {
-    try {
-      const st = this._lightRadiusRings;
-      if (!st) return;
-
-      const radiusType = st.pendingType;
-      const newRadius = st.pendingRadius;
-      if (!radiusType || !Number.isFinite(newRadius)) return;
-
-      const nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-      const hz = Math.max(1, Number(st.liveApplyHz) || 15);
-      const intervalMs = 1000 / hz;
-
-      // Throttle to keep Foundry doc updates and scene flag writes reasonable.
-      if ((nowMs - (st.lastLiveApplyMs || 0)) < intervalMs) return;
-      st.lastLiveApplyMs = nowMs;
-
-      // If an update is already in flight, queue the latest value.
-      if (st.liveInFlight) {
-        st.liveQueued = { sel, radiusType, newRadius };
-        return;
-      }
-
-      st.liveInFlight = true;
-      st.liveQueued = null;
-
-      const run = async () => {
-        try {
-          // Commit writes to the underlying doc/entity so the user sees true lighting.
-          await this._commitPendingRadius(sel);
-        } catch (_) {
-        } finally {
-          st.liveInFlight = false;
-
-          // If we missed a newer value while in flight, immediately apply it.
-          const q = st.liveQueued;
-          st.liveQueued = null;
-          if (q && q.sel && q.radiusType && Number.isFinite(q.newRadius)) {
-            try {
-              this._previewRadiusChange(q.sel, q.radiusType, q.newRadius);
-              this._applyPendingRadiusLive(q.sel);
-            } catch (_) {
-            }
-          }
-        }
-      };
-
-      void run();
-    } catch (_) {
-    }
-  }
-
-  /**
-   * Commit the pending radius change to the underlying document/entity.
-   * @param {{type:'foundry'|'enhanced', id:string}} sel
-   */
-  async _commitPendingRadius(sel) {
-    try {
-      const radiusType = this._lightRadiusRings.pendingType;
-      const newRadius = this._lightRadiusRings.pendingRadius;
-      if (!radiusType || !Number.isFinite(newRadius)) return;
-
-      if (sel.type === 'foundry') {
-        const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
-        if (!doc) return;
-
-        const gridSize = canvas?.scene?.grid?.size || 100;
-        const gridUnits = newRadius / gridSize;
-        const updateData = {};
-        if (radiusType === 'bright') updateData['config.bright'] = gridUnits;
-        else updateData['config.dim'] = gridUnits;
-        await doc.update(updateData);
-        return;
-      }
-
-      if (sel.type === 'enhanced') {
-        const api = window.MapShine?.enhancedLights;
-        if (!api?.update) return;
-
-        const updateData = { photometry: {} };
-        if (radiusType === 'bright') updateData.photometry.bright = newRadius;
-        else updateData.photometry.dim = newRadius;
-        await api.update(sel.id, updateData);
-      }
-    } catch (_) {
-    }
-  }
-
-  /**
-   * Commit the radius change and clean up drag state.
-   */
-  _commitRadiusChange() {
-    try {
-      const sel = this._lightRadiusRings?.selected;
-      if (sel) {
-        void this._commitPendingRadius(sel);
-      }
-
-      try {
-        this._hideUIHoverLabel();
-      } catch (_) {
-      }
-
-      // Re-enable camera controls
-      if (window.MapShine?.cameraController) {
-        window.MapShine.cameraController.enabled = true;
-      }
-
-      // Reset cursor
-      this.canvasElement.style.cursor = '';
-
-      // Clear drag state
-      this.dragState.active = false;
-      this.dragState.mode = null;
-      this.dragState.object = null;
-      this._lightRadiusRings.dragging = null;
-      this._lightRadiusRings.startRadius = 0;
-      this._lightRadiusRings.startDistance = 0;
-      this._lightRadiusRings.pendingType = null;
-      this._lightRadiusRings.pendingRadius = null;
-      this._lightRadiusRings.previewBright = null;
-      this._lightRadiusRings.previewDim = null;
-      this._lightRadiusRings.liveQueued = null;
-
-      const lightEditor = window.MapShine?.lightEditor;
-      lightEditor?._refreshFromSource?.();
-    } catch (_) {
-    }
-  }
-
-  /**
-   * Get the bright and dim radii for a selected light (in world pixels).
-   * @param {{type:'foundry'|'enhanced', id:string}} sel
-   * @returns {{bright:number, dim:number}|null}
-   */
-  _getSelectedLightRadii(sel) {
-    try {
-      if (sel.type === 'foundry') {
-        const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
-        if (doc) {
-          const gridSize = canvas?.scene?.grid?.size || 100;
-          return {
-            bright: (doc.config?.bright ?? 0) * gridSize,
-            dim: (doc.config?.dim ?? 0) * gridSize
-          };
-        }
-      } else if (sel.type === 'enhanced') {
-        // Use EnhancedLightsApi (async container) if available; fall back to cached scene flag.
-        const container = canvas?.scene?.getFlag?.('map-shine-advanced', 'enhancedLights');
-        const lights = container?.lights;
-        const data = Array.isArray(lights) ? lights.find((l) => String(l?.id) === String(sel.id)) : null;
-        if (data) {
-          return {
-            bright: Number(data.photometry?.bright ?? 0),
-            dim: Number(data.photometry?.dim ?? 0)
-          };
-        }
-      }
-    } catch (_) {
-    }
-    return null;
-  }
-
-  _getSelectedLight() {
-    try {
-      if (!this.selection || this.selection.size !== 1) return null;
-      const id = Array.from(this.selection)[0];
-
-      const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
-      if (enhancedLightIconManager?.lights?.has?.(id)) {
-        return { type: 'enhanced', id: String(id) };
-      }
-
-      if (this.lightIconManager?.lights?.has?.(id)) {
-        return { type: 'foundry', id: String(id) };
-      }
-    } catch (_) {
-    }
-    return null;
-  }
-
-  _canEditSelectedLight(sel) {
-    try {
-      if (!sel) return false;
-      if (sel.type === 'enhanced') return !!game.user.isGM;
-      if (sel.type === 'foundry') {
-        const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
-        return !!(doc && doc.canUserModify(game.user, 'update'));
-      }
-    } catch (_) {
-    }
-    return false;
-  }
-
-  _getSelectedLightWorldPos(sel) {
-    try {
-      const THREE = window.THREE;
-      if (!THREE) return null;
-      const v = new THREE.Vector3();
-
-      if (sel.type === 'enhanced') {
-        const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
-        const root = enhancedLightIconManager?.getRootObject?.(sel.id);
-        if (root?.getWorldPosition) {
-          root.getWorldPosition(v);
-          return v;
-        }
-      }
-
-      if (sel.type === 'foundry') {
-        const sprite = this.lightIconManager?.lights?.get?.(sel.id);
-        if (sprite?.getWorldPosition) {
-          sprite.getWorldPosition(v);
-          return v;
-        }
-
-        const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
-        if (doc) {
-          const w = Coordinates.toWorld(doc.x, doc.y);
-          v.set(w.x, w.y, 0);
-          return v;
-        }
-      }
-    } catch (_) {
-    }
-    return null;
-  }
-
-  _updateLightTranslateGizmo() {
-    try {
-      const g = this._lightTranslate?.group;
-      if (!g) return;
-
-      // Respect global visibility toggle from Tweakpane
-      const showGizmo = window.MapShine?.tweakpaneManager?.globalParams?.showLightTranslateGizmo ?? true;
-      if (!showGizmo) {
-        g.visible = false;
-        return;
-      }
-
-      // Never show while dragging anything.
-      if (this.dragState?.active) {
-        g.visible = false;
-        return;
-      }
-
-      const sel = this._getSelectedLight();
-      this._lightTranslate.selected = sel;
-      if (!sel || !this._canEditSelectedLight(sel)) {
-        g.visible = false;
-        return;
-      }
-
-      const pos = this._getSelectedLightWorldPos(sel);
-      if (!pos) {
-        g.visible = false;
-        return;
-      }
-
-      const groundZ = this.sceneComposer?.groundZ ?? 0;
-      const z = groundZ + 4.05;
-
-      const zoom = this._getEffectiveZoom();
-      const dx = (this._lightTranslate.offsetPx.x || 0) / zoom;
-      const dy = -(this._lightTranslate.offsetPx.y || 0) / zoom;
-
-      g.position.set(pos.x + dx, pos.y + dy, z);
-
-      // Keep gizmo a stable screen size.
-      const s = 1 / zoom;
-      g.scale.set(s, s, 1);
-
-      // Stamp the current selected light onto handle userData for ray-hit routing.
-      for (const h of this._lightTranslate.handles) {
-        if (!h?.userData) h.userData = {};
-        h.userData.lightType = sel.type;
-        if (sel.type === 'foundry') {
-          h.userData.lightId = sel.id;
-          h.userData.enhancedLightId = undefined;
-        } else {
-          h.userData.enhancedLightId = sel.id;
-          h.userData.lightId = undefined;
-        }
-      }
-
-      g.visible = true;
-    } catch (_) {
-    }
-  }
+  // ── Light gizmo/query methods — delegated to LightInteractionHandler ──────
+  _createLightTranslateGizmo() { this.lightHandler.createTranslateGizmo(); }
+
+  _createLightRadiusRingsGizmo() { this.lightHandler.createRadiusRingsGizmo(); }
+  _updateLightRadiusRingsGizmo() { this.lightHandler.updateRadiusRingsGizmo(); }
+  _previewRadiusChange(sel, rt, nr) { this.lightHandler.previewRadiusChange(sel, rt, nr); }
+  _applyPendingRadiusLive(sel) { this.lightHandler.applyPendingRadiusLive(sel); }
+  async _commitPendingRadius(sel) { return this.lightHandler.commitPendingRadius(sel); }
+  _commitRadiusChange() { this.lightHandler.commitRadiusChange(); }
+  _getSelectedLightRadii(sel) { return this.lightHandler.getSelectedLightRadii(sel); }
+  _getSelectedLight() { return this.lightHandler.getSelectedLight(); }
+  _canEditSelectedLight(sel) { return this.lightHandler.canEditSelectedLight(sel); }
+  _getSelectedLightWorldPos(sel) { return this.lightHandler.getSelectedLightWorldPos(sel); }
+  _updateLightTranslateGizmo() { this.lightHandler.updateTranslateGizmo(); }
 
   /**
    * Update Token HUD position to match Three.js camera
@@ -4751,10 +2111,7 @@ export class InteractionManager {
       const spriteData = this.tokenManager.tokenSprites.get(token.id);
       if (!spriteData || !spriteData.sprite) {
           // Token may have been deleted; avoid spamming errors by closing the HUD.
-          try {
-              if (hud?.rendered) hud.close();
-          } catch (_) {
-          }
+          safeCall(() => { if (hud?.rendered) hud.close(); }, 'updateHUD.closeStaleHud', Severity.COSMETIC);
           this.openHudTokenId = null;
           return;
       }
@@ -4875,19 +2232,11 @@ export class InteractionManager {
   handleHover(event) {
     // Ensure camera matrices are current before any raycasting.
     // A stale camera matrixWorld can cause systematic pick offsets.
-    try {
-      const cam = this.sceneComposer?.camera;
-      cam?.updateMatrixWorld?.(true);
-      cam?.updateProjectionMatrix?.();
-    } catch (_) {
-    }
+    safeCall(() => { const cam = this.sceneComposer?.camera; cam?.updateMatrixWorld?.(true); cam?.updateProjectionMatrix?.(); }, 'hover.updateCameraMatrix', Severity.COSMETIC);
 
     // Tiles have matrixAutoUpdate=false. Ensure the scene graph is up to date so
     // Raycaster sees correct matrixWorld values.
-    try {
-      this.sceneComposer?.scene?.updateMatrixWorld?.(true);
-    } catch (_) {
-    }
+    safeCall(() => this.sceneComposer?.scene?.updateMatrixWorld?.(true), 'hover.updateSceneMatrix', Severity.COSMETIC);
 
     this.updateMouseCoords(event);
     this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
@@ -4895,78 +2244,37 @@ export class InteractionManager {
     let hitFound = false;
 
     // 0. Light translate gizmo hover (cursor affordance)
-    try {
+    safeCall(() => {
       if (this._lightTranslate?.group?.visible && Array.isArray(this._lightTranslate.handles) && this._lightTranslate.handles.length) {
         const prevMask = this.raycaster.layers?.mask;
-        try {
-          // Allow hover hit-testing against overlay-layer gizmos.
-          this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
-          this.raycaster.layers.enable(0);
-        } catch (_) {
-        }
+        safeCall(() => { this.raycaster.layers.enable(OVERLAY_THREE_LAYER); this.raycaster.layers.enable(0); }, 'hover.gizmoLayers', Severity.COSMETIC);
 
         const hits = this.raycaster.intersectObjects(this._lightTranslate.handles, false);
 
-        try {
-          if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask;
-        } catch (_) {
-        }
+        safeCall(() => { if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask; }, 'hover.restoreGizmoLayers', Severity.COSMETIC);
 
         if (hits && hits.length > 0) {
           // Clear any lingering hover states so visuals/cursor don't fight.
-          try {
-            if (this.hoveredWallId) {
-              this.wallManager?.setHighlight?.(this.hoveredWallId, false);
-              this.hoveredWallId = null;
-            }
-          } catch (_) {
-          }
-          try {
-            if (this.hoveredTokenId) {
-              this.tokenManager?.setHover?.(this.hoveredTokenId, false);
-              this.hoveredTokenId = null;
-            }
-          } catch (_) {
-          }
-          try {
-            if (this.hoveredOverheadTileId && this.tileManager?.setTileHoverHidden) {
-              this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
-              this.hoveredOverheadTileId = null;
-            }
-          } catch (_) {
-          }
-          try {
-            if (this.hoveringTreeCanopy) {
-              const treeEffect = (window.MapShine || window.mapShine)?.treeEffect;
-              treeEffect?.setHoverHidden?.(false);
-              this.hoveringTreeCanopy = false;
-            }
-          } catch (_) {
-          }
+          safeCall(() => { if (this.hoveredWallId) { this.wallManager?.setHighlight?.(this.hoveredWallId, false); this.hoveredWallId = null; } }, 'hover.clearWall', Severity.COSMETIC);
+          safeCall(() => { if (this.hoveredTokenId) { this.tokenManager?.setHover?.(this.hoveredTokenId, false); this.hoveredTokenId = null; } }, 'hover.clearToken', Severity.COSMETIC);
+          safeCall(() => { if (this.hoveredOverheadTileId && this.tileManager?.setTileHoverHidden) { this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false); this.hoveredOverheadTileId = null; } }, 'hover.clearTile', Severity.COSMETIC);
+          safeCall(() => { if (this.hoveringTreeCanopy) { const treeEffect = (window.MapShine || window.mapShine)?.treeEffect; treeEffect?.setHoverHidden?.(false); this.hoveringTreeCanopy = false; } }, 'hover.clearTree', Severity.COSMETIC);
 
           this.canvasElement.style.cursor = 'pointer';
           return;
         }
       }
-    } catch (_) {
-    }
+    }, 'hover.lightTranslateGizmo', Severity.COSMETIC);
 
     // 0b. Light radius handles hover (cursor affordance)
-    try {
+    safeCall(() => {
       if (this._lightRadiusRings?.group?.visible && Array.isArray(this._lightRadiusRings.handles) && this._lightRadiusRings.handles.length) {
         const prevMask = this.raycaster.layers?.mask;
-        try {
-          this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
-          this.raycaster.layers.enable(0);
-        } catch (_) {
-        }
+        safeCall(() => { this.raycaster.layers.enable(OVERLAY_THREE_LAYER); this.raycaster.layers.enable(0); }, 'hover.radiusLayers', Severity.COSMETIC);
 
         const hits = this.raycaster.intersectObjects(this._lightRadiusRings.handles, false);
 
-        try {
-          if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask;
-        } catch (_) {
-        }
+        safeCall(() => { if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask; }, 'hover.restoreRadiusLayers', Severity.COSMETIC);
 
         if (hits && hits.length > 0) {
           const obj = hits[0]?.object;
@@ -4977,8 +2285,7 @@ export class InteractionManager {
           return;
         }
       }
-    } catch (_) {
-    }
+    }, 'hover.radiusRings', Severity.COSMETIC);
 
     // If we didn't early-return for gizmo/handle hover, ensure the hover label is hidden.
     // (We intentionally keep it visible while hovering the relevant handle.)
@@ -5015,18 +2322,11 @@ export class InteractionManager {
         // The THREE.Raycaster respects layers, so we must enable ROOF_LAYER here or all
         // overhead picking will silently miss.
         const prevMask = this.raycaster.layers?.mask;
-        try {
-          this.raycaster.layers.enable(20); // ROOF_LAYER
-          this.raycaster.layers.enable(0);
-        } catch (_) {
-        }
+        safeCall(() => { this.raycaster.layers.enable(20); this.raycaster.layers.enable(0); }, 'hover.roofLayers', Severity.COSMETIC);
 
         const hits = this.raycaster.intersectObjects(overheadSprites, false);
 
-        try {
-          if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask;
-        } catch (_) {
-        }
+        safeCall(() => { if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask; }, 'hover.restoreRoofLayers', Severity.COSMETIC);
         if (hits && hits.length > 0) {
           for (let i = 0; i < hits.length; i++) {
             const hit = hits[i];
@@ -5040,33 +2340,22 @@ export class InteractionManager {
             // Only apply hover-to-hide to tiles that are explicitly configured
             // as roofs, or which have a non-NONE occlusion mode (typical roof setup).
             // This prevents hiding decorative overhead tiles unexpectedly.
-            try {
+            const hoverEligible = safeCall(() => {
               const tileDoc = data.tileDoc;
               const occlusionMode = tileDoc?.occlusion?.mode ?? CONST.TILE_OCCLUSION_MODES.NONE;
-              const hoverEligible = !!sprite.userData.isWeatherRoof || (occlusionMode !== CONST.TILE_OCCLUSION_MODES.NONE);
-              if (!hoverEligible) continue;
-            } catch (_) {
-            }
+              return !!sprite.userData.isWeatherRoof || (occlusionMode !== CONST.TILE_OCCLUSION_MODES.NONE);
+            }, 'hover.checkOcclusion', Severity.COSMETIC, { fallback: true });
+            if (!hoverEligible) continue;
 
             // Pixel-opaque test using UV from the sprite raycast.
             let opaqueHit = true;
             if (typeof this.tileManager.isUvOpaque === 'function' && hit?.uv) {
-              try {
-                opaqueHit = this.tileManager.isUvOpaque(data, hit.uv);
-              } catch (_) {
-                opaqueHit = true;
-              }
+              opaqueHit = safeCall(() => this.tileManager.isUvOpaque(data, hit.uv), 'hover.uvOpaque', Severity.COSMETIC, { fallback: true });
             }
             if (!opaqueHit) continue;
 
             // Rank by world Z, not local Z (tiles may be parented under transformed groups).
-            let z = 0;
-            try {
-              sprite.getWorldPosition(zPos);
-              z = zPos.z;
-            } catch (_) {
-              z = sprite.position?.z ?? 0;
-            }
+            const z = safeCall(() => { sprite.getWorldPosition(zPos); return zPos.z; }, 'hover.worldZ', Severity.COSMETIC, { fallback: sprite.position?.z ?? 0 });
             if (z >= bestZ) {
               bestZ = z;
               bestTileId = tileId;
@@ -5086,13 +2375,7 @@ export class InteractionManager {
         if (bestTileId) {
           // Clear wall hover highlight while a roof is being hover-hidden.
           // Otherwise the wall selection affordance can fight with the roof UX.
-          try {
-            if (this.hoveredWallId) {
-              this.wallManager?.setHighlight?.(this.hoveredWallId, false);
-              this.hoveredWallId = null;
-            }
-          } catch (_) {
-          }
+          safeCall(() => { if (this.hoveredWallId) { this.wallManager?.setHighlight?.(this.hoveredWallId, false); this.hoveredWallId = null; } }, 'hover.clearWallForRoof', Severity.COSMETIC);
 
           if (this.hoveredOverheadTileId !== bestTileId) {
             if (this.hoveredOverheadTileId && this.tileManager.setTileHoverHidden) {
@@ -5204,19 +2487,12 @@ export class InteractionManager {
     // Tokens may be rendered on the overlay layer (31) to draw above post-processing.
     // Ensure raycasting includes that layer, otherwise tokens won't be clickable/draggable.
     const prevRayMask = this.raycaster.layers?.mask;
-    try {
-      this.raycaster.layers?.enable?.(OVERLAY_THREE_LAYER);
-      this.raycaster.layers?.enable?.(0);
-    } catch (_) {
-    }
+    safeCall(() => { this.raycaster.layers?.enable?.(OVERLAY_THREE_LAYER); this.raycaster.layers?.enable?.(0); }, 'hover.tokenLayers', Severity.COSMETIC);
 
     const interactables = this.tokenManager.getAllTokenSprites();
     const intersects = this.raycaster.intersectObjects(interactables, false);
 
-    try {
-      if (typeof prevRayMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevRayMask;
-    } catch (_) {
-    }
+    safeCall(() => { if (typeof prevRayMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevRayMask; }, 'hover.restoreTokenLayers', Severity.COSMETIC);
 
     if (intersects.length > 0) {
       const hit = intersects[0];
@@ -5270,15 +2546,14 @@ export class InteractionManager {
         // Track last pointer position for paste placement.
         // Only update when the pointer is actually over the canvas to avoid using
         // stale values from dragging UI.
-        try {
+        safeCall(() => {
           const rect = this.canvasElement.getBoundingClientRect();
           const inside = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
           if (inside && !this._isEventFromUI(event)) {
             this._lastPointerClientX = event.clientX;
             this._lastPointerClientY = event.clientY;
           }
-        } catch (_) {
-        }
+        }, 'pointerMove.trackPointer', Severity.COSMETIC);
 
         // PERFORMANCE: Skip expensive hover detection if mouse is not over the canvas.
         // This prevents raycasting when hovering over Tweakpane UI or other overlays.
@@ -5304,11 +2579,7 @@ export class InteractionManager {
             if (this._pendingLight.canEdit && this._pendingLight.sprite && this._pendingLight.hitPoint) {
               // Hide the radius slider overlay immediately; the per-frame gizmo update will
               // also keep it hidden while dragging.
-              try {
-                const ui = this._radiusSliderUI;
-                if (ui?.el) ui.el.style.display = 'none';
-              } catch (_) {
-              }
+              safeCall(() => { const ui = this._radiusSliderUI; if (ui?.el) ui.el.style.display = 'none'; }, 'pointerMove.hideRadiusSlider', Severity.COSMETIC);
 
               this.startDrag(this._pendingLight.sprite, this._pendingLight.hitPoint);
             }
@@ -5339,7 +2610,7 @@ export class InteractionManager {
               cursorX = snapped.x;
               cursorY = snapped.y;
             }
-            this._updateMapPointPreview(cursorX, cursorY);
+            this.mapPointDrawHandler.updateCursorPreview(cursorX, cursorY);
           }
           // Don't return - allow other hover effects to work
         }
@@ -5442,7 +2713,7 @@ export class InteractionManager {
               this.dragState.mapPointPoints[idx].y = y;
             }
 
-            this._updateDraggedMapPointHelperGeometry();
+            this.mapPointDrawHandler.updateDraggedHelperGeometry();
           }
           return;
         }
@@ -5563,25 +2834,17 @@ export class InteractionManager {
             overlay.style.display = 'block';
 
             // Delegate overlay geometry/label updates to the SelectionBoxEffect.
-            try {
-              this.selectionBoxEffect?.updateOverlayGeometry?.(width, height);
-              this.selectionBoxEffect?.updateLabel?.(width, height);
-            } catch (_) {
-            }
+            safeCall(() => { this.selectionBoxEffect?.updateOverlayGeometry?.(width, height); this.selectionBoxEffect?.updateLabel?.(width, height); }, 'dragSelect.updateOverlay', Severity.COSMETIC);
           } else if (overlay) {
             overlay.style.display = 'none';
-            try {
-              this.selectionBoxEffect?.updateLabel?.(0, 0);
-            } catch (_) {
-            }
+            safeCall(() => this.selectionBoxEffect?.updateLabel?.(0, 0), 'dragSelect.clearLabel', Severity.COSMETIC);
           }
 
           // World-space projected shadow
-          try {
+          safeCall(() => {
             if (selectionEnabled) this.selectionBoxEffect?.updateShadowFromDrag?.();
             else this.selectionBoxEffect?._hideSelectionShadow?.();
-          } catch (_) {
-          }
+          }, 'dragSelect.shadow', Severity.COSMETIC);
 
           return;
         }
@@ -5706,7 +2969,7 @@ export class InteractionManager {
 
           // Enhanced lights: recompute the LOS-clipped radius polygon at ~15hz while dragging.
           // This lets the user see the true end-state shape while moving the light.
-          try {
+          safeCall(() => {
             if (isEnhancedLightDrag) {
               const enhancedLightIconManager2 = window.MapShine?.enhancedLightIconManager;
               const lightingEffect = window.MapShine?.lightingEffect;
@@ -5722,7 +2985,7 @@ export class InteractionManager {
 
                     // Also update the actual MapShine light contribution while dragging so the
                     // user sees the true lighting result in real time.
-                    try {
+                    safeCall(() => {
                       const src = lightingEffect?.mapshineLights?.get?.(`mapshine:${pid}`);
                       if (src?.document) {
                         // Diagnostics: if the light appears to get ~2x brighter while dragging,
@@ -5735,18 +2998,11 @@ export class InteractionManager {
                         if (!this._enhancedLightDragDebug) this._enhancedLightDragDebug = new Map();
                         const dbg = this._enhancedLightDragDebug.get(dbgKey) || { lastLogMs: -Infinity };
 
-                        let before = null;
-                        try {
+                        const before = safeCall(() => {
                           const u = src.material?.uniforms;
-                          if (u) {
-                            before = {
-                              brightness: u.uBrightness?.value,
-                              alpha: u.uAlpha?.value,
-                              intensity: u.uIntensity?.value
-                            };
-                          }
-                        } catch (_) {
-                        }
+                          if (u) return { brightness: u.uBrightness?.value, alpha: u.uAlpha?.value, intensity: u.uIntensity?.value };
+                          return null;
+                        }, 'lightDrag.snapshotUniforms', Severity.COSMETIC, { fallback: null });
 
                         const foundryPos = Coordinates.toFoundry(p.position.x, p.position.y);
                         // IMPORTANT: Do not create a new doc object here.
@@ -5757,11 +3013,11 @@ export class InteractionManager {
                         // Force rebuild so the wall-clipped polygon updates with position.
                         src.updateData?.(src.document, true);
 
-                        try {
+                        safeCall(() => {
                           // Mitigation: if we ever end up with duplicate meshes for the same light
                           // in the light scene, brightness will roughly double due to additive blending.
                           // Enforce that only src.mesh remains.
-                          try {
+                          safeCall(() => {
                             if (src.mesh) {
                               src.mesh.userData = src.mesh.userData || {};
                               src.mesh.userData.lightId = src.id;
@@ -5769,25 +3025,19 @@ export class InteractionManager {
 
                             const sceneParent = lightingEffect?.lightScene;
                             if (sceneParent?.children && Array.isArray(sceneParent.children) && typeof sceneParent.remove === 'function') {
-                              let found = 0;
                               for (let i = sceneParent.children.length - 1; i >= 0; i--) {
                                 const c = sceneParent.children[i];
-                                // Match either by our explicit tag OR by material identity.
-                                // Material identity is important for legacy/orphan meshes which
-                                // may have been created before we started tagging userData.lightId.
                                 const isThisLight = (c?.userData?.lightId === src.id) || (c?.material === src.material);
                                 if (!isThisLight) continue;
-                                found++;
 
                                 // Keep the currently tracked mesh; remove any others.
                                 if (c !== src.mesh) {
                                   sceneParent.remove(c);
-                                  try { c.geometry?.dispose?.(); } catch (_) {}
+                                  safeCall(() => c.geometry?.dispose?.(), 'lightDrag.disposeOrphan', Severity.COSMETIC);
                                 }
                               }
                             }
-                          } catch (_) {
-                          }
+                          }, 'lightDrag.dedupeMeshes', Severity.COSMETIC);
 
                           // Check for duplicate meshes under the light scene.
                           const parent = src.mesh?.parent ?? lightingEffect?.lightScene;
@@ -5832,24 +3082,20 @@ export class InteractionManager {
                           // Last-resort guard: if brightness-related uniforms drift during the
                           // drag update, restore them so the visual result stays stable.
                           if (changed && before && u2) {
-                            try {
+                            safeCall(() => {
                               if (u2.uBrightness && Number.isFinite(before.brightness)) u2.uBrightness.value = before.brightness;
                               if (u2.uAlpha && Number.isFinite(before.alpha)) u2.uAlpha.value = before.alpha;
                               if (u2.uIntensity && Number.isFinite(before.intensity)) u2.uIntensity.value = before.intensity;
-                            } catch (_) {
-                            }
+                            }, 'lightDrag.restoreUniforms', Severity.COSMETIC);
                           }
-                        } catch (_) {
-                        }
+                        }, 'lightDrag.dupeCheck', Severity.COSMETIC);
                       }
-                    } catch (_) {
-                    }
+                    }, 'lightDrag.enhancedUpdate', Severity.COSMETIC);
                   }
                 }
               }
             }
-          } catch (_) {
-          }
+          }, 'lightDrag.enhancedRadiusRefresh', Severity.COSMETIC);
 
           if (this.dragMeasure.active && this.dragMeasure.el && canvas?.grid?.measurePath) {
             const leaderPreview = this.dragState.previews.get(this.dragState.leaderId);
@@ -5912,7 +3158,7 @@ export class InteractionManager {
           this._pendingLight.canEdit = false;
 
           if (sprite && id && type) {
-            try {
+            safeCall(() => {
               const lightEditor = window.MapShine?.lightEditor;
               if (type === 'foundry') {
                 const light = canvas?.lighting?.get?.(id);
@@ -5929,8 +3175,7 @@ export class InteractionManager {
                 const root = enhancedLightIconManager?.getRootObject?.(id) || sprite;
                 lightEditor?.show?.({ type: 'enhanced', id: String(id) }, root);
               }
-            } catch (_) {
-            }
+            }, 'pointerUp.lightEditorShow', Severity.COSMETIC);
           }
 
           return;
@@ -5942,10 +3187,7 @@ export class InteractionManager {
           return;
         }
 
-        try {
-          this._hideUIHoverLabel();
-        } catch (_) {
-        }
+        safeCall(() => this._hideUIHoverLabel(), 'pointerUp.hideHoverLabel', Severity.COSMETIC);
 
         // Handle Right Click (HUD toggle)
         if (event.button === 2 && this.rightClickState.active) {
@@ -6047,12 +3289,10 @@ export class InteractionManager {
                 }
             };
 
-            try {
+            await safeCall(async () => {
                 await canvas.scene.createEmbeddedDocuments('AmbientLight', [data]);
                 log.info(`Created AmbientLight at (${startF.x.toFixed(1)}, ${startF.y.toFixed(1)}) with dim radius ${dim.toFixed(1)}`);
-            } catch (e) {
-                log.error('Failed to create AmbientLight', e);
-            }
+            }, 'pointerUp.createLight', Severity.DEGRADED);
             
             return;
         }
@@ -6089,14 +3329,12 @@ export class InteractionManager {
                   c[3] = foundryPos.y;
               }
               
-              try {
+              await safeCall(async () => {
                   await wall.document.update({c});
                   log.info(`Updated wall ${wallId} coords`);
-              } catch(e) {
-                  log.error('Failed to update wall', e);
-                  // Revert visual by re-syncing from original doc
-                  this.wallManager.update(wall.document, {c: wall.document.c}); 
-              }
+              }, 'pointerUp.updateWall', Severity.DEGRADED, {
+                  onError: () => this.wallManager.update(wall.document, {c: wall.document.c})
+              });
           }
           
           this.dragState.object = null;
@@ -6118,7 +3356,7 @@ export class InteractionManager {
           }
 
           if (mapPointsManager && groupId && Array.isArray(points) && points.length > 0) {
-            try {
+            await safeCall(async () => {
               const existingGroup = mapPointsManager.getGroup(groupId);
               const isExistingRopeGroup = existingGroup?.effectTarget === 'rope' || existingGroup?.type === 'rope';
               const updates = {
@@ -6150,9 +3388,7 @@ export class InteractionManager {
                   mapPointsManager.createVisualHelper(groupId, group);
                 }
               }
-            } catch (e) {
-              log.error('Failed to update map point group from drag', e);
-            }
+            }, 'pointerUp.updateMapPointGroup', Severity.DEGRADED);
           }
 
           this.dragState.object = null;
@@ -6186,7 +3422,7 @@ export class InteractionManager {
           // Prepare Data based on tool
           const data = this.getWallData(this.wallDraw.type, [startF.x, startF.y, endF.x, endF.y]);
           
-          try {
+          await safeCall(async () => {
             await canvas.scene.createEmbeddedDocuments('Wall', [data]);
             log.info('Created wall segment');
             
@@ -6195,9 +3431,7 @@ export class InteractionManager {
                // TODO: Implement Chaining logic
                // For now, simple single segment
             }
-          } catch (e) {
-            log.error('Failed to create wall', e);
-          }
+          }, 'pointerUp.createWall', Severity.DEGRADED);
           
           return;
         }
@@ -6210,14 +3444,8 @@ export class InteractionManager {
           if (this.dragSelect.mesh) this.dragSelect.mesh.visible = false;
           if (this.dragSelect.border) this.dragSelect.border.visible = false;
           if (this.dragSelect.overlayEl) this.dragSelect.overlayEl.style.display = 'none';
-          try {
-            this.selectionBoxEffect?._hideSelectionShadow?.();
-          } catch (_) {
-          }
-          try {
-            this.selectionBoxEffect?._hideSelectionIllumination?.();
-          } catch (_) {
-          }
+          safeCall(() => this.selectionBoxEffect?._hideSelectionShadow?.(), 'pointerUp.hideSelectionShadow', Severity.COSMETIC);
+          safeCall(() => this.selectionBoxEffect?._hideSelectionIllumination?.(), 'pointerUp.hideSelectionIllumination', Severity.COSMETIC);
 
           if (!wasDragging) {
             return;
@@ -6313,14 +3541,13 @@ export class InteractionManager {
                 // It can incorrectly clamp moves and make tokens feel "stuck" in certain regions.
                 // Snap to grid center (when applicable), then let Foundry enforce collisions.
                 const token = tokenDoc.object;
-                try {
+                safeCall(() => {
                   const grid = canvas?.grid;
                   const isGridless = !!(grid && grid.type === CONST.GRID_TYPES.GRIDLESS);
                   if (!isGridless && grid && typeof grid.getSnappedPoint === 'function') {
                     foundryPos = grid.getSnappedPoint(foundryPos, { mode: CONST.GRID_SNAPPING_MODES.CENTER });
                   }
-                } catch (_) {
-                }
+                }, 'pointerUp.snapToGrid', Severity.COSMETIC);
 
                 // Adjust for center vs top-left
                 const wPx = (token && typeof token.w === 'number' && token.w > 0)
@@ -6365,14 +3592,12 @@ export class InteractionManager {
                 // Update via MapShine Enhanced Lights API
                 const enhancedLightsApi = window.MapShine?.enhancedLights;
                 if (enhancedLightsApi) {
-                    try {
+                    await safeCall(async () => {
                         await enhancedLightsApi.update(id, { transform: { x: foundryPos.x, y: foundryPos.y } });
                         log.info(`Updated MapShine Enhanced Light ${id} position`);
                         anyUpdates = true;
                         anyEnhancedLightUpdates = true;
-                    } catch (err) {
-                        log.error(`Failed to update MapShine Enhanced Light ${id}`, err);
-                    }
+                    }, `pointerUp.updateEnhancedLight.${id}`, Severity.DEGRADED);
                 }
                 continue;
             }
@@ -6380,7 +3605,7 @@ export class InteractionManager {
 
           // Re-enable enhanced light gizmos now that drag is ending.
           // If enhanced light positions changed, force a gizmo resync so the LOS polygon matches.
-          try {
+          safeCall(() => {
             const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
             if (enhancedLightIconManager && this.selection && this.selection.size > 0) {
               for (const sid of this.selection) {
@@ -6392,13 +3617,12 @@ export class InteractionManager {
                 enhancedLightIconManager.syncAllLights?.();
               }
             }
-          } catch (_) {
-          }
+          }, 'pointerUp.resyncGizmos', Severity.COSMETIC);
 
           if (tokenUpdates.length > 0) {
             log.info(`Updating ${tokenUpdates.length} tokens`);
             anyUpdates = true;
-            try {
+            await safeCall(async () => {
               // Foundry: "Unrestrained Movement" UI toggle is implemented as the client setting
               // `core.unconstrainedMovement`. When active (and the user is a GM), Foundry's
               // native drag workflow passes constrainOptions {ignoreWalls:true, ignoreCost:true}.
@@ -6451,19 +3675,15 @@ export class InteractionManager {
 
               await canvas.scene.updateEmbeddedDocuments('Token', tokenUpdates, updateOptions);
               tokenUpdateSucceeded = true;
-            } catch (err) {
-              log.error('Failed to update token positions', err);
-            }
+            }, 'pointerUp.updateTokenPositions', Severity.DEGRADED);
           }
 
           if (lightUpdates.length > 0) {
               log.info(`Updating ${lightUpdates.length} lights`);
               anyUpdates = true;
-              try {
+              await safeCall(async () => {
                   await canvas.scene.updateEmbeddedDocuments('AmbientLight', lightUpdates);
-              } catch (err) {
-                  log.error('Failed to update light positions', err);
-              }
+              }, 'pointerUp.updateLightPositions', Severity.DEGRADED);
           }
             
           // Cleanup
@@ -6505,7 +3725,7 @@ export class InteractionManager {
             this.dragState.axis = null;
 
             // Drag canceled / no movement: restore enhanced light gizmo visibility.
-            try {
+            safeCall(() => {
               const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
               if (enhancedLightIconManager && this.selection && this.selection.size > 0) {
                 for (const sid of this.selection) {
@@ -6514,8 +3734,7 @@ export class InteractionManager {
                   }
                 }
               }
-            } catch (_) {
-            }
+            }, 'pointerUp.restoreGizmosNoMove', Severity.COSMETIC);
 
             this._clearAllDragPreviews();
 
@@ -6524,14 +3743,13 @@ export class InteractionManager {
         log.error('Error in onPointerUp:', error);
 
         // Never leave drag previews stuck in the scene if commit fails.
-        try {
+        safeCall(() => {
           this.dragState.active = false;
           this.dragState.object = null;
           this.dragState.mode = null;
           this.dragState.axis = null;
           this._clearAllDragPreviews();
-        } catch (_) {
-        }
+        }, 'pointerUp.emergencyCleanup', Severity.COSMETIC);
     }
   }
 
@@ -6607,7 +3825,7 @@ export class InteractionManager {
 
     // Copy/Paste for Three-native lights.
     if (isMod && key === 'c') {
-      try {
+      safeCall(async () => {
         const selected = this._getSelectedLights();
         if (!selected.length) return;
 
@@ -6617,33 +3835,20 @@ export class InteractionManager {
             const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
             if (!doc) return;
 
-            let obj;
-            try {
-              obj = (typeof doc.toObject === 'function') ? doc.toObject() : doc;
-            } catch (_) {
-              obj = doc;
-            }
+            const obj = safeCall(() => (typeof doc.toObject === 'function') ? doc.toObject() : doc, 'copy.toObject', Severity.COSMETIC, { fallback: doc });
 
-            let cloned;
-            try {
-              cloned = foundry?.utils?.duplicate ? foundry.utils.duplicate(obj) : JSON.parse(JSON.stringify(obj));
-            } catch (_) {
-              cloned = JSON.parse(JSON.stringify(obj));
-            }
+            const cloned = safeCall(() => foundry?.utils?.duplicate ? foundry.utils.duplicate(obj) : JSON.parse(JSON.stringify(obj)), 'copy.duplicate', Severity.COSMETIC, { fallback: JSON.parse(JSON.stringify(obj)) });
 
             // Ensure we don't carry IDs across.
-            try { delete cloned._id; } catch (_) {}
-            try { delete cloned.id; } catch (_) {}
+            delete cloned._id;
+            delete cloned.id;
 
-            let enhancement = null;
-            try {
+            const enhancement = safeCall(() => {
               const store = window.MapShine?.lightEnhancementStore;
               const enhCfg = store?.getCached?.(doc.id)?.config;
-              if (enhCfg && typeof enhCfg === 'object') {
-                enhancement = JSON.parse(JSON.stringify(enhCfg));
-              }
-            } catch (_) {
-            }
+              if (enhCfg && typeof enhCfg === 'object') return JSON.parse(JSON.stringify(enhCfg));
+              return null;
+            }, 'copy.enhancement', Severity.COSMETIC, { fallback: null });
 
             this._lightClipboard = {
               kind: 'foundry',
@@ -6658,17 +3863,12 @@ export class InteractionManager {
             const data = await api.get(sel.id);
             if (!data) return;
 
-            let cloned;
-            try {
-              cloned = JSON.parse(JSON.stringify(data));
-            } catch (_) {
-              cloned = data;
-            }
+            const cloned = safeCall(() => JSON.parse(JSON.stringify(data)), 'copy.cloneEnhanced', Severity.COSMETIC, { fallback: data });
 
-            try { delete cloned.id; } catch (_) {}
+            delete cloned.id;
             // Never preserve Foundry overrides/links when duplicating.
-            try { delete cloned.linkedFoundryLightId; } catch (_) {}
-            try { delete cloned.overrideFoundry; } catch (_) {}
+            delete cloned.linkedFoundryLightId;
+            delete cloned.overrideFoundry;
 
             const sx = cloned?.transform?.x;
             const sy = cloned?.transform?.y;
@@ -6690,22 +3890,12 @@ export class InteractionManager {
               const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
               if (!doc) continue;
 
-              let obj;
-              try {
-                obj = (typeof doc.toObject === 'function') ? doc.toObject() : doc;
-              } catch (_) {
-                obj = doc;
-              }
+              const obj = safeCall(() => (typeof doc.toObject === 'function') ? doc.toObject() : doc, 'copyMulti.toObject', Severity.COSMETIC, { fallback: doc });
 
-              let cloned;
-              try {
-                cloned = foundry?.utils?.duplicate ? foundry.utils.duplicate(obj) : JSON.parse(JSON.stringify(obj));
-              } catch (_) {
-                cloned = JSON.parse(JSON.stringify(obj));
-              }
+              const cloned = safeCall(() => foundry?.utils?.duplicate ? foundry.utils.duplicate(obj) : JSON.parse(JSON.stringify(obj)), 'copyMulti.duplicate', Severity.COSMETIC, { fallback: JSON.parse(JSON.stringify(obj)) });
 
-              try { delete cloned._id; } catch (_) {}
-              try { delete cloned.id; } catch (_) {}
+              delete cloned._id;
+              delete cloned.id;
 
               items.push({
                 kind: 'foundry',
@@ -6722,16 +3912,11 @@ export class InteractionManager {
               const data = await api.get(sel.id);
               if (!data) continue;
 
-              let cloned;
-              try {
-                cloned = JSON.parse(JSON.stringify(data));
-              } catch (_) {
-                cloned = data;
-              }
+              const cloned = safeCall(() => JSON.parse(JSON.stringify(data)), 'copyMulti.cloneEnhanced', Severity.COSMETIC, { fallback: data });
 
-              try { delete cloned.id; } catch (_) {}
-              try { delete cloned.linkedFoundryLightId; } catch (_) {}
-              try { delete cloned.overrideFoundry; } catch (_) {}
+              delete cloned.id;
+              delete cloned.linkedFoundryLightId;
+              delete cloned.overrideFoundry;
 
               const sx = cloned?.transform?.x;
               const sy = cloned?.transform?.y;
@@ -6761,37 +3946,32 @@ export class InteractionManager {
         }
 
         this._consumeKeyEvent(event);
-      } catch (_) {
-      }
+      }, 'onKeyDown.copy', Severity.COSMETIC);
       return;
     }
 
     if (isMod && key === 'v') {
-      try {
+      safeCall(async () => {
         const clip = this._lightClipboard;
         if (!clip || !clip.kind || !clip.data) return;
 
-        const canEditScene = (() => {
-          try {
+        const canEditScene = safeCall(() => {
             if (!canvas?.scene || !game?.user) return false;
             if (game.user.isGM) return true;
             if (typeof canvas.scene.canUserModify === 'function') return canvas.scene.canUserModify(game.user, 'update');
-          } catch (_) {
-          }
-          return false;
-        })();
+            return false;
+        }, 'paste.canEditScene', Severity.COSMETIC, { fallback: false });
 
         if (!canEditScene) return;
 
         // Determine paste position.
-        let pasteF = null;
-        try {
+        let pasteF = safeCall(() => {
           if (Number.isFinite(this._lastPointerClientX) && Number.isFinite(this._lastPointerClientY)) {
             const w = this.screenToWorld(this._lastPointerClientX, this._lastPointerClientY);
-            if (w) pasteF = Coordinates.toFoundry(w.x, w.y);
+            if (w) return Coordinates.toFoundry(w.x, w.y);
           }
-        } catch (_) {
-        }
+          return null;
+        }, 'paste.pointerToFoundry', Severity.COSMETIC, { fallback: null });
 
         if (!pasteF) {
           // Fallback: offset from source position.
@@ -6808,8 +3988,8 @@ export class InteractionManager {
           if (!canvas?.scene?.createEmbeddedDocuments) return;
 
           const createData = { ...base, x: pasteF.x, y: pasteF.y };
-          try { delete createData._id; } catch (_) {}
-          try { delete createData.id; } catch (_) {}
+          delete createData._id;
+          delete createData.id;
 
           const created = await canvas.scene.createEmbeddedDocuments('AmbientLight', [createData]);
           const newDoc = Array.isArray(created) ? created[0] : null;
@@ -6817,11 +3997,10 @@ export class InteractionManager {
           if (!newId) return;
 
           if (clip.enhancement && typeof clip.enhancement === 'object') {
-            try {
+            await safeCall(async () => {
               const store = window.MapShine?.lightEnhancementStore;
               await store?.upsert?.(newId, clip.enhancement);
-            } catch (_) {
-            }
+            }, 'paste.upsertEnhancement', Severity.COSMETIC);
           }
 
           // Select it (sprite may not exist yet if the icon texture is still loading).
@@ -6840,9 +4019,9 @@ export class InteractionManager {
           const base = clip.data;
 
           const createData = { ...base };
-          try { delete createData.id; } catch (_) {}
-          try { delete createData.linkedFoundryLightId; } catch (_) {}
-          try { delete createData.overrideFoundry; } catch (_) {}
+          delete createData.id;
+          delete createData.linkedFoundryLightId;
+          delete createData.overrideFoundry;
 
           // EnhancedLightsApi accepts either x/y or transform.x/y.
           createData.transform = { x: pasteF.x, y: pasteF.y };
@@ -6855,7 +4034,7 @@ export class InteractionManager {
           this.selection.add(String(newId));
 
           // Prefer selecting via sprite when available, but we can always open the ring.
-          try {
+          safeCall(() => {
             const mgr = window.MapShine?.enhancedLightIconManager;
             const sprite = mgr?.lights?.get?.(String(newId)) || null;
             if (sprite) {
@@ -6864,15 +4043,13 @@ export class InteractionManager {
               const lightEditor = window.MapShine?.lightEditor;
               lightEditor?.show?.({ type: 'enhanced', id: String(newId) }, null);
             }
-          } catch (_) {
-            const lightEditor = window.MapShine?.lightEditor;
-            lightEditor?.show?.({ type: 'enhanced', id: String(newId) }, null);
-          }
+          }, 'paste.selectEnhanced', Severity.COSMETIC, {
+            onError: () => { const le = window.MapShine?.lightEditor; le?.show?.({ type: 'enhanced', id: String(newId) }, null); }
+          });
         }
 
         this._consumeKeyEvent(event);
-      } catch (_) {
-      }
+      }, 'onKeyDown.paste', Severity.COSMETIC);
       return;
     }
 
@@ -6885,19 +4062,18 @@ export class InteractionManager {
     // Handle Map Point Drawing Mode keys
     if (this.mapPointDraw.active) {
       if (event.key === 'Escape') {
-        this.cancelMapPointDrawing();
+        this.mapPointDrawHandler.cancel();
         this._consumeKeyEvent(event);
         return;
       }
       if (event.key === 'Enter') {
-        await this._finishMapPointDrawing();
+        await this.mapPointDrawHandler.finish();
         this._consumeKeyEvent(event);
         return;
       }
       // Backspace removes last point
       if (event.key === 'Backspace' && this.mapPointDraw.points.length > 0) {
-        this.mapPointDraw.points.pop();
-        this._updateMapPointPreview();
+        this.mapPointDrawHandler.removeLastPoint();
         this._consumeKeyEvent(event);
         return;
       }
@@ -6906,6 +4082,7 @@ export class InteractionManager {
     // Delete key
     if (event.key === 'Delete' || event.key === 'Backspace') {
       if (this.selection.size > 0) {
+        let deleteConsumed = false;
         try {
           // Filter for tokens and walls
           const tokensToDelete = [];
@@ -6987,11 +4164,7 @@ export class InteractionManager {
             const enhancedLightsApi = window.MapShine?.enhancedLights;
             if (enhancedLightsApi) {
               for (const id of enhancedLightsToDelete) {
-                try {
-                  await enhancedLightsApi.remove(id);
-                } catch (err) {
-                  log.error(`Failed to delete MapShine Enhanced Light ${id}`, err);
-                }
+                await safeCall(async () => enhancedLightsApi.remove(id), `delete.enhancedLight.${id}`, Severity.DEGRADED);
               }
             }
           }
@@ -7142,69 +4315,31 @@ export class InteractionManager {
         // Keep Foundry's native token control state in sync.
         // Drag-select previously only updated MapShine selection, which meant
         // Foundry never fired controlToken/perception updates and fog/vision could break.
-        try {
-          const fvttToken = canvas.tokens?.get(id);
-          if (fvttToken && !fvttToken.controlled) {
-            fvttToken.control({ releaseOthers: false });
-          }
-        } catch (_) {
-          // Ignore control errors
-        }
+        safeCall(() => { const fvttToken = canvas.tokens?.get(id); if (fvttToken && !fvttToken.controlled) fvttToken.control({ releaseOthers: false }); }, 'selectObject.controlToken', Severity.COSMETIC);
     } else if (sprite.userData.lightId) {
         id = sprite.userData.lightId;
-        // TODO: Visual selection for lights
-        try {
-          if (sprite?.material?.color?.set) sprite.material.color.set(0x8888ff); // Tint blue
-        } catch (_) {
-        }
+        // Visual selection for lights
+        safeCall(() => { if (sprite?.material?.color?.set) sprite.material.color.set(0x8888ff); }, 'selectObject.tintLight', Severity.COSMETIC);
 
         // Scale bump on selection so it reads clearly.
-        try {
-          const base = sprite?.userData?.baseScale;
-          if (base && Number.isFinite(base.x) && Number.isFinite(base.y)) {
-            sprite.scale.set(base.x * 1.15, base.y * 1.15, base.z ?? 1);
-          }
-        } catch (_) {
-        }
+        safeCall(() => { const base = sprite?.userData?.baseScale; if (base && Number.isFinite(base.x) && Number.isFinite(base.y)) sprite.scale.set(base.x * 1.15, base.y * 1.15, base.z ?? 1); }, 'selectObject.scaleLight', Severity.COSMETIC);
 
         if (showLightEditor) {
-          try {
-            const lightEditor = window.MapShine?.lightEditor;
-            if (lightEditor && typeof lightEditor.show === 'function') {
-              lightEditor.show({ type: 'foundry', id: String(id) }, sprite);
-            }
-          } catch (_) {
-          }
+          safeCall(() => { const lightEditor = window.MapShine?.lightEditor; if (lightEditor && typeof lightEditor.show === 'function') lightEditor.show({ type: 'foundry', id: String(id) }, sprite); }, 'selectObject.showFoundryEditor', Severity.COSMETIC);
         }
     } else if (sprite.userData.enhancedLightId) {
         id = sprite.userData.enhancedLightId;
         // Visual selection for MapShine enhanced lights
         // Do not tint here; enhanced light icons may use ShaderMaterial with no .color.
 
-        try {
-          const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
-          enhancedLightIconManager?.setSelected?.(id, true);
-        } catch (_) {
-        }
+        safeCall(() => { const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager; enhancedLightIconManager?.setSelected?.(id, true); }, 'selectObject.setEnhancedSelected', Severity.COSMETIC);
         
         if (showLightEditor) {
-          try {
-            const lightEditor = window.MapShine?.lightEditor;
-            const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
-            const root = enhancedLightIconManager?.getRootObject?.(id) || sprite;
-            if (lightEditor && typeof lightEditor.show === 'function') {
-              lightEditor.show({ type: 'enhanced', id: String(id) }, root);
-            }
-          } catch (_) {
-          }
+          safeCall(() => { const lightEditor = window.MapShine?.lightEditor; const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager; const root = enhancedLightIconManager?.getRootObject?.(id) || sprite; if (lightEditor && typeof lightEditor.show === 'function') lightEditor.show({ type: 'enhanced', id: String(id) }, root); }, 'selectObject.showEnhancedEditor', Severity.COSMETIC);
         }
 
         // Ensure the legacy inspector stays out of the way.
-        try {
-          const inspector = window.MapShine?.enhancedLightInspector;
-          inspector?.hide?.();
-        } catch (_) {
-        }
+        safeCall(() => { const inspector = window.MapShine?.enhancedLightInspector; inspector?.hide?.(); }, 'selectObject.hideInspector', Severity.COSMETIC);
     } else {
         return;
     }
@@ -7227,29 +4362,15 @@ export class InteractionManager {
           // canvas.tokens.controlled is kept in sync with MapShine's
           // selection state. This is important for fog bypass logic
           // which checks whether the GM has any controlled tokens.
-          try {
-            const fvttToken = canvas.tokens?.get(id);
-            if (fvttToken) fvttToken.release();
-          } catch (_) {
-            // Ignore release errors
-          }
+          safeCall(() => { const fvttToken = canvas.tokens?.get(id); if (fvttToken) fvttToken.release(); }, 'clearSelection.releaseToken', Severity.COSMETIC);
       }
       // Check Foundry Light
       if (this.lightIconManager && this.lightIconManager.lights.has(id)) {
           const sprite = this.lightIconManager.lights.get(id);
-          try {
-            if (sprite?.material?.color?.set) sprite.material.color.set(0xffffff); // Reset tint
-          } catch (_) {
-          }
+          safeCall(() => { if (sprite?.material?.color?.set) sprite.material.color.set(0xffffff); }, 'clearSelection.resetTint', Severity.COSMETIC);
 
           // Reset scale if we stored a baseScale.
-          try {
-            const base = sprite?.userData?.baseScale;
-            if (base && Number.isFinite(base.x) && Number.isFinite(base.y)) {
-              sprite.scale.set(base.x, base.y, base.z ?? 1);
-            }
-          } catch (_) {
-          }
+          safeCall(() => { const base = sprite?.userData?.baseScale; if (base && Number.isFinite(base.x) && Number.isFinite(base.y)) sprite.scale.set(base.x, base.y, base.z ?? 1); }, 'clearSelection.resetScale', Severity.COSMETIC);
       }
       // Check MapShine Enhanced Light
       const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
@@ -7257,10 +4378,7 @@ export class InteractionManager {
           const sprite = enhancedLightIconManager.lights.get(id);
           // Do not reset tint here; enhanced light icons may use ShaderMaterial with no .color.
 
-          try {
-            enhancedLightIconManager?.setSelected?.(id, false);
-          } catch (_) {
-          }
+          safeCall(() => enhancedLightIconManager?.setSelected?.(id, false), 'clearSelection.deselectEnhanced', Severity.COSMETIC);
       }
       // Check Wall
       if (this.wallManager.walls.has(id)) {
@@ -7272,11 +4390,7 @@ export class InteractionManager {
     this._hideSelectedLightOutline();
     
     // Hide light editor when clearing selection.
-    try {
-      const lightEditor = window.MapShine?.lightEditor;
-      lightEditor?.hide?.();
-    } catch (_) {
-    }
+    safeCall(() => { const lightEditor = window.MapShine?.lightEditor; lightEditor?.hide?.(); }, 'clearSelection.hideEditor', Severity.COSMETIC);
 
     // Hide enhanced light inspector when clearing selection
     const inspector = window.MapShine?.enhancedLightInspector;
@@ -7344,21 +4458,17 @@ export class InteractionManager {
     
     this.clearSelection();
 
-    try {
+    safeCall(() => {
       const line = this._selectedLightOutline?.line;
       if (line) {
         line.parent?.remove?.(line);
         line.geometry?.dispose?.();
         line.material?.dispose?.();
       }
-    } catch (_) {
-    }
+    }, 'dispose.lightOutline', Severity.COSMETIC);
 
-    try {
-      this.selectionBoxEffect?.dispose?.();
-      this.selectionBoxEffect = null;
-    } catch (_) {
-    }
+    safeDispose(this.selectionBoxEffect, 'dispose.selectionBoxEffect');
+    this.selectionBoxEffect = null;
 
     log.info('InteractionManager disposed');
   }

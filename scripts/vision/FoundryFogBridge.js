@@ -228,11 +228,36 @@ export class FoundryFogBridge {
   }
 
   /**
-   * Get the current vision texture (real-time LOS)
+   * Get the current vision texture (real-time LOS).
+   * When global illumination is active, the raw vision mask is legitimately
+   * empty — return white (fully visible) to match Foundry's native behavior.
    * @returns {THREE.Texture}
    */
   getVisionTexture() {
+    if (this._isGlobalIlluminationActive()) return this._fallbackWhite;
     return this.visionTexture || this._fallbackWhite;
+  }
+
+  /** @private */
+  _isGlobalIlluminationActive() {
+    try {
+      const gls = canvas?.environment?.globalLightSource;
+      if (gls?.active) {
+        const darknessLevel = canvas.environment.darknessLevel ?? 0;
+        const { min = 0, max = 1 } = gls.data?.darkness ?? {};
+        if (darknessLevel >= min && darknessLevel <= max) return true;
+      }
+    } catch (_) {}
+    try {
+      const globalLight = canvas?.scene?.environment?.globalLight?.enabled
+                       ?? canvas?.scene?.globalLight ?? false;
+      if (globalLight) {
+        const darkness = canvas?.scene?.environment?.darknessLevel
+                      ?? canvas?.scene?.darkness ?? 0;
+        if (darkness < 0.5) return true;
+      }
+    } catch (_) {}
+    return false;
   }
 
   /**

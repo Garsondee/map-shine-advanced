@@ -722,16 +722,11 @@ export class BloomEffect extends EffectBase {
       } catch (_) {
       }
 
-      // Prefer WorldSpaceFogEffect's self-maintained vision RT when available.
+      // Extract Foundry's PIXI vision texture via the fog bridge (pixel extraction).
+      // FoundryFogBridge uses extract.pixels() for cross-context transfer.
       let visionTex = null;
-      const fog = window.MapShine?.fogEffect;
-      const fogVisionTex = fog?.visionRenderTarget?.texture;
-      if (fogVisionTex) {
-        visionTex = fogVisionTex;
-      } else {
-        this.fogBridge?.sync?.();
-        visionTex = this.fogBridge?.getVisionTexture?.();
-      }
+      this.fogBridge?.sync?.();
+      visionTex = this.fogBridge?.getVisionTexture?.();
 
       if (u?.tVision) {
         u.tVision.value = visionTex;
@@ -743,10 +738,10 @@ export class BloomEffect extends EffectBase {
         u.uMaskEnabled.value = 0.0;
       }
 
-      // If we're using the fog RT (scene-space), enable scene-rect mapping.
-      // If we're using Foundry's vision texture (screen-space), we should skip mapping.
+      // Vision texture from the fogBridge covers the full canvas (screen-space),
+      // so disable scene-rect mapping when using it.
       if (u?.uHasSceneRect) {
-        u.uHasSceneRect.value = (visionTex === fogVisionTex && u.uHasSceneRect.value > 0.5) ? 1.0 : 0.0;
+        u.uHasSceneRect.value = 0.0;
       }
 
       if (u?.uVisionTexelSize) {

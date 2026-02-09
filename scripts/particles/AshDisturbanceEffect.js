@@ -112,7 +112,7 @@ export class AshDisturbanceEffect extends EffectBase {
 
     this.priority = 2;
     this.alwaysRender = false;
-    this.enabled = false;
+    this.enabled = true;
 
     this.scene = null;
     this.renderer = null;
@@ -121,7 +121,7 @@ export class AshDisturbanceEffect extends EffectBase {
     this.batchRenderer = null;
 
     this.params = {
-      enabled: false,
+      enabled: true,
       burstRate: 240,
       burstDuration: 0.35,
       burstRadius: 180,
@@ -159,7 +159,7 @@ export class AshDisturbanceEffect extends EffectBase {
         { name: 'motion', label: 'Motion', type: 'inline', separator: true, parameters: ['windInfluence', 'curlStrength', 'curlScale'] }
       ],
       parameters: {
-        enabled: { type: 'boolean', default: false },
+        enabled: { type: 'boolean', default: true },
         burstRate: { type: 'slider', label: 'Burst Rate', min: 10, max: 800, step: 5, default: 240, throttle: 50 },
         burstDuration: { type: 'slider', label: 'Burst Duration (s)', min: 0.05, max: 2.0, step: 0.05, default: 0.35, throttle: 50 },
         burstRadius: { type: 'slider', label: 'Burst Radius', min: 30, max: 600, step: 10, default: 180, throttle: 50 },
@@ -439,13 +439,19 @@ export class AshDisturbanceEffect extends EffectBase {
     const dims = canvas?.dimensions;
     if (!dims) return false;
 
+    // worldX/worldY are in Three.js world space (Y-up).
+    // Convert back to Foundry coords (Y-down) for mask sampling.
+    const foundryX = worldX;
+    const foundryY = (dims.height || 0) - worldY;
+
     const sceneX = dims.sceneX || 0;
     const sceneY = dims.sceneY || 0;
     const sceneW = dims.sceneWidth || dims.width || 1;
     const sceneH = dims.sceneHeight || dims.height || 1;
 
-    const u = (worldX - sceneX) / sceneW;
-    const v = 1.0 - ((worldY - sceneY) / sceneH);
+    // UV in Foundry space: u left->right, v top->bottom (matches mask data layout)
+    const u = (foundryX - sceneX) / sceneW;
+    const v = (foundryY - sceneY) / sceneH;
     if (!Number.isFinite(u) || !Number.isFinite(v)) return false;
 
     const cu = Math.max(0, Math.min(1, u));
@@ -483,9 +489,10 @@ export class AshDisturbanceEffect extends EffectBase {
     const offsetY = (d.height || height) - (d.sceneY || 0) - height;
 
     const sceneComposer = window.MapShine?.sceneComposer;
+    // groundZ fallback must be 0 (ground plane), NOT camera height
     const groundZ = (sceneComposer && typeof sceneComposer.groundZ === 'number')
       ? sceneComposer.groundZ
-      : 1000;
+      : 0;
 
     const material = new THREE.MeshBasicMaterial({
       map: this._particleTexture,

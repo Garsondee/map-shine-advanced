@@ -67,6 +67,10 @@ export function getEffectMaskRegistry() {
 /** Asset cache to prevent redundant loads */
 const assetCache = new Map();
 
+/** Cache hit/miss counters for diagnostics */
+let _cacheHits = 0;
+let _cacheMisses = 0;
+
  /** Generic texture cache for non-map assets (e.g. light cookies/gobos) */
  const textureCache = new Map();
 
@@ -116,12 +120,14 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
 
         const missingCritical = Array.from(CRITICAL_MASK_IDS).filter((id) => !cachedIds.has(id));
         if (missingCritical.length === 0) {
-          log.debug('Using cached asset bundle');
+          _cacheHits++;
+          log.info(`Asset bundle cache hit (${cachedMaskCount} masks): ${basePath}`);
           return {
             success: true,
             bundle: cached,
             warnings: [],
-            error: null
+            error: null,
+            cacheHit: true
           };
         }
 
@@ -131,6 +137,8 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
         });
       }
     }
+
+    _cacheMisses++;
 
     // Step 1: Load base texture (optional if Foundry already loaded it)
     let baseTexture = null;
@@ -174,11 +182,23 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
     let loaded = skipBaseTexture ? 0 : 1;
     const totalMasks = maskEntries.length;
 
+    // When FilePicker returned no files, fall back to direct URL probing.
+    // This is common for player clients that lack FilePicker browse permissions.
+    const useDirectProbe = availableFiles.length === 0;
+    if (useDirectProbe) {
+      log.info('FilePicker returned no files — falling back to direct URL probing');
+    }
+
     const maskPromises = maskEntries.map(async ([maskId, maskDef]) => {
       await semaphore.acquire();
       try {
-        // Check if this mask exists in discovered files
-        const maskFile = findMaskInFiles(availableFiles, basePath, maskDef.suffix);
+        // Resolve the mask file path: from FilePicker results or via direct URL probe
+        let maskFile = null;
+        if (useDirectProbe) {
+          maskFile = await probeMaskUrl(basePath, maskDef.suffix);
+        } else {
+          maskFile = findMaskInFiles(availableFiles, basePath, maskDef.suffix);
+        }
 
         // Fast-path: if an optional water mask is not present, skip the loading step entirely
         // so we don't stall on a map that doesn't use water at all.
@@ -202,12 +222,16 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
             const spanId = doLoadProfile ? `assetLoader.maskTexture:${spanToken}:${maskId}` : null;
             if (doLoadProfile) {
               try {
-                lp.begin(spanId, { maskId, path: maskFile });
+                lp.begin(spanId, { maskId, path: maskFile, direct: true });
               } catch (e) {
               }
             }
             try {
-              maskTexture = await loadTextureAsync(maskFile);
+              // Use direct loading (fetch + createImageBitmap) for off-thread decode.
+              // Bypasses PIXI, eliminates canvas clone, downscales large masks, and
+              // applies final texture settings (colorSpace, mipmaps, flipY) in one pass.
+              const isColorTexture = ['bush', 'tree'].includes(maskId);
+              maskTexture = await loadMaskTextureDirect(maskFile, { isColorTexture });
             } finally {
               if (doLoadProfile) {
                 try {
@@ -227,26 +251,10 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
         }
 
         if (maskTexture) {
+          // Texture settings (colorSpace, flipY, mipmaps, filters) are already
+          // configured by loadMaskTextureDirect — no post-load overrides needed.
           const isColorTexture = ['bush', 'tree'].includes(maskId);
-          if (isColorTexture && THREE.SRGBColorSpace) {
-            maskTexture.colorSpace = THREE.SRGBColorSpace;
-          }
-
-          if (!isColorTexture && THREE.NoColorSpace) {
-            maskTexture.colorSpace = THREE.NoColorSpace;
-          }
-
-          if (!isColorTexture) {
-            // Mask UVs are authored in scene-UV space (top-left origin). Keep flipY=false
-            // and rely on shader-side V inversion so all mask sampling is consistent.
-            maskTexture.flipY = false;
-            maskTexture.generateMipmaps = false;
-            maskTexture.minFilter = THREE.LinearFilter;
-            maskTexture.magFilter = THREE.LinearFilter;
-            maskTexture.needsUpdate = true;
-          }
-          
-          log.debug(`Loaded effect mask: ${maskId} from ${resolvedMaskPath} (colorSpace: ${isColorTexture ? 'sRGB' : 'Default'}, mipmaps: ${(!!maskTexture.generateMipmaps).toString()})`);
+          log.debug(`Loaded effect mask: ${maskId} from ${resolvedMaskPath} (colorSpace: ${isColorTexture ? 'sRGB' : 'data'}, ${maskTexture.image?.width ?? '?'}×${maskTexture.image?.height ?? '?'})`);
           return {
             id: maskId,
             suffix: maskDef.suffix,
@@ -476,6 +484,162 @@ async function discoverAvailableFiles(basePath) {
       } catch (e) {
       }
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Direct mask texture loading (bypasses PIXI for off-thread decode)
+// ---------------------------------------------------------------------------
+
+/** Feature-detect createImageBitmap support once */
+const _hasImageBitmap = typeof createImageBitmap === 'function';
+
+/** Default max dimension for data mask downscaling (specular, roughness, etc.) */
+const MASK_MAX_SIZE = 2048;
+
+/** Color textures (bush, tree) keep full resolution for visual quality */
+const COLOR_MASK_MAX_SIZE = 4096;
+
+/**
+ * Load a mask texture directly via fetch + createImageBitmap → THREE.Texture.
+ * This bypasses PIXI entirely:
+ *   - Image decode happens off the main thread (createImageBitmap)
+ *   - No PIXI texture management overhead
+ *   - No canvas clone step needed (ImageBitmap is already detached)
+ *   - Large masks are downscaled during decode (zero main-thread cost)
+ *
+ * Texture settings (flipY, mipmaps, colorSpace, filters) are applied
+ * immediately so there is no need for post-load reconfiguration and
+ * only a single `needsUpdate = true` cycle occurs.
+ *
+ * Falls back to the legacy PIXI path if createImageBitmap is unavailable.
+ *
+ * @param {string} url - URL to the mask image file
+ * @param {object} [opts]
+ * @param {boolean} [opts.isColorTexture=false] - True for bush/tree (sRGB + mipmaps)
+ * @param {number}  [opts.maxSize] - Max dimension; larger images are downscaled during decode
+ * @returns {Promise<THREE.Texture>} Loaded THREE.Texture
+ * @private
+ */
+async function loadMaskTextureDirect(url, opts = {}) {
+  const THREE = window.THREE;
+  const absoluteUrl = normalizePath(url);
+  const isColor = !!opts.isColorTexture;
+  const maxSize = opts.maxSize ?? (isColor ? COLOR_MASK_MAX_SIZE : MASK_MAX_SIZE);
+
+  if (!_hasImageBitmap) {
+    // Fallback: use the legacy PIXI-based loader
+    return loadTextureAsync(absoluteUrl);
+  }
+
+  const response = await fetch(absoluteUrl);
+  if (!response.ok) {
+    throw new Error(`Fetch failed (${response.status}): ${absoluteUrl}`);
+  }
+
+  const blob = await response.blob();
+
+  // Build createImageBitmap options — decode + optional downscale off-thread.
+  // Color textures (bush/tree) use premultiplied alpha so that transparent pixels
+  // become (0,0,0,0) instead of (1,1,1,0).  This eliminates white fringe from
+  // bilinear filtering at content edges — the GPU interpolates premultiplied
+  // values correctly.  The shader un-premultiplies after sampling.
+  // Data masks keep straight alpha (premultiplyAlpha:'none') since they are
+  // sampled as single-channel data, not blended as RGBA.
+  const bitmapOpts = {
+    premultiplyAlpha: isColor ? 'premultiply' : 'none',
+    colorSpaceConversion: 'none'
+  };
+
+  // Decode off the main thread, then downscale if the image exceeds maxSize.
+  // We resize the already-decoded ImageBitmap (not the blob) to avoid
+  // decompressing the PNG/WebP/JPG data a second time.
+  let bitmap = await createImageBitmap(blob, bitmapOpts);
+
+  if (maxSize > 0 && (bitmap.width > maxSize || bitmap.height > maxSize)) {
+    const w = bitmap.width;
+    const h = bitmap.height;
+    const scale = maxSize / Math.max(w, h);
+    const newW = Math.max(1, Math.round(w * scale));
+    const newH = Math.max(1, Math.round(h * scale));
+
+    try {
+      // Resize the decoded bitmap (fast — no re-decompression)
+      const resized = await createImageBitmap(bitmap, 0, 0, w, h, {
+        resizeWidth: newW,
+        resizeHeight: newH,
+        resizeQuality: 'medium',
+        // Preserve the premultiply mode from the original decode so the
+        // resize averages pixels in the correct alpha space.
+        premultiplyAlpha: isColor ? 'premultiply' : 'none'
+      });
+      bitmap.close(); // Release full-size memory
+      bitmap = resized;
+      log.debug(`Downscaled mask ${absoluteUrl}: ${w}×${h} → ${newW}×${newH}`);
+    } catch (_) {
+      // If resize options aren't supported, keep the full-size bitmap
+      log.debug(`Resize not supported — keeping full-size mask ${w}×${h}`);
+    }
+  }
+
+  // Create the THREE.Texture with final, correct settings — no double config.
+  const texture = new THREE.Texture(bitmap);
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+
+  if (isColor) {
+    // Color textures (bush, tree) — sRGB, no mipmaps.
+    // Mipmaps with straight-alpha textures cause "mipmap bleed": gl.generateMipmap()
+    // averages transparent texels whose RGB is white with opaque content, creating
+    // white halos at every mip level that no shader correction can undo.
+    // flipY=false matches the base map and data masks (all share geometry with scale.y=-1).
+    texture.colorSpace = THREE.SRGBColorSpace || '';
+    texture.flipY = false;
+    texture.generateMipmaps = false;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+  } else {
+    // Data masks — linear, no mipmaps, flipY=false (shader handles UV inversion)
+    texture.colorSpace = THREE.NoColorSpace || '';
+    texture.flipY = false;
+    texture.generateMipmaps = false;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+  }
+
+  texture.needsUpdate = true;
+  return texture;
+}
+
+/**
+ * Probe known suffix+format URLs directly when FilePicker browse returned no files.
+ * This is common for player clients that lack FilePicker access.
+ * Uses lightweight HEAD requests to avoid downloading full images just to check existence.
+ * All formats are probed in parallel via Promise.any for minimal latency; the first
+ * successful response wins (respecting SUPPORTED_FORMATS priority via a small delay trick).
+ *
+ * @param {string} basePath - Base path without extension (e.g., 'worlds/myworld/maps/BattleMap')
+ * @param {string} suffix - Mask suffix (e.g., '_Specular')
+ * @returns {Promise<string|null>} URL of the first format that exists, or null
+ * @private
+ */
+async function probeMaskUrl(basePath, suffix) {
+  // Build parallel probes — all formats fire simultaneously
+  const probes = SUPPORTED_FORMATS.map(async (format) => {
+    const url = normalizePath(`${basePath}${suffix}.${format}`);
+    const resp = await fetch(url, { method: 'HEAD' });
+    if (!resp.ok) throw new Error(`${resp.status}`);
+    return url;
+  });
+
+  try {
+    // Promise.any resolves with the first success
+    const url = await Promise.any(probes);
+    log.debug(`Direct probe hit: ${url}`);
+    return url;
+  } catch (_) {
+    // All probes failed — mask doesn't exist in any format
+    return null;
   }
 }
 
@@ -814,6 +978,49 @@ export function clearCache() {
 }
 
 /**
+ * Eagerly upload all textures in a bundle to the GPU via renderer.initTexture().
+ *
+ * By default Three.js defers texture upload (gl.texImage2D) until the texture is
+ * first used in a draw call. For a scene with 10-14 masks this causes a massive
+ * first-frame stall. Calling this function during loading spreads that cost across
+ * the loading phase where the user already expects to wait.
+ *
+ * @param {THREE.WebGLRenderer} renderer - The active renderer
+ * @param {MapAssetBundle} bundle - The loaded asset bundle
+ * @param {(uploaded: number, total: number) => void} [onProgress] - Optional progress callback
+ * @returns {{uploaded: number, totalMs: number}} Upload stats
+ * @public
+ */
+export function warmupBundleTextures(renderer, bundle, onProgress) {
+  if (!renderer?.initTexture || !bundle) return { uploaded: 0, totalMs: 0 };
+
+  const textures = [];
+  if (bundle.baseTexture) textures.push(bundle.baseTexture);
+  for (const mask of (bundle.masks || [])) {
+    if (mask?.texture) textures.push(mask.texture);
+  }
+
+  if (textures.length === 0) return { uploaded: 0, totalMs: 0 };
+
+  const t0 = performance.now();
+  let uploaded = 0;
+
+  for (const tex of textures) {
+    try {
+      renderer.initTexture(tex);
+      uploaded++;
+      if (onProgress) onProgress(uploaded, textures.length);
+    } catch (e) {
+      log.debug(`GPU warmup failed for texture:`, e);
+    }
+  }
+
+  const totalMs = performance.now() - t0;
+  log.info(`GPU texture warmup: ${uploaded}/${textures.length} textures uploaded in ${totalMs.toFixed(1)}ms`);
+  return { uploaded, totalMs };
+}
+
+/**
  * Get cache statistics
  * @returns {{size: number, bundles: string[]}} Cache stats
  * @public
@@ -821,6 +1028,11 @@ export function clearCache() {
 export function getCacheStats() {
   return {
     size: assetCache.size,
-    bundles: Array.from(assetCache.keys())
+    bundles: Array.from(assetCache.keys()),
+    hits: _cacheHits,
+    misses: _cacheMisses,
+    hitRate: (_cacheHits + _cacheMisses) > 0
+      ? (_cacheHits / (_cacheHits + _cacheMisses) * 100).toFixed(1) + '%'
+      : 'N/A'
   };
 }

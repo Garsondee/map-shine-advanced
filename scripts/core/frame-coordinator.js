@@ -327,6 +327,15 @@ export class FrameCoordinator {
   }
 
   /**
+   * Whether the coordinator has been successfully initialized and is
+   * actively running post-PIXI callbacks on the Foundry ticker.
+   * @returns {boolean}
+   */
+  get initialized() {
+    return this._initialized;
+  }
+
+  /**
    * Dispose the frame coordinator
    */
   dispose() {

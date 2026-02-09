@@ -106,16 +106,26 @@ export class WorldSpaceFogEffect extends EffectBase {
     // Track whether we have valid vision data (LOS polygons computed)
     // Used to hide fog plane until Foundry's async perception update completes
     this._hasValidVision = false;
-    
-    // Track camera position for movement detection
-    this._lastCameraX = 0;
-    this._lastCameraY = 0;
-    this._lastCameraZoom = 1;
-    this._cameraMovementThreshold = 50; // pixels
 
+    // Safety: count consecutive frames where we're stuck waiting for vision.
+    // After a threshold we fall back to showing fog with whatever data we have
+    // (prevents the fog plane being permanently hidden).
+    this._visionRetryFrames = 0;
+    this._maxVisionRetryFrames = 30; // ~0.5s at 60fps
+    // True when the vision mask contains a full-scene white rect (global
+    // illumination fallback) instead of a real LOS polygon. When set,
+    // exploration accumulation is skipped to avoid polluting it past walls.
+    this._visionIsFullSceneFallback = false;
+    
     this._explorationLoadedFromFoundry = false;
     this._explorationLoadAttempts = 0;
     this._explorationDirty = false;
+    // Generation counter: incremented on every reset/re-init to detect stale
+    // async TextureLoader callbacks that should no longer overwrite exploration.
+    this._explorationLoadGeneration = 0;
+    // Tracks when vision was rendered but exploration wasn't ready to accumulate.
+    // When exploration finishes loading, we do one catch-up accumulation.
+    this._pendingAccumulation = false;
     this._explorationCommitCount = 0;
     this._saveExplorationDebounced = null;
     this._isSavingExploration = false;
@@ -139,6 +149,7 @@ export class WorldSpaceFogEffect extends EffectBase {
 
     this._fullResTargetsReady = false;
     this._fullResTargetsQueued = false;
+    this._loggedExplorationState = false;
   }
 
   resetExploration() {
@@ -174,6 +185,9 @@ export class WorldSpaceFogEffect extends EffectBase {
     // Mark exploration as loaded so we don't stall accumulation while repeatedly
     // trying to load a now-deleted FogExploration document.
     this._explorationLoadedFromFoundry = true;
+    // Bump generation so any in-flight async TextureLoader callbacks from a
+    // prior _ensureExplorationLoadedFromFoundry() call are silently ignored.
+    this._explorationLoadGeneration++;
   }
 
   /**
@@ -254,9 +268,86 @@ export class WorldSpaceFogEffect extends EffectBase {
     this._registerHooks();
     
     this._initialized = true;
-    log.info('WorldSpaceFogEffect initialized');
+
+    // One-shot diagnostic: confirm fog plane setup
+    const fp = this.fogPlane;
+    log.info(`WorldSpaceFogEffect initialized — fogPlane: ${!!fp}, layer: ${fp?.layers?.mask}, renderOrder: ${fp?.renderOrder}, visible: ${fp?.visible}, pos: (${fp?.position?.x?.toFixed(0)}, ${fp?.position?.y?.toFixed(0)}, ${fp?.position?.z?.toFixed(2)}), sceneRect: (${this.sceneRect.x}, ${this.sceneRect.y}, ${this.sceneRect.width}x${this.sceneRect.height}), tokenVision: ${canvas?.scene?.tokenVision}, globalIllum: ${this._isGlobalIlluminationActive()}`);
 
     this._queueUpgradeTargets();
+  }
+
+  /**
+   * Console-callable diagnostic — run `MapShine.fogEffect.diagnose()` in the
+   * browser console to get a snapshot of all relevant fog state.
+   */
+  diagnose() {
+    const fp = this.fogPlane;
+    const isGM = game?.user?.isGM ?? false;
+    const controlled = canvas?.tokens?.controlled || [];
+    const msSelection = window.MapShine?.interactionManager?.selection;
+    const info = {
+      initialized: this._initialized,
+      enabled: this.enabled,
+      paramsEnabled: this.params.enabled,
+      fogPlaneExists: !!fp,
+      fogPlaneVisible: fp?.visible,
+      fogPlaneLayer: fp?.layers?.mask,
+      fogPlaneRenderOrder: fp?.renderOrder,
+      fogPlanePosition: fp ? `(${fp.position.x.toFixed(0)}, ${fp.position.y.toFixed(0)}, ${fp.position.z.toFixed(2)})` : 'N/A',
+      fogPlaneInScene: fp ? this.mainScene?.children?.includes(fp) : false,
+      fullResTargetsReady: this._fullResTargetsReady,
+      visionRTSize: `${this._visionRTWidth}x${this._visionRTHeight}`,
+      explorationRTSize: `${this._explorationRTWidth}x${this._explorationRTHeight}`,
+      needsVisionUpdate: this._needsVisionUpdate,
+      hasValidVision: this._hasValidVision,
+      visionRetryFrames: this._visionRetryFrames,
+      bypassFog: this._shouldBypassFog(),
+      tokenVision: canvas?.scene?.tokenVision ?? 'undefined',
+      globalIllumination: this._isGlobalIlluminationActive(),
+      isGM,
+      foundryControlled: controlled.map(t => t.name),
+      mapShineSelection: msSelection ? Array.from(msSelection) : [],
+      explorationEnabled: canvas?.scene?.fog?.exploration ?? false,
+      explorationLoaded: this._explorationLoadedFromFoundry,
+      explorationLoadGeneration: this._explorationLoadGeneration,
+      visionIsFullSceneFallback: this._visionIsFullSceneFallback,
+      pendingAccumulation: this._pendingAccumulation,
+      explorationDirty: this._explorationDirty,
+    };
+
+    // Also check token vision data
+    const allTokens = [...controlled];
+    if (msSelection && window.MapShine?.tokenManager?.tokenSprites) {
+      const placeables = canvas?.tokens?.placeables || [];
+      for (const id of msSelection) {
+        if (!window.MapShine.tokenManager.tokenSprites.has(id)) continue;
+        const t = placeables.find(p => p.document?.id === id);
+        if (t && !allTokens.includes(t)) allTokens.push(t);
+      }
+    }
+    info.tokenDiag = allTokens.map(t => {
+      const vs = t.vision;
+      const shape = vs?.los || vs?.shape || vs?.fov;
+      return {
+        name: t.name,
+        sightEnabled: t.document?.sight?.enabled ?? false,
+        hasVision: !!vs,
+        visionActive: vs?.active ?? 'N/A',
+        hasLos: !!vs?.los,
+        losPoints: vs?.los?.points?.length || 0,
+        hasShape: !!vs?.shape,
+        shapePoints: vs?.shape?.points?.length || 0,
+        hasFov: !!vs?.fov,
+        fovPoints: vs?.fov?.points?.length || 0,
+      };
+    });
+
+    console.table(info);
+    console.log('[FOG DIAGNOSE] Full state:', info);
+    if (info.tokenDiag.length > 0) {
+      console.table(info.tokenDiag);
+    }
+    return info;
   }
 
   _createMinimalTargets() {
@@ -337,32 +428,6 @@ export class WorldSpaceFogEffect extends EffectBase {
       },
       vertexShader: `
         varying vec2 vUv;
-
-        float hash21(vec2 p) {
-          p = fract(p * vec2(123.34, 345.45));
-          p += dot(p, p + 34.345);
-          return fract(p.x * p.y);
-        }
-
-        float noise2(vec2 p) {
-          vec2 i = floor(p);
-          vec2 f = fract(p);
-          float a = hash21(i);
-          float b = hash21(i + vec2(1.0, 0.0));
-          float c = hash21(i + vec2(0.0, 1.0));
-          float d = hash21(i + vec2(1.0, 1.0));
-          vec2 u = f * f * (3.0 - 2.0 * f);
-          return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
-        }
-
-        float sampleBlur4(sampler2D tex, vec2 uv, vec2 texel) {
-          float c = texture2D(tex, uv).r;
-          float l = texture2D(tex, uv + vec2(-texel.x, 0.0)).r;
-          float r = texture2D(tex, uv + vec2(texel.x, 0.0)).r;
-          float d = texture2D(tex, uv + vec2(0.0, -texel.y)).r;
-          float u = texture2D(tex, uv + vec2(0.0, texel.y)).r;
-          return (c * 4.0 + l + r + d + u) / 8.0;
-        }
         void main() {
           vUv = uv;
           gl_Position = vec4(position, 1.0);
@@ -437,6 +502,8 @@ export class WorldSpaceFogEffect extends EffectBase {
     this._explorationLoadAttempts = 0;
     this._needsVisionUpdate = true;
     this._hasValidVision = false;
+
+    log.info(`Full-res render targets ready — vision: ${this._visionRTWidth}x${this._visionRTHeight}, exploration: ${this._explorationRTWidth}x${this._explorationRTHeight}`);
   }
 
   /**
@@ -490,23 +557,18 @@ export class WorldSpaceFogEffect extends EffectBase {
     this._visionRTHeight = rtHeight;
     
     this.visionRenderTarget = new THREE.WebGLRenderTarget(rtWidth, rtHeight, {
-      format: THREE.RGBAFormat,  // Use RGBA for proper sampling
+      format: THREE.RGBAFormat,
       type: THREE.UnsignedByteType,
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       stencilBuffer: false,
       depthBuffer: false,
       generateMipmaps: false
+      // No MSAA — unnecessary for a binary white/black vision mask.
+      // LinearFilter already smooths edges. MSAA would add 4x fragment
+      // cost and can cause texture-resolve issues when this RT is sampled
+      // in the exploration accumulation shader on some drivers.
     });
-
-    try {
-      const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
-      if (isWebGL2 && typeof this.visionRenderTarget.samples === 'number') {
-        this.visionRenderTarget.samples = 4;
-      }
-    } catch (_) {
-      // Ignore
-    }
     
     // Create a scene for rendering vision polygons
     this.visionScene = new THREE.Scene();
@@ -580,32 +642,6 @@ export class WorldSpaceFogEffect extends EffectBase {
       },
       vertexShader: `
         varying vec2 vUv;
-
-        float hash21(vec2 p) {
-          p = fract(p * vec2(123.34, 345.45));
-          p += dot(p, p + 34.345);
-          return fract(p.x * p.y);
-        }
-
-        float noise2(vec2 p) {
-          vec2 i = floor(p);
-          vec2 f = fract(p);
-          float a = hash21(i);
-          float b = hash21(i + vec2(1.0, 0.0));
-          float c = hash21(i + vec2(0.0, 1.0));
-          float d = hash21(i + vec2(1.0, 1.0));
-          vec2 u = f * f * (3.0 - 2.0 * f);
-          return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
-        }
-
-        float sampleBlur4(sampler2D tex, vec2 uv, vec2 texel) {
-          float c = texture2D(tex, uv).r;
-          float l = texture2D(tex, uv + vec2(-texel.x, 0.0)).r;
-          float r = texture2D(tex, uv + vec2(texel.x, 0.0)).r;
-          float d = texture2D(tex, uv + vec2(0.0, -texel.y)).r;
-          float u = texture2D(tex, uv + vec2(0.0, texel.y)).r;
-          return (c * 4.0 + l + r + d + u) / 8.0;
-        }
         void main() {
           vUv = uv;
           gl_Position = vec4(position, 1.0);
@@ -956,11 +992,10 @@ export class WorldSpaceFogEffect extends EffectBase {
     const isGM = game?.user?.isGM ?? false;
 
     if (selection && tokenManager?.tokenSprites) {
-      // Map selected IDs to Foundry Token placeables
       const placeables = canvas?.tokens?.placeables || [];
       const selectedIds = Array.from(selection);
       for (const id of selectedIds) {
-        if (!tokenManager.tokenSprites.has(id)) continue; // skip non-token selections
+        if (!tokenManager.tokenSprites.has(id)) continue;
         const token = placeables.find(t => t.document?.id === id);
         if (token) controlledTokens.push(token);
       }
@@ -997,73 +1032,107 @@ export class WorldSpaceFogEffect extends EffectBase {
       }
     }
 
-    // Debug: Log what we're working with (always log when we have controlled tokens but no vision yet)
-    const shouldLogDebug = Math.random() < 0.02 || (controlledTokens.length > 0 && !this._hasValidVision);
-    if (shouldLogDebug) {
+    // Always log when we have controlled tokens but no vision yet (state transition diagnostic)
+    if (controlledTokens.length > 0 && !this._hasValidVision) {
       const visionSources = canvas?.effects?.visionSources;
-      log.debug(`Vision sources: ${visionSources?.size || 0}, controlled tokens: ${controlledTokens.length}, hasValidVision: ${this._hasValidVision}`);
+      log.debug(`[FOG DIAG] Vision sources: ${visionSources?.size || 0}, controlled: ${controlledTokens.length}, retryFrame: ${this._visionRetryFrames}`);
       for (const token of controlledTokens) {
         const vs = token.vision;
+        const hasSight = token.document?.sight?.enabled ?? false;
         const shape = vs?.los || vs?.shape || vs?.fov;
-        log.debug(`  Token ${token.name}: vision=${!!vs}, los=${!!vs?.los}, shape=${!!vs?.shape}, fov=${!!vs?.fov}, points=${shape?.points?.length || 0}`);
+        log.debug(`  [FOG DIAG] Token "${token.name}": sight.enabled=${hasSight}, vision=${!!vs}, active=${vs?.active ?? 'N/A'}, los=${!!vs?.los}, shape=${!!vs?.shape}, fov=${!!vs?.fov}, points=${shape?.points?.length || 0}`);
       }
     }
     
-    // Try to get vision from controlled tokens' vision sources
+    // Global illumination means the token can see in the dark — but it does
+    // NOT bypass walls or sight range. Foundry's LOS polygon already accounts
+    // for global illumination when computing visibility. We should always use
+    // the token's actual LOS polygon when it exists.
+    //
+    // For tokens whose LOS is degenerate (e.g. sight.range=0), global
+    // illumination uses a full-scene rect so they aren't blind. However,
+    // the _visionIsFullSceneFallback flag prevents this from being
+    // accumulated into exploration (which would permanently mark areas
+    // behind walls as explored via the max() accumulator).
+    const globalIllumActive = this._isGlobalIlluminationActive();
+    this._visionIsFullSceneFallback = false;
+
+    // Categorize tokens into three groups:
+    // - tokensWithValidLOS: have a vision source with a valid polygon
+    // - tokensWaitingForLOS: have sight enabled and a vision source, but LOS hasn't computed yet
+    // - tokensWithoutSight: don't have sight enabled or have no vision source at all
+    // Only tokensWaitingForLOS should trigger retries. tokensWithoutSight are simply skipped.
     let polygonsRendered = 0;
-    let tokensWithoutValidLOS = 0;
-    
+    let tokensWaitingForLOS = 0;
+    let tokensWithoutSight = 0;
+
     for (const token of controlledTokens) {
-      // Each token has a vision source in canvas.effects.visionSources
-      // The key is typically the token's sourceId
       const visionSource = token.vision;
-      
+      const hasSight = token.document?.sight?.enabled ?? false;
+
+      // Token has no vision source at all. If sight isn't enabled on the
+      // token, this is expected — skip it without triggering retries.
       if (!visionSource) {
-        if (Math.random() < 0.02) {
-          log.debug(`Token ${token.name} has no vision source`);
+        if (!hasSight) {
+          tokensWithoutSight++;
+        } else if (globalIllumActive) {
+          // Sight enabled, no vision source yet, but global illumination is
+          // active — render full-scene rect so the token isn't blind.
+          // Flag prevents this from polluting exploration.
+          this._addFullSceneRect(THREE);
+          this._visionIsFullSceneFallback = true;
+          polygonsRendered++;
+        } else {
+          // Sight is enabled but vision source hasn't been created yet — wait.
+          tokensWaitingForLOS++;
+          log.debug(`[FOG DIAG] Token "${token.name}" has sight enabled but no vision source yet — waiting`);
         }
-        tokensWithoutValidLOS++;
         continue;
       }
-      
-      // Get the LOS (line of sight) shape - this is the actual visibility polygon
-      // Try different properties that Foundry might use
+
+      // Vision source exists — check if the LOS polygon has been computed.
       let shape = visionSource.los || visionSource.shape || visionSource.fov;
-      
+
       if (!shape || !shape.points || shape.points.length < 6) {
-        if (Math.random() < 0.02) {
-          log.debug(`Token ${token.name} vision source has no valid shape (los=${!!visionSource.los}, shape=${!!visionSource.shape}, fov=${!!visionSource.fov})`);
+        if (!hasSight) {
+          // Sight disabled — token has a default/inactive vision source.
+          tokensWithoutSight++;
+        } else if (globalIllumActive) {
+          // Sight enabled, LOS is tiny/missing (e.g. sight.range=0), but
+          // global illumination is active. Use full-scene rect so the
+          // token can see. Flag prevents exploration pollution.
+          this._addFullSceneRect(THREE);
+          this._visionIsFullSceneFallback = true;
+          polygonsRendered++;
+        } else {
+          // Sight enabled but polygon not ready yet.
+          tokensWaitingForLOS++;
+          log.debug(`[FOG DIAG] Token "${token.name}" sight enabled, LOS not ready (points=${shape?.points?.length || 0})`);
         }
-        tokensWithoutValidLOS++;
         continue;
       }
-      
-      // Convert PIXI polygon points to Three.js shape
+
+      // Valid LOS polygon — always use it, regardless of global illumination.
+      // Global illumination affects lighting, not wall occlusion.
       const points = shape.points;
       const threeShape = new THREE.Shape();
-      
-      // Points are in Foundry world coords (relative to scene origin)
-      // Offset by sceneRect to get local coords for our render target
       const offsetX = this.sceneRect.x;
       const offsetY = this.sceneRect.y;
-      
+
       threeShape.moveTo(points[0] - offsetX, points[1] - offsetY);
       for (let i = 2; i < points.length; i += 2) {
         threeShape.lineTo(points[i] - offsetX, points[i + 1] - offsetY);
       }
       threeShape.closePath();
-      
+
       const geometry = new THREE.ShapeGeometry(threeShape);
       const mesh = new THREE.Mesh(geometry, this.visionMaterial);
       this.visionScene.add(mesh);
       polygonsRendered++;
-      
-      if (Math.random() < 0.02) {
-        log.debug(`Rendered vision for ${token.name}: ${points.length / 2} vertices`);
-      }
     }
     
-    // Render to the vision target
+    // Render to the vision target (always render, even if no polygons —
+    // that gives us a black texture = "nothing visible" = full fog)
     const currentTarget = this.renderer.getRenderTarget();
     const currentClearColor = this.renderer.getClearColor(new THREE.Color());
     const currentClearAlpha = this.renderer.getClearAlpha();
@@ -1073,85 +1142,48 @@ export class WorldSpaceFogEffect extends EffectBase {
     this.renderer.clear();
     this.renderer.render(this.visionScene, this.visionCamera);
     
-    // Restore previous state
     this.renderer.setRenderTarget(currentTarget);
     this.renderer.setClearColor(currentClearColor, currentClearAlpha);
     
-    // Only clear the update flag if we successfully rendered vision for all
-    // controlled tokens. If any token is missing a valid LOS polygon, keep
-    // the flag set so we retry next frame (Foundry's perception update is async).
-    if (controlledTokens.length > 0 && tokensWithoutValidLOS > 0) {
-      // Some tokens don't have valid LOS yet - keep retrying
-      // Also re-trigger perception update in case it didn't take
-      frameCoordinator.forcePerceptionUpdate();
-      this._hasValidVision = false;
-      log.debug(`Vision mask incomplete: ${polygonsRendered}/${controlledTokens.length} tokens have valid LOS, retrying...`);
-    } else if (controlledTokens.length > 0 && polygonsRendered > 0) {
-      // We have controlled tokens AND successfully rendered their vision
+    // Determine result state.
+    //
+    // Key distinction: tokens without sight are NOT "invalid" — they simply
+    // don't contribute vision. Only tokens that SHOULD have LOS (sight enabled)
+    // but DON'T yet should trigger retries.
+    //
+    // tokensWithSightRequirement = total tokens that should have LOS
+    const tokensWithSightRequirement = controlledTokens.length - tokensWithoutSight;
+
+    if (controlledTokens.length === 0) {
+      // No controlled tokens at all — mark complete, bypass handles visibility
       this._needsVisionUpdate = false;
       this._hasValidVision = true;
-    } else if (controlledTokens.length === 0) {
-      // No controlled tokens - GM bypass mode is handled separately by _shouldBypassFog.
-      // We clear the update flag but leave _hasValidVision unchanged so that
-      // a subsequent selection cannot accidentally reuse a "valid" state that
-      // was set when no tokens were controlled.
+    } else if (tokensWithSightRequirement === 0) {
+      // All controlled tokens lack sight — vision RT is intentionally black
+      // (full fog). This is valid; don't retry.
       this._needsVisionUpdate = false;
+      this._hasValidVision = true;
+      log.debug(`[FOG DIAG] All ${controlledTokens.length} controlled tokens lack sight → full fog`);
+    } else if (tokensWaitingForLOS > 0 && polygonsRendered === 0) {
+      // Some tokens should have LOS but none are ready yet — keep retrying
+      frameCoordinator.forcePerceptionUpdate();
+      this._hasValidVision = false;
+      log.debug(`[FOG DIAG] Waiting for LOS: ${tokensWaitingForLOS} tokens pending, ${polygonsRendered} rendered`);
     } else {
-      // controlledTokens.length > 0 but polygonsRendered === 0 and tokensWithoutValidLOS === 0
-      // This shouldn't happen, but keep retrying just in case
-      frameCoordinator.forcePerceptionUpdate();
-      this._hasValidVision = false;
-      log.debug(`Vision mask edge case: ${controlledTokens.length} tokens, ${polygonsRendered} rendered, retrying...`);
-    }
-    
-    // Debug logging
-    if (Math.random() < 0.01) {
-      log.debug(`Vision mask rendered: ${this.visionScene.children.length} polygons`);
-    }
-  }
-
-  /**
-   * Detect significant camera movement and trigger perception update if needed
-   * This ensures Foundry's vision system is current before we sample textures
-   * @private
-   */
-  _detectCameraMovement() {
-    const stage = canvas?.stage;
-    if (!stage) return;
-    
-    const currentX = stage.pivot.x;
-    const currentY = stage.pivot.y;
-    const currentZoom = stage.scale.x || 1;
-    
-    const dx = Math.abs(currentX - this._lastCameraX);
-    const dy = Math.abs(currentY - this._lastCameraY);
-    const dz = Math.abs(currentZoom - this._lastCameraZoom);
-    
-    // Check if camera moved significantly
-    const movedSignificantly = dx > this._cameraMovementThreshold || 
-                               dy > this._cameraMovementThreshold ||
-                               dz > 0.1;
-    
-    if (movedSignificantly) {
-      // Force Foundry's perception system to update
-      // This ensures vision polygons are current for this frame
-      frameCoordinator.forcePerceptionUpdate();
-      
-      // Also mark vision as needing update and invalidate current vision
-      // so the fog plane hides until we get fresh LOS polygons
-      this._needsVisionUpdate = true;
-      this._hasValidVision = false;
-      
-      // Update tracking
-      this._lastCameraX = currentX;
-      this._lastCameraY = currentY;
-      this._lastCameraZoom = currentZoom;
-      
-      if (Math.random() < 0.1) {
-        log.debug(`Camera moved: dx=${dx.toFixed(0)}, dy=${dy.toFixed(0)}, dz=${dz.toFixed(3)} - forcing perception update`);
+      // We rendered at least some polygons, or all sight-enabled tokens were
+      // handled. Mark as valid — partial vision is better than no fog at all.
+      this._needsVisionUpdate = false;
+      this._hasValidVision = true;
+      if (tokensWaitingForLOS > 0) {
+        // Some tokens still waiting but we have at least partial vision.
+        // Trigger another perception update but don't block fog display.
+        frameCoordinator.forcePerceptionUpdate();
+        this._needsVisionUpdate = true;
+        log.debug(`[FOG DIAG] Partial vision: ${polygonsRendered} rendered, ${tokensWaitingForLOS} still waiting`);
       }
     }
   }
+
 
   /**
    * Check if fog should be bypassed (GM with no tokens selected)
@@ -1197,6 +1229,60 @@ export class WorldSpaceFogEffect extends EffectBase {
     return false;
   }
 
+  /**
+   * Add a full-scene white rectangle to the vision scene.
+   * Used as a fallback when global illumination is active and a token's
+   * LOS polygon is unavailable or too small (e.g. sight.range = 0).
+   * IMPORTANT: callers must set _visionIsFullSceneFallback = true so that
+   * exploration accumulation is skipped — otherwise the full-scene white
+   * would be max()'d into the exploration texture permanently, marking
+   * areas behind walls as explored.
+   * @param {object} THREE - Three.js namespace
+   * @private
+   */
+  _addFullSceneRect(THREE) {
+    const w = Math.max(1, this.sceneRect.width);
+    const h = Math.max(1, this.sceneRect.height);
+    const fullShape = new THREE.Shape();
+    fullShape.moveTo(0, 0);
+    fullShape.lineTo(w, 0);
+    fullShape.lineTo(w, h);
+    fullShape.lineTo(0, h);
+    fullShape.closePath();
+    const geometry = new THREE.ShapeGeometry(fullShape);
+    const mesh = new THREE.Mesh(geometry, this.visionMaterial);
+    this.visionScene.add(mesh);
+  }
+
+  /**
+   * Check if Foundry's global illumination is active. Used to decide whether
+   * tokens with degenerate LOS polygons (sight.range=0) should get a
+   * full-scene vision rect. Exploration accumulation is guarded separately
+   * by _visionIsFullSceneFallback.
+   * @returns {boolean}
+   * @private
+   */
+  _isGlobalIlluminationActive() {
+    try {
+      const gls = canvas?.environment?.globalLightSource;
+      if (gls?.active) {
+        const darknessLevel = canvas.environment.darknessLevel ?? 0;
+        const { min = 0, max = 1 } = gls.data?.darkness ?? {};
+        if (darknessLevel >= min && darknessLevel <= max) return true;
+      }
+    } catch (_) {}
+    try {
+      const globalLight = canvas?.scene?.environment?.globalLight?.enabled
+                       ?? canvas?.scene?.globalLight ?? false;
+      if (globalLight) {
+        const darkness = canvas?.scene?.environment?.darknessLevel
+                      ?? canvas?.scene?.darkness ?? 0;
+        if (darkness < 0.5) return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
   update(timeInfo) {
     if (!this._initialized || !this.fogPlane) return;
     
@@ -1204,105 +1290,125 @@ export class WorldSpaceFogEffect extends EffectBase {
     const bypassFog = this._shouldBypassFog();
     this.fogMaterial.uniforms.uBypassFog.value = bypassFog ? 1.0 : 0.0;
 
-    // PREWARM: The first time fog becomes active (typically when the first token is selected),
-    // we don't want to pay the cost of loading/decoding the FogExploration texture and
-    // building the initial vision RT. Do that work in the background even while fog is
-    // bypassed (e.g. GM view with no controlled token).
+    // Prewarm exploration loading even while fog is bypassed so the first
+    // token selection doesn't stall.
     const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
     if (this.params.enabled && explorationEnabled) {
       this._ensureExplorationLoadedFromFoundry();
     }
-
-    // Also perform a single vision render when requested, even if fog is bypassed.
-    // This warms up the render path so the first token selection feels instant.
-    if (this._needsVisionUpdate) {
-      this._renderVisionMask();
-    }
     
     if (!this.params.enabled || bypassFog) {
+      this.fogPlane.visible = false;
+      this._visionRetryFrames = 0;
+      return;
+    }
+
+    // Don't attempt vision rendering until full-res render targets are ready.
+    // The 1x1 minimal targets created during init produce garbage results.
+    if (!this._fullResTargetsReady) {
       this.fogPlane.visible = false;
       return;
     }
     
-    // Detect camera movement FIRST - if camera moved significantly, we may need to
-    // force a perception update to ensure Foundry's vision system is current.
-    // This must happen BEFORE the visibility check so that _hasValidVision is
-    // correctly invalidated before we decide whether to show the fog plane.
-    this._detectCameraMovement();
-    
     // Detect MapShine selection changes (Three.js-driven UI) and trigger
     // a vision recompute when the set of selected token IDs changes.
+    // IMPORTANT: This must run BEFORE _renderVisionMask() so we don't
+    // render once, then immediately reset _hasValidVision and render again.
     try {
       const ms = window.MapShine;
       const interactionManager = ms?.interactionManager;
       const selection = interactionManager?.selection;
       let selectionVersion = '';
       if (selection && selection.size > 0) {
-        // Stable ordering by sorting IDs so that order changes don't
-        // cause unnecessary recomputes.
         const ids = Array.from(selection);
         ids.sort();
         selectionVersion = ids.join('|');
       }
       if (selectionVersion !== this._lastSelectionVersion) {
         this._lastSelectionVersion = selectionVersion;
-
-        // MapShine selection changed (Three.js-driven token selection).
-        // Force Foundry perception so that the corresponding vision
-        // sources are up to date before we rebuild the vision mask.
+        log.debug(`Selection changed → forcing perception update and vision recompute`);
         frameCoordinator.forcePerceptionUpdate();
         this._needsVisionUpdate = true;
-        this._hasValidVision = false; // Reset until we get valid LOS polygons
+        this._hasValidVision = false;
+        this._visionRetryFrames = 0;
       }
     } catch (_) {
       // Ignore MapShine selection errors
     }
 
-    // Update vision mask if needed
-    // If frame coordinator is available and we're in a coordinated frame,
-    // the vision update may have already been triggered by the post-PIXI callback
+    // Render vision mask if needed (single call per frame, after all
+    // invalidation checks above have had a chance to set _needsVisionUpdate).
+    let visionRenderedThisFrame = false;
     if (this._needsVisionUpdate) {
       this._renderVisionMask();
+      visionRenderedThisFrame = true;
     }
     
-    // NOW set fog plane visibility - after all invalidation checks have run
-    // Hide fog plane if we don't have valid vision data yet (waiting for Foundry's async perception update)
+    // Determine if we're stuck waiting for valid vision data.
+    // After _maxVisionRetryFrames, give up and show fog anyway - this
+    // prevents the fog plane from being permanently hidden when tokens
+    // lack sight or Foundry's perception never provides valid LOS.
     const waitingForVision = this._needsVisionUpdate && !this._hasValidVision;
-    this.fogPlane.visible = !waitingForVision;
-    
     if (waitingForVision) {
-      // Don't accumulate exploration or update uniforms while waiting for valid vision
-      return;
+      this._visionRetryFrames++;
+      if (this._visionRetryFrames >= this._maxVisionRetryFrames) {
+        log.warn(`Vision retry limit reached (${this._maxVisionRetryFrames} frames). Forcing fog visible with current data.`);
+        this._needsVisionUpdate = false;
+        this._hasValidVision = true;
+        this._visionRetryFrames = 0;
+      } else {
+        // Still waiting — hide fog plane and skip the rest of the update
+        this.fogPlane.visible = false;
+        return;
+      }
+    } else {
+      this._visionRetryFrames = 0;
     }
+
+    // Fog plane is visible
+    this.fogPlane.visible = true;
     
-    // Accumulate current vision into our self-maintained exploration texture
-    // This runs every frame so that as the token moves, the explored area grows
-    // explored = max(explored, vision)
+    // Accumulate exploration if enabled and prior state has been loaded.
+    // Don't accumulate before loading — otherwise we'd start from black,
+    // mark dirty, and overwrite the existing FogExploration document.
+    // PERF: Only accumulate when vision was actually re-rendered this frame,
+    // OR when we have a pending catch-up accumulation from a frame where
+    // vision rendered but exploration wasn't loaded yet.
     this._ensureExplorationLoadedFromFoundry();
+    const canAccumulate = explorationEnabled && this._explorationLoadedFromFoundry;
 
-    // IMPORTANT: Don't accumulate (or save) exploration until we've loaded the
-    // prior persisted state (or confirmed there is none). Otherwise we can start
-    // from black, mark dirty, and overwrite the existing FogExploration before
-    // the async load finishes.
-    if (explorationEnabled && !this._explorationLoadedFromFoundry) {
-      // Still render fog using the (currently black) exploration buffer.
-      // Accumulation will begin once load completes.
-      return;
+    if (visionRenderedThisFrame && !canAccumulate) {
+      // Vision rendered but exploration not ready — remember to catch up later
+      this._pendingAccumulation = true;
     }
 
-    if (explorationEnabled) {
+    // CRITICAL: Never accumulate when the vision mask is a full-scene fallback
+    // (from global illumination + degenerate LOS). The full-scene white rect
+    // covers areas behind walls, and max() accumulation would permanently
+    // mark them as explored. Only accumulate from real LOS polygons.
+    const shouldAccumulate = canAccumulate
+      && (visionRenderedThisFrame || this._pendingAccumulation)
+      && !this._visionIsFullSceneFallback;
+    if (shouldAccumulate) {
       this._accumulateExploration();
       this._markExplorationDirty();
+      this._pendingAccumulation = false;
+    }
+
+    // One-shot diagnostic: log exploration accumulation state on first opportunity
+    if (!this._loggedExplorationState) {
+      this._loggedExplorationState = true;
+      log.info(`[FOG DIAG] Exploration state: enabled=${explorationEnabled}, loaded=${this._explorationLoadedFromFoundry}, canAccumulate=${canAccumulate}, shouldAccumulate=${shouldAccumulate}, explorationRTSize=${this._explorationRTWidth}x${this._explorationRTHeight}`);
     }
     
     // Use our self-maintained exploration texture (NOT Foundry's pre-populated one)
-    // This ensures only areas we've actually seen with our token are marked explored
     const exploredTex = explorationEnabled
       ? (this._getExplorationReadTarget()?.texture || this._fallbackBlack)
       : this._fallbackBlack;
+
+    // --- Always update all uniforms when the fog plane is visible ---
     this.fogMaterial.uniforms.tExplored.value = exploredTex;
 
-    // Update texel sizes for softness/AA in the fog shader
     const vtW = Math.max(1, this._visionRTWidth);
     const vtH = Math.max(1, this._visionRTHeight);
     const etW = Math.max(1, this._explorationRTWidth);
@@ -1314,16 +1420,15 @@ export class WorldSpaceFogEffect extends EffectBase {
     this.fogMaterial.uniforms.uNoiseStrengthPx.value = this.params.noiseStrength ?? 0.0;
     this.fogMaterial.uniforms.uNoiseSpeed.value = this.params.noiseSpeed ?? 0.0;
     
-    // Update color uniforms
     this.fogMaterial.uniforms.uUnexploredColor.value.set(this.params.unexploredColor);
     this.fogMaterial.uniforms.uExploredColor.value.set(this.params.exploredColor);
     
     // If exploration is disabled, force explored opacity to 0 so only
-    // current vision reveals the map. Otherwise respect the configured
-    // exploredOpacity parameter.
+    // current vision reveals the map.
     this.fogMaterial.uniforms.uExploredOpacity.value = explorationEnabled
       ? this.params.exploredOpacity
       : 0.0;
+
   }
 
   /**
@@ -1420,8 +1525,18 @@ export class WorldSpaceFogEffect extends EffectBase {
       return;
     }
 
+    // Capture generation before async work so we can detect stale callbacks
+    // (e.g. resetExploration() called while the load is in flight).
+    const loadGeneration = this._explorationLoadGeneration;
+
     FogExplorationCls.load().then((doc) => {
       try {
+        // Stale? A reset happened while we were loading — discard.
+        if (loadGeneration !== this._explorationLoadGeneration) {
+          log.debug('[FOG DIAG] Discarding stale FogExploration load (generation mismatch)');
+          return;
+        }
+
         const base64 = doc?.explored;
         if (!doc || !base64) {
           // No persisted fog exists yet for this user+scene (or it was reset).
@@ -1445,6 +1560,12 @@ export class WorldSpaceFogEffect extends EffectBase {
           base64,
           (texture) => {
             try {
+              // Second stale check: the image decode is also async and a reset
+              // could have happened between the document load and texture decode.
+              if (loadGeneration !== this._explorationLoadGeneration) {
+                log.debug('[FOG DIAG] Discarding stale exploration texture (generation mismatch)');
+                return;
+              }
               // Avoid double Y-flips: our fog shader already flips explored sampling.
               texture.flipY = false;
               texture.needsUpdate = true;

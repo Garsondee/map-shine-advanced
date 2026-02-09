@@ -174,6 +174,23 @@ export class TreeEffect extends EffectBase {
     const x = Math.floor(u * (this._alphaMaskWidth - 1));
     const y = Math.floor(v * (this._alphaMaskHeight - 1));
     const index = (y * this._alphaMaskWidth + x) * 4;
+
+    if (this._deriveAlpha) {
+      // Mirror the shader's derived-alpha logic on the CPU side:
+      // white/desaturated background → transparent, colored content → opaque.
+      const r = this._alphaMask[index] / 255;
+      const g = this._alphaMask[index + 1] / 255;
+      const b = this._alphaMask[index + 2] / 255;
+      const lum = r * 0.2126 + g * 0.7152 + b * 0.0722;
+      const maxC = Math.max(r, g, b);
+      const minC = Math.min(r, g, b);
+      const chroma = maxC - minC;
+      // High luminance + low chroma = background
+      const isBright = lum > 0.85;
+      const isDesaturated = chroma < 0.06;
+      return !(isBright && isDesaturated);
+    }
+
     const alpha = this._alphaMask[index + 3] / 255;
     return alpha > 0.5;
   }
@@ -329,6 +346,25 @@ export class TreeEffect extends EffectBase {
                      mix(hash(i + vec2(0.0,1.0)), hash(i + vec2(1.0,1.0)), u.x), u.y);
         }
 
+        // Extract effective alpha, handling textures without a real alpha channel.
+        // When the raw alpha is fully opaque AND the pixel is bright + desaturated
+        // (white/gray background), return 0 so the pixel is treated as transparent.
+        float safeAlpha(vec4 s) {
+          float a = s.a;
+          if (a > 0.99) {
+            float lum    = dot(s.rgb, vec3(0.2126, 0.7152, 0.0722));
+            float maxC   = max(s.r, max(s.g, s.b));
+            float minC   = min(s.r, min(s.g, s.b));
+            float chroma = maxC - minC;
+            // Catch anti-aliased edges (tree color blended with white bg)
+            // by using a wide luminance range and generous chroma tolerance.
+            float bgMask = smoothstep(0.45, 0.85, lum)
+                         * (1.0 - smoothstep(0.0, 0.15, chroma));
+            a *= (1.0 - bgMask);
+          }
+          return a;
+        }
+
         void main() {
           // --- Wind / Tree motion ---
           vec2 windDir = normalize(uWindDir);
@@ -361,7 +397,7 @@ export class TreeEffect extends EffectBase {
 
           // Sample projected tree alpha (shadow source)
           vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
-          float a = treeSample.a;
+          float a = safeAlpha(treeSample);
           
           float baseShadow = clamp(a * uShadowOpacity, 0.0, 1.0);
 
@@ -375,7 +411,7 @@ export class TreeEffect extends EffectBase {
               vec2 blurUv = vUv + vec2(float(dx), float(dy)) * stepUv;
               float w = 1.0;
               if (dx == 0 && dy == 0) w = 2.0;
-              float v = texture2D(uTreeMask, blurUv - distortion).a;
+              float v = safeAlpha(texture2D(uTreeMask, blurUv - distortion));
               accum += v * w;
               weightSum += w;
             }
@@ -414,6 +450,39 @@ export class TreeEffect extends EffectBase {
     log.info('TreeEffect initialized');
   }
 
+  /**
+   * Detect whether a texture has a meaningful alpha channel by sampling pixels.
+   * Returns true if the texture lacks real alpha (all pixels are opaque),
+   * meaning we need to derive alpha from color content in the shader.
+   * @param {THREE.Texture} texture
+   * @returns {boolean} True if alpha should be derived from color
+   * @private
+   */
+  _needsDerivedAlpha(texture) {
+    try {
+      const img = texture?.image;
+      if (!img) return false;
+
+      const sampleSize = 64;
+      const canvas = document.createElement('canvas');
+      canvas.width = sampleSize;
+      canvas.height = sampleSize;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, sampleSize, sampleSize);
+      const data = ctx.getImageData(0, 0, sampleSize, sampleSize).data;
+
+      for (let i = 3; i < data.length; i += 4) {
+        if (data[i] < 250) return false;
+      }
+
+      log.info('Tree texture has no alpha channel \u2014 will derive alpha from color content');
+      return true;
+    } catch (e) {
+      log.debug('Alpha detection failed, assuming texture has alpha:', e);
+      return false;
+    }
+  }
+
   setBaseMesh(baseMesh, assetBundle) {
     if (!assetBundle || !assetBundle.masks) return;
     this.baseMesh = baseMesh;
@@ -422,6 +491,9 @@ export class TreeEffect extends EffectBase {
     const nextMask = treeData?.texture || null;
     const maskChanged = this.treeMask !== nextMask;
     this.treeMask = nextMask;
+
+    // Detect whether the texture needs derived alpha (no real alpha channel)
+    this._deriveAlpha = this.treeMask ? this._needsDerivedAlpha(this.treeMask) : false;
 
     // Scene switches can keep the effect instance around briefly; ensure we don't
     // carry motion/hover state across fundamentally different scenes.
@@ -552,6 +624,25 @@ export class TreeEffect extends EffectBase {
           return color;
         }
 
+        // Extract effective alpha, handling textures without a real alpha channel.
+        // When the raw alpha is fully opaque AND the pixel is bright + desaturated
+        // (white/gray background), return 0 so the pixel is treated as transparent.
+        float safeAlpha(vec4 s) {
+          float a = s.a;
+          if (a > 0.99) {
+            float lum    = dot(s.rgb, vec3(0.2126, 0.7152, 0.0722));
+            float maxC   = max(s.r, max(s.g, s.b));
+            float minC   = min(s.r, min(s.g, s.b));
+            float chroma = maxC - minC;
+            // Catch anti-aliased edges (tree color blended with white bg)
+            // by using a wide luminance range and generous chroma tolerance.
+            float bgMask = smoothstep(0.45, 0.85, lum)
+                         * (1.0 - smoothstep(0.0, 0.15, chroma));
+            a *= (1.0 - bgMask);
+          }
+          return a;
+        }
+
         void main() {
           // 1. Calculate Environmental Factors
           vec2 windDir = normalize(uWindDir);
@@ -591,7 +682,20 @@ export class TreeEffect extends EffectBase {
           // Sample Texture
           vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
 
-          float a = treeSample.a * uIntensity * uHoverFade;
+          // Fix white fringe from bilinear filtering of straight-alpha textures.
+          // The GPU interpolates between opaque tree pixels and transparent pixels
+          // whose RGB is white, producing semi-transparent pixels with white-
+          // contaminated color.  Undo the contamination (assuming bg = white).
+          if (treeSample.a > 0.01 && treeSample.a < 0.99) {
+            treeSample.rgb = clamp(
+              (treeSample.rgb - (1.0 - treeSample.a)) / treeSample.a,
+              0.0, 1.0
+            );
+          }
+
+          // Smart alpha: also detect and discard opaque white/gray background
+          // pixels (catches textures saved without proper transparency).
+          float a = safeAlpha(treeSample) * uIntensity * uHoverFade;
           if (a <= 0.001) discard;
 
           vec3 color = treeSample.rgb;

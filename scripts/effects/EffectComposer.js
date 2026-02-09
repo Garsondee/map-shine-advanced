@@ -204,6 +204,140 @@ export class EffectComposer {
   }
 
   /**
+   * P1.2: Register multiple effects in parallel with concurrency control.
+   *
+   * Preserves deterministic render order by inserting all effects into the Map
+   * synchronously (in array order) before any initialization begins. Then
+   * initializes them concurrently, limited to `concurrency` simultaneous
+   * `initialize()` calls to avoid overwhelming the GPU with shader compilations.
+   *
+   * @param {EffectBase[]} effects - Array of effect instances to register
+   * @param {object} [opts] - Options
+   * @param {number} [opts.concurrency=4] - Max simultaneous initializations
+   * @param {function} [opts.onProgress] - Called after each effect finishes: (completedCount, totalCount, effectId)
+   * @param {Set<string>} [opts.skipIds] - Effect IDs to defer initialization for (P2.1 lazy init). These effects are added to the Map but not initialized; they get enabled=false and _lazyInitPending=true.
+   * @returns {Promise<{registered: string[], skipped: string[], deferred: string[], timings: Array<{id: string, durationMs: number}>}>}
+   */
+  async registerEffectBatch(effects, opts = {}) {
+    const concurrency = Math.max(1, opts?.concurrency ?? 4);
+    const onProgress = typeof opts?.onProgress === 'function' ? opts.onProgress : null;
+    const skipIds = opts?.skipIds instanceof Set ? opts.skipIds : null;
+
+    const toInit = [];
+    const skipped = [];
+    const deferred = [];
+
+    // Phase 1: Synchronous insertion — preserves deterministic Map order
+    for (const effect of effects) {
+      if (this.effects.has(effect.id)) {
+        log.warn(`Effect already registered (batch): ${effect.id}`);
+        skipped.push(effect.id);
+        continue;
+      }
+      if (!this.meetsRequirements(effect)) {
+        log.warn(`Effect ${effect.id} requires higher GPU tier, skipping (batch)`);
+        skipped.push(effect.id);
+        continue;
+      }
+      this.effects.set(effect.id, effect);
+
+      // P2.1: Defer initialization for effects the user has disabled via Graphics Settings.
+      // They remain in the Map (preserving render order) but won't compile shaders until
+      // the user re-enables them via ensureEffectInitialized().
+      if (skipIds && skipIds.has(effect.id)) {
+        effect.enabled = false;
+        effect._lazyInitPending = true;
+        deferred.push(effect.id);
+        log.debug(`Effect deferred (lazy init): ${effect.id}`);
+        continue;
+      }
+
+      toInit.push(effect);
+    }
+
+    // Phase 2: Parallel initialization with concurrency limit
+    const lp = globalLoadingProfiler;
+    const doLoadProfile = !!lp?.enabled;
+    const timings = [];
+    let completed = 0;
+    const total = toInit.length;
+
+    // Simple semaphore for concurrency control
+    let running = 0;
+    const queue = [];
+    const acquire = () => {
+      if (running < concurrency) { running++; return Promise.resolve(); }
+      return new Promise(resolve => queue.push(resolve));
+    };
+    const release = () => {
+      running--;
+      const next = queue.shift();
+      if (next) { running++; next(); }
+    };
+
+    const initPromises = toInit.map(async (effect) => {
+      await acquire();
+      const t0 = performance.now();
+      const spanId = doLoadProfile ? `effect:${effect.id}:initialize` : null;
+      if (doLoadProfile) {
+        try { lp.begin(spanId, { layer: effect?.layer?.name ?? null, requiredTier: effect?.requiredTier ?? null, batch: true }); } catch (_) {}
+      }
+      try {
+        await effect.initialize(this.renderer, this.scene, this.camera);
+      } finally {
+        if (doLoadProfile) {
+          try { lp.end(spanId); } catch (_) {}
+        }
+        release();
+      }
+      const dt = performance.now() - t0;
+      timings.push({ id: effect.id, durationMs: dt });
+      completed++;
+      if (onProgress) {
+        try { onProgress(completed, total, effect.id); } catch (_) {}
+      }
+      log.debug(`Effect initialized (batch): ${effect.id} (${dt.toFixed(1)}ms)`);
+    });
+
+    await Promise.all(initPromises);
+    this.invalidateRenderOrder();
+
+    const registered = toInit.map(e => e.id);
+    if (deferred.length > 0) {
+      log.info(`Batch registered ${registered.length} effects, deferred ${deferred.length} (lazy), ${skipped.length} skipped, concurrency=${concurrency}`);
+    } else {
+      log.info(`Batch registered ${registered.length} effects (${skipped.length} skipped), concurrency=${concurrency}`);
+    }
+    return { registered, skipped, deferred, timings };
+  }
+
+  /**
+   * P2.1: Lazily initialize an effect that was deferred during batch registration.
+   * Call this when the user re-enables a previously-disabled effect via Graphics Settings.
+   *
+   * @param {string} effectId - The effect ID to initialize
+   * @returns {Promise<boolean>} true if initialization succeeded, false if not needed or failed
+   */
+  async ensureEffectInitialized(effectId) {
+    const effect = this.effects.get(effectId);
+    if (!effect) return false;
+    if (!effect._lazyInitPending) return true; // Already initialized
+
+    const t0 = performance.now();
+    try {
+      await effect.initialize(this.renderer, this.scene, this.camera);
+      effect._lazyInitPending = false;
+      this.invalidateRenderOrder();
+      const dt = performance.now() - t0;
+      log.info(`Lazy-initialized effect: ${effectId} (${dt.toFixed(1)}ms)`);
+      return true;
+    } catch (e) {
+      log.error(`Failed to lazy-initialize effect: ${effectId}`, e);
+      return false;
+    }
+  }
+
+  /**
    * Unregister an effect
    * @param {string} effectId - Effect ID to remove
    */
@@ -863,5 +997,599 @@ export class EffectBase {
       this.mesh.parent.remove(this.mesh);
       this.mesh = null;
     }
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Formalized Effect Hierarchy
+//
+// These intermediate classes sit between EffectBase and concrete effects.
+// They codify the three dominant patterns observed across all effects:
+//
+//   EffectBase
+//     ├── SceneMeshEffect   — World-space mesh overlays (trees, water, fog, etc.)
+//     ├── PostProcessEffect  — Screen-space shader passes (lighting, bloom, etc.)
+//     └── ParticleEffect     — Particle system wrappers (fire, dust, flies, etc.)
+//
+// Concrete effects can extend these instead of EffectBase to get standardized
+// lifecycle hooks, shared resource management, and a clearer contract.
+// Migration is opt-in — existing effects that extend EffectBase directly
+// will continue to work unchanged.
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Base class for effects that create meshes in the Three.js scene.
+ * 
+ * Provides a standardized lifecycle:
+ * 1. `initialize(renderer, scene, camera)` — stores refs, calls `onInitialize()`
+ * 2. `setBaseMesh(baseMesh, assetBundle)` — receives the scene's base plane + asset data
+ * 3. `createMesh()` — builds the effect mesh (override required)
+ * 4. `update(timeInfo)` — per-frame logic, calls `onUpdate(timeInfo)`
+ * 5. `dispose()` — cleans up mesh, material, shadow resources
+ * 
+ * Subclasses MUST override:
+ * - `createMesh()` — build and add the mesh to `this.scene`
+ * 
+ * Subclasses MAY override:
+ * - `onInitialize()` — extra init after renderer/scene/camera are stored
+ * - `onUpdate(timeInfo)` — per-frame update logic
+ * - `onBaseMeshSet(baseMesh, assetBundle)` — extract masks/textures from the asset bundle
+ * - `createShadowResources()` — build shadow meshes/targets
+ * 
+ * @extends EffectBase
+ */
+export class SceneMeshEffect extends EffectBase {
+  /**
+   * @param {string} id
+   * @param {EffectLayer} layer
+   * @param {string} [requiredTier='low']
+   */
+  constructor(id, layer, requiredTier = 'low') {
+    super(id, layer, requiredTier);
+
+    /** @type {THREE.Renderer|null} */
+    this.renderer = null;
+
+    /** @type {THREE.Scene|null} */
+    this.scene = null;
+
+    /** @type {THREE.Camera|null} */
+    this.camera = null;
+
+    /** @type {THREE.Mesh|null} - The base plane mesh (shared geometry source) */
+    this.baseMesh = null;
+
+    /** @type {THREE.Mesh|null} - This effect's primary overlay mesh */
+    this.mesh = null;
+
+    /** @type {THREE.ShaderMaterial|null} */
+    this.material = null;
+
+    // Shadow casting support (optional — subclasses populate these)
+    /** @type {THREE.Scene|null} */
+    this.shadowScene = null;
+
+    /** @type {THREE.Mesh|null} */
+    this.shadowMesh = null;
+
+    /** @type {THREE.ShaderMaterial|null} */
+    this.shadowMaterial = null;
+
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this.shadowTarget = null;
+
+    /** @type {boolean} - Backing field for enabled getter/setter */
+    this._enabled = true;
+  }
+
+  get enabled() {
+    return this._enabled;
+  }
+
+  set enabled(value) {
+    this._enabled = !!value;
+    if (this.mesh) this.mesh.visible = this._enabled;
+  }
+
+  /**
+   * Standard initialize — stores renderer/scene/camera, then delegates to onInitialize().
+   * @param {THREE.Renderer} renderer
+   * @param {THREE.Scene} scene
+   * @param {THREE.Camera} camera
+   */
+  initialize(renderer, scene, camera) {
+    this.renderer = renderer;
+    this.scene = scene;
+    this.camera = camera;
+    this.onInitialize();
+  }
+
+  /**
+   * Hook for subclass-specific initialization after renderer/scene/camera are set.
+   * Override this instead of initialize() to avoid forgetting the super call.
+   * @protected
+   */
+  onInitialize() {
+    // Override in subclass
+  }
+
+  /**
+   * Receive the base plane mesh and asset bundle.
+   * Extracts masks/textures via onBaseMeshSet(), then calls createMesh().
+   * @param {THREE.Mesh} baseMesh - The scene's ground plane mesh
+   * @param {Object} assetBundle - Contains masks, textures, and metadata
+   */
+  setBaseMesh(baseMesh, assetBundle) {
+    this.baseMesh = baseMesh;
+    this.onBaseMeshSet(baseMesh, assetBundle);
+    if (this.scene && this.baseMesh) {
+      this.createMesh();
+      this.createShadowResources();
+    }
+  }
+
+  /**
+   * Extract masks/textures from the asset bundle.
+   * Override to pull effect-specific data (e.g., tree mask, window mask).
+   * @param {THREE.Mesh} baseMesh
+   * @param {Object} assetBundle
+   * @protected
+   */
+  onBaseMeshSet(baseMesh, assetBundle) {
+    // Override in subclass
+  }
+
+  /**
+   * Build the primary overlay mesh and add it to `this.scene`.
+   * MUST be overridden by subclasses.
+   * @abstract
+   * @protected
+   */
+  createMesh() {
+    // Override in subclass — REQUIRED
+  }
+
+  /**
+   * Build shadow-casting resources (mesh, material, render target).
+   * Override only if this effect casts shadows onto the scene.
+   * @protected
+   */
+  createShadowResources() {
+    // Override in subclass — optional
+  }
+
+  /**
+   * Per-frame update. Calls onUpdate() for subclass logic.
+   * @param {TimeInfo} timeInfo
+   */
+  update(timeInfo) {
+    if (!this._enabled || !this.mesh) return;
+    this.onUpdate(timeInfo);
+  }
+
+  /**
+   * Subclass per-frame update logic (uniform updates, animation, etc.).
+   * @param {TimeInfo} timeInfo
+   * @protected
+   */
+  onUpdate(timeInfo) {
+    // Override in subclass
+  }
+
+  /**
+   * Dispose all resources: mesh, material, shadow resources, and references.
+   */
+  dispose() {
+    // Remove primary mesh
+    if (this.mesh && this.scene) {
+      try { this.scene.remove(this.mesh); } catch (_) {}
+    }
+    this.mesh = null;
+
+    // Remove shadow mesh
+    if (this.shadowMesh && this.shadowScene) {
+      try { this.shadowScene.remove(this.shadowMesh); } catch (_) {}
+    }
+    this.shadowMesh = null;
+
+    // Dispose materials
+    if (this.material) {
+      try { this.material.dispose(); } catch (_) {}
+      this.material = null;
+    }
+    if (this.shadowMaterial) {
+      try { this.shadowMaterial.dispose(); } catch (_) {}
+      this.shadowMaterial = null;
+    }
+
+    // Dispose shadow render target
+    if (this.shadowTarget) {
+      try { this.shadowTarget.dispose(); } catch (_) {}
+      this.shadowTarget = null;
+    }
+
+    // Clear references
+    this.shadowScene = null;
+    this.renderer = null;
+    this.scene = null;
+    this.camera = null;
+    this.baseMesh = null;
+  }
+}
+
+/**
+ * Base class for screen-space post-processing effects.
+ * 
+ * These effects operate on the rendered scene texture via fullscreen quad passes.
+ * They typically use `setBuffers()` or `setInputTexture()` to receive the
+ * EffectComposer's ping-pong buffers, then render a modified result.
+ * 
+ * Provides a standardized lifecycle:
+ * 1. `initialize(renderer, scene, camera)` — stores refs, creates quad scene, calls `onInitialize()`
+ * 2. `setBuffers(readBuffer, writeBuffer)` — receive ping-pong targets from EffectComposer
+ * 3. `render(renderer, scene, camera)` — renders the post-process pass
+ * 4. `onResize(width, height)` — updates resolution uniforms and render targets
+ * 5. `dispose()` — cleans up quad scene, materials, render targets
+ * 
+ * Subclasses MUST override:
+ * - `createMaterial()` — return the ShaderMaterial for the fullscreen quad
+ * 
+ * Subclasses MAY override:
+ * - `onInitialize()` — extra init (additional render targets, hook registration)
+ * - `onUpdate(timeInfo)` — per-frame uniform updates
+ * - `onRender(renderer)` — custom render logic (multi-pass effects)
+ * 
+ * @extends EffectBase
+ */
+export class PostProcessEffect extends EffectBase {
+  /**
+   * @param {string} id
+   * @param {string} [requiredTier='low']
+   */
+  constructor(id, requiredTier = 'low') {
+    super(id, RenderLayers.POST_PROCESSING, requiredTier);
+
+    /** @type {THREE.Renderer|null} */
+    this.renderer = null;
+
+    /** @type {THREE.Scene|null} - The main scene (for reading scene state) */
+    this.mainScene = null;
+
+    /** @type {THREE.Camera|null} */
+    this.mainCamera = null;
+
+    /** @type {THREE.Scene|null} - Fullscreen quad scene for this pass */
+    this.quadScene = null;
+
+    /** @type {THREE.OrthographicCamera|null} - Ortho camera for quad rendering */
+    this.quadCamera = null;
+
+    /** @type {THREE.Mesh|null} - The fullscreen quad mesh */
+    this.quadMesh = null;
+
+    /** @type {THREE.ShaderMaterial|null} */
+    this.material = null;
+
+    /** @type {THREE.WebGLRenderTarget|null} - Read buffer from EffectComposer */
+    this.readBuffer = null;
+
+    /** @type {THREE.WebGLRenderTarget|null} - Write buffer from EffectComposer */
+    this.writeBuffer = null;
+  }
+
+  /**
+   * Standard initialize — stores refs, creates the quad scene, delegates to onInitialize().
+   * @param {THREE.Renderer} renderer
+   * @param {THREE.Scene} scene
+   * @param {THREE.Camera} camera
+   */
+  initialize(renderer, scene, camera) {
+    this.renderer = renderer;
+    this.mainScene = scene;
+    this.mainCamera = camera;
+    this._createQuadScene();
+    this.onInitialize();
+  }
+
+  /**
+   * Hook for subclass-specific initialization.
+   * @protected
+   */
+  onInitialize() {
+    // Override in subclass
+  }
+
+  /**
+   * Receive ping-pong buffers from the EffectComposer.
+   * @param {THREE.WebGLRenderTarget} readBuffer - Contains the current scene render
+   * @param {THREE.WebGLRenderTarget} writeBuffer - Target for this effect's output
+   */
+  setBuffers(readBuffer, writeBuffer) {
+    this.readBuffer = readBuffer;
+    this.writeBuffer = writeBuffer;
+    if (this.material?.uniforms?.tDiffuse) {
+      this.material.uniforms.tDiffuse.value = readBuffer?.texture ?? null;
+    }
+  }
+
+  /**
+   * Convenience for effects that only need the input texture.
+   * @param {THREE.Texture} texture
+   */
+  setInputTexture(texture) {
+    if (this.material?.uniforms?.tDiffuse) {
+      this.material.uniforms.tDiffuse.value = texture;
+    }
+  }
+
+  /**
+   * Per-frame update. Calls onUpdate() for subclass logic.
+   * @param {TimeInfo} timeInfo
+   */
+  update(timeInfo) {
+    if (!this.enabled) return;
+    this.onUpdate(timeInfo);
+  }
+
+  /**
+   * Subclass per-frame update logic (uniform updates).
+   * @param {TimeInfo} timeInfo
+   * @protected
+   */
+  onUpdate(timeInfo) {
+    // Override in subclass
+  }
+
+  /**
+   * Handle resize — updates resolution uniforms on the material.
+   * @param {number} width
+   * @param {number} height
+   */
+  onResize(width, height) {
+    super.onResize(width, height);
+    // Additional render targets owned by the subclass should be resized in an override
+  }
+
+  /**
+   * Create the ShaderMaterial for the fullscreen quad.
+   * MUST be overridden by subclasses. Called during _createQuadScene().
+   * @abstract
+   * @protected
+   * @returns {THREE.ShaderMaterial|null}
+   */
+  createMaterial() {
+    // Override in subclass — REQUIRED
+    return null;
+  }
+
+  /**
+   * Dispose all resources.
+   */
+  dispose() {
+    if (this.quadMesh && this.quadScene) {
+      try { this.quadScene.remove(this.quadMesh); } catch (_) {}
+    }
+    this.quadMesh = null;
+
+    if (this.material) {
+      try { this.material.dispose(); } catch (_) {}
+      this.material = null;
+    }
+
+    // Dispose any render targets from the base class
+    if (this.renderTarget) {
+      try { this.renderTarget.dispose(); } catch (_) {}
+      this.renderTarget = null;
+    }
+
+    this.quadScene = null;
+    this.quadCamera = null;
+    this.renderer = null;
+    this.mainScene = null;
+    this.mainCamera = null;
+    this.readBuffer = null;
+    this.writeBuffer = null;
+  }
+
+  /**
+   * Create the fullscreen quad scene used for rendering this post-process pass.
+   * @private
+   */
+  _createQuadScene() {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    this.quadScene = new THREE.Scene();
+    this.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+    this.material = this.createMaterial();
+
+    if (this.material) {
+      const geometry = new THREE.PlaneGeometry(2, 2);
+      this.quadMesh = new THREE.Mesh(geometry, this.material);
+      this.quadScene.add(this.quadMesh);
+    }
+  }
+}
+
+/**
+ * Base class for particle-system effects.
+ * 
+ * These effects manage three-quarks ParticleSystem instances, position maps,
+ * and batch renderer integration. They typically:
+ * - Build a "position map" from a luminance mask (lookup map technique)
+ * - Create particle systems that sample the position map in the vertex shader
+ * - Register with the global BatchRenderer for efficient rendering
+ * 
+ * Provides a standardized lifecycle:
+ * 1. `initialize(renderer, scene, camera)` — stores refs, calls `onInitialize()`
+ * 2. `setBaseMesh(baseMesh, assetBundle)` — extract position data from masks
+ * 3. `update(timeInfo)` — tick particle systems
+ * 4. `dispose()` — unregister from batch renderer, dispose systems
+ * 
+ * Subclasses MUST override:
+ * - `createParticleSystems()` — build and register particle system(s)
+ * 
+ * Subclasses MAY override:
+ * - `onInitialize()` — extra init
+ * - `onBaseMeshSet(baseMesh, assetBundle)` — extract masks, build position maps
+ * - `onUpdate(timeInfo)` — per-frame logic beyond particle system ticking
+ * 
+ * @extends EffectBase
+ */
+export class ParticleEffect extends EffectBase {
+  /**
+   * @param {string} id
+   * @param {string} [requiredTier='low']
+   */
+  constructor(id, requiredTier = 'low') {
+    super(id, RenderLayers.PARTICLES, requiredTier);
+
+    this.requiresContinuousRender = true;
+
+    /** @type {THREE.Renderer|null} */
+    this.renderer = null;
+
+    /** @type {THREE.Scene|null} */
+    this.scene = null;
+
+    /** @type {THREE.Camera|null} */
+    this.camera = null;
+
+    /** @type {THREE.Mesh|null} */
+    this.baseMesh = null;
+
+    /** @type {Array} - Particle systems managed by this effect */
+    this.particleSystems = [];
+
+    /** @type {boolean} */
+    this._enabled = true;
+  }
+
+  get enabled() {
+    return this._enabled;
+  }
+
+  set enabled(value) {
+    this._enabled = !!value;
+    // Toggle emitter visibility for all particle systems
+    for (const sys of this.particleSystems) {
+      if (sys?.emitter) sys.emitter.visible = this._enabled;
+    }
+  }
+
+  /**
+   * Standard initialize — stores refs, delegates to onInitialize().
+   * @param {THREE.Renderer} renderer
+   * @param {THREE.Scene} scene
+   * @param {THREE.Camera} camera
+   */
+  initialize(renderer, scene, camera) {
+    this.renderer = renderer;
+    this.scene = scene;
+    this.camera = camera;
+    this.onInitialize();
+  }
+
+  /**
+   * Hook for subclass-specific initialization.
+   * @protected
+   */
+  onInitialize() {
+    // Override in subclass
+  }
+
+  /**
+   * Receive the base plane mesh and asset bundle.
+   * @param {THREE.Mesh} baseMesh
+   * @param {Object} assetBundle
+   */
+  setBaseMesh(baseMesh, assetBundle) {
+    this.baseMesh = baseMesh;
+    this.onBaseMeshSet(baseMesh, assetBundle);
+    if (this.scene) {
+      this.createParticleSystems();
+    }
+  }
+
+  /**
+   * Extract masks/position data from the asset bundle.
+   * @param {THREE.Mesh} baseMesh
+   * @param {Object} assetBundle
+   * @protected
+   */
+  onBaseMeshSet(baseMesh, assetBundle) {
+    // Override in subclass
+  }
+
+  /**
+   * Build and register particle system(s) with the batch renderer.
+   * MUST be overridden by subclasses.
+   * @abstract
+   * @protected
+   */
+  createParticleSystems() {
+    // Override in subclass — REQUIRED
+  }
+
+  /**
+   * Per-frame update. Calls onUpdate() for subclass logic.
+   * @param {TimeInfo} timeInfo
+   */
+  update(timeInfo) {
+    if (!this._enabled) return;
+    this.onUpdate(timeInfo);
+  }
+
+  /**
+   * Subclass per-frame update logic.
+   * @param {TimeInfo} timeInfo
+   * @protected
+   */
+  onUpdate(timeInfo) {
+    // Override in subclass
+  }
+
+  /**
+   * Check if this particle effect is actively emitting.
+   * Override for dynamic activation (e.g., only when fire sources exist).
+   * @returns {boolean}
+   */
+  isActive() {
+    if (!this._enabled) return false;
+    return this.particleSystems.some(sys => sys?.emitter?.visible);
+  }
+
+  /**
+   * Dispose all particle systems and references.
+   */
+  dispose() {
+    // Unregister from batch renderer
+    const batch = window.MapShineParticles?.batchRenderer;
+    for (const sys of this.particleSystems) {
+      if (!sys) continue;
+      try {
+        if (batch && typeof batch.deleteSystem === 'function') {
+          batch.deleteSystem(sys);
+        }
+      } catch (_) {}
+      try {
+        if (sys.emitter && sys.emitter.parent) {
+          sys.emitter.parent.remove(sys.emitter);
+        }
+      } catch (_) {}
+      try {
+        if (typeof sys.dispose === 'function') sys.dispose();
+      } catch (_) {}
+    }
+    this.particleSystems = [];
+
+    // Dispose materials/geometry via parent
+    super.dispose();
+
+    this.renderer = null;
+    this.scene = null;
+    this.camera = null;
+    this.baseMesh = null;
   }
 }

@@ -190,12 +190,35 @@ export class GraphicsSettingsManager {
 
   /**
    * Apply overrides to live effects.
+   * P2.1: If an effect was deferred during loading (lazy init) and the user
+   * re-enables it, trigger ensureEffectInitialized() to compile its shaders
+   * on demand. This is async but we fire-and-forget so the UI stays responsive.
    */
   applyOverrides() {
     for (const [effectId, effect] of this._effects.entries()) {
       const enabled = this.getEffectiveEnabled(effectId);
 
       try {
+        // P2.1: If the effect was deferred and is now being enabled, trigger lazy init.
+        if (enabled && effect._lazyInitPending && this.effectComposer) {
+          this.effectComposer.ensureEffectInitialized(effect.id).then((ok) => {
+            if (ok) {
+              effect.enabled = true;
+              if (effect.params && typeof effect.params.enabled === 'boolean') {
+                effect.params.enabled = true;
+              }
+              if (effect.settings && typeof effect.settings.enabled === 'boolean') {
+                effect.settings.enabled = true;
+              }
+              log.info(`Lazy-initialized and enabled effect: ${effectId}`);
+            }
+          }).catch((e) => {
+            log.warn(`Failed to lazy-initialize effect: ${effectId}`, e);
+          });
+          // Don't enable yet — let the lazy init callback do it once shaders compile.
+          continue;
+        }
+
         // EffectComposer only renders enabled effects, so this is the safest first step.
         if (typeof effect.enabled === 'boolean') {
           effect.enabled = enabled;

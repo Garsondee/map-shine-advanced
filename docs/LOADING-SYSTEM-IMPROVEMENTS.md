@@ -568,26 +568,35 @@ Concrete plan:
 ## Implementation Roadmap
 
 ### Phase 1: Quick Wins (Week 1)
-- [ ] P1.1: Parallel asset discovery
-- [ ] P1.4: Smarter progress tracking
-- [ ] **Estimated impact**: 30-40% faster loads
+- [x] P1.1: Parallel asset discovery (Semaphore + Promise.all in loader.js)
+- [x] P1.4: Smarter progress tracking (8 fine-grained sub-stages replacing 4 coarse stages)
+- [x] Tile overhead parity fix (shared `isTileOverhead()` helper, removed deprecated `tileDoc.overhead`, fixed `>` to `>=`)
+- **Estimated impact**: 30-40% faster loads
 
 ### Phase 2: Core Improvements (Week 2-3)
-- [ ] P1.2: Parallel effect initialization
-- [ ] P1.3: Streaming manager initialization
-- [ ] P2.1: Lazy effect initialization
-- [ ] **Estimated impact**: 50-60% faster loads
+- [x] P1.2: Parallel effect initialization (`registerEffectBatch()` with concurrency=4 semaphore, 27 independent effects parallelized, dependent effects remain sequential)
+- [x] P1.3: Parallel manager initialization (7 independent managers via Promise.all)
+- [x] P2.1: Lazy effect initialization (pre-read localStorage overrides, `skipIds` in `registerEffectBatch`, `ensureEffectInitialized()` for deferred init on re-enable via Graphics Settings)
+- [x] Load Session / Staleness checks (`LoadSession` class in `core/load-session.js` replaces ad-hoc generation counter closure with AbortController/Signal, diagnostics, `session.finish()`. Future: pass `session.signal` through texture loading pipeline for true fetch cancellation.)
+- [x] UX: Enhanced loading overlay (scene name display, percentage counter, elapsed timer, animated stage pills with pending/active/done states, pulsing bar glow, refined visual design)
+- **Estimated impact**: 50-60% faster loads
 
 ### Phase 3: Advanced Features (Week 4-5)
 - [ ] P2.2: Streaming tile texture upload
-- [ ] P2.3: Asset bundle caching
-- [ ] P2.4: Smart format detection
-- [ ] **Estimated impact**: 70-80% faster loads (with caching)
+- [x] P2.3: Asset bundle caching (assetCache Map with critical mask validation, hit/miss counters, `cacheHit` flag on return value, enhanced `getCacheStats()`)
+- [x] P2.4: Smart format detection + direct mask loading (`loadMaskTextureDirect` via fetch + `createImageBitmap` for off-thread decode, bypasses PIXI; `probeMaskUrl` fallback for player clients without FilePicker access; WebP-first format priority)
+- [x] UX: Faster scene transitions (fade-in 5s→2s, fade-to-black 5s→2s, snappier content fade timing)
+- [x] Texture loading optimization:
+  - **Eager GPU upload**: `warmupBundleTextures(renderer, bundle)` calls `renderer.initTexture()` during loading instead of deferring all `gl.texImage2D` calls to the first render frame
+  - **Off-thread downscaling**: Data masks capped at 2048px, color masks at 4096px via `createImageBitmap` resize (zero main-thread cost)
+  - **Single-pass texture config**: `loadMaskTextureDirect` applies colorSpace, flipY, mipmaps, and filters in one pass — eliminates double `needsUpdate` cycle
+  - **Bitmap-to-bitmap resize**: Downscaling resizes the decoded ImageBitmap (not re-decompresses the blob)
+- **Estimated impact**: 70-80% faster loads (with caching)
 
 ### Phase 4: Polish (Week 6+)
 - [ ] P3.1: Incremental scene rendering
 - [ ] P3.2: Adaptive loading strategy
-- [ ] **Estimated impact**: Perceived load time improvement
+- **Estimated impact**: Perceived load time improvement
 
 ---
 

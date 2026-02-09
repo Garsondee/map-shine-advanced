@@ -55,13 +55,16 @@ import {
   MaskDebugEffect,
   DebugLayerEffect,
   PlayerLightEffect,
-  SkyColorEffect
+  SkyColorEffect,
+  VisionModeEffect
 } from './effect-wiring.js';
 import { RenderLoop } from '../core/render-loop.js';
 import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
 import { EnhancedLightInspector } from '../ui/enhanced-light-inspector.js';
 import { TokenManager } from '../scene/token-manager.js';
+import { VisibilityController } from '../vision/VisibilityController.js';
+import { DetectionFilterEffect } from '../effects/DetectionFilterEffect.js';
 import { TileManager } from '../scene/tile-manager.js';
 import { SurfaceRegistry } from '../scene/surface-registry.js';
 import { WallManager } from '../scene/wall-manager.js';
@@ -182,6 +185,12 @@ let lightEditor = null;
 
 /** @type {TokenManager|null} */
 let tokenManager = null;
+
+/** @type {VisibilityController|null} */
+let visibilityController = null;
+
+/** @type {DetectionFilterEffect|null} */
+let detectionFilterEffect = null;
 
 /** @type {DynamicExposureManager|null} */
 let dynamicExposureManager = null;
@@ -843,6 +852,8 @@ function onCanvasTearDown(canvas) {
     window.MapShine.effectComposer = null;
     window.MapShine.maskManager = null;
     window.MapShine.tokenManager = null;
+    window.MapShine.visibilityController = null;
+    window.MapShine.detectionFilterEffect = null;
     window.MapShine.tileManager = null;
     window.MapShine.surfaceRegistry = null;
     window.MapShine.surfaceReport = null;
@@ -1568,6 +1579,33 @@ async function createThreeCanvas(scene) {
     tokenManager.syncAllTokens();
     log.info('Token manager initialized and synced');
 
+    // Step 4 (cont): Initialize visibility controller — delegates to Foundry's
+    // testVisibility() so we get full detection mode / status effect parity for free.
+    safeCall(() => {
+      if (visibilityController) visibilityController.dispose();
+      visibilityController = new VisibilityController(tokenManager);
+      visibilityController.initialize();
+    }, 'VisibilityController.init', Severity.DEGRADED);
+
+    // Step 4 (cont): Detection filter rendering — glow/outline on tokens
+    // detected via special detection modes (tremorsense, see invisible, etc.)
+    safeCall(() => {
+      if (detectionFilterEffect) detectionFilterEffect.dispose();
+      detectionFilterEffect = new DetectionFilterEffect(tokenManager, visibilityController);
+      detectionFilterEffect.initialize();
+      effectComposer.addUpdatable(detectionFilterEffect);
+    }, 'DetectionFilterEffect.init', Severity.COSMETIC);
+
+    // CRITICAL: Expose managers on window.MapShine so other subsystems
+    // (e.g. TokenManager.updateSpriteVisibility) can check VC state.
+    // Without this, the VC early-return path is never taken and
+    // refreshToken hooks constantly override sprite.visible.
+    if (window.MapShine) {
+      window.MapShine.tokenManager = tokenManager;
+      window.MapShine.visibilityController = visibilityController;
+      window.MapShine.detectionFilterEffect = detectionFilterEffect;
+    }
+
     // Step 4a: Dynamic Exposure Manager (token-based eye adaptation)
     safeCall(() => {
       if (!dynamicExposureManager) {
@@ -1705,6 +1743,7 @@ async function createThreeCanvas(scene) {
 
     // Expose for InteractionManager selection routing and debugging.
     if (window.MapShine) {
+      window.MapShine.interactionManager = interactionManager;
       window.MapShine.overlayUIManager = overlayUIManager;
       window.MapShine.lightEditor = lightEditor;
     }
@@ -1881,7 +1920,8 @@ async function createThreeCanvas(scene) {
     exposeGlobals(mapShine, {
       effectMap,
       sceneComposer, effectComposer, cameraFollower, pixiInputBridge,
-      tokenManager, tileManager, wallManager, doorMeshManager,
+      tokenManager, tileManager, visibilityController, detectionFilterEffect,
+      wallManager, doorMeshManager,
       drawingManager, noteManager, templateManager, lightIconManager,
       enhancedLightIconManager, enhancedLightInspector, interactionManager,
       overlayUIManager, lightEditor, gridRenderer, mapPointsManager,
@@ -4175,6 +4215,20 @@ function destroyThreeCanvas() {
     dropHandler.dispose();
     dropHandler = null;
     log.debug('Drop handler disposed');
+  }
+
+  // Dispose detection filter effect (before visibility controller)
+  if (detectionFilterEffect) {
+    detectionFilterEffect.dispose();
+    detectionFilterEffect = null;
+    log.debug('Detection filter effect disposed');
+  }
+
+  // Dispose visibility controller (before token manager since it references it)
+  if (visibilityController) {
+    visibilityController.dispose();
+    visibilityController = null;
+    log.debug('Visibility controller disposed');
   }
 
   // Dispose token manager

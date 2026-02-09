@@ -43,6 +43,7 @@ import { MaskDebugEffect } from '../effects/MaskDebugEffect.js';
 import { DebugLayerEffect } from '../effects/DebugLayerEffect.js';
 import { PlayerLightEffect } from '../effects/PlayerLightEffect.js';
 import { SkyColorEffect } from '../effects/SkyColorEffect.js';
+import { VisionModeEffect } from '../effects/VisionModeEffect.js';
 
 import { createLogger } from '../core/log.js';
 
@@ -78,7 +79,8 @@ export {
   MaskDebugEffect,
   DebugLayerEffect,
   PlayerLightEffect,
-  SkyColorEffect
+  SkyColorEffect,
+  VisionModeEffect
 };
 
 // ── Independent Effect Definitions ──────────────────────────────────────────
@@ -118,7 +120,8 @@ export function getIndependentEffectDefs() {
     ['Mask Debug', MaskDebugEffect],
     ['Debug Layers', DebugLayerEffect],
     ['Player Lights', PlayerLightEffect],
-    ['Sky Color', SkyColorEffect]
+    ['Sky Color', SkyColorEffect],
+    ['Vision Mode', VisionModeEffect]
   ];
 }
 
@@ -164,6 +167,7 @@ const CAPABILITIES = [
   { effectId: 'bushes',            displayName: 'Animated Bushes',          category: 'surface',      performanceImpact: 'medium' },
   { effectId: 'candle-flames',     displayName: 'Candle Flames',            category: 'particle',     performanceImpact: 'low' },
   { effectId: 'lighting',          displayName: 'Lighting',                 category: 'global',       performanceImpact: 'high' },
+  { effectId: 'visionMode',        displayName: 'Vision Mode',              category: 'global',       performanceImpact: 'low' },
 ];
 
 /**
@@ -217,6 +221,7 @@ const GS_ID_TO_EFFECT_MAP_NAME = [
   ['ash-disturbance',   'Ash Disturbance'],
   ['candle-flames',     'Candle Flames'],
   ['lighting',          'Lighting'],
+  ['visionMode',        'Vision Mode'],
 ];
 
 /**

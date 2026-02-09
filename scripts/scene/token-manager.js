@@ -747,7 +747,18 @@ vec3 ms_applyWindowLight(vec3 color) {
       if (!currentSprite.material || currentSprite.material.disposed) return;
 
       currentSprite.material.map = texture;
-      currentSprite.material.opacity = 1; // Restore opacity
+      // Restore opacity, but respect VisibilityController authority.
+      // If VC is active and the sprite is hidden, don't override opacity —
+      // the VC will set the correct opacity when it makes the sprite visible.
+      const vc = window.MapShine?.visibilityController;
+      if (vc?._initialized) {
+        if (currentSprite.visible) {
+          currentSprite.material.opacity = currentData?.tokenDoc?.hidden ? 0.5 : 1.0;
+        }
+        // else: sprite is hidden by VC, leave opacity as-is
+      } else {
+        currentSprite.material.opacity = 1;
+      }
       currentSprite.material.needsUpdate = true;
     }).catch(error => {
       log.error(`Failed to load token texture: ${texturePath}`, error);
@@ -756,6 +767,14 @@ vec3 ms_applyWindowLight(vec3 color) {
     // Set initial position, scale, visibility
     this.updateSpriteTransform(sprite, tokenDoc);
     this.updateSpriteVisibility(sprite, tokenDoc);
+
+    // When VC is active, new sprites must start hidden. The VC will set
+    // correct visibility on the next sightRefresh / _refreshVisibility pass.
+    // Without this, the THREE.js default (visible=true) would flash tokens.
+    const vc = window.MapShine?.visibilityController;
+    if (vc?._initialized) {
+      sprite.visible = false;
+    }
     
     // Start with 0 opacity to prevent white flash before texture loads
     sprite.material.opacity = 0;
@@ -1112,7 +1131,16 @@ vec3 ms_applyWindowLight(vec3 color) {
    * @private
    */
   updateSpriteVisibility(sprite, tokenDoc) {
-    // Hidden tokens are only visible to GMs
+    // When the VisibilityController is active, it is the SOLE authority on
+    // Three.js sprite visibility (via _refreshVisibility patch + sightRefresh
+    // hook). Do NOT touch sprite.visible here — doing so would race with
+    // the VC and cause tokens to flicker or stay permanently hidden.
+    const vc = window.MapShine?.visibilityController;
+    if (vc?._initialized) {
+      return;
+    }
+
+    // Fallback when no VisibilityController is active (e.g. during init)
     if (tokenDoc.hidden) {
       sprite.visible = game.user?.isGM || false;
       sprite.material.opacity = 0.5;

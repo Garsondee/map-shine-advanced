@@ -590,6 +590,13 @@ export class WorldSpaceFogEffect extends EffectBase {
       color: 0xffffff,
       side: THREE.DoubleSide
     });
+
+    // Material for drawing darkness source shapes (black = not visible).
+    // Rendered AFTER vision/light shapes to subtract darkness areas.
+    this.darknessMaterial = new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      side: THREE.DoubleSide
+    });
     
     log.debug(`Vision render target created: ${rtWidth}x${rtHeight}`);
   }
@@ -1129,6 +1136,77 @@ export class WorldSpaceFogEffect extends EffectBase {
       const mesh = new THREE.Mesh(geometry, this.visionMaterial);
       this.visionScene.add(mesh);
       polygonsRendered++;
+    }
+
+    // Phase 2: Light-Grants-Vision
+    // Light sources with data.vision === true grant visibility within their area.
+    // Draw their shapes into the vision mask alongside token LOS polygons.
+    try {
+      const lightSources = canvas?.effects?.lightSources;
+      if (lightSources) {
+        for (const lightSource of lightSources) {
+          if (!lightSource.active || !lightSource.data?.vision) continue;
+          // Skip GlobalLightSource — handled separately via _isGlobalIlluminationActive
+          if (lightSource.constructor?.name === 'GlobalLightSource') continue;
+
+          const shape = lightSource.shape;
+          if (!shape?.points || shape.points.length < 6) continue;
+
+          const pts = shape.points;
+          const lightShape = new THREE.Shape();
+          const offsetX = this.sceneRect.x;
+          const offsetY = this.sceneRect.y;
+
+          lightShape.moveTo(pts[0] - offsetX, pts[1] - offsetY);
+          for (let i = 2; i < pts.length; i += 2) {
+            lightShape.lineTo(pts[i] - offsetX, pts[i + 1] - offsetY);
+          }
+          lightShape.closePath();
+
+          const geo = new THREE.ShapeGeometry(lightShape);
+          const lightMesh = new THREE.Mesh(geo, this.visionMaterial);
+          this.visionScene.add(lightMesh);
+          polygonsRendered++;
+        }
+      }
+    } catch (e) {
+      log.warn('Failed to render light-grants-vision shapes:', e);
+    }
+
+    // Phase 5: Darkness Source Integration
+    // Darkness-emitting lights (PointDarknessSource) suppress vision within their area.
+    // Draw their shapes in black AFTER vision/light shapes to subtract those zones.
+    // Foundry stores these in canvas.effects.darknessSources (v12+).
+    try {
+      const darknessSources = canvas?.effects?.darknessSources;
+      if (darknessSources) {
+        for (const darknessSource of darknessSources) {
+          if (!darknessSource.active) continue;
+
+          const shape = darknessSource.shape;
+          if (!shape?.points || shape.points.length < 6) continue;
+
+          const pts = shape.points;
+          const darkShape = new THREE.Shape();
+          const offsetX = this.sceneRect.x;
+          const offsetY = this.sceneRect.y;
+
+          darkShape.moveTo(pts[0] - offsetX, pts[1] - offsetY);
+          for (let i = 2; i < pts.length; i += 2) {
+            darkShape.lineTo(pts[i] - offsetX, pts[i + 1] - offsetY);
+          }
+          darkShape.closePath();
+
+          const geo = new THREE.ShapeGeometry(darkShape);
+          const darkMesh = new THREE.Mesh(geo, this.darknessMaterial);
+          // Render darkness shapes slightly in front of vision shapes so they
+          // overwrite (subtract) the white areas in the same render pass.
+          darkMesh.renderOrder = 1;
+          this.visionScene.add(darkMesh);
+        }
+      }
+    } catch (e) {
+      log.warn('Failed to render darkness source shapes:', e);
     }
     
     // Render to the vision target (always render, even if no polygons —
@@ -1860,6 +1938,9 @@ export class WorldSpaceFogEffect extends EffectBase {
       this.fogPlane.geometry.dispose();
       this.fogMaterial.dispose();
     }
+
+    if (this.visionMaterial) this.visionMaterial.dispose();
+    if (this.darknessMaterial) this.darknessMaterial.dispose();
     
     if (this.visionRenderTarget) {
       this.visionRenderTarget.dispose();

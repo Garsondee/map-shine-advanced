@@ -128,7 +128,7 @@ export class BuildingShadowsEffect extends EffectBase {
           name: 'main',
           label: 'Building Shadows',
           type: 'inline',
-          parameters: ['opacity', 'length', 'quality', 'sunLatitude', 'blurStrength', 'sunriseTime', 'sunsetTime']
+          parameters: ['opacity', 'length', 'quality', 'blurStrength', 'sunriseTime', 'sunsetTime']
         }
       ],
       parameters: {
@@ -155,14 +155,6 @@ export class BuildingShadowsEffect extends EffectBase {
           max: 128,
           step: 1,
           default: 80
-        },
-        sunLatitude: {
-          type: 'slider',
-          label: 'Sun Latitude',
-          min: 0.0,
-          max: 1.0,
-          step: 0.01,
-          default: 0.03
         },
         blurStrength: {
           type: 'slider',

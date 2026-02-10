@@ -268,7 +268,7 @@ export class WindowLightEffect extends EffectBase {
           label: 'Sun Tracking',
           type: 'folder',
           expanded: false,
-          parameters: ['sunLightEnabled', 'sunLightLength', 'sunLightLatitude']
+          parameters: ['sunLightEnabled', 'sunLightLength']
         },
         {
           name: 'environment',
@@ -1227,15 +1227,6 @@ export class WindowLightEffect extends EffectBase {
           step: 0.005,
           default: 0.03,
           tooltip: 'How far the window light shifts with the sun position'
-        },
-        sunLightLatitude: {
-          type: 'slider',
-          label: 'Sun Latitude',
-          min: 0.0,
-          max: 1.0,
-          step: 0.01,
-          default: 0.1,
-          tooltip: 'North/south arc of the sun (0 = flat east/west, 1 = maximum arc)'
         },
         lightningWindowEnabled: {
           type: 'boolean',

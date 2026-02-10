@@ -64,6 +64,7 @@ export class TweakpaneManager {
     this.globalParams = {
       mapMakerMode: false,
       timeRate: 100, // 0-200%
+      sunLatitude: 0.1, // 0=flat east/west, 1=maximum north/south arc (single source of truth for all effects)
       // Light authoring UI visibility toggles
       showLightTranslateGizmo: true,
       showLightRadiusRings: true,
@@ -369,6 +370,9 @@ export class TweakpaneManager {
 
     // Build global controls
     this.buildGlobalControls();
+
+    // Build environment section (sun latitude etc.) — single source of truth
+    this.buildEnvironmentSection();
 
     this.buildRopesSection();
 
@@ -873,6 +877,38 @@ export class TweakpaneManager {
     });
   }
 
+  /**
+   * Build the Environment section — contains global sun/sky parameters that are
+   * the single source of truth for all effects (shadows, window light, trees, etc.).
+   * @private
+   */
+  buildEnvironmentSection() {
+    if (!this.pane) return;
+
+    const envFolder = this.ensureCategoryFolder('environment', 'Environment');
+
+    // Sun Latitude slider — single authoritative value consumed by
+    // OverheadShadowsEffect, BuildingShadowsEffect, WindowLightEffect,
+    // LightingEffect, TreeEffect, and BushEffect.
+    const onSunLatitudeChange = (ev) => {
+      this.globalParams.sunLatitude = ev.value;
+      this.onGlobalChange('sunLatitude', ev.value);
+    };
+    this._uiValidatorGlobalHandlers.sunLatitude = onSunLatitudeChange;
+
+    this._sunLatitudeBinding = envFolder.addBinding(this.globalParams, 'sunLatitude', {
+      label: 'Sun Latitude',
+      min: 0.0,
+      max: 1.0,
+      step: 0.01
+    }).on('change', onSunLatitudeChange);
+
+    envFolder.on('fold', (ev) => {
+      this.accordionStates['cat_environment'] = ev.expanded;
+      this.saveUIState();
+    });
+  }
+
   buildDebugSection() {
     if (!this.pane) return;
     if (this._debugFolder) return;
@@ -1185,6 +1221,7 @@ export class TweakpaneManager {
     // Reset global controls to their defaults
     this.globalParams.mapMakerMode = false;
     this.globalParams.timeRate = 100;
+    this.globalParams.sunLatitude = 0.1;
 
     // Reset UI scale
     this.uiScale = 1.0;
@@ -1195,6 +1232,7 @@ export class TweakpaneManager {
     // Propagate global control changes to the underlying systems
     this.onGlobalChange('mapMakerMode', this.globalParams.mapMakerMode);
     this.onGlobalChange('timeRate', this.globalParams.timeRate);
+    this.onGlobalChange('sunLatitude', this.globalParams.sunLatitude);
 
     // Queue saves for all effects so scene flags are updated
     for (const [effectId] of Object.entries(this.effectFolders)) {
@@ -1249,6 +1287,7 @@ export class TweakpaneManager {
     // Restore globals
     this.globalParams.mapMakerMode = snapshot.globalParams.mapMakerMode;
     this.globalParams.timeRate = snapshot.globalParams.timeRate;
+    this.globalParams.sunLatitude = snapshot.globalParams.sunLatitude ?? 0.1;
 
     // Restore UI scale
     this.uiScale = snapshot.uiScale ?? 1.0;
@@ -1259,6 +1298,7 @@ export class TweakpaneManager {
     // Propagate global control changes
     this.onGlobalChange('mapMakerMode', this.globalParams.mapMakerMode);
     this.onGlobalChange('timeRate', this.globalParams.timeRate);
+    this.onGlobalChange('sunLatitude', this.globalParams.sunLatitude);
 
     // Restore each effect's parameters and notify callbacks
     for (const [effectId, effectSnapshot] of Object.entries(snapshot.effects || {})) {
@@ -1684,6 +1724,7 @@ export class TweakpaneManager {
     let parent = this.pane;
     if (categoryId) {
       const titles = {
+        environment: 'Environment',
         atmospheric: 'Atmospheric & Environmental',
         surface: 'Surface & Material',
         water: 'Water',
@@ -2075,6 +2116,15 @@ export class TweakpaneManager {
     } else if (param === 'showLightRadiusVisualization') {
       // Trigger a refresh of the enhanced light icon manager to update radius visualization visibility
       window.MapShine?.enhancedLightIconManager?.refreshAll?.();
+    } else if (param === 'sunLatitude') {
+      // Push global sun latitude to all effects that consume it.
+      // This is the single source of truth — individual effect sliders have been removed.
+      const lat = typeof value === 'number' ? value : 0.1;
+      const ms = window.MapShine;
+      if (ms?.overheadShadowsEffect?.params) ms.overheadShadowsEffect.params.sunLatitude = lat;
+      if (ms?.buildingShadowsEffect?.params) ms.buildingShadowsEffect.params.sunLatitude = lat;
+      if (ms?.windowLightEffect?.params) ms.windowLightEffect.params.sunLightLatitude = lat;
+      log.debug(`Sun latitude pushed to all effects: ${lat}`);
     }
 
     this.saveUIState();
@@ -3567,6 +3617,11 @@ export class TweakpaneManager {
           if (this.globalParams.tokenColorCorrection.windowLightIntensity === undefined) {
             this.globalParams.tokenColorCorrection.windowLightIntensity = 1.0;
           }
+        }
+
+        // Backwards-compatible default for sunLatitude (added as global param)
+        if (this.globalParams.sunLatitude === undefined) {
+          this.globalParams.sunLatitude = 0.1;
         }
 
         // Backwards-compatible defaults for newly added Dynamic Exposure controls

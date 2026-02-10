@@ -3439,13 +3439,6 @@ async function initializeUI(effectMap) {
       } else if (overheadShadowsEffect.params && Object.prototype.hasOwnProperty.call(overheadShadowsEffect.params, paramId)) {
         overheadShadowsEffect.params[paramId] = value;
         log.debug(`OverheadShadows.${paramId} =`, value);
-
-        // Keep BuildingShadowsEffect's sunLatitude in sync so both
-        // shadow casters share the same north/south eccentricity.
-        if (paramId === 'sunLatitude' && buildingShadowsEffect && buildingShadowsEffect.params) {
-          buildingShadowsEffect.params.sunLatitude = value;
-          log.debug('BuildingShadows.sunLatitude synced from OverheadShadows:', value);
-        }
       }
     };
 
@@ -3469,13 +3462,6 @@ async function initializeUI(effectMap) {
       } else if (buildingShadowsEffect.params && Object.prototype.hasOwnProperty.call(buildingShadowsEffect.params, paramId)) {
         buildingShadowsEffect.params[paramId] = value;
         log.debug(`BuildingShadows.${paramId} =`, value);
-
-        // Keep OverheadShadowsEffect's sunLatitude in sync so both
-        // shadow casters share the same north/south eccentricity.
-        if (paramId === 'sunLatitude' && overheadShadowsEffect && overheadShadowsEffect.params) {
-          overheadShadowsEffect.params.sunLatitude = value;
-          log.debug('OverheadShadows.sunLatitude synced from BuildingShadows:', value);
-        }
       }
     };
 
@@ -4115,6 +4101,12 @@ async function initializeUI(effectMap) {
 
   // Expose UI manager globally for debugging
   window.MapShine.uiManager = uiManager;
+
+  // Push the global sunLatitude value to all effects now that they exist.
+  // This is the single source of truth — individual per-effect sliders were removed.
+  if (uiManager && typeof uiManager.onGlobalChange === 'function') {
+    uiManager.onGlobalChange('sunLatitude', uiManager.globalParams.sunLatitude);
+  }
   
   log.info('Specular effect wired to UI');
 }

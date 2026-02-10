@@ -745,9 +745,10 @@ export class BushEffect extends EffectBase {
             const azimuth = (t - 0.5) * Math.PI;
 
             const x = -Math.sin(azimuth);
-            const lat = (overhead && overhead.params)
-              ? (overhead.params.sunLatitude ?? 0.5)
-              : 0.5;
+            // Read sun latitude from the global Environment source of truth
+            const globalLat = window.MapShine?.uiManager?.globalParams?.sunLatitude;
+            const lat = (typeof globalLat === 'number') ? globalLat
+              : (overhead && overhead.params) ? (overhead.params.sunLatitude ?? 0.5) : 0.5;
             const y = Math.cos(azimuth) * lat;
 
             su.uSunDir.value.set(x, y);

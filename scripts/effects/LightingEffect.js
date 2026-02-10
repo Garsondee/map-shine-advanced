@@ -2046,7 +2046,7 @@ export class LightingEffect extends EffectBase {
         u.uShadowSunDir.value.copy(overhead.sunDir);
       } else if (weatherController && THREE) {
         // Fallback: recompute sunDir from WeatherController.timeOfDay and
-        // overhead sunLatitude, mirroring OverheadShadowsEffect logic.
+        // global sunLatitude, mirroring OverheadShadowsEffect logic.
         let hour = 12.0;
         try {
           if (typeof weatherController.timeOfDay === 'number') {
@@ -2056,9 +2056,13 @@ export class LightingEffect extends EffectBase {
 
         const t = (hour % 24.0) / 24.0;
         const azimuth = (t - 0.5) * Math.PI;
-        const lat = (overhead && overhead.params && typeof overhead.params.sunLatitude === 'number')
-          ? THREE.MathUtils.clamp(overhead.params.sunLatitude, 0.0, 1.0)
-          : 0.5;
+        // Read sun latitude from the global Environment source of truth
+        const globalLat = window.MapShine?.uiManager?.globalParams?.sunLatitude;
+        const lat = (typeof globalLat === 'number')
+          ? THREE.MathUtils.clamp(globalLat, 0.0, 1.0)
+          : (overhead && overhead.params && typeof overhead.params.sunLatitude === 'number')
+            ? THREE.MathUtils.clamp(overhead.params.sunLatitude, 0.0, 1.0)
+            : 0.5;
         const x = -Math.sin(azimuth);
         const y = Math.cos(azimuth) * lat;
         u.uShadowSunDir.value.set(x, y);

@@ -849,7 +849,10 @@ export class TreeEffect extends EffectBase {
             try { if (typeof weatherController.timeOfDay === 'number') hour = weatherController.timeOfDay; } catch (e) {}
             const t = (hour % 24.0) / 24.0;
             const azimuth = (t - 0.5) * Math.PI;
-            const lat = (overhead && overhead.params) ? (overhead.params.sunLatitude ?? 0.5) : 0.5;
+            // Read sun latitude from the global Environment source of truth
+            const globalLat = window.MapShine?.uiManager?.globalParams?.sunLatitude;
+            const lat = (typeof globalLat === 'number') ? globalLat
+              : (overhead && overhead.params) ? (overhead.params.sunLatitude ?? 0.5) : 0.5;
             su.uSunDir.value.set(-Math.sin(azimuth), Math.cos(azimuth) * lat);
           }
         }

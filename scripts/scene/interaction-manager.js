@@ -368,6 +368,8 @@ export class InteractionManager {
     this._pendingOverheadTileId = null;
     /** @type {number} Timestamp when overhead hover debounce started */
     this._overheadHoverStartMs = 0;
+    /** @type {number|null} Timeout handle for overhead hover-hide debounce */
+    this._overheadHoverTimeoutId = null;
     this.hoveringTreeCanopy = false;
     
     /** @type {string|null} ID of token whose HUD is currently open */
@@ -2387,6 +2389,31 @@ export class InteractionManager {
           if (this._pendingOverheadTileId !== bestTileId) {
             this._pendingOverheadTileId = bestTileId;
             this._overheadHoverStartMs = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+            // IMPORTANT: The hover debounce must NOT require further pointer movement.
+            // Without this timer, the hide only triggers when handleHover runs again
+            // (usually on mouse move), causing the "jiggle" UX.
+            try {
+              if (this._overheadHoverTimeoutId != null) {
+                clearTimeout(this._overheadHoverTimeoutId);
+                this._overheadHoverTimeoutId = null;
+              }
+
+              this._overheadHoverTimeoutId = setTimeout(() => {
+                try {
+                  // Only commit if we're still hovering the same tile.
+                  if (!this._pendingOverheadTileId || this._pendingOverheadTileId !== bestTileId) return;
+
+                  this.hoveredOverheadTileId = bestTileId;
+                  this._pendingOverheadTileId = null;
+                  if (this.tileManager?.setTileHoverHidden) {
+                    this.tileManager.setTileHoverHidden(bestTileId, true);
+                  }
+                } catch (_) {
+                }
+              }, 1000);
+            } catch (_) {
+            }
           }
 
           const nowMs = (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -2396,6 +2423,15 @@ export class InteractionManager {
             if (this.tileManager.setTileHoverHidden) {
               this.tileManager.setTileHoverHidden(bestTileId, true);
             }
+
+            // If we committed via pointermove, cancel any scheduled commit.
+            try {
+              if (this._overheadHoverTimeoutId != null) {
+                clearTimeout(this._overheadHoverTimeoutId);
+                this._overheadHoverTimeoutId = null;
+              }
+            } catch (_) {
+            }
           }
           hitFound = true;
         } else {
@@ -2404,6 +2440,15 @@ export class InteractionManager {
             this.hoveredOverheadTileId = null;
           }
           this._pendingOverheadTileId = null;
+
+          // No longer hovering any eligible overhead tile: cancel pending debounce.
+          try {
+            if (this._overheadHoverTimeoutId != null) {
+              clearTimeout(this._overheadHoverTimeoutId);
+              this._overheadHoverTimeoutId = null;
+            }
+          } catch (_) {
+          }
         }
       }
     }

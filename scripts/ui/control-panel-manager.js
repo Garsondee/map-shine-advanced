@@ -99,6 +99,17 @@ export class ControlPanelManager {
     /** @type {number|null} */
     this._statusIntervalId = null;
 
+    /** @type {number|null} */
+    this._sunLatitudeSyncIntervalId = null;
+
+    /** @type {{sunLatitude:number}} */
+    this._environmentState = {
+      sunLatitude: 0.1
+    };
+
+    /** @type {any|null} */
+    this._sunLatitudeBinding = null;
+
     /** @type {boolean} */
     this._didLoadControlState = false;
 
@@ -524,12 +535,81 @@ export class ControlPanelManager {
     // Build UI sections
     this._buildTimeSection();
     this._buildWeatherSection();
+    this._buildEnvironmentSection();
     this._buildUtilitiesSection();
 
     // Apply initial state
     await this._applyControlState();
 
+    this._startEnvironmentSync();
+
     log.info('Control Panel initialized');
+  }
+
+  _buildEnvironmentSection() {
+    const envFolder = this.pane.addFolder({
+      title: '🌤️ Environment',
+      expanded: false
+    });
+
+    // Initialize from the shared config panel state if available.
+    try {
+      const lat = window.MapShine?.uiManager?.globalParams?.sunLatitude;
+      if (typeof lat === 'number' && Number.isFinite(lat)) {
+        this._environmentState.sunLatitude = lat;
+      }
+    } catch (e) {
+    }
+
+    const onSunLatitudeChange = (ev) => {
+      this._environmentState.sunLatitude = ev.value;
+
+      const uiManager = window.MapShine?.uiManager;
+      if (uiManager?.globalParams) {
+        uiManager.globalParams.sunLatitude = ev.value;
+        if (typeof uiManager.onGlobalChange === 'function') {
+          uiManager.onGlobalChange('sunLatitude', ev.value);
+        }
+        try {
+          uiManager._sunLatitudeBinding?.refresh?.();
+        } catch (e) {
+        }
+      }
+    };
+
+    this._sunLatitudeBinding = envFolder.addBinding(this._environmentState, 'sunLatitude', {
+      label: 'Sun Latitude',
+      min: 0.0,
+      max: 1.0,
+      step: 0.01
+    }).on('change', onSunLatitudeChange);
+  }
+
+  _startEnvironmentSync() {
+    if (this._sunLatitudeSyncIntervalId !== null) {
+      clearInterval(this._sunLatitudeSyncIntervalId);
+      this._sunLatitudeSyncIntervalId = null;
+    }
+
+    let lastLat = null;
+    this._sunLatitudeSyncIntervalId = setInterval(() => {
+      try {
+        const uiManager = window.MapShine?.uiManager;
+        const lat = uiManager?.globalParams?.sunLatitude;
+        if (typeof lat !== 'number' || !Number.isFinite(lat)) return;
+        if (lastLat === null) lastLat = lat;
+
+        if (lat !== lastLat) {
+          lastLat = lat;
+          this._environmentState.sunLatitude = lat;
+          try {
+            this._sunLatitudeBinding?.refresh?.();
+          } catch (e) {
+          }
+        }
+      } catch (e) {
+      }
+    }, 200);
   }
 
   /**
@@ -1586,6 +1666,11 @@ Current Weather:
       this._statusIntervalId = null;
     }
 
+    if (this._sunLatitudeSyncIntervalId !== null) {
+      clearInterval(this._sunLatitudeSyncIntervalId);
+      this._sunLatitudeSyncIntervalId = null;
+    }
+
     // Remove event listeners
     if (this.clockElements.face) {
       this.clockElements.face.removeEventListener('mousedown', this._boundHandlers.onFaceMouseDown);
@@ -1621,6 +1706,7 @@ Current Weather:
     this.statusPanel = null;
     this._statusEls = null;
     this.headerOverlay = null;
+    this._sunLatitudeBinding = null;
 
     log.info('Control panel destroyed');
   }

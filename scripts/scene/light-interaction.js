@@ -234,10 +234,12 @@ export class LightInteractionHandler {
       vertexShader: `
         varying vec2 vUv;
         varying vec3 vWorldPosition;
+        varying vec2 vCenterWorld;
         void main() {
           vUv = uv;
           vec4 worldPos = modelMatrix * vec4(position, 1.0);
           vWorldPosition = worldPos.xyz;
+          vCenterWorld = (modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xy;
           gl_Position = projectionMatrix * viewMatrix * worldPos;
         }
       `,
@@ -247,11 +249,10 @@ export class LightInteractionHandler {
         uniform float uRadius;
         varying vec2 vUv;
         varying vec3 vWorldPosition;
+        varying vec2 vCenterWorld;
 
         void main() {
-          // Distance from center of the group (modelMatrix origin)
-          vec2 centerWorld = (modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xy;
-          float dist = length(vWorldPosition.xy - centerWorld);
+          float dist = length(vWorldPosition.xy - vCenterWorld);
 
           float d = dist / max(uRadius, 0.0001);
 

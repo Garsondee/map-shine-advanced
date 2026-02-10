@@ -863,9 +863,14 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const cached = this._tileSpecularMaskCache.get(resolvedUrl);
     if (cached) {
       const THREE = window.THREE;
-      if (THREE && cached.colorSpace !== THREE.NoColorSpace) {
-        cached.colorSpace = THREE.NoColorSpace;
-        cached.needsUpdate = true;
+      if (THREE) {
+        // Tile specular masks must use flipY=true to match the tile albedo
+        // texture convention. Without this, the specular overlay appears
+        // Y-flipped on the PlaneGeometry mesh.
+        let dirty = false;
+        if (cached.colorSpace !== THREE.NoColorSpace) { cached.colorSpace = THREE.NoColorSpace; dirty = true; }
+        if (!cached.flipY) { cached.flipY = true; dirty = true; }
+        if (dirty) cached.needsUpdate = true;
       }
       return cached;
     }
@@ -878,6 +883,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       const THREE = window.THREE;
       if (THREE) {
         tex.colorSpace = THREE.NoColorSpace;
+        // Tile specular masks must use flipY=true to match the tile albedo
+        // texture convention (loaded without DATA_MASK role). The overlay
+        // PlaneGeometry shares the sprite's transform, so UVs must agree.
+        tex.flipY = true;
         tex.needsUpdate = true;
       }
       this._tileSpecularMaskCache.set(resolvedUrl, tex);

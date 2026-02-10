@@ -231,7 +231,11 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
               // Bypasses PIXI, eliminates canvas clone, downscales large masks, and
               // applies final texture settings (colorSpace, mipmaps, flipY) in one pass.
               const isColorTexture = ['bush', 'tree'].includes(maskId);
-              maskTexture = await loadMaskTextureDirect(maskFile, { isColorTexture });
+              const isVisualDetail = VISUAL_DETAIL_MASKS.has(maskId);
+              // Visual-detail masks (specular, normal, etc.) need full resolution
+              // to avoid visible quality loss on high-frequency patterns.
+              const maskMaxSize = (isColorTexture || isVisualDetail) ? VISUAL_MASK_MAX_SIZE : undefined;
+              maskTexture = await loadMaskTextureDirect(maskFile, { isColorTexture, maxSize: maskMaxSize });
             } finally {
               if (doLoadProfile) {
                 try {
@@ -494,11 +498,18 @@ async function discoverAvailableFiles(basePath) {
 /** Feature-detect createImageBitmap support once */
 const _hasImageBitmap = typeof createImageBitmap === 'function';
 
-/** Default max dimension for data mask downscaling (specular, roughness, etc.) */
+/** Max dimension for low-frequency data masks (fire spawn, outdoors, water depth, etc.) */
 const MASK_MAX_SIZE = 2048;
 
-/** Color textures (bush, tree) keep full resolution for visual quality */
-const COLOR_MASK_MAX_SIZE = 4096;
+/** Max dimension for color textures (bush, tree) and visual-detail masks */
+const VISUAL_MASK_MAX_SIZE = 4096;
+
+/**
+ * Masks containing high-frequency visual detail that is directly visible on screen.
+ * These need full resolution to avoid blurriness — downscaling a 4096 specular mask
+ * to 2048 produces a noticeable "half-res" appearance on stripe/sparkle patterns.
+ */
+const VISUAL_DETAIL_MASKS = new Set(['specular', 'roughness', 'normal', 'iridescence', 'prism']);
 
 /**
  * Load a mask texture directly via fetch + createImageBitmap → THREE.Texture.
@@ -525,7 +536,7 @@ async function loadMaskTextureDirect(url, opts = {}) {
   const THREE = window.THREE;
   const absoluteUrl = normalizePath(url);
   const isColor = !!opts.isColorTexture;
-  const maxSize = opts.maxSize ?? (isColor ? COLOR_MASK_MAX_SIZE : MASK_MAX_SIZE);
+  const maxSize = opts.maxSize ?? (isColor ? VISUAL_MASK_MAX_SIZE : MASK_MAX_SIZE);
 
   if (!_hasImageBitmap) {
     // Fallback: use the legacy PIXI-based loader

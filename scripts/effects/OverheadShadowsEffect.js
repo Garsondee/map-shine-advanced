@@ -60,7 +60,12 @@ export class OverheadShadowsEffect extends EffectBase {
       softness: 3.0,
       verticalOnly: true,  // v1: primarily vertical motion in screen space
       affectsLights: 0.0,
-      sunLatitude: 0.1     // 0=flat east/west, 1=maximum north/south arc
+      sunLatitude: 0.1,    // 0=flat east/west, 1=maximum north/south arc
+      indoorShadowEnabled: false, // Treat indoor areas (_Outdoors dark) as additional shadow
+      indoorShadowOpacity: 0.5,   // Opacity of the indoor area shadow contribution
+      indoorShadowMaskId: 'none', // Which mask to use for indoor shadow (resolved from MaskManager)
+      indoorShadowLengthScale: 1.0,
+      indoorShadowSoftnessScale: 1.0
     };
     
     // PERFORMANCE: Reusable objects to avoid per-frame allocations
@@ -97,6 +102,12 @@ export class OverheadShadowsEffect extends EffectBase {
           label: 'Overhead Shadows',
           type: 'inline',
           parameters: ['opacity', 'length', 'softness', 'sunLatitude', 'affectsLights']
+        },
+        {
+          name: 'indoorShadow',
+          label: 'Indoor Shadow',
+          type: 'inline',
+          parameters: ['indoorShadowEnabled', 'indoorShadowMaskId', 'indoorShadowOpacity', 'indoorShadowLengthScale', 'indoorShadowSoftnessScale']
         }
       ],
       parameters: {
@@ -139,6 +150,60 @@ export class OverheadShadowsEffect extends EffectBase {
           max: 1.0,
           step: 0.05,
           default: 0.75
+        },
+        indoorShadowEnabled: {
+          type: 'checkbox',
+          label: 'Enable Indoor Shadow',
+          default: false,
+          tooltip: 'Add shadow to indoor areas using the _Outdoors mask'
+        },
+        indoorShadowMaskId: {
+          type: 'list',
+          label: 'Mask Source',
+          options: {
+            'None': 'none',
+            '_Outdoors': 'outdoors',
+            '_Structural': 'structural',
+            '_Windows': 'windows',
+            '_Fire': 'fire',
+            '_Water': 'water',
+            '_Specular': 'specular',
+            '_Iridescence': 'iridescence',
+            '_Bush': 'bush',
+            '_Tree': 'tree',
+            '_Dust': 'dust',
+            '_Ash': 'ash',
+            '_Prism': 'prism'
+          },
+          default: 'none',
+          tooltip: 'Select which discovered mask to use for indoor shadow areas'
+        },
+        indoorShadowOpacity: {
+          type: 'slider',
+          label: 'Indoor Shadow Opacity',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.5,
+          tooltip: 'Strength of the shadow applied to indoor (covered) areas'
+        },
+        indoorShadowLengthScale: {
+          type: 'slider',
+          label: 'Indoor Length Scale',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 1.0,
+          tooltip: 'Scale factor for indoor shadow projection distance'
+        },
+        indoorShadowSoftnessScale: {
+          type: 'slider',
+          label: 'Indoor Softness Scale',
+          min: 0.0,
+          max: 4.0,
+          step: 0.01,
+          default: 1.0,
+          tooltip: 'Scale factor for indoor shadow blur radius'
         }
       }
     };
@@ -187,7 +252,16 @@ export class OverheadShadowsEffect extends EffectBase {
         uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         uSunDir: { value: new THREE.Vector2(0.0, 1.0) },
         uResolution: { value: new THREE.Vector2(1024, 1024) },
-        uZoom: { value: 1.0 }
+        uZoom: { value: 1.0 },
+        // Indoor shadow from _Outdoors mask
+        uOutdoorsMask: { value: null },
+        uHasOutdoorsMask: { value: 0.0 },
+        uIndoorShadowEnabled: { value: 0.0 },
+        uIndoorShadowOpacity: { value: 0.5 },
+        uIndoorShadowLengthScale: { value: 1.0 },
+        uIndoorShadowSoftnessScale: { value: 1.0 },
+        // Scene dimensions in world pixels for world-space mask UV conversion
+        uSceneDimensions: { value: new THREE.Vector2(1, 1) }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -206,6 +280,16 @@ export class OverheadShadowsEffect extends EffectBase {
         uniform vec2 uResolution;
         uniform float uZoom;
 
+        // Indoor shadow from _Outdoors mask
+        uniform sampler2D uOutdoorsMask;
+        uniform float uHasOutdoorsMask;
+        uniform float uIndoorShadowEnabled;
+        uniform float uIndoorShadowOpacity;
+        uniform float uIndoorShadowLengthScale;
+        uniform float uIndoorShadowSoftnessScale;
+        // Scene dimensions in world pixels for mask UV conversion
+        uniform vec2 uSceneDimensions;
+
         varying vec2 vUv;
 
         void main() {
@@ -213,9 +297,23 @@ export class OverheadShadowsEffect extends EffectBase {
           // render that was produced with the same camera.
           vec2 screenUv = gl_FragCoord.xy / uResolution;
 
-          // Sun direction in screen space, driven by TimeManager. We
-          // assume uSunDir is already normalized.
+          // Two direction vectors are needed because the roof sampling and
+          // indoor mask sampling operate in different UV spaces:
+          //
+          // Screen UV (gl_FragCoord / uResolution): Y=0 at the BOTTOM of the
+          //   viewport (south on the map).
+          // Mesh UV (vUv on basePlane with scale.y=-1 and flipY=false): V=0 at
+          //   the TOP of the mesh (north on the map).
+          //
+          // BuildingShadowsEffect's bake shader uses a standard-UV bake quad
+          // where V=0 also maps to north (flipY=false on the _Outdoors mask).
+          // So its +dir.y points north in its UV space. To get the same visual
+          // direction in screen UV we must negate Y, because screen Y=0 is south.
+          //
+          // dir        — mesh/mask UV space (V=0 = north, matches bake UV)
+          // screenDir  — screen UV space (Y=0 = south, needs Y flip)
           vec2 dir = normalize(uSunDir);
+          vec2 screenDir = normalize(vec2(uSunDir.x, -uSunDir.y));
 
           // Scale length by zoom so the world-space band stays
           // approximately constant as the camera zoom changes.
@@ -225,19 +323,23 @@ export class OverheadShadowsEffect extends EffectBase {
           // uLength (0.04) * 1080 ~= 43 pixels at Zoom 1.
           float pixelLen = uLength * 1080.0 * max(uZoom, 0.0001);
 
-          // Base roof coverage (directly overhead)
-          float roofBase = texture2D(tRoof, screenUv).a;
-
-          // Sample along the shadow direction. We multiply by uTexelSize
-          // to convert the pixel length into UV space. Since uTexelSize.x
-          // and uTexelSize.y may differ (non-square aspect), this automatically
-          // corrects for aspect ratio, preventing shadow stretching.
-          vec2 offsetUv = screenUv + dir * pixelLen * uTexelSize;
-          float roofOffset = texture2D(tRoof, offsetUv).a;
+          // Sample the roof mask at an offset along screenDir. We look for
+          // roof pixels in the +screenDir direction so shadow extends in
+          // -screenDir, matching BuildingShadowsEffect's visual convention.
+          vec2 offsetUv = screenUv + screenDir * pixelLen * uTexelSize;
 
           // Simple 3x3 blur around the offset position to soften edges.
           float blurScale = 1.0 * uSoftness;
           vec2 stepUv = uTexelSize * blurScale;
+
+          // Prepare indoor shadow sampling in world UV (mask space). We will
+          // merge roof+indoor into a single pre-blur kernel by taking the per-tap
+          // max() and then blurring once.
+          bool indoorEnabled = (uIndoorShadowEnabled > 0.5 && uHasOutdoorsMask > 0.5);
+          vec2 maskTexelSize = vec2(1.0) / max(uSceneDimensions, vec2(1.0));
+          float maskPixelLen = uLength * 1080.0 * uIndoorShadowLengthScale;
+          vec2 maskOffsetUv = vUv + dir * maskPixelLen * maskTexelSize;
+          vec2 maskStepUv = maskTexelSize * uSoftness * 4.0 * max(uIndoorShadowSoftnessScale, 0.0);
 
           float accum = 0.0;
           float weightSum = 0.0;
@@ -246,25 +348,31 @@ export class OverheadShadowsEffect extends EffectBase {
               vec2 sUv = offsetUv + vec2(float(dx), float(dy)) * stepUv;
               float w = 1.0;
               if (dx == 0 && dy == 0) w = 2.0; // center bias
-              float v = texture2D(tRoof, sUv).a;
-              accum += v * w;
+
+              // Roof tap (screen-space)
+              float roofTap = texture2D(tRoof, sUv).a;
+              float roofStrengthTap = clamp(roofTap * uOpacity, 0.0, 1.0);
+
+              // Indoor tap (world-space mask)
+              float indoorStrengthTap = 0.0;
+              if (indoorEnabled) {
+                vec2 mUv = maskOffsetUv + vec2(float(dx), float(dy)) * maskStepUv;
+                float mv = 1.0 - texture2D(uOutdoorsMask, mUv).r;
+                indoorStrengthTap = clamp(mv * uIndoorShadowOpacity, 0.0, 1.0);
+              }
+
+              // Combine BEFORE blur.
+              float combinedTap = max(roofStrengthTap, indoorStrengthTap);
+              accum += combinedTap * w;
               weightSum += w;
             }
           }
 
-          float blurred = (weightSum > 0.0) ? accum / weightSum : roofOffset;
-
-          // Shadow band from blurred roofOffset. We intentionally do NOT
-          // subtract roofBase so the band stays solid across the roof
-          // footprint. Roof masking and outdoors gating are handled in
-          // LightingEffect during final composition.
-          float shadowMask = blurred;
-
-          float strength = clamp(shadowMask * uOpacity, 0.0, 1.0);
+          float combinedStrength = (weightSum > 0.0) ? (accum / weightSum) : 0.0;
 
           // Encode shadow factor in the red channel (1.0 = fully lit,
           // 0.0 = fully shadowed).
-          float shadowFactor = 1.0 - strength;
+          float shadowFactor = 1.0 - combinedStrength;
           gl_FragColor = vec4(shadowFactor, shadowFactor, shadowFactor, 1.0);
         }
       `,
@@ -378,7 +486,7 @@ export class OverheadShadowsEffect extends EffectBase {
 
     // Optimization: Skip update if params haven't changed
     const camZoom = this._getEffectiveZoom();
-    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${camZoom.toFixed(4)}`;
+    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${this.params.indoorShadowMaskId}_${this.params.indoorShadowOpacity}_${this.params.indoorShadowLengthScale}_${this.params.indoorShadowSoftnessScale}`;
     
     if (this._lastUpdateHash === updateHash && this.sunDir) return;
     this._lastUpdateHash = updateHash;
@@ -390,19 +498,13 @@ export class OverheadShadowsEffect extends EffectBase {
     const t = (hour % 24.0) / 24.0;
     const azimuth = (t - 0.5) * Math.PI;
 
-    // Horizontal offset (X) driven by -sin(azimuth):
-    //  Noon (0)       ->  0  (no horizontal offset)
-    //  Sunrise(-PI/2) -> +1  (shadow to the west, sun in the east)
-    //  Sunset( PI/2)  -> -1  (shadow to the east, sun in the west)
+    // Sun direction MUST be identical to BuildingShadowsEffect so both
+    // effects follow the same daily arc. The shader projection sign (+dir)
+    // is what makes both shadow directions visually consistent.
     const x = -Math.sin(azimuth);
 
-    // Vertical offset (Y) driven by cos(azimuth) scaled by sunLatitude
-    // (eccentricity). When sunLatitude = 0, Y is always 0 so the band
-    // slides purely east/west. Increasing sunLatitude introduces an
-    // orbital north/south component. We flip the sign here so the
-    // north/south motion matches BuildingShadowsEffect visually.
     const lat = Math.max(0.0, Math.min(1.0, this.params.sunLatitude ?? 0.5));
-    const y = Math.cos(azimuth) * lat;
+    const y = -Math.cos(azimuth) * lat;
 
     if (!this.sunDir) {
       this.sunDir = new THREE.Vector2(x, y);
@@ -422,6 +524,41 @@ export class OverheadShadowsEffect extends EffectBase {
       if (u.uZoom && this.mainCamera) {
         u.uZoom.value = this._getEffectiveZoom();
       }
+      // Indoor shadow uniforms — resolve the selected mask from MaskManager
+      if (u.uIndoorShadowEnabled) u.uIndoorShadowEnabled.value = this.params.indoorShadowEnabled ? 1.0 : 0.0;
+      if (u.uIndoorShadowOpacity) u.uIndoorShadowOpacity.value = this.params.indoorShadowOpacity;
+      if (u.uIndoorShadowLengthScale) u.uIndoorShadowLengthScale.value = this.params.indoorShadowLengthScale;
+      if (u.uIndoorShadowSoftnessScale) u.uIndoorShadowSoftnessScale.value = this.params.indoorShadowSoftnessScale;
+
+      // Scene dimensions for mask UV conversion (world-space mask offset)
+      if (u.uSceneDimensions) {
+        try {
+          const dims = canvas?.dimensions;
+          if (dims) {
+            const sw = dims.sceneWidth || dims.width || 1;
+            const sh = dims.sceneHeight || dims.height || 1;
+            u.uSceneDimensions.value.set(sw, sh);
+          }
+        } catch (_) { /* canvas may not be ready */ }
+      }
+
+      // Resolve the active indoor shadow mask texture from MaskManager.
+      // Falls back to the auto-discovered outdoorsMask from setBaseMesh()
+      // if no explicit selection is made.
+      let activeMask = null;
+      const maskId = this.params.indoorShadowMaskId;
+      if (maskId && maskId !== 'none') {
+        const mm = window.MapShine?.maskManager;
+        if (mm) {
+          activeMask = mm.getTexture(maskId) || null;
+        }
+        // Fallback: if the selected ID matches what setBaseMesh found, use it
+        if (!activeMask && maskId === 'outdoors') {
+          activeMask = this.outdoorsMask;
+        }
+      }
+      if (u.uOutdoorsMask) u.uOutdoorsMask.value = activeMask;
+      if (u.uHasOutdoorsMask) u.uHasOutdoorsMask.value = activeMask ? 1.0 : 0.0;
     }
   }
 

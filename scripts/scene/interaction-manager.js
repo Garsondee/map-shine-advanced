@@ -3479,24 +3479,30 @@ export class InteractionManager {
             }
           }
 
-          // Select Foundry lights within bounds (world-space icon centers)
-          const lightIcons = this.lightIconManager?.lights?.values?.() ? Array.from(this.lightIconManager.lights.values()) : [];
-          for (const sprite of lightIcons) {
-            const x = sprite.position.x;
-            const y = sprite.position.y;
-            if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
-              this.selectObject(sprite, { showLightEditor: false });
+          // Only allow box-selecting lights when the Lighting layer is active.
+          // In token movement mode (TokenLayer), marquee selection should not grab lights.
+          const activeLayer = canvas?.activeLayer?.name;
+          const isLightingLayer = (activeLayer === 'LightingLayer' || activeLayer === 'lighting');
+          if (isLightingLayer) {
+            // Select Foundry lights within bounds (world-space icon centers)
+            const lightIcons = this.lightIconManager?.lights?.values?.() ? Array.from(this.lightIconManager.lights.values()) : [];
+            for (const sprite of lightIcons) {
+              const x = sprite.position.x;
+              const y = sprite.position.y;
+              if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
+                this.selectObject(sprite, { showLightEditor: false });
+              }
             }
-          }
 
-          // Select MapShine enhanced lights within bounds
-          const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
-          const enhancedIcons = enhancedLightIconManager?.lights?.values?.() ? Array.from(enhancedLightIconManager.lights.values()) : [];
-          for (const sprite of enhancedIcons) {
-            const x = sprite.position.x;
-            const y = sprite.position.y;
-            if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
-              this.selectObject(sprite, { showLightEditor: false });
+            // Select MapShine enhanced lights within bounds
+            const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+            const enhancedIcons = enhancedLightIconManager?.lights?.values?.() ? Array.from(enhancedLightIconManager.lights.values()) : [];
+            for (const sprite of enhancedIcons) {
+              const x = sprite.position.x;
+              const y = sprite.position.y;
+              if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
+                this.selectObject(sprite, { showLightEditor: false });
+              }
             }
           }
 

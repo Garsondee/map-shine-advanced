@@ -193,11 +193,18 @@ export class WindowLightEffect extends EffectBase {
       lightningWindowEnabled: true,
       lightningWindowIntensityBoost: 1.0,
       lightningWindowContrastBoost: 1.75,
-      lightningWindowRgbBoost: 0.35
+      lightningWindowRgbBoost: 0.35,
+
+      // Sun-tracking offset: shifts the window light pool based on sun position
+      sunLightEnabled: false,
+      sunLightLength: 0.03,
+      sunLightLatitude: 0.1
     };
 
     this._tmpRainDir = null;
     this._tmpWindDir = null;
+    /** @type {THREE.Vector2|null} Cached sun direction for window light offset */
+    this._sunDir = null;
   }
 
   _applyThreeColor(target, input) {
@@ -255,6 +262,13 @@ export class WindowLightEffect extends EffectBase {
           type: 'folder',
           expanded: true,
           parameters: ['intensity', 'falloff', 'color']
+        },
+        {
+          name: 'sunTracking',
+          label: 'Sun Tracking',
+          type: 'folder',
+          expanded: false,
+          parameters: ['sunLightEnabled', 'sunLightLength', 'sunLightLatitude']
         },
         {
           name: 'environment',
@@ -1199,6 +1213,30 @@ export class WindowLightEffect extends EffectBase {
           default: 0.0
         },
 
+        sunLightEnabled: {
+          type: 'boolean',
+          label: 'Enable Sun Tracking',
+          default: false,
+          tooltip: 'Shift the window light pool based on sun position (time of day)'
+        },
+        sunLightLength: {
+          type: 'slider',
+          label: 'Light Shift Length',
+          min: 0.0,
+          max: 0.3,
+          step: 0.005,
+          default: 0.03,
+          tooltip: 'How far the window light shifts with the sun position'
+        },
+        sunLightLatitude: {
+          type: 'slider',
+          label: 'Sun Latitude',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.1,
+          tooltip: 'North/south arc of the sun (0 = flat east/west, 1 = maximum arc)'
+        },
         lightningWindowEnabled: {
           type: 'boolean',
           label: 'Enabled',
@@ -1747,7 +1785,12 @@ export class WindowLightEffect extends EffectBase {
         uLightningWindowEnabled: { value: this.params.lightningWindowEnabled ? 1.0 : 0.0 },
         uLightningWindowIntensityBoost: { value: this.params.lightningWindowIntensityBoost },
         uLightningWindowContrastBoost: { value: this.params.lightningWindowContrastBoost },
-        uLightningWindowRgbBoost: { value: this.params.lightningWindowRgbBoost }
+        uLightningWindowRgbBoost: { value: this.params.lightningWindowRgbBoost },
+
+        // Sun-tracking offset uniforms
+        uSunLightEnabled: { value: this.params.sunLightEnabled ? 1.0 : 0.0 },
+        uSunLightLength: { value: this.params.sunLightLength },
+        uSunDir: { value: new THREE.Vector2(0.0, 0.0) }
       },
       vertexShader: this.getVertexShader(),
       fragmentShader: this.getFragmentShader(),
@@ -1904,6 +1947,11 @@ export class WindowLightEffect extends EffectBase {
       uniform float uRgbShiftAmount;
       uniform float uRgbShiftAngle;
 
+      // Sun-tracking offset
+      uniform float uSunLightEnabled;
+      uniform float uSunLightLength;
+      uniform vec2 uSunDir;
+
       varying vec4 vClipPos;
       varying vec2 vUv;
 
@@ -1998,16 +2046,29 @@ export class WindowLightEffect extends EffectBase {
           return;
         }
 
+        // Sun-tracking offset: shift the window mask sampling UV so the light
+        // pool moves with the sun direction. The offset is in mask UV space
+        // (vUv), matching BuildingShadowsEffect's bake shader convention
+        // where V=0 = north (flipY=false).
+        vec2 sunOffset = vec2(0.0);
+        if (uSunLightEnabled > 0.5) {
+          vec2 dir = normalize(uSunDir + vec2(1e-6));
+          sunOffset = dir * uSunLightLength;
+        }
+        // maskUv is the UV used for all window mask lookups when sun tracking
+        // is active; falls back to vUv when disabled.
+        vec2 maskUv = vUv + sunOffset;
+
         float flash01 = clamp(uLightningFlash01, 0.0, 1.0) * step(0.5, uLightningWindowEnabled);
         float rgbBoost = max(uLightningWindowRgbBoost, 0.0);
         float shiftAmountPx = uRgbShiftAmount * (1.0 + flash01 * rgbBoost);
 
-        vec2 uv = vUv;
+        vec2 uv = maskUv;
         vec3 rainNormal = vec3(0.0, 0.0, 1.0);
         float rainK = clamp(uRainK, 0.0, 4.0);
         float rainKSplash = rainK;
 
-        float baseMaskScalar = msLuminance(texture2D(uWindowMask, vUv).rgb);
+        float baseMaskScalar = msLuminance(texture2D(uWindowMask, maskUv).rgb);
         float baseLightGate = pow(max(baseMaskScalar, 0.0), uFalloff);
         float gateContrastPow = 1.0 / (1.0 + flash01 * max(uLightningWindowContrastBoost, 0.0));
         baseLightGate = pow(max(baseLightGate, 0.0), gateContrastPow);
@@ -2390,11 +2451,24 @@ export class WindowLightEffect extends EffectBase {
         lightMap = pow(max(lightMap, 0.0), contrastPow);
 
         // 3. Outdoors Rejection (Soft)
-        // If outdoors, we shouldn't see window light (unless it's a skylight, but usually this is for interiors)
+        // If outdoors, we shouldn't see window light. When sun tracking is
+        // active, also check the outdoors mask at the current fragment's
+        // original position to ensure light never leaks into outdoor areas
+        // even when the mask sampling has been shifted by the sun offset.
         float indoorFactor = 1.0;
         if (uHasOutdoorsMask > 0.5) {
+          // Check the original fragment position — this is where the light
+          // would actually appear on screen
           float outdoorStrength = texture2D(uOutdoorsMask, vUv).r;
           indoorFactor = clamp(1.0 - outdoorStrength, 0.0, 1.0);
+
+          // When sun tracking shifts the mask lookup, also reject if the
+          // offset source position is outdoor (prevents pulling outdoor
+          // mask values into indoor areas)
+          if (uSunLightEnabled > 0.5) {
+            float offsetOutdoor = texture2D(uOutdoorsMask, maskUv).r;
+            indoorFactor *= clamp(1.0 - offsetOutdoor, 0.0, 1.0);
+          }
         }
 
         // 4. Environmental Attenuation
@@ -2473,6 +2547,40 @@ export class WindowLightEffect extends EffectBase {
 
     if (u?.uTime) u.uTime.value = timeInfo.elapsed;
     if (lu?.uTime) lu.uTime.value = timeInfo.elapsed;
+
+    // Sun-tracking: compute sun direction from time of day (same math as
+    // BuildingShadowsEffect / OverheadShadowsEffect for visual consistency).
+    if (this.params.sunLightEnabled) {
+      const THREE = window.THREE;
+      let hour = 12.0;
+      try {
+        if (weatherController && typeof weatherController.timeOfDay === 'number') {
+          hour = weatherController.timeOfDay;
+        }
+      } catch (e) { /* default noon */ }
+
+      const t = (hour % 24.0) / 24.0;
+      const azimuth = (t - 0.5) * Math.PI;
+      const sx = -Math.sin(azimuth);
+      const lat = Math.max(0.0, Math.min(1.0, this.params.sunLightLatitude ?? 0.1));
+      const sy = -Math.cos(azimuth) * lat;
+
+      if (!this._sunDir && THREE) {
+        this._sunDir = new THREE.Vector2(sx, sy);
+      } else if (this._sunDir) {
+        this._sunDir.set(sx, sy);
+      }
+    }
+
+    // Push sun-tracking uniforms to both materials
+    const applySunUniforms = (uu) => {
+      if (!uu) return;
+      if (uu.uSunLightEnabled) uu.uSunLightEnabled.value = this.params.sunLightEnabled ? 1.0 : 0.0;
+      if (uu.uSunLightLength) uu.uSunLightLength.value = this.params.sunLightLength;
+      if (uu.uSunDir && this._sunDir) uu.uSunDir.value.copy(this._sunDir);
+    };
+    applySunUniforms(u);
+    applySunUniforms(lu);
 
     // Sync environment
     let fogDensity = 0.0;
@@ -2978,7 +3086,12 @@ export class WindowLightEffect extends EffectBase {
         uLightningWindowEnabled: { value: this.params.lightningWindowEnabled ? 1.0 : 0.0 },
         uLightningWindowIntensityBoost: { value: this.params.lightningWindowIntensityBoost },
         uLightningWindowContrastBoost: { value: this.params.lightningWindowContrastBoost },
-        uLightningWindowRgbBoost: { value: this.params.lightningWindowRgbBoost }
+        uLightningWindowRgbBoost: { value: this.params.lightningWindowRgbBoost },
+
+        // Sun-tracking offset uniforms
+        uSunLightEnabled: { value: this.params.sunLightEnabled ? 1.0 : 0.0 },
+        uSunLightLength: { value: this.params.sunLightLength },
+        uSunDir: { value: new THREE.Vector2(0.0, 0.0) }
       },
       vertexShader: this.getVertexShader(),
       fragmentShader: this.getLightOnlyFragmentShader(),
@@ -3112,6 +3225,11 @@ export class WindowLightEffect extends EffectBase {
       uniform float uLightningWindowContrastBoost;
       uniform float uLightningWindowRgbBoost;
 
+      // Sun-tracking offset
+      uniform float uSunLightEnabled;
+      uniform float uSunLightLength;
+      uniform vec2 uSunDir;
+
       varying vec4 vClipPos;
       varying vec2 vUv;
 
@@ -3201,15 +3319,23 @@ export class WindowLightEffect extends EffectBase {
           return;
         }
 
+        // Sun-tracking offset for the light-only pass (same as main shader)
+        vec2 sunOffset = vec2(0.0);
+        if (uSunLightEnabled > 0.5) {
+          vec2 dir = normalize(uSunDir + vec2(1e-6));
+          sunOffset = dir * uSunLightLength;
+        }
+        vec2 maskUv = vUv + sunOffset;
+
         float flash01 = clamp(uLightningFlash01, 0.0, 1.0) * step(0.5, uLightningWindowEnabled);
         float rgbBoost = max(uLightningWindowRgbBoost, 0.0);
         float shiftAmountPx = uRgbShiftAmount * (1.0 + flash01 * rgbBoost);
 
-        vec2 uv = vUv;
+        vec2 uv = maskUv;
         vec3 rainNormal = vec3(0.0, 0.0, 1.0);
         float rainK = clamp(uRainK, 0.0, 4.0);
         float rainKSplash = rainK;
-        float baseMaskScalar = msLuminance(texture2D(uWindowMask, vUv).rgb);
+        float baseMaskScalar = msLuminance(texture2D(uWindowMask, maskUv).rgb);
         float baseLightGate = pow(max(baseMaskScalar, 0.0), uFalloff);
         float gateContrastPow = 1.0 / (1.0 + flash01 * max(uLightningWindowContrastBoost, 0.0));
         baseLightGate = pow(max(baseLightGate, 0.0), gateContrastPow);
@@ -3588,6 +3714,14 @@ export class WindowLightEffect extends EffectBase {
         if (uHasOutdoorsMask > 0.5) {
           float outdoorStrength = texture2D(uOutdoorsMask, vUv).r;
           indoorFactor = clamp(1.0 - outdoorStrength, 0.0, 1.0);
+
+          // When sun tracking shifts the mask lookup, also reject if the
+          // offset source position is outdoor (prevents pulling outdoor
+          // mask values into indoor areas)
+          if (uSunLightEnabled > 0.5) {
+            float offsetOutdoor = texture2D(uOutdoorsMask, maskUv).r;
+            indoorFactor *= clamp(1.0 - offsetOutdoor, 0.0, 1.0);
+          }
         }
 
         float envFactor = 1.0;

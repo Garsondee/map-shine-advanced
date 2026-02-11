@@ -555,8 +555,13 @@ export class LightingEffect extends EffectBase {
           float treePixelLen = uTreeShadowLength * max(uViewportHeight, 1.0) * max(uShadowZoom, 0.0001);
           vec2 treeOffsetUv = bushDir * treePixelLen * uCompositeTexelSize;
           float treeTex = texture2D(tTreeShadow, vUv + treeOffsetUv).r;
+          // Tree shadow target packs coverage in G (see TreeEffect shadow shader).
+          // If the current pixel is part of the tree itself, don't apply tree shadows
+          // to it (prevents the shadow from appearing on top of the tree overlay).
+          float treeSelfCoverage = texture2D(tTreeShadow, vUv).g;
           float treeOpacity = clamp(uTreeShadowOpacity, 0.0, 1.0);
           float rawTreeFactor = mix(1.0, treeTex, treeOpacity);
+          rawTreeFactor = mix(rawTreeFactor, 1.0, clamp(treeSelfCoverage, 0.0, 1.0));
 
           float cloudTex = texture2D(tCloudShadow, vUv).r;
           float cloudOpacity = clamp(uCloudShadowOpacity, 0.0, 1.0);
@@ -565,7 +570,7 @@ export class LightingEffect extends EffectBase {
           float shadowFactor = mix(rawShadowFactor, 1.0, roofAlphaRaw);
           float buildingFactor = mix(rawBuildingFactor, 1.0, roofAlphaRaw);
           float bushFactor = mix(rawBushFactor, 1.0, roofAlphaRaw);
-          float treeFactor = rawTreeFactor;
+          float treeFactor = mix(rawTreeFactor, 1.0, roofAlphaRaw);
 
           float outdoorStrength = max(outdoorStrengthBase, roofAlphaRaw);
           shadowFactor = mix(1.0, shadowFactor, outdoorStrength);

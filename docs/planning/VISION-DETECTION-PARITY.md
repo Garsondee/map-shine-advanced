@@ -1,6 +1,6 @@
 # Vision, Detection & Fog of War — Full Foundry Parity Plan
 
-## Status: Implemented (Phase 3 visual rendering disabled)
+## Status: Implemented (all phases except Phase 7)
 ## Priority: High
 
 ---
@@ -20,7 +20,7 @@ This document tracks Map Shine's parity with Foundry VTT's native perception sys
 - ✅ **Token Visibility Testing** — `VisibilityController` uses dual-path architecture: `_refreshVisibility` patch (per-token) + `sightRefresh` hook (bulk), both delegating to `foundryToken.isVisible` → `canvas.visibility.testVisibility()` (Phase 1)
 - ✅ **Detection Modes** — all modes (basicSight, lightPerception, darkvision, tremorsense, etc.) via Foundry delegation (Phase 1)
 - ✅ **Light-Grants-Vision** — lights with `vision: true` draw into the fog vision mask (Phase 2)
-- ⚠️ **Detection Filters** — infrastructure complete (VC tracks detection state, materials/presets defined), but visual rendering is **disabled** pending proper glow/outline shaders (Phase 3)
+- ✅ **Detection Filters** — full visual rendering with custom GLSL shaders: glow (multi-ring alpha expansion, additive blending) for seeInvisibility/senseInvisibility, outline (edge detection via alpha discontinuity) for seeAll/senseAll/feelTremor. Renders on OVERLAY_THREE_LAYER above fog. (Phase 3)
 - ✅ **Vision Mode Rendering** — post-process pass for darkvision desaturation, light amplification tint, etc. Tremorsense uses color adjustments only (no animated wave distortion) (Phase 4)
 - ✅ **Darkness Sources** — darkness-emitting lights subtract from the vision mask (Phase 5)
 - ✅ **Status Effects** — BLIND, INVISIBLE, BURROW, FLY, HOVER handled via Foundry's `testVisibility()` (Phase 6)

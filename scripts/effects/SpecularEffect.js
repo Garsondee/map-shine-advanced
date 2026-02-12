@@ -124,7 +124,7 @@ export class SpecularEffect extends EffectBase {
 
       // Wet Surface (Rain) - Derives specular from grayscale albedo during rain
       wetSpecularEnabled: true,
-      wetSpecularThreshold: 0.5,    // Precipitation level (0-1) above which surfaces become wet
+      wetSpecularThreshold: 0.5,    // DEPRECATED: wetness now driven by WeatherController tracker
 
       // Wet Input CC (shapes which albedo values become reflective)
       wetInputBrightness: 0.0,     // Pre-contrast brightness shift (-0.5 to 0.5)
@@ -136,12 +136,30 @@ export class SpecularEffect extends EffectBase {
       // Wet Output CC (shapes the final wet specular contribution)
       wetSpecularIntensity: 1.5,   // Overall wet shine multiplier
       wetOutputMax: 1.0,           // Hard brightness cap (prevents bloom explosion on whites)
-      wetOutputGamma: 1.0          // Output curve (<1 = brighter midtones, >1 = darker/punchier)
+      wetOutputGamma: 1.0,         // Output curve (<1 = brighter midtones, >1 = darker/punchier)
 
       // TODO: Snow Albedo Effect - Create a way for snow to change the colouration
       // of the albedo in outdoor areas. When freezeLevel > 0.55 and precipitation
       // is active (snow), blend outdoor albedo towards white/snow-tinted colour.
       // This should be a separate visual pass from the wet effect.
+
+      // Frost/Ice Glaze (cold weather boosts specular on outdoor surfaces)
+      frostGlazeEnabled: true,
+      frostThreshold: 0.55,        // freezeLevel above which frost appears
+      frostIntensity: 1.2,         // Specular boost multiplier when frosted
+      frostTintStrength: 0.4,      // How much to shift specular toward cool blue-white (0-1)
+
+      // Dynamic Light Color Tinting (stripes/sparkles pick up nearby light hues)
+      dynamicLightTintEnabled: true,
+      dynamicLightTintStrength: 0.6, // 0=global uLightColor only, 1=fully tinted by nearest light
+
+      // Wind-Driven Stripe Animation (stripes drift with wind)
+      windDrivenStripesEnabled: true,
+      windStripeInfluence: 0.5,    // How much wind affects stripe drift (0=none, 1=full)
+
+      // Building Shadow Suppression (suppress specular in building shadows)
+      buildingShadowSuppressionEnabled: true,
+      buildingShadowSuppressionStrength: 0.8 // 0=no suppression, 1=full shadow kill
     };
 
     this._tempScreenSize = null;
@@ -252,10 +270,38 @@ export class SpecularEffect extends EffectBase {
           type: 'folder',
           expanded: false,
           parameters: [
-            'wetSpecularEnabled', 'wetSpecularThreshold',
+            'wetSpecularEnabled',
             'wetInputBrightness', 'wetInputGamma', 'wetSpecularContrast', 'wetBlackPoint', 'wetWhitePoint',
             'wetSpecularIntensity', 'wetOutputMax', 'wetOutputGamma'
           ]
+        },
+        {
+          name: 'frost-glaze',
+          label: 'Frost / Ice Glaze',
+          type: 'folder',
+          expanded: false,
+          parameters: ['frostGlazeEnabled', 'frostThreshold', 'frostIntensity', 'frostTintStrength']
+        },
+        {
+          name: 'dynamic-light-tint',
+          label: 'Dynamic Light Tinting',
+          type: 'folder',
+          expanded: false,
+          parameters: ['dynamicLightTintEnabled', 'dynamicLightTintStrength']
+        },
+        {
+          name: 'wind-driven-stripes',
+          label: 'Wind-Driven Stripes',
+          type: 'folder',
+          expanded: false,
+          parameters: ['windDrivenStripesEnabled', 'windStripeInfluence']
+        },
+        {
+          name: 'building-shadow-suppression',
+          label: 'Building Shadow Suppression',
+          type: 'folder',
+          expanded: false,
+          parameters: ['buildingShadowSuppressionEnabled', 'buildingShadowSuppressionStrength']
         }
       ],
       parameters: {
@@ -726,6 +772,88 @@ export class SpecularEffect extends EffectBase {
           step: 0.01,
           default: 1.0,
           throttle: 100
+        },
+
+        // Frost / Ice Glaze
+        frostGlazeEnabled: {
+          type: 'boolean',
+          label: 'Enable Frost Glaze',
+          default: true
+        },
+        frostThreshold: {
+          type: 'slider',
+          label: 'Freeze Threshold',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.55,
+          throttle: 100
+        },
+        frostIntensity: {
+          type: 'slider',
+          label: 'Frost Intensity',
+          min: 0,
+          max: 3,
+          step: 0.01,
+          default: 1.2,
+          throttle: 100
+        },
+        frostTintStrength: {
+          type: 'slider',
+          label: 'Blue Tint Strength',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.4,
+          throttle: 100
+        },
+
+        // Dynamic Light Color Tinting
+        dynamicLightTintEnabled: {
+          type: 'boolean',
+          label: 'Enable Light Tinting',
+          default: true
+        },
+        dynamicLightTintStrength: {
+          type: 'slider',
+          label: 'Tint Strength',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.6,
+          throttle: 100
+        },
+
+        // Wind-Driven Stripe Animation
+        windDrivenStripesEnabled: {
+          type: 'boolean',
+          label: 'Enable Wind Stripes',
+          default: true
+        },
+        windStripeInfluence: {
+          type: 'slider',
+          label: 'Wind Influence',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.5,
+          throttle: 100
+        },
+
+        // Building Shadow Suppression
+        buildingShadowSuppressionEnabled: {
+          type: 'boolean',
+          label: 'Enable Shadow Suppression',
+          default: true
+        },
+        buildingShadowSuppressionStrength: {
+          type: 'slider',
+          label: 'Suppression Strength',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.8,
+          throttle: 100
         }
       }
     };
@@ -1103,7 +1231,28 @@ export class SpecularEffect extends EffectBase {
         numLights: { value: 0 },
         lightPosition: { value: new Float32Array(this.maxLights * 3) },
         lightColor: { value: new Float32Array(this.maxLights * 3) },
-        lightConfig: { value: new Float32Array(this.maxLights * 4) }
+        lightConfig: { value: new Float32Array(this.maxLights * 4) },
+
+        // Frost / Ice Glaze
+        uFrostGlazeEnabled: { value: this.params.frostGlazeEnabled },
+        uFrostLevel: { value: 0.0 },
+        uFrostIntensity: { value: this.params.frostIntensity },
+        uFrostTintStrength: { value: this.params.frostTintStrength },
+
+        // Dynamic Light Color Tinting
+        uDynamicLightTintEnabled: { value: this.params.dynamicLightTintEnabled },
+        uDynamicLightTintStrength: { value: this.params.dynamicLightTintStrength },
+
+        // Wind-Driven Stripe Animation
+        uWindDrivenStripesEnabled: { value: this.params.windDrivenStripesEnabled },
+        uWindStripeInfluence: { value: this.params.windStripeInfluence },
+        uWindAccum: { value: new THREE.Vector2(0.0, 0.0) },
+
+        // Building Shadow Suppression
+        uBuildingShadowSuppressionEnabled: { value: this.params.buildingShadowSuppressionEnabled },
+        uBuildingShadowSuppressionStrength: { value: this.params.buildingShadowSuppressionStrength },
+        uHasBuildingShadowMap: { value: false },
+        uBuildingShadowMap: { value: null }
       },
       vertexShader: this.getVertexShader(),
       fragmentShader: this.getFragmentShader(),
@@ -1366,20 +1515,50 @@ export class SpecularEffect extends EffectBase {
       this.validateShaderState(timeInfo);
     }
     
-    // Compute rain wetness from weather state (once per frame, shared by all materials).
-    // Wetness ramps from 0→1 as precipitation goes from threshold→1.0, but ONLY for rain.
-    // Snow has a different visual effect (albedo colouration) handled separately.
+    // Read surface wetness from WeatherController's wetness tracker.
+    // The tracker already handles transition holdoff (doesn't change during weather
+    // transitions), proportional wetting (heavier rain wets faster), and slow
+    // drying (minutes to fully dry after rain stops).
     let rainWetness = 0.0;
     try {
       const weather = weatherController?.getCurrentState?.();
-      if (weather && weather.precipType === PrecipitationType.RAIN) {
-        const threshold = this.params.wetSpecularThreshold;
-        rainWetness = Math.min(1.0, Math.max(0.0,
-          (weather.precipitation - threshold) / Math.max(0.001, 1.0 - threshold)
-        ));
+      if (weather) {
+        rainWetness = Math.max(0.0, Math.min(1.0, weather.wetness ?? 0.0));
       }
     } catch (_) {
       // WeatherController may not be initialised yet; stay dry.
+    }
+
+    // Compute frost level from weather state (once per frame, shared by all materials).
+    // Frost ramps from 0→1 as freezeLevel goes from frostThreshold→1.0.
+    let frostLevel = 0.0;
+    try {
+      const weather = weatherController?.getCurrentState?.();
+      if (weather) {
+        // Frost
+        if (this.params.frostGlazeEnabled) {
+          const ft = this.params.frostThreshold;
+          const fl = weather.freezeLevel ?? 0.0;
+          frostLevel = Math.min(1.0, Math.max(0.0,
+            (fl - ft) / Math.max(0.001, 1.0 - ft)
+          ));
+        }
+        // Wind — accumulate displacement monotonically so stripes always
+        // drift forward (faster during gusts, slower during lulls, never backward).
+        if (this.params.windDrivenStripesEnabled) {
+          const ws = weather.windSpeed ?? 0.0;
+          const wd = weather.windDirection;
+          const dx = (wd && typeof wd.x === 'number') ? wd.x : 1.0;
+          const dy = (wd && typeof wd.y === 'number') ? wd.y : 0.0;
+          const dt = timeInfo.delta; // seconds since last frame
+          if (!this._windAccumX) this._windAccumX = 0.0;
+          if (!this._windAccumY) this._windAccumY = 0.0;
+          this._windAccumX += dx * ws * dt * 0.01;
+          this._windAccumY += dy * ws * dt * 0.01;
+        }
+      }
+    } catch (_) {
+      // WeatherController may not be initialised yet; stay calm.
     }
 
     for (const mat of this._materials) {
@@ -1444,6 +1623,27 @@ export class SpecularEffect extends EffectBase {
       if (mat.uniforms.uWetSpecularIntensity) mat.uniforms.uWetSpecularIntensity.value = this.params.wetSpecularIntensity;
       if (mat.uniforms.uWetOutputMax) mat.uniforms.uWetOutputMax.value = this.params.wetOutputMax;
       if (mat.uniforms.uWetOutputGamma) mat.uniforms.uWetOutputGamma.value = this.params.wetOutputGamma;
+
+      // Frost / Ice Glaze
+      if (mat.uniforms.uFrostGlazeEnabled) mat.uniforms.uFrostGlazeEnabled.value = this.params.frostGlazeEnabled;
+      if (mat.uniforms.uFrostLevel) mat.uniforms.uFrostLevel.value = frostLevel;
+      if (mat.uniforms.uFrostIntensity) mat.uniforms.uFrostIntensity.value = this.params.frostIntensity;
+      if (mat.uniforms.uFrostTintStrength) mat.uniforms.uFrostTintStrength.value = this.params.frostTintStrength;
+
+      // Dynamic Light Color Tinting
+      if (mat.uniforms.uDynamicLightTintEnabled) mat.uniforms.uDynamicLightTintEnabled.value = this.params.dynamicLightTintEnabled;
+      if (mat.uniforms.uDynamicLightTintStrength) mat.uniforms.uDynamicLightTintStrength.value = this.params.dynamicLightTintStrength;
+
+      // Wind-Driven Stripe Animation
+      if (mat.uniforms.uWindDrivenStripesEnabled) mat.uniforms.uWindDrivenStripesEnabled.value = this.params.windDrivenStripesEnabled;
+      if (mat.uniforms.uWindStripeInfluence) mat.uniforms.uWindStripeInfluence.value = this.params.windStripeInfluence;
+      if (mat.uniforms.uWindAccum?.value?.set) {
+        mat.uniforms.uWindAccum.value.set(this._windAccumX || 0.0, this._windAccumY || 0.0);
+      }
+
+      // Building Shadow Suppression (texture bound in render(), params here)
+      if (mat.uniforms.uBuildingShadowSuppressionEnabled) mat.uniforms.uBuildingShadowSuppressionEnabled.value = this.params.buildingShadowSuppressionEnabled;
+      if (mat.uniforms.uBuildingShadowSuppressionStrength) mat.uniforms.uBuildingShadowSuppressionStrength.value = this.params.buildingShadowSuppressionStrength;
 
       // Layer 1
       if (mat.uniforms.uStripe1Enabled) mat.uniforms.uStripe1Enabled.value = this.params.stripe1Enabled;
@@ -1650,6 +1850,17 @@ export class SpecularEffect extends EffectBase {
             mat.uniforms.uSceneBounds.value.set(sx, syWorld, sw, sh);
           }
         }
+
+        // Bind building shadow world-space texture for specular suppression.
+        // BuildingShadowsEffect bakes shadows into a world-space RT (worldShadowTarget).
+        // Not exposed on window.MapShine; look it up via effectComposer.
+        const bse = window.MapShine?.effectComposer?.effects?.get('building-shadows');
+        const bsTex = (bse && bse.enabled) ? bse.worldShadowTarget?.texture : null;
+        const hasBs = !!bsTex;
+        for (const mat of this._materials) {
+          if (mat?.uniforms?.uHasBuildingShadowMap) mat.uniforms.uHasBuildingShadowMap.value = hasBs;
+          if (mat?.uniforms?.uBuildingShadowMap) mat.uniforms.uBuildingShadowMap.value = hasBs ? bsTex : null;
+        }
       }
     } catch (e) {
       for (const mat of this._materials) {
@@ -1657,6 +1868,8 @@ export class SpecularEffect extends EffectBase {
         if (mat?.uniforms?.uCloudShadowMap) mat.uniforms.uCloudShadowMap.value = null;
         if (mat?.uniforms?.uRoofMap) mat.uniforms.uRoofMap.value = null;
         if (mat?.uniforms?.uRoofMaskEnabled) mat.uniforms.uRoofMaskEnabled.value = 0.0;
+        if (mat?.uniforms?.uHasBuildingShadowMap) mat.uniforms.uHasBuildingShadowMap.value = false;
+        if (mat?.uniforms?.uBuildingShadowMap) mat.uniforms.uBuildingShadowMap.value = null;
       }
     }
     
@@ -1883,6 +2096,27 @@ export class SpecularEffect extends EffectBase {
       uniform vec3 lightPosition[${this.maxLights}];
       uniform vec3 lightColor[${this.maxLights}];
       uniform vec4 lightConfig[${this.maxLights}]; // radius, dim, attenuation, unused
+
+      // Frost / Ice Glaze
+      uniform bool uFrostGlazeEnabled;
+      uniform float uFrostLevel;        // 0=warm, 1=fully frozen (computed from weather)
+      uniform float uFrostIntensity;    // Specular boost multiplier
+      uniform float uFrostTintStrength; // Blue-white tint blend (0-1)
+
+      // Dynamic Light Color Tinting
+      uniform bool uDynamicLightTintEnabled;
+      uniform float uDynamicLightTintStrength; // 0=global only, 1=fully dynamic
+
+      // Wind-Driven Stripe Animation
+      uniform bool uWindDrivenStripesEnabled;
+      uniform float uWindStripeInfluence;
+      uniform vec2 uWindAccum; // Monotonically accumulated wind displacement (CPU-integrated)
+
+      // Building Shadow Suppression
+      uniform bool uBuildingShadowSuppressionEnabled;
+      uniform float uBuildingShadowSuppressionStrength;
+      uniform bool uHasBuildingShadowMap;
+      uniform sampler2D uBuildingShadowMap;
 
       varying vec2 vUv;
       varying vec3 vWorldNormal;
@@ -2120,6 +2354,8 @@ export class SpecularEffect extends EffectBase {
         // Dynamic Lighting Calculation (Falloff Only)
         // ---------------------------------------------------------
         vec3 totalDynamicLight = vec3(0.0);
+        vec3 dominantDynLightColor = vec3(1.0); // Fallback: white (neutral tint)
+        float dominantDynLightWeight = 0.0;
         
         for (int i = 0; i < ${this.maxLights}; i++) {
           if (i >= numLights) break;
@@ -2144,6 +2380,16 @@ export class SpecularEffect extends EffectBase {
             float lightIntensity = mix(linear, squared, attenuation) * falloff;
             
             totalDynamicLight += lColor * lightIntensity;
+
+            // Track the brightest contributing light for color tinting.
+            // Uses perceptual luminance weighting so colored lights compete fairly.
+            float contribution = dot(lColor, vec3(0.2126, 0.7152, 0.0722)) * lightIntensity;
+            if (contribution > dominantDynLightWeight) {
+              dominantDynLightWeight = contribution;
+              // Normalize the light color to extract its hue (avoid div-by-zero)
+              float lum = max(dot(lColor, vec3(0.2126, 0.7152, 0.0722)), 0.001);
+              dominantDynLightColor = lColor / lum;
+            }
           }
         }
 
@@ -2321,16 +2567,52 @@ export class SpecularEffect extends EffectBase {
           totalModulator *= thresholdMask;
         }
         
+        // Dynamic light color tinting: blend global uLightColor toward the
+        // dominant nearby dynamic light's hue so specular picks up local color.
+        vec3 effectiveLightColor = uLightColor;
+        if (uDynamicLightTintEnabled && dominantDynLightWeight > 0.01) {
+          effectiveLightColor = mix(uLightColor, dominantDynLightColor, uDynamicLightTintStrength);
+        }
+
+        // Building shadow suppression: darken specular in building shadow areas.
+        // The building shadow map is world-space UV (0..1 covers the scene).
+        float buildingShadowFactor = 1.0;
+        if (uBuildingShadowSuppressionEnabled && uHasBuildingShadowMap) {
+          float bu = (vWorldPosition.x - uSceneBounds.x) / max(1e-5, uSceneBounds.z);
+          float bv = (vWorldPosition.y - uSceneBounds.y) / max(1e-5, uSceneBounds.w);
+          bv = 1.0 - bv; // Y-flip: V=0 at top of scene (same convention as roof mask)
+          vec2 bsUv = clamp(vec2(bu, bv), 0.0, 1.0);
+          float shadowVal = texture2D(uBuildingShadowMap, bsUv).r; // 1.0=lit, 0.0=shadow
+          buildingShadowFactor = mix(1.0, shadowVal, uBuildingShadowSuppressionStrength);
+        }
+
         // For 2.5D top-down: specular mask directly defines shine areas
         // The colored mask defines WHERE and WHAT COLOR things shine.
         // We modulate by totalIncidentLight to ensure we don't shine in darkness.
-        // uLightColor is preserved as a manual tint/multiplier.
-        vec3 specularColor = specularMask.rgb * totalModulator * uSpecularIntensity * uLightColor * totalIncidentLight;
+        // effectiveLightColor blends global tint with dominant dynamic light hue.
+        // buildingShadowFactor suppresses specular in building shadows.
+        vec3 specularColor = specularMask.rgb * totalModulator * uSpecularIntensity * effectiveLightColor * totalIncidentLight * buildingShadowFactor;
         
+        // Wind-driven ripple for wet surfaces only.
+        // Creates traveling waves across wet outdoor surfaces in the wind direction.
+        // This is separate from the base stripe animation — _Specular mask specular
+        // is never wind-blown; only rain-wetness specular gets this treatment.
+        float windRipple = 0.0;
+        if (uWindDrivenStripesEnabled && uWindStripeInfluence > 0.0 && uRainWetness > 0.001 && outdoorFactor > 0.01) {
+          // Offset UVs by accumulated wind displacement to create directional waves
+          vec2 windUv = vUv + uWindAccum * uWindStripeInfluence;
+          // Two octaves of noise at different scales for organic ripple feel
+          float ripple1 = snoise(windUv * 8.0) * 0.6;
+          float ripple2 = snoise(windUv * 16.0 + 3.7) * 0.4;
+          windRipple = max(0.0, ripple1 + ripple2) * outdoorFactor;
+        }
+
         // Wet specular: the wet mask is multiplied by effectsOnly (not the base 1.0)
         // so wet surfaces only light up where stripes sweep across, clouds create
-        // specular highlights, or sparkles fire. No constant white.
-        vec3 wetSpecularColor = vec3(wetMask) * effectsOnly * uWetSpecularIntensity * uLightColor * totalIncidentLight;
+        // specular highlights, or sparkles fire. Wind ripple adds extra modulation
+        // on outdoor wet surfaces only.
+        float wetEffects = effectsOnly + windRipple;
+        vec3 wetSpecularColor = vec3(wetMask) * wetEffects * uWetSpecularIntensity * effectiveLightColor * totalIncidentLight * buildingShadowFactor;
         
         // --- Output CC ---
         // Output gamma: shapes the wet specular curve. >1 darkens midtones
@@ -2340,6 +2622,20 @@ export class SpecularEffect extends EffectBase {
         }
         // Output clamp: hard cap prevents bloom explosion on bright surfaces.
         wetSpecularColor = min(wetSpecularColor, vec3(uWetOutputMax));
+
+        // Frost / Ice Glaze: cold weather boosts specular and tints toward blue-white.
+        // Only affects outdoor surfaces (gated by outdoorFactor).
+        vec3 frostSpecularColor = vec3(0.0);
+        if (uFrostGlazeEnabled && uFrostLevel > 0.001) {
+          // Cool blue-white tint for frosted surfaces
+          vec3 frostTint = mix(vec3(1.0), vec3(0.75, 0.88, 1.0), uFrostTintStrength);
+          // Frost adds a broad specular boost modulated by the specular mask.
+          // Unlike wet (which only shines where effects sweep), frost is a constant
+          // icy sheen that covers the surface. Uses max of specular/wet masks so
+          // frost applies on any reflective-looking area.
+          float frostMask = max(specularStrength, wetMask) * outdoorFactor * uFrostLevel;
+          frostSpecularColor = frostTint * frostMask * uFrostIntensity * totalIncidentLight * buildingShadowFactor;
+        }
         
         // Apply Foundry darkness level with different falloff curves (reuse
         // lightLevel defined earlier). Albedo is additionally tinted by the
@@ -2356,7 +2652,8 @@ export class SpecularEffect extends EffectBase {
         
         // Specular is already lit by totalIncidentLight (which includes ambient + dynamic).
         // Wet specular is added separately — it only appears where animated effects are active.
-        vec3 litSpecular = specularColor + wetSpecularColor;
+        // Frost specular is a constant icy sheen on outdoor frozen surfaces.
+        vec3 litSpecular = specularColor + wetSpecularColor + frostSpecularColor;
 
         // Simple additive composition: base + specular (including wet)
         vec3 finalColor = litAlbedo + litSpecular;
@@ -2369,6 +2666,9 @@ export class SpecularEffect extends EffectBase {
         // finalColor = specularMask.rgb; // Show specular mask only
         // finalColor = vec3(wetMask); // Show wet reflectivity mask
         // finalColor = vec3(effectsOnly); // Show animated effects only
+        // finalColor = vec3(frostSpecularColor); // Show frost glaze only
+        // finalColor = vec3(buildingShadowFactor); // Show building shadow suppression
+        // finalColor = effectiveLightColor; // Show dynamic light tint color
 
         // Output routing:
         // - Full mode: albedo + specular (tone mapped)

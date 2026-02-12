@@ -3581,6 +3581,12 @@ async function initializeUI(effectMap) {
       weatherController.gustStrength = value;
     } else if (paramId === 'rainCurlStrength') {
       weatherController.rainTuning.curlStrength = value;
+    } else if (paramId === 'wettingDuration') {
+      weatherController.wetnessTuning.wettingDuration = value;
+    } else if (paramId === 'dryingDuration') {
+      weatherController.wetnessTuning.dryingDuration = value;
+    } else if (paramId === 'precipThreshold') {
+      weatherController.wetnessTuning.precipThreshold = value;
     } else {
       // Manual Overrides (update target state directly)
       const target = weatherController.targetState;
@@ -3719,7 +3725,12 @@ async function initializeUI(effectMap) {
     gustWaitMin: weatherController.gustWaitMin,
     gustWaitMax: weatherController.gustWaitMax,
     gustDuration: weatherController.gustDuration,
-    gustStrength: weatherController.gustStrength
+    gustStrength: weatherController.gustStrength,
+
+    // Wetness tracker tuning
+    wettingDuration: weatherController.wetnessTuning.wettingDuration,
+    dryingDuration: weatherController.wetnessTuning.dryingDuration,
+    precipThreshold: weatherController.wetnessTuning.precipThreshold
   };
 
   // Fix negative angles

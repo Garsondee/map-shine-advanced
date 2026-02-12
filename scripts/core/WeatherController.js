@@ -207,6 +207,20 @@ export class WeatherController {
     /** @type {number} Global simulation speed scalar for Quarks-based effects (weather, fire, etc.). */
     this.simulationSpeed = 1.0;
 
+    // Wetness Tracker — surface wetness lags behind precipitation with
+    // transition-aware holdoff.  Wetness only starts changing AFTER a weather
+    // transition finishes, then ramps proportionally to precipitation (wetting)
+    // or decays slowly over minutes (drying).
+    this.wetnessTuning = {
+      wettingDuration: 30.0,   // Seconds for full rain (precip=1) to reach wetness=1
+      dryingDuration: 180.0,   // Seconds for fully wet surface to reach wetness=0
+      precipThreshold: 0.05    // Precipitation below this is considered "not raining"
+    };
+
+    // Internal wetness tracker state (not serialized — derived at runtime)
+    /** @private Whether we're holding off wetness changes while a transition runs */
+    this._wetnessHoldoff = false;
+
     // Per-system tuning parameters for precipitation visuals
     this.rainTuning = {
       intensityScale: 1.0,
@@ -2087,19 +2101,55 @@ export class WeatherController {
    * @private
    */
   _updateWetness(dt) {
-    // If raining, wetness increases fast
-    // If dry, wetness decreases slow
-    const targetWetness = this.currentState.precipitation > 0.1 ? 1.0 : 0.0;
-    const rate = targetWetness > this.currentState.wetness 
-      ? 0.2 // Wetting rate (5 seconds to full wet)
-      : 0.05; // Drying rate (20 seconds to dry)
+    const cs = this.currentState;
+    const tuning = this.wetnessTuning;
 
-    this.currentState.wetness = THREE.MathUtils.damp(
-      this.currentState.wetness,
-      targetWetness,
-      rate,
-      dt
-    );
+    // Determine target wetness from current precipitation.
+    // Only rain creates surface wetness; snow/hail/ash don't (frost handles cold).
+    const isRain = cs.precipType === PrecipitationType.RAIN;
+    const precip = isRain ? cs.precipitation : 0.0;
+    const targetWetness = precip > tuning.precipThreshold
+      ? Math.min(1.0, precip)
+      : 0.0;
+
+    // --- Transition-aware holdoff ---
+    // Don't start wetting or drying while a weather transition is in progress.
+    // Precipitation is still interpolating during a transition, so we wait for
+    // it to settle before committing to a wetness trajectory.
+    if (this.isTransitioning) {
+      this._wetnessHoldoff = true;
+      return;
+    }
+
+    // Coming out of a transition — release the holdoff.
+    if (this._wetnessHoldoff) {
+      this._wetnessHoldoff = false;
+    }
+
+    // --- Wetting / Drying ---
+    const current = cs.wetness;
+    const diff = targetWetness - current;
+
+    // Close enough — snap and stop.
+    if (Math.abs(diff) < 0.001) {
+      cs.wetness = targetWetness;
+      return;
+    }
+
+    if (diff > 0) {
+      // Wetting: accumulate proportional to precipitation intensity.
+      // At precip=1.0 → full wet in wettingDuration seconds.
+      // At precip=0.3 → full wet in wettingDuration / 0.3 ≈ 3.3× longer.
+      const effectivePrecip = Math.max(precip, 0.01);
+      const rate = effectivePrecip / Math.max(tuning.wettingDuration, 0.1);
+      cs.wetness = Math.min(targetWetness, current + rate * dt);
+    } else {
+      // Drying: constant rate so total drying time is proportional to
+      // the distance to travel. Fully wet (1.0) → dry (0.0) takes
+      // dryingDuration seconds. Half wet (0.5) → dry takes half as long.
+      const rate = 1.0 / Math.max(tuning.dryingDuration, 0.1);
+      cs.wetness = Math.max(targetWetness, current - rate * dt);
+    }
   }
 
   /**
@@ -2759,6 +2809,32 @@ export class WeatherController {
           group: 'snow'
         },
 
+        // Wetness Tracker tuning
+        wettingDuration: {
+          label: 'Wetting Duration (s)',
+          default: 30.0,
+          min: 1.0,
+          max: 120.0,
+          step: 1.0,
+          group: 'wetness'
+        },
+        dryingDuration: {
+          label: 'Drying Duration (s)',
+          default: 180.0,
+          min: 10.0,
+          max: 600.0,
+          step: 5.0,
+          group: 'wetness'
+        },
+        precipThreshold: {
+          label: 'Rain Threshold',
+          default: 0.05,
+          min: 0.0,
+          max: 0.5,
+          step: 0.01,
+          group: 'wetness'
+        },
+
         // Roof/Indoors mask control
         roofMaskForceEnabled: {
           label: 'Force Indoor Mask',
@@ -2797,6 +2873,7 @@ export class WeatherController {
         { label: 'Simulation', type: 'folder', parameters: ['variability', 'transitionDuration', 'simulationSpeed'] },
         { label: 'Fog', type: 'folder', parameters: ['fogDensity'], expanded: true },
         { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'wetness', 'freezeLevel'], expanded: true },
+        { label: 'Wetness', type: 'folder', parameters: ['wettingDuration', 'dryingDuration', 'precipThreshold'] },
         { label: 'Wind', type: 'folder', parameters: ['windSpeed', 'windDirection', 'gustWaitMin', 'gustWaitMax', 'gustDuration', 'gustStrength'], expanded: true },
         { label: 'Rain', type: 'folder', parameters: [
           'rainIntensityScale',

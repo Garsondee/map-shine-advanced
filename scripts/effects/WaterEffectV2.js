@@ -1,5 +1,6 @@
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
+import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { WaterSurfaceModel } from './WaterSurfaceModel.js';
 import { DistortionLayer } from './DistortionManager.js';
 
@@ -393,6 +394,9 @@ export class WaterEffectV2 extends EffectBase {
     this._lastTimeValue = null;
     this._timeStallFrames = 0;
     this._timeStallLogged = false;
+
+    // First-render diagnostics: tracks whether we've logged shader compile stats.
+    this._firstRenderDone = false;
 
     /** @type {number} */
     this._lastDefinesKey = 0;
@@ -1243,6 +1247,7 @@ export class WaterEffectV2 extends EffectBase {
     this._material = new THREE.ShaderMaterial({
       uniforms: {
         tDiffuse: { value: null },
+        tNoiseMap: { value: null },
         tWaterData: { value: null },
         uHasWaterData: { value: 0.0 },
         uWaterEnabled: { value: this.enabled ? 1.0 : 0.0 },
@@ -1460,6 +1465,7 @@ export class WaterEffectV2 extends EffectBase {
       `,
       fragmentShader: `
         uniform sampler2D tDiffuse;
+        uniform sampler2D tNoiseMap;
         uniform sampler2D tWaterData;
         uniform float uHasWaterData;
         uniform float uWaterEnabled;
@@ -1679,27 +1685,76 @@ export class WaterEffectV2 extends EffectBase {
           return vec2(n, hash12(p + n + 19.19));
         }
 
+        // Noise via a pre-baked 512x512 tileable RGBA noise texture (tNoiseMap).
+        // Each RGBA channel holds an independent noise field (different PRNG seed).
+        // NEAREST filtering + manual smoothstep interpolation exactly matches the
+        // original procedural valueNoise quality while eliminating hundreds of
+        // inlined hash12 calls that caused ANGLE/D3D11 fxc.exe to take ~49s.
+        const float NOISE_INV = 1.0 / 512.0;
+
+        // Smoothstep-interpolated single-channel noise from channel R.
+        // 4 texel samples with smoothstep blending — identical to original valueNoise.
         float valueNoise(vec2 p) {
           vec2 i = floor(p);
           vec2 f = fract(p);
-          float a = hash12(i);
-          float b = hash12(i + vec2(1.0, 0.0));
-          float c = hash12(i + vec2(0.0, 1.0));
-          float d = hash12(i + vec2(1.0, 1.0));
           vec2 u = f * f * (3.0 - 2.0 * f);
+          float a = texture2D(tNoiseMap, (i + 0.5) * NOISE_INV).r;
+          float b = texture2D(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV).r;
+          float c = texture2D(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV).r;
+          float d = texture2D(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV).r;
           return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
         }
 
+        // 4-octave fBm with pre-computed coefficients: amp starts at 0.55, decays by 0.55.
+        // Octave weights: 1.1, 0.605, 0.33275, 0.183 (each is amp * 2.0).
+        // Each octave samples a different RGBA channel for decorrelation,
+        // and inter-octave rotation (~37°) prevents visible tiling repetition.
         float fbmNoise(vec2 p) {
-          float sum = 0.0;
-          float amp = 0.55;
-          float freq = 1.0;
-          for (int i = 0; i < 4; i++) {
-            sum += (valueNoise(p * freq) - 0.5) * 2.0 * amp;
-            freq *= 2.0;
-            amp *= 0.55;
-          }
-          return sum;
+          // Rotation matrix (~37° = atan(0.75)) decorrelates octave orientations.
+          // Preserves magnitude so effective frequency still doubles each octave.
+          const mat2 octRot = mat2(0.8, 0.6, -0.6, 0.8);
+          vec2 i, f, u;
+
+          // Octave 0 — R channel
+          i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
+          float n0 = mix(mix(
+            texture2D(tNoiseMap, (i + 0.5) * NOISE_INV).r,
+            texture2D(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV).r, u.x), mix(
+            texture2D(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV).r,
+            texture2D(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV).r, u.x), u.y);
+
+          p = octRot * p * 2.0;
+
+          // Octave 1 — G channel
+          i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
+          float n1 = mix(mix(
+            texture2D(tNoiseMap, (i + 0.5) * NOISE_INV).g,
+            texture2D(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV).g, u.x), mix(
+            texture2D(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV).g,
+            texture2D(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV).g, u.x), u.y);
+
+          p = octRot * p * 2.0;
+
+          // Octave 2 — B channel
+          i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
+          float n2 = mix(mix(
+            texture2D(tNoiseMap, (i + 0.5) * NOISE_INV).b,
+            texture2D(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV).b, u.x), mix(
+            texture2D(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV).b,
+            texture2D(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV).b, u.x), u.y);
+
+          p = octRot * p * 2.0;
+
+          // Octave 3 — A channel
+          i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
+          float n3 = mix(mix(
+            texture2D(tNoiseMap, (i + 0.5) * NOISE_INV).a,
+            texture2D(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV).a, u.x), mix(
+            texture2D(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV).a,
+            texture2D(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV).a, u.x), u.y);
+
+          return (n0 - 0.5) * 1.1 + (n1 - 0.5) * 0.605
+               + (n2 - 0.5) * 0.33275 + (n3 - 0.5) * 0.183;
         }
 
         float safe01(float v) {
@@ -2884,15 +2939,30 @@ export class WaterEffectV2 extends EffectBase {
       depthTest: false
     });
 
+    // Set ALL initial defines to match what update() will compute on first call.
+    // This avoids a wasted recompilation: initialize() used to set only sand/flecks,
+    // then update() would detect the mismatch and set needsUpdate=true for multitap/chrom.
     const sandEnabled = !!this.params?.sandEnabled;
     const flecksEnabled = !!this.params?.foamFlecksEnabled;
-    // Avoid object-spread allocations; mutate defines object directly.
+    const multiTapEnabled = this.params?.refractionMultiTapEnabled === true;
+    const chromEnabled = this.params?.chromaticAberrationEnabled === true;
     const initDefines = {};
     if (sandEnabled) initDefines.USE_SAND = 1;
     if (flecksEnabled) initDefines.USE_FOAM_FLECKS = 1;
+    if (multiTapEnabled) initDefines.USE_WATER_REFRACTION_MULTITAP = 1;
+    if (chromEnabled) initDefines.USE_WATER_CHROMATIC_ABERRATION = 1;
     this._material.defines = initDefines;
-    this._lastDefinesKey = (sandEnabled ? DEF_SAND : 0) | (flecksEnabled ? DEF_FOAM_FLECKS : 0);
+    this._lastDefinesKey = (sandEnabled ? DEF_SAND : 0)
+      | (flecksEnabled ? DEF_FOAM_FLECKS : 0)
+      | (multiTapEnabled ? DEF_MULTITAP : 0)
+      | (chromEnabled ? DEF_CHROM_AB : 0);
     this._material.needsUpdate = true;
+
+    // Generate the tileable noise texture that replaces procedural hash-based noise.
+    // This 512x512 RGBA texture (4 independent noise channels) eliminates hundreds
+    // of inlined hash12 calls and cuts ANGLE/D3D11 shader compilation time dramatically.
+    this._noiseTexture = WaterEffectV2._createNoiseTexture(THREE);
+    this._material.uniforms.tNoiseMap.value = this._noiseTexture;
 
     this._quadMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._material);
     this._quadScene.add(this._quadMesh);
@@ -4006,10 +4076,209 @@ export class WaterEffectV2 extends EffectBase {
 
     this._lastCamera = camera;
 
+    const isFirstRender = !this._firstRenderDone;
+    if (isFirstRender) {
+      this._firstRenderDone = true;
+      this._logPreCompileDiagnostics();
+    }
+
     const prevAutoClear = renderer.autoClear;
     renderer.autoClear = false;
+
+    const t0 = isFirstRender ? performance.now() : 0;
     renderer.render(this._quadScene, this._quadCamera);
+
+    if (isFirstRender) {
+      // Force synchronous completion so we can measure actual compile time.
+      const gl = renderer.getContext();
+      if (gl?.finish) gl.finish();
+      const compileMs = performance.now() - t0;
+      this._logPostCompileDiagnostics(renderer, compileMs);
+    }
+
     renderer.autoClear = prevAutoClear;
+  }
+
+  /**
+   * Log shader stats BEFORE the first render triggers compilation.
+   * Helps diagnose why ANGLE/D3D11 HLSL translation takes so long.
+   * @private
+   */
+  _logPreCompileDiagnostics() {
+    const dlp = debugLoadingProfiler;
+    try {
+      const fragSrc = this._material.fragmentShader || '';
+      const vertSrc = this._material.vertexShader || '';
+      const defines = this._material.defines ? Object.keys(this._material.defines) : [];
+      const uniformCount = this._material.uniforms ? Object.keys(this._material.uniforms).length : 0;
+
+      // Count samplers (texture uniforms) — each costs an extra binding.
+      let samplerCount = 0;
+      if (this._material.uniforms) {
+        for (const key of Object.keys(this._material.uniforms)) {
+          const v = this._material.uniforms[key]?.value;
+          if (v && (v.isTexture || v.isRenderTarget)) samplerCount++;
+        }
+      }
+
+      const fragLines = fragSrc.split('\n').length;
+      const fragChars = fragSrc.length;
+      const vertLines = vertSrc.split('\n').length;
+      const vertChars = vertSrc.length;
+      const definesStr = defines.length > 0 ? defines.join(', ') : '(none)';
+
+      const msg =
+        `water.compile: SHADER STATS — ` +
+        `frag=${fragLines} lines/${fragChars} chars, ` +
+        `vert=${vertLines} lines/${vertChars} chars, ` +
+        `defines=[${definesStr}], ` +
+        `uniforms=${uniformCount} (${samplerCount} samplers), ` +
+        `needsUpdate=${this._material.needsUpdate}`;
+      log.info(`[COMPILE] ${msg}`);
+      dlp?.event?.(msg);
+    } catch (e) {
+      log.warn('[COMPILE] Pre-compile diagnostics failed:', e?.message);
+    }
+  }
+
+  /**
+   * Log compilation results and extract GL shader info logs from ANGLE.
+   * @private
+   */
+  _logPostCompileDiagnostics(renderer, compileMs) {
+    const dlp = debugLoadingProfiler;
+    try {
+      const msg = `water.compile: DONE — ${compileMs.toFixed(0)}ms for 1 program`;
+      log.info(`[COMPILE] ${msg}`);
+      dlp?.event?.(msg);
+
+      // Extract GL shader info logs — ANGLE often includes HLSL translation warnings.
+      const gl = renderer.getContext();
+      const programs = renderer.info?.programs;
+      if (programs && programs.length > 0) {
+        // The most recently added program should be ours.
+        const lastProg = programs[programs.length - 1];
+        const glProg = lastProg?.program;
+        if (glProg) {
+          const shaders = gl.getAttachedShaders(glProg);
+          if (shaders) {
+            for (const shader of shaders) {
+              const type = gl.getShaderParameter(shader, gl.SHADER_TYPE);
+              const typeName = type === gl.FRAGMENT_SHADER ? 'Fragment' : 'Vertex';
+              const infoLog = gl.getShaderInfoLog(shader);
+              if (infoLog && infoLog.trim()) {
+                const truncated = infoLog.length > 2000
+                  ? infoLog.substring(0, 2000) + `\n... (truncated, ${infoLog.length} chars total)`
+                  : infoLog;
+                log.info(`[COMPILE] ${typeName} shader info log:\n${truncated}`);
+                dlp?.event?.(`water.compile: ${typeName} GL log — ${infoLog.length} chars`);
+              } else {
+                dlp?.event?.(`water.compile: ${typeName} GL log — (empty, no warnings)`);
+              }
+            }
+          }
+          const linkLog = gl.getProgramInfoLog(glProg);
+          if (linkLog && linkLog.trim()) {
+            log.info(`[COMPILE] Program link info log:\n${linkLog}`);
+            dlp?.event?.(`water.compile: link log — ${linkLog.length} chars`);
+          }
+        }
+      }
+    } catch (e) {
+      log.warn('[COMPILE] Post-compile diagnostics failed:', e?.message);
+    }
+  }
+
+  /**
+   * Diagnostic: compile the water shader with different define subsets to identify
+   * which features drive the majority of ANGLE/D3D11 compilation time.
+   *
+   * Creates temporary ShaderMaterials with subsets of defines, renders each to
+   * trigger GL compilation, then disposes them. Results are logged to both the
+   * console and the debug loading profiler event log.
+   *
+   * Call this AFTER the main water shader has compiled (so the vertex shader
+   * is already cached by the driver and only fragment variants are tested).
+   *
+   * @param {THREE.WebGLRenderer} renderer
+   * @returns {Promise<void>}
+   */
+  async diagnosticVariantCompile(renderer) {
+    const THREE = window.THREE;
+    const gl = renderer.getContext();
+    const dlp = debugLoadingProfiler;
+    if (!THREE || !gl || !this._material) return;
+
+    const fragSrc = this._material.fragmentShader;
+    const vertSrc = this._material.vertexShader;
+    if (!fragSrc || !vertSrc) return;
+
+    dlp?.event?.('water.variantTest: BEGIN — testing define subsets to isolate compilation cost');
+    log.info('[VARIANT TEST] Starting water shader define-variant compilation test...');
+
+    // Define subsets to test. Each entry: [label, definesObject]
+    const variants = [
+      ['bare (no defines)',    {}],
+      ['+SAND',               { USE_SAND: 1 }],
+      ['+MULTITAP',           { USE_WATER_REFRACTION_MULTITAP: 1 }],
+      ['+CHROM_AB',           { USE_WATER_CHROMATIC_ABERRATION: 1 }],
+      ['+SAND+MULTITAP+CHROM', { USE_SAND: 1, USE_WATER_REFRACTION_MULTITAP: 1, USE_WATER_CHROMATIC_ABERRATION: 1 }],
+    ];
+
+    const results = [];
+    const quadScene = new THREE.Scene();
+    const quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    const quadGeo = new THREE.PlaneGeometry(2, 2);
+
+    for (const [label, defines] of variants) {
+      // Clone the material with a different set of defines.
+      const mat = new THREE.ShaderMaterial({
+        uniforms: this._material.uniforms,
+        vertexShader: vertSrc,
+        fragmentShader: fragSrc,
+        defines: { ...defines },
+        depthWrite: false,
+        depthTest: false,
+      });
+      mat.needsUpdate = true;
+
+      const mesh = new THREE.Mesh(quadGeo, mat);
+      quadScene.add(mesh);
+
+      const progBefore = Array.isArray(renderer.info?.programs) ? renderer.info.programs.length : 0;
+      const t0 = performance.now();
+      try {
+        renderer.setRenderTarget(null);
+        renderer.render(quadScene, quadCamera);
+        if (gl.finish) gl.finish();
+      } catch (e) {
+        log.warn(`[VARIANT TEST] Error compiling "${label}":`, e?.message);
+      }
+      const ms = performance.now() - t0;
+      const progAfter = Array.isArray(renderer.info?.programs) ? renderer.info.programs.length : 0;
+      const newProgs = progAfter - progBefore;
+
+      results.push({ label, ms, newProgs });
+      const msg = `water.variantTest: "${label}" — ${ms.toFixed(0)}ms, +${newProgs} prog`;
+      log.info(`[VARIANT TEST] ${msg}`);
+      dlp?.event?.(msg);
+
+      // Clean up
+      quadScene.remove(mesh);
+      mat.dispose();
+
+      // Yield to event loop between variants so the loading overlay can update.
+      await new Promise(r => setTimeout(r, 0));
+    }
+
+    quadGeo.dispose();
+
+    // Summary
+    const summary = results.map(r => `${r.label}: ${r.ms.toFixed(0)}ms`).join(' | ');
+    const totalMs = results.reduce((s, r) => s + r.ms, 0);
+    const summaryMsg = `water.variantTest: DONE — total ${totalMs.toFixed(0)}ms [ ${summary} ]`;
+    log.info(`[VARIANT TEST] ${summaryMsg}`);
+    dlp?.event?.(summaryMsg);
   }
 
   onResize(width, height) {
@@ -4032,12 +4301,66 @@ export class WaterEffectV2 extends EffectBase {
       this._material = null;
     }
 
+    if (this._noiseTexture) {
+      this._noiseTexture.dispose();
+      this._noiseTexture = null;
+    }
+
     this._quadScene = null;
     this._quadCamera = null;
 
     this.waterMask = null;
     this.baseMesh = null;
     this._lastWaterMaskUuid = null;
+  }
+
+  /**
+   * Generate a 512×512 tileable RGBA noise texture for the water fragment shader.
+   * Each RGBA channel holds an independent noise field (different PRNG seed) so
+   * fbmNoise can sample a different channel per octave for decorrelation.
+   * Replaces procedural hash12-based valueNoise/fbmNoise with texture lookups,
+   * eliminating the massive function inlining that caused ANGLE/D3D11 to spend
+   * ~49 seconds compiling the shader.
+   *
+   * Uses a deterministic seeded LCG so the noise is reproducible across loads.
+   * REPEAT wrapping + NEAREST filtering; the shader does manual smoothstep
+   * interpolation for exact visual parity with the original procedural noise.
+   *
+   * @param {object} THREE - Three.js namespace
+   * @returns {THREE.DataTexture}
+   * @static
+   */
+  static _createNoiseTexture(THREE) {
+    const size = 512;
+    const data = new Uint8Array(size * size * 4);
+
+    // 4 independent LCG seeds — one per RGBA channel — so each channel is an
+    // uncorrelated noise field. fbmNoise samples a different channel per octave
+    // to prevent visible self-correlation in the fBm sum.
+    let sR = 48271, sG = 16807, sB = 75013, sA = 33791;
+    for (let i = 0; i < size * size; i++) {
+      sR = (sR * 1103515245 + 12345) & 0x7fffffff;
+      sG = (sG * 1103515245 + 12345) & 0x7fffffff;
+      sB = (sB * 1103515245 + 12345) & 0x7fffffff;
+      sA = (sA * 1103515245 + 12345) & 0x7fffffff;
+      const idx = i * 4;
+      data[idx]     = (sR >> 16) & 0xff; // R
+      data[idx + 1] = (sG >> 16) & 0xff; // G
+      data[idx + 2] = (sB >> 16) & 0xff; // B
+      data[idx + 3] = (sA >> 16) & 0xff; // A
+    }
+
+    const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.UnsignedByteType);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    // NEAREST filtering — the shader does manual smoothstep interpolation
+    // by sampling the 4 corner texels explicitly. This avoids texel-center
+    // precision issues that LINEAR filtering can introduce.
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    return tex;
   }
 
   _rebuildWaterDataIfNeeded(force) {

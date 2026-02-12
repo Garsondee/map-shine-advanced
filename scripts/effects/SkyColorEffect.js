@@ -82,6 +82,10 @@ export class SkyColorEffect extends EffectBase {
       autoIntensityEnabled: true,
       autoIntensityStrength: 1.0,
 
+      // Sky tint applied to Darkness Response lights (e.g. golden hour hue on sun lights)
+      skyTintDarknessLightsEnabled: true,
+      skyTintDarknessLightsIntensity: 1.0,
+
       // --- Time-of-day grading presets (blended by timeOfDay) ---
       // Note: These are applied only to outdoors (masked) and then blended by intensity.
       // All values are tuned to be subtle by default; raise intensity for stronger look.
@@ -162,6 +166,11 @@ export class SkyColorEffect extends EffectBase {
       saturation: 1.0,
       contrast: 1.0
     };
+
+    // Exposed sky tint color for other systems (e.g. Darkness Response lights).
+    // Updated each frame in update(). Represents the white-balance temperature shift
+    // as an RGB multiplier so lights can adopt the current sky hue.
+    this.currentSkyTintColor = { r: 1.0, g: 1.0, b: 1.0 };
 
     this.material = null;
     this.quadScene = null;
@@ -282,7 +291,7 @@ export class SkyColorEffect extends EffectBase {
           name: 'sky-color',
           label: 'Sky Color',
           type: 'inline',
-          parameters: ['intensity', 'saturationBoost', 'vibranceBoost']
+          parameters: ['intensity', 'saturationBoost', 'vibranceBoost', 'skyTintDarknessLightsEnabled', 'skyTintDarknessLightsIntensity']
         },
         {
           name: 'sky-automation',
@@ -425,6 +434,8 @@ export class SkyColorEffect extends EffectBase {
         hazeContrastLoss: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.0, label: 'Haze Contrast', throttle: 50 },
         autoIntensityEnabled: { type: 'boolean', default: true, label: 'Auto Intensity' },
         autoIntensityStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Auto Strength', throttle: 50 },
+        skyTintDarknessLightsEnabled: { type: 'boolean', default: true, label: 'Tint Sun Lights' },
+        skyTintDarknessLightsIntensity: { type: 'slider', min: 0.0, max: 5.0, step: 0.01, default: 1.0, label: 'Sun Light Tint Intensity', throttle: 50 },
         ...dawn.parameters,
         ...day.parameters,
         ...dusk.parameters,
@@ -905,6 +916,37 @@ export class SkyColorEffect extends EffectBase {
 
       saturation = Math.max(0.0, Math.min(2.0, saturation + (this.params.saturationBoost ?? 0.0)));
       vibrance = Math.max(-1.0, Math.min(1.0, vibrance + (this.params.vibranceBoost ?? 0.0)));
+
+      // Compute the sky tint color for Darkness Response lights.
+      // Produces a rich golden amber at dawn/dusk (warm temperature) and a cool
+      // blue at night (cold temperature). All three channels are shaped so the
+      // hue shift is dramatic enough to be visible on the lights, unlike the
+      // subtle white-balance grading used for the full-screen sky pass.
+      //
+      // Typical temperature values: dawn/dusk ≈ 1.0, day ≈ 0.0, night ≈ -0.5.
+      {
+        const t = temperature;
+        let tr, tg, tb;
+        if (t >= 0) {
+          // Warm: golden amber — boost red, suppress blue, slight green warmth.
+          tr = 1.0 + t * 0.4;
+          tg = 1.0 - t * 0.15;
+          tb = 1.0 - t * 0.55;
+        } else {
+          // Cool: blue hour — suppress red, slight green reduction, boost blue.
+          const at = -t; // positive magnitude
+          tr = 1.0 - at * 0.45;
+          tg = 1.0 - at * 0.1;
+          tb = 1.0 + at * 0.4;
+        }
+        // Include tint shift (green/magenta axis).
+        const tintShiftG = 1.0 + tint;
+        // Clamp to sane range — values are further luminance-normalized in the
+        // light source, so we just need to avoid degenerate near-zero channels.
+        this.currentSkyTintColor.r = Math.max(0.01, tr);
+        this.currentSkyTintColor.g = Math.max(0.01, tg * tintShiftG);
+        this.currentSkyTintColor.b = Math.max(0.01, tb);
+      }
 
       const u = this.material.uniforms;
       u.uTime.value = timeInfo.elapsed;

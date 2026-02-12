@@ -356,6 +356,7 @@ const GLOBAL_EFFECT_EXPOSURES = [
   ['Distortion',        'distortionManager'],
   ['Bloom',             'bloomEffect'],
   ['Dazzle Overlay',    'dazzleOverlayEffect'],
+  ['Sky Color',         'skyColorEffect'],
 ];
 
 /**

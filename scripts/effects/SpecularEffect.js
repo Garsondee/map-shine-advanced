@@ -7,7 +7,7 @@
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { ShaderValidator } from '../core/shader-validator.js';
-import { weatherController } from '../core/WeatherController.js';
+import { weatherController, PrecipitationType } from '../core/WeatherController.js';
 import Coordinates from '../utils/coordinates.js';
 
 const log = createLogger('SpecularEffect');
@@ -120,12 +120,34 @@ export class SpecularEffect extends EffectBase {
       // Outdoor Cloud Specular (cloud shadows drive specular intensity outdoors)
       outdoorCloudSpecularEnabled: true,
       outdoorStripeBlend: 0.8,     // How much stripes show outdoors (0=none, 1=full)
-      cloudSpecularIntensity: 0.37  // Intensity of cloud-driven specular outdoors
+      cloudSpecularIntensity: 0.37, // Intensity of cloud-driven specular outdoors
+
+      // Wet Surface (Rain) - Derives specular from grayscale albedo during rain
+      wetSpecularEnabled: true,
+      wetSpecularThreshold: 0.5,    // Precipitation level (0-1) above which surfaces become wet
+
+      // Wet Input CC (shapes which albedo values become reflective)
+      wetInputBrightness: 0.0,     // Pre-contrast brightness shift (-0.5 to 0.5)
+      wetInputGamma: 1.0,          // Midtone curve before contrast (<1 brightens mids, >1 darkens)
+      wetSpecularContrast: 3.0,    // Contrast boost on grayscale albedo
+      wetBlackPoint: 0.2,          // Below this, surfaces don't shine (cuts dark areas)
+      wetWhitePoint: 1.0,          // Above this, full shine (lower to tame bright surfaces)
+
+      // Wet Output CC (shapes the final wet specular contribution)
+      wetSpecularIntensity: 1.5,   // Overall wet shine multiplier
+      wetOutputMax: 1.0,           // Hard brightness cap (prevents bloom explosion on whites)
+      wetOutputGamma: 1.0          // Output curve (<1 = brighter midtones, >1 = darker/punchier)
+
+      // TODO: Snow Albedo Effect - Create a way for snow to change the colouration
+      // of the albedo in outdoor areas. When freezeLevel > 0.55 and precipitation
+      // is active (snow), blend outdoor albedo towards white/snow-tinted colour.
+      // This should be a separate visual pass from the wet effect.
     };
 
     this._tempScreenSize = null;
 
     this._fallbackAlbedo = null;
+    this._fallbackBlack = null;
   }
 
   /**
@@ -223,6 +245,17 @@ export class SpecularEffect extends EffectBase {
           type: 'folder',
           expanded: false,
           parameters: ['outdoorCloudSpecularEnabled', 'outdoorStripeBlend', 'cloudSpecularIntensity']
+        },
+        {
+          name: 'wet-surface',
+          label: 'Wet Surface (Rain)',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'wetSpecularEnabled', 'wetSpecularThreshold',
+            'wetInputBrightness', 'wetInputGamma', 'wetSpecularContrast', 'wetBlackPoint', 'wetWhitePoint',
+            'wetSpecularIntensity', 'wetOutputMax', 'wetOutputGamma'
+          ]
         }
       ],
       parameters: {
@@ -602,6 +635,97 @@ export class SpecularEffect extends EffectBase {
           step: 0.01,
           default: 3.0,
           throttle: 100
+        },
+
+        wetSpecularEnabled: {
+          type: 'boolean',
+          label: 'Enable Wet Surface',
+          default: true
+        },
+        wetSpecularThreshold: {
+          type: 'slider',
+          label: 'Rain Threshold',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.5,
+          throttle: 100
+        },
+
+        // --- Input CC ---
+        wetInputBrightness: {
+          type: 'slider',
+          label: 'Input Brightness',
+          min: -0.5,
+          max: 0.5,
+          step: 0.01,
+          default: 0.0,
+          throttle: 100
+        },
+        wetInputGamma: {
+          type: 'slider',
+          label: 'Input Gamma',
+          min: 0.1,
+          max: 3.0,
+          step: 0.01,
+          default: 1.0,
+          throttle: 100
+        },
+        wetSpecularContrast: {
+          type: 'slider',
+          label: 'Input Contrast',
+          min: 1,
+          max: 10,
+          step: 0.1,
+          default: 3.0,
+          throttle: 100
+        },
+        wetBlackPoint: {
+          type: 'slider',
+          label: 'Black Point',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.2,
+          throttle: 100
+        },
+        wetWhitePoint: {
+          type: 'slider',
+          label: 'White Point',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 1.0,
+          throttle: 100
+        },
+
+        // --- Output CC ---
+        wetSpecularIntensity: {
+          type: 'slider',
+          label: 'Output Intensity',
+          min: 0,
+          max: 5,
+          step: 0.01,
+          default: 1.5,
+          throttle: 100
+        },
+        wetOutputMax: {
+          type: 'slider',
+          label: 'Output Max (Clamp)',
+          min: 0.0,
+          max: 3.0,
+          step: 0.01,
+          default: 1.0,
+          throttle: 100
+        },
+        wetOutputGamma: {
+          type: 'slider',
+          label: 'Output Gamma',
+          min: 0.1,
+          max: 3.0,
+          step: 0.01,
+          default: 1.0,
+          throttle: 100
         }
       }
     };
@@ -662,17 +786,14 @@ export class SpecularEffect extends EffectBase {
     }
 
     if (!this.specularMask) {
-      // Scene-wide specular on the base plane is optional.
-      // Some scenes only need per-tile specular overlays (e.g., a single glossy prop tile)
-      // while other tiles intentionally have no mask.
-      //
-      // Important: Do NOT disable the entire effect here, because that would also disable
-      // per-tile overlays (they share the same uEffectEnabled uniform).
-      log.warn('No scene-wide _Specular mask found for base mesh; base specular disabled but per-tile overlays may still render');
-      return;
+      // No scene-wide _Specular mask. Traditional specular stripes won't show,
+      // but we still need the PBR material for weather-driven effects
+      // (wet surface from rain, future snow albedo colouration) which derive
+      // shine from the albedo itself, not the specular mask.
+      log.warn('No scene-wide _Specular mask found for base mesh; stripes inactive but wet/weather effects will still apply');
+    } else {
+      log.info('Specular mask loaded, creating PBR material');
     }
-    
-    log.info('Specular mask loaded, creating PBR material');
 
     const baseMap = baseMesh?.material?.map || this._getFallbackAlbedoTexture();
     this.createPBRMaterial(baseMap);
@@ -858,7 +979,7 @@ export class SpecularEffect extends EffectBase {
       uniforms: {
         // Textures
         uAlbedoMap: { value: safeBase },
-        uSpecularMap: { value: specularMask || this.specularMask },
+        uSpecularMap: { value: specularMask || this.specularMask || this._getFallbackBlackTexture() },
         uRoughnessMap: { value: roughnessMask || safeBase },
         uNormalMap: { value: normalMap || safeBase },
 
@@ -951,6 +1072,20 @@ export class SpecularEffect extends EffectBase {
         uOutdoorStripeBlend: { value: this.params.outdoorStripeBlend },
         uCloudSpecularIntensity: { value: this.params.cloudSpecularIntensity },
 
+        // Wet Surface (Rain)
+        uWetSpecularEnabled: { value: this.params.wetSpecularEnabled },
+        uRainWetness: { value: 0.0 }, // Driven by WeatherController: 0=dry, 1=fully wet
+        // Input CC
+        uWetInputBrightness: { value: this.params.wetInputBrightness },
+        uWetInputGamma: { value: this.params.wetInputGamma },
+        uWetSpecularContrast: { value: this.params.wetSpecularContrast },
+        uWetBlackPoint: { value: this.params.wetBlackPoint },
+        uWetWhitePoint: { value: this.params.wetWhitePoint },
+        // Output CC
+        uWetSpecularIntensity: { value: this.params.wetSpecularIntensity },
+        uWetOutputMax: { value: this.params.wetOutputMax },
+        uWetOutputGamma: { value: this.params.wetOutputGamma },
+
         uRoofMap: { value: null },
         uRoofMaskEnabled: { value: 0.0 },
         uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
@@ -1001,6 +1136,29 @@ export class SpecularEffect extends EffectBase {
     tex.magFilter = THREE.NearestFilter;
     tex.generateMipmaps = false;
     this._fallbackAlbedo = tex;
+    return tex;
+  }
+
+  /**
+   * Returns a cached 1x1 black texture used as fallback when no _Specular mask exists.
+   * This ensures the shader receives a valid sampler (returning 0,0,0) so traditional
+   * specular stripes produce nothing, while weather-driven effects (wet surface) that
+   * derive shine from the albedo still work.
+   * @returns {THREE.DataTexture}
+   * @private
+   */
+  _getFallbackBlackTexture() {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+    if (this._fallbackBlack) return this._fallbackBlack;
+
+    const data = new Uint8Array([0, 0, 0, 255]);
+    const tex = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat);
+    tex.needsUpdate = true;
+    tex.minFilter = THREE.NearestFilter;
+    tex.magFilter = THREE.NearestFilter;
+    tex.generateMipmaps = false;
+    this._fallbackBlack = tex;
     return tex;
   }
 
@@ -1208,11 +1366,30 @@ export class SpecularEffect extends EffectBase {
       this.validateShaderState(timeInfo);
     }
     
+    // Compute rain wetness from weather state (once per frame, shared by all materials).
+    // Wetness ramps from 0→1 as precipitation goes from threshold→1.0, but ONLY for rain.
+    // Snow has a different visual effect (albedo colouration) handled separately.
+    let rainWetness = 0.0;
+    try {
+      const weather = weatherController?.getCurrentState?.();
+      if (weather && weather.precipType === PrecipitationType.RAIN) {
+        const threshold = this.params.wetSpecularThreshold;
+        rainWetness = Math.min(1.0, Math.max(0.0,
+          (weather.precipitation - threshold) / Math.max(0.001, 1.0 - threshold)
+        ));
+      }
+    } catch (_) {
+      // WeatherController may not be initialised yet; stay dry.
+    }
+
     for (const mat of this._materials) {
       if (!mat?.uniforms) continue;
 
       // Update time uniform for animation
       if (mat.uniforms.uTime) mat.uniforms.uTime.value = timeInfo.elapsed;
+
+      // Rain wetness (computed above from weather state)
+      if (mat.uniforms.uRainWetness) mat.uniforms.uRainWetness.value = rainWetness;
 
       // Update uniforms from parameters
       if (mat.uniforms.uSpecularIntensity) mat.uniforms.uSpecularIntensity.value = this.params.intensity;
@@ -1254,6 +1431,19 @@ export class SpecularEffect extends EffectBase {
       }
       if (mat.uniforms.uOutdoorStripeBlend) mat.uniforms.uOutdoorStripeBlend.value = this.params.outdoorStripeBlend;
       if (mat.uniforms.uCloudSpecularIntensity) mat.uniforms.uCloudSpecularIntensity.value = this.params.cloudSpecularIntensity;
+
+      // Wet Surface (Rain)
+      if (mat.uniforms.uWetSpecularEnabled) mat.uniforms.uWetSpecularEnabled.value = this.params.wetSpecularEnabled;
+      // Input CC
+      if (mat.uniforms.uWetInputBrightness) mat.uniforms.uWetInputBrightness.value = this.params.wetInputBrightness;
+      if (mat.uniforms.uWetInputGamma) mat.uniforms.uWetInputGamma.value = this.params.wetInputGamma;
+      if (mat.uniforms.uWetSpecularContrast) mat.uniforms.uWetSpecularContrast.value = this.params.wetSpecularContrast;
+      if (mat.uniforms.uWetBlackPoint) mat.uniforms.uWetBlackPoint.value = this.params.wetBlackPoint;
+      if (mat.uniforms.uWetWhitePoint) mat.uniforms.uWetWhitePoint.value = this.params.wetWhitePoint;
+      // Output CC
+      if (mat.uniforms.uWetSpecularIntensity) mat.uniforms.uWetSpecularIntensity.value = this.params.wetSpecularIntensity;
+      if (mat.uniforms.uWetOutputMax) mat.uniforms.uWetOutputMax.value = this.params.wetOutputMax;
+      if (mat.uniforms.uWetOutputGamma) mat.uniforms.uWetOutputGamma.value = this.params.wetOutputGamma;
 
       // Layer 1
       if (mat.uniforms.uStripe1Enabled) mat.uniforms.uStripe1Enabled.value = this.params.stripe1Enabled;
@@ -1658,6 +1848,20 @@ export class SpecularEffect extends EffectBase {
       uniform float uOutdoorStripeBlend;      // How much stripes show outdoors (0=none, 1=full)
       uniform float uCloudSpecularIntensity;  // Intensity of cloud-driven specular
 
+      // Wet Surface (Rain) - derives specular from high-contrast grayscale albedo
+      uniform bool uWetSpecularEnabled;
+      uniform float uRainWetness;  // 0=dry, 1=fully wet (driven by weather precipitation)
+      // Input CC
+      uniform float uWetInputBrightness;  // Pre-contrast brightness shift
+      uniform float uWetInputGamma;       // Midtone curve before contrast
+      uniform float uWetSpecularContrast; // Contrast boost on grayscale
+      uniform float uWetBlackPoint;       // Low-end cutoff (surfaces below don't shine)
+      uniform float uWetWhitePoint;       // High-end cap (tames bright surfaces)
+      // Output CC
+      uniform float uWetSpecularIntensity; // Overall wet shine multiplier
+      uniform float uWetOutputMax;         // Hard brightness cap (prevents bloom)
+      uniform float uWetOutputGamma;       // Output curve shaping
+
       uniform sampler2D uRoofMap;
       uniform float uRoofMaskEnabled;
       uniform vec4 uSceneBounds;
@@ -1955,8 +2159,60 @@ export class SpecularEffect extends EffectBase {
         
         vec4 specularMask = texture2D(uSpecularMap, vUv);
         float roughness = uHasRoughnessMap ? texture2D(uRoughnessMap, vUv).r : uRoughness;
+
+        // ---------------------------------------------------------
+        // Outdoor Factor (needed early for wet surface augmentation)
+        // ---------------------------------------------------------
+        float outdoorFactor = 1.0;
+        if (uRoofMaskEnabled > 0.5) {
+          float u = (vWorldPosition.x - uSceneBounds.x) / max(1e-5, uSceneBounds.z);
+          float v = (vWorldPosition.y - uSceneBounds.y) / max(1e-5, uSceneBounds.w);
+          v = 1.0 - v;
+          vec2 roofUv = clamp(vec2(u, v), 0.0, 1.0);
+          outdoorFactor = texture2D(uRoofMap, roofUv).r;
+        }
+
+        // ---------------------------------------------------------
+        // Wet Surface (Rain) — compute wet reflectivity mask
+        // ---------------------------------------------------------
+        // When it's raining, outdoor surfaces become shiny. We derive a
+        // reflectivity mask from the albedo (grayscale + contrast boost).
+        // This mask is kept SEPARATE from specularMask and only multiplied
+        // by animated effects (stripes, clouds, sparkles) — never by the
+        // base 1.0 — so wet surfaces only shine where effects sweep across
+        // them, not as constant white paint.
+        float wetMask = 0.0;
+        if (uWetSpecularEnabled && uRainWetness > 0.001) {
+          // --- Input CC ---
+          // Convert albedo to grayscale luminance
+          float gray = dot(albedo.rgb, vec3(0.299, 0.587, 0.114));
+          
+          // Brightness shift (slide the grayscale up or down before processing)
+          gray = clamp(gray + uWetInputBrightness, 0.0, 1.0);
+          
+          // Input gamma (shape midtones: <1 = brighter mids, >1 = darker mids)
+          gray = pow(gray, max(uWetInputGamma, 0.01));
+          
+          // Contrast boost around midpoint (pushes midtones towards black/white)
+          float contrasted = clamp((gray - 0.5) * uWetSpecularContrast + 0.5, 0.0, 1.0);
+          
+          // Black/white point remap: smoothstep cuts dark surfaces (blackPoint)
+          // and caps bright surfaces (whitePoint) to prevent bloom explosion.
+          float bp = min(uWetBlackPoint, uWetWhitePoint - 0.001);
+          contrasted = smoothstep(bp, uWetWhitePoint, contrasted);
+          
+          // Modulate by outdoor factor (indoors stays dry) and rain intensity.
+          // uWetSpecularIntensity is applied later as part of output CC.
+          wetMask = contrasted * outdoorFactor * uRainWetness;
+        }
         
-        // Calculate specular mask strength (luminance of the colored mask)
+        // TODO: Snow Albedo Effect
+        // When freezeLevel > 0.55 and precipitation is active (snow type),
+        // blend outdoor albedo towards a white/snow-tinted colour to simulate
+        // snow accumulation on surfaces. This should modify litAlbedo below,
+        // not the specular channel. Gate by outdoorFactor so indoors stays clear.
+
+        // Calculate specular mask strength (luminance of the original mask, unmodified)
         float specularStrength = dot(specularMask.rgb, vec3(0.299, 0.587, 0.114));
 
         // Cloud lighting (1.0 = lit gap, 0.0 = shadow) sampled in screen-space.
@@ -2034,15 +2290,6 @@ export class SpecularEffect extends EffectBase {
         
         float stripeContribution = stripeMaskAnimated;
         float cloudSpecular = 0.0;
-
-        float outdoorFactor = 1.0;
-        if (uRoofMaskEnabled > 0.5) {
-          float u = (vWorldPosition.x - uSceneBounds.x) / max(1e-5, uSceneBounds.z);
-          float v = (vWorldPosition.y - uSceneBounds.y) / max(1e-5, uSceneBounds.w);
-          v = 1.0 - v;
-          vec2 roofUv = clamp(vec2(u, v), 0.0, 1.0);
-          outdoorFactor = texture2D(uRoofMap, roofUv).r;
-        }
         
         if (uOutdoorCloudSpecularEnabled && uHasCloudShadowMap) {
           // Cloud lit areas get bright specular (reflecting sky)
@@ -2054,12 +2301,21 @@ export class SpecularEffect extends EffectBase {
           stripeContribution *= mix(1.0, uOutdoorStripeBlend, outdoorFactor);
         }
         
-        // Combine: base 1.0 + stripe contribution + cloud specular + sparkles
-        float totalModulator = 1.0 + stripeContribution + cloudSpecular + (sparkleVal * uSparkleIntensity);
+        // Animated effects only (stripes + clouds + sparkles, NO base 1.0).
+        // Used by the wet path so wet surfaces only shine where effects are active.
+        float effectsOnly = stripeContribution + cloudSpecular + (sparkleVal * uSparkleIntensity);
+        
+        // Full modulator for the original specular mask (base 1.0 + effects).
+        float totalModulator = 1.0 + effectsOnly;
 
         // Stripe brightness threshold: only allow shine on the brightest parts
         // of the specular mask when stripes are enabled. 0 = full mask, 1 = only
-        // near-white texels. This should NOT gate the base specular shine.
+        // near-white texels.
+        // IMPORTANT: This only gates totalModulator (the original specular mask path).
+        // The wet path uses raw effectsOnly because it derives its own spatial gating
+        // from the albedo contrast, not the specular mask. Without this separation,
+        // a black/missing specular mask (specularStrength=0) would zero out the
+        // threshold and kill the wet effect entirely.
         if (uStripeEnabled && uStripeMaskThreshold > 0.0) {
           float thresholdMask = smoothstep(uStripeMaskThreshold, 1.0, specularStrength);
           totalModulator *= thresholdMask;
@@ -2070,6 +2326,20 @@ export class SpecularEffect extends EffectBase {
         // We modulate by totalIncidentLight to ensure we don't shine in darkness.
         // uLightColor is preserved as a manual tint/multiplier.
         vec3 specularColor = specularMask.rgb * totalModulator * uSpecularIntensity * uLightColor * totalIncidentLight;
+        
+        // Wet specular: the wet mask is multiplied by effectsOnly (not the base 1.0)
+        // so wet surfaces only light up where stripes sweep across, clouds create
+        // specular highlights, or sparkles fire. No constant white.
+        vec3 wetSpecularColor = vec3(wetMask) * effectsOnly * uWetSpecularIntensity * uLightColor * totalIncidentLight;
+        
+        // --- Output CC ---
+        // Output gamma: shapes the wet specular curve. >1 darkens midtones
+        // (punchier, more contrast), <1 brightens midtones (softer falloff).
+        if (uWetOutputGamma != 1.0) {
+          wetSpecularColor = pow(max(wetSpecularColor, vec3(0.0)), vec3(max(uWetOutputGamma, 0.01)));
+        }
+        // Output clamp: hard cap prevents bloom explosion on bright surfaces.
+        wetSpecularColor = min(wetSpecularColor, vec3(uWetOutputMax));
         
         // Apply Foundry darkness level with different falloff curves (reuse
         // lightLevel defined earlier). Albedo is additionally tinted by the
@@ -2084,10 +2354,11 @@ export class SpecularEffect extends EffectBase {
         vec3 baseAlbedo = albedo.rgb * ambientTint;
         vec3 litAlbedo = baseAlbedo * albedoBrightness;
         
-        // Specular is already lit by totalIncidentLight (which includes ambient + dynamic)
-        vec3 litSpecular = specularColor;
+        // Specular is already lit by totalIncidentLight (which includes ambient + dynamic).
+        // Wet specular is added separately — it only appears where animated effects are active.
+        vec3 litSpecular = specularColor + wetSpecularColor;
 
-        // Simple additive composition: base + specular
+        // Simple additive composition: base + specular (including wet)
         vec3 finalColor = litAlbedo + litSpecular;
         
         // Debug visualization (uncomment to see components)
@@ -2096,6 +2367,8 @@ export class SpecularEffect extends EffectBase {
         // finalColor = vec3(layer2); // Show layer 2 only
         // finalColor = vec3(layer3); // Show layer 3 only
         // finalColor = specularMask.rgb; // Show specular mask only
+        // finalColor = vec3(wetMask); // Show wet reflectivity mask
+        // finalColor = vec3(effectsOnly); // Show animated effects only
 
         // Output routing:
         // - Full mode: albedo + specular (tone mapped)

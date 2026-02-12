@@ -10,6 +10,7 @@ import * as sceneSettings from './settings/scene-settings.js';
 import * as canvasReplacement from './foundry/canvas-replacement.js';
 import { registerUISettings } from './ui/tweakpane-manager.js';
 import { loadingOverlay } from './ui/loading-overlay.js';
+import { debugLoadingProfiler } from './core/debug-loading-profiler.js';
 
 /**
  * Module state exposed globally for debugging and inter-module communication
@@ -38,6 +39,10 @@ try {
 
 // Expose module state globally (idempotent)
 window.MapShine = MapShine;
+
+// Expose debug loading profiler early so it can be toggled from console before scene load.
+// Usage: window.MapShine.debugLoadingProfiler.debugMode = false  (to disable)
+MapShine.debugLoadingProfiler = debugLoadingProfiler;
 
 /**
  * Foundry VTT 'init' hook - Called when Foundry initializes

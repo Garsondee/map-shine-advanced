@@ -678,6 +678,180 @@ export class EffectComposer {
   }
 
   /**
+   * Progressive shader warmup — compiles all effect materials one effect at a
+   * time, yielding to the event loop between each so the loading UI stays
+   * responsive.  Mirrors the logic of render() but inserts gl.finish() + yield
+   * after every effect to force synchronous compilation and allow progress
+   * updates.
+   *
+   * @param {function} [onProgress] - Called after each step with
+   *   { step, totalSteps, effectId, type, timeMs, newPrograms, totalPrograms }
+   * @returns {Promise<{totalMs: number, programsCompiled: number}>}
+   */
+  async progressiveWarmup(onProgress) {
+    const gl = this.renderer.getContext();
+    const programCount = () =>
+      Array.isArray(this.renderer.info?.programs)
+        ? this.renderer.info.programs.length
+        : 0;
+
+    const effects = this.resolveRenderOrder();
+    const timeInfo = this.timeManager.update();
+
+    // Update frame state (same as render)
+    try {
+      const frameState = getGlobalFrameState();
+      const sceneComposer = window.MapShine?.sceneComposer;
+      const canvas = this.renderer?.domElement;
+      frameState.update(this.camera, sceneComposer, canvas, timeInfo.frameCount, timeInfo.delta);
+    } catch (_) { /* non-critical */ }
+
+    // Split effects into scene vs post-processing (same as render())
+    const sceneEffects = [];
+    const postEffects = [];
+    for (const effect of effects) {
+      if (!this.shouldRenderThisFrame(effect, timeInfo)) continue;
+      if (effect.layer && effect.layer.order >= RenderLayers.POST_PROCESSING.order) {
+        postEffects.push(effect);
+      } else {
+        sceneEffects.push(effect);
+      }
+    }
+
+    // +1 for the main scene render pass, +1 for the overlay pass
+    const totalSteps = sceneEffects.length + 1 + postEffects.length + 1;
+    let step = 0;
+    const startPrograms = programCount();
+    const warmupT0 = performance.now();
+
+    const _yield = () => new Promise(r => setTimeout(r, 0));
+    const _finish = () => { if (gl?.finish) gl.finish(); };
+
+    // Helper to report progress and yield
+    const _progress = async (effectId, type, t0, progBefore) => {
+      _finish();
+      const elapsed = performance.now() - t0;
+      const nowProgs = programCount();
+      step++;
+      try {
+        onProgress?.({
+          step, totalSteps, effectId, type,
+          timeMs: elapsed,
+          newPrograms: nowProgs - progBefore,
+          totalPrograms: nowProgs
+        });
+      } catch (_) { /* callback errors are non-critical */ }
+      await _yield();
+    };
+
+    // ── Scene effects: update + render ──────────────────────────────────
+    for (const effect of sceneEffects) {
+      const t0 = performance.now();
+      const progBefore = programCount();
+      try {
+        effect.update(timeInfo);
+        effect.render(this.renderer, this.scene, this.camera);
+      } catch (e) {
+        log.error(`Warmup scene-effect error (${effect.id}):`, e);
+      }
+      await _progress(effect.id, 'scene', t0, progBefore);
+    }
+
+    // ── Main scene render (compiles remaining scene-graph materials) ────
+    {
+      const t0 = performance.now();
+      const progBefore = programCount();
+      try {
+        this.ensureSceneRenderTarget();
+        this.renderer.setRenderTarget(this.sceneRenderTarget);
+        this.renderer.clear();
+        const prevMask = this.camera.layers.mask;
+        try {
+          this.camera.layers.disable(OVERLAY_THREE_LAYER);
+          this.renderer.render(this.scene, this.camera);
+        } finally {
+          this.camera.layers.mask = prevMask;
+        }
+      } catch (e) {
+        log.error('Warmup main-scene render error:', e);
+      }
+      await _progress('_mainScene', 'scene-render', t0, progBefore);
+    }
+
+    // ── Post-processing effects (ping-pong chain, same as render()) ─────
+    if (postEffects.length > 0) {
+      let inputBuffer = this.sceneRenderTarget;
+      let outputBuffer = this.getRenderTarget(
+        'post_1', inputBuffer.width, inputBuffer.height, false
+      );
+      const pingPongBuffer = this.getRenderTarget(
+        'post_2', inputBuffer.width, inputBuffer.height, false
+      );
+
+      for (let i = 0; i < postEffects.length; i++) {
+        const effect = postEffects[i];
+        const isLast = i === postEffects.length - 1;
+        const currentOutput = isLast ? null : outputBuffer;
+
+        const t0 = performance.now();
+        const progBefore = programCount();
+        try {
+          effect.update(timeInfo);
+          if (typeof effect.setInputTexture === 'function') {
+            effect.setInputTexture(inputBuffer.texture);
+          }
+          if (typeof effect.setRenderToScreen === 'function') {
+            effect.setRenderToScreen(isLast);
+          }
+          if (typeof effect.setBuffers === 'function') {
+            effect.setBuffers(inputBuffer, currentOutput);
+          }
+          this.renderer.setRenderTarget(currentOutput);
+          if (currentOutput) this.renderer.clear();
+          effect.render(this.renderer, this.scene, this.camera);
+        } catch (e) {
+          log.error(`Warmup post-effect error (${effect.id}):`, e);
+        }
+        await _progress(effect.id, 'post', t0, progBefore);
+
+        // Water shader variant compilation test — disabled by default because it adds
+        // ~170s of extra compilations. Set window.MAPSHINE_SHADER_VARIANT_TEST = true
+        // in the browser console BEFORE loading a scene to re-enable.
+        if (window.MAPSHINE_SHADER_VARIANT_TEST && effect.id === 'water' && typeof effect.diagnosticVariantCompile === 'function') {
+          try {
+            await effect.diagnosticVariantCompile(this.renderer);
+          } catch (e) {
+            log.warn('Water variant compile test failed:', e);
+          }
+        }
+
+        // Ping-pong swap
+        if (!isLast) {
+          inputBuffer = outputBuffer;
+          outputBuffer = (inputBuffer === this.getRenderTarget('post_1'))
+            ? pingPongBuffer
+            : this.getRenderTarget('post_1');
+        }
+      }
+    }
+
+    // ── Overlay pass ────────────────────────────────────────────────────
+    {
+      const t0 = performance.now();
+      const progBefore = programCount();
+      try { this._renderOverlayToScreen(); } catch (_) {}
+      await _progress('_overlay', 'overlay', t0, progBefore);
+    }
+
+    // Restore render target
+    this.renderer.setRenderTarget(null);
+
+    const totalMs = performance.now() - warmupT0;
+    const programsCompiled = programCount() - startPrograms;
+    return { totalMs, programsCompiled, totalPrograms: programCount() };
+  }
+
+  /**
    * Handle effect error with user notification
    * @param {EffectBase} effect - The effect that errored
    * @param {Error} error - The error that occurred

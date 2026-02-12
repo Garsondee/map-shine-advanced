@@ -6,6 +6,7 @@
 
 import { createLogger } from '../core/log.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
+import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 
 const log = createLogger('AssetLoader');
 
@@ -98,6 +99,9 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
   const spanToken = doLoadProfile ? (++_lpSeq) : 0;
   
   const warnings = [];
+  const _dlp = debugLoadingProfiler;
+  const _isDbg = _dlp.debugMode;
+  const _shortBase = basePath.split('/').pop() || basePath;
   
   try {
     // Check cache first
@@ -120,22 +124,52 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
 
         const missingCritical = Array.from(CRITICAL_MASK_IDS).filter((id) => !cachedIds.has(id));
         if (missingCritical.length === 0) {
-          _cacheHits++;
-          log.info(`Asset bundle cache hit (${cachedMaskCount} masks): ${basePath}`);
-          return {
-            success: true,
-            bundle: cached,
-            warnings: [],
-            error: null,
-            cacheHit: true
-          };
+          // Validate that cached textures still have valid image data.
+          // After sceneComposer.dispose(), the GPU backing is removed but the JS
+          // Texture object and its .image remain. We must verify .image is present
+          // and has non-zero dimensions — otherwise the cache entry is truly stale.
+          const staleTextures = cached.masks.filter(m => {
+            const img = m?.texture?.image ?? m?.texture?.source?.data;
+            if (!img) return true;
+            const w = img.width ?? img.naturalWidth ?? 0;
+            return w <= 0;
+          });
+
+          if (staleTextures.length > 0) {
+            if (_isDbg) _dlp.addDiagnostic('Asset Cache', {
+              [`cache.${_shortBase}`]: `MISS (${staleTextures.length} stale textures: ${staleTextures.map(m => m.id).join(', ')})`
+            });
+            log.warn('Cached textures have stale image data; reloading', { basePath, stale: staleTextures.map(m => m.id) });
+            assetCache.delete(cacheKey);
+          } else {
+            // Mark all cached textures for GPU re-upload (they were GPU-disposed
+            // but still have valid JS image data).
+            for (const m of cached.masks) {
+              if (m?.texture) m.texture.needsUpdate = true;
+            }
+            _cacheHits++;
+            if (_isDbg) _dlp.addDiagnostic('Asset Cache', { [`cache.${_shortBase}`]: `HIT (${cachedMaskCount} masks, re-upload)` });
+            log.info(`Asset bundle cache hit (${cachedMaskCount} masks): ${basePath}`);
+            return {
+              success: true,
+              bundle: cached,
+              warnings: [],
+              error: null,
+              cacheHit: true
+            };
+          }
         }
 
+        if (_isDbg) _dlp.addDiagnostic('Asset Cache', { [`cache.${_shortBase}`]: `MISS (missing critical: ${missingCritical.join(', ')})` });
         log.warn('Cached asset bundle missing critical masks; reloading', {
           basePath,
           missingCritical
         });
+      } else {
+        if (_isDbg) _dlp.addDiagnostic('Asset Cache', { [`cache.${_shortBase}`]: `MISS (0 masks in cache)` });
       }
+    } else {
+      if (_isDbg) _dlp.addDiagnostic('Asset Cache', { [`cache.${_shortBase}`]: bypassCache ? 'BYPASSED' : 'MISS (no entry)' });
     }
 
     _cacheMisses++;
@@ -164,9 +198,11 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
       } catch (e) {
       }
     }
+    if (_isDbg) _dlp.begin(`al.discover[${_shortBase}]`, 'texture');
     try {
       availableFiles = await discoverAvailableFiles(basePath);
     } finally {
+      if (_isDbg) _dlp.end(`al.discover[${_shortBase}]`, { files: availableFiles?.length ?? 0 });
       if (doLoadProfile) {
         try {
           lp.end(`assetLoader.discoverAvailableFiles:${spanToken}`, { files: availableFiles?.length ?? 0 });
@@ -189,8 +225,11 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
       log.info('FilePicker returned no files — falling back to direct URL probing');
     }
 
+    if (_isDbg) _dlp.begin(`al.loadMasks[${_shortBase}]`, 'texture', { totalMasks, useDirectProbe });
     const maskPromises = maskEntries.map(async ([maskId, maskDef]) => {
       await semaphore.acquire();
+      const _maskDbgId = `al.mask.${maskId}[${_shortBase}]`;
+      if (_isDbg) _dlp.begin(_maskDbgId, 'texture');
       try {
         // Resolve the mask file path: from FilePicker results or via direct URL probe
         let maskFile = null;
@@ -204,6 +243,7 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
         // so we don't stall on a map that doesn't use water at all.
         if (!maskFile && maskId === 'water' && !maskDef.required) {
           loaded++;
+          if (_isDbg) _dlp.end(_maskDbgId, { result: 'skipped (optional)' });
           return null;
         }
 
@@ -258,7 +298,10 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
           // Texture settings (colorSpace, flipY, mipmaps, filters) are already
           // configured by loadMaskTextureDirect — no post-load overrides needed.
           const isColorTexture = ['bush', 'tree'].includes(maskId);
-          log.debug(`Loaded effect mask: ${maskId} from ${resolvedMaskPath} (colorSpace: ${isColorTexture ? 'sRGB' : 'data'}, ${maskTexture.image?.width ?? '?'}×${maskTexture.image?.height ?? '?'})`);
+          const w = maskTexture.image?.width ?? '?';
+          const h = maskTexture.image?.height ?? '?';
+          log.debug(`Loaded effect mask: ${maskId} from ${resolvedMaskPath} (colorSpace: ${isColorTexture ? 'sRGB' : 'data'}, ${w}×${h})`);
+          if (_isDbg) _dlp.end(_maskDbgId, { result: 'loaded', dims: `${w}x${h}` });
           return {
             id: maskId,
             suffix: maskDef.suffix,
@@ -270,6 +313,7 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
         } else if (maskDef.required) {
           warnings.push(`Required mask missing: ${maskId} (${maskDef.suffix})`);
         }
+        if (_isDbg && !maskTexture) _dlp.end(_maskDbgId, { result: maskFile ? 'load failed' : 'not found' });
         return null;
       } finally {
         semaphore.release();
@@ -279,6 +323,16 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
     // Wait for all masks to load and collect results in registry order
     const maskResults = await Promise.all(maskPromises);
     const masks = maskResults.filter(m => m !== null);
+    if (_isDbg) {
+      _dlp.end(`al.loadMasks[${_shortBase}]`, { loaded: masks.length, total: totalMasks });
+      // Add mask summary to diagnostics
+      const maskSummary = masks.map(m => {
+        const t = m.texture;
+        const dims = t?.image ? `${t.image.width}x${t.image.height}` : '?';
+        return `${m.id}(${dims})`;
+      }).join(', ');
+      _dlp.addDiagnostic('Loaded Masks', { [`${_shortBase}`]: maskSummary || 'none' });
+    }
 
     // Step 4: Apply intelligent fallbacks
     applyIntelligentFallbacks(masks, warnings);
@@ -537,18 +591,23 @@ async function loadMaskTextureDirect(url, opts = {}) {
   const absoluteUrl = normalizePath(url);
   const isColor = !!opts.isColorTexture;
   const maxSize = opts.maxSize ?? (isColor ? VISUAL_MASK_MAX_SIZE : MASK_MAX_SIZE);
+  const _dlp = debugLoadingProfiler;
+  const _isDbg = _dlp.debugMode;
+  const _shortUrl = url.split('/').pop() || url;
 
   if (!_hasImageBitmap) {
     // Fallback: use the legacy PIXI-based loader
     return loadTextureAsync(absoluteUrl);
   }
 
+  if (_isDbg) _dlp.begin(`al.fetch[${_shortUrl}]`, 'texture');
   const response = await fetch(absoluteUrl);
   if (!response.ok) {
+    if (_isDbg) _dlp.end(`al.fetch[${_shortUrl}]`, { status: response.status });
     throw new Error(`Fetch failed (${response.status}): ${absoluteUrl}`);
   }
-
   const blob = await response.blob();
+  if (_isDbg) _dlp.end(`al.fetch[${_shortUrl}]`, { bytes: blob.size });
 
   // Build createImageBitmap options — decode + optional downscale off-thread.
   // Color textures (bush/tree) use premultiplied alpha so that transparent pixels
@@ -565,7 +624,9 @@ async function loadMaskTextureDirect(url, opts = {}) {
   // Decode off the main thread, then downscale if the image exceeds maxSize.
   // We resize the already-decoded ImageBitmap (not the blob) to avoid
   // decompressing the PNG/WebP/JPG data a second time.
+  if (_isDbg) _dlp.begin(`al.decode[${_shortUrl}]`, 'texture');
   let bitmap = await createImageBitmap(blob, bitmapOpts);
+  if (_isDbg) _dlp.end(`al.decode[${_shortUrl}]`, { w: bitmap.width, h: bitmap.height });
 
   if (maxSize > 0 && (bitmap.width > maxSize || bitmap.height > maxSize)) {
     const w = bitmap.width;
@@ -593,8 +654,34 @@ async function loadMaskTextureDirect(url, opts = {}) {
     }
   }
 
+  // Stabilize ImageBitmap orientation by copying to a canvas element.
+  // Some browsers/drivers have inconsistent ImageBitmap upload/orientation
+  // behavior with WebGL UNPACK_FLIP_Y (see tile-manager.js commit 090907e).
+  // Drawing through a canvas normalizes the pixel data so Three.js uploads
+  // it consistently regardless of browser or GPU driver.
+  let texSource = bitmap;
+  try {
+    const bw = Number(bitmap?.width ?? 0);
+    const bh = Number(bitmap?.height ?? 0);
+    if (bw > 0 && bh > 0) {
+      const canvasEl = document.createElement('canvas');
+      canvasEl.width = bw;
+      canvasEl.height = bh;
+      const ctx = canvasEl.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(bitmap, 0, 0, bw, bh);
+        texSource = canvasEl;
+      }
+    }
+  } catch (_) {
+  }
+  try {
+    if (texSource !== bitmap && bitmap && typeof bitmap.close === 'function') bitmap.close();
+  } catch (_) {
+  }
+
   // Create the THREE.Texture with final, correct settings — no double config.
-  const texture = new THREE.Texture(bitmap);
+  const texture = new THREE.Texture(texSource);
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
 

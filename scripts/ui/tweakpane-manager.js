@@ -13,6 +13,7 @@ import { DiagnosticCenterManager } from './diagnostic-center.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../effects/EffectComposer.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import Coordinates from '../utils/coordinates.js';
+import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 
 const log = createLogger('UI');
 
@@ -280,12 +281,17 @@ export class TweakpaneManager {
       return;
     }
 
+    const _dlp = debugLoadingProfiler;
+    const _isDbg = _dlp.debugMode;
+
     // Wait for Tweakpane to be available (up to 5 seconds)
+    if (_isDbg) _dlp.begin('tp.waitForLib', 'finalize');
     log.info('Waiting for Tweakpane library to load...');
     const startTime = Date.now();
     while (typeof Tweakpane === 'undefined' && (Date.now() - startTime) < 5000) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
+    if (_isDbg) _dlp.end('tp.waitForLib');
 
     if (typeof Tweakpane === 'undefined') {
       log.error('Tweakpane library failed to load after 5 seconds');
@@ -359,8 +365,11 @@ export class TweakpaneManager {
     this.addTitleControls();
 
     // Load saved UI state (position, scale, accordion states)
+    if (_isDbg) _dlp.begin('tp.loadUIState', 'finalize');
     await this.loadUIState();
+    if (_isDbg) _dlp.end('tp.loadUIState');
 
+    if (_isDbg) _dlp.begin('tp.buildSections', 'finalize');
     this.buildBrandingSection();
 
     // Build scene setup section (only for GMs)
@@ -377,6 +386,7 @@ export class TweakpaneManager {
     this.buildRopesSection();
 
     this.buildDebugSection();
+    if (_isDbg) _dlp.end('tp.buildSections');
 
     // Start UI update loop
     this.startUILoop();
@@ -385,16 +395,22 @@ export class TweakpaneManager {
     this.makeDraggable();
 
     // Initialize Texture Manager
+    if (_isDbg) _dlp.begin('tp.textureManager.init', 'finalize');
     this.textureManager = new TextureManagerUI();
     await this.textureManager.initialize();
+    if (_isDbg) _dlp.end('tp.textureManager.init');
 
     // Initialize Effect Stack
+    if (_isDbg) _dlp.begin('tp.effectStack.init', 'finalize');
     this.effectStack = new EffectStackUI();
     await this.effectStack.initialize();
+    if (_isDbg) _dlp.end('tp.effectStack.init');
 
     // Initialize Diagnostic Center
+    if (_isDbg) _dlp.begin('tp.diagnosticCenter.init', 'finalize');
     this.diagnosticCenter = new DiagnosticCenterManager();
     await this.diagnosticCenter.initialize();
+    if (_isDbg) _dlp.end('tp.diagnosticCenter.init');
 
     // Start hidden by default for release; can be opened via the scene control button.
     this.hide();

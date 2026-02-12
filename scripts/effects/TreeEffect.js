@@ -296,7 +296,8 @@ export class TreeEffect extends EffectBase {
         uResolution: { value: new THREE.Vector2(1024, 1024) },
         uSunDir: { value: new THREE.Vector2(0.0, 1.0) },
         uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
-        uZoom: { value: 1.0 }
+        uZoom: { value: 1.0 },
+        uHoverFade: { value: 1.0 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -330,6 +331,7 @@ export class TreeEffect extends EffectBase {
 
         uniform vec2 uResolution;
         uniform vec2 uTexelSize;
+        uniform float uHoverFade;
 
         varying vec2 vUv;
         varying vec2 vWorldPos;
@@ -421,7 +423,10 @@ export class TreeEffect extends EffectBase {
           float strength = clamp(blurred * uShadowOpacity, 0.0, 1.0);
           float shadowFactor = 1.0 - strength;
           
-          float coverage = a;
+          // Scale coverage by hover fade so that when the tree graphic fades
+          // out on hover, the self-coverage mask drops to 0 and the full
+          // unmasked shadow is revealed underneath.
+          float coverage = a * uHoverFade;
           gl_FragColor = vec4(shadowFactor, coverage, 0.0, 1.0);
         }
       `,
@@ -822,6 +827,7 @@ export class TreeEffect extends EffectBase {
       su.uFlutterScale.value = this.params.flutterScale;
 
       su.uShadowOpacity.value = 1.0;
+      su.uHoverFade.value = this._hoverFade;
 
       su.uShadowLength.value = this.params.shadowLength;
       su.uShadowSoftness.value = this.params.shadowSoftness;

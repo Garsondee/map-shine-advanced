@@ -1,6 +1,7 @@
 import { createLogger } from '../core/log.js';
 import { getEffectMaskRegistry, loadAssetBundle } from '../assets/loader.js';
 import * as sceneSettings from '../settings/scene-settings.js';
+import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 
 const log = createLogger('EffectStack');
 
@@ -207,12 +208,19 @@ export class EffectStackUI {
     this._effectsFolder = this.pane.addFolder({ title: 'Effects', expanded: true });
     this._tilesFolder = this.pane.addFolder({ title: 'Tiles', expanded: true });
 
+    const _dlp = debugLoadingProfiler;
+    const _isDbg = _dlp.debugMode;
+    if (_isDbg) _dlp.begin('es.loadState', 'finalize');
     await this.loadState();
+    if (_isDbg) _dlp.end('es.loadState');
     this.makeDraggable();
 
-    await this.refresh();
+    // NOTE: refresh() is intentionally NOT called here. The panel starts hidden
+    // (this.visible = false) and toggle() already calls refresh() when it becomes
+    // visible. Calling refresh() here was loading asset bundles for every tile
+    // base path (~59s of HTTP probing) during startup for a panel nobody is viewing.
 
-    log.info('Effect Stack UI initialized');
+    log.info('Effect Stack UI initialized (refresh deferred to first toggle)');
   }
 
   toggle() {
@@ -599,7 +607,10 @@ export class EffectStackUI {
     this._rebuildTilesFolder();
 
     this._buildEffectRows();
+    const __dlp = debugLoadingProfiler;
+    if (__dlp.debugMode) __dlp.begin('es.buildTileRows', 'finalize');
     const tileRows = await this._buildTileRows(tiles, maskCompositeInfo);
+    if (__dlp.debugMode) __dlp.end('es.buildTileRows');
     this._lastReport = this._buildReport(tileRows, bundle, { maskCompositeInfo, albedoCompositeInfo });
 
     try {
@@ -785,6 +796,9 @@ export class EffectStackUI {
 
     for (const bp of basePaths) {
       if (this._bundleMaskCache.has(bp)) continue;
+      const __dlp = debugLoadingProfiler;
+      const __bpLabel = bp.split('/').pop() || bp;
+      if (__dlp.debugMode) __dlp.begin(`es.loadBundle[${__bpLabel}]`, 'finalize');
       try {
         const res = await loadAssetBundle(bp, null, { skipBaseTexture: true, suppressProbeErrors: true });
         const masks = res?.bundle?.masks || [];
@@ -793,6 +807,7 @@ export class EffectStackUI {
       } catch (e) {
         this._bundleMaskCache.set(bp, { foundIds: new Set(), loadError: e });
       }
+      if (__dlp.debugMode) __dlp.end(`es.loadBundle[${__bpLabel}]`);
     }
 
     const query = String(this._tileFilterState.query || '').trim().toLowerCase();

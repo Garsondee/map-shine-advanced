@@ -8,6 +8,7 @@
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../effects/EffectComposer.js';
+import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 
 const log = createLogger('TileManager');
 
@@ -960,7 +961,13 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
             // Tile _Water masks are luminance masks (in RGB) and may also have alpha.
             // Use luminance as the primary mask and multiply by alpha to respect any
             // authored transparency in the mask.
-            vec4 m = texture2D(tWaterMask, vUv);
+            // IMPORTANT: The tile ALBEDO texture uses flipY=true (standard Three.js
+            // convention after the overhead y-flip fix), but per-tile DATA_MASK textures
+            // use flipY=false. Since both are sampled with the same vUv on this mesh,
+            // we must flip V when sampling the mask to compensate for the orientation
+            // mismatch — otherwise the water mask appears y-inverted relative to the tile.
+            vec2 maskUv = vec2(vUv.x, 1.0 - vUv.y);
+            vec4 m = texture2D(tWaterMask, maskUv);
             w = msLuminance(m.rgb) * m.a;
           }
 
@@ -1331,27 +1338,37 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
   waitForInitialTiles(opts = undefined) {
     const overheadOnly = !!opts?.overheadOnly;
-    const timeoutMs = Number.isFinite(opts?.timeoutMs) ? Math.max(0, opts.timeoutMs) : 0;
 
     const doneAll = (this._initialLoad.pendingAll <= 0);
     const doneOverhead = (this._initialLoad.pendingOverhead <= 0);
+
+    // Add diagnostic info about what we're waiting for
+    const _dlp = debugLoadingProfiler;
+    if (_dlp.debugMode) {
+      const trackedIds = this._initialLoad.trackedIds ? Array.from(this._initialLoad.trackedIds) : [];
+      const tileNames = trackedIds.map(id => {
+        const data = this.tileSprites.get(id);
+        const src = data?.tileDoc?.texture?.src;
+        return src ? (src.split('/').pop() || id) : id;
+      });
+      _dlp.addDiagnostic('Tile Initial Load', {
+        'Pending (all)': this._initialLoad.pendingAll,
+        'Pending (overhead)': this._initialLoad.pendingOverhead,
+        'Already done': (overheadOnly ? doneOverhead : doneAll) ? 'yes' : 'no',
+        'Tracked tiles': tileNames.length > 0 ? tileNames.join(', ') : '(none)'
+      });
+    }
 
     if (overheadOnly ? doneOverhead : doneAll) {
       return Promise.resolve();
     }
 
-    let timeoutId = null;
+    // NOTE: This Promise resolves when all tracked tiles finish loading (or fail).
+    // The CALLER is responsible for applying a hard timeout via Promise.race —
+    // the internal timeout mechanism was unreliable (Promise didn't settle when
+    // resolve() was called from setTimeout, likely due to .finally() interaction).
     return new Promise((resolve) => {
       this._initialLoad.waiters.push({ resolve, overheadOnly });
-      if (timeoutMs > 0) {
-        timeoutId = setTimeout(() => {
-          try { resolve(); } catch (_) {}
-        }, timeoutMs);
-      }
-    }).finally(() => {
-      if (timeoutId) {
-        try { clearTimeout(timeoutId); } catch (_) {}
-      }
     });
   }
 
@@ -2153,7 +2170,13 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     const isOverheadForLoad = isTileOverhead(tileDoc);
 
-    // Load texture
+    // Load texture (instrumented for debug loading profiler)
+    const _tileFileName = texturePath.split('/').pop() || tileDoc.id;
+    const _tileDbgId = `tile.load[${_tileFileName}]`;
+    const _dlp = debugLoadingProfiler;
+    const _tileCached = this.textureCache.has(texturePath);
+    if (_dlp.debugMode) _dlp.begin(_tileDbgId, 'tile', { overhead: isOverheadForLoad, cached: _tileCached });
+    const _tileLoadStartMs = performance.now();
     this.loadTileTexture(texturePath).then(texture => {
       material.map = texture;
       material.needsUpdate = true;
@@ -2206,10 +2229,27 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       } catch (_) {
       }
 
+      if (_dlp.debugMode && _dlp._openEntries?.has(_tileDbgId)) {
+        const w = texture?.image?.width ?? '?';
+        const h = texture?.image?.height ?? '?';
+        _dlp.end(_tileDbgId, { dims: `${w}x${h}`, ms: (performance.now() - _tileLoadStartMs).toFixed(0) });
+      } else if (_dlp.debugMode) {
+        const w = texture?.image?.width ?? '?';
+        const h = texture?.image?.height ?? '?';
+        const ms = (performance.now() - _tileLoadStartMs).toFixed(0);
+        _dlp.event(`tile.LATE SUCCESS: ${_tileFileName} (${w}x${h}, ${ms}ms after load start)`);
+      }
       this._markInitialTileLoaded(tileDoc?.id, isOverheadForLoad);
     }).catch(error => {
       log.error(`Failed to load tile texture: ${texturePath}`, error);
-
+      // Guard: if the profiler session already ended (tile loading is non-blocking),
+      // the entry was closed as orphaned by endSession(). Don't call end() again.
+      if (_dlp.debugMode && _dlp._openEntries?.has(_tileDbgId)) {
+        _dlp.end(_tileDbgId, { error: error?.message || 'unknown' });
+      } else {
+        // Session already ended — log the tile failure as a late event for next-session visibility
+        _dlp.event(`tile.LATE FAILURE: ${_tileFileName} — ${error?.message || 'unknown'}`, 'error');
+      }
       this._markInitialTileLoaded(tileDoc?.id, isOverheadForLoad);
     });
 
@@ -2947,17 +2987,39 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       if (!THREE) throw new Error('THREE.js not available');
 
       const role = options?.role || 'ALBEDO';
+      const _shortPath = texturePath.split('/').pop() || texturePath;
+      // 120s timeout: shader compilation via gl.finish() can block the event loop for
+      // 25-50+ seconds on GPUs without KHR_parallel_shader_compile (ANGLE/D3D11).
+      // During that stall, both the fetch completion callback and this setTimeout are
+      // queued as macrotasks. If the timeout is shorter than the compile stall, the
+      // timeout wins Promise.race and rejects even though the fetch already succeeded.
+      const TILE_FETCH_TIMEOUT_MS = 120000;
+      const _dlp = debugLoadingProfiler;
+      const _ev = (msg, lvl) => { _dlp.event(msg, lvl); };
 
       // Prefer createImageBitmap for faster/off-thread decoding where supported.
       // Fallback to THREE.TextureLoader when unavailable.
       // Debug flag: window.MapShine.disableImageBitmapTiles = true to bypass
       // ImageBitmap decode (helps diagnose Y-flip or upload path issues).
-      try {
-        const disableImageBitmapTiles = window.MapShine?.disableImageBitmapTiles === true;
-        if (!disableImageBitmapTiles && typeof fetch === 'function' && typeof createImageBitmap === 'function') {
-          const res = await fetch(texturePath);
+      const disableImageBitmapTiles = window.MapShine?.disableImageBitmapTiles === true;
+      const canUseFetchPath = !disableImageBitmapTiles && typeof fetch === 'function' && typeof createImageBitmap === 'function';
+
+      if (canUseFetchPath) {
+        // Use Promise.race with a hard timeout — this is INESCAPABLE.
+        // AbortController doesn't reliably abort in-progress .blob() body downloads
+        // in all browsers. The body continues streaming for 56+ seconds despite abort().
+        // Promise.race guarantees the timeout fires regardless of event loop health.
+        const controller = new AbortController();
+        _ev(`tile.fetch START: ${_shortPath}`);
+
+        const fetchPipeline = (async () => {
+          const res = await fetch(texturePath, { signal: controller.signal });
+          _ev(`tile.fetch headers OK: ${_shortPath} (status=${res.status})`);
           if (!res.ok) throw new Error(`Failed to fetch texture (${res.status})`);
           const blob = await res.blob();
+          _ev(`tile.fetch body OK: ${_shortPath} (${blob.size} bytes)`);
+
+          _ev(`tile.decode START: ${_shortPath}`);
           // Keep tile textures in the same orientation as THREE.TextureLoader
           // so sprite UVs remain consistent across browsers.
           // NOTE: Some browsers/drivers have inconsistent ImageBitmap upload/orientation
@@ -2968,18 +3030,43 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           } catch (_) {
             bitmap = await createImageBitmap(blob);
           }
+          _ev(`tile.decode OK: ${_shortPath} (${bitmap.width}x${bitmap.height})`);
 
+          // Cap the canvas copy at 4096×4096 to limit the synchronous
+          // drawImage cost. A 6750×6750 tile = 182M pixels and blocks the
+          // event loop for 1-3s; 4096×4096 = 67M pixels is ~3× cheaper.
+          // Downscale via createImageBitmap (off-thread) when oversized.
+          const TILE_MAX_DIM = 4096;
           let texSource = bitmap;
           try {
-            const w = Number(bitmap?.width ?? 0);
-            const h = Number(bitmap?.height ?? 0);
+            let srcBitmap = bitmap;
+            const origW = Number(bitmap?.width ?? 0);
+            const origH = Number(bitmap?.height ?? 0);
+            if (origW > TILE_MAX_DIM || origH > TILE_MAX_DIM) {
+              const scale = TILE_MAX_DIM / Math.max(origW, origH);
+              const newW = Math.max(1, Math.round(origW * scale));
+              const newH = Math.max(1, Math.round(origH * scale));
+              _ev(`tile.downscale: ${_shortPath} ${origW}x${origH} → ${newW}x${newH}`);
+              try {
+                const resized = await createImageBitmap(bitmap, 0, 0, origW, origH, {
+                  resizeWidth: newW, resizeHeight: newH, resizeQuality: 'medium'
+                });
+                bitmap.close();
+                srcBitmap = resized;
+              } catch (_resizeErr) {
+                // Browser doesn't support resize options — keep full size
+                _ev(`tile.downscale FAILED (keeping full size): ${_shortPath}`, 'warn');
+              }
+            }
+            const w = Number(srcBitmap?.width ?? 0);
+            const h = Number(srcBitmap?.height ?? 0);
             if (w > 0 && h > 0) {
               const canvasEl = document.createElement('canvas');
               canvasEl.width = w;
               canvasEl.height = h;
               const ctx = canvasEl.getContext('2d');
               if (ctx) {
-                ctx.drawImage(bitmap, 0, 0, w, h);
+                ctx.drawImage(srcBitmap, 0, 0, w, h);
                 texSource = canvasEl;
               }
             }
@@ -3000,15 +3087,49 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           this._normalizeTileTextureSource(texture, role);
           texture.needsUpdate = true;
           this.textureCache.set(texturePath, texture);
+          _ev(`tile.texture CREATED: ${_shortPath} (${texSource.width}x${texSource.height})`);
           return texture;
+        })();
+
+        const timeoutRejection = new Promise((_, reject) => {
+          setTimeout(() => {
+            _ev(`tile.TIMEOUT: ${_shortPath} — aborting after ${TILE_FETCH_TIMEOUT_MS}ms`, 'warn');
+            controller.abort(); // Also kill the underlying network request
+            reject(new Error(`Tile texture fetch timed out after ${TILE_FETCH_TIMEOUT_MS}ms: ${_shortPath}`));
+          }, TILE_FETCH_TIMEOUT_MS);
+        });
+
+        // Promise.race: whichever settles first wins. The timeout rejection is
+        // inescapable — it doesn't depend on AbortController or event loop health.
+        try {
+          return await Promise.race([fetchPipeline, timeoutRejection]);
+        } catch (err) {
+          // If it was our timeout or an abort, do NOT fall through to TextureLoader
+          // (which would create a second stuck request on the same URL).
+          const isTimeout = err?.message?.includes('timed out');
+          const isAbort = err?.name === 'AbortError';
+          if (isTimeout || isAbort) {
+            _ev(`tile.FAILED (timeout/abort): ${_shortPath}`, 'error');
+            throw err;
+          }
+          // Non-timeout error (e.g. createImageBitmap unsupported) — fall through
+          _ev(`tile.fetch error (falling back to TextureLoader): ${_shortPath} — ${err?.message}`, 'warn');
         }
-      } catch (_) {
       }
 
+      // Fallback: THREE.TextureLoader (uses <img> element)
+      // Also apply a hard timeout to prevent indefinite hangs.
+      _ev(`tile.TextureLoader START: ${_shortPath}`);
       return await new Promise((resolve, reject) => {
+        const fallbackTimeout = setTimeout(() => {
+          _ev(`tile.TextureLoader TIMEOUT: ${_shortPath} (${TILE_FETCH_TIMEOUT_MS}ms)`, 'warn');
+          reject(new Error(`TextureLoader timed out after ${TILE_FETCH_TIMEOUT_MS}ms: ${_shortPath}`));
+        }, TILE_FETCH_TIMEOUT_MS);
         this.textureLoader.load(
           texturePath,
           (texture) => {
+            clearTimeout(fallbackTimeout);
+            _ev(`tile.TextureLoader OK: ${_shortPath}`);
             texture.colorSpace = (role === 'DATA_MASK') ? THREE.NoColorSpace : THREE.SRGBColorSpace;
             texture.flipY = (role === 'DATA_MASK') ? false : true;
             this._configureTileTextureFiltering(texture, role);
@@ -3018,7 +3139,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
             resolve(texture);
           },
           undefined,
-          reject
+          (err) => {
+            clearTimeout(fallbackTimeout);
+            _ev(`tile.TextureLoader FAILED: ${_shortPath} — ${err?.message}`, 'error');
+            reject(err);
+          }
         );
       });
     })();

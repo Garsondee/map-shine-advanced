@@ -8,6 +8,7 @@ import { createLogger } from '../core/log.js';
 import * as assetLoader from '../assets/loader.js';
 import { weatherController } from '../core/WeatherController.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
+import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { isTileOverhead } from './tile-manager.js';
 
 const log = createLogger('SceneComposer');
@@ -770,6 +771,9 @@ export class SceneComposer {
     const doLoadProfile = !!lp?.enabled;
     const spanToken = doLoadProfile ? (++_lpSeq) : 0;
 
+    const _dlp = debugLoadingProfiler;
+    const _isDbg = _dlp.debugMode;
+
     const THREE = window.THREE;
     if (!THREE) {
       throw new Error('three.js not loaded');
@@ -849,9 +853,11 @@ export class SceneComposer {
         } catch (e) {
         }
       }
+      if (_isDbg) _dlp.begin('sc.getFoundryBgTexture', 'texture');
       try {
         baseTexture = await this.getFoundryBackgroundTexture(foundryScene);
       } finally {
+        if (_isDbg) _dlp.end('sc.getFoundryBgTexture');
         if (doLoadProfile) {
           try {
             lp.end(`sceneComposer.getFoundryBackgroundTexture:${spanToken}`);
@@ -875,6 +881,7 @@ export class SceneComposer {
         } catch (e) {
         }
       }
+      if (_isDbg) _dlp.begin('sc.loadAssetBundle', 'texture');
       try {
         result = await assetLoader.loadAssetBundle(
           bgPath,
@@ -891,6 +898,7 @@ export class SceneComposer {
           { skipBaseTexture: true } // Skip base texture since we got it from Foundry
         );
       } finally {
+        if (_isDbg) _dlp.end('sc.loadAssetBundle');
         if (doLoadProfile) {
           try {
             lp.end(`sceneComposer.loadAssetBundle:${spanToken}`);
@@ -905,6 +913,7 @@ export class SceneComposer {
     // This makes mask loading independent of grid type and resilient to transient
     // canvas/tile readiness during grid/dimension rebuilds.
     if (!bgPath || !(result?.bundle?.masks?.length > 0)) {
+      if (_isDbg) _dlp.begin('sc.probeMaskBasePath', 'texture');
       const maxAttempts = 6;
       const retryDelayMs = 50;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -922,6 +931,7 @@ export class SceneComposer {
         if (result?.bundle?.masks?.length > 0) break;
         await new Promise((r) => setTimeout(r, retryDelayMs));
       }
+      if (_isDbg) _dlp.end('sc.probeMaskBasePath');
     }
 
     if (bgPath && (result?.bundle?.masks?.length > 0)) {
@@ -932,6 +942,7 @@ export class SceneComposer {
     this._albedoCompositeInfo = null;
     let compositeLayout = null;
     try {
+      if (_isDbg) _dlp.begin('sc.compositeLayout', 'texture');
       if (doLoadProfile) {
         try {
           lp.begin(`sceneComposer.composite.layout:${spanToken}`);
@@ -947,9 +958,11 @@ export class SceneComposer {
         } catch (e) {
         }
       }
+      if (_isDbg) _dlp.end('sc.compositeLayout');
 
       if (layout) {
         const perBaseMasks = new Map();
+        if (_isDbg) _dlp.begin('sc.compositeLoadPerBase', 'texture');
         if (doLoadProfile) {
           try {
             lp.begin(`sceneComposer.composite.loadPerBaseMasks:${spanToken}`, { bases: layout?.segments?.length ?? 0 });
@@ -963,6 +976,7 @@ export class SceneComposer {
             perBaseMasks.set(seg.basePath, masks);
           }
         } finally {
+          if (_isDbg) _dlp.end('sc.compositeLoadPerBase');
           if (doLoadProfile) {
             try {
               lp.end(`sceneComposer.composite.loadPerBaseMasks:${spanToken}`, { uniqueBases: perBaseMasks.size });
@@ -971,6 +985,7 @@ export class SceneComposer {
           }
         }
 
+        if (_isDbg) _dlp.begin('sc.compositeBuildMasks', 'texture');
         if (doLoadProfile) {
           try {
             lp.begin(`sceneComposer.composite.buildMasks:${spanToken}`, { uniqueBases: perBaseMasks.size });
@@ -981,6 +996,7 @@ export class SceneComposer {
         try {
           composite = await this._buildCompositeSceneMasks(layout, perBaseMasks);
         } finally {
+          if (_isDbg) _dlp.end('sc.compositeBuildMasks');
           if (doLoadProfile) {
             try {
               lp.end(`sceneComposer.composite.buildMasks:${spanToken}`, { outW: composite?.width ?? null, outH: composite?.height ?? null, maskCount: composite?.masks?.length ?? 0 });
@@ -1024,6 +1040,7 @@ export class SceneComposer {
 
     if (!hasBackgroundImage && !baseTexture && compositeLayout) {
       try {
+        if (_isDbg) _dlp.begin('sc.compositeBuildAlbedo', 'texture');
         if (doLoadProfile) {
           try {
             lp.begin(`sceneComposer.composite.buildAlbedo:${spanToken}`);
@@ -1031,6 +1048,7 @@ export class SceneComposer {
           }
         }
         const compositeAlbedo = await this._buildCompositeSceneAlbedo(compositeLayout);
+        if (_isDbg) _dlp.end('sc.compositeBuildAlbedo');
         if (doLoadProfile) {
           try {
             lp.end(`sceneComposer.composite.buildAlbedo:${spanToken}`, { outW: compositeAlbedo?.width ?? null, outH: compositeAlbedo?.height ?? null });
@@ -1060,6 +1078,7 @@ export class SceneComposer {
       }
     }
 
+    if (_isDbg) _dlp.begin('sc.unionMasks', 'texture');
     try {
       const fullSceneBasePaths = this._getFullSceneMaskTileBasePaths();
       const moduleId = 'map-shine-advanced';
@@ -1105,6 +1124,7 @@ export class SceneComposer {
         }
       }
     }
+    if (_isDbg) _dlp.end('sc.unionMasks');
 
     // Create bundle with Foundry's texture + any masks that loaded successfully
     this.currentBundle = {
@@ -1132,6 +1152,7 @@ export class SceneComposer {
     }
 
     // Create base plane mesh (with texture or fallback color)
+    if (_isDbg) _dlp.begin('sc.createBasePlane', 'texture');
     if (doLoadProfile) {
       try {
         lp.begin(`sceneComposer.createBasePlane:${spanToken}`);
@@ -1141,6 +1162,7 @@ export class SceneComposer {
     try {
       this.createBasePlane(baseTexture);
     } finally {
+      if (_isDbg) _dlp.end('sc.createBasePlane');
       if (doLoadProfile) {
         try {
           lp.end(`sceneComposer.createBasePlane:${spanToken}`);
@@ -1150,6 +1172,7 @@ export class SceneComposer {
     }
 
     // Setup perspective camera with FOV-based zoom
+    if (_isDbg) _dlp.begin('sc.setupCamera', 'texture');
     if (doLoadProfile) {
       try {
         lp.begin(`sceneComposer.setupCamera:${spanToken}`);
@@ -1159,6 +1182,7 @@ export class SceneComposer {
     try {
       this.setupCamera(viewportWidth, viewportHeight);
     } finally {
+      if (_isDbg) _dlp.end('sc.setupCamera');
       if (doLoadProfile) {
         try {
           lp.end(`sceneComposer.setupCamera:${spanToken}`);

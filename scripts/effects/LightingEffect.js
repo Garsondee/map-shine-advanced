@@ -721,100 +721,12 @@ export class LightingEffect extends EffectBase {
       transparent: false,
     });
 
-    this.debugLightBufferMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        tLight: { value: null },
-        uExposure: { value: 1.0 },
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D tLight;
-        uniform float uExposure;
-        varying vec2 vUv;
-
-        vec3 reinhard(vec3 c) {
-          return c / (c + 1.0);
-        }
-
-        void main() {
-          vec3 c = texture2D(tLight, vUv).rgb * max(uExposure, 0.0);
-          c = reinhard(max(c, vec3(0.0)));
-          gl_FragColor = vec4(c, 1.0);
-        }
-      `,
-      depthWrite: false,
-      depthTest: false,
-      transparent: false,
-    });
-
-    this.debugRopeMaskMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        tRopeMask: { value: null },
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D tRopeMask;
-        varying vec2 vUv;
-        void main() {
-          float m = texture2D(tRopeMask, vUv).a;
-          gl_FragColor = vec4(m, m, m, 1.0);
-        }
-      `,
-      depthWrite: false,
-      depthTest: false,
-      transparent: false,
-    });
-
-    this.debugDarknessBufferMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        tDarkness: { value: null },
-        uStrength: { value: 1.0 },
-        tLight: { value: null },
-        uGain: { value: 2.0 },
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D tDarkness;
-        uniform float uStrength;
-        uniform sampler2D tLight;
-        uniform float uGain;
-        varying vec2 vUv;
-
-        void main() {
-          float d = texture2D(tDarkness, vUv).r;
-          vec3 lrgb = texture2D(tLight, vUv).rgb;
-          float li = max(max(lrgb.r, lrgb.g), lrgb.b);
-          float punch = 1.0 - exp(-max(li, 0.0) * max(uGain, 0.0));
-          float punched = clamp(d - punch * max(uStrength, 0.0), 0.0, 1.0);
-          // Diagnostic view:
-          // R: final punched mask
-          // G: original darkness mask
-          // B: punch amount (from light buffer)
-          gl_FragColor = vec4(punched, d, punch, 1.0);
-        }
-      `,
-      depthWrite: false,
-      depthTest: false,
-      transparent: false,
-    });
+    // Debug materials are deferred — created on first use via
+    // _ensureDebugMaterials() to avoid compiling 3 extra shader programs
+    // that are only needed when the user activates a debug view.
+    this.debugLightBufferMaterial = null;
+    this.debugRopeMaskMaterial = null;
+    this.debugDarknessBufferMaterial = null;
 
     this._quadMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.compositeMaterial);
     this.quadScene.add(this._quadMesh);
@@ -1827,13 +1739,34 @@ export class LightingEffect extends EffectBase {
 
     const sceneDarkness = this._getSceneDarknessLevel();
 
+    // Build sky tint object for Darkness Response lights.
+    // SkyColorEffect exposes currentSkyTintColor (RGB multiplier from sky temperature)
+    // and params controlling whether to apply it and at what intensity.
+    // Reuse cached object to avoid per-frame allocation (GC pressure).
+    if (!this._cachedSkyTint) this._cachedSkyTint = { r: 1, g: 1, b: 1, intensity: 0 };
+    const skyTint = this._cachedSkyTint;
+    skyTint.intensity = 0; // disabled by default
+    try {
+      const sce = window.MapShine?.skyColorEffect;
+      if (sce && sce.params?.skyTintDarknessLightsEnabled && sce.currentSkyTintColor) {
+        const tintIntensity = Math.max(0.0, sce.params.skyTintDarknessLightsIntensity ?? 1.0);
+        if (tintIntensity > 0) {
+          const c = sce.currentSkyTintColor;
+          skyTint.r = c.r;
+          skyTint.g = c.g;
+          skyTint.b = c.b;
+          skyTint.intensity = tintIntensity;
+        }
+      }
+    } catch (_) {}
+
     // Update animations first, THEN apply darkness gating visibility.
     // updateAnimation() can trigger rebuildGeometry() (e.g. zoom-driven wall
     // inset updates), which replaces the mesh. Setting visibility before the
     // animation would target the OLD mesh, leaving the NEW mesh visible=true
     // for one frame — causing the flicker on darkness-gated lights during zoom.
     for (const light of this.lights.values()) {
-      light.updateAnimation(timeInfo, sceneDarkness);
+      light.updateAnimation(timeInfo, sceneDarkness, skyTint);
       const isActive = this._isLightActiveForDarkness(light.document, sceneDarkness);
       const isSuppressed = this._overriddenFoundryLightIds.has(light.id);
       if (light.mesh) light.mesh.visible = isActive && !isSuppressed;
@@ -1841,7 +1774,7 @@ export class LightingEffect extends EffectBase {
 
     // Update MapShine-native lights using the same animation system for now.
     for (const light of this.mapshineLights.values()) {
-      light.updateAnimation(timeInfo, sceneDarkness);
+      light.updateAnimation(timeInfo, sceneDarkness, skyTint);
       const isActive = this._isLightActiveForDarkness(light.document, sceneDarkness);
       if (light.mesh) light.mesh.visible = isActive;
     }
@@ -2570,6 +2503,11 @@ export class LightingEffect extends EffectBase {
 
     renderer.setRenderTarget(oldTarget);
 
+    // Debug views — materials are lazily created on first use to avoid
+    // compiling 3 extra shader programs during loading.
+    const wantsDebug = this.params?.debugShowRopeMask || this.params?.debugShowLightBuffer || this.params?.debugShowDarknessBuffer;
+    if (wantsDebug) this._ensureDebugMaterials();
+
     if (this.params?.debugShowRopeMask && this._quadMesh && this.debugRopeMaskMaterial) {
       this.debugRopeMaskMaterial.uniforms.tRopeMask.value = this.ropeMaskTarget?.texture ?? null;
       this._quadMesh.material = this.debugRopeMaskMaterial;
@@ -2588,6 +2526,89 @@ export class LightingEffect extends EffectBase {
     }
 
     renderer.render(this.quadScene, this.quadCamera);
+  }
+
+  /**
+   * Lazily create the debug visualization materials on first use.
+   * Saves ~3 shader programs from compiling during loading.
+   * @private
+   */
+  _ensureDebugMaterials() {
+    if (this.debugLightBufferMaterial) return; // already created
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    this.debugLightBufferMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tLight: { value: null },
+        uExposure: { value: 1.0 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tLight;
+        uniform float uExposure;
+        varying vec2 vUv;
+        vec3 reinhard(vec3 c) { return c / (c + 1.0); }
+        void main() {
+          vec3 c = texture2D(tLight, vUv).rgb * max(uExposure, 0.0);
+          c = reinhard(max(c, vec3(0.0)));
+          gl_FragColor = vec4(c, 1.0);
+        }
+      `,
+      depthWrite: false, depthTest: false, transparent: false,
+    });
+
+    this.debugRopeMaskMaterial = new THREE.ShaderMaterial({
+      uniforms: { tRopeMask: { value: null } },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() { vUv = uv; gl_Position = vec4(position, 1.0); }
+      `,
+      fragmentShader: `
+        uniform sampler2D tRopeMask;
+        varying vec2 vUv;
+        void main() {
+          float m = texture2D(tRopeMask, vUv).a;
+          gl_FragColor = vec4(m, m, m, 1.0);
+        }
+      `,
+      depthWrite: false, depthTest: false, transparent: false,
+    });
+
+    this.debugDarknessBufferMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tDarkness: { value: null },
+        uStrength: { value: 1.0 },
+        tLight: { value: null },
+        uGain: { value: 2.0 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() { vUv = uv; gl_Position = vec4(position, 1.0); }
+      `,
+      fragmentShader: `
+        uniform sampler2D tDarkness;
+        uniform float uStrength;
+        uniform sampler2D tLight;
+        uniform float uGain;
+        varying vec2 vUv;
+        void main() {
+          float d = texture2D(tDarkness, vUv).r;
+          vec3 lrgb = texture2D(tLight, vUv).rgb;
+          float li = max(max(lrgb.r, lrgb.g), lrgb.b);
+          float punch = 1.0 - exp(-max(li, 0.0) * max(uGain, 0.0));
+          float punched = clamp(d - punch * max(uStrength, 0.0), 0.0, 1.0);
+          gl_FragColor = vec4(punched, d, punch, 1.0);
+        }
+      `,
+      depthWrite: false, depthTest: false, transparent: false,
+    });
   }
 
   setInputTexture(texture) {

@@ -18,6 +18,7 @@ import { EffectBase, RenderLayers, OVERLAY_THREE_LAYER } from './EffectComposer.
 import { createLogger } from '../core/log.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
 import { VisionSDF } from '../vision/VisionSDF.js';
+import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 
 const log = createLogger('WorldSpaceFogEffect');
 
@@ -226,12 +227,17 @@ export class WorldSpaceFogEffect extends EffectBase {
   initialize(renderer, scene, camera) {
     if (this._initialized) return;
     
+    const _dlp = debugLoadingProfiler;
+    const _isDbg = _dlp.debugMode;
+
     this.renderer = renderer;
     this.mainScene = scene;
     const THREE = window.THREE;
 
     // Get scene dimensions from Foundry
+    if (_isDbg) _dlp.begin('fog.sceneDimensions', 'effect');
     this._updateSceneDimensions();
+    if (_isDbg) _dlp.end('fog.sceneDimensions');
 
     // Respect Foundry scene fog colors if provided
     try {
@@ -243,6 +249,7 @@ export class WorldSpaceFogEffect extends EffectBase {
     }
     
     // Create fallback textures
+    if (_isDbg) _dlp.begin('fog.createTargets', 'effect');
     const whiteData = new Uint8Array([255, 255, 255, 255]);
     this._fallbackWhite = new THREE.DataTexture(whiteData, 1, 1, THREE.RGBAFormat);
     this._fallbackWhite.needsUpdate = true;
@@ -262,6 +269,7 @@ export class WorldSpaceFogEffect extends EffectBase {
       }
     } catch (_) {
     }
+    if (_isDbg) _dlp.end('fog.createTargets');
 
     this._saveExplorationDebounced = foundry.utils.debounce(
       this._saveExplorationToFoundry.bind(this),
@@ -269,10 +277,14 @@ export class WorldSpaceFogEffect extends EffectBase {
     );
     
     // Create the fog overlay plane
+    if (_isDbg) _dlp.begin('fog.createPlane', 'effect');
     this._createFogPlane();
+    if (_isDbg) _dlp.end('fog.createPlane');
     
     // Register Foundry hooks for vision updates
+    if (_isDbg) _dlp.begin('fog.registerHooks', 'effect');
     this._registerHooks();
+    if (_isDbg) _dlp.end('fog.registerHooks');
     
     this._initialized = true;
 

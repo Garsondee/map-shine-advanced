@@ -80,8 +80,9 @@ import { MapPointsManager } from '../scene/map-points-manager.js';
 import { PhysicsRopeManager } from '../scene/physics-rope-manager.js';
 import { DropHandler } from './drop-handler.js';
 import { sceneDebug } from '../utils/scene-debug.js';
-import { clearCache as clearAssetCache, warmupBundleTextures } from '../assets/loader.js';
+import { clearCache as clearAssetCache, warmupBundleTextures, getCacheStats } from '../assets/loader.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
+import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { weatherController } from '../core/WeatherController.js';
 import { DynamicExposureManager } from '../core/DynamicExposureManager.js';
 import { ControlsIntegration } from './controls-integration.js';
@@ -471,44 +472,85 @@ async function waitForThreeFrames(
     allowHiddenResolve = true
   } = {}
 ) {
+  const _dlp = debugLoadingProfiler;
   const startTime = performance.now();
 
   const startThreeFrame = renderer?.info?.render?.frame;
   const startLoopFrame = typeof renderLoop?.getFrameCount === 'function' ? renderLoop.getFrameCount() : 0;
 
+  _dlp.event(`waitFrames: start — threeFrame=${startThreeFrame}, loopFrame=${startLoopFrame}, ` +
+    `need ${minFrames} frames, ${stableCallsFrames} stable calls, ${minDelayMs}ms delay, timeout=${timeoutMs}ms`);
+
+  // Heartbeat: fires every 2s to prove the event loop is alive.
+  // If the event loop is blocked (e.g. by synchronous shader compilation),
+  // no heartbeat events will appear — confirming the block.
+  let heartbeatCount = 0;
+  const heartbeatId = setInterval(() => {
+    heartbeatCount++;
+    const elapsed = (performance.now() - startTime).toFixed(0);
+    const curFrame = renderer?.info?.render?.frame;
+    const curLoop = typeof renderLoop?.getFrameCount === 'function' ? renderLoop.getFrameCount() : '?';
+    const curCalls = renderer?.info?.render?.calls;
+    _dlp.event(`waitFrames: heartbeat #${heartbeatCount} at +${elapsed}ms — ` +
+      `threeFrame=${curFrame}, loopFrame=${curLoop}, calls=${curCalls}`);
+  }, 2000);
+
   let callsStable = 0;
+  let iterations = 0;
 
-  while (performance.now() - startTime < timeoutMs) {
-    const now = performance.now();
-    const currentThreeFrame = renderer?.info?.render?.frame;
-    const currentLoopFrame = typeof renderLoop?.getFrameCount === 'function' ? renderLoop.getFrameCount() : 0;
+  try {
+    while (performance.now() - startTime < timeoutMs) {
+      iterations++;
+      const now = performance.now();
+      const currentThreeFrame = renderer?.info?.render?.frame;
+      const currentLoopFrame = typeof renderLoop?.getFrameCount === 'function' ? renderLoop.getFrameCount() : 0;
 
-    const hasThreeCounter = Number.isFinite(startThreeFrame) && Number.isFinite(currentThreeFrame);
-    const framesAdvanced = hasThreeCounter
-      ? (currentThreeFrame - startThreeFrame)
-      : (currentLoopFrame - startLoopFrame);
+      const hasThreeCounter = Number.isFinite(startThreeFrame) && Number.isFinite(currentThreeFrame);
+      const framesAdvanced = hasThreeCounter
+        ? (currentThreeFrame - startThreeFrame)
+        : (currentLoopFrame - startLoopFrame);
 
-    const calls = renderer?.info?.render?.calls;
-    if (Number.isFinite(calls) && calls >= minCalls) callsStable++;
-    else callsStable = 0;
+      const calls = renderer?.info?.render?.calls;
+      if (Number.isFinite(calls) && calls >= minCalls) callsStable++;
+      else callsStable = 0;
 
-    const meetsDelay = (now - startTime) >= minDelayMs;
-    const meetsFrames = framesAdvanced >= minFrames;
-    const meetsCalls = !Number.isFinite(calls) ? true : (callsStable >= stableCallsFrames);
+      const meetsDelay = (now - startTime) >= minDelayMs;
+      const meetsFrames = framesAdvanced >= minFrames;
+      const meetsCalls = !Number.isFinite(calls) ? true : (callsStable >= stableCallsFrames);
 
-    const isHidden = allowHiddenResolve && typeof document !== 'undefined' && document.hidden;
+      const isHidden = allowHiddenResolve && typeof document !== 'undefined' && document.hidden;
 
-    if (meetsDelay && meetsFrames && meetsCalls) return true;
-    if (isHidden && meetsDelay && meetsCalls) return true;
+      // Log detailed state on first few iterations and when conditions are close to met
+      if (iterations <= 3 || (meetsDelay && (meetsFrames || meetsCalls))) {
+        _dlp.event(`waitFrames: iter=${iterations} +${(now - startTime).toFixed(0)}ms — ` +
+          `frames=${framesAdvanced}/${minFrames}, calls=${calls}, stable=${callsStable}/${stableCallsFrames}, ` +
+          `delay=${meetsDelay}, hidden=${!!isHidden}`);
+      }
 
-    // Use Promise.race to ensure we don't hang if tab is backgrounded (rAF pauses)
-    await Promise.race([
-      new Promise(resolve => requestAnimationFrame(resolve)),
-      new Promise(resolve => setTimeout(resolve, 100)) // Fallback: max 100ms per iteration
-    ]);
+      if (meetsDelay && meetsFrames && meetsCalls) {
+        _dlp.event(`waitFrames: RESOLVED after ${iterations} iterations, ${(now - startTime).toFixed(0)}ms — ` +
+          `frames=${framesAdvanced}, stable=${callsStable}`);
+        return true;
+      }
+      if (isHidden && meetsDelay && meetsCalls) {
+        _dlp.event(`waitFrames: RESOLVED (hidden tab) after ${iterations} iterations, ${(now - startTime).toFixed(0)}ms`);
+        return true;
+      }
+
+      // Use Promise.race to ensure we don't hang if tab is backgrounded (rAF pauses)
+      await Promise.race([
+        new Promise(resolve => requestAnimationFrame(resolve)),
+        new Promise(resolve => setTimeout(resolve, 100)) // Fallback: max 100ms per iteration
+      ]);
+    }
+
+    const elapsed = (performance.now() - startTime).toFixed(0);
+    _dlp.event(`waitFrames: TIMED OUT after ${iterations} iterations, ${elapsed}ms — ` +
+      `threeFrame=${renderer?.info?.render?.frame}, loopFrame=${typeof renderLoop?.getFrameCount === 'function' ? renderLoop.getFrameCount() : '?'}`, 'warn');
+    return false;
+  } finally {
+    clearInterval(heartbeatId);
   }
-
-  return false;
 }
 
 /**
@@ -984,11 +1026,26 @@ async function createThreeCanvas(scene) {
     window.MapShine._sectionTimings = _sectionTimings;
   };
 
+  // Debug Loading Profiler: when active, forces sequential loading and shows
+  // a granular timing log on the loading overlay.
+  const dlp = debugLoadingProfiler;
+  const isDebugLoad = dlp.debugMode;
+  if (isDebugLoad) {
+    dlp.startSession(scene?.name || 'Unknown');
+    // Wire real-time log output to the loading overlay
+    dlp.onEntryComplete = (entry) => {
+      safeCall(() => loadingOverlay.appendDebugLine(dlp.formatEntryLine(entry)), 'dlp.appendLine', Severity.COSMETIC);
+    };
+    safeCall(() => loadingOverlay.enableDebugMode(), 'overlay.enableDebug', Severity.COSMETIC);
+  }
+
   _sectionStart('total');
   _sectionStart('cleanup');
+  if (isDebugLoad) dlp.begin('cleanup', 'cleanup');
   // Cleanup existing canvas if present
   destroyThreeCanvas();
   _sectionEnd('cleanup');
+  if (isDebugLoad) dlp.end('cleanup');
 
   safeCall(() => { if (window.MapShine) window.MapShine.stateApplier = stateApplier; }, 'exposeStateApplier', Severity.COSMETIC);
 
@@ -1032,6 +1089,7 @@ async function createThreeCanvas(scene) {
     // Scene updates (like changing grid type/style) can momentarily put the Foundry canvas into
     // a partially-initialized state. Wait for it to be stable before we touch layers or
     // initialize ControlsIntegration.
+    if (isDebugLoad) dlp.begin('waitForFoundryCanvas', 'setup');
     const canvasOk = await safeCallAsync(async () => {
       const ok = await _waitForFoundryCanvasReady({ timeoutMs: 15000 });
       if (!ok) {
@@ -1040,6 +1098,7 @@ async function createThreeCanvas(scene) {
       }
       return true;
     }, 'waitForFoundryCanvas', Severity.DEGRADED, { fallback: true });
+    if (isDebugLoad) dlp.end('waitForFoundryCanvas');
     if (canvasOk === false) return;
 
     if (session.isStale()) return;
@@ -1069,6 +1128,7 @@ async function createThreeCanvas(scene) {
     isMapMakerMode = false; // Default to Gameplay Mode
 
     // Create new canvas element
+    if (isDebugLoad) dlp.begin('canvas.create', 'setup');
     threeCanvas = document.createElement('canvas');
     threeCanvas.id = 'map-shine-canvas';
     threeCanvas.style.position = 'absolute';
@@ -1133,9 +1193,11 @@ async function createThreeCanvas(scene) {
     
     // Insert our canvas as a sibling, right after the PIXI canvas
     pixiCanvas.parentElement.insertBefore(threeCanvas, pixiCanvas.nextSibling);
+    if (isDebugLoad) dlp.end('canvas.create');
     log.debug('Three.js canvas created and attached as sibling to PIXI canvas');
 
     // Get renderer from global state and attach its canvas
+    if (isDebugLoad) dlp.begin('renderer.attach', 'setup');
     renderer = mapShine.renderer;
     const rendererCanvas = renderer.domElement;
 
@@ -1211,6 +1273,8 @@ async function createThreeCanvas(scene) {
       threeCanvas.addEventListener('webglcontextrestored', _webglContextRestoredHandler, false);
     }, 'registerWebGLContextHandlers', Severity.DEGRADED);
 
+    if (isDebugLoad) dlp.end('renderer.attach');
+
     // Ensure regions outside the Foundry world bounds remain black; padded region is covered by a background plane
     if (renderer.setClearColor) {
       renderer.setClearColor(0x000000, 1);
@@ -1218,6 +1282,8 @@ async function createThreeCanvas(scene) {
 
     // Step 1: Initialize scene composer
     _sectionStart('sceneComposer.initialize');
+    if (isDebugLoad) dlp.begin('sceneComposer.initialize', 'texture');
+    dlp.event('sceneComposer: BEGIN — loading masks + textures');
     sceneComposer = new SceneComposer();
     if (doLoadProfile) safeCall(() => lp.begin('sceneComposer.initialize'), 'lp.begin', Severity.COSMETIC);
     const { scene: threeScene, camera, bundle } = await sceneComposer.initialize(
@@ -1235,7 +1301,62 @@ async function createThreeCanvas(scene) {
       }
     );
     if (doLoadProfile) safeCall(() => lp.end('sceneComposer.initialize'), 'lp.end', Severity.COSMETIC);
+    if (isDebugLoad) dlp.end('sceneComposer.initialize', { masks: bundle?.masks?.length ?? 0 });
+    dlp.event(`sceneComposer: DONE — ${bundle?.masks?.length ?? 0} masks loaded`);
     _sectionEnd('sceneComposer.initialize');
+
+    // Capture asset cache stats for the debug profiler
+    if (isDebugLoad) {
+      safeCall(() => {
+        const cs = getCacheStats();
+        const isFirstLoad = cs.hits === 0 && cs.misses <= 1;
+        dlp.addDiagnostic('Asset Cache Stats', {
+          'Bundles cached': cs.size,
+          'Cache hits': cs.hits,
+          'Cache misses': cs.misses,
+          'Hit rate': cs.hitRate || '—',
+          'Bundle keys': cs.bundles.length > 0 ? cs.bundles.map(k => k.split('/').pop()).join(', ') : '(empty)',
+          'Note': isFirstLoad
+            ? 'First load — MISS is expected. Cache is in-memory only (survives scene transitions, not page reloads). Switch scenes and return to test cache HIT.'
+            : 'Return visit — cache should HIT if masks are still valid.'
+        });
+        // Log bundle mask details
+        if (bundle?.masks?.length) {
+          const maskInfo = bundle.masks.map(m => {
+            const t = m?.texture;
+            const w = t?.image?.width ?? '?';
+            const h = t?.image?.height ?? '?';
+            const cs = t?.colorSpace || '?';
+            return `${m.id} ${w}x${h} ${cs}`;
+          });
+          dlp.addDiagnostic('Scene Bundle', {
+            'Base path': bundle.basePath || '—',
+            'Mask count': bundle.masks.length,
+            'Masks': maskInfo.join(' | ')
+          });
+        }
+      }, 'dlp.cacheStats', Severity.COSMETIC);
+
+      // GPU / renderer diagnostics — static hardware info captured early.
+      // Dynamic counts (programs, textures, materials) are in the Resource
+      // Snapshot and shader compile event log (captured after effects init).
+      safeCall(() => {
+        const gl = renderer?.getContext?.();
+        const gpuDiag = {};
+        if (gl) {
+          const dbgInfo = gl.getExtension('WEBGL_debug_renderer_info');
+          if (dbgInfo) {
+            gpuDiag['GPU Vendor'] = gl.getParameter(dbgInfo.UNMASKED_VENDOR_WEBGL) || '?';
+            gpuDiag['GPU Renderer'] = gl.getParameter(dbgInfo.UNMASKED_RENDERER_WEBGL) || '?';
+          }
+          gpuDiag['WebGL Version'] = gl.getParameter(gl.VERSION) || '?';
+          gpuDiag['Max Texture Size'] = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+          const parallelCompile = gl.getExtension('KHR_parallel_shader_compile');
+          gpuDiag['KHR_parallel_shader_compile'] = parallelCompile ? 'YES' : 'NO (sync compile fallback)';
+        }
+        dlp.addDiagnostic('GPU / Renderer', gpuDiag);
+      }, 'dlp.gpuDiagnostic', Severity.COSMETIC);
+    }
 
     if (session.isStale()) {
       safeDispose(() => destroyThreeCanvas(), 'destroyThreeCanvas(stale)');
@@ -1248,6 +1369,7 @@ async function createThreeCanvas(scene) {
     // Without this, Three.js defers gl.texImage2D to the first render frame,
     // causing a massive stall (potentially hundreds of ms for 10+ large masks).
     _sectionStart('gpu.textureWarmup');
+    if (isDebugLoad) dlp.begin('gpu.textureWarmup', 'texture');
     safeCall(() => {
       const warmupResult = warmupBundleTextures(renderer, bundle, (uploaded, total) => {
         safeCall(() => loadingOverlay.setStage('assets.load', 1.0, `GPU upload ${uploaded}/${total}…`, { keepAuto: true }), 'overlay.gpuWarmup', Severity.COSMETIC);
@@ -1256,11 +1378,13 @@ async function createThreeCanvas(scene) {
         log.info(`GPU texture warmup took ${warmupResult.totalMs.toFixed(0)}ms for ${warmupResult.uploaded} textures`);
       }
     }, 'gpu.textureWarmup', Severity.DEGRADED);
+    if (isDebugLoad) dlp.end('gpu.textureWarmup');
     _sectionEnd('gpu.textureWarmup');
 
     // CRITICAL: Expose sceneComposer early so effects can access groundZ during initialization
     mapShine.sceneComposer = sceneComposer;
 
+    if (isDebugLoad) dlp.begin('maskManager.register', 'texture');
     mapShine.maskManager = new MaskManager();
     mapShine.maskManager.setRenderer(renderer);
     safeCall(() => {
@@ -1285,6 +1409,7 @@ async function createThreeCanvas(scene) {
         mm.defineDerivedMask('precipVisibility.screen', { op: 'max', a: 'outdoors.screen', b: 'roofClear.screen' });
       }
     }, 'MaskManager.registerBundleMasks', Severity.DEGRADED);
+    if (isDebugLoad) dlp.end('maskManager.register');
 
     // Wire the _Outdoors (roof/indoor) mask into the WeatherController so
     // precipitation effects (rain, snow, puddles) can respect covered areas.
@@ -1301,8 +1426,10 @@ async function createThreeCanvas(scene) {
     }, 'weatherController.setRoofMap', Severity.DEGRADED);
 
     // Step 2: Initialize effect composer
+    if (isDebugLoad) dlp.begin('effectComposer.initialize', 'setup');
     effectComposer = new EffectComposer(renderer, threeScene, camera);
     effectComposer.initialize(mapShine.capabilities);
+    if (isDebugLoad) dlp.end('effectComposer.initialize');
 
     // Ensure TimeManager immediately matches Foundry's current pause state.
     safeCall(() => {
@@ -1328,7 +1455,9 @@ async function createThreeCanvas(scene) {
     // Ensure WeatherController is initialized and driven by the centralized TimeManager.
     // This allows precipitation, wind, etc. to update every frame and drive GPU effects
     // like the particle-based weather system without requiring manual console snippets.
+    if (isDebugLoad) dlp.begin('weatherController.initialize', 'weather');
     await weatherController.initialize();
+    if (isDebugLoad) dlp.end('weatherController.initialize');
 
     safeCall(() => effectComposer.addUpdatable(weatherController), 'effectComposer.addUpdatable(weather)', Severity.DEGRADED);
 
@@ -1364,10 +1493,14 @@ async function createThreeCanvas(scene) {
     // they'll be lazily initialized if the user re-enables them later.
     const lazySkipIds = readLazySkipIds();
 
-    // Initialize in parallel (concurrency=4) with progress reporting.
-    // Effects in lazySkipIds are deferred (added to Map but not initialized).
+    // Initialize effects. In debug mode, concurrency is forced to 1 (sequential)
+    // so that per-effect timings are accurate and not overlapping.
+    // Normal mode uses concurrency=4 for faster loading.
+    const effectConcurrency = isDebugLoad ? 1 : 4;
+    const _batchStartMs = performance.now();
+    dlp.event(`effectInit: BEGIN — ${effectInstances.length} effects, concurrency=${effectConcurrency}, lazy-skip=${lazySkipIds?.size ?? 0}`);
     const batchResult = await effectComposer.registerEffectBatch(effectInstances, {
-      concurrency: 4,
+      concurrency: effectConcurrency,
       skipIds: lazySkipIds,
       onProgress: (completed, total, effectId) => {
         const t = Math.max(0, Math.min(1, completed / total));
@@ -1376,19 +1509,61 @@ async function createThreeCanvas(scene) {
       }
     });
 
-    // Log per-effect timings (top 10 slowest)
+    dlp.event(`effectInit: DONE — ${batchResult?.registered?.length ?? 0} registered, ${batchResult?.deferred?.length ?? 0} deferred, ${(performance.now() - _batchStartMs).toFixed(0)}ms`);
+
+    // Log per-effect timings (top 10 slowest) and feed into debug profiler
     safeCall(() => {
       const effectTimings = (batchResult?.timings || [])
-        .map(t => ({ name: nameByEffectId.get(t.id) || t.id, durationMs: t.durationMs }))
+        .map(t => ({ name: nameByEffectId.get(t.id) || t.id, durationMs: t.durationMs, id: t.id }))
         .sort((a, b) => b.durationMs - a.durationMs);
       const top10 = effectTimings.slice(0, 10);
       const deferredCount = batchResult?.deferred?.length || 0;
-      log.info(`Effect batch init: ${batchResult.registered.length} registered, ${deferredCount} deferred (lazy), ${batchResult.skipped.length} skipped (concurrency=4)`);
+      log.info(`Effect batch init: ${batchResult.registered.length} registered, ${deferredCount} deferred (lazy), ${batchResult.skipped.length} skipped (concurrency=${effectConcurrency})`);
       log.info('Effect init timings (top 10 slowest):');
       for (const { name, durationMs } of top10) {
         log.info(`  ${name}: ${durationMs.toFixed(1)}ms`);
       }
       window.MapShine._effectInitTimings = effectTimings;
+
+      // Add effect batch summary to debug profiler diagnostics
+      if (isDebugLoad) {
+        const deferredCount = batchResult?.deferred?.length || 0;
+        const skippedCount = batchResult?.skipped?.length || 0;
+        dlp.addDiagnostic('Effect Batch Init', {
+          'Registered': batchResult?.registered?.length ?? 0,
+          'Deferred (lazy)': deferredCount > 0 ? `${deferredCount} [${batchResult.deferred.join(', ')}]` : '0',
+          'Skipped': skippedCount > 0 ? `${skippedCount} [${batchResult.skipped.join(', ')}]` : '0',
+          'Concurrency': effectConcurrency,
+          'Lazy skip IDs': lazySkipIds?.size > 0 ? Array.from(lazySkipIds).join(', ') : '(none)',
+          'Total batch time': `${(performance.now() - _batchStartMs).toFixed(0)}ms`
+        });
+      }
+
+      // Feed individual effect timings into the debug profiler for the log.
+      // The batch result only contains { id, durationMs } per effect. Since debug
+      // mode forces concurrency=1 (sequential), we compute approximate start times
+      // by accumulating durations from the batch start timestamp.
+      if (isDebugLoad && batchResult?.timings) {
+        let cursor = _batchStartMs;
+        for (const t of batchResult.timings) {
+          const displayName = nameByEffectId.get(t.id) || t.id;
+          const entryId = `effect.${displayName}.initialize`;
+          const dur = t.durationMs ?? 0;
+          const entry = {
+            id: entryId,
+            category: 'effect',
+            startMs: cursor,
+            endMs: cursor + dur,
+            durationMs: dur,
+            meta: null
+          };
+          cursor += dur;
+          dlp.entries.push(entry);
+          if (dlp.onEntryComplete) {
+            try { dlp.onEntryComplete(entry); } catch (_) {}
+          }
+        }
+      }
     }, 'logEffectTimings', Severity.COSMETIC);
     _sectionEnd('effectInit');
     
@@ -1426,6 +1601,7 @@ async function createThreeCanvas(scene) {
 
     // --- Graphics Settings (Essential Feature) ---
     // Create once per canvas lifecycle, register known effects, and expose globally.
+    if (isDebugLoad) dlp.begin('graphicsSettings.init', 'graphics');
     safeCall(() => {
       if (!effectCapabilitiesRegistry) effectCapabilitiesRegistry = new EffectCapabilitiesRegistry();
       registerAllCapabilities(effectCapabilitiesRegistry);
@@ -1449,6 +1625,7 @@ async function createThreeCanvas(scene) {
       // Wire all effect instances so the manager can toggle them safely.
       wireGraphicsSettings(graphicsSettings, effectMap);
     }, 'graphicsSettings.initAndWire', Severity.DEGRADED);
+    if (isDebugLoad) dlp.end('graphicsSettings.init');
 
     // Assign to module-level variables for later reference
     lightningEffect = lightningEffect_temp;
@@ -1463,37 +1640,45 @@ async function createThreeCanvas(scene) {
 
     // Step 3.8: Register Particle System (must be before FireSparksEffect)
     _setEffectInitStep('Particles');
+    if (isDebugLoad) dlp.begin('effect.ParticleSystem.register', 'effect');
     const particleSystem = new ParticleSystem();
     await effectComposer.registerEffect(particleSystem);
+    if (isDebugLoad) dlp.end('effect.ParticleSystem.register');
 
     // Step 3.9: Register Fire Sparks Effect (depends on ParticleSystem)
     _setEffectInitStep('Fire');
+    if (isDebugLoad) dlp.begin('effect.FireSparks.register', 'effect');
     const fireSparksEffect = new FireSparksEffect();
     fireSparksEffect.setParticleSystem(particleSystem);
     await effectComposer.registerEffect(fireSparksEffect);
     if (bundle) {
       fireSparksEffect.setAssetBundle(bundle);
     }
+    if (isDebugLoad) dlp.end('effect.FireSparks.register');
 
     safeCall(() => { graphicsSettings?.registerEffectInstance('fire-sparks', fireSparksEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(fire-sparks)', Severity.COSMETIC);
 
     // Step 3.10: Register Dust Motes (can use particle system if needed)
     _setEffectInitStep('Dust Motes');
+    if (isDebugLoad) dlp.begin('effect.DustMotes.register', 'effect');
     const dustMotesEffect = new DustMotesEffect();
     await effectComposer.registerEffect(dustMotesEffect);
     if (bundle) {
       dustMotesEffect.setAssetBundle(bundle);
     }
+    if (isDebugLoad) dlp.end('effect.DustMotes.register');
 
     safeCall(() => { graphicsSettings?.registerEffectInstance('dust-motes', dustMotesEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(dust-motes)', Severity.COSMETIC);
 
     // Step 3.11: Register Ash Disturbance (token movement bursts)
     _setEffectInitStep('Ash Disturbance');
+    if (isDebugLoad) dlp.begin('effect.AshDisturbance.register', 'effect');
     ashDisturbanceEffect = new AshDisturbanceEffect();
     await effectComposer.registerEffect(ashDisturbanceEffect);
     if (bundle) {
       ashDisturbanceEffect.setAssetBundle(bundle);
     }
+    if (isDebugLoad) dlp.end('effect.AshDisturbance.register');
 
     safeCall(() => { graphicsSettings?.registerEffectInstance('ash-disturbance', ashDisturbanceEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(ash-disturbance)', Severity.COSMETIC);
 
@@ -1502,6 +1687,7 @@ async function createThreeCanvas(scene) {
     // runs, otherwise the first syncAllLights() will fail to apply cookie enhancements.
     // See docs/LIGHT-COOKIE-RESET-ISSUE.md for full analysis.
     _setEffectInitStep('Light Enhancement Store');
+    if (isDebugLoad) dlp.begin('effect.LightEnhancementStore.init', 'effect');
     await safeCallAsync(async () => {
       mapShine.lightEnhancementStore = new LightEnhancementStore();
       await mapShine.lightEnhancementStore.load?.();
@@ -1509,21 +1695,26 @@ async function createThreeCanvas(scene) {
     }, 'LightEnhancementStore.init', Severity.DEGRADED, {
       onError: () => { mapShine.lightEnhancementStore = null; }
     });
+    if (isDebugLoad) dlp.end('effect.LightEnhancementStore.init');
 
     // Step 3.14: Register Lighting Effect (must be before CandleFlamesEffect)
     _setEffectInitStep('Lighting');
+    if (isDebugLoad) dlp.begin('effect.Lighting.register', 'effect');
     lightingEffect = new LightingEffect();
     await effectComposer.registerEffect(lightingEffect);
     if (window.MapShine) window.MapShine.lightingEffect = lightingEffect;
+    if (isDebugLoad) dlp.end('effect.Lighting.register');
 
     safeCall(() => { graphicsSettings?.registerEffectInstance('lighting', lightingEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(lighting)', Severity.COSMETIC);
 
     // Step 3.15: Register Candle Flames (depends on LightingEffect)
     _setEffectInitStep('Candle Flames');
+    if (isDebugLoad) dlp.begin('effect.CandleFlames.register', 'effect');
     const candleFlamesEffect = new CandleFlamesEffect();
     candleFlamesEffect.setLightingEffect(lightingEffect);
     await effectComposer.registerEffect(candleFlamesEffect);
     if (window.MapShine) window.MapShine.candleFlamesEffect = candleFlamesEffect;
+    if (isDebugLoad) dlp.end('effect.CandleFlames.register');
 
     safeCall(() => { graphicsSettings?.registerEffectInstance('candle-flames', candleFlamesEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(candle-flames)', Severity.COSMETIC);
 
@@ -1545,9 +1736,11 @@ async function createThreeCanvas(scene) {
     const basePlane = sceneComposer.getBasePlane();
 
     _sectionStart('setBaseMesh');
+    if (isDebugLoad) dlp.begin('wireBaseMeshes', 'sync');
     wireBaseMeshes(effectMap, basePlane, bundle, (label, dt) => {
       log.info(`  setBaseMesh(${label}): ${dt.toFixed(1)}ms`);
     });
+    if (isDebugLoad) dlp.end('wireBaseMeshes');
     _sectionEnd('setBaseMesh');
 
     _sectionStart('sceneSync');
@@ -1562,39 +1755,49 @@ async function createThreeCanvas(scene) {
     }
 
     // Step 3b: Initialize grid renderer
+    if (isDebugLoad) dlp.begin('manager.Grid.init', 'manager');
     gridRenderer = new GridRenderer(threeScene);
     gridRenderer.initialize();
     gridRenderer.updateGrid();
     safeCall(() => { if (effectComposer) effectComposer.addUpdatable(gridRenderer); }, 'addUpdatable(grid)', Severity.COSMETIC);
+    if (isDebugLoad) dlp.end('manager.Grid.init');
     log.info('Grid renderer initialized');
 
     safeCall(() => loadingOverlay.setStage('scene.managers', 0.25, 'Syncing grid…', { keepAuto: true }), 'overlay.grid', Severity.COSMETIC);
 
     // Step 4: Initialize token manager
+    if (isDebugLoad) dlp.begin('manager.TokenManager.init', 'manager');
     tokenManager = new TokenManager(threeScene);
     tokenManager.setEffectComposer(effectComposer); // Connect to main loop
     tokenManager.initialize();
+    if (isDebugLoad) dlp.end('manager.TokenManager.init');
 
     // Sync existing tokens immediately (we're already in canvasReady, so the hook won't fire)
+    if (isDebugLoad) dlp.begin('manager.TokenManager.syncAll', 'sync');
     tokenManager.syncAllTokens();
+    if (isDebugLoad) dlp.end('manager.TokenManager.syncAll');
     log.info('Token manager initialized and synced');
 
     // Step 4 (cont): Initialize visibility controller — delegates to Foundry's
     // testVisibility() so we get full detection mode / status effect parity for free.
+    if (isDebugLoad) dlp.begin('manager.VisibilityController.init', 'manager');
     safeCall(() => {
       if (visibilityController) visibilityController.dispose();
       visibilityController = new VisibilityController(tokenManager);
       visibilityController.initialize();
     }, 'VisibilityController.init', Severity.DEGRADED);
+    if (isDebugLoad) dlp.end('manager.VisibilityController.init');
 
     // Step 4 (cont): Detection filter rendering — glow/outline on tokens
     // detected via special detection modes (tremorsense, see invisible, etc.)
+    if (isDebugLoad) dlp.begin('manager.DetectionFilter.init', 'manager');
     safeCall(() => {
       if (detectionFilterEffect) detectionFilterEffect.dispose();
       detectionFilterEffect = new DetectionFilterEffect(tokenManager, visibilityController);
       detectionFilterEffect.initialize();
       effectComposer.addUpdatable(detectionFilterEffect);
     }, 'DetectionFilterEffect.init', Severity.COSMETIC);
+    if (isDebugLoad) dlp.end('manager.DetectionFilter.init');
 
     // CRITICAL: Expose managers on window.MapShine so other subsystems
     // (e.g. TokenManager.updateSpriteVisibility) can check VC state.
@@ -1607,6 +1810,7 @@ async function createThreeCanvas(scene) {
     }
 
     // Step 4a: Dynamic Exposure Manager (token-based eye adaptation)
+    if (isDebugLoad) dlp.begin('manager.DynamicExposure.init', 'manager');
     safeCall(() => {
       if (!dynamicExposureManager) {
         dynamicExposureManager = new DynamicExposureManager({
@@ -1627,31 +1831,40 @@ async function createThreeCanvas(scene) {
       effectComposer.addUpdatable(dynamicExposureManager);
       if (window.MapShine) window.MapShine.dynamicExposureManager = dynamicExposureManager;
     }, 'DynamicExposureManager.init', Severity.DEGRADED);
+    if (isDebugLoad) dlp.end('manager.DynamicExposure.init');
 
     safeCall(() => loadingOverlay.setStage('scene.sync', 0.0, 'Syncing tokens…', { keepAuto: true }), 'overlay.tokens', Severity.COSMETIC);
 
     // Step 4b: Initialize tile manager
+    if (isDebugLoad) dlp.begin('manager.TileManager.init', 'manager');
     tileManager = new TileManager(threeScene);
     tileManager.setSpecularEffect(specularEffect);
     // Route water occluder meshes into DistortionManager's dedicated scene so
     // the occluder render pass avoids traversing the full world scene.
     safeCall(() => tileManager.setWaterOccluderScene(distortionManager?.waterOccluderScene ?? null), 'tileManager.setWaterOccluder', Severity.COSMETIC);
     tileManager.initialize();
+    if (isDebugLoad) dlp.end('manager.TileManager.init');
+    if (isDebugLoad) dlp.begin('manager.TileManager.syncAll', 'sync');
     tileManager.syncAllTiles();
     tileManager.setWindowLightEffect(windowLightEffect); // Link for overhead tile lighting
     effectComposer.addUpdatable(tileManager); // Register for occlusion updates
+    if (isDebugLoad) dlp.end('manager.TileManager.syncAll');
     log.info('Tile manager initialized and synced');
 
     safeCall(() => loadingOverlay.setStage('scene.sync', 0.35, 'Syncing tiles…', { keepAuto: true }), 'overlay.tiles', Severity.COSMETIC);
 
+    if (isDebugLoad) dlp.begin('manager.SurfaceRegistry.init', 'manager');
     surfaceRegistry = new SurfaceRegistry();
     surfaceRegistry.initialize({ sceneComposer, tileManager });
     mapShine.surfaceRegistry = surfaceRegistry;
     mapShine.surfaceReport = surfaceRegistry.refresh();
+    if (isDebugLoad) dlp.end('manager.SurfaceRegistry.init');
 
     // Step 4c: Initialize wall manager
+    if (isDebugLoad) dlp.begin('manager.WallManager.init', 'manager');
     wallManager = new WallManager(threeScene);
     wallManager.initialize();
+    if (isDebugLoad) dlp.end('manager.WallManager.init');
     // Sync happens in initialize
     log.info('Wall manager initialized');
 
@@ -1671,16 +1884,34 @@ async function createThreeCanvas(scene) {
     enhancedLightIconManager = new EnhancedLightIconManager(threeScene);
     mapPointsManager = new MapPointsManager(threeScene);
 
-    // Initialize all in parallel (most are synchronous; mapPointsManager is async)
-    await Promise.all([
-      Promise.resolve(doorMeshManager.initialize()),
-      Promise.resolve(drawingManager.initialize()),
-      Promise.resolve(noteManager.initialize()),
-      Promise.resolve(templateManager.initialize()),
-      Promise.resolve(lightIconManager.initialize()),
-      Promise.resolve(enhancedLightIconManager.initialize()),
-      mapPointsManager.initialize(),
-    ]);
+    if (isDebugLoad) {
+      // Debug mode: initialize managers sequentially for accurate per-manager timing
+      const lightweightManagers = [
+        ['manager.DoorMesh.init', doorMeshManager],
+        ['manager.Drawing.init', drawingManager],
+        ['manager.Note.init', noteManager],
+        ['manager.Template.init', templateManager],
+        ['manager.LightIcon.init', lightIconManager],
+        ['manager.EnhancedLightIcon.init', enhancedLightIconManager],
+        ['manager.MapPoints.init', mapPointsManager],
+      ];
+      for (const [id, mgr] of lightweightManagers) {
+        dlp.begin(id, 'manager');
+        await Promise.resolve(mgr.initialize());
+        dlp.end(id);
+      }
+    } else {
+      // Normal mode: initialize all in parallel (most are synchronous; mapPointsManager is async)
+      await Promise.all([
+        Promise.resolve(doorMeshManager.initialize()),
+        Promise.resolve(drawingManager.initialize()),
+        Promise.resolve(noteManager.initialize()),
+        Promise.resolve(templateManager.initialize()),
+        Promise.resolve(lightIconManager.initialize()),
+        Promise.resolve(enhancedLightIconManager.initialize()),
+        mapPointsManager.initialize(),
+      ]);
+    }
 
     effectComposer.addUpdatable(doorMeshManager);
     log.info('Parallel manager batch initialized (Door, Drawing, Note, Template, LightIcon, EnhancedLightIcon, MapPoints)');
@@ -1689,16 +1920,20 @@ async function createThreeCanvas(scene) {
     wireMapPointsToEffects(effectMap, mapPointsManager);
 
     // Step 4i: Initialize physics ropes (rope/chain map points)
+    if (isDebugLoad) dlp.begin('manager.PhysicsRope.init', 'manager');
     physicsRopeManager = new PhysicsRopeManager(threeScene, sceneComposer, mapPointsManager);
     physicsRopeManager.initialize();
     effectComposer.addUpdatable(physicsRopeManager);
     mapShine.physicsRopeManager = physicsRopeManager;
+    if (isDebugLoad) dlp.end('manager.PhysicsRope.init');
     log.info('Physics rope manager initialized');
 
     // Step 5: Initialize interaction manager (Selection, Drag/Drop)
+    if (isDebugLoad) dlp.begin('manager.Interaction.init', 'manager');
     interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager, wallManager, lightIconManager);
     interactionManager.initialize();
     effectComposer.addUpdatable(interactionManager); // Register for updates (HUD positioning)
+    if (isDebugLoad) dlp.end('manager.Interaction.init');
     log.info('Interaction manager initialized');
 
     // Wire token movement hook for ash disturbance.
@@ -1732,12 +1967,16 @@ async function createThreeCanvas(scene) {
     }
 
     // Step 5b: Initialize DOM overlay UI system (world-anchored overlays)
+    if (isDebugLoad) dlp.begin('manager.OverlayUI.init', 'manager');
     overlayUIManager = new OverlayUIManager(threeCanvas, sceneComposer);
     overlayUIManager.initialize();
     effectComposer.addUpdatable(overlayUIManager);
+    if (isDebugLoad) dlp.end('manager.OverlayUI.init');
 
+    if (isDebugLoad) dlp.begin('manager.LightEditor.init', 'manager');
     lightEditor = new LightEditorTweakpane(overlayUIManager);
     lightEditor.initialize();
+    if (isDebugLoad) dlp.end('manager.LightEditor.init');
 
     safeCall(() => effectComposer.addUpdatable(lightEditor), 'addUpdatable(lightEditor)', Severity.COSMETIC);
 
@@ -1749,27 +1988,34 @@ async function createThreeCanvas(scene) {
     }
 
     // Step 6: Initialize drop handler (for creating new items)
+    if (isDebugLoad) dlp.begin('manager.DropHandler.init', 'manager');
     dropHandler = new DropHandler(threeCanvas, sceneComposer);
     dropHandler.initialize();
+    if (isDebugLoad) dlp.end('manager.DropHandler.init');
     log.info('Drop handler initialized');
 
     // Step 6: Initialize Camera Follower
     // Simple one-way sync: Three.js camera follows PIXI camera each frame.
     // PIXI/Foundry handles all pan/zoom input - we just read and match.
     // This eliminates bidirectional sync issues and race conditions.
+    if (isDebugLoad) dlp.begin('manager.CameraFollower.init', 'manager');
     cameraFollower = new CameraFollower({ sceneComposer });
     cameraFollower.initialize();
     effectComposer.addUpdatable(cameraFollower); // Per-frame sync
+    if (isDebugLoad) dlp.end('manager.CameraFollower.init');
     log.info('Camera follower initialized - Three.js follows PIXI');
 
     // Step 6a: Initialize PIXI Input Bridge
     // Handles pan/zoom input on Three canvas and applies to PIXI stage.
     // CameraFollower then reads PIXI state and updates Three camera.
+    if (isDebugLoad) dlp.begin('manager.PixiInputBridge.init', 'manager');
     pixiInputBridge = new PixiInputBridge(threeCanvas);
     pixiInputBridge.initialize();
+    if (isDebugLoad) dlp.end('manager.PixiInputBridge.init');
     log.info('PIXI input bridge initialized - pan/zoom updates PIXI stage');
 
     // Step 6b: Initialize controls integration (PIXI overlay system)
+    if (isDebugLoad) dlp.begin('manager.ControlsIntegration.init', 'manager');
     controlsIntegration = new ControlsIntegration({ 
       sceneComposer,
       effectComposer
@@ -1778,9 +2024,11 @@ async function createThreeCanvas(scene) {
       const ok = await controlsIntegration.initialize();
       if (!ok) throw new Error('ControlsIntegration initialization failed');
     }
+    if (isDebugLoad) dlp.end('manager.ControlsIntegration.init');
     
     log.info('Controls integration initialized');
 
+    dlp.event('sceneSync: DONE — entering finalization');
     _sectionEnd('sceneSync');
     _sectionStart('finalization');
     safeCall(() => {
@@ -1803,12 +2051,64 @@ async function createThreeCanvas(scene) {
     });
     modeManager.ensureUILayering();
 
+    // Step 7.5: Progressive shader warmup.
+    //
+    // Renders each effect one at a time through the EffectComposer pipeline,
+    // calling gl.finish() after each to force synchronous compilation, then
+    // yielding to the event loop so the loading overlay can update with
+    // per-effect progress.  This replaces the old monolithic
+    // effectComposer.render(0) which blocked the main thread for 50+ seconds
+    // with zero feedback.
+    _sectionStart('gpu.shaderCompile');
+    if (isDebugLoad) dlp.begin('gpu.shaderCompile', 'gpu');
+    safeCall(() => loadingOverlay.setStage('final', 0.05, 'Compiling shaders…', { keepAuto: true }), 'overlay.shaderCompile', Severity.COSMETIC);
+    {
+      const gl = renderer.getContext?.();
+      const hasParallelCompile = !!gl?.getExtension?.('KHR_parallel_shader_compile');
+      const startPrograms = Array.isArray(renderer.info?.programs) ? renderer.info.programs.length : 0;
+
+      dlp.event(`gpu.shaderCompile: BEGIN — progressive warmup, ${startPrograms} programs already compiled, ` +
+        `KHR_parallel_shader_compile=${hasParallelCompile ? 'YES' : 'NO'}`);
+      if (!hasParallelCompile) {
+        dlp.event('gpu.shaderCompile: WARNING — KHR_parallel_shader_compile not available. ' +
+          'Each shader compiles synchronously (~500-1500ms on ANGLE/older GPUs).', 'warn');
+      }
+
+      try {
+        const result = await effectComposer.progressiveWarmup(({ step, totalSteps, effectId, type, timeMs, newPrograms, totalPrograms }) => {
+          // Per-effect diagnostic line in the event log
+          const tag = newPrograms > 0
+            ? `+${newPrograms} prog → ${totalPrograms}`
+            : `(no new, ${totalPrograms} total)`;
+          dlp.event(`shader.warmup[${step}/${totalSteps}]: ${effectId} (${type}) — ${timeMs.toFixed(0)}ms ${tag}`);
+
+          // Update the loading overlay so the user sees progress
+          safeCall(() => {
+            const pct = 0.05 + 0.85 * (step / totalSteps);
+            loadingOverlay.setStage('final', pct,
+              `Compiling shaders (${step}/${totalSteps})…`, { keepAuto: true });
+          }, 'overlay.shaderProgress', Severity.COSMETIC);
+        });
+
+        dlp.event(`gpu.shaderCompile: COMPLETE — ${result.totalMs.toFixed(0)}ms, ` +
+          `${result.programsCompiled} new programs, ${result.totalPrograms} total`);
+        log.info(`Shader compilation: ${result.totalMs.toFixed(0)}ms ` +
+          `(${result.programsCompiled} new, ${result.totalPrograms} total programs)`);
+      } catch (e) {
+        dlp.event(`gpu.shaderCompile: ERROR — ${e?.message}`, 'error');
+        log.warn('Progressive shader warmup failed:', e);
+      }
+    }
+    if (isDebugLoad) dlp.end('gpu.shaderCompile');
+    _sectionEnd('gpu.shaderCompile');
+
     // Step 8: Start render loop
     renderLoop = new RenderLoop(renderer, threeScene, camera, effectComposer);
     renderLoop.start();
     // Update ModeManager with the now-created renderLoop reference
     if (modeManager) modeManager._deps.renderLoop = renderLoop;
 
+    dlp.event('renderLoop: STARTED — first rAF frame queued');
     log.info('Render loop started');
 
     // Step 8.5: Set up resize handling via extracted ResizeHandler
@@ -1956,6 +2256,7 @@ async function createThreeCanvas(scene) {
 
     // Initialize Tweakpane UI
     _sectionStart('fin.initializeUI');
+    if (isDebugLoad) dlp.begin('fin.initializeUI', 'finalize');
     await safeCallAsync(async () => {
       if (session.isStale()) return;
       await initializeUI(effectMap);
@@ -1964,6 +2265,7 @@ async function createThreeCanvas(scene) {
       // (Control Panel / Tweakpane) applied other defaults during startup.
       weatherController._loadWeatherSnapshotFromScene?.();
     }, 'initializeUI', Severity.DEGRADED);
+    if (isDebugLoad) dlp.end('fin.initializeUI');
     _sectionEnd('fin.initializeUI');
 
     // Only begin fading-in once we have proof that Three has actually rendered.
@@ -1976,6 +2278,7 @@ async function createThreeCanvas(scene) {
     // P1.2: Wait for all effects to be ready before fading overlay
     // This ensures textures are loaded and GPU operations are complete
     _sectionStart('fin.effectReadiness');
+    if (isDebugLoad) dlp.begin('fin.effectReadiness', 'finalize');
     safeCall(() => loadingOverlay.setStage('final', 0.45, 'Finishing textures…', { keepAuto: true }), 'overlay.textures', Severity.COSMETIC);
     await safeCallAsync(async () => {
       const effectReadinessPromises = [];
@@ -1995,27 +2298,72 @@ async function createThreeCanvas(scene) {
         ]);
       }
     }, 'effectReadinessWait', Severity.COSMETIC);
+    if (isDebugLoad) dlp.end('fin.effectReadiness');
     _sectionEnd('fin.effectReadiness');
 
-    // P1.3: Wait for all tiles (not just overhead) to decode their textures
-    // This prevents pop-in of ground/water tiles after the overlay fades
+    // P1.3: Tile loading is NON-BLOCKING.
+    // Tiles load in the background and appear when their fetch/decode completes.
+    // We do NOT await tiles because:
+    //   1. The server may take 56+ seconds to respond (observed on mythicamachina.com)
+    //   2. During the await, Foundry's PIXI render loop starves setTimeout callbacks
+    //      (10s timer fires 46s late), making any timeout mechanism unreliable
+    //   3. Overhead/decorative tiles are not required for an interactive scene
+    // The tile textures will pop in when ready — this is acceptable vs a 60s stall.
     _sectionStart('fin.waitForTiles');
     safeCall(() => loadingOverlay.setStage('final', 0.50, 'Preparing tiles…', { keepAuto: true }), 'overlay.prepareTiles', Severity.COSMETIC);
-    await safeCallAsync(async () => {
-      await tileManager?.waitForInitialTiles?.({ overheadOnly: false, timeoutMs: 15000 });
-    }, 'waitForInitialTiles', Severity.COSMETIC);
+    {
+      const pendingAll = tileManager?._initialLoad?.pendingAll ?? 0;
+      const totalTracked = tileManager?._initialLoad?.trackedIds?.size ?? 0;
+      dlp.event(`fin.waitForTiles: SKIPPED (non-blocking) — ${pendingAll} tile(s) loading in background`);
+      if (isDebugLoad) {
+        dlp.begin('fin.waitForTiles', 'finalize', { pending: pendingAll, tracked: totalTracked });
+        dlp.end('fin.waitForTiles', { pendingAfter: pendingAll, skipped: true });
+
+        if (pendingAll > 0) {
+          dlp.addDiagnostic('Tile Wait', {
+            'Strategy': 'Non-blocking (tiles load in background)',
+            'Pending tiles': pendingAll,
+            'Tile names': Array.from(tileManager?._initialLoad?.trackedIds ?? []).map(id => {
+              const data = tileManager?.tileSprites?.get(id);
+              return data?.tileDoc?.texture?.src?.split('/').pop() || id;
+            }).join(', '),
+            'Note': 'Tiles appear when server responds. No loading stall.'
+          });
+        }
+      }
+    }
     _sectionEnd('fin.waitForTiles');
 
+    // With shaders pre-compiled (Step 7.5), the first render frame should be
+    // fast (~10-50ms). We only need 3 stable frames to confirm the renderer is
+    // healthy — down from 6 frames / 12s timeout when compilation happened here.
     _sectionStart('fin.waitForThreeFrames');
-    await safeCallAsync(async () => {
-      await waitForThreeFrames(renderer, renderLoop, 6, 12000, {
-        minCalls: 1,
-        stableCallsFrames: 3,
-        minDelayMs: 350
-      });
-    }, 'waitForThreeFrames', Severity.COSMETIC);
+    if (isDebugLoad) dlp.begin('fin.waitForThreeFrames', 'finalize');
+    {
+      const FRAME_WAIT_HARD_TIMEOUT_MS = 5000;
+      let frameTimedOut = false;
+      dlp.event('fin.waitForThreeFrames: BEGIN');
+      await safeCallAsync(async () => {
+        const framePromise = waitForThreeFrames(renderer, renderLoop, 3, 4000, {
+          minCalls: 1,
+          stableCallsFrames: 2,
+          minDelayMs: 200
+        });
+        // Hard timeout safety net — if the event loop is blocked by something
+        // unexpected (late tile decode, other module work), Promise.race exits.
+        const hardTimeout = new Promise(r => setTimeout(() => {
+          frameTimedOut = true;
+          dlp.event('fin.waitForThreeFrames: HARD TIMEOUT — 5s cap reached', 'warn');
+          r(false);
+        }, FRAME_WAIT_HARD_TIMEOUT_MS));
+        await Promise.race([framePromise, hardTimeout]);
+      }, 'waitForThreeFrames', Severity.COSMETIC);
+      dlp.event(`fin.waitForThreeFrames: DONE (hardTimedOut=${frameTimedOut})`);
+      if (isDebugLoad) dlp.end('fin.waitForThreeFrames', { hardTimedOut: frameTimedOut });
+    }
     _sectionEnd('fin.waitForThreeFrames');
 
+    if (isDebugLoad) dlp.begin('fin.timeOfDay', 'finalize');
     await safeCallAsync(async () => {
       const controlHour = window.MapShine?.controlPanel?.controlState?.timeOfDay;
       const hour = Number.isFinite(controlHour) ? controlHour : Number(weatherController?.timeOfDay);
@@ -2030,14 +2378,39 @@ async function createThreeCanvas(scene) {
         }, 'cloudEffect.recompose', Severity.COSMETIC);
       }
     }, 'timeOfDay.refresh', Severity.COSMETIC);
+    if (isDebugLoad) dlp.end('fin.timeOfDay');
 
     _sectionStart('fin.fadeIn');
-    await safeCallAsync(async () => {
+    dlp.event('fin.fadeIn: loading pipeline complete — preparing overlay transition');
+
+    // Debug loading mode: capture resource snapshot, generate the full log,
+    // replace it in the overlay, and show the dismiss button instead of auto-fading.
+    if (isDebugLoad) {
+      safeCall(() => dlp.captureResourceSnapshot(renderer, bundle), 'dlp.captureResources', Severity.COSMETIC);
+      dlp.endSession();
+
+      // Replace the real-time log with the full formatted report (includes summary)
+      const fullLog = dlp.generateLog();
+      safeCall(() => loadingOverlay.setDebugLog(fullLog), 'dlp.setFullLog', Severity.COSMETIC);
+
       const elapsed = loadingOverlay.getElapsedSeconds();
-      const readyMsg = elapsed > 0 ? `Ready! (${elapsed.toFixed(1)}s)` : 'Ready!';
-      loadingOverlay.setStage('final', 1.0, readyMsg, { immediate: true });
-      await loadingOverlay.fadeIn(2000, 800);
-    }, 'overlay.fadeIn', Severity.COSMETIC);
+      const readyMsg = elapsed > 0 ? `Debug load complete (${elapsed.toFixed(1)}s) — review log below` : 'Debug load complete — review log below';
+      safeCall(() => loadingOverlay.setStage('final', 1.0, readyMsg, { immediate: true }), 'overlay.debugReady', Severity.COSMETIC);
+
+      // Show dismiss button; clicking it triggers the normal fadeIn
+      safeCall(() => loadingOverlay.showDebugDismiss(), 'overlay.showDismiss', Severity.COSMETIC);
+
+      // Expose the profiler on window.MapShine for console access
+      if (window.MapShine) window.MapShine.debugLoadingProfiler = dlp;
+    } else {
+      await safeCallAsync(async () => {
+        const elapsed = loadingOverlay.getElapsedSeconds();
+        const readyMsg = elapsed > 0 ? `Ready! (${elapsed.toFixed(1)}s)` : 'Ready!';
+        loadingOverlay.setStage('final', 1.0, readyMsg, { immediate: true });
+        await loadingOverlay.fadeIn(2000, 800);
+      }, 'overlay.fadeIn', Severity.COSMETIC);
+    }
+
     _sectionEnd('fin.fadeIn');
     _sectionEnd('finalization');
     _sectionEnd('total');
@@ -2120,13 +2493,18 @@ async function initializeUI(effectMap) {
   }
   
   // Create UI manager if not already created
+  const _dlp = debugLoadingProfiler;
+  const _isDbg = _dlp.debugMode;
   if (!uiManager) {
+    if (_isDbg) _dlp.begin('ui.TweakpaneManager.init', 'finalize');
     uiManager = new TweakpaneManager();
     await uiManager.initialize();
+    if (_isDbg) _dlp.end('ui.TweakpaneManager.init');
     log.info('UI Manager created');
   }
 
   // --- Selection Box UI (Gameplay drag-select visuals) ---
+  if (_isDbg) _dlp.begin('ui.registerSelectionBox', 'finalize');
   safeCall(() => {
     const selectionSchema = {
       enabled: true,
@@ -2626,21 +3004,49 @@ async function initializeUI(effectMap) {
       'global'
     );
   }, 'registerSelectionBoxUI', Severity.DEGRADED);
+  if (_isDbg) _dlp.end('ui.registerSelectionBox');
 
   // Create Control Panel manager if not already created
   if (!controlPanel) {
+    if (_isDbg) _dlp.begin('ui.ControlPanel.init', 'finalize');
     controlPanel = new ControlPanelManager();
     await controlPanel.initialize();
     window.MapShine.controlPanel = controlPanel;
+    if (_isDbg) _dlp.end('ui.ControlPanel.init');
     log.info('Control Panel created');
   }
 
   // Create Enhanced Light Inspector if not already created
   if (!enhancedLightInspector) {
+    if (_isDbg) _dlp.begin('ui.LightInspector.init', 'finalize');
     enhancedLightInspector = new EnhancedLightInspector();
     enhancedLightInspector.initialize();
     safeCall(() => { if (window.MapShine) window.MapShine.enhancedLightInspector = enhancedLightInspector; }, 'exposeEnhancedLightInspector', Severity.COSMETIC);
+    if (_isDbg) _dlp.end('ui.LightInspector.init');
     log.info('Enhanced Light Inspector created');
+  }
+
+  // Auto-instrument every registerEffect / registerEffectUnderEffect call when
+  // debug mode is active. This wraps the methods so each registration gets a
+  // timed entry in the debug log without touching every call site.
+  let _origRegisterEffect, _origRegisterUnder;
+  if (_isDbg && uiManager) {
+    _origRegisterEffect = uiManager.registerEffect.bind(uiManager);
+    uiManager.registerEffect = function(id, label, schema, cb, category) {
+      _dlp.begin(`ui.register.${id}`, 'finalize');
+      const result = _origRegisterEffect(id, label, schema, cb, category);
+      _dlp.end(`ui.register.${id}`);
+      return result;
+    };
+    _origRegisterUnder = uiManager.registerEffectUnderEffect?.bind(uiManager);
+    if (_origRegisterUnder) {
+      uiManager.registerEffectUnderEffect = function(parentId, id, label, schema, cb) {
+        _dlp.begin(`ui.register.${parentId}.${id}`, 'finalize');
+        const result = _origRegisterUnder(parentId, id, label, schema, cb);
+        _dlp.end(`ui.register.${parentId}.${id}`);
+        return result;
+      };
+    }
   }
 
   // Get Specular effect schema from effect class (centralized definition)
@@ -4099,6 +4505,12 @@ async function initializeUI(effectMap) {
     );
   }
 
+  // Restore original registerEffect methods after all registrations are done.
+  if (_isDbg && uiManager) {
+    if (_origRegisterEffect) uiManager.registerEffect = _origRegisterEffect;
+    if (_origRegisterUnder) uiManager.registerEffectUnderEffect = _origRegisterUnder;
+  }
+
   // Expose UI manager globally for debugging
   window.MapShine.uiManager = uiManager;
 
@@ -4363,7 +4775,14 @@ function destroyThreeCanvas() {
     restoreFoundryRendering();
   }
 
-  safeDispose(() => clearAssetCache(), 'clearAssetCache');
+  // NOTE: We intentionally do NOT clear the asset cache here.
+  // The cache maps basePath → loaded bundle (textures + masks). Clearing it
+  // on every scene transition makes the cache permanently useless (0% hit rate).
+  // The cache is checked at the start of loadAssetBundle() and only reused if
+  // all critical masks are present. Stale entries are harmless — they just hold
+  // references to disposed textures, which loadAssetBundle's validation will
+  // detect and re-probe. Explicit cache clearing is still available via
+  // clearAssetCache() for manual use or memory pressure scenarios.
 
   // Note: renderer is owned by MapShine global state, don't dispose here
   renderer = null;

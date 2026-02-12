@@ -7,6 +7,7 @@
 import { createLogger } from '../core/log.js';
 import { stateApplier } from './state-applier.js';
 import { weatherController as coreWeatherController } from '../core/WeatherController.js';
+import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 
 const log = createLogger('ControlPanel');
 
@@ -421,11 +422,16 @@ export class ControlPanelManager {
       return;
     }
 
+    const _dlp = debugLoadingProfiler;
+    const _isDbg = _dlp.debugMode;
+
     // Wait for Tweakpane to be available
+    if (_isDbg) _dlp.begin('cp.waitForLib', 'finalize');
     const startTime = Date.now();
     while (typeof Tweakpane === 'undefined' && (Date.now() - startTime) < 5000) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
+    if (_isDbg) _dlp.end('cp.waitForLib');
 
     if (typeof Tweakpane === 'undefined') {
       throw new Error('Tweakpane library not available');
@@ -501,7 +507,9 @@ export class ControlPanelManager {
     this._buildStatusPanel();
 
     // Load saved control state
+    if (_isDbg) _dlp.begin('cp.loadControlState', 'finalize');
     this._didLoadControlState = await this._loadControlState();
+    if (_isDbg) _dlp.end('cp.loadControlState');
 
     try {
       // Only use the weather snapshot as a fallback when no controlState is present.
@@ -533,13 +541,17 @@ export class ControlPanelManager {
     }
 
     // Build UI sections
+    if (_isDbg) _dlp.begin('cp.buildSections', 'finalize');
     this._buildTimeSection();
     this._buildWeatherSection();
     this._buildEnvironmentSection();
     this._buildUtilitiesSection();
+    if (_isDbg) _dlp.end('cp.buildSections');
 
     // Apply initial state
+    if (_isDbg) _dlp.begin('cp.applyControlState', 'finalize');
     await this._applyControlState();
+    if (_isDbg) _dlp.end('cp.applyControlState');
 
     this._startEnvironmentSync();
 

@@ -730,6 +730,11 @@ export class ThreeLightSource {
     }
     this.material.uniforms.uColor.value.copy(c);
 
+    // Cache the untinted base color so sky-tint in updateAnimation can be applied
+    // from the original each frame without compounding (feedback loop).
+    if (!this._baseLightColor) this._baseLightColor = new THREE.Color();
+    this._baseLightColor.copy(c);
+
     // 2. Brightness / intensity logic (reduced by 25% to match Foundry VTT)
     const luminosity = config.luminosity ?? 0.5;
     const satBonus = (hsl.s > 0.2) ? 0.5 : 0.0;
@@ -1647,7 +1652,7 @@ export class ThreeLightSource {
     }
   }
 
-  updateAnimation(timeInfo, globalDarkness) {
+  updateAnimation(timeInfo, globalDarkness, skyTint) {
     const dtMs = (timeInfo && typeof timeInfo.delta === 'number') ? (timeInfo.delta * 1000) : 0;
     const tMs = (timeInfo && typeof timeInfo.elapsed === 'number') ? (timeInfo.elapsed * 1000) : 0;
     const tSec = (timeInfo && typeof timeInfo.elapsed === 'number') ? timeInfo.elapsed : 0;
@@ -1657,9 +1662,11 @@ export class ThreeLightSource {
     // This is a MapShine enhancement which modulates the light intensity based on
     // the scene darkness level (0 = day, 1 = night).
     let darknessMul = 1.0;
+    let hasDarknessResponse = false;
     try {
       const dr = this.document?.config?.darknessResponse;
       if (dr && typeof dr === 'object' && dr.enabled === true) {
+        hasDarknessResponse = true;
         const d0 = (typeof globalDarkness === 'number' && Number.isFinite(globalDarkness)) ? globalDarkness : 0.0;
         const d = Math.max(0.0, Math.min(1.0, d0));
 
@@ -1673,6 +1680,7 @@ export class ThreeLightSource {
 
         const min0 = (typeof dr.min === 'number' && Number.isFinite(dr.min)) ? dr.min : 0.0;
         const max0 = (typeof dr.max === 'number' && Number.isFinite(dr.max)) ? dr.max : 1.0;
+
         const minV = Math.max(0.0, Math.min(1.0, min0));
         const maxV = Math.max(0.0, Math.min(1.0, max0));
 
@@ -1763,6 +1771,34 @@ export class ThreeLightSource {
         }
       }
     } catch (_) {
+    }
+
+    // Apply sky colour tint to Darkness Response lights.
+    // This runs AFTER the inset/updateData section so that zoom-triggered
+    // geometry rebuilds (which reset uColor) don't overwrite the tint.
+    //
+    // The tint is luminance-normalized so it only recolours, never brightens.
+    // We always compute from _baseLightColor to avoid frame-over-frame compounding.
+    if (hasDarknessResponse && this._baseLightColor && skyTint && typeof skyTint === 'object' && skyTint.intensity > 0) {
+      const si = Math.max(0.0, skyTint.intensity); // allow > 1.0 for amplified tint
+      // Luminance-normalize the tint so it only shifts hue, not brightness.
+      // Rec.709 luminance weights.
+      const tintLum = skyTint.r * 0.2126 + skyTint.g * 0.7152 + skyTint.b * 0.0722;
+      const invLum = (tintLum > 1e-6) ? (1.0 / tintLum) : 1.0;
+      const nr = skyTint.r * invLum;
+      const ng = skyTint.g * invLum;
+      const nb = skyTint.b * invLum;
+
+      // Lerp base color toward base*normalizedTint by intensity, clamping to
+      // prevent negative channels when si > 1.0.
+      const dst = this.material.uniforms.uColor.value;
+      const base = this._baseLightColor;
+      dst.r = Math.max(0.0, base.r * (1.0 + (nr - 1.0) * si));
+      dst.g = Math.max(0.0, base.g * (1.0 + (ng - 1.0) * si));
+      dst.b = Math.max(0.0, base.b * (1.0 + (nb - 1.0) * si));
+    } else if (this._baseLightColor) {
+      // No tint active — restore base color in case tint was toggled off.
+      this.material.uniforms.uColor.value.copy(this._baseLightColor);
     }
 
     const u = this.material.uniforms;

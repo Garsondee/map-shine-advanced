@@ -2699,7 +2699,9 @@ export class WeatherParticles {
     this.rainSystem = new ParticleSystem({
       duration: 1,
       looping: true,
-      prewarm: true,
+      // prewarm disabled — synchronous simulation of 60+ frames blocks the
+      // event loop during loading. Rain fills in naturally within ~3s.
+      prewarm: false,
       
       // LIFE: Long enough that particles are culled by the world-volume floor instead of timing out mid-air.
       startLife: new IntervalValue(3.0, 4.0),
@@ -3092,7 +3094,8 @@ export class WeatherParticles {
      this.snowSystem = new ParticleSystem({
        duration: 5,
        looping: true,
-       prewarm: true,
+       // prewarm disabled — blocks event loop during loading. Snow fills in within ~5s.
+       prewarm: false,
        startLife: new IntervalValue(4, 6),
        startSpeed: new IntervalValue(200, 400),
        startSize: new IntervalValue(8, 12), // Snow can be larger
@@ -3201,7 +3204,8 @@ export class WeatherParticles {
     this.ashSystem = new ParticleSystem({
       duration: 6,
       looping: true,
-      prewarm: true,
+      // prewarm disabled — blocks event loop during loading. Ash fills in within ~6s.
+      prewarm: false,
       startLife: new IntervalValue(5, 8), // Longer life than snow
       startSpeed: new IntervalValue(120, 200), // Slower than snow
       startSize: new IntervalValue(10, 16), // Slightly larger than snow
@@ -3270,7 +3274,8 @@ export class WeatherParticles {
     this.ashEmberSystem = new ParticleSystem({
       duration: 4,
       looping: true,
-      prewarm: true,
+      // prewarm disabled — blocks event loop during loading. Embers fill in within ~4s.
+      prewarm: false,
       startLife: new IntervalValue(2.5, 4.0),
       startSpeed: new IntervalValue(180, 260),
       startSize: new IntervalValue(6, 12),

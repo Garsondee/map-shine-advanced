@@ -23,6 +23,15 @@ export class LoadingOverlay {
     this._stageRowEl = null;
     this._timerStart = 0;
     this._timerRaf = 0;
+
+    // Debug loading profiler UI elements
+    this._debugLogEl = null;
+    this._debugDismissBtn = null;
+    this._debugCopyBtn = null;
+    this._debugContainerEl = null;
+    this._debugMode = false;
+    /** @type {Function|null} callback when dismiss is clicked */
+    this._debugDismissCallback = null;
   }
 
   configureStages(stages) {
@@ -248,6 +257,104 @@ export class LoadingOverlay {
     content.appendChild(stageRow);
     content.appendChild(msg);
     content.appendChild(progressRow);
+
+    // Debug log container (hidden by default, shown when enableDebugMode() is called)
+    const debugContainer = document.createElement('div');
+    debugContainer.className = 'map-shine-loading-overlay__debug';
+    debugContainer.style.display = 'none';
+    debugContainer.style.marginTop = '14px';
+    debugContainer.style.position = 'relative';
+    this._debugContainerEl = debugContainer;
+
+    // Debug log header with copy button
+    const debugHeader = document.createElement('div');
+    debugHeader.style.display = 'flex';
+    debugHeader.style.justifyContent = 'space-between';
+    debugHeader.style.alignItems = 'center';
+    debugHeader.style.marginBottom = '6px';
+
+    const debugTitle = document.createElement('span');
+    debugTitle.textContent = 'Loading Log';
+    debugTitle.style.fontSize = '11px';
+    debugTitle.style.fontWeight = '600';
+    debugTitle.style.color = 'rgba(255, 255, 255, 0.6)';
+    debugTitle.style.textTransform = 'uppercase';
+    debugTitle.style.letterSpacing = '0.5px';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.textContent = 'Copy Log';
+    copyBtn.className = 'map-shine-debug-copy-btn';
+    copyBtn.style.fontSize = '10px';
+    copyBtn.style.padding = '2px 8px';
+    copyBtn.style.border = '1px solid rgba(255,255,255,0.2)';
+    copyBtn.style.borderRadius = '4px';
+    copyBtn.style.background = 'rgba(255,255,255,0.08)';
+    copyBtn.style.color = 'rgba(255,255,255,0.7)';
+    copyBtn.style.cursor = 'pointer';
+    copyBtn.style.transition = 'background 0.15s ease';
+    copyBtn.addEventListener('mouseenter', () => { copyBtn.style.background = 'rgba(255,255,255,0.15)'; });
+    copyBtn.addEventListener('mouseleave', () => { copyBtn.style.background = 'rgba(255,255,255,0.08)'; });
+    copyBtn.addEventListener('click', () => this._copyDebugLog());
+    this._debugCopyBtn = copyBtn;
+
+    debugHeader.appendChild(debugTitle);
+    debugHeader.appendChild(copyBtn);
+
+    // Scrollable log area — selectable monospace text
+    const logEl = document.createElement('pre');
+    logEl.className = 'map-shine-loading-overlay__debug-log';
+    logEl.style.margin = '0';
+    logEl.style.padding = '8px 10px';
+    logEl.style.fontFamily = "'Consolas', 'Monaco', 'Courier New', monospace";
+    logEl.style.fontSize = '10.5px';
+    logEl.style.lineHeight = '1.5';
+    logEl.style.color = 'rgba(200, 220, 255, 0.85)';
+    logEl.style.background = 'rgba(0, 0, 0, 0.5)';
+    logEl.style.border = '1px solid rgba(255,255,255,0.08)';
+    logEl.style.borderRadius = '6px';
+    logEl.style.maxHeight = '40vh';
+    logEl.style.overflowY = 'auto';
+    logEl.style.overflowX = 'auto';
+    logEl.style.whiteSpace = 'pre';
+    logEl.style.userSelect = 'text';
+    logEl.style.webkitUserSelect = 'text';
+    logEl.style.cursor = 'text';
+    logEl.style.tabSize = '4';
+    logEl.textContent = '';
+    this._debugLogEl = logEl;
+
+    // Dismiss button
+    const dismissBtn = document.createElement('button');
+    dismissBtn.textContent = 'Dismiss Loading Log';
+    dismissBtn.className = 'map-shine-debug-dismiss-btn';
+    dismissBtn.style.display = 'none';
+    dismissBtn.style.marginTop = '10px';
+    dismissBtn.style.width = '100%';
+    dismissBtn.style.padding = '8px 16px';
+    dismissBtn.style.fontSize = '13px';
+    dismissBtn.style.fontWeight = '600';
+    dismissBtn.style.border = '1px solid rgba(0, 180, 255, 0.4)';
+    dismissBtn.style.borderRadius = '6px';
+    dismissBtn.style.background = 'rgba(0, 180, 255, 0.15)';
+    dismissBtn.style.color = 'rgba(0, 200, 255, 0.95)';
+    dismissBtn.style.cursor = 'pointer';
+    dismissBtn.style.transition = 'background 0.15s ease, border-color 0.15s ease';
+    dismissBtn.addEventListener('mouseenter', () => {
+      dismissBtn.style.background = 'rgba(0, 180, 255, 0.25)';
+      dismissBtn.style.borderColor = 'rgba(0, 180, 255, 0.6)';
+    });
+    dismissBtn.addEventListener('mouseleave', () => {
+      dismissBtn.style.background = 'rgba(0, 180, 255, 0.15)';
+      dismissBtn.style.borderColor = 'rgba(0, 180, 255, 0.4)';
+    });
+    dismissBtn.addEventListener('click', () => this._onDebugDismiss());
+    this._debugDismissBtn = dismissBtn;
+
+    debugContainer.appendChild(debugHeader);
+    debugContainer.appendChild(logEl);
+    debugContainer.appendChild(dismissBtn);
+    content.appendChild(debugContainer);
+
     el.appendChild(content);
 
     this.el = el;
@@ -289,6 +396,12 @@ export class LoadingOverlay {
       `.map-shine-stage-pill--pending { background:rgba(255,255,255,0.06); color:rgba(255,255,255,0.3); }`,
       `.map-shine-stage-pill--active { background:rgba(0,180,255,0.2); color:rgba(0,200,255,0.95); box-shadow:0 0 8px rgba(0,180,255,0.15); }`,
       `.map-shine-stage-pill--done { background:rgba(100,220,140,0.12); color:rgba(100,220,140,0.7); }`,
+      /* Debug mode: wider container to fit log */
+      `.map-shine-loading-overlay--debug .map-shine-loading-overlay__content { width: min(720px, calc(100vw - 40px)) !important; }`,
+      `.map-shine-loading-overlay__debug-log::-webkit-scrollbar { width: 6px; }`,
+      `.map-shine-loading-overlay__debug-log::-webkit-scrollbar-track { background: transparent; }`,
+      `.map-shine-loading-overlay__debug-log::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }`,
+      `.map-shine-loading-overlay__debug-log::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }`,
     ].join('\n');
     this._styleEl = style;
 
@@ -593,6 +706,120 @@ export class LoadingOverlay {
         pill.className = 'map-shine-stage-pill map-shine-stage-pill--pending';
       }
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Debug loading profiler
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Enable debug mode on the loading overlay.
+   * Shows the debug log panel, widens the container, and prepares for log entries.
+   * Call this BEFORE showBlack() or during the loading sequence.
+   */
+  enableDebugMode() {
+    this.ensure();
+    this._debugMode = true;
+    if (this.el) this.el.classList.add('map-shine-loading-overlay--debug');
+    // Debug UI must remain clickable even while the overlay is shown.
+    // The overlay root defaults to pointer-events:none so it doesn't block gameplay
+    // when hidden/fading; debug mode explicitly opts into interaction.
+    if (this.el) this.el.style.pointerEvents = 'auto';
+    if (this._debugContainerEl) this._debugContainerEl.style.display = 'block';
+    if (this._debugContainerEl) this._debugContainerEl.style.pointerEvents = 'auto';
+    if (this._debugLogEl) this._debugLogEl.textContent = '';
+    if (this._debugDismissBtn) this._debugDismissBtn.style.display = 'none';
+  }
+
+  /**
+   * Disable debug mode and hide the debug panel.
+   */
+  disableDebugMode() {
+    this._debugMode = false;
+    if (this.el) this.el.classList.remove('map-shine-loading-overlay--debug');
+    if (this._debugContainerEl) this._debugContainerEl.style.display = 'none';
+    if (this._debugContainerEl) this._debugContainerEl.style.pointerEvents = 'none';
+    if (this._debugDismissBtn) this._debugDismissBtn.style.display = 'none';
+  }
+
+  /**
+   * Append a single line to the debug log. Auto-scrolls to bottom.
+   * @param {string} line - Text to append (no trailing newline needed)
+   */
+  appendDebugLine(line) {
+    if (!this._debugLogEl) return;
+    if (this._debugLogEl.textContent.length > 0) {
+      this._debugLogEl.textContent += '\n' + line;
+    } else {
+      this._debugLogEl.textContent = line;
+    }
+    // Auto-scroll to bottom
+    this._debugLogEl.scrollTop = this._debugLogEl.scrollHeight;
+  }
+
+  /**
+   * Replace the entire debug log content.
+   * @param {string} text - Full log text
+   */
+  setDebugLog(text) {
+    if (!this._debugLogEl) return;
+    this._debugLogEl.textContent = text || '';
+    this._debugLogEl.scrollTop = this._debugLogEl.scrollHeight;
+  }
+
+  /**
+   * Show the dismiss button (call when loading is complete).
+   * @param {Function} [callback] - Called when button is clicked
+   */
+  showDebugDismiss(callback = null) {
+    this._debugDismissCallback = callback || null;
+    // Ensure the overlay is interactive so the user can click the button.
+    if (this.el) this.el.style.pointerEvents = 'auto';
+    if (this._debugDismissBtn) {
+      this._debugDismissBtn.style.display = 'block';
+      this._debugDismissBtn.style.pointerEvents = 'auto';
+    }
+  }
+
+  /**
+   * Copy the full debug log text to the clipboard.
+   * @private
+   */
+  async _copyDebugLog() {
+    if (!this._debugLogEl) return;
+    const text = this._debugLogEl.textContent || '';
+    try {
+      await navigator.clipboard.writeText(text);
+      // Flash the button to confirm
+      if (this._debugCopyBtn) {
+        const orig = this._debugCopyBtn.textContent;
+        this._debugCopyBtn.textContent = 'Copied!';
+        this._debugCopyBtn.style.color = 'rgba(100, 220, 140, 0.95)';
+        this._debugCopyBtn.style.borderColor = 'rgba(100, 220, 140, 0.4)';
+        setTimeout(() => {
+          if (this._debugCopyBtn) {
+            this._debugCopyBtn.textContent = orig;
+            this._debugCopyBtn.style.color = 'rgba(255,255,255,0.7)';
+            this._debugCopyBtn.style.borderColor = 'rgba(255,255,255,0.2)';
+          }
+        }, 1500);
+      }
+    } catch (err) {
+      console.warn('Map Shine: Failed to copy debug log to clipboard', err);
+    }
+  }
+
+  /**
+   * Handle dismiss button click — runs the callback then fades out.
+   * @private
+   */
+  _onDebugDismiss() {
+    if (this._debugDismissCallback) {
+      try { this._debugDismissCallback(); } catch (_) { /* ignore */ }
+      this._debugDismissCallback = null;
+    }
+    // Fade out the overlay
+    this.fadeIn(2000, 800).catch(() => {});
   }
 
   // ---------------------------------------------------------------------------

@@ -66,6 +66,9 @@ export class RenderLoop {
     /** @type {number} */
     this.framesThisSecond = 0;
     
+    // Track first-frame timing to diagnose residual shader compilation
+    this._firstFrameLogged = false;
+
     // Bind render method to preserve context
     this.render = this.render.bind(this);
   }
@@ -87,6 +90,7 @@ export class RenderLoop {
     this.framesThisSecond = 0;
 
     this._forceNextRender = true;
+    this._firstFrameLogged = false;
     this._lastComposerRenderTime = 0;
     this._lastCamX = null;
     this._lastCamY = null;
@@ -226,9 +230,36 @@ export class RenderLoop {
         }
 
         if (shouldRender) {
+          // Measure first-frame render time to detect residual shader compilation.
+          // If compileAsync() worked, this should be ~10-50ms. If it's hundreds of
+          // ms or seconds, shaders are still compiling on the first draw call.
+          const _isFirstFrame = !this._firstFrameLogged;
+          const _t0 = _isFirstFrame ? performance.now() : 0;
+
           this.effectComposer.render(deltaTime);
           this._lastComposerRenderTime = now;
           this._forceNextRender = false;
+
+          if (_isFirstFrame) {
+            this._firstFrameLogged = true;
+            const _renderMs = performance.now() - _t0;
+            try {
+              const dlp = window.MapShine?.debugLoadingProfiler;
+              if (dlp?.event) {
+                const calls = this.renderer?.info?.render?.calls ?? '?';
+                const tris = this.renderer?.info?.render?.triangles ?? '?';
+                const progs = Array.isArray(this.renderer?.info?.programs)
+                  ? this.renderer.info.programs.length : '?';
+                dlp.event(`renderLoop: FIRST FRAME rendered in ${_renderMs.toFixed(1)}ms ` +
+                  `(calls=${calls}, tris=${tris}, programs=${progs})`);
+              }
+            } catch (_) {}
+            if (_renderMs > 100) {
+              log.warn(`First frame took ${_renderMs.toFixed(0)}ms — possible residual shader compilation`);
+            } else {
+              log.info(`First frame rendered in ${_renderMs.toFixed(0)}ms`);
+            }
+          }
 
           // Refresh caches after rendering.
           try {

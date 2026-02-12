@@ -207,19 +207,15 @@ export class WeatherController {
     /** @type {number} Global simulation speed scalar for Quarks-based effects (weather, fire, etc.). */
     this.simulationSpeed = 1.0;
 
-    // Wetness Tracker — surface wetness lags behind precipitation with
-    // transition-aware holdoff.  Wetness only starts changing AFTER a weather
-    // transition finishes, then ramps proportionally to precipitation (wetting)
-    // or decays slowly over minutes (drying).
+    // Wetness Tracker — surface wetness lags behind precipitation via slow
+    // wetting/drying rates.  Tracks currentState.precipitation in real-time
+    // (even during transitions) because the slow rates provide natural lag.
+    // No holdoff needed — avoids deadlock with dynamic weather's back-to-back transitions.
     this.wetnessTuning = {
       wettingDuration: 30.0,   // Seconds for full rain (precip=1) to reach wetness=1
       dryingDuration: 180.0,   // Seconds for fully wet surface to reach wetness=0
       precipThreshold: 0.05    // Precipitation below this is considered "not raining"
     };
-
-    // Internal wetness tracker state (not serialized — derived at runtime)
-    /** @private Whether we're holding off wetness changes while a transition runs */
-    this._wetnessHoldoff = false;
 
     // Per-system tuning parameters for precipitation visuals
     this.rainTuning = {
@@ -2104,27 +2100,19 @@ export class WeatherController {
     const cs = this.currentState;
     const tuning = this.wetnessTuning;
 
-    // Determine target wetness from current precipitation.
+    // Determine target wetness from current (possibly interpolated) precipitation.
     // Only rain creates surface wetness; snow/hail/ash don't (frost handles cold).
+    // During a weather transition, currentState.precipitation is being lerped —
+    // we intentionally track it in real-time rather than waiting for the transition
+    // to finish. The slow wetting/drying rates (30s / 180s) already provide
+    // natural lag, so wetness barely moves during a typical 13s transition.
+    // A holdoff would deadlock wetness when dynamic weather runs back-to-back
+    // transitions with no gap.
     const isRain = cs.precipType === PrecipitationType.RAIN;
     const precip = isRain ? cs.precipitation : 0.0;
     const targetWetness = precip > tuning.precipThreshold
       ? Math.min(1.0, precip)
       : 0.0;
-
-    // --- Transition-aware holdoff ---
-    // Don't start wetting or drying while a weather transition is in progress.
-    // Precipitation is still interpolating during a transition, so we wait for
-    // it to settle before committing to a wetness trajectory.
-    if (this.isTransitioning) {
-      this._wetnessHoldoff = true;
-      return;
-    }
-
-    // Coming out of a transition — release the holdoff.
-    if (this._wetnessHoldoff) {
-      this._wetnessHoldoff = false;
-    }
 
     // --- Wetting / Drying ---
     const current = cs.wetness;

@@ -17,6 +17,7 @@
 // ── Effect Class Imports ────────────────────────────────────────────────────
 import { SpecularEffect } from '../effects/SpecularEffect.js';
 import { IridescenceEffect } from '../effects/IridescenceEffect.js';
+import { FluidEffect } from '../effects/FluidEffect.js';
 import { WindowLightEffect } from '../effects/WindowLightEffect.js';
 import { ColorCorrectionEffect } from '../effects/ColorCorrectionEffect.js';
 import { FilmGrainEffect } from '../effects/FilmGrainEffect.js';
@@ -54,6 +55,7 @@ const log = createLogger('EffectWiring');
 export {
   SpecularEffect,
   IridescenceEffect,
+  FluidEffect,
   WindowLightEffect,
   ColorCorrectionEffect,
   FilmGrainEffect,
@@ -95,6 +97,7 @@ export function getIndependentEffectDefs() {
   return [
     ['Specular', SpecularEffect],
     ['Iridescence', IridescenceEffect],
+    ['Fluid', FluidEffect],
     ['Window Lights', WindowLightEffect],
     ['Color Correction', ColorCorrectionEffect],
     ['Film Grain', FilmGrainEffect],
@@ -102,7 +105,6 @@ export function getIndependentEffectDefs() {
     ['Halftone', HalftoneEffect],
     ['Sharpen', SharpenEffect],
     ['ASCII', AsciiEffect],
-    ['Smelly Flies', SmellyFliesEffect],
     ['Lightning', LightningEffect],
     ['Prism', PrismEffect],
     ['Water', WaterEffectV2],
@@ -139,11 +141,12 @@ export function getIndependentEffectDefs() {
 /** @type {CapabilityDef[]} */
 const CAPABILITIES = [
   { effectId: 'specular',          displayName: 'Metallic / Specular',       category: 'surface',      performanceImpact: 'medium' },
-  { effectId: 'iridescence',       displayName: 'Iridescence / Holographic', category: 'surface',      performanceImpact: 'medium' },
-  { effectId: 'water',             displayName: 'Water',                     category: 'water',        performanceImpact: 'high' },
-  { effectId: 'fog',               displayName: 'Fog of War',               category: 'global',       performanceImpact: 'medium' },
-  { effectId: 'bloom',             displayName: 'Bloom',                     category: 'global',       performanceImpact: 'high' },
-  { effectId: 'lensflare',         displayName: 'Lensflare',                category: 'global',       performanceImpact: 'medium' },
+  { effectId: 'fluid',             displayName: 'Fluid',                     category: 'surface',      performanceImpact: 'medium' },
+  { effectId: 'iridescence',       displayName: 'Iridescence',               category: 'surface',      performanceImpact: 'low' },
+  { effectId: 'window-lights',     displayName: 'Window Lights',             category: 'structure',    performanceImpact: 'medium' },
+  { effectId: 'color-correction',  displayName: 'Color Correction',          category: 'global',       performanceImpact: 'low' },
+  { effectId: 'film-grain',        displayName: 'Film Grain',                category: 'global',       performanceImpact: 'low' },
+  { effectId: 'dot-screen',        displayName: 'Dot Screen',                category: 'global',       performanceImpact: 'low' },
   { effectId: 'clouds',            displayName: 'Clouds',                   category: 'atmospheric',  performanceImpact: 'medium' },
   { effectId: 'overhead-shadows',  displayName: 'Overhead Shadows',         category: 'structure',    performanceImpact: 'medium' },
   { effectId: 'building-shadows',  displayName: 'Building Shadows',         category: 'structure',    performanceImpact: 'medium' },
@@ -199,7 +202,6 @@ const GS_ID_TO_EFFECT_MAP_NAME = [
   ['halftone',          'Halftone'],
   ['sharpen',           'Sharpen'],
   ['ascii',             'ASCII'],
-  ['smelly-flies',      'Smelly Flies'],
   ['lightning',         'Lightning'],
   ['prism',             'Prism'],
   ['water',             'Water'],
@@ -219,6 +221,7 @@ const GS_ID_TO_EFFECT_MAP_NAME = [
   ['fire-sparks',       'Fire Sparks'],
   ['dust-motes',        'Dust Motes'],
   ['ash-disturbance',   'Ash Disturbance'],
+  ['smelly-flies',      'Smelly Flies'],
   ['candle-flames',     'Candle Flames'],
   ['lighting',          'Lighting'],
   ['visionMode',        'Vision Mode'],
@@ -349,6 +352,7 @@ export function wireBaseMeshes(effectMap, basePlane, bundle, logFn) {
  * @type {Array<[string, string]>}
  */
 const GLOBAL_EFFECT_EXPOSURES = [
+  ['Fluid',            'fluidEffect'],
   ['Window Lights',     'windowLightEffect'],
   ['Color Correction',  'colorCorrectionEffect'],
   ['Clouds',            'cloudEffect'],

@@ -755,12 +755,19 @@ export class SkyColorEffect extends EffectBase {
         }
 
         const sunFactorRaw = dayProgress >= 0.0 ? Math.sin(Math.PI * clamp01(dayProgress)) : 0.0;
-        const dayFactor = Math.max(clamp01(this.params.nightFloor), clamp01(sunFactorRaw));
+        const dayFactorBase = Math.max(clamp01(this.params.nightFloor), clamp01(sunFactorRaw));
 
         const goldenWidth = Math.max(0.0001, this.params.goldenHourWidth);
         const goldenBase = clamp01(peakHour(hour, sunrise, goldenWidth) + peakHour(hour, sunset, goldenWidth));
         const goldenPow = Math.pow(goldenBase, Math.max(0.0001, this.params.goldenPower ?? 1.0));
         const golden = clamp01(goldenPow * Math.max(0.0, this.params.goldenStrength ?? 1.0));
+
+        // Extend dayFactor into golden hour transition zones.
+        // Pre-sunrise and post-sunset hours within the golden window should
+        // receive transitional daylight — the sun is near the horizon, not
+        // full night.  Without this, exposure goes negative and the warm
+        // tint is buried under darkness, making dawn look nothing like dusk.
+        const dayFactor = Math.max(dayFactorBase, golden * 0.45);
 
         const state = weatherController?.getCurrentState ? weatherController.getCurrentState() : null;
         const cloudCover = clamp01(state?.cloudCover ?? 0.0);
@@ -793,16 +800,16 @@ export class SkyColorEffect extends EffectBase {
         );
         const turbidityEff = clamp01(turbidityBase + turbidityWeather);
 
-        let effectiveDarkness = clamp01(
+        // Use the sunrise/sunset-aware dayFactor for effectiveDarkness.
+        // WeatherController's env.effectiveDarkness uses a naive linear-from-
+        // noon model that doesn't know about sunrise/sunset or golden hour,
+        // so we intentionally skip that override here.
+        const effectiveDarkness = clamp01(
           sceneDarkness +
           (1.0 - dayFactor) * 0.25 +
           overcast * 0.15 +
           storm * 0.1
         );
-
-        if (env && Number.isFinite(env.effectiveDarkness)) {
-          effectiveDarkness = clamp01(env.effectiveDarkness);
-        }
 
         const rayleigh = clamp01(this.params.rayleighStrength);
         const mie = clamp01(this.params.mieStrength);
@@ -846,6 +853,9 @@ export class SkyColorEffect extends EffectBase {
         saturation = Math.max(0.0, Math.min(2.0, 1.0 + (saturation - 1.0) * analyticStrength));
         contrast = Math.max(0.5, Math.min(1.5, 1.0 + (contrast - 1.0) * analyticStrength));
         vibrance = Math.max(-1.0, Math.min(1.0, vibrance * analyticStrength));
+
+        // Cache the improved dayFactor for the auto-intensity computation below.
+        this._lastDayFactor = dayFactor;
 
         const tNight = clamp01(effectiveDarkness);
         vignetteStrength = lerp(this.params.dayVignetteStrength ?? 0.0, this.params.nightVignetteStrength ?? 0.0, tNight);
@@ -970,10 +980,22 @@ export class SkyColorEffect extends EffectBase {
       u.uGrainStrength.value = grainStrength;
       let effectiveIntensity = this.params.intensity;
       if (this.params.automationMode === 1 && this.params.autoIntensityEnabled) {
-        const env = weatherController?.getEnvironment ? weatherController.getEnvironment() : null;
-        const skyIntensity = clamp01(env?.skyIntensity ?? 1.0);
+        // Compute a local skyIntensity using the sunrise/sunset-aware dayFactor
+        // from the analytical block above (stored in this._lastDayFactor).
+        // WeatherController's env.skyIntensity uses a naive linear-from-noon
+        // model which under-values dawn and over-values dusk, causing the
+        // golden hour effect to be visibly dimmer before sunrise than after
+        // sunset.  By using our own dayFactor we get symmetric intensity.
+        const localDayFactor = clamp01(this._lastDayFactor ?? 0.5);
+        const envFallback = weatherController?.getEnvironment?.();
+        const overcastMul = 1.0 - clamp01(envFallback?.overcastFactor ?? 0) * 0.55;
+        const stormMul = 1.0 - clamp01(envFallback?.stormFactor ?? 0) * 0.25;
+        let localSceneDarkness = 0.0;
+        try { localSceneDarkness = clamp01(canvas?.environment?.darknessLevel ?? 0.0); } catch (_) { /* */ }
+        const darkMul = 1.0 - localSceneDarkness * 0.85;
+        const localSkyIntensity = clamp01((0.15 + 0.85 * localDayFactor) * overcastMul * stormMul * darkMul);
         const strength = clamp01(this.params.autoIntensityStrength);
-        effectiveIntensity *= lerp(1.0, skyIntensity, strength);
+        effectiveIntensity *= lerp(1.0, localSkyIntensity, strength);
       }
 
       u.uIntensity.value = effectiveIntensity;

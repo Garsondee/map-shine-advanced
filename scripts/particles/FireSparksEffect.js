@@ -10,7 +10,6 @@ import {
   RenderMode,
   ApplyForce,
   ConstantValue,
-  ColorOverLife,
   SizeOverLife,
   PiecewiseBezier,
   Bezier,
@@ -22,15 +21,9 @@ import { BLOOM_HOTSPOT_LAYER } from '../effects/EffectComposer.js';
 
 const log = createLogger('FireSparksEffect');
 
-const _FIRE_PALETTE_COLD_START = { r: 0.8, g: 0.3, b: 0.1 };
-const _FIRE_PALETTE_COLD_END = { r: 0.2, g: 0.0, b: 0.0 };
-const _FIRE_PALETTE_HOT_START = { r: 0.2, g: 0.6, b: 1.0 };
-const _FIRE_PALETTE_HOT_END = { r: 0.0, g: 0.1, b: 0.8 };
-
-const _FIRE_STD_START_DEFAULT = { r: 1.0, g: 1.0, b: 1.0 };
-const _FIRE_STD_END_DEFAULT = { r: 0.8, g: 0.2, b: 0.05 };
-const _EMBER_STD_START_DEFAULT = { r: 1.0, g: 0.8, b: 0.4 };
-const _EMBER_STD_END_DEFAULT = { r: 1.0, g: 0.2, b: 0.0 };
+// Legacy palette constants removed — lifecycle behaviors (FlameLifecycleBehavior,
+// EmberLifecycleBehavior) now use their own internal multi-stop gradient tables
+// for temperature-based color blending.
 
 /**
  * Emitter shape that spawns particles from a precomputed list of valid
@@ -247,10 +240,9 @@ class FireMaskShape {
             p.size *= (0.6 + 0.4 * survival);
         }
         
-        // Dying flames are more transparent (fizzle out)
-        if (p.color && typeof p.color.w === 'number') {
-            p.color.w *= (0.5 + 0.5 * survival);
-        }
+        // Weather guttering now only affects count (via life) and size.
+        // Alpha is no longer reduced here — the lifecycle behavior controls
+        // the full opacity curve without external multiplicative stages.
     }
 
     // 5. Apply brightness-based modifiers. The particle system has already
@@ -268,11 +260,10 @@ class FireMaskShape {
       p.size *= (0.4 + 0.6 * brightness);
     }
 
-    // Opacity (Alpha): Darker pixels are much more transparent.
-    // Using brightness^2 gives a sharper falloff so grey pixels look ghostly.
-    if (p.color && typeof p.color.w === 'number') {
-      p.color.w *= (brightness * brightness);
-    }
+    // Store brightness for lifecycle behaviors to read. Brightness now only
+    // affects size and life (above), not alpha directly. This prevents the
+    // compounding opacity kill where brightness² made mid-range pixels invisible.
+    p._flameBrightness = brightness;
 
     // 5. Reset velocity to prevent accumulation across particle reuse
     if (p.velocity) {
@@ -374,6 +365,516 @@ class FireSpinBehavior {
   }
 }
 
+// ============================================================================
+// FlameLifecycleBehavior — physically-inspired flame color/emission/alpha
+// ============================================================================
+// Replaces the stock ColorOverLife + startColor pipeline with a single behavior
+// that writes particle.color directly each frame. This bypasses the quarks
+// engine's startColor × ColorOverLife multiplication, giving us full control
+// over HDR emission, multi-stop blackbody gradients, and per-particle variation.
+//
+// Follows the DustFadeOverLifeBehavior pattern (DustMotesEffect.js): store
+// per-particle base values at spawn, read per-frame params in frameUpdate(),
+// and write particle.color directly in update().
+// ============================================================================
+
+// Pre-baked gradient tables for three temperature tiers (cold / standard / hot).
+// Each stop: { t, r, g, b } where t is particle life fraction [0..1].
+const _FLAME_GRADIENT_COLD = [
+  { t: 0.00, r: 0.90, g: 0.50, b: 0.15 },  // Dull orange core
+  { t: 0.12, r: 0.80, g: 0.25, b: 0.03 },  // Dark orange inner
+  { t: 0.40, r: 0.50, g: 0.10, b: 0.02 },  // Dark red body
+  { t: 0.65, r: 0.30, g: 0.05, b: 0.01 },  // Near-black tip
+  { t: 1.00, r: 0.15, g: 0.03, b: 0.01 },  // Extinction
+];
+
+const _FLAME_GRADIENT_STANDARD = [
+  { t: 0.00, r: 1.00, g: 0.95, b: 0.85 },  // White-yellow core (~1900K)
+  { t: 0.12, r: 1.00, g: 0.72, b: 0.20 },  // Rich amber inner (~1500K)
+  { t: 0.40, r: 1.00, g: 0.38, b: 0.05 },  // Deep orange body (~1300K)
+  { t: 0.65, r: 0.60, g: 0.12, b: 0.02 },  // Dark crimson tip (~1000K)
+  { t: 1.00, r: 0.15, g: 0.04, b: 0.01 },  // Near-black extinction (~800K)
+];
+
+const _FLAME_GRADIENT_HOT = [
+  { t: 0.00, r: 0.85, g: 0.92, b: 1.00 },  // Blue-white core
+  { t: 0.12, r: 1.00, g: 0.95, b: 0.85 },  // White inner
+  { t: 0.40, r: 1.00, g: 0.78, b: 0.28 },  // Yellow body
+  { t: 0.65, r: 1.00, g: 0.38, b: 0.05 },  // Orange tip
+  { t: 1.00, r: 0.60, g: 0.12, b: 0.02 },  // Crimson extinction
+];
+
+// HDR emission multiplier curve — drives bloom via BLOOM_HOTSPOT_LAYER.
+// Higher values at core mean overlapping young particles produce genuine HDR.
+const _FLAME_EMISSION_STOPS = [
+  { t: 0.00, v: 2.50 },  // Blazing core
+  { t: 0.12, v: 2.00 },  // Inner flame
+  { t: 0.35, v: 1.20 },  // Body — moderate glow
+  { t: 0.55, v: 0.60 },  // Outer body — dimming
+  { t: 0.70, v: 0.15 },  // Tip — barely emissive
+  { t: 1.00, v: 0.00 },  // Dead
+];
+
+// Alpha envelope — clean, predictable, no external multiplicative stages.
+const _FLAME_ALPHA_STOPS = [
+  { t: 0.00, v: 0.00 },  // Invisible at spawn — prevents pop
+  { t: 0.04, v: 0.85 },  // Rapid fade-in
+  { t: 0.15, v: 1.00 },  // Full opacity core + inner
+  { t: 0.50, v: 0.90 },  // Slight fade through body
+  { t: 0.70, v: 0.50 },  // Noticeable fade at tip
+  { t: 0.90, v: 0.15 },  // Mostly gone
+  { t: 1.00, v: 0.00 },  // Dead
+];
+
+class FlameLifecycleBehavior {
+  /**
+   * @param {FireSparksEffect} ownerEffect - Parent effect for reading params
+   */
+  constructor(ownerEffect) {
+    this.type = 'FlameLifecycle';
+    this.ownerEffect = ownerEffect;
+
+    // Active gradient (lerped between cold/standard/hot each frame by temperature).
+    // 5 stops matching the gradient tables above.
+    this._colorStops = _FLAME_GRADIENT_STANDARD.map(s => ({ ...s }));
+
+    // Cached per-frame values from params (avoid property lookups per particle)
+    this._peakOpacity = 1.0;
+    this._emissionScale = 2.5;
+    this._temperature = 0.5;
+  }
+
+  /**
+   * Called once when a particle spawns. Stores per-particle random heat
+   * variation so each flame tongue is slightly hotter or cooler.
+   */
+  initialize(particle) {
+    // ±15% random heat variation around base temperature
+    particle._flameHeat = 0.85 + Math.random() * 0.30;
+    // _flameBrightness is set by FireMaskShape.initialize() before behaviors run
+    if (particle._flameBrightness === undefined) {
+      particle._flameBrightness = 1.0;
+    }
+  }
+
+  /**
+   * Called every frame for every living particle. Writes particle.color directly,
+   * bypassing the quarks startColor × ColorOverLife multiplication.
+   */
+  update(particle, delta) {
+    const life = particle.life;
+    const age = particle.age;
+    if (life <= 0) return;
+    const t = age / Math.max(0.001, life); // 0 → 1
+
+    const heat = particle._flameHeat ?? 1.0;
+    // Clamp brightness to [0.3, 1.0] — even dim mask pixels produce visible flames
+    const brightness = Math.max(0.3, particle._flameBrightness ?? 1.0);
+
+    // 1. Sample multi-stop color gradient at time t
+    const color = this._lerpColorStops(t);
+
+    // 2. Sample emission multiplier (HDR for bloom)
+    const emission = this._lerpScalarStops(_FLAME_EMISSION_STOPS, t) * heat * this._emissionScale;
+
+    // 3. Sample alpha envelope
+    const alpha = this._lerpScalarStops(_FLAME_ALPHA_STOPS, t) * this._peakOpacity;
+
+    // 4. Write directly to particle.color (bypasses startColor multiplication)
+    particle.color.x = color.r * emission * brightness;
+    particle.color.y = color.g * emission * brightness;
+    particle.color.z = color.b * emission * brightness;
+    particle.color.w = alpha * brightness;
+  }
+
+  /**
+   * Called once per frame (before per-particle updates). Reads ownerEffect.params
+   * and pre-computes the active gradient for the current temperature.
+   */
+  frameUpdate(delta) {
+    const p = this.ownerEffect?.params;
+    this._peakOpacity = p?.flamePeakOpacity ?? 0.95;
+    this._emissionScale = p?.coreEmission ?? 2.5;
+    this._temperature = p?.fireTemperature ?? 0.5;
+    this._updateGradientsForTemperature(this._temperature);
+  }
+
+  /**
+   * Lerp between cold/standard/hot gradient tables based on temperature.
+   * Writes result into this._colorStops (no allocation).
+   */
+  _updateGradientsForTemperature(temp) {
+    const stops = this._colorStops;
+    let srcA, srcB, f;
+
+    if (temp <= 0.5) {
+      srcA = _FLAME_GRADIENT_COLD;
+      srcB = _FLAME_GRADIENT_STANDARD;
+      f = temp * 2.0; // 0→1 over [0.0, 0.5]
+    } else {
+      srcA = _FLAME_GRADIENT_STANDARD;
+      srcB = _FLAME_GRADIENT_HOT;
+      f = (temp - 0.5) * 2.0; // 0→1 over [0.5, 1.0]
+    }
+
+    for (let i = 0; i < stops.length; i++) {
+      const a = srcA[i];
+      const b = srcB[i];
+      stops[i].r = a.r + (b.r - a.r) * f;
+      stops[i].g = a.g + (b.g - a.g) * f;
+      stops[i].b = a.b + (b.b - a.b) * f;
+    }
+  }
+
+  /**
+   * Linear interpolation across the multi-stop color gradient.
+   * Returns {r, g, b} for the given life fraction t.
+   * @param {number} t - Life fraction [0..1]
+   * @returns {{r: number, g: number, b: number}}
+   */
+  _lerpColorStops(t) {
+    const stops = this._colorStops;
+    let i = 0;
+    while (i < stops.length - 1 && stops[i + 1].t <= t) i++;
+    if (i >= stops.length - 1) return stops[stops.length - 1];
+
+    const a = stops[i];
+    const b = stops[i + 1];
+    const f = (t - a.t) / Math.max(0.0001, b.t - a.t);
+    // Reuse a temp object to avoid per-particle allocation
+    return _flameColorTemp.r = a.r + (b.r - a.r) * f,
+           _flameColorTemp.g = a.g + (b.g - a.g) * f,
+           _flameColorTemp.b = a.b + (b.b - a.b) * f,
+           _flameColorTemp;
+  }
+
+  /**
+   * Linear interpolation across a scalar stop array [{t, v}, ...].
+   * @param {Array<{t: number, v: number}>} stops
+   * @param {number} t - Life fraction [0..1]
+   * @returns {number}
+   */
+  _lerpScalarStops(stops, t) {
+    let i = 0;
+    while (i < stops.length - 1 && stops[i + 1].t <= t) i++;
+    if (i >= stops.length - 1) return stops[stops.length - 1].v;
+
+    const a = stops[i];
+    const b = stops[i + 1];
+    const f = (t - a.t) / Math.max(0.0001, b.t - a.t);
+    return a.v + (b.v - a.v) * f;
+  }
+
+  reset() {}
+
+  clone() {
+    return new FlameLifecycleBehavior(this.ownerEffect);
+  }
+}
+
+// Reusable temp object for _lerpColorStops to avoid per-particle allocation
+const _flameColorTemp = { r: 0, g: 0, b: 0 };
+
+// ============================================================================
+// SmokeLifecycleBehavior — NormalBlending smoke color/alpha over life
+// ============================================================================
+// Smoke uses NormalBlending (dark grey must occlude, not add). This behavior
+// writes particle.color directly, matching the FlameLifecycleBehavior pattern.
+// Smoke is born inside the flame zone (invisible), emerges as a warm grey
+// plume, and dissipates over its longer lifetime.
+// ============================================================================
+
+// Smoke color gradient: warm brownish grey → neutral grey → thinning
+// Two gradient sets for the warmth slider: cool (grey) and warm (brown)
+const _SMOKE_COLOR_COOL = [
+  { t: 0.00, r: 0.35, g: 0.35, b: 0.35 },  // Neutral grey (born inside flame)
+  { t: 0.10, r: 0.40, g: 0.40, b: 0.40 },  // Light grey (emerging)
+  { t: 0.25, r: 0.45, g: 0.45, b: 0.45 },  // Peak grey
+  { t: 0.50, r: 0.40, g: 0.40, b: 0.40 },  // Cooling
+  { t: 0.75, r: 0.32, g: 0.32, b: 0.32 },  // Thinning
+  { t: 1.00, r: 0.25, g: 0.25, b: 0.25 },  // Dissipated
+];
+const _SMOKE_COLOR_WARM = [
+  { t: 0.00, r: 0.40, g: 0.30, b: 0.20 },  // Warm brown (born inside flame)
+  { t: 0.10, r: 0.48, g: 0.38, b: 0.28 },  // Lighter brownish (emerging)
+  { t: 0.25, r: 0.50, g: 0.42, b: 0.32 },  // Warm grey (peak)
+  { t: 0.50, r: 0.42, g: 0.38, b: 0.32 },  // Cooling
+  { t: 0.75, r: 0.33, g: 0.30, b: 0.28 },  // Thinning
+  { t: 1.00, r: 0.25, g: 0.24, b: 0.22 },  // Dissipated
+];
+
+
+class SmokeLifecycleBehavior {
+  /**
+   * @param {FireSparksEffect} ownerEffect - Parent effect for reading params
+   */
+  constructor(ownerEffect) {
+    this.type = 'SmokeLifecycle';
+    this.ownerEffect = ownerEffect;
+
+    // Cached per-frame values (updated in frameUpdate)
+    this._smokeOpacity = 0.6;
+    this._colorWarmth = 0.4;
+    this._colorBrightness = 0.45;
+    this._darknessFactor = 1.0;  // 1.0 = full brightness, 0.15 = very dark
+    this._sizeGrowth = 4.0;
+    this._precipMult = 1.0;
+
+    // Alpha envelope curve control points (normalized lifetime 0-1)
+    this._alphaStart = 0.0;   // t where alpha begins ramping up from 0
+    this._alphaPeak = 0.75;   // t where alpha reaches maximum
+    this._alphaEnd = 1.0;     // t where alpha returns to 0
+  }
+
+  initialize(particle) {
+    // Per-particle smoke density from mask brightness (set by FireMaskShape).
+    // Dim areas = more smoke (smoldering edges), bright areas = less smoke.
+    const brightness = particle._flameBrightness ?? 1.0;
+    particle._smokeDensity = 1.0 - (brightness * 0.5);
+
+    // Store initial size for param-driven size growth (replaces SizeOverLife)
+    particle._smokeStartSize = particle.size;
+  }
+
+  update(particle, delta) {
+    const life = particle.life;
+    const age = particle.age;
+    if (life <= 0) return;
+    const t = age / Math.max(0.001, life);
+
+    const density = particle._smokeDensity ?? 0.75;
+
+    // --- Color: blend between cool grey and warm brown based on warmth param ---
+    const coolColor = _lerpStops(_SMOKE_COLOR_COOL, t);
+    const warmColor = _lerpStops(_SMOKE_COLOR_WARM, t);
+    const w = this._colorWarmth;
+    const baseR = coolColor.r + (warmColor.r - coolColor.r) * w;
+    const baseG = coolColor.g + (warmColor.g - coolColor.g) * w;
+    const baseB = coolColor.b + (warmColor.b - coolColor.b) * w;
+
+    // Apply brightness and darkness factor
+    const brightDark = this._colorBrightness * this._darknessFactor;
+    particle.color.x = baseR * brightDark;
+    particle.color.y = baseG * brightDark;
+    particle.color.z = baseB * brightDark;
+
+    // --- Alpha: param-driven 3-point envelope (start → peak → end) ---
+    // Smoothstep ramp up from _alphaStart to _alphaPeak, then down to _alphaEnd.
+    let alphaEnv = 0.0;
+    const aStart = this._alphaStart;
+    const aPeak = this._alphaPeak;
+    const aEnd = this._alphaEnd;
+    if (t <= aStart) {
+      alphaEnv = 0.0;
+    } else if (t <= aPeak) {
+      // Ramp up: smoothstep from 0 to 1
+      const rampT = (t - aStart) / Math.max(0.0001, aPeak - aStart);
+      alphaEnv = rampT * rampT * (3.0 - 2.0 * rampT);
+    } else if (t <= aEnd) {
+      // Ramp down: smoothstep from 1 to 0
+      const fadeT = (t - aPeak) / Math.max(0.0001, aEnd - aPeak);
+      const s = fadeT * fadeT * (3.0 - 2.0 * fadeT);
+      alphaEnv = 1.0 - s;
+    }
+    particle.color.w = alphaEnv * density * this._smokeOpacity * this._precipMult;
+
+    // --- Size growth: billow from startSize to startSize * sizeGrowth ---
+    // Use smoothstep for natural-looking expansion
+    const startSize = particle._smokeStartSize;
+    if (startSize > 0) {
+      const st = t * t * (3.0 - 2.0 * t); // smoothstep
+      particle.size = startSize * (1.0 + (this._sizeGrowth - 1.0) * st);
+    }
+  }
+
+  frameUpdate(delta) {
+    const p = this.ownerEffect?.params;
+
+    // Read smoke params (with sensible defaults)
+    this._smokeOpacity = Math.max(0.0, Math.min(1.0, p?.smokeOpacity ?? 0.6));
+    this._colorWarmth = Math.max(0.0, Math.min(1.0, p?.smokeColorWarmth ?? 0.4));
+    this._colorBrightness = Math.max(0.01, p?.smokeColorBrightness ?? 0.45);
+    this._sizeGrowth = Math.max(1.0, p?.smokeSizeGrowth ?? 4.0);
+
+    // Alpha envelope curve: 3-point control (start/peak/end as normalized lifetime)
+    this._alphaStart = Math.max(0.0, Math.min(1.0, p?.smokeAlphaStart ?? 0.0));
+    this._alphaPeak = Math.max(this._alphaStart, Math.min(1.0, p?.smokeAlphaPeak ?? 0.75));
+    this._alphaEnd = Math.max(this._alphaPeak, Math.min(1.0, p?.smokeAlphaEnd ?? 1.0));
+
+    // Scene darkness modulation: smoke shouldn't glow at night
+    const darknessResponse = Math.max(0.0, Math.min(1.0, p?.smokeDarknessResponse ?? 0.8));
+    const envState = weatherController._environmentState;
+    const sceneDarkness = envState?.sceneDarkness ?? 0.0;
+    // At darkness=0: factor=1.0 (full bright); at darkness=1, response=1: factor=0.15 (very dark but not invisible)
+    this._darknessFactor = 1.0 - sceneDarkness * darknessResponse * 0.85;
+
+    // Precipitation suppresses smoke for outdoor particles (rain condenses it)
+    const precip = weatherController.currentState?.precipitation || 0;
+    this._precipMult = Math.max(0.2, 1.0 - precip * 0.5);
+  }
+
+  reset() {}
+
+  clone() {
+    return new SmokeLifecycleBehavior(this.ownerEffect);
+  }
+}
+
+// Reusable temp objects for smoke color lerp
+const _smokeColorTemp = { r: 0, g: 0, b: 0 };
+const _smokeColorTemp2 = { r: 0, g: 0, b: 0 };
+
+/** Lerp a color stop array, writing to _smokeColorTemp (or _smokeColorTemp2). */
+function _lerpStops(stops, t) {
+  let i = 0;
+  while (i < stops.length - 1 && stops[i + 1].t <= t) i++;
+  if (i >= stops.length - 1) {
+    const last = stops[stops.length - 1];
+    // Return using the temp that matches the stops array
+    const out = (stops === _SMOKE_COLOR_COOL) ? _smokeColorTemp : _smokeColorTemp2;
+    out.r = last.r; out.g = last.g; out.b = last.b;
+    return out;
+  }
+  const a = stops[i];
+  const b = stops[i + 1];
+  const f = (t - a.t) / Math.max(0.0001, b.t - a.t);
+  const out = (stops === _SMOKE_COLOR_COOL) ? _smokeColorTemp : _smokeColorTemp2;
+  out.r = a.r + (b.r - a.r) * f;
+  out.g = a.g + (b.g - a.g) * f;
+  out.b = a.b + (b.b - a.b) * f;
+  return out;
+}
+
+
+// ============================================================================
+// EmberLifecycleBehavior — cooling ember color/emission over life
+// ============================================================================
+// Embers start blazing hot (yellow-white) and cool to dark red/black.
+// Uses HDR emission for bloom, same pattern as FlameLifecycleBehavior.
+// ============================================================================
+
+const _EMBER_COLOR_STOPS = [
+  { t: 0.00, r: 1.0, g: 0.9, b: 0.5 },   // Hot yellow-white (just broke off)
+  { t: 0.15, r: 1.0, g: 0.6, b: 0.1 },   // Bright orange (still very hot)
+  { t: 0.40, r: 0.9, g: 0.3, b: 0.02 },  // Orange-red (cooling)
+  { t: 0.70, r: 0.5, g: 0.1, b: 0.01 },  // Dark red (nearly cooled)
+  { t: 1.00, r: 0.2, g: 0.02, b: 0.0 },  // Almost black (dead ember)
+];
+
+const _EMBER_EMISSION_STOPS = [
+  { t: 0.00, v: 3.0 },   // Blazing hot, strong bloom
+  { t: 0.10, v: 2.0 },   // Still very bright
+  { t: 0.30, v: 1.0 },   // Moderate glow
+  { t: 0.60, v: 0.3 },   // Dim
+  { t: 1.00, v: 0.0 },   // Dead
+];
+
+const _EMBER_ALPHA_STOPS = [
+  { t: 0.00, v: 0.0 },   // Invisible at spawn
+  { t: 0.03, v: 0.90 },  // Rapid fade-in
+  { t: 0.20, v: 1.0 },   // Full
+  { t: 0.60, v: 0.80 },  // Slow fade
+  { t: 0.85, v: 0.30 },  // Dimming
+  { t: 1.00, v: 0.0 },   // Dead
+];
+
+class EmberLifecycleBehavior {
+  constructor(ownerEffect) {
+    this.type = 'EmberLifecycle';
+    this.ownerEffect = ownerEffect;
+
+    // Active gradient lerped by temperature
+    this._colorStops = _EMBER_COLOR_STOPS.map(s => ({ ...s }));
+    this._emissionScale = 1.0;
+    this._peakOpacity = 1.0;
+    this._temperature = 0.5;
+  }
+
+  initialize(particle) {
+    particle._emberHeat = 0.85 + Math.random() * 0.30;
+    if (particle._flameBrightness === undefined) {
+      particle._flameBrightness = 1.0;
+    }
+  }
+
+  update(particle, delta) {
+    const life = particle.life;
+    const age = particle.age;
+    if (life <= 0) return;
+    const t = age / Math.max(0.001, life);
+
+    const heat = particle._emberHeat ?? 1.0;
+    const brightness = Math.max(0.3, particle._flameBrightness ?? 1.0);
+
+    const color = this._lerpColorStops(t);
+    const emission = this._lerpScalarStops(_EMBER_EMISSION_STOPS, t) * heat * this._emissionScale;
+    const alpha = this._lerpScalarStops(_EMBER_ALPHA_STOPS, t) * this._peakOpacity;
+
+    particle.color.x = color.r * emission * brightness;
+    particle.color.y = color.g * emission * brightness;
+    particle.color.z = color.b * emission * brightness;
+    particle.color.w = alpha * brightness;
+  }
+
+  frameUpdate(delta) {
+    const p = this.ownerEffect?.params;
+    this._emissionScale = p?.emberEmission ?? 2.0;
+    this._peakOpacity = p?.emberPeakOpacity ?? 0.9;
+    this._temperature = p?.fireTemperature ?? 0.5;
+    // Temperature shifts ember colors similar to flame
+    this._updateGradientsForTemperature(this._temperature);
+  }
+
+  _updateGradientsForTemperature(temp) {
+    // Embers share the same hot/cold shift idea but with a simpler blend:
+    // Cold → redder/dimmer, Hot → yellower/brighter.
+    // We only shift the first 2 stops (birth colors) noticeably.
+    const stops = this._colorStops;
+    const base = _EMBER_COLOR_STOPS;
+    const heatShift = (temp - 0.5) * 0.3; // ±0.15 max
+
+    for (let i = 0; i < stops.length; i++) {
+      stops[i].r = Math.min(1.0, Math.max(0.0, base[i].r + heatShift * 0.2));
+      stops[i].g = Math.min(1.0, Math.max(0.0, base[i].g + heatShift * 0.5));
+      stops[i].b = Math.min(1.0, Math.max(0.0, base[i].b + heatShift * 0.8));
+    }
+  }
+
+  _lerpColorStops(t) {
+    const stops = this._colorStops;
+    let i = 0;
+    while (i < stops.length - 1 && stops[i + 1].t <= t) i++;
+    if (i >= stops.length - 1) return stops[stops.length - 1];
+
+    const a = stops[i];
+    const b = stops[i + 1];
+    const f = (t - a.t) / Math.max(0.0001, b.t - a.t);
+    return _emberColorTemp.r = a.r + (b.r - a.r) * f,
+           _emberColorTemp.g = a.g + (b.g - a.g) * f,
+           _emberColorTemp.b = a.b + (b.b - a.b) * f,
+           _emberColorTemp;
+  }
+
+  _lerpScalarStops(stops, t) {
+    let i = 0;
+    while (i < stops.length - 1 && stops[i + 1].t <= t) i++;
+    if (i >= stops.length - 1) return stops[stops.length - 1].v;
+
+    const a = stops[i];
+    const b = stops[i + 1];
+    const f = (t - a.t) / Math.max(0.0001, b.t - a.t);
+    return a.v + (b.v - a.v) * f;
+  }
+
+  reset() {}
+
+  clone() {
+    return new EmberLifecycleBehavior(this.ownerEffect);
+  }
+}
+
+const _emberColorTemp = { r: 0, g: 0, b: 0 };
+
 class ParticleTimeScaledBehavior {
   constructor(inner) {
     this.type = 'ParticleTimeScaled';
@@ -441,6 +942,7 @@ export class FireSparksEffect extends EffectBase {
     this.globalEmbers = null;
     this.globalSystems = [];
     this.globalEmberSystems = [];
+    this.globalSmokeSystems = [];
     this._lastAssetBundle = null;
     this._lastMapPointsManager = null;
     this.emberTexture = null;
@@ -452,10 +954,6 @@ export class FireSparksEffect extends EffectBase {
     this._reusableConstantValue = null;
     this._tempSystems = [];
 
-    this._tempTargetFireStart = { r: 1.0, g: 1.0, b: 1.0 };
-    this._tempTargetFireEnd = { r: 1.0, g: 0.2, b: 0.0 };
-    this._tempTargetEmberStart = { r: 1.0, g: 0.8, b: 0.4 };
-    this._tempTargetEmberEnd = { r: 1.0, g: 0.2, b: 0.0 };
     // Per-system reusable color objects (keyed by system reference)
     this._systemColorCache = new WeakMap();
     
@@ -468,25 +966,21 @@ export class FireSparksEffect extends EffectBase {
     this.params = {
       enabled: true,
       // Tuned default from scene: Global Intensity
-      globalFireRate: 4.0,
+      globalFireRate: 5.2,
       // Tuned default: very low flame height for floor-level glyphs
       fireHeight: 10.0,
       fireSize: 18.0,
-      emberRate: 5.0,
+      emberRate: 3.1,
       // Wind Influence is controlled by WeatherController; keep existing default
-      windInfluence: 5.0,
+      windInfluence: 4.5,
       // Updated default from scene
       lightIntensity: 5.0,
 
       // Fire fine controls (defaults)
-      fireSizeMin: 23,
-      fireSizeMax: 80,
-      fireLifeMin: 2.95,
-      fireLifeMax: 3.7,
-      fireOpacityMin: 0.54,
-      fireOpacityMax: 0.97,
-      fireColorBoostMin: 0.0,
-      fireColorBoostMax: 1.35,
+      fireSizeMin: 19,
+      fireSizeMax: 170,
+      fireLifeMin: 1.35,
+      fireLifeMax: 6,
       fireSpinEnabled: true,
       fireSpinSpeedMin: 0.2,
       fireSpinSpeedMax: 0.7,
@@ -496,33 +990,22 @@ export class FireSparksEffect extends EffectBase {
       fireTemperature: 0.5,
 
       // Ember fine controls (keep most previous tuning, update sizes from scene)
-      emberSizeMin: 13.0,
-      emberSizeMax: 22.0,
-      emberLifeMin: 0.7,
-      emberLifeMax: 3.6,
-      emberOpacityMin: 0.67,
-      emberOpacityMax: 0.89,
-      emberColorBoostMin: 0.7,
-      emberColorBoostMax: 1.95,
-
-      // New color controls
-      fireStartColor: { r: 1.0, g: 1.0, b: 1.0 },
-      fireEndColor: { r: 0.8, g: 0.2, b: 0.05 },
-      emberStartColor: { r: 1.0, g: 0.8, b: 0.4 },
-      emberEndColor: { r: 1.0, g: 0.2, b: 0.0 },
-
+      emberSizeMin: 5,
+      emberSizeMax: 17,
+      emberLifeMin: 6.6,
+      emberLifeMax: 12,
       // Physics controls (match Mad Scientist scene where provided)
-      fireUpdraft: 0.15,
-      emberUpdraft: 6.05,
+      fireUpdraft: 0.3,
+      emberUpdraft: 3.3,
       fireCurlStrength: 0.7,
-      emberCurlStrength: 0.55,
+      emberCurlStrength: 0.3,
 
       // Weather guttering controls (outdoor fire kill strength)
       // These scale how strongly precipitation and wind reduce fire lifetime
       // and size during spawn-time guttering in FireMaskShape.initialize.
       // Defaults preserve existing tuned behavior: precip 0.8, wind 0.4.
-      weatherPrecipKill: 0.8,
-      weatherWindKill: 0.4,
+      weatherPrecipKill: 0.5,
+      weatherWindKill: 0.5,
 
       // Per-effect time scaling (independent of global Simulation Speed)
       // 1.0 = baseline, >1.0 = faster (shorter lifetimes), <1.0 = slower.
@@ -548,10 +1031,10 @@ export class FireSparksEffect extends EffectBase {
 
       // ========== HEAT DISTORTION CONTROLS ==========
       // Heat distortion creates a rippling heat haze effect around fire sources
-      heatDistortionEnabled: false,
-      heatDistortionIntensity: 0.011, // Strength of UV offset (0.0 - 0.05)
-      heatDistortionFrequency: 8.0,   // Noise frequency for shimmer pattern
-      heatDistortionSpeed: 1.0,       // Animation speed multiplier
+      heatDistortionEnabled: true,
+      heatDistortionIntensity: 0.05, // Strength of UV offset (0.0 - 0.05)
+      heatDistortionFrequency: 20,   // Noise frequency for shimmer pattern
+      heatDistortionSpeed: 3,        // Animation speed multiplier
       heatDistortionBlurRadius: 4.0,  // Blur radius for mask expansion
       heatDistortionBlurPasses: 3,    // Number of blur passes (more = wider area)
       heatDistortionBoost: 2.0,       // Brightness boost before blur (expands effective area)
@@ -560,21 +1043,49 @@ export class FireSparksEffect extends EffectBase {
       // 1.0 = indoor flames live as long as outdoor flames.
       // <1.0 = indoor flames are shorter-lived (tighter, less buoyant).
       // This is applied in FireMaskShape.initialize when outdoorFactor ~ 0.
-      indoorLifeScale: 0.75,
+      indoorLifeScale: 0.7,
 
-      indoorTimeScale: 1,
+      indoorTimeScale: 0.2,
+
+      // ========== FLAME LIFECYCLE CONTROLS ==========
+      // These drive the FlameLifecycleBehavior's multi-stop gradients.
+      flamePeakOpacity: 0.9,   // Maximum alpha at peak life (0.0-1.0)
+      coreEmission: 0.7,       // HDR emission multiplier for flame core (drives bloom)
+
+      // ========== EMBER LIFECYCLE CONTROLS ==========
+      emberEmission: 2.0,       // HDR emission multiplier for ember core
+      emberPeakOpacity: 0.9,    // Maximum alpha for embers
+
+      // ========== SMOKE CONTROLS ==========
+      smokeEnabled: true,           // Enable/disable smoke system
+      smokeRatio: 0.5,              // Smoke emission relative to fire rate
+      smokeOpacity: 0.2,            // Peak smoke alpha (0-1)
+      smokeColorWarmth: 0.59,       // 0 = cool grey, 1 = warm brown
+      smokeColorBrightness: 0.9,    // Base brightness multiplier
+      smokeDarknessResponse: 0.8,   // How much scene darkness darkens smoke (0-1)
+      smokeSizeMin: 183,            // Start size minimum
+      smokeSizeMax: 400,            // Start size maximum
+      smokeSizeGrowth: 10,          // Smoothstep expansion factor over lifetime
+      smokeLifeMin: 7,              // Minimum lifetime (seconds)
+      smokeLifeMax: 15,             // Maximum lifetime (seconds)
+      smokeUpdraft: 8.8,            // Upward force strength
+      smokeTurbulence: 0.05,        // Curl noise strength multiplier
+      smokeWindInfluence: 3.1,      // Wind response multiplier (relative to base windInfluence)
+      smokeAlphaStart: 0.7,         // Normalized life (0-1) where alpha starts ramping up
+      smokeAlphaPeak: 0.8,          // Normalized life where alpha reaches peak
+      smokeAlphaEnd: 1,             // Normalized life where alpha fades back to 0
 
       // ========== FLAME TEXTURE CONTROLS ==========
       // Controls for the flame.webp sprite appearance and UV transforms.
-      flameTextureOpacity: 0.85,
-      flameTextureBrightness: 1.0,
-      flameTextureScaleX: 1.0,
-      flameTextureScaleY: 1.0,
-      flameTextureOffsetX: 0.0,
-      flameTextureOffsetY: 0.0,
-      flameTextureRotation: 0.0,
-      flameTextureFlipX: false,
-      flameTextureFlipY: false
+      flameTextureOpacity: 0.78,
+      flameTextureBrightness: 1.22,
+      flameTextureScaleX: 1,
+      flameTextureScaleY: 1,
+      flameTextureOffsetX: 0,
+      flameTextureOffsetY: 0,
+      flameTextureRotation: 0,
+      flameTextureFlipX: true,
+      flameTextureFlipY: true
     };
 
     // Fire texture is loaded lazily via _ensureFireTexture.
@@ -586,6 +1097,7 @@ export class FireSparksEffect extends EffectBase {
     if (this.globalSystem || this.globalEmbers) return true;
     if (this.globalSystems && this.globalSystems.length) return true;
     if (this.globalEmberSystems && this.globalEmberSystems.length) return true;
+    if (this.globalSmokeSystems && this.globalSmokeSystems.length) return true;
     if (this.fires && this.fires.length) return true;
     return false;
   }
@@ -776,100 +1288,142 @@ export class FireSparksEffect extends EffectBase {
     return {
       enabled: true,
       groups: [
-        { name: 'fire-main', label: 'Fire - Main', type: 'inline', parameters: ['globalFireRate', 'fireHeight', 'fireTemperature'] },
-        { name: 'fire-shape', label: 'Fire - Shape', type: 'inline', parameters: ['fireSizeMin', 'fireSizeMax', 'fireLifeMin', 'fireLifeMax'] },
-        { name: 'fire-look', label: 'Fire - Look', type: 'inline', parameters: ['fireOpacityMin', 'fireOpacityMax', 'fireColorBoostMin', 'fireColorBoostMax', 'fireStartColor', 'fireEndColor'] },
-        { name: 'fire-spin', label: 'Fire - Spin', type: 'inline', parameters: ['fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax'] },
-        { name: 'fire-physics', label: 'Fire - Physics', type: 'inline', parameters: ['fireUpdraft', 'fireCurlStrength'] },
+        // ── Flames ──────────────────────────────────────────────────────
         {
-          name: 'flame-texture',
-          label: 'Flame Texture (Sprite)',
-          type: 'inline',
+          name: 'flames', label: '🔥 Flames', type: 'folder', expanded: false,
           parameters: [
-            'flameTextureOpacity',
-            'flameTextureBrightness',
-            'flameTextureScaleX',
-            'flameTextureScaleY',
-            'flameTextureOffsetX',
-            'flameTextureOffsetY',
-            'flameTextureRotation',
-            'flameTextureFlipX',
-            'flameTextureFlipY'
+            'globalFireRate', 'fireHeight', 'fireTemperature',
+            'flamePeakOpacity', 'coreEmission',
+            'fireSizeMin', 'fireSizeMax',
+            'fireLifeMin', 'fireLifeMax',
+            'fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax',
+            'fireUpdraft', 'fireCurlStrength'
           ]
         },
-        { name: 'embers-main', label: 'Embers - Main', type: 'inline', parameters: ['emberRate'] },
-        { name: 'embers-shape', label: 'Embers - Shape', type: 'inline', parameters: ['emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax'] },
-        { name: 'embers-look', label: 'Embers - Look', type: 'inline', parameters: ['emberOpacityMin', 'emberOpacityMax', 'emberColorBoostMin', 'emberColorBoostMax', 'emberStartColor', 'emberEndColor'] },
-        { name: 'embers-physics', label: 'Embers - Physics', type: 'inline', parameters: ['emberUpdraft', 'emberCurlStrength'] },
-        { name: 'env', label: 'Environment', type: 'inline', parameters: ['windInfluence', 'lightIntensity', 'timeScale', 'indoorLifeScale', 'indoorTimeScale', 'weatherPrecipKill', 'weatherWindKill'] },
-        { name: 'heat-distortion', label: 'Heat Distortion', type: 'inline', parameters: ['heatDistortionEnabled', 'heatDistortionIntensity', 'heatDistortionFrequency', 'heatDistortionSpeed'] }
+        // ── Flame Texture ───────────────────────────────────────────────
+        {
+          name: 'flame-texture', label: '🎨 Flame Texture', type: 'folder', expanded: false,
+          parameters: [
+            'flameTextureOpacity', 'flameTextureBrightness',
+            'flameTextureScaleX', 'flameTextureScaleY',
+            'flameTextureOffsetX', 'flameTextureOffsetY',
+            'flameTextureRotation',
+            'flameTextureFlipX', 'flameTextureFlipY'
+          ]
+        },
+        // ── Embers ──────────────────────────────────────────────────────
+        {
+          name: 'embers', label: '✨ Embers', type: 'folder', expanded: false,
+          parameters: [
+            'emberRate', 'emberEmission', 'emberPeakOpacity',
+            'emberSizeMin', 'emberSizeMax',
+            'emberLifeMin', 'emberLifeMax',
+            'emberUpdraft', 'emberCurlStrength'
+          ]
+        },
+        // ── Smoke ───────────────────────────────────────────────────────
+        {
+          name: 'smoke', label: '💨 Smoke', type: 'folder', expanded: true,
+          parameters: [
+            'smokeEnabled', 'smokeRatio',
+            'smokeOpacity', 'smokeColorWarmth', 'smokeColorBrightness',
+            'smokeDarknessResponse',
+            'smokeAlphaStart', 'smokeAlphaPeak', 'smokeAlphaEnd',
+            'smokeSizeMin', 'smokeSizeMax', 'smokeSizeGrowth',
+            'smokeLifeMin', 'smokeLifeMax',
+            'smokeUpdraft', 'smokeTurbulence', 'smokeWindInfluence'
+          ]
+        },
+        // ── Environment ─────────────────────────────────────────────────
+        {
+          name: 'environment', label: '🌍 Environment', type: 'folder', expanded: false,
+          parameters: [
+            'windInfluence', 'timeScale', 'lightIntensity',
+            'indoorLifeScale', 'indoorTimeScale',
+            'weatherPrecipKill', 'weatherWindKill'
+          ]
+        },
+        // ── Heat Distortion ─────────────────────────────────────────────
+        {
+          name: 'heat-distortion', label: '🌀 Heat Distortion', type: 'folder', expanded: false,
+          parameters: [
+            'heatDistortionEnabled',
+            'heatDistortionIntensity', 'heatDistortionFrequency', 'heatDistortionSpeed'
+          ]
+        }
       ],
       parameters: {
         enabled: { type: 'checkbox', label: 'Fire Enabled', default: true },
-        // Tuned default from scene: Global Intensity
-        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 2.5 },
-        // Tuned default: low height for floor-level glyph fires
+
+        // ── Flames ──────────────────────────────────────────────────────
+        globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 5.2 },
         fireHeight: { type: 'slider', label: 'Height', min: 1.0, max: 600.0, step: 1.0, default: 10.0 },
-
-        // Temperature (0.0 = Arctic/Chilled, 1.0 = Blue Bunsen)
         fireTemperature: { type: 'slider', label: 'Temperature', min: 0.0, max: 1.0, step: 0.05, default: 0.5 },
-        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 150.0, step: 1.0, default: 23 },
-        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 200.0, step: 1.0, default: 80 },
-        fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 6.0, step: 0.05, default: 2.95 },
-        fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 3.7 },
-        fireOpacityMin: { type: 'slider', label: 'Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.54 },
-        fireOpacityMax: { type: 'slider', label: 'Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 0.97 },
-        fireColorBoostMin: { type: 'slider', label: 'Color Boost Min', min: 0.0, max: 4.0, step: 0.05, default: 0.0 },
-        fireColorBoostMax: { type: 'slider', label: 'Color Boost Max', min: 0.0, max: 12.0, step: 0.05, default: 2.15 },
-        fireStartColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 } },
-        fireEndColor: { type: 'color', default: { r: 0.8, g: 0.2, b: 0.05 } },
+        flamePeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.9 },
+        coreEmission: { type: 'slider', label: 'Core Emission (HDR)', min: 0.5, max: 5.0, step: 0.1, default: 0.7 },
+        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 150.0, step: 1.0, default: 19 },
+        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 200.0, step: 1.0, default: 170 },
+        fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 6.0, step: 0.05, default: 1.35 },
+        fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 6 },
         fireSpinEnabled: { type: 'checkbox', label: 'Spin Enabled', default: true },
-        fireSpinSpeedMin: { type: 'slider', label: 'Spin Speed Min (rad/s)', min: 0.0, max: 50.0, step: 0.1, default: 0.2 },
-        fireSpinSpeedMax: { type: 'slider', label: 'Spin Speed Max (rad/s)', min: 0.0, max: 50.0, step: 0.1, default: 0.7 },
+        fireSpinSpeedMin: { type: 'slider', label: 'Spin Speed Min', min: 0.0, max: 50.0, step: 0.1, default: 0.2 },
+        fireSpinSpeedMax: { type: 'slider', label: 'Spin Speed Max', min: 0.0, max: 50.0, step: 0.1, default: 0.7 },
+        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 0.3 },
+        fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.7 },
 
-        // ========== FLAME TEXTURE CONTROLS ==========
-        flameTextureOpacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.85 },
-        flameTextureBrightness: { type: 'slider', label: 'Brightness', min: 0.0, max: 3.0, step: 0.01, default: 1.0 },
+        // ── Flame Texture ───────────────────────────────────────────────
+        flameTextureOpacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.78 },
+        flameTextureBrightness: { type: 'slider', label: 'Brightness', min: 0.0, max: 3.0, step: 0.01, default: 1.22 },
         flameTextureScaleX: { type: 'slider', label: 'Scale X', min: 0.05, max: 4.0, step: 0.05, default: 1.0 },
         flameTextureScaleY: { type: 'slider', label: 'Scale Y', min: 0.05, max: 4.0, step: 0.05, default: 1.0 },
         flameTextureOffsetX: { type: 'slider', label: 'Offset X', min: -1.0, max: 1.0, step: 0.01, default: 0.0 },
         flameTextureOffsetY: { type: 'slider', label: 'Offset Y', min: -1.0, max: 1.0, step: 0.01, default: 0.0 },
         flameTextureRotation: { type: 'slider', label: 'Rotation (rad)', min: -3.14, max: 3.14, step: 0.01, default: 0.0 },
-        flameTextureFlipX: { type: 'checkbox', label: 'Flip X', default: false },
-        flameTextureFlipY: { type: 'checkbox', label: 'Flip Y', default: false },
+        flameTextureFlipX: { type: 'checkbox', label: 'Flip X', default: true },
+        flameTextureFlipY: { type: 'checkbox', label: 'Flip Y', default: true },
 
-        emberRate: { type: 'slider', label: 'Ember Density', min: 0.0, max: 5.0, step: 0.1, default: 2.5 },
-        emberSizeMin: { type: 'slider', label: 'Ember Size Min', min: 1.0, max: 40.0, step: 1.0, default: 5.0 },
-        emberSizeMax: { type: 'slider', label: 'Ember Size Max', min: 1.0, max: 60.0, step: 1.0, default: 17.0 },
-        emberLifeMin: { type: 'slider', label: 'Ember Life Min (s)', min: 0.1, max: 8.0, step: 0.1, default: 1.0 },
-        emberLifeMax: { type: 'slider', label: 'Ember Life Max (s)', min: 0.1, max: 12.0, step: 0.1, default: 12.0 },
-        emberOpacityMin: { type: 'slider', label: 'Ember Opacity Min', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
-        emberOpacityMax: { type: 'slider', label: 'Ember Opacity Max', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
-        emberColorBoostMin: { type: 'slider', label: 'Ember Color Boost Min', min: 0.0, max: 2.0, step: 0.05, default: 0.7 },
-        emberColorBoostMax: { type: 'slider', label: 'Ember Color Boost Max', min: 0.0, max: 3.0, step: 0.05, default: 1.95 },
-        emberStartColor: { type: 'color', default: { r: 1.0, g: 0.8, b: 0.4 } },
-        emberEndColor: { type: 'color', default: { r: 1.0, g: 0.2, b: 0.0 } },
-        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 0.15 },
-        emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 6.05 },
-        fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.7 },
-        emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.55 },
-        // Wind Influence remains generic; Light Intensity and Time Scale match scene
+        // ── Embers ──────────────────────────────────────────────────────
+        emberRate: { type: 'slider', label: 'Density', min: 0.0, max: 5.0, step: 0.1, default: 3.1 },
+        emberEmission: { type: 'slider', label: 'Emission (HDR)', min: 0.5, max: 5.0, step: 0.1, default: 2 },
+        emberPeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.9 },
+        emberSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 40.0, step: 1.0, default: 5 },
+        emberSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 60.0, step: 1.0, default: 17 },
+        emberLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 8.0, step: 0.1, default: 6.6 },
+        emberLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 12.0, step: 0.1, default: 12.0 },
+        emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 3.3 },
+        emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.3 },
+
+        // ── Smoke ───────────────────────────────────────────────────────
+        smokeEnabled: { type: 'checkbox', label: 'Enable Smoke', default: true },
+        smokeRatio: { type: 'slider', label: 'Emission Density', min: 0.0, max: 3.0, step: 0.05, default: 0.5 },
+        smokeOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.2 },
+        smokeColorWarmth: { type: 'slider', label: 'Color Warmth', min: 0.0, max: 1.0, step: 0.01, default: 0.59 },
+        smokeColorBrightness: { type: 'slider', label: 'Brightness', min: 0.05, max: 2.0, step: 0.01, default: 0.9 },
+        smokeDarknessResponse: { type: 'slider', label: 'Darkness Response', min: 0.0, max: 1.0, step: 0.01, default: 0.8 },
+        smokeSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 200.0, step: 1.0, default: 183 },
+        smokeSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 400.0, step: 1.0, default: 400 },
+        smokeSizeGrowth: { type: 'slider', label: 'Size Growth', min: 1.0, max: 10.0, step: 0.1, default: 10 },
+        smokeLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 10.0, step: 0.1, default: 7 },
+        smokeLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 15.0, step: 0.1, default: 15 },
+        smokeUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 20.0, step: 0.1, default: 8.8 },
+        smokeTurbulence: { type: 'slider', label: 'Turbulence', min: 0.0, max: 5.0, step: 0.05, default: 0.05 },
+        smokeWindInfluence: { type: 'slider', label: 'Wind Response', min: 0.0, max: 10.0, step: 0.1, default: 3.1 },
+        smokeAlphaStart: { type: 'slider', label: 'Alpha Ramp Start', min: 0.0, max: 1.0, step: 0.01, default: 0.7 },
+        smokeAlphaPeak: { type: 'slider', label: 'Alpha Peak', min: 0.0, max: 1.0, step: 0.01, default: 0.8 },
+        smokeAlphaEnd: { type: 'slider', label: 'Alpha Fade End', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
+
+        // ── Environment ─────────────────────────────────────────────────
         windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 4.5 },
-        lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
         timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 3.0 },
-
-        // Indoor vs outdoor lifetime scaling (applied only when particles are fully indoors)
-        indoorLifeScale: { type: 'slider', label: 'Indoor Life Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.75 },
-
-        indoorTimeScale: { type: 'slider', label: 'Indoor Time Scale', min: 0.05, max: 1.0, step: 0.05, default: 1.0 },
-
-        // Weather guttering strength (spawn-time kill) for outdoor flames
+        lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
+        indoorLifeScale: { type: 'slider', label: 'Indoor Life Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.7 },
+        indoorTimeScale: { type: 'slider', label: 'Indoor Time Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.2 },
         weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.5 },
         weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.5 },
 
-        // Heat Distortion Controls
+        // ── Heat Distortion ─────────────────────────────────────────────
         heatDistortionEnabled: { type: 'checkbox', label: 'Enable Heat Haze', default: true },
-        heatDistortionIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 0.05, step: 0.001, default: 0.011 },
+        heatDistortionIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 0.05, step: 0.001, default: 0.05 },
         heatDistortionFrequency: { type: 'slider', label: 'Frequency', min: 1.0, max: 20.0, step: 0.5, default: 20.0 },
         heatDistortionSpeed: { type: 'slider', label: 'Speed', min: 0.1, max: 3.0, step: 0.1, default: 3.0 }
       }
@@ -1061,6 +1615,40 @@ export class FireSparksEffect extends EffectBase {
           pointCount: sourceScale,
           isEmber: true
         });
+
+        // Create smoke system alongside fire (if enabled)
+        if (this.params.smokeEnabled) {
+          const smokeRatio = Math.max(0.0, this.params.smokeRatio ?? 0.3);
+          const smokeRate = new IntervalValue(
+            baseRate * sourceScale * smokeRatio * 0.3,
+            baseRate * sourceScale * smokeRatio * 0.6
+          );
+
+          const smokeSystem = this._createSmokeSystem({
+            shape,
+            rate: smokeRate,
+            height: this.params.fireHeight
+          });
+
+          if (smokeSystem && smokeSystem.userData) {
+            smokeSystem.userData._msEmissionScale = sourceScale;
+            smokeSystem.userData._msHeightSource = 'global';
+          }
+
+          batch.addSystem(smokeSystem);
+          this.scene.add(smokeSystem.emitter);
+          // Patch the quarks batch material for smoke to use NormalBlending
+          this._patchSmokeBatchBlending(smokeSystem);
+
+          this.fires.push({
+            id: `mappoints_fire_smoke_${key}`,
+            system: smokeSystem,
+            position: { x: 0, y: 0 },
+            isCandle: false,
+            pointCount: sourceScale,
+            isSmoke: true
+          });
+        }
       });
     }
   }
@@ -1153,9 +1741,14 @@ export class FireSparksEffect extends EffectBase {
           if (batch && sys) batch.deleteSystem(sys);
           if (scene && sys?.emitter) scene.remove(sys.emitter);
         }
+        for (const sys of this.globalSmokeSystems) {
+          if (batch && sys) batch.deleteSystem(sys);
+          if (scene && sys?.emitter) scene.remove(sys.emitter);
+        }
       }
       this.globalSystems.length = 0;
       this.globalEmberSystems.length = 0;
+      this.globalSmokeSystems.length = 0;
 
       try {
         const d = canvas.dimensions;
@@ -1257,9 +1850,34 @@ export class FireSparksEffect extends EffectBase {
         batch.addSystem(emberSystem);
         if (this.scene) this.scene.add(emberSystem.emitter);
         this.globalEmberSystems.push(emberSystem);
+
+        // Create smoke system alongside fire (if enabled)
+        if (this.params.smokeEnabled) {
+          const smokeRatio = Math.max(0.0, this.params.smokeRatio ?? 0.3);
+          const smokeSystem = this._createSmokeSystem({
+            shape: shape,
+            rate: new IntervalValue(
+              10.0 * weight * smokeRatio * 0.5,
+              20.0 * weight * smokeRatio * 0.8
+            ),
+            height: this.params.fireHeight
+          });
+          if (smokeSystem && smokeSystem.userData) {
+            smokeSystem.userData._msMaskWeight = weight;
+            smokeSystem.userData._msMaskKey = key;
+            smokeSystem.userData._msEmissionScale = weight;
+            smokeSystem.userData._msHeightSource = 'global';
+          }
+          batch.addSystem(smokeSystem);
+          if (this.scene) this.scene.add(smokeSystem.emitter);
+          // Patch the quarks batch material for smoke to use NormalBlending
+          // (quarks defaults to AdditiveBlending which makes dark grey invisible)
+          this._patchSmokeBatchBlending(smokeSystem);
+          this.globalSmokeSystems.push(smokeSystem);
+        }
       });
 
-      log.info('Created Global Fire Systems from mask (' + (points.length/3) + ' points, ' + buckets.size + ' buckets)');
+      log.info('Created Global Fire + Smoke Systems from mask (' + (points.length/3) + ' points, ' + buckets.size + ' buckets)');
 
       // Register heat distortion with DistortionManager if available
       this._registerHeatDistortion(fireMask.texture);
@@ -1481,16 +2099,17 @@ export class FireSparksEffect extends EffectBase {
       side: THREE.DoubleSide
     });
 
-    const colorOverLife = new ColorOverLife(
-        new ColorRange(
-            new Vector4(1.2, 1.0, 0.6, 0.2),
-            new Vector4(0.8, 0.2, 0.05, 0.0)
-        )
-    );
+    // FlameLifecycleBehavior replaces ColorOverLife — it writes particle.color
+    // directly each frame with multi-stop blackbody gradients, HDR emission,
+    // and a clean alpha envelope. No more startColor × ColorOverLife double-mult.
+    const flameLifecycle = new FlameLifecycleBehavior(this);
 
+    // Two-segment size curve: rapid grow to peak then gentle shrink.
+    // This models the flame expanding as it rises, then dissipating at the tip.
     const sizeOverLife = new SizeOverLife(
         new PiecewiseBezier([
-            [new Bezier(0.5, 1.2, 1.0, 0.0), 0]
+            [new Bezier(0.3, 0.9, 1.0, 1.1), 0],     // 0–50%: rapid grow to peak
+            [new Bezier(1.1, 1.0, 0.7, 0.4), 0.5]    // 50–100%: gentle shrink
         ])
     );
     
@@ -1520,15 +2139,8 @@ export class FireSparksEffect extends EffectBase {
     const sizeMin = Math.max(0.1, p.fireSizeMin ?? (size * 0.8));
     const sizeMax = Math.max(sizeMin, p.fireSizeMax ?? (size * 1.5));
 
-    const opacityMin = Math.max(0.0, Math.min(1.0, p.fireOpacityMin ?? 0.3));
-    const opacityMax = Math.max(opacityMin, Math.min(1.0, p.fireOpacityMax ?? 1.0));
-
-    const colorBoostMin = Math.max(0.01, 1.0 + (p.fireColorBoostMin ?? 0.0));
-    const colorBoostMax = Math.max(colorBoostMin, 1.0 + (p.fireColorBoostMax ?? 0.0));
-
-    const fireStart = p.fireStartColor || { r: 1.2, g: 1.0, b: 0.6 };
-    const fireEnd = p.fireEndColor || { r: 0.8, g: 0.2, b: 0.05 };
-
+    // startColor is neutral (1,1,1,1) — FlameLifecycleBehavior writes particle.color
+    // directly each frame with multi-stop blackbody gradients and HDR emission.
     const system = new ParticleSystem({
       duration: 1,
       looping: true,
@@ -1536,18 +2148,8 @@ export class FireSparksEffect extends EffectBase {
       startSpeed: new ConstantValue(0),
       startSize: new IntervalValue(sizeMin, sizeMax),
       startColor: new ColorRange(
-        new Vector4(
-          fireStart.r * colorBoostMin,
-          fireStart.g * colorBoostMin,
-          fireStart.b * colorBoostMin,
-          opacityMin
-        ),
-        new Vector4(
-          fireEnd.r * colorBoostMax,
-          fireEnd.g * colorBoostMax,
-          fireEnd.b * colorBoostMax,
-          opacityMax
-        )
+        new Vector4(1, 1, 1, 1),
+        new Vector4(1, 1, 1, 1)
       ),
       worldSpace: true,
       maxParticles: 10000,
@@ -1567,7 +2169,8 @@ export class FireSparksEffect extends EffectBase {
         buoyancy,
         turbulence,
         new FireSpinBehavior(),
-        colorOverLife
+        sizeOverLife,
+        flameLifecycle
       ]
     });
 
@@ -1576,6 +2179,15 @@ export class FireSparksEffect extends EffectBase {
     // Patch the material to support roof/outdoors masking
     this._patchRoofMaskMaterial(material);
 
+    // Enable BLOOM_HOTSPOT_LAYER on fire emitters so the HDR emission values
+    // from FlameLifecycleBehavior (2.0-2.5 at core) drive bloom automatically.
+    try {
+      if (system?.emitter?.layers?.enable) {
+        system.emitter.layers.enable(BLOOM_HOTSPOT_LAYER);
+      }
+    } catch (_) {
+    }
+
     system.userData = {
       windForce,
       ownerEffect: this,
@@ -1583,7 +2195,6 @@ export class FireSparksEffect extends EffectBase {
       baseUpdraftMag: height * 0.125,
       turbulence,
       baseCurlStrength: fireCurlStrengthBase.clone(),
-      _msColorOverLife: colorOverLife,
       _msEmissionScale: 1.0,
       _msHeight: height
     };
@@ -1608,7 +2219,7 @@ export class FireSparksEffect extends EffectBase {
       map: this._ensureEmberTexture(),
       transparent: true,
       blending: THREE.AdditiveBlending,
-      color: 0xffaa00,
+      color: 0xffffff,
       depthWrite: false,
       depthTest: true
     });
@@ -1623,14 +2234,8 @@ export class FireSparksEffect extends EffectBase {
     const sizeMin = Math.max(0.1, p.emberSizeMin ?? 4.0);
     const sizeMax = Math.max(sizeMin, p.emberSizeMax ?? 10.0);
 
-    const opacityMin = Math.max(0.0, Math.min(1.0, p.emberOpacityMin ?? 0.4));
-    const opacityMax = Math.max(opacityMin, Math.min(1.0, p.emberOpacityMax ?? 1.0));
-
-    const colorBoostMin = p.emberColorBoostMin ?? 0.9;
-    const colorBoostMax = Math.max(colorBoostMin, p.emberColorBoostMax ?? 1.5);
-
-    const emberStart = p.emberStartColor || { r: 1.0, g: 0.8, b: 0.4 };
-    const emberEnd = p.emberEndColor || { r: 1.0, g: 0.2, b: 0.0 };
+    // EmberLifecycleBehavior handles all color/emission/alpha directly
+    const emberLifecycle = new EmberLifecycleBehavior(this);
 
     const emberCurlScale = new THREE.Vector3(30, 30, 30);
     const emberCurlStrengthBase = new THREE.Vector3(150, 150, 50);
@@ -1643,25 +2248,21 @@ export class FireSparksEffect extends EffectBase {
       4.0
     );
 
+    // Ember-specific size curve: shrink as they cool and burn away
+    const emberSizeOverLife = new SizeOverLife(new PiecewiseBezier([
+      [new Bezier(1.0, 0.85, 0.5, 0.2), 0]
+    ]));
+
     const system = new ParticleSystem({
       duration: 1,
       looping: true,
       startLife: new IntervalValue(lifeMin, lifeMax),
       startSpeed: new ConstantValue(0),
       startSize: new IntervalValue(sizeMin, sizeMax),
+      // Neutral startColor — EmberLifecycleBehavior writes particle.color directly
       startColor: new ColorRange(
-        new Vector4(
-          emberStart.r * colorBoostMin,
-          emberStart.g * colorBoostMin,
-          emberStart.b * colorBoostMin,
-          opacityMin
-        ),
-        new Vector4(
-          emberEnd.r * colorBoostMax,
-          emberEnd.g * colorBoostMax,
-          emberEnd.b * colorBoostMax,
-          opacityMax
-        )
+        new Vector4(1, 1, 1, 1),
+        new Vector4(1, 1, 1, 1)
       ),
       worldSpace: true,
       maxParticles: 2000,
@@ -1671,12 +2272,11 @@ export class FireSparksEffect extends EffectBase {
       renderMode: RenderMode.BillBoard,
       renderOrder: 51,
       behaviors: [
-        // Updraft: likewise reduce the base magnitude so emberUpdraft stays in a sensible range
-        // after the camera height/scale change.
         new ParticleTimeScaledBehavior(buoyancy),
         windForce,
         new ParticleTimeScaledBehavior(turbulence),
-        new SizeOverLife(new PiecewiseBezier([[new Bezier(1, 0.9, 0.5, 0), 0]]))
+        emberSizeOverLife,
+        emberLifecycle
       ]
     });
 
@@ -1698,6 +2298,133 @@ export class FireSparksEffect extends EffectBase {
       baseCurlStrength: emberCurlStrengthBase.clone(),
       isEmber: true,
       ownerEffect: this,
+      _msEmissionScale: 1.0,
+      _msHeight: height
+    };
+
+    if (system.emitter) {
+      system.emitter.userData = system.emitter.userData || {};
+      const b = this._computeCullBoundsForShape(shape, height);
+      if (b) {
+        system.emitter.userData.msCullCenter = b.center;
+        system.emitter.userData.msCullRadius = b.radius;
+      }
+    }
+
+    return system;
+  }
+
+  /**
+   * Create a smoke particle system for a given emitter shape.
+   * Smoke uses NormalBlending (dark grey must occlude, not add), spawns from
+   * the same shape as fire. Size growth is handled by SmokeLifecycleBehavior
+   * (param-driven smoothstep expansion) rather than a fixed SizeOverLife curve.
+   *
+   * @param {Object} opts
+   * @param {Object} opts.shape - Emitter shape (FireMaskShape or MultiPointEmitterShape)
+   * @param {IntervalValue} opts.rate - Emission rate
+   * @param {number} opts.height - Base fire height for updraft scaling
+   * @returns {ParticleSystem}
+   */
+  _createSmokeSystem(opts) {
+    const { shape, rate, height } = opts;
+    const THREE = window.THREE;
+    log.info('Creating smoke system', { rateA: rate?.a, rateB: rate?.b, height });
+
+    // Smoke uses a soft round sprite — reuse particle.webp (the ember texture)
+    const material = new THREE.MeshBasicMaterial({
+      map: this._ensureEmberTexture(),
+      transparent: true,
+      blending: THREE.NormalBlending, // Critical: dark colors must occlude, not add
+      color: 0xffffff,
+      depthWrite: false,
+      depthTest: true,
+      side: THREE.DoubleSide
+    });
+
+    const p = this.params;
+    const timeScale = Math.max(0.1, p.timeScale ?? 1.0);
+
+    // Use dedicated smoke params for lifetime
+    const baseLifeMin = p.smokeLifeMin ?? 0.9;
+    const baseLifeMax = p.smokeLifeMax ?? 3.0;
+    const lifeMin = Math.max(0.01, baseLifeMin / timeScale);
+    const lifeMax = Math.max(lifeMin, baseLifeMax / timeScale);
+
+    // Use dedicated smoke params for start size
+    const sizeMin = Math.max(1.0, p.smokeSizeMin ?? 18);
+    const sizeMax = Math.max(sizeMin, p.smokeSizeMax ?? 96);
+
+    const smokeLifecycle = new SmokeLifecycleBehavior(this);
+
+    // Smoke rises (hot air). Updraft strength is param-driven via update().
+    const smokeUpdraftMag = Math.max(0.0, p.smokeUpdraft ?? 2.5);
+    const smokeUpdraft = new ApplyForce(
+      new THREE.Vector3(0, 0, 1),
+      new ConstantValue(smokeUpdraftMag)
+    );
+
+    // Smart wind with higher susceptibility for smoke
+    const windForce = new SmartWindBehavior();
+
+    // Turbulence — smoke billows and curls. Strength is param-driven via update().
+    const smokeTurbMult = Math.max(0.0, p.smokeTurbulence ?? 1.0);
+    const smokeCurlScale = new THREE.Vector3(100, 100, 40);
+    const smokeCurlStrengthBase = new THREE.Vector3(
+      200 * smokeTurbMult,
+      200 * smokeTurbMult,
+      80 * smokeTurbMult
+    );
+    const turbulence = new CurlNoiseField(
+      smokeCurlScale,
+      smokeCurlStrengthBase.clone(),
+      2.0
+    );
+
+    // SmokeLifecycleBehavior handles size growth (replaces SizeOverLife for
+    // param-driven control). It must be the LAST behavior so it can override
+    // particle.size after any other behaviors run.
+    const system = new ParticleSystem({
+      duration: 1,
+      looping: true,
+      startLife: new IntervalValue(lifeMin, lifeMax),
+      startSpeed: new ConstantValue(0),
+      startSize: new IntervalValue(sizeMin, sizeMax),
+      // Neutral startColor — SmokeLifecycleBehavior writes particle.color directly
+      startColor: new ColorRange(
+        new Vector4(1, 1, 1, 1),
+        new Vector4(1, 1, 1, 1)
+      ),
+      worldSpace: true,
+      maxParticles: 3000,
+      emissionOverTime: rate,
+      shape: shape,
+      material: material,
+      renderMode: RenderMode.BillBoard,
+      renderOrder: 52, // Above flames (50) and embers (51) — smoke rises above fire
+      startRotation: new IntervalValue(0, Math.PI * 2),
+      behaviors: [
+        windForce,
+        smokeUpdraft,
+        turbulence,
+        new FireSpinBehavior(), // Reuse spin for organic look
+        smokeLifecycle          // Must be last — writes color, alpha, and size
+      ]
+    });
+
+    // Smoke does NOT go on BLOOM_HOTSPOT_LAYER (dark grey shouldn't glow)
+
+    // Patch roof mask for indoor/outdoor awareness
+    this._patchRoofMaskMaterial(material);
+
+    system.userData = {
+      windForce,
+      ownerEffect: this,
+      updraftForce: smokeUpdraft,
+      baseUpdraftMag: smokeUpdraftMag,
+      turbulence,
+      baseCurlStrength: new THREE.Vector3(200, 200, 80), // unscaled base for update()
+      isSmoke: true,
       _msEmissionScale: 1.0,
       _msHeight: height
     };
@@ -1775,6 +2502,34 @@ export class FireSparksEffect extends EffectBase {
     return { center: { x: cx, y: cy, z: cz }, radius };
   }
   
+  /**
+   * Patch the quarks batch material for a smoke system to use NormalBlending.
+   * The quarks BatchedRenderer creates its own ShaderMaterial per batch, and
+   * by default it inherits AdditiveBlending. Dark grey smoke is invisible
+   * under additive blending, so we must override it to NormalBlending.
+   * @param {ParticleSystem} smokeSystem - The smoke particle system
+   */
+  _patchSmokeBatchBlending(smokeSystem) {
+    const THREE = window.THREE;
+    const br = this.particleSystemRef?.batchRenderer;
+    if (!smokeSystem || !br || !THREE) return;
+
+    try {
+      const idx = br.systemToBatchIndex?.get(smokeSystem);
+      if (idx !== undefined && br.batches && br.batches[idx]) {
+        const batchMat = br.batches[idx].material;
+        if (batchMat) {
+          batchMat.blending = THREE.NormalBlending;
+          batchMat.depthWrite = false;
+          batchMat.needsUpdate = true;
+          log.info('Patched smoke batch material to NormalBlending (batch idx=' + idx + ')');
+        }
+      }
+    } catch (e) {
+      log.warn('Failed to patch smoke batch blending', e);
+    }
+  }
+
   /**
    * Patch a MeshBasicMaterial to support sampling the roof/_Outdoors mask.
    *
@@ -1973,38 +2728,11 @@ export class FireSparksEffect extends EffectBase {
     // 0.0 = Chilled (Red/Deep Orange/Smoky), 0.5 = Standard, 1.0 = Bunsen (Blue/White)
     const temp = (typeof p.fireTemperature === 'number') ? p.fireTemperature : 0.5;
 
-    // 1. Calculate Temperature Modifier for Physics (Range: 0.75 to 1.25)
-    // Low Temp = Slower, sluggish (0.75x)
-    // High Temp = Faster, energetic (1.25x)
+    // Temperature Modifier for Physics (Range: 0.75 to 1.25)
+    // Low Temp = Slower, sluggish (0.75x); High Temp = Faster, energetic (1.25x)
+    // Color/alpha temperature blending is now handled inside each lifecycle behavior
+    // (FlameLifecycleBehavior, EmberLifecycleBehavior) via their own gradient tables.
     const tempPhysMod = 0.75 + (temp * 0.5);
-
-    // 2. Calculate Color Targets
-    // Avoid per-frame object allocation by writing into cached temp objects.
-    const stdStart = p.fireStartColor || _FIRE_STD_START_DEFAULT;
-    const stdEnd = p.fireEndColor || _FIRE_STD_END_DEFAULT;
-
-    const targetFireStart = this._tempTargetFireStart;
-    const targetFireEnd = this._tempTargetFireEnd;
-
-    if (temp <= 0.5) {
-      const f = temp * 2.0;
-      targetFireStart.r = _FIRE_PALETTE_COLD_START.r + (stdStart.r - _FIRE_PALETTE_COLD_START.r) * f;
-      targetFireStart.g = _FIRE_PALETTE_COLD_START.g + (stdStart.g - _FIRE_PALETTE_COLD_START.g) * f;
-      targetFireStart.b = _FIRE_PALETTE_COLD_START.b + (stdStart.b - _FIRE_PALETTE_COLD_START.b) * f;
-
-      targetFireEnd.r = _FIRE_PALETTE_COLD_END.r + (stdEnd.r - _FIRE_PALETTE_COLD_END.r) * f;
-      targetFireEnd.g = _FIRE_PALETTE_COLD_END.g + (stdEnd.g - _FIRE_PALETTE_COLD_END.g) * f;
-      targetFireEnd.b = _FIRE_PALETTE_COLD_END.b + (stdEnd.b - _FIRE_PALETTE_COLD_END.b) * f;
-    } else {
-      const f = (temp - 0.5) * 2.0;
-      targetFireStart.r = stdStart.r + (_FIRE_PALETTE_HOT_START.r - stdStart.r) * f;
-      targetFireStart.g = stdStart.g + (_FIRE_PALETTE_HOT_START.g - stdStart.g) * f;
-      targetFireStart.b = stdStart.b + (_FIRE_PALETTE_HOT_START.b - stdStart.b) * f;
-
-      targetFireEnd.r = stdEnd.r + (_FIRE_PALETTE_HOT_END.r - stdEnd.r) * f;
-      targetFireEnd.g = stdEnd.g + (_FIRE_PALETTE_HOT_END.g - stdEnd.g) * f;
-      targetFireEnd.b = stdEnd.b + (_FIRE_PALETTE_HOT_END.b - stdEnd.b) * f;
-    }
     // --- TEMPERATURE LOGIC END ---
 
     // 1. Animate Lights (Flicker)
@@ -2095,6 +2823,7 @@ export class FireSparksEffect extends EffectBase {
     if (this.globalEmbers) systems.push(this.globalEmbers);
     if (this.globalSystems && this.globalSystems.length) systems.push(...this.globalSystems);
     if (this.globalEmberSystems && this.globalEmberSystems.length) systems.push(...this.globalEmberSystems);
+    if (this.globalSmokeSystems && this.globalSmokeSystems.length) systems.push(...this.globalSmokeSystems);
     for (const f of this.fires) {
       if (f && f.system) systems.push(f.system);
     }
@@ -2127,7 +2856,23 @@ export class FireSparksEffect extends EffectBase {
               u.uResolution.value.set(resX, resY);
               if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
             }
-            const desiredMap = (sys.userData && sys.userData.isEmber) ? this.emberTexture : this.fireTexture;
+            // Smoke uses NormalBlending — must override the batch material's default
+            // (quarks batch renderer inherits AdditiveBlending from fire systems).
+            const isSmokeSystem = !!(sys.userData && sys.userData.isSmoke);
+            if (THREE) {
+              const desiredBlending = isSmokeSystem ? THREE.NormalBlending : THREE.AdditiveBlending;
+              if (batchMat.blending !== desiredBlending) {
+                batchMat.blending = desiredBlending;
+                batchMat.needsUpdate = true;
+              }
+            }
+
+            // Set the correct texture for each system type:
+            // - Smoke and embers use the soft round particle texture
+            // - Fire uses the flame sprite texture
+            const desiredMap = (isSmokeSystem || (sys.userData && sys.userData.isEmber))
+              ? this.emberTexture
+              : this.fireTexture;
             if (desiredMap) {
               try {
                 if (batchMat.uniforms?.map) batchMat.uniforms.map.value = desiredMap;
@@ -2151,8 +2896,10 @@ export class FireSparksEffect extends EffectBase {
       const emissionScale = (sys.userData && Number.isFinite(sys.userData._msEmissionScale))
         ? sys.userData._msEmissionScale
         : 1.0;
+      const isSmoke = !!(sys.userData && sys.userData.isSmoke);
       const baseRate = 200.0 * (p2.globalFireRate ?? 0) * effectiveTimeScale * zoomEmissionMult;
-      if (sys.emissionOverTime && typeof sys.emissionOverTime.a === 'number') {
+      // Fire emission (smoke gets its own emission in the lifecycle branch below)
+      if (!isSmoke && sys.emissionOverTime && typeof sys.emissionOverTime.a === 'number') {
         const r = baseRate * Math.max(0.0, emissionScale);
         sys.emissionOverTime.a = r * 0.8;
         sys.emissionOverTime.b = r * 1.2;
@@ -2166,21 +2913,23 @@ export class FireSparksEffect extends EffectBase {
         sys.emissionOverTime.b = r * 1.0;
       }
 
-      // Wind Influence
-      if (sys.userData) {
+      // Wind Influence — smoke uses its own param, embers 1.5×, fire 1×
+      if (sys.userData && !isSmoke) {
         const multiplier = isEmber ? 1.5 : 1.0;
         sys.userData.windInfluence = influence * multiplier;
       }
 
       // Apply Temperature Modifier to Physics (Updraft & Turbulence)
-      const updraftParam = isEmber ? (p2.emberUpdraft ?? 1.0) : (p2.fireUpdraft ?? 1.0);
-      const curlParam = isEmber ? (p2.emberCurlStrength ?? 1.0) : (p2.fireCurlStrength ?? 1.0);
+      const updraftParam = isSmoke ? (p2.smokeUpdraft ?? 2.5) : isEmber ? (p2.emberUpdraft ?? 1.0) : (p2.fireUpdraft ?? 1.0);
+      const curlParam = isSmoke ? (p2.smokeTurbulence ?? 1.0) : isEmber ? (p2.emberCurlStrength ?? 1.0) : (p2.fireCurlStrength ?? 1.0);
 
       // Height slider affects the baseline updraft magnitude for systems that follow
       // global height. Manual fires keep their creation-time height.
       if (sys.userData && sys.userData._msHeightSource === 'global') {
         const h = Math.max(0.0, p2.fireHeight ?? 0);
-        if (isEmber) {
+        if (isSmoke) {
+          sys.userData.baseUpdraftMag = h * 0.25; // Smoke rises faster than fire
+        } else if (isEmber) {
           sys.userData.baseUpdraftMag = h * 0.4;
         } else {
           sys.userData.baseUpdraftMag = h * 0.125;
@@ -2202,41 +2951,52 @@ export class FireSparksEffect extends EffectBase {
           .multiplyScalar(Math.max(0.0, curlParam) * effectiveTimeScale * tempPhysMod);
       }
 
-      // --- APPLY COLORS & LIFETIME ---
-      if (isEmber) {
+      // --- APPLY LIFETIME & SIZE ---
+      // Color/alpha is now handled by lifecycle behaviors (FlameLifecycleBehavior,
+      // EmberLifecycleBehavior, SmokeLifecycleBehavior). We only update spawn
+      // parameters (lifetime, size) and physics here.
+      if (isSmoke) {
+        // Smoke emission scales with fire rate × smokeRatio
+        const smokeRatio = Math.max(0.0, p2.smokeRatio ?? 0.3);
+        if (sys.emissionOverTime && typeof sys.emissionOverTime.a === 'number') {
+          const smokeBase = baseRate * smokeRatio;
+          const r = smokeBase * Math.max(0.0, emissionScale);
+          sys.emissionOverTime.a = r * 0.8;
+          sys.emissionOverTime.b = r * 1.2;
+        }
+
+        // Reset startLife each frame from dedicated smoke params.
+        // Without this reset, the wind-based lifetime reduction below compounds
+        // every frame, collapsing startLife to zero within seconds.
+        const baseSmokeLifeMin = p2.smokeLifeMin ?? 0.9;
+        const baseSmokeLifeMax = p2.smokeLifeMax ?? 3.0;
+        const smokeLifeMin = Math.max(0.01, baseSmokeLifeMin / effectiveTimeScale);
+        const smokeLifeMax = Math.max(smokeLifeMin, baseSmokeLifeMax / effectiveTimeScale);
+
+        if (sys.startLife && typeof sys.startLife.a === 'number') {
+          sys.startLife.a = smokeLifeMin;
+          sys.startLife.b = smokeLifeMax;
+        }
+
+        // Reset startSize from dedicated smoke params
+        if (sys.startSize && typeof sys.startSize.a === 'number') {
+          const baseSizeMin = Math.max(1.0, p2.smokeSizeMin ?? 18);
+          const baseSizeMax = Math.max(baseSizeMin, p2.smokeSizeMax ?? 96);
+          sys.startSize.a = baseSizeMin;
+          sys.startSize.b = baseSizeMax;
+        }
+
+        // Smoke wind susceptibility is controlled by smokeWindInfluence
+        if (sys.userData) {
+          sys.userData.windInfluence = influence * Math.max(0.0, p2.smokeWindInfluence ?? 3.0);
+        }
+      } else if (isEmber) {
+        // Ember system — lifecycle behavior handles color/alpha.
+        // Update spawn lifetime and size only.
         const baseEmberLifeMin = p2.emberLifeMin ?? 1.5;
         const baseEmberLifeMax = p2.emberLifeMax ?? 3.0;
         const lifeMin = Math.max(0.01, baseEmberLifeMin / effectiveTimeScale);
         const lifeMax = Math.max(lifeMin, baseEmberLifeMax / effectiveTimeScale);
-
-        const opacityMin = Math.max(0.0, Math.min(1.0, p2.emberOpacityMin ?? 0.4));
-        const opacityMax = Math.max(opacityMin, Math.max(0.0, Math.min(1.0, p2.emberOpacityMax ?? 1.0)));
-        const colorBoostMin = Math.max(0.01, 1.0 + (p2.emberColorBoostMin ?? 0.0));
-        const colorBoostMax = Math.max(colorBoostMin, 1.0 + (p2.emberColorBoostMax ?? 0.0));
-
-        const emberStdStart = p2.emberStartColor || _EMBER_STD_START_DEFAULT;
-        const emberStdEnd = p2.emberEndColor || _EMBER_STD_END_DEFAULT;
-        const targetEmberStart = this._tempTargetEmberStart;
-        const targetEmberEnd = this._tempTargetEmberEnd;
-        if (temp <= 0.5) {
-          const f = temp * 2.0;
-          targetEmberStart.r = _FIRE_PALETTE_COLD_START.r + (emberStdStart.r - _FIRE_PALETTE_COLD_START.r) * f;
-          targetEmberStart.g = _FIRE_PALETTE_COLD_START.g + (emberStdStart.g - _FIRE_PALETTE_COLD_START.g) * f;
-          targetEmberStart.b = _FIRE_PALETTE_COLD_START.b + (emberStdStart.b - _FIRE_PALETTE_COLD_START.b) * f;
-
-          targetEmberEnd.r = _FIRE_PALETTE_COLD_END.r + (emberStdEnd.r - _FIRE_PALETTE_COLD_END.r) * f;
-          targetEmberEnd.g = _FIRE_PALETTE_COLD_END.g + (emberStdEnd.g - _FIRE_PALETTE_COLD_END.g) * f;
-          targetEmberEnd.b = _FIRE_PALETTE_COLD_END.b + (emberStdEnd.b - _FIRE_PALETTE_COLD_END.b) * f;
-        } else {
-          const f = (temp - 0.5) * 2.0;
-          targetEmberStart.r = emberStdStart.r + (_FIRE_PALETTE_HOT_START.r - emberStdStart.r) * f;
-          targetEmberStart.g = emberStdStart.g + (_FIRE_PALETTE_HOT_START.g - emberStdStart.g) * f;
-          targetEmberStart.b = emberStdStart.b + (_FIRE_PALETTE_HOT_START.b - emberStdStart.b) * f;
-
-          targetEmberEnd.r = emberStdEnd.r + (_FIRE_PALETTE_HOT_END.r - emberStdEnd.r) * f;
-          targetEmberEnd.g = emberStdEnd.g + (_FIRE_PALETTE_HOT_END.g - emberStdEnd.g) * f;
-          targetEmberEnd.b = emberStdEnd.b + (_FIRE_PALETTE_HOT_END.b - emberStdEnd.b) * f;
-        }
 
         if (sys.startLife && typeof sys.startLife.a === 'number') {
           sys.startLife.a = lifeMin;
@@ -2249,36 +3009,15 @@ export class FireSparksEffect extends EffectBase {
           sys.startSize.a = baseSizeMin;
           sys.startSize.b = baseSizeMax;
         }
-        if (sys.startColor && sys.startColor.a && sys.startColor.b) {
-          sys.startColor.a.set(
-            targetEmberStart.r * colorBoostMin,
-            targetEmberStart.g * colorBoostMin,
-            targetEmberStart.b * colorBoostMin,
-            opacityMin
-          );
-          sys.startColor.b.set(
-            targetEmberEnd.r * colorBoostMax,
-            targetEmberEnd.g * colorBoostMax,
-            targetEmberEnd.b * colorBoostMax,
-            opacityMax
-          );
-        }
       } else {
-        // Fire system
-        // Lifetime is affected by Temperature (Hot = Burns faster/Shorter life)
+        // Fire system — color/alpha is now fully handled by FlameLifecycleBehavior.
+        // We still update lifetime and size spawn parameters here.
         const lifeTempMod = 1.25 - (temp * 0.5);
 
         const baseFireLifeMin = p2.fireLifeMin ?? 0.4;
         const baseFireLifeMax = p2.fireLifeMax ?? 1.6;
         const lifeMin = Math.max(0.01, (baseFireLifeMin / effectiveTimeScale) * lifeTempMod);
         const lifeMax = Math.max(lifeMin, (baseFireLifeMax / effectiveTimeScale) * lifeTempMod);
-
-        const rawOpMin = p2.fireOpacityMin ?? 0.25;
-        const rawOpMax = p2.fireOpacityMax ?? 0.68;
-        const opacityMin = Math.max(0.0, Math.min(1.0, rawOpMin * 0.4));
-        const opacityMax = Math.max(opacityMin, Math.max(0.0, Math.min(1.0, rawOpMax * 0.5)));
-        const colorBoostMin = Math.max(0.01, 1.0 + (p2.fireColorBoostMin ?? 0.0));
-        const colorBoostMax = Math.max(colorBoostMin, 1.0 + (p2.fireColorBoostMax ?? 0.0));
 
         if (sys.startLife && typeof sys.startLife.a === 'number') {
           sys.startLife.a = lifeMin;
@@ -2290,36 +3029,6 @@ export class FireSparksEffect extends EffectBase {
           const baseSizeMax = Math.max(baseSizeMin, p2.fireSizeMax ?? baseSizeMin);
           sys.startSize.a = baseSizeMin;
           sys.startSize.b = baseSizeMax;
-        }
-        if (sys.startColor && sys.startColor.a && sys.startColor.b) {
-          sys.startColor.a.set(
-            targetFireStart.r * colorBoostMin,
-            targetFireStart.g * colorBoostMin,
-            targetFireStart.b * colorBoostMin,
-            opacityMin
-          );
-          sys.startColor.b.set(
-            targetFireEnd.r * colorBoostMax,
-            targetFireEnd.g * colorBoostMax,
-            targetFireEnd.b * colorBoostMax,
-            opacityMax
-          );
-        }
-
-        const col = sys.userData?._msColorOverLife;
-        if (col && col.color && col.color.a && col.color.b) {
-          col.color.a.set(
-            targetFireStart.r * colorBoostMax,
-            targetFireStart.g * colorBoostMax,
-            targetFireStart.b * colorBoostMax,
-            1.0
-          );
-          col.color.b.set(
-            targetFireEnd.r * colorBoostMax,
-            targetFireEnd.g * colorBoostMax,
-            targetFireEnd.b * colorBoostMax,
-            0.0
-          );
         }
       }
 
@@ -2416,9 +3125,14 @@ export class FireSparksEffect extends EffectBase {
         if (batch && sys) batch.deleteSystem(sys);
         if (scene && sys?.emitter) scene.remove(sys.emitter);
       }
+      for (const sys of this.globalSmokeSystems) {
+        if (batch && sys) batch.deleteSystem(sys);
+        if (scene && sys?.emitter) scene.remove(sys.emitter);
+      }
     }
     this.globalSystems.length = 0;
     this.globalEmberSystems.length = 0;
+    this.globalSmokeSystems.length = 0;
 
     // Remove any per-fire systems and lights created via createFire or
     // aggregated map-point paths. We avoid calling removeFire here because

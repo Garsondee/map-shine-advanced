@@ -30,6 +30,7 @@ import {
   // Effect classes re-exported for initializeUI's static getControlSchema() calls
   SpecularEffect,
   IridescenceEffect,
+  FluidEffect,
   WindowLightEffect,
   ColorCorrectionEffect,
   FilmGrainEffect,
@@ -1579,7 +1580,6 @@ async function createThreeCanvas(scene) {
     const halftoneEffect = effectMap.get('Halftone');
     const sharpenEffect = effectMap.get('Sharpen');
     const asciiEffect = effectMap.get('ASCII');
-    const smellyFliesEffect = effectMap.get('Smelly Flies');
     const lightningEffect_temp = effectMap.get('Lightning');
     const prismEffect = effectMap.get('Prism');
     const waterEffect = effectMap.get('Water');
@@ -1682,6 +1682,15 @@ async function createThreeCanvas(scene) {
 
     safeCall(() => { graphicsSettings?.registerEffectInstance('ash-disturbance', ashDisturbanceEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(ash-disturbance)', Severity.COSMETIC);
 
+    // Step 3.12: Register Smelly Flies (depends on ParticleSystem for BatchedRenderer)
+    _setEffectInitStep('Smelly Flies');
+    if (isDebugLoad) dlp.begin('effect.SmellyFlies.register', 'effect');
+    const smellyFliesEffect = new SmellyFliesEffect();
+    await effectComposer.registerEffect(smellyFliesEffect);
+    if (isDebugLoad) dlp.end('effect.SmellyFlies.register');
+
+    safeCall(() => { graphicsSettings?.registerEffectInstance('smelly-flies', smellyFliesEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(smelly-flies)', Severity.COSMETIC);
+
     // Step 3.13.5: Initialize LightEnhancementStore BEFORE LightingEffect
     // CRITICAL: The enhancement store must be created and loaded before LightingEffect.initialize()
     // runs, otherwise the first syncAllLights() will fail to apply cookie enhancements.
@@ -1724,6 +1733,7 @@ async function createThreeCanvas(scene) {
     effectMap.set('Fire Sparks', fireSparksEffect);
     effectMap.set('Dust Motes', dustMotesEffect);
     effectMap.set('Ash Disturbance', ashDisturbanceEffect);
+    effectMap.set('Smelly Flies', smellyFliesEffect);
     effectMap.set('Lighting', lightingEffect);
     effectMap.set('Candle Flames', candleFlamesEffect);
 
@@ -1839,6 +1849,7 @@ async function createThreeCanvas(scene) {
     if (isDebugLoad) dlp.begin('manager.TileManager.init', 'manager');
     tileManager = new TileManager(threeScene);
     tileManager.setSpecularEffect(specularEffect);
+    tileManager.setFluidEffect(window.MapShine?.fluidEffect ?? effectMap.get('Fluid') ?? null);
     // Route water occluder meshes into DistortionManager's dedicated scene so
     // the occluder render pass avoids traversing the full world scene.
     safeCall(() => tileManager.setWaterOccluderScene(distortionManager?.waterOccluderScene ?? null), 'tileManager.setWaterOccluder', Severity.COSMETIC);
@@ -2455,6 +2466,7 @@ async function initializeUI(effectMap) {
   // Variable names match those used throughout the function body so no further changes needed.
   const specularEffect = effectMap.get('Specular');
   const iridescenceEffect = effectMap.get('Iridescence');
+  const fluidEffect = effectMap.get('Fluid');
   const colorCorrectionEffect = effectMap.get('Color Correction');
   const filmGrainEffect = effectMap.get('Film Grain');
   const dotScreenEffect = effectMap.get('Dot Screen');
@@ -3173,6 +3185,29 @@ async function initializeUI(effectMap) {
       }
       uiManager.updateEffectiveState('iridescence');
     }
+  }
+
+  // --- Fluid Settings ---
+  if (fluidEffect) {
+    const fluidSchema = FluidEffect.getControlSchema();
+
+    const onFluidUpdate = (effectId, paramId, value) => {
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        fluidEffect.enabled = value;
+        log.debug(`Fluid effect ${value ? 'enabled' : 'disabled'}`);
+      } else if (fluidEffect.params[paramId] !== undefined) {
+        fluidEffect.params[paramId] = value;
+        log.debug(`Fluid.${paramId} = ${value}`);
+      }
+    };
+
+    uiManager.registerEffect(
+      'fluid',
+      'Fluid / Pipes',
+      fluidSchema,
+      onFluidUpdate,
+      'surface'
+    );
   }
 
   // Sync dynamic status from effect to UI immediately

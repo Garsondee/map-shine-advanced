@@ -102,6 +102,11 @@ export class TileManager {
     this._tileSpecularMaskResolvedUrl = new Map();
     this._tileSpecularMaskResolvePromises = new Map();
 
+    this._tileFluidMaskCache = new Map();
+    this._tileFluidMaskPromises = new Map();
+    this._tileFluidMaskResolvedUrl = new Map();
+    this._tileFluidMaskResolvePromises = new Map();
+
     // Cache directory listings so we can avoid 404 spam when probing optional mask files.
     // Key: directory path (with trailing slash), Value: string[] of file paths
     this._dirFileListCache = new Map();
@@ -170,10 +175,17 @@ export class TileManager {
     /** @type {SpecularEffect|null} */
     this.specularEffect = null;
 
+    /** @type {import('../effects/FluidEffect.js').FluidEffect|null} */
+    this.fluidEffect = null;
+
     // Cache renderer-derived values for texture filtering.
     this._maxAnisotropy = null;
     
     log.debug('TileManager created');
+  }
+
+  setFluidEffect(fluidEffect) {
+    this.fluidEffect = fluidEffect || null;
   }
 
   setOverheadColorCorrectionParams(params) {
@@ -643,6 +655,27 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     return files.includes(p);
   }
 
+  _getMaskCandidates(parts, suffix) {
+    if (!parts || !suffix) return [];
+
+    const exts = [parts.ext, '.webp', '.png', '.jpg', '.jpeg'];
+    const uniqueExts = [];
+    for (const e of exts) {
+      const ee = String(e || '').toLowerCase();
+      if (!ee) continue;
+      if (!uniqueExts.includes(ee)) uniqueExts.push(ee);
+    }
+
+    const candidates = [];
+    for (const ext of uniqueExts) {
+      const baseNoQuery = `${parts.pathNoExt}${suffix}${ext}`;
+      candidates.push(baseNoQuery);
+      if (parts.query) candidates.push(`${baseNoQuery}${parts.query}`);
+    }
+
+    return candidates;
+  }
+
   async _resolveTileWaterMaskUrl(tileDoc) {
     const src = tileDoc?.texture?.src;
     const parts = this._splitUrl(src);
@@ -900,6 +933,111 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     return p;
   }
 
+  async _resolveTileFluidMaskUrl(tileDoc) {
+    const src = tileDoc?.texture?.src;
+    const parts = this._splitUrl(src);
+    if (!parts) return null;
+
+    const key = parts.pathNoExt;
+    if (this._tileFluidMaskResolvedUrl.has(key)) {
+      return this._tileFluidMaskResolvedUrl.get(key);
+    }
+
+    if (this._tileFluidMaskResolvePromises.has(key)) {
+      return this._tileFluidMaskResolvePromises.get(key);
+    }
+
+    const p = (async () => {
+      const candidates = this._getMaskCandidates(parts, '_Fluid');
+
+      // Strict no-probing policy: do not make any network requests for optional
+      // masks unless we can confirm the file exists via FilePicker directory listing.
+      let hasFilePickerListing = false;
+      try {
+        const dir = this._getDirectoryFromPath(parts.base);
+        const files = await this._listDirectoryFiles(dir);
+        hasFilePickerListing = Array.isArray(files) && files.length > 0;
+      } catch (_) {
+        hasFilePickerListing = false;
+      }
+
+      if (!hasFilePickerListing) {
+        this._tileFluidMaskResolvedUrl.set(key, null);
+        return null;
+      }
+
+      for (let i = 0; i < candidates.length; i++) {
+        const url = candidates[i];
+        try {
+          const noQuery = url.split('?')[0];
+          const exists = await this._fileExistsViaFilePicker(noQuery);
+          if (!exists) continue;
+
+          const tex = await this.loadTileTexture(url, { role: 'DATA_MASK' });
+          if (tex) {
+            this._tileFluidMaskCache.set(url, tex);
+            this._tileFluidMaskResolvedUrl.set(key, url);
+            return url;
+          }
+        } catch (_) {
+        }
+      }
+
+      this._tileFluidMaskResolvedUrl.set(key, null);
+      try {
+        log.debug(`No _Fluid mask found for tile ${tileDoc?.id || '(unknown)'}: ${candidates.join(', ')}`);
+      } catch (_) {
+      }
+      return null;
+    })();
+
+    this._tileFluidMaskResolvePromises.set(key, p);
+    try {
+      return await p;
+    } finally {
+      this._tileFluidMaskResolvePromises.delete(key);
+    }
+  }
+
+  async loadTileFluidMaskTexture(tileDoc) {
+    const resolvedUrl = await this._resolveTileFluidMaskUrl(tileDoc);
+    if (!resolvedUrl) return null;
+
+    const cached = this._tileFluidMaskCache.get(resolvedUrl);
+    if (cached) {
+      const THREE = window.THREE;
+      if (THREE) {
+        cached.minFilter = THREE.LinearFilter;
+        cached.magFilter = THREE.LinearFilter;
+        cached.generateMipmaps = false;
+        cached.flipY = true;
+        cached.needsUpdate = true;
+      }
+      return cached;
+    }
+
+    const pending = this._tileFluidMaskPromises.get(resolvedUrl);
+    if (pending) return pending;
+
+    const p = this.loadTileTexture(resolvedUrl, { role: 'DATA_MASK' }).then((tex) => {
+      const THREE = window.THREE;
+      if (tex && THREE) {
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.generateMipmaps = false;
+        tex.flipY = true;
+        tex.needsUpdate = true;
+      }
+      if (tex) this._tileFluidMaskCache.set(resolvedUrl, tex);
+      return tex;
+    }).catch(() => null).finally(() => {
+      this._tileFluidMaskPromises.delete(resolvedUrl);
+    });
+
+    this._tileFluidMaskPromises.set(resolvedUrl, p);
+    return p;
+  }
+
   _autoDetectWaterOccludersForAllTiles() {
     // Retry auto-detection scene-wide (useful after initial tile load settles).
     // This ensures every tile has a chance to resolve its own _Water mask.
@@ -914,6 +1052,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       sprite.userData._autoOccludesWaterState = null;
       try {
         this.updateSpriteTransform(sprite, tileDoc);
+      } catch (_) {
+      }
+
+      try {
+        this.fluidEffect?.syncTileSpriteVisibility?.(tileDoc.id, sprite);
       } catch (_) {
       }
     }
@@ -2204,6 +2347,21 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       } catch (_) {
       }
 
+      // Bind per-tile Fluid overlay if a matching _Fluid mask exists.
+      try {
+        if (this.fluidEffect) {
+          this.loadTileFluidMaskTexture(tileDoc).then((fluidTex) => {
+            if (!fluidTex) {
+              this.fluidEffect?.unbindTileSprite?.(tileDoc.id);
+              return;
+            }
+            this.fluidEffect.bindTileSprite(tileDoc, sprite, fluidTex);
+          }).catch(() => {
+          });
+        }
+      } catch (_) {
+      }
+
       const spriteData = this.tileSprites.get(tileDoc.id);
       if (spriteData) {
         this._ensureWaterOccluderMesh(spriteData, tileDoc);
@@ -2269,6 +2427,18 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         this.loadTileSpecularMaskTexture(tileDoc).then((specTex) => {
           if (!specTex) return;
           this.specularEffect.bindTileSprite(tileDoc, sprite, specTex);
+        }).catch(() => {
+        });
+      }
+    } catch (_) {
+    }
+
+    // Kick fluid resolve early (texture load is async, but we can probe now).
+    try {
+      if (this.fluidEffect) {
+        this.loadTileFluidMaskTexture(tileDoc).then((fluidTex) => {
+          if (!fluidTex) return;
+          this.fluidEffect.bindTileSprite(tileDoc, sprite, fluidTex);
         }).catch(() => {
         });
       }
@@ -2366,6 +2536,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       } catch (_) {
       }
 
+      try {
+        this.fluidEffect?.syncTileSpriteTransform?.(tileDoc.id, sprite);
+      } catch (_) {
+      }
+
       // If specular was toggled off via flags, remove any existing overlay.
       // If toggled on, we'll bind below (and/or on the next texture load).
       if ('flags' in changes) {
@@ -2458,6 +2633,32 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         } catch (_) {
         }
 
+        // If the tile texture changes, its associated _Fluid mask may also change.
+        try {
+          const prevSrc = spriteData?.tileDoc?.texture?.src;
+          const nextSrc = changes.texture.src;
+          const prevParts = this._splitUrl(prevSrc);
+          const nextParts = this._splitUrl(nextSrc);
+          if (prevParts?.pathNoExt) this._tileFluidMaskResolvedUrl.delete(prevParts.pathNoExt);
+          if (nextParts?.pathNoExt) this._tileFluidMaskResolvedUrl.delete(nextParts.pathNoExt);
+        } catch (_) {
+        }
+
+        try {
+          if (this.fluidEffect) {
+            const nextDoc = { texture: { src: changes.texture.src }, flags: targetDoc.flags, id: tileDoc.id };
+            this.loadTileFluidMaskTexture(nextDoc).then((fluidTex) => {
+              if (!fluidTex) {
+                this.fluidEffect?.unbindTileSprite?.(tileDoc.id);
+                return;
+              }
+              this.fluidEffect.bindTileSprite({ id: tileDoc.id }, sprite, fluidTex);
+            }).catch(() => {
+            });
+          }
+        } catch (_) {
+        }
+
         const occ = sprite.userData?.waterOccluderMesh;
         if (occ?.material?.uniforms?.tTile) {
           occ.material.uniforms.tTile.value = texture;
@@ -2495,6 +2696,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         const a = ('alpha' in targetDoc) ? targetDoc.alpha : 1.0;
         occ.material.uniforms.uOpacity.value = Number.isFinite(a) ? a : 1.0;
       }
+
+      try {
+        this.fluidEffect?.syncTileSpriteVisibility?.(tileDoc.id, sprite);
+      } catch (_) {
+      }
     }
 
     // Update stored reference
@@ -2523,8 +2729,18 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     } catch (_) {
     }
 
+    try {
+      this.fluidEffect?.syncTileSpriteTransform?.(tileDoc.id, spriteData.sprite);
+    } catch (_) {
+    }
+
     // Visibility/opacity can also change during refresh.
     this.updateSpriteVisibility(spriteData.sprite, tileDoc);
+
+    try {
+      this.fluidEffect?.syncTileSpriteVisibility?.(tileDoc.id, spriteData.sprite);
+    } catch (_) {
+    }
   }
 
   /**
@@ -2540,6 +2756,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     try {
       this.specularEffect?.unbindTileSprite?.(tileId);
+    } catch (_) {
+    }
+
+    try {
+      this.fluidEffect?.unbindTileSprite?.(tileId);
     } catch (_) {
     }
 

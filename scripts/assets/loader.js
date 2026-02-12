@@ -48,6 +48,7 @@ const EFFECT_MASKS = {
   dust: { suffix: '_Dust', required: false, description: 'Dust motes mask' },
   outdoors: { suffix: '_Outdoors', required: false, description: 'Indoor/outdoor area mask' },
   iridescence: { suffix: '_Iridescence', required: false, description: 'Iridescence effect mask' },
+  fluid: { suffix: '_Fluid', required: false, description: 'Fluid flow mask (data)' },
   prism: { suffix: '_Prism', required: false, description: 'Prism/refraction mask' },
   windows: { suffix: '_Windows', required: false, description: 'Window lighting mask' },
   structural: { suffix: '_Structural', required: false, description: 'Structural (legacy window) mask' },

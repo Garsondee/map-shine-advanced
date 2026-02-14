@@ -10,6 +10,7 @@ import { globalValidator, getSpecularEffectiveState, getStripeDependencyState } 
 import { TextureManagerUI } from './texture-manager.js';
 import { EffectStackUI } from './effect-stack.js';
 import { DiagnosticCenterManager } from './diagnostic-center.js';
+import { TileMotionDialog } from './tile-motion-dialog.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../effects/EffectComposer.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import Coordinates from '../utils/coordinates.js';
@@ -130,6 +131,9 @@ export class TweakpaneManager {
 
     /** @type {DiagnosticCenterManager|null} */
     this.diagnosticCenter = null;
+
+    /** @type {TileMotionDialog|null} */
+    this.tileMotionDialog = null;
 
     /** @type {number} UI scale factor */
     this.uiScale = 1.0;
@@ -411,6 +415,12 @@ export class TweakpaneManager {
     this.diagnosticCenter = new DiagnosticCenterManager();
     await this.diagnosticCenter.initialize();
     if (_isDbg) _dlp.end('tp.diagnosticCenter.init');
+
+    // Initialize Tile Motion Dialog
+    if (_isDbg) _dlp.begin('tp.tileMotionDialog.init', 'finalize');
+    this.tileMotionDialog = new TileMotionDialog();
+    await this.tileMotionDialog.initialize();
+    if (_isDbg) _dlp.end('tp.tileMotionDialog.init');
 
     // Start hidden by default for release; can be opened via the scene control button.
     this.hide();
@@ -841,6 +851,13 @@ export class TweakpaneManager {
       label: 'Map Points'
     }).on('click', () => {
       this.openMapPointsManagerDialog();
+    });
+
+    globalFolder.addButton({
+      title: '🧭 Tile Motion Manager',
+      label: 'Motion'
+    }).on('click', () => {
+      this.tileMotionDialog?.toggle?.();
     });
 
     globalFolder.addButton({
@@ -3768,6 +3785,11 @@ export class TweakpaneManager {
     
     this.stopUILoop();
     
+    if (this.tileMotionDialog) {
+      this.tileMotionDialog.dispose();
+      this.tileMotionDialog = null;
+    }
+
     if (this.pane) {
       this.pane.dispose();
       this.pane = null;

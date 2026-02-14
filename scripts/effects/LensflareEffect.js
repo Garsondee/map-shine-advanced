@@ -324,6 +324,28 @@ export class LensflareEffect extends EffectBase {
   }
 
   /**
+   * Ensure external managers (GraphicsSettingsManager, UI toggles) can
+   * immediately hide/show already-created flare meshes.
+   *
+   * Important: When an effect is disabled at the composer level, update()
+   * no longer runs. Without this hook, flares that were previously visible
+   * can remain visible indefinitely.
+   *
+   * @param {boolean} enabled
+   */
+  setEnabled(enabled) {
+    const next = enabled === true;
+    this.enabled = next;
+    if (this.params && typeof this.params.enabled === 'boolean') {
+      this.params.enabled = next;
+    }
+
+    for (const flare of this.flares.values()) {
+      flare.visible = next;
+    }
+  }
+
+  /**
    * Get UI control schema
    */
   static getControlSchema() {

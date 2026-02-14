@@ -36,6 +36,9 @@ export class OverheadShadowsEffect extends EffectBase {
     /** @type {THREE.WebGLRenderTarget|null} */
     this.shadowTarget = null; // Final overhead shadow factor texture
 
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this.fluidRoofTarget = null; // Fluid-only roof pass (for optional shadow tint)
+
     /** @type {THREE.Texture|null} */
     this.inputTexture = null;
 
@@ -63,9 +66,15 @@ export class OverheadShadowsEffect extends EffectBase {
       sunLatitude: 0.1,    // 0=flat east/west, 1=maximum north/south arc
       indoorShadowEnabled: false, // Treat indoor areas (_Outdoors dark) as additional shadow
       indoorShadowOpacity: 0.5,   // Opacity of the indoor area shadow contribution
-      indoorShadowMaskId: 'none', // Which mask to use for indoor shadow (resolved from MaskManager)
       indoorShadowLengthScale: 1.0,
-      indoorShadowSoftnessScale: 1.0
+      indoorShadowSoftness: 3.0,
+      indoorFluidShadowIntensityBoost: 1.0,
+      indoorFluidColorSaturation: 1.2,
+      fluidColorEnabled: false,
+      fluidEffectTransparency: 0.35,
+      fluidShadowIntensityBoost: 1.0,
+      fluidColorBoost: 1.5,
+      fluidColorSaturation: 1.2
     };
     
     // PERFORMANCE: Reusable objects to avoid per-frame allocations
@@ -101,13 +110,13 @@ export class OverheadShadowsEffect extends EffectBase {
           name: 'main',
           label: 'Overhead Shadows',
           type: 'inline',
-          parameters: ['opacity', 'length', 'softness', 'affectsLights']
+          parameters: ['opacity', 'length', 'softness', 'affectsLights', 'fluidColorEnabled', 'fluidEffectTransparency', 'fluidShadowIntensityBoost', 'fluidColorBoost', 'fluidColorSaturation']
         },
         {
           name: 'indoorShadow',
           label: 'Indoor Shadow',
           type: 'inline',
-          parameters: ['indoorShadowEnabled', 'indoorShadowMaskId', 'indoorShadowOpacity', 'indoorShadowLengthScale', 'indoorShadowSoftnessScale']
+          parameters: ['indoorShadowEnabled', 'indoorShadowOpacity', 'indoorShadowLengthScale', 'indoorShadowSoftness', 'indoorFluidShadowIntensityBoost', 'indoorFluidColorSaturation']
         }
       ],
       parameters: {
@@ -143,59 +152,98 @@ export class OverheadShadowsEffect extends EffectBase {
           step: 0.05,
           default: 0.75
         },
+        fluidColorEnabled: {
+          type: 'checkbox',
+          label: 'Use Fluid Effect Colour',
+          default: false,
+          tooltip: 'Tints overhead shadows with FluidEffect colour when fluid overlays are attached to overhead tiles'
+        },
+        fluidEffectTransparency: {
+          type: 'slider',
+          label: 'Fluid Effect Transparency',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.35,
+          tooltip: 'Opacity of FluidEffect colour tint in overhead shadows'
+        },
+        fluidShadowIntensityBoost: {
+          type: 'slider',
+          label: 'Fluid Shadow Intensity Boost',
+          min: 0.0,
+          max: 5.0,
+          step: 0.01,
+          default: 1.0,
+          tooltip: 'Boost multiplier for FluidEffect shadow contribution (up to 500%)'
+        },
+        fluidColorBoost: {
+          type: 'slider',
+          label: 'Fluid Colour Boost',
+          min: 0.0,
+          max: 4.0,
+          step: 0.01,
+          default: 1.5,
+          tooltip: 'Boosts fluid colour intensity used to tint overhead shadows'
+        },
+        fluidColorSaturation: {
+          type: 'slider',
+          label: 'Fluid Colour Saturation',
+          min: 0.0,
+          max: 3.0,
+          step: 0.01,
+          default: 1.2,
+          tooltip: 'Saturation multiplier for fluid shadow tint colour'
+        },
         indoorShadowEnabled: {
           type: 'checkbox',
           label: 'Enable Indoor Shadow',
           default: false,
-          tooltip: 'Add shadow to indoor areas using the _Outdoors mask'
-        },
-        indoorShadowMaskId: {
-          type: 'list',
-          label: 'Mask Source',
-          options: {
-            'None': 'none',
-            '_Outdoors': 'outdoors',
-            '_Structural': 'structural',
-            '_Windows': 'windows',
-            '_Fire': 'fire',
-            '_Water': 'water',
-            '_Specular': 'specular',
-            '_Iridescence': 'iridescence',
-            '_Bush': 'bush',
-            '_Tree': 'tree',
-            '_Dust': 'dust',
-            '_Ash': 'ash',
-            '_Prism': 'prism'
-          },
-          default: 'none',
-          tooltip: 'Select which discovered mask to use for indoor shadow areas'
+          tooltip: 'Enable indoor-receiver shadow contribution using the _Outdoors mask'
         },
         indoorShadowOpacity: {
           type: 'slider',
-          label: 'Indoor Shadow Opacity',
+          label: 'Indoor Shadow Strength',
           min: 0.0,
           max: 1.0,
           step: 0.01,
           default: 0.5,
-          tooltip: 'Strength of the shadow applied to indoor (covered) areas'
+          tooltip: 'Strength of the indoor-only shadow contribution on indoor receivers'
         },
         indoorShadowLengthScale: {
           type: 'slider',
-          label: 'Indoor Length Scale',
+          label: 'Indoor Shadow Length Scale',
           min: 0.0,
           max: 2.0,
           step: 0.01,
           default: 1.0,
-          tooltip: 'Scale factor for indoor shadow projection distance'
+          tooltip: 'Scale factor for indoor contribution projection distance'
         },
-        indoorShadowSoftnessScale: {
+        indoorShadowSoftness: {
           type: 'slider',
-          label: 'Indoor Softness Scale',
+          label: 'Indoor Shadow Softness',
+          min: 0.5,
+          max: 5.0,
+          step: 0.1,
+          default: 3.0,
+          tooltip: 'Indoor blur radius for overhead and fluid shadow contributions'
+        },
+        indoorFluidShadowIntensityBoost: {
+          type: 'slider',
+          label: 'Indoor Fluid Shadow Intensity Boost',
           min: 0.0,
-          max: 4.0,
+          max: 5.0,
           step: 0.01,
           default: 1.0,
-          tooltip: 'Scale factor for indoor shadow blur radius'
+          tooltip: 'Boost multiplier for FluidEffect colour contribution on indoor receivers (up to 500%)'
+        },
+        indoorFluidColorSaturation: {
+          type: 'slider',
+          label: 'Indoor Fluid Colour Saturation',
+          min: 0.0,
+          max: 3.0,
+          step: 0.01,
+          default: 1.2,
+          tooltip: 'Saturation multiplier for FluidEffect tint on indoor receivers'
         }
       }
     };
@@ -251,7 +299,16 @@ export class OverheadShadowsEffect extends EffectBase {
         uIndoorShadowEnabled: { value: 0.0 },
         uIndoorShadowOpacity: { value: 0.5 },
         uIndoorShadowLengthScale: { value: 1.0 },
-        uIndoorShadowSoftnessScale: { value: 1.0 },
+        uIndoorShadowSoftness: { value: 3.0 },
+        uIndoorFluidShadowIntensityBoost: { value: 1.0 },
+        uIndoorFluidColorSaturation: { value: 1.2 },
+        uFluidColorEnabled: { value: 0.0 },
+        uFluidEffectTransparency: { value: 0.35 },
+        uFluidShadowIntensityBoost: { value: 1.0 },
+        uFluidColorBoost: { value: 1.5 },
+        uFluidColorSaturation: { value: 1.2 },
+        tFluidRoof: { value: null },
+        uHasFluidRoof: { value: 0.0 },
         // Scene dimensions in world pixels for world-space mask UV conversion
         uSceneDimensions: { value: new THREE.Vector2(1, 1) }
       },
@@ -278,7 +335,16 @@ export class OverheadShadowsEffect extends EffectBase {
         uniform float uIndoorShadowEnabled;
         uniform float uIndoorShadowOpacity;
         uniform float uIndoorShadowLengthScale;
-        uniform float uIndoorShadowSoftnessScale;
+        uniform float uIndoorShadowSoftness;
+        uniform float uIndoorFluidShadowIntensityBoost;
+        uniform float uIndoorFluidColorSaturation;
+        uniform float uFluidColorEnabled;
+        uniform float uFluidEffectTransparency;
+        uniform float uFluidShadowIntensityBoost;
+        uniform float uFluidColorBoost;
+        uniform float uFluidColorSaturation;
+        uniform sampler2D tFluidRoof;
+        uniform float uHasFluidRoof;
         // Scene dimensions in world pixels for mask UV conversion
         uniform vec2 uSceneDimensions;
 
@@ -320,10 +386,6 @@ export class OverheadShadowsEffect extends EffectBase {
           // -screenDir, matching BuildingShadowsEffect's visual convention.
           vec2 offsetUv = screenUv + screenDir * pixelLen * uTexelSize;
 
-          // Simple 3x3 blur around the offset position to soften edges.
-          float blurScale = 1.0 * uSoftness;
-          vec2 stepUv = uTexelSize * blurScale;
-
           // Prepare indoor shadow sampling in world UV (mask space). We will
           // merge roof+indoor into a single pre-blur kernel by taking the per-tap
           // max() and then blurring once.
@@ -331,9 +393,25 @@ export class OverheadShadowsEffect extends EffectBase {
           vec2 maskTexelSize = vec2(1.0) / max(uSceneDimensions, vec2(1.0));
           float maskPixelLen = uLength * 1080.0 * uIndoorShadowLengthScale;
           vec2 maskOffsetUv = vUv + dir * maskPixelLen * maskTexelSize;
-          vec2 maskStepUv = maskTexelSize * uSoftness * 4.0 * max(uIndoorShadowSoftnessScale, 0.0);
+
+          // Receiver-space classification (at the current fragment). We use
+          // separate inclusion rules depending on where the shadow lands:
+          // - Receiver outdoors: include DARK _Outdoors regions (indoors)
+          // - Receiver indoors:  include BRIGHT _Outdoors regions (outdoors)
+          // This avoids treating both cases with the same inversion rule.
+          float receiverOutdoors = indoorEnabled ? clamp(texture2D(uOutdoorsMask, vUv).r, 0.0, 1.0) : 1.0;
+          float receiverIndoor = 1.0 - receiverOutdoors;
+          float receiverIsIndoor = step(0.5, receiverIndoor);
+
+          // Apply indoor/outdoor softness selection uniformly so all shadow
+          // components (roof, indoor mask, and fluid tint) blur consistently.
+          float blurSoftness = mix(uSoftness, uIndoorShadowSoftness, receiverIsIndoor);
+          vec2 stepUv = uTexelSize * blurSoftness;
+          vec2 maskStepUv = maskTexelSize * blurSoftness * 4.0;
 
           float accum = 0.0;
+          float fluidAccumA = 0.0;
+          vec3 fluidAccumRgb = vec3(0.0);
           float weightSum = 0.0;
           for (int dy = -1; dy <= 1; dy++) {
             for (int dx = -1; dx <= 1; dx++) {
@@ -349,13 +427,29 @@ export class OverheadShadowsEffect extends EffectBase {
               float indoorStrengthTap = 0.0;
               if (indoorEnabled) {
                 vec2 mUv = maskOffsetUv + vec2(float(dx), float(dy)) * maskStepUv;
-                float mv = 1.0 - texture2D(uOutdoorsMask, mUv).r;
-                indoorStrengthTap = clamp(mv * uIndoorShadowOpacity, 0.0, 1.0);
+                float outdoorsTap = clamp(texture2D(uOutdoorsMask, mUv).r, 0.0, 1.0);
+                float includeDarkForOutdoorReceiver = 1.0 - outdoorsTap;
+                float includeBrightForIndoorReceiver = outdoorsTap;
+                float inclusionTap = mix(includeDarkForOutdoorReceiver, includeBrightForIndoorReceiver, receiverIsIndoor);
+                // Indoor controls should affect indoor receiver pixels only.
+                indoorStrengthTap = clamp(inclusionTap * uIndoorShadowOpacity * receiverIndoor, 0.0, 1.0);
               }
 
               // Combine BEFORE blur.
               float combinedTap = max(roofStrengthTap, indoorStrengthTap);
               accum += combinedTap * w;
+
+              if (uFluidColorEnabled > 0.5 && uHasFluidRoof > 0.5) {
+                vec4 fluidTap = texture2D(tFluidRoof, sUv);
+                float fa = clamp(fluidTap.a, 0.0, 1.0);
+                // Keep fluid tint independent from indoor/outdoor mask remapping.
+                // The fluid roof pass already encodes where coloured fluid exists.
+                fluidAccumA += fa * w;
+                // fluidTap.rgb comes from a transparent pass composited over black,
+                // so it is already alpha-weighted. Avoid multiplying by alpha again.
+                fluidAccumRgb += fluidTap.rgb * w;
+              }
+
               weightSum += w;
             }
           }
@@ -365,7 +459,28 @@ export class OverheadShadowsEffect extends EffectBase {
           // Encode shadow factor in the red channel (1.0 = fully lit,
           // 0.0 = fully shadowed).
           float shadowFactor = 1.0 - combinedStrength;
-          gl_FragColor = vec4(shadowFactor, shadowFactor, shadowFactor, 1.0);
+          vec3 shadowRgb = vec3(shadowFactor);
+
+          if (uFluidColorEnabled > 0.5 && uHasFluidRoof > 0.5 && fluidAccumA > 0.0001) {
+            float fluidBlurAlpha = fluidAccumA / max(weightSum, 0.0001);
+            vec3 fluidBlurColor = fluidAccumRgb / max(fluidAccumA, 0.0001);
+            float fluidLuma = dot(fluidBlurColor, vec3(0.2126, 0.7152, 0.0722));
+            // Blend indoor/outdoor tint controls using the continuous indoor
+            // weight so partially covered pixels are not stuck on one branch.
+            float fluidSaturation = mix(max(uFluidColorSaturation, 0.0), max(uIndoorFluidColorSaturation, 0.0), receiverIndoor);
+            fluidBlurColor = mix(vec3(fluidLuma), fluidBlurColor, fluidSaturation);
+            fluidBlurColor = clamp(fluidBlurColor * max(uFluidColorBoost, 0.0), 0.0, 1.0);
+            float fluidIntensityBoost = mix(max(uFluidShadowIntensityBoost, 0.0), max(uIndoorFluidShadowIntensityBoost, 0.0), receiverIndoor);
+            // Root cause of subtle indoor tint: intensity boost previously only
+            // affected mix amount, while tint darkness stayed capped by a weak
+            // indoor combinedStrength. Apply boost to tint strength too.
+            float tintedStrength = clamp(combinedStrength * fluidIntensityBoost, 0.0, 1.0);
+            float fluidTintMix = clamp(fluidBlurAlpha * uFluidEffectTransparency * fluidIntensityBoost, 0.0, 1.0);
+            vec3 tintedShadow = 1.0 - tintedStrength * (1.0 - fluidBlurColor);
+            shadowRgb = mix(shadowRgb, tintedShadow, fluidTintMix);
+          }
+
+          gl_FragColor = vec4(shadowRgb, 1.0);
         }
       `,
       transparent: false
@@ -410,6 +525,17 @@ export class OverheadShadowsEffect extends EffectBase {
       });
     } else {
       this.shadowTarget.setSize(width, height);
+    }
+
+    if (!this.fluidRoofTarget) {
+      this.fluidRoofTarget = new THREE.WebGLRenderTarget(width, height, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else {
+      this.fluidRoofTarget.setSize(width, height);
     }
   }
 
@@ -478,7 +604,7 @@ export class OverheadShadowsEffect extends EffectBase {
 
     // Optimization: Skip update if params haven't changed
     const camZoom = this._getEffectiveZoom();
-    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${this.params.indoorShadowMaskId}_${this.params.indoorShadowOpacity}_${this.params.indoorShadowLengthScale}_${this.params.indoorShadowSoftnessScale}`;
+    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${this.params.indoorShadowOpacity}_${this.params.indoorShadowLengthScale}_${this.params.indoorShadowSoftness}_${this.params.indoorFluidShadowIntensityBoost}_${this.params.indoorFluidColorSaturation}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}`;
     
     if (this._lastUpdateHash === updateHash && this.sunDir) return;
     this._lastUpdateHash = updateHash;
@@ -520,7 +646,14 @@ export class OverheadShadowsEffect extends EffectBase {
       if (u.uIndoorShadowEnabled) u.uIndoorShadowEnabled.value = this.params.indoorShadowEnabled ? 1.0 : 0.0;
       if (u.uIndoorShadowOpacity) u.uIndoorShadowOpacity.value = this.params.indoorShadowOpacity;
       if (u.uIndoorShadowLengthScale) u.uIndoorShadowLengthScale.value = this.params.indoorShadowLengthScale;
-      if (u.uIndoorShadowSoftnessScale) u.uIndoorShadowSoftnessScale.value = this.params.indoorShadowSoftnessScale;
+      if (u.uIndoorShadowSoftness) u.uIndoorShadowSoftness.value = this.params.indoorShadowSoftness;
+      if (u.uIndoorFluidShadowIntensityBoost) u.uIndoorFluidShadowIntensityBoost.value = this.params.indoorFluidShadowIntensityBoost;
+      if (u.uIndoorFluidColorSaturation) u.uIndoorFluidColorSaturation.value = this.params.indoorFluidColorSaturation;
+      if (u.uFluidColorEnabled) u.uFluidColorEnabled.value = this.params.fluidColorEnabled ? 1.0 : 0.0;
+      if (u.uFluidEffectTransparency) u.uFluidEffectTransparency.value = this.params.fluidEffectTransparency;
+      if (u.uFluidShadowIntensityBoost) u.uFluidShadowIntensityBoost.value = this.params.fluidShadowIntensityBoost;
+      if (u.uFluidColorBoost) u.uFluidColorBoost.value = this.params.fluidColorBoost;
+      if (u.uFluidColorSaturation) u.uFluidColorSaturation.value = this.params.fluidColorSaturation;
 
       // Scene dimensions for mask UV conversion (world-space mask offset)
       if (u.uSceneDimensions) {
@@ -534,21 +667,9 @@ export class OverheadShadowsEffect extends EffectBase {
         } catch (_) { /* canvas may not be ready */ }
       }
 
-      // Resolve the active indoor shadow mask texture from MaskManager.
-      // Falls back to the auto-discovered outdoorsMask from setBaseMesh()
-      // if no explicit selection is made.
-      let activeMask = null;
-      const maskId = this.params.indoorShadowMaskId;
-      if (maskId && maskId !== 'none') {
-        const mm = window.MapShine?.maskManager;
-        if (mm) {
-          activeMask = mm.getTexture(maskId) || null;
-        }
-        // Fallback: if the selected ID matches what setBaseMesh found, use it
-        if (!activeMask && maskId === 'outdoors') {
-          activeMask = this.outdoorsMask;
-        }
-      }
+      // Indoor shadow is always sourced from _Outdoors.
+      // (White = outdoors, dark = indoors; shader inverts it for indoor weight.)
+      const activeMask = this.outdoorsMask;
       if (u.uOutdoorsMask) u.uOutdoorsMask.value = activeMask;
       if (u.uHasOutdoorsMask) u.uHasOutdoorsMask.value = activeMask ? 1.0 : 0.0;
     }
@@ -584,13 +705,36 @@ export class OverheadShadowsEffect extends EffectBase {
     const previousTarget = renderer.getRenderTarget();
 
     const overrides = [];
+    const fluidVisibilityOverrides = [];
+    const fluidUniformOverrides = [];
+    const nonFluidVisibilityOverrides = [];
     const roofMaskBit = 1 << ROOF_LAYER;
     this.mainScene.traverse((object) => {
-      if (!object.isSprite || !object.layers || !object.material) return;
+      if (!object.layers || !object.material) return;
 
       // Directly test the ROOF_LAYER bit to avoid Layers.test() argument issues.
       if ((object.layers.mask & roofMaskBit) === 0) return;
 
+      if (typeof object.visible === 'boolean') {
+        fluidVisibilityOverrides.push({ object, visible: object.visible });
+        const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
+        object.visible = isFluidOverlay;
+
+        if (isFluidOverlay) {
+          const uniforms = object.material?.uniforms;
+          if (uniforms) {
+            fluidUniformOverrides.push({
+              uniforms,
+              tileOpacity: uniforms.uTileOpacity?.value,
+              roofOcclusionEnabled: uniforms.uRoofOcclusionEnabled?.value
+            });
+            if (uniforms.uTileOpacity) uniforms.uTileOpacity.value = 1.0;
+            if (uniforms.uRoofOcclusionEnabled) uniforms.uRoofOcclusionEnabled.value = 0.0;
+          }
+        }
+      }
+
+      if (!object.isSprite) return;
       const mat = object.material;
       if (typeof mat.opacity !== 'number') return;
       overrides.push({ object, opacity: mat.opacity });
@@ -598,6 +742,37 @@ export class OverheadShadowsEffect extends EffectBase {
       // keep overhead shadows active while hovering, so the shadow mask render
       // pass always treats roof sprites as fully opaque.
       mat.opacity = 1.0;
+    });
+
+    // Pass 0: render only FluidEffect overlays attached to overhead tiles.
+    this.mainCamera.layers.set(ROOF_LAYER);
+    renderer.setRenderTarget(this.fluidRoofTarget);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    renderer.render(this.mainScene, this.mainCamera);
+
+    for (const entry of fluidVisibilityOverrides) {
+      if (entry.object) {
+        entry.object.visible = entry.visible;
+      }
+    }
+    for (const entry of fluidUniformOverrides) {
+      if (!entry?.uniforms) continue;
+      if (entry.uniforms.uTileOpacity && typeof entry.tileOpacity === 'number') {
+        entry.uniforms.uTileOpacity.value = entry.tileOpacity;
+      }
+      if (entry.uniforms.uRoofOcclusionEnabled && typeof entry.roofOcclusionEnabled === 'number') {
+        entry.uniforms.uRoofOcclusionEnabled.value = entry.roofOcclusionEnabled;
+      }
+    }
+
+    // Pass 1 should be based on overhead tile sprites only (exclude fluid overlays).
+    this.mainScene.traverse((object) => {
+      if (!object.layers || (object.layers.mask & roofMaskBit) === 0) return;
+      const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
+      if (!isFluidOverlay || typeof object.visible !== 'boolean') return;
+      nonFluidVisibilityOverrides.push({ object, visible: object.visible });
+      object.visible = false;
     });
 
     // Pass 1: render overhead tiles into roofTarget (alpha mask)
@@ -615,6 +790,8 @@ export class OverheadShadowsEffect extends EffectBase {
     // groundplane mesh that samples the roof mask in screen space.
     if (this.material && this.material.uniforms) {
       this.material.uniforms.tRoof.value = this.roofTarget.texture;
+      this.material.uniforms.tFluidRoof.value = this.fluidRoofTarget?.texture || null;
+      this.material.uniforms.uHasFluidRoof.value = this.fluidRoofTarget?.texture ? 1.0 : 0.0;
       if (this.material.uniforms.uResolution) {
         this.material.uniforms.uResolution.value.set(size.x, size.y);
       }
@@ -624,6 +801,10 @@ export class OverheadShadowsEffect extends EffectBase {
     renderer.setClearColor(0xffffff, 1);
     renderer.clear();
     renderer.render(this.shadowScene, this.mainCamera);
+
+    for (const entry of nonFluidVisibilityOverrides) {
+      if (entry.object) entry.object.visible = entry.visible;
+    }
 
     // Restore per-sprite opacity and previous render target
     for (const entry of overrides) {
@@ -642,6 +823,10 @@ export class OverheadShadowsEffect extends EffectBase {
     if (this.shadowTarget) {
       this.shadowTarget.dispose();
       this.shadowTarget = null;
+    }
+    if (this.fluidRoofTarget) {
+      this.fluidRoofTarget.dispose();
+      this.fluidRoofTarget = null;
     }
     if (this.material) {
       this.material.dispose();

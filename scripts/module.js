@@ -40,8 +40,7 @@ try {
 // Expose module state globally (idempotent)
 window.MapShine = MapShine;
 
-// Expose debug loading profiler early so it can be toggled from console before scene load.
-// Usage: window.MapShine.debugLoadingProfiler.debugMode = false  (to disable)
+// Expose debug loading profiler early (runtime state is synced from Foundry settings at init).
 MapShine.debugLoadingProfiler = debugLoadingProfiler;
 
 /**
@@ -64,6 +63,8 @@ Hooks.once('init', async function() {
   
   // Register settings
   sceneSettings.registerSettings();
+  // Sync Debug Loading Mode from Foundry settings on startup.
+  debugLoadingProfiler.debugMode = sceneSettings.getDebugLoadingModeEnabled();
   registerUISettings();
   
   // Register scene control buttons for Map Shine panels

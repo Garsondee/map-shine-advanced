@@ -14,8 +14,24 @@ const CURRENT_VERSION = '0.2.0';
 /** Flag namespace in Foundry scene */
 const FLAG_NAMESPACE = 'map-shine-advanced';
 
+/** Module setting keys */
+const DEBUG_LOADING_MODE_SETTING = 'debugLoadingMode';
+
 function _getPlayerOverridesSettingKey(scene) {
   return `scene-${scene?.id}-player-overrides`;
+}
+
+/**
+ * Read the module-level Debug Loading Mode toggle.
+ * @returns {boolean}
+ * @public
+ */
+export function getDebugLoadingModeEnabled() {
+  try {
+    return !!game.settings.get(FLAG_NAMESPACE, DEBUG_LOADING_MODE_SETTING);
+  } catch (_) {
+    return false;
+  }
 }
 
 function _ensurePlayerOverridesSettingRegistered(scene) {
@@ -289,6 +305,23 @@ export function registerSettings() {
     config: true,
     type: Boolean,
     default: false
+  });
+
+  game.settings.register(FLAG_NAMESPACE, DEBUG_LOADING_MODE_SETTING, {
+    name: 'Debug Loading Mode',
+    hint: 'When enabled, scene loading pauses at completion and shows a copyable loading log until you press the continue button.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: false,
+    onChange: (enabled) => {
+      try {
+        const profiler = window.MapShine?.debugLoadingProfiler;
+        if (profiler) profiler.debugMode = !!enabled;
+      } catch (_) {
+      }
+    }
   });
 
   game.settings.register('map-shine-advanced', 'allowPlayersToTogglePlayerLightMode', {

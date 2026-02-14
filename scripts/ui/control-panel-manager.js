@@ -65,7 +65,11 @@ export class ControlPanelManager {
       // Wind controls
       windSpeed: 0.5,
       windDirection: 180.0,
-      gustiness: 'moderate' // 'calm', 'light', 'moderate', 'strong', 'extreme'
+      gustiness: 'moderate', // 'calm', 'light', 'moderate', 'strong', 'extreme'
+      // Tile motion transport controls (runtime state still lives in tileMotion scene flag)
+      tileMotionSpeedPercent: 100,
+      tileMotionAutoPlayEnabled: true,
+      tileMotionTimeFactorPercent: 100
     };
 
     this._suppressInitialWeatherApply = false;
@@ -110,6 +114,15 @@ export class ControlPanelManager {
 
     /** @type {any|null} */
     this._sunLatitudeBinding = null;
+
+    /** @type {any|null} */
+    this._tileMotionSpeedBinding = null;
+
+    /** @type {any|null} */
+    this._tileMotionAutoPlayBinding = null;
+
+    /** @type {any|null} */
+    this._tileMotionTimeFactorBinding = null;
 
     /** @type {boolean} */
     this._didLoadControlState = false;
@@ -277,6 +290,7 @@ export class ControlPanelManager {
 
     this._updateTimeUI(wc);
     this._updateWindUI(wc);
+    this._syncTileMotionSpeedFromManager();
 
     const isEnabled = wc.enabled !== false;
     const isDynamic = wc.dynamicEnabled === true;
@@ -511,6 +525,9 @@ export class ControlPanelManager {
     this._didLoadControlState = await this._loadControlState();
     if (_isDbg) _dlp.end('cp.loadControlState');
 
+    // If tile motion already has persisted global state, mirror speed into control UI.
+    this._syncTileMotionSpeedFromManager();
+
     try {
       // Only use the weather snapshot as a fallback when no controlState is present.
       // controlState is the authoritative live-play state and should win on refresh.
@@ -545,6 +562,7 @@ export class ControlPanelManager {
     this._buildTimeSection();
     this._buildWeatherSection();
     this._buildEnvironmentSection();
+    this._buildTileMotionSection();
     this._buildUtilitiesSection();
     if (_isDbg) _dlp.end('cp.buildSections');
 
@@ -1331,6 +1349,196 @@ export class ControlPanelManager {
     });
   }
 
+  _syncTileMotionSpeedFromManager() {
+    try {
+      const mgr = window.MapShine?.tileMotionManager;
+      if (!mgr || typeof mgr.getGlobalState !== 'function') return;
+
+      const global = mgr.getGlobalState();
+      const speed = Number(global?.speedPercent);
+      const autoPlay = global?.autoPlayEnabled !== false;
+      const timeFactor = Number(global?.timeFactorPercent);
+
+      if (Number.isFinite(speed)) {
+        const clamped = Math.max(0, Math.min(400, speed));
+        if (Math.abs((this.controlState.tileMotionSpeedPercent ?? 100) - clamped) >= 0.001) {
+          this.controlState.tileMotionSpeedPercent = clamped;
+        }
+      }
+
+      if ((this.controlState.tileMotionAutoPlayEnabled ?? true) !== autoPlay) {
+        this.controlState.tileMotionAutoPlayEnabled = autoPlay;
+      }
+
+      if (Number.isFinite(timeFactor)) {
+        const tf = Math.max(0, Math.min(200, timeFactor));
+        if (Math.abs((this.controlState.tileMotionTimeFactorPercent ?? 100) - tf) >= 0.001) {
+          this.controlState.tileMotionTimeFactorPercent = tf;
+        }
+      }
+
+      try {
+        this._tileMotionSpeedBinding?.refresh?.();
+        this._tileMotionAutoPlayBinding?.refresh?.();
+        this._tileMotionTimeFactorBinding?.refresh?.();
+      } catch (_) {
+      }
+    } catch (_) {
+    }
+  }
+
+  async _setTileMotionSpeed(percent, options = undefined) {
+    try {
+      const mgr = window.MapShine?.tileMotionManager;
+      if (!mgr || typeof mgr.setSpeedPercent !== 'function') return false;
+      return await mgr.setSpeedPercent(percent, options);
+    } catch (error) {
+      log.warn('Failed to set tile motion speed:', error);
+      return false;
+    }
+  }
+
+  async _setTileMotionAutoPlayEnabled(enabled, options = undefined) {
+    try {
+      const mgr = window.MapShine?.tileMotionManager;
+      if (!mgr || typeof mgr.setAutoPlayEnabled !== 'function') return false;
+      return await mgr.setAutoPlayEnabled(enabled, options);
+    } catch (error) {
+      log.warn('Failed to set tile motion autoplay:', error);
+      return false;
+    }
+  }
+
+  async _setTileMotionTimeFactor(percent, options = undefined) {
+    try {
+      const mgr = window.MapShine?.tileMotionManager;
+      if (!mgr || typeof mgr.setTimeFactorPercent !== 'function') return false;
+      return await mgr.setTimeFactorPercent(percent, options);
+    } catch (error) {
+      log.warn('Failed to set tile motion time factor:', error);
+      return false;
+    }
+  }
+
+  async _startTileMotion() {
+    if (!game.user?.isGM) {
+      ui.notifications?.warn('Tile motion controls are GM-only');
+      return;
+    }
+
+    const mgr = window.MapShine?.tileMotionManager;
+    if (!mgr || typeof mgr.start !== 'function') {
+      ui.notifications?.warn('Tile motion manager is not available');
+      return;
+    }
+
+    const ok = await mgr.start();
+    if (!ok) {
+      ui.notifications?.warn('Failed to start tile motion');
+      return;
+    }
+
+    this._syncTileMotionSpeedFromManager();
+    ui.notifications?.info('Tile motion started');
+  }
+
+  async _stopTileMotion() {
+    if (!game.user?.isGM) {
+      ui.notifications?.warn('Tile motion controls are GM-only');
+      return;
+    }
+
+    const mgr = window.MapShine?.tileMotionManager;
+    if (!mgr || typeof mgr.stop !== 'function') {
+      ui.notifications?.warn('Tile motion manager is not available');
+      return;
+    }
+
+    const ok = await mgr.stop();
+    if (!ok) {
+      ui.notifications?.warn('Failed to stop tile motion');
+      return;
+    }
+
+    ui.notifications?.info('Tile motion stopped');
+  }
+
+  async _resetTileMotionPhase() {
+    if (!game.user?.isGM) {
+      ui.notifications?.warn('Tile motion controls are GM-only');
+      return;
+    }
+
+    const mgr = window.MapShine?.tileMotionManager;
+    if (!mgr || typeof mgr.resetPhase !== 'function') {
+      ui.notifications?.warn('Tile motion manager is not available');
+      return;
+    }
+
+    const ok = await mgr.resetPhase();
+    if (!ok) {
+      ui.notifications?.warn('Failed to reset tile motion phase');
+      return;
+    }
+
+    ui.notifications?.info('Tile motion phase reset');
+  }
+
+  _buildTileMotionSection() {
+    const tileMotionFolder = this.pane.addFolder({
+      title: '🧭 Tile Motion',
+      expanded: false
+    });
+
+    this._tileMotionAutoPlayBinding = tileMotionFolder.addBinding(this.controlState, 'tileMotionAutoPlayEnabled', {
+      label: 'Auto Play'
+    }).on('change', (ev) => {
+      this.controlState.tileMotionAutoPlayEnabled = !!ev.value;
+      void this._setTileMotionAutoPlayEnabled(!!ev.value, { persist: !!ev?.last });
+      if (ev?.last) this.debouncedSave();
+    });
+
+    this._tileMotionTimeFactorBinding = tileMotionFolder.addBinding(this.controlState, 'tileMotionTimeFactorPercent', {
+      label: 'Time Factor (%)',
+      min: 0,
+      max: 200,
+      step: 1
+    }).on('change', (ev) => {
+      this.controlState.tileMotionTimeFactorPercent = ev.value;
+      void this._setTileMotionTimeFactor(ev.value, { persist: !!ev?.last });
+      if (ev?.last) this.debouncedSave();
+    });
+
+    this._tileMotionSpeedBinding = tileMotionFolder.addBinding(this.controlState, 'tileMotionSpeedPercent', {
+      label: 'Speed (%)',
+      min: 0,
+      max: 400,
+      step: 1
+    }).on('change', (ev) => {
+      this.controlState.tileMotionSpeedPercent = ev.value;
+      void this._setTileMotionSpeed(ev.value, { persist: !!ev?.last });
+      if (ev?.last) this.debouncedSave();
+    });
+
+    tileMotionFolder.addButton({
+      title: 'Start'
+    }).on('click', () => {
+      void this._startTileMotion();
+    });
+
+    tileMotionFolder.addButton({
+      title: 'Stop'
+    }).on('click', () => {
+      void this._stopTileMotion();
+    });
+
+    tileMotionFolder.addButton({
+      title: 'Reset Phase'
+    }).on('click', () => {
+      void this._resetTileMotionPhase();
+    });
+  }
+
   /**
    * Apply control state to game systems using centralized StateApplier
    * @private
@@ -1497,11 +1705,19 @@ export class ControlPanelManager {
       directedTransitionMinutes: 5.0,
       windSpeed: 0.5,
       windDirection: 180.0,
-      gustiness: 'moderate'
+      gustiness: 'moderate',
+      tileMotionSpeedPercent: 100,
+      tileMotionAutoPlayEnabled: true,
+      tileMotionTimeFactorPercent: 100
     };
 
     this._updateClock(12.0);
-    void this._applyControlState().then(() => this._saveControlState());
+    void this._applyControlState().then(async () => {
+      await this._setTileMotionSpeed(this.controlState.tileMotionSpeedPercent);
+      await this._setTileMotionAutoPlayEnabled(this.controlState.tileMotionAutoPlayEnabled);
+      await this._setTileMotionTimeFactor(this.controlState.tileMotionTimeFactorPercent);
+      await this._saveControlState();
+    });
     
     // Refresh bindings
     if (this.pane) {
@@ -1719,6 +1935,7 @@ Current Weather:
     this._statusEls = null;
     this.headerOverlay = null;
     this._sunLatitudeBinding = null;
+    this._tileMotionSpeedBinding = null;
 
     log.info('Control panel destroyed');
   }

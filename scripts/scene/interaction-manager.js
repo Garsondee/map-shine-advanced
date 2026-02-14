@@ -161,6 +161,16 @@ export class InteractionManager {
       visible: false
     };
 
+    // One-shot world pick callback (e.g., pivot selection from Tile Motion dialog).
+    // Set via setPendingWorldPick(); checked at the top of onPointerDown.
+    /** @type {((worldPos: {x:number, y:number}) => void)|null} */
+    this._pendingWorldPick = null;
+
+    // Persistent world click observers notified on every left-click with world coords.
+    // Used by the Tile Motion dialog to auto-select clicked tiles.
+    /** @type {Set<(info: {clientX:number, clientY:number, worldX:number, worldY:number}) => void>} */
+    this._worldClickObservers = new Set();
+
     this._pendingTokenMoveCleanup = {
       timeoutId: null,
       tokenIds: new Set()
@@ -1224,6 +1234,36 @@ export class InteractionManager {
         // Ignore pointer-down on UI so we don't start scene interactions.
         if (this._isEventFromUI(event)) {
           return;
+        }
+
+        // One-shot world pick callback (e.g., Tile Motion pivot selection).
+        // This takes absolute priority — it consumes the event and returns.
+        if (this._pendingWorldPick && event.button === 0) {
+          const pickWorldPos = this.screenToWorld(event.clientX, event.clientY);
+          if (pickWorldPos) {
+            const cb = this._pendingWorldPick;
+            this._pendingWorldPick = null;
+            try { cb(pickWorldPos); } catch (err) { log.warn('World pick callback error:', err); }
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
+            return;
+          }
+        }
+
+        // Notify persistent world click observers (non-consuming).
+        // Fires early so observers see every left-click regardless of what
+        // the InteractionManager does with it afterwards.
+        if (this._worldClickObservers.size > 0 && event.button === 0) {
+          safeCall(() => {
+            const obsWorldPos = this.screenToWorld(event.clientX, event.clientY);
+            if (obsWorldPos) {
+              const info = { clientX: event.clientX, clientY: event.clientY, worldX: obsWorldPos.x, worldY: obsWorldPos.y };
+              for (const cb of this._worldClickObservers) {
+                try { cb(info); } catch (err) { log.warn('World click observer error:', err); }
+              }
+            }
+          }, 'pointerDown.worldClickObservers', Severity.COSMETIC);
         }
 
         // Any new pointerdown cancels a pending light click unless we immediately re-arm it.
@@ -4296,6 +4336,37 @@ export class InteractionManager {
     const worldPos = this.viewportToWorld(clientX, clientY, groundZ);
     if (!worldPos) return null;
     return { x: worldPos.x, y: worldPos.y };
+  }
+
+  // ── World Pick / Observer API ────────────────────────────────────────────
+
+  /**
+   * Register a one-shot world pick callback. On the next left-click the
+   * callback receives world coords and the event is consumed (no other
+   * InteractionManager processing occurs for that click).
+   * @param {(worldPos: {x:number, y:number}) => void} callback
+   */
+  setPendingWorldPick(callback) {
+    this._pendingWorldPick = typeof callback === 'function' ? callback : null;
+  }
+
+  /** Clear a previously registered pending world pick without firing it. */
+  clearPendingWorldPick() {
+    this._pendingWorldPick = null;
+  }
+
+  /**
+   * Register a persistent observer that is notified on every left-click
+   * with the world position. Observers do NOT consume the event.
+   * @param {(info: {clientX:number, clientY:number, worldX:number, worldY:number}) => void} callback
+   */
+  addWorldClickObserver(callback) {
+    if (typeof callback === 'function') this._worldClickObservers.add(callback);
+  }
+
+  /** Remove a previously registered world click observer. */
+  removeWorldClickObserver(callback) {
+    this._worldClickObservers.delete(callback);
   }
 
   /**

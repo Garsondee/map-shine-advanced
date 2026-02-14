@@ -219,19 +219,25 @@ export class GraphicsSettingsManager {
           continue;
         }
 
-        // EffectComposer only renders enabled effects, so this is the safest first step.
-        if (typeof effect.enabled === 'boolean') {
-          effect.enabled = enabled;
-        }
+        // Prefer a dedicated enable/disable hook so effects can immediately hide
+        // scene-attached objects even when the composer stops calling update().
+        if (typeof effect.setEnabled === 'function') {
+          effect.setEnabled(enabled);
+        } else {
+          // EffectComposer only renders enabled effects, so this is the safest first step.
+          if (typeof effect.enabled === 'boolean') {
+            effect.enabled = enabled;
+          }
 
-        // Some effects use params.enabled patterns.
-        if (effect.params && typeof effect.params.enabled === 'boolean') {
-          effect.params.enabled = enabled;
-        }
+          // Some effects use params.enabled patterns.
+          if (effect.params && typeof effect.params.enabled === 'boolean') {
+            effect.params.enabled = enabled;
+          }
 
-        // Some effects have a specific settings enabled.
-        if (effect.settings && typeof effect.settings.enabled === 'boolean') {
-          effect.settings.enabled = enabled;
+          // Some effects have a specific settings enabled.
+          if (effect.settings && typeof effect.settings.enabled === 'boolean') {
+            effect.settings.enabled = enabled;
+          }
         }
 
       } catch (e) {

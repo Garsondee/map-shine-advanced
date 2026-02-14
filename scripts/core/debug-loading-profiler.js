@@ -42,10 +42,11 @@ export class DebugLoadingProfiler {
   constructor() {
     /**
      * Master toggle. When true, loading is forced sequential and the debug
-     * log overlay is shown. Set to true for development, false for release.
+     * log overlay is shown. This is controlled by the Foundry setting
+     * "Debug Loading Mode" and defaults to disabled.
      * @type {boolean}
      */
-    this.debugMode = true;
+    this.debugMode = false;
 
     /**
      * All recorded loading entries for the current session.

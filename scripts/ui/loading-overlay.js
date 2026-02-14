@@ -325,7 +325,7 @@ export class LoadingOverlay {
 
     // Dismiss button
     const dismissBtn = document.createElement('button');
-    dismissBtn.textContent = 'Dismiss Loading Log';
+    dismissBtn.textContent = 'Load Scene';
     dismissBtn.className = 'map-shine-debug-dismiss-btn';
     dismissBtn.style.display = 'none';
     dismissBtn.style.marginTop = '10px';

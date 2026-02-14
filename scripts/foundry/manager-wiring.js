@@ -79,6 +79,7 @@ export function wireMapPointsToEffects(effectMap, mapPointsManager) {
  * @param {Object} refs.lightEditor
  * @param {Object} refs.gridRenderer
  * @param {Object} refs.mapPointsManager
+ * @param {Object} refs.tileMotionManager
  * @param {Object} refs.weatherController
  * @param {Object} refs.renderLoop
  * @param {Object} refs.sceneDebug
@@ -130,6 +131,7 @@ export function exposeGlobals(mapShine, refs) {
     'drawingManager', 'noteManager', 'templateManager', 'lightIconManager',
     'enhancedLightIconManager', 'enhancedLightInspector', 'interactionManager',
     'overlayUIManager', 'lightEditor', 'gridRenderer', 'mapPointsManager',
+    'tileMotionManager',
     'weatherController', 'renderLoop', 'sceneDebug', 'controlsIntegration',
     'dynamicExposureManager', 'physicsRopeManager',
   ];

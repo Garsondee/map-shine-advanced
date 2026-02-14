@@ -399,6 +399,7 @@ export class LightingEffect extends EffectBase {
         uLightIntensity: { value: 1.0 },
         uColorationStrength: { value: 1.0 },
         uOverheadShadowOpacity: { value: 0.0 },
+        uOverheadShadowAllowIndoor: { value: 0.0 },
         uOverheadShadowAffectsLights: { value: 0.75 },
         uBuildingShadowOpacity: { value: 0.0 },
         uBushShadowOpacity: { value: 0.0 },
@@ -455,6 +456,7 @@ export class LightingEffect extends EffectBase {
         uniform float uLightIntensity;
         uniform float uColorationStrength;
         uniform float uOverheadShadowOpacity;
+        uniform float uOverheadShadowAllowIndoor;
         uniform float uOverheadShadowAffectsLights;
         uniform float uBuildingShadowOpacity;
         uniform float uBushShadowOpacity;
@@ -493,6 +495,7 @@ export class LightingEffect extends EffectBase {
           // Small gaussian-ish blur kernel in screen UV to soften sun-light edges.
           // Uses pixel radius converted to UV via uCompositeTexelSize.
           float rpx = max(uSunBlurRadiusPx, 0.0);
+
           if (rpx <= 0.001) {
             return texture2D(tSunLight, uv).rgb;
           }
@@ -532,53 +535,61 @@ export class LightingEffect extends EffectBase {
           float roofAlpha = roofAlphaRaw * (1.0 - ropeMask);
           float lightVisibility = 1.0 - roofAlpha;
 
-          float shadowTex = texture2D(tOverheadShadow, vUv).r;
+          vec3 shadowTex = texture2D(tOverheadShadow, vUv).rgb;
           float shadowOpacity = clamp(uOverheadShadowOpacity, 0.0, 1.0);
-          float rawShadowFactor = mix(1.0, shadowTex, shadowOpacity);
+          vec3 rawShadowFactor = mix(vec3(1.0), shadowTex, shadowOpacity);
 
           float buildingTex = texture2D(tBuildingShadow, vUv).r;
           float buildingOpacity = clamp(uBuildingShadowOpacity, 0.0, 1.0);
           float rawBuildingFactor = mix(1.0, buildingTex, buildingOpacity);
 
-          vec2 bushDir = normalize(uShadowSunDir);
-          float bushPixelLen = uBushShadowLength * max(uViewportHeight, 1.0) * max(uShadowZoom, 0.0001);
-          vec2 bushOffsetUv = bushDir * bushPixelLen * uCompositeTexelSize;
-          float bushTex = texture2D(tBushShadow, vUv + bushOffsetUv).r;
-          // Bush shadow target packs coverage in G (see BushEffect shadow shader).
-          // If the current pixel is part of the bush itself, don't apply bush shadows
-          // to it (prevents the shadow from appearing on top of the bush overlay).
-          float bushSelfCoverage = texture2D(tBushShadow, vUv).g;
+          float bushTex = texture2D(tBushShadow, vUv).r;
           float bushOpacity = clamp(uBushShadowOpacity, 0.0, 1.0);
           float rawBushFactor = mix(1.0, bushTex, bushOpacity);
+
+          vec2 windDir = uShadowSunDir;
+          float windLen2 = dot(windDir, windDir);
+          if (windLen2 < 1e-6) windDir = vec2(0.0, 1.0);
+          else windDir *= inversesqrt(windLen2);
+
+          float zoom = max(uShadowZoom, 0.0001);
+          vec2 texel = max(uCompositeTexelSize, vec2(1.0 / 4096.0));
+          float viewportH = max(uViewportHeight, 1.0);
+          vec2 pixelVec = vec2(windDir.x, -windDir.y);
+
+          vec2 bushOffset = pixelVec * (uBushShadowLength * viewportH * zoom) * texel;
+          float bushSelfCoverage = texture2D(tBushShadow, clamp(vUv - bushOffset, vec2(0.001), vec2(0.999))).g;
           rawBushFactor = mix(rawBushFactor, 1.0, clamp(bushSelfCoverage, 0.0, 1.0));
 
-          float treePixelLen = uTreeShadowLength * max(uViewportHeight, 1.0) * max(uShadowZoom, 0.0001);
-          vec2 treeOffsetUv = bushDir * treePixelLen * uCompositeTexelSize;
-          float treeTex = texture2D(tTreeShadow, vUv + treeOffsetUv).r;
-          // Tree shadow target packs coverage in G (see TreeEffect shadow shader).
-          // If the current pixel is part of the tree itself, don't apply tree shadows
-          // to it (prevents the shadow from appearing on top of the tree overlay).
-          float treeSelfCoverage = texture2D(tTreeShadow, vUv).g;
+          float treeTex = texture2D(tTreeShadow, vUv).r;
+          float treeSelf = clamp(uTreeSelfShadowStrength, 0.0, 1.0);
+          treeTex = mix(1.0, treeTex, treeSelf);
           float treeOpacity = clamp(uTreeShadowOpacity, 0.0, 1.0);
           float rawTreeFactor = mix(1.0, treeTex, treeOpacity);
+
+          // Self-shadow suppression mask: green channel encodes tree sprite coverage.
+          // Where tree geometry exists, fade projected tree shadow out so it only appears
+          // next to the tree and not on top of it (prevents the shadow from appearing on top of the tree overlay).
+          float treeSelfCoverage = texture2D(tTreeShadow, vUv).g;
           rawTreeFactor = mix(rawTreeFactor, 1.0, clamp(treeSelfCoverage, 0.0, 1.0));
 
           float cloudTex = texture2D(tCloudShadow, vUv).r;
           float cloudOpacity = clamp(uCloudShadowOpacity, 0.0, 1.0);
           float cloudFactor = mix(1.0, cloudTex, cloudOpacity);
 
-          float shadowFactor = mix(rawShadowFactor, 1.0, roofAlphaRaw);
+          vec3 shadowFactor = mix(rawShadowFactor, vec3(1.0), roofAlphaRaw);
           float buildingFactor = mix(rawBuildingFactor, 1.0, roofAlphaRaw);
           float bushFactor = mix(rawBushFactor, 1.0, roofAlphaRaw);
           float treeFactor = mix(rawTreeFactor, 1.0, roofAlphaRaw);
 
           float outdoorStrength = max(outdoorStrengthBase, roofAlphaRaw);
-          shadowFactor = mix(1.0, shadowFactor, outdoorStrength);
+          float overheadOutdoorStrength = mix(outdoorStrength, 1.0, step(0.5, uOverheadShadowAllowIndoor));
+          shadowFactor = mix(vec3(1.0), shadowFactor, overheadOutdoorStrength);
           buildingFactor = mix(1.0, buildingFactor, outdoorStrength);
           bushFactor = mix(1.0, bushFactor, outdoorStrength);
           treeFactor = mix(1.0, treeFactor, outdoorStrength);
 
-          float combinedShadowFactor = shadowFactor * buildingFactor * bushFactor * treeFactor * cloudFactor;
+          vec3 combinedShadowFactor = shadowFactor * buildingFactor * bushFactor * treeFactor * cloudFactor;
 
           float kd = clamp(uOverheadShadowAffectsLights, 0.0, 1.0);
           vec3 shadedAmbient = ambient * combinedShadowFactor;
@@ -1907,13 +1918,16 @@ export class LightingEffect extends EffectBase {
       const overhead = window.MapShine?.overheadShadowsEffect;
       if (overhead && overhead.params && overhead.enabled && overhead.shadowTarget) {
         u.uOverheadShadowOpacity.value = overhead.params.opacity ?? 0.0;
+        u.uOverheadShadowAllowIndoor.value = overhead.params.indoorShadowEnabled ? 1.0 : 0.0;
         u.uOverheadShadowAffectsLights.value = overhead.params.affectsLights ?? 0.75;
       } else {
         // No active overhead shadows; disable effect in shader.
         u.uOverheadShadowOpacity.value = 0.0;
+        u.uOverheadShadowAllowIndoor.value = 0.0;
       }
     } catch (e) {
       u.uOverheadShadowOpacity.value = 0.0;
+      u.uOverheadShadowAllowIndoor.value = 0.0;
     }
 
     // Drive building shadow opacity from BuildingShadowsEffect (if present).

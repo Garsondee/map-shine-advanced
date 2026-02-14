@@ -67,6 +67,7 @@ import { TokenManager } from '../scene/token-manager.js';
 import { VisibilityController } from '../vision/VisibilityController.js';
 import { DetectionFilterEffect } from '../effects/DetectionFilterEffect.js';
 import { TileManager } from '../scene/tile-manager.js';
+import { TileMotionManager } from '../scene/tile-motion-manager.js';
 import { SurfaceRegistry } from '../scene/surface-registry.js';
 import { WallManager } from '../scene/wall-manager.js';
 import { DoorMeshManager } from '../scene/DoorMeshManager.js';
@@ -199,6 +200,9 @@ let dynamicExposureManager = null;
 
 /** @type {TileManager|null} */
 let tileManager = null;
+
+/** @type {TileMotionManager|null} */
+let tileMotionManager = null;
 
 /** @type {SurfaceRegistry|null} */
 let surfaceRegistry = null;
@@ -898,6 +902,7 @@ function onCanvasTearDown(canvas) {
     window.MapShine.visibilityController = null;
     window.MapShine.detectionFilterEffect = null;
     window.MapShine.tileManager = null;
+    window.MapShine.tileMotionManager = null;
     window.MapShine.surfaceRegistry = null;
     window.MapShine.surfaceReport = null;
     window.MapShine.wallManager = null;
@@ -1030,6 +1035,11 @@ async function createThreeCanvas(scene) {
   // Debug Loading Profiler: when active, forces sequential loading and shows
   // a granular timing log on the loading overlay.
   const dlp = debugLoadingProfiler;
+  // Always reset debug callbacks/UI at scene-load start so toggling the setting
+  // between loads cannot leave stale handlers or debug UI state behind.
+  dlp.onEntryComplete = null;
+  dlp.onEntryStart = null;
+  safeCall(() => loadingOverlay.disableDebugMode(), 'overlay.disableDebug', Severity.COSMETIC);
   const isDebugLoad = dlp.debugMode;
   if (isDebugLoad) {
     dlp.startSession(scene?.name || 'Unknown');
@@ -1862,6 +1872,15 @@ async function createThreeCanvas(scene) {
     if (isDebugLoad) dlp.end('manager.TileManager.syncAll');
     log.info('Tile manager initialized and synced');
 
+    // Step 4b.1: Initialize tile motion runtime manager
+    if (isDebugLoad) dlp.begin('manager.TileMotion.init', 'manager');
+    tileMotionManager = new TileMotionManager(tileManager);
+    await tileMotionManager.initialize();
+    effectComposer.addUpdatable(tileMotionManager);
+    if (window.MapShine) window.MapShine.tileMotionManager = tileMotionManager;
+    if (isDebugLoad) dlp.end('manager.TileMotion.init');
+    log.info('Tile motion manager initialized');
+
     safeCall(() => loadingOverlay.setStage('scene.sync', 0.35, 'Syncing tiles…', { keepAuto: true }), 'overlay.tiles', Severity.COSMETIC);
 
     if (isDebugLoad) dlp.begin('manager.SurfaceRegistry.init', 'manager');
@@ -2236,6 +2255,7 @@ async function createThreeCanvas(scene) {
       drawingManager, noteManager, templateManager, lightIconManager,
       enhancedLightIconManager, enhancedLightInspector, interactionManager,
       overlayUIManager, lightEditor, gridRenderer, mapPointsManager,
+      tileMotionManager,
       weatherController, renderLoop, sceneDebug, controlsIntegration,
       dynamicExposureManager, physicsRopeManager,
       setMapMakerMode, resetScene, isMapMakerMode
@@ -4686,6 +4706,14 @@ function destroyThreeCanvas() {
     tokenManager.dispose();
     tokenManager = null;
     log.debug('Token manager disposed');
+  }
+
+  // Dispose tile manager
+  if (tileMotionManager) {
+    safeDispose(() => { if (effectComposer) effectComposer.removeUpdatable(tileMotionManager); }, 'removeUpdatable(tileMotion)');
+    safeDispose(() => tileMotionManager.dispose(), 'tileMotionManager.dispose');
+    tileMotionManager = null;
+    log.debug('Tile motion manager disposed');
   }
 
   // Dispose tile manager

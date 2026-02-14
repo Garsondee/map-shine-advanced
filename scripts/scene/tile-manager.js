@@ -1529,6 +1529,16 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   }
 
   /**
+   * Get sprite+doc bundle for a tile id.
+   * @param {string} tileId
+   * @returns {{sprite: THREE.Sprite, tileDoc: TileDocument}|null}
+   * @public
+   */
+  getTileSpriteData(tileId) {
+    return this.tileSprites.get(tileId) || null;
+  }
+
+  /**
    * Toggle hover-based hiding for a specific tile. When un-hiding, normal
    * visibility rules (GM hidden, alpha, etc.) are re-applied.
    * @param {string} tileId
@@ -2785,6 +2795,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     this._overheadTileIds.delete(tileId);
     this._weatherRoofTileIds.delete(tileId);
 
+    try {
+      window.MapShine?.tileMotionManager?.onTileRemoved?.(tileId);
+    } catch (_) {
+    }
+
     if (this._initialLoad.active && this._initialLoad.trackedIds?.has(tileId)) {
       const wasOverhead = !!sprite?.userData?.isOverhead;
       this._markInitialTileLoaded(tileId, wasOverhead);
@@ -3112,6 +3127,13 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     if (data) {
       this._ensureWaterOccluderMesh(data, tileDoc);
       this._updateWaterOccluderMeshTransform(sprite, tileDoc);
+    }
+
+    // Tile motion is layered on top of the base transform.
+    // Capture authoritative base values whenever TileManager re-syncs a sprite.
+    try {
+      window.MapShine?.tileMotionManager?.captureBaseTransform?.(tileDoc?.id, sprite);
+    } catch (_) {
     }
   }
 

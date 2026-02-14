@@ -535,9 +535,12 @@ export class LightingEffect extends EffectBase {
           float roofAlpha = roofAlphaRaw * (1.0 - ropeMask);
           float lightVisibility = 1.0 - roofAlpha;
 
-          vec3 shadowTex = texture2D(tOverheadShadow, vUv).rgb;
+          vec4 overheadShadowSample = texture2D(tOverheadShadow, vUv);
+          vec3 shadowTex = overheadShadowSample.rgb;
+          float tileShadowTex = overheadShadowSample.a;
           float shadowOpacity = clamp(uOverheadShadowOpacity, 0.0, 1.0);
           vec3 rawShadowFactor = mix(vec3(1.0), shadowTex, shadowOpacity);
+          float rawTileProjectionFactor = mix(1.0, tileShadowTex, shadowOpacity);
 
           float buildingTex = texture2D(tBuildingShadow, vUv).r;
           float buildingOpacity = clamp(uBuildingShadowOpacity, 0.0, 1.0);
@@ -567,9 +570,6 @@ export class LightingEffect extends EffectBase {
           float treeOpacity = clamp(uTreeShadowOpacity, 0.0, 1.0);
           float rawTreeFactor = mix(1.0, treeTex, treeOpacity);
 
-          // Self-shadow suppression mask: green channel encodes tree sprite coverage.
-          // Where tree geometry exists, fade projected tree shadow out so it only appears
-          // next to the tree and not on top of it (prevents the shadow from appearing on top of the tree overlay).
           float treeSelfCoverage = texture2D(tTreeShadow, vUv).g;
           rawTreeFactor = mix(rawTreeFactor, 1.0, clamp(treeSelfCoverage, 0.0, 1.0));
 
@@ -577,7 +577,9 @@ export class LightingEffect extends EffectBase {
           float cloudOpacity = clamp(uCloudShadowOpacity, 0.0, 1.0);
           float cloudFactor = mix(1.0, cloudTex, cloudOpacity);
 
-          vec3 shadowFactor = mix(rawShadowFactor, vec3(1.0), roofAlphaRaw);
+          float roofSuppress = roofAlphaRaw * (1.0 - step(0.5, uOverheadShadowAllowIndoor));
+          vec3 shadowFactor = mix(rawShadowFactor, vec3(1.0), roofSuppress);
+
           float buildingFactor = mix(rawBuildingFactor, 1.0, roofAlphaRaw);
           float bushFactor = mix(rawBushFactor, 1.0, roofAlphaRaw);
           float treeFactor = mix(rawTreeFactor, 1.0, roofAlphaRaw);
@@ -590,6 +592,7 @@ export class LightingEffect extends EffectBase {
           treeFactor = mix(1.0, treeFactor, outdoorStrength);
 
           vec3 combinedShadowFactor = shadowFactor * buildingFactor * bushFactor * treeFactor * cloudFactor;
+          combinedShadowFactor *= rawTileProjectionFactor;
 
           float kd = clamp(uOverheadShadowAffectsLights, 0.0, 1.0);
           vec3 shadedAmbient = ambient * combinedShadowFactor;
@@ -601,14 +604,13 @@ export class LightingEffect extends EffectBase {
           }
 
           vec3 shadedLights = mix(baseLights, baseLights * combinedShadowFactor, kd);
+          vec3 safeLights = max(shadedLights, vec3(0.0));
+          float lightI = max(max(safeLights.r, safeLights.g), safeLights.b);
 
           vec3 windowLightIllum = vec3(0.0);
           if (uHasWindowLight > 0.5) {
             windowLightIllum = texture2D(tWindowLight, vUv).rgb;
           }
-
-          vec3 safeLights = max(shadedLights, vec3(0.0));
-          float lightI = max(max(safeLights.r, safeLights.g), safeLights.b);
 
           // Sun Light (indoor fill) contribution: only apply in indoor regions.
           // Indoors are represented by low outdoors mask values.

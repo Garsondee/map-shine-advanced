@@ -4,13 +4,19 @@
  * @module effects/SpecularEffect
  */
 
-import { EffectBase, RenderLayers } from './EffectComposer.js';
+import { EffectBase, RenderLayers, OVERLAY_THREE_LAYER } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { ShaderValidator } from '../core/shader-validator.js';
 import { weatherController, PrecipitationType } from '../core/WeatherController.js';
 import Coordinates from '../utils/coordinates.js';
 
 const log = createLogger('SpecularEffect');
+
+// Tile overlay pass ordering bands.
+// Keep all occluders in an earlier global band and all additive color meshes
+// in a later band so no color pass can run before every occluder has written depth.
+const TILE_SPEC_OCCLUDER_ORDER_BASE = 6000;
+const TILE_SPEC_COLOR_ORDER_BASE = 7000;
 
 /**
  * Specular highlight effect with PBR lighting model
@@ -50,7 +56,13 @@ export class SpecularEffect extends EffectBase {
     /** @type {THREE.Scene|null} */
     this._scene = null;
 
-    /** @type {Map<string, {mesh: THREE.Mesh, material: THREE.ShaderMaterial, sprite: THREE.Object3D}>} */
+    /** @type {Map<string, {
+     *   sprite: THREE.Object3D,
+     *   occluderMesh: THREE.Mesh|null,
+     *   occluderMaterial: THREE.ShaderMaterial|null,
+     *   colorMesh: THREE.Mesh|null,
+     *   colorMaterial: THREE.ShaderMaterial|null
+     * }>} */
     this._tileOverlays = new Map();
 
     // Light tracking
@@ -74,6 +86,7 @@ export class SpecularEffect extends EffectBase {
       stripeBlendMode: 0,       // 0=Add, 1=Multiply, 2=Screen, 3=Overlay
       parallaxStrength: 1.5,    // Global parallax intensity multiplier
       stripeMaskThreshold: 0.1, // 0 = all mask, 1 = only brightest texels
+      worldPatternScale: 3072.0, // World-space stripe scale in pixels (higher = larger pattern)
       
       // Layer 1 - Primary stripes
       stripe1Enabled: true,
@@ -163,6 +176,10 @@ export class SpecularEffect extends EffectBase {
     };
 
     this._tempScreenSize = null;
+    this._tileOverlayPos = null;
+    this._tileOverlayQuat = null;
+    this._tileOverlayScale = null;
+    this._tileOverlayRotQuat = null;
 
     this._fallbackAlbedo = null;
     this._fallbackBlack = null;
@@ -226,7 +243,7 @@ export class SpecularEffect extends EffectBase {
           label: 'Stripe Settings',
           type: 'inline',
           separator: true, // Add separator before this group
-          parameters: ['stripeEnabled', 'stripeBlendMode', 'parallaxStrength', 'stripeMaskThreshold']
+          parameters: ['stripeEnabled', 'stripeBlendMode', 'parallaxStrength', 'stripeMaskThreshold', 'worldPatternScale']
         },
         {
           name: 'layer1',
@@ -357,6 +374,15 @@ export class SpecularEffect extends EffectBase {
           max: 1,
           step: 0.01,
           default: 0.1,
+          throttle: 100
+        },
+        worldPatternScale: {
+          type: 'slider',
+          label: 'Specular World Scale',
+          min: 256,
+          max: 8192,
+          step: 16,
+          default: 3072,
           throttle: 100
         },
         parallaxStrength: {
@@ -934,63 +960,166 @@ export class SpecularEffect extends EffectBase {
   /**
    * Bind a per-tile specular overlay to an existing tile sprite.
    * This keeps tiles as sprites (fast), and renders specular as an additive mesh.
+   *
+   * If specularMask is null, we still bind a depth-only overlay so the tile is
+   * treated as a black specular mask and occludes lower specular layers.
    * @param {TileDocument} tileDoc
    * @param {THREE.Object3D} sprite
-   * @param {THREE.Texture} specularMask
+   * @param {THREE.Texture|null} specularMask
+   * @param {{emitSpecular?: boolean}} [options]
    */
-  bindTileSprite(tileDoc, sprite, specularMask) {
+  bindTileSprite(tileDoc, sprite, specularMask, options = {}) {
     const THREE = window.THREE;
     if (!THREE) return;
 
     const tileId = tileDoc?.id;
-    if (!tileId || !sprite || !specularMask) return;
+    if (!tileId || !sprite) return;
+
+    // emitSpecular=false keeps the tile as an occluder only.
+    const emitSpecular = options?.emitSpecular !== false;
+    const hasSpecularMask = emitSpecular && !!specularMask;
+    const resolvedSpecularMask = hasSpecularMask ? specularMask : this._getFallbackBlackTexture();
 
     // Ensure we have a scene to attach into.
     if (!this._scene) return;
 
-    // If already bound, just update the textures.
-    const existing = this._tileOverlays.get(tileId);
-    if (existing?.material?.uniforms?.uSpecularMap) {
-      existing.material.uniforms.uAlbedoMap.value = sprite?.material?.map || this._getFallbackAlbedoTexture();
-      existing.material.uniforms.uSpecularMap.value = specularMask;
-      this._syncTileOverlayTransform(tileId, sprite);
-      return;
+    // Rebuild cleanly whenever the tile rebinds (texture/flags/sprite updates).
+    // This keeps dual-pass overlay state deterministic.
+    if (this._tileOverlays.has(tileId)) {
+      this.unbindTileSprite(tileId);
     }
 
-    const geom = new THREE.PlaneGeometry(1, 1);
     const baseMap = sprite?.material?.map || this._getFallbackAlbedoTexture();
-    const mat = this._createMaterialInstance({
+
+    // Pass A: depth-only occluder. This writes depth using the tile silhouette
+    // so lower tile specular cannot leak through opaque upper tiles.
+    const occluderMaterial = this._createMaterialInstance({
       baseTexture: baseMap,
-      specularMask,
+      specularMask: resolvedSpecularMask,
       roughnessMask: null,
       normalMap: null,
       outputMode: 1.0,
       transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
+      blending: THREE.NoBlending,
+      depthWrite: true,
       depthTest: true
     });
+    occluderMaterial.colorWrite = false;
+    occluderMaterial.blending = THREE.NoBlending;
+    if (typeof THREE.LessEqualDepth !== 'undefined') {
+      occluderMaterial.depthFunc = THREE.LessEqualDepth;
+    }
+    this._setTileOverlayAlphaClip(occluderMaterial, 0.1);
+    occluderMaterial.needsUpdate = true;
 
-    const mesh = new THREE.Mesh(geom, mat);
-    mesh.matrixAutoUpdate = false;
-    mesh.frustumCulled = false;
+    const occluderMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), occluderMaterial);
+    occluderMesh.matrixAutoUpdate = false;
+    occluderMesh.frustumCulled = false;
 
-    // Render above the tile sprite.
+    let colorMaterial = null;
+    let colorMesh = null;
+    if (hasSpecularMask) {
+      // Pass B: additive color, depth-tested against the occluder prepass.
+      colorMaterial = this._createMaterialInstance({
+        baseTexture: baseMap,
+        specularMask: resolvedSpecularMask,
+        roughnessMask: null,
+        normalMap: null,
+        outputMode: 1.0,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        depthTest: true
+      });
+      colorMaterial.colorWrite = true;
+      colorMaterial.blending = THREE.AdditiveBlending;
+      colorMaterial.depthWrite = false;
+      if (typeof THREE.EqualDepth !== 'undefined') {
+        colorMaterial.depthFunc = THREE.EqualDepth;
+      }
+      this._setTileOverlayAlphaClip(colorMaterial, 0.1);
+      colorMaterial.needsUpdate = true;
+
+      colorMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), colorMaterial);
+      colorMesh.matrixAutoUpdate = false;
+      colorMesh.frustumCulled = false;
+    }
+
+    const baseOrder = (typeof sprite.renderOrder === 'number') ? sprite.renderOrder : 0;
+    const sortKey = Number(
+      sprite?.userData?._msSortKey
+      ?? sprite?.userData?.tileDoc?.sort
+      ?? sprite?.userData?.tileDoc?.z
+      ?? 0
+    );
+    const sortOrderOffset = Number.isFinite(sortKey) ? (-sortKey * 0.00001) : 0.0;
+
+    // Keep all occluders before all additive color passes.
     try {
-      mesh.renderOrder = (typeof sprite.renderOrder === 'number') ? (sprite.renderOrder + 1) : 1;
+      const orderNudge = baseOrder * 0.1;
+      occluderMesh.renderOrder = TILE_SPEC_OCCLUDER_ORDER_BASE + orderNudge + sortOrderOffset;
+      if (colorMesh) colorMesh.renderOrder = TILE_SPEC_COLOR_ORDER_BASE + orderNudge + sortOrderOffset;
     } catch (_) {
     }
 
-    // Put it on the same layers as the sprite (important for roof/overlay passes).
-    try {
-      mesh.layers.mask = sprite.layers.mask;
-    } catch (_) {
-    }
+    this._syncTileOverlayLayers({ occluderMesh, colorMesh }, sprite);
 
-    this._scene.add(mesh);
-    this._tileOverlays.set(tileId, { mesh, material: mat, sprite });
+    this._scene.add(occluderMesh);
+    if (colorMesh) this._scene.add(colorMesh);
+    this._tileOverlays.set(tileId, {
+      sprite,
+      occluderMesh,
+      occluderMaterial,
+      colorMesh,
+      colorMaterial
+    });
 
     this._syncTileOverlayTransform(tileId, sprite);
+  }
+
+  /**
+   * Set alpha clip threshold for tile overlay materials.
+   * Uses the same threshold as tile sprites (alphaTest ~= 0.1) so overlay
+   * coverage matches visible tile silhouettes.
+   * @param {THREE.ShaderMaterial} mat
+   * @param {number} threshold
+   * @private
+   */
+  _setTileOverlayAlphaClip(mat, threshold = 0.1) {
+    if (!mat) return;
+
+    const t = Number(threshold);
+    const value = Number.isFinite(t) ? t : 0.1;
+    if (mat.uniforms?.uTileAlphaClip) {
+      mat.uniforms.uTileAlphaClip.value = value;
+    }
+    mat.needsUpdate = true;
+  }
+
+  /**
+   * Sync overlay layers from source sprite.
+   * - Color mesh follows sprite layers exactly.
+   * - Occluder mesh excludes overlay-only layer so it still renders in main
+   *   scene pass and blocks lower specular even for bypassEffects tiles.
+   * @param {{occluderMesh?: THREE.Mesh|null, colorMesh?: THREE.Mesh|null}} meshes
+   * @param {THREE.Object3D} sprite
+   * @private
+   */
+  _syncTileOverlayLayers(meshes, sprite) {
+    const occluderMesh = meshes?.occluderMesh || null;
+    const colorMesh = meshes?.colorMesh || null;
+    if (!sprite) return;
+
+    try {
+      const spriteMaskU = (Number(sprite?.layers?.mask ?? 1) >>> 0);
+      const overlayBit = ((1 << OVERLAY_THREE_LAYER) >>> 0);
+      let occluderMaskU = spriteMaskU & (~overlayBit >>> 0);
+      if (occluderMaskU === 0) occluderMaskU = 1; // Ensure layer 0 fallback.
+
+      if (occluderMesh?.layers) occluderMesh.layers.mask = occluderMaskU;
+      if (colorMesh?.layers) colorMesh.layers.mask = sprite.layers.mask;
+    } catch (_) {
+    }
   }
 
   /**
@@ -1000,16 +1129,26 @@ export class SpecularEffect extends EffectBase {
   unbindTileSprite(tileId) {
     const entry = tileId ? this._tileOverlays.get(tileId) : null;
     if (!entry) return;
+
+    const meshes = [entry.occluderMesh, entry.colorMesh].filter(Boolean);
+    const materials = [entry.occluderMaterial, entry.colorMaterial].filter(Boolean);
+
     try {
-      this._scene?.remove?.(entry.mesh);
+      for (const mesh of meshes) this._scene?.remove?.(mesh);
     } catch (_) {
     }
     try {
-      entry.mesh?.geometry?.dispose?.();
-      entry.material?.dispose?.();
+      for (const mesh of meshes) {
+        mesh?.geometry?.dispose?.();
+      }
+      for (const material of materials) {
+        material?.dispose?.();
+      }
     } catch (_) {
     }
-    this._materials.delete(entry.material);
+    for (const material of materials) {
+      this._materials.delete(material);
+    }
     this._tileOverlays.delete(tileId);
   }
 
@@ -1025,34 +1164,122 @@ export class SpecularEffect extends EffectBase {
 
   _syncTileOverlayTransform(tileId, sprite) {
     const entry = this._tileOverlays.get(tileId);
-    if (!entry?.mesh || !sprite) return;
+    if (!entry || !sprite) return;
+    const THREE = window.THREE;
+
+    const meshes = [entry.occluderMesh, entry.colorMesh].filter(Boolean);
+    if (meshes.length === 0) return;
+
     try {
       // Ensure world matrix is current.
       sprite.updateMatrixWorld?.(true);
     } catch (_) {
     }
     try {
-      entry.mesh.matrix.copy(sprite.matrixWorld);
+      if (THREE) {
+        if (!this._tileOverlayPos) this._tileOverlayPos = new THREE.Vector3();
+        if (!this._tileOverlayQuat) this._tileOverlayQuat = new THREE.Quaternion();
+        if (!this._tileOverlayScale) this._tileOverlayScale = new THREE.Vector3(1, 1, 1);
+        if (!this._tileOverlayRotQuat) this._tileOverlayRotQuat = new THREE.Quaternion();
+
+        // Decompose and re-compose as T*R*S so additional sprite material rotation
+        // is applied in the correct order. (T*S*R causes skew/drift on scaled/flipped tiles.)
+        sprite.matrixWorld.decompose(this._tileOverlayPos, this._tileOverlayQuat, this._tileOverlayScale);
+        const spriteRot = Number(sprite?.material?.rotation) || 0;
+        if (Math.abs(spriteRot) > 0.000001) {
+          this._tileOverlayRotQuat.setFromAxisAngle(new THREE.Vector3(0, 0, 1), spriteRot);
+          this._tileOverlayQuat.multiply(this._tileOverlayRotQuat);
+        }
+        for (const mesh of meshes) {
+          mesh.matrix.compose(this._tileOverlayPos, this._tileOverlayQuat, this._tileOverlayScale);
+        }
+      } else {
+        for (const mesh of meshes) {
+          mesh.matrix.copy(sprite.matrixWorld);
+        }
+      }
+      for (const mesh of meshes) {
+        mesh.matrixWorldNeedsUpdate = true;
+      }
+
       // Keep overlay visibility in sync with the underlying tile sprite.
       // IMPORTANT: Tile hover-hide fades via sprite.material.opacity without toggling sprite.visible.
       // If we only mirror sprite.visible here, the specular overlay can remain visible
       // while the tile has faded out, which looks like a "second copy" that won't disappear.
+      const sortKey = Number(
+        sprite?.userData?._msSortKey
+        ?? sprite?.userData?.tileDoc?.sort
+        ?? sprite?.userData?.tileDoc?.z
+        ?? 0
+      );
+
+      // Lift overlays slightly above their owning tile sprite so they can render
+      // in specular-only mode, and add a tiny sort-based lift so higher-sort tiles
+      // are reliably in front for depth occlusion (prevents lower-tile specular
+      // bleeding through top opaque tiles when depth values quantize closely).
+      try {
+        const baseLift = 0.02;
+        const sortLift = Number.isFinite(sortKey)
+          ? Math.max(-0.015, Math.min(0.50, sortKey * 0.002))
+          : 0.0;
+        for (const mesh of meshes) {
+          mesh.matrix.elements[14] += (baseLift + sortLift);
+        }
+      } catch (_) {
+      }
+
       let spriteOpacity = 1.0;
       try {
         const o = sprite?.material?.opacity;
         if (typeof o === 'number' && Number.isFinite(o)) spriteOpacity = o;
       } catch (_) {
       }
-      entry.mesh.visible = !!sprite.visible && spriteOpacity > 0.01;
+      const shouldShow = !!sprite.visible && spriteOpacity > 0.01;
+      for (const mesh of meshes) {
+        mesh.visible = shouldShow;
+      }
+
+      // Mirror tile depth-write policy (e.g. overhead fade-hidden roofs disable
+      // depth writes). This keeps specular overlays from re-introducing depth
+      // occlusion when the owning tile intentionally does not write depth.
+      try {
+        const desiredDepthWrite = !!sprite?.material?.depthWrite;
+        if (entry.occluderMaterial && entry.occluderMaterial.depthWrite !== desiredDepthWrite) {
+          entry.occluderMaterial.depthWrite = desiredDepthWrite;
+          entry.occluderMaterial.needsUpdate = true;
+        }
+      } catch (_) {
+      }
+
+      // Color pass should never write depth; it is gated by the occluder pass.
+      try {
+        if (entry.colorMaterial && entry.colorMaterial.depthWrite !== false) {
+          entry.colorMaterial.depthWrite = false;
+          entry.colorMaterial.needsUpdate = true;
+        }
+      } catch (_) {
+      }
 
       // Keep layering/sorting in sync. Tile renderOrder and layers can change
       // after initial bind during scene sync, elevation transitions, etc.
       try {
-        entry.mesh.renderOrder = (typeof sprite.renderOrder === 'number') ? (sprite.renderOrder + 1) : entry.mesh.renderOrder;
+        const baseOrder = (typeof sprite.renderOrder === 'number') ? sprite.renderOrder : 0;
+        // Higher Foundry sort should occlude lower specular first, so we render
+        // higher sort overlays slightly earlier in this dedicated overlay band.
+        // Keep this as a tiny continuous offset so large sort values don't collapse
+        // into the same renderOrder bucket (which can re-introduce lower-tile bleed-through).
+        const sortOrderOffset = Number.isFinite(sortKey) ? (-sortKey * 0.00001) : 0.0;
+        const orderNudge = baseOrder * 0.1;
+        if (entry.occluderMesh) {
+          entry.occluderMesh.renderOrder = TILE_SPEC_OCCLUDER_ORDER_BASE + orderNudge + sortOrderOffset;
+        }
+        if (entry.colorMesh) {
+          entry.colorMesh.renderOrder = TILE_SPEC_COLOR_ORDER_BASE + orderNudge + sortOrderOffset;
+        }
       } catch (_) {
       }
       try {
-        entry.mesh.layers.mask = sprite.layers.mask;
+        this._syncTileOverlayLayers(entry, sprite);
       } catch (_) {
       }
     } catch (_) {
@@ -1122,6 +1349,9 @@ export class SpecularEffect extends EffectBase {
         // 0 = full (albedo + specular)
         // 1 = specular only (for additive overlays like tiles)
         uOutputMode: { value: outputMode },
+        // Alpha clip threshold used by tile overlays. Base scene material keeps
+        // a near-zero clip; tile overlays override to match sprite alphaTest.
+        uTileAlphaClip: { value: 0.001 },
 
         // Effect parameters
         uSpecularIntensity: { value: this.params.intensity },
@@ -1152,6 +1382,7 @@ export class SpecularEffect extends EffectBase {
         uStripeBlendMode: { value: this.params.stripeBlendMode },
         uParallaxStrength: { value: this.params.parallaxStrength },
         uStripeMaskThreshold: { value: this.params.stripeMaskThreshold },
+        uWorldPatternScale: { value: this.params.worldPatternScale },
 
         // Layer 1
         uStripe1Enabled: { value: this.params.stripe1Enabled },
@@ -1597,6 +1828,7 @@ export class SpecularEffect extends EffectBase {
       if (mat.uniforms.uStripeBlendMode) mat.uniforms.uStripeBlendMode.value = this.params.stripeBlendMode;
       if (mat.uniforms.uParallaxStrength) mat.uniforms.uParallaxStrength.value = this.params.parallaxStrength;
       if (mat.uniforms.uStripeMaskThreshold) mat.uniforms.uStripeMaskThreshold.value = this.params.stripeMaskThreshold;
+      if (mat.uniforms.uWorldPatternScale) mat.uniforms.uWorldPatternScale.value = this.params.worldPatternScale;
 
       // Update sparkle parameters
       if (mat.uniforms.uSparkleEnabled) mat.uniforms.uSparkleEnabled.value = this.params.sparkleEnabled;
@@ -1688,9 +1920,9 @@ export class SpecularEffect extends EffectBase {
     try {
       if (this._tileOverlays && this._tileOverlays.size > 0) {
         for (const entry of this._tileOverlays.values()) {
-          const mesh = entry?.mesh;
+          const meshes = [entry?.occluderMesh, entry?.colorMesh].filter(Boolean);
           const sprite = entry?.sprite;
-          if (!mesh || !sprite) continue;
+          if (meshes.length === 0 || !sprite) continue;
 
           let spriteOpacity = 1.0;
           try {
@@ -1702,7 +1934,9 @@ export class SpecularEffect extends EffectBase {
           // Mirror the same cutoff used by TileManager for depthWrite and by
           // SpecularEffect._syncTileOverlayTransform.
           const shouldShow = !!sprite.visible && spriteOpacity > 0.01;
-          if (mesh.visible !== shouldShow) mesh.visible = shouldShow;
+          for (const mesh of meshes) {
+            if (mesh.visible !== shouldShow) mesh.visible = shouldShow;
+          }
         }
       }
     } catch (_) {
@@ -1787,7 +2021,7 @@ export class SpecularEffect extends EffectBase {
     // Update uCameraOffset for parallax effects
     for (const mat of this._materials) {
       if (!mat?.uniforms?.uCameraOffset?.value?.set) continue;
-      if (camera.isPerspectiveCamera) {
+      if (isFinite(camera.position.x) && isFinite(camera.position.y)) {
         mat.uniforms.uCameraOffset.value.set(camera.position.x, camera.position.y);
       } else if (camera.isOrthographicCamera) {
         const centerX = (camera.left + camera.right) / 2;
@@ -1996,6 +2230,7 @@ export class SpecularEffect extends EffectBase {
       uniform bool uEffectEnabled;
 
       uniform float uOutputMode;
+      uniform float uTileAlphaClip;
       
       uniform float uSpecularIntensity;
       uniform float uRoughness;
@@ -2009,10 +2244,11 @@ export class SpecularEffect extends EffectBase {
       uniform float uTime;
       
       // Multi-layer stripe system
-      uniform bool uStripeEnabled;
+      uniform bool  uStripeEnabled;
       uniform float uStripeBlendMode;
       uniform float uParallaxStrength;
       uniform float uStripeMaskThreshold;
+      uniform float uWorldPatternScale;
       
       // Layer 1
       uniform bool  uStripe1Enabled;
@@ -2181,7 +2417,7 @@ export class SpecularEffect extends EffectBase {
       
       /**
        * Generate a single stripe layer with camera-based parallax
-       * @param uv - Base UV coordinates
+       * @param uv - World-space pattern coordinates (top-down oriented)
        * @param worldPos - World position of fragment
        * @param cameraPos - Camera position in world space
        * @param time - Current time
@@ -2227,7 +2463,7 @@ export class SpecularEffect extends EffectBase {
           // Negative parallaxDepth = layer moves faster (closer)
           // Positive parallaxDepth = layer moves slower (farther)
           // The effect subtracts offset so positive depth = slower movement
-          vec2 offset = uCameraOffset * parallaxDepth * parallaxStrength * 0.0005;
+          vec2 offset = uCameraOffset * parallaxDepth * parallaxStrength * 0.001;
           parallaxUv -= offset;
         }
 
@@ -2322,6 +2558,17 @@ export class SpecularEffect extends EffectBase {
       void main() {
         // Sample textures
         vec4 albedo = texture2D(uAlbedoMap, vUv);
+        vec4 specularMaskSample = texture2D(uSpecularMap, vUv);
+
+        // Coverage used for overlay depth/color writes.
+        // IMPORTANT: Use tile albedo alpha only so an upper tile still blocks
+        // lower specular even where its _Specular alpha is 0 (black/no shine).
+        // This prevents lower-tile specular leakage through opaque top tiles.
+        float maskCoverage = albedo.a;
+
+        // For specular-only tile overlays, clip fully transparent tile texels.
+        // This keeps overlays from occluding through true tile holes.
+        if (uOutputMode > 0.5 && maskCoverage <= max(0.0, uTileAlphaClip)) discard;
         
         // Apply Foundry darkness level and ambient environment tint. We
         // approximate Foundry's computedBackgroundColor by blending
@@ -2403,7 +2650,7 @@ export class SpecularEffect extends EffectBase {
         // Used to modulate specular so it doesn't shine in pitch blackness
         vec3 totalIncidentLight = ambientLight + totalDynamicLight;
         
-        vec4 specularMask = texture2D(uSpecularMap, vUv);
+        vec4 specularMask = specularMaskSample;
         float roughness = uHasRoughnessMap ? texture2D(uRoughnessMap, vUv).r : uRoughness;
 
         // ---------------------------------------------------------
@@ -2459,7 +2706,7 @@ export class SpecularEffect extends EffectBase {
         // not the specular channel. Gate by outdoorFactor so indoors stays clear.
 
         // Calculate specular mask strength (luminance of the original mask, unmodified)
-        float specularStrength = dot(specularMask.rgb, vec3(0.299, 0.587, 0.114));
+        float specularStrength = dot(specularMask.rgb, vec3(0.299, 0.587, 0.114)) * specularMask.a;
 
         // Cloud lighting (1.0 = lit gap, 0.0 = shadow) sampled in screen-space.
         // Default to fully lit if texture is unavailable.
@@ -2471,6 +2718,14 @@ export class SpecularEffect extends EffectBase {
         
         // Multi-layer stripe composition
         float stripeMaskAnimated = 0.0;
+
+        // World-space pattern coordinates so stripe/sparkle scale is stable
+        // across tiles of different sizes (instead of restarting per tile UV).
+        // We use a top-down Y convention to match Foundry orientation.
+        float worldPatternScalePx = max(1.0, uWorldPatternScale);
+        float worldX = (vWorldPosition.x - uSceneBounds.x);
+        float worldYTopDown = ((uSceneBounds.y + uSceneBounds.w) - vWorldPosition.y);
+        vec2 worldPatternUv = vec2(worldX, worldYTopDown) / worldPatternScalePx;
         
         if (uStripeEnabled) {
           // Generate each stripe layer
@@ -2480,7 +2735,7 @@ export class SpecularEffect extends EffectBase {
           
           if (uStripe1Enabled) {
             layer1 = generateStripeLayer(
-              vUv, vWorldPosition, uCameraPosition, uTime, 
+              worldPatternUv, vWorldPosition, uCameraPosition, uTime,
               uStripe1Frequency, uStripe1Speed, uStripe1Angle, 
               uStripe1Width, uStripe1Parallax, uParallaxStrength,
               uStripe1Wave, uStripe1Gaps, uStripe1Softness
@@ -2489,7 +2744,7 @@ export class SpecularEffect extends EffectBase {
           
           if (uStripe2Enabled) {
             layer2 = generateStripeLayer(
-              vUv, vWorldPosition, uCameraPosition, uTime, 
+              worldPatternUv, vWorldPosition, uCameraPosition, uTime,
               uStripe2Frequency, uStripe2Speed, uStripe2Angle, 
               uStripe2Width, uStripe2Parallax, uParallaxStrength,
               uStripe2Wave, uStripe2Gaps, uStripe2Softness
@@ -2498,7 +2753,7 @@ export class SpecularEffect extends EffectBase {
           
           if (uStripe3Enabled) {
             layer3 = generateStripeLayer(
-              vUv, vWorldPosition, uCameraPosition, uTime, 
+              worldPatternUv, vWorldPosition, uCameraPosition, uTime,
               uStripe3Frequency, uStripe3Speed, uStripe3Angle, 
               uStripe3Width, uStripe3Parallax, uParallaxStrength,
               uStripe3Wave, uStripe3Gaps, uStripe3Softness
@@ -2518,8 +2773,8 @@ export class SpecularEffect extends EffectBase {
         // Calculate sparkles
         float sparkleVal = 0.0;
         if (uSparkleEnabled) {
-          // Generate sparkles based on UV and time
-          sparkleVal = sparkleNoise(vUv, uSparkleScale, uTime, uSparkleSpeed);
+          // World-space sparkles to avoid per-tile UV stretching.
+          sparkleVal = sparkleNoise(worldPatternUv, uSparkleScale, uTime, uSparkleSpeed);
           
           // Mask by specular strength so we don't sparkle on matte areas
           sparkleVal *= specularStrength;
@@ -2591,7 +2846,7 @@ export class SpecularEffect extends EffectBase {
         // We modulate by totalIncidentLight to ensure we don't shine in darkness.
         // effectiveLightColor blends global tint with dominant dynamic light hue.
         // buildingShadowFactor suppresses specular in building shadows.
-        vec3 specularColor = specularMask.rgb * totalModulator * uSpecularIntensity * effectiveLightColor * totalIncidentLight * buildingShadowFactor;
+        vec3 specularColor = specularMask.rgb * specularMask.a * totalModulator * uSpecularIntensity * effectiveLightColor * totalIncidentLight * buildingShadowFactor;
         
         // Wind-driven ripple for wet surfaces only.
         // Creates traveling waves across wet outdoor surfaces in the wind direction.
@@ -2600,7 +2855,7 @@ export class SpecularEffect extends EffectBase {
         float windRipple = 0.0;
         if (uWindDrivenStripesEnabled && uWindStripeInfluence > 0.0 && uRainWetness > 0.001 && outdoorFactor > 0.01) {
           // Offset UVs by accumulated wind displacement to create directional waves
-          vec2 windUv = vUv + uWindAccum * uWindStripeInfluence;
+          vec2 windUv = worldPatternUv + uWindAccum * uWindStripeInfluence;
           // Two octaves of noise at different scales for organic ripple feel
           float ripple1 = snoise(windUv * 8.0) * 0.6;
           float ripple2 = snoise(windUv * 16.0 + 3.7) * 0.4;
@@ -2676,7 +2931,7 @@ export class SpecularEffect extends EffectBase {
         vec3 outColor = (uOutputMode > 0.5) ? litSpecular : finalColor;
         outColor = reinhardJodie(outColor);
 
-        float outA = (uOutputMode > 0.5) ? clamp(specularStrength, 0.0, 1.0) : albedo.a;
+        float outA = (uOutputMode > 0.5) ? clamp(maskCoverage, 0.0, 1.0) : albedo.a;
         gl_FragColor = vec4(outColor, outA);
       }
     `;

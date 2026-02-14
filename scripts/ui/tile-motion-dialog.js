@@ -36,6 +36,7 @@ export class TileMotionDialog {
       tileId: '',
       tileStatus: 'Unknown',
       enabled: false,
+      shadowProjectionEnabled: false,
       mode: 'transform',
       motionType: 'rotation',
       loopMode: 'loop',
@@ -187,6 +188,12 @@ export class TileMotionDialog {
 
     this._bindings.enabled = this._motionFolder.addBinding(this.uiState, 'enabled', {
       label: 'Enabled'
+    }).on('change', (ev) => {
+      this._onConfigChanged(ev);
+    });
+
+    this._bindings.shadowProjectionEnabled = this._motionFolder.addBinding(this.uiState, 'shadowProjectionEnabled', {
+      label: 'Shadow Projection'
     }).on('change', (ev) => {
       this._onConfigChanged(ev);
     });
@@ -550,6 +557,7 @@ export class TileMotionDialog {
     if (!cfg) return;
 
     this.uiState.enabled = !!cfg.enabled;
+    this.uiState.shadowProjectionEnabled = !!cfg.shadowProjectionEnabled;
     this.uiState.mode = cfg.mode === 'texture' ? 'texture' : 'transform';
     this.uiState.motionType = cfg.motion?.type || 'rotation';
     this.uiState.loopMode = cfg.motion?.loopMode === 'pingPong' ? 'pingPong' : 'loop';
@@ -626,6 +634,7 @@ export class TileMotionDialog {
 
     const patch = {
       enabled: !!this.uiState.enabled,
+      shadowProjectionEnabled: !!this.uiState.shadowProjectionEnabled,
       mode: this.uiState.mode === 'texture' ? 'texture' : 'transform',
       parentId: this.uiState.parentId || null,
       pivot: {

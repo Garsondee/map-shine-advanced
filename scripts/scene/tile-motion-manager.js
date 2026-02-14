@@ -285,6 +285,7 @@ export class TileMotionManager {
 
     return {
       enabled: !!cfg.enabled,
+      shadowProjectionEnabled: !!cfg.shadowProjectionEnabled,
       mode,
       parentId,
       pivot: {
@@ -413,6 +414,19 @@ export class TileMotionManager {
 
     list.sort((a, b) => String(a.label).localeCompare(String(b.label)));
     return list;
+  }
+
+  /**
+   * Get tile IDs which are motion-enabled and opted into overhead shadow projection.
+   * @returns {string[]}
+   */
+  getShadowProjectionTileIds() {
+    const ids = [];
+    for (const [tileId, cfg] of Object.entries(this.state?.tiles || {})) {
+      if (!tileId || !cfg?.enabled || !cfg?.shadowProjectionEnabled) continue;
+      ids.push(tileId);
+    }
+    return ids;
   }
 
   isPlaying() {
@@ -771,6 +785,7 @@ export class TileMotionManager {
     sprite.scale.set(tileBase.scaleX, tileBase.scaleY, 1);
     if (sprite.material) sprite.material.rotation = finalRot;
     sprite.updateMatrix();
+    this.tileManager?.syncTileAttachedEffects?.(tileId, sprite);
 
     const resolved = this._getResolvedState(tileId, frameId);
     resolved.x = finalX;
@@ -808,6 +823,7 @@ export class TileMotionManager {
     }
 
     sprite.updateMatrix();
+    this.tileManager?.syncTileAttachedEffects?.(tileId, sprite);
   }
 
   _restoreAllActiveTiles() {

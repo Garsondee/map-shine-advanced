@@ -178,6 +178,14 @@ export class TileManager {
     /** @type {import('../effects/FluidEffect.js').FluidEffect|null} */
     this.fluidEffect = null;
 
+    // Reused object for runtime occluder transform sync (hot path).
+    this._runtimeOccluderDoc = {
+      width: 0,
+      height: 0,
+      rotation: 0,
+      alpha: 1
+    };
+
     // Cache renderer-derived values for texture filtering.
     this._maxAnisotropy = null;
     
@@ -568,6 +576,20 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
   _tileAllowsSpecular(tileDoc) {
     return this._getTileSpecularMode(tileDoc) !== 'disabled';
+  }
+
+  _tileBypassesEffects(tileDoc) {
+    try {
+      return !!tileDoc?.flags?.['map-shine-advanced']?.bypassEffects;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _tileShouldEmitSpecular(tileDoc) {
+    // Any tile can still be an occluder, but only non-bypass tiles with
+    // specular enabled should emit additive specular color.
+    return this._tileAllowsSpecular(tileDoc) && !this._tileBypassesEffects(tileDoc);
   }
 
   _deriveMaskPath(src, suffix) {
@@ -1279,6 +1301,51 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     if (mesh.material?.uniforms?.uOpacity) {
       const a = ('alpha' in tileDoc) ? tileDoc.alpha : 1.0;
       mesh.material.uniforms.uOpacity.value = Number.isFinite(a) ? a : 1.0;
+    }
+  }
+
+  /**
+   * Sync transforms for tile-attached effects from the current runtime sprite state.
+   * This is used by systems like TileMotionManager which animate sprites without
+   * emitting Foundry document updates every frame.
+   * @param {string} tileId
+   * @param {THREE.Sprite} sprite
+   */
+  syncTileAttachedEffects(tileId, sprite) {
+    if (!tileId || !sprite) return;
+
+    const data = this.tileSprites.get(tileId);
+    const tileDoc = data?.tileDoc;
+
+    // Keep water occluder aligned with runtime transform, including animated
+    // rotation that lives on sprite.material.rotation.
+    if (tileDoc) {
+      try {
+        this._ensureWaterOccluderMesh(data, tileDoc);
+        const runtimeDoc = this._runtimeOccluderDoc;
+        runtimeDoc.width = Number.isFinite(tileDoc.width) ? tileDoc.width : 0;
+        runtimeDoc.height = Number.isFinite(tileDoc.height) ? tileDoc.height : 0;
+        runtimeDoc.rotation = (Number(sprite?.material?.rotation) || 0) * (180 / Math.PI);
+        const runtimeAlpha = Number(sprite?.material?.opacity);
+        runtimeDoc.alpha = Number.isFinite(runtimeAlpha) ? runtimeAlpha : (Number.isFinite(tileDoc.alpha) ? tileDoc.alpha : 1);
+        this._updateWaterOccluderMeshTransform(sprite, runtimeDoc);
+      } catch (_) {
+      }
+    }
+
+    try {
+      this.specularEffect?.syncTileSpriteTransform?.(tileId, sprite);
+    } catch (_) {
+    }
+
+    try {
+      this.fluidEffect?.syncTileSpriteTransform?.(tileId, sprite);
+    } catch (_) {
+    }
+
+    try {
+      this.fluidEffect?.syncTileSpriteVisibility?.(tileId, sprite);
+    } catch (_) {
     }
   }
 
@@ -2342,17 +2409,23 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       this.updateSpriteTransform(sprite, tileDoc);
       this.updateSpriteVisibility(sprite, tileDoc);
 
-      // Bind per-tile specular overlay if a matching _Specular mask exists and enabled.
+      // Bind per-tile specular overlay.
+      // Even when emission is disabled, still bind as depth occluder so upper
+      // tiles block lower specular correctly.
       try {
-        if (this.specularEffect && this._tileAllowsSpecular(tileDoc)) {
-          this.loadTileSpecularMaskTexture(tileDoc).then((specTex) => {
-            if (!specTex) {
-              this.specularEffect.unbindTileSprite(tileDoc.id);
-              return;
-            }
-            this.specularEffect.bindTileSprite(tileDoc, sprite, specTex);
-          }).catch(() => {
-          });
+        if (this.specularEffect) {
+          const emitSpecular = this._tileShouldEmitSpecular(tileDoc);
+          if (!emitSpecular) {
+            this.specularEffect.bindTileSprite(tileDoc, sprite, null, { emitSpecular: false });
+          } else {
+            this.loadTileSpecularMaskTexture(tileDoc).then((specTex) => {
+              // Missing _Specular should still bind as a black occluder so
+              // upper tiles without masks block lower specular layers.
+              this.specularEffect.bindTileSprite(tileDoc, sprite, specTex, { emitSpecular: true });
+            }).catch(() => {
+              this.specularEffect.bindTileSprite(tileDoc, sprite, null, { emitSpecular: true });
+            });
+          }
         }
       } catch (_) {
       }
@@ -2432,13 +2505,21 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     });
 
     // Kick specular resolve early (texture load is async, but we can probe now).
+    // Always bind an occluder, even for disabled/bypass tiles.
     try {
-      if (this.specularEffect && this._tileAllowsSpecular(tileDoc)) {
-        this.loadTileSpecularMaskTexture(tileDoc).then((specTex) => {
-          if (!specTex) return;
-          this.specularEffect.bindTileSprite(tileDoc, sprite, specTex);
-        }).catch(() => {
-        });
+      if (this.specularEffect) {
+        const emitSpecular = this._tileShouldEmitSpecular(tileDoc);
+        if (!emitSpecular) {
+          this.specularEffect.bindTileSprite(tileDoc, sprite, null, { emitSpecular: false });
+        } else {
+          this.loadTileSpecularMaskTexture(tileDoc).then((specTex) => {
+            // Bind even when no mask exists; SpecularEffect will treat null as
+            // a black mask depth occluder for proper tile stacking.
+            this.specularEffect.bindTileSprite(tileDoc, sprite, specTex, { emitSpecular: true });
+          }).catch(() => {
+            this.specularEffect.bindTileSprite(tileDoc, sprite, null, { emitSpecular: true });
+          });
+        }
       }
     } catch (_) {
     }
@@ -2530,7 +2611,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     };
 
     // Specular masks can be forced on/off, or auto-detected when unset.
-    const allowsSpecular = this._tileAllowsSpecular(targetDoc);
+    const emitSpecular = this._tileShouldEmitSpecular(targetDoc);
 
     // Update transform if relevant properties changed
     if ('x' in changes || 'y' in changes || 'width' in changes ||
@@ -2551,35 +2632,36 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       } catch (_) {
       }
 
-      // If specular was toggled off via flags, remove any existing overlay.
-      // If toggled on, we'll bind below (and/or on the next texture load).
+      // If flags affecting specular changed, refresh tile overlay binding.
+      // Emission-off tiles keep an occluder-only binding.
       if ('flags' in changes) {
         try {
-          if (!allowsSpecular) {
-            this.specularEffect?.unbindTileSprite?.(tileDoc.id);
-          } else if (this.specularEffect) {
-            // Specular was enabled (or remains enabled) but may not be bound yet.
-            // Bind immediately without requiring a texture change.
-            try {
-              const prevSrc = spriteData?.tileDoc?.texture?.src;
-              const prevParts = this._splitUrl(prevSrc);
-              if (prevParts?.pathNoExt) this._tileSpecularMaskResolvedUrl.delete(prevParts.pathNoExt);
-            } catch (_) {
+          if (this.specularEffect) {
+            if (!emitSpecular) {
+              // Keep occluder bound even when emission is disabled.
+              this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, null, { emitSpecular: false });
             }
-
-            const docForMask = {
-              id: tileDoc.id,
-              texture: { src: spriteData?.tileDoc?.texture?.src || tileDoc?.texture?.src },
-              flags: targetDoc.flags
-            };
-            this.loadTileSpecularMaskTexture(docForMask).then((specTex) => {
-              if (!specTex) {
-                this.specularEffect?.unbindTileSprite?.(tileDoc.id);
-                return;
+            else {
+              // Specular was enabled (or remains enabled) but may not be bound yet.
+              // Bind immediately without requiring a texture change.
+              try {
+                const prevSrc = spriteData?.tileDoc?.texture?.src;
+                const prevParts = this._splitUrl(prevSrc);
+                if (prevParts?.pathNoExt) this._tileSpecularMaskResolvedUrl.delete(prevParts.pathNoExt);
+              } catch (_) {
               }
-              this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, specTex);
-            }).catch(() => {
-            });
+
+              const docForMask = {
+                id: tileDoc.id,
+                texture: { src: spriteData?.tileDoc?.texture?.src || tileDoc?.texture?.src },
+                flags: targetDoc.flags
+              };
+              this.loadTileSpecularMaskTexture(docForMask).then((specTex) => {
+                this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, specTex || null, { emitSpecular: true });
+              }).catch(() => {
+                this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, null, { emitSpecular: true });
+              });
+            }
           }
         } catch (_) {
         }
@@ -2626,17 +2708,14 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
         try {
           if (this.specularEffect) {
-            if (!allowsSpecular) {
-              this.specularEffect.unbindTileSprite(tileDoc.id);
+            if (!emitSpecular) {
+              this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, null, { emitSpecular: false });
             } else {
               const nextDoc = { texture: { src: changes.texture.src }, flags: targetDoc.flags };
               this.loadTileSpecularMaskTexture(nextDoc).then((specTex) => {
-                if (!specTex) {
-                  this.specularEffect.unbindTileSprite(tileDoc.id);
-                  return;
-                }
-                this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, specTex);
+                this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, specTex || null, { emitSpecular: true });
               }).catch(() => {
+                this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, null, { emitSpecular: true });
               });
             }
           }
@@ -3045,6 +3124,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     } catch (_) {
     }
 
+    const sortKey = tileDoc.sort ?? tileDoc.z ?? 0;
+
     if (isOverhead) {
       zBase = groundZ + Z_OVERHEAD_OFFSET;
       // Overhead tiles should not dominate the depth buffer so that
@@ -3068,7 +3149,6 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     } else {
       // Foundry 'z' property (sort key) determines background/foreground for non-overhead tiles
       // Note: Foundry uses 'sort' or 'z' depending on version, tileDoc.z is common access
-      const sortKey = tileDoc.sort ?? tileDoc.z ?? 0;
       if (sortKey < 0) {
         zBase = groundZ + Z_BACKGROUND_OFFSET;
       } else {
@@ -3086,8 +3166,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     
     // Add small offset based on sort key to prevent z-fighting within same layer
     // Normalize sort key to small range (e.g., 0.0001 steps)
-    const sortOffset = (tileDoc.sort || 0) * 0.00001;
+    const sortOffset = (Number.isFinite(Number(sortKey)) ? Number(sortKey) : 0) * 0.00001;
     const zPosition = zBase + sortOffset;
+
+    // Keep runtime sort key available for tile-attached overlays/effects that
+    // need deterministic top-most ordering across overlapping tiles.
+    sprite.userData._msSortKey = Number.isFinite(Number(sortKey)) ? Number(sortKey) : 0;
 
     // 2. Position & Scale (Foundry Top-Left -> THREE Center)
     

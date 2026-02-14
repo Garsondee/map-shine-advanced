@@ -43,8 +43,10 @@ export const FoundryLightingShaderChunks = {
             vec2 nuv = vUvs * 2.0 - 1.0;
             vec2 puv = vec2(atan(nuv.x, nuv.y) * INVTWOPI + 0.5, length(nuv));
             vec3 rainbow = hsb2rgb(vec3(puv.x + puv.y - time * 0.2, 1.0, 1.0));
-            vec3 baseColor = vec3(1.0);
-            vec3 mixedColor = mix(baseColor, rainbow, smoothstep(0.0, 1.5 - intens, dist));
+            // Keep fairy lights strongly chromatic (minimal white illumination washout).
+            float rainbowMix = mix(0.9, 1.0, smoothstep(0.0, 1.5 - intens, dist));
+            vec3 baseColor = max(uColor, vec3(0.001));
+            vec3 mixedColor = mix(baseColor, rainbow, rainbowMix);
 
             outColor = distortion1 * distortion1 *
                        distortion2 * distortion2 *

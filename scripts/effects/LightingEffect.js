@@ -1974,14 +1974,9 @@ export class LightingEffect extends EffectBase {
           u.uTreeShadowLength.value = tree.params.shadowLength;
         }
 
-        let selfStrength = 1.0;
-        if (typeof tree.getHoverFade === 'function') {
-          const f = tree.getHoverFade();
-          if (typeof f === 'number' && isFinite(f)) {
-            selfStrength = Math.max(0.0, Math.min(1.0, f));
-          }
-        }
-        u.uTreeSelfShadowStrength.value = selfStrength;
+        // Keep cast shadow strength independent from hover/albedo fade.
+        // TreeEffect encodes hover fade into self-coverage (G channel) instead.
+        u.uTreeSelfShadowStrength.value = 1.0;
       } else {
         u.uTreeShadowOpacity.value = 0.0;
         u.uTreeSelfShadowStrength.value = 1.0;

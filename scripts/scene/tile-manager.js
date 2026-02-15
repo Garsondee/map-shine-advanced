@@ -1975,7 +1975,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       const occlusion = tileDoc.occlusion || {};
       const mode = occlusion.mode || CONST.TILE_OCCLUSION_MODES.NONE;
 
-      if (mode !== CONST.TILE_OCCLUSION_MODES.NONE) {
+      // Occlusion only triggers when the mouse is hovering over the tile AND a
+      // controlled token is underneath — matching Foundry's native behaviour.
+      // Without the hover gate, selecting a token would immediately fade ALL
+      // overhead tiles covering it, which is incorrect.
+      if (hoverHidden && mode !== CONST.TILE_OCCLUSION_MODES.NONE) {
         let occluded = false;
 
         // Check if any relevant token is under this tile

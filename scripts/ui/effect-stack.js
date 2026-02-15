@@ -177,13 +177,51 @@ export class EffectStackUI {
       disabled: true
     });
 
-    summaryFolder.addButton({ title: 'Refresh Now' }).on('click', () => {
-      void this.refresh();
-    });
+    // Compact 2-column button grid (matches shared UI shell pattern).
+    {
+      const contentElement = summaryFolder?.element?.querySelector?.('.tp-fldv_c') || summaryFolder?.element;
+      if (contentElement) {
+        const grid = document.createElement('div');
+        grid.style.display = 'grid';
+        grid.style.gridTemplateColumns = '1fr 1fr';
+        grid.style.gap = '4px';
+        grid.style.padding = '4px 6px 6px 6px';
 
-    summaryFolder.addButton({ title: 'Copy Report' }).on('click', () => {
-      void this.copyReportToClipboard();
-    });
+        const addGridButton = (label, onClick) => {
+          const btn = document.createElement('button');
+          btn.textContent = label;
+          btn.style.padding = '4px 8px';
+          btn.style.borderRadius = '6px';
+          btn.style.border = '1px solid rgba(255,255,255,0.14)';
+          btn.style.background = 'rgba(255,255,255,0.08)';
+          btn.style.color = 'inherit';
+          btn.style.cursor = 'pointer';
+          btn.style.fontSize = '11px';
+          btn.style.fontWeight = '500';
+          btn.addEventListener('click', onClick);
+          grid.appendChild(btn);
+        };
+
+        addGridButton('Refresh Now', () => {
+          void this.refresh();
+        });
+
+        addGridButton('Copy Report', () => {
+          void this.copyReportToClipboard();
+        });
+
+        contentElement.appendChild(grid);
+
+        // Scope note — read-only inspection tool.
+        const scopeNote = document.createElement('div');
+        scopeNote.textContent = 'Read-only inspection of the current rendering pipeline.';
+        scopeNote.style.fontSize = '10px';
+        scopeNote.style.opacity = '0.55';
+        scopeNote.style.padding = '4px 6px 2px 6px';
+        scopeNote.style.fontStyle = 'italic';
+        contentElement.appendChild(scopeNote);
+      }
+    }
 
     const debugFolder = this.pane.addFolder({ title: 'Mask Debug', expanded: true });
 

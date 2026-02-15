@@ -86,6 +86,9 @@ export class TileMotionDialog {
     /** @type {THREE.Mesh|null} Pivot point visualization marker in the Three.js scene. */
     this._pivotMarker = null;
 
+    /** @type {Object<string, HTMLElement|null>} Folder tag elements for summary chips. */
+    this._folderTags = {};
+
     this._drag = {
       active: false,
       mx: 0,
@@ -176,11 +179,60 @@ export class TileMotionDialog {
     return window.MapShine?.tileManager || null;
   }
 
+  /**
+   * Add a small tag chip to a folder title (matches Control Panel / Main Config pattern).
+   * @private
+   * @param {any} folder
+   * @param {string} key
+   * @param {string} [initialText]
+   */
+  _ensureFolderTag(folder, key, initialText = '') {
+    try {
+      const titleElement = folder?.element?.querySelector?.('.tp-fldv_t');
+      if (!titleElement) return;
+
+      const tag = document.createElement('span');
+      tag.className = `map-shine-folder-tag map-shine-folder-tag-${key}`;
+      tag.style.marginLeft = '8px';
+      tag.style.fontSize = '10px';
+      tag.style.fontWeight = '600';
+      tag.style.padding = '1px 6px';
+      tag.style.borderRadius = '999px';
+      tag.style.border = '1px solid rgba(255,255,255,0.14)';
+      tag.style.background = 'rgba(255,255,255,0.08)';
+      tag.style.opacity = '0.9';
+      tag.style.verticalAlign = 'middle';
+      tag.style.pointerEvents = 'none';
+      titleElement.appendChild(tag);
+      this._folderTags[key] = tag;
+      this._setFolderTag(key, initialText);
+    } catch (_) {
+    }
+  }
+
+  /**
+   * Update a folder tag's text.
+   * @private
+   * @param {string} key
+   * @param {string} text
+   */
+  _setFolderTag(key, text) {
+    const tag = this._folderTags?.[key];
+    if (!tag) return;
+    const next = String(text || '').trim();
+    tag.textContent = next;
+    tag.style.display = next ? 'inline-block' : 'none';
+  }
+
   _buildUI() {
     this._tileFolder = this.pane.addFolder({ title: 'Tile', expanded: true });
     this._motionFolder = this.pane.addFolder({ title: 'Transform Motion', expanded: true });
     this._pivotFolder = this.pane.addFolder({ title: 'Pivot', expanded: false });
     this._textureFolder = this.pane.addFolder({ title: 'Texture Motion', expanded: false });
+
+    // Folder tags for at-a-glance status.
+    this._ensureFolderTag(this._motionFolder, 'mode', this.uiState.mode);
+    this._ensureFolderTag(this._textureFolder, 'texMode', '');
 
     // Only build tile dropdown here; parent binding is added after all pivot controls.
     // tileStatus binding is created inside _rebuildTileBindings right after the tile selector.
@@ -412,39 +464,78 @@ export class TileMotionDialog {
     });
 
     const globalFolder = this.pane.addFolder({ title: 'Global Transport', expanded: false });
+    this._ensureFolderTag(globalFolder, 'playState', this.uiState.playState);
 
     this._bindings.playState = globalFolder.addBinding(this.uiState, 'playState', {
       label: 'State',
       readonly: true
     });
 
-    globalFolder.addButton({ title: 'Start' }).on('click', async () => {
-      const mgr = this._getManager();
-      if (!mgr) return;
-      const ok = await mgr.start();
-      if (!ok) ui.notifications?.warn('Tile motion start failed');
-      this._refreshGlobalState();
-    });
+    // Compact 2-column button grid for transport actions.
+    {
+      const contentElement = globalFolder?.element?.querySelector?.('.tp-fldv_c') || globalFolder?.element;
+      if (contentElement) {
+        const grid = document.createElement('div');
+        grid.style.display = 'grid';
+        grid.style.gridTemplateColumns = '1fr 1fr';
+        grid.style.gap = '4px';
+        grid.style.padding = '4px 6px 6px 6px';
 
-    globalFolder.addButton({ title: 'Stop' }).on('click', async () => {
-      const mgr = this._getManager();
-      if (!mgr) return;
-      const ok = await mgr.stop();
-      if (!ok) ui.notifications?.warn('Tile motion stop failed');
-      this._refreshGlobalState();
-    });
+        const addGridButton = (label, onClick, danger = false) => {
+          const btn = document.createElement('button');
+          btn.textContent = label;
+          btn.style.padding = '4px 8px';
+          btn.style.borderRadius = '6px';
+          btn.style.border = danger ? '1px solid rgba(255,80,80,0.35)' : '1px solid rgba(255,255,255,0.14)';
+          btn.style.background = danger ? 'rgba(255,60,60,0.12)' : 'rgba(255,255,255,0.08)';
+          btn.style.color = danger ? '#ff9090' : 'inherit';
+          btn.style.cursor = 'pointer';
+          btn.style.fontSize = '11px';
+          btn.style.fontWeight = '500';
+          btn.addEventListener('click', onClick);
+          grid.appendChild(btn);
+        };
 
-    globalFolder.addButton({ title: 'Reset Phase' }).on('click', async () => {
-      const mgr = this._getManager();
-      if (!mgr || typeof mgr.resetPhase !== 'function') return;
-      const ok = await mgr.resetPhase();
-      if (!ok) ui.notifications?.warn('Tile motion phase reset failed');
-      this._refreshGlobalState();
-    });
+        addGridButton('Start', async () => {
+          const mgr = this._getManager();
+          if (!mgr) return;
+          const ok = await mgr.start();
+          if (!ok) ui.notifications?.warn('Tile motion start failed');
+          this._refreshGlobalState();
+        });
 
-    globalFolder.addButton({ title: 'Refresh Tile List' }).on('click', () => {
-      this.refreshTileList();
-    });
+        addGridButton('Stop', async () => {
+          const mgr = this._getManager();
+          if (!mgr) return;
+          const ok = await mgr.stop();
+          if (!ok) ui.notifications?.warn('Tile motion stop failed');
+          this._refreshGlobalState();
+        });
+
+        addGridButton('Reset Phase', async () => {
+          const mgr = this._getManager();
+          if (!mgr || typeof mgr.resetPhase !== 'function') return;
+          const ok = await mgr.resetPhase();
+          if (!ok) ui.notifications?.warn('Tile motion phase reset failed');
+          this._refreshGlobalState();
+        }, true);
+
+        addGridButton('Refresh Tiles', () => {
+          this.refreshTileList();
+        });
+
+        contentElement.appendChild(grid);
+
+        // GM-only scope note.
+        const scopeNote = document.createElement('div');
+        scopeNote.textContent = 'Tile motion configs are saved to scene flags (GM-only).';
+        scopeNote.style.fontSize = '10px';
+        scopeNote.style.opacity = '0.55';
+        scopeNote.style.padding = '4px 6px 2px 6px';
+        scopeNote.style.fontStyle = 'italic';
+        contentElement.appendChild(scopeNote);
+      }
+    }
 
     // Load the first tile's config now that all bindings exist.
     this._loadTileConfigToUI();
@@ -530,6 +621,7 @@ export class TileMotionDialog {
       this.uiState.playState = mgr.isPlaying?.() ? 'Playing' : 'Stopped';
     }
     this._bindings.playState?.refresh?.();
+    this._setFolderTag('playState', this.uiState.playState);
     this._refreshSelectedTileStatus();
   }
 
@@ -617,6 +709,16 @@ export class TileMotionDialog {
     if (this._bindings.amplitudeX) this._bindings.amplitudeX.hidden = !showSine;
     if (this._bindings.amplitudeY) this._bindings.amplitudeY.hidden = !showSine;
     if (this._bindings.amplitudeRot) this._bindings.amplitudeRot.hidden = !showSine;
+
+    // Update folder tags to reflect current mode.
+    if (isTexture) {
+      this._setFolderTag('mode', '');
+      this._setFolderTag('texMode', 'Active');
+    } else {
+      const typeLabels = { rotation: 'Rotation', orbit: 'Orbit', pingPong: 'Ping-Pong', sine: 'Sine' };
+      this._setFolderTag('mode', typeLabels[motionType] || motionType);
+      this._setFolderTag('texMode', '');
+    }
   }
 
   _onConfigChanged(ev) {

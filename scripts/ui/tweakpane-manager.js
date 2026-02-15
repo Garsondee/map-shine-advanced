@@ -203,6 +203,28 @@ export class TweakpaneManager {
 
     /** @type {Array<any>|null} */
     this._dynamicExposureDebugBindings = null;
+
+    /** @type {boolean} */
+    this._singleOpenPrimarySections = true;
+
+    /** @type {Array<any>} */
+    this._primaryFolders = [];
+  }
+
+  _registerPrimaryFolder(folder) {
+    if (!folder) return;
+    this._primaryFolders.push(folder);
+
+    folder.on('fold', (ev) => {
+      if (!ev?.expanded || !this._singleOpenPrimarySections) return;
+      for (const other of this._primaryFolders) {
+        if (!other || other === folder) continue;
+        try {
+          if (other.expanded) other.expanded = false;
+        } catch (_) {
+        }
+      }
+    });
   }
 
   _getProperty(obj, path) {
@@ -374,22 +396,29 @@ export class TweakpaneManager {
     if (_isDbg) _dlp.end('tp.loadUIState');
 
     if (_isDbg) _dlp.begin('tp.buildSections', 'finalize');
-    this.buildBrandingSection();
-
     // Build scene setup section (only for GMs)
     if (game.user.isGM) {
       this.buildSceneSetupSection();
     }
 
-    // Build global controls
+    // Build authoring workflow controls
     this.buildGlobalControls();
 
     // Build environment section (sun latitude etc.) — single source of truth
     this.buildEnvironmentSection();
 
+    // Build token/character rendering authoring controls
+    this.buildTokensSection();
+
+    // Build utility launchers as a dedicated section
+    this.buildUtilityLaunchersSection();
+
     this.buildRopesSection();
 
     this.buildDebugSection();
+
+    // Keep support links available but out of the primary authoring flow.
+    this.buildBrandingSection();
     if (_isDbg) _dlp.end('tp.buildSections');
 
     // Start UI update loop
@@ -477,9 +506,10 @@ export class TweakpaneManager {
    */
   buildGlobalControls() {
     const globalFolder = this.pane.addFolder({
-      title: 'Global Controls',
+      title: 'Authoring Workflow',
       expanded: this.accordionStates['global'] ?? true
     });
+    this._registerPrimaryFolder(globalFolder);
 
     // Map Maker Mode toggle
     const onMapMakerModeChange = (ev) => {
@@ -558,10 +588,46 @@ export class TweakpaneManager {
 
     globalFolder.addBlade({ view: 'separator' });
 
-    const tokensFolder = globalFolder.addFolder({
-      title: 'Tokens',
+    const masterResetButton = globalFolder.addButton({
+      title: 'Master Reset to Defaults',
+      label: 'Defaults'
+    });
+
+    masterResetButton.on('click', () => {
+      this.onMasterResetToDefaults();
+    });
+
+    this.undoButton = globalFolder.addButton({
+      title: 'Undo Last Master Reset',
+      label: 'Undo'
+    });
+
+    this.undoButton.on('click', () => {
+      this.onUndoMasterReset();
+    });
+
+    this.updateUndoButtonState();
+
+    // Track accordion state
+    globalFolder.on('fold', (ev) => {
+      this.accordionStates['global'] = ev.expanded;
+      this.saveUIState();
+    });
+  }
+
+  /**
+   * Build token/character rendering controls as a dedicated top-level section.
+   * This keeps authoring workflow controls compact while preserving advanced token tools.
+   * @private
+   */
+  buildTokensSection() {
+    if (!this.pane) return;
+
+    const tokensFolder = this.pane.addFolder({
+      title: 'Tokens & Character Rendering',
       expanded: this.accordionStates['tokens'] ?? false
     });
+    this._registerPrimaryFolder(tokensFolder);
 
     const tokenCCFolder = tokensFolder.addFolder({
       title: 'Color Correction',
@@ -657,7 +723,6 @@ export class TweakpaneManager {
       this.globalParams.tokenColorCorrection.gamma = 1.0;
       this.globalParams.tokenColorCorrection.windowLightIntensity = 1.0;
 
-      // Refresh bindings under this folder.
       try {
         tokenCCFolder.refresh();
       } catch (_) {
@@ -737,7 +802,7 @@ export class TweakpaneManager {
       expanded: this.accordionStates['token_dynamicExposure_debug'] ?? false
     });
 
-    // These bindings are updated by the UI loop (see startUILoop patch below).
+    // These bindings are updated by the UI loop.
     this._dynamicExposureDebugBindings = [];
 
     this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'subjectTokenId', {
@@ -809,61 +874,70 @@ export class TweakpaneManager {
       this.saveUIState();
     });
 
-    // Push initial state into TokenManager so the UI and runtime match.
+    // Push initial state into runtime managers so UI and runtime match.
     applyTokenCC();
-
-    // Push initial state into DynamicExposureManager (if available).
     applyDynamicExposure();
+  }
 
-    globalFolder.addBlade({ view: 'separator' });
+  /**
+   * Build utility launchers as a separate top-level section.
+   * @private
+   */
+  buildUtilityLaunchersSection() {
+    if (!this.pane) return;
 
-    // Texture Manager Button
-    globalFolder.addButton({
-      title: 'Open Texture Manager',
-      label: 'Tools'
-    }).on('click', () => {
-      if (this.textureManager) {
-        this.textureManager.toggle();
-      }
+    const utilitiesFolder = this.pane.addFolder({
+      title: 'Utilities',
+      expanded: this.accordionStates['utilities'] ?? false
+    });
+    this._registerPrimaryFolder(utilitiesFolder);
+
+    const contentElement = utilitiesFolder.element.querySelector('.tp-fldv_c') || utilitiesFolder.element;
+    const grid = document.createElement('div');
+    grid.style.display = 'grid';
+    grid.style.gridTemplateColumns = '1fr 1fr';
+    grid.style.gap = '6px';
+    grid.style.marginTop = '4px';
+
+    const addGridButton = (label, onClick, danger = false) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.style.padding = '6px 8px';
+      btn.style.borderRadius = '6px';
+      btn.style.border = danger
+        ? '1px solid rgba(255,120,120,0.45)'
+        : '1px solid rgba(255,255,255,0.15)';
+      btn.style.background = danger
+        ? 'rgba(120,0,0,0.18)'
+        : 'rgba(255,255,255,0.06)';
+      btn.style.color = 'inherit';
+      btn.style.cursor = 'pointer';
+      btn.addEventListener('click', onClick);
+      grid.appendChild(btn);
+    };
+
+    addGridButton('Texture Manager', () => {
+      if (this.textureManager) this.textureManager.toggle();
     });
 
-    globalFolder.addButton({
-      title: 'Open Effect Stack',
-      label: 'Tools'
-    }).on('click', () => {
-      if (this.effectStack) {
-        this.effectStack.toggle();
-      }
+    addGridButton('Effect Stack', () => {
+      if (this.effectStack) this.effectStack.toggle();
     });
 
-    globalFolder.addButton({
-      title: 'Open Diagnostic Center',
-      label: 'Tools'
-    }).on('click', () => {
-      if (this.diagnosticCenter) {
-        this.diagnosticCenter.toggle();
-      }
+    addGridButton('Diagnostic Center', () => {
+      if (this.diagnosticCenter) this.diagnosticCenter.toggle();
     });
 
-    // Map Points Manager Button (opens management dialog with draw/edit/delete)
-    globalFolder.addButton({
-      title: '🎯 Manage Map Points',
-      label: 'Map Points'
-    }).on('click', () => {
+    addGridButton('🎯 Map Points', () => {
       this.openMapPointsManagerDialog();
     });
 
-    globalFolder.addButton({
-      title: '🧭 Tile Motion Manager',
-      label: 'Motion'
-    }).on('click', () => {
+    addGridButton('🧭 Tile Motion', () => {
       this.tileMotionDialog?.toggle?.();
     });
 
-    globalFolder.addButton({
-      title: 'Scene Reset (Rebuild)',
-      label: 'Tools'
-    }).on('click', async () => {
+    addGridButton('Scene Reset', async () => {
       try {
         const fn = window.MapShine?.resetScene;
         if (typeof fn !== 'function') {
@@ -881,31 +955,12 @@ export class TweakpaneManager {
         } catch (_) {
         }
       }
-    });
+    }, true);
 
-    const masterResetButton = globalFolder.addButton({
-      title: 'Master Reset to Defaults',
-      label: 'Defaults'
-    });
+    contentElement.appendChild(grid);
 
-    masterResetButton.on('click', () => {
-      this.onMasterResetToDefaults();
-    });
-
-    this.undoButton = globalFolder.addButton({
-      title: 'Undo Last Master Reset',
-      label: 'Undo'
-    });
-
-    this.undoButton.on('click', () => {
-      this.onUndoMasterReset();
-    });
-
-    this.updateUndoButtonState();
-
-    // Track accordion state
-    globalFolder.on('fold', (ev) => {
-      this.accordionStates['global'] = ev.expanded;
+    utilitiesFolder.on('fold', (ev) => {
+      this.accordionStates['utilities'] = ev.expanded;
       this.saveUIState();
     });
   }
@@ -950,6 +1005,7 @@ export class TweakpaneManager {
       title: 'Developer Tools',
       expanded: this.accordionStates['debug'] ?? false
     });
+    this._registerPrimaryFolder(debugFolder);
 
     this._debugFolder = debugFolder;
 
@@ -1376,6 +1432,7 @@ export class TweakpaneManager {
       title: 'Scene Setup',
       expanded: this.accordionStates['sceneSetup'] ?? true
     });
+    this._registerPrimaryFolder(setupFolder);
 
     // Settings mode selector
     const modeParams = {
@@ -1482,8 +1539,9 @@ export class TweakpaneManager {
   buildBrandingSection() {
     const brandingFolder = this.pane.addFolder({
       title: 'Support & Links',
-      expanded: true
+      expanded: this.accordionStates['branding'] ?? false
     });
+    this._registerPrimaryFolder(brandingFolder);
 
     // Add HTML element for links
     const linkContainer = document.createElement('div');
@@ -1518,15 +1576,6 @@ export class TweakpaneManager {
     brandingFolder.on('fold', (ev) => {
       this.accordionStates['branding'] = ev.expanded;
       this.saveUIState();
-
-      if (!ev.expanded) {
-        setTimeout(() => {
-          try {
-            brandingFolder.expanded = true;
-          } catch (e) {
-          }
-        }, 0);
-      }
     });
   }
 

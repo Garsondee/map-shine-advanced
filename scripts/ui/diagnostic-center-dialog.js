@@ -212,34 +212,72 @@ export class DiagnosticCenterDialog {
 
     const actionsFolder = this.pane.addFolder({ title: 'Actions', expanded: true });
 
-    actionsFolder.addButton({ title: 'Use Selected Tile (or Background)' }).on('click', async () => {
-      await this._autoSelectTarget();
-    });
+    // Compact 2-column button grid (matches shared UI shell pattern).
+    {
+      const contentElement = actionsFolder?.element?.querySelector?.('.tp-fldv_c') || actionsFolder?.element;
+      if (contentElement) {
+        const grid = document.createElement('div');
+        grid.style.display = 'grid';
+        grid.style.gridTemplateColumns = '1fr 1fr';
+        grid.style.gap = '4px';
+        grid.style.padding = '4px 6px 6px 6px';
 
-    actionsFolder.addButton({ title: 'Run Diagnostics' }).on('click', async () => {
-      await this.runDiagnostics();
-    });
+        const addGridButton = (label, onClick, danger = false) => {
+          const btn = document.createElement('button');
+          btn.textContent = label;
+          btn.style.padding = '4px 8px';
+          btn.style.borderRadius = '6px';
+          btn.style.border = danger ? '1px solid rgba(255,80,80,0.35)' : '1px solid rgba(255,255,255,0.14)';
+          btn.style.background = danger ? 'rgba(255,60,60,0.12)' : 'rgba(255,255,255,0.08)';
+          btn.style.color = danger ? '#ff9090' : 'inherit';
+          btn.style.cursor = 'pointer';
+          btn.style.fontSize = '11px';
+          btn.style.fontWeight = '500';
+          btn.addEventListener('click', onClick);
+          grid.appendChild(btn);
+        };
 
-    actionsFolder.addButton({ title: 'Copy Last Report (JSON)' }).on('click', async () => {
-      if (!this._lastReport) {
-        ui?.notifications?.warn?.('Diagnostic Center: no report yet');
-        return;
+        addGridButton('Select Target', async () => {
+          await this._autoSelectTarget();
+        });
+
+        addGridButton('Run Diagnostics', async () => {
+          await this.runDiagnostics();
+        });
+
+        addGridButton('Copy Report', async () => {
+          if (!this._lastReport) {
+            ui?.notifications?.warn?.('Diagnostic Center: no report yet');
+            return;
+          }
+          await _copyTextToClipboard(JSON.stringify(this._lastReport, null, 2), 'Copied diagnostic report');
+        });
+
+        addGridButton('Clear Cache', async () => {
+          try {
+            clearCache();
+            ui?.notifications?.info?.('Map Shine: Asset cache cleared');
+          } catch (e) {
+            ui?.notifications?.warn?.('Map Shine: Failed to clear asset cache (see console)');
+            try {
+              console.warn('[MapShine] Failed to clear asset cache', e);
+            } catch (_) {
+            }
+          }
+        }, true);
+
+        contentElement.appendChild(grid);
+
+        // Scope note — diagnostics are read-only, runtime-only.
+        const scopeNote = document.createElement('div');
+        scopeNote.textContent = 'Diagnostics are read-only and do not modify scene data.';
+        scopeNote.style.fontSize = '10px';
+        scopeNote.style.opacity = '0.55';
+        scopeNote.style.padding = '4px 6px 2px 6px';
+        scopeNote.style.fontStyle = 'italic';
+        contentElement.appendChild(scopeNote);
       }
-      await _copyTextToClipboard(JSON.stringify(this._lastReport, null, 2), 'Copied diagnostic report');
-    });
-
-    actionsFolder.addButton({ title: 'Clear Asset Cache' }).on('click', async () => {
-      try {
-        clearCache();
-        ui?.notifications?.info?.('Map Shine: Asset cache cleared');
-      } catch (e) {
-        ui?.notifications?.warn?.('Map Shine: Failed to clear asset cache (see console)');
-        try {
-          console.warn('[MapShine] Failed to clear asset cache', e);
-        } catch (_) {
-        }
-      }
-    });
+    }
 
     const reportFolder = this.pane.addFolder({ title: 'Report', expanded: true });
     this._reportRoot = this._getFolderContentEl(reportFolder);

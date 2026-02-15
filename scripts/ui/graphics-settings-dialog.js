@@ -32,6 +32,9 @@ export class GraphicsSettingsDialog {
     this._effectUI = new Map();
 
     this._boundStopHandlers = null;
+
+    /** @type {HTMLElement|null} Active-count tag on the Effects folder title. */
+    this._effectsCountTag = null;
   }
 
   async initialize(parentElement = document.body) {
@@ -122,34 +125,69 @@ export class GraphicsSettingsDialog {
       this.manager.saveState();
     });
 
-    globalFolder.addButton({
-      title: 'Enable All'
-    }).on('click', () => {
-      this.manager.setDisableAll(false);
-      this.manager.enableAllEffects();
-      this.refresh();
-    });
+    // Compact 2-column button grid (matches Main Config / Control Panel pattern).
+    {
+      const contentElement = globalFolder?.element?.querySelector?.('.tp-fldv_c') || globalFolder?.element;
+      if (contentElement) {
+        const grid = document.createElement('div');
+        grid.style.display = 'grid';
+        grid.style.gridTemplateColumns = '1fr 1fr';
+        grid.style.gap = '4px';
+        grid.style.padding = '4px 6px 6px 6px';
 
-    globalFolder.addButton({
-      title: 'Disable All Effects'
-    }).on('click', () => {
-      this.manager.setDisableAll(true);
-      this.manager.disableAllEffects();
-      this.refresh();
-    });
+        const addGridButton = (label, onClick, danger = false) => {
+          const btn = document.createElement('button');
+          btn.textContent = label;
+          btn.style.padding = '4px 8px';
+          btn.style.borderRadius = '6px';
+          btn.style.border = danger ? '1px solid rgba(255,80,80,0.35)' : '1px solid rgba(255,255,255,0.14)';
+          btn.style.background = danger ? 'rgba(255,60,60,0.12)' : 'rgba(255,255,255,0.08)';
+          btn.style.color = danger ? '#ff9090' : 'inherit';
+          btn.style.cursor = 'pointer';
+          btn.style.fontSize = '11px';
+          btn.style.fontWeight = '500';
+          btn.addEventListener('click', onClick);
+          grid.appendChild(btn);
+        };
 
-    globalFolder.addButton({
-      title: 'Reset Overrides'
-    }).on('click', () => {
-      this.manager.resetAllOverrides();
-      this.refresh();
-    });
+        addGridButton('Enable All', () => {
+          this.manager.setDisableAll(false);
+          this.manager.enableAllEffects();
+          this.refresh();
+        });
+
+        addGridButton('Disable All', () => {
+          this.manager.setDisableAll(true);
+          this.manager.disableAllEffects();
+          this.refresh();
+        });
+
+        addGridButton('Reset Overrides', () => {
+          this.manager.resetAllOverrides();
+          this.refresh();
+        }, true);
+
+        contentElement.appendChild(grid);
+
+        // Persistence scope note (client-local settings).
+        const scopeNote = document.createElement('div');
+        scopeNote.textContent = 'These settings are saved per-client (browser-local).';
+        scopeNote.style.fontSize = '10px';
+        scopeNote.style.opacity = '0.55';
+        scopeNote.style.padding = '4px 6px 2px 6px';
+        scopeNote.style.fontStyle = 'italic';
+        contentElement.appendChild(scopeNote);
+      }
+    }
 
     // Effects section.
     const effectsFolder = this.pane.addFolder({
       title: 'Effects',
       expanded: true
     });
+
+    // Active-count tag on the Effects folder title.
+    this._ensureEffectsCountTag(effectsFolder);
 
     this._buildEffectsUI(effectsFolder);
 
@@ -243,6 +281,51 @@ export class GraphicsSettingsDialog {
     }
   }
 
+  /**
+   * Add a small count-tag chip to the Effects folder title (e.g. "8/12 active").
+   * @private
+   * @param {any} folder
+   */
+  _ensureEffectsCountTag(folder) {
+    try {
+      const titleElement = folder?.element?.querySelector?.('.tp-fldv_t');
+      if (!titleElement) return;
+
+      const tag = document.createElement('span');
+      tag.className = 'map-shine-effects-count-tag';
+      tag.style.marginLeft = '8px';
+      tag.style.fontSize = '10px';
+      tag.style.fontWeight = '600';
+      tag.style.padding = '1px 6px';
+      tag.style.borderRadius = '999px';
+      tag.style.border = '1px solid rgba(255,255,255,0.14)';
+      tag.style.background = 'rgba(255,255,255,0.08)';
+      tag.style.opacity = '0.9';
+      tag.style.verticalAlign = 'middle';
+      tag.style.pointerEvents = 'none';
+      titleElement.appendChild(tag);
+      this._effectsCountTag = tag;
+    } catch (_) {
+    }
+  }
+
+  /**
+   * Update the Effects folder count tag with current active/total.
+   * @private
+   */
+  _updateEffectsCountTag() {
+    if (!this._effectsCountTag) return;
+    let active = 0;
+    let total = 0;
+    for (const [effectId] of this._effectUI.entries()) {
+      total++;
+      if (this.manager.getEffectiveEnabled(effectId)) active++;
+    }
+    const text = `${active}/${total} active`;
+    this._effectsCountTag.textContent = text;
+    this._effectsCountTag.style.display = text ? 'inline-block' : 'none';
+  }
+
   refresh() {
     // Sync UI state from manager.
     for (const [effectId, ui] of this._effectUI.entries()) {
@@ -283,6 +366,8 @@ export class GraphicsSettingsDialog {
         dot.title = 'Active';
       }
     }
+
+    this._updateEffectsCountTag();
   }
 
   show() {

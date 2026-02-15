@@ -1,13 +1,18 @@
 # Tweakpane Interface Revamp Plan (Map Shine Advanced)
 
 ## Status
-- Phase: Planning Complete (Sessions 1-3 of 3)
+- Phase: Implementation Complete (WP-1 through WP-5 done; WP-6 QA pending)
 - This document now covers:
   1. Session 1: Basics + full UI overview
   2. Session 2: Important UX improvements
   3. Session 3: Optional/nice-to-have enhancements
-- Next phase:
-  1. Implementation
+- Implementation status:
+  - WP-1: ✅ Shared UI Shell Standards (all panels normalized)
+  - WP-2: ✅ Main Config Re-Arrangement
+  - WP-3: ✅ Control Panel Live-Play Upgrade
+  - WP-4: ✅ Space Optimization Pass
+  - WP-5: ✅ Trust and Feedback Pass
+  - WP-6: ⏳ QA + Regression Verification
 
 ---
 
@@ -699,30 +704,40 @@ These are explicitly optional for first implementation waves, but strongly impro
 
 This planning stage is complete when implementation can proceed in clear, low-risk slices.
 
-### WP-1: Shared UI Shell Standards
-- Normalize header behavior, drag rules, spacing, status vocabulary, and action semantics across all panels.
+### WP-1: Shared UI Shell Standards ✅
+- Normalized compact 2-column button grids across all panels.
+- Added persistence scope notes to all panels (scene/client/runtime).
+- Added folder tag chips to Tile Motion Dialog, Control Panel, and Graphics Settings.
+- Panels covered: Main Config, Control Panel, Graphics Settings, Effect Stack, Diagnostic Center, Tile Motion Dialog.
+- Light Editor intentionally excluded (specialized workflow with its own overlay system).
 
-### WP-2: Main Config Re-Arrangement
-- Split overloaded Global controls.
-- Move tool launchers into Utilities.
-- Introduce Tokens & Character Rendering top-level section.
-- Apply new top-level order and accordion defaults.
+### WP-2: Main Config Re-Arrangement ✅
+- Split overloaded Global Controls into Authoring Workflow.
+- Moved tool launchers into dedicated Utilities section with compact grid.
+- Introduced Tokens & Character Rendering top-level section.
+- Applied new top-level order and single-open accordion defaults.
+- Made Support & Links collapsible and default-collapsed.
 
-### WP-3: Control Panel Live-Play Upgrade
-- Introduce Quick Scene Beats.
-- Rebuild weather section into explicit mode sub-accordions.
-- Reorganize utilities and reduce first-screen clutter.
+### WP-3: Control Panel Live-Play Upgrade ✅
+- Introduced Quick Scene Beats section with time/weather quick actions.
+- Rebuilt weather section into explicit Dynamic/Directed sub-accordions with auto-expand.
+- Moved wind controls to dedicated Wind section with Quick/Advanced folds.
+- Reorganized utilities with compact grid and de-emphasis.
+- Added folder tag badges for section summaries.
 
-### WP-4: Space Optimization Pass
-- Add compact button grids where appropriate.
-- Add section summary chips and density caps.
-- Apply accordion behavior matrix.
+### WP-4: Space Optimization Pass ✅
+- Compact 2-column button grids in Main Config, Control Panel, Graphics Settings, Diagnostic Center, Effect Stack, Tile Motion Dialog.
+- Section summary chips (folder tags) in Control Panel and Tile Motion Dialog.
+- Single-open accordion behavior in Main Config and Control Panel.
+- Active-count tag on Graphics Settings Effects folder.
 
-### WP-5: Trust and Feedback Pass
-- Standardize disabled-state reasons.
-- Standardize save-scope feedback (`scene`, `client`, `runtime`).
+### WP-5: Trust and Feedback Pass ✅
+- Persistence scope display in Control Panel status panel (Scene GM authoritative / Runtime only).
+- Save-scope notes in Control Panel utilities, Graphics Settings, Tile Motion Dialog, Diagnostic Center, Effect Stack.
+- Disabled-state reason messaging in Control Panel Tile Motion section.
+- Disabled controls for non-GM / unavailable tile motion.
 
-### WP-6: QA + Regression Verification
+### WP-6: QA + Regression Verification ⏳
 - Validate no startup regressions.
 - Validate live-play speed goals and reduced-scroll objectives.
 - Validate persistence consistency (accordion state and control state).

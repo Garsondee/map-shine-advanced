@@ -124,6 +124,29 @@ export class ControlPanelManager {
     /** @type {any|null} */
     this._tileMotionTimeFactorBinding = null;
 
+    /** @type {any|null} */
+    this._weatherDynamicFolder = null;
+
+    /** @type {any|null} */
+    this._weatherDirectedFolder = null;
+
+    /** @type {boolean} */
+    this._singleOpenTopLevelSections = true;
+
+    /** @type {Array<any>} */
+    this._topLevelFolders = [];
+
+    /** @type {Object<string, HTMLElement|null>} */
+    this._folderTags = {
+      quick: null,
+      time: null,
+      weather: null,
+      wind: null,
+      tileMotion: null,
+      environment: null,
+      utilities: null
+    };
+
     /** @type {boolean} */
     this._didLoadControlState = false;
 
@@ -138,6 +161,65 @@ export class ControlPanelManager {
       onDocPanelMouseMove: (e) => this._onHeaderMouseMove(e),
       onDocPanelMouseUp: () => this._onHeaderMouseUp()
     };
+  }
+
+  _registerTopLevelFolder(folder) {
+    if (!folder) return;
+    this._topLevelFolders.push(folder);
+
+    folder.on('fold', (ev) => {
+      if (!ev?.expanded || !this._singleOpenTopLevelSections) return;
+      for (const other of this._topLevelFolders) {
+        if (!other || other === folder) continue;
+        try {
+          if (other.expanded) other.expanded = false;
+        } catch (_) {
+        }
+      }
+    });
+  }
+
+  _ensureFolderTag(folder, key, initialText = '') {
+    try {
+      const titleElement = folder?.element?.querySelector?.('.tp-fldv_t');
+      if (!titleElement) return null;
+
+      let tag = titleElement.querySelector(`.map-shine-folder-tag-${key}`);
+      if (!tag) {
+        tag = document.createElement('span');
+        tag.className = `map-shine-folder-tag map-shine-folder-tag-${key}`;
+        tag.style.marginLeft = '8px';
+        tag.style.fontSize = '10px';
+        tag.style.fontWeight = '600';
+        tag.style.padding = '1px 6px';
+        tag.style.borderRadius = '999px';
+        tag.style.border = '1px solid rgba(255,255,255,0.14)';
+        tag.style.background = 'rgba(255,255,255,0.08)';
+        tag.style.opacity = '0.9';
+        tag.style.verticalAlign = 'middle';
+        tag.style.pointerEvents = 'none';
+        titleElement.appendChild(tag);
+      }
+
+      this._folderTags[key] = tag;
+      this._setFolderTag(key, initialText);
+      return tag;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _setFolderTag(key, text) {
+    const tag = this._folderTags?.[key];
+    if (!tag) return;
+    const next = String(text || '').trim();
+    tag.textContent = next;
+    tag.style.display = next ? 'inline-block' : 'none';
+  }
+
+  _refreshWeatherFolderTag() {
+    const isDynamic = this.controlState.weatherMode === 'dynamic';
+    this._setFolderTag('weather', isDynamic ? 'Dynamic' : 'Directed');
   }
 
   _buildStatusPanel() {
@@ -185,6 +267,21 @@ export class ControlPanelManager {
     activityText.style.opacity = '0.85';
     modeLine.appendChild(modeText);
     modeLine.appendChild(activityText);
+
+    const scopeLine = document.createElement('div');
+    scopeLine.style.display = 'flex';
+    scopeLine.style.justifyContent = 'space-between';
+    scopeLine.style.gap = '10px';
+    scopeLine.style.opacity = '0.8';
+    scopeLine.style.marginBottom = '8px';
+    scopeLine.style.fontSize = '11px';
+    panel.appendChild(scopeLine);
+
+    const scopeLabel = document.createElement('div');
+    scopeLabel.textContent = 'Persistence';
+    const scopeText = document.createElement('div');
+    scopeLine.appendChild(scopeLabel);
+    scopeLine.appendChild(scopeText);
 
     const row = document.createElement('div');
     row.style.display = 'grid';
@@ -251,7 +348,17 @@ export class ControlPanelManager {
     panel.appendChild(progressWrap);
 
     this.statusPanel = panel;
-    this._statusEls = { curText, tgtText, modeText, activityText, progressLabel, progressPct, barInner, progressWrap };
+    this._statusEls = {
+      curText,
+      tgtText,
+      modeText,
+      activityText,
+      scopeText,
+      progressLabel,
+      progressPct,
+      barInner,
+      progressWrap
+    };
 
     // Insert directly under the pane title bar.
     const root = this.pane.element;
@@ -279,6 +386,9 @@ export class ControlPanelManager {
     if (!els) return;
 
     const wc = coreWeatherController || window.MapShine?.weatherController || window.weatherController;
+    const isGM = game.user?.isGM === true;
+    els.scopeText.textContent = isGM ? 'Scene (GM authoritative)' : 'Runtime only';
+
     if (!wc) {
       els.modeText.textContent = 'Weather: Unavailable';
       els.activityText.textContent = '';
@@ -399,6 +509,7 @@ export class ControlPanelManager {
 
     const windSpeed = Math.max(0, Math.min(1, Number(state.windSpeed) || 0));
     const pct = `${Math.round(windSpeed * 100)}%`;
+    this._setFolderTag('wind', pct);
 
     if (this._windStrengthBarInner) {
       this._windStrengthBarInner.style.width = `${windSpeed * 100}%`;
@@ -559,10 +670,12 @@ export class ControlPanelManager {
 
     // Build UI sections
     if (_isDbg) _dlp.begin('cp.buildSections', 'finalize');
+    this._buildQuickSceneBeatsSection();
     this._buildTimeSection();
     this._buildWeatherSection();
-    this._buildEnvironmentSection();
+    this._buildWindSection();
     this._buildTileMotionSection();
+    this._buildEnvironmentSection();
     this._buildUtilitiesSection();
     if (_isDbg) _dlp.end('cp.buildSections');
 
@@ -576,11 +689,108 @@ export class ControlPanelManager {
     log.info('Control Panel initialized');
   }
 
+  _buildQuickSceneBeatsSection() {
+    const beatsFolder = this.pane.addFolder({
+      title: '⚡ Quick Scene Beats',
+      expanded: true
+    });
+    this._registerTopLevelFolder(beatsFolder);
+    this._ensureFolderTag(beatsFolder, 'quick', 'Quick');
+
+    const contentElement = beatsFolder.element.querySelector('.tp-fldv_c') || beatsFolder.element;
+
+    const makeGrid = () => {
+      const grid = document.createElement('div');
+      grid.style.display = 'grid';
+      grid.style.gridTemplateColumns = '1fr 1fr';
+      grid.style.gap = '6px';
+      grid.style.margin = '8px 0';
+      return grid;
+    };
+
+    const makeBtn = (label, onClick) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.style.padding = '6px 8px';
+      btn.style.borderRadius = '6px';
+      btn.style.border = '1px solid rgba(255,255,255,0.15)';
+      btn.style.background = 'rgba(255,255,255,0.06)';
+      btn.style.color = 'inherit';
+      btn.style.cursor = 'pointer';
+      btn.addEventListener('click', onClick);
+      return btn;
+    };
+
+    const timeLabel = document.createElement('div');
+    timeLabel.textContent = 'Time';
+    timeLabel.style.fontSize = '11px';
+    timeLabel.style.opacity = '0.85';
+    contentElement.appendChild(timeLabel);
+
+    const timeGrid = makeGrid();
+    const timeBeats = {
+      Dawn: 6.0,
+      Noon: 12.0,
+      Dusk: 18.0,
+      Midnight: 0.0
+    };
+    for (const [label, hour] of Object.entries(timeBeats)) {
+      timeGrid.appendChild(makeBtn(label, () => {
+        this._revealTimeTargetUI();
+        const mins = Number(this.controlState.timeTransitionMinutes) || 0;
+        if (mins > 0) {
+          void this._startTimeOfDayTransition(hour, mins).then(() => this.debouncedSave());
+        } else {
+          void this._setTimeOfDay(hour).then(() => this.debouncedSave());
+        }
+      }));
+    }
+    contentElement.appendChild(timeGrid);
+
+    const weatherLabel = document.createElement('div');
+    weatherLabel.textContent = 'Weather';
+    weatherLabel.style.fontSize = '11px';
+    weatherLabel.style.opacity = '0.85';
+    weatherLabel.style.marginTop = '2px';
+    contentElement.appendChild(weatherLabel);
+
+    const weatherGrid = makeGrid();
+    const weatherBeats = {
+      Clear: 'Clear (Dry)',
+      Rain: 'Rain',
+      Storm: 'Thunderstorm',
+      Snow: 'Snow'
+    };
+    for (const [label, presetId] of Object.entries(weatherBeats)) {
+      weatherGrid.appendChild(makeBtn(label, () => {
+        void this._applyQuickWeatherBeat(presetId).then(() => this.debouncedSave());
+      }));
+    }
+    contentElement.appendChild(weatherGrid);
+  }
+
+  async _applyQuickWeatherBeat(presetId) {
+    this.controlState.weatherMode = 'directed';
+    this.controlState.dynamicEnabled = false;
+    this.controlState.directedPresetId = presetId;
+
+    this._updateWeatherControls();
+    try {
+      this.pane?.refresh?.();
+    } catch (_) {
+    }
+
+    await this._startDirectedTransition();
+  }
+
   _buildEnvironmentSection() {
     const envFolder = this.pane.addFolder({
       title: '🌤️ Environment',
       expanded: false
     });
+    this._registerTopLevelFolder(envFolder);
+    this._ensureFolderTag(envFolder, 'environment', 'Sun');
 
     // Initialize from the shared config panel state if available.
     try {
@@ -648,9 +858,17 @@ export class ControlPanelManager {
    */
   _buildTimeSection() {
     const timeFolder = this.pane.addFolder({
-      title: '⏰ Time of Day',
+      title: '⏰ Time Director',
       expanded: true
     });
+    this._registerTopLevelFolder(timeFolder);
+    this._ensureFolderTag(timeFolder, 'time', 'Now');
+
+    const refreshTimeFolderTag = () => {
+      const mins = Number(this.controlState.timeTransitionMinutes) || 0;
+      if (mins > 0) this._setFolderTag('time', `Δ ${mins.toFixed(1)}m`);
+      else this._setFolderTag('time', 'Now');
+    };
 
     // Create custom clock DOM
     this.clockElement = this._createClockDOM();
@@ -663,8 +881,10 @@ export class ControlPanelManager {
       max: 60.0,
       step: 0.5
     }).on('change', (ev) => {
+      refreshTimeFolderTag();
       if (ev?.last) this.debouncedSave();
     });
+    refreshTimeFolderTag();
 
     // Quick time buttons
     const quickTimes = {
@@ -1116,8 +1336,15 @@ export class ControlPanelManager {
    */
   _buildWeatherSection() {
     const weatherFolder = this.pane.addFolder({
-      title: '🌦️ Weather',
-      expanded: true
+      title: '🌦️ Weather Director',
+      expanded: false
+    });
+    this._registerTopLevelFolder(weatherFolder);
+    this._ensureFolderTag(weatherFolder, 'weather', 'Directed');
+
+    weatherFolder.on('fold', (ev) => {
+      // Keep state explicit if we later persist control-panel accordions.
+      this._weatherFolderExpanded = !!ev.expanded;
     });
 
     // Weather mode selector
@@ -1140,22 +1367,25 @@ export class ControlPanelManager {
         this.controlState.dynamicEnabled = false;
       }
 
-      this._updateWeatherControls(weatherFolder);
+      this._updateWeatherControls();
       void this._applyControlState();
       this.debouncedSave();
     });
 
-    // Dynamic mode controls (initially visible)
-    this.dynamicControls = this._buildDynamicControls(weatherFolder);
-    
-    // Directed mode controls (initially hidden)
-    this.directedControls = this._buildDirectedControls(weatherFolder);
+    this._weatherDynamicFolder = weatherFolder.addFolder({
+      title: 'Dynamic Mode',
+      expanded: this.controlState.weatherMode === 'dynamic'
+    });
+    this.dynamicControls = this._buildDynamicControls(this._weatherDynamicFolder);
 
-    // Wind controls (always visible)
-    this.windControls = this._buildWindControls(weatherFolder);
+    this._weatherDirectedFolder = weatherFolder.addFolder({
+      title: 'Directed Mode',
+      expanded: this.controlState.weatherMode === 'directed'
+    });
+    this.directedControls = this._buildDirectedControls(this._weatherDirectedFolder);
 
     // Show/hide appropriate controls based on current mode
-    this._updateWeatherControls(weatherFolder);
+    this._updateWeatherControls();
   }
 
   /**
@@ -1267,7 +1497,8 @@ export class ControlPanelManager {
    * @returns {Object} Control references
    * @private
    */
-  _buildWindControls(parentFolder) {
+  _buildWindControls(parentFolder, options = undefined) {
+    const includeGustiness = options?.includeGustiness !== false;
     const controls = {};
 
     controls.speed = parentFolder.addBinding(this.controlState, 'windSpeed', {
@@ -1290,7 +1521,86 @@ export class ControlPanelManager {
       if (ev?.last) this.debouncedSave();
     });
 
-    controls.gustiness = parentFolder.addBinding(this.controlState, 'gustiness', {
+    if (includeGustiness) {
+      controls.gustiness = parentFolder.addBinding(this.controlState, 'gustiness', {
+        label: 'Gustiness',
+        options: {
+          'Calm': 'calm',
+          'Light': 'light',
+          'Moderate': 'moderate',
+          'Strong': 'strong',
+          'Extreme': 'extreme'
+        }
+      }).on('change', (ev) => {
+        void this._applyWindState();
+        if (ev?.last) this.debouncedSave();
+      });
+    }
+
+    return controls;
+  }
+
+  _buildWindSection() {
+    const windFolder = this.pane.addFolder({
+      title: '💨 Wind',
+      expanded: false
+    });
+    this._registerTopLevelFolder(windFolder);
+    this._ensureFolderTag(windFolder, 'wind', `${Math.round((Number(this.controlState.windSpeed) || 0) * 100)}%`);
+
+    const quickWindFolder = windFolder.addFolder({
+      title: 'Quick Wind',
+      expanded: true
+    });
+
+    this.windControls = this._buildWindControls(quickWindFolder, { includeGustiness: false });
+
+    quickWindFolder.addBlade({ view: 'separator' });
+
+    const beats = {
+      Calm: { speed: 0.1, gustiness: 'calm' },
+      Breezy: { speed: 0.35, gustiness: 'light' },
+      Windy: { speed: 0.6, gustiness: 'strong' },
+      Storm: { speed: 0.85, gustiness: 'extreme' }
+    };
+
+    const contentElement = quickWindFolder.element.querySelector('.tp-fldv_c') || quickWindFolder.element;
+    const grid = document.createElement('div');
+    grid.style.display = 'grid';
+    grid.style.gridTemplateColumns = '1fr 1fr';
+    grid.style.gap = '6px';
+    grid.style.marginTop = '6px';
+
+    for (const [label, cfg] of Object.entries(beats)) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.style.padding = '6px 8px';
+      btn.style.borderRadius = '6px';
+      btn.style.border = '1px solid rgba(255,255,255,0.15)';
+      btn.style.background = 'rgba(255,255,255,0.06)';
+      btn.style.color = 'inherit';
+      btn.style.cursor = 'pointer';
+      btn.addEventListener('click', () => {
+        this.controlState.windSpeed = cfg.speed;
+        this.controlState.gustiness = cfg.gustiness;
+        try {
+          this.pane?.refresh?.();
+        } catch (_) {
+        }
+        void this._applyWindState();
+        this.debouncedSave();
+      });
+      grid.appendChild(btn);
+    }
+    contentElement.appendChild(grid);
+
+    const advancedFolder = windFolder.addFolder({
+      title: 'Advanced Wind',
+      expanded: false
+    });
+
+    advancedFolder.addBinding(this.controlState, 'gustiness', {
       label: 'Gustiness',
       options: {
         'Calm': 'calm',
@@ -1303,27 +1613,20 @@ export class ControlPanelManager {
       void this._applyWindState();
       if (ev?.last) this.debouncedSave();
     });
-
-    return controls;
   }
 
   /**
    * Update visibility of weather controls based on mode
-   * @param {Tweakpane.Folder} weatherFolder
    * @private
    */
-  _updateWeatherControls(weatherFolder) {
+  _updateWeatherControls() {
     const isDynamic = this.controlState.weatherMode === 'dynamic';
-    
-    // Show/hide dynamic controls
-    Object.values(this.dynamicControls).forEach(control => {
-      control.hidden = !isDynamic;
-    });
-    
-    // Show/hide directed controls
-    Object.values(this.directedControls).forEach(control => {
-      control.hidden = isDynamic;
-    });
+
+    // Keep mode sections explicit in the hierarchy, auto-expanding the active mode
+    // so the GM always lands on the relevant controls during live play.
+    if (this._weatherDynamicFolder) this._weatherDynamicFolder.expanded = isDynamic;
+    if (this._weatherDirectedFolder) this._weatherDirectedFolder.expanded = !isDynamic;
+    this._refreshWeatherFolderTag();
   }
 
   /**
@@ -1332,21 +1635,55 @@ export class ControlPanelManager {
    */
   _buildUtilitiesSection() {
     const utilsFolder = this.pane.addFolder({
-      title: '⚙️ Utilities',
+      title: '⚙️ Utilities (Advanced)',
       expanded: false
     });
+    this._registerTopLevelFolder(utilsFolder);
+    this._ensureFolderTag(utilsFolder, 'utilities', 'Advanced');
 
-    utilsFolder.addButton({
-      title: 'Reset to Defaults'
-    }).on('click', () => {
-      this._resetToDefaults();
-    });
+    const contentElement = utilsFolder.element.querySelector('.tp-fldv_c') || utilsFolder.element;
+    const grid = document.createElement('div');
+    grid.style.display = 'grid';
+    grid.style.gridTemplateColumns = '1fr 1fr';
+    grid.style.gap = '6px';
+    grid.style.marginTop = '4px';
 
-    utilsFolder.addButton({
-      title: 'Copy Current Weather'
-    }).on('click', () => {
+    const scopeNote = document.createElement('div');
+    scopeNote.textContent = game.user?.isGM
+      ? 'Scope: Saves to scene'
+      : 'Scope: Runtime only (GM required for scene persistence)';
+    scopeNote.style.fontSize = '11px';
+    scopeNote.style.opacity = '0.78';
+    scopeNote.style.marginTop = '2px';
+
+    const addGridButton = (title, onClick, danger = false) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = title;
+      btn.style.padding = '6px 8px';
+      btn.style.borderRadius = '6px';
+      btn.style.border = danger
+        ? '1px solid rgba(255,120,120,0.45)'
+        : '1px solid rgba(255,255,255,0.15)';
+      btn.style.background = danger
+        ? 'rgba(120,0,0,0.18)'
+        : 'rgba(255,255,255,0.06)';
+      btn.style.color = 'inherit';
+      btn.style.cursor = 'pointer';
+      btn.addEventListener('click', onClick);
+      grid.appendChild(btn);
+    };
+
+    addGridButton('Copy Weather', () => {
       this._copyCurrentWeather();
     });
+
+    addGridButton('Reset Defaults', () => {
+      this._resetToDefaults();
+    }, true);
+
+    contentElement.appendChild(scopeNote);
+    contentElement.appendChild(grid);
   }
 
   _syncTileMotionSpeedFromManager() {
@@ -1364,6 +1701,7 @@ export class ControlPanelManager {
         if (Math.abs((this.controlState.tileMotionSpeedPercent ?? 100) - clamped) >= 0.001) {
           this.controlState.tileMotionSpeedPercent = clamped;
         }
+        this._setFolderTag('tileMotion', `${Math.round(clamped)}%`);
       }
 
       if ((this.controlState.tileMotionAutoPlayEnabled ?? true) !== autoPlay) {
@@ -1489,6 +1827,21 @@ export class ControlPanelManager {
       title: '🧭 Tile Motion',
       expanded: false
     });
+    this._registerTopLevelFolder(tileMotionFolder);
+    this._ensureFolderTag(tileMotionFolder, 'tileMotion', `${Math.round(Number(this.controlState.tileMotionSpeedPercent) || 0)}%`);
+
+    const canEditTileMotion = game.user?.isGM === true && !!window.MapShine?.tileMotionManager;
+    if (!canEditTileMotion) {
+      const content = tileMotionFolder.element.querySelector('.tp-fldv_c') || tileMotionFolder.element;
+      const reason = document.createElement('div');
+      reason.textContent = game.user?.isGM
+        ? 'Unavailable: Tile motion manager is not ready yet.'
+        : 'Unavailable: Tile motion controls are GM-only.';
+      reason.style.fontSize = '11px';
+      reason.style.opacity = '0.78';
+      reason.style.margin = '4px 0 8px';
+      content.appendChild(reason);
+    }
 
     this._tileMotionAutoPlayBinding = tileMotionFolder.addBinding(this.controlState, 'tileMotionAutoPlayEnabled', {
       label: 'Auto Play'
@@ -1497,6 +1850,7 @@ export class ControlPanelManager {
       void this._setTileMotionAutoPlayEnabled(!!ev.value, { persist: !!ev?.last });
       if (ev?.last) this.debouncedSave();
     });
+    this._tileMotionAutoPlayBinding.disabled = !canEditTileMotion;
 
     this._tileMotionTimeFactorBinding = tileMotionFolder.addBinding(this.controlState, 'tileMotionTimeFactorPercent', {
       label: 'Time Factor (%)',
@@ -1508,6 +1862,7 @@ export class ControlPanelManager {
       void this._setTileMotionTimeFactor(ev.value, { persist: !!ev?.last });
       if (ev?.last) this.debouncedSave();
     });
+    this._tileMotionTimeFactorBinding.disabled = !canEditTileMotion;
 
     this._tileMotionSpeedBinding = tileMotionFolder.addBinding(this.controlState, 'tileMotionSpeedPercent', {
       label: 'Speed (%)',
@@ -1516,27 +1871,32 @@ export class ControlPanelManager {
       step: 1
     }).on('change', (ev) => {
       this.controlState.tileMotionSpeedPercent = ev.value;
+      this._setFolderTag('tileMotion', `${Math.round(Number(ev.value) || 0)}%`);
       void this._setTileMotionSpeed(ev.value, { persist: !!ev?.last });
       if (ev?.last) this.debouncedSave();
     });
+    this._tileMotionSpeedBinding.disabled = !canEditTileMotion;
 
-    tileMotionFolder.addButton({
+    const startButton = tileMotionFolder.addButton({
       title: 'Start'
     }).on('click', () => {
       void this._startTileMotion();
     });
+    startButton.disabled = !canEditTileMotion;
 
-    tileMotionFolder.addButton({
+    const stopButton = tileMotionFolder.addButton({
       title: 'Stop'
     }).on('click', () => {
       void this._stopTileMotion();
     });
+    stopButton.disabled = !canEditTileMotion;
 
-    tileMotionFolder.addButton({
+    const resetButton = tileMotionFolder.addButton({
       title: 'Reset Phase'
     }).on('click', () => {
       void this._resetTileMotionPhase();
     });
+    resetButton.disabled = !canEditTileMotion;
   }
 
   /**

@@ -10,6 +10,7 @@ import * as sceneSettings from '../settings/scene-settings.js';
 import { SceneComposer } from '../scene/composer.js';
 import { CameraFollower } from './camera-follower.js';
 import { PixiInputBridge } from './pixi-input-bridge.js';
+import { CinematicCameraManager } from './cinematic-camera-manager.js';
 import { EffectComposer } from '../effects/EffectComposer.js';
 // Dependent effects still constructed directly in createThreeCanvas
 import { LightingEffect } from '../effects/LightingEffect.js';
@@ -62,6 +63,7 @@ import {
 import { RenderLoop } from '../core/render-loop.js';
 import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
+import { CameraPanelManager } from '../ui/camera-panel-manager.js';
 import { EnhancedLightInspector } from '../ui/enhanced-light-inspector.js';
 import { TokenManager } from '../scene/token-manager.js';
 import { VisibilityController } from '../vision/VisibilityController.js';
@@ -97,6 +99,7 @@ import { OverlayUIManager } from '../ui/overlay-ui-manager.js';
 import { LightEditorTweakpane } from '../ui/light-editor-tweakpane.js';
 import { EffectCapabilitiesRegistry } from '../effects/effect-capabilities-registry.js';
 import { GraphicsSettingsManager } from '../ui/graphics-settings-manager.js';
+import { TokenMovementManager } from '../scene/token-movement-manager.js';
 import { LoadSession } from '../core/load-session.js';
 import { ResizeHandler } from './resize-handler.js';
 import { ModeManager } from './mode-manager.js';
@@ -154,6 +157,12 @@ let uiManager = null;
 /** @type {ControlPanelManager|null} */
 let controlPanel = null;
 
+/** @type {CameraPanelManager|null} */
+let cameraPanel = null;
+
+/** @type {CinematicCameraManager|null} */
+let cinematicCameraManager = null;
+
 /**
  * ESSENTIAL FEATURE:
  * Per-client Graphics Settings (Players/GMs) to disable or reduce effect intensity.
@@ -188,6 +197,9 @@ let lightEditor = null;
 
 /** @type {TokenManager|null} */
 let tokenManager = null;
+
+/** @type {TokenMovementManager|null} */
+let tokenMovementManager = null;
 
 /** @type {VisibilityController|null} */
 let visibilityController = null;
@@ -814,6 +826,24 @@ async function onCanvasReady(canvas) {
       }, 'controlPanel.init(UI-only)', Severity.DEGRADED);
     }
 
+    if (!cinematicCameraManager) {
+      await safeCallAsync(async () => {
+        cinematicCameraManager = new CinematicCameraManager();
+        cinematicCameraManager.initialize();
+        if (window.MapShine) window.MapShine.cinematicCameraManager = cinematicCameraManager;
+        log.info('Cinematic camera manager initialized in UI-only mode');
+      }, 'cinematicCamera.init(UI-only)', Severity.DEGRADED);
+    }
+
+    if (!cameraPanel) {
+      await safeCallAsync(async () => {
+        cameraPanel = new CameraPanelManager(cinematicCameraManager);
+        cameraPanel.initialize();
+        if (window.MapShine) window.MapShine.cameraPanel = cameraPanel;
+        log.info('Camera panel initialized in UI-only mode');
+      }, 'cameraPanel.init(UI-only)', Severity.DEGRADED);
+    }
+
     // Graphics Settings (Essential Feature)
     // Even in UI-only mode, we create the dialog so the scene-control button does not dead-end.
     // In this mode there are no live effects to toggle; the UI will remain minimal.
@@ -917,6 +947,8 @@ function onCanvasTearDown(canvas) {
     window.MapShine.gridRenderer = null;
     window.MapShine.mapPointsManager = null;
     window.MapShine.physicsRopeManager = null;
+    window.MapShine.cinematicCameraManager = null;
+    window.MapShine.cameraPanel = null;
     window.MapShine.frameCoordinator = null;
     window.MapShine.waterEffect = null;
     window.MapShine.distortionManager = null;
@@ -1898,6 +1930,22 @@ async function createThreeCanvas(scene) {
     // Sync happens in initialize
     log.info('Wall manager initialized');
 
+    // Step 4d: Initialize token movement manager (movement styles + path policies)
+    if (isDebugLoad) dlp.begin('manager.TokenMovement.init', 'manager');
+    if (tokenMovementManager) {
+      safeDispose(() => {
+        effectComposer?.removeUpdatable?.(tokenMovementManager);
+        tokenMovementManager.dispose();
+      }, 'tokenMovementManager.dispose(reinit)');
+    }
+    tokenMovementManager = new TokenMovementManager({ tokenManager, wallManager });
+    tokenMovementManager.initialize();
+    tokenManager.setMovementManager(tokenMovementManager);
+    effectComposer.addUpdatable(tokenMovementManager);
+    if (window.MapShine) window.MapShine.tokenMovementManager = tokenMovementManager;
+    if (isDebugLoad) dlp.end('manager.TokenMovement.init');
+    log.info('Token movement manager initialized');
+
     safeCall(() => loadingOverlay.setStage('scene.sync', 0.55, 'Syncing walls…', { keepAuto: true }), 'overlay.walls', Severity.COSMETIC);
 
     // P1.3: Parallel initialization of independent lightweight managers.
@@ -2043,6 +2091,28 @@ async function createThreeCanvas(scene) {
     pixiInputBridge.initialize();
     if (isDebugLoad) dlp.end('manager.PixiInputBridge.init');
     log.info('PIXI input bridge initialized - pan/zoom updates PIXI stage');
+
+    // Step 6a.5: Initialize cinematic camera manager
+    if (isDebugLoad) dlp.begin('manager.CinematicCamera.init', 'manager');
+    if (!cinematicCameraManager) {
+      cinematicCameraManager = new CinematicCameraManager({
+        pixiInputBridge,
+        sceneComposer,
+      });
+      cinematicCameraManager.initialize();
+    } else {
+      cinematicCameraManager.setDependencies({
+        pixiInputBridge,
+        sceneComposer,
+      });
+    }
+    safeCall(() => {
+      effectComposer?.removeUpdatable?.(cinematicCameraManager);
+      effectComposer?.addUpdatable?.(cinematicCameraManager);
+    }, 'cinematicCamera.updatable', Severity.COSMETIC);
+    if (window.MapShine) window.MapShine.cinematicCameraManager = cinematicCameraManager;
+    if (isDebugLoad) dlp.end('manager.CinematicCamera.init');
+    log.info('Cinematic camera manager initialized');
 
     // Step 6b: Initialize controls integration (PIXI overlay system)
     if (isDebugLoad) dlp.begin('manager.ControlsIntegration.init', 'manager');
@@ -2250,7 +2320,8 @@ async function createThreeCanvas(scene) {
     exposeGlobals(mapShine, {
       effectMap,
       sceneComposer, effectComposer, cameraFollower, pixiInputBridge,
-      tokenManager, tileManager, visibilityController, detectionFilterEffect,
+      cinematicCameraManager, cameraPanel,
+      tokenManager, tokenMovementManager, tileManager, visibilityController, detectionFilterEffect,
       wallManager, doorMeshManager,
       drawingManager, noteManager, templateManager, lightIconManager,
       enhancedLightIconManager, enhancedLightInspector, interactionManager,
@@ -3046,6 +3117,18 @@ async function initializeUI(effectMap) {
     window.MapShine.controlPanel = controlPanel;
     if (_isDbg) _dlp.end('ui.ControlPanel.init');
     log.info('Control Panel created');
+  }
+
+  // Create Camera Panel manager if not already created
+  if (!cameraPanel) {
+    if (_isDbg) _dlp.begin('ui.CameraPanel.init', 'finalize');
+    cameraPanel = new CameraPanelManager(cinematicCameraManager);
+    cameraPanel.initialize();
+    window.MapShine.cameraPanel = cameraPanel;
+    if (_isDbg) _dlp.end('ui.CameraPanel.init');
+    log.info('Camera Panel created');
+  } else {
+    cameraPanel.setCinematicManager(cinematicCameraManager);
   }
 
   // Create Enhanced Light Inspector if not already created
@@ -4647,6 +4730,20 @@ function destroyThreeCanvas() {
     log.debug('Control Panel manager disposed');
   }
 
+  // Dispose Camera Panel manager
+  if (cameraPanel) {
+    cameraPanel.destroy();
+    cameraPanel = null;
+    log.debug('Camera Panel manager disposed');
+  }
+
+  // Dispose cinematic camera manager
+  if (cinematicCameraManager) {
+    safeDispose(() => { if (effectComposer) effectComposer.removeUpdatable(cinematicCameraManager); }, 'removeUpdatable(cinematicCamera)');
+    safeDispose(() => cinematicCameraManager.dispose(), 'cinematicCameraManager.dispose');
+    cinematicCameraManager = null;
+  }
+
   if (graphicsSettings) {
     safeDispose(() => graphicsSettings.dispose(), 'graphicsSettings.dispose');
     graphicsSettings = null;
@@ -4699,6 +4796,14 @@ function destroyThreeCanvas() {
     visibilityController.dispose();
     visibilityController = null;
     log.debug('Visibility controller disposed');
+  }
+
+  // Dispose token manager
+  if (tokenMovementManager) {
+    safeDispose(() => { if (effectComposer) effectComposer.removeUpdatable(tokenMovementManager); }, 'removeUpdatable(tokenMovement)');
+    safeDispose(() => tokenMovementManager.dispose(), 'tokenMovementManager.dispose');
+    tokenMovementManager = null;
+    log.debug('Token movement manager disposed');
   }
 
   // Dispose token manager

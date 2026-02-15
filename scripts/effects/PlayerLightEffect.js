@@ -1023,88 +1023,12 @@ export class PlayerLightEffect extends EffectBase {
         const isFlashlightMode = this.params.mode === 'flashlight';
 
         if (isFlashlightMode) {
-          const origin = tokenObj?.center ?? { x: tokenDoc?.x ?? 0, y: tokenDoc?.y ?? 0 };
-          const ox = origin.x;
-          const oy = origin.y;
-          const dx = destFoundry.x - ox;
-          const dy = destFoundry.y - oy;
-          const denomEps = 1e-8;
-          const rayLenSq = dx * dx + dy * dy;
-
-          if (rayLenSq > denomEps) {
-            const walls = canvas?.walls?.placeables;
-            let bestT = Infinity;
-            let bestX = 0;
-            let bestY = 0;
-
-            if (walls && walls.length) {
-              for (let i = 0; i < walls.length; i++) {
-                const w = walls[i];
-                const doc = w?.document;
-                if (!doc) continue;
-
-                if (doc.door > 0 && doc.ds === 1) continue;
-
-                const blocksLight = doc.light !== 0;
-                const blocksSight = doc.sight !== 0;
-                if (!blocksLight && !blocksSight) continue;
-
-                const c = doc.c;
-                if (!c || c.length < 4) continue;
-                const ax = c[0];
-                const ay = c[1];
-                const bx = c[2];
-                const by = c[3];
-
-                // Check proximity thresholds for light/sight
-                let shouldBlock = true;
-                if (blocksLight && typeof doc.light === 'number' && doc.light > 0) {
-                  // Proximity light restriction - check distance to closest point on wall
-                  const closestX = Math.max(ax, Math.min(bx, ox));
-                  const closestY = Math.max(ay, Math.min(by, oy));
-                  const distToWall = Math.hypot(ox - closestX, oy - closestY) * pxToUnits;
-                  if (distToWall <= doc.light) {
-                    shouldBlock = false;
-                  }
-                }
-                if (shouldBlock && blocksSight && typeof doc.sight === 'number' && doc.sight > 0) {
-                  // Proximity sight restriction - check distance to closest point on wall
-                  const closestX = Math.max(ax, Math.min(bx, ox));
-                  const closestY = Math.max(ay, Math.min(by, oy));
-                  const distToWall = Math.hypot(ox - closestX, oy - closestY) * pxToUnits;
-                  if (distToWall <= doc.sight) {
-                    shouldBlock = false;
-                  }
-                }
-                if (!shouldBlock) continue;
-
-                const sx = bx - ax;
-                const sy = by - ay;
-                const rxs = dx * sy - dy * sx;
-                if (Math.abs(rxs) < denomEps) continue;
-
-                const qpx = ax - ox;
-                const qpy = ay - oy;
-                const t = (qpx * sy - qpy * sx) / rxs;
-                const u = (qpx * dy - qpy * dx) / rxs;
-
-                if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
-                  if (t < bestT) {
-                    bestT = t;
-                    bestX = ox + t * dx;
-                    bestY = oy + t * dy;
-                  }
-                }
-              }
-            }
-
-            if (bestT !== Infinity) {
-              collision = { x: bestX, y: bestY };
-            }
-          }
+          // Use Foundry's polygon backends to match real sight/light wall behavior,
+          // including one-way walls, door states, and threshold walls.
+          collision = this._findClosestWallCollision(tokenObj, destFoundry, ['sight', 'light', 'move']);
         } else {
           // Torch placement behaves like moving a physical object.
-          collision = tokenObj.checkCollision(destFoundry, { mode: 'closest', type: 'move' });
+          collision = this._findClosestWallCollision(tokenObj, destFoundry, ['move']);
         }
         if (collision) {
           blocked = true;
@@ -1172,7 +1096,7 @@ export class PlayerLightEffect extends EffectBase {
       const flashlightMaxU = maxU;
       const flashlightConeMaxLenU = Math.max(0.5, this.params.flashlightLengthUnits) * 4.0;
       this._updateFlashlight(timeInfo, tokenCenterWorld, aimWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc, flashlightMaxU, flashlightConeMaxLenU);
-      this._updateDynamicLightSources(timeInfo, tokenCenterWorld, aimWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc);
+      this._updateDynamicLightSources(timeInfo, tokenCenterWorld, clampedTargetWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc);
       this._setVisible(true, false);
       return;
     }
@@ -1345,6 +1269,38 @@ export class PlayerLightEffect extends EffectBase {
       : (typeof d.size === 'number' && d.size > 0 ? d.size : 100);
 
     return d.distance / pxPerGrid;
+  }
+
+  _findClosestWallCollision(tokenObj, destinationFoundry, collisionTypes = ['move']) {
+    if (!tokenObj || !destinationFoundry) return null;
+
+    const origin = tokenObj.center;
+    const originX = (origin && Number.isFinite(origin.x)) ? origin.x : destinationFoundry.x;
+    const originY = (origin && Number.isFinite(origin.y)) ? origin.y : destinationFoundry.y;
+
+    let bestCollision = null;
+    let bestDistSq = Infinity;
+
+    for (let i = 0; i < collisionTypes.length; i++) {
+      const type = collisionTypes[i];
+      if (!type) continue;
+
+      try {
+        const collision = tokenObj.checkCollision(destinationFoundry, { origin, mode: 'closest', type });
+        if (!collision || !Number.isFinite(collision.x) || !Number.isFinite(collision.y)) continue;
+
+        const dx = collision.x - originX;
+        const dy = collision.y - originY;
+        const distSq = dx * dx + dy * dy;
+        if (distSq < bestDistSq) {
+          bestDistSq = distSq;
+          bestCollision = collision;
+        }
+      } catch (_) {
+      }
+    }
+
+    return bestCollision;
   }
 
   _flashlightRand() {
@@ -2333,31 +2289,38 @@ export class PlayerLightEffect extends EffectBase {
     const a = 1 - Math.exp(-k * dt);
     this._torchIntensity += (targetIntensity - this._torchIntensity) * a;
 
-    // Spring-follow target on ground plane
-    this._tempA.set(cursorWorld.x, cursorWorld.y, groundZ);
+    if (blocked) {
+      // Hard pin to the clamped wall-safe point while blocked so spring/wander never
+      // pushes the torch light source through the wall.
+      this._torchPos.set(cursorWorld.x, cursorWorld.y, groundZ);
+      this._torchVel.set(0, 0, 0);
+    } else {
+      // Spring-follow target on ground plane
+      this._tempA.set(cursorWorld.x, cursorWorld.y, groundZ);
 
-    // Add subtle wander in world space based on "pixel" scale (world px)
-    const wanderPx = Math.max(0, this.params.wanderPixels);
-    const wanderSpd = Math.max(0.001, this.params.wanderSpeed);
-    const wX = this._wanderNoiseX.value(t * wanderSpd);
-    const wY = this._wanderNoiseY.value(t * wanderSpd);
-    this._tempA.x += wX * wanderPx;
-    this._tempA.y += wY * wanderPx;
+      // Add subtle wander in world space based on "pixel" scale (world px)
+      const wanderPx = Math.max(0, this.params.wanderPixels);
+      const wanderSpd = Math.max(0.001, this.params.wanderSpeed);
+      const wX = this._wanderNoiseX.value(t * wanderSpd);
+      const wY = this._wanderNoiseY.value(t * wanderSpd);
+      this._tempA.x += wX * wanderPx;
+      this._tempA.y += wY * wanderPx;
 
-    // Critically-damped-ish spring
-    const stiff = Math.max(0, this.params.springStiffness);
-    const damp = Math.max(0, this.params.springDamping);
+      // Critically-damped-ish spring
+      const stiff = Math.max(0, this.params.springStiffness);
+      const damp = Math.max(0, this.params.springDamping);
 
-    // vel += (target-pos)*k*dt
-    this._tempB.subVectors(this._tempA, this._torchPos);
-    this._torchVel.addScaledVector(this._tempB, stiff * dt);
+      // vel += (target-pos)*k*dt
+      this._tempB.subVectors(this._tempA, this._torchPos);
+      this._torchVel.addScaledVector(this._tempB, stiff * dt);
 
-    // damping
-    const d = Math.exp(-damp * dt);
-    this._torchVel.multiplyScalar(d);
+      // damping
+      const d = Math.exp(-damp * dt);
+      this._torchVel.multiplyScalar(d);
 
-    // integrate
-    this._torchPos.addScaledVector(this._torchVel, dt);
+      // integrate
+      this._torchPos.addScaledVector(this._torchVel, dt);
+    }
 
     // Flicker intensity
     const flickerSpd = Math.max(0.001, this.params.flickerSpeed);

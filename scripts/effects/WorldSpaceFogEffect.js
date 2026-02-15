@@ -6,7 +6,7 @@
  * and ensures the fog is always correctly pinned to the map.
  * 
  * Architecture:
- * - Creates a plane mesh covering the scene rect
+ * - Creates a plane mesh covering the full canvas (including padding)
  * - Renders vision polygons to a world-space render target
  * - Uses Foundry's exploration texture directly (it's already world-space)
  * - Composites vision + exploration in the fog plane's shader
@@ -799,7 +799,11 @@ export class WorldSpaceFogEffect extends EffectBase {
         uVisionTexelSize: { value: new THREE.Vector2(1, 1) },
         uExploredTexelSize: { value: new THREE.Vector2(1, 1) },
         uUseSDF: { value: 0.0 },
-        uSDFMaxDistance: { value: 32.0 }
+        uSDFMaxDistance: { value: 32.0 },
+        // Maps full-canvas plane UVs to the scene rect sub-region
+        // vec4(uOffset.x, uOffset.y, uScale.x, uScale.y)
+        // sceneUv = (planeUv - offset) / scale
+        uSceneUVRect: { value: new THREE.Vector4(0.0, 0.0, 1.0, 1.0) }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -825,6 +829,9 @@ export class WorldSpaceFogEffect extends EffectBase {
         uniform vec2 uExploredTexelSize;
         uniform float uUseSDF;
         uniform float uSDFMaxDistance;
+        // Maps full-canvas plane UVs to scene rect sub-region:
+        // xy = offset, zw = scale. sceneUv = (planeUv - offset) / scale
+        uniform vec4 uSceneUVRect;
 
         varying vec2 vUv;
 
@@ -911,9 +918,21 @@ export class WorldSpaceFogEffect extends EffectBase {
           float noiseUvScale = max(max(uVisionTexelSize.x, uVisionTexelSize.y), max(uExploredTexelSize.x, uExploredTexelSize.y));
           vec2 uvWarp = n * (uNoiseStrengthPx * noiseUvScale);
 
+          // Remap from full-canvas plane UVs to scene rect sub-region UVs.
+          // The fog plane covers the entire canvas (including padding), but
+          // vision/exploration textures only cover the scene rect.
+          vec2 sceneUv = (vUv - uSceneUVRect.xy) / uSceneUVRect.zw;
+
+          // Anything outside the scene rect [0,1] is fully fogged (padded region)
+          bool outsideScene = sceneUv.x < 0.0 || sceneUv.x > 1.0 || sceneUv.y < 0.0 || sceneUv.y > 1.0;
+          if (outsideScene) {
+            gl_FragColor = vec4(uUnexploredColor, 1.0);
+            return;
+          }
+
           // UV needs Y-flip because Three.js plane UVs are bottom-left origin
           // but our vision camera renders with top-left origin (Foundry coords)
-          vec2 visionUv = vec2(vUv.x, 1.0 - vUv.y) + uvWarp;
+          vec2 visionUv = vec2(sceneUv.x, 1.0 - sceneUv.y) + uvWarp;
 
           // --- Sample vision: SDF path (smooth) or legacy path (multi-tap blur) ---
           float visible;
@@ -932,7 +951,7 @@ export class WorldSpaceFogEffect extends EffectBase {
           }
           
           // --- Exploration: always uses sampleSoft (no SDF for exploration yet) ---
-          vec2 exploredUv = vec2(vUv.x, 1.0 - vUv.y) + uvWarp;
+          vec2 exploredUv = vec2(sceneUv.x, 1.0 - sceneUv.y) + uvWarp;
           float explored = sampleSoft(tExplored, exploredUv, uExploredTexelSize, uSoftnessPx);
           float softnessPxE = max(uSoftnessPx, 0.0);
           float de = max(fwidth(explored), 1e-4);
@@ -960,8 +979,11 @@ export class WorldSpaceFogEffect extends EffectBase {
       side: THREE.DoubleSide
     });
     
-    // Create plane geometry covering the scene rect
-    const geometry = new THREE.PlaneGeometry(width, height);
+    // Create plane geometry covering the FULL canvas (including padding)
+    // so fog darkness extends into the padded region around the scene.
+    const fullW = this.sceneDimensions.width;
+    const fullH = this.sceneDimensions.height;
+    const geometry = new THREE.PlaneGeometry(fullW, fullH);
     
     this.fogPlane = new THREE.Mesh(geometry, this.fogMaterial);
     this.fogPlane.name = 'FogOverlayPlane';
@@ -970,11 +992,10 @@ export class WorldSpaceFogEffect extends EffectBase {
     this.fogPlane.renderOrder = 9999;
     this.fogPlane.layers.set(OVERLAY_THREE_LAYER);
     
-    // Position the plane in Three.js world space
-    // Three.js: origin bottom-left, Y-up
-    // Scene rect center in Three.js coords:
-    const centerX = x + width / 2;
-    const centerY = this.sceneDimensions.height - (y + height / 2);
+    // Position the plane in Three.js world space, centered on the full canvas.
+    // Three.js: origin bottom-left, Y-up.
+    const centerX = fullW / 2;
+    const centerY = fullH / 2;
     
     // Position fog plane relative to groundZ
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
@@ -983,10 +1004,21 @@ export class WorldSpaceFogEffect extends EffectBase {
     // Frustum culling off - always render
     this.fogPlane.frustumCulled = false;
     
+    // Compute UV rect mapping: the plane covers the full canvas [0,1] in UV,
+    // but vision/exploration textures only cover the scene rect sub-region.
+    // sceneUv = (planeUv - offset) / scale
+    // PlaneGeometry UV Y=0 is bottom (Three.js), but sceneRect.y is top-down
+    // (Foundry). Flip the Y offset so the scene rect maps correctly.
+    const uvOffsetX = x / fullW;
+    const uvOffsetY = (fullH - y - height) / fullH;
+    const uvScaleX = width / fullW;
+    const uvScaleY = height / fullH;
+    this.fogMaterial.uniforms.uSceneUVRect.value.set(uvOffsetX, uvOffsetY, uvScaleX, uvScaleY);
+    
     // Add to main scene
     this.mainScene.add(this.fogPlane);
     
-    log.debug(`Fog plane created at (${centerX}, ${centerY}, ${groundZ + FOG_PLANE_Z_OFFSET}), size ${width}x${height}`);
+    log.debug(`Fog plane created at (${centerX}, ${centerY}, ${groundZ + FOG_PLANE_Z_OFFSET}), size ${fullW}x${fullH} (full canvas incl. padding), sceneUVRect=(${uvOffsetX.toFixed(3)}, ${uvOffsetY.toFixed(3)}, ${uvScaleX.toFixed(3)}, ${uvScaleY.toFixed(3)})`);
   }
 
   /**

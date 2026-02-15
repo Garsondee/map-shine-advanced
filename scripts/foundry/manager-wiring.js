@@ -65,6 +65,7 @@ export function wireMapPointsToEffects(effectMap, mapPointsManager) {
  * @param {Object} refs.cameraFollower
  * @param {Object} refs.pixiInputBridge
  * @param {Object} refs.tokenManager
+ * @param {Object} refs.tokenMovementManager
  * @param {Object} refs.tileManager
  * @param {Object} refs.wallManager
  * @param {Object} refs.doorMeshManager
@@ -127,7 +128,8 @@ export function exposeGlobals(mapShine, refs) {
   // Expose managers directly from refs
   const MANAGER_EXPOSURES = [
     'sceneComposer', 'effectComposer', 'cameraFollower', 'pixiInputBridge',
-    'tokenManager', 'tileManager', 'wallManager', 'doorMeshManager',
+    'cinematicCameraManager', 'cameraPanel',
+    'tokenManager', 'tokenMovementManager', 'tileManager', 'wallManager', 'doorMeshManager',
     'drawingManager', 'noteManager', 'templateManager', 'lightIconManager',
     'enhancedLightIconManager', 'enhancedLightInspector', 'interactionManager',
     'overlayUIManager', 'lightEditor', 'gridRenderer', 'mapPointsManager',

@@ -334,6 +334,15 @@ export function registerSettings() {
     default: true
   });
 
+  game.settings.register('map-shine-advanced', 'rightClickMoveImmediate', {
+    name: 'Right-Click Move Immediate',
+    hint: 'When enabled, right-click movement executes on the first click instead of requiring a second confirmation click on the same destination.',
+    scope: 'client',
+    config: true,
+    type: Boolean,
+    default: false
+  });
+
   // Last used map point effect target (for quick placement)
   game.settings.register('map-shine-advanced', 'lastMapPointEffect', {
     name: 'Last Map Point Effect',

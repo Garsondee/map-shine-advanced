@@ -767,3 +767,161 @@ Begin implementation with **WP-2 + WP-3 first**:
 2. Control Panel live-play restructuring
 
 These two packages deliver the highest practical UX impact immediately while preserving existing systems.
+
+---
+
+## 17) Plugin Research Addendum — Tweakpane Essentials + Camerakit
+
+This addendum captures the research phase for evaluating two upstream Tweakpane plugins for Map Shine UI enhancement.
+
+### 17.1 Research scope and compatibility check
+
+Reviewed:
+- `@tweakpane/plugin-essentials` (README + compatibility table)
+- `@tweakpane/plugin-camerakit` (README + compatibility table)
+
+Compatibility result:
+- Map Shine vendors **Tweakpane 4.0.3** (`scripts/vendor/tweakpane.js`), and both plugins are compatible with Tweakpane 4.x.
+- Essentials target for 4.x: `0.2.x`
+- Camerakit target for 4.x: `0.3.x`
+
+### 17.2 Current integration constraints in Map Shine
+
+Current module architecture uses vendored, browser-loaded ES modules:
+- `module.json` loads `scripts/vendor/tweakpane-loader.js` before `scripts/module.js`
+- `tweakpane-loader.js` imports local `./tweakpane.js` and exposes `window.Tweakpane`
+
+Implication:
+- We should prefer a **vendored plugin loading path** first (same pattern as existing Tweakpane integration), rather than introducing a bundler requirement.
+
+### 17.3 Installation options (recommended path first)
+
+#### Option A (Recommended): Vendored plugin modules (no build pipeline change)
+1. Add vendored plugin files under `scripts/vendor/` (ESM builds):
+   - `tweakpane-plugin-essentials.js`
+   - `tweakpane-plugin-camerakit.js`
+2. Extend `scripts/vendor/tweakpane-loader.js`:
+   - Import each plugin module
+   - Expose references on `window` (for non-module UI classes)
+3. In each pane manager after `new Tweakpane.Pane(...)`, register only if available:
+   - `pane.registerPlugin(window.TweakpaneEssentialsPlugin)`
+   - `pane.registerPlugin(window.TweakpaneCamerakitPlugin)`
+4. Keep registration defensive (`try/catch`) so UI still works when plugin file is missing.
+
+Why this fits current architecture:
+- Matches existing `window.Tweakpane` exposure strategy.
+- Avoids dependency on package install/build steps for Foundry runtime.
+
+#### Option B (Secondary): NPM package path
+1. Add dependencies in `package.json`:
+   - `@tweakpane/plugin-essentials@^0.2.x`
+   - `@tweakpane/plugin-camerakit@^0.3.x`
+2. Add a build step that emits browser-consumable ESM into `scripts/vendor/` for release.
+
+Caveat:
+- Current project is not relying on a front-end bundle pipeline for UI runtime, so this option adds maintenance overhead.
+
+### 17.4 What we can use these controls for
+
+#### Essentials plugin
+
+1. `radiogrid`
+   - Best for compact preset picks where vertical space matters.
+   - Candidate uses:
+     - Quick Scene Beats (time/weather/wind presets)
+     - Graphics settings resolution scale presets
+     - UI scale presets in Authoring Workflow
+
+2. `buttongrid`
+   - Best for directional or matrix actions.
+   - Candidate uses:
+     - Wind direction quick picks (8-way compass)
+     - Time jumps (dawn/noon/dusk/midnight) as compact deck
+     - Utility action clusters in diagnostics/control panel
+
+3. `fpsgraph`
+   - Best for diagnostics/perf visibility.
+   - Candidate uses:
+     - Diagnostic Center live frame pacing snapshot
+     - Optional Effect Stack perf lane for heavy scenes
+
+4. `interval`
+   - Best for min/max bounded pairs.
+   - Candidate uses:
+     - Randomized parameter ranges in authoring tools
+     - Day/night active window controls for weather/effects
+
+5. `cubicbezier`
+   - Best for transition/easing authoring UX.
+   - Candidate uses:
+     - Weather transition easing profile
+     - Tile motion interpolation/ease tuning
+
+#### Camerakit plugin
+
+1. `cameraring`
+   - Best for cyclic/angular values.
+   - Candidate uses:
+     - Wind direction heading
+     - Sun azimuth / light direction controls
+     - Circular time-of-day scrubber
+
+2. `camerawheel`
+   - Best for tactile scrubbing of scalar values.
+   - Candidate uses:
+     - Transition duration
+     - Time rate / speed multipliers
+     - Wind speed or gustiness fine control
+
+### 17.5 UX placement guidance (where to use “nicest controls”)
+
+Use richer controls where they improve speed/clarity, not everywhere:
+
+1. Control Panel (highest value)
+   - Quick Scene Beats -> `radiogrid`/`buttongrid`
+   - Wind heading -> `cameraring`
+   - Time scrub/duration -> `camerawheel`
+
+2. Main Config (targeted upgrades)
+   - Authoring presets -> `radiogrid`
+   - Advanced easing -> `cubicbezier` (only in advanced folders)
+
+3. Diagnostics (optional)
+   - Perf visualization -> `fpsgraph`
+
+Guideline:
+- Keep default flows simple.
+- Gate advanced controls behind expanded folders.
+- Avoid replacing standard sliders where precision text input is already efficient.
+
+### 17.6 Rollout proposal (research-phase outcome)
+
+#### Pilot slice (low risk)
+1. Register both plugins globally (defensive).
+2. Add `radiogrid` to one Quick Scene Beats section.
+3. Add `cameraring` to one wind-direction control.
+4. Add optional `fpsgraph` in Diagnostic Center.
+
+Success criteria:
+- No pane init regressions.
+- Reduced vertical scroll in live controls.
+- Faster selection for preset-heavy actions.
+
+#### Expansion slice
+- Scale plugin controls to additional high-value locations after pilot validation.
+
+### 17.7 UI clipping issue follow-up (pill chips)
+
+Observed issue:
+- Recently introduced pill chips/tags in folder headers can clip due tight header line box.
+
+Mitigation applied in shared CSS:
+- Added compact chip sizing rules to reduce vertical footprint and align content centrally for:
+  - `.map-shine-folder-tag`
+  - `.map-shine-effects-count-tag`
+
+Validation checklist:
+1. Open Main Config, Control Panel, Tile Motion Dialog, Graphics Settings.
+2. Verify tag chips are fully visible in expanded/collapsed folder states.
+3. Verify no overlap at UI scale extremes.
+

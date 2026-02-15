@@ -11,6 +11,7 @@ import { TextureManagerUI } from './texture-manager.js';
 import { EffectStackUI } from './effect-stack.js';
 import { DiagnosticCenterManager } from './diagnostic-center.js';
 import { TileMotionDialog } from './tile-motion-dialog.js';
+import { TokenMovementDialog } from './token-movement-dialog.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../effects/EffectComposer.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import Coordinates from '../utils/coordinates.js';
@@ -134,6 +135,9 @@ export class TweakpaneManager {
 
     /** @type {TileMotionDialog|null} */
     this.tileMotionDialog = null;
+
+    /** @type {TokenMovementDialog|null} */
+    this.tokenMovementDialog = null;
 
     /** @type {number} UI scale factor */
     this.uiScale = 1.0;
@@ -450,6 +454,12 @@ export class TweakpaneManager {
     this.tileMotionDialog = new TileMotionDialog();
     await this.tileMotionDialog.initialize();
     if (_isDbg) _dlp.end('tp.tileMotionDialog.init');
+
+    // Initialize Token Movement Dialog
+    if (_isDbg) _dlp.begin('tp.tokenMovementDialog.init', 'finalize');
+    this.tokenMovementDialog = new TokenMovementDialog();
+    await this.tokenMovementDialog.initialize();
+    if (_isDbg) _dlp.end('tp.tokenMovementDialog.init');
 
     // Start hidden by default for release; can be opened via the scene control button.
     this.hide();
@@ -935,6 +945,10 @@ export class TweakpaneManager {
 
     addGridButton('🧭 Tile Motion', () => {
       this.tileMotionDialog?.toggle?.();
+    });
+
+    addGridButton('🚶 Token Movement', () => {
+      this.tokenMovementDialog?.toggle?.();
     });
 
     addGridButton('Scene Reset', async () => {
@@ -3837,6 +3851,11 @@ export class TweakpaneManager {
     if (this.tileMotionDialog) {
       this.tileMotionDialog.dispose();
       this.tileMotionDialog = null;
+    }
+
+    if (this.tokenMovementDialog) {
+      this.tokenMovementDialog.dispose();
+      this.tokenMovementDialog = null;
     }
 
     if (this.pane) {

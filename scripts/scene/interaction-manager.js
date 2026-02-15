@@ -176,10 +176,26 @@ export class InteractionManager {
       tokenIds: new Set()
     };
 
-    this.dragMeasure = {
+    this.movementPathPreview = {
+      group: null,
+      lineOuter: null,
+      lineInner: null,
+      tileGroup: null,
+      ghost: null,
+      labelEl: null,
       active: false,
-      startFoundry: { x: 0, y: 0 },
-      el: null
+      currentKey: '',
+      lastUpdateMs: 0,
+      updateIntervalMs: 80,
+      pending: null,
+      inFlight: false
+    };
+
+    this.rightClickMovePreview = {
+      active: false,
+      tokenId: null,
+      tileKey: '',
+      destinationTopLeft: null
     };
 
     // Throttle enhanced light LOS-polygon refresh during drag.
@@ -359,7 +375,7 @@ export class InteractionManager {
     // Create drag select visuals (Three.js mesh kept for compatibility)
     this.selectionBoxHandler.createSelectionBox();
     this.selectionBoxEffect.initialize();
-    this.createDragMeasureOverlay();
+    this.createMovementPathPreviewOverlay();
     this.lightHandler.createUIHoverLabelOverlay();
     this.lightHandler.createRadiusSliderOverlay();
     this.lightHandler.createLightPreview();
@@ -641,6 +657,7 @@ export class InteractionManager {
    */
   _clearAllDragPreviews() {
     this.destroyDragPreviews();
+    this._clearMovementPathPreview();
 
     if (this._pendingTokenMoveCleanup.timeoutId) {
       clearTimeout(this._pendingTokenMoveCleanup.timeoutId);
@@ -791,20 +808,457 @@ export class InteractionManager {
   _hideSelectionShadow() { this.selectionBoxHandler.hideSelectionShadow(); }
   applySelectionBoxParamChange(id, v) { this.selectionBoxHandler.applyParamChange(id, v); }
 
-  createDragMeasureOverlay() {
-    const el = document.createElement('div');
-    el.style.position = 'fixed';
-    el.style.pointerEvents = 'none';
-    el.style.zIndex = '10000';
-    el.style.padding = '4px 12px';
-    el.style.borderRadius = '4px';
-    el.style.backgroundColor = 'rgba(0,0,0,0.7)';
-    el.style.color = 'white';
-    el.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-    el.style.fontSize = '24px';
-    el.style.display = 'none';
-    document.body.appendChild(el);
-    this.dragMeasure.el = el;
+  createMovementPathPreviewOverlay() {
+    const THREE = window.THREE;
+    const scene = this.sceneComposer?.scene;
+    if (!THREE || !scene) return;
+
+    const group = new THREE.Group();
+    group.name = 'TokenMovementPathPreview';
+    group.visible = false;
+    group.renderOrder = 25;
+
+    const lineOuter = new THREE.Line(
+      new THREE.BufferGeometry(),
+      new THREE.LineBasicMaterial({
+      color: 0x143e78,
+      transparent: true,
+      opacity: 0.72,
+      depthTest: false,
+      depthWrite: false
+      })
+    );
+    lineOuter.renderOrder = 26;
+
+    const lineInner = new THREE.Line(
+      new THREE.BufferGeometry(),
+      new THREE.LineDashedMaterial({
+        color: 0x69d2ff,
+        transparent: true,
+        opacity: 0.95,
+        depthTest: false,
+        depthWrite: false,
+        dashSize: 9,
+        gapSize: 6,
+        scale: 1
+      })
+    );
+    lineInner.renderOrder = 27;
+
+    const tileGroup = new THREE.Group();
+    tileGroup.name = 'TokenMovementPathPreviewTiles';
+    tileGroup.renderOrder = 24;
+
+    const ghost = new THREE.Sprite();
+    ghost.visible = false;
+    ghost.renderOrder = 30;
+
+    group.add(lineOuter);
+    group.add(lineInner);
+    group.add(tileGroup);
+    group.add(ghost);
+    scene.add(group);
+
+    const labelEl = document.createElement('div');
+    labelEl.style.position = 'fixed';
+    labelEl.style.pointerEvents = 'none';
+    labelEl.style.zIndex = '10000';
+    labelEl.style.padding = '2px 7px';
+    labelEl.style.borderRadius = '4px';
+    labelEl.style.backgroundColor = 'rgba(5, 12, 20, 0.72)';
+    labelEl.style.border = '1px solid rgba(88, 180, 255, 0.42)';
+    labelEl.style.color = '#d9f1ff';
+    labelEl.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+    labelEl.style.fontSize = '12px';
+    labelEl.style.display = 'none';
+    document.body.appendChild(labelEl);
+
+    this.movementPathPreview.group = group;
+    this.movementPathPreview.lineOuter = lineOuter;
+    this.movementPathPreview.lineInner = lineInner;
+    this.movementPathPreview.tileGroup = tileGroup;
+    this.movementPathPreview.ghost = ghost;
+    this.movementPathPreview.labelEl = labelEl;
+  }
+
+  _clearMovementPathPreview() {
+    const preview = this.movementPathPreview;
+    if (!preview) return;
+
+    preview.active = false;
+    preview.currentKey = '';
+    preview.pending = null;
+
+    if (preview.group) preview.group.visible = false;
+
+    if (preview.labelEl) {
+      preview.labelEl.style.display = 'none';
+      preview.labelEl.textContent = '';
+    }
+
+    const tileGroup = preview.tileGroup;
+    if (tileGroup?.children && tileGroup.children.length > 0) {
+      for (let i = tileGroup.children.length - 1; i >= 0; i--) {
+        const mesh = tileGroup.children[i];
+        tileGroup.remove(mesh);
+        safeCall(() => mesh.geometry?.dispose?.(), 'movementPathPreview.disposeTileGeometry', Severity.COSMETIC);
+        safeCall(() => mesh.material?.dispose?.(), 'movementPathPreview.disposeTileMaterial', Severity.COSMETIC);
+      }
+    }
+
+    if (preview.ghost) {
+      safeCall(() => preview.ghost.material?.dispose?.(), 'movementPathPreview.disposeGhostMaterial', Severity.COSMETIC);
+      preview.ghost.material = null;
+      preview.ghost.visible = false;
+    }
+
+    const lineOuter = preview.lineOuter;
+    if (lineOuter?.geometry) {
+      safeCall(() => lineOuter.geometry.dispose?.(), 'movementPathPreview.disposeLineOuterGeometry', Severity.COSMETIC);
+      lineOuter.geometry = new window.THREE.BufferGeometry();
+    }
+
+    const lineInner = preview.lineInner;
+    if (lineInner?.geometry) {
+      safeCall(() => lineInner.geometry.dispose?.(), 'movementPathPreview.disposeLineInnerGeometry', Severity.COSMETIC);
+      lineInner.geometry = new window.THREE.BufferGeometry();
+    }
+  }
+
+  _renderMovementPathPreview(pathNodes, totalDistance, tokenDoc = null) {
+    const preview = this.movementPathPreview;
+    if (!preview?.group || !preview.lineOuter || !preview.lineInner || !Array.isArray(pathNodes) || pathNodes.length < 2) {
+      this._clearMovementPathPreview();
+      return;
+    }
+
+    const THREE = window.THREE;
+    const groundZ = (this.sceneComposer?.groundZ ?? 0) + 0.008;
+    const points = [];
+    for (const node of pathNodes) {
+      const w = Coordinates.toWorld(node.x, node.y);
+      points.push(new THREE.Vector3(w.x, w.y, groundZ));
+    }
+
+    safeCall(() => preview.lineOuter.geometry?.dispose?.(), 'movementPathPreview.swapLineOuterGeometry', Severity.COSMETIC);
+    preview.lineOuter.geometry = new THREE.BufferGeometry().setFromPoints(points);
+
+    safeCall(() => preview.lineInner.geometry?.dispose?.(), 'movementPathPreview.swapLineInnerGeometry', Severity.COSMETIC);
+    preview.lineInner.geometry = new THREE.BufferGeometry().setFromPoints(points);
+    safeCall(() => preview.lineInner.computeLineDistances?.(), 'movementPathPreview.computeLineDistances', Severity.COSMETIC);
+
+    // Remove previous tile highlights.
+    const tileGroup = preview.tileGroup;
+    for (let i = tileGroup.children.length - 1; i >= 0; i--) {
+      const mesh = tileGroup.children[i];
+      tileGroup.remove(mesh);
+      safeCall(() => mesh.geometry?.dispose?.(), 'movementPathPreview.removeOldTileGeometry', Severity.COSMETIC);
+      safeCall(() => mesh.material?.dispose?.(), 'movementPathPreview.removeOldTileMaterial', Severity.COSMETIC);
+    }
+
+    const grid = canvas?.grid;
+    const gridSize = Math.max(1, Number(grid?.size || canvas?.dimensions?.size || 100));
+    const tileW = Math.max(8, Number(grid?.sizeX || gridSize));
+    const tileH = Math.max(8, Number(grid?.sizeY || gridSize));
+
+    const seen = new Set();
+    for (let i = 1; i < pathNodes.length; i++) {
+      const p = pathNodes[i];
+      const key = `${Math.round(Number(p?.x || 0))}:${Math.round(Number(p?.y || 0))}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const world = Coordinates.toWorld(p.x, p.y);
+      const tile = new THREE.Mesh(
+        new THREE.PlaneGeometry(tileW * 0.92, tileH * 0.92),
+        new THREE.MeshBasicMaterial({
+          color: 0x3f86ff,
+          transparent: true,
+          opacity: 0.25,
+          depthTest: false,
+          depthWrite: false
+        })
+      );
+      tile.position.set(world.x, world.y, groundZ - 0.005);
+      tile.renderOrder = 24;
+      tileGroup.add(tile);
+    }
+
+    // Destination ghost token (50% opacity) to show final stop position.
+    safeCall(() => {
+      const ghost = preview.ghost;
+      if (!ghost) return;
+
+      const doc = tokenDoc || this._getPrimarySelectedTokenDoc();
+      const tokenData = doc?.id ? this.tokenManager?.tokenSprites?.get?.(doc.id) : null;
+      const sourceSprite = tokenData?.sprite;
+      if (!doc || !sourceSprite) {
+        ghost.visible = false;
+        return;
+      }
+
+      const tex = sourceSprite.material?.map || sourceSprite.userData?.texture || null;
+      if (!tex) {
+        ghost.visible = false;
+        return;
+      }
+
+      safeCall(() => ghost.material?.dispose?.(), 'movementPathPreview.swapGhostMaterial', Severity.COSMETIC);
+      ghost.material = new THREE.SpriteMaterial({
+        map: tex,
+        transparent: true,
+        opacity: 0.5,
+        depthTest: false,
+        depthWrite: false
+      });
+
+      const endFoundry = pathNodes[pathNodes.length - 1];
+      const endWorld = Coordinates.toWorld(endFoundry.x, endFoundry.y);
+      const srcScale = sourceSprite.scale;
+      ghost.scale.set(srcScale?.x ?? 100, srcScale?.y ?? 100, srcScale?.z ?? 1);
+      ghost.position.set(endWorld.x, endWorld.y, (this.sceneComposer?.groundZ ?? 0) + 0.02);
+      ghost.visible = true;
+    }, 'movementPathPreview.ghost', Severity.COSMETIC);
+
+    preview.group.visible = true;
+    preview.active = true;
+
+    const labelEl = preview.labelEl;
+    if (labelEl) {
+      const units = canvas?.grid?.units || canvas?.scene?.grid?.units || '';
+      const dist = Number.isFinite(totalDistance) ? totalDistance : 0;
+      const pxPerGrid = Number(canvas?.dimensions?.size || 100);
+      const unitsPerGrid = Number(canvas?.dimensions?.distance || 1);
+      const distanceInUnits = (dist / Math.max(1, pxPerGrid)) * unitsPerGrid;
+      const distLabel = Number.isFinite(distanceInUnits) ? distanceInUnits.toFixed(1) : '0.0';
+      labelEl.textContent = units ? `${distLabel} ${units}` : distLabel;
+
+      const last = points[points.length - 1];
+      const screen = this._worldToClient(last);
+      if (screen) {
+        labelEl.style.left = `${screen.x + 10}px`;
+        labelEl.style.top = `${screen.y - 24}px`;
+        labelEl.style.display = 'block';
+      } else {
+        labelEl.style.display = 'none';
+      }
+    }
+  }
+
+  _worldToClient(worldVec3) {
+    const camera = this.sceneComposer?.camera;
+    if (!camera || !worldVec3) return null;
+    const projected = worldVec3.clone().project(camera);
+    if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y)) return null;
+
+    const rect = this._getCanvasRectCached();
+    return {
+      x: ((projected.x + 1) * 0.5 * rect.width) + rect.left,
+      y: ((-projected.y + 1) * 0.5 * rect.height) + rect.top
+    };
+  }
+
+  _getTokenPixelSize(tokenDoc) {
+    const grid = canvas?.grid;
+    const gridSizeX = Math.max(1, Number(grid?.sizeX || grid?.size || canvas?.dimensions?.size || 100));
+    const gridSizeY = Math.max(1, Number(grid?.sizeY || grid?.size || canvas?.dimensions?.size || 100));
+    const wUnits = Math.max(1, Number(tokenDoc?.width || 1));
+    const hUnits = Math.max(1, Number(tokenDoc?.height || 1));
+    return { w: wUnits * gridSizeX, h: hUnits * gridSizeY };
+  }
+
+  _tokenCenterToTopLeftFoundry(centerPoint, tokenDoc) {
+    const size = this._getTokenPixelSize(tokenDoc);
+    return {
+      x: Number(centerPoint?.x || 0) - (size.w * 0.5),
+      y: Number(centerPoint?.y || 0) - (size.h * 0.5)
+    };
+  }
+
+  _snapTokenTopLeftToGrid(tokenDoc, topLeft) {
+    const x = Number(topLeft?.x || 0);
+    const y = Number(topLeft?.y || 0);
+    const grid = canvas?.grid;
+    const gridTypes = globalThis.CONST?.GRID_TYPES || {};
+    const isGridless = !!(grid && grid.type === gridTypes.GRIDLESS);
+    if (!grid || isGridless || typeof grid.getSnappedPoint !== 'function') {
+      return { x, y };
+    }
+
+    const center = {
+      x: x + (this._getTokenPixelSize(tokenDoc).w * 0.5),
+      y: y + (this._getTokenPixelSize(tokenDoc).h * 0.5)
+    };
+
+    try {
+      const mode = globalThis.CONST?.GRID_SNAPPING_MODES?.CENTER;
+      const snappedCenter = (mode !== undefined)
+        ? grid.getSnappedPoint(center, { mode })
+        : grid.getSnappedPoint(center);
+      return this._tokenCenterToTopLeftFoundry(snappedCenter, tokenDoc);
+    } catch (_) {
+      return { x, y };
+    }
+  }
+
+  _getUnconstrainedMovementEnabled() {
+    return !!(
+      game?.user?.isGM &&
+      game?.settings?.get?.('core', 'unconstrainedMovement')
+    );
+  }
+
+  _getPrimarySelectedTokenDoc() {
+    for (const id of this.selection) {
+      const tokenData = this.tokenManager?.tokenSprites?.get?.(id);
+      if (tokenData?.tokenDoc) return tokenData.tokenDoc;
+    }
+
+    const controlled = canvas?.tokens?.controlled;
+    const controlledToken = (Array.isArray(controlled) && controlled.length > 0) ? controlled[0] : null;
+    return controlledToken?.document || null;
+  }
+
+  _buildMovePreviewKey(tokenId, destinationTopLeft) {
+    return `${String(tokenId || '')}:${Math.round(Number(destinationTopLeft?.x || 0))}:${Math.round(Number(destinationTopLeft?.y || 0))}`;
+  }
+
+  _applyMovementPreviewResult(previewResult, key, tokenDoc = null) {
+    if (!previewResult?.ok || !Array.isArray(previewResult.pathNodes) || previewResult.pathNodes.length < 2) {
+      this._clearMovementPathPreview();
+      return;
+    }
+    this.movementPathPreview.currentKey = key;
+    this._renderMovementPathPreview(previewResult.pathNodes, previewResult.distance || 0, tokenDoc);
+  }
+
+  _updateTokenDragPathPreview() {
+    const leaderId = this.dragState?.leaderId;
+    if (!leaderId) {
+      this._clearMovementPathPreview();
+      return;
+    }
+
+    const tokenData = this.tokenManager?.tokenSprites?.get?.(leaderId);
+    const tokenDoc = tokenData?.tokenDoc;
+    const leaderPreview = this.dragState?.previews?.get?.(leaderId);
+    if (!tokenDoc || !leaderPreview) {
+      this._clearMovementPathPreview();
+      return;
+    }
+
+    const foundryCenter = Coordinates.toFoundry(leaderPreview.position.x, leaderPreview.position.y);
+    const rawTopLeft = this._tokenCenterToTopLeftFoundry(foundryCenter, tokenDoc);
+    const destinationTopLeft = this._snapTokenTopLeftToGrid(tokenDoc, rawTopLeft);
+    const key = this._buildMovePreviewKey(tokenDoc.id, destinationTopLeft);
+
+    if (this.movementPathPreview.currentKey === key && this.movementPathPreview.active) return;
+
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    const shouldDefer = (now - this.movementPathPreview.lastUpdateMs) < this.movementPathPreview.updateIntervalMs;
+    if (this.movementPathPreview.inFlight || shouldDefer) {
+      this.movementPathPreview.pending = { tokenDoc, destinationTopLeft, key };
+      return;
+    }
+
+    this.movementPathPreview.inFlight = true;
+    this.movementPathPreview.lastUpdateMs = now;
+
+    const movementManager = window.MapShine?.tokenMovementManager;
+    const previewResult = movementManager?.computeTokenPathPreview?.({
+      tokenDoc,
+      destinationTopLeft,
+      options: {
+        ignoreWalls: this._getUnconstrainedMovementEnabled(),
+        ignoreCost: this._getUnconstrainedMovementEnabled()
+      }
+    });
+
+    this._applyMovementPreviewResult(previewResult, key, tokenDoc);
+
+    this.movementPathPreview.inFlight = false;
+    const pending = this.movementPathPreview.pending;
+    this.movementPathPreview.pending = null;
+    if (pending) {
+      this.movementPathPreview.currentKey = '';
+      this._updateTokenDragPathPreview();
+    }
+  }
+
+  async _executeTokenMoveToTopLeft(tokenDoc, destinationTopLeft, { method = 'dragging' } = {}) {
+    if (!tokenDoc || !destinationTopLeft) return { ok: false, reason: 'invalid-move-request' };
+
+    const unconstrainedMovement = this._getUnconstrainedMovementEnabled();
+    const movementManager = window.MapShine?.tokenMovementManager;
+    if (movementManager && typeof movementManager.executeDoorAwareTokenMove === 'function') {
+      return movementManager.executeDoorAwareTokenMove({
+        tokenDoc,
+        destinationTopLeft,
+        options: {
+          method,
+          ignoreWalls: unconstrainedMovement,
+          ignoreCost: unconstrainedMovement,
+          includeMovementPayload: unconstrainedMovement,
+          suppressFoundryMovementUI: !unconstrainedMovement,
+          updateOptions: {}
+        }
+      });
+    }
+
+    await canvas?.scene?.updateEmbeddedDocuments?.('Token', [{ _id: tokenDoc.id, x: destinationTopLeft.x, y: destinationTopLeft.y }]);
+    return { ok: true };
+  }
+
+  async _handleRightClickMovePreview(tokenDoc, worldPos) {
+    const movementManager = window.MapShine?.tokenMovementManager;
+    if (!tokenDoc || !movementManager?.computeTokenPathPreview) return;
+
+    const foundryCenter = Coordinates.toFoundry(worldPos.x, worldPos.y);
+    const rawTopLeft = this._tokenCenterToTopLeftFoundry(foundryCenter, tokenDoc);
+    const destinationTopLeft = this._snapTokenTopLeftToGrid(tokenDoc, rawTopLeft);
+    const tileKey = this._buildMovePreviewKey(tokenDoc.id, destinationTopLeft);
+
+    const immediateMove = !!game?.settings?.get?.('map-shine-advanced', 'rightClickMoveImmediate');
+    const isConfirmClick = this.rightClickMovePreview.active
+      && this.rightClickMovePreview.tokenId === tokenDoc.id
+      && this.rightClickMovePreview.tileKey === tileKey;
+
+    const previewResult = movementManager.computeTokenPathPreview({
+      tokenDoc,
+      destinationTopLeft,
+      options: {
+        ignoreWalls: this._getUnconstrainedMovementEnabled(),
+        ignoreCost: this._getUnconstrainedMovementEnabled()
+      }
+    });
+
+    this._applyMovementPreviewResult(previewResult, tileKey, tokenDoc);
+    if (!previewResult?.ok) {
+      this.rightClickMovePreview.active = false;
+      this.rightClickMovePreview.tokenId = null;
+      this.rightClickMovePreview.tileKey = '';
+      this.rightClickMovePreview.destinationTopLeft = null;
+      return;
+    }
+
+    this.rightClickMovePreview.active = true;
+    this.rightClickMovePreview.tokenId = tokenDoc.id;
+    this.rightClickMovePreview.tileKey = tileKey;
+    this.rightClickMovePreview.destinationTopLeft = destinationTopLeft;
+
+    if (immediateMove || isConfirmClick) {
+      // Preview visuals are for planning only; hide before the token starts stepping.
+      this._clearMovementPathPreview();
+
+      const moveResult = await this._executeTokenMoveToTopLeft(tokenDoc, destinationTopLeft, { method: 'path-walk' });
+      if (!moveResult?.ok) {
+        log.warn(`Right-click move blocked for ${tokenDoc.id}: ${moveResult?.reason || 'move-failed'}`);
+      }
+      this.rightClickMovePreview.active = false;
+      this.rightClickMovePreview.tokenId = null;
+      this.rightClickMovePreview.tileKey = '';
+      this.rightClickMovePreview.destinationTopLeft = null;
+    }
   }
 
   createUIHoverLabelOverlay() { this.lightHandler.createUIHoverLabelOverlay(); }
@@ -1169,18 +1623,11 @@ export class InteractionManager {
         this.dragState.initialPositions.set(pid, preview.position.clone());
       }
 
-      this.dragMeasure.active = false;
-      if (this.dragMeasure.el) this.dragMeasure.el.style.display = 'none';
-
-      if (targetObject.userData.tokenDoc && this.dragMeasure.el) {
-        const startWorld = leaderPreview.position;
-        const startF = Coordinates.toFoundry(startWorld.x, startWorld.y);
-        this.dragMeasure.startFoundry.x = startF.x;
-        this.dragMeasure.startFoundry.y = startF.y;
-        this.dragMeasure.active = true;
-        this.dragMeasure.el.style.display = 'block';
-        this.dragMeasure.el.textContent = '';
-      }
+      this._clearMovementPathPreview();
+      this.rightClickMovePreview.active = false;
+      this.rightClickMovePreview.tokenId = null;
+      this.rightClickMovePreview.tileKey = '';
+      this.rightClickMovePreview.destinationTopLeft = null;
       
       if (window.MapShine?.cameraController) {
         window.MapShine.cameraController.enabled = false;
@@ -1534,6 +1981,7 @@ export class InteractionManager {
         const tokenSprites = this.tokenManager.getAllTokenSprites();
         log.debug('onPointerDown tokenSprites count', { count: tokenSprites.length });
         const wallGroup = this.wallManager.wallGroup;
+        const groundZ = this.sceneComposer?.groundZ ?? 0;
 
         // Handle Right Click (Potential HUD or Door Lock/Unlock)
         if (event.button === 2) {
@@ -1610,13 +2058,26 @@ export class InteractionManager {
                 // and the HUD won't open (standard Foundry behavior).
                 return;
             } else {
+                const selectedTokenDoc = this._getPrimarySelectedTokenDoc();
+                const worldPos = selectedTokenDoc ? this.viewportToWorld(event.clientX, event.clientY, groundZ) : null;
+
+                if (selectedTokenDoc && worldPos) {
+                    safeCall(async () => {
+                      await this._handleRightClickMovePreview(selectedTokenDoc, worldPos);
+                    }, 'pointerDown.rightClickMovePreview', Severity.DEGRADED);
+
+                    event.preventDefault();
+                    event.stopPropagation();
+                    event.stopImmediatePropagation?.();
+                    return;
+                }
+
                 log.debug('Right click down: No token hit');
             }
             return;
         }
         
         const activeLayer = canvas.activeLayer?.name;
-        const groundZ = this.sceneComposer?.groundZ ?? 0;
         const isTokensLayer = activeLayer === 'TokensLayer';
         const isWallLayer = activeLayer && activeLayer.includes('WallsLayer');
 
@@ -3019,9 +3480,8 @@ export class InteractionManager {
           const isLightDrag = isFoundryLightDrag || isEnhancedLightDrag;
           
           // Snap to grid logic if Shift is NOT held and this is NOT a light drag.
-          // For tokens, avoid per-move snapping: it can make the drag feel "stuck"
-          // (especially near collision boundaries). We snap on commit instead.
-          if (!event.shiftKey && !isLightDrag && !isTokenDrag) {
+          // Token drags should preview on-grid so users see the final landing cell.
+          if (!event.shiftKey && !isLightDrag) {
             const foundryPos = Coordinates.toFoundry(x, y);
             const snapped = this.snapToGrid(foundryPos.x, foundryPos.y);
             const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
@@ -3182,22 +3642,10 @@ export class InteractionManager {
             }
           }, 'lightDrag.enhancedRadiusRefresh', Severity.COSMETIC);
 
-          if (this.dragMeasure.active && this.dragMeasure.el && canvas?.grid?.measurePath) {
-            const leaderPreview = this.dragState.previews.get(this.dragState.leaderId);
-            if (leaderPreview) {
-              const curF = Coordinates.toFoundry(leaderPreview.position.x, leaderPreview.position.y);
-              const measurement = canvas.grid.measurePath([
-                { x: this.dragMeasure.startFoundry.x, y: this.dragMeasure.startFoundry.y },
-                { x: curF.x, y: curF.y }
-              ]);
-
-              const units = canvas.grid.units || canvas.scene?.grid?.units || '';
-              const dist = (measurement?.distance ?? 0);
-              const distLabel = dist.toNearest ? dist.toNearest(0.01).toLocaleString(game.i18n.lang) : String(dist);
-              this.dragMeasure.el.textContent = units ? `${distLabel} ${units}` : `${distLabel}`;
-              this.dragMeasure.el.style.left = `${event.clientX + 16}px`;
-              this.dragMeasure.el.style.top = `${event.clientY + 16}px`;
-            }
+          if (isTokenDrag) {
+            this._updateTokenDragPathPreview();
+          } else {
+            this._clearMovementPathPreview();
           }
           
           // NOTE: Vision updates during drag are now handled natively by Foundry.
@@ -3596,10 +4044,7 @@ export class InteractionManager {
 
         if (!this.dragState.active) return;
 
-        if (this.dragMeasure.el) {
-          this.dragMeasure.el.style.display = 'none';
-        }
-        this.dragMeasure.active = false;
+        this._clearMovementPathPreview();
 
         // Re-enable camera controls
         if (window.MapShine?.cameraController) {
@@ -3713,60 +4158,109 @@ export class InteractionManager {
           if (tokenUpdates.length > 0) {
             log.info(`Updating ${tokenUpdates.length} tokens`);
             anyUpdates = true;
-            await safeCall(async () => {
-              // Foundry: "Unrestrained Movement" UI toggle is implemented as the client setting
-              // `core.unconstrainedMovement`. When active (and the user is a GM), Foundry's
-              // native drag workflow passes constrainOptions {ignoreWalls:true, ignoreCost:true}.
-              //
-              // Our Three.js drag workflow updates token docs directly, so we must forward the
-              // equivalent movement options or Foundry will still constrain the movement.
-              const unconstrainedMovement = !!(
-                game?.user?.isGM &&
-                game?.settings?.get?.('core', 'unconstrainedMovement')
-              );
+            // Foundry: "Unrestrained Movement" UI toggle is implemented as the client setting
+            // `core.unconstrainedMovement`. When active (and the user is a GM), Foundry's
+            // native drag workflow passes constrainOptions {ignoreWalls:true, ignoreCost:true}.
+            const unconstrainedMovement = !!(
+              game?.user?.isGM &&
+              game?.settings?.get?.('core', 'unconstrainedMovement')
+            );
 
-              const updateOptions = {};
-              if (unconstrainedMovement) {
-                /** @type {Record<string, any>} */
-                const movement = {};
+            const movementManager = window.MapShine?.tokenMovementManager;
+            const canRunDoorSequencer = !!(
+              movementManager &&
+              typeof movementManager.executeDoorAwareTokenMove === 'function'
+            );
 
-                for (const upd of tokenUpdates) {
-                  const id = String(upd?._id ?? '');
-                  if (!id) continue;
+            /** @type {Array<{_id:string,x:number,y:number}>} */
+            const fallbackTokenUpdates = [];
 
-                  // Movement waypoints use top-left x/y (same coordinate space as TokenDocument.x/y).
-                  // Include some extra fields where available to match Foundry's internal waypoint shape.
-                  const tokenData = this.tokenManager?.tokenSprites?.get?.(id);
-                  const tokenDoc = tokenData?.tokenDoc;
+            if (canRunDoorSequencer) {
+              for (const upd of tokenUpdates) {
+                const id = String(upd?._id ?? '');
+                if (!id) continue;
 
-                  const waypoint = {
-                    x: upd.x,
-                    y: upd.y,
-                    explicit: true,
-                    checkpoint: true
-                  };
-
-                  if (tokenDoc) {
-                    if (typeof tokenDoc.elevation === 'number') waypoint.elevation = tokenDoc.elevation;
-                    if (typeof tokenDoc.width === 'number') waypoint.width = tokenDoc.width;
-                    if (typeof tokenDoc.height === 'number') waypoint.height = tokenDoc.height;
-                    if (tokenDoc.shape != null) waypoint.shape = tokenDoc.shape;
-                    if (typeof tokenDoc.movementAction === 'string') waypoint.action = tokenDoc.movementAction;
-                  }
-
-                  movement[id] = {
-                    waypoints: [waypoint],
-                    method: 'dragging',
-                    constrainOptions: { ignoreWalls: true, ignoreCost: true }
-                  };
+                const tokenData = this.tokenManager?.tokenSprites?.get?.(id);
+                const tokenDoc = tokenData?.tokenDoc;
+                if (!tokenDoc) {
+                  fallbackTokenUpdates.push(upd);
+                  continue;
                 }
 
-                updateOptions.movement = movement;
-              }
+                const sequencerResult = await safeCall(async () => {
+                  return movementManager.executeDoorAwareTokenMove({
+                    tokenDoc,
+                    destinationTopLeft: { x: upd.x, y: upd.y },
+                    options: {
+                      method: 'path-walk',
+                      ignoreWalls: unconstrainedMovement,
+                      ignoreCost: unconstrainedMovement,
+                      includeMovementPayload: unconstrainedMovement,
+                      suppressFoundryMovementUI: true,
+                      updateOptions: {}
+                    }
+                  });
+                }, `pointerUp.executeDoorAwareTokenMove.${id}`, Severity.DEGRADED, {
+                  fallback: { ok: false, reason: 'door-aware-sequencer-error' }
+                });
 
-              await canvas.scene.updateEmbeddedDocuments('Token', tokenUpdates, updateOptions);
-              tokenUpdateSucceeded = true;
-            }, 'pointerUp.updateTokenPositions', Severity.DEGRADED);
+                if (sequencerResult?.ok) {
+                  tokenUpdateSucceeded = true;
+                } else if (unconstrainedMovement) {
+                  fallbackTokenUpdates.push(upd);
+                } else {
+                  log.warn(`Blocked constrained token move for ${id}: ${sequencerResult?.reason || 'no-valid-path'}`);
+                }
+              }
+            } else {
+              fallbackTokenUpdates.push(...tokenUpdates);
+            }
+
+            if (fallbackTokenUpdates.length > 0) {
+              await safeCall(async () => {
+                const updateOptions = {};
+                if (unconstrainedMovement) {
+                  /** @type {Record<string, any>} */
+                  const movement = {};
+
+                  for (const upd of fallbackTokenUpdates) {
+                    const id = String(upd?._id ?? '');
+                    if (!id) continue;
+
+                    // Movement waypoints use top-left x/y (same coordinate space as TokenDocument.x/y).
+                    // Include some extra fields where available to match Foundry's internal waypoint shape.
+                    const tokenData = this.tokenManager?.tokenSprites?.get?.(id);
+                    const tokenDoc = tokenData?.tokenDoc;
+
+                    const waypoint = {
+                      x: upd.x,
+                      y: upd.y,
+                      explicit: true,
+                      checkpoint: true
+                    };
+
+                    if (tokenDoc) {
+                      if (typeof tokenDoc.elevation === 'number') waypoint.elevation = tokenDoc.elevation;
+                      if (typeof tokenDoc.width === 'number') waypoint.width = tokenDoc.width;
+                      if (typeof tokenDoc.height === 'number') waypoint.height = tokenDoc.height;
+                      if (tokenDoc.shape != null) waypoint.shape = tokenDoc.shape;
+                      if (typeof tokenDoc.movementAction === 'string') waypoint.action = tokenDoc.movementAction;
+                    }
+
+                    movement[id] = {
+                      waypoints: [waypoint],
+                      method: 'path-walk',
+                      constrainOptions: { ignoreWalls: true, ignoreCost: true }
+                    };
+                  }
+
+                  updateOptions.movement = movement;
+                }
+
+                await canvas.scene.updateEmbeddedDocuments('Token', fallbackTokenUpdates, updateOptions);
+                tokenUpdateSucceeded = true;
+              }, 'pointerUp.updateTokenPositionsFallback', Severity.DEGRADED);
+            }
           }
 
           if (lightUpdates.length > 0) {
@@ -3839,6 +4333,7 @@ export class InteractionManager {
           this.dragState.object = null;
           this.dragState.mode = null;
           this.dragState.axis = null;
+          this._clearMovementPathPreview();
           this._clearAllDragPreviews();
         }, 'pointerUp.emergencyCleanup', Severity.COSMETIC);
     }
@@ -4508,6 +5003,11 @@ export class InteractionManager {
       }
     }
     this.selection.clear();
+    this._clearMovementPathPreview();
+    this.rightClickMovePreview.active = false;
+    this.rightClickMovePreview.tokenId = null;
+    this.rightClickMovePreview.tileKey = '';
+    this.rightClickMovePreview.destinationTopLeft = null;
 
     this._hideSelectedLightOutline();
     
@@ -4588,6 +5088,30 @@ export class InteractionManager {
         line.material?.dispose?.();
       }
     }, 'dispose.lightOutline', Severity.COSMETIC);
+
+    safeCall(() => {
+      const group = this.movementPathPreview?.group;
+      if (group?.parent) group.parent.remove(group);
+      const lineOuter = this.movementPathPreview?.lineOuter;
+      lineOuter?.geometry?.dispose?.();
+      lineOuter?.material?.dispose?.();
+      const lineInner = this.movementPathPreview?.lineInner;
+      lineInner?.geometry?.dispose?.();
+      lineInner?.material?.dispose?.();
+      const tileGroup = this.movementPathPreview?.tileGroup;
+      if (tileGroup?.children) {
+        for (let i = tileGroup.children.length - 1; i >= 0; i--) {
+          const mesh = tileGroup.children[i];
+          tileGroup.remove(mesh);
+          mesh.geometry?.dispose?.();
+          mesh.material?.dispose?.();
+        }
+      }
+      const ghost = this.movementPathPreview?.ghost;
+      ghost?.material?.dispose?.();
+      const labelEl = this.movementPathPreview?.labelEl;
+      if (labelEl?.parentNode) labelEl.parentNode.removeChild(labelEl);
+    }, 'dispose.movementPathPreview', Severity.COSMETIC);
 
     safeDispose(this.selectionBoxEffect, 'dispose.selectionBoxEffect');
     this.selectionBoxEffect = null;

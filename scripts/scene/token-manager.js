@@ -42,6 +42,9 @@ export class TokenManager {
     /** @type {EffectComposer|null} */
     this.effectComposer = null;
 
+    /** @type {import('./token-movement-manager.js').TokenMovementManager|null} */
+    this.movementManager = null;
+
     // Track active animations
     // Map<tokenId, { 
     //   attributes: Array<{parent, attribute, start, to, diff}>, 
@@ -421,6 +424,28 @@ vec3 ms_applyWindowLight(vec3 color) {
     if (typeof callback === 'function') {
       this._onTokenMovementStartListeners.push(callback);
     }
+  }
+
+  /**
+   * Notify all listeners that a token has started moving.
+   * @param {string} tokenId
+   */
+  emitTokenMovementStart(tokenId) {
+    if (!tokenId) return;
+    for (const cb of this._onTokenMovementStartListeners) {
+      try {
+        cb(tokenId);
+      } catch (_) {
+      }
+    }
+  }
+
+  /**
+   * Set the TokenMovementManager instance used for authoritative movement styles.
+   * @param {import('./token-movement-manager.js').TokenMovementManager|null} manager
+   */
+  setMovementManager(manager) {
+    this.movementManager = manager || null;
   }
 
   /**
@@ -845,7 +870,23 @@ vec3 ms_applyWindowLight(vec3 color) {
       // Check if we should animate (default true unless specified false)
       // Also, if only elevation/size changed, we might snap? Foundry animates size/elevation too usually.
       const animate = options.animate !== false;
-      this.updateSpriteTransform(sprite, targetDoc, animate);
+
+      // Delegate movement-style handling to TokenMovementManager when available.
+      // If no custom style is active (or manager declines), fall back to legacy
+      // TokenManager transform animation.
+      const handledByMovementManager = !!this.movementManager?.handleTokenSpriteUpdate?.({
+        sprite,
+        tokenDoc,
+        targetDoc,
+        changes,
+        options,
+        animate,
+        fallback: () => this.updateSpriteTransform(sprite, targetDoc, animate)
+      });
+
+      if (!handledByMovementManager) {
+        this.updateSpriteTransform(sprite, targetDoc, animate);
+      }
     }
 
     // Update texture if changed
@@ -1032,9 +1073,7 @@ vec3 ms_applyWindowLight(vec3 color) {
       }
 
       if (attributes.length > 0) {
-        for (const cb of this._onTokenMovementStartListeners) {
-          try { cb(tokenDoc.id); } catch (_) {}
-        }
+        this.emitTokenMovementStart(tokenDoc.id);
         // Calculate duration based on distance
         const dist = Math.hypot(sprite.position.x - centerX, sprite.position.y - centerY);
         
@@ -1068,9 +1107,7 @@ vec3 ms_applyWindowLight(vec3 color) {
       Math.abs(sprite.position.y - centerY) > 0.1 ||
       Math.abs(sprite.position.z - zPosition) > 0.1
     ) {
-      for (const cb of this._onTokenMovementStartListeners) {
-        try { cb(tokenDoc.id); } catch (_) {}
-      }
+      this.emitTokenMovementStart(tokenDoc.id);
     }
     sprite.position.set(centerX, centerY, zPosition);
     if (sprite.material) {

@@ -165,6 +165,28 @@ Hooks.once('init', async function() {
             controlPanel.toggle();
           }
         });
+
+        ensureTool(tokenControls, {
+          name: 'map-shine-camera',
+          title: 'Map Shine Advanced Camera',
+          icon: 'fas fa-video',
+          button: true,
+          order: 102,
+          visible: true,
+          toolclip: {
+            src: '',
+            heading: 'MAPSHINE.ToolTitle',
+            items: [{ paragraph: 'MAPSHINE.ToolDescription' }]
+          },
+          onChange: () => {
+            const cameraPanel = window.MapShine?.cameraPanel;
+            if (!cameraPanel) {
+              ui.notifications?.warn?.('Map Shine Camera Panel is not available yet. The scene may still be initializing.');
+              return;
+            }
+            cameraPanel.toggle();
+          }
+        });
       }
 
       const playerToolsVisible = isGM || allowPlayers;
@@ -174,7 +196,7 @@ Hooks.once('init', async function() {
         title: 'Map Shine Graphics Settings',
         icon: 'fas fa-desktop',
         button: true,
-        order: 102,
+        order: 105,
         visible: playerToolsVisible,
         toolclip: {
           src: '',

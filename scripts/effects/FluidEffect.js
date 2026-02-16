@@ -649,6 +649,16 @@ export class FluidEffect extends EffectBase {
         u.uScreenSize.value.set(this._screenSize.x, this._screenSize.y);
       }
 
+      // Depth pass texture binding for shader-based tile occlusion.
+      const dpm = window.MapShine?.depthPassManager;
+      const depthTex = (dpm && dpm.isEnabled()) ? dpm.getDepthTexture() : null;
+      if (u.uDepthEnabled) u.uDepthEnabled.value = depthTex ? 1.0 : 0.0;
+      if (u.uDepthTexture) u.uDepthTexture.value = depthTex;
+      if (depthTex && dpm) {
+        if (u.uDepthCameraNear) u.uDepthCameraNear.value = dpm.getDepthNear();
+        if (u.uDepthCameraFar) u.uDepthCameraFar.value = dpm.getDepthFar();
+      }
+
       // Mirror the owning tile sprite's material opacity so the fluid fades
       // in lockstep with overhead tile hover-hide / occlusion animations.
       if (u.uTileOpacity) {
@@ -821,14 +831,24 @@ export class FluidEffect extends EffectBase {
 
         // Per-tile opacity: mirrors the owning sprite's material.opacity so
         // the fluid fades in sync with overhead tile hover-hide / occlusion.
-        uTileOpacity: { value: 1.0 }
+        uTileOpacity: { value: 1.0 },
+
+        // Depth pass integration: occludes fluid where a closer surface exists.
+        // Uses the tight depth camera (groundDist±200) for ~40 ULPs/sort step.
+        uDepthTexture: { value: null },
+        uDepthEnabled: { value: 0.0 },
+        uDepthCameraNear: { value: 800.0 },
+        uDepthCameraFar: { value: 1200.0 }
       },
       vertexShader: `
 varying vec2 vUv;
+varying float vLinearDepth;
 
 void main() {
   vUv = uv;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+  vLinearDepth = -mvPos.z; // Eye-space distance (positive, full float32 precision)
+  gl_Position = projectionMatrix * mvPos;
 }
       `.trim(),
       fragmentShader: `
@@ -918,7 +938,22 @@ uniform float uPoolSoftness;
 
 uniform float uTileOpacity;
 
+// Depth pass integration
+uniform sampler2D uDepthTexture;
+uniform float uDepthEnabled;
+uniform float uDepthCameraNear;
+uniform float uDepthCameraFar;
+
 varying vec2 vUv;
+varying float vLinearDepth;
+
+// Linearize perspective device depth [0,1] → eye-space distance.
+// Uses the tight depth camera's near/far (NOT main camera).
+float msa_linearizeDepth(float d) {
+  float z_ndc = d * 2.0 - 1.0;
+  return (2.0 * uDepthCameraNear * uDepthCameraFar) /
+         (uDepthCameraFar + uDepthCameraNear - z_ndc * (uDepthCameraFar - uDepthCameraNear));
+}
 
 // --- Noise utilities ---
 
@@ -1377,6 +1412,18 @@ void main() {
     // Apply: push colour above 1.0 (HDR). The bloom pass will pick up
     // anything above the bloom threshold and create the glow halo.
     col += col * boostAmount;
+  }
+
+  // ---- Depth pass occlusion ----
+  // Discard fluid where a closer surface exists in the depth texture.
+  // Tolerance 0.0005: passes same-tile, rejects adjacent sort keys.
+  if (uDepthEnabled > 0.5) {
+    vec2 depthUv = gl_FragCoord.xy / max(vec2(1.0), uScreenSize);
+    float storedDepth = texture2D(uDepthTexture, depthUv).r;
+    if (storedDepth < 0.9999) {
+      float storedLinear = msa_linearizeDepth(storedDepth);
+      if (storedLinear < vLinearDepth - 0.0005) discard;
+    }
   }
 
   // ---- Roof alpha occlusion (screen-space) ----

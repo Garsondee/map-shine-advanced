@@ -488,7 +488,15 @@ export class OverheadShadowsEffect extends EffectBase {
         uTileProjectionIndoorOpacityScale: { value: 1.0 },
         uTileProjectionSortBias: { value: 0.002 },
         // Scene dimensions in world pixels for world-space mask UV conversion
-        uSceneDimensions: { value: new THREE.Vector2(1, 1) }
+        uSceneDimensions: { value: new THREE.Vector2(1, 1) },
+        // Depth pass integration: height-based shadow modulation.
+        // Casters must be above receivers to cast shadows — prevents
+        // self-shadowing and upward-shadowing using per-pixel depth.
+        uDepthTexture: { value: null },
+        uDepthEnabled: { value: 0.0 },
+        uDepthCameraNear: { value: 800.0 },
+        uDepthCameraFar: { value: 1200.0 },
+        uGroundDistance: { value: 1000.0 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -546,7 +554,22 @@ export class OverheadShadowsEffect extends EffectBase {
         // Scene dimensions in world pixels for mask UV conversion
         uniform vec2 uSceneDimensions;
 
+        // Depth pass integration
+        uniform sampler2D uDepthTexture;
+        uniform float uDepthEnabled;
+        uniform float uDepthCameraNear;
+        uniform float uDepthCameraFar;
+        uniform float uGroundDistance;
+
         varying vec2 vUv;
+
+        // Linearize perspective device depth [0,1] → eye-space distance.
+        // Uses the tight depth camera's near/far (NOT main camera).
+        float msa_linearizeDepth(float d) {
+          float z_ndc = d * 2.0 - 1.0;
+          return (2.0 * uDepthCameraNear * uDepthCameraFar) /
+                 (uDepthCameraFar + uDepthCameraNear - z_ndc * (uDepthCameraFar - uDepthCameraNear));
+        }
 
         // ClampToEdge + linear filtering can smear border texels when sampling
         // exactly on the 0/1 boundary. Require taps to stay at least half a
@@ -629,6 +652,45 @@ export class OverheadShadowsEffect extends EffectBase {
           float projectedOffsetScale = offsetTravelScale(tileProjectionUv, projectedOffsetDeltaUv);
           float projectedEdgeFade = smoothstep(0.0, 1.0, projectedOffsetScale);
           vec2 projectedOffsetUv = tileProjectionUv + projectedOffsetDeltaUv;
+
+          // ---- Depth pass: height-based shadow modulation ----
+          // Sample the depth texture at receiver and caster positions to
+          // determine height above ground. Shadow only applies when the caster
+          // is above the receiver (heightDiff > 0). This naturally prevents:
+          //   - Self-shadowing (same height → diff=0 → no shadow)
+          //   - Upward-shadowing (lower caster → diff<0 → no shadow)
+          //   - Ground gets full shadow from anything above it
+          // Tile Z layout: ground=0, BG=1, FG=2, TOKEN=3, OVERHEAD=4
+          float depthMod = 1.0;
+          float depthTileProjectionMod = 1.0;
+          if (uDepthEnabled > 0.5) {
+            float receiverDevice = texture2D(uDepthTexture, screenUv).r;
+            if (receiverDevice < 0.9999) {
+              float receiverLinear = msa_linearizeDepth(receiverDevice);
+              float receiverHeight = uGroundDistance - receiverLinear;
+
+              // Roof/indoor shadow caster height (center offset in screen space)
+              vec2 depthCasterUv = screenUv + screenDir * pixelLen * uTexelSize;
+              float casterDevice = texture2D(uDepthTexture, depthCasterUv).r;
+              if (casterDevice < 0.9999) {
+                float casterLinear = msa_linearizeDepth(casterDevice);
+                float casterHeight = uGroundDistance - casterLinear;
+                // Full shadow when caster is ≥1.0u above receiver, none when ≤0
+                depthMod = smoothstep(0.0, 1.0, casterHeight - receiverHeight);
+              }
+
+              // Tile projection caster height (uses different projection length)
+              if (tileProjectionEnabled) {
+                vec2 tileCasterUv = screenUv + screenDir * projectedPixelLen * uTexelSize;
+                float tileCasterDevice = texture2D(uDepthTexture, tileCasterUv).r;
+                if (tileCasterDevice < 0.9999) {
+                  float tileCasterLinear = msa_linearizeDepth(tileCasterDevice);
+                  float tileCasterHeight = uGroundDistance - tileCasterLinear;
+                  depthTileProjectionMod = smoothstep(0.0, 1.0, tileCasterHeight - receiverHeight);
+                }
+              }
+            }
+          }
 
           // Prepare indoor/outdoor mask sampling in world UV (mask space).
           // We use this for two jobs:
@@ -715,6 +777,8 @@ export class OverheadShadowsEffect extends EffectBase {
           }
 
           float combinedStrength = (weightSum > 0.0) ? (accum / weightSum) : 0.0;
+          // Depth-based height gate: suppress shadow when caster is not above receiver
+          combinedStrength *= depthMod;
 
           float tileProjectedStrength = 0.0;
           if (tileProjectionEnabled) {
@@ -766,6 +830,8 @@ export class OverheadShadowsEffect extends EffectBase {
             }
 
             tileProjectedStrength = (projectedWeightSum > 0.0) ? (projectedAccum / projectedWeightSum) : 0.0;
+            // Depth-based height gate: suppress tile shadow when caster is not above receiver
+            tileProjectedStrength *= depthTileProjectionMod;
           }
 
           // Keep roof/indoor/fluid contribution separate from tile projection.
@@ -1463,6 +1529,23 @@ export class OverheadShadowsEffect extends EffectBase {
       this.material.uniforms.uHasTileReceiverSort.value = hasTileReceiverSort ? 1.0 : 0.0;
       if (this.material.uniforms.uResolution) {
         this.material.uniforms.uResolution.value.set(size.x, size.y);
+      }
+
+      // Bind depth pass for height-based shadow modulation
+      const dpm = window.MapShine?.depthPassManager;
+      const depthTex = (dpm && dpm.isEnabled()) ? dpm.getDepthTexture() : null;
+      if (this.material.uniforms.uDepthEnabled) {
+        this.material.uniforms.uDepthEnabled.value = depthTex ? 1.0 : 0.0;
+      }
+      if (this.material.uniforms.uDepthTexture) {
+        this.material.uniforms.uDepthTexture.value = depthTex;
+      }
+      if (depthTex && dpm) {
+        if (this.material.uniforms.uDepthCameraNear) this.material.uniforms.uDepthCameraNear.value = dpm.getDepthNear();
+        if (this.material.uniforms.uDepthCameraFar) this.material.uniforms.uDepthCameraFar.value = dpm.getDepthFar();
+        if (this.material.uniforms.uGroundDistance) {
+          this.material.uniforms.uGroundDistance.value = window.MapShine?.sceneComposer?.groundDistance ?? 1000.0;
+        }
       }
     }
 

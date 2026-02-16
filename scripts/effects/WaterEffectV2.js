@@ -3,6 +3,7 @@ import { createLogger } from '../core/log.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { WaterSurfaceModel } from './WaterSurfaceModel.js';
 import { DistortionLayer } from './DistortionManager.js';
+import { DepthShaderChunks } from './DepthShaderChunks.js';
 
 const log = createLogger('WaterEffectV2');
 
@@ -1454,7 +1455,10 @@ export class WaterEffectV2 extends EffectBase {
         uHasTokenMask: { value: 0.0 },
 
         // Scene/environment coupling
-        uSceneDarkness: { value: 0.0 }
+        uSceneDarkness: { value: 0.0 },
+
+        // Shared module depth-pass uniforms (uDepthTexture/uDepthEnabled/uDepthCameraNear/uDepthCameraFar/uGroundDistance)
+        ...DepthShaderChunks.createUniforms()
       },
       vertexShader: `
         varying vec2 vUv;
@@ -1665,6 +1669,9 @@ export class WaterEffectV2 extends EffectBase {
         uniform vec3 uSkyColor;
         uniform float uSkyIntensity;
         uniform float uSceneDarkness;
+
+        ${DepthShaderChunks.uniforms}
+        ${DepthShaderChunks.linearize}
 
         varying vec2 vUv;
 
@@ -2566,7 +2573,20 @@ export class WaterEffectV2 extends EffectBase {
           if (uHasWaterOccluderAlpha > 0.5) {
             waterOccluder = texture2D(tWaterOccluderAlpha, vUv).a;
           }
-          float waterVisible = 1.0 - clamp(waterOccluder, 0.0, 1.0);
+          float depthOccluder = 0.0;
+          if (uDepthEnabled > 0.5) {
+            float deviceDepth = msa_sampleDeviceDepth(vUv);
+            if (deviceDepth < 0.9999) {
+              float linearDepth = msa_linearizeDepth(deviceDepth);
+              float aboveGround = uGroundDistance - linearDepth;
+              // Keep normal tile layers (BG/FG at ~+1/+2) eligible for water.
+              // Only treat higher foreground occluders (tokens/overheads, ~+3 and above)
+              // as blockers for this post-pass.
+              depthOccluder = smoothstep(2.75, 3.25, aboveGround);
+            }
+          }
+
+          float waterVisible = (1.0 - clamp(waterOccluder, 0.0, 1.0)) * (1.0 - depthOccluder);
           inside *= waterVisible;
 
           float distInside = distortionInsideFromSdf(sdf01) * waterVisible;
@@ -3047,6 +3067,9 @@ export class WaterEffectV2 extends EffectBase {
 
     const THREE = window.THREE;
     const u = this._material.uniforms;
+
+    // Bind shared module depth-pass uniforms for depth-aware water occlusion.
+    DepthShaderChunks.bindDepthPass(u);
 
     // Global scene darkness coupling (0 = fully lit, 1 = max darkness).
     // Used to prevent surface foam from appearing self-illuminated at night.

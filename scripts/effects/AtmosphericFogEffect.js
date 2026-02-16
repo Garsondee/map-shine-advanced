@@ -256,7 +256,16 @@ export class AtmosphericFogEffect extends EffectBase {
         uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
         // Full canvas dimensions (including padding) in Foundry coords
         uSceneDimensions: { value: new THREE.Vector2(1, 1) },
-        uScreenSize: { value: new THREE.Vector2(1, 1) }
+        uScreenSize: { value: new THREE.Vector2(1, 1) },
+        // Depth pass integration: per-pixel depth modulates fog density.
+        // Elevated objects (tiles at Z+1..4, tokens at Z+3) are closer to the
+        // camera than the ground plane, so they receive less fog.
+        uDepthTexture: { value: null },
+        uDepthEnabled: { value: 0.0 },
+        uDepthCameraNear: { value: 800.0 },
+        uDepthCameraFar: { value: 1200.0 },
+        uGroundDistance: { value: 1000.0 },
+        uDepthFogStrength: { value: 1.0 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -305,7 +314,23 @@ export class AtmosphericFogEffect extends EffectBase {
         uniform vec2 uSceneDimensions;
         uniform vec2 uScreenSize;
 
+        // Depth pass integration
+        uniform sampler2D uDepthTexture;
+        uniform float uDepthEnabled;
+        uniform float uDepthCameraNear;
+        uniform float uDepthCameraFar;
+        uniform float uGroundDistance;
+        uniform float uDepthFogStrength;
+
         varying vec2 vUv;
+
+        // Linearize perspective device depth [0,1] → eye-space distance.
+        // Uses the tight depth camera's near/far (NOT main camera).
+        float msa_linearizeDepth(float d) {
+          float z_ndc = d * 2.0 - 1.0;
+          return (2.0 * uDepthCameraNear * uDepthCameraFar) /
+                 (uDepthCameraFar + uDepthCameraNear - z_ndc * (uDepthCameraFar - uDepthCameraNear));
+        }
 
         // Simple hash for noise
         float hash21(vec2 p) {
@@ -477,7 +502,23 @@ export class AtmosphericFogEffect extends EffectBase {
             fogStrength *= (1.0 - (uCutoutStrength * fade * cut));
           }
 
-          float fogAmount = clamp(fogStrength * uMaxOpacity * outdoorFactor, 0.0, uMaxOpacity);
+          // Depth-based fog modulation: elevated objects get less fog.
+          // Ground plane is at uGroundDistance from camera. Tiles/tokens/roofs
+          // are closer (smaller linear depth). The ratio gives a natural fog
+          // gradient: ground=1.0, BG≈0.999, FG≈0.998, tokens≈0.997, roofs≈0.996.
+          // smoothstep maps this to a visible reduction curve.
+          float depthFogMod = 1.0;
+          if (uDepthEnabled > 0.5) {
+            float deviceDepth = texture2D(uDepthTexture, vUv).r;
+            if (deviceDepth < 0.9999) {
+              float linDepth = msa_linearizeDepth(deviceDepth);
+              float depthRatio = linDepth / max(uGroundDistance, 1.0);
+              // Ramp: ground (ratio≈1.0) → full fog, overhead (ratio≈0.996) → ~55% fog
+              depthFogMod = mix(1.0, smoothstep(0.990, 1.001, depthRatio), uDepthFogStrength);
+            }
+          }
+
+          float fogAmount = clamp(fogStrength * uMaxOpacity * outdoorFactor * depthFogMod, 0.0, uMaxOpacity);
           
           // Blend fog with scene
           vec3 fogCol = mix(uFogColor * 0.85, uFogColor * 1.05, noiseShape);
@@ -795,6 +836,18 @@ export class AtmosphericFogEffect extends EffectBase {
     if (!inputTexture) return;
 
     this.material.uniforms.tDiffuse.value = inputTexture;
+
+    // Bind depth pass texture for per-pixel fog modulation
+    const dpm = window.MapShine?.depthPassManager;
+    const depthTex = (dpm && dpm.isEnabled()) ? dpm.getDepthTexture() : null;
+    const u = this.material.uniforms;
+    u.uDepthEnabled.value = depthTex ? 1.0 : 0.0;
+    u.uDepthTexture.value = depthTex;
+    if (depthTex && dpm) {
+      u.uDepthCameraNear.value = dpm.getDepthNear();
+      u.uDepthCameraFar.value = dpm.getDepthFar();
+      u.uGroundDistance.value = window.MapShine?.sceneComposer?.groundDistance ?? 1000.0;
+    }
 
     if (this.writeBuffer) {
       renderer.setRenderTarget(this.writeBuffer);

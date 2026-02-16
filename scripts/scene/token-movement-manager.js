@@ -183,6 +183,16 @@ export class TokenMovementManager {
      */
     this._groupMoveLock = null;
 
+    /**
+     * Cancel token for the currently executing group move timeline. When a
+     * new movement order arrives, the previous token's `.cancelled` flag is
+     * set to `true`, causing the in-flight timeline to abort at the next
+     * step boundary so the new order can proceed immediately instead of
+     * waiting for the full previous animation to finish.
+     * @type {{cancelled:boolean}|null}
+     */
+    this._activeGroupCancelToken = null;
+
     this._doorStateRevision = 0;
     this._inCombat = false;
     this._pathSearchGeneration = 0;
@@ -587,14 +597,10 @@ export class TokenMovementManager {
     const slots = new Map();
     if (list.length <= 1) return slots;
 
-    const gridSize = Math.max(1, asNumber(canvas?.grid?.size, asNumber(canvas?.dimensions?.size, 100)));
-    const maxRingSize = clamp(Math.round(asNumber(options?.groupFormationRingSize, 8)), 4, 16);
-    const baseRadius = Math.max(
-      gridSize * 0.9,
-      asNumber(options?.groupFormationRadiusPx, gridSize * (list.length <= 5 ? 1.2 : 1.5))
-    );
+    const anchorX = asNumber(anchorCenter?.x, 0);
+    const anchorY = asNumber(anchorCenter?.y, 0);
 
-    // Preserve relative ordering by sorting on current angle around group centroid.
+    // Compute centroid of all starting positions.
     const centroid = list.reduce((acc, entry) => {
       acc.x += asNumber(entry?.startCenter?.x, 0);
       acc.y += asNumber(entry?.startCenter?.y, 0);
@@ -603,34 +609,23 @@ export class TokenMovementManager {
     centroid.x /= Math.max(1, list.length);
     centroid.y /= Math.max(1, list.length);
 
-    const sorted = list.slice().sort((a, b) => {
-      const aa = Math.atan2(asNumber(a?.startCenter?.y, 0) - centroid.y, asNumber(a?.startCenter?.x, 0) - centroid.x);
-      const bb = Math.atan2(asNumber(b?.startCenter?.y, 0) - centroid.y, asNumber(b?.startCenter?.x, 0) - centroid.x);
-      return aa - bb;
-    });
+    // Preserve the original formation: each token's slot is its starting
+    // offset from the group centroid, re-applied around the anchor center.
+    // This keeps the same spatial arrangement (e.g. a 2×3 grid stays 2×3)
+    // instead of rearranging tokens into a circular ring.
+    for (const entry of list) {
+      const startX = asNumber(entry?.startCenter?.x, 0);
+      const startY = asNumber(entry?.startCenter?.y, 0);
+      const offsetX = startX - centroid.x;
+      const offsetY = startY - centroid.y;
+      const angle = Math.atan2(offsetY, offsetX);
 
-    const anchorX = asNumber(anchorCenter?.x, 0);
-    const anchorY = asNumber(anchorCenter?.y, 0);
-    let cursor = 0;
-    let ring = 0;
-    while (cursor < sorted.length) {
-      const remaining = sorted.length - cursor;
-      const ringCount = Math.max(1, Math.min(remaining, maxRingSize + (ring * 4)));
-      const ringRadius = baseRadius + (ring * gridSize * 0.95);
-
-      for (let i = 0; i < ringCount; i++) {
-        const entry = sorted[cursor + i];
-        const angle = ((Math.PI * 2) * i / ringCount) - (Math.PI / 2);
-        slots.set(entry.tokenId, {
-          x: anchorX + (Math.cos(angle) * ringRadius),
-          y: anchorY + (Math.sin(angle) * ringRadius),
-          ring,
-          angle
-        });
-      }
-
-      cursor += ringCount;
-      ring += 1;
+      slots.set(entry.tokenId, {
+        x: anchorX + offsetX,
+        y: anchorY + offsetY,
+        ring: 0,
+        angle
+      });
     }
 
     return slots;
@@ -808,6 +803,10 @@ export class TokenMovementManager {
 
     this._activeMoveLocks.clear();
     this._groupMoveLock = null;
+    if (this._activeGroupCancelToken) {
+      this._activeGroupCancelToken.cancelled = true;
+      this._activeGroupCancelToken = null;
+    }
     this._groupPlanCache.clear();
 
     if (this._pathPrewarmTimer) {
@@ -2590,21 +2589,31 @@ export class TokenMovementManager {
       if (allowHpa) {
         const hpaResult = this._findHpaPath({ start, end, tokenDoc, options, cancelToken });
         if (hpaResult?.ok && Array.isArray(hpaResult.pathNodes) && hpaResult.pathNodes.length >= 2) {
-          this._recordWeightedPathStats(statsCollector, {
-            ok: true,
-            reason: 'hpa-ok',
-            iterations: Math.max(1, hpaResult.pathNodes.length - 1),
-            graphDiagnostics: null
-          });
-          return {
-            ok: true,
-            pathNodes: hpaResult.pathNodes,
-            diagnostics: {
-              iterations: Math.max(1, hpaResult.pathNodes.length - 1),
-              weight: clamp(asNumber(options?.weight, this.settings.weightedAStarWeight), 1, 4),
-              hpa: hpaResult?.diagnostics || null
-            }
-          };
+          const hpaClipped = this._clipPathBacktrackDetours(hpaResult.pathNodes);
+          const hpaSmoothed = this._smoothPathStringPull(hpaClipped, tokenDoc, options);
+          // Safety net: verify no HPA-stitched segment crosses a wall.
+          const hpaValidated = optionsBoolean(options?.ignoreWalls, false)
+            ? hpaSmoothed
+            : this._validatePathWallIntegrity(hpaSmoothed, tokenDoc, options);
+          if (hpaValidated.length >= 2) {
+            const hpaInterpolated = this._interpolatePathForWalking(hpaValidated);
+            this._recordWeightedPathStats(statsCollector, {
+              ok: true,
+              reason: 'hpa-ok',
+              iterations: Math.max(1, hpaInterpolated.length - 1),
+              graphDiagnostics: null
+            });
+            return {
+              ok: true,
+              pathNodes: hpaInterpolated,
+              diagnostics: {
+                iterations: Math.max(1, hpaResult.pathNodes.length - 1),
+                weight: clamp(asNumber(options?.weight, this.settings.weightedAStarWeight), 1, 4),
+                hpa: hpaResult?.diagnostics || null
+              }
+            };
+          }
+          // HPA path crosses a wall — fall through to scene nav graph / dynamic graph.
         }
       }
 
@@ -2770,7 +2779,19 @@ export class TokenMovementManager {
         closedSet.add(currentKey);
 
         if (currentKey === graph.endKey) {
-          const pathNodes = this._reconstructPathNodes(cameFrom, currentKey, graph.nodes);
+          const rawPathNodes = this._reconstructPathNodes(cameFrom, currentKey, graph.nodes);
+          const clippedPath = this._clipPathBacktrackDetours(rawPathNodes);
+          // String-pull: skip unnecessary intermediate waypoints wherever
+          // a direct line-of-sight exists between non-adjacent nodes.
+          const smoothedPath = this._smoothPathStringPull(clippedPath, tokenDoc, options);
+          // Final safety net: verify no segment crosses a wall.
+          const ignoreWalls = optionsBoolean(options?.ignoreWalls, false);
+          const validatedPath = ignoreWalls
+            ? smoothedPath
+            : this._validatePathWallIntegrity(smoothedPath, tokenDoc, options);
+          // Re-densify for smooth walk animation: insert intermediate
+          // waypoints at grid-cell intervals along each segment.
+          const pathNodes = this._interpolatePathForWalking(validatedPath);
           this._recordWeightedPathStats(statsCollector, {
             ok: true,
             reason: 'ok',
@@ -2778,11 +2799,16 @@ export class TokenMovementManager {
             graphDiagnostics: graph.diagnostics
           });
           return {
-            ok: true,
+            ok: pathNodes.length >= 2,
             pathNodes,
             diagnostics: {
               iterations,
               weight,
+              backtrackClipped: rawPathNodes.length !== clippedPath.length,
+              nodesClipped: rawPathNodes.length - clippedPath.length,
+              smoothed: clippedPath.length !== smoothedPath.length,
+              nodesSmoothed: clippedPath.length - smoothedPath.length,
+              wallTruncated: smoothedPath.length !== validatedPath.length,
               graphDiagnostics: graph.diagnostics
             }
           };
@@ -3490,6 +3516,297 @@ export class TokenMovementManager {
     }
     path.reverse();
     return path;
+  }
+
+  /**
+   * Post-process a path to remove unnecessary backtrack detours where the
+   * path enters a dead-end area (e.g. a room) and then exits through the
+   * same doorway. This happens because weighted A* (weight > 1) produces
+   * slightly suboptimal paths — the heuristic pulls the search toward the
+   * goal, causing it to explore dead ends that are geographically closer.
+   *
+   * The algorithm scans for pairs of path nodes (i, j) that are very close
+   * to each other but separated by many intermediate nodes. The segment
+   * between them is a U-turn detour that can be safely clipped.
+   *
+   * Two complementary passes are applied:
+   * 1. **Proximity loop clipping**: Remove segments where the path returns
+   *    to within ~1 grid cell of a previously visited point.
+   * 2. **Progress-stall clipping**: Remove segments where the path stops
+   *    making net progress toward the goal (distance-to-goal at the end of
+   *    the segment ≈ distance-to-goal at the start).
+   *
+   * @param {Array<{x:number,y:number}>} pathNodes
+   * @returns {Array<{x:number,y:number}>}
+   */
+  _clipPathBacktrackDetours(pathNodes) {
+    if (!Array.isArray(pathNodes) || pathNodes.length < 4) return pathNodes;
+
+    const gridSize = Math.max(1, asNumber(canvas?.grid?.size, 100));
+    let path = pathNodes;
+
+    // Helper: verify that a shortcut from path[i] to path[j] doesn't cross
+    // any walls. Without this check, clipping a legitimate detour through a
+    // doorway would create a shortcut straight through a wall.
+    const isShortcutWallFree = (a, b) => {
+      const check = this._validatePathSegmentCollision(a, b, {
+        tokenDoc: null,
+        options: { ignoreWalls: false, collisionMode: 'closest' }
+      });
+      return check?.ok === true;
+    };
+
+    // --- Pass 1: Proximity loop clipping ---
+    // If the path visits two nodes that are within ~1 grid cell of each other
+    // but separated by 3+ intermediate nodes, the segment between them is a
+    // backtrack loop. Clip it by jumping from the earlier node to the later one,
+    // but ONLY if the shortcut doesn't cross a wall.
+    const proximityThreshold = gridSize * 1.0;
+    const proximityThresholdSq = proximityThreshold * proximityThreshold;
+    const maxProximityPasses = 8;
+
+    for (let pass = 0; pass < maxProximityPasses; pass++) {
+      let clipped = false;
+
+      for (let i = 0; i < path.length - 3 && !clipped; i++) {
+        // Search backwards from the end to find the FURTHEST matching node,
+        // removing the largest possible detour first.
+        for (let j = path.length - 1; j >= i + 3; j--) {
+          const dx = asNumber(path[j].x, 0) - asNumber(path[i].x, 0);
+          const dy = asNumber(path[j].y, 0) - asNumber(path[i].y, 0);
+          if (dx * dx + dy * dy <= proximityThresholdSq) {
+            // Verify the shortcut doesn't cross a wall before clipping.
+            if (!isShortcutWallFree(path[i], path[j])) continue;
+            path = [...path.slice(0, i + 1), ...path.slice(j)];
+            clipped = true;
+            break;
+          }
+        }
+      }
+
+      if (!clipped) break;
+    }
+
+    // --- Pass 2: Progress-stall clipping ---
+    // Detect segments where the path stops making net progress toward the
+    // goal. A "stall" is where the path wanders into a dead end and comes
+    // back, ending up at roughly the same distance-to-goal as it started.
+    // We check for contiguous sequences of nodes where d(node, goal) first
+    // increases (moving away) then decreases back to the entry value.
+    if (path.length >= 5) {
+      const goal = path[path.length - 1];
+      const distToGoal = (pt) => Math.hypot(
+        asNumber(pt.x, 0) - asNumber(goal.x, 0),
+        asNumber(pt.y, 0) - asNumber(goal.y, 0)
+      );
+
+      // Minimum detour length to consider clipping (in grid cells of path
+      // distance). Short diversions around small obstacles are acceptable.
+      const minDetourNodes = 4;
+      const progressTolerance = gridSize * 1.5;
+      const maxProgressPasses = 6;
+
+      for (let pass = 0; pass < maxProgressPasses; pass++) {
+        let clipped = false;
+
+        for (let i = 0; i < path.length - minDetourNodes && !clipped; i++) {
+          const baseDist = distToGoal(path[i]);
+
+          // Walk forward looking for the path to diverge (move away from
+          // goal) then return to approximately the same distance-to-goal.
+          let peakDist = baseDist;
+
+          for (let j = i + 1; j < path.length; j++) {
+            const d = distToGoal(path[j]);
+
+            if (d > peakDist) {
+              peakDist = d;
+            }
+
+            // Check if the path has returned to ≈ the same distance-to-goal
+            // (or closer) after having diverged significantly.
+            const divergedEnough = (peakDist - baseDist) > gridSize * 2;
+            const returnedClose = d <= baseDist + progressTolerance;
+            const detourLongEnough = (j - i) >= minDetourNodes;
+
+            if (divergedEnough && returnedClose && detourLongEnough) {
+              const directDist = Math.hypot(
+                asNumber(path[j].x, 0) - asNumber(path[i].x, 0),
+                asNumber(path[j].y, 0) - asNumber(path[i].y, 0)
+              );
+              const detourPathLen = this._measurePathLength(path.slice(i, j + 1));
+
+              // Only clip if the detour path is significantly longer than
+              // the direct connection, the shortcut is short-range, AND the
+              // shortcut doesn't cross any walls.
+              if (detourPathLen > directDist * 2.0
+                && directDist < gridSize * 4
+                && isShortcutWallFree(path[i], path[j])) {
+                path = [...path.slice(0, i + 1), ...path.slice(j)];
+                clipped = true;
+                break;
+              }
+            }
+          }
+        }
+
+        if (!clipped) break;
+      }
+    }
+
+    return path;
+  }
+
+  /**
+   * String-pulling path smoother: greedily skip intermediate waypoints
+   * wherever a direct line-of-sight exists between non-adjacent nodes.
+   *
+   * Grid-based A* produces staircase patterns (e.g. right-right-down-right-down)
+   * even when a smooth diagonal would be wall-free. Weighted A* (weight > 1)
+   * makes this worse by accepting suboptimal zigzags. This pass straightens
+   * the path by checking, for each anchor node, the furthest reachable node
+   * via a wall-free direct line, then jumping there and repeating.
+   *
+   * @param {Array<{x:number,y:number}>} pathNodes
+   * @param {TokenDocument|object|null} tokenDoc
+   * @param {object} [options]
+   * @returns {Array<{x:number,y:number}>}
+   */
+  _smoothPathStringPull(pathNodes, tokenDoc = null, options = {}) {
+    if (!Array.isArray(pathNodes) || pathNodes.length < 3) return pathNodes;
+    if (optionsBoolean(options?.ignoreWalls, false)) return pathNodes;
+
+    const collisionContext = {
+      tokenDoc,
+      options: {
+        ignoreWalls: false,
+        collisionMode: options?.collisionMode || 'closest'
+      }
+    };
+
+    const smoothed = [pathNodes[0]];
+    let anchor = 0;
+
+    while (anchor < pathNodes.length - 1) {
+      // From the current anchor, look as far ahead as possible to find
+      // the furthest node reachable via a wall-free direct line.
+      let furthest = anchor + 1;
+
+      for (let probe = pathNodes.length - 1; probe > anchor + 1; probe--) {
+        const check = this._validatePathSegmentCollision(
+          pathNodes[anchor],
+          pathNodes[probe],
+          collisionContext
+        );
+        if (check?.ok) {
+          furthest = probe;
+          break;
+        }
+      }
+
+      smoothed.push(pathNodes[furthest]);
+      anchor = furthest;
+    }
+
+    return smoothed;
+  }
+
+  /**
+   * Re-densify a smoothed path by inserting intermediate waypoints at
+   * approximately grid-cell intervals along each segment. After string-
+   * pulling, paths may have only 3–4 nodes with long straight segments.
+   * The group timeline steps through nodes one at a time, so sparse paths
+   * cause tokens to "teleport" instead of walking smoothly. This method
+   * adds evenly-spaced intermediate points so the walk animation has
+   * enough steps for fluid movement.
+   *
+   * @param {Array<{x:number,y:number}>} pathNodes
+   * @returns {Array<{x:number,y:number}>}
+   */
+  _interpolatePathForWalking(pathNodes) {
+    if (!Array.isArray(pathNodes) || pathNodes.length < 2) return pathNodes;
+
+    const gridSize = Math.max(1, asNumber(canvas?.grid?.size, 100));
+    // Step size: one grid cell — gives a smooth walk cadence.
+    const stepSize = gridSize;
+
+    const result = [pathNodes[0]];
+
+    for (let i = 1; i < pathNodes.length; i++) {
+      const prev = pathNodes[i - 1];
+      const curr = pathNodes[i];
+      const dx = asNumber(curr.x, 0) - asNumber(prev.x, 0);
+      const dy = asNumber(curr.y, 0) - asNumber(prev.y, 0);
+      const segLen = Math.hypot(dx, dy);
+
+      if (segLen <= stepSize * 1.5) {
+        // Segment is short enough — keep as-is.
+        result.push(curr);
+        continue;
+      }
+
+      // Insert intermediate points at stepSize intervals.
+      const steps = Math.max(1, Math.round(segLen / stepSize));
+      const nx = dx / segLen;
+      const ny = dy / segLen;
+      const actualStep = segLen / steps;
+
+      for (let s = 1; s < steps; s++) {
+        result.push({
+          x: asNumber(prev.x, 0) + nx * actualStep * s,
+          y: asNumber(prev.y, 0) + ny * actualStep * s
+        });
+      }
+
+      // Always end with the exact endpoint.
+      result.push(curr);
+    }
+
+    return result;
+  }
+
+  /**
+   * Safety-net validation: walk every segment of a path and verify none
+   * cross a wall. If a wall-crossing segment is found, the path is
+   * truncated just before the offending segment. This catches any
+   * wall-violating paths regardless of how they were produced (clipper
+   * bugs, HPA stitching errors, graph cache staleness, etc.).
+   *
+   * @param {Array<{x:number,y:number}>} pathNodes
+   * @param {TokenDocument|object|null} tokenDoc
+   * @param {object} [options]
+   * @returns {Array<{x:number,y:number}>}
+   */
+  _validatePathWallIntegrity(pathNodes, tokenDoc = null, options = {}) {
+    if (!Array.isArray(pathNodes) || pathNodes.length < 2) return pathNodes;
+    if (optionsBoolean(options?.ignoreWalls, false)) return pathNodes;
+
+    const collisionContext = {
+      tokenDoc,
+      options: {
+        ignoreWalls: false,
+        collisionMode: options?.collisionMode || 'closest'
+      }
+    };
+
+    for (let i = 0; i < pathNodes.length - 1; i++) {
+      const check = this._validatePathSegmentCollision(pathNodes[i], pathNodes[i + 1], collisionContext);
+      if (!check?.ok) {
+        // Truncate the path at the last valid node. The token will stop
+        // just before the wall rather than attempting to pass through it.
+        this._pathfindingLog('warn', '_validatePathWallIntegrity found wall-crossing segment — truncating path', {
+          segmentIndex: i,
+          from: pathNodes[i],
+          to: pathNodes[i + 1],
+          originalLength: pathNodes.length,
+          truncatedLength: i + 1,
+          reason: check?.reason || 'collision'
+        });
+        return pathNodes.slice(0, i + 1);
+      }
+    }
+
+    return pathNodes;
   }
 
   /**
@@ -4383,9 +4700,22 @@ export class TokenMovementManager {
    * @returns {Promise<{ok:boolean, reason?:string, tokenCount:number, assignments?:Array<object>, stepCount?:number}>}
    */
   async executeDoorAwareGroupMove({ tokenMoves = [], options = {} } = {}) {
+    // Signal any in-flight group move to stop at the next step boundary so
+    // this new movement order can take over quickly instead of waiting for
+    // the full previous animation to finish.
+    if (this._activeGroupCancelToken) {
+      this._activeGroupCancelToken.cancelled = true;
+    }
+
     // Serialize group moves globally so two concurrent group operations
     // cannot interleave timeline steps and cause deadlocks.
     await this._acquireGroupMoveLock();
+
+    // Create a fresh cancel token for this move. Any subsequent move call
+    // will set .cancelled = true to interrupt our timeline.
+    const groupCancelToken = { cancelled: false };
+    this._activeGroupCancelToken = groupCancelToken;
+
     try {
       const totalStartMs = this._nowMs();
       const moves = Array.isArray(tokenMoves) ? tokenMoves : [];
@@ -4580,11 +4910,34 @@ export class TokenMovementManager {
         ignoreWalls,
         ignoreCost,
         method: options?.method || 'path-walk',
-        suppressFoundryMovementUI: options?.suppressFoundryMovementUI !== false
+        suppressFoundryMovementUI: options?.suppressFoundryMovementUI !== false,
+        _groupCancelToken: groupCancelToken
       });
       const timelineExecuteMs = this._nowMs() - timelineExecuteStartMs;
 
       if (!execution.ok) {
+        // If interrupted by a new movement order, skip reconciliation —
+        // tokens are at valid intermediate positions and the new move will
+        // re-plan from their current locations.
+        if (execution.reason === 'interrupted-by-new-move') {
+          this._pathfindingLog('info', 'executeDoorAwareGroupMove interrupted — skipping reconciliation', {
+            tokenCount: planResult.tokenCount,
+            planSource,
+            timelineExecuteMs
+          });
+          return {
+            ok: false,
+            reason: 'interrupted-by-new-move',
+            tokenCount: planResult.tokenCount,
+            assignments: planEntries.map((p) => ({ tokenId: p.tokenId, destinationTopLeft: p.destinationTopLeft })),
+            diagnostics: {
+              ...baseDiagnostics,
+              timelineExecuteMs,
+              totalMs: this._nowMs() - totalStartMs
+            }
+          };
+        }
+
         this._pathfindingLog('warn', 'executeDoorAwareGroupMove timeline execution failed', {
           reason: execution.reason || 'group-execution-failed',
           tokenCount: planResult.tokenCount,
@@ -4684,6 +5037,11 @@ export class TokenMovementManager {
         assignments: []
       };
     } finally {
+      // Only clear if this is still the active token (not already superseded
+      // by another move that set a new cancel token).
+      if (this._activeGroupCancelToken === groupCancelToken) {
+        this._activeGroupCancelToken = null;
+      }
       this._releaseGroupMoveLock();
     }
   }
@@ -5019,6 +5377,25 @@ export class TokenMovementManager {
       };
     });
 
+    // Post-assignment coherence pass: detect tokens whose paths significantly
+    // diverge from the group's shared corridor (e.g. 4 tokens go left around
+    // a wall but 1 goes right) and re-route outliers through the corridor
+    // so the entire group travels together.
+    let outlierFixDiagnostics = null;
+    if (!ignoreWalls && sharedCorridorPath.length >= 3 && planEntries.length >= 3) {
+      const outlierResult = this._fixGroupPathOutliers(planEntries, sharedCorridorPath, {
+        ignoreWalls,
+        ignoreCost,
+        allowDiagonal: optionsBoolean(candidateOptions?.allowDiagonal, true),
+        fogPathPolicy: candidateOptions?.fogPathPolicy || this.settings.fogPathPolicy
+      });
+      outlierFixDiagnostics = {
+        fixedCount: outlierResult.fixedCount,
+        outlierTokenIds: outlierResult.diagnostics?.outlierTokenIds || [],
+        fixedTokenIds: outlierResult.diagnostics?.fixedTokenIds || []
+      };
+    }
+
     return {
       ok: true,
       tokenCount: entries.length,
@@ -5042,6 +5419,7 @@ export class TokenMovementManager {
           nodeCount: Array.isArray(sharedCorridorPath) ? sharedCorridorPath.length : 0,
           adaptiveExpansionUsed: !!sharedCorridorAdaptiveExpansionUsed
         },
+        outlierFix: outlierFixDiagnostics,
         totalCandidates: Object.values(candidateCountByToken).reduce((sum, count) => sum + asNumber(count, 0), 0),
         pathfinding: this._summarizePathfindingStats(pathfindingStatsCollector)
       }
@@ -5140,7 +5518,12 @@ export class TokenMovementManager {
       const formationOffset = formationSlot
         ? Math.hypot(center.x - asNumber(formationSlot?.x, center.x), center.y - asNumber(formationSlot?.y, center.y))
         : 0;
-      const coarseCost = (anchorOffset * 0.62) + (directDistance * 0.2) + (formationOffset * 0.18);
+      // Formation offset is weighted heavily so that when there's enough room
+      // the group arrives in the same spatial arrangement it started in.
+      // Anchor offset still matters to keep the group near the click point.
+      const coarseCost = formationSlot
+        ? (anchorOffset * 0.30) + (directDistance * 0.15) + (formationOffset * 0.55)
+        : (anchorOffset * 0.65) + (directDistance * 0.35);
 
       coarseCandidates.push({
         topLeft: snappedTopLeft,
@@ -5284,7 +5667,17 @@ export class TokenMovementManager {
       }
 
       const pathLength = this._measurePathLength(pathNodes);
-      const cost = (coarse.anchorOffset * 0.7) + (pathLength * 0.3);
+      // When a formation slot exists, factor formation offset into the
+      // assignment cost so the branch-and-bound solver strongly prefers
+      // candidates that preserve the original spatial arrangement.
+      const formationSlotRef = formationSlots?.get?.(entry.tokenId) || null;
+      const fOffset = formationSlotRef
+        ? Math.hypot(coarse.center.x - asNumber(formationSlotRef.x, coarse.center.x),
+          coarse.center.y - asNumber(formationSlotRef.y, coarse.center.y))
+        : 0;
+      const cost = formationSlotRef
+        ? (coarse.anchorOffset * 0.25) + (pathLength * 0.25) + (fOffset * 0.50)
+        : (coarse.anchorOffset * 0.7) + (pathLength * 0.3);
       candidates.push({
         topLeft: coarse.topLeft,
         center: coarse.center,
@@ -5474,6 +5867,203 @@ export class TokenMovementManager {
       ok: true,
       assignments: bestAssignments
     };
+  }
+
+  /**
+   * Compute how much a token's path diverges from the group's shared corridor.
+   * Returns the average distance of sampled path points to their nearest
+   * corridor point. High values indicate the path takes a significantly
+   * different route (e.g. going around the opposite side of a wall).
+   *
+   * @param {Array<{x:number,y:number}>} pathNodes
+   * @param {Array<{x:number,y:number}>} corridorNodes
+   * @returns {number}
+   */
+  _computePathCorridorDivergence(pathNodes, corridorNodes) {
+    if (!Array.isArray(pathNodes) || pathNodes.length < 2) return 0;
+    if (!Array.isArray(corridorNodes) || corridorNodes.length < 2) return 0;
+
+    // Sample the path at evenly spaced points and measure distance to the
+    // nearest corridor node. Sampling avoids O(n*m) full cross-product.
+    const sampleCount = Math.min(10, pathNodes.length);
+    let totalDistance = 0;
+
+    for (let i = 0; i < sampleCount; i++) {
+      const idx = Math.round(i * (pathNodes.length - 1) / Math.max(1, sampleCount - 1));
+      const point = pathNodes[idx];
+      if (!point) continue;
+
+      let minDist = Number.POSITIVE_INFINITY;
+      for (const cp of corridorNodes) {
+        const d = Math.hypot(
+          asNumber(point.x, 0) - asNumber(cp.x, 0),
+          asNumber(point.y, 0) - asNumber(cp.y, 0)
+        );
+        if (d < minDist) minDist = d;
+      }
+
+      totalDistance += minDist;
+    }
+
+    return totalDistance / Math.max(1, sampleCount);
+  }
+
+  /**
+   * After assignment, detect tokens whose paths significantly diverge from
+   * the group's shared corridor (e.g. 4 tokens go left around a wall but
+   * 1 goes right) and re-route them through corridor waypoints so the
+   * group travels together.
+   *
+   * @param {Array<{tokenId:string, tokenDoc:any, pathNodes:Array<{x:number,y:number}>, destinationTopLeft:{x:number,y:number}, cost:number}>} planEntries
+   * @param {Array<{x:number,y:number}>} sharedCorridorPath
+   * @param {object} [options]
+   * @returns {{planEntries:Array<object>, fixedCount:number, diagnostics:object}}
+   */
+  _fixGroupPathOutliers(planEntries, sharedCorridorPath, options = {}) {
+    const diagnostics = {
+      checked: 0,
+      outlierTokenIds: [],
+      fixedTokenIds: [],
+      divergences: {}
+    };
+
+    if (!Array.isArray(sharedCorridorPath) || sharedCorridorPath.length < 3) {
+      return { planEntries, fixedCount: 0, diagnostics };
+    }
+    if (!Array.isArray(planEntries) || planEntries.length < 3) {
+      return { planEntries, fixedCount: 0, diagnostics };
+    }
+
+    const gridSize = Math.max(1, asNumber(canvas?.grid?.size, 100));
+
+    // Compute divergence for each token's assigned path.
+    const divergenceByTokenId = new Map();
+    for (const entry of planEntries) {
+      const div = this._computePathCorridorDivergence(entry.pathNodes, sharedCorridorPath);
+      divergenceByTokenId.set(entry.tokenId, div);
+      diagnostics.divergences[entry.tokenId] = Math.round(div * 10) / 10;
+    }
+    diagnostics.checked = planEntries.length;
+
+    // Compute median divergence to establish what "normal" looks like.
+    const sortedDivs = [...divergenceByTokenId.values()].sort((a, b) => a - b);
+    const median = sortedDivs[Math.floor(sortedDivs.length / 2)];
+
+    // Outlier threshold: must be both significantly above median AND above
+    // an absolute minimum distance to avoid false positives on compact moves.
+    const outlierThreshold = Math.max(median * 2.5, gridSize * 4);
+
+    let fixedCount = 0;
+    for (const entry of planEntries) {
+      const div = divergenceByTokenId.get(entry.tokenId) || 0;
+      if (div <= outlierThreshold) continue;
+      if (!Array.isArray(entry.pathNodes) || entry.pathNodes.length < 2) continue;
+
+      diagnostics.outlierTokenIds.push(entry.tokenId);
+
+      const startCenter = entry.pathNodes[0];
+      const endCenter = entry.pathNodes[entry.pathNodes.length - 1];
+
+      // Find the corridor node closest to this token's start position.
+      let startCorridorIdx = 0;
+      let minStartDist = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < sharedCorridorPath.length; i++) {
+        const d = Math.hypot(
+          asNumber(startCenter.x, 0) - asNumber(sharedCorridorPath[i].x, 0),
+          asNumber(startCenter.y, 0) - asNumber(sharedCorridorPath[i].y, 0)
+        );
+        if (d < minStartDist) { minStartDist = d; startCorridorIdx = i; }
+      }
+
+      // Find the corridor node closest to this token's destination.
+      let endCorridorIdx = sharedCorridorPath.length - 1;
+      let minEndDist = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < sharedCorridorPath.length; i++) {
+        const d = Math.hypot(
+          asNumber(endCenter.x, 0) - asNumber(sharedCorridorPath[i].x, 0),
+          asNumber(endCenter.y, 0) - asNumber(sharedCorridorPath[i].y, 0)
+        );
+        if (d < minEndDist) { minEndDist = d; endCorridorIdx = i; }
+      }
+
+      // Build a corridor-guided path: start → corridor entry → ... → corridor exit → destination.
+      // Use findWeightedPath for the local segments (start→entry, exit→dest) and
+      // interpolate through corridor nodes for the middle segment.
+      const corridorEntry = sharedCorridorPath[startCorridorIdx];
+      const corridorExit = sharedCorridorPath[endCorridorIdx];
+
+      const pathOptions = {
+        ignoreWalls: optionsBoolean(options?.ignoreWalls, false),
+        ignoreCost: optionsBoolean(options?.ignoreCost, false),
+        allowDiagonal: optionsBoolean(options?.allowDiagonal, true),
+        fogPathPolicy: options?.fogPathPolicy || this.settings.fogPathPolicy,
+        maxSearchIterations: 6000,
+        suppressNoPathLog: true
+      };
+
+      // Segment A: start → corridor entry point
+      const segA = this.findWeightedPath({
+        start: startCenter,
+        end: corridorEntry,
+        tokenDoc: entry.tokenDoc,
+        options: pathOptions
+      });
+
+      // Corridor middle: walk through corridor nodes in order
+      const corridorSlice = startCorridorIdx <= endCorridorIdx
+        ? sharedCorridorPath.slice(startCorridorIdx, endCorridorIdx + 1)
+        : sharedCorridorPath.slice(endCorridorIdx, startCorridorIdx + 1).reverse();
+
+      // Segment B: corridor exit → destination
+      const segB = this.findWeightedPath({
+        start: corridorExit,
+        end: endCenter,
+        tokenDoc: entry.tokenDoc,
+        options: pathOptions
+      });
+
+      // Stitch segments together, deduplicating junction points.
+      const newPath = [];
+      if (segA?.ok && Array.isArray(segA.pathNodes) && segA.pathNodes.length >= 2) {
+        newPath.push(...segA.pathNodes);
+      } else {
+        newPath.push(startCenter, corridorEntry);
+      }
+
+      // Add corridor middle (skip first node since it overlaps with segA end)
+      for (let i = 1; i < corridorSlice.length - 1; i++) {
+        newPath.push(corridorSlice[i]);
+      }
+
+      if (segB?.ok && Array.isArray(segB.pathNodes) && segB.pathNodes.length >= 2) {
+        newPath.push(...segB.pathNodes);
+      } else {
+        newPath.push(corridorExit, endCenter);
+      }
+
+      // Only accept the new path if it isn't dramatically longer than the
+      // original — we want route coherence, not a worse path.
+      const oldLength = this._measurePathLength(entry.pathNodes);
+      const newLength = this._measurePathLength(newPath);
+      if (newLength <= oldLength * 1.8 && newPath.length >= 2) {
+        entry.pathNodes = newPath;
+        entry.cost = newLength;
+        fixedCount += 1;
+        diagnostics.fixedTokenIds.push(entry.tokenId);
+      }
+    }
+
+    if (fixedCount > 0) {
+      this._pathfindingLog('debug', '_fixGroupPathOutliers corrected divergent paths', {
+        fixedCount,
+        outlierCount: diagnostics.outlierTokenIds.length,
+        threshold: Math.round(outlierThreshold * 10) / 10,
+        median: Math.round(median * 10) / 10,
+        divergences: diagnostics.divergences
+      });
+    }
+
+    return { planEntries, fixedCount, diagnostics };
   }
 
   /**
@@ -5739,12 +6329,26 @@ export class TokenMovementManager {
    */
   async _executeGroupTimeline(planEntries, timelineByTokenId, options = {}) {
     try {
+      const groupCancelToken = options?._groupCancelToken || null;
       const maxTimelineLen = planEntries.reduce((maxLen, p) => {
         const tl = timelineByTokenId.get(p.tokenId) || [];
         return Math.max(maxLen, tl.length);
       }, 0);
 
       for (let stepIndex = 1; stepIndex < maxTimelineLen; stepIndex++) {
+        // Check for cancellation from a new movement order. Tokens stay at
+        // their current (last-confirmed) Foundry positions — each completed
+        // step already called updateEmbeddedDocuments, so no rollback needed.
+        if (groupCancelToken?.cancelled) {
+          this._pathfindingLog('info', '_executeGroupTimeline interrupted by new movement order', {
+            stepIndex,
+            maxTimelineLen,
+            tokenCount: planEntries.length,
+            completedSteps: stepIndex - 1
+          });
+          return { ok: false, reason: 'interrupted-by-new-move' };
+        }
+
         const stepMoves = [];
 
         for (const entry of planEntries) {

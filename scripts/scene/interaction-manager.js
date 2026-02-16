@@ -1273,10 +1273,23 @@ export class InteractionManager {
       return;
     }
 
+    // Compute actual walk distance along the leader's path (sum of segment
+    // lengths) instead of the weighted assignment cost which mixes anchor
+    // offset, path length, and formation offset into a single score.
+    let walkDistance = 0;
+    for (let i = 1; i < leaderPath.length; i++) {
+      const a = leaderPath[i - 1];
+      const b = leaderPath[i];
+      walkDistance += Math.hypot(
+        Number(b?.x || 0) - Number(a?.x || 0),
+        Number(b?.y || 0) - Number(a?.y || 0)
+      );
+    }
+
     this.movementPathPreview.currentKey = key;
     this._renderMovementPathPreview(
       leaderPath,
-      Number.isFinite(Number(leaderAssignment?.cost)) ? Number(leaderAssignment.cost) : 0,
+      walkDistance,
       leaderTokenDoc,
       assignments
     );

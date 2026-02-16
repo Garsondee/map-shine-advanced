@@ -202,6 +202,18 @@ export class TokenMovementManager {
     this._hpaSectorIndex = null;
     /** @type {Map<string, {sceneId:string, revision:number, sectorSize:number, adjacency:Map<string, Array<object>>, builtAtMs:number}>} */
     this._hpaAdjacencyCache = new Map();
+
+    /**
+     * Full-scene precomputed navigation graphs keyed by token collision size
+     * class (e.g. "1x1", "2x2"). Each entry contains all reachable grid cell
+     * nodes and their collision-tested adjacency so `findWeightedPath` can skip
+     * the expensive per-call `generateMovementGraph` entirely.
+     * Built during pathfinding prewarm (scene load) and invalidated when wall
+     * topology changes.
+     * @type {Map<string, {sceneId:string, revision:number, sizeKey:string, nodes:Map<string,{x:number,y:number,key:string}>, adjacency:Map<string,Array<{toKey:string,cost:number}>>, edgeCount:number, gridType:number, gridSizeX:number, gridSizeY:number, latticeStep:number, builtAtMs:number, buildMs:number}>}
+     */
+    this._sceneNavGraphCache = new Map();
+
     this._pathPrewarmTimer = null;
     this._pathPrewarmLastSceneId = '';
     this._pathPrewarmLastRevision = -1;
@@ -805,6 +817,7 @@ export class TokenMovementManager {
     this._doorSpatialIndex = null;
     this._hpaSectorIndex = null;
     this._hpaAdjacencyCache.clear();
+    this._sceneNavGraphCache.clear();
     this._pathPrewarmLastSceneId = '';
     this._pathPrewarmLastRevision = -1;
 
@@ -826,6 +839,7 @@ export class TokenMovementManager {
       this._doorSpatialIndex = null;
       this._hpaSectorIndex = null;
       this._hpaAdjacencyCache.clear();
+      this._sceneNavGraphCache.clear();
       this._pathPrewarmLastRevision = -1;
     }
   }
@@ -838,6 +852,7 @@ export class TokenMovementManager {
     this._doorSpatialIndex = null;
     this._hpaSectorIndex = null;
     this._hpaAdjacencyCache.clear();
+    this._sceneNavGraphCache.clear();
     this._pathPrewarmLastRevision = -1;
     this._schedulePathfindingPrewarm(reason || 'topology-dirty', 180);
   }
@@ -900,8 +915,8 @@ export class TokenMovementManager {
     // Uses a synthetic 1×1 tokenDoc stub since adjacency is keyed by token
     // dimensions and collision mode.
     let hpaAdjacencyEdgeCount = 0;
+    const stubTokenDoc = { width: 1, height: 1 };
     if (hpaIndex) {
-      const stubTokenDoc = { width: 1, height: 1 };
       const adjacencyResult = this._buildHpaAdjacency({
         tokenDoc: stubTokenDoc,
         options: { allowDiagonal: true, collisionMode: 'closest' },
@@ -914,6 +929,21 @@ export class TokenMovementManager {
       }
     }
 
+    // Pre-build the full-scene navigation graph for 1×1 tokens so that the
+    // first group preview or pathfinding request runs A* directly on the
+    // cached adjacency without paying per-call graph generation costs.
+    let sceneNavGraphNodeCount = 0;
+    let sceneNavGraphEdgeCount = 0;
+    let sceneNavGraphBuildMs = 0;
+    const navGraph = this._getOrBuildSceneNavGraph(stubTokenDoc, {
+      collisionMode: 'closest'
+    });
+    if (navGraph) {
+      sceneNavGraphNodeCount = navGraph.nodes?.size || 0;
+      sceneNavGraphEdgeCount = navGraph.edgeCount || 0;
+      sceneNavGraphBuildMs = navGraph.buildMs || 0;
+    }
+
     this._pathPrewarmLastSceneId = sceneId;
     this._pathPrewarmLastRevision = this._doorStateRevision;
 
@@ -924,8 +954,185 @@ export class TokenMovementManager {
       bucketCount: doorIndex?.buckets instanceof Map ? doorIndex.buckets.size : 0,
       hpaSectorCount: Array.isArray(hpaIndex?.sectors) ? hpaIndex.sectors.length : 0,
       hpaAdjacencyEdgeCount,
+      sceneNavGraphNodeCount,
+      sceneNavGraphEdgeCount,
+      sceneNavGraphBuildMs: Math.round(sceneNavGraphBuildMs * 10) / 10,
       prewarmMs: this._nowMs() - startMs
     });
+  }
+
+  /**
+   * Retrieve or build a precomputed full-scene navigation graph for the given
+   * token collision size. The graph contains every grid cell center in the
+   * scene as a node and every wall-collision-tested edge as adjacency, so
+   * `findWeightedPath` can skip `generateMovementGraph` entirely and run A*
+   * directly on this cached structure.
+   *
+   * The graph is keyed by a token size string (e.g. "1x1") and invalidated
+   * when `_doorStateRevision` changes (wall/door topology update).
+   *
+   * @param {TokenDocument|object|null} tokenDoc
+   * @param {object} [options]
+   * @returns {{sceneId:string, revision:number, sizeKey:string, nodes:Map<string,{x:number,y:number,key:string}>, adjacency:Map<string,Array<{toKey:string,cost:number}>>, edgeCount:number, gridType:number, gridSizeX:number, gridSizeY:number, latticeStep:number, builtAtMs:number, buildMs:number}|null}
+   */
+  _getOrBuildSceneNavGraph(tokenDoc, options = {}) {
+    const sceneId = String(canvas?.scene?.id || '');
+    if (!sceneId) return null;
+
+    const w = Math.max(1, Math.round(asNumber(tokenDoc?.width, 1)));
+    const h = Math.max(1, Math.round(asNumber(tokenDoc?.height, 1)));
+    const sizeKey = `${w}x${h}`;
+    const revision = this._doorStateRevision;
+
+    const cached = this._sceneNavGraphCache.get(sizeKey);
+    if (cached && cached.sceneId === sceneId && cached.revision === revision) {
+      return cached;
+    }
+
+    const buildStartMs = this._nowMs();
+    const graph = this._buildFullSceneNavGraph(tokenDoc, options);
+    if (!graph) return null;
+    const buildMs = this._nowMs() - buildStartMs;
+
+    const entry = {
+      sceneId,
+      revision,
+      sizeKey,
+      ...graph,
+      builtAtMs: this._nowMs(),
+      buildMs
+    };
+    this._sceneNavGraphCache.set(sizeKey, entry);
+
+    this._pathfindingLog('debug', 'scene nav graph built', {
+      sizeKey,
+      sceneId,
+      revision,
+      nodeCount: graph.nodes.size,
+      edgeCount: graph.edgeCount,
+      buildMs: Math.round(buildMs * 10) / 10
+    });
+
+    return entry;
+  }
+
+  /**
+   * Build a complete navigation graph covering every grid cell center in the
+   * current scene. For each cell, all 8 neighbor directions (4 cardinal +
+   * 4 diagonal) are tested for wall collisions using the same
+   * `_validatePathSegmentCollision` path as dynamic graph generation. The
+   * resulting adjacency list is identical in shape to what
+   * `generateMovementGraph` produces, so A* can run on it directly.
+   *
+   * @param {TokenDocument|object|null} tokenDoc
+   * @param {object} [options]
+   * @returns {{nodes:Map<string,{x:number,y:number,key:string}>, adjacency:Map<string,Array<{toKey:string,cost:number}>>, edgeCount:number, gridType:number, gridSizeX:number, gridSizeY:number, latticeStep:number}|null}
+   */
+  _buildFullSceneNavGraph(tokenDoc, options = {}) {
+    const grid = canvas?.grid;
+    const dimensions = canvas?.dimensions;
+    if (!grid || !dimensions) return null;
+
+    const sceneRect = dimensions?.sceneRect || {
+      x: 0,
+      y: 0,
+      width: asNumber(dimensions?.width, 0),
+      height: asNumber(dimensions?.height, 0)
+    };
+    if (sceneRect.width <= 0 || sceneRect.height <= 0) return null;
+
+    const gridSize = Math.max(1, asNumber(grid?.size, 100));
+    const gridSizeX = Math.max(1, asNumber(grid?.sizeX, gridSize));
+    const gridSizeY = Math.max(1, asNumber(grid?.sizeY, gridSize));
+    const gridType = asNumber(grid?.type, 1);
+    const latticeStep = Math.max(8, Math.max(24, gridSize * 0.5));
+
+    const snapContext = { gridType, grid, latticeStep };
+
+    // Build a collision-testing context that covers the full scene.
+    const fullContext = {
+      tokenDoc,
+      options: {
+        ignoreWalls: false,
+        collisionMode: options?.collisionMode || 'closest',
+        allowDiagonal: true,
+        ignoreCost: false
+      },
+      grid,
+      gridType,
+      gridSize,
+      gridSizeX,
+      gridSizeY,
+      latticeStep,
+      bounds: {
+        minX: sceneRect.x,
+        maxX: sceneRect.x + sceneRect.width,
+        minY: sceneRect.y,
+        maxY: sceneRect.y + sceneRect.height
+      },
+      sceneRect,
+      doorSegmentCache: new Map(),
+      doorSegmentCacheStats: { calls: 0, hits: 0 },
+      // Dummy start/end — not used during full-scene build.
+      startNode: { x: 0, y: 0, key: '0:0' },
+      endNode: { x: 0, y: 0, key: '0:0' }
+    };
+
+    // Enumerate all grid cell centers within the scene rect.
+    // Iterate at grid-size steps and snap each point to ensure alignment
+    // with the traversal grid that _getCandidateNeighbors produces.
+    const nodes = new Map();
+    const pad = Math.max(gridSizeX, gridSizeY) * 0.5;
+    for (let y = sceneRect.y - pad; y <= sceneRect.y + sceneRect.height + pad; y += gridSizeY) {
+      for (let x = sceneRect.x - pad; x <= sceneRect.x + sceneRect.width + pad; x += gridSizeX) {
+        const snapped = this._snapPointToTraversalGrid({ x, y }, snapContext);
+        const key = this._pointKey(snapped.x, snapped.y);
+        if (nodes.has(key)) continue;
+
+        // Only include nodes within the scene rect.
+        if (snapped.x < sceneRect.x || snapped.x > sceneRect.x + sceneRect.width) continue;
+        if (snapped.y < sceneRect.y || snapped.y > sceneRect.y + sceneRect.height) continue;
+
+        nodes.set(key, { x: snapped.x, y: snapped.y, key });
+      }
+    }
+
+    // Test all edges: for each node, get its candidate neighbors and validate
+    // wall collisions + traversal cost — identical to generateMovementGraph.
+    const adjacency = new Map();
+    let edgeCount = 0;
+    for (const [key, node] of nodes) {
+      const neighborNodes = this._getCandidateNeighbors(node, fullContext);
+      if (!neighborNodes || neighborNodes.length === 0) continue;
+
+      const edges = [];
+      for (const neighbor of neighborNodes) {
+        if (!nodes.has(neighbor.key)) continue;
+
+        const collision = this._validatePathSegmentCollision(node, neighbor, fullContext);
+        if (!collision.ok) continue;
+
+        const cost = this._computeTraversalCost(node, neighbor, fullContext);
+        if (!Number.isFinite(cost) || cost <= 0) continue;
+
+        edges.push({ toKey: neighbor.key, cost });
+        edgeCount += 1;
+      }
+
+      if (edges.length > 0) {
+        adjacency.set(key, edges);
+      }
+    }
+
+    return {
+      nodes,
+      adjacency,
+      edgeCount,
+      gridType,
+      gridSizeX,
+      gridSizeY,
+      latticeStep
+    };
   }
 
   /**
@@ -2401,13 +2608,62 @@ export class TokenMovementManager {
         }
       }
 
-      const graph = this.generateMovementGraph({
-        start,
-        end,
-        tokenDoc,
-        options,
-        cancelToken
-      });
+      // Try precomputed full-scene navigation graph first. This avoids the
+      // expensive per-call generateMovementGraph (BFS + collision tests) and
+      // runs A* directly on the cached adjacency structure. Falls back to
+      // dynamic graph generation if the cache isn't ready or start/end keys
+      // aren't in the cached graph.
+      let graph = null;
+      let useFogFilterInAStar = false;
+      if (!optionsBoolean(options?.ignoreWalls, false)
+        && !optionsBoolean(options?.disableSceneNavCache, false)) {
+        const cachedNav = this._getOrBuildSceneNavGraph(tokenDoc, options);
+        if (cachedNav) {
+          const snappedStart = this._snapPointToTraversalGrid(
+            { x: startX, y: startY },
+            { gridType: cachedNav.gridType, grid: canvas?.grid, latticeStep: cachedNav.latticeStep }
+          );
+          const snappedEnd = this._snapPointToTraversalGrid(
+            { x: endX, y: endY },
+            { gridType: cachedNav.gridType, grid: canvas?.grid, latticeStep: cachedNav.latticeStep }
+          );
+          const sk = this._pointKey(snappedStart.x, snappedStart.y);
+          const ek = this._pointKey(snappedEnd.x, snappedEnd.y);
+
+          if (cachedNav.nodes.has(sk) && cachedNav.nodes.has(ek)) {
+            graph = {
+              ok: true,
+              nodes: cachedNav.nodes,
+              adjacency: cachedNav.adjacency,
+              startKey: sk,
+              endKey: ek,
+              diagnostics: {
+                cached: true,
+                nodeCount: cachedNav.nodes.size,
+                edgeCount: cachedNav.edgeCount
+              }
+            };
+
+            // Fog filtering must be applied at A* time when using the
+            // precomputed graph since it includes all cells regardless of
+            // fog/exploration state.
+            const fogPolicy = options?.fogPathPolicy || this.settings.fogPathPolicy;
+            if (fogPolicy === 'strictNoFogPath' && !game?.user?.isGM) {
+              useFogFilterInAStar = true;
+            }
+          }
+        }
+      }
+
+      if (!graph) {
+        graph = this.generateMovementGraph({
+          start,
+          end,
+          tokenDoc,
+          options,
+          cancelToken
+        });
+      }
 
       if (!graph.ok) {
         this._pathfindingLog('warn', 'findWeightedPath aborted: graph generation failed', {
@@ -2538,6 +2794,13 @@ export class TokenMovementManager {
         const currentG = gScore.get(currentKey) ?? Number.POSITIVE_INFINITY;
         for (const edge of neighbors) {
           if (closedSet.has(edge.toKey)) continue;
+
+          // When using the precomputed scene nav graph, fog filtering is
+          // deferred to A* time because the cached graph includes all cells.
+          if (useFogFilterInAStar && edge.toKey !== graph.startKey && edge.toKey !== graph.endKey) {
+            const neighborNode = graph.nodes.get(edge.toKey);
+            if (neighborNode && !this.isPointVisibleToPlayer(neighborNode)) continue;
+          }
 
           const tentativeG = currentG + asNumber(edge.cost, Number.POSITIVE_INFINITY);
           const neighborG = gScore.get(edge.toKey) ?? Number.POSITIVE_INFINITY;
@@ -4509,13 +4772,14 @@ export class TokenMovementManager {
     const candidateGenerationMsByToken = {};
     const candidateCountByToken = {};
 
-    // Eagerly warm the HPA adjacency graph so every findWeightedPath call
-    // during candidate evaluation hits the cache instead of rebuilding it.
-    // This is especially important for long-distance group moves where HPA
-    // kicks in for each per-token candidate path search.
+    // Eagerly warm caches so every findWeightedPath call during candidate
+    // evaluation hits precomputed data instead of rebuilding from scratch.
     if (!ignoreWalls) {
       this._buildHpaSectorIndex();
-      // Build adjacency for the most common token sizes in the group.
+      // Build HPA adjacency and full-scene nav graphs for each unique token
+      // size in the group. The scene nav graph is the primary acceleration —
+      // it lets findWeightedPath skip generateMovementGraph entirely and run
+      // A* directly on the cached adjacency.
       const seenSizeKeys = new Set();
       for (const entry of entries) {
         const w = Math.max(1, Math.round(asNumber(entry.tokenDoc?.width, 1)));
@@ -4526,6 +4790,9 @@ export class TokenMovementManager {
         this._buildHpaAdjacency({
           tokenDoc: entry.tokenDoc,
           options: { allowDiagonal: true, collisionMode: options?.collisionMode || 'closest' }
+        });
+        this._getOrBuildSceneNavGraph(entry.tokenDoc, {
+          collisionMode: options?.collisionMode || 'closest'
         });
       }
     }

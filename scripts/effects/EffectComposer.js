@@ -63,6 +63,9 @@ export class EffectComposer {
     /** @type {TimeManager} - Centralized time management */
     this.timeManager = new TimeManager();
 
+    /** @type {import('../scene/depth-pass-manager.js').DepthPassManager|null} */
+    this._depthPassManager = null;
+
     // PERFORMANCE: Cache for resolved render order to avoid per-frame allocations
     this._cachedRenderOrder = [];
     this._renderOrderDirty = true;
@@ -602,6 +605,8 @@ export class EffectComposer {
     // If no post-processing effects are active, we're done
     if (!usePostProcessing) {
       this._renderOverlayToScreen();
+      // Depth pass debug overlay — renders depth visualization to screen when enabled
+      this._renderDepthDebugOverlay();
       if (doProfile) profiler.endFrame();
       return;
     }
@@ -674,6 +679,8 @@ export class EffectComposer {
     }
 
     this._renderOverlayToScreen();
+    // Depth pass debug overlay — renders depth visualization to screen when enabled
+    this._renderDepthDebugOverlay();
     if (doProfile) profiler.endFrame();
   }
 
@@ -964,6 +971,15 @@ export class EffectComposer {
       log.debug(`Resized render target: ${name} (${renderW}x${renderH})`);
     }
 
+    // Resize depth pass manager render target
+    if (this._depthPassManager) {
+      try {
+        this._depthPassManager.resize(renderW, renderH);
+      } catch (e) {
+        // Non-critical; depth pass will auto-resize on next render
+      }
+    }
+
     // Notify all effects of resize
     for (const effect of this.effects.values()) {
       if (effect.onResize) {
@@ -1014,6 +1030,36 @@ export class EffectComposer {
    */
   getTimeManager() {
     return this.timeManager;
+  }
+
+  /**
+   * Set the depth pass manager reference for debug overlay rendering.
+   * @param {import('../scene/depth-pass-manager.js').DepthPassManager|null} manager
+   */
+  setDepthPassManager(manager) {
+    this._depthPassManager = manager;
+  }
+
+  /**
+   * Get the depth pass manager.
+   * @returns {import('../scene/depth-pass-manager.js').DepthPassManager|null}
+   */
+  getDepthPassManager() {
+    return this._depthPassManager;
+  }
+
+  /**
+   * Render depth debug overlay to screen if enabled.
+   * Called at the very end of the render loop (after post-processing and overlays).
+   * @private
+   */
+  _renderDepthDebugOverlay() {
+    if (!this._depthPassManager) return;
+    try {
+      this._depthPassManager.renderDebugOverlay();
+    } catch (e) {
+      // Debug overlay is non-critical; swallow errors
+    }
   }
 
   /**

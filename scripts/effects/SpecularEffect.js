@@ -15,8 +15,8 @@ const log = createLogger('SpecularEffect');
 // Tile overlay pass ordering bands.
 // Keep all occluders in an earlier global band and all additive color meshes
 // in a later band so no color pass can run before every occluder has written depth.
-const TILE_SPEC_OCCLUDER_ORDER_BASE = 6000;
-const TILE_SPEC_COLOR_ORDER_BASE = 7000;
+const TILE_SPEC_OCCLUDER_ORDER_BASE = 6000000000;
+const TILE_SPEC_COLOR_ORDER_BASE = 7000000000;
 
 /**
  * Specular highlight effect with PBR lighting model
@@ -214,6 +214,42 @@ export class SpecularEffect extends EffectBase {
     } else if (this.material?.uniforms?.uEffectEnabled) {
       // Fallback for legacy single-material path.
       this.material.uniforms.uEffectEnabled.value = value;
+    }
+  }
+
+  _getTileOverlayDepthLift(sprite) {
+    const info = this._getTileOverlaySortInfo(sprite);
+
+    // Keep this deterministic and bounded:
+    // - higher authored sort/elevation/renderOrder should sit slightly "closer"
+    // - tie-breaker keeps equal-sort stacks stable frame-to-frame
+    const baseRank = this._clampInt(info.baseOrder * 10, -5000, 5000, 0);
+    const sortInt = this._clampInt(info.sortKey, -200000, 200000, 0);
+    const elevationInt = this._clampInt(info.elevation * 100, -50000, 50000, 0);
+    const tieBreak = this._stableTileTieBreak(info.tileId);
+
+    // Use quantized steps large enough to survive depth quantization.
+    const baseLift = baseRank * 0.00008;
+    const sortLift = sortInt * 0.00002;
+    const elevationLift = elevationInt * 0.00001;
+    const tieLift = tieBreak * 0.00001;
+
+    // Keep a small base offset so overlays remain above their source sprite.
+    const total = 0.01 + baseLift + sortLift + elevationLift + tieLift;
+    return Math.max(-0.75, Math.min(0.75, total));
+  }
+
+  _applyTileOverlayDepthLift(meshes, sprite) {
+    if (!sprite) return;
+    const allMeshes = [meshes?.occluderMesh, meshes?.colorMesh].filter(Boolean);
+    if (allMeshes.length === 0) return;
+
+    try {
+      const depthLift = this._getTileOverlayDepthLift(sprite);
+      for (const mesh of allMeshes) {
+        mesh.matrix.elements[14] += depthLift;
+      }
+    } catch (_) {
     }
   }
 
@@ -991,52 +1027,84 @@ export class SpecularEffect extends EffectBase {
 
     const baseMap = sprite?.material?.map || this._getFallbackAlbedoTexture();
 
-    // Pass A: depth-only occluder. This writes depth using the tile silhouette
-    // so lower tile specular cannot leak through opaque upper tiles.
-    const occluderMaterial = this._createMaterialInstance({
-      baseTexture: baseMap,
-      specularMask: resolvedSpecularMask,
-      roughnessMask: null,
-      normalMap: null,
-      outputMode: 1.0,
-      transparent: true,
-      blending: THREE.NoBlending,
-      depthWrite: true,
-      depthTest: true
-    });
-    occluderMaterial.colorWrite = false;
-    occluderMaterial.blending = THREE.NoBlending;
-    if (typeof THREE.LessEqualDepth !== 'undefined') {
-      occluderMaterial.depthFunc = THREE.LessEqualDepth;
-    }
-    this._setTileOverlayAlphaClip(occluderMaterial, 0.1);
-    occluderMaterial.needsUpdate = true;
+    // Check whether the module-wide depth pass is available.
+    // With the new tile Z layout (layers 1.0 apart, sort multiplier 0.001/step),
+    // the tight depth camera (groundDist±200) gives ~40 ULPs per sort step —
+    // easily resolvable for shader-based occlusion. The fragment shader samples
+    // the depth texture and discards overlay fragments where a closer tile exists.
+    // Falls back to legacy dual-pass (occluder + EqualDepth) when unavailable.
+    const dpm = window.MapShine?.depthPassManager;
+    const useDepthPass = !!(dpm && dpm.isEnabled() && dpm.getDepthTexture());
 
-    const occluderMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), occluderMaterial);
-    occluderMesh.matrixAutoUpdate = false;
-    occluderMesh.frustumCulled = false;
+    let occluderMaterial = null;
+    let occluderMesh = null;
 
-    let colorMaterial = null;
-    let colorMesh = null;
-    if (hasSpecularMask) {
-      // Pass B: additive color, depth-tested against the occluder prepass.
-      colorMaterial = this._createMaterialInstance({
+    if (!useDepthPass) {
+      // Legacy fallback: Pass A — depth-only occluder writes depth via tile
+      // silhouette so lower tile specular cannot leak through upper tiles.
+      occluderMaterial = this._createMaterialInstance({
         baseTexture: baseMap,
         specularMask: resolvedSpecularMask,
         roughnessMask: null,
         normalMap: null,
         outputMode: 1.0,
         transparent: true,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
+        blending: THREE.NoBlending,
+        depthWrite: true,
         depthTest: true
       });
+      occluderMaterial.colorWrite = false;
+      occluderMaterial.blending = THREE.NoBlending;
+      if (typeof THREE.LessDepth !== 'undefined') {
+        occluderMaterial.depthFunc = THREE.LessDepth;
+      } else if (typeof THREE.LessEqualDepth !== 'undefined') {
+        occluderMaterial.depthFunc = THREE.LessEqualDepth;
+      }
+      this._setTileOverlayAlphaClip(occluderMaterial, 0.1);
+      occluderMaterial.needsUpdate = true;
+
+      occluderMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), occluderMaterial);
+      occluderMesh.matrixAutoUpdate = false;
+      occluderMesh.frustumCulled = false;
+    }
+
+    let colorMaterial = null;
+    let colorMesh = null;
+    if (hasSpecularMask) {
+      if (useDepthPass) {
+        // Depth pass path: single-pass color mesh. Occlusion handled in fragment
+        // shader via depth texture comparison. No hardware depth test needed.
+        colorMaterial = this._createMaterialInstance({
+          baseTexture: baseMap,
+          specularMask: resolvedSpecularMask,
+          roughnessMask: null,
+          normalMap: null,
+          outputMode: 1.0,
+          transparent: true,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          depthTest: false
+        });
+      } else {
+        // Legacy fallback: Pass B — additive color, depth-tested against occluder.
+        colorMaterial = this._createMaterialInstance({
+          baseTexture: baseMap,
+          specularMask: resolvedSpecularMask,
+          roughnessMask: null,
+          normalMap: null,
+          outputMode: 1.0,
+          transparent: true,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          depthTest: true
+        });
+        colorMaterial.depthWrite = false;
+        if (typeof THREE.EqualDepth !== 'undefined') {
+          colorMaterial.depthFunc = THREE.EqualDepth;
+        }
+      }
       colorMaterial.colorWrite = true;
       colorMaterial.blending = THREE.AdditiveBlending;
-      colorMaterial.depthWrite = false;
-      if (typeof THREE.EqualDepth !== 'undefined') {
-        colorMaterial.depthFunc = THREE.EqualDepth;
-      }
       this._setTileOverlayAlphaClip(colorMaterial, 0.1);
       colorMaterial.needsUpdate = true;
 
@@ -1045,33 +1113,21 @@ export class SpecularEffect extends EffectBase {
       colorMesh.frustumCulled = false;
     }
 
-    const baseOrder = (typeof sprite.renderOrder === 'number') ? sprite.renderOrder : 0;
-    const sortKey = Number(
-      sprite?.userData?._msSortKey
-      ?? sprite?.userData?.tileDoc?.sort
-      ?? sprite?.userData?.tileDoc?.z
-      ?? 0
-    );
-    const sortOrderOffset = Number.isFinite(sortKey) ? (-sortKey * 0.00001) : 0.0;
-
-    // Keep all occluders before all additive color passes.
-    try {
-      const orderNudge = baseOrder * 0.1;
-      occluderMesh.renderOrder = TILE_SPEC_OCCLUDER_ORDER_BASE + orderNudge + sortOrderOffset;
-      if (colorMesh) colorMesh.renderOrder = TILE_SPEC_COLOR_ORDER_BASE + orderNudge + sortOrderOffset;
-    } catch (_) {
-    }
+    // Keep all occluders before all additive color passes using a stable,
+    // deterministic integer ordering key.
+    this._applyTileOverlayRenderOrder({ occluderMesh, colorMesh }, sprite);
 
     this._syncTileOverlayLayers({ occluderMesh, colorMesh }, sprite);
 
-    this._scene.add(occluderMesh);
+    if (occluderMesh) this._scene.add(occluderMesh);
     if (colorMesh) this._scene.add(colorMesh);
     this._tileOverlays.set(tileId, {
       sprite,
       occluderMesh,
       occluderMaterial,
       colorMesh,
-      colorMaterial
+      colorMaterial,
+      useDepthPass
     });
 
     this._syncTileOverlayTransform(tileId, sprite);
@@ -1094,6 +1150,82 @@ export class SpecularEffect extends EffectBase {
       mat.uniforms.uTileAlphaClip.value = value;
     }
     mat.needsUpdate = true;
+  }
+
+  _clampInt(value, min, max, fallback = 0) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    const i = Math.round(n);
+    if (i < min) return min;
+    if (i > max) return max;
+    return i;
+  }
+
+  _stableTileTieBreak(tileId) {
+    const text = String(tileId || 'tile');
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i += 1) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0) & 1023;
+  }
+
+  _getTileOverlaySortInfo(sprite) {
+    const tileDoc = sprite?.userData?.tileDoc || null;
+    const tileId = String(
+      tileDoc?.id
+      ?? sprite?.userData?._msTileId
+      ?? sprite?.userData?.id
+      ?? ''
+    );
+    const baseOrder = Number.isFinite(Number(sprite?.renderOrder)) ? Number(sprite.renderOrder) : 0;
+    const sortKey = Number(
+      sprite?.userData?._msSortKey
+      ?? tileDoc?.sort
+      ?? tileDoc?.z
+      ?? 0
+    );
+    const elevation = Number(tileDoc?.elevation ?? 0);
+
+    return {
+      tileId,
+      baseOrder,
+      sortKey,
+      elevation
+    };
+  }
+
+  _computeTileOverlayOrderDetail(sprite) {
+    const info = this._getTileOverlaySortInfo(sprite);
+
+    // Build a deterministic integer order key.
+    // - baseRank tracks source sprite renderOrder changes
+    // - sortRank puts higher Foundry sort earlier (lower renderOrder)
+    // - elevationRank provides stable secondary ordering
+    // - tieBreak avoids non-determinism when all authored values match
+    const baseRank = this._clampInt(info.baseOrder * 10, -5000, 5000, 0);
+    const sortInt = this._clampInt(info.sortKey, -200000, 200000, 0);
+    const elevationInt = this._clampInt(info.elevation * 100, -50000, 50000, 0);
+
+    const sortRank = this._clampInt(200000 - sortInt, 0, 400000, 200000);
+    const elevationRank = this._clampInt(50000 - elevationInt, 0, 100000, 50000);
+    const tieBreak = this._stableTileTieBreak(info.tileId);
+
+    return (baseRank * 100000) + (sortRank * 100) + elevationRank + tieBreak;
+  }
+
+  _applyTileOverlayRenderOrder(meshes, sprite) {
+    const occluderMesh = meshes?.occluderMesh || null;
+    const colorMesh = meshes?.colorMesh || null;
+    if (!sprite) return;
+
+    try {
+      const detailOrder = this._computeTileOverlayOrderDetail(sprite);
+      if (occluderMesh) occluderMesh.renderOrder = TILE_SPEC_OCCLUDER_ORDER_BASE + detailOrder;
+      if (colorMesh) colorMesh.renderOrder = TILE_SPEC_COLOR_ORDER_BASE + detailOrder;
+    } catch (_) {
+    }
   }
 
   /**
@@ -1198,6 +1330,16 @@ export class SpecularEffect extends EffectBase {
           mesh.matrix.copy(sprite.matrixWorld);
         }
       }
+
+      // Depth lift is only needed for the legacy dual-pass path (EqualDepth).
+      // Both occluder and color mesh get the same lift so the occluder writes
+      // depth at (tile_Z + lift) and EqualDepth matches only its own occluder.
+      // With depth pass active, the overlay must sit at the SAME Z as its tile
+      // sprite so the shader depth comparison matches correctly.
+      if (!entry.useDepthPass) {
+        this._applyTileOverlayDepthLift(entry, sprite);
+      }
+
       for (const mesh of meshes) {
         mesh.matrixWorldNeedsUpdate = true;
       }
@@ -1206,28 +1348,6 @@ export class SpecularEffect extends EffectBase {
       // IMPORTANT: Tile hover-hide fades via sprite.material.opacity without toggling sprite.visible.
       // If we only mirror sprite.visible here, the specular overlay can remain visible
       // while the tile has faded out, which looks like a "second copy" that won't disappear.
-      const sortKey = Number(
-        sprite?.userData?._msSortKey
-        ?? sprite?.userData?.tileDoc?.sort
-        ?? sprite?.userData?.tileDoc?.z
-        ?? 0
-      );
-
-      // Lift overlays slightly above their owning tile sprite so they can render
-      // in specular-only mode, and add a tiny sort-based lift so higher-sort tiles
-      // are reliably in front for depth occlusion (prevents lower-tile specular
-      // bleeding through top opaque tiles when depth values quantize closely).
-      try {
-        const baseLift = 0.02;
-        const sortLift = Number.isFinite(sortKey)
-          ? Math.max(-0.015, Math.min(0.50, sortKey * 0.002))
-          : 0.0;
-        for (const mesh of meshes) {
-          mesh.matrix.elements[14] += (baseLift + sortLift);
-        }
-      } catch (_) {
-      }
-
       let spriteOpacity = 1.0;
       try {
         const o = sprite?.material?.opacity;
@@ -1262,22 +1382,7 @@ export class SpecularEffect extends EffectBase {
 
       // Keep layering/sorting in sync. Tile renderOrder and layers can change
       // after initial bind during scene sync, elevation transitions, etc.
-      try {
-        const baseOrder = (typeof sprite.renderOrder === 'number') ? sprite.renderOrder : 0;
-        // Higher Foundry sort should occlude lower specular first, so we render
-        // higher sort overlays slightly earlier in this dedicated overlay band.
-        // Keep this as a tiny continuous offset so large sort values don't collapse
-        // into the same renderOrder bucket (which can re-introduce lower-tile bleed-through).
-        const sortOrderOffset = Number.isFinite(sortKey) ? (-sortKey * 0.00001) : 0.0;
-        const orderNudge = baseOrder * 0.1;
-        if (entry.occluderMesh) {
-          entry.occluderMesh.renderOrder = TILE_SPEC_OCCLUDER_ORDER_BASE + orderNudge + sortOrderOffset;
-        }
-        if (entry.colorMesh) {
-          entry.colorMesh.renderOrder = TILE_SPEC_COLOR_ORDER_BASE + orderNudge + sortOrderOffset;
-        }
-      } catch (_) {
-      }
+      this._applyTileOverlayRenderOrder(entry, sprite);
       try {
         this._syncTileOverlayLayers(entry, sprite);
       } catch (_) {
@@ -1483,7 +1588,16 @@ export class SpecularEffect extends EffectBase {
         uBuildingShadowSuppressionEnabled: { value: this.params.buildingShadowSuppressionEnabled },
         uBuildingShadowSuppressionStrength: { value: this.params.buildingShadowSuppressionStrength },
         uHasBuildingShadowMap: { value: false },
-        uBuildingShadowMap: { value: null }
+        uBuildingShadowMap: { value: null },
+
+        // Module-wide depth pass for tile overlay occlusion.
+        // When available, replaces the fragile dual-pass occluder + EqualDepth approach
+        // with a single-pass depth-texture comparison that works correctly during
+        // tile movement, rotation, and animation.
+        uUseDepthPass: { value: false },
+        uDepthPassTexture: { value: null },
+        uDepthCameraNear: { value: 1.0 },
+        uDepthCameraFar: { value: 5000.0 }
       },
       vertexShader: this.getVertexShader(),
       fragmentShader: this.getFragmentShader(),
@@ -2095,6 +2209,21 @@ export class SpecularEffect extends EffectBase {
           if (mat?.uniforms?.uHasBuildingShadowMap) mat.uniforms.uHasBuildingShadowMap.value = hasBs;
           if (mat?.uniforms?.uBuildingShadowMap) mat.uniforms.uBuildingShadowMap.value = hasBs ? bsTex : null;
         }
+
+        // Module-wide depth pass texture binding for shader-based tile occlusion.
+        // With the new tile Z layout (layers 1.0 apart, sort 0.001/step), the
+        // tight depth camera gives ~40 ULPs per sort step — easily resolvable.
+        const dpm = window.MapShine?.depthPassManager;
+        const depthTex = (dpm && dpm.isEnabled()) ? dpm.getDepthTexture() : null;
+        const useDepth = !!depthTex;
+        for (const mat of this._materials) {
+          if (mat?.uniforms?.uUseDepthPass) mat.uniforms.uUseDepthPass.value = useDepth;
+          if (mat?.uniforms?.uDepthPassTexture) mat.uniforms.uDepthPassTexture.value = useDepth ? depthTex : null;
+          if (useDepth && dpm) {
+            if (mat?.uniforms?.uDepthCameraNear) mat.uniforms.uDepthCameraNear.value = dpm.getDepthNear();
+            if (mat?.uniforms?.uDepthCameraFar) mat.uniforms.uDepthCameraFar.value = dpm.getDepthFar();
+          }
+        }
       }
     } catch (e) {
       for (const mat of this._materials) {
@@ -2104,6 +2233,8 @@ export class SpecularEffect extends EffectBase {
         if (mat?.uniforms?.uRoofMaskEnabled) mat.uniforms.uRoofMaskEnabled.value = 0.0;
         if (mat?.uniforms?.uHasBuildingShadowMap) mat.uniforms.uHasBuildingShadowMap.value = false;
         if (mat?.uniforms?.uBuildingShadowMap) mat.uniforms.uBuildingShadowMap.value = null;
+        if (mat?.uniforms?.uUseDepthPass) mat.uniforms.uUseDepthPass.value = false;
+        if (mat?.uniforms?.uDepthPassTexture) mat.uniforms.uDepthPassTexture.value = null;
       }
     }
     
@@ -2202,12 +2333,18 @@ export class SpecularEffect extends EffectBase {
       varying vec2 vUv;
       varying vec3 vWorldNormal;
       varying vec3 vWorldPosition;
+      varying float vLinearDepth; // Eye-space distance from camera (full precision)
       
       void main() {
         vUv = uv;
         vWorldNormal = normalize(mat3(modelMatrix) * normal);
         vWorldPosition = (modelMatrix * vec4(position, 1.0)).xyz;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+        // Positive distance from camera — computed from the model-view matrix
+        // with full float32 precision, avoiding the main camera's perspective
+        // depth buffer precision loss at Z=1000.
+        vLinearDepth = -mvPos.z;
+        gl_Position = projectionMatrix * mvPos;
       }
     `;
   }
@@ -2354,9 +2491,18 @@ export class SpecularEffect extends EffectBase {
       uniform bool uHasBuildingShadowMap;
       uniform sampler2D uBuildingShadowMap;
 
+      // Module-wide depth pass for tile overlay occlusion.
+      // When enabled, replaces the dual-pass occluder + EqualDepth hack with a
+      // single-pass depth-texture comparison that works correctly for moving/rotating tiles.
+      uniform bool uUseDepthPass;
+      uniform sampler2D uDepthPassTexture;
+      uniform float uDepthCameraNear;
+      uniform float uDepthCameraFar;
+
       varying vec2 vUv;
       varying vec3 vWorldNormal;
       varying vec3 vWorldPosition;
+      varying float vLinearDepth;
       
       // Simple 1D noise function for stripe variation
       float noise1D(float p) {
@@ -2569,7 +2715,35 @@ export class SpecularEffect extends EffectBase {
         // For specular-only tile overlays, clip fully transparent tile texels.
         // This keeps overlays from occluding through true tile holes.
         if (uOutputMode > 0.5 && maskCoverage <= max(0.0, uTileAlphaClip)) discard;
-        
+
+        // Depth pass occlusion for tile overlays.
+        // The depth pass uses a cloned camera with tight near/far bounds
+        // (groundDist ±200). We linearize the stored depth using the depth-pass
+        // near/far and compare against vLinearDepth (vertex-computed eye-space
+        // distance with full float32 precision).
+        //
+        // Tile Z layout (layers 1.0 apart, sort 0.001/step):
+        //   BG = groundZ+1.0, FG = groundZ+2.0, TOKEN = +3.0, OVERHEAD = +4.0
+        //   Sort keys 0-999 add 0 to 0.999 within each layer band.
+        //   Tight camera gives ~40 ULPs per 0.001 sort step.
+        //
+        // Tolerance 0.0005: passes same-tile (precision error ~0.00003),
+        // rejects adjacent sort keys (gap 0.001 > 0.0005).
+        if (uUseDepthPass && uOutputMode > 0.5) {
+          vec2 depthUv = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
+          float storedDepth = texture2D(uDepthPassTexture, depthUv).r;
+
+          // Linearize stored depth using the depth-pass camera's tight near/far.
+          float nf2 = 2.0 * uDepthCameraNear * uDepthCameraFar;
+          float nfRange = uDepthCameraFar - uDepthCameraNear;
+          float nfSum = uDepthCameraFar + uDepthCameraNear;
+          float storedLinear = nf2 / (nfSum - (storedDepth * 2.0 - 1.0) * nfRange);
+
+          // If the scene surface at this pixel is more than 0.0005 world units
+          // closer than this overlay fragment, another tile is occluding us.
+          if (storedLinear < vLinearDepth - 0.0005) discard;
+        }
+
         // Apply Foundry darkness level and ambient environment tint. We
         // approximate Foundry's computedBackgroundColor by blending
         // between ambientDaylight and ambientDarkness.

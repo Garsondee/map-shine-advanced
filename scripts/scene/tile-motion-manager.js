@@ -286,6 +286,7 @@ export class TileMotionManager {
     return {
       enabled: !!cfg.enabled,
       shadowProjectionEnabled: !!cfg.shadowProjectionEnabled,
+      renderAboveTokens: !!cfg.renderAboveTokens,
       mode,
       parentId,
       pivot: {
@@ -356,6 +357,18 @@ export class TileMotionManager {
     this.state.global.autoPlayEnabled = enabled !== false;
     if (!persist) return true;
     return this._saveStateToScene();
+  }
+
+  _refreshTileBaseTransform(tileId) {
+    if (!tileId) return;
+
+    const tileDoc = this._getTileData(tileId)?.tileDoc;
+    if (!tileDoc) return;
+
+    try {
+      this.tileManager?.refreshTileSprite?.(tileDoc);
+    } catch (_) {
+    }
   }
 
   async setTimeFactorPercent(percent, options = undefined) {
@@ -507,6 +520,10 @@ export class TileMotionManager {
 
     this.state.tiles[tileId] = this._sanitizeTileConfig(tileId, merged);
     this._graphDirty = true;
+
+    // Some options (like renderAboveTokens) affect base layer placement (z/renderOrder).
+    // Re-sync the tile immediately so playback and base caches reflect the new layer.
+    this._refreshTileBaseTransform(tileId);
 
     if (this.state.global.playing) this._requestContinuousRender(500);
 

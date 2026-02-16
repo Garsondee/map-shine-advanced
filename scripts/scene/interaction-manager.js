@@ -948,7 +948,7 @@ export class InteractionManager {
     }
 
     const THREE = window.THREE;
-    const groundZ = (this.sceneComposer?.groundZ ?? 0) + 0.008;
+    const groundZ = (this.sceneComposer?.groundZ ?? 0) + 0.5;
     const points = [];
     for (const node of pathNodes) {
       const w = Coordinates.toWorld(node.x, node.y);
@@ -1033,7 +1033,7 @@ export class InteractionManager {
         const endWorld = Coordinates.toWorld(endFoundryCenter.x, endFoundryCenter.y);
         const srcScale = sourceSprite.scale;
         ghost.scale.set(srcScale?.x ?? 100, srcScale?.y ?? 100, srcScale?.z ?? 1);
-        ghost.position.set(endWorld.x, endWorld.y, (this.sceneComposer?.groundZ ?? 0) + 0.02);
+        ghost.position.set(endWorld.x, endWorld.y, (this.sceneComposer?.groundZ ?? 0) + 2.0);
         ghost.renderOrder = 30;
         ghostGroup.add(ghost);
       };
@@ -2729,7 +2729,7 @@ export class InteractionManager {
             
             // Initialize Visuals
             this.lightPlacement.previewGroup.position.copy(this.lightPlacement.start);
-            this.lightPlacement.previewGroup.position.z = groundZ + 0.05;
+            this.lightPlacement.previewGroup.position.z = groundZ + 0.5;
             this.lightPlacement.previewGroup.scale.set(1, 1, 1);
             this.lightPlacement.previewGroup.visible = true;
 

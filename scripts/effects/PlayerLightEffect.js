@@ -702,7 +702,7 @@ export class PlayerLightEffect extends EffectBase {
     sys.emitter.visible = enabled;
     if (!enabled) return;
 
-    sys.emitter.position.set(this._torchPos.x, this._torchPos.y, groundZ + 0.125);
+    sys.emitter.position.set(this._torchPos.x, this._torchPos.y, groundZ + 3.5);
 
     try {
       const rate = Math.max(0, this.params.torchSparksRate);
@@ -2341,7 +2341,7 @@ export class PlayerLightEffect extends EffectBase {
 
     const particleSystem = this._torchParticleSystem;
     particleSystem.emitter.visible = true;
-    particleSystem.emitter.position.set(this._torchPos.x, this._torchPos.y, groundZ + 0.12);
+    particleSystem.emitter.position.set(this._torchPos.x, this._torchPos.y, groundZ + 3.5);
 
     try {
       if (particleSystem.startLife && particleSystem.startLife.a !== undefined) {

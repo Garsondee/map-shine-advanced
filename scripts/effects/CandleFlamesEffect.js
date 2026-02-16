@@ -880,7 +880,7 @@ export class CandleFlamesEffect extends EffectBase {
         const sizeVar = 1.0 + (size01 * 2.0 - 1.0) * sizeJitter;
         const s = Math.max(1.0, flameSize * Math.max(0.2, sizeVar));
 
-        this._dummy.position.set(wx, wy, groundZ + 0.25);
+        this._dummy.position.set(wx, wy, groundZ + 3.5);
         this._dummy.rotation.set(0, 0, phase * Math.PI * 2);
         this._dummy.scale.set(s, s, 1);
         this._dummy.updateMatrix();

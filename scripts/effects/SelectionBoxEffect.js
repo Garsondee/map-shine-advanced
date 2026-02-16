@@ -916,7 +916,7 @@ export class SelectionBoxEffect {
     const cy = (minY + maxY) * 0.5;
 
     const groundZ = im.sceneComposer?.groundZ ?? 0;
-    mesh.position.set(cx, cy, groundZ + 0.14);
+    mesh.position.set(cx, cy, groundZ + 5.5);
     mesh.scale.set(w, h, 1);
     mesh.visible = true;
 

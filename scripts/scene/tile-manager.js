@@ -17,16 +17,20 @@ const log = createLogger('TileManager');
 // Currently FALSE so tiles behave normally while we profile other systems.
 const DISABLE_TILE_UPDATES = false;
 
-// Z-layer offsets from groundZ (from Architecture)
+// Z-layer offsets from groundZ.
 // These are OFFSETS added to groundZ, not absolute values.
-// Compressed so all tiles live in a very thin band above the ground plane.
-// Background < Foreground < Overhead, but differences are tiny.
-const Z_BACKGROUND_OFFSET = 0.01;
-const Z_FOREGROUND_OFFSET = 0.02;
+// Layers are spaced 1.0 unit apart so the depth pass's tight camera
+// (groundDist±200) can resolve same-layer tiles via sort-based Z offsets.
+// Sort multiplier is 0.001/step — sort keys 0-999 stay within a single
+// 1.0-unit band, giving ~40 ULPs of depth separation per sort step.
+//
+// Layer ordering:  ground(0) → ground-indicators(0.5) → BG(1.0) → FG(2.0) → TOKEN(3.0) → OVERHEAD(4.0)
+const Z_BACKGROUND_OFFSET = 1.0;
+const Z_FOREGROUND_OFFSET = 2.0;
 // IMPORTANT: Overhead tiles must sit above tokens in Z so depth testing can
 // reliably keep roofs visible even when renderer object sorting is disabled.
-// Tokens use TOKEN_BASE_Z=0.06 (see TokenManager). Keep this slightly above.
-const Z_OVERHEAD_OFFSET = 0.08;
+// Tokens use TOKEN_BASE_Z=3.0 (see TokenManager). Keep this above.
+const Z_OVERHEAD_OFFSET = 4.0;
 
 const ROOF_LAYER = 20;
 const WEATHER_ROOF_LAYER = 21;
@@ -2418,16 +2422,29 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       // tiles block lower specular correctly.
       try {
         if (this.specularEffect) {
+          const tileId = tileDoc.id;
           const emitSpecular = this._tileShouldEmitSpecular(tileDoc);
           if (!emitSpecular) {
             this.specularEffect.bindTileSprite(tileDoc, sprite, null, { emitSpecular: false });
           } else {
+            // Bind occluder immediately so stacking behavior is stable while we
+            // asynchronously probe/load the optional _Specular mask.
+            this.specularEffect.bindTileSprite(tileDoc, sprite, null, { emitSpecular: false });
+
             this.loadTileSpecularMaskTexture(tileDoc).then((specTex) => {
+              // Tile could have been removed/replaced while awaiting mask IO.
+              const current = this.tileSprites.get(tileId);
+              const currentSprite = current?.sprite;
+              if (!currentSprite || currentSprite !== sprite) return;
+
               // Missing _Specular should still bind as a black occluder so
               // upper tiles without masks block lower specular layers.
-              this.specularEffect.bindTileSprite(tileDoc, sprite, specTex, { emitSpecular: true });
+              this.specularEffect.bindTileSprite(current.tileDoc || tileDoc, currentSprite, specTex, { emitSpecular: true });
             }).catch(() => {
-              this.specularEffect.bindTileSprite(tileDoc, sprite, null, { emitSpecular: true });
+              const current = this.tileSprites.get(tileId);
+              const currentSprite = current?.sprite;
+              if (!currentSprite || currentSprite !== sprite) return;
+              this.specularEffect.bindTileSprite(current.tileDoc || tileDoc, currentSprite, null, { emitSpecular: true });
             });
           }
         }
@@ -2512,16 +2529,26 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // Always bind an occluder, even for disabled/bypass tiles.
     try {
       if (this.specularEffect) {
+        const tileId = tileDoc.id;
         const emitSpecular = this._tileShouldEmitSpecular(tileDoc);
         if (!emitSpecular) {
           this.specularEffect.bindTileSprite(tileDoc, sprite, null, { emitSpecular: false });
         } else {
+          this.specularEffect.bindTileSprite(tileDoc, sprite, null, { emitSpecular: false });
+
           this.loadTileSpecularMaskTexture(tileDoc).then((specTex) => {
+            const current = this.tileSprites.get(tileId);
+            const currentSprite = current?.sprite;
+            if (!currentSprite || currentSprite !== sprite) return;
+
             // Bind even when no mask exists; SpecularEffect will treat null as
             // a black mask depth occluder for proper tile stacking.
-            this.specularEffect.bindTileSprite(tileDoc, sprite, specTex, { emitSpecular: true });
+            this.specularEffect.bindTileSprite(current.tileDoc || tileDoc, currentSprite, specTex, { emitSpecular: true });
           }).catch(() => {
-            this.specularEffect.bindTileSprite(tileDoc, sprite, null, { emitSpecular: true });
+            const current = this.tileSprites.get(tileId);
+            const currentSprite = current?.sprite;
+            if (!currentSprite || currentSprite !== sprite) return;
+            this.specularEffect.bindTileSprite(current.tileDoc || tileDoc, currentSprite, null, { emitSpecular: true });
           });
         }
       }
@@ -2978,7 +3005,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
     let zBase = groundZ + Z_FOREGROUND_OFFSET;
 
-    const isOverhead = isTileOverhead(tileDoc);
+    const renderAboveTokens = !!window.MapShine?.tileMotionManager?.getTileConfig?.(tileDoc?.id)?.renderAboveTokens;
+    // Per-tile motion toggle can force overhead-style draw ordering so the tile
+    // participates in the proven roof-style depth/render path (avoids custom band
+    // ordering regressions with post effects).
+    const isOverhead = isTileOverhead(tileDoc) || renderAboveTokens;
     const wasOverhead = !!sprite.userData.isOverhead;
 
     // Store overhead status for update loop
@@ -3168,9 +3199,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       sprite.renderOrder = 0;
     }
     
-    // Add small offset based on sort key to prevent z-fighting within same layer
-    // Normalize sort key to small range (e.g., 0.0001 steps)
-    const sortOffset = (Number.isFinite(Number(sortKey)) ? Number(sortKey) : 0) * 0.00001;
+    // Sort-based Z offset within each layer. 0.001/step gives ~40 ULPs of
+    // separation in the tight depth camera, sufficient for the specular
+    // effect's depth-pass occlusion to distinguish overlapping tiles.
+    const sortOffset = (Number.isFinite(Number(sortKey)) ? Number(sortKey) : 0) * 0.001;
     const zPosition = zBase + sortOffset;
 
     // Keep runtime sort key available for tile-attached overlays/effects that

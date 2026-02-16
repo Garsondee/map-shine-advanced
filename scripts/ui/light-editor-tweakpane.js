@@ -1166,7 +1166,7 @@ export class LightEditorTweakpane {
       if (!this._tmpAnchorWorld) this._tmpAnchorWorld = new window.THREE.Vector3();
 
       const groundZ = window.MapShine?.sceneComposer?.groundZ ?? this.overlayManager?.sceneComposer?.groundZ ?? 0;
-      const anchorZ = groundZ + 0.01;
+      const anchorZ = groundZ + 0.5;
 
       const w = Coordinates.toWorld(doc.x, doc.y);
       w.z = anchorZ;

@@ -104,6 +104,7 @@ import { LoadSession } from '../core/load-session.js';
 import { ResizeHandler } from './resize-handler.js';
 import { ModeManager } from './mode-manager.js';
 import { wireMapPointsToEffects, exposeGlobals } from './manager-wiring.js';
+import { DepthPassManager } from '../scene/depth-pass-manager.js';
 
 const log = createLogger('Canvas');
 
@@ -357,6 +358,9 @@ let resizeHandler = null;
 
 /** @type {ModeManager|null} */
 let modeManager = null;
+
+/** @type {DepthPassManager|null} */
+let depthPassManager = null;
 
 /** @type {Function|null} */
 let _webglContextLostHandler = null;
@@ -1479,6 +1483,23 @@ async function createThreeCanvas(scene) {
       const paused = game?.paused ?? false;
       effectComposer.getTimeManager()?.setFoundryPaused?.(paused, 0);
     }, 'timeManager.syncPause', Severity.COSMETIC);
+
+    // Initialize module-wide depth pass manager.
+    // Must be after effectComposer (uses renderer/scene/camera) and MaskManager (publishes depth texture).
+    if (isDebugLoad) dlp.begin('depthPassManager.init', 'setup');
+    safeCall(() => {
+      if (depthPassManager) {
+        safeDispose(() => { effectComposer?.removeUpdatable?.(depthPassManager); }, 'removeUpdatable(depthPass)');
+        safeDispose(() => depthPassManager.dispose(), 'depthPassManager.dispose(reinit)');
+      }
+      depthPassManager = new DepthPassManager();
+      depthPassManager.initialize(renderer, threeScene, camera);
+      depthPassManager.setMaskManager(mapShine.maskManager);
+      effectComposer.addUpdatable(depthPassManager);
+      effectComposer.setDepthPassManager(depthPassManager);
+      if (window.MapShine) window.MapShine.depthPassManager = depthPassManager;
+    }, 'DepthPassManager.init', Severity.DEGRADED);
+    if (isDebugLoad) dlp.end('depthPassManager.init');
 
     safeCall(() => {
       loadingOverlay.setStage('effects.core', 0.0, 'Initializing effects…', { immediate: true });
@@ -4908,6 +4929,14 @@ function destroyThreeCanvas() {
     safeDispose(() => physicsRopeManager.dispose(), 'physicsRopeManager.dispose');
     physicsRopeManager = null;
     log.debug('Physics rope manager disposed');
+  }
+
+  // Dispose depth pass manager (before effect composer since it's an updatable)
+  if (depthPassManager) {
+    safeDispose(() => { if (effectComposer) effectComposer.removeUpdatable(depthPassManager); }, 'removeUpdatable(depthPass)');
+    safeDispose(() => depthPassManager.dispose(), 'depthPassManager.dispose');
+    depthPassManager = null;
+    log.debug('Depth pass manager disposed');
   }
 
   // Dispose effect composer

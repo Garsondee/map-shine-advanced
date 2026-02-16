@@ -2348,7 +2348,7 @@ export class TokenMovementManager {
 
     const elevation = asNumber(tokenDoc?.elevation, 0);
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
-    const z = groundZ + 0.06 + elevation;
+    const z = groundZ + 3.0 + elevation;
 
     const THREE = window.THREE;
     const rotationDeg = asNumber(tokenDoc?.rotation, 0);
@@ -2596,7 +2596,9 @@ export class TokenMovementManager {
             ? hpaSmoothed
             : this._validatePathWallIntegrity(hpaSmoothed, tokenDoc, options);
           if (hpaValidated.length >= 2) {
-            const hpaInterpolated = this._interpolatePathForWalking(hpaValidated);
+            const hpaInterpolated = (typeof this._interpolatePathForWalking === 'function')
+              ? this._interpolatePathForWalking(hpaValidated)
+              : hpaValidated;
             this._recordWeightedPathStats(statsCollector, {
               ok: true,
               reason: 'hpa-ok',
@@ -2786,12 +2788,14 @@ export class TokenMovementManager {
           const smoothedPath = this._smoothPathStringPull(clippedPath, tokenDoc, options);
           // Final safety net: verify no segment crosses a wall.
           const ignoreWalls = optionsBoolean(options?.ignoreWalls, false);
-          const validatedPath = ignoreWalls
+          const finalValidatedPath = ignoreWalls
             ? smoothedPath
             : this._validatePathWallIntegrity(smoothedPath, tokenDoc, options);
           // Re-densify for smooth walk animation: insert intermediate
           // waypoints at grid-cell intervals along each segment.
-          const pathNodes = this._interpolatePathForWalking(validatedPath);
+          const pathNodes = (typeof this._interpolatePathForWalking === 'function')
+            ? this._interpolatePathForWalking(finalValidatedPath)
+            : finalValidatedPath;
           this._recordWeightedPathStats(statsCollector, {
             ok: true,
             reason: 'ok',
@@ -2808,7 +2812,7 @@ export class TokenMovementManager {
               nodesClipped: rawPathNodes.length - clippedPath.length,
               smoothed: clippedPath.length !== smoothedPath.length,
               nodesSmoothed: clippedPath.length - smoothedPath.length,
-              wallTruncated: smoothedPath.length !== validatedPath.length,
+              wallTruncated: smoothedPath.length !== finalValidatedPath.length,
               graphDiagnostics: graph.diagnostics
             }
           };
@@ -3905,7 +3909,7 @@ export class TokenMovementManager {
       // Position at token base. We read the sprite's current XY and place
       // the indicator on the ground Z.
       const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
-      groundGroup.position.set(sprite.position.x, sprite.position.y, groundZ + 0.01);
+      groundGroup.position.set(sprite.position.x, sprite.position.y, groundZ + 0.5);
       groundGroup.matrixAutoUpdate = false;
       groundGroup.updateMatrix();
 
@@ -4012,7 +4016,7 @@ export class TokenMovementManager {
       // Sync ground indicator position to follow token XY
       if (state.groundGroup) {
         const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
-        state.groundGroup.position.set(sprite.position.x, sprite.position.y, groundZ + 0.01);
+        state.groundGroup.position.set(sprite.position.x, sprite.position.y, groundZ + 0.5);
         state.groundGroup.updateMatrix();
       }
 
@@ -6134,6 +6138,11 @@ export class TokenMovementManager {
       const acceptedIdSet = new Set();
       const rejectedProposals = [];
 
+      // Build a set of all tokens that are proposing to move this tick.
+      // If a token has a proposal, it intends to vacate its current cell,
+      // so other tokens can move into that cell simultaneously.
+      const proposingToMoveIds = new Set(proposals.map((p) => p.tokenId));
+
       for (const proposal of proposals) {
         const tokenId = proposal.tokenId;
 
@@ -6176,9 +6185,13 @@ export class TokenMovementManager {
           continue;
         }
 
-        // Check overlap against current positions of tokens that are not already accepted.
-        // Only trust the occupier will vacate if its move was ALREADY accepted this tick
-        // (not merely that it intends to move — its move could get rejected later).
+        // Check overlap against current positions of other tokens.
+        // Allow the move if the occupier is:
+        //   (a) already accepted to move this tick (guaranteed vacating), OR
+        //   (b) has a pending proposal to move (intends to vacate), OR
+        //   (c) is at its final node and the mover is just passing through.
+        // This allows simultaneous movement: token A moves into B's cell
+        // while B moves into C's cell in the same tick.
         for (const state of allStates()) {
           if (state.tokenId === tokenId) continue;
           if (acceptedIdSet.has(state.tokenId)) continue;
@@ -6186,9 +6199,8 @@ export class TokenMovementManager {
           const currentNode = state.pathNodes[state.pathIndex];
           const currentRect = this._buildTokenRect(this._tokenCenterToTopLeft(currentNode, state.tokenDoc), state.tokenDoc);
           if (this._rectsOverlap(proposalRect, currentRect)) {
-            // Only allow move into occupied cell if the occupier's move was
-            // already accepted this tick (guaranteed to vacate).
-            if (acceptedIdSet.has(state.tokenId)) {
+            // Occupier is also proposing to move away — allow concurrent movement.
+            if (proposingToMoveIds.has(state.tokenId)) {
               continue;
             }
 
@@ -6216,8 +6228,10 @@ export class TokenMovementManager {
         acceptedIdSet.add(tokenId);
       }
 
-      // Prune any accepted moves that still overlap the current position of a
-      // token that ended up not moving this tick.
+      // Prune any accepted moves that overlap the current position of a
+      // token that is truly stationary — has no proposal to move at all.
+      // Tokens with proposals (even if not yet accepted) are expected to
+      // vacate, so they don't block.
       let changed = true;
       while (changed) {
         changed = false;
@@ -6231,7 +6245,9 @@ export class TokenMovementManager {
           let blockedByTokenId = '';
           for (const state of allStates()) {
             if (state.tokenId === proposal.tokenId) continue;
+            // Skip tokens that are accepted (moving away) or proposing to move.
             if (acceptedNow.has(state.tokenId)) continue;
+            if (proposingToMoveIds.has(state.tokenId)) continue;
 
             const currentNode = state.pathNodes[state.pathIndex];
             const currentRect = this._buildTokenRect(this._tokenCenterToTopLeft(currentNode, state.tokenDoc), state.tokenDoc);

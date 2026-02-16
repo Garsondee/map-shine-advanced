@@ -10,11 +10,11 @@ import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
 const log = createLogger('TokenManager');
 
 /**
- * Z-position base for tokens (from architecture)
+ * Z-position base for tokens.
  * Tokens render at this z-position + elevation above the scene groundZ.
- * Kept in a thin band above tiles to minimize depth range.
+ * Layer ordering: ground(0) → BG(1.0) → FG(2.0) → TOKEN(3.0) → OVERHEAD(4.0)
  */
-const TOKEN_BASE_Z = 0.06;
+const TOKEN_BASE_Z = 3.0;
 
 /**
  * TokenManager - Synchronizes Foundry VTT tokens to THREE.js sprites

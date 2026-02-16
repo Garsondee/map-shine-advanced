@@ -37,6 +37,7 @@ export class TileMotionDialog {
       tileStatus: 'Unknown',
       enabled: false,
       shadowProjectionEnabled: false,
+      renderAboveTokens: false,
       mode: 'transform',
       motionType: 'rotation',
       loopMode: 'loop',
@@ -246,6 +247,12 @@ export class TileMotionDialog {
 
     this._bindings.shadowProjectionEnabled = this._motionFolder.addBinding(this.uiState, 'shadowProjectionEnabled', {
       label: 'Shadow Projection'
+    }).on('change', (ev) => {
+      this._onConfigChanged(ev);
+    });
+
+    this._bindings.renderAboveTokens = this._motionFolder.addBinding(this.uiState, 'renderAboveTokens', {
+      label: 'Render Above Tokens'
     }).on('change', (ev) => {
       this._onConfigChanged(ev);
     });
@@ -650,6 +657,7 @@ export class TileMotionDialog {
 
     this.uiState.enabled = !!cfg.enabled;
     this.uiState.shadowProjectionEnabled = !!cfg.shadowProjectionEnabled;
+    this.uiState.renderAboveTokens = !!cfg.renderAboveTokens;
     this.uiState.mode = cfg.mode === 'texture' ? 'texture' : 'transform';
     this.uiState.motionType = cfg.motion?.type || 'rotation';
     this.uiState.loopMode = cfg.motion?.loopMode === 'pingPong' ? 'pingPong' : 'loop';
@@ -737,6 +745,7 @@ export class TileMotionDialog {
     const patch = {
       enabled: !!this.uiState.enabled,
       shadowProjectionEnabled: !!this.uiState.shadowProjectionEnabled,
+      renderAboveTokens: !!this.uiState.renderAboveTokens,
       mode: this.uiState.mode === 'texture' ? 'texture' : 'transform',
       parentId: this.uiState.parentId || null,
       pivot: {

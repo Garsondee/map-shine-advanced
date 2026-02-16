@@ -958,6 +958,16 @@ export class TweakpaneManager {
           ui.notifications.warn('Map Shine: Scene reset not available');
           return;
         }
+
+        const confirmed = await Dialog.confirm({
+          title: 'Confirm Scene Reset',
+          content: '<p>Reset Map Shine for this scene now?</p><p>This rebuilds Three.js rendering and may take a few seconds.</p>',
+          yes: () => true,
+          no: () => false,
+          defaultYes: false
+        });
+        if (!confirmed) return;
+
         await fn();
       } catch (e) {
         try {
@@ -1125,10 +1135,99 @@ export class TweakpaneManager {
       this.saveUIState();
     });
 
+    debugFolder.addBlade({ view: 'separator' });
+
+    // ── Depth Pass Debug Section ──────────────────────────────────────────
+    this._buildDepthPassDebugSection(debugFolder);
+
     debugFolder.on('fold', (ev) => {
       this.accordionStates['debug'] = ev.expanded;
       this.saveUIState();
     });
+  }
+
+  /**
+   * Build the Depth Pass debug sub-section inside Developer Tools.
+   * Provides controls for toggling the depth pass, enabling the debug
+   * overlay visualization, and switching display modes (raw vs linear).
+   * @param {Object} parentFolder - Tweakpane folder to add into
+   * @private
+   */
+  _buildDepthPassDebugSection(parentFolder) {
+    if (!parentFolder) return;
+
+    // Backing params object for Tweakpane bindings
+    if (!this._depthPassDebugParams) {
+      this._depthPassDebugParams = {
+        enabled: true,
+        continuous: true,
+        debugOverlay: false,
+        displayMode: 0, // 0 = raw device depth, 1 = linear depth
+      };
+    }
+    const params = this._depthPassDebugParams;
+
+    const depthFolder = parentFolder.addFolder({
+      title: 'Depth Pass',
+      expanded: this.accordionStates['debug_depthPass'] ?? false
+    });
+
+    // Enabled toggle — controls whether the depth pass renders at all
+    depthFolder.addBinding(params, 'enabled', {
+      label: 'Enabled'
+    }).on('change', (ev) => {
+      const dpm = window.MapShine?.depthPassManager;
+      if (dpm) dpm.setEnabled(ev.value);
+    });
+
+    // Continuous toggle — re-render every frame vs on-invalidation only
+    depthFolder.addBinding(params, 'continuous', {
+      label: 'Continuous'
+    }).on('change', (ev) => {
+      const dpm = window.MapShine?.depthPassManager;
+      if (dpm) dpm.setContinuous(ev.value);
+    });
+
+    depthFolder.addBlade({ view: 'separator' });
+
+    // Debug overlay toggle — renders depth visualization to screen
+    depthFolder.addBinding(params, 'debugOverlay', {
+      label: 'Show Depth'
+    }).on('change', (ev) => {
+      const dpm = window.MapShine?.depthPassManager;
+      if (dpm) dpm.setDebugEnabled(ev.value);
+    });
+
+    // Display mode — raw device depth vs linearized
+    depthFolder.addBinding(params, 'displayMode', {
+      label: 'Display Mode',
+      options: {
+        'Layer View (±6u)': 0,
+        'Sort Zoom (FG ±1u)': 1,
+        'Raw Device Depth': 2,
+      }
+    }).on('change', (ev) => {
+      const dpm = window.MapShine?.depthPassManager;
+      if (dpm) dpm.setDebugDisplayMode(ev.value);
+    });
+
+    // Manual invalidation button for non-continuous mode testing
+    depthFolder.addButton({
+      title: 'Force Invalidate'
+    }).on('click', () => {
+      const dpm = window.MapShine?.depthPassManager;
+      if (dpm) {
+        dpm.invalidate();
+        log.info('Depth pass manually invalidated');
+      }
+    });
+
+    depthFolder.on('fold', (ev) => {
+      this.accordionStates['debug_depthPass'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    this._depthPassFolder = depthFolder;
   }
 
   buildRopesSection() {

@@ -46,6 +46,96 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+/**
+ * Binary min-heap keyed by a numeric score. Used to replace the O(n) linear
+ * scan in A* open-set extraction with O(log n) insert/extract-min.
+ *
+ * Each entry is { key: string, score: number }. The heap also maintains a
+ * Set of keys currently in the heap so `has()` is O(1).
+ */
+class BinaryMinHeap {
+  constructor() {
+    /** @type {Array<{key:string, score:number}>} */
+    this._data = [];
+    /** @type {Set<string>} */
+    this._keys = new Set();
+  }
+
+  get size() {
+    return this._data.length;
+  }
+
+  has(key) {
+    return this._keys.has(key);
+  }
+
+  /**
+   * Insert or update an entry. If the key already exists with a higher score,
+   * we push a duplicate (lazy deletion) — the stale copy is skipped in pop().
+   */
+  push(key, score) {
+    this._data.push({ key, score });
+    this._keys.add(key);
+    this._bubbleUp(this._data.length - 1);
+  }
+
+  /**
+   * Extract the entry with the lowest score, skipping stale duplicates
+   * that were superseded by a later push with a lower score.
+   * @returns {{key:string, score:number}|null}
+   */
+  pop() {
+    while (this._data.length > 0) {
+      const top = this._data[0];
+      const last = this._data.pop();
+      if (this._data.length > 0 && last) {
+        this._data[0] = last;
+        this._sinkDown(0);
+      }
+      // Skip stale entries (key was already removed or superseded).
+      if (this._keys.has(top.key)) {
+        this._keys.delete(top.key);
+        return top;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Remove a key from the live set so it is skipped by future pop() calls.
+   */
+  remove(key) {
+    this._keys.delete(key);
+  }
+
+  /** @private */
+  _bubbleUp(i) {
+    const data = this._data;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (data[i].score >= data[parent].score) break;
+      [data[i], data[parent]] = [data[parent], data[i]];
+      i = parent;
+    }
+  }
+
+  /** @private */
+  _sinkDown(i) {
+    const data = this._data;
+    const n = data.length;
+    while (true) {
+      let smallest = i;
+      const left = 2 * i + 1;
+      const right = 2 * i + 2;
+      if (left < n && data[left].score < data[smallest].score) smallest = left;
+      if (right < n && data[right].score < data[smallest].score) smallest = right;
+      if (smallest === i) break;
+      [data[i], data[smallest]] = [data[smallest], data[i]];
+      i = smallest;
+    }
+  }
+}
+
 function shortestAngleDelta(from, to) {
   let d = to - from;
   while (d > Math.PI) d -= Math.PI * 2;
@@ -78,9 +168,43 @@ export class TokenMovementManager {
     /** @type {Array<[string, number]>} */
     this._hookIds = [];
 
+    /**
+     * Per-token move locks prevent overlapping async move sequences from
+     * racing on the same token (e.g. rapid double-clicks or latent hooks).
+     * Key = tokenId, Value = Promise that resolves when the current move ends.
+     * @type {Map<string, Promise<void>>}
+     */
+    this._activeMoveLocks = new Map();
+
+    /**
+     * Global group-move lock prevents concurrent group operations from
+     * interleaving and causing deadlocks.
+     * @type {Promise<void>|null}
+     */
+    this._groupMoveLock = null;
+
     this._doorStateRevision = 0;
     this._inCombat = false;
     this._pathSearchGeneration = 0;
+
+    /**
+     * Ephemeral cache of group plans built during preview and reused during
+     * confirm/execute to avoid duplicate expensive planning on the same target.
+     * @type {Map<string, {createdAtMs:number, signatureJson:string, planResult:any}>}
+     */
+    this._groupPlanCache = new Map();
+    this._groupPlanCacheTtlMs = 8000;
+    this._groupPlanCacheMaxEntries = 12;
+
+    /** @type {{sceneId:string, revision:number, doorEntries:Array<object>, buckets:Map<string, Array<object>>, bucketSize:number, builtAtMs:number}|null} */
+    this._doorSpatialIndex = null;
+    /** @type {{sceneId:string, revision:number, sectorSize:number, cols:number, rows:number, sceneRect:{x:number,y:number,width:number,height:number}, sectors:Array<object>, sectorsById:Map<string, object>, builtAtMs:number}|null} */
+    this._hpaSectorIndex = null;
+    /** @type {Map<string, {sceneId:string, revision:number, sectorSize:number, adjacency:Map<string, Array<object>>, builtAtMs:number}>} */
+    this._hpaAdjacencyCache = new Map();
+    this._pathPrewarmTimer = null;
+    this._pathPrewarmLastSceneId = '';
+    this._pathPrewarmLastRevision = -1;
 
     this.settings = {
       defaultStyle: DEFAULT_STYLE,
@@ -121,6 +245,523 @@ export class TokenMovementManager {
       || optionsBoolean(options?.ignoreCost, false);
   }
 
+  /**
+   * Unified diagnostics logger for pathfinding-related flows.
+   * Every entry includes a "[Pathfinding]" marker for easy filtering.
+   *
+   * @param {'debug'|'info'|'warn'|'error'} level
+   * @param {string} message
+   * @param {object|null} [details]
+   * @param {any} [error]
+   */
+  _pathfindingLog(level, message, details = null, error = null) {
+    const method = (typeof log?.[level] === 'function') ? log[level].bind(log) : log.info.bind(log);
+    const taggedMessage = `[Pathfinding] ${message}`;
+    if (details && error) {
+      method(taggedMessage, details, error);
+      return;
+    }
+    if (error) {
+      method(taggedMessage, error);
+      return;
+    }
+    if (details) {
+      method(taggedMessage, details);
+      return;
+    }
+    method(taggedMessage);
+  }
+
+  /**
+   * Build compact token metadata for diagnostics payloads.
+   *
+   * @param {TokenDocument|object|null} tokenDoc
+   * @returns {{tokenId:string, tokenName:string, x:number, y:number, width:number, height:number}}
+   */
+  _pathfindingTokenMeta(tokenDoc) {
+    return {
+      tokenId: String(tokenDoc?.id || ''),
+      tokenName: String(tokenDoc?.name || ''),
+      x: asNumber(tokenDoc?.x, NaN),
+      y: asNumber(tokenDoc?.y, NaN),
+      width: asNumber(tokenDoc?.width, NaN),
+      height: asNumber(tokenDoc?.height, NaN)
+    };
+  }
+
+  /**
+   * @returns {number}
+   */
+  _nowMs() {
+    if (globalThis?.performance && typeof globalThis.performance.now === 'function') {
+      return globalThis.performance.now();
+    }
+    return Date.now();
+  }
+
+  /**
+   * @param {object} signature
+   * @returns {string}
+   */
+  _serializeGroupPlanSignature(signature) {
+    try {
+      return JSON.stringify(signature || {});
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /**
+   * @returns {{weightedPath:{calls:number,success:number,fail:number,iterationsTotal:number,graphNodeTotal:number,graphEdgeTotal:number,graphTruncatedCount:number,reasonCounts:Record<string,number>}}}
+   */
+  _createPathfindingStatsCollector() {
+    return {
+      weightedPath: {
+        calls: 0,
+        success: 0,
+        fail: 0,
+        iterationsTotal: 0,
+        graphNodeTotal: 0,
+        graphEdgeTotal: 0,
+        graphTruncatedCount: 0,
+        doorSegmentCallsTotal: 0,
+        doorSegmentCacheHitsTotal: 0,
+        reasonCounts: {}
+      }
+    };
+  }
+
+  /**
+   * @param {object|null} statsCollector
+   * @param {{ok:boolean, reason?:string, iterations?:number, graphDiagnostics?:object|null}} result
+   */
+  _recordWeightedPathStats(statsCollector, result = {}) {
+    if (!statsCollector || typeof statsCollector !== 'object') return;
+    if (!statsCollector.weightedPath || typeof statsCollector.weightedPath !== 'object') {
+      statsCollector.weightedPath = this._createPathfindingStatsCollector().weightedPath;
+    }
+
+    const stats = statsCollector.weightedPath;
+    stats.calls += 1;
+    if (result.ok) stats.success += 1;
+    else stats.fail += 1;
+
+    stats.iterationsTotal += Math.max(0, asNumber(result.iterations, 0));
+
+    const graphDiagnostics = result.graphDiagnostics && typeof result.graphDiagnostics === 'object'
+      ? result.graphDiagnostics
+      : null;
+    if (graphDiagnostics) {
+      stats.graphNodeTotal += Math.max(0, asNumber(graphDiagnostics.nodeCount, 0));
+      stats.graphEdgeTotal += Math.max(0, asNumber(graphDiagnostics.edgeCount, 0));
+      if (graphDiagnostics.truncated) stats.graphTruncatedCount += 1;
+      stats.doorSegmentCallsTotal += Math.max(0, asNumber(graphDiagnostics.doorSegmentCalls, 0));
+      stats.doorSegmentCacheHitsTotal += Math.max(0, asNumber(graphDiagnostics.doorSegmentCacheHits, 0));
+    }
+
+    const reasonKey = String(result.reason || (result.ok ? 'ok' : 'unknown'));
+    stats.reasonCounts[reasonKey] = asNumber(stats.reasonCounts[reasonKey], 0) + 1;
+  }
+
+  /**
+   * @param {object|null} statsCollector
+   * @returns {object|null}
+   */
+  _summarizePathfindingStats(statsCollector) {
+    const stats = statsCollector?.weightedPath;
+    if (!stats) return null;
+
+    const calls = Math.max(0, asNumber(stats.calls, 0));
+    return {
+      calls,
+      success: Math.max(0, asNumber(stats.success, 0)),
+      fail: Math.max(0, asNumber(stats.fail, 0)),
+      avgIterations: calls > 0 ? (asNumber(stats.iterationsTotal, 0) / calls) : 0,
+      avgGraphNodes: calls > 0 ? (asNumber(stats.graphNodeTotal, 0) / calls) : 0,
+      avgGraphEdges: calls > 0 ? (asNumber(stats.graphEdgeTotal, 0) / calls) : 0,
+      truncatedGraphs: Math.max(0, asNumber(stats.graphTruncatedCount, 0)),
+      doorSegmentCalls: Math.max(0, asNumber(stats.doorSegmentCallsTotal, 0)),
+      doorSegmentCacheHits: Math.max(0, asNumber(stats.doorSegmentCacheHitsTotal, 0)),
+      doorSegmentCacheHitRate: asNumber(stats.doorSegmentCallsTotal, 0) > 0
+        ? (asNumber(stats.doorSegmentCacheHitsTotal, 0) / asNumber(stats.doorSegmentCallsTotal, 0))
+        : 0,
+      reasonCounts: { ...(stats.reasonCounts || {}) }
+    };
+  }
+
+  /**
+   * @param {number} groupSize
+   * @returns {{maxRadiusCells:number, maxCandidatesPerToken:number, pathEvalCandidates:number}}
+   */
+  _getAdaptiveGroupCandidateDefaults(groupSize) {
+    const size = Math.max(1, Math.round(asNumber(groupSize, 1)));
+    if (size <= 3) return { maxRadiusCells: 8, maxCandidatesPerToken: 14, pathEvalCandidates: 8 };
+    if (size <= 5) return { maxRadiusCells: 9, maxCandidatesPerToken: 16, pathEvalCandidates: 10 };
+    if (size <= 8) return { maxRadiusCells: 10, maxCandidatesPerToken: 20, pathEvalCandidates: 12 };
+    return { maxRadiusCells: 12, maxCandidatesPerToken: 24, pathEvalCandidates: 14 };
+  }
+
+  /**
+   * @param {{startMs:number,budgetMs:number,triggered?:boolean,overrunMs?:number}|null} planBudget
+   * @returns {boolean}
+   */
+  _isGroupPlanningBudgetExceeded(planBudget) {
+    if (!planBudget || !Number.isFinite(asNumber(planBudget.budgetMs, NaN)) || asNumber(planBudget.budgetMs, 0) <= 0) {
+      return false;
+    }
+    const elapsedMs = this._nowMs() - asNumber(planBudget.startMs, 0);
+    if (elapsedMs <= asNumber(planBudget.budgetMs, 0)) return false;
+    planBudget.triggered = true;
+    planBudget.overrunMs = Math.max(asNumber(planBudget.overrunMs, 0), elapsedMs - asNumber(planBudget.budgetMs, 0));
+    return true;
+  }
+
+  /**
+   * Build one-shot expanded planning options after a failed group plan.
+   *
+   * @param {object} options
+   * @param {{reason?:string}|null} planResult
+   * @returns {object|null}
+   */
+  _buildGroupPlanRetryOptions(options = {}, planResult = null) {
+    if (optionsBoolean(options?.groupPlanRetryDisabled, false)) return null;
+    if (optionsBoolean(options?.__groupPlanRetried, false)) return null;
+
+    const reason = String(planResult?.reason || '');
+    const retryableReasons = [
+      'group-assignment-failed',
+      'no-non-overlap-assignment',
+      'backtrack-budget-exceeded',
+      'no-group-candidate-'
+    ];
+    const isRetryable = retryableReasons.some((needle) => reason.includes(needle));
+    if (!isRetryable) return null;
+
+    const baseMaxNodes = Math.max(256, asNumber(options?.maxGraphNodes, 6000));
+    const baseIterations = Math.max(256, asNumber(options?.maxSearchIterations, 12000));
+    const baseSearchMargin = Math.max(0, asNumber(options?.searchMarginPx, 260));
+    const baseGroupCandidates = Math.max(4, asNumber(options?.groupMaxCandidatesPerToken, 16));
+    const basePathEvalCandidates = Math.max(4, asNumber(options?.groupPathEvalCandidatesPerToken, 10));
+
+    return {
+      ...options,
+      __groupPlanRetried: true,
+      searchMarginPx: clamp(baseSearchMargin + 180, 120, 1800),
+      maxGraphNodes: clamp(Math.round(baseMaxNodes * 1.5), 1000, 18000),
+      maxSearchIterations: clamp(Math.round(baseIterations * 1.35), 1000, 26000),
+      groupMaxCandidatesPerToken: clamp(Math.round(baseGroupCandidates + 4), 6, 48),
+      groupPathEvalCandidatesPerToken: clamp(Math.round(basePathEvalCandidates + 4), 4, 30),
+      groupPlanningBudgetMs: clamp(asNumber(options?.groupPlanningBudgetMs, 280) + 120, 40, 1600),
+      groupBacktrackBudgetMs: clamp(asNumber(options?.groupBacktrackBudgetMs, 45) + 25, 5, 2500),
+      groupBacktrackNodeLimit: clamp(Math.round(asNumber(options?.groupBacktrackNodeLimit, 30000) * 1.5), 5000, 600000),
+      // For clustered right-click moves this can over-constrain dense scenes.
+      // Retry once with relaxed side-enforcement to recover valid plans.
+      enforceAnchorSide: options?.enforceAnchorSide ? false : optionsBoolean(options?.enforceAnchorSide, false)
+    };
+  }
+
+  /**
+   * Run weighted path search with a single bounded expansion retry when initial
+   * search likely failed due constrained bounds/budgets.
+   *
+   * @param {object} params
+   * @param {{x:number,y:number}} params.start
+   * @param {{x:number,y:number}} params.end
+   * @param {TokenDocument|object|null} [params.tokenDoc]
+   * @param {object} [params.options]
+   * @param {{cancelled:boolean}|null} [params.cancelToken]
+   * @param {boolean} [params.preferLongRange]
+   * @returns {{ok:boolean,pathNodes:Array<{x:number,y:number}>,reason?:string,diagnostics?:object,adaptiveExpansionUsed?:boolean,initialReason?:string}}
+   */
+  _findWeightedPathWithAdaptiveExpansion({
+    start,
+    end,
+    tokenDoc = null,
+    options = {},
+    cancelToken = null,
+    preferLongRange = false
+  } = {}) {
+    const baseOptions = options && typeof options === 'object'
+      ? { ...options }
+      : {};
+
+    const firstResult = this.findWeightedPath({
+      start,
+      end,
+      tokenDoc,
+      options: baseOptions,
+      cancelToken
+    });
+
+    if (firstResult?.ok || optionsBoolean(baseOptions?.ignoreWalls, false)) {
+      return {
+        ...(firstResult || { ok: false, pathNodes: [], reason: 'weighted-path-failed' }),
+        adaptiveExpansionUsed: false
+      };
+    }
+
+    if (optionsBoolean(baseOptions?.disableAdaptivePathExpansion, false)
+      || optionsBoolean(baseOptions?.__adaptivePathExpansionApplied, false)) {
+      return {
+        ...(firstResult || { ok: false, pathNodes: [], reason: 'weighted-path-failed' }),
+        adaptiveExpansionUsed: false
+      };
+    }
+
+    const reason = String(firstResult?.reason || '');
+    const graphDiagnostics = firstResult?.diagnostics?.graphDiagnostics || null;
+    const retryableReason = reason === 'no-path' || reason === 'max-iterations';
+    const graphTruncated = optionsBoolean(graphDiagnostics?.truncated, false);
+    const lowConnectivity = asNumber(graphDiagnostics?.nodeCount, 0) <= 28;
+    const shouldRetry = retryableReason
+      && (graphTruncated || lowConnectivity || preferLongRange || reason === 'max-iterations');
+
+    if (!shouldRetry) {
+      return {
+        ...(firstResult || { ok: false, pathNodes: [], reason: 'weighted-path-failed' }),
+        adaptiveExpansionUsed: false
+      };
+    }
+
+    const startX = asNumber(start?.x, 0);
+    const startY = asNumber(start?.y, 0);
+    const endX = asNumber(end?.x, 0);
+    const endY = asNumber(end?.y, 0);
+    const directDistance = Math.hypot(endX - startX, endY - startY);
+
+    const baseMargin = Math.max(0, asNumber(baseOptions?.searchMarginPx, 260));
+    const expandedMargin = preferLongRange
+      ? Math.max(baseMargin + 260, (directDistance * 0.9) + 240)
+      : Math.max(baseMargin + 180, (directDistance * 0.6) + 180);
+
+    const baseGraphNodes = Math.max(128, asNumber(baseOptions?.maxGraphNodes, 6000));
+    const baseIterations = Math.max(64, asNumber(baseOptions?.maxSearchIterations, 12000));
+
+    const retryOptions = {
+      ...baseOptions,
+      __adaptivePathExpansionApplied: true,
+      suppressNoPathLog: true,
+      searchMarginPx: clamp(Math.round(expandedMargin), 120, 2800),
+      maxGraphNodes: clamp(Math.round(baseGraphNodes * 1.8), 1000, 24000),
+      maxSearchIterations: clamp(Math.round(baseIterations * 1.6), 1000, 38000)
+    };
+
+    const retryResult = this.findWeightedPath({
+      start,
+      end,
+      tokenDoc,
+      options: retryOptions,
+      cancelToken
+    });
+
+    return {
+      ...(retryResult || { ok: false, pathNodes: [], reason: 'weighted-path-failed' }),
+      adaptiveExpansionUsed: true,
+      initialReason: reason || null
+    };
+  }
+
+  /**
+   * Build per-token destination slots around the anchor to reduce endpoint
+   * overlap pressure in dense group arrivals.
+   *
+   * @param {Array<{tokenId:string,startCenter:{x:number,y:number}}>} entries
+   * @param {{x:number,y:number}} anchorCenter
+   * @param {object} [options]
+   * @returns {Map<string, {x:number,y:number,ring:number,angle:number}>}
+   */
+  _buildGroupFormationSlots(entries = [], anchorCenter = { x: 0, y: 0 }, options = {}) {
+    const list = Array.isArray(entries) ? entries.filter((e) => !!e?.tokenId) : [];
+    const slots = new Map();
+    if (list.length <= 1) return slots;
+
+    const gridSize = Math.max(1, asNumber(canvas?.grid?.size, asNumber(canvas?.dimensions?.size, 100)));
+    const maxRingSize = clamp(Math.round(asNumber(options?.groupFormationRingSize, 8)), 4, 16);
+    const baseRadius = Math.max(
+      gridSize * 0.9,
+      asNumber(options?.groupFormationRadiusPx, gridSize * (list.length <= 5 ? 1.2 : 1.5))
+    );
+
+    // Preserve relative ordering by sorting on current angle around group centroid.
+    const centroid = list.reduce((acc, entry) => {
+      acc.x += asNumber(entry?.startCenter?.x, 0);
+      acc.y += asNumber(entry?.startCenter?.y, 0);
+      return acc;
+    }, { x: 0, y: 0 });
+    centroid.x /= Math.max(1, list.length);
+    centroid.y /= Math.max(1, list.length);
+
+    const sorted = list.slice().sort((a, b) => {
+      const aa = Math.atan2(asNumber(a?.startCenter?.y, 0) - centroid.y, asNumber(a?.startCenter?.x, 0) - centroid.x);
+      const bb = Math.atan2(asNumber(b?.startCenter?.y, 0) - centroid.y, asNumber(b?.startCenter?.x, 0) - centroid.x);
+      return aa - bb;
+    });
+
+    const anchorX = asNumber(anchorCenter?.x, 0);
+    const anchorY = asNumber(anchorCenter?.y, 0);
+    let cursor = 0;
+    let ring = 0;
+    while (cursor < sorted.length) {
+      const remaining = sorted.length - cursor;
+      const ringCount = Math.max(1, Math.min(remaining, maxRingSize + (ring * 4)));
+      const ringRadius = baseRadius + (ring * gridSize * 0.95);
+
+      for (let i = 0; i < ringCount; i++) {
+        const entry = sorted[cursor + i];
+        const angle = ((Math.PI * 2) * i / ringCount) - (Math.PI / 2);
+        slots.set(entry.tokenId, {
+          x: anchorX + (Math.cos(angle) * ringRadius),
+          y: anchorY + (Math.sin(angle) * ringRadius),
+          ring,
+          angle
+        });
+      }
+
+      cursor += ringCount;
+      ring += 1;
+    }
+
+    return slots;
+  }
+
+  /**
+   * @param {object} params
+   * @param {Array<{tokenDoc: TokenDocument|object, destinationTopLeft: {x:number,y:number}}>} params.tokenMoves
+   * @param {object} params.options
+   * @returns {object}
+   */
+  _buildGroupPlanSignature({ tokenMoves = [], options = {} } = {}) {
+    const moves = Array.isArray(tokenMoves) ? tokenMoves : [];
+    const normalizedMoves = [];
+
+    for (const move of moves) {
+      const tokenId = String(move?.tokenDoc?.id || move?._id || '');
+      if (!tokenId) continue;
+
+      const liveDoc = this._resolveTokenDocumentById(tokenId, move?.tokenDoc);
+      if (!liveDoc) continue;
+
+      const destX = asNumber(move?.destinationTopLeft?.x, NaN);
+      const destY = asNumber(move?.destinationTopLeft?.y, NaN);
+      if (!Number.isFinite(destX) || !Number.isFinite(destY)) continue;
+
+      const snappedDestination = this._snapTokenTopLeftToGrid({ x: destX, y: destY }, liveDoc);
+      normalizedMoves.push({
+        tokenId,
+        startX: Math.round(asNumber(liveDoc?.x, 0)),
+        startY: Math.round(asNumber(liveDoc?.y, 0)),
+        destinationX: Math.round(asNumber(snappedDestination?.x, 0)),
+        destinationY: Math.round(asNumber(snappedDestination?.y, 0))
+      });
+    }
+
+    normalizedMoves.sort((a, b) => a.tokenId.localeCompare(b.tokenId));
+
+    const signatureOptions = {
+      ignoreWalls: optionsBoolean(options?.ignoreWalls, false),
+      ignoreCost: optionsBoolean(options?.ignoreCost, false),
+      allowDiagonal: optionsBoolean(options?.allowDiagonal, true),
+      fogPathPolicy: String(options?.fogPathPolicy || this.settings.fogPathPolicy || 'strictNoFogPath'),
+      enforceAnchorSide: optionsBoolean(options?.enforceAnchorSide, false),
+      groupAnchorTokenId: String(options?.groupAnchorTokenId || ''),
+      groupAnchorTopLeftX: Math.round(asNumber(options?.groupAnchorTopLeft?.x, NaN)),
+      groupAnchorTopLeftY: Math.round(asNumber(options?.groupAnchorTopLeft?.y, NaN)),
+      groupMaxRadiusCells: Math.round(asNumber(options?.groupMaxRadiusCells, NaN)),
+      groupMaxCandidatesPerToken: Math.round(asNumber(options?.groupMaxCandidatesPerToken, NaN)),
+      groupPathEvalCandidatesPerToken: Math.round(asNumber(options?.groupPathEvalCandidatesPerToken, NaN)),
+      groupBudgetMinCandidatesPerToken: Math.round(asNumber(options?.groupBudgetMinCandidatesPerToken, NaN)),
+      groupBacktrackTokenLimit: Math.round(asNumber(options?.groupBacktrackTokenLimit, NaN)),
+      groupBacktrackBudgetMs: Math.round(asNumber(options?.groupBacktrackBudgetMs, NaN)),
+      groupBacktrackNodeLimit: Math.round(asNumber(options?.groupBacktrackNodeLimit, NaN)),
+      maxSearchIterations: Math.round(asNumber(options?.maxSearchIterations, NaN)),
+      maxGraphNodes: Math.round(asNumber(options?.maxGraphNodes, NaN)),
+      searchMarginPx: Math.round(asNumber(options?.searchMarginPx, NaN)),
+      latticeStepPx: Math.round(asNumber(options?.latticeStepPx, NaN)),
+      groupPlanningBudgetMs: Math.round(asNumber(options?.groupPlanningBudgetMs, NaN))
+    };
+
+    return {
+      doorStateRevision: this._doorStateRevision,
+      inCombat: this._inCombat,
+      moves: normalizedMoves,
+      options: signatureOptions
+    };
+  }
+
+  /**
+   * @param {object} params
+   * @param {Array<{tokenDoc: TokenDocument|object, destinationTopLeft: {x:number,y:number}}>} params.tokenMoves
+   * @param {object} params.options
+   * @param {object} params.planResult
+   * @returns {string}
+   */
+  _storeGroupPlanCacheEntry({ tokenMoves = [], options = {}, planResult = null } = {}) {
+    if (!planResult?.ok) return '';
+
+    this._purgeExpiredGroupPlanCache();
+
+    const signatureJson = this._serializeGroupPlanSignature(this._buildGroupPlanSignature({ tokenMoves, options }));
+    if (!signatureJson) return '';
+
+    const cacheKey = `group-plan-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    this._groupPlanCache.set(cacheKey, {
+      createdAtMs: this._nowMs(),
+      signatureJson,
+      planResult
+    });
+
+    // Keep cache bounded by dropping oldest entries.
+    if (this._groupPlanCache.size > this._groupPlanCacheMaxEntries) {
+      const entries = [...this._groupPlanCache.entries()]
+        .sort((a, b) => asNumber(a[1]?.createdAtMs, 0) - asNumber(b[1]?.createdAtMs, 0));
+      const dropCount = this._groupPlanCache.size - this._groupPlanCacheMaxEntries;
+      for (let i = 0; i < dropCount; i++) {
+        this._groupPlanCache.delete(entries[i][0]);
+      }
+    }
+
+    return cacheKey;
+  }
+
+  /**
+   * @param {string} cacheKey
+   * @param {object} params
+   * @param {Array<{tokenDoc: TokenDocument|object, destinationTopLeft: {x:number,y:number}}>} params.tokenMoves
+   * @param {object} params.options
+   * @returns {object|null}
+   */
+  _consumeGroupPlanCacheEntry(cacheKey, { tokenMoves = [], options = {} } = {}) {
+    const key = String(cacheKey || '');
+    if (!key) return null;
+
+    this._purgeExpiredGroupPlanCache();
+
+    const cached = this._groupPlanCache.get(key);
+    if (!cached) return null;
+
+    // One-shot consumption keeps the cache fresh and avoids stale reuse.
+    this._groupPlanCache.delete(key);
+
+    const expectedSignatureJson = this._serializeGroupPlanSignature(this._buildGroupPlanSignature({ tokenMoves, options }));
+    if (!expectedSignatureJson || cached.signatureJson !== expectedSignatureJson) {
+      return null;
+    }
+
+    return cached.planResult || null;
+  }
+
+  _purgeExpiredGroupPlanCache() {
+    if (!this._groupPlanCache || this._groupPlanCache.size === 0) return;
+    const nowMs = this._nowMs();
+    const ttlMs = Math.max(1, asNumber(this._groupPlanCacheTtlMs, 8000));
+    for (const [key, entry] of this._groupPlanCache.entries()) {
+      const ageMs = nowMs - asNumber(entry?.createdAtMs, 0);
+      if (ageMs > ttlMs) {
+        this._groupPlanCache.delete(key);
+      }
+    }
+  }
+
   initialize() {
     if (this.initialized) return;
 
@@ -128,6 +769,7 @@ export class TokenMovementManager {
     this._setupHooks();
 
     this.initialized = true;
+    this._schedulePathfindingPrewarm('initialize', 220);
     log.info('TokenMovementManager initialized');
   }
 
@@ -152,6 +794,20 @@ export class TokenMovementManager {
       }
     }
 
+    this._activeMoveLocks.clear();
+    this._groupMoveLock = null;
+    this._groupPlanCache.clear();
+
+    if (this._pathPrewarmTimer) {
+      clearTimeout(this._pathPrewarmTimer);
+      this._pathPrewarmTimer = null;
+    }
+    this._doorSpatialIndex = null;
+    this._hpaSectorIndex = null;
+    this._hpaAdjacencyCache.clear();
+    this._pathPrewarmLastSceneId = '';
+    this._pathPrewarmLastRevision = -1;
+
     this.tokenStyleOverrides.clear();
     this.initialized = false;
 
@@ -165,22 +821,718 @@ export class TokenMovementManager {
    */
   setDependencies({ tokenManager = null, wallManager = null } = {}) {
     if (tokenManager !== null) this.tokenManager = tokenManager;
-    if (wallManager !== null) this.wallManager = wallManager;
+    if (wallManager !== null) {
+      this.wallManager = wallManager;
+      this._doorSpatialIndex = null;
+      this._hpaSectorIndex = null;
+      this._hpaAdjacencyCache.clear();
+      this._pathPrewarmLastRevision = -1;
+    }
+  }
+
+  /**
+   * @param {string} [reason]
+   */
+  _markPathfindingTopologyDirty(reason = '') {
+    this._doorStateRevision += 1;
+    this._doorSpatialIndex = null;
+    this._hpaSectorIndex = null;
+    this._hpaAdjacencyCache.clear();
+    this._pathPrewarmLastRevision = -1;
+    this._schedulePathfindingPrewarm(reason || 'topology-dirty', 180);
+  }
+
+  /**
+   * @param {string} [reason]
+   * @param {number} [delayMs]
+   */
+  _schedulePathfindingPrewarm(reason = '', delayMs = 140) {
+    if (!this.initialized) return;
+
+    if (this._pathPrewarmTimer) {
+      clearTimeout(this._pathPrewarmTimer);
+      this._pathPrewarmTimer = null;
+    }
+
+    const delay = Math.max(0, Math.round(asNumber(delayMs, 140)));
+    this._pathPrewarmTimer = setTimeout(() => {
+      this._pathPrewarmTimer = null;
+
+      const run = () => {
+        try {
+          this._runPathfindingPrewarm(reason || 'scheduled');
+        } catch (_) {
+        }
+      };
+
+      if (typeof globalThis?.requestIdleCallback === 'function') {
+        try {
+          globalThis.requestIdleCallback(() => run(), { timeout: 300 });
+          return;
+        } catch (_) {
+        }
+      }
+
+      run();
+    }, delay);
+  }
+
+  /**
+   * @param {string} [reason]
+   */
+  _runPathfindingPrewarm(reason = '') {
+    if (!this.initialized) return;
+
+    const sceneId = String(canvas?.scene?.id || '');
+    if (!sceneId) return;
+
+    if (this._pathPrewarmLastSceneId === sceneId && this._pathPrewarmLastRevision === this._doorStateRevision) {
+      return;
+    }
+
+    const startMs = this._nowMs();
+    const doorIndex = this._buildDoorSpatialIndex({ force: true });
+    const hpaIndex = this._buildHpaSectorIndex({ force: true });
+    if (!doorIndex && !hpaIndex) return;
+
+    // Pre-build the HPA adjacency graph for the most common token size (1×1)
+    // so the first pathfinding request doesn't pay the gateway scan cost.
+    // Uses a synthetic 1×1 tokenDoc stub since adjacency is keyed by token
+    // dimensions and collision mode.
+    let hpaAdjacencyEdgeCount = 0;
+    if (hpaIndex) {
+      const stubTokenDoc = { width: 1, height: 1 };
+      const adjacencyResult = this._buildHpaAdjacency({
+        tokenDoc: stubTokenDoc,
+        options: { allowDiagonal: true, collisionMode: 'closest' },
+        index: hpaIndex
+      });
+      if (adjacencyResult?.adjacency instanceof Map) {
+        for (const edges of adjacencyResult.adjacency.values()) {
+          hpaAdjacencyEdgeCount += Array.isArray(edges) ? edges.length : 0;
+        }
+      }
+    }
+
+    this._pathPrewarmLastSceneId = sceneId;
+    this._pathPrewarmLastRevision = this._doorStateRevision;
+
+    this._pathfindingLog('debug', 'pathfinding prewarm complete', {
+      reason: String(reason || ''),
+      sceneId,
+      doorCount: Array.isArray(doorIndex?.doorEntries) ? doorIndex.doorEntries.length : 0,
+      bucketCount: doorIndex?.buckets instanceof Map ? doorIndex.buckets.size : 0,
+      hpaSectorCount: Array.isArray(hpaIndex?.sectors) ? hpaIndex.sectors.length : 0,
+      hpaAdjacencyEdgeCount,
+      prewarmMs: this._nowMs() - startMs
+    });
+  }
+
+  /**
+   * @param {{force?:boolean, sectorSize?:number}} [options]
+   * @returns {{sceneId:string, revision:number, sectorSize:number, cols:number, rows:number, sceneRect:{x:number,y:number,width:number,height:number}, sectors:Array<object>, sectorsById:Map<string, object>, builtAtMs:number}|null}
+   */
+  _buildHpaSectorIndex({ force = false, sectorSize = NaN } = {}) {
+    const sceneId = String(canvas?.scene?.id || '');
+    if (!sceneId) return null;
+
+    const dimensions = canvas?.dimensions;
+    const sceneRect = dimensions?.sceneRect || {
+      x: 0,
+      y: 0,
+      width: asNumber(dimensions?.width, 0),
+      height: asNumber(dimensions?.height, 0)
+    };
+
+    const gridSize = Math.max(1, asNumber(canvas?.grid?.size, asNumber(dimensions?.size, 100)));
+    const resolvedSectorSize = clamp(
+      Math.round(asNumber(sectorSize, asNumber(this.settings?.hpaSectorSizePx, gridSize * 8))),
+      Math.max(64, gridSize * 2),
+      2048
+    );
+
+    const revision = this._doorStateRevision;
+    const cached = this._hpaSectorIndex;
+    if (
+      !force
+      && cached
+      && cached.sceneId === sceneId
+      && cached.revision === revision
+      && cached.sectorSize === resolvedSectorSize
+    ) {
+      return cached;
+    }
+
+    const cols = Math.max(1, Math.ceil(asNumber(sceneRect?.width, 0) / resolvedSectorSize));
+    const rows = Math.max(1, Math.ceil(asNumber(sceneRect?.height, 0) / resolvedSectorSize));
+    const sectors = [];
+    const sectorsById = new Map();
+
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const minX = asNumber(sceneRect?.x, 0) + (col * resolvedSectorSize);
+        const minY = asNumber(sceneRect?.y, 0) + (row * resolvedSectorSize);
+        const maxX = Math.min(asNumber(sceneRect?.x, 0) + asNumber(sceneRect?.width, 0), minX + resolvedSectorSize);
+        const maxY = Math.min(asNumber(sceneRect?.y, 0) + asNumber(sceneRect?.height, 0), minY + resolvedSectorSize);
+        const id = `${col}:${row}`;
+        const sector = {
+          id,
+          col,
+          row,
+          bounds: { minX, minY, maxX, maxY },
+          center: {
+            x: (minX + maxX) * 0.5,
+            y: (minY + maxY) * 0.5
+          }
+        };
+        sectors.push(sector);
+        sectorsById.set(id, sector);
+      }
+    }
+
+    const index = {
+      sceneId,
+      revision,
+      sectorSize: resolvedSectorSize,
+      cols,
+      rows,
+      sceneRect,
+      sectors,
+      sectorsById,
+      builtAtMs: this._nowMs()
+    };
+
+    this._hpaSectorIndex = index;
+    return index;
+  }
+
+  /**
+   * @param {{x:number,y:number}} point
+   * @param {{sceneRect:{x:number,y:number,width:number,height:number}, sectorSize:number, cols:number, rows:number}} index
+   * @returns {string}
+   */
+  _getHpaSectorIdForPoint(point, index) {
+    const x = asNumber(point?.x, 0);
+    const y = asNumber(point?.y, 0);
+    const sx = asNumber(index?.sceneRect?.x, 0);
+    const sy = asNumber(index?.sceneRect?.y, 0);
+    const sectorSize = Math.max(1, asNumber(index?.sectorSize, 1));
+    const col = clamp(Math.floor((x - sx) / sectorSize), 0, Math.max(0, asNumber(index?.cols, 1) - 1));
+    const row = clamp(Math.floor((y - sy) / sectorSize), 0, Math.max(0, asNumber(index?.rows, 1) - 1));
+    return `${col}:${row}`;
+  }
+
+  /**
+   * @param {object} params
+   * @param {object} params.a
+   * @param {object} params.b
+   * @param {TokenDocument|object|null} params.tokenDoc
+   * @param {object} params.options
+   * @param {number} params.gridSize
+   * @returns {{a:{x:number,y:number}, b:{x:number,y:number}, cost:number}|null}
+   */
+  _buildHpaGatewayBetweenSectors({ a, b, tokenDoc = null, options = {}, gridSize = 100 } = {}) {
+    const dx = asNumber(b?.col, 0) - asNumber(a?.col, 0);
+    const dy = asNumber(b?.row, 0) - asNumber(a?.row, 0);
+    const manhattan = Math.abs(dx) + Math.abs(dy);
+    // Support cardinal (manhattan=1) and diagonal (manhattan=2) adjacency.
+    if (manhattan < 1 || manhattan > 2) return null;
+
+    const aBounds = a?.bounds;
+    const bBounds = b?.bounds;
+    if (!aBounds || !bBounds) return null;
+
+    const sampleStep = Math.max(16, Math.round(gridSize * 0.5));
+    const samplePad = Math.max(6, Math.round(gridSize * 0.18));
+
+    const collisionCtx = {
+      tokenDoc,
+      options: {
+        ...options,
+        ignoreWalls: false,
+        collisionMode: options?.collisionMode || 'closest'
+      }
+    };
+    const segmentCheck = (pA, pB) => {
+      return !!this._validatePathSegmentCollision(pA, pB, collisionCtx)?.ok;
+    };
+
+    const centerCost = Math.hypot(
+      asNumber(b?.center?.x, 0) - asNumber(a?.center?.x, 0),
+      asNumber(b?.center?.y, 0) - asNumber(a?.center?.y, 0)
+    );
+
+    // For diagonal adjacency, test a direct center-to-center crossing at the
+    // shared corner point. If passable, create a gateway there.
+    if (manhattan === 2) {
+      const cornerX = dx > 0 ? asNumber(aBounds?.maxX, 0) : asNumber(aBounds?.minX, 0);
+      const cornerY = dy > 0 ? asNumber(aBounds?.maxY, 0) : asNumber(aBounds?.minY, 0);
+      const pA = {
+        x: cornerX - (dx > 0 ? samplePad : -samplePad),
+        y: cornerY - (dy > 0 ? samplePad : -samplePad)
+      };
+      const pB = {
+        x: cornerX + (dx > 0 ? samplePad : -samplePad),
+        y: cornerY + (dy > 0 ? samplePad : -samplePad)
+      };
+      if (segmentCheck(pA, pB)) {
+        return { a: pA, b: pB, cost: centerCost };
+      }
+      return null;
+    }
+
+    // Cardinal adjacency — scan all sample points along the shared border and
+    // pick the most central passable one (best gateway quality).
+    /**
+     * @param {number} borderFixed - The fixed coordinate on the border axis
+     * @param {number} rangeMin - Start of the shared range on the sweep axis
+     * @param {number} rangeMax - End of the shared range on the sweep axis
+     * @param {boolean} horizontal - true if border is vertical (dx≠0), sweep is Y
+     * @returns {{a:{x:number,y:number}, b:{x:number,y:number}, cost:number}|null}
+     */
+    const scanBorder = (borderFixed, rangeMin, rangeMax, horizontal) => {
+      if (rangeMax <= rangeMin) return null;
+      const rangeMid = (rangeMin + rangeMax) * 0.5;
+
+      // Collect all passable sample points along the border.
+      /** @type {Array<{coord:number, pA:{x:number,y:number}, pB:{x:number,y:number}}>} */
+      const passable = [];
+      for (let coord = rangeMin + sampleStep * 0.5; coord < rangeMax; coord += sampleStep) {
+        let pA, pB;
+        if (horizontal) {
+          const sign = dx > 0 ? 1 : -1;
+          pA = { x: borderFixed - sign * samplePad, y: coord };
+          pB = { x: borderFixed + sign * samplePad, y: coord };
+        } else {
+          const sign = dy > 0 ? 1 : -1;
+          pA = { x: coord, y: borderFixed - sign * samplePad };
+          pB = { x: coord, y: borderFixed + sign * samplePad };
+        }
+        if (segmentCheck(pA, pB)) {
+          passable.push({ coord, pA, pB });
+        }
+      }
+
+      if (passable.length === 0) return null;
+
+      // Pick the sample closest to the midpoint of the shared border — this
+      // produces the most useful gateway for routing through sector centers.
+      let bestIdx = 0;
+      let bestDist = Math.abs(passable[0].coord - rangeMid);
+      for (let i = 1; i < passable.length; i++) {
+        const dist = Math.abs(passable[i].coord - rangeMid);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestIdx = i;
+        }
+      }
+
+      return {
+        a: passable[bestIdx].pA,
+        b: passable[bestIdx].pB,
+        cost: centerCost
+      };
+    };
+
+    if (dx !== 0) {
+      const borderX = dx > 0 ? asNumber(aBounds?.maxX, 0) : asNumber(aBounds?.minX, 0);
+      const minY = Math.max(asNumber(aBounds?.minY, 0), asNumber(bBounds?.minY, 0));
+      const maxY = Math.min(asNumber(aBounds?.maxY, 0), asNumber(bBounds?.maxY, 0));
+      return scanBorder(borderX, minY, maxY, true);
+    }
+
+    const borderY = dy > 0 ? asNumber(aBounds?.maxY, 0) : asNumber(aBounds?.minY, 0);
+    const minX = Math.max(asNumber(aBounds?.minX, 0), asNumber(bBounds?.minX, 0));
+    const maxX = Math.min(asNumber(aBounds?.maxX, 0), asNumber(bBounds?.maxX, 0));
+    return scanBorder(borderY, minX, maxX, false);
+  }
+
+  /**
+   * @param {{tokenDoc?:TokenDocument|object|null, options?:object, index?:object}} params
+   * @returns {{adjacency:Map<string, Array<object>>, index:object}|null}
+   */
+  _buildHpaAdjacency({ tokenDoc = null, options = {}, index = null } = {}) {
+    const sectorIndex = index || this._buildHpaSectorIndex();
+    if (!sectorIndex) return null;
+
+    const widthCells = Math.max(1, Math.round(asNumber(tokenDoc?.width, 1)));
+    const heightCells = Math.max(1, Math.round(asNumber(tokenDoc?.height, 1)));
+    const cacheKey = [
+      sectorIndex.sceneId,
+      sectorIndex.revision,
+      sectorIndex.sectorSize,
+      widthCells,
+      heightCells,
+      optionsBoolean(options?.allowDiagonal, true) ? 1 : 0,
+      String(options?.collisionMode || 'closest')
+    ].join('|');
+
+    const cached = this._hpaAdjacencyCache.get(cacheKey);
+    if (cached && cached.sceneId === sectorIndex.sceneId && cached.revision === sectorIndex.revision) {
+      return { adjacency: cached.adjacency, index: sectorIndex };
+    }
+
+    const adjacency = new Map();
+    const gridSize = Math.max(1, asNumber(canvas?.grid?.size, asNumber(canvas?.dimensions?.size, 100)));
+    // Cardinal + diagonal neighbors for richer sector connectivity.
+    // Diagonal edges let HPA route around large wall complexes that block
+    // all cardinal crossings between two sectors.
+    const neighbors = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+      [1, 1],
+      [1, -1],
+      [-1, 1],
+      [-1, -1]
+    ];
+
+    const addEdge = (fromId, edge) => {
+      let list = adjacency.get(fromId);
+      if (!list) {
+        list = [];
+        adjacency.set(fromId, list);
+      }
+      list.push(edge);
+    };
+
+    for (const sector of sectorIndex.sectors) {
+      for (const [dx, dy] of neighbors) {
+        const nCol = asNumber(sector?.col, 0) + dx;
+        const nRow = asNumber(sector?.row, 0) + dy;
+        if (nCol < 0 || nRow < 0 || nCol >= sectorIndex.cols || nRow >= sectorIndex.rows) continue;
+
+        const neighborId = `${nCol}:${nRow}`;
+        if (String(sector?.id || '') >= neighborId) continue;
+
+        const neighbor = sectorIndex.sectorsById.get(neighborId);
+        if (!neighbor) continue;
+
+        const gateway = this._buildHpaGatewayBetweenSectors({
+          a: sector,
+          b: neighbor,
+          tokenDoc,
+          options,
+          gridSize
+        });
+        if (!gateway) continue;
+
+        addEdge(sector.id, {
+          toId: neighbor.id,
+          cost: asNumber(gateway?.cost, gridSize),
+          fromGateway: gateway.a,
+          toGateway: gateway.b
+        });
+        addEdge(neighbor.id, {
+          toId: sector.id,
+          cost: asNumber(gateway?.cost, gridSize),
+          fromGateway: gateway.b,
+          toGateway: gateway.a
+        });
+      }
+    }
+
+    this._hpaAdjacencyCache.set(cacheKey, {
+      sceneId: sectorIndex.sceneId,
+      revision: sectorIndex.revision,
+      sectorSize: sectorIndex.sectorSize,
+      adjacency,
+      builtAtMs: this._nowMs()
+    });
+
+    return { adjacency, index: sectorIndex };
+  }
+
+  /**
+   * @param {object} params
+   * @param {{x:number,y:number}} params.start
+   * @param {{x:number,y:number}} params.end
+   * @param {TokenDocument|object|null} [params.tokenDoc]
+   * @param {object} [params.options]
+   * @param {{cancelled:boolean}|null} [params.cancelToken]
+   * @returns {{ok:boolean,pathNodes:Array<{x:number,y:number}>,diagnostics?:object,reason?:string}}
+   */
+  _findHpaPath({ start, end, tokenDoc = null, options = {}, cancelToken = null } = {}) {
+    const setup = this._buildHpaAdjacency({ tokenDoc, options });
+    if (!setup) return { ok: false, pathNodes: [], reason: 'hpa-unavailable' };
+
+    const { adjacency, index } = setup;
+    const startSectorId = this._getHpaSectorIdForPoint(start, index);
+    const endSectorId = this._getHpaSectorIdForPoint(end, index);
+    if (!startSectorId || !endSectorId) {
+      return { ok: false, pathNodes: [], reason: 'hpa-invalid-sector' };
+    }
+
+    if (startSectorId === endSectorId) {
+      return { ok: false, pathNodes: [], reason: 'hpa-same-sector' };
+    }
+
+    const gScore = new Map([[startSectorId, 0]]);
+    const cameFrom = new Map();
+    const closedSectors = new Set();
+    const getCenter = (id) => index.sectorsById.get(id)?.center || { x: 0, y: 0 };
+    const heuristic = (fromId) => {
+      const a = getCenter(fromId);
+      const b = getCenter(endSectorId);
+      return Math.hypot(asNumber(b?.x, 0) - asNumber(a?.x, 0), asNumber(b?.y, 0) - asNumber(a?.y, 0));
+    };
+
+    // Use BinaryMinHeap for sector-level A* as well.
+    const sectorHeap = new BinaryMinHeap();
+    sectorHeap.push(startSectorId, heuristic(startSectorId));
+
+    let safety = 0;
+    const maxExpand = Math.max(32, index.sectors.length * 4);
+    while (sectorHeap.size > 0 && safety < maxExpand) {
+      safety += 1;
+      if ((safety & 15) === 0 && this._isPathSearchCancelled(cancelToken, this._pathSearchGeneration, options?.shouldCancel)) {
+        return { ok: false, pathNodes: [], reason: 'cancelled' };
+      }
+
+      const bestEntry = sectorHeap.pop();
+      if (!bestEntry) break;
+      const current = bestEntry.key;
+
+      if (closedSectors.has(current)) continue;
+      closedSectors.add(current);
+
+      if (current === endSectorId) {
+        const sectorPath = [current];
+        while (cameFrom.has(sectorPath[0])) {
+          sectorPath.unshift(cameFrom.get(sectorPath[0]).fromId);
+        }
+
+        const waypoints = [{ x: asNumber(start?.x, 0), y: asNumber(start?.y, 0) }];
+        for (let i = 0; i < sectorPath.length - 1; i++) {
+          const fromId = sectorPath[i];
+          const toId = sectorPath[i + 1];
+          const edges = adjacency.get(fromId) || [];
+          const edge = edges.find((e) => String(e?.toId || '') === toId);
+          if (!edge) continue;
+          waypoints.push({ x: asNumber(edge?.fromGateway?.x, 0), y: asNumber(edge?.fromGateway?.y, 0) });
+          waypoints.push({ x: asNumber(edge?.toGateway?.x, 0), y: asNumber(edge?.toGateway?.y, 0) });
+        }
+        waypoints.push({ x: asNumber(end?.x, 0), y: asNumber(end?.y, 0) });
+
+        const refined = [];
+        const localMargin = Math.max(
+          asNumber(options?.searchMarginPx, 260),
+          Math.round(asNumber(index?.sectorSize, 400) * 0.85)
+        );
+        for (let i = 1; i < waypoints.length; i++) {
+          const segment = this.findWeightedPath({
+            start: waypoints[i - 1],
+            end: waypoints[i],
+            tokenDoc,
+            options: {
+              ...options,
+              disableHpa: true,
+              suppressNoPathLog: true,
+              searchMarginPx: localMargin
+            },
+            cancelToken
+          });
+          if (!segment?.ok || !Array.isArray(segment.pathNodes) || segment.pathNodes.length < 2) {
+            return {
+              ok: false,
+              pathNodes: [],
+              reason: 'hpa-refine-failed',
+              diagnostics: {
+                failedSegmentIndex: i,
+                sectorCount: sectorPath.length
+              }
+            };
+          }
+
+          if (refined.length === 0) refined.push(...segment.pathNodes);
+          else refined.push(...segment.pathNodes.slice(1));
+        }
+
+        return {
+          ok: refined.length >= 2,
+          pathNodes: refined,
+          diagnostics: {
+            sectorCount: sectorPath.length,
+            waypointCount: waypoints.length
+          }
+        };
+      }
+
+      const neighbors = adjacency.get(current) || [];
+      const currentG = asNumber(gScore.get(current), Number.POSITIVE_INFINITY);
+      for (const edge of neighbors) {
+        const toId = String(edge?.toId || '');
+        if (!toId || closedSectors.has(toId)) continue;
+
+        const tentative = currentG + Math.max(1, asNumber(edge?.cost, 1));
+        if (tentative >= asNumber(gScore.get(toId), Number.POSITIVE_INFINITY)) continue;
+
+        cameFrom.set(toId, { fromId: current, edge });
+        gScore.set(toId, tentative);
+        sectorHeap.push(toId, tentative + heuristic(toId));
+      }
+    }
+
+    return { ok: false, pathNodes: [], reason: 'hpa-no-path' };
+  }
+
+  /**
+   * @param {{force?:boolean}} [options]
+   * @returns {{sceneId:string, revision:number, doorEntries:Array<object>, buckets:Map<string, Array<object>>, bucketSize:number, builtAtMs:number}|null}
+   */
+  _buildDoorSpatialIndex({ force = false } = {}) {
+    const sceneId = String(canvas?.scene?.id || '');
+    if (!sceneId) return null;
+
+    const revision = this._doorStateRevision;
+    const cached = this._doorSpatialIndex;
+    if (!force && cached && cached.sceneId === sceneId && cached.revision === revision) {
+      return cached;
+    }
+
+    const walls = canvas?.walls?.placeables;
+    const doorEntries = [];
+    const buckets = new Map();
+    const bucketSize = Math.max(64, Math.round(asNumber(canvas?.grid?.size, 100) * 2));
+
+    const addToBucket = (ix, iy, entry) => {
+      const key = `${ix}:${iy}`;
+      let list = buckets.get(key);
+      if (!list) {
+        list = [];
+        buckets.set(key, list);
+      }
+      list.push(entry);
+    };
+
+    if (Array.isArray(walls)) {
+      for (const wall of walls) {
+        const doc = wall?.document;
+        if (!doc) continue;
+
+        const doorType = asNumber(doc.door, DOOR_TYPES.NONE);
+        if (doorType <= DOOR_TYPES.NONE) continue;
+
+        const c = doc.c;
+        if (!Array.isArray(c) || c.length < 4) continue;
+
+        const minX = Math.min(asNumber(c[0], 0), asNumber(c[2], 0));
+        const maxX = Math.max(asNumber(c[0], 0), asNumber(c[2], 0));
+        const minY = Math.min(asNumber(c[1], 0), asNumber(c[3], 0));
+        const maxY = Math.max(asNumber(c[1], 0), asNumber(c[3], 0));
+
+        const entry = {
+          wall,
+          doc,
+          wallId: String(doc.id || doc._id || ''),
+          c: [asNumber(c[0], 0), asNumber(c[1], 0), asNumber(c[2], 0), asNumber(c[3], 0)],
+          minX,
+          minY,
+          maxX,
+          maxY
+        };
+        doorEntries.push(entry);
+
+        const ix0 = Math.floor(minX / bucketSize);
+        const iy0 = Math.floor(minY / bucketSize);
+        const ix1 = Math.floor(maxX / bucketSize);
+        const iy1 = Math.floor(maxY / bucketSize);
+
+        for (let ix = ix0; ix <= ix1; ix++) {
+          for (let iy = iy0; iy <= iy1; iy++) {
+            addToBucket(ix, iy, entry);
+          }
+        }
+      }
+    }
+
+    const index = {
+      sceneId,
+      revision,
+      doorEntries,
+      buckets,
+      bucketSize,
+      builtAtMs: this._nowMs()
+    };
+    this._doorSpatialIndex = index;
+    return index;
+  }
+
+  /**
+   * @param {{x:number,y:number}} start
+   * @param {{x:number,y:number}} end
+   * @param {{doorEntries:Array<object>, buckets:Map<string, Array<object>>, bucketSize:number}|null} index
+   * @returns {Array<object>}
+   */
+  _getDoorWallCandidatesForSegment(start, end, index) {
+    if (!index || !Array.isArray(index?.doorEntries)) return [];
+    if (index.doorEntries.length === 0) return [];
+
+    const bucketSize = Math.max(1, asNumber(index?.bucketSize, 200));
+    const sx = asNumber(start?.x, 0);
+    const sy = asNumber(start?.y, 0);
+    const ex = asNumber(end?.x, 0);
+    const ey = asNumber(end?.y, 0);
+
+    const minX = Math.min(sx, ex);
+    const minY = Math.min(sy, ey);
+    const maxX = Math.max(sx, ex);
+    const maxY = Math.max(sy, ey);
+
+    const ix0 = Math.floor(minX / bucketSize);
+    const iy0 = Math.floor(minY / bucketSize);
+    const ix1 = Math.floor(maxX / bucketSize);
+    const iy1 = Math.floor(maxY / bucketSize);
+
+    const cellSpan = (Math.max(0, ix1 - ix0) + 1) * (Math.max(0, iy1 - iy0) + 1);
+    if (cellSpan > 400) {
+      return index.doorEntries;
+    }
+
+    if (!(index.buckets instanceof Map) || index.buckets.size === 0) {
+      return index.doorEntries;
+    }
+
+    const unique = new Map();
+    for (let ix = ix0; ix <= ix1; ix++) {
+      for (let iy = iy0; iy <= iy1; iy++) {
+        const bucket = index.buckets.get(`${ix}:${iy}`);
+        if (!Array.isArray(bucket)) continue;
+        for (const entry of bucket) {
+          const key = String(entry?.wallId || '');
+          if (!key || unique.has(key)) continue;
+          unique.set(key, entry);
+        }
+      }
+    }
+
+    if (unique.size === 0) {
+      return index.doorEntries;
+    }
+    return [...unique.values()];
   }
 
   _setupHooks() {
     if (this._hookIds.length > 0) return;
 
     this._hookIds.push(['updateWall', Hooks.on('updateWall', () => {
-      this._doorStateRevision += 1;
+      this._markPathfindingTopologyDirty('update-wall');
     })]);
 
     this._hookIds.push(['createWall', Hooks.on('createWall', () => {
-      this._doorStateRevision += 1;
+      this._markPathfindingTopologyDirty('create-wall');
     })]);
 
     this._hookIds.push(['deleteWall', Hooks.on('deleteWall', () => {
-      this._doorStateRevision += 1;
+      this._markPathfindingTopologyDirty('delete-wall');
+    })]);
+
+    this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
+      this._doorSpatialIndex = null;
+      this._pathPrewarmLastSceneId = '';
+      this._pathPrewarmLastRevision = -1;
+      this._schedulePathfindingPrewarm('canvas-ready', 260);
     })]);
 
     this._hookIds.push(['createCombat', Hooks.on('createCombat', () => {
@@ -845,105 +2197,159 @@ export class TokenMovementManager {
    * @returns {{ok:boolean, nodes: Map<string, {x:number,y:number,key:string}>, adjacency: Map<string, Array<{toKey:string,cost:number}>>, startKey:string, endKey:string, reason?:string, diagnostics?:object}}
    */
   generateMovementGraph({ start, end, tokenDoc = null, options = {}, cancelToken = null } = {}) {
-    const generation = ++this._pathSearchGeneration;
-    const context = this._buildPathContext(start, end, tokenDoc, options);
-    if (!context) {
+    try {
+      const generation = ++this._pathSearchGeneration;
+      const context = this._buildPathContext(start, end, tokenDoc, options);
+      if (!context) {
+        this._pathfindingLog('warn', 'generateMovementGraph blocked: invalid path context input', {
+          token: this._pathfindingTokenMeta(tokenDoc),
+          start,
+          end,
+          options
+        });
+        return {
+          ok: false,
+          nodes: new Map(),
+          adjacency: new Map(),
+          startKey: '',
+          endKey: '',
+          reason: 'invalid-input'
+        };
+      }
+
+      const nodes = new Map();
+      const adjacency = new Map();
+      const queue = [];
+
+      const startNode = context.startNode;
+      const endNode = context.endNode;
+      const startKey = startNode.key;
+      const endKey = endNode.key;
+
+      nodes.set(startKey, startNode);
+      queue.push(startNode);
+
+      const maxNodes = Math.max(128, asNumber(options?.maxGraphNodes, 6000));
+      let truncated = false;
+      let edgesAccepted = 0;
+
+      for (let i = 0; i < queue.length; i++) {
+        if ((i & 31) === 0 && this._isPathSearchCancelled(cancelToken, generation, options?.shouldCancel)) {
+          this._pathfindingLog('warn', 'generateMovementGraph cancelled', {
+            token: this._pathfindingTokenMeta(tokenDoc),
+            expanded: i,
+            nodeCount: nodes.size,
+            edgeCount: edgesAccepted,
+            start,
+            end
+          });
+          return {
+            ok: false,
+            nodes,
+            adjacency,
+            startKey,
+            endKey,
+            reason: 'cancelled',
+            diagnostics: {
+              expanded: i,
+              nodeCount: nodes.size,
+              edgeCount: edgesAccepted
+            }
+          };
+        }
+
+        if (nodes.size >= maxNodes) {
+          truncated = true;
+          break;
+        }
+
+        const node = queue[i];
+        const neighbors = this._getCandidateNeighbors(node, context);
+        if (!neighbors || neighbors.length === 0) continue;
+
+        let edges = adjacency.get(node.key);
+        if (!edges) {
+          edges = [];
+          adjacency.set(node.key, edges);
+        }
+
+        for (const neighbor of neighbors) {
+          if (!this._isWithinSearchBounds(neighbor, context.bounds)) continue;
+          if (!this._isNodeTraversable(neighbor, context)) continue;
+
+          const collision = this._validatePathSegmentCollision(node, neighbor, context);
+          if (!collision.ok) continue;
+
+          const stepCost = this._computeTraversalCost(node, neighbor, context);
+          if (!Number.isFinite(stepCost) || stepCost <= 0) continue;
+
+          edges.push({ toKey: neighbor.key, cost: stepCost });
+          edgesAccepted += 1;
+
+          if (!nodes.has(neighbor.key)) {
+            nodes.set(neighbor.key, neighbor);
+            queue.push(neighbor);
+          }
+        }
+      }
+
+      // Ensure end node exists so A* can terminate when discovered by an edge.
+      if (!nodes.has(endKey)) {
+        nodes.set(endKey, endNode);
+      }
+
+      if (truncated) {
+        this._pathfindingLog('warn', 'generateMovementGraph reached max node budget (truncated)', {
+          token: this._pathfindingTokenMeta(tokenDoc),
+          start,
+          end,
+          nodeCount: nodes.size,
+          edgeCount: edgesAccepted,
+          maxNodes
+        });
+      }
+
+      if (edgesAccepted === 0) {
+        this._pathfindingLog('warn', 'generateMovementGraph produced zero traversable edges', {
+          token: this._pathfindingTokenMeta(tokenDoc),
+          start,
+          end,
+          nodeCount: nodes.size,
+          options
+        });
+      }
+
+      return {
+        ok: true,
+        nodes,
+        adjacency,
+        startKey,
+        endKey,
+        diagnostics: {
+          truncated,
+          nodeCount: nodes.size,
+          edgeCount: edgesAccepted,
+          maxNodes,
+          doorSegmentCalls: asNumber(context?.doorSegmentCacheStats?.calls, 0),
+          doorSegmentCacheHits: asNumber(context?.doorSegmentCacheStats?.hits, 0)
+        }
+      };
+    } catch (error) {
+      this._pathfindingLog('error', 'generateMovementGraph threw unexpectedly', {
+        token: this._pathfindingTokenMeta(tokenDoc),
+        start,
+        end,
+        options
+      }, error);
       return {
         ok: false,
         nodes: new Map(),
         adjacency: new Map(),
         startKey: '',
         endKey: '',
-        reason: 'invalid-input'
+        reason: 'graph-generation-exception'
       };
     }
-
-    const nodes = new Map();
-    const adjacency = new Map();
-    const queue = [];
-
-    const startNode = context.startNode;
-    const endNode = context.endNode;
-    const startKey = startNode.key;
-    const endKey = endNode.key;
-
-    nodes.set(startKey, startNode);
-    queue.push(startNode);
-
-    const maxNodes = Math.max(128, asNumber(options?.maxGraphNodes, 6000));
-    let truncated = false;
-    let edgesAccepted = 0;
-
-    for (let i = 0; i < queue.length; i++) {
-      if ((i & 31) === 0 && this._isPathSearchCancelled(cancelToken, generation, options?.shouldCancel)) {
-        return {
-          ok: false,
-          nodes,
-          adjacency,
-          startKey,
-          endKey,
-          reason: 'cancelled',
-          diagnostics: {
-            expanded: i,
-            nodeCount: nodes.size,
-            edgeCount: edgesAccepted
-          }
-        };
-      }
-
-      if (nodes.size >= maxNodes) {
-        truncated = true;
-        break;
-      }
-
-      const node = queue[i];
-      const neighbors = this._getCandidateNeighbors(node, context);
-      if (!neighbors || neighbors.length === 0) continue;
-
-      let edges = adjacency.get(node.key);
-      if (!edges) {
-        edges = [];
-        adjacency.set(node.key, edges);
-      }
-
-      for (const neighbor of neighbors) {
-        if (!this._isWithinSearchBounds(neighbor, context.bounds)) continue;
-        if (!this._isNodeTraversable(neighbor, context)) continue;
-
-        const collision = this._validatePathSegmentCollision(node, neighbor, context);
-        if (!collision.ok) continue;
-
-        const stepCost = this._computeTraversalCost(node, neighbor, context);
-        if (!Number.isFinite(stepCost) || stepCost <= 0) continue;
-
-        edges.push({ toKey: neighbor.key, cost: stepCost });
-        edgesAccepted += 1;
-
-        if (!nodes.has(neighbor.key)) {
-          nodes.set(neighbor.key, neighbor);
-          queue.push(neighbor);
-        }
-      }
-    }
-
-    // Ensure end node exists so A* can terminate when discovered by an edge.
-    if (!nodes.has(endKey)) {
-      nodes.set(endKey, endNode);
-    }
-
-    return {
-      ok: true,
-      nodes,
-      adjacency,
-      startKey,
-      endKey,
-      diagnostics: {
-        truncated,
-        nodeCount: nodes.size,
-        edgeCount: edgesAccepted,
-        maxNodes
-      }
-    };
   }
 
   /**
@@ -958,108 +2364,244 @@ export class TokenMovementManager {
    * @returns {{ok:boolean, pathNodes:Array<{x:number,y:number}>, reason?:string, diagnostics?:object}}
    */
   findWeightedPath({ start, end, tokenDoc = null, options = {}, cancelToken = null } = {}) {
-    const graph = this.generateMovementGraph({
-      start,
-      end,
-      tokenDoc,
-      options,
-      cancelToken
-    });
+    const statsCollector = options?.statsCollector && typeof options.statsCollector === 'object'
+      ? options.statsCollector
+      : null;
 
-    if (!graph.ok) {
-      return {
-        ok: false,
-        pathNodes: [],
-        reason: graph.reason || 'graph-generation-failed',
-        diagnostics: graph.diagnostics
-      };
-    }
+    try {
+      const startX = asNumber(start?.x, 0);
+      const startY = asNumber(start?.y, 0);
+      const endX = asNumber(end?.x, 0);
+      const endY = asNumber(end?.y, 0);
+      const directDistance = Math.hypot(endX - startX, endY - startY);
+      const gridSize = Math.max(1, asNumber(canvas?.grid?.size, asNumber(canvas?.dimensions?.size, 100)));
+      const hpaDistanceThreshold = Math.max(gridSize * 8, asNumber(options?.hpaDistanceThresholdPx, gridSize * 12));
+      const allowHpa = !optionsBoolean(options?.disableHpa, false)
+        && !optionsBoolean(options?.ignoreWalls, false)
+        && directDistance >= hpaDistanceThreshold;
 
-    const weight = clamp(asNumber(options?.weight, this.settings.weightedAStarWeight), 1, 4);
-    const maxIterations = Math.max(64, asNumber(options?.maxSearchIterations, 12000));
-    const generation = this._pathSearchGeneration;
+      if (allowHpa) {
+        const hpaResult = this._findHpaPath({ start, end, tokenDoc, options, cancelToken });
+        if (hpaResult?.ok && Array.isArray(hpaResult.pathNodes) && hpaResult.pathNodes.length >= 2) {
+          this._recordWeightedPathStats(statsCollector, {
+            ok: true,
+            reason: 'hpa-ok',
+            iterations: Math.max(1, hpaResult.pathNodes.length - 1),
+            graphDiagnostics: null
+          });
+          return {
+            ok: true,
+            pathNodes: hpaResult.pathNodes,
+            diagnostics: {
+              iterations: Math.max(1, hpaResult.pathNodes.length - 1),
+              weight: clamp(asNumber(options?.weight, this.settings.weightedAStarWeight), 1, 4),
+              hpa: hpaResult?.diagnostics || null
+            }
+          };
+        }
+      }
 
-    const openSet = new Set([graph.startKey]);
-    const cameFrom = new Map();
-    const gScore = new Map([[graph.startKey, 0]]);
-    const fScore = new Map([[graph.startKey, this._heuristicScore(graph.startKey, graph.endKey, graph.nodes, options) * weight]]);
+      const graph = this.generateMovementGraph({
+        start,
+        end,
+        tokenDoc,
+        options,
+        cancelToken
+      });
 
-    let iterations = 0;
-
-    while (openSet.size > 0) {
-      if ((iterations & 31) === 0 && this._isPathSearchCancelled(cancelToken, generation, options?.shouldCancel)) {
+      if (!graph.ok) {
+        this._pathfindingLog('warn', 'findWeightedPath aborted: graph generation failed', {
+          token: this._pathfindingTokenMeta(tokenDoc),
+          start,
+          end,
+          reason: graph.reason || 'graph-generation-failed',
+          diagnostics: graph.diagnostics || null,
+          options
+        });
+        this._recordWeightedPathStats(statsCollector, {
+          ok: false,
+          reason: graph.reason || 'graph-generation-failed',
+          iterations: 0,
+          graphDiagnostics: graph.diagnostics
+        });
         return {
           ok: false,
           pathNodes: [],
-          reason: 'cancelled',
-          diagnostics: {
-            iterations,
-            openSetSize: openSet.size,
-            graphDiagnostics: graph.diagnostics
-          }
+          reason: graph.reason || 'graph-generation-failed',
+          diagnostics: graph.diagnostics
         };
       }
 
-      if (iterations >= maxIterations) {
-        return {
-          ok: false,
-          pathNodes: [],
-          reason: 'max-iterations',
-          diagnostics: {
+      const weight = clamp(asNumber(options?.weight, this.settings.weightedAStarWeight), 1, 4);
+      const maxIterations = Math.max(64, asNumber(options?.maxSearchIterations, 12000));
+      const generation = this._pathSearchGeneration;
+
+      // Use a binary min-heap for the open set — O(log n) insert/extract-min
+      // instead of the previous O(n) linear scan per iteration.
+      const openHeap = new BinaryMinHeap();
+      const closedSet = new Set();
+      const cameFrom = new Map();
+      const gScore = new Map([[graph.startKey, 0]]);
+      const startF = this._heuristicScore(graph.startKey, graph.endKey, graph.nodes, options) * weight;
+      openHeap.push(graph.startKey, startF);
+
+      let iterations = 0;
+
+      while (openHeap.size > 0) {
+        if ((iterations & 31) === 0 && this._isPathSearchCancelled(cancelToken, generation, options?.shouldCancel)) {
+          this._pathfindingLog('warn', 'findWeightedPath cancelled', {
+            token: this._pathfindingTokenMeta(tokenDoc),
+            start,
+            end,
+            iterations,
+            openSetSize: openHeap.size,
+            options
+          });
+          this._recordWeightedPathStats(statsCollector, {
+            ok: false,
+            reason: 'cancelled',
+            iterations,
+            graphDiagnostics: graph.diagnostics
+          });
+          return {
+            ok: false,
+            pathNodes: [],
+            reason: 'cancelled',
+            diagnostics: {
+              iterations,
+              openSetSize: openHeap.size,
+              graphDiagnostics: graph.diagnostics
+            }
+          };
+        }
+
+        if (iterations >= maxIterations) {
+          this._pathfindingLog('warn', 'findWeightedPath reached max iterations', {
+            token: this._pathfindingTokenMeta(tokenDoc),
+            start,
+            end,
             iterations,
             maxIterations,
-            openSetSize: openSet.size,
+            openSetSize: openHeap.size,
+            options
+          });
+          this._recordWeightedPathStats(statsCollector, {
+            ok: false,
+            reason: 'max-iterations',
+            iterations,
             graphDiagnostics: graph.diagnostics
-          }
-        };
+          });
+          return {
+            ok: false,
+            pathNodes: [],
+            reason: 'max-iterations',
+            diagnostics: {
+              iterations,
+              maxIterations,
+              openSetSize: openHeap.size,
+              graphDiagnostics: graph.diagnostics
+            }
+          };
+        }
+        iterations += 1;
+
+        const best = openHeap.pop();
+        if (!best) break;
+        const currentKey = best.key;
+
+        // Skip nodes already expanded (lazy-deletion duplicates from re-push).
+        if (closedSet.has(currentKey)) continue;
+        closedSet.add(currentKey);
+
+        if (currentKey === graph.endKey) {
+          const pathNodes = this._reconstructPathNodes(cameFrom, currentKey, graph.nodes);
+          this._recordWeightedPathStats(statsCollector, {
+            ok: true,
+            reason: 'ok',
+            iterations,
+            graphDiagnostics: graph.diagnostics
+          });
+          return {
+            ok: true,
+            pathNodes,
+            diagnostics: {
+              iterations,
+              weight,
+              graphDiagnostics: graph.diagnostics
+            }
+          };
+        }
+
+        const neighbors = graph.adjacency.get(currentKey) || [];
+        if (neighbors.length === 0) continue;
+
+        const currentG = gScore.get(currentKey) ?? Number.POSITIVE_INFINITY;
+        for (const edge of neighbors) {
+          if (closedSet.has(edge.toKey)) continue;
+
+          const tentativeG = currentG + asNumber(edge.cost, Number.POSITIVE_INFINITY);
+          const neighborG = gScore.get(edge.toKey) ?? Number.POSITIVE_INFINITY;
+          if (tentativeG >= neighborG) continue;
+
+          cameFrom.set(edge.toKey, currentKey);
+          gScore.set(edge.toKey, tentativeG);
+
+          const h = this._heuristicScore(edge.toKey, graph.endKey, graph.nodes, options);
+          const f = tentativeG + (weight * h);
+          openHeap.push(edge.toKey, f);
+        }
       }
-      iterations += 1;
 
-      const currentKey = this._selectOpenSetBestNode(openSet, fScore);
-      if (!currentKey) break;
-
-      if (currentKey === graph.endKey) {
-        const pathNodes = this._reconstructPathNodes(cameFrom, currentKey, graph.nodes);
-        return {
-          ok: true,
-          pathNodes,
+      if (!optionsBoolean(options?.suppressNoPathLog, false)) {
+        this._pathfindingLog('warn', 'findWeightedPath ended with no path', {
+          token: this._pathfindingTokenMeta(tokenDoc),
+          start,
+          end,
           diagnostics: {
             iterations,
             weight,
             graphDiagnostics: graph.diagnostics
-          }
-        };
+          },
+          options
+        });
       }
 
-      openSet.delete(currentKey);
-      const neighbors = graph.adjacency.get(currentKey) || [];
-      if (neighbors.length === 0) continue;
-
-      const currentG = gScore.get(currentKey) ?? Number.POSITIVE_INFINITY;
-      for (const edge of neighbors) {
-        const tentativeG = currentG + asNumber(edge.cost, Number.POSITIVE_INFINITY);
-        const neighborG = gScore.get(edge.toKey) ?? Number.POSITIVE_INFINITY;
-        if (tentativeG >= neighborG) continue;
-
-        cameFrom.set(edge.toKey, currentKey);
-        gScore.set(edge.toKey, tentativeG);
-
-        const h = this._heuristicScore(edge.toKey, graph.endKey, graph.nodes, options);
-        fScore.set(edge.toKey, tentativeG + (weight * h));
-        openSet.add(edge.toKey);
-      }
-    }
-
-    return {
-      ok: false,
-      pathNodes: [],
-      reason: 'no-path',
-      diagnostics: {
+      this._recordWeightedPathStats(statsCollector, {
+        ok: false,
+        reason: 'no-path',
         iterations,
-        weight,
         graphDiagnostics: graph.diagnostics
-      }
-    };
+      });
+
+      return {
+        ok: false,
+        pathNodes: [],
+        reason: 'no-path',
+        diagnostics: {
+          iterations,
+          weight,
+          graphDiagnostics: graph.diagnostics
+        }
+      };
+    } catch (error) {
+      this._pathfindingLog('error', 'findWeightedPath threw unexpectedly', {
+        token: this._pathfindingTokenMeta(tokenDoc),
+        start,
+        end,
+        options
+      }, error);
+      this._recordWeightedPathStats(statsCollector, {
+        ok: false,
+        reason: 'weighted-path-exception',
+        iterations: 0,
+        graphDiagnostics: null
+      });
+      return {
+        ok: false,
+        pathNodes: [],
+        reason: 'weighted-path-exception'
+      };
+    }
   }
 
   /**
@@ -1126,6 +2668,11 @@ export class TokenMovementManager {
       latticeStep,
       bounds,
       sceneRect,
+      doorSegmentCache: new Map(),
+      doorSegmentCacheStats: {
+        calls: 0,
+        hits: 0
+      },
       startNode: makeNode(snappedStart),
       endNode: makeNode(snappedEnd)
     };
@@ -1304,6 +2851,10 @@ export class TokenMovementManager {
   /**
    * Validate a movement edge against Foundry collision checks.
    *
+   * For tokens larger than 1×1 grid cells, we test parallel rays at the
+   * token's corners (Minkowski sum) so fat tokens cannot pathfind through
+   * gaps narrower than their footprint.
+   *
    * @param {{x:number,y:number}} from
    * @param {{x:number,y:number}} to
    * @param {object} context
@@ -1317,31 +2868,52 @@ export class TokenMovementManager {
     const rayA = { x: asNumber(from?.x, 0), y: asNumber(from?.y, 0) };
     const rayB = { x: asNumber(to?.x, 0), y: asNumber(to?.y, 0) };
 
+    // Build corner offsets for fat-token Minkowski expansion.
+    // For 1×1 tokens the only ray is center→center (offsets = [[0,0]]).
+    // For larger tokens we also test at each corner of the bounding box
+    // so the full footprint is checked against walls.
+    const halfW = this._getTokenCollisionHalfSize(context.tokenDoc);
+    const cornerOffsets = [[0, 0]];
+    if (halfW.x > 1 || halfW.y > 1) {
+      cornerOffsets.push(
+        [-halfW.x, -halfW.y],
+        [halfW.x, -halfW.y],
+        [-halfW.x, halfW.y],
+        [halfW.x, halfW.y]
+      );
+    }
+
     // Critical: collision must be tested per candidate graph segment (rayA -> rayB).
     // token.checkCollision(target) is origin-implicit (token's live document position),
     // which collapses A* expansion at the first wall and prevents routing around it.
     if (polygonBackends) {
-      const backendTypes = ['move', 'sight', 'light'];
-      for (const type of backendTypes) {
-        const backend = polygonBackends?.[type];
-        if (!backend || typeof backend.testCollision !== 'function') continue;
-        try {
-          const hit = backend.testCollision(rayA, rayB, {
-            mode: context.options?.collisionMode || 'closest',
-            type,
-            source: tokenObj,
-            token: tokenObj,
-            wallDirectionMode: 'all'
-          });
-          if (hit) return { ok: false, reason: `collision-${type}` };
-        } catch (_) {
+      for (const [ox, oy] of cornerOffsets) {
+        const a = { x: rayA.x + ox, y: rayA.y + oy };
+        const b = { x: rayB.x + ox, y: rayB.y + oy };
+
+        const backendTypes = ['move', 'sight', 'light'];
+        for (const type of backendTypes) {
+          const backend = polygonBackends?.[type];
+          if (!backend || typeof backend.testCollision !== 'function') continue;
+          try {
+            const hit = backend.testCollision(a, b, {
+              mode: context.options?.collisionMode || 'closest',
+              type,
+              source: tokenObj,
+              token: tokenObj,
+              wallDirectionMode: 'all'
+            });
+            if (hit) return { ok: false, reason: `collision-${type}` };
+          } catch (_) {
+          }
+          if (type === 'move') break;
         }
-        if (type === 'move') break;
       }
       return { ok: true };
     }
 
     // Fallback only when polygon backends are unavailable.
+    // Test center ray only (no Minkowski) since checkCollision is origin-implicit.
     const target = { x: rayB.x, y: rayB.y };
     try {
       if (tokenObj && typeof tokenObj.checkCollision === 'function') {
@@ -1357,6 +2929,147 @@ export class TokenMovementManager {
     }
 
     return { ok: true };
+  }
+
+  /**
+   * Compute the half-size of a token's collision footprint in pixels,
+   * shrunk by a small margin to allow passage through openings that are
+   * exactly the token's width.
+   *
+   * @param {TokenDocument|object|null} tokenDoc
+   * @returns {{x:number, y:number}}
+   */
+  _getTokenCollisionHalfSize(tokenDoc) {
+    const size = this._getTokenPixelSize(tokenDoc);
+    // Shrink by 2px so a 2×2 token can fit through a 2-grid-wide gap.
+    const margin = 2;
+    return {
+      x: Math.max(0, (size.widthPx / 2) - margin),
+      y: Math.max(0, (size.heightPx / 2) - margin)
+    };
+  }
+
+  /**
+   * Ensure each group token reaches its assigned destination, even if the
+   * synchronized timeline encountered transient contention and ended short.
+   *
+   * @param {Array<{tokenId:string, tokenDoc:any, destinationTopLeft:{x:number,y:number}}>} planEntries
+   * @param {object} options
+   * @returns {Promise<{ok:boolean, reason?:string, correctedCount:number}>}
+   */
+  async _reconcileGroupFinalPositions(planEntries, options = {}) {
+    const plans = Array.isArray(planEntries) ? planEntries : [];
+    if (plans.length === 0) return { ok: true, correctedCount: 0 };
+
+    const unresolved = [];
+    for (const entry of plans) {
+      const liveDoc = this._resolveTokenDocumentById(entry?.tokenId, entry?.tokenDoc);
+      if (!liveDoc || !entry?.destinationTopLeft) continue;
+      const dx = Math.abs(asNumber(liveDoc?.x, 0) - asNumber(entry.destinationTopLeft?.x, 0));
+      const dy = Math.abs(asNumber(liveDoc?.y, 0) - asNumber(entry.destinationTopLeft?.y, 0));
+      if (dx >= 0.5 || dy >= 0.5) unresolved.push({ entry, liveDoc });
+    }
+
+    if (unresolved.length === 0) {
+      return { ok: true, correctedCount: 0 };
+    }
+
+    this._pathfindingLog('warn', '_reconcileGroupFinalPositions detected unresolved token endpoints', {
+      unresolvedTokenIds: unresolved.map((item) => String(item?.entry?.tokenId || '')).filter(Boolean),
+      unresolvedCount: unresolved.length,
+      planCount: plans.length,
+      options
+    });
+
+    const unresolvedById = new Map(unresolved.map((item) => [String(item?.entry?.tokenId || ''), item.entry]));
+    const lastFailureReasonById = new Map();
+    const maxPasses = Math.max(1, Math.min(12, unresolved.length * 2));
+    let correctedCount = 0;
+
+    for (let pass = 1; pass <= maxPasses; pass++) {
+      if (unresolvedById.size === 0) {
+        return { ok: true, correctedCount };
+      }
+
+      let passProgress = 0;
+      for (const [tokenId, entry] of [...unresolvedById.entries()]) {
+        const liveDoc = this._resolveTokenDocumentById(tokenId, entry?.tokenDoc);
+        if (!liveDoc || !entry?.destinationTopLeft) {
+          lastFailureReasonById.set(tokenId, 'missing-token-doc');
+          continue;
+        }
+
+        const beforeDx = Math.abs(asNumber(liveDoc?.x, 0) - asNumber(entry.destinationTopLeft?.x, 0));
+        const beforeDy = Math.abs(asNumber(liveDoc?.y, 0) - asNumber(entry.destinationTopLeft?.y, 0));
+        if (beforeDx < 0.5 && beforeDy < 0.5) {
+          unresolvedById.delete(tokenId);
+          continue;
+        }
+
+        const repair = await this.executeDoorAwareTokenMove({
+          tokenDoc: liveDoc,
+          destinationTopLeft: entry.destinationTopLeft,
+          options: {
+            ...options,
+            method: options?.method || 'path-walk'
+          }
+        });
+
+        if (!repair?.ok) {
+          lastFailureReasonById.set(tokenId, repair?.reason || 'group-final-reconcile-failed');
+          this._pathfindingLog('warn', '_reconcileGroupFinalPositions repair move failed', {
+            tokenId,
+            reason: repair?.reason || 'group-final-reconcile-failed',
+            destinationTopLeft: entry?.destinationTopLeft,
+            pass,
+            maxPasses,
+            options
+          });
+          continue;
+        }
+
+        const afterDoc = this._resolveTokenDocumentById(tokenId, entry?.tokenDoc);
+        const afterDx = Math.abs(asNumber(afterDoc?.x, 0) - asNumber(entry.destinationTopLeft?.x, 0));
+        const afterDy = Math.abs(asNumber(afterDoc?.y, 0) - asNumber(entry.destinationTopLeft?.y, 0));
+        if (afterDx < 0.5 && afterDy < 0.5) {
+          unresolvedById.delete(tokenId);
+          passProgress += 1;
+          correctedCount += 1;
+          lastFailureReasonById.delete(tokenId);
+        } else {
+          lastFailureReasonById.set(tokenId, 'repair-no-position-change');
+        }
+      }
+
+      if (unresolvedById.size === 0) {
+        return { ok: true, correctedCount };
+      }
+
+      if (passProgress === 0) {
+        break;
+      }
+    }
+
+    const remainingDetails = [...unresolvedById.keys()].map((tokenId) => ({
+      tokenId,
+      reason: lastFailureReasonById.get(tokenId) || 'unknown'
+    }));
+
+    this._pathfindingLog('warn', '_reconcileGroupFinalPositions incomplete after repair attempts', {
+      remaining: unresolvedById.size,
+      correctedCount,
+      attemptedRepairs: unresolved.length,
+      remainingDetails,
+      options
+    });
+
+    return {
+      ok: false,
+      reason: 'group-final-reconcile-incomplete',
+      correctedCount,
+      remainingCount: unresolvedById.size,
+      remainingDetails
+    };
   }
 
   /**
@@ -1389,7 +3102,7 @@ export class TokenMovementManager {
     }
 
     let doorPenalty = 0;
-    const doorHits = this.findDoorsAlongSegment(from, to);
+    const doorHits = this._findDoorsAlongSegmentCached(from, to, context);
     for (const hit of doorHits) {
       if (hit.ds === DOOR_STATES.OPEN) continue;
 
@@ -1414,6 +3127,42 @@ export class TokenMovementManager {
     }
 
     return (distance * multiplier) + doorPenalty;
+  }
+
+  /**
+   * @param {{x:number,y:number}} from
+   * @param {{x:number,y:number}} to
+   * @param {object} context
+   * @returns {Array<any>}
+   */
+  _findDoorsAlongSegmentCached(from, to, context) {
+    const cache = context?.doorSegmentCache;
+    const stats = context?.doorSegmentCacheStats;
+    if (stats && typeof stats === 'object') {
+      stats.calls = asNumber(stats.calls, 0) + 1;
+    }
+
+    const ax = Math.round(asNumber(from?.x, 0));
+    const ay = Math.round(asNumber(from?.y, 0));
+    const bx = Math.round(asNumber(to?.x, 0));
+    const by = Math.round(asNumber(to?.y, 0));
+
+    const forwardKey = `${ax}:${ay}|${bx}:${by}`;
+    const reverseKey = `${bx}:${by}|${ax}:${ay}`;
+    const key = forwardKey < reverseKey ? forwardKey : reverseKey;
+
+    if (cache instanceof Map && cache.has(key)) {
+      if (stats && typeof stats === 'object') {
+        stats.hits = asNumber(stats.hits, 0) + 1;
+      }
+      return cache.get(key) || [];
+    }
+
+    const hits = this.findDoorsAlongSegment(from, to);
+    if (cache instanceof Map) {
+      cache.set(key, hits);
+    }
+    return hits;
   }
 
   /**
@@ -1782,7 +3531,16 @@ export class TokenMovementManager {
       };
     }
 
-    if (this.settings.doorPolicy.requireDoorPermission && !this._canCurrentUserSetDoorState(wallDoc, targetDoorState)) {
+    // When autoOpen + playerAutoDoorEnabled are both true, the movement system
+    // acts as a "key" for players — bypass the core permission check so players
+    // don't get stuck at unlocked doors simply because Foundry's WALL_DOOR
+    // permission configuration would otherwise block them.
+    const autoOpenBypassesPermission = this.settings.doorPolicy.autoOpen
+      && this.settings.doorPolicy.playerAutoDoorEnabled;
+
+    if (this.settings.doorPolicy.requireDoorPermission
+      && !autoOpenBypassesPermission
+      && !this._canCurrentUserSetDoorState(wallDoc, targetDoorState)) {
       return {
         ok: false,
         wallId: wallDoc.id,
@@ -1802,7 +3560,12 @@ export class TokenMovementManager {
       };
     } catch (error) {
       if (!silent) {
-        log.warn(`Door update failed for wall ${wallDoc.id}`, error);
+        this._pathfindingLog('warn', 'Door update failed for wall', {
+          wallId: String(wallDoc?.id || ''),
+          requestedState: targetDoorState,
+          currentState,
+          reason: 'update-failed'
+        }, error);
       }
       return {
         ok: false,
@@ -1970,150 +3733,1920 @@ export class TokenMovementManager {
    * @returns {Promise<{ok:boolean, tokenId:string, reason?:string, transitions:Array<object>, plan?:object, pathNodes:Array<{x:number,y:number}>}>}
    */
   async executeDoorAwareTokenMove({ tokenDoc, destinationTopLeft, options = {} } = {}) {
-    const tokenId = String(tokenDoc?.id || '');
-    if (!tokenId) {
-      return {
-        ok: false,
-        tokenId: '',
-        reason: 'missing-token-id',
-        transitions: [],
-        pathNodes: []
-      };
-    }
+    try {
+      const tokenId = String(tokenDoc?.id || '');
+      if (!tokenId) {
+        this._pathfindingLog('warn', 'executeDoorAwareTokenMove blocked: missing token id', {
+          destinationTopLeft,
+          options
+        });
+        return {
+          ok: false,
+          tokenId: '',
+          reason: 'missing-token-id',
+          transitions: [],
+          pathNodes: []
+        };
+      }
 
-    const destX = asNumber(destinationTopLeft?.x, NaN);
-    const destY = asNumber(destinationTopLeft?.y, NaN);
-    if (!Number.isFinite(destX) || !Number.isFinite(destY)) {
+      // Serialize per-token: wait for any in-flight move on this token to finish
+      // before starting a new one. Safety timeout prevents infinite waits.
+      await this._acquireTokenMoveLock(tokenId);
+
+      const destX = asNumber(destinationTopLeft?.x, NaN);
+      const destY = asNumber(destinationTopLeft?.y, NaN);
+      if (!Number.isFinite(destX) || !Number.isFinite(destY)) {
+        this._pathfindingLog('warn', 'executeDoorAwareTokenMove blocked: invalid destination', {
+          tokenId,
+          destinationTopLeft,
+          options
+        });
+        return {
+          ok: false,
+          tokenId,
+          reason: 'invalid-destination',
+          transitions: [],
+          pathNodes: []
+        };
+      }
+
+      const currentDoc = this._resolveTokenDocumentById(tokenId, tokenDoc);
+      if (!currentDoc) {
+        this._pathfindingLog('warn', 'executeDoorAwareTokenMove blocked: missing token document', {
+          tokenId,
+          destinationTopLeft,
+          options
+        });
+        return {
+          ok: false,
+          tokenId,
+          reason: 'missing-token-doc',
+          transitions: [],
+          pathNodes: []
+        };
+      }
+
+      const ignoreWalls = optionsBoolean(options?.ignoreWalls, false);
+      const ignoreCost = optionsBoolean(options?.ignoreCost, false);
+
+      const targetTopLeft = this._snapTokenTopLeftToGrid({ x: destX, y: destY }, currentDoc);
+      const startCenter = this._tokenTopLeftToCenter({ x: currentDoc.x, y: currentDoc.y }, currentDoc);
+      const endCenter = this._tokenTopLeftToCenter(targetTopLeft, currentDoc);
+
+      let pathNodes = [startCenter, endCenter];
+      if (!ignoreWalls) {
+        const pathResult = this.findWeightedPath({
+          start: startCenter,
+          end: endCenter,
+          tokenDoc: currentDoc,
+          options: {
+            ignoreWalls,
+            ignoreCost,
+            fogPathPolicy: this.settings.fogPathPolicy,
+            allowDiagonal: optionsBoolean(options?.allowDiagonal, true),
+            maxSearchIterations: asNumber(options?.maxSearchIterations, 12000)
+          }
+        });
+
+        const foundryPathResult = await this._computeFoundryParityPath({
+          tokenDoc: currentDoc,
+          startTopLeft: { x: currentDoc.x, y: currentDoc.y },
+          endTopLeft: targetTopLeft,
+          ignoreWalls,
+          ignoreCost
+        });
+
+        const paritySelection = this._selectPathWithFoundryParity({
+          customPathResult: pathResult,
+          foundryPathResult,
+          startCenter,
+          endCenter,
+          gridSize: asNumber(canvas?.grid?.size, 100),
+          forceFoundryParity: optionsBoolean(options?.forceFoundryParity, false)
+        });
+
+        if (!paritySelection?.ok) {
+          this._pathfindingLog('warn', 'executeDoorAwareTokenMove path selection failed', {
+            token: this._pathfindingTokenMeta(currentDoc),
+            destinationTopLeft: targetTopLeft,
+            pathReason: pathResult?.reason || null,
+            foundryPathReason: foundryPathResult?.reason || null,
+            parityReason: paritySelection?.reason || 'no-path',
+            pathDiagnostics: pathResult?.diagnostics || null,
+            options
+          });
+          return {
+            ok: false,
+            tokenId,
+            reason: paritySelection?.reason || 'no-path',
+            transitions: [],
+            pathNodes: []
+          };
+        }
+
+        if (Array.isArray(paritySelection.pathNodes) && paritySelection.pathNodes.length >= 2) {
+          pathNodes = paritySelection.pathNodes;
+        }
+      }
+
+      const moveToPoint = async (point, context = {}) => {
+        return this._moveTokenToFoundryPoint(tokenId, point, currentDoc, {
+          ...options,
+          ignoreWalls,
+          ignoreCost
+        }, context);
+      };
+
+      if (ignoreWalls) {
+        const direct = await moveToPoint(endCenter, {
+          tokenId,
+          stepIndex: -1,
+          phase: 'DIRECT_MOVE',
+          plan: null
+        });
+
+        if (!direct?.ok) {
+          this._pathfindingLog('warn', 'executeDoorAwareTokenMove direct move failed', {
+            token: this._pathfindingTokenMeta(currentDoc),
+            destinationTopLeft: targetTopLeft,
+            reason: direct?.reason || 'direct-move-failed',
+            options
+          });
+        }
+
+        return {
+          ok: !!direct?.ok,
+          tokenId,
+          reason: direct?.reason || null,
+          transitions: [],
+          plan: {
+            pathNodes,
+            doorSteps: [],
+            doorRevision: this._doorStateRevision,
+            inCombat: this._inCombat
+          },
+          pathNodes
+        };
+      }
+
+      const sequenceResult = await this.runDoorAwareMovementSequence({
+        tokenId,
+        pathNodes,
+        moveToPoint,
+        options
+      });
+
+      if (!sequenceResult?.ok) {
+        this._pathfindingLog('warn', 'executeDoorAwareTokenMove sequence failed', {
+          token: this._pathfindingTokenMeta(currentDoc),
+          destinationTopLeft: targetTopLeft,
+          reason: sequenceResult?.reason || 'door-sequence-failed',
+          transitionCount: Array.isArray(sequenceResult?.transitions) ? sequenceResult.transitions.length : 0,
+          options
+        });
+        return {
+          ok: false,
+          tokenId,
+          reason: sequenceResult?.reason || 'door-sequence-failed',
+          transitions: sequenceResult?.transitions || [],
+          plan: sequenceResult?.plan,
+          pathNodes
+        };
+      }
+
+      return {
+        ok: true,
+        tokenId,
+        reason: null,
+        transitions: sequenceResult.transitions || [],
+        plan: sequenceResult.plan,
+        pathNodes
+      };
+    } catch (error) {
+      const tokenId = String(tokenDoc?.id || '');
+      this._pathfindingLog('error', 'executeDoorAwareTokenMove threw unexpectedly', {
+        tokenId,
+        destinationTopLeft,
+        options
+      }, error);
       return {
         ok: false,
         tokenId,
-        reason: 'invalid-destination',
+        reason: 'token-move-exception',
         transitions: [],
         pathNodes: []
       };
+    } finally {
+      const tokenId = String(tokenDoc?.id || '');
+      if (tokenId) this._releaseTokenMoveLock(tokenId);
     }
+  }
 
-    const currentDoc = this._resolveTokenDocumentById(tokenId, tokenDoc);
-    if (!currentDoc) {
+  /**
+   * Compute a non-committing preview plan for coordinated group movement.
+   *
+   * This uses the same candidate generation and destination assignment logic as
+   * executeDoorAwareGroupMove, but does not animate or update documents.
+   *
+   * @param {object} params
+   * @param {Array<{tokenDoc: TokenDocument|object, destinationTopLeft: {x:number,y:number}}>} params.tokenMoves
+   * @param {object} [params.options]
+   * @returns {{ok:boolean, reason?:string, tokenCount:number, assignments?:Array<{tokenId:string,destinationTopLeft:{x:number,y:number},pathNodes:Array<{x:number,y:number}>,cost:number}>, stepCount?:number}}
+   */
+  computeDoorAwareGroupMovePreview({ tokenMoves = [], options = {} } = {}) {
+    try {
+      const moves = Array.isArray(tokenMoves) ? tokenMoves : [];
+      if (moves.length === 0) {
+        this._pathfindingLog('warn', 'computeDoorAwareGroupMovePreview blocked: missing group moves', {
+          tokenMoves,
+          options
+        });
+        return { ok: false, reason: 'missing-group-moves', tokenCount: 0 };
+      }
+
+      if (moves.length === 1) {
+        const single = moves[0];
+        const preview = this.computeTokenPathPreview({
+          tokenDoc: single?.tokenDoc,
+          destinationTopLeft: single?.destinationTopLeft,
+          options
+        });
+        if (!preview?.ok) {
+          this._pathfindingLog('warn', 'computeDoorAwareGroupMovePreview single-token preview failed', {
+            tokenId: preview?.tokenId || String(single?.tokenDoc?.id || ''),
+            reason: preview?.reason || 'single-group-preview-failed',
+            destinationTopLeft: single?.destinationTopLeft,
+            options
+          });
+          return {
+            ok: false,
+            reason: preview?.reason || 'single-group-preview-failed',
+            tokenCount: 0,
+            assignments: []
+          };
+        }
+
+        const liveDoc = this._resolveTokenDocumentById(preview.tokenId, single?.tokenDoc);
+        const snappedTopLeft = this._snapTokenTopLeftToGrid(single?.destinationTopLeft || { x: 0, y: 0 }, liveDoc || single?.tokenDoc);
+        return {
+          ok: true,
+          tokenCount: 1,
+          assignments: [{
+            tokenId: preview.tokenId,
+            destinationTopLeft: snappedTopLeft,
+            pathNodes: preview.pathNodes.slice(),
+            cost: asNumber(preview.distance, 0)
+          }],
+          stepCount: Math.max(0, (preview.pathNodes?.length || 1) - 1),
+          groupPlanCacheKey: ''
+        };
+      }
+
+      let planSource = 'computed';
+      let planResult = this._planDoorAwareGroupMove({ tokenMoves: moves, options });
+      let retryDiagnostics = null;
+
+      if (!planResult?.ok) {
+        const retryOptions = this._buildGroupPlanRetryOptions(options, planResult);
+        if (retryOptions) {
+          const retryStartMs = this._nowMs();
+          const retryPlanResult = this._planDoorAwareGroupMove({ tokenMoves: moves, options: retryOptions });
+          retryDiagnostics = {
+            attempted: true,
+            reason: planResult?.reason || 'group-plan-failed',
+            retryMs: this._nowMs() - retryStartMs,
+            options: {
+              searchMarginPx: asNumber(retryOptions?.searchMarginPx, NaN),
+              maxGraphNodes: asNumber(retryOptions?.maxGraphNodes, NaN),
+              maxSearchIterations: asNumber(retryOptions?.maxSearchIterations, NaN),
+              groupMaxCandidatesPerToken: asNumber(retryOptions?.groupMaxCandidatesPerToken, NaN),
+              groupPathEvalCandidatesPerToken: asNumber(retryOptions?.groupPathEvalCandidatesPerToken, NaN),
+              groupPlanningBudgetMs: asNumber(retryOptions?.groupPlanningBudgetMs, NaN),
+              enforceAnchorSide: optionsBoolean(retryOptions?.enforceAnchorSide, false)
+            },
+            result: {
+              ok: !!retryPlanResult?.ok,
+              reason: retryPlanResult?.reason || null,
+              metrics: retryPlanResult?.metrics || null
+            }
+          };
+
+          if (retryPlanResult?.ok) {
+            planResult = retryPlanResult;
+            planSource = 'computed-retry-expanded';
+          } else if (retryPlanResult) {
+            planResult = retryPlanResult;
+            planSource = 'computed-retry-failed';
+          }
+        }
+      }
+
+      if (!planResult.ok) {
+        this._pathfindingLog('warn', 'computeDoorAwareGroupMovePreview plan failed', {
+          reason: planResult.reason || 'group-plan-failed',
+          tokenCount: planResult.tokenCount || 0,
+          planSource,
+          retryDiagnostics,
+          requestedMoves: moves.length,
+          options
+        });
+        return {
+          ok: false,
+          reason: planResult.reason || 'group-plan-failed',
+          tokenCount: planResult.tokenCount || 0,
+          assignments: [],
+          diagnostics: {
+            planSource,
+            planning: planResult?.metrics || null,
+            retry: retryDiagnostics
+          }
+        };
+      }
+
+      // If preview succeeded only after retrying with expanded options, avoid
+      // caching the plan under the original signature; execute will compute and
+      // retry as needed with full diagnostics.
+      const groupPlanCacheKey = planSource === 'computed'
+        ? this._storeGroupPlanCacheEntry({
+          tokenMoves: moves,
+          options,
+          planResult
+        })
+        : '';
+
+      return {
+        ok: true,
+        tokenCount: planResult.tokenCount,
+        assignments: planResult.planEntries.map((entry) => ({
+          tokenId: entry.tokenId,
+          destinationTopLeft: entry.destinationTopLeft,
+          pathNodes: Array.isArray(entry.pathNodes) ? entry.pathNodes.slice() : [],
+          cost: asNumber(entry.cost, 0)
+        })),
+        stepCount: planResult.stepCount,
+        groupPlanCacheKey,
+        diagnostics: {
+          planSource,
+          planning: planResult?.metrics || null,
+          retry: retryDiagnostics
+        }
+      };
+    } catch (error) {
+      this._pathfindingLog('error', 'computeDoorAwareGroupMovePreview threw unexpectedly', {
+        tokenMoveCount: Array.isArray(tokenMoves) ? tokenMoves.length : 0,
+        options
+      }, error);
       return {
         ok: false,
-        tokenId,
-        reason: 'missing-token-doc',
-        transitions: [],
-        pathNodes: []
+        reason: 'group-preview-exception',
+        tokenCount: 0,
+        assignments: [],
+        groupPlanCacheKey: ''
+      };
+    }
+  }
+
+  /**
+   * Execute a coordinated group movement for multiple tokens.
+   *
+   * Behavior goals:
+   * 1) Assign unique, nearby destination cells that minimize total travel cost.
+   * 2) Respect wall/path constraints for each token path.
+   * 3) Move tokens in synchronized steps while avoiding overlap and edge swaps.
+   *
+   * @param {object} params
+   * @param {Array<{tokenDoc: TokenDocument|object, destinationTopLeft: {x:number,y:number}}>} params.tokenMoves
+   * @param {object} [params.options]
+   * @returns {Promise<{ok:boolean, reason?:string, tokenCount:number, assignments?:Array<object>, stepCount?:number}>}
+   */
+  async executeDoorAwareGroupMove({ tokenMoves = [], options = {} } = {}) {
+    // Serialize group moves globally so two concurrent group operations
+    // cannot interleave timeline steps and cause deadlocks.
+    await this._acquireGroupMoveLock();
+    try {
+      const totalStartMs = this._nowMs();
+      const moves = Array.isArray(tokenMoves) ? tokenMoves : [];
+      if (moves.length === 0) {
+        this._pathfindingLog('warn', 'executeDoorAwareGroupMove blocked: missing group moves', {
+          tokenMoves,
+          options
+        });
+        return { ok: false, reason: 'missing-group-moves', tokenCount: 0 };
+      }
+
+      if (moves.length === 1) {
+        const single = moves[0];
+        const res = await this.executeDoorAwareTokenMove({
+          tokenDoc: single?.tokenDoc,
+          destinationTopLeft: single?.destinationTopLeft,
+          options
+        });
+        if (!res?.ok) {
+          this._pathfindingLog('warn', 'executeDoorAwareGroupMove single-token fallback failed', {
+            tokenId: res?.tokenId || String(single?.tokenDoc?.id || ''),
+            reason: res?.reason || 'single-group-move-failed',
+            destinationTopLeft: single?.destinationTopLeft,
+            options
+          });
+        }
+        return {
+          ok: !!res?.ok,
+          reason: res?.reason || null,
+          tokenCount: res?.tokenId ? 1 : 0,
+          assignments: res?.tokenId ? [{ tokenId: res.tokenId, destinationTopLeft: single?.destinationTopLeft }] : [],
+          stepCount: Array.isArray(res?.pathNodes) ? Math.max(0, res.pathNodes.length - 1) : 0
+        };
+      }
+      let planSource = 'computed';
+      let planResult = null;
+      let retryDiagnostics = null;
+      const cachedPlanKey = String(options?.groupPlanCacheKey || '');
+      if (cachedPlanKey) {
+        const cached = this._consumeGroupPlanCacheEntry(cachedPlanKey, {
+          tokenMoves: moves,
+          options
+        });
+        if (cached?.ok) {
+          planResult = cached;
+          planSource = 'preview-cache';
+        }
+      }
+
+      if (!planResult) {
+        planResult = this._planDoorAwareGroupMove({ tokenMoves: moves, options });
+      }
+
+      if (!planResult?.ok) {
+        const retryOptions = this._buildGroupPlanRetryOptions(options, planResult);
+        if (retryOptions) {
+          const retryStartMs = this._nowMs();
+          const retryPlanResult = this._planDoorAwareGroupMove({ tokenMoves: moves, options: retryOptions });
+          retryDiagnostics = {
+            attempted: true,
+            reason: planResult?.reason || 'group-plan-failed',
+            retryMs: this._nowMs() - retryStartMs,
+            options: {
+              searchMarginPx: asNumber(retryOptions?.searchMarginPx, NaN),
+              maxGraphNodes: asNumber(retryOptions?.maxGraphNodes, NaN),
+              maxSearchIterations: asNumber(retryOptions?.maxSearchIterations, NaN),
+              groupMaxCandidatesPerToken: asNumber(retryOptions?.groupMaxCandidatesPerToken, NaN),
+              groupPathEvalCandidatesPerToken: asNumber(retryOptions?.groupPathEvalCandidatesPerToken, NaN),
+              groupPlanningBudgetMs: asNumber(retryOptions?.groupPlanningBudgetMs, NaN),
+              enforceAnchorSide: optionsBoolean(retryOptions?.enforceAnchorSide, false)
+            },
+            result: {
+              ok: !!retryPlanResult?.ok,
+              reason: retryPlanResult?.reason || null,
+              metrics: retryPlanResult?.metrics || null
+            }
+          };
+
+          if (retryPlanResult?.ok) {
+            planResult = retryPlanResult;
+            planSource = `${planSource}-retry-expanded`;
+          } else if (retryPlanResult) {
+            planResult = retryPlanResult;
+            planSource = `${planSource}-retry-failed`;
+          }
+        }
+      }
+
+      if (!planResult.ok) {
+        this._pathfindingLog('warn', 'executeDoorAwareGroupMove planning failed', {
+          reason: planResult.reason || 'group-plan-failed',
+          tokenCount: planResult.tokenCount || 0,
+          planSource,
+          retryDiagnostics,
+          requestedMoves: moves.length,
+          options
+        });
+        return {
+          ok: false,
+          reason: planResult.reason || 'group-plan-failed',
+          tokenCount: planResult.tokenCount || 0,
+          diagnostics: {
+            planSource,
+            planning: planResult?.metrics || null,
+            retry: retryDiagnostics,
+            totalMs: this._nowMs() - totalStartMs
+          }
+        };
+      }
+
+      const planEntries = planResult.planEntries;
+      const ignoreWalls = planResult.ignoreWalls;
+      const ignoreCost = planResult.ignoreCost;
+
+      const timelineBuildStartMs = this._nowMs();
+      const timelineResult = this._buildGroupMovementTimeline(planEntries, options);
+      const timelineBuildMs = this._nowMs() - timelineBuildStartMs;
+
+      const baseDiagnostics = {
+        planSource,
+        planning: planResult?.metrics || null,
+        retry: retryDiagnostics,
+        timelineBuildMs,
+        totalMs: this._nowMs() - totalStartMs
+      };
+
+      if (!timelineResult.ok) {
+        this._pathfindingLog('warn', 'executeDoorAwareGroupMove timeline build failed', {
+          reason: timelineResult.reason || 'group-timeline-failed',
+          tokenCount: planResult.tokenCount,
+          planSource,
+          timelineDiagnostics: timelineResult?.diagnostics || null,
+          options
+        });
+
+        // Recovery path: if synchronized scheduling deadlocks, attempt to
+        // finish tokens sequentially to their assigned endpoints.
+        const reconciledAfterTimelineBuildFailure = await this._reconcileGroupFinalPositions(planEntries, {
+          ...options,
+          ignoreWalls,
+          ignoreCost,
+          method: options?.method || 'path-walk'
+        });
+        if (reconciledAfterTimelineBuildFailure.ok) {
+          this._pathfindingLog('warn', 'executeDoorAwareGroupMove recovered after timeline build failure via final reconciliation', {
+            reason: timelineResult.reason || 'group-timeline-failed',
+            tokenCount: planResult.tokenCount,
+            timelineDiagnostics: timelineResult?.diagnostics || null,
+            correctedCount: reconciledAfterTimelineBuildFailure.correctedCount,
+            options
+          });
+          return {
+            ok: true,
+            tokenCount: planResult.tokenCount,
+            assignments: planEntries.map((p) => ({ tokenId: p.tokenId, destinationTopLeft: p.destinationTopLeft })),
+            stepCount: 0,
+            reconciled: true,
+            correctedCount: reconciledAfterTimelineBuildFailure.correctedCount,
+            deadlockRecovered: true,
+            diagnostics: {
+              ...baseDiagnostics,
+              timeline: timelineResult?.diagnostics || null,
+              reconciliation: {
+                correctedCount: asNumber(reconciledAfterTimelineBuildFailure.correctedCount, 0)
+              }
+            }
+          };
+        }
+
+        return {
+          ok: false,
+          reason: timelineResult.reason || 'group-timeline-failed',
+          tokenCount: planResult.tokenCount,
+          diagnostics: {
+            ...baseDiagnostics,
+            timeline: timelineResult?.diagnostics || null,
+            reconciliation: {
+              reason: reconciledAfterTimelineBuildFailure?.reason || 'group-final-reconcile-failed',
+              correctedCount: asNumber(reconciledAfterTimelineBuildFailure?.correctedCount, 0),
+              remainingCount: asNumber(reconciledAfterTimelineBuildFailure?.remainingCount, NaN),
+              remainingDetails: Array.isArray(reconciledAfterTimelineBuildFailure?.remainingDetails)
+                ? reconciledAfterTimelineBuildFailure.remainingDetails
+                : []
+            }
+          }
+        };
+      }
+
+      const timelineExecuteStartMs = this._nowMs();
+      const execution = await this._executeGroupTimeline(planEntries, timelineResult.timelineByTokenId, {
+        ...options,
+        ignoreWalls,
+        ignoreCost,
+        method: options?.method || 'path-walk',
+        suppressFoundryMovementUI: options?.suppressFoundryMovementUI !== false
+      });
+      const timelineExecuteMs = this._nowMs() - timelineExecuteStartMs;
+
+      if (!execution.ok) {
+        this._pathfindingLog('warn', 'executeDoorAwareGroupMove timeline execution failed', {
+          reason: execution.reason || 'group-execution-failed',
+          tokenCount: planResult.tokenCount,
+          planSource,
+          options
+        });
+
+        const reconciledAfterFailure = await this._reconcileGroupFinalPositions(planEntries, {
+          ...options,
+          ignoreWalls,
+          ignoreCost
+        });
+        if (reconciledAfterFailure.ok) {
+          this._pathfindingLog('warn', 'executeDoorAwareGroupMove recovered by final reconciliation after execution failure', {
+            tokenCount: planResult.tokenCount,
+            stepCount: timelineResult.stepCount,
+            options
+          });
+          return {
+            ok: true,
+            tokenCount: planResult.tokenCount,
+            assignments: planEntries.map((p) => ({ tokenId: p.tokenId, destinationTopLeft: p.destinationTopLeft })),
+            stepCount: timelineResult.stepCount,
+            reconciled: true,
+            diagnostics: {
+              ...baseDiagnostics,
+              timelineExecuteMs,
+              totalMs: this._nowMs() - totalStartMs
+            }
+          };
+        }
+
+        return {
+          ok: false,
+          reason: execution.reason || 'group-execution-failed',
+          tokenCount: planResult.tokenCount,
+          assignments: planEntries.map((p) => ({ tokenId: p.tokenId, destinationTopLeft: p.destinationTopLeft })),
+          diagnostics: {
+            ...baseDiagnostics,
+            timelineExecuteMs,
+            totalMs: this._nowMs() - totalStartMs
+          }
+        };
+      }
+
+      const reconcileStartMs = this._nowMs();
+      const reconciliation = await this._reconcileGroupFinalPositions(planEntries, {
+        ...options,
+        ignoreWalls,
+        ignoreCost
+      });
+      const reconcileMs = this._nowMs() - reconcileStartMs;
+      if (!reconciliation.ok) {
+        this._pathfindingLog('warn', 'executeDoorAwareGroupMove final reconciliation failed', {
+          reason: reconciliation.reason || 'group-final-reconcile-failed',
+          tokenCount: planResult.tokenCount,
+          planSource,
+          options
+        });
+        return {
+          ok: false,
+          reason: reconciliation.reason || 'group-final-reconcile-failed',
+          tokenCount: planResult.tokenCount,
+          assignments: planEntries.map((p) => ({ tokenId: p.tokenId, destinationTopLeft: p.destinationTopLeft })),
+          diagnostics: {
+            ...baseDiagnostics,
+            timelineExecuteMs,
+            reconcileMs,
+            totalMs: this._nowMs() - totalStartMs
+          }
+        };
+      }
+
+      return {
+        ok: true,
+        tokenCount: planResult.tokenCount,
+        assignments: planEntries.map((p) => ({ tokenId: p.tokenId, destinationTopLeft: p.destinationTopLeft })),
+        stepCount: timelineResult.stepCount,
+        reconciled: reconciliation.correctedCount > 0,
+        correctedCount: reconciliation.correctedCount,
+        diagnostics: {
+          ...baseDiagnostics,
+          timelineExecuteMs,
+          reconcileMs,
+          totalMs: this._nowMs() - totalStartMs
+        }
+      };
+    } catch (error) {
+      this._pathfindingLog('error', 'executeDoorAwareGroupMove threw unexpectedly', {
+        requestedMoveCount: Array.isArray(tokenMoves) ? tokenMoves.length : 0,
+        options
+      }, error);
+      return {
+        ok: false,
+        reason: 'group-move-exception',
+        tokenCount: 0,
+        assignments: []
+      };
+    } finally {
+      this._releaseGroupMoveLock();
+    }
+  }
+
+  /**
+   * Build coordinated destination/path plans for group movement.
+   *
+   * @param {object} params
+   * @param {Array<{tokenDoc: TokenDocument|object, destinationTopLeft: {x:number,y:number}}>} params.tokenMoves
+   * @param {object} [params.options]
+   * @returns {{ok:boolean, reason?:string, tokenCount:number, planEntries?:Array<{tokenId:string, tokenDoc:any, pathNodes:Array<{x:number,y:number}>, destinationTopLeft:{x:number,y:number}, cost:number}>, ignoreWalls?:boolean, ignoreCost?:boolean, stepCount?:number}}
+   */
+  _planDoorAwareGroupMove({ tokenMoves = [], options = {} } = {}) {
+    const planningStartMs = this._nowMs();
+    const moves = Array.isArray(tokenMoves) ? tokenMoves : [];
+    if (moves.length === 0) {
+      this._pathfindingLog('warn', '_planDoorAwareGroupMove blocked: missing group moves', {
+        tokenMoves,
+        options
+      });
+      return {
+        ok: false,
+        reason: 'missing-group-moves',
+        tokenCount: 0,
+        metrics: {
+          planningMs: this._nowMs() - planningStartMs,
+          tokenCount: 0
+        }
       };
     }
 
     const ignoreWalls = optionsBoolean(options?.ignoreWalls, false);
     const ignoreCost = optionsBoolean(options?.ignoreCost, false);
 
-    const targetTopLeft = this._snapTokenTopLeftToGrid({ x: destX, y: destY }, currentDoc);
-    const startCenter = this._tokenTopLeftToCenter({ x: currentDoc.x, y: currentDoc.y }, currentDoc);
-    const endCenter = this._tokenTopLeftToCenter(targetTopLeft, currentDoc);
+    /** @type {Array<{tokenId:string, tokenDoc:any, startTopLeft:{x:number,y:number}, desiredTopLeft:{x:number,y:number}, startCenter:{x:number,y:number}, desiredCenter:{x:number,y:number}, size:{widthPx:number,heightPx:number}}>} */
+    const entries = [];
+    for (const move of moves) {
+      const inputDoc = move?.tokenDoc;
+      const tokenId = String(inputDoc?.id || move?._id || '');
+      if (!tokenId) continue;
 
-    let pathNodes = [startCenter, endCenter];
+      const liveDoc = this._resolveTokenDocumentById(tokenId, inputDoc);
+      if (!liveDoc) continue;
+
+      const destX = asNumber(move?.destinationTopLeft?.x, NaN);
+      const destY = asNumber(move?.destinationTopLeft?.y, NaN);
+      if (!Number.isFinite(destX) || !Number.isFinite(destY)) continue;
+
+      const startTopLeft = {
+        x: asNumber(liveDoc?.x, 0),
+        y: asNumber(liveDoc?.y, 0)
+      };
+      const desiredTopLeft = this._snapTokenTopLeftToGrid({ x: destX, y: destY }, liveDoc);
+      const startCenter = this._tokenTopLeftToCenter(startTopLeft, liveDoc);
+      const desiredCenter = this._tokenTopLeftToCenter(desiredTopLeft, liveDoc);
+
+      entries.push({
+        tokenId,
+        tokenDoc: liveDoc,
+        startTopLeft,
+        desiredTopLeft,
+        startCenter,
+        desiredCenter,
+        size: this._getTokenPixelSize(liveDoc)
+      });
+    }
+
+    if (entries.length < 2) {
+      this._pathfindingLog('warn', '_planDoorAwareGroupMove blocked: insufficient live token entries', {
+        requestedMoves: moves.length,
+        resolvedEntries: entries.length,
+        options
+      });
+      return {
+        ok: false,
+        reason: 'insufficient-group-tokens',
+        tokenCount: entries.length,
+        metrics: {
+          planningMs: this._nowMs() - planningStartMs,
+          tokenCount: entries.length
+        }
+      };
+    }
+
+    const pathfindingStatsCollector = this._createPathfindingStatsCollector();
+    const candidateGenerationMsByToken = {};
+    const candidateCountByToken = {};
+
+    // Eagerly warm the HPA adjacency graph so every findWeightedPath call
+    // during candidate evaluation hits the cache instead of rebuilding it.
+    // This is especially important for long-distance group moves where HPA
+    // kicks in for each per-token candidate path search.
     if (!ignoreWalls) {
-      const pathResult = this.findWeightedPath({
-        start: startCenter,
-        end: endCenter,
-        tokenDoc: currentDoc,
+      this._buildHpaSectorIndex();
+      // Build adjacency for the most common token sizes in the group.
+      const seenSizeKeys = new Set();
+      for (const entry of entries) {
+        const w = Math.max(1, Math.round(asNumber(entry.tokenDoc?.width, 1)));
+        const h = Math.max(1, Math.round(asNumber(entry.tokenDoc?.height, 1)));
+        const sizeKey = `${w}x${h}`;
+        if (seenSizeKeys.has(sizeKey)) continue;
+        seenSizeKeys.add(sizeKey);
+        this._buildHpaAdjacency({
+          tokenDoc: entry.tokenDoc,
+          options: { allowDiagonal: true, collisionMode: options?.collisionMode || 'closest' }
+        });
+      }
+    }
+
+    const adaptiveDefaults = this._getAdaptiveGroupCandidateDefaults(entries.length);
+    const candidateOptions = {
+      ...options,
+      groupMaxRadiusCells: Number.isFinite(Number(options?.groupMaxRadiusCells))
+        ? Math.round(asNumber(options?.groupMaxRadiusCells, adaptiveDefaults.maxRadiusCells))
+        : adaptiveDefaults.maxRadiusCells,
+      groupMaxCandidatesPerToken: Number.isFinite(Number(options?.groupMaxCandidatesPerToken))
+        ? Math.round(asNumber(options?.groupMaxCandidatesPerToken, adaptiveDefaults.maxCandidatesPerToken))
+        : adaptiveDefaults.maxCandidatesPerToken,
+      groupPathEvalCandidatesPerToken: Number.isFinite(Number(options?.groupPathEvalCandidatesPerToken))
+        ? Math.round(asNumber(options?.groupPathEvalCandidatesPerToken, adaptiveDefaults.pathEvalCandidates))
+        : adaptiveDefaults.pathEvalCandidates,
+      groupBudgetMinCandidatesPerToken: Number.isFinite(Number(options?.groupBudgetMinCandidatesPerToken))
+        ? Math.round(asNumber(options?.groupBudgetMinCandidatesPerToken, Math.min(adaptiveDefaults.maxCandidatesPerToken, adaptiveDefaults.pathEvalCandidates)))
+        : Math.min(adaptiveDefaults.maxCandidatesPerToken, adaptiveDefaults.pathEvalCandidates)
+    };
+
+    // Use a larger planning budget for long-distance group moves where HPA
+    // coarse routing is likely to trigger multi-segment local refinement.
+    const anchorEntryTemp = entries.find((entry) => entry.tokenId === String(options?.groupAnchorTokenId || '')) || entries[0];
+    const groupTravelDistance = Math.hypot(
+      asNumber(anchorEntryTemp?.desiredCenter?.x, 0) - asNumber(anchorEntryTemp?.startCenter?.x, 0),
+      asNumber(anchorEntryTemp?.desiredCenter?.y, 0) - asNumber(anchorEntryTemp?.startCenter?.y, 0)
+    );
+    const gridSize = Math.max(1, asNumber(canvas?.grid?.size, asNumber(canvas?.dimensions?.size, 100)));
+    const isLongDistance = groupTravelDistance >= gridSize * 10;
+    const baseBudgetMs = asNumber(options?.groupPlanningBudgetMs, 280);
+    const effectiveBudgetMs = isLongDistance
+      ? clamp(Math.max(baseBudgetMs, baseBudgetMs * 1.6), 0, 5000)
+      : clamp(baseBudgetMs, 0, 5000);
+
+    const planBudget = {
+      startMs: planningStartMs,
+      budgetMs: effectiveBudgetMs,
+      triggered: false,
+      overrunMs: 0
+    };
+
+    const requestedAnchorId = String(options?.groupAnchorTokenId || '');
+    const anchorEntry = entries.find((entry) => entry.tokenId === requestedAnchorId) || entries[0];
+    const rawAnchorTopLeft = {
+      x: asNumber(options?.groupAnchorTopLeft?.x, anchorEntry?.desiredTopLeft?.x),
+      y: asNumber(options?.groupAnchorTopLeft?.y, anchorEntry?.desiredTopLeft?.y)
+    };
+    const anchorTopLeft = this._snapTokenTopLeftToGrid(rawAnchorTopLeft, anchorEntry.tokenDoc);
+    const anchorCenter = this._tokenTopLeftToCenter(anchorTopLeft, anchorEntry.tokenDoc);
+    const anchor = {
+      tokenDoc: anchorEntry.tokenDoc,
+      topLeft: anchorTopLeft,
+      center: anchorCenter,
+      enforceAnchorSide: optionsBoolean(options?.enforceAnchorSide, false)
+    };
+
+    const relaxedAnchorTokenIds = new Set();
+    if (anchor.enforceAnchorSide && !ignoreWalls) {
+      for (const entry of entries) {
+        if (entry.tokenId === anchorEntry.tokenId) continue;
+
+        const anchorProbe = this.findWeightedPath({
+          start: entry.startCenter,
+          end: anchor.center,
+          tokenDoc: entry.tokenDoc,
+          options: {
+            ignoreWalls: false,
+            ignoreCost,
+            allowDiagonal: optionsBoolean(candidateOptions?.allowDiagonal, true),
+            fogPathPolicy: candidateOptions?.fogPathPolicy || this.settings.fogPathPolicy,
+            maxSearchIterations: Math.min(4000, Math.max(256, asNumber(candidateOptions?.maxSearchIterations, 12000))),
+            suppressNoPathLog: true,
+            statsCollector: pathfindingStatsCollector
+          }
+        });
+
+        if (!anchorProbe?.ok) {
+          const graphDiagnostics = anchorProbe?.diagnostics?.graphDiagnostics || null;
+          const looksDisconnected = String(anchorProbe?.reason || '') === 'no-path'
+            && graphDiagnostics
+            && !optionsBoolean(graphDiagnostics?.truncated, false)
+            && asNumber(graphDiagnostics?.nodeCount, 0) <= 28;
+
+          if (looksDisconnected) {
+            relaxedAnchorTokenIds.add(entry.tokenId);
+          }
+        }
+      }
+    }
+
+    let sharedCorridorPath = [];
+    let sharedCorridorAdaptiveExpansionUsed = false;
+    if (!ignoreWalls) {
+      const sharedCorridorResult = this._findWeightedPathWithAdaptiveExpansion({
+        start: anchorEntry.startCenter,
+        end: anchor.center,
+        tokenDoc: anchorEntry.tokenDoc,
         options: {
+          ignoreWalls: false,
+          ignoreCost,
+          allowDiagonal: optionsBoolean(candidateOptions?.allowDiagonal, true),
+          fogPathPolicy: candidateOptions?.fogPathPolicy || this.settings.fogPathPolicy,
+          maxSearchIterations: asNumber(candidateOptions?.maxSearchIterations, 12000),
+          suppressNoPathLog: true,
+          statsCollector: pathfindingStatsCollector
+        },
+        preferLongRange: true
+      });
+
+      if (sharedCorridorResult?.ok && Array.isArray(sharedCorridorResult.pathNodes) && sharedCorridorResult.pathNodes.length >= 2) {
+        sharedCorridorPath = sharedCorridorResult.pathNodes.slice();
+        sharedCorridorAdaptiveExpansionUsed = !!sharedCorridorResult?.adaptiveExpansionUsed;
+      }
+    }
+
+    const formationSlotsByTokenId = this._buildGroupFormationSlots(entries, anchor.center, candidateOptions);
+
+    const movingIds = new Set(entries.map((e) => e.tokenId));
+    const staticRects = this._collectStaticTokenOccupancyRects(movingIds);
+
+    /** @type {Map<string, Array<{topLeft:{x:number,y:number}, center:{x:number,y:number}, rect:{x:number,y:number,w:number,h:number}, key:string, pathNodes:Array<{x:number,y:number}>, cost:number}>>} */
+    const candidateMap = new Map();
+    for (const entry of entries) {
+      const candidateStartMs = this._nowMs();
+      const candidates = this._buildGroupMoveCandidates(entry, {
+        entries,
+        staticRects,
+        anchor,
+        ignoreWalls,
+        ignoreCost,
+        options: candidateOptions,
+        planBudget,
+        relaxedAnchorTokenIds,
+        formationSlotsByTokenId,
+        sharedCorridorPath,
+        sharedCorridorTokenId: anchorEntry.tokenId,
+        statsCollector: pathfindingStatsCollector
+      });
+      candidateGenerationMsByToken[entry.tokenId] = this._nowMs() - candidateStartMs;
+      candidateCountByToken[entry.tokenId] = candidates.length;
+      candidateMap.set(entry.tokenId, candidates);
+      if (candidates.length === 0) {
+        this._pathfindingLog('warn', '_planDoorAwareGroupMove found no candidates for token', {
+          tokenId: entry.tokenId,
+          token: this._pathfindingTokenMeta(entry.tokenDoc),
+          desiredTopLeft: entry.desiredTopLeft,
+          anchorTopLeft: anchor.topLeft,
+          anchorSideRelaxed: relaxedAnchorTokenIds.has(entry.tokenId),
+          sharedCorridorNodes: Array.isArray(sharedCorridorPath) ? sharedCorridorPath.length : 0,
           ignoreWalls,
           ignoreCost,
-          fogPathPolicy: this.settings.fogPathPolicy,
-          allowDiagonal: optionsBoolean(options?.allowDiagonal, true),
-          maxSearchIterations: asNumber(options?.maxSearchIterations, 12000)
-        }
-      });
-
-      const foundryPathResult = await this._computeFoundryParityPath({
-        tokenDoc: currentDoc,
-        startTopLeft: { x: currentDoc.x, y: currentDoc.y },
-        endTopLeft: targetTopLeft,
-        ignoreWalls,
-        ignoreCost
-      });
-
-      const paritySelection = this._selectPathWithFoundryParity({
-        customPathResult: pathResult,
-        foundryPathResult,
-        startCenter,
-        endCenter,
-        gridSize: asNumber(canvas?.grid?.size, 100),
-        forceFoundryParity: optionsBoolean(options?.forceFoundryParity, false)
-      });
-
-      if (!paritySelection?.ok) {
+          options
+        });
         return {
           ok: false,
-          tokenId,
-          reason: paritySelection?.reason || 'no-path',
-          transitions: [],
-          pathNodes: []
+          reason: `no-group-candidate-${entry.tokenId}`,
+          tokenCount: entries.length,
+          metrics: {
+            planningMs: this._nowMs() - planningStartMs,
+            tokenCount: entries.length,
+            budgetMs: planBudget.budgetMs,
+            budgetTriggered: !!planBudget.triggered,
+            budgetOverrunMs: asNumber(planBudget.overrunMs, 0),
+            candidateGenerationMsByToken,
+            candidateCountByToken,
+            anchorSideRelaxedTokenIds: Array.from(relaxedAnchorTokenIds),
+            formationSlotCount: formationSlotsByTokenId.size,
+            sharedCorridor: {
+              used: Array.isArray(sharedCorridorPath) && sharedCorridorPath.length >= 2,
+              nodeCount: Array.isArray(sharedCorridorPath) ? sharedCorridorPath.length : 0,
+              adaptiveExpansionUsed: !!sharedCorridorAdaptiveExpansionUsed
+            },
+            totalCandidates: Object.values(candidateCountByToken).reduce((sum, count) => sum + asNumber(count, 0), 0),
+            pathfinding: this._summarizePathfindingStats(pathfindingStatsCollector)
+          }
+        };
+      }
+    }
+
+    const assignmentStartMs = this._nowMs();
+    const assignmentResult = this._assignGroupDestinations(entries, candidateMap, candidateOptions);
+    const assignmentMs = this._nowMs() - assignmentStartMs;
+    if (!assignmentResult.ok) {
+      this._pathfindingLog('warn', '_planDoorAwareGroupMove assignment failed', {
+        reason: assignmentResult.reason || 'group-assignment-failed',
+        tokenCount: entries.length,
+        options: candidateOptions
+      });
+      return {
+        ok: false,
+        reason: assignmentResult.reason || 'group-assignment-failed',
+        tokenCount: entries.length,
+        metrics: {
+          planningMs: this._nowMs() - planningStartMs,
+          tokenCount: entries.length,
+          assignmentMs,
+          budgetMs: planBudget.budgetMs,
+          budgetTriggered: !!planBudget.triggered,
+          budgetOverrunMs: asNumber(planBudget.overrunMs, 0),
+          candidateGenerationMsByToken,
+          candidateCountByToken,
+          anchorSideRelaxedTokenIds: Array.from(relaxedAnchorTokenIds),
+          formationSlotCount: formationSlotsByTokenId.size,
+          sharedCorridor: {
+            used: Array.isArray(sharedCorridorPath) && sharedCorridorPath.length >= 2,
+            nodeCount: Array.isArray(sharedCorridorPath) ? sharedCorridorPath.length : 0,
+            adaptiveExpansionUsed: !!sharedCorridorAdaptiveExpansionUsed
+          },
+          totalCandidates: Object.values(candidateCountByToken).reduce((sum, count) => sum + asNumber(count, 0), 0),
+          pathfinding: this._summarizePathfindingStats(pathfindingStatsCollector)
+        }
+      };
+    }
+
+    const planEntries = entries.map((entry) => {
+      const assigned = assignmentResult.assignments.get(entry.tokenId);
+      return {
+        tokenId: entry.tokenId,
+        tokenDoc: entry.tokenDoc,
+        pathNodes: Array.isArray(assigned?.pathNodes) ? assigned.pathNodes.slice() : [entry.startCenter, entry.desiredCenter],
+        destinationTopLeft: assigned?.topLeft || entry.desiredTopLeft,
+        cost: asNumber(assigned?.cost, 0)
+      };
+    });
+
+    return {
+      ok: true,
+      tokenCount: entries.length,
+      planEntries,
+      ignoreWalls,
+      ignoreCost,
+      stepCount: Math.max(0, ...planEntries.map((entry) => Math.max(0, (entry.pathNodes?.length || 1) - 1))),
+      metrics: {
+        planningMs: this._nowMs() - planningStartMs,
+        tokenCount: entries.length,
+        assignmentMs,
+        budgetMs: planBudget.budgetMs,
+        budgetTriggered: !!planBudget.triggered,
+        budgetOverrunMs: asNumber(planBudget.overrunMs, 0),
+        candidateGenerationMsByToken,
+        candidateCountByToken,
+        anchorSideRelaxedTokenIds: Array.from(relaxedAnchorTokenIds),
+        formationSlotCount: formationSlotsByTokenId.size,
+        sharedCorridor: {
+          used: Array.isArray(sharedCorridorPath) && sharedCorridorPath.length >= 2,
+          nodeCount: Array.isArray(sharedCorridorPath) ? sharedCorridorPath.length : 0,
+          adaptiveExpansionUsed: !!sharedCorridorAdaptiveExpansionUsed
+        },
+        totalCandidates: Object.values(candidateCountByToken).reduce((sum, count) => sum + asNumber(count, 0), 0),
+        pathfinding: this._summarizePathfindingStats(pathfindingStatsCollector)
+      }
+    };
+  }
+
+  /**
+   * @param {{tokenId:string, tokenDoc:any, startTopLeft:{x:number,y:number}, desiredTopLeft:{x:number,y:number}, startCenter:{x:number,y:number}, desiredCenter:{x:number,y:number}, size:{widthPx:number,heightPx:number}}} entry
+   * @param {{entries:Array<object>, staticRects:Array<{x:number,y:number,w:number,h:number}>, anchor?:{tokenDoc:any, topLeft:{x:number,y:number}, center:{x:number,y:number}, enforceAnchorSide:boolean}, ignoreWalls:boolean, ignoreCost:boolean, options:object, relaxedAnchorTokenIds?:Set<string>, formationSlotsByTokenId?:Map<string,{x:number,y:number,ring:number,angle:number}>, sharedCorridorPath?:Array<{x:number,y:number}>, sharedCorridorTokenId?:string}} context
+   * @returns {Array<{topLeft:{x:number,y:number}, center:{x:number,y:number}, rect:{x:number,y:number,w:number,h:number}, key:string, pathNodes:Array<{x:number,y:number}>, cost:number}>}
+   */
+  _buildGroupMoveCandidates(entry, context) {
+    const grid = canvas?.grid;
+    const gridSize = Math.max(1, asNumber(grid?.size, asNumber(canvas?.dimensions?.size, 100)));
+    const stepX = Math.max(1, asNumber(grid?.sizeX, gridSize));
+    const stepY = Math.max(1, asNumber(grid?.sizeY, gridSize));
+
+    const adaptiveDefaults = this._getAdaptiveGroupCandidateDefaults(context?.entries?.length || 1);
+    const maxRadiusCells = clamp(
+      Math.round(asNumber(context?.options?.groupMaxRadiusCells, adaptiveDefaults.maxRadiusCells)),
+      0,
+      16
+    );
+    const maxCandidates = clamp(
+      Math.round(asNumber(context?.options?.groupMaxCandidatesPerToken, adaptiveDefaults.maxCandidatesPerToken)),
+      4,
+      60
+    );
+
+    // When an anchor point exists (right-click group move), generate candidates
+    // centered on the anchor rather than each token's individual desired position.
+    // This produces much tighter clustering near the click point.
+    const hasAnchor = !!(context?.anchor?.topLeft);
+    const searchOriginTopLeft = hasAnchor
+      ? context.anchor.topLeft
+      : entry.desiredTopLeft;
+
+    const seen = new Set();
+    const coarseCandidates = [];
+    const candidates = [];
+    const budgetCandidateFloor = clamp(
+      Math.round(asNumber(context?.options?.groupBudgetMinCandidatesPerToken, 8)),
+      4,
+      maxCandidates
+    );
+
+    const pathEvalCandidatesLimit = clamp(
+      Math.round(asNumber(context?.options?.groupPathEvalCandidatesPerToken, Math.min(maxCandidates, adaptiveDefaults.pathEvalCandidates))),
+      4,
+      maxCandidates
+    );
+
+    const formationSlots = context?.formationSlotsByTokenId instanceof Map
+      ? context.formationSlotsByTokenId
+      : null;
+    const formationSlot = formationSlots?.get?.(entry.tokenId) || null;
+
+    const pushCoarseCandidate = (rawTopLeft, meta = {}) => {
+      if (coarseCandidates.length >= maxCandidates) return;
+
+      const snappedTopLeft = this._snapTokenTopLeftToGrid(rawTopLeft, entry.tokenDoc);
+      const key = this._pointKey(snappedTopLeft.x, snappedTopLeft.y);
+      if (seen.has(key)) return;
+      seen.add(key);
+
+      if (!this._isTokenTopLeftWithinScene(snappedTopLeft, entry.tokenDoc)) return;
+
+      const rect = this._buildTokenRect(snappedTopLeft, entry.tokenDoc);
+      if (this._rectOverlapsAny(rect, context.staticRects)) return;
+
+      const center = this._tokenTopLeftToCenter(snappedTopLeft, entry.tokenDoc);
+
+      const anchorSideRelaxed = context?.relaxedAnchorTokenIds instanceof Set && context.relaxedAnchorTokenIds.has(entry.tokenId);
+      if (context?.anchor?.enforceAnchorSide && !context.ignoreWalls && !anchorSideRelaxed) {
+        const anchorDoc = context.anchor.tokenDoc || entry.tokenDoc;
+        const anchorCheck = this._validatePathSegmentCollision(context.anchor.center, center, {
+          tokenDoc: anchorDoc,
+          options: {
+            ignoreWalls: false,
+            collisionMode: context?.options?.collisionMode || 'closest'
+          }
+        });
+        if (!anchorCheck?.ok) return;
+      }
+
+      // Distance from this candidate cell to the anchor point (click target).
+      // This is weighted more heavily than path length so tokens compress
+      // tightly around the click point rather than spreading out.
+      const anchorCenter = hasAnchor ? context.anchor.center : entry.desiredCenter;
+      const anchorOffset = Math.hypot(
+        center.x - anchorCenter.x,
+        center.y - anchorCenter.y
+      );
+
+      const directDistance = Math.hypot(center.x - entry.startCenter.x, center.y - entry.startCenter.y);
+      const formationOffset = formationSlot
+        ? Math.hypot(center.x - asNumber(formationSlot?.x, center.x), center.y - asNumber(formationSlot?.y, center.y))
+        : 0;
+      const coarseCost = (anchorOffset * 0.62) + (directDistance * 0.2) + (formationOffset * 0.18);
+
+      coarseCandidates.push({
+        topLeft: snappedTopLeft,
+        center,
+        rect,
+        key,
+        anchorOffset,
+        coarseCost,
+        formationSeed: !!meta?.formationSeed,
+        sharedPathIndex: Number.isFinite(asNumber(meta?.sharedPathIndex, NaN))
+          ? Math.max(0, Math.round(asNumber(meta?.sharedPathIndex, 0)))
+          : -1
+      });
+    };
+
+    if (formationSlot) {
+      const formationTopLeft = this._tokenCenterToTopLeft({
+        x: asNumber(formationSlot?.x, 0),
+        y: asNumber(formationSlot?.y, 0)
+      }, entry.tokenDoc);
+
+      pushCoarseCandidate(formationTopLeft, { formationSeed: true });
+
+      // Seed a small ring around the slot so assignment has nearby non-overlap
+      // alternatives before broad radial expansion.
+      const ringStep = Math.max(stepX, stepY);
+      const ring = [
+        [ringStep, 0],
+        [-ringStep, 0],
+        [0, ringStep],
+        [0, -ringStep],
+        [ringStep, ringStep],
+        [ringStep, -ringStep],
+        [-ringStep, ringStep],
+        [-ringStep, -ringStep]
+      ];
+      for (const [dx, dy] of ring) {
+        pushCoarseCandidate({ x: formationTopLeft.x + dx, y: formationTopLeft.y + dy }, { formationSeed: true });
+      }
+    }
+
+    const sharedCorridorPath = Array.isArray(context?.sharedCorridorPath)
+      ? context.sharedCorridorPath
+      : [];
+    if (!context.ignoreWalls && sharedCorridorPath.length >= 2) {
+      const corridorTailSteps = clamp(
+        Math.round(asNumber(context?.options?.groupSharedPathTailSteps, 20)),
+        4,
+        80
+      );
+      const corridorStride = clamp(
+        Math.round(asNumber(context?.options?.groupSharedPathStride, 2)),
+        1,
+        8
+      );
+      const startIndex = Math.max(0, sharedCorridorPath.length - corridorTailSteps);
+
+      for (let idx = sharedCorridorPath.length - 1; idx >= startIndex && coarseCandidates.length < maxCandidates; idx -= corridorStride) {
+        const node = sharedCorridorPath[idx];
+        if (!node || !Number.isFinite(asNumber(node?.x, NaN)) || !Number.isFinite(asNumber(node?.y, NaN))) continue;
+        const corridorTopLeft = this._tokenCenterToTopLeft(node, entry.tokenDoc);
+        pushCoarseCandidate(corridorTopLeft, { sharedPathIndex: idx });
+      }
+    }
+
+    for (let radius = 0; radius <= maxRadiusCells && coarseCandidates.length < maxCandidates; radius++) {
+      if (this._isGroupPlanningBudgetExceeded(context?.planBudget) && coarseCandidates.length >= budgetCandidateFloor) {
+        break;
+      }
+      for (let ox = -radius; ox <= radius && coarseCandidates.length < maxCandidates; ox++) {
+        if (this._isGroupPlanningBudgetExceeded(context?.planBudget) && coarseCandidates.length >= budgetCandidateFloor) {
+          break;
+        }
+        for (let oy = -radius; oy <= radius && coarseCandidates.length < maxCandidates; oy++) {
+          if (this._isGroupPlanningBudgetExceeded(context?.planBudget) && coarseCandidates.length >= budgetCandidateFloor) {
+            break;
+          }
+          if (Math.max(Math.abs(ox), Math.abs(oy)) !== radius) continue;
+          pushCoarseCandidate({
+            x: searchOriginTopLeft.x + (ox * stepX),
+            y: searchOriginTopLeft.y + (oy * stepY)
+          });
+        }
+      }
+    }
+
+    if (coarseCandidates.length === 0) return [];
+
+    coarseCandidates.sort((a, b) => a.coarseCost - b.coarseCost);
+
+    const evaluateCandidate = (coarse, index = 0) => {
+      let pathNodes = [entry.startCenter, coarse.center];
+      if (!context.ignoreWalls) {
+        const pathOptions = {
+          ignoreWalls: false,
+          ignoreCost: context.ignoreCost,
+          allowDiagonal: optionsBoolean(context?.options?.allowDiagonal, true),
+          fogPathPolicy: context?.options?.fogPathPolicy || this.settings.fogPathPolicy,
+          maxSearchIterations: asNumber(context?.options?.maxSearchIterations, 12000),
+          suppressNoPathLog: true,
+          statsCollector: context?.statsCollector || null
+        };
+
+        const useAdaptiveExpansion = index < 2
+          || !!coarse?.formationSeed
+          || (asNumber(coarse?.sharedPathIndex, -1) >= 0 && index < 6);
+        const pathResult = useAdaptiveExpansion
+          ? this._findWeightedPathWithAdaptiveExpansion({
+            start: entry.startCenter,
+            end: coarse.center,
+            tokenDoc: entry.tokenDoc,
+            options: pathOptions,
+            preferLongRange: asNumber(coarse?.anchorOffset, 0) <= Math.max(stepX, stepY)
+          })
+          : this.findWeightedPath({
+            start: entry.startCenter,
+            end: coarse.center,
+            tokenDoc: entry.tokenDoc,
+            options: pathOptions
+          });
+
+        if (!pathResult?.ok || !Array.isArray(pathResult.pathNodes) || pathResult.pathNodes.length < 2) {
+          return {
+            accepted: false,
+            reason: String(pathResult?.reason || 'path-search-failed'),
+            diagnostics: pathResult?.diagnostics || null
+          };
+        }
+
+        pathNodes = pathResult.pathNodes.slice();
+        pathNodes[0] = entry.startCenter;
+        pathNodes[pathNodes.length - 1] = coarse.center;
+      }
+
+      if (this._pathOverlapsStaticOccupancy(pathNodes, entry.tokenDoc, context.staticRects)) {
+        return {
+          accepted: false,
+          reason: 'path-overlaps-static-occupancy',
+          diagnostics: null
         };
       }
 
-      if (Array.isArray(paritySelection.pathNodes) && paritySelection.pathNodes.length >= 2) {
-        pathNodes = paritySelection.pathNodes;
+      const pathLength = this._measurePathLength(pathNodes);
+      const cost = (coarse.anchorOffset * 0.7) + (pathLength * 0.3);
+      candidates.push({
+        topLeft: coarse.topLeft,
+        center: coarse.center,
+        rect: coarse.rect,
+        key: coarse.key,
+        pathNodes,
+        cost
+      });
+      return {
+        accepted: true,
+        reason: 'ok',
+        diagnostics: null
+      };
+    };
+
+    const targetEvalCount = context.ignoreWalls
+      ? coarseCandidates.length
+      : Math.min(coarseCandidates.length, pathEvalCandidatesLimit);
+
+    let evaluatedCount = 0;
+    let lowConnectivityNoPathStreak = 0;
+    for (let i = 0; i < coarseCandidates.length; i++) {
+      if (this._isGroupPlanningBudgetExceeded(context?.planBudget) && candidates.length >= budgetCandidateFloor) {
+        break;
+      }
+
+      // Two-phase behavior:
+      // - evaluate only the top coarse candidates first (fast path)
+      // - continue beyond that only when we still don't have enough viable endpoints.
+      if (i >= targetEvalCount && candidates.length >= budgetCandidateFloor) {
+        break;
+      }
+
+      const evalResult = evaluateCandidate(coarseCandidates[i], i);
+      evaluatedCount += 1;
+
+      const graphDiagnostics = evalResult?.diagnostics?.graphDiagnostics || null;
+      const noPathLikelyDisconnected = evalResult?.reason === 'no-path'
+        && graphDiagnostics
+        && !optionsBoolean(graphDiagnostics?.truncated, false)
+        && asNumber(graphDiagnostics?.nodeCount, 0) <= 24;
+
+      lowConnectivityNoPathStreak = noPathLikelyDisconnected
+        ? (lowConnectivityNoPathStreak + 1)
+        : 0;
+
+      // If early probes repeatedly show tiny non-truncated graphs with no-path,
+      // remaining probes are typically wasted for this token in this preview.
+      if (!context.ignoreWalls && candidates.length === 0 && lowConnectivityNoPathStreak >= 4) {
+        break;
       }
     }
 
-    const moveToPoint = async (point, context = {}) => {
-      return this._moveTokenToFoundryPoint(tokenId, point, currentDoc, {
-        ...options,
-        ignoreWalls,
-        ignoreCost
-      }, context);
+    if (!context.ignoreWalls && candidates.length < budgetCandidateFloor && evaluatedCount < coarseCandidates.length) {
+      for (let i = evaluatedCount; i < coarseCandidates.length; i++) {
+        if (this._isGroupPlanningBudgetExceeded(context?.planBudget) && candidates.length >= budgetCandidateFloor) {
+          break;
+        }
+        evaluateCandidate(coarseCandidates[i], i);
+      }
+    }
+
+    candidates.sort((a, b) => a.cost - b.cost);
+    return candidates.slice(0, maxCandidates);
+  }
+
+  /**
+   * @param {Array<{tokenId:string, tokenDoc:any}>} entries
+   * @param {Map<string, Array<object>>} candidateMap
+   * @param {object} options
+   * @returns {{ok:boolean, reason?:string, assignments?:Map<string, any>}}
+   */
+  _assignGroupDestinations(entries, candidateMap, options = {}) {
+    const tokens = entries.slice().sort((a, b) => {
+      const ca = candidateMap.get(a.tokenId)?.length || 0;
+      const cb = candidateMap.get(b.tokenId)?.length || 0;
+      return ca - cb;
+    });
+
+    const buildGreedyAssignments = () => {
+      const greedy = new Map();
+      const usedRects = [];
+
+      for (const token of tokens) {
+        const candidates = candidateMap.get(token.tokenId) || [];
+        let selected = null;
+        for (const candidate of candidates) {
+          if (!this._rectOverlapsAny(candidate.rect, usedRects)) {
+            selected = candidate;
+            break;
+          }
+        }
+        if (!selected) {
+          return { ok: false, reason: 'greedy-assignment-failed', assignments: null };
+        }
+        greedy.set(token.tokenId, selected);
+        usedRects.push(selected.rect);
+      }
+
+      return { ok: true, assignments: greedy };
     };
 
-    if (ignoreWalls) {
-      const direct = await moveToPoint(endCenter, {
-        tokenId,
-        stepIndex: -1,
-        phase: 'DIRECT_MOVE',
-        plan: null
-      });
+    const maxBacktrackTokens = clamp(Math.round(asNumber(options?.groupBacktrackTokenLimit, 8)), 2, 12);
+    if (tokens.length > maxBacktrackTokens) {
+      // Fallback greedy assignment for very large groups.
+      return buildGreedyAssignments();
+    }
+
+    let bestCost = Number.POSITIVE_INFINITY;
+    /** @type {Map<string, any>|null} */
+    let bestAssignments = null;
+
+    const backtrackBudgetMs = clamp(asNumber(options?.groupBacktrackBudgetMs, 45), 1, 2000);
+    const backtrackNodeLimit = clamp(Math.round(asNumber(options?.groupBacktrackNodeLimit, 30000)), 1000, 500000);
+    const backtrackStartMs = this._nowMs();
+    let exploredNodes = 0;
+    let budgetExceeded = false;
+
+    const recurse = (index, runningCost, currentAssignments, usedRects) => {
+      if (budgetExceeded) return;
+
+      exploredNodes += 1;
+      if (
+        exploredNodes >= backtrackNodeLimit
+        || (this._nowMs() - backtrackStartMs) >= backtrackBudgetMs
+      ) {
+        budgetExceeded = true;
+        return;
+      }
+
+      if (runningCost >= bestCost) return;
+
+      if (index >= tokens.length) {
+        bestCost = runningCost;
+        bestAssignments = new Map(currentAssignments);
+        return;
+      }
+
+      const token = tokens[index];
+      const candidates = candidateMap.get(token.tokenId) || [];
+      for (const candidate of candidates) {
+        if (this._rectOverlapsAny(candidate.rect, usedRects)) continue;
+
+        currentAssignments.set(token.tokenId, candidate);
+        usedRects.push(candidate.rect);
+
+        recurse(index + 1, runningCost + asNumber(candidate.cost, Number.POSITIVE_INFINITY), currentAssignments, usedRects);
+
+        usedRects.pop();
+        currentAssignments.delete(token.tokenId);
+      }
+    };
+
+    recurse(0, 0, new Map(), []);
+
+    if ((!bestAssignments || bestAssignments.size !== tokens.length) && budgetExceeded) {
+      const greedyFallback = buildGreedyAssignments();
+      if (greedyFallback.ok) {
+        return {
+          ok: true,
+          assignments: greedyFallback.assignments,
+          degraded: true,
+          diagnostics: {
+            reason: 'backtrack-budget-exceeded-greedy-fallback',
+            exploredNodes,
+            backtrackNodeLimit,
+            backtrackBudgetMs
+          }
+        };
+      }
       return {
-        ok: !!direct?.ok,
-        tokenId,
-        reason: direct?.reason || null,
-        transitions: [],
-        plan: {
-          pathNodes,
-          doorSteps: [],
-          doorRevision: this._doorStateRevision,
-          inCombat: this._inCombat
-        },
-        pathNodes
+        ok: false,
+        reason: 'backtrack-budget-exceeded',
+        diagnostics: {
+          exploredNodes,
+          backtrackNodeLimit,
+          backtrackBudgetMs
+        }
       };
     }
 
-    const sequenceResult = await this.runDoorAwareMovementSequence({
-      tokenId,
-      pathNodes,
-      moveToPoint,
-      options
-    });
-
-    if (!sequenceResult?.ok) {
-      return {
-        ok: false,
-        tokenId,
-        reason: sequenceResult?.reason || 'door-sequence-failed',
-        transitions: sequenceResult?.transitions || [],
-        plan: sequenceResult?.plan,
-        pathNodes
-      };
+    if (!bestAssignments || bestAssignments.size !== tokens.length) {
+      return { ok: false, reason: 'no-non-overlap-assignment' };
     }
 
     return {
       ok: true,
-      tokenId,
-      reason: null,
-      transitions: sequenceResult.transitions || [],
-      plan: sequenceResult.plan,
-      pathNodes
+      assignments: bestAssignments
     };
+  }
+
+  /**
+   * Build synchronized timelines that avoid same-cell overlap and edge swaps.
+   *
+   * @param {Array<{tokenId:string, tokenDoc:any, pathNodes:Array<{x:number,y:number}>}>} planEntries
+   * @returns {{ok:boolean, reason?:string, timelineByTokenId?:Map<string, Array<{x:number,y:number}>>, stepCount?:number, diagnostics?:object}}
+   */
+  _buildGroupMovementTimeline(planEntries) {
+    const stateById = new Map();
+    for (const entry of planEntries) {
+      const path = Array.isArray(entry?.pathNodes) && entry.pathNodes.length >= 2
+        ? entry.pathNodes.slice()
+        : null;
+      if (!path) {
+        return { ok: false, reason: `invalid-path-${entry?.tokenId || 'unknown'}` };
+      }
+      stateById.set(entry.tokenId, {
+        tokenId: entry.tokenId,
+        tokenDoc: entry.tokenDoc,
+        pathNodes: path,
+        pathIndex: 0,
+        timeline: [path[0]]
+      });
+    }
+
+    const allStates = () => [...stateById.values()];
+    const isFinished = () => allStates().every((s) => s.pathIndex >= (s.pathNodes.length - 1));
+    const maxTicks = Math.max(24, planEntries.reduce((sum, p) => sum + Math.max(0, (p.pathNodes?.length || 1) - 1), 0) * 4);
+
+    let ticks = 0;
+    let consecutiveStalls = 0;
+    while (!isFinished()) {
+      ticks += 1;
+      if (ticks > maxTicks) {
+        const diagnostics = {
+          tick: ticks,
+          maxTicks,
+          tokenCount: planEntries.length
+        };
+        this._pathfindingLog('warn', '_buildGroupMovementTimeline exceeded max ticks', diagnostics);
+        return { ok: false, reason: 'group-timeline-max-ticks', diagnostics };
+      }
+
+      const proposals = [];
+      const proposalById = new Map();
+      for (const state of allStates()) {
+        if (state.pathIndex >= state.pathNodes.length - 1) continue;
+        const from = state.pathNodes[state.pathIndex];
+        const to = state.pathNodes[state.pathIndex + 1];
+        const proposal = {
+          tokenId: state.tokenId,
+          tokenDoc: state.tokenDoc,
+          from,
+          to,
+          remaining: (state.pathNodes.length - 1) - state.pathIndex
+        };
+        proposals.push(proposal);
+        proposalById.set(proposal.tokenId, proposal);
+      }
+
+      if (proposals.length === 0) break;
+
+      // Longer remaining paths move first to reduce corridor deadlocks.
+      proposals.sort((a, b) => b.remaining - a.remaining);
+
+      const accepted = [];
+      const acceptedIdSet = new Set();
+      const rejectedProposals = [];
+
+      for (const proposal of proposals) {
+        const tokenId = proposal.tokenId;
+
+        // Prevent edge swaps (A->B while B->A).
+        let blocked = false;
+        let blockedByTokenId = '';
+        let blockedReason = '';
+        for (const a of accepted) {
+          if (
+            Math.abs(a.from.x - proposal.to.x) < 0.5
+            && Math.abs(a.from.y - proposal.to.y) < 0.5
+            && Math.abs(a.to.x - proposal.from.x) < 0.5
+            && Math.abs(a.to.y - proposal.from.y) < 0.5
+          ) {
+            blocked = true;
+            blockedByTokenId = a.tokenId;
+            blockedReason = 'edge-swap';
+            break;
+          }
+        }
+        if (blocked) {
+          rejectedProposals.push({ tokenId, blockedByTokenId, blockedReason });
+          continue;
+        }
+
+        const proposalRect = this._buildTokenRect(this._tokenCenterToTopLeft(proposal.to, proposal.tokenDoc), proposal.tokenDoc);
+
+        // Check overlap against accepted target positions.
+        for (const a of accepted) {
+          const otherRect = this._buildTokenRect(this._tokenCenterToTopLeft(a.to, a.tokenDoc), a.tokenDoc);
+          if (this._rectsOverlap(proposalRect, otherRect)) {
+            blocked = true;
+            blockedByTokenId = a.tokenId;
+            blockedReason = 'target-overlap';
+            break;
+          }
+        }
+        if (blocked) {
+          rejectedProposals.push({ tokenId, blockedByTokenId, blockedReason });
+          continue;
+        }
+
+        // Check overlap against current positions of tokens that are not already accepted.
+        // Only trust the occupier will vacate if its move was ALREADY accepted this tick
+        // (not merely that it intends to move — its move could get rejected later).
+        for (const state of allStates()) {
+          if (state.tokenId === tokenId) continue;
+          if (acceptedIdSet.has(state.tokenId)) continue;
+
+          const currentNode = state.pathNodes[state.pathIndex];
+          const currentRect = this._buildTokenRect(this._tokenCenterToTopLeft(currentNode, state.tokenDoc), state.tokenDoc);
+          if (this._rectsOverlap(proposalRect, currentRect)) {
+            // Only allow move into occupied cell if the occupier's move was
+            // already accepted this tick (guaranteed to vacate).
+            if (acceptedIdSet.has(state.tokenId)) {
+              continue;
+            }
+
+            const blockerAtFinalNode = state.pathIndex >= (state.pathNodes.length - 1);
+            const moverHasMoreStepsAfterThis = proposal.remaining > 1;
+            if (blockerAtFinalNode && moverHasMoreStepsAfterThis) {
+              // Allow transient pass-through overlap when only a corridor-through
+              // step is blocked by a token that is already parked at its final
+              // destination. Final landing overlap is still disallowed.
+              continue;
+            }
+
+            blocked = true;
+            blockedByTokenId = state.tokenId;
+            blockedReason = 'occupied-current';
+            break;
+          }
+        }
+        if (blocked) {
+          rejectedProposals.push({ tokenId, blockedByTokenId, blockedReason });
+          continue;
+        }
+
+        accepted.push(proposal);
+        acceptedIdSet.add(tokenId);
+      }
+
+      // Prune any accepted moves that still overlap the current position of a
+      // token that ended up not moving this tick.
+      let changed = true;
+      while (changed) {
+        changed = false;
+        const acceptedNow = new Set(accepted.map((a) => a.tokenId));
+
+        for (let idx = accepted.length - 1; idx >= 0; idx--) {
+          const proposal = accepted[idx];
+          const proposalRect = this._buildTokenRect(this._tokenCenterToTopLeft(proposal.to, proposal.tokenDoc), proposal.tokenDoc);
+
+          let invalid = false;
+          let blockedByTokenId = '';
+          for (const state of allStates()) {
+            if (state.tokenId === proposal.tokenId) continue;
+            if (acceptedNow.has(state.tokenId)) continue;
+
+            const currentNode = state.pathNodes[state.pathIndex];
+            const currentRect = this._buildTokenRect(this._tokenCenterToTopLeft(currentNode, state.tokenDoc), state.tokenDoc);
+            if (this._rectsOverlap(proposalRect, currentRect)) {
+              invalid = true;
+              blockedByTokenId = state.tokenId;
+              break;
+            }
+          }
+
+          if (invalid) {
+            rejectedProposals.push({
+              tokenId: proposal.tokenId,
+              blockedByTokenId,
+              blockedReason: 'occupied-by-stationary-after-prune'
+            });
+            accepted.splice(idx, 1);
+            changed = true;
+          }
+        }
+      }
+
+      if (accepted.length === 0) {
+        consecutiveStalls += 1;
+
+        // Deadlock breaker: after 3 consecutive zero-progress ticks,
+        // force-accept the proposal with the longest remaining path
+        // to break the impasse. This sacrifices anti-overlap safety for
+        // one step but prevents infinite lockup.
+        if (consecutiveStalls >= 3 && proposals.length > 0) {
+          const forced = proposals[0]; // already sorted longest-remaining first
+          accepted.push(forced);
+          acceptedIdSet.add(forced.tokenId);
+          this._pathfindingLog('warn', '_buildGroupMovementTimeline deadlock breaker: force-accepting proposal', {
+            tick: ticks,
+            forcedTokenId: forced.tokenId,
+            consecutiveStalls
+          });
+          consecutiveStalls = 0;
+        } else if (consecutiveStalls >= 6) {
+          // Hard bail after extended deadlock even with breaker attempts
+          const diagnostics = {
+            tick: ticks,
+            tokenCount: planEntries.length,
+            proposalCount: proposals.length,
+            proposalSample: proposals.slice(0, 12).map((p) => ({
+              tokenId: p.tokenId,
+              from: { x: asNumber(p.from?.x, 0), y: asNumber(p.from?.y, 0) },
+              to: { x: asNumber(p.to?.x, 0), y: asNumber(p.to?.y, 0) },
+              remaining: p.remaining
+            })),
+            rejectedCount: rejectedProposals.length,
+            rejectedSample: rejectedProposals.slice(0, 20),
+            consecutiveStalls
+          };
+          this._pathfindingLog('warn', '_buildGroupMovementTimeline deadlock detected after breaker attempts', diagnostics);
+          return { ok: false, reason: 'group-timeline-deadlock', diagnostics };
+        }
+      } else {
+        consecutiveStalls = 0;
+      }
+
+      for (const step of accepted) {
+        const state = stateById.get(step.tokenId);
+        if (!state) continue;
+        state.pathIndex += 1;
+      }
+
+      for (const state of allStates()) {
+        state.timeline.push(state.pathNodes[state.pathIndex]);
+      }
+    }
+
+    const timelineByTokenId = new Map();
+    let maxTimelineLen = 0;
+    for (const state of allStates()) {
+      timelineByTokenId.set(state.tokenId, state.timeline.slice());
+      maxTimelineLen = Math.max(maxTimelineLen, state.timeline.length);
+    }
+
+    return {
+      ok: true,
+      timelineByTokenId,
+      stepCount: Math.max(0, maxTimelineLen - 1)
+    };
+  }
+
+  /**
+   * Execute one synchronized step wave at a time so tokens move in parallel.
+   *
+   * @param {Array<{tokenId:string, tokenDoc:any}>} planEntries
+   * @param {Map<string, Array<{x:number,y:number}>>} timelineByTokenId
+   * @param {object} options
+   * @returns {Promise<{ok:boolean, reason?:string}>}
+   */
+  async _executeGroupTimeline(planEntries, timelineByTokenId, options = {}) {
+    try {
+      const maxTimelineLen = planEntries.reduce((maxLen, p) => {
+        const tl = timelineByTokenId.get(p.tokenId) || [];
+        return Math.max(maxLen, tl.length);
+      }, 0);
+
+      for (let stepIndex = 1; stepIndex < maxTimelineLen; stepIndex++) {
+        const stepMoves = [];
+
+        for (const entry of planEntries) {
+          const tokenId = entry.tokenId;
+          const timeline = timelineByTokenId.get(tokenId) || [];
+          if (timeline.length < 2) continue;
+
+          const prev = timeline[Math.min(stepIndex - 1, timeline.length - 1)];
+          const next = timeline[Math.min(stepIndex, timeline.length - 1)];
+          if (!prev || !next) continue;
+
+          const moved = Math.hypot(
+            asNumber(next.x, 0) - asNumber(prev.x, 0),
+            asNumber(next.y, 0) - asNumber(prev.y, 0)
+          ) >= 0.5;
+          if (!moved) continue;
+
+          stepMoves.push(
+            this._moveTokenToFoundryPoint(tokenId, next, entry.tokenDoc, options, {
+              tokenId,
+              phase: 'GROUP_PATH_SEGMENT',
+              groupStepIndex: stepIndex,
+              groupStepCount: maxTimelineLen - 1
+            })
+          );
+        }
+
+        if (stepMoves.length === 0) continue;
+
+        // Use allSettled so one token's transient failure doesn't abort the
+        // entire group. The final reconciliation pass will repair stragglers.
+        const settled = await Promise.allSettled(stepMoves);
+        let stepFailCount = 0;
+        for (const result of settled) {
+          const value = result.status === 'fulfilled' ? result.value : null;
+          if (!value?.ok) stepFailCount += 1;
+        }
+        if (stepFailCount > 0) {
+          this._pathfindingLog('warn', '_executeGroupTimeline step had partial failures (continuing)', {
+            stepIndex,
+            failCount: stepFailCount,
+            totalMoves: stepMoves.length
+          });
+          // Don't abort — reconciliation will handle stragglers.
+        }
+
+        // Keep render loop warm during synchronized group movement.
+        try {
+          const rl = window.MapShine?.renderLoop;
+          rl?.requestContinuousRender?.(100);
+        } catch (_) {
+        }
+      }
+
+      return { ok: true };
+    } catch (error) {
+      this._pathfindingLog('error', '_executeGroupTimeline threw unexpectedly', {
+        tokenCount: Array.isArray(planEntries) ? planEntries.length : 0,
+        options
+      }, error);
+      return { ok: false, reason: 'group-timeline-exception' };
+    }
+  }
+
+  /**
+   * @param {{x:number,y:number}} topLeft
+   * @param {TokenDocument|object} tokenDoc
+   * @returns {{x:number,y:number,w:number,h:number}}
+   */
+  _buildTokenRect(topLeft, tokenDoc) {
+    const size = this._getTokenPixelSize(tokenDoc);
+    return {
+      x: asNumber(topLeft?.x, 0),
+      y: asNumber(topLeft?.y, 0),
+      w: size.widthPx,
+      h: size.heightPx
+    };
+  }
+
+  /**
+   * @param {{x:number,y:number,w:number,h:number}} a
+   * @param {{x:number,y:number,w:number,h:number}} b
+   * @returns {boolean}
+   */
+  _rectsOverlap(a, b) {
+    const eps = 0.1;
+    return (
+      a.x < (b.x + b.w - eps)
+      && (a.x + a.w) > (b.x + eps)
+      && a.y < (b.y + b.h - eps)
+      && (a.y + a.h) > (b.y + eps)
+    );
+  }
+
+  /**
+   * @param {{x:number,y:number,w:number,h:number}} rect
+   * @param {Array<{x:number,y:number,w:number,h:number}>} rects
+   * @returns {boolean}
+   */
+  _rectOverlapsAny(rect, rects) {
+    if (!Array.isArray(rects) || rects.length === 0) return false;
+    for (const other of rects) {
+      if (this._rectsOverlap(rect, other)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * @param {{x:number,y:number}} topLeft
+   * @param {TokenDocument|object} tokenDoc
+   * @returns {boolean}
+   */
+  _isTokenTopLeftWithinScene(topLeft, tokenDoc) {
+    const dims = canvas?.dimensions;
+    const sceneRect = dims?.sceneRect || {
+      x: 0,
+      y: 0,
+      width: asNumber(dims?.width, 0),
+      height: asNumber(dims?.height, 0)
+    };
+
+    const rect = this._buildTokenRect(topLeft, tokenDoc);
+    return (
+      rect.x >= sceneRect.x
+      && rect.y >= sceneRect.y
+      && (rect.x + rect.w) <= (sceneRect.x + sceneRect.width)
+      && (rect.y + rect.h) <= (sceneRect.y + sceneRect.height)
+    );
+  }
+
+  /**
+   * @param {Set<string>} movingIds
+   * @returns {Array<{x:number,y:number,w:number,h:number}>}
+   */
+  _collectStaticTokenOccupancyRects(movingIds) {
+    const out = [];
+    const tokenDocs = canvas?.scene?.tokens;
+    if (!tokenDocs || typeof tokenDocs.values !== 'function') return out;
+
+    for (const doc of tokenDocs.values()) {
+      const id = String(doc?.id || '');
+      if (!id) continue;
+      if (movingIds?.has?.(id)) continue;
+
+      const topLeft = { x: asNumber(doc?.x, 0), y: asNumber(doc?.y, 0) };
+      out.push(this._buildTokenRect(topLeft, doc));
+    }
+    return out;
+  }
+
+  /**
+   * @param {Array<{x:number,y:number}>} pathNodes
+   * @param {TokenDocument|object} tokenDoc
+   * @param {Array<{x:number,y:number,w:number,h:number}>} staticRects
+   * @returns {boolean}
+   */
+  _pathOverlapsStaticOccupancy(pathNodes, tokenDoc, staticRects) {
+    if (!Array.isArray(pathNodes) || pathNodes.length === 0) return false;
+    if (!Array.isArray(staticRects) || staticRects.length === 0) return false;
+
+    for (let i = 1; i < pathNodes.length; i++) {
+      const node = pathNodes[i];
+      const topLeft = this._tokenCenterToTopLeft(node, tokenDoc);
+      const rect = this._buildTokenRect(topLeft, tokenDoc);
+      if (this._rectOverlapsAny(rect, staticRects)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -2128,67 +5661,104 @@ export class TokenMovementManager {
    * @returns {{ok:boolean, tokenId:string, pathNodes:Array<{x:number,y:number}>, distance:number, reason?:string}}
    */
   computeTokenPathPreview({ tokenDoc, destinationTopLeft, options = {} } = {}) {
-    const tokenId = String(tokenDoc?.id || '');
-    if (!tokenId) {
-      return { ok: false, tokenId: '', pathNodes: [], distance: 0, reason: 'missing-token-id' };
-    }
-
-    const liveDoc = this._resolveTokenDocumentById(tokenId, tokenDoc);
-    if (!liveDoc) {
-      return { ok: false, tokenId, pathNodes: [], distance: 0, reason: 'missing-token-doc' };
-    }
-
-    const destX = asNumber(destinationTopLeft?.x, NaN);
-    const destY = asNumber(destinationTopLeft?.y, NaN);
-    if (!Number.isFinite(destX) || !Number.isFinite(destY)) {
-      return { ok: false, tokenId, pathNodes: [], distance: 0, reason: 'invalid-destination' };
-    }
-
-    const ignoreWalls = optionsBoolean(options?.ignoreWalls, false);
-    const ignoreCost = optionsBoolean(options?.ignoreCost, false);
-
-    const startTopLeft = { x: asNumber(liveDoc.x, 0), y: asNumber(liveDoc.y, 0) };
-    const targetTopLeft = this._snapTokenTopLeftToGrid({ x: destX, y: destY }, liveDoc);
-
-    const startCenter = this._tokenTopLeftToCenter(startTopLeft, liveDoc);
-    const endCenter = this._tokenTopLeftToCenter(targetTopLeft, liveDoc);
-
-    let pathNodes = [startCenter, endCenter];
-    if (!ignoreWalls) {
-      const pathResult = this.findWeightedPath({
-        start: startCenter,
-        end: endCenter,
-        tokenDoc: liveDoc,
-        options: {
-          ignoreWalls,
-          ignoreCost,
-          fogPathPolicy: this.settings.fogPathPolicy,
-          allowDiagonal: optionsBoolean(options?.allowDiagonal, true),
-          maxSearchIterations: asNumber(options?.maxSearchIterations, 12000)
-        }
-      });
-
-      if (!pathResult?.ok || !Array.isArray(pathResult.pathNodes) || pathResult.pathNodes.length < 2) {
-        return {
-          ok: false,
-          tokenId,
-          pathNodes: [],
-          distance: 0,
-          reason: pathResult?.reason || 'no-path'
-        };
+    try {
+      const tokenId = String(tokenDoc?.id || '');
+      if (!tokenId) {
+        this._pathfindingLog('warn', 'computeTokenPathPreview blocked: missing token id', {
+          destinationTopLeft,
+          options
+        });
+        return { ok: false, tokenId: '', pathNodes: [], distance: 0, reason: 'missing-token-id' };
       }
 
-      pathNodes = pathResult.pathNodes.slice();
-      pathNodes[0] = startCenter;
-      pathNodes[pathNodes.length - 1] = endCenter;
-    }
+      const liveDoc = this._resolveTokenDocumentById(tokenId, tokenDoc);
+      if (!liveDoc) {
+        this._pathfindingLog('warn', 'computeTokenPathPreview blocked: missing token document', {
+          tokenId,
+          destinationTopLeft,
+          options
+        });
+        return { ok: false, tokenId, pathNodes: [], distance: 0, reason: 'missing-token-doc' };
+      }
 
-    return {
-      ok: true,
-      tokenId,
-      pathNodes,
-      distance: this._measurePathLength(pathNodes)
-    };
+      const destX = asNumber(destinationTopLeft?.x, NaN);
+      const destY = asNumber(destinationTopLeft?.y, NaN);
+      if (!Number.isFinite(destX) || !Number.isFinite(destY)) {
+        this._pathfindingLog('warn', 'computeTokenPathPreview blocked: invalid destination', {
+          token: this._pathfindingTokenMeta(liveDoc),
+          destinationTopLeft,
+          options
+        });
+        return { ok: false, tokenId, pathNodes: [], distance: 0, reason: 'invalid-destination' };
+      }
+
+      const ignoreWalls = optionsBoolean(options?.ignoreWalls, false);
+      const ignoreCost = optionsBoolean(options?.ignoreCost, false);
+
+      const startTopLeft = { x: asNumber(liveDoc.x, 0), y: asNumber(liveDoc.y, 0) };
+      const targetTopLeft = this._snapTokenTopLeftToGrid({ x: destX, y: destY }, liveDoc);
+
+      const startCenter = this._tokenTopLeftToCenter(startTopLeft, liveDoc);
+      const endCenter = this._tokenTopLeftToCenter(targetTopLeft, liveDoc);
+
+      let pathNodes = [startCenter, endCenter];
+      if (!ignoreWalls) {
+        const pathResult = this.findWeightedPath({
+          start: startCenter,
+          end: endCenter,
+          tokenDoc: liveDoc,
+          options: {
+            ignoreWalls,
+            ignoreCost,
+            fogPathPolicy: this.settings.fogPathPolicy,
+            allowDiagonal: optionsBoolean(options?.allowDiagonal, true),
+            maxSearchIterations: asNumber(options?.maxSearchIterations, 12000)
+          }
+        });
+
+        if (!pathResult?.ok || !Array.isArray(pathResult.pathNodes) || pathResult.pathNodes.length < 2) {
+          this._pathfindingLog('warn', 'computeTokenPathPreview failed to find a valid path', {
+            token: this._pathfindingTokenMeta(liveDoc),
+            destinationTopLeft: targetTopLeft,
+            reason: pathResult?.reason || 'no-path',
+            diagnostics: pathResult?.diagnostics || null,
+            options
+          });
+          return {
+            ok: false,
+            tokenId,
+            pathNodes: [],
+            distance: 0,
+            reason: pathResult?.reason || 'no-path'
+          };
+        }
+
+        pathNodes = pathResult.pathNodes.slice();
+        pathNodes[0] = startCenter;
+        pathNodes[pathNodes.length - 1] = endCenter;
+      }
+
+      return {
+        ok: true,
+        tokenId,
+        pathNodes,
+        distance: this._measurePathLength(pathNodes)
+      };
+    } catch (error) {
+      const tokenId = String(tokenDoc?.id || '');
+      this._pathfindingLog('error', 'computeTokenPathPreview threw unexpectedly', {
+        tokenId,
+        destinationTopLeft,
+        options
+      }, error);
+      return {
+        ok: false,
+        tokenId,
+        pathNodes: [],
+        distance: 0,
+        reason: 'preview-exception'
+      };
+    }
   }
 
   /**
@@ -2502,7 +6072,11 @@ export class TokenMovementManager {
         reason: raw.reason || null
       };
     } catch (error) {
-      log.warn('Door sequencer moveToPoint callback failed', error);
+      this._pathfindingLog('warn', 'Door sequencer moveToPoint callback failed', {
+        tokenId: String(context?.tokenId || ''),
+        phase: String(context?.phase || ''),
+        point
+      }, error);
       return { ok: false, reason: 'move-callback-error' };
     }
   }
@@ -2597,10 +6171,25 @@ export class TokenMovementManager {
    * @returns {Promise<{ok:boolean, reason?:string}>}
    */
   async _moveTokenToFoundryPoint(tokenId, point, tokenDoc, options = {}, context = {}) {
-    if (!tokenId || !point) return { ok: false, reason: 'missing-move-target' };
+    if (!tokenId || !point) {
+      this._pathfindingLog('warn', '_moveTokenToFoundryPoint blocked: missing move target', {
+        tokenId,
+        point,
+        context,
+        options
+      });
+      return { ok: false, reason: 'missing-move-target' };
+    }
 
     const liveDoc = this._resolveTokenDocumentById(tokenId, tokenDoc);
-    if (!liveDoc) return { ok: false, reason: 'missing-token-doc' };
+    if (!liveDoc) {
+      this._pathfindingLog('warn', '_moveTokenToFoundryPoint blocked: missing token document', {
+        tokenId,
+        context,
+        options
+      });
+      return { ok: false, reason: 'missing-token-doc' };
+    }
 
     const targetTopLeftRaw = this._tokenCenterToTopLeft(point, liveDoc);
     const targetTopLeft = this._snapTokenTopLeftToGrid(targetTopLeftRaw, liveDoc);
@@ -2637,7 +6226,13 @@ export class TokenMovementManager {
       await this._awaitSequencedStepSettle(tokenId, fallbackDelayMs, options);
       return { ok: true };
     } catch (error) {
-      log.warn(`Door-aware move update failed for token ${tokenId}`, error);
+      this._pathfindingLog('warn', 'Door-aware move update failed for token', {
+        tokenId,
+        update,
+        context,
+        options,
+        updateOptions
+      }, error);
       return { ok: false, reason: 'token-update-failed' };
     }
   }
@@ -2696,6 +6291,72 @@ export class TokenMovementManager {
     }
   }
 
+  // ── Move Lock Helpers ──────────────────────────────────────────────────────
+
+  /**
+   * Wait for any in-flight move on `tokenId` to finish, then register our
+   * own lock. Safety timeout (8s) prevents infinite waits from leaked locks.
+   * @param {string} tokenId
+   */
+  async _acquireTokenMoveLock(tokenId) {
+    const MAX_WAIT_MS = 8000;
+    const existing = this._activeMoveLocks.get(tokenId);
+    if (existing) {
+      try {
+        await Promise.race([existing, _sleep(MAX_WAIT_MS)]);
+      } catch (_) {
+        // Swallow — the previous move may have rejected.
+      }
+    }
+    // Create a new deferred that will be resolved when we release.
+    let resolve;
+    const promise = new Promise((r) => { resolve = r; });
+    promise._resolve = resolve;
+    this._activeMoveLocks.set(tokenId, promise);
+  }
+
+  /**
+   * Release the per-token move lock.
+   * @param {string} tokenId
+   */
+  _releaseTokenMoveLock(tokenId) {
+    const lock = this._activeMoveLocks.get(tokenId);
+    this._activeMoveLocks.delete(tokenId);
+    if (lock && typeof lock._resolve === 'function') {
+      lock._resolve();
+    }
+  }
+
+  /**
+   * Wait for any in-flight group move to finish, then register our lock.
+   * Safety timeout (15s) prevents infinite waits from leaked locks.
+   */
+  async _acquireGroupMoveLock() {
+    const MAX_WAIT_MS = 15000;
+    const existing = this._groupMoveLock;
+    if (existing) {
+      try {
+        await Promise.race([existing, _sleep(MAX_WAIT_MS)]);
+      } catch (_) {
+      }
+    }
+    let resolve;
+    const promise = new Promise((r) => { resolve = r; });
+    promise._resolve = resolve;
+    this._groupMoveLock = promise;
+  }
+
+  /**
+   * Release the global group move lock.
+   */
+  _releaseGroupMoveLock() {
+    const lock = this._groupMoveLock;
+    this._groupMoveLock = null;
+    if (lock && typeof lock._resolve === 'function') {
+      lock._resolve();
+    }
+  }
+
   /**
    * @param {TokenDocument|object} tokenDoc
    * @param {{_id:string,x:number,y:number}} update
@@ -2707,6 +6368,20 @@ export class TokenMovementManager {
     const updateOptions = (options?.updateOptions && typeof options.updateOptions === 'object')
       ? { ...options.updateOptions }
       : {};
+
+    // Always include an animation hint so other modules (FX, combat trackers)
+    // can distinguish animated path-walk updates from teleports, even when the
+    // full Foundry movement payload is suppressed for our choreography.
+    if (updateOptions.animation === undefined) {
+      updateOptions.animation = { duration: 0 };
+    }
+    if (!updateOptions.mapShineMovement) {
+      updateOptions.mapShineMovement = {
+        animated: true,
+        method: String(options?.method || context?.phase || 'path-walk'),
+        phase: String(context?.phase || '')
+      };
+    }
 
     const includeMovement = optionsBoolean(options?.includeMovementPayload, false)
       || optionsBoolean(options?.ignoreWalls, false)
@@ -2773,6 +6448,13 @@ export class TokenMovementManager {
   async _computeFoundryParityPath({ tokenDoc, startTopLeft, endTopLeft, ignoreWalls, ignoreCost }) {
     const tokenObj = tokenDoc?.object || canvas?.tokens?.get?.(tokenDoc?.id) || null;
     if (!tokenObj || typeof tokenObj.findMovementPath !== 'function') {
+      this._pathfindingLog('warn', '_computeFoundryParityPath unavailable: token object has no findMovementPath', {
+        token: this._pathfindingTokenMeta(tokenDoc),
+        startTopLeft,
+        endTopLeft,
+        ignoreWalls,
+        ignoreCost
+      });
       return { ok: false, pathNodes: [], reason: 'no-find-movement-path' };
     }
 
@@ -2815,6 +6497,14 @@ export class TokenMovementManager {
         result = await job.promise;
       }
       if (!Array.isArray(result) || result.length < 2) {
+        this._pathfindingLog('warn', '_computeFoundryParityPath returned empty/short path', {
+          token: this._pathfindingTokenMeta(tokenDoc),
+          startTopLeft,
+          endTopLeft,
+          ignoreWalls,
+          ignoreCost,
+          resultLength: Array.isArray(result) ? result.length : -1
+        });
         return { ok: false, pathNodes: [], reason: 'empty-foundry-path' };
       }
 
@@ -2826,7 +6516,13 @@ export class TokenMovementManager {
 
       return { ok: true, pathNodes };
     } catch (error) {
-      log.warn('Foundry parity path query failed', error);
+      this._pathfindingLog('warn', 'Foundry parity path query failed', {
+        token: this._pathfindingTokenMeta(tokenDoc),
+        startTopLeft,
+        endTopLeft,
+        ignoreWalls,
+        ignoreCost
+      }, error);
       return { ok: false, pathNodes: [], reason: 'find-movement-path-error' };
     }
   }
@@ -2937,17 +6633,17 @@ export class TokenMovementManager {
   findDoorsAlongSegment(start, end) {
     const results = [];
 
-    // Access Foundry walls
-    const walls = canvas?.walls?.placeables;
-    if (!walls || !Array.isArray(walls)) return results;
-
     const sx = asNumber(start?.x, 0);
     const sy = asNumber(start?.y, 0);
     const ex = asNumber(end?.x, 0);
     const ey = asNumber(end?.y, 0);
 
-    for (const wall of walls) {
-      const doc = wall?.document;
+    const doorIndex = this._buildDoorSpatialIndex();
+    const candidates = this._getDoorWallCandidatesForSegment(start, end, doorIndex);
+    if (!Array.isArray(candidates) || candidates.length === 0) return results;
+
+    for (const candidate of candidates) {
+      const doc = candidate?.doc || candidate?.wall?.document;
       if (!doc) continue;
 
       // Skip non-door walls
@@ -2955,7 +6651,7 @@ export class TokenMovementManager {
       if (doorType <= DOOR_TYPES.NONE) continue;
 
       // Wall segment coordinates [x0, y0, x1, y1]
-      const c = doc.c;
+      const c = Array.isArray(candidate?.c) ? candidate.c : doc.c;
       if (!c || c.length < 4) continue;
 
       // Line-line intersection test

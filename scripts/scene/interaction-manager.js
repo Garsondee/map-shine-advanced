@@ -181,7 +181,7 @@ export class InteractionManager {
       lineOuter: null,
       lineInner: null,
       tileGroup: null,
-      ghost: null,
+      ghostGroup: null,
       labelEl: null,
       active: false,
       currentKey: '',
@@ -195,7 +195,19 @@ export class InteractionManager {
       active: false,
       tokenId: null,
       tileKey: '',
-      destinationTopLeft: null
+      destinationTopLeft: null,
+      selectionKey: '',
+      groupPlanCacheKey: ''
+    };
+
+    this.moveClickState = {
+      active: false,
+      button: 2,
+      tokenDoc: null,
+      tokenDocs: null,
+      worldPos: null,
+      startPos: new THREE.Vector2(),
+      threshold: 10
     };
 
     // Throttle enhanced light LOS-polygon refresh during drag.
@@ -849,14 +861,14 @@ export class InteractionManager {
     tileGroup.name = 'TokenMovementPathPreviewTiles';
     tileGroup.renderOrder = 24;
 
-    const ghost = new THREE.Sprite();
-    ghost.visible = false;
-    ghost.renderOrder = 30;
+    const ghostGroup = new THREE.Group();
+    ghostGroup.name = 'TokenMovementPathPreviewGhosts';
+    ghostGroup.renderOrder = 30;
 
     group.add(lineOuter);
     group.add(lineInner);
     group.add(tileGroup);
-    group.add(ghost);
+    group.add(ghostGroup);
     scene.add(group);
 
     const labelEl = document.createElement('div');
@@ -877,7 +889,7 @@ export class InteractionManager {
     this.movementPathPreview.lineOuter = lineOuter;
     this.movementPathPreview.lineInner = lineInner;
     this.movementPathPreview.tileGroup = tileGroup;
-    this.movementPathPreview.ghost = ghost;
+    this.movementPathPreview.ghostGroup = ghostGroup;
     this.movementPathPreview.labelEl = labelEl;
   }
 
@@ -906,10 +918,13 @@ export class InteractionManager {
       }
     }
 
-    if (preview.ghost) {
-      safeCall(() => preview.ghost.material?.dispose?.(), 'movementPathPreview.disposeGhostMaterial', Severity.COSMETIC);
-      preview.ghost.material = null;
-      preview.ghost.visible = false;
+    const ghostGroup = preview.ghostGroup;
+    if (ghostGroup?.children && ghostGroup.children.length > 0) {
+      for (let i = ghostGroup.children.length - 1; i >= 0; i--) {
+        const ghost = ghostGroup.children[i];
+        ghostGroup.remove(ghost);
+        safeCall(() => ghost.material?.dispose?.(), 'movementPathPreview.disposeGhostMaterial', Severity.COSMETIC);
+      }
     }
 
     const lineOuter = preview.lineOuter;
@@ -925,7 +940,7 @@ export class InteractionManager {
     }
   }
 
-  _renderMovementPathPreview(pathNodes, totalDistance, tokenDoc = null) {
+  _renderMovementPathPreview(pathNodes, totalDistance, tokenDoc = null, groupAssignments = null) {
     const preview = this.movementPathPreview;
     if (!preview?.group || !preview.lineOuter || !preview.lineInner || !Array.isArray(pathNodes) || pathNodes.length < 2) {
       this._clearMovementPathPreview();
@@ -984,40 +999,62 @@ export class InteractionManager {
       tileGroup.add(tile);
     }
 
-    // Destination ghost token (50% opacity) to show final stop position.
+    const ghostGroup = preview.ghostGroup;
+    for (let i = (ghostGroup?.children?.length || 0) - 1; i >= 0; i--) {
+      const ghost = ghostGroup.children[i];
+      ghostGroup.remove(ghost);
+      safeCall(() => ghost.material?.dispose?.(), 'movementPathPreview.removeOldGhostMaterial', Severity.COSMETIC);
+    }
+
+    // Destination ghost token(s) (50% opacity) to show final stop positions.
     safeCall(() => {
-      const ghost = preview.ghost;
-      if (!ghost) return;
+      if (!ghostGroup) return;
 
-      const doc = tokenDoc || this._getPrimarySelectedTokenDoc();
-      const tokenData = doc?.id ? this.tokenManager?.tokenSprites?.get?.(doc.id) : null;
-      const sourceSprite = tokenData?.sprite;
-      if (!doc || !sourceSprite) {
-        ghost.visible = false;
-        return;
+      /**
+       * @param {TokenDocument|object} doc
+       * @param {{x:number,y:number}} endFoundryCenter
+       */
+      const addGhost = (doc, endFoundryCenter) => {
+        if (!doc || !endFoundryCenter) return;
+        const tokenData = doc?.id ? this.tokenManager?.tokenSprites?.get?.(doc.id) : null;
+        const sourceSprite = tokenData?.sprite;
+        if (!sourceSprite) return;
+
+        const tex = sourceSprite.material?.map || sourceSprite.userData?.texture || null;
+        if (!tex) return;
+
+        const ghost = new THREE.Sprite(new THREE.SpriteMaterial({
+          map: tex,
+          transparent: true,
+          opacity: 0.5,
+          depthTest: false,
+          depthWrite: false
+        }));
+        const endWorld = Coordinates.toWorld(endFoundryCenter.x, endFoundryCenter.y);
+        const srcScale = sourceSprite.scale;
+        ghost.scale.set(srcScale?.x ?? 100, srcScale?.y ?? 100, srcScale?.z ?? 1);
+        ghost.position.set(endWorld.x, endWorld.y, (this.sceneComposer?.groundZ ?? 0) + 0.02);
+        ghost.renderOrder = 30;
+        ghostGroup.add(ghost);
+      };
+
+      if (Array.isArray(groupAssignments) && groupAssignments.length > 1) {
+        for (const assignment of groupAssignments) {
+          const tokenId = String(assignment?.tokenId || '');
+          if (!tokenId) continue;
+          const doc = this.tokenManager?.tokenSprites?.get?.(tokenId)?.tokenDoc || (tokenDoc?.id === tokenId ? tokenDoc : null);
+          if (!doc) continue;
+
+          const endFoundry = Array.isArray(assignment?.pathNodes) && assignment.pathNodes.length > 0
+            ? assignment.pathNodes[assignment.pathNodes.length - 1]
+            : this._tokenTopLeftToCenterFoundry(assignment?.destinationTopLeft, doc);
+          addGhost(doc, endFoundry);
+        }
+      } else {
+        const doc = tokenDoc || this._getPrimarySelectedTokenDoc();
+        const endFoundry = pathNodes[pathNodes.length - 1];
+        addGhost(doc, endFoundry);
       }
-
-      const tex = sourceSprite.material?.map || sourceSprite.userData?.texture || null;
-      if (!tex) {
-        ghost.visible = false;
-        return;
-      }
-
-      safeCall(() => ghost.material?.dispose?.(), 'movementPathPreview.swapGhostMaterial', Severity.COSMETIC);
-      ghost.material = new THREE.SpriteMaterial({
-        map: tex,
-        transparent: true,
-        opacity: 0.5,
-        depthTest: false,
-        depthWrite: false
-      });
-
-      const endFoundry = pathNodes[pathNodes.length - 1];
-      const endWorld = Coordinates.toWorld(endFoundry.x, endFoundry.y);
-      const srcScale = sourceSprite.scale;
-      ghost.scale.set(srcScale?.x ?? 100, srcScale?.y ?? 100, srcScale?.z ?? 1);
-      ghost.position.set(endWorld.x, endWorld.y, (this.sceneComposer?.groundZ ?? 0) + 0.02);
-      ghost.visible = true;
     }, 'movementPathPreview.ghost', Severity.COSMETIC);
 
     preview.group.visible = true;
@@ -1075,6 +1112,14 @@ export class InteractionManager {
     };
   }
 
+  _tokenTopLeftToCenterFoundry(topLeft, tokenDoc) {
+    const size = this._getTokenPixelSize(tokenDoc);
+    return {
+      x: Number(topLeft?.x || 0) + (size.w * 0.5),
+      y: Number(topLeft?.y || 0) + (size.h * 0.5)
+    };
+  }
+
   _snapTokenTopLeftToGrid(tokenDoc, topLeft) {
     const x = Number(topLeft?.x || 0);
     const y = Number(topLeft?.y || 0);
@@ -1108,6 +1153,50 @@ export class InteractionManager {
     );
   }
 
+  _pathfindingLog(level, message, details = null, error = null) {
+    const method = (typeof log?.[level] === 'function') ? log[level].bind(log) : log.info.bind(log);
+    const taggedMessage = `[Pathfinding] ${message}`;
+    if (details && error) {
+      method(taggedMessage, details, error);
+      return;
+    }
+    if (error) {
+      method(taggedMessage, error);
+      return;
+    }
+    if (details) {
+      method(taggedMessage, details);
+      return;
+    }
+    method(taggedMessage);
+  }
+
+  _getClickToMoveButton() {
+    const leftClickMode = !!game?.settings?.get?.('map-shine-advanced', 'leftClickMoveEnabled');
+    return leftClickMode ? 0 : 2;
+  }
+
+  _resetMoveClickState() {
+    this.moveClickState.active = false;
+    this.moveClickState.button = 2;
+    this.moveClickState.tokenDoc = null;
+    this.moveClickState.tokenDocs = null;
+    this.moveClickState.worldPos = null;
+  }
+
+  _armMoveClickState({ button, tokenDoc, tokenDocs, worldPos, clientX, clientY }) {
+    this.moveClickState.active = true;
+    this.moveClickState.button = Number.isFinite(Number(button)) ? Number(button) : 2;
+    this.moveClickState.tokenDoc = tokenDoc || null;
+    this.moveClickState.tokenDocs = Array.isArray(tokenDocs) ? tokenDocs.filter(Boolean) : (tokenDoc ? [tokenDoc] : null);
+    this.moveClickState.worldPos = worldPos ? {
+      x: Number(worldPos.x || 0),
+      y: Number(worldPos.y || 0),
+      z: Number(worldPos.z || 0)
+    } : null;
+    this.moveClickState.startPos.set(Number(clientX || 0), Number(clientY || 0));
+  }
+
   _getPrimarySelectedTokenDoc() {
     for (const id of this.selection) {
       const tokenData = this.tokenManager?.tokenSprites?.get?.(id);
@@ -1117,6 +1206,43 @@ export class InteractionManager {
     const controlled = canvas?.tokens?.controlled;
     const controlledToken = (Array.isArray(controlled) && controlled.length > 0) ? controlled[0] : null;
     return controlledToken?.document || null;
+  }
+
+  _getSelectedTokenDocs() {
+    const docs = [];
+    const seen = new Set();
+
+    for (const id of this.selection) {
+      const tokenDoc = this.tokenManager?.tokenSprites?.get?.(id)?.tokenDoc;
+      const tokenId = String(tokenDoc?.id || '');
+      if (!tokenId || seen.has(tokenId)) continue;
+      seen.add(tokenId);
+      docs.push(tokenDoc);
+    }
+
+    if (docs.length === 0) {
+      const controlled = canvas?.tokens?.controlled;
+      if (Array.isArray(controlled)) {
+        for (const token of controlled) {
+          const tokenDoc = token?.document;
+          const tokenId = String(tokenDoc?.id || '');
+          if (!tokenId || seen.has(tokenId)) continue;
+          seen.add(tokenId);
+          docs.push(tokenDoc);
+        }
+      }
+    }
+
+    return docs;
+  }
+
+  _buildTokenSelectionKey(tokenDocs) {
+    if (!Array.isArray(tokenDocs) || tokenDocs.length === 0) return '';
+    return tokenDocs
+      .map((doc) => String(doc?.id || ''))
+      .filter((id) => id.length > 0)
+      .sort()
+      .join('|');
   }
 
   _buildMovePreviewKey(tokenId, destinationTopLeft) {
@@ -1130,6 +1256,30 @@ export class InteractionManager {
     }
     this.movementPathPreview.currentKey = key;
     this._renderMovementPathPreview(previewResult.pathNodes, previewResult.distance || 0, tokenDoc);
+  }
+
+  _applyGroupMovementPreviewResult(previewResult, key, leaderTokenDoc = null) {
+    const assignments = Array.isArray(previewResult?.assignments) ? previewResult.assignments : [];
+    if (!previewResult?.ok || assignments.length === 0) {
+      this._clearMovementPathPreview();
+      return;
+    }
+
+    const leaderId = String(leaderTokenDoc?.id || '');
+    const leaderAssignment = assignments.find((a) => String(a?.tokenId || '') === leaderId) || assignments[0];
+    const leaderPath = Array.isArray(leaderAssignment?.pathNodes) ? leaderAssignment.pathNodes : [];
+    if (leaderPath.length < 2) {
+      this._clearMovementPathPreview();
+      return;
+    }
+
+    this.movementPathPreview.currentKey = key;
+    this._renderMovementPathPreview(
+      leaderPath,
+      Number.isFinite(Number(leaderAssignment?.cost)) ? Number(leaderAssignment.cost) : 0,
+      leaderTokenDoc,
+      assignments
+    );
   }
 
   _updateTokenDragPathPreview() {
@@ -1186,78 +1336,301 @@ export class InteractionManager {
   }
 
   async _executeTokenMoveToTopLeft(tokenDoc, destinationTopLeft, { method = 'dragging' } = {}) {
-    if (!tokenDoc || !destinationTopLeft) return { ok: false, reason: 'invalid-move-request' };
+    try {
+      if (!tokenDoc || !destinationTopLeft) {
+        this._pathfindingLog('warn', '_executeTokenMoveToTopLeft blocked: invalid move request', {
+          tokenId: String(tokenDoc?.id || ''),
+          destinationTopLeft,
+          method
+        });
+        return { ok: false, reason: 'invalid-move-request' };
+      }
 
-    const unconstrainedMovement = this._getUnconstrainedMovementEnabled();
-    const movementManager = window.MapShine?.tokenMovementManager;
-    if (movementManager && typeof movementManager.executeDoorAwareTokenMove === 'function') {
-      return movementManager.executeDoorAwareTokenMove({
-        tokenDoc,
-        destinationTopLeft,
-        options: {
-          method,
-          ignoreWalls: unconstrainedMovement,
-          ignoreCost: unconstrainedMovement,
-          includeMovementPayload: unconstrainedMovement,
-          suppressFoundryMovementUI: !unconstrainedMovement,
-          updateOptions: {}
+      const unconstrainedMovement = this._getUnconstrainedMovementEnabled();
+      const movementManager = window.MapShine?.tokenMovementManager;
+      if (movementManager && typeof movementManager.executeDoorAwareTokenMove === 'function') {
+        const sequencedResult = await movementManager.executeDoorAwareTokenMove({
+          tokenDoc,
+          destinationTopLeft,
+          options: {
+            method,
+            ignoreWalls: unconstrainedMovement,
+            ignoreCost: unconstrainedMovement,
+            includeMovementPayload: unconstrainedMovement,
+            suppressFoundryMovementUI: !unconstrainedMovement,
+            updateOptions: {}
+          }
+        });
+        if (!sequencedResult?.ok) {
+          this._pathfindingLog('warn', '_executeTokenMoveToTopLeft sequenced move failed', {
+            tokenId: String(tokenDoc?.id || ''),
+            destinationTopLeft,
+            reason: sequencedResult?.reason || 'door-aware-token-move-failed',
+            method,
+            unconstrainedMovement
+          });
         }
-      });
-    }
+        return sequencedResult;
+      }
 
-    await canvas?.scene?.updateEmbeddedDocuments?.('Token', [{ _id: tokenDoc.id, x: destinationTopLeft.x, y: destinationTopLeft.y }]);
-    return { ok: true };
+      await canvas?.scene?.updateEmbeddedDocuments?.('Token', [{ _id: tokenDoc.id, x: destinationTopLeft.x, y: destinationTopLeft.y }]);
+      return { ok: true };
+    } catch (error) {
+      this._pathfindingLog('error', '_executeTokenMoveToTopLeft threw unexpectedly', {
+        tokenId: String(tokenDoc?.id || ''),
+        destinationTopLeft,
+        method
+      }, error);
+      return { ok: false, reason: 'token-move-exception' };
+    }
   }
 
-  async _handleRightClickMovePreview(tokenDoc, worldPos) {
-    const movementManager = window.MapShine?.tokenMovementManager;
-    if (!tokenDoc || !movementManager?.computeTokenPathPreview) return;
-
-    const foundryCenter = Coordinates.toFoundry(worldPos.x, worldPos.y);
-    const rawTopLeft = this._tokenCenterToTopLeftFoundry(foundryCenter, tokenDoc);
-    const destinationTopLeft = this._snapTokenTopLeftToGrid(tokenDoc, rawTopLeft);
-    const tileKey = this._buildMovePreviewKey(tokenDoc.id, destinationTopLeft);
-
-    const immediateMove = !!game?.settings?.get?.('map-shine-advanced', 'rightClickMoveImmediate');
-    const isConfirmClick = this.rightClickMovePreview.active
-      && this.rightClickMovePreview.tokenId === tokenDoc.id
-      && this.rightClickMovePreview.tileKey === tileKey;
-
-    const previewResult = movementManager.computeTokenPathPreview({
-      tokenDoc,
-      destinationTopLeft,
-      options: {
-        ignoreWalls: this._getUnconstrainedMovementEnabled(),
-        ignoreCost: this._getUnconstrainedMovementEnabled()
+  async _executeTokenGroupMoveToTopLeft(leaderTokenDoc, leaderDestinationTopLeft, tokenDocs, { method = 'path-walk', groupPlanCacheKey = '' } = {}) {
+    try {
+      if (!leaderTokenDoc || !leaderDestinationTopLeft) {
+        this._pathfindingLog('warn', '_executeTokenGroupMoveToTopLeft blocked: invalid group move request', {
+          leaderTokenId: String(leaderTokenDoc?.id || ''),
+          leaderDestinationTopLeft,
+          method
+        });
+        return { ok: false, reason: 'invalid-group-move-request' };
       }
-    });
 
-    this._applyMovementPreviewResult(previewResult, tileKey, tokenDoc);
-    if (!previewResult?.ok) {
-      this.rightClickMovePreview.active = false;
-      this.rightClickMovePreview.tokenId = null;
-      this.rightClickMovePreview.tileKey = '';
-      this.rightClickMovePreview.destinationTopLeft = null;
-      return;
+      const docs = Array.isArray(tokenDocs) ? tokenDocs.filter(Boolean) : [];
+      if (docs.length <= 1) {
+        return this._executeTokenMoveToTopLeft(leaderTokenDoc, leaderDestinationTopLeft, { method });
+      }
+
+      const byId = new Map();
+      const leaderId = String(leaderTokenDoc?.id || '');
+      for (const doc of docs) {
+        const id = String(doc?.id || '');
+        if (!id) continue;
+        byId.set(id, doc);
+      }
+      if (leaderId && !byId.has(leaderId)) byId.set(leaderId, leaderTokenDoc);
+
+      const tokenMoves = [...byId.values()].map((doc) => ({
+        tokenDoc: doc,
+        destinationTopLeft: {
+          // Right-click group move is "cluster-to-point" behavior:
+          // all selected tokens share a common target anchor, and the group
+          // assignment solver places each token in the nearest valid non-overlapping
+          // cell around this anchor while respecting wall/path constraints.
+          x: Number(leaderDestinationTopLeft.x || 0),
+          y: Number(leaderDestinationTopLeft.y || 0)
+        }
+      }));
+
+      const unconstrainedMovement = this._getUnconstrainedMovementEnabled();
+      const movementManager = window.MapShine?.tokenMovementManager;
+      if (movementManager && typeof movementManager.executeDoorAwareGroupMove === 'function') {
+        const groupResult = await movementManager.executeDoorAwareGroupMove({
+          tokenMoves,
+          options: {
+            method,
+            ignoreWalls: unconstrainedMovement,
+            ignoreCost: unconstrainedMovement,
+            includeMovementPayload: unconstrainedMovement,
+            groupAnchorTokenId: leaderId,
+            groupAnchorTopLeft: {
+              x: Number(leaderDestinationTopLeft.x || 0),
+              y: Number(leaderDestinationTopLeft.y || 0)
+            },
+            enforceAnchorSide: true,
+            groupPlanCacheKey: String(groupPlanCacheKey || ''),
+            suppressFoundryMovementUI: !unconstrainedMovement,
+            updateOptions: {}
+          }
+        });
+        if (!groupResult?.ok) {
+          this._pathfindingLog('warn', '_executeTokenGroupMoveToTopLeft sequenced group move failed', {
+            leaderTokenId: leaderId,
+            tokenCount: tokenMoves.length,
+            destinationTopLeft: leaderDestinationTopLeft,
+            reason: groupResult?.reason || 'door-aware-group-move-failed',
+            diagnostics: groupResult?.diagnostics || null,
+            method,
+            unconstrainedMovement
+          });
+        }
+        return groupResult;
+      }
+
+      const results = await Promise.all(tokenMoves.map((move) => this._executeTokenMoveToTopLeft(move.tokenDoc, move.destinationTopLeft, { method })));
+      const failed = results.find((result) => !result?.ok);
+      if (failed) {
+        this._pathfindingLog('warn', '_executeTokenGroupMoveToTopLeft fallback move failed', {
+          leaderTokenId: leaderId,
+          tokenCount: tokenMoves.length,
+          destinationTopLeft: leaderDestinationTopLeft,
+          reason: failed?.reason || 'group-fallback-move-failed',
+          method
+        });
+        return { ok: false, reason: failed?.reason || 'group-fallback-move-failed' };
+      }
+      return { ok: true, tokenCount: tokenMoves.length };
+    } catch (error) {
+      this._pathfindingLog('error', '_executeTokenGroupMoveToTopLeft threw unexpectedly', {
+        leaderTokenId: String(leaderTokenDoc?.id || ''),
+        leaderDestinationTopLeft,
+        tokenCount: Array.isArray(tokenDocs) ? tokenDocs.length : 0,
+        method
+      }, error);
+      return { ok: false, reason: 'group-move-exception' };
     }
+  }
 
-    this.rightClickMovePreview.active = true;
-    this.rightClickMovePreview.tokenId = tokenDoc.id;
-    this.rightClickMovePreview.tileKey = tileKey;
-    this.rightClickMovePreview.destinationTopLeft = destinationTopLeft;
-
-    if (immediateMove || isConfirmClick) {
-      // Preview visuals are for planning only; hide before the token starts stepping.
-      this._clearMovementPathPreview();
-
-      const moveResult = await this._executeTokenMoveToTopLeft(tokenDoc, destinationTopLeft, { method: 'path-walk' });
-      if (!moveResult?.ok) {
-        log.warn(`Right-click move blocked for ${tokenDoc.id}: ${moveResult?.reason || 'move-failed'}`);
+  async _handleRightClickMovePreview(tokenDoc, worldPos, tokenDocs = null) {
+    try {
+      const movementManager = window.MapShine?.tokenMovementManager;
+      if (!tokenDoc || !movementManager?.computeTokenPathPreview) {
+        this._pathfindingLog('warn', '_handleRightClickMovePreview blocked: missing token or pathfinding manager', {
+          tokenId: String(tokenDoc?.id || ''),
+          hasManager: !!movementManager,
+          hasPreviewApi: !!movementManager?.computeTokenPathPreview,
+          worldPos
+        });
+        return;
       }
+
+      const selectedTokenDocs = Array.isArray(tokenDocs) && tokenDocs.length > 0
+        ? tokenDocs.filter(Boolean)
+        : [tokenDoc];
+      const selectionKey = this._buildTokenSelectionKey(selectedTokenDocs);
+
+      const foundryCenter = Coordinates.toFoundry(worldPos.x, worldPos.y);
+      const rawTopLeft = this._tokenCenterToTopLeftFoundry(foundryCenter, tokenDoc);
+      const destinationTopLeft = this._snapTokenTopLeftToGrid(tokenDoc, rawTopLeft);
+      const tileKey = this._buildMovePreviewKey(tokenDoc.id, destinationTopLeft);
+
+      const immediateMove = !!game?.settings?.get?.('map-shine-advanced', 'rightClickMoveImmediate');
+      const isConfirmClick = this.rightClickMovePreview.active
+        && this.rightClickMovePreview.tokenId === tokenDoc.id
+        && this.rightClickMovePreview.tileKey === tileKey
+        && this.rightClickMovePreview.selectionKey === selectionKey;
+
+      const unconstrainedMovement = this._getUnconstrainedMovementEnabled();
+      const isGroup = selectedTokenDocs.length > 1;
+
+      let previewResult;
+      if (isGroup && typeof movementManager?.computeDoorAwareGroupMovePreview === 'function') {
+        const tokenMoves = selectedTokenDocs.map((doc) => ({
+          tokenDoc: doc,
+          destinationTopLeft: {
+            x: Number(destinationTopLeft.x || 0),
+            y: Number(destinationTopLeft.y || 0)
+          }
+        }));
+
+        previewResult = movementManager.computeDoorAwareGroupMovePreview({
+          tokenMoves,
+          options: {
+            ignoreWalls: unconstrainedMovement,
+            ignoreCost: unconstrainedMovement,
+            groupAnchorTokenId: String(tokenDoc?.id || ''),
+            groupAnchorTopLeft: {
+              x: Number(destinationTopLeft.x || 0),
+              y: Number(destinationTopLeft.y || 0)
+            },
+            enforceAnchorSide: true
+          }
+        });
+        this._applyGroupMovementPreviewResult(previewResult, tileKey, tokenDoc);
+      } else {
+        previewResult = movementManager.computeTokenPathPreview({
+          tokenDoc,
+          destinationTopLeft,
+          options: {
+            ignoreWalls: unconstrainedMovement,
+            ignoreCost: unconstrainedMovement
+          }
+        });
+        this._applyMovementPreviewResult(previewResult, tileKey, tokenDoc);
+      }
+
+      if (!previewResult?.ok) {
+        this._pathfindingLog('warn', '_handleRightClickMovePreview preview failed', {
+          tokenId: String(tokenDoc?.id || ''),
+          selectionKey,
+          selectedTokenCount: selectedTokenDocs.length,
+          destinationTopLeft,
+          tileKey,
+          reason: previewResult?.reason || 'preview-failed',
+          immediateMove,
+          isConfirmClick,
+          isGroup
+        });
+        this.rightClickMovePreview.active = false;
+        this.rightClickMovePreview.tokenId = null;
+        this.rightClickMovePreview.tileKey = '';
+        this.rightClickMovePreview.destinationTopLeft = null;
+        this.rightClickMovePreview.selectionKey = '';
+        this.rightClickMovePreview.groupPlanCacheKey = '';
+        return;
+      }
+
+      this.rightClickMovePreview.active = true;
+      this.rightClickMovePreview.tokenId = tokenDoc.id;
+      this.rightClickMovePreview.tileKey = tileKey;
+      this.rightClickMovePreview.destinationTopLeft = destinationTopLeft;
+      this.rightClickMovePreview.selectionKey = selectionKey;
+      this.rightClickMovePreview.groupPlanCacheKey = String(previewResult?.groupPlanCacheKey || '');
+
+      if (!immediateMove && this.rightClickMovePreview.active && !isConfirmClick) {
+        this._pathfindingLog('warn', '_handleRightClickMovePreview waiting for confirmation click', {
+          tokenId: String(tokenDoc?.id || ''),
+          tileKey,
+          selectionKey,
+          expectedTileKey: this.rightClickMovePreview.tileKey,
+          expectedSelectionKey: this.rightClickMovePreview.selectionKey,
+          selectedTokenCount: selectedTokenDocs.length,
+          destinationTopLeft
+        });
+      }
+
+      if (immediateMove || isConfirmClick) {
+        // Preview visuals are for planning only; hide before the token starts stepping.
+        this._clearMovementPathPreview();
+
+        const moveResult = await this._executeTokenGroupMoveToTopLeft(tokenDoc, destinationTopLeft, selectedTokenDocs, {
+          method: 'path-walk',
+          groupPlanCacheKey: this.rightClickMovePreview.groupPlanCacheKey
+        });
+        if (!moveResult?.ok) {
+          this._pathfindingLog('warn', '_handleRightClickMovePreview move execution failed', {
+            tokenId: String(tokenDoc?.id || ''),
+            selectionKey,
+            selectedTokenCount: selectedTokenDocs.length,
+            destinationTopLeft,
+            tileKey,
+            reason: moveResult?.reason || 'group-move-failed',
+            diagnostics: moveResult?.diagnostics || null,
+            immediateMove,
+            isConfirmClick,
+            isGroup
+          });
+        }
+        this.rightClickMovePreview.active = false;
+        this.rightClickMovePreview.tokenId = null;
+        this.rightClickMovePreview.tileKey = '';
+        this.rightClickMovePreview.destinationTopLeft = null;
+        this.rightClickMovePreview.selectionKey = '';
+        this.rightClickMovePreview.groupPlanCacheKey = '';
+      }
+    } catch (error) {
+      this._pathfindingLog('error', '_handleRightClickMovePreview threw unexpectedly', {
+        tokenId: String(tokenDoc?.id || ''),
+        selectedTokenCount: Array.isArray(tokenDocs) ? tokenDocs.length : (tokenDoc ? 1 : 0),
+        worldPos
+      }, error);
       this.rightClickMovePreview.active = false;
       this.rightClickMovePreview.tokenId = null;
       this.rightClickMovePreview.tileKey = '';
       this.rightClickMovePreview.destinationTopLeft = null;
+      this.rightClickMovePreview.selectionKey = '';
+      this.rightClickMovePreview.groupPlanCacheKey = '';
+      this._clearMovementPathPreview();
     }
   }
 
@@ -1628,6 +2001,8 @@ export class InteractionManager {
       this.rightClickMovePreview.tokenId = null;
       this.rightClickMovePreview.tileKey = '';
       this.rightClickMovePreview.destinationTopLeft = null;
+      this.rightClickMovePreview.selectionKey = '';
+      this.rightClickMovePreview.groupPlanCacheKey = '';
       
       if (window.MapShine?.cameraController) {
         window.MapShine.cameraController.enabled = false;
@@ -1722,6 +2097,12 @@ export class InteractionManager {
           this._pendingLight.hitPoint = null;
           this._pendingLight.canEdit = false;
           this._pendingLight.forceSheet = false;
+        }
+
+        // Defensive cleanup: if a click-to-move interaction was armed but never
+        // completed (e.g., lost pointerup), reset it before handling a new down.
+        if (this.moveClickState?.active) {
+          this._resetMoveClickState();
         }
 
         // Handle Map Point Drawing Mode (takes priority over other interactions)
@@ -1983,6 +2364,8 @@ export class InteractionManager {
         const wallGroup = this.wallManager.wallGroup;
         const groundZ = this.sceneComposer?.groundZ ?? 0;
 
+        const clickToMoveButton = this._getClickToMoveButton();
+
         // Handle Right Click (Potential HUD or Door Lock/Unlock)
         if (event.button === 2) {
             // Toggle Foundry light disable via MapShine icons (so disabled lights can be re-enabled).
@@ -2058,17 +2441,19 @@ export class InteractionManager {
                 // and the HUD won't open (standard Foundry behavior).
                 return;
             } else {
-                const selectedTokenDoc = this._getPrimarySelectedTokenDoc();
+                const selectedTokenDocs = this._getSelectedTokenDocs();
+                const selectedTokenDoc = selectedTokenDocs[0] || null;
                 const worldPos = selectedTokenDoc ? this.viewportToWorld(event.clientX, event.clientY, groundZ) : null;
 
-                if (selectedTokenDoc && worldPos) {
-                    safeCall(async () => {
-                      await this._handleRightClickMovePreview(selectedTokenDoc, worldPos);
-                    }, 'pointerDown.rightClickMovePreview', Severity.DEGRADED);
-
-                    event.preventDefault();
-                    event.stopPropagation();
-                    event.stopImmediatePropagation?.();
+                if (event.button === clickToMoveButton && selectedTokenDoc && worldPos) {
+                    this._armMoveClickState({
+                      button: event.button,
+                      tokenDoc: selectedTokenDoc,
+                      tokenDocs: selectedTokenDocs,
+                      worldPos,
+                      clientX: event.clientX,
+                      clientY: event.clientY
+                    });
                     return;
                 }
 
@@ -2422,6 +2807,23 @@ export class InteractionManager {
           }, 'pointerDown.syncFoundryToken', Severity.DEGRADED);
           
         } else {
+          if (clickToMoveButton === 0) {
+            const selectedTokenDocs = this._getSelectedTokenDocs();
+            const selectedTokenDoc = selectedTokenDocs[0] || null;
+            const worldPos = selectedTokenDoc ? this.viewportToWorld(event.clientX, event.clientY, groundZ) : null;
+            if (selectedTokenDoc && worldPos && !event.shiftKey) {
+              this._armMoveClickState({
+                button: 0,
+                tokenDoc: selectedTokenDoc,
+                tokenDocs: selectedTokenDocs,
+                worldPos,
+                clientX: event.clientX,
+                clientY: event.clientY
+              });
+              return;
+            }
+          }
+
           // Clicked empty space - deselect all unless shift held
           if (!event.shiftKey) {
             this.clearSelection();
@@ -3084,6 +3486,7 @@ export class InteractionManager {
           !this.lightPlacement?.active &&
           !this.mapPointDraw?.active &&
           !this.rightClickState?.active &&
+          !this.moveClickState?.active &&
           !this._pendingLight?.active
         ) {
           return;
@@ -3114,6 +3517,20 @@ export class InteractionManager {
                 log.debug(`Right click cancelled: moved ${dist.toFixed(1)}px (threshold ${this.rightClickState.threshold}px)`);
                 this.rightClickState.active = false; // It's a drag/pan, not a click
             }
+        }
+
+        if (this.moveClickState.active) {
+          const dist = Math.hypot(event.clientX - this.moveClickState.startPos.x, event.clientY - this.moveClickState.startPos.y);
+          if (dist > this.moveClickState.threshold) {
+            this._pathfindingLog('warn', 'click-to-move cancelled due drag threshold (panning/drag detected)', {
+              button: this.moveClickState.button,
+              dist,
+              threshold: this.moveClickState.threshold,
+              tokenId: String(this.moveClickState.tokenDoc?.id || ''),
+              selectedTokenCount: Array.isArray(this.moveClickState.tokenDocs) ? this.moveClickState.tokenDocs.length : 0
+            });
+            this._resetMoveClickState();
+          }
         }
 
         // Pending light interaction: start drag only after crossing a screen-space threshold.
@@ -3671,6 +4088,7 @@ export class InteractionManager {
           !this.lightPlacement?.active &&
           !this.mapPointDraw?.active &&
           !this.rightClickState?.active &&
+          !this.moveClickState?.active &&
           !this._pendingLight?.active
         ) {
           return;
@@ -3721,6 +4139,31 @@ export class InteractionManager {
         }
 
         safeCall(() => this._hideUIHoverLabel(), 'pointerUp.hideHoverLabel', Severity.COSMETIC);
+
+        if (this.moveClickState.active && event.button === this.moveClickState.button) {
+          const pendingTokenDoc = this.moveClickState.tokenDoc;
+          const pendingTokenDocs = this.moveClickState.tokenDocs;
+          const pendingWorldPos = this.moveClickState.worldPos;
+
+          this._resetMoveClickState();
+
+          if (pendingTokenDoc && pendingWorldPos) {
+            await safeCall(async () => {
+              await this._handleRightClickMovePreview(pendingTokenDoc, pendingWorldPos, pendingTokenDocs);
+            }, 'pointerUp.clickMovePreview', Severity.DEGRADED);
+
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
+            return;
+          }
+
+          this._pathfindingLog('warn', 'click-to-move pointer-up had incomplete pending state', {
+            hasPendingTokenDoc: !!pendingTokenDoc,
+            hasPendingWorldPos: !!pendingWorldPos,
+            button: event.button
+          });
+        }
 
         // Handle Right Click (HUD toggle)
         if (event.button === 2 && this.rightClickState.active) {
@@ -4167,25 +4610,72 @@ export class InteractionManager {
             );
 
             const movementManager = window.MapShine?.tokenMovementManager;
-            const canRunDoorSequencer = !!(
+            const canRunTokenSequencer = !!(
               movementManager &&
               typeof movementManager.executeDoorAwareTokenMove === 'function'
+            );
+            const canRunGroupSequencer = !!(
+              movementManager &&
+              typeof movementManager.executeDoorAwareGroupMove === 'function'
             );
 
             /** @type {Array<{_id:string,x:number,y:number}>} */
             const fallbackTokenUpdates = [];
 
-            if (canRunDoorSequencer) {
-              for (const upd of tokenUpdates) {
-                const id = String(upd?._id ?? '');
-                if (!id) continue;
+            /** @type {Array<{update:{_id:string,x:number,y:number}, tokenDoc:any}>} */
+            const sequencerCandidates = [];
 
-                const tokenData = this.tokenManager?.tokenSprites?.get?.(id);
-                const tokenDoc = tokenData?.tokenDoc;
-                if (!tokenDoc) {
-                  fallbackTokenUpdates.push(upd);
-                  continue;
+            for (const upd of tokenUpdates) {
+              const id = String(upd?._id ?? '');
+              if (!id) continue;
+
+              const tokenData = this.tokenManager?.tokenSprites?.get?.(id);
+              const tokenDoc = tokenData?.tokenDoc;
+              if (!tokenDoc) {
+                fallbackTokenUpdates.push(upd);
+                continue;
+              }
+
+              sequencerCandidates.push({ update: upd, tokenDoc });
+            }
+
+            if (canRunGroupSequencer && sequencerCandidates.length > 1) {
+              const groupResult = await safeCall(async () => {
+                return movementManager.executeDoorAwareGroupMove({
+                  tokenMoves: sequencerCandidates.map((item) => ({
+                    tokenDoc: item.tokenDoc,
+                    destinationTopLeft: {
+                      x: item.update.x,
+                      y: item.update.y
+                    }
+                  })),
+                  options: {
+                    method: 'path-walk',
+                    ignoreWalls: unconstrainedMovement,
+                    ignoreCost: unconstrainedMovement,
+                    includeMovementPayload: unconstrainedMovement,
+                    suppressFoundryMovementUI: true,
+                    updateOptions: {}
+                  }
+                });
+              }, 'pointerUp.executeDoorAwareGroupMove', Severity.DEGRADED, {
+                fallback: { ok: false, reason: 'door-aware-group-sequencer-error' }
+              });
+
+              if (groupResult?.ok) {
+                tokenUpdateSucceeded = true;
+              } else if (unconstrainedMovement) {
+                for (const item of sequencerCandidates) {
+                  fallbackTokenUpdates.push(item.update);
                 }
+              } else {
+                log.warn(`Blocked constrained group token move: ${groupResult?.reason || 'group-no-valid-path'}`);
+              }
+            } else if (canRunTokenSequencer) {
+              for (const item of sequencerCandidates) {
+                const upd = item.update;
+                const tokenDoc = item.tokenDoc;
+                const id = String(upd?._id ?? '');
 
                 const sequencerResult = await safeCall(async () => {
                   return movementManager.executeDoorAwareTokenMove({
@@ -4213,7 +4703,9 @@ export class InteractionManager {
                 }
               }
             } else {
-              fallbackTokenUpdates.push(...tokenUpdates);
+              for (const item of sequencerCandidates) {
+                fallbackTokenUpdates.push(item.update);
+              }
             }
 
             if (fallbackTokenUpdates.length > 0) {
@@ -5008,6 +5500,8 @@ export class InteractionManager {
     this.rightClickMovePreview.tokenId = null;
     this.rightClickMovePreview.tileKey = '';
     this.rightClickMovePreview.destinationTopLeft = null;
+    this.rightClickMovePreview.selectionKey = '';
+    this.rightClickMovePreview.groupPlanCacheKey = '';
 
     this._hideSelectedLightOutline();
     

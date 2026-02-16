@@ -343,6 +343,15 @@ export function registerSettings() {
     default: false
   });
 
+  game.settings.register('map-shine-advanced', 'leftClickMoveEnabled', {
+    name: 'Left-Click to Move',
+    hint: 'When enabled, click-to-move uses left-click on empty space instead of right-click. Right-click remains available for panning/HUD interactions.',
+    scope: 'client',
+    config: true,
+    type: Boolean,
+    default: false
+  });
+
   // Last used map point effect target (for quick placement)
   game.settings.register('map-shine-advanced', 'lastMapPointEffect', {
     name: 'Last Map Point Effect',

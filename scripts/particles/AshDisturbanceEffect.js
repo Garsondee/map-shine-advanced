@@ -38,52 +38,69 @@ class AshBurstShape {
     this.centerY = 0;
     this.radius = 150;
 
+    /**
+     * Pre-filtered list of spawn point indices within the burst radius.
+     * Rebuilt on each setCenter() call so initialize() has a 100% hit rate.
+     * @type {number[]}
+     */
+    this._candidateIndices = [];
+
     this.type = 'ash_burst';
   }
 
+  /**
+   * Set the burst center and pre-filter spawn points within the radius.
+   * This replaces the old per-particle rejection sampling (24 random tries)
+   * with a single O(N) scan that guarantees every emitted particle gets a
+   * valid position.
+   */
   setCenter(x, y, radius) {
     this.centerX = x;
     this.centerY = y;
     this.radius = Math.max(10, radius || 150);
-  }
 
-  initialize(p) {
+    // Pre-filter: collect all spawn point indices within the burst radius.
+    const candidates = [];
     const count = this.points.length / 3;
-    if (count <= 0) return;
+    const rSq = this.radius * this.radius;
 
-    const maxTries = Math.min(24, count);
-    let found = false;
-    let worldX = 0;
-    let worldY = 0;
-    let brightness = 0.0;
+    for (let i = 0; i < count; i++) {
+      const o = i * 3;
+      const u = this.points[o];
+      const v = this.points[o + 1];
+      const b = this.points[o + 2];
+      if (b <= 0.0) continue;
 
-    for (let i = 0; i < maxTries; i++) {
-      const idx = Math.floor(Math.random() * count) * 3;
-      const u = this.points[idx];
-      const v = this.points[idx + 1];
-      const b = this.points[idx + 2];
-      if (!Number.isFinite(u) || !Number.isFinite(v) || !Number.isFinite(b) || b <= 0.0) {
-        continue;
-      }
-
-      worldX = this.offsetX + u * this.width;
-      worldY = this.offsetY + (1.0 - v) * this.height;
-      brightness = b;
-
-      const dx = worldX - this.centerX;
-      const dy = worldY - this.centerY;
-      if ((dx * dx + dy * dy) <= (this.radius * this.radius)) {
-        found = true;
-        break;
+      const worldX = this.offsetX + u * this.width;
+      const worldY = this.offsetY + (1.0 - v) * this.height;
+      const dx = worldX - x;
+      const dy = worldY - y;
+      if ((dx * dx + dy * dy) <= rSq) {
+        candidates.push(i);
       }
     }
 
-    if (!found) {
+    this._candidateIndices = candidates;
+  }
+
+  initialize(p) {
+    const candidates = this._candidateIndices;
+    if (!candidates || candidates.length === 0) {
+      // No valid spawn points near the burst center — kill the particle.
       if (typeof p.life === 'number') p.life = 0;
       if (p.color && typeof p.color.w === 'number') p.color.w = 0;
       if (typeof p.size === 'number') p.size = 0;
       return;
     }
+
+    const idx = candidates[Math.floor(Math.random() * candidates.length)];
+    const o = idx * 3;
+    const u = this.points[o];
+    const v = this.points[o + 1];
+    const brightness = this.points[o + 2];
+
+    const worldX = this.offsetX + u * this.width;
+    const worldY = this.offsetY + (1.0 - v) * this.height;
 
     p.position.x = worldX;
     p.position.y = worldY;
@@ -122,19 +139,21 @@ export class AshDisturbanceEffect extends EffectBase {
 
     this.params = {
       enabled: true,
-      burstRate: 240,
-      burstDuration: 0.35,
-      burstRadius: 180,
-      maxParticles: 1200,
-      lifeMin: 0.8,
-      lifeMax: 1.6,
-      sizeMin: 8,
-      sizeMax: 18,
+      burstRate: 500,
+      burstDuration: 0.5,
+      burstRadius: 250,
+      maxParticles: 3000,
+      lifeMin: 1.5,
+      lifeMax: 3.5,
+      sizeMin: 20,
+      sizeMax: 50,
       windInfluence: 0.6,
-      curlStrength: 10,
+      curlStrength: 15,
       curlScale: 240,
-      colorStart: { r: 0.45, g: 0.42, b: 0.38, a: 0.6 },
-      colorEnd: { r: 0.25, g: 0.22, b: 0.2, a: 0.0 }
+      opacityStart: 0.85,
+      opacityEnd: 0.15,
+      colorStart: { r: 0.50, g: 0.46, b: 0.42, a: 0.85 },
+      colorEnd: { r: 0.30, g: 0.27, b: 0.24, a: 0.15 }
     };
 
     this._assetBundle = null;
@@ -145,31 +164,53 @@ export class AshDisturbanceEffect extends EffectBase {
     this._spawnPoints = null;
 
     this._particleTexture = null;
+    /** @type {boolean} True once the particle texture has fully decoded and is GPU-ready. */
+    this._textureReady = false;
 
     this._burstSystems = [];
     this._burstIndex = 0;
+
+    /**
+     * Deferred rebuild flag. Set when setAssetBundle runs but systems cannot be
+     * built yet (e.g. canvas.dimensions not ready, texture still loading).
+     * The next handleTokenMovement or update call will retry.
+     */
+    this._needsRebuild = false;
+
+    /** Number of deferred rebuild attempts (capped to avoid infinite retries). */
+    this._rebuildAttempts = 0;
+    /** @type {number} Max deferred rebuild attempts before giving up. */
+    this._maxRebuildAttempts = 10;
   }
 
   static getControlSchema() {
     return {
       enabled: true,
       groups: [
-        { name: 'ash', label: 'Ash Disturbance', type: 'inline', parameters: ['burstRate', 'burstDuration', 'burstRadius'] },
-        { name: 'appearance', label: 'Appearance', type: 'inline', separator: true, parameters: ['sizeMin', 'sizeMax', 'lifeMin', 'lifeMax'] },
+        { name: 'burst', label: 'Burst Settings', type: 'inline', parameters: ['burstRate', 'burstDuration', 'burstRadius', 'maxParticles'] },
+        { name: 'appearance', label: 'Appearance', type: 'inline', separator: true, parameters: ['sizeMin', 'sizeMax', 'lifeMin', 'lifeMax', 'opacityStart', 'opacityEnd'] },
         { name: 'motion', label: 'Motion', type: 'inline', separator: true, parameters: ['windInfluence', 'curlStrength', 'curlScale'] }
       ],
+      presets: {
+        'Light Disturbance': { burstRate: 200, burstDuration: 0.3, burstRadius: 180, maxParticles: 1500, sizeMin: 14, sizeMax: 35, lifeMin: 1.0, lifeMax: 2.5, opacityStart: 0.65, opacityEnd: 0.1, windInfluence: 0.5, curlStrength: 10, curlScale: 240 },
+        'Standard': { burstRate: 500, burstDuration: 0.5, burstRadius: 250, maxParticles: 3000, sizeMin: 20, sizeMax: 50, lifeMin: 1.5, lifeMax: 3.5, opacityStart: 0.85, opacityEnd: 0.15, windInfluence: 0.6, curlStrength: 15, curlScale: 240 },
+        'Heavy Disturbance': { burstRate: 800, burstDuration: 0.8, burstRadius: 350, maxParticles: 5000, sizeMin: 25, sizeMax: 65, lifeMin: 2.0, lifeMax: 4.5, opacityStart: 0.95, opacityEnd: 0.2, windInfluence: 0.8, curlStrength: 20, curlScale: 200 },
+        'Volcanic': { burstRate: 1200, burstDuration: 1.2, burstRadius: 450, maxParticles: 6000, sizeMin: 30, sizeMax: 80, lifeMin: 2.5, lifeMax: 5.5, opacityStart: 1.0, opacityEnd: 0.3, windInfluence: 1.0, curlStrength: 30, curlScale: 160 }
+      },
       parameters: {
         enabled: { type: 'boolean', default: true },
-        burstRate: { type: 'slider', label: 'Burst Rate', min: 10, max: 800, step: 5, default: 240, throttle: 50 },
-        burstDuration: { type: 'slider', label: 'Burst Duration (s)', min: 0.05, max: 2.0, step: 0.05, default: 0.35, throttle: 50 },
-        burstRadius: { type: 'slider', label: 'Burst Radius', min: 30, max: 600, step: 10, default: 180, throttle: 50 },
-        maxParticles: { type: 'slider', label: 'Max Particles', min: 100, max: 6000, step: 100, default: 1200, throttle: 50 },
-        lifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 5.0, step: 0.05, default: 0.8, throttle: 50 },
-        lifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 1.6, throttle: 50 },
-        sizeMin: { type: 'slider', label: 'Size Min', min: 2, max: 60, step: 1, default: 8, throttle: 50 },
-        sizeMax: { type: 'slider', label: 'Size Max', min: 4, max: 80, step: 1, default: 18, throttle: 50 },
-        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 2.0, step: 0.05, default: 0.6, throttle: 50 },
-        curlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 60.0, step: 1, default: 10, throttle: 50 },
+        burstRate: { type: 'slider', label: 'Burst Rate (particles/s)', min: 50, max: 2000, step: 10, default: 500, throttle: 50 },
+        burstDuration: { type: 'slider', label: 'Burst Duration (s)', min: 0.1, max: 2.0, step: 0.05, default: 0.5, throttle: 50 },
+        burstRadius: { type: 'slider', label: 'Burst Radius (px)', min: 50, max: 800, step: 10, default: 250, throttle: 50 },
+        maxParticles: { type: 'slider', label: 'Max Particles', min: 500, max: 8000, step: 100, default: 3000, throttle: 50 },
+        lifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.2, max: 6.0, step: 0.1, default: 1.5, throttle: 50 },
+        lifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.5, max: 8.0, step: 0.1, default: 3.5, throttle: 50 },
+        sizeMin: { type: 'slider', label: 'Size Min (px)', min: 4, max: 100, step: 1, default: 20, throttle: 50 },
+        sizeMax: { type: 'slider', label: 'Size Max (px)', min: 8, max: 150, step: 1, default: 50, throttle: 50 },
+        opacityStart: { type: 'slider', label: 'Opacity Start', min: 0.1, max: 1.0, step: 0.05, default: 0.85, throttle: 50 },
+        opacityEnd: { type: 'slider', label: 'Opacity End', min: 0.0, max: 1.0, step: 0.05, default: 0.15, throttle: 50 },
+        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 3.0, step: 0.05, default: 0.6, throttle: 50 },
+        curlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 80.0, step: 1, default: 15, throttle: 50 },
         curlScale: { type: 'slider', label: 'Curl Scale', min: 50, max: 800, step: 10, default: 240, throttle: 50 }
       }
     };
@@ -183,19 +224,39 @@ export class AshDisturbanceEffect extends EffectBase {
     const particleSystem = window.MapShineParticles;
     if (particleSystem && particleSystem.batchRenderer) {
       this.batchRenderer = particleSystem.batchRenderer;
+      log.info('Ash disturbance: acquired BatchedRenderer.');
     } else {
-      log.warn('BatchedRenderer not available; ash disturbance disabled');
-      this.enabled = false;
-      return;
+      log.warn('BatchedRenderer not available at init time; will retry on first use.');
+      // Don't disable — we'll try to acquire the batchRenderer lazily.
     }
 
     this._ensureParticleTexture();
+  }
+
+  /**
+   * Attempt to lazily acquire the BatchedRenderer if it wasn't available at init time.
+   * @returns {boolean} true if batchRenderer is now available
+   * @private
+   */
+  _ensureBatchRenderer() {
+    if (this.batchRenderer) return true;
+    const particleSystem = window.MapShineParticles;
+    if (particleSystem && particleSystem.batchRenderer) {
+      this.batchRenderer = particleSystem.batchRenderer;
+      log.info('Ash disturbance: lazily acquired BatchedRenderer.');
+      return true;
+    }
+    return false;
   }
 
   setAssetBundle(bundle) {
     this._assetBundle = bundle || null;
     const masks = bundle?.masks || [];
     this._ashMask = masks.find(m => m.id === 'ash' || m.type === 'ash')?.texture || null;
+
+    if (this._ashMask) {
+      log.info('Ash disturbance: _Ash mask found in asset bundle.');
+    }
 
     try {
       const mm = window.MapShine?.maskManager;
@@ -215,12 +276,21 @@ export class AshDisturbanceEffect extends EffectBase {
     if (!this._spawnPoints) {
       this._spawnPoints = this._generateFallbackPoints();
       if (this._spawnPoints) {
-        log.warn('Ash disturbance: _Ash mask missing; using fallback spawn points across scene.');
+        log.info('Ash disturbance: no _Ash mask; using fallback spawn points across entire scene.');
+      } else {
+        log.warn('Ash disturbance: canvas.dimensions not available yet; deferring system build.');
       }
     }
     this._cacheMaskData(this._ashMask);
 
-    this._rebuildSystems();
+    // Attempt to build systems now. If prerequisites are missing,
+    // set the deferred-rebuild flag so we retry on first use.
+    this._rebuildAttempts = 0;
+    const built = this._tryRebuildSystems();
+    if (!built) {
+      this._needsRebuild = true;
+      log.info('Ash disturbance: deferred system build (missing prerequisites).');
+    }
   }
 
   applyParamChange(paramId, value) {
@@ -234,14 +304,47 @@ export class AshDisturbanceEffect extends EffectBase {
     if (Object.prototype.hasOwnProperty.call(this.params, paramId)) {
       this.params[paramId] = value;
     }
+
+    // Keep colorStart/colorEnd alpha in sync with opacity sliders.
+    if (paramId === 'opacityStart') {
+      this.params.colorStart.a = Number(value) || 0;
+    } else if (paramId === 'opacityEnd') {
+      this.params.colorEnd.a = Number(value) || 0;
+    }
+
+    // Flag that live systems need their properties synced on next update.
+    this._paramsDirty = true;
   }
 
   handleTokenMovement(tokenId) {
-    if (!this.enabled || !this._spawnPoints || !this._spawnPoints.length) return;
+    if (!this.enabled) return;
+
+    // Attempt deferred rebuild if systems haven't been created yet.
+    if (this._needsRebuild || !this._burstSystems.length) {
+      this._attemptDeferredRebuild();
+    }
+
+    if (!this._spawnPoints || !this._spawnPoints.length) {
+      if (!this._loggedNoSpawnPoints) {
+        this._loggedNoSpawnPoints = true;
+        log.warn('Ash disturbance: handleTokenMovement called but no spawn points available.');
+      }
+      return;
+    }
+    if (!this._burstSystems.length) {
+      if (!this._loggedNoSystems) {
+        this._loggedNoSystems = true;
+        log.warn('Ash disturbance: handleTokenMovement called but no burst systems built.');
+      }
+      return;
+    }
 
     const token = canvas?.tokens?.get?.(tokenId);
     const doc = token?.document || canvas?.scene?.tokens?.get?.(tokenId);
-    if (!doc) return;
+    if (!doc) {
+      log.debug(`Ash disturbance: token ${tokenId} not found in canvas.tokens or scene.tokens.`);
+      return;
+    }
 
     const grid = canvas?.grid;
     const gridSizeX = (grid && typeof grid.sizeX === 'number' && grid.sizeX > 0)
@@ -257,24 +360,46 @@ export class AshDisturbanceEffect extends EffectBase {
     const centerX = worldCenter.x;
     const centerY = worldCenter.y;
 
-    if (!this._isAshAtWorld(centerX, centerY)) return;
+    if (!this._isAshAtWorld(centerX, centerY)) {
+      log.debug(`Ash disturbance: token ${tokenId} at world (${centerX.toFixed(0)}, ${centerY.toFixed(0)}) is NOT on ash mask.`);
+      return;
+    }
 
-    const system = this._burstSystems[this._burstIndex++ % this._burstSystems.length];
+    // Safe modulo: avoid NaN from 0 % 0
+    const count = this._burstSystems.length;
+    if (count <= 0) return;
+    const system = this._burstSystems[this._burstIndex++ % count];
     if (!system || !system.userData || !system.userData.burstShape) return;
 
     const shape = system.userData.burstShape;
     shape.setCenter(centerX, centerY, this.params.burstRadius);
+
+    const candidateCount = shape._candidateIndices?.length ?? 0;
 
     const emission = system.emissionOverTime;
     if (emission && typeof emission.value === 'number') {
       emission.value = Math.max(0, this.params.burstRate || 0);
     }
     system.userData.burstTime = Math.max(0.05, this.params.burstDuration || 0.2);
+
+    // One-time confirmation log
+    if (!this._loggedFirstBurst) {
+      this._loggedFirstBurst = true;
+      log.info(`Ash disturbance: first burst triggered at (${centerX.toFixed(0)}, ${centerY.toFixed(0)}), candidates=${candidateCount}, rate=${this.params.burstRate}, duration=${this.params.burstDuration}s, systems=${count}.`);
+    }
   }
 
   update(timeInfo) {
-    if (!this.enabled || !this._burstSystems.length) return;
+    if (!this.enabled) return;
 
+    // Attempt deferred rebuild if systems haven't been created yet.
+    if (this._needsRebuild && !this._burstSystems.length) {
+      this._attemptDeferredRebuild();
+    }
+
+    if (!this._burstSystems.length) return;
+
+    const p = this.params;
     const weather = weatherController?.getCurrentState?.() || {};
     const windSpeed = Number(weather.windSpeed) || 0;
     const windDir = weather.windDirection || { x: 1, y: 0 };
@@ -284,6 +409,11 @@ export class AshDisturbanceEffect extends EffectBase {
     const len = Math.hypot(windX, windY) || 1;
     const dirX = windX / len;
     const dirY = windY / len;
+
+    // Dynamically sync slider params to live burst systems so changes take
+    // immediate effect without a full rebuild.
+    const syncParams = this._paramsDirty;
+    if (syncParams) this._paramsDirty = false;
 
     for (const system of this._burstSystems) {
       if (!system || !system.userData) continue;
@@ -301,14 +431,38 @@ export class AshDisturbanceEffect extends EffectBase {
       if (windForce && windForce.direction) {
         windForce.direction.set(dirX, dirY, 0);
         if (windForce.magnitude && typeof windForce.magnitude.value === 'number') {
-          windForce.magnitude.value = 600 * windSpeed * (this.params.windInfluence ?? 0.6);
+          windForce.magnitude.value = 600 * windSpeed * (p.windInfluence ?? 0.6);
         }
       }
 
       const curl = system.userData.curl;
       const baseCurl = system.userData.baseCurlStrength;
       if (curl && baseCurl) {
-        curl.strength.copy(baseCurl).multiplyScalar(Math.max(0.0, this.params.curlStrength ?? 10));
+        curl.strength.copy(baseCurl).multiplyScalar(Math.max(0.0, p.curlStrength ?? 15));
+      }
+
+      // Live-sync size, life, and color when sliders change.
+      if (syncParams) {
+        if (system.startSize && typeof system.startSize.a === 'number') {
+          system.startSize.a = p.sizeMin;
+          system.startSize.b = Math.max(p.sizeMin, p.sizeMax);
+        }
+        if (system.startLife && typeof system.startLife.a === 'number') {
+          system.startLife.a = p.lifeMin;
+          system.startLife.b = Math.max(p.lifeMin, p.lifeMax);
+        }
+        // Update ColorOverLife behavior for new opacity values.
+        for (const behavior of (system.behaviors || [])) {
+          if (behavior instanceof ColorOverLife && behavior.color) {
+            try {
+              const cr = behavior.color;
+              if (cr.a && cr.b) {
+                cr.a.x = p.colorStart.r; cr.a.y = p.colorStart.g; cr.a.z = p.colorStart.b; cr.a.w = p.colorStart.a;
+                cr.b.x = p.colorEnd.r;   cr.b.y = p.colorEnd.g;   cr.b.z = p.colorEnd.b;   cr.b.w = p.colorEnd.a;
+              }
+            } catch (_) { /* ColorRange structure may vary */ }
+          }
+        }
       }
     }
   }
@@ -338,7 +492,23 @@ export class AshDisturbanceEffect extends EffectBase {
     if (this._particleTexture) return this._particleTexture;
 
     try {
-      const texture = new THREE.TextureLoader().load('modules/map-shine-advanced/assets/particle.webp');
+      const texture = new THREE.TextureLoader().load(
+        'modules/map-shine-advanced/assets/particle.webp',
+        // onLoad: texture is decoded and ready
+        () => {
+          this._textureReady = true;
+          log.info('Ash disturbance: particle texture loaded.');
+          // If we were waiting on the texture for a deferred rebuild, try now.
+          if (this._needsRebuild) {
+            this._attemptDeferredRebuild();
+          }
+        },
+        undefined,
+        // onError
+        (err) => {
+          log.error('Ash disturbance: failed to load particle texture:', err);
+        }
+      );
       texture.wrapS = THREE.ClampToEdgeWrapping;
       texture.wrapT = THREE.ClampToEdgeWrapping;
       texture.minFilter = THREE.LinearMipmapLinearFilter;
@@ -348,6 +518,7 @@ export class AshDisturbanceEffect extends EffectBase {
       this._particleTexture = texture;
       return texture;
     } catch (e) {
+      log.error('Ash disturbance: exception loading particle texture:', e);
       return null;
     }
   }
@@ -387,7 +558,11 @@ export class AshDisturbanceEffect extends EffectBase {
 
   _generateFallbackPoints(count = 12000) {
     const dims = canvas?.dimensions;
-    if (!dims) return null;
+    if (!dims || !dims.sceneWidth || !dims.sceneHeight) {
+      // canvas.dimensions may not be populated yet during early init.
+      // Caller should set _needsRebuild and retry later.
+      return null;
+    }
 
     const total = Math.max(1000, Math.floor(count));
     const coords = new Float32Array(total * 3);
@@ -463,6 +638,58 @@ export class AshDisturbanceEffect extends EffectBase {
     const idx = py * w + px;
     const value = this._ashMaskData[idx] / 255.0;
     return value > 0.1;
+  }
+
+  /**
+   * Attempt a deferred rebuild. Called lazily from handleTokenMovement/update
+   * when _needsRebuild is true. Retries generating fallback spawn points if
+   * canvas.dimensions is now available.
+   * @private
+   */
+  _attemptDeferredRebuild() {
+    if (!this._needsRebuild) return;
+    if (this._rebuildAttempts >= this._maxRebuildAttempts) {
+      // Give up after too many attempts to avoid log spam.
+      this._needsRebuild = false;
+      log.warn(`Ash disturbance: giving up on deferred rebuild after ${this._rebuildAttempts} attempts.`);
+      return;
+    }
+    this._rebuildAttempts++;
+
+    // Ensure we have a batchRenderer (may have been unavailable at init).
+    if (!this._ensureBatchRenderer()) return;
+
+    // If we still don't have spawn points, try generating fallback points now.
+    if (!this._spawnPoints || !this._spawnPoints.length) {
+      this._spawnPoints = this._generateFallbackPoints();
+      if (this._spawnPoints) {
+        log.info('Ash disturbance: deferred fallback points generated successfully.');
+      }
+    }
+
+    const built = this._tryRebuildSystems();
+    if (built) {
+      this._needsRebuild = false;
+      log.info(`Ash disturbance: deferred rebuild succeeded on attempt ${this._rebuildAttempts} (${this._burstSystems.length} systems).`);
+    }
+  }
+
+  /**
+   * Try to build burst systems. Returns true if systems were created.
+   * Does not set _needsRebuild — caller decides.
+   * @returns {boolean}
+   * @private
+   */
+  _tryRebuildSystems() {
+    if (!this._ensureBatchRenderer()) return false;
+    if (!this.scene) return false;
+    if (!this._spawnPoints || !this._spawnPoints.length) return false;
+
+    const d = canvas?.dimensions;
+    if (!d || !d.sceneWidth || !d.sceneHeight) return false;
+
+    this._rebuildSystems();
+    return this._burstSystems.length > 0;
   }
 
   _rebuildSystems() {
@@ -576,5 +803,14 @@ export class AshDisturbanceEffect extends EffectBase {
     for (let i = 0; i < systemCount; i++) {
       this._burstSystems.push(createBurstSystem());
     }
+
+    log.info(`Ash disturbance: _rebuildSystems created ${this._burstSystems.length} burst systems.`, {
+      spawnPoints: this._spawnPoints ? (this._spawnPoints.length / 3) : 0,
+      sceneSize: `${width}x${height}`,
+      offset: `(${offsetX}, ${offsetY})`,
+      groundZ,
+      hasMask: !!this._ashMask,
+      textureReady: this._textureReady
+    });
   }
 }

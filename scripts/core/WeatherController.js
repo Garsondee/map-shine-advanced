@@ -990,6 +990,8 @@ export class WeatherController {
     const windSpeed = clamp01(Number(presetDef.windSpeed ?? this.targetState.windSpeed ?? 0));
     const fogDensity = clamp01(Number(presetDef.fogDensity ?? this.targetState.fogDensity ?? 0));
     const freezeLevel = clamp01(Number(presetDef.freezeLevel ?? this.targetState.freezeLevel ?? 0));
+    // Ash presets include ashIntensity; default to 0 so non-ash presets clear any active ash.
+    const ashIntensity = clamp01(Number(presetDef.ashIntensity ?? 0));
 
     const rad = (Number(presetDef.windDirection ?? NaN) * Math.PI) / 180;
     const windDirection = Number.isFinite(rad)
@@ -1003,6 +1005,7 @@ export class WeatherController {
       windDirection,
       fogDensity,
       freezeLevel,
+      ashIntensity,
       precipType: PrecipitationType.NONE,
       wetness: 0.0
     };
@@ -2089,6 +2092,16 @@ export class WeatherController {
     const baseAngle = Math.atan2(-this.targetState.windDirection.y, this.targetState.windDirection.x);
     const newAngle = baseAngle + dirMeander;
     this.currentState.windDirection.set(Math.cos(newAngle), -Math.sin(newAngle));
+
+    // Ash Intensity = Target + subtle noise variation
+    // Only modulate if target ashIntensity > 0 so idle scenes aren't affected.
+    const targetAsh = this.targetState.ashIntensity ?? 0.0;
+    if (targetAsh > 0) {
+      const ashNoiseSigned = (this._getPinkNoise01(time * 0.08 + this.noiseOffset * 5.0 + 200.0) * 2.0 - 1.0);
+      // Bounded perturbation: ±15% of variability around target, clamped to [0, 1]
+      const ashMeander = ashNoiseSigned * baseVar * 0.15;
+      this.currentState.ashIntensity = THREE.MathUtils.clamp(targetAsh + ashMeander, 0.0, 1.0);
+    }
   }
 
   /**
@@ -2917,7 +2930,11 @@ export class WeatherController {
         'Thunderstorm': { precipitation: 0.92, cloudCover: 1.0, windSpeed: 0.75, fogDensity: 0.35, freezeLevel: 0.0 },
         'Snow Flurries': { precipitation: 0.25, cloudCover: 0.75, windSpeed: 0.22, fogDensity: 0.12, freezeLevel: 0.85 },
         'Snow': { precipitation: 0.55, cloudCover: 0.9, windSpeed: 0.30, fogDensity: 0.16, freezeLevel: 0.95 },
-        'Blizzard': { precipitation: 0.92, cloudCover: 1.0, windSpeed: 0.85, fogDensity: 0.25, freezeLevel: 1.0 }
+        'Blizzard': { precipitation: 0.92, cloudCover: 1.0, windSpeed: 0.85, fogDensity: 0.25, freezeLevel: 1.0 },
+        'Light Ash Fall': { precipitation: 0.0, cloudCover: 0.6, windSpeed: 0.15, fogDensity: 0.08, freezeLevel: 0.0, ashIntensity: 0.3 },
+        'Ash Fall': { precipitation: 0.0, cloudCover: 0.8, windSpeed: 0.25, fogDensity: 0.18, freezeLevel: 0.0, ashIntensity: 0.6 },
+        'Heavy Ash Fall': { precipitation: 0.0, cloudCover: 0.95, windSpeed: 0.4, fogDensity: 0.3, freezeLevel: 0.0, ashIntensity: 0.85 },
+        'Volcanic Storm': { precipitation: 0.15, cloudCover: 1.0, windSpeed: 0.65, fogDensity: 0.45, freezeLevel: 0.0, ashIntensity: 1.0 }
       }
     };
   }

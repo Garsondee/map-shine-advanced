@@ -1226,6 +1226,37 @@ export class SceneComposer {
    */
   async getFoundryBackgroundTexture(foundryScene) {
     const THREE = window.THREE;
+    const bgSrc = (typeof foundryScene?.background?.src === 'string')
+      ? foundryScene.background.src.trim()
+      : '';
+
+    const toThreeTexture = (source, sourceLabel = 'unknown') => {
+      if (!source) return null;
+
+      const w = Number(source?.naturalWidth ?? source?.videoWidth ?? source?.width ?? 0);
+      const h = Number(source?.naturalHeight ?? source?.videoHeight ?? source?.height ?? 0);
+      if (w <= 0 || h <= 0) {
+        log.warn(`Background source from ${sourceLabel} has invalid dimensions`, { w, h });
+        return null;
+      }
+
+      const threeTexture = this._markOwnedTexture(new THREE.Texture(source));
+      threeTexture.needsUpdate = true;
+      // Use sRGB for correct color in lighting calculations
+      if (THREE.SRGBColorSpace) {
+        threeTexture.colorSpace = THREE.SRGBColorSpace;
+      }
+      // Keep same UV convention as the base plane and masks
+      threeTexture.flipY = false;
+
+      // Match PIXI-like texture settings
+      threeTexture.wrapS = THREE.ClampToEdgeWrapping;
+      threeTexture.wrapT = THREE.ClampToEdgeWrapping;
+      threeTexture.minFilter = THREE.LinearFilter;
+      threeTexture.magFilter = THREE.LinearFilter;
+      threeTexture.generateMipmaps = false;
+      return threeTexture;
+    };
     
     // Wait for Foundry's canvas to be ready
     if (!canvas || !canvas.primary) {
@@ -1233,40 +1264,69 @@ export class SceneComposer {
       return null;
     }
 
-    // Access Foundry's PIXI texture for the scene background
-    const pixiTexture = canvas.primary.background?.texture;
-    if (!pixiTexture || !pixiTexture.baseTexture) {
-      log.warn('Foundry background texture not found');
+    // Primary path: Foundry's already-loaded PIXI background texture.
+    // This can be transiently unavailable during scene rebuilds.
+    try {
+      const pixiTexture = canvas.primary.background?.texture;
+      const pixiSource = pixiTexture?.baseTexture?.resource?.source;
+      const fromPixi = toThreeTexture(pixiSource, 'canvas.primary.background.texture');
+      if (fromPixi) {
+        log.debug('Converted Foundry texture to THREE.Texture');
+        return fromPixi;
+      }
+      log.warn('Foundry background texture not ready from PIXI path; trying fallback loader');
+    } catch (e) {
+      log.warn('Failed to read PIXI background texture; trying fallback loader', e);
+    }
+
+    if (!bgSrc) {
+      log.warn('No scene background src available for fallback load');
       return null;
     }
 
-    // Get the HTMLImageElement or HTMLCanvasElement from PIXI
-    const baseTexture = pixiTexture.baseTexture;
-    const resource = baseTexture.resource;
-    
-    if (!resource || !resource.source) {
-      log.warn('Foundry texture resource not accessible');
-      return null;
+    // Fallback 1: use Foundry's texture loader (cache-aware).
+    try {
+      const loadTextureFn = globalThis.foundry?.canvas?.loadTexture ?? globalThis.loadTexture;
+      if (typeof loadTextureFn === 'function') {
+        const pixiTexture = await loadTextureFn(bgSrc);
+        const pixiSource = pixiTexture?.baseTexture?.resource?.source;
+        const fromLoadTexture = toThreeTexture(pixiSource, 'foundry.canvas.loadTexture');
+        if (fromLoadTexture) {
+          log.info('Loaded background texture via Foundry loader fallback');
+          return fromLoadTexture;
+        }
+      }
+    } catch (e) {
+      log.warn('Foundry loader fallback failed for background texture', e);
     }
 
-    // Create THREE.Texture from the same image source
-    const threeTexture = this._markOwnedTexture(new THREE.Texture(resource.source));
-    threeTexture.needsUpdate = true;
-    // Use sRGB for correct color in lighting calculations
-    if (THREE.SRGBColorSpace) {
-      threeTexture.colorSpace = THREE.SRGBColorSpace;
+    // Fallback 2: direct TextureLoader fetch by source URL.
+    try {
+      const tex = await new Promise((resolve, reject) => {
+        const loader = new THREE.TextureLoader();
+        loader.load(bgSrc, resolve, undefined, reject);
+      });
+      if (tex) {
+        tex.needsUpdate = true;
+        if (THREE.SRGBColorSpace) {
+          tex.colorSpace = THREE.SRGBColorSpace;
+        }
+        tex.flipY = false;
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.generateMipmaps = false;
+        this._markOwnedTexture(tex);
+        log.info('Loaded background texture via THREE.TextureLoader fallback');
+        return tex;
+      }
+    } catch (e) {
+      log.warn('THREE.TextureLoader fallback failed for background texture', e);
     }
-    // Flip Y: PIXI textures are top-left origin, three.js UVs are bottom-left origin
-    threeTexture.flipY = false;
-    
-    // Match PIXI's texture settings
-    threeTexture.wrapS = THREE.ClampToEdgeWrapping;
-    threeTexture.wrapT = THREE.ClampToEdgeWrapping;
-    threeTexture.minFilter = THREE.LinearFilter;
-    threeTexture.magFilter = THREE.LinearFilter;
 
-    log.debug('Converted Foundry texture to THREE.Texture');
-    return threeTexture;
+    log.warn('Failed to acquire background texture from all paths');
+    return null;
   }
 
   /**
@@ -1303,6 +1363,9 @@ export class SceneComposer {
     const bgGeometry = new THREE.PlaneGeometry(worldWidth, worldHeight);
     const bgMaterial = new THREE.MeshBasicMaterial({ color: bgColorInt });
     const bgMesh = new THREE.Mesh(bgGeometry, bgMaterial);
+    // This plane spans the whole world canvas. Keep it always renderable to avoid
+    // rare frustum-culling precision/center issues on very large scenes.
+    bgMesh.frustumCulled = false;
     // Position background slightly behind the base plane
     // groundZ is set when basePlaneMesh is created (1000 by default)
     // For perfect PIXI alignment with camera at Z=2000, ground should be at Z=1000
@@ -1341,6 +1404,10 @@ export class SceneComposer {
 
     this.basePlaneMesh = new THREE.Mesh(geometry, material);
     this.basePlaneMesh.name = 'BasePlane';
+    // The ground albedo plane is a scene-coverage receiver for most effects.
+    // Disable culling so large-scene bounds/precision edge cases cannot drop
+    // the entire albedo pass for a frame (which then cascades into black post).
+    this.basePlaneMesh.frustumCulled = false;
     
     // Create red back-face for orientation debugging
     const backMaterial = new THREE.MeshBasicMaterial({

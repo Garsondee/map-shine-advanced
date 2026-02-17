@@ -399,67 +399,78 @@ export class TweakpaneManager {
     await this.loadUIState();
     if (_isDbg) _dlp.end('tp.loadUIState');
 
+    const scene = canvas?.scene ?? null;
+    const sceneIsEnabled = !!scene && sceneSettings.isEnabled(scene);
+    const showOnboardingOnly = (game.user?.isGM ?? false) && !sceneIsEnabled;
+
     if (_isDbg) _dlp.begin('tp.buildSections', 'finalize');
     // Build scene setup section (only for GMs)
     if (game.user.isGM) {
-      this.buildSceneSetupSection();
+      if (showOnboardingOnly) this.buildFirstTimeEnableSection();
+      else this.buildSceneSetupSection();
     }
 
-    // Build authoring workflow controls
-    this.buildGlobalControls();
+    if (!showOnboardingOnly) {
+      // Build authoring workflow controls
+      this.buildGlobalControls();
 
-    // Build environment section (sun latitude etc.) — single source of truth
-    this.buildEnvironmentSection();
+      // Build environment section (sun latitude etc.) — single source of truth
+      this.buildEnvironmentSection();
 
-    // Build token/character rendering authoring controls
-    this.buildTokensSection();
+      // Build token/character rendering authoring controls
+      this.buildTokensSection();
 
-    // Build utility launchers as a dedicated section
-    this.buildUtilityLaunchersSection();
+      // Build utility launchers as a dedicated section
+      this.buildUtilityLaunchersSection();
 
-    this.buildRopesSection();
+      this.buildRopesSection();
 
-    this.buildDebugSection();
+      this.buildDebugSection();
 
-    // Keep support links available but out of the primary authoring flow.
-    this.buildBrandingSection();
+      // Keep support links available but out of the primary authoring flow.
+      this.buildBrandingSection();
+    } else {
+      log.info('Tweakpane initialized in onboarding-only mode (scene not enabled).');
+    }
     if (_isDbg) _dlp.end('tp.buildSections');
 
-    // Start UI update loop
-    this.startUILoop();
+    // Start UI update loop only when full controls are available.
+    if (!showOnboardingOnly) this.startUILoop();
 
     // Make pane draggable
     this.makeDraggable();
 
-    // Initialize Texture Manager
-    if (_isDbg) _dlp.begin('tp.textureManager.init', 'finalize');
-    this.textureManager = new TextureManagerUI();
-    await this.textureManager.initialize();
-    if (_isDbg) _dlp.end('tp.textureManager.init');
+    if (!showOnboardingOnly) {
+      // Initialize Texture Manager
+      if (_isDbg) _dlp.begin('tp.textureManager.init', 'finalize');
+      this.textureManager = new TextureManagerUI();
+      await this.textureManager.initialize();
+      if (_isDbg) _dlp.end('tp.textureManager.init');
 
-    // Initialize Effect Stack
-    if (_isDbg) _dlp.begin('tp.effectStack.init', 'finalize');
-    this.effectStack = new EffectStackUI();
-    await this.effectStack.initialize();
-    if (_isDbg) _dlp.end('tp.effectStack.init');
+      // Initialize Effect Stack
+      if (_isDbg) _dlp.begin('tp.effectStack.init', 'finalize');
+      this.effectStack = new EffectStackUI();
+      await this.effectStack.initialize();
+      if (_isDbg) _dlp.end('tp.effectStack.init');
 
-    // Initialize Diagnostic Center
-    if (_isDbg) _dlp.begin('tp.diagnosticCenter.init', 'finalize');
-    this.diagnosticCenter = new DiagnosticCenterManager();
-    await this.diagnosticCenter.initialize();
-    if (_isDbg) _dlp.end('tp.diagnosticCenter.init');
+      // Initialize Diagnostic Center
+      if (_isDbg) _dlp.begin('tp.diagnosticCenter.init', 'finalize');
+      this.diagnosticCenter = new DiagnosticCenterManager();
+      await this.diagnosticCenter.initialize();
+      if (_isDbg) _dlp.end('tp.diagnosticCenter.init');
 
-    // Initialize Tile Motion Dialog
-    if (_isDbg) _dlp.begin('tp.tileMotionDialog.init', 'finalize');
-    this.tileMotionDialog = new TileMotionDialog();
-    await this.tileMotionDialog.initialize();
-    if (_isDbg) _dlp.end('tp.tileMotionDialog.init');
+      // Initialize Tile Motion Dialog
+      if (_isDbg) _dlp.begin('tp.tileMotionDialog.init', 'finalize');
+      this.tileMotionDialog = new TileMotionDialog();
+      await this.tileMotionDialog.initialize();
+      if (_isDbg) _dlp.end('tp.tileMotionDialog.init');
 
-    // Initialize Token Movement Dialog
-    if (_isDbg) _dlp.begin('tp.tokenMovementDialog.init', 'finalize');
-    this.tokenMovementDialog = new TokenMovementDialog();
-    await this.tokenMovementDialog.initialize();
-    if (_isDbg) _dlp.end('tp.tokenMovementDialog.init');
+      // Initialize Token Movement Dialog
+      if (_isDbg) _dlp.begin('tp.tokenMovementDialog.init', 'finalize');
+      this.tokenMovementDialog = new TokenMovementDialog();
+      await this.tokenMovementDialog.initialize();
+      if (_isDbg) _dlp.end('tp.tokenMovementDialog.init');
+    }
 
     // Start hidden by default for release; can be opened via the scene control button.
     this.hide();
@@ -950,6 +961,10 @@ export class TweakpaneManager {
     addGridButton('🚶 Token Movement', () => {
       this.tokenMovementDialog?.toggle?.();
     });
+
+    addGridButton('Attempt Scene Recovery', async () => {
+      await this.attemptSceneRecovery();
+    }, true);
 
     addGridButton('Scene Reset', async () => {
       try {
@@ -1464,6 +1479,115 @@ export class TweakpaneManager {
     ui.notifications.info('Map Shine: Previous settings restored');
   }
 
+  /**
+   * Attempt to recover a corrupted scene document by creating a clean scene root
+   * and copying embedded placeables into it.
+   *
+   * This is intended for cases where duplicated/resized scenes become visually
+   * unstable despite valid textures and normal effect settings.
+   *
+   * @returns {Promise<void>}
+   * @public
+   */
+  async attemptSceneRecovery() {
+    const src = canvas?.scene;
+    if (!src) {
+      ui.notifications?.warn?.('Map Shine: No active scene to recover.');
+      return;
+    }
+
+    const confirmed = await Dialog.confirm({
+      title: 'Attempt Scene Recovery',
+      content: '<p>Create a new recovered scene by cloning content into a clean scene document?</p><p>This does not delete your current scene.</p>',
+      yes: () => true,
+      no: () => false,
+      defaultYes: false
+    });
+    if (!confirmed) return;
+
+    const clone = (v) => foundry?.utils?.deepClone ? foundry.utils.deepClone(v ?? {}) : JSON.parse(JSON.stringify(v ?? {}));
+
+    try {
+      const baseData = {
+        name: `${src.name} [Recovered]`,
+        width: Number(src.width) || Number(src.dimensions?.sceneWidth) || 4000,
+        height: Number(src.height) || Number(src.dimensions?.sceneHeight) || 3000,
+        padding: Number(src.padding ?? 0),
+        background: clone(src.background),
+        foreground: src.foreground ?? null,
+        backgroundColor: src.backgroundColor || '#999999',
+        grid: clone(src.grid),
+        darkness: Number(src.darkness ?? 0),
+        tokenVision: !!src.tokenVision,
+        fogExploration: !!src.fogExploration,
+        globalLight: !!src.globalLight,
+        navigation: !!src.navigation,
+        navName: src.navName ?? src.name,
+        flags: clone(src.flags)
+      };
+
+      // Exclude Map Shine flags from the recovered scene root.
+      if (baseData.flags?.['map-shine-advanced']) delete baseData.flags['map-shine-advanced'];
+      if (baseData.flags?.['map-shine']) delete baseData.flags['map-shine'];
+
+      const dst = await Scene.create(baseData, { renderSheet: false });
+      if (!dst) {
+        ui.notifications?.error?.('Map Shine: Failed to create recovered scene.');
+        return;
+      }
+
+      const copyEmbedded = async (collectionName, docName) => {
+        const coll = src?.[collectionName];
+        const docs = Array.isArray(coll?.contents) ? coll.contents : [];
+        if (docs.length === 0) return 0;
+
+        const payload = docs.map((d) => {
+          const obj = d.toObject();
+          delete obj._id;
+          return obj;
+        });
+
+        await dst.createEmbeddedDocuments(docName, payload);
+        return payload.length;
+      };
+
+      const copied = {};
+      try { copied.walls = await copyEmbedded('walls', 'Wall'); } catch (_) {}
+      try { copied.tiles = await copyEmbedded('tiles', 'Tile'); } catch (_) {}
+      try { copied.tokens = await copyEmbedded('tokens', 'Token'); } catch (_) {}
+      try { copied.lights = await copyEmbedded('lights', 'AmbientLight'); } catch (_) {}
+      try { copied.sounds = await copyEmbedded('sounds', 'AmbientSound'); } catch (_) {}
+      try { copied.notes = await copyEmbedded('notes', 'Note'); } catch (_) {}
+      try { copied.drawings = await copyEmbedded('drawings', 'Drawing'); } catch (_) {}
+      try { copied.templates = await copyEmbedded('templates', 'MeasuredTemplate'); } catch (_) {}
+      try { copied.regions = await copyEmbedded('regions', 'Region'); } catch (_) {}
+
+      try {
+        console.info('[MapShine] Scene recovery completed', {
+          sourceScene: src.name,
+          recoveredScene: dst.name,
+          copied
+        });
+      } catch (_) {
+      }
+
+      ui.notifications?.info?.(`Map Shine: Recovered scene created (${dst.name}). Activating...`);
+      await dst.activate();
+
+      try {
+        window.MapShine?.renderLoop?.requestRender?.();
+        window.MapShine?.renderLoop?.requestContinuousRender?.(300);
+      } catch (_) {
+      }
+    } catch (e) {
+      try {
+        console.error('[MapShine] Scene recovery failed', e);
+      } catch (_) {
+      }
+      ui.notifications?.error?.('Map Shine: Scene recovery failed (see console).');
+    }
+  }
+
   captureMasterResetSnapshot() {
     const effects = {};
     for (const [effectId, effectData] of Object.entries(this.effectFolders)) {
@@ -1576,72 +1700,103 @@ export class TweakpaneManager {
     });
 
     // Enable / Upgrade Map Shine Advanced for this scene
-    const scene = canvas?.scene;
-    const isEnabled = !!scene && scene.getFlag('map-shine-advanced', 'enabled') === true;
-    // Legacy v1.x module used the "map-shine" flag scope. On newer
-    // Foundry versions, getFlag will throw if that scope is not
-    // registered, so we must guard this in a try/catch.
-    let hasLegacy = false;
-    if (scene) {
-      try {
-        hasLegacy = scene.getFlag('map-shine', 'enabled') === true;
-      } catch (e) {
-        // Flag scope not available; treat as no legacy data present.
-        hasLegacy = false;
-      }
-    }
-
-    if (scene) {
-      if (isEnabled) {
-        // Show a disabled status button when already enabled
-        const statusButton = setupFolder.addButton({
-          title: 'Map Shine Advanced Enabled'
-        });
-        statusButton.disabled = true;
-      } else {
-        const title = hasLegacy
-          ? 'Upgrade Scene to Map Shine Advanced'
-          : 'Enable Map Shine Advanced for this Scene';
-
-        const enableButton = setupFolder.addButton({
-          title
-        });
-
-        enableButton.on('click', async () => {
-          const s = canvas?.scene;
-          if (!s) {
-            ui.notifications?.warn?.('Map Shine: No active scene to enable.');
-            return;
-          }
-
-          try {
-            await sceneSettings.enable(s);
-            ui.notifications?.info?.('Map Shine: Scene enabled for Map Shine Advanced. Reloading Foundry to activate the 3D canvas...');
-
-            setTimeout(() => {
-              try {
-                const utils = globalThis.foundry?.utils;
-                if (typeof utils?.debouncedReload === 'function') {
-                  utils.debouncedReload();
-                } else {
-                  globalThis.location?.reload?.();
-                }
-              } catch (e) {
-                globalThis.location?.reload?.();
-              }
-            }, 250);
-          } catch (e) {
-            log.error('Failed to enable Map Shine Advanced for scene:', e);
-            ui.notifications?.error?.('Map Shine: Failed to enable this scene. Check console for details.');
-          }
-        });
-      }
-    }
+    this._addSceneEnableControlButton(setupFolder);
 
     // Track accordion state
     setupFolder.on('fold', (ev) => {
       this.accordionStates['sceneSetup'] = ev.expanded;
       this.saveUIState();
+    });
+  }
+
+  /**
+   * Build minimal onboarding section for first-time setup.
+   * Shows only a short explanation and a single enable/upgrade button.
+   * @private
+   */
+  buildFirstTimeEnableSection() {
+    const setupFolder = this.pane.addFolder({
+      title: 'Getting Started',
+      expanded: true
+    });
+    this._registerPrimaryFolder(setupFolder);
+
+    const contentElement = setupFolder.element.querySelector('.tp-fldv_c') || setupFolder.element;
+    const description = document.createElement('div');
+    description.style.padding = '8px';
+    description.style.fontSize = '12px';
+    description.style.lineHeight = '1.45';
+    description.textContent = 'Enable Map Shine Advanced for this scene to activate the 3D renderer and full controls. Foundry will reload once after enabling.';
+    contentElement.appendChild(description);
+
+    this._addSceneEnableControlButton(setupFolder);
+  }
+
+  /**
+   * Add the scene enable/upgrade control button to a folder.
+   * @param {any} folder
+   * @private
+   */
+  _addSceneEnableControlButton(folder) {
+    const scene = canvas?.scene;
+    if (!scene || !folder) return;
+
+    const isEnabled = sceneSettings.isEnabled(scene);
+
+    // Legacy v1.x module used the "map-shine" flag scope. On newer
+    // Foundry versions, getFlag will throw if that scope is not
+    // registered, so we must guard this in a try/catch.
+    let hasLegacy = false;
+    try {
+      hasLegacy = scene.getFlag('map-shine', 'enabled') === true;
+    } catch (e) {
+      // Flag scope not available; treat as no legacy data present.
+      hasLegacy = false;
+    }
+
+    if (isEnabled) {
+      const statusButton = folder.addButton({
+        title: 'Map Shine Advanced Enabled'
+      });
+      statusButton.disabled = true;
+      return;
+    }
+
+    const title = hasLegacy
+      ? 'Upgrade Scene to Map Shine Advanced'
+      : 'Enable Map Shine Advanced for this Scene';
+
+    const enableButton = folder.addButton({
+      title
+    });
+
+    enableButton.on('click', async () => {
+      const s = canvas?.scene;
+      if (!s) {
+        ui.notifications?.warn?.('Map Shine: No active scene to enable.');
+        return;
+      }
+
+      try {
+        await sceneSettings.enable(s);
+        ui.notifications?.info?.('Map Shine: Scene enabled for Map Shine Advanced. Reloading Foundry to activate the 3D canvas...');
+
+        setTimeout(() => {
+          try {
+            const utils = globalThis.foundry?.utils;
+            if (typeof utils?.debouncedReload === 'function') {
+              utils.debouncedReload();
+            } else {
+              globalThis.location?.reload?.();
+            }
+          } catch (e) {
+            globalThis.location?.reload?.();
+          }
+        }, 250);
+      } catch (e) {
+        log.error('Failed to enable Map Shine Advanced for scene:', e);
+        ui.notifications?.error?.('Map Shine: Failed to enable this scene. Check console for details.');
+      }
     });
   }
 

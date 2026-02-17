@@ -3607,7 +3607,8 @@ async function initializeUI(effectMap) {
         paramId === 'windSpeed' ||
         paramId === 'windDirection' ||
         paramId === 'fogDensity' ||
-        paramId === 'freezeLevel'
+        paramId === 'freezeLevel' ||
+        paramId === 'ashIntensity'
       ) {
         weatherPresetBuffer[paramId] = value;
         return;

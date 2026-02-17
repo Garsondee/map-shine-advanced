@@ -3219,7 +3219,8 @@ export class WeatherParticles {
       renderMode: RenderMode.BillBoard,
       uTileCount: 2,
       vTileCount: 2,
-      startTileIndex: new IntervalValue(0, 4),
+      // 2x2 atlas → valid tile indices are 0, 1, 2, 3
+      startTileIndex: new IntervalValue(0, 3),
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [
         ashGravity,
@@ -3289,7 +3290,8 @@ export class WeatherParticles {
       renderMode: RenderMode.BillBoard,
       uTileCount: 2,
       vTileCount: 2,
-      startTileIndex: new IntervalValue(0, 4),
+      // 2x2 atlas → valid tile indices are 0, 1, 2, 3
+      startTileIndex: new IntervalValue(0, 3),
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [
         ashEmberGravity,
@@ -4030,26 +4032,23 @@ export class WeatherParticles {
         this.snowSystem.emitter.position.y = emitCY;
       }
 
+      // Ash emitters cover the full scene (same as rain/snow) to avoid visible
+      // hard-edged rectangles. Density variation comes from temporal clusterBoost
+      // on the emission rate, not from shrinking/repositioning the emitter.
       if (this.ashSystem?.emitter && this.ashSystem.emitterShape) {
         const shape = this.ashSystem.emitterShape;
-        const clusterRadius = this._ashClusterRadius || Math.max(300, Math.min(1800, emitW * 0.35));
-        const width = Math.max(1, Math.min(emitW, clusterRadius * 2));
-        const height = Math.max(1, Math.min(emitH, clusterRadius * 2));
-        if (typeof shape.width === 'number') shape.width = width;
-        if (typeof shape.height === 'number') shape.height = height;
-        this.ashSystem.emitter.position.x = this._ashClusterCenter.x || emitCX;
-        this.ashSystem.emitter.position.y = this._ashClusterCenter.y || emitCY;
+        if (typeof shape.width === 'number') shape.width = emitW;
+        if (typeof shape.height === 'number') shape.height = emitH;
+        this.ashSystem.emitter.position.x = emitCX;
+        this.ashSystem.emitter.position.y = emitCY;
       }
 
       if (this.ashEmberSystem?.emitter && this.ashEmberSystem.emitterShape) {
         const shape = this.ashEmberSystem.emitterShape;
-        const clusterRadius = this._ashClusterRadius || Math.max(300, Math.min(1800, emitW * 0.35));
-        const width = Math.max(1, Math.min(emitW, clusterRadius * 2));
-        const height = Math.max(1, Math.min(emitH, clusterRadius * 2));
-        if (typeof shape.width === 'number') shape.width = width;
-        if (typeof shape.height === 'number') shape.height = height;
-        this.ashEmberSystem.emitter.position.x = this._ashClusterCenter.x || emitCX;
-        this.ashEmberSystem.emitter.position.y = this._ashClusterCenter.y || emitCY;
+        if (typeof shape.width === 'number') shape.width = emitW;
+        if (typeof shape.height === 'number') shape.height = emitH;
+        this.ashEmberSystem.emitter.position.x = emitCX;
+        this.ashEmberSystem.emitter.position.y = emitCY;
       }
 
       // Foam flecks: keep the rendered dot ~pixel-sized across zoom levels.
@@ -5299,7 +5298,18 @@ export class WeatherParticles {
       const intensityScale = ashTuning.intensityScale ?? 1.0;
       const tunedIntensity = Math.max(0.0, ashIntensity * intensityScale);
 
-      // Uneven ash distribution: pick a drifting cluster center every few seconds.
+      // One-time diagnostic log when ash first activates
+      if (tunedIntensity > 0 && !this._ashActivatedLogged) {
+        this._ashActivatedLogged = true;
+        log.info(`Ash weather activated: ashIntensity=${ashIntensity.toFixed(3)}, tunedIntensity=${tunedIntensity.toFixed(3)}`);
+      } else if (tunedIntensity <= 0 && this._ashActivatedLogged) {
+        this._ashActivatedLogged = false;
+      }
+
+      // Temporal ash intensity variation: every few seconds a random "cluster center"
+      // is chosen. Its distance from the (static, full-scene) emitter center drives
+      // a boost multiplier on emission rate, creating natural density surges and lulls
+      // without moving the emitter or creating visible rectangular edges.
       if (this._ashClusterTimer <= 0) {
         const holdMin = ashTuning.clusterHoldMin ?? 2.5;
         const holdMax = ashTuning.clusterHoldMax ?? 7.0;

@@ -78,6 +78,7 @@ export class LightningEffect extends EffectBase {
 
     this._mapPointsManager = null;
     this._changeListener = null;
+    this._pendingSourceRebuild = false;
 
     this._sources = [];
 
@@ -231,6 +232,10 @@ export class LightningEffect extends EffectBase {
 
     this._applyOverheadOrderToMeshes();
 
+    // Defer source rebuild to update() so startup wiring/state-restore order
+    // cannot leave lightning with stale or empty source data.
+    this._requestSourceRebuild();
+
     this._initialized = true;
     log.info('LightningEffect initialized');
   }
@@ -250,6 +255,18 @@ export class LightningEffect extends EffectBase {
     if (paramId === 'overheadOrder') {
       this._applyOverheadOrderToMeshes();
     }
+
+    // Timing parameters influence burst scheduling; rebuild sources so scene-load
+    // restored settings take effect immediately without requiring point edits.
+    if (
+      paramId === 'minDelayMs' ||
+      paramId === 'maxDelayMs' ||
+      paramId === 'burstMinStrikes' ||
+      paramId === 'burstMaxStrikes' ||
+      paramId === 'strikeDelayMs'
+    ) {
+      this._requestSourceRebuild();
+    }
   }
 
   setMapPointsSources(manager) {
@@ -260,9 +277,9 @@ export class LightningEffect extends EffectBase {
 
     this._mapPointsManager = manager || null;
 
-    this._rebuildSources();
+    this._requestSourceRebuild();
 
-    this._changeListener = () => this._rebuildSources();
+    this._changeListener = () => this._requestSourceRebuild();
     if (this._mapPointsManager) {
       this._mapPointsManager.addChangeListener(this._changeListener);
     }
@@ -270,13 +287,19 @@ export class LightningEffect extends EffectBase {
 
   update(timeInfo) {
     if (!this._initialized) return;
+
+    const nowMs = timeInfo.elapsed * 1000;
+
+    if (this._pendingSourceRebuild) {
+      this._rebuildSources(nowMs);
+      this._pendingSourceRebuild = false;
+    }
+
     if (!this.enabled) {
       this._hideAllStrikes();
       this._setFlash(0.0, timeInfo);
       return;
     }
-
-    const nowMs = timeInfo.elapsed * 1000;
 
     for (let i = 0; i < this._sources.length; i++) {
       const src = this._sources[i];
@@ -480,6 +503,10 @@ export class LightningEffect extends EffectBase {
     this._initialized = false;
   }
 
+  _requestSourceRebuild() {
+    this._pendingSourceRebuild = true;
+  }
+
   _getGroundZ() {
     const sc = window.MapShine?.sceneComposer;
     return (sc && typeof sc.groundZ === 'number') ? sc.groundZ : DEFAULT_GROUND_Z;
@@ -492,7 +519,7 @@ export class LightningEffect extends EffectBase {
     return v;
   }
 
-  _rebuildSources() {
+  _rebuildSources(nowMsOverride = null) {
     this._sources.length = 0;
 
     if (!this._mapPointsManager) return;
@@ -534,7 +561,9 @@ export class LightningEffect extends EffectBase {
       });
     }
 
-    const nowMs = (window.MapShine?.timeManager?.elapsed ?? 0) * 1000;
+    const nowMs = Number.isFinite(nowMsOverride)
+      ? nowMsOverride
+      : ((window.MapShine?.timeManager?.elapsed ?? 0) * 1000);
     for (let i = 0; i < this._sources.length; i++) {
       const s = this._sources[i];
       s.nextBurstAt = nowMs + this._randFloatRange(s.rng, 0, Math.max(0, this.params.maxDelayMs));

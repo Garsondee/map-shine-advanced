@@ -12,6 +12,266 @@ import { registerUISettings } from './ui/tweakpane-manager.js';
 import { loadingOverlay } from './ui/loading-overlay.js';
 import { debugLoadingProfiler } from './core/debug-loading-profiler.js';
 
+const MODULE_ID = 'map-shine-advanced';
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function getMovementStyleEntries() {
+  const manager = window.MapShine?.tokenMovementManager;
+  if (manager?.styles instanceof Map && manager.styles.size > 0) {
+    const entries = [];
+    for (const [id, def] of manager.styles.entries()) {
+      entries.push({ id, label: String(def?.label || id) });
+    }
+    if (entries.length > 0) return entries;
+  }
+
+  return [
+    { id: 'walk', label: 'Walk - Steady March' },
+    { id: 'walk-heavy-stomp', label: 'Walk - Heavy Stomp' },
+    { id: 'walk-sneak-glide', label: 'Walk - Sneak Glide' },
+    { id: 'walk-swagger-stride', label: 'Walk - Swagger Stride' },
+    { id: 'walk-skitter-step', label: 'Walk - Skitter Step' },
+    { id: 'walk-limping-advance', label: 'Walk - Limping Advance' },
+    { id: 'walk-wobble-totter', label: 'Walk - Wobble Totter' },
+    { id: 'walk-drunken-drift', label: 'Walk - Drunken Drift' },
+    { id: 'walk-clockwork-tick', label: 'Walk - Clockwork Tick-Walk' },
+    { id: 'walk-chaos-skip', label: 'Walk - Chaos Skip' },
+    { id: 'pick-up-drop', label: 'Pick Up and Drop' },
+    { id: 'flying-glide', label: 'Flying - Glide' },
+    { id: 'flying-hover-bob', label: 'Flying - Hover Bob' },
+    { id: 'flying-bank-swoop', label: 'Flying - Bank Swoop' },
+    { id: 'flying-flutter-dart', label: 'Flying - Flutter Dart' },
+    { id: 'flying-chaos-drift', label: 'Flying - Chaos Drift' }
+  ];
+}
+
+function getActorSheetTokenDocuments(sheetApp) {
+  const tokenMap = new Map();
+
+  const primaryTokenDoc = sheetApp?.token?.document;
+  if (primaryTokenDoc?.id) tokenMap.set(primaryTokenDoc.id, primaryTokenDoc);
+
+  const actor = sheetApp?.actor;
+  if (actor?.getActiveTokens) {
+    const activeTokenDocs = actor.getActiveTokens(false, true) || [];
+    for (const tokenDoc of activeTokenDocs) {
+      if (tokenDoc?.id) tokenMap.set(tokenDoc.id, tokenDoc);
+    }
+  }
+
+  return [...tokenMap.values()];
+}
+
+function openActorMovementStyleDialog(sheetApp) {
+  const actor = sheetApp?.actor;
+  if (!actor) return;
+
+  const tokenDocs = getActorSheetTokenDocuments(sheetApp).filter((tokenDoc) => {
+    if (!tokenDoc?.id) return false;
+    return !!canvas?.scene?.tokens?.get(tokenDoc.id);
+  });
+
+  if (tokenDocs.length === 0) {
+    ui.notifications?.warn?.('No active scene tokens found for this character.');
+    return;
+  }
+
+  const controlledIds = new Set(
+    (canvas?.tokens?.controlled || [])
+      .map((token) => token?.document?.id)
+      .filter(Boolean)
+  );
+
+  const initialToken = tokenDocs.find((tokenDoc) => controlledIds.has(tokenDoc.id)) || tokenDocs[0];
+  const movementStyles = getMovementStyleEntries();
+  const initialStyle = String(initialToken?.getFlag?.(MODULE_ID, 'movementStyle') || '__default__');
+
+  const tokenOptionsHtml = tokenDocs
+    .map((tokenDoc) => {
+      const tokenName = tokenDoc?.name || actor.name || tokenDoc.id;
+      const selected = tokenDoc.id === initialToken.id ? ' selected' : '';
+      return `<option value="${escapeHtml(tokenDoc.id)}"${selected}>${escapeHtml(tokenName)}</option>`;
+    })
+    .join('');
+
+  const styleOptionsHtml = [
+    `<option value="__default__"${initialStyle === '__default__' ? ' selected' : ''}>Scene Default</option>`,
+    ...movementStyles.map((style) => {
+      const selected = style.id === initialStyle ? ' selected' : '';
+      return `<option value="${escapeHtml(style.id)}"${selected}>${escapeHtml(style.label)}</option>`;
+    })
+  ].join('');
+
+  const content = `
+    <form class="map-shine-movement-style-form" style="display:flex; flex-direction:column; gap: 0.75rem;">
+      <p style="margin:0; opacity:0.9;">Choose a movement style for a single token in this scene.</p>
+      <div class="form-group">
+        <label for="map-shine-token-id" style="display:block; font-weight:600; margin-bottom:0.25rem;">Token</label>
+        <select id="map-shine-token-id" name="map-shine-token-id" style="width:100%;">${tokenOptionsHtml}</select>
+      </div>
+      <div class="form-group">
+        <label for="map-shine-movement-style" style="display:block; font-weight:600; margin-bottom:0.25rem;">Movement Style</label>
+        <select id="map-shine-movement-style" name="map-shine-movement-style" style="width:100%;">${styleOptionsHtml}</select>
+      </div>
+      <p class="notes" style="margin:0; opacity:0.75;">This updates the token flag <code>flags.${MODULE_ID}.movementStyle</code>.</p>
+    </form>
+  `;
+
+  new Dialog(
+    {
+      title: `Movement Style - ${actor.name}`,
+      content,
+      buttons: {
+        save: {
+          icon: '<i class="fas fa-check"></i>',
+          label: 'Apply',
+          callback: (html) => {
+            void (async () => {
+              try {
+                const tokenId = String(html?.find?.('select[name="map-shine-token-id"]')?.val?.() || '');
+                const selectedStyle = String(html?.find?.('select[name="map-shine-movement-style"]')?.val?.() || '__default__');
+                if (!tokenId) return;
+
+                const tokenDoc = canvas?.scene?.tokens?.get?.(tokenId);
+                if (!tokenDoc) {
+                  ui.notifications?.warn?.('Token was not found in the current scene.');
+                  return;
+                }
+
+                const manager = window.MapShine?.tokenMovementManager;
+                if (selectedStyle === '__default__') {
+                  await tokenDoc.unsetFlag(MODULE_ID, 'movementStyle');
+                  manager?.setTokenStyleOverride?.(tokenId, null);
+                  ui.notifications?.info?.(`Movement style reset to scene default for ${tokenDoc.name || 'token'}.`);
+                  return;
+                }
+
+                await tokenDoc.setFlag(MODULE_ID, 'movementStyle', selectedStyle);
+                manager?.setTokenStyleOverride?.(tokenId, selectedStyle);
+                const selectedLabel = movementStyles.find((entry) => entry.id === selectedStyle)?.label || selectedStyle;
+                ui.notifications?.info?.(`Movement style set to ${selectedLabel} for ${tokenDoc.name || 'token'}.`);
+              } catch (e) {
+                console.error('Map Shine: failed to apply token movement style from actor sheet', e);
+                ui.notifications?.error?.('Failed to apply movement style.');
+              }
+            })();
+          }
+        },
+        cancel: {
+          icon: '<i class="fas fa-times"></i>',
+          label: 'Cancel'
+        }
+      },
+      render: (html) => {
+        try {
+          const tokenSelect = html?.find?.('select[name="map-shine-token-id"]');
+          const styleSelect = html?.find?.('select[name="map-shine-movement-style"]');
+          if (!tokenSelect?.length || !styleSelect?.length) return;
+
+          const syncStyleToToken = () => {
+            const selectedTokenId = String(tokenSelect.val?.() || '');
+            const selectedToken = tokenDocs.find((tokenDoc) => tokenDoc?.id === selectedTokenId);
+            const selectedTokenStyle = String(selectedToken?.getFlag?.(MODULE_ID, 'movementStyle') || '__default__');
+
+            let hasStyleOption = false;
+            styleSelect.find('option').each((_, option) => {
+              if (String(option?.value || '') === selectedTokenStyle) hasStyleOption = true;
+            });
+
+            styleSelect.val(hasStyleOption ? selectedTokenStyle : '__default__');
+          };
+
+          tokenSelect.on('change', syncStyleToToken);
+          syncStyleToToken();
+        } catch (_) {
+        }
+      },
+      default: 'save'
+    },
+    { width: 420 }
+  ).render(true);
+}
+
+function showExperimentalWarningDialog() {
+  try {
+    const dismissed = game.settings?.get?.(MODULE_ID, 'dismissExperimentalWarning');
+    if (dismissed) return;
+
+    const issuesUrl = 'https://github.com/Garsondee/map-shine-advanced/issues';
+
+    const content = `
+      <div style="display:flex; flex-direction:column; gap: 0.75rem;">
+        <p>
+          <strong>Map Shine Advanced is experimental.</strong>
+          It may be unreliable, incomplete, or change behavior between versions.
+        </p>
+        <p>
+          <strong>Compatibility note:</strong>
+          Right now it is not compatible with extremely ambitious canvas-altering modules (for example <strong>Levels</strong>).
+          There are plans to support more complex compatibility in the future.
+        </p>
+        <p>
+          If things aren’t working correctly mid-session, your best bet may be to <strong>disable Map Shine Advanced</strong>
+          and continue with the session without it.
+        </p>
+        <p>
+          Please report bugs and odd behavior so they can be fixed:
+          <a href="${issuesUrl}" target="_blank" rel="noopener noreferrer">${issuesUrl}</a>
+        </p>
+        <label style="display:flex; align-items:center; gap: 0.5rem;">
+          <input type="checkbox" name="msa-dismiss-experimental-warning" />
+          <span>Don’t show this message again</span>
+        </label>
+      </div>
+    `;
+
+    const applyDismissal = (html) => {
+      try {
+        const checked = !!html?.find?.('input[name="msa-dismiss-experimental-warning"]')?.prop?.('checked');
+        if (checked) {
+          game.settings?.set?.(MODULE_ID, 'dismissExperimentalWarning', true);
+        }
+      } catch (_) {
+      }
+    };
+
+    new Dialog(
+      {
+        title: 'Map Shine Advanced (Experimental)',
+        content,
+        buttons: {
+          issues: {
+            icon: '<i class="fas fa-bug"></i>',
+            label: 'Report a Bug',
+            callback: (html) => {
+              applyDismissal(html);
+              try { window.open(issuesUrl, '_blank', 'noopener'); } catch (_) {}
+            }
+          },
+          ok: {
+            icon: '<i class="fas fa-check"></i>',
+            label: 'Continue',
+            callback: (html) => applyDismissal(html)
+          }
+        },
+        default: 'ok',
+        close: (html) => applyDismissal(html)
+      },
+      { width: 520 }
+    ).render(true);
+  } catch (e) {
+    console.warn('Map Shine: failed to show experimental warning dialog', e);
+  }
+}
+
 /**
  * Module state exposed globally for debugging and inter-module communication
  * Reuse existing object if already defined to avoid losing state on re-execution
@@ -337,6 +597,26 @@ Hooks.once('init', async function() {
     }
   });
 
+  Hooks.on('getActorSheetHeaderButtons', (app, buttons) => {
+    try {
+      const actor = app?.actor;
+      if (!actor || !Array.isArray(buttons)) return;
+      if (!game.user?.isGM && !actor.isOwner) return;
+
+      const existing = buttons.some((btn) => btn?.class === 'map-shine-movement-style');
+      if (existing) return;
+
+      buttons.unshift({
+        label: 'Movement Style',
+        class: 'map-shine-movement-style',
+        icon: 'fas fa-shoe-prints',
+        onclick: () => openActorMovementStyleDialog(app)
+      });
+    } catch (e) {
+      console.error('Map Shine: failed to add actor sheet movement style header button', e);
+    }
+  });
+
   Hooks.on('renderTileConfig', (app, html) => {
     try {
       const $ = globalThis.$;
@@ -428,6 +708,12 @@ Hooks.once('init', async function() {
  * Main bootstrap happens here
  */
 Hooks.once('ready', async function() {
+  try {
+    // Defer slightly so the rest of Foundry UI finishes settling before we show a modal.
+    setTimeout(() => showExperimentalWarningDialog(), 250);
+  } catch (_) {
+  }
+
   try {
     loadingOverlay.setMessage('Preparing renderer…');
   } catch (e) {

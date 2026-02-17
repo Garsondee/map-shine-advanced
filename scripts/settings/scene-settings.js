@@ -307,6 +307,15 @@ export function registerSettings() {
     default: false
   });
 
+  game.settings.register('map-shine-advanced', 'dismissExperimentalWarning', {
+    name: 'Dismiss Experimental Warning',
+    hint: 'When enabled, the experimental warning dialog will no longer be shown for this user.',
+    scope: 'client',
+    config: false,
+    type: Boolean,
+    default: false
+  });
+
   game.settings.register(FLAG_NAMESPACE, DEBUG_LOADING_MODE_SETTING, {
     name: 'Debug Loading Mode',
     hint: 'When enabled, scene loading pauses at completion and shows a copyable loading log until you press the continue button.',

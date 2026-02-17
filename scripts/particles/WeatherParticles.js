@@ -5295,7 +5295,7 @@ export class WeatherParticles {
 
       const ashTuning = weatherController.ashTuning || {};
       const ashIntensity = weather.ashIntensity ?? 0;
-      const intensityScale = ashTuning.intensityScale ?? 1.0;
+      const intensityScale = ashTuning.intensityScale ?? 0.5;
       const tunedIntensity = Math.max(0.0, ashIntensity * intensityScale);
 
       // One-time diagnostic log when ash first activates
@@ -5311,8 +5311,8 @@ export class WeatherParticles {
       // a boost multiplier on emission rate, creating natural density surges and lulls
       // without moving the emitter or creating visible rectangular edges.
       if (this._ashClusterTimer <= 0) {
-        const holdMin = ashTuning.clusterHoldMin ?? 2.5;
-        const holdMax = ashTuning.clusterHoldMax ?? 7.0;
+        const holdMin = ashTuning.clusterHoldMin ?? 1.3;
+        const holdMax = ashTuning.clusterHoldMax ?? 2.3;
         const holdRange = Math.max(0.1, holdMax - holdMin);
         this._ashClusterTimer = Math.max(0.1, holdMin + Math.random() * holdRange);
 
@@ -5323,8 +5323,8 @@ export class WeatherParticles {
         this._ashClusterCenter.x = sx + Math.random() * sw;
         this._ashClusterCenter.y = sy + Math.random() * sh;
 
-        const radiusMin = Math.max(10, ashTuning.clusterRadiusMin ?? 300);
-        const radiusMax = Math.max(radiusMin, ashTuning.clusterRadiusMax ?? 1800);
+        const radiusMin = Math.max(10, ashTuning.clusterRadiusMin ?? 1150);
+        const radiusMax = Math.max(radiusMin, ashTuning.clusterRadiusMax ?? 2060);
         this._ashClusterRadius = radiusMin + Math.random() * (radiusMax - radiusMin);
       }
       this._ashClusterTimer -= Math.max(0, safeDt || 0);
@@ -5338,20 +5338,20 @@ export class WeatherParticles {
         const dy = ey - this._ashClusterCenter.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
         const t = 1.0 - Math.min(1.0, dist / this._ashClusterRadius);
-        const boostMin = ashTuning.clusterBoostMin ?? 0.55;
-        const boostMax = ashTuning.clusterBoostMax ?? 1.45;
+        const boostMin = ashTuning.clusterBoostMin ?? 1.1;
+        const boostMax = ashTuning.clusterBoostMax ?? 2.55;
         clusterBoost = boostMin + (boostMax - boostMin) * t;
       }
       
       const ashEmission = this.ashSystem.emissionOverTime;
       if (ashEmission && typeof ashEmission.value === 'number') {
-        const rate = ashTuning.emissionRate ?? 300;
+        const rate = ashTuning.emissionRate ?? 840;
         ashEmission.value = rate * tunedIntensity * clusterBoost;
       }
 
       // Ash particle size - slightly larger than snow
-      const ashSMin = ashTuning.sizeMin ?? 10;
-      const ashSMax = ashTuning.sizeMax ?? 16;
+      const ashSMin = ashTuning.sizeMin ?? 5;
+      const ashSMax = ashTuning.sizeMax ?? 17;
       if (this.ashSystem.startSize && typeof this.ashSystem.startSize.a === 'number') {
         this.ashSystem.startSize.a = ashSMin;
         this.ashSystem.startSize.b = Math.max(ashSMin, ashSMax);
@@ -5359,16 +5359,16 @@ export class WeatherParticles {
 
       // Ash lifetime
       if (this.ashSystem.startLife && typeof this.ashSystem.startLife.a === 'number') {
-        const lifeMin = ashTuning.lifeMin ?? 5;
-        const lifeMax = ashTuning.lifeMax ?? 8;
+        const lifeMin = ashTuning.lifeMin ?? 2;
+        const lifeMax = ashTuning.lifeMax ?? 4.7;
         this.ashSystem.startLife.a = lifeMin;
         this.ashSystem.startLife.b = Math.max(lifeMin, lifeMax);
       }
 
       // Ash fall speed
       if (this.ashSystem.startSpeed && typeof this.ashSystem.startSpeed.a === 'number') {
-        const speedMin = ashTuning.speedMin ?? 120;
-        const speedMax = ashTuning.speedMax ?? 200;
+        const speedMin = ashTuning.speedMin ?? 15;
+        const speedMax = ashTuning.speedMax ?? 25;
         this.ashSystem.startSpeed.a = speedMin;
         this.ashSystem.startSpeed.b = Math.max(speedMin, speedMax);
       }
@@ -5377,8 +5377,8 @@ export class WeatherParticles {
       const ashBrightness = (ashTuning.brightness ?? 1.0) * darknessBrightnessScale;
       const clampedAshB = THREE ? THREE.MathUtils.clamp(ashBrightness, 0.0, 3.0) : ashBrightness;
       const ashAlphaScale = clampedAshB / 3.0;
-      const ashMinAlpha = (ashTuning.opacityStartMin ?? 0.75) * ashAlphaScale;
-      const ashMaxAlpha = (ashTuning.opacityStartMax ?? 0.5) * ashAlphaScale;
+      const ashMinAlpha = (ashTuning.opacityStartMin ?? 0.53) * ashAlphaScale;
+      const ashMaxAlpha = (ashTuning.opacityStartMax ?? 0.75) * ashAlphaScale;
       if (this.ashSystem.startColor && this.ashSystem.startColor.a && this.ashSystem.startColor.b) {
         const cStart = ashTuning.colorStart ?? { r: 0.45, g: 0.42, b: 0.38 };
         const cEnd = ashTuning.colorEnd ?? { r: 0.35, g: 0.32, b: 0.28 };
@@ -5389,14 +5389,14 @@ export class WeatherParticles {
       if (this._ashColorOverLife?.color?.a && this._ashColorOverLife.color?.b) {
         const cStart = ashTuning.colorStart ?? { r: 0.45, g: 0.42, b: 0.38 };
         const cEnd = ashTuning.colorEnd ?? { r: 0.35, g: 0.32, b: 0.28 };
-        const endAlpha = Math.max(0.0, ashTuning.opacityEnd ?? 0.0);
+        const endAlpha = Math.max(0.0, ashTuning.opacityEnd ?? 0.85);
         this._ashColorOverLife.color.a.set(cStart.r, cStart.g, cStart.b, ashMinAlpha);
         this._ashColorOverLife.color.b.set(cEnd.r, cEnd.g, cEnd.b, endAlpha);
       }
 
       // Scale curl noise for ash
       if (this._ashCurl && this._ashCurlBaseStrength) {
-        const curlStrength = debugDisableWeatherBehaviors ? 0.0 : (ashTuning.curlStrength ?? 0.6);
+        const curlStrength = debugDisableWeatherBehaviors ? 0.0 : (ashTuning.curlStrength ?? 3);
         this._ashCurl.strength.copy(this._ashCurlBaseStrength).multiplyScalar(curlStrength);
       }
 
@@ -5431,59 +5431,59 @@ export class WeatherParticles {
       this._ensureBatchMaterialPatched(this.ashEmberSystem, '_ashEmberBatchMaterial');
       const ashTuning = weatherController.ashTuning || {};
       const ashIntensity = weather.ashIntensity ?? 0;
-      const intensityScale = ashTuning.intensityScale ?? 1.0;
+      const intensityScale = ashTuning.intensityScale ?? 0.5;
       const tunedIntensity = Math.max(0.0, ashIntensity * intensityScale);
 
       const emberEmission = this.ashEmberSystem.emissionOverTime;
       if (emberEmission && typeof emberEmission.value === 'number') {
-        const rate = ashTuning.emberEmissionRate ?? 25;
+        const rate = ashTuning.emberEmissionRate ?? 167;
         emberEmission.value = rate * tunedIntensity;
       }
 
       if (this.ashEmberSystem.startSize && typeof this.ashEmberSystem.startSize.a === 'number') {
-        const emberSizeMin = ashTuning.emberSizeMin ?? 6;
-        const emberSizeMax = ashTuning.emberSizeMax ?? 12;
+        const emberSizeMin = ashTuning.emberSizeMin ?? 7;
+        const emberSizeMax = ashTuning.emberSizeMax ?? 14;
         this.ashEmberSystem.startSize.a = emberSizeMin;
         this.ashEmberSystem.startSize.b = Math.max(emberSizeMin, emberSizeMax);
       }
 
       if (this.ashEmberSystem.startLife && typeof this.ashEmberSystem.startLife.a === 'number') {
-        const emberLifeMin = ashTuning.emberLifeMin ?? 2.5;
-        const emberLifeMax = ashTuning.emberLifeMax ?? 4.0;
+        const emberLifeMin = ashTuning.emberLifeMin ?? 12;
+        const emberLifeMax = ashTuning.emberLifeMax ?? 16;
         this.ashEmberSystem.startLife.a = emberLifeMin;
         this.ashEmberSystem.startLife.b = Math.max(emberLifeMin, emberLifeMax);
       }
 
       if (this.ashEmberSystem.startSpeed && typeof this.ashEmberSystem.startSpeed.a === 'number') {
         const emberSpeedMin = ashTuning.emberSpeedMin ?? 180;
-        const emberSpeedMax = ashTuning.emberSpeedMax ?? 260;
+        const emberSpeedMax = ashTuning.emberSpeedMax ?? 820;
         this.ashEmberSystem.startSpeed.a = emberSpeedMin;
         this.ashEmberSystem.startSpeed.b = Math.max(emberSpeedMin, emberSpeedMax);
       }
 
-      const emberBrightness = (ashTuning.emberBrightness ?? 1.0) * darknessBrightnessScale;
+      const emberBrightness = (ashTuning.emberBrightness ?? 5) * darknessBrightnessScale;
       const clampedEmberB = THREE ? THREE.MathUtils.clamp(emberBrightness, 0.0, 5.0) : emberBrightness;
       const emberAlphaScale = clampedEmberB / 5.0;
-      const emberMinAlpha = (ashTuning.emberOpacityStartMin ?? 0.9) * emberAlphaScale;
-      const emberMaxAlpha = (ashTuning.emberOpacityStartMax ?? 0.4) * emberAlphaScale;
+      const emberMinAlpha = (ashTuning.emberOpacityStartMin ?? 0.87) * emberAlphaScale;
+      const emberMaxAlpha = (ashTuning.emberOpacityStartMax ?? 0.94) * emberAlphaScale;
 
       if (this.ashEmberSystem.startColor && this.ashEmberSystem.startColor.a && this.ashEmberSystem.startColor.b) {
-        const emberStart = ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.05 };
-        const emberEnd = ashTuning.emberColorEnd ?? { r: 0.35, g: 0.32, b: 0.28 };
+        const emberStart = ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.0 };
+        const emberEnd = ashTuning.emberColorEnd ?? { r: 1.0, g: 0.25, b: 0.0 };
         this.ashEmberSystem.startColor.a.set(emberStart.r, emberStart.g, emberStart.b, emberMinAlpha);
         this.ashEmberSystem.startColor.b.set(emberEnd.r, emberEnd.g, emberEnd.b, emberMaxAlpha);
       }
 
       if (this._ashEmberColorOverLife?.color?.a && this._ashEmberColorOverLife.color?.b) {
-        const emberStart = ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.05 };
-        const emberEnd = ashTuning.emberColorEnd ?? { r: 0.35, g: 0.32, b: 0.28 };
-        const emberEndAlpha = Math.max(0.0, ashTuning.emberOpacityEnd ?? 0.0);
+        const emberStart = ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.0 };
+        const emberEnd = ashTuning.emberColorEnd ?? { r: 1.0, g: 0.25, b: 0.0 };
+        const emberEndAlpha = Math.max(0.0, ashTuning.emberOpacityEnd ?? 0.83);
         this._ashEmberColorOverLife.color.a.set(emberStart.r, emberStart.g, emberStart.b, emberMinAlpha);
         this._ashEmberColorOverLife.color.b.set(emberEnd.r, emberEnd.g, emberEnd.b, emberEndAlpha);
       }
 
       if (this._ashEmberCurl && this._ashEmberCurlBaseStrength) {
-        const emberCurlStrength = debugDisableWeatherBehaviors ? 0.0 : (ashTuning.emberCurlStrength ?? 1.0);
+        const emberCurlStrength = debugDisableWeatherBehaviors ? 0.0 : (ashTuning.emberCurlStrength ?? 3);
         this._ashEmberCurl.strength.copy(this._ashEmberCurlBaseStrength).multiplyScalar(emberCurlStrength);
       }
 
@@ -5582,7 +5582,7 @@ export class WeatherParticles {
         if (this._ashWindForce.magnitude && typeof this._ashWindForce.magnitude.value === 'number') {
           const baseMag = 400; // Less wind influence than snow
           const align = THREE.MathUtils.clamp(windSpeed, 0, 1);
-          const windInfluence = ashTuning.windInfluence ?? 1.0;
+          const windInfluence = ashTuning.windInfluence ?? 2.1;
           this._ashWindForce.magnitude.value = baseMag * align * 0.7 * windInfluence;
         }
       }
@@ -5592,18 +5592,18 @@ export class WeatherParticles {
         if (this._ashEmberWindForce.magnitude && typeof this._ashEmberWindForce.magnitude.value === 'number') {
           const baseMag = 650;
           const align = THREE.MathUtils.clamp(windSpeed, 0, 1);
-          const windInfluence = ashTuning.emberWindInfluence ?? 1.0;
+          const windInfluence = ashTuning.emberWindInfluence ?? 0.45;
           this._ashEmberWindForce.magnitude.value = baseMag * align * 0.9 * windInfluence;
         }
       }
 
       if (this._ashGravityForce && this._ashGravityForce.magnitude && typeof this._ashGravityForce.magnitude.value === 'number') {
-        const gravScale = ashTuning.gravityScale ?? 1.0;
+        const gravScale = ashTuning.gravityScale ?? 0.55;
         this._ashGravityForce.magnitude.value = this._ashBaseGravity * gravScale;
       }
 
       if (this._ashEmberGravityForce && this._ashEmberGravityForce.magnitude && typeof this._ashEmberGravityForce.magnitude.value === 'number') {
-        const emberGravScale = ashTuning.emberGravityScale ?? 0.75;
+        const emberGravScale = ashTuning.emberGravityScale ?? 0;
         this._ashEmberGravityForce.magnitude.value = this._ashBaseGravity * 0.75 * emberGravScale;
       }
 

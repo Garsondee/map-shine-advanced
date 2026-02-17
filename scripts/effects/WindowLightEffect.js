@@ -1692,6 +1692,9 @@ export class WindowLightEffect extends EffectBase {
 
         uCloudShadowMap: { value: null },
         uHasCloudShadowMap: { value: 0.0 },
+        uRoofAlphaMap: { value: null },
+        uHasRoofAlphaMap: { value: 0.0 },
+        uOverheadMaskSuppression: { value: 0.0 },
 
         uSpecularBoost: { value: this.params.specularBoost },
 
@@ -1850,6 +1853,9 @@ export class WindowLightEffect extends EffectBase {
 
       uniform sampler2D uCloudShadowMap;
       uniform float uHasCloudShadowMap;
+      uniform sampler2D uRoofAlphaMap;
+      uniform float uHasRoofAlphaMap;
+      uniform float uOverheadMaskSuppression;
 
       uniform float uTime;
 
@@ -2030,6 +2036,15 @@ export class WindowLightEffect extends EffectBase {
             gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
             return;
           }
+        }
+
+        // When overhead lighting is disabled (or reduced), suppress window light
+        // under currently visible roof pixels using LightingEffect's roof-alpha pass.
+        float roofSuppression = 1.0;
+        if (uHasRoofAlphaMap > 0.5 && uOverheadMaskSuppression > 0.001) {
+          vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
+          float roofAlpha = clamp(texture2D(uRoofAlphaMap, screenUV).a, 0.0, 1.0);
+          roofSuppression = 1.0 - roofAlpha * clamp(uOverheadMaskSuppression, 0.0, 1.0);
         }
 
         if (uRainDebugRoofPlateau > 0.5 && uHasRainFlowMap <= 0.5) {
@@ -2496,6 +2511,7 @@ export class WindowLightEffect extends EffectBase {
         float flashIntensityBoost = max(uLightningWindowIntensityBoost, 0.0);
         float flashMul = 1.0 + flash01 * flashIntensityBoost;
         vec3 finalLight = lightMap * finalColor * uIntensity * indoorFactor * envFactor * flashMul;
+        finalLight *= roofSuppression;
 
         if (waterMask > 0.0001) {
           float kDark = clamp(uRainDarken, 0.0, 1.0);
@@ -2693,6 +2709,32 @@ export class WindowLightEffect extends EffectBase {
         if (lu?.uHasCloudShadowMap) {
           lu.uHasCloudShadowMap.value = 0.0;
         }
+    }
+
+    // Roof alpha binding for overhead-light suppression in WindowLight shaders.
+    // This keeps window light from leaking through visible roofs when the
+    // overhead-lighting contribution is disabled (or reduced).
+    try {
+      const roofAlphaTex = window.MapShine?.lightingEffect?.roofAlphaTarget?.texture || null;
+      const overheadIntensity = (typeof this.params.overheadLightIntensity === 'number' && Number.isFinite(this.params.overheadLightIntensity))
+        ? Math.max(0.0, Math.min(1.0, this.params.overheadLightIntensity))
+        : 1.0;
+      const overheadSuppression = this.params.lightOverheadTiles ? (1.0 - overheadIntensity) : 1.0;
+
+      const bindRoofAlpha = (uu) => {
+        if (!uu) return;
+        if (uu.uRoofAlphaMap) uu.uRoofAlphaMap.value = roofAlphaTex;
+        if (uu.uHasRoofAlphaMap) uu.uHasRoofAlphaMap.value = roofAlphaTex ? 1.0 : 0.0;
+        if (uu.uOverheadMaskSuppression) uu.uOverheadMaskSuppression.value = overheadSuppression;
+      };
+
+      bindRoofAlpha(u);
+      bindRoofAlpha(lu);
+    } catch (e) {
+      if (u?.uHasRoofAlphaMap) u.uHasRoofAlphaMap.value = 0.0;
+      if (lu?.uHasRoofAlphaMap) lu.uHasRoofAlphaMap.value = 0.0;
+      if (u?.uOverheadMaskSuppression) u.uOverheadMaskSuppression.value = 0.0;
+      if (lu?.uOverheadMaskSuppression) lu.uOverheadMaskSuppression.value = 0.0;
     }
 
     // Update Params
@@ -2997,6 +3039,9 @@ export class WindowLightEffect extends EffectBase {
         uCloudShadowMap: { value: null },
         uHasCloudShadowMap: { value: 0.0 }
         ,
+        uRoofAlphaMap: { value: null },
+        uHasRoofAlphaMap: { value: 0.0 },
+        uOverheadMaskSuppression: { value: 0.0 },
         uTime: { value: 0.0 },
 
         uRainK: { value: 0.0 },
@@ -3133,6 +3178,9 @@ export class WindowLightEffect extends EffectBase {
 
       uniform sampler2D uCloudShadowMap;
       uniform float uHasCloudShadowMap;
+      uniform sampler2D uRoofAlphaMap;
+      uniform float uHasRoofAlphaMap;
+      uniform float uOverheadMaskSuppression;
 
       uniform float uTime;
 
@@ -3715,6 +3763,13 @@ export class WindowLightEffect extends EffectBase {
           }
         }
 
+        float roofSuppression = 1.0;
+        if (uHasRoofAlphaMap > 0.5 && uOverheadMaskSuppression > 0.001) {
+          vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
+          float roofAlpha = clamp(texture2D(uRoofAlphaMap, screenUV).a, 0.0, 1.0);
+          roofSuppression = 1.0 - roofAlpha * clamp(uOverheadMaskSuppression, 0.0, 1.0);
+        }
+
         float envFactor = 1.0;
         if (uHasCloudShadowMap > 0.5) {
           vec2 screenUV = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
@@ -3741,6 +3796,7 @@ export class WindowLightEffect extends EffectBase {
         float flashIntensityBoost = max(uLightningWindowIntensityBoost, 0.0);
         float flashMul = 1.0 + flash01 * flashIntensityBoost;
         finalBrightness = finalBrightness * uIntensity * indoorFactor * envFactor * flashMul;
+        finalBrightness *= roofSuppression;
 
         if (waterMask > 0.0001) {
           float kDark = clamp(uRainDarken, 0.0, 1.0);

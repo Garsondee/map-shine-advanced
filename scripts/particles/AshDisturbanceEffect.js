@@ -139,20 +139,20 @@ export class AshDisturbanceEffect extends EffectBase {
 
     this.params = {
       enabled: true,
-      burstRate: 500,
-      burstDuration: 0.5,
-      burstRadius: 250,
+      burstRate: 270,
+      burstDuration: 1.6,
+      burstRadius: 170,
       maxParticles: 3000,
-      lifeMin: 1.5,
-      lifeMax: 3.5,
-      sizeMin: 20,
-      sizeMax: 50,
-      windInfluence: 0.6,
-      curlStrength: 15,
-      curlScale: 240,
-      opacityStart: 0.85,
+      lifeMin: 4,
+      lifeMax: 5.9,
+      sizeMin: 54,
+      sizeMax: 77,
+      windInfluence: 0.35,
+      curlStrength: 20,
+      curlScale: 140,
+      opacityStart: 0.5,
       opacityEnd: 0.15,
-      colorStart: { r: 0.50, g: 0.46, b: 0.42, a: 0.85 },
+      colorStart: { r: 0.50, g: 0.46, b: 0.42, a: 0.5 },
       colorEnd: { r: 0.30, g: 0.27, b: 0.24, a: 0.15 }
     };
 
@@ -199,19 +199,19 @@ export class AshDisturbanceEffect extends EffectBase {
       },
       parameters: {
         enabled: { type: 'boolean', default: true },
-        burstRate: { type: 'slider', label: 'Burst Rate (particles/s)', min: 50, max: 2000, step: 10, default: 500, throttle: 50 },
-        burstDuration: { type: 'slider', label: 'Burst Duration (s)', min: 0.1, max: 2.0, step: 0.05, default: 0.5, throttle: 50 },
-        burstRadius: { type: 'slider', label: 'Burst Radius (px)', min: 50, max: 800, step: 10, default: 250, throttle: 50 },
+        burstRate: { type: 'slider', label: 'Burst Rate (particles/s)', min: 50, max: 2000, step: 10, default: 270, throttle: 50 },
+        burstDuration: { type: 'slider', label: 'Burst Duration (s)', min: 0.1, max: 2.0, step: 0.05, default: 1.6, throttle: 50 },
+        burstRadius: { type: 'slider', label: 'Burst Radius (px)', min: 50, max: 800, step: 10, default: 170, throttle: 50 },
         maxParticles: { type: 'slider', label: 'Max Particles', min: 500, max: 8000, step: 100, default: 3000, throttle: 50 },
-        lifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.2, max: 6.0, step: 0.1, default: 1.5, throttle: 50 },
-        lifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.5, max: 8.0, step: 0.1, default: 3.5, throttle: 50 },
-        sizeMin: { type: 'slider', label: 'Size Min (px)', min: 4, max: 100, step: 1, default: 20, throttle: 50 },
-        sizeMax: { type: 'slider', label: 'Size Max (px)', min: 8, max: 150, step: 1, default: 50, throttle: 50 },
-        opacityStart: { type: 'slider', label: 'Opacity Start', min: 0.1, max: 1.0, step: 0.05, default: 0.85, throttle: 50 },
+        lifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.2, max: 6.0, step: 0.1, default: 4, throttle: 50 },
+        lifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.5, max: 8.0, step: 0.1, default: 5.9, throttle: 50 },
+        sizeMin: { type: 'slider', label: 'Size Min (px)', min: 4, max: 100, step: 1, default: 54, throttle: 50 },
+        sizeMax: { type: 'slider', label: 'Size Max (px)', min: 8, max: 150, step: 1, default: 77, throttle: 50 },
+        opacityStart: { type: 'slider', label: 'Opacity Start', min: 0.1, max: 1.0, step: 0.05, default: 0.5, throttle: 50 },
         opacityEnd: { type: 'slider', label: 'Opacity End', min: 0.0, max: 1.0, step: 0.05, default: 0.15, throttle: 50 },
-        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 3.0, step: 0.05, default: 0.6, throttle: 50 },
-        curlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 80.0, step: 1, default: 15, throttle: 50 },
-        curlScale: { type: 'slider', label: 'Curl Scale', min: 50, max: 800, step: 10, default: 240, throttle: 50 }
+        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 3.0, step: 0.05, default: 0.35, throttle: 50 },
+        curlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 80.0, step: 1, default: 20, throttle: 50 },
+        curlScale: { type: 'slider', label: 'Curl Scale', min: 50, max: 800, step: 10, default: 140, throttle: 50 }
       }
     };
   }

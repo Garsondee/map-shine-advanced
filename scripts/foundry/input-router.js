@@ -220,6 +220,13 @@ export class InputRouter {
       layerIdName === 'tokens';
 
     if (isTokensLayer) {
+      // WP-2 Ruler parity: when Foundry's ruler tool is active on the tokens
+      // layer (toggled via R key), route input to PIXI so the ruler can receive
+      // pointer drag events for measurement. Input routes back to THREE when
+      // the user switches back to the select tool.
+      if (activeTool === 'ruler') {
+        return InputMode.PIXI;
+      }
       return InputMode.THREE;
     }
     

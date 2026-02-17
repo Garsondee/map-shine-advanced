@@ -176,6 +176,26 @@ export class InteractionManager {
       tokenIds: new Set()
     };
 
+    // WP-7 Multiplayer cursor broadcast: throttled Foundry canvas coordinate
+    // broadcast mirroring ControlsLayer._onMouseMove when Three owns input.
+    /** @type {number} */
+    this._lastCursorBroadcastMs = 0;
+    /** @type {number} Minimum ms between broadcasts (matches Foundry ticker rate). */
+    this._cursorBroadcastIntervalMs = 100;
+
+    // WP-3 Ping parity: long-press ping detection mirrors Foundry's
+    // ControlsLayer._onLongPress (500ms hold on empty canvas → canvas.ping).
+    /** @type {{timerId: number|null, startX: number, startY: number, worldX: number, worldY: number, threshold: number, shiftHeld: boolean}} */
+    this._pingLongPress = {
+      timerId: null,
+      startX: 0,
+      startY: 0,
+      worldX: 0,
+      worldY: 0,
+      threshold: 5,
+      shiftHeld: false
+    };
+
     this.movementPathPreview = {
       group: null,
       lineOuter: null,
@@ -1899,6 +1919,51 @@ export class InteractionManager {
             }
         }
 
+        // 1.6 WP-5: Check Notes (double-click opens journal entry)
+        // Mirrors Foundry Note._onClickLeft2: opens journal entry/page sheet.
+        safeCall(() => {
+          const nm = window.MapShine?.noteManager;
+          if (nm && nm.notes.size > 0) {
+            const noteSprites = Array.from(nm.notes.values());
+            const noteHits = this.raycaster.intersectObjects(noteSprites, false);
+            if (noteHits.length > 0) {
+              const hit = noteHits[0];
+              const docId = hit.object?.userData?.docId;
+              const noteDoc = docId ? canvas?.scene?.notes?.get?.(docId) : null;
+              if (noteDoc) {
+                const entry = noteDoc.entry;
+                const page = noteDoc.page;
+                if (entry) {
+                  // Permission check: _canView requires OBSERVER (or LIMITED for image pages)
+                  const accessTest = page ?? entry;
+                  const canView = game?.user?.isGM || accessTest?.testUserPermission?.(game.user, 'OBSERVER');
+                  if (canView) {
+                    const options = {};
+                    if (page) {
+                      options.mode = foundry?.applications?.sheets?.journal?.JournalEntrySheet?.VIEW_MODES?.SINGLE;
+                      options.pageId = page.id;
+                    }
+                    const allowed = Hooks.call('activateNote', canvas?.notes?.get?.(docId) ?? noteDoc, options);
+                    if (allowed !== false) {
+                      if (page?.type === 'image') {
+                        new ImagePopout({
+                          src: page.src,
+                          uuid: page.uuid,
+                          caption: page.image?.caption,
+                          window: { title: page.name }
+                        }).render({ force: true });
+                      } else {
+                        entry.sheet.render(true, options);
+                      }
+                    }
+                    return;
+                  }
+                }
+              }
+            }
+          }
+        }, 'dblClick.noteInteraction', Severity.COSMETIC);
+
         // 2. Check Tokens
         const wallGroup = this.wallManager.wallGroup;
         this.raycaster.params.Line.threshold = 10; // Tolerance
@@ -2020,6 +2085,33 @@ export class InteractionManager {
       if (window.MapShine?.cameraController) {
         window.MapShine.cameraController.enabled = false;
       }
+  }
+
+  /**
+   * Start wall endpoint drag operation.
+   * @param {THREE.Object3D} endpointObject
+   * @param {PointerEvent} event
+   */
+  startWallDrag(endpointObject, event) {
+    const wallId = endpointObject?.userData?.wallId;
+    const endpointIndex = endpointObject?.userData?.index;
+    if (!wallId || !Number.isFinite(endpointIndex)) return;
+
+    this.dragState.active = true;
+    this.dragState.mode = 'wallEndpoint';
+    this.dragState.object = endpointObject;
+    this.dragState.wallId = wallId;
+    this.dragState.endpointIndex = endpointIndex;
+    this.dragState.hasMoved = false;
+
+    if (window.MapShine?.cameraController) {
+      window.MapShine.cameraController.enabled = false;
+    }
+
+    // Consume interaction so wall endpoint drag does not leak into other handlers.
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    event?.stopImmediatePropagation?.();
   }
 
   // ── Map Point Handle methods — delegated to MapPointDrawHandler ──────────
@@ -2852,6 +2944,35 @@ export class InteractionManager {
             this.openHudTokenId = null;
           }
           
+          // WP-3 Ping parity: arm long-press ping timer on empty-space left-click.
+          // Mirrors Foundry's ControlsLayer._onLongPress (500ms).
+          // Capture Shift key state NOW so pull ping works even if Shift is released during the 500ms delay.
+          this._cancelPingLongPress();
+          safeCall(() => {
+            const isTokensLayer = canvas?.activeLayer instanceof foundry.canvas.layers.TokenLayer;
+            const isCtrl = !!(event.ctrlKey || event.metaKey);
+            if (isTokensLayer && !isCtrl && game?.user?.hasPermission?.('PING_CANVAS')) {
+              const groundZ = this.sceneComposer?.groundZ ?? 0;
+              const pingWorld = this.viewportToWorld(event.clientX, event.clientY, groundZ);
+              if (pingWorld) {
+                const pingFoundry = Coordinates.toFoundry(pingWorld.x, pingWorld.y);
+                this._pingLongPress.startX = event.clientX;
+                this._pingLongPress.startY = event.clientY;
+                this._pingLongPress.worldX = pingFoundry.x;
+                this._pingLongPress.worldY = pingFoundry.y;
+                this._pingLongPress.shiftHeld = event.shiftKey;
+                this._pingLongPress.timerId = setTimeout(() => {
+                  this._pingLongPress.timerId = null;
+                  safeCall(() => {
+                    // Pass pull=true if Shift was held when ping was armed (not when firing)
+                    const pingOptions = this._pingLongPress.shiftHeld ? { pull: true } : {};
+                    canvas?.ping?.({ x: this._pingLongPress.worldX, y: this._pingLongPress.worldY }, pingOptions);
+                  }, 'pingLongPress.fire', Severity.COSMETIC);
+                }, 500);
+              }
+            }
+          }, 'pointerDown.armPingLongPress', Severity.COSMETIC);
+
           // Start Drag Select
           this.dragSelect.active = true;
           this.dragSelect.dragging = false;
@@ -3465,12 +3586,14 @@ export class InteractionManager {
       // We want hover even if we can't move it, just to show name.
       
       if (this.hoveredTokenId !== tokenDoc.id) {
-        // Hover changed
+        // Hover changed — unhover previous
         if (this.hoveredTokenId) {
           this.tokenManager.setHover(this.hoveredTokenId, false);
+          this._syncFoundryHoverOut(this.hoveredTokenId);
         }
         this.hoveredTokenId = tokenDoc.id;
         this.tokenManager.setHover(this.hoveredTokenId, true);
+        this._syncFoundryHoverIn(this.hoveredTokenId);
         
         // Cursor
         this.canvasElement.style.cursor = canControl ? 'pointer' : 'default';
@@ -3479,10 +3602,77 @@ export class InteractionManager {
       // No hit
       if (this.hoveredTokenId) {
         this.tokenManager.setHover(this.hoveredTokenId, false);
+        this._syncFoundryHoverOut(this.hoveredTokenId);
         this.hoveredTokenId = null;
         this.canvasElement.style.cursor = 'default';
       }
     }
+  }
+
+  /**
+   * XM-1: Sync Foundry hover-in state when Three.js detects a new hovered token.
+   * Mirrors PlaceableObject._onHoverIn: sets layer.hover, token.hover, fires
+   * hoverToken hook, highlights combat tracker entry, and refreshes occlusion.
+   * @param {string} tokenId
+   * @private
+   */
+  _syncFoundryHoverIn(tokenId) {
+    safeCall(() => {
+      const fvttToken = canvas?.tokens?.get?.(tokenId);
+      if (!fvttToken) return;
+
+      // Set Foundry's authoritative hover state
+      const layer = fvttToken.layer ?? canvas?.tokens;
+      if (layer) layer.hover = fvttToken;
+      fvttToken.hover = true;
+
+      // Fire the hook that other modules listen to (Token Info, Health Estimate, etc.)
+      Hooks.callAll('hoverToken', fvttToken, true);
+
+      // Combat tracker hover highlight (mirrors Token._onHoverIn)
+      const combatant = fvttToken.combatant;
+      if (combatant) {
+        ui?.combat?.hoverCombatant?.(combatant, ui?.combat?._isTokenVisible?.(fvttToken) ?? true);
+      }
+
+      // Occlusion refresh for hover-based token occlusion mode
+      if (fvttToken.layer?.occlusionMode & CONST?.TOKEN_OCCLUSION_MODES?.HOVERED) {
+        canvas?.perception?.update?.({ refreshOcclusion: true });
+      }
+    }, 'hover.syncFoundryIn', Severity.COSMETIC);
+  }
+
+  /**
+   * XM-1: Sync Foundry hover-out state when Three.js clears a hovered token.
+   * Mirrors PlaceableObject._onHoverOut: clears layer.hover, token.hover, fires
+   * hoverToken hook, clears combat tracker highlight, and refreshes occlusion.
+   * @param {string} tokenId
+   * @private
+   */
+  _syncFoundryHoverOut(tokenId) {
+    safeCall(() => {
+      const fvttToken = canvas?.tokens?.get?.(tokenId);
+      if (!fvttToken) return;
+
+      // Clear Foundry's authoritative hover state
+      const layer = fvttToken.layer ?? canvas?.tokens;
+      if (layer && layer.hover === fvttToken) layer.hover = null;
+      fvttToken.hover = false;
+
+      // Fire the hook
+      Hooks.callAll('hoverToken', fvttToken, false);
+
+      // Combat tracker hover clear
+      const combatant = fvttToken.combatant;
+      if (combatant) {
+        ui?.combat?.hoverCombatant?.(combatant, false);
+      }
+
+      // Occlusion refresh
+      if (fvttToken.layer?.occlusionMode & CONST?.TOKEN_OCCLUSION_MODES?.HOVERED) {
+        canvas?.perception?.update?.({ refreshOcclusion: true });
+      }
+    }, 'hover.syncFoundryOut', Severity.COSMETIC);
   }
 
   /**
@@ -3514,6 +3704,27 @@ export class InteractionManager {
           if (inside && !this._isEventFromUI(event)) {
             this._lastPointerClientX = event.clientX;
             this._lastPointerClientY = event.clientY;
+
+            // WP-7: Sync canvas.mousePosition and broadcast cursor activity
+            // when Three.js owns input, mirroring ControlsLayer._onMouseMove.
+            const now = performance.now();
+            if (now - this._lastCursorBroadcastMs >= this._cursorBroadcastIntervalMs) {
+              this._lastCursorBroadcastMs = now;
+              const groundZ = this.sceneComposer?.groundZ ?? 0;
+              const wp = this.viewportToWorld(event.clientX, event.clientY, groundZ);
+              if (wp) {
+                const fp = Coordinates.toFoundry(wp.x, wp.y);
+                // Keep canvas.mousePosition in sync so Foundry features
+                // (cursor display, ruler tooltips) that read it stay correct.
+                if (canvas?.mousePosition) {
+                  canvas.mousePosition.x = fp.x;
+                  canvas.mousePosition.y = fp.y;
+                }
+                if (game?.user?.hasPermission?.('SHOW_CURSOR')) {
+                  game.user.broadcastActivity({ cursor: fp });
+                }
+              }
+            }
           }
         }, 'pointerMove.trackPointer', Severity.COSMETIC);
 
@@ -3523,6 +3734,14 @@ export class InteractionManager {
         const isOverCanvas = event.target === this.canvasElement || 
                              this.canvasElement.contains(event.target);
         
+        // WP-3 Ping parity: cancel long-press ping if pointer moves beyond threshold.
+        if (this._pingLongPress.timerId != null) {
+          const dist = Math.hypot(event.clientX - this._pingLongPress.startX, event.clientY - this._pingLongPress.startY);
+          if (dist > this._pingLongPress.threshold) {
+            this._cancelPingLongPress();
+          }
+        }
+
         // Check Right Click Threshold (Cancel HUD if dragged)
         if (this.rightClickState.active) {
             const dist = Math.hypot(event.clientX - this.rightClickState.startPos.x, event.clientY - this.rightClickState.startPos.y);
@@ -4088,11 +4307,25 @@ export class InteractionManager {
   }
 
   /**
+   * Cancel any pending ping long-press timer.
+   * @private
+   */
+  _cancelPingLongPress() {
+    if (this._pingLongPress.timerId != null) {
+      clearTimeout(this._pingLongPress.timerId);
+      this._pingLongPress.timerId = null;
+    }
+  }
+
+  /**
    * Handle pointer up (end drag)
    * @param {PointerEvent} event 
    */
   async onPointerUp(event) {
     try {
+        // WP-3: Cancel ping long-press on any pointer up.
+        this._cancelPingLongPress();
+
         if (
           this._isEventFromUI(event) &&
           !this.dragState?.active &&
@@ -4914,6 +5147,33 @@ export class InteractionManager {
       if (!isCopyPaste || this._isTextEditingEvent(event)) return;
     }
 
+    // Gameplay token targeting parity (Foundry core "target" keybind behavior).
+    // - T toggles target on currently hovered token
+    // - Shift+T preserves existing targets
+    if (!isMod && key === 't') {
+      const activeLayer = canvas?.activeLayer;
+
+      // Prefer Foundry's authoritative token-layer hover first. When MapShine
+      // controls selection, canvas.activeLayer can be non-token, so relying on
+      // activeLayer.hover alone can miss valid hovered tokens.
+      const hoveredTokenId =
+        canvas?.tokens?.hover?.id
+        || canvas?.tokens?.hover?.document?.id
+        || this.hoveredTokenId
+        || activeLayer?.hover?.id
+        || activeLayer?.hover?.document?.id
+        || null;
+      if (!hoveredTokenId) return;
+
+      const token = canvas?.tokens?.get?.(hoveredTokenId);
+      if (!token || token?.document?.isSecret) return;
+
+      token.setTarget(!token.isTargeted, { releaseOthers: !event.shiftKey });
+      this.tokenManager?.updateTokenTargetIndicator?.(token.id);
+      this._consumeKeyEvent(event);
+      return;
+    }
+
     // Copy/Paste for Three-native lights.
     if (isMod && key === 'c') {
       safeCall(async () => {
@@ -5236,8 +5496,27 @@ export class InteractionManager {
           }
 
           if (tokensToDelete.length > 0) {
-            log.info(`Deleting ${tokensToDelete.length} tokens`);
-            await canvas.scene.deleteEmbeddedDocuments('Token', tokensToDelete);
+            log.info(`Deleting ${tokensToDelete.length} tokens via Foundry TokenLayer safety flow`);
+
+            // Launch-safety parity: route token deletion through Foundry's
+            // combat-aware confirmation API before deleting selected token docs.
+            const tokenLayer = canvas?.tokens;
+            const tokenDocs = tokensToDelete
+              .map((tokenId) => canvas?.scene?.tokens?.get?.(tokenId) || tokenLayer?.get?.(tokenId)?.document || null)
+              .filter((doc) => !!doc);
+
+            if (tokenLayer && typeof tokenLayer._confirmDeleteKey === 'function' && tokenDocs.length > 0) {
+              const confirmed = await tokenLayer._confirmDeleteKey(tokenDocs);
+              if (confirmed) {
+                await canvas.scene.deleteEmbeddedDocuments('Token', tokenDocs.map((doc) => doc.id));
+              }
+            } else if (tokenLayer && typeof tokenLayer._onDeleteKey === 'function') {
+              // Fallback to layer-level delete behavior when confirm hook is unavailable.
+              await tokenLayer._onDeleteKey(event);
+            } else {
+              // Fallback (legacy): should rarely be hit, but keep as resilience.
+              await canvas.scene.deleteEmbeddedDocuments('Token', tokensToDelete);
+            }
           }
 
           if (wallsToDelete.length > 0) {
@@ -5584,7 +5863,8 @@ export class InteractionManager {
     window.removeEventListener('pointerup', this.boundHandlers.onPointerUp);
     window.removeEventListener('wheel', this.boundHandlers.onWheel);
     window.removeEventListener('keydown', this.boundHandlers.onKeyDown);
-    
+
+    this._cancelPingLongPress();
     this.clearSelection();
 
     safeCall(() => {

@@ -401,6 +401,7 @@ export class LightingEffect extends EffectBase {
         uOverheadShadowOpacity: { value: 0.0 },
         uOverheadShadowAllowIndoor: { value: 0.0 },
         uOverheadShadowAffectsLights: { value: 0.75 },
+        uRoofHoverRevealActive: { value: 0.0 },
         uBuildingShadowOpacity: { value: 0.0 },
         uBushShadowOpacity: { value: 0.0 },
         uTreeShadowOpacity: { value: 0.0 },
@@ -458,6 +459,7 @@ export class LightingEffect extends EffectBase {
         uniform float uOverheadShadowOpacity;
         uniform float uOverheadShadowAllowIndoor;
         uniform float uOverheadShadowAffectsLights;
+        uniform float uRoofHoverRevealActive;
         uniform float uBuildingShadowOpacity;
         uniform float uBushShadowOpacity;
         uniform float uTreeShadowOpacity;
@@ -578,7 +580,8 @@ export class LightingEffect extends EffectBase {
           float cloudFactor = mix(1.0, cloudTex, cloudOpacity);
 
           float roofSuppress = roofAlphaRaw * (1.0 - step(0.5, uOverheadShadowAllowIndoor));
-          vec3 shadowFactor = mix(rawShadowFactor, vec3(1.0), roofSuppress);
+          float hoverRevealActive = step(0.5, uRoofHoverRevealActive);
+          vec3 shadowFactor = mix(rawShadowFactor, vec3(1.0), roofSuppress * (1.0 - hoverRevealActive));
 
           float buildingFactor = mix(rawBuildingFactor, 1.0, roofAlphaRaw);
           float bushFactor = mix(rawBushFactor, 1.0, roofAlphaRaw);
@@ -586,6 +589,7 @@ export class LightingEffect extends EffectBase {
 
           float outdoorStrength = max(outdoorStrengthBase, roofAlphaRaw);
           float overheadOutdoorStrength = mix(outdoorStrength, 1.0, step(0.5, uOverheadShadowAllowIndoor));
+          overheadOutdoorStrength = mix(overheadOutdoorStrength, 1.0, hoverRevealActive);
           shadowFactor = mix(vec3(1.0), shadowFactor, overheadOutdoorStrength);
           buildingFactor = mix(1.0, buildingFactor, outdoorStrength);
           bushFactor = mix(1.0, bushFactor, outdoorStrength);
@@ -1594,7 +1598,8 @@ export class LightingEffect extends EffectBase {
 
   /**
    * Handle lightingRefresh hook - rebuilds lights that were created before
-   * Foundry computed their LOS polygons (fixes lights extending through walls)
+   * Foundry computed their LOS polygons (fixes lights extending through walls
+   * on initial creation/paste).
    * 
    * CRITICAL: We must re-apply enhancements before calling updateData() because
    * source.document may be stale (missing cookie config). If we call updateData()
@@ -1736,6 +1741,37 @@ export class LightingEffect extends EffectBase {
     }
 
     return 1.0;
+  }
+
+  /**
+   * Detect whether overhead hover-reveal is currently active.
+   *
+   * Primary source is WeatherController.roofMaskActive, but we also fall back
+   * to live TileManager hoverHidden flags so lighting/shadow compositing does
+   * not depend on cross-manager update ordering.
+   * @returns {boolean}
+   * @private
+   */
+  _isRoofHoverRevealActive() {
+    try {
+      if (weatherController?.roofMaskActive === true) return true;
+    } catch (_) {
+    }
+
+    try {
+      const tileManager = window.MapShine?.tileManager;
+      const tiles = tileManager?.tileSprites;
+      if (!tiles || typeof tiles.values !== 'function') return false;
+
+      for (const data of tiles.values()) {
+        if (!data?.hoverHidden) continue;
+        if (!data?.sprite?.userData?.isOverhead) continue;
+        return true;
+      }
+    } catch (_) {
+    }
+
+    return false;
   }
 
   update(timeInfo) {
@@ -1918,6 +1954,8 @@ export class LightingEffect extends EffectBase {
     // Drive overhead shadow uniforms from OverheadShadowsEffect (if present).
     try {
       const overhead = window.MapShine?.overheadShadowsEffect;
+      const roofHoverRevealActive = this._isRoofHoverRevealActive() ? 1.0 : 0.0;
+      u.uRoofHoverRevealActive.value = roofHoverRevealActive;
       if (overhead && overhead.params && overhead.enabled && overhead.shadowTarget) {
         u.uOverheadShadowOpacity.value = overhead.params.opacity ?? 0.0;
         u.uOverheadShadowAllowIndoor.value = overhead.params.indoorShadowEnabled ? 1.0 : 0.0;
@@ -1930,6 +1968,7 @@ export class LightingEffect extends EffectBase {
     } catch (e) {
       u.uOverheadShadowOpacity.value = 0.0;
       u.uOverheadShadowAllowIndoor.value = 0.0;
+      u.uRoofHoverRevealActive.value = 0.0;
     }
 
     // Drive building shadow opacity from BuildingShadowsEffect (if present).

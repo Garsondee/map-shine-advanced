@@ -249,9 +249,22 @@ export class TokenMovementDialog {
     }
 
     return {
-      Walk: 'walk',
+      'Walk - Steady March': 'walk',
+      'Walk - Heavy Stomp': 'walk-heavy-stomp',
+      'Walk - Sneak Glide': 'walk-sneak-glide',
+      'Walk - Swagger Stride': 'walk-swagger-stride',
+      'Walk - Skitter Step': 'walk-skitter-step',
+      'Walk - Limping Advance': 'walk-limping-advance',
+      'Walk - Wobble Totter': 'walk-wobble-totter',
+      'Walk - Drunken Drift': 'walk-drunken-drift',
+      'Walk - Clockwork Tick-Walk': 'walk-clockwork-tick',
+      'Walk - Chaos Skip': 'walk-chaos-skip',
       'Pick Up and Drop': 'pick-up-drop',
-      'Flying Glide (Placeholder)': 'flying-glide'
+      'Flying - Glide': 'flying-glide',
+      'Flying - Hover Bob': 'flying-hover-bob',
+      'Flying - Bank Swoop': 'flying-bank-swoop',
+      'Flying - Flutter Dart': 'flying-flutter-dart',
+      'Flying - Chaos Drift': 'flying-chaos-drift'
     };
   }
 

@@ -44,6 +44,11 @@ export class TileMotionDialog {
       parentId: '',
       speed: 0,
       phase: 0,
+      rotationEasing: 'linear',
+      easeStrength: 1,
+      clockworkSteps: 8,
+      clockworkHold: 0.55,
+      clockworkJank: 0,
       radius: 0,
       pointAX: 0,
       pointAY: 0,
@@ -305,6 +310,61 @@ export class TileMotionDialog {
       min: -360,
       max: 360,
       step: 1
+    }).on('change', (ev) => {
+      this._onConfigChanged(ev);
+    });
+
+    this._bindings.rotationEasing = this._motionFolder.addBinding(this.uiState, 'rotationEasing', {
+      label: 'Rotation Ease',
+      options: {
+        Linear: 'linear',
+        'Ease In Sine': 'easeInSine',
+        'Ease Out Sine': 'easeOutSine',
+        'Ease In/Out Sine': 'easeInOutSine',
+        'Ease In/Out Cubic': 'easeInOutCubic',
+        'Ease In/Out Back': 'easeInOutBack',
+        'Ease Out Bounce': 'easeOutBounce',
+        'Ease In/Out Elastic': 'easeInOutElastic',
+        Clockwork: 'clockwork',
+        'Clockwork Chaos': 'clockwork-chaos'
+      }
+    }).on('change', (ev) => {
+      this._refreshModeVisibility();
+      this._onConfigChanged(ev);
+    });
+
+    this._bindings.easeStrength = this._motionFolder.addBinding(this.uiState, 'easeStrength', {
+      label: 'Ease Strength',
+      min: 0,
+      max: 1,
+      step: 0.01
+    }).on('change', (ev) => {
+      this._onConfigChanged(ev);
+    });
+
+    this._bindings.clockworkSteps = this._motionFolder.addBinding(this.uiState, 'clockworkSteps', {
+      label: 'Clockwork Steps',
+      min: 1,
+      max: 48,
+      step: 1
+    }).on('change', (ev) => {
+      this._onConfigChanged(ev);
+    });
+
+    this._bindings.clockworkHold = this._motionFolder.addBinding(this.uiState, 'clockworkHold', {
+      label: 'Clockwork Hold',
+      min: 0,
+      max: 0.95,
+      step: 0.01
+    }).on('change', (ev) => {
+      this._onConfigChanged(ev);
+    });
+
+    this._bindings.clockworkJank = this._motionFolder.addBinding(this.uiState, 'clockworkJank', {
+      label: 'Random / Jank',
+      min: 0,
+      max: 1,
+      step: 0.01
     }).on('change', (ev) => {
       this._onConfigChanged(ev);
     });
@@ -664,6 +724,11 @@ export class TileMotionDialog {
     this.uiState.parentId = cfg.parentId || '';
     this.uiState.speed = _toNumber(cfg.motion?.speed, 0);
     this.uiState.phase = _toNumber(cfg.motion?.phase, 0);
+    this.uiState.rotationEasing = cfg.motion?.rotationEasing || 'linear';
+    this.uiState.easeStrength = _clamp(_toNumber(cfg.motion?.easeStrength, 1), 0, 1);
+    this.uiState.clockworkSteps = Math.round(_clamp(_toNumber(cfg.motion?.clockworkSteps, 8), 1, 48));
+    this.uiState.clockworkHold = _clamp(_toNumber(cfg.motion?.clockworkHold, 0.55), 0, 0.95);
+    this.uiState.clockworkJank = _clamp(_toNumber(cfg.motion?.clockworkJank, 0), 0, 1);
     this.uiState.radius = Math.max(0, _toNumber(cfg.motion?.radius, 0));
     this.uiState.pointAX = _toNumber(cfg.motion?.pointA?.x, 0);
     this.uiState.pointAY = _toNumber(cfg.motion?.pointA?.y, 0);
@@ -703,11 +768,20 @@ export class TileMotionDialog {
     const showOrbit = showTransformOnly && motionType === 'orbit';
     const showPingPong = showTransformOnly && motionType === 'pingPong';
     const showSine = showTransformOnly && motionType === 'sine';
+    const showRotation = showTransformOnly && motionType === 'rotation';
+    const showClockwork = showRotation
+      && (this.uiState.rotationEasing === 'clockwork' || this.uiState.rotationEasing === 'clockwork-chaos');
 
     if (this._bindings.motionType) this._bindings.motionType.hidden = isTexture;
     // loopMode only affects orbit and pingPong; hide it for rotation/sine where it has no effect.
     const showLoopMode = showOrbit || showPingPong;
     if (this._bindings.loopMode) this._bindings.loopMode.hidden = !showLoopMode;
+
+    if (this._bindings.rotationEasing) this._bindings.rotationEasing.hidden = !showRotation;
+    if (this._bindings.easeStrength) this._bindings.easeStrength.hidden = !showRotation;
+    if (this._bindings.clockworkSteps) this._bindings.clockworkSteps.hidden = !showClockwork;
+    if (this._bindings.clockworkHold) this._bindings.clockworkHold.hidden = !showClockwork;
+    if (this._bindings.clockworkJank) this._bindings.clockworkJank.hidden = !showRotation;
 
     if (this._bindings.radius) this._bindings.radius.hidden = !showOrbit;
     if (this._bindings.pointAX) this._bindings.pointAX.hidden = !showPingPong;
@@ -757,6 +831,11 @@ export class TileMotionDialog {
         type: this.uiState.motionType || 'rotation',
         speed: _toNumber(this.uiState.speed, 0),
         phase: _toNumber(this.uiState.phase, 0),
+        rotationEasing: this.uiState.rotationEasing || 'linear',
+        easeStrength: _clamp(_toNumber(this.uiState.easeStrength, 1), 0, 1),
+        clockworkSteps: Math.round(_clamp(_toNumber(this.uiState.clockworkSteps, 8), 1, 48)),
+        clockworkHold: _clamp(_toNumber(this.uiState.clockworkHold, 0.55), 0, 0.95),
+        clockworkJank: _clamp(_toNumber(this.uiState.clockworkJank, 0), 0, 1),
         loopMode: this.uiState.loopMode === 'pingPong' ? 'pingPong' : 'loop',
         radius: Math.max(0, _toNumber(this.uiState.radius, 0)),
         pointA: {

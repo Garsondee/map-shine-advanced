@@ -452,6 +452,39 @@ function installCanvasTransitionWrapper() {
   transitionsInstalled = true;
 
   safeCall(() => {
+    // XM-3: Wrapper function that fades to black before tearDown.
+    // Used by both libWrapper and direct-wrap paths.
+    const _tearDownWrapper = async function(wrapped, ...args) {
+      await safeCallAsync(async () => {
+        const scene = this.scene;
+        if (scene && sceneSettings.isEnabled(scene)) {
+          loadingOverlay.showLoading('Switching scenes…');
+          await loadingOverlay.fadeToBlack(2000, 600);
+          loadingOverlay.setMessage('Loading…');
+          loadingOverlay.setProgress(0, { immediate: true });
+        }
+      }, 'sceneTransition.fade', Severity.DEGRADED);
+      return wrapped(...args);
+    };
+
+    // XM-3: Prefer libWrapper if available — ensures correct chaining with
+    // other modules that also wrap Canvas.tearDown (e.g. scene-packer, etc.)
+    if (typeof globalThis.libWrapper === 'function' || globalThis.libWrapper?.register) {
+      try {
+        libWrapper.register(
+          'map-shine-advanced',
+          'Canvas.prototype.tearDown',
+          _tearDownWrapper,
+          'WRAPPER'
+        );
+        log.info('Installed Canvas.tearDown transition wrapper via libWrapper');
+        return;
+      } catch (e) {
+        log.warn('libWrapper registration failed, falling back to direct wrap:', e);
+      }
+    }
+
+    // Fallback: direct prototype wrap when libWrapper is not available
     const CanvasCls = globalThis.foundry?.canvas?.Canvas;
     const proto = CanvasCls?.prototype;
     if (!proto?.tearDown) {
@@ -462,22 +495,13 @@ function installCanvasTransitionWrapper() {
     if (proto.tearDown.__mapShineWrapped) return;
 
     const original = proto.tearDown;
-    const wrapped = async function(...args) {
-      await safeCallAsync(async () => {
-        const scene = this.scene;
-        if (scene && sceneSettings.isEnabled(scene)) {
-          loadingOverlay.showLoading('Switching scenes…');
-          await loadingOverlay.fadeToBlack(2000, 600);
-          loadingOverlay.setMessage('Loading…');
-          loadingOverlay.setProgress(0, { immediate: true });
-        }
-      }, 'sceneTransition.fade', Severity.DEGRADED);
-      return original.apply(this, args);
+    const directWrapped = async function(...args) {
+      return _tearDownWrapper.call(this, original.bind(this), ...args);
     };
 
-    wrapped.__mapShineWrapped = true;
-    proto.tearDown = wrapped;
-    log.info('Installed Canvas.tearDown transition wrapper');
+    directWrapped.__mapShineWrapped = true;
+    proto.tearDown = directWrapped;
+    log.info('Installed Canvas.tearDown transition wrapper (direct prototype wrap)');
   }, 'installCanvasTransitionWrapper', Severity.DEGRADED);
 }
 
@@ -948,6 +972,7 @@ function onCanvasTearDown(canvas) {
     window.MapShine.cameraFollower = null;
     window.MapShine.pixiInputBridge = null;
     window.MapShine.interactionManager = null;
+    window.MapShine.noteManager = null;
     window.MapShine.gridRenderer = null;
     window.MapShine.mapPointsManager = null;
     window.MapShine.physicsRopeManager = null;
@@ -2084,6 +2109,7 @@ async function createThreeCanvas(scene) {
       window.MapShine.interactionManager = interactionManager;
       window.MapShine.overlayUIManager = overlayUIManager;
       window.MapShine.lightEditor = lightEditor;
+      window.MapShine.noteManager = noteManager;
     }
 
     // Step 6: Initialize drop handler (for creating new items)
@@ -4213,46 +4239,46 @@ async function initializeUI(effectMap) {
         { name: 'embers', label: 'Embers', type: 'inline', separator: true, parameters: ['emberEmissionRate', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'emberSpeedMin', 'emberSpeedMax', 'emberOpacityStartMin', 'emberOpacityStartMax', 'emberOpacityEnd', 'emberColorStart', 'emberColorEnd', 'emberBrightness', 'emberGravityScale', 'emberWindInfluence', 'emberCurlStrength'] }
       ],
       parameters: {
-        ashIntensity: { label: 'Ash Intensity', type: 'slider', default: weatherController.targetState.ashIntensity ?? 0.0, min: 0.0, max: 1.0, step: 0.01 },
-        ashIntensityScale: { label: 'Intensity Scale', type: 'slider', default: ashTuning.intensityScale ?? 1.0, min: 0.0, max: 4.0, step: 0.05 },
-        ashEmissionRate: { label: 'Emission Rate', type: 'slider', default: ashTuning.emissionRate ?? 300, min: 0, max: 2400, step: 10 },
-        ashSizeMin: { label: 'Size Min', type: 'slider', default: ashTuning.sizeMin ?? 10, min: 1, max: 60, step: 1 },
-        ashSizeMax: { label: 'Size Max', type: 'slider', default: ashTuning.sizeMax ?? 16, min: 2, max: 80, step: 1 },
-        ashLifeMin: { label: 'Life Min (s)', type: 'slider', default: ashTuning.lifeMin ?? 5, min: 0.2, max: 12, step: 0.1 },
-        ashLifeMax: { label: 'Life Max (s)', type: 'slider', default: ashTuning.lifeMax ?? 8, min: 0.2, max: 18, step: 0.1 },
-        ashSpeedMin: { label: 'Fall Speed Min', type: 'slider', default: ashTuning.speedMin ?? 120, min: 0, max: 600, step: 5 },
-        ashSpeedMax: { label: 'Fall Speed Max', type: 'slider', default: ashTuning.speedMax ?? 200, min: 0, max: 900, step: 5 },
-        ashOpacityStartMin: { label: 'Opacity Start Min', type: 'slider', default: ashTuning.opacityStartMin ?? 0.75, min: 0.0, max: 1.0, step: 0.01 },
-        ashOpacityStartMax: { label: 'Opacity Start Max', type: 'slider', default: ashTuning.opacityStartMax ?? 0.5, min: 0.0, max: 1.0, step: 0.01 },
-        ashOpacityEnd: { label: 'Opacity End', type: 'slider', default: ashTuning.opacityEnd ?? 0.0, min: 0.0, max: 1.0, step: 0.01 },
+        ashIntensity: { label: 'Ash Intensity', type: 'slider', default: weatherController.targetState.ashIntensity ?? 0.93, min: 0.0, max: 1.0, step: 0.01 },
+        ashIntensityScale: { label: 'Intensity Scale', type: 'slider', default: ashTuning.intensityScale ?? 0.5, min: 0.0, max: 4.0, step: 0.05 },
+        ashEmissionRate: { label: 'Emission Rate', type: 'slider', default: ashTuning.emissionRate ?? 840, min: 0, max: 2400, step: 10 },
+        ashSizeMin: { label: 'Size Min', type: 'slider', default: ashTuning.sizeMin ?? 5, min: 1, max: 60, step: 1 },
+        ashSizeMax: { label: 'Size Max', type: 'slider', default: ashTuning.sizeMax ?? 17, min: 2, max: 80, step: 1 },
+        ashLifeMin: { label: 'Life Min (s)', type: 'slider', default: ashTuning.lifeMin ?? 2, min: 0.2, max: 12, step: 0.1 },
+        ashLifeMax: { label: 'Life Max (s)', type: 'slider', default: ashTuning.lifeMax ?? 4.7, min: 0.2, max: 18, step: 0.1 },
+        ashSpeedMin: { label: 'Fall Speed Min', type: 'slider', default: ashTuning.speedMin ?? 15, min: 0, max: 600, step: 5 },
+        ashSpeedMax: { label: 'Fall Speed Max', type: 'slider', default: ashTuning.speedMax ?? 25, min: 0, max: 900, step: 5 },
+        ashOpacityStartMin: { label: 'Opacity Start Min', type: 'slider', default: ashTuning.opacityStartMin ?? 0.53, min: 0.0, max: 1.0, step: 0.01 },
+        ashOpacityStartMax: { label: 'Opacity Start Max', type: 'slider', default: ashTuning.opacityStartMax ?? 0.75, min: 0.0, max: 1.0, step: 0.01 },
+        ashOpacityEnd: { label: 'Opacity End', type: 'slider', default: ashTuning.opacityEnd ?? 0.85, min: 0.0, max: 1.0, step: 0.01 },
         ashColorStart: { type: 'color', label: 'Color Start', default: ashTuning.colorStart ?? { r: 0.45, g: 0.42, b: 0.38 } },
         ashColorEnd: { type: 'color', label: 'Color End', default: ashTuning.colorEnd ?? { r: 0.35, g: 0.32, b: 0.28 } },
         ashBrightness: { label: 'Brightness', type: 'slider', default: ashTuning.brightness ?? 1.0, min: 0.0, max: 3.0, step: 0.05 },
-        ashGravityScale: { label: 'Gravity Scale', type: 'slider', default: ashTuning.gravityScale ?? 1.0, min: 0.0, max: 3.0, step: 0.05 },
-        ashWindInfluence: { label: 'Wind Influence', type: 'slider', default: ashTuning.windInfluence ?? 1.0, min: 0.0, max: 4.0, step: 0.05 },
-        ashCurlStrength: { label: 'Curl Strength', type: 'slider', default: ashTuning.curlStrength ?? 0.6, min: 0.0, max: 3.0, step: 0.05 },
-        ashClusterHoldMin: { label: 'Cluster Hold Min (s)', type: 'slider', default: ashTuning.clusterHoldMin ?? 2.5, min: 0.5, max: 12, step: 0.1 },
-        ashClusterHoldMax: { label: 'Cluster Hold Max (s)', type: 'slider', default: ashTuning.clusterHoldMax ?? 7.0, min: 0.5, max: 18, step: 0.1 },
-        ashClusterRadiusMin: { label: 'Cluster Radius Min', type: 'slider', default: ashTuning.clusterRadiusMin ?? 300, min: 50, max: 3000, step: 10 },
-        ashClusterRadiusMax: { label: 'Cluster Radius Max', type: 'slider', default: ashTuning.clusterRadiusMax ?? 1800, min: 100, max: 4000, step: 10 },
-        ashClusterBoostMin: { label: 'Cluster Boost Min', type: 'slider', default: ashTuning.clusterBoostMin ?? 0.55, min: 0.0, max: 2.0, step: 0.05 },
-        ashClusterBoostMax: { label: 'Cluster Boost Max', type: 'slider', default: ashTuning.clusterBoostMax ?? 1.45, min: 0.0, max: 3.0, step: 0.05 },
-        emberEmissionRate: { label: 'Ember Rate', type: 'slider', default: ashTuning.emberEmissionRate ?? 25, min: 0, max: 400, step: 1 },
-        emberSizeMin: { label: 'Ember Size Min', type: 'slider', default: ashTuning.emberSizeMin ?? 6, min: 1, max: 50, step: 1 },
-        emberSizeMax: { label: 'Ember Size Max', type: 'slider', default: ashTuning.emberSizeMax ?? 12, min: 2, max: 70, step: 1 },
-        emberLifeMin: { label: 'Ember Life Min (s)', type: 'slider', default: ashTuning.emberLifeMin ?? 2.5, min: 0.2, max: 12, step: 0.1 },
-        emberLifeMax: { label: 'Ember Life Max (s)', type: 'slider', default: ashTuning.emberLifeMax ?? 4.0, min: 0.2, max: 16, step: 0.1 },
+        ashGravityScale: { label: 'Gravity Scale', type: 'slider', default: ashTuning.gravityScale ?? 0.55, min: 0.0, max: 3.0, step: 0.05 },
+        ashWindInfluence: { label: 'Wind Influence', type: 'slider', default: ashTuning.windInfluence ?? 2.1, min: 0.0, max: 4.0, step: 0.05 },
+        ashCurlStrength: { label: 'Curl Strength', type: 'slider', default: ashTuning.curlStrength ?? 3, min: 0.0, max: 3.0, step: 0.05 },
+        ashClusterHoldMin: { label: 'Cluster Hold Min (s)', type: 'slider', default: ashTuning.clusterHoldMin ?? 1.3, min: 0.5, max: 12, step: 0.1 },
+        ashClusterHoldMax: { label: 'Cluster Hold Max (s)', type: 'slider', default: ashTuning.clusterHoldMax ?? 2.3, min: 0.5, max: 18, step: 0.1 },
+        ashClusterRadiusMin: { label: 'Cluster Radius Min', type: 'slider', default: ashTuning.clusterRadiusMin ?? 1150, min: 50, max: 3000, step: 10 },
+        ashClusterRadiusMax: { label: 'Cluster Radius Max', type: 'slider', default: ashTuning.clusterRadiusMax ?? 2060, min: 100, max: 4000, step: 10 },
+        ashClusterBoostMin: { label: 'Cluster Boost Min', type: 'slider', default: ashTuning.clusterBoostMin ?? 1.1, min: 0.0, max: 2.0, step: 0.05 },
+        ashClusterBoostMax: { label: 'Cluster Boost Max', type: 'slider', default: ashTuning.clusterBoostMax ?? 2.55, min: 0.0, max: 3.0, step: 0.05 },
+        emberEmissionRate: { label: 'Ember Rate', type: 'slider', default: ashTuning.emberEmissionRate ?? 167, min: 0, max: 400, step: 1 },
+        emberSizeMin: { label: 'Ember Size Min', type: 'slider', default: ashTuning.emberSizeMin ?? 7, min: 1, max: 50, step: 1 },
+        emberSizeMax: { label: 'Ember Size Max', type: 'slider', default: ashTuning.emberSizeMax ?? 14, min: 2, max: 70, step: 1 },
+        emberLifeMin: { label: 'Ember Life Min (s)', type: 'slider', default: ashTuning.emberLifeMin ?? 12, min: 0.2, max: 12, step: 0.1 },
+        emberLifeMax: { label: 'Ember Life Max (s)', type: 'slider', default: ashTuning.emberLifeMax ?? 16, min: 0.2, max: 16, step: 0.1 },
         emberSpeedMin: { label: 'Ember Speed Min', type: 'slider', default: ashTuning.emberSpeedMin ?? 180, min: 0, max: 800, step: 5 },
-        emberSpeedMax: { label: 'Ember Speed Max', type: 'slider', default: ashTuning.emberSpeedMax ?? 260, min: 0, max: 1000, step: 5 },
-        emberOpacityStartMin: { label: 'Ember Opacity Min', type: 'slider', default: ashTuning.emberOpacityStartMin ?? 0.9, min: 0.0, max: 1.0, step: 0.01 },
-        emberOpacityStartMax: { label: 'Ember Opacity Max', type: 'slider', default: ashTuning.emberOpacityStartMax ?? 0.4, min: 0.0, max: 1.0, step: 0.01 },
-        emberOpacityEnd: { label: 'Ember Opacity End', type: 'slider', default: ashTuning.emberOpacityEnd ?? 0.0, min: 0.0, max: 1.0, step: 0.01 },
-        emberColorStart: { type: 'color', label: 'Ember Color Start', default: ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.05 } },
-        emberColorEnd: { type: 'color', label: 'Ember Color End', default: ashTuning.emberColorEnd ?? { r: 0.35, g: 0.32, b: 0.28 } },
-        emberBrightness: { label: 'Ember Brightness', type: 'slider', default: ashTuning.emberBrightness ?? 1.0, min: 0.0, max: 5.0, step: 0.05 },
-        emberGravityScale: { label: 'Ember Gravity Scale', type: 'slider', default: ashTuning.emberGravityScale ?? 0.75, min: 0.0, max: 3.0, step: 0.05 },
-        emberWindInfluence: { label: 'Ember Wind Influence', type: 'slider', default: ashTuning.emberWindInfluence ?? 1.0, min: 0.0, max: 4.0, step: 0.05 },
-        emberCurlStrength: { label: 'Ember Curl Strength', type: 'slider', default: ashTuning.emberCurlStrength ?? 1.0, min: 0.0, max: 3.0, step: 0.05 }
+        emberSpeedMax: { label: 'Ember Speed Max', type: 'slider', default: ashTuning.emberSpeedMax ?? 820, min: 0, max: 1000, step: 5 },
+        emberOpacityStartMin: { label: 'Ember Opacity Min', type: 'slider', default: ashTuning.emberOpacityStartMin ?? 0.87, min: 0.0, max: 1.0, step: 0.01 },
+        emberOpacityStartMax: { label: 'Ember Opacity Max', type: 'slider', default: ashTuning.emberOpacityStartMax ?? 0.94, min: 0.0, max: 1.0, step: 0.01 },
+        emberOpacityEnd: { label: 'Ember Opacity End', type: 'slider', default: ashTuning.emberOpacityEnd ?? 0.83, min: 0.0, max: 1.0, step: 0.01 },
+        emberColorStart: { type: 'color', label: 'Ember Color Start', default: ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.0 } },
+        emberColorEnd: { type: 'color', label: 'Ember Color End', default: ashTuning.emberColorEnd ?? { r: 1.0, g: 0.25, b: 0.0 } },
+        emberBrightness: { label: 'Ember Brightness', type: 'slider', default: ashTuning.emberBrightness ?? 5, min: 0.0, max: 5.0, step: 0.05 },
+        emberGravityScale: { label: 'Ember Gravity Scale', type: 'slider', default: ashTuning.emberGravityScale ?? 0, min: 0.0, max: 3.0, step: 0.05 },
+        emberWindInfluence: { label: 'Ember Wind Influence', type: 'slider', default: ashTuning.emberWindInfluence ?? 0.45, min: 0.0, max: 4.0, step: 0.05 },
+        emberCurlStrength: { label: 'Ember Curl Strength', type: 'slider', default: ashTuning.emberCurlStrength ?? 3, min: 0.0, max: 3.0, step: 0.05 }
       }
     };
 

@@ -67,46 +67,77 @@ export class DropHandler {
 
     log.debug('Drop event received');
 
-    // Get drop data
-    let data;
+    // Get drop data using Foundry's canonical parser first.
+    // This matches Canvas.#onDrop and improves compatibility with modules that
+    // put structured payloads in drag events.
+    let data = null;
     try {
-      data = JSON.parse(event.dataTransfer.getData('text/plain'));
-    } catch (e) {
-      log.warn('Failed to parse drop data', e);
-      return;
+      data = foundry?.applications?.ux?.TextEditor?.implementation?.getDragEventData?.(event) || null;
+    } catch (_) {
+      data = null;
+    }
+
+    // Fallback for environments where TextEditor drag parser is unavailable.
+    if (!data || typeof data !== 'object') {
+      try {
+        data = JSON.parse(event.dataTransfer.getData('text/plain'));
+      } catch (e) {
+        log.warn('Failed to parse drop data', e);
+        return;
+      }
     }
 
     log.debug('Drop data:', data);
 
-    // Get drop position relative to canvas
-    const rect = this.canvasElement.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
+    // Use Foundry's canonical screen->canvas coordinate conversion first.
+    // This mirrors Canvas.#onDrop and keeps drop placement aligned with any
+    // module/system wrappers on canvasCoordinatesFromClient.
+    let canvasPos = null;
+    try {
+      if (typeof canvas?.canvasCoordinatesFromClient === 'function') {
+        canvasPos = canvas.canvasCoordinatesFromClient({ x: event.clientX, y: event.clientY });
+      }
+    } catch (_) {
+      canvasPos = null;
+    }
 
-    // Convert viewport coordinates to canvas coordinates
-    const canvasPos = this.viewportToCanvas(x, y);
-    
-    log.debug(`Drop position: viewport(${x}, ${y}) -> canvas(${canvasPos.x}, ${canvasPos.y})`);
+    // Fallback: convert via Three camera math if canonical conversion isn't available.
+    if (!canvasPos || !Number.isFinite(canvasPos.x) || !Number.isFinite(canvasPos.y)) {
+      const rect = this.canvasElement.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      canvasPos = this.viewportToCanvas(x, y);
+      log.debug(`Drop position fallback: viewport(${x}, ${y}) -> canvas(${canvasPos.x}, ${canvasPos.y})`);
+    } else {
+      log.debug(`Drop position canonical: client(${event.clientX}, ${event.clientY}) -> canvas(${canvasPos.x}, ${canvasPos.y})`);
+    }
 
     // Add position to data
     data.x = canvasPos.x;
     data.y = canvasPos.y;
 
+    // XM-2: Fire dropCanvasData hook before processing, matching Foundry's
+    // Canvas._onDrop flow. Other modules (Item Piles, Monk's Active Tiles, etc.)
+    // can intercept or modify the drop by returning false from this hook.
+    const allowed = Hooks.call('dropCanvasData', canvas, data, event);
+    if (allowed === false) {
+      log.debug('Drop prevented by dropCanvasData hook');
+      return;
+    }
+
     // Handle different drop types
     switch (data.type) {
       case 'Actor':
-        await this.handleActorDrop(event, data);
-        break;
+        return this.handleActorDrop(event, data);
       case 'Tile':
-        await this.handleTileDrop(event, data);
-        break;
+        return this.handleTileDrop(event, data);
       case 'JournalEntry':
       case 'JournalEntryPage':
-        await this.handleNoteDrop(event, data);
-        break;
+        return this.handleNoteDrop(event, data);
       case 'PlaylistSound':
-        await this.handleSoundDrop(event, data);
-        break;
+        return this.handleSoundDrop(event, data);
+      case 'Macro':
+        return game?.user?.assignHotbarMacro?.(null, Number(data.slot));
       default:
         log.warn(`Unsupported drop type: ${data.type}`);
     }
@@ -121,6 +152,12 @@ export class DropHandler {
    */
   async handleActorDrop(event, data) {
     log.info('Handling actor drop');
+
+    // Prefer Foundry's native Actor drop workflow for maximum module/system
+    // compatibility (permissions, defaults, system overrides, wrappers).
+    if (canvas?.tokens?._onDropActorData) {
+      return canvas.tokens._onDropActorData(event, data);
+    }
 
     // Permission check
     if (!game.user.can('TOKEN_CREATE')) {
@@ -226,6 +263,11 @@ export class DropHandler {
    */
   async handleTileDrop(event, data) {
     log.info('Handling tile drop');
+
+    // Prefer Foundry's native Tile drop workflow for maximum compatibility.
+    if (canvas?.tiles?._onDropData) {
+      return canvas.tiles._onDropData(event, data);
+    }
     
     // Permission check
     if (!game.user.can('TILE_CREATE')) {

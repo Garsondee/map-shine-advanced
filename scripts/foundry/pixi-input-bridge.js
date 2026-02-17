@@ -89,6 +89,9 @@ export class PixiInputBridge {
     this._onWheel = this._onWheel.bind(this);
     this._onContextMenu = this._onContextMenu.bind(this);
     this._tickSmoothing = this._tickSmoothing.bind(this);
+
+    /** @type {{name: string, id: number}[]} */
+    this._hookIds = [];
   }
 
   _isEventFromOverlayUI(event) {
@@ -121,8 +124,37 @@ export class PixiInputBridge {
     }
     
     this._attachListeners();
+    this._registerHooks();
     log.info('PIXI input bridge initialized');
     return true;
+  }
+
+  /**
+   * Register Foundry hooks.
+   * @private
+   */
+  _registerHooks() {
+    const panHookId = Hooks.on('canvasPan', () => {
+      // External pan events (e.g. pull-ping/animatePan/cinematic pan) should win.
+      // If we keep a stale smoothing target alive, it can snap the camera back.
+      this._smoothTargetView = null;
+      this._stopSmoothingLoop();
+    });
+    this._hookIds.push({ name: 'canvasPan', id: panHookId });
+  }
+
+  /**
+   * Unregister all Foundry hooks.
+   * @private
+   */
+  _unregisterHooks() {
+    for (const { name, id } of this._hookIds) {
+      try {
+        Hooks.off(name, id);
+      } catch (_) {
+      }
+    }
+    this._hookIds = [];
   }
   
   /**
@@ -639,6 +671,7 @@ export class PixiInputBridge {
   dispose() {
     this.disable();
     this._detachListeners();
+    this._unregisterHooks();
     log.info('PIXI input bridge disposed');
   }
 }

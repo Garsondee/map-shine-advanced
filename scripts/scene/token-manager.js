@@ -80,6 +80,9 @@ export class TokenManager {
     /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
     this._hookIds = [];
 
+    /** @type {boolean} Whether Foundry highlight-all (Alt) is currently active */
+    this._highlightAllTokensActive = false;
+
     // Cache renderer-derived values for texture filtering.
     this._maxAnisotropy = null;
     
@@ -688,6 +691,42 @@ vec3 ms_applyWindowLight(vec3 color) {
       this.refreshTokenSprite(token.document);
     })]);
 
+    // Target updates (local + remote users).
+    // Foundry emits this whenever a token target state changes, which is the
+    // authoritative trigger we should mirror in Three.
+    this._hookIds.push(['targetToken', Hooks.on('targetToken', (user, token, targeted) => {
+      const tokenId = token?.id ?? token?.document?.id ?? null;
+      if (tokenId) this.updateTokenTargetIndicator(tokenId);
+      else this.refreshAllTargetIndicators();
+    })]);
+
+    // Keep Three selection visuals in sync when control state changes from
+    // outside InteractionManager (core keybinds, macros, other modules).
+    this._hookIds.push(['controlToken', Hooks.on('controlToken', (token, controlled) => {
+      const tokenId = token?.id ?? token?.document?.id ?? null;
+      const spriteData = tokenId ? this.tokenSprites.get(tokenId) : null;
+      if (!spriteData) return;
+      spriteData.isSelected = !!controlled;
+      this._updateTokenBorderVisibility(spriteData);
+      this._updateNameLabelVisibility(spriteData);
+    })]);
+
+    // Keep Three hover visuals in sync for native PIXI hover workflows.
+    this._hookIds.push(['hoverToken', Hooks.on('hoverToken', (token, hovered) => {
+      const tokenId = token?.id ?? token?.document?.id ?? null;
+      const spriteData = tokenId ? this.tokenSprites.get(tokenId) : null;
+      if (!spriteData) return;
+      spriteData.isHovered = !!hovered;
+      this._updateTokenBorderVisibility(spriteData);
+      this._updateNameLabelVisibility(spriteData);
+    })]);
+
+    // Foundry Alt highlight toggle. Mirror this to Three token overlays.
+    this._hookIds.push(['highlightObjects', Hooks.on('highlightObjects', (active) => {
+      this._highlightAllTokensActive = !!active;
+      this.refreshAllTokenOverlayStates();
+    })]);
+
     this.hooksRegistered = true;
     log.debug('Foundry hooks registered');
   }
@@ -706,9 +745,14 @@ vec3 ms_applyWindowLight(vec3 color) {
     const tokens = canvas.tokens.placeables || [];
     log.info(`Syncing ${tokens.length} tokens`);
 
+    this._highlightAllTokensActive = !!canvas?.tokens?.highlightObjects;
+
     for (const token of tokens) {
       this.createTokenSprite(token.document);
     }
+
+    this.refreshAllTokenOverlayStates();
+    this.refreshAllTargetIndicators();
   }
 
   /**
@@ -809,14 +853,27 @@ vec3 ms_applyWindowLight(vec3 color) {
     // log.warn(`DEBUG: Token rendering disabled for ${tokenDoc.id}`);
     this.scene.add(sprite);
 
+    const foundryToken = canvas?.tokens?.get?.(tokenDoc.id) || null;
+
     // Store reference
-    this.tokenSprites.set(tokenDoc.id, {
+    const spriteData = {
       sprite,
       tokenDoc,
       lastUpdate: Date.now(),
-      isSelected: false,
-      isHovered: false
-    });
+      isSelected: !!foundryToken?.controlled,
+      isHovered: !!foundryToken?.hover,
+      targetIndicator: null,
+      targetArrowsGroup: null,
+      targetPipsGroup: null,
+      targetPipCount: 0,
+      targetPipSignature: ''
+    };
+    this.tokenSprites.set(tokenDoc.id, spriteData);
+
+    this._updateTokenBorderVisibility(spriteData);
+    this._updateNameLabelVisibility(spriteData);
+
+    this.updateTokenTargetIndicator(tokenDoc.id);
 
     // Apply current lighting tint immediately so new tokens (e.g., copy-pasted)
     // pick up scene lighting right away instead of waiting for next update() call
@@ -925,6 +982,8 @@ vec3 ms_applyWindowLight(vec3 color) {
       this._updateNameLabelVisibility(spriteData);
     }
 
+    this.updateTokenTargetIndicator(tokenDoc.id);
+
     log.debug(`Updated token sprite: ${tokenDoc.id}`);
   }
 
@@ -938,9 +997,18 @@ vec3 ms_applyWindowLight(vec3 color) {
     if (!spriteData) return;
 
     const { sprite } = spriteData;
+
+    const foundryToken = canvas?.tokens?.get?.(tokenDoc.id) || null;
+    if (foundryToken) {
+      spriteData.isSelected = !!foundryToken.controlled;
+      spriteData.isHovered = !!foundryToken.hover;
+    }
     
     // Update visibility based on current state
     this.updateSpriteVisibility(sprite, tokenDoc);
+    this._updateTokenBorderVisibility(spriteData);
+    this._updateNameLabelVisibility(spriteData);
+    this.updateTokenTargetIndicator(tokenDoc.id);
   }
 
   /**
@@ -974,6 +1042,8 @@ vec3 ms_applyWindowLight(vec3 color) {
       sprite.userData._removed = true;
     } catch (_) {
     }
+
+    this._disposeTokenOverlays(spriteData);
 
     // Remove from scene
     this.scene.remove(sprite);
@@ -1188,6 +1258,306 @@ vec3 ms_applyWindowLight(vec3 color) {
   }
 
   /**
+   * Ensure a token has a target indicator group.
+   * The indicator mirrors Foundry's targeting semantics:
+   * - local user target => ring
+   * - other users targeting => pips
+   *
+   * @param {TokenSpriteData} spriteData
+   * @returns {void}
+   */
+  _ensureTargetIndicator(spriteData) {
+    if (!spriteData || spriteData.targetIndicator) return;
+
+    const THREE = window.THREE;
+    const sprite = spriteData.sprite;
+    if (!THREE || !sprite) return;
+
+    const indicator = new THREE.Group();
+    indicator.name = 'TargetIndicator';
+    indicator.matrixAutoUpdate = false;
+    indicator.visible = false;
+    indicator.layers.set(OVERLAY_THREE_LAYER);
+
+    const arrowsGroup = new THREE.Group();
+    arrowsGroup.name = 'TargetArrows';
+    arrowsGroup.matrixAutoUpdate = false;
+    arrowsGroup.visible = false;
+    arrowsGroup.layers.set(OVERLAY_THREE_LAYER);
+
+    const makeArrow = (x0, y0, x1, y1, x2, y2) => {
+      const geometry = new THREE.BufferGeometry();
+      const vertices = new Float32Array([
+        x0, y0, 0,
+        x1, y1, 0,
+        x2, y2, 0
+      ]);
+      geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+      geometry.computeVertexNormals();
+
+      const material = new THREE.MeshBasicMaterial({
+        color: 0xff9829,
+        transparent: true,
+        opacity: 0.98,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide
+      });
+
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.layers.set(OVERLAY_THREE_LAYER);
+      mesh.matrixAutoUpdate = false;
+      mesh.updateMatrix();
+      return mesh;
+    };
+
+    const m = 0.02;
+    const l = 0.16;
+    const xL = -0.5 + m;
+    const xR = 0.5 - m;
+    const yT = 0.5 - m;
+    const yB = -0.5 + m;
+
+    arrowsGroup.add(makeArrow(xL, yT, xL - l, yT, xL, yT + l)); // top-left
+    arrowsGroup.add(makeArrow(xR, yT, xR + l, yT, xR, yT + l)); // top-right
+    arrowsGroup.add(makeArrow(xL, yB, xL - l, yB, xL, yB - l)); // bottom-left
+    arrowsGroup.add(makeArrow(xR, yB, xR + l, yB, xR, yB - l)); // bottom-right
+    arrowsGroup.updateMatrix();
+
+    const pipsGroup = new THREE.Group();
+    pipsGroup.name = 'TargetPips';
+    pipsGroup.matrixAutoUpdate = false;
+    pipsGroup.visible = false;
+    pipsGroup.layers.set(OVERLAY_THREE_LAYER);
+    pipsGroup.updateMatrix();
+
+    indicator.add(arrowsGroup);
+    indicator.add(pipsGroup);
+    sprite.add(indicator);
+    indicator.updateMatrix();
+
+    spriteData.targetIndicator = indicator;
+    spriteData.targetArrowsGroup = arrowsGroup;
+    spriteData.targetPipsGroup = pipsGroup;
+    spriteData.targetPipCount = 0;
+    spriteData.targetPipSignature = '';
+  }
+
+  /**
+   * @param {string|number|undefined|null} color
+   * @param {number} fallback
+   * @returns {number}
+   */
+  _parseColorHex(color, fallback) {
+    if (typeof color === 'number' && Number.isFinite(color)) return color;
+    if (typeof color === 'string') {
+      const cleaned = color.trim().replace(/^#/, '');
+      if (/^[0-9a-fA-F]{6}$/.test(cleaned)) return parseInt(cleaned, 16);
+    }
+    return fallback;
+  }
+
+  /**
+   * @returns {number}
+   */
+  _getSelfTargetColor() {
+    const userColor = game?.user?.color;
+    return this._parseColorHex(userColor, 0xff9829);
+  }
+
+  /**
+   * Get non-self users currently targeting a token.
+   * @param {Token|null} token
+   * @returns {Array<User>}
+   */
+  _getOtherTargetUsers(token) {
+    if (!token) return [];
+
+    try {
+      if (token.targeted && typeof token.targeted[Symbol.iterator] === 'function') {
+        return Array.from(token.targeted).filter((user) => user && !user.isSelf);
+      }
+    } catch (_) {
+    }
+
+    const users = [];
+    try {
+      for (const user of game?.users || []) {
+        if (!user || user.isSelf) continue;
+        if (user?.targets?.has?.(token)) users.push(user);
+      }
+    } catch (_) {
+    }
+    return users;
+  }
+
+  /**
+   * Rebuild target pips to match non-self targeting users, colored per-user.
+   * @param {TokenSpriteData} spriteData
+   * @param {Array<User>} targetUsers - Non-self users targeting this token
+   */
+  _refreshTargetPips(spriteData, targetUsers) {
+    const THREE = window.THREE;
+    const group = spriteData?.targetPipsGroup;
+    if (!THREE || !group) return;
+
+    const users = Array.isArray(targetUsers) ? targetUsers.slice(0, 8) : [];
+    const count = users.length;
+    const signature = users.map((user) => `${user.id}:${String(user.color || '')}`).join('|');
+    if (spriteData.targetPipCount === count && spriteData.targetPipSignature === signature) {
+      group.visible = count > 0;
+      return;
+    }
+
+    for (let i = group.children.length - 1; i >= 0; i--) {
+      const pip = group.children[i];
+      group.remove(pip);
+      pip.geometry?.dispose?.();
+      pip.material?.dispose?.();
+    }
+
+    if (count > 0) {
+      const spacing = 0.14;
+      const startX = -((count - 1) * spacing) / 2;
+      const y = 0.72;
+      for (let i = 0; i < count; i++) {
+        const userColor = this._parseColorHex(users[i]?.color, 0x7fd6ff);
+        const geometry = new THREE.CircleGeometry(0.045, 12);
+        const material = new THREE.MeshBasicMaterial({
+          color: userColor,
+          transparent: true,
+          opacity: 0.95,
+          depthTest: false,
+          depthWrite: false
+        });
+        const pip = new THREE.Mesh(geometry, material);
+        pip.position.set(startX + (i * spacing), y, 0);
+        pip.layers.set(OVERLAY_THREE_LAYER);
+        pip.matrixAutoUpdate = false;
+        pip.updateMatrix();
+        group.add(pip);
+      }
+    }
+
+    group.visible = count > 0;
+    group.updateMatrix();
+    spriteData.targetPipCount = count;
+    spriteData.targetPipSignature = signature;
+  }
+
+  /**
+   * Update one token's target indicator from Foundry's authoritative state.
+   * @param {string} tokenId
+   */
+  updateTokenTargetIndicator(tokenId) {
+    if (!tokenId) return;
+    const spriteData = this.tokenSprites.get(tokenId);
+    if (!spriteData) return;
+
+    this._ensureTargetIndicator(spriteData);
+
+    const indicator = spriteData.targetIndicator;
+    const arrows = spriteData.targetArrowsGroup;
+    if (!indicator || !arrows) return;
+
+    const token = canvas?.tokens?.get?.(tokenId) || null;
+    if (!token) {
+      indicator.visible = false;
+      arrows.visible = false;
+      this._refreshTargetPips(spriteData, []);
+      return;
+    }
+
+    let isSecret = false;
+    try {
+      isSecret = !!token.document?.isSecret && !game?.user?.isGM && !token.document?.isOwner;
+    } catch (_) {
+      isSecret = false;
+    }
+    if (isSecret) {
+      indicator.visible = false;
+      arrows.visible = false;
+      this._refreshTargetPips(spriteData, []);
+      return;
+    }
+
+    const isLocalTargeted = !!token.isTargeted || !!game?.user?.targets?.has?.(token);
+    const otherTargetUsers = this._getOtherTargetUsers(token);
+
+    arrows.visible = isLocalTargeted;
+    if (isLocalTargeted) {
+      const selfColor = this._getSelfTargetColor();
+      for (const child of arrows.children || []) {
+        if (child?.material?.color?.setHex) child.material.color.setHex(selfColor);
+      }
+    }
+
+    this._refreshTargetPips(spriteData, otherTargetUsers);
+    indicator.visible = isLocalTargeted || (otherTargetUsers.length > 0);
+  }
+
+  /**
+   * Refresh all target indicators.
+   */
+  refreshAllTargetIndicators() {
+    for (const tokenId of this.tokenSprites.keys()) {
+      this.updateTokenTargetIndicator(tokenId);
+    }
+  }
+
+  /**
+   * Dispose per-token overlays (selection border, labels, target indicators).
+   * @param {TokenSpriteData} spriteData
+   */
+  _disposeTokenOverlays(spriteData) {
+    if (!spriteData) return;
+
+    try {
+      if (spriteData.selectionBorder) {
+        spriteData.selectionBorder.parent?.remove?.(spriteData.selectionBorder);
+        spriteData.selectionBorder.geometry?.dispose?.();
+        spriteData.selectionBorder.material?.dispose?.();
+        spriteData.selectionBorder = null;
+      }
+    } catch (_) {
+    }
+
+    try {
+      const label = spriteData.nameLabel;
+      if (label) {
+        label.parent?.remove?.(label);
+        label.material?.map?.dispose?.();
+        label.material?.dispose?.();
+        spriteData.nameLabel = null;
+      }
+    } catch (_) {
+    }
+
+    try {
+      const indicator = spriteData.targetIndicator;
+      if (indicator) {
+        for (const child of indicator.children || []) {
+          if (child.type === 'Group') {
+            for (const nested of child.children || []) {
+              nested.geometry?.dispose?.();
+              nested.material?.dispose?.();
+            }
+          }
+          child.geometry?.dispose?.();
+          child.material?.dispose?.();
+        }
+        indicator.parent?.remove?.(indicator);
+        spriteData.targetIndicator = null;
+        spriteData.targetArrowsGroup = null;
+        spriteData.targetPipsGroup = null;
+        spriteData.targetPipCount = 0;
+        spriteData.targetPipSignature = '';
+      }
+    } catch (_) {
+    }
+  }
+
+  /**
    * Set token selection state
    * @param {string} tokenId 
    * @param {boolean} selected 
@@ -1199,18 +1569,8 @@ vec3 ms_applyWindowLight(vec3 color) {
     const { sprite, tokenDoc } = spriteData;
 
     spriteData.isSelected = !!selected;
-    
-    // Use square border instead of tint
-    if (selected) {
-      if (!spriteData.selectionBorder) {
-        this.createSelectionBorder(spriteData);
-      }
-      spriteData.selectionBorder.visible = true;
-    } else {
-      if (spriteData.selectionBorder) {
-        spriteData.selectionBorder.visible = false;
-      }
-    }
+
+    this._updateTokenBorderVisibility(spriteData);
 
     this._updateNameLabelVisibility(spriteData);
     
@@ -1230,7 +1590,48 @@ vec3 ms_applyWindowLight(vec3 color) {
 
     spriteData.isHovered = !!hovered;
 
+    this._updateTokenBorderVisibility(spriteData);
     this._updateNameLabelVisibility(spriteData);
+  }
+
+  refreshAllTokenOverlayStates() {
+    for (const spriteData of this.tokenSprites.values()) {
+      this._updateTokenBorderVisibility(spriteData);
+      this._updateNameLabelVisibility(spriteData);
+    }
+  }
+
+  _shouldShowTokenBorder(spriteData) {
+    const highlighted = this._highlightAllTokensActive || !!canvas?.tokens?.highlightObjects;
+    return !!(spriteData?.isSelected || spriteData?.isHovered || highlighted);
+  }
+
+  _getTokenBorderColor(tokenDoc, isSelected) {
+    const colors = CONFIG?.Canvas?.dispositionColors || {};
+    if (isSelected) return colors.CONTROLLED ?? 0xFF9829;
+
+    const disp = tokenDoc?.disposition;
+    if (disp === CONST?.TOKEN_DISPOSITIONS?.FRIENDLY) return colors.FRIENDLY ?? 0x43DFDF;
+    if (disp === CONST?.TOKEN_DISPOSITIONS?.NEUTRAL) return colors.NEUTRAL ?? 0xF1D836;
+    if (disp === CONST?.TOKEN_DISPOSITIONS?.HOSTILE) return colors.HOSTILE ?? 0xE72124;
+    return colors.INACTIVE ?? 0xFFFFFF;
+  }
+
+  _updateTokenBorderVisibility(spriteData) {
+    if (!spriteData) return;
+
+    const show = this._shouldShowTokenBorder(spriteData);
+    if (show && !spriteData.selectionBorder) {
+      this.createSelectionBorder(spriteData);
+    }
+
+    if (!spriteData.selectionBorder) return;
+
+    spriteData.selectionBorder.visible = show;
+    const color = this._getTokenBorderColor(spriteData.tokenDoc, !!spriteData.isSelected);
+    if (spriteData.selectionBorder.material?.color?.setHex) {
+      spriteData.selectionBorder.material.color.setHex(color);
+    }
   }
 
   _refreshNameLabel(spriteData) {
@@ -1260,7 +1661,7 @@ vec3 ms_applyWindowLight(vec3 color) {
       if (m === CONST.TOKEN_DISPLAY_MODES.ALWAYS) return true;
       if (m === CONST.TOKEN_DISPLAY_MODES.CONTROL) return !!spriteData?.isSelected;
 
-      const hover = !!spriteData?.isHovered || !!canvas?.tokens?.layer?.highlightObjects;
+      const hover = !!spriteData?.isHovered || this._highlightAllTokensActive || !!canvas?.tokens?.highlightObjects;
       if (m === CONST.TOKEN_DISPLAY_MODES.HOVER) return hover;
 
       const isOwner = !!spriteData?.tokenDoc?.isOwner
@@ -1528,6 +1929,7 @@ vec3 ms_applyWindowLight(vec3 color) {
 
     // Remove all token sprites
     for (const [tokenId, data] of this.tokenSprites.entries()) {
+      this._disposeTokenOverlays(data);
       this.scene.remove(data.sprite);
       data.sprite.material?.dispose();
       data.sprite.geometry?.dispose();

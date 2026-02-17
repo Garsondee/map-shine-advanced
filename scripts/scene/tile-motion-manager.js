@@ -15,6 +15,18 @@ const MODULE_ID = 'map-shine-advanced';
 const FLAG_KEY = 'tileMotion';
 const CURRENT_VERSION = 1;
 const MOTION_TYPES = new Set(['rotation', 'orbit', 'pingPong', 'sine']);
+const ROTATION_EASING_TYPES = new Set([
+  'linear',
+  'easeInSine',
+  'easeOutSine',
+  'easeInOutSine',
+  'easeInOutCubic',
+  'easeInOutBack',
+  'easeOutBounce',
+  'easeInOutElastic',
+  'clockwork',
+  'clockwork-chaos'
+]);
 
 function _clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -101,6 +113,9 @@ export class TileMotionManager {
 
     /** @type {Map<string, {x:number,y:number,rotation:number,animDelta:number,frameId:number}>} */
     this._resolvedStates = new Map();
+
+    /** @type {Map<string, number>} */
+    this._tileSeedCache = new Map();
 
     /** @type {string[]} */
     this._runtimeOrder = [];
@@ -192,6 +207,7 @@ export class TileMotionManager {
     this._baseCache.clear();
     this._textureBaseCache.clear();
     this._resolvedStates.clear();
+    this._tileSeedCache.clear();
     this._runtimeOrder.length = 0;
     this._invalidTiles.clear();
     this._missingParentTiles.clear();
@@ -298,6 +314,11 @@ export class TileMotionManager {
         type: motionType,
         speed: _toNumber(motion.speed, 0),
         phase: _toNumber(motion.phase, 0),
+        rotationEasing: ROTATION_EASING_TYPES.has(motion.rotationEasing) ? motion.rotationEasing : 'linear',
+        easeStrength: _clamp(_toNumber(motion.easeStrength, 1), 0, 1),
+        clockworkSteps: Math.round(_clamp(_toNumber(motion.clockworkSteps, 8), 1, 48)),
+        clockworkHold: _clamp(_toNumber(motion.clockworkHold, 0.55), 0, 0.95),
+        clockworkJank: _clamp(_toNumber(motion.clockworkJank, 0), 0, 1),
         loopMode,
         radius: Math.max(0, _toNumber(motion.radius, 0)),
         pointA,
@@ -619,6 +640,7 @@ export class TileMotionManager {
     this._baseCache.delete(tileId);
     this._textureBaseCache.delete(tileId);
     this._resolvedStates.delete(tileId);
+    this._tileSeedCache.delete(tileId);
     this._activeTileIds.delete(tileId);
     this._frameActiveTileIds.delete(tileId);
 
@@ -761,6 +783,174 @@ export class TileMotionManager {
     return cycle;
   }
 
+  _easeOutBounce01(u) {
+    const n1 = 7.5625;
+    const d1 = 2.75;
+    if (u < 1 / d1) return n1 * u * u;
+    if (u < 2 / d1) {
+      const t = u - 1.5 / d1;
+      return n1 * t * t + 0.75;
+    }
+    if (u < 2.5 / d1) {
+      const t = u - 2.25 / d1;
+      return n1 * t * t + 0.9375;
+    }
+    const t = u - 2.625 / d1;
+    return n1 * t * t + 0.984375;
+  }
+
+  _easeByName01(name, u) {
+    const t = _clamp(_toNumber(u, 0), 0, 1);
+    if (name === 'easeInSine') {
+      return 1 - Math.cos((t * Math.PI) * 0.5);
+    }
+    if (name === 'easeOutSine') {
+      return Math.sin((t * Math.PI) * 0.5);
+    }
+    if (name === 'easeInOutSine') {
+      return -(Math.cos(Math.PI * t) - 1) * 0.5;
+    }
+    if (name === 'easeInOutCubic') {
+      return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) * 0.5;
+    }
+    if (name === 'easeInOutBack') {
+      const c1 = 1.70158;
+      const c2 = c1 * 1.525;
+      return t < 0.5
+        ? (Math.pow(2 * t, 2) * ((c2 + 1) * 2 * t - c2)) * 0.5
+        : (Math.pow(2 * t - 2, 2) * ((c2 + 1) * (2 * t - 2) + c2) + 2) * 0.5;
+    }
+    if (name === 'easeOutBounce') {
+      return this._easeOutBounce01(t);
+    }
+    if (name === 'easeInOutElastic') {
+      if (t === 0 || t === 1) return t;
+      const c5 = (2 * Math.PI) / 4.5;
+      return t < 0.5
+        ? -(Math.pow(2, 20 * t - 10) * Math.sin((20 * t - 11.125) * c5)) * 0.5
+        : (Math.pow(2, -20 * t + 10) * Math.sin((20 * t - 11.125) * c5)) * 0.5 + 1;
+    }
+    return t;
+  }
+
+  _hash01(value) {
+    const x = Math.sin(value * 12.9898) * 43758.5453123;
+    return x - Math.floor(x);
+  }
+
+  _getTileSeed(tileId) {
+    if (!tileId) return 1;
+    const cached = this._tileSeedCache.get(tileId);
+    if (typeof cached === 'number') return cached;
+
+    let h = 2166136261;
+    for (let i = 0; i < tileId.length; i++) {
+      h ^= tileId.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    const seed = Math.abs(h) + 1;
+    this._tileSeedCache.set(tileId, seed);
+    return seed;
+  }
+
+  _applyJankWarp01(u, tileId, cycleIndex, jank) {
+    const t = _clamp(_toNumber(u, 0), 0, 1);
+    const amount = _clamp(_toNumber(jank, 0), 0, 1);
+    if (amount <= 0.0001) return t;
+
+    const seed = this._getTileSeed(tileId) + cycleIndex * 131.37;
+    const phaseA = this._hash01(seed + 0.71);
+    const phaseB = this._hash01(seed + 9.33);
+    const freq = 2 + Math.floor(this._hash01(seed + 4.61) * 4); // 2..5
+    const amp = 0.16 * amount;
+    const envelope = t * (1 - t) * 4;
+
+    const wobbleA = Math.sin((t * freq + phaseA) * Math.PI * 2) * amp;
+    const wobbleB = Math.sin((t * (freq + 1.5) + phaseB) * Math.PI * 2) * amp * 0.45;
+    return _clamp(t + (wobbleA + wobbleB) * envelope, 0, 1);
+  }
+
+  _computeClockworkProgress01(u, motion, tileId, cycleIndex, chaosScale = 1) {
+    const t = _clamp(_toNumber(u, 0), 0, 1);
+    const steps = Math.max(1, Math.round(_clamp(_toNumber(motion?.clockworkSteps, 8), 1, 48)));
+    const holdBase = _clamp(_toNumber(motion?.clockworkHold, 0.55), 0, 0.95);
+    const jank = _clamp(_toNumber(motion?.clockworkJank, 0), 0, 1);
+
+    let scaled = t * steps;
+    let stepIndex = Math.floor(scaled);
+    if (stepIndex >= steps) {
+      stepIndex = steps - 1;
+      scaled = steps;
+    }
+    const localT = _clamp(scaled - stepIndex, 0, 1);
+
+    const seedBase = this._getTileSeed(tileId) + cycleIndex * 97.17 + stepIndex * 23.59;
+    const holdNoise = (this._hash01(seedBase + 0.23) - 0.5) * 2;
+    const motionNoise = (this._hash01(seedBase + 1.83) - 0.5) * 2;
+    const overshootNoise = (this._hash01(seedBase + 4.17) - 0.5) * 2;
+    const microStopRoll = this._hash01(seedBase + 5.41);
+
+    const hold = _clamp(holdBase + holdNoise * 0.35 * jank * chaosScale, 0, 0.98);
+    let stepU = 0;
+    if (localT > hold) {
+      stepU = _clamp((localT - hold) / Math.max(0.0001, 1 - hold), 0, 1);
+
+      // Pushes each "tick" into uneven acceleration/deceleration for a mechanical feel.
+      const accel = 1 + Math.max(0, motionNoise) * (2.2 * jank * chaosScale);
+      stepU = 1 - Math.pow(1 - stepU, accel);
+
+      if (microStopRoll < (0.3 * jank * chaosScale)) {
+        const stopCenter = this._hash01(seedBase + 6.01) * 0.8 + 0.1;
+        const stopWidth = 0.08 + this._hash01(seedBase + 6.89) * 0.12;
+        const d = Math.abs(stepU - stopCenter);
+        if (d < stopWidth) {
+          const stall = 1 - d / stopWidth;
+          stepU *= (1 - stall * 0.75);
+        }
+      }
+
+      const overshoot = overshootNoise * (0.14 * jank * chaosScale);
+      stepU += Math.sin(stepU * Math.PI) * overshoot;
+      stepU = _clamp(stepU, 0, 1);
+    }
+
+    const minU = stepIndex / steps;
+    const maxU = (stepIndex + 1) / steps;
+    return _clamp(minU + (maxU - minU) * stepU, minU, maxU);
+  }
+
+  _computeRotationProgress01(cfg, u, tileId, cycleIndex) {
+    const motion = cfg?.motion || {};
+    const easing = ROTATION_EASING_TYPES.has(motion.rotationEasing) ? motion.rotationEasing : 'linear';
+    const easeStrength = _clamp(_toNumber(motion.easeStrength, 1), 0, 1);
+    const jank = _clamp(_toNumber(motion.clockworkJank, 0), 0, 1);
+
+    const warpedU = this._applyJankWarp01(u, tileId, cycleIndex, jank);
+
+    let easedU = warpedU;
+    if (easing === 'clockwork') {
+      easedU = this._computeClockworkProgress01(warpedU, motion, tileId, cycleIndex, 1);
+    } else if (easing === 'clockwork-chaos') {
+      easedU = this._computeClockworkProgress01(warpedU, motion, tileId, cycleIndex, 1.75);
+    } else {
+      easedU = this._easeByName01(easing, warpedU);
+    }
+
+    return _clamp(warpedU + (easedU - warpedU) * easeStrength, 0, 1);
+  }
+
+  _computeRotationDeltaRad(cfg, elapsedSec, tileId) {
+    const rawDeg = this._computeRawPhaseDeg(cfg, elapsedSec);
+    const rawTurns = rawDeg / 360;
+    const sign = rawTurns < 0 ? -1 : 1;
+    const absTurns = Math.abs(rawTurns);
+    const cycleIndex = Math.floor(absTurns);
+    const cycleU = absTurns - cycleIndex;
+    const shapedU = this._computeRotationProgress01(cfg, cycleU, tileId, cycleIndex);
+    const totalDeg = sign * ((cycleIndex * 360) + (shapedU * 360));
+    return (totalDeg * Math.PI) / 180;
+  }
+
   _rotateFoundryLocalToWorld(localX, localYFoundry, worldRotationRad, out = undefined) {
     const x = _toNumber(localX, 0);
     const y = -_toNumber(localYFoundry, 0);
@@ -867,7 +1057,7 @@ export class TileMotionManager {
     if (!tileBase) return;
 
     const inherited = this._resolveInheritedTransform(tileId, cfg, frameId, tileBase);
-    const ownDelta = (this._computeRawPhaseDeg(cfg, elapsedSec) * Math.PI) / 180;
+    const ownDelta = this._computeRotationDeltaRad(cfg, elapsedSec, tileId);
     const pivoted = this._applyPivotRotation(
       inherited.inheritedX,
       inherited.inheritedY,

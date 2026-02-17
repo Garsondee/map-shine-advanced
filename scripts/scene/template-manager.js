@@ -97,14 +97,39 @@ export class TemplateManager {
   }
 
   /**
-   * Sync all templates
+   * Check whether a template should be visible to the current user.
+   * Mirrors Foundry's MeasuredTemplate#isVisible: hidden templates
+   * are only visible to the author or GM.
+   * @param {MeasuredTemplateDocument} doc
+   * @returns {boolean}
+   * @private
+   */
+  _isTemplateVisible(doc) {
+    try {
+      // If the PIXI placeable exists, defer to its authoritative isVisible.
+      const placeable = canvas?.templates?.get?.(doc.id);
+      if (placeable && ('isVisible' in placeable)) return !!placeable.isVisible;
+
+      // Fallback: replicate core logic.
+      return !doc.hidden || doc.isAuthor || !!game?.user?.isGM;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /**
+   * Sync all templates, filtering by visibility/permission.
    * @private
    */
   syncAllTemplates() {
     if (!canvas.scene || !canvas.scene.templates) return;
     
     for (const template of canvas.scene.templates) {
-      this.create(template);
+      if (this._isTemplateVisible(template)) {
+        this.create(template);
+      } else {
+        this.remove(template.id);
+      }
     }
   }
 
@@ -115,12 +140,17 @@ export class TemplateManager {
    */
   create(doc) {
     if (this.templates.has(doc.id)) return;
+    // WP-6: Skip templates that fail visibility/permission check.
+    if (!this._isTemplateVisible(doc)) return;
 
     try {
         const t = doc.t; // circle, cone, rect, ray
         const distance = doc.distance;
         const direction = doc.direction || 0;
-        const angle = doc.angle || 53.13;
+        // Use system-specific default cone angle (e.g. 53.13° for DnD5e, 90° for PF2e)
+        const gsm = window.MapShine?.gameSystem;
+        const defaultConeAngle = gsm?.getDefaultConeAngle?.() ?? 53.13;
+        const angle = doc.angle || defaultConeAngle;
         const width = doc.width;
         
         // Convert distance (grid units) to pixels
@@ -202,8 +232,11 @@ export class TemplateManager {
    * @private
    */
   update(doc, changes) {
+    // WP-6: Re-check visibility on update (e.g., hidden flag changed).
     this.remove(doc.id);
-    this.create(doc);
+    if (this._isTemplateVisible(doc)) {
+      this.create(doc);
+    }
   }
 
   /**

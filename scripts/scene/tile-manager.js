@@ -2256,23 +2256,13 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const b = this._windowMaskData[index + 2] / 255;
     const brightness = (r * 0.2126 + g * 0.7152 + b * 0.0722);
 
-    // Apply the same mask shaping as the shader
-    const threshold = wle.params.maskThreshold;
-    const softness = wle.params.softness;
-    const halfWidth = Math.max(softness, 0.001);
-    const edgeLo = Math.max(0, threshold - halfWidth);
-    const edgeHi = Math.min(1, threshold + halfWidth);
-    
-    // Smoothstep
-    let shaped = 0;
-    if (brightness <= edgeLo) {
-      shaped = 0;
-    } else if (brightness >= edgeHi) {
-      shaped = 1;
-    } else {
-      const t = (brightness - edgeLo) / (edgeHi - edgeLo);
-      shaped = t * t * (3 - 2 * t);
-    }
+    // Keep CPU overhead sampling aligned with WindowLightEffect shader logic.
+    // The shader currently shapes mask luminance via gamma power (uFalloff),
+    // not threshold/softness gates.
+    const falloff = (typeof wle.params?.falloff === 'number' && Number.isFinite(wle.params.falloff))
+      ? Math.max(0.001, wle.params.falloff)
+      : 1.0;
+    const shaped = Math.pow(Math.max(0.0, Math.min(1.0, brightness)), falloff);
 
     // Check outdoors mask if available (skip outdoor areas)
     let indoorFactor = 1.0;

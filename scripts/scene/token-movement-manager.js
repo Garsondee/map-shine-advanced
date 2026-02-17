@@ -18,6 +18,26 @@ const log = createLogger('TokenMovementManager');
 
 const MODULE_ID = 'map-shine-advanced';
 const DEFAULT_STYLE = 'walk';
+const WALK_STYLE_IDS = new Set([
+  'walk',
+  'walk-heavy-stomp',
+  'walk-sneak-glide',
+  'walk-swagger-stride',
+  'walk-skitter-step',
+  'walk-limping-advance',
+  'walk-wobble-totter',
+  'walk-drunken-drift',
+  'walk-clockwork-tick',
+  'walk-chaos-skip'
+]);
+
+const FLYING_STYLE_IDS = new Set([
+  'flying-glide',
+  'flying-hover-bob',
+  'flying-bank-swoop',
+  'flying-flutter-dart',
+  'flying-chaos-drift'
+]);
 
 const DOOR_TYPES = {
   NONE: 0,
@@ -44,6 +64,16 @@ function asNumber(value, fallback = 0) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function hashStringToUnit(value) {
+  const source = String(value || '');
+  let hash = 2166136261;
+  for (let i = 0; i < source.length; i += 1) {
+    hash ^= source.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967295;
 }
 
 /**
@@ -171,15 +201,16 @@ export class TokenMovementManager {
     /**
      * Per-token move locks prevent overlapping async move sequences from
      * racing on the same token (e.g. rapid double-clicks or latent hooks).
-     * Key = tokenId, Value = Promise that resolves when the current move ends.
-     * @type {Map<string, Promise<void>>}
+     * Key = tokenId, Value = lock entry containing a Promise resolved when
+     * the current move ends.
+     * @type {Map<string, {promise: Promise<void>, _resolve?: Function, ownerId: string, createdAtMs: number}>}
      */
     this._activeMoveLocks = new Map();
 
     /**
      * Global group-move lock prevents concurrent group operations from
      * interleaving and causing deadlocks.
-     * @type {Promise<void>|null}
+     * @type {{promise: Promise<void>, _resolve?: Function, ownerId: string, createdAtMs: number}|null}
      */
     this._groupMoveLock = null;
 
@@ -1759,11 +1790,25 @@ export class TokenMovementManager {
   }
 
   _registerDefaultStyles() {
-    this.styles.set('walk', {
-      id: 'walk',
-      label: 'Walk',
-      mode: 'delegated'
-    });
+    const walkStyles = [
+      ['walk', 'Walk - Steady March'],
+      ['walk-heavy-stomp', 'Walk - Heavy Stomp'],
+      ['walk-sneak-glide', 'Walk - Sneak Glide'],
+      ['walk-swagger-stride', 'Walk - Swagger Stride'],
+      ['walk-skitter-step', 'Walk - Skitter Step'],
+      ['walk-limping-advance', 'Walk - Limping Advance'],
+      ['walk-wobble-totter', 'Walk - Wobble Totter'],
+      ['walk-drunken-drift', 'Walk - Drunken Drift'],
+      ['walk-clockwork-tick', 'Walk - Clockwork Tick-Walk'],
+      ['walk-chaos-skip', 'Walk - Chaos Skip']
+    ];
+    for (const [id, label] of walkStyles) {
+      this.styles.set(id, {
+        id,
+        label,
+        mode: 'custom'
+      });
+    }
 
     this.styles.set('pick-up-drop', {
       id: 'pick-up-drop',
@@ -1771,11 +1816,36 @@ export class TokenMovementManager {
       mode: 'custom'
     });
 
-    this.styles.set('flying-glide', {
-      id: 'flying-glide',
-      label: 'Flying Glide (Placeholder)',
-      mode: 'placeholder'
-    });
+    const flyingStyles = [
+      ['flying-glide', 'Flying - Glide'],
+      ['flying-hover-bob', 'Flying - Hover Bob'],
+      ['flying-bank-swoop', 'Flying - Bank Swoop'],
+      ['flying-flutter-dart', 'Flying - Flutter Dart'],
+      ['flying-chaos-drift', 'Flying - Chaos Drift']
+    ];
+    for (const [id, label] of flyingStyles) {
+      this.styles.set(id, {
+        id,
+        label,
+        mode: 'custom'
+      });
+    }
+  }
+
+  /**
+   * @param {string} styleId
+   * @returns {boolean}
+   */
+  _isWalkStyle(styleId) {
+    return WALK_STYLE_IDS.has(styleId);
+  }
+
+  /**
+   * @param {string} styleId
+   * @returns {boolean}
+   */
+  _isFlyingStyle(styleId) {
+    return FLYING_STYLE_IDS.has(styleId);
   }
 
   /**
@@ -1865,6 +1935,7 @@ export class TokenMovementManager {
     const styleId = this.getStyleForToken(tokenDoc, options);
     const tokenId = tokenDoc.id;
     let existingTrack = this.activeTracks.get(tokenId);
+    const shouldAnimate = animate || optionsBoolean(options?.mapShineMovement?.animated, false);
 
     // If movement style changed, clear stale track state before applying the
     // next behavior so two animation systems never fight over the same sprite.
@@ -1875,12 +1946,12 @@ export class TokenMovementManager {
     }
 
     // If style changed away from flying, clear any lingering hover state.
-    if (styleId !== 'flying-glide' && this.isFlying(tokenId)) {
+    if (!this._isFlyingStyle(styleId) && this.isFlying(tokenId)) {
       this.clearFlyingState(tokenId);
     }
 
     // Unknown styles keep existing fallback animation behavior for compatibility.
-    if (styleId !== 'walk' && styleId !== 'pick-up-drop' && styleId !== 'flying-glide') {
+    if (!this._isWalkStyle(styleId) && styleId !== 'pick-up-drop' && !this._isFlyingStyle(styleId)) {
       if (existingTrack) {
         this._cancelTrack(existingTrack);
         this.activeTracks.delete(tokenId);
@@ -1889,13 +1960,13 @@ export class TokenMovementManager {
       return true;
     }
 
-    if (!animate) {
+    if (!shouldAnimate) {
       if (existingTrack) {
         this._cancelTrack(existingTrack);
         this.activeTracks.delete(tokenId);
       }
 
-      if (styleId === 'flying-glide') {
+      if (this._isFlyingStyle(styleId)) {
         const target = this._computeTargetTransform(targetDoc);
         if (!target) {
           fallback();
@@ -1924,7 +1995,7 @@ export class TokenMovementManager {
         return true;
       }
 
-      if (styleId === 'walk' || styleId === 'pick-up-drop') {
+      if (this._isWalkStyle(styleId) || styleId === 'pick-up-drop') {
         const target = this._computeTargetTransform(targetDoc);
         if (!target) {
           fallback();
@@ -1951,21 +2022,23 @@ export class TokenMovementManager {
     sprite.scale.set(target.scaleX, target.scaleY, 1);
     if (sprite.matrixAutoUpdate === false) sprite.updateMatrix();
 
-    if (styleId === 'flying-glide') {
+    if (this._isFlyingStyle(styleId)) {
       this._startFlyingGlideTrack({
         tokenId,
         sprite,
         target,
+        styleId,
         options
       });
       return true;
     }
 
-    if (styleId === 'walk') {
+    if (this._isWalkStyle(styleId)) {
       this._startWalkTrack({
         tokenId,
         sprite,
         target,
+        styleId,
         options
       });
       return true;
@@ -2056,7 +2129,7 @@ export class TokenMovementManager {
    * @param {{x:number,y:number,z:number,scaleX:number,scaleY:number,rotation:number,gridSize:number}} input.target
    * @param {object} [input.options]
    */
-  _startWalkTrack({ tokenId, sprite, target, options = {} }) {
+  _startWalkTrack({ tokenId, sprite, target, styleId = 'walk', options = {} }) {
     if (!tokenId || !sprite || !target) return;
 
     const existing = this.activeTracks.get(tokenId);
@@ -2070,21 +2143,102 @@ export class TokenMovementManager {
     const distance = Math.hypot(target.x - startX, target.y - startY);
     const gridSize = Math.max(1, asNumber(target.gridSize, 100));
 
+    const requestedStyleId = String(
+      styleId
+      || options?.mapShineWalkStyle
+      || options?.mapShineMovementStyle
+      || options?.styleId
+      || ''
+    );
+    const walkStyleId = this._isWalkStyle(requestedStyleId)
+      ? requestedStyleId
+      : (this._isWalkStyle(options?.styleId) ? options.styleId : 'walk');
+
+    const profile = this._getWalkStyleProfile(walkStyleId, distance, gridSize);
+
     const durationMs = clamp(
-      asNumber(options?.mapShineWalkDurationMs, (distance / gridSize) * 290 + 120),
+      asNumber(options?.mapShineWalkDurationMs, profile.durationMs),
       120,
-      1500
+      1800
     );
     const bobAmplitude = clamp(
-      asNumber(options?.mapShineWalkBobAmplitude, Math.max(0.6, gridSize * 0.012)),
-      0,
-      8
-    );
-    const bobCycles = clamp(
-      asNumber(options?.mapShineWalkBobCycles, Math.max(1, distance / Math.max(1, gridSize))),
+      asNumber(options?.mapShineWalkBobAmplitude, profile.bobAmplitude),
       0,
       12
     );
+    const bobCycles = clamp(
+      asNumber(options?.mapShineWalkBobCycles, profile.bobCycles),
+      0,
+      14
+    );
+    const lateralAmplitude = clamp(
+      asNumber(options?.mapShineWalkLateralAmplitude, profile.lateralAmplitude),
+      0,
+      Math.max(2, gridSize * 0.2)
+    );
+    const lateralCycles = clamp(
+      asNumber(options?.mapShineWalkLateralCycles, profile.lateralCycles),
+      0,
+      12
+    );
+    const settleAmplitude = clamp(
+      asNumber(options?.mapShineWalkSettleAmplitude, profile.settleAmplitude),
+      0,
+      Math.max(3, gridSize * 0.25)
+    );
+    const strideAmplitude = clamp(
+      asNumber(options?.mapShineWalkStrideAmplitude, profile.strideAmplitude),
+      0,
+      Math.max(8, gridSize * 0.35)
+    );
+    const rotationSwayFactor = clamp(
+      asNumber(options?.mapShineWalkRotationSway, profile.rotationSwayFactor),
+      0,
+      2
+    );
+    const chipTiltStrength = clamp(
+      asNumber(options?.mapShineWalkChipTilt, profile.chipTiltStrength),
+      0,
+      2
+    );
+    const chaosAmplitude = clamp(
+      asNumber(options?.mapShineWalkChaosAmplitude, profile.chaosAmplitude),
+      0,
+      Math.max(10, gridSize * 0.45)
+    );
+    const chaosCycles = clamp(
+      asNumber(options?.mapShineWalkChaosCycles, profile.chaosCycles),
+      0,
+      16
+    );
+    const routeBendFactor = clamp(
+      asNumber(options?.mapShineWalkRouteBendFactor, profile.routeBendFactor),
+      0,
+      1
+    );
+
+    const randomness = clamp(
+      asNumber(options?.mapShineWalkRandomness, profile.randomness),
+      0,
+      1
+    );
+    const seedRoot = `${tokenId}|${walkStyleId}|${Math.round(startX)}|${Math.round(startY)}|${Math.round(target.x)}|${Math.round(target.y)}`;
+    const bobRandom = ((hashStringToUnit(`${seedRoot}|bob`) * 2) - 1) * randomness;
+    const lateralRandom = ((hashStringToUnit(`${seedRoot}|lat`) * 2) - 1) * randomness;
+    const strideRandom = ((hashStringToUnit(`${seedRoot}|stride`) * 2) - 1) * randomness;
+    const chaosPhase = hashStringToUnit(`${seedRoot}|chaos-phase`) * Math.PI * 2;
+    const routeBendSeed = ((hashStringToUnit(`${seedRoot}|route-bend`) * 2) - 1);
+    const routeBendPhase = hashStringToUnit(`${seedRoot}|route-bend-phase`) * Math.PI * 2;
+
+    const maxRouteBend = Math.min(
+      Math.max(2, gridSize * 0.14),
+      Math.max(2.5, distance * 0.28)
+    );
+    const routeBendAmplitude = routeBendSeed * maxRouteBend * routeBendFactor;
+
+    const randomizedBobAmplitude = Math.max(0, bobAmplitude * (1 + (bobRandom * profile.randomBobJitter)));
+    const randomizedLateralAmplitude = Math.max(0, lateralAmplitude * (1 + (lateralRandom * profile.randomLateralJitter)));
+    const randomizedStrideAmplitude = Math.max(0, strideAmplitude * (1 + (strideRandom * profile.randomStrideJitter)));
 
     try {
       this.tokenManager?.emitTokenMovementStart?.(tokenId);
@@ -2100,7 +2254,7 @@ export class TokenMovementManager {
 
     this.activeTracks.set(tokenId, {
       tokenId,
-      styleId: 'walk',
+      styleId: walkStyleId,
       sprite,
       startX,
       startY,
@@ -2109,9 +2263,405 @@ export class TokenMovementManager {
       target,
       durationSec: durationMs / 1000,
       elapsedSec: 0,
-      bobAmplitude,
-      bobCycles
+      bobAmplitude: randomizedBobAmplitude,
+      bobCycles,
+      lateralAmplitude: randomizedLateralAmplitude,
+      lateralCycles,
+      settleAmplitude,
+      strideAmplitude: randomizedStrideAmplitude,
+      rotationSwayFactor,
+      chipTiltStrength,
+      chaosAmplitude,
+      chaosCycles,
+      chaosPhase,
+      routeBendAmplitude,
+      routeBendPhase
     });
+  }
+
+  /**
+   * @param {string} styleId
+   * @param {number} distance
+   * @param {number} gridSize
+   * @returns {{durationMs:number,bobAmplitude:number,bobCycles:number,lateralAmplitude:number,lateralCycles:number,settleAmplitude:number,strideAmplitude:number,rotationSwayFactor:number,chipTiltStrength:number,chaosAmplitude:number,chaosCycles:number,routeBendFactor:number,randomness:number,randomBobJitter:number,randomLateralJitter:number,randomStrideJitter:number}}
+   */
+  _getWalkStyleProfile(styleId, distance, gridSize) {
+    const cells = distance / Math.max(1, gridSize);
+
+    if (styleId === 'walk-heavy-stomp') {
+      return {
+        durationMs: (cells * 430) + 220,
+        bobAmplitude: Math.max(1.2, gridSize * 0.026),
+        bobCycles: Math.max(0.8, cells * 0.85),
+        lateralAmplitude: Math.max(2.2, gridSize * 0.06),
+        lateralCycles: Math.max(0.6, cells * 0.75),
+        settleAmplitude: Math.max(1.4, gridSize * 0.03),
+        strideAmplitude: Math.max(0.9, gridSize * 0.022),
+        rotationSwayFactor: 0.78,
+        chipTiltStrength: 0.55,
+        chaosAmplitude: Math.max(0.2, gridSize * 0.006),
+        chaosCycles: Math.max(0.5, cells * 0.5),
+        routeBendFactor: 0.2,
+        randomness: 0.22,
+        randomBobJitter: 0.22,
+        randomLateralJitter: 0.25,
+        randomStrideJitter: 0.22
+      };
+    }
+
+    if (styleId === 'walk-sneak-glide') {
+      return {
+        durationMs: (cells * 320) + 170,
+        bobAmplitude: Math.max(0.12, gridSize * 0.003),
+        bobCycles: Math.max(0.5, cells * 0.55),
+        lateralAmplitude: Math.max(0.3, gridSize * 0.01),
+        lateralCycles: Math.max(0.5, cells * 0.42),
+        settleAmplitude: Math.max(0.06, gridSize * 0.0015),
+        strideAmplitude: Math.max(0.08, gridSize * 0.002),
+        rotationSwayFactor: 0.12,
+        chipTiltStrength: 0.2,
+        chaosAmplitude: Math.max(0.06, gridSize * 0.0015),
+        chaosCycles: Math.max(0.35, cells * 0.35),
+        routeBendFactor: 0.08,
+        randomness: 0.15,
+        randomBobJitter: 0.14,
+        randomLateralJitter: 0.15,
+        randomStrideJitter: 0.14
+      };
+    }
+
+    if (styleId === 'walk-swagger-stride') {
+      return {
+        durationMs: (cells * 300) + 145,
+        bobAmplitude: Math.max(0.62, gridSize * 0.013),
+        bobCycles: Math.max(0.95, cells * 0.95),
+        lateralAmplitude: Math.max(2.8, gridSize * 0.076),
+        lateralCycles: Math.max(0.85, cells * 0.9),
+        settleAmplitude: Math.max(0.35, gridSize * 0.01),
+        strideAmplitude: Math.max(0.48, gridSize * 0.012),
+        rotationSwayFactor: 1.05,
+        chipTiltStrength: 0.82,
+        chaosAmplitude: Math.max(0.16, gridSize * 0.004),
+        chaosCycles: Math.max(0.55, cells * 0.55),
+        routeBendFactor: 0.3,
+        randomness: 0.28,
+        randomBobJitter: 0.24,
+        randomLateralJitter: 0.35,
+        randomStrideJitter: 0.28
+      };
+    }
+
+    if (styleId === 'walk-skitter-step') {
+      return {
+        durationMs: (cells * 245) + 115,
+        bobAmplitude: Math.max(0.32, gridSize * 0.008),
+        bobCycles: Math.max(1.8, cells * 2.3),
+        lateralAmplitude: Math.max(1.9, gridSize * 0.05),
+        lateralCycles: Math.max(1.7, cells * 1.8),
+        settleAmplitude: Math.max(0.18, gridSize * 0.004),
+        strideAmplitude: Math.max(0.26, gridSize * 0.007),
+        rotationSwayFactor: 0.5,
+        chipTiltStrength: 0.38,
+        chaosAmplitude: Math.max(0.4, gridSize * 0.011),
+        chaosCycles: Math.max(2.2, cells * 2.4),
+        routeBendFactor: 0.42,
+        randomness: 0.55,
+        randomBobJitter: 0.42,
+        randomLateralJitter: 0.5,
+        randomStrideJitter: 0.38
+      };
+    }
+
+    if (styleId === 'walk-limping-advance') {
+      return {
+        durationMs: (cells * 395) + 220,
+        bobAmplitude: Math.max(0.92, gridSize * 0.02),
+        bobCycles: Math.max(0.65, cells * 0.72),
+        lateralAmplitude: Math.max(1.25, gridSize * 0.034),
+        lateralCycles: Math.max(0.5, cells * 0.58),
+        settleAmplitude: Math.max(1.1, gridSize * 0.028),
+        strideAmplitude: Math.max(0.62, gridSize * 0.015),
+        rotationSwayFactor: 0.42,
+        chipTiltStrength: 0.6,
+        chaosAmplitude: Math.max(0.26, gridSize * 0.007),
+        chaosCycles: Math.max(0.7, cells * 0.7),
+        routeBendFactor: 0.26,
+        randomness: 0.34,
+        randomBobJitter: 0.35,
+        randomLateralJitter: 0.3,
+        randomStrideJitter: 0.5
+      };
+    }
+
+    if (styleId === 'walk-wobble-totter') {
+      return {
+        durationMs: (cells * 325) + 180,
+        bobAmplitude: Math.max(0.85, gridSize * 0.018),
+        bobCycles: Math.max(1, cells * 1.05),
+        lateralAmplitude: Math.max(2.5, gridSize * 0.068),
+        lateralCycles: Math.max(1.1, cells * 1.15),
+        settleAmplitude: Math.max(0.7, gridSize * 0.017),
+        strideAmplitude: Math.max(0.44, gridSize * 0.011),
+        rotationSwayFactor: 1.25,
+        chipTiltStrength: 0.94,
+        chaosAmplitude: Math.max(0.34, gridSize * 0.009),
+        chaosCycles: Math.max(1.15, cells * 1.2),
+        routeBendFactor: 0.38,
+        randomness: 0.46,
+        randomBobJitter: 0.32,
+        randomLateralJitter: 0.48,
+        randomStrideJitter: 0.28
+      };
+    }
+
+    if (styleId === 'walk-drunken-drift') {
+      return {
+        durationMs: (cells * 335) + 175,
+        bobAmplitude: Math.max(0.56, gridSize * 0.012),
+        bobCycles: Math.max(0.8, cells * 0.86),
+        lateralAmplitude: Math.max(3.2, gridSize * 0.086),
+        lateralCycles: Math.max(0.8, cells * 0.82),
+        settleAmplitude: Math.max(0.48, gridSize * 0.013),
+        strideAmplitude: Math.max(0.4, gridSize * 0.01),
+        rotationSwayFactor: 1.32,
+        chipTiltStrength: 1.05,
+        chaosAmplitude: Math.max(0.75, gridSize * 0.019),
+        chaosCycles: Math.max(1.2, cells * 1.3),
+        routeBendFactor: 0.52,
+        randomness: 0.62,
+        randomBobJitter: 0.36,
+        randomLateralJitter: 0.62,
+        randomStrideJitter: 0.3
+      };
+    }
+
+    if (styleId === 'walk-clockwork-tick') {
+      return {
+        durationMs: (cells * 360) + 155,
+        bobAmplitude: Math.max(0.42, gridSize * 0.009),
+        bobCycles: Math.max(1.1, cells * 1.1),
+        lateralAmplitude: Math.max(0.7, gridSize * 0.019),
+        lateralCycles: Math.max(0.95, cells),
+        settleAmplitude: Math.max(0.22, gridSize * 0.006),
+        strideAmplitude: Math.max(0.32, gridSize * 0.008),
+        rotationSwayFactor: 0.2,
+        chipTiltStrength: 0.26,
+        chaosAmplitude: Math.max(0.05, gridSize * 0.0015),
+        chaosCycles: Math.max(2.2, cells * 2.3),
+        routeBendFactor: 0.06,
+        randomness: 0.08,
+        randomBobJitter: 0.08,
+        randomLateralJitter: 0.08,
+        randomStrideJitter: 0.08
+      };
+    }
+
+    if (styleId === 'walk-chaos-skip') {
+      return {
+        durationMs: (cells * 260) + 130,
+        bobAmplitude: Math.max(0.78, gridSize * 0.018),
+        bobCycles: Math.max(1.7, cells * 1.95),
+        lateralAmplitude: Math.max(3.7, gridSize * 0.1),
+        lateralCycles: Math.max(1.7, cells * 1.9),
+        settleAmplitude: Math.max(0.85, gridSize * 0.022),
+        strideAmplitude: Math.max(0.75, gridSize * 0.019),
+        rotationSwayFactor: 1.7,
+        chipTiltStrength: 1.12,
+        chaosAmplitude: Math.max(1.3, gridSize * 0.034),
+        chaosCycles: Math.max(2.8, cells * 3),
+        routeBendFactor: 0.68,
+        randomness: 0.88,
+        randomBobJitter: 0.62,
+        randomLateralJitter: 0.85,
+        randomStrideJitter: 0.58
+      };
+    }
+
+    return {
+      durationMs: (cells * 290) + 130,
+      bobAmplitude: Math.max(0.5, gridSize * 0.01),
+      bobCycles: Math.max(1, cells),
+      lateralAmplitude: Math.max(1.0, gridSize * 0.028),
+      lateralCycles: Math.max(0.75, cells * 0.95),
+      settleAmplitude: Math.max(0.35, gridSize * 0.009),
+      strideAmplitude: Math.max(0.32, gridSize * 0.008),
+      rotationSwayFactor: 0.34,
+      chipTiltStrength: 0.35,
+      chaosAmplitude: Math.max(0.12, gridSize * 0.003),
+      chaosCycles: Math.max(0.6, cells * 0.7),
+      routeBendFactor: 0.2,
+      randomness: 0.2,
+      randomBobJitter: 0.18,
+      randomLateralJitter: 0.22,
+      randomStrideJitter: 0.18
+    };
+  }
+
+  /**
+   * @param {string} styleId
+   * @param {number} tNorm
+   * @returns {number}
+   */
+  _resolveWalkEasedProgress(styleId, tNorm) {
+    const t = clamp(tNorm, 0, 1);
+
+    if (styleId === 'walk-heavy-stomp') {
+      // Heavy stomp starts with force and slows into a planted finish.
+      return 1 - Math.pow(1 - t, 1.95);
+    }
+
+    if (styleId === 'walk-sneak-glide') {
+      // Sneak glide keeps a gentler, near-constant progress.
+      return 0.5 - (0.5 * Math.cos(Math.PI * t));
+    }
+
+    if (styleId === 'walk-skitter-step' || styleId === 'walk-chaos-skip') {
+      return Math.pow(t, 0.72);
+    }
+
+    if (styleId === 'walk-clockwork-tick') {
+      // Quantize progress into coarse ticks while preserving full completion.
+      const steps = 8;
+      return Math.floor(t * steps) / steps;
+    }
+
+    if (styleId === 'walk-limping-advance') {
+      // Bias toward uneven cadence so one "step" visibly lingers.
+      const limpPhase = Math.sin(t * Math.PI * 2);
+      return clamp(t + (limpPhase * 0.05 * (1 - t)), 0, 1);
+    }
+
+    return (t * t) * (3 - (2 * t));
+  }
+
+  /**
+   * @param {string} styleId
+   * @param {number} distance
+   * @param {number} gridSize
+   * @returns {{durationMs:number,hoverHeight:number,rockAmplitudeDeg:number,rockSpeedHz:number,bobAmplitude:number,bobCycles:number,lateralAmplitude:number,lateralCycles:number,bankFactor:number,routeBendFactor:number,chaosAmplitude:number,chaosCycles:number,scaleTiltStrength:number,randomness:number}}
+   */
+  _getFlyingStyleProfile(styleId, distance, gridSize) {
+    const cells = distance / Math.max(1, gridSize);
+
+    if (styleId === 'flying-hover-bob') {
+      return {
+        durationMs: (cells * 280) + 260,
+        hoverHeight: Math.max(12, gridSize * 0.34),
+        rockAmplitudeDeg: 2.8,
+        rockSpeedHz: 0.5,
+        bobAmplitude: Math.max(0.7, gridSize * 0.018),
+        bobCycles: Math.max(1.2, cells * 1.1),
+        lateralAmplitude: Math.max(1.2, gridSize * 0.03),
+        lateralCycles: Math.max(0.9, cells * 0.95),
+        bankFactor: 0.38,
+        routeBendFactor: 0.22,
+        chaosAmplitude: Math.max(0.3, gridSize * 0.008),
+        chaosCycles: Math.max(0.9, cells * 0.9),
+        scaleTiltStrength: 0.28,
+        randomness: 0.22
+      };
+    }
+
+    if (styleId === 'flying-bank-swoop') {
+      return {
+        durationMs: (cells * 230) + 190,
+        hoverHeight: Math.max(14, gridSize * 0.4),
+        rockAmplitudeDeg: 1.8,
+        rockSpeedHz: 0.32,
+        bobAmplitude: Math.max(0.4, gridSize * 0.011),
+        bobCycles: Math.max(0.9, cells * 0.85),
+        lateralAmplitude: Math.max(3.1, gridSize * 0.08),
+        lateralCycles: Math.max(1, cells * 1.15),
+        bankFactor: 1.1,
+        routeBendFactor: 0.62,
+        chaosAmplitude: Math.max(0.36, gridSize * 0.01),
+        chaosCycles: Math.max(1.1, cells * 1.1),
+        scaleTiltStrength: 0.62,
+        randomness: 0.3
+      };
+    }
+
+    if (styleId === 'flying-flutter-dart') {
+      return {
+        durationMs: (cells * 200) + 150,
+        hoverHeight: Math.max(10, gridSize * 0.32),
+        rockAmplitudeDeg: 2.2,
+        rockSpeedHz: 0.72,
+        bobAmplitude: Math.max(1.1, gridSize * 0.028),
+        bobCycles: Math.max(2.8, cells * 3.2),
+        lateralAmplitude: Math.max(1.8, gridSize * 0.046),
+        lateralCycles: Math.max(2.4, cells * 2.6),
+        bankFactor: 0.72,
+        routeBendFactor: 0.35,
+        chaosAmplitude: Math.max(0.75, gridSize * 0.02),
+        chaosCycles: Math.max(2.5, cells * 2.9),
+        scaleTiltStrength: 0.46,
+        randomness: 0.55
+      };
+    }
+
+    if (styleId === 'flying-chaos-drift') {
+      return {
+        durationMs: (cells * 250) + 170,
+        hoverHeight: Math.max(16, gridSize * 0.44),
+        rockAmplitudeDeg: 4.2,
+        rockSpeedHz: 0.62,
+        bobAmplitude: Math.max(1.4, gridSize * 0.034),
+        bobCycles: Math.max(2.2, cells * 2.4),
+        lateralAmplitude: Math.max(4.1, gridSize * 0.108),
+        lateralCycles: Math.max(2, cells * 2.25),
+        bankFactor: 1.5,
+        routeBendFactor: 0.8,
+        chaosAmplitude: Math.max(1.6, gridSize * 0.04),
+        chaosCycles: Math.max(3, cells * 3.25),
+        scaleTiltStrength: 0.86,
+        randomness: 0.88
+      };
+    }
+
+    return {
+      durationMs: (cells * 250) + 220,
+      hoverHeight: Math.max(12, gridSize * 0.35),
+      rockAmplitudeDeg: 3,
+      rockSpeedHz: 0.4,
+      bobAmplitude: Math.max(0.5, gridSize * 0.014),
+      bobCycles: Math.max(1, cells * 0.95),
+      lateralAmplitude: Math.max(1.4, gridSize * 0.036),
+      lateralCycles: Math.max(0.95, cells),
+      bankFactor: 0.5,
+      routeBendFactor: 0.28,
+      chaosAmplitude: Math.max(0.45, gridSize * 0.012),
+      chaosCycles: Math.max(1.1, cells * 1.1),
+      scaleTiltStrength: 0.34,
+      randomness: 0.24
+    };
+  }
+
+  /**
+   * @param {string} styleId
+   * @param {number} tNorm
+   * @returns {number}
+   */
+  _resolveFlyingEasedProgress(styleId, tNorm) {
+    const t = clamp(tNorm, 0, 1);
+
+    if (styleId === 'flying-bank-swoop') {
+      return 1 - Math.pow(1 - t, 1.72);
+    }
+
+    if (styleId === 'flying-flutter-dart') {
+      return clamp(t + (Math.sin(t * Math.PI * 6) * 0.018 * (1 - t)), 0, 1);
+    }
+
+    if (styleId === 'flying-chaos-drift') {
+      return clamp(t + (Math.sin((t * Math.PI * 2.2) + Math.PI * 0.15) * 0.04 * (1 - t)), 0, 1);
+    }
+
+    if (styleId === 'flying-hover-bob') {
+      return 0.5 - (0.5 * Math.cos(Math.PI * t));
+    }
+
+    return (t * t) * (3 - (2 * t));
   }
 
   /**
@@ -2121,40 +2671,107 @@ export class TokenMovementManager {
    * @param {{x:number,y:number,z:number,scaleX:number,scaleY:number,rotation:number,gridSize:number}} input.target
    * @param {object} [input.options]
    */
-  _startFlyingGlideTrack({ tokenId, sprite, target, options = {} }) {
+  _startFlyingGlideTrack({ tokenId, sprite, target, styleId = 'flying-glide', options = {} }) {
     if (!tokenId || !sprite || !target) return;
 
     const existing = this.activeTracks.get(tokenId);
     if (existing) this._cancelTrack(existing);
 
-    const fallbackHover = Math.max(10, asNumber(target.gridSize, 100) * 0.35);
-    const hoverHeight = asNumber(options?.mapShineHoverHeight, fallbackHover);
-    const rockAmplitudeDeg = asNumber(options?.mapShineRockAmplitudeDeg, 3);
-    const rockSpeedHz = asNumber(options?.mapShineRockSpeedHz, 0.4);
+    const flyingStyleId = this._isFlyingStyle(styleId) ? styleId : 'flying-glide';
+    const distance = Math.hypot(target.x - asNumber(sprite.position.x, target.x), target.y - asNumber(sprite.position.y, target.y));
+    const gridSize = Math.max(1, asNumber(target.gridSize, 100));
+    const profile = this._getFlyingStyleProfile(flyingStyleId, distance, gridSize);
+
+    const hoverHeight = asNumber(options?.mapShineHoverHeight, profile.hoverHeight);
+    const rockAmplitudeDeg = asNumber(options?.mapShineRockAmplitudeDeg, profile.rockAmplitudeDeg);
+    const rockSpeedHz = asNumber(options?.mapShineRockSpeedHz, profile.rockSpeedHz);
+    const bobAmplitude = clamp(
+      asNumber(options?.mapShineFlyingBobAmplitude, profile.bobAmplitude),
+      0,
+      Math.max(5, gridSize * 0.2)
+    );
+    const bobCycles = clamp(
+      asNumber(options?.mapShineFlyingBobCycles, profile.bobCycles),
+      0,
+      12
+    );
+    const lateralAmplitude = clamp(
+      asNumber(options?.mapShineFlyingLateralAmplitude, profile.lateralAmplitude),
+      0,
+      Math.max(8, gridSize * 0.22)
+    );
+    const lateralCycles = clamp(
+      asNumber(options?.mapShineFlyingLateralCycles, profile.lateralCycles),
+      0,
+      10
+    );
+    const bankFactor = clamp(
+      asNumber(options?.mapShineFlyingBankFactor, profile.bankFactor),
+      0,
+      2
+    );
+    const routeBendFactor = clamp(
+      asNumber(options?.mapShineFlyingRouteBendFactor, profile.routeBendFactor),
+      0,
+      1
+    );
+    const chaosAmplitude = clamp(
+      asNumber(options?.mapShineFlyingChaosAmplitude, profile.chaosAmplitude),
+      0,
+      Math.max(10, gridSize * 0.28)
+    );
+    const chaosCycles = clamp(
+      asNumber(options?.mapShineFlyingChaosCycles, profile.chaosCycles),
+      0,
+      16
+    );
+    const scaleTiltStrength = clamp(
+      asNumber(options?.mapShineFlyingScaleTiltStrength, profile.scaleTiltStrength),
+      0,
+      1.4
+    );
+
+    const randomness = clamp(
+      asNumber(options?.mapShineFlyingRandomness, profile.randomness),
+      0,
+      1
+    );
+
+    const startX = asNumber(sprite.position.x, target.x);
+    const startY = asNumber(sprite.position.y, target.y);
+
+    const seedRoot = `${tokenId}|${flyingStyleId}|${Math.round(startX)}|${Math.round(startY)}|${Math.round(target.x)}|${Math.round(target.y)}`;
+    const bobRandom = ((hashStringToUnit(`${seedRoot}|f-bob`) * 2) - 1) * randomness;
+    const lateralRandom = ((hashStringToUnit(`${seedRoot}|f-lat`) * 2) - 1) * randomness;
+    const chaosPhase = hashStringToUnit(`${seedRoot}|f-chaos-phase`) * Math.PI * 2;
+    const routeBendPhase = hashStringToUnit(`${seedRoot}|f-route-bend-phase`) * Math.PI * 2;
+    const routeBendSeed = ((hashStringToUnit(`${seedRoot}|f-route-bend`) * 2) - 1);
+
+    const randomizedBobAmplitude = Math.max(0, bobAmplitude * (1 + (bobRandom * 0.32)));
+    const randomizedLateralAmplitude = Math.max(0, lateralAmplitude * (1 + (lateralRandom * 0.38)));
+    const maxRouteBend = Math.min(Math.max(2, gridSize * 0.18), Math.max(2, distance * 0.34));
+    const routeBendAmplitude = routeBendSeed * maxRouteBend * routeBendFactor;
 
     if (!this.isFlying(tokenId)) {
       this.setFlyingState(tokenId, { hoverHeight, rockAmplitudeDeg, rockSpeedHz });
     }
 
     const flyingState = this.flyingTokens.get(tokenId);
+    const startHoverHeight = asNumber(flyingState?.hoverHeight, hoverHeight);
     if (flyingState) {
+      flyingState.styleId = flyingStyleId;
       flyingState.hoverHeight = hoverHeight;
       flyingState.rockAmplitudeRad = (rockAmplitudeDeg * Math.PI) / 180;
       flyingState.rockSpeedHz = rockSpeedHz;
     }
 
-    const startX = asNumber(sprite.position.x, target.x);
-    const startY = asNumber(sprite.position.y, target.y);
-    const startGroundZ = asNumber(sprite.position.z - hoverHeight, target.z);
+    const startGroundZ = asNumber(sprite.position.z - startHoverHeight, target.z);
     const startRotation = asNumber(flyingState?.baseRotation, asNumber(sprite.material?.rotation, target.rotation));
 
-    const distance = Math.hypot(target.x - startX, target.y - startY);
-    const gridSize = Math.max(1, asNumber(target.gridSize, 100));
-
     const durationMs = clamp(
-      asNumber(options?.mapShineDurationMs, (distance / gridSize) * 260 + 220),
+      asNumber(options?.mapShineDurationMs, profile.durationMs),
       180,
-      1800
+      2400
     );
 
     try {
@@ -2171,14 +2788,26 @@ export class TokenMovementManager {
 
     this.activeTracks.set(tokenId, {
       tokenId,
-      styleId: 'flying-glide',
+      styleId: flyingStyleId,
       sprite,
       startX,
       startY,
       startGroundZ,
       startRotation,
       target,
+      startHoverHeight,
       hoverHeight,
+      bobAmplitude: randomizedBobAmplitude,
+      bobCycles,
+      lateralAmplitude: randomizedLateralAmplitude,
+      lateralCycles,
+      bankFactor,
+      routeBendAmplitude,
+      routeBendPhase,
+      chaosAmplitude,
+      chaosCycles,
+      chaosPhase,
+      scaleTiltStrength,
       durationSec: durationMs / 1000,
       elapsedSec: 0
     });
@@ -2192,25 +2821,59 @@ export class TokenMovementManager {
     const sprite = track?.sprite;
     if (!sprite) return;
 
-    const x = track.startX + (track.target.x - track.startX) * tNorm;
-    const y = track.startY + (track.target.y - track.startY) * tNorm;
-    const baseZ = track.startGroundZ + (track.target.z - track.startGroundZ) * tNorm;
+    const easedT = this._resolveFlyingEasedProgress(track.styleId, tNorm);
+    const dx = track.target.x - track.startX;
+    const dy = track.target.y - track.startY;
+    const dist = Math.hypot(dx, dy);
+    const invDist = dist > 0.0001 ? (1 / dist) : 0;
+    const perpX = -dy * invDist;
+    const perpY = dx * invDist;
+
+    const lateral = Math.sin(easedT * Math.PI * 2 * asNumber(track.lateralCycles, 0))
+      * asNumber(track.lateralAmplitude, 0)
+      * (1 - (0.72 * tNorm));
+    const bob = Math.sin(easedT * Math.PI * 2 * asNumber(track.bobCycles, 0))
+      * asNumber(track.bobAmplitude, 0)
+      * (1 - (0.65 * tNorm));
+    const chaos = Math.sin((easedT * Math.PI * 2 * asNumber(track.chaosCycles, 0)) + asNumber(track.chaosPhase, 0))
+      * asNumber(track.chaosAmplitude, 0)
+      * (1 - (0.55 * tNorm));
+    const routeBend = Math.sin((easedT * Math.PI) + asNumber(track.routeBendPhase, 0))
+      * Math.sin(easedT * Math.PI)
+      * asNumber(track.routeBendAmplitude, 0);
+
+    const x = track.startX + (dx * easedT) + (perpX * (lateral + routeBend + (chaos * 0.4)));
+    const y = track.startY + (dy * easedT) + (perpY * (lateral + routeBend + (chaos * 0.4)));
+    const baseZ = track.startGroundZ + (track.target.z - track.startGroundZ) * easedT;
+    const currentHoverHeight = asNumber(track.startHoverHeight, asNumber(track.hoverHeight, 0))
+      + ((asNumber(track.hoverHeight, 0) - asNumber(track.startHoverHeight, asNumber(track.hoverHeight, 0))) * easedT);
+    const z = baseZ + bob + (chaos * 0.12);
 
     const rotDelta = shortestAngleDelta(track.startRotation, track.target.rotation);
-    const baseRotation = track.startRotation + (rotDelta * tNorm);
+    const gridScale = Math.max(1, asNumber(track.target?.gridSize, 100));
+    const baseRotation = track.startRotation
+      + (rotDelta * easedT)
+      + (((lateral + routeBend) / gridScale) * asNumber(track.bankFactor, 0.5))
+      + ((chaos / gridScale) * 0.35);
+
+    const tilt = ((lateral + routeBend + (chaos * 0.22)) / gridScale) * asNumber(track.scaleTiltStrength, 0);
+    const scalePulse = Math.abs(tilt);
+    const scaleX = track.target.scaleX * (1 + (scalePulse * 0.09));
+    const scaleY = track.target.scaleY * (1 - (scalePulse * 0.07));
 
     const state = this.flyingTokens.get(track.tokenId);
     if (state) {
-      state.baseZ = baseZ;
+      state.baseZ = z;
       state.baseRotation = baseRotation;
-      state.hoverHeight = asNumber(track.hoverHeight, state.hoverHeight);
+      state.hoverHeight = currentHoverHeight;
     } else if (sprite.material) {
       // Fallback if hover state was externally cleared mid-track.
       sprite.material.rotation = baseRotation;
     }
 
-    const hoverHeight = asNumber(track.hoverHeight, 0);
-    sprite.position.set(x, y, baseZ + hoverHeight);
+    sprite.position.set(x, y, z + currentHoverHeight);
+    sprite.scale.set(scaleX, scaleY, 1);
+    if (sprite.material) sprite.material.rotation = baseRotation;
     if (sprite.matrixAutoUpdate === false) sprite.updateMatrix();
   }
 
@@ -2232,21 +2895,68 @@ export class TokenMovementManager {
         track.elapsedSec += deltaSec;
         const tNorm = clamp(track.elapsedSec / Math.max(track.durationSec, 0.0001), 0, 1);
 
-        if (track.styleId === 'flying-glide') {
+        if (this._isFlyingStyle(track.styleId)) {
           this._sampleFlyingGlideTrack(track, tNorm);
-        } else if (track.styleId === 'walk') {
-          const easedT = (tNorm * tNorm) * (3 - (2 * tNorm));
-          const x = track.startX + (track.target.x - track.startX) * easedT;
-          const y = track.startY + (track.target.y - track.startY) * easedT;
-          const z = track.startZ + (track.target.z - track.startZ) * easedT
-            + (Math.sin(easedT * Math.PI * 2 * asNumber(track.bobCycles, 0))
-              * asNumber(track.bobAmplitude, 0)
-              * (1 - tNorm));
+        } else if (this._isWalkStyle(track.styleId)) {
+          const easedT = this._resolveWalkEasedProgress(track.styleId, tNorm);
+          const dx = track.target.x - track.startX;
+          const dy = track.target.y - track.startY;
+          const dist = Math.hypot(dx, dy);
+          const invDist = dist > 0.0001 ? (1 / dist) : 0;
+          const dirX = dx * invDist;
+          const dirY = dy * invDist;
+          const perpX = -dy * invDist;
+          const perpY = dx * invDist;
+
+          const lateral = Math.sin(easedT * Math.PI * 2 * asNumber(track.lateralCycles, 0))
+            * asNumber(track.lateralAmplitude, 0)
+            * (1 - (0.7 * tNorm));
+
+          const stride = Math.sin(easedT * Math.PI * 2 * asNumber(track.bobCycles, 0))
+            * asNumber(track.strideAmplitude, 0)
+            * (1 - (0.85 * tNorm));
+
+          const bob = Math.sin(easedT * Math.PI * 2 * asNumber(track.bobCycles, 0))
+            * asNumber(track.bobAmplitude, 0)
+            * (1 - tNorm);
+
+          const chaos = Math.sin((easedT * Math.PI * 2 * asNumber(track.chaosCycles, 0)) + asNumber(track.chaosPhase, 0))
+            * asNumber(track.chaosAmplitude, 0)
+            * (1 - (0.6 * tNorm));
+
+          const routeBend = Math.sin((easedT * Math.PI) + asNumber(track.routeBendPhase, 0))
+            * Math.sin(easedT * Math.PI)
+            * asNumber(track.routeBendAmplitude, 0);
+
+          let settle = 0;
+          const settleAmplitude = asNumber(track.settleAmplitude, 0);
+          if (settleAmplitude > 0) {
+            const settleT = clamp((tNorm - 0.82) / 0.18, 0, 1);
+            if (settleT > 0) {
+              settle = Math.sin(settleT * Math.PI) * (1 - settleT) * settleAmplitude;
+            }
+          }
+
+          const x = track.startX + (dx * easedT) + (perpX * (lateral + chaos + routeBend)) + (dirX * stride);
+          const y = track.startY + (dy * easedT) + (perpY * (lateral + chaos + routeBend)) + (dirY * stride);
+          const z = track.startZ + (track.target.z - track.startZ) * easedT + bob - settle;
 
           const rotDelta = shortestAngleDelta(track.startRotation, track.target.rotation);
-          const rotation = track.startRotation + (rotDelta * easedT);
+          let rotation = track.startRotation + (rotDelta * easedT);
+          const gridScale = Math.max(1, asNumber(track.target?.gridSize, 100));
+          rotation += (lateral / gridScale) * asNumber(track.rotationSwayFactor, 0.18);
+          rotation += (chaos / gridScale) * 0.4;
+
+          // Sprite tokens are billboarded, so we fake chip-like pitch/roll by
+          // modulating X/Y scale during movement.
+          const tiltStrength = asNumber(track.chipTiltStrength, 0);
+          const tilt = ((lateral + chaos) / gridScale) * tiltStrength;
+          const scalePulse = Math.abs(tilt);
+          const scaleX = track.target.scaleX * (1 + (scalePulse * 0.11));
+          const scaleY = track.target.scaleY * (1 - (scalePulse * 0.08));
 
           sprite.position.set(x, y, z);
+          sprite.scale.set(scaleX, scaleY, 1);
           if (sprite.material) sprite.material.rotation = rotation;
           if (sprite.matrixAutoUpdate === false) sprite.updateMatrix();
         } else {
@@ -2290,7 +3000,7 @@ export class TokenMovementManager {
     const sprite = track?.sprite;
     if (!sprite) return;
 
-    if (track.styleId === 'flying-glide') {
+    if (this._isFlyingStyle(track.styleId)) {
       const hoverHeight = asNumber(track.hoverHeight, 0);
       const baseZ = asNumber(track.target?.z, sprite.position.z - hoverHeight);
       const baseRotation = asNumber(track.target?.rotation, asNumber(sprite.material?.rotation, 0));
@@ -3831,7 +4541,7 @@ export class TokenMovementManager {
     return false;
   }
 
-  // ── Flying Placeholder API ──────────────────────────────────────────────────
+  // ── Flying Movement + Elevation Indicators ─────────────────────────────────
 
   /**
    * Map of tokenId → flying state objects. Tracks which tokens are currently
@@ -3841,6 +4551,194 @@ export class TokenMovementManager {
   get flyingTokens() {
     if (!this._flyingTokens) this._flyingTokens = new Map();
     return this._flyingTokens;
+  }
+
+  /**
+   * @param {TokenDocument|object|null} tokenDoc
+   * @param {number} worldX
+   * @param {number} worldY
+   * @returns {{type:'ground'|'tile', tileId:string, tileDoc:any, elevation:number, sortKey:number, label:string}}
+   */
+  _resolveFlyingSupportSurface(tokenDoc, worldX, worldY) {
+    const tokenElevation = asNumber(tokenDoc?.elevation, 0);
+    const tileManager = window.MapShine?.tileManager;
+    const tileEntries = tileManager?.tileSprites;
+    let best = null;
+
+    if (tileEntries instanceof Map && tileEntries.size > 0) {
+      for (const [tileId, data] of tileEntries.entries()) {
+        const tileDoc = data?.tileDoc;
+        const sprite = data?.sprite;
+        if (!tileDoc || !sprite || sprite.userData?._removed) continue;
+        if (sprite.visible === false) continue;
+
+        const tileElevation = asNumber(tileDoc?.elevation, 0);
+        if (tileElevation > (tokenElevation + 0.15)) continue;
+
+        let inBounds = false;
+        try {
+          inBounds = !!tileManager?.isWorldPointInTileBounds?.(data, worldX, worldY);
+        } catch (_) {
+          inBounds = false;
+        }
+        if (!inBounds) continue;
+
+        let opaque = true;
+        if (typeof tileManager?.isWorldPointOpaque === 'function') {
+          try {
+            opaque = !!tileManager.isWorldPointOpaque(data, worldX, worldY);
+          } catch (_) {
+            opaque = true;
+          }
+        }
+        if (!opaque) continue;
+
+        const sortKey = asNumber(tileDoc?.sort ?? tileDoc?.z, 0);
+        const tileSrc = String(tileDoc?.texture?.src || '');
+        const fileName = tileSrc
+          ? (tileSrc.split('/').pop() || '').split('?')[0]
+          : '';
+        const label = fileName || `Tile ${String(tileId || '')}`;
+
+        if (!best
+          || tileElevation > (best.elevation + 0.01)
+          || (Math.abs(tileElevation - best.elevation) <= 0.01 && sortKey > best.sortKey)) {
+          best = {
+            type: 'tile',
+            tileId: String(tileId || ''),
+            tileDoc,
+            elevation: tileElevation,
+            sortKey,
+            label
+          };
+        }
+      }
+    }
+
+    if (best) return best;
+
+    return {
+      type: 'ground',
+      tileId: '',
+      tileDoc: null,
+      elevation: 0,
+      sortKey: Number.NEGATIVE_INFINITY,
+      label: 'Ground'
+    };
+  }
+
+  /**
+   * @param {any} supportSurface
+   * @returns {string}
+   */
+  _getFlyingSupportLabel(supportSurface) {
+    if (!supportSurface || supportSurface.type !== 'tile') return 'Ground';
+    const raw = String(supportSurface.label || supportSurface.tileId || 'Tile');
+    return raw.length > 20 ? `${raw.slice(0, 17)}...` : raw;
+  }
+
+  /**
+   * @param {any} state
+   */
+  _ensureFlyingIndicatorBadge(state) {
+    if (!state?.groundGroup || state?.elevationBadgeSprite) return;
+
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 768;
+    canvas.height = 192;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    if (THREE.SRGBColorSpace) texture.colorSpace = THREE.SRGBColorSpace;
+
+    const material = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false
+    });
+    const badge = new THREE.Sprite(material);
+    badge.name = `FlyingElevationBadge_${state.tokenId}`;
+    badge.scale.set(120, 30, 1);
+    badge.position.set(0, 0, 12);
+
+    state.groundGroup.add(badge);
+    state.elevationBadgeSprite = badge;
+    state.elevationBadgeCanvas = canvas;
+    state.elevationBadgeCtx = ctx;
+    state.elevationBadgeTexture = texture;
+  }
+
+  /**
+   * @param {any} state
+   * @param {string} text
+   */
+  _drawFlyingIndicatorBadge(state, text) {
+    if (!state) return;
+    this._ensureFlyingIndicatorBadge(state);
+
+    const canvas = state.elevationBadgeCanvas;
+    const ctx = state.elevationBadgeCtx;
+    const texture = state.elevationBadgeTexture;
+    if (!canvas || !ctx || !texture) return;
+
+    const safeText = String(text || '').trim();
+    if (safeText === state.elevationBadgeText) return;
+    state.elevationBadgeText = safeText;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = 'rgba(10, 11, 18, 0.72)';
+    ctx.strokeStyle = 'rgba(170, 212, 255, 0.68)';
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.rect(12, 12, canvas.width - 24, canvas.height - 24);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = 'bold 58px Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.97)';
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
+    ctx.lineWidth = 10;
+    const x = canvas.width / 2;
+    const y = canvas.height / 2;
+    ctx.strokeText(safeText, x, y);
+    ctx.fillText(safeText, x, y);
+
+    texture.needsUpdate = true;
+  }
+
+  /**
+   * @param {any} state
+   * @param {number} tetherHeight
+   */
+  _updateFlyingTetherHeight(state, tetherHeight) {
+    if (!state) return;
+
+    const height = Math.max(2, asNumber(tetherHeight, 2));
+    const line = state.tetherLine;
+    const position = line?.geometry?.attributes?.position;
+    if (position && position.count >= 2) {
+      position.setXYZ(0, 0, 0, 0);
+      position.setXYZ(1, 0, 0, height);
+      position.needsUpdate = true;
+      try {
+        line.computeLineDistances?.();
+      } catch (_) {
+      }
+    }
+
+    if (state.elevationBadgeSprite) {
+      state.elevationBadgeSprite.position.set(0, 0, height + 12);
+    }
   }
 
   /**
@@ -3872,6 +4770,7 @@ export class TokenMovementManager {
     // Create ground indicator group (line + circle under the token).
     const THREE = window.THREE;
     let groundGroup = null;
+    let tetherLine = null;
     if (THREE) {
       groundGroup = new THREE.Group();
       groundGroup.name = `FlyingIndicator_${tokenId}`;
@@ -3902,9 +4801,9 @@ export class TokenMovementManager {
         gapSize: 4,
         depthWrite: false
       });
-      const line = new THREE.Line(lineGeo, lineMat);
-      line.computeLineDistances();
-      groundGroup.add(line);
+      tetherLine = new THREE.Line(lineGeo, lineMat);
+      tetherLine.computeLineDistances();
+      groundGroup.add(tetherLine);
 
       // Position at token base. We read the sprite's current XY and place
       // the indicator on the ground Z.
@@ -3922,12 +4821,21 @@ export class TokenMovementManager {
       tokenId,
       sprite,
       groundGroup,
+      tetherLine,
+      styleId: 'flying-glide',
       hoverHeight,
       rockAmplitudeRad: (rockAmplitudeDeg * Math.PI) / 180,
       rockSpeedHz,
       baseZ: sprite.position.z,
       baseRotation: asNumber(sprite.material?.rotation, 0),
       elapsedSec: 0,
+      supportSampleElapsed: 0,
+      supportSurface: null,
+      elevationBadgeSprite: null,
+      elevationBadgeCanvas: null,
+      elevationBadgeCtx: null,
+      elevationBadgeTexture: null,
+      elevationBadgeText: '',
       active: true
     };
 
@@ -3936,6 +4844,9 @@ export class TokenMovementManager {
     // Offset sprite upward immediately
     sprite.position.z = state.baseZ + hoverHeight;
     if (sprite.matrixAutoUpdate === false) sprite.updateMatrix();
+
+    // Create and initialize the elevation/support badge after initial state setup.
+    this._ensureFlyingIndicatorBadge(state);
 
     log.info(`Token ${tokenId} entered flying hover (height=${hoverHeight.toFixed(1)})`);
     return true;
@@ -3959,11 +4870,19 @@ export class TokenMovementManager {
       const scene = this.tokenManager?.scene;
       if (scene) scene.remove(state.groundGroup);
       state.groundGroup.traverse(child => {
+        child.material?.map?.dispose?.();
         child.geometry?.dispose();
         child.material?.dispose();
       });
       state.groundGroup = null;
+      state.tetherLine = null;
     }
+
+    state.elevationBadgeSprite = null;
+    state.elevationBadgeCanvas = null;
+    state.elevationBadgeCtx = null;
+    state.elevationBadgeTexture = null;
+    state.elevationBadgeText = '';
 
     // Snap sprite back to base Z and rotation
     if (state.sprite && !state.sprite.userData?._removed) {
@@ -3989,8 +4908,8 @@ export class TokenMovementManager {
   }
 
   /**
-   * Per-frame update for flying tokens: gentle rock animation and
-   * ground indicator position sync.
+   * Per-frame update for flying tokens: gentle rock animation, dynamic tether,
+   * and elevation/support indicators.
    * @param {number} deltaSec
    * @private
    */
@@ -4016,7 +4935,27 @@ export class TokenMovementManager {
       // Sync ground indicator position to follow token XY
       if (state.groundGroup) {
         const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
-        state.groundGroup.position.set(sprite.position.x, sprite.position.y, groundZ + 0.5);
+        const groundAnchorZ = groundZ + 0.5;
+        state.groundGroup.position.set(sprite.position.x, sprite.position.y, groundAnchorZ);
+
+        const tetherHeight = Math.max(2, sprite.position.z - groundAnchorZ);
+        this._updateFlyingTetherHeight(state, tetherHeight);
+
+        state.supportSampleElapsed = asNumber(state.supportSampleElapsed, 0) + deltaSec;
+        if (state.supportSampleElapsed >= 0.12 || !state.supportSurface) {
+          const tokenDoc = this._resolveTokenDocumentById(tokenId, sprite?.userData?.tokenDoc || null);
+          const supportSurface = this._resolveFlyingSupportSurface(tokenDoc, sprite.position.x, sprite.position.y);
+          state.supportSurface = supportSurface;
+
+          const tokenElevation = asNumber(tokenDoc?.elevation, 0);
+          const supportLabel = this._getFlyingSupportLabel(supportSurface);
+          const supportElevation = Math.round(asNumber(supportSurface?.elevation, 0) * 10) / 10;
+          const badgeText = `Elev ${Math.round(tokenElevation * 10) / 10} | ${supportLabel} @ ${supportElevation}`;
+          this._drawFlyingIndicatorBadge(state, badgeText);
+
+          state.supportSampleElapsed = 0;
+        }
+
         state.groundGroup.updateMatrix();
       }
 
@@ -4317,8 +5256,10 @@ export class TokenMovementManager {
    * @returns {Promise<{ok:boolean, tokenId:string, reason?:string, transitions:Array<object>, plan?:object, pathNodes:Array<{x:number,y:number}>}>}
    */
   async executeDoorAwareTokenMove({ tokenDoc, destinationTopLeft, options = {} } = {}) {
+    let tokenMoveLock = null;
+    let tokenId = '';
     try {
-      const tokenId = String(tokenDoc?.id || '');
+      tokenId = String(tokenDoc?.id || '');
       if (!tokenId) {
         this._pathfindingLog('warn', 'executeDoorAwareTokenMove blocked: missing token id', {
           destinationTopLeft,
@@ -4335,7 +5276,7 @@ export class TokenMovementManager {
 
       // Serialize per-token: wait for any in-flight move on this token to finish
       // before starting a new one. Safety timeout prevents infinite waits.
-      await this._acquireTokenMoveLock(tokenId);
+      tokenMoveLock = await this._acquireTokenMoveLock(tokenId);
 
       const destX = asNumber(destinationTopLeft?.x, NaN);
       const destY = asNumber(destinationTopLeft?.y, NaN);
@@ -4507,7 +5448,6 @@ export class TokenMovementManager {
         pathNodes
       };
     } catch (error) {
-      const tokenId = String(tokenDoc?.id || '');
       this._pathfindingLog('error', 'executeDoorAwareTokenMove threw unexpectedly', {
         tokenId,
         destinationTopLeft,
@@ -4521,8 +5461,7 @@ export class TokenMovementManager {
         pathNodes: []
       };
     } finally {
-      const tokenId = String(tokenDoc?.id || '');
-      if (tokenId) this._releaseTokenMoveLock(tokenId);
+      if (tokenId) this._releaseTokenMoveLock(tokenId, tokenMoveLock);
     }
   }
 
@@ -4704,6 +5643,8 @@ export class TokenMovementManager {
    * @returns {Promise<{ok:boolean, reason?:string, tokenCount:number, assignments?:Array<object>, stepCount?:number}>}
    */
   async executeDoorAwareGroupMove({ tokenMoves = [], options = {} } = {}) {
+    let groupMoveLock = null;
+
     // Signal any in-flight group move to stop at the next step boundary so
     // this new movement order can take over quickly instead of waiting for
     // the full previous animation to finish.
@@ -4713,7 +5654,7 @@ export class TokenMovementManager {
 
     // Serialize group moves globally so two concurrent group operations
     // cannot interleave timeline steps and cause deadlocks.
-    await this._acquireGroupMoveLock();
+    groupMoveLock = await this._acquireGroupMoveLock();
 
     // Create a fresh cancel token for this move. Any subsequent move call
     // will set .cancelled = true to interrupt our timeline.
@@ -5046,7 +5987,7 @@ export class TokenMovementManager {
       if (this._activeGroupCancelToken === groupCancelToken) {
         this._activeGroupCancelToken = null;
       }
-      this._releaseGroupMoveLock();
+      this._releaseGroupMoveLock(groupMoveLock);
     }
   }
 
@@ -6387,7 +7328,8 @@ export class TokenMovementManager {
               tokenId,
               phase: 'GROUP_PATH_SEGMENT',
               groupStepIndex: stepIndex,
-              groupStepCount: maxTimelineLen - 1
+              groupStepCount: maxTimelineLen - 1,
+              _groupCancelToken: groupCancelToken
             })
           );
         }
@@ -6417,6 +7359,21 @@ export class TokenMovementManager {
           rl?.requestContinuousRender?.(100);
         } catch (_) {
         }
+
+        if (groupCancelToken?.cancelled) {
+          return { ok: false, reason: 'interrupted-by-new-move' };
+        }
+
+        const wavePauseMs = this._estimateGroupWavePauseMs(stepIndex, Math.max(1, maxTimelineLen - 1), planEntries.length, options);
+        if (wavePauseMs > 0) {
+          const pauseDeadline = Date.now() + wavePauseMs;
+          while (!groupCancelToken?.cancelled && Date.now() < pauseDeadline) {
+            await _sleep(Math.min(20, Math.max(4, pauseDeadline - Date.now())));
+          }
+          if (groupCancelToken?.cancelled) {
+            return { ok: false, reason: 'interrupted-by-new-move' };
+          }
+        }
       }
 
       return { ok: true };
@@ -6427,6 +7384,33 @@ export class TokenMovementManager {
       }, error);
       return { ok: false, reason: 'group-timeline-exception' };
     }
+  }
+
+  /**
+   * Compute a small variable pause between synchronized group-move waves.
+   * This prevents groups from looking perfectly metronomic while preserving
+   * deterministic choreography on the same plan.
+   *
+   * @param {number} stepIndex
+   * @param {number} stepCount
+   * @param {number} tokenCount
+   * @param {object} options
+   * @returns {number}
+   */
+  _estimateGroupWavePauseMs(stepIndex, stepCount, tokenCount, options = {}) {
+    if (Number.isFinite(Number(options?.groupStepPauseMs))) {
+      return Math.max(0, asNumber(options?.groupStepPauseMs, 0));
+    }
+
+    const baseMs = clamp(asNumber(options?.groupStepPauseBaseMs, 18), 0, 240);
+    const varianceMs = clamp(asNumber(options?.groupStepPauseVarianceMs, 46), 0, 180);
+
+    const sceneId = String(canvas?.scene?.id || 'scene');
+    const seed = hashStringToUnit(`${sceneId}|group-wave|${Math.round(stepIndex)}|${Math.round(stepCount)}|${Math.round(tokenCount)}|${this._doorStateRevision}`);
+    const jitter = ((seed * 2) - 1) * (varianceMs * 0.5);
+    const pauseMs = baseMs + jitter;
+
+    return clamp(pauseMs, 0, 260);
   }
 
   /**
@@ -7058,6 +8042,12 @@ export class TokenMovementManager {
    * @returns {Promise<{ok:boolean, reason?:string}>}
    */
   async _moveTokenToFoundryPoint(tokenId, point, tokenDoc, options = {}, context = {}) {
+    const groupCancelToken = context?._groupCancelToken || options?._groupCancelToken || null;
+
+    if (groupCancelToken?.cancelled) {
+      return { ok: false, reason: 'interrupted-by-new-move' };
+    }
+
     if (!tokenId || !point) {
       this._pathfindingLog('warn', '_moveTokenToFoundryPoint blocked: missing move target', {
         tokenId,
@@ -7095,6 +8085,7 @@ export class TokenMovementManager {
       ? Math.hypot(targetTopLeft.x - currentX, targetTopLeft.y - currentY)
       : 0;
     const fallbackDelayMs = this._estimateSequencedStepDelayMs(stepDistancePx, options);
+    const stepPauseMs = this._estimateSequencedStepPauseMs(stepDistancePx, tokenId, context, options);
 
     const update = {
       _id: tokenId,
@@ -7110,7 +8101,25 @@ export class TokenMovementManager {
 
     try {
       await canvas.scene.updateEmbeddedDocuments('Token', [update], updateOptions);
-      await this._awaitSequencedStepSettle(tokenId, fallbackDelayMs, options);
+      if (groupCancelToken?.cancelled) {
+        return { ok: false, reason: 'interrupted-by-new-move' };
+      }
+
+      await this._awaitSequencedStepSettle(tokenId, fallbackDelayMs, options, context);
+
+      if (groupCancelToken?.cancelled) {
+        return { ok: false, reason: 'interrupted-by-new-move' };
+      }
+
+      if (stepPauseMs > 0) {
+        const pauseDeadline = Date.now() + stepPauseMs;
+        while (!groupCancelToken?.cancelled && Date.now() < pauseDeadline) {
+          await _sleep(Math.min(20, Math.max(4, pauseDeadline - Date.now())));
+        }
+        if (groupCancelToken?.cancelled) {
+          return { ok: false, reason: 'interrupted-by-new-move' };
+        }
+      }
       return { ok: true };
     } catch (error) {
       this._pathfindingLog('warn', 'Door-aware move update failed for token', {
@@ -7144,14 +8153,50 @@ export class TokenMovementManager {
   }
 
   /**
+   * Add a small randomized post-step pause so synchronized movement has more
+   * organic cadence while still respecting deterministic path planning.
+   *
+   * @param {number} stepDistancePx
+   * @param {string} tokenId
+   * @param {object} context
+   * @param {object} options
+   * @returns {number}
+   */
+  _estimateSequencedStepPauseMs(stepDistancePx, tokenId, context = {}, options = {}) {
+    if (optionsBoolean(options?.disableStepPauseJitter, false)) return 0;
+    if (Number.isFinite(Number(options?.perStepPauseMs))) {
+      return Math.max(0, asNumber(options?.perStepPauseMs, 0));
+    }
+
+    const phase = String(context?.phase || options?.method || 'PATH_SEGMENT');
+    const isGroupPhase = phase === 'GROUP_PATH_SEGMENT';
+    const baseMs = clamp(asNumber(options?.stepPauseBaseMs, isGroupPhase ? 12 : 7), 0, 220);
+    const varianceMs = clamp(asNumber(options?.stepPauseVarianceMs, isGroupPhase ? 34 : 18), 0, 220);
+
+    const stepIndex = Math.round(asNumber(context?.groupStepIndex, asNumber(context?.stepIndex, -1)));
+    const sceneId = String(canvas?.scene?.id || 'scene');
+    const distanceKey = Math.round(asNumber(stepDistancePx, 0));
+    const seed = hashStringToUnit(`${sceneId}|${tokenId}|${phase}|${stepIndex}|${distanceKey}`);
+    const jitter = ((seed * 2) - 1) * (varianceMs * 0.5);
+
+    return clamp(baseMs + jitter, 0, 260);
+  }
+
+  /**
    * Wait for the token's movement animation track to complete before issuing
    * the next sequenced path node update.
    *
    * @param {string} tokenId
    * @param {number} fallbackDelayMs
    * @param {object} options
+   * @param {object} context
    */
-  async _awaitSequencedStepSettle(tokenId, fallbackDelayMs, options = {}) {
+  async _awaitSequencedStepSettle(tokenId, fallbackDelayMs, options = {}, context = {}) {
+    const groupCancelToken = context?._groupCancelToken || options?._groupCancelToken || null;
+    const cancelled = () => !!groupCancelToken?.cancelled;
+
+    if (cancelled()) return;
+
     const waitForTrackStartMs = clamp(asNumber(options?.waitForTrackStartMs, 220), 0, 2000);
     const waitForTrackFinishMs = clamp(asNumber(options?.waitForTrackFinishMs, 2400), 100, 10000);
     const pollMs = clamp(asNumber(options?.trackPollIntervalMs, 16), 8, 100);
@@ -7160,21 +8205,33 @@ export class TokenMovementManager {
 
     const startDeadline = Date.now() + waitForTrackStartMs;
     let sawTrack = hasTrack();
-    while (!sawTrack && Date.now() < startDeadline) {
+    while (!sawTrack && Date.now() < startDeadline && !cancelled()) {
       await _sleep(pollMs);
       sawTrack = hasTrack();
     }
 
+    if (cancelled()) return;
+
     if (sawTrack) {
       const finishDeadline = Date.now() + waitForTrackFinishMs;
-      while (hasTrack() && Date.now() < finishDeadline) {
+      while (hasTrack() && Date.now() < finishDeadline && !cancelled()) {
         await _sleep(pollMs);
+      }
+      if (hasTrack() && !cancelled()) {
+        this._pathfindingLog('debug', '_awaitSequencedStepSettle timed out waiting for track to finish', {
+          tokenId,
+          waitForTrackFinishMs,
+          pollMs
+        });
       }
       return;
     }
 
-    if (fallbackDelayMs > 0) {
-      await _sleep(fallbackDelayMs);
+    if (fallbackDelayMs > 0 && !cancelled()) {
+      const fallbackDeadline = Date.now() + fallbackDelayMs;
+      while (Date.now() < fallbackDeadline && !cancelled()) {
+        await _sleep(Math.min(pollMs, Math.max(4, fallbackDeadline - Date.now())));
+      }
     }
   }
 
@@ -7184,30 +8241,59 @@ export class TokenMovementManager {
    * Wait for any in-flight move on `tokenId` to finish, then register our
    * own lock. Safety timeout (8s) prevents infinite waits from leaked locks.
    * @param {string} tokenId
+   * @returns {Promise<{promise: Promise<void>, _resolve?: Function, ownerId: string, createdAtMs: number}>}
    */
   async _acquireTokenMoveLock(tokenId) {
     const MAX_WAIT_MS = 8000;
     const existing = this._activeMoveLocks.get(tokenId);
     if (existing) {
+      const existingPromise = existing?.promise || existing;
+      let timedOut = false;
       try {
-        await Promise.race([existing, _sleep(MAX_WAIT_MS)]);
+        await Promise.race([
+          existingPromise,
+          _sleep(MAX_WAIT_MS).then(() => {
+            timedOut = true;
+          })
+        ]);
       } catch (_) {
         // Swallow — the previous move may have rejected.
       }
+
+      if (timedOut && this._activeMoveLocks.get(tokenId) === existing) {
+        this._pathfindingLog('warn', '_acquireTokenMoveLock wait timed out; overriding stale lock', {
+          tokenId,
+          maxWaitMs: MAX_WAIT_MS,
+          ownerId: String(existing?.ownerId || 'unknown')
+        });
+      }
     }
+
     // Create a new deferred that will be resolved when we release.
     let resolve;
     const promise = new Promise((r) => { resolve = r; });
-    promise._resolve = resolve;
-    this._activeMoveLocks.set(tokenId, promise);
+    const lockEntry = {
+      promise,
+      _resolve: resolve,
+      ownerId: `token:${tokenId}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+      createdAtMs: Date.now()
+    };
+    this._activeMoveLocks.set(tokenId, lockEntry);
+    return lockEntry;
   }
 
   /**
    * Release the per-token move lock.
    * @param {string} tokenId
+   * @param {{promise: Promise<void>, _resolve?: Function, ownerId: string, createdAtMs: number}|null} lockEntry
    */
-  _releaseTokenMoveLock(tokenId) {
+  _releaseTokenMoveLock(tokenId, lockEntry = null) {
     const lock = this._activeMoveLocks.get(tokenId);
+    if (!lock) return;
+
+    // If a newer move already replaced this lock, do not clear it.
+    if (lockEntry && lock !== lockEntry) return;
+
     this._activeMoveLocks.delete(tokenId);
     if (lock && typeof lock._resolve === 'function') {
       lock._resolve();
@@ -7217,27 +8303,55 @@ export class TokenMovementManager {
   /**
    * Wait for any in-flight group move to finish, then register our lock.
    * Safety timeout (15s) prevents infinite waits from leaked locks.
+   * @returns {Promise<{promise: Promise<void>, _resolve?: Function, ownerId: string, createdAtMs: number}>}
    */
   async _acquireGroupMoveLock() {
     const MAX_WAIT_MS = 15000;
     const existing = this._groupMoveLock;
     if (existing) {
+      const existingPromise = existing?.promise || existing;
+      let timedOut = false;
       try {
-        await Promise.race([existing, _sleep(MAX_WAIT_MS)]);
+        await Promise.race([
+          existingPromise,
+          _sleep(MAX_WAIT_MS).then(() => {
+            timedOut = true;
+          })
+        ]);
       } catch (_) {
       }
+
+      if (timedOut && this._groupMoveLock === existing) {
+        this._pathfindingLog('warn', '_acquireGroupMoveLock wait timed out; overriding stale group lock', {
+          maxWaitMs: MAX_WAIT_MS,
+          ownerId: String(existing?.ownerId || 'unknown')
+        });
+      }
     }
+
     let resolve;
     const promise = new Promise((r) => { resolve = r; });
-    promise._resolve = resolve;
-    this._groupMoveLock = promise;
+    const lockEntry = {
+      promise,
+      _resolve: resolve,
+      ownerId: `group:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+      createdAtMs: Date.now()
+    };
+    this._groupMoveLock = lockEntry;
+    return lockEntry;
   }
 
   /**
    * Release the global group move lock.
+   * @param {{promise: Promise<void>, _resolve?: Function, ownerId: string, createdAtMs: number}|null} lockEntry
    */
-  _releaseGroupMoveLock() {
+  _releaseGroupMoveLock(lockEntry = null) {
     const lock = this._groupMoveLock;
+    if (!lock) return;
+
+    // If a newer group move already replaced this lock, do not clear it.
+    if (lockEntry && lock !== lockEntry) return;
+
     this._groupMoveLock = null;
     if (lock && typeof lock._resolve === 'function') {
       lock._resolve();

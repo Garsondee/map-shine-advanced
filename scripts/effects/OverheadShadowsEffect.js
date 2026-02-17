@@ -1258,6 +1258,7 @@ export class OverheadShadowsEffect extends EffectBase {
     const fluidVisibilityOverrides = [];
     const fluidUniformOverrides = [];
     const nonFluidVisibilityOverrides = [];
+    const roofSpriteVisibilityOverrides = [];
     const tileProjectionVisibilityOverrides = [];
     const tileProjectionOpacityOverrides = [];
     const tileReceiverVisibilityOverrides = [];
@@ -1326,9 +1327,20 @@ export class OverheadShadowsEffect extends EffectBase {
       this.mainScene.traverse((object) => {
         if (!object.layers || (object.layers.mask & roofMaskBit) === 0) return;
         const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
-        if (!isFluidOverlay || typeof object.visible !== 'boolean') return;
-        nonFluidVisibilityOverrides.push({ object, visible: object.visible });
-        object.visible = false;
+        if (isFluidOverlay) {
+          if (typeof object.visible === 'boolean') {
+            nonFluidVisibilityOverrides.push({ object, visible: object.visible });
+            object.visible = false;
+          }
+          return;
+        }
+
+        // Hover-reveal can temporarily hide/fade roof sprites. For the roof mask
+        // capture pass we still need those tiles to contribute caster alpha.
+        if (object.isSprite && typeof object.visible === 'boolean') {
+          roofSpriteVisibilityOverrides.push({ object, visible: object.visible });
+          object.visible = true;
+        }
       });
 
       // Pass 1: render overhead tiles into roofTarget (alpha mask)
@@ -1347,6 +1359,9 @@ export class OverheadShadowsEffect extends EffectBase {
       if (entry.object && entry.object.material) {
         entry.object.material.opacity = entry.opacity;
       }
+    }
+    for (const entry of roofSpriteVisibilityOverrides) {
+      if (entry.object) entry.object.visible = entry.visible;
     }
 
     // IMPORTANT: restore camera layers before rendering the world-pinned

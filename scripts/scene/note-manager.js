@@ -77,6 +77,9 @@ export class NoteManager {
         this.updateVisibility();
     })]);
 
+    // WP-6: Re-check note visibility when vision/sight changes (e.g., token moved).
+    this._hookIds.push(['sightRefresh', Hooks.on('sightRefresh', () => this.refreshVisibility())]);
+
     this._hookIds.push(['activateNotesLayer', Hooks.on('activateNotesLayer', () => this.setVisibility(false))]);
     this._hookIds.push(['deactivateNotesLayer', Hooks.on('deactivateNotesLayer', () => this.setVisibility(true))]);
 
@@ -102,14 +105,61 @@ export class NoteManager {
   }
 
   /**
-   * Sync all notes
+   * Check whether a note should be visible to the current user.
+   * Mirrors Foundry's Note#isVisible: permission check on the linked journal,
+   * plus token-vision test when token vision is active and the note is not global.
+   * @param {NoteDocument} doc
+   * @returns {boolean}
+   * @private
+   */
+  _isNoteVisible(doc) {
+    try {
+      // If the PIXI placeable exists, defer to its authoritative isVisible getter.
+      const placeable = canvas?.notes?.get?.(doc.id);
+      if (placeable && ('isVisible' in placeable)) return !!placeable.isVisible;
+
+      // Fallback: replicate the core logic when placeable isn't available yet.
+      const accessTest = doc.page ?? doc.entry;
+      const access = accessTest?.testUserPermission?.(game.user, 'LIMITED') ?? true;
+      if (!access) return false;
+      if (!canvas?.visibility?.tokenVision || doc.global) return !!access;
+      const point = { x: doc.x, y: doc.y };
+      const tolerance = (doc.iconSize || 40) / 4;
+      return !!canvas.visibility.testVisibility(point, { tolerance });
+    } catch (_) {
+      return true; // Fail-open: don't hide notes if the check itself errors.
+    }
+  }
+
+  /**
+   * Sync all notes, filtering by visibility/permission.
    * @private
    */
   syncAllNotes() {
     if (!canvas.scene || !canvas.scene.notes) return;
     
     for (const note of canvas.scene.notes) {
-      this.create(note);
+      if (this._isNoteVisible(note)) {
+        this.create(note);
+      } else {
+        this.remove(note.id);
+      }
+    }
+  }
+
+  /**
+   * Refresh visibility of all notes (e.g., after token movement changes vision).
+   * @public
+   */
+  refreshVisibility() {
+    if (!canvas?.scene?.notes) return;
+    for (const doc of canvas.scene.notes) {
+      const shouldShow = this._isNoteVisible(doc);
+      if (shouldShow && !this.notes.has(doc.id)) {
+        this.create(doc);
+      } else if (!shouldShow && this.notes.has(doc.id)) {
+        this.remove(doc.id);
+      }
     }
   }
 
@@ -120,6 +170,8 @@ export class NoteManager {
    */
   create(doc) {
     if (this.notes.has(doc.id)) return;
+    // WP-6: Skip notes that fail visibility/permission check.
+    if (!this._isNoteVisible(doc)) return;
 
     const iconPath = doc.icon || this.defaultIcon;
     

@@ -51,7 +51,7 @@ export class WeatherController {
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0,
-      ashIntensity: 0.0 // 0.0 (none) to 1.0 (heavy ash fall)
+      ashIntensity: 0.93 // 0.0 (none) to 1.0 (heavy ash fall)
     };
 
     /**
@@ -82,7 +82,7 @@ export class WeatherController {
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0,
-      ashIntensity: 0.0
+      ashIntensity: 0.93
     };
 
     /** @type {WeatherState} */
@@ -283,45 +283,45 @@ export class WeatherController {
 
     // Ash precipitation tuning (WeatherParticles + AshGeometry)
     this.ashTuning = {
-      intensityScale: 1.0,
-      emissionRate: 300,
-      sizeMin: 10,
-      sizeMax: 16,
-      lifeMin: 5,
-      lifeMax: 8,
-      speedMin: 120,
-      speedMax: 200,
-      opacityStartMin: 0.75,
-      opacityStartMax: 0.5,
-      opacityEnd: 0.0,
+      intensityScale: 0.5,
+      emissionRate: 840,
+      sizeMin: 5,
+      sizeMax: 17,
+      lifeMin: 2,
+      lifeMax: 4.7,
+      speedMin: 15,
+      speedMax: 25,
+      opacityStartMin: 0.53,
+      opacityStartMax: 0.75,
+      opacityEnd: 0.85,
       colorStart: { r: 0.45, g: 0.42, b: 0.38 },
       colorEnd: { r: 0.35, g: 0.32, b: 0.28 },
       brightness: 1.0,
-      gravityScale: 1.0,
-      windInfluence: 1.0,
-      curlStrength: 0.6,
-      clusterHoldMin: 2.5,
-      clusterHoldMax: 7.0,
-      clusterRadiusMin: 300,
-      clusterRadiusMax: 1800,
-      clusterBoostMin: 0.55,
-      clusterBoostMax: 1.45,
-      emberEmissionRate: 25,
-      emberSizeMin: 6,
-      emberSizeMax: 12,
-      emberLifeMin: 2.5,
-      emberLifeMax: 4.0,
+      gravityScale: 0.55,
+      windInfluence: 2.1,
+      curlStrength: 3,
+      clusterHoldMin: 1.3,
+      clusterHoldMax: 2.3,
+      clusterRadiusMin: 1150,
+      clusterRadiusMax: 2060,
+      clusterBoostMin: 1.1,
+      clusterBoostMax: 2.55,
+      emberEmissionRate: 167,
+      emberSizeMin: 7,
+      emberSizeMax: 14,
+      emberLifeMin: 12,
+      emberLifeMax: 16,
       emberSpeedMin: 180,
-      emberSpeedMax: 260,
-      emberOpacityStartMin: 0.9,
-      emberOpacityStartMax: 0.4,
-      emberOpacityEnd: 0.0,
-      emberColorStart: { r: 1.0, g: 0.25, b: 0.05 },
-      emberColorEnd: { r: 0.35, g: 0.32, b: 0.28 },
-      emberBrightness: 1.0,
-      emberGravityScale: 0.75,
-      emberWindInfluence: 1.0,
-      emberCurlStrength: 1.0
+      emberSpeedMax: 820,
+      emberOpacityStartMin: 0.87,
+      emberOpacityStartMax: 0.94,
+      emberOpacityEnd: 0.83,
+      emberColorStart: { r: 1.0, g: 0.25, b: 0.0 },
+      emberColorEnd: { r: 1.0, g: 0.25, b: 0.0 },
+      emberBrightness: 5,
+      emberGravityScale: 0,
+      emberWindInfluence: 0.45,
+      emberCurlStrength: 3
     };
   }
 

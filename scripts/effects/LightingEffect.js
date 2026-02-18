@@ -14,7 +14,7 @@ import { ThreeDarknessSource } from './ThreeDarknessSource.js';
 import { LightRegistry } from './LightRegistry.js';
 import { MapShineLightAdapter } from './MapShineLightAdapter.js';
 import { ROPE_MASK_LAYER } from './EffectComposer.js';
-import { isLightVisibleForPerspective } from '../foundry/elevation-context.js';
+import { getPerspectiveElevation, isLightVisibleForPerspective } from '../foundry/elevation-context.js';
 
 const log = createLogger('LightingEffect');
 
@@ -65,6 +65,13 @@ export class LightingEffect extends EffectBase {
 
       wallInsetPx: 6.0,
 
+      // Experimental: when enabled, lights above the current level can bleed
+      // through transparent roof/floor pixels. Opaque roof pixels block this
+      // contribution entirely.
+      upperFloorTransmissionEnabled: false,
+      upperFloorTransmissionStrength: 0.6,
+      upperFloorTransmissionSoftness: 1.5,
+
       negativeDarknessStrength: 1.0, // Controls subtractive darkness strength
       darknessPunchGain: 2.0,
 
@@ -97,6 +104,7 @@ export class LightingEffect extends EffectBase {
     this.sunLightScene = null;
     this.darknessScene = null;  
     this.darknessTarget = null; 
+    this.upperFloorLightTarget = null;
     this.sunLightTarget = null;
     this.roofAlphaTarget = null; 
     this.weatherRoofAlphaTarget = null;
@@ -115,6 +123,8 @@ export class LightingEffect extends EffectBase {
     this._effectiveDarkness = null;
     
     this._tempSize = null; 
+    this._tmpUpperVisibility = [];
+    this._upperTransmissionRuntimeDisabled = false;
 
     this._baseMesh = null;
 
@@ -241,7 +251,7 @@ export class LightingEffect extends EffectBase {
           name: 'occlusion',
           label: 'Occlusion',
           type: 'inline',
-          parameters: ['wallInsetPx']
+          parameters: ['wallInsetPx', 'upperFloorTransmissionEnabled', 'upperFloorTransmissionStrength', 'upperFloorTransmissionSoftness']
         },
         {
           name: 'darkness',
@@ -289,6 +299,9 @@ export class LightingEffect extends EffectBase {
         lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.2, label: 'Light Intensity' },
         colorationStrength: { type: 'slider', min: 0, max: 500, step: 0.05, default: 3.0, label: 'Coloration Strength' },
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
+        upperFloorTransmissionEnabled: { type: 'boolean', default: false, label: 'Upper Floor Through-Gaps' },
+        upperFloorTransmissionStrength: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.6, label: 'Upper Light Strength' },
+        upperFloorTransmissionSoftness: { type: 'slider', min: 0.25, max: 4, step: 0.05, default: 1.5, label: 'Upper Light Softness' },
         darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Darkness Effect' },
         outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.7, label: 'Outdoor Brightness' },
         lightAnimWindInfluence: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.0, label: 'Wind Influence' },
@@ -381,6 +394,7 @@ export class LightingEffect extends EffectBase {
       uniforms: {
         tDiffuse: { value: null }, 
         tLight: { value: null },   
+        tUpperFloorLight: { value: null },
         tSunLight: { value: null },
         tDarkness: { value: null }, 
         tMasks: { value: null },
@@ -399,6 +413,9 @@ export class LightingEffect extends EffectBase {
         uGlobalIllumination: { value: 1.0 },
         uLightIntensity: { value: 1.0 },
         uColorationStrength: { value: 1.0 },
+        uUpperFloorTransmissionEnabled: { value: 0.0 },
+        uUpperFloorTransmissionStrength: { value: 0.6 },
+        uUpperFloorTransmissionSoftness: { value: 1.5 },
         uOverheadShadowOpacity: { value: 0.0 },
         uOverheadShadowAllowIndoor: { value: 0.0 },
         uOverheadShadowAffectsLights: { value: 0.75 },
@@ -439,6 +456,7 @@ export class LightingEffect extends EffectBase {
       fragmentShader: `
         uniform sampler2D tDiffuse;
         uniform sampler2D tLight;
+        uniform sampler2D tUpperFloorLight;
         uniform sampler2D tSunLight;
         uniform sampler2D tDarkness;
         uniform sampler2D tMasks;
@@ -457,6 +475,9 @@ export class LightingEffect extends EffectBase {
         uniform float uGlobalIllumination;
         uniform float uLightIntensity;
         uniform float uColorationStrength;
+        uniform float uUpperFloorTransmissionEnabled;
+        uniform float uUpperFloorTransmissionStrength;
+        uniform float uUpperFloorTransmissionSoftness;
         uniform float uOverheadShadowOpacity;
         uniform float uOverheadShadowAllowIndoor;
         uniform float uOverheadShadowAffectsLights;
@@ -615,7 +636,19 @@ export class LightingEffect extends EffectBase {
             baseLights = vec3(0.0);
           }
 
-          vec3 shadedLights = mix(baseLights, baseLights * combinedShadowFactor, kd);
+          vec3 upperFloorLights = vec3(0.0);
+          if (uUpperFloorTransmissionEnabled > 0.5) {
+            vec3 upperSample = texture2D(tUpperFloorLight, vUv).rgb;
+            bool badUpper = (upperSample.r != upperSample.r) || (upperSample.g != upperSample.g) || (upperSample.b != upperSample.b);
+            if (!badUpper) {
+              float gapMask = pow(clamp(1.0 - roofAlphaRaw, 0.0, 1.0), max(uUpperFloorTransmissionSoftness, 0.001));
+              upperFloorLights = upperSample * gapMask * max(uUpperFloorTransmissionStrength, 0.0) * (1.0 - ropeMask);
+            }
+          }
+
+          vec3 totalBaseLights = baseLights + upperFloorLights;
+
+          vec3 shadedLights = mix(totalBaseLights, totalBaseLights * combinedShadowFactor, kd);
           vec3 safeLights = max(shadedLights, vec3(0.0));
           float lightI = max(max(safeLights.r, safeLights.g), safeLights.b);
 
@@ -981,7 +1014,7 @@ export class LightingEffect extends EffectBase {
             this.lightScene?.remove(ls.mesh);
             this.sunLightScene?.remove(ls.mesh);
           }
-          ls?.dispose?.();
+          ls?.dispose();
           this.mapshineLights.delete(id);
         }
 
@@ -1001,7 +1034,7 @@ export class LightingEffect extends EffectBase {
         if (this.mapshineDarknessSources.has(id)) {
           const ds = this.mapshineDarknessSources.get(id);
           if (ds?.mesh) this.darknessScene?.remove(ds.mesh);
-          ds?.dispose?.();
+          ds?.dispose();
           this.mapshineDarknessSources.delete(id);
         }
 
@@ -1054,7 +1087,7 @@ export class LightingEffect extends EffectBase {
           this.lightScene?.remove(src.mesh);
           this.sunLightScene?.remove(src.mesh);
         }
-        src?.dispose?.();
+        src?.dispose();
       } catch (_) {
       }
       this.mapshineLights.delete(id);
@@ -1065,7 +1098,7 @@ export class LightingEffect extends EffectBase {
       if (keep.has(id)) continue;
       try {
         if (src?.mesh) this.darknessScene?.remove(src.mesh);
-        src?.dispose?.();
+        src?.dispose();
       } catch (_) {
       }
       this.mapshineDarknessSources.delete(id);
@@ -1166,6 +1199,7 @@ export class LightingEffect extends EffectBase {
    */
   _applyFoundryOverrides() {
     const sceneDarkness = this._getSceneDarknessLevel();
+
     for (const [id, source] of this.lights.entries()) {
       const suppressed = this._overriddenFoundryLightIds.has(id);
       const isActive = this._isLightActiveForDarkness(source?.document, sceneDarkness);
@@ -1216,6 +1250,8 @@ export class LightingEffect extends EffectBase {
     if (this.lightTarget) this.lightTarget.dispose();
     if (this.sunLightTarget) this.sunLightTarget.dispose();
     if (this.darknessTarget) this.darknessTarget.dispose();
+    if (this.upperFloorLightTarget) this.upperFloorLightTarget.dispose();
+
     this.lightTarget = new THREE.WebGLRenderTarget(width, height, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
@@ -1229,6 +1265,18 @@ export class LightingEffect extends EffectBase {
       format: THREE.RGBAFormat,
       type: THREE.HalfFloatType // HDR capable
     });
+
+    // Keep the experimental upper-floor target opt-in to avoid consuming an
+    // extra full-resolution HDR render target when the feature is disabled.
+    this.upperFloorLightTarget = null;
+    if (this.params?.upperFloorTransmissionEnabled === true && !this._upperTransmissionRuntimeDisabled) {
+      this.upperFloorLightTarget = new THREE.WebGLRenderTarget(width, height, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.HalfFloatType
+      });
+    }
   }
 
   setBaseMesh(baseMesh, assetBundle) {
@@ -1699,6 +1747,12 @@ export class LightingEffect extends EffectBase {
   }
 
   _isLightActiveForDarkness(doc, darknessLevel) {
+    return this._isLightActiveForDarknessWithOptions(doc, darknessLevel, { ignorePerspective: false });
+  }
+
+  _isLightActiveForDarknessWithOptions(doc, darknessLevel, options = {}) {
+    const { ignorePerspective = false } = options;
+
     if (!doc) return false;
 
     if (doc.hidden === true) return false;
@@ -1727,14 +1781,69 @@ export class LightingEffect extends EffectBase {
     // When Levels compatibility is active, lights outside the viewer's
     // elevation range are hidden. Uses the raw Foundry doc (not the
     // MapShine-enhanced wrapper) so elevation flags are available.
-    try {
-      const rawDoc = doc?.raw ?? doc;
-      if (!isLightVisibleForPerspective(rawDoc)) return false;
-    } catch (_) {
-      // Fail open — keep the light visible if the check errors
+    if (!ignorePerspective) {
+      try {
+        const rawDoc = doc?.raw ?? doc;
+        if (!isLightVisibleForPerspective(rawDoc)) return false;
+      } catch (_) {
+        // Fail open — keep the light visible if the check errors
+      }
     }
 
     return true;
+  }
+
+  _isUpperFloorLightForTransmission(doc, darknessLevel) {
+    if (this.params?.upperFloorTransmissionEnabled !== true || this._upperTransmissionRuntimeDisabled) return false;
+
+    // Reuse all standard light gating (hidden, darkness range, radius, etc.)
+    // but skip perspective visibility so above-floor lights can contribute via
+    // the dedicated transmission pass.
+    const baseline = this._isLightActiveForDarknessWithOptions(doc, darknessLevel, {
+      ignorePerspective: true,
+    });
+    if (!baseline) return false;
+
+    const perspective = getPerspectiveElevation();
+    if (!perspective || perspective.source === 'background') return false;
+
+    const rawDoc = doc?.raw ?? doc;
+    const lightElevation = Number(rawDoc?.elevation ?? -Infinity);
+    if (!Number.isFinite(lightElevation)) return false;
+
+    return lightElevation > perspective.losHeight;
+  }
+
+  _prepareUpperTransmissionVisibility(darknessLevel) {
+    const tmp = this._tmpUpperVisibility;
+    tmp.length = 0;
+
+    const apply = (source, suppressed = false) => {
+      const mesh = source?.mesh;
+      if (!mesh) return;
+
+      const wasVisible = mesh.visible === true;
+      const upperVisible = !suppressed && this._isUpperFloorLightForTransmission(source.document, darknessLevel);
+      tmp.push({ mesh, wasVisible });
+      mesh.visible = upperVisible;
+    };
+
+    for (const [id, source] of this.lights.entries()) {
+      const suppressed = this._overriddenFoundryLightIds.has(id);
+      apply(source, suppressed);
+    }
+    for (const source of this.mapshineLights.values()) {
+      apply(source, false);
+    }
+  }
+
+  _restoreUpperTransmissionVisibility() {
+    const tmp = this._tmpUpperVisibility;
+    for (let i = 0; i < tmp.length; i += 1) {
+      const entry = tmp[i];
+      if (entry?.mesh) entry.mesh.visible = entry.wasVisible;
+    }
+    tmp.length = 0;
   }
 
   _getEffectiveZoom() {
@@ -1786,15 +1895,6 @@ export class LightingEffect extends EffectBase {
     return 1.0;
   }
 
-  /**
-   * Detect whether overhead hover-reveal is currently active.
-   *
-   * Primary source is WeatherController.roofMaskActive, but we also fall back
-   * to live TileManager hoverHidden flags so lighting/shadow compositing does
-   * not depend on cross-manager update ordering.
-   * @returns {boolean}
-   * @private
-   */
   _isRoofHoverRevealActive() {
     try {
       if (weatherController?.roofMaskActive === true) return true;
@@ -1891,6 +1991,9 @@ export class LightingEffect extends EffectBase {
     if (u.uGlobalIllumination) u.uGlobalIllumination.value = this.params.globalIllumination;
     if (u.uLightIntensity) u.uLightIntensity.value = this.params.lightIntensity;
     if (u.uColorationStrength) u.uColorationStrength.value = this.params.colorationStrength;
+    if (u.uUpperFloorTransmissionEnabled) u.uUpperFloorTransmissionEnabled.value = this.params.upperFloorTransmissionEnabled ? 1.0 : 0.0;
+    if (u.uUpperFloorTransmissionStrength) u.uUpperFloorTransmissionStrength.value = this.params.upperFloorTransmissionStrength;
+    if (u.uUpperFloorTransmissionSoftness) u.uUpperFloorTransmissionSoftness.value = this.params.upperFloorTransmissionSoftness;
     if (u.uOutdoorBrightness) u.uOutdoorBrightness.value = this.params.outdoorBrightness;
     if (u.uSunIndoorGain) u.uSunIndoorGain.value = this.params.sunIndoorGain;
     if (u.uSunBlurRadiusPx) u.uSunBlurRadiusPx.value = this.params.sunBlurRadiusPx;
@@ -2153,6 +2256,23 @@ export class LightingEffect extends EffectBase {
       });
     } else if (this.darknessTarget.width !== size.x || this.darknessTarget.height !== size.y) {
       this.darknessTarget.setSize(size.x, size.y);
+    }
+
+    const wantsUpperTransmission = this.params?.upperFloorTransmissionEnabled === true && !this._upperTransmissionRuntimeDisabled;
+    if (wantsUpperTransmission) {
+      if (!this.upperFloorLightTarget) {
+        this.upperFloorLightTarget = new THREE.WebGLRenderTarget(size.x, size.y, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          format: THREE.RGBAFormat,
+          type: THREE.HalfFloatType
+        });
+      } else if (this.upperFloorLightTarget.width !== size.x || this.upperFloorLightTarget.height !== size.y) {
+        this.upperFloorLightTarget.setSize(size.x, size.y);
+      }
+    } else if (this.upperFloorLightTarget) {
+      this.upperFloorLightTarget.dispose();
+      this.upperFloorLightTarget = null;
     }
 
     if (!this.roofAlphaTarget) {
@@ -2459,7 +2579,45 @@ export class LightingEffect extends EffectBase {
       renderer.setRenderTarget(prevTargetPack);
     }
 
-    // 1. Accumulate Lights into lightTarget
+    // 1. Accumulate upper-floor transmission lights into a dedicated buffer.
+    // This pass temporarily swaps mesh visibility to render only lights above
+    // the current perspective; they are later masked by roof alpha (gaps pass,
+    // opaque pixels block).
+    if (this.upperFloorLightTarget) {
+      renderer.setRenderTarget(this.upperFloorLightTarget);
+      renderer.setClearColor(0x000000, 1);
+      renderer.clear();
+
+      if (this.params?.upperFloorTransmissionEnabled && !this._upperTransmissionRuntimeDisabled && this.lightScene && this.mainCamera) {
+        const transmissionDarkness = this._getSceneDarknessLevel();
+        const prevMaskUpper = this.mainCamera.layers.mask;
+        let passError = null;
+        try {
+          this._prepareUpperTransmissionVisibility(transmissionDarkness);
+          this.mainCamera.layers.enableAll();
+          renderer.render(this.lightScene, this.mainCamera);
+        } catch (e) {
+          passError = e;
+        } finally {
+          this.mainCamera.layers.mask = prevMaskUpper;
+          this._restoreUpperTransmissionVisibility();
+        }
+
+        if (passError) {
+          // Fail open: keep frame rendering even if this optional experimental
+          // pass errors (avoids silently breaking the rest of the pipeline).
+          this._upperTransmissionRuntimeDisabled = true;
+          try {
+            this.upperFloorLightTarget?.dispose?.();
+          } catch (_) {
+          }
+          this.upperFloorLightTarget = null;
+          log.warn('Upper-floor transmission pass failed; disabling feature for this session', passError);
+        }
+      }
+    }
+
+    // 2. Accumulate direct-visibility lights into lightTarget
     const oldTarget = renderer.getRenderTarget();
     renderer.setRenderTarget(this.lightTarget);
     renderer.setClearColor(0x000000, 1);
@@ -2476,7 +2634,7 @@ export class LightingEffect extends EffectBase {
       }
     }
 
-    // 1.25 Accumulate Sun Lights (indoor fill) into sunLightTarget
+    // 2.25 Accumulate Sun Lights (indoor fill) into sunLightTarget
     renderer.setRenderTarget(this.sunLightTarget);
     renderer.setClearColor(0x000000, 1);
     renderer.clear();
@@ -2491,7 +2649,7 @@ export class LightingEffect extends EffectBase {
       }
     }
 
-    // 1.5 Accumulate Darkness into darknessTarget
+    // 2.5 Accumulate Darkness into darknessTarget
     renderer.setRenderTarget(this.darknessTarget);
     renderer.setClearColor(0x000000, 1);
     renderer.clear();
@@ -2509,6 +2667,7 @@ export class LightingEffect extends EffectBase {
     // Base scene texture comes from EffectComposer via setInputTexture(tDiffuse).
     const cu = this.compositeMaterial.uniforms;
     cu.tLight.value = this.lightTarget.texture;
+    cu.tUpperFloorLight.value = this.upperFloorLightTarget?.texture ?? this._transparentTex;
     cu.tSunLight.value = this.sunLightTarget?.texture ?? this._transparentTex;
     cu.tDarkness.value = this.darknessTarget.texture;
     cu.tMasks.value = this.masksTarget?.texture ?? this._transparentTex;
@@ -2728,6 +2887,12 @@ export class LightingEffect extends EffectBase {
     try {
       this.sunLightTarget?.dispose?.();
       this.sunLightTarget = null;
+    } catch (_) {
+    }
+
+    try {
+      this.upperFloorLightTarget?.dispose?.();
+      this.upperFloorLightTarget = null;
     } catch (_) {
     }
 

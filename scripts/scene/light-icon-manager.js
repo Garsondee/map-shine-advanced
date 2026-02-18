@@ -7,6 +7,12 @@
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { applyAmbientLightLevelDefaults } from '../foundry/levels-create-defaults.js';
+import { isLightVisibleForPerspective } from '../foundry/elevation-context.js';
+import {
+  getLightIconLevelVisibilityMode,
+  LIGHT_ICON_LEVEL_VISIBILITY_MODES,
+} from '../settings/scene-settings.js';
 
 const log = createLogger('LightIconManager');
 
@@ -138,6 +144,9 @@ export class LightIconManager {
   setupHooks() {
     if (this.hooksRegistered) return;
 
+    this._hookIds.push(['preCreateAmbientLight', Hooks.on('preCreateAmbientLight', (doc, data, options, userId) => {
+      this._onPreCreateAmbientLight(doc, data, options, userId);
+    })]);
     this._hookIds.push(['createAmbientLight', Hooks.on('createAmbientLight', (doc) => this.create(doc))]);
     this._hookIds.push(['updateAmbientLight', Hooks.on('updateAmbientLight', (doc, changes) => this.update(doc, changes))]);
     this._hookIds.push(['deleteAmbientLight', Hooks.on('deleteAmbientLight', (doc) => this.remove(doc.id))]);
@@ -147,7 +156,50 @@ export class LightIconManager {
       this.syncAllLights();
     })]);
 
+    // Refresh icon visibility when level context or controlled token changes,
+    // because perspective-driven light visibility can change without light docs
+    // themselves updating.
+    this._hookIds.push(['mapShineLevelContextChanged', Hooks.on('mapShineLevelContextChanged', () => {
+      this._refreshPerLightVisibility();
+    })]);
+    this._hookIds.push(['controlToken', Hooks.on('controlToken', () => {
+      this._refreshPerLightVisibility();
+    })]);
+
     this.hooksRegistered = true;
+  }
+
+  _onPreCreateAmbientLight(doc, data, options, userId) {
+    try {
+      if (userId && game?.user?.id && userId !== game.user.id) return;
+
+      const hasElevation = data?.elevation !== undefined && data?.elevation !== null;
+      const hasRangeTop = data?.flags?.levels?.rangeTop !== undefined
+        && data?.flags?.levels?.rangeTop !== null;
+      if (hasElevation && hasRangeTop) return;
+
+      const defaults = {};
+      applyAmbientLightLevelDefaults(defaults, { scene: doc?.parent ?? canvas?.scene });
+
+      const patch = {};
+      if (!hasElevation && defaults.elevation !== undefined && defaults.elevation !== null) {
+        patch.elevation = defaults.elevation;
+      }
+
+      const seededRangeTop = defaults?.flags?.levels?.rangeTop;
+      if (!hasRangeTop && seededRangeTop !== undefined && seededRangeTop !== null) {
+        patch.flags = {
+          levels: {
+            rangeTop: seededRangeTop,
+          },
+        };
+      }
+
+      if (Object.keys(patch).length > 0) {
+        doc.updateSource(patch);
+      }
+    } catch (_) {
+    }
   }
 
   /**
@@ -157,6 +209,48 @@ export class LightIconManager {
    */
   setVisibility(visible) {
     this.group.visible = visible;
+    if (visible) {
+      this._refreshPerLightVisibility();
+    }
+  }
+
+  _getLightDocById(id) {
+    try {
+      return canvas?.scene?.lights?.get?.(id)
+        || canvas?.lighting?.placeables?.find?.((l) => l?.id === id)?.document
+        || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _shouldShowLightIconForDoc(doc) {
+    const mode = getLightIconLevelVisibilityMode();
+    if (mode === LIGHT_ICON_LEVEL_VISIBILITY_MODES.ALL) return true;
+    try {
+      return !!isLightVisibleForPerspective(doc);
+    } catch (_) {
+      return true;
+    }
+  }
+
+  _refreshSingleLightVisibility(id, docOverride = null) {
+    const sprite = this.lights.get(id);
+    if (!sprite) return;
+    const doc = docOverride || this._getLightDocById(id);
+    sprite.visible = this._shouldShowLightIconForDoc(doc);
+  }
+
+  /**
+   * Re-evaluate per-light icon visibility according to the configured level
+   * filtering policy.
+   */
+  _refreshPerLightVisibility() {
+    for (const [id, sprite] of this.lights.entries()) {
+      if (!sprite) continue;
+      const doc = this._getLightDocById(id);
+      sprite.visible = this._shouldShowLightIconForDoc(doc);
+    }
   }
 
   /**
@@ -254,6 +348,7 @@ export class LightIconManager {
 
       this.group.add(sprite);
       this.lights.set(doc.id, sprite);
+      this._refreshSingleLightVisibility(doc.id, doc);
 
       log.debug(`Created light icon ${doc.id}`);
     }, undefined, (err) => {
@@ -286,6 +381,7 @@ export class LightIconManager {
     }
 
     // No icon/color change for now; that could be extended later
+    this._refreshSingleLightVisibility(doc.id, doc);
   }
 
   /**

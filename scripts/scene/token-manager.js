@@ -1670,8 +1670,27 @@ vec3 ms_applyWindowLight(vec3 color) {
     }
   }
 
-  _shouldShowTokenBorder(spriteData) {
+  _isGlobalTokenHighlightActive() {
     const highlighted = this._highlightAllTokensActive || !!canvas?.tokens?.highlightObjects;
+    if (!highlighted) return false;
+
+    // Guard against stuck highlight state: Foundry highlight is key-held. If the
+    // key-up is missed (focus loss, input interception), layer state can remain true.
+    // In that case, treat highlight as inactive to avoid global hostile red borders.
+    try {
+      const keyboard = game?.keyboard;
+      if (keyboard?.isCoreActionKeyActive && !keyboard.isCoreActionKeyActive('highlight')) {
+        return false;
+      }
+    } catch (_) {
+      // Fail-open to the Foundry flag if keyboard state is unavailable.
+    }
+
+    return true;
+  }
+
+  _shouldShowTokenBorder(spriteData) {
+    const highlighted = this._isGlobalTokenHighlightActive();
     return !!(spriteData?.isSelected || spriteData?.isHovered || highlighted);
   }
 
@@ -1730,7 +1749,7 @@ vec3 ms_applyWindowLight(vec3 color) {
       if (m === CONST.TOKEN_DISPLAY_MODES.ALWAYS) return true;
       if (m === CONST.TOKEN_DISPLAY_MODES.CONTROL) return !!spriteData?.isSelected;
 
-      const hover = !!spriteData?.isHovered || this._highlightAllTokensActive || !!canvas?.tokens?.highlightObjects;
+      const hover = !!spriteData?.isHovered || this._isGlobalTokenHighlightActive();
       if (m === CONST.TOKEN_DISPLAY_MODES.HOVER) return hover;
 
       const isOwner = !!spriteData?.tokenDoc?.isOwner

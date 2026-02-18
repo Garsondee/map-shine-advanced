@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { createDefaultStyledLoadingScreenConfig } from '../ui/loading-screen/loading-screen-config.js';
 
 const log = createLogger('Settings');
 
@@ -17,12 +18,33 @@ const FLAG_NAMESPACE = 'map-shine-advanced';
 /** Module setting keys */
 const DEBUG_LOADING_MODE_SETTING = 'debugLoadingMode';
 const LEVELS_COMPATIBILITY_MODE_SETTING = 'levelsCompatibilityMode';
+const LIGHT_ICON_LEVEL_VISIBILITY_MODE_SETTING = 'lightIconLevelVisibilityMode';
+const LOADING_SCREEN_ENABLED_SETTING = 'loadingScreenEnabled';
+const LOADING_SCREEN_MODE_SETTING = 'loadingScreenMode';
+const LOADING_SCREEN_CONFIG_SETTING = 'loadingScreenConfig';
+const LOADING_SCREEN_USER_PRESETS_SETTING = 'loadingScreenUserPresets';
+const LOADING_SCREEN_APPLY_TO_SETTING = 'loadingScreenApplyTo';
+const LOADING_SCREEN_GOOGLE_FONTS_ENABLED_SETTING = 'loadingScreenGoogleFontsEnabled';
+const LOADING_SCREEN_USE_FOUNDRY_DEFAULT_SETTING = 'loadingScreenUseFoundryDefault';
+const LOADING_SCREEN_ACTIVE_PRESET_ID_SETTING = 'loadingScreenActivePresetId';
+
+const LOADING_SCREEN_MODES = Object.freeze({
+  LEGACY: 'legacy',
+  STYLED: 'styled',
+  FOUNDRY: 'foundry',
+});
 
 /** Levels compatibility mode setting values */
 const LEVELS_COMPATIBILITY_MODES = Object.freeze({
   OFF: 'off',
   IMPORT_ONLY: 'import-only',
   DIAGNOSTIC_INTEROP: 'diagnostic-interop',
+});
+
+/** Light icon visibility policy for lighting edit mode. */
+export const LIGHT_ICON_LEVEL_VISIBILITY_MODES = Object.freeze({
+  ALL: 'all',
+  PERSPECTIVE: 'perspective',
 });
 
 function _getPlayerOverridesSettingKey(scene) {
@@ -39,6 +61,20 @@ export function getDebugLoadingModeEnabled() {
     return !!game.settings.get(FLAG_NAMESPACE, DEBUG_LOADING_MODE_SETTING);
   } catch (_) {
     return false;
+  }
+}
+
+/**
+ * Read light icon level-visibility policy for lighting edit mode.
+ * @returns {'all'|'perspective'}
+ */
+export function getLightIconLevelVisibilityMode() {
+  try {
+    const raw = String(game.settings.get(FLAG_NAMESPACE, LIGHT_ICON_LEVEL_VISIBILITY_MODE_SETTING) ?? '').trim().toLowerCase();
+    if (raw === LIGHT_ICON_LEVEL_VISIBILITY_MODES.PERSPECTIVE) return LIGHT_ICON_LEVEL_VISIBILITY_MODES.PERSPECTIVE;
+    return LIGHT_ICON_LEVEL_VISIBILITY_MODES.ALL;
+  } catch (_) {
+    return LIGHT_ICON_LEVEL_VISIBILITY_MODES.ALL;
   }
 }
 
@@ -354,6 +390,137 @@ export function registerSettings() {
       [LEVELS_COMPATIBILITY_MODES.DIAGNOSTIC_INTEROP]: 'Diagnostic Interop (migration debugging)',
     },
     default: LEVELS_COMPATIBILITY_MODES.IMPORT_ONLY,
+  });
+
+  game.settings.register(FLAG_NAMESPACE, LIGHT_ICON_LEVEL_VISIBILITY_MODE_SETTING, {
+    name: 'Light Icon Visibility by Level',
+    hint: 'Choose whether lighting edit icons show all lights or only lights visible for the current level perspective.',
+    scope: 'client',
+    config: true,
+    type: String,
+    choices: {
+      [LIGHT_ICON_LEVEL_VISIBILITY_MODES.ALL]: 'Show all light icons',
+      [LIGHT_ICON_LEVEL_VISIBILITY_MODES.PERSPECTIVE]: 'Show only icons visible for current level',
+    },
+    default: LIGHT_ICON_LEVEL_VISIBILITY_MODES.ALL,
+    onChange: () => {
+      try {
+        window.MapShine?.lightIconManager?._refreshPerLightVisibility?.();
+      } catch (_) {
+      }
+    },
+  });
+
+  // Loading Screens / Scene Transitions (world-scoped)
+  game.settings.register(FLAG_NAMESPACE, LOADING_SCREEN_ENABLED_SETTING, {
+    name: 'Loading Screens Enabled',
+    hint: 'Enable Map Shine loading screen system for startup and transitions.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: true,
+    onChange: () => {
+      try { window.MapShine?.loadingScreenService?.refreshFromGameSettings?.(); } catch (_) {}
+    }
+  });
+
+  game.settings.register(FLAG_NAMESPACE, LOADING_SCREEN_MODE_SETTING, {
+    name: 'Loading Screen Mode',
+    hint: 'Choose which loading screen renderer to use by default.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: String,
+    choices: {
+      [LOADING_SCREEN_MODES.LEGACY]: 'Map Shine Advanced current loading screen',
+      [LOADING_SCREEN_MODES.STYLED]: 'Styled custom loading screen',
+      [LOADING_SCREEN_MODES.FOUNDRY]: 'Foundry default loading screen',
+    },
+    default: LOADING_SCREEN_MODES.LEGACY,
+    onChange: () => {
+      try { window.MapShine?.loadingScreenService?.refreshFromGameSettings?.(); } catch (_) {}
+    }
+  });
+
+  game.settings.register(FLAG_NAMESPACE, LOADING_SCREEN_APPLY_TO_SETTING, {
+    name: 'Loading Screen Applies To',
+    hint: 'Where loading screens are shown.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: String,
+    choices: {
+      all: 'All startup + all scene transitions',
+      'startup-only': 'Startup only',
+      'transitions-only': 'Scene transitions only',
+    },
+    default: 'all',
+    onChange: () => {
+      try { window.MapShine?.loadingScreenService?.refreshFromGameSettings?.(); } catch (_) {}
+    }
+  });
+
+  game.settings.register(FLAG_NAMESPACE, LOADING_SCREEN_GOOGLE_FONTS_ENABLED_SETTING, {
+    name: 'Google Fonts for Loading Screens',
+    hint: 'Allow loading screen themes to fetch Google Fonts families.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: true,
+    onChange: () => {
+      try { window.MapShine?.loadingScreenService?.refreshFromGameSettings?.(); } catch (_) {}
+    }
+  });
+
+  game.settings.register(FLAG_NAMESPACE, LOADING_SCREEN_USE_FOUNDRY_DEFAULT_SETTING, {
+    name: 'Force Foundry Default Loading',
+    hint: 'Bypass Map Shine loading overlays and use Foundry UI loading indicators only.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: false,
+    onChange: () => {
+      try { window.MapShine?.loadingScreenService?.refreshFromGameSettings?.(); } catch (_) {}
+    }
+  });
+
+  game.settings.register(FLAG_NAMESPACE, LOADING_SCREEN_ACTIVE_PRESET_ID_SETTING, {
+    name: 'Active Loading Screen Preset',
+    hint: 'Built-in preset ID currently selected for styled mode.',
+    scope: 'world',
+    config: false,
+    restricted: true,
+    type: String,
+    default: 'map-shine-default',
+    onChange: () => {
+      try { window.MapShine?.loadingScreenService?.refreshFromGameSettings?.(); } catch (_) {}
+    }
+  });
+
+  game.settings.register(FLAG_NAMESPACE, LOADING_SCREEN_CONFIG_SETTING, {
+    name: 'Loading Screen Config',
+    hint: 'Full loading screen configuration object used by styled mode.',
+    scope: 'world',
+    config: false,
+    restricted: true,
+    type: Object,
+    default: createDefaultStyledLoadingScreenConfig(),
+    onChange: () => {
+      try { window.MapShine?.loadingScreenService?.refreshFromGameSettings?.(); } catch (_) {}
+    }
+  });
+
+  game.settings.register(FLAG_NAMESPACE, LOADING_SCREEN_USER_PRESETS_SETTING, {
+    name: 'Loading Screen User Presets',
+    hint: 'GM-authored loading screen presets.',
+    scope: 'world',
+    config: false,
+    restricted: true,
+    type: Array,
+    default: []
   });
 
   game.settings.register('map-shine-advanced', 'allowPlayersToTogglePlayerLightMode', {

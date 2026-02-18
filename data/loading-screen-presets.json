@@ -1,0 +1,1165 @@
+[
+  {
+    "id": "map-shine-default",
+    "name": "Map Shine Default",
+    "description": "Refined modern default with layered center stack, divider line, and energetic progress feedback.",
+    "config": {
+      "themeName": "Map Shine Default",
+      "style": {
+        "backgroundColor": "rgba(2, 6, 12, 1)",
+        "accentColor": "rgba(0, 196, 255, 0.95)",
+        "secondaryAccentColor": "rgba(96, 129, 255, 0.95)",
+        "textColor": "rgba(233, 245, 255, 0.95)",
+        "panelBackground": "rgba(8, 14, 24, 0.72)",
+        "panelBorder": "1px solid rgba(138, 193, 255, 0.22)",
+        "panelBlurPx": 16,
+        "panelRadiusPx": 16,
+        "primaryFont": "Sora",
+        "bodyFont": "Sora"
+      },
+      "fonts": {
+        "googleFamilies": ["Sora:wght@300;400;600;700"]
+      },
+      "wallpapers": {
+        "mode": "single",
+        "fit": "cover",
+        "entries": []
+      },
+      "overlayEffects": [
+        { "type": "vignette", "enabled": true, "intensity": 0.56, "color": "rgba(0,0,0,0.72)", "speed": 1 },
+        { "type": "grain", "enabled": true, "intensity": 0.16, "color": "rgba(255,255,255,0.1)", "speed": 1 }
+      ],
+      "layout": {
+        "panel": {
+          "visible": true,
+          "x": 50,
+          "y": 52,
+          "widthPx": 560,
+          "padding": "26px 28px"
+        },
+        "elements": [
+          {
+            "id": "title",
+            "type": "text",
+            "visible": true,
+            "position": { "x": 50, "y": 32 },
+            "anchor": "center",
+            "props": { "text": "Map Shine Advanced" },
+            "style": { "fontSize": "32px", "fontWeight": "700", "letterSpacing": "0.6px", "textShadow": "0 2px 16px rgba(0,0,0,0.55)" },
+            "animation": { "entrance": { "type": "fade-in-up", "duration": 560, "delay": 30, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 3800, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "subtitle",
+            "type": "text",
+            "visible": true,
+            "position": { "x": 50, "y": 36 },
+            "anchor": "center",
+            "props": { "text": "Preparing your scene stack" },
+            "style": { "fontSize": "13px", "fontWeight": "400", "color": "rgba(196,223,255,0.8)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 460, "delay": 120, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "scene-name",
+            "type": "scene-name",
+            "visible": true,
+            "position": { "x": 50, "y": 39.8 },
+            "anchor": "center",
+            "props": { "prefix": "Routing to " },
+            "style": { "fontSize": "14px", "fontWeight": "500", "color": "rgba(211,230,255,0.82)" },
+            "animation": { "entrance": { "type": "blur-in", "duration": 460, "delay": 190, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "decor-line",
+            "type": "custom-html",
+            "visible": true,
+            "position": { "x": 50, "y": 43.2 },
+            "anchor": "center",
+            "props": {
+              "html": "<div style='width:440px;max-width:calc(100vw - 48px);height:1px;background:linear-gradient(90deg,rgba(0,0,0,0),rgba(143,202,255,0.68),rgba(0,0,0,0));'></div>"
+            },
+            "style": {},
+            "animation": { "entrance": { "type": "clip-reveal-center", "duration": 520, "delay": 240, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "stage-pills",
+            "type": "stage-pills",
+            "visible": true,
+            "position": { "x": 50, "y": 47.2 },
+            "anchor": "center",
+            "props": {
+              "containerEnabled": true,
+              "containerPaddingYpx": 8,
+              "containerPaddingXpx": 12,
+              "containerRadiusPx": 999,
+              "containerBackground": "rgba(4,12,24,0.54)",
+              "containerBorder": "1px solid rgba(120,170,240,0.26)",
+              "maxWidthPx": 920
+            },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in", "duration": 340, "delay": 330, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "progress",
+            "type": "progress-bar",
+            "visible": true,
+            "position": { "x": 50, "y": 53.5 },
+            "anchor": "center",
+            "props": { "widthPx": 430, "heightPx": 8, "radiusPx": 999 },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in-up", "duration": 320, "delay": 390, "easing": "ease-out" }, "ambient": { "type": "glow-pulse", "duration": 2500, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "percentage",
+            "type": "percentage",
+            "visible": true,
+            "position": { "x": 76.5, "y": 53.5 },
+            "anchor": "center-left",
+            "props": {},
+            "style": { "fontSize": "13px", "fontWeight": "700", "color": "rgba(205,236,255,0.84)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 300, "delay": 430, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "message",
+            "type": "message",
+            "visible": true,
+            "position": { "x": 50, "y": 57.4 },
+            "anchor": "center",
+            "props": { "text": "Compiling manager graph..." },
+            "style": { "fontSize": "12.5px", "color": "rgba(190,214,239,0.82)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 300, "delay": 470, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 2100, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "spinner",
+            "type": "spinner",
+            "visible": true,
+            "position": { "x": 22.5, "y": 53.5 },
+            "anchor": "center",
+            "props": { "sizePx": 26 },
+            "style": {},
+            "animation": { "entrance": { "type": "scale-in", "duration": 460, "delay": 220, "easing": "ease-out" }, "ambient": { "type": "spin", "duration": 900, "easing": "linear" } }
+          },
+          {
+            "id": "timer",
+            "type": "timer",
+            "visible": true,
+            "position": { "x": 78, "y": 33.2 },
+            "anchor": "center-left",
+            "props": {},
+            "style": { "fontSize": "12px", "color": "rgba(191,214,236,0.6)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 320, "delay": 210, "easing": "ease-out" }, "ambient": null }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "dark-fantasy",
+    "name": "Dark Fantasy",
+    "description": "Left-column ritual layout with ornate divider, embers, and heavy cinematic contrast.",
+    "config": {
+      "themeName": "Dark Fantasy",
+      "style": {
+        "backgroundColor": "#0a0604",
+        "accentColor": "#d7a64a",
+        "secondaryAccentColor": "#8f6925",
+        "textColor": "rgba(255, 244, 224, 0.94)",
+        "panelBackground": "rgba(20, 10, 6, 0.66)",
+        "panelBorder": "1px solid rgba(212, 163, 78, 0.28)",
+        "panelBlurPx": 10,
+        "panelRadiusPx": 12,
+        "primaryFont": "Cinzel",
+        "bodyFont": "Cormorant Garamond"
+      },
+      "fonts": {
+        "googleFamilies": ["Cinzel:wght@400;600;700", "Cormorant Garamond:wght@400;500;700"]
+      },
+      "wallpapers": {
+        "mode": "single",
+        "fit": "cover",
+        "entries": [
+          {
+            "id": "df-1",
+            "label": "Dark Castle",
+            "src": "modules/map-shine-advanced/assets/loading/dark-castle.webp",
+            "pinToFirstLoad": true,
+            "weight": 1
+          }
+        ],
+        "overlay": {
+          "enabled": true,
+          "color": "rgba(0,0,0,0.58)"
+        }
+      },
+      "overlayEffects": [
+        { "type": "vignette", "enabled": true, "intensity": 0.88, "color": "rgba(0,0,0,0.84)", "speed": 1 },
+        { "type": "embers", "enabled": true, "intensity": 0.72, "color": "#ff7a18", "speed": 0.86 },
+        { "type": "fog", "enabled": true, "intensity": 0.42, "color": "rgba(92,78,64,0.3)", "speed": 0.58 }
+      ],
+      "layout": {
+        "panel": {
+          "visible": true,
+          "x": 24,
+          "y": 54,
+          "widthPx": 470,
+          "padding": "24px 22px"
+        },
+        "elements": [
+          {
+            "id": "title",
+            "type": "text",
+            "visible": true,
+            "position": { "x": 8, "y": 14 },
+            "anchor": "top-left",
+            "props": { "text": "The Citadel Awakens" },
+            "style": { "fontSize": "30px", "fontWeight": "700", "textShadow": "0 2px 14px rgba(0,0,0,0.7)" },
+            "animation": { "entrance": { "type": "fade-in-left", "duration": 580, "delay": 40, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 4600, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "scene-name",
+            "type": "scene-name",
+            "visible": true,
+            "position": { "x": 8, "y": 21 },
+            "anchor": "top-left",
+            "props": { "prefix": "Summoning " },
+            "style": { "fontSize": "14px", "color": "rgba(244,218,172,0.8)" },
+            "animation": { "entrance": { "type": "fade-in-left", "duration": 500, "delay": 110, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "divider",
+            "type": "custom-html",
+            "visible": true,
+            "position": { "x": 8, "y": 28 },
+            "anchor": "top-left",
+            "props": {
+              "html": "<div style='width:390px;max-width:46vw;height:1px;background:linear-gradient(90deg,rgba(215,166,74,0.75),rgba(215,166,74,0.08));'></div>"
+            },
+            "style": {},
+            "animation": { "entrance": { "type": "clip-reveal-left", "duration": 520, "delay": 170, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "stage-pills",
+            "type": "stage-pills",
+            "visible": true,
+            "position": { "x": 8, "y": 48 },
+            "anchor": "top-left",
+            "props": {
+              "containerEnabled": true,
+              "containerPaddingYpx": 8,
+              "containerPaddingXpx": 10,
+              "containerRadiusPx": 12,
+              "containerBackground": "rgba(33,18,9,0.52)",
+              "containerBorder": "1px solid rgba(193,143,63,0.24)",
+              "maxWidthPx": 420
+            },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in", "duration": 360, "delay": 260, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "message",
+            "type": "message",
+            "visible": true,
+            "position": { "x": 8, "y": 65.5 },
+            "anchor": "top-left",
+            "props": { "text": "Lighting braziers and opening iron gates..." },
+            "style": { "fontSize": "13px", "color": "rgba(235,207,164,0.86)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 320, "delay": 340, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 2400, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "progress",
+            "type": "progress-bar",
+            "visible": true,
+            "position": { "x": 8, "y": 74 },
+            "anchor": "top-left",
+            "props": { "widthPx": 360, "heightPx": 9, "radiusPx": 2 },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in-up", "duration": 320, "delay": 390, "easing": "ease-out" }, "ambient": { "type": "glow-pulse", "duration": 2600, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "percentage",
+            "type": "percentage",
+            "visible": true,
+            "position": { "x": 40.5, "y": 74 },
+            "anchor": "center-left",
+            "props": {},
+            "style": { "fontSize": "12px", "fontWeight": "700", "color": "rgba(238,214,170,0.84)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 260, "delay": 430, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "spinner",
+            "type": "spinner",
+            "visible": true,
+            "position": { "x": 42.5, "y": 15 },
+            "anchor": "top-right",
+            "props": { "sizePx": 28 },
+            "style": {},
+            "animation": { "entrance": { "type": "scale-in", "duration": 460, "delay": 220, "easing": "ease-out" }, "ambient": { "type": "spin", "duration": 980, "easing": "linear" } }
+          },
+          {
+            "id": "timer",
+            "type": "timer",
+            "visible": true,
+            "position": { "x": 38.7, "y": 8.8 },
+            "anchor": "top-right",
+            "props": {},
+            "style": { "fontSize": "12px", "color": "rgba(227,195,145,0.56)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 320, "delay": 170, "easing": "ease-out" }, "ambient": null }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "arcane-sanctum",
+    "name": "Arcane Sanctum",
+    "description": "Right-side mystical console with glowing rings, floating labels, and starfield energy.",
+    "config": {
+      "themeName": "Arcane Sanctum",
+      "style": {
+        "backgroundColor": "#070511",
+        "accentColor": "#8bc6ff",
+        "secondaryAccentColor": "#c18fff",
+        "textColor": "rgba(241, 233, 255, 0.95)",
+        "panelBackground": "rgba(19, 10, 34, 0.58)",
+        "panelBorder": "1px solid rgba(167, 139, 250, 0.3)",
+        "panelBlurPx": 16,
+        "panelRadiusPx": 18,
+        "primaryFont": "Uncial Antiqua",
+        "bodyFont": "Cormorant Garamond"
+      },
+      "fonts": {
+        "googleFamilies": ["Uncial Antiqua", "Cormorant Garamond:wght@400;500;700"]
+      },
+      "wallpapers": {
+        "mode": "single",
+        "fit": "cover",
+        "entries": [
+          {
+            "id": "ar-1",
+            "label": "Arcane Sky",
+            "src": "modules/map-shine-advanced/assets/loading/starfield.webp",
+            "pinToFirstLoad": true,
+            "weight": 1
+          }
+        ],
+        "overlay": {
+          "enabled": true,
+          "color": "rgba(8,4,20,0.46)"
+        }
+      },
+      "overlayEffects": [
+        { "type": "stars", "enabled": true, "intensity": 0.86, "color": "#f1e3ff", "speed": 1 },
+        { "type": "magic-motes", "enabled": true, "intensity": 0.75, "color": "#b597ff", "speed": 0.92 },
+        { "type": "smoke", "enabled": true, "intensity": 0.33, "color": "rgba(120,95,200,0.26)", "speed": 0.62 }
+      ],
+      "layout": {
+        "panel": {
+          "visible": true,
+          "x": 77,
+          "y": 51,
+          "widthPx": 430,
+          "padding": "24px 24px"
+        },
+        "elements": [
+          {
+            "id": "title",
+            "type": "text",
+            "visible": true,
+            "position": { "x": 92, "y": 14 },
+            "anchor": "top-right",
+            "props": { "text": "Arcane Transit" },
+            "style": { "fontSize": "30px", "fontWeight": "700", "textShadow": "0 0 20px rgba(182,149,255,0.55)" },
+            "animation": { "entrance": { "type": "fade-in-right", "duration": 560, "delay": 40, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 4200, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "scene-name",
+            "type": "scene-name",
+            "visible": true,
+            "position": { "x": 92, "y": 18.5 },
+            "anchor": "top-right",
+            "props": { "prefix": "Attuning " },
+            "style": { "fontSize": "14px", "color": "rgba(214,196,255,0.84)" },
+            "animation": { "entrance": { "type": "fade-in-right", "duration": 500, "delay": 120, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "rune-box",
+            "type": "custom-html",
+            "visible": true,
+            "position": { "x": 92, "y": 23.5 },
+            "anchor": "top-right",
+            "props": {
+              "html": "<div style='width:340px;max-width:40vw;padding:8px 10px;border:1px solid rgba(168,139,250,0.35);border-radius:10px;background:rgba(30,16,53,0.32);font-size:11px;color:rgba(214,196,255,0.78);text-align:right;'>sigils aligned | leyline lock acquired | conduits stable</div>"
+            },
+            "style": {},
+            "animation": { "entrance": { "type": "clip-reveal-left", "duration": 540, "delay": 190, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "spinner",
+            "type": "spinner",
+            "visible": true,
+            "position": { "x": 74.2, "y": 50 },
+            "anchor": "center",
+            "props": { "sizePx": 64 },
+            "style": {},
+            "animation": { "entrance": { "type": "scale-in", "duration": 540, "delay": 260, "easing": "ease-out" }, "ambient": { "type": "float-rotate", "duration": 4200, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "stage-pills",
+            "type": "stage-pills",
+            "visible": true,
+            "position": { "x": 92, "y": 37.5 },
+            "anchor": "top-right",
+            "props": {
+              "containerEnabled": true,
+              "containerPaddingYpx": 8,
+              "containerPaddingXpx": 10,
+              "containerRadiusPx": 14,
+              "containerBackground": "rgba(26,14,46,0.58)",
+              "containerBorder": "1px solid rgba(167,139,250,0.28)",
+              "maxWidthPx": 360
+            },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in", "duration": 360, "delay": 320, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "message",
+            "type": "message",
+            "visible": true,
+            "position": { "x": 92, "y": 43.8 },
+            "anchor": "top-right",
+            "props": { "text": "Stabilizing planar bridges..." },
+            "style": { "fontSize": "13px", "color": "rgba(218,202,255,0.85)", "textAlign": "right" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 340, "delay": 380, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 2400, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "progress",
+            "type": "progress-bar",
+            "visible": true,
+            "position": { "x": 92, "y": 48.5 },
+            "anchor": "top-right",
+            "props": { "widthPx": 338, "heightPx": 8, "radiusPx": 999 },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in-up", "duration": 320, "delay": 420, "easing": "ease-out" }, "ambient": { "type": "glow-pulse", "duration": 2600, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "percentage",
+            "type": "percentage",
+            "visible": true,
+            "position": { "x": 92, "y": 45.8 },
+            "anchor": "top-right",
+            "props": {},
+            "style": { "fontSize": "12px", "fontWeight": "700", "color": "rgba(223,212,255,0.84)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 280, "delay": 450, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "timer",
+            "type": "timer",
+            "visible": true,
+            "position": { "x": 92, "y": 8.8 },
+            "anchor": "top-right",
+            "props": {},
+            "style": { "fontSize": "12px", "color": "rgba(208,190,255,0.58)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 320, "delay": 170, "easing": "ease-out" }, "ambient": null }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "parchment-ink",
+    "name": "Parchment and Ink",
+    "description": "Expanded parchment dossier with centered typewriter rhythm and journal-style framing.",
+    "config": {
+      "themeName": "Parchment and Ink",
+      "style": {
+        "backgroundColor": "#efe2c7",
+        "accentColor": "#6d4c41",
+        "secondaryAccentColor": "#9d6d52",
+        "textColor": "#4a3028",
+        "panelBackground": "rgba(246, 229, 198, 0.68)",
+        "panelBorder": "1px solid rgba(87, 54, 34, 0.24)",
+        "panelBlurPx": 4,
+        "panelRadiusPx": 8,
+        "primaryFont": "Pirata One",
+        "bodyFont": "Special Elite"
+      },
+      "fonts": {
+        "googleFamilies": ["Pirata One", "Special Elite"]
+      },
+      "wallpapers": {
+        "mode": "single",
+        "fit": "cover",
+        "entries": [
+          {
+            "id": "pi-1",
+            "label": "Parchment",
+            "src": "modules/map-shine-advanced/assets/loading/parchment.webp",
+            "pinToFirstLoad": true,
+            "weight": 1
+          }
+        ],
+        "overlay": {
+          "enabled": false,
+          "color": "rgba(0,0,0,0.0)"
+        }
+      },
+      "overlayEffects": [
+        { "type": "dust", "enabled": true, "intensity": 0.48, "color": "rgba(150,120,90,0.32)", "speed": 0.72 },
+        { "type": "grain", "enabled": true, "intensity": 0.26, "color": "rgba(100,80,50,0.18)", "speed": 1 }
+      ],
+      "layout": {
+        "panel": {
+          "visible": true,
+          "x": 50,
+          "y": 61,
+          "widthPx": 710,
+          "padding": "22px 26px"
+        },
+        "elements": [
+          {
+            "id": "title",
+            "type": "text",
+            "visible": true,
+            "position": { "x": 50, "y": 42 },
+            "anchor": "center",
+            "props": { "text": "Field Notes Ledger" },
+            "style": { "fontSize": "34px", "fontWeight": "700", "textShadow": "0 1px 0 rgba(255,255,255,0.45)" },
+            "animation": { "entrance": { "type": "fade-in-down", "duration": 520, "delay": 40, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "scene-name",
+            "type": "scene-name",
+            "visible": true,
+            "position": { "x": 50, "y": 46.5 },
+            "anchor": "center",
+            "props": { "prefix": "Charting " },
+            "style": { "fontSize": "15px", "color": "rgba(74,48,40,0.75)" },
+            "animation": { "entrance": { "type": "typewriter", "duration": 700, "delay": 120, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "rule",
+            "type": "custom-html",
+            "visible": true,
+            "position": { "x": 50, "y": 49 },
+            "anchor": "center",
+            "props": {
+              "html": "<div style='width:520px;max-width:calc(100vw - 56px);height:2px;background:linear-gradient(90deg,rgba(74,48,40,0.04),rgba(74,48,40,0.55),rgba(74,48,40,0.04));'></div>"
+            },
+            "style": {},
+            "animation": { "entrance": { "type": "clip-reveal-center", "duration": 560, "delay": 190, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "message",
+            "type": "message",
+            "visible": true,
+            "position": { "x": 50, "y": 53 },
+            "anchor": "center",
+            "props": { "text": "Cataloging artifacts and map annotations..." },
+            "style": { "fontSize": "13px", "color": "rgba(74,48,40,0.82)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 320, "delay": 300, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 2800, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "progress",
+            "type": "progress-bar",
+            "visible": true,
+            "position": { "x": 50, "y": 57.5 },
+            "anchor": "center",
+            "props": { "widthPx": 520, "heightPx": 8, "radiusPx": 2 },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in-up", "duration": 320, "delay": 360, "easing": "ease-out" }, "ambient": { "type": "glow-pulse", "duration": 3000, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "percentage",
+            "type": "percentage",
+            "visible": true,
+            "position": { "x": 78.8, "y": 57.5 },
+            "anchor": "center-left",
+            "props": {},
+            "style": { "fontSize": "13px", "fontWeight": "700", "color": "rgba(74,48,40,0.72)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 280, "delay": 410, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "stage-pills",
+            "type": "stage-pills",
+            "visible": true,
+            "position": { "x": 50, "y": 62.8 },
+            "anchor": "center",
+            "props": {
+              "containerEnabled": true,
+              "containerPaddingYpx": 7,
+              "containerPaddingXpx": 10,
+              "containerRadiusPx": 6,
+              "containerBackground": "rgba(245,228,194,0.48)",
+              "containerBorder": "1px solid rgba(109,76,65,0.24)",
+              "maxWidthPx": 1000
+            },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in", "duration": 340, "delay": 450, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "spinner",
+            "type": "spinner",
+            "visible": true,
+            "position": { "x": 21.5, "y": 57.5 },
+            "anchor": "center",
+            "props": { "sizePx": 24 },
+            "style": {},
+            "animation": { "entrance": { "type": "scale-in", "duration": 430, "delay": 210, "easing": "ease-out" }, "ambient": { "type": "spin", "duration": 980, "easing": "linear" } }
+          },
+          {
+            "id": "timer",
+            "type": "timer",
+            "visible": true,
+            "position": { "x": 79.5, "y": 42.2 },
+            "anchor": "center-left",
+            "props": {},
+            "style": { "fontSize": "12px", "color": "rgba(74,48,40,0.56)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 320, "delay": 180, "easing": "ease-out" }, "ambient": null }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "cyberpunk-terminal",
+    "name": "Cyberpunk Terminal",
+    "description": "Glitch-heavy command deck with side diagnostics and full-width bottom progress lane.",
+    "config": {
+      "themeName": "Cyberpunk Terminal",
+      "style": {
+        "backgroundColor": "#050807",
+        "accentColor": "#00ffd5",
+        "secondaryAccentColor": "#4fffee",
+        "textColor": "#9dffe7",
+        "panelBackground": "rgba(2, 14, 12, 0.52)",
+        "panelBorder": "1px solid rgba(0, 255, 200, 0.24)",
+        "panelBlurPx": 8,
+        "panelRadiusPx": 8,
+        "primaryFont": "Orbitron",
+        "bodyFont": "Fira Code"
+      },
+      "fonts": {
+        "googleFamilies": ["Orbitron:wght@400;600;700", "Fira Code:wght@400;500;700"]
+      },
+      "wallpapers": {
+        "mode": "single",
+        "fit": "cover",
+        "entries": [],
+        "overlay": {
+          "enabled": false,
+          "color": "rgba(0,0,0,0)"
+        }
+      },
+      "overlayEffects": [
+        { "type": "scanlines", "enabled": true, "intensity": 0.86, "color": "rgba(0,255,136,0.08)", "speed": 1 },
+        { "type": "grain", "enabled": true, "intensity": 0.28, "color": "rgba(255,255,255,0.08)", "speed": 1.3 },
+        { "type": "dust", "enabled": true, "intensity": 0.34, "color": "rgba(90,255,220,0.18)", "speed": 0.88 }
+      ],
+      "layout": {
+        "panel": {
+          "visible": true,
+          "x": 31,
+          "y": 55,
+          "widthPx": 600,
+          "padding": "20px 20px"
+        },
+        "elements": [
+          {
+            "id": "title",
+            "type": "text",
+            "visible": true,
+            "position": { "x": 6, "y": 8 },
+            "anchor": "top-left",
+            "props": { "text": "SYS::SCENE_BOOT" },
+            "style": { "fontSize": "25px", "fontWeight": "700", "letterSpacing": "1.2px", "textShadow": "0 0 12px rgba(0,255,220,0.35)" },
+            "animation": { "entrance": { "type": "glitch-in", "duration": 500, "delay": 20, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 3000, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "scene-name",
+            "type": "scene-name",
+            "visible": true,
+            "position": { "x": 6, "y": 14.8 },
+            "anchor": "top-left",
+            "props": { "prefix": "target_scene = " },
+            "style": { "fontSize": "13px", "color": "rgba(147,255,225,0.82)" },
+            "animation": { "entrance": { "type": "typewriter", "duration": 760, "delay": 120, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "diag-box",
+            "type": "custom-html",
+            "visible": true,
+            "position": { "x": 6, "y": 23 },
+            "anchor": "top-left",
+            "props": {
+              "html": "<div style='width:520px;max-width:58vw;padding:8px 10px;border:1px solid rgba(0,255,200,0.28);background:rgba(0,18,14,0.52);border-radius:6px;font-size:11px;line-height:1.45;color:rgba(133,255,221,0.84);'>[ok] mount texture bundles<br>[ok] compile render graph<br>[..] waiting for scene managers</div>"
+            },
+            "style": {},
+            "animation": { "entrance": { "type": "clip-reveal-up", "duration": 420, "delay": 210, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "stage-pills",
+            "type": "stage-pills",
+            "visible": true,
+            "position": { "x": 50, "y": 59.8 },
+            "anchor": "center",
+            "props": {
+              "containerEnabled": true,
+              "containerPaddingYpx": 7,
+              "containerPaddingXpx": 10,
+              "containerRadiusPx": 4,
+              "containerBackground": "rgba(0,20,16,0.5)",
+              "containerBorder": "1px solid rgba(0,255,200,0.24)",
+              "maxWidthPx": 960
+            },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in", "duration": 320, "delay": 300, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "message",
+            "type": "message",
+            "visible": true,
+            "position": { "x": 6, "y": 46 },
+            "anchor": "top-left",
+            "props": { "text": "streaming world state packets..." },
+            "style": { "fontSize": "12.5px", "color": "rgba(147,255,225,0.78)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 280, "delay": 360, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 1800, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "progress",
+            "type": "progress-bar",
+            "visible": true,
+            "position": { "x": 50, "y": 53.5 },
+            "anchor": "center",
+            "props": { "widthPx": 920, "heightPx": 9, "radiusPx": 2 },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in-up", "duration": 280, "delay": 420, "easing": "ease-out" }, "ambient": { "type": "glow-pulse", "duration": 1800, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "percentage",
+            "type": "percentage",
+            "visible": true,
+            "position": { "x": 93, "y": 53.5 },
+            "anchor": "center-right",
+            "props": {},
+            "style": { "fontSize": "12px", "fontWeight": "700", "color": "rgba(132,255,220,0.86)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 240, "delay": 460, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "spinner",
+            "type": "spinner",
+            "visible": true,
+            "position": { "x": 90, "y": 46.5 },
+            "anchor": "center",
+            "props": { "sizePx": 32 },
+            "style": {},
+            "animation": { "entrance": { "type": "scale-in", "duration": 360, "delay": 250, "easing": "ease-out" }, "ambient": { "type": "spin", "duration": 700, "easing": "linear" } }
+          },
+          {
+            "id": "timer",
+            "type": "timer",
+            "visible": true,
+            "position": { "x": 94, "y": 8 },
+            "anchor": "top-right",
+            "props": {},
+            "style": { "fontSize": "12px", "color": "rgba(114,232,203,0.65)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 280, "delay": 150, "easing": "ease-out" }, "ambient": null }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "cinematic-widescreen",
+    "name": "Cinematic Widescreen",
+    "description": "Film-title composition with letterbox bars, edge-aligned text, and understated bottom load bar.",
+    "config": {
+      "themeName": "Cinematic Widescreen",
+      "style": {
+        "backgroundColor": "#030303",
+        "accentColor": "#f8f8f8",
+        "secondaryAccentColor": "rgba(255,255,255,0.5)",
+        "textColor": "rgba(255,255,255,0.95)",
+        "panelBackground": "rgba(0,0,0,0)",
+        "panelBorder": "0px solid transparent",
+        "panelBlurPx": 0,
+        "panelRadiusPx": 0,
+        "primaryFont": "Playfair Display",
+        "bodyFont": "IBM Plex Sans"
+      },
+      "fonts": {
+        "googleFamilies": ["Playfair Display:wght@400;700", "IBM Plex Sans:wght@300;400;500;700"]
+      },
+      "wallpapers": {
+        "mode": "single",
+        "fit": "cover",
+        "entries": [
+          {
+            "id": "cw-1",
+            "label": "Cinematic Placeholder",
+            "src": "modules/map-shine-advanced/assets/loading/placeholder-scene.webp",
+            "pinToFirstLoad": true,
+            "weight": 1
+          }
+        ],
+        "overlay": {
+          "enabled": true,
+          "color": "rgba(0,0,0,0.32)"
+        }
+      },
+      "overlayEffects": [
+        { "type": "vignette", "enabled": true, "intensity": 0.6, "color": "rgba(0,0,0,0.66)", "speed": 1 },
+        { "type": "grain", "enabled": true, "intensity": 0.22, "color": "rgba(255,255,255,0.08)", "speed": 1 }
+      ],
+      "layout": {
+        "panel": {
+          "visible": false,
+          "x": 50,
+          "y": 50,
+          "widthPx": 440,
+          "padding": "24px 22px"
+        },
+        "elements": [
+          {
+            "id": "letterbox-bars",
+            "type": "custom-html",
+            "visible": true,
+            "position": { "x": 50, "y": 50 },
+            "anchor": "center",
+            "props": {
+              "html": "<div style='position:fixed;inset:0;pointer-events:none;'><div style='position:absolute;left:0;top:0;width:100%;height:9.5vh;background:rgba(0,0,0,0.92);'></div><div style='position:absolute;left:0;bottom:0;width:100%;height:11vh;background:rgba(0,0,0,0.92);'></div></div>"
+            },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in", "duration": 300, "delay": 0, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "title",
+            "type": "text",
+            "visible": true,
+            "position": { "x": 6, "y": 86.6 },
+            "anchor": "bottom-left",
+            "props": { "text": "NOW LOADING" },
+            "style": { "fontSize": "10px", "fontWeight": "600", "letterSpacing": "3px", "color": "rgba(255,255,255,0.72)" },
+            "animation": { "entrance": { "type": "fade-in-up", "duration": 420, "delay": 120, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "scene-name",
+            "type": "scene-name",
+            "visible": true,
+            "position": { "x": 6, "y": 91.8 },
+            "anchor": "bottom-left",
+            "props": { "prefix": "" },
+            "style": { "fontSize": "26px", "fontWeight": "700", "textShadow": "0 2px 20px rgba(0,0,0,0.7)" },
+            "animation": { "entrance": { "type": "fade-in-up", "duration": 540, "delay": 180, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "message",
+            "type": "message",
+            "visible": true,
+            "position": { "x": 6, "y": 96.2 },
+            "anchor": "bottom-left",
+            "props": { "text": "cueing transitions and effects" },
+            "style": { "fontSize": "12px", "color": "rgba(255,255,255,0.72)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 360, "delay": 240, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 2600, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "progress",
+            "type": "progress-bar",
+            "visible": true,
+            "position": { "x": 50, "y": 94.5 },
+            "anchor": "center",
+            "props": { "widthPx": 680, "heightPx": 4, "radiusPx": 999 },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in", "duration": 320, "delay": 250, "easing": "ease-out" }, "ambient": { "type": "glow-pulse", "duration": 2800, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "percentage",
+            "type": "percentage",
+            "visible": true,
+            "position": { "x": 84.5, "y": 94.5 },
+            "anchor": "center-left",
+            "props": {},
+            "style": { "fontSize": "11px", "fontWeight": "600", "color": "rgba(255,255,255,0.66)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 280, "delay": 300, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "timer",
+            "type": "timer",
+            "visible": true,
+            "position": { "x": 94, "y": 7.5 },
+            "anchor": "top-right",
+            "props": {},
+            "style": { "fontSize": "12px", "fontWeight": "500", "color": "rgba(255,255,255,0.62)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 280, "delay": 120, "easing": "ease-out" }, "ambient": null }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "oceanic-depths",
+    "name": "Oceanic Depths",
+    "description": "New sonar-inspired template with right-side data panel, drifting haze, and cool cyan gradients.",
+    "config": {
+      "themeName": "Oceanic Depths",
+      "style": {
+        "backgroundColor": "#02111a",
+        "accentColor": "#4fe4ff",
+        "secondaryAccentColor": "#63ffc7",
+        "textColor": "rgba(220, 248, 255, 0.92)",
+        "panelBackground": "rgba(4, 24, 35, 0.62)",
+        "panelBorder": "1px solid rgba(101, 214, 255, 0.26)",
+        "panelBlurPx": 14,
+        "panelRadiusPx": 16,
+        "primaryFont": "Space Grotesk",
+        "bodyFont": "Space Grotesk"
+      },
+      "fonts": {
+        "googleFamilies": ["Space Grotesk:wght@400;500;700"]
+      },
+      "wallpapers": {
+        "mode": "single",
+        "fit": "cover",
+        "entries": [],
+        "overlay": {
+          "enabled": true,
+          "color": "rgba(0, 20, 34, 0.4)"
+        }
+      },
+      "overlayEffects": [
+        { "type": "fog", "enabled": true, "intensity": 0.44, "color": "rgba(80,180,210,0.22)", "speed": 0.52 },
+        { "type": "dust", "enabled": true, "intensity": 0.36, "color": "rgba(112,240,255,0.22)", "speed": 0.76 },
+        { "type": "vignette", "enabled": true, "intensity": 0.52, "color": "rgba(0,8,14,0.7)", "speed": 1 }
+      ],
+      "layout": {
+        "panel": {
+          "visible": true,
+          "x": 78,
+          "y": 56,
+          "widthPx": 460,
+          "padding": "24px 22px"
+        },
+        "elements": [
+          {
+            "id": "title",
+            "type": "text",
+            "visible": true,
+            "position": { "x": 92, "y": 13 },
+            "anchor": "top-right",
+            "props": { "text": "Bathymetry Link" },
+            "style": { "fontSize": "30px", "fontWeight": "700", "textShadow": "0 0 18px rgba(80,220,255,0.4)" },
+            "animation": { "entrance": { "type": "fade-in-right", "duration": 540, "delay": 40, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 3600, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "scene-name",
+            "type": "scene-name",
+            "visible": true,
+            "position": { "x": 92, "y": 20 },
+            "anchor": "top-right",
+            "props": { "prefix": "Submerging into " },
+            "style": { "fontSize": "14px", "color": "rgba(178,234,247,0.84)" },
+            "animation": { "entrance": { "type": "fade-in-right", "duration": 480, "delay": 110, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "spinner",
+            "type": "spinner",
+            "visible": true,
+            "position": { "x": 75, "y": 46 },
+            "anchor": "center",
+            "props": { "sizePx": 58 },
+            "style": {},
+            "animation": { "entrance": { "type": "scale-in", "duration": 520, "delay": 210, "easing": "ease-out" }, "ambient": { "type": "float-rotate", "duration": 4400, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "sonar-box",
+            "type": "custom-html",
+            "visible": true,
+            "position": { "x": 92, "y": 31 },
+            "anchor": "top-right",
+            "props": {
+              "html": "<div style='width:360px;max-width:42vw;padding:9px 11px;border:1px solid rgba(101,214,255,0.32);border-radius:10px;background:rgba(8,34,45,0.38);font-size:11px;color:rgba(193,241,255,0.82);text-align:right;'>depth lock / pressure nominal / channels synchronized</div>"
+            },
+            "style": {},
+            "animation": { "entrance": { "type": "clip-reveal-left", "duration": 520, "delay": 180, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "message",
+            "type": "message",
+            "visible": true,
+            "position": { "x": 92, "y": 66 },
+            "anchor": "top-right",
+            "props": { "text": "mapping contour fields and currents..." },
+            "style": { "fontSize": "13px", "color": "rgba(190,239,251,0.84)", "textAlign": "right" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 320, "delay": 330, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 2200, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "progress",
+            "type": "progress-bar",
+            "visible": true,
+            "position": { "x": 92, "y": 74.5 },
+            "anchor": "top-right",
+            "props": { "widthPx": 352, "heightPx": 8, "radiusPx": 999 },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in-up", "duration": 300, "delay": 390, "easing": "ease-out" }, "ambient": { "type": "glow-pulse", "duration": 2500, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "percentage",
+            "type": "percentage",
+            "visible": true,
+            "position": { "x": 92, "y": 70.8 },
+            "anchor": "top-right",
+            "props": {},
+            "style": { "fontSize": "12px", "fontWeight": "700", "color": "rgba(195,243,255,0.86)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 260, "delay": 420, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "timer",
+            "type": "timer",
+            "visible": true,
+            "position": { "x": 92, "y": 8.5 },
+            "anchor": "top-right",
+            "props": {},
+            "style": { "fontSize": "12px", "color": "rgba(172,226,240,0.62)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 300, "delay": 160, "easing": "ease-out" }, "ambient": null }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "noir-dossier",
+    "name": "Noir Dossier",
+    "description": "New monochrome detective dossier style with left-margin briefing cards and sharp red progress line.",
+    "config": {
+      "themeName": "Noir Dossier",
+      "style": {
+        "backgroundColor": "#090909",
+        "accentColor": "#db4343",
+        "secondaryAccentColor": "#f5f5f5",
+        "textColor": "rgba(241, 241, 241, 0.95)",
+        "panelBackground": "rgba(11, 11, 11, 0.68)",
+        "panelBorder": "1px solid rgba(255, 255, 255, 0.16)",
+        "panelBlurPx": 8,
+        "panelRadiusPx": 2,
+        "primaryFont": "Bebas Neue",
+        "bodyFont": "Libre Baskerville"
+      },
+      "fonts": {
+        "googleFamilies": ["Bebas Neue", "Libre Baskerville:wght@400;700"]
+      },
+      "wallpapers": {
+        "mode": "single",
+        "fit": "cover",
+        "entries": [],
+        "overlay": {
+          "enabled": true,
+          "color": "rgba(0,0,0,0.42)"
+        }
+      },
+      "overlayEffects": [
+        { "type": "grain", "enabled": true, "intensity": 0.34, "color": "rgba(255,255,255,0.12)", "speed": 1.2 },
+        { "type": "vignette", "enabled": true, "intensity": 0.7, "color": "rgba(0,0,0,0.8)", "speed": 1 },
+        { "type": "smoke", "enabled": true, "intensity": 0.3, "color": "rgba(180,180,180,0.15)", "speed": 0.5 }
+      ],
+      "layout": {
+        "panel": {
+          "visible": true,
+          "x": 22,
+          "y": 56,
+          "widthPx": 480,
+          "padding": "22px 20px"
+        },
+        "elements": [
+          {
+            "id": "title",
+            "type": "text",
+            "visible": true,
+            "position": { "x": 8, "y": 12 },
+            "anchor": "top-left",
+            "props": { "text": "CASE FILE // LOADING" },
+            "style": { "fontSize": "34px", "fontWeight": "700", "letterSpacing": "1.4px", "color": "rgba(247,247,247,0.94)" },
+            "animation": { "entrance": { "type": "fade-in-left", "duration": 520, "delay": 30, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "scene-name",
+            "type": "scene-name",
+            "visible": true,
+            "position": { "x": 8, "y": 19.5 },
+            "anchor": "top-left",
+            "props": { "prefix": "Location: " },
+            "style": { "fontSize": "14px", "color": "rgba(231,231,231,0.76)" },
+            "animation": { "entrance": { "type": "typewriter", "duration": 760, "delay": 120, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "brief",
+            "type": "custom-html",
+            "visible": true,
+            "position": { "x": 8, "y": 29 },
+            "anchor": "top-left",
+            "props": {
+              "html": "<div style='width:390px;max-width:44vw;padding:8px 10px;border:1px solid rgba(255,255,255,0.18);background:rgba(0,0,0,0.35);font-size:11px;line-height:1.5;color:rgba(240,240,240,0.8);'>evidence chain restored<br>lighting transcripts reconstructed<br>witness overlays synchronized</div>"
+            },
+            "style": {},
+            "animation": { "entrance": { "type": "clip-reveal-left", "duration": 480, "delay": 190, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "message",
+            "type": "message",
+            "visible": true,
+            "position": { "x": 8, "y": 66 },
+            "anchor": "top-left",
+            "props": { "text": "building timeline and suspect graph..." },
+            "style": { "fontSize": "12.5px", "color": "rgba(230,230,230,0.78)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 300, "delay": 330, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 2000, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "progress",
+            "type": "progress-bar",
+            "visible": true,
+            "position": { "x": 8, "y": 74 },
+            "anchor": "top-left",
+            "props": { "widthPx": 380, "heightPx": 7, "radiusPx": 1 },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in-up", "duration": 280, "delay": 380, "easing": "ease-out" }, "ambient": { "type": "glow-pulse", "duration": 2200, "easing": "ease-in-out" } }
+          },
+          {
+            "id": "percentage",
+            "type": "percentage",
+            "visible": true,
+            "position": { "x": 42.5, "y": 74 },
+            "anchor": "center-left",
+            "props": {},
+            "style": { "fontSize": "12px", "fontWeight": "700", "color": "rgba(245,245,245,0.84)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 250, "delay": 420, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "stage-pills",
+            "type": "stage-pills",
+            "visible": true,
+            "position": { "x": 8, "y": 81.5 },
+            "anchor": "top-left",
+            "props": {
+              "containerEnabled": true,
+              "containerPaddingYpx": 7,
+              "containerPaddingXpx": 9,
+              "containerRadiusPx": 2,
+              "containerBackground": "rgba(8,8,8,0.62)",
+              "containerBorder": "1px solid rgba(255,255,255,0.14)",
+              "maxWidthPx": 430
+            },
+            "style": {},
+            "animation": { "entrance": { "type": "fade-in", "duration": 340, "delay": 450, "easing": "ease-out" }, "ambient": null }
+          },
+          {
+            "id": "timer",
+            "type": "timer",
+            "visible": true,
+            "position": { "x": 94, "y": 8 },
+            "anchor": "top-right",
+            "props": {},
+            "style": { "fontSize": "12px", "color": "rgba(220,220,220,0.62)" },
+            "animation": { "entrance": { "type": "fade-in", "duration": 260, "delay": 130, "easing": "ease-out" }, "ambient": null }
+          }
+        ]
+      }
+    }
+  }
+]

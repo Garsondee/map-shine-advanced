@@ -6,6 +6,7 @@
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
+import { applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
 
 const log = createLogger('WallManager');
 
@@ -80,6 +81,10 @@ export class WallManager {
    * @private
    */
   setupHooks() {
+    this._hookIds.push(['preCreateWall', Hooks.on('preCreateWall', (doc, data, options, userId) => {
+      this._onPreCreateWall(doc, data, options, userId);
+    })]);
+
     this._hookIds.push(['createWall', Hooks.on('createWall', (doc) => {
       this.create(doc);
       setTimeout(() => {
@@ -110,6 +115,35 @@ export class WallManager {
       }, 0);
       this._requestLightingRefresh();
     })]);
+  }
+
+  _onPreCreateWall(doc, data, options, userId) {
+    try {
+      if (userId && game?.user?.id && userId !== game.user.id) return;
+
+      const hasBottom = data?.flags?.['wall-height']?.bottom !== undefined
+        && data?.flags?.['wall-height']?.bottom !== null;
+      const hasTop = data?.flags?.['wall-height']?.top !== undefined
+        && data?.flags?.['wall-height']?.top !== null;
+      if (hasBottom && hasTop) return;
+
+      const defaults = {};
+      applyWallLevelDefaults(defaults, { scene: doc?.parent ?? canvas?.scene });
+      const seeded = defaults?.flags?.['wall-height'];
+      if (!seeded) return;
+
+      const nextWallHeight = {
+        bottom: hasBottom ? data.flags['wall-height'].bottom : seeded.bottom,
+        top: hasTop ? data.flags['wall-height'].top : seeded.top,
+      };
+
+      doc.updateSource({
+        flags: {
+          'wall-height': nextWallHeight,
+        },
+      });
+    } catch (_) {
+    }
   }
 
   _shouldShowWallLines() {

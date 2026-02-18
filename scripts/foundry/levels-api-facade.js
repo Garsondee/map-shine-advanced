@@ -471,11 +471,18 @@ function _buildNativeDocFlags(doc) {
   const lf = doc.flags.levels;
   if (lf.rangeBottom === undefined && lf.rangeTop === undefined) return null;
 
-  const bottom = Number(lf.rangeBottom);
+  // Levels V12+ migrates flags.levels.rangeBottom to doc.elevation.
+  // Fall back to doc.elevation when the flag is absent to match Levels'
+  // own getRangeForDocument() semantics.
+  const rawBottom = Number(lf.rangeBottom);
+  const docElev = Number(doc.elevation ?? NaN);
+  const bottom = Number.isFinite(rawBottom) ? rawBottom
+    : Number.isFinite(docElev) ? docElev : -Infinity;
+
   const top = Number(lf.rangeTop);
   return {
     elevation: {
-      rangeBottom: Number.isFinite(bottom) ? bottom : -Infinity,
+      rangeBottom: bottom,
       rangeTop: Number.isFinite(top) ? top : Infinity,
     },
     _migratedFrom: 'levels',

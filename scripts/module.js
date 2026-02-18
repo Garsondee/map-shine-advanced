@@ -10,7 +10,8 @@ import * as sceneSettings from './settings/scene-settings.js';
 import * as canvasReplacement from './foundry/canvas-replacement.js';
 import { registerLevelNavigationKeybindings } from './foundry/level-navigation-keybindings.js';
 import { registerUISettings } from './ui/tweakpane-manager.js';
-import { loadingOverlay } from './ui/loading-overlay.js';
+import { loadingScreenService as loadingOverlay } from './ui/loading-screen/loading-screen-service.js';
+import { LoadingScreenManager } from './ui/loading-screen/loading-screen-manager.js';
 import { debugLoadingProfiler } from './core/debug-loading-profiler.js';
 
 const MODULE_ID = 'map-shine-advanced';
@@ -300,6 +301,7 @@ try {
 
 // Expose module state globally (idempotent)
 window.MapShine = MapShine;
+MapShine.loadingScreenService = loadingOverlay;
 
 // Expose debug loading profiler early (runtime state is synced from Foundry settings at init).
 MapShine.debugLoadingProfiler = debugLoadingProfiler;
@@ -310,6 +312,15 @@ MapShine.debugLoadingProfiler = debugLoadingProfiler;
  */
 Hooks.once('init', async function() {
   info('Initializing...');
+
+  // Register settings first so loading-screen service can read world defaults.
+  sceneSettings.registerSettings();
+
+  try {
+    await loadingOverlay.initialize();
+  } catch (e) {
+    console.warn('Map Shine: failed to initialize loading screen service', e);
+  }
 
   try {
     loadingOverlay.showBlack('Initializing…');
@@ -322,8 +333,6 @@ Hooks.once('init', async function() {
   "color: #888; font-style: italic;"
 );
   
-  // Register settings
-  sceneSettings.registerSettings();
   registerLevelNavigationKeybindings(MODULE_ID);
   // Sync Debug Loading Mode from Foundry settings on startup.
   debugLoadingProfiler.debugMode = sceneSettings.getDebugLoadingModeEnabled();
@@ -475,42 +484,35 @@ Hooks.once('init', async function() {
         }
       });
 
-      const getControlledTokenDoc = () => {
-        try {
-          const controlled = canvas?.tokens?.controlled;
-          const token = (Array.isArray(controlled) && controlled.length > 0) ? controlled[0] : null;
-          return token?.document ?? null;
-        } catch (_) {
-          return null;
-        }
-      };
-
-      const getPlayerLightState = () => {
-        const tokenDoc = getControlledTokenDoc();
-        if (!tokenDoc) return { tokenDoc: null, enabled: false, mode: 'flashlight' };
-
-        const enabled = tokenDoc.getFlag?.('map-shine-advanced', 'playerLightEnabled');
-        const mode = tokenDoc.getFlag?.('map-shine-advanced', 'playerLightMode');
-
-        return {
-          tokenDoc,
-          enabled: (enabled === undefined || enabled === null) ? false : !!enabled,
-          mode: (mode === 'torch' || mode === 'flashlight') ? mode : 'flashlight'
-        };
-      };
-
-      const rerenderControls = () => {
-        try { ui?.controls?.render?.(true); } catch (_) {}
-        try {
-          ui?.controls?.render?.(true);
-        } catch (_) {
-        }
-      };
-
-      const stNow = getPlayerLightState();
-      const globalPlayerLightEnabled = !!(window.MapShine?.playerLightEffect?.enabled);
-      const torchActive = globalPlayerLightEnabled && !!stNow.tokenDoc && stNow.enabled && stNow.mode === 'torch';
-      const flashlightActive = globalPlayerLightEnabled && !!stNow.tokenDoc && stNow.enabled && stNow.mode === 'flashlight';
+      if (isGM) {
+        ensureTool(tokenControls, {
+          name: 'map-shine-loading-screens',
+          title: 'Map Shine Loading Screens',
+          icon: 'fas fa-images',
+          button: true,
+          order: 106,
+          visible: true,
+          toolclip: {
+            src: '',
+            heading: 'MAPSHINE.ToolTitle',
+            items: [{ paragraph: 'Open Loading Screen Composer' }]
+          },
+          onChange: async () => {
+            try {
+              let manager = window.MapShine?.loadingScreenManager;
+              if (!manager) {
+                manager = new LoadingScreenManager();
+                await manager.initialize();
+                if (window.MapShine) window.MapShine.loadingScreenManager = manager;
+              }
+              await manager.toggle();
+            } catch (e) {
+              console.error('Map Shine: failed to open Loading Screen Composer', e);
+              ui.notifications?.warn?.('Loading Screen Composer is not available yet.');
+            }
+          }
+        });
+      }
 
       ensureTool(tokenControls, {
         name: 'map-shine-player-torch',
@@ -519,7 +521,7 @@ Hooks.once('init', async function() {
         toggle: true,
         order: 103,
         visible: playerToolsVisible,
-        active: torchActive,
+        active: false,
         onChange: async () => {
           if (!playerToolsVisible) {
             ui.notifications?.warn?.('Only the GM can change Player Light mode.');
@@ -528,7 +530,6 @@ Hooks.once('init', async function() {
 
           if (!window.MapShine?.playerLightEffect?.enabled) {
             ui.notifications?.warn?.('Player Light is disabled for this map.');
-            rerenderControls();
             return;
           }
 
@@ -560,7 +561,7 @@ Hooks.once('init', async function() {
         toggle: true,
         order: 104,
         visible: playerToolsVisible,
-        active: flashlightActive,
+        active: false,
         onChange: async () => {
           if (!playerToolsVisible) {
             ui.notifications?.warn?.('Only the GM can change Player Light mode.');
@@ -569,7 +570,6 @@ Hooks.once('init', async function() {
 
           if (!window.MapShine?.playerLightEffect?.enabled) {
             ui.notifications?.warn?.('Player Light is disabled for this map.');
-            rerenderControls();
             return;
           }
 
@@ -739,4 +739,14 @@ Hooks.once('ready', async function() {
   }
   
   info('Module ready');
+
+  try {
+    if (!MapShine.loadingScreenManager) {
+      const manager = new LoadingScreenManager();
+      await manager.initialize();
+      MapShine.loadingScreenManager = manager;
+    }
+  } catch (e) {
+    console.warn('Map Shine: failed to initialize Loading Screen Manager', e);
+  }
 });

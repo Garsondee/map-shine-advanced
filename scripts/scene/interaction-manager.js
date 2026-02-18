@@ -14,6 +14,8 @@ import { LightInteractionHandler } from './light-interaction.js';
 import { SelectionBoxHandler } from './selection-box-interaction.js';
 import { safeCall, safeDispose, Severity } from '../core/safe-call.js';
 import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
+import { applyAmbientLightLevelDefaults, applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
+import { isTokenOnActiveLevel, isTokenDragSelectable, getAutoSwitchElevation, switchToLevelForElevation } from './level-interaction-service.js';
 
 const log = createLogger('InteractionManager');
 
@@ -2932,6 +2934,18 @@ export class InteractionManager {
               fvttToken.control({ releaseOthers, pan: false });
             }
           }, 'pointerDown.syncFoundryToken', Severity.DEGRADED);
+
+          // Auto-switch floor when clicking a visible token on a different level.
+          // If you can see a token (even on a floor below), clicking it selects it
+          // and automatically changes the level view to that token's floor.
+          safeCall(() => {
+            if (!isTokenOnActiveLevel(tokenDoc)) {
+              const elev = Number(tokenDoc?.elevation ?? 0);
+              if (Number.isFinite(elev)) {
+                switchToLevelForElevation(elev, 'click-select-token-auto-switch');
+              }
+            }
+          }, 'pointerDown.autoSwitchLevel', Severity.COSMETIC);
           
         } else {
           if (clickToMoveButton === 0) {
@@ -4533,6 +4547,10 @@ export class InteractionManager {
                 }
             };
 
+            // Seed missing elevation/range defaults from the active Levels band.
+            // This keeps newly drawn lights scoped to the currently viewed floor.
+            applyAmbientLightLevelDefaults(data, { scene: canvas?.scene });
+
             await safeCall(async () => {
                 await canvas.scene.createEmbeddedDocuments('AmbientLight', [data]);
                 log.info(`Created AmbientLight at (${startF.x.toFixed(1)}, ${startF.y.toFixed(1)}) with dim radius ${dim.toFixed(1)}`);
@@ -4705,8 +4723,12 @@ export class InteractionManager {
           const maxY = Math.max(start.y, current.y);
           
           // Find tokens within bounds
-          // Foundry selects if CENTER is within bounds
+          // Foundry selects if CENTER is within bounds.
+          // Level-aware filtering: tokens on other floors are excluded if they are
+          // hidden under a solid floor tile (tile occlusion test). Tokens visible
+          // through transparent areas (holes, stairwells, balconies) stay selectable.
           const tokens = this.tokenManager.getAllTokenSprites();
+          const dragSelectedDocs = [];
           
           for (const sprite of tokens) {
             const x = sprite.position.x;
@@ -4714,14 +4736,28 @@ export class InteractionManager {
             
             if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
               const tokenDoc = sprite.userData.tokenDoc;
-              // Only select if we have permission (observer or owner usually can select, but control requires owner)
-              // Foundry allows selecting visible tokens usually.
-              // We'll check canUserModify("update") to mirror our click selection logic
-              if (tokenDoc.canUserModify(game.user, "update")) {
-                this.selectObject(sprite);
-              }
+              if (!tokenDoc?.canUserModify(game.user, "update")) continue;
+
+              // Level-aware drag-select: skip tokens on other floors that are
+              // hidden under opaque floor tiles. Allow tokens visible through
+              // transparent areas (gaps, stairwells, balconies).
+              if (!isTokenDragSelectable(sprite, this.tileManager)) continue;
+
+              this.selectObject(sprite);
+              dragSelectedDocs.push(tokenDoc);
             }
           }
+
+          // Auto-switch floor: if ALL drag-selected tokens are on the same floor
+          // that is different from the current floor, switch the level view to
+          // that floor. This lets users drag-select a group on a visible lower
+          // floor and seamlessly transition to it.
+          safeCall(() => {
+            const switchElev = getAutoSwitchElevation(dragSelectedDocs);
+            if (switchElev !== null) {
+              switchToLevelForElevation(switchElev, 'drag-select-auto-switch');
+            }
+          }, 'dragSelect.autoSwitchLevel', Severity.COSMETIC);
 
           // Only allow box-selecting lights when the Lighting layer is active.
           // In token movement mode (TokenLayer), marquee selection should not grab lights.
@@ -5009,7 +5045,9 @@ export class InteractionManager {
 
                     movement[id] = {
                       waypoints: [waypoint],
-                      method: 'path-walk',
+                      // Foundry validates movement.method against a strict enum.
+                      // Keep internal choreography labels out of document payloads.
+                      method: 'api',
                       constrainOptions: { ignoreWalls: true, ignoreCost: true }
                     };
                   }
@@ -5146,6 +5184,10 @@ export class InteractionManager {
         data.move = NORMAL;
         data.sight = NORMAL;
     }
+
+    // Seed missing wall-height defaults from the active Levels band so new
+    // walls are authored on the currently viewed floor by default.
+    applyWallLevelDefaults(data, { scene: canvas?.scene });
     
     return data;
   }
@@ -5363,6 +5405,10 @@ export class InteractionManager {
           const createData = { ...base, x: pasteF.x, y: pasteF.y };
           delete createData._id;
           delete createData.id;
+
+          // If the copied payload lacks level metadata, seed from the active
+          // level context so pasted lights follow current floor authoring.
+          applyAmbientLightLevelDefaults(createData, { scene: canvas?.scene });
 
           const created = await canvas.scene.createEmbeddedDocuments('AmbientLight', [createData]);
           const newDoc = Array.isArray(created) ? created[0] : null;

@@ -93,7 +93,7 @@ import { weatherController } from '../core/WeatherController.js';
 import { DynamicExposureManager } from '../core/DynamicExposureManager.js';
 import { ControlsIntegration } from './controls-integration.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
-import { loadingOverlay } from '../ui/loading-overlay.js';
+import { loadingScreenService as loadingOverlay } from '../ui/loading-screen/loading-screen-service.js';
 import { stateApplier } from '../ui/state-applier.js';
 import { createEnhancedLightsApi } from '../effects/EnhancedLightsApi.js';
 import { LightEnhancementStore } from '../effects/LightEnhancementStore.js';
@@ -393,6 +393,9 @@ let _webglContextRestoredHandler = null;
  /** @type {boolean} */
  let transitionsInstalled = false;
 
+/** @type {number|null} - Safety net timer ID to force-dismiss stuck overlay after tearDown */
+let _overlayDismissSafetyTimerId = null;
+
 /** @type {boolean} */
 let ambientSoundAudibilityPatched = false;
 
@@ -409,6 +412,23 @@ let lastLevelsInteropWarningKey = null;
      return game?.scenes?.current ?? game?.scenes?.active ?? game?.scenes?.viewed ?? null;
    }, 'getActiveSceneForCanvasConfig', Severity.COSMETIC, { fallback: null });
  }
+
+/**
+ * Resolve the scene display name for loading UI.
+ * Prefer Navigation Name first, then fallback to Scene name.
+ *
+ * @param {any} scene
+ * @returns {string}
+ */
+function getSceneLoadingDisplayName(scene) {
+  const navName = String(scene?.navName || '').trim();
+  if (navName) return navName;
+
+  const sceneName = String(scene?.name || '').trim();
+  if (sceneName) return sceneName;
+
+  return 'scene';
+}
 
 /**
  * Refresh and expose Levels runtime interop diagnostics.
@@ -561,15 +581,32 @@ function installCanvasTransitionWrapper() {
     // Used by both libWrapper and direct-wrap paths.
     const _tearDownWrapper = async function(wrapped, ...args) {
       await safeCallAsync(async () => {
-        const scene = this.scene;
-        if (scene && sceneSettings.isEnabled(scene)) {
-          loadingOverlay.showLoading('Switching scenes…');
-          await loadingOverlay.fadeToBlack(2000, 600);
-          loadingOverlay.setMessage('Loading…');
-          loadingOverlay.setProgress(0, { immediate: true });
-        }
+        loadingOverlay.showLoading('Switching scenes…');
+        await loadingOverlay.fadeToBlack(2000, 600);
+        loadingOverlay.setMessage('Loading…');
+        loadingOverlay.setProgress(0, { immediate: true });
       }, 'sceneTransition.fade', Severity.DEGRADED);
-      return wrapped(...args);
+
+      const result = await wrapped(...args);
+
+      // BLANK-CANVAS SAFETY: When canvas.draw(null) is called (scene deleted,
+      // deactivated, unviewed, etc.), Foundry's internal #drawBlank() runs
+      // instead of the normal draw path. #drawBlank does NOT fire the
+      // canvasReady hook, which is the only place Map Shine normally dismisses
+      // the loading overlay. Without this check the overlay stays visible
+      // forever, locking up the UI.
+      // We use queueMicrotask so Foundry's #drawBlank has finished setting
+      // canvas state (loading=false, scene=null) before we inspect it.
+      queueMicrotask(() => {
+        try {
+          if (!canvas?.scene && !canvas?.loading) {
+            log.info('Blank canvas detected after tearDown — dismissing loading overlay');
+            safeCall(() => loadingOverlay.fadeIn(500).catch(() => {}), 'overlay.blankCanvasDismiss', Severity.COSMETIC);
+          }
+        } catch (_) { /* guard against unexpected canvas state */ }
+      });
+
+      return result;
     };
 
     // XM-3: Prefer libWrapper if available — ensures correct chaining with
@@ -929,10 +966,21 @@ async function _waitForFoundryCanvasReady({ timeoutMs = 15000 } = {}) {
  * @private
  */
 async function onCanvasReady(canvas) {
+  // Clear the tearDown safety net timer — canvasReady fired, so the overlay
+  // will be handled by the normal flow below (or dismissed for null scenes).
+  if (_overlayDismissSafetyTimerId !== null) {
+    clearTimeout(_overlayDismissSafetyTimerId);
+    _overlayDismissSafetyTimerId = null;
+  }
+
   const scene = canvas.scene;
 
   if (!scene) {
-    log.debug('onCanvasReady called with no active scene');
+    log.debug('onCanvasReady called with no active scene — dismissing overlay');
+    // Dismiss the loading overlay even though there's no scene to draw.
+    // Without this, the overlay can get stuck if canvasReady fires with null
+    // (e.g. edge cases during blank canvas transitions or other module interactions).
+    safeCall(() => loadingOverlay.fadeIn(500).catch(() => {}), 'overlay.noScene', Severity.COSMETIC);
     return;
   }
 
@@ -1066,8 +1114,10 @@ async function onCanvasReady(canvas) {
   log.info(`Initializing Map Shine canvas for scene: ${scene.name}`);
 
   safeCall(() => {
-    loadingOverlay.showBlack(`Loading ${scene?.name || 'scene'}…`);
-    loadingOverlay.setSceneName(scene?.name || 'scene');
+    // Scene name is rendered by the dedicated scene-name element/subtitle when present.
+    const displayName = getSceneLoadingDisplayName(scene);
+    loadingOverlay.showBlack('Loading…');
+    loadingOverlay.setSceneName(displayName);
     loadingOverlay.configureStages([
       { id: 'assets.discover', label: 'Discovering assets…', weight: 5 },
       { id: 'assets.load',     label: 'Loading textures…', weight: 25 },
@@ -1142,7 +1192,7 @@ function onCanvasTearDown(canvas) {
     window.MapShine.availableLevels = null;
     window.MapShine.levelNavigationDiagnostics = null;
     window.MapShine.levelsInteropDiagnostics = null;
-    window.MapShine.levelsSnapshot = null;
+    delete window.MapShine.levelsSnapshot;
     window.MapShine.pixiInputBridge = null;
     window.MapShine.interactionManager = null;
     window.MapShine.noteManager = null;
@@ -1158,6 +1208,28 @@ function onCanvasTearDown(canvas) {
     // Keep renderer and capabilities - they're reusable
   }
   candleFlamesEffect = null;
+
+  // SAFETY NET: Schedule a delayed fallback check. If the overlay is still
+  // visible after 10 seconds and there's no active scene or loading in
+  // progress, force-dismiss it. This catches rare edge cases where the
+  // queueMicrotask in the tearDown wrapper (Layer 1) or the onCanvasReady
+  // null-scene handler (Layer 2) didn't fire — e.g. errors during draw,
+  // unexpected module interactions, or network-induced stalls.
+  // Clear any previous safety timer to avoid stacking.
+  if (_overlayDismissSafetyTimerId !== null) {
+    clearTimeout(_overlayDismissSafetyTimerId);
+  }
+  _overlayDismissSafetyTimerId = setTimeout(() => {
+    _overlayDismissSafetyTimerId = null;
+    try {
+      // Only dismiss if the canvas is genuinely idle with no scene.
+      // If a new scene is loading or already loaded, canvasReady will handle it.
+      if (!canvas?.scene && !canvas?.loading) {
+        log.warn('Overlay safety net triggered — forcing overlay dismissal (no scene loaded after 10s)');
+        safeCall(() => loadingOverlay.fadeIn(300).catch(() => {}), 'overlay.safetyNet', Severity.COSMETIC);
+      }
+    } catch (_) { /* guard against unexpected state */ }
+  }, 10000);
 }
 
 /**
@@ -1373,8 +1445,10 @@ async function createThreeCanvas(scene) {
     }, 'levelsSnapshot.expose', Severity.COSMETIC);
 
     safeCall(() => {
-      loadingOverlay.showBlack(`Loading ${scene?.name || 'scene'}…`);
-      loadingOverlay.setSceneName(scene?.name || 'scene');
+      // Scene name is rendered by the dedicated scene-name element/subtitle when present.
+      const displayName = getSceneLoadingDisplayName(scene);
+      loadingOverlay.showBlack('Loading…');
+      loadingOverlay.setSceneName(displayName);
       loadingOverlay.configureStages([
         { id: 'assets.discover', label: 'Discovering assets…', weight: 5 },
         { id: 'assets.load',     label: 'Loading textures…', weight: 25 },
@@ -2815,6 +2889,15 @@ async function createThreeCanvas(scene) {
     log.error('Failed to initialize three.js scene:', error);
     session.abort();
     destroyThreeCanvas();
+
+    // Dismiss the loading overlay so the user isn't locked out after a failed
+    // scene init. Also restore Foundry's PIXI state in case we modified it
+    // before the error occurred.
+    safeCall(() => restoreFoundryStateFromSnapshot(), 'restoreSnapshot(error)', Severity.COSMETIC);
+    await safeCallAsync(async () => {
+      loadingOverlay.setStage?.('final', 1.0, 'Scene init failed', { immediate: true });
+      await loadingOverlay.fadeIn(500);
+    }, 'overlay.fadeIn(error)', Severity.COSMETIC);
   } finally {
     if (doLoadProfile) safeCall(() => lp.end('sceneLoad'), 'lp.end(sceneLoad)', Severity.COSMETIC);
   }

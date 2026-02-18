@@ -120,7 +120,40 @@ export function isLevelsEnabledForScene(scene) {
   if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
   if (!scene) return false;
   if (scene?.flags?.levels?.enabled === true) return true;
-  return readSceneLevelsFlag(scene).length > 0;
+  if (readSceneLevelsFlag(scene).length > 0) return true;
+
+  // Detect scenes that have Levels data on individual documents (tiles, walls,
+  // lights) but no explicit sceneLevels bands. This catches maps that were
+  // configured with the Levels module but never had bands formally defined —
+  // for example, a compendium scene with tile/wall elevation ranges set.
+  const levelsFlags = scene?.flags?.levels;
+  if (levelsFlags) {
+    // Scene-level flags like backgroundElevation or lightMasking indicate setup
+    if (levelsFlags.backgroundElevation !== undefined && levelsFlags.backgroundElevation !== 0) return true;
+    if (levelsFlags.weatherElevation !== undefined) return true;
+    if (levelsFlags.lightMasking !== undefined) return true;
+  }
+
+  // Check tiles for any Levels range flags
+  const tiles = scene.tiles ?? scene.collections?.tiles;
+  if (tiles) {
+    for (const tileDoc of tiles) {
+      if (tileDoc?.flags?.levels?.rangeTop !== undefined) return true;
+      if (tileDoc?.flags?.levels?.isBasement === true) return true;
+      if (tileDoc?.flags?.levels?.showIfAbove === true) return true;
+    }
+  }
+
+  // Check walls for wall-height flags (Levels companion module)
+  const walls = scene.walls ?? scene.collections?.walls;
+  if (walls) {
+    for (const wallDoc of walls) {
+      const wh = wallDoc?.flags?.['wall-height'];
+      if (wh && (wh.bottom !== undefined || wh.top !== undefined)) return true;
+    }
+  }
+
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +344,15 @@ export function readDocLevelsRange(doc) {
       rangeBottom = n;
     } else if (flags.rangeBottom !== Infinity && flags.rangeBottom !== -Infinity) {
       _recordFlagDiagnostic('readDocLevelsRange', 'rangeBottom', flags.rangeBottom, rangeBottom, docId);
+    }
+  } else {
+    // Levels V12+ migrates flags.levels.rangeBottom to doc.elevation.
+    // After migration, rangeBottom is deleted from flags and the authoritative
+    // value lives on the core elevation property. Fall back to doc.elevation
+    // to match Levels' own getRangeForDocument() / inRange() semantics.
+    const docElev = Number(doc.elevation ?? NaN);
+    if (Number.isFinite(docElev)) {
+      rangeBottom = docElev;
     }
   }
   if (flags.rangeTop !== undefined && flags.rangeTop !== null) {

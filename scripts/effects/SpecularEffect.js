@@ -1550,7 +1550,9 @@ export class SpecularEffect extends EffectBase {
         uWetOutputMax: { value: this.params.wetOutputMax },
         uWetOutputGamma: { value: this.params.wetOutputGamma },
 
-        uRoofMap: { value: null },
+        // Optional world-space outdoors/roof mask. Keep a valid fallback texture
+        // bound at all times so uniform validation doesn't spam null warnings.
+        uRoofMap: { value: this._getFallbackBlackTexture() },
         uRoofMaskEnabled: { value: 0.0 },
         uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
 
@@ -2180,9 +2182,11 @@ export class SpecularEffect extends EffectBase {
         }
 
         const roofTex = weatherController?.roofMap || null;
+        const roofFallbackTex = this._getFallbackBlackTexture();
+        const safeRoofTex = roofTex || roofFallbackTex;
         const d = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
         for (const mat of this._materials) {
-          if (mat?.uniforms?.uRoofMap) mat.uniforms.uRoofMap.value = roofTex;
+          if (mat?.uniforms?.uRoofMap) mat.uniforms.uRoofMap.value = safeRoofTex;
           if (mat?.uniforms?.uRoofMaskEnabled) mat.uniforms.uRoofMaskEnabled.value = roofTex ? 1.0 : 0.0;
           if (d && mat?.uniforms?.uSceneBounds?.value?.set) {
             const rect = d.sceneRect;
@@ -2226,10 +2230,11 @@ export class SpecularEffect extends EffectBase {
         }
       }
     } catch (e) {
+      const roofFallbackTex = this._getFallbackBlackTexture();
       for (const mat of this._materials) {
         if (mat?.uniforms?.uHasCloudShadowMap) mat.uniforms.uHasCloudShadowMap.value = false;
         if (mat?.uniforms?.uCloudShadowMap) mat.uniforms.uCloudShadowMap.value = null;
-        if (mat?.uniforms?.uRoofMap) mat.uniforms.uRoofMap.value = null;
+        if (mat?.uniforms?.uRoofMap) mat.uniforms.uRoofMap.value = roofFallbackTex;
         if (mat?.uniforms?.uRoofMaskEnabled) mat.uniforms.uRoofMaskEnabled.value = 0.0;
         if (mat?.uniforms?.uHasBuildingShadowMap) mat.uniforms.uHasBuildingShadowMap.value = false;
         if (mat?.uniforms?.uBuildingShadowMap) mat.uniforms.uBuildingShadowMap.value = null;

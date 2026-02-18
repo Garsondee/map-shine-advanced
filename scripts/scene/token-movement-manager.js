@@ -58,6 +58,15 @@ const FOG_PATH_POLICIES = new Set([
   'gmUnrestricted'
 ]);
 
+const FOUNDRY_MOVEMENT_METHODS = new Set([
+  'api',
+  'config',
+  'dragging',
+  'keyboard',
+  'paste',
+  'undo'
+]);
+
 function asNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -75,6 +84,16 @@ function hashStringToUnit(value) {
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0) / 4294967295;
+}
+
+function normalizeFoundryMovementMethod(method, fallback = 'dragging') {
+  const normalized = String(method || '').toLowerCase();
+  if (FOUNDRY_MOVEMENT_METHODS.has(normalized)) return normalized;
+
+  const fallbackNormalized = String(fallback || '').toLowerCase();
+  if (FOUNDRY_MOVEMENT_METHODS.has(fallbackNormalized)) return fallbackNormalized;
+
+  return 'dragging';
 }
 
 /**
@@ -1871,6 +1890,44 @@ export class TokenMovementManager {
   }
 
   /**
+   * Resolve movement method metadata from an updateToken options payload.
+   *
+   * Foundry keyboard nudging reports method="keyboard" in the movement payload.
+   * We use this signal to guard style-track behavior against key-repeat spam.
+   *
+   * @param {TokenDocument|object|null} tokenDoc
+   * @param {object} [options]
+   * @returns {string}
+   */
+  _resolveIncomingMovementMethod(tokenDoc, options = {}) {
+    const mapShineMethod = options?.mapShineMovement?.method;
+    if (typeof mapShineMethod === 'string' && mapShineMethod.trim()) {
+      return mapShineMethod.toLowerCase();
+    }
+
+    const movement = options?.movement;
+    if (movement && typeof movement === 'object') {
+      const tokenId = String(tokenDoc?.id || '');
+      const directEntry = tokenId ? movement?.[tokenId] : null;
+      if (typeof directEntry?.method === 'string' && directEntry.method.trim()) {
+        return directEntry.method.toLowerCase();
+      }
+
+      for (const entry of Object.values(movement)) {
+        if (entry && typeof entry === 'object' && typeof entry.method === 'string' && entry.method.trim()) {
+          return entry.method.toLowerCase();
+        }
+      }
+    }
+
+    if (typeof options?.method === 'string' && options.method.trim()) {
+      return options.method.toLowerCase();
+    }
+
+    return '';
+  }
+
+  /**
    * @param {string} tokenId
    * @param {string|null} styleId
    */
@@ -1937,11 +1994,24 @@ export class TokenMovementManager {
     const tokenId = tokenDoc.id;
     let existingTrack = this.activeTracks.get(tokenId);
     const shouldAnimate = animate || optionsBoolean(options?.mapShineMovement?.animated, false);
+    const movementMethod = this._resolveIncomingMovementMethod(tokenDoc, options);
+    const isKeyboardMove = movementMethod === 'keyboard';
 
     // If movement style changed, clear stale track state before applying the
     // next behavior so two animation systems never fight over the same sprite.
     if (existingTrack && existingTrack.styleId !== styleId) {
       this._cancelTrack(existingTrack);
+      this.activeTracks.delete(tokenId);
+      existingTrack = null;
+    }
+
+    // Guard: keyboard hold-repeat can flood updateToken events while a style
+    // track is mid-flight. If we keep retargeting from intermediate poses, the
+    // token falls increasingly behind and distance-based durations balloon.
+    // Snap to the prior authoritative endpoint before consuming the next
+    // keyboard step so each repeat stays bounded and momentum cannot "charge".
+    if (isKeyboardMove && existingTrack) {
+      this._finalizeTrack(existingTrack);
       this.activeTracks.delete(tokenId);
       existingTrack = null;
     }
@@ -2185,7 +2255,9 @@ export class TokenMovementManager {
     const settleAmplitude = clamp(
       asNumber(options?.mapShineWalkSettleAmplitude, profile.settleAmplitude),
       0,
-      Math.max(3, gridSize * 0.25)
+      // Safety: if this gets too large the sprite can dip below the map plane
+      // and be fully occluded (appearing to vanish mid-walk).
+      Math.max(3, gridSize * 0.07)
     );
     const strideAmplitude = clamp(
       asNumber(options?.mapShineWalkStrideAmplitude, profile.strideAmplitude),
@@ -2940,11 +3012,18 @@ export class TokenMovementManager {
 
           const x = track.startX + (dx * easedT) + (perpX * (lateral + chaos + routeBend)) + (dirX * stride);
           const y = track.startY + (dy * easedT) + (perpY * (lateral + chaos + routeBend)) + (dirY * stride);
-          const z = track.startZ + (track.target.z - track.startZ) * easedT + bob - settle;
+          const baseZ = track.startZ + (track.target.z - track.startZ) * easedT;
+          let z = baseZ + bob - settle;
+
+          // Safety: Never allow the walk track to bury the token far below its
+          // interpolated base height, otherwise it can be occluded by the map
+          // plane and appear to pop out of existence.
+          const gridScale = Math.max(1, asNumber(track.target?.gridSize, 100));
+          const maxDownDip = Math.max(2, gridScale * 0.06);
+          if (Number.isFinite(z)) z = Math.max(z, baseZ - maxDownDip);
 
           const rotDelta = shortestAngleDelta(track.startRotation, track.target.rotation);
           let rotation = track.startRotation + (rotDelta * easedT);
-          const gridScale = Math.max(1, asNumber(track.target?.gridSize, 100));
           rotation += (lateral / gridScale) * asNumber(track.rotationSwayFactor, 0.18);
           rotation += (chaos / gridScale) * 0.4;
 
@@ -2953,12 +3032,40 @@ export class TokenMovementManager {
           const tiltStrength = asNumber(track.chipTiltStrength, 0);
           const tilt = ((lateral + chaos) / gridScale) * tiltStrength;
           const scalePulse = Math.abs(tilt);
-          const scaleX = track.target.scaleX * (1 + (scalePulse * 0.11));
-          const scaleY = track.target.scaleY * (1 - (scalePulse * 0.08));
+          let scaleX = track.target.scaleX * (1 + (scalePulse * 0.11));
+          let scaleY = track.target.scaleY * (1 - (scalePulse * 0.08));
 
-          sprite.position.set(x, y, z);
+          // Sanity clamp: protect against any transient NaNs/zeros causing
+          // invisible sprites or invalid matrices.
+          const minScale = 0.05;
+          if (!Number.isFinite(scaleX) || scaleX <= minScale) scaleX = Math.max(minScale, asNumber(track.target.scaleX, 1));
+          if (!Number.isFinite(scaleY) || scaleY <= minScale) scaleY = Math.max(minScale, asNumber(track.target.scaleY, 1));
+          if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z) || !Number.isFinite(rotation)) {
+            if (!track._invalidPoseWarned) {
+              track._invalidPoseWarned = true;
+              try {
+                console.warn('[Pathfinding] Invalid walk pose sample; clamping to base transform', {
+                  tokenId,
+                  styleId: track.styleId,
+                  x,
+                  y,
+                  z,
+                  rotation,
+                  scaleX,
+                  scaleY
+                });
+              } catch (_) {
+              }
+            }
+          }
+
+          sprite.position.set(
+            Number.isFinite(x) ? x : track.startX,
+            Number.isFinite(y) ? y : track.startY,
+            Number.isFinite(z) ? z : baseZ
+          );
           sprite.scale.set(scaleX, scaleY, 1);
-          if (sprite.material) sprite.material.rotation = rotation;
+          if (sprite.material) sprite.material.rotation = Number.isFinite(rotation) ? rotation : track.startRotation;
           if (sprite.matrixAutoUpdate === false) sprite.updateMatrix();
         } else {
           const x = track.startX + (track.target.x - track.startX) * tNorm;
@@ -8463,9 +8570,13 @@ export class TokenMovementManager {
       };
     }
 
-    const includeMovement = optionsBoolean(options?.includeMovementPayload, false)
-      || optionsBoolean(options?.ignoreWalls, false)
-      || optionsBoolean(options?.ignoreCost, false);
+    const hasExplicitIncludePayload = Object.prototype.hasOwnProperty.call(options, 'includeMovementPayload');
+    const includeMovement = hasExplicitIncludePayload
+      ? optionsBoolean(options?.includeMovementPayload, false)
+      : (
+        optionsBoolean(options?.ignoreWalls, false)
+        || optionsBoolean(options?.ignoreCost, false)
+      );
     if (!includeMovement) return updateOptions;
 
     const waypoint = {
@@ -8484,7 +8595,9 @@ export class TokenMovementManager {
 
     const movementEntry = {
       waypoints: [waypoint],
-      method: options?.method || 'dragging'
+      // Foundry strictly validates movement methods. Keep internal choreography
+      // method names (e.g. "path-walk") out of the document payload.
+      method: normalizeFoundryMovementMethod(options?.method, 'dragging')
     };
 
     const constrainOptions = this._getFoundryConstrainOptions(options);

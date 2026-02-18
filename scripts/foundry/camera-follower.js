@@ -142,8 +142,11 @@ export class CameraFollower {
     });
     this._hookIds.push({ name: 'updateScene', id: updateSceneId });
 
+    // Selecting a token is an explicit user action — always switch to that
+    // token's level regardless of lock mode or GM status. This gives
+    // immediate floor-navigation feedback when clicking a token.
     const controlTokenId = Hooks.on('controlToken', (_token, controlled) => {
-      if (!controlled || !this._shouldAutoSyncControlledTokenEvents()) return;
+      if (!controlled) return;
       this._syncToControlledTokenLevel({ emit: true, reason: 'control-token' });
     });
     this._hookIds.push({ name: 'controlToken', id: controlTokenId });

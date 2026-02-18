@@ -3034,10 +3034,49 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     let zBase = groundZ + Z_FOREGROUND_OFFSET;
 
     const renderAboveTokens = !!window.MapShine?.tileMotionManager?.getTileConfig?.(tileDoc?.id)?.renderAboveTokens;
+
+    // Levels floor-vs-roof classification:
+    // If a tile belongs to the currently active level band and has a finite
+    // rangeTop (i.e. it is a floor-like level tile, not a roof), treat it as a
+    // regular floor layer so tokens on that level render above it.
+    //
+    // Without this, tiles elevated above scene.foregroundElevation are always
+    // classified as overhead, which causes same-floor tokens to appear "under"
+    // their floor art after stair elevation changes.
+    let treatAsCurrentFloor = false;
+    try {
+      const activeLevelContext = window.MapShine?.activeLevelContext;
+      if (isLevelsEnabledForScene(canvas?.scene) && hasFiniteActiveLevelBand(activeLevelContext)) {
+        const bandBottom = Number(activeLevelContext.bottom);
+        const bandTop = Number(activeLevelContext.top);
+        const tileElevation = Number(tileDoc?.elevation);
+
+        if (tileHasLevelsRange(tileDoc)) {
+          const flags = readTileLevelsFlags(tileDoc);
+          const tileBottom = Number(flags.rangeBottom);
+          const tileTop = Number(flags.rangeTop);
+
+          // Finite rangeTop => floor/platform-like tile. Overlap with active band
+          // means this is the current floor and should not use roof layering.
+          if (Number.isFinite(tileBottom) && Number.isFinite(tileTop)) {
+            // Inclusive overlap test to handle shared boundaries (e.g. tile top
+            // exactly equals band bottom). This must be inclusive so same-floor
+            // tiles at boundary elevations don't get misclassified as overhead.
+            treatAsCurrentFloor = !(tileTop < bandBottom || tileBottom > bandTop);
+          }
+        } else if (Number.isFinite(tileElevation)) {
+          // Fallback for tiles without explicit Levels flags.
+          treatAsCurrentFloor = tileElevation >= bandBottom && tileElevation <= bandTop;
+        }
+      }
+    } catch (_) {
+      treatAsCurrentFloor = false;
+    }
+
     // Per-tile motion toggle can force overhead-style draw ordering so the tile
     // participates in the proven roof-style depth/render path (avoids custom band
     // ordering regressions with post effects).
-    const isOverhead = isTileOverhead(tileDoc) || renderAboveTokens;
+    const isOverhead = (isTileOverhead(tileDoc) && !treatAsCurrentFloor) || renderAboveTokens;
     const wasOverhead = !!sprite.userData.isOverhead;
 
     // Store overhead status for update loop
@@ -3456,6 +3495,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     for (const { sprite, tileDoc } of this.tileSprites.values()) {
       if (!sprite || !tileDoc) continue;
+      // Re-run transform so the treatAsCurrentFloor / isOverhead classification
+      // is re-evaluated against the new active level band. Without this, tiles
+      // keep stale overhead Z-layering after a level switch and tokens render
+      // underneath their own floor.
+      this.updateSpriteTransform(sprite, tileDoc);
       this.updateSpriteVisibility(sprite, tileDoc);
     }
 

@@ -71,6 +71,13 @@ export class InteractionManager {
     // Track last pointer position (screen coords) so paste can place at cursor.
     this._lastPointerClientX = null;
     this._lastPointerClientY = null;
+
+    // Keyboard token movement throttle state.
+    // - _keyboardMoveIntent stores the most recent desired direction per token.
+    // - _keyboardStepInFlight prevents issuing multiple tokenDoc.update calls
+    //   before TokenMovementManager has a chance to register an active track.
+    this._keyboardMoveIntent = null;
+    this._keyboardStepInFlight = new Map();
     
     // Drag state
     this.dragState = {
@@ -5209,6 +5216,85 @@ export class InteractionManager {
     if (this._isEventFromUI(event)) {
       // If the user is actively typing/editing text, never hijack clipboard shortcuts.
       if (!isCopyPaste || this._isTextEditingEvent(event)) return;
+    }
+
+    // Keyboard token movement (arrow keys / WASD): MapShine takes ownership so we
+    // can throttle to one grid step per completed animation. This prevents Foundry's
+    // default key-repeat from racing the token document (and camera follow/pan)
+    // far ahead of our animation.
+    if (!isMod && !event.altKey && !event.shiftKey) {
+      const movementKey = key;
+      const isArrow = movementKey === 'arrowup' || movementKey === 'arrowdown' || movementKey === 'arrowleft' || movementKey === 'arrowright';
+      const isWASD = movementKey === 'w' || movementKey === 'a' || movementKey === 's' || movementKey === 'd';
+      if (isArrow || isWASD) {
+        let dx = 0;
+        let dy = 0;
+        if (movementKey === 'arrowup' || movementKey === 'w') dy = -1;
+        else if (movementKey === 'arrowdown' || movementKey === 's') dy = 1;
+        else if (movementKey === 'arrowleft' || movementKey === 'a') dx = -1;
+        else if (movementKey === 'arrowright' || movementKey === 'd') dx = 1;
+
+        const tokenDocs = this._getSelectedTokenDocs?.() || [];
+        if (tokenDocs.length > 0) {
+          this._consumeKeyEvent(event);
+
+          // Store the most recent intended direction so when repeat events arrive
+          // while a track is in-flight we don't accumulate a backlog.
+          if (!this._keyboardMoveIntent) this._keyboardMoveIntent = new Map();
+          for (const tokenDoc of tokenDocs) {
+            const tokenId = String(tokenDoc?.id || '');
+            if (!tokenId) continue;
+            this._keyboardMoveIntent.set(tokenId, { dx, dy, t: performance.now() });
+          }
+
+          const movementManager = this.tokenManager?.movementManager || window.MapShine?.tokenManager?.movementManager || null;
+          const gridSize = canvas?.dimensions?.size ?? canvas?.grid?.size ?? 100;
+          const gridStep = Math.max(1, Number(gridSize) || 100);
+          const now = performance.now();
+
+          for (const tokenDoc of tokenDocs) {
+            const tokenId = String(tokenDoc?.id || '');
+            if (!tokenId) continue;
+
+            // Only issue a new doc update when the previous MapShine track has
+            // fully completed (no active track). While moving, the latest intent
+            // remains stored and will be picked up by the next repeat tick.
+            const hasActiveTrack = !!movementManager?.activeTracks?.get?.(tokenId);
+            if (hasActiveTrack) continue;
+
+            const inFlightAt = this._keyboardStepInFlight.get(tokenId);
+            if (Number.isFinite(inFlightAt)) {
+              // If we somehow missed track creation (or the move was rejected),
+              // let the latch expire so the user can try again.
+              if ((now - inFlightAt) < 650) continue;
+              this._keyboardStepInFlight.delete(tokenId);
+            }
+
+            const intent = this._keyboardMoveIntent.get(tokenId);
+            if (!intent) continue;
+
+            const startX = Number.isFinite(tokenDoc.x) ? tokenDoc.x : 0;
+            const startY = Number.isFinite(tokenDoc.y) ? tokenDoc.y : 0;
+            const nextX = startX + (intent.dx * gridStep);
+            const nextY = startY + (intent.dy * gridStep);
+
+            const update = { x: nextX, y: nextY };
+            const updateOptions = {
+              animate: false,
+              animation: { duration: 0 },
+              method: 'keyboard',
+              mapShineMovement: { animated: true, method: 'keyboard' }
+            };
+
+            safeCall(async () => {
+              this._keyboardStepInFlight.set(tokenId, performance.now());
+              await tokenDoc.update(update, updateOptions);
+            }, `keyboardMove.${tokenId}`, Severity.COSMETIC);
+          }
+
+          return;
+        }
+      }
     }
 
     // Gameplay token targeting parity (Foundry core "target" keybind behavior).

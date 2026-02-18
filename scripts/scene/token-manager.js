@@ -1307,6 +1307,23 @@ vec3 ms_applyWindowLight(vec3 color) {
       sprite.visible = true;
       sprite.material.opacity = 1.0;
     }
+
+    // Level-based filtering: hide tokens above the current active level.
+    // This mirrors VisibilityController._isTokenAboveCurrentLevel for
+    // the fallback path when the VC is not yet initialized.
+    if (sprite.visible) {
+      try {
+        const levelContext = window.MapShine?.activeLevelContext;
+        if (levelContext && Number.isFinite(levelContext.top) && (levelContext.count ?? 0) > 1) {
+          const tokenElev = Number(tokenDoc?.elevation ?? 0);
+          if (Number.isFinite(tokenElev) && tokenElev >= levelContext.top - 0.01) {
+            sprite.visible = false;
+          }
+        }
+      } catch (_) {
+        // Fail-open: if level context is unavailable, keep visibility as-is
+      }
+    }
   }
 
   /**

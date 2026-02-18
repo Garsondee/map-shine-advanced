@@ -181,6 +181,12 @@ export class VisibilityController {
     this._hookIds.push(['controlToken',
       Hooks.on('controlToken', () => this._queueBulkRefresh())
     ]);
+
+    // When the active level changes (floor navigation, controlled-token
+    // elevation change, etc.), tokens on higher levels must be hidden.
+    this._hookIds.push(['mapShineLevelContextChanged',
+      Hooks.on('mapShineLevelContextChanged', () => this._queueBulkRefresh())
+    ]);
   }
 
   /**
@@ -195,6 +201,45 @@ export class VisibilityController {
       this._bulkRefreshQueued = false;
       if (this._initialized) this._refreshAllVisibility();
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  //  Level-based visibility filtering
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Check whether a token is above the current active level and should be
+   * hidden. Tokens whose elevation exceeds the active level's top boundary
+   * are considered "above" and are not rendered.
+   *
+   * @param {TokenDocument|object} tokenDoc - The token document (or object with .elevation)
+   * @returns {boolean} True if the token is above the current level (should be hidden)
+   * @private
+   */
+  _isTokenAboveCurrentLevel(tokenDoc) {
+    try {
+      const levelContext = window.MapShine?.activeLevelContext;
+      // No active level context (single-level scene or levels not configured)
+      // → don't filter, let normal Foundry visibility decide.
+      if (!levelContext || !Number.isFinite(levelContext.top)) return false;
+
+      // Only filter when there are multiple levels — single-level scenes
+      // should never hide tokens via this path.
+      if ((levelContext.count ?? 0) <= 1) return false;
+
+      const tokenElev = Number(tokenDoc?.elevation ?? 0);
+      if (!Number.isFinite(tokenElev)) return false;
+
+      // Token is above if its elevation exceeds the active level's top.
+      // Use a small epsilon to avoid floating-point edge cases at boundaries.
+      // IMPORTANT: Shared-boundary semantics.
+      // If level A is [0,10] and level B is [10,20], elevation=10 should be treated
+      // as belonging to the UPPER level (B). So when viewing level A, tokens at
+      // elevation==top should be hidden.
+      return tokenElev >= levelContext.top - 0.01;
+    } catch (_) {
+      return false;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -216,7 +261,13 @@ export class VisibilityController {
 
     // After the original _refreshVisibility, this.visible holds the result
     // of this.isVisible (before we override it for PIXI interaction).
-    const computedVisible = foundryToken.visible;
+    let computedVisible = foundryToken.visible;
+
+    // Level-based filtering: hide tokens that are above the current level.
+    // This runs after Foundry's own visibility so we only further restrict.
+    if (computedVisible && this._isTokenAboveCurrentLevel(foundryToken.document)) {
+      computedVisible = false;
+    }
 
     sprite.visible = computedVisible;
     if (computedVisible && sprite.material?.map) {
@@ -287,6 +338,11 @@ export class VisibilityController {
         // If isVisible throws (e.g. vision not ready), fall back:
         // GM sees everything, players see nothing until vision is ready.
         visible = isGM;
+      }
+
+      // Level-based filtering: hide tokens that are above the current level.
+      if (visible && this._isTokenAboveCurrentLevel(foundryToken.document)) {
+        visible = false;
       }
 
       sprite.visible = visible;

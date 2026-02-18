@@ -962,6 +962,17 @@ export class TweakpaneManager {
       this.tokenMovementDialog?.toggle?.();
     });
 
+    if (game.user?.isGM) {
+      addGridButton('🧱 Levels Authoring', () => {
+        const dlg = window.MapShine?.levelsAuthoring;
+        if (!dlg) {
+          ui.notifications?.warn?.('Levels Authoring not available (Map Shine not fully initialized yet)');
+          return;
+        }
+        dlg.toggle?.();
+      });
+    }
+
     addGridButton('Attempt Scene Recovery', async () => {
       await this.attemptSceneRecovery();
     }, true);

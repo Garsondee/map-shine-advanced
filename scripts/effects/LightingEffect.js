@@ -14,6 +14,7 @@ import { ThreeDarknessSource } from './ThreeDarknessSource.js';
 import { LightRegistry } from './LightRegistry.js';
 import { MapShineLightAdapter } from './MapShineLightAdapter.js';
 import { ROPE_MASK_LAYER } from './EffectComposer.js';
+import { isLightVisibleForPerspective } from '../foundry/elevation-context.js';
 
 const log = createLogger('LightingEffect');
 
@@ -579,9 +580,9 @@ export class LightingEffect extends EffectBase {
           float cloudOpacity = clamp(uCloudShadowOpacity, 0.0, 1.0);
           float cloudFactor = mix(1.0, cloudTex, cloudOpacity);
 
-          float roofSuppress = roofAlphaRaw * (1.0 - step(0.5, uOverheadShadowAllowIndoor));
           float hoverRevealActive = step(0.5, uRoofHoverRevealActive);
-          vec3 shadowFactor = mix(rawShadowFactor, vec3(1.0), roofSuppress * (1.0 - hoverRevealActive));
+          float roofSuppress = roofAlphaRaw * (1.0 - step(0.5, uOverheadShadowAllowIndoor));
+          vec3 shadowFactor = mix(rawShadowFactor, vec3(1.0), roofSuppress);
 
           float buildingFactor = mix(rawBuildingFactor, 1.0, roofAlphaRaw);
           float bushFactor = mix(rawBushFactor, 1.0, roofAlphaRaw);
@@ -589,8 +590,15 @@ export class LightingEffect extends EffectBase {
 
           float outdoorStrength = max(outdoorStrengthBase, roofAlphaRaw);
           float overheadOutdoorStrength = mix(outdoorStrength, 1.0, step(0.5, uOverheadShadowAllowIndoor));
-          overheadOutdoorStrength = mix(overheadOutdoorStrength, 1.0, hoverRevealActive);
+
+          // Keep shadow continuity local to pixels that already contain
+          // overhead-shadow energy when roofs are hover-hidden.
+          float overheadShadowPresence = 1.0 - clamp((shadowTex.r + shadowTex.g + shadowTex.b) * (1.0 / 3.0), 0.0, 1.0);
+          float hoverShadowKeep = hoverRevealActive * (1.0 - roofAlphaRaw) * step(0.0005, overheadShadowPresence);
+          overheadOutdoorStrength = max(overheadOutdoorStrength, hoverShadowKeep);
+
           shadowFactor = mix(vec3(1.0), shadowFactor, overheadOutdoorStrength);
+
           buildingFactor = mix(1.0, buildingFactor, outdoorStrength);
           bushFactor = mix(1.0, bushFactor, outdoorStrength);
           treeFactor = mix(1.0, treeFactor, outdoorStrength);
@@ -800,7 +808,29 @@ export class LightingEffect extends EffectBase {
 
     Hooks.on('updateScene', updateSceneHandler);
     this._hookRegistrations.push({ hook: 'updateScene', fn: updateSceneHandler });
-    
+
+    // MS-LVL-040: Elevation-based light visibility.
+    // Refresh when active level changes (keyboard step, follow-token, manual select).
+    const levelContextHandler = () => {
+      this._applyFoundryOverrides();
+    };
+    Hooks.on('mapShineLevelContextChanged', levelContextHandler);
+    this._hookRegistrations.push({ hook: 'mapShineLevelContextChanged', fn: levelContextHandler });
+
+    // Refresh when the controlled token changes (perspective elevation shifts).
+    const tokenControlHandler = () => {
+      this._applyFoundryOverrides();
+    };
+    Hooks.on('controlToken', tokenControlHandler);
+    this._hookRegistrations.push({ hook: 'controlToken', fn: tokenControlHandler });
+
+    // Refresh after vision recomputation (token moved to new elevation).
+    const sightRefreshHandler = () => {
+      this._applyFoundryOverrides();
+    };
+    Hooks.on('sightRefresh', sightRefreshHandler);
+    this._hookRegistrations.push({ hook: 'sightRefresh', fn: sightRefreshHandler });
+
     // Initial Load
     this.syncAllLights();
   }
@@ -1207,7 +1237,7 @@ export class LightingEffect extends EffectBase {
 
     this._baseMesh = baseMesh;
 
-    const outdoorsData = assetBundle.masks.find(m => m.id === 'outdoors');
+    const outdoorsData = assetBundle.masks.find(m => m.id === 'outdoors' || m.type === 'outdoors');
 
     this.outdoorsMask = outdoorsData?.texture || null;
 
@@ -1691,7 +1721,20 @@ export class LightingEffect extends EffectBase {
       ? Math.max(0.0, Math.min(1.0, darknessLevel))
       : 0.0;
 
-    return d >= min && d <= max;
+    if (!(d >= min && d <= max)) return false;
+
+    // MS-LVL-040: Elevation-based light visibility.
+    // When Levels compatibility is active, lights outside the viewer's
+    // elevation range are hidden. Uses the raw Foundry doc (not the
+    // MapShine-enhanced wrapper) so elevation flags are available.
+    try {
+      const rawDoc = doc?.raw ?? doc;
+      if (!isLightVisibleForPerspective(rawDoc)) return false;
+    } catch (_) {
+      // Fail open — keep the light visible if the check errors
+    }
+
+    return true;
   }
 
   _getEffectiveZoom() {

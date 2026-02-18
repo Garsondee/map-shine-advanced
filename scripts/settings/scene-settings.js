@@ -16,6 +16,14 @@ const FLAG_NAMESPACE = 'map-shine-advanced';
 
 /** Module setting keys */
 const DEBUG_LOADING_MODE_SETTING = 'debugLoadingMode';
+const LEVELS_COMPATIBILITY_MODE_SETTING = 'levelsCompatibilityMode';
+
+/** Levels compatibility mode setting values */
+const LEVELS_COMPATIBILITY_MODES = Object.freeze({
+  OFF: 'off',
+  IMPORT_ONLY: 'import-only',
+  DIAGNOSTIC_INTEROP: 'diagnostic-interop',
+});
 
 function _getPlayerOverridesSettingKey(scene) {
   return `scene-${scene?.id}-player-overrides`;
@@ -331,6 +339,21 @@ export function registerSettings() {
       } catch (_) {
       }
     }
+  });
+
+  game.settings.register(FLAG_NAMESPACE, LEVELS_COMPATIBILITY_MODE_SETTING, {
+    name: 'Levels Compatibility Mode',
+    hint: 'Controls how Map Shine handles Levels data/wrappers. Import-only is recommended for stable gameplay authority.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: String,
+    choices: {
+      [LEVELS_COMPATIBILITY_MODES.OFF]: 'Off (ignore Levels import data)',
+      [LEVELS_COMPATIBILITY_MODES.IMPORT_ONLY]: 'Import-Only (recommended)',
+      [LEVELS_COMPATIBILITY_MODES.DIAGNOSTIC_INTEROP]: 'Diagnostic Interop (migration debugging)',
+    },
+    default: LEVELS_COMPATIBILITY_MODES.IMPORT_ONLY,
   });
 
   game.settings.register('map-shine-advanced', 'allowPlayersToTogglePlayerLightMode', {

@@ -26,6 +26,7 @@ export class CameraPanelManager {
 
     this._unbindState = null;
     this._inputs = {};
+    this._displays = {};
   }
 
   setCinematicManager(manager) {
@@ -111,6 +112,11 @@ export class CameraPanelManager {
     const inputs = this.container.querySelectorAll('[data-input]');
     for (const input of inputs) {
       this._inputs[input.dataset.input] = input;
+    }
+
+    const displays = this.container.querySelectorAll('[data-display]');
+    for (const display of displays) {
+      this._displays[display.dataset.display] = display;
     }
   }
 
@@ -203,9 +209,9 @@ export class CameraPanelManager {
   }
 
   _syncFromManager() {
-    if (!this.container || !this.cinematicManager?.getState) return;
+    if (!this.container) return;
 
-    const state = this.cinematicManager.getState();
+    const state = this.cinematicManager?.getState ? this.cinematicManager.getState() : null;
 
     const setCheck = (key, value) => {
       const el = this._inputs[key];
@@ -217,23 +223,25 @@ export class CameraPanelManager {
       if (el) el.value = String(value);
     };
 
-    setCheck('improvedModeEnabled', state.improvedModeEnabled);
-    setCheck('cinematicActive', state.cinematicActive);
-    setCheck('lockPlayers', state.lockPlayers);
-    setCheck('strictFollow', state.strictFollow);
+    if (state) {
+      setCheck('improvedModeEnabled', state.improvedModeEnabled);
+      setCheck('cinematicActive', state.cinematicActive);
+      setCheck('lockPlayers', state.lockPlayers);
+      setCheck('strictFollow', state.strictFollow);
 
-    setValue('uiFade', state.uiFade);
-    setValue('barHeightPct', state.barHeightPct);
-    setValue('transitionMs', state.transitionMs);
+      setValue('uiFade', state.uiFade);
+      setValue('barHeightPct', state.barHeightPct);
+      setValue('transitionMs', state.transitionMs);
 
-    setCheck('playerBoundsEnabled', state.playerBoundsEnabled);
-    setValue('playerBoundsPadding', state.playerBoundsPadding);
-    setValue('playerBoundsSampleDivisions', state.playerBoundsSampleDivisions);
+      setCheck('playerBoundsEnabled', state.playerBoundsEnabled);
+      setValue('playerBoundsPadding', state.playerBoundsPadding);
+      setValue('playerBoundsSampleDivisions', state.playerBoundsSampleDivisions);
 
-    setCheck('cohesionEnabled', state.cohesionEnabled);
-    setValue('cohesionStrength', state.cohesionStrength);
-    setCheck('cohesionAutoFit', state.cohesionAutoFit);
-    setValue('cohesionPadding', state.cohesionPadding);
+      setCheck('cohesionEnabled', state.cohesionEnabled);
+      setValue('cohesionStrength', state.cohesionStrength);
+      setCheck('cohesionAutoFit', state.cohesionAutoFit);
+      setValue('cohesionPadding', state.cohesionPadding);
+    }
 
     this._applyRoleRestrictions();
   }
@@ -305,6 +313,7 @@ export class CameraPanelManager {
 
     this.container = null;
     this._inputs = {};
+    this._displays = {};
     this.visible = false;
   }
 }

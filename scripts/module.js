@@ -8,6 +8,7 @@ import { bootstrap, cleanup } from './core/bootstrap.js';
 import { info } from './core/log.js';
 import * as sceneSettings from './settings/scene-settings.js';
 import * as canvasReplacement from './foundry/canvas-replacement.js';
+import { registerLevelNavigationKeybindings } from './foundry/level-navigation-keybindings.js';
 import { registerUISettings } from './ui/tweakpane-manager.js';
 import { loadingOverlay } from './ui/loading-overlay.js';
 import { debugLoadingProfiler } from './core/debug-loading-profiler.js';
@@ -215,8 +216,8 @@ function showExperimentalWarningDialog() {
         </p>
         <p>
           <strong>Compatibility note:</strong>
-          Right now it is not compatible with extremely ambitious canvas-altering modules (for example <strong>Levels</strong>).
-          There are plans to support more complex compatibility in the future.
+          Levels compatibility is currently designed for <strong>import-only</strong> workflows.
+          Running active Levels runtime wrappers alongside Map Shine gameplay mode can still conflict.
         </p>
         <p>
           If things aren’t working correctly mid-session, your best bet may be to <strong>disable Map Shine Advanced</strong>
@@ -323,6 +324,7 @@ Hooks.once('init', async function() {
   
   // Register settings
   sceneSettings.registerSettings();
+  registerLevelNavigationKeybindings(MODULE_ID);
   // Sync Debug Loading Mode from Foundry settings on startup.
   debugLoadingProfiler.debugMode = sceneSettings.getDebugLoadingModeEnabled();
   registerUISettings();

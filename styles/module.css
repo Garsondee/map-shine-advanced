@@ -440,3 +440,903 @@
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+/* ====================================================================
+   Levels Authoring Dialog
+   ==================================================================== */
+
+#map-shine-levels-authoring {
+  position: fixed;
+  z-index: 10020;
+  /* Default position — JS will set left/top for dragging */
+  left: calc(50% - 260px);
+  top: 10%;
+  width: 520px;
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  background: rgba(18, 22, 28, 0.95);
+  border: 1px solid rgba(160, 200, 255, 0.28);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  font-family: var(--font-primary, 'Signika', sans-serif);
+  font-size: 12px;
+  color: rgba(240, 245, 255, 0.94);
+  overflow: hidden;
+}
+
+.msa-la__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+  flex-shrink: 0;
+  cursor: grab;
+  user-select: none;
+}
+
+.msa-la__header.msa-la__header--dragging {
+  cursor: grabbing;
+}
+
+.msa-la__title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  flex: 1;
+}
+
+.msa-la__mode {
+  font-size: 10px;
+  opacity: 0.65;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.msa-la__close {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 16px;
+  width: 26px;
+  height: 26px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.msa-la__tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+.msa-la__tab {
+  appearance: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.msa-la__tab:hover {
+  color: rgba(255, 255, 255, 0.90);
+}
+
+.msa-la__tab--active {
+  color: rgba(140, 195, 255, 1);
+  border-bottom-color: rgba(140, 195, 255, 0.8);
+}
+
+.msa-la__badge {
+  display: inline-block;
+  background: rgba(255, 120, 80, 0.85);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 99px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+.msa-la__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  min-height: 120px;
+}
+
+.msa-la__empty {
+  text-align: center;
+  padding: 28px 16px;
+  opacity: 0.65;
+  line-height: 1.5;
+}
+
+.msa-la__inactive-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: -4px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.msa-la__inactive-actions button {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(245, 248, 255, 0.9);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.msa-la__inactive-actions button:hover {
+  border-color: rgba(140, 195, 255, 0.45);
+  background: rgba(140, 195, 255, 0.18);
+}
+
+.msa-la__empty--ok {
+  color: rgba(120, 220, 160, 0.9);
+  opacity: 0.85;
+}
+
+/* Level Stack */
+.msa-la__stack-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.msa-la__stack-tools button {
+  appearance: none;
+  border: 1px solid rgba(160, 200, 255, 0.35);
+  border-radius: 6px;
+  background: rgba(100, 180, 255, 0.12);
+  color: rgba(210, 230, 255, 0.95);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.msa-la__stack-tools button:hover {
+  border-color: rgba(160, 220, 255, 0.55);
+  background: rgba(120, 200, 255, 0.2);
+}
+
+.msa-la__stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.msa-la__band {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.msa-la__band:hover {
+  border-color: rgba(140, 195, 255, 0.35);
+  background: rgba(140, 195, 255, 0.05);
+}
+
+.msa-la__band--solo {
+  border-color: rgba(120, 210, 160, 0.6);
+  background: rgba(120, 210, 160, 0.08);
+}
+
+.msa-la__band--unassigned {
+  border-color: rgba(255, 160, 80, 0.35);
+  background: rgba(255, 160, 80, 0.05);
+}
+
+.msa-la__band-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+
+.msa-la__band-label {
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.msa-la__band-range {
+  font-size: 10px;
+  opacity: 0.7;
+  font-family: monospace;
+}
+
+.msa-la__band-counts {
+  display: flex;
+  gap: 10px;
+  font-size: 10px;
+  opacity: 0.75;
+  margin-bottom: 4px;
+}
+
+.msa-la__band-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.msa-la__band-actions button {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.msa-la__band-actions button:hover {
+  background: rgba(140, 195, 255, 0.15);
+  border-color: rgba(140, 195, 255, 0.4);
+}
+
+.msa-la__band-editor {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.msa-la__band-editor-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr;
+  gap: 6px;
+}
+
+.msa-la__band-editor-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10px;
+  color: rgba(220, 230, 255, 0.9);
+}
+
+.msa-la__band-editor-row input[type="text"] {
+  width: 100%;
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(245, 248, 255, 0.95);
+  font-size: 11px;
+  padding: 4px 6px;
+}
+
+.msa-la__band-editor-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.msa-la__band-editor-actions button {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(240, 245, 255, 0.9);
+  font-size: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.msa-la__band-editor-actions button:hover {
+  border-color: rgba(140, 195, 255, 0.45);
+  background: rgba(140, 195, 255, 0.16);
+}
+
+/* Tile Inspector */
+.msa-la__tile-group {
+  margin-bottom: 10px;
+}
+
+.msa-la__tile-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.msa-la__tile-tip {
+  font-size: 11px;
+  color: rgba(210, 230, 255, 0.9);
+  background: rgba(100, 170, 255, 0.12);
+  border: 1px solid rgba(140, 195, 255, 0.35);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+
+.msa-la__tile-filters,
+.msa-la__tile-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.msa-la__tile-filter,
+.msa-la__tile-bulk button {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(240, 245, 255, 0.88);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.msa-la__tile-filter:hover,
+.msa-la__tile-bulk button:hover {
+  border-color: rgba(140, 195, 255, 0.45);
+  background: rgba(140, 195, 255, 0.16);
+}
+
+.msa-la__tile-filter--active {
+  border-color: rgba(120, 210, 160, 0.55);
+  background: rgba(120, 210, 160, 0.18);
+  color: rgba(215, 255, 235, 0.95);
+}
+
+.msa-la__tile-group-header {
+  font-weight: 700;
+  font-size: 11px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 4px;
+}
+
+.msa-la__tile-group-count {
+  font-weight: 400;
+  opacity: 0.65;
+}
+
+.msa-la__tile-group--unassigned .msa-la__tile-group-header {
+  color: rgba(255, 180, 100, 0.95);
+}
+
+.msa-la__tile-empty {
+  font-size: 10px;
+  opacity: 0.55;
+  padding: 2px 0;
+}
+
+.msa-la__tile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.msa-la__tile-row {
+  display: flex;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.02);
+  cursor: default;
+}
+
+.msa-la__tile-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.msa-la__tile-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.msa-la__tile-editor-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.msa-la__tile-editor-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10px;
+  color: rgba(220, 230, 255, 0.9);
+}
+
+.msa-la__tile-editor-row input[type="text"] {
+  width: 100%;
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(245, 248, 255, 0.95);
+  font-size: 11px;
+  padding: 4px 6px;
+}
+
+.msa-la__tile-editor-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.msa-la__tile-editor-flags label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: rgba(230, 238, 255, 0.9);
+}
+
+.msa-la__tile-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.msa-la__tile-editor-actions button {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(240, 245, 255, 0.88);
+  font-size: 10px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.msa-la__tile-editor-actions button:hover {
+  border-color: rgba(140, 195, 255, 0.45);
+  background: rgba(140, 195, 255, 0.16);
+}
+
+.msa-la__tile-row:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.msa-la__tile-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.msa-la__tile-range {
+  font-size: 10px;
+  opacity: 0.7;
+  font-family: monospace;
+  white-space: nowrap;
+}
+
+.msa-la__tile-elev {
+  font-size: 9px;
+  opacity: 0.55;
+  font-family: monospace;
+  white-space: nowrap;
+}
+
+.msa-la__tag {
+  font-size: 8px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.msa-la__tag--overhead {
+  background: rgba(180, 130, 255, 0.25);
+  color: rgba(200, 170, 255, 0.95);
+  border: 1px solid rgba(180, 130, 255, 0.35);
+}
+
+.msa-la__tag--levels {
+  background: rgba(120, 210, 160, 0.18);
+  color: rgba(195, 245, 220, 0.95);
+  border: 1px solid rgba(120, 210, 160, 0.35);
+}
+
+.msa-la__tag--missing {
+  background: rgba(255, 170, 90, 0.16);
+  color: rgba(255, 215, 170, 0.95);
+  border: 1px solid rgba(255, 170, 90, 0.35);
+}
+
+.msa-la__tile-main button {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.80);
+  font-size: 9px;
+  padding: 1px 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* Validation */
+.msa-la__validation {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.msa-la__warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.msa-la__warn--error {
+  background: rgba(255, 80, 80, 0.12);
+  border: 1px solid rgba(255, 80, 80, 0.30);
+  color: rgba(255, 160, 140, 0.95);
+}
+
+.msa-la__warn--warn {
+  background: rgba(255, 190, 60, 0.10);
+  border: 1px solid rgba(255, 190, 60, 0.28);
+  color: rgba(255, 210, 120, 0.95);
+}
+
+.msa-la__warn--info {
+  background: rgba(100, 180, 255, 0.08);
+  border: 1px solid rgba(100, 180, 255, 0.20);
+  color: rgba(170, 210, 255, 0.90);
+}
+
+.msa-la__warn-icon {
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
+/* Scene tab */
+.msa-la__scene {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.msa-la__scene-row {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.msa-la__scene-row strong {
+  color: rgba(160, 200, 255, 0.90);
+}
+
+.msa-la__scene-surfaces {
+  margin-top: 6px;
+}
+
+.msa-la__scene-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.msa-la__scene-actions button {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(240, 245, 255, 0.9);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 5px 8px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.msa-la__scene-actions button:hover {
+  border-color: rgba(140, 195, 255, 0.5);
+  background: rgba(140, 195, 255, 0.16);
+}
+
+/* Zones tab */
+.msa-la__zones {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.msa-la__zone-warn {
+  font-size: 11px;
+  color: rgba(255, 180, 100, 0.95);
+  background: rgba(255, 160, 80, 0.12);
+  border-radius: 6px;
+  padding: 6px 10px;
+  line-height: 1.4;
+}
+
+.msa-la__zone-create,
+.msa-la__zone-existing,
+.msa-la__zone-migrate {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.msa-la__zone-create-header {
+  font-weight: 700;
+  font-size: 12px;
+  margin-bottom: 8px;
+  color: rgba(200, 220, 255, 0.95);
+}
+
+.msa-la__zone-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.msa-la__zone-form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.msa-la__zone-form-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10px;
+  color: rgba(220, 230, 255, 0.9);
+}
+
+.msa-la__zone-form-row select,
+.msa-la__zone-form-row input[type="text"],
+.msa-la__zone-form-row input[type="number"] {
+  width: 100%;
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 5px;
+  background: rgba(7, 10, 14, 0.7);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 11px;
+  padding: 4px 6px;
+}
+
+.msa-la__zone-options {
+  grid-template-columns: 1fr;
+  gap: 5px;
+}
+
+.msa-la__zone-options label {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.msa-la__zone-options input[type="checkbox"] {
+  margin: 0;
+  width: auto;
+}
+
+.msa-la__zone-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.msa-la__zone-buttons button {
+  appearance: none;
+  border: 1px solid rgba(160, 200, 255, 0.35);
+  border-radius: 6px;
+  background: rgba(100, 170, 255, 0.12);
+  color: rgba(220, 240, 255, 0.95);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.msa-la__zone-buttons button:hover {
+  border-color: rgba(160, 220, 255, 0.55);
+  background: rgba(120, 200, 255, 0.2);
+}
+
+.msa-la__zone-buttons button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.msa-la__zone-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.msa-la__zone-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 11px;
+}
+
+.msa-la__zone-row:hover {
+  border-color: rgba(140, 195, 255, 0.25);
+  background: rgba(140, 195, 255, 0.04);
+}
+
+.msa-la__zone-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.msa-la__zone-range {
+  font-family: monospace;
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.msa-la__zone-flags {
+  font-size: 9px;
+  opacity: 0.6;
+  font-style: italic;
+}
+
+.msa-la__zone-row button {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 9px;
+  padding: 2px 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.msa-la__zone-row button:hover {
+  border-color: rgba(140, 195, 255, 0.4);
+  background: rgba(140, 195, 255, 0.12);
+}
+
+/* Elevator dialog (rendered by Foundry's Dialog API) */
+.map-shine-elevator-dialog .dialog-content {
+  padding: 4px 8px;
+}
+
+.map-shine-elevator-dialog .ms-elevator-btn {
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.map-shine-elevator-dialog .ms-elevator-btn:hover:not(:disabled) {
+  border-color: rgba(140, 195, 255, 0.5) !important;
+  background: rgba(100, 170, 255, 0.2) !important;
+}
+
+.map-shine-elevator-dialog .ms-elevator-floor-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.map-shine-elevator-dialog .ms-elevator-btn {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(40, 44, 52, 0.9);
+  color: rgba(255, 255, 255, 0.95);
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+}
+
+/* ====================================================================
+   Zone Drawing Banner
+   ==================================================================== */
+
+.map-shine-zone-draw-banner {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100000;
+  pointer-events: none;
+  animation: msDrawBannerFadeIn 0.25s ease;
+}
+
+@keyframes msDrawBannerFadeIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+.ms-draw-banner__content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  border-radius: 10px;
+  background: rgba(18, 22, 30, 0.94);
+  border: 1px solid rgba(254, 108, 11, 0.5);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
+  font-family: var(--font-primary, 'Signika', sans-serif);
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ms-draw-banner__icon {
+  font-size: 16px;
+}
+
+.ms-draw-banner__text {
+  font-weight: 600;
+}
+
+.ms-draw-banner__count {
+  padding: 2px 8px;
+  border-radius: 99px;
+  background: rgba(254, 108, 11, 0.3);
+  color: rgba(255, 200, 150, 1);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ms-draw-banner__hint {
+  font-size: 10px;
+  opacity: 0.6;
+}

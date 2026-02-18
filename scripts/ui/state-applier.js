@@ -6,6 +6,7 @@
 
 import { createLogger } from '../core/log.js';
 import { weatherController as coreWeatherController } from '../core/WeatherController.js';
+import { getFoundryTimePhaseHours, getWrappedHourProgress, getFoundrySunlightFactor } from '../core/foundry-time-phases.js';
 
 const log = createLogger('StateApplier');
 
@@ -21,6 +22,12 @@ export class StateApplier {
     /** @type {number|null} Pending target darkness level to flush */
     this._pendingDarknessTarget = null;
 
+    /** @type {number} Timestamp (ms) of the last successful darkness write */
+    this._lastDarknessAppliedAtMs = 0;
+
+    /** @type {number|null} Last darkness value successfully written */
+    this._lastDarknessAppliedValue = null;
+
     /** @type {number|null} */
     this._timeTransitionIntervalId = null;
   }
@@ -30,13 +37,225 @@ export class StateApplier {
   }
 
   /**
+   * Resolve whether time should be synchronized into Foundry core world time.
+   * @returns {boolean}
+   * @private
+   */
+  _isFoundryTimeLinkEnabled() {
+    const controlState = window.MapShine?.controlPanel?.controlState;
+    if (controlState && typeof controlState === 'object') {
+      return controlState.linkTimeToFoundry === true;
+    }
+
+    // Fallback for early boot / UI-only states where the panel is not yet constructed.
+    const sceneState = canvas?.scene?.getFlag?.('map-shine-advanced', 'controlState');
+    return sceneState?.linkTimeToFoundry === true;
+  }
+
+  /**
+   * Get calendar unit sizing for the active Foundry calendar.
+   * @returns {{hoursPerDay:number, minutesPerHour:number, secondsPerMinute:number}|null}
+   * @private
+   */
+  _getCalendarUnits() {
+    const calDays = game?.time?.calendar?.days;
+    if (!calDays) return null;
+
+    const hoursPerDay = Number(calDays.hoursPerDay);
+    const minutesPerHour = Number(calDays.minutesPerHour);
+    const secondsPerMinute = Number(calDays.secondsPerMinute);
+    if (!Number.isFinite(hoursPerDay) || !Number.isFinite(minutesPerHour) || !Number.isFinite(secondsPerMinute)) {
+      return null;
+    }
+
+    return {
+      hoursPerDay: Math.max(1, hoursPerDay),
+      minutesPerHour: Math.max(1, minutesPerHour),
+      secondsPerMinute: Math.max(1, secondsPerMinute)
+    };
+  }
+
+  /**
+   * PF2E world clock can apply a world-created epoch offset to worldTime.
+   * Resolve that offset in seconds when available.
+   * @returns {number|null}
+   * @private
+   */
+  _getPf2eEpochOffsetSeconds() {
+    if (game?.system?.id !== 'pf2e') return null;
+
+    const created = game?.pf2e?.worldClock?.worldCreatedOn?.c;
+    if (!created || typeof created !== 'object') return null;
+
+    const hour = Number(created.hour) || 0;
+    const minute = Number(created.minute) || 0;
+    const second = Number(created.second) || 0;
+    const millisecond = Number(created.millisecond) || 0;
+
+    return (hour * 3600) + (minute * 60) + second + (millisecond * 0.001);
+  }
+
+  /**
+   * Resolve PF2E display clock components for a given worldTime value.
+   * @param {number} worldTime
+   * @returns {{hour:number, minute:number, second:number}|null}
+   * @private
+   */
+  _getPf2eClockComponentsFromWorldTime(worldTime) {
+    if (game?.system?.id !== 'pf2e') return null;
+
+    const timeValue = Number(worldTime);
+    const epochOffset = this._getPf2eEpochOffsetSeconds();
+    if (Number.isFinite(timeValue) && Number.isFinite(epochOffset)) {
+      const secondsPerDay = 24 * 60 * 60;
+      let secondOfDay = (timeValue + epochOffset) % secondsPerDay;
+      if (secondOfDay < 0) secondOfDay += secondsPerDay;
+
+      const hour = Math.floor(secondOfDay / 3600);
+      secondOfDay -= hour * 3600;
+      const minute = Math.floor(secondOfDay / 60);
+      const second = secondOfDay - (minute * 60);
+      return { hour, minute, second };
+    }
+
+    // Fallback to the PF2E clock cache if epoch metadata is unavailable.
+    const c = game?.pf2e?.worldClock?.worldTime?.c;
+    if (!c || typeof c !== 'object') return null;
+    const hour = Number(c.hour);
+    const minute = Number(c.minute);
+    const second = Number(c.second);
+    if (!Number.isFinite(hour) || !Number.isFinite(minute) || !Number.isFinite(second)) return null;
+    return { hour, minute, second };
+  }
+
+  /**
+   * Convert a Foundry worldTime second value into Map Shine's 0-24 hour scale.
+   * @param {number} [worldTime] - Foundry world time in seconds
+   * @returns {number|null}
+   */
+  getHourFromWorldTime(worldTime = game?.time?.worldTime) {
+    const timeValue = Number(worldTime);
+    if (!Number.isFinite(timeValue)) return null;
+
+    const pf2eComponents = this._getPf2eClockComponentsFromWorldTime(timeValue);
+    if (pf2eComponents) {
+      const h = Number(pf2eComponents.hour) || 0;
+      const m = Number(pf2eComponents.minute) || 0;
+      const s = Number(pf2eComponents.second) || 0;
+      return ((h + (m / 60) + (s / 3600)) % 24 + 24) % 24;
+    }
+
+    const calendar = game?.time?.calendar;
+    const units = this._getCalendarUnits();
+    if (!calendar || !units) return null;
+
+    const components = calendar.timeToComponents(timeValue);
+    const h = Number(components?.hour) || 0;
+    const m = Number(components?.minute) || 0;
+    const s = Number(components?.second) || 0;
+
+    const dayFraction =
+      (h + (m / units.minutesPerHour) + (s / (units.minutesPerHour * units.secondsPerMinute))) /
+      units.hoursPerDay;
+
+    return ((dayFraction * 24) % 24 + 24) % 24;
+  }
+
+  /**
+   * Canonical entrypoint for Foundry world-time -> Map Shine time application.
+   * Keeps all time-driven systems in sync while explicitly avoiding a write-back to
+   * game.time (prevents updateWorldTime feedback loops).
+   * @param {number} [worldTime] - Foundry world time in seconds
+   * @param {boolean} [saveToScene=false]
+   * @param {boolean} [applyDarkness=true]
+   * @returns {Promise<number|null>} Applied hour in Map Shine 0-24 scale
+   */
+  async applyFoundryWorldTime(worldTime = game?.time?.worldTime, saveToScene = false, applyDarkness = true) {
+    const linkedHour = this.getHourFromWorldTime(worldTime);
+    if (!Number.isFinite(linkedHour)) return null;
+
+    await this.applyTimeOfDay(linkedHour, saveToScene, applyDarkness, false);
+    return linkedHour;
+  }
+
+  /**
+   * Convert a Map Shine 0-24 hour value into Foundry worldTime seconds while preserving calendar day/year.
+   * @param {number} hour
+   * @param {number} [baseWorldTime]
+   * @returns {number|null}
+   * @private
+   */
+  _worldTimeFromHour(hour, baseWorldTime = game?.time?.worldTime) {
+    const normalizedHour = ((Number(hour) % 24) + 24) % 24;
+    const base = Number(baseWorldTime);
+
+    const pf2eEpochOffset = this._getPf2eEpochOffsetSeconds();
+    if (Number.isFinite(base) && Number.isFinite(pf2eEpochOffset)) {
+      const secondsPerDay = 24 * 60 * 60;
+      const shifted = base + pf2eEpochOffset;
+      const dayIndex = Math.floor(shifted / secondsPerDay);
+
+      let secondsInDay = Math.round((normalizedHour / 24) * secondsPerDay);
+      secondsInDay = Math.max(0, Math.min(secondsPerDay - 1, secondsInDay));
+
+      const targetShifted = (dayIndex * secondsPerDay) + secondsInDay;
+      return targetShifted - pf2eEpochOffset;
+    }
+
+    const calendar = game?.time?.calendar;
+    const units = this._getCalendarUnits();
+    if (!calendar || !units || !Number.isFinite(base)) return null;
+
+    const components = calendar.timeToComponents(base);
+
+    const secondsPerDay = units.hoursPerDay * units.minutesPerHour * units.secondsPerMinute;
+    let secondsInDay = Math.round((normalizedHour / 24) * secondsPerDay);
+    secondsInDay = Math.max(0, Math.min(secondsPerDay - 1, secondsInDay));
+
+    const hourValue = Math.floor(secondsInDay / (units.minutesPerHour * units.secondsPerMinute));
+    const remAfterHour = secondsInDay - (hourValue * units.minutesPerHour * units.secondsPerMinute);
+    const minuteValue = Math.floor(remAfterHour / units.secondsPerMinute);
+    const secondValue = remAfterHour - (minuteValue * units.secondsPerMinute);
+
+    return calendar.componentsToTime({
+      year: Number(components?.year) || 0,
+      day: Number(components?.day) || 0,
+      hour: hourValue,
+      minute: minuteValue,
+      second: secondValue
+    });
+  }
+
+  /**
+   * Synchronize Map Shine time-of-day into Foundry's canonical world time.
+   * @param {number} hour
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _syncFoundryWorldTimeFromHour(hour) {
+    if (!game?.user?.isGM) return;
+
+    const currentWorldTime = Number(game?.time?.worldTime);
+    if (!Number.isFinite(currentWorldTime)) return;
+
+    const targetWorldTime = this._worldTimeFromHour(hour, currentWorldTime);
+    if (!Number.isFinite(targetWorldTime)) return;
+
+    // 1 second threshold avoids redundant socket churn from tiny rounding differences.
+    if (Math.abs(targetWorldTime - currentWorldTime) < 1) return;
+
+    await game.time.set(targetWorldTime, { mapShineTimeSync: true });
+  }
+
+  /**
    * Apply time of day change to all systems
    * @param {number} hour - 0-24 hour value
    * @param {boolean} [saveToScene=true] - Whether to save to scene flags
    * @param {boolean} [applyDarkness=true] - Whether to update Foundry scene darkness
+   * @param {boolean} [syncFoundryTime=true] - Whether to synchronize linked Foundry world time
    * @returns {Promise<void>}
    */
-  async applyTimeOfDay(hour, saveToScene = true, applyDarkness = true) {
+  async applyTimeOfDay(hour, saveToScene = true, applyDarkness = true, syncFoundryTime = true) {
     try {
       const clampedHour = ((hour % 24) + 24) % 24;
       
@@ -48,6 +267,10 @@ export class StateApplier {
         weatherController.setTime(clampedHour);
       } else {
         log.warn('WeatherController not available for time application');
+      }
+
+      if (syncFoundryTime && this._isFoundryTimeLinkEnabled()) {
+        await this._syncFoundryWorldTimeFromHour(clampedHour);
       }
 
       // Update Foundry scene darkness based on time
@@ -328,33 +551,29 @@ export class StateApplier {
     try {
       if (!game?.user?.isGM || !canvas?.scene) return;
 
-      // Enhanced darkness calculation for better day/night transitions
-      let targetDarkness;
+      const nowMs = Date.now();
 
-      if (hour >= 5 && hour < 7) {
-        // Dawn: 5am (0.95) -> 7am (0.3)
-        const progress = (hour - 5) / 2;
-        targetDarkness = 0.95 - progress * 0.65;
-      } else if (hour >= 7 && hour < 8) {
-        // Early morning: 7am (0.3) -> 8am (0.0)
-        const progress = (hour - 7) / 1;
-        targetDarkness = 0.3 - progress * 0.3;
-      } else if (hour >= 8 && hour < 17) {
-        // Day: 8am -> 5pm is full daylight
-        targetDarkness = 0.0;
-      } else if (hour >= 17 && hour < 19) {
-        // Dusk: 5pm (0.0) -> 7pm (0.6)
-        const progress = (hour - 17) / 2;
-        targetDarkness = 0.0 + progress * 0.6;
-      } else if (hour >= 19 && hour < 21) {
-        // Evening: 7pm (0.6) -> 9pm (0.8)
-        const progress = (hour - 19) / 2;
-        targetDarkness = 0.6 + progress * 0.2;
+      // Align darkness transitions to Foundry/PF2E time-of-day phase definitions.
+      const safeHour = ((Number(hour) % 24) + 24) % 24;
+      const phases = getFoundryTimePhaseHours();
+      const dawnDuskDarkness = 0.55;
+      const noonDarkness = 0.0;
+      const midnightDarkness = 0.95;
+
+      let targetDarkness;
+      const dayProgress = getWrappedHourProgress(safeHour, phases.sunrise, phases.sunset);
+
+      if (Number.isFinite(dayProgress)) {
+        const sunlight = Math.pow(getFoundrySunlightFactor(safeHour, phases), 0.85);
+        targetDarkness = dawnDuskDarkness + ((noonDarkness - dawnDuskDarkness) * sunlight);
       } else {
-        // Night: 9pm (0.8) -> 5am (0.95)
-        let nightHour = hour >= 21 ? hour - 21 : hour + 3;
-        const progress = nightHour / 8;
-        targetDarkness = 0.8 + progress * 0.15;
+        const nightProgress = getWrappedHourProgress(safeHour, phases.sunset, phases.sunrise);
+        if (Number.isFinite(nightProgress)) {
+          const moonArc = Math.pow(Math.max(0, Math.sin(Math.PI * nightProgress)), 0.8);
+          targetDarkness = dawnDuskDarkness + ((midnightDarkness - dawnDuskDarkness) * moonArc);
+        } else {
+          targetDarkness = midnightDarkness;
+        }
       }
 
       // Clamp to valid range
@@ -363,8 +582,19 @@ export class StateApplier {
       // Get current darkness
       const currentDarkness = canvas?.environment?.darknessLevel ?? canvas?.scene?.environment?.darknessLevel ?? 0.0;
 
+      const lastApplied = Number.isFinite(this._lastDarknessAppliedValue)
+        ? this._lastDarknessAppliedValue
+        : currentDarkness;
+
+      const darknessDelta = Math.abs(lastApplied - targetDarkness);
+      const DARKNESS_DELTA_THRESHOLD = 0.002;
+      const MIN_LINKED_WRITE_INTERVAL_MS = 1500;
+      const shouldForceByAge =
+        darknessDelta > 0.00005 &&
+        (nowMs - this._lastDarknessAppliedAtMs) >= MIN_LINKED_WRITE_INTERVAL_MS;
+
       // Schedule updates during rapid time changes (e.g. transitions) without starving the timer.
-      if (Math.abs(currentDarkness - targetDarkness) > 0.002) {
+      if ((Math.abs(currentDarkness - targetDarkness) > DARKNESS_DELTA_THRESHOLD) || shouldForceByAge) {
         this._pendingDarknessTarget = targetDarkness;
 
         // If a flush is already scheduled, just update the pending value.
@@ -380,6 +610,8 @@ export class StateApplier {
 
           try {
             await canvas.scene.update({ 'environment.darknessLevel': pending });
+            this._lastDarknessAppliedAtMs = Date.now();
+            this._lastDarknessAppliedValue = pending;
             log.debug(`Scene darkness updated: ${pending.toFixed(3)}`);
           } catch (error) {
             log.warn('Failed to update scene darkness:', error);
@@ -436,6 +668,8 @@ export class StateApplier {
     }
 
     this._pendingDarknessTarget = null;
+    this._lastDarknessAppliedAtMs = 0;
+    this._lastDarknessAppliedValue = null;
 
     if (this._timeTransitionIntervalId) {
       clearInterval(this._timeTransitionIntervalId);

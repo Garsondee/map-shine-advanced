@@ -420,9 +420,17 @@ export class VisionManager {
       center.x = tokenX + tokenWidth / 2;
       center.y = tokenY + tokenHeight / 2;
 
+      // MS-LVL-072: Read the token's elevation so the polygon computer can
+      // skip walls whose wall-height bounds don't include this elevation.
+      // This lets tokens on one floor see past walls that only exist on other floors.
+      const tokenElevation = Number(doc.elevation ?? 0);
+      const computeOptions = Number.isFinite(tokenElevation) && tokenElevation !== 0
+        ? { elevation: tokenElevation }
+        : null;
+
       // Compute visibility polygon using our own algorithm
       // Pass sceneBounds to clip vision to scene interior (not padded region)
-      const points = this.computer.compute(center, radiusPixels, walls, sceneBounds);
+      const points = this.computer.compute(center, radiusPixels, walls, sceneBounds, computeOptions);
 
       if (points && points.length >= 6) {
         const geometry = this.converter.toBufferGeometry(points);

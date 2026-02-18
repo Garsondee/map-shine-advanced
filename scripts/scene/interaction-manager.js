@@ -13,6 +13,7 @@ import { MapPointDrawHandler } from './map-point-interaction.js';
 import { LightInteractionHandler } from './light-interaction.js';
 import { SelectionBoxHandler } from './selection-box-interaction.js';
 import { safeCall, safeDispose, Severity } from '../core/safe-call.js';
+import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 
 const log = createLogger('InteractionManager');
 
@@ -802,6 +803,10 @@ export class InteractionManager {
     window.addEventListener('pointerdown', this.boundHandlers.onPointerDown, { capture: true });
     this.canvasElement.addEventListener('dblclick', this.boundHandlers.onDoubleClick);
 
+    // Prevent the browser's native context menu on the Three.js canvas so
+    // right-click interactions (token HUD, click-to-move) aren't interrupted.
+    this.canvasElement.addEventListener('contextmenu', (e) => e.preventDefault());
+
     window.addEventListener('pointerup', this.boundHandlers.onPointerUp);
     window.addEventListener('pointermove', this.boundHandlers.onPointerMove);
     window.addEventListener('wheel', this.boundHandlers.onWheel, { passive: false });
@@ -960,12 +965,14 @@ export class InteractionManager {
     }
   }
 
-  _renderMovementPathPreview(pathNodes, totalDistance, tokenDoc = null, groupAssignments = null) {
+  _renderMovementPathPreview(pathNodes, totalDistance, tokenDoc = null, groupAssignments = null, renderOptions = {}) {
     const preview = this.movementPathPreview;
     if (!preview?.group || !preview.lineOuter || !preview.lineInner || !Array.isArray(pathNodes) || pathNodes.length < 2) {
       this._clearMovementPathPreview();
       return;
     }
+
+    const showGhosts = renderOptions?.showGhosts !== false;
 
     const THREE = window.THREE;
     const groundZ = (this.sceneComposer?.groundZ ?? 0) + 0.5;
@@ -1027,55 +1034,58 @@ export class InteractionManager {
     }
 
     // Destination ghost token(s) (50% opacity) to show final stop positions.
-    safeCall(() => {
-      if (!ghostGroup) return;
+    // Token drag previews can disable this so only one token ghost is shown.
+    if (showGhosts) {
+      safeCall(() => {
+        if (!ghostGroup) return;
 
-      /**
-       * @param {TokenDocument|object} doc
-       * @param {{x:number,y:number}} endFoundryCenter
-       */
-      const addGhost = (doc, endFoundryCenter) => {
-        if (!doc || !endFoundryCenter) return;
-        const tokenData = doc?.id ? this.tokenManager?.tokenSprites?.get?.(doc.id) : null;
-        const sourceSprite = tokenData?.sprite;
-        if (!sourceSprite) return;
+        /**
+         * @param {TokenDocument|object} doc
+         * @param {{x:number,y:number}} endFoundryCenter
+         */
+        const addGhost = (doc, endFoundryCenter) => {
+          if (!doc || !endFoundryCenter) return;
+          const tokenData = doc?.id ? this.tokenManager?.tokenSprites?.get?.(doc.id) : null;
+          const sourceSprite = tokenData?.sprite;
+          if (!sourceSprite) return;
 
-        const tex = sourceSprite.material?.map || sourceSprite.userData?.texture || null;
-        if (!tex) return;
+          const tex = sourceSprite.material?.map || sourceSprite.userData?.texture || null;
+          if (!tex) return;
 
-        const ghost = new THREE.Sprite(new THREE.SpriteMaterial({
-          map: tex,
-          transparent: true,
-          opacity: 0.5,
-          depthTest: false,
-          depthWrite: false
-        }));
-        const endWorld = Coordinates.toWorld(endFoundryCenter.x, endFoundryCenter.y);
-        const srcScale = sourceSprite.scale;
-        ghost.scale.set(srcScale?.x ?? 100, srcScale?.y ?? 100, srcScale?.z ?? 1);
-        ghost.position.set(endWorld.x, endWorld.y, (this.sceneComposer?.groundZ ?? 0) + 2.0);
-        ghost.renderOrder = 30;
-        ghostGroup.add(ghost);
-      };
+          const ghost = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: tex,
+            transparent: true,
+            opacity: 0.5,
+            depthTest: false,
+            depthWrite: false
+          }));
+          const endWorld = Coordinates.toWorld(endFoundryCenter.x, endFoundryCenter.y);
+          const srcScale = sourceSprite.scale;
+          ghost.scale.set(srcScale?.x ?? 100, srcScale?.y ?? 100, srcScale?.z ?? 1);
+          ghost.position.set(endWorld.x, endWorld.y, (this.sceneComposer?.groundZ ?? 0) + 2.0);
+          ghost.renderOrder = 30;
+          ghostGroup.add(ghost);
+        };
 
-      if (Array.isArray(groupAssignments) && groupAssignments.length > 1) {
-        for (const assignment of groupAssignments) {
-          const tokenId = String(assignment?.tokenId || '');
-          if (!tokenId) continue;
-          const doc = this.tokenManager?.tokenSprites?.get?.(tokenId)?.tokenDoc || (tokenDoc?.id === tokenId ? tokenDoc : null);
-          if (!doc) continue;
+        if (Array.isArray(groupAssignments) && groupAssignments.length > 1) {
+          for (const assignment of groupAssignments) {
+            const tokenId = String(assignment?.tokenId || '');
+            if (!tokenId) continue;
+            const doc = this.tokenManager?.tokenSprites?.get?.(tokenId)?.tokenDoc || (tokenDoc?.id === tokenId ? tokenDoc : null);
+            if (!doc) continue;
 
-          const endFoundry = Array.isArray(assignment?.pathNodes) && assignment.pathNodes.length > 0
-            ? assignment.pathNodes[assignment.pathNodes.length - 1]
-            : this._tokenTopLeftToCenterFoundry(assignment?.destinationTopLeft, doc);
+            const endFoundry = Array.isArray(assignment?.pathNodes) && assignment.pathNodes.length > 0
+              ? assignment.pathNodes[assignment.pathNodes.length - 1]
+              : this._tokenTopLeftToCenterFoundry(assignment?.destinationTopLeft, doc);
+            addGhost(doc, endFoundry);
+          }
+        } else {
+          const doc = tokenDoc || this._getPrimarySelectedTokenDoc();
+          const endFoundry = pathNodes[pathNodes.length - 1];
           addGhost(doc, endFoundry);
         }
-      } else {
-        const doc = tokenDoc || this._getPrimarySelectedTokenDoc();
-        const endFoundry = pathNodes[pathNodes.length - 1];
-        addGhost(doc, endFoundry);
-      }
-    }, 'movementPathPreview.ghost', Severity.COSMETIC);
+      }, 'movementPathPreview.ghost', Severity.COSMETIC);
+    }
 
     preview.group.visible = true;
     preview.active = true;
@@ -1269,13 +1279,13 @@ export class InteractionManager {
     return `${String(tokenId || '')}:${Math.round(Number(destinationTopLeft?.x || 0))}:${Math.round(Number(destinationTopLeft?.y || 0))}`;
   }
 
-  _applyMovementPreviewResult(previewResult, key, tokenDoc = null) {
+  _applyMovementPreviewResult(previewResult, key, tokenDoc = null, renderOptions = {}) {
     if (!previewResult?.ok || !Array.isArray(previewResult.pathNodes) || previewResult.pathNodes.length < 2) {
       this._clearMovementPathPreview();
       return;
     }
     this.movementPathPreview.currentKey = key;
-    this._renderMovementPathPreview(previewResult.pathNodes, previewResult.distance || 0, tokenDoc);
+    this._renderMovementPathPreview(previewResult.pathNodes, previewResult.distance || 0, tokenDoc, null, renderOptions);
   }
 
   _applyGroupMovementPreviewResult(previewResult, key, leaderTokenDoc = null) {
@@ -1357,7 +1367,11 @@ export class InteractionManager {
       }
     });
 
-    this._applyMovementPreviewResult(previewResult, key, tokenDoc);
+    const isFlyingToken = !!movementManager?.isFlying?.(tokenDoc.id);
+
+    this._applyMovementPreviewResult(previewResult, key, tokenDoc, {
+      showGhosts: !isFlyingToken
+    });
 
     this.movementPathPreview.inFlight = false;
     const pending = this.movementPathPreview.pending;
@@ -1717,6 +1731,7 @@ export class InteractionManager {
     const THREE = window.THREE;
     const _tmpPos = new THREE.Vector3();
     const _tmpQuat = new THREE.Quaternion();
+    const groundDragZ = (this.sceneComposer?.groundZ ?? 0) + 3.0;
     
     for (const id of this.selection) {
       // Check Token
@@ -1724,11 +1739,16 @@ export class InteractionManager {
       if (tokenData && tokenData.sprite) {
         const original = tokenData.sprite;
         const preview = original.clone();
+        const movementManager = window.MapShine?.tokenMovementManager;
+        const isFlyingToken = !!movementManager?.isFlying?.(id);
 
         // Previews must update their matrix as we drag them.
         preview.matrixAutoUpdate = true;
-        // Slightly above the original to avoid z-fighting.
-        preview.position.z = (preview.position.z ?? 0) + 0.01;
+        // Flying drags should preview the landing tile, not current flight height.
+        // Non-flying drags keep the existing slight z offset behavior.
+        preview.position.z = isFlyingToken
+          ? (groundDragZ + 0.01)
+          : ((preview.position.z ?? 0) + 0.01);
         // Ensure it's drawn above the original even if depth is enabled elsewhere.
         preview.renderOrder = 9998;
         
@@ -2540,10 +2560,12 @@ export class InteractionManager {
                 this.rightClickState.startPos.set(event.clientX, event.clientY);
                 this.rightClickState.time = Date.now();
 
-                // NOTE: We do NOT preventDefault or stopPropagation here because
-                // CameraController needs to see this event to start Panning (Right Drag).
-                // If the user moves the mouse > threshold, rightClickState.active becomes false
-                // and the HUD won't open (standard Foundry behavior).
+                // Stop propagation of the pointerdown to prevent Foundry's PIXI
+                // from redundantly processing the right-click (which causes a
+                // noticeable freeze). The UnifiedCamera still receives the separate
+                // mousedown event for right-drag panning support.
+                event.preventDefault();
+                event.stopPropagation();
                 return;
             } else {
                 const selectedTokenDocs = this._getSelectedTokenDocs();
@@ -5810,6 +5832,38 @@ export class InteractionManager {
     // effect, which also consults Foundry's controlled tokens for GM bypass.
   }
 
+  /**
+   * MS-LVL-075: Check whether a door wall's height bounds include the
+   * controlled token's elevation. GMs always pass. When no controlled
+   * token exists, the check passes (no elevation context to gate against).
+   *
+   * @param {WallDocument|object|null} wallDoc
+   * @returns {boolean} true if the door is reachable at the current elevation
+   */
+  _isDoorWallAtTokenElevation(wallDoc) {
+    if (game?.user?.isGM) return true;
+    if (!wallDoc) return true;
+
+    const controlled = canvas?.tokens?.controlled;
+    const token = (Array.isArray(controlled) && controlled.length > 0) ? controlled[0] : null;
+    if (!token) return true;
+
+    const tokenElevation = Number(token?.document?.elevation);
+    if (!Number.isFinite(tokenElevation)) return true;
+
+    const bounds = readWallHeightFlags(wallDoc);
+    let bottom = Number(bounds?.bottom);
+    let top = Number(bounds?.top);
+    if (!Number.isFinite(bottom)) bottom = -Infinity;
+    if (!Number.isFinite(top)) top = Infinity;
+    if (top < bottom) { const swap = bottom; bottom = top; top = swap; }
+
+    // Unbounded walls are always reachable
+    if (bottom === -Infinity && top === Infinity) return true;
+
+    return (bottom <= tokenElevation) && (tokenElevation <= top);
+  }
+
   handleDoorClick(doorControl, event) {
       let object = doorControl;
       while (object && !object.userData?.wallId) object = object.parent;
@@ -5818,6 +5872,13 @@ export class InteractionManager {
 
       const wallDoc = canvas.walls?.get?.(wallId)?.document ?? canvas.scene?.walls?.get?.(wallId);
       if (!wallDoc) return;
+
+      // MS-LVL-075: Prevent non-GM players from toggling doors outside their
+      // token's elevation range (wall-height bounds check).
+      if (!this._isDoorWallAtTokenElevation(wallDoc)) {
+          log.debug(`Door ${wallId} blocked: wall-height bounds outside token elevation`);
+          return;
+      }
 
       if (!wallDoc.canUserModify(game.user, 'update')) {
           ui.notifications?.warn?.('You do not have permission to control this door.');
@@ -5842,6 +5903,13 @@ export class InteractionManager {
 
       const wallDoc = canvas.walls?.get?.(wallId)?.document ?? canvas.scene?.walls?.get?.(wallId);
       if (!wallDoc) return;
+
+      // MS-LVL-075: Prevent non-GM players from locking/unlocking doors outside
+      // their token's elevation range.
+      if (!this._isDoorWallAtTokenElevation(wallDoc)) {
+          log.debug(`Door ${wallId} right-click blocked: wall-height bounds outside token elevation`);
+          return;
+      }
 
       if (!wallDoc.canUserModify(game.user, 'update')) {
           ui.notifications?.warn?.('You do not have permission to modify this door.');

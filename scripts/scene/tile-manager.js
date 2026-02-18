@@ -9,6 +9,8 @@ import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../effects/EffectComposer.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
+import { isTileVisibleForPerspective, isBackgroundVisibleForPerspective, isWeatherVisibleForPerspective } from '../foundry/elevation-context.js';
+import { tileHasLevelsRange, isLevelsEnabledForScene, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
 
 const log = createLogger('TileManager');
 
@@ -66,6 +68,17 @@ export function isTileOverhead(tileDoc) {
   }
 
   return elev >= foregroundElevation;
+}
+
+function hasFiniteActiveLevelBand(context) {
+  return Number.isFinite(Number(context?.bottom)) && Number.isFinite(Number(context?.top));
+}
+
+function isElevationWithinActiveBand(elevation, context) {
+  if (!hasFiniteActiveLevelBand(context)) return true;
+  const n = Number(elevation);
+  if (!Number.isFinite(n)) return true;
+  return n >= Number(context.bottom) && n <= Number(context.top);
 }
 
 /**
@@ -1447,6 +1460,21 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       }
     })]);
 
+    // Level context changes: when the active level changes (keyboard step,
+    // follow-token, manual select), re-evaluate elevation-based tile visibility.
+    this._hookIds.push(['mapShineLevelContextChanged', Hooks.on('mapShineLevelContextChanged', () => {
+      this._refreshAllTileElevationVisibility();
+    })]);
+
+    // Token control/sight changes affect perspective elevation for tile visibility.
+    // Use a lightweight debounce to avoid per-frame churn during token animations.
+    this._hookIds.push(['controlToken', Hooks.on('controlToken', () => {
+      this._scheduleElevationVisibilityRefresh();
+    })]);
+    this._hookIds.push(['sightRefresh', Hooks.on('sightRefresh', () => {
+      this._scheduleElevationVisibilityRefresh();
+    })]);
+
     this.hooksRegistered = true;
     log.debug('Foundry hooks registered');
   }
@@ -1511,6 +1539,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     this._notifyInitialLoadWaiters();
+
+    // Run elevation visibility refresh after initial sync to set correct
+    // background visibility and weather suppression state for the loaded scene.
+    this._refreshAllTileElevationVisibility();
   }
 
   _notifyInitialLoadWaiters() {
@@ -1926,6 +1958,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       if (!data) continue;
 
       const { sprite, tileDoc, hoverHidden } = data;
+
+      // MS-LVL-036: Skip overhead fade for tiles that are elevation-hidden.
+      // Levels range-hide takes precedence over hover-fade — if the tile is
+      // outside the viewer's elevation range, do not animate it back in.
+      if (!sprite.visible) continue;
+
       if (sprite.material) {
         // Overhead tiles should respect the same outdoors brightness/dim response
         // as the main LightingEffect composite (otherwise outdoor roofs stay too
@@ -3193,7 +3231,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // separation in the tight depth camera, sufficient for the specular
     // effect's depth-pass occlusion to distinguish overlapping tiles.
     const sortOffset = (Number.isFinite(Number(sortKey)) ? Number(sortKey) : 0) * 0.001;
-    const zPosition = zBase + sortOffset;
+    const elevationOffset = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
+    // Keep tile Z aligned with token elevation semantics:
+    // TokenManager uses groundZ + TOKEN_BASE_Z + token.elevation.
+    // Apply the same elevation offset here so upper-floor tiles are visually higher.
+    const zPosition = zBase + elevationOffset + sortOffset;
 
     // Keep runtime sort key available for tile-attached overlays/effects that
     // need deterministic top-most ordering across overlapping tiles.
@@ -3248,7 +3290,16 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   }
 
   /**
-   * Update sprite visibility and opacity
+   * Update sprite visibility and opacity.
+   *
+   * Visibility is determined by a layered gate chain:
+   * 1. Global visibility (TileManager hidden → all tiles hidden)
+   * 2. Texture readiness (no texture → hidden)
+   * 3. Foundry hidden state (GM sees at 50% opacity, players don't see)
+   * 4. **Levels elevation range** (MS-LVL-030..032, 036): tile hidden if
+   *    outside the current perspective elevation using imported Levels flags.
+   * 5. Hover-hide (overhead-only UX feature)
+   *
    * @param {THREE.Sprite} sprite 
    * @param {TileDocument} tileDoc 
    */
@@ -3285,6 +3336,66 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       sprite.material.opacity = tileDoc.alpha ?? 1;
     }
 
+    // --- Levels elevation-based tile visibility (MS-LVL-030..032, 036) ---
+    // If the tile passes Foundry's baseline visibility but has Levels range
+    // flags, apply elevation-based visibility gating. GMs always see
+    // range-hidden tiles at reduced opacity for editing convenience.
+    if (sprite.visible) {
+      try {
+        const activeLevelContext = window.MapShine?.activeLevelContext;
+        const strictBandVisibility = isLevelsEnabledForScene(canvas?.scene) && hasFiniteActiveLevelBand(activeLevelContext);
+
+        let elevationVisible = true;
+
+        if (tileHasLevelsRange(tileDoc)) {
+          elevationVisible = isTileVisibleForPerspective(tileDoc);
+
+          // When a specific floor is selected via the level navigator, also
+          // enforce that the tile's elevation range overlaps the active band.
+          // The Levels algorithm alone doesn't hide tiles below the viewer
+          // (it relies on roof occlusion which Map Shine doesn't use), so
+          // without this check selecting Floor 2 would still show Floor 1
+          // tiles, appearing "inverted" to the user.
+          if (elevationVisible && strictBandVisibility) {
+            const flags = readTileLevelsFlags(tileDoc);
+            const tileBottom = Number(flags.rangeBottom);
+            const tileTop = Number(flags.rangeTop);
+            const bandBottom = Number(activeLevelContext.bottom);
+            const bandTop = Number(activeLevelContext.top);
+            if (Number.isFinite(tileBottom) && Number.isFinite(bandBottom) && Number.isFinite(bandTop)) {
+              // Finite rangeTop: tile must overlap the active band
+              if (Number.isFinite(tileTop)) {
+                elevationVisible = !(tileTop <= bandBottom || tileBottom >= bandTop);
+              } else {
+                // Roof tiles (rangeTop=Infinity): visible if the tile's bottom
+                // is within or below the active band (roofs cover their floor)
+                elevationVisible = tileBottom < bandTop;
+              }
+            }
+          }
+        } else if (strictBandVisibility) {
+          // For tiles without explicit Levels flags, use tile elevation as the
+          // fallback floor assignment when an active level context exists.
+          elevationVisible = isElevationWithinActiveBand(tileDoc?.elevation, activeLevelContext);
+        }
+
+        if (!elevationVisible) {
+          // When a specific level is active, enforce strict hide/reveal behavior
+          // so upper/lower floors do not bleed through, even for GMs.
+          if (strictBandVisibility) {
+            sprite.visible = false;
+          } else if (isGM) {
+            // GM: show elevation-hidden tiles at reduced opacity in non-strict mode
+            sprite.material.opacity = Math.min(sprite.material.opacity, 0.25);
+          } else {
+            sprite.visible = false;
+          }
+        }
+      } catch (_) {
+        // Elevation visibility check failed — fail open (keep tile visible)
+      }
+    }
+
     // If this tile is currently hover-hidden, force opacity to zero so that
     // refreshTile/update hooks don't fight the hover fade in update().
     try {
@@ -3316,6 +3427,69 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
     } catch (_) {
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  //  Elevation-based tile visibility (Levels compatibility)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Re-evaluate elevation-based visibility for all tiles.
+   * Called when the active level context changes or the controlled token changes.
+   * @private
+   */
+  _refreshAllTileElevationVisibility() {
+    if (!this._globalVisible) return;
+
+    // When Levels compatibility is off, restore defaults and bail out.
+    // This prevents stale hidden state from a previous elevation context.
+    if (!isLevelsEnabledForScene(canvas?.scene)) {
+      try {
+        const basePlane = window.MapShine?.sceneComposer?.basePlaneMesh;
+        if (basePlane) basePlane.visible = true;
+      } catch (_) {}
+      try {
+        weatherController.elevationWeatherSuppressed = false;
+      } catch (_) {}
+      return;
+    }
+
+    for (const { sprite, tileDoc } of this.tileSprites.values()) {
+      if (!sprite || !tileDoc) continue;
+      this.updateSpriteVisibility(sprite, tileDoc);
+    }
+
+    // MS-LVL-050: Update scene background visibility based on backgroundElevation.
+    // When the viewer is below the background elevation (e.g. in a basement),
+    // hide the base plane mesh so only basement tiles are visible.
+    try {
+      const basePlane = window.MapShine?.sceneComposer?.basePlaneMesh;
+      if (basePlane) {
+        basePlane.visible = isBackgroundVisibleForPerspective();
+      }
+    } catch (_) {
+      // Fail open — keep background visible
+    }
+
+    // MS-LVL-051: Suppress weather when the viewer is below weatherElevation.
+    try {
+      weatherController.elevationWeatherSuppressed = !isWeatherVisibleForPerspective();
+    } catch (_) {
+      // Fail open — don't suppress weather
+    }
+  }
+
+  /**
+   * Schedule a debounced elevation visibility refresh.
+   * Avoids per-frame churn from rapid hook firing during animations.
+   * @private
+   */
+  _scheduleElevationVisibilityRefresh() {
+    if (this._elevationVisibilityTimer) return;
+    this._elevationVisibilityTimer = requestAnimationFrame(() => {
+      this._elevationVisibilityTimer = null;
+      this._refreshAllTileElevationVisibility();
+    });
   }
 
   /**

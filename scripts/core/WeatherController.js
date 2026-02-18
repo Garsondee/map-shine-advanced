@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from './log.js';
+import { getFoundrySunlightFactor } from './foundry-time-phases.js';
 
 const log = createLogger('WeatherController');
 
@@ -203,6 +204,14 @@ export class WeatherController {
 
     /** @type {boolean} Manual override to force indoor/roof mask for weather at all times */
     this.roofMaskForceEnabled = false;
+
+    /**
+     * MS-LVL-051: Whether weather is suppressed because the viewer is below
+     * the scene's `weatherElevation`. Set by TileManager's elevation refresh
+     * and read by weather particle effects to skip rendering.
+     * @type {boolean}
+     */
+    this.elevationWeatherSuppressed = false;
 
     /** @type {number} Global simulation speed scalar for Quarks-based effects (weather, fire, etc.). */
     this.simulationSpeed = 1.0;
@@ -1871,8 +1880,7 @@ export class WeatherController {
     }
 
     const clamp01 = (n) => Math.max(0, Math.min(1, n));
-    const dayDist = Math.abs(timeOfDay - 12.0) / 12.0;
-    const dayFactor = clamp01(1.0 - dayDist);
+    const dayFactor = clamp01(getFoundrySunlightFactor(timeOfDay));
     const overcastFactor = clamp01((state.cloudCover ?? 0.0) * 0.8 + (state.precipitation ?? 0.0) * 0.6);
     const stormFactor = clamp01((state.precipitation ?? 0.0) * 1.0);
 

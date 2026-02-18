@@ -60,8 +60,276 @@ export class GridRenderer {
 
     /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
     this._hookIds = [];
+
+    /** @type {{center?:number}|null} */
+    this.activeLevelContext = null;
+
+    /** @type {number} */
+    this._targetLevelOffset = 0;
+
+    /** @type {number} */
+    this._displayLevelOffset = 0;
+
+    /** @type {number} */
+    this._transitionDurationMs = 180;
+
+    /** @type {number} */
+    this._transitionLastAtMs = 0;
+
+    /** @type {Array<{center:number,bottom:number,top:number,label:string}>} */
+    this._availableLevels = [];
+
+    /** @type {number} */
+    this._activeLevelIndex = -1;
+
+    /** @type {boolean} */
+    this._ghostGridEnabled = true;
+
+    /** @type {boolean} */
+    this._floorTintPresetsEnabled = true;
+
+    /** @type {number} */
+    this._ghostGridAlphaScale = 0.22;
+
+    /** @type {Array<THREE.Mesh>} */
+    this._ghostGridMeshes = [];
     
     log.debug('GridRenderer created');
+  }
+
+  /**
+   * @param {{center?:number}|null} context
+   */
+  setActiveLevelContext(context) {
+    const previous = this.activeLevelContext;
+    this.activeLevelContext = context && typeof context === 'object' ? { ...context } : null;
+
+    const contextIndex = Number(this.activeLevelContext?.index);
+    if (Number.isFinite(contextIndex)) {
+      this._activeLevelIndex = contextIndex;
+    }
+
+    const nextOffset = Number(this.activeLevelContext?.center);
+    this._targetLevelOffset = Number.isFinite(nextOffset) ? nextOffset : 0;
+
+    const nextDuration = Number(this.activeLevelContext?.transitionMs);
+    this._transitionDurationMs = Number.isFinite(nextDuration)
+      ? Math.max(0, Math.min(2500, nextDuration))
+      : 180;
+
+    if (!previous) {
+      // First context application should snap to avoid startup drift.
+      this._displayLevelOffset = this._targetLevelOffset;
+    }
+
+    if (this._transitionDurationMs <= 0) {
+      this._displayLevelOffset = this._targetLevelOffset;
+    }
+
+    this._transitionLastAtMs = 0;
+    this._applyActiveLevelContextToGridMesh();
+    this._refreshGhostGridMeshes();
+  }
+
+  /**
+   * @param {{context?:{index?:number}|null, levels?:Array<any>}|null} payload
+   */
+  setLevelContextPayload(payload) {
+    const levels = Array.isArray(payload?.levels) ? payload.levels : [];
+    this._availableLevels = levels.map((level, i) => {
+      const bottomRaw = Number(level?.bottom);
+      const topRaw = Number(level?.top);
+      const centerRaw = Number(level?.center);
+
+      const bottom = Number.isFinite(bottomRaw) ? bottomRaw : 0;
+      const top = Number.isFinite(topRaw) ? topRaw : bottom;
+      const center = Number.isFinite(centerRaw) ? centerRaw : ((bottom + top) * 0.5);
+
+      return {
+        bottom,
+        top,
+        center,
+        label: String(level?.label ?? `Level ${i + 1}`),
+      };
+    });
+
+    const idx = Number(payload?.context?.index);
+    this._activeLevelIndex = Number.isFinite(idx) ? idx : this._activeLevelIndex;
+
+    this.setActiveLevelContext(payload?.context ?? null);
+  }
+
+  _disposeGhostGrids() {
+    for (const mesh of this._ghostGridMeshes) {
+      try {
+        this.scene.remove(mesh);
+      } catch (_) {
+      }
+      try {
+        mesh.geometry?.dispose?.();
+      } catch (_) {
+      }
+      try {
+        mesh.material?.dispose?.();
+      } catch (_) {
+      }
+    }
+    this._ghostGridMeshes = [];
+  }
+
+  _refreshGhostGridMeshes() {
+    this._disposeGhostGrids();
+
+    if (!this._ghostGridEnabled) return;
+    if (!this.gridMesh || !this.gridMaterial) return;
+    if (!Array.isArray(this._availableLevels) || !this._availableLevels.length) return;
+    if (!Number.isFinite(this._activeLevelIndex) || this._activeLevelIndex < 0) return;
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const baseAlpha = Number(this.gridMaterial?.uniforms?.uAlpha?.value ?? 0.1);
+    const ghostAlpha = Math.max(0, Math.min(1, baseAlpha * this._ghostGridAlphaScale));
+
+    const neighborIndices = [this._activeLevelIndex - 1, this._activeLevelIndex + 1]
+      .filter((idx) => idx >= 0 && idx < this._availableLevels.length);
+
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+
+    const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0));
+    const tintGhostColor = (base, mode, basement = false) => {
+      const color = base.clone();
+      if (!this._floorTintPresetsEnabled) return color;
+
+      if (mode === 'above') {
+        // Warm up floors above the active level.
+        color.set(
+          clamp01(color.x * 1.06 + 0.02),
+          clamp01(color.y * 1.00 + 0.01),
+          clamp01(color.z * 0.92)
+        );
+      } else {
+        // Cool down floors below the active level.
+        color.set(
+          clamp01(color.x * 0.88),
+          clamp01(color.y * 0.95 + 0.01),
+          clamp01(color.z * 1.08 + 0.03)
+        );
+      }
+
+      if (basement) {
+        // Add a stronger cool emphasis for subterranean levels.
+        color.set(
+          clamp01(color.x * 0.78),
+          clamp01(color.y * 0.90),
+          clamp01(color.z * 1.15 + 0.04)
+        );
+      }
+
+      return color;
+    };
+
+    for (const idx of neighborIndices) {
+      const neighbor = this._availableLevels[idx];
+      const levelCenter = Number(neighbor?.center);
+      if (!Number.isFinite(levelCenter)) continue;
+
+      const material = this.gridMaterial.clone();
+      if (material.uniforms?.uAlpha) material.uniforms.uAlpha.value = ghostAlpha;
+      if (material.uniforms?.uThickness) {
+        material.uniforms.uThickness.value = Number(material.uniforms.uThickness.value) * 0.85;
+      }
+      if (material.uniforms?.uColor?.value) {
+        const mode = idx > this._activeLevelIndex ? 'above' : 'below';
+        const basement = Number(neighbor?.top) < 0;
+        material.uniforms.uColor.value = tintGhostColor(material.uniforms.uColor.value, mode, basement);
+      }
+
+      const geometry = this.gridMesh.geometry.clone();
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.name = `GridOverlayGhost_${idx}`;
+      mesh.layers.set(OVERLAY_THREE_LAYER);
+      mesh.renderOrder = this.gridMesh.renderOrder - 1;
+      mesh.position.copy(this.gridMesh.position);
+      mesh.position.z = groundZ + GRID_Z_OFFSET + levelCenter;
+
+      this.scene.add(mesh);
+      this._ghostGridMeshes.push(mesh);
+    }
+  }
+
+  /**
+   * @param {boolean} enabled
+   */
+  setGhostGridEnabled(enabled) {
+    this._ghostGridEnabled = enabled === true;
+    this._refreshGhostGridMeshes();
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  isGhostGridEnabled() {
+    return this._ghostGridEnabled === true;
+  }
+
+  /**
+   * @param {boolean} enabled
+   */
+  setFloorTintPresetsEnabled(enabled) {
+    this._floorTintPresetsEnabled = enabled === true;
+    this._refreshGhostGridMeshes();
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  isFloorTintPresetsEnabled() {
+    return this._floorTintPresetsEnabled === true;
+  }
+
+  _applyActiveLevelContextToGridMesh() {
+    if (!this.gridMesh) return;
+
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+    this.gridMesh.position.z = groundZ + GRID_Z_OFFSET + this._displayLevelOffset;
+  }
+
+  _updateLevelTransition(_timeInfo) {
+    if (!this.gridMesh) return;
+
+    const target = Number.isFinite(this._targetLevelOffset) ? this._targetLevelOffset : 0;
+    if (this._transitionDurationMs <= 0) {
+      this._displayLevelOffset = target;
+      this._applyActiveLevelContextToGridMesh();
+      return;
+    }
+
+    const diff = target - this._displayLevelOffset;
+    if (Math.abs(diff) <= 0.001) {
+      if (this._displayLevelOffset !== target) {
+        this._displayLevelOffset = target;
+        this._applyActiveLevelContextToGridMesh();
+      }
+      return;
+    }
+
+    const nowMs = Number(_timeInfo?.nowMs ?? performance.now());
+    const now = Number.isFinite(nowMs) ? nowMs : performance.now();
+    if (!Number.isFinite(this._transitionLastAtMs) || this._transitionLastAtMs <= 0) {
+      this._transitionLastAtMs = now;
+      return;
+    }
+
+    const dtMs = Math.max(0, Math.min(120, now - this._transitionLastAtMs));
+    this._transitionLastAtMs = now;
+    if (dtMs <= 0) return;
+
+    const alpha = 1 - Math.exp(-dtMs / Math.max(16, this._transitionDurationMs));
+    this._displayLevelOffset += diff * alpha;
+    if (Math.abs(target - this._displayLevelOffset) <= 0.001) {
+      this._displayLevelOffset = target;
+    }
+    this._applyActiveLevelContextToGridMesh();
   }
 
   /**
@@ -141,6 +409,8 @@ export class GridRenderer {
    * @param {TimeInfo} _timeInfo
    */
   update(_timeInfo) {
+    this._updateLevelTransition(_timeInfo);
+
     // Keep the AA resolution uniform in sync with camera zoom.
     // This is required for parity with Foundry, where grid thickness is stable across zoom.
     try {
@@ -161,6 +431,11 @@ export class GridRenderer {
 
       this._lastResolution = resolution;
       this.gridMaterial.uniforms.uResolution.value = resolution;
+
+      for (const ghost of this._ghostGridMeshes) {
+        const u = ghost?.material?.uniforms;
+        if (u?.uResolution) u.uResolution.value = resolution;
+      }
     } catch (e) {
       // Non-critical; avoid cascading failures.
     }
@@ -203,6 +478,10 @@ export class GridRenderer {
         this.updateGrid();
       }
     })]);
+
+    this._hookIds.push(['mapShineLevelContextChanged', Hooks.on('mapShineLevelContextChanged', (payload) => {
+      this.setLevelContextPayload(payload ?? null);
+    })]);
     
     this.hooksRegistered = true;
   }
@@ -224,6 +503,8 @@ export class GridRenderer {
       this.gridMesh.material.dispose();
       this.gridMesh = null;
     }
+
+    this._disposeGhostGrids();
 
     this.gridMaterial = null;
     this._lastResolution = -1;
@@ -315,6 +596,14 @@ export class GridRenderer {
     const centerYFoundry = sceneY + (sceneH / 2);
     const centerYWorld = worldHeight - centerYFoundry;
     this.gridMesh.position.set(centerX, centerYWorld, groundZ + GRID_Z_OFFSET);
+
+    // Ensure a stable baseline when the mesh is recreated.
+    if (!Number.isFinite(this._displayLevelOffset)) this._displayLevelOffset = 0;
+    if (!Number.isFinite(this._targetLevelOffset)) this._targetLevelOffset = this._displayLevelOffset;
+    this._transitionLastAtMs = 0;
+
+    this._applyActiveLevelContextToGridMesh();
+    this._refreshGhostGridMeshes();
 
     this.scene.add(this.gridMesh);
     log.info(`Grid rendered (shader): type ${grid.type}, size ${grid.size}, style ${styleKey}`);
@@ -617,6 +906,8 @@ export class GridRenderer {
       this.gridMesh.geometry.dispose();
       this.gridMesh.material.dispose();
     }
+
+    this._disposeGhostGrids();
 
     this.gridMesh = null;
     this.gridMaterial = null;

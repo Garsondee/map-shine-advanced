@@ -654,40 +654,27 @@ export class OverheadShadowsEffect extends EffectBase {
           vec2 projectedOffsetUv = tileProjectionUv + projectedOffsetDeltaUv;
 
           // ---- Depth pass: height-based shadow modulation ----
-          // Sample the depth texture at receiver and caster positions to
-          // determine height above ground. Shadow only applies when the caster
-          // is above the receiver (heightDiff > 0). This naturally prevents:
-          //   - Self-shadowing (same height → diff=0 → no shadow)
-          //   - Upward-shadowing (lower caster → diff<0 → no shadow)
-          //   - Ground gets full shadow from anything above it
-          // Tile Z layout: ground=0, BG=1, FG=2, TOKEN=3, OVERHEAD=4
-          float depthMod = 1.0;
+          // IMPORTANT: Keep depth gating only for tile projection shadows.
+          //
+          // Roof/indoor overhead shadow continuity intentionally does NOT use
+          // this gate, because hover-hidden roofs fade out of the main depth
+          // pass (depthWrite disabled near zero opacity) while we still need
+          // their captured roof mask to cast shadows. Applying depthMod there
+          // also suppresses _Outdoors dark-region contribution in outdoor space.
           float depthTileProjectionMod = 1.0;
-          if (uDepthEnabled > 0.5) {
+          if (uDepthEnabled > 0.5 && tileProjectionEnabled) {
             float receiverDevice = texture2D(uDepthTexture, screenUv).r;
             if (receiverDevice < 0.9999) {
               float receiverLinear = msa_linearizeDepth(receiverDevice);
               float receiverHeight = uGroundDistance - receiverLinear;
 
-              // Roof/indoor shadow caster height (center offset in screen space)
-              vec2 depthCasterUv = screenUv + screenDir * pixelLen * uTexelSize;
-              float casterDevice = texture2D(uDepthTexture, depthCasterUv).r;
-              if (casterDevice < 0.9999) {
-                float casterLinear = msa_linearizeDepth(casterDevice);
-                float casterHeight = uGroundDistance - casterLinear;
-                // Full shadow when caster is ≥1.0u above receiver, none when ≤0
-                depthMod = smoothstep(0.0, 1.0, casterHeight - receiverHeight);
-              }
-
-              // Tile projection caster height (uses different projection length)
-              if (tileProjectionEnabled) {
-                vec2 tileCasterUv = screenUv + screenDir * projectedPixelLen * uTexelSize;
-                float tileCasterDevice = texture2D(uDepthTexture, tileCasterUv).r;
-                if (tileCasterDevice < 0.9999) {
-                  float tileCasterLinear = msa_linearizeDepth(tileCasterDevice);
-                  float tileCasterHeight = uGroundDistance - tileCasterLinear;
-                  depthTileProjectionMod = smoothstep(0.0, 1.0, tileCasterHeight - receiverHeight);
-                }
+              // Tile projection caster height (uses projection-length offset)
+              vec2 tileCasterUv = screenUv + screenDir * projectedPixelLen * uTexelSize;
+              float tileCasterDevice = texture2D(uDepthTexture, tileCasterUv).r;
+              if (tileCasterDevice < 0.9999) {
+                float tileCasterLinear = msa_linearizeDepth(tileCasterDevice);
+                float tileCasterHeight = uGroundDistance - tileCasterLinear;
+                depthTileProjectionMod = smoothstep(0.0, 1.0, tileCasterHeight - receiverHeight);
               }
             }
           }
@@ -777,8 +764,6 @@ export class OverheadShadowsEffect extends EffectBase {
           }
 
           float combinedStrength = (weightSum > 0.0) ? (accum / weightSum) : 0.0;
-          // Depth-based height gate: suppress shadow when caster is not above receiver
-          combinedStrength *= depthMod;
 
           float tileProjectedStrength = 0.0;
           if (tileProjectionEnabled) {

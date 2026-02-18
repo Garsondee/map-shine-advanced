@@ -9,6 +9,7 @@
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
+import { getFoundryTimePhaseHours } from '../core/foundry-time-phases.js';
 
 const log = createLogger('BuildingShadowsEffect');
 
@@ -409,8 +410,14 @@ export class BuildingShadowsEffect extends EffectBase {
       }
     } catch (e) { /* default */ }
 
-    const sunrise = Math.max(0.0, Math.min(24.0, this.params.sunriseTime ?? 6.0));
-    const sunset = Math.max(0.0, Math.min(24.0, this.params.sunsetTime ?? 18.0));
+    const isFoundryLinked = window.MapShine?.controlPanel?.controlState?.linkTimeToFoundry === true;
+    const phaseHours = isFoundryLinked ? getFoundryTimePhaseHours() : null;
+    const sunrise = Number.isFinite(phaseHours?.sunrise)
+      ? phaseHours.sunrise
+      : Math.max(0.0, Math.min(24.0, this.params.sunriseTime ?? 6.0));
+    const sunset = Number.isFinite(phaseHours?.sunset)
+      ? phaseHours.sunset
+      : Math.max(0.0, Math.min(24.0, this.params.sunsetTime ?? 18.0));
 
     const t = (hour % 24.0) / 24.0;
     const azimuth = (t - 0.5) * Math.PI;

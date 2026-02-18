@@ -13,6 +13,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 
 const log = createLogger('TokenMovementManager');
 
@@ -3868,8 +3869,9 @@ export class TokenMovementManager {
 
     const tokenObj = context.tokenDoc?.object || canvas?.tokens?.get?.(context.tokenDoc?.id) || null;
     const polygonBackends = CONFIG?.Canvas?.polygonBackends;
-    const rayA = { x: asNumber(from?.x, 0), y: asNumber(from?.y, 0) };
-    const rayB = { x: asNumber(to?.x, 0), y: asNumber(to?.y, 0) };
+    const collisionElevation = asNumber(context.tokenDoc?.elevation, asNumber(tokenObj?.document?.elevation, 0));
+    const rayA = { x: asNumber(from?.x, 0), y: asNumber(from?.y, 0), elevation: collisionElevation };
+    const rayB = { x: asNumber(to?.x, 0), y: asNumber(to?.y, 0), elevation: collisionElevation };
 
     // Build corner offsets for fat-token Minkowski expansion.
     // For 1×1 tokens the only ray is center→center (offsets = [[0,0]]).
@@ -3889,27 +3891,53 @@ export class TokenMovementManager {
     // Critical: collision must be tested per candidate graph segment (rayA -> rayB).
     // token.checkCollision(target) is origin-implicit (token's live document position),
     // which collapses A* expansion at the first wall and prevents routing around it.
+    //
+    // MS-LVL-073: useThreshold enables proximity/distance wall evaluation so
+    //   WALL_SENSE_TYPES.PROXIMITY (30) and DISTANCE (40) walls are conditionally
+    //   bypassed based on source-to-wall distance instead of always blocking.
+    // MS-LVL-074: wallDirectionMode uses numeric 0 (NORMAL) so one-way walls
+    //   are respected during pathfinding. Only 'move' type is tested for physical
+    //   movement collision — sight/light are for vision, not movement. Terrain
+    //   walls (LIMITED sense type) are handled natively by Foundry's move backend.
     if (polygonBackends) {
-      for (const [ox, oy] of cornerOffsets) {
-        const a = { x: rayA.x + ox, y: rayA.y + oy };
-        const b = { x: rayB.x + ox, y: rayB.y + oy };
+      const moveBackend = polygonBackends?.['move'];
+      if (!moveBackend || typeof moveBackend.testCollision !== 'function') {
+        return { ok: true };
+      }
 
-        const backendTypes = ['move', 'sight', 'light'];
-        for (const type of backendTypes) {
-          const backend = polygonBackends?.[type];
-          if (!backend || typeof backend.testCollision !== 'function') continue;
-          try {
-            const hit = backend.testCollision(a, b, {
-              mode: context.options?.collisionMode || 'closest',
-              type,
-              source: tokenObj,
-              token: tokenObj,
-              wallDirectionMode: 'all'
-            });
-            if (hit) return { ok: false, reason: `collision-${type}` };
-          } catch (_) {
+      for (const [ox, oy] of cornerOffsets) {
+        const a = { x: rayA.x + ox, y: rayA.y + oy, elevation: rayA.elevation };
+        const b = { x: rayB.x + ox, y: rayB.y + oy, elevation: rayB.elevation };
+
+        try {
+          const hit = moveBackend.testCollision(a, b, {
+            mode: context.options?.collisionMode || 'closest',
+            type: 'move',
+            source: tokenObj,
+            token: tokenObj,
+            wallDirectionMode: 0,   // NORMAL — respect one-way wall direction
+            useThreshold: true      // MS-LVL-073: evaluate proximity/distance walls
+          });
+          if (!hit) continue;
+
+          if (typeof hit === 'object' && this._collisionResultBlocksAtElevation(hit, collisionElevation)) {
+            return { ok: false, reason: 'collision-move' };
           }
-          if (type === 'move') break;
+
+          // If the nearest hit is out of wall-height bounds, re-check all hits
+          // so farther valid-height walls still block movement.
+          const allHits = moveBackend.testCollision(a, b, {
+            mode: 'all',
+            type: 'move',
+            source: tokenObj,
+            token: tokenObj,
+            wallDirectionMode: 0,
+            useThreshold: true
+          });
+          if (this._collisionResultBlocksAtElevation(allHits, collisionElevation)) {
+            return { ok: false, reason: 'collision-move' };
+          }
+        } catch (_) {
         }
       }
       return { ok: true };
@@ -3917,14 +3945,14 @@ export class TokenMovementManager {
 
     // Fallback only when polygon backends are unavailable.
     // Test center ray only (no Minkowski) since checkCollision is origin-implicit.
-    const target = { x: rayB.x, y: rayB.y };
+    const target = { x: rayB.x, y: rayB.y, elevation: rayB.elevation };
     try {
       if (tokenObj && typeof tokenObj.checkCollision === 'function') {
         const mode = context.options?.collisionMode || 'closest';
         const hit = tokenObj.checkCollision(target, {
           mode,
           type: 'move',
-          origin: rayA
+          origin: { x: rayA.x, y: rayA.y, elevation: rayA.elevation }
         });
         if (hit) return { ok: false, reason: 'collision-move' };
       }
@@ -3932,6 +3960,66 @@ export class TokenMovementManager {
     }
 
     return { ok: true };
+  }
+
+  /**
+   * @param {boolean|object|Array<object>|null|undefined} hit
+   * @param {number} elevation
+   * @returns {boolean}
+   */
+  _collisionResultBlocksAtElevation(hit, elevation) {
+    if (!hit) return false;
+    if (!Number.isFinite(elevation)) return true;
+
+    if (Array.isArray(hit)) {
+      for (const entry of hit) {
+        if (this._collisionVertexBlocksAtElevation(entry, elevation)) return true;
+      }
+      return false;
+    }
+
+    if (typeof hit === 'object') {
+      return this._collisionVertexBlocksAtElevation(hit, elevation);
+    }
+
+    return !!hit;
+  }
+
+  /**
+   * @param {object|null|undefined} vertex
+   * @param {number} elevation
+   * @returns {boolean}
+   */
+  _collisionVertexBlocksAtElevation(vertex, elevation) {
+    const edges = vertex?.edges;
+    if (!(edges instanceof Set) || edges.size === 0) return true;
+
+    for (const edge of edges) {
+      if (!edge) continue;
+
+      // Non-wall edges are treated as blocking to preserve baseline safety.
+      if (edge.type && edge.type !== 'wall') return true;
+
+      const wallLike = edge.object;
+      const wallDoc = wallLike?.document ?? wallLike ?? null;
+      if (!wallDoc) return true;
+
+      const bounds = readWallHeightFlags(wallDoc);
+      let bottom = Number(bounds?.bottom);
+      let top = Number(bounds?.top);
+      if (!Number.isFinite(bottom)) bottom = -Infinity;
+      if (!Number.isFinite(top)) top = Infinity;
+      if (top < bottom) {
+        const swap = bottom;
+        bottom = top;
+        top = swap;
+      }
+
+      if (bottom <= elevation && elevation <= top) return true;
+    }
+
+    // No wall edge matched this elevation, so this collision does not block.
+    return false;
   }
 
   /**
@@ -4725,6 +4813,13 @@ export class TokenMovementManager {
 
     const height = Math.max(2, asNumber(tetherHeight, 2));
     const line = state.tetherLine;
+
+    if (line?.userData?.isFlyingTetherStick) {
+      line.scale.z = height;
+      line.position.z = height * 0.5;
+      if (line.matrixAutoUpdate === false) line.updateMatrix();
+    }
+
     const position = line?.geometry?.attributes?.position;
     if (position && position.count >= 2) {
       position.setXYZ(0, 0, 0, 0);
@@ -4788,21 +4883,23 @@ export class TokenMovementManager {
       const circle = new THREE.Mesh(circleGeo, circleMat);
       groundGroup.add(circle);
 
-      // Vertical dashed tether line from ground to token
-      const lineGeo = new THREE.BufferGeometry().setFromPoints([
-        new THREE.Vector3(0, 0, 0),
-        new THREE.Vector3(0, 0, hoverHeight)
-      ]);
-      const lineMat = new THREE.LineDashedMaterial({
-        color: 0x555555,
+      // Vertical tether stick from ground to token. Use a mesh instead of
+      // LineDashedMaterial so thickness is consistent across platforms.
+      const tetherThickness = Math.max(2.5, circleRadius * 0.15);
+      const lineGeo = new THREE.BoxGeometry(tetherThickness, tetherThickness, 1);
+      const lineMat = new THREE.MeshBasicMaterial({
+        color: 0x222222,
         transparent: true,
-        opacity: 0.35,
-        dashSize: 4,
-        gapSize: 4,
+        opacity: 0.28,
         depthWrite: false
       });
-      tetherLine = new THREE.Line(lineGeo, lineMat);
-      tetherLine.computeLineDistances();
+      tetherLine = new THREE.Mesh(lineGeo, lineMat);
+      tetherLine.userData = {
+        ...(tetherLine.userData || {}),
+        isFlyingTetherStick: true
+      };
+      tetherLine.scale.set(1, 1, Math.max(2, hoverHeight));
+      tetherLine.position.set(0, 0, Math.max(2, hoverHeight) * 0.5);
       groundGroup.add(tetherLine);
 
       // Position at token base. We read the sprite's current XY and place
@@ -4844,9 +4941,6 @@ export class TokenMovementManager {
     // Offset sprite upward immediately
     sprite.position.z = state.baseZ + hoverHeight;
     if (sprite.matrixAutoUpdate === false) sprite.updateMatrix();
-
-    // Create and initialize the elevation/support badge after initial state setup.
-    this._ensureFlyingIndicatorBadge(state);
 
     log.info(`Token ${tokenId} entered flying hover (height=${hoverHeight.toFixed(1)})`);
     return true;
@@ -4940,21 +5034,6 @@ export class TokenMovementManager {
 
         const tetherHeight = Math.max(2, sprite.position.z - groundAnchorZ);
         this._updateFlyingTetherHeight(state, tetherHeight);
-
-        state.supportSampleElapsed = asNumber(state.supportSampleElapsed, 0) + deltaSec;
-        if (state.supportSampleElapsed >= 0.12 || !state.supportSurface) {
-          const tokenDoc = this._resolveTokenDocumentById(tokenId, sprite?.userData?.tokenDoc || null);
-          const supportSurface = this._resolveFlyingSupportSurface(tokenDoc, sprite.position.x, sprite.position.y);
-          state.supportSurface = supportSurface;
-
-          const tokenElevation = asNumber(tokenDoc?.elevation, 0);
-          const supportLabel = this._getFlyingSupportLabel(supportSurface);
-          const supportElevation = Math.round(asNumber(supportSurface?.elevation, 0) * 10) / 10;
-          const badgeText = `Elev ${Math.round(tokenElevation * 10) / 10} | ${supportLabel} @ ${supportElevation}`;
-          this._drawFlyingIndicatorBadge(state, badgeText);
-
-          state.supportSampleElapsed = 0;
-        }
 
         state.groundGroup.updateMatrix();
       }

@@ -6,6 +6,9 @@
 
 import { createLogger } from '../core/log.js';
 import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { getPerspectiveElevation } from '../foundry/elevation-context.js';
+import { readDocLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
+import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
 
 const log = createLogger('TemplateManager');
 
@@ -64,6 +67,7 @@ export class TemplateManager {
     if (this.hooksRegistered) return;
 
     this._hookIds.push(['createMeasuredTemplate', Hooks.on('createMeasuredTemplate', (doc) => this.create(doc))]);
+    this._hookIds.push(['preCreateMeasuredTemplate', Hooks.on('preCreateMeasuredTemplate', (doc, data, options, userId) => this._onPreCreateMeasuredTemplate(doc, data, options, userId))]);
     this._hookIds.push(['updateMeasuredTemplate', Hooks.on('updateMeasuredTemplate', (doc, changes) => this.update(doc, changes))]);
     this._hookIds.push(['deleteMeasuredTemplate', Hooks.on('deleteMeasuredTemplate', (doc) => this.remove(doc.id))]);
     
@@ -71,6 +75,14 @@ export class TemplateManager {
         this.syncAllTemplates();
         this.updateVisibility();
     })]);
+
+    // Keep baseline Foundry visibility in sync with vision/perception refreshes.
+    this._hookIds.push(['sightRefresh', Hooks.on('sightRefresh', () => this.refreshVisibility())]);
+
+    // MS-LVL-045: Re-check template visibility when level context or controlled
+    // token changes.
+    this._hookIds.push(['mapShineLevelContextChanged', Hooks.on('mapShineLevelContextChanged', () => this.refreshVisibility())]);
+    this._hookIds.push(['controlToken', Hooks.on('controlToken', () => this.refreshVisibility())]);
 
     this._hookIds.push(['activateTemplateLayer', Hooks.on('activateTemplateLayer', () => this.setVisibility(false))]);
     this._hookIds.push(['deactivateTemplateLayer', Hooks.on('deactivateTemplateLayer', () => this.setVisibility(true))]);
@@ -108,12 +120,113 @@ export class TemplateManager {
     try {
       // If the PIXI placeable exists, defer to its authoritative isVisible.
       const placeable = canvas?.templates?.get?.(doc.id);
-      if (placeable && ('isVisible' in placeable)) return !!placeable.isVisible;
+      if (placeable && ('isVisible' in placeable) && !placeable.isVisible) return false;
 
       // Fallback: replicate core logic.
-      return !doc.hidden || doc.isAuthor || !!game?.user?.isGM;
+      if (!placeable) {
+        const isVisibleByCore = !doc.hidden || doc.isAuthor || !!game?.user?.isGM;
+        if (!isVisibleByCore) return false;
+      }
     } catch (_) {
-      return true;
+      // Fail-open: keep template visible if baseline check errors.
+    }
+
+    // MS-LVL-045: Elevation range gating for templates.
+    try {
+      if (getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
+          && isLevelsEnabledForScene(canvas?.scene)) {
+        const range = readDocLevelsRange(doc);
+        if (Number.isFinite(range.rangeBottom) || Number.isFinite(range.rangeTop)) {
+          const perspective = getPerspectiveElevation();
+          if (perspective.source !== 'background') {
+            const elev = perspective.elevation;
+            if (elev < range.rangeBottom || elev > range.rangeTop) return false;
+          }
+        }
+      }
+    } catch (_) {
+      // Fail-open: keep template visible if elevation check errors.
+    }
+
+    return true;
+  }
+
+  /**
+   * MS-LVL-045: Apply template creation defaults from active elevation context.
+   *
+   * - If no explicit template elevation is provided, default to current
+   *   perspective elevation.
+   * - If an active level band exists, seed missing rangeBottom/rangeTop flags
+   *   from that band so template visibility follows the current floor context.
+   *
+   * @param {MeasuredTemplateDocument} doc
+   * @param {object} data
+   * @param {object} options
+   * @param {string} userId
+   * @private
+   */
+  _onPreCreateMeasuredTemplate(doc, data, options, userId) {
+    try {
+      if (userId && game?.user?.id && userId !== game.user.id) return;
+      if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return;
+
+      // Keep parity with Levels behavior: if the template payload is meant for
+      // levels-3d-preview tooling, do not override elevation/special defaults.
+      if (data?.flags?.['levels-3d-preview']) return;
+
+      const scene = doc?.parent ?? canvas?.scene;
+      if (!isLevelsEnabledForScene(scene)) return;
+
+      const patch = {};
+
+      // Elevation default: only seed when the create payload omitted elevation.
+      const hasExplicitElevation = data?.elevation !== undefined && data?.elevation !== null;
+      if (!hasExplicitElevation) {
+        const perspective = getPerspectiveElevation();
+        const elevation = Number(perspective?.elevation);
+        if (Number.isFinite(elevation)) patch.elevation = elevation;
+      }
+
+      // Range defaults: seed from active level context if a finite band exists.
+      const active = window.MapShine?.activeLevelContext;
+      const activeBottom = Number(active?.bottom);
+      const activeTop = Number(active?.top);
+      if (Number.isFinite(activeBottom) && Number.isFinite(activeTop)) {
+        const hasRangeBottom = data?.flags?.levels?.rangeBottom !== undefined && data?.flags?.levels?.rangeBottom !== null;
+        const hasRangeTop = data?.flags?.levels?.rangeTop !== undefined && data?.flags?.levels?.rangeTop !== null;
+
+        if (!hasRangeBottom || !hasRangeTop) {
+          patch.flags = patch.flags || {};
+          patch.flags.levels = patch.flags.levels || {};
+          if (!hasRangeBottom) patch.flags.levels.rangeBottom = activeBottom;
+          if (!hasRangeTop) patch.flags.levels.rangeTop = activeTop;
+        }
+      }
+
+      // Levels template depth (`flags.levels.special`) defaults to a derived
+      // hand-mode style offset. In native mode we derive it from the current
+      // perspective LOS/elevation delta when omitted.
+      const hasSpecial = data?.flags?.levels?.special !== undefined
+        && data?.flags?.levels?.special !== null;
+      if (!hasSpecial) {
+        const perspective = getPerspectiveElevation();
+        const losHeight = Number(perspective?.losHeight);
+        const elevation = Number(perspective?.elevation);
+        const delta = Number.isFinite(losHeight) && Number.isFinite(elevation)
+          ? Math.max(0, losHeight - elevation)
+          : 0;
+        const specialDepth = Math.round(delta * 0.8);
+
+        patch.flags = patch.flags || {};
+        patch.flags.levels = patch.flags.levels || {};
+        patch.flags.levels.special = Number.isFinite(specialDepth) ? specialDepth : 0;
+      }
+
+      if (Object.keys(patch).length > 0) {
+        doc.updateSource(patch);
+      }
+    } catch (e) {
+      log.warn('Failed to apply pre-create template defaults', e);
     }
   }
 
@@ -129,6 +242,22 @@ export class TemplateManager {
         this.create(template);
       } else {
         this.remove(template.id);
+      }
+    }
+  }
+
+  /**
+   * Refresh visibility of all templates after elevation context changes.
+   * @public
+   */
+  refreshVisibility() {
+    if (!canvas?.scene?.templates) return;
+    for (const doc of canvas.scene.templates) {
+      const shouldShow = this._isTemplateVisible(doc);
+      if (shouldShow && !this.templates.has(doc.id)) {
+        this.create(doc);
+      } else if (!shouldShow && this.templates.has(doc.id)) {
+        this.remove(doc.id);
       }
     }
   }

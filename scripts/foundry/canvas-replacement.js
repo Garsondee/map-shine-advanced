@@ -64,7 +64,9 @@ import { RenderLoop } from '../core/render-loop.js';
 import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
 import { CameraPanelManager } from '../ui/camera-panel-manager.js';
+import { LevelNavigatorOverlay } from '../ui/level-navigator-overlay.js';
 import { EnhancedLightInspector } from '../ui/enhanced-light-inspector.js';
+import { LevelsAuthoringDialog } from '../ui/levels-authoring-dialog.js';
 import { TokenManager } from '../scene/token-manager.js';
 import { VisibilityController } from '../vision/VisibilityController.js';
 import { DetectionFilterEffect } from '../effects/DetectionFilterEffect.js';
@@ -105,6 +107,17 @@ import { ResizeHandler } from './resize-handler.js';
 import { ModeManager } from './mode-manager.js';
 import { wireMapPointsToEffects, exposeGlobals } from './manager-wiring.js';
 import { DepthPassManager } from '../scene/depth-pass-manager.js';
+import {
+  detectLevelsRuntimeInteropState,
+  enforceMapShineRuntimeAuthority,
+  formatLevelsInteropWarning,
+} from './levels-compatibility.js';
+import { isSoundAudibleForPerspective } from './elevation-context.js';
+import { emitModuleConflictWarnings } from './levels-compatibility.js';
+import { installLevelsRegionBehaviorCompatPatch } from './region-levels-compat.js';
+import { installSnapshotStoreHooks, getSnapshot as getLevelsSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
+import { installLevelsApiFacade } from './levels-api-facade.js';
+import { ZoneManager } from './zone-manager.js';
 
 const log = createLogger('Canvas');
 
@@ -161,6 +174,9 @@ let controlPanel = null;
 /** @type {CameraPanelManager|null} */
 let cameraPanel = null;
 
+/** @type {LevelNavigatorOverlay|null} */
+let levelNavigatorOverlay = null;
+
 /** @type {CinematicCameraManager|null} */
 let cinematicCameraManager = null;
 
@@ -189,6 +205,9 @@ function _applyRenderResolutionToRenderer(viewportWidthCss, viewportHeightCss) {
 
 /** @type {EnhancedLightInspector|null} */
 let enhancedLightInspector = null;
+
+/** @type {LevelsAuthoringDialog|null} */
+let levelsAuthoring = null;
 
 /** @type {OverlayUIManager|null} */
 let overlayUIManager = null;
@@ -374,8 +393,14 @@ let _webglContextRestoredHandler = null;
  /** @type {boolean} */
  let transitionsInstalled = false;
 
+/** @type {boolean} */
+let ambientSoundAudibilityPatched = false;
+
  /** @type {number|null} - Hook ID for pauseGame listener */
  let pauseGameHookId = null;
+
+/** @type {string|null} Last shown Levels interop warning key (dedupe within session) */
+let lastLevelsInteropWarningKey = null;
 
  function _getActiveSceneForCanvasConfig() {
    return safeCall(() => {
@@ -384,6 +409,52 @@ let _webglContextRestoredHandler = null;
      return game?.scenes?.current ?? game?.scenes?.active ?? game?.scenes?.viewed ?? null;
    }, 'getActiveSceneForCanvasConfig', Severity.COSMETIC, { fallback: null });
  }
+
+/**
+ * Refresh and expose Levels runtime interop diagnostics.
+ * In gameplay mode this also enforces Map Shine authority safeguards.
+ *
+ * @param {{gameplayMode?: boolean, emitWarning?: boolean, reason?: string}} [options]
+ * @returns {object}
+ */
+function refreshLevelsInteropDiagnostics(options = {}) {
+  const {
+    gameplayMode = false,
+    emitWarning = false,
+    reason = 'runtime-check',
+  } = options;
+
+  const state = gameplayMode
+    ? enforceMapShineRuntimeAuthority({ gameplayMode: true })
+    : detectLevelsRuntimeInteropState({ gameplayMode: false });
+
+  if (window.MapShine) {
+    window.MapShine.levelsInteropDiagnostics = {
+      ...state,
+      reason,
+      timestamp: Date.now(),
+    };
+  }
+
+  if (emitWarning && state.shouldWarnInGameplay) {
+    const warning = formatLevelsInteropWarning(state);
+    const warningKey = [
+      String(state.mode || ''),
+      String(state.levelsModuleActive || false),
+      String(state.fogManagerTakeover || false),
+      String(state.canvasFogTakeover || false),
+      String(state.wrappersLikelyActive || false),
+    ].join('|');
+
+    if (warningKey !== lastLevelsInteropWarningKey) {
+      lastLevelsInteropWarningKey = warningKey;
+      log.warn(`${warning} [reason=${reason}]`, state);
+      safeCall(() => ui?.notifications?.warn?.(warning), 'levelsInterop.warnNotification', Severity.COSMETIC);
+    }
+  }
+
+  return state;
+}
 
 /**
  * Initialize canvas replacement hooks
@@ -421,6 +492,15 @@ export function initialize() {
     // Hook into scene configuration changes (grid, padding, background, etc.)
     Hooks.on('updateScene', onUpdateScene);
 
+    // MS-LVL-042: Recompute ambient sound playback when the active level context
+    // changes so audibility gates update immediately.
+    Hooks.on('mapShineLevelContextChanged', () => {
+      safeCall(() => {
+        if (!sceneSettings.isEnabled(canvas?.scene)) return;
+        canvas?.sounds?.refresh?.();
+      }, 'ambientSound.refreshOnLevelContext', Severity.COSMETIC);
+    });
+
     // Hook into Foundry pause/unpause so we can smoothly ramp time scale to 0 and back.
     if (!pauseGameHookId) {
       pauseGameHookId = Hooks.on('pauseGame', (paused) => {
@@ -436,6 +516,31 @@ export function initialize() {
      // Install transition wrapper so we can fade-to-black BEFORE Foundry tears down the old scene.
      // This must wrap an awaited method (Canvas.tearDown) to actually block the teardown.
      installCanvasTransitionWrapper();
+
+    // MS-LVL-042: Patch Foundry AmbientSound audibility so imported Levels
+    // range flags can gate ambient sound playback by elevation in gameplay mode.
+    installAmbientSoundAudibilityPatch();
+
+    // MS-LVL-080..082: Intercept imported Levels region executeScript behaviors
+    // (stair/stairUp/stairDown/elevator) so they keep functioning in Map Shine
+    // gameplay mode without Levels runtime ownership.
+    installLevelsRegionBehaviorCompatPatch();
+
+    // MS-LVL-016: Install LevelsSnapshotStore auto-invalidation hooks so the
+    // immutable per-scene snapshot is rebuilt when tiles/walls/lights/etc change.
+    // The snapshot is exposed on window.MapShine.levelsSnapshot for diagnostics.
+    installSnapshotStoreHooks();
+
+    // MS-LVL-090: Install read-only Levels API compatibility facade at
+    // CONFIG.Levels.API so third-party modules/macros that call common
+    // Levels API methods get correct answers from Map Shine's own data.
+    // Only installs when Levels module is not active (avoids conflicts).
+    installLevelsApiFacade();
+
+    // MS-LVL-114: Emit one-time warnings for known modules that overlap
+    // with Map Shine's Levels compatibility features (e.g., elevatedvision,
+    // betterroofs). Only fires when compatibility mode is not 'off'.
+    emitModuleConflictWarnings();
 
     isHooked = true;
     log.info('Canvas replacement hooks registered');
@@ -503,6 +608,56 @@ function installCanvasTransitionWrapper() {
     proto.tearDown = directWrapped;
     log.info('Installed Canvas.tearDown transition wrapper (direct prototype wrap)');
   }, 'installCanvasTransitionWrapper', Severity.DEGRADED);
+}
+
+function installAmbientSoundAudibilityPatch() {
+  if (ambientSoundAudibilityPatched) return;
+  const installed = safeCall(() => {
+    const AmbientSoundCls = globalThis.CONFIG?.AmbientSound?.objectClass;
+    const proto = AmbientSoundCls?.prototype;
+    if (!proto) {
+      log.warn('AmbientSound class unavailable; audibility patch not installed');
+      return false;
+    }
+
+    const descriptor = Object.getOwnPropertyDescriptor(proto, 'isAudible');
+    if (!descriptor?.get) {
+      log.warn('AmbientSound#isAudible getter missing; audibility patch not installed');
+      return false;
+    }
+
+    if (descriptor.get.__mapShineSoundAudibilityWrapped) {
+      return true;
+    }
+
+    const originalGetter = descriptor.get;
+    const wrappedGetter = function mapShineAmbientSoundIsAudible() {
+      const baseAudible = originalGetter.call(this);
+      if (!baseAudible) return false;
+
+      // Only apply Levels-style elevation gating in Map Shine gameplay scenes.
+      if (!sceneSettings.isEnabled(canvas?.scene)) return baseAudible;
+
+      return safeCall(
+        () => isSoundAudibleForPerspective(this?.document),
+        'ambientSound.isSoundAudibleForPerspective',
+        Severity.COSMETIC,
+        { fallback: true }
+      );
+    };
+
+    wrappedGetter.__mapShineSoundAudibilityWrapped = true;
+
+    Object.defineProperty(proto, 'isAudible', {
+      ...descriptor,
+      get: wrappedGetter,
+    });
+
+    log.info('Installed AmbientSound audibility elevation patch');
+    return true;
+  }, 'installAmbientSoundAudibilityPatch', Severity.DEGRADED, { fallback: false });
+
+  ambientSoundAudibilityPatched = installed === true;
 }
 
 async function waitForThreeFrames(
@@ -870,6 +1025,16 @@ async function onCanvasReady(canvas) {
         if (window.MapShine) window.MapShine.cameraPanel = cameraPanel;
         log.info('Camera panel initialized in UI-only mode');
       }, 'cameraPanel.init(UI-only)', Severity.DEGRADED);
+    } else {
+      safeCall(() => {
+        cameraPanel.setCinematicManager(cinematicCameraManager);
+      }, 'cameraPanel.sync(UI-only)', Severity.COSMETIC);
+    }
+
+    if (window.MapShine) {
+      window.MapShine.levelNavigatorOverlay = null;
+      window.MapShine.levelNavigationDiagnostics = null;
+      refreshLevelsInteropDiagnostics({ gameplayMode: false, emitWarning: false, reason: 'ui-only-mode' });
     }
 
     // Graphics Settings (Essential Feature)
@@ -970,6 +1135,14 @@ function onCanvasTearDown(canvas) {
     window.MapShine.candleFlamesEffect = null;
     window.MapShine.renderLoop = null;
     window.MapShine.cameraFollower = null;
+    window.MapShine.levelNavigationController = null;
+    window.MapShine.levelNavigatorOverlay = null;
+    window.MapShine.cameraController = null;
+    window.MapShine.activeLevelContext = null;
+    window.MapShine.availableLevels = null;
+    window.MapShine.levelNavigationDiagnostics = null;
+    window.MapShine.levelsInteropDiagnostics = null;
+    window.MapShine.levelsSnapshot = null;
     window.MapShine.pixiInputBridge = null;
     window.MapShine.interactionManager = null;
     window.MapShine.noteManager = null;
@@ -1116,6 +1289,9 @@ async function createThreeCanvas(scene) {
   if (isDebugLoad) dlp.begin('cleanup', 'cleanup');
   // Cleanup existing canvas if present
   destroyThreeCanvas();
+  // Retry ambient sound patch at scene init time in case early init occurred
+  // before CONFIG ambient sound classes were fully available.
+  installAmbientSoundAudibilityPatch();
   _sectionEnd('cleanup');
   if (isDebugLoad) dlp.end('cleanup');
 
@@ -1174,6 +1350,27 @@ async function createThreeCanvas(scene) {
     if (canvasOk === false) return;
 
     if (session.isStale()) return;
+
+    safeCall(() => {
+      refreshLevelsInteropDiagnostics({
+        gameplayMode: true,
+        emitWarning: true,
+        reason: 'createThreeCanvas',
+      });
+    }, 'levelsInterop.createThreeCanvas', Severity.COSMETIC);
+
+    // MS-LVL-016: Eagerly build and expose the LevelsImportSnapshot so it's
+    // available for all downstream systems and diagnostics during scene init.
+    safeCall(() => {
+      if (window.MapShine) {
+        // Expose as a getter so it always returns the freshest cached snapshot
+        Object.defineProperty(window.MapShine, 'levelsSnapshot', {
+          get: () => getLevelsSnapshot(),
+          configurable: true,
+          enumerable: true,
+        });
+      }
+    }, 'levelsSnapshot.expose', Severity.COSMETIC);
 
     safeCall(() => {
       loadingOverlay.showBlack(`Loading ${scene?.name || 'scene'}…`);
@@ -2112,6 +2309,14 @@ async function createThreeCanvas(scene) {
       window.MapShine.noteManager = noteManager;
     }
 
+    // Step 5c: Initialize zone manager (bespoke stair/elevator zones)
+    safeCall(() => {
+      const zm = new ZoneManager();
+      zm.initialize(sceneComposer, interactionManager);
+      if (window.MapShine) window.MapShine.zoneManager = zm;
+      log.info('Zone manager initialized');
+    }, 'ZoneManager.init', Severity.DEGRADED);
+
     // Step 6: Initialize drop handler (for creating new items)
     if (isDebugLoad) dlp.begin('manager.DropHandler.init', 'manager');
     dropHandler = new DropHandler(threeCanvas, sceneComposer);
@@ -2127,8 +2332,26 @@ async function createThreeCanvas(scene) {
     cameraFollower = new CameraFollower({ sceneComposer });
     cameraFollower.initialize();
     effectComposer.addUpdatable(cameraFollower); // Per-frame sync
+    safeCall(() => {
+      if (window.MapShine) {
+        window.MapShine.levelNavigationController = cameraFollower;
+      }
+    }, 'exposeLevelNavigationController', Severity.COSMETIC);
     if (isDebugLoad) dlp.end('manager.CameraFollower.init');
     log.info('Camera follower initialized - Three.js follows PIXI');
+
+    // Step 6.05: Compact level navigator overlay (always visible on levels-enabled scenes).
+    if (isDebugLoad) dlp.begin('manager.LevelNavigatorOverlay.init', 'manager');
+    if (!levelNavigatorOverlay && overlayUIManager) {
+      levelNavigatorOverlay = new LevelNavigatorOverlay(overlayUIManager, cameraFollower);
+      levelNavigatorOverlay.initialize();
+    } else {
+      levelNavigatorOverlay?.setLevelNavigationController?.(cameraFollower);
+    }
+    safeCall(() => {
+      if (window.MapShine) window.MapShine.levelNavigatorOverlay = levelNavigatorOverlay;
+    }, 'exposeLevelNavigatorOverlay', Severity.COSMETIC);
+    if (isDebugLoad) dlp.end('manager.LevelNavigatorOverlay.init');
 
     // Step 6a: Initialize PIXI Input Bridge
     // Handles pan/zoom input on Three canvas and applies to PIXI stage.
@@ -2136,6 +2359,12 @@ async function createThreeCanvas(scene) {
     if (isDebugLoad) dlp.begin('manager.PixiInputBridge.init', 'manager');
     pixiInputBridge = new PixiInputBridge(threeCanvas);
     pixiInputBridge.initialize();
+    safeCall(() => {
+      if (window.MapShine) {
+        // Legacy alias used by several interaction paths to temporarily disable camera input while dragging.
+        window.MapShine.cameraController = pixiInputBridge;
+      }
+    }, 'exposeLegacyCameraControllerAlias', Severity.COSMETIC);
     if (isDebugLoad) dlp.end('manager.PixiInputBridge.init');
     log.info('PIXI input bridge initialized - pan/zoom updates PIXI stage');
 
@@ -2367,7 +2596,8 @@ async function createThreeCanvas(scene) {
     exposeGlobals(mapShine, {
       effectMap,
       sceneComposer, effectComposer, cameraFollower, pixiInputBridge,
-      cinematicCameraManager, cameraPanel,
+      cinematicCameraManager, cameraPanel, levelsAuthoring,
+      levelNavigatorOverlay,
       tokenManager, tokenMovementManager, tileManager, visibilityController, detectionFilterEffect,
       wallManager, doorMeshManager,
       drawingManager, noteManager, templateManager, lightIconManager,
@@ -3186,6 +3416,16 @@ async function initializeUI(effectMap) {
     safeCall(() => { if (window.MapShine) window.MapShine.enhancedLightInspector = enhancedLightInspector; }, 'exposeEnhancedLightInspector', Severity.COSMETIC);
     if (_isDbg) _dlp.end('ui.LightInspector.init');
     log.info('Enhanced Light Inspector created');
+  }
+
+  // Create Levels Authoring Dialog if not already created (GM only)
+  if (!levelsAuthoring && game.user?.isGM) {
+    if (_isDbg) _dlp.begin('ui.LevelsAuthoring.init', 'finalize');
+    levelsAuthoring = new LevelsAuthoringDialog();
+    levelsAuthoring.initialize();
+    safeCall(() => { if (window.MapShine) window.MapShine.levelsAuthoring = levelsAuthoring; }, 'exposeLevelsAuthoring', Severity.COSMETIC);
+    if (_isDbg) _dlp.end('ui.LevelsAuthoring.init');
+    log.info('Levels Authoring Dialog created');
   }
 
   // Auto-instrument every registerEffect / registerEffectUnderEffect call when
@@ -4765,6 +5005,11 @@ function destroyThreeCanvas() {
     lightEditor = null;
   }
 
+  if (levelNavigatorOverlay) {
+    safeDispose(() => levelNavigatorOverlay.dispose(), 'levelNavigatorOverlay.dispose');
+    levelNavigatorOverlay = null;
+  }
+
   if (overlayUIManager) {
     safeDispose(() => { if (effectComposer) effectComposer.removeUpdatable(overlayUIManager); }, 'removeUpdatable(overlayUI)');
     safeDispose(() => overlayUIManager.dispose(), 'overlayUIManager.dispose');
@@ -4783,6 +5028,13 @@ function destroyThreeCanvas() {
     cameraPanel.destroy();
     cameraPanel = null;
     log.debug('Camera Panel manager disposed');
+  }
+
+  // Dispose Levels Authoring Dialog
+  if (levelsAuthoring) {
+    levelsAuthoring.destroy();
+    levelsAuthoring = null;
+    log.debug('Levels Authoring Dialog disposed');
   }
 
   // Dispose cinematic camera manager
@@ -5135,6 +5387,14 @@ function restoreMapMakerFogOverride() {
  */
 function enableSystem() {
   if (!threeCanvas) return;
+
+  safeCall(() => {
+    refreshLevelsInteropDiagnostics({
+      gameplayMode: true,
+      emitWarning: true,
+      reason: 'enable-system',
+    });
+  }, 'levelsInterop.enableSystem', Severity.COSMETIC);
 
   // Hard safety: ensure PIXI's primary/tile visuals are suppressed immediately
   // in Gameplay/Hybrid mode, even if ControlsIntegration is still initializing

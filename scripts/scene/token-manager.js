@@ -6,6 +6,9 @@
 
 import { createLogger } from '../core/log.js';
 import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
+import { isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
+import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 
 const log = createLogger('TokenManager');
 
@@ -238,17 +241,29 @@ export class TokenManager {
       const mat = data?.sprite?.material;
       if (mat) {
         this._ensureTokenColorCorrection(mat);
-        this._applyTokenColorCorrectionUniforms(mat);
+        this._applyTokenColorCorrectionUniforms(mat, data?.tokenDoc || null);
       }
     }
     this._tokenCCDirty = false;
   }
 
-  _applyTokenColorCorrectionUniforms(material) {
+  _getUndergroundSaturationMultiplier(tokenDoc) {
+    const elevation = Number(tokenDoc?.elevation ?? 0);
+    if (!Number.isFinite(elevation) || elevation >= 0) return 1.0;
+
+    const depth = Math.min(1, Math.abs(elevation) / 30);
+    // At deep underground levels, heavily desaturate but keep some color identity.
+    return Math.max(0.2, 1 - (0.65 * depth));
+  }
+
+  _applyTokenColorCorrectionUniforms(material, tokenDoc = null) {
     const shader = material?.userData?._msTokenCCShader;
     if (!shader?.uniforms) return;
 
     const p = this.tokenColorCorrection;
+    const undergroundSaturation = this._getUndergroundSaturationMultiplier(
+      tokenDoc || material?.userData?._msTokenDoc || null
+    );
     shader.uniforms.uTokenCCEnabled.value = p.enabled ? 1.0 : 0.0;
     shader.uniforms.uTokenExposure.value = p.exposure ?? 1.0;
     shader.uniforms.uTokenTemperature.value = p.temperature ?? 0.0;
@@ -256,6 +271,9 @@ export class TokenManager {
     shader.uniforms.uTokenBrightness.value = p.brightness ?? 0.0;
     shader.uniforms.uTokenContrast.value = p.contrast ?? 1.0;
     shader.uniforms.uTokenSaturation.value = p.saturation ?? 1.0;
+    if (shader.uniforms.uTokenSaturationMultiplier) {
+      shader.uniforms.uTokenSaturationMultiplier.value = undergroundSaturation;
+    }
     shader.uniforms.uTokenGamma.value = p.gamma ?? 1.0;
 
     // Update window light texture
@@ -293,6 +311,7 @@ export class TokenManager {
       shader.uniforms.uTokenBrightness = { value: 0.0 };
       shader.uniforms.uTokenContrast = { value: 1.0 };
       shader.uniforms.uTokenSaturation = { value: 1.0 };
+      shader.uniforms.uTokenSaturationMultiplier = { value: 1.0 };
       shader.uniforms.uTokenGamma = { value: 1.0 };
       shader.uniforms.tWindowLight = { value: null };
       shader.uniforms.uHasWindowLight = { value: 0.0 };
@@ -307,6 +326,7 @@ uniform float uTokenTint;
 uniform float uTokenBrightness;
 uniform float uTokenContrast;
 uniform float uTokenSaturation;
+uniform float uTokenSaturationMultiplier;
 uniform float uTokenGamma;
 uniform sampler2D tWindowLight;
 uniform float uHasWindowLight;
@@ -331,7 +351,8 @@ vec3 ms_applyTokenColorCorrection(vec3 color) {
   color = (color - 0.5) * uTokenContrast + 0.5;
 
   float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-  color = mix(vec3(luma), color, uTokenSaturation);
+  float saturation = max(0.0, uTokenSaturation * uTokenSaturationMultiplier);
+  color = mix(vec3(luma), color, saturation);
 
   color = max(color, vec3(0.0));
   color = pow(color, vec3(1.0 / max(uTokenGamma, 0.0001)));
@@ -399,7 +420,7 @@ vec3 ms_applyWindowLight(vec3 color) {
       }
 
       // Push current UI values into uniforms.
-      this._applyTokenColorCorrectionUniforms(material);
+      this._applyTokenColorCorrectionUniforms(material, material?.userData?._msTokenDoc || null);
     };
 
     material.needsUpdate = true;
@@ -785,6 +806,7 @@ vec3 ms_applyWindowLight(vec3 color) {
       sizeAttenuation: true, // Enable perspective scaling - tokens should scale with the world
       side: THREE.DoubleSide // CRITICAL: Prevent culling when projection matrix is flipped
     });
+    material.userData._msTokenDoc = tokenDoc;
 
     this._ensureTokenColorCorrection(material);
 
@@ -970,6 +992,10 @@ vec3 ms_applyWindowLight(vec3 color) {
     // Update stored reference
     spriteData.tokenDoc = tokenDoc;
     spriteData.lastUpdate = Date.now();
+    if (sprite.material?.userData) {
+      sprite.material.userData._msTokenDoc = tokenDoc;
+      this._applyTokenColorCorrectionUniforms(sprite.material, tokenDoc);
+    }
     
     // CRITICAL: Update sprite userData so InteractionManager sees the new doc
     sprite.userData.tokenDoc = tokenDoc;
@@ -1009,6 +1035,11 @@ vec3 ms_applyWindowLight(vec3 color) {
     this._updateTokenBorderVisibility(spriteData);
     this._updateNameLabelVisibility(spriteData);
     this.updateTokenTargetIndicator(tokenDoc.id);
+
+    if (sprite.material?.userData) {
+      sprite.material.userData._msTokenDoc = tokenDoc;
+      this._applyTokenColorCorrectionUniforms(sprite.material, tokenDoc);
+    }
   }
 
   /**
@@ -1110,7 +1141,28 @@ vec3 ms_applyWindowLight(vec3 color) {
     log.debug(`Current Sprite Pos: (${sprite.position.x}, ${sprite.position.y}, ${sprite.position.z})`);
 
     // Handle Scale (usually instant)
-    sprite.scale.set(widthPx, heightPx, 1);
+    // MS-LVL-022: Apply elevation-based scale factor when Levels compatibility
+    // is active. Tokens on a different floor than the viewer appear smaller,
+    // giving a visual depth cue. The algorithm matches Levels' tokenElevScale:
+    // scaleFactor = min(multiplier / (abs(tokenElev - viewerElev) / 8), 1)
+    let elevScaleFactor = 1;
+    try {
+      if (getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
+          && isLevelsEnabledForScene(canvas?.scene)) {
+        const tokenElev = Number(tokenDoc.elevation ?? 0);
+        const perspective = getPerspectiveElevation();
+        const viewerElev = Number(perspective.elevation ?? tokenElev);
+        const elevDiff = Math.abs(tokenElev - viewerElev) / 8;
+        if (elevDiff > 0) {
+          // Default multiplier of 1.0 (Levels default); clamped to [0.3, 1.0]
+          elevScaleFactor = Math.max(0.3, Math.min(1.0 / elevDiff, 1));
+        }
+      }
+    } catch (_) {
+      // Fail-open: if elevation context is unavailable, keep full scale
+    }
+
+    sprite.scale.set(widthPx * elevScaleFactor, heightPx * elevScaleFactor, 1);
     if (sprite.matrixAutoUpdate === false) {
       sprite.updateMatrix();
     }

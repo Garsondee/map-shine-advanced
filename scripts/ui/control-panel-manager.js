@@ -8,6 +8,7 @@ import { createLogger } from '../core/log.js';
 import { stateApplier } from './state-applier.js';
 import { weatherController as coreWeatherController } from '../core/WeatherController.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
+import { getFoundryTimePhaseHours } from '../core/foundry-time-phases.js';
 
 const log = createLogger('ControlPanel');
 
@@ -53,6 +54,7 @@ export class ControlPanelManager {
     this.controlState = {
       timeOfDay: 12.0,
       timeTransitionMinutes: 0.0,
+      linkTimeToFoundry: false,
       weatherMode: 'dynamic', // 'dynamic' | 'directed'
       // Dynamic mode
       dynamicEnabled: false,
@@ -107,6 +109,12 @@ export class ControlPanelManager {
     /** @type {number|null} */
     this._sunLatitudeSyncIntervalId = null;
 
+    /** @type {number|null} */
+    this._worldTimeHookId = null;
+
+    /** @type {boolean} */
+    this._isApplyingFoundryTimeSync = false;
+
     /** @type {{sunLatitude:number}} */
     this._environmentState = {
       sunLatitude: 0.1
@@ -160,6 +168,16 @@ export class ControlPanelManager {
       onHeaderMouseDown: (e) => this._onHeaderMouseDown(e),
       onDocPanelMouseMove: (e) => this._onHeaderMouseMove(e),
       onDocPanelMouseUp: () => this._onHeaderMouseUp()
+    };
+  }
+
+  _getQuickTimeAnchors() {
+    const phases = getFoundryTimePhaseHours();
+    return {
+      Dawn: Number.isFinite(phases?.dawn) ? phases.dawn : 6.0,
+      Noon: Number.isFinite(phases?.noon) ? phases.noon : 12.0,
+      Dusk: Number.isFinite(phases?.dusk) ? phases.dusk : 18.0,
+      Midnight: Number.isFinite(phases?.midnight) ? phases.midnight : 0.0
     };
   }
 
@@ -489,6 +507,57 @@ export class ControlPanelManager {
     }
   }
 
+  _registerFoundryTimeHook() {
+    this._unregisterFoundryTimeHook();
+
+    const hooksApi = globalThis?.Hooks;
+    if (!hooksApi || typeof hooksApi.on !== 'function') return;
+
+    this._worldTimeHookId = hooksApi.on('updateWorldTime', (worldTime) => {
+      if (!this.controlState?.linkTimeToFoundry) return;
+      if (this.isDraggingClock) return;
+      void this._syncTimeFromFoundryWorldTime(worldTime, false);
+    });
+  }
+
+  _unregisterFoundryTimeHook() {
+    if (this._worldTimeHookId === null) return;
+    const hooksApi = globalThis?.Hooks;
+    if (hooksApi && typeof hooksApi.off === 'function') {
+      hooksApi.off('updateWorldTime', this._worldTimeHookId);
+    }
+    this._worldTimeHookId = null;
+  }
+
+  async _syncTimeFromFoundryWorldTime(worldTime = game?.time?.worldTime, persist = false) {
+    if (this._isApplyingFoundryTimeSync) return;
+
+    const linkedHour = stateApplier.getHourFromWorldTime(worldTime);
+    if (!Number.isFinite(linkedHour)) return;
+
+    this._isApplyingFoundryTimeSync = true;
+    try {
+      this.controlState.timeOfDay = linkedHour;
+
+      // Keep transition bookkeeping aligned so we don't immediately re-apply stale values.
+      this._lastTimeTargetApplied = linkedHour;
+      this._lastTimeTransitionMinutesApplied = Number(this.controlState.timeTransitionMinutes) || 0;
+
+      this._updateClockTarget(linkedHour);
+      this._updateClock(linkedHour);
+
+      // Canonical Foundry->Map Shine application path: updates all time-driven
+      // systems (including scene darkness) without writing back to game.time.
+      await stateApplier.applyFoundryWorldTime(worldTime, false, true);
+
+      if (persist) this.debouncedSave();
+    } catch (error) {
+      log.warn('Failed to synchronize Map Shine time from Foundry world time:', error);
+    } finally {
+      this._isApplyingFoundryTimeSync = false;
+    }
+  }
+
   _updateWindUI(wc) {
     if (!this._windArrow && !this._windStrengthBarInner && !this._windStrengthText) return;
 
@@ -636,6 +705,14 @@ export class ControlPanelManager {
     this._didLoadControlState = await this._loadControlState();
     if (_isDbg) _dlp.end('cp.loadControlState');
 
+    // If Foundry link mode is enabled, pull canonical world time before first apply pass.
+    if (this.controlState.linkTimeToFoundry) {
+      const linkedHour = stateApplier.getHourFromWorldTime(game?.time?.worldTime);
+      if (Number.isFinite(linkedHour)) {
+        this.controlState.timeOfDay = linkedHour;
+      }
+    }
+
     // If tile motion already has persisted global state, mirror speed into control UI.
     this._syncTileMotionSpeedFromManager();
 
@@ -684,6 +761,8 @@ export class ControlPanelManager {
     await this._applyControlState();
     if (_isDbg) _dlp.end('cp.applyControlState');
 
+    this._registerFoundryTimeHook();
+
     this._startEnvironmentSync();
 
     log.info('Control Panel initialized');
@@ -729,12 +808,7 @@ export class ControlPanelManager {
     contentElement.appendChild(timeLabel);
 
     const timeGrid = makeGrid();
-    const timeBeats = {
-      Dawn: 6.0,
-      Noon: 12.0,
-      Dusk: 18.0,
-      Midnight: 0.0
-    };
+    const timeBeats = this._getQuickTimeAnchors();
     for (const [label, hour] of Object.entries(timeBeats)) {
       timeGrid.appendChild(makeBtn(label, () => {
         this._revealTimeTargetUI();
@@ -866,8 +940,13 @@ export class ControlPanelManager {
 
     const refreshTimeFolderTag = () => {
       const mins = Number(this.controlState.timeTransitionMinutes) || 0;
-      if (mins > 0) this._setFolderTag('time', `Δ ${mins.toFixed(1)}m`);
-      else this._setFolderTag('time', 'Now');
+      if (this.controlState.linkTimeToFoundry) {
+        this._setFolderTag('time', 'Linked');
+      } else if (mins > 0) {
+        this._setFolderTag('time', `Δ ${mins.toFixed(1)}m`);
+      } else {
+        this._setFolderTag('time', 'Now');
+      }
     };
 
     // Create custom clock DOM
@@ -884,15 +963,24 @@ export class ControlPanelManager {
       refreshTimeFolderTag();
       if (ev?.last) this.debouncedSave();
     });
+
+    const linkBinding = timeFolder.addBinding(this.controlState, 'linkTimeToFoundry', {
+      label: 'Link Foundry Time'
+    }).on('change', (ev) => {
+      refreshTimeFolderTag();
+
+      if (ev?.value === true) {
+        void this._syncTimeFromFoundryWorldTime(game?.time?.worldTime, false);
+      }
+
+      if (ev?.last) this.debouncedSave();
+    });
+    linkBinding.disabled = !(game.user?.isGM === true);
+
     refreshTimeFolderTag();
 
     // Quick time buttons
-    const quickTimes = {
-      'Dawn': 6.0,
-      'Noon': 12.0,
-      'Dusk': 18.0,
-      'Midnight': 0.0
-    };
+    const quickTimes = this._getQuickTimeAnchors();
 
     const btnGrid = document.createElement('div');
     btnGrid.style.display = 'grid';
@@ -2056,6 +2144,7 @@ export class ControlPanelManager {
     this.controlState = {
       timeOfDay: 12.0,
       timeTransitionMinutes: 0.0,
+      linkTimeToFoundry: false,
       weatherMode: 'dynamic',
       dynamicEnabled: false,
       dynamicPresetId: 'Temperate Plains',
@@ -2258,6 +2347,8 @@ Current Weather:
       clearInterval(this._sunLatitudeSyncIntervalId);
       this._sunLatitudeSyncIntervalId = null;
     }
+
+    this._unregisterFoundryTimeHook();
 
     // Remove event listeners
     if (this.clockElements.face) {

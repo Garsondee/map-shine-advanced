@@ -5,6 +5,9 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { getPerspectiveElevation } from '../foundry/elevation-context.js';
+import { readDocLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
+import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
 
 const log = createLogger('NoteManager');
 
@@ -80,6 +83,10 @@ export class NoteManager {
     // WP-6: Re-check note visibility when vision/sight changes (e.g., token moved).
     this._hookIds.push(['sightRefresh', Hooks.on('sightRefresh', () => this.refreshVisibility())]);
 
+    // MS-LVL-043: Re-check note visibility when the active level or controlled token changes.
+    this._hookIds.push(['mapShineLevelContextChanged', Hooks.on('mapShineLevelContextChanged', () => this.refreshVisibility())]);
+    this._hookIds.push(['controlToken', Hooks.on('controlToken', () => this.refreshVisibility())]);
+
     this._hookIds.push(['activateNotesLayer', Hooks.on('activateNotesLayer', () => this.setVisibility(false))]);
     this._hookIds.push(['deactivateNotesLayer', Hooks.on('deactivateNotesLayer', () => this.setVisibility(true))]);
 
@@ -125,10 +132,31 @@ export class NoteManager {
       if (!canvas?.visibility?.tokenVision || doc.global) return !!access;
       const point = { x: doc.x, y: doc.y };
       const tolerance = (doc.iconSize || 40) / 4;
-      return !!canvas.visibility.testVisibility(point, { tolerance });
+      if (!canvas.visibility.testVisibility(point, { tolerance })) return false;
     } catch (_) {
-      return true; // Fail-open: don't hide notes if the check itself errors.
+      // Fail-open: don't hide notes if the Foundry check itself errors.
     }
+
+    // MS-LVL-043: Elevation range gating — hide notes outside the viewer's
+    // elevation range when Levels compatibility is active.
+    try {
+      if (getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
+          && isLevelsEnabledForScene(canvas?.scene)) {
+        const range = readDocLevelsRange(doc);
+        // Only gate if the note has a finite range configured
+        if (Number.isFinite(range.rangeBottom) || Number.isFinite(range.rangeTop)) {
+          const perspective = getPerspectiveElevation();
+          if (perspective.source !== 'background') {
+            const elev = perspective.elevation;
+            if (elev < range.rangeBottom || elev > range.rangeTop) return false;
+          }
+        }
+      }
+    } catch (_) {
+      // Fail-open: don't hide notes if elevation check errors.
+    }
+
+    return true;
   }
 
   /**

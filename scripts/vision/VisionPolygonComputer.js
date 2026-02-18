@@ -6,6 +6,8 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
+import { readTileLevelsFlags, tileHasLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
 
 const log = createLogger('VisionPolygonComputer');
 
@@ -43,7 +45,7 @@ export class VisionPolygonComputer {
    * @param {number} radius - Vision radius in pixels
    * @param {Wall[]} walls - Array of wall placeables (optional, defaults to canvas.walls.placeables)
    * @param {{x: number, y: number, width: number, height: number}} [sceneBounds] - Optional scene bounds to clip vision
-   * @param {{sense?: 'sight'|'light'}|null} [options] - Optional compute mode (defaults to 'sight')
+   * @param {{sense?: 'sight'|'light', elevation?: number}|null} [options] - Optional compute mode and viewer elevation for wall-height filtering
    * @returns {number[]} Flat array [x0, y0, x1, y1, ...] in Foundry coordinates
    */
   compute(center, radius, walls = null, sceneBounds = null, options = null) {
@@ -56,11 +58,15 @@ export class VisionPolygonComputer {
     const allWalls = walls ?? canvas?.walls?.placeables ?? [];
 
     const sense = (options && options.sense === 'light') ? 'light' : 'sight';
+    const elevation = (options && typeof options.elevation === 'number' && Number.isFinite(options.elevation))
+      ? options.elevation : undefined;
 
     // Convert walls to segments (filtering inline to avoid allocations).
+    // When an elevation is provided, walls whose wall-height bounds don't
+    // include that elevation are skipped (MS-LVL-072).
     const segments = this._segmentsPool;
     segments.length = 0;
-    this.wallsToSegments(allWalls, center, radius, sense, segments);
+    this.wallsToSegments(allWalls, center, radius, sense, segments, elevation);
     
     // Add scene boundary segments if provided (clips vision to scene interior)
     if (sceneBounds) {
@@ -157,28 +163,110 @@ export class VisionPolygonComputer {
    * @param {Wall[]} walls - Filtered walls
    * @param {{x: number, y: number}} center - Vision origin
    * @param {number} radius - Vision radius
+   * @param {string} sense - 'sight' or 'light'
+   * @param {Array|null} outSegments - Output array (reused for perf)
+   * @param {number|undefined} elevation - Viewer elevation for wall-height filtering (MS-LVL-072)
    * @returns {Array<{a: {x: number, y: number}, b: {x: number, y: number}}>}
    */
-  wallsToSegments(walls, center, radius, sense = 'sight', outSegments = null) {
+  wallsToSegments(walls, center, radius, sense = 'sight', outSegments = null, elevation = undefined) {
     const segments = outSegments ?? [];
     let writeIndex = segments.length;
     const radiusSq = radius * radius;
     const WALL_DIRECTION_BOTH = 0;
     const WALL_DIRECTION_LEFT = 1;
     const WALL_DIRECTION_RIGHT = 2;
+    const hasElevation = (elevation !== undefined);
+
+    // MS-LVL-035: Pre-collect bounds of tiles with allWallBlockSight=true.
+    // Walls whose midpoint falls within any such tile are forced to block
+    // sight regardless of their wall type (overriding sight=0).
+    let allBlockTileBounds = null;
+    if (sense === 'sight'
+        && getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
+        && isLevelsEnabledForScene(canvas?.scene)) {
+      const tiles = canvas?.scene?.tiles;
+      if (tiles) {
+        for (const tileDoc of tiles) {
+          if (!tileDoc || !tileHasLevelsRange(tileDoc)) continue;
+          const flags = readTileLevelsFlags(tileDoc);
+          if (!flags.allWallBlockSight) continue;
+
+          // Only consider tiles visible at the viewer's elevation
+          if (hasElevation) {
+            const inRange = elevation >= flags.rangeBottom
+              && (flags.rangeTop === Infinity || elevation < flags.rangeTop);
+            if (!inRange) continue;
+          }
+
+          if (!allBlockTileBounds) allBlockTileBounds = [];
+          allBlockTileBounds.push({
+            x: Number(tileDoc.x ?? 0),
+            y: Number(tileDoc.y ?? 0),
+            w: Number(tileDoc.width ?? 0),
+            h: Number(tileDoc.height ?? 0),
+          });
+        }
+      }
+    }
     
     for (const wall of walls) {
       const doc = wall?.document;
       if (!doc) continue;
 
       // Inline filtering to avoid allocating a filtered walls array.
+      // MS-LVL-035: If a wall's midpoint falls within an allWallBlockSight
+      // tile, skip the sight=0 check and force it to block.
       if (sense === 'light') {
         if (doc.light === 0) continue;
       } else {
-        if (doc.sight === 0) continue;
+        if (doc.sight === 0) {
+          // Check if this wall is overridden by allWallBlockSight tiles
+          if (allBlockTileBounds) {
+            const c = doc.c;
+            if (c && c.length >= 4) {
+              const mx = (c[0] + c[2]) * 0.5;
+              const my = (c[1] + c[3]) * 0.5;
+              let forced = false;
+              for (const b of allBlockTileBounds) {
+                if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) {
+                  forced = true;
+                  break;
+                }
+              }
+              if (!forced) continue;
+            } else {
+              continue;
+            }
+          } else {
+            continue;
+          }
+        }
       }
       // Skip open doors.
       if (doc.door > 0 && doc.ds === 1) continue;
+
+      // MS-LVL-072: Wall-height filtering. Skip walls whose vertical
+      // bounds don't include the viewer's elevation. This allows tokens
+      // on one floor to see past walls that only exist on other floors.
+      if (hasElevation) {
+        const whFlags = doc.flags?.['wall-height'];
+        if (whFlags) {
+          let whBottom = -Infinity;
+          let whTop = Infinity;
+          if (whFlags.bottom !== undefined && whFlags.bottom !== null) {
+            const n = Number(whFlags.bottom);
+            if (Number.isFinite(n)) whBottom = n;
+          }
+          if (whFlags.top !== undefined && whFlags.top !== null) {
+            const n = Number(whFlags.top);
+            if (Number.isFinite(n)) whTop = n;
+          }
+          // Swap if inverted
+          if (whTop < whBottom) { const s = whBottom; whBottom = whTop; whTop = s; }
+          // Skip wall if viewer elevation is outside its vertical extent
+          if (elevation < whBottom || elevation > whTop) continue;
+        }
+      }
 
       const c = doc.c;
       if (!c || c.length < 4) continue;

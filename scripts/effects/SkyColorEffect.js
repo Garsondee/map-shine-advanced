@@ -1,6 +1,7 @@
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
+import { getFoundryTimePhaseHours } from '../core/foundry-time-phases.js';
 
 const log = createLogger('SkyColorEffect');
 
@@ -733,8 +734,10 @@ export class SkyColorEffect extends EffectBase {
       let grainStrength = 0.0;
 
       if (this.params.automationMode === 1) {
-        const sunrise = wrapHour24(this.params.sunriseHour);
-        const sunset = wrapHour24(this.params.sunsetHour);
+        const isFoundryLinked = window.MapShine?.controlPanel?.controlState?.linkTimeToFoundry === true;
+        const foundryPhases = isFoundryLinked ? getFoundryTimePhaseHours() : null;
+        const sunrise = wrapHour24(Number.isFinite(foundryPhases?.sunrise) ? foundryPhases.sunrise : this.params.sunriseHour);
+        const sunset = wrapHour24(Number.isFinite(foundryPhases?.sunset) ? foundryPhases.sunset : this.params.sunsetHour);
 
         let dayProgress = 0.0;
         if (sunrise < sunset) {

@@ -6,6 +6,9 @@
 
 import { createLogger } from '../core/log.js';
 import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { getPerspectiveElevation } from '../foundry/elevation-context.js';
+import { readDocLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
+import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
 
 const log = createLogger('DrawingManager');
 
@@ -74,6 +77,14 @@ export class DrawingManager {
         this.updateVisibility();
     })]);
 
+    // Keep baseline Foundry visibility in sync with vision/perception refreshes.
+    this._hookIds.push(['sightRefresh', Hooks.on('sightRefresh', () => this.refreshVisibility())]);
+
+    // MS-LVL-044: Re-check drawing visibility when level context or controlled
+    // token changes.
+    this._hookIds.push(['mapShineLevelContextChanged', Hooks.on('mapShineLevelContextChanged', () => this.refreshVisibility())]);
+    this._hookIds.push(['controlToken', Hooks.on('controlToken', () => this.refreshVisibility())]);
+
     // Listen for layer activation to toggle visibility
     this._hookIds.push(['activateDrawingsLayer', Hooks.on('activateDrawingsLayer', () => this.updateVisibility())]);
     this._hookIds.push(['deactivateDrawingsLayer', Hooks.on('deactivateDrawingsLayer', () => this.updateVisibility())]);
@@ -96,6 +107,50 @@ export class DrawingManager {
    */
   updateVisibility() {
     this.setVisibility(true);
+  }
+
+  /**
+   * Check whether a drawing should be visible to the current user.
+   * Baseline visibility mirrors existing behavior (hidden drawings are visible
+   * to author/GM), with optional Levels elevation range filtering layered on top.
+   *
+   * @param {DrawingDocument} doc
+   * @returns {boolean}
+   * @private
+   */
+  _isDrawingVisible(doc) {
+    try {
+      const placeable = canvas?.drawings?.get?.(doc.id);
+      if (placeable && ('isVisible' in placeable) && !placeable.isVisible) return false;
+
+      if (!placeable) {
+        const isGM = game.user?.isGM;
+        const isAuthor = doc.isAuthor;
+        const hidden = doc.hidden;
+        if (hidden && !isAuthor && !isGM) return false;
+      }
+    } catch (_) {
+      // Fail-open: keep drawing visible if baseline check errors.
+    }
+
+    // MS-LVL-044: Elevation range gating for drawings.
+    try {
+      if (getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
+          && isLevelsEnabledForScene(canvas?.scene)) {
+        const range = readDocLevelsRange(doc);
+        if (Number.isFinite(range.rangeBottom) || Number.isFinite(range.rangeTop)) {
+          const perspective = getPerspectiveElevation();
+          if (perspective.source !== 'background') {
+            const elev = perspective.elevation;
+            if (elev < range.rangeBottom || elev > range.rangeTop) return false;
+          }
+        }
+      }
+    } catch (_) {
+      // Fail-open: keep drawing visible if elevation check errors.
+    }
+
+    return true;
   }
 
   /**
@@ -138,7 +193,27 @@ export class DrawingManager {
     log.debug(`Syncing ${docs.length} drawings`);
     for (const drawingDoc of docs) {
       if (!drawingDoc?.id) continue;
-      this.create(drawingDoc);
+      if (this._isDrawingVisible(drawingDoc)) {
+        this.create(drawingDoc);
+      } else {
+        this.remove(drawingDoc.id);
+      }
+    }
+  }
+
+  /**
+   * Refresh visibility for already synced drawings.
+   * @public
+   */
+  refreshVisibility() {
+    if (!canvas?.scene?.drawings) return;
+    for (const doc of canvas.scene.drawings) {
+      const shouldShow = this._isDrawingVisible(doc);
+      if (shouldShow && !this.drawings.has(doc.id)) {
+        this.create(doc);
+      } else if (!shouldShow && this.drawings.has(doc.id)) {
+        this.remove(doc.id);
+      }
     }
   }
 
@@ -151,6 +226,7 @@ export class DrawingManager {
     const drawingDoc = doc?.document ?? doc;
     if (!drawingDoc?.id) return;
     if (this.drawings.has(drawingDoc.id)) return;
+    if (!this._isDrawingVisible(drawingDoc)) return;
 
     try {
         const THREE = window.THREE;
@@ -203,12 +279,6 @@ export class DrawingManager {
         
         // 2. Shape Rendering (Simple Outline)
         this.createShape(drawingDoc, group, width, height);
-
-        // Visibility rules: mimic Foundry isVisible behavior
-        const isGM = game.user?.isGM;
-        const isAuthor = drawingDoc.isAuthor;
-        const hidden = drawingDoc.hidden;
-        group.visible = !hidden || isAuthor || isGM;
 
         // Render drawings in overlay pass so text/lines are not affected by bloom.
         // Layers are not inherited in three.js, so apply to all descendants.

@@ -3873,6 +3873,16 @@ export class WeatherParticles {
       return;
     }
 
+    // MS-LVL-051: Suppress weather particles when viewer is below weatherElevation.
+    // Uses the same hide-and-zero pattern as the global enabled kill-switch so
+    // existing rain/snow clears immediately when the viewer descends underground.
+    if (weatherController && weatherController.elevationWeatherSuppressed === true) {
+      this._zeroWeatherEmissions();
+      this._clearAllRainSplashes();
+      this._setWeatherSystemsVisible(false);
+      return;
+    }
+
     this._setWeatherSystemsVisible(true);
 
     const weather = weatherController.getCurrentState();

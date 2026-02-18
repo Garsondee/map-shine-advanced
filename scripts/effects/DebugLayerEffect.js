@@ -1,6 +1,7 @@
 import { EffectBase, RenderLayers, OVERLAY_THREE_LAYER } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
+import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 
 const log = createLogger('DebugLayerEffect');
 
@@ -267,8 +268,23 @@ export class DebugLayerEffect extends EffectBase {
 
     try {
       const destFoundry = Coordinates.toFoundry(worldPos.x, worldPos.y);
-      const collision = tokenObj.checkCollision(destFoundry, { mode: 'closest', type: 'move' });
-      if (collision) {
+      const tokenElevation = Number.isFinite(Number(tokenDoc?.elevation))
+        ? Number(tokenDoc.elevation)
+        : (Number.isFinite(Number(tokenObj?.document?.elevation)) ? Number(tokenObj.document.elevation) : 0);
+
+      const origin = tokenObj?.center
+        ? { x: Number(tokenObj.center.x) || 0, y: Number(tokenObj.center.y) || 0, elevation: tokenElevation }
+        : null;
+      const destination = { x: Number(destFoundry.x) || 0, y: Number(destFoundry.y) || 0, elevation: tokenElevation };
+
+      const collision = this._findClosestBlockingCollision(tokenObj, origin, destination, 'move', tokenElevation);
+
+      if (
+        collision
+        && this._collisionHitBlocksAtElevation(collision, tokenElevation)
+        && Number.isFinite(collision.x)
+        && Number.isFinite(collision.y)
+      ) {
         blocked = true;
         const cv = Coordinates.toWorld(collision.x, collision.y);
         collisionWorld = this._tempC;
@@ -315,6 +331,81 @@ export class DebugLayerEffect extends EffectBase {
     this._lastProbe.collisionWorldY = collisionWorld ? collisionWorld.y : null;
 
     this._updatePanel(timeInfo, this._lastProbe);
+  }
+
+  _collisionHitBlocksAtElevation(hit, elevation) {
+    if (!hit) return false;
+    if (!Number.isFinite(elevation)) return true;
+    if (typeof hit !== 'object') return !!hit;
+
+    const edges = hit?.edges;
+    if (!(edges instanceof Set) || edges.size === 0) return true;
+
+    for (const edge of edges) {
+      if (!edge) continue;
+      if (edge.type && edge.type !== 'wall') return true;
+
+      const wallDoc = edge.object?.document ?? edge.object ?? null;
+      if (!wallDoc) return true;
+
+      const bounds = readWallHeightFlags(wallDoc);
+      let bottom = Number(bounds?.bottom);
+      let top = Number(bounds?.top);
+      if (!Number.isFinite(bottom)) bottom = -Infinity;
+      if (!Number.isFinite(top)) top = Infinity;
+      if (top < bottom) {
+        const swap = bottom;
+        bottom = top;
+        top = swap;
+      }
+
+      if (bottom <= elevation && elevation <= top) return true;
+    }
+
+    return false;
+  }
+
+  _findClosestBlockingCollision(tokenObj, origin, destination, type, elevation) {
+    if (!tokenObj || !destination || !type) return null;
+
+    let closest = null;
+    try {
+      closest = tokenObj.checkCollision(destination, {
+        origin,
+        mode: 'closest',
+        type
+      });
+    } catch (_) {
+      closest = null;
+    }
+
+    if (!closest) return null;
+    if (typeof closest !== 'object') return null;
+    if (this._collisionHitBlocksAtElevation(closest, elevation)) return closest;
+
+    const backend = CONFIG?.Canvas?.polygonBackends?.[type];
+    if (!backend || typeof backend.testCollision !== 'function') return null;
+
+    try {
+      const allHits = backend.testCollision(origin, destination, {
+        mode: 'all',
+        type,
+        source: tokenObj,
+        token: tokenObj,
+        wallDirectionMode: 0,   // NORMAL — respect one-way wall direction (MS-LVL-074)
+        useThreshold: true      // Evaluate proximity/distance walls (MS-LVL-073)
+      });
+      if (!Array.isArray(allHits) || allHits.length === 0) return null;
+
+      for (const hit of allHits) {
+        if (!hit || typeof hit !== 'object') continue;
+        if (!this._collisionHitBlocksAtElevation(hit, elevation)) continue;
+        return hit;
+      }
+    } catch (_) {
+    }
+
+    return null;
   }
 
   render(renderer, scene, camera) {

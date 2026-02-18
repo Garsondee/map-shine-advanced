@@ -19,6 +19,9 @@ import { createLogger } from '../core/log.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
 import { VisionSDF } from '../vision/VisionSDF.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
+import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
+import { isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange } from '../foundry/levels-scene-flags.js';
+import { getPerspectiveElevation, isLightVisibleForPerspective } from '../foundry/elevation-context.js';
 
 const log = createLogger('WorldSpaceFogEffect');
 
@@ -158,6 +161,16 @@ export class WorldSpaceFogEffect extends EffectBase {
     this._visionSDF = null;
     this._loggedSDFState = false;
     this._sdfUpdateFailed = false;
+
+    // MS-LVL-060: Elevation band tracking for per-floor fog exploration.
+    // When the active elevation band changes (e.g. navigating to a different
+    // floor), the exploration accumulation buffer is reset so the new floor
+    // starts with fresh fog — matching Levels' behavior where changing floors
+    // reveals only what the token can currently see on the new floor.
+    /** @type {number|null} Last known elevation band bottom (null = not yet set) */
+    this._lastElevationBandBottom = null;
+    /** @type {number|null} Last known elevation band top */
+    this._lastElevationBandTop = null;
   }
 
   resetExploration() {
@@ -1045,12 +1058,63 @@ export class WorldSpaceFogEffect extends EffectBase {
     this._hookIds.push(['updateToken', Hooks.on('updateToken', () => { this._needsVisionUpdate = true; })]);
     this._hookIds.push(['sightRefresh', Hooks.on('sightRefresh', () => { this._needsVisionUpdate = true; })]);
     this._hookIds.push(['lightingRefresh', Hooks.on('lightingRefresh', () => { this._needsVisionUpdate = true; })]);
+
+    // MS-LVL-060: When the active level context changes (floor navigation),
+    // check if the elevation band has changed. If so, reset exploration so
+    // the new floor starts with fresh fog — matching Levels' per-floor fog
+    // reveal behavior. Also force a vision update since wall-height filtering
+    // may produce a different LOS polygon for the new elevation.
+    this._hookIds.push(['mapShineLevelContextChanged', Hooks.on('mapShineLevelContextChanged', (ctx) => {
+      this._needsVisionUpdate = true;
+      this._checkElevationBandChange();
+    })]);
     
     // Initial render: force perception so that any starting
     // controlled token (or vision source) has a valid LOS
     // polygon before the first fog mask is drawn.
     frameCoordinator.forcePerceptionUpdate();
     this._needsVisionUpdate = true; // Initial render
+  }
+
+  /**
+   * MS-LVL-060: Check if the active elevation band has changed since last
+   * check. If so, reset the exploration accumulation buffer so the new
+   * floor starts with fresh fog.
+   *
+   * @private
+   */
+  _checkElevationBandChange() {
+    if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return;
+
+    const scene = canvas?.scene;
+    if (!scene || !isLevelsEnabledForScene(scene)) return;
+
+    const levelCtx = window.MapShine?.activeLevelContext;
+    if (!levelCtx) return;
+
+    const bandBottom = Number.isFinite(levelCtx.bottom) ? levelCtx.bottom : null;
+    const bandTop = Number.isFinite(levelCtx.top) ? levelCtx.top : null;
+
+    // First time — just record the band, don't reset
+    if (this._lastElevationBandBottom === null && this._lastElevationBandTop === null) {
+      this._lastElevationBandBottom = bandBottom;
+      this._lastElevationBandTop = bandTop;
+      return;
+    }
+
+    // Band unchanged — nothing to do
+    if (bandBottom === this._lastElevationBandBottom && bandTop === this._lastElevationBandTop) {
+      return;
+    }
+
+    // Band changed — reset exploration for the new floor
+    log.info(`[MS-LVL-060] Elevation band changed: [${this._lastElevationBandBottom}, ${this._lastElevationBandTop}] → [${bandBottom}, ${bandTop}] — resetting fog exploration for new floor`);
+    this._lastElevationBandBottom = bandBottom;
+    this._lastElevationBandTop = bandTop;
+
+    this.resetExploration();
+    this._needsVisionUpdate = true;
+    this._hasValidVision = false;
   }
 
   /**
@@ -1223,13 +1287,28 @@ export class WorldSpaceFogEffect extends EffectBase {
     // Phase 2: Light-Grants-Vision
     // Light sources with data.vision === true grant visibility within their area.
     // Draw their shapes into the vision mask alongside token LOS polygons.
+    // MS-LVL-070: Skip lights outside the viewer's elevation range so lights
+    // on other floors don't grant vision through the fog mask.
     try {
       const lightSources = canvas?.effects?.lightSources;
       if (lightSources) {
+        const levelsActive = getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
+          && isLevelsEnabledForScene(canvas?.scene);
+
         for (const lightSource of lightSources) {
           if (!lightSource.active || !lightSource.data?.vision) continue;
           // Skip GlobalLightSource — handled separately via _isGlobalIlluminationActive
           if (lightSource.constructor?.name === 'GlobalLightSource') continue;
+
+          // MS-LVL-070: Elevation-filter vision-granting lights
+          if (levelsActive) {
+            try {
+              const lightDoc = lightSource.object?.document;
+              if (lightDoc && !isLightVisibleForPerspective(lightDoc)) continue;
+            } catch (_) {
+              // Fail-open: if elevation check errors, keep the light
+            }
+          }
 
           const shape = lightSource.shape;
           if (!shape?.points || shape.points.length < 6) continue;
@@ -1289,6 +1368,104 @@ export class WorldSpaceFogEffect extends EffectBase {
       }
     } catch (e) {
       log.warn('Failed to render darkness source shapes:', e);
+    }
+
+    // Phase 6: MS-LVL-034 — noFogHide tile fog suppression.
+    // Tiles with the Levels `noFogHide` flag punch through the fog mask:
+    // their bounds are rendered as white rectangles in the vision mask so
+    // they remain visible even outside the token's LOS polygon.
+    try {
+      if (getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
+          && isLevelsEnabledForScene(canvas?.scene)) {
+        const tiles = canvas?.scene?.tiles;
+        if (tiles) {
+          const offsetX = this.sceneRect.x;
+          const offsetY = this.sceneRect.y;
+          for (const tileDoc of tiles) {
+            if (!tileDoc || !tileHasLevelsRange(tileDoc)) continue;
+            const flags = readTileLevelsFlags(tileDoc);
+            if (!flags.noFogHide) continue;
+
+            // Only punch through fog for tiles visible at the current elevation
+            // (no point revealing a tile on a different floor)
+            const perspective = getPerspectiveElevation();
+            if (perspective.source !== 'background') {
+              const inRange = perspective.losHeight >= flags.rangeBottom
+                && (flags.rangeTop === Infinity || perspective.losHeight < flags.rangeTop);
+              if (!inRange) continue;
+            }
+
+            const tx = Number(tileDoc.x ?? 0) - offsetX;
+            const ty = Number(tileDoc.y ?? 0) - offsetY;
+            const tw = Number(tileDoc.width ?? 0);
+            const th = Number(tileDoc.height ?? 0);
+            if (tw <= 0 || th <= 0) continue;
+
+            const tileShape = new THREE.Shape();
+            tileShape.moveTo(tx, ty);
+            tileShape.lineTo(tx + tw, ty);
+            tileShape.lineTo(tx + tw, ty + th);
+            tileShape.lineTo(tx, ty + th);
+            tileShape.closePath();
+
+            const geo = new THREE.ShapeGeometry(tileShape);
+            const tileMesh = new THREE.Mesh(geo, this.visionMaterial);
+            // Render after darkness sources but below normal LOS priority
+            tileMesh.renderOrder = 2;
+            this.visionScene.add(tileMesh);
+          }
+        }
+      }
+    } catch (e) {
+      log.warn('Failed to render noFogHide tile shapes:', e);
+    }
+
+    // Phase 7: MS-LVL-061 — revealTokenInFog equivalent.
+    // When enabled, visible tokens on the current floor reveal a small area
+    // of fog around themselves, even if they're outside the viewer's LOS.
+    // This draws small circles at each visible token's position in the
+    // vision mask. Uses Three.js CircleGeometry for efficient rendering.
+    try {
+      if (getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
+          && isLevelsEnabledForScene(canvas?.scene)) {
+        const tokens = canvas?.tokens?.placeables;
+        if (tokens && tokens.length > 0) {
+          const gridSize = Number(canvas?.scene?.grid?.size ?? canvas?.scene?.dimensions?.size ?? 100);
+          // Bubble radius: roughly half a grid square, matching Levels' visual approach
+          const bubbleRadius = gridSize * 0.6;
+          const offsetX = this.sceneRect.x;
+          const offsetY = this.sceneRect.y;
+          const perspective = getPerspectiveElevation();
+
+          for (const token of tokens) {
+            if (!token?.visible) continue;
+            const doc = token.document;
+            if (!doc) continue;
+
+            // Only reveal tokens on the same floor as the viewer
+            if (perspective.source !== 'background') {
+              const tokenElev = Number(doc.elevation ?? 0);
+              if (!Number.isFinite(tokenElev)) continue;
+              // Skip tokens more than 1 level band away
+              const delta = Math.abs(tokenElev - perspective.elevation);
+              if (delta > 30) continue; // Generous threshold for "same floor"
+            }
+
+            const tw = Number(doc.width ?? 1) * gridSize;
+            const th = Number(doc.height ?? 1) * gridSize;
+            const cx = Number(doc.x ?? 0) + tw / 2 - offsetX;
+            const cy = Number(doc.y ?? 0) + th / 2 - offsetY;
+
+            const circleGeo = new THREE.CircleGeometry(bubbleRadius, 16);
+            const circleMesh = new THREE.Mesh(circleGeo, this.visionMaterial);
+            circleMesh.position.set(cx, cy, 0);
+            circleMesh.renderOrder = 3;
+            this.visionScene.add(circleMesh);
+          }
+        }
+      }
+    } catch (e) {
+      log.warn('Failed to render revealTokenInFog bubbles:', e);
     }
     
     // Render to the vision target (always render, even if no polygons —

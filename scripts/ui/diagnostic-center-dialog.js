@@ -13,6 +13,10 @@
 
 import { createLogger } from '../core/log.js';
 import { getEffectMaskRegistry, loadAssetBundle, probeMaskFile, clearCache } from '../assets/loader.js';
+import { readSceneLevelsFlag, isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange, readWallHeightFlags, wallHasHeightBounds, readDocLevelsRange, getSceneBackgroundElevation, getSceneWeatherElevation, getSceneLightMasking, getFlagReaderDiagnostics } from '../foundry/levels-scene-flags.js';
+import { detectLevelsRuntimeInteropState, getLevelsCompatibilityMode, detectKnownModuleConflicts } from '../foundry/levels-compatibility.js';
+import { getPerspectiveElevation } from '../foundry/elevation-context.js';
+import { peekSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
 
 const log = createLogger('DiagnosticCenter');
 
@@ -109,6 +113,67 @@ function _summarizeChecks(checks) {
     else out.info++;
   }
   return out;
+}
+
+function _parseLevelRangeRecord(item) {
+  let bottomRaw;
+  let topRaw;
+
+  if (Array.isArray(item)) {
+    bottomRaw = item[0];
+    topRaw = item[1];
+  } else if (item && typeof item === 'object') {
+    bottomRaw = item.bottom ?? item.rangeBottom ?? item.min;
+    topRaw = item.top ?? item.rangeTop ?? item.max;
+  }
+
+  let bottom = Number(bottomRaw);
+  let top = Number(topRaw);
+  if (!Number.isFinite(bottom) || !Number.isFinite(top)) {
+    return { valid: false, swapped: false, bottom: null, top: null };
+  }
+
+  let swapped = false;
+  if (bottom > top) {
+    const t = bottom;
+    bottom = top;
+    top = t;
+    swapped = true;
+  }
+
+  return { valid: true, swapped, bottom, top };
+}
+
+function _collectSceneLevelFlagDiagnostics(scene) {
+  const rawLevels = readSceneLevelsFlag(scene);
+  const levelsEnabled = isLevelsEnabledForScene(scene);
+
+  let parsedCount = 0;
+  let invalidCount = 0;
+  let swappedCount = 0;
+
+  const rawCount = Array.isArray(rawLevels) ? rawLevels.length : 0;
+  if (Array.isArray(rawLevels)) {
+    for (const item of rawLevels) {
+      const parsed = _parseLevelRangeRecord(item);
+      if (!parsed.valid) {
+        invalidCount += 1;
+        continue;
+      }
+      if (parsed.swapped) swappedCount += 1;
+      parsedCount += 1;
+    }
+  }
+
+  return {
+    sceneId: String(scene?.id || ''),
+    sceneName: String(scene?.name || '(Unnamed Scene)'),
+    levelsEnabled,
+    rawCount,
+    parsedCount,
+    invalidCount,
+    swappedCount,
+  };
 }
 
 export class DiagnosticCenterDialog {
@@ -426,6 +491,377 @@ export class DiagnosticCenterDialog {
 
     const now = Date.now();
 
+    const levelController = ms?.levelNavigationController || null;
+    const activeContext = levelController?.getActiveLevelContext?.() || ms?.activeLevelContext || null;
+    const availableLevels = levelController?.getAvailableLevels?.() || ms?.availableLevels || [];
+    const diagnostics = levelController?.getLevelDiagnostics?.() || ms?.levelNavigationDiagnostics || null;
+    const lockMode = levelController?.getLockMode?.() || activeContext?.lockMode || 'manual';
+    const gameplayMode = Boolean(ms?.sceneComposer && ms?.isMapMakerMode !== true);
+    const levelsInterop = detectLevelsRuntimeInteropState({ gameplayMode });
+    const compatibilityMode = getLevelsCompatibilityMode();
+
+    checks.push(_mkCheck('Levels', 'levels.compatibility.mode', 'INFO', `Compatibility mode: ${compatibilityMode}`, {
+      mode: compatibilityMode,
+      gameplayMode,
+    }));
+
+    if (gameplayMode) {
+      checks.push(_mkCheck(
+        'Levels',
+        'levels.runtime.authority',
+        levelsInterop.hasRuntimeConflict ? 'WARN' : 'PASS',
+        levelsInterop.hasRuntimeConflict
+          ? 'Levels runtime interop signals detected while gameplay mode is active'
+          : 'No Levels runtime interop conflicts detected in gameplay mode',
+        {
+          levelsModuleActive: levelsInterop.levelsModuleActive,
+          wrappersLikelyActive: levelsInterop.wrappersLikelyActive,
+          fogManagerTakeover: levelsInterop.fogManagerTakeover,
+          canvasFogTakeover: levelsInterop.canvasFogTakeover,
+          configuredFogManagerClassName: levelsInterop.configuredFogManagerClassName,
+          coreFogManagerClassName: levelsInterop.coreFogManagerClassName,
+        }
+      ));
+    }
+
+    if (levelController) {
+      checks.push(_mkCheck('Levels', 'levels.controller.exists', 'PASS', 'Level navigation controller is available'));
+    } else {
+      checks.push(_mkCheck('Levels', 'levels.controller.exists', 'WARN', 'Level navigation controller is not available'));
+    }
+
+    if (activeContext) {
+      checks.push(_mkCheck('Levels', 'levels.context.active', 'PASS', 'Active level context is available', {
+        levelId: activeContext.levelId,
+        label: activeContext.label,
+        index: activeContext.index,
+        count: activeContext.count,
+        bottom: activeContext.bottom,
+        top: activeContext.top,
+        center: activeContext.center,
+        source: activeContext.source,
+        lockMode,
+      }));
+    } else {
+      checks.push(_mkCheck('Levels', 'levels.context.active', 'WARN', 'No active level context is available'));
+    }
+
+    if (Array.isArray(availableLevels) && availableLevels.length > 0) {
+      checks.push(_mkCheck('Levels', 'levels.available', 'PASS', `Available levels: ${availableLevels.length}`));
+    } else {
+      checks.push(_mkCheck('Levels', 'levels.available', 'WARN', 'No available levels reported by controller'));
+    }
+
+    if (diagnostics) {
+      const source = String(diagnostics.source || activeContext?.source || 'unknown');
+      const rawCount = Number(diagnostics.rawCount || 0);
+      const parsedCount = Number(diagnostics.parsedCount || availableLevels.length || 0);
+      const invalidCount = Number(diagnostics.invalidCount || 0);
+      const swappedCount = Number(diagnostics.swappedCount || 0);
+      const inferredCenterCount = Number(diagnostics.inferredCenterCount || 0);
+
+      const sourceStatus = (source === 'sceneLevels' || source === 'inferred') ? 'PASS' : 'WARN';
+      checks.push(_mkCheck('Levels', 'levels.source', sourceStatus, `Level source: ${source}`, {
+        source,
+        rawCount,
+        parsedCount,
+        invalidCount,
+        swappedCount,
+        inferredCenterCount,
+      }));
+
+      if (invalidCount > 0 || swappedCount > 0) {
+        checks.push(_mkCheck('Levels', 'levels.parse.warnings', 'WARN', 'Level parsing reported warning counts', {
+          invalidCount,
+          swappedCount,
+        }));
+      } else {
+        checks.push(_mkCheck('Levels', 'levels.parse.warnings', 'PASS', 'No level parsing warnings reported'));
+      }
+    } else {
+      checks.push(_mkCheck('Levels', 'levels.diagnostics', 'WARN', 'Level diagnostics payload is unavailable'));
+    }
+
+    const worldSceneSummaries = Array.from(game?.scenes?.contents || [])
+      .map((scene) => _collectSceneLevelFlagDiagnostics(scene))
+      .filter((entry) => entry.levelsEnabled || entry.rawCount > 0);
+
+    const worldLevelTotals = worldSceneSummaries.reduce((acc, entry) => {
+      acc.rawCount += entry.rawCount;
+      acc.parsedCount += entry.parsedCount;
+      acc.invalidCount += entry.invalidCount;
+      acc.swappedCount += entry.swappedCount;
+      return acc;
+    }, { rawCount: 0, parsedCount: 0, invalidCount: 0, swappedCount: 0 });
+
+    if (worldSceneSummaries.length > 0) {
+      checks.push(_mkCheck('Levels', 'levels.world.summary', 'PASS', `Scenes with Levels data: ${worldSceneSummaries.length}`, {
+        totals: worldLevelTotals,
+        scenes: worldSceneSummaries,
+      }));
+      if (worldLevelTotals.invalidCount > 0 || worldLevelTotals.swappedCount > 0) {
+        checks.push(_mkCheck('Levels', 'levels.world.warnings', 'WARN', 'World-level scene flag parsing has warnings', {
+          invalidCount: worldLevelTotals.invalidCount,
+          swappedCount: worldLevelTotals.swappedCount,
+        }));
+      } else {
+        checks.push(_mkCheck('Levels', 'levels.world.warnings', 'PASS', 'No world-level scene flag parsing warnings'));
+      }
+    } else {
+      checks.push(_mkCheck('Levels', 'levels.world.summary', 'INFO', 'No scenes with Levels flags were detected in this world'));
+    }
+
+    const levelsModuleActive = game?.modules?.get?.('levels')?.active === true;
+    const activeSceneSummary = _collectSceneLevelFlagDiagnostics(canvas?.scene || null);
+    if (!levelsModuleActive && activeSceneSummary.rawCount > 0) {
+      checks.push(_mkCheck('Levels', 'levels.importOnly.readiness', 'PASS', 'Levels module is disabled and active scene still has imported level flags', {
+        activeScene: activeSceneSummary,
+      }));
+    } else if (!levelsModuleActive) {
+      checks.push(_mkCheck('Levels', 'levels.importOnly.readiness', 'INFO', 'Levels module is disabled; active scene has no imported sceneLevels array'));
+    } else {
+      checks.push(_mkCheck('Levels', 'levels.importOnly.readiness', 'INFO', 'Levels module is active; import-only readiness check skipped'));
+    }
+
+    // --- Extended Levels diagnostics (MS-LVL-110/111) ---
+
+    // Elevation context
+    try {
+      const perspective = getPerspectiveElevation();
+      const bgElev = getSceneBackgroundElevation(canvas?.scene);
+      checks.push(_mkCheck('Levels', 'levels.elevation.context', 'PASS', `Perspective: ${perspective.source} (elev=${perspective.elevation}, LOS=${perspective.losHeight})`, {
+        ...perspective,
+        backgroundElevation: bgElev,
+      }));
+    } catch (_) {
+      checks.push(_mkCheck('Levels', 'levels.elevation.context', 'WARN', 'Failed to read elevation context'));
+    }
+
+    // Tile range flag summary for active scene
+    try {
+      const sceneTiles = canvas?.scene?.tiles;
+      if (sceneTiles && sceneTiles.size > 0) {
+        let tilesWithRange = 0;
+        let basementCount = 0;
+        let showIfAboveCount = 0;
+        let noCollisionCount = 0;
+        let noFogHideCount = 0;
+        let allWallBlockSightCount = 0;
+        for (const tileDoc of sceneTiles) {
+          if (tileHasLevelsRange(tileDoc)) {
+            tilesWithRange++;
+            const flags = readTileLevelsFlags(tileDoc);
+            if (flags.isBasement) basementCount++;
+            if (flags.showIfAbove) showIfAboveCount++;
+            if (flags.noCollision) noCollisionCount++;
+            if (flags.noFogHide) noFogHideCount++;
+            if (flags.allWallBlockSight) allWallBlockSightCount++;
+          }
+        }
+        if (tilesWithRange > 0) {
+          checks.push(_mkCheck('Levels', 'levels.tiles.rangeFlags', 'PASS', `Tiles with Levels range: ${tilesWithRange}/${sceneTiles.size}`, {
+            total: sceneTiles.size,
+            withRange: tilesWithRange,
+            basement: basementCount,
+            showIfAbove: showIfAboveCount,
+            noCollision: noCollisionCount,
+            noFogHide: noFogHideCount,
+            allWallBlockSight: allWallBlockSightCount,
+          }));
+
+          if (noCollisionCount > 0) {
+            checks.push(_mkCheck('Levels', 'levels.tiles.noCollision', 'PASS', `${noCollisionCount} tile(s) use noCollision — handled by elevation-plane collision (MS-LVL-033)`, {
+              noCollisionTiles: noCollisionCount,
+            }));
+          }
+          if (noFogHideCount > 0) {
+            checks.push(_mkCheck('Levels', 'levels.tiles.noFogHide', 'PASS', `${noFogHideCount} tile(s) use noFogHide — fog mask suppression active (MS-LVL-034)`, {
+              noFogHideTiles: noFogHideCount,
+            }));
+          }
+          if (allWallBlockSightCount > 0) {
+            checks.push(_mkCheck('Levels', 'levels.tiles.allWallBlockSight', 'PASS', `${allWallBlockSightCount} tile(s) use allWallBlockSight — vision override active (MS-LVL-035)`, {
+              allWallBlockSightTiles: allWallBlockSightCount,
+            }));
+          }
+        } else {
+          checks.push(_mkCheck('Levels', 'levels.tiles.rangeFlags', 'INFO', `No tiles with Levels range flags (${sceneTiles.size} tiles total)`));
+        }
+      }
+    } catch (_) {
+    }
+
+    // Wall-height flag summary for active scene
+    try {
+      const walls = canvas?.walls?.placeables;
+      if (walls && walls.length > 0) {
+        let wallsWithHeight = 0;
+        for (const wall of walls) {
+          if (wallHasHeightBounds(wall?.document)) wallsWithHeight++;
+        }
+        if (wallsWithHeight > 0) {
+          checks.push(_mkCheck('Levels', 'levels.walls.heightFlags', 'PASS', `Walls with height bounds: ${wallsWithHeight}/${walls.length}`, {
+            total: walls.length,
+            withHeightBounds: wallsWithHeight,
+          }));
+        } else {
+          checks.push(_mkCheck('Levels', 'levels.walls.heightFlags', 'INFO', `No walls with wall-height flags (${walls.length} walls total)`));
+        }
+      }
+    } catch (_) {
+    }
+
+    // Per-scene import readiness score (MS-LVL-111)
+    // Enhanced: checks 8 parity domains for comprehensive readiness assessment
+    try {
+      const scene = canvas?.scene;
+      if (scene && isLevelsEnabledForScene(scene)) {
+        const domains = [];
+        const domainDetails = {};
+
+        // Domain 1: sceneLevels bands
+        const sceneLevels = readSceneLevelsFlag(scene);
+        if (sceneLevels.length > 0) { domains.push('sceneLevels'); domainDetails.sceneLevelsCount = sceneLevels.length; }
+
+        // Domain 2: backgroundElevation
+        const bgElev = getSceneBackgroundElevation(scene);
+        if (bgElev !== 0) { domains.push('backgroundElevation'); domainDetails.backgroundElevation = bgElev; }
+
+        // Domain 3: weatherElevation
+        const weatherElev = getSceneWeatherElevation(scene);
+        if (Number.isFinite(weatherElev)) { domains.push('weatherElevation'); domainDetails.weatherElevation = weatherElev; }
+
+        // Domain 4: lightMasking
+        const lightMasking = getSceneLightMasking(scene);
+        if (lightMasking !== true) { domains.push('lightMasking'); domainDetails.lightMasking = lightMasking; }
+
+        // Domain 5: tile range flags
+        let tilesWithRange = 0;
+        for (const tileDoc of (scene.tiles || [])) {
+          if (tileHasLevelsRange(tileDoc)) tilesWithRange++;
+        }
+        if (tilesWithRange > 0) { domains.push('tileRangeFlags'); domainDetails.tilesWithRange = tilesWithRange; }
+
+        // Domain 6: wall-height flags
+        let wallsWithHeight = 0;
+        const wallPlaceables = canvas?.walls?.placeables || [];
+        for (const wall of wallPlaceables) {
+          if (wallHasHeightBounds(wall?.document)) wallsWithHeight++;
+        }
+        if (wallsWithHeight > 0) { domains.push('wallHeightFlags'); domainDetails.wallsWithHeight = wallsWithHeight; }
+
+        // Domain 7: doc elevation ranges (lights/sounds/notes with finite ranges)
+        let docsWithRange = 0;
+        for (const collection of [scene.lights, scene.sounds, scene.notes]) {
+          if (!collection) continue;
+          for (const doc of collection) {
+            const r = readDocLevelsRange(doc);
+            if (Number.isFinite(r.rangeBottom) || Number.isFinite(r.rangeTop)) docsWithRange++;
+          }
+        }
+        if (docsWithRange > 0) { domains.push('docRangeFlags'); domainDetails.docsWithRange = docsWithRange; }
+
+        // Domain 8: legacy drawing stairs
+        let drawingStairs = 0;
+        for (const drawingDoc of (scene.drawings || [])) {
+          const dm = Number(drawingDoc?.flags?.levels?.drawingMode ?? 0);
+          if (dm === 2 || dm === 3 || dm === 21 || dm === 22) drawingStairs++;
+        }
+        if (drawingStairs > 0) { domains.push('legacyDrawingStairs'); domainDetails.drawingStairs = drawingStairs; }
+
+        const score = domains.length;
+        const maxScore = 8;
+        const status = score >= 3 ? 'PASS' : (score >= 1 ? 'INFO' : 'WARN');
+        checks.push(_mkCheck('Levels', 'levels.scene.readiness', status, `Import readiness: ${score}/${maxScore} domains populated`, {
+          score,
+          maxScore,
+          domains,
+          ...domainDetails,
+        }));
+
+        // Actionable readiness verdict
+        const levelsActive = game?.modules?.get?.('levels')?.active === true;
+        if (!levelsActive && score >= 3) {
+          checks.push(_mkCheck('Levels', 'levels.scene.verdict', 'PASS', 'Scene is ready for import-only mode (Levels runtime not required)'));
+        } else if (!levelsActive && score >= 1) {
+          checks.push(_mkCheck('Levels', 'levels.scene.verdict', 'INFO', 'Scene has some Levels data; import-only mode should work but coverage is limited'));
+        } else if (levelsActive) {
+          checks.push(_mkCheck('Levels', 'levels.scene.verdict', 'INFO', 'Levels module is active; readiness check is informational only'));
+        }
+      }
+    } catch (_) {
+    }
+
+    // Snapshot store status (MS-LVL-016)
+    try {
+      const snapshot = peekSnapshot();
+      if (snapshot) {
+        checks.push(_mkCheck('Levels', 'levels.snapshot.available', 'PASS', 'LevelsImportSnapshot is cached and available', {
+          sceneId: snapshot.sceneId,
+          sceneLevelsCount: snapshot.sceneLevels?.length ?? 0,
+          tileCount: snapshot.tiles?.length ?? 0,
+          wallCount: snapshot.walls?.length ?? 0,
+          diagnostics: snapshot.diagnostics ?? null,
+        }));
+      } else {
+        checks.push(_mkCheck('Levels', 'levels.snapshot.available', 'INFO', 'No LevelsImportSnapshot cached (scene may not have Levels data)'));
+      }
+    } catch (_) {
+      checks.push(_mkCheck('Levels', 'levels.snapshot.available', 'WARN', 'Failed to read LevelsImportSnapshot'));
+    }
+
+    // API facade status (MS-LVL-090)
+    try {
+      const facadeActive = globalThis.CONFIG?.Levels?.API?._mapShineFacade === true;
+      const realLevelsApi = globalThis.CONFIG?.Levels?.API && !globalThis.CONFIG?.Levels?.API?._mapShineFacade;
+      if (facadeActive) {
+        checks.push(_mkCheck('Levels', 'levels.api.facade', 'PASS', 'Map Shine Levels API facade is active at CONFIG.Levels.API'));
+      } else if (realLevelsApi) {
+        checks.push(_mkCheck('Levels', 'levels.api.facade', 'INFO', 'Real Levels API is active (facade not needed)'));
+      } else {
+        checks.push(_mkCheck('Levels', 'levels.api.facade', 'INFO', 'No Levels API facade installed (mode may be off or no callers)'));
+      }
+    } catch (_) {
+    }
+
+    // Flag-reader data-quality diagnostics (MS-LVL-015)
+    try {
+      const flagDiags = getFlagReaderDiagnostics();
+      if (flagDiags.length > 0) {
+        checks.push(_mkCheck('Levels', 'levels.flags.invalidValues', 'WARN', `${flagDiags.length} invalid flag value(s) replaced with defaults`, {
+          count: flagDiags.length,
+          recent: flagDiags.slice(-5).map(d => ({
+            reader: d.reader,
+            field: d.field,
+            rawValue: String(d.rawValue),
+            defaultUsed: String(d.defaultUsed),
+            docId: d.docId ?? '(unknown)',
+          })),
+        }));
+      } else {
+        checks.push(_mkCheck('Levels', 'levels.flags.invalidValues', 'PASS', 'No invalid flag values detected'));
+      }
+    } catch (_) {
+    }
+
+    // Module conflict detection (MS-LVL-114)
+    try {
+      const conflicts = detectKnownModuleConflicts();
+      if (conflicts.length > 0) {
+        for (const conflict of conflicts) {
+          const status = conflict.severity === 'warn' ? 'WARN' : 'INFO';
+          checks.push(_mkCheck('Levels', `levels.conflict.${conflict.id}`, status,
+            `${conflict.label}: ${conflict.overlap}`, {
+              moduleId: conflict.id,
+              severity: conflict.severity,
+            }));
+        }
+      } else {
+        checks.push(_mkCheck('Levels', 'levels.conflicts.none', 'PASS', 'No known module conflicts detected'));
+      }
+    } catch (_) {
+    }
+
     // Resolve target.
     let targetKind = this._state.targetKind;
     let targetId = this._state.targetId;
@@ -586,13 +1022,23 @@ export class DiagnosticCenterDialog {
     const summary = _summarizeChecks(checks);
 
     return {
-      version: 1,
+      version: 2,
       time: now,
       target: {
         kind: targetKind,
         id: targetId,
         src,
         basePath
+      },
+      levelNavigation: {
+        lockMode,
+        activeContext,
+        diagnostics,
+        availableLevels: Array.isArray(availableLevels) ? availableLevels.length : 0,
+      },
+      worldLevels: {
+        scenesWithFlags: worldSceneSummaries.length,
+        totals: worldLevelTotals,
       },
       summary,
       checks
@@ -652,7 +1098,7 @@ export class DiagnosticCenterDialog {
       groups.get(cat).push(c);
     }
 
-    const order = ['Tile', 'Scene', 'Flags', 'Three', 'Surface', 'Assets', 'Other'];
+    const order = ['Levels', 'Tile', 'Scene', 'Flags', 'Three', 'Surface', 'Assets', 'Other'];
     const cats = Array.from(groups.keys());
     cats.sort((a, b) => {
       const ai = order.indexOf(a);

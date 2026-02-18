@@ -1,6 +1,7 @@
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
+import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 import { 
   ParticleSystem, 
   IntervalValue,
@@ -1274,9 +1275,22 @@ export class PlayerLightEffect extends EffectBase {
   _findClosestWallCollision(tokenObj, destinationFoundry, collisionTypes = ['move']) {
     if (!tokenObj || !destinationFoundry) return null;
 
-    const origin = tokenObj.center;
-    const originX = (origin && Number.isFinite(origin.x)) ? origin.x : destinationFoundry.x;
-    const originY = (origin && Number.isFinite(origin.y)) ? origin.y : destinationFoundry.y;
+    const tokenElevation = Number.isFinite(Number(tokenObj?.document?.elevation))
+      ? Number(tokenObj.document.elevation)
+      : 0;
+    const originCenter = tokenObj.center;
+    const originX = (originCenter && Number.isFinite(originCenter.x)) ? originCenter.x : destinationFoundry.x;
+    const originY = (originCenter && Number.isFinite(originCenter.y)) ? originCenter.y : destinationFoundry.y;
+    const origin = {
+      x: originX,
+      y: originY,
+      elevation: tokenElevation,
+    };
+    const destination = {
+      x: Number(destinationFoundry.x) || 0,
+      y: Number(destinationFoundry.y) || 0,
+      elevation: tokenElevation,
+    };
 
     let bestCollision = null;
     let bestDistSq = Infinity;
@@ -1286,7 +1300,7 @@ export class PlayerLightEffect extends EffectBase {
       if (!type) continue;
 
       try {
-        const collision = tokenObj.checkCollision(destinationFoundry, { origin, mode: 'closest', type });
+        const collision = this._findClosestBlockingCollision(tokenObj, origin, destination, type, tokenElevation);
         if (!collision || !Number.isFinite(collision.x) || !Number.isFinite(collision.y)) continue;
 
         const dx = collision.x - originX;
@@ -1301,6 +1315,77 @@ export class PlayerLightEffect extends EffectBase {
     }
 
     return bestCollision;
+  }
+
+  _findClosestBlockingCollision(tokenObj, origin, destination, type, elevation) {
+    if (!tokenObj || !destination || !type) return null;
+
+    let closest = null;
+    try {
+      closest = tokenObj.checkCollision(destination, { origin, mode: 'closest', type });
+    } catch (_) {
+      closest = null;
+    }
+
+    if (!closest) return null;
+    if (typeof closest !== 'object') return null;
+    if (this._collisionHitBlocksAtElevation(closest, elevation)) return closest;
+
+    const backend = CONFIG?.Canvas?.polygonBackends?.[type];
+    if (!backend || typeof backend.testCollision !== 'function') return null;
+
+    try {
+      const allHits = backend.testCollision(origin, destination, {
+        mode: 'all',
+        type,
+        source: tokenObj,
+        token: tokenObj,
+        wallDirectionMode: 0,   // NORMAL — respect one-way wall direction (MS-LVL-074)
+        useThreshold: true      // Evaluate proximity/distance walls (MS-LVL-073)
+      });
+      if (!Array.isArray(allHits) || allHits.length === 0) return null;
+
+      for (const hit of allHits) {
+        if (!hit || typeof hit !== 'object') continue;
+        if (!this._collisionHitBlocksAtElevation(hit, elevation)) continue;
+        return hit;
+      }
+    } catch (_) {
+    }
+
+    return null;
+  }
+
+  _collisionHitBlocksAtElevation(hit, elevation) {
+    if (!hit) return false;
+    if (!Number.isFinite(elevation)) return true;
+    if (typeof hit !== 'object') return !!hit;
+
+    const edges = hit?.edges;
+    if (!(edges instanceof Set) || edges.size === 0) return true;
+
+    for (const edge of edges) {
+      if (!edge) continue;
+      if (edge.type && edge.type !== 'wall') return true;
+
+      const wallDoc = edge.object?.document ?? edge.object ?? null;
+      if (!wallDoc) return true;
+
+      const bounds = readWallHeightFlags(wallDoc);
+      let bottom = Number(bounds?.bottom);
+      let top = Number(bounds?.top);
+      if (!Number.isFinite(bottom)) bottom = -Infinity;
+      if (!Number.isFinite(top)) top = Infinity;
+      if (top < bottom) {
+        const swap = bottom;
+        bottom = top;
+        top = swap;
+      }
+
+      if (bottom <= elevation && elevation <= top) return true;
+    }
+
+    return false;
   }
 
   _flashlightRand() {

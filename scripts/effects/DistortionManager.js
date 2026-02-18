@@ -14,6 +14,7 @@
 
 import { EffectBase, RenderLayers } from './EffectComposer.js';
 import { createLogger } from '../core/log.js';
+import { DepthShaderChunks } from './DepthShaderChunks.js';
 
 const log = createLogger('DistortionManager');
 
@@ -643,7 +644,10 @@ export class DistortionManager extends EffectBase {
         uHasRoofAlpha: { value: 0.0 },
         
         // Global
-        uGlobalIntensity: { value: 1.0 }
+        uGlobalIntensity: { value: 1.0 },
+
+        // Depth pass (shared module uniforms for depth-aware occlusion)
+        ...DepthShaderChunks.createUniforms()
       },
       vertexShader: `
         varying vec2 vUv;
@@ -704,6 +708,11 @@ export class DistortionManager extends EffectBase {
         uniform float uHasRoofAlpha;
         
         uniform float uGlobalIntensity;
+
+        // Depth pass uniforms and helpers for depth-aware occlusion.
+        // Elevated surfaces (tokens, overheads at Z >= ~3) suppress distortion.
+        ${DepthShaderChunks.uniforms}
+        ${DepthShaderChunks.linearize}
         
         varying vec2 vUv;
         
@@ -795,6 +804,20 @@ export class DistortionManager extends EffectBase {
           float waterOccluder = 0.0;
           if (uHasWaterOccluderAlpha > 0.5) {
             waterOccluder = texture2D(tWaterOccluderAlpha, vUv).a;
+          }
+
+          // Depth-based occlusion: suppress distortion for pixels belonging to
+          // elevated surfaces (tokens at Z ~+3, overhead tiles, etc.).
+          // Ground-level tiles (BG/FG at Z ~+1/+2) are NOT occluded so water/heat
+          // distortion still applies to the base map layers.
+          float depthOccluder = 0.0;
+          if (uDepthEnabled > 0.5) {
+            float deviceDepth = msa_sampleDeviceDepth(vUv);
+            if (deviceDepth < 0.9999) {
+              float linearDepth = msa_linearizeDepth(deviceDepth);
+              float aboveGround = uGroundDistance - linearDepth;
+              depthOccluder = smoothstep(2.75, 3.25, aboveGround);
+            }
           }
 
           // Derive stable world-space coordinates (Foundry coords, then scene UV)
@@ -899,6 +922,12 @@ export class DistortionManager extends EffectBase {
             }
           }
           
+          // Depth-based occlusion: suppress distortion under elevated surfaces
+          // (tokens, overhead tiles, etc.) that sit above the distortion sources.
+          totalOffset *= (1.0 - depthOccluder);
+          totalMask *= (1.0 - depthOccluder);
+          waterOnlyMask *= (1.0 - depthOccluder);
+
           // Apply roof masking if needed (distortion only under roofs)
           if (uHasRoofAlpha > 0.5) {
             float roofAlpha = texture2D(tRoofAlpha, vUv).a;
@@ -1054,7 +1083,10 @@ export class DistortionManager extends EffectBase {
         uWaterFoamDepthHi: { value: 0.75 },
         uWaterFoamColor: { value: new THREE.Color(0xffffff) },
         uWaterWindDir: { value: new THREE.Vector2(1.0, 0.0) },
-        uWaterWindSpeed: { value: 0.0 }
+        uWaterWindSpeed: { value: 0.0 },
+
+        // Depth pass (shared module uniforms for depth-aware water shading occlusion)
+        ...DepthShaderChunks.createUniforms()
       },
       vertexShader: `
         varying vec2 vUv;
@@ -1173,6 +1205,11 @@ export class DistortionManager extends EffectBase {
         uniform vec3 uWaterFoamColor;
         uniform vec2 uWaterWindDir;
         uniform float uWaterWindSpeed;
+
+        // Depth pass uniforms and helpers for depth-aware water shading occlusion.
+        ${DepthShaderChunks.uniforms}
+        ${DepthShaderChunks.linearize}
+
         varying vec2 vUv;
 
         ${DistortionNoise.simplex2D}
@@ -1335,7 +1372,20 @@ export class DistortionManager extends EffectBase {
           if (uHasWaterOccluderAlpha > 0.5) {
             waterOccluder = texture2D(tWaterOccluderAlpha, vUv).a;
           }
-          float waterVisible = (1.0 - waterOccluder);
+
+          // Depth-based occlusion for the apply pass: suppress water shading
+          // (tint, caustics, murk, foam, sand) under elevated surfaces.
+          float depthOccluder = 0.0;
+          if (uDepthEnabled > 0.5) {
+            float deviceDepth = msa_sampleDeviceDepth(vUv);
+            if (deviceDepth < 0.9999) {
+              float linearDepth = msa_linearizeDepth(deviceDepth);
+              float aboveGround = uGroundDistance - linearDepth;
+              depthOccluder = smoothstep(2.75, 3.25, aboveGround);
+            }
+          }
+
+          float waterVisible = (1.0 - waterOccluder) * (1.0 - depthOccluder);
 
           // Keep perceived distortion stable across zoom levels by scaling the
           // screen-space UV offset. (Zoom out => smaller offset.)
@@ -1942,7 +1992,14 @@ export class DistortionManager extends EffectBase {
     u.uTime.value = timeInfo.elapsed;
     u.uGlobalIntensity.value = this.params.globalIntensity;
 
+    // Bind depth pass uniforms so the composite shader can occlude distortion
+    // for elevated surfaces (tokens, overhead tiles, etc.).
+    DepthShaderChunks.bindDepthPass(u);
+
     if (au) {
+      // Also bind depth pass for the apply shader (water shading occlusion).
+      DepthShaderChunks.bindDepthPass(au);
+
       au.uTime.value = timeInfo.elapsed;
 
       const sceneComposer = window.MapShine?.sceneComposer ?? window.canvas?.mapShine?.sceneComposer;

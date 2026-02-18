@@ -25,6 +25,13 @@ export class GridRenderer {
    */
   constructor(scene) {
     this.scene = scene;
+
+    /**
+     * Sub-rate update lane — grid state changes infrequently, so 5 Hz is sufficient.
+     * Set to 0 or undefined to run every rendered frame.
+     * @type {number}
+     */
+    this.updateHz = 5;
     
     /** @type {THREE.Mesh|null} */
     this.gridMesh = null;

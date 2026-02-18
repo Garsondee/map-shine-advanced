@@ -125,6 +125,44 @@ export class GraphicsSettingsDialog {
       this.manager.saveState();
     });
 
+    // Frame pacing controls (client-local).
+    globalFolder.addBinding(this.manager.state, 'renderAdaptiveFpsEnabled', {
+      label: 'Adaptive Frame Cap'
+    }).on('change', (ev) => {
+      this.manager.setRenderAdaptiveFpsEnabled(ev.value === true);
+      this.manager.saveState();
+    });
+
+    globalFolder.addBinding(this.manager.state, 'renderIdleFps', {
+      label: 'Idle FPS',
+      min: 5,
+      max: 60,
+      step: 1
+    }).on('change', (ev) => {
+      this.manager.setRenderIdleFps(ev.value);
+      this.manager.saveState();
+    });
+
+    globalFolder.addBinding(this.manager.state, 'renderActiveFps', {
+      label: 'Active FPS',
+      min: 5,
+      max: 120,
+      step: 1
+    }).on('change', (ev) => {
+      this.manager.setRenderActiveFps(ev.value);
+      this.manager.saveState();
+    });
+
+    globalFolder.addBinding(this.manager.state, 'renderContinuousFps', {
+      label: 'Continuous FX FPS',
+      min: 5,
+      max: 120,
+      step: 1
+    }).on('change', (ev) => {
+      this.manager.setRenderContinuousFps(ev.value);
+      this.manager.saveState();
+    });
+
     // Compact 2-column button grid (matches Main Config / Control Panel pattern).
     {
       const contentElement = globalFolder?.element?.querySelector?.('.tp-fldv_c') || globalFolder?.element;
@@ -177,6 +215,14 @@ export class GraphicsSettingsDialog {
         scopeNote.style.padding = '4px 6px 2px 6px';
         scopeNote.style.fontStyle = 'italic';
         contentElement.appendChild(scopeNote);
+
+        const framePacingNote = document.createElement('div');
+        framePacingNote.textContent = 'Adaptive Frame Cap: Active = interactions, Continuous = animated effects, Idle = static scene refresh.';
+        framePacingNote.style.fontSize = '10px';
+        framePacingNote.style.opacity = '0.55';
+        framePacingNote.style.padding = '2px 6px 4px 6px';
+        framePacingNote.style.fontStyle = 'italic';
+        contentElement.appendChild(framePacingNote);
       }
     }
 

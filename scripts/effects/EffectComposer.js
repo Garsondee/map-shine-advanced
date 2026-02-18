@@ -53,6 +53,28 @@ export class EffectComposer {
 
     /** @type {Set<Object>} - Objects that need update(timeInfo) called every frame */
     this.updatables = new Set();
+
+    /**
+     * Sub-rate updatable lane tracking.
+     * Maps each updatable with an `updateHz` property to its accumulated delta (seconds).
+     * Updatables without `updateHz` (or updateHz <= 0) run every rendered frame.
+     * @type {Map<Object, number>}
+     */
+    this._updatableAccum = new Map();
+
+    // ── T2-B: Adaptive effect decimation ──────────────────────────────────
+    // Track rolling average frame time and dynamically skip non-critical
+    // effects when budget is exceeded. Hysteresis prevents oscillation.
+    /** @type {number} Rolling exponential average of frame time (ms) */
+    this._avgFrameTimeMs = 0;
+    /** @type {boolean} Currently in degraded (decimation) mode */
+    this._decimationActive = false;
+    /** @type {number} Frame time threshold to enter decimation (ms) */
+    this._decimationEnterMs = 20; // ~50 fps
+    /** @type {number} Frame time threshold to exit decimation (ms) */
+    this._decimationExitMs = 14; // ~71 fps — hysteresis band
+    /** @type {number} EMA smoothing factor (0..1, higher = faster response) */
+    this._decimationAlpha = 0.1;
     
     /** @type {GPUCapabilities} */
     this.capabilities = null;
@@ -395,6 +417,7 @@ export class EffectComposer {
    */
   removeUpdatable(updatable) {
     this.updatables.delete(updatable);
+    this._updatableAccum.delete(updatable);
   }
 
   /**
@@ -439,6 +462,7 @@ export class EffectComposer {
    * @param {number} deltaTime - Time since last frame in seconds (from RenderLoop, informational only)
    */
   render(deltaTime) {
+    const _frameStartMs = performance.now(); // T2-B: measure frame time for decimation
     const effects = this.resolveRenderOrder();
 
     // Update centralized time (single source of truth)
@@ -518,8 +542,23 @@ export class EffectComposer {
     }
 
     // Update registered updatables (managers, etc.)
+    // Sub-rate lanes: updatables with an `updateHz` property only run when their
+    // accumulated delta exceeds the interval (1/updateHz). This avoids running
+    // slow-changing systems at the full render rate.
     for (const updatable of this.updatables) {
       try {
+        const hz = updatable.updateHz;
+        if (hz > 0) {
+          const accum = (this._updatableAccum.get(updatable) || 0) + timeInfo.delta;
+          const interval = 1.0 / hz;
+          if (accum < interval) {
+            this._updatableAccum.set(updatable, accum);
+            continue; // skip this frame — not enough time has accumulated
+          }
+          // Reset accumulator (keep remainder for smooth pacing)
+          this._updatableAccum.set(updatable, accum % interval);
+        }
+
         let t0 = 0;
         if (doProfile) t0 = performance.now();
         updatable.update(timeInfo);
@@ -608,6 +647,7 @@ export class EffectComposer {
       // Depth pass debug overlay — renders depth visualization to screen when enabled
       this._renderDepthDebugOverlay();
       if (doProfile) profiler.endFrame();
+      this._updateDecimationState(performance.now() - _frameStartMs); // T2-B
       return;
     }
 
@@ -682,6 +722,7 @@ export class EffectComposer {
     // Depth pass debug overlay — renders depth visualization to screen when enabled
     this._renderDepthDebugOverlay();
     if (doProfile) profiler.endFrame();
+    this._updateDecimationState(performance.now() - _frameStartMs); // T2-B
   }
 
   /**
@@ -884,7 +925,15 @@ export class EffectComposer {
   }
 
   /**
-   * Determine if effect should render this frame (performance gating)
+   * Determine if effect should render this frame (performance gating).
+   * Combines static GPU-tier gating with dynamic frame-time decimation (T2-B).
+   *
+   * When the rolling average frame time exceeds _decimationEnterMs, non-critical
+   * effects are skipped on alternating frames. The system exits decimation when
+   * the average drops below _decimationExitMs (hysteresis prevents oscillation).
+   *
+   * Disable via: window.MapShine.renderAdaptiveDecimation = false
+   *
    * @param {EffectBase} effect - Effect to check
    * @param {TimeInfo} timeInfo - Current time information
    * @returns {boolean} Whether to render
@@ -892,9 +941,9 @@ export class EffectComposer {
    */
   shouldRenderThisFrame(effect, timeInfo) {
     // Always render critical effects
-    if (effect.alwaysRender) return true;
+    if (effect.alwaysRender || effect.noFrameSkip) return true;
 
-    // Skip expensive effects on low-tier GPUs if framerate is struggling
+    // Static GPU-tier gating (unchanged)
     if (this.capabilities && this.capabilities.tier === 'low') {
       if (effect.requiredTier === 'high') return false;
       if (effect.requiredTier === 'medium' && timeInfo.frameCount % 2 !== 0) {
@@ -902,7 +951,44 @@ export class EffectComposer {
       }
     }
 
+    // T2-B: Dynamic frame-time decimation
+    const adaptiveEnabled = window.MapShine?.renderAdaptiveDecimation !== false;
+    if (adaptiveEnabled && this._decimationActive) {
+      // In decimation mode: skip medium-tier effects every other frame
+      if (effect.requiredTier === 'medium' && timeInfo.frameCount % 2 !== 0) {
+        return false;
+      }
+      // Skip high-tier effects every other frame too
+      if (effect.requiredTier === 'high' && timeInfo.frameCount % 2 !== 0) {
+        return false;
+      }
+    }
+
     return true;
+  }
+
+  /**
+   * Update the rolling frame time average and decimation state.
+   * Called once per rendered frame from render().
+   * @param {number} frameTimeMs - Total frame time in milliseconds
+   * @private
+   */
+  _updateDecimationState(frameTimeMs) {
+    if (window.MapShine?.renderAdaptiveDecimation === false) {
+      this._decimationActive = false;
+      return;
+    }
+
+    // Exponential moving average
+    const alpha = this._decimationAlpha;
+    this._avgFrameTimeMs = this._avgFrameTimeMs * (1 - alpha) + frameTimeMs * alpha;
+
+    // Hysteresis: enter at high threshold, exit at low threshold
+    if (!this._decimationActive && this._avgFrameTimeMs > this._decimationEnterMs) {
+      this._decimationActive = true;
+    } else if (this._decimationActive && this._avgFrameTimeMs < this._decimationExitMs) {
+      this._decimationActive = false;
+    }
   }
 
   /**

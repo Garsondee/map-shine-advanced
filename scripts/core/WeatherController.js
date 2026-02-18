@@ -42,6 +42,24 @@ export const PrecipitationType = {
 
 export class WeatherController {
   constructor() {
+    /**
+     * Sub-rate update lane — weather state math (transition lerp, noise, wetness)
+     * doesn't need full render rate. 15 Hz is sufficient for smooth transitions.
+     * Set to 0 or undefined to run every rendered frame.
+     * @type {number}
+     */
+    this.updateHz = 15;
+
+    /**
+     * Static fast-path flag. When weather is idle (no transition, no dynamic,
+     * no variability), we snap target→current once and skip all per-frame work
+     * until something changes. Cleared by transitionTo(), setVariability(),
+     * setDynamicEnabled(), etc.
+     * @type {boolean}
+     * @private
+     */
+    this._staticSnapped = false;
+
     /** @type {WeatherState} */
     this.currentState = {
       precipitation: 0.0,
@@ -614,6 +632,21 @@ export class WeatherController {
     const dt = Math.min(timeInfo.delta, 0.25);
     const elapsed = timeInfo.elapsed;
 
+    // Static fast-path: when weather is idle (no transition, no dynamic, no
+    // variability), snap target→current once and then early-return on
+    // subsequent frames. This avoids per-frame noise, wetness, and output
+    // recalculation when nothing is changing.
+    if (!this.isTransitioning && this.dynamicEnabled !== true && this.variability <= 0) {
+      if (!this._staticSnapped) {
+        this._copyState(this.targetState, this.currentState);
+        this._updateWetness(dt);
+        this._updateEnvironmentOutputs();
+        this._staticSnapped = true;
+      }
+      return;
+    }
+    this._staticSnapped = false;
+
     if (this._canEditSceneFlags()) {
       this._weatherSnapshotPersistTimer += dt;
       if (this._weatherSnapshotPersistTimer >= this._weatherSnapshotPersistIntervalSeconds) {
@@ -926,6 +959,7 @@ export class WeatherController {
   setDynamicEnabled(enabled) {
     const next = !!enabled;
     if (next === this.dynamicEnabled) return;
+    this._staticSnapped = false; // Break static fast-path when dynamic mode changes
 
     if (next) {
       this._ensureDynamicSeed();
@@ -2167,6 +2201,7 @@ export class WeatherController {
    * @param {number} duration - Seconds
    */
   transitionTo(targetState, duration = 5.0) {
+    this._staticSnapped = false; // Break static fast-path on any transition
     const durArg = Number(duration);
     const safeDuration = Number.isFinite(durArg) ? Math.max(0.1, durArg) : 5.0;
     log.info(`Transitioning weather over ${safeDuration}s`);
@@ -2239,6 +2274,7 @@ export class WeatherController {
    */
   setVariability(value) {
     this.variability = THREE.MathUtils.clamp(value, 0, 1);
+    this._staticSnapped = false; // Break static fast-path when variability changes
   }
 
   /**

@@ -115,6 +115,13 @@ export class LightEditorTweakpane {
   constructor(overlayManager) {
     this.overlayManager = overlayManager;
 
+    /**
+     * Sub-rate update lane — light editor overlay only matters when open; 15 Hz is sufficient.
+     * Set to 0 or undefined to run every rendered frame.
+     * @type {number}
+     */
+    this.updateHz = 15;
+
     /** @type {{type:'foundry'|'enhanced', id:string}|null} */
     this.current = null;
 

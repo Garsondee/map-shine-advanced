@@ -624,9 +624,12 @@ export class DistortionManager extends EffectBase {
         uWaterShoreNoiseEnabled: { value: 0.0 },
         uWaterShoreNoiseStrengthPx: { value: 2.25 },
         uWaterShoreNoiseFrequency: { value: 220.0 },
-        uWaterShoreNoiseSpeed: { value: 0.65 },
-        uWaterShoreNoiseFadeLo: { value: 0.06 },
-        uWaterShoreNoiseFadeHi: { value: 0.28 },
+        uWaterShoreNoiseSpeed: { value: 0.8 },
+        uWaterShoreNoiseFadeLo: { value: 0.0 },
+        uWaterShoreNoiseFadeHi: { value: 0.25 },
+        uWaterShoreNoiseCurlStrength: { value: 0.6 },
+        uWaterShoreNoiseWashStrength: { value: 0.45 },
+        uWaterShoreNoiseWashSpeed: { value: 0.8 },
 
         // Water occluder alpha (screen-space)
         tWaterOccluderAlpha: { value: null },
@@ -691,6 +694,9 @@ export class DistortionManager extends EffectBase {
         uniform float uWaterShoreNoiseSpeed;
         uniform float uWaterShoreNoiseFadeLo;
         uniform float uWaterShoreNoiseFadeHi;
+        uniform float uWaterShoreNoiseCurlStrength;
+        uniform float uWaterShoreNoiseWashStrength;
+        uniform float uWaterShoreNoiseWashSpeed;
 
         // Water occluder alpha (screen-space)
         uniform sampler2D tWaterOccluderAlpha;
@@ -783,17 +789,92 @@ export class DistortionManager extends EffectBase {
           return smoothstep(0.52, 0.48, sdf01);
         }
 
-        vec2 shoreMicroNoise(vec2 uv, float time, float frequency, float speed) {
-          // High-frequency, map-pinned noise. No rejection sampling; just a few octaves.
+        // 2D curl noise — divergence-free vector field from the gradient of a scalar
+        // noise potential. Produces realistic fluid-like swirling motion without the
+        // convergence/divergence artifacts of raw simplex FBM.
+        // curl(N) = (dN/dy, -dN/dx)
+        vec2 curlNoise2D(vec2 p, float t, float eps) {
+          float n0 = snoise(p + vec2(t, 0.0));
+          float nX = snoise(vec2(p.x + eps, p.y) + vec2(t, 0.0));
+          float nY = snoise(vec2(p.x, p.y + eps) + vec2(t, 0.0));
+          float dNdx = (nX - n0) / eps;
+          float dNdy = (nY - n0) / eps;
+          return vec2(dNdy, -dNdx);
+        }
+
+        // Multi-layer shore distortion with physically-motivated components.
+        // shoreNormal: unit vector pointing from land into water (perpendicular to shore)
+        // shoreDist01: 0 at shore edge, increases into the interior
+        vec2 shoreDistortion(vec2 uv, float time, float frequency, float speed,
+                             vec2 shoreNormal, float shoreDist01,
+                             float curlStrength, float washStrength, float washSpeed) {
           vec2 p = uv * frequency;
           float t = time * speed;
-          float n1 = snoise(p + vec2(t * 0.90, -t * 0.75));
-          float n2 = snoise(p * 1.9 + vec2(-t * 1.10, t * 0.95));
-          float n3 = snoise(p * 3.7 + vec2(t * 1.55, t * 1.25));
-          // Return a 2D offset (not scalar) so it reads like chaotic surface turbulence.
-          float nx = n1 * 0.60 + n2 * 0.28 + n3 * 0.12;
-          float ny = n1 * 0.25 + n2 * 0.55 + n3 * 0.20;
-          return vec2(nx, ny);
+
+          // === Domain warp: low-frequency displacement breaks visible tiling ===
+          float warpN = snoise(p * 0.07 + vec2(t * 0.03, -t * 0.02));
+          vec2 warpedP = p + vec2(warpN * 0.5, warpN * 0.35);
+
+          // === Layer 1: Curl Turbulence ===
+          // Multi-scale divergence-free swirls — the signature of real turbulent water.
+          // Larger eddies at low frequency, tighter vortices at high frequency.
+          // Eps scales with octave so the gradient stays well-sampled.
+          vec2 curl1 = curlNoise2D(warpedP * 0.25, t * 0.35, 0.25);
+          vec2 curl2 = curlNoise2D(warpedP * 0.7, t * 0.6 + 42.0, 0.15);
+          vec2 curlTotal = curl1 * 0.6 + curl2 * 0.4;
+
+          // === Layer 2: Raw FBM turbulence (classic approach) ===
+          // When curlStrength is low, fall back to traditional multi-octave noise.
+          float n1 = snoise(warpedP + vec2(t * 0.9, -t * 0.75));
+          float n2 = snoise(warpedP * 1.9 + vec2(-t * 1.1, t * 0.95));
+          float n3 = snoise(warpedP * 3.7 + vec2(t * 1.55, t * 1.25));
+          vec2 rawNoise = vec2(
+            n1 * 0.55 + n2 * 0.30 + n3 * 0.15,
+            n1 * 0.25 + n2 * 0.50 + n3 * 0.25
+          );
+
+          // Blend between curl (physically correct) and raw (classic) based on user param.
+          float cs = clamp(curlStrength, 0.0, 1.0);
+          vec2 turbulence = mix(rawNoise, curlTotal, cs);
+
+          // === Layer 3: Shore Wash ===
+          // Perpendicular to the shore: simulates waves lapping in and receding.
+          // Phase offset by shore distance creates the rolling look of approaching waves.
+          // Compound wave frequencies for realistic irregular rhythm.
+          float washPhase = time * washSpeed;
+          float wash = sin(washPhase * 2.5 + shoreDist01 * 18.0) * 0.55
+                     + sin(washPhase * 1.3 + shoreDist01 * 9.0 + 1.7) * 0.30
+                     + sin(washPhase * 4.1 + shoreDist01 * 28.0 + 3.2) * 0.15;
+          // Spatial variation along the shore so wash isn't uniform.
+          float washVar = 0.7 + 0.3 * snoise(uv * frequency * 0.12 + vec2(t * 0.05));
+          vec2 washOffset = shoreNormal * wash * washVar;
+
+          // === Layer 4: Longshore Drift ===
+          // Shore-parallel current — subtle sideways motion along the coastline.
+          vec2 tangent = vec2(-shoreNormal.y, shoreNormal.x);
+          float drift = snoise(uv * frequency * 0.3 + vec2(t * 0.25, -t * 0.15));
+          vec2 driftOffset = tangent * drift * 0.35;
+
+          // === Layer 5: Foam Churn Micro-Detail ===
+          // High-frequency chaotic displacement strongest right at the shore edge,
+          // fading quickly into deeper water for a natural foam-zone look.
+          float churnFade = 1.0 - smoothstep(0.0, 0.3, shoreDist01);
+          vec2 churn = vec2(
+            snoise(warpedP * 3.2 + vec2(t * 1.4, -t * 1.1)),
+            snoise(warpedP * 4.8 + vec2(-t * 0.9, t * 1.7))
+          ) * 0.25 * churnFade;
+
+          // === Combine all layers ===
+          vec2 result = turbulence
+                      + washOffset * washStrength
+                      + driftOffset * (1.0 - cs * 0.3)
+                      + churn;
+
+          // === Wave Set Pulsing ===
+          // Slow amplitude modulation simulating groups of stronger/weaker waves.
+          float pulse = 0.8 + 0.2 * sin(time * 0.25 + shoreDist01 * 8.0);
+
+          return result * pulse;
         }
         
         void main() {
@@ -857,15 +938,10 @@ export class DistortionManager extends EffectBase {
               ? blur5TapMask(tWaterMask, waterUv, stepUv) * sceneInBounds
               : waterMaskHard;
 
-            // If the mask contains low non-zero values outside the intended water area,
-            // blurring can cause distortion to "leak" across the scene.
-            // We also want edges to be soft, so use a wider threshold window which
-            // expands slightly with edge softness.
-            float wm = clamp(waterMask, 0.0, 1.0);
-            float softness01 = clamp(blurTexels / 16.0, 0.0, 1.0);
-            float edgeLo = 0.02;
-            float edgeHi = mix(0.18, 0.35, softness01);
-            waterMask = smoothstep(edgeLo, edgeHi, wm);
+            // Use the mask value directly: brighter white = stronger water effect.
+            // A small noise floor prevents sub-pixel leakage from blur or
+            // low non-zero values outside the intended water area.
+            waterMask = clamp(waterMask, 0.0, 1.0) * step(0.01, waterMask);
 
             // Suppress water anywhere a tile pixel is opaque (boats etc.).
             // This keeps tiles without any _Water mask treated as non-water.
@@ -889,14 +965,19 @@ export class DistortionManager extends EffectBase {
               float hi = clamp(max(uWaterShoreNoiseFadeLo, uWaterShoreNoiseFadeHi), lo + 1e-4, 1.0);
 
               float shoreBand = 0.0;
+              float sdf01 = 0.5;
+              float exposure01 = 0.0;
+              bool hasWD = false;
+
               if (uHasWaterData > 0.5) {
                 vec4 wd = texture2D(tWaterData, sceneUv);
-                float sdf01 = wd.r;
-                float exposure01 = wd.g;
+                sdf01 = wd.r;
+                exposure01 = wd.g;
                 float inside = waterInsideFromSdf(sdf01);
 
                 // 1 at the boundary, fades to 0 into the interior.
                 shoreBand = (1.0 - smoothstep(lo, hi, clamp(exposure01, 0.0, 1.0))) * inside;
+                hasWD = true;
               } else {
                 // Use a fixed small blur for band derivation so it works even when the main
                 // water distortion edge softness is 0.
@@ -912,13 +993,40 @@ export class DistortionManager extends EffectBase {
               // Ensure it's strictly inside water and respects tile-driven occlusion.
               shoreBand *= waterMask;
 
-              // Convert pixel amplitude to UV amplitude for resolution stability.
-              vec2 texel = 1.0 / max(uResolution, vec2(1.0));
-              float px = clamp(uWaterShoreNoiseStrengthPx, 0.0, 64.0);
-              float ampUv = px * max(texel.x, texel.y);
-              vec2 micro = shoreMicroNoise(waterUv, uTime, max(0.01, uWaterShoreNoiseFrequency), uWaterShoreNoiseSpeed);
-              totalOffset += micro * ampUv * shoreBand;
-              totalMask = max(totalMask, shoreBand);
+              // Compute shore normal from SDF gradient BEFORE the per-pixel early-out
+              // so dFdx/dFdy always execute in uniform control flow (safe across quads).
+              vec2 shoreNormal = vec2(0.0, 1.0);
+              if (hasWD) {
+                // Screen-space derivatives of the SDF give the shore direction.
+                // SDF gradient points from water (low) toward land (high);
+                // negate to get a vector pointing INTO the water body.
+                float dSdx = dFdx(sdf01);
+                float dSdy = dFdy(sdf01);
+                float gradLen = length(vec2(dSdx, dSdy));
+                if (gradLen > 1e-6) {
+                  shoreNormal = vec2(-dSdx, -dSdy) / gradLen;
+                }
+              }
+
+              // Early-out: skip expensive noise for pixels far from shore.
+              if (shoreBand > 0.001) {
+                // Convert pixel amplitude to UV amplitude for resolution stability.
+                vec2 texel = 1.0 / max(uResolution, vec2(1.0));
+                float px = clamp(uWaterShoreNoiseStrengthPx, 0.0, 64.0);
+                float ampUv = px * max(texel.x, texel.y);
+
+                vec2 micro = shoreDistortion(
+                  waterUv, uTime,
+                  max(0.01, uWaterShoreNoiseFrequency),
+                  uWaterShoreNoiseSpeed,
+                  shoreNormal, clamp(exposure01, 0.0, 1.0),
+                  uWaterShoreNoiseCurlStrength,
+                  uWaterShoreNoiseWashStrength,
+                  uWaterShoreNoiseWashSpeed
+                );
+                totalOffset += micro * ampUv * shoreBand;
+                totalMask = max(totalMask, shoreBand);
+              }
             }
           }
           
@@ -2131,8 +2239,20 @@ export class DistortionManager extends EffectBase {
         u.uWaterShoreNoiseFadeLo.value = Math.max(0.0, Math.min(1.0, v));
       }
       if (u.uWaterShoreNoiseFadeHi) {
-        const v = Number.isFinite(waterSource.params?.shoreNoiseFadeHi) ? waterSource.params.shoreNoiseFadeHi : 0.28;
+        const v = Number.isFinite(waterSource.params?.shoreNoiseFadeHi) ? waterSource.params.shoreNoiseFadeHi : 0.25;
         u.uWaterShoreNoiseFadeHi.value = Math.max(0.0, Math.min(1.0, v));
+      }
+      if (u.uWaterShoreNoiseCurlStrength) {
+        const v = Number.isFinite(waterSource.params?.shoreNoiseCurlStrength) ? waterSource.params.shoreNoiseCurlStrength : 0.6;
+        u.uWaterShoreNoiseCurlStrength.value = Math.max(0.0, Math.min(1.0, v));
+      }
+      if (u.uWaterShoreNoiseWashStrength) {
+        const v = Number.isFinite(waterSource.params?.shoreNoiseWashStrength) ? waterSource.params.shoreNoiseWashStrength : 0.45;
+        u.uWaterShoreNoiseWashStrength.value = Math.max(0.0, Math.min(1.0, v));
+      }
+      if (u.uWaterShoreNoiseWashSpeed) {
+        const v = Number.isFinite(waterSource.params?.shoreNoiseWashSpeed) ? waterSource.params.shoreNoiseWashSpeed : 0.8;
+        u.uWaterShoreNoiseWashSpeed.value = Math.max(0.0, v);
       }
     } else {
       u.uWaterEnabled.value = 0.0;
@@ -2147,8 +2267,11 @@ export class DistortionManager extends EffectBase {
       if (u.uWaterShoreNoiseStrengthPx) u.uWaterShoreNoiseStrengthPx.value = 0.0;
       if (u.uWaterShoreNoiseFrequency) u.uWaterShoreNoiseFrequency.value = 220.0;
       if (u.uWaterShoreNoiseSpeed) u.uWaterShoreNoiseSpeed.value = 0.65;
-      if (u.uWaterShoreNoiseFadeLo) u.uWaterShoreNoiseFadeLo.value = 0.06;
-      if (u.uWaterShoreNoiseFadeHi) u.uWaterShoreNoiseFadeHi.value = 0.28;
+      if (u.uWaterShoreNoiseFadeLo) u.uWaterShoreNoiseFadeLo.value = 0.0;
+      if (u.uWaterShoreNoiseFadeHi) u.uWaterShoreNoiseFadeHi.value = 0.25;
+      if (u.uWaterShoreNoiseCurlStrength) u.uWaterShoreNoiseCurlStrength.value = 0.6;
+      if (u.uWaterShoreNoiseWashStrength) u.uWaterShoreNoiseWashStrength.value = 0.45;
+      if (u.uWaterShoreNoiseWashSpeed) u.uWaterShoreNoiseWashSpeed.value = 0.8;
     }
 
     // Water chromatic refraction (apply pass)

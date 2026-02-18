@@ -39,6 +39,13 @@ export class InteractionManager {
     this.wallManager = wallManager;
     this.lightIconManager = lightIconManager;
 
+    /**
+     * Sub-rate update lane — HUD positioning and gizmo updates are smooth at 30 Hz.
+     * Set to 0 or undefined to run every rendered frame.
+     * @type {number}
+     */
+    this.updateHz = 30;
+
     this.raycaster = new THREE.Raycaster();
     this.mouse = new THREE.Vector2();
 

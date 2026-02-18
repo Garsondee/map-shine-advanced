@@ -64,10 +64,36 @@ export class FrameCoordinator {
       perceptionUpdateCallsPerSec: 0
     };
 
-    this._perceptionUpdateMinIntervalMs = 100;
+    /**
+     * T3-A: Adaptive perception update interval.
+     * Fast (50ms) during active camera/token motion, slow (200ms) when idle.
+     * Call requestActivePerception() to temporarily switch to the fast rate.
+     * @type {number} Current minimum interval between perception updates (ms)
+     */
+    this._perceptionUpdateMinIntervalMs = 200;
+    /** @type {number} Fast interval for active state (ms) */
+    this._perceptionActiveIntervalMs = 50;
+    /** @type {number} Slow interval for idle state (ms) */
+    this._perceptionIdleIntervalMs = 200;
+    /** @type {number} Timestamp when active perception was last requested (ms) */
+    this._perceptionActiveUntilMs = 0;
+    /** @type {number} Duration to stay in active mode after last request (ms) */
+    this._perceptionActiveDurationMs = 500;
+
     this._lastPerceptionUpdateTime = 0;
     this._perceptionUpdateWindowStart = 0;
     this._perceptionUpdateWindowCalls = 0;
+
+    /**
+     * T2-C: Sync callback throttle. Sync callbacks pull Foundry state for
+     * Three.js rendering — they only need to run at approximately the Three.js
+     * render rate, not every PIXI tick. PostPixi callbacks (fog/vision sync)
+     * remain ungated since they are critical.
+     * @type {number} Max Hz for sync callback execution
+     */
+    this._syncThrottleHz = 30;
+    /** @type {number} Timestamp of last sync callback execution (ms) */
+    this._lastSyncRunMs = 0;
   }
 
   /**
@@ -166,9 +192,24 @@ export class FrameCoordinator {
    * Force Foundry's perception system to update
    * Call this when camera moves significantly to ensure vision is current
    */
+  /**
+   * T3-A: Signal that perception updates should use the fast interval.
+   * Call this during camera pan, token drag, or other active interactions.
+   * The fast rate auto-decays after _perceptionActiveDurationMs.
+   */
+  requestActivePerception() {
+    this._perceptionActiveUntilMs = performance.now() + this._perceptionActiveDurationMs;
+  }
+
   forcePerceptionUpdate() {
     try {
       const now = performance.now();
+
+      // T3-A: Adapt interval based on activity state
+      this._perceptionUpdateMinIntervalMs = (now < this._perceptionActiveUntilMs)
+        ? this._perceptionActiveIntervalMs
+        : this._perceptionIdleIntervalMs;
+
       if (this._lastPerceptionUpdateTime && (now - this._lastPerceptionUpdateTime) < this._perceptionUpdateMinIntervalMs) {
         this._metrics.perceptionUpdateSkipped++;
 
@@ -230,12 +271,19 @@ export class FrameCoordinator {
       this._captureFrameState();
       
       // Step 2: Run sync callbacks (managers pulling Foundry state)
+      // T2-C: Throttle sync callbacks — they only need to run at ~render rate,
+      // not every PIXI tick. PostPixi callbacks remain ungated.
       const syncStart = performance.now();
-      for (const callback of this._syncCallbacks) {
-        try {
-          callback(this._frameState);
-        } catch (e) {
-          log.error('Sync callback error:', e);
+      const syncInterval = this._syncThrottleHz > 0 ? (1000 / this._syncThrottleHz) : 0;
+      const runSync = syncInterval <= 0 || (syncStart - this._lastSyncRunMs) >= syncInterval;
+      if (runSync) {
+        this._lastSyncRunMs = syncStart;
+        for (const callback of this._syncCallbacks) {
+          try {
+            callback(this._frameState);
+          } catch (e) {
+            log.error('Sync callback error:', e);
+          }
         }
       }
       

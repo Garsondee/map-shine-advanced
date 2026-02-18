@@ -36,6 +36,13 @@ export class OverlayUIManager {
     this.canvasElement = canvasElement;
     this.sceneComposer = sceneComposer;
 
+    /**
+     * Sub-rate update lane — DOM overlay projection is expensive; 30 Hz is visually smooth.
+     * Set to 0 or undefined to run every rendered frame.
+     * @type {number}
+     */
+    this.updateHz = 30;
+
     /** @type {HTMLElement|null} */
     this.root = null;
 

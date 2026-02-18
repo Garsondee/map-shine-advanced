@@ -26,6 +26,9 @@ export class BloomEffect extends EffectBase {
     // Scene -> Bloom -> ToneMapping -> Screen
     this.priority = 50; 
     this.alwaysRender = false;
+    // Bloom is visually unstable when frame-skipped (alternating bright/dim frames).
+    // Keep it out of adaptive decimation and low-tier frame skipping.
+    this.noFrameSkip = true;
     
     // Internal pass
     this.pass = null;

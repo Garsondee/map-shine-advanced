@@ -57,6 +57,14 @@ export class TokenManager {
     // }>
     this.activeAnimations = new Map();
 
+    /**
+     * Sub-rate update lane — tint changes slowly and token animations are delta-driven,
+     * so 15 Hz is sufficient for the per-frame update loop.
+     * Set to 0 or undefined to run every rendered frame.
+     * @type {number}
+     */
+    this.updateHz = 15;
+
     this._globalTint = null;
     this._daylightTint = null;
     this._darknessTint = null;
@@ -470,6 +478,60 @@ vec3 ms_applyWindowLight(vec3 color) {
    */
   setMovementManager(manager) {
     this.movementManager = manager || null;
+    this._reapplyMovementStyleBaselines();
+  }
+
+  /**
+   * Re-apply movement-style baseline transforms for all live token sprites.
+   *
+   * This is especially important during startup/scene activation where token
+   * sprites may be created before TokenMovementManager is wired, leaving flying
+   * tokens grounded (or with stale scale/pose) until the first move update.
+   * @private
+   */
+  _reapplyMovementStyleBaselines() {
+    for (const spriteData of this.tokenSprites.values()) {
+      const sprite = spriteData?.sprite;
+      const tokenDoc = spriteData?.tokenDoc;
+      if (!sprite || !tokenDoc || sprite.userData?._removed) continue;
+      this._applyMovementStyleBaseline(sprite, tokenDoc);
+    }
+  }
+
+  /**
+   * Apply the current movement-style baseline pose for a single token.
+   * Falls back to TokenManager's transform logic when movement manager is
+   * unavailable or declines handling.
+   * @param {THREE.Sprite} sprite
+   * @param {TokenDocument|object} tokenDoc
+   * @private
+   */
+  _applyMovementStyleBaseline(sprite, tokenDoc) {
+    if (!sprite || !tokenDoc) return;
+
+    const movementManager = this.movementManager;
+    if (!movementManager?.handleTokenSpriteUpdate) {
+      this.updateSpriteTransform(sprite, tokenDoc, false);
+      return;
+    }
+
+    try {
+      const handled = !!movementManager.handleTokenSpriteUpdate({
+        sprite,
+        tokenDoc,
+        targetDoc: tokenDoc,
+        changes: {},
+        options: {},
+        animate: false,
+        fallback: () => this.updateSpriteTransform(sprite, tokenDoc, false)
+      });
+      if (!handled) {
+        this.updateSpriteTransform(sprite, tokenDoc, false);
+      }
+    } catch (error) {
+      log.warn(`Failed to apply movement baseline for token ${tokenDoc.id}`, error);
+      this.updateSpriteTransform(sprite, tokenDoc, false);
+    }
   }
 
   /**
@@ -891,6 +953,10 @@ vec3 ms_applyWindowLight(vec3 color) {
       targetPipSignature: ''
     };
     this.tokenSprites.set(tokenDoc.id, spriteData);
+
+    // Apply current movement-style baseline immediately so startup/scene-load
+    // tokens do not wait for the first movement hook to get correct style pose.
+    this._applyMovementStyleBaseline(sprite, tokenDoc);
 
     this._updateTokenBorderVisibility(spriteData);
     this._updateNameLabelVisibility(spriteData);

@@ -163,6 +163,13 @@ export class DetectionFilterEffect {
     this.visibilityController = visibilityController;
 
     /**
+     * Sub-rate update lane — detection state changes infrequently, 15 Hz is smooth enough.
+     * Set to 0 or undefined to run every rendered frame.
+     * @type {number}
+     */
+    this.updateHz = 15;
+
+    /**
      * Active indicators keyed by tokenId.
      * @type {Map<string, {mesh: THREE.Mesh, filterType: string}>}
      */

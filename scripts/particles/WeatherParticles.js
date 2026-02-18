@@ -1473,6 +1473,12 @@ class FoamPlumeBehavior {
       const hi = Math.max(s0, s1);
       particle._foamSpinSpeed = lo + (hi - lo) * Math.random();
     }
+    // Random UV flips: each particle independently mirrors X and/or Y so the
+    // same foam.webp graphic produces four visually distinct orientations.
+    if (typeof particle._foamFlipX !== 'number') {
+      particle._foamFlipX = Math.random() < 0.5 ? -1.0 : 1.0;
+      particle._foamFlipY = Math.random() < 0.5 ? -1.0 : 1.0;
+    }
   }
 
   update(particle, delta, system) {
@@ -1485,6 +1491,9 @@ class FoamPlumeBehavior {
     const scale = this.startScale + (this.maxScale - this.startScale) * g;
     if (particle.size && particle._foamBaseSize) {
       particle.size.copy(particle._foamBaseSize).multiplyScalar(scale);
+      // Apply random X/Y flips for visual variety (negative size = mirrored UV).
+      if (particle._foamFlipX === -1.0) particle.size.x *= -1.0;
+      if (particle._foamFlipY === -1.0) particle.size.y *= -1.0;
     }
 
     const pt = Math.max(0.01, Math.min(0.6, this.peakTime));
@@ -1558,6 +1567,19 @@ export class WeatherParticles {
     this.foamFleckTexture = this._createFoamFleckTexture();
     this.enabled = true;
     this._time = 0;
+
+    /**
+     * Control-rate throttle for expensive per-frame work (emission bounds,
+     * sizing, emission rates, uniform updates). The particle simulation itself
+     * (batchRenderer.update) runs every frame in ParticleSystem; only the
+     * control recalculation is throttled here.
+     * @type {number} Target Hz for the slow control path
+     */
+    this._controlHz = 20;
+    /** @type {number} Accumulated time since last control update (seconds) */
+    this._controlAccum = 0;
+    /** @type {boolean} Whether a full control update has run at least once */
+    this._controlInitialized = false;
 
     this._splashShape = null;
 
@@ -2970,7 +2992,7 @@ export class WeatherParticles {
       material: foamMaterial,
       renderOrder: 50,
       renderMode: RenderMode.BillBoard,
-      startRotation: new ConstantValue(0),
+      startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [foamPlumeBehavior, killBehavior]
     });
 
@@ -3414,7 +3436,28 @@ export class WeatherParticles {
       uFoamRadialInnerOpacity: { value: 1.0 },
       uFoamRadialMidOpacity: { value: 1.0 },
       uFoamRadialOuterOpacity: { value: 1.0 },
-      uFoamRadialCurve: { value: 1.0 }
+      uFoamRadialCurve: { value: 1.0 },
+
+      // Foam plume GPU curl displacement (option 3): displace the rendered
+      // billboards in the vertex shader using the same curl basis controls as
+      // WaterEffectV2 foam (curl strength/scale/speed + wind advection).
+      uFoamCurlDisplaceEnabled: { value: 0.0 },
+      uFoamCurlDisplaceUv: { value: 0.006 },
+      uFoamCurlAmount: { value: 1.0 },
+      uFoamCurlStrength: { value: 0.0 },
+      uFoamCurlScale: { value: 1.0 },
+      uFoamCurlSpeed: { value: 0.0 },
+      uFoamCurlDirectionality: { value: 0.0 },
+      uFoamCurlDerivativeEpsilon: { value: 0.02 },
+      uFoamCurlLacunarity: { value: 2.0 },
+      uFoamCurlGain: { value: 0.55 },
+      uFoamCurlOctaveWeights: { value: new THREE.Vector4(1.1, 0.605, 0.33275, 0.183) },
+      uFoamCurlWindOffsetInfluence: { value: 0.5 },
+      uFoamCurlWindAdvection: { value: 1.0 },
+      uFoamCurlMaxUv: { value: 0.04 },
+      uFoamWindDir: { value: new THREE.Vector2(1.0, 0.0) },
+      uFoamWindOffsetUv: { value: new THREE.Vector2(0.0, 0.0) },
+      uFoamWindTime: { value: 0.0 }
     };
 
     // Upgrade older cached uniform packs in-place.
@@ -3429,6 +3472,23 @@ export class WeatherParticles {
     if (!uniforms.uFoamRadialMidOpacity) uniforms.uFoamRadialMidOpacity = { value: 1.0 };
     if (!uniforms.uFoamRadialOuterOpacity) uniforms.uFoamRadialOuterOpacity = { value: 1.0 };
     if (!uniforms.uFoamRadialCurve) uniforms.uFoamRadialCurve = { value: 1.0 };
+    if (!uniforms.uFoamCurlDisplaceEnabled) uniforms.uFoamCurlDisplaceEnabled = { value: 0.0 };
+    if (!uniforms.uFoamCurlDisplaceUv) uniforms.uFoamCurlDisplaceUv = { value: 0.006 };
+    if (!uniforms.uFoamCurlAmount) uniforms.uFoamCurlAmount = { value: 1.0 };
+    if (!uniforms.uFoamCurlStrength) uniforms.uFoamCurlStrength = { value: 0.0 };
+    if (!uniforms.uFoamCurlScale) uniforms.uFoamCurlScale = { value: 1.0 };
+    if (!uniforms.uFoamCurlSpeed) uniforms.uFoamCurlSpeed = { value: 0.0 };
+    if (!uniforms.uFoamCurlDirectionality) uniforms.uFoamCurlDirectionality = { value: 0.0 };
+    if (!uniforms.uFoamCurlDerivativeEpsilon) uniforms.uFoamCurlDerivativeEpsilon = { value: 0.02 };
+    if (!uniforms.uFoamCurlLacunarity) uniforms.uFoamCurlLacunarity = { value: 2.0 };
+    if (!uniforms.uFoamCurlGain) uniforms.uFoamCurlGain = { value: 0.55 };
+    if (!uniforms.uFoamCurlOctaveWeights) uniforms.uFoamCurlOctaveWeights = { value: new THREE.Vector4(1.1, 0.605, 0.33275, 0.183) };
+    if (!uniforms.uFoamCurlWindOffsetInfluence) uniforms.uFoamCurlWindOffsetInfluence = { value: 0.5 };
+    if (!uniforms.uFoamCurlWindAdvection) uniforms.uFoamCurlWindAdvection = { value: 1.0 };
+    if (!uniforms.uFoamCurlMaxUv) uniforms.uFoamCurlMaxUv = { value: 0.04 };
+    if (!uniforms.uFoamWindDir) uniforms.uFoamWindDir = { value: new THREE.Vector2(1.0, 0.0) };
+    if (!uniforms.uFoamWindOffsetUv) uniforms.uFoamWindOffsetUv = { value: new THREE.Vector2(0.0, 0.0) };
+    if (!uniforms.uFoamWindTime) uniforms.uFoamWindTime = { value: 0.0 };
 
     // Store for per-frame updates in update()
     material.userData = material.userData || {};
@@ -3524,6 +3584,105 @@ export class WeatherParticles {
       'uniform float uFoamRadialMidOpacity;\n' +
       'uniform float uFoamRadialOuterOpacity;\n' +
       'uniform float uFoamRadialCurve;\n';
+    const foamCurlVertexMarker = 'MS_FOAM_PLUME_CURL_VERTEX';
+    const foamCurlVertexUniformsCode =
+      'uniform float uFoamCurlDisplaceEnabled;\n' +
+      'uniform float uFoamCurlDisplaceUv;\n' +
+      'uniform float uFoamCurlAmount;\n' +
+      'uniform float uFoamCurlStrength;\n' +
+      'uniform float uFoamCurlScale;\n' +
+      'uniform float uFoamCurlSpeed;\n' +
+      'uniform float uFoamCurlDirectionality;\n' +
+      'uniform float uFoamCurlDerivativeEpsilon;\n' +
+      'uniform float uFoamCurlLacunarity;\n' +
+      'uniform float uFoamCurlGain;\n' +
+      'uniform vec4 uFoamCurlOctaveWeights;\n' +
+      'uniform float uFoamCurlWindOffsetInfluence;\n' +
+      'uniform float uFoamCurlWindAdvection;\n' +
+      'uniform float uFoamCurlMaxUv;\n' +
+      'uniform vec2 uFoamWindDir;\n' +
+      'uniform vec2 uFoamWindOffsetUv;\n' +
+      'uniform float uFoamWindTime;\n' +
+      'uniform vec4 uSceneBounds;\n' +
+      'float msFoamHash12(vec2 p) {\n' +
+      '  vec3 p3 = fract(vec3(p.xyx) * 0.1031);\n' +
+      '  p3 += dot(p3, p3.yzx + 33.33);\n' +
+      '  return fract((p3.x + p3.y) * p3.z);\n' +
+      '}\n' +
+      'float msFoamValueNoise(vec2 p) {\n' +
+      '  vec2 i = floor(p);\n' +
+      '  vec2 f = fract(p);\n' +
+      '  vec2 u = f * f * (3.0 - 2.0 * f);\n' +
+      '  float a = msFoamHash12(i + vec2(0.0, 0.0));\n' +
+      '  float b = msFoamHash12(i + vec2(1.0, 0.0));\n' +
+      '  float c = msFoamHash12(i + vec2(0.0, 1.0));\n' +
+      '  float d = msFoamHash12(i + vec2(1.0, 1.0));\n' +
+      '  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);\n' +
+      '}\n' +
+      'float msFoamFbmNoise(vec2 p) {\n' +
+      '  const mat2 octRot = mat2(0.8, 0.6, -0.6, 0.8);\n' +
+      '  float lac = max(1.01, uFoamCurlLacunarity);\n' +
+      '  float gain = max(0.0, uFoamCurlGain);\n' +
+      '  float amp1 = gain;\n' +
+      '  float amp2 = amp1 * gain;\n' +
+      '  float amp3 = amp2 * gain;\n' +
+      '  float n0 = (msFoamValueNoise(p) - 0.5) * uFoamCurlOctaveWeights.x;\n' +
+      '  p = octRot * p * lac;\n' +
+      '  float n1 = (msFoamValueNoise(p) - 0.5) * uFoamCurlOctaveWeights.y * amp1;\n' +
+      '  p = octRot * p * lac;\n' +
+      '  float n2 = (msFoamValueNoise(p) - 0.5) * uFoamCurlOctaveWeights.z * amp2;\n' +
+      '  p = octRot * p * lac;\n' +
+      '  float n3 = (msFoamValueNoise(p) - 0.5) * uFoamCurlOctaveWeights.w * amp3;\n' +
+      '  return n0 + n1 + n2 + n3;\n' +
+      '}\n' +
+      'vec2 msFoamCurlNoise2D(vec2 p) {\n' +
+      '  float e = clamp(uFoamCurlDerivativeEpsilon, 0.001, 0.2);\n' +
+      '  float n1 = msFoamFbmNoise(p + vec2(0.0, e));\n' +
+      '  float n2 = msFoamFbmNoise(p - vec2(0.0, e));\n' +
+      '  float n3 = msFoamFbmNoise(p + vec2(e, 0.0));\n' +
+      '  float n4 = msFoamFbmNoise(p - vec2(e, 0.0));\n' +
+      '  float dndy = (n1 - n2) / (2.0 * e);\n' +
+      '  float dndx = (n3 - n4) / (2.0 * e);\n' +
+      '  vec2 curlRaw = vec2(dndy, -dndx);\n' +
+      '  float curlLen = length(curlRaw);\n' +
+      '  vec2 curlDir = (curlLen > 1e-6) ? (curlRaw / curlLen) : vec2(0.0, 0.0);\n' +
+      '  return mix(curlRaw, curlDir, clamp(uFoamCurlDirectionality, 0.0, 1.0));\n' +
+      '}\n';
+    const foamCurlVertexCode =
+      '  // ' + foamCurlVertexMarker + '\n' +
+      '  if (uFoamCurlDisplaceEnabled > 0.5) {\n' +
+      '    vec2 sceneUv = vec2(\n' +
+      '      (vRoofWorldPos.x - uSceneBounds.x) / max(1e-6, uSceneBounds.z),\n' +
+      '      1.0 - (vRoofWorldPos.y - uSceneBounds.y) / max(1e-6, uSceneBounds.w)\n' +
+      '    );\n' +
+      '    if (sceneUv.x >= 0.0 && sceneUv.x <= 1.0 && sceneUv.y >= 0.0 && sceneUv.y <= 1.0) {\n' +
+      '      float sceneAspect = uSceneBounds.z / max(1e-6, uSceneBounds.w);\n' +
+      '      vec2 foamWindOffsetUv = vec2(uFoamWindOffsetUv.x, -uFoamWindOffsetUv.y);\n' +
+      '      vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * max(0.0, uFoamCurlWindOffsetInfluence));\n' +
+      '      vec2 foamBasis = vec2(foamSceneUv.x * sceneAspect, foamSceneUv.y);\n' +
+      '      vec2 windF = uFoamWindDir;\n' +
+      '      float windLen = length(windF);\n' +
+      '      windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);\n' +
+      '      vec2 windDir = vec2(windF.x, -windF.y);\n' +
+      '      vec2 windBasisRaw = vec2(windDir.x * sceneAspect, windDir.y);\n' +
+      '      float windBasisLen = length(windBasisRaw);\n' +
+      '      vec2 windBasis = (windBasisLen > 1e-6) ? (windBasisRaw / windBasisLen) : vec2(1.0, 0.0);\n' +
+      '      vec2 curlP = foamBasis * max(0.01, uFoamCurlScale) - windBasis * (uFoamWindTime * max(0.0, uFoamCurlSpeed) * max(0.0, uFoamCurlWindAdvection));\n' +
+      '      vec2 flow = msFoamCurlNoise2D(curlP) * max(0.0, uFoamCurlStrength) * max(0.0, uFoamCurlAmount);\n' +
+      '      vec2 uvOffset = flow * max(0.0, uFoamCurlDisplaceUv);\n' +
+      '      float maxUv = max(0.0, uFoamCurlMaxUv);\n' +
+      '      if (maxUv > 1e-6) {\n' +
+      '        float uvLen = length(uvOffset);\n' +
+      '        if (uvLen > maxUv) uvOffset *= (maxUv / max(1e-6, uvLen));\n' +
+      '      }\n' +
+      '      vec2 worldOffset = vec2(uvOffset.x * uSceneBounds.z, -uvOffset.y * uSceneBounds.w);\n' +
+      '      vec3 displacedWorld = vec3(vRoofWorldPos.xy + worldOffset, vRoofWorldPos.z);\n' +
+      '      vec4 clip0 = projectionMatrix * viewMatrix * vec4(vRoofWorldPos, 1.0);\n' +
+      '      vec4 clip1 = projectionMatrix * viewMatrix * vec4(displacedWorld, 1.0);\n' +
+      '      gl_Position += (clip1 - clip0);\n' +
+      '      vRoofWorldPos = displacedWorld;\n' +
+      '    }\n' +
+      '  }\n';
     const foamAlphaCode =
       '  // ' + foamMarker + '\n' +
       '  {\n' +
@@ -3576,6 +3735,23 @@ export class WeatherParticles {
       uni.uFoamRadialMidOpacity = uniforms.uFoamRadialMidOpacity;
       uni.uFoamRadialOuterOpacity = uniforms.uFoamRadialOuterOpacity;
       uni.uFoamRadialCurve = uniforms.uFoamRadialCurve;
+      uni.uFoamCurlDisplaceEnabled = uniforms.uFoamCurlDisplaceEnabled;
+      uni.uFoamCurlDisplaceUv = uniforms.uFoamCurlDisplaceUv;
+      uni.uFoamCurlAmount = uniforms.uFoamCurlAmount;
+      uni.uFoamCurlStrength = uniforms.uFoamCurlStrength;
+      uni.uFoamCurlScale = uniforms.uFoamCurlScale;
+      uni.uFoamCurlSpeed = uniforms.uFoamCurlSpeed;
+      uni.uFoamCurlDirectionality = uniforms.uFoamCurlDirectionality;
+      uni.uFoamCurlDerivativeEpsilon = uniforms.uFoamCurlDerivativeEpsilon;
+      uni.uFoamCurlLacunarity = uniforms.uFoamCurlLacunarity;
+      uni.uFoamCurlGain = uniforms.uFoamCurlGain;
+      uni.uFoamCurlOctaveWeights = uniforms.uFoamCurlOctaveWeights;
+      uni.uFoamCurlWindOffsetInfluence = uniforms.uFoamCurlWindOffsetInfluence;
+      uni.uFoamCurlWindAdvection = uniforms.uFoamCurlWindAdvection;
+      uni.uFoamCurlMaxUv = uniforms.uFoamCurlMaxUv;
+      uni.uFoamWindDir = uniforms.uFoamWindDir;
+      uni.uFoamWindOffsetUv = uniforms.uFoamWindOffsetUv;
+      uni.uFoamWindTime = uniforms.uFoamWindTime;
 
       let shaderChanged = false;
 
@@ -3613,6 +3789,30 @@ export class WeatherParticles {
         }
 
         if (material.vertexShader !== beforeVS) shaderChanged = true;
+      }
+
+      if (isFoamPlume && typeof material.vertexShader === 'string' && !material.vertexShader.includes(foamCurlVertexMarker)) {
+        const beforeFoamVS = material.vertexShader;
+        material.vertexShader = material.vertexShader.replace(
+          'void main() {',
+          foamCurlVertexUniformsCode + 'void main() {'
+        );
+
+        const hasRotatedPositionFoam = /\brotatedPosition\b/.test(material.vertexShader);
+        const desiredAssignFoam = hasRotatedPositionFoam
+          ? 'vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;\n  vRoofWorldPos.xy += rotatedPosition;'
+          : 'vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;';
+        const assignWithCurl = desiredAssignFoam + '\n' + foamCurlVertexCode;
+        if (material.vertexShader.includes(desiredAssignFoam)) {
+          material.vertexShader = material.vertexShader.replace(desiredAssignFoam, assignWithCurl);
+        } else if (material.vertexShader.includes('#include <soft_vertex>')) {
+          material.vertexShader = material.vertexShader.replace(
+            '#include <soft_vertex>',
+            '#include <soft_vertex>\n  ' + desiredAssignFoam + '\n' + foamCurlVertexCode
+          );
+        }
+
+        if (material.vertexShader !== beforeFoamVS) shaderChanged = true;
       }
 
       if (typeof material.fragmentShader === 'string') {
@@ -3718,6 +3918,23 @@ export class WeatherParticles {
       shader.uniforms.uFoamRadialMidOpacity = uniforms.uFoamRadialMidOpacity;
       shader.uniforms.uFoamRadialOuterOpacity = uniforms.uFoamRadialOuterOpacity;
       shader.uniforms.uFoamRadialCurve = uniforms.uFoamRadialCurve;
+      shader.uniforms.uFoamCurlDisplaceEnabled = uniforms.uFoamCurlDisplaceEnabled;
+      shader.uniforms.uFoamCurlDisplaceUv = uniforms.uFoamCurlDisplaceUv;
+      shader.uniforms.uFoamCurlAmount = uniforms.uFoamCurlAmount;
+      shader.uniforms.uFoamCurlStrength = uniforms.uFoamCurlStrength;
+      shader.uniforms.uFoamCurlScale = uniforms.uFoamCurlScale;
+      shader.uniforms.uFoamCurlSpeed = uniforms.uFoamCurlSpeed;
+      shader.uniforms.uFoamCurlDirectionality = uniforms.uFoamCurlDirectionality;
+      shader.uniforms.uFoamCurlDerivativeEpsilon = uniforms.uFoamCurlDerivativeEpsilon;
+      shader.uniforms.uFoamCurlLacunarity = uniforms.uFoamCurlLacunarity;
+      shader.uniforms.uFoamCurlGain = uniforms.uFoamCurlGain;
+      shader.uniforms.uFoamCurlOctaveWeights = uniforms.uFoamCurlOctaveWeights;
+      shader.uniforms.uFoamCurlWindOffsetInfluence = uniforms.uFoamCurlWindOffsetInfluence;
+      shader.uniforms.uFoamCurlWindAdvection = uniforms.uFoamCurlWindAdvection;
+      shader.uniforms.uFoamCurlMaxUv = uniforms.uFoamCurlMaxUv;
+      shader.uniforms.uFoamWindDir = uniforms.uFoamWindDir;
+      shader.uniforms.uFoamWindOffsetUv = uniforms.uFoamWindOffsetUv;
+      shader.uniforms.uFoamWindTime = uniforms.uFoamWindTime;
 
       const hasRotatedPosition = /\brotatedPosition\b/.test(shader.vertexShader);
 
@@ -3738,6 +3955,23 @@ export class WeatherParticles {
       const desiredAssign = hasRotatedPosition ? upgradedAssign : legacyAssign;
       if (shader.vertexShader.includes(legacyAssign) && !shader.vertexShader.includes(desiredAssign)) {
         shader.vertexShader = shader.vertexShader.replace(legacyAssign, desiredAssign);
+      }
+
+      if (isFoamPlume && !shader.vertexShader.includes(foamCurlVertexMarker)) {
+        shader.vertexShader = shader.vertexShader.replace(
+          'void main() {',
+          foamCurlVertexUniformsCode + 'void main() {'
+        );
+
+        const assignWithCurl = desiredAssign + '\n' + foamCurlVertexCode;
+        if (shader.vertexShader.includes(desiredAssign)) {
+          shader.vertexShader = shader.vertexShader.replace(desiredAssign, assignWithCurl);
+        } else if (shader.vertexShader.includes('#include <soft_vertex>')) {
+          shader.vertexShader = shader.vertexShader.replace(
+            '#include <soft_vertex>',
+            '#include <soft_vertex>\n  ' + desiredAssign + '\n' + foamCurlVertexCode
+          );
+        }
       }
 
       let fs = shader.fragmentShader;
@@ -3887,6 +4121,21 @@ export class WeatherParticles {
 
     const weather = weatherController.getCurrentState();
     if (!weather) return;
+
+    // T2-A: Control-rate throttle — the expensive control path (emission bounds,
+    // sizing, emission rates, uniform updates, mask lookups) only runs at _controlHz.
+    // The particle simulation itself (batchRenderer.update) runs every frame in
+    // ParticleSystem.update(), so particle motion stays smooth.
+    {
+      const safeDtForAccum = dt > 1.0 ? dt / 1000 : dt;
+      this._controlAccum += safeDtForAccum;
+      const controlInterval = this._controlHz > 0 ? (1.0 / this._controlHz) : 0;
+      if (this._controlInitialized && controlInterval > 0 && this._controlAccum < controlInterval) {
+        return; // Skip control recalculation this frame
+      }
+      this._controlAccum = this._controlAccum % Math.max(controlInterval, 0.001);
+      this._controlInitialized = true;
+    }
 
     const ms = window.MapShine;
     const debugDisableWeatherSplashes = ms?.debugDisableWeatherSplashes === true;
@@ -4903,6 +5152,81 @@ export class WeatherParticles {
         // Shader-side alpha shaping controls (foam.webp only)
         const u = this._foamMaterial.userData?.roofUniforms || null;
         if (u) {
+          const foamCurlEnabled = (waterParams?.foamPlumeCurlDisplaceEnabled ?? true) === true;
+          const foamCurlDisplaceUv = Number.isFinite(waterParams?.foamPlumeCurlDisplaceUv)
+            ? Math.max(0.0, waterParams.foamPlumeCurlDisplaceUv)
+            : 0.006;
+          const foamCurlAmount = Number.isFinite(waterParams?.foamPlumeCurlAmount)
+            ? Math.max(0.0, waterParams.foamPlumeCurlAmount)
+            : 1.0;
+          const foamCurlStrengthMul = Number.isFinite(waterParams?.foamPlumeCurlStrengthMultiplier)
+            ? Math.max(0.0, waterParams.foamPlumeCurlStrengthMultiplier)
+            : 1.0;
+          const foamCurlScaleMul = Number.isFinite(waterParams?.foamPlumeCurlScaleMultiplier)
+            ? Math.max(0.01, waterParams.foamPlumeCurlScaleMultiplier)
+            : 1.0;
+          const foamCurlSpeedMul = Number.isFinite(waterParams?.foamPlumeCurlSpeedMultiplier)
+            ? Math.max(0.0, waterParams.foamPlumeCurlSpeedMultiplier)
+            : 1.0;
+          const baseFoamCurlStrength = Number.isFinite(waterParams?.foamCurlStrength) ? waterParams.foamCurlStrength : 0.0;
+          const baseFoamCurlScale = Number.isFinite(waterParams?.foamCurlScale) ? waterParams.foamCurlScale : 1.0;
+          const baseFoamCurlSpeed = Number.isFinite(waterParams?.foamCurlSpeed) ? waterParams.foamCurlSpeed : 0.0;
+          const foamCurlStrength = baseFoamCurlStrength * foamCurlStrengthMul;
+          const foamCurlScale = Math.max(0.01, baseFoamCurlScale * foamCurlScaleMul);
+          const foamCurlSpeed = baseFoamCurlSpeed * foamCurlSpeedMul;
+          const foamCurlDirectionality = Number.isFinite(waterParams?.foamPlumeCurlDirectionality)
+            ? Math.max(0.0, Math.min(1.0, waterParams.foamPlumeCurlDirectionality))
+            : 0.0;
+          const foamCurlDerivativeEpsilon = Number.isFinite(waterParams?.foamPlumeCurlDerivativeEpsilon)
+            ? Math.max(0.001, Math.min(0.2, waterParams.foamPlumeCurlDerivativeEpsilon))
+            : 0.02;
+          const foamCurlLacunarity = Number.isFinite(waterParams?.foamPlumeCurlLacunarity)
+            ? Math.max(1.01, Math.min(4.0, waterParams.foamPlumeCurlLacunarity))
+            : 2.0;
+          const foamCurlGain = Number.isFinite(waterParams?.foamPlumeCurlGain)
+            ? Math.max(0.0, Math.min(1.0, waterParams.foamPlumeCurlGain))
+            : 0.55;
+          const foamCurlOct1 = Number.isFinite(waterParams?.foamPlumeCurlOctave1Weight) ? waterParams.foamPlumeCurlOctave1Weight : 1.1;
+          const foamCurlOct2 = Number.isFinite(waterParams?.foamPlumeCurlOctave2Weight) ? waterParams.foamPlumeCurlOctave2Weight : 0.605;
+          const foamCurlOct3 = Number.isFinite(waterParams?.foamPlumeCurlOctave3Weight) ? waterParams.foamPlumeCurlOctave3Weight : 0.33275;
+          const foamCurlOct4 = Number.isFinite(waterParams?.foamPlumeCurlOctave4Weight) ? waterParams.foamPlumeCurlOctave4Weight : 0.183;
+          const foamCurlWindOffsetInfluence = Number.isFinite(waterParams?.foamPlumeCurlWindOffsetInfluence)
+            ? Math.max(0.0, waterParams.foamPlumeCurlWindOffsetInfluence)
+            : 0.5;
+          const foamCurlWindAdvection = Number.isFinite(waterParams?.foamPlumeCurlWindAdvection)
+            ? Math.max(0.0, waterParams.foamPlumeCurlWindAdvection)
+            : 1.0;
+          const foamCurlMaxUv = Number.isFinite(waterParams?.foamPlumeCurlMaxUv)
+            ? Math.max(0.0, waterParams.foamPlumeCurlMaxUv)
+            : 0.04;
+          const windDirX = Number.isFinite(weather?.windDirection?.x) ? weather.windDirection.x : 1.0;
+          const windDirY = Number.isFinite(weather?.windDirection?.y) ? weather.windDirection.y : 0.0;
+          const windLen = Math.hypot(windDirX, windDirY);
+          const normWindX = windLen > 1e-6 ? (windDirX / windLen) : 1.0;
+          const normWindY = windLen > 1e-6 ? (windDirY / windLen) : 0.0;
+          const windOffsetUv = waterEffect?._windOffsetUv;
+          const windOffsetX = Number.isFinite(windOffsetUv?.x) ? windOffsetUv.x : 0.0;
+          const windOffsetY = Number.isFinite(windOffsetUv?.y) ? windOffsetUv.y : 0.0;
+          const windTime = Number.isFinite(waterEffect?._windTime) ? waterEffect._windTime : this._time;
+
+          u.uFoamCurlDisplaceEnabled.value = (foamCurlEnabled && plumeEnabled && waterEnabled) ? 1.0 : 0.0;
+          u.uFoamCurlDisplaceUv.value = foamCurlDisplaceUv;
+          u.uFoamCurlAmount.value = foamCurlAmount;
+          u.uFoamCurlStrength.value = foamCurlStrength;
+          u.uFoamCurlScale.value = foamCurlScale;
+          u.uFoamCurlSpeed.value = foamCurlSpeed;
+          u.uFoamCurlDirectionality.value = foamCurlDirectionality;
+          u.uFoamCurlDerivativeEpsilon.value = foamCurlDerivativeEpsilon;
+          u.uFoamCurlLacunarity.value = foamCurlLacunarity;
+          u.uFoamCurlGain.value = foamCurlGain;
+          u.uFoamCurlOctaveWeights.value.set(foamCurlOct1, foamCurlOct2, foamCurlOct3, foamCurlOct4);
+          u.uFoamCurlWindOffsetInfluence.value = foamCurlWindOffsetInfluence;
+          u.uFoamCurlWindAdvection.value = foamCurlWindAdvection;
+          u.uFoamCurlMaxUv.value = foamCurlMaxUv;
+          u.uFoamWindDir.value.set(normWindX, normWindY);
+          u.uFoamWindOffsetUv.value.set(windOffsetX, windOffsetY);
+          u.uFoamWindTime.value = windTime;
+
           const additiveBoost = Number.isFinite(waterParams?.foamPlumeAdditiveBoost)
             ? Math.max(0.0, waterParams.foamPlumeAdditiveBoost)
             : 1.0;
@@ -4932,6 +5256,81 @@ export class WeatherParticles {
 
         const u = this._foamBatchMaterial.userData?.roofUniforms || null;
         if (u) {
+          const foamCurlEnabled = (waterParams?.foamPlumeCurlDisplaceEnabled ?? true) === true;
+          const foamCurlDisplaceUv = Number.isFinite(waterParams?.foamPlumeCurlDisplaceUv)
+            ? Math.max(0.0, waterParams.foamPlumeCurlDisplaceUv)
+            : 0.006;
+          const foamCurlAmount = Number.isFinite(waterParams?.foamPlumeCurlAmount)
+            ? Math.max(0.0, waterParams.foamPlumeCurlAmount)
+            : 1.0;
+          const foamCurlStrengthMul = Number.isFinite(waterParams?.foamPlumeCurlStrengthMultiplier)
+            ? Math.max(0.0, waterParams.foamPlumeCurlStrengthMultiplier)
+            : 1.0;
+          const foamCurlScaleMul = Number.isFinite(waterParams?.foamPlumeCurlScaleMultiplier)
+            ? Math.max(0.01, waterParams.foamPlumeCurlScaleMultiplier)
+            : 1.0;
+          const foamCurlSpeedMul = Number.isFinite(waterParams?.foamPlumeCurlSpeedMultiplier)
+            ? Math.max(0.0, waterParams.foamPlumeCurlSpeedMultiplier)
+            : 1.0;
+          const baseFoamCurlStrength = Number.isFinite(waterParams?.foamCurlStrength) ? waterParams.foamCurlStrength : 0.0;
+          const baseFoamCurlScale = Number.isFinite(waterParams?.foamCurlScale) ? waterParams.foamCurlScale : 1.0;
+          const baseFoamCurlSpeed = Number.isFinite(waterParams?.foamCurlSpeed) ? waterParams.foamCurlSpeed : 0.0;
+          const foamCurlStrength = baseFoamCurlStrength * foamCurlStrengthMul;
+          const foamCurlScale = Math.max(0.01, baseFoamCurlScale * foamCurlScaleMul);
+          const foamCurlSpeed = baseFoamCurlSpeed * foamCurlSpeedMul;
+          const foamCurlDirectionality = Number.isFinite(waterParams?.foamPlumeCurlDirectionality)
+            ? Math.max(0.0, Math.min(1.0, waterParams.foamPlumeCurlDirectionality))
+            : 0.0;
+          const foamCurlDerivativeEpsilon = Number.isFinite(waterParams?.foamPlumeCurlDerivativeEpsilon)
+            ? Math.max(0.001, Math.min(0.2, waterParams.foamPlumeCurlDerivativeEpsilon))
+            : 0.02;
+          const foamCurlLacunarity = Number.isFinite(waterParams?.foamPlumeCurlLacunarity)
+            ? Math.max(1.01, Math.min(4.0, waterParams.foamPlumeCurlLacunarity))
+            : 2.0;
+          const foamCurlGain = Number.isFinite(waterParams?.foamPlumeCurlGain)
+            ? Math.max(0.0, Math.min(1.0, waterParams.foamPlumeCurlGain))
+            : 0.55;
+          const foamCurlOct1 = Number.isFinite(waterParams?.foamPlumeCurlOctave1Weight) ? waterParams.foamPlumeCurlOctave1Weight : 1.1;
+          const foamCurlOct2 = Number.isFinite(waterParams?.foamPlumeCurlOctave2Weight) ? waterParams.foamPlumeCurlOctave2Weight : 0.605;
+          const foamCurlOct3 = Number.isFinite(waterParams?.foamPlumeCurlOctave3Weight) ? waterParams.foamPlumeCurlOctave3Weight : 0.33275;
+          const foamCurlOct4 = Number.isFinite(waterParams?.foamPlumeCurlOctave4Weight) ? waterParams.foamPlumeCurlOctave4Weight : 0.183;
+          const foamCurlWindOffsetInfluence = Number.isFinite(waterParams?.foamPlumeCurlWindOffsetInfluence)
+            ? Math.max(0.0, waterParams.foamPlumeCurlWindOffsetInfluence)
+            : 0.5;
+          const foamCurlWindAdvection = Number.isFinite(waterParams?.foamPlumeCurlWindAdvection)
+            ? Math.max(0.0, waterParams.foamPlumeCurlWindAdvection)
+            : 1.0;
+          const foamCurlMaxUv = Number.isFinite(waterParams?.foamPlumeCurlMaxUv)
+            ? Math.max(0.0, waterParams.foamPlumeCurlMaxUv)
+            : 0.04;
+          const windDirX = Number.isFinite(weather?.windDirection?.x) ? weather.windDirection.x : 1.0;
+          const windDirY = Number.isFinite(weather?.windDirection?.y) ? weather.windDirection.y : 0.0;
+          const windLen = Math.hypot(windDirX, windDirY);
+          const normWindX = windLen > 1e-6 ? (windDirX / windLen) : 1.0;
+          const normWindY = windLen > 1e-6 ? (windDirY / windLen) : 0.0;
+          const windOffsetUv = waterEffect?._windOffsetUv;
+          const windOffsetX = Number.isFinite(windOffsetUv?.x) ? windOffsetUv.x : 0.0;
+          const windOffsetY = Number.isFinite(windOffsetUv?.y) ? windOffsetUv.y : 0.0;
+          const windTime = Number.isFinite(waterEffect?._windTime) ? waterEffect._windTime : this._time;
+
+          u.uFoamCurlDisplaceEnabled.value = (foamCurlEnabled && plumeEnabled && waterEnabled) ? 1.0 : 0.0;
+          u.uFoamCurlDisplaceUv.value = foamCurlDisplaceUv;
+          u.uFoamCurlAmount.value = foamCurlAmount;
+          u.uFoamCurlStrength.value = foamCurlStrength;
+          u.uFoamCurlScale.value = foamCurlScale;
+          u.uFoamCurlSpeed.value = foamCurlSpeed;
+          u.uFoamCurlDirectionality.value = foamCurlDirectionality;
+          u.uFoamCurlDerivativeEpsilon.value = foamCurlDerivativeEpsilon;
+          u.uFoamCurlLacunarity.value = foamCurlLacunarity;
+          u.uFoamCurlGain.value = foamCurlGain;
+          u.uFoamCurlOctaveWeights.value.set(foamCurlOct1, foamCurlOct2, foamCurlOct3, foamCurlOct4);
+          u.uFoamCurlWindOffsetInfluence.value = foamCurlWindOffsetInfluence;
+          u.uFoamCurlWindAdvection.value = foamCurlWindAdvection;
+          u.uFoamCurlMaxUv.value = foamCurlMaxUv;
+          u.uFoamWindDir.value.set(normWindX, normWindY);
+          u.uFoamWindOffsetUv.value.set(windOffsetX, windOffsetY);
+          u.uFoamWindTime.value = windTime;
+
           const additiveBoost = Number.isFinite(waterParams?.foamPlumeAdditiveBoost)
             ? Math.max(0.0, waterParams.foamPlumeAdditiveBoost)
             : 1.0;
@@ -5229,6 +5628,24 @@ export class WeatherParticles {
 
         if (smu.tWaterOccluderAlpha && u.tWaterOccluderAlpha) smu.tWaterOccluderAlpha.value = u.tWaterOccluderAlpha.value;
         if (smu.uHasWaterOccluderAlpha && u.uHasWaterOccluderAlpha) smu.uHasWaterOccluderAlpha.value = u.uHasWaterOccluderAlpha.value;
+
+        if (smu.uFoamCurlDisplaceEnabled && u.uFoamCurlDisplaceEnabled) smu.uFoamCurlDisplaceEnabled.value = u.uFoamCurlDisplaceEnabled.value;
+        if (smu.uFoamCurlDisplaceUv && u.uFoamCurlDisplaceUv) smu.uFoamCurlDisplaceUv.value = u.uFoamCurlDisplaceUv.value;
+        if (smu.uFoamCurlAmount && u.uFoamCurlAmount) smu.uFoamCurlAmount.value = u.uFoamCurlAmount.value;
+        if (smu.uFoamCurlStrength && u.uFoamCurlStrength) smu.uFoamCurlStrength.value = u.uFoamCurlStrength.value;
+        if (smu.uFoamCurlScale && u.uFoamCurlScale) smu.uFoamCurlScale.value = u.uFoamCurlScale.value;
+        if (smu.uFoamCurlSpeed && u.uFoamCurlSpeed) smu.uFoamCurlSpeed.value = u.uFoamCurlSpeed.value;
+        if (smu.uFoamCurlDirectionality && u.uFoamCurlDirectionality) smu.uFoamCurlDirectionality.value = u.uFoamCurlDirectionality.value;
+        if (smu.uFoamCurlDerivativeEpsilon && u.uFoamCurlDerivativeEpsilon) smu.uFoamCurlDerivativeEpsilon.value = u.uFoamCurlDerivativeEpsilon.value;
+        if (smu.uFoamCurlLacunarity && u.uFoamCurlLacunarity) smu.uFoamCurlLacunarity.value = u.uFoamCurlLacunarity.value;
+        if (smu.uFoamCurlGain && u.uFoamCurlGain) smu.uFoamCurlGain.value = u.uFoamCurlGain.value;
+        if (smu.uFoamCurlOctaveWeights && u.uFoamCurlOctaveWeights) smu.uFoamCurlOctaveWeights.value = u.uFoamCurlOctaveWeights.value;
+        if (smu.uFoamCurlWindOffsetInfluence && u.uFoamCurlWindOffsetInfluence) smu.uFoamCurlWindOffsetInfluence.value = u.uFoamCurlWindOffsetInfluence.value;
+        if (smu.uFoamCurlWindAdvection && u.uFoamCurlWindAdvection) smu.uFoamCurlWindAdvection.value = u.uFoamCurlWindAdvection.value;
+        if (smu.uFoamCurlMaxUv && u.uFoamCurlMaxUv) smu.uFoamCurlMaxUv.value = u.uFoamCurlMaxUv.value;
+        if (smu.uFoamWindDir && u.uFoamWindDir) smu.uFoamWindDir.value = u.uFoamWindDir.value;
+        if (smu.uFoamWindOffsetUv && u.uFoamWindOffsetUv) smu.uFoamWindOffsetUv.value = u.uFoamWindOffsetUv.value;
+        if (smu.uFoamWindTime && u.uFoamWindTime) smu.uFoamWindTime.value = u.uFoamWindTime.value;
       }
     }
 

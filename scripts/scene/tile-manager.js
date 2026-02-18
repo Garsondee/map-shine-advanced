@@ -92,6 +92,14 @@ export class TileManager {
   constructor(scene) {
     this.scene = scene;
 
+    /**
+     * Sub-rate update lane — tint changes slowly and occlusion fades are delta-driven,
+     * so 15 Hz is sufficient for the per-frame update loop.
+     * Set to 0 or undefined to run every rendered frame.
+     * @type {number}
+     */
+    this.updateHz = 15;
+
     /** @type {THREE.Scene|null} */
     this.waterOccluderScene = null;
     
@@ -3520,6 +3528,17 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       weatherController.elevationWeatherSuppressed = !isWeatherVisibleForPerspective();
     } catch (_) {
       // Fail open — don't suppress weather
+    }
+
+    // Floor/perspective transitions can radically change visible tiles and
+    // overhead classification. Force depth + post target resync immediately so
+    // water/roof/fog masks don't display stale data for a few frames.
+    try {
+      const ms = window.MapShine;
+      ms?.depthPassManager?.invalidate?.();
+      ms?.renderLoop?.requestRender?.();
+      ms?.renderLoop?.requestContinuousRender?.(180);
+    } catch (_) {
     }
   }
 

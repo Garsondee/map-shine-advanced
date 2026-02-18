@@ -3750,8 +3750,17 @@ export class TweakpaneManager {
       const now = performance.now();
       const delta = now - this.lastUIFrame;
 
+      // T3-C: Power-saving — when no interaction for 5s, drop to 5 Hz.
+      // Any dirty params or save queue activity resets the idle timer.
+      const hasActivity = this.dirtyParams.size > 0 || (this.saveQueue && this.saveQueue.size > 0);
+      if (hasActivity) {
+        this._lastUIInteractionMs = now;
+      }
+      const idleMs = now - (this._lastUIInteractionMs || now);
+      const effectiveFps = idleMs > 5000 ? 5 : this.uiFrameRate;
+
       // Throttle to target frame rate
-      if (delta < 1000 / this.uiFrameRate) {
+      if (delta < 1000 / effectiveFps) {
         this.rafHandle = requestAnimationFrame(uiLoop);
         return;
       }

@@ -637,6 +637,19 @@ export class CameraFollower {
     } catch (_) {
     }
 
+    // Major scene-appearance transition (floor/level switch): force a full
+    // visual resync pass so cached masks/depth/occluders do not lag behind
+    // tile visibility and layering updates.
+    try {
+      const ms = window.MapShine;
+      ms?.depthPassManager?.invalidate?.();
+      ms?.renderLoop?.requestRender?.();
+      // Short burst ensures multi-pass targets (roof alpha, fog, distortion,
+      // water occluder composites) settle coherently after a drastic switch.
+      ms?.renderLoop?.requestContinuousRender?.(220);
+    } catch (_) {
+    }
+
     log.debug('Level context changed', payload);
   }
   

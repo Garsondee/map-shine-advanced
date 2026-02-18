@@ -46,7 +46,7 @@ export class WaterEffectV2 extends EffectBase {
     this.alwaysRender = true;
 
     this.params = {
-      tintStrength: 0.25,
+      tintStrength: 0.2,
       tintColor: { r: 0.1, g: 0.3, b: 0.48 },
 
       cloudShadowEnabled: true,
@@ -57,55 +57,55 @@ export class WaterEffectV2 extends EffectBase {
       cloudShadowCausticsKill: 1,
       cloudShadowCausticsCurve: 0.1,
 
-      maskChannel: 'auto',
+      maskChannel: 'luma',
       maskInvert: false,
-      maskThreshold: 1,
+      maskThreshold: 0.87,
       maskBlurRadius: 0.0,
       maskBlurPasses: 0,
-      maskExpandPx: 1,
-      buildResolution: 1024,
-      sdfRangePx: 126,
-      shoreWidthPx: 50,
+      maskExpandPx: 0,
+      buildResolution: 4096,
+      sdfRangePx: 70,
+      shoreWidthPx: 128,
 
-      waveScale: 4.5,
+      waveScale: 6,
       waveSpeed: 0.78,
-      waveStrength: 0.55,
+      waveStrength: 0.81,
 
       // Wave texture enhancement controls
       // Domain warp reduces visible repetition across large water bodies.
       waveWarpLargeStrength: 0.18,
-      waveWarpSmallStrength: 0.08,
-      waveWarpMicroStrength: 0.03,
-      waveWarpTimeSpeed: 0.015,
+      waveWarpSmallStrength: 0.07,
+      waveWarpMicroStrength: 0.02,
+      waveWarpTimeSpeed: 0.065,
 
       // Slow evolution of wave "sea state" (alternating calmer/rougher).
       waveEvolutionEnabled: true,
       waveEvolutionSpeed: 0.5,
       waveEvolutionAmount: 1,
-      waveEvolutionScale: 0.5,
+      waveEvolutionScale: 1.03,
 
       waveSpeedUseWind: true,
-      waveSpeedWindMinFactor: 1,
+      waveSpeedWindMinFactor: 0.2,
       waveStrengthUseWind: true,
       waveStrengthWindMinFactor: 1,
-      distortionStrengthPx: 9.97,
+      distortionStrengthPx: 14.84,
 
       // Refraction sampling controls
-      refractionMultiTapEnabled: true,
+      refractionMultiTapEnabled: false,
       chromaticAberrationEnabled: true,
-      chromaticAberrationStrengthPx: 2.5,
-      chromaticAberrationEdgeCenter: 0.194,
-      chromaticAberrationEdgeFeather: 0.027,
-      chromaticAberrationEdgeGamma: 0.71,
+      chromaticAberrationStrengthPx: 1.78,
+      chromaticAberrationEdgeCenter: 0.5,
+      chromaticAberrationEdgeFeather: 0.1,
+      chromaticAberrationEdgeGamma: 1,
       chromaticAberrationEdgeMin: 0.0,
 
-      waveIndoorDampingEnabled: true,
+      waveIndoorDampingEnabled: false,
       waveIndoorDampingStrength: 1.0,
       waveIndoorMinFactor: 0.05,
 
       // Distortion masking (shader-side; does not rebuild water data)
       distortionEdgeCenter: 0.504,
-      distortionEdgeFeather: 0.051,
+      distortionEdgeFeather: 0.07,
       distortionEdgeGamma: 1,
       distortionShoreRemapLo: 0.0,
       distortionShoreRemapHi: 1.0,
@@ -114,13 +114,21 @@ export class WaterEffectV2 extends EffectBase {
 
       // Shoreline-only high-frequency distortion (fed into DistortionManager)
       shoreNoiseDistortionEnabled: true,
-      shoreNoiseDistortionStrengthPx: 0.02,
-      shoreNoiseDistortionFrequency: 995.7,
-      shoreNoiseDistortionSpeed: 1.16,
+      shoreNoiseDistortionStrengthPx: 12.75,
+      shoreNoiseDistortionFrequency: 526.1,
+      shoreNoiseDistortionSpeed: 4.31,
       // Controls how quickly the noise fades out from the shore toward the interior.
       // Expressed in water mask "depth" (0..1): lower => thinner band near edges.
-      shoreNoiseDistortionFadeLo: 0,
-      shoreNoiseDistortionFadeHi: 0.132,
+      shoreNoiseDistortionFadeLo: 0.112,
+      shoreNoiseDistortionFadeHi: 0.601,
+
+      // Curl noise produces divergence-free (swirling) turbulence — physically
+      // correct fluid motion instead of generic TV-static noise. 0 = raw noise, 1 = full curl.
+      shoreNoiseDistortionCurlStrength: 0.45,
+      // Shore-perpendicular wave wash: simulates waves lapping in and receding
+      // along the shoreline with compound wave frequencies.
+      shoreNoiseDistortionWashStrength: 0.51,
+      shoreNoiseDistortionWashSpeed: 0.8,
 
       // Rain-hit surface distortion (precipitation driven)
       rainDistortionEnabled: true,
@@ -134,7 +142,7 @@ export class WaterEffectV2 extends EffectBase {
       rainIndoorDampingStrength: 1.0,
 
       causticsEnabled: true,
-      causticsIntensity: 1.67,
+      causticsIntensity: 4,
       causticsScale: 33.4,
       causticsSpeed: 1.05,
       causticsSharpness: 0.1,
@@ -143,7 +151,7 @@ export class WaterEffectV2 extends EffectBase {
       causticsEdgeBlurTexels: 0,
 
       causticsBrightnessMaskEnabled: true,
-      causticsBrightnessThreshold: 0.27,
+      causticsBrightnessThreshold: 0.36,
       causticsBrightnessSoftness: 0.55,
       causticsBrightnessGamma: 0.62,
 
@@ -197,52 +205,52 @@ export class WaterEffectV2 extends EffectBase {
       useTargetWindDirection: true,
 
       specStrength: 250,
-      specPower: 1,
+      specPower: 1.5,
 
-      specSunAzimuthDeg: 48,
-      specSunElevationDeg: 67,
-      specSunIntensity: 1.32,
+      specSunAzimuthDeg: 12,
+      specSunElevationDeg: 79,
+      specSunIntensity: 4.08,
       specNormalStrength: 5,
-      specNormalScale: 0.205,
-      specRoughnessMin: 0.396,
-      specRoughnessMax: 0.873,
-      specF0: 0.12,
-      specMaskGamma: 3.2,
-      specSkyTint: 1.0,
-      specShoreBias: 0.61,
+      specNormalScale: 0.25,
+      specRoughnessMin: 0.001,
+      specRoughnessMax: 1,
+      specF0: 0.069,
+      specMaskGamma: 2.6,
+      specSkyTint: 0.6,
+      specShoreBias: 1,
 
-      specDistortionNormalStrength: 1.14,
-      specAnisotropy: 0.2,
-      specAnisoRatio: 3,
+      specDistortionNormalStrength: 2,
+      specAnisotropy: 0.16,
+      specAnisoRatio: 3.05,
 
-      foamStrength: 0.72,
-      foamThreshold: 0.92,
-      foamScale: 1225,
+      foamStrength: 0.09,
+      foamThreshold: 0.84,
+      foamScale: 2000,
       foamColor: { r: 6, g: 6, b: 5 },
-      foamSpeed: 1.5,
+      foamSpeed: 0.19,
 
-      foamCurlStrength: 0.13,
-      foamCurlScale: 11.3,
-      foamCurlSpeed: 0.1,
+      foamCurlStrength: 1,
+      foamCurlScale: 3,
+      foamCurlSpeed: 0.09,
 
-      foamBreakupStrength1: 0.61,
-      foamBreakupScale1: 6.5,
-      foamBreakupSpeed1: 0.6,
+      foamBreakupStrength1: 1,
+      foamBreakupScale1: 1,
+      foamBreakupSpeed1: 0.04,
 
-      foamBreakupStrength2: 0.44,
-      foamBreakupScale2: 2.6,
-      foamBreakupSpeed2: 0.16,
+      foamBreakupStrength2: 1,
+      foamBreakupScale2: 17,
+      foamBreakupSpeed2: 0.32,
 
-      foamBlackPoint: 0.05,
+      foamBlackPoint: 0,
       foamWhitePoint: 1,
-      foamGamma: 0.62,
-      foamContrast: 1.64,
-      foamBrightness: 0.01,
+      foamGamma: 1.06,
+      foamContrast: 0.87,
+      foamBrightness: -0.01,
 
-      floatingFoamStrength: 0.33,
-      floatingFoamCoverage: 0.24,
-      floatingFoamScale: 75.5,
-      floatingFoamWaveDistortion: 0.7,
+      floatingFoamStrength: 0.8,
+      floatingFoamCoverage: 0.09,
+      floatingFoamScale: 34.5,
+      floatingFoamWaveDistortion: 2,
 
       // foam.webp particle systems (WeatherParticles)
       shoreFoamEnabled: true,
@@ -250,14 +258,14 @@ export class WaterEffectV2 extends EffectBase {
 
       foamPlumeEnabled: true,
       foamPlumeSpawnMode: 'waterEdge',
-      foamPlumeMaxParticles: 1681,
-      foamPlumeEmissionBase: 31.2,
-      foamPlumeEmissionWindScale: 321.7,
-      foamPlumeLifeMin: 1.5,
-      foamPlumeLifeMax: 2.7,
+      foamPlumeMaxParticles: 8681,
+      foamPlumeEmissionBase: 500,
+      foamPlumeEmissionWindScale: 1500,
+      foamPlumeLifeMin: 4.13,
+      foamPlumeLifeMax: 4.67,
       foamPlumeSizeMin: 15,
       foamPlumeSizeMax: 36.1,
-      foamPlumeOpacity: 0.23,
+      foamPlumeOpacity: 0.3,
       foamPlumePeakOpacity: 0.04,
       foamPlumePeakTime: 0.12,
       foamPlumeStartScale: 1.24,
@@ -269,23 +277,42 @@ export class WaterEffectV2 extends EffectBase {
       foamPlumeAdditiveBoost: 1.68,
       foamPlumeColor: { r: 1.0, g: 1.0, b: 1.0 },
 
-      foamPlumeRandomOpacityMin: 1.94,
-      foamPlumeRandomOpacityMax: 4.06,
+      foamPlumeRandomOpacityMin: 2.06,
+      foamPlumeRandomOpacityMax: 2.99,
 
       foamPlumeRadialAlphaEnabled: true,
       foamPlumeRadialInnerPos: 0.0,
       foamPlumeRadialMidPos: 0.149,
       foamPlumeRadialInnerOpacity: 5,
-      foamPlumeRadialMidOpacity: 0.58,
-      foamPlumeRadialOuterOpacity: 0.31,
+      foamPlumeRadialMidOpacity: 0.81,
+      foamPlumeRadialOuterOpacity: 0.27,
       foamPlumeRadialCurve: 0.1,
 
+      // Foam plume GPU curl distortion controls (WeatherParticles vertex shader)
+      foamPlumeCurlDisplaceEnabled: true,
+      foamPlumeCurlDisplaceUv: 0.0147,
+      foamPlumeCurlAmount: 0.56,
+      foamPlumeCurlStrengthMultiplier: 0.21,
+      foamPlumeCurlScaleMultiplier: 4,
+      foamPlumeCurlSpeedMultiplier: 1.87,
+      foamPlumeCurlDirectionality: 1,
+      foamPlumeCurlDerivativeEpsilon: 0.059,
+      foamPlumeCurlLacunarity: 1.69,
+      foamPlumeCurlGain: 1,
+      foamPlumeCurlOctave1Weight: 0.388,
+      foamPlumeCurlOctave2Weight: 0.301,
+      foamPlumeCurlOctave3Weight: 0.33275,
+      foamPlumeCurlOctave4Weight: 0.183,
+      foamPlumeCurlWindOffsetInfluence: 0.5,
+      foamPlumeCurlWindAdvection: 1.0,
+      foamPlumeCurlMaxUv: 0.046,
+
       // Large-scale noise masking for foam.webp particles (break up / intermittent reveal)
-      foamParticleNoiseEnabled: false,
-      foamParticleNoiseStrength: 0.05,
+      foamParticleNoiseEnabled: true,
+      foamParticleNoiseStrength: 0.14,
       foamParticleNoiseScale: 14.3,
       foamParticleNoiseSpeed: 0,
-      foamParticleNoiseCoverage: 0.46,
+      foamParticleNoiseCoverage: 0.81,
       foamParticleNoiseSoftness: 0.5,
       foamParticleNoiseAttempts: 4,
 
@@ -325,7 +352,7 @@ export class WaterEffectV2 extends EffectBase {
       murkContrast: 4,
 
       sandEnabled: true,
-      sandIntensity: 0.18,
+      sandIntensity: 0.12,
       sandColor: { r: 0, g: 0, b: 0 },
       sandContrast: 0.25,
       sandChunkScale: 5.4,
@@ -425,14 +452,17 @@ export class WaterEffectV2 extends EffectBase {
       murkOcclusionSoftness: 0.09,
 
       shoreNoiseEnabled: true,
-      shoreNoiseStrengthPx: 0.02,
-      shoreNoiseFrequency: 995.7,
-      shoreNoiseSpeed: 1.16,
-      shoreNoiseFadeLo: 0.0,
-      shoreNoiseFadeHi: 0.132,
+      shoreNoiseStrengthPx: 12.75,
+      shoreNoiseFrequency: 526.1,
+      shoreNoiseSpeed: 4.31,
+      shoreNoiseFadeLo: 0.112,
+      shoreNoiseFadeHi: 0.601,
+      shoreNoiseCurlStrength: 0.45,
+      shoreNoiseWashStrength: 0.51,
+      shoreNoiseWashSpeed: 0.8,
 
       causticsEnabled: true,
-      causticsIntensity: 1.67,
+      causticsIntensity: 4,
       causticsScale: 33.4,
       causticsSpeed: 1.05,
       causticsSharpness: 0.1,
@@ -441,7 +471,7 @@ export class WaterEffectV2 extends EffectBase {
       causticsEdgeBlurTexels: 0.0,
 
       causticsBrightnessMaskEnabled: true,
-      causticsBrightnessThreshold: 0.27,
+      causticsBrightnessThreshold: 0.36,
       causticsBrightnessSoftness: 0.55,
       causticsBrightnessGamma: 0.62,
     };
@@ -578,6 +608,9 @@ export class WaterEffectV2 extends EffectBase {
             'shoreNoiseDistortionSpeed',
             'shoreNoiseDistortionFadeLo',
             'shoreNoiseDistortionFadeHi',
+            'shoreNoiseDistortionCurlStrength',
+            'shoreNoiseDistortionWashStrength',
+            'shoreNoiseDistortionWashSpeed',
 
             'refractionMultiTapEnabled',
             'chromaticAberrationEnabled',
@@ -827,7 +860,32 @@ export class WaterEffectV2 extends EffectBase {
             'foamPlumeRadialInnerOpacity',
             'foamPlumeRadialMidOpacity',
             'foamPlumeRadialOuterOpacity',
-            'foamPlumeRadialCurve',
+            'foamPlumeRadialCurve'
+          ]
+        },
+        {
+          name: 'foam-particle-noise-controls',
+          label: 'Foam Particles -> Foam Noise Controls',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'foamPlumeCurlDisplaceEnabled',
+            'foamPlumeCurlDisplaceUv',
+            'foamPlumeCurlAmount',
+            'foamPlumeCurlStrengthMultiplier',
+            'foamPlumeCurlScaleMultiplier',
+            'foamPlumeCurlSpeedMultiplier',
+            'foamPlumeCurlDirectionality',
+            'foamPlumeCurlDerivativeEpsilon',
+            'foamPlumeCurlLacunarity',
+            'foamPlumeCurlGain',
+            'foamPlumeCurlOctave1Weight',
+            'foamPlumeCurlOctave2Weight',
+            'foamPlumeCurlOctave3Weight',
+            'foamPlumeCurlOctave4Weight',
+            'foamPlumeCurlWindOffsetInfluence',
+            'foamPlumeCurlWindAdvection',
+            'foamPlumeCurlMaxUv',
 
             'foamParticleNoiseEnabled',
             'foamParticleNoiseStrength',
@@ -912,7 +970,7 @@ export class WaterEffectV2 extends EffectBase {
           default: true,
           hidden: true
         },
-        tintStrength: { type: 'slider', label: 'Tint Strength', min: 0, max: 1, step: 0.01, default: 0.25 },
+        tintStrength: { type: 'slider', label: 'Tint Strength', min: 0, max: 1, step: 0.01, default: 0.2 },
         tintColor: { type: 'color', label: 'Tint Color', default: { r: 0.1, g: 0.3, b: 0.48 } },
 
         cloudShadowEnabled: { type: 'boolean', label: 'Enabled', default: true },
@@ -932,58 +990,61 @@ export class WaterEffectV2 extends EffectBase {
             Alpha: 'a',
             Luma: 'luma'
           },
-          default: 'auto'
+          default: 'luma'
         },
         maskInvert: { type: 'boolean', label: 'Invert Mask', default: false },
-        maskThreshold: { type: 'slider', label: 'Mask Threshold', min: 0.0, max: 1.0, step: 0.01, default: 1, throttle: 50 },
+        maskThreshold: { type: 'slider', label: 'Mask Threshold', min: 0.0, max: 1.0, step: 0.01, default: 0.87, throttle: 50 },
         maskBlurRadius: { type: 'slider', label: 'Mask Blur Radius (px)', min: 0.0, max: 16.0, step: 0.1, default: 0.0, throttle: 50 },
         maskBlurPasses: { type: 'slider', label: 'Mask Blur Passes', min: 0, max: 6, step: 1, default: 0, throttle: 50 },
-        maskExpandPx: { type: 'slider', label: 'Mask Expand/Contract (px)', min: -64.0, max: 64.0, step: 0.25, default: 1, throttle: 50 },
+        maskExpandPx: { type: 'slider', label: 'Mask Expand/Contract (px)', min: -64.0, max: 64.0, step: 0.25, default: 0, throttle: 50 },
 
-        buildResolution: { type: 'list', label: 'Build Resolution', options: { 256: 256, 512: 512, 1024: 1024 }, default: 1024 },
-        sdfRangePx: { type: 'slider', label: 'SDF Range (px)', min: 8, max: 256, step: 1, default: 126, throttle: 50 },
-        shoreWidthPx: { type: 'slider', label: 'Shore Width (px)', min: 1, max: 128, step: 1, default: 50, throttle: 50 },
+        buildResolution: { type: 'list', label: 'Build Resolution', options: { 256: 256, 512: 512, 1024: 1024, 2048: 2048, 4096: 4096 }, default: 4096 },
+        sdfRangePx: { type: 'slider', label: 'SDF Range (px)', min: 8, max: 256, step: 1, default: 70, throttle: 50 },
+        shoreWidthPx: { type: 'slider', label: 'Shore Width (px)', min: 1, max: 128, step: 1, default: 128, throttle: 50 },
 
-        waveScale: { type: 'slider', label: 'Wave Scale', min: 1, max: 60, step: 0.5, default: 4.5 },
+        waveScale: { type: 'slider', label: 'Wave Scale', min: 1, max: 60, step: 0.5, default: 6 },
         waveSpeed: { type: 'slider', label: 'Wave Speed', min: 0, max: 2.0, step: 0.01, default: 0.78 },
-        waveStrength: { type: 'slider', label: 'Wave Strength', min: 0, max: 2.0, step: 0.01, default: 0.55 },
+        waveStrength: { type: 'slider', label: 'Wave Strength', min: 0, max: 2.0, step: 0.01, default: 0.81 },
 
         waveWarpLargeStrength: { type: 'slider', label: 'Warp Large', min: 0.0, max: 1.0, step: 0.01, default: 0.18 },
-        waveWarpSmallStrength: { type: 'slider', label: 'Warp Small', min: 0.0, max: 0.5, step: 0.01, default: 0.08 },
-        waveWarpMicroStrength: { type: 'slider', label: 'Warp Micro', min: 0.0, max: 0.25, step: 0.005, default: 0.03 },
-        waveWarpTimeSpeed: { type: 'slider', label: 'Warp Time Speed', min: 0.0, max: 0.25, step: 0.005, default: 0.015 },
+        waveWarpSmallStrength: { type: 'slider', label: 'Warp Small', min: 0.0, max: 0.5, step: 0.01, default: 0.07 },
+        waveWarpMicroStrength: { type: 'slider', label: 'Warp Micro', min: 0.0, max: 0.25, step: 0.005, default: 0.02 },
+        waveWarpTimeSpeed: { type: 'slider', label: 'Warp Time Speed', min: 0.0, max: 0.25, step: 0.005, default: 0.065 },
 
         waveEvolutionEnabled: { type: 'boolean', label: 'Sea State Evolution', default: true },
         waveEvolutionSpeed: { type: 'slider', label: 'Evolution Speed', min: 0.0, max: 0.5, step: 0.005, default: 0.5 },
         waveEvolutionAmount: { type: 'slider', label: 'Evolution Amount', min: 0.0, max: 1.0, step: 0.01, default: 1 },
-        waveEvolutionScale: { type: 'slider', label: 'Evolution Scale', min: 0.01, max: 2.0, step: 0.01, default: 0.5 },
+        waveEvolutionScale: { type: 'slider', label: 'Evolution Scale', min: 0.01, max: 2.0, step: 0.01, default: 1.03 },
         waveSpeedUseWind: { type: 'boolean', label: 'Wave Speed Linked To Wind', default: true },
-        waveSpeedWindMinFactor: { type: 'slider', label: 'Wave Speed @ Wind=0', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        waveSpeedWindMinFactor: { type: 'slider', label: 'Wave Speed @ Wind=0', min: 0.0, max: 1.0, step: 0.01, default: 0.2 },
         waveStrengthUseWind: { type: 'boolean', label: 'Wave Strength Linked To Wind', default: true },
         waveStrengthWindMinFactor: { type: 'slider', label: 'Wave Strength @ Wind=0', min: 0.0, max: 1.0, step: 0.01, default: 1 },
-        distortionStrengthPx: { type: 'slider', label: 'Distortion Strength (px)', min: 0, max: 64.0, step: 0.01, default: 9.97 },
+        distortionStrengthPx: { type: 'slider', label: 'Distortion Strength (px)', min: 0, max: 64.0, step: 0.01, default: 14.84 },
 
         shoreNoiseDistortionEnabled: { type: 'boolean', label: 'Shore Noise Enabled', default: true },
-        shoreNoiseDistortionStrengthPx: { type: 'slider', label: 'Shore Noise Strength (px)', min: 0.0, max: 64.0, step: 0.01, default: 0.02 },
-        shoreNoiseDistortionFrequency: { type: 'slider', label: 'Shore Noise Frequency', min: 0.1, max: 1200.0, step: 0.1, default: 995.7 },
-        shoreNoiseDistortionSpeed: { type: 'slider', label: 'Shore Noise Speed', min: 0.0, max: 5.0, step: 0.01, default: 1.16 },
-        shoreNoiseDistortionFadeLo: { type: 'slider', label: 'Shore Noise Fade Lo', min: 0.0, max: 1.0, step: 0.001, default: 0 },
-        shoreNoiseDistortionFadeHi: { type: 'slider', label: 'Shore Noise Fade Hi', min: 0.0, max: 1.0, step: 0.001, default: 0.132 },
+        shoreNoiseDistortionStrengthPx: { type: 'slider', label: 'Shore Noise Strength (px)', min: 0.0, max: 64.0, step: 0.01, default: 12.75 },
+        shoreNoiseDistortionFrequency: { type: 'slider', label: 'Shore Noise Frequency', min: 0.1, max: 1200.0, step: 0.1, default: 526.1 },
+        shoreNoiseDistortionSpeed: { type: 'slider', label: 'Shore Noise Speed', min: 0.0, max: 5.0, step: 0.01, default: 4.31 },
+        shoreNoiseDistortionFadeLo: { type: 'slider', label: 'Shore Noise Fade Lo', min: 0.0, max: 1.0, step: 0.001, default: 0.112 },
+        shoreNoiseDistortionFadeHi: { type: 'slider', label: 'Shore Noise Fade Hi', min: 0.0, max: 1.0, step: 0.001, default: 0.601 },
+        shoreNoiseDistortionCurlStrength: { type: 'slider', label: 'Curl Turbulence', min: 0.0, max: 1.0, step: 0.01, default: 0.45 },
+        shoreNoiseDistortionWashStrength: { type: 'slider', label: 'Wave Wash Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.51 },
+        shoreNoiseDistortionWashSpeed: { type: 'slider', label: 'Wave Wash Speed', min: 0.0, max: 5.0, step: 0.01, default: 0.8 },
 
-        refractionMultiTapEnabled: { type: 'boolean', label: 'Refraction Multi-Tap (Blur)', default: true },
+        refractionMultiTapEnabled: { type: 'boolean', label: 'Refraction Multi-Tap (Blur)', default: false },
         chromaticAberrationEnabled: { type: 'boolean', label: 'Chromatic Aberration (RGB Shift)', default: true },
-        chromaticAberrationStrengthPx: { type: 'slider', label: 'RGB Shift Strength (px)', min: 0.0, max: 6.0, step: 0.01, default: 2.5 },
-        chromaticAberrationEdgeCenter: { type: 'slider', label: 'RGB Edge Center', min: 0.0, max: 1.0, step: 0.001, default: 0.194 },
-        chromaticAberrationEdgeFeather: { type: 'slider', label: 'RGB Edge Feather', min: 0.0, max: 0.2, step: 0.001, default: 0.027 },
-        chromaticAberrationEdgeGamma: { type: 'slider', label: 'RGB Edge Gamma', min: 0.05, max: 4.0, step: 0.01, default: 0.71 },
+        chromaticAberrationStrengthPx: { type: 'slider', label: 'RGB Shift Strength (px)', min: 0.0, max: 6.0, step: 0.01, default: 1.78 },
+        chromaticAberrationEdgeCenter: { type: 'slider', label: 'RGB Edge Center', min: 0.0, max: 1.0, step: 0.001, default: 0.5 },
+        chromaticAberrationEdgeFeather: { type: 'slider', label: 'RGB Edge Feather', min: 0.0, max: 0.2, step: 0.001, default: 0.1 },
+        chromaticAberrationEdgeGamma: { type: 'slider', label: 'RGB Edge Gamma', min: 0.05, max: 4.0, step: 0.01, default: 1 },
         chromaticAberrationEdgeMin: { type: 'slider', label: 'RGB Edge Min', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
 
-        waveIndoorDampingEnabled: { type: 'boolean', label: 'Dampen Indoors (_Outdoors)', default: true },
+        waveIndoorDampingEnabled: { type: 'boolean', label: 'Dampen Indoors (_Outdoors)', default: false },
         waveIndoorDampingStrength: { type: 'slider', label: 'Indoor Damp Strength', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
         waveIndoorMinFactor: { type: 'slider', label: 'Indoor Min Factor', min: 0.0, max: 1.0, step: 0.01, default: 0.05 },
 
         distortionEdgeCenter: { type: 'slider', label: 'Edge Center', min: 0.0, max: 1.0, step: 0.001, default: 0.504 },
-        distortionEdgeFeather: { type: 'slider', label: 'Edge Feather', min: 0.0, max: 0.2, step: 0.001, default: 0.051 },
+        distortionEdgeFeather: { type: 'slider', label: 'Edge Feather', min: 0.0, max: 0.2, step: 0.001, default: 0.07 },
         distortionEdgeGamma: { type: 'slider', label: 'Edge Gamma', min: 0.05, max: 4.0, step: 0.01, default: 1 },
         distortionShoreRemapLo: { type: 'slider', label: 'Shore Start', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
         distortionShoreRemapHi: { type: 'slider', label: 'Shore End', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
@@ -1035,7 +1096,7 @@ export class WaterEffectV2 extends EffectBase {
         rainStormMicroSpeed: { type: 'slider', label: 'Micro Speed', min: 0.0, max: 10.0, step: 0.01, default: 1.25 },
 
         causticsEnabled: { type: 'boolean', label: 'Caustics Enabled', default: true },
-        causticsIntensity: { type: 'slider', label: 'Caustics Intensity', min: 0.0, max: 4.0, step: 0.01, default: 1.67 },
+        causticsIntensity: { type: 'slider', label: 'Caustics Intensity', min: 0.0, max: 4.0, step: 0.01, default: 4 },
         causticsScale: { type: 'slider', label: 'Caustics Scale', min: 0.1, max: 200.0, step: 0.1, default: 33.4 },
         causticsSpeed: { type: 'slider', label: 'Caustics Speed', min: 0.0, max: 5.0, step: 0.01, default: 1.05 },
         causticsSharpness: { type: 'slider', label: 'Caustics Sharpness', min: 0.1, max: 10.0, step: 0.01, default: 0.1 },
@@ -1044,7 +1105,7 @@ export class WaterEffectV2 extends EffectBase {
         causticsEdgeBlurTexels: { type: 'slider', label: 'Caustics Edge Blur (texels)', min: 0.0, max: 64.0, step: 0.5, default: 0 },
 
         causticsBrightnessMaskEnabled: { type: 'boolean', label: 'Brightness Mask', default: true },
-        causticsBrightnessThreshold: { type: 'slider', label: 'Brightness Threshold', min: 0.0, max: 2.0, step: 0.01, default: 0.27 },
+        causticsBrightnessThreshold: { type: 'slider', label: 'Brightness Threshold', min: 0.0, max: 2.0, step: 0.01, default: 0.36 },
         causticsBrightnessSoftness: { type: 'slider', label: 'Brightness Softness', min: 0.0, max: 1.0, step: 0.01, default: 0.55 },
         causticsBrightnessGamma: { type: 'slider', label: 'Brightness Gamma', min: 0.1, max: 4.0, step: 0.01, default: 0.62 },
 
@@ -1060,51 +1121,51 @@ export class WaterEffectV2 extends EffectBase {
         useTargetWindDirection: { type: 'boolean', label: 'Use Target Wind Dir', default: true },
 
         specStrength: { type: 'slider', label: 'Specular Strength', min: 0, max: 250.0, step: 0.01, default: 250 },
-        specPower: { type: 'slider', label: 'Specular Power', min: 1, max: 24, step: 0.5, default: 1 },
+        specPower: { type: 'slider', label: 'Specular Power', min: 1, max: 24, step: 0.5, default: 1.5 },
 
-        specSunAzimuthDeg: { type: 'slider', label: 'Sun Azimuth (deg)', min: 0.0, max: 360.0, step: 1.0, default: 48 },
-        specSunElevationDeg: { type: 'slider', label: 'Sun Elevation (deg)', min: 1.0, max: 90.0, step: 1.0, default: 67 },
-        specSunIntensity: { type: 'slider', label: 'Sun Intensity', min: 0.0, max: 5.0, step: 0.01, default: 1.32 },
+        specSunAzimuthDeg: { type: 'slider', label: 'Sun Azimuth (deg)', min: 0.0, max: 360.0, step: 1.0, default: 12 },
+        specSunElevationDeg: { type: 'slider', label: 'Sun Elevation (deg)', min: 1.0, max: 90.0, step: 1.0, default: 79 },
+        specSunIntensity: { type: 'slider', label: 'Sun Intensity', min: 0.0, max: 5.0, step: 0.01, default: 4.08 },
         specNormalStrength: { type: 'slider', label: 'Normal Strength', min: 0.0, max: 5.0, step: 0.01, default: 5 },
-        specNormalScale: { type: 'slider', label: 'Normal Scale', min: 0.0, max: 0.25, step: 0.001, default: 0.205 },
-        specRoughnessMin: { type: 'slider', label: 'Roughness Min', min: 0.001, max: 1.0, step: 0.001, default: 0.396 },
-        specRoughnessMax: { type: 'slider', label: 'Roughness Max', min: 0.001, max: 1.0, step: 0.001, default: 0.873 },
-        specF0: { type: 'slider', label: 'F0 (Reflectance)', min: 0.0, max: 0.12, step: 0.001, default: 0.12 },
-        specMaskGamma: { type: 'slider', label: 'Mask Gamma', min: 0.1, max: 6.0, step: 0.01, default: 3.2 },
-        specSkyTint: { type: 'slider', label: 'Sky Tint', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
-        specShoreBias: { type: 'slider', label: 'Shore Bias', min: 0.0, max: 1.0, step: 0.01, default: 0.61 },
+        specNormalScale: { type: 'slider', label: 'Normal Scale', min: 0.0, max: 0.25, step: 0.001, default: 0.25 },
+        specRoughnessMin: { type: 'slider', label: 'Roughness Min', min: 0.001, max: 1.0, step: 0.001, default: 0.001 },
+        specRoughnessMax: { type: 'slider', label: 'Roughness Max', min: 0.001, max: 1.0, step: 0.001, default: 1 },
+        specF0: { type: 'slider', label: 'F0 (Reflectance)', min: 0.0, max: 0.12, step: 0.001, default: 0.069 },
+        specMaskGamma: { type: 'slider', label: 'Mask Gamma', min: 0.1, max: 6.0, step: 0.01, default: 2.6 },
+        specSkyTint: { type: 'slider', label: 'Sky Tint', min: 0.0, max: 1.0, step: 0.01, default: 0.6 },
+        specShoreBias: { type: 'slider', label: 'Shore Bias', min: 0.0, max: 1.0, step: 0.01, default: 1 },
 
-        specDistortionNormalStrength: { type: 'slider', label: 'Distortion→Normal', min: 0.0, max: 2.0, step: 0.01, default: 1.14 },
-        specAnisotropy: { type: 'slider', label: 'Anisotropy', min: 0.0, max: 1.0, step: 0.01, default: 0.2 },
-        specAnisoRatio: { type: 'slider', label: 'Aniso Ratio', min: 1.0, max: 8.0, step: 0.01, default: 3 },
+        specDistortionNormalStrength: { type: 'slider', label: 'Distortion→Normal', min: 0.0, max: 2.0, step: 0.01, default: 2 },
+        specAnisotropy: { type: 'slider', label: 'Anisotropy', min: 0.0, max: 1.0, step: 0.01, default: 0.16 },
+        specAnisoRatio: { type: 'slider', label: 'Aniso Ratio', min: 1.0, max: 8.0, step: 0.01, default: 3.05 },
 
-        foamStrength: { type: 'slider', label: 'Foam Strength', min: 0, max: 1.0, step: 0.01, default: 0.72 },
+        foamStrength: { type: 'slider', label: 'Foam Strength', min: 0, max: 1.0, step: 0.01, default: 0.09 },
         foamColor: { type: 'color', label: 'Foam Color', default: { r: 6, g: 6, b: 5 } },
-        foamThreshold: { type: 'slider', label: 'Foam Width', min: 0.0, max: 1.0, step: 0.01, default: 0.92 },
-        foamScale: { type: 'slider', label: 'Foam Grain Scale', min: 1.0, max: 2000.0, step: 1.0, default: 1225 },
-        foamSpeed: { type: 'slider', label: 'Foam Speed', min: 0.0, max: 1.5, step: 0.01, default: 1.5 },
+        foamThreshold: { type: 'slider', label: 'Foam Width', min: 0.0, max: 1.0, step: 0.01, default: 0.84 },
+        foamScale: { type: 'slider', label: 'Foam Grain Scale', min: 1.0, max: 2000.0, step: 1.0, default: 2000 },
+        foamSpeed: { type: 'slider', label: 'Foam Speed', min: 0.0, max: 1.5, step: 0.01, default: 0.19 },
 
-        foamCurlStrength: { type: 'slider', label: 'Foam Curl Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.13 },
-        foamCurlScale: { type: 'slider', label: 'Foam Curl Scale', min: 0.1, max: 30.0, step: 0.1, default: 11.3 },
-        foamCurlSpeed: { type: 'slider', label: 'Foam Curl Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.1 },
+        foamCurlStrength: { type: 'slider', label: 'Foam Curl Strength', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        foamCurlScale: { type: 'slider', label: 'Foam Curl Scale', min: 0.1, max: 30.0, step: 0.1, default: 3 },
+        foamCurlSpeed: { type: 'slider', label: 'Foam Curl Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.09 },
 
-        foamBreakupStrength1: { type: 'slider', label: 'Foam Breakup 1 Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.61 },
-        foamBreakupScale1: { type: 'slider', label: 'Foam Breakup 1 Scale', min: 0.1, max: 200.0, step: 0.1, default: 6.5 },
-        foamBreakupSpeed1: { type: 'slider', label: 'Foam Breakup 1 Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.6 },
-        foamBreakupStrength2: { type: 'slider', label: 'Foam Breakup 2 Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.44 },
-        foamBreakupScale2: { type: 'slider', label: 'Foam Breakup 2 Scale', min: 0.1, max: 100.0, step: 0.1, default: 2.6 },
-        foamBreakupSpeed2: { type: 'slider', label: 'Foam Breakup 2 Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.16 },
+        foamBreakupStrength1: { type: 'slider', label: 'Foam Breakup 1 Strength', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        foamBreakupScale1: { type: 'slider', label: 'Foam Breakup 1 Scale', min: 0.1, max: 200.0, step: 0.1, default: 1 },
+        foamBreakupSpeed1: { type: 'slider', label: 'Foam Breakup 1 Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.04 },
+        foamBreakupStrength2: { type: 'slider', label: 'Foam Breakup 2 Strength', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        foamBreakupScale2: { type: 'slider', label: 'Foam Breakup 2 Scale', min: 0.1, max: 100.0, step: 0.1, default: 17 },
+        foamBreakupSpeed2: { type: 'slider', label: 'Foam Breakup 2 Speed', min: 0.0, max: 1.0, step: 0.01, default: 0.32 },
 
-        foamBlackPoint: { type: 'slider', label: 'Foam Black Point', min: 0.0, max: 1.0, step: 0.01, default: 0.05 },
+        foamBlackPoint: { type: 'slider', label: 'Foam Black Point', min: 0.0, max: 1.0, step: 0.01, default: 0 },
         foamWhitePoint: { type: 'slider', label: 'Foam White Point', min: 0.0, max: 1.0, step: 0.01, default: 1 },
-        foamGamma: { type: 'slider', label: 'Foam Gamma', min: 0.1, max: 4.0, step: 0.01, default: 0.62 },
-        foamContrast: { type: 'slider', label: 'Foam Contrast', min: 0.0, max: 3.0, step: 0.01, default: 1.64 },
-        foamBrightness: { type: 'slider', label: 'Foam Brightness', min: -1.0, max: 1.0, step: 0.01, default: 0.01 },
+        foamGamma: { type: 'slider', label: 'Foam Gamma', min: 0.1, max: 4.0, step: 0.01, default: 1.06 },
+        foamContrast: { type: 'slider', label: 'Foam Contrast', min: 0.0, max: 3.0, step: 0.01, default: 0.87 },
+        foamBrightness: { type: 'slider', label: 'Foam Brightness', min: -1.0, max: 1.0, step: 0.01, default: -0.01 },
 
-        floatingFoamStrength: { type: 'slider', label: 'Floating Foam Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.33 },
-        floatingFoamCoverage: { type: 'slider', label: 'Floating Foam Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.24 },
-        floatingFoamScale: { type: 'slider', label: 'Floating Foam Scale', min: 1, max: 200, step: 0.5, default: 75.5 },
-        floatingFoamWaveDistortion: { type: 'slider', label: 'Wave Distortion', min: 0.0, max: 2.0, step: 0.01, default: 0.7 },
+        floatingFoamStrength: { type: 'slider', label: 'Floating Foam Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.8 },
+        floatingFoamCoverage: { type: 'slider', label: 'Floating Foam Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.09 },
+        floatingFoamScale: { type: 'slider', label: 'Floating Foam Scale', min: 1, max: 200, step: 0.5, default: 34.5 },
+        floatingFoamWaveDistortion: { type: 'slider', label: 'Wave Distortion', min: 0.0, max: 2.0, step: 0.01, default: 2 },
 
         shoreFoamEnabled: { type: 'boolean', label: 'Foam Particles Enabled', default: true },
         shoreFoamIntensity: { type: 'slider', label: 'Foam Particles Intensity', min: 0.0, max: 6.0, step: 0.01, default: 6 },
@@ -1120,14 +1181,14 @@ export class WaterEffectV2 extends EffectBase {
           default: 'waterEdge'
         },
         
-        foamPlumeMaxParticles: { type: 'slider', label: 'Plume Max Particles', min: 0, max: 20000, step: 1, default: 1681 },
-        foamPlumeEmissionBase: { type: 'slider', label: 'Plume Emission Base', min: 0.0, max: 500.0, step: 0.1, default: 31.2 },
-        foamPlumeEmissionWindScale: { type: 'slider', label: 'Plume Emission Wind Scale', min: 0.0, max: 1500.0, step: 0.1, default: 321.7 },
-        foamPlumeLifeMin: { type: 'slider', label: 'Plume Life Min', min: 0.01, max: 10.0, step: 0.01, default: 1.5 },
-        foamPlumeLifeMax: { type: 'slider', label: 'Plume Life Max', min: 0.01, max: 10.0, step: 0.01, default: 2.7 },
+        foamPlumeMaxParticles: { type: 'slider', label: 'Plume Max Particles', min: 0, max: 20000, step: 1, default: 8681 },
+        foamPlumeEmissionBase: { type: 'slider', label: 'Plume Emission Base', min: 0.0, max: 500.0, step: 0.1, default: 500 },
+        foamPlumeEmissionWindScale: { type: 'slider', label: 'Plume Emission Wind Scale', min: 0.0, max: 1500.0, step: 0.1, default: 1500 },
+        foamPlumeLifeMin: { type: 'slider', label: 'Plume Life Min', min: 0.01, max: 10.0, step: 0.01, default: 4.13 },
+        foamPlumeLifeMax: { type: 'slider', label: 'Plume Life Max', min: 0.01, max: 10.0, step: 0.01, default: 4.67 },
         foamPlumeSizeMin: { type: 'slider', label: 'Plume Size Min', min: 0.1, max: 500.0, step: 0.1, default: 15 },
         foamPlumeSizeMax: { type: 'slider', label: 'Plume Size Max', min: 0.1, max: 700.0, step: 0.1, default: 36.1 },
-        foamPlumeOpacity: { type: 'slider', label: 'Plume Opacity', min: 0.0, max: 2.0, step: 0.01, default: 0.23 },
+        foamPlumeOpacity: { type: 'slider', label: 'Plume Opacity', min: 0.0, max: 2.0, step: 0.01, default: 0.3 },
         foamPlumePeakOpacity: { type: 'slider', label: 'Plume Peak Opacity', min: 0.0, max: 2.0, step: 0.01, default: 0.04 },
         foamPlumePeakTime: { type: 'slider', label: 'Plume Peak Time', min: 0.01, max: 0.6, step: 0.01, default: 0.12 },
         foamPlumeStartScale: { type: 'slider', label: 'Plume Start Scale', min: 0.01, max: 5.0, step: 0.01, default: 1.24 },
@@ -1139,22 +1200,40 @@ export class WaterEffectV2 extends EffectBase {
         foamPlumeAdditiveBoost: { type: 'slider', label: 'Plume Additive Boost', min: 0.0, max: 20.0, step: 0.01, default: 1.68 },
         foamPlumeColor: { type: 'color', label: 'Plume Color', default: { r: 1.0, g: 1.0, b: 1.0 } },
 
-        foamPlumeRandomOpacityMin: { type: 'slider', label: 'Plume Random Opacity Min', min: 0.0, max: 5.0, step: 0.01, default: 1.94 },
-        foamPlumeRandomOpacityMax: { type: 'slider', label: 'Plume Random Opacity Max', min: 0.0, max: 5.0, step: 0.01, default: 4.06 },
+        foamPlumeRandomOpacityMin: { type: 'slider', label: 'Plume Random Opacity Min', min: 0.0, max: 5.0, step: 0.01, default: 2.06 },
+        foamPlumeRandomOpacityMax: { type: 'slider', label: 'Plume Random Opacity Max', min: 0.0, max: 5.0, step: 0.01, default: 2.99 },
 
         foamPlumeRadialAlphaEnabled: { type: 'boolean', label: 'Plume Radial Opacity Enabled', default: true },
         foamPlumeRadialInnerPos: { type: 'slider', label: 'Plume Radial Inner Pos', min: 0.0, max: 1.0, step: 0.001, default: 0.0 },
         foamPlumeRadialMidPos: { type: 'slider', label: 'Plume Radial Mid Pos', min: 0.0, max: 1.0, step: 0.001, default: 0.149 },
         foamPlumeRadialInnerOpacity: { type: 'slider', label: 'Plume Radial Inner Opacity', min: 0.0, max: 5.0, step: 0.01, default: 5 },
-        foamPlumeRadialMidOpacity: { type: 'slider', label: 'Plume Radial Mid Opacity', min: 0.0, max: 5.0, step: 0.01, default: 0.58 },
-        foamPlumeRadialOuterOpacity: { type: 'slider', label: 'Plume Radial Outer Opacity', min: 0.0, max: 5.0, step: 0.01, default: 0.31 },
+        foamPlumeRadialMidOpacity: { type: 'slider', label: 'Plume Radial Mid Opacity', min: 0.0, max: 5.0, step: 0.01, default: 0.81 },
+        foamPlumeRadialOuterOpacity: { type: 'slider', label: 'Plume Radial Outer Opacity', min: 0.0, max: 5.0, step: 0.01, default: 0.27 },
         foamPlumeRadialCurve: { type: 'slider', label: 'Plume Radial Curve', min: 0.1, max: 4.0, step: 0.01, default: 0.1 },
 
-        foamParticleNoiseEnabled: { type: 'boolean', label: 'Cutout Noise (Large) Enabled', default: false },
-        foamParticleNoiseStrength: { type: 'slider', label: 'Cutout Noise (Large) Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.05 },
+        foamPlumeCurlDisplaceEnabled: { type: 'boolean', label: 'Distortion Enabled', default: true },
+        foamPlumeCurlDisplaceUv: { type: 'slider', label: 'Distortion Strength (UV)', min: 0.0, max: 0.08, step: 0.0001, default: 0.0147 },
+        foamPlumeCurlAmount: { type: 'slider', label: 'Overall Distortion Amount', min: 0.0, max: 4.0, step: 0.01, default: 0.56 },
+        foamPlumeCurlStrengthMultiplier: { type: 'slider', label: 'Surface Curl Strength Multiplier', min: 0.0, max: 4.0, step: 0.01, default: 0.21 },
+        foamPlumeCurlScaleMultiplier: { type: 'slider', label: 'Surface Curl Scale Multiplier', min: 0.05, max: 4.0, step: 0.01, default: 4 },
+        foamPlumeCurlSpeedMultiplier: { type: 'slider', label: 'Surface Curl Speed Multiplier', min: 0.0, max: 4.0, step: 0.01, default: 1.87 },
+        foamPlumeCurlDirectionality: { type: 'slider', label: 'Directionality (0=Raw, 1=Normalized)', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        foamPlumeCurlDerivativeEpsilon: { type: 'slider', label: 'Derivative Epsilon', min: 0.001, max: 0.2, step: 0.001, default: 0.059 },
+        foamPlumeCurlLacunarity: { type: 'slider', label: 'Octave Lacunarity', min: 1.01, max: 4.0, step: 0.01, default: 1.69 },
+        foamPlumeCurlGain: { type: 'slider', label: 'Octave Gain', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        foamPlumeCurlOctave1Weight: { type: 'slider', label: 'Octave 1 Weight', min: 0.0, max: 4.0, step: 0.001, default: 0.388 },
+        foamPlumeCurlOctave2Weight: { type: 'slider', label: 'Octave 2 Weight', min: 0.0, max: 4.0, step: 0.001, default: 0.301 },
+        foamPlumeCurlOctave3Weight: { type: 'slider', label: 'Octave 3 Weight', min: 0.0, max: 4.0, step: 0.001, default: 0.33275 },
+        foamPlumeCurlOctave4Weight: { type: 'slider', label: 'Octave 4 Weight', min: 0.0, max: 4.0, step: 0.001, default: 0.183 },
+        foamPlumeCurlWindOffsetInfluence: { type: 'slider', label: 'Wind Offset Influence', min: 0.0, max: 2.0, step: 0.01, default: 0.5 },
+        foamPlumeCurlWindAdvection: { type: 'slider', label: 'Wind Advection Influence', min: 0.0, max: 3.0, step: 0.01, default: 1.0 },
+        foamPlumeCurlMaxUv: { type: 'slider', label: 'Max Distortion Clamp (UV)', min: 0.0, max: 0.25, step: 0.0005, default: 0.046 },
+
+        foamParticleNoiseEnabled: { type: 'boolean', label: 'Cutout Noise (Large) Enabled', default: true },
+        foamParticleNoiseStrength: { type: 'slider', label: 'Cutout Noise (Large) Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.14 },
         foamParticleNoiseScale: { type: 'slider', label: 'Cutout Noise (Large) Scale', min: 0.1, max: 120.0, step: 0.1, default: 14.3 },
         foamParticleNoiseSpeed: { type: 'slider', label: 'Cutout Noise (Large) Evolution Speed', min: 0.0, max: 5.0, step: 0.01, default: 0 },
-        foamParticleNoiseCoverage: { type: 'slider', label: 'Cutout Noise (Large) Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.46 },
+        foamParticleNoiseCoverage: { type: 'slider', label: 'Cutout Noise (Large) Coverage', min: 0.0, max: 1.0, step: 0.01, default: 0.81 },
         foamParticleNoiseSoftness: { type: 'slider', label: 'Cutout Noise (Large) Softness', min: 0.0, max: 0.5, step: 0.005, default: 0.5 },
         foamParticleNoiseAttempts: { type: 'slider', label: 'Cutout Noise Spawn Attempts', min: 1, max: 8, step: 1, default: 4 },
 
@@ -1190,7 +1269,7 @@ export class WaterEffectV2 extends EffectBase {
         murkContrast: { type: 'slider', label: 'Contrast', min: 0.25, max: 4.0, step: 0.01, default: 4 },
 
         sandEnabled: { type: 'boolean', label: 'Sand Enabled', default: true },
-        sandIntensity: { type: 'slider', label: 'Sand Intensity', min: 0.0, max: 1.0, step: 0.01, default: 0.18 },
+        sandIntensity: { type: 'slider', label: 'Sand Intensity', min: 0.0, max: 1.0, step: 0.01, default: 0.12 },
         sandColor: { type: 'color', label: 'Sand Color', default: { r: 0, g: 0, b: 0 } },
         sandContrast: { type: 'slider', label: 'Sand Contrast', min: 0.25, max: 4.0, step: 0.01, default: 0.25 },
         sandChunkScale: { type: 'slider', label: 'Sand Chunk Scale', min: 0.1, max: 20.0, step: 0.1, default: 5.4 },
@@ -3173,18 +3252,21 @@ export class WaterEffectV2 extends EffectBase {
             p.sandContrast = Number.isFinite(this.params?.sandContrast) ? this.params.sandContrast : 1.35;
 
             p.shoreNoiseEnabled = this.params?.shoreNoiseDistortionEnabled !== false;
-            p.shoreNoiseStrengthPx = Number.isFinite(this.params?.shoreNoiseDistortionStrengthPx) ? this.params.shoreNoiseDistortionStrengthPx : 2.25;
-            p.shoreNoiseFrequency = Number.isFinite(this.params?.shoreNoiseDistortionFrequency) ? this.params.shoreNoiseDistortionFrequency : 220.0;
-            p.shoreNoiseSpeed = Number.isFinite(this.params?.shoreNoiseDistortionSpeed) ? this.params.shoreNoiseDistortionSpeed : 0.65;
-            p.shoreNoiseFadeLo = Number.isFinite(this.params?.shoreNoiseDistortionFadeLo) ? this.params.shoreNoiseDistortionFadeLo : 0.06;
-            p.shoreNoiseFadeHi = Number.isFinite(this.params?.shoreNoiseDistortionFadeHi) ? this.params.shoreNoiseDistortionFadeHi : 0.28;
+            p.shoreNoiseStrengthPx = Number.isFinite(this.params?.shoreNoiseDistortionStrengthPx) ? this.params.shoreNoiseDistortionStrengthPx : 12.75;
+            p.shoreNoiseFrequency = Number.isFinite(this.params?.shoreNoiseDistortionFrequency) ? this.params.shoreNoiseDistortionFrequency : 526.1;
+            p.shoreNoiseSpeed = Number.isFinite(this.params?.shoreNoiseDistortionSpeed) ? this.params.shoreNoiseDistortionSpeed : 4.31;
+            p.shoreNoiseFadeLo = Number.isFinite(this.params?.shoreNoiseDistortionFadeLo) ? this.params.shoreNoiseDistortionFadeLo : 0.112;
+            p.shoreNoiseFadeHi = Number.isFinite(this.params?.shoreNoiseDistortionFadeHi) ? this.params.shoreNoiseDistortionFadeHi : 0.601;
+            p.shoreNoiseCurlStrength = Number.isFinite(this.params?.shoreNoiseDistortionCurlStrength) ? this.params.shoreNoiseDistortionCurlStrength : 0.45;
+            p.shoreNoiseWashStrength = Number.isFinite(this.params?.shoreNoiseDistortionWashStrength) ? this.params.shoreNoiseDistortionWashStrength : 0.51;
+            p.shoreNoiseWashSpeed = Number.isFinite(this.params?.shoreNoiseDistortionWashSpeed) ? this.params.shoreNoiseDistortionWashSpeed : 0.8;
 
             // Provide WaterData so DistortionManager can derive a shoreline band pinned to
             // the true land/water boundary (exposure01 == 0 at the edge).
             p.waterDataTexture = this.getWaterDataTexture?.() ?? null;
 
             p.causticsEnabled = this.params?.causticsEnabled !== false;
-            p.causticsIntensity = Number.isFinite(this.params?.causticsIntensity) ? this.params.causticsIntensity : 0.25;
+            p.causticsIntensity = Number.isFinite(this.params?.causticsIntensity) ? this.params.causticsIntensity : 4;
             p.causticsScale = Number.isFinite(this.params?.causticsScale) ? this.params.causticsScale : 60.4;
             p.causticsSpeed = Number.isFinite(this.params?.causticsSpeed) ? this.params.causticsSpeed : 1.83;
             p.causticsSharpness = Number.isFinite(this.params?.causticsSharpness) ? this.params.causticsSharpness : 1.36;
@@ -3193,7 +3275,7 @@ export class WaterEffectV2 extends EffectBase {
             p.causticsEdgeBlurTexels = Number.isFinite(this.params?.causticsEdgeBlurTexels) ? this.params.causticsEdgeBlurTexels : 4.0;
 
             p.causticsBrightnessMaskEnabled = this.params?.causticsBrightnessMaskEnabled === true;
-            p.causticsBrightnessThreshold = Number.isFinite(this.params?.causticsBrightnessThreshold) ? this.params.causticsBrightnessThreshold : 0.25;
+            p.causticsBrightnessThreshold = Number.isFinite(this.params?.causticsBrightnessThreshold) ? this.params.causticsBrightnessThreshold : 0.24;
             p.causticsBrightnessSoftness = Number.isFinite(this.params?.causticsBrightnessSoftness) ? this.params.causticsBrightnessSoftness : 0.25;
             p.causticsBrightnessGamma = Number.isFinite(this.params?.causticsBrightnessGamma) ? this.params.causticsBrightnessGamma : 0.62;
 
@@ -3221,7 +3303,7 @@ export class WaterEffectV2 extends EffectBase {
 
     if (u.uChromaticAberrationStrengthPx) {
       const v = this.params?.chromaticAberrationStrengthPx;
-      u.uChromaticAberrationStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.75;
+      u.uChromaticAberrationStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, v) : 1.78;
     }
 
     if (u.uChromaticAberrationEdgeCenter) {
@@ -3230,7 +3312,7 @@ export class WaterEffectV2 extends EffectBase {
     }
     if (u.uChromaticAberrationEdgeFeather) {
       const v = this.params?.chromaticAberrationEdgeFeather;
-      u.uChromaticAberrationEdgeFeather.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.5, v)) : 0.06;
+      u.uChromaticAberrationEdgeFeather.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.5, v)) : 0.1;
     }
     if (u.uChromaticAberrationEdgeGamma) {
       const v = this.params?.chromaticAberrationEdgeGamma;
@@ -4394,7 +4476,7 @@ export class WaterEffectV2 extends EffectBase {
 
     try {
       this._waterData = this._surfaceModel.buildFromMaskTexture(this.waterMask, {
-        resolution: Number.isFinite(this.params?.buildResolution) ? this.params.buildResolution : 512,
+        resolution: Number.isFinite(this.params?.buildResolution) ? this.params.buildResolution : 2048,
         threshold: Number.isFinite(this.params?.maskThreshold) ? this.params.maskThreshold : 0.15,
         channel: this.params?.maskChannel ?? 'auto',
         invert: !!this.params?.maskInvert,
@@ -4443,7 +4525,7 @@ export class WaterEffectV2 extends EffectBase {
     const br = Number.isFinite(p.maskBlurRadius) ? p.maskBlurRadius : 0.0;
     const bp = Number.isFinite(p.maskBlurPasses) ? p.maskBlurPasses : 0;
     const ex = Number.isFinite(p.maskExpandPx) ? p.maskExpandPx : 0.0;
-    const res = Number.isFinite(p.buildResolution) ? p.buildResolution : 512;
+    const res = Number.isFinite(p.buildResolution) ? p.buildResolution : 2048;
     const sdf = Number.isFinite(p.sdfRangePx) ? p.sdfRangePx : 64;
     const shore = Number.isFinite(p.shoreWidthPx) ? p.shoreWidthPx : 24;
 

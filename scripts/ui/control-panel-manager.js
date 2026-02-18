@@ -2291,12 +2291,13 @@ Current Weather:
 
     // Start status updates
     if (this._statusIntervalId) clearInterval(this._statusIntervalId);
+    // T3-D: 500ms is sufficient for status display (FPS, frame time) — halves timer overhead.
     this._statusIntervalId = setInterval(() => {
       try {
         this._updateStatusPanel();
       } catch (e) {
       }
-    }, 250);
+    }, 500);
     
     log.debug('Control panel shown');
   }

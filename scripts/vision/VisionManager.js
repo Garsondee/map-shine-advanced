@@ -78,9 +78,14 @@ export class VisionManager {
     this.sceneBounds = null;
     
     // PERFORMANCE: Throttle vision updates to avoid recomputing every animation frame.
-    // refreshToken fires ~60 times/sec during token movement; we limit to ~10 updates/sec.
+    // refreshToken fires ~60 times/sec during token movement; we limit updates/sec.
+    // T3-B: Adaptive throttle — fast during active token movement, slow when idle.
     this._lastUpdateTime = 0;
-    this._updateThrottleMs = 100; // Minimum ms between vision recomputes
+    this._updateThrottleMs = 200; // Current effective interval (adaptive)
+    this._updateThrottleFastMs = 50; // Fast rate during active token movement
+    this._updateThrottleIdleMs = 200; // Slow rate when idle
+    this._visionActiveUntilMs = 0; // Timestamp until which fast rate is used
+    this._visionActiveDurationMs = 600; // Duration to stay fast after last activity signal
     this._pendingThrottledUpdate = false;
     
     // PERFORMANCE: Reusable objects to avoid per-frame allocations
@@ -147,6 +152,8 @@ export class VisionManager {
         });
         // Mark for throttled update instead of immediate
         this._pendingThrottledUpdate = true;
+        // T3-B: Signal active vision — use fast throttle during token animation
+        this._visionActiveUntilMs = performance.now() + this._visionActiveDurationMs;
       }
     })]);
     
@@ -202,6 +209,8 @@ export class VisionManager {
     if (!this._controlledTokenIds.has(tokenId)) return;
     this.pendingPositions.set(tokenId, { x, y });
     this._pendingThrottledUpdate = true;
+    // T3-B: Signal active vision — use fast throttle during drag
+    this._visionActiveUntilMs = performance.now() + this._visionActiveDurationMs;
   }
 
   /**
@@ -318,8 +327,12 @@ export class VisionManager {
     
     // PERFORMANCE: Throttle updates from refreshToken to avoid 60fps vision recomputes.
     // Immediate updates (needsUpdate) from updateToken/createWall/etc. are not throttled.
+    // T3-B: Adaptive throttle — fast during active token movement, slow when idle.
     if (!this.needsUpdate && this._pendingThrottledUpdate) {
       const now = performance.now();
+      this._updateThrottleMs = (now < this._visionActiveUntilMs)
+        ? this._updateThrottleFastMs
+        : this._updateThrottleIdleMs;
       if (now - this._lastUpdateTime < this._updateThrottleMs) {
         // Too soon since last update, skip this frame
         return;

@@ -154,8 +154,34 @@ export class DepthPassManager {
     /** @type {boolean} Whether the depth needs re-rendering this frame */
     this._dirty = true;
 
-    /** @type {boolean} Continuous mode — re-render every frame (needed when tiles animate) */
-    this._continuous = true;
+    /**
+     * Continuous mode — re-render every frame regardless of dirty state.
+     * Defaults to false (on-demand). The depth pass self-invalidates on camera
+     * movement and can be manually invalidated via invalidate().
+     * Use setContinuous(true) to force every-frame rendering for debugging.
+     * @type {boolean}
+     */
+    this._continuous = false;
+
+    /**
+     * Max depth-pass render rate (Hz). Even when continuously dirty (e.g. during
+     * camera pan), cap to this rate to avoid GPU pressure from redundant passes.
+     * @type {number}
+     */
+    this._maxHz = 30;
+
+    /** @type {number} Timestamp of last depth render (ms) */
+    this._lastRenderTimeMs = 0;
+
+    // Camera change detection — stored as flat values to avoid per-frame object allocation
+    /** @private */ this._prevCamX = NaN;
+    /** @private */ this._prevCamY = NaN;
+    /** @private */ this._prevCamZ = NaN;
+    /** @private */ this._prevCamQx = NaN;
+    /** @private */ this._prevCamQy = NaN;
+    /** @private */ this._prevCamQz = NaN;
+    /** @private */ this._prevCamQw = NaN;
+    /** @private */ this._prevCamFov = NaN;
 
     // ── Debug visualization ──────────────────────────────────────────────
     /** @type {boolean} */
@@ -360,17 +386,56 @@ export class DepthPassManager {
 
   /**
    * Called every frame by EffectComposer.
-   * Renders the depth pass if dirty or in continuous mode.
+   * Renders the depth pass if dirty, camera moved, or in continuous mode.
+   * Rate-capped to _maxHz to avoid redundant GPU work.
    * @param {Object} timeInfo
    */
   update(timeInfo) {
     if (!this._initialized || !this._enabled) return;
 
+    // Self-invalidate on camera movement (position, rotation, or FOV change)
+    this._detectCameraChange();
+
     const shouldRender = this._continuous || this._dirty;
     if (!shouldRender) return;
 
+    // Rate-cap: skip if we rendered too recently
+    if (this._maxHz > 0 && !this._continuous) {
+      const now = performance.now();
+      const minIntervalMs = 1000 / this._maxHz;
+      if ((now - this._lastRenderTimeMs) < minIntervalMs) return;
+      this._lastRenderTimeMs = now;
+    }
+
     this._renderDepthPass();
     this._dirty = false;
+  }
+
+  /**
+   * Compare current camera state to previous frame and set _dirty if changed.
+   * Uses flat scalar comparisons to avoid any per-frame allocations.
+   * @private
+   */
+  _detectCameraChange() {
+    const cam = this._camera;
+    if (!cam) return;
+
+    const p = cam.position;
+    const q = cam.quaternion;
+    const fov = cam.fov;
+
+    if (
+      p.x !== this._prevCamX || p.y !== this._prevCamY || p.z !== this._prevCamZ ||
+      q.x !== this._prevCamQx || q.y !== this._prevCamQy ||
+      q.z !== this._prevCamQz || q.w !== this._prevCamQw ||
+      fov !== this._prevCamFov
+    ) {
+      this._dirty = true;
+      this._prevCamX = p.x; this._prevCamY = p.y; this._prevCamZ = p.z;
+      this._prevCamQx = q.x; this._prevCamQy = q.y;
+      this._prevCamQz = q.z; this._prevCamQw = q.w;
+      this._prevCamFov = fov;
+    }
   }
 
   /** @private */

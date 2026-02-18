@@ -18,6 +18,10 @@ const log = createLogger('GraphicsSettings');
  * @typedef {Object} GraphicsSettingsState
  * @property {boolean} globalDisableAll
  * @property {string} renderResolutionPreset
+ * @property {boolean} renderAdaptiveFpsEnabled
+ * @property {number} renderIdleFps
+ * @property {number} renderActiveFps
+ * @property {number} renderContinuousFps
  * @property {Object<string, {enabled?: boolean}>} effectOverrides
  */
 
@@ -38,6 +42,10 @@ export class GraphicsSettingsManager {
     this.state = {
       globalDisableAll: false,
       renderResolutionPreset: 'native',
+      renderAdaptiveFpsEnabled: true,
+      renderIdleFps: 15,
+      renderActiveFps: 60,
+      renderContinuousFps: 30,
       effectOverrides: {}
     };
 
@@ -48,6 +56,20 @@ export class GraphicsSettingsManager {
     // Cache of effect instances wired for runtime application.
     /** @type {Map<string, any>} */
     this._effects = new Map();
+  }
+
+  /**
+   * @private
+   * @param {*} value
+   * @param {number} fallback
+   * @param {number} min
+   * @param {number} max
+   * @returns {number}
+   */
+  _coerceFps(value, fallback, min, max) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, Math.floor(n)));
   }
 
   _buildStorageKey() {
@@ -76,6 +98,9 @@ export class GraphicsSettingsManager {
   async initialize() {
     this.loadState();
 
+    // Render loop reads these values from window.MapShine each frame.
+    this.applyRenderPerformanceSettings();
+
     try {
       this._onApplyRenderResolution?.();
     } catch (e) {
@@ -91,6 +116,34 @@ export class GraphicsSettingsManager {
    */
   getRenderResolutionPreset() {
     return this.state?.renderResolutionPreset || 'native';
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  getRenderAdaptiveFpsEnabled() {
+    return this.state?.renderAdaptiveFpsEnabled === true;
+  }
+
+  /**
+   * @returns {number}
+   */
+  getRenderIdleFps() {
+    return this._coerceFps(this.state?.renderIdleFps, 15, 5, 60);
+  }
+
+  /**
+   * @returns {number}
+   */
+  getRenderActiveFps() {
+    return this._coerceFps(this.state?.renderActiveFps, 60, 5, 120);
+  }
+
+  /**
+   * @returns {number}
+   */
+  getRenderContinuousFps() {
+    return this._coerceFps(this.state?.renderContinuousFps, 30, 5, 120);
   }
 
   /**
@@ -143,6 +196,54 @@ export class GraphicsSettingsManager {
       this._onApplyRenderResolution?.();
     } catch (e) {
       log.warn('Failed to apply render resolution', e);
+    }
+  }
+
+  /**
+   * @param {boolean} enabled
+   */
+  setRenderAdaptiveFpsEnabled(enabled) {
+    this.state.renderAdaptiveFpsEnabled = enabled === true;
+    this.applyRenderPerformanceSettings();
+  }
+
+  /**
+   * @param {number} fps
+   */
+  setRenderIdleFps(fps) {
+    this.state.renderIdleFps = this._coerceFps(fps, 15, 5, 60);
+    this.applyRenderPerformanceSettings();
+  }
+
+  /**
+   * @param {number} fps
+   */
+  setRenderActiveFps(fps) {
+    this.state.renderActiveFps = this._coerceFps(fps, 60, 5, 120);
+    this.applyRenderPerformanceSettings();
+  }
+
+  /**
+   * @param {number} fps
+   */
+  setRenderContinuousFps(fps) {
+    this.state.renderContinuousFps = this._coerceFps(fps, 30, 5, 120);
+    this.applyRenderPerformanceSettings();
+  }
+
+  /**
+   * Push current frame pacing settings into the runtime namespace consumed by RenderLoop.
+   */
+  applyRenderPerformanceSettings() {
+    try {
+      if (!window) return;
+      const ms = window.MapShine || (window.MapShine = {});
+      ms.renderAdaptiveFpsEnabled = this.getRenderAdaptiveFpsEnabled();
+      ms.renderIdleFps = this.getRenderIdleFps();
+      ms.renderActiveFps = this.getRenderActiveFps();
+      ms.renderContinuousFps = this.getRenderContinuousFps();
+    } catch (e) {
+      log.warn('Failed to apply render performance settings', e);
     }
   }
 
@@ -321,6 +422,10 @@ export class GraphicsSettingsManager {
 
       if (typeof parsed.globalDisableAll === 'boolean') this.state.globalDisableAll = parsed.globalDisableAll;
       if (typeof parsed.renderResolutionPreset === 'string') this.state.renderResolutionPreset = parsed.renderResolutionPreset;
+      if (typeof parsed.renderAdaptiveFpsEnabled === 'boolean') this.state.renderAdaptiveFpsEnabled = parsed.renderAdaptiveFpsEnabled;
+      if (parsed.renderIdleFps !== undefined) this.state.renderIdleFps = this._coerceFps(parsed.renderIdleFps, 15, 5, 60);
+      if (parsed.renderActiveFps !== undefined) this.state.renderActiveFps = this._coerceFps(parsed.renderActiveFps, 60, 5, 120);
+      if (parsed.renderContinuousFps !== undefined) this.state.renderContinuousFps = this._coerceFps(parsed.renderContinuousFps, 30, 5, 120);
       if (parsed.effectOverrides && typeof parsed.effectOverrides === 'object') this.state.effectOverrides = parsed.effectOverrides;
 
       log.debug('Loaded graphics overrides');

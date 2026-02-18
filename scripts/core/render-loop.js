@@ -24,6 +24,12 @@ export class RenderLoop {
     this._forceNextRender = true;
     this._lastComposerRenderTime = 0;
     this._idleFps = 15;
+    this._activeFps = 60;
+    this._continuousFps = 30;
+
+    // PERF: Cache expensive composer continuous-render probes.
+    this._cachedEffectWantsContinuous = false;
+    this._lastEffectContinuousCheckMs = -Infinity;
 
     // Camera snapshot for cheap motion detection.
     this._lastCamX = null;
@@ -101,6 +107,9 @@ export class RenderLoop {
     this._lastPixiPivotY = null;
     this._lastPixiZoom = null;
 
+    this._cachedEffectWantsContinuous = false;
+    this._lastEffectContinuousCheckMs = -Infinity;
+
     this._continuousRenderUntilMs = 0;
     
     // Kick off the loop
@@ -126,6 +135,45 @@ export class RenderLoop {
 
     // Ensure the very next frame renders even if we're currently idle-throttled.
     this._forceNextRender = true;
+  }
+
+  /**
+   * @private
+   * @param {*} value
+   * @param {number} fallback
+   * @param {number} min
+   * @param {number} max
+   * @returns {number}
+   */
+  _clampFps(value, fallback, min = 5, max = 120) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, Math.floor(n)));
+  }
+
+  /**
+   * Query EffectComposer.wantsContinuousRender() with a short cache window.
+   * This avoids scanning effects on every RAF when nothing changes.
+   *
+   * @private
+   * @param {number} nowMs
+   * @returns {boolean}
+   */
+  _getEffectWantsContinuous(nowMs) {
+    if (!this.effectComposer?.wantsContinuousRender) return false;
+
+    const now = Number.isFinite(nowMs) ? nowMs : performance.now();
+    const pollIntervalMs = this._cachedEffectWantsContinuous ? 120 : 33;
+    if ((now - this._lastEffectContinuousCheckMs) < pollIntervalMs) {
+      return this._cachedEffectWantsContinuous;
+    }
+
+    this._lastEffectContinuousCheckMs = now;
+    try {
+      this._cachedEffectWantsContinuous = !!this.effectComposer.wantsContinuousRender();
+    } catch (_) {
+    }
+    return this._cachedEffectWantsContinuous;
   }
 
   /**
@@ -208,25 +256,47 @@ export class RenderLoop {
         // IMPORTANT: keep idle interval <= 100ms, otherwise TimeManager clamps delta
         // and animations will slow down when the user re-enables them.
         const ms = window.MapShine;
-        const idleFps = Number.isFinite(ms?.renderIdleFps)
-          ? Math.max(5, Math.min(60, Math.floor(ms.renderIdleFps)))
-          : this._idleFps;
+        const adaptiveFpsEnabled = ms?.renderAdaptiveFpsEnabled !== false;
+        const idleFps = this._clampFps(ms?.renderIdleFps, this._idleFps, 5, 60);
+        const activeFps = this._clampFps(ms?.renderActiveFps, this._activeFps, 5, 120);
+        const continuousFps = this._clampFps(ms?.renderContinuousFps, this._continuousFps, 5, 120);
         const idleIntervalMs = 1000 / Math.max(1, idleFps);
+
+        // Fast path: when adaptive mode is on, nothing can render faster than the
+        // highest configured mode cap. On high-refresh displays this avoids extra
+        // per-RAF work (camera checks + effect scans) between allowed render ticks.
+        if (adaptiveFpsEnabled) {
+          const since = now - (this._lastComposerRenderTime || 0);
+          const fastestFps = Math.max(idleFps, activeFps, continuousFps);
+          const minIntervalMs = 1000 / Math.max(1, fastestFps);
+          if (since < minIntervalMs) return;
+        }
 
         // Effects may request continuous rendering while they are active
         // (e.g. particle systems) so they don't animate at the idle FPS.
-        let effectWantsContinuous = false;
-        try {
-          if (this.effectComposer?.wantsContinuousRender) {
-            effectWantsContinuous = !!this.effectComposer.wantsContinuousRender();
-          }
-        } catch (_) {
+        let effectWantsContinuous = inContinuousWindow;
+        if (!effectWantsContinuous) {
+          effectWantsContinuous = this._getEffectWantsContinuous(now);
         }
 
         let shouldRender = inContinuousWindow || effectWantsContinuous || this._forceNextRender || cameraChanged;
         if (!shouldRender) {
           const since = now - (this._lastComposerRenderTime || 0);
           if (since >= idleIntervalMs) shouldRender = true;
+        }
+
+        // Optional adaptive frame cap for smoother pacing under continuous load.
+        // - active: camera/interactions/forced updates
+        // - continuous: ongoing animated effects requesting full-rate updates
+        // - idle: falls back to the existing idle throttle target
+        if (shouldRender && adaptiveFpsEnabled) {
+          let targetFps = idleFps;
+          if (inContinuousWindow || effectWantsContinuous) targetFps = continuousFps;
+          else if (this._forceNextRender || cameraChanged) targetFps = activeFps;
+
+          const minIntervalMs = 1000 / Math.max(1, targetFps);
+          const since = now - (this._lastComposerRenderTime || 0);
+          if (since < minIntervalMs) shouldRender = false;
         }
 
         if (shouldRender) {
@@ -347,6 +417,8 @@ export class RenderLoop {
   setEffectComposer(composer) {
     this.effectComposer = composer;
     this._forceNextRender = true;
+    this._cachedEffectWantsContinuous = false;
+    this._lastEffectContinuousCheckMs = -Infinity;
     log.debug('Effect composer set');
   }
 

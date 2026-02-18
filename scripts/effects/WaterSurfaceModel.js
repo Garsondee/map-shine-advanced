@@ -36,9 +36,6 @@ export class WaterSurfaceModel {
     this.resolution = Math.max(8, Math.floor(resolution));
     this.threshold = threshold;
 
-    const w = this.resolution;
-    const h = this.resolution;
-
     log.info('buildFromMaskTexture called', { resolution, threshold, channel, invert });
 
     const img = maskTexture?.image;
@@ -51,6 +48,23 @@ export class WaterSurfaceModel {
       this.transform = new THREE.Vector4(0, 0, 1, 1);
       return null;
     }
+
+    // Derive w/h proportional to the source image so we don't squash
+    // non-square masks into a square grid.  The `resolution` parameter
+    // acts as the max dimension; the shorter side scales proportionally.
+    const srcW = img.width || img.naturalWidth || this.resolution;
+    const srcH = img.height || img.naturalHeight || this.resolution;
+    const maxDim = this.resolution;
+    let w, h;
+    if (srcW >= srcH) {
+      w = maxDim;
+      h = Math.max(8, Math.round(maxDim * (srcH / srcW)));
+    } else {
+      h = maxDim;
+      w = Math.max(8, Math.round(maxDim * (srcW / srcH)));
+    }
+
+    log.info('buildFromMaskTexture dimensions', { srcW, srcH, buildW: w, buildH: h });
 
     const canvas = document.createElement('canvas');
     canvas.width = w;

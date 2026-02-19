@@ -7,7 +7,7 @@
 
 import { createLogger } from '../core/log.js';
 import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
-import { readTileLevelsFlags, tileHasLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
+import { readTileLevelsFlags, tileHasLevelsRange, isLevelsEnabledForScene, readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 
 const log = createLogger('VisionPolygonComputer');
 
@@ -248,24 +248,19 @@ export class VisionPolygonComputer {
       // MS-LVL-072: Wall-height filtering. Skip walls whose vertical
       // bounds don't include the viewer's elevation. This allows tokens
       // on one floor to see past walls that only exist on other floors.
+      //
+      // IMPORTANT: Use Levels-style top-exclusive ranges:
+      //   inRange = elevation >= bottom && elevation < top
+      // This avoids cross-floor blocking at shared floor boundaries
+      // (e.g. lower wall top=10 should not block viewer elevation=10).
       if (hasElevation) {
-        const whFlags = doc.flags?.['wall-height'];
-        if (whFlags) {
-          let whBottom = -Infinity;
-          let whTop = Infinity;
-          if (whFlags.bottom !== undefined && whFlags.bottom !== null) {
-            const n = Number(whFlags.bottom);
-            if (Number.isFinite(n)) whBottom = n;
-          }
-          if (whFlags.top !== undefined && whFlags.top !== null) {
-            const n = Number(whFlags.top);
-            if (Number.isFinite(n)) whTop = n;
-          }
-          // Swap if inverted
-          if (whTop < whBottom) { const s = whBottom; whBottom = whTop; whTop = s; }
-          // Skip wall if viewer elevation is outside its vertical extent
-          if (elevation < whBottom || elevation > whTop) continue;
-        }
+        const { bottom: whBottomRaw, top: whTopRaw } = readWallHeightFlags(doc);
+        let whBottom = whBottomRaw;
+        let whTop = whTopRaw;
+        // Swap if inverted
+        if (whTop < whBottom) { const s = whBottom; whBottom = whTop; whTop = s; }
+        const inWallRange = elevation >= whBottom && (whTop === Infinity || elevation < whTop);
+        if (!inWallRange) continue;
       }
 
       const c = doc.c;

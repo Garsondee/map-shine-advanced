@@ -388,9 +388,12 @@ export function readDocLevelsRange(doc) {
  */
 export function readWallHeightFlags(wallDoc) {
   const defaults = { bottom: -Infinity, top: Infinity };
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return defaults;
 
-  const flags = wallDoc?.flags?.['wall-height'];
+  // IMPORTANT: wall-height must remain authoritative even when Levels
+  // compatibility mode is OFF so floor-scoped walls don't regress into
+  // full-height blockers across all levels.
+  const flags = wallDoc?.flags?.['wall-height']
+    ?? wallDoc?.document?.flags?.['wall-height'];
   if (!flags) return defaults;
 
   let bottom = -Infinity;
@@ -426,8 +429,8 @@ export function readWallHeightFlags(wallDoc) {
  * @returns {boolean}
  */
 export function wallHasHeightBounds(wallDoc) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
-  const flags = wallDoc?.flags?.['wall-height'];
+  const flags = wallDoc?.flags?.['wall-height']
+    ?? wallDoc?.document?.flags?.['wall-height'];
   if (!flags) return false;
   if (flags.bottom !== undefined && flags.bottom !== null) {
     const n = Number(flags.bottom);

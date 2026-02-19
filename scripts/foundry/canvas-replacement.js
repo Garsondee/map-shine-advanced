@@ -118,6 +118,7 @@ import { installLevelsRegionBehaviorCompatPatch } from './region-levels-compat.j
 import { installSnapshotStoreHooks, getSnapshot as getLevelsSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
 import { installLevelsApiFacade } from './levels-api-facade.js';
 import { ZoneManager } from './zone-manager.js';
+import { LevelsPerspectiveBridge } from './levels-perspective-bridge.js';
 
 const log = createLogger('Canvas');
 
@@ -176,6 +177,9 @@ let cameraPanel = null;
 
 /** @type {LevelNavigatorOverlay|null} */
 let levelNavigatorOverlay = null;
+
+/** @type {LevelsPerspectiveBridge|null} - Syncs floor context between MapShine and Levels module */
+let levelsPerspectiveBridge = null;
 
 /** @type {CinematicCameraManager|null} */
 let cinematicCameraManager = null;
@@ -2426,6 +2430,19 @@ async function createThreeCanvas(scene) {
       if (window.MapShine) window.MapShine.levelNavigatorOverlay = levelNavigatorOverlay;
     }, 'exposeLevelNavigatorOverlay', Severity.COSMETIC);
     if (isDebugLoad) dlp.end('manager.LevelNavigatorOverlay.init');
+
+    // Step 6.06: Initialize Levels Perspective Bridge.
+    // Syncs floor context bidirectionally between MapShine and the Levels module
+    // so movement, vision, and wall filtering all use the same elevation.
+    safeCall(() => {
+      if (levelsPerspectiveBridge) {
+        levelsPerspectiveBridge.dispose();
+      }
+      levelsPerspectiveBridge = new LevelsPerspectiveBridge();
+      levelsPerspectiveBridge.initialize();
+      if (window.MapShine) window.MapShine.levelsPerspectiveBridge = levelsPerspectiveBridge;
+      log.info('Levels perspective bridge initialized');
+    }, 'LevelsPerspectiveBridge.init', Severity.DEGRADED);
 
     // Step 6a: Initialize PIXI Input Bridge
     // Handles pan/zoom input on Three canvas and applies to PIXI stage.
@@ -5091,6 +5108,11 @@ function destroyThreeCanvas() {
   if (levelNavigatorOverlay) {
     safeDispose(() => levelNavigatorOverlay.dispose(), 'levelNavigatorOverlay.dispose');
     levelNavigatorOverlay = null;
+  }
+
+  if (levelsPerspectiveBridge) {
+    safeDispose(() => levelsPerspectiveBridge.dispose(), 'levelsPerspectiveBridge.dispose');
+    levelsPerspectiveBridge = null;
   }
 
   if (overlayUIManager) {

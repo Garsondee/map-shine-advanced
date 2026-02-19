@@ -6,7 +6,9 @@
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
-import { applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
+import { applyWallLevelDefaults, getFiniteActiveLevelBand, shouldApplyLevelCreateDefaults } from '../foundry/levels-create-defaults.js';
+import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
+import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 
 const log = createLogger('WallManager');
 
@@ -87,6 +89,7 @@ export class WallManager {
 
     this._hookIds.push(['createWall', Hooks.on('createWall', (doc) => {
       this.create(doc);
+      this._postCreateWallIntegrityGuard(doc);
       setTimeout(() => {
         try {
           this.updateVisibility();
@@ -115,6 +118,10 @@ export class WallManager {
       }, 0);
       this._requestLightingRefresh();
     })]);
+
+    this._hookIds.push(['mapShineLevelContextChanged', Hooks.on('mapShineLevelContextChanged', () => {
+      this.updateVisibility();
+    })]);
   }
 
   _onPreCreateWall(doc, data, options, userId) {
@@ -137,12 +144,62 @@ export class WallManager {
         top: hasTop ? data.flags['wall-height'].top : seeded.top,
       };
 
+      // Mutate the pending create data directly so all downstream preCreate
+      // consumers see the same wall-height bounds in this transaction.
+      data.flags = (data.flags && typeof data.flags === 'object') ? data.flags : {};
+      data.flags['wall-height'] = {
+        ...(data.flags['wall-height'] && typeof data.flags['wall-height'] === 'object' ? data.flags['wall-height'] : {}),
+        bottom: nextWallHeight.bottom,
+        top: nextWallHeight.top,
+      };
+
       doc.updateSource({
-        flags: {
-          'wall-height': nextWallHeight,
-        },
+        'flags.wall-height.bottom': nextWallHeight.bottom,
+        'flags.wall-height.top': nextWallHeight.top,
       });
     } catch (_) {
+    }
+  }
+
+  /**
+   * Post-create integrity guard: if a wall was created in a multi-level scene
+   * but somehow landed without wall-height bounds (e.g. preCreate hook was
+   * bypassed, or a module created the wall programmatically), patch it now.
+   *
+   * This is a safety net — the preCreateWall hook should handle the normal case.
+   * @param {WallDocument} doc
+   * @private
+   */
+  _postCreateWallIntegrityGuard(doc) {
+    try {
+      if (!doc?.id) return;
+      if (!shouldApplyLevelCreateDefaults(doc.parent ?? canvas?.scene, { allowWhenModeOff: true })) return;
+
+      const flags = doc.flags?.['wall-height'];
+      const hasBottom = flags?.bottom !== undefined && flags?.bottom !== null && Number.isFinite(Number(flags.bottom));
+      const hasTop = flags?.top !== undefined && flags?.top !== null && Number.isFinite(Number(flags.top));
+      if (hasBottom && hasTop) return;
+
+      const band = getFiniteActiveLevelBand();
+      if (!band) return;
+
+      const patch = {};
+      if (!hasBottom) patch['flags.wall-height.bottom'] = band.bottom;
+      if (!hasTop) patch['flags.wall-height.top'] = band.top;
+
+      log.warn(`Post-create guard: wall ${doc.id} missing wall-height bounds — patching with band [${band.bottom}, ${band.top}]`);
+
+      // Defer the update to avoid re-entrant document mutations during the
+      // createWall hook chain.
+      setTimeout(() => {
+        try {
+          doc.update(patch);
+        } catch (e) {
+          log.warn('Post-create wall-height patch failed:', e);
+        }
+      }, 50);
+    } catch (_) {
+      // Guard must never throw and disrupt the createWall flow
     }
   }
 
@@ -214,19 +271,36 @@ export class WallManager {
     this.setVisibility(showLines);
   }
 
+  _isWallVisibleAtPerspective(wallDoc) {
+    if (!wallDoc) return true;
+
+    const perspective = getPerspectiveElevation();
+    const elevation = Number(perspective?.elevation);
+    if (!Number.isFinite(elevation)) return true;
+
+    const bounds = readWallHeightFlags(wallDoc);
+    let bottom = Number(bounds?.bottom);
+    let top = Number(bounds?.top);
+    if (!Number.isFinite(bottom)) bottom = -Infinity;
+    if (!Number.isFinite(top)) top = Infinity;
+    if (top < bottom) {
+      const swap = bottom;
+      bottom = top;
+      top = swap;
+    }
+
+    return (bottom <= elevation) && (elevation <= top);
+  }
+
   /**
    * Set explicit visibility for wall lines
    * @param {boolean} visible 
    */
   setVisibility(visible) {
-    this.walls.forEach(group => {
-      group.children.forEach(child => {
-        // Skip door controls (they stay visible)
-        if (child.userData.type === 'doorControl') return;
-        
-        // Toggle lines and endpoints
-        child.visible = visible;
-      });
+    this.walls.forEach((group, wallId) => {
+      const wallDoc = canvas.walls?.get?.(wallId)?.document ?? canvas.scene?.walls?.get?.(wallId) ?? null;
+      const inActiveBand = this._isWallVisibleAtPerspective(wallDoc);
+      group.visible = visible && inActiveBand;
     });
   }
 

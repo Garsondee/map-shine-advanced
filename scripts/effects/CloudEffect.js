@@ -303,6 +303,12 @@ export class CloudEffect extends EffectBase {
     this._lastElapsed = 0;
 
     this._cloudTopDensityValid = false;
+
+    // Treat near-zero cloud cover as disabled for performance, but keep one
+    // transition frame to publish neutral textures and avoid stale cloud masks.
+    this._cloudCoverEpsilon = 0.0001;
+    this._cloudCoverZeroLastFrame = false;
+    this._needsNeutralCloudClear = false;
   }
 
   isActive() {
@@ -310,7 +316,21 @@ export class CloudEffect extends EffectBase {
     // (If weather is disabled, CloudEffect.render() produces neutral textures and we don't need
     // per-frame updates.)
     if (!this.enabled) return false;
-    if (weatherController && weatherController.enabled === false) return false;
+
+    const weatherState = this._getEffectiveWeatherState();
+    if (!weatherState.weatherEnabled) return false;
+
+    const coverIsZero = this._isCloudCoverEffectivelyZero(weatherState.cloudCover);
+    if (coverIsZero) {
+      if (!this._cloudCoverZeroLastFrame) {
+        this._needsNeutralCloudClear = true;
+      }
+      this._cloudCoverZeroLastFrame = true;
+      return this._needsNeutralCloudClear;
+    }
+
+    this._cloudCoverZeroLastFrame = false;
+    this._needsNeutralCloudClear = false;
     return true;
   }
 
@@ -474,6 +494,40 @@ export class CloudEffect extends EffectBase {
   _smoothstep(edge0, edge1, x) {
     const t = Math.max(0, Math.min(1, (x - edge0) / Math.max(edge1 - edge0, 1e-6)));
     return t * t * (3 - 2 * t);
+  }
+
+  _isCloudCoverEffectivelyZero(cloudCover) {
+    const cover = Number.isFinite(cloudCover) ? cloudCover : 0.0;
+    return cover <= this._cloudCoverEpsilon;
+  }
+
+  _getEffectiveWeatherState() {
+    let cloudCover = this.params.cloudCover;
+    let windSpeed = 0.07;
+    let windDirX = 1.0;
+    let windDirY = 0.0;
+
+    try {
+      const state = weatherController?.getCurrentState?.();
+      if (state) {
+        cloudCover = state.cloudCover ?? cloudCover;
+        windSpeed = state.windSpeed ?? windSpeed;
+        if (state.windDirection) {
+          windDirX = state.windDirection.x ?? windDirX;
+          windDirY = state.windDirection.y ?? windDirY;
+        }
+      }
+    } catch (_) {
+    }
+
+    const normalizedCloudCover = Math.max(0.0, Math.min(1.0, Number(cloudCover) || 0.0));
+    return {
+      weatherEnabled: !(weatherController && weatherController.enabled === false) && this.enabled,
+      cloudCover: normalizedCloudCover,
+      windSpeed,
+      windDirX,
+      windDirY
+    };
   }
 
   /**
@@ -1901,24 +1955,18 @@ export class CloudEffect extends EffectBase {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    // Get weather state
-    let cloudCover = this.params.cloudCover;
-    let windSpeed = 0.07;
-    let windDirX = 1.0;
-    let windDirY = 0.0;
+    const weatherState = this._getEffectiveWeatherState();
+    const cloudCover = weatherState.cloudCover;
+    const windSpeed = weatherState.windSpeed;
+    const windDirX = weatherState.windDirX;
+    const windDirY = weatherState.windDirY;
 
-    try {
-      const state = weatherController?.getCurrentState?.();
-      if (state) {
-        cloudCover = state.cloudCover ?? cloudCover;
-        windSpeed = state.windSpeed ?? windSpeed;
-        if (state.windDirection) {
-          windDirX = state.windDirection.x ?? windDirX;
-          windDirY = state.windDirection.y ?? windDirY;
-        }
-      }
-    } catch (e) {
-      // Use defaults
+    // If weather is globally disabled or cloud cover is zero, skip all per-frame
+    // cloud simulation work. render() will publish neutral targets.
+    if (!weatherState.weatherEnabled || this._isCloudCoverEffectivelyZero(cloudCover)) {
+      const du = this.densityMaterial?.uniforms;
+      if (du?.uCloudCover) du.uCloudCover.value = 0.0;
+      return;
     }
 
     // Update wind offset for cloud drift
@@ -2249,10 +2297,12 @@ export class CloudEffect extends EffectBase {
 
     if (!this.densityMaterial || !this.shadowMaterial) return;
 
-    // Global Weather checkbox kill-switch.
-    // If weather is disabled we still must render *neutral* targets so downstream
-    // consumers (lighting/shadows/window light) immediately see "no clouds".
-    const weatherEnabled = !(weatherController && weatherController.enabled === false) && this.enabled;
+    // If weather is disabled OR cloud cover is zero we still must render neutral
+    // targets so downstream consumers immediately see "no clouds".
+    const weatherState = this._getEffectiveWeatherState();
+    const weatherEnabled = weatherState.weatherEnabled;
+    const coverIsZero = this._isCloudCoverEffectivelyZero(weatherState.cloudCover);
+    const shouldRenderNeutral = !weatherEnabled || coverIsZero || this._needsNeutralCloudClear;
 
     // Ensure render targets exist
     if (!this._tempSize) this._tempSize = new THREE.Vector2();
@@ -2281,9 +2331,8 @@ export class CloudEffect extends EffectBase {
       const shouldUpdateThisFrame = true;
       const shouldRecomposeThisFrame = (this._forceRecomposeFrames > 0) || this._blockersDirty;
 
-    // If weather is disabled, clear textures to neutral values and skip all
-    // simulation work.
-    if (!weatherEnabled) {
+    // Clear textures to neutral values and skip all simulation work.
+    if (shouldRenderNeutral) {
       renderer.setRenderTarget(this.cloudDensityTarget);
       renderer.setClearColor(0x000000, 1);
       renderer.clear();
@@ -2358,9 +2407,14 @@ export class CloudEffect extends EffectBase {
         this.cloudTopOverlayMesh.visible = false;
       }
 
+      this._needsNeutralCloudClear = false;
+
       renderer.setRenderTarget(previousTarget);
       return;
     }
+
+    this._cloudCoverZeroLastFrame = false;
+    this._needsNeutralCloudClear = false;
 
     if (!shouldUpdateThisFrame && !shouldRecomposeThisFrame) {
       renderer.setRenderTarget(previousTarget);

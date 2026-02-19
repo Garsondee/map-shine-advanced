@@ -15,6 +15,7 @@ import { SelectionBoxHandler } from './selection-box-interaction.js';
 import { safeCall, safeDispose, Severity } from '../core/safe-call.js';
 import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 import { applyAmbientLightLevelDefaults, applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
+import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { isTokenOnActiveLevel, isTokenDragSelectable, getAutoSwitchElevation, switchToLevelForElevation } from './level-interaction-service.js';
 
 const log = createLogger('InteractionManager');
@@ -5983,11 +5984,8 @@ export class InteractionManager {
     if (game?.user?.isGM) return true;
     if (!wallDoc) return true;
 
-    const controlled = canvas?.tokens?.controlled;
-    const token = (Array.isArray(controlled) && controlled.length > 0) ? controlled[0] : null;
-    if (!token) return true;
-
-    const tokenElevation = Number(token?.document?.elevation);
+    const perspective = getPerspectiveElevation();
+    const tokenElevation = Number(perspective?.elevation);
     if (!Number.isFinite(tokenElevation)) return true;
 
     const bounds = readWallHeightFlags(wallDoc);

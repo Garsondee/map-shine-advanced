@@ -8,6 +8,8 @@ import { createLogger } from '../core/log.js';
 import { LayerVisibilityManager } from './layer-visibility-manager.js';
 import { InputRouter } from './input-router.js';
 import { CameraSync } from './camera-sync.js';
+import { readWallHeightFlags } from './levels-scene-flags.js';
+import { getPerspectiveElevation } from './elevation-context.js';
 
 const log = createLogger('ControlsIntegration');
 
@@ -430,15 +432,17 @@ export class ControlsIntegration {
         wall.endpoints.alpha = ALPHA;
       }
 
-      // Keep door control visible (this is what shows the door icon)
+      // Door controls: only show if the wall is on the current floor.
+      // This prevents players from seeing/clicking doors on other floors.
+      const onCurrentFloor = this._isWallOnCurrentFloor(wall);
       if (wall.doorControl) {
-        wall.doorControl.visible = true;
-        wall.doorControl.alpha = 1;
+        wall.doorControl.visible = onCurrentFloor;
+        wall.doorControl.alpha = onCurrentFloor ? 1 : 0;
       }
 
       wall.visible = true;
-      wall.interactive = true;
-      wall.interactiveChildren = true;
+      wall.interactive = onCurrentFloor;
+      wall.interactiveChildren = onCurrentFloor;
     } catch (_) {
       // Ignore - wall structure can vary by Foundry version
     }
@@ -460,13 +464,71 @@ export class ControlsIntegration {
         wall.doorControl.visible = true;
         wall.doorControl.alpha = 1;
       }
+      // Ensure the wall itself is visible (may have been hidden by floor filter)
+      wall.visible = true;
     } catch (_) {
       // Ignore
     }
   }
 
   /**
+   * Hide a PIXI wall completely because it belongs to a different floor.
+   * Unlike _makeWallTransparent (which keeps door controls visible for gameplay),
+   * this hides everything including door controls to declutter the walls editor.
+   * @param {Wall} wall
+   * @private
+   */
+  _hideWallForOtherFloor(wall) {
+    if (!wall) return;
+    try {
+      wall.visible = false;
+    } catch (_) {
+      // Ignore
+    }
+  }
+
+  /**
+   * Check whether a Foundry PIXI wall placeable is on the current floor.
+   * Uses wall-height flags and the current perspective elevation to determine
+   * if the wall should be shown when editing.
+   *
+   * Walls without wall-height flags (full-height walls) are always considered
+   * "on" the current floor so they remain visible.
+   *
+   * @param {Wall} wall - Foundry PIXI wall placeable
+   * @returns {boolean} True if the wall is on the current floor
+   * @private
+   */
+  _isWallOnCurrentFloor(wall) {
+    try {
+      const doc = wall?.document;
+      if (!doc) return true;
+
+      const perspective = getPerspectiveElevation();
+      const elevation = Number(perspective?.elevation);
+      if (!Number.isFinite(elevation)) return true;
+
+      const bounds = readWallHeightFlags(doc);
+      let bottom = Number(bounds?.bottom);
+      let top = Number(bounds?.top);
+
+      // Walls without finite bounds are full-height — always show them
+      if (!Number.isFinite(bottom) && !Number.isFinite(top)) return true;
+
+      if (!Number.isFinite(bottom)) bottom = -Infinity;
+      if (!Number.isFinite(top)) top = Infinity;
+      if (top < bottom) { const swap = bottom; bottom = top; top = swap; }
+
+      return (bottom <= elevation) && (elevation <= top);
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /**
    * Ensure wall visuals are correct for the current active layer.
+   * When the walls layer is active, only walls on the current floor are shown;
+   * walls on other floors are hidden to keep the editor uncluttered.
    * @private
    */
   _updateWallsVisualState() {
@@ -495,10 +557,16 @@ export class ControlsIntegration {
     }
 
     if (isWallsActive) {
-      if (this._wallsAreTransparent) {
-        for (const wall of canvas.walls.placeables) this._restoreWallVisuals(wall);
-        this._wallsAreTransparent = false;
+      // Walls layer is active — restore walls on the current floor,
+      // hide walls on other floors to declutter the editor.
+      for (const wall of canvas.walls.placeables) {
+        if (this._isWallOnCurrentFloor(wall)) {
+          this._restoreWallVisuals(wall);
+        } else {
+          this._hideWallForOtherFloor(wall);
+        }
       }
+      this._wallsAreTransparent = false;
     } else {
       if (!this._wallsAreTransparent) {
         for (const wall of canvas.walls.placeables) this._makeWallTransparent(wall);
@@ -662,6 +730,7 @@ export class ControlsIntegration {
 
     // When a token is controlled/released, Foundry may adjust control icon visibility.
     // Re-assert that the walls layer stays visible so door controls/icons remain visible.
+    // Also re-apply floor filtering since the perspective elevation may change.
     const controlTokenHookId = Hooks.on('controlToken', () => {
       if (this.state !== IntegrationState.ACTIVE) return;
       setTimeout(() => {
@@ -671,6 +740,11 @@ export class ControlsIntegration {
             canvas.walls.visible = true;
             canvas.walls.interactiveChildren = true;
           }
+          // Force re-apply transparency so door control visibility updates
+          // for the newly controlled token's elevation.
+          if (this._wallsAreTransparent && canvas?.walls?.placeables) {
+            for (const wall of canvas.walls.placeables) this._makeWallTransparent(wall);
+          }
           this._updateWallsVisualState();
         } catch (_) {
         }
@@ -678,13 +752,19 @@ export class ControlsIntegration {
     });
     this._hookIds.push({ name: 'controlToken', id: controlTokenHookId });
 
-    // Wall refresh - reapply transparency so door controls stay visible
+    // Wall refresh - reapply correct visual state based on layer and floor
     const refreshWallHookId = Hooks.on('refreshWall', (wall) => {
       if (this.state !== IntegrationState.ACTIVE) return;
       try {
-        // Only apply transparency when not actively editing walls
         if (this._wallsAreTransparent) {
           this._makeWallTransparent(wall);
+        } else {
+          // Walls layer is active — apply floor filter to this refreshed wall
+          if (this._isWallOnCurrentFloor(wall)) {
+            this._restoreWallVisuals(wall);
+          } else {
+            this._hideWallForOtherFloor(wall);
+          }
         }
       } catch (_) {
       }
@@ -702,12 +782,38 @@ export class ControlsIntegration {
 
           if (this._wallsAreTransparent) {
             this._makeWallTransparent(wall);
+          } else {
+            // Walls layer is active — apply floor filter to this new wall
+            if (this._isWallOnCurrentFloor(wall)) {
+              this._restoreWallVisuals(wall);
+            } else {
+              this._hideWallForOtherFloor(wall);
+            }
           }
         } catch (_) {
         }
       }, 50);
     });
     this._hookIds.push({ name: 'createWall', id: createWallHookId });
+
+    // Floor change — re-filter wall visibility so switching floors immediately
+    // updates which walls are shown in the walls editor and which door controls
+    // are visible during gameplay.
+    const levelContextHookId = Hooks.on('mapShineLevelContextChanged', () => {
+      if (this.state !== IntegrationState.ACTIVE) return;
+      setTimeout(() => {
+        try {
+          // Force re-apply even when walls are already transparent so door
+          // control visibility updates for the new floor.
+          if (this._wallsAreTransparent && canvas?.walls?.placeables) {
+            for (const wall of canvas.walls.placeables) this._makeWallTransparent(wall);
+          }
+          this._updateWallsVisualState();
+        } catch (_) {
+        }
+      }, 0);
+    });
+    this._hookIds.push({ name: 'mapShineLevelContextChanged', id: levelContextHookId });
 
     // Also handle createToken to catch initial creation
     const createTokenHookId = Hooks.on('createToken', (doc, options, userId) => {

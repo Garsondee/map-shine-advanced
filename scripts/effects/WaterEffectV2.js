@@ -59,41 +59,41 @@ export class WaterEffectV2 extends EffectBase {
 
       maskChannel: 'luma',
       maskInvert: false,
-      maskThreshold: 0.87,
+      maskThreshold: 0.65,
       maskBlurRadius: 0.0,
       maskBlurPasses: 0,
-      maskExpandPx: 0,
+      maskExpandPx: -0.3,
       buildResolution: 4096,
-      sdfRangePx: 70,
+      sdfRangePx: 12,
       shoreWidthPx: 128,
 
-      waveScale: 6,
-      waveSpeed: 0.78,
-      waveStrength: 0.81,
+      waveScale: 5,
+      waveSpeed: 0.39,
+      waveStrength: 2,
 
       // Wave texture enhancement controls
       // Domain warp reduces visible repetition across large water bodies.
-      waveWarpLargeStrength: 0.18,
-      waveWarpSmallStrength: 0.07,
-      waveWarpMicroStrength: 0.02,
-      waveWarpTimeSpeed: 0.065,
+      waveWarpLargeStrength: 0.31,
+      waveWarpSmallStrength: 0.05,
+      waveWarpMicroStrength: 0.005,
+      waveWarpTimeSpeed: 0.25,
 
       // Slow evolution of wave "sea state" (alternating calmer/rougher).
       waveEvolutionEnabled: true,
-      waveEvolutionSpeed: 0.5,
-      waveEvolutionAmount: 1,
+      waveEvolutionSpeed: 0.23,
+      waveEvolutionAmount: 0.49,
       waveEvolutionScale: 1.03,
 
       waveSpeedUseWind: true,
-      waveSpeedWindMinFactor: 0.2,
+      waveSpeedWindMinFactor: 1,
       waveStrengthUseWind: true,
       waveStrengthWindMinFactor: 1,
-      distortionStrengthPx: 14.84,
+      distortionStrengthPx: 11.36,
 
       // Refraction sampling controls
       refractionMultiTapEnabled: false,
       chromaticAberrationEnabled: true,
-      chromaticAberrationStrengthPx: 1.78,
+      chromaticAberrationStrengthPx: 2.57,
       chromaticAberrationEdgeCenter: 0.5,
       chromaticAberrationEdgeFeather: 0.1,
       chromaticAberrationEdgeGamma: 1,
@@ -114,21 +114,21 @@ export class WaterEffectV2 extends EffectBase {
 
       // Shoreline-only high-frequency distortion (fed into DistortionManager)
       shoreNoiseDistortionEnabled: true,
-      shoreNoiseDistortionStrengthPx: 12.75,
-      shoreNoiseDistortionFrequency: 526.1,
-      shoreNoiseDistortionSpeed: 4.31,
+      shoreNoiseDistortionStrengthPx: 6.49,
+      shoreNoiseDistortionFrequency: 474,
+      shoreNoiseDistortionSpeed: 3.22,
       // Controls how quickly the noise fades out from the shore toward the interior.
       // Expressed in water mask "depth" (0..1): lower => thinner band near edges.
-      shoreNoiseDistortionFadeLo: 0.112,
-      shoreNoiseDistortionFadeHi: 0.601,
+      shoreNoiseDistortionFadeLo: 0,
+      shoreNoiseDistortionFadeHi: 1,
 
       // Curl noise produces divergence-free (swirling) turbulence — physically
       // correct fluid motion instead of generic TV-static noise. 0 = raw noise, 1 = full curl.
-      shoreNoiseDistortionCurlStrength: 0.45,
+      shoreNoiseDistortionCurlStrength: 1,
       // Shore-perpendicular wave wash: simulates waves lapping in and receding
       // along the shoreline with compound wave frequencies.
-      shoreNoiseDistortionWashStrength: 0.51,
-      shoreNoiseDistortionWashSpeed: 0.8,
+      shoreNoiseDistortionWashStrength: 1,
+      shoreNoiseDistortionWashSpeed: 1.97,
 
       // Rain-hit surface distortion (precipitation driven)
       rainDistortionEnabled: true,
@@ -136,7 +136,7 @@ export class WaterEffectV2 extends EffectBase {
       rainDistortionPrecipitationOverride: 0.0,
       rainDistortionSplit: 0.5,
       rainDistortionBlend: 0.25,
-      rainDistortionGlobalStrength: 1.14,
+      rainDistortionGlobalStrength: 0.12,
 
       rainIndoorDampingEnabled: true,
       rainIndoorDampingStrength: 1.0,
@@ -159,7 +159,7 @@ export class WaterEffectV2 extends EffectBase {
       causticsIgnoreLightGate: true,
 
       rainRippleStrengthPx: 64,
-      rainRippleScale: 269,
+      rainRippleScale: 2000,
       rainRippleSpeed: 4.26,
       rainRippleDensity: 1,
       rainRippleSharpness: 2.41,
@@ -174,9 +174,9 @@ export class WaterEffectV2 extends EffectBase {
       rainRippleSecondaryPhaseOffset: 0.37,
 
       rainStormStrengthPx: 64,
-      rainStormScale: 204,
+      rainStormScale: 2000,
       rainStormSpeed: 5,
-      rainStormCurl: 0.3,
+      rainStormCurl: 0.37,
 
       // Heavy rain smash field (advanced)
       rainStormRateBase: 10,
@@ -197,122 +197,122 @@ export class WaterEffectV2 extends EffectBase {
       rainMaxCombinedStrengthPx: 45.4,
 
       lockWaveTravelToWind: false,
-      waveDirOffsetDeg: -42,
+      waveDirOffsetDeg: -9,
       waveAppearanceOffsetDeg: 0.0,
       advectionDirOffsetDeg: 0.0,
-      advectionSpeed: 0.51,
+      advectionSpeed: 4,
       windDirResponsiveness: 10,
       useTargetWindDirection: true,
 
       specStrength: 250,
-      specPower: 1.5,
+      specPower: 1,
 
-      specSunAzimuthDeg: 12,
-      specSunElevationDeg: 79,
-      specSunIntensity: 4.08,
+      specSunAzimuthDeg: 44,
+      specSunElevationDeg: 84,
+      specSunIntensity: 5,
       specNormalStrength: 5,
       specNormalScale: 0.25,
       specRoughnessMin: 0.001,
-      specRoughnessMax: 1,
-      specF0: 0.069,
-      specMaskGamma: 2.6,
-      specSkyTint: 0.6,
+      specRoughnessMax: 0.882,
+      specF0: 0.12,
+      specMaskGamma: 3.12,
+      specSkyTint: 1,
       specShoreBias: 1,
 
       specDistortionNormalStrength: 2,
       specAnisotropy: 0.16,
       specAnisoRatio: 3.05,
 
-      foamStrength: 0.09,
+      foamStrength: 0,
       foamThreshold: 0.84,
       foamScale: 2000,
       foamColor: { r: 6, g: 6, b: 5 },
-      foamSpeed: 0.19,
+      foamSpeed: 0.06,
 
       foamCurlStrength: 1,
-      foamCurlScale: 3,
-      foamCurlSpeed: 0.09,
+      foamCurlScale: 6.1,
+      foamCurlSpeed: 0.07,
 
       foamBreakupStrength1: 1,
       foamBreakupScale1: 1,
       foamBreakupSpeed1: 0.04,
 
       foamBreakupStrength2: 1,
-      foamBreakupScale2: 17,
+      foamBreakupScale2: 13.5,
       foamBreakupSpeed2: 0.32,
 
       foamBlackPoint: 0,
       foamWhitePoint: 1,
       foamGamma: 1.06,
-      foamContrast: 0.87,
+      foamContrast: 1.58,
       foamBrightness: -0.01,
 
-      floatingFoamStrength: 0.8,
-      floatingFoamCoverage: 0.09,
-      floatingFoamScale: 34.5,
-      floatingFoamWaveDistortion: 2,
+      floatingFoamStrength: 0.46,
+      floatingFoamCoverage: 0.2,
+      floatingFoamScale: 10.5,
+      floatingFoamWaveDistortion: 0.88,
 
       // foam.webp particle systems (WeatherParticles)
       shoreFoamEnabled: true,
-      shoreFoamIntensity: 6,
+      shoreFoamIntensity: 2.5,
 
       foamPlumeEnabled: true,
       foamPlumeSpawnMode: 'waterEdge',
-      foamPlumeMaxParticles: 8681,
-      foamPlumeEmissionBase: 500,
+      foamPlumeMaxParticles: 20000,
+      foamPlumeEmissionBase: 199.6,
       foamPlumeEmissionWindScale: 1500,
-      foamPlumeLifeMin: 4.13,
-      foamPlumeLifeMax: 4.67,
-      foamPlumeSizeMin: 15,
-      foamPlumeSizeMax: 36.1,
-      foamPlumeOpacity: 0.3,
-      foamPlumePeakOpacity: 0.04,
+      foamPlumeLifeMin: 1.96,
+      foamPlumeLifeMax: 9.02,
+      foamPlumeSizeMin: 10.6,
+      foamPlumeSizeMax: 30,
+      foamPlumeOpacity: 0,
+      foamPlumePeakOpacity: 0.6,
       foamPlumePeakTime: 0.12,
-      foamPlumeStartScale: 1.24,
-      foamPlumeMaxScale: 10,
-      foamPlumeSpinMin: -0.14,
-      foamPlumeSpinMax: 0.19,
-      foamPlumeWindDriftScale: 0.25,
+      foamPlumeStartScale: 1.19,
+      foamPlumeMaxScale: 6.5,
+      foamPlumeSpinMin: -5,
+      foamPlumeSpinMax: 5,
+      foamPlumeWindDriftScale: 0.84,
       foamPlumeUseAdditive: true,
-      foamPlumeAdditiveBoost: 1.68,
+      foamPlumeAdditiveBoost: 0.01,
       foamPlumeColor: { r: 1.0, g: 1.0, b: 1.0 },
 
-      foamPlumeRandomOpacityMin: 2.06,
-      foamPlumeRandomOpacityMax: 2.99,
+      foamPlumeRandomOpacityMin: 0.96,
+      foamPlumeRandomOpacityMax: 5,
 
       foamPlumeRadialAlphaEnabled: true,
       foamPlumeRadialInnerPos: 0.0,
-      foamPlumeRadialMidPos: 0.149,
+      foamPlumeRadialMidPos: 0.184,
       foamPlumeRadialInnerOpacity: 5,
-      foamPlumeRadialMidOpacity: 0.81,
-      foamPlumeRadialOuterOpacity: 0.27,
-      foamPlumeRadialCurve: 0.1,
+      foamPlumeRadialMidOpacity: 5,
+      foamPlumeRadialOuterOpacity: 5,
+      foamPlumeRadialCurve: 4,
 
       // Foam plume GPU curl distortion controls (WeatherParticles vertex shader)
       foamPlumeCurlDisplaceEnabled: true,
-      foamPlumeCurlDisplaceUv: 0.0147,
-      foamPlumeCurlAmount: 0.56,
-      foamPlumeCurlStrengthMultiplier: 0.21,
+      foamPlumeCurlDisplaceUv: 0.0078,
+      foamPlumeCurlAmount: 0.3,
+      foamPlumeCurlStrengthMultiplier: 1.78,
       foamPlumeCurlScaleMultiplier: 4,
-      foamPlumeCurlSpeedMultiplier: 1.87,
+      foamPlumeCurlSpeedMultiplier: 0.04,
       foamPlumeCurlDirectionality: 1,
-      foamPlumeCurlDerivativeEpsilon: 0.059,
-      foamPlumeCurlLacunarity: 1.69,
-      foamPlumeCurlGain: 1,
-      foamPlumeCurlOctave1Weight: 0.388,
-      foamPlumeCurlOctave2Weight: 0.301,
-      foamPlumeCurlOctave3Weight: 0.33275,
-      foamPlumeCurlOctave4Weight: 0.183,
-      foamPlumeCurlWindOffsetInfluence: 0.5,
-      foamPlumeCurlWindAdvection: 1.0,
-      foamPlumeCurlMaxUv: 0.046,
+      foamPlumeCurlDerivativeEpsilon: 0.2,
+      foamPlumeCurlLacunarity: 4,
+      foamPlumeCurlGain: 0.42,
+      foamPlumeCurlOctave1Weight: 4,
+      foamPlumeCurlOctave2Weight: 1.128,
+      foamPlumeCurlOctave3Weight: 0.563,
+      foamPlumeCurlOctave4Weight: 0,
+      foamPlumeCurlWindOffsetInfluence: 1.67,
+      foamPlumeCurlWindAdvection: 2.8,
+      foamPlumeCurlMaxUv: 0.25,
 
       // Large-scale noise masking for foam.webp particles (break up / intermittent reveal)
       foamParticleNoiseEnabled: true,
       foamParticleNoiseStrength: 0.14,
       foamParticleNoiseScale: 14.3,
       foamParticleNoiseSpeed: 0,
-      foamParticleNoiseCoverage: 0.81,
+      foamParticleNoiseCoverage: 0.56,
       foamParticleNoiseSoftness: 0.5,
       foamParticleNoiseAttempts: 4,
 
@@ -337,18 +337,19 @@ export class WaterEffectV2 extends EffectBase {
       foamFlecksWindDriftScale: 1.0,
 
       murkEnabled: true,
-      murkIntensity: 0.87,
-      murkColor: { r: 52.062435150146484, g: 45.39800770426304, b: 0.22835098232271409 },
-      murkScale: 4.67,
-      murkSpeed: 0.49,
-      murkDepthLo: 0,
+      murkIntensity: 0.5,
+      murkColor: { r: 48.874935150146484, g: 32.11777191167764, b: 0 },
+      murkScale: 8.81,
+      murkSpeed: 0.33,
+      murkDepthFade: 0.74,
+      murkDepthLo: 0.03,
       murkDepthHi: 1,
 
-      murkGrainScale: 1200,
-      murkGrainSpeed: 0.45,
-      murkGrainStrength: 1.49,
-      murkOcclusionStrength: 0.38,
-      murkOcclusionSoftness: 0.09,
+      murkGrainScale: 6000,
+      murkGrainSpeed: 1.02,
+      murkGrainStrength: 1.73,
+      murkOcclusionStrength: 1,
+      murkOcclusionSoftness: 1,
       murkContrast: 4,
 
       sandEnabled: true,
@@ -433,21 +434,43 @@ export class WaterEffectV2 extends EffectBase {
 
     this._tempSize = null;
 
+    // Param-sync optimization: only push static uniforms when params change.
+    this._paramsDirty = true;
+    this._paramsProxyRoot = null;
+    this._paramsProxyCache = new WeakMap();
+
+    // Cached trigonometry for advection angle offset (avoids per-frame sin/cos).
+    this._cachedAdvectionDirOffsetDeg = null;
+    this._cachedAdvectionDirCos = 1.0;
+    this._cachedAdvectionDirSin = 0.0;
+
+    // Cached specular sun-angle trigonometry (azimuth/elevation).
+    this._cachedSpecSunAzimuthDeg = null;
+    this._cachedSpecSunElevationDeg = null;
+    this._cachedSpecSunDirX = 0.0;
+    this._cachedSpecSunDirY = 0.0;
+    this._cachedSpecSunDirZ = 1.0;
+
+    // DistortionManager payload sync bookkeeping.
+    this._lastDistortionWaterDataTexture = null;
+
+    this._installParamsProxy();
+
     this._distortionWaterParams = {
       maskFlipY: 0.0,
       maskUseAlpha: 0.0,
       edgeSoftnessTexels: 0.0,
 
       murkEnabled: true,
-      murkIntensity: 0.87,
-      murkColor: { r: 52.062435150146484, g: 45.39800770426304, b: 0.22835098232271409 },
-      murkScale: 4.67,
-      murkSpeed: 0.49,
+      murkIntensity: 0.85,
+      murkColor: { r: 0.25, g: 0.18, b: 0.12 },
+      murkScale: 3.5,
+      murkSpeed: 0.15,
       murkDepthLo: 0,
       murkDepthHi: 1,
-      murkGrainScale: 1200,
-      murkGrainSpeed: 0.45,
-      murkGrainStrength: 1.49,
+      murkGrainScale: 3200,
+      murkGrainSpeed: 0.9,
+      murkGrainStrength: 0.4,
       murkOcclusionStrength: 0.38,
       murkOcclusionSoftness: 0.09,
 
@@ -475,6 +498,49 @@ export class WaterEffectV2 extends EffectBase {
       causticsBrightnessSoftness: 0.55,
       causticsBrightnessGamma: 0.62,
     };
+  }
+
+  _createParamsProxyObject(target) {
+    if (!target || typeof target !== 'object') return target;
+    const cached = this._paramsProxyCache.get(target);
+    if (cached) return cached;
+
+    const proxy = new Proxy(target, {
+      get: (obj, prop) => {
+        const value = obj[prop];
+        if (!value || typeof value !== 'object') return value;
+        return this._createParamsProxyObject(value);
+      },
+      set: (obj, prop, value) => {
+        if (obj[prop] === value) return true;
+        obj[prop] = value;
+        this._paramsDirty = true;
+        return true;
+      },
+      deleteProperty: (obj, prop) => {
+        if (!(prop in obj)) return true;
+        delete obj[prop];
+        this._paramsDirty = true;
+        return true;
+      }
+    });
+
+    this._paramsProxyCache.set(target, proxy);
+    return proxy;
+  }
+
+  _installParamsProxy() {
+    if (!this.params || typeof this.params !== 'object') return;
+    this._paramsProxyCache = new WeakMap();
+    this._paramsProxyRoot = this._createParamsProxyObject(this.params);
+    this.params = this._paramsProxyRoot;
+  }
+
+  _ensureParamsProxy() {
+    if (!this.params || typeof this.params !== 'object') return;
+    if (this.params === this._paramsProxyRoot) return;
+    this._installParamsProxy();
+    this._paramsDirty = true;
   }
 
   clearCaches() {
@@ -938,6 +1004,7 @@ export class WaterEffectV2 extends EffectBase {
             'murkColor',
             'murkScale',
             'murkSpeed',
+            'murkDepthFade',
             'murkDepthLo',
             'murkDepthHi',
             'murkGrainScale',
@@ -1255,15 +1322,16 @@ export class WaterEffectV2 extends EffectBase {
         foamFlecksWindDriftScale: { type: 'slider', label: 'Wind Drift Scale', min: 0.0, max: 3.0, step: 0.01, default: 1.0 },
 
         murkEnabled: { type: 'boolean', label: 'Enabled', default: true },
-        murkIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 2.0, step: 0.01, default: 0.87 },
-        murkColor: { type: 'color', label: 'Color', default: { r: 52.062435150146484, g: 45.39800770426304, b: 0.22835098232271409 } },
-        murkScale: { type: 'slider', label: 'Cloud Scale', min: 0.1, max: 12.0, step: 0.01, default: 4.67 },
-        murkSpeed: { type: 'slider', label: 'Cloud Speed', min: 0.0, max: 2.0, step: 0.01, default: 0.49 },
+        murkIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 2.0, step: 0.01, default: 0.85 },
+        murkColor: { type: 'color', label: 'Color', default: { r: 0.25, g: 0.18, b: 0.12 } },
+        murkScale: { type: 'slider', label: 'Cloud Scale', min: 0.1, max: 12.0, step: 0.01, default: 3.5 },
+        murkSpeed: { type: 'slider', label: 'Cloud Speed', min: 0.0, max: 2.0, step: 0.01, default: 0.15 },
+        murkDepthFade: { type: 'slider', label: 'Depth Fade', min: 0.1, max: 4.0, step: 0.01, default: 1.2 },
         murkDepthLo: { type: 'slider', label: 'Depth Lo', min: 0.0, max: 1.0, step: 0.01, default: 0 },
         murkDepthHi: { type: 'slider', label: 'Depth Hi', min: 0.0, max: 1.0, step: 0.01, default: 1 },
-        murkGrainScale: { type: 'slider', label: 'Grain Scale', min: 10.0, max: 1200.0, step: 1.0, default: 1200 },
-        murkGrainSpeed: { type: 'slider', label: 'Grain Speed', min: 0.0, max: 3.0, step: 0.01, default: 0.45 },
-        murkGrainStrength: { type: 'slider', label: 'Grain Strength', min: 0.0, max: 2.0, step: 0.01, default: 1.49 },
+        murkGrainScale: { type: 'slider', label: 'Grain Scale', min: 10.0, max: 6000.0, step: 1.0, default: 3200 },
+        murkGrainSpeed: { type: 'slider', label: 'Grain Speed', min: 0.0, max: 3.0, step: 0.01, default: 0.9 },
+        murkGrainStrength: { type: 'slider', label: 'Grain Strength', min: 0.0, max: 2.0, step: 0.01, default: 0.4 },
         murkOcclusionStrength: { type: 'slider', label: 'Occlusion Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.38 },
         murkOcclusionSoftness: { type: 'slider', label: 'Occlusion Softness', min: 0.0, max: 1.0, step: 0.01, default: 0.09 },
         murkContrast: { type: 'slider', label: 'Contrast', min: 0.25, max: 4.0, step: 0.01, default: 4 },
@@ -1396,6 +1464,7 @@ export class WaterEffectV2 extends EffectBase {
         uHasCloudShadow: { value: 0.0 },
         uCloudShadowEnabled: { value: this.params.cloudShadowEnabled === false ? 0.0 : 1.0 },
         uCloudShadowMinBrightness: { value: 0.0 },
+        uCloudShadowOpacity: { value: 1.0 },
         uCloudShadowDarkenStrength: { value: this.params.cloudShadowDarkenStrength },
         uCloudShadowDarkenCurve: { value: this.params.cloudShadowDarkenCurve },
         uCloudShadowSpecularKill: { value: this.params.cloudShadowSpecularKill },
@@ -1497,6 +1566,18 @@ export class WaterEffectV2 extends EffectBase {
 
         // Shader-based foam flecks (spray dots)
         uFoamFlecksIntensity: { value: this.params.foamFlecksIntensity },
+
+        uMurkEnabled: { value: this.params.murkEnabled === false ? 0.0 : 1.0 },
+        uMurkIntensity: { value: this.params.murkIntensity },
+        uMurkColor: { value: new THREE.Color(this.params.murkColor.r, this.params.murkColor.g, this.params.murkColor.b) },
+        uMurkScale: { value: this.params.murkScale },
+        uMurkSpeed: { value: this.params.murkSpeed },
+        uMurkDepthLo: { value: this.params.murkDepthLo },
+        uMurkDepthHi: { value: this.params.murkDepthHi },
+        uMurkGrainScale: { value: this.params.murkGrainScale },
+        uMurkGrainSpeed: { value: this.params.murkGrainSpeed },
+        uMurkGrainStrength: { value: this.params.murkGrainStrength },
+        uMurkDepthFade: { value: this.params.murkDepthFade },
 
         uSandIntensity: { value: this.params.sandIntensity },
         uSandColor: { value: new THREE.Color(0.0, 0.0, 0.0) },
@@ -1613,6 +1694,7 @@ export class WaterEffectV2 extends EffectBase {
         uniform float uHasCloudShadow;
         uniform float uCloudShadowEnabled;
         uniform float uCloudShadowMinBrightness;
+        uniform float uCloudShadowOpacity;
         uniform float uCloudShadowDarkenStrength;
         uniform float uCloudShadowDarkenCurve;
         uniform float uCloudShadowSpecularKill;
@@ -1710,6 +1792,19 @@ export class WaterEffectV2 extends EffectBase {
 
         // Shader-based foam flecks (spray dots)
         uniform float uFoamFlecksIntensity;
+
+        // Subsurface murk volume (silt/algae/mud)
+        uniform float uMurkEnabled;
+        uniform float uMurkIntensity;
+        uniform vec3 uMurkColor;
+        uniform float uMurkScale;
+        uniform float uMurkSpeed;
+        uniform float uMurkDepthLo;
+        uniform float uMurkDepthHi;
+        uniform float uMurkGrainScale;
+        uniform float uMurkGrainSpeed;
+        uniform float uMurkGrainStrength;
+        uniform float uMurkDepthFade;
 
         uniform float uSandIntensity;
         uniform vec3 uSandColor;
@@ -2009,6 +2104,7 @@ export class WaterEffectV2 extends EffectBase {
           if (uRainEnabled < 0.5) return vec2(0.0);
 
           float p = safe01(uRainPrecipitation);
+          if (p < 0.001) return vec2(0.0);
           float split = safe01(uRainSplit);
           float blend = clamp(uRainBlend, 0.0, 0.25);
 
@@ -2216,7 +2312,7 @@ export class WaterEffectV2 extends EffectBase {
         #endif
         // --- SHADER FLECKS END ---
 
-        float getFoamBaseAmount(vec2 sceneUv, float shore, float inside) {
+        float getFoamBaseAmount(vec2 sceneUv, float shore, float inside, vec2 rainOffPx) {
           vec2 foamWindOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
           vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
           float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
@@ -2259,10 +2355,18 @@ export class WaterEffectV2 extends EffectBase {
           vec2 clumpUv = foamBasis * max(0.1, uFloatingFoamScale);
           clumpUv -= windBasis * (tWind * (0.02 + uFoamSpeed * 0.05));
           
-          // Apply wave distortion to floating foam clumps
+          // Apply wave + rain-hit distortion to floating foam clumps so they respond
+          // to the same precipitation turbulence driving refraction/specular.
           if (uFloatingFoamWaveDistortion > 0.01) {
+            float foamDistort = clamp(uFloatingFoamWaveDistortion, 0.0, 2.0);
             vec2 waveGrad = waveGrad2D(sceneUv, uTime, 1.0);
-            clumpUv += waveGrad * clamp(uFloatingFoamWaveDistortion, 0.0, 2.0) * 0.1;
+            clumpUv += waveGrad * foamDistort * 0.1;
+
+            vec2 texel = 1.0 / max(uResolution, vec2(1.0));
+            vec2 rainUv = rainOffPx * texel;
+            vec2 rainBasis = vec2(rainUv.x * sceneAspect, rainUv.y);
+            float rainFoamScale = max(1.0, uFloatingFoamScale * 0.35);
+            clumpUv += rainBasis * foamDistort * rainFoamScale;
           }
           
           float c1 = valueNoise(clumpUv);
@@ -2311,7 +2415,7 @@ export class WaterEffectV2 extends EffectBase {
           gSceneUv += amp * d * (k * dir) * uWaveScale * bunch;
         }
 
-        float waveHeight(vec2 sceneUv, float t, float motion01) {
+        vec3 calculateWave(vec2 sceneUv, float t, float motion01) {
           const float TAU = 6.2831853;
 
           vec2 windF = uWindDir;
@@ -2339,7 +2443,7 @@ export class WaterEffectV2 extends EffectBase {
           );
 
           float h = 0.0;
-          vec2 gDummy = vec2(0.0);
+          vec2 g = vec2(0.0);
 
           float sea01 = waveSeaState(sceneUv, motion01);
           float evoAmt = clamp(uWaveEvolutionAmount, 0.0, 1.0);
@@ -2364,89 +2468,35 @@ export class WaterEffectV2 extends EffectBase {
           // Swell layer (3 waves)
           float kMul0; float r0; waveMods(lf, 1.0, kMul0, r0);
           float k0 = (TAU * 0.61) * kMul0;
-          addWave(swellP, rotate2D(wind, -0.60 + r0), k0, 0.40 * wavePulse, 2.20, (1.05 + 0.62 * sqrt(k0)), t, h, gDummy);
+          addWave(swellP, rotate2D(wind, -0.60 + r0), k0, 0.40 * wavePulse, 2.20, (1.05 + 0.62 * sqrt(k0)), t, h, g);
 
           float kMul1; float r1; waveMods(lf, 2.0, kMul1, r1);
           float k1 = (TAU * 0.97) * kMul1;
-          addWave(swellP, rotate2D(wind, -0.15 + r1), k1, 0.28 * wavePulse, 2.55, (1.05 + 0.62 * sqrt(k1)), t, h, gDummy);
+          addWave(swellP, rotate2D(wind, -0.15 + r1), k1, 0.28 * wavePulse, 2.55, (1.05 + 0.62 * sqrt(k1)), t, h, g);
 
           float kMul2; float r2; waveMods(lf, 3.0, kMul2, r2);
           float k2 = (TAU * 1.43) * kMul2;
-          addWave(swellP, rotate2D(wind,  0.20 + r2), k2, 0.16 * wavePulse, 2.85, (1.05 + 0.62 * sqrt(k2)), t, h, gDummy);
+          addWave(swellP, rotate2D(wind,  0.20 + r2), k2, 0.16 * wavePulse, 2.85, (1.05 + 0.62 * sqrt(k2)), t, h, g);
 
           // Cross-chop layer (2 waves) - tighter scale and significant angle offset
           float kMul3; float r3; waveMods(lf, 4.0, kMul3, r3);
           float k3 = (TAU * 1.88) * kMul3;
-          addWave(chopP, rotate2D(crossWind,  0.25 + r3), k3, 0.10 * chopPulse, 3.10, (1.18 + 0.72 * sqrt(k3)), t, h, gDummy);
+          addWave(chopP, rotate2D(crossWind,  0.25 + r3), k3, 0.10 * chopPulse, 3.10, (1.18 + 0.72 * sqrt(k3)), t, h, g);
 
           float kMul4; float r4; waveMods(lf, 5.0, kMul4, r4);
           float k4 = (TAU * 2.71) * kMul4;
-          addWave(chopP, rotate2D(crossWind, -0.35 + r4), k4, 0.06 * chopPulse, 3.35, (1.18 + 0.72 * sqrt(k4)), t, h, gDummy);
+          addWave(chopP, rotate2D(crossWind, -0.35 + r4), k4, 0.06 * chopPulse, 3.35, (1.18 + 0.72 * sqrt(k4)), t, h, g);
 
-          return h;
+          vec2 grad = g / max(uWaveScale, 1e-3);
+          return vec3(h, grad);
+        }
+
+        float waveHeight(vec2 sceneUv, float t, float motion01) {
+          return calculateWave(sceneUv, t, motion01).x;
         }
 
         vec2 waveGrad2D(vec2 sceneUv, float t, float motion01) {
-          const float TAU = 6.2831853;
-
-          vec2 windF = uWindDir;
-          float wl = length(windF);
-          windF = (wl > 1e-5) ? (windF / wl) : vec2(1.0, 0.0);
-          // Keep consistent with waveHeight(): flip Foundry Y-down to math-style Y-up.
-          vec2 wind = vec2(windF.x, -windF.y);
-          float travelRot = (uLockWaveTravelToWind > 0.5) ? 0.0 : uWaveDirOffsetRad;
-          wind = rotate2D(wind, travelRot);
-
-          vec2 uvF = warpUv(sceneUv, motion01);
-          vec2 uv = uvF;
-          vec2 p = uv * uWaveScale;
-
-          // Must match waveHeight(): same low-frequency modulation so normals/distortion stay coherent.
-          vec2 lf = vec2(
-            fbmNoise(sceneUv * 0.11 + vec2(11.3, 17.9)),
-            fbmNoise(sceneUv * 0.11 + vec2(37.1, 5.7))
-          );
-
-          float hDummy = 0.0;
-          vec2 g = vec2(0.0);
-
-          float sea01 = waveSeaState(sceneUv, motion01);
-          float evoAmt = clamp(uWaveEvolutionAmount, 0.0, 1.0);
-          float evo = mix(1.0 - evoAmt, 1.0 + evoAmt, sea01);
-
-          float breathing = 0.8 + 0.2 * sin(uTime * 0.5 * clamp(motion01, 0.0, 1.0));
-          float wavePulse = evo * breathing;
-
-          vec2 swellP = p;
-          vec2 chopP = p * 2.618;
-          vec2 crossWind = rotate2D(wind, 0.78);
-          float chopBreathing = 0.7 + 0.3 * cos(uTime * 0.7 * clamp(motion01, 0.0, 1.0));
-          float chopPulse = evo * chopBreathing;
-
-          // Swell layer
-          float kMul0; float r0; waveMods(lf, 1.0, kMul0, r0);
-          float k0 = (TAU * 0.61) * kMul0;
-          addWave(swellP, rotate2D(wind, -0.60 + r0), k0, 0.40 * wavePulse, 2.20, (1.05 + 0.62 * sqrt(k0)), t, hDummy, g);
-
-          float kMul1; float r1; waveMods(lf, 2.0, kMul1, r1);
-          float k1 = (TAU * 0.97) * kMul1;
-          addWave(swellP, rotate2D(wind, -0.15 + r1), k1, 0.28 * wavePulse, 2.55, (1.05 + 0.62 * sqrt(k1)), t, hDummy, g);
-
-          float kMul2; float r2; waveMods(lf, 3.0, kMul2, r2);
-          float k2 = (TAU * 1.43) * kMul2;
-          addWave(swellP, rotate2D(wind,  0.20 + r2), k2, 0.16 * wavePulse, 2.85, (1.05 + 0.62 * sqrt(k2)), t, hDummy, g);
-
-          // Cross-chop layer
-          float kMul3; float r3; waveMods(lf, 4.0, kMul3, r3);
-          float k3 = (TAU * 1.88) * kMul3;
-          addWave(chopP, rotate2D(crossWind,  0.25 + r3), k3, 0.10 * chopPulse, 3.10, (1.18 + 0.72 * sqrt(k3)), t, hDummy, g);
-
-          float kMul4; float r4; waveMods(lf, 5.0, kMul4, r4);
-          float k4 = (TAU * 2.71) * kMul4;
-          addWave(chopP, rotate2D(crossWind, -0.35 + r4), k4, 0.06 * chopPulse, 3.35, (1.18 + 0.72 * sqrt(k4)), t, hDummy, g);
-
-          // Normalize away the scale dependence so uWaveScale doesn't make razor-sharp gradients.
-          return g / max(uWaveScale, 1e-3);
+          return calculateWave(sceneUv, t, motion01).yz;
         }
 
         vec2 smoothFlow2D(vec2 sceneUv) {
@@ -2601,6 +2651,90 @@ export class WaterEffectV2 extends EffectBase {
           sandAlpha *= clamp(uSandIntensity, 0.0, 1.0);
           sandAlpha *= 1.15;
           return sandAlpha;
+        }
+
+        vec3 applyMurk(vec3 baseColor, vec2 sceneUv, float shore, float inside, float time, out float murkFactorOut) {
+          murkFactorOut = 0.0;
+          if (uMurkEnabled < 0.5) return baseColor;
+
+          float murkIntensity = clamp(uMurkIntensity, 0.0, 2.0);
+          if (murkIntensity < 0.01 || inside < 0.001) return baseColor;
+
+          float murkScale = max(0.1, uMurkScale);
+          float murkSpeed = max(0.0, uMurkSpeed);
+          // Keep murk domain in scene space and drive advection explicitly from wind basis
+          // so changing wind direction immediately rotates murk travel direction.
+          vec2 murkSceneUv = sceneUv;
+          float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+          vec2 murkBasis = vec2(murkSceneUv.x * sceneAspect, murkSceneUv.y);
+
+          // Explicit wind-direction basis for all animated murk terms.
+          // This ensures changing wind direction rotates murk motion accordingly.
+          vec2 windF = uWindDir;
+          float windLen = length(windF);
+          windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
+          vec2 windBasis = normalize(vec2(windF.x * sceneAspect, windF.y));
+          vec2 windPerp = vec2(-windBasis.y, windBasis.x);
+          float tWind = uWindTime;
+
+          // Low-frequency cloud field, warped by curl to create billowy suspended silt.
+          vec2 cloudUv = murkBasis * murkScale;
+          vec2 cloudDrift = windBasis * (tWind * murkSpeed * 0.22);
+          vec2 cloudWarp = curlNoise2D((cloudUv - cloudDrift) * 0.45) * 0.45;
+          float cloudA = fbmNoise(cloudUv - cloudDrift + cloudWarp);
+          float cloudB = fbmNoise(cloudUv * 0.57 - cloudDrift * 0.73 + windPerp * 0.35 + vec2(17.3, 9.1) - cloudWarp * 0.35);
+          float cloud = clamp(0.5 + 0.5 * (0.65 * cloudA + 0.35 * cloudB), 0.0, 1.0);
+          cloud = smoothstep(0.30, 0.78, cloud);
+
+          // Depth proxy from exposure: higher values are deeper water in this pass.
+          float depthLo = clamp(uMurkDepthLo, 0.0, 1.0);
+          float depthHi = clamp(uMurkDepthHi, 0.0, 1.0);
+          float mdLo = min(depthLo, depthHi - 0.001);
+          float mdHi = max(depthHi, mdLo + 0.001);
+          float depthMask = smoothstep(mdLo, mdHi, clamp(shore, 0.0, 1.0));
+          float depthFactor = pow(depthMask, max(0.1, uMurkDepthFade));
+
+          // High-frequency particulate sparkle, strongest in thick clouds.
+          float grainScale = max(10.0, uMurkGrainScale);
+          float grainSpeed = max(0.0, uMurkGrainSpeed);
+          vec2 grainSceneUv = sceneUv;
+          vec2 grainBasis = vec2(grainSceneUv.x * sceneAspect, grainSceneUv.y);
+
+          float grainPhase = tWind * (murkSpeed + grainSpeed);
+          vec2 grainDrift = windBasis * (grainPhase * 1.8);
+          // IMPORTANT: translation alone looks like sliding texture. Add time-evolving
+          // domain motion so the particulate field boils/changes each frame.
+          vec2 grainEvo = vec2(time * grainSpeed * 0.85, -time * grainSpeed * 0.71);
+          vec2 gUv1 = grainBasis * (grainScale * 1.0) - grainDrift + grainEvo;
+          vec2 gUv2 = grainBasis * (grainScale * 2.35) - grainDrift * 2.1 - grainEvo * 1.6 + vec2(23.4, 7.1);
+          vec2 gUv3 = grainBasis * (grainScale * 4.9) - grainDrift * 3.0 + grainEvo * 2.4 + vec2(-11.8, 31.6);
+          vec2 gWarp = curlNoise2D((grainBasis * grainScale * 0.018) + grainEvo * 0.12 - windBasis * (grainPhase * 0.20)) * 2.0;
+          gUv1 += gWarp * 0.20;
+          gUv2 += gWarp * 0.12;
+          gUv3 += gWarp * 0.08;
+
+          float g1 = valueNoise(gUv1);
+          float g2 = valueNoise(gUv2);
+          float g3 = valueNoise(gUv3);
+          float grit = clamp(0.55 * g1 + 0.30 * g2 + 0.15 * g3, 0.0, 1.0);
+
+          // Tiny animated particulate peaks, biased into thicker murk pockets.
+          float grain = pow(grit, 14.0) * clamp(uMurkGrainStrength, 0.0, 2.0);
+          grain *= smoothstep(0.45, 0.95, cloud) * depthFactor;
+
+          float murkFactor = clamp(cloud * depthFactor * murkIntensity * inside, 0.0, 1.0);
+          murkFactorOut = murkFactor;
+
+          vec3 murkColor = clamp(uMurkColor, vec3(0.0), vec3(1.0));
+          float darkness = clamp(uSceneDarkness, 0.0, 1.0);
+          float murkDarkScale = mix(1.0, 0.22, darkness);
+          float baseLuma = dot(baseColor, vec3(0.299, 0.587, 0.114));
+          float localLight = clamp(0.35 + baseLuma * 0.85, 0.2, 1.0);
+          vec3 muckyCol = mix(murkColor * 0.6, murkColor, cloud);
+          muckyCol *= murkDarkScale * localLight;
+          muckyCol += grain * 0.35 * murkDarkScale * localLight;
+
+          return mix(baseColor, muckyCol, murkFactor);
         }
 
         void main() {
@@ -2768,7 +2902,8 @@ export class WaterEffectV2 extends EffectBase {
               return;
             }
             if (d < 11.5) {
-              float foamAmount = getFoamBaseAmount(sceneUv, shore, inside);
+              vec2 rainOffPxDebug = computeRainOffsetPx(worldSceneUv);
+              float foamAmount = getFoamBaseAmount(sceneUv, shore, inside, rainOffPxDebug);
               gl_FragColor = vec4(vec3(clamp(foamAmount, 0.0, 1.0)), 1.0);
               return;
             }
@@ -2836,6 +2971,22 @@ export class WaterEffectV2 extends EffectBase {
           // Specular uses the raw field and is faded separately to avoid "cutout" artifacts.
           vec2 offsetUv = offsetUvRaw * distMask;
 
+          // Depth-tested refraction guard: avoid pulling foreground/shore pixels into water.
+          // If the refracted sample is closer to camera than the current pixel, treat it as
+          // a likely shoreline leak and suppress refraction for this fragment.
+          if (uDepthEnabled > 0.5) {
+            float srcDepth = msa_sampleDeviceDepth(vUv);
+            vec2 refrUv = clamp(vUv + offsetUv, vec2(0.001), vec2(0.999));
+            float dstDepth = msa_sampleDeviceDepth(refrUv);
+            if (srcDepth < 0.9999 && dstDepth < 0.9999) {
+              float srcLinear = msa_linearizeDepth(srcDepth);
+              float dstLinear = msa_linearizeDepth(dstDepth);
+              if (dstLinear + 0.001 < srcLinear) {
+                offsetUv = vec2(0.0);
+              }
+            }
+          }
+
           vec2 uv1 = clamp(vUv + offsetUv, vec2(0.001), vec2(0.999));
 
           // Default: single-tap refraction (bandwidth efficient).
@@ -2868,8 +3019,16 @@ export class WaterEffectV2 extends EffectBase {
           refracted.rgb = vec3(rr, refracted.g, bb);
           #endif
 
-          float k = clamp(uTintStrength, 0.0, 1.0) * inside * shore;
-          vec3 col = mix(refracted.rgb, uTintColor, k);
+          vec3 col = refracted.rgb;
+
+          // Subsurface murk volume (silt/algae/mud), depth-aware and clouded.
+          float murkFactor = 0.0;
+          col = applyMurk(col, sceneUv, shore, inside, uTime, murkFactor);
+
+          // Surface tint sits on top of murk; fade it when murk is already dense.
+          float effectiveTint = clamp(uTintStrength, 0.0, 1.0) * (1.0 - (murkFactor * 0.5));
+          float k = effectiveTint * inside * shore;
+          col = mix(col, uTintColor, k);
 
           // Water-specific cloud shadow coupling:
           // - Darken the water body under cloud shadow
@@ -2878,6 +3037,7 @@ export class WaterEffectV2 extends EffectBase {
           float cloudShadow = 0.0;
           float cloudLitRaw = 1.0;
           float cloudLitNorm = 1.0;
+          float cloudOcclusionNorm = 0.0;
           if (uCloudShadowEnabled > 0.5 && uHasCloudShadow > 0.5) {
             cloudLitRaw = texture2D(tCloudShadow, vUv).r;
             cloudShadow = clamp(1.0 - cloudLitRaw, 0.0, 1.0);
@@ -2887,6 +3047,15 @@ export class WaterEffectV2 extends EffectBase {
             // so specular can actually be removed.
             float minB = clamp(uCloudShadowMinBrightness, 0.0, 0.99);
             cloudLitNorm = clamp((cloudLitRaw - minB) / max(1e-5, 1.0 - minB), 0.0, 1.0);
+
+            // Normalize cloud occlusion so specular suppression follows cloud coverage,
+            // not cloud shadow darkness. This decouples glint suppression from
+            // CloudEffect shadowOpacity/minBrightness artistic controls.
+            float shadowOpacity = clamp(uCloudShadowOpacity, 0.0, 1.0);
+            cloudOcclusionNorm = (shadowOpacity > 1e-3)
+              ? clamp((1.0 - cloudLitNorm) / shadowOpacity, 0.0, 1.0)
+              : 0.0;
+
             float dStrength = clamp(uCloudShadowDarkenStrength, 0.0, 4.0);
             float dCurve = max(0.01, uCloudShadowDarkenCurve);
             float darken = dStrength * pow(cloudShadow, dCurve);
@@ -2903,7 +3072,7 @@ export class WaterEffectV2 extends EffectBase {
 
           // Foam bubbles around shorelines (exposure01/shore), broken up with animated grain.
           // shore: 0.0 in deep water, 1.0 at water boundary.
-          float foamAmount = getFoamBaseAmount(sceneUv, shore, inside);
+          float foamAmount = getFoamBaseAmount(sceneUv, shore, inside, rainOffPx);
 
           float foamVisual = clamp(foamAmount, 0.0, 1.0);
 
@@ -3002,7 +3171,8 @@ export class WaterEffectV2 extends EffectBase {
           if (uCloudShadowEnabled > 0.5 && cloudShadow > 1e-5) {
             float kStrength = clamp(uCloudShadowSpecularKill, 0.0, 1.0);
             float kCurve = max(0.01, uCloudShadowSpecularCurve);
-            float litPow = pow(clamp(cloudLitNorm, 0.0, 1.0), kCurve);
+            float specLit = clamp(1.0 - cloudOcclusionNorm, 0.0, 1.0);
+            float litPow = pow(specLit, kCurve);
             float specMul = mix(1.0, litPow, kStrength);
             spec *= clamp(specMul, 0.0, 1.0);
           }
@@ -3144,8 +3314,11 @@ export class WaterEffectV2 extends EffectBase {
   update(timeInfo) {
     if (!this._material) return;
 
+    this._ensureParamsProxy();
+
     const THREE = window.THREE;
     const u = this._material.uniforms;
+    const staticUniformsDirty = this._paramsDirty === true;
 
     // Bind shared module depth-pass uniforms for depth-aware water occlusion.
     DepthShaderChunks.bindDepthPass(u);
@@ -3233,59 +3406,63 @@ export class WaterEffectV2 extends EffectBase {
           }
           if (typeof dm.updateSourceParams === 'function') {
             const p = this._distortionWaterParams;
+            const waterDataTexture = this.getWaterDataTexture?.() ?? null;
+            const distortionParamsDirty = staticUniformsDirty || this._lastDistortionWaterDataTexture !== waterDataTexture;
+            if (distortionParamsDirty) {
+              p.murkEnabled = this.params?.murkEnabled === true;
+              p.murkIntensity = Number.isFinite(this.params?.murkIntensity) ? this.params.murkIntensity : 0.65;
+              p.murkColor = normalizeRgb01(this.params?.murkColor, { r: 0.082, g: 0.204, b: 0.212 });
+              p.murkScale = Number.isFinite(this.params?.murkScale) ? this.params.murkScale : 2.25;
+              p.murkSpeed = Number.isFinite(this.params?.murkSpeed) ? this.params.murkSpeed : 0.15;
+              p.murkDepthLo = Number.isFinite(this.params?.murkDepthLo) ? this.params.murkDepthLo : 0.35;
+              p.murkDepthHi = Number.isFinite(this.params?.murkDepthHi) ? this.params.murkDepthHi : 0.95;
+              p.murkGrainScale = Number.isFinite(this.params?.murkGrainScale) ? this.params.murkGrainScale : 3200.0;
+              p.murkGrainSpeed = Number.isFinite(this.params?.murkGrainSpeed) ? this.params.murkGrainSpeed : 0.9;
+              p.murkGrainStrength = Number.isFinite(this.params?.murkGrainStrength) ? this.params.murkGrainStrength : 0.65;
+              p.murkOcclusionStrength = Number.isFinite(this.params?.murkOcclusionStrength) ? this.params.murkOcclusionStrength : 0.55;
+              p.murkOcclusionSoftness = Number.isFinite(this.params?.murkOcclusionSoftness) ? this.params.murkOcclusionSoftness : 0.2;
+              p.murkContrast = Number.isFinite(this.params?.murkContrast) ? this.params.murkContrast : 1.6;
 
-            p.murkEnabled = this.params?.murkEnabled === true;
-            p.murkIntensity = Number.isFinite(this.params?.murkIntensity) ? this.params.murkIntensity : 0.65;
-            p.murkColor = normalizeRgb01(this.params?.murkColor, { r: 0.082, g: 0.204, b: 0.212 });
-            p.murkScale = Number.isFinite(this.params?.murkScale) ? this.params.murkScale : 2.25;
-            p.murkSpeed = Number.isFinite(this.params?.murkSpeed) ? this.params.murkSpeed : 0.15;
-            p.murkDepthLo = Number.isFinite(this.params?.murkDepthLo) ? this.params.murkDepthLo : 0.35;
-            p.murkDepthHi = Number.isFinite(this.params?.murkDepthHi) ? this.params.murkDepthHi : 0.95;
-            p.murkGrainScale = Number.isFinite(this.params?.murkGrainScale) ? this.params.murkGrainScale : 340.0;
-            p.murkGrainSpeed = Number.isFinite(this.params?.murkGrainSpeed) ? this.params.murkGrainSpeed : 0.45;
-            p.murkGrainStrength = Number.isFinite(this.params?.murkGrainStrength) ? this.params.murkGrainStrength : 0.65;
-            p.murkOcclusionStrength = Number.isFinite(this.params?.murkOcclusionStrength) ? this.params.murkOcclusionStrength : 0.55;
-            p.murkOcclusionSoftness = Number.isFinite(this.params?.murkOcclusionSoftness) ? this.params.murkOcclusionSoftness : 0.2;
-            p.murkContrast = Number.isFinite(this.params?.murkContrast) ? this.params.murkContrast : 1.6;
+              // Reuse WaterEffectV2 sand contrast to tighten DistortionManager's subsurface sand.
+              p.sandContrast = Number.isFinite(this.params?.sandContrast) ? this.params.sandContrast : 1.35;
 
-            // Reuse WaterEffectV2 sand contrast to tighten DistortionManager's subsurface sand.
-            p.sandContrast = Number.isFinite(this.params?.sandContrast) ? this.params.sandContrast : 1.35;
+              p.shoreNoiseEnabled = this.params?.shoreNoiseDistortionEnabled !== false;
+              p.shoreNoiseStrengthPx = Number.isFinite(this.params?.shoreNoiseDistortionStrengthPx) ? this.params.shoreNoiseDistortionStrengthPx : 12.75;
+              p.shoreNoiseFrequency = Number.isFinite(this.params?.shoreNoiseDistortionFrequency) ? this.params.shoreNoiseDistortionFrequency : 526.1;
+              p.shoreNoiseSpeed = Number.isFinite(this.params?.shoreNoiseDistortionSpeed) ? this.params.shoreNoiseDistortionSpeed : 4.31;
+              p.shoreNoiseFadeLo = Number.isFinite(this.params?.shoreNoiseDistortionFadeLo) ? this.params.shoreNoiseDistortionFadeLo : 0.112;
+              p.shoreNoiseFadeHi = Number.isFinite(this.params?.shoreNoiseDistortionFadeHi) ? this.params.shoreNoiseDistortionFadeHi : 0.601;
+              p.shoreNoiseCurlStrength = Number.isFinite(this.params?.shoreNoiseDistortionCurlStrength) ? this.params.shoreNoiseDistortionCurlStrength : 0.45;
+              p.shoreNoiseWashStrength = Number.isFinite(this.params?.shoreNoiseDistortionWashStrength) ? this.params.shoreNoiseDistortionWashStrength : 0.51;
+              p.shoreNoiseWashSpeed = Number.isFinite(this.params?.shoreNoiseDistortionWashSpeed) ? this.params.shoreNoiseDistortionWashSpeed : 0.8;
 
-            p.shoreNoiseEnabled = this.params?.shoreNoiseDistortionEnabled !== false;
-            p.shoreNoiseStrengthPx = Number.isFinite(this.params?.shoreNoiseDistortionStrengthPx) ? this.params.shoreNoiseDistortionStrengthPx : 12.75;
-            p.shoreNoiseFrequency = Number.isFinite(this.params?.shoreNoiseDistortionFrequency) ? this.params.shoreNoiseDistortionFrequency : 526.1;
-            p.shoreNoiseSpeed = Number.isFinite(this.params?.shoreNoiseDistortionSpeed) ? this.params.shoreNoiseDistortionSpeed : 4.31;
-            p.shoreNoiseFadeLo = Number.isFinite(this.params?.shoreNoiseDistortionFadeLo) ? this.params.shoreNoiseDistortionFadeLo : 0.112;
-            p.shoreNoiseFadeHi = Number.isFinite(this.params?.shoreNoiseDistortionFadeHi) ? this.params.shoreNoiseDistortionFadeHi : 0.601;
-            p.shoreNoiseCurlStrength = Number.isFinite(this.params?.shoreNoiseDistortionCurlStrength) ? this.params.shoreNoiseDistortionCurlStrength : 0.45;
-            p.shoreNoiseWashStrength = Number.isFinite(this.params?.shoreNoiseDistortionWashStrength) ? this.params.shoreNoiseDistortionWashStrength : 0.51;
-            p.shoreNoiseWashSpeed = Number.isFinite(this.params?.shoreNoiseDistortionWashSpeed) ? this.params.shoreNoiseDistortionWashSpeed : 0.8;
+              // Provide WaterData so DistortionManager can derive a shoreline band pinned to
+              // the true land/water boundary (exposure01 == 0 at the edge).
+              p.waterDataTexture = waterDataTexture;
 
-            // Provide WaterData so DistortionManager can derive a shoreline band pinned to
-            // the true land/water boundary (exposure01 == 0 at the edge).
-            p.waterDataTexture = this.getWaterDataTexture?.() ?? null;
+              p.causticsEnabled = this.params?.causticsEnabled !== false;
+              p.causticsIntensity = Number.isFinite(this.params?.causticsIntensity) ? this.params.causticsIntensity : 4;
+              p.causticsScale = Number.isFinite(this.params?.causticsScale) ? this.params.causticsScale : 60.4;
+              p.causticsSpeed = Number.isFinite(this.params?.causticsSpeed) ? this.params.causticsSpeed : 1.83;
+              p.causticsSharpness = Number.isFinite(this.params?.causticsSharpness) ? this.params.causticsSharpness : 1.36;
+              p.causticsEdgeLo = Number.isFinite(this.params?.causticsEdgeLo) ? this.params.causticsEdgeLo : 0.5;
+              p.causticsEdgeHi = Number.isFinite(this.params?.causticsEdgeHi) ? this.params.causticsEdgeHi : 1.0;
+              p.causticsEdgeBlurTexels = Number.isFinite(this.params?.causticsEdgeBlurTexels) ? this.params.causticsEdgeBlurTexels : 4.0;
 
-            p.causticsEnabled = this.params?.causticsEnabled !== false;
-            p.causticsIntensity = Number.isFinite(this.params?.causticsIntensity) ? this.params.causticsIntensity : 4;
-            p.causticsScale = Number.isFinite(this.params?.causticsScale) ? this.params.causticsScale : 60.4;
-            p.causticsSpeed = Number.isFinite(this.params?.causticsSpeed) ? this.params.causticsSpeed : 1.83;
-            p.causticsSharpness = Number.isFinite(this.params?.causticsSharpness) ? this.params.causticsSharpness : 1.36;
-            p.causticsEdgeLo = Number.isFinite(this.params?.causticsEdgeLo) ? this.params.causticsEdgeLo : 0.5;
-            p.causticsEdgeHi = Number.isFinite(this.params?.causticsEdgeHi) ? this.params.causticsEdgeHi : 1.0;
-            p.causticsEdgeBlurTexels = Number.isFinite(this.params?.causticsEdgeBlurTexels) ? this.params.causticsEdgeBlurTexels : 4.0;
+              p.causticsBrightnessMaskEnabled = this.params?.causticsBrightnessMaskEnabled === true;
+              p.causticsBrightnessThreshold = Number.isFinite(this.params?.causticsBrightnessThreshold) ? this.params.causticsBrightnessThreshold : 0.24;
+              p.causticsBrightnessSoftness = Number.isFinite(this.params?.causticsBrightnessSoftness) ? this.params.causticsBrightnessSoftness : 0.25;
+              p.causticsBrightnessGamma = Number.isFinite(this.params?.causticsBrightnessGamma) ? this.params.causticsBrightnessGamma : 0.62;
 
-            p.causticsBrightnessMaskEnabled = this.params?.causticsBrightnessMaskEnabled === true;
-            p.causticsBrightnessThreshold = Number.isFinite(this.params?.causticsBrightnessThreshold) ? this.params.causticsBrightnessThreshold : 0.24;
-            p.causticsBrightnessSoftness = Number.isFinite(this.params?.causticsBrightnessSoftness) ? this.params.causticsBrightnessSoftness : 0.25;
-            p.causticsBrightnessGamma = Number.isFinite(this.params?.causticsBrightnessGamma) ? this.params.causticsBrightnessGamma : 0.62;
+              p.causticsDebug = this.params?.causticsDebug === true;
+              p.causticsIgnoreLightGate = this.params?.causticsIgnoreLightGate === true;
 
-            p.causticsDebug = this.params?.causticsDebug === true;
-            p.causticsIgnoreLightGate = this.params?.causticsIgnoreLightGate === true;
+              p.cloudShadowCausticsKill = Number.isFinite(this.params?.cloudShadowCausticsKill) ? this.params.cloudShadowCausticsKill : 1.0;
+              p.cloudShadowCausticsCurve = Number.isFinite(this.params?.cloudShadowCausticsCurve) ? this.params.cloudShadowCausticsCurve : 0.1;
 
-            p.cloudShadowCausticsKill = Number.isFinite(this.params?.cloudShadowCausticsKill) ? this.params.cloudShadowCausticsKill : 1.0;
-            p.cloudShadowCausticsCurve = Number.isFinite(this.params?.cloudShadowCausticsCurve) ? this.params.cloudShadowCausticsCurve : 0.1;
-
-            dm.updateSourceParams('water', p);
+              dm.updateSourceParams('water', p);
+              this._lastDistortionWaterDataTexture = waterDataTexture;
+            }
           }
         }
       }
@@ -3301,24 +3478,24 @@ export class WaterEffectV2 extends EffectBase {
       u.uZoom.value = Number.isFinite(z) ? z : 1.0;
     }
 
-    if (u.uChromaticAberrationStrengthPx) {
+    if (staticUniformsDirty && u.uChromaticAberrationStrengthPx) {
       const v = this.params?.chromaticAberrationStrengthPx;
       u.uChromaticAberrationStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, v) : 1.78;
     }
 
-    if (u.uChromaticAberrationEdgeCenter) {
+    if (staticUniformsDirty && u.uChromaticAberrationEdgeCenter) {
       const v = this.params?.chromaticAberrationEdgeCenter;
       u.uChromaticAberrationEdgeCenter.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.5;
     }
-    if (u.uChromaticAberrationEdgeFeather) {
+    if (staticUniformsDirty && u.uChromaticAberrationEdgeFeather) {
       const v = this.params?.chromaticAberrationEdgeFeather;
       u.uChromaticAberrationEdgeFeather.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.5, v)) : 0.1;
     }
-    if (u.uChromaticAberrationEdgeGamma) {
+    if (staticUniformsDirty && u.uChromaticAberrationEdgeGamma) {
       const v = this.params?.chromaticAberrationEdgeGamma;
       u.uChromaticAberrationEdgeGamma.value = Number.isFinite(v) ? Math.max(0.01, v) : 1.0;
     }
-    if (u.uChromaticAberrationEdgeMin) {
+    if (staticUniformsDirty && u.uChromaticAberrationEdgeMin) {
       const v = this.params?.chromaticAberrationEdgeMin;
       u.uChromaticAberrationEdgeMin.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.0;
     }
@@ -3341,209 +3518,257 @@ export class WaterEffectV2 extends EffectBase {
       }
     }
 
-    const t = this.params?.tintStrength;
-    u.uTintStrength.value = Number.isFinite(t) ? t : 0.2;
+    if (staticUniformsDirty) {
+      const t = this.params?.tintStrength;
+      u.uTintStrength.value = Number.isFinite(t) ? t : 0.2;
 
-    const c = this.params?.tintColor;
-    if (c && (typeof c.r === 'number') && (typeof c.g === 'number') && (typeof c.b === 'number')) {
-      u.uTintColor.value.setRGB(c.r, c.g, c.b);
-    }
-
-    if (u.uSandIntensity) {
-      const v = this.params?.sandIntensity;
-      u.uSandIntensity.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.5;
-    }
-    if (u.uSandColor) {
-      const sc = this.params?.sandColor;
-      if (typeof sc === 'string') {
-        u.uSandColor.value.set(sc);
-      } else if (sc && (typeof sc.r === 'number') && (typeof sc.g === 'number') && (typeof sc.b === 'number')) {
-        const c01 = normalizeRgb01(sc, { r: 0.0, g: 0.0, b: 0.0 });
-        u.uSandColor.value.setRGB(c01.r, c01.g, c01.b);
+      const c = this.params?.tintColor;
+      if (c && (typeof c.r === 'number') && (typeof c.g === 'number') && (typeof c.b === 'number')) {
+        u.uTintColor.value.setRGB(c.r, c.g, c.b);
       }
-    }
-    if (u.uSandContrast) {
-      const v = this.params?.sandContrast;
-      u.uSandContrast.value = Number.isFinite(v) ? Math.max(0.01, v) : 1.35;
-    }
-    if (u.uSandChunkScale) {
-      const v = this.params?.sandChunkScale;
-      u.uSandChunkScale.value = Number.isFinite(v) ? Math.max(0.01, v) : 17.5;
-    }
-    if (u.uSandChunkSpeed) {
-      const v = this.params?.sandChunkSpeed;
-      u.uSandChunkSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 1.12;
-    }
-    if (u.uSandGrainScale) {
-      const v = this.params?.sandGrainScale;
-      u.uSandGrainScale.value = Number.isFinite(v) ? Math.max(1.0, v) : 37.0;
-    }
-    if (u.uSandGrainSpeed) {
-      const v = this.params?.sandGrainSpeed;
-      u.uSandGrainSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.0;
-    }
-    if (u.uSandBillowStrength) {
-      const v = this.params?.sandBillowStrength;
-      u.uSandBillowStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.55;
-    }
 
-    if (u.uSandCoverage) {
-      const v = this.params?.sandCoverage;
-      u.uSandCoverage.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
-    }
-    if (u.uSandChunkSoftness) {
-      const v = this.params?.sandChunkSoftness;
-      u.uSandChunkSoftness.value = Number.isFinite(v) ? Math.max(0.001, Math.min(1.0, v)) : 0.37;
-    }
-    if (u.uSandSpeckCoverage) {
-      const v = this.params?.sandSpeckCoverage;
-      u.uSandSpeckCoverage.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.81;
-    }
-    if (u.uSandSpeckSoftness) {
-      const v = this.params?.sandSpeckSoftness;
-      u.uSandSpeckSoftness.value = Number.isFinite(v) ? Math.max(0.001, Math.min(1.0, v)) : 0.33;
-    }
-    if (u.uSandDepthLo) {
-      const v = this.params?.sandDepthLo;
-      u.uSandDepthLo.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.15;
-    }
-    if (u.uSandDepthHi) {
-      const v = this.params?.sandDepthHi;
-      u.uSandDepthHi.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.90;
-    }
-    if (u.uSandAnisotropy) {
-      const v = this.params?.sandAnisotropy;
-      u.uSandAnisotropy.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
-    }
-    if (u.uSandDistortionStrength) {
-      const v = this.params?.sandDistortionStrength;
-      u.uSandDistortionStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.0;
-    }
-    if (u.uSandAdditive) {
-      const v = this.params?.sandAdditive;
-      u.uSandAdditive.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.0;
-    }
-
-    if (u.uFoamColor) {
-      const fColor = this.params?.foamColor;
-      if (fColor && (typeof fColor.r === 'number') && (typeof fColor.g === 'number') && (typeof fColor.b === 'number')) {
-        u.uFoamColor.value.setRGB(fColor.r, fColor.g, fColor.b);
+      if (u.uSandIntensity) {
+        const v = this.params?.sandIntensity;
+        u.uSandIntensity.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.5;
       }
-    }
+      if (u.uSandColor) {
+        const sc = this.params?.sandColor;
+        if (typeof sc === 'string') {
+          u.uSandColor.value.set(sc);
+        } else if (sc && (typeof sc.r === 'number') && (typeof sc.g === 'number') && (typeof sc.b === 'number')) {
+          const c01 = normalizeRgb01(sc, { r: 0.0, g: 0.0, b: 0.0 });
+          u.uSandColor.value.setRGB(c01.r, c01.g, c01.b);
+        }
+      }
+      if (u.uSandContrast) {
+        const v = this.params?.sandContrast;
+        u.uSandContrast.value = Number.isFinite(v) ? Math.max(0.01, v) : 1.35;
+      }
+      if (u.uSandChunkScale) {
+        const v = this.params?.sandChunkScale;
+        u.uSandChunkScale.value = Number.isFinite(v) ? Math.max(0.01, v) : 17.5;
+      }
+      if (u.uSandChunkSpeed) {
+        const v = this.params?.sandChunkSpeed;
+        u.uSandChunkSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 1.12;
+      }
+      if (u.uSandGrainScale) {
+        const v = this.params?.sandGrainScale;
+        u.uSandGrainScale.value = Number.isFinite(v) ? Math.max(1.0, v) : 37.0;
+      }
+      if (u.uSandGrainSpeed) {
+        const v = this.params?.sandGrainSpeed;
+        u.uSandGrainSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.0;
+      }
+      if (u.uSandBillowStrength) {
+        const v = this.params?.sandBillowStrength;
+        u.uSandBillowStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.55;
+      }
 
-    if (u.uFoamStrength) {
-      const fs = this.params?.foamStrength;
-      u.uFoamStrength.value = Number.isFinite(fs) ? fs : 0.0;
-    }
+      if (u.uSandCoverage) {
+        const v = this.params?.sandCoverage;
+        u.uSandCoverage.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
+      }
+      if (u.uSandChunkSoftness) {
+        const v = this.params?.sandChunkSoftness;
+        u.uSandChunkSoftness.value = Number.isFinite(v) ? Math.max(0.001, Math.min(1.0, v)) : 0.37;
+      }
+      if (u.uSandSpeckCoverage) {
+        const v = this.params?.sandSpeckCoverage;
+        u.uSandSpeckCoverage.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.81;
+      }
+      if (u.uSandSpeckSoftness) {
+        const v = this.params?.sandSpeckSoftness;
+        u.uSandSpeckSoftness.value = Number.isFinite(v) ? Math.max(0.001, Math.min(1.0, v)) : 0.33;
+      }
+      if (u.uSandDepthLo) {
+        const v = this.params?.sandDepthLo;
+        u.uSandDepthLo.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.15;
+      }
+      if (u.uSandDepthHi) {
+        const v = this.params?.sandDepthHi;
+        u.uSandDepthHi.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.90;
+      }
+      if (u.uSandAnisotropy) {
+        const v = this.params?.sandAnisotropy;
+        u.uSandAnisotropy.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
+      }
+      if (u.uSandDistortionStrength) {
+        const v = this.params?.sandDistortionStrength;
+        u.uSandDistortionStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.0;
+      }
+      if (u.uSandAdditive) {
+        const v = this.params?.sandAdditive;
+        u.uSandAdditive.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.0;
+      }
 
-    if (u.uFoamThreshold) {
-      const ft = this.params?.foamThreshold;
-      // UI is expressed as "width" where higher values push foam further from shore.
-      // In shader space, larger cutoff values yield thinner foam, so invert.
-      const width01 = Number.isFinite(ft) ? Math.max(0.0, Math.min(1.0, ft)) : 0.65;
-      u.uFoamThreshold.value = 1.0 - width01;
-    }
+      if (u.uFoamColor) {
+        const fColor = this.params?.foamColor;
+        if (fColor && (typeof fColor.r === 'number') && (typeof fColor.g === 'number') && (typeof fColor.b === 'number')) {
+          u.uFoamColor.value.setRGB(fColor.r, fColor.g, fColor.b);
+        }
+      }
 
-    if (u.uFoamScale) {
-      const fsc = this.params?.foamScale;
-      u.uFoamScale.value = Number.isFinite(fsc) ? fsc : 80.0;
-    }
+      if (u.uFoamStrength) {
+        const fs = this.params?.foamStrength;
+        u.uFoamStrength.value = Number.isFinite(fs) ? fs : 0.0;
+      }
 
-    if (u.uFoamSpeed) {
-      const fsp = this.params?.foamSpeed;
-      u.uFoamSpeed.value = Number.isFinite(fsp) ? fsp : 0.1;
-    }
+      if (u.uFoamThreshold) {
+        const ft = this.params?.foamThreshold;
+        // UI is expressed as "width" where higher values push foam further from shore.
+        // In shader space, larger cutoff values yield thinner foam, so invert.
+        const width01 = Number.isFinite(ft) ? Math.max(0.0, Math.min(1.0, ft)) : 0.65;
+        u.uFoamThreshold.value = 1.0 - width01;
+      }
 
-    if (u.uFoamCurlStrength) {
-      const v = this.params?.foamCurlStrength;
-      u.uFoamCurlStrength.value = Number.isFinite(v) ? v : 0.12;
-    }
+      if (u.uFoamScale) {
+        const fsc = this.params?.foamScale;
+        u.uFoamScale.value = Number.isFinite(fsc) ? fsc : 80.0;
+      }
 
-    if (u.uFoamCurlScale) {
-      const v = this.params?.foamCurlScale;
-      u.uFoamCurlScale.value = Number.isFinite(v) ? Math.max(0.01, v) : 2.2;
-    }
+      if (u.uFoamSpeed) {
+        const fsp = this.params?.foamSpeed;
+        u.uFoamSpeed.value = Number.isFinite(fsp) ? fsp : 0.1;
+      }
 
-    if (u.uFoamCurlSpeed) {
-      const v = this.params?.foamCurlSpeed;
-      u.uFoamCurlSpeed.value = Number.isFinite(v) ? v : 0.06;
-    }
+      if (u.uFoamCurlStrength) {
+        const v = this.params?.foamCurlStrength;
+        u.uFoamCurlStrength.value = Number.isFinite(v) ? v : 0.12;
+      }
 
-    if (u.uFoamBreakupStrength1) {
-      const v = this.params?.foamBreakupStrength1;
-      u.uFoamBreakupStrength1.value = Number.isFinite(v) ? v : 0.35;
-    }
-    if (u.uFoamBreakupScale1) {
-      const v = this.params?.foamBreakupScale1;
-      u.uFoamBreakupScale1.value = Number.isFinite(v) ? Math.max(0.01, v) : 18.0;
-    }
-    if (u.uFoamBreakupSpeed1) {
-      const v = this.params?.foamBreakupSpeed1;
-      u.uFoamBreakupSpeed1.value = Number.isFinite(v) ? v : 0.07;
-    }
+      if (u.uFoamCurlScale) {
+        const v = this.params?.foamCurlScale;
+        u.uFoamCurlScale.value = Number.isFinite(v) ? Math.max(0.01, v) : 2.2;
+      }
 
-    if (u.uFoamBreakupStrength2) {
-      const v = this.params?.foamBreakupStrength2;
-      u.uFoamBreakupStrength2.value = Number.isFinite(v) ? v : 0.20;
-    }
-    if (u.uFoamBreakupScale2) {
-      const v = this.params?.foamBreakupScale2;
-      u.uFoamBreakupScale2.value = Number.isFinite(v) ? Math.max(0.01, v) : 6.5;
-    }
-    if (u.uFoamBreakupSpeed2) {
-      const v = this.params?.foamBreakupSpeed2;
-      u.uFoamBreakupSpeed2.value = Number.isFinite(v) ? v : 0.03;
-    }
+      if (u.uFoamCurlSpeed) {
+        const v = this.params?.foamCurlSpeed;
+        u.uFoamCurlSpeed.value = Number.isFinite(v) ? v : 0.06;
+      }
 
-    if (u.uFoamBlackPoint) {
-      const v = this.params?.foamBlackPoint;
-      u.uFoamBlackPoint.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.0;
-    }
-    if (u.uFoamWhitePoint) {
-      const v = this.params?.foamWhitePoint;
-      u.uFoamWhitePoint.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
-    }
-    if (u.uFoamGamma) {
-      const v = this.params?.foamGamma;
-      u.uFoamGamma.value = Number.isFinite(v) ? Math.max(0.01, v) : 1.0;
-    }
-    if (u.uFoamContrast) {
-      const v = this.params?.foamContrast;
-      u.uFoamContrast.value = Number.isFinite(v) ? Math.max(0.0, v) : 1.0;
-    }
-    if (u.uFoamBrightness) {
-      const v = this.params?.foamBrightness;
-      u.uFoamBrightness.value = Number.isFinite(v) ? v : 0.0;
-    }
+      if (u.uFoamBreakupStrength1) {
+        const v = this.params?.foamBreakupStrength1;
+        u.uFoamBreakupStrength1.value = Number.isFinite(v) ? v : 0.35;
+      }
+      if (u.uFoamBreakupScale1) {
+        const v = this.params?.foamBreakupScale1;
+        u.uFoamBreakupScale1.value = Number.isFinite(v) ? Math.max(0.01, v) : 18.0;
+      }
+      if (u.uFoamBreakupSpeed1) {
+        const v = this.params?.foamBreakupSpeed1;
+        u.uFoamBreakupSpeed1.value = Number.isFinite(v) ? v : 0.07;
+      }
 
-    if (u.uFloatingFoamStrength) {
-      const s = this.params?.floatingFoamStrength;
-      u.uFloatingFoamStrength.value = Number.isFinite(s) ? s : 0.0;
+      if (u.uFoamBreakupStrength2) {
+        const v = this.params?.foamBreakupStrength2;
+        u.uFoamBreakupStrength2.value = Number.isFinite(v) ? v : 0.20;
+      }
+      if (u.uFoamBreakupScale2) {
+        const v = this.params?.foamBreakupScale2;
+        u.uFoamBreakupScale2.value = Number.isFinite(v) ? Math.max(0.01, v) : 6.5;
+      }
+      if (u.uFoamBreakupSpeed2) {
+        const v = this.params?.foamBreakupSpeed2;
+        u.uFoamBreakupSpeed2.value = Number.isFinite(v) ? v : 0.03;
+      }
+
+      if (u.uFoamBlackPoint) {
+        const v = this.params?.foamBlackPoint;
+        u.uFoamBlackPoint.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.0;
+      }
+      if (u.uFoamWhitePoint) {
+        const v = this.params?.foamWhitePoint;
+        u.uFoamWhitePoint.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
+      }
+      if (u.uFoamGamma) {
+        const v = this.params?.foamGamma;
+        u.uFoamGamma.value = Number.isFinite(v) ? Math.max(0.01, v) : 1.0;
+      }
+      if (u.uFoamContrast) {
+        const v = this.params?.foamContrast;
+        u.uFoamContrast.value = Number.isFinite(v) ? Math.max(0.0, v) : 1.0;
+      }
+      if (u.uFoamBrightness) {
+        const v = this.params?.foamBrightness;
+        u.uFoamBrightness.value = Number.isFinite(v) ? v : 0.0;
+      }
+
+      if (u.uFloatingFoamStrength) {
+        const s = this.params?.floatingFoamStrength;
+        u.uFloatingFoamStrength.value = Number.isFinite(s) ? s : 0.0;
+      }
+
+      if (u.uFloatingFoamCoverage) {
+        const cov = this.params?.floatingFoamCoverage;
+        u.uFloatingFoamCoverage.value = Number.isFinite(cov) ? Math.max(0.0, Math.min(1.0, cov)) : 0.22;
+      }
+
+      if (u.uFloatingFoamScale) {
+        const sc = this.params?.floatingFoamScale;
+        u.uFloatingFoamScale.value = Number.isFinite(sc) ? Math.max(0.1, sc) : 12.0;
+      }
+
+      if (u.uFloatingFoamWaveDistortion) {
+        const wd = this.params?.floatingFoamWaveDistortion;
+        u.uFloatingFoamWaveDistortion.value = Number.isFinite(wd) ? Math.max(0.0, wd) : 0.5;
+      }
+
+      // Shader-based foam flecks uniform sync
+      if (u.uFoamFlecksIntensity) {
+        const fi = this.params?.foamFlecksIntensity;
+        u.uFoamFlecksIntensity.value = Number.isFinite(fi) ? Math.max(0.0, fi) : 6.0;
+      }
+
+      if (u.uMurkEnabled) {
+        u.uMurkEnabled.value = this.params?.murkEnabled === false ? 0.0 : 1.0;
+      }
+      if (u.uMurkIntensity) {
+        const v = this.params?.murkIntensity;
+        u.uMurkIntensity.value = Number.isFinite(v) ? Math.max(0.0, Math.min(2.0, v)) : 0.85;
+      }
+      if (u.uMurkColor) {
+        const mc = this.params?.murkColor;
+        if (mc && (typeof mc.r === 'number') && (typeof mc.g === 'number') && (typeof mc.b === 'number')) {
+          const c01 = normalizeRgb01(mc, { r: 0.25, g: 0.18, b: 0.12 });
+          u.uMurkColor.value.setRGB(c01.r, c01.g, c01.b);
+        }
+      }
+      if (u.uMurkScale) {
+        const v = this.params?.murkScale;
+        u.uMurkScale.value = Number.isFinite(v) ? Math.max(0.1, v) : 3.5;
+      }
+      if (u.uMurkSpeed) {
+        const v = this.params?.murkSpeed;
+        u.uMurkSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.15;
+      }
+      if (u.uMurkDepthLo) {
+        const v = this.params?.murkDepthLo;
+        u.uMurkDepthLo.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.0;
+      }
+      if (u.uMurkDepthHi) {
+        const v = this.params?.murkDepthHi;
+        u.uMurkDepthHi.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
+      }
+      if (u.uMurkGrainScale) {
+        const v = this.params?.murkGrainScale;
+        u.uMurkGrainScale.value = Number.isFinite(v) ? Math.max(10.0, v) : 3200.0;
+      }
+      if (u.uMurkGrainSpeed) {
+        const v = this.params?.murkGrainSpeed;
+        u.uMurkGrainSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.9;
+      }
+      if (u.uMurkGrainStrength) {
+        const v = this.params?.murkGrainStrength;
+        u.uMurkGrainStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(2.0, v)) : 0.4;
+      }
+      if (u.uMurkDepthFade) {
+        const v = this.params?.murkDepthFade;
+        u.uMurkDepthFade.value = Number.isFinite(v) ? Math.max(0.1, Math.min(4.0, v)) : 1.2;
+      }
+
+      u.uDebugView.value = Number.isFinite(this.params?.debugView) ? this.params.debugView : 0.0;
     }
-
-    if (u.uFloatingFoamCoverage) {
-      const cov = this.params?.floatingFoamCoverage;
-      u.uFloatingFoamCoverage.value = Number.isFinite(cov) ? Math.max(0.0, Math.min(1.0, cov)) : 0.22;
-    }
-
-    if (u.uFloatingFoamScale) {
-      const sc = this.params?.floatingFoamScale;
-      u.uFloatingFoamScale.value = Number.isFinite(sc) ? Math.max(0.1, sc) : 12.0;
-    }
-
-    if (u.uFloatingFoamWaveDistortion) {
-      const wd = this.params?.floatingFoamWaveDistortion;
-      u.uFloatingFoamWaveDistortion.value = Number.isFinite(wd) ? Math.max(0.0, wd) : 0.5;
-    }
-
-    // Shader-based foam flecks uniform sync
-    if (u.uFoamFlecksIntensity) {
-      const fi = this.params?.foamFlecksIntensity;
-      u.uFoamFlecksIntensity.value = Number.isFinite(fi) ? Math.max(0.0, fi) : 6.0;
-    }
-
-
-    u.uDebugView.value = Number.isFinite(this.params?.debugView) ? this.params.debugView : 0.0;
 
     // Optional wind-link scaling for wave animation controls.
     // windSpeed is treated as 0..1 (WeatherController normalized), and we lerp
@@ -3558,8 +3783,10 @@ export class WaterEffectV2 extends EffectBase {
       _windSpeed01ForWaves = 0.0;
     }
 
-    const waveScale = this.params?.waveScale;
-    u.uWaveScale.value = Number.isFinite(waveScale) ? waveScale : 32.0;
+    if (staticUniformsDirty) {
+      const waveScale = this.params?.waveScale;
+      u.uWaveScale.value = Number.isFinite(waveScale) ? waveScale : 32.0;
+    }
     const waveSpeed = this.params?.waveSpeed;
     let waveSpeedValue = Number.isFinite(waveSpeed) ? waveSpeed : 0.18;
     if (this.params?.waveSpeedUseWind === true) {
@@ -3582,50 +3809,52 @@ export class WaterEffectV2 extends EffectBase {
     }
     u.uWaveStrength.value = waveStrengthValue;
 
-    const distPx = this.params?.distortionStrengthPx;
-    u.uDistortionStrengthPx.value = Number.isFinite(distPx) ? distPx : 5.38;
+    if (staticUniformsDirty) {
+      const distPx = this.params?.distortionStrengthPx;
+      u.uDistortionStrengthPx.value = Number.isFinite(distPx) ? distPx : 5.38;
+    }
 
-    if (u.uWaveWarpLargeStrength) {
+    if (staticUniformsDirty && u.uWaveWarpLargeStrength) {
       const v = this.params?.waveWarpLargeStrength;
       u.uWaveWarpLargeStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.22;
     }
-    if (u.uWaveWarpSmallStrength) {
+    if (staticUniformsDirty && u.uWaveWarpSmallStrength) {
       const v = this.params?.waveWarpSmallStrength;
       u.uWaveWarpSmallStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.06;
     }
-    if (u.uWaveWarpMicroStrength) {
+    if (staticUniformsDirty && u.uWaveWarpMicroStrength) {
       const v = this.params?.waveWarpMicroStrength;
       u.uWaveWarpMicroStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.02;
     }
-    if (u.uWaveWarpTimeSpeed) {
+    if (staticUniformsDirty && u.uWaveWarpTimeSpeed) {
       const v = this.params?.waveWarpTimeSpeed;
       u.uWaveWarpTimeSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.03;
     }
 
-    if (u.uWaveEvolutionEnabled) {
+    if (staticUniformsDirty && u.uWaveEvolutionEnabled) {
       u.uWaveEvolutionEnabled.value = this.params?.waveEvolutionEnabled === false ? 0.0 : 1.0;
     }
-    if (u.uWaveEvolutionSpeed) {
+    if (staticUniformsDirty && u.uWaveEvolutionSpeed) {
       const v = this.params?.waveEvolutionSpeed;
       u.uWaveEvolutionSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.08;
     }
-    if (u.uWaveEvolutionAmount) {
+    if (staticUniformsDirty && u.uWaveEvolutionAmount) {
       const v = this.params?.waveEvolutionAmount;
       u.uWaveEvolutionAmount.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.35;
     }
-    if (u.uWaveEvolutionScale) {
+    if (staticUniformsDirty && u.uWaveEvolutionScale) {
       const v = this.params?.waveEvolutionScale;
       u.uWaveEvolutionScale.value = Number.isFinite(v) ? Math.max(0.01, v) : 0.18;
     }
 
-    if (u.uWaveIndoorDampingEnabled) {
+    if (staticUniformsDirty && u.uWaveIndoorDampingEnabled) {
       u.uWaveIndoorDampingEnabled.value = this.params?.waveIndoorDampingEnabled === false ? 0.0 : 1.0;
     }
-    if (u.uWaveIndoorDampingStrength) {
+    if (staticUniformsDirty && u.uWaveIndoorDampingStrength) {
       const v = this.params?.waveIndoorDampingStrength;
       u.uWaveIndoorDampingStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
     }
-    if (u.uWaveIndoorMinFactor) {
+    if (staticUniformsDirty && u.uWaveIndoorMinFactor) {
       const v = this.params?.waveIndoorMinFactor;
       u.uWaveIndoorMinFactor.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.2;
     }
@@ -3694,7 +3923,7 @@ export class WaterEffectV2 extends EffectBase {
       u.uHasCloudShadow.value = cloudTex ? 1.0 : 0.0;
     }
 
-    if (u.uCloudShadowEnabled) {
+    if (staticUniformsDirty && u.uCloudShadowEnabled) {
       u.uCloudShadowEnabled.value = this.params?.cloudShadowEnabled === false ? 0.0 : 1.0;
     }
     if (u.uCloudShadowMinBrightness) {
@@ -3708,49 +3937,60 @@ export class WaterEffectV2 extends EffectBase {
       }
       u.uCloudShadowMinBrightness.value = Math.max(0.0, Math.min(0.99, minB));
     }
-    if (u.uCloudShadowDarkenStrength) {
+    if (u.uCloudShadowOpacity) {
+      let shadowOpacity = 1.0;
+      try {
+        const cloud = window.MapShine?.cloudEffect;
+        const v = cloud?.params?.shadowOpacity;
+        shadowOpacity = Number.isFinite(v) ? v : 1.0;
+      } catch (_) {
+        shadowOpacity = 1.0;
+      }
+      u.uCloudShadowOpacity.value = Math.max(0.0, Math.min(1.0, shadowOpacity));
+    }
+    if (staticUniformsDirty && u.uCloudShadowDarkenStrength) {
       const v = this.params?.cloudShadowDarkenStrength;
       u.uCloudShadowDarkenStrength.value = Number.isFinite(v) ? Math.max(0.0, v) : 1.25;
     }
-    if (u.uCloudShadowDarkenCurve) {
+    if (staticUniformsDirty && u.uCloudShadowDarkenCurve) {
       const v = this.params?.cloudShadowDarkenCurve;
       u.uCloudShadowDarkenCurve.value = Number.isFinite(v) ? Math.max(0.01, v) : 1.5;
     }
-    if (u.uCloudShadowSpecularKill) {
+    if (staticUniformsDirty && u.uCloudShadowSpecularKill) {
       const v = this.params?.cloudShadowSpecularKill;
       u.uCloudShadowSpecularKill.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
     }
-    if (u.uCloudShadowSpecularCurve) {
+    if (staticUniformsDirty && u.uCloudShadowSpecularCurve) {
       const v = this.params?.cloudShadowSpecularCurve;
       u.uCloudShadowSpecularCurve.value = Number.isFinite(v) ? Math.max(0.01, v) : 6.0;
     }
 
     // Distortion masking (shader-side)
-    if (u.uDistortionEdgeCenter) {
+    if (staticUniformsDirty && u.uDistortionEdgeCenter) {
       const v = this.params?.distortionEdgeCenter;
       u.uDistortionEdgeCenter.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.447;
     }
-    if (u.uDistortionEdgeFeather) {
+    if (staticUniformsDirty && u.uDistortionEdgeFeather) {
       const v = this.params?.distortionEdgeFeather;
       u.uDistortionEdgeFeather.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.5, v)) : 0.051;
     }
-    if (u.uDistortionEdgeGamma) {
+    if (staticUniformsDirty && u.uDistortionEdgeGamma) {
       const v = this.params?.distortionEdgeGamma;
       u.uDistortionEdgeGamma.value = Number.isFinite(v) ? Math.max(0.01, Math.min(12.0, v)) : 1.0;
     }
-    if (u.uDistortionShoreRemapLo) {
+    if (staticUniformsDirty && u.uDistortionShoreRemapLo) {
       const v = this.params?.distortionShoreRemapLo;
       u.uDistortionShoreRemapLo.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.0;
     }
-    if (u.uDistortionShoreRemapHi) {
+    if (staticUniformsDirty && u.uDistortionShoreRemapHi) {
       const v = this.params?.distortionShoreRemapHi;
       u.uDistortionShoreRemapHi.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
     }
-    if (u.uDistortionShorePow) {
+    if (staticUniformsDirty && u.uDistortionShorePow) {
       const v = this.params?.distortionShorePow;
       u.uDistortionShorePow.value = Number.isFinite(v) ? Math.max(0.01, Math.min(12.0, v)) : 1.0;
     }
-    if (u.uDistortionShoreMin) {
+    if (staticUniformsDirty && u.uDistortionShoreMin) {
       const v = this.params?.distortionShoreMin;
       u.uDistortionShoreMin.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.35;
     }
@@ -3777,166 +4017,168 @@ export class WaterEffectV2 extends EffectBase {
       precip = Math.max(0.0, Math.min(1.0, precip));
       u.uRainPrecipitation.value = precip;
 
-      if (u.uRainSplit) {
-        const v = this.params?.rainDistortionSplit;
-        u.uRainSplit.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.5;
-      }
-      if (u.uRainBlend) {
-        const v = this.params?.rainDistortionBlend;
-        u.uRainBlend.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.25, v)) : 0.25;
-      }
-      if (u.uRainGlobalStrength) {
-        const v = this.params?.rainDistortionGlobalStrength;
-        u.uRainGlobalStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(2.0, v)) : 1.14;
-      }
+      if (staticUniformsDirty) {
+        if (u.uRainSplit) {
+          const v = this.params?.rainDistortionSplit;
+          u.uRainSplit.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.5;
+        }
+        if (u.uRainBlend) {
+          const v = this.params?.rainDistortionBlend;
+          u.uRainBlend.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.25, v)) : 0.25;
+        }
+        if (u.uRainGlobalStrength) {
+          const v = this.params?.rainDistortionGlobalStrength;
+          u.uRainGlobalStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(2.0, v)) : 1.14;
+        }
 
-      // Optional indoor damping driven by _Outdoors
-      if (u.uRainIndoorDampingEnabled) {
-        u.uRainIndoorDampingEnabled.value = this.params?.rainIndoorDampingEnabled === false ? 0.0 : 1.0;
-      }
-      if (u.uRainIndoorDampingStrength) {
-        const v = this.params?.rainIndoorDampingStrength;
-        u.uRainIndoorDampingStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
-      }
+        // Optional indoor damping driven by _Outdoors
+        if (u.uRainIndoorDampingEnabled) {
+          u.uRainIndoorDampingEnabled.value = this.params?.rainIndoorDampingEnabled === false ? 0.0 : 1.0;
+        }
+        if (u.uRainIndoorDampingStrength) {
+          const v = this.params?.rainIndoorDampingStrength;
+          u.uRainIndoorDampingStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
+        }
 
-      if (u.uRainRippleStrengthPx) {
-        const v = this.params?.rainRippleStrengthPx;
-        u.uRainRippleStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, Math.min(64.0, v)) : 64.0;
-      }
-      if (u.uRainRippleScale) {
-        const v = this.params?.rainRippleScale;
-        u.uRainRippleScale.value = Number.isFinite(v) ? Math.max(1.0, v) : 269.0;
-      }
-      if (u.uRainRippleSpeed) {
-        const v = this.params?.rainRippleSpeed;
-        u.uRainRippleSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 4.26;
-      }
-      if (u.uRainRippleDensity) {
-        const v = this.params?.rainRippleDensity;
-        u.uRainRippleDensity.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
-      }
-      if (u.uRainRippleSharpness) {
-        const v = this.params?.rainRippleSharpness;
-        u.uRainRippleSharpness.value = Number.isFinite(v) ? Math.max(0.1, Math.min(5.0, v)) : 2.41;
-      }
+        if (u.uRainRippleStrengthPx) {
+          const v = this.params?.rainRippleStrengthPx;
+          u.uRainRippleStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, Math.min(64.0, v)) : 64.0;
+        }
+        if (u.uRainRippleScale) {
+          const v = this.params?.rainRippleScale;
+          u.uRainRippleScale.value = Number.isFinite(v) ? Math.max(1.0, v) : 269.0;
+        }
+        if (u.uRainRippleSpeed) {
+          const v = this.params?.rainRippleSpeed;
+          u.uRainRippleSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 4.26;
+        }
+        if (u.uRainRippleDensity) {
+          const v = this.params?.rainRippleDensity;
+          u.uRainRippleDensity.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
+        }
+        if (u.uRainRippleSharpness) {
+          const v = this.params?.rainRippleSharpness;
+          u.uRainRippleSharpness.value = Number.isFinite(v) ? Math.max(0.1, Math.min(5.0, v)) : 2.41;
+        }
 
-      if (u.uRainRippleJitter) {
-        const v = this.params?.rainRippleJitter;
-        u.uRainRippleJitter.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.35;
-      }
-      if (u.uRainRippleRadiusMin) {
-        const v = this.params?.rainRippleRadiusMin;
-        u.uRainRippleRadiusMin.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.95, v)) : 0.03;
-      }
-      if (u.uRainRippleRadiusMax) {
-        const v = this.params?.rainRippleRadiusMax;
-        u.uRainRippleRadiusMax.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.95, v)) : 0.52;
-      }
-      if (u.uRainRippleWidthScale) {
-        const v = this.params?.rainRippleWidthScale;
-        u.uRainRippleWidthScale.value = Number.isFinite(v) ? Math.max(0.05, Math.min(5.0, v)) : 1.0;
-      }
-      if (u.uRainRippleSecondaryEnabled) {
-        u.uRainRippleSecondaryEnabled.value = this.params?.rainRippleSecondaryEnabled === false ? 0.0 : 1.0;
-      }
-      if (u.uRainRippleSecondaryStrength) {
-        const v = this.params?.rainRippleSecondaryStrength;
-        u.uRainRippleSecondaryStrength.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.55;
-      }
-      if (u.uRainRippleSecondaryPhaseOffset) {
-        const v = this.params?.rainRippleSecondaryPhaseOffset;
-        u.uRainRippleSecondaryPhaseOffset.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.37;
-      }
+        if (u.uRainRippleJitter) {
+          const v = this.params?.rainRippleJitter;
+          u.uRainRippleJitter.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.35;
+        }
+        if (u.uRainRippleRadiusMin) {
+          const v = this.params?.rainRippleRadiusMin;
+          u.uRainRippleRadiusMin.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.95, v)) : 0.03;
+        }
+        if (u.uRainRippleRadiusMax) {
+          const v = this.params?.rainRippleRadiusMax;
+          u.uRainRippleRadiusMax.value = Number.isFinite(v) ? Math.max(0.0, Math.min(0.95, v)) : 0.52;
+        }
+        if (u.uRainRippleWidthScale) {
+          const v = this.params?.rainRippleWidthScale;
+          u.uRainRippleWidthScale.value = Number.isFinite(v) ? Math.max(0.05, Math.min(5.0, v)) : 1.0;
+        }
+        if (u.uRainRippleSecondaryEnabled) {
+          u.uRainRippleSecondaryEnabled.value = this.params?.rainRippleSecondaryEnabled === false ? 0.0 : 1.0;
+        }
+        if (u.uRainRippleSecondaryStrength) {
+          const v = this.params?.rainRippleSecondaryStrength;
+          u.uRainRippleSecondaryStrength.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.55;
+        }
+        if (u.uRainRippleSecondaryPhaseOffset) {
+          const v = this.params?.rainRippleSecondaryPhaseOffset;
+          u.uRainRippleSecondaryPhaseOffset.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.37;
+        }
 
-      if (u.uRainStormStrengthPx) {
-        const v = this.params?.rainStormStrengthPx;
-        u.uRainStormStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, Math.min(64.0, v)) : 52.41;
-      }
-      if (u.uRainStormScale) {
-        const v = this.params?.rainStormScale;
-        u.uRainStormScale.value = Number.isFinite(v) ? Math.max(1.0, v) : 117.0;
-      }
-      if (u.uRainStormSpeed) {
-        const v = this.params?.rainStormSpeed;
-        u.uRainStormSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 2.74;
-      }
-      if (u.uRainStormCurl) {
-        const v = this.params?.rainStormCurl;
-        u.uRainStormCurl.value = Number.isFinite(v) ? Math.max(0.0, Math.min(3.0, v)) : 0.96;
-      }
+        if (u.uRainStormStrengthPx) {
+          const v = this.params?.rainStormStrengthPx;
+          u.uRainStormStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, Math.min(64.0, v)) : 52.41;
+        }
+        if (u.uRainStormScale) {
+          const v = this.params?.rainStormScale;
+          u.uRainStormScale.value = Number.isFinite(v) ? Math.max(1.0, v) : 117.0;
+        }
+        if (u.uRainStormSpeed) {
+          const v = this.params?.rainStormSpeed;
+          u.uRainStormSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 2.74;
+        }
+        if (u.uRainStormCurl) {
+          const v = this.params?.rainStormCurl;
+          u.uRainStormCurl.value = Number.isFinite(v) ? Math.max(0.0, Math.min(3.0, v)) : 0.96;
+        }
 
-      if (u.uRainStormRateBase) {
-        const v = this.params?.rainStormRateBase;
-        u.uRainStormRateBase.value = Number.isFinite(v) ? Math.max(0.0, v) : 2.0;
-      }
-      if (u.uRainStormRateSpeedScale) {
-        const v = this.params?.rainStormRateSpeedScale;
-        u.uRainStormRateSpeedScale.value = Number.isFinite(v) ? Math.max(0.0, v) : 4.0;
-      }
-      if (u.uRainStormSizeMin) {
-        const v = this.params?.rainStormSizeMin;
-        u.uRainStormSizeMin.value = Number.isFinite(v) ? Math.max(0.001, v) : 0.07;
-      }
-      if (u.uRainStormSizeMax) {
-        const v = this.params?.rainStormSizeMax;
-        u.uRainStormSizeMax.value = Number.isFinite(v) ? Math.max(0.001, v) : 0.24;
-      }
-      if (u.uRainStormWidthMinScale) {
-        const v = this.params?.rainStormWidthMinScale;
-        u.uRainStormWidthMinScale.value = Number.isFinite(v) ? Math.max(0.001, v) : 0.10;
-      }
-      if (u.uRainStormWidthMaxScale) {
-        const v = this.params?.rainStormWidthMaxScale;
-        u.uRainStormWidthMaxScale.value = Number.isFinite(v) ? Math.max(0.001, v) : 0.22;
-      }
-      if (u.uRainStormDecay) {
-        const v = this.params?.rainStormDecay;
-        u.uRainStormDecay.value = Number.isFinite(v) ? Math.max(0.0, v) : 6.0;
-      }
-      if (u.uRainStormCoreWeight) {
-        const v = this.params?.rainStormCoreWeight;
-        u.uRainStormCoreWeight.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.65;
-      }
-      if (u.uRainStormRingWeight) {
-        const v = this.params?.rainStormRingWeight;
-        u.uRainStormRingWeight.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.95;
-      }
-      if (u.uRainStormSwirlStrength) {
-        const v = this.params?.rainStormSwirlStrength;
-        u.uRainStormSwirlStrength.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.35;
-      }
-      if (u.uRainStormMicroEnabled) {
-        u.uRainStormMicroEnabled.value = this.params?.rainStormMicroEnabled === false ? 0.0 : 1.0;
-      }
-      if (u.uRainStormMicroStrength) {
-        const v = this.params?.rainStormMicroStrength;
-        u.uRainStormMicroStrength.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.25;
-      }
-      if (u.uRainStormMicroScale) {
-        const v = this.params?.rainStormMicroScale;
-        u.uRainStormMicroScale.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.85;
-      }
-      if (u.uRainStormMicroSpeed) {
-        const v = this.params?.rainStormMicroSpeed;
-        u.uRainStormMicroSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 1.25;
-      }
+        if (u.uRainStormRateBase) {
+          const v = this.params?.rainStormRateBase;
+          u.uRainStormRateBase.value = Number.isFinite(v) ? Math.max(0.0, v) : 2.0;
+        }
+        if (u.uRainStormRateSpeedScale) {
+          const v = this.params?.rainStormRateSpeedScale;
+          u.uRainStormRateSpeedScale.value = Number.isFinite(v) ? Math.max(0.0, v) : 4.0;
+        }
+        if (u.uRainStormSizeMin) {
+          const v = this.params?.rainStormSizeMin;
+          u.uRainStormSizeMin.value = Number.isFinite(v) ? Math.max(0.001, v) : 0.07;
+        }
+        if (u.uRainStormSizeMax) {
+          const v = this.params?.rainStormSizeMax;
+          u.uRainStormSizeMax.value = Number.isFinite(v) ? Math.max(0.001, v) : 0.24;
+        }
+        if (u.uRainStormWidthMinScale) {
+          const v = this.params?.rainStormWidthMinScale;
+          u.uRainStormWidthMinScale.value = Number.isFinite(v) ? Math.max(0.001, v) : 0.10;
+        }
+        if (u.uRainStormWidthMaxScale) {
+          const v = this.params?.rainStormWidthMaxScale;
+          u.uRainStormWidthMaxScale.value = Number.isFinite(v) ? Math.max(0.001, v) : 0.22;
+        }
+        if (u.uRainStormDecay) {
+          const v = this.params?.rainStormDecay;
+          u.uRainStormDecay.value = Number.isFinite(v) ? Math.max(0.0, v) : 6.0;
+        }
+        if (u.uRainStormCoreWeight) {
+          const v = this.params?.rainStormCoreWeight;
+          u.uRainStormCoreWeight.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.65;
+        }
+        if (u.uRainStormRingWeight) {
+          const v = this.params?.rainStormRingWeight;
+          u.uRainStormRingWeight.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.95;
+        }
+        if (u.uRainStormSwirlStrength) {
+          const v = this.params?.rainStormSwirlStrength;
+          u.uRainStormSwirlStrength.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.35;
+        }
+        if (u.uRainStormMicroEnabled) {
+          u.uRainStormMicroEnabled.value = this.params?.rainStormMicroEnabled === false ? 0.0 : 1.0;
+        }
+        if (u.uRainStormMicroStrength) {
+          const v = this.params?.rainStormMicroStrength;
+          u.uRainStormMicroStrength.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.25;
+        }
+        if (u.uRainStormMicroScale) {
+          const v = this.params?.rainStormMicroScale;
+          u.uRainStormMicroScale.value = Number.isFinite(v) ? Math.max(0.0, v) : 0.85;
+        }
+        if (u.uRainStormMicroSpeed) {
+          const v = this.params?.rainStormMicroSpeed;
+          u.uRainStormMicroSpeed.value = Number.isFinite(v) ? Math.max(0.0, v) : 1.25;
+        }
 
-      if (u.uRainMaxCombinedStrengthPx) {
-        const v = this.params?.rainMaxCombinedStrengthPx;
-        u.uRainMaxCombinedStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, Math.min(64.0, v)) : 45.4;
+        if (u.uRainMaxCombinedStrengthPx) {
+          const v = this.params?.rainMaxCombinedStrengthPx;
+          u.uRainMaxCombinedStrengthPx.value = Number.isFinite(v) ? Math.max(0.0, Math.min(64.0, v)) : 45.4;
+        }
       }
     }
 
-    if (u.uWaveDirOffsetRad) {
+    if (staticUniformsDirty && u.uWaveDirOffsetRad) {
       const deg = Number.isFinite(this.params?.waveDirOffsetDeg) ? this.params.waveDirOffsetDeg : 0.0;
       u.uWaveDirOffsetRad.value = (deg * Math.PI) / 180.0;
     }
 
-    if (u.uLockWaveTravelToWind) {
+    if (staticUniformsDirty && u.uLockWaveTravelToWind) {
       u.uLockWaveTravelToWind.value = this.params?.lockWaveTravelToWind === false ? 0.0 : 1.0;
     }
 
-    if (u.uWaveAppearanceRotRad) {
+    if (staticUniformsDirty && u.uWaveAppearanceRotRad) {
       const deg = Number.isFinite(this.params?.waveAppearanceOffsetDeg) ? this.params.waveAppearanceOffsetDeg : 0.0;
       u.uWaveAppearanceRotRad.value = (deg * Math.PI) / 180.0;
     }
@@ -3998,12 +4240,17 @@ export class WaterEffectV2 extends EffectBase {
           const baseDxF = (this._smoothedWindDir?.x ?? nx);
           const baseDyF = (this._smoothedWindDir?.y ?? ny);
           const adDeg = Number.isFinite(this.params?.advectionDirOffsetDeg) ? this.params.advectionDirOffsetDeg : 0.0;
-          const adRad = (adDeg * Math.PI) / 180.0;
+          if (this._cachedAdvectionDirOffsetDeg !== adDeg) {
+            const adRad = (adDeg * Math.PI) / 180.0;
+            this._cachedAdvectionDirCos = Math.cos(adRad);
+            this._cachedAdvectionDirSin = Math.sin(adRad);
+            this._cachedAdvectionDirOffsetDeg = adDeg;
+          }
 
           // Keep advection in the same basis as sceneUv (Foundry sceneRect UVs, Y-down).
           // Any Y-up conversions for wave math happen later in the shader.
-          const cs = Math.cos(adRad);
-          const sn = Math.sin(adRad);
+          const cs = this._cachedAdvectionDirCos;
+          const sn = this._cachedAdvectionDirSin;
           const dx = cs * baseDxF - sn * baseDyF;
           const dy = sn * baseDxF + cs * baseDyF;
 
@@ -4046,74 +4293,85 @@ export class WaterEffectV2 extends EffectBase {
       u.uWindTime.value = this._windTime;
     }
 
-    const specStrength = this.params?.specStrength;
-    u.uSpecStrength.value = Number.isFinite(specStrength) ? specStrength : 0.25;
-    const specPower = this.params?.specPower;
-    u.uSpecPower.value = Number.isFinite(specPower) ? specPower : 3.0;
+    if (staticUniformsDirty) {
+      const specStrength = this.params?.specStrength;
+      u.uSpecStrength.value = Number.isFinite(specStrength) ? specStrength : 0.25;
+      const specPower = this.params?.specPower;
+      u.uSpecPower.value = Number.isFinite(specPower) ? specPower : 3.0;
+    }
 
     // Specular (Advanced)
-    if (u.uSpecSunDir && THREE) {
+    if (staticUniformsDirty && u.uSpecSunDir && THREE) {
       const azDeg = Number.isFinite(this.params?.specSunAzimuthDeg) ? this.params.specSunAzimuthDeg : 225.0;
       const elDeg = Number.isFinite(this.params?.specSunElevationDeg) ? this.params.specSunElevationDeg : 65.0;
-      const az = (azDeg * Math.PI) / 180.0;
-      const el = (Math.max(0.0, Math.min(89.999, elDeg)) * Math.PI) / 180.0;
+      const clampedElDeg = Math.max(0.0, Math.min(89.999, elDeg));
+      if (this._cachedSpecSunAzimuthDeg !== azDeg || this._cachedSpecSunElevationDeg !== clampedElDeg) {
+        const az = (azDeg * Math.PI) / 180.0;
+        const el = (clampedElDeg * Math.PI) / 180.0;
 
-      // Interpret azimuth in Foundry-like screen/world basis (Y-down), then convert
-      // to shader basis (Y-up) by flipping Y.
-      const cEl = Math.cos(el);
-      const sx = Math.cos(az) * cEl;
-      const sy = -Math.sin(az) * cEl;
-      const sz = Math.sin(el);
-      u.uSpecSunDir.value.set(sx, sy, sz);
+        // Interpret azimuth in Foundry-like screen/world basis (Y-down), then convert
+        // to shader basis (Y-up) by flipping Y.
+        const cEl = Math.cos(el);
+        this._cachedSpecSunDirX = Math.cos(az) * cEl;
+        this._cachedSpecSunDirY = -Math.sin(az) * cEl;
+        this._cachedSpecSunDirZ = Math.sin(el);
+        this._cachedSpecSunAzimuthDeg = azDeg;
+        this._cachedSpecSunElevationDeg = clampedElDeg;
+      }
+      u.uSpecSunDir.value.set(this._cachedSpecSunDirX, this._cachedSpecSunDirY, this._cachedSpecSunDirZ);
     }
-    if (u.uSpecSunIntensity) {
+    if (staticUniformsDirty && u.uSpecSunIntensity) {
       const v = this.params?.specSunIntensity;
       u.uSpecSunIntensity.value = Number.isFinite(v) ? Math.max(0.0, Math.min(10.0, v)) : 1.0;
     }
-    if (u.uSpecNormalStrength) {
+    if (staticUniformsDirty && u.uSpecNormalStrength) {
       const v = this.params?.specNormalStrength;
       u.uSpecNormalStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(10.0, v)) : 1.0;
     }
-    if (u.uSpecNormalScale) {
+    if (staticUniformsDirty && u.uSpecNormalScale) {
       const v = this.params?.specNormalScale;
       u.uSpecNormalScale.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.03;
     }
-    if (u.uSpecRoughnessMin) {
+    if (staticUniformsDirty && u.uSpecRoughnessMin) {
       const v = this.params?.specRoughnessMin;
       u.uSpecRoughnessMin.value = Number.isFinite(v) ? Math.max(0.001, Math.min(1.0, v)) : 0.02;
     }
-    if (u.uSpecRoughnessMax) {
+    if (staticUniformsDirty && u.uSpecRoughnessMax) {
       const v = this.params?.specRoughnessMax;
       u.uSpecRoughnessMax.value = Number.isFinite(v) ? Math.max(0.001, Math.min(1.0, v)) : 0.25;
     }
-    if (u.uSpecF0) {
+    if (staticUniformsDirty && u.uSpecF0) {
       const v = this.params?.specF0;
       u.uSpecF0.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.02;
     }
-    if (u.uSpecMaskGamma) {
+    if (staticUniformsDirty && u.uSpecMaskGamma) {
       const v = this.params?.specMaskGamma;
       u.uSpecMaskGamma.value = Number.isFinite(v) ? Math.max(0.05, Math.min(12.0, v)) : 1.0;
     }
-    if (u.uSpecSkyTint) {
+    if (staticUniformsDirty && u.uSpecSkyTint) {
       const v = this.params?.specSkyTint;
       u.uSpecSkyTint.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 1.0;
     }
-    if (u.uSpecShoreBias) {
+    if (staticUniformsDirty && u.uSpecShoreBias) {
       const v = this.params?.specShoreBias;
       u.uSpecShoreBias.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.35;
     }
 
-    if (u.uSpecDistortionNormalStrength) {
+    if (staticUniformsDirty && u.uSpecDistortionNormalStrength) {
       const v = this.params?.specDistortionNormalStrength;
       u.uSpecDistortionNormalStrength.value = Number.isFinite(v) ? Math.max(0.0, Math.min(5.0, v)) : 0.35;
     }
-    if (u.uSpecAnisotropy) {
+    if (staticUniformsDirty && u.uSpecAnisotropy) {
       const v = this.params?.specAnisotropy;
       u.uSpecAnisotropy.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.35;
     }
-    if (u.uSpecAnisoRatio) {
+    if (staticUniformsDirty && u.uSpecAnisoRatio) {
       const v = this.params?.specAnisoRatio;
       u.uSpecAnisoRatio.value = Number.isFinite(v) ? Math.max(1.0, Math.min(16.0, v)) : 3.0;
+    }
+
+    if (staticUniformsDirty) {
+      this._paramsDirty = false;
     }
 
     this._rebuildWaterDataIfNeeded(false);

@@ -15,10 +15,48 @@ function _isMissing(value) {
 }
 
 /**
+ * Read the currently selected Levels UI range when the Levels range UI is active.
+ *
+ * This keeps create-default seeding aligned with users who are navigating floors
+ * through the Levels module UI instead of MapShine's level navigator.
+ *
+ * @returns {{bottom:number, top:number, center:number}|null}
+ */
+function _getLevelsUiActiveBand() {
+  const levelsUi = globalThis.CONFIG?.Levels?.UI;
+  if (!levelsUi || levelsUi.rangeEnabled !== true) return null;
+
+  const range = levelsUi.range;
+  if (!Array.isArray(range) || range.length < 2) return null;
+
+  let bottom = Number(range[0]);
+  let top = Number(range[1]);
+  if (!Number.isFinite(bottom) || !Number.isFinite(top)) return null;
+
+  if (top < bottom) {
+    const swap = bottom;
+    bottom = top;
+    top = swap;
+  }
+
+  return {
+    bottom,
+    top,
+    center: (bottom + top) * 0.5,
+  };
+}
+
+/**
  * Read a finite active level band from runtime context.
  * @returns {{bottom:number, top:number, center:number}|null}
  */
 export function getFiniteActiveLevelBand() {
+  // Prefer Levels UI range when active, then fall back to MapShine context.
+  // This ensures floor-scoped wall defaults work regardless of which floor UI
+  // the user is currently driving.
+  const levelsUiBand = _getLevelsUiActiveBand();
+  if (levelsUiBand) return levelsUiBand;
+
   const ctx = window.MapShine?.activeLevelContext;
   let bottom = Number(ctx?.bottom);
   let top = Number(ctx?.top);
@@ -40,10 +78,27 @@ export function getFiniteActiveLevelBand() {
 /**
  * Should active-level create defaults be applied for this scene?
  * @param {Scene|null|undefined} [scene]
+ * @param {{allowWhenModeOff?: boolean}} [options]
  * @returns {boolean}
  */
-export function shouldApplyLevelCreateDefaults(scene = canvas?.scene) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
+export function shouldApplyLevelCreateDefaults(scene = canvas?.scene, options = {}) {
+  const { allowWhenModeOff = false } = options;
+  if (!allowWhenModeOff && getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
+
+  // If Levels' own range UI is active, respect it regardless of scene-flag
+  // completeness. This matches the user's explicit floor-selection intent.
+  if (_getLevelsUiActiveBand()) return true;
+
+  // If MapShine has an active multi-level context, allow default seeding even
+  // when a scene's Levels flags are sparse or inferred at runtime.
+  const mapShineCtx = window.MapShine?.activeLevelContext;
+  const mapShineLevelCount = Number(mapShineCtx?.count ?? 0);
+  if (Number.isFinite(mapShineLevelCount) && mapShineLevelCount > 1) return true;
+
+  // Fallback: if an explicit finite active band exists, honor it even when
+  // count metadata is unavailable.
+  if (getFiniteActiveLevelBand()) return true;
+
   if (!scene) return false;
   return isLevelsEnabledForScene(scene);
 }
@@ -59,7 +114,9 @@ export function applyWallLevelDefaults(data, options = {}) {
   if (!data || typeof data !== 'object') return data;
 
   const scene = options.scene ?? canvas?.scene;
-  if (!shouldApplyLevelCreateDefaults(scene)) return data;
+  // Wall-height scoping should keep working even when compatibility mode is
+  // OFF, as long as we have an explicit active floor context.
+  if (!shouldApplyLevelCreateDefaults(scene, { allowWhenModeOff: true })) return data;
 
   const band = getFiniteActiveLevelBand();
   if (!band) return data;

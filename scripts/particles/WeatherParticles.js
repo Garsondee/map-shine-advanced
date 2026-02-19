@@ -3428,6 +3428,9 @@ export class WeatherParticles {
       tWaterOccluderAlpha: { value: null },
       uHasWaterOccluderAlpha: { value: 0.0 }
       ,
+      // Screen-space cloud shadow factor from CloudEffect (1.0=lit, 0.0=shadowed)
+      tCloudShadow: { value: null },
+      uHasCloudShadow: { value: 0.0 },
       // Foam plume post-alpha shaping (foam.webp only)
       uFoamAdditiveBoost: { value: 1.0 },
       uFoamRadialEnabled: { value: 0.0 },
@@ -3464,6 +3467,8 @@ export class WeatherParticles {
     // (We reuse material.userData.roofUniforms to keep this patcher idempotent.)
     if (!uniforms.tWaterOccluderAlpha) uniforms.tWaterOccluderAlpha = { value: null };
     if (!uniforms.uHasWaterOccluderAlpha) uniforms.uHasWaterOccluderAlpha = { value: 0.0 };
+    if (!uniforms.tCloudShadow) uniforms.tCloudShadow = { value: null };
+    if (!uniforms.uHasCloudShadow) uniforms.uHasCloudShadow = { value: 0.0 };
     if (!uniforms.uFoamAdditiveBoost) uniforms.uFoamAdditiveBoost = { value: 1.0 };
     if (!uniforms.uFoamRadialEnabled) uniforms.uFoamRadialEnabled = { value: 0.0 };
     if (!uniforms.uFoamRadialInnerPos) uniforms.uFoamRadialInnerPos = { value: 0.0 };
@@ -3576,6 +3581,8 @@ export class WeatherParticles {
     const isFoamPlume = material.userData?.msFoamPlume === true;
     const foamMarker = 'MS_FOAM_PLUME_ALPHA';
     const foamUniformsCode =
+      'uniform sampler2D tCloudShadow;\n' +
+      'uniform float uHasCloudShadow;\n' +
       'uniform float uFoamAdditiveBoost;\n' +
       'uniform float uFoamRadialEnabled;\n' +
       'uniform float uFoamRadialInnerPos;\n' +
@@ -3686,6 +3693,14 @@ export class WeatherParticles {
     const foamAlphaCode =
       '  // ' + foamMarker + '\n' +
       '  {\n' +
+      '    // Darken foam under CloudEffect shadowing (screen-space).\n' +
+      '    if (uHasCloudShadow > 0.5) {\n' +
+      '      vec2 cloudUv = gl_FragCoord.xy / uScreenSize;\n' +
+      '      float cloudLit = clamp(texture2D(tCloudShadow, cloudUv).r, 0.0, 1.0);\n' +
+      '      gl_FragColor.rgb *= cloudLit;\n' +
+      '      gl_FragColor.a *= cloudLit;\n' +
+      '    }\n' +
+      '    \n' +
       '    // Additive strength boost (used to compensate for low per-particle opacity)\n' +
       '    // NOTE: this is only intended for foam.webp plume particles.\n' +
       '    gl_FragColor.a *= max(0.0, uFoamAdditiveBoost);\n' +
@@ -3727,6 +3742,8 @@ export class WeatherParticles {
       uni.uWaterMaskFlipY = uniforms.uWaterMaskFlipY;
       uni.tWaterOccluderAlpha = uniforms.tWaterOccluderAlpha;
       uni.uHasWaterOccluderAlpha = uniforms.uHasWaterOccluderAlpha;
+      uni.tCloudShadow = uniforms.tCloudShadow;
+      uni.uHasCloudShadow = uniforms.uHasCloudShadow;
       uni.uFoamAdditiveBoost = uniforms.uFoamAdditiveBoost;
       uni.uFoamRadialEnabled = uniforms.uFoamRadialEnabled;
       uni.uFoamRadialInnerPos = uniforms.uFoamRadialInnerPos;
@@ -3910,6 +3927,8 @@ export class WeatherParticles {
       shader.uniforms.uWaterMaskFlipY = uniforms.uWaterMaskFlipY;
       shader.uniforms.tWaterOccluderAlpha = uniforms.tWaterOccluderAlpha;
       shader.uniforms.uHasWaterOccluderAlpha = uniforms.uHasWaterOccluderAlpha;
+      shader.uniforms.tCloudShadow = uniforms.tCloudShadow;
+      shader.uniforms.uHasCloudShadow = uniforms.uHasCloudShadow;
       shader.uniforms.uFoamAdditiveBoost = uniforms.uFoamAdditiveBoost;
       shader.uniforms.uFoamRadialEnabled = uniforms.uFoamRadialEnabled;
       shader.uniforms.uFoamRadialInnerPos = uniforms.uFoamRadialInnerPos;
@@ -4753,6 +4772,18 @@ export class WeatherParticles {
     }
     const hasRoofAlphaMap = !!roofAlphaTexture;
 
+    let cloudShadowTexture = null;
+    try {
+      const mm = window.MapShine?.maskManager;
+      cloudShadowTexture = mm ? mm.getTexture('cloudShadow.screen') : null;
+      if (!cloudShadowTexture) {
+        const cloud = window.MapShine?.cloudEffect;
+        cloudShadowTexture = cloud?.cloudShadowTarget?.texture || null;
+      }
+    } catch (_) {
+      cloudShadowTexture = null;
+    }
+
     // DIAGNOSTIC: allow disabling the precipitation roof/outdoors masking at runtime.
     // Toggle via console: window.MapShine.disableWeatherRoofMask = true/false
     // This helps A/B test whether the mask sampling/discard path is a major GPU cost.
@@ -5590,6 +5621,10 @@ export class WeatherParticles {
         u.tWaterOccluderAlpha.value = waterOccTex;
         u.uHasWaterOccluderAlpha.value = waterOccTex ? 1.0 : 0.0;
       }
+      if (u.uHasCloudShadow && u.tCloudShadow) {
+        u.tCloudShadow.value = cloudShadowTexture;
+        u.uHasCloudShadow.value = cloudShadowTexture ? 1.0 : 0.0;
+      }
     }
 
     if (this._foamBatchMaterial && this._foamBatchMaterial.userData && this._foamBatchMaterial.userData.roofUniforms) {
@@ -5610,6 +5645,10 @@ export class WeatherParticles {
         u.tWaterOccluderAlpha.value = waterOccTex;
         u.uHasWaterOccluderAlpha.value = waterOccTex ? 1.0 : 0.0;
       }
+      if (u.uHasCloudShadow && u.tCloudShadow) {
+        u.tCloudShadow.value = cloudShadowTexture;
+        u.uHasCloudShadow.value = cloudShadowTexture ? 1.0 : 0.0;
+      }
 
       // Quarks may rebuild ShaderMaterial.uniforms; also drive the live ShaderMaterial uniforms directly.
       const smu = this._foamBatchMaterial.uniforms;
@@ -5628,6 +5667,8 @@ export class WeatherParticles {
 
         if (smu.tWaterOccluderAlpha && u.tWaterOccluderAlpha) smu.tWaterOccluderAlpha.value = u.tWaterOccluderAlpha.value;
         if (smu.uHasWaterOccluderAlpha && u.uHasWaterOccluderAlpha) smu.uHasWaterOccluderAlpha.value = u.uHasWaterOccluderAlpha.value;
+        if (smu.tCloudShadow && u.tCloudShadow) smu.tCloudShadow.value = u.tCloudShadow.value;
+        if (smu.uHasCloudShadow && u.uHasCloudShadow) smu.uHasCloudShadow.value = u.uHasCloudShadow.value;
 
         if (smu.uFoamCurlDisplaceEnabled && u.uFoamCurlDisplaceEnabled) smu.uFoamCurlDisplaceEnabled.value = u.uFoamCurlDisplaceEnabled.value;
         if (smu.uFoamCurlDisplaceUv && u.uFoamCurlDisplaceUv) smu.uFoamCurlDisplaceUv.value = u.uFoamCurlDisplaceUv.value;

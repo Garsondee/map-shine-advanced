@@ -18,6 +18,7 @@ import { EffectBase, RenderLayers, OVERLAY_THREE_LAYER } from './EffectComposer.
 import { createLogger } from '../core/log.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
 import { VisionSDF } from '../vision/VisionSDF.js';
+import { VisionPolygonComputer } from '../vision/VisionPolygonComputer.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
 import { isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange } from '../foundry/levels-scene-flags.js';
@@ -161,6 +162,10 @@ export class WorldSpaceFogEffect extends EffectBase {
     this._visionSDF = null;
     this._loggedSDFState = false;
     this._sdfUpdateFailed = false;
+
+    // Elevation-aware LOS polygon computer used for fog vision rendering.
+    // This gives us explicit wall-height filtering in levels-enabled scenes.
+    this._visionPolygonComputer = new VisionPolygonComputer();
 
     // MS-LVL-060: Elevation band tracking for per-floor fog exploration.
     // When the active elevation band changes (e.g. navigating to a different
@@ -1210,6 +1215,14 @@ export class WorldSpaceFogEffect extends EffectBase {
     const globalIllumActive = this._isGlobalIlluminationActive();
     this._visionIsFullSceneFallback = false;
 
+    const levelsActive = getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
+      && isLevelsEnabledForScene(canvas?.scene);
+    const levelWalls = levelsActive ? (canvas?.walls?.placeables ?? []) : null;
+    const sceneRect = canvas?.dimensions?.sceneRect;
+    const sceneBounds = sceneRect
+      ? { x: sceneRect.x, y: sceneRect.y, width: sceneRect.width, height: sceneRect.height }
+      : null;
+
     // Categorize tokens into three groups:
     // - tokensWithValidLOS: have a vision source with a valid polygon
     // - tokensWaitingForLOS: have sight enabled and a vision source, but LOS hasn't computed yet
@@ -1222,6 +1235,22 @@ export class WorldSpaceFogEffect extends EffectBase {
     for (const token of controlledTokens) {
       const visionSource = token.vision;
       const hasSight = token.document?.sight?.enabled ?? false;
+
+      // MS-LVL-120: In levels-enabled scenes, compute token LOS polygon with
+      // explicit elevation-aware wall filtering for fog rendering.
+      // Keep Foundry polygon fallback for non-levels scenes and non-360 cones.
+      if (levelsActive && hasSight) {
+        const sightAngle = Number(token.document?.sight?.angle ?? 360);
+        const useCustomLevelsPolygon = !Number.isFinite(sightAngle) || sightAngle >= 360;
+        if (useCustomLevelsPolygon) {
+          const customPoints = this._computeTokenVisionPolygonPoints(token, levelWalls, sceneBounds);
+          if (customPoints && customPoints.length >= 6) {
+            this._addPolygonPointsToVisionScene(customPoints, THREE);
+            polygonsRendered++;
+            continue;
+          }
+        }
+      }
 
       // Token has no vision source at all. If sight isn't enabled on the
       // token, this is expected — skip it without triggering retries.
@@ -1268,19 +1297,7 @@ export class WorldSpaceFogEffect extends EffectBase {
       // Valid LOS polygon — always use it, regardless of global illumination.
       // Global illumination affects lighting, not wall occlusion.
       const points = shape.points;
-      const threeShape = new THREE.Shape();
-      const offsetX = this.sceneRect.x;
-      const offsetY = this.sceneRect.y;
-
-      threeShape.moveTo(points[0] - offsetX, points[1] - offsetY);
-      for (let i = 2; i < points.length; i += 2) {
-        threeShape.lineTo(points[i] - offsetX, points[i + 1] - offsetY);
-      }
-      threeShape.closePath();
-
-      const geometry = new THREE.ShapeGeometry(threeShape);
-      const mesh = new THREE.Mesh(geometry, this.visionMaterial);
-      this.visionScene.add(mesh);
+      this._addPolygonPointsToVisionScene(points, THREE);
       polygonsRendered++;
     }
 
@@ -1589,6 +1606,120 @@ export class WorldSpaceFogEffect extends EffectBase {
     const geometry = new THREE.ShapeGeometry(fullShape);
     const mesh = new THREE.Mesh(geometry, this.visionMaterial);
     this.visionScene.add(mesh);
+  }
+
+  /**
+   * Add a flat [x,y,...] polygon to the vision scene in scene-local space.
+   * @param {number[]} points
+   * @param {object} THREE
+   * @private
+   */
+  _addPolygonPointsToVisionScene(points, THREE) {
+    if (!Array.isArray(points) || points.length < 6) return;
+
+    const threeShape = new THREE.Shape();
+    const offsetX = this.sceneRect.x;
+    const offsetY = this.sceneRect.y;
+
+    threeShape.moveTo(points[0] - offsetX, points[1] - offsetY);
+    for (let i = 2; i < points.length; i += 2) {
+      threeShape.lineTo(points[i] - offsetX, points[i + 1] - offsetY);
+    }
+    threeShape.closePath();
+
+    const geometry = new THREE.ShapeGeometry(threeShape);
+    const mesh = new THREE.Mesh(geometry, this.visionMaterial);
+    this.visionScene.add(mesh);
+  }
+
+  /**
+   * Compute a token LOS polygon using VisionPolygonComputer.
+   * This path is elevation-aware via wall-height filtering.
+   *
+   * @param {Token} token
+   * @param {Wall[]} walls
+   * @param {{x:number,y:number,width:number,height:number}|null} sceneBounds
+   * @returns {number[]|null}
+   * @private
+   */
+  _computeTokenVisionPolygonPoints(token, walls, sceneBounds) {
+    try {
+      const doc = token?.document;
+      if (!doc) return null;
+
+      // Prefer the active vision source radius when available.
+      let radiusPixels = Number(
+        token?.vision?.radius
+        ?? token?.vision?.data?.radius
+        ?? token?.vision?._radius
+        ?? 0
+      );
+
+      // Use system adapter vision radius for systems where doc.sight.range is
+      // not authoritative (e.g. PF2e often stores unlimited vision as range=0).
+      if (!(radiusPixels > 0)) {
+        try {
+          const gsm = window.MapShine?.gameSystem;
+          const distRadius = Number(gsm?.getTokenVisionRadius?.(token) ?? 0);
+          if (distRadius > 0) {
+            const px = Number(gsm?.distanceToPixels?.(distRadius) ?? 0);
+            if (px > 0 && Number.isFinite(px)) radiusPixels = px;
+          }
+        } catch (_) {
+          // Keep fallback chain below.
+        }
+      }
+
+      if (!(radiusPixels > 0)) {
+        const sightRange = Number(doc?.sight?.range ?? token?.sightRange ?? 0);
+        const distance = Number(canvas?.dimensions?.distance ?? 0);
+        const size = Number(canvas?.dimensions?.size ?? 0);
+        if (sightRange > 0 && distance > 0 && size > 0) {
+          radiusPixels = (sightRange / distance) * size;
+        }
+      }
+
+      // Final fallback for implicit/unlimited vision: use scene diagonal so we
+      // still compute a custom levels-aware polygon instead of falling back to
+      // Foundry LOS polygons that may include cross-floor blockers.
+      if (!(radiusPixels > 0)) {
+        const rect = canvas?.dimensions?.sceneRect;
+        const width = Number(rect?.width ?? canvas?.dimensions?.width ?? 0);
+        const height = Number(rect?.height ?? canvas?.dimensions?.height ?? 0);
+        if (width > 0 && height > 0) {
+          radiusPixels = Math.hypot(width, height);
+        }
+      }
+
+      if (!(radiusPixels > 0) || !Number.isFinite(radiusPixels)) return null;
+
+      let centerX = Number(token?.center?.x);
+      let centerY = Number(token?.center?.y);
+      if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) {
+        const gridSize = Number(canvas?.dimensions?.size ?? 100);
+        const tokenWidth = Number(doc.width ?? 1) * gridSize;
+        const tokenHeight = Number(doc.height ?? 1) * gridSize;
+        centerX = Number(doc.x ?? 0) + tokenWidth * 0.5;
+        centerY = Number(doc.y ?? 0) + tokenHeight * 0.5;
+      }
+
+      const viewerElevation = Number(token?.losHeight ?? doc?.elevation ?? 0);
+      const options = Number.isFinite(viewerElevation)
+        ? { sense: 'sight', elevation: viewerElevation }
+        : { sense: 'sight' };
+
+      const computed = this._visionPolygonComputer.compute(
+        { x: centerX, y: centerY },
+        radiusPixels,
+        walls,
+        sceneBounds,
+        options
+      );
+
+      return Array.isArray(computed) && computed.length >= 6 ? computed : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   /**

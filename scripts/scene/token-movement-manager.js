@@ -14,6 +14,7 @@
 
 import { createLogger } from '../core/log.js';
 import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
+import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 
 const log = createLogger('TokenMovementManager');
 
@@ -4129,7 +4130,7 @@ export class TokenMovementManager {
 
     const tokenObj = context.tokenDoc?.object || canvas?.tokens?.get?.(context.tokenDoc?.id) || null;
     const polygonBackends = CONFIG?.Canvas?.polygonBackends;
-    const collisionElevation = asNumber(context.tokenDoc?.elevation, asNumber(tokenObj?.document?.elevation, 0));
+    const collisionElevation = this._resolveCollisionElevation(context, tokenObj);
     const rayA = { x: asNumber(from?.x, 0), y: asNumber(from?.y, 0), elevation: collisionElevation };
     const rayB = { x: asNumber(to?.x, 0), y: asNumber(to?.y, 0), elevation: collisionElevation };
 
@@ -4220,6 +4221,38 @@ export class TokenMovementManager {
     }
 
     return { ok: true };
+  }
+
+  /**
+   * Resolve the elevation used for wall collision tests.
+   *
+   * In multi-level scenes, movement collision must follow the current
+   * perspective context to avoid walls from non-active floors blocking routes.
+   *
+   * @param {object} context
+   * @param {Token|null} tokenObj
+   * @returns {number}
+   */
+  _resolveCollisionElevation(context, tokenObj) {
+    const tokenDoc = context?.tokenDoc ?? tokenObj?.document ?? null;
+    const tokenId = String(tokenDoc?.id ?? tokenObj?.id ?? '');
+    const docElevation = asNumber(tokenDoc?.elevation, asNumber(tokenObj?.document?.elevation, 0));
+
+    const perspective = getPerspectiveElevation();
+    const perspectiveElevation = Number(perspective?.elevation);
+    if (!Number.isFinite(perspectiveElevation)) return docElevation;
+
+    // Manual floor navigation should force collision checks to that level.
+    if (perspective?.source === 'active-level') return perspectiveElevation;
+
+    // When perspective is driven by a controlled token, apply it only to that
+    // token's collision checks.
+    const perspectiveTokenId = perspective?.tokenId ? String(perspective.tokenId) : '';
+    if (perspectiveTokenId && tokenId && perspectiveTokenId === tokenId) {
+      return perspectiveElevation;
+    }
+
+    return docElevation;
   }
 
   /**

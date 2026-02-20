@@ -37,16 +37,16 @@ const DEFAULT_POLICIES = {
   water:        { preserveAcrossFloors: true,  disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'lighten',     resolutionClass: 'data'   },
   fire:         { preserveAcrossFloors: false, disposeOnClear: true,  recomposeOnTileChange: true,  compositionMode: 'lighten',     resolutionClass: 'data'   },
   outdoors:     { preserveAcrossFloors: false, disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'source-over', resolutionClass: 'data'   },
-  windows:      { preserveAcrossFloors: false, disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'source-over', resolutionClass: 'data'   },
-  specular:     { preserveAcrossFloors: false, disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'source-over', resolutionClass: 'visual' },
-  normal:       { preserveAcrossFloors: false, disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'source-over', resolutionClass: 'visual' },
+  windows:      { preserveAcrossFloors: true,  disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'source-over', resolutionClass: 'data'   },
+  specular:     { preserveAcrossFloors: true,  disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'source-over', resolutionClass: 'visual' },
+  normal:       { preserveAcrossFloors: true,  disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'source-over', resolutionClass: 'visual' },
   tree:         { preserveAcrossFloors: false, disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'source-over', resolutionClass: 'color'  },
   bush:         { preserveAcrossFloors: false, disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'source-over', resolutionClass: 'color'  },
   dust:         { preserveAcrossFloors: false, disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'lighten',     resolutionClass: 'data'   },
   ash:          { preserveAcrossFloors: false, disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'lighten',     resolutionClass: 'data'   },
   iridescence:  { preserveAcrossFloors: false, disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'source-over', resolutionClass: 'data'   },
   prism:        { preserveAcrossFloors: false, disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'source-over', resolutionClass: 'data'   },
-  roughness:    { preserveAcrossFloors: false, disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'source-over', resolutionClass: 'visual' },
+  roughness:    { preserveAcrossFloors: true,  disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'source-over', resolutionClass: 'visual' },
   fluid:        { preserveAcrossFloors: false, disposeOnClear: false, recomposeOnTileChange: true,  compositionMode: 'source-over', resolutionClass: 'data'   },
 };
 
@@ -430,7 +430,7 @@ export class EffectMaskRegistry {
     this._metrics.transitionCount++;
     this._metrics.lastTransitionMs = elapsed;
 
-    log.info('transitionToFloor complete', {
+    log.warn('[FloorDiag] transitionToFloor complete', {
       floorKey,
       prevFloorKey,
       actions: Object.fromEntries(actions),

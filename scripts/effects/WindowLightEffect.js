@@ -1380,7 +1380,13 @@ export class WindowLightEffect extends EffectBase {
     };
 
     this._registryUnsubs.push(
-      registry.subscribe('windows', (texture) => {
+      registry.subscribe('windows', (texture, floorKey) => {
+        const log2 = window.MapShine?._log ?? console;
+        console.warn('[WinDiag] windows subscriber fired', {
+          hasTexture: !!texture, floorKey,
+          enabled: this.enabled, hasMesh: !!this.mesh,
+          hasWindowMask: this.params.hasWindowMask
+        });
         this.windowMask = texture;
         this.params.hasWindowMask = !!texture;
         if (!texture) {

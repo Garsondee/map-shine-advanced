@@ -153,11 +153,19 @@ const TILE_FRAG = /* glsl */`
     vec4 s = texture2D(tMask, vTileUv);
 
     if (uMode == 0) {
-      // Lighten: output luminance in all channels so MAX blending works.
+      // Lighten: output RGB luminance in all channels so MAX blending works.
+      // Do NOT include alpha — some tiles (e.g. upper-floor _Water) use alpha
+      // as a floor-boundary cutout with black RGB. Including alpha would make
+      // those tiles appear as valid water masks, overriding the preserved
+      // ground-floor water. Water coverage is always encoded in RGB.
       float lum = max(s.r, max(s.g, s.b));
       gl_FragColor = vec4(lum, lum, lum, lum);
     } else {
-      // Source-over: output full RGBA.
+      // Source-over: output full RGBA as-is.
+      // Do NOT promote alpha into RGB — upper-floor tiles use alpha as a
+      // floor-boundary cutout with black RGB. Promoting it would make the
+      // entire floor appear as outdoors/windows. The 4x4 readback (RGB-only)
+      // will correctly detect these as empty and trigger preserveAcrossFloors.
       gl_FragColor = s;
     }
   }
@@ -197,15 +205,16 @@ export class GpuSceneMaskCompositor {
     this._outputDims = new Map();
 
     /**
-     * Most recent active floor key (used for getCpuPixels lookups).
+     * Floor key of the currently active floor ("${bottom}:${top}").
+     * Used by getCpuPixels lookups and to detect actual floor changes so
+     * masksChanged is true whenever the floor key changes, regardless of
+     * whether basePath is the same.
      * @type {string|null}
      */
     this._activeFloorKey = null;
 
     /**
      * BasePath of the tile whose masks are currently active.
-     * Used to detect whether masks actually changed on a floor switch
-     * so callers can skip expensive effect redistribution.
      * @type {string|null}
      */
     this._activeFloorBasePath = null;
@@ -426,13 +435,33 @@ export class GpuSceneMaskCompositor {
     // Fast path: floor already composited — return cached metadata.
     const cached = this._floorMeta.get(floorKey);
     if (cached?.masks?.length) {
+      // Strip preserveAcrossFloors mask types from cached entries. These masks
+      // belong to a different floor's registry slot and must never be included in
+      // the new floor's mask set — doing so would trigger a replace action in
+      // transitionToFloor instead of the correct preserve action. This also
+      // handles stale cache entries populated before the policy was set.
+      const emr = window.MapShine?.effectMaskRegistry;
+      const filteredMasks = cached.masks.filter(m => {
+        const type = m?.type || m?.id;
+        if (!type) return true;
+        const policy = emr?.getPolicy?.(type);
+        return !policy?.preserveAcrossFloors;
+      });
+
       if (cacheOnly) {
-        return { masks: cached.masks, masksChanged: false, levelElevation, basePath: cached.basePath };
+        return { masks: filteredMasks, masksChanged: false, levelElevation, basePath: cached.basePath };
       }
-      const masksChanged = (cached.basePath !== this._activeFloorBasePath);
-      if (masksChanged) this._activeFloorBasePath = cached.basePath;
+      // masksChanged must be true whenever the active floor key changes, even if
+      // basePath is the same. Two floors on the same tile set share a basePath but
+      // have different per-floor masks — the old basePath comparison caused
+      // transitionToFloor to be skipped entirely on same-tileset floor switches.
+      const masksChanged = (floorKey !== this._activeFloorKey);
+      if (masksChanged) {
+        this._activeFloorBasePath = cached.basePath;
+        this._activeFloorKey = floorKey;
+      }
       log.info('composeFloor: cache hit', { floorKey, masksChanged, basePath: cached.basePath });
-      return { masks: cached.masks, masksChanged, levelElevation, basePath: cached.basePath };
+      return { masks: filteredMasks, masksChanged, levelElevation, basePath: cached.basePath };
     }
 
     log.info('composeFloor: cache miss, compositing floor', { floorKey, bandBottom, bandTop });
@@ -555,8 +584,11 @@ export class GpuSceneMaskCompositor {
       return { masks: newMasks, masksChanged: false, levelElevation, basePath: primaryBasePath };
     }
 
-    const masksChanged = (primaryBasePath !== this._activeFloorBasePath);
+    // masksChanged is true whenever the floor key changes, not just basePath.
+    // Two floors on the same tile set share a basePath but need separate transitions.
+    const masksChanged = (floorKey !== this._activeFloorKey);
     this._activeFloorBasePath = primaryBasePath;
+    this._activeFloorKey = floorKey;
 
     log.info('composeFloor: done', {
       floorKey, maskCount: newMasks.length,
@@ -732,6 +764,7 @@ export class GpuSceneMaskCompositor {
   dispose() {
     this._floorMeta.clear();
     this._activeFloorBasePath = null;
+    this._activeFloorKey = null;
     for (const floorTargets of this._floorCache.values()) {
       for (const rt of floorTargets.values()) {
         try { rt.dispose(); } catch (_) {}
@@ -1184,7 +1217,10 @@ export class GpuSceneMaskCompositor {
           const px = Math.floor(rt.width  * (gx + 0.5) / GRID);
           const py = Math.floor(rt.height * (gy + 0.5) / GRID);
           renderer.readRenderTargetPixels(rt, px, py, 1, 1, buf);
-          if ((buf[0] | buf[1] | buf[2] | buf[3]) !== 0) return true;
+          // Check RGB only — alpha may be non-zero on tiles that use alpha as a
+          // floor-boundary cutout (black RGB, alpha=floor-shape). Those tiles
+          // contain no actual mask coverage data and must be treated as empty.
+          if ((buf[0] | buf[1] | buf[2]) !== 0) return true;
         }
       }
       return false;

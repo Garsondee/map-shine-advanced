@@ -4419,9 +4419,21 @@ export class WaterEffectV2 extends EffectBase {
     u.uWaterEnabled.value = this.enabled ? 1.0 : 0.0;
 
     if (u.uActiveLevelElevation) {
-      let activeElev = Number(window.MapShine?._activeLevelElevation);
-      if (!Number.isFinite(activeElev)) {
-        activeElev = Number(window.MapShine?.activeLevelContext?.bottom);
+      // When water is preserved across floors, use the elevation of the floor
+      // the water mask belongs to (not the viewer's current floor). This keeps
+      // depth occlusion identical whether viewed from ground or upper level.
+      const reg = window.MapShine?.effectMaskRegistry;
+      const waterSlot = reg?.getSlot?.('water');
+      const waterFloorKey = waterSlot?.floorKey;
+      let activeElev;
+      if (waterFloorKey && waterFloorKey !== reg?._activeFloorKey) {
+        // Water belongs to a different floor — use that floor's bottom elevation.
+        activeElev = Number(waterFloorKey.split(':')[0]);
+      } else {
+        activeElev = Number(window.MapShine?._activeLevelElevation);
+        if (!Number.isFinite(activeElev)) {
+          activeElev = Number(window.MapShine?.activeLevelContext?.bottom);
+        }
       }
       u.uActiveLevelElevation.value = Number.isFinite(activeElev) ? activeElev : 0.0;
     }
@@ -4715,22 +4727,6 @@ export class WaterEffectV2 extends EffectBase {
     }
 
     this._registryUnsub = registry.subscribe('water', (texture, _floorKey, _source) => {
-      // Diagnostic: log every registry callback so we can trace the failure path.
-      const img = texture?.image;
-      const isRtDiag = texture && (!img || (img && typeof img === 'object' &&
-        !(img instanceof HTMLImageElement) && !(img instanceof HTMLCanvasElement) &&
-        !(img instanceof HTMLVideoElement) &&
-        !(typeof ImageBitmap !== 'undefined' && img instanceof ImageBitmap) &&
-        !(typeof OffscreenCanvas !== 'undefined' && img instanceof OffscreenCanvas)));
-      log.warn('[WaterDiag] registry water callback', {
-        floorKey: _floorKey, source: _source,
-        textureUuid: texture?.uuid ?? 'null',
-        isRt: isRtDiag,
-        imgType: img ? img.constructor?.name : 'null',
-        sameAsCurrent: texture === this.waterMask,
-        currentMaskUuid: this.waterMask?.uuid ?? 'null',
-      });
-
       // Same texture reference — no-op (avoids redundant SDF rebuild)
       if (texture === this.waterMask) return;
 

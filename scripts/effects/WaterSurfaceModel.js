@@ -81,14 +81,6 @@ export class WaterSurfaceModel {
         return null;
       }
       data = buf;
-      // Diagnostic: sample pixel stats to understand what the readback returned.
-      let nonZero = 0, maxVal = 0;
-      for (let di = 0; di < buf.length; di += 4) {
-        const v = Math.max(buf[di], buf[di+1], buf[di+2], buf[di+3]);
-        if (v > 0) nonZero++;
-        if (v > maxVal) maxVal = v;
-      }
-      log.warn('[WaterDiag] GPU readback stats', { srcW, srcH, totalPixels: srcW*srcH, nonZeroPixels: nonZero, maxVal });
       log.info('buildFromMaskTexture: using GPU readback path', { srcW, srcH });
     } else {
       // Standard CPU path: draw the image to a canvas and read pixels.

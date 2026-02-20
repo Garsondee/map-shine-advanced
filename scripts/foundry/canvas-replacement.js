@@ -3188,6 +3188,46 @@ async function createThreeCanvas(scene) {
           }
           console.groupEnd();
 
+          console.group('EffectMaskRegistry');
+          const reg = ms?.effectMaskRegistry;
+          if (reg) {
+            console.log('activeFloorKey:', reg._activeFloorKey);
+            console.log('transitioning:', reg._transitioning);
+            const slotInfo = {};
+            if (reg._slots) {
+              for (const [k, v] of reg._slots) {
+                slotInfo[k] = { hasTexture: !!v.texture, floorKey: v.floorKey, source: v.source };
+              }
+            }
+            console.log('slots:', slotInfo);
+          }
+          console.groupEnd();
+
+          console.group('Water Effect');
+          const we = ms?.waterEffect;
+          if (we) {
+            console.log('enabled:', we.enabled);
+            console.log('waterMask:', we.waterMask?.uuid ?? 'null');
+            console.log('_waterData:', !!we._waterData, 'texture:', !!we._waterData?.texture);
+            console.log('_floorTransitionActive:', we._floorTransitionActive);
+            const wu = we._material?.uniforms;
+            console.log('uHasWaterData:', wu?.uHasWaterData?.value);
+            console.log('tNoiseMap:', wu?.tNoiseMap?.value?.uuid ?? 'null');
+            console.log('tWaterData:', wu?.tWaterData?.value?.uuid ?? 'null');
+          }
+          console.groupEnd();
+
+          console.group('Window Light Effect');
+          const wle = ms?.effectComposer?.effects ? [...ms.effectComposer.effects.values()].find(e => e.id === 'window-light') : null;
+          if (wle) {
+            console.log('enabled:', wle.enabled);
+            console.log('hasWindowMask:', wle.params?.hasWindowMask);
+            console.log('windowMask:', wle.windowMask?.uuid ?? 'null');
+            console.log('mesh exists:', !!wle.mesh);
+            console.log('mesh visible:', wle.mesh?.visible);
+          }
+          console.groupEnd();
+
           console.groupEnd();
         };
         log.info('Debug helper available: window.MapShine._debugRenderState()');

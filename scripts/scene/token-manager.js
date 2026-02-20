@@ -94,6 +94,14 @@ export class TokenManager {
     /** @type {boolean} Whether Foundry highlight-all (Alt) is currently active */
     this._highlightAllTokensActive = false;
 
+    /**
+     * P4-02: When true, token sprites use depthTest:true/depthWrite:true so they
+     * are correctly occluded by elevated foreground tiles in the depth buffer.
+     * When false (default), tokens always render on top (legacy behaviour).
+     * @type {boolean}
+     */
+    this.tokenDepthInteraction = false;
+
     // Cache renderer-derived values for texture filtering.
     this._maxAnisotropy = null;
     
@@ -304,6 +312,24 @@ export class TokenManager {
     }
   }
 
+  /**
+   * P4-02/03: Enable or disable depth interaction for all token sprites.
+   * When enabled, tokens participate in the depth buffer (depthTest + depthWrite)
+   * so elevated foreground tiles correctly occlude them.
+   * When disabled, tokens always render on top (legacy behaviour).
+   * @param {boolean} enabled
+   */
+  setDepthInteraction(enabled) {
+    this.tokenDepthInteraction = enabled === true;
+    for (const data of this.tokenSprites.values()) {
+      const mat = data?.sprite?.material;
+      if (!mat) continue;
+      mat.depthTest = this.tokenDepthInteraction;
+      mat.depthWrite = this.tokenDepthInteraction;
+      mat.needsUpdate = true;
+    }
+  }
+
   _ensureTokenColorCorrection(material) {
     if (!material || material.userData?._msTokenCCInstalled) return;
 
@@ -326,6 +352,14 @@ export class TokenManager {
       shader.uniforms.uWindowLightScreenSize = { value: new window.THREE.Vector2(1, 1) };
       shader.uniforms.uWindowLightIntensity = { value: 1.0 };
 
+      // P4-07/08/09: LightingEffect composite target + outdoors mask for indoor/outdoor
+      // light intensity gating on tokens.
+      shader.uniforms.tLightingTarget = { value: null };
+      shader.uniforms.uHasLightingTarget = { value: 0.0 };
+      shader.uniforms.tOutdoorsMask = { value: null };
+      shader.uniforms.uHasOutdoorsMask = { value: 0.0 };
+      shader.uniforms.uLightingScreenSize = { value: new window.THREE.Vector2(1, 1) };
+
       const uniformBlock = `
 uniform float uTokenCCEnabled;
 uniform float uTokenExposure;
@@ -340,6 +374,11 @@ uniform sampler2D tWindowLight;
 uniform float uHasWindowLight;
 uniform vec2 uWindowLightScreenSize;
 uniform float uWindowLightIntensity;
+uniform sampler2D tLightingTarget;
+uniform float uHasLightingTarget;
+uniform sampler2D tOutdoorsMask;
+uniform float uHasOutdoorsMask;
+uniform vec2 uLightingScreenSize;
 
 vec3 ms_applyTokenWhiteBalance(vec3 color, float temp, float tint) {
   vec3 tempShift = vec3(1.0 + temp, 1.0, 1.0 - temp);
@@ -377,6 +416,25 @@ vec3 ms_applyWindowLight(vec3 color) {
   vec3 illum = max(windowLight, vec3(0.0)) * max(uWindowLightIntensity, 0.0);
   return color * (vec3(1.0) + illum);
 }
+
+// P4-07: Sample the LightingEffect composite target at the token's screen position.
+// This applies the scene's ambient + dynamic light contribution to the token color,
+// making tokens react to the same lighting as the ground beneath them.
+vec3 ms_applySceneLighting(vec3 color) {
+  if (uHasLightingTarget < 0.5) return color;
+  vec2 luv = gl_FragCoord.xy / max(uLightingScreenSize, vec2(1.0));
+  vec3 lightSample = texture2D(tLightingTarget, clamp(luv, vec2(0.001), vec2(0.999))).rgb;
+  // P4-08: Gate indoor/outdoor light intensity via the outdoors mask.
+  // Tokens fully indoors (outdoorStrength=0) receive only indoor ambient;
+  // tokens outdoors (outdoorStrength=1) receive full scene lighting.
+  float outdoorStrength = 1.0;
+  if (uHasOutdoorsMask > 0.5) {
+    outdoorStrength = texture2D(tOutdoorsMask, clamp(luv, vec2(0.001), vec2(0.999))).r;
+  }
+  // Blend between unlit (1.0) and scene-lit based on outdoor strength.
+  vec3 lightFactor = mix(vec3(1.0), lightSample, outdoorStrength);
+  return color * max(lightFactor, vec3(0.0));
+}
 `;
 
       // Inject uniforms + helper functions.
@@ -392,7 +450,7 @@ vec3 ms_applyWindowLight(vec3 color) {
       if (shader.fragmentShader.includes('#include <output_fragment>')) {
         shader.fragmentShader = shader.fragmentShader.replace(
           '#include <output_fragment>',
-          `#include <output_fragment>\n  gl_FragColor.rgb = ms_applyTokenColorCorrection(gl_FragColor.rgb);\n  gl_FragColor.rgb = ms_applyWindowLight(gl_FragColor.rgb);`
+          `#include <output_fragment>\n  gl_FragColor.rgb = ms_applyTokenColorCorrection(gl_FragColor.rgb);\n  gl_FragColor.rgb = ms_applyWindowLight(gl_FragColor.rgb);\n  gl_FragColor.rgb = ms_applySceneLighting(gl_FragColor.rgb);`
         );
         patched = true;
       }
@@ -402,17 +460,16 @@ vec3 ms_applyWindowLight(vec3 color) {
       if (!patched && shader.fragmentShader.includes('gl_FragColor = vec4( outgoingLight, diffuseColor.a );')) {
         shader.fragmentShader = shader.fragmentShader.replace(
           'gl_FragColor = vec4( outgoingLight, diffuseColor.a );',
-          `vec3 ccLight = ms_applyTokenColorCorrection(outgoingLight);\n  ccLight = ms_applyWindowLight(ccLight);\n  gl_FragColor = vec4( ccLight, diffuseColor.a );`
+          `vec3 ccLight = ms_applyTokenColorCorrection(outgoingLight);\n  ccLight = ms_applyWindowLight(ccLight);\n  ccLight = ms_applySceneLighting(ccLight);\n  gl_FragColor = vec4( ccLight, diffuseColor.a );`
         );
         patched = true;
       }
 
-      // Another common pattern:
-      // gl_FragColor = vec4( outgoingLight, diffuseColor.a );\n#include <tonemapping_fragment>...
+      // Another common pattern (duplicate guard — same string, kept for safety):
       if (!patched && shader.fragmentShader.includes('gl_FragColor = vec4( outgoingLight, diffuseColor.a );')) {
         shader.fragmentShader = shader.fragmentShader.replace(
           'gl_FragColor = vec4( outgoingLight, diffuseColor.a );',
-          `vec3 ccLight = ms_applyTokenColorCorrection(outgoingLight);\n  ccLight = ms_applyWindowLight(ccLight);\n  gl_FragColor = vec4( ccLight, diffuseColor.a );`
+          `vec3 ccLight = ms_applyTokenColorCorrection(outgoingLight);\n  ccLight = ms_applyWindowLight(ccLight);\n  ccLight = ms_applySceneLighting(ccLight);\n  gl_FragColor = vec4( ccLight, diffuseColor.a );`
         );
         patched = true;
       }
@@ -423,7 +480,7 @@ vec3 ms_applyWindowLight(vec3 color) {
       if (!patched) {
         shader.fragmentShader = shader.fragmentShader.replace(
           /}\s*$/,
-          `  gl_FragColor.rgb = ms_applyTokenColorCorrection(gl_FragColor.rgb);\n  gl_FragColor.rgb = ms_applyWindowLight(gl_FragColor.rgb);\n}`
+          `  gl_FragColor.rgb = ms_applyTokenColorCorrection(gl_FragColor.rgb);\n  gl_FragColor.rgb = ms_applyWindowLight(gl_FragColor.rgb);\n  gl_FragColor.rgb = ms_applySceneLighting(gl_FragColor.rgb);\n}`
         );
       }
 
@@ -571,24 +628,45 @@ vec3 ms_applyWindowLight(vec3 color) {
    * @param {TimeInfo} timeInfo 
    */
   update(timeInfo) {
-    // Update window light texture for all tokens
+    // Update window light texture + P4-10: lighting target + outdoors mask for all tokens.
     try {
       const wle = window.MapShine?.windowLightEffect;
-      const tex = (wle && typeof wle.getLightTexture === 'function') ? wle.getLightTexture() : (wle?.lightTarget?.texture ?? null);
-      const hasWindowLight = tex ? 1.0 : 0.0;
-      const w = wle?.lightTarget?.width ?? window.innerWidth ?? 1;
-      const h = wle?.lightTarget?.height ?? window.innerHeight ?? 1;
-      
+      const wlTex = (wle && typeof wle.getLightTexture === 'function') ? wle.getLightTexture() : (wle?.lightTarget?.texture ?? null);
+      const hasWindowLight = wlTex ? 1.0 : 0.0;
+      const wlW = wle?.lightTarget?.width ?? window.innerWidth ?? 1;
+      const wlH = wle?.lightTarget?.height ?? window.innerHeight ?? 1;
+
+      // P4-10: Resolve LightingEffect composite target + outdoors mask once per frame.
+      const le = window.MapShine?.lightingEffect;
+      const lightTex = le?.lightTarget?.texture ?? null;
+      const hasLightTex = lightTex ? 1.0 : 0.0;
+      const lightW = le?.lightTarget?.width ?? window.innerWidth ?? 1;
+      const lightH = le?.lightTarget?.height ?? window.innerHeight ?? 1;
+      const outdoorsTex = le?.outdoorsTarget?.texture ?? null;
+      const hasOutdoors = outdoorsTex ? 1.0 : 0.0;
+
       for (const data of this.tokenSprites.values()) {
         const shader = data?.sprite?.material?.userData?._msTokenCCShader;
-        if (shader?.uniforms) {
-          if (shader.uniforms.tWindowLight) {
-            shader.uniforms.tWindowLight.value = tex || null;
-            shader.uniforms.uHasWindowLight.value = hasWindowLight;
-            if (shader.uniforms.uWindowLightScreenSize?.value?.set) {
-              shader.uniforms.uWindowLightScreenSize.value.set(w, h);
-            }
+        if (!shader?.uniforms) continue;
+        const u = shader.uniforms;
+        if (u.tWindowLight) {
+          u.tWindowLight.value = wlTex || null;
+          u.uHasWindowLight.value = hasWindowLight;
+          if (u.uWindowLightScreenSize?.value?.set) {
+            u.uWindowLightScreenSize.value.set(wlW, wlH);
           }
+        }
+        // P4-10: Push lighting target + outdoors mask.
+        if (u.tLightingTarget !== undefined) {
+          u.tLightingTarget.value = lightTex;
+          u.uHasLightingTarget.value = hasLightTex;
+          if (u.uLightingScreenSize?.value?.set) {
+            u.uLightingScreenSize.value.set(lightW, lightH);
+          }
+        }
+        if (u.tOutdoorsMask !== undefined) {
+          u.tOutdoorsMask.value = outdoorsTex;
+          u.uHasOutdoorsMask.value = hasOutdoors;
         }
       }
     } catch (_) {
@@ -858,13 +936,14 @@ vec3 ms_applyWindowLight(vec3 color) {
     }
 
     // Create sprite with material
+    // P4-01: depthTest/depthWrite follow the tokenDepthInteraction setting.
+    // When false (default), tokens always render on top (legacy behaviour).
+    // When true, tokens are correctly occluded by elevated foreground tiles.
     const material = new THREE.SpriteMaterial({
       transparent: true,
       alphaTest: 0.1, // Discard fully transparent pixels
-      // Render tokens in the overlay pass so they draw AFTER post-processing passes
-      // like WaterEffectV2. This prevents water distortion/tint from affecting tokens.
-      depthTest: false,
-      depthWrite: false,
+      depthTest: this.tokenDepthInteraction,
+      depthWrite: this.tokenDepthInteraction,
       sizeAttenuation: true, // Enable perspective scaling - tokens should scale with the world
       side: THREE.DoubleSide // CRITICAL: Prevent culling when projection matrix is flipped
     });

@@ -77,6 +77,22 @@ export class BushEffect extends EffectBase {
 
     // PERFORMANCE: Reusable objects to avoid per-frame allocations
     this._tempSize = null; // Lazy init when THREE is available
+
+    /** @type {function|null} Unsubscribe from EffectMaskRegistry */
+    this._registryUnsub = null;
+
+    /**
+     * Per-tile overlay meshes created by the TileBindableEffect interface.
+     * Key: tileId, Value: {mesh, material, sprite}
+     * @type {Map<string, {mesh: THREE.Mesh, material: THREE.ShaderMaterial, sprite: THREE.Object3D}>}
+     */
+    this._tileOverlays = new Map();
+
+    /**
+     * All per-tile overlay materials — kept in sync with params in update().
+     * @type {Set<THREE.ShaderMaterial>}
+     */
+    this._tileOverlayMaterials = new Set();
   }
 
   _resetTemporalState() {
@@ -85,6 +101,15 @@ export class BushEffect extends EffectBase {
   }
 
   dispose() {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+
+    // Dispose all per-tile overlays.
+    for (const [tileId] of this._tileOverlays) {
+      try { this.unbindTileSprite(tileId); } catch (_) {}
+    }
+    this._tileOverlays.clear();
+    this._tileOverlayMaterials.clear();
+
     try {
       if (this.mesh && this.scene) {
         this.scene.remove(this.mesh);
@@ -371,8 +396,255 @@ export class BushEffect extends EffectBase {
       this.enabled = false;
       return;
     }
+    // Re-enable when a valid mask is found. Without this, the effect stays
+    // permanently disabled after visiting a floor with no _Bush texture.
+    this.enabled = true;
     if (this.scene) this._createMesh();
     if (this.shadowScene && this.bushMask) this._createShadowMesh();
+  }
+
+  /**
+   * Subscribe to the EffectMaskRegistry for 'bush' mask updates.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    this._registryUnsub = registry.subscribe('bush', (texture) => {
+      this.bushMask = texture;
+      this._resetTemporalState();
+      if (!texture) { this.enabled = false; return; }
+      this.enabled = true;
+      if (this.scene) this._createMesh();
+      if (this.shadowScene) this._createShadowMesh();
+    });
+  }
+
+  // ── TileBindableEffect interface ────────────────────────────────────────────
+
+  /**
+   * TileBindableEffect: load the per-tile _Bush mask texture.
+   * Called by TileEffectBindingManager before bindTileSprite().
+   * @param {object} tileDoc
+   * @returns {Promise<THREE.Texture|null>}
+   */
+  async loadTileMask(tileDoc) {
+    const tileManager = window.MapShine?.tileManager;
+    if (!tileManager) return null;
+    try {
+      return await tileManager.loadTileBushMaskTexture(tileDoc) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * TileBindableEffect: skip tiles with no texture.
+   * @param {object} tileDoc
+   * @returns {boolean}
+   */
+  shouldBindTile(tileDoc) {
+    return !!(tileDoc?.texture?.src || tileDoc?.id);
+  }
+
+  /**
+   * TileBindableEffect: bind a per-tile bush overlay mesh.
+   * @param {object} tileDoc
+   * @param {THREE.Object3D} sprite
+   * @param {THREE.Texture|null} bushMaskTexture
+   */
+  bindTileSprite(tileDoc, sprite, bushMaskTexture) {
+    const tileId = tileDoc?.id;
+    const THREE = window.THREE;
+    if (!tileId || !THREE || !this.scene || !sprite || !bushMaskTexture) return;
+
+    if (sprite?.userData?.isWeatherRoof) { this.unbindTileSprite(tileId); return; }
+
+    this.unbindTileSprite(tileId);
+
+    const mat = this._createTileOverlayMaterial(bushMaskTexture);
+    const geom = new THREE.PlaneGeometry(1, 1, 1, 1);
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.matrixAutoUpdate = false;
+
+    const baseOrder = (typeof sprite.renderOrder === 'number') ? sprite.renderOrder : 0;
+    mesh.renderOrder = baseOrder + 1;
+
+    this._syncTileMeshToSprite(mesh, sprite);
+    mesh.visible = !!(this._enabled && sprite.visible);
+
+    this.scene.add(mesh);
+    this._tileOverlays.set(tileId, { mesh, material: mat, sprite });
+  }
+
+  /**
+   * TileBindableEffect: remove and dispose a per-tile bush overlay.
+   * @param {string} tileId
+   */
+  unbindTileSprite(tileId) {
+    const data = this._tileOverlays.get(tileId);
+    if (!data) return;
+    try { if (data.mesh && this.scene) this.scene.remove(data.mesh); } catch (_) {}
+    try { data.mesh?.geometry?.dispose?.(); } catch (_) {}
+    try {
+      if (data.material) {
+        this._tileOverlayMaterials.delete(data.material);
+        data.material.dispose?.();
+      }
+    } catch (_) {}
+    this._tileOverlays.delete(tileId);
+  }
+
+  /**
+   * TileBindableEffect: keep the per-tile overlay aligned with its sprite.
+   * @param {string} tileId
+   * @param {THREE.Object3D} sprite
+   */
+  syncTileSpriteTransform(tileId, sprite) {
+    const data = this._tileOverlays.get(tileId);
+    if (!data?.mesh || !sprite) return;
+    if (sprite?.userData?.isWeatherRoof) { this.unbindTileSprite(tileId); return; }
+    data.sprite = sprite;
+    this._syncTileMeshToSprite(data.mesh, sprite);
+    const baseOrder = (typeof sprite.renderOrder === 'number') ? sprite.renderOrder : 0;
+    data.mesh.renderOrder = baseOrder + 1;
+  }
+
+  /**
+   * TileBindableEffect: sync overlay visibility with the owning tile.
+   * @param {string} tileId
+   * @param {THREE.Object3D} sprite
+   */
+  syncTileSpriteVisibility(tileId, sprite) {
+    const data = this._tileOverlays.get(tileId);
+    if (!data?.mesh) return;
+    data.mesh.visible = !!(this._enabled && sprite?.visible);
+  }
+
+  /**
+   * Copy a sprite's world transform onto a per-tile overlay mesh.
+   * @param {THREE.Mesh} mesh
+   * @param {THREE.Object3D} sprite
+   * @private
+   */
+  _syncTileMeshToSprite(mesh, sprite) {
+    if (!window.THREE) return;
+    mesh.position.copy(sprite.position);
+    mesh.scale.copy(sprite.scale);
+    const rot = Number(sprite?.material?.rotation) || 0;
+    mesh.rotation.set(0, 0, rot);
+    mesh.updateMatrix();
+  }
+
+  /**
+   * Create a ShaderMaterial for a per-tile bush overlay.
+   * @param {THREE.Texture} bushMask
+   * @returns {THREE.ShaderMaterial}
+   * @private
+   */
+  _createTileOverlayMaterial(bushMask) {
+    const THREE = window.THREE;
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uBushMask: { value: bushMask },
+        uTime: { value: 0.0 },
+        uWindDir: { value: new THREE.Vector2(1.0, 0.0) },
+        uWindSpeed: { value: 0.0 },
+        uIntensity: { value: (this.params.intensity ?? 1.0) },
+        uWindSpeedGlobal: { value: this.params.windSpeedGlobal },
+        uGustFrequency: { value: this.params.gustFrequency },
+        uGustSpeed: { value: this.params.gustSpeed },
+        uBranchBend: { value: this.params.branchBend },
+        uElasticity: { value: this.params.elasticity },
+        uFlutterIntensity: { value: this.params.flutterIntensity },
+        uFlutterSpeed: { value: this.params.flutterSpeed },
+        uFlutterScale: { value: this.params.flutterScale },
+        uExposure: { value: this.params.exposure },
+        uBrightness: { value: this.params.brightness },
+        uContrast: { value: this.params.contrast },
+        uSaturation: { value: this.params.saturation },
+        uTemperature: { value: this.params.temperature },
+        uTint: { value: this.params.tint }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        varying vec2 vWorldPos;
+        void main() {
+          vUv = uv;
+          vec4 worldPos = modelMatrix * vec4(position, 1.0);
+          vWorldPos = worldPos.xy;
+          gl_Position = projectionMatrix * viewMatrix * worldPos;
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D uBushMask;
+        uniform float uTime;
+        uniform vec2  uWindDir;
+        uniform float uWindSpeed;
+        uniform float uIntensity;
+        uniform float uWindSpeedGlobal;
+        uniform float uGustFrequency;
+        uniform float uGustSpeed;
+        uniform float uBranchBend;
+        uniform float uElasticity;
+        uniform float uFlutterIntensity;
+        uniform float uFlutterSpeed;
+        uniform float uFlutterScale;
+        uniform float uExposure;
+        uniform float uBrightness;
+        uniform float uContrast;
+        uniform float uSaturation;
+        uniform float uTemperature;
+        uniform float uTint;
+        varying vec2 vUv;
+        varying vec2 vWorldPos;
+
+        float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898,78.233)))*43758.5453); }
+        float noise(vec2 p) {
+          vec2 i=floor(p); vec2 f=fract(p); vec2 u=f*f*(3.0-2.0*f);
+          return mix(mix(hash(i),hash(i+vec2(1,0)),u.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),u.x),u.y);
+        }
+        float msLuminance(vec3 c) { return dot(c,vec3(0.2126,0.7152,0.0722)); }
+        vec3 applyCC(vec3 color) {
+          color *= pow(2.0,uExposure);
+          color.r+=uTemperature*0.1; color.b-=uTemperature*0.1; color.g+=uTint*0.1;
+          color+=vec3(uBrightness);
+          color=(color-0.5)*uContrast+0.5;
+          float l=msLuminance(color); color=mix(vec3(l),color,uSaturation);
+          return color;
+        }
+        void main() {
+          vec2 windDir=normalize(uWindDir);
+          if(length(windDir)<0.01) windDir=vec2(1,0);
+          float speed=uWindSpeed*uWindSpeedGlobal;
+          float effectiveSpeed=0.1+speed;
+          vec2 gustPos=vWorldPos*uGustFrequency;
+          vec2 scroll=windDir*uTime*uGustSpeed*effectiveSpeed;
+          float gustNoise=noise(gustPos-scroll);
+          float gustStrength=smoothstep(0.2,0.8,gustNoise);
+          vec2 perpDir=vec2(-windDir.y,windDir.x);
+          float orbitPhase=uTime*uElasticity+(gustNoise*5.0);
+          float orbitSway=sin(orbitPhase);
+          float pushMagnitude=gustStrength*uBranchBend*effectiveSpeed;
+          float swayMagnitude=orbitSway*(uBranchBend*0.4)*effectiveSpeed*(0.5+0.5*gustStrength);
+          float noiseVal=noise(vWorldPos*uFlutterScale);
+          float flutterPhase=uTime*uFlutterSpeed*effectiveSpeed+noiseVal*6.28;
+          float flutter=sin(flutterPhase);
+          float flutterMagnitude=flutter*uFlutterIntensity*(0.5+0.5*gustStrength);
+          vec2 distortion=(windDir*pushMagnitude)+(perpDir*swayMagnitude)+vec2(flutter,flutter)*flutterMagnitude;
+          vec4 bushSample=texture2D(uBushMask,vUv-distortion);
+          float a=bushSample.a*uIntensity;
+          if(a<=0.001) discard;
+          vec3 color=applyCC(bushSample.rgb);
+          gl_FragColor=vec4(color,clamp(a,0.0,1.0));
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true
+    });
+    mat._isTileOverlay = true;
+    this._tileOverlayMaterials.add(mat);
+    return mat;
   }
 
   _createMesh() {
@@ -662,6 +934,32 @@ export class BushEffect extends EffectBase {
     u.uSaturation.value = this.params.saturation;
     u.uTemperature.value = this.params.temperature;
     u.uTint.value = this.params.tint;
+
+    // Sync all per-tile overlay materials with the same wind/time/params as the scene-wide mesh.
+    if (this._tileOverlayMaterials && this._tileOverlayMaterials.size > 0) {
+      for (const mat of this._tileOverlayMaterials) {
+        if (!mat?.uniforms) continue;
+        const tu = mat.uniforms;
+        if (tu.uTime) tu.uTime.value = timeInfo.elapsed;
+        if (tu.uWindDir) tu.uWindDir.value.copy(u.uWindDir.value);
+        if (tu.uWindSpeed) tu.uWindSpeed.value = this._currentWindSpeed;
+        if (tu.uIntensity) tu.uIntensity.value = (this.params.intensity ?? 1.0);
+        if (tu.uWindSpeedGlobal) tu.uWindSpeedGlobal.value = this.params.windSpeedGlobal;
+        if (tu.uGustFrequency) tu.uGustFrequency.value = this.params.gustFrequency;
+        if (tu.uGustSpeed) tu.uGustSpeed.value = this.params.gustSpeed;
+        if (tu.uBranchBend) tu.uBranchBend.value = this.params.branchBend;
+        if (tu.uElasticity) tu.uElasticity.value = this.params.elasticity;
+        if (tu.uFlutterIntensity) tu.uFlutterIntensity.value = this.params.flutterIntensity;
+        if (tu.uFlutterSpeed) tu.uFlutterSpeed.value = this.params.flutterSpeed;
+        if (tu.uFlutterScale) tu.uFlutterScale.value = this.params.flutterScale;
+        if (tu.uExposure) tu.uExposure.value = this.params.exposure;
+        if (tu.uBrightness) tu.uBrightness.value = this.params.brightness;
+        if (tu.uContrast) tu.uContrast.value = this.params.contrast;
+        if (tu.uSaturation) tu.uSaturation.value = this.params.saturation;
+        if (tu.uTemperature) tu.uTemperature.value = this.params.temperature;
+        if (tu.uTint) tu.uTint.value = this.params.tint;
+      }
+    }
 
     if (this.shadowMaterial && this.shadowMaterial.uniforms) {
       const su = this.shadowMaterial.uniforms;

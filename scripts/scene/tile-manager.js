@@ -11,6 +11,10 @@ import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../effects/EffectCompo
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { isTileVisibleForPerspective, isBackgroundVisibleForPerspective, isWeatherVisibleForPerspective } from '../foundry/elevation-context.js';
 import { tileHasLevelsRange, isLevelsEnabledForScene, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
+import { applyTileLevelDefaults } from '../foundry/levels-create-defaults.js';
+import { getEffectMaskRegistry } from '../assets/loader.js';
+import { getTextureBudgetTracker, estimateTextureBytes } from '../assets/TextureBudgetTracker.js';
+import { TileEffectBindingManager } from './TileEffectBindingManager.js';
 
 const log = createLogger('TileManager');
 
@@ -132,6 +136,42 @@ export class TileManager {
     this._tileFluidMaskResolvedUrl = new Map();
     this._tileFluidMaskResolvePromises = new Map();
 
+    this._tileTreeMaskCache = new Map();
+    this._tileTreeMaskPromises = new Map();
+    this._tileTreeMaskResolvedUrl = new Map();
+
+    this._tileBushMaskCache = new Map();
+    this._tileBushMaskPromises = new Map();
+    this._tileBushMaskResolvedUrl = new Map();
+
+    this._tileIridescenceMaskCache = new Map();
+    this._tileIridescenceMaskPromises = new Map();
+    this._tileIridescenceMaskResolvedUrl = new Map();
+
+    // Per-tile generic effect mask cache for the compositor pipeline.
+    // Outer key: tileId, Inner key: maskType (e.g. 'fire','water','outdoors'),
+    // Value: { url: string, texture: THREE.Texture }
+    /** @type {Map<string, Map<string, {url: string, texture: THREE.Texture}>>} */
+    this._tileEffectMasks = new Map();
+    /** @type {Map<string, Promise>} */
+    this._tileEffectMaskResolvePromises = new Map();
+
+    /**
+     * Estimated VRAM bytes consumed by per-tile effect masks.
+     * Used for budget enforcement to prevent memory exhaustion on
+     * scenes with many tiles and high-resolution masks.
+     * @type {number}
+     * @private
+     */
+    this._tileEffectMaskVramBytes = 0;
+
+    /**
+     * Maximum VRAM budget for per-tile effect masks (bytes).
+     * 512 MB default — sufficient for ~32 unique 4096×4096 RGBA masks.
+     * @type {number}
+     */
+    this.effectMaskVramBudget = 512 * 1024 * 1024;
+
     // Cache directory listings so we can avoid 404 spam when probing optional mask files.
     // Key: directory path (with trailing slash), Value: string[] of file paths
     this._dirFileListCache = new Map();
@@ -203,6 +243,14 @@ export class TileManager {
     /** @type {import('../effects/FluidEffect.js').FluidEffect|null} */
     this.fluidEffect = null;
 
+    /**
+     * Centralized routing layer for per-tile effect overlays.
+     * Effects register with this manager; TileManager calls it at every
+     * tile lifecycle point instead of calling effects directly.
+     * @type {TileEffectBindingManager}
+     */
+    this.tileBindingManager = new TileEffectBindingManager();
+
     // Reused object for runtime occluder transform sync (hot path).
     this._runtimeOccluderDoc = {
       width: 0,
@@ -219,6 +267,16 @@ export class TileManager {
 
   setFluidEffect(fluidEffect) {
     this.fluidEffect = fluidEffect || null;
+  }
+
+  /**
+   * Set the tile effect binding manager. Called from canvas-replacement.js
+   * after all effects are wired. The manager routes tile lifecycle events
+   * to all registered TileBindableEffects.
+   * @param {TileEffectBindingManager} manager
+   */
+  setTileBindingManager(manager) {
+    this.tileBindingManager = manager || new TileEffectBindingManager();
   }
 
   setOverheadColorCorrectionParams(params) {
@@ -723,6 +781,163 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     return candidates;
   }
 
+  /**
+   * Generic per-tile mask URL resolver. Probes for a given suffix mask
+   * alongside the tile's texture URL using the same FilePicker-based
+   * directory listing pattern as the existing Water/Specular/Fluid resolvers.
+   *
+   * @param {object} tileDoc - Tile document (needs texture.src)
+   * @param {string} suffix - Mask suffix (e.g. '_Fire', '_Outdoors')
+   * @returns {Promise<string|null>} Resolved URL or null if not found
+   * @private
+   */
+  async _resolveTileMaskUrl(tileDoc, suffix) {
+    const src = tileDoc?.texture?.src;
+    const parts = this._splitUrl(src);
+    if (!parts || !suffix) return null;
+
+    const candidates = this._getMaskCandidates(parts, suffix);
+    if (!candidates.length) return null;
+
+    // Use FilePicker directory listing to confirm existence (no 404 probing).
+    let hasFilePickerListing = false;
+    try {
+      const dir = this._getDirectoryFromPath(parts.base);
+      const files = await this._listDirectoryFiles(dir);
+      hasFilePickerListing = Array.isArray(files) && files.length > 0;
+    } catch (_) {
+      hasFilePickerListing = false;
+    }
+
+    if (!hasFilePickerListing) return null;
+
+    for (const url of candidates) {
+      try {
+        const noQuery = url.split('?')[0];
+        const exists = await this._fileExistsViaFilePicker(noQuery);
+        if (exists) return url;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /**
+   * Load all discoverable suffix masks for a given tile document.
+   * Probes all mask types from the EFFECT_MASKS registry in parallel,
+   * loads textures for any that are found, and caches results in
+   * _tileEffectMasks keyed by tileId.
+   *
+   * @param {object} tileDoc - Tile document
+   * @returns {Promise<Map<string, {url: string, texture: THREE.Texture}>>}
+   *   Map of maskType → {url, texture} for all discovered masks.
+   */
+  async loadAllTileMasks(tileDoc) {
+    const tileId = tileDoc?.id;
+    if (!tileId) return new Map();
+
+    // Return cached result if available.
+    if (this._tileEffectMasks.has(tileId)) {
+      return this._tileEffectMasks.get(tileId);
+    }
+
+    // Budget guard: skip loading if per-tile effect mask VRAM exceeds budget.
+    if (this._tileEffectMaskVramBytes >= this.effectMaskVramBudget) {
+      log.debug(`loadAllTileMasks: VRAM budget exceeded (${(this._tileEffectMaskVramBytes / (1024*1024)).toFixed(1)} MB / ${(this.effectMaskVramBudget / (1024*1024)).toFixed(0)} MB), skipping tile ${tileId}`);
+      return new Map();
+    }
+
+    // Deduplicate concurrent calls for the same tile.
+    if (this._tileEffectMaskResolvePromises.has(tileId)) {
+      return this._tileEffectMaskResolvePromises.get(tileId);
+    }
+
+    const p = (async () => {
+      const registry = getEffectMaskRegistry();
+      const results = new Map();
+      const promises = [];
+
+      for (const [maskId, def] of Object.entries(registry)) {
+        const suffix = def?.suffix;
+        if (!suffix) continue;
+
+        // NOTE: water/specular/fluid also have dedicated per-tile loaders for
+        // their specific pipelines (water SDF, specular per-tile, etc.), but
+        // the compositor needs them too for scene-space composition on level
+        // switches. The VRAM budget guard prevents excessive duplication.
+
+        promises.push(
+          this._resolveTileMaskUrl(tileDoc, suffix).then(async (url) => {
+            if (!url) return;
+            try {
+              const tex = await this.loadTileTexture(url, { role: 'DATA_MASK' });
+              if (tex) {
+                // Ensure correct color space for data vs color masks.
+                const THREE = window.THREE;
+                if (THREE) {
+                  const isColor = (maskId === 'bush' || maskId === 'tree');
+                  tex.colorSpace = isColor ? (THREE.SRGBColorSpace || '') : (THREE.NoColorSpace || '');
+                  tex.flipY = false;
+                  tex.generateMipmaps = false;
+                  tex.minFilter = THREE.LinearFilter;
+                  tex.magFilter = THREE.LinearFilter;
+                  tex.needsUpdate = true;
+                }
+                results.set(maskId, { url, texture: tex });
+              }
+            } catch (_) {}
+          }).catch(() => {})
+        );
+      }
+
+      await Promise.all(promises);
+      this._tileEffectMasks.set(tileId, results);
+
+      // Track VRAM consumption for budget enforcement.
+      for (const entry of results.values()) {
+        this._tileEffectMaskVramBytes += this._estimateTextureBytes(entry?.texture);
+      }
+
+      return results;
+    })();
+
+    this._tileEffectMaskResolvePromises.set(tileId, p);
+    try {
+      return await p;
+    } finally {
+      this._tileEffectMaskResolvePromises.delete(tileId);
+    }
+  }
+
+  /**
+   * Clear cached effect masks for a specific tile (on tile removal or texture change).
+   * @param {string} tileId
+   */
+  clearTileEffectMasks(tileId) {
+    const cached = this._tileEffectMasks.get(tileId);
+    if (cached) {
+      for (const entry of cached.values()) {
+        this._tileEffectMaskVramBytes -= this._estimateTextureBytes(entry?.texture);
+        try { entry?.texture?.dispose?.(); } catch (_) {}
+      }
+      // Clamp to zero to prevent drift from estimation inaccuracies.
+      if (this._tileEffectMaskVramBytes < 0) this._tileEffectMaskVramBytes = 0;
+      this._tileEffectMasks.delete(tileId);
+    }
+  }
+
+  /**
+   * Estimate GPU VRAM consumption for a texture (width × height × 4 bytes RGBA).
+   * @param {THREE.Texture|null} texture
+   * @returns {number} Estimated bytes
+   * @private
+   */
+  _estimateTextureBytes(texture) {
+    if (!texture?.image) return 0;
+    const w = Number(texture.image.width ?? texture.image.naturalWidth ?? 0);
+    const h = Number(texture.image.height ?? texture.image.naturalHeight ?? 0);
+    return w * h * 4;
+  }
+
   async _resolveTileWaterMaskUrl(tileDoc) {
     const src = tileDoc?.texture?.src;
     const parts = this._splitUrl(src);
@@ -943,31 +1158,24 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     const cached = this._tileSpecularMaskCache.get(resolvedUrl);
     if (cached) {
-      const THREE = window.THREE;
-      if (THREE) {
-        // Tile specular masks must use flipY=true to match the tile albedo
-        // texture convention. Without this, the specular overlay appears
-        // Y-flipped on the PlaneGeometry mesh.
-        let dirty = false;
-        if (cached.colorSpace !== THREE.NoColorSpace) { cached.colorSpace = THREE.NoColorSpace; dirty = true; }
-        if (!cached.flipY) { cached.flipY = true; dirty = true; }
-        if (dirty) cached.needsUpdate = true;
-      }
       return cached;
     }
 
     const pending = this._tileSpecularMaskPromises.get(resolvedUrl);
     if (pending) return pending;
 
+    // Load via the shared textureCache (DATA_MASK role → flipY=false).
+    // The overlay PlaneGeometry mesh has its Y scale negated in
+    // _syncTileOverlayTransform to match the base plane's scale.y=-1
+    // convention, so the same flipY=false textures render correctly on both.
     const p = this.loadTileTexture(resolvedUrl, { role: 'DATA_MASK' }).then((tex) => {
       if (!tex) return null;
       const THREE = window.THREE;
       if (THREE) {
         tex.colorSpace = THREE.NoColorSpace;
-        // Tile specular masks must use flipY=true to match the tile albedo
-        // texture convention (loaded without DATA_MASK role). The overlay
-        // PlaneGeometry shares the sprite's transform, so UVs must agree.
-        tex.flipY = true;
+        tex.generateMipmaps = false;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
         tex.needsUpdate = true;
       }
       this._tileSpecularMaskCache.set(resolvedUrl, tex);
@@ -1085,6 +1293,115 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     return p;
   }
 
+  /**
+   * Load the per-tile _Tree mask texture (ALBEDO — color + alpha).
+   * Uses the generic _resolveTileMaskUrl helper with the '_Tree' suffix.
+   * @param {object} tileDoc
+   * @returns {Promise<THREE.Texture|null>}
+   */
+  async loadTileTreeMaskTexture(tileDoc) {
+    const src = tileDoc?.texture?.src;
+    const parts = this._splitUrl(src);
+    if (!parts) return null;
+    const key = parts.pathNoExt;
+
+    if (this._tileTreeMaskResolvedUrl.has(key)) {
+      const url = this._tileTreeMaskResolvedUrl.get(key);
+      if (!url) return null;
+      const cached = this._tileTreeMaskCache.get(url);
+      if (cached) return cached;
+    }
+
+    const pending = this._tileTreeMaskPromises.get(key);
+    if (pending) return pending;
+
+    const p = (async () => {
+      const url = await this._resolveTileMaskUrl(tileDoc, '_Tree');
+      this._tileTreeMaskResolvedUrl.set(key, url);
+      if (!url) return null;
+      const tex = await this.loadTileTexture(url, { role: 'ALBEDO' });
+      if (tex) this._tileTreeMaskCache.set(url, tex);
+      return tex || null;
+    })().catch(() => null).finally(() => {
+      this._tileTreeMaskPromises.delete(key);
+    });
+
+    this._tileTreeMaskPromises.set(key, p);
+    return p;
+  }
+
+  /**
+   * Load the per-tile _Bush mask texture (ALBEDO — color + alpha).
+   * @param {object} tileDoc
+   * @returns {Promise<THREE.Texture|null>}
+   */
+  async loadTileBushMaskTexture(tileDoc) {
+    const src = tileDoc?.texture?.src;
+    const parts = this._splitUrl(src);
+    if (!parts) return null;
+    const key = parts.pathNoExt;
+
+    if (this._tileBushMaskResolvedUrl.has(key)) {
+      const url = this._tileBushMaskResolvedUrl.get(key);
+      if (!url) return null;
+      const cached = this._tileBushMaskCache.get(url);
+      if (cached) return cached;
+    }
+
+    const pending = this._tileBushMaskPromises.get(key);
+    if (pending) return pending;
+
+    const p = (async () => {
+      const url = await this._resolveTileMaskUrl(tileDoc, '_Bush');
+      this._tileBushMaskResolvedUrl.set(key, url);
+      if (!url) return null;
+      const tex = await this.loadTileTexture(url, { role: 'ALBEDO' });
+      if (tex) this._tileBushMaskCache.set(url, tex);
+      return tex || null;
+    })().catch(() => null).finally(() => {
+      this._tileBushMaskPromises.delete(key);
+    });
+
+    this._tileBushMaskPromises.set(key, p);
+    return p;
+  }
+
+  /**
+   * Load the per-tile _Iridescence mask texture (DATA_MASK — grayscale mask).
+   * @param {object} tileDoc
+   * @returns {Promise<THREE.Texture|null>}
+   */
+  async loadTileIridescenceMaskTexture(tileDoc) {
+    const src = tileDoc?.texture?.src;
+    const parts = this._splitUrl(src);
+    if (!parts) return null;
+    const key = parts.pathNoExt;
+
+    if (this._tileIridescenceMaskResolvedUrl.has(key)) {
+      const url = this._tileIridescenceMaskResolvedUrl.get(key);
+      if (!url) return null;
+      const cached = this._tileIridescenceMaskCache.get(url);
+      if (cached) return cached;
+    }
+
+    const pending = this._tileIridescenceMaskPromises.get(key);
+    if (pending) return pending;
+
+    const p = (async () => {
+      const url = await this._resolveTileMaskUrl(tileDoc, '_Iridescence');
+      this._tileIridescenceMaskResolvedUrl.set(key, url);
+      if (!url) return null;
+      const tex = await this.loadTileTexture(url, { role: 'DATA_MASK' });
+      if (tex) this._tileIridescenceMaskCache.set(url, tex);
+      return tex || null;
+    })().catch(() => null).finally(() => {
+      this._tileIridescenceMaskPromises.delete(key);
+    });
+
+    this._tileIridescenceMaskPromises.set(key, p);
+    return p;
+  }
+
   _autoDetectWaterOccludersForAllTiles() {
     // Retry auto-detection scene-wide (useful after initial tile load settles).
     // This ensures every tile has a chance to resolve its own _Water mask.
@@ -1103,7 +1420,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       }
 
       try {
-        this.fluidEffect?.syncTileSpriteVisibility?.(tileDoc.id, sprite);
+        this.tileBindingManager.onTileVisibilityChanged(tileDoc.id, sprite);
       } catch (_) {
       }
     }
@@ -1359,17 +1676,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     try {
-      this.specularEffect?.syncTileSpriteTransform?.(tileId, sprite);
-    } catch (_) {
-    }
-
-    try {
-      this.fluidEffect?.syncTileSpriteTransform?.(tileId, sprite);
-    } catch (_) {
-    }
-
-    try {
-      this.fluidEffect?.syncTileSpriteVisibility?.(tileId, sprite);
+      this.tileBindingManager.onTileTransformChanged(tileId, sprite);
+      this.tileBindingManager.onTileVisibilityChanged(tileId, sprite);
     } catch (_) {
     }
   }
@@ -1416,6 +1724,26 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // so a canvasReady hook would cause double-creation of tile sprites,
     // leaving orphan sprites in the scene that don't respond to updates.
 
+    // Seed missing tile elevation/range defaults from active level context
+    // before Foundry persists new tile documents. This keeps creation paths
+    // consistent regardless of whether placement came from drag/drop, API, or
+    // any other tool pipeline.
+    this._hookIds.push(['preCreateTile', Hooks.on('preCreateTile', (tileDoc, data) => {
+      try {
+        const scene = canvas?.scene;
+        if (!scene || tileDoc?.parent?.id !== scene.id) return;
+
+        const next = (data && typeof data === 'object')
+          ? foundry.utils.deepClone(data)
+          : {};
+
+        applyTileLevelDefaults(next, { scene });
+        tileDoc.updateSource(next);
+      } catch (_) {
+        // Fail-open: never block tile creation due default seeding issues.
+      }
+    })]);
+
     // Create new tile
     this._hookIds.push(['createTile', Hooks.on('createTile', (tileDoc, options, userId) => {
       log.debug(`Tile created: ${tileDoc.id}`);
@@ -1423,6 +1751,15 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
       this._invalidateTileWaterMaskCachesForTile(tileDoc);
       this._scheduleWaterCacheInvalidation(tileDoc?.id);
+
+      // Notify the EffectMaskRegistry so it can schedule recomposition.
+      // For create events, pass a synthetic change with all geometry keys
+      // so the registry classifies it as mask-relevant.
+      const reg = window.MapShine?.effectMaskRegistry;
+      if (reg) reg.onTileChange(tileDoc, { x: tileDoc.x, y: tileDoc.y, width: tileDoc.width, height: tileDoc.height });
+
+      // Eagerly load per-tile effect masks for the compositor pipeline.
+      this.loadAllTileMasks(tileDoc).catch(() => {});
     })]);
 
     // Update existing tile
@@ -1430,14 +1767,36 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       log.debug(`Tile updated: ${tileDoc.id}`, changes);
       this.updateTileSprite(tileDoc, changes);
 
-      // Only invalidate if the update could affect tile water contributions.
+      // Only invalidate water caches if the update could affect the water mask.
+      // The scene-wide water SDF is derived from the _Water mask texture, NOT
+      // from individual tile metadata flags. Tile flag changes (e.g. Levels
+      // visibility toggles, wall-height flags) must NOT trigger water
+      // invalidation — doing so destroys valid ground-floor water data every
+      // time the Levels module updates tile visibility during a floor switch.
       const keys = changes && typeof changes === 'object' ? Object.keys(changes) : null;
-      const relevant = !keys || keys.some((k) => (
-        k === 'x' || k === 'y' || k === 'width' || k === 'height' || k === 'rotation' || k === 'texture' || k === 'flags'
+      const waterRelevant = !keys || keys.some((k) => (
+        k === 'x' || k === 'y' || k === 'width' || k === 'height' || k === 'rotation' || k === 'texture'
       ));
-      if (relevant) {
+      if (waterRelevant) {
         this._invalidateTileWaterMaskCachesForTile(tileDoc, changes);
         this._scheduleWaterCacheInvalidation(tileDoc?.id);
+      }
+
+      // Delegate tile-change classification to the EffectMaskRegistry.
+      // The registry filters out flag-only changes (Levels visibility toggles,
+      // wall-height flags, TileMotion configs) and only schedules recomposition
+      // for geometry/texture/visibility/elevation changes.
+      const reg = window.MapShine?.effectMaskRegistry;
+      if (reg) reg.onTileChange(tileDoc, changes);
+
+      // Per-tile effect masks (specular, fluid, etc.) need reloading when
+      // texture changes. Flag changes may also be relevant for per-tile
+      // effect mask gating (e.g. bypassEffects), but those are handled
+      // by the effect binding path, not by loadAllTileMasks.
+      const texChanged = !keys || keys.includes('texture');
+      if (texChanged) {
+        this.clearTileEffectMasks(tileDoc.id);
+        this.loadAllTileMasks(tileDoc).catch(() => {});
       }
     })]);
 
@@ -1448,6 +1807,13 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
       this._invalidateTileWaterMaskCachesForTile(tileDoc);
       this._scheduleWaterCacheInvalidation(tileDoc?.id);
+
+      // Notify registry of tile removal (synthetic geometry change).
+      const reg = window.MapShine?.effectMaskRegistry;
+      if (reg) reg.onTileChange(tileDoc, { x: tileDoc.x, y: tileDoc.y, width: tileDoc.width, height: tileDoc.height });
+
+      // Clean up per-tile effect mask cache entry.
+      this.clearTileEffectMasks(tileDoc.id);
     })]);
 
     // Refresh tile (rendering changes)
@@ -2453,52 +2819,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       this.updateSpriteTransform(sprite, tileDoc);
       this.updateSpriteVisibility(sprite, tileDoc);
 
-      // Bind per-tile specular overlay.
-      // Even when emission is disabled, still bind as depth occluder so upper
-      // tiles block lower specular correctly.
+      // Route tile-ready event through the binding manager.
+      // The manager fans out to all registered TileBindableEffects (SpecularEffect,
+      // FluidEffect, and any future per-tile overlay effects). Each effect's
+      // loadTileMask() method handles its own async mask loading.
       try {
-        if (this.specularEffect) {
-          const tileId = tileDoc.id;
-          const emitSpecular = this._tileShouldEmitSpecular(tileDoc);
-          if (!emitSpecular) {
-            this.specularEffect.bindTileSprite(tileDoc, sprite, null, { emitSpecular: false });
-          } else {
-            // Bind occluder immediately so stacking behavior is stable while we
-            // asynchronously probe/load the optional _Specular mask.
-            this.specularEffect.bindTileSprite(tileDoc, sprite, null, { emitSpecular: false });
-
-            this.loadTileSpecularMaskTexture(tileDoc).then((specTex) => {
-              // Tile could have been removed/replaced while awaiting mask IO.
-              const current = this.tileSprites.get(tileId);
-              const currentSprite = current?.sprite;
-              if (!currentSprite || currentSprite !== sprite) return;
-
-              // Missing _Specular should still bind as a black occluder so
-              // upper tiles without masks block lower specular layers.
-              this.specularEffect.bindTileSprite(current.tileDoc || tileDoc, currentSprite, specTex, { emitSpecular: true });
-            }).catch(() => {
-              const current = this.tileSprites.get(tileId);
-              const currentSprite = current?.sprite;
-              if (!currentSprite || currentSprite !== sprite) return;
-              this.specularEffect.bindTileSprite(current.tileDoc || tileDoc, currentSprite, null, { emitSpecular: true });
-            });
-          }
-        }
-      } catch (_) {
-      }
-
-      // Bind per-tile Fluid overlay if a matching _Fluid mask exists.
-      try {
-        if (this.fluidEffect) {
-          this.loadTileFluidMaskTexture(tileDoc).then((fluidTex) => {
-            if (!fluidTex) {
-              this.fluidEffect?.unbindTileSprite?.(tileDoc.id);
-              return;
-            }
-            this.fluidEffect.bindTileSprite(tileDoc, sprite, fluidTex);
-          }).catch(() => {
-          });
-        }
+        this.tileBindingManager.onTileReady(tileDoc, sprite);
       } catch (_) {
       }
 
@@ -2690,46 +3016,14 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       this._updateWaterOccluderMeshTransform(sprite, targetDoc);
 
       try {
-        this.specularEffect?.syncTileSpriteTransform?.(tileDoc.id, sprite);
+        this.tileBindingManager.onTileTransformChanged(tileDoc.id, sprite);
       } catch (_) {
       }
 
-      try {
-        this.fluidEffect?.syncTileSpriteTransform?.(tileDoc.id, sprite);
-      } catch (_) {
-      }
-
-      // If flags affecting specular changed, refresh tile overlay binding.
-      // Emission-off tiles keep an occluder-only binding.
+      // If flags affecting per-tile overlays changed, rebind via the manager.
       if ('flags' in changes) {
         try {
-          if (this.specularEffect) {
-            if (!emitSpecular) {
-              // Keep occluder bound even when emission is disabled.
-              this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, null, { emitSpecular: false });
-            }
-            else {
-              // Specular was enabled (or remains enabled) but may not be bound yet.
-              // Bind immediately without requiring a texture change.
-              try {
-                const prevSrc = spriteData?.tileDoc?.texture?.src;
-                const prevParts = this._splitUrl(prevSrc);
-                if (prevParts?.pathNoExt) this._tileSpecularMaskResolvedUrl.delete(prevParts.pathNoExt);
-              } catch (_) {
-              }
-
-              const docForMask = {
-                id: tileDoc.id,
-                texture: { src: spriteData?.tileDoc?.texture?.src || tileDoc?.texture?.src },
-                flags: targetDoc.flags
-              };
-              this.loadTileSpecularMaskTexture(docForMask).then((specTex) => {
-                this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, specTex || null, { emitSpecular: true });
-              }).catch(() => {
-                this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, null, { emitSpecular: true });
-              });
-            }
-          }
+          this.tileBindingManager.onTileReady(targetDoc, sprite);
         } catch (_) {
         }
       }
@@ -2773,45 +3067,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         } catch (_) {
         }
 
+        // Rebind all per-tile overlays for the new texture via the binding manager.
         try {
-          if (this.specularEffect) {
-            if (!emitSpecular) {
-              this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, null, { emitSpecular: false });
-            } else {
-              const nextDoc = { texture: { src: changes.texture.src }, flags: targetDoc.flags };
-              this.loadTileSpecularMaskTexture(nextDoc).then((specTex) => {
-                this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, specTex || null, { emitSpecular: true });
-              }).catch(() => {
-                this.specularEffect.bindTileSprite({ id: tileDoc.id }, sprite, null, { emitSpecular: true });
-              });
-            }
-          }
-        } catch (_) {
-        }
-
-        // If the tile texture changes, its associated _Fluid mask may also change.
-        try {
-          const prevSrc = spriteData?.tileDoc?.texture?.src;
-          const nextSrc = changes.texture.src;
-          const prevParts = this._splitUrl(prevSrc);
-          const nextParts = this._splitUrl(nextSrc);
-          if (prevParts?.pathNoExt) this._tileFluidMaskResolvedUrl.delete(prevParts.pathNoExt);
-          if (nextParts?.pathNoExt) this._tileFluidMaskResolvedUrl.delete(nextParts.pathNoExt);
-        } catch (_) {
-        }
-
-        try {
-          if (this.fluidEffect) {
-            const nextDoc = { texture: { src: changes.texture.src }, flags: targetDoc.flags, id: tileDoc.id };
-            this.loadTileFluidMaskTexture(nextDoc).then((fluidTex) => {
-              if (!fluidTex) {
-                this.fluidEffect?.unbindTileSprite?.(tileDoc.id);
-                return;
-              }
-              this.fluidEffect.bindTileSprite({ id: tileDoc.id }, sprite, fluidTex);
-            }).catch(() => {
-            });
-          }
+          const nextDoc = { id: tileDoc.id, texture: { src: changes.texture.src }, flags: targetDoc.flags };
+          this.tileBindingManager.onTileReady(nextDoc, sprite);
         } catch (_) {
         }
 
@@ -2854,7 +3113,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       }
 
       try {
-        this.fluidEffect?.syncTileSpriteVisibility?.(tileDoc.id, sprite);
+        this.tileBindingManager.onTileVisibilityChanged(tileDoc.id, sprite);
       } catch (_) {
       }
     }
@@ -2881,12 +3140,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     try {
-      this.specularEffect?.syncTileSpriteTransform?.(tileDoc.id, spriteData.sprite);
-    } catch (_) {
-    }
-
-    try {
-      this.fluidEffect?.syncTileSpriteTransform?.(tileDoc.id, spriteData.sprite);
+      this.tileBindingManager.onTileTransformChanged(tileDoc.id, spriteData.sprite);
     } catch (_) {
     }
 
@@ -2894,7 +3148,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     this.updateSpriteVisibility(spriteData.sprite, tileDoc);
 
     try {
-      this.fluidEffect?.syncTileSpriteVisibility?.(tileDoc.id, spriteData.sprite);
+      this.tileBindingManager.onTileVisibilityChanged(tileDoc.id, spriteData.sprite);
     } catch (_) {
     }
   }
@@ -2911,12 +3165,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const { sprite } = spriteData;
 
     try {
-      this.specularEffect?.unbindTileSprite?.(tileId);
-    } catch (_) {
-    }
-
-    try {
-      this.fluidEffect?.unbindTileSprite?.(tileId);
+      this.tileBindingManager.onTileRemoved(tileId);
     } catch (_) {
     }
 
@@ -3677,6 +3926,18 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           this._normalizeTileTextureSource(texture, role);
           texture.needsUpdate = true;
           this.textureCache.set(texturePath, texture);
+          // P5-05: Register with budget tracker so VRAM usage is tracked.
+          const _tw = texSource.width || 0;
+          const _th = texSource.height || 0;
+          if (_tw > 0 && _th > 0) {
+            const _pixFmt = (role === 'DATA_MASK') ? 'ubyte' : 'ubyte';
+            getTextureBudgetTracker().register(
+              texture,
+              `tile:${_shortPath}`,
+              estimateTextureBytes(_tw, _th, _pixFmt),
+              { source: 'tileMask' }
+            );
+          }
           _ev(`tile.texture CREATED: ${_shortPath} (${texSource.width}x${texSource.height})`);
           return texture;
         })();
@@ -3726,6 +3987,18 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
             this._normalizeTileTextureSource(texture, role);
             texture.needsUpdate = true;
             this.textureCache.set(texturePath, texture);
+            // P5-05: Register with budget tracker (TextureLoader fallback path).
+            const _img = texture.image;
+            const _tw2 = _img?.width || _img?.naturalWidth || 0;
+            const _th2 = _img?.height || _img?.naturalHeight || 0;
+            if (_tw2 > 0 && _th2 > 0) {
+              getTextureBudgetTracker().register(
+                texture,
+                `tile:${_shortPath}`,
+                estimateTextureBytes(_tw2, _th2, 'ubyte'),
+                { source: 'tileMask' }
+              );
+            }
             resolve(texture);
           },
           undefined,
@@ -3782,6 +4055,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     this._weatherRoofTileIds.clear();
 
     if (clearCache) {
+      // P5-05: Unregister all cached textures from the budget tracker.
+      const budget = getTextureBudgetTracker();
+      for (const texture of this.textureCache.values()) {
+        try { budget.unregister(texture); } catch (_) {}
+      }
       for (const texture of this.textureCache.values()) {
         try {
           if (texture?.image && typeof texture.image.close === 'function') {
@@ -3813,6 +4091,16 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       this._tileSpecularMaskPromises.clear();
       this._tileSpecularMaskResolvedUrl.clear();
       this._tileSpecularMaskResolvePromises.clear();
+
+      // Clear generic per-tile effect mask caches and reset VRAM tracker.
+      for (const tileMap of this._tileEffectMasks.values()) {
+        for (const entry of tileMap.values()) {
+          try { entry?.texture?.dispose?.(); } catch (_) {}
+        }
+      }
+      this._tileEffectMasks.clear();
+      this._tileEffectMaskResolvePromises.clear();
+      this._tileEffectMaskVramBytes = 0;
       
       this.initialized = false;
     }

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @fileoverview Scene composer - creates 2.5D scene from battlemap assets
  * Handles scene setup, camera positioning, and grid alignment
  * @module scene/composer
@@ -10,6 +10,8 @@ import { weatherController } from '../core/WeatherController.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { isTileOverhead } from './tile-manager.js';
+import { isLevelsEnabledForScene, tileHasLevelsRange, readTileLevelsFlags, readSceneLevelsFlag } from '../foundry/levels-scene-flags.js';
+import { GpuSceneMaskCompositor } from '../masks/GpuSceneMaskCompositor.js';
 
 const log = createLogger('SceneComposer');
 
@@ -20,7 +22,7 @@ let _lpSeq = 0;
 // <1.0 = flatter perspective (more orthographic-feeling)
 // >1.0 = more exaggerated perspective
 // NOTE: Values very far from 1.0 can introduce slight desync vs PIXI; small tweaks
-// like 0.9–0.95 are usually safe. Adjust to taste.
+// like 0.9â€“0.95 are usually safe. Adjust to taste.
 const PERSPECTIVE_STRENGTH = 1.0;
 
 /**
@@ -64,6 +66,17 @@ export class SceneComposer {
     // scene rebuilds (including grid type changes) do not depend on transient
     // canvas/tile readiness.
     this._lastMaskBasePath = null;
+
+    /**
+     * Per-tile mask compositor â€” composes per-tile suffix masks into
+     * scene-space render targets (GPU) or canvases (CPU fallback).
+     * Replaces the single-tile mask selection logic for multi-tile and
+     * multi-floor scenes. The GPU compositor caches render targets per
+     * floor and provides getCpuPixels() for particle spawn scanning.
+     * @type {GpuSceneMaskCompositor}
+     * @private
+     */
+    this._sceneMaskCompositor = new GpuSceneMaskCompositor();
   }
 
   _markOwnedTexture(texture) {
@@ -173,457 +186,76 @@ export class SceneComposer {
     }
   }
 
-  _getLargeSceneMaskTiles(foundryScene = null) {
-    try {
-      // Prefer canvas data when available, but fall back to the provided Foundry scene.
-      // During some grid transitions (notably hex), canvas state can be temporarily
-      // inconsistent while Foundry is rebuilding dimensions.
-      let tiles = canvas?.scene?.tiles ?? null;
-      if (!tiles || (typeof tiles.size === 'number' && tiles.size === 0)) {
-        tiles = foundryScene?.tiles ?? null;
+  // _isTileInLevelBand, _getActiveLevelTiles, _getLargeSceneMaskTiles,
+  // _computeSceneMaskCompositeLayout, _buildCompositeSceneMasks,
+  // _buildCompositeSceneAlbedo, rebuildMasksForActiveLevel, and
+  // preloadMasksForAllLevels have been moved to GpuSceneMaskCompositor
+  // (scripts/masks/GpuSceneMaskCompositor.js) as part of P6-03 to P6-08.
+  // Use compositor.composeFloor() and compositor.preloadAllFloors() instead.
+
+  /**
+   * @deprecated Use GpuSceneMaskCompositor._isTileInLevelBand() instead.
+   * Kept temporarily for _resolveMaskSourceSrc which still calls _getLargeSceneMaskTiles.
+   */
+  _isTileInLevelBand(tileDoc, levelContext) {
+    const bandBottom = Number(levelContext.bottom);
+    const bandTop = Number(levelContext.top);
+    if (!Number.isFinite(bandBottom) || !Number.isFinite(bandTop)) return true;
+
+    if (tileHasLevelsRange(tileDoc)) {
+      const flags = readTileLevelsFlags(tileDoc);
+      const tileBottom = Number(flags.rangeBottom);
+      const tileTop = Number(flags.rangeTop);
+
+      if (Number.isFinite(tileBottom) && Number.isFinite(tileTop)) {
+        // Floor tile: must overlap the active band with exclusive boundaries.
+        // Uses <= and >= to match updateSpriteVisibility in tile-manager.js
+        // so that a tile whose rangeBottom == bandTop is NOT included
+        // (it belongs to the floor above).
+        return !(tileTop <= bandBottom || tileBottom >= bandTop);
+      } else if (Number.isFinite(tileBottom)) {
+        // Roof tile (rangeTop=Infinity): belongs to its originating floor.
+        // Include only if the roof's bottom is strictly within the active band.
+        return tileBottom >= bandBottom && tileBottom < bandTop;
       }
-      const d = canvas?.dimensions ?? foundryScene?.dimensions;
-
-      if (!tiles || !d) return [];
-
-      // Prefer explicit sceneRect, otherwise derive from dimension fields.
-      const sr = d.sceneRect ?? {
-        x: Number.isFinite(d.sceneX) ? d.sceneX : 0,
-        y: Number.isFinite(d.sceneY) ? d.sceneY : 0,
-        width: d.sceneWidth ?? d.width ?? 0,
-        height: d.sceneHeight ?? d.height ?? 0
-      };
-
-      if (!sr || !Number.isFinite(sr.width) || !Number.isFinite(sr.height)) return [];
-
-      const sceneX = sr.x ?? 0;
-      const sceneY = sr.y ?? 0;
-      const sceneW = sr.width ?? 0;
-      const sceneH = sr.height ?? 0;
-      if (!sceneW || !sceneH) return [];
-
-      const tol = 1;
-      const minArea = sceneW * sceneH * 0.2;
-      const out = [];
-
-      // tiles may be an Array, a Foundry Collection (with .contents), or something iterable.
-      const tileIter = Array.isArray(tiles)
-        ? tiles
-        : (Array.isArray(tiles?.contents) ? tiles.contents : (tiles?.values?.() ?? tiles));
-      for (const tileDoc of tileIter) {
-        const src = tileDoc?.texture?.src;
-        if (typeof src !== 'string' || src.trim().length === 0) continue;
-
-        // Exclude overhead/roof tiles from composite candidates.
-        // These composites are used to build scene-wide masks and (optionally) a base albedo.
-        // If an overhead tile is included, its color can be baked into the ground pass and
-        // appear as a persistent "ghost" when the actual overhead sprite fades out.
-        try {
-          if (isTileOverhead(tileDoc)) continue;
-        } catch (e) {
-        }
-
-        const x = Number.isFinite(tileDoc?.x) ? tileDoc.x : 0;
-        const y = Number.isFinite(tileDoc?.y) ? tileDoc.y : 0;
-        const w = Number.isFinite(tileDoc?.width) ? tileDoc.width : 0;
-        const h = Number.isFinite(tileDoc?.height) ? tileDoc.height : 0;
-        if (!w || !h) continue;
-
-        const area = w * h;
-        if (area < minArea) continue;
-
-        const yAligned = Math.abs(y - sceneY) <= tol && Math.abs(h - sceneH) <= tol;
-        if (!yAligned) continue;
-
-        out.push({
-          tileDoc,
-          src: src.trim(),
-          basePath: this.extractBasePath(src.trim()),
-          rect: { x, y, w, h }
-        });
-      }
-
-      out.sort((a, b) => (a.rect.x - b.rect.x));
-      return out;
-    } catch (e) {
     }
-    return [];
+
+    // Fallback: use tile elevation directly.
+    // Exclusive top boundary: elev must be >= bottom and strictly < top.
+    const elev = Number(tileDoc?.elevation);
+    if (Number.isFinite(elev)) {
+      return elev >= bandBottom && elev < bandTop;
+    }
+
+    // No elevation data â€” include by default (fail open).
+    return true;
   }
 
-  _computeSceneMaskCompositeLayout(tiles, foundryScene = null) {
-    try {
-      const d = canvas?.dimensions ?? foundryScene?.dimensions;
-      const sr = d?.sceneRect ?? {
-        x: Number.isFinite(d.sceneX) ? d.sceneX : 0,
-        y: Number.isFinite(d.sceneY) ? d.sceneY : 0,
-        width: d.sceneWidth ?? d.width ?? 0,
-        height: d.sceneHeight ?? d.height ?? 0
-      };
+  // _getActiveLevelTiles, _getLargeSceneMaskTiles, _computeSceneMaskCompositeLayout,
+  // _buildCompositeSceneMasks, _buildCompositeSceneAlbedo, rebuildMasksForActiveLevel,
+  // and preloadMasksForAllLevels removed â€” now owned by GpuSceneMaskCompositor.
+  // See scripts/masks/GpuSceneMaskCompositor.js composeFloor() / preloadAllFloors().
 
-      if (!sr) return null;
-
-      const sceneX = sr.x ?? 0;
-      const sceneY = sr.y ?? 0;
-      const sceneW = sr.width ?? 0;
-      const sceneH = sr.height ?? 0;
-      if (!sceneW || !sceneH) return null;
-
-      if (!Array.isArray(tiles) || tiles.length < 2) return null;
-
-      const tol = 1;
-      const segments = [];
-      for (const t of tiles) {
-        const r = t?.rect;
-        if (!r) continue;
-        const coversY = Math.abs(r.y - sceneY) <= tol && Math.abs(r.h - sceneH) <= tol;
-        if (!coversY) continue;
-        const x0 = r.x;
-        const x1 = r.x + r.w;
-        const sx0 = Math.max(sceneX, Math.min(sceneX + sceneW, x0));
-        const sx1 = Math.max(sceneX, Math.min(sceneX + sceneW, x1));
-        if (sx1 - sx0 <= tol) continue;
-
-        segments.push({
-          basePath: t.basePath,
-          src: t.src,
-          tileDoc: t.tileDoc,
-          sceneX,
-          sceneY,
-          sceneW,
-          sceneH,
-          segX0: sx0,
-          segX1: sx1
-        });
-      }
-
-      if (segments.length < 2) return null;
-
-      segments.sort((a, b) => a.segX0 - b.segX0);
-      let covered = 0;
-      let cursor = sceneX;
-      for (const s of segments) {
-        if (s.segX1 <= cursor + tol) continue;
-        if (s.segX0 > cursor + tol) {
-          cursor = s.segX0;
-        }
-        const add = Math.max(0, s.segX1 - cursor);
-        covered += add;
-        cursor = Math.max(cursor, s.segX1);
-      }
-
-      const coverFrac = covered / sceneW;
-      if (coverFrac < 0.95) return null;
-
-      return { sceneX, sceneY, sceneW, sceneH, segments };
-    } catch (e) {
-      return null;
-    }
+  /**
+   * @deprecated Kept only for _resolveMaskSourceSrc. Use GpuSceneMaskCompositor instead.
+   */
+  _getActiveLevelTiles(foundryScene = null, levelContext = null) {
+    return this._sceneMaskCompositor?._getActiveLevelTiles?.(foundryScene, levelContext) ?? [];
   }
 
-  _getFullSceneMaskTileBasePaths() {
-    try {
-      const tiles = canvas?.scene?.tiles;
-      const d = canvas?.dimensions;
-      const sr = d?.sceneRect;
-      if (!tiles || !sr) return [];
-
-      const sceneX = sr.x ?? 0;
-      const sceneY = sr.y ?? 0;
-      const sceneW = sr.width ?? 0;
-      const sceneH = sr.height ?? 0;
-      if (!sceneW || !sceneH) return [];
-      const tol = 1;
-
-      const out = new Set();
-      for (const tileDoc of tiles) {
-        if (tileDoc?.hidden) continue;
-
-        // Exclude overhead/roof tiles from union-mask basePaths.
-        // Union masks are intended for scene-wide ground masks, not roofs.
-        try {
-          if (isTileOverhead(tileDoc)) continue;
-        } catch (e) {
-        }
-
-        const src = tileDoc?.texture?.src;
-        if (typeof src !== 'string' || src.trim().length === 0) continue;
-
-        const x = Number.isFinite(tileDoc?.x) ? tileDoc.x : 0;
-        const y = Number.isFinite(tileDoc?.y) ? tileDoc.y : 0;
-        const w = Number.isFinite(tileDoc?.width) ? tileDoc.width : 0;
-        const h = Number.isFinite(tileDoc?.height) ? tileDoc.height : 0;
-        if (!w || !h) continue;
-
-        const coversScene = (
-          Math.abs(x - sceneX) <= tol &&
-          Math.abs(y - sceneY) <= tol &&
-          Math.abs(w - sceneW) <= tol &&
-          Math.abs(h - sceneH) <= tol
-        );
-        if (!coversScene) continue;
-
-        out.add(this.extractBasePath(src.trim()));
-      }
-
-      return Array.from(out);
-    } catch (e) {
-      return [];
-    }
+  /** @deprecated Use GpuSceneMaskCompositor instead. */
+  _getLargeSceneMaskTiles(foundryScene = null, levelContext = null) {
+    return this._sceneMaskCompositor?._getLargeSceneMaskTiles?.(foundryScene, levelContext) ?? [];
   }
 
-  async _buildUnionMaskForBasePaths(maskId, basePaths) {
-    const THREE = window.THREE;
-    if (!THREE) return null;
-    if (!maskId || !Array.isArray(basePaths) || basePaths.length === 0) return null;
+  // â”€â”€ Removed legacy methods (now in GpuSceneMaskCompositor) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // _getActiveLevelTilesBody, _getLargeSceneMaskTilesBody, _computeSceneMaskCompositeLayout,
+  // _getFullSceneMaskTileBasePaths, _buildUnionMaskForBasePaths, _buildCompositeSceneMasks,
+  // _buildCompositeSceneAlbedo, rebuildMasksForActiveLevel, preloadMasksForAllLevels
+  // were removed as part of P6-03 to P6-08.
 
-    const registry = assetLoader.getEffectMaskRegistry?.() || {};
-    const def = registry?.[maskId] || null;
-    const suffix = def?.suffix;
-    if (typeof suffix !== 'string' || !suffix) return null;
-
-    const sourceMasks = [];
-    let outW = 0;
-    let outH = 0;
-
-    for (const basePath of basePaths) {
-      if (typeof basePath !== 'string' || !basePath.trim()) continue;
-      const masks = await this._loadMasksOnlyForBasePath(basePath.trim());
-      const m = masks.find((x) => x?.id === maskId || x?.type === maskId);
-      const tex = m?.texture;
-      const img = tex?.image;
-      if (!img) continue;
-
-      const w = img?.width ?? 0;
-      const h = img?.height ?? 0;
-      if (!w || !h) continue;
-
-      outW = Math.max(outW, w);
-      outH = Math.max(outH, h);
-      sourceMasks.push({ tex, img });
-    }
-
-    if (!sourceMasks.length || !outW || !outH) return null;
-
-    const canvasEl = document.createElement('canvas');
-    canvasEl.width = outW;
-    canvasEl.height = outH;
-    const ctx = canvasEl.getContext('2d');
-    if (!ctx) return null;
-
-    ctx.clearRect(0, 0, outW, outH);
-
-    let prevCompositeOp = null;
-    try {
-      prevCompositeOp = ctx.globalCompositeOperation;
-      ctx.globalCompositeOperation = 'lighten';
-    } catch (e) {
-      prevCompositeOp = null;
-    }
-
-    for (const s of sourceMasks) {
-      try {
-        ctx.drawImage(s.img, 0, 0, s.img.width, s.img.height, 0, 0, outW, outH);
-      } catch (e) {
-      }
-    }
-
-    if (prevCompositeOp !== null) {
-      try {
-        ctx.globalCompositeOperation = prevCompositeOp;
-      } catch (e) {
-      }
-    }
-
-    const outTex = this._markOwnedTexture(new THREE.Texture(canvasEl));
-    outTex.needsUpdate = true;
-
-    const isDataTexture = ['normal', 'roughness', 'water'].includes(maskId);
-    if (THREE.SRGBColorSpace && !isDataTexture) {
-      outTex.colorSpace = THREE.SRGBColorSpace;
-    }
-
-    outTex.minFilter = THREE.LinearFilter;
-    outTex.magFilter = THREE.LinearFilter;
-    outTex.generateMipmaps = false;
-    outTex.flipY = false;
-
-    return {
-      id: maskId,
-      suffix,
-      type: maskId,
-      texture: outTex,
-      required: !!def?.required
-    };
-  }
-
-  async _buildCompositeSceneMasks(layout, perBaseMasks) {
-    const THREE = window.THREE;
-    if (!THREE || !layout) return null;
-
-    const renderer = window.MapShine?.renderer;
-    const maxTex = renderer?.capabilities?.maxTextureSize;
-    const cap = Number.isFinite(maxTex) ? Math.max(256, Math.floor(maxTex)) : 4096;
-    const hardCap = Math.min(cap, 8192);
-
-    const sceneW = layout.sceneW;
-    const sceneH = layout.sceneH;
-    const scale = Math.min(1.0, hardCap / Math.max(1, sceneW), hardCap / Math.max(1, sceneH));
-
-    const outW = Math.max(1, Math.round(sceneW * scale));
-    const outH = Math.max(1, Math.round(sceneH * scale));
-
-    const registry = assetLoader.getEffectMaskRegistry?.() || {};
-    const compositeMasks = [];
-
-    for (const [maskId, def] of Object.entries(registry)) {
-      const suffix = def?.suffix;
-      if (typeof suffix !== 'string' || !suffix) continue;
-
-      const canvasEl = document.createElement('canvas');
-      canvasEl.width = outW;
-      canvasEl.height = outH;
-      const ctx = canvasEl.getContext('2d');
-      if (!ctx) continue;
-
-      ctx.clearRect(0, 0, outW, outH);
-
-      let prevCompositeOp = null;
-      if (maskId === 'water') {
-        try {
-          prevCompositeOp = ctx.globalCompositeOperation;
-          ctx.globalCompositeOperation = 'lighten';
-        } catch (e) {
-          prevCompositeOp = null;
-        }
-      }
-
-      let any = false;
-
-      for (const seg of layout.segments) {
-        const masks = perBaseMasks.get(seg.basePath) || [];
-        const m = masks.find((x) => x?.id === maskId || x?.type === maskId);
-        const tex = m?.texture;
-        const img = tex?.image;
-        if (!img) continue;
-
-        const segU0 = (seg.segX0 - layout.sceneX) / layout.sceneW;
-        const segU1 = (seg.segX1 - layout.sceneX) / layout.sceneW;
-        const dx = Math.round(segU0 * outW);
-        const dw = Math.max(1, Math.round((segU1 - segU0) * outW));
-
-        try {
-          ctx.drawImage(img, 0, 0, img.width, img.height, dx, 0, dw, outH);
-          any = true;
-        } catch (e) {
-        }
-      }
-
-      if (prevCompositeOp !== null) {
-        try {
-          ctx.globalCompositeOperation = prevCompositeOp;
-        } catch (e) {
-        }
-      }
-
-      if (!any) continue;
-
-      const outTex = this._markOwnedTexture(new THREE.Texture(canvasEl));
-      outTex.needsUpdate = true;
-
-      const isDataTexture = ['normal', 'roughness', 'water'].includes(maskId);
-      if (THREE.SRGBColorSpace && !isDataTexture) {
-        outTex.colorSpace = THREE.SRGBColorSpace;
-      }
-
-      outTex.minFilter = THREE.LinearFilter;
-      outTex.magFilter = THREE.LinearFilter;
-      outTex.generateMipmaps = false;
-
-      // Invariant: MapShine mask textures use flipY=false, and coordinate
-      // alignment is handled via geometry/shader conventions.
-      outTex.flipY = false;
-
-      compositeMasks.push({
-        id: maskId,
-        suffix,
-        type: maskId,
-        texture: outTex,
-        required: !!def?.required
-      });
-    }
-
-    return { masks: compositeMasks, width: outW, height: outH };
-  }
-
-  async _buildCompositeSceneAlbedo(layout) {
-    const THREE = window.THREE;
-    if (!THREE || !layout) return null;
-
-    const renderer = window.MapShine?.renderer;
-    const maxTex = renderer?.capabilities?.maxTextureSize;
-    const cap = Number.isFinite(maxTex) ? Math.max(256, Math.floor(maxTex)) : 4096;
-    const hardCap = Math.min(cap, 8192);
-
-    const sceneW = layout.sceneW;
-    const sceneH = layout.sceneH;
-    const scale = Math.min(1.0, hardCap / Math.max(1, sceneW), hardCap / Math.max(1, sceneH));
-
-    const outW = Math.max(1, Math.round(sceneW * scale));
-    const outH = Math.max(1, Math.round(sceneH * scale));
-
-    const canvasEl = document.createElement('canvas');
-    canvasEl.width = outW;
-    canvasEl.height = outH;
-    const ctx = canvasEl.getContext('2d');
-    if (!ctx) return null;
-
-    ctx.clearRect(0, 0, outW, outH);
-
-    const loadTextureFn = globalThis.foundry?.canvas?.loadTexture ?? globalThis.loadTexture;
-    if (!loadTextureFn) return null;
-
-    let any = false;
-
-    for (const seg of layout.segments) {
-      const src = seg?.src;
-      if (typeof src !== 'string' || !src.trim()) continue;
-
-      let img = null;
-      try {
-        const pixiTexture = await loadTextureFn(src.trim());
-        const resource = pixiTexture?.baseTexture?.resource;
-        img = resource?.source || null;
-      } catch (e) {
-        img = null;
-      }
-
-      if (!img) continue;
-
-      const segU0 = (seg.segX0 - layout.sceneX) / layout.sceneW;
-      const segU1 = (seg.segX1 - layout.sceneX) / layout.sceneW;
-      const dx = Math.round(segU0 * outW);
-      const dw = Math.max(1, Math.round((segU1 - segU0) * outW));
-
-      try {
-        ctx.drawImage(img, 0, 0, img.width, img.height, dx, 0, dw, outH);
-        any = true;
-      } catch (e) {
-      }
-    }
-
-    if (!any) return null;
-
-    const outTex = this._markOwnedTexture(new THREE.Texture(canvasEl));
-    outTex.needsUpdate = true;
-    if (THREE.SRGBColorSpace) {
-      outTex.colorSpace = THREE.SRGBColorSpace;
-    }
-    outTex.minFilter = THREE.LinearFilter;
-    outTex.magFilter = THREE.LinearFilter;
-    outTex.generateMipmaps = false;
-    outTex.flipY = false;
-
-    return { texture: outTex, width: outW, height: outH };
+  getCpuPixels(maskType) {
+    return this._sceneMaskCompositor?.getCpuPixels?.(maskType) ?? null;
   }
 
   _resolveMaskSourceSrc(foundryScene) {
@@ -672,7 +304,7 @@ export class SceneComposer {
       if (!Array.isArray(candidates) || candidates.length === 0) {
         // Fallback: choose the largest visible tile in the scene.
         // Some scenes (especially with non-square grid geometry) may temporarily
-        // fail our “sceneRect-aligned” heuristic due to fractional offsets.
+        // fail our â€œsceneRect-alignedâ€ heuristic due to fractional offsets.
         let tiles = canvas?.scene?.tiles ?? foundryScene?.tiles ?? null;
         if (tiles && typeof tiles.size === 'number' && tiles.size === 0) tiles = foundryScene?.tiles ?? null;
 
@@ -741,6 +373,7 @@ export class SceneComposer {
         score += Math.min(10, Math.log2(area + 1));
 
         // Prefer lower elevations
+        const elev = Number(tileDoc?.elevation ?? 0);
         score -= elev * 0.01;
 
         if (score > bestScore) {
@@ -937,194 +570,6 @@ export class SceneComposer {
     if (bgPath && (result?.bundle?.masks?.length > 0)) {
       this._lastMaskBasePath = bgPath;
     }
-
-    this._maskCompositeInfo = null;
-    this._albedoCompositeInfo = null;
-    let compositeLayout = null;
-    try {
-      if (_isDbg) _dlp.begin('sc.compositeLayout', 'texture');
-      if (doLoadProfile) {
-        try {
-          lp.begin(`sceneComposer.composite.layout:${spanToken}`);
-        } catch (e) {
-        }
-      }
-      const tileCandidates = this._getLargeSceneMaskTiles(foundryScene);
-      const layout = this._computeSceneMaskCompositeLayout(tileCandidates, foundryScene);
-      compositeLayout = layout;
-      if (doLoadProfile) {
-        try {
-          lp.end(`sceneComposer.composite.layout:${spanToken}`, { segments: layout?.segments?.length ?? 0 });
-        } catch (e) {
-        }
-      }
-      if (_isDbg) _dlp.end('sc.compositeLayout');
-
-      if (layout) {
-        const perBaseMasks = new Map();
-        if (_isDbg) _dlp.begin('sc.compositeLoadPerBase', 'texture');
-        if (doLoadProfile) {
-          try {
-            lp.begin(`sceneComposer.composite.loadPerBaseMasks:${spanToken}`, { bases: layout?.segments?.length ?? 0 });
-          } catch (e) {
-          }
-        }
-        try {
-          for (const seg of layout.segments) {
-            if (!seg?.basePath || perBaseMasks.has(seg.basePath)) continue;
-            const masks = await this._loadMasksOnlyForBasePath(seg.basePath);
-            perBaseMasks.set(seg.basePath, masks);
-          }
-        } finally {
-          if (_isDbg) _dlp.end('sc.compositeLoadPerBase');
-          if (doLoadProfile) {
-            try {
-              lp.end(`sceneComposer.composite.loadPerBaseMasks:${spanToken}`, { uniqueBases: perBaseMasks.size });
-            } catch (e) {
-            }
-          }
-        }
-
-        if (_isDbg) _dlp.begin('sc.compositeBuildMasks', 'texture');
-        if (doLoadProfile) {
-          try {
-            lp.begin(`sceneComposer.composite.buildMasks:${spanToken}`, { uniqueBases: perBaseMasks.size });
-          } catch (e) {
-          }
-        }
-        let composite = null;
-        try {
-          composite = await this._buildCompositeSceneMasks(layout, perBaseMasks);
-        } finally {
-          if (_isDbg) _dlp.end('sc.compositeBuildMasks');
-          if (doLoadProfile) {
-            try {
-              lp.end(`sceneComposer.composite.buildMasks:${spanToken}`, { outW: composite?.width ?? null, outH: composite?.height ?? null, maskCount: composite?.masks?.length ?? 0 });
-            } catch (e) {
-            }
-          }
-        }
-
-        if (composite?.masks?.length) {
-          result = {
-            success: true,
-            bundle: {
-              masks: composite.masks,
-              isMapShineCompatible: true
-            },
-            warnings: result?.warnings || [],
-            error: null
-          };
-
-          this._maskCompositeInfo = {
-            enabled: true,
-            sceneRect: { x: layout.sceneX, y: layout.sceneY, w: layout.sceneW, h: layout.sceneH },
-            outputSize: { w: composite.width, h: composite.height },
-            segments: layout.segments.map((s) => ({
-              basePath: s.basePath,
-              src: s.src,
-              segX0: s.segX0,
-              segX1: s.segX1
-            }))
-          };
-        }
-      }
-    } catch (e) {
-      if (doLoadProfile) {
-        try {
-          lp.mark(`sceneComposer.composite.error:${spanToken}`, { message: String(e?.message ?? e) });
-        } catch (e2) {
-        }
-      }
-    }
-
-    if (!hasBackgroundImage && !baseTexture && compositeLayout) {
-      try {
-        if (_isDbg) _dlp.begin('sc.compositeBuildAlbedo', 'texture');
-        if (doLoadProfile) {
-          try {
-            lp.begin(`sceneComposer.composite.buildAlbedo:${spanToken}`);
-          } catch (e) {
-          }
-        }
-        const compositeAlbedo = await this._buildCompositeSceneAlbedo(compositeLayout);
-        if (_isDbg) _dlp.end('sc.compositeBuildAlbedo');
-        if (doLoadProfile) {
-          try {
-            lp.end(`sceneComposer.composite.buildAlbedo:${spanToken}`, { outW: compositeAlbedo?.width ?? null, outH: compositeAlbedo?.height ?? null });
-          } catch (e) {
-          }
-        }
-        if (compositeAlbedo?.texture) {
-          baseTexture = compositeAlbedo.texture;
-          this._albedoCompositeInfo = {
-            enabled: true,
-            outputSize: { w: compositeAlbedo.width, h: compositeAlbedo.height },
-            segments: compositeLayout.segments.map((s) => ({
-              basePath: s.basePath,
-              src: s.src,
-              segX0: s.segX0,
-              segX1: s.segX1
-            }))
-          };
-        }
-      } catch (e) {
-        if (doLoadProfile) {
-          try {
-            lp.mark(`sceneComposer.composite.albedoError:${spanToken}`, { message: String(e?.message ?? e) });
-          } catch (e2) {
-          }
-        }
-      }
-    }
-
-    if (_isDbg) _dlp.begin('sc.unionMasks', 'texture');
-    try {
-      const fullSceneBasePaths = this._getFullSceneMaskTileBasePaths();
-      const moduleId = 'map-shine-advanced';
-      const unionWaterEnabled = foundryScene?.getFlag?.(moduleId, 'unionWaterMasks')
-        ?? foundryScene?.flags?.[moduleId]?.unionWaterMasks;
-
-      if (unionWaterEnabled && fullSceneBasePaths.length > 1) {
-        if (doLoadProfile) {
-          try {
-            lp.begin(`sceneComposer.unionMasks.water:${spanToken}`, { basePaths: fullSceneBasePaths.length });
-          } catch (e) {
-          }
-        }
-        let unionWater = null;
-        try {
-          unionWater = await this._buildUnionMaskForBasePaths('water', fullSceneBasePaths);
-        } finally {
-          if (doLoadProfile) {
-            try {
-              lp.end(`sceneComposer.unionMasks.water:${spanToken}`, { success: !!unionWater });
-            } catch (e) {
-            }
-          }
-        }
-        if (unionWater) {
-          if (!result || typeof result !== 'object') result = { success: false, bundle: { masks: [] }, warnings: [] };
-          if (!result.bundle || typeof result.bundle !== 'object') result.bundle = { masks: [] };
-
-          const masks = Array.isArray(result.bundle.masks) ? result.bundle.masks : [];
-          const next = masks.filter((m) => (m?.id !== 'water' && m?.type !== 'water'));
-          next.push(unionWater);
-          result.bundle.masks = next;
-
-          result.success = true;
-          result.bundle.isMapShineCompatible = true;
-        }
-      }
-    } catch (e) {
-      if (doLoadProfile) {
-        try {
-          lp.mark(`sceneComposer.unionMasks.error:${spanToken}`, { message: String(e?.message ?? e) });
-        } catch (e2) {
-        }
-      }
-    }
-    if (_isDbg) _dlp.end('sc.unionMasks');
 
     // Create bundle with Foundry's texture + any masks that loaded successfully
     this.currentBundle = {
@@ -1542,7 +987,7 @@ export class SceneComposer {
     this.cameraDistance = CAMERA_HEIGHT;
     this.baseDistance = CAMERA_HEIGHT;
 
-    log.info(`Perspective camera setup (FOV zoom): height=${CAMERA_HEIGHT}, groundZ=${groundZ}, distance=${distanceToGround}, baseFOV=${baseFovDegrees.toFixed(2)}°, center (${centerX}, ${centerY}), viewport ${viewportWidth}x${viewportHeight}`);
+    log.info(`Perspective camera setup (FOV zoom): height=${CAMERA_HEIGHT}, groundZ=${groundZ}, distance=${distanceToGround}, baseFOV=${baseFovDegrees.toFixed(2)}Â°, center (${centerX}, ${centerY}), viewport ${viewportWidth}x${viewportHeight}`);
   }
 
   /**
@@ -1588,7 +1033,7 @@ export class SceneComposer {
     this.baseViewportWidth = viewportWidth;
     this.baseViewportHeight = viewportHeight;
 
-    log.debug(`Camera resized: ${viewportWidth}x${viewportHeight}, FOV=${this.camera.fov.toFixed(2)}°`);
+    log.debug(`Camera resized: ${viewportWidth}x${viewportHeight}, FOV=${this.camera.fov.toFixed(2)}Â°`);
   }
 
   /**
@@ -1688,7 +1133,7 @@ export class SceneComposer {
     this.camera.fov = newFov;
     this.camera.updateProjectionMatrix();
 
-    log.debug(`Camera zoom: ${newZoom.toFixed(3)} (FOV=${newFov.toFixed(2)}°, limits: ${limits.min.toFixed(3)}-${limits.max.toFixed(3)})`);
+    log.debug(`Camera zoom: ${newZoom.toFixed(3)} (FOV=${newFov.toFixed(2)}Â°, limits: ${limits.min.toFixed(3)}-${limits.max.toFixed(3)})`);
   }
 
   /**
@@ -1732,6 +1177,11 @@ export class SceneComposer {
       this._disposeOwnedTexture(bundle?.baseTexture);
     } catch (e) {
     }
+
+    // Dispose the per-tile mask compositor.
+    try {
+      this._sceneMaskCompositor?.dispose?.();
+    } catch (_) {}
 
     // Dispose background mesh resources (not covered by basePlaneMesh disposal).
     if (this._backgroundMesh) {
@@ -1786,6 +1236,7 @@ export class SceneComposer {
 
     this.camera = null;
     this.currentBundle = null;
+
 
     try {
       this._ownedTextures.clear();

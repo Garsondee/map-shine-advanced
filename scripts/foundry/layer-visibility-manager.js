@@ -26,6 +26,7 @@ export class LayerVisibilityManager {
       'background',
       'grid',
       'primary',
+      'tiles',
       'tokens',
       'weather',
       'environment'
@@ -48,7 +49,6 @@ export class LayerVisibilityManager {
      * @type {Set<string>}
      */
     this.editOnlyLayers = new Set([
-      'tiles',
       'lighting',
       'sounds',
       'regions'
@@ -156,17 +156,6 @@ export class LayerVisibilityManager {
     for (const name of this.editOnlyLayers) {
       const isActive = this.isLayerActive(name, activeName);
       this.setLayerVisibility(name, isActive, isActive ? 'edit-active' : 'edit-inactive');
-
-      // Tiles layer is a special case:
-      // - In Gameplay/Hybrid mode, Three.js renders tiles.
-      // - But we still sometimes need the PIXI Tiles tool for editing.
-      // We keep the layer itself toggleable for edit mode, but *force* its
-      // placeables fully invisible when not actively editing to prevent
-      // double-rendering ("ghost" duplicate tiles).
-      if (name === 'tiles') {
-        if (isActive) this._setPixiTileVisualAlpha(1);
-        else this._setPixiTileVisualAlpha(0);
-      }
     }
     
     // Preserve custom layers (always visible)

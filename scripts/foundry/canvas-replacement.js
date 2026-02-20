@@ -60,6 +60,7 @@ import {
   SkyColorEffect,
   VisionModeEffect
 } from './effect-wiring.js';
+import { TileEffectBindingManager } from '../scene/TileEffectBindingManager.js';
 import { RenderLoop } from '../core/render-loop.js';
 import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
@@ -71,6 +72,7 @@ import { TokenManager } from '../scene/token-manager.js';
 import { VisibilityController } from '../vision/VisibilityController.js';
 import { DetectionFilterEffect } from '../effects/DetectionFilterEffect.js';
 import { TileManager } from '../scene/tile-manager.js';
+import { getTextureBudgetTracker } from '../assets/TextureBudgetTracker.js';
 import { TileMotionManager } from '../scene/tile-motion-manager.js';
 import { SurfaceRegistry } from '../scene/surface-registry.js';
 import { WallManager } from '../scene/wall-manager.js';
@@ -119,6 +121,7 @@ import { installSnapshotStoreHooks, getSnapshot as getLevelsSnapshot } from '../
 import { installLevelsApiFacade } from './levels-api-facade.js';
 import { ZoneManager } from './zone-manager.js';
 import { LevelsPerspectiveBridge } from './levels-perspective-bridge.js';
+import { EffectMaskRegistry } from '../assets/EffectMaskRegistry.js';
 
 const log = createLogger('Canvas');
 
@@ -194,6 +197,9 @@ let graphicsSettings = null;
 
 /** @type {EffectCapabilitiesRegistry|null} */
 let effectCapabilitiesRegistry = null;
+
+/** @type {EffectMaskRegistry|null} Central mask state manager for multi-level rendering. */
+let effectMaskRegistry = null;
 
 function _applyRenderResolutionToRenderer(viewportWidthCss, viewportHeightCss) {
   if (!renderer || typeof renderer.setPixelRatio !== 'function') return;
@@ -523,6 +529,125 @@ export function initialize() {
         if (!sceneSettings.isEnabled(canvas?.scene)) return;
         canvas?.sounds?.refresh?.();
       }, 'ambientSound.refreshOnLevelContext', Severity.COSMETIC);
+    });
+
+    // MS-LVL-060: Rebuild effect masks when the active level changes.
+    // Masks (_Fire, _Outdoors, _Water, etc.) are authored per-floor tile.
+    // Without this, switching floors keeps the ground floor's masks active,
+    // causing outdoors leakage, missing fire, and water suppression on upper floors.
+    //
+    // Performance: SceneComposer caches masks per-floor so the first visit
+    // loads from disk but all subsequent visits are instant cache hits.
+    // The `masksChanged` flag avoids expensive effect rebuilds (fire particle
+    // regeneration, water SDF, rain flow map) when re-selecting the same floor.
+    Hooks.on('mapShineLevelContextChanged', (payload) => {
+      // SYNCHRONOUS: Begin floor transition on the registry AND the water
+      // effect. The registry blocks all tile-change-driven invalidation;
+      // the water lock blocks clearCaches/setBaseMesh/rebuild paths.
+      // Both are cleared in the finally block after all redistribution.
+      //
+      // See docs/planning/MULTI-LEVEL-RENDERING-ARCHITECTURE.md Phase 0.
+      safeCall(() => {
+        const reg = effectMaskRegistry ?? window.MapShine?.effectMaskRegistry;
+        if (reg) reg.beginTransition();
+        const we = window.MapShine?.waterEffect;
+        if (we) we._floorTransitionActive = true;
+      }, 'levelMaskRebuild.transitionLock', Severity.COSMETIC);
+
+      safeCallAsync(async () => {
+        const ms = window.MapShine;
+        const waterEffectRef = ms?.waterEffect;
+        const reg = effectMaskRegistry ?? ms?.effectMaskRegistry;
+        try {
+        if (!sceneSettings.isEnabled(canvas?.scene)) return;
+        const composer = ms?.sceneComposer ?? sceneComposer;
+        if (!composer) return;
+
+        // P6-05: Use GpuSceneMaskCompositor.composeFloor() directly.
+        // This eliminates the SceneComposer._levelMaskCache duplicate cache layer.
+        const compositor = composer._sceneMaskCompositor;
+        if (!compositor || typeof compositor.composeFloor !== 'function') return;
+
+        const ctx = payload?.context;
+        const result = await compositor.composeFloor(ctx, canvas?.scene, {
+          lastMaskBasePath: composer._lastMaskBasePath ?? null
+        });
+        if (!result || !result.masks) return;
+
+        // Always update the level elevation (fire spawn Z offset).
+        if (ms) ms._activeLevelElevation = result.levelElevation ?? 0;
+
+        // If the masks are the same as before (same floor re-selected),
+        // skip the expensive redistribution entirely.
+        if (!result.masksChanged) {
+          log.debug('Level mask rebuild: masks unchanged, skipping redistribution');
+          safeCall(() => {
+            ms?.renderLoop?.requestRender?.();
+          }, 'levelMaskRebuild.renderOnly', Severity.COSMETIC);
+          return;
+        }
+
+        const bundle = composer.currentBundle;
+        if (!bundle) return;
+
+        // Keep currentBundle.masks in sync so base-plane shaders and any
+        // bundle-dependent systems (MaskManager, albedo, etc.) see the new masks.
+        bundle.masks = result.masks;
+
+        log.info('Level mask rebuild: redistributing masks to effects', {
+          maskTypes: result.masks.map(m => m.type),
+          levelElevation: result.levelElevation,
+          basePath: result.basePath
+        });
+
+        // ── Registry-driven redistribution ──────────────────────────────
+        // All mask-consuming effects are subscribed to the EffectMaskRegistry.
+        // A single transitionToFloor() call atomically applies per-type
+        // preserve/replace/clear policies and notifies all subscribers.
+        // Water's preserveAcrossFloors policy ensures ground-floor water
+        // survives when switching to a floor without a _Water mask.
+        safeCall(() => {
+          const floorKey = `${payload?.context?.bottom ?? ''}:${payload?.context?.top ?? ''}`;
+          if (reg) {
+            reg.transitionToFloor(floorKey, result.masks);
+          }
+        }, 'levelMaskRebuild.registryTransition', Severity.DEGRADED);
+
+        // ── Non-mask concerns (not handled by registry) ─────────────────
+
+        // Redistribute masks to MaskManager for derived masks (texture registry,
+        // separate from EffectMaskRegistry).
+        safeCall(() => {
+          const mm = ms?.maskManager;
+          if (mm && bundle.masks) {
+            for (const m of bundle.masks) {
+              if (m?.id && m?.texture) {
+                mm.setTexture(`${m.id}.scene`, m.texture, {
+                  space: 'sceneUv',
+                  source: 'assetBundle',
+                  channels: 'rgba',
+                  uvFlipY: false,
+                  lifecycle: 'staticPerScene'
+                });
+              }
+            }
+          }
+        }, 'levelMaskRebuild.maskManager', Severity.DEGRADED);
+
+        // Force render refresh so new masks take effect immediately.
+        safeCall(() => {
+          ms?.depthPassManager?.invalidate?.();
+          ms?.renderLoop?.requestRender?.();
+          ms?.renderLoop?.requestContinuousRender?.(300);
+        }, 'levelMaskRebuild.renderRefresh', Severity.COSMETIC);
+
+        } finally {
+          // ALWAYS clear transition locks, even on early returns or errors.
+          // This guarantees neither water nor the registry are permanently locked.
+          if (waterEffectRef) waterEffectRef._floorTransitionActive = false;
+          if (reg) reg.endTransition();
+        }
+      }, 'levelMaskRebuild', Severity.DEGRADED);
     });
 
     // Hook into Foundry pause/unpause so we can smoothly ramp time scale to 0 and back.
@@ -1163,6 +1288,13 @@ function onCanvasTearDown(canvas) {
     }, 'frameCoordinator.dispose');
   }
 
+  if (effectMaskRegistry) {
+    safeDispose(() => {
+      effectMaskRegistry.dispose();
+      effectMaskRegistry = null;
+    }, 'EffectMaskRegistry.dispose');
+  }
+
   if (window.MapShine?.maskManager && typeof window.MapShine.maskManager.dispose === 'function') {
     safeDispose(() => window.MapShine.maskManager.dispose(), 'MaskManager.dispose');
   }
@@ -1209,6 +1341,8 @@ function onCanvasTearDown(canvas) {
     window.MapShine.waterEffect = null;
     window.MapShine.distortionManager = null;
     window.MapShine.cloudEffect = null;
+    window.MapShine.effectMaskRegistry = null;
+    window.MapShine.textureBudgetTracker = null;
     // Keep renderer and capabilities - they're reusable
   }
   candleFlamesEffect = null;
@@ -1772,6 +1906,32 @@ async function createThreeCanvas(scene) {
       }
     }, 'weatherController.setRoofMap', Severity.DEGRADED);
 
+    // Step 1b: Initialize EffectMaskRegistry — central mask state manager.
+    // Created after SceneComposer (which loads the initial bundle with masks)
+    // and before EffectComposer (which creates effects that will subscribe).
+    // The registry owns mask lifecycle; effects read masks from it instead of
+    // storing their own references. See MULTI-LEVEL-RENDERING-ARCHITECTURE.md.
+    safeCall(() => {
+      effectMaskRegistry = new EffectMaskRegistry();
+
+      // Seed the registry with the initial bundle's masks (ground floor).
+      if (bundle?.masks?.length) {
+        for (const m of bundle.masks) {
+          const maskType = m.type || m.id;
+          if (maskType && m.texture) {
+            effectMaskRegistry.setMask(maskType, m.texture, null, 'bundle');
+          }
+        }
+        log.info('EffectMaskRegistry seeded with initial bundle masks', {
+          types: bundle.masks.filter(m => m.texture).map(m => m.type || m.id)
+        });
+      }
+
+      if (window.MapShine) window.MapShine.effectMaskRegistry = effectMaskRegistry;
+      // P5-04: Expose the TextureBudgetTracker singleton so debug panels can access it.
+      if (window.MapShine) window.MapShine.textureBudgetTracker = getTextureBudgetTracker();
+    }, 'effectMaskRegistry.init', Severity.DEGRADED);
+
     // Step 2: Initialize effect composer
     if (isDebugLoad) dlp.begin('effectComposer.initialize', 'setup');
     effectComposer = new EffectComposer(renderer, threeScene, camera);
@@ -2114,6 +2274,46 @@ async function createThreeCanvas(scene) {
       log.info(`  setBaseMesh(${label}): ${dt.toFixed(1)}ms`);
     });
     if (isDebugLoad) dlp.end('wireBaseMeshes');
+
+    // Connect all mask-consuming effects to the EffectMaskRegistry now that
+    // both the effects and registry are initialized. Registry subscriptions
+    // replace direct mask management during floor transitions.
+    safeCall(() => {
+      const reg = effectMaskRegistry ?? window.MapShine?.effectMaskRegistry;
+      if (!reg) return;
+
+      const connectIfPresent = (key, label) => {
+        const eff = effectMap.get(key);
+        if (eff && typeof eff.connectToRegistry === 'function') {
+          eff.connectToRegistry(reg);
+          log.info(`${label ?? key} connected to EffectMaskRegistry`);
+        }
+      };
+
+      connectIfPresent('Water', 'WaterEffectV2');
+      connectIfPresent('Lighting', 'LightingEffect');
+      connectIfPresent('Window Lights', 'WindowLightEffect');
+      connectIfPresent('Building Shadows', 'BuildingShadowsEffect');
+      connectIfPresent('Overhead Shadows', 'OverheadShadowsEffect');
+      connectIfPresent('Clouds', 'CloudEffect');
+      connectIfPresent('Atmospheric Fog', 'AtmosphericFogEffect');
+      connectIfPresent('Trees', 'TreeEffect');
+      connectIfPresent('Bushes', 'BushEffect');
+      connectIfPresent('Iridescence', 'IridescenceEffect');
+      connectIfPresent('Prism', 'PrismEffect');
+      connectIfPresent('Specular', 'SpecularEffect');
+      connectIfPresent('Fire Sparks', 'FireSparksEffect');
+      connectIfPresent('Dust Motes', 'DustMotesEffect');
+      connectIfPresent('Ash Disturbance', 'AshDisturbanceEffect');
+
+      // WeatherController is a singleton, not in effectMap
+      const wc = window.MapShine?.weatherController;
+      if (wc && typeof wc.connectToRegistry === 'function') {
+        wc.connectToRegistry(reg);
+        log.info('WeatherController connected to EffectMaskRegistry');
+      }
+    }, 'effects.connectToRegistry', Severity.DEGRADED);
+
     _sectionEnd('setBaseMesh');
 
     _sectionStart('sceneSync');
@@ -2143,6 +2343,17 @@ async function createThreeCanvas(scene) {
     tokenManager = new TokenManager(threeScene);
     tokenManager.setEffectComposer(effectComposer); // Connect to main loop
     tokenManager.initialize();
+
+    // P4-02/03: Apply persisted tokenDepthInteraction setting and wire live changes.
+    safeCall(() => {
+      if (graphicsSettings) {
+        tokenManager.setDepthInteraction(graphicsSettings.getTokenDepthInteraction());
+        graphicsSettings._onTokenDepthInteractionChanged = (enabled) => {
+          tokenManager?.setDepthInteraction(enabled);
+        };
+      }
+    }, 'tokenManager.wireDepthInteraction', Severity.COSMETIC);
+
     if (isDebugLoad) dlp.end('manager.TokenManager.init');
 
     // Sync existing tokens immediately (we're already in canvasReady, so the hook won't fire)
@@ -2212,7 +2423,26 @@ async function createThreeCanvas(scene) {
     if (isDebugLoad) dlp.begin('manager.TileManager.init', 'manager');
     tileManager = new TileManager(threeScene);
     tileManager.setSpecularEffect(specularEffect);
-    tileManager.setFluidEffect(window.MapShine?.fluidEffect ?? effectMap.get('Fluid') ?? null);
+    const _fluidEffect = window.MapShine?.fluidEffect ?? effectMap.get('Fluid') ?? null;
+    tileManager.setFluidEffect(_fluidEffect);
+
+    // Wire the TileEffectBindingManager — centralizes all per-tile overlay routing.
+    // Effects register here; TileManager calls the manager at every tile lifecycle
+    // point instead of calling effects directly.
+    safeCall(() => {
+      const bindingMgr = new TileEffectBindingManager();
+      if (specularEffect) bindingMgr.registerEffect(specularEffect);
+      if (_fluidEffect) bindingMgr.registerEffect(_fluidEffect);
+      // Tree, Bush, and Iridescence now support per-tile overlays via TileBindableEffect interface.
+      const _treeEffect = effectMap.get('Trees');
+      const _bushEffect = effectMap.get('Bushes');
+      if (_treeEffect) bindingMgr.registerEffect(_treeEffect);
+      if (_bushEffect) bindingMgr.registerEffect(_bushEffect);
+      if (iridescenceEffect) bindingMgr.registerEffect(iridescenceEffect);
+      tileManager.setTileBindingManager(bindingMgr);
+      if (window.MapShine) window.MapShine.tileBindingManager = bindingMgr;
+      log.info('TileEffectBindingManager wired with', bindingMgr._effects.length, 'effects');
+    }, 'tileManager.bindingManager', Severity.DEGRADED);
     // Route water occluder meshes into DistortionManager's dedicated scene so
     // the occluder render pass avoids traversing the full world scene.
     safeCall(() => tileManager.setWaterOccluderScene(distortionManager?.waterOccluderScene ?? null), 'tileManager.setWaterOccluder', Severity.COSMETIC);
@@ -2889,6 +3119,80 @@ async function createThreeCanvas(scene) {
     // Mark the load session as successfully completed (records duration).
     session.finish();
     if (window.MapShine) window.MapShine._loadSession = session;
+
+    // MS-LVL-060: Background-preload masks for all floor bands.
+    // P6-06: Uses GpuSceneMaskCompositor.preloadAllFloors() directly.
+    // This warms the per-floor compositor cache so level switches are instant.
+    safeCallAsync(async () => {
+      const c = window.MapShine?.sceneComposer;
+      const compositor = c?._sceneMaskCompositor;
+      if (compositor && typeof compositor.preloadAllFloors === 'function') {
+        await compositor.preloadAllFloors(canvas?.scene, {
+          lastMaskBasePath: c._lastMaskBasePath ?? null,
+          initialMasks: c.currentBundle?.masks ?? null,
+          activeLevelContext: window.MapShine?.activeLevelContext ?? null
+        });
+      }
+    }, 'levelMaskPreload', Severity.COSMETIC);
+
+    // Debug helper: call window.MapShine._debugRenderState() in the browser console
+    // to dump the current render pipeline state for diagnosing albedo/mask issues.
+    safeCall(() => {
+      if (window.MapShine) {
+        window.MapShine._debugRenderState = () => {
+          const ms = window.MapShine;
+          const sc = ms?.sceneComposer;
+          const ec = ms?.effectComposer;
+          const bp = sc?.basePlaneMesh;
+          const bundle = sc?.currentBundle;
+          const compositor = sc?._sceneMaskCompositor;
+
+          console.group('[MapShine] Render State Debug');
+
+          console.group('Base Plane');
+          console.log('exists:', !!bp);
+          console.log('visible:', bp?.visible);
+          console.log('position:', bp?.position?.toArray?.());
+          console.log('scale:', bp?.scale?.toArray?.());
+          const mat = bp?.material;
+          console.log('material type:', mat?.type);
+          console.log('material.map:', mat?.map);
+          console.log('material.map.image:', mat?.map?.image);
+          console.log('material.uniforms.uAlbedoMap:', mat?.uniforms?.uAlbedoMap?.value);
+          console.groupEnd();
+
+          console.group('currentBundle');
+          console.log('basePath:', bundle?.basePath);
+          console.log('baseTexture:', bundle?.baseTexture);
+          console.log('baseTexture.image:', bundle?.baseTexture?.image);
+          console.log('masks count:', bundle?.masks?.length);
+          console.log('masks:', bundle?.masks?.map(m => `${m.id}(${m.texture?.image?.width ?? m.texture?.width ?? 'RT'}x${m.texture?.image?.height ?? m.texture?.height ?? '?'})`));
+          console.groupEnd();
+
+          console.group('GPU Compositor');
+          console.log('_activeFloorKey:', compositor?._activeFloorKey);
+          console.log('_floorCache keys:', [...(compositor?._floorCache?.keys() ?? [])]);
+          console.log('_floorMeta keys:', [...(compositor?._floorMeta?.keys() ?? [])]);
+          console.groupEnd();
+
+          console.group('Renderer');
+          const r = ms?.renderer;
+          console.log('getRenderTarget():', r?.getRenderTarget());
+          console.log('autoClear:', r?.autoClear);
+          console.groupEnd();
+
+          console.group('Effects');
+          const effects = [...(ec?.effects?.values() ?? [])];
+          for (const e of effects) {
+            console.log(`${e.id}: enabled=${e.enabled}, initialized=${!e._lazyInitPending}`);
+          }
+          console.groupEnd();
+
+          console.groupEnd();
+        };
+        log.info('Debug helper available: window.MapShine._debugRenderState()');
+      }
+    }, 'debugHelper', Severity.COSMETIC);
 
     // Wall-clock load timer report (module.js sets MapShine._loadTimerStartMs).
     safeCall(() => {
@@ -5591,27 +5895,13 @@ function _enforceGameplayPixiSuppression() {
     // V12+: primary can render tiles/overheads/roofs. Keep it hidden in gameplay.
     safeCall(() => { if (canvas.primary) canvas.primary.visible = false; }, 'pixiSuppress.primary', Severity.COSMETIC);
 
-    // If the Tiles layer is actively being edited, allow normal visuals.
-    // Otherwise, keep placeables nearly transparent to avoid double-rendering.
-    const isTilesActive = safeCall(() => {
-      const activeLayerObj = canvas.activeLayer;
-      const activeLayerName = activeLayerObj?.options?.name || activeLayerObj?.name || '';
-      const activeLayerCtor = activeLayerObj?.constructor?.name || '';
-      return (activeLayerName === 'TilesLayer') || (activeLayerName === 'tiles') || (activeLayerCtor === 'TilesLayer');
-    }, 'pixiSuppress.checkTilesActive', Severity.COSMETIC, { fallback: false });
+    // Tiles are fully Three-owned in gameplay mode. Keep PIXI tile visuals suppressed.
+    const alpha = 0;
 
-    // When not editing tiles, fully hide PIXI tile visuals (alpha=0) so no
-    // faint duplicate remains visible when Three.js roofs fade to opacity 0.
-    // (We still keep placeables interactive for Foundry tooling.)
-    const alpha = isTilesActive ? 1 : 0;
-
-    // If the Tiles tool is active, prefer PIXI for tile editing visuals and hide
-    // Three.js tiles to prevent a duplicate "second roof" copy.
-    // When the Tiles tool is not active, prefer Three.js for tiles so hover-hide
-    // works and we keep full rendering control.
+    // Keep Three.js tiles visible in gameplay regardless of active canvas layer.
     safeCall(() => {
       const tm = window.MapShine?.tileManager;
-      if (tm?.setVisibility) tm.setVisibility(!isTilesActive);
+      if (tm?.setVisibility) tm.setVisibility(true);
     }, 'pixiSuppress.tileVisibility', Severity.COSMETIC);
 
     safeCall(() => {
@@ -5827,15 +6117,11 @@ function updateLayerVisibility() {
       }
   }
 
-  // Tiles
+  // Tiles are fully Three-owned in gameplay mode.
   if (canvas.tiles) {
-      const isTilesActive = isActiveLayer('TilesLayer') || isActiveLayer('tiles');
-      canvas.tiles.visible = isTilesActive;
+      canvas.tiles.visible = false;
       if (tileManager) {
-          // While actively editing tiles, prefer PIXI tile visuals and hide
-          // Three.js tiles to avoid double-rendering (duplicate roofs).
-          // Otherwise, prefer Three.js tiles for gameplay/hover-hide.
-          tileManager.setVisibility(!isTilesActive && !isMapMakerMode);
+          tileManager.setVisibility(!isMapMakerMode);
       }
   }
 
@@ -5937,9 +6223,7 @@ function updateInputMode() {
       'DrawingsLayer',
       'NotesLayer',
       'RegionLayer',
-      'regions',
-      'TilesLayer',
-      'tiles'
+      'regions'
     ];
     
     // Drive Three.js wall line visibility and PIXI input routing based on the

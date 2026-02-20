@@ -39,21 +39,69 @@ export class WaterSurfaceModel {
     log.info('buildFromMaskTexture called', { resolution, threshold, channel, invert });
 
     const img = maskTexture?.image;
-    if (!img) {
-      log.warn('buildFromMaskTexture: No image found on input maskTexture.');
-    }
-    if (!img) {
-      log.warn('buildFromMaskTexture: build failed, returning null because image was missing.');
-      this._hasWater = false;
-      this.transform = new THREE.Vector4(0, 0, 1, 1);
-      return null;
+
+    // Detect whether the texture is a WebGLRenderTarget texture (GPU compositor output).
+    // RT textures have no CPU-side .image that drawImage() can accept; we must use
+    // renderer.readRenderTargetPixels() to get pixel data instead.
+    const isRtTexture = !img || (img && typeof img === 'object' && !(img instanceof HTMLImageElement) && !(img instanceof HTMLCanvasElement) && !(img instanceof HTMLVideoElement) && !(img instanceof ImageBitmap) && !(typeof OffscreenCanvas !== 'undefined' && img instanceof OffscreenCanvas));
+
+    // Resolve source dimensions and raw RGBA data.
+    let data;
+    let srcW, srcH;
+
+    if (isRtTexture) {
+      // GPU readback path: find the render target for this texture via the compositor.
+      const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+      const renderer = window.MapShine?.renderer;
+      if (!compositor || !renderer) {
+        log.warn('buildFromMaskTexture: RT texture but no compositor/renderer available.');
+        this._hasWater = false;
+        this.transform = new THREE.Vector4(0, 0, 1, 1);
+        return null;
+      }
+
+      // Find the render target that owns this texture.
+      const rt = compositor._findRenderTargetForTexture(maskTexture);
+      if (!rt) {
+        log.warn('buildFromMaskTexture: Could not find render target for RT texture.');
+        this._hasWater = false;
+        this.transform = new THREE.Vector4(0, 0, 1, 1);
+        return null;
+      }
+
+      srcW = rt.width;
+      srcH = rt.height;
+      const buf = new Uint8Array(srcW * srcH * 4);
+      try {
+        renderer.readRenderTargetPixels(rt, 0, 0, srcW, srcH, buf);
+      } catch (e) {
+        log.warn('buildFromMaskTexture: GPU readback failed.', e);
+        this._hasWater = false;
+        this.transform = new THREE.Vector4(0, 0, 1, 1);
+        return null;
+      }
+      data = buf;
+      // Diagnostic: sample pixel stats to understand what the readback returned.
+      let nonZero = 0, maxVal = 0;
+      for (let di = 0; di < buf.length; di += 4) {
+        const v = Math.max(buf[di], buf[di+1], buf[di+2], buf[di+3]);
+        if (v > 0) nonZero++;
+        if (v > maxVal) maxVal = v;
+      }
+      log.warn('[WaterDiag] GPU readback stats', { srcW, srcH, totalPixels: srcW*srcH, nonZeroPixels: nonZero, maxVal });
+      log.info('buildFromMaskTexture: using GPU readback path', { srcW, srcH });
+    } else {
+      // Standard CPU path: draw the image to a canvas and read pixels.
+      if (!img) {
+        log.warn('buildFromMaskTexture: build failed, returning null because image was missing.');
+        this._hasWater = false;
+        this.transform = new THREE.Vector4(0, 0, 1, 1);
+        return null;
+      }
+      srcW = img.width || img.naturalWidth || this.resolution;
+      srcH = img.height || img.naturalHeight || this.resolution;
     }
 
-    // Derive w/h proportional to the source image so we don't squash
-    // non-square masks into a square grid.  The `resolution` parameter
-    // acts as the max dimension; the shorter side scales proportionally.
-    const srcW = img.width || img.naturalWidth || this.resolution;
-    const srcH = img.height || img.naturalHeight || this.resolution;
     const maxDim = this.resolution;
     let w, h;
     if (srcW >= srcH) {
@@ -66,21 +114,48 @@ export class WaterSurfaceModel {
 
     log.info('buildFromMaskTexture dimensions', { srcW, srcH, buildW: w, buildH: h });
 
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) {
-      log.warn('buildFromMaskTexture: Failed to get 2D context.');
-      this._hasWater = false;
-      this.transform = new THREE.Vector4(0, 0, 1, 1);
-      return null;
+    if (!isRtTexture) {
+      // CPU path: rasterise the image into a canvas at the target resolution.
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) {
+        log.warn('buildFromMaskTexture: Failed to get 2D context.');
+        this._hasWater = false;
+        this.transform = new THREE.Vector4(0, 0, 1, 1);
+        return null;
+      }
+      ctx.clearRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      data = ctx.getImageData(0, 0, w, h).data;
+    } else if (srcW !== w || srcH !== h) {
+      // GPU readback was at full RT resolution; downsample to build resolution via canvas.
+      const srcCanvas = document.createElement('canvas');
+      srcCanvas.width = srcW;
+      srcCanvas.height = srcH;
+      const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+      if (srcCtx) {
+        // Paint the raw readback pixels into the source canvas.
+        const imgData = new ImageData(new Uint8ClampedArray(data.buffer), srcW, srcH);
+        srcCtx.putImageData(imgData, 0, 0);
+
+        const dstCanvas = document.createElement('canvas');
+        dstCanvas.width = w;
+        dstCanvas.height = h;
+        const dstCtx = dstCanvas.getContext('2d', { willReadFrequently: true });
+        if (dstCtx) {
+          dstCtx.drawImage(srcCanvas, 0, 0, w, h);
+          data = dstCtx.getImageData(0, 0, w, h).data;
+        }
+      }
+      // If canvas ops failed, data stays as the full-res readback; w/h will be reset below.
+      if (!data || data.length !== w * h * 4) {
+        // Fall back to using the full-res readback directly.
+        w = srcW;
+        h = srcH;
+      }
     }
-
-    ctx.clearRect(0, 0, w, h);
-    ctx.drawImage(img, 0, 0, w, h);
-
-    const { data } = ctx.getImageData(0, 0, w, h);
 
     this._useAlpha = this._detectUseAlpha(data);
 

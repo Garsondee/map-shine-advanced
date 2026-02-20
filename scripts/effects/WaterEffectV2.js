@@ -388,6 +388,25 @@ export class WaterEffectV2 extends EffectBase {
     this._waterMaskImageIds = new WeakMap();
     this._nextWaterMaskImageId = 1;
 
+    // Floor transition lock. When true, ALL water destruction paths are
+    // blocked: clearCaches(), setBaseMesh() no-water path, and
+    // _rebuildWaterDataIfNeeded(). This prevents any external code path
+    // (Foundry hooks, tile-manager debounce, async timing races) from
+    // destroying valid ground-floor water during a level switch.
+    //
+    // Lifecycle:
+    //   Set to true:  synchronously at mapShineLevelContextChanged hook entry
+    //   Set to false: synchronously after redistribution completes (or on error)
+    //
+    // See docs/planning/MULTI-LEVEL-RENDERING-ARCHITECTURE.md Phase 0.
+    this._floorTransitionActive = false;
+
+    // EffectMaskRegistry subscription. When connected, the registry is the
+    // authoritative source for the water mask texture. The subscription
+    // callback handles mask replacement and preserve-across-floors logic.
+    // @type {function|null} Unsubscribe function returned by registry.subscribe()
+    this._registryUnsub = null;
+
     this._quadScene = null;
     this._quadCamera = null;
     this._quadMesh = null;
@@ -544,8 +563,14 @@ export class WaterEffectV2 extends EffectBase {
   }
 
   clearCaches() {
-    // Force all cached water data derived from the _Water mask to rebuild.
-    // Also clears the published MaskManager derived texture so downstream systems refresh.
+    // Force cached water data to rebuild when the underlying mask changes.
+    //
+    // BLOCKED during floor transitions. The _floorTransitionActive lock
+    // prevents ALL water destruction regardless of the calling code path
+    // (TileManager debounce, Foundry hooks, async timing races, etc.).
+    // This replaces the previous suppress flag + UUID guard approach.
+    if (this._floorTransitionActive) return;
+
     try {
       this._surfaceModel?.dispose?.();
     } catch (_) {
@@ -1618,7 +1643,11 @@ export class WaterEffectV2 extends EffectBase {
         uSceneDarkness: { value: 0.0 },
 
         // Shared module depth-pass uniforms (uDepthTexture/uDepthEnabled/uDepthCameraNear/uDepthCameraFar/uGroundDistance)
-        ...DepthShaderChunks.createUniforms()
+        ...DepthShaderChunks.createUniforms(),
+        // Active Levels floor bottom elevation. Used to make depth-based water
+        // occlusion relative to the currently viewed floor instead of absolute
+        // world height, so upper-floor tiles don't fully hide lower-floor water.
+        uActiveLevelElevation: { value: 0.0 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -1843,6 +1872,7 @@ export class WaterEffectV2 extends EffectBase {
         uniform vec3 uSkyColor;
         uniform float uSkyIntensity;
         uniform float uSceneDarkness;
+        uniform float uActiveLevelElevation;
 
         ${DepthShaderChunks.uniforms}
         ${DepthShaderChunks.linearize}
@@ -2792,10 +2822,14 @@ export class WaterEffectV2 extends EffectBase {
             if (deviceDepth < 0.9999) {
               float linearDepth = msa_linearizeDepth(deviceDepth);
               float aboveGround = uGroundDistance - linearDepth;
+              float aboveActiveFloor = aboveGround - uActiveLevelElevation;
               // Keep normal tile layers (BG/FG at ~+1/+2) eligible for water.
               // Only treat higher foreground occluders (tokens/overheads, ~+3 and above)
               // as blockers for this post-pass.
-              depthOccluder = smoothstep(2.75, 3.25, aboveGround);
+              // IMPORTANT: Use height relative to the active Levels floor so
+              // upper-floor BG/FG tiles don't fully occlude water when viewing
+              // higher floors.
+              depthOccluder = smoothstep(2.75, 3.25, aboveActiveFloor);
             }
           }
 
@@ -3275,6 +3309,10 @@ export class WaterEffectV2 extends EffectBase {
     this.waterMask = waterMaskData?.texture || null;
 
     if (!this.waterMask) {
+      // No water mask in bundle — clear water data.
+      // BLOCKED during floor transitions to preserve ground-floor water
+      // when switching to a floor that has no water.
+      if (this._floorTransitionActive) return;
       this._waterData = null;
       this._waterRawMask = null;
       this._lastWaterMaskUuid = null;
@@ -4380,6 +4418,14 @@ export class WaterEffectV2 extends EffectBase {
     u.uHasWaterData.value = this._waterData?.texture ? 1.0 : 0.0;
     u.uWaterEnabled.value = this.enabled ? 1.0 : 0.0;
 
+    if (u.uActiveLevelElevation) {
+      let activeElev = Number(window.MapShine?._activeLevelElevation);
+      if (!Number.isFinite(activeElev)) {
+        activeElev = Number(window.MapShine?.activeLevelContext?.bottom);
+      }
+      u.uActiveLevelElevation.value = Number.isFinite(activeElev) ? activeElev : 0.0;
+    }
+
     if (u.tWaterRawMask && u.uHasWaterRawMask) {
       u.tWaterRawMask.value = this._waterRawMask;
       u.uHasWaterRawMask.value = this._waterRawMask ? 1.0 : 0.0;
@@ -4649,7 +4695,102 @@ export class WaterEffectV2 extends EffectBase {
     this._material.uniforms.uResolution.value.set(width, height);
   }
 
+  /**
+   * Connect this effect to the EffectMaskRegistry. Once connected, the
+   * registry owns the water mask lifecycle — floor transitions update the
+   * mask via the registry's observer pattern instead of direct setBaseMesh
+   * calls. The subscription callback handles:
+   *   - New mask: clear caches, rebuild SDF from new texture
+   *   - Null mask: dispose SDF data (only fires when policy allows clear)
+   *   - Same texture: no-op (reference equality check)
+   *
+   * Call this after the effect is initialized and the registry is seeded.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    // Unsubscribe from any previous connection
+    if (this._registryUnsub) {
+      this._registryUnsub();
+      this._registryUnsub = null;
+    }
+
+    this._registryUnsub = registry.subscribe('water', (texture, _floorKey, _source) => {
+      // Diagnostic: log every registry callback so we can trace the failure path.
+      const img = texture?.image;
+      const isRtDiag = texture && (!img || (img && typeof img === 'object' &&
+        !(img instanceof HTMLImageElement) && !(img instanceof HTMLCanvasElement) &&
+        !(img instanceof HTMLVideoElement) &&
+        !(typeof ImageBitmap !== 'undefined' && img instanceof ImageBitmap) &&
+        !(typeof OffscreenCanvas !== 'undefined' && img instanceof OffscreenCanvas)));
+      log.warn('[WaterDiag] registry water callback', {
+        floorKey: _floorKey, source: _source,
+        textureUuid: texture?.uuid ?? 'null',
+        isRt: isRtDiag,
+        imgType: img ? img.constructor?.name : 'null',
+        sameAsCurrent: texture === this.waterMask,
+        currentMaskUuid: this.waterMask?.uuid ?? 'null',
+      });
+
+      // Same texture reference — no-op (avoids redundant SDF rebuild)
+      if (texture === this.waterMask) return;
+
+      if (!texture) {
+        // Mask cleared (policy allowed it) — dispose SDF data.
+        // The floor transition lock is NOT checked here because the
+        // registry's preserveAcrossFloors policy already prevented
+        // this callback from firing when water should be preserved.
+        this._waterData = null;
+        this._waterRawMask = null;
+        this._lastWaterMaskUuid = null;
+        this._surfaceModel?.dispose?.();
+        return;
+      }
+
+      // New water mask — rebuild SDF.
+      // Temporarily lift the floor transition lock so clearCaches and
+      // setBaseMesh can proceed (the registry already decided this is
+      // the correct new mask for the current floor).
+      const prevLock = this._floorTransitionActive;
+      this._floorTransitionActive = false;
+      try {
+        if (typeof this.clearCaches === 'function') this.clearCaches();
+        this.waterMask = texture;
+
+        const THREE = window.THREE;
+        if (THREE && this.waterMask) {
+          this.waterMask.minFilter = THREE.LinearFilter;
+          this.waterMask.magFilter = THREE.LinearFilter;
+          this.waterMask.generateMipmaps = false;
+          this.waterMask.flipY = false;
+          // Do NOT set needsUpdate=true on GPU render target textures — it
+          // increments texture.version every call, which breaks the SDF cache
+          // key and triggers a full rebuild every frame. RT textures are
+          // managed by the renderer and don't need CPU-side upload triggers.
+          const img = this.waterMask.image;
+          const isRt = !img ||
+            (img && typeof img === 'object' &&
+             !(img instanceof HTMLImageElement) &&
+             !(img instanceof HTMLCanvasElement) &&
+             !(img instanceof HTMLVideoElement) &&
+             !(typeof ImageBitmap !== 'undefined' && img instanceof ImageBitmap) &&
+             !(typeof OffscreenCanvas !== 'undefined' && img instanceof OffscreenCanvas));
+          if (!isRt) this.waterMask.needsUpdate = true;
+        }
+
+        this._rebuildWaterDataIfNeeded(true);
+      } finally {
+        this._floorTransitionActive = prevLock;
+      }
+    });
+  }
+
   dispose() {
+    // Unsubscribe from EffectMaskRegistry before disposing resources.
+    if (this._registryUnsub) {
+      this._registryUnsub();
+      this._registryUnsub = null;
+    }
+
     this._surfaceModel.dispose();
     this._waterData = null;
     this._waterRawMask = null;
@@ -4727,6 +4868,10 @@ export class WaterEffectV2 extends EffectBase {
   }
 
   _rebuildWaterDataIfNeeded(force) {
+    // BLOCKED during floor transitions — prevents the render loop from
+    // triggering a rebuild due to cache key changes (e.g. texture version
+    // increments from the compositor normalizing flipY on shared textures).
+    if (this._floorTransitionActive) return;
     if (!this.waterMask) return;
 
     const cacheKey = this._getWaterMaskCacheKey();
@@ -4774,7 +4919,18 @@ export class WaterEffectV2 extends EffectBase {
     if (!tex) return null;
     const img = tex.image;
     const imgId = img ? this._getWaterMaskImageId(img) : 0;
-    const v = Number.isFinite(tex.version) ? tex.version : 0;
+    // GPU render target textures have their `version` incremented every frame
+    // they are rendered to. Including version in the key would cause a full SDF
+    // rebuild every frame. Detect RT textures by the absence of a drawable CPU
+    // image — RT textures have image===null or a non-drawable object.
+    const isRenderTarget = !img ||
+      (img && typeof img === 'object' &&
+       !(img instanceof HTMLImageElement) &&
+       !(img instanceof HTMLCanvasElement) &&
+       !(img instanceof HTMLVideoElement) &&
+       !(typeof ImageBitmap !== 'undefined' && img instanceof ImageBitmap) &&
+       !(typeof OffscreenCanvas !== 'undefined' && img instanceof OffscreenCanvas));
+    const v = isRenderTarget ? 0 : (Number.isFinite(tex.version) ? tex.version : 0);
 
     const p = this.params ?? {};
     const chan = (p.maskChannel === 'r' || p.maskChannel === 'a' || p.maskChannel === 'luma') ? p.maskChannel : 'auto';

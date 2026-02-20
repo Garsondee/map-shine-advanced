@@ -77,6 +77,22 @@ export class TreeEffect extends EffectBase {
     
     // PERFORMANCE: Reusable objects to avoid per-frame allocations
     this._tempSize = null; // Lazy init when THREE is available
+
+    /** @type {function|null} Unsubscribe from EffectMaskRegistry */
+    this._registryUnsub = null;
+
+    /**
+     * Per-tile overlay meshes created by the TileBindableEffect interface.
+     * Key: tileId, Value: {mesh, material, sprite}
+     * @type {Map<string, {mesh: THREE.Mesh, material: THREE.ShaderMaterial, sprite: THREE.Object3D}>}
+     */
+    this._tileOverlays = new Map();
+
+    /**
+     * All per-tile overlay materials — kept in sync with params in update().
+     * @type {Set<THREE.ShaderMaterial>}
+     */
+    this._tileOverlayMaterials = new Set();
   }
 
   _resetTemporalState() {
@@ -93,6 +109,15 @@ export class TreeEffect extends EffectBase {
   }
 
   dispose() {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+
+    // Dispose all per-tile overlays.
+    for (const [tileId] of this._tileOverlays) {
+      try { this.unbindTileSprite(tileId); } catch (_) {}
+    }
+    this._tileOverlays.clear();
+    this._tileOverlayMaterials.clear();
+
     try {
       if (this.mesh && this.scene) {
         this.scene.remove(this.mesh);
@@ -518,6 +543,297 @@ export class TreeEffect extends EffectBase {
     if (this.shadowScene && this.treeMask) this._createShadowMesh();
   }
 
+  /**
+   * Subscribe to the EffectMaskRegistry for 'tree' mask updates.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    this._registryUnsub = registry.subscribe('tree', (texture) => {
+      const maskChanged = this.treeMask !== texture;
+      this.treeMask = texture;
+      this._deriveAlpha = texture ? this._needsDerivedAlpha(texture) : false;
+      this._resetTemporalState();
+      if (maskChanged) this._clearAlphaMaskCache();
+      if (!texture) { this.enabled = false; return; }
+      this.enabled = true;
+      if (this.scene) this._createMesh();
+      if (this.shadowScene) this._createShadowMesh();
+    });
+  }
+
+  // ── TileBindableEffect interface ────────────────────────────────────────────
+
+  /**
+   * TileBindableEffect: load the per-tile _Tree mask texture.
+   * Called by TileEffectBindingManager before bindTileSprite().
+   * @param {object} tileDoc
+   * @returns {Promise<THREE.Texture|null>}
+   */
+  async loadTileMask(tileDoc) {
+    const tileManager = window.MapShine?.tileManager;
+    if (!tileManager) return null;
+    try {
+      return await tileManager.loadTileTreeMaskTexture(tileDoc) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * TileBindableEffect: skip tiles with no texture (can't derive mask path).
+   * @param {object} tileDoc
+   * @returns {boolean}
+   */
+  shouldBindTile(tileDoc) {
+    return !!(tileDoc?.texture?.src || tileDoc?.id);
+  }
+
+  /**
+   * TileBindableEffect: bind a per-tile tree overlay mesh.
+   * Creates a PlaneGeometry mesh at the tile's world transform using the same
+   * wind shader as the scene-wide mesh. Skips if no mask texture is provided.
+   * @param {object} tileDoc
+   * @param {THREE.Object3D} sprite
+   * @param {THREE.Texture|null} treeMaskTexture
+   */
+  bindTileSprite(tileDoc, sprite, treeMaskTexture) {
+    const tileId = tileDoc?.id;
+    const THREE = window.THREE;
+    if (!tileId || !THREE || !this.scene || !sprite || !treeMaskTexture) return;
+
+    // Roof tiles never get tree overlays.
+    if (sprite?.userData?.isWeatherRoof) {
+      this.unbindTileSprite(tileId);
+      return;
+    }
+
+    // Rebind if already exists.
+    this.unbindTileSprite(tileId);
+
+    const deriveAlpha = this._needsDerivedAlpha(treeMaskTexture);
+    const mat = this._createTileOverlayMaterial(treeMaskTexture, deriveAlpha);
+
+    const geom = new THREE.PlaneGeometry(1, 1, 1, 1);
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.matrixAutoUpdate = false;
+
+    // Trees render above overhead tiles (same as scene-wide mesh renderOrder + 20).
+    const baseOrder = (typeof sprite.renderOrder === 'number') ? sprite.renderOrder : 0;
+    mesh.renderOrder = baseOrder + 20;
+
+    // Enable roof layer so LightingEffect includes this in tRoofAlpha.
+    mesh.layers.enable(20);
+
+    this._syncTileMeshToSprite(mesh, sprite);
+    mesh.visible = !!(this._enabled && sprite.visible);
+
+    this.scene.add(mesh);
+    this._tileOverlays.set(tileId, { mesh, material: mat, sprite });
+  }
+
+  /**
+   * TileBindableEffect: remove and dispose a per-tile tree overlay.
+   * @param {string} tileId
+   */
+  unbindTileSprite(tileId) {
+    const data = this._tileOverlays.get(tileId);
+    if (!data) return;
+    try { if (data.mesh && this.scene) this.scene.remove(data.mesh); } catch (_) {}
+    try { data.mesh?.geometry?.dispose?.(); } catch (_) {}
+    try { data.material?.dispose?.(); } catch (_) {}
+    this._tileOverlays.delete(tileId);
+  }
+
+  /**
+   * TileBindableEffect: keep the per-tile overlay aligned with its sprite.
+   * @param {string} tileId
+   * @param {THREE.Object3D} sprite
+   */
+  syncTileSpriteTransform(tileId, sprite) {
+    const data = this._tileOverlays.get(tileId);
+    if (!data?.mesh || !sprite) return;
+    if (sprite?.userData?.isWeatherRoof) { this.unbindTileSprite(tileId); return; }
+    data.sprite = sprite;
+    this._syncTileMeshToSprite(data.mesh, sprite);
+    const baseOrder = (typeof sprite.renderOrder === 'number') ? sprite.renderOrder : 0;
+    data.mesh.renderOrder = baseOrder + 20;
+  }
+
+  /**
+   * TileBindableEffect: sync overlay visibility with the owning tile.
+   * @param {string} tileId
+   * @param {THREE.Object3D} sprite
+   */
+  syncTileSpriteVisibility(tileId, sprite) {
+    const data = this._tileOverlays.get(tileId);
+    if (!data?.mesh) return;
+    data.mesh.visible = !!(this._enabled && sprite?.visible);
+  }
+
+  /**
+   * Copy a sprite's world transform onto a per-tile overlay mesh.
+   * Reads position, scale, and material.rotation (animated tiles).
+   * @param {THREE.Mesh} mesh
+   * @param {THREE.Object3D} sprite
+   * @private
+   */
+  _syncTileMeshToSprite(mesh, sprite) {
+    const THREE = window.THREE;
+    if (!THREE) return;
+    mesh.position.copy(sprite.position);
+    mesh.scale.copy(sprite.scale);
+    // Animated rotation lives on sprite.material.rotation (radians).
+    const rot = Number(sprite?.material?.rotation) || 0;
+    mesh.rotation.set(0, 0, rot);
+    mesh.updateMatrix();
+  }
+
+  /**
+   * Create a ShaderMaterial for a per-tile tree overlay.
+   * Reuses the same vertex/fragment shader as the scene-wide mesh.
+   * @param {THREE.Texture} treeMask
+   * @param {boolean} deriveAlpha
+   * @returns {THREE.ShaderMaterial}
+   * @private
+   */
+  _createTileOverlayMaterial(treeMask, deriveAlpha) {
+    const THREE = window.THREE;
+    // Build a material identical to _createMesh() but bound to the per-tile mask.
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTreeMask: { value: treeMask },
+        uTime: { value: 0.0 },
+        uWindDir: { value: new THREE.Vector2(1.0, 0.0) },
+        uWindSpeed: { value: 0.0 },
+        uIntensity: { value: (this.params.intensity ?? 1.0) },
+        uWindSpeedGlobal: { value: this.params.windSpeedGlobal },
+        uGustFrequency: { value: this.params.gustFrequency },
+        uGustSpeed: { value: this.params.gustSpeed },
+        uBranchBend: { value: this.params.branchBend },
+        uElasticity: { value: this.params.elasticity },
+        uFlutterIntensity: { value: this.params.flutterIntensity },
+        uFlutterSpeed: { value: this.params.flutterSpeed },
+        uFlutterScale: { value: this.params.flutterScale },
+        uExposure: { value: this.params.exposure },
+        uBrightness: { value: this.params.brightness },
+        uContrast: { value: this.params.contrast },
+        uSaturation: { value: this.params.saturation },
+        uTemperature: { value: this.params.temperature },
+        uTint: { value: this.params.tint },
+        uHoverFade: { value: 1.0 },
+        uDeriveAlpha: { value: deriveAlpha ? 1.0 : 0.0 }
+      },
+      vertexShader: this.material?.vertexShader || this._getTileVertexShader(),
+      fragmentShader: this.material?.fragmentShader || this._getTileFragmentShader(),
+      transparent: true,
+      depthWrite: false,
+      depthTest: true
+    });
+    // Tag so update() can sync uniforms to all tile overlay materials.
+    mat._isTileOverlay = true;
+    if (!this._tileOverlayMaterials) this._tileOverlayMaterials = new Set();
+    this._tileOverlayMaterials.add(mat);
+    return mat;
+  }
+
+  _getTileVertexShader() {
+    return `
+      varying vec2 vUv;
+      varying vec2 vWorldPos;
+      void main() {
+        vUv = uv;
+        vec4 worldPos = modelMatrix * vec4(position, 1.0);
+        vWorldPos = worldPos.xy;
+        gl_Position = projectionMatrix * viewMatrix * worldPos;
+      }
+    `;
+  }
+
+  _getTileFragmentShader() {
+    // Identical to the scene-wide fragment shader but with uDeriveAlpha uniform
+    // so we can handle both alpha-channel and color-derived alpha textures.
+    return `
+      uniform sampler2D uTreeMask;
+      uniform float uTime;
+      uniform vec2  uWindDir;
+      uniform float uWindSpeed;
+      uniform float uIntensity;
+      uniform float uWindSpeedGlobal;
+      uniform float uGustFrequency;
+      uniform float uGustSpeed;
+      uniform float uBranchBend;
+      uniform float uElasticity;
+      uniform float uFlutterIntensity;
+      uniform float uFlutterSpeed;
+      uniform float uFlutterScale;
+      uniform float uExposure;
+      uniform float uBrightness;
+      uniform float uContrast;
+      uniform float uSaturation;
+      uniform float uTemperature;
+      uniform float uTint;
+      uniform float uHoverFade;
+      uniform float uDeriveAlpha;
+      varying vec2 vUv;
+      varying vec2 vWorldPos;
+
+      float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898,78.233)))*43758.5453); }
+      float noise(vec2 p) {
+        vec2 i=floor(p); vec2 f=fract(p); vec2 u=f*f*(3.0-2.0*f);
+        return mix(mix(hash(i),hash(i+vec2(1,0)),u.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),u.x),u.y);
+      }
+      float msLuminance(vec3 c) { return dot(c,vec3(0.2126,0.7152,0.0722)); }
+      vec3 applyCC(vec3 color) {
+        color *= pow(2.0,uExposure);
+        color.r+=uTemperature*0.1; color.b-=uTemperature*0.1; color.g+=uTint*0.1;
+        color+=vec3(uBrightness);
+        color=(color-0.5)*uContrast+0.5;
+        float l=msLuminance(color); color=mix(vec3(l),color,uSaturation);
+        return color;
+      }
+      float safeAlpha(vec4 s) {
+        float a=s.a;
+        if(uDeriveAlpha>0.5 && a>0.99) {
+          float lum=dot(s.rgb,vec3(0.2126,0.7152,0.0722));
+          float maxC=max(s.r,max(s.g,s.b)); float minC=min(s.r,min(s.g,s.b));
+          float chroma=maxC-minC;
+          float bgMask=smoothstep(0.45,0.85,lum)*(1.0-smoothstep(0.0,0.15,chroma));
+          a*=(1.0-bgMask);
+        }
+        return a;
+      }
+      void main() {
+        vec2 windDir=normalize(uWindDir);
+        if(length(windDir)<0.01) windDir=vec2(1,0);
+        float speed=uWindSpeed*uWindSpeedGlobal;
+        float effectiveSpeed=0.1+speed;
+        vec2 gustPos=vWorldPos*uGustFrequency;
+        vec2 scroll=windDir*uTime*uGustSpeed*effectiveSpeed;
+        float gustNoise=noise(gustPos-scroll);
+        float gustStrength=smoothstep(0.2,0.8,gustNoise);
+        vec2 perpDir=vec2(-windDir.y,windDir.x);
+        float orbitPhase=uTime*uElasticity+(gustNoise*5.0);
+        float orbitSway=sin(orbitPhase);
+        float pushMagnitude=gustStrength*uBranchBend*effectiveSpeed;
+        float swayMagnitude=orbitSway*(uBranchBend*0.4)*effectiveSpeed*(0.5+0.5*gustStrength);
+        float noiseVal=noise(vWorldPos*uFlutterScale);
+        float flutterPhase=uTime*uFlutterSpeed*effectiveSpeed+noiseVal*6.28;
+        float flutter=sin(flutterPhase);
+        float flutterMagnitude=flutter*uFlutterIntensity*(0.5+0.5*gustStrength);
+        vec2 distortion=(windDir*pushMagnitude)+(perpDir*swayMagnitude)+vec2(flutter,flutter)*flutterMagnitude;
+        vec4 treeSample=texture2D(uTreeMask,vUv-distortion);
+        if(treeSample.a>0.01 && treeSample.a<0.99) {
+          treeSample.rgb=clamp((treeSample.rgb-(1.0-treeSample.a))/treeSample.a,0.0,1.0);
+        }
+        float a=safeAlpha(treeSample)*uIntensity*uHoverFade;
+        if(a<=0.001) discard;
+        vec3 color=applyCC(treeSample.rgb);
+        gl_FragColor=vec4(color,clamp(a,0.0,1.0));
+      }
+    `;
+  }
+
   _createMesh() {
     const THREE = window.THREE;
     if (!THREE || !this.baseMesh || !this.treeMask) return;
@@ -813,6 +1129,33 @@ export class TreeEffect extends EffectBase {
     }
 
     u.uHoverFade.value = this._hoverFade;
+
+    // Sync all per-tile overlay materials with the same wind/time/params as the scene-wide mesh.
+    if (this._tileOverlayMaterials && this._tileOverlayMaterials.size > 0) {
+      for (const mat of this._tileOverlayMaterials) {
+        if (!mat?.uniforms) continue;
+        const tu = mat.uniforms;
+        if (tu.uTime) tu.uTime.value = timeInfo.elapsed;
+        if (tu.uWindDir) tu.uWindDir.value.copy(u.uWindDir.value);
+        if (tu.uWindSpeed) tu.uWindSpeed.value = this._currentWindSpeed;
+        if (tu.uIntensity) tu.uIntensity.value = (this.params.intensity ?? 1.0);
+        if (tu.uWindSpeedGlobal) tu.uWindSpeedGlobal.value = this.params.windSpeedGlobal;
+        if (tu.uGustFrequency) tu.uGustFrequency.value = this.params.gustFrequency;
+        if (tu.uGustSpeed) tu.uGustSpeed.value = this.params.gustSpeed;
+        if (tu.uBranchBend) tu.uBranchBend.value = this.params.branchBend;
+        if (tu.uElasticity) tu.uElasticity.value = this.params.elasticity;
+        if (tu.uFlutterIntensity) tu.uFlutterIntensity.value = this.params.flutterIntensity;
+        if (tu.uFlutterSpeed) tu.uFlutterSpeed.value = this.params.flutterSpeed;
+        if (tu.uFlutterScale) tu.uFlutterScale.value = this.params.flutterScale;
+        if (tu.uExposure) tu.uExposure.value = this.params.exposure;
+        if (tu.uBrightness) tu.uBrightness.value = this.params.brightness;
+        if (tu.uContrast) tu.uContrast.value = this.params.contrast;
+        if (tu.uSaturation) tu.uSaturation.value = this.params.saturation;
+        if (tu.uTemperature) tu.uTemperature.value = this.params.temperature;
+        if (tu.uTint) tu.uTint.value = this.params.tint;
+        if (tu.uHoverFade) tu.uHoverFade.value = this._hoverFade;
+      }
+    }
 
     if (this.shadowMaterial && this.shadowMaterial.uniforms) {
       const su = this.shadowMaterial.uniforms;

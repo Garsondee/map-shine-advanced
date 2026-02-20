@@ -1272,6 +1272,27 @@ export class EffectBase {
   }
 
   /**
+   * P5-08/09: Called by EffectMaskRegistry when a mask of a subscribed type arrives
+   * for the first time (texture transitions from null → non-null) and the effect
+   * has `_lazyInitPending === true`. The default implementation triggers lazy
+   * initialization via `EffectComposer.ensureEffectInitialized()`.
+   *
+   * Effects that need custom behaviour on first-mask arrival can override this,
+   * but should call `super.onMaskArrived(maskType, texture)` to preserve lazy init.
+   *
+   * @param {string} maskType - The mask type that arrived (e.g. 'outdoors', 'tree')
+   * @param {THREE.Texture|null} texture - The new mask texture
+   */
+  onMaskArrived(maskType, texture) {
+    if (!this._lazyInitPending) return;
+    // Resolve the EffectComposer from window.MapShine to avoid a circular import.
+    const composer = window.MapShine?.effectComposer;
+    if (composer && typeof composer.ensureEffectInitialized === 'function') {
+      composer.ensureEffectInitialized(this.id).catch(() => {});
+    }
+  }
+
+  /**
    * Dispose effect resources
    * Default implementation cleans up common resources
    * Override in subclass for additional cleanup

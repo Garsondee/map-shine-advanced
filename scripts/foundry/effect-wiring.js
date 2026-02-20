@@ -362,6 +362,7 @@ const GLOBAL_EFFECT_EXPOSURES = [
   ['Bloom',             'bloomEffect'],
   ['Dazzle Overlay',    'dazzleOverlayEffect'],
   ['Sky Color',         'skyColorEffect'],
+  ['Water',             'waterEffect'],
 ];
 
 /**

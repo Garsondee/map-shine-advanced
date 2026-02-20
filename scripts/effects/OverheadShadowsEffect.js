@@ -102,6 +102,9 @@ export class OverheadShadowsEffect extends EffectBase {
     
     // PERFORMANCE: Reusable objects to avoid per-frame allocations
     this._tempSize = null; // Lazy init when THREE is available
+
+    /** @type {function|null} Unsubscribe from EffectMaskRegistry */
+    this._registryUnsub = null;
   }
 
   /**
@@ -162,6 +165,20 @@ export class OverheadShadowsEffect extends EffectBase {
     if (this.renderer && this.mainScene && this.mainCamera) {
       this._createShadowMesh();
     }
+  }
+
+  /**
+   * Subscribe to the EffectMaskRegistry for 'outdoors' mask updates.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    this._registryUnsub = registry.subscribe('outdoors', (texture) => {
+      this.outdoorsMask = texture;
+      if (texture && this.renderer && this.mainScene && this.mainCamera) {
+        this._createShadowMesh();
+      }
+    });
   }
 
   /**
@@ -1563,6 +1580,7 @@ export class OverheadShadowsEffect extends EffectBase {
   }
 
   dispose() {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
     if (this.roofTarget) {
       this.roofTarget.dispose();
       this.roofTarget = null;

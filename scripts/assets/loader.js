@@ -554,10 +554,10 @@ async function discoverAvailableFiles(basePath) {
 const _hasImageBitmap = typeof createImageBitmap === 'function';
 
 /** Max dimension for low-frequency data masks (fire spawn, outdoors, water depth, etc.) */
-const MASK_MAX_SIZE = 2048;
+const MASK_MAX_SIZE = 4096;
 
 /** Max dimension for color textures (bush, tree) and visual-detail masks */
-const VISUAL_MASK_MAX_SIZE = 4096;
+const VISUAL_MASK_MAX_SIZE = 8192;
 
 /**
  * Masks containing high-frequency visual detail that is directly visible on screen.

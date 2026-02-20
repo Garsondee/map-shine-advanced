@@ -89,6 +89,9 @@ export class BuildingShadowsEffect extends EffectBase {
 
     this.needsBake = true;
     this.lastBakeHash = '';
+
+    /** @type {function|null} Unsubscribe from EffectMaskRegistry */
+    this._registryUnsub = null;
   }
 
   /**
@@ -116,6 +119,22 @@ export class BuildingShadowsEffect extends EffectBase {
       this._createShadowMesh();
       this.needsBake = true;
     }
+  }
+
+  /**
+   * Subscribe to the EffectMaskRegistry for 'outdoors' mask updates.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    this._registryUnsub = registry.subscribe('outdoors', (texture) => {
+      this.outdoorsMask = texture;
+      if (!texture) return;
+      if (this.renderer && this.mainScene && this.mainCamera) {
+        this._createShadowMesh();
+        this.needsBake = true;
+      }
+    });
   }
 
   /**
@@ -578,6 +597,7 @@ export class BuildingShadowsEffect extends EffectBase {
   }
 
   dispose() {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
     if (this.shadowTarget) {
       this.shadowTarget.dispose();
       this.shadowTarget = null;

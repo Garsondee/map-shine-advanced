@@ -74,8 +74,6 @@ export class InputRouter {
       'circle', 'cone', 'rect', 'ray',
       // Drawing tools
       'select', 'polygon', 'freehand', 'text', 'ellipse', 'rectangle',
-      // Tile tools
-      'tile', 'browse',
       // Region tools
       'region'
     ]);
@@ -219,6 +217,10 @@ export class InputRouter {
       layerCtorName === 'TokensLayer' ||
       layerIdName === 'tokens';
 
+    const isTilesLayer =
+      layerCtorName === 'TilesLayer' ||
+      layerIdName === 'tiles';
+
     if (isTokensLayer) {
       // WP-2 Ruler parity: when Foundry's ruler tool is active on the tokens
       // layer (toggled via R key), route input to PIXI so the ruler can receive
@@ -227,6 +229,12 @@ export class InputRouter {
       if (activeTool === 'ruler') {
         return InputMode.PIXI;
       }
+      return InputMode.THREE;
+    }
+
+    // Tile placement/selection is handled by InteractionManager + TileManager in
+    // Three.js so we keep input routed to Three even when the Tiles layer/tools are active.
+    if (isTilesLayer) {
       return InputMode.THREE;
     }
     

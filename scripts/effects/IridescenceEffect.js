@@ -65,6 +65,22 @@ export class IridescenceEffect extends EffectBase {
       // Advanced
       alpha: 0.5, // Global opacity multiplier
     };
+
+    /** @type {function|null} Unsubscribe from EffectMaskRegistry */
+    this._registryUnsub = null;
+
+    /**
+     * Per-tile overlay meshes created by the TileBindableEffect interface.
+     * Key: tileId, Value: {mesh, material, sprite}
+     * @type {Map<string, {mesh: THREE.Mesh, material: THREE.ShaderMaterial, sprite: THREE.Object3D}>}
+     */
+    this._tileOverlays = new Map();
+
+    /**
+     * All per-tile overlay materials — kept in sync with params in update().
+     * @type {Set<THREE.ShaderMaterial>}
+     */
+    this._tileOverlayMaterials = new Set();
   }
 
   /**
@@ -320,8 +336,219 @@ export class IridescenceEffect extends EffectBase {
       return;
     }
 
+    // Re-enable when a valid mask is found. Without this, the effect stays
+    // permanently disabled after visiting a floor with no _Iridescence mask.
+    this.enabled = true;
+
+    // If material already exists (redistribution), update the mask uniform
+    // rather than rebuilding the entire mesh.
+    if (this.material?.uniforms?.uIridescenceMask) {
+      this.material.uniforms.uIridescenceMask.value = this.iridescenceMask;
+      this.material.needsUpdate = true;
+      return;
+    }
+
     log.info('Iridescence mask loaded, creating overlay mesh');
     this.createOverlayMesh();
+  }
+
+  /**
+   * Subscribe to the EffectMaskRegistry for 'iridescence' mask updates.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  // ── TileBindableEffect interface ────────────────────────────────────────────
+
+  /**
+   * TileBindableEffect: load the per-tile _Iridescence mask texture.
+   * Called by TileEffectBindingManager before bindTileSprite().
+   * @param {object} tileDoc
+   * @returns {Promise<THREE.Texture|null>}
+   */
+  async loadTileMask(tileDoc) {
+    const tileManager = window.MapShine?.tileManager;
+    if (!tileManager) return null;
+    try {
+      return await tileManager.loadTileIridescenceMaskTexture(tileDoc) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * TileBindableEffect: skip tiles with no texture.
+   * @param {object} tileDoc
+   * @returns {boolean}
+   */
+  shouldBindTile(tileDoc) {
+    return !!(tileDoc?.texture?.src || tileDoc?.id);
+  }
+
+  /**
+   * TileBindableEffect: bind a per-tile iridescence overlay mesh.
+   * Uses additive blending at tile Z + 0.0005 per the plan spec.
+   * @param {object} tileDoc
+   * @param {THREE.Object3D} sprite
+   * @param {THREE.Texture|null} iridMaskTexture
+   */
+  bindTileSprite(tileDoc, sprite, iridMaskTexture) {
+    const tileId = tileDoc?.id;
+    const THREE = window.THREE;
+    if (!tileId || !THREE || !this.scene || !sprite || !iridMaskTexture) return;
+
+    if (sprite?.userData?.isWeatherRoof) { this.unbindTileSprite(tileId); return; }
+
+    this.unbindTileSprite(tileId);
+
+    const mat = this._createTileOverlayMaterial(iridMaskTexture);
+    const geom = new THREE.PlaneGeometry(1, 1, 1, 1);
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.matrixAutoUpdate = false;
+
+    // Render just above the tile sprite (additive blending, no depth write).
+    const baseOrder = (typeof sprite.renderOrder === 'number') ? sprite.renderOrder : 0;
+    mesh.renderOrder = baseOrder + 5;
+
+    this._syncTileMeshToSprite(mesh, sprite);
+    // Slight Z offset to avoid z-fighting with the tile sprite.
+    mesh.position.z += 0.0005;
+    mesh.updateMatrix();
+    mesh.visible = !!(this._enabled && sprite.visible);
+
+    this.scene.add(mesh);
+    this._tileOverlays.set(tileId, { mesh, material: mat, sprite });
+  }
+
+  /**
+   * TileBindableEffect: remove and dispose a per-tile iridescence overlay.
+   * @param {string} tileId
+   */
+  unbindTileSprite(tileId) {
+    const data = this._tileOverlays.get(tileId);
+    if (!data) return;
+    try { if (data.mesh && this.scene) this.scene.remove(data.mesh); } catch (_) {}
+    try { data.mesh?.geometry?.dispose?.(); } catch (_) {}
+    try {
+      if (data.material) {
+        this._tileOverlayMaterials.delete(data.material);
+        data.material.dispose?.();
+      }
+    } catch (_) {}
+    this._tileOverlays.delete(tileId);
+  }
+
+  /**
+   * TileBindableEffect: keep the per-tile overlay aligned with its sprite.
+   * @param {string} tileId
+   * @param {THREE.Object3D} sprite
+   */
+  syncTileSpriteTransform(tileId, sprite) {
+    const data = this._tileOverlays.get(tileId);
+    if (!data?.mesh || !sprite) return;
+    if (sprite?.userData?.isWeatherRoof) { this.unbindTileSprite(tileId); return; }
+    data.sprite = sprite;
+    this._syncTileMeshToSprite(data.mesh, sprite);
+    data.mesh.position.z += 0.0005;
+    data.mesh.updateMatrix();
+    const baseOrder = (typeof sprite.renderOrder === 'number') ? sprite.renderOrder : 0;
+    data.mesh.renderOrder = baseOrder + 5;
+  }
+
+  /**
+   * TileBindableEffect: sync overlay visibility with the owning tile.
+   * @param {string} tileId
+   * @param {THREE.Object3D} sprite
+   */
+  syncTileSpriteVisibility(tileId, sprite) {
+    const data = this._tileOverlays.get(tileId);
+    if (!data?.mesh) return;
+    data.mesh.visible = !!(this._enabled && sprite?.visible);
+  }
+
+  /**
+   * Copy a sprite's world transform onto a per-tile overlay mesh.
+   * @param {THREE.Mesh} mesh
+   * @param {THREE.Object3D} sprite
+   * @private
+   */
+  _syncTileMeshToSprite(mesh, sprite) {
+    if (!window.THREE) return;
+    mesh.position.copy(sprite.position);
+    mesh.scale.copy(sprite.scale);
+    const rot = Number(sprite?.material?.rotation) || 0;
+    mesh.rotation.set(0, 0, rot);
+    mesh.updateMatrix();
+  }
+
+  /**
+   * Create a ShaderMaterial for a per-tile iridescence overlay.
+   * Uses the same vertex/fragment shaders as the scene-wide mesh.
+   * @param {THREE.Texture} iridMask
+   * @returns {THREE.ShaderMaterial}
+   * @private
+   */
+  _createTileOverlayMaterial(iridMask) {
+    const THREE = window.THREE;
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uIridescenceMask: { value: iridMask },
+        uRoofAlphaMap: { value: null },
+        uHasRoofAlphaMap: { value: 0.0 },
+        uTime: { value: 0.0 },
+        uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+        uIntensity: { value: this.params.intensity },
+        uAlpha: { value: this.params.alpha },
+        uDistortionStrength: { value: this.params.distortionStrength },
+        uNoiseScale: { value: this.params.noiseScale },
+        uNoiseType: { value: this.params.noiseType },
+        uFlowSpeed: { value: this.params.flowSpeed },
+        uPhaseMult: { value: this.params.phaseMult },
+        uColorCycleSpeed: { value: this.params.colorCycleSpeed },
+        uAngle: { value: this.params.angle * (Math.PI / 180.0) },
+        uIgnoreDarkness: { value: this.params.ignoreDarkness },
+        uParallaxStrength: { value: this.params.parallaxStrength },
+        uCameraOffset: { value: new THREE.Vector2(0, 0) },
+        uMaskThreshold: { value: this.params.maskThreshold },
+        uDarknessLevel: { value: 0.0 },
+        uAmbientDaylight: { value: new THREE.Color(1.0, 1.0, 1.0) },
+        uAmbientDarkness: { value: new THREE.Color(0.14, 0.14, 0.28) },
+        uAmbientBrightest: { value: new THREE.Color(1.0, 1.0, 1.0) },
+        numLights: { value: 0 },
+        lightPosition: { value: new Float32Array(this.maxLights * 3) },
+        lightColor: { value: new Float32Array(this.maxLights * 3) },
+        lightConfig: { value: new Float32Array(this.maxLights * 4) }
+      },
+      vertexShader: this.getVertexShader(),
+      fragmentShader: this.getFragmentShader(),
+      side: THREE.DoubleSide,
+      transparent: true,
+      blending: THREE.NormalBlending,
+      depthWrite: false,
+      depthTest: true
+    });
+    mat._isTileOverlay = true;
+    this._tileOverlayMaterials.add(mat);
+    return mat;
+  }
+
+  connectToRegistry(registry) {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    this._registryUnsub = registry.subscribe('iridescence', (texture) => {
+      this.iridescenceMask = texture;
+      this.params.hasIridescenceMask = !!texture;
+      if (!texture) {
+        this.params.textureStatus = 'Inactive (No Texture Found)';
+        this.enabled = false;
+        return;
+      }
+      this.params.textureStatus = 'Ready (Texture Found)';
+      this.enabled = true;
+      if (this.material?.uniforms?.uIridescenceMask) {
+        this.material.uniforms.uIridescenceMask.value = texture;
+        this.material.needsUpdate = true;
+      } else {
+        this.createOverlayMesh();
+      }
+    });
   }
 
   createOverlayMesh() {
@@ -680,18 +907,58 @@ export class IridescenceEffect extends EffectBase {
     } catch (e) {
       // Ignore
     }
+
+    // Sync all per-tile overlay materials with the same time/params as the scene-wide mesh.
+    if (this._tileOverlayMaterials && this._tileOverlayMaterials.size > 0) {
+      const mu = this.material.uniforms;
+      for (const mat of this._tileOverlayMaterials) {
+        if (!mat?.uniforms) continue;
+        const tu = mat.uniforms;
+        if (tu.uTime) tu.uTime.value = timeInfo.elapsed;
+        if (tu.uIntensity) tu.uIntensity.value = this.params.intensity;
+        if (tu.uAlpha) tu.uAlpha.value = this.params.alpha;
+        if (tu.uDistortionStrength) tu.uDistortionStrength.value = this.params.distortionStrength;
+        if (tu.uNoiseScale) tu.uNoiseScale.value = mu.uNoiseScale.value;
+        if (tu.uNoiseType) tu.uNoiseType.value = this.params.noiseType;
+        if (tu.uFlowSpeed) tu.uFlowSpeed.value = this.params.flowSpeed;
+        if (tu.uPhaseMult) tu.uPhaseMult.value = this.params.phaseMult;
+        if (tu.uColorCycleSpeed) tu.uColorCycleSpeed.value = this.params.colorCycleSpeed;
+        if (tu.uAngle) tu.uAngle.value = this.params.angle * (Math.PI / 180.0);
+        if (tu.uIgnoreDarkness) tu.uIgnoreDarkness.value = this.params.ignoreDarkness;
+        if (tu.uParallaxStrength) tu.uParallaxStrength.value = this.params.parallaxStrength;
+        if (tu.uMaskThreshold) tu.uMaskThreshold.value = this.params.maskThreshold;
+        if (tu.uDarknessLevel) tu.uDarknessLevel.value = mu.uDarknessLevel.value;
+        if (tu.uRoofAlphaMap) tu.uRoofAlphaMap.value = mu.uRoofAlphaMap.value;
+        if (tu.uHasRoofAlphaMap) tu.uHasRoofAlphaMap.value = mu.uHasRoofAlphaMap.value;
+        if (tu.uResolution && mu.uResolution) tu.uResolution.value.copy(mu.uResolution.value);
+        if (tu.uAmbientDaylight && mu.uAmbientDaylight) tu.uAmbientDaylight.value.copy(mu.uAmbientDaylight.value);
+        if (tu.uAmbientDarkness && mu.uAmbientDarkness) tu.uAmbientDarkness.value.copy(mu.uAmbientDarkness.value);
+        if (tu.uAmbientBrightest && mu.uAmbientBrightest) tu.uAmbientBrightest.value.copy(mu.uAmbientBrightest.value);
+        if (tu.numLights) tu.numLights.value = mu.numLights.value;
+      }
+    }
   }
 
   render(renderer, scene, camera) {
     if (!this.material || !this.mesh) return;
 
     // Update camera offset for parallax effects
+    let cx = 0, cy = 0;
     if (camera.isPerspectiveCamera) {
-      this.material.uniforms.uCameraOffset.value.set(camera.position.x, camera.position.y);
+      cx = camera.position.x; cy = camera.position.y;
     } else if (camera.isOrthographicCamera) {
-      const centerX = (camera.left + camera.right) / 2;
-      const centerY = (camera.top + camera.bottom) / 2;
-      this.material.uniforms.uCameraOffset.value.set(centerX, centerY);
+      cx = (camera.left + camera.right) / 2;
+      cy = (camera.top + camera.bottom) / 2;
+    }
+    this.material.uniforms.uCameraOffset.value.set(cx, cy);
+
+    // Propagate camera offset to per-tile overlay materials.
+    if (this._tileOverlayMaterials && this._tileOverlayMaterials.size > 0) {
+      for (const mat of this._tileOverlayMaterials) {
+        if (mat?.uniforms?.uCameraOffset) {
+          mat.uniforms.uCameraOffset.value.set(cx, cy);
+        }
+      }
     }
   }
 
@@ -702,6 +969,15 @@ export class IridescenceEffect extends EffectBase {
   }
 
   dispose() {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+
+    // Dispose all per-tile overlays.
+    for (const [tileId] of this._tileOverlays) {
+      try { this.unbindTileSprite(tileId); } catch (_) {}
+    }
+    this._tileOverlays.clear();
+    this._tileOverlayMaterials.clear();
+
     // Unregister Foundry hooks using correct two-argument signature
     try {
       if (this._hookIds && this._hookIds.length) {

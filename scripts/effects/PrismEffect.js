@@ -67,6 +67,9 @@ export class PrismEffect extends EffectBase {
       glintStrength: 0.45,
       glintThreshold: 0.13      // Only sparkle on sharpest angles
     };
+
+    /** @type {function|null} Unsubscribe from EffectMaskRegistry */
+    this._registryUnsub = null;
   }
 
   /**
@@ -289,9 +292,49 @@ export class PrismEffect extends EffectBase {
       this.enabled = false;
       return;
     }
+
+    // Re-enable when a valid mask is found. Without this, the effect stays
+    // permanently disabled after visiting a floor with no _Prism mask.
+    this.enabled = true;
+
+    // If material already exists (redistribution), update the mask uniform
+    // rather than rebuilding the entire mesh.
+    if (this.material?.uniforms?.uPrismMask) {
+      this.material.uniforms.uPrismMask.value = this.prismMask;
+      if (this.material.uniforms.uBaseMap) {
+        this.material.uniforms.uBaseMap.value = this.baseTexture;
+      }
+      this.material.needsUpdate = true;
+      return;
+    }
     
     log.info('Prism mask loaded, creating overlay mesh');
     this.createOverlayMesh();
+  }
+
+  /**
+   * Subscribe to the EffectMaskRegistry for 'prism' mask updates.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    this._registryUnsub = registry.subscribe('prism', (texture) => {
+      this.prismMask = texture;
+      this.params.hasPrismMask = !!texture;
+      if (!texture) {
+        this.params.textureStatus = 'Inactive (No Texture Found)';
+        this.enabled = false;
+        return;
+      }
+      this.params.textureStatus = 'Ready (Texture Found)';
+      this.enabled = true;
+      if (this.material?.uniforms?.uPrismMask) {
+        this.material.uniforms.uPrismMask.value = texture;
+        this.material.needsUpdate = true;
+      } else {
+        this.createOverlayMesh();
+      }
+    });
   }
 
   /**
@@ -511,6 +554,7 @@ export class PrismEffect extends EffectBase {
    * Cleanup resources
    */
   dispose() {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry.dispose(); // Should be shared, but safe to call

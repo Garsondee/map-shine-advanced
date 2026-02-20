@@ -205,6 +205,9 @@ export class WindowLightEffect extends EffectBase {
     this._tmpWindDir = null;
     /** @type {THREE.Vector2|null} Cached sun direction for window light offset */
     this._sunDir = null;
+
+    /** @type {Array<function>} Unsubscribe functions from EffectMaskRegistry */
+    this._registryUnsubs = [];
   }
 
   _applyThreeColor(target, input) {
@@ -1298,10 +1301,109 @@ export class WindowLightEffect extends EffectBase {
       return;
     }
 
+    // Re-enable when a valid mask is found. Without this, the effect stays
+    // permanently disabled after visiting a floor with no _Windows mask.
+    this.enabled = true;
+
     this.params.textureStatus = 'Ready (Texture Found)';
     log.info('Window mask loaded');
 
+    // If the material already exists (redistribution after level change),
+    // push the new mask textures into the existing uniforms so the shader
+    // sees the updated masks without a full mesh rebuild.
+    if (this.material?.uniforms) {
+      const u = this.material.uniforms;
+      if (u.uWindowMask) u.uWindowMask.value = this.windowMask;
+      if (u.uOutdoorsMask) u.uOutdoorsMask.value = this.outdoorsMask;
+      if (u.uSpecularMask) u.uSpecularMask.value = this.specularMask;
+      if (u.uHasOutdoorsMask) u.uHasOutdoorsMask.value = this.outdoorsMask ? 1.0 : 0.0;
+      if (u.uHasSpecularMask) u.uHasSpecularMask.value = this.specularMask ? 1.0 : 0.0;
+      if (u.uWindowTexelSize && this.windowMask?.image) {
+        u.uWindowTexelSize.value.set(
+          1 / this.windowMask.image.width,
+          1 / this.windowMask.image.height
+        );
+      }
+      this.material.needsUpdate = true;
+    }
+
+    // Also update the light-pass material if it exists (used by TileManager).
+    if (this.lightMaterial?.uniforms) {
+      const lu = this.lightMaterial.uniforms;
+      if (lu.uWindowMask) lu.uWindowMask.value = this.windowMask;
+      if (lu.uOutdoorsMask) lu.uOutdoorsMask.value = this.outdoorsMask;
+      if (lu.uHasOutdoorsMask) lu.uHasOutdoorsMask.value = this.outdoorsMask ? 1.0 : 0.0;
+      this.lightMaterial.needsUpdate = true;
+    }
+
+    // If no mesh exists yet (first time receiving a valid mask after init),
+    // create the overlay mesh now so the effect becomes visible.
+    if (!this.mesh && this.scene && this.baseMesh) {
+      this.createOverlayMesh();
+    }
+
     this._ensureRainFlowMap();
+  }
+
+  /**
+   * Subscribe to the EffectMaskRegistry for 'windows', 'outdoors', and 'specular' mask updates.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    for (const unsub of this._registryUnsubs) unsub();
+    this._registryUnsubs = [];
+
+    // Helper to push updated mask textures into existing material uniforms
+    const pushMask = () => {
+      if (this.material?.uniforms) {
+        const u = this.material.uniforms;
+        if (u.uWindowMask) u.uWindowMask.value = this.windowMask;
+        if (u.uOutdoorsMask) u.uOutdoorsMask.value = this.outdoorsMask;
+        if (u.uSpecularMask) u.uSpecularMask.value = this.specularMask;
+        if (u.uHasOutdoorsMask) u.uHasOutdoorsMask.value = this.outdoorsMask ? 1.0 : 0.0;
+        if (u.uHasSpecularMask) u.uHasSpecularMask.value = this.specularMask ? 1.0 : 0.0;
+        if (u.uWindowTexelSize && this.windowMask?.image) {
+          u.uWindowTexelSize.value.set(
+            1 / this.windowMask.image.width,
+            1 / this.windowMask.image.height
+          );
+        }
+        this.material.needsUpdate = true;
+      }
+      if (this.lightMaterial?.uniforms) {
+        const lu = this.lightMaterial.uniforms;
+        if (lu.uWindowMask) lu.uWindowMask.value = this.windowMask;
+        if (lu.uOutdoorsMask) lu.uOutdoorsMask.value = this.outdoorsMask;
+        if (lu.uHasOutdoorsMask) lu.uHasOutdoorsMask.value = this.outdoorsMask ? 1.0 : 0.0;
+        this.lightMaterial.needsUpdate = true;
+      }
+    };
+
+    this._registryUnsubs.push(
+      registry.subscribe('windows', (texture) => {
+        this.windowMask = texture;
+        this.params.hasWindowMask = !!texture;
+        if (!texture) {
+          this.params.textureStatus = 'Inactive (No _Windows / _Structural mask found)';
+          this.enabled = false;
+          return;
+        }
+        this.params.textureStatus = 'Ready (Texture Found)';
+        this.enabled = true;
+        pushMask();
+        if (!this.mesh && this.scene && this.baseMesh) this.createOverlayMesh();
+        this._ensureRainFlowMap();
+      }),
+      registry.subscribe('outdoors', (texture) => {
+        this.outdoorsMask = texture;
+        pushMask();
+        this._ensureRainFlowMap();
+      }),
+      registry.subscribe('specular', (texture) => {
+        this.specularMask = texture;
+        pushMask();
+      })
+    );
   }
 
   _ensureRainFlowMap() {
@@ -3859,6 +3961,8 @@ export class WindowLightEffect extends EffectBase {
   }
 
   dispose() {
+    for (const unsub of this._registryUnsubs) unsub();
+    this._registryUnsubs = [];
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh = null;

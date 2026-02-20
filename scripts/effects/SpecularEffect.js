@@ -183,6 +183,9 @@ export class SpecularEffect extends EffectBase {
 
     this._fallbackAlbedo = null;
     this._fallbackBlack = null;
+
+    /** @type {Array<function>} Unsubscribe functions from EffectMaskRegistry */
+    this._registryUnsubs = [];
   }
 
   /**
@@ -976,21 +979,103 @@ export class SpecularEffect extends EffectBase {
     }
 
     if (!this.specularMask) {
-      // No scene-wide _Specular mask. Traditional specular stripes won't show,
-      // but we still need the PBR material for weather-driven effects
-      // (wet surface from rain, future snow albedo colouration) which derive
-      // shine from the albedo itself, not the specular mask.
       log.warn('No scene-wide _Specular mask found for base mesh; stripes inactive but wet/weather effects will still apply');
     } else {
       log.info('Specular mask loaded, creating PBR material');
     }
 
-    const baseMap = baseMesh?.material?.map || this._getFallbackAlbedoTexture();
+    // Preserve the albedo texture across redistributions. On first call the
+    // base mesh has a MeshBasicMaterial with .map set to the scene background.
+    // After createPBRMaterial replaces it with a ShaderMaterial, .map is gone.
+    // Without this, redistribution would use a 1x1 white fallback as albedo.
+    const baseMap = baseMesh?.material?.map
+      || this.material?.uniforms?.uAlbedoMap?.value
+      || this._savedAlbedoTexture
+      || this._getFallbackAlbedoTexture();
+    this._savedAlbedoTexture = baseMap;
+
+    // During redistribution, update existing material uniforms rather than
+    // rebuilding the entire shader. This avoids shader recompilation stalls
+    // and preserves the albedo texture correctly.
+    if (this.material?.uniforms) {
+      const u = this.material.uniforms;
+      u.uSpecularMap.value = this.specularMask || this._getFallbackBlackTexture();
+      u.uRoughnessMap.value = this.roughnessMask || baseMap;
+      u.uNormalMap.value = this.normalMap || baseMap;
+      u.uHasRoughnessMap.value = !!this.roughnessMask;
+      u.uHasNormalMap.value = !!this.normalMap;
+      this.material.needsUpdate = true;
+      return;
+    }
+
     this.createPBRMaterial(baseMap);
     
     // Replace base mesh material
     baseMesh.material.dispose();
     baseMesh.material = this.material;
+  }
+
+  /**
+   * Subscribe to the EffectMaskRegistry for 'specular', 'roughness', and 'normal' mask updates.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    for (const unsub of this._registryUnsubs) unsub();
+    this._registryUnsubs = [];
+
+    const updateUniform = (maskField, uniformName, hasUniformName) => {
+      return (texture) => {
+        this[maskField] = texture;
+        if (this.material?.uniforms?.[uniformName]) {
+          this.material.uniforms[uniformName].value = texture || this._fallbackBlack;
+        }
+        if (hasUniformName && this.material?.uniforms?.[hasUniformName]) {
+          this.material.uniforms[hasUniformName].value = !!texture;
+        }
+      };
+    };
+
+    this._registryUnsubs.push(
+      registry.subscribe('specular', updateUniform('specularMask', 'uSpecularMap', null)),
+      registry.subscribe('roughness', updateUniform('roughnessMask', 'uRoughnessMap', 'uHasRoughnessMap')),
+      registry.subscribe('normal', updateUniform('normalMap', 'uNormalMap', 'uHasNormalMap'))
+    );
+  }
+
+  /**
+   * TileBindableEffect interface: load the per-tile specular mask texture.
+   * Called by TileEffectBindingManager before bindTileSprite().
+   * Returns null when the tile should be bound as an occluder-only (no emission).
+   *
+   * @param {object} tileDoc - Foundry TileDocument
+   * @returns {Promise<THREE.Texture|null>}
+   */
+  async loadTileMask(tileDoc) {
+    const tileManager = window.MapShine?.tileManager;
+    if (!tileManager) return null;
+
+    const emitSpecular = tileManager._tileShouldEmitSpecular?.(tileDoc) ?? true;
+    if (!emitSpecular) {
+      // Return null — bindTileSprite will be called with null and emitSpecular:false.
+      return null;
+    }
+
+    try {
+      const tex = await tileManager.loadTileSpecularMaskTexture(tileDoc);
+      return tex || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * TileBindableEffect interface: decide whether this tile should be bound at all.
+   * Specular always binds (at minimum as a depth occluder), so always returns true.
+   * @param {object} _tileDoc
+   * @returns {boolean}
+   */
+  shouldBindTile(_tileDoc) {
+    return true;
   }
 
   /**
@@ -1322,6 +1407,16 @@ export class SpecularEffect extends EffectBase {
           this._tileOverlayRotQuat.setFromAxisAngle(new THREE.Vector3(0, 0, 1), spriteRot);
           this._tileOverlayQuat.multiply(this._tileOverlayRotQuat);
         }
+        // The base plane mesh has scale.y = -1 to reconcile Foundry's Y-down
+        // coordinate system with Three.js Y-up. All scene-space textures
+        // (specular mask, albedo, etc.) are authored with flipY=false and rely
+        // on this Y-flip to render right-side up.
+        //
+        // The tile sprite's matrixWorld has POSITIVE Y scale (no flip). Copying
+        // it directly to the PlaneGeometry overlay would invert the UV sampling
+        // relative to the base plane, causing the specular mask to appear
+        // y-flipped on the tile. Negate Y scale here to match the base plane.
+        this._tileOverlayScale.y = -Math.abs(this._tileOverlayScale.y);
         for (const mesh of meshes) {
           mesh.matrix.compose(this._tileOverlayPos, this._tileOverlayQuat, this._tileOverlayScale);
         }
@@ -2308,6 +2403,8 @@ export class SpecularEffect extends EffectBase {
    * Dispose resources
    */
   dispose() {
+    for (const unsub of this._registryUnsubs) unsub();
+    this._registryUnsubs = [];
     Hooks.off('createAmbientLight', this.onLightCreatedBound);
     Hooks.off('updateAmbientLight', this.onLightUpdatedBound);
     Hooks.off('deleteAmbientLight', this.onLightDeletedBound);

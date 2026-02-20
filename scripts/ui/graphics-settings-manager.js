@@ -22,6 +22,7 @@ const log = createLogger('GraphicsSettings');
  * @property {number} renderIdleFps
  * @property {number} renderActiveFps
  * @property {number} renderContinuousFps
+ * @property {boolean} tokenDepthInteraction - P4-02: tokens participate in depth buffer when true
  * @property {Object<string, {enabled?: boolean}>} effectOverrides
  */
 
@@ -46,8 +47,14 @@ export class GraphicsSettingsManager {
       renderIdleFps: 15,
       renderActiveFps: 60,
       renderContinuousFps: 30,
+      // P4-02: When true, token sprites use depthTest/depthWrite so elevated foreground
+      // tiles correctly occlude them. Default false preserves legacy always-on-top behaviour.
+      tokenDepthInteraction: false,
       effectOverrides: {}
     };
+
+    /** @type {Function|null} Callback invoked when tokenDepthInteraction changes. */
+    this._onTokenDepthInteractionChanged = null;
 
     this.dialog = new GraphicsSettingsDialog(this);
 
@@ -183,6 +190,29 @@ export class GraphicsSettingsManager {
 
     // Clamp to a sane minimum to avoid creating tiny render targets.
     return Math.max(0.1, capped);
+  }
+
+  /**
+   * P4-02: Returns the current tokenDepthInteraction setting.
+   * @returns {boolean}
+   */
+  getTokenDepthInteraction() {
+    return this.state.tokenDepthInteraction === true;
+  }
+
+  /**
+   * P4-02/03: Set tokenDepthInteraction and notify TokenManager to apply it to all
+   * existing sprites immediately.
+   * @param {boolean} enabled
+   */
+  setTokenDepthInteraction(enabled) {
+    this.state.tokenDepthInteraction = enabled === true;
+    try {
+      this._onTokenDepthInteractionChanged?.(this.state.tokenDepthInteraction);
+    } catch (e) {
+      log.warn('Failed to propagate tokenDepthInteraction change', e);
+    }
+    this.saveState();
   }
 
   /**
@@ -426,6 +456,7 @@ export class GraphicsSettingsManager {
       if (parsed.renderIdleFps !== undefined) this.state.renderIdleFps = this._coerceFps(parsed.renderIdleFps, 15, 5, 60);
       if (parsed.renderActiveFps !== undefined) this.state.renderActiveFps = this._coerceFps(parsed.renderActiveFps, 60, 5, 120);
       if (parsed.renderContinuousFps !== undefined) this.state.renderContinuousFps = this._coerceFps(parsed.renderContinuousFps, 30, 5, 120);
+      if (typeof parsed.tokenDepthInteraction === 'boolean') this.state.tokenDepthInteraction = parsed.tokenDepthInteraction;
       if (parsed.effectOverrides && typeof parsed.effectOverrides === 'object') this.state.effectOverrides = parsed.effectOverrides;
 
       log.debug('Loaded graphics overrides');

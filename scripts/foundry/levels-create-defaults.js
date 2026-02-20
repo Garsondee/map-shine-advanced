@@ -139,6 +139,46 @@ export function applyWallLevelDefaults(data, options = {}) {
 }
 
 /**
+ * Seed missing tile elevation/range defaults from the active level band.
+ *
+ * This keeps newly created tiles (including drag/drop creates) scoped to the
+ * currently selected floor in the Levels mini UI / MapShine level context.
+ *
+ * @param {object} data
+ * @param {{scene?: Scene|null|undefined}} [options]
+ * @returns {object}
+ */
+export function applyTileLevelDefaults(data, options = {}) {
+  if (!data || typeof data !== 'object') return data;
+
+  const scene = options.scene ?? canvas?.scene;
+  // Tile floor scoping should keep working when we have explicit active-floor
+  // context, even if compatibility mode is set to OFF.
+  if (!shouldApplyLevelCreateDefaults(scene, { allowWhenModeOff: true })) return data;
+
+  const band = getFiniteActiveLevelBand();
+  if (!band) return data;
+
+  const hasElevation = !_isMissing(data.elevation);
+  const hasRangeTop = !_isMissing(data.flags?.levels?.rangeTop);
+  if (hasElevation && hasRangeTop) return data;
+
+  if (!hasElevation) {
+    data.elevation = band.center;
+  }
+
+  if (!hasRangeTop) {
+    data.flags = (data.flags && typeof data.flags === 'object') ? data.flags : {};
+    data.flags.levels = (data.flags.levels && typeof data.flags.levels === 'object')
+      ? data.flags.levels
+      : {};
+    data.flags.levels.rangeTop = band.top;
+  }
+
+  return data;
+}
+
+/**
  * Seed missing ambient-light elevation/range defaults from the active level band.
  *
  * @param {object} data

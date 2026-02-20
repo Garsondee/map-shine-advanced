@@ -96,6 +96,9 @@ export class CloudEffect extends EffectBase {
     /** @type {THREE.Texture|null} */
     this.outdoorsMask = null;
 
+    /** @type {function|null} Unsubscribe from EffectMaskRegistry */
+    this._registryUnsub = null;
+
     /** @type {THREE.Vector2|null} */
     this.sunDir = null;
 
@@ -481,6 +484,17 @@ export class CloudEffect extends EffectBase {
       const outdoorsData = assetBundle.masks.find(m => m.id === 'outdoors' || m.type === 'outdoors');
       this.outdoorsMask = outdoorsData?.texture || null;
     }
+  }
+
+  /**
+   * Subscribe to the EffectMaskRegistry for 'outdoors' mask updates.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    this._registryUnsub = registry.subscribe('outdoors', (texture) => {
+      this.outdoorsMask = texture;
+    });
   }
 
   /**
@@ -2696,6 +2710,7 @@ export class CloudEffect extends EffectBase {
  }
 
   dispose() {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
     if (this.cloudTopOverlayMesh && this.mainScene) {
       try {
         this.mainScene.remove(this.cloudTopOverlayMesh);

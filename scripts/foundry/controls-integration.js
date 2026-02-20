@@ -318,7 +318,7 @@ export class ControlsIntegration {
     
     // These layers are VISUALLY replaced by Three.js but remain INTERACTIVE
     // We hide the visual elements but keep interaction enabled
-    const visuallyReplacedLayers = ['background', 'grid', 'primary', 'weather', 'environment'];
+    const visuallyReplacedLayers = ['background', 'grid', 'primary', 'tiles', 'weather', 'environment'];
     
     for (const name of visuallyReplacedLayers) {
       const layer = canvas[name];

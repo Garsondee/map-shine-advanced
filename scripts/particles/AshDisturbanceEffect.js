@@ -181,6 +181,9 @@ export class AshDisturbanceEffect extends EffectBase {
     this._rebuildAttempts = 0;
     /** @type {number} Max deferred rebuild attempts before giving up. */
     this._maxRebuildAttempts = 10;
+
+    /** @type {function|null} Unsubscribe from EffectMaskRegistry */
+    this._registryUnsub = null;
   }
 
   static getControlSchema() {
@@ -293,6 +296,25 @@ export class AshDisturbanceEffect extends EffectBase {
     }
   }
 
+  /**
+   * Subscribe to the EffectMaskRegistry for 'ash' mask updates.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    this._registryUnsub = registry.subscribe('ash', (texture) => {
+      this._ashMask = texture;
+      this._spawnPoints = texture
+        ? this._generatePoints(texture)
+        : this._generateFallbackPoints();
+      this._cacheMaskData(texture);
+      this._rebuildAttempts = 0;
+      if (!this._tryRebuildSystems()) {
+        this._needsRebuild = true;
+      }
+    });
+  }
+
   applyParamChange(paramId, value) {
     if (!this.params) return;
     if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -399,6 +421,9 @@ export class AshDisturbanceEffect extends EffectBase {
 
     if (!this._burstSystems.length) return;
 
+    // Per-frame roof occlusion uniform sync.
+    this._syncRoofOcclusionUniforms();
+
     const p = this.params;
     const weather = weatherController?.getCurrentState?.() || {};
     const windSpeed = Number(weather.windSpeed) || 0;
@@ -472,6 +497,7 @@ export class AshDisturbanceEffect extends EffectBase {
   }
 
   dispose() {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
     for (const system of this._burstSystems) {
       try {
         if (this.batchRenderer && system) this.batchRenderer.deleteSystem(system);
@@ -524,20 +550,32 @@ export class AshDisturbanceEffect extends EffectBase {
   }
 
   _generatePoints(maskTexture, threshold = 0.12) {
-    if (!maskTexture || !maskTexture.image) return null;
+    // Prefer GPU compositor readback — avoids CPU canvas round-trip when the
+    // GpuSceneMaskCompositor has already composited the ash mask this session.
+    const composer = window.MapShine?.sceneComposer;
+    const compositor = composer?._sceneMaskCompositor;
+    const gpuPixels = compositor?.getCpuPixels?.('ash');
+    const dims = compositor?.getOutputDims?.('ash');
 
-    const image = maskTexture.image;
-    const w = image.width || 0;
-    const h = image.height || 0;
-    if (w <= 0 || h <= 0) return null;
-
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-    ctx.drawImage(image, 0, 0);
-    const data = ctx.getImageData(0, 0, w, h).data;
+    let data, w, h;
+    if (gpuPixels && dims?.width && dims?.height) {
+      data = gpuPixels;
+      w = dims.width;
+      h = dims.height;
+    } else {
+      if (!maskTexture || !maskTexture.image) return null;
+      const image = maskTexture.image;
+      w = image.width || 0;
+      h = image.height || 0;
+      if (w <= 0 || h <= 0) return null;
+      const cvs = document.createElement('canvas');
+      cvs.width = w;
+      cvs.height = h;
+      const ctx = cvs.getContext('2d');
+      if (!ctx) return null;
+      ctx.drawImage(image, 0, 0);
+      data = ctx.getImageData(0, 0, w, h).data;
+    }
 
     const coords = [];
     const flipV = this._ashMaskFlipV === true;
@@ -578,20 +616,32 @@ export class AshDisturbanceEffect extends EffectBase {
   _cacheMaskData(maskTexture) {
     this._ashMaskData = null;
     this._ashMaskSize = { width: 0, height: 0 };
-    if (!maskTexture || !maskTexture.image) return;
 
-    const image = maskTexture.image;
-    const w = image.width || 0;
-    const h = image.height || 0;
-    if (!w || !h) return;
+    // Prefer GPU compositor readback for the ash mask pixel cache.
+    const composer = window.MapShine?.sceneComposer;
+    const compositor = composer?._sceneMaskCompositor;
+    const gpuPixels = compositor?.getCpuPixels?.('ash');
+    const gpuDims = compositor?.getOutputDims?.('ash');
 
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.drawImage(image, 0, 0);
-    const data = ctx.getImageData(0, 0, w, h).data;
+    let data, w, h;
+    if (gpuPixels && gpuDims?.width && gpuDims?.height) {
+      data = gpuPixels;
+      w = gpuDims.width;
+      h = gpuDims.height;
+    } else {
+      if (!maskTexture || !maskTexture.image) return;
+      const image = maskTexture.image;
+      w = image.width || 0;
+      h = image.height || 0;
+      if (!w || !h) return;
+      const cvs = document.createElement('canvas');
+      cvs.width = w;
+      cvs.height = h;
+      const ctx = cvs.getContext('2d');
+      if (!ctx) return;
+      ctx.drawImage(image, 0, 0);
+      data = ctx.getImageData(0, 0, w, h).data;
+    }
 
     const out = new Uint8Array(w * h);
     const flipV = this._ashMaskFlipV === true;
@@ -732,6 +782,10 @@ export class AshDisturbanceEffect extends EffectBase {
       side: THREE.DoubleSide
     });
 
+    // Patch material for roof/outdoors occlusion before systems are created.
+    this._patchRoofMaskMaterial(material);
+    this._ashMaterial = material;
+
     const p = this.params;
     const startColor = new ColorRange(
       new Vector4(p.colorStart.r, p.colorStart.g, p.colorStart.b, p.colorStart.a),
@@ -804,6 +858,9 @@ export class AshDisturbanceEffect extends EffectBase {
       this._burstSystems.push(createBurstSystem());
     }
 
+    // Patch batch materials for roof occlusion after systems are registered.
+    this._patchAshBatchMaterials();
+
     log.info(`Ash disturbance: _rebuildSystems created ${this._burstSystems.length} burst systems.`, {
       spawnPoints: this._spawnPoints ? (this._spawnPoints.length / 3) : 0,
       sceneSize: `${width}x${height}`,
@@ -812,5 +869,202 @@ export class AshDisturbanceEffect extends EffectBase {
       hasMask: !!this._ashMask,
       textureReady: this._textureReady
     });
+  }
+
+  /**
+   * Patch batch materials for roof occlusion after burst systems are registered.
+   * three.quarks BatchedRenderer creates ShaderMaterials from the source
+   * MeshBasicMaterial — we need to patch those too.
+   * @private
+   */
+  _patchAshBatchMaterials() {
+    if (!this.batchRenderer) return;
+    for (const sys of this._burstSystems) {
+      if (!sys) continue;
+      try {
+        const idx = this.batchRenderer.systemToBatchIndex?.get(sys);
+        if (idx === undefined) continue;
+        const batch = this.batchRenderer.batches?.[idx];
+        if (batch?.material) {
+          this._patchRoofMaskMaterial(batch.material);
+        }
+      } catch (_) {}
+    }
+  }
+
+  /**
+   * Patch a particle material to support roof/outdoors occlusion.
+   * Indoor ash particles (where _Outdoors mask is dark) are faded out
+   * based on the screen-space roof alpha pre-pass, so ash doesn't
+   * render under opaque roofs. Mirrors FireSparksEffect._patchRoofMaskMaterial.
+   * @param {THREE.Material} material
+   * @private
+   */
+  _patchRoofMaskMaterial(material) {
+    const THREE = window.THREE;
+    if (!material || !THREE) return;
+    if (material.userData?.roofUniforms) return;
+
+    const uniforms = {
+      uRoofMap: { value: null },
+      uRoofAlphaMap: { value: null },
+      uResolution: { value: new THREE.Vector2(1, 1) },
+      uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+      uRoofMaskEnabled: { value: 0.0 }
+    };
+
+    material.userData = material.userData || {};
+    material.userData.roofUniforms = uniforms;
+
+    const roofFragBlock =
+      '  if (uRoofMaskEnabled > 0.5) {\n' +
+      '    vec2 uvMask = vec2(\n' +
+      '      (vRoofWorldPos.x - uSceneBounds.x) / uSceneBounds.z,\n' +
+      '      1.0 - (vRoofWorldPos.y - uSceneBounds.y) / uSceneBounds.w\n' +
+      '    );\n' +
+      '    if (uvMask.x >= 0.0 && uvMask.x <= 1.0 && uvMask.y >= 0.0 && uvMask.y <= 1.0) {\n' +
+      '      float m = texture2D(uRoofMap, uvMask).r;\n' +
+      '      if (m < 0.5) {\n' +
+      '        vec2 screenUV = gl_FragCoord.xy / uResolution;\n' +
+      '        float roofAlpha = texture2D(uRoofAlphaMap, screenUV).a;\n' +
+      '        gl_FragColor.a *= (1.0 - roofAlpha);\n' +
+      '      }\n' +
+      '    }\n' +
+      '  }\n';
+
+    const roofUniformDecls =
+      'uniform sampler2D uRoofMap;\n' +
+      'uniform sampler2D uRoofAlphaMap;\n' +
+      'uniform vec2 uResolution;\n' +
+      'uniform vec4 uSceneBounds;\n' +
+      'uniform float uRoofMaskEnabled;\n';
+
+    const isShaderMat = material.isShaderMaterial === true;
+
+    if (isShaderMat) {
+      const uni = material.uniforms || (material.uniforms = {});
+      uni.uRoofMap = uniforms.uRoofMap;
+      uni.uRoofAlphaMap = uniforms.uRoofAlphaMap;
+      uni.uResolution = uniforms.uResolution;
+      uni.uSceneBounds = uniforms.uSceneBounds;
+      uni.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
+
+      if (typeof material.vertexShader === 'string') {
+        const vsMarker = 'MS_ROOF_OCCLUDE_ASH';
+        if (!material.vertexShader.includes(vsMarker)) {
+          material.vertexShader = material.vertexShader
+            .replace('void main() {', '// ' + vsMarker + '\nvarying vec3 vRoofWorldPos;\nvoid main() {')
+            .replace(/(#include <soft_vertex>)/m, '$1\n  vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;');
+        }
+      }
+      if (typeof material.fragmentShader === 'string') {
+        const fsMarker = 'MS_ROOF_OCCLUDE_ASH_FRAG';
+        if (!material.fragmentShader.includes(fsMarker)) {
+          material.fragmentShader = material.fragmentShader
+            .replace('void main() {', '// ' + fsMarker + '\nvarying vec3 vRoofWorldPos;\n' + roofUniformDecls + 'void main() {')
+            .replace(/(^[ \t]*#include <soft_fragment>)/m, roofFragBlock + '$1');
+        }
+      }
+      material.needsUpdate = true;
+      return;
+    }
+
+    // MeshBasicMaterial — install onBeforeCompile.
+    const prevCompile = material.onBeforeCompile;
+    material.onBeforeCompile = (shader) => {
+      if (prevCompile) prevCompile(shader);
+
+      shader.uniforms.uRoofMap = uniforms.uRoofMap;
+      shader.uniforms.uRoofAlphaMap = uniforms.uRoofAlphaMap;
+      shader.uniforms.uResolution = uniforms.uResolution;
+      shader.uniforms.uSceneBounds = uniforms.uSceneBounds;
+      shader.uniforms.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
+
+      shader.vertexShader = shader.vertexShader
+        .replace('void main() {', 'varying vec3 vRoofWorldPos;\nvoid main() {')
+        .replace(/(#include <soft_vertex>)/m, '$1\n  vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;');
+
+      shader.fragmentShader = shader.fragmentShader
+        .replace('void main() {', 'varying vec3 vRoofWorldPos;\n' + roofUniformDecls + 'void main() {')
+        .replace(/(^[ \t]*#include <soft_fragment>)/m, roofFragBlock + '$1');
+    };
+    material.needsUpdate = true;
+  }
+
+  /**
+   * Per-frame sync of roof occlusion uniforms from WeatherController + LightingEffect.
+   * Pushes uniform values to all burst system materials and their batch materials.
+   * @private
+   */
+  _syncRoofOcclusionUniforms() {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const wc = window.MapShine?.weatherController;
+    const roofTex = wc?.roofMap || null;
+    const roofMaskEnabled = !!roofTex && !wc?.roofMaskActive;
+
+    let roofAlphaTex = null;
+    const lighting = window.MapShine?.lightingEffect;
+    if (lighting?.roofAlphaTarget) {
+      roofAlphaTex = lighting.roofAlphaTarget.texture;
+    }
+
+    const renderer = this.renderer;
+    let resX = 1, resY = 1;
+    if (renderer && THREE) {
+      if (!this._tmpRoofVec2) this._tmpRoofVec2 = new THREE.Vector2();
+      if (typeof renderer.getDrawingBufferSize === 'function') {
+        renderer.getDrawingBufferSize(this._tmpRoofVec2);
+      } else if (typeof renderer.getSize === 'function') {
+        renderer.getSize(this._tmpRoofVec2);
+        const dpr = typeof renderer.getPixelRatio === 'function' ? renderer.getPixelRatio() : (window.devicePixelRatio || 1);
+        this._tmpRoofVec2.multiplyScalar(dpr);
+      }
+      resX = this._tmpRoofVec2.x || 1;
+      resY = this._tmpRoofVec2.y || 1;
+    }
+
+    const d = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
+    if (d && THREE) {
+      if (!this._roofSceneBounds) this._roofSceneBounds = new THREE.Vector4();
+      const sw = d.sceneWidth || d.width;
+      const sh = d.sceneHeight || d.height;
+      const sx = d.sceneX || 0;
+      const sy = (d.height || sh) - (d.sceneY || 0) - sh;
+      this._roofSceneBounds.set(sx, sy, sw, sh);
+    }
+
+    const push = (mat) => {
+      const u = mat?.userData?.roofUniforms;
+      if (!u) return;
+      u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+      u.uRoofMap.value = roofTex;
+      u.uRoofAlphaMap.value = roofAlphaTex;
+      u.uResolution.value.set(resX, resY);
+      if (this._roofSceneBounds) u.uSceneBounds.value.copy(this._roofSceneBounds);
+    };
+
+    // Push to source material.
+    push(this._ashMaterial);
+
+    // Push to all batch materials.
+    if (this.batchRenderer) {
+      for (const sys of this._burstSystems) {
+        if (!sys) continue;
+        try {
+          const idx = this.batchRenderer.systemToBatchIndex?.get(sys);
+          if (idx === undefined) continue;
+          const batch = this.batchRenderer.batches?.[idx];
+          if (batch?.material) {
+            // Lazy-patch batch materials that were created after initial patching.
+            if (!batch.material.userData?.roofUniforms) {
+              this._patchRoofMaskMaterial(batch.material);
+            }
+            push(batch.material);
+          }
+        } catch (_) {}
+      }
+    }
   }
 }

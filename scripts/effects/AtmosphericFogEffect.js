@@ -104,6 +104,9 @@ export class AtmosphericFogEffect extends EffectBase {
     this._tempWindTarget = null;
 
     this._evolveTime = 0.0;
+
+    /** @type {function|null} Unsubscribe from EffectMaskRegistry */
+    this._registryUnsub = null;
   }
 
   /**
@@ -552,6 +555,17 @@ export class AtmosphericFogEffect extends EffectBase {
   }
 
   /**
+   * Subscribe to the EffectMaskRegistry for 'outdoors' mask updates.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    this._registryUnsub = registry.subscribe('outdoors', (texture) => {
+      this.setOutdoorsMask(texture);
+    });
+  }
+
+  /**
    * Set input/output buffers from EffectComposer
    */
   setBuffers(readBuffer, writeBuffer) {
@@ -866,6 +880,7 @@ export class AtmosphericFogEffect extends EffectBase {
   }
 
   dispose() {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
     if (this.quadMesh) {
       this.quadMesh.geometry.dispose();
       this.quadScene.remove(this.quadMesh);

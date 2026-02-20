@@ -1292,6 +1292,20 @@ export class LightingEffect extends EffectBase {
     this._rebuildOutdoorsProjection();
   }
 
+  /**
+   * Subscribe to the EffectMaskRegistry for 'outdoors' mask updates.
+   * Called once after initial wireBaseMeshes; subsequent floor transitions
+   * update the mask through the registry subscription callback.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    this._registryUnsub = registry.subscribe('outdoors', (texture) => {
+      this.outdoorsMask = texture;
+      this._rebuildOutdoorsProjection();
+    });
+  }
+
   syncAllLights() {
     // During Foundry startup, LightingEffect.initialize() can run before the lighting
     // layer has finished constructing its placeables. If we sync too early, we can
@@ -1450,86 +1464,6 @@ export class LightingEffect extends EffectBase {
       merged.id = merged._id;
     }
     return merged;
-  }
-
-  _applyFoundryEnhancements(doc) {
-    if (!doc) return doc;
-
-    const docId = doc.id ?? doc._id;
-    if (!docId) return doc;
-
-    const store = window.MapShine?.lightEnhancementStore;
-    const enhancement = store?.getCached?.(docId);
-    let config = enhancement?.config;
-
-    // If the in-memory cache isn't populated for some reason, fall back to directly
-    // reading scene flags synchronously so enhancements can't temporarily "drop"
-    // during Foundry doc updates.
-    if (!config || typeof config !== 'object') {
-      config = this._getFoundryEnhancementConfigFallback(docId);
-    }
-
-    if (!config || typeof config !== 'object') return doc;
-
-    // Normalize numeric types (scene flags can sometimes deserialize numbers as strings).
-    const n = (v, d) => {
-      const x = (typeof v === 'string') ? Number(v) : v;
-      return Number.isFinite(x) ? x : d;
-    };
-
-    const normalized = {
-      ...config,
-      cookieRotation: (config.cookieRotation !== undefined) ? n(config.cookieRotation, undefined) : undefined,
-      cookieScale: (config.cookieScale !== undefined) ? n(config.cookieScale, undefined) : undefined,
-      cookieStrength: (config.cookieStrength !== undefined) ? n(config.cookieStrength, 1.0) : undefined,
-      cookieContrast: (config.cookieContrast !== undefined) ? n(config.cookieContrast, 1.0) : undefined,
-      cookieGamma: (config.cookieGamma !== undefined) ? n(config.cookieGamma, 1.0) : undefined,
-      outputGain: (config.outputGain !== undefined) ? n(config.outputGain, 1.0) : undefined,
-      outerWeight: (config.outerWeight !== undefined) ? n(config.outerWeight, 0.5) : undefined,
-      innerWeight: (config.innerWeight !== undefined) ? n(config.innerWeight, 0.5) : undefined,
-    };
-
-    // Only allow enhancement-owned keys to merge into Foundry's config.
-    // This prevents legacy/stale keys stored in scene flags (e.g. luminosity/alpha)
-    // from overriding the live Foundry light configuration after a reload.
-    const enh = {};
-    const allow = (k) => {
-      if (normalized[k] !== undefined) enh[k] = normalized[k];
-    };
-
-    // Cookie/gobo
-    allow('cookieEnabled');
-    allow('cookieTexture');
-    allow('cookieRotation');
-    allow('cookieScale');
-    allow('cookieTint');
-    allow('cookieStrength');
-    allow('cookieContrast');
-    allow('cookieGamma');
-    allow('cookieInvert');
-    allow('cookieColorize');
-
-    // Output shaping
-    allow('outputGain');
-    allow('outerWeight');
-    allow('innerWeight');
-
-    // Layer targeting
-    allow('targetLayers');
-
-    // Darkness response (sun lights)
-    allow('darknessResponse');
-
-    if (Object.keys(enh).length === 0) return { ...doc, id: docId };
-
-    return {
-      ...doc,
-      id: docId,
-      config: {
-        ...(doc?.config ?? {}),
-        ...enh
-      }
-    };
   }
 
   onLightUpdate(doc, changes) {
@@ -2870,6 +2804,8 @@ export class LightingEffect extends EffectBase {
   }
 
   dispose() {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+
     if (this._syncRetryTimeoutId !== null) {
       try { clearTimeout(this._syncRetryTimeoutId); } catch (_) {}
       this._syncRetryTimeoutId = null;

@@ -170,9 +170,14 @@ class FireMaskShape {
       ? sceneComposer.groundZ
       : 1000;
 
+    // When Levels is active, fire on upper floors must spawn at the floor's
+    // elevation offset above groundZ. The level elevation is set by the
+    // mask rebuild handler in canvas-replacement.js on each level change.
+    const levelElevation = Number(window.MapShine?._activeLevelElevation) || 0;
+
     p.position.x = this.offsetX + u * this.width;
     p.position.y = this.offsetY + (1.0 - v) * this.height;
-    p.position.z = groundZ;
+    p.position.z = groundZ + levelElevation;
 
     // 3. TAGGING: Check "Outdoors" mask to determine wind susceptibility.
     // We query the WeatherController using the same (u, 1-v) logic? 
@@ -1090,6 +1095,9 @@ export class FireSparksEffect extends EffectBase {
 
     // Fire texture is loaded lazily via _ensureFireTexture.
     this.fireTexture = null;
+
+    /** @type {function|null} Unsubscribe from EffectMaskRegistry */
+    this._registryUnsub = null;
   }
 
   isActive() {
@@ -1708,6 +1716,8 @@ export class FireSparksEffect extends EffectBase {
     this._lastAssetBundle = bundle || null;
     if (!bundle || !bundle.masks) {
       log.info('FireSparksEffect: No bundle or masks provided');
+      // Unregister stale heat distortion from a previous floor's fire mask.
+      this._unregisterHeatDistortion();
       return;
     }
     // The asset loader (assets/loader.js) exposes any `<Base>_Fire.*` image
@@ -1721,6 +1731,98 @@ export class FireSparksEffect extends EffectBase {
       hasScene: !!this.scene,
       maskTypes: bundle.masks.map(m => m.type)
     });
+    if (!fireMask) {
+      // No fire mask on this floor — clean up stale heat distortion and
+      // destroy existing fire particle systems so they stop emitting.
+      this._unregisterHeatDistortion();
+
+      const batch = this.particleSystemRef?.batchRenderer;
+      const scene = this.scene;
+      if (batch && this.globalSystem) batch.deleteSystem(this.globalSystem);
+      if (scene && this.globalSystem?.emitter) scene.remove(this.globalSystem.emitter);
+      if (batch && this.globalEmbers) batch.deleteSystem(this.globalEmbers);
+      if (scene && this.globalEmbers?.emitter) scene.remove(this.globalEmbers.emitter);
+      this.globalSystem = null;
+      this.globalEmbers = null;
+
+      if (batch || scene) {
+        for (const sys of this.globalSystems) {
+          if (batch && sys) batch.deleteSystem(sys);
+          if (scene && sys?.emitter) scene.remove(sys.emitter);
+        }
+        for (const sys of this.globalEmberSystems) {
+          if (batch && sys) batch.deleteSystem(sys);
+          if (scene && sys?.emitter) scene.remove(sys.emitter);
+        }
+        for (const sys of this.globalSmokeSystems) {
+          if (batch && sys) batch.deleteSystem(sys);
+          if (scene && sys?.emitter) scene.remove(sys.emitter);
+        }
+      }
+      this.globalSystems.length = 0;
+      this.globalEmberSystems.length = 0;
+      this.globalSmokeSystems.length = 0;
+
+      // Clear the position map so stale spawn data doesn't persist.
+      this._firePositionMap = null;
+
+      log.info('FireSparksEffect: No fire mask — cleared all fire systems');
+      return;
+    }
+    this._applyFireMask(fireMask);
+  }
+
+  /**
+   * Subscribe to the EffectMaskRegistry for 'fire' mask updates.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    this._registryUnsub = registry.subscribe('fire', (texture) => {
+      if (!texture) {
+        // No fire mask — clean up existing systems
+        this._unregisterHeatDistortion();
+        const batch = this.particleSystemRef?.batchRenderer;
+        const scene = this.scene;
+        if (batch && this.globalSystem) batch.deleteSystem(this.globalSystem);
+        if (scene && this.globalSystem?.emitter) scene.remove(this.globalSystem.emitter);
+        if (batch && this.globalEmbers) batch.deleteSystem(this.globalEmbers);
+        if (scene && this.globalEmbers?.emitter) scene.remove(this.globalEmbers.emitter);
+        this.globalSystem = null;
+        this.globalEmbers = null;
+        if (batch || scene) {
+          for (const sys of this.globalSystems) {
+            if (batch && sys) batch.deleteSystem(sys);
+            if (scene && sys?.emitter) scene.remove(sys.emitter);
+          }
+          for (const sys of this.globalEmberSystems) {
+            if (batch && sys) batch.deleteSystem(sys);
+            if (scene && sys?.emitter) scene.remove(sys.emitter);
+          }
+          for (const sys of this.globalSmokeSystems) {
+            if (batch && sys) batch.deleteSystem(sys);
+            if (scene && sys?.emitter) scene.remove(sys.emitter);
+          }
+        }
+        this.globalSystems.length = 0;
+        this.globalEmberSystems.length = 0;
+        this.globalSmokeSystems.length = 0;
+        this._firePositionMap = null;
+        return;
+      }
+      // Build a synthetic mask entry matching what setAssetBundle expects
+      const fireMask = { type: 'fire', texture };
+      this._applyFireMask(fireMask);
+    });
+  }
+
+  /**
+   * Internal: apply a fire mask entry (from setAssetBundle or registry callback).
+   * Extracted from setAssetBundle to share logic with connectToRegistry.
+   * @param {{type: string, texture: THREE.Texture}} fireMask
+   * @private
+   */
+  _applyFireMask(fireMask) {
     if (fireMask && this.particleSystemRef && this.particleSystemRef.batchRenderer) {
       const batch = this.particleSystemRef.batchRenderer;
       const scene = this.scene;
@@ -1940,6 +2042,25 @@ export class FireSparksEffect extends EffectBase {
   }
 
   /**
+   * Unregister any active heat distortion source from the DistortionManager.
+   * Called when switching to a floor with no _Fire mask so stale heat haze
+   * from a previous floor doesn't persist.
+   * @private
+   */
+  _unregisterHeatDistortion() {
+    try {
+      const distortionManager = window.MapShine?.distortionManager;
+      if (distortionManager) {
+        distortionManager.unregisterSource('heat');
+      }
+    } catch (_) {}
+    if (this._heatDistortionMask) {
+      try { this._heatDistortionMask.dispose(); } catch (_) {}
+      this._heatDistortionMask = null;
+    }
+  }
+
+  /**
    * Create a boosted/expanded version of the fire mask for heat distortion.
    * The boost increases brightness so that after blur, the heat area extends
    * well beyond the visible flames.
@@ -2054,26 +2175,45 @@ export class FireSparksEffect extends EffectBase {
   }
   
   _generatePoints(maskTexture, threshold = 0.1) {
-    const image = maskTexture.image;
-    if (!image) {
-      log.warn('FireSparksEffect: No image in mask texture');
-      return null;
+    // Prefer GPU compositor readback — avoids CPU canvas round-trip when the
+    // GpuSceneMaskCompositor has already composited the fire mask this session.
+    const composer = window.MapShine?.sceneComposer;
+    const gpuPixels = composer?.getCpuPixels?.('fire');
+    const dims = composer?._sceneMaskCompositor?.getOutputDims?.('fire');
+
+    let data, imgW, imgH;
+
+    if (gpuPixels && dims?.width && dims?.height) {
+      data = gpuPixels;
+      imgW = dims.width;
+      imgH = dims.height;
+      log.info('FireSparksEffect: using GPU compositor readback for fire mask scan');
+    } else {
+      // Fallback: CPU canvas drawImage from the texture's HTMLImageElement.
+      const image = maskTexture?.image;
+      if (!image) {
+        log.warn('FireSparksEffect: No image in mask texture');
+        return null;
+      }
+      const c = document.createElement('canvas');
+      c.width = image.width;
+      c.height = image.height;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(image, 0, 0);
+      data = ctx.getImageData(0, 0, c.width, c.height).data;
+      imgW = c.width;
+      imgH = c.height;
     }
-    const c = document.createElement('canvas');
-    c.width = image.width;
-    c.height = image.height;
-    const ctx = c.getContext('2d');
-    ctx.drawImage(image, 0, 0);
-    const data = ctx.getImageData(0, 0, c.width, c.height).data;
+
     const coords = [];
     for (let i = 0; i < data.length; i += 4) {
-        const b = data[i] / 255.0;
-        if (b > threshold) {
-            const idx = i / 4;
-            const x = (idx % c.width) / c.width;
-            const y = Math.floor(idx / c.width) / c.height;
-            coords.push(x, y, b);
-        }
+      const b = data[i] / 255.0;
+      if (b > threshold) {
+        const idx = i / 4;
+        const x = (idx % imgW) / imgW;
+        const y = Math.floor(idx / imgW) / imgH;
+        coords.push(x, y, b);
+      }
     }
     if (coords.length === 0) {
       log.warn('FireSparksEffect: No fire points found in mask (all pixels below threshold)');
@@ -3073,6 +3213,7 @@ export class FireSparksEffect extends EffectBase {
   }
   
   dispose() {
+      if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
       this._destroyParticleSystems();
       this._detachMapPointsListener();
       this._lastAssetBundle = null;

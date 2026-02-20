@@ -350,6 +350,9 @@ export class WeatherController {
       emberWindInfluence: 0.45,
       emberCurlStrength: 3
     };
+
+    /** @type {function|null} Unsubscribe from EffectMaskRegistry */
+    this._registryUnsub = null;
   }
 
   /**
@@ -415,6 +418,17 @@ export class WeatherController {
       this.roofMaskSize = { width: 0, height: 0 };
       this._disposeRoofDistanceMap();
     }
+  }
+
+  /**
+   * Subscribe to the EffectMaskRegistry for 'outdoors' mask updates (roof map).
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    this._registryUnsub = registry.subscribe('outdoors', (texture) => {
+      this.setRoofMap(texture);
+    });
   }
 
   _disposeRoofDistanceMap() {

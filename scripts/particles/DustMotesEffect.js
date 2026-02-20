@@ -202,6 +202,9 @@ export class DustMotesEffect extends EffectBase {
 
     this._tmpSceneBounds = null;
     this._lastSceneBoundsKey = null;
+
+    /** @type {Array<function>} Unsubscribe functions from EffectMaskRegistry */
+    this._registryUnsubs = [];
   }
 
   static getControlSchema() {
@@ -333,6 +336,25 @@ export class DustMotesEffect extends EffectBase {
     this._needsRebuild = true;
   }
 
+  /**
+   * Subscribe to the EffectMaskRegistry for 'dust' and 'outdoors' mask updates.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    for (const unsub of this._registryUnsubs) unsub();
+    this._registryUnsubs = [];
+
+    const rebuild = () => {
+      this._spawnPoints = this._generatePoints(this._dustMask, this._structuralMask, this._outdoorsMask);
+      this._needsRebuild = true;
+    };
+
+    this._registryUnsubs.push(
+      registry.subscribe('dust', (texture) => { this._dustMask = texture; rebuild(); }),
+      registry.subscribe('outdoors', (texture) => { this._outdoorsMask = texture; rebuild(); })
+    );
+  }
+
   applyParamChange(paramId, value) {
     if (!this.params) return;
     if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -365,31 +387,39 @@ export class DustMotesEffect extends EffectBase {
   }
 
   _generatePoints(dustTexture, structuralTexture, outdoorsTexture) {
-    if (!dustTexture || !dustTexture.image) {
-      return null;
+    // Try GPU compositor readback first for dust and outdoors masks.
+    // Falls back to CPU canvas drawImage when compositor data is unavailable.
+    const composer = window.MapShine?.sceneComposer;
+    const compositor = composer?._sceneMaskCompositor;
+
+    // ── Dust mask pixels ──────────────────────────────────────────────────
+    let dustData, w, h;
+    const gpuDust = compositor?.getCpuPixels?.('dust');
+    const dustDims = compositor?.getOutputDims?.('dust');
+    if (gpuDust && dustDims?.width && dustDims?.height) {
+      dustData = gpuDust;
+      w = dustDims.width;
+      h = dustDims.height;
+    } else {
+      if (!dustTexture || !dustTexture.image) return null;
+      const dustImage = dustTexture.image;
+      w = dustImage.width || 0;
+      h = dustImage.height || 0;
+      if (w <= 0 || h <= 0) return null;
+      const dustCanvas = document.createElement('canvas');
+      dustCanvas.width = w;
+      dustCanvas.height = h;
+      const dustCtx = dustCanvas.getContext('2d');
+      if (!dustCtx) return null;
+      dustCtx.drawImage(dustImage, 0, 0);
+      dustData = dustCtx.getImageData(0, 0, w, h).data;
     }
 
-    const dustImage = dustTexture.image;
-    const structuralImage = structuralTexture?.image || null;
-    const outdoorsImage = outdoorsTexture?.image || null;
-
-    const w = dustImage.width || 0;
-    const h = dustImage.height || 0;
-    if (w <= 0 || h <= 0) {
-      return null;
-    }
-
-    const dustCanvas = document.createElement('canvas');
-    dustCanvas.width = w;
-    dustCanvas.height = h;
-    const dustCtx = dustCanvas.getContext('2d');
-    if (!dustCtx) return null;
-    dustCtx.drawImage(dustImage, 0, 0);
-    const dustData = dustCtx.getImageData(0, 0, w, h).data;
-
+    // ── Structural mask pixels (always CPU — no compositor slot) ──────────
     let structuralData = null;
     let structuralW = 0;
     let structuralH = 0;
+    const structuralImage = structuralTexture?.image || null;
     if (structuralImage && structuralImage.width && structuralImage.height) {
       const c = document.createElement('canvas');
       c.width = structuralImage.width;
@@ -403,19 +433,29 @@ export class DustMotesEffect extends EffectBase {
       }
     }
 
+    // ── Outdoors mask pixels ──────────────────────────────────────────────
     let outdoorsData = null;
     let outdoorsW = 0;
     let outdoorsH = 0;
-    if (outdoorsImage && outdoorsImage.width && outdoorsImage.height) {
-      const c = document.createElement('canvas');
-      c.width = outdoorsImage.width;
-      c.height = outdoorsImage.height;
-      const ctx = c.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(outdoorsImage, 0, 0);
-        outdoorsData = ctx.getImageData(0, 0, c.width, c.height).data;
-        outdoorsW = c.width;
-        outdoorsH = c.height;
+    const gpuOutdoors = compositor?.getCpuPixels?.('outdoors');
+    const outdoorsDims = compositor?.getOutputDims?.('outdoors');
+    if (gpuOutdoors && outdoorsDims?.width && outdoorsDims?.height) {
+      outdoorsData = gpuOutdoors;
+      outdoorsW = outdoorsDims.width;
+      outdoorsH = outdoorsDims.height;
+    } else {
+      const outdoorsImage = outdoorsTexture?.image || null;
+      if (outdoorsImage && outdoorsImage.width && outdoorsImage.height) {
+        const c = document.createElement('canvas');
+        c.width = outdoorsImage.width;
+        c.height = outdoorsImage.height;
+        const ctx = c.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(outdoorsImage, 0, 0);
+          outdoorsData = ctx.getImageData(0, 0, c.width, c.height).data;
+          outdoorsW = c.width;
+          outdoorsH = c.height;
+        }
       }
     }
 
@@ -602,6 +642,7 @@ export class DustMotesEffect extends EffectBase {
     }
 
     this._patchWindowLightMaterial(material);
+    this._patchRoofMaskMaterial(material);
 
     this.batchRenderer.addSystem(system);
     this.scene.add(system.emitter);
@@ -625,6 +666,7 @@ export class DustMotesEffect extends EffectBase {
       if (!batch || !batch.material) return;
       this._batchMaterial = batch.material;
       this._patchWindowLightMaterial(this._batchMaterial);
+      this._patchRoofMaskMaterial(this._batchMaterial);
     } catch (e) {
     }
   }
@@ -910,6 +952,7 @@ export class DustMotesEffect extends EffectBase {
     }
 
     this._syncWindowLightUniforms();
+    this._syncRoofOcclusionUniforms();
     this._syncMaterialVisibilityOverrides();
   }
 
@@ -927,7 +970,165 @@ export class DustMotesEffect extends EffectBase {
     push(this._batchMaterial);
   }
 
+  /**
+   * Patch a particle material to support roof/outdoors occlusion.
+   * Indoor dust motes (where _Outdoors mask is dark) are faded out
+   * based on the screen-space roof alpha pre-pass, so dust doesn't
+   * render under opaque roofs. Mirrors FireSparksEffect._patchRoofMaskMaterial.
+   * @param {THREE.Material} material
+   * @private
+   */
+  _patchRoofMaskMaterial(material) {
+    const THREE = window.THREE;
+    if (!material || !THREE) return;
+    if (material.userData?.roofUniforms) return;
+
+    const uniforms = {
+      uRoofMap: { value: null },
+      uRoofAlphaMap: { value: null },
+      uResolution: { value: new THREE.Vector2(1, 1) },
+      uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+      uRoofMaskEnabled: { value: 0.0 }
+    };
+
+    material.userData = material.userData || {};
+    material.userData.roofUniforms = uniforms;
+
+    const roofFragBlock =
+      '  if (uRoofMaskEnabled > 0.5) {\n' +
+      '    vec2 uvMask = vec2(\n' +
+      '      (vRoofWorldPos.x - uSceneBounds.x) / uSceneBounds.z,\n' +
+      '      1.0 - (vRoofWorldPos.y - uSceneBounds.y) / uSceneBounds.w\n' +
+      '    );\n' +
+      '    if (uvMask.x >= 0.0 && uvMask.x <= 1.0 && uvMask.y >= 0.0 && uvMask.y <= 1.0) {\n' +
+      '      float m = texture2D(uRoofMap, uvMask).r;\n' +
+      '      if (m < 0.5) {\n' +
+      '        vec2 screenUV = gl_FragCoord.xy / uResolution;\n' +
+      '        float roofAlpha = texture2D(uRoofAlphaMap, screenUV).a;\n' +
+      '        gl_FragColor.a *= (1.0 - roofAlpha);\n' +
+      '      }\n' +
+      '    }\n' +
+      '  }\n';
+
+    const roofUniformDecls =
+      'uniform sampler2D uRoofMap;\n' +
+      'uniform sampler2D uRoofAlphaMap;\n' +
+      'uniform vec2 uResolution;\n' +
+      'uniform vec4 uSceneBounds;\n' +
+      'uniform float uRoofMaskEnabled;\n';
+
+    const isShaderMat = material.isShaderMaterial === true;
+
+    if (isShaderMat) {
+      const uni = material.uniforms || (material.uniforms = {});
+      uni.uRoofMap = uniforms.uRoofMap;
+      uni.uRoofAlphaMap = uniforms.uRoofAlphaMap;
+      uni.uResolution = uniforms.uResolution;
+      uni.uSceneBounds = uniforms.uSceneBounds;
+      uni.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
+
+      if (typeof material.vertexShader === 'string') {
+        const vsMarker = 'MS_ROOF_OCCLUDE_DUST';
+        if (!material.vertexShader.includes(vsMarker)) {
+          material.vertexShader = material.vertexShader
+            .replace('void main() {', '// ' + vsMarker + '\nvarying vec3 vRoofWorldPos;\nvoid main() {')
+            .replace(/(#include <soft_vertex>)/m, '$1\n  vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;');
+        }
+      }
+      if (typeof material.fragmentShader === 'string') {
+        const fsMarker = 'MS_ROOF_OCCLUDE_DUST_FRAG';
+        if (!material.fragmentShader.includes(fsMarker)) {
+          material.fragmentShader = material.fragmentShader
+            .replace('void main() {', '// ' + fsMarker + '\nvarying vec3 vRoofWorldPos;\n' + roofUniformDecls + 'void main() {')
+            .replace(/(^[ \t]*#include <soft_fragment>)/m, roofFragBlock + '$1');
+        }
+      }
+      material.needsUpdate = true;
+      return;
+    }
+
+    // MeshBasicMaterial — chain with existing onBeforeCompile.
+    const prevCompile = material.onBeforeCompile;
+    material.onBeforeCompile = (shader) => {
+      if (prevCompile) prevCompile(shader);
+
+      shader.uniforms.uRoofMap = uniforms.uRoofMap;
+      shader.uniforms.uRoofAlphaMap = uniforms.uRoofAlphaMap;
+      shader.uniforms.uResolution = uniforms.uResolution;
+      shader.uniforms.uSceneBounds = uniforms.uSceneBounds;
+      shader.uniforms.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
+
+      shader.vertexShader = shader.vertexShader
+        .replace('void main() {', 'varying vec3 vRoofWorldPos;\nvoid main() {')
+        .replace(/(#include <soft_vertex>)/m, '$1\n  vRoofWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;');
+
+      shader.fragmentShader = shader.fragmentShader
+        .replace('void main() {', 'varying vec3 vRoofWorldPos;\n' + roofUniformDecls + 'void main() {')
+        .replace(/(^[ \t]*#include <soft_fragment>)/m, roofFragBlock + '$1');
+    };
+    material.needsUpdate = true;
+  }
+
+  /**
+   * Per-frame sync of roof occlusion uniforms from WeatherController + LightingEffect.
+   * @private
+   */
+  _syncRoofOcclusionUniforms() {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const wc = window.MapShine?.weatherController;
+    const roofTex = wc?.roofMap || null;
+    const roofMaskEnabled = !!roofTex && !wc?.roofMaskActive;
+
+    let roofAlphaTex = null;
+    const lighting = window.MapShine?.lightingEffect;
+    if (lighting?.roofAlphaTarget) {
+      roofAlphaTex = lighting.roofAlphaTarget.texture;
+    }
+
+    const renderer = this.renderer;
+    let resX = 1, resY = 1;
+    if (renderer && THREE) {
+      if (!this._tmpRoofVec2) this._tmpRoofVec2 = new THREE.Vector2();
+      if (typeof renderer.getDrawingBufferSize === 'function') {
+        renderer.getDrawingBufferSize(this._tmpRoofVec2);
+      } else if (typeof renderer.getSize === 'function') {
+        renderer.getSize(this._tmpRoofVec2);
+        const dpr = typeof renderer.getPixelRatio === 'function' ? renderer.getPixelRatio() : (window.devicePixelRatio || 1);
+        this._tmpRoofVec2.multiplyScalar(dpr);
+      }
+      resX = this._tmpRoofVec2.x || 1;
+      resY = this._tmpRoofVec2.y || 1;
+    }
+
+    const d = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
+    if (d && THREE) {
+      if (!this._roofSceneBounds) this._roofSceneBounds = new THREE.Vector4();
+      const sw = d.sceneWidth || d.width;
+      const sh = d.sceneHeight || d.height;
+      const sx = d.sceneX || 0;
+      const sy = (d.height || sh) - (d.sceneY || 0) - sh;
+      this._roofSceneBounds.set(sx, sy, sw, sh);
+    }
+
+    const push = (mat) => {
+      const u = mat?.userData?.roofUniforms;
+      if (!u) return;
+      u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
+      u.uRoofMap.value = roofTex;
+      u.uRoofAlphaMap.value = roofAlphaTex;
+      u.uResolution.value.set(resX, resY);
+      if (this._roofSceneBounds) u.uSceneBounds.value.copy(this._roofSceneBounds);
+    };
+
+    push(this._material);
+    push(this._batchMaterial);
+  }
+
   dispose() {
+    for (const unsub of this._registryUnsubs) unsub();
+    this._registryUnsubs = [];
     this._disposeSystem();
 
     if (this._particleTexture) {

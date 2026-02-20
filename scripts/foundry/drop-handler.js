@@ -6,6 +6,7 @@
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
+import { applyTileLevelDefaults } from './levels-create-defaults.js';
 
 const log = createLogger('DropHandler');
 
@@ -323,6 +324,10 @@ export class DropHandler {
       y: y,
       elevation: 0 // Default elevation
     };
+
+    // Seed missing elevation/range from active level context so dropped tiles
+    // are floor-scoped to the currently selected level.
+    applyTileLevelDefaults(tileData, { scene: canvas?.scene });
 
     // Create TileDocument
     log.info(`Creating tile at (${x}, ${y})`);

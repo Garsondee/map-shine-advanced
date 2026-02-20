@@ -909,14 +909,20 @@ export class TokenMovementManager {
     this._hpaAdjacencyCache.clear();
     this._sceneNavGraphCache.clear();
     this._pathPrewarmLastRevision = -1;
-    this._schedulePathfindingPrewarm(reason || 'topology-dirty', 180);
+    // Wall/door edits can happen interactively and frequently. Running the
+    // full-scene nav graph warmup here can stall the UI on large scenes, so we
+    // do a lightweight prewarm and defer nav graph construction until on-demand
+    // path queries.
+    this._schedulePathfindingPrewarm(reason || 'topology-dirty', 180, {
+      skipSceneNavGraphWarmup: true
+    });
   }
 
   /**
    * @param {string} [reason]
    * @param {number} [delayMs]
    */
-  _schedulePathfindingPrewarm(reason = '', delayMs = 140) {
+  _schedulePathfindingPrewarm(reason = '', delayMs = 140, options = {}) {
     if (!this.initialized) return;
 
     if (this._pathPrewarmTimer) {
@@ -930,7 +936,7 @@ export class TokenMovementManager {
 
       const run = () => {
         try {
-          this._runPathfindingPrewarm(reason || 'scheduled');
+          this._runPathfindingPrewarm(reason || 'scheduled', options);
         } catch (_) {
         }
       };
@@ -950,8 +956,10 @@ export class TokenMovementManager {
   /**
    * @param {string} [reason]
    */
-  _runPathfindingPrewarm(reason = '') {
+  _runPathfindingPrewarm(reason = '', options = {}) {
     if (!this.initialized) return;
+
+    const skipSceneNavGraphWarmup = !!options?.skipSceneNavGraphWarmup;
 
     const sceneId = String(canvas?.scene?.id || '');
     if (!sceneId) return;
@@ -990,13 +998,15 @@ export class TokenMovementManager {
     let sceneNavGraphNodeCount = 0;
     let sceneNavGraphEdgeCount = 0;
     let sceneNavGraphBuildMs = 0;
-    const navGraph = this._getOrBuildSceneNavGraph(stubTokenDoc, {
-      collisionMode: 'closest'
-    });
-    if (navGraph) {
-      sceneNavGraphNodeCount = navGraph.nodes?.size || 0;
-      sceneNavGraphEdgeCount = navGraph.edgeCount || 0;
-      sceneNavGraphBuildMs = navGraph.buildMs || 0;
+    if (!skipSceneNavGraphWarmup) {
+      const navGraph = this._getOrBuildSceneNavGraph(stubTokenDoc, {
+        collisionMode: 'closest'
+      });
+      if (navGraph) {
+        sceneNavGraphNodeCount = navGraph.nodes?.size || 0;
+        sceneNavGraphEdgeCount = navGraph.edgeCount || 0;
+        sceneNavGraphBuildMs = navGraph.buildMs || 0;
+      }
     }
 
     this._pathPrewarmLastSceneId = sceneId;
@@ -1009,6 +1019,7 @@ export class TokenMovementManager {
       bucketCount: doorIndex?.buckets instanceof Map ? doorIndex.buckets.size : 0,
       hpaSectorCount: Array.isArray(hpaIndex?.sectors) ? hpaIndex.sectors.length : 0,
       hpaAdjacencyEdgeCount,
+      skipSceneNavGraphWarmup,
       sceneNavGraphNodeCount,
       sceneNavGraphEdgeCount,
       sceneNavGraphBuildMs: Math.round(sceneNavGraphBuildMs * 10) / 10,

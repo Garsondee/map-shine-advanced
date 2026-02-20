@@ -1166,10 +1166,231 @@ export class TweakpaneManager {
     // ── Depth Pass Debug Section ──────────────────────────────────────────
     this._buildDepthPassDebugSection(debugFolder);
 
+    debugFolder.addBlade({ view: 'separator' });
+
+    // P5-10/11/12/13: Mask Registry debug panel
+    this._buildMaskRegistryDebugSection(debugFolder);
+
+    debugFolder.addBlade({ view: 'separator' });
+
+    // P5-10: VRAM Budget debug panel
+    this._buildVramBudgetDebugSection(debugFolder);
+
     debugFolder.on('fold', (ev) => {
       this.accordionStates['debug'] = ev.expanded;
       this.saveUIState();
     });
+  }
+
+  /**
+   * P5-10/11/12/13: Build the Mask Registry debug sub-section.
+   * Shows per-slot status (has texture, floor key, subscriber count, resolution),
+   * per-mask-type enable toggles (P5-12), and a tile binding inspector (P5-13).
+   * @param {Object} parentFolder
+   * @private
+   */
+  _buildMaskRegistryDebugSection(parentFolder) {
+    if (!parentFolder) return;
+
+    const folder = parentFolder.addFolder({
+      title: 'Mask Registry',
+      expanded: this.accordionStates['debug_maskRegistry'] ?? false
+    });
+
+    // P5-10: "Dump State" button — logs full registry snapshot to console
+    folder.addButton({ title: 'Dump Registry State' }).on('click', () => {
+      try {
+        const registry = window.MapShine?.effectMaskRegistry;
+        if (!registry) { console.warn('MapShine: EffectMaskRegistry not available'); return; }
+        const state = registry.getDebugState?.() ?? registry.getMetrics?.() ?? {};
+        console.groupCollapsed('MapShine: Mask Registry State');
+        console.log('activeFloorKey:', state.activeFloorKey);
+        console.log('transitioning:', state.transitioning);
+        console.log('transitionCount:', state.transitionCount);
+        console.log('recomposeCount:', state.recomposeCount);
+        if (state.slots) {
+          const rows = Object.entries(state.slots).map(([type, s]) => ({
+            type,
+            hasTexture: s.hasTexture,
+            floorKey: s.floorKey,
+            source: s.source,
+            subscribers: s.subscriberCount,
+            ageMs: s.ageMs,
+            resolution: s.resolution ? `${s.resolution.w}x${s.resolution.h}` : '—',
+            enabled: s.enabled !== false
+          }));
+          console.table(rows);
+        }
+        console.groupEnd();
+      } catch (e) {
+        console.warn('MapShine: Failed to dump Mask Registry state', e);
+      }
+    });
+
+    // P5-11: "Dump Tile Contributions" button — shows which tiles contribute to each mask
+    folder.addButton({ title: 'Dump Tile Contributions' }).on('click', () => {
+      try {
+        const tileManager = window.MapShine?.tileManager;
+        if (!tileManager?.tileSprites) { console.warn('MapShine: TileManager not available'); return; }
+        const rows = [];
+        for (const [id, data] of tileManager.tileSprites) {
+          const doc = data?.tileDoc;
+          if (!doc) continue;
+          const src = doc.texture?.src ?? '—';
+          const shortSrc = src.split('/').pop() ?? src;
+          rows.push({
+            tileId: id,
+            src: shortSrc,
+            elevation: doc.elevation ?? 0,
+            hidden: doc.hidden ?? false,
+            hasWater: !!data._waterMask,
+            hasFire: !!data._fireMask,
+            hasSpecular: !!data._specularMask,
+            hasTree: !!data._treeMask,
+            hasBush: !!data._bushMask,
+            hasIridescence: !!data._iridescenceMask,
+          });
+        }
+        console.groupCollapsed('MapShine: Tile Mask Contributions');
+        console.table(rows);
+        console.groupEnd();
+      } catch (e) {
+        console.warn('MapShine: Failed to dump tile contributions', e);
+      }
+    });
+
+    // P5-13: "Dump Tile Binding Inspector" — per-tile overlay count, orphan detection
+    folder.addButton({ title: 'Dump Tile Binding Inspector' }).on('click', () => {
+      try {
+        const tebm = window.MapShine?.tileEffectBindingManager;
+        if (!tebm) { console.warn('MapShine: TileEffectBindingManager not available'); return; }
+        const report = (typeof tebm.getInspectorReport === 'function')
+          ? tebm.getInspectorReport()
+          : null;
+        if (report) {
+          console.groupCollapsed('MapShine: Tile Binding Inspector');
+          console.table(report.tiles ?? report);
+          if (report.orphans?.length) {
+            console.warn('Orphaned overlays:', report.orphans);
+          }
+          console.groupEnd();
+        } else {
+          // Fallback: dump binding counts from the manager's internal state
+          console.groupCollapsed('MapShine: Tile Binding Inspector (basic)');
+          const bindings = tebm._bindings ?? tebm._tileBindings ?? tebm.bindings;
+          if (bindings instanceof Map) {
+            const rows = [];
+            for (const [tileId, binding] of bindings) {
+              const effects = binding?.effects ?? binding?.overlays ?? [];
+              rows.push({ tileId, overlayCount: Array.isArray(effects) ? effects.length : '?' });
+            }
+            console.table(rows);
+          } else {
+            console.log('Binding data:', bindings);
+          }
+          console.groupEnd();
+        }
+      } catch (e) {
+        console.warn('MapShine: Failed to dump tile binding inspector', e);
+      }
+    });
+
+    // P5-12: Per-mask-type enable toggles
+    folder.addBlade({ view: 'separator' });
+    const togglesFolder = folder.addFolder({ title: 'Mask Type Toggles', expanded: false });
+    const MASK_TYPES = ['water', 'fire', 'outdoors', 'windows', 'specular', 'normal',
+      'tree', 'bush', 'dust', 'ash', 'iridescence', 'prism', 'roughness', 'fluid'];
+
+    if (!this._maskTypeToggleParams) {
+      this._maskTypeToggleParams = {};
+      for (const t of MASK_TYPES) this._maskTypeToggleParams[t] = true;
+    }
+
+    for (const maskType of MASK_TYPES) {
+      togglesFolder.addBinding(this._maskTypeToggleParams, maskType, {
+        label: maskType
+      }).on('change', (ev) => {
+        try {
+          const registry = window.MapShine?.effectMaskRegistry;
+          if (registry && typeof registry.setMaskTypeDebugEnabled === 'function') {
+            registry.setMaskTypeDebugEnabled(maskType, ev.value);
+          }
+        } catch (e) {
+          console.warn(`MapShine: Failed to toggle mask type '${maskType}'`, e);
+        }
+      });
+    }
+
+    folder.on('fold', (ev) => {
+      this.accordionStates['debug_maskRegistry'] = ev.expanded;
+      this.saveUIState();
+    });
+  }
+
+  /**
+   * P5-10: Build the VRAM Budget debug sub-section.
+   * Shows current usage, budget fraction, and top entries by size.
+   * @param {Object} parentFolder
+   * @private
+   */
+  _buildVramBudgetDebugSection(parentFolder) {
+    if (!parentFolder) return;
+
+    const folder = parentFolder.addFolder({
+      title: 'VRAM Budget',
+      expanded: this.accordionStates['debug_vramBudget'] ?? false
+    });
+
+    folder.addButton({ title: 'Dump Budget State' }).on('click', () => {
+      try {
+        const budget = window.MapShine?.textureBudgetTracker
+          ?? (typeof window !== 'undefined' && window._msTextureBudget);
+        if (!budget) {
+          // Lazy-import the singleton
+          import('../assets/TextureBudgetTracker.js').then(({ getTextureBudgetTracker }) => {
+            const b = getTextureBudgetTracker();
+            this._logBudgetState(b);
+          }).catch(() => console.warn('MapShine: TextureBudgetTracker not available'));
+          return;
+        }
+        this._logBudgetState(budget);
+      } catch (e) {
+        console.warn('MapShine: Failed to dump VRAM budget state', e);
+      }
+    });
+
+    folder.on('fold', (ev) => {
+      this.accordionStates['debug_vramBudget'] = ev.expanded;
+      this.saveUIState();
+    });
+  }
+
+  /**
+   * Log a TextureBudgetTracker state snapshot to the console.
+   * @param {import('../assets/TextureBudgetTracker.js').TextureBudgetTracker} budget
+   * @private
+   */
+  _logBudgetState(budget) {
+    try {
+      const state = budget.getBudgetState();
+      const usedMB = (state.usedBytes / 1024 / 1024).toFixed(1);
+      const budgetMB = (state.budgetBytes / 1024 / 1024).toFixed(0);
+      const pct = (state.usedFraction * 100).toFixed(1);
+      console.groupCollapsed(`MapShine: VRAM Budget — ${usedMB} MB / ${budgetMB} MB (${pct}%)${state.overBudget ? ' ⚠ OVER BUDGET' : ''}`);
+      console.log('entries:', state.entryCount);
+      const breakdown = budget.getSourceBreakdown();
+      console.log('by source:', Object.fromEntries(
+        Object.entries(breakdown).map(([k, v]) => [k, `${(v / 1024 / 1024).toFixed(1)} MB`])
+      ));
+      console.table(state.topEntries.map(e => ({
+        label: e.label,
+        source: e.source,
+        sizeMB: (e.sizeBytes / 1024 / 1024).toFixed(2)
+      })));
+      console.groupEnd();
+    } catch (e) {
+      console.warn('MapShine: Failed to log budget state', e);
+    }
   }
 
   /**

@@ -13,7 +13,7 @@ import { MapPointDrawHandler } from './map-point-interaction.js';
 import { LightInteractionHandler } from './light-interaction.js';
 import { SelectionBoxHandler } from './selection-box-interaction.js';
 import { safeCall, safeDispose, Severity } from '../core/safe-call.js';
-import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
+import { readWallHeightFlags, readTileLevelsFlags, tileHasLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
 import { applyAmbientLightLevelDefaults, applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { isTokenOnActiveLevel, isTokenDragSelectable, getAutoSwitchElevation, switchToLevelForElevation } from './level-interaction-service.js';
@@ -1787,6 +1787,40 @@ export class InteractionManager {
         continue;
       }
 
+      // Check Tile
+      const tileData = this.tileManager?.tileSprites?.get?.(id);
+      if (tileData?.sprite) {
+        const original = tileData.sprite;
+        const preview = original.clone();
+
+        preview.matrixAutoUpdate = true;
+
+        safeCall(() => {
+          original.getWorldPosition(_tmpPos);
+          original.getWorldQuaternion(_tmpQuat);
+          preview.position.copy(_tmpPos);
+          preview.quaternion.copy(_tmpQuat);
+        }, 'dragPreview.copyTileTransform', Severity.COSMETIC);
+
+        preview.position.z = (preview.position.z ?? 0) + 0.01;
+        preview.renderOrder = 9998;
+
+        if (original.material) {
+          preview.material = original.material.clone();
+          preview.material.transparent = true;
+          preview.material.opacity = Math.min(Number(original.material.opacity ?? 1), 0.7);
+          preview.material.depthTest = false;
+          preview.material.depthWrite = false;
+        }
+
+        if (this.sceneComposer.scene) {
+          this.sceneComposer.scene.add(preview);
+        }
+
+        this.dragState.previews.set(id, preview);
+        continue;
+      }
+
       // Check Foundry Light
       if (this.lightIconManager && this.lightIconManager.lights.has(id)) {
           const original = this.lightIconManager.lights.get(id);
@@ -2001,6 +2035,20 @@ export class InteractionManager {
           }
         }, 'dblClick.noteInteraction', Severity.COSMETIC);
 
+        // 1.7 Check Tiles (double-click opens tile config sheet)
+        if (this._isTilesLayerActive()) {
+          const tilePick = this._pickTileHit();
+          if (tilePick) {
+            const tile = canvas.tiles?.get?.(tilePick.tileId);
+            if (tile?.document?.testUserPermission?.(game.user, 'LIMITED')) {
+              tile.sheet?.render?.(true);
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+          }
+        }
+
         // 2. Check Tokens
         const wallGroup = this.wallManager.wallGroup;
         this.raycaster.params.Line.threshold = 10; // Tolerance
@@ -2083,6 +2131,8 @@ export class InteractionManager {
           id = targetObject.userData.lightId;
       } else if (targetObject.userData.enhancedLightId) {
           id = targetObject.userData.enhancedLightId;
+      } else if (targetObject.userData.foundryTileId) {
+          id = targetObject.userData.foundryTileId;
       } else {
           return;
       }
@@ -2149,6 +2199,151 @@ export class InteractionManager {
     event?.preventDefault?.();
     event?.stopPropagation?.();
     event?.stopImmediatePropagation?.();
+  }
+
+  _isTilesLayerActive() {
+    const layer = canvas?.activeLayer;
+    if (!layer) return false;
+    const layerName = layer?.options?.name || layer?.name || '';
+    const layerCtor = layer?.constructor?.name || '';
+    return layerName === 'tiles' || layerName === 'TilesLayer' || layerCtor === 'TilesLayer';
+  }
+
+  _isTileWithinActiveBand(tileDoc) {
+    if (!isLevelsEnabledForScene(canvas?.scene)) return true;
+
+    const activeLevelContext = window.MapShine?.activeLevelContext;
+    const bandBottom = Number(activeLevelContext?.bottom);
+    const bandTop = Number(activeLevelContext?.top);
+    if (!Number.isFinite(bandBottom) || !Number.isFinite(bandTop)) return true;
+
+    if (tileHasLevelsRange(tileDoc)) {
+      const flags = readTileLevelsFlags(tileDoc);
+      const tileBottom = Number(flags.rangeBottom);
+      const tileTop = Number(flags.rangeTop);
+      if (!Number.isFinite(tileBottom)) return true;
+      if (Number.isFinite(tileTop)) {
+        return !(tileTop <= bandBottom || tileBottom >= bandTop);
+      }
+      return tileBottom < bandTop;
+    }
+
+    const tileElevation = Number(tileDoc?.elevation);
+    if (!Number.isFinite(tileElevation)) return true;
+    return tileElevation >= bandBottom && tileElevation <= bandTop;
+  }
+
+  _isTileSelectableForCurrentTool(data) {
+    const sprite = data?.sprite;
+    const tileDoc = data?.tileDoc;
+    if (!sprite || !tileDoc) return false;
+    if (!sprite.visible) return false;
+    if (!this._isTileWithinActiveBand(tileDoc)) return false;
+
+    const foregroundToggle = !!(
+      ui?.controls?.control?.tools?.foreground?.active
+      || ui?.controls?.controls?.tiles?.tools?.foreground?.active
+    );
+
+    const isOverhead = !!sprite.userData?.isOverhead;
+    return foregroundToggle ? isOverhead : !isOverhead;
+  }
+
+  _pickTileHit() {
+    const camera = this.sceneComposer?.camera;
+    if (!camera || !this.tileManager?.tileSprites) return null;
+
+    const sprites = [];
+    for (const data of this.tileManager.tileSprites.values()) {
+      if (!this._isTileSelectableForCurrentTool(data)) continue;
+      sprites.push(data.sprite);
+    }
+    if (sprites.length === 0) return null;
+
+    const prevMask = this.raycaster.layers?.mask;
+    safeCall(() => {
+      if (!this.raycaster.layers) this.raycaster.layers = new THREE.Layers();
+      this.raycaster.layers.set(0);
+      this.raycaster.layers.enable(20);
+      this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
+    }, 'tilePick.rayLayers', Severity.COSMETIC);
+
+    const hits = this.raycaster.intersectObjects(sprites, false);
+
+    safeCall(() => {
+      if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask;
+    }, 'tilePick.restoreRayLayers', Severity.COSMETIC);
+
+    for (const hit of hits) {
+      const tileId = hit?.object?.userData?.foundryTileId;
+      if (!tileId) continue;
+
+      const data = this.tileManager.tileSprites.get(tileId);
+      if (!data || !this._isTileSelectableForCurrentTool(data)) continue;
+
+      let opaqueHit = true;
+      if (hit?.uv && typeof this.tileManager.isUvOpaque === 'function') {
+        opaqueHit = safeCall(() => this.tileManager.isUvOpaque(data, hit.uv), 'tilePick.uvOpaque', Severity.COSMETIC, { fallback: true });
+      } else if (hit?.point && typeof this.tileManager.isWorldPointOpaque === 'function') {
+        opaqueHit = safeCall(() => this.tileManager.isWorldPointOpaque(data, hit.point.x, hit.point.y), 'tilePick.worldOpaque', Severity.COSMETIC, { fallback: true });
+      }
+      if (!opaqueHit) continue;
+
+      return { hit, tileId, data };
+    }
+
+    return null;
+  }
+
+  _handleTilesLayerPointerDown(event, currentTool) {
+    if (!this._isTilesLayerActive()) return false;
+
+    if (event.button === 2) {
+      const picked = this._pickTileHit();
+      if (!picked) return true;
+      const tile = canvas.tiles?.get?.(picked.tileId);
+      if (tile?.document?.testUserPermission?.(game.user, 'LIMITED')) {
+        tile.sheet?.render?.(true);
+      }
+      this._consumeKeyEvent(event);
+      return true;
+    }
+
+    if (event.button !== 0) return true;
+
+    const picked = this._pickTileHit();
+    if (picked) {
+      const sprite = picked.data.sprite;
+      const tileDoc = picked.data.tileDoc;
+      const tileId = picked.tileId;
+
+      if (!tileDoc?.canUserModify?.(game.user, 'update')) {
+        ui.notifications?.warn?.('You do not have permission to control this tile.');
+        this._consumeKeyEvent(event);
+        return true;
+      }
+
+      const isSelected = this.selection.has(tileId);
+      if (event.shiftKey) {
+        if (!isSelected) this.selectObject(sprite, { showLightEditor: false });
+      } else if (!isSelected) {
+        this.clearSelection();
+        this.selectObject(sprite, { showLightEditor: false });
+      }
+
+      if (currentTool === 'select' || currentTool === 'tile') {
+        this.startDrag(sprite, picked.hit?.point || sprite.position);
+      }
+
+      this._consumeKeyEvent(event);
+      return true;
+    }
+
+    if (!event.shiftKey && (currentTool === 'select' || currentTool === 'tile')) {
+      this.clearSelection();
+    }
+    this._consumeKeyEvent(event);
+    return true;
   }
 
   // ── Map Point Handle methods — delegated to MapPointDrawHandler ──────────
@@ -2301,7 +2496,7 @@ export class InteractionManager {
         // for the Tokens layer so gameplay clicks are never blocked.
         const mapShine = window.MapShine || window.mapShine;
         const inputRouter = mapShine?.inputRouter;
-        const activeLayerName = canvas.activeLayer?.name;
+        const routerActiveLayerName = canvas.activeLayer?.name;
         const activeTool = ui?.controls?.tool?.name ?? game.activeTool;
         
         // DEBUG: Log InputRouter state to diagnose why clicks aren't being processed
@@ -2309,11 +2504,11 @@ export class InteractionManager {
           hasInputRouter: !!inputRouter,
           currentMode: inputRouter?.currentMode,
           shouldThreeReceive: inputRouter?.shouldThreeReceiveInput?.(),
-          activeLayer: activeLayerName,
+          activeLayer: routerActiveLayerName,
           activeTool
         });
 
-        const isTokenLayerName = activeLayerName === 'TokenLayer' || activeLayerName === 'TokensLayer' || activeLayerName === 'tokens';
+        const isTokenLayerName = routerActiveLayerName === 'TokenLayer' || routerActiveLayerName === 'TokensLayer' || routerActiveLayerName === 'tokens';
         const isTokenSelectTool = activeTool === 'select' || !activeTool;
         const shouldOverrideRouter = isTokenLayerName && isTokenSelectTool;
         
@@ -2606,9 +2801,19 @@ export class InteractionManager {
             return;
         }
         
-        const activeLayer = canvas.activeLayer?.name;
-        const isTokensLayer = activeLayer === 'TokensLayer';
-        const isWallLayer = activeLayer && activeLayer.includes('WallsLayer');
+        const activeLayerObj = canvas.activeLayer;
+        const activeLayerName = activeLayerObj?.name || activeLayerObj?.options?.name || '';
+        const activeLayerCtor = activeLayerObj?.constructor?.name || '';
+        const activeLayer = activeLayerName || activeLayerCtor;
+        const currentTool = ui?.controls?.tool?.name ?? game.activeTool;
+
+        const isTokensLayer = activeLayerName === 'TokensLayer' || activeLayerCtor === 'TokenLayer' || activeLayerCtor === 'TokensLayer' || activeLayerName === 'tokens';
+        const isWallLayer = activeLayerName.includes('WallsLayer') || activeLayerCtor === 'WallsLayer' || activeLayerName === 'walls';
+        const isTilesLayer = activeLayerName === 'TilesLayer' || activeLayerName === 'tiles' || activeLayerCtor === 'TilesLayer';
+
+        if (isTilesLayer && this._handleTilesLayerPointerDown(event, currentTool)) {
+          return;
+        }
 
         const doorIntersects = this.raycaster.intersectObject(wallGroup, true);
         if (doorIntersects.length > 0) {
@@ -2681,8 +2886,6 @@ export class InteractionManager {
             }
         }
 
-        const currentTool = ui?.controls?.tool?.name ?? game.activeTool;
-        
         if (isWallLayer) {
           // Start Wall Drawing on the ground plane (aligned with groundZ)
           const worldPos = this.viewportToWorld(event.clientX, event.clientY, groundZ);
@@ -3542,6 +3745,17 @@ export class InteractionManager {
     }
 
     // If we hit an overhead tile, don't hover walls/tokens through it.
+    if (hitFound) return;
+
+    // 1b. Tiles layer hover — show pointer cursor when hovering a selectable tile
+    if (this._isTilesLayerActive() && this.tileManager?.tileSprites) {
+      const tileHit = this._pickTileHit();
+      if (tileHit) {
+        this.canvasElement.style.cursor = 'pointer';
+        hitFound = true;
+      }
+    }
+
     if (hitFound) return;
 
     // 2. Check Walls (Priority for "near line" detection)
@@ -4816,6 +5030,7 @@ export class InteractionManager {
         if (this.dragState.hasMoved && this.dragState.object) {
           // Commit change to Foundry for ALL selected objects
           const tokenUpdates = [];
+          const tileUpdates = [];
           const lightUpdates = [];
           let anyUpdates = false;
           let anyEnhancedLightUpdates = false;
@@ -4869,6 +5084,44 @@ export class InteractionManager {
                 }
                 
                 tokenUpdates.push({ _id: id, x: finalX, y: finalY });
+                continue;
+            }
+
+            // Check Tile
+            const tileData = this.tileManager?.tileSprites?.get?.(id);
+            if (tileData?.tileDoc) {
+                const tileDoc = tileData.tileDoc;
+                if (!tileDoc?.canUserModify?.(game.user, 'update')) continue;
+
+                const worldPos = preview.position;
+                const foundryCenter = Coordinates.toFoundry(worldPos.x, worldPos.y);
+
+                const width = Number(tileDoc.width ?? 0);
+                const height = Number(tileDoc.height ?? 0);
+                let finalX = foundryCenter.x - (width / 2);
+                let finalY = foundryCenter.y - (height / 2);
+
+                safeCall(() => {
+                  if (!event.shiftKey) {
+                    const grid = canvas?.grid;
+                    const isGridless = !!(grid && grid.type === CONST.GRID_TYPES.GRIDLESS);
+                    if (!isGridless && grid && typeof grid.getSnappedPoint === 'function') {
+                      const snapped = grid.getSnappedPoint({ x: finalX, y: finalY }, { mode: CONST.GRID_SNAPPING_MODES.TOP_LEFT_CORNER });
+                      finalX = snapped.x;
+                      finalY = snapped.y;
+                    }
+                  }
+                }, 'pointerUp.snapTileToGrid', Severity.COSMETIC);
+
+                if (
+                  typeof tileDoc.x === 'number' && typeof tileDoc.y === 'number' &&
+                  Math.abs(finalX - tileDoc.x) < 0.5 &&
+                  Math.abs(finalY - tileDoc.y) < 0.5
+                ) {
+                  continue;
+                }
+
+                tileUpdates.push({ _id: id, x: finalX, y: finalY });
                 continue;
             }
 
@@ -5082,6 +5335,14 @@ export class InteractionManager {
               await safeCall(async () => {
                   await canvas.scene.updateEmbeddedDocuments('AmbientLight', lightUpdates);
               }, 'pointerUp.updateLightPositions', Severity.DEGRADED);
+          }
+
+          if (tileUpdates.length > 0) {
+              log.info(`Updating ${tileUpdates.length} tiles`);
+              anyUpdates = true;
+              await safeCall(async () => {
+                  await canvas.scene.updateEmbeddedDocuments('Tile', tileUpdates);
+              }, 'pointerUp.updateTilePositions', Severity.DEGRADED);
           }
             
           // Cleanup
@@ -5600,6 +5861,7 @@ export class InteractionManager {
           // Filter for tokens and walls
           const tokensToDelete = [];
           const wallsToDelete = [];
+          const tilesToDelete = [];
           const lightsToDelete = [];
           const enhancedLightsToDelete = [];
           const staleIds = [];
@@ -5649,6 +5911,17 @@ export class InteractionManager {
             // Check Wall
             if (this.wallManager.walls.has(id)) {
                 wallsToDelete.push(id);
+                continue;
+            }
+
+            // Check Tile
+            const tileDoc = canvas.tiles?.get?.(id)?.document ?? canvas.scene?.tiles?.get?.(id);
+            if (tileDoc) {
+              if (!tileDoc.canUserModify(game.user, 'delete')) {
+                continue;
+              }
+              tilesToDelete.push(id);
+              continue;
             }
           }
 
@@ -5684,6 +5957,11 @@ export class InteractionManager {
           if (wallsToDelete.length > 0) {
             log.info(`Deleting ${wallsToDelete.length} walls`);
             await canvas.scene.deleteEmbeddedDocuments('Wall', wallsToDelete);
+          }
+
+          if (tilesToDelete.length > 0) {
+            log.info(`Deleting ${tilesToDelete.length} tiles`);
+            await canvas.scene.deleteEmbeddedDocuments('Tile', tilesToDelete);
           }
 
           if (lightsToDelete.length > 0) {
@@ -5903,6 +6181,13 @@ export class InteractionManager {
 
         // Ensure the legacy inspector stays out of the way.
         safeCall(() => { const inspector = window.MapShine?.enhancedLightInspector; inspector?.hide?.(); }, 'selectObject.hideInspector', Severity.COSMETIC);
+    } else if (sprite.userData.foundryTileId) {
+        id = sprite.userData.foundryTileId;
+
+        safeCall(() => {
+          const tile = canvas.tiles?.get?.(id);
+          if (tile && !tile.controlled) tile.control({ releaseOthers: false });
+        }, 'selectObject.controlTile', Severity.COSMETIC);
     } else {
         return;
     }
@@ -5946,6 +6231,12 @@ export class InteractionManager {
       // Check Wall
       if (this.wallManager.walls.has(id)) {
           this.wallManager.select(id, false);
+      }
+
+      // Check Tile
+      const tile = canvas.tiles?.get?.(id);
+      if (tile?.controlled) {
+        safeCall(() => tile.release(), 'clearSelection.releaseTile', Severity.COSMETIC);
       }
     }
     this.selection.clear();

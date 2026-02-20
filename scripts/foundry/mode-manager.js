@@ -257,26 +257,13 @@ export class ModeManager {
         if (canvas.primary) canvas.primary.visible = false;
       } catch (_) {}
 
-      // Check if Tiles layer is actively being edited
-      let isTilesActive = false;
-      try {
-        const activeLayerObj = canvas.activeLayer;
-        const activeLayerName = activeLayerObj?.options?.name || activeLayerObj?.name || '';
-        const activeLayerCtor = activeLayerObj?.constructor?.name || '';
-        isTilesActive = (activeLayerName === 'TilesLayer') ||
-                        (activeLayerName === 'tiles') ||
-                        (activeLayerCtor === 'TilesLayer');
-      } catch (_) {
-        isTilesActive = false;
-      }
+      // Tiles are fully Three-owned in gameplay. Keep PIXI visuals suppressed.
+      const alpha = 0;
 
-      // When not editing tiles, fully hide PIXI tile visuals (alpha=0)
-      const alpha = isTilesActive ? 1 : 0;
-
-      // Toggle Three.js tile visibility
+      // Keep Three.js tile visibility enabled in gameplay.
       try {
         const tm = this._deps.tileManager ?? window.MapShine?.tileManager;
-        if (tm?.setVisibility) tm.setVisibility(!isTilesActive);
+        if (tm?.setVisibility) tm.setVisibility(true);
       } catch (_) {}
 
       try {
@@ -371,13 +358,12 @@ export class ModeManager {
       }
     }
 
-    // Tiles
+    // Tiles are fully Three-owned in gameplay mode.
     if (canvas.tiles) {
-      const isTilesActive = isActiveLayer('TilesLayer') || isActiveLayer('tiles');
-      canvas.tiles.visible = isTilesActive;
+      canvas.tiles.visible = false;
       const tm = this._deps.tileManager;
       if (tm?.setVisibility) {
-        tm.setVisibility(!isTilesActive && !this.isMapMakerMode);
+        tm.setVisibility(!this.isMapMakerMode);
       }
     }
 
@@ -417,7 +403,7 @@ export class ModeManager {
 
     const editLayers = [
       'SoundsLayer', 'TemplateLayer', 'DrawingsLayer', 'NotesLayer',
-      'RegionLayer', 'regions', 'TilesLayer', 'tiles'
+      'RegionLayer', 'regions'
     ];
 
     setTimeout(() => {

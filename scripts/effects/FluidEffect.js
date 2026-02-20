@@ -402,6 +402,36 @@ export class FluidEffect extends EffectBase {
   }
 
   /**
+   * TileBindableEffect interface: load the per-tile fluid mask texture.
+   * Called by TileEffectBindingManager before bindTileSprite().
+   * Returns null when no _Fluid mask exists for this tile (binding is skipped).
+   *
+   * @param {object} tileDoc - Foundry TileDocument
+   * @returns {Promise<THREE.Texture|null>}
+   */
+  async loadTileMask(tileDoc) {
+    const tileManager = window.MapShine?.tileManager;
+    if (!tileManager) return null;
+    try {
+      const tex = await tileManager.loadTileFluidMaskTexture(tileDoc);
+      return tex || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * TileBindableEffect interface: skip roof tiles (they never get fluid overlays).
+   * @param {object} tileDoc
+   * @returns {boolean}
+   */
+  shouldBindTile(tileDoc) {
+    // Roof tiles are identified at sprite-ready time via userData.isWeatherRoof,
+    // but we can also skip tiles that have no texture src at all.
+    return !!(tileDoc?.texture?.src || tileDoc?.id);
+  }
+
+  /**
    * Bind a per-tile fluid overlay.
    * @param {object} tileDoc
    * @param {THREE.Sprite} sprite

@@ -4869,7 +4869,6 @@ export class WaterEffectV2 extends EffectBase {
     // increments from the compositor normalizing flipY on shared textures).
     if (this._floorTransitionActive) return;
     if (!this.waterMask) return;
-
     const cacheKey = this._getWaterMaskCacheKey();
     if (!force && cacheKey && cacheKey === this._lastWaterMaskCacheKey && this._waterData?.texture) return;
 

@@ -430,7 +430,7 @@ export class EffectMaskRegistry {
     this._metrics.transitionCount++;
     this._metrics.lastTransitionMs = elapsed;
 
-    log.warn('[FloorDiag] transitionToFloor complete', {
+    log.info('transitionToFloor complete', {
       floorKey,
       prevFloorKey,
       actions: Object.fromEntries(actions),

@@ -343,21 +343,28 @@ export class GpuSceneMaskCompositor {
 
       if (!anyDrawn) continue;
 
-      // For preserveAcrossFloors mask types (currently only 'water'), verify the
-      // composited result is non-zero via a cheap 1×1 GPU readback. If the upper
-      // floor's tile has a _Water mask file that's all black (no water regions),
-      // anyDrawn is still true (the draw call succeeded) but the result is empty.
-      // Skipping it here lets transitionToFloor preserve the ground-floor water
-      // instead of replacing it with a black texture and destroying the SDF data.
+      // Verify the composited result has non-zero RGB via a cheap GPU readback.
+      // Upper-floor tiles commonly have black-RGB masks with alpha=floor-shape
+      // (a floor-boundary cutout, not actual coverage data). The compositor
+      // draws these tiles (anyDrawn=true), but the RGB result is all-zero.
+      //
+      // Including such empty masks in the output causes two problems:
+      //  - preserveAcrossFloors types (water, windows, specular, etc.):
+      //    transitionToFloor would 'replace' with the black mask instead of
+      //    preserving the valid ground-floor mask.
+      //  - Non-preserve types (outdoors, fire, dust, etc.):
+      //    the black mask is applied as valid coverage data. For outdoors,
+      //    R=0 everywhere means "fully indoors", suppressing caustics and
+      //    cloud shadows in the water shader.
+      //
+      // Skipping empty masks lets transitionToFloor either preserve (if
+      // preserveAcrossFloors) or clear (falling back to default behavior,
+      // e.g. no outdoors mask → treat everything as outdoors → caustics work).
       try {
-        const emr = window.MapShine?.effectMaskRegistry;
-        const emrPolicy = emr?.getPolicy?.(maskType);
-        if (emrPolicy?.preserveAcrossFloors) {
-          const isNonEmpty = this._readbackIsNonEmpty(renderer, rt);
-          if (!isNonEmpty) {
-            log.debug(`compose: skipping all-zero '${maskType}' mask (preserveAcrossFloors)`);
-            continue;
-          }
+        const isNonEmpty = this._readbackIsNonEmpty(renderer, rt);
+        if (!isNonEmpty) {
+          log.debug(`compose: skipping all-zero '${maskType}' mask`);
+          continue;
         }
       } catch (_) {}
 
@@ -386,8 +393,15 @@ export class GpuSceneMaskCompositor {
 
     if (compositeMasks.length === 0) return null;
 
-    // Update active floor key and invalidate CPU pixel cache.
-    this._activeFloorKey = floorKey;
+    // Invalidate CPU pixel cache — the RT contents just changed.
+    // NOTE: Do NOT update _activeFloorKey here. composeFloor() is the sole
+    // owner of _activeFloorKey and updates it only on non-cacheOnly calls.
+    // Setting it here caused preloadAllFloors (which calls compose via
+    // composeFloor with cacheOnly=true) to prematurely advance the floor key,
+    // making the first real floor transition report masksChanged=false and
+    // skip all mask redistribution. On the second transition the masks WERE
+    // redistributed, applying the upper floor's black-RGB outdoors mask and
+    // breaking caustics/cloud shadows in the water shader.
     this._cpuPixelCache.clear();
 
     // Touch LRU order.

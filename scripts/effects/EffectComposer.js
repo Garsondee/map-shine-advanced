@@ -29,6 +29,16 @@ export const RenderLayers = {
 export const BLOOM_HOTSPOT_LAYER = 30;
 export const OVERLAY_THREE_LAYER = 31;
 
+/**
+ * Layer for scene objects that must render exactly once per frame, in the
+ * global scene pass that runs after the per-floor render loop completes.
+ * Use this for world-space objects that are floor-agnostic (drawings, notes)
+ * and must not be multi-composited (rendered once per floor) during the
+ * floor loop. Objects on this layer are excluded from per-floor scene
+ * renders and depth captures via camera.layers.disable(GLOBAL_SCENE_LAYER).
+ */
+export const GLOBAL_SCENE_LAYER = 29;
+
 export const ROPE_MASK_LAYER = 25;
 
 export const TILE_FEATURE_LAYERS = {
@@ -590,65 +600,180 @@ export class EffectComposer {
       }
     }
 
-    // PASS 0: UPDATE & OPTIONAL RENDER FOR SCENE EFFECTS
-    for (const effect of sceneEffects) {
+    // PRE-FRAME: Advance time-based simulations once per frame, before any
+    // per-floor work begins. This ensures simulation state (wave phase, cloud
+    // drift, particle lifetimes, etc.) advances at 1× speed even when the
+    // floor loop calls update() multiple times per frame in Phase 2.
+    // Effects that have no independent simulation leave prepareFrame() as a no-op.
+    for (const effect of effects) {
+      if (!effect.enabled) continue;
       try {
-        // Allow scene effects to update internal state/uniforms
-        let t0 = 0;
-        if (doProfile) t0 = performance.now();
-        effect.update(timeInfo);
-        if (doProfile) profiler.recordEffectUpdate(effect.id, performance.now() - t0);
-
-        // Most scene effects rely on the main scene render, but render is
-        // still available for those that need it (e.g., to sync materials)
-        if (doProfile) t0 = performance.now();
-        effect.render(this.renderer, this.scene, this.camera);
-        if (doProfile) profiler.recordEffectRender(effect.id, performance.now() - t0);
+        effect.prepareFrame(timeInfo);
       } catch (error) {
-        log.error(`Scene effect update/render error (${effect.id}):`, error);
-        this.handleEffectError(effect, error);
+        log.error(`Effect prepareFrame error (${effect.id}):`, error);
       }
     }
 
+    // ── SCENE RENDER PATH ────────────────────────────────────────────────────
+    // Phase 3 floor loop (experimentalFloorRendering setting, default true)
+    // renders each visible floor separately bottom→top, accumulating into
+    // sceneRenderTarget, then runs global-scoped effects once after the loop.
+    // Legacy path does a single depth capture + PASS 0 + one scene render.
+    // Both paths share PASS 2 post-processing below.
+    const _floorStack = window.MapShine?.floorStack ?? null;
+    const _useFloorLoop = this._checkFloorLoopEnabled() && _floorStack !== null;
     const usePostProcessing = postEffects.length > 0;
-
-    // Debug log for post-processing path (throttled)
     if (usePostProcessing && Math.random() < 0.005) {
-      log.debug('Rendering with Post-Processing', {
-        postEffects: postEffects.map(e => e.id),
-        sceneEffects: sceneEffects.length
-      });
+      log.debug('Rendering with Post-Processing', { postEffects: postEffects.map(e => e.id), sceneEffects: sceneEffects.length });
     }
 
-    if (usePostProcessing) {
-      // Render scene into HDR-capable off-screen target
-      this.ensureSceneRenderTarget();
-      this.renderer.setRenderTarget(this.sceneRenderTarget);
-      this.renderer.clear();
+    if (_useFloorLoop) {
+      // ── Phase 3: per-floor render loop ──────────────────────────────────────
+      // Floor-scoped effects run once per floor; global-scoped run once after.
+      const _floorEffects = sceneEffects.filter(e => e.floorScope !== 'global');
+      const _globalEffects = sceneEffects.filter(e => e.floorScope === 'global');
+      const _floors = _floorStack.getVisibleFloors();
+
+      if (usePostProcessing) this.ensureSceneRenderTarget();
+
+      // Resolve the GpuSceneMaskCompositor once per frame for floor bundle lookup.
+      const _maskCompositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+
+      // Scene-layer floor-scoped effects that implement bindFloorMasks, regardless
+      // of whether shouldRenderThisFrame excluded them from sceneEffects this frame.
+      // Mask binding is a setup step — effects need their _floorStates kept current
+      // even on frames where they skip rendering (frame decimation, low-tier gating).
+      //
+      // Post-processing effects are intentionally excluded here. They receive masks
+      // via connectToRegistry() which honours the preserveAcrossFloors policy —
+      // e.g. water's ground-floor mask is preserved when the player moves to an
+      // upper floor that has no water. Calling bindFloorMasks() on them in the
+      // per-floor loop would override that preserved state with null, breaking
+      // effects like WaterEffectV2 on floors above the water surface.
+      const _allBindableFloorEffects = [];
+      for (const _e of this.effects.values()) {
+        if (_e.floorScope !== 'global' && typeof _e.bindFloorMasks === 'function') {
+          const _isPostProcessing = _e.layer &&
+            _e.layer.order >= RenderLayers.POST_PROCESSING.order;
+          if (!_isPostProcessing) _allBindableFloorEffects.push(_e);
+        }
+      }
+
+      if (_floors.length > 0) {
+        // Render each floor bottom→top, accumulating on top of the previous.
+        for (let _fi = 0; _fi < _floors.length; _fi++) {
+          const _isFirst = _fi === 0;
+          const _floor = _floors[_fi];
+          // Retrieve the pre-composed mask bundle for this floor (may be null if
+          // preloadAllFloors() hasn't run yet — effects fall back to active-floor masks).
+          const _floorBundle = _maskCompositor?._floorMeta?.get(_floor.compositorKey) ?? null;
+          // Isolate this floor's geometry for depth capture and scene render.
+          _floorStack.setFloorVisible(_floor.index);
+          const _floorPrevMask = this.camera.layers.mask;
+          this.camera.layers.disable(GLOBAL_SCENE_LAYER);
+          // Per-floor depth capture (bypasses rate limiter).
+          if (this._depthPassManager) {
+            try { this._depthPassManager.captureForFloor(); }
+            catch (_e) { log.error('Per-floor depth capture failed:', _e); }
+          }
+          // Bind floor-specific masks for ALL floor-scoped effects — not only the
+          // ones rendering this frame — so _floorStates stays current for effects
+          // that were skipped by shouldRenderThisFrame (e.g. water, lighting).
+          for (const _eff of _allBindableFloorEffects) {
+            try { _eff.bindFloorMasks(_floorBundle, _floor.compositorKey); }
+            catch (_e) { log.error(`bindFloorMasks error (${_eff.id}):`, _e); }
+          }
+          // Floor-scoped effects update + render.
+          for (const _eff of _floorEffects) {
+            try {
+              let _t = 0; if (doProfile) _t = performance.now();
+              _eff.update(timeInfo); if (doProfile) profiler.recordEffectUpdate(_eff.id, performance.now() - _t);
+              if (doProfile) _t = performance.now();
+              _eff.render(this.renderer, this.scene, this.camera); if (doProfile) profiler.recordEffectRender(_eff.id, performance.now() - _t);
+            } catch (_e) { log.error(`Floor-scope effect error (${_eff.id}):`, _e); this.handleEffectError(_eff, _e); }
+          }
+          // Restore camera mask for scene render (OVERLAY_THREE_LAYER re-disabled below).
+          this.camera.layers.mask = _floorPrevMask;
+          // Point renderer at the correct target; only clear on the first floor.
+          if (usePostProcessing) {
+            this.renderer.setRenderTarget(this.sceneRenderTarget);
+            if (_isFirst) this.renderer.clear();
+          } else {
+            this.renderer.setRenderTarget(null);
+          }
+          // Accumulate: do not clear colour/depth for floors after the first.
+          if (!_isFirst) { this.renderer.autoClearColor = false; this.renderer.autoClearDepth = false; }
+          const _floorScenePrevMask = this.camera.layers.mask;
+          try { this.camera.layers.disable(OVERLAY_THREE_LAYER); this.renderer.render(this.scene, this.camera); }
+          finally { this.camera.layers.mask = _floorScenePrevMask; }
+          if (!_isFirst) { this.renderer.autoClearColor = true; this.renderer.autoClearDepth = true; }
+        }
+        // Restore Levels-driven visibility after all floors are rendered.
+        _floorStack.restoreVisibility();
+      } else {
+        // No floors available — single full-scene render as safe fallback.
+        if (usePostProcessing) { this.renderer.setRenderTarget(this.sceneRenderTarget); this.renderer.clear(); }
+        else { this.renderer.setRenderTarget(null); }
+        const _fbPrevMask = this.camera.layers.mask;
+        try { this.camera.layers.disable(OVERLAY_THREE_LAYER); this.renderer.render(this.scene, this.camera); }
+        finally { this.camera.layers.mask = _fbPrevMask; }
+      }
+
+      // Global-scoped effects run once after the floor loop.
+      for (const _eff of _globalEffects) {
+        try {
+          let _t = 0; if (doProfile) _t = performance.now();
+          _eff.update(timeInfo); if (doProfile) profiler.recordEffectUpdate(_eff.id, performance.now() - _t);
+          if (doProfile) _t = performance.now();
+          _eff.render(this.renderer, this.scene, this.camera); if (doProfile) profiler.recordEffectRender(_eff.id, performance.now() - _t);
+        } catch (_e) { log.error(`Global-scope effect error (${_eff.id}):`, _e); this.handleEffectError(_eff, _e); }
+      }
+
+      if (!usePostProcessing) {
+        this._renderOverlayToScreen(); this._renderDepthDebugOverlay();
+        if (doProfile) profiler.endFrame();
+        this._updateDecimationState(performance.now() - _frameStartMs);
+        return;
+      }
     } else {
-      // Default path: render directly to screen
-      this.renderer.setRenderTarget(null);
-    }
+      // ── Legacy single-pass path (floor loop disabled) ────────────────────────
+      // Phase 2: capture depth for active floor only, restore before scene render.
+      if (_floorStack && this._depthPassManager) {
+        const _activeFloor = _floorStack.getActiveFloor();
+        if (_activeFloor !== null) {
+          const _prevMask = this.camera.layers.mask;
+          try {
+            _floorStack.setFloorVisible(_activeFloor.index);
+            this.camera.layers.disable(GLOBAL_SCENE_LAYER);
+            this._depthPassManager.captureForFloor();
+          } catch (_err) { log.error('Floor-aware depth capture failed:', _err); }
+          finally { this.camera.layers.mask = _prevMask; _floorStack.restoreVisibility(); }
+        }
+      }
 
-    // Single authoritative scene render (background, tiles, tokens, surface effects, etc.)
-    // Ensure overlay-only objects (layer 31) are NEVER included in post-processing inputs.
-    // They are rendered separately to screen in _renderOverlayToScreen().
-    const prevSceneLayersMask = this.camera.layers.mask;
-    try {
-      this.camera.layers.disable(OVERLAY_THREE_LAYER);
-      this.renderer.render(this.scene, this.camera);
-    } finally {
-      this.camera.layers.mask = prevSceneLayersMask;
-    }
+      // PASS 0: UPDATE & OPTIONAL RENDER FOR SCENE EFFECTS
+      for (const effect of sceneEffects) {
+        try {
+          let t0 = 0; if (doProfile) t0 = performance.now();
+          effect.update(timeInfo); if (doProfile) profiler.recordEffectUpdate(effect.id, performance.now() - t0);
+          if (doProfile) t0 = performance.now();
+          effect.render(this.renderer, this.scene, this.camera); if (doProfile) profiler.recordEffectRender(effect.id, performance.now() - t0);
+        } catch (error) { log.error(`Scene effect update/render error (${effect.id}):`, error); this.handleEffectError(effect, error); }
+      }
 
-    // If no post-processing effects are active, we're done
-    if (!usePostProcessing) {
-      this._renderOverlayToScreen();
-      // Depth pass debug overlay — renders depth visualization to screen when enabled
-      this._renderDepthDebugOverlay();
-      if (doProfile) profiler.endFrame();
-      this._updateDecimationState(performance.now() - _frameStartMs); // T2-B
-      return;
+      if (usePostProcessing) { this.ensureSceneRenderTarget(); this.renderer.setRenderTarget(this.sceneRenderTarget); this.renderer.clear(); }
+      else { this.renderer.setRenderTarget(null); }
+
+      const prevSceneLayersMask = this.camera.layers.mask;
+      try { this.camera.layers.disable(OVERLAY_THREE_LAYER); this.renderer.render(this.scene, this.camera); }
+      finally { this.camera.layers.mask = prevSceneLayersMask; }
+
+      if (!usePostProcessing) {
+        this._renderOverlayToScreen(); this._renderDepthDebugOverlay();
+        if (doProfile) profiler.endFrame();
+        this._updateDecimationState(performance.now() - _frameStartMs);
+        return;
+      }
     }
 
     // PASS 2: POST-PROCESSING ON SCENE TEXTURE
@@ -723,6 +848,21 @@ export class EffectComposer {
     this._renderDepthDebugOverlay();
     if (doProfile) profiler.endFrame();
     this._updateDecimationState(performance.now() - _frameStartMs); // T2-B
+  }
+
+  /**
+   * Check whether the per-floor render loop is enabled.
+   * Reads the 'experimentalFloorRendering' game setting (default: true).
+   * Fails silently (returns false) if settings are unavailable (e.g., during warmup).
+   * @returns {boolean}
+   * @private
+   */
+  _checkFloorLoopEnabled() {
+    try {
+      return !!game?.settings?.get('map-shine-advanced', 'experimentalFloorRendering');
+    } catch (_) {
+      return false;
+    }
   }
 
   /**
@@ -1189,6 +1329,23 @@ export class EffectBase {
     // When true, RenderLoop will bypass idle FPS throttling while this effect is active.
     // Use this for continuous animations like particle systems.
     this.requiresContinuousRender = false;
+
+    /**
+     * Controls when this effect participates in the per-floor render loop.
+     *
+     * - `'floor'` (default): The effect runs once per visible floor. Its
+     *   update() receives per-floor mask bindings and contributes to that
+     *   floor's render target. Most scene effects use this scope.
+     *
+     * - `'global'`: The effect runs exactly once per frame, after the floor
+     *   loop completes, on the fully-composited accumulated image. Use for
+     *   floor-agnostic effects whose output should not be multiplied across
+     *   floors (ParticleSystem, WorldSpaceFogEffect, PlayerLightEffect,
+     *   all POST_PROCESSING effects that don't need per-floor depth).
+     *
+     * @type {'floor'|'global'}
+     */
+    this.floorScope = 'floor';
   }
 
   /**
@@ -1226,13 +1383,35 @@ export class EffectBase {
   }
 
   /**
-   * Update effect state (called every frame before render)
-   * 
+   * Advance time-based simulations for this effect.
+   *
+   * Called ONCE per render frame, before the floor loop begins. Override to
+   * step simulations whose rate must not depend on floor count (e.g. wave SDF,
+   * cloud density, heat haze, spark lifetimes). Do NOT bind floor-specific
+   * masks or uniforms here — floor masks are not yet active when this runs.
+   *
+   * Default: no-op. Safe to leave unimplemented for effects with no
+   * independent simulation (specular, fluid overlays, post effects, etc.).
+   *
+   * @param {TimeInfo} timeInfo - Centralized time information
+   */
+  prepareFrame(timeInfo) {
+    // Override in subclass to advance time-based simulations.
+  }
+
+  /**
+   * Update effect state for the current floor pass (called once per floor).
+   *
+   * In the floor loop architecture this is called once per visible floor with
+   * that floor's mask bundle already bound. Perform floor-specific uniform
+   * updates and mask sampling here. Time-advancing simulation should live in
+   * prepareFrame() instead so it runs at 1× speed regardless of floor count.
+   *
    * **IMPORTANT: Use timeInfo for all time-based calculations**
    * - timeInfo.elapsed: Total elapsed time (for absolute animations)
    * - timeInfo.delta: Frame delta time (for frame-independent movement)
    * - timeInfo.frameCount: Current frame number
-   * 
+   *
    * @param {TimeInfo} timeInfo - Centralized time information
    */
   update(timeInfo) {

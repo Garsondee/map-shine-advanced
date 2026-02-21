@@ -131,6 +131,14 @@ export class AshDisturbanceEffect extends EffectBase {
     this.alwaysRender = false;
     this.enabled = true;
 
+    /**
+     * Per-floor cached state. Keyed by FloorBand.key. Populated lazily by
+     * bindFloorMasks(). Holds per-floor ash mask CPU pixel data used to
+     * generate ash disturbance particle spawn points.
+     * @type {Map<string, object>}
+     */
+    this._floorStates = new Map();
+
     this.scene = null;
     this.renderer = null;
     this.camera = null;
@@ -496,7 +504,59 @@ export class AshDisturbanceEffect extends EffectBase {
     // no-op (quarks renderer handles rendering)
   }
 
+  /**
+   * Bind floor-specific mask data before a floor's render pass.
+   * @param {object} bundle - Mask bundle for this floor
+   * @param {string} floorKey - Stable floor key from FloorBand.key
+   */
+  bindFloorMasks(bundle, floorKey) {
+    if (!bundle) return;
+
+    const masks = bundle.masks ?? [];
+    const ashTex = masks.find(m => m.id === 'ash' || m.type === 'ash')?.texture ?? null;
+
+    // Restore from cache if mask reference hasn't changed.
+    const cached = this._floorStates.get(floorKey);
+    if (cached && cached.ashMask === ashTex) {
+      this._ashMask = cached.ashMask;
+      this._spawnPoints = cached.spawnPoints;
+      this._ashMaskFlipV = cached.ashMaskFlipV;
+      return;
+    }
+
+    // First visit or mask changed: regenerate spawn points and cache.
+    this._ashMask = ashTex;
+    this._spawnPoints = ashTex
+      ? this._generatePoints(ashTex)
+      : this._generateFallbackPoints();
+    this._cacheMaskData(ashTex);
+
+    this._floorStates.set(floorKey, {
+      ashMask: ashTex,
+      spawnPoints: this._spawnPoints,
+      ashMaskFlipV: this._ashMaskFlipV,
+    });
+
+    // Request a system rebuild on the next update() so particles use the new points.
+    this._rebuildAttempts = 0;
+    if (!this._tryRebuildSystems()) this._needsRebuild = true;
+  }
+
+  /**
+   * Release the cached state for a specific floor.
+   * The floor state holds JS data (spawn points, mask flip flag) and a
+   * registry-owned texture reference — no owned GPU resources to dispose.
+   * @param {string} floorKey
+   */
+  disposeFloorState(floorKey) {
+    this._floorStates.delete(floorKey);
+  }
+
   dispose() {
+    for (const key of this._floorStates.keys()) {
+      this.disposeFloorState(key);
+    }
+    this._floorStates.clear();
     if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
     for (const system of this._burstSystems) {
       try {

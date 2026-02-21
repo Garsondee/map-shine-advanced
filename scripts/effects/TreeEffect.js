@@ -19,6 +19,15 @@ export class TreeEffect extends EffectBase {
 
     this.priority = 12; // Higher priority than bushes
     this.alwaysRender = false;
+
+    /**
+     * Per-floor cached state. Keyed by FloorBand.key. Populated lazily by
+     * bindFloorMasks(). Holds per-floor tree mask textures and billboard
+     * instance data derived from each floor's tree mask.
+     * @type {Map<string, object>}
+     */
+    this._floorStates = new Map();
+
     this.baseMesh = null;
     this.mesh = null;
     this.treeMask = null;
@@ -108,7 +117,90 @@ export class TreeEffect extends EffectBase {
     this._alphaMaskHeight = 0;
   }
 
+  /**
+   * Bind floor-specific mask data before a floor's render pass.
+   * @param {object} bundle - Mask bundle for this floor
+   * @param {string} floorKey - Stable floor key from FloorBand.key
+   */
+  bindFloorMasks(bundle, floorKey) {
+    if (!bundle) return;
+
+    const masks = bundle.masks ?? [];
+    const treeEntry = masks.find(m => m.id === 'tree' || m.type === 'tree');
+    const floorMaskTex = treeEntry?.texture ?? null;
+
+    // Restore from cache if mask reference hasn't changed — O(1) path.
+    const cached = this._floorStates.get(floorKey);
+    if (cached && cached.treeMask === floorMaskTex) {
+      if (this.treeMask !== cached.treeMask) {
+        this.treeMask = cached.treeMask;
+        this._deriveAlpha = cached.deriveAlpha;
+        this._applyTreeMaskUniforms(cached.treeMask, cached.deriveAlpha);
+        if (this.mesh) this.mesh.visible = !!cached.treeMask && this._enabled;
+      }
+      return;
+    }
+
+    // First visit or mask changed: update state and uniforms.
+    const prevMask = this.treeMask;
+    this.treeMask = floorMaskTex;
+    if (floorMaskTex !== prevMask) this._clearAlphaMaskCache();
+
+    const deriveAlpha = floorMaskTex ? this._needsDerivedAlpha(floorMaskTex) : false;
+    this._deriveAlpha = deriveAlpha;
+
+    if (floorMaskTex && this.baseMesh) {
+      if (!this.mesh && this.scene) {
+        // First floor that has trees: create the mesh now.
+        this._createMesh();
+        if (this.shadowScene) this._createShadowMesh();
+      } else {
+        // Mesh already exists: swap uniforms without GPU-side rebuild.
+        this._applyTreeMaskUniforms(floorMaskTex, deriveAlpha);
+        if (this.mesh) this.mesh.visible = this._enabled;
+      }
+    } else if (this.mesh) {
+      // No tree mask on this floor: hide mesh.
+      this.mesh.visible = false;
+    }
+
+    this._floorStates.set(floorKey, { treeMask: floorMaskTex, deriveAlpha });
+  }
+
+  /**
+   * Update uTreeMask + uDeriveAlpha on the main and shadow materials.
+   * Called by bindFloorMasks() on floors after the first, where the mesh
+   * geometry is already in the scene and only the texture needs to change.
+   * @param {THREE.Texture|null} tex
+   * @param {boolean} deriveAlpha
+   * @private
+   */
+  _applyTreeMaskUniforms(tex, deriveAlpha) {
+    if (this.material?.uniforms) {
+      if (this.material.uniforms.uTreeMask) this.material.uniforms.uTreeMask.value = tex;
+      if (this.material.uniforms.uDeriveAlpha) this.material.uniforms.uDeriveAlpha.value = deriveAlpha ? 1.0 : 0.0;
+    }
+    if (this.shadowMaterial?.uniforms?.uTreeMask) {
+      this.shadowMaterial.uniforms.uTreeMask.value = tex;
+    }
+  }
+
+  /**
+   * Release GPU resources for a specific floor's cached state.
+   * @param {string} floorKey
+   */
+  disposeFloorState(floorKey) {
+    const state = this._floorStates.get(floorKey);
+    if (!state) return;
+    // Mask textures are owned by the compositor, not by us — don't dispose them here.
+    this._floorStates.delete(floorKey);
+  }
+
   dispose() {
+    for (const key of this._floorStates.keys()) {
+      this.disposeFloorState(key);
+    }
+    this._floorStates.clear();
     if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
 
     // Dispose all per-tile overlays.

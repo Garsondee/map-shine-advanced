@@ -213,6 +213,17 @@ export class DepthPassManager {
 
     /** @type {MaskManager|null} */
     this._maskManager = null;
+
+    /**
+     * Override material used exclusively during the depth capture pass.
+     * A colorWrite-disabled MeshBasicMaterial writes depth via the standard
+     * depth buffer without sampling any scene textures. This prevents the
+     * WebGL illegal feedback warning that occurs when tile materials sample
+     * the depth texture while it is simultaneously attached as DEPTH_ATTACHMENT
+     * to the current framebuffer.
+     * @type {THREE.MeshBasicMaterial|null}
+     */
+    this._depthCaptureMaterial = null;
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -242,6 +253,13 @@ export class DepthPassManager {
     this._createDepthTarget();
     this._createDebugVisualization();
     this._createDepthCamera();
+
+    // Create a lightweight override material for the depth capture pass.
+    // colorWrite=false means only the depth buffer is written, not the color
+    // buffer — which is correct since we only care about depth here.
+    this._depthCaptureMaterial = new THREE.MeshBasicMaterial();
+    this._depthCaptureMaterial.colorWrite = false;
+    this._depthCaptureMaterial.depthWrite = true;
 
     this._initialized = true;
     this._dirty = true;
@@ -385,9 +403,15 @@ export class DepthPassManager {
   // ── Per-frame Update (called by EffectComposer as an updatable) ─────────
 
   /**
-   * Called every frame by EffectComposer.
+   * Called every frame by EffectComposer as a global updatable.
    * Renders the depth pass if dirty, camera moved, or in continuous mode.
    * Rate-capped to _maxHz to avoid redundant GPU work.
+   *
+   * In the per-floor render loop architecture, the primary depth capture
+   * path is {@link captureForFloor} which is called once per floor before
+   * that floor's scene render. This global `update()` is retained for
+   * single-floor scenes, the debug visualizer, and as a fallback.
+   *
    * @param {Object} timeInfo
    */
   update(timeInfo) {
@@ -407,6 +431,28 @@ export class DepthPassManager {
       this._lastRenderTimeMs = now;
     }
 
+    this._renderDepthPass();
+    this._dirty = false;
+  }
+
+  /**
+   * Render a fresh depth pass for the current floor visibility state.
+   *
+   * Called once per floor inside the EffectComposer floor loop, immediately
+   * before that floor's scene effects run and the floor scene is rendered.
+   * Because visibility has just been set to show only floor N's geometry
+   * (via FloorStack.setFloorVisible), the resulting depth texture accurately
+   * represents floor N — which is what per-floor depth-dependent effects
+   * (WaterEffectV2, DistortionManager, SpecularEffect, FluidEffect,
+   * AtmosphericFogEffect, OverheadShadowsEffect) need.
+   *
+   * Intentionally does NOT update _lastRenderTimeMs so the rate limiter
+   * in update() is not poisoned by floor-loop captures.
+   * Clears _dirty so the global update() does not redundantly re-render
+   * on the same frame after the floor loop completes.
+   */
+  captureForFloor() {
+    if (!this._initialized || !this._enabled) return;
     this._renderDepthPass();
     this._dirty = false;
   }
@@ -475,13 +521,23 @@ export class DepthPassManager {
 
     // Render the scene into our depth target using the tight-bounds camera.
     // Exclude overlay-only objects (layer 31) — same exclusion as the main scene render.
+    //
+    // IMPORTANT: Override all tile materials with _depthCaptureMaterial during
+    // this pass. Tile ShaderMaterials may have the depth texture bound as a
+    // uniform. If the same texture is also attached as DEPTH_ATTACHMENT to
+    // _depthTarget, WebGL issues an illegal feedback warning. Using a plain
+    // colorWrite=false material prevents any sampling of the depth texture
+    // while still writing the correct depth values via the depth buffer.
+    const prevOverride = renderer.overrideMaterial;
     try {
       depthCamera.layers.disable(OVERLAY_THREE_LAYER);
+      renderer.overrideMaterial = this._depthCaptureMaterial;
       renderer.setRenderTarget(this._depthTarget);
       renderer.autoClear = true;
       renderer.clear(true, true, false);
       renderer.render(scene, depthCamera);
     } finally {
+      renderer.overrideMaterial = prevOverride;
       renderer.setRenderTarget(prevRenderTarget);
       renderer.autoClear = prevAutoClear;
     }
@@ -658,6 +714,10 @@ export class DepthPassManager {
     if (this._debugMaterial) {
       this._debugMaterial.dispose();
       this._debugMaterial = null;
+    }
+    if (this._depthCaptureMaterial) {
+      this._depthCaptureMaterial.dispose();
+      this._depthCaptureMaterial = null;
     }
     if (this._debugQuad?.geometry) {
       this._debugQuad.geometry.dispose();

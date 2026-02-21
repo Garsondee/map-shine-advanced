@@ -145,6 +145,14 @@ export class DustMotesEffect extends EffectBase {
     this.alwaysRender = false;
     this.enabled = false;
 
+    /**
+     * Per-floor cached state. Keyed by FloorBand.key. Populated lazily by
+     * bindFloorMasks(). Holds per-floor dust/outdoors mask CPU pixel data
+     * used to generate dust particle spawn points.
+     * @type {Map<string, object>}
+     */
+    this._floorStates = new Map();
+
     this.scene = null;
     this.renderer = null;
     this.camera = null;
@@ -1126,7 +1134,61 @@ export class DustMotesEffect extends EffectBase {
     push(this._batchMaterial);
   }
 
+  /**
+   * Bind floor-specific mask data before a floor's render pass.
+   * @param {object} bundle - Mask bundle for this floor
+   * @param {string} floorKey - Stable floor key from FloorBand.key
+   */
+  bindFloorMasks(bundle, floorKey) {
+    if (!bundle) return;
+
+    const masks = bundle.masks ?? [];
+    const dustTex = masks.find(m => m.id === 'dust' || m.type === 'dust')?.texture ?? null;
+    const structTex = masks.find(m => m.id === 'structural' || m.type === 'structural')?.texture ?? null;
+    const outdoorsTex = masks.find(m => m.id === 'outdoors' || m.type === 'outdoors')?.texture ?? null;
+
+    // Restore from cache if mask references haven't changed.
+    const cached = this._floorStates.get(floorKey);
+    if (cached &&
+        cached.dustMask === dustTex &&
+        cached.structuralMask === structTex &&
+        cached.outdoorsMask === outdoorsTex) {
+      this._dustMask = cached.dustMask;
+      this._structuralMask = cached.structuralMask;
+      this._outdoorsMask = cached.outdoorsMask;
+      this._spawnPoints = cached.spawnPoints;
+      return;
+    }
+
+    // First visit or masks changed: (re)generate spawn points and cache.
+    this._dustMask = dustTex;
+    this._structuralMask = structTex;
+    this._outdoorsMask = outdoorsTex;
+    this._spawnPoints = this._generatePoints(dustTex, structTex, outdoorsTex);
+    this._needsRebuild = true;
+    this._floorStates.set(floorKey, {
+      dustMask: dustTex,
+      structuralMask: structTex,
+      outdoorsMask: outdoorsTex,
+      spawnPoints: this._spawnPoints,
+    });
+  }
+
+  /**
+   * Release the cached state for a specific floor.
+   * The floor state holds JS data (spawn points array) and a registry-owned
+   * texture reference — no owned GPU resources to dispose.
+   * @param {string} floorKey
+   */
+  disposeFloorState(floorKey) {
+    this._floorStates.delete(floorKey);
+  }
+
   dispose() {
+    for (const key of this._floorStates.keys()) {
+      this.disposeFloorState(key);
+    }
+    this._floorStates.clear();
     for (const unsub of this._registryUnsubs) unsub();
     this._registryUnsubs = [];
     this._disposeSystem();

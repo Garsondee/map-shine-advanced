@@ -4380,8 +4380,25 @@ export class WeatherParticles {
     }
 
     const waterEffect = window.MapShine?.waterEffect;
-    const waterEnabled = !!(waterEffect && waterEffect.enabled);
+    let waterEnabled = !!(waterEffect && waterEffect.enabled);
     const waterParams = waterEffect?.params || {};
+
+    // Guard: if the registry's water mask was preserved from a different floor
+    // (preserveAcrossFloors=true), the mask coordinates belong to that other
+    // floor's geometry. The 2D post-processing water shader still benefits from
+    // the preserved mask (shows water through floor openings), but 3D particle
+    // systems (foam, splash) should not spawn at another floor's water positions.
+    if (waterEnabled) {
+      try {
+        const reg = window.MapShine?.effectMaskRegistry;
+        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+        const activeFloorKey = compositor?._activeFloorKey ?? null;
+        const waterFloorKey = reg?.getSlot?.('water')?.floorKey ?? null;
+        if (activeFloorKey && waterFloorKey && activeFloorKey !== waterFloorKey) {
+          waterEnabled = false;
+        }
+      } catch (_) {}
+    }
     const waterTex = (waterEffect && typeof waterEffect.getWaterMaskTexture === 'function')
       ? waterEffect.getWaterMaskTexture()
       : (waterEffect?.waterMask || null);

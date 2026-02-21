@@ -888,7 +888,12 @@ export class SmellyFliesEffect extends EffectBase {
 
   constructor() {
     super('smellyFlies', RenderLayers.PARTICLES, 'low');
-    
+
+    // Fly particle systems live persistently in the Three.js scene without
+    // per-floor visibility filtering. Running per-floor would render all flies
+    // in every floor pass and accumulate duplicates in the scene render target.
+    this.floorScope = 'global';
+
     this.priority = 10;
     this.alwaysRender = false;
     

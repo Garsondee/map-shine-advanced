@@ -105,6 +105,12 @@ export class OverheadShadowsEffect extends EffectBase {
 
     /** @type {function|null} Unsubscribe from EffectMaskRegistry */
     this._registryUnsub = null;
+
+    /**
+     * Per-floor outdoors mask cache so bindFloorMasks() skips redundant swaps.
+     * @type {Map<string, {outdoorsMask: THREE.Texture|null}>}
+     */
+    this._floorStates = new Map();
   }
 
   /**
@@ -175,10 +181,37 @@ export class OverheadShadowsEffect extends EffectBase {
     if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
     this._registryUnsub = registry.subscribe('outdoors', (texture) => {
       this.outdoorsMask = texture;
+      // Clear per-floor cache so next bindFloorMasks() picks up the new global mask.
+      this._floorStates.clear();
       if (texture && this.renderer && this.mainScene && this.mainCamera) {
         this._createShadowMesh();
       }
     });
+  }
+
+  /**
+   * Phase 4+: per-floor mask swap called by the EffectComposer floor loop.
+   * Swaps the outdoors mask for the current floor; render() reads it per-frame
+   * and pushes it to uOutdoorsMask / uHasOutdoorsMask.
+   *
+   * @param {{masks: Array}|null} bundle - Floor mask bundle from the GPU compositor.
+   * @param {string} floorKey - Compositor key for this floor (e.g. "0:200").
+   */
+  bindFloorMasks(bundle, floorKey) {
+    const outdoorsEntry = bundle?.masks?.find?.(m => m.id === 'outdoors' || m.type === 'outdoors');
+    const newMask = outdoorsEntry?.texture ?? null;
+
+    const cached = this._floorStates.get(floorKey);
+    if (cached) {
+      // Always restore the instance field — the previous floor's pass overwrites it.
+      // The render path reads this.outdoorsMask directly, so it must be correct
+      // for the floor currently being rendered.
+      this.outdoorsMask = cached.outdoorsMask;
+      return;
+    }
+
+    this._floorStates.set(floorKey, { outdoorsMask: newMask });
+    this.outdoorsMask = newMask;
   }
 
   /**

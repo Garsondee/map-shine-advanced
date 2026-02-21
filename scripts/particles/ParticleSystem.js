@@ -23,6 +23,13 @@ export class ParticleSystem extends EffectBase {
     // even on GPUs where advanced compute features are limited.
     super('particles', RenderLayers.PARTICLES, 'low');
 
+    // ParticleSystem manages the shared BatchedRenderer and WeatherParticles
+    // simulation. Running per-floor would advance all particle lifetimes and
+    // weather emission N times per frame on multi-floor scenes. The BatchedRenderer
+    // already forces all quarks batches onto OVERLAY_THREE_LAYER so they render
+    // once via _renderOverlayToScreen() regardless of floor count.
+    this.floorScope = 'global';
+
     this.priority = 0;
     this.alwaysRender = false;
 

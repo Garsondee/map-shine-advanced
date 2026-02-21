@@ -351,6 +351,20 @@ export function registerSettings() {
     default: false
   });
 
+  // Phase 3 floor loop: per-floor scene rendering for correct per-floor masks,
+  // depth capture, and effect isolation on multi-floor Levels scenes. When enabled,
+  // EffectComposer renders each visible floor separately (bottom-to-top) with its
+  // own mask bundle, depth pass, and scene geometry, then accumulates the results.
+  // Has no effect on single-floor scenes. Enabled by default — Phase 3 is complete.
+  game.settings.register('map-shine-advanced', 'experimentalFloorRendering', {
+    name: 'Per-Floor Rendering',
+    hint: 'Render each visible floor separately in multi-floor Levels scenes so each floor uses its own effect masks (water, fire, specular, etc.). Disable only if visual artifacts appear on multi-floor scenes.',
+    scope: 'world',
+    config: true,
+    type: Boolean,
+    default: true
+  });
+
   game.settings.register('map-shine-advanced', 'dismissExperimentalWarning', {
     name: 'Dismiss Experimental Warning',
     hint: 'When enabled, the experimental warning dialog will no longer be shown for this user.',

@@ -70,6 +70,12 @@ export class PrismEffect extends EffectBase {
 
     /** @type {function|null} Unsubscribe from EffectMaskRegistry */
     this._registryUnsub = null;
+
+    /**
+     * Per-floor mask cache so bindFloorMasks() skips redundant uniform pushes.
+     * @type {Map<string, {prismMask: THREE.Texture|null}>}
+     */
+    this._floorStates = new Map();
   }
 
   /**
@@ -321,6 +327,8 @@ export class PrismEffect extends EffectBase {
     this._registryUnsub = registry.subscribe('prism', (texture) => {
       this.prismMask = texture;
       this.params.hasPrismMask = !!texture;
+      // Clear per-floor cache so next bindFloorMasks() picks up the new global mask.
+      this._floorStates.clear();
       if (!texture) {
         this.params.textureStatus = 'Inactive (No Texture Found)';
         this.enabled = false;
@@ -335,6 +343,38 @@ export class PrismEffect extends EffectBase {
         this.createOverlayMesh();
       }
     });
+  }
+
+  /**
+   * Phase 4+: per-floor mask swap called by the EffectComposer floor loop.
+   * Swaps the prism mask and pushes it directly to uPrismMask.
+   *
+   * @param {{masks: Array}|null} bundle - Floor mask bundle from the GPU compositor.
+   * @param {string} floorKey - Compositor key for this floor (e.g. "0:200").
+   */
+  bindFloorMasks(bundle, floorKey) {
+    const prismEntry = bundle?.masks?.find?.(m => m.id === 'prism' || m.type === 'prism');
+    const newMask = prismEntry?.texture ?? null;
+
+    // Use cache for the texture lookup but always restore all shared fields —
+    // the previous floor's pass overwrites this.prismMask and the uniform.
+    let effectiveMask;
+    const cached = this._floorStates.get(floorKey);
+    if (cached) {
+      effectiveMask = cached.prismMask;
+    } else {
+      effectiveMask = newMask;
+      this._floorStates.set(floorKey, { prismMask: newMask });
+    }
+
+    this.prismMask = effectiveMask;
+    this.params.hasPrismMask = !!effectiveMask;
+    this.enabled = !!effectiveMask;
+
+    if (this.material?.uniforms?.uPrismMask) {
+      this.material.uniforms.uPrismMask.value = effectiveMask;
+      this.material.needsUpdate = true;
+    }
   }
 
   /**

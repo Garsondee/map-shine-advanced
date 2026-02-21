@@ -38,6 +38,14 @@ export class BuildingShadowsEffect extends EffectBase {
     this.priority = 15;
     this.alwaysRender = true;
 
+    /**
+     * Per-floor cached state. Keyed by FloorBand.key. Populated lazily by
+     * bindFloorMasks(). Holds per-floor bakeTarget render targets and
+     * the outdoors mask texture used to drive shadow generation.
+     * @type {Map<string, object>}
+     */
+    this._floorStates = new Map();
+
     /** @type {THREE.ShaderMaterial|null} */
     this.bakeMaterial = null; // The expensive raymarcher
 
@@ -596,7 +604,52 @@ export class BuildingShadowsEffect extends EffectBase {
     renderer.setRenderTarget(previousTarget);
   }
 
+  /**
+   * Bind floor-specific mask data before a floor's render pass.
+   * @param {object} bundle - Mask bundle for this floor
+   * @param {string} floorKey - Stable floor key from FloorBand.key
+   */
+  bindFloorMasks(bundle, floorKey) {
+    if (!bundle) return;
+
+    // Retrieve the outdoors mask from the floor bundle.
+    const maskEntry = bundle.masks?.find(m => m.id === 'outdoors' || m.type === 'outdoors');
+    const floorMaskTex = maskEntry?.texture ?? null;
+
+    // Restore from cache if available and mask hasn't changed.
+    const cached = this._floorStates.get(floorKey);
+    if (cached) {
+      if (cached.outdoorsMask === floorMaskTex) {
+        this.outdoorsMask = cached.outdoorsMask;
+        return;
+      }
+      // Mask reference changed (e.g. recomposed) — fall through to rebind.
+    }
+
+    // First visit or mask changed: bind and schedule a rebake.
+    this.outdoorsMask = floorMaskTex;
+    if (floorMaskTex && this.renderer && this.mainScene && this.mainCamera) {
+      this._createShadowMesh();
+      this.needsBake = true;
+    }
+    this._floorStates.set(floorKey, { outdoorsMask: floorMaskTex });
+  }
+
+  /**
+   * Release the cached state for a specific floor.
+   * The floor state only holds a reference to the registry-owned outdoors mask
+   * texture — there are no owned GPU resources to dispose here.
+   * @param {string} floorKey
+   */
+  disposeFloorState(floorKey) {
+    this._floorStates.delete(floorKey);
+  }
+
   dispose() {
+    for (const key of this._floorStates.keys()) {
+      this.disposeFloorState(key);
+    }
+    this._floorStates.clear();
     if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
     if (this.shadowTarget) {
       this.shadowTarget.dispose();

@@ -82,6 +82,12 @@ export class BushEffect extends EffectBase {
     this._registryUnsub = null;
 
     /**
+     * Per-floor mask cache so bindFloorMasks() skips redundant uniform pushes.
+     * @type {Map<string, {bushMask: THREE.Texture|null}>}
+     */
+    this._floorStates = new Map();
+
+    /**
      * Per-tile overlay meshes created by the TileBindableEffect interface.
      * Key: tileId, Value: {mesh, material, sprite}
      * @type {Map<string, {mesh: THREE.Mesh, material: THREE.ShaderMaterial, sprite: THREE.Object3D}>}
@@ -411,12 +417,39 @@ export class BushEffect extends EffectBase {
     if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
     this._registryUnsub = registry.subscribe('bush', (texture) => {
       this.bushMask = texture;
+      // Clear per-floor cache so next bindFloorMasks() picks up the new global mask.
+      this._floorStates.clear();
       this._resetTemporalState();
       if (!texture) { this.enabled = false; return; }
       this.enabled = true;
       if (this.scene) this._createMesh();
       if (this.shadowScene) this._createShadowMesh();
     });
+  }
+
+  /**
+   * Phase 4+: per-floor mask swap called by the EffectComposer floor loop.
+   * Swaps the bush mask and pushes it to both the scene mesh and shadow mesh materials.
+   *
+   * @param {{masks: Array}|null} bundle - Floor mask bundle from the GPU compositor.
+   * @param {string} floorKey - Compositor key for this floor (e.g. "0:200").
+   */
+  bindFloorMasks(bundle, floorKey) {
+    const bushEntry = bundle?.masks?.find?.(m => m.id === 'bush' || m.type === 'bush');
+    const newMask = bushEntry?.texture ?? null;
+
+    const cached = this._floorStates.get(floorKey);
+    if (cached?.bushMask === newMask) return;
+
+    this._floorStates.set(floorKey, { bushMask: newMask });
+    this.bushMask = newMask;
+
+    // Handle enable/disable based on mask presence.
+    this.enabled = !!newMask;
+
+    // Push updated mask into both render materials.
+    if (this.material?.uniforms?.uBushMask)       this.material.uniforms.uBushMask.value = newMask;
+    if (this.shadowMaterial?.uniforms?.uBushMask) this.shadowMaterial.uniforms.uBushMask.value = newMask;
   }
 
   // ── TileBindableEffect interface ────────────────────────────────────────────

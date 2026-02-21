@@ -53,6 +53,11 @@ export class PlayerLightEffect extends EffectBase {
   constructor() {
     super('player-light', RenderLayers.ENVIRONMENTAL, 'low');
 
+    // PlayerLightEffect renders flashlight meshes and torch particle emitters
+    // that are tied to the controlled token on the active floor only. Running
+    // this per-floor would show the player's light on every floor simultaneously.
+    this.floorScope = 'global';
+
     this.priority = 9;
     this.enabled = true;
 

@@ -79,6 +79,7 @@ import { WallManager } from '../scene/wall-manager.js';
 import { DoorMeshManager } from '../scene/DoorMeshManager.js';
 import { DrawingManager } from '../scene/drawing-manager.js';
 import { NoteManager } from '../scene/note-manager.js';
+import { FloorStack } from '../scene/FloorStack.js';
 import { TemplateManager } from '../scene/template-manager.js';
 import { LightIconManager } from '../scene/light-icon-manager.js';
 import { EnhancedLightIconManager } from '../scene/enhanced-light-icon-manager.js';
@@ -242,6 +243,9 @@ let dynamicExposureManager = null;
 
 /** @type {TileManager|null} */
 let tileManager = null;
+
+/** @type {FloorStack|null} */
+let floorStack = null;
 
 /** @type {TileMotionManager|null} */
 let tileMotionManager = null;
@@ -554,6 +558,18 @@ export function initialize() {
         if (we) we._floorTransitionActive = true;
       }, 'levelMaskRebuild.transitionLock', Severity.COSMETIC);
 
+      // Update FloorStack's active floor immediately so the per-floor depth
+      // capture in EffectComposer uses the correct floor on the very next frame.
+      safeCall(() => {
+        const fs = floorStack ?? window.MapShine?.floorStack;
+        if (fs) {
+          fs.rebuildFloors(
+            window.MapShine?.levelsSnapshot?.sceneLevels ?? null,
+            payload?.context ?? null
+          );
+        }
+      }, 'levelMaskRebuild.floorStackUpdate', Severity.COSMETIC);
+
       safeCallAsync(async () => {
         const ms = window.MapShine;
         const waterEffectRef = ms?.waterEffect;
@@ -572,7 +588,28 @@ export function initialize() {
         const result = await compositor.composeFloor(ctx, canvas?.scene, {
           lastMaskBasePath: composer._lastMaskBasePath ?? null
         });
-        if (!result || !result.masks) return;
+
+        // When the compositor finds no tile masks for this floor (result=null),
+        // we still need to apply floor-transition policy so that
+        // preserveAcrossFloors:false types (outdoors, dust, ash, etc.) are
+        // cleared rather than bleeding floor-0 data onto an empty floor.
+        //
+        // We ALSO update compositor._activeFloorKey to this empty floor's key
+        // so that returning to the previous floor produces masksChanged=true,
+        // which forces a full redistribution and restores the cleared masks.
+        if (!result || !result.masks) {
+          if (reg && ctx) {
+            const emptyFloorKey = `${ctx.bottom ?? ''}:${ctx.top ?? ''}`;
+            safeCall(() => {
+              // Advance the compositor's active key so the return-trip sees a change.
+              if (compositor._activeFloorKey !== emptyFloorKey) {
+                compositor._activeFloorKey = emptyFloorKey;
+              }
+              reg.transitionToFloor(emptyFloorKey, []);
+            }, 'levelMaskRebuild.emptyFloorTransition', Severity.DEGRADED);
+          }
+          return;
+        }
 
         // Always update the level elevation (fire spawn Z offset).
         if (ms) ms._activeLevelElevation = result.levelElevation ?? 0;
@@ -612,6 +649,25 @@ export function initialize() {
             reg.transitionToFloor(floorKey, result.masks);
           }
         }, 'levelMaskRebuild.registryTransition', Severity.DEGRADED);
+
+        // ── Floor ID texture ─────────────────────────────────────────────
+        // Rebuild the world-space floor ID texture now that all floor bundles are
+        // up to date. Post-processing effects (fog, water distortion) can sample
+        // this to determine which floor's mask applies at each screen pixel.
+        safeCall(() => {
+          const fs = ms?.floorStack ?? window.MapShine?.floorStack;
+          if (!fs || !compositor) return;
+          const visibleFloors = fs.getVisibleFloors?.() ?? [];
+          const floorBundles = visibleFloors
+            .map(floor => {
+              const meta = compositor._floorMeta?.get(floor.compositorKey);
+              return (meta?.masks?.length) ? { index: floor.index, bundle: { masks: meta.masks } } : null;
+            })
+            .filter(Boolean);
+          if (floorBundles.length > 0) {
+            compositor.buildFloorIdTexture(floorBundles);
+          }
+        }, 'levelMaskRebuild.floorIdTexture', Severity.COSMETIC);
 
         // ── Non-mask concerns (not handled by registry) ─────────────────
 
@@ -1299,6 +1355,17 @@ function onCanvasTearDown(canvas) {
     safeDispose(() => window.MapShine.maskManager.dispose(), 'MaskManager.dispose');
   }
 
+  // Reset compositor floor-tracking state so stale floor keys don't bleed
+  // into the next scene load. clearFloorState() keeps the render target cache
+  // in place (they'll be LRU-evicted or disposed when the compositor itself
+  // is GC'd), but clears _activeFloorKey / _belowFloorKey / _floorMeta.
+  safeDispose(() => {
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+    if (compositor && typeof compositor.clearFloorState === 'function') {
+      compositor.clearFloorState();
+    }
+  }, 'compositor.clearFloorState');
+
   // Cleanup three.js canvas
   destroyThreeCanvas();
   
@@ -1310,6 +1377,7 @@ function onCanvasTearDown(canvas) {
     window.MapShine.tokenManager = null;
     window.MapShine.visibilityController = null;
     window.MapShine.detectionFilterEffect = null;
+    window.MapShine.floorStack = null;
     window.MapShine.tileManager = null;
     window.MapShine.tileMotionManager = null;
     window.MapShine.surfaceRegistry = null;
@@ -2312,6 +2380,49 @@ async function createThreeCanvas(scene) {
         wc.connectToRegistry(reg);
         log.info('WeatherController connected to EffectMaskRegistry');
       }
+      // Seed the registry slots with the initial bundle masks so all slots have
+      // valid textures from the start. This ensures transitionToFloor's preserve
+      // logic works on the very first floor transition (preserve requires
+      // currentTexture to be non-null). Without this, the registry starts empty
+      // and preserved types are silently skipped until a trip back to the ground
+      // floor populates them.
+      //
+      // IMPORTANT: Seed slots SILENTLY (no subscriber notifications). Effects
+      // already have their masks from setBaseMesh — we only need populated slots
+      // for the preserve logic. Notifying subscribers here would trigger heavy
+      // work (fire mask scanning, water SDF rebuild) before the render loop
+      // starts, potentially before particle systems or other dependencies are
+      // fully wired.
+      if (reg && bundle?.masks?.length) {
+        const seededTypes = [];
+        for (const m of bundle.masks) {
+          const type = m?.type || m?.id;
+          if (type && m?.texture) {
+            // Only seed preserveAcrossFloors types. Non-preserve types (fire,
+            // outdoors, dust, ash) are managed by setAssetBundle and their own
+            // compositor paths. Seeding them would set currentTexture to non-null,
+            // which causes a spurious CLEAR action on the first floor UP (since
+            // the upper floor has no compositor data for them → newTexture=null,
+            // currentTexture=seeded → clear → fire particles destroyed).
+            const policy = reg.getPolicy?.(type);
+            if (!policy?.preserveAcrossFloors) continue;
+
+            const slot = reg._slots?.get(type);
+            if (slot) {
+              slot.texture = m.texture;
+              slot.floorKey = null;
+              slot.source = 'bundle';
+              slot.timestamp = performance.now();
+              seededTypes.push(type);
+            }
+          }
+        }
+        if (seededTypes.length) {
+          log.info('EffectMaskRegistry seeded with preserveAcrossFloors bundle masks (silent)', {
+            types: seededTypes
+          });
+        }
+      }
     }, 'effects.connectToRegistry', Severity.DEGRADED);
 
     _sectionEnd('setBaseMesh');
@@ -2446,6 +2557,21 @@ async function createThreeCanvas(scene) {
     // Route water occluder meshes into DistortionManager's dedicated scene so
     // the occluder render pass avoids traversing the full world scene.
     safeCall(() => tileManager.setWaterOccluderScene(distortionManager?.waterOccluderScene ?? null), 'tileManager.setWaterOccluder', Severity.COSMETIC);
+    // Route floor-presence meshes (layer 23) into a shared THREE.Scene that
+    // DistortionManager renders each frame to produce the floor-presence RT.
+    // Also route below-floor-presence meshes (layer 24) for the below-floor RT
+    // which bounds preserved lower-floor effects to their originating tile footprint.
+    safeCall(() => {
+      if (tileManager && distortionManager) {
+        const fpScene = new (window.THREE.Scene)();
+        tileManager.setFloorPresenceScene(fpScene);
+        distortionManager.setFloorPresenceScene(fpScene);
+
+        const bfpScene = new (window.THREE.Scene)();
+        tileManager.setBelowFloorPresenceScene(bfpScene);
+        distortionManager.setBelowFloorPresenceScene(bfpScene);
+      }
+    }, 'tileManager.setFloorPresenceScene', Severity.COSMETIC);
     tileManager.initialize();
     if (isDebugLoad) dlp.end('manager.TileManager.init');
     if (isDebugLoad) dlp.begin('manager.TileManager.syncAll', 'sync');
@@ -2454,6 +2580,18 @@ async function createThreeCanvas(scene) {
     effectComposer.addUpdatable(tileManager); // Register for occlusion updates
     if (isDebugLoad) dlp.end('manager.TileManager.syncAll');
     log.info('Tile manager initialized and synced');
+
+    // Step 4b.0: Initialize FloorStack — derives per-floor elevation bands from
+    // the LevelsImportSnapshot and provides the setFloorVisible() API used by
+    // the per-floor render loop (Phase 2) and depth captures.
+    floorStack = new FloorStack();
+    floorStack.setManagers(tileManager, tokenManager);
+    floorStack.rebuildFloors(
+      window.MapShine?.levelsSnapshot?.sceneLevels ?? null,
+      window.MapShine?.activeLevelContext ?? null
+    );
+    if (window.MapShine) window.MapShine.floorStack = floorStack;
+    log.info('FloorStack initialized');
 
     // Step 4b.1: Initialize tile motion runtime manager
     if (isDebugLoad) dlp.begin('manager.TileMotion.init', 'manager');
@@ -3132,6 +3270,24 @@ async function createThreeCanvas(scene) {
           initialMasks: c.currentBundle?.masks ?? null,
           activeLevelContext: window.MapShine?.activeLevelContext ?? null
         });
+
+        // Build the floor ID texture once all floor caches are warm.
+        // This gives post-processing effects a world-space per-pixel floor index
+        // from the very first frame, without waiting for the first floor transition.
+        safeCall(() => {
+          const fs = window.MapShine?.floorStack;
+          if (!fs) return;
+          const visibleFloors = fs.getVisibleFloors?.() ?? [];
+          const floorBundles = visibleFloors
+            .map(floor => {
+              const meta = compositor._floorMeta?.get(floor.compositorKey);
+              return (meta?.masks?.length) ? { index: floor.index, bundle: { masks: meta.masks } } : null;
+            })
+            .filter(Boolean);
+          if (floorBundles.length > 0) {
+            compositor.buildFloorIdTexture(floorBundles);
+          }
+        }, 'levelMaskPreload.floorIdTexture', Severity.COSMETIC);
       }
     }, 'levelMaskPreload', Severity.COSMETIC);
 
@@ -5568,6 +5724,13 @@ function destroyThreeCanvas() {
     safeDispose(() => tileMotionManager.dispose(), 'tileMotionManager.dispose');
     tileMotionManager = null;
     log.debug('Tile motion manager disposed');
+  }
+
+  // Dispose floor stack (before tile/token managers it references).
+  if (floorStack) {
+    floorStack.dispose();
+    floorStack = null;
+    log.debug('FloorStack disposed');
   }
 
   // Dispose tile manager

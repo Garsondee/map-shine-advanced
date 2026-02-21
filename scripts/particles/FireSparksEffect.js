@@ -941,6 +941,29 @@ export class FireSparksEffect extends EffectBase {
     // We gate *actual* activation via isActive().
     this.requiresContinuousRender = true;
 
+    /**
+     * Per-floor cached state. Keyed by FloorBand.key. Populated lazily by
+     * bindFloorMasks(). Each entry holds {fireMask, globalSystems,
+     * globalEmberSystems, globalSmokeSystems} for that floor.
+     * @type {Map<string, object>}
+     */
+    this._floorStates = new Map();
+
+    /**
+     * The floorKey whose particle systems are currently active (in batch + scene).
+     * null means no floor loop is active — systems are managed by setAssetBundle/registry.
+     * @type {string|null}
+     */
+    this._activeFloorKey = null;
+
+    /**
+     * Tracks floor keys for which a null-bundle warning has already been emitted.
+     * Prevents per-frame console spam when GpuSceneMaskCompositor hasn't cached
+     * this floor yet.
+     * @type {Set<string>}
+     */
+    this._warnedNullBundleKeys = new Set();
+
     this.fires = [];
     this.particleSystemRef = null; 
     this.globalSystem = null;
@@ -1779,6 +1802,14 @@ export class FireSparksEffect extends EffectBase {
   connectToRegistry(registry) {
     if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
     this._registryUnsub = registry.subscribe('fire', (texture) => {
+      // Registry-driven floor transition: all per-floor system caches are now stale
+      // because the compositor just produced a new mask set. Clear the cache so the
+      // next floor loop rebuilds fresh systems. Inactive floors' systems were already
+      // removed from batch/scene by bindFloorMasks — only their references remain
+      // here, so clearing _floorStates is safe without another batch.deleteSystem call.
+      this._floorStates.clear();
+      this._activeFloorKey = null;
+
       if (!texture) {
         // No fire mask — clean up existing systems
         this._unregisterHeatDistortion();
@@ -1854,7 +1885,7 @@ export class FireSparksEffect extends EffectBase {
 
       try {
         const d = canvas.dimensions;
-        const baseTex = bundle.baseTexture;
+        const baseTex = this._lastAssetBundle?.baseTexture ?? null;
         log.info('Fire debug: base vs fire vs dims', {
           baseW: baseTex?.image?.width,
           baseH: baseTex?.image?.height,
@@ -2175,18 +2206,30 @@ export class FireSparksEffect extends EffectBase {
   }
   
   _generatePoints(maskTexture, threshold = 0.1) {
-    // Prefer GPU compositor readback — avoids CPU canvas round-trip when the
-    // GpuSceneMaskCompositor has already composited the fire mask this session.
+    // Use GPU compositor readback ONLY when maskTexture is a compositor RT
+    // (WebGLRenderTarget textures have image = {width, height} with no .src).
+    // Bundle textures from the asset loader are HTMLImageElements with a .src —
+    // those must use the CPU canvas path to preserve the authored fire positions.
+    // Blindly preferring the GPU path would discard the bundle's precise fire
+    // positions whenever the compositor happened to have data, causing fire to
+    // spawn at compositor RT positions (often wider than the bundle texture).
+    const isCompositorRT = maskTexture?.image != null && !maskTexture.image.src;
     const composer = window.MapShine?.sceneComposer;
-    const gpuPixels = composer?.getCpuPixels?.('fire');
-    const dims = composer?._sceneMaskCompositor?.getOutputDims?.('fire');
+    const gpuPixels = isCompositorRT ? composer?.getCpuPixels?.('fire') : null;
+    const dims = isCompositorRT ? composer?._sceneMaskCompositor?.getOutputDims?.('fire') : null;
 
     let data, imgW, imgH;
 
+    let gpuFlipY = false;
     if (gpuPixels && dims?.width && dims?.height) {
       data = gpuPixels;
       imgW = dims.width;
       imgH = dims.height;
+      // WebGL readPixels stores rows bottom-to-top: row 0 = rendered BOTTOM of scene.
+      // The CPU canvas path (drawImage) stores rows top-to-bottom: row 0 = visual TOP.
+      // _applyFireMask expects the CPU convention (v=0 at visual TOP), so flip the
+      // normalised y for GPU-sourced pixels.
+      gpuFlipY = true;
       log.info('FireSparksEffect: using GPU compositor readback for fire mask scan');
     } else {
       // Fallback: CPU canvas drawImage from the texture's HTMLImageElement.
@@ -2207,11 +2250,18 @@ export class FireSparksEffect extends EffectBase {
 
     const coords = [];
     for (let i = 0; i < data.length; i += 4) {
-      const b = data[i] / 255.0;
+      // Mirror compositor convention: coverage = max(RGB) * alpha.
+      // Tiles without alpha have alpha=255 (no change). Alpha-encoded fire tiles
+      // correctly restrict spawn points to their opaque painted area.
+      const lum = Math.max(data[i], data[i + 1], data[i + 2]) / 255.0;
+      const b = lum * (data[i + 3] / 255.0);
       if (b > threshold) {
         const idx = i / 4;
         const x = (idx % imgW) / imgW;
-        const y = Math.floor(idx / imgW) / imgH;
+        const rawY = Math.floor(idx / imgW) / imgH;
+        // GPU readback is bottom-to-top; flip to top-to-bottom to match
+        // the CPU canvas convention that _applyFireMask expects.
+        const y = gpuFlipY ? (1.0 - rawY) : rawY;
         coords.push(x, y, b);
       }
     }
@@ -2713,7 +2763,12 @@ export class FireSparksEffect extends EffectBase {
       // size here would break on High-DPR displays (UVs > 1.0).
       uResolution: { value: new THREE.Vector2(1, 1) },
       uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
-      uRoofMaskEnabled: { value: 0.0 }
+      uRoofMaskEnabled: { value: 0.0 },
+      // Floor-presence map: screen-space RT (layer 23) where R=1 beneath
+      // the current floor's opaque tiles. Occludes below-floor particles so
+      // fire/smoke from floor 0 don't render through solid floor-1 tiles.
+      uFloorPresenceMap: { value: null },
+      uHasFloorPresenceMap: { value: 0.0 }
     };
 
     material.userData = material.userData || {};
@@ -2725,6 +2780,8 @@ export class FireSparksEffect extends EffectBase {
       shader.uniforms.uResolution = uniforms.uResolution;
       shader.uniforms.uSceneBounds = uniforms.uSceneBounds;
       shader.uniforms.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
+      shader.uniforms.uFloorPresenceMap = uniforms.uFloorPresenceMap;
+      shader.uniforms.uHasFloorPresenceMap = uniforms.uHasFloorPresenceMap;
 
       shader.vertexShader = shader.vertexShader
         .replace(
@@ -2739,7 +2796,7 @@ export class FireSparksEffect extends EffectBase {
       shader.fragmentShader = shader.fragmentShader
         .replace(
           'void main() {',
-          'varying vec3 vRoofWorldPos;\nuniform sampler2D uRoofMap;\nuniform sampler2D uRoofAlphaMap;\nuniform vec2 uResolution;\nuniform vec4 uSceneBounds;\nuniform float uRoofMaskEnabled;\nvoid main() {'
+          'varying vec3 vRoofWorldPos;\nuniform sampler2D uRoofMap;\nuniform sampler2D uRoofAlphaMap;\nuniform vec2 uResolution;\nuniform vec4 uSceneBounds;\nuniform float uRoofMaskEnabled;\nuniform sampler2D uFloorPresenceMap;\nuniform float uHasFloorPresenceMap;\nvoid main() {'
         )
         .replace(
           '#include <soft_fragment>',
@@ -2763,6 +2820,13 @@ export class FireSparksEffect extends EffectBase {
           '        gl_FragColor.a *= (1.0 - roofAlpha);\n' +
           '      }\n' +
           '    }\n' +
+          '  }\n' +
+          '  // Floor-presence gate: occlude below-floor particles where the current\n' +
+          '  // floor has solid tiles (layer-23 floorPresenceTarget, screen-space).\n' +
+          '  if (uHasFloorPresenceMap > 0.5) {\n' +
+          '    vec2 fpScreenUV = gl_FragCoord.xy / uResolution;\n' +
+          '    float floorPresence = texture2D(uFloorPresenceMap, fpScreenUV).r;\n' +
+          '    gl_FragColor.a *= (1.0 - floorPresence);\n' +
           '  }\n' +
           '#include <soft_fragment>'
         );
@@ -2968,11 +3032,13 @@ export class FireSparksEffect extends EffectBase {
       if (f && f.system) systems.push(f.system);
     }
 
+    // Floor-presence texture looked up once per frame (not per-system) for efficiency.
+    const fpTex = window.MapShine?.distortionManager?.floorPresenceTarget?.texture ?? null;
     const p2 = this.params;
     for (const sys of systems) {
       if (!sys) continue;
 
-      // Update Uniforms (roof / occlusion)
+      // Update Uniforms (roof / occlusion + floor-presence)
       if (sys.material && sys.material.userData && sys.material.userData.roofUniforms) {
         const u = sys.material.userData.roofUniforms;
         u.uRoofMaskEnabled.value = roofMaskEnabled ? 1.0 : 0.0;
@@ -2980,6 +3046,11 @@ export class FireSparksEffect extends EffectBase {
         u.uRoofAlphaMap.value = roofAlphaTex;
         u.uResolution.value.set(resX, resY);
         if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
+        // Floor-presence: occlude particles under the current floor's solid tiles.
+        if (u.uFloorPresenceMap !== undefined) {
+          u.uFloorPresenceMap.value = fpTex;
+          u.uHasFloorPresenceMap.value = fpTex ? 1.0 : 0.0;
+        }
       }
       if (this.particleSystemRef && this.particleSystemRef.batchRenderer) {
         const renderer = this.particleSystemRef.batchRenderer;
@@ -2995,6 +3066,11 @@ export class FireSparksEffect extends EffectBase {
               u.uRoofAlphaMap.value = roofAlphaTex;
               u.uResolution.value.set(resX, resY);
               if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
+              // Floor-presence: occlude particles under the current floor's solid tiles.
+              if (u.uFloorPresenceMap !== undefined) {
+                u.uFloorPresenceMap.value = fpTex;
+                u.uHasFloorPresenceMap.value = fpTex ? 1.0 : 0.0;
+              }
             }
             // Smoke uses NormalBlending — must override the batch material's default
             // (quarks batch renderer inherits AdditiveBlending from fire systems).
@@ -3212,7 +3288,190 @@ export class FireSparksEffect extends EffectBase {
       [...this.fires].forEach(f => this.removeFire(f.id));
   }
   
+  /**
+   * Bind floor-specific mask data before a floor's render pass.
+   * @param {object} bundle - Mask bundle for this floor
+   * @param {string} floorKey - Stable floor key from FloorBand.key
+   */
+  bindFloorMasks(bundle, floorKey) {
+    // Null bundle means GpuSceneMaskCompositor.preloadAllFloors() hasn't cached
+    // this floor yet. Fire particles will continue using whatever mask was
+    // previously active — likely the wrong floor. Warn once per key.
+    if (!bundle) {
+      if (!this._warnedNullBundleKeys.has(floorKey)) {
+        this._warnedNullBundleKeys.add(floorKey);
+        log.warn(`bindFloorMasks: null bundle for floor "${floorKey}" — FireSparksEffect will use stale fire mask (likely the wrong floor). Run: await MapShine.debug.diagnoseFloorRendering()`);
+      }
+      return;
+    }
+    // Clear the warning flag once a valid bundle arrives.
+    this._warnedNullBundleKeys.delete(floorKey);
+
+    const masks = bundle.masks ?? [];
+    const fireEntry = masks.find(m => m.id === 'fire' || m.type === 'fire');
+    const floorMaskTex = fireEntry?.texture ?? null;
+
+    // No-op: this floor is already active and mask is unchanged.
+    if (this._activeFloorKey === floorKey) {
+      const active = this._floorStates.get(floorKey);
+      if (active?.fireMask === floorMaskTex) return;
+    }
+
+    const batch = this.particleSystemRef?.batchRenderer ?? null;
+    const scene = this.scene ?? null;
+
+    // Check if systems for this floor have already been built.
+    const cached = this._floorStates.get(floorKey);
+    if (cached && cached.fireMask === floorMaskTex) {
+      // Swap: deactivate previous floor's systems, activate this floor's.
+      this._deactivatePreviousFloor(batch, scene);
+      this._activateFloorSystemsFromState(cached, batch, scene);
+      this.globalSystems = cached.globalSystems;
+      this.globalEmberSystems = cached.globalEmberSystems;
+      this.globalSmokeSystems = cached.globalSmokeSystems;
+      this._activeFloorKey = floorKey;
+      return;
+    }
+
+    // First visit or mask changed: deactivate previous, build fresh systems.
+    this._deactivatePreviousFloor(batch, scene);
+
+    // Clear instance arrays so _applyFireMask() starts fresh.
+    this.globalSystems = [];
+    this.globalEmberSystems = [];
+    this.globalSmokeSystems = [];
+    this.globalSystem = null;
+    this.globalEmbers = null;
+
+    if (floorMaskTex) {
+      const fireMask = { type: 'fire', texture: floorMaskTex };
+      this._applyFireMask(fireMask); // builds systems into globalSystems etc.
+    }
+
+    // Cache the newly-built systems for future floor visits.
+    this._floorStates.set(floorKey, {
+      fireMask: floorMaskTex,
+      globalSystems: [...this.globalSystems],
+      globalEmberSystems: [...this.globalEmberSystems],
+      globalSmokeSystems: [...this.globalSmokeSystems],
+    });
+
+    this._activeFloorKey = floorKey;
+  }
+
+  /**
+   * Deactivate whichever floor's systems are currently in the batch + scene,
+   * preparing for activation of a different floor's systems.
+   * @param {object|null} batch
+   * @param {THREE.Scene|null} scene
+   * @private
+   */
+  _deactivatePreviousFloor(batch, scene) {
+    if (this._activeFloorKey !== null) {
+      const prevState = this._floorStates.get(this._activeFloorKey);
+      if (prevState) {
+        this._deactivateFloorSystems(prevState, batch, scene);
+        return;
+      }
+    }
+    // No active floor key or no cached state — deactivate from instance fields.
+    this._deactivateCurrentSystems(batch, scene);
+  }
+
+  /**
+   * Remove a floor's cached particle systems from the batch renderer and scene.
+   * Systems are retained in _floorStates so they can be reactivated later.
+   * @param {{globalSystems: object[], globalEmberSystems: object[], globalSmokeSystems: object[]}} state
+   * @param {object|null} batch
+   * @param {THREE.Scene|null} scene
+   * @private
+   */
+  _deactivateFloorSystems(state, batch, scene) {
+    for (const sys of state.globalSystems) {
+      if (batch && sys) try { batch.deleteSystem(sys); } catch (_) {}
+      if (scene && sys?.emitter) scene.remove(sys.emitter);
+    }
+    for (const sys of state.globalEmberSystems) {
+      if (batch && sys) try { batch.deleteSystem(sys); } catch (_) {}
+      if (scene && sys?.emitter) scene.remove(sys.emitter);
+    }
+    for (const sys of state.globalSmokeSystems) {
+      if (batch && sys) try { batch.deleteSystem(sys); } catch (_) {}
+      if (scene && sys?.emitter) scene.remove(sys.emitter);
+    }
+  }
+
+  /**
+   * Re-add a floor's cached particle systems into the batch renderer and scene.
+   * @param {{globalSystems: object[], globalEmberSystems: object[], globalSmokeSystems: object[]}} state
+   * @param {object|null} batch
+   * @param {THREE.Scene|null} scene
+   * @private
+   */
+  _activateFloorSystemsFromState(state, batch, scene) {
+    for (const sys of state.globalSystems) {
+      if (batch && sys) try { batch.addSystem(sys); } catch (_) {}
+      if (scene && sys?.emitter) scene.add(sys.emitter);
+    }
+    for (const sys of state.globalEmberSystems) {
+      if (batch && sys) try { batch.addSystem(sys); } catch (_) {}
+      if (scene && sys?.emitter) scene.add(sys.emitter);
+    }
+    for (const sys of state.globalSmokeSystems) {
+      if (batch && sys) try { batch.addSystem(sys); } catch (_) {}
+      if (scene && sys?.emitter) scene.add(sys.emitter);
+    }
+  }
+
+  /**
+   * Deactivate the current instance-level particle systems (globalSystems etc.)
+   * without looking up _floorStates. Used when _activeFloorKey is null (pre-loop
+   * systems built by setAssetBundle) or when _floorStates has no entry.
+   * @param {object|null} batch
+   * @param {THREE.Scene|null} scene
+   * @private
+   */
+  _deactivateCurrentSystems(batch, scene) {
+    for (const sys of this.globalSystems) {
+      if (batch && sys) try { batch.deleteSystem(sys); } catch (_) {}
+      if (scene && sys?.emitter) scene.remove(sys.emitter);
+    }
+    for (const sys of this.globalEmberSystems) {
+      if (batch && sys) try { batch.deleteSystem(sys); } catch (_) {}
+      if (scene && sys?.emitter) scene.remove(sys.emitter);
+    }
+    for (const sys of this.globalSmokeSystems) {
+      if (batch && sys) try { batch.deleteSystem(sys); } catch (_) {}
+      if (scene && sys?.emitter) scene.remove(sys.emitter);
+    }
+    if (batch && this.globalSystem) try { batch.deleteSystem(this.globalSystem); } catch (_) {}
+    if (scene && this.globalSystem?.emitter) scene.remove(this.globalSystem.emitter);
+    if (batch && this.globalEmbers) try { batch.deleteSystem(this.globalEmbers); } catch (_) {}
+    if (scene && this.globalEmbers?.emitter) scene.remove(this.globalEmbers.emitter);
+  }
+
+  /**
+   * Release resources for a specific floor's cached state.
+   * @param {string} floorKey
+   */
+  disposeFloorState(floorKey) {
+    const state = this._floorStates.get(floorKey);
+    if (!state) return;
+    // Fire systems for inactive floors are already out of batch/scene.
+    // The batch renderer owns the GPU resources; we only hold JS references.
+    // Simply clearing the arrays is sufficient — GC will reclaim the objects.
+    state.globalSystems = [];
+    state.globalEmberSystems = [];
+    state.globalSmokeSystems = [];
+    this._floorStates.delete(floorKey);
+    if (this._activeFloorKey === floorKey) this._activeFloorKey = null;
+  }
+
   dispose() {
+      for (const key of this._floorStates.keys()) {
+        this.disposeFloorState(key);
+      }
+      this._floorStates.clear();
       if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
       this._destroyParticleSystems();
       this._detachMapPointsListener();

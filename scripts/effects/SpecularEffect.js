@@ -9,6 +9,7 @@ import { createLogger } from '../core/log.js';
 import { ShaderValidator } from '../core/shader-validator.js';
 import { weatherController, PrecipitationType } from '../core/WeatherController.js';
 import Coordinates from '../utils/coordinates.js';
+import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
 
 const log = createLogger('SpecularEffect');
 
@@ -186,6 +187,21 @@ export class SpecularEffect extends EffectBase {
 
     /** @type {Array<function>} Unsubscribe functions from EffectMaskRegistry */
     this._registryUnsubs = [];
+
+    /**
+     * Per-floor mask cache so bindFloorMasks() skips redundant uniform pushes.
+     * Key: floorKey, Value: { specularMask, roughnessMask, normalMap }
+     * @type {Map<string, {specularMask: THREE.Texture|null, roughnessMask: THREE.Texture|null, normalMap: THREE.Texture|null}>}
+     */
+    this._floorStates = new Map();
+
+    /**
+     * Tracks floor keys for which a null-bundle warning has already been emitted.
+     * Prevents per-frame console spam when GpuSceneMaskCompositor hasn't cached
+     * this floor yet.
+     * @type {Set<string>}
+     */
+    this._warnedNullBundleKeys = new Set();
   }
 
   /**
@@ -1032,6 +1048,8 @@ export class SpecularEffect extends EffectBase {
         if (hasUniformName && this.material?.uniforms?.[hasUniformName]) {
           this.material.uniforms[hasUniformName].value = !!texture;
         }
+        // Clear per-floor cache so next bindFloorMasks() picks up the new global mask.
+        this._floorStates.clear();
       };
     };
 
@@ -1040,6 +1058,151 @@ export class SpecularEffect extends EffectBase {
       registry.subscribe('roughness', updateUniform('roughnessMask', 'uRoughnessMap', 'uHasRoughnessMap')),
       registry.subscribe('normal', updateUniform('normalMap', 'uNormalMap', 'uHasNormalMap'))
     );
+  }
+
+  /**
+   * Phase 4+: per-floor mask swap called by the EffectComposer floor loop.
+   * Pushes specular, roughness and normal textures for the current floor
+   * directly into the shader uniforms without rebuilding the material.
+   *
+   * @param {{masks: Array}|null} bundle - Floor mask bundle from the GPU compositor.
+   * @param {string} floorKey - Compositor key for this floor (e.g. "0:200").
+   */
+  bindFloorMasks(bundle, floorKey) {
+    // Null bundle means GpuSceneMaskCompositor.preloadAllFloors() hasn't cached
+    // this floor yet. The effect continues with whatever masks were last bound —
+    // likely from the wrong floor. Warn once per key so the problem is visible.
+    if (!bundle) {
+      if (!this._warnedNullBundleKeys.has(floorKey)) {
+        this._warnedNullBundleKeys.add(floorKey);
+        log.warn(`bindFloorMasks: null bundle for floor "${floorKey}" — SpecularEffect will use stale masks (likely the wrong floor). Run: await MapShine.debug.diagnoseFloorRendering()`);
+      }
+      return;
+    }
+    // Clear the warning flag once a valid bundle arrives.
+    this._warnedNullBundleKeys.delete(floorKey);
+
+    // Use the cached texture refs if this floor has been visited before to avoid
+    // re-searching the bundle. Cache only stores texture identity — it does NOT
+    // skip the uniform push, because material uniforms are a shared resource
+    // overwritten by the previous floor's pass and must be re-set every time.
+    let newSpecular, newRoughness, newNormal;
+    const cached = this._floorStates.get(floorKey);
+    if (cached) {
+      newSpecular  = cached.specularMask;
+      newRoughness = cached.roughnessMask;
+      newNormal    = cached.normalMap;
+    } else {
+      const specularEntry  = bundle.masks?.find(m => m.id === 'specular'  || m.type === 'specular');
+      const roughnessEntry = bundle.masks?.find(m => m.id === 'roughness' || m.type === 'roughness');
+      const normalEntry    = bundle.masks?.find(m => m.id === 'normal'    || m.type === 'normal');
+      newSpecular  = specularEntry?.texture  ?? null;
+      newRoughness = roughnessEntry?.texture ?? null;
+      newNormal    = normalEntry?.texture    ?? null;
+      this._floorStates.set(floorKey, { specularMask: newSpecular, roughnessMask: newRoughness, normalMap: newNormal });
+    }
+
+    // Always update instance fields and uniforms — the previous floor pass
+    // will have overwritten them with its own values.
+    this.specularMask  = newSpecular;
+    this.roughnessMask = newRoughness;
+    this.normalMap     = newNormal;
+
+    const u = this.material?.uniforms;
+    if (!u) {
+      log.error(`bindFloorMasks: material not initialized for floor "${floorKey}" — SpecularEffect won't render. Ensure setBaseMesh() has been called.`);
+      return;
+    }
+
+    const black = this._fallbackBlack || this._getFallbackBlackTexture?.() || null;
+
+    // The base mesh is the scene background plane (Ground.webp albedo). It must
+    // only receive the specular mask from the GROUND FLOOR pass (bandBottom <= 0).
+    // Upper-floor specular is applied exclusively via per-tile overlays
+    // (bindTileSprite), which correctly pair each tile's own albedo with its
+    // specular mask. Applying an upper floor's specular to the ground-albedo base
+    // mesh produces a wrong albedo×specular combination that visually breaks the
+    // ground floor when viewed from an upper floor.
+    const _bandBottom = Number(String(floorKey).split(':')[0]);
+    const _isBaseMeshFloor = Number.isFinite(_bandBottom) && _bandBottom <= 0;
+
+    if (u.uSpecularMap)     u.uSpecularMap.value     = (_isBaseMeshFloor ? newSpecular  : null) || black;
+    if (u.uRoughnessMap)    u.uRoughnessMap.value    = (_isBaseMeshFloor ? newRoughness : null) || black;
+    if (u.uNormalMap)       u.uNormalMap.value       = (_isBaseMeshFloor ? newNormal    : null) || black;
+    if (u.uHasRoughnessMap) u.uHasRoughnessMap.value = _isBaseMeshFloor && !!newRoughness;
+    if (u.uHasNormalMap)    u.uHasNormalMap.value    = _isBaseMeshFloor && !!newNormal;
+
+    // For upper-floor passes, lazily upgrade any tile overlay that was originally
+    // bound without a colorMesh (specularMask=null at bind time — preloadAllFloors
+    // hadn't cached the tile's specular yet). Now that the cache is warm we rebuild
+    // the overlay so the tile emits specular on its own color mesh.
+    if (!_isBaseMeshFloor && this._tileOverlays.size > 0) {
+      const tileManager = window.MapShine?.tileManager;
+      const tileDocs    = canvas?.tiles;
+      if (tileManager && tileDocs) {
+        for (const [tileId, entry] of this._tileOverlays.entries()) {
+          // Only upgrade overlays that are currently occluder-only (colorMesh absent).
+          if (entry.colorMesh) continue;
+          const specTex = tileManager._tileEffectMasks?.get(tileId)?.get('specular')?.texture
+            ?? null;
+          if (!specTex) continue;
+          const tileDoc = tileDocs.get?.(tileId) ?? tileDocs.contents?.find?.(t => t.id === tileId);
+          if (!tileDoc || !entry.sprite) continue;
+          // Rebuild overlay — bindTileSprite cleans up the old occluder-only entry first.
+          this.bindTileSprite(tileDoc, entry.sprite, specTex);
+        }
+      }
+    }
+
+    // ── Per-floor tile overlay visibility gating ─────────────────────────────
+    // FloorStack.setFloorVisible() manages tile sprites and token sprites, but
+    // NOT SpecularEffect's tile overlay meshes (colorMesh / occluderMesh). These
+    // are independent THREE.js objects added directly to the scene. Without
+    // per-floor gating, ALL floor overlays render in every floor pass — causing
+    // every floor's specular to combine on the ground-floor render and the upper
+    // floor to show ground-floor tile overlays as well.
+    //
+    // Strategy: parse the floor band from floorKey. For Levels scenes, show only
+    // overlays whose tile's elevation/Levels range overlaps the current band. For
+    // non-Levels (single-floor) scenes, leave all overlays visible.
+    if (this._tileOverlays.size > 0) {
+      const _fParts   = String(floorKey).split(':');
+      // Non-Levels sentinel is ':' — both parts are empty strings.
+      const _fIsLevels = _fParts[0] !== '' && _fParts[1] !== '';
+      const _fBandBot  = Number(_fParts[0]);
+      const _fBandTop  = Number(_fParts[1]);
+      const _fValid    = _fIsLevels && Number.isFinite(_fBandBot) && Number.isFinite(_fBandTop);
+
+      for (const [_oid, _oEntry] of this._tileOverlays.entries()) {
+        let _oVisible = true; // default: show all overlays in non-Levels scenes
+
+        if (_fValid) {
+          // Resolve tileDoc via canvas lookup or TileManager sprite cache.
+          const _oTileDoc = canvas?.tiles?.get?.(_oid)
+            ?? window.MapShine?.tileManager?.tileSprites?.get(_oid)?.tileDoc
+            ?? null;
+
+          if (_oTileDoc) {
+            if (tileHasLevelsRange(_oTileDoc)) {
+              // Tile has explicit Levels range flags — show only if it overlaps
+              // the current floor band (standard interval overlap test).
+              const _oFlags  = readTileLevelsFlags(_oTileDoc);
+              const _oBot    = Number(_oFlags.rangeBottom);
+              const _oTop    = Number(_oFlags.rangeTop);
+              _oVisible = _oBot <= _fBandTop && _fBandBot <= _oTop;
+            } else {
+              // No Levels range: assign tile to the band that contains its elevation.
+              const _oElev = Number.isFinite(Number(_oTileDoc.elevation))
+                ? Number(_oTileDoc.elevation) : 0;
+              _oVisible = _oElev >= _fBandBot && _oElev <= _fBandTop;
+            }
+          }
+        }
+
+        if (_oEntry.occluderMesh) _oEntry.occluderMesh.visible = _oVisible;
+        if (_oEntry.colorMesh)    _oEntry.colorMesh.visible    = _oVisible;
+      }
+    }
   }
 
   /**
@@ -1449,8 +1612,17 @@ export class SpecularEffect extends EffectBase {
         if (typeof o === 'number' && Number.isFinite(o)) spriteOpacity = o;
       } catch (_) {
       }
-      const shouldShow = !!sprite.visible && spriteOpacity > 0.01;
+
+      // D++ multi-floor: below-floor (levelsHidden) tiles keep their color
+      // mesh alive so specular shows through transparent upper-floor gaps.
+      // Occluder mesh is always hidden for below-floor tiles (no depth writes).
+      const isLevelsHidden = !!sprite.userData?.levelsHidden;
+      const shouldShow = (!!sprite.visible || isLevelsHidden) && spriteOpacity > 0.01;
       for (const mesh of meshes) {
+        if (mesh === entry?.occluderMesh && isLevelsHidden) {
+          if (mesh.visible) mesh.visible = false;
+          continue;
+        }
         mesh.visible = shouldShow;
       }
 
@@ -1694,7 +1866,29 @@ export class SpecularEffect extends EffectBase {
         uUseDepthPass: { value: false },
         uDepthPassTexture: { value: null },
         uDepthCameraNear: { value: 1.0 },
-        uDepthCameraFar: { value: 5000.0 }
+        uDepthCameraFar: { value: 5000.0 },
+
+        // Floor-presence gate for D++ multi-floor compositing.
+        // tFloorPresence: half-res screen-space RT where R=1 means current floor
+        //   tiles are opaque at that pixel.
+        // tBelowFloorPresence: half-res RT where R=1 means below-floor tiles exist
+        //   — used to bound preserved below-floor specular to its originating tile footprint.
+        // uFloorPresenceGate: 0 = normal tile (no gating), 1 = below-floor tile
+        //   (output multiplied by belowFloorPresence*(1-floorPresence) so specular from below
+        //   only shows through gaps AND only where below-floor tiles actually exist).
+        tFloorPresence:       { value: null },
+        uHasFloorPresence:    { value: 0.0 },
+        tBelowFloorPresence:    { value: null },
+        uHasBelowFloorPresence: { value: 0.0 },
+        uFloorPresenceGate: { value: 0.0 },
+
+        // Below-floor specular for base mesh gap-area blending (uFloorPresenceGate=0).
+        // When on floor-N with gaps showing floor-(N-1), the base mesh samples
+        // tBelowSpecularMap in those gaps so floor-(N-1) artwork gets its own correct
+        // specular highlights rather than floor-N's.
+        // Bound each frame from GpuSceneMaskCompositor.getBelowFloorTexture('specular').
+        tBelowSpecularMap:    { value: null },
+        uHasBelowSpecularMap: { value: 0.0 }
       },
       vertexShader: this.getVertexShader(),
       fragmentShader: this.getFragmentShader(),
@@ -2142,11 +2336,29 @@ export class SpecularEffect extends EffectBase {
           } catch (_) {
           }
 
-          // Mirror the same cutoff used by TileManager for depthWrite and by
-          // SpecularEffect._syncTileOverlayTransform.
-          const shouldShow = !!sprite.visible && spriteOpacity > 0.01;
+          // D++ multi-floor specular: Levels-hidden (below-floor) tiles keep
+          // their COLOR mesh alive so specular from below shows through
+          // transparent gaps in the upper floor (gated in the fragment shader
+          // by tFloorPresence). The OCCLUDER mesh is always hidden for
+          // below-floor tiles to avoid incorrect depth writes.
+          const isLevelsHidden = !!sprite.userData?.levelsHidden;
+          const shouldShow = (!!sprite.visible || isLevelsHidden) && spriteOpacity > 0.01;
+
           for (const mesh of meshes) {
+            // Occluder mesh: never show for below-floor tiles.
+            if (mesh === entry?.occluderMesh && isLevelsHidden) {
+              if (mesh.visible) mesh.visible = false;
+              continue;
+            }
             if (mesh.visible !== shouldShow) mesh.visible = shouldShow;
+          }
+
+          // Set floor-presence gate uniform: 1 for below-floor, 0 for normal.
+          const gate = isLevelsHidden ? 1.0 : 0.0;
+          for (const mat of [entry?.occluderMaterial, entry?.colorMaterial]) {
+            if (mat?.uniforms?.uFloorPresenceGate !== undefined) {
+              mat.uniforms.uFloorPresenceGate.value = gate;
+            }
           }
         }
       }
@@ -2322,6 +2534,27 @@ export class SpecularEffect extends EffectBase {
             if (mat?.uniforms?.uDepthCameraNear) mat.uniforms.uDepthCameraNear.value = dpm.getDepthNear();
             if (mat?.uniforms?.uDepthCameraFar) mat.uniforms.uDepthCameraFar.value = dpm.getDepthFar();
           }
+        }
+
+        // D++ floor-presence + below-floor specular: single loop to avoid
+        // iterating _materials twice per frame.
+        const fpTex  = window.MapShine?.distortionManager?.floorPresenceTarget?.texture ?? null;
+        const bfpTex = window.MapShine?.distortionManager?.belowFloorPresenceTarget?.texture ?? null;
+        const hasFp  = !!fpTex;
+        const hasBfp = !!bfpTex;
+        // Below-floor compositor specular for base mesh gap-area blending.
+        // Uses the lazy-resolving getBelowFloorTexture() so post-preload timing
+        // races (composeFloor fires before preloadAllFloors) are handled correctly.
+        const comp = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+        const belowSpecTex = comp?.getBelowFloorTexture?.('specular') ?? null;
+        const hasBelowSpec = !!belowSpecTex;
+        for (const mat of this._materials) {
+          if (mat?.uniforms?.tFloorPresence)         mat.uniforms.tFloorPresence.value         = fpTex;
+          if (mat?.uniforms?.uHasFloorPresence)      mat.uniforms.uHasFloorPresence.value      = hasFp  ? 1.0 : 0.0;
+          if (mat?.uniforms?.tBelowFloorPresence)    mat.uniforms.tBelowFloorPresence.value    = bfpTex;
+          if (mat?.uniforms?.uHasBelowFloorPresence) mat.uniforms.uHasBelowFloorPresence.value = hasBfp ? 1.0 : 0.0;
+          if (mat?.uniforms?.tBelowSpecularMap)      mat.uniforms.tBelowSpecularMap.value      = belowSpecTex;
+          if (mat?.uniforms?.uHasBelowSpecularMap)   mat.uniforms.uHasBelowSpecularMap.value   = hasBelowSpec ? 1.0 : 0.0;
         }
       }
     } catch (e) {
@@ -2557,6 +2790,21 @@ export class SpecularEffect extends EffectBase {
       uniform bool uHasCloudShadowMap;
       uniform sampler2D uCloudShadowMap;
       uniform vec2 uScreenSize;
+
+      // Floor-presence gate (D++ multi-floor compositing).
+      // When uFloorPresenceGate=1 this tile is below the current floor;
+      // its specular output is multiplied by belowFloorPresence*(1-floorPresence)
+      // so it only shows through gaps AND only where below-floor tiles exist.
+      uniform sampler2D tFloorPresence;
+      uniform float uHasFloorPresence;
+      uniform sampler2D tBelowFloorPresence;
+      uniform float uHasBelowFloorPresence;
+      uniform float uFloorPresenceGate;
+
+      // Below-floor specular map: compositor RT for the floor below the active one.
+      // Only bound on the base mesh (uFloorPresenceGate=0) when a below-floor exists.
+      uniform sampler2D tBelowSpecularMap;
+      uniform float uHasBelowSpecularMap;
       
       // Foundry scene darkness (0 = light, 1 = dark)
       uniform float uDarknessLevel;
@@ -2807,6 +3055,23 @@ export class SpecularEffect extends EffectBase {
         // Sample textures
         vec4 albedo = texture2D(uAlbedoMap, vUv);
         vec4 specularMaskSample = texture2D(uSpecularMap, vUv);
+
+        // Base mesh below-floor specular blend (uFloorPresenceGate=0 only).
+        // In gap areas (fp=0) where below-floor tiles exist (bfp=1), replace the
+        // current floor's specular with floor-0's so artwork visible through gaps
+        // receives the correct highlights, not floor-1's specular.
+        if (uFloorPresenceGate < 0.5 && uHasBelowSpecularMap > 0.5
+            && uHasFloorPresence > 0.5 && uHasBelowFloorPresence > 0.5) {
+          vec2 bsUv   = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
+          float bsfp  = clamp(texture2D(tFloorPresence,      bsUv).r, 0.0, 1.0);
+          float bsbfp = clamp(texture2D(tBelowFloorPresence, bsUv).r, 0.0, 1.0);
+          // blend factor: 1 in gap-with-below-floor-tile, 0 under solid floor-1 tile
+          float bsBlend = bsbfp * (1.0 - bsfp);
+          if (bsBlend > 0.001) {
+            vec4 belowSpec = texture2D(tBelowSpecularMap, vUv);
+            specularMaskSample = mix(specularMaskSample, belowSpec, bsBlend);
+          }
+        }
 
         // Coverage used for overlay depth/color writes.
         // IMPORTANT: Use tile albedo alpha only so an upper tile still blocks
@@ -3208,6 +3473,25 @@ export class SpecularEffect extends EffectBase {
         outColor = reinhardJodie(outColor);
 
         float outA = (uOutputMode > 0.5) ? clamp(maskCoverage, 0.0, 1.0) : albedo.a;
+
+        // D++ floor-presence gate: for below-floor tiles (uFloorPresenceGate=1),
+        // gate specular by belowFloorPresence*(1-floorPresence):
+        //   belowFloorPresence = 1 where below-floor tiles exist (prevents bleed
+        //     into gaps where the floor below has no tile at all).
+        //   (1-floorPresence) = 0 under opaque current-floor tiles (prevents
+        //     bleed behind solid upper-floor tile surfaces).
+        // Normal tiles (uFloorPresenceGate=0) are unaffected.
+        if (uFloorPresenceGate > 0.5 && uHasFloorPresence > 0.5) {
+          vec2 fpUv = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
+          float fp  = clamp(texture2D(tFloorPresence, fpUv).r, 0.0, 1.0);
+          float bfp = (uHasBelowFloorPresence > 0.5)
+            ? clamp(texture2D(tBelowFloorPresence, fpUv).r, 0.0, 1.0)
+            : 1.0;
+          float gate = bfp * (1.0 - fp);
+          outColor *= gate;
+          outA    *= gate;
+        }
+
         gl_FragColor = vec4(outColor, outA);
       }
     `;

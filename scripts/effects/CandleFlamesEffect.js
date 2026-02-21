@@ -11,6 +11,11 @@ export class CandleFlamesEffect extends EffectBase {
   constructor() {
     super('candle-flames', RenderLayers.ENVIRONMENTAL, 'low');
 
+    // Candle flames are instantiated from Foundry light positions without
+    // per-floor filtering. Running per-floor would render all flames in every
+    // floor pass and accumulate duplicates in the scene render target.
+    this.floorScope = 'global';
+
     this.priority = 8;
 
     this.params = {
@@ -442,6 +447,20 @@ export class CandleFlamesEffect extends EffectBase {
       }
     }
 
+    // Floor-presence gate: occlude candle flames under current-floor solid tiles.
+    if (this._flameMaterial?.uniforms?.uHasFloorPresenceMap !== undefined) {
+      const u = this._flameMaterial.uniforms;
+      const fpTex = window.MapShine?.distortionManager?.floorPresenceTarget?.texture ?? null;
+      u.uFloorPresenceMap.value    = fpTex;
+      u.uHasFloorPresenceMap.value = fpTex ? 1.0 : 0.0;
+      if (this.renderer) {
+        // Reuse cached vector to avoid per-frame allocation.
+        if (!this._fpSizeVec) this._fpSizeVec = new THREE.Vector2();
+        this.renderer.getDrawingBufferSize(this._fpSizeVec);
+        u.uResolution.value.copy(this._fpSizeVec);
+      }
+    }
+
     if (this._needsGlowRebuild && (timeInfo.elapsed - this._lastGlowRebuildAt) > 0.12) {
       this._rebuildGlowMeshes();
       this._needsGlowRebuild = false;
@@ -593,6 +612,12 @@ export class CandleFlamesEffect extends EffectBase {
         uOutdoorSway: { value: this.params.outdoorSway },
         uWindSpeed: { value: 0.0 },
         uWindDir: { value: new THREE.Vector2(1.0, 0.0) },
+        // Floor-presence gate: screen-space RT (layer 23) where R=1 beneath
+        // the current floor's opaque tiles. Occludes below-floor candle flames
+        // so flames from floor 0 don't render through solid floor-1 tiles.
+        uFloorPresenceMap:    { value: null },
+        uHasFloorPresenceMap: { value: 0.0 },
+        uResolution:          { value: new THREE.Vector2(1.0, 1.0) },
       },
       vertexShader: `
         varying vec2 vUv;
@@ -665,6 +690,9 @@ export class CandleFlamesEffect extends EffectBase {
         uniform float uWobble;
         uniform float uWobbleSpeed;
         uniform float uWindSpeed;
+        uniform sampler2D uFloorPresenceMap;
+        uniform float uHasFloorPresenceMap;
+        uniform vec2 uResolution;
 
         float hash21(vec2 p) {
           p = fract(p * vec2(123.34, 456.21));
@@ -746,6 +774,13 @@ export class CandleFlamesEffect extends EffectBase {
           float flicker = flickerBase + flickerStrength * 0.35 * flickerShape;
           flicker = max(0.55, flicker);
           float finalAlpha = alpha * uOpacity * clamp(vIntensity, 0.0, 3.0) * flicker;
+
+          // Floor-presence gate: occlude candle flames under current-floor
+          // solid tiles (layer-23 floorPresenceTarget, screen-space).
+          if (uHasFloorPresenceMap > 0.5) {
+            vec2 fpUv = gl_FragCoord.xy / max(uResolution, vec2(1.0));
+            finalAlpha *= (1.0 - texture2D(uFloorPresenceMap, fpUv).r);
+          }
 
           if (finalAlpha <= 0.001) discard;
 

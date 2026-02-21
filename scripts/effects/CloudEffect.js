@@ -31,6 +31,12 @@ export class CloudEffect extends EffectBase {
     this.priority = 5; // Before OverheadShadowsEffect (10)
     this.alwaysRender = true;
 
+    // Clouds are a scene-wide overlay above all floors. Running this per-floor
+    // would compute cloud density N times and accumulate duplicated cloud geometry
+    // in the scene render target. The active-floor outdoors mask is kept current
+    // by the EffectMaskRegistry subscription in connectToRegistry().
+    this.floorScope = 'global';
+
     // Clouds are time-based animation (wind drift + procedural noise time).
     // If we allow RenderLoop idle throttling, clouds will appear to only move
     // during camera motion (since that's when the pipeline re-renders).
@@ -1961,33 +1967,47 @@ export class CloudEffect extends EffectBase {
     }
   }
 
-  update(timeInfo) {
+  /**
+   * @override
+   * Advance the cloud wind simulation once per render frame.
+   *
+   * Called by EffectComposer once per frame BEFORE the per-floor loop begins.
+   * Moving all accumulative state here (_windOffset, _windVelocity,
+   * _layerWindOffsets) ensures cloud drift runs at 1× frame speed regardless
+   * of how many times update() is invoked per frame in the floor render loop.
+   *
+   * @param {TimeInfo} timeInfo
+   */
+  prepareFrame(timeInfo) {
     if (!this.densityMaterial || !this.shadowMaterial || !this.enabled) return;
+    const weatherState = this._getEffectiveWeatherState();
+    if (!weatherState.weatherEnabled || this._isCloudCoverEffectivelyZero(weatherState.cloudCover)) return;
+    this._advanceWindSimulation(
+      timeInfo?.delta ?? 0.016,
+      weatherState.windDirX,
+      weatherState.windDirY,
+      weatherState.windSpeed
+    );
+  }
 
-    this._lastElapsed = timeInfo?.elapsed ?? 0;
-
+  /**
+   * Advance accumulated wind state (_windOffset, _windVelocity, _layerWindOffsets,
+   * _layerWindVelocities, _layerWindOffsetsFlat) by one frame delta.
+   * Called from prepareFrame() — not from update() — so accumulation is 1× per frame.
+   *
+   * @param {number} delta - Frame delta in seconds
+   * @param {number} windDirX - Normalised wind direction X
+   * @param {number} windDirY - Normalised wind direction Y
+   * @param {number} windSpeed - Wind speed (0–1 scale)
+   * @private
+   */
+  _advanceWindSimulation(delta, windDirX, windDirY, windSpeed) {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    const weatherState = this._getEffectiveWeatherState();
-    const cloudCover = weatherState.cloudCover;
-    const windSpeed = weatherState.windSpeed;
-    const windDirX = weatherState.windDirX;
-    const windDirY = weatherState.windDirY;
-
-    // If weather is globally disabled or cloud cover is zero, skip all per-frame
-    // cloud simulation work. render() will publish neutral targets.
-    if (!weatherState.weatherEnabled || this._isCloudCoverEffectivelyZero(cloudCover)) {
-      const du = this.densityMaterial?.uniforms;
-      if (du?.uCloudCover) du.uCloudCover.value = 0.0;
-      return;
-    }
-
-    // Update wind offset for cloud drift
-    // Note: uLayerWindOffsets are *sampling offsets* (added to UV). Increasing the sampling coordinate
-    // makes the visual pattern appear to move the opposite direction. So we subtract displacement here
-    // so clouds drift WITH the wind direction.
-    const delta = timeInfo?.delta ?? 0.016;
+    // Note: uLayerWindOffsets are *sampling offsets* (added to UV). Increasing the sampling
+    // coordinate makes the visual pattern appear to move the opposite direction. So we subtract
+    // displacement here so clouds drift WITH the wind direction.
     const windDrivenSpeed = windSpeed * this.params.windInfluence * this.params.driftSpeed;
     const minDriftSpeed = Math.max(0.0, Number(this.params.minDriftSpeed) || 0.0);
     const targetBaseSpeed = Math.max(windDrivenSpeed, minDriftSpeed);
@@ -2003,109 +2023,98 @@ export class CloudEffect extends EffectBase {
       this._tempVec2A.set(windDirX, windDirY);
       if (this._tempVec2A.lengthSq() > 1e-6) this._tempVec2A.normalize();
       this._tempVec2A.multiplyScalar(targetBaseSpeed);
-
       this._windVelocity.lerp(this._tempVec2A, lerpAlpha);
       const vLen = this._windVelocity.length();
       if (vLen > maxSpeed && vLen > 1e-6) this._windVelocity.multiplyScalar(maxSpeed / vLen);
-
       // IMPORTANT: Do NOT modulo-wrap offsets.
       // Wrapping introduces a discontinuity which looks like clouds "teleporting".
       this._windOffset.x -= this._windVelocity.x * delta;
       this._windOffset.y -= this._windVelocity.y * delta;
-
       if (!Number.isFinite(this._windOffset.x)) this._windOffset.x = 0.0;
       if (!Number.isFinite(this._windOffset.y)) this._windOffset.y = 0.0;
     }
 
-    // Multi-layer offsets: subtle speed + direction differences, plus parallax handled in shader
+    // Multi-layer offsets: subtle speed + direction differences, parallax handled in shader
     if (this._layerWindOffsets && this._layerWindVelocities) {
       const baseParallax = Math.max(0.0, Math.min(1.0, this.params.layerParallaxBase ?? 0.2));
-
       const toRad = Math.PI / 180;
-      const l1Enabled = !!this.params.layer1Enabled;
-      const l2Enabled = !!this.params.layer2Enabled;
-      const l3Enabled = !!this.params.layer3Enabled;
-      const l4Enabled = !!this.params.layer4Enabled;
+      const l1Enabled = !!this.params.layer1Enabled; const l2Enabled = !!this.params.layer2Enabled;
+      const l3Enabled = !!this.params.layer3Enabled; const l4Enabled = !!this.params.layer4Enabled;
       const l5Enabled = !!this.params.layer5Enabled;
-
-      this._layerSpeedMult[0] = this.params.layer1SpeedMult;
-      this._layerSpeedMult[1] = this.params.layer2SpeedMult;
-      this._layerSpeedMult[2] = this.params.layer3SpeedMult;
-      this._layerSpeedMult[3] = this.params.layer4SpeedMult;
+      this._layerSpeedMult[0] = this.params.layer1SpeedMult; this._layerSpeedMult[1] = this.params.layer2SpeedMult;
+      this._layerSpeedMult[2] = this.params.layer3SpeedMult; this._layerSpeedMult[3] = this.params.layer4SpeedMult;
       this._layerSpeedMult[4] = this.params.layer5SpeedMult;
-
-      this._layerDirAngle[0] = (this.params.layer1DirDeg ?? 0) * toRad;
-      this._layerDirAngle[1] = (this.params.layer2DirDeg ?? 0) * toRad;
-      this._layerDirAngle[2] = (this.params.layer3DirDeg ?? 0) * toRad;
-      this._layerDirAngle[3] = (this.params.layer4DirDeg ?? 0) * toRad;
+      this._layerDirAngle[0] = (this.params.layer1DirDeg ?? 0) * toRad; this._layerDirAngle[1] = (this.params.layer2DirDeg ?? 0) * toRad;
+      this._layerDirAngle[2] = (this.params.layer3DirDeg ?? 0) * toRad; this._layerDirAngle[3] = (this.params.layer4DirDeg ?? 0) * toRad;
       this._layerDirAngle[4] = (this.params.layer5DirDeg ?? 0) * toRad;
-
       this._layerParallax[0] = Math.max(0.0, Math.min(1.0, baseParallax * (this.params.layer1ParallaxMult ?? 1.0)));
       this._layerParallax[1] = Math.max(0.0, Math.min(1.0, baseParallax * (this.params.layer2ParallaxMult ?? 1.0)));
       this._layerParallax[2] = Math.max(0.0, Math.min(1.0, baseParallax * (this.params.layer3ParallaxMult ?? 1.0)));
       this._layerParallax[3] = Math.max(0.0, Math.min(1.0, baseParallax * (this.params.layer4ParallaxMult ?? 1.0)));
       this._layerParallax[4] = Math.max(0.0, Math.min(1.0, baseParallax * (this.params.layer5ParallaxMult ?? 1.0)));
-
-      this._layerNoiseScaleMult[0] = this.params.layer1Scale;
-      this._layerNoiseScaleMult[1] = this.params.layer2Scale;
-      this._layerNoiseScaleMult[2] = this.params.layer3Scale;
-      this._layerNoiseScaleMult[3] = this.params.layer4Scale;
+      this._layerNoiseScaleMult[0] = this.params.layer1Scale; this._layerNoiseScaleMult[1] = this.params.layer2Scale;
+      this._layerNoiseScaleMult[2] = this.params.layer3Scale; this._layerNoiseScaleMult[3] = this.params.layer4Scale;
       this._layerNoiseScaleMult[4] = this.params.layer5Scale;
-
-      this._layerCoverMult[0] = this.params.layer1Coverage;
-      this._layerCoverMult[1] = this.params.layer2Coverage;
-      this._layerCoverMult[2] = this.params.layer3Coverage;
-      this._layerCoverMult[3] = this.params.layer4Coverage;
+      this._layerCoverMult[0] = this.params.layer1Coverage; this._layerCoverMult[1] = this.params.layer2Coverage;
+      this._layerCoverMult[2] = this.params.layer3Coverage; this._layerCoverMult[3] = this.params.layer4Coverage;
       this._layerCoverMult[4] = this.params.layer5Coverage;
-
       this._layerWeight[0] = l1Enabled ? (this.params.layer1Opacity ?? 0.0) : 0.0;
       this._layerWeight[1] = l2Enabled ? (this.params.layer2Opacity ?? 0.0) : 0.0;
       this._layerWeight[2] = l3Enabled ? (this.params.layer3Opacity ?? 0.0) : 0.0;
       this._layerWeight[3] = l4Enabled ? (this.params.layer4Opacity ?? 0.0) : 0.0;
       this._layerWeight[4] = l5Enabled ? (this.params.layer5Opacity ?? 0.0) : 0.0;
-
       this._tempVec2A.set(windDirX, windDirY);
       if (this._tempVec2A.lengthSq() > 1e-6) this._tempVec2A.normalize();
-
       for (let i = 0; i < this._layerWindOffsets.length; i++) {
         const a = this._layerDirAngle[i] ?? 0.0;
-        const ca = Math.cos(a);
-        const sa = Math.sin(a);
-
+        const ca = Math.cos(a); const sa = Math.sin(a);
         const dx = this._tempVec2A.x * ca - this._tempVec2A.y * sa;
         const dy = this._tempVec2A.x * sa + this._tempVec2A.y * ca;
-
         const speedMult = (this._layerSpeedMult[i] ?? 1.0);
         this._tempVec2B.set(dx, dy).multiplyScalar(targetBaseSpeed * speedMult);
-
         const v = this._layerWindVelocities[i];
         v.lerp(this._tempVec2B, lerpAlpha);
-        const vMax = maxSpeed * speedMult;
-        const vLayerLen = v.length();
+        const vMax = maxSpeed * speedMult; const vLayerLen = v.length();
         if (vLayerLen > vMax && vLayerLen > 1e-6) v.multiplyScalar(vMax / vLayerLen);
-
         const o = this._layerWindOffsets[i];
-        // IMPORTANT: Do NOT modulo-wrap offsets.
-        // Wrapping introduces a discontinuity which looks like clouds "teleporting".
-        o.x -= v.x * delta;
-        o.y -= v.y * delta;
-
+        // IMPORTANT: Do NOT modulo-wrap offsets — causes a discontinuity (clouds "teleporting").
+        o.x -= v.x * delta; o.y -= v.y * delta;
         if (!Number.isFinite(o.x)) o.x = 0.0;
         if (!Number.isFinite(o.y)) o.y = 0.0;
       }
-
-      // PERF: Keep uLayerWindOffsets uniform as a flat typed array so Three.js can upload it
-      // directly (skipping flatten() + Vector2.toArray overhead).
+      // PERF: Keep uLayerWindOffsets as a flat typed array to skip Three.js flatten() overhead.
       if (this._layerWindOffsetsFlat) {
         const flat = this._layerWindOffsetsFlat;
         for (let i = 0; i < this._layerWindOffsets.length; i++) {
-          const o = this._layerWindOffsets[i];
-          const j = i * 2;
-          flat[j] = o.x;
-          flat[j + 1] = o.y;
+          const o = this._layerWindOffsets[i]; const j = i * 2;
+          flat[j] = o.x; flat[j + 1] = o.y;
         }
       }
     }
+  }
+
+  update(timeInfo) {
+    if (!this.densityMaterial || !this.shadowMaterial || !this.enabled) return;
+
+    this._lastElapsed = timeInfo?.elapsed ?? 0;
+
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const weatherState = this._getEffectiveWeatherState();
+    const cloudCover = weatherState.cloudCover;
+
+    // If weather is globally disabled or cloud cover is zero, skip uniform binding.
+    // Wind simulation advance is already a no-op in prepareFrame() for this case.
+    if (!weatherState.weatherEnabled || this._isCloudCoverEffectivelyZero(cloudCover)) {
+      const du = this.densityMaterial?.uniforms;
+      if (du?.uCloudCover) du.uCloudCover.value = 0.0;
+      return;
+    }
+
+    // Wind simulation advance (_windOffset, _windVelocity, _layerWindOffsets,
+    // _layerWindVelocities, _layerWindOffsetsFlat) is performed in prepareFrame()
+    // via _advanceWindSimulation(). Values are already up-to-date when update() runs.
 
     // Calculate sun direction for shadow offset
     this._calculateSunDirection();

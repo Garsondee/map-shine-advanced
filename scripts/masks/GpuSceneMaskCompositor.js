@@ -27,8 +27,10 @@ const log = createLogger('GpuSceneMaskCompositor');
 
 // ── Resolution classes ────────────────────────────────────────────────────────
 
-/** Max output dimension for data masks (fire, water, outdoors, dust, ash). */
-const DATA_MAX = 4096;
+/** Max output dimension for data masks (fire, water, outdoors, dust, ash).
+ *  Raised from 4096 to 8192 to match the tile albedo resolution cap increase
+ *  \u2014 6K\u20138K scenes were getting masks at only 68% resolution with the old cap. */
+const DATA_MAX = 8192;
 
 /** Max output dimension for visual/color masks (specular, normal, bush, tree). */
 const VISUAL_MAX = 8192;
@@ -132,13 +134,14 @@ const TILE_VERT = /* glsl */`
  *
  * Uniforms:
  *   tMask     — tile mask texture
- *   uMode     — 0 = lighten (output luminance), 1 = source-over (output rgba)
+ *   uMode     — 0 = lighten (output luminance), 1 = source-over (output rgba),
+ *               2 = alpha-extract (tile albedo alpha → greyscale, used by _composeFloorAlpha)
  */
 const TILE_FRAG = /* glsl */`
   precision highp float;
 
   uniform sampler2D tMask;
-  uniform int uMode; // 0 = lighten, 1 = source-over
+  uniform int uMode; // 0 = lighten, 1 = source-over, 2 = alpha-extract
 
   varying vec2 vSceneUv;
   varying vec2 vTileUv;
@@ -153,13 +156,22 @@ const TILE_FRAG = /* glsl */`
     vec4 s = texture2D(tMask, vTileUv);
 
     if (uMode == 0) {
-      // Lighten: output RGB luminance in all channels so MAX blending works.
-      // Do NOT include alpha — some tiles (e.g. upper-floor _Water) use alpha
-      // as a floor-boundary cutout with black RGB. Including alpha would make
-      // those tiles appear as valid water masks, overriding the preserved
-      // ground-floor water. Water coverage is always encoded in RGB.
-      float lum = max(s.r, max(s.g, s.b));
+      // Lighten: alpha-weighted luminance.
+      // Convention: if a tile has an alpha channel, transparent pixels mean
+      // "no effect here". Tiles without alpha have alpha=1 (THREE.js pads it),
+      // so lum*1 = lum — no change for standard RGB masks.
+      // Black-RGB tiles (floor-boundary markers) always output 0 regardless of
+      // alpha: max(0,0,0)*anything = 0 → vec4(0,0,0,0). Readback RGB check
+      // (unchanged) still correctly treats them as empty. ✓
+      float lum = max(s.r, max(s.g, s.b)) * s.a;
       gl_FragColor = vec4(lum, lum, lum, lum);
+    } else if (uMode == 2) {
+      // Alpha-extract: output the tile albedo's alpha channel as greyscale.
+      // Used by _composeFloorAlpha() to build world-space per-floor alpha RTs.
+      // Fully opaque tiles (alpha=1 everywhere) fill their rect with white.
+      // Tiles with transparent areas correctly encode the holes as black.
+      float a = s.a;
+      gl_FragColor = vec4(a, a, a, a);
     } else {
       // Source-over: output full RGBA as-is.
       // Do NOT promote alpha into RGB — upper-floor tiles use alpha as a
@@ -168,6 +180,35 @@ const TILE_FRAG = /* glsl */`
       // will correctly detect these as empty and trigger preserveAcrossFloors.
       gl_FragColor = s;
     }
+  }
+`;
+
+/**
+ * Fragment shader for floor ID texture composition.
+ * Samples a floor's pre-composed world-space alpha texture (floorAlpha).
+ * Where the floor has tile coverage (alpha ≥ threshold), writes the floor's
+ * index (pre-scaled to 0..1 as index/255) with alpha=1 so NormalBlending
+ * overwrites the previous floor's ID. Pixels below threshold are discarded,
+ * preserving whatever lower floor ID was already in the render target.
+ *
+ * Uniforms:
+ *   tFloorAlpha — floor alpha RT from _composeFloorAlpha() (scene-space [0..1])
+ *   uFloorId    — floor index pre-divided by 255.0 (range 0..1)
+ *   uAlphaThres — minimum alpha to count as tile coverage (default 0.1)
+ */
+const FLOOR_ID_FRAG = /* glsl */`
+  precision highp float;
+
+  uniform sampler2D tFloorAlpha;
+  uniform float uFloorId;     // index / 255.0 — use R channel to decode index
+  uniform float uAlphaThres;  // default 0.1
+
+  varying vec2 vSceneUv;
+
+  void main() {
+    float a = texture2D(tFloorAlpha, vSceneUv).r;
+    if (a < uAlphaThres) discard;
+    gl_FragColor = vec4(uFloorId, uFloorId, uFloorId, 1.0);
   }
 `;
 
@@ -214,6 +255,14 @@ export class GpuSceneMaskCompositor {
     this._activeFloorKey = null;
 
     /**
+     * Floor key of the floor that was active just before the current floor.
+     * Populated whenever a floor switch occurs (masksChanged=true).
+     * Exposes the below-floor's cached RTs to effects via getBelowFloorTexture().
+     * @type {string|null}
+     */
+    this._belowFloorKey = null;
+
+    /**
      * BasePath of the tile whose masks are currently active.
      * @type {string|null}
      */
@@ -247,6 +296,23 @@ export class GpuSceneMaskCompositor {
 
     /** @type {THREE.OrthographicCamera|null} Shared ortho camera covering NDC [-1..1]. */
     this._orthoCamera = null;
+
+    /** @type {THREE.RawShaderMaterial|null} Material for the floor ID composition pass. */
+    this._floorIdMaterial = null;
+
+    /** @type {THREE.Mesh|null} Full-screen quad mesh for the floor ID pass. */
+    this._floorIdMesh = null;
+
+    /** @type {THREE.Scene|null} Minimal scene for the floor ID pass. */
+    this._floorIdScene = null;
+
+    /**
+     * Floor ID render target — a world-space texture where each pixel's R
+     * channel encodes the index of the topmost visible floor (index/255.0).
+     * Updated by buildFloorIdTexture() after floor composition.
+     * @type {THREE.WebGLRenderTarget|null}
+     */
+    this._floorIdTarget = null;
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -391,6 +457,16 @@ export class GpuSceneMaskCompositor {
       });
     }
 
+    // Compose floor alpha from tile base textures (world-space, replaces screen-space
+    // floor-presence passes). Each floor bundle gets a 'floorAlpha' mask entry whose
+    // texture encodes where the floor has opaque tile coverage vs transparent gaps.
+    // Effects and the floor ID builder consume this instead of floorPresenceTarget.
+    const floorAlphaEntry = this._composeFloorAlpha(
+      renderer, THREE, floorTargets, sortedEntries,
+      sceneX, sceneY, sceneW, sceneH, maxTex
+    );
+    if (floorAlphaEntry) compositeMasks.push(floorAlphaEntry);
+
     if (compositeMasks.length === 0) return null;
 
     // Invalidate CPU pixel cache — the RT contents just changed.
@@ -449,21 +525,21 @@ export class GpuSceneMaskCompositor {
     // Fast path: floor already composited — return cached metadata.
     const cached = this._floorMeta.get(floorKey);
     if (cached?.masks?.length) {
-      // Strip preserveAcrossFloors mask types from cached entries. These masks
-      // belong to a different floor's registry slot and must never be included in
-      // the new floor's mask set — doing so would trigger a replace action in
-      // transitionToFloor instead of the correct preserve action. This also
-      // handles stale cache entries populated before the policy was set.
-      const emr = window.MapShine?.effectMaskRegistry;
-      const filteredMasks = cached.masks.filter(m => {
-        const type = m?.type || m?.id;
-        if (!type) return true;
-        const policy = emr?.getPolicy?.(type);
-        return !policy?.preserveAcrossFloors;
-      });
+      // Pass cached masks through directly. The compositor's _readbackIsNonEmpty
+      // check already strips empty masks (black-RGB floor-boundary alphas), so
+      // cached.masks only contains valid non-empty data. transitionToFloor handles
+      // the preserve/replace/clear logic correctly:
+      //  - If a cached mask exists for a type → replace (even preserveAcrossFloors)
+      //  - If no cached mask AND preserveAcrossFloors → preserve from registry
+      //  - If no cached mask AND NOT preserveAcrossFloors → clear
+      //
+      // NOTE: baseBundleMasks (line 524) are still filtered to prevent shared
+      // bundle masks from polluting floor-specific compositor results. But once
+      // masks are cached, they represent the compositor's final floor-specific
+      // output and should pass through unfiltered.
 
       if (cacheOnly) {
-        return { masks: filteredMasks, masksChanged: false, levelElevation, basePath: cached.basePath };
+        return { masks: cached.masks, masksChanged: false, levelElevation, basePath: cached.basePath };
       }
       // masksChanged must be true whenever the active floor key changes, even if
       // basePath is the same. Two floors on the same tile set share a basePath but
@@ -471,11 +547,26 @@ export class GpuSceneMaskCompositor {
       // transitionToFloor to be skipped entirely on same-tileset floor switches.
       const masksChanged = (floorKey !== this._activeFloorKey);
       if (masksChanged) {
+        // Only treat the previous floor as "below" when navigating UPWARD.
+        // If we go floor-1 → floor-0, floor-1 is above — _belowFloorKey must
+        // be null so below-floor effects don't incorrectly activate on floor-0.
+        const prevKey = this._activeFloorKey;
+        const prevBandBottom = prevKey ? Number(prevKey.split(':')[0]) : -Infinity;
+        this._belowFloorKey = (bandBottom > prevBandBottom) ? prevKey : null;
+        // Fallback for first-load on an upper floor: if no below-floor was set
+        // from a floor transition, scan the preloaded _floorCache for the
+        // highest floor whose bandBottom is below the current one.
+        if (!this._belowFloorKey) {
+          this._belowFloorKey = this._findBestBelowFloorKey(bandBottom);
+        }
         this._activeFloorBasePath = cached.basePath;
         this._activeFloorKey = floorKey;
+        // Invalidate CPU pixel cache so getCpuPixels() reads from the new
+        // floor's RTs instead of returning stale data from the previous floor.
+        this._cpuPixelCache.clear();
       }
       log.info('composeFloor: cache hit', { floorKey, masksChanged, basePath: cached.basePath });
-      return { masks: filteredMasks, masksChanged, levelElevation, basePath: cached.basePath };
+      return { masks: cached.masks, masksChanged, levelElevation, basePath: cached.basePath };
     }
 
     log.info('composeFloor: cache miss, compositing floor', { floorKey, bandBottom, bandTop });
@@ -567,18 +658,31 @@ export class GpuSceneMaskCompositor {
     }
 
     // Step 4: Background basePath fallback for ground-floor bands.
-    if (!newMasks && lastMaskBasePath && bandBottom <= 0) {
+    // Prefer the path derived from the scene's background image over
+    // lastMaskBasePath — lastMaskBasePath holds the active floor's path and
+    // may point to an upper floor's tile when the user loaded on an upper floor.
+    if (!newMasks && bandBottom <= 0) {
+      let bgFallbackPath = null;
       try {
-        const r = await assetLoader.loadAssetBundle(lastMaskBasePath, null, {
-          skipBaseTexture: true, suppressProbeErrors: true
-        });
-        if (r?.bundle?.masks?.length) {
-          newMasks = r.bundle.masks;
-          primaryBasePath = lastMaskBasePath;
-          log.info('composeFloor: fell back to background basePath', { lastMaskBasePath });
+        const bgSrc = sc?.background?.src || sc?.img || null;
+        if (bgSrc) bgFallbackPath = this._extractBasePath(bgSrc);
+      } catch (_) {}
+      const fallbackPath = bgFallbackPath || lastMaskBasePath;
+      if (fallbackPath) {
+        try {
+          const r = await assetLoader.loadAssetBundle(fallbackPath, null, {
+            skipBaseTexture: true, suppressProbeErrors: true
+          });
+          if (r?.bundle?.masks?.length) {
+            newMasks = r.bundle.masks;
+            primaryBasePath = fallbackPath;
+            log.info('composeFloor: fell back to background basePath', {
+              fallbackPath, fromScene: !!bgFallbackPath
+            });
+          }
+        } catch (e) {
+          log.warn('composeFloor: background basePath fallback failed', e);
         }
-      } catch (e) {
-        log.warn('composeFloor: background basePath fallback failed', e);
       }
     }
 
@@ -601,8 +705,24 @@ export class GpuSceneMaskCompositor {
     // masksChanged is true whenever the floor key changes, not just basePath.
     // Two floors on the same tile set share a basePath but need separate transitions.
     const masksChanged = (floorKey !== this._activeFloorKey);
+    if (masksChanged) {
+      // Only treat the previous floor as "below" when navigating UPWARD.
+      // Going floor-1 → floor-0 means floor-1 is above — reset to null.
+      const prevKey = this._activeFloorKey;
+      const prevBandBottom = prevKey ? Number(prevKey.split(':')[0]) : -Infinity;
+      this._belowFloorKey = (bandBottom > prevBandBottom) ? prevKey : null;
+      // Fallback for first-load on an upper floor: scan the preloaded cache
+      // for the highest floor below the current one.
+      if (!this._belowFloorKey) {
+        this._belowFloorKey = this._findBestBelowFloorKey(bandBottom);
+      }
+    }
     this._activeFloorBasePath = primaryBasePath;
     this._activeFloorKey = floorKey;
+    // Invalidate CPU pixel cache so getCpuPixels() reads from the new
+    // floor's RTs instead of returning stale data from the previous floor.
+    // (The cache-hit path clears this at line ~480; the miss path must also clear it.)
+    if (masksChanged) this._cpuPixelCache.clear();
 
     log.info('composeFloor: done', {
       floorKey, maskCount: newMasks.length,
@@ -678,15 +798,89 @@ export class GpuSceneMaskCompositor {
       if (bands.size <= 1) return;
 
       log.info('preloadAllFloors: warming cache for', bands.size, 'level bands');
+
+      // Derive the scene background image's basePath for ground-floor fallback.
+      // lastMaskBasePath holds the ACTIVE floor's path — if the player loaded on
+      // an upper floor, using it for floor 0 would load the upper floor's masks
+      // as the ground-floor background, causing cross-floor mask bleed.
+      let sceneBackgroundBasePath = null;
+      try {
+        const bgSrc = sc?.background?.src || sc?.img || null;
+        if (bgSrc) sceneBackgroundBasePath = this._extractBasePath(bgSrc);
+      } catch (_) {}
+
+      // Track bands that were evicted and re-composed so we can push updated masks
+      // to the registry for the active floor without requiring a floor re-transition.
+      const _recomposedBands = new Set();
+
       for (const bandKey of bands) {
-        if (this._floorMeta.has(bandKey)) continue;
         const [bottom, top] = bandKey.split(':').map(Number);
+
+        // Stale-cache detection MUST run before the _floorMeta skip guard.
+        // Empty _tileEffectMasks entries can occur when preloadAllFloors (or an
+        // early floor transition) ran before the tile's suffix files were ready,
+        // causing masks like _Fire to be permanently absent from the bundle.
+        // Only clear truly-empty results (size=0). Tiles with ≥1 mask found are
+        // assumed correct; a missing fire on an otherwise healthy tile means the
+        // _Fire file genuinely does not exist — don't hammer the filesystem.
+        // Also evict the floor bundle when stale tiles are found: composeFloor
+        // may have already cached a bundle that lacks fire, and without evicting
+        // _floorMeta the skip guard below would prevent re-composition.
         try {
-          await this.composeFloor({ bottom, top }, sc, { lastMaskBasePath, cacheOnly: true });
+          const tm = window.MapShine?.tileManager;
+          if (tm && typeof tm.clearTileEffectMasks === 'function') {
+            const bandTiles = this._getActiveLevelTiles(sc, { bottom, top });
+            let anyCleared = false;
+            for (const { tileDoc } of bandTiles) {
+              const tileId = tileDoc?.id;
+              if (!tileId) continue;
+              const cachedMasks = tm._tileEffectMasks?.get(tileId);
+              if (cachedMasks && cachedMasks.size === 0) {
+                log.debug('preloadAllFloors: clearing empty tile mask cache for tile', tileId, 'in band', bandKey);
+                tm.clearTileEffectMasks(tileId);
+                anyCleared = true;
+              }
+            }
+            if (anyCleared && this._floorMeta.has(bandKey)) {
+              log.debug('preloadAllFloors: evicting stale floor bundle for band', bandKey, 'to allow re-composition');
+              this._floorMeta.delete(bandKey);
+              _recomposedBands.add(bandKey);
+            }
+          }
+        } catch (_clearErr) {}
+
+        // Skip if the band is already correctly cached (nothing was evicted above).
+        if (this._floorMeta.has(bandKey)) continue;
+
+        // For ground-floor bands, prefer the scene background image's basePath
+        // so step 4 in composeFloor loads the correct masks, not an upper floor's.
+        const floorBasePath = (bottom <= 0 && sceneBackgroundBasePath)
+          ? sceneBackgroundBasePath
+          : lastMaskBasePath;
+        try {
+          await this.composeFloor({ bottom, top }, sc, { lastMaskBasePath: floorBasePath, cacheOnly: true });
+          _recomposedBands.add(bandKey);
         } catch (e) {
           log.debug('preloadAllFloors: failed for band', bandKey, e);
         }
       }
+
+      // If the currently-active floor's bundle was evicted and re-composed above,
+      // push the updated masks to the registry immediately so effects like fire
+      // appear without requiring the user to switch floors and back.
+      try {
+        const activeKey = this._activeFloorKey;
+        if (activeKey && _recomposedBands.has(activeKey)) {
+          const newBundle = this._floorMeta.get(activeKey);
+          if (newBundle?.masks?.length) {
+            const reg = window.MapShine?.effectMaskRegistry;
+            if (reg && typeof reg.transitionToFloor === 'function') {
+              log.info('preloadAllFloors: refreshing registry for active floor', activeKey, 'after re-composition');
+              reg.transitionToFloor(activeKey, newBundle.masks);
+            }
+          }
+        }
+      } catch (_refreshErr) {}
       log.info('preloadAllFloors: done,', this._floorMeta.size, 'floors cached');
     } catch (e) {
       log.debug('preloadAllFloors: error', e);
@@ -705,6 +899,102 @@ export class GpuSceneMaskCompositor {
   preloadFloor(floorKey, tileMaskEntries, scene) {
     return this.compose(tileMaskEntries, scene, { floorKey });
   }
+
+  /**
+   * Build (or rebuild) the floor ID texture from the supplied visible-floor bundles.
+   *
+   * The floor ID texture is a world-space render target at DATA_MAX resolution where
+   * each pixel's R channel encodes the index of the topmost floor that has tile
+   * coverage at that point: `floorIndex / 255.0`.
+   *
+   * Floor 0 (background / ground level) is represented by R=0 everywhere the no
+   * higher floor has tiles. Higher floors overwrite lower floors using a painter's
+   * algorithm (floors rendered lowest-index first with NormalBlending + discard
+   * for sub-threshold pixels).
+   *
+   * Call this once after floor composition is complete (scene init / floor change).
+   * The result is accessible via `compositor.floorIdTexture`.
+   *
+   * @param {Array<{index: number, bundle: {masks: Array}}>} visibleFloorBundles
+   *   Ordered array of {index, bundle} from lowest floor index to highest.
+   *   Each bundle must be the result of composeFloor() and should contain a
+   *   'floorAlpha' mask entry (produced by _composeFloorAlpha()).
+   * @returns {THREE.WebGLRenderTarget|null}
+   */
+  buildFloorIdTexture(visibleFloorBundles) {
+    const renderer = window.MapShine?.renderer;
+    const THREE = window.THREE;
+    if (!THREE || !renderer || !visibleFloorBundles?.length) return null;
+
+    this._ensureGpuResources(THREE);
+
+    const d = canvas?.dimensions;
+    const sr = d?.sceneRect;
+    if (!sr?.width || !sr?.height) return null;
+
+    const sceneW = sr.width;
+    const sceneH = sr.height;
+    const maxTex = renderer.capabilities?.maxTextureSize ?? 16384;
+    const scale = Math.min(1.0, DATA_MAX / Math.max(1, sceneW), DATA_MAX / Math.max(1, sceneH),
+                                maxTex / Math.max(1, sceneW), maxTex / Math.max(1, sceneH));
+    const outW = Math.max(1, Math.round(sceneW * scale));
+    const outH = Math.max(1, Math.round(sceneH * scale));
+
+    // (Re)create RT if resolution changed.
+    if (!this._floorIdTarget || this._floorIdTarget.width !== outW || this._floorIdTarget.height !== outH) {
+      this._floorIdTarget?.dispose();
+      this._floorIdTarget = new THREE.WebGLRenderTarget(outW, outH, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType,
+        depthBuffer: false
+      });
+      this._floorIdTarget.texture.colorSpace = THREE.NoColorSpace ?? '';
+    }
+
+    const mat  = this._floorIdMaterial;
+    const prev = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+
+    renderer.setRenderTarget(this._floorIdTarget);
+    renderer.setClearColor(0x000000, 0); // R=0 = floor index 0 (background)
+    renderer.autoClear = true;
+    renderer.clear();
+    renderer.autoClear = false;
+
+    // NormalBlending: alpha=1 overwrites previous floor; discard preserves it.
+    mat.blending = THREE.NormalBlending;
+
+    for (const { index, bundle } of visibleFloorBundles) {
+      const floorAlphaEntry = bundle?.masks?.find?.(m => m.id === 'floorAlpha');
+      if (!floorAlphaEntry?.texture) continue;
+
+      mat.uniforms.tFloorAlpha.value = floorAlphaEntry.texture;
+      mat.uniforms.uFloorId.value    = Math.max(0, Math.min(255, index)) / 255.0;
+      mat.needsUpdate = true;
+
+      try {
+        renderer.render(this._floorIdScene, this._orthoCamera);
+      } catch (e) {
+        log.debug(`buildFloorIdTexture: draw failed for floor ${index}`, e);
+      }
+    }
+
+    renderer.autoClear = prevAutoClear;
+    renderer.setRenderTarget(prev);
+
+    log.debug('buildFloorIdTexture: built for', visibleFloorBundles.length, 'floors', outW, 'x', outH);
+    return this._floorIdTarget;
+  }
+
+  /**
+   * The most-recently built floor ID render target.
+   * R channel encodes topmost-floor index as index/255.0 (world-space, scene coords).
+   * Null until buildFloorIdTexture() has been called at least once.
+   * @type {THREE.WebGLRenderTarget|null}
+   */
+  get floorIdTarget() { return this._floorIdTarget; }
 
   /**
    * Get CPU pixel data for a mask type (for particle spawn point scanning).
@@ -743,6 +1033,110 @@ export class GpuSceneMaskCompositor {
       log.warn(`getCpuPixels: readback failed for '${maskType}'`, e);
       return null;
     }
+  }
+
+  /**
+   * Scan the preloaded floor cache and return the floor key with the highest
+   * bandBottom that is still strictly below `currentBandBottom`.
+   * Used when no explicit floor transition has set _belowFloorKey — e.g. when
+   * the game first loads directly on an upper floor after preloadAllFloors().
+   * Returns null when no suitable candidate exists.
+   * @param {number} currentBandBottom
+   * @returns {string|null}
+   * @private
+   */
+  _findBestBelowFloorKey(currentBandBottom) {
+    let bestKey = null;
+    let bestBottom = -Infinity;
+    for (const [key] of this._floorCache) {
+      const kb = Number(key.split(':')[0]);
+      if (Number.isFinite(kb) && kb < currentBandBottom && kb > bestBottom) {
+        bestBottom = kb;
+        bestKey = key;
+      }
+    }
+    return bestKey;
+  }
+
+  /**
+   * Reset all floor-tracking state and dispose cached GPU render targets.
+   * Call this when the scene changes so stale floor keys and mask textures
+   * don't bleed into the next scene load. Floor keys are not scene-unique
+   * (e.g. "0:5" can appear on any two-floor map), so the RT cache must be
+   * flushed to prevent getBelowFloorTexture() returning data from the wrong scene.
+   */
+  clearFloorState() {
+    this._activeFloorKey      = null;
+    this._belowFloorKey       = null;
+    this._activeFloorBasePath = null;
+    this._cpuPixelCache.clear();
+
+    // Clear the per-floor metadata cache so composeFloor() re-evaluates
+    // masksChanged correctly on the first call after a scene switch.
+    this._floorMeta.clear();
+
+    // Dispose and clear cached GPU render targets. Floor keys (e.g. "0:5")
+    // are not scene-unique, so keeping old RTs would cause getBelowFloorTexture()
+    // to return stale mask data from the previous scene on the new scene.
+    for (const maskMap of this._floorCache.values()) {
+      for (const rt of maskMap.values()) {
+        try { rt.dispose(); } catch (_) {}
+      }
+    }
+    this._floorCache.clear();
+    this._outputDims.clear();
+    // Reset LRU order so eviction logic starts fresh on the new scene.
+    this._lruOrder.length = 0;
+
+    log.info('GpuSceneMaskCompositor: floor state cleared (RTs disposed)');
+  }
+
+  /**
+   * Get the cached compositor RT texture for a specific floor key and mask type.
+   * Returns null if that floor hasn't been composited yet or the mask type is absent.
+   * @param {string} floorKey - e.g. "0:5" (the "${bottom}:${top}" string)
+   * @param {string} maskType - e.g. 'water', 'fire', 'specular'
+   * @returns {THREE.Texture|null}
+   */
+  getFloorTexture(floorKey, maskType) {
+    // Primary: GPU render target produced by the compose() path.
+    const rt = this._floorCache.get(floorKey)?.get(maskType);
+    if (rt?.texture) return rt.texture;
+
+    // Fallback: file-based bundle in _floorMeta produced by the cacheOnly
+    // preload path. These floors never go through compose() so _floorCache
+    // has no entry. getBelowFloorTexture relies on this path for the ground
+    // floor when _floorCache["0:10"] is absent.
+    const meta = this._floorMeta.get(floorKey);
+    if (meta?.masks) {
+      const entry = meta.masks.find(m => (m.id ?? m.type) === maskType);
+      return entry?.texture ?? null;
+    }
+    return null;
+  }
+
+  /**
+   * Get the cached compositor RT texture for the below-floor (previously active floor).
+   * This returns the mask for the floor that was active before the current floor,
+   * enabling effects to show lower-floor contributions through gaps in the current floor.
+   * Returns null if no floor switch has occurred yet or the mask is not cached.
+   * @param {string} maskType
+   * @returns {THREE.Texture|null}
+   */
+  getBelowFloorTexture(maskType) {
+    // Lazy resolution: _belowFloorKey may be null if composeFloor() fired before
+    // preloadAllFloors() had a chance to populate _floorCache with lower floors.
+    // Once the cache is warm we can derive the below-floor key on demand without
+    // waiting for an explicit floor transition to set it.
+    if (!this._belowFloorKey && this._activeFloorKey) {
+      const bandBottom = Number(this._activeFloorKey.split(':')[0]);
+      if (Number.isFinite(bandBottom)) {
+        const found = this._findBestBelowFloorKey(bandBottom);
+        if (found) this._belowFloorKey = found;
+      }
+    }
+    if (!this._belowFloorKey) return null;
+    return this.getFloorTexture(this._belowFloorKey, maskType);
   }
 
   /**
@@ -795,6 +1189,14 @@ export class GpuSceneMaskCompositor {
 
     try { this._tileMaterial?.dispose(); } catch (_) {}
     this._tileMaterial = null;
+
+    try { this._floorIdMaterial?.dispose(); } catch (_) {}
+    this._floorIdMaterial = null;
+    this._floorIdMesh = null;
+    this._floorIdScene = null;
+
+    try { this._floorIdTarget?.dispose(); } catch (_) {}
+    this._floorIdTarget = null;
 
     this._quadMesh = null;
     this._quadScene = null;
@@ -877,6 +1279,36 @@ export class GpuSceneMaskCompositor {
 
     if (!this._orthoCamera) {
       this._orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    }
+
+    if (!this._floorIdMaterial) {
+      this._floorIdMaterial = new THREE.RawShaderMaterial({
+        vertexShader: TILE_VERT,      // reuse — vSceneUv is the scene-space UV we need
+        fragmentShader: FLOOR_ID_FRAG,
+        uniforms: {
+          tFloorAlpha: { value: null },
+          uFloorId:    { value: 0.0 },
+          uAlphaThres: { value: 0.1 },
+          // TILE_VERT uniforms — set for identity (full-screen pass, no tile cropping)
+          uTileRect:   { value: new THREE.Vector4(0, 0, 1, 1) },
+          uScaleSign:  { value: new THREE.Vector2(1, 1) },
+          uRotation:   { value: 0.0 },
+        },
+        depthTest:   false,
+        depthWrite:  false,
+        transparent: true,
+        blending:    THREE.NormalBlending,
+      });
+    }
+
+    if (!this._floorIdMesh) {
+      this._floorIdMesh = new THREE.Mesh(this._quadGeo, this._floorIdMaterial);
+      this._floorIdMesh.frustumCulled = false;
+    }
+
+    if (!this._floorIdScene) {
+      this._floorIdScene = new THREE.Scene();
+      this._floorIdScene.add(this._floorIdMesh);
     }
   }
 
@@ -1208,6 +1640,129 @@ export class GpuSceneMaskCompositor {
 
     renderer.setRenderTarget(prevTarget);
     return anyDrawn;
+  }
+
+  /**
+   * Compose world-space per-floor alpha from the base textures of all tiles on
+   * the floor. The result is a scene-sized render target where R=1 means a tile
+   * exists at that pixel and R=0 means a transparent gap (no tile or fully transparent).
+   *
+   * This replaces the screen-space `floorPresenceTarget` system: the alpha is now
+   * baked in world space at composition time rather than re-rendered every frame at
+   * viewport resolution. Effects should prefer this over `floorPresenceTarget` when
+   * they need to know the floor's spatial extent.
+   *
+   * Stored in the floor bundle as `{ id: 'floorAlpha', type: 'floorAlpha', ... }`.
+   *
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {object} THREE
+   * @param {Map<string, THREE.WebGLRenderTarget>} floorTargets - Per-floor RT cache
+   * @param {Array} sortedEntries - Tiles sorted by Z-order
+   * @param {number} sceneX
+   * @param {number} sceneY
+   * @param {number} sceneW
+   * @param {number} sceneH
+   * @param {number} maxTex - Renderer max texture dimension
+   * @returns {{ id: string, type: string, texture: THREE.Texture, required: boolean }|null}
+   * @private
+   */
+  _composeFloorAlpha(renderer, THREE, floorTargets, sortedEntries, sceneX, sceneY, sceneW, sceneH, maxTex) {
+    const FLOOR_ALPHA_ID = 'floorAlpha';
+    const tileManager = window.MapShine?.tileManager;
+
+    // Collect tiles that have their base texture loaded.
+    const alphaTiles = [];
+    for (const entry of sortedEntries) {
+      const tileDoc = entry.tileDoc;
+      const tileId = tileDoc?.id;
+      if (!tileId) continue;
+
+      // Base texture lives on the sprite material map (loaded by TileManager).
+      const baseTex = tileManager?.tileSprites?.get(tileId)?.sprite?.material?.map ?? null;
+      if (!baseTex) continue;
+
+      alphaTiles.push({ tileDoc, baseTex });
+    }
+
+    if (alphaTiles.length === 0) return null;
+
+    // Use DATA_MAX resolution — the floor alpha is a binary-ish mask; no need for
+    // visual-quality resolution. Half-res of DATA_MAX is sufficient but DATA_MAX
+    // gives clean edges for tiles that have detailed alpha channels.
+    const scale = Math.min(1.0, DATA_MAX / Math.max(1, sceneW), DATA_MAX / Math.max(1, sceneH));
+    const outW = Math.max(1, Math.round(sceneW * scale));
+    const outH = Math.max(1, Math.round(sceneH * scale));
+
+    let rt = floorTargets.get(FLOOR_ALPHA_ID);
+    if (!rt || rt.width !== outW || rt.height !== outH) {
+      rt?.dispose();
+      rt = this._createRenderTarget(THREE, outW, outH, FLOOR_ALPHA_ID);
+      floorTargets.set(FLOOR_ALPHA_ID, rt);
+    }
+
+    const mat = this._tileMaterial;
+    const prevTarget = renderer.getRenderTarget();
+
+    renderer.setRenderTarget(rt);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+
+    // MAX blending: accumulate the maximum alpha across overlapping tiles.
+    // A pixel covered by any tile gets alpha=max(all tiles at that pixel).
+    mat.blending = THREE.CustomBlending;
+    mat.blendEquation = THREE.MaxEquation ?? THREE.AddEquation;
+    mat.blendEquationAlpha = THREE.MaxEquation ?? THREE.AddEquation;
+    mat.blendSrc = THREE.OneFactor;
+    mat.blendDst = THREE.OneFactor;
+    mat.blendSrcAlpha = THREE.OneFactor;
+    mat.blendDstAlpha = THREE.OneFactor;
+    mat.uniforms.uMode.value = 2; // alpha-extract mode
+
+    let anyDrawn = false;
+    for (const { tileDoc, baseTex } of alphaTiles) {
+      const tileX = Number(tileDoc?.x ?? 0);
+      const tileY = Number(tileDoc?.y ?? 0);
+      const tileW = Number(tileDoc?.width ?? 0);
+      const tileH = Number(tileDoc?.height ?? 0);
+      if (!tileW || !tileH) continue;
+
+      const u0 = (tileX - sceneX) / sceneW;
+      const v0_foundry = (tileY - sceneY) / sceneH;
+      const uW = tileW / sceneW;
+      const vH = tileH / sceneH;
+      const v0 = 1.0 - (v0_foundry + vH); // Y-flip: Foundry Y-down → GL Y-up
+
+      const scaleX = Number(tileDoc?.texture?.scaleX ?? 1);
+      const scaleY = Number(tileDoc?.texture?.scaleY ?? 1);
+      const rotRad = Number(tileDoc?.rotation ?? 0) * Math.PI / 180;
+
+      mat.uniforms.tMask.value = baseTex;
+      mat.uniforms.uTileRect.value.set(u0, v0, uW, vH);
+      mat.uniforms.uScaleSign.value.set(Math.sign(scaleX) || 1, Math.sign(scaleY) || 1);
+      mat.uniforms.uRotation.value = rotRad;
+      mat.needsUpdate = true;
+
+      try {
+        renderer.render(this._quadScene, this._orthoCamera);
+        anyDrawn = true;
+      } catch (e) {
+        log.debug(`_composeFloorAlpha: draw failed for tile ${tileDoc?.id}`, e);
+      }
+    }
+
+    renderer.setRenderTarget(prevTarget);
+
+    if (!anyDrawn) return null;
+
+    // Floor alpha is linear data — no color space conversion.
+    rt.texture.colorSpace = THREE.NoColorSpace ?? '';
+
+    return {
+      id: FLOOR_ALPHA_ID,
+      type: FLOOR_ALPHA_ID,
+      texture: rt.texture,
+      required: false
+    };
   }
 
   /**

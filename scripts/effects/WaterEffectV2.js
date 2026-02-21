@@ -45,6 +45,22 @@ export class WaterEffectV2 extends EffectBase {
     this.priority = 80;
     this.alwaysRender = true;
 
+    /**
+     * Per-floor cached state. Keyed by FloorBand.key. Populated lazily by
+     * bindFloorMasks() on the first render pass for each floor. Holds
+     * floor-specific water mask textures, SDF data, and wave simulation state.
+     * @type {Map<string, object>}
+     */
+    this._floorStates = new Map();
+
+    /**
+     * Tracks floor keys for which a null-bundle warning has already been emitted.
+     * Prevents per-frame console spam when GpuSceneMaskCompositor hasn't cached
+     * this floor yet.
+     * @type {Set<string>}
+     */
+    this._warnedNullBundleKeys = new Set();
+
     this.params = {
       tintStrength: 0.2,
       tintColor: { r: 0.1, g: 0.3, b: 0.48 },
@@ -442,6 +458,9 @@ export class WaterEffectV2 extends EffectBase {
     this._lastTimeValue = null;
     this._timeStallFrames = 0;
     this._timeStallLogged = false;
+    // Holds the real frame delta pre-computed in prepareFrame() so update()
+    // consumes dtSeconds=0 when called a second time per frame (floor loop).
+    this._preparedDtSeconds = null;
 
     // First-render diagnostics: tracks whether we've logged shader compile stats.
     this._firstRenderDone = false;
@@ -1186,6 +1205,7 @@ export class WaterEffectV2 extends EffectBase {
         rainStormMicroStrength: { type: 'slider', label: 'Micro Strength', min: 0.0, max: 2.0, step: 0.01, default: 1.59 },
         rainStormMicroScale: { type: 'slider', label: 'Micro Scale', min: 0.01, max: 5.0, step: 0.01, default: 0.85 },
         rainStormMicroSpeed: { type: 'slider', label: 'Micro Speed', min: 0.0, max: 10.0, step: 0.01, default: 1.25 },
+        rainMaxCombinedStrengthPx: { type: 'slider', label: 'Max Rain Offset Px', min: 0.0, max: 64.0, step: 0.1, default: 45.4 },
 
         causticsEnabled: { type: 'boolean', label: 'Caustics Enabled', default: true },
         causticsIntensity: { type: 'slider', label: 'Caustics Intensity', min: 0.0, max: 4.0, step: 0.01, default: 4 },
@@ -3538,7 +3558,13 @@ export class WaterEffectV2 extends EffectBase {
       u.uChromaticAberrationEdgeMin.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.0;
     }
 
-    const dtSeconds = (this._lastTimeValue === null) ? 0.0 : Math.max(0.0, elapsed - this._lastTimeValue);
+    // Use the delta pre-computed in prepareFrame() if available (consumes it so any
+    // subsequent call this frame — e.g. from the per-floor loop — gets dtSeconds=0
+    // and all accumulations below become no-ops, preventing double-advance).
+    const dtSeconds = this._preparedDtSeconds !== null
+      ? this._preparedDtSeconds
+      : ((this._lastTimeValue === null) ? 0.0 : Math.max(0.0, elapsed - this._lastTimeValue));
+    this._preparedDtSeconds = null; // consume
 
     if (this._lastTimeValue === null) {
       this._lastTimeValue = elapsed;
@@ -4780,7 +4806,134 @@ export class WaterEffectV2 extends EffectBase {
     });
   }
 
+  /**
+   * @override
+   * Pre-compute the frame delta and lock _lastTimeValue before update() runs.
+   *
+   * Stores the real elapsed delta in _preparedDtSeconds; update() consumes it
+   * and resets it to null. On any subsequent call within the same frame (e.g.
+   * a per-floor loop) update() sees _preparedDtSeconds=null and falls back to
+   * computing dtSeconds from _lastTimeValue (which is already set to elapsed,
+   * so dtSeconds=0 — preventing double-advance of _windOffsetUv / _windTime).
+   *
+   * @param {TimeInfo} timeInfo
+   */
+  prepareFrame(timeInfo) {
+    if (!this._material) return;
+    const elapsed = Number.isFinite(timeInfo?.elapsed) ? timeInfo.elapsed : 0.0;
+    const dt = (this._lastTimeValue === null)
+      ? 0.0
+      : Math.max(0.0, elapsed - this._lastTimeValue);
+    // Advance _lastTimeValue NOW — update() will compute dtSeconds=0 naturally.
+    this._lastTimeValue = elapsed;
+    this._preparedDtSeconds = dt;
+  }
+
+  /**
+   * Bind floor-specific mask data before a floor's render pass.
+   *
+   * Called by EffectComposer's floor loop before each floor's update/render.
+   * On the first visit for a floorKey, finds the water mask in the bundle,
+   * builds the SDF via _rebuildWaterDataIfNeeded(), and caches the result in
+   * _floorStates. Subsequent visits for the same floorKey restore the cached
+   * state in O(1) — no SDF rebuild.
+   *
+   * If bundle is null (preloadAllFloors hasn't run yet), the method is a no-op
+   * and the effect continues using whatever active-floor masks are already set.
+   *
+   * @param {{masks: Array}|null} bundle - Pre-composed mask bundle for this floor
+   * @param {string} floorKey - Compositor floor key: "${bottom}:${top}"
+   */
+  bindFloorMasks(bundle, floorKey) {
+    // Material must exist before mask binding is meaningful.
+    if (!this._material) {
+      if (!this._warnedNullBundleKeys.has('no-material')) {
+        this._warnedNullBundleKeys.add('no-material');
+        log.error('bindFloorMasks: water material not initialized — water won\'t render. Call initialize() first.');
+      }
+      return;
+    }
+    // Null bundle means GpuSceneMaskCompositor.preloadAllFloors() hasn't cached
+    // this floor yet. Effect continues with whatever masks were previously bound.
+    if (!bundle) {
+      if (!this._warnedNullBundleKeys.has(floorKey)) {
+        this._warnedNullBundleKeys.add(floorKey);
+        log.warn(`bindFloorMasks: null bundle for floor "${floorKey}" — WaterEffectV2 will use stale masks (likely the wrong floor). Run: await MapShine.debug.diagnoseFloorRendering()`);
+      }
+      return;
+    }
+    // Clear the warning flag once a valid bundle arrives.
+    this._warnedNullBundleKeys.delete(floorKey);
+
+    const maskEntry = bundle.masks?.find(m => m.id === 'water' || m.type === 'water');
+    const floorMaskTex = maskEntry?.texture ?? null;
+
+    // Check for a cached state for this floor.
+    const cached = this._floorStates.get(floorKey);
+    if (cached) {
+      // Restore whichever state was cached (water or no-water) — no rebuild.
+      this.waterMask = cached.waterMask;
+      this._waterData = cached.waterData;
+      this._waterRawMask = cached.waterRawMask;
+      this._lastWaterMaskCacheKey = cached.lastMaskCacheKey;
+      this._lastWaterMaskUuid = cached.lastMaskUuid;
+      return;
+    }
+
+    if (!floorMaskTex) {
+      // No water on this floor; cache the no-water state to avoid repeated lookups.
+      this._floorStates.set(floorKey, {
+        waterMask: null, waterData: null, waterRawMask: null,
+        lastMaskCacheKey: null, lastMaskUuid: null,
+      });
+      this.waterMask = null;
+      this._waterData = null;
+      this._waterRawMask = null;
+      this._lastWaterMaskCacheKey = null;
+      this._lastWaterMaskUuid = null;
+      return;
+    }
+
+    // First visit for this floor — build the SDF.
+    // Temporarily clear the transition lock so _rebuildWaterDataIfNeeded() runs.
+    const prevTransitionActive = this._floorTransitionActive;
+    this._floorTransitionActive = false;
+    this.waterMask = floorMaskTex;
+    this._rebuildWaterDataIfNeeded(true);
+    this._floorTransitionActive = prevTransitionActive;
+
+    // Cache the built state for all future frames of this floor.
+    this._floorStates.set(floorKey, {
+      waterMask: this.waterMask,
+      waterData: this._waterData,
+      waterRawMask: this._waterRawMask,
+      lastMaskCacheKey: this._lastWaterMaskCacheKey,
+      lastMaskUuid: this._lastWaterMaskUuid,
+    });
+  }
+
+  /**
+   * Release GPU resources for a specific floor's cached state.
+   * Called when a floor is evicted from the LRU cache.
+   * @param {string} floorKey
+   */
+  disposeFloorState(floorKey) {
+    const state = this._floorStates.get(floorKey);
+    if (!state) return;
+    // Dispose the per-floor SDF texture if it was built (not a shared RT texture).
+    if (state.waterData?.texture) {
+      try { state.waterData.texture.dispose(); } catch (_) {}
+    }
+    this._floorStates.delete(floorKey);
+  }
+
   dispose() {
+    // Release all per-floor cached state before disposing shared resources.
+    for (const key of this._floorStates.keys()) {
+      this.disposeFloorState(key);
+    }
+    this._floorStates.clear();
+
     // Unsubscribe from EffectMaskRegistry before disposing resources.
     if (this._registryUnsub) {
       this._registryUnsub();

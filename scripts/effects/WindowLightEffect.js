@@ -208,6 +208,21 @@ export class WindowLightEffect extends EffectBase {
 
     /** @type {Array<function>} Unsubscribe functions from EffectMaskRegistry */
     this._registryUnsubs = [];
+
+    /**
+     * Per-floor mask cache so bindFloorMasks() skips redundant uniform pushes.
+     * Key: floorKey, Value: { windowMask, outdoorsMask, specularMask }
+     * @type {Map<string, {windowMask: THREE.Texture|null, outdoorsMask: THREE.Texture|null, specularMask: THREE.Texture|null}>}
+     */
+    this._floorStates = new Map();
+
+    /**
+     * Tracks floor keys for which a null-bundle warning has already been emitted.
+     * Prevents per-frame console spam when GpuSceneMaskCompositor hasn't cached
+     * this floor yet.
+     * @type {Set<string>}
+     */
+    this._warnedNullBundleKeys = new Set();
   }
 
   _applyThreeColor(target, input) {
@@ -1383,6 +1398,8 @@ export class WindowLightEffect extends EffectBase {
       registry.subscribe('windows', (texture) => {
         this.windowMask = texture;
         this.params.hasWindowMask = !!texture;
+        // Clear per-floor cache so next bindFloorMasks() picks up the updated mask.
+        this._floorStates.clear();
         if (!texture) {
           this.params.textureStatus = 'Inactive (No _Windows / _Structural mask found)';
           this.enabled = false;
@@ -1396,14 +1413,102 @@ export class WindowLightEffect extends EffectBase {
       }),
       registry.subscribe('outdoors', (texture) => {
         this.outdoorsMask = texture;
+        // Clear per-floor cache so next bindFloorMasks() picks up the updated mask.
+        this._floorStates.clear();
         pushMask();
         this._ensureRainFlowMap();
       }),
       registry.subscribe('specular', (texture) => {
         this.specularMask = texture;
+        // Clear per-floor cache so next bindFloorMasks() picks up the updated mask.
+        this._floorStates.clear();
         pushMask();
       })
     );
+  }
+
+  /**
+   * Phase 4+: per-floor mask swap called by the EffectComposer floor loop.
+   * Swaps window, outdoors, and specular masks to the versions baked for this
+   * floor, updating both material and lightMaterial uniforms in place.
+   *
+   * @param {{masks: Array}|null} bundle - Floor mask bundle from the GPU compositor.
+   * @param {string} floorKey - Compositor key for this floor (e.g. "0:200").
+   */
+  bindFloorMasks(bundle, floorKey) {
+    // Null bundle means GpuSceneMaskCompositor.preloadAllFloors() hasn't cached
+    // this floor yet (e.g. scene background floor with no tiles). The effect will
+    // continue rendering with whatever masks were previously bound — likely the
+    // wrong floor's masks. Warn once per floor key so the problem is visible.
+    if (!bundle) {
+      if (!this._warnedNullBundleKeys.has(floorKey)) {
+        this._warnedNullBundleKeys.add(floorKey);
+        log.warn(`bindFloorMasks: null bundle for floor "${floorKey}" — WindowLightEffect will use stale masks (likely the wrong floor). Run: await MapShine.debug.diagnoseFloorRendering()`);
+      }
+      return;
+    }
+    // Clear the warning flag once a valid bundle arrives.
+    this._warnedNullBundleKeys.delete(floorKey);
+
+    // Use cached texture refs if this floor has been visited before to avoid
+    // re-searching the bundle. Cache only stores texture identity — it does NOT
+    // skip the uniform/state push, because material uniforms and enabled state
+    // are shared resources overwritten by the previous floor pass every frame.
+    let newWindow, newOutdoors, newSpecular;
+    const cached = this._floorStates.get(floorKey);
+    if (cached) {
+      newWindow   = cached.windowMask;
+      newOutdoors = cached.outdoorsMask;
+      newSpecular = cached.specularMask;
+    } else {
+      const windowEntry   = bundle.masks?.find(m => m.id === 'windows' || m.type === 'windows');
+      const outdoorsEntry = bundle.masks?.find(m => m.id === 'outdoors' || m.type === 'outdoors');
+      const specularEntry = bundle.masks?.find(m => m.id === 'specular' || m.type === 'specular');
+      newWindow   = windowEntry?.texture   ?? null;
+      newOutdoors = outdoorsEntry?.texture  ?? null;
+      newSpecular = specularEntry?.texture  ?? null;
+      this._floorStates.set(floorKey, { windowMask: newWindow, outdoorsMask: newOutdoors, specularMask: newSpecular });
+    }
+
+    // Always update instance fields so other per-frame logic stays consistent.
+    this.windowMask   = newWindow;
+    this.outdoorsMask = newOutdoors;
+    this.specularMask = newSpecular;
+
+    // Always update enabled state — the previous floor pass may have left the
+    // effect enabled or disabled and it must be correct for every floor pass.
+    if (!newWindow) {
+      this.enabled = false;
+      this.params.hasWindowMask = false;
+    } else {
+      this.enabled = true;
+      this.params.hasWindowMask = true;
+    }
+
+    // Push updated textures into the render materials.
+    if (this.material?.uniforms) {
+      const u = this.material.uniforms;
+      if (u.uWindowMask)      u.uWindowMask.value      = newWindow;
+      if (u.uOutdoorsMask)    u.uOutdoorsMask.value    = newOutdoors;
+      if (u.uSpecularMask)    u.uSpecularMask.value    = newSpecular;
+      if (u.uHasOutdoorsMask) u.uHasOutdoorsMask.value = newOutdoors ? 1.0 : 0.0;
+      if (u.uHasSpecularMask) u.uHasSpecularMask.value = newSpecular ? 1.0 : 0.0;
+      if (u.uWindowTexelSize && newWindow?.image) {
+        u.uWindowTexelSize.value.set(
+          1 / newWindow.image.width,
+          1 / newWindow.image.height
+        );
+      }
+      this.material.needsUpdate = true;
+    }
+
+    if (this.lightMaterial?.uniforms) {
+      const lu = this.lightMaterial.uniforms;
+      if (lu.uWindowMask)      lu.uWindowMask.value      = newWindow;
+      if (lu.uOutdoorsMask)    lu.uOutdoorsMask.value    = newOutdoors;
+      if (lu.uHasOutdoorsMask) lu.uHasOutdoorsMask.value = newOutdoors ? 1.0 : 0.0;
+      this.lightMaterial.needsUpdate = true;
+    }
   }
 
   _ensureRainFlowMap() {
@@ -2356,7 +2461,7 @@ export class WindowLightEffect extends EffectBase {
           float featherPx = max(0.0, uRainDistortionFeatherPx);
           vec2 stepUv = uWindowTexelSize * featherPx;
 
-          float srcMask = msLuminance(texture2D(uWindowMask, vUv).rgb);
+          float srcMask  = msLuminance(texture2D(uWindowMask, vUv).rgb);
           float destMask = msLuminance(texture2D(uWindowMask, vUv - distUV).rgb);
 
           if (featherPx > 0.001) {
@@ -3657,7 +3762,7 @@ export class WindowLightEffect extends EffectBase {
           float featherPx = max(0.0, uRainDistortionFeatherPx);
           vec2 stepUv = uWindowTexelSize * featherPx;
 
-          float srcMask = msLuminance(texture2D(uWindowMask, vUv).rgb);
+          float srcMask  = msLuminance(texture2D(uWindowMask, vUv).rgb);
           float destMask = msLuminance(texture2D(uWindowMask, vUv - distUV).rgb);
 
           if (featherPx > 0.001) {

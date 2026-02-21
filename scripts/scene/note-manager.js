@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { GLOBAL_SCENE_LAYER } from '../effects/EffectComposer.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { readDocLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
 import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
@@ -38,6 +39,11 @@ export class NoteManager {
     this.group.name = 'Notes';
     // Z position will be set in initialize() once groundZ is available
     this.group.position.z = 2.5;
+    // Note icons are floor-agnostic world objects. GLOBAL_SCENE_LAYER (29) ensures
+    // they render exactly once per frame in the global scene pass (after the
+    // per-floor render loop), preventing multi-compositing artifacts and
+    // excluding them from per-floor depth captures.
+    this.group.layers.set(GLOBAL_SCENE_LAYER);
     this.scene.add(this.group);
     
     // Default icon

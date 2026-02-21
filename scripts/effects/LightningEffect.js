@@ -9,6 +9,11 @@ export class LightningEffect extends EffectBase {
   constructor() {
     super('lightning', RenderLayers.ENVIRONMENTAL, 'low');
 
+    // Lightning is a whole-sky atmospheric effect with no floor-specific masks.
+    // Running per-floor would trigger the simulation and flash rendering N times,
+    // accumulating duplicate flash geometry in the scene render target.
+    this.floorScope = 'global';
+
     this.priority = 8;
 
     this.params = {

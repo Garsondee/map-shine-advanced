@@ -47,6 +47,14 @@ const FOG_PLANE_Z_OFFSET = 0.05; // Nearly coplanar with the ground plane to avo
 export class WorldSpaceFogEffect extends EffectBase {
   constructor() {
     super('fog', RenderLayers.ENVIRONMENTAL, 'low');
+
+    // The fog plane is a global overlay — it covers the fully-accumulated floor
+    // image rather than any individual floor. Running it per-floor would
+    // multiply the fog darkening N times. The fog plane is placed on
+    // OVERLAY_THREE_LAYER (31) so it is excluded from per-floor scene renders
+    // (EffectComposer disables OVERLAY_THREE_LAYER during each floor pass) and
+    // is presented exactly once per frame via _renderOverlayToScreen().
+    this.floorScope = 'global';
     
     this.priority = 10;
     

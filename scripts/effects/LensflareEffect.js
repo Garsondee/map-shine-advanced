@@ -299,7 +299,12 @@ function getLensflareClasses() {
 export class LensflareEffect extends EffectBase {
   constructor() {
     super('lensflare', RenderLayers.SURFACE_EFFECTS, 'medium');
-    
+
+    // Lens flares are a camera-space effect whose quads live in the main Three.js
+    // scene at light positions. Running per-floor would add duplicate flares in
+    // every floor pass and accumulate them in the scene render target.
+    this.floorScope = 'global';
+
     this.priority = 100; // Render on top of other surface effects
     this.alwaysRender = false;
 

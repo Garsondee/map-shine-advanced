@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @fileoverview Lighting Effect
  * Implements dynamic lighting for the scene base plane.
  * Replaces Foundry's PIXI lighting with a multipass Three.js approach.
@@ -169,6 +169,15 @@ export class LightingEffect extends EffectBase {
     /** @type {number|null} */
     this._syncRetryTimeoutId = null;
     this._syncFailCount = 0;
+
+    /**
+     * Per-floor outdoors mask cache for the EffectComposer floor loop.
+     * Key: floorKey (e.g. "0:200"), Value: { outdoorsMask: THREE.Texture|null }
+     * @type {Map<string, {outdoorsMask: THREE.Texture|null}>}
+     */
+    this._floorStates = new Map();
+    /** @type {boolean} Suppress repeated null-bundle warnings in bindFloorMasks. */
+    this._warnedMissingBundle = false;
   }
 
   _getFoundryLightDocById(id) {
@@ -779,7 +788,7 @@ export class LightingEffect extends EffectBase {
       transparent: false,
     });
 
-    // Debug materials are deferred — created on first use via
+    // Debug materials are deferred ΓÇö created on first use via
     // _ensureDebugMaterials() to avoid compiling 3 extra shader programs
     // that are only needed when the user activates a debug view.
     this.debugLightBufferMaterial = null;
@@ -1303,7 +1312,64 @@ export class LightingEffect extends EffectBase {
     this._registryUnsub = registry.subscribe('outdoors', (texture) => {
       this.outdoorsMask = texture;
       this._rebuildOutdoorsProjection();
+      // Clear the floor-states cache so the next bindFloorMasks() call picks up
+      // the updated global mask rather than serving a stale per-floor entry.
+      this._floorStates.clear();
     });
+  }
+
+  /**
+   * Phase 4+: per-floor mask swap called by the EffectComposer floor loop.
+   * Swaps the outdoors mask to the version baked for this floor and rebuilds
+   * the outdoors projection mesh if the texture actually changed.
+   *
+   * @param {{masks: Array}|null} bundle - Floor mask bundle from the GPU compositor.
+   * @param {string} floorKey - Compositor key for this floor (e.g. "0:200").
+   */
+  bindFloorMasks(bundle, floorKey) {
+    if (!bundle) {
+      if (!this._warnedMissingBundle) {
+        log.warn(`bindFloorMasks: null bundle for floor "${floorKey}" — LightingEffect will use stale outdoors mask. Run: await MapShine.debug.diagnoseFloorRendering()`);
+        this._warnedMissingBundle = true;
+      }
+      return;
+    }
+    // Clear the one-time warning once a valid bundle arrives.
+    this._warnedMissingBundle = false;
+
+    // Use cached texture ref if this floor has been visited before. Cache only
+    // stores the identity — it does NOT skip the assignment, because
+    // this.outdoorsMask is a shared field overwritten by each floor's pass and
+    // must be restored to the correct value on every pass.
+    let newMask;
+    const cached = this._floorStates.get(floorKey);
+    if (cached) {
+      newMask = cached.outdoorsMask;
+    } else {
+      const outdoorsEntry = bundle?.masks?.find?.(m => m.id === 'outdoors' || m.type === 'outdoors');
+      newMask = outdoorsEntry?.texture ?? null;
+      this._floorStates.set(floorKey, { outdoorsMask: newMask });
+    }
+
+    // Always restore the instance field — the previous floor's pass overwrites it.
+    // Use a fast path for the common case: swap .map on the existing material
+    // rather than allocating a new Material+Mesh every floor transition.
+    // Full rebuild is only needed when the mesh doesn't exist yet, or when
+    // transitioning from null→non-null (mesh must be created for the first time).
+    if (this.outdoorsMask !== newMask) {
+      this.outdoorsMask = newMask;
+      if (!newMask) {
+        // No outdoors mask for this floor — hide the mesh without destroying it.
+        if (this.outdoorsMesh) this.outdoorsMesh.visible = false;
+      } else if (this.outdoorsMaterial && this.outdoorsMesh) {
+        // Fast path: just swap the texture ref on the existing material.
+        this.outdoorsMesh.visible = true;
+        this.outdoorsMaterial.map = newMask;
+      } else {
+        // First-time build: mesh/material don't exist yet.
+        this._rebuildOutdoorsProjection();
+      }
+    }
   }
 
   syncAllLights() {
@@ -1720,7 +1786,7 @@ export class LightingEffect extends EffectBase {
         const rawDoc = doc?.raw ?? doc;
         if (!isLightVisibleForPerspective(rawDoc)) return false;
       } catch (_) {
-        // Fail open — keep the light visible if the check errors
+        // Fail open ΓÇö keep the light visible if the check errors
       }
     }
 
@@ -1890,7 +1956,7 @@ export class LightingEffect extends EffectBase {
     // updateAnimation() can trigger rebuildGeometry() (e.g. zoom-driven wall
     // inset updates), which replaces the mesh. Setting visibility before the
     // animation would target the OLD mesh, leaving the NEW mesh visible=true
-    // for one frame — causing the flicker on darkness-gated lights during zoom.
+    // for one frame ΓÇö causing the flicker on darkness-gated lights during zoom.
     for (const light of this.lights.values()) {
       light.updateAnimation(timeInfo, sceneDarkness, skyTint);
       const isActive = this._isLightActiveForDarkness(light.document, sceneDarkness);
@@ -2689,7 +2755,7 @@ export class LightingEffect extends EffectBase {
 
     renderer.setRenderTarget(oldTarget);
 
-    // Debug views — materials are lazily created on first use to avoid
+    // Debug views ΓÇö materials are lazily created on first use to avoid
     // compiling 3 extra shader programs during loading.
     const wantsDebug = this.params?.debugShowRopeMask || this.params?.debugShowLightBuffer || this.params?.debugShowDarknessBuffer;
     if (wantsDebug) this._ensureDebugMaterials();

@@ -41,17 +41,20 @@ const Z_OVERHEAD_OFFSET = 4.0;
 const ROOF_LAYER = 20;
 const WEATHER_ROOF_LAYER = 21;
 const WATER_OCCLUDER_LAYER = 22;
-
-// Track whether we've already logged the deprecated tileDoc.overhead warning
-// to avoid spamming the console for every tile on every scene load.
-let _loggedOverheadDeprecation = false;
+// Floor-presence layer: ALL tiles render their alpha here so effects can
+// suppress lower-floor contributions in areas covered by the current floor.
+const FLOOR_PRESENCE_LAYER = 23;
+// Below-floor-presence layer: only levelsHidden (below current floor) tiles render here.
+// Used to bound preserved lower-floor effects to their originating floor's tile footprint.
+const BELOW_FLOOR_PRESENCE_LAYER = 24;
 
 /**
  * Determine whether a tile is overhead based solely on its elevation relative
  * to the scene's foregroundElevation. This matches Foundry v12+ behavior.
  *
- * The legacy `tileDoc.overhead` boolean is intentionally ignored — Foundry
- * removed it and elevation is the single source of truth.
+ * The legacy `tileDoc.overhead` boolean is intentionally NOT accessed here —
+ * reading that property triggers a PF2e deprecation getter on every tile.
+ * Elevation is the single source of truth for overhead status.
  *
  * @param {object} tileDoc - The tile document
  * @returns {boolean}
@@ -61,16 +64,6 @@ export function isTileOverhead(tileDoc) {
     ? canvas.scene.foregroundElevation
     : 0;
   const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
-
-  // Debug: warn once if the deprecated property is still set on any tile doc.
-  if (!_loggedOverheadDeprecation && tileDoc?.overhead !== undefined) {
-    _loggedOverheadDeprecation = true;
-    log.debug(
-      'Tile document has deprecated "overhead" property — MapShine ignores it and uses elevation >= foregroundElevation instead.',
-      { tileId: tileDoc?.id, overhead: tileDoc.overhead, elevation: elev, foregroundElevation }
-    );
-  }
-
   return elev >= foregroundElevation;
 }
 
@@ -106,6 +99,12 @@ export class TileManager {
 
     /** @type {THREE.Scene|null} */
     this.waterOccluderScene = null;
+
+    /** @type {THREE.Scene|null} Dedicated scene for floor-presence alpha meshes (layer 23). */
+    this.floorPresenceScene = null;
+
+    /** @type {THREE.Scene|null} Dedicated scene for below-floor-presence meshes (layer 24). */
+    this.belowFloorPresenceScene = null;
     
     /** @type {Map<string, {sprite: THREE.Sprite, tileDoc: TileDocument}>} */
     this.tileSprites = new Map();
@@ -525,6 +524,64 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       }
     } catch (_) {
     }
+  }
+
+  /**
+   * Provide a dedicated scene for floor-presence alpha meshes.
+   * All tile sprites render a simple alpha quad here (layer 23) so effects
+   * can determine which screen pixels are covered by the current floor.
+   * @param {THREE.Scene|null} scene
+   */
+  setFloorPresenceScene(scene) {
+    const next = scene || null;
+    if (this.floorPresenceScene === next) return;
+
+    const prev = this.floorPresenceScene;
+    this.floorPresenceScene = next;
+
+    // Migrate existing floor-presence meshes between scenes.
+    try {
+      if (!prev && !next) return;
+      for (const { sprite } of this.tileSprites.values()) {
+        const fp = sprite?.userData?.floorPresenceMesh;
+        if (!fp) continue;
+        try { if (prev) prev.remove(fp); } catch (_) {}
+        try { if (next) next.add(fp); else this.scene?.add(fp); } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  _getFloorPresenceScene() {
+    return this.floorPresenceScene || this.scene;
+  }
+
+  /**
+   * Provide a dedicated scene for below-floor-presence alpha meshes.
+   * Only levelsHidden tiles render a quad here (layer 24) so effects can
+   * bound preserved lower-floor contributions to their originating tile footprint.
+   * @param {THREE.Scene|null} scene
+   */
+  setBelowFloorPresenceScene(scene) {
+    const next = scene || null;
+    if (this.belowFloorPresenceScene === next) return;
+
+    const prev = this.belowFloorPresenceScene;
+    this.belowFloorPresenceScene = next;
+
+    // Migrate existing below-floor-presence meshes between scenes.
+    try {
+      if (!prev && !next) return;
+      for (const { sprite } of this.tileSprites.values()) {
+        const bfp = sprite?.userData?.belowFloorPresenceMesh;
+        if (!bfp) continue;
+        try { if (prev) prev.remove(bfp); } catch (_) {}
+        try { if (next) next.add(bfp); else this.scene?.add(bfp); } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  _getBelowFloorPresenceScene() {
+    return this.belowFloorPresenceScene || this.scene;
   }
 
   isWorldPointInTileBounds(data, worldX, worldY) {
@@ -1647,6 +1704,185 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   }
 
   /**
+   * Create a simple material that outputs the tile's alpha footprint.
+   * Used for the floor-presence pass (layer 23) which tells effects which
+   * screen pixels are covered by the current floor's tiles.
+   * @param {THREE.Texture|null} tileTexture
+   * @returns {THREE.ShaderMaterial}
+   */
+  _createFloorPresenceMaterial(tileTexture) {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+
+    return new THREE.ShaderMaterial({
+      uniforms: {
+        tTile:    { value: tileTexture || null },
+        uHasTile: { value: tileTexture ? 1.0 : 0.0 },
+        uOpacity: { value: 1.0 }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tTile;
+        uniform float uHasTile;
+        uniform float uOpacity;
+        varying vec2 vUv;
+        void main() {
+          float a = 1.0;
+          if (uHasTile > 0.5) {
+            a = texture2D(tTile, vUv).a;
+          }
+          // Output alpha footprint as greyscale — RGB carries the same value
+          // so MAX blending accumulates presence across overlapping tiles.
+          float v = clamp(a * uOpacity, 0.0, 1.0);
+          gl_FragColor = vec4(v, v, v, v);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      depthTest:  false,
+      // MAX blending: result = max(dst, src) for each channel.
+      // This correctly accumulates alpha across multiple overlapping tiles
+      // without over-brightening.
+      blending:      THREE.CustomBlending,
+      blendEquation: THREE.MaxEquation,
+      blendSrc:      THREE.OneFactor,
+      blendDst:      THREE.OneFactor,
+      toneMapped: false
+    });
+  }
+
+  /**
+   * Ensure a levelsHidden tile has a below-floor-presence mesh on layer 24.
+   * The mesh is only VISIBLE when the tile is levelsHidden (below current floor),
+   * so the resulting RT correctly shows only below-floor tile footprints.
+   * @param {{sprite: THREE.Sprite}} spriteData
+   * @param {TileDocument} tileDoc
+   */
+  _ensureBelowFloorPresenceMesh(spriteData, tileDoc) {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const sprite = spriteData?.sprite;
+    if (!sprite) return;
+
+    const existing = sprite.userData.belowFloorPresenceMesh;
+    if (existing) {
+      // Keep texture in sync after async load.
+      const tex = sprite.material?.map ?? null;
+      if (existing.material?.uniforms?.tTile) {
+        existing.material.uniforms.tTile.value  = tex;
+        existing.material.uniforms.uHasTile.value = tex ? 1.0 : 0.0;
+      }
+      // Visible only when tile is levelsHidden (below current floor).
+      existing.visible = !!sprite.userData?.levelsHidden;
+      return;
+    }
+
+    const geom = new THREE.PlaneGeometry(1, 1);
+    const mat  = this._createFloorPresenceMaterial(sprite.material?.map ?? null);
+    if (!mat) { geom.dispose(); return; }
+
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.matrixAutoUpdate = false;
+    mesh.layers.set(BELOW_FLOOR_PRESENCE_LAYER);
+    // Initially invisible; becomes visible when levelsHidden=true in updateSpriteVisibility.
+    mesh.visible = !!sprite.userData?.levelsHidden;
+    mesh.renderOrder = 999;
+    this._getBelowFloorPresenceScene().add(mesh);
+    sprite.userData.belowFloorPresenceMesh = mesh;
+  }
+
+  /**
+   * Sync the below-floor-presence mesh transform to match its parent tile sprite.
+   * @param {THREE.Sprite} sprite
+   * @param {TileDocument} tileDoc
+   */
+  _updateBelowFloorPresenceMeshTransform(sprite, tileDoc) {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const mesh = sprite?.userData?.belowFloorPresenceMesh;
+    if (!mesh) return;
+
+    mesh.position.copy(sprite.position);
+    mesh.scale.set(tileDoc.width, tileDoc.height, 1);
+    mesh.rotation.set(0, 0, 0);
+    if (tileDoc.rotation) {
+      mesh.rotation.z = THREE.MathUtils.degToRad(tileDoc.rotation);
+    }
+    mesh.updateMatrix();
+
+    if (mesh.material?.uniforms?.uOpacity) {
+      const a = ('alpha' in tileDoc) ? tileDoc.alpha : 1.0;
+      mesh.material.uniforms.uOpacity.value = Number.isFinite(a) ? a : 1.0;
+    }
+  }
+
+  _ensureFloorPresenceMesh(spriteData, tileDoc) {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const sprite = spriteData?.sprite;
+    if (!sprite) return;
+
+    const existing = sprite.userData.floorPresenceMesh;
+    if (existing) {
+      // Keep texture in sync after async load.
+      const tex = sprite.material?.map ?? null;
+      if (existing.material?.uniforms?.tTile) {
+        existing.material.uniforms.tTile.value  = tex;
+        existing.material.uniforms.uHasTile.value = tex ? 1.0 : 0.0;
+      }
+      existing.visible = !!sprite.visible;
+      return;
+    }
+
+    const geom = new THREE.PlaneGeometry(1, 1);
+    const mat  = this._createFloorPresenceMaterial(sprite.material?.map ?? null);
+    if (!mat) { geom.dispose(); return; }
+
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.matrixAutoUpdate = false;
+    mesh.layers.set(FLOOR_PRESENCE_LAYER);
+    mesh.visible = !!sprite.visible;
+    mesh.renderOrder = 999;
+    this._getFloorPresenceScene().add(mesh);
+    sprite.userData.floorPresenceMesh = mesh;
+  }
+
+  /**
+   * Sync the floor-presence mesh transform to match its parent tile sprite.
+   * @param {THREE.Sprite} sprite
+   * @param {TileDocument} tileDoc
+   */
+  _updateFloorPresenceMeshTransform(sprite, tileDoc) {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const mesh = sprite?.userData?.floorPresenceMesh;
+    if (!mesh) return;
+
+    mesh.position.copy(sprite.position);
+    mesh.scale.set(tileDoc.width, tileDoc.height, 1);
+    mesh.rotation.set(0, 0, 0);
+    if (tileDoc.rotation) {
+      mesh.rotation.z = THREE.MathUtils.degToRad(tileDoc.rotation);
+    }
+    mesh.updateMatrix();
+
+    if (mesh.material?.uniforms?.uOpacity) {
+      const a = ('alpha' in tileDoc) ? tileDoc.alpha : 1.0;
+      mesh.material.uniforms.uOpacity.value = Number.isFinite(a) ? a : 1.0;
+    }
+  }
+
+  /**
    * Sync transforms for tile-attached effects from the current runtime sprite state.
    * This is used by systems like TileMotionManager which animate sprites without
    * emitting Foundry document updates every frame.
@@ -1659,11 +1895,13 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const data = this.tileSprites.get(tileId);
     const tileDoc = data?.tileDoc;
 
-    // Keep water occluder aligned with runtime transform, including animated
-    // rotation that lives on sprite.material.rotation.
+    // Keep water occluder and floor-presence mesh aligned with runtime transform,
+    // including animated rotation that lives on sprite.material.rotation.
     if (tileDoc) {
       try {
         this._ensureWaterOccluderMesh(data, tileDoc);
+        this._ensureFloorPresenceMesh(data, tileDoc);
+        this._ensureBelowFloorPresenceMesh(data, tileDoc);
         const runtimeDoc = this._runtimeOccluderDoc;
         runtimeDoc.width = Number.isFinite(tileDoc.width) ? tileDoc.width : 0;
         runtimeDoc.height = Number.isFinite(tileDoc.height) ? tileDoc.height : 0;
@@ -1671,6 +1909,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         const runtimeAlpha = Number(sprite?.material?.opacity);
         runtimeDoc.alpha = Number.isFinite(runtimeAlpha) ? runtimeAlpha : (Number.isFinite(tileDoc.alpha) ? tileDoc.alpha : 1);
         this._updateWaterOccluderMeshTransform(sprite, runtimeDoc);
+        this._updateFloorPresenceMeshTransform(sprite, runtimeDoc);
+        this._updateBelowFloorPresenceMeshTransform(sprite, runtimeDoc);
       } catch (_) {
       }
     }
@@ -2832,6 +3072,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       if (spriteData) {
         this._ensureWaterOccluderMesh(spriteData, tileDoc);
         this._updateWaterOccluderMeshTransform(sprite, tileDoc);
+        this._ensureFloorPresenceMesh(spriteData, tileDoc);
+        this._updateFloorPresenceMeshTransform(sprite, tileDoc);
+        this._ensureBelowFloorPresenceMesh(spriteData, tileDoc);
+        this._updateBelowFloorPresenceMeshTransform(sprite, tileDoc);
 
         // If the occluder mesh already exists (it may have been created while
         // the tile texture was still loading), update its tile texture uniforms
@@ -2930,6 +3174,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     this._ensureWaterOccluderMesh(this.tileSprites.get(tileDoc.id), tileDoc);
+    this._ensureFloorPresenceMesh(this.tileSprites.get(tileDoc.id), tileDoc);
+    this._ensureBelowFloorPresenceMesh(this.tileSprites.get(tileDoc.id), tileDoc);
 
     if (sprite.userData.isOverhead) {
       this._overheadTileIds.add(tileDoc.id);
@@ -3014,6 +3260,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       this.updateSpriteTransform(sprite, targetDoc);
       this._ensureWaterOccluderMesh(spriteData, targetDoc);
       this._updateWaterOccluderMeshTransform(sprite, targetDoc);
+      this._ensureFloorPresenceMesh(spriteData, targetDoc);
+      this._updateFloorPresenceMeshTransform(sprite, targetDoc);
+      this._ensureBelowFloorPresenceMesh(spriteData, targetDoc);
+      this._updateBelowFloorPresenceMeshTransform(sprite, targetDoc);
 
       try {
         this.tileBindingManager.onTileTransformChanged(tileDoc.id, sprite);
@@ -3111,6 +3361,20 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         const a = ('alpha' in targetDoc) ? targetDoc.alpha : 1.0;
         occ.material.uniforms.uOpacity.value = Number.isFinite(a) ? a : 1.0;
       }
+      // Keep floor-presence mesh in sync.
+      const fp = sprite.userData?.floorPresenceMesh;
+      if (fp) {
+        fp.visible = !!sprite.visible;
+      }
+      if (fp?.material?.uniforms?.uOpacity) {
+        const a = ('alpha' in targetDoc) ? targetDoc.alpha : 1.0;
+        fp.material.uniforms.uOpacity.value = Number.isFinite(a) ? a : 1.0;
+      }
+      // Keep below-floor-presence mesh in sync (visible only for levelsHidden tiles).
+      const bfp = sprite.userData?.belowFloorPresenceMesh;
+      if (bfp) {
+        bfp.visible = !!sprite.userData?.levelsHidden;
+      }
 
       try {
         this.tileBindingManager.onTileVisibilityChanged(tileDoc.id, sprite);
@@ -3178,6 +3442,28 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       } catch (_) {
       }
       sprite.userData.waterOccluderMesh = null;
+    }
+
+    const fp = sprite?.userData?.floorPresenceMesh;
+    if (fp) {
+      try {
+        this._getFloorPresenceScene().remove(fp);
+        fp.geometry?.dispose?.();
+        fp.material?.dispose?.();
+      } catch (_) {
+      }
+      sprite.userData.floorPresenceMesh = null;
+    }
+
+    const bfp = sprite?.userData?.belowFloorPresenceMesh;
+    if (bfp) {
+      try {
+        this._getBelowFloorPresenceScene().remove(bfp);
+        bfp.geometry?.dispose?.();
+        bfp.material?.dispose?.();
+      } catch (_) {
+      }
+      sprite.userData.belowFloorPresenceMesh = null;
     }
 
     this.scene.remove(sprite);
@@ -3575,6 +3861,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     if (data) {
       this._ensureWaterOccluderMesh(data, tileDoc);
       this._updateWaterOccluderMeshTransform(sprite, tileDoc);
+      this._ensureFloorPresenceMesh(data, tileDoc);
+      this._updateFloorPresenceMeshTransform(sprite, tileDoc);
+      this._ensureBelowFloorPresenceMesh(data, tileDoc);
+      this._updateBelowFloorPresenceMeshTransform(sprite, tileDoc);
     }
 
     // Tile motion is layered on top of the base transform.
@@ -3680,12 +3970,21 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           // so upper/lower floors do not bleed through, even for GMs.
           if (strictBandVisibility) {
             sprite.visible = false;
+            // Tag for D++ specular: below-floor tiles keep their specular color
+            // pass alive so it can render through transparent upper-floor gaps
+            // (gated by floor presence in the shader).
+            sprite.userData.levelsHidden = true;
           } else if (isGM) {
             // GM: show elevation-hidden tiles at reduced opacity in non-strict mode
             sprite.material.opacity = Math.min(sprite.material.opacity, 0.25);
+            sprite.userData.levelsHidden = false;
           } else {
             sprite.visible = false;
+            sprite.userData.levelsHidden = true;
           }
+        } else {
+          // Elevation visible — clear below-floor tag.
+          sprite.userData.levelsHidden = false;
         }
       } catch (_) {
         // Elevation visibility check failed — fail open (keep tile visible)
@@ -3716,6 +4015,28 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         // rather than just tileDoc.alpha
         const spriteOpacity = sprite?.material?.opacity ?? 1.0;
         occ.material.uniforms.uOpacity.value = Number.isFinite(spriteOpacity) ? spriteOpacity : 1.0;
+      }
+    }
+
+    // Keep floor-presence mesh visibility/opacity synced (same logic as occluder).
+    const fp = sprite?.userData?.floorPresenceMesh;
+    if (fp) {
+      fp.visible = !!sprite.visible;
+      if (fp.material?.uniforms?.uOpacity) {
+        const spriteOpacity = sprite?.material?.opacity ?? 1.0;
+        fp.material.uniforms.uOpacity.value = Number.isFinite(spriteOpacity) ? spriteOpacity : 1.0;
+      }
+    }
+
+    // Keep below-floor-presence mesh visibility synced.
+    // This mesh is ONLY visible when the tile is levelsHidden (i.e. below the current floor),
+    // so the belowFloorPresenceTarget RT shows exactly where below-floor tiles exist.
+    const bfp = sprite?.userData?.belowFloorPresenceMesh;
+    if (bfp) {
+      bfp.visible = !!sprite.userData?.levelsHidden;
+      if (bfp.material?.uniforms?.uOpacity) {
+        const spriteOpacity = sprite?.material?.opacity ?? 1.0;
+        bfp.material.uniforms.uOpacity.value = Number.isFinite(spriteOpacity) ? spriteOpacity : 1.0;
       }
     }
 
@@ -3871,11 +4192,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           }
           _ev(`tile.decode OK: ${_shortPath} (${bitmap.width}x${bitmap.height})`);
 
-          // Cap the canvas copy at 4096×4096 to limit the synchronous
-          // drawImage cost. A 6750×6750 tile = 182M pixels and blocks the
-          // event loop for 1-3s; 4096×4096 = 67M pixels is ~3× cheaper.
-          // Downscale via createImageBitmap (off-thread) when oversized.
-          const TILE_MAX_DIM = 4096;
+          // Cap the canvas copy to limit synchronous drawImage cost.
+          // Raised from 4096 to 8192 so 6K-8K scene maps are no longer
+          // downscaled — the original 4096 limit was visibly degrading tile
+          // albedo detail. The resize still runs off-thread via createImageBitmap
+          // so the event loop is not blocked.
+          const TILE_MAX_DIM = 8192;
           let texSource = bitmap;
           try {
             let srcBitmap = bitmap;

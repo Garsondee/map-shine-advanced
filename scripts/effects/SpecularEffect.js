@@ -202,6 +202,17 @@ export class SpecularEffect extends EffectBase {
      * @type {Set<string>}
      */
     this._warnedNullBundleKeys = new Set();
+
+    /**
+     * Ground-floor specular/roughness/normal textures cached on the first
+     * (ground) floor pass. The base mesh always binds these regardless of
+     * which floor pass is running — the fragment shader's floor presence
+     * system (tFloorPresence + tBelowSpecularMap) handles per-pixel compositing.
+     * @type {THREE.Texture|null}
+     */
+    this._groundFloorSpecular  = null;
+    this._groundFloorRoughness = null;
+    this._groundFloorNormal    = null;
   }
 
   /**
@@ -1050,6 +1061,9 @@ export class SpecularEffect extends EffectBase {
         }
         // Clear per-floor cache so next bindFloorMasks() picks up the new global mask.
         this._floorStates.clear();
+        this._groundFloorSpecular = null;
+        this._groundFloorRoughness = null;
+        this._groundFloorNormal = null;
       };
     };
 
@@ -1069,6 +1083,66 @@ export class SpecularEffect extends EffectBase {
    * @param {string} floorKey - Compositor key for this floor (e.g. "0:200").
    */
   bindFloorMasks(bundle, floorKey) {
+    // Compute floor identity first — needed for mesh/overlay gating regardless
+    // of whether the compositor bundle is cached yet.
+    const _bandBottom = Number(String(floorKey).split(':')[0]);
+    const _isBaseMeshFloor = Number.isFinite(_bandBottom) && _bandBottom <= 0;
+
+    // ── Base mesh visibility ─────────────────────────────────────────────────
+    // The base mesh must ALWAYS render. It is the ground plane albedo + PBR
+    // output. Hiding it in upper-floor passes removes the scene background.
+    // Instead, the base mesh always carries ground-floor specular; per-pixel
+    // floor compositing is handled by the fragment shader via tFloorPresence
+    // and tBelowSpecularMap. Upper-floor specular comes exclusively from tile
+    // overlays (additive, uOutputMode=1).
+
+    // ── Per-floor tile overlay visibility gating ─────────────────────────────
+    // Run BEFORE the null-bundle early-return so gating is always applied even
+    // when the compositor bundle isn't cached yet. Without this, tile overlays
+    // stay in their last-pass visible state and bleed into the wrong floor.
+    //
+    // Cumulative rule: show overlays for tiles on floor N or any floor below N
+    // so lower-floor specular accumulates additively through upper-floor gaps.
+    // Membership: tile belongs to floor N or below if rangeBottom <= bandBottom.
+    if (this._tileOverlays.size > 0) {
+      const _fParts    = String(floorKey).split(':');
+      const _fIsLevels = _fParts[0] !== '' && _fParts[1] !== '';
+      const _fBandBot  = _bandBottom;
+      const _fValid    = _fIsLevels && Number.isFinite(_fBandBot);
+
+      for (const [_oid, _oEntry] of this._tileOverlays.entries()) {
+        let _oVisible = true;
+
+        if (_fValid) {
+          // Prefer the tileDoc stored at bind time (always available); fall
+          // back to canvas/TileManager lookup for legacy entries.
+          // canvas.tiles.get() returns a Tile placeable — unwrap to its
+          // TileDocument so tileHasLevelsRange can read .flags.levels.
+          const _oRaw = _oEntry.tileDoc
+            ?? canvas?.tiles?.get?.(_oid)
+            ?? window.MapShine?.tileManager?.tileSprites?.get(_oid)?.tileDoc
+            ?? null;
+          const _oTileDoc = _oRaw?.document ?? _oRaw;
+
+          if (_oTileDoc) {
+            if (tileHasLevelsRange(_oTileDoc)) {
+              const _oFlags = readTileLevelsFlags(_oTileDoc);
+              _oVisible = Number(_oFlags.rangeBottom) <= _fBandBot;
+            } else {
+              const _oElev = Number.isFinite(Number(_oTileDoc.elevation)) ? Number(_oTileDoc.elevation) : 0;
+              _oVisible = _oElev <= _fBandBot;
+            }
+          }
+        }
+
+        // Store the gate on the entry; render()'s per-frame visibility loop
+        // reads it to ensure the floor-pass setting survives sprite.visible
+        // overrides from setFloorVisible(). Don't set mesh.visible here —
+        // render() is the last write before renderer.render(scene, camera).
+        _oEntry._floorGate = _oVisible;
+      }
+    }
+
     // Null bundle means GpuSceneMaskCompositor.preloadAllFloors() hasn't cached
     // this floor yet. The effect continues with whatever masks were last bound —
     // likely from the wrong floor. Warn once per key so the problem is visible.
@@ -1116,21 +1190,31 @@ export class SpecularEffect extends EffectBase {
 
     const black = this._fallbackBlack || this._getFallbackBlackTexture?.() || null;
 
-    // The base mesh is the scene background plane (Ground.webp albedo). It must
-    // only receive the specular mask from the GROUND FLOOR pass (bandBottom <= 0).
-    // Upper-floor specular is applied exclusively via per-tile overlays
-    // (bindTileSprite), which correctly pair each tile's own albedo with its
-    // specular mask. Applying an upper floor's specular to the ground-albedo base
-    // mesh produces a wrong albedo×specular combination that visually breaks the
-    // ground floor when viewed from an upper floor.
-    const _bandBottom = Number(String(floorKey).split(':')[0]);
-    const _isBaseMeshFloor = Number.isFinite(_bandBottom) && _bandBottom <= 0;
+    // ── Base mesh uniform strategy ────────────────────────────────────────────
+    // The base mesh renders in EVERY floor pass (opaque NormalBlending). If we
+    // swap its specular to black on upper-floor passes, it overwrites the
+    // accumulated ground-floor specular from pass 0. Instead, we ALWAYS bind
+    // the ground-floor specular to the base mesh. The fragment shader's floor
+    // presence system (tFloorPresence + tBelowSpecularMap) handles per-pixel
+    // compositing so specular only shows through gaps in upper-floor tiles.
+    //
+    // Cache the ground-floor textures on the first (ground) pass so they
+    // persist unchanged through all subsequent upper-floor passes.
+    if (_isBaseMeshFloor) {
+      this._groundFloorSpecular  = newSpecular;
+      this._groundFloorRoughness = newRoughness;
+      this._groundFloorNormal    = newNormal;
+    }
+    // Always bind ground-floor textures to the base mesh material.
+    const gfSpec  = this._groundFloorSpecular  ?? newSpecular;
+    const gfRough = this._groundFloorRoughness ?? newRoughness;
+    const gfNorm  = this._groundFloorNormal    ?? newNormal;
 
-    if (u.uSpecularMap)     u.uSpecularMap.value     = (_isBaseMeshFloor ? newSpecular  : null) || black;
-    if (u.uRoughnessMap)    u.uRoughnessMap.value    = (_isBaseMeshFloor ? newRoughness : null) || black;
-    if (u.uNormalMap)       u.uNormalMap.value       = (_isBaseMeshFloor ? newNormal    : null) || black;
-    if (u.uHasRoughnessMap) u.uHasRoughnessMap.value = _isBaseMeshFloor && !!newRoughness;
-    if (u.uHasNormalMap)    u.uHasNormalMap.value    = _isBaseMeshFloor && !!newNormal;
+    if (u.uSpecularMap)     u.uSpecularMap.value     = gfSpec  || black;
+    if (u.uRoughnessMap)    u.uRoughnessMap.value    = gfRough || black;
+    if (u.uNormalMap)       u.uNormalMap.value       = gfNorm  || black;
+    if (u.uHasRoughnessMap) u.uHasRoughnessMap.value = !!gfRough;
+    if (u.uHasNormalMap)    u.uHasNormalMap.value    = !!gfNorm;
 
     // For upper-floor passes, lazily upgrade any tile overlay that was originally
     // bound without a colorMesh (specularMask=null at bind time — preloadAllFloors
@@ -1154,55 +1238,6 @@ export class SpecularEffect extends EffectBase {
       }
     }
 
-    // ── Per-floor tile overlay visibility gating ─────────────────────────────
-    // FloorStack.setFloorVisible() manages tile sprites and token sprites, but
-    // NOT SpecularEffect's tile overlay meshes (colorMesh / occluderMesh). These
-    // are independent THREE.js objects added directly to the scene. Without
-    // per-floor gating, ALL floor overlays render in every floor pass — causing
-    // every floor's specular to combine on the ground-floor render and the upper
-    // floor to show ground-floor tile overlays as well.
-    //
-    // Strategy: parse the floor band from floorKey. For Levels scenes, show only
-    // overlays whose tile's elevation/Levels range overlaps the current band. For
-    // non-Levels (single-floor) scenes, leave all overlays visible.
-    if (this._tileOverlays.size > 0) {
-      const _fParts   = String(floorKey).split(':');
-      // Non-Levels sentinel is ':' — both parts are empty strings.
-      const _fIsLevels = _fParts[0] !== '' && _fParts[1] !== '';
-      const _fBandBot  = Number(_fParts[0]);
-      const _fBandTop  = Number(_fParts[1]);
-      const _fValid    = _fIsLevels && Number.isFinite(_fBandBot) && Number.isFinite(_fBandTop);
-
-      for (const [_oid, _oEntry] of this._tileOverlays.entries()) {
-        let _oVisible = true; // default: show all overlays in non-Levels scenes
-
-        if (_fValid) {
-          // Resolve tileDoc via canvas lookup or TileManager sprite cache.
-          const _oTileDoc = canvas?.tiles?.get?.(_oid)
-            ?? window.MapShine?.tileManager?.tileSprites?.get(_oid)?.tileDoc
-            ?? null;
-
-          if (_oTileDoc) {
-            if (tileHasLevelsRange(_oTileDoc)) {
-              // Tile has explicit Levels range flags — show only if it overlaps
-              // the current floor band (standard interval overlap test).
-              const _oFlags  = readTileLevelsFlags(_oTileDoc);
-              const _oBot    = Number(_oFlags.rangeBottom);
-              const _oTop    = Number(_oFlags.rangeTop);
-              _oVisible = _oBot <= _fBandTop && _fBandBot <= _oTop;
-            } else {
-              // No Levels range: assign tile to the band that contains its elevation.
-              const _oElev = Number.isFinite(Number(_oTileDoc.elevation))
-                ? Number(_oTileDoc.elevation) : 0;
-              _oVisible = _oElev >= _fBandBot && _oElev <= _fBandTop;
-            }
-          }
-        }
-
-        if (_oEntry.occluderMesh) _oEntry.occluderMesh.visible = _oVisible;
-        if (_oEntry.colorMesh)    _oEntry.colorMesh.visible    = _oVisible;
-      }
-    }
   }
 
   /**
@@ -1371,6 +1406,7 @@ export class SpecularEffect extends EffectBase {
     if (colorMesh) this._scene.add(colorMesh);
     this._tileOverlays.set(tileId, {
       sprite,
+      tileDoc,
       occluderMesh,
       occluderMaterial,
       colorMesh,
@@ -1617,9 +1653,22 @@ export class SpecularEffect extends EffectBase {
       // mesh alive so specular shows through transparent upper-floor gaps.
       // Occluder mesh is always hidden for below-floor tiles (no depth writes).
       const isLevelsHidden = !!sprite.userData?.levelsHidden;
-      const shouldShow = (!!sprite.visible || isLevelsHidden) && spriteOpacity > 0.01;
+      // _floorGate set by bindFloorMasks() in the per-floor render loop:
+      //   false     → higher-floor tile; hide to prevent bleed
+      //   true      → current/lower-floor tile; show color mesh regardless of
+      //               sprite.visible (sprite may be hidden by setFloorVisible)
+      //   undefined → no floor gating (non-Levels scene)
+      const floorGate = entry._floorGate;
+      let shouldShow;
+      if (floorGate === false) {
+        shouldShow = false;
+      } else if (floorGate === true) {
+        shouldShow = spriteOpacity > 0.01;
+      } else {
+        shouldShow = (!!sprite.visible || isLevelsHidden) && spriteOpacity > 0.01;
+      }
       for (const mesh of meshes) {
-        if (mesh === entry?.occluderMesh && isLevelsHidden) {
+        if (mesh === entry?.occluderMesh && (isLevelsHidden || floorGate === true)) {
           if (mesh.visible) mesh.visible = false;
           continue;
         }
@@ -2342,11 +2391,25 @@ export class SpecularEffect extends EffectBase {
           // by tFloorPresence). The OCCLUDER mesh is always hidden for
           // below-floor tiles to avoid incorrect depth writes.
           const isLevelsHidden = !!sprite.userData?.levelsHidden;
-          const shouldShow = (!!sprite.visible || isLevelsHidden) && spriteOpacity > 0.01;
+          // _floorGate set by bindFloorMasks() in the per-floor render loop:
+          //   false     → higher-floor tile; hide to prevent bleed
+          //   true      → current/lower-floor tile; show color mesh regardless of
+          //               sprite.visible (sprite may be hidden by setFloorVisible)
+          //   undefined → no floor gating (non-Levels scene)
+          const floorGate = entry._floorGate;
+          let shouldShow;
+          if (floorGate === false) {
+            shouldShow = false;
+          } else if (floorGate === true) {
+            shouldShow = spriteOpacity > 0.01;
+          } else {
+            shouldShow = (!!sprite.visible || isLevelsHidden) && spriteOpacity > 0.01;
+          }
 
           for (const mesh of meshes) {
-            // Occluder mesh: never show for below-floor tiles.
-            if (mesh === entry?.occluderMesh && isLevelsHidden) {
+            // Occluder mesh: never show for below-floor or lower-floor pass-through
+            // tiles (avoids incorrect depth writes when tile is not on active floor).
+            if (mesh === entry?.occluderMesh && (isLevelsHidden || floorGate === true)) {
               if (mesh.visible) mesh.visible = false;
               continue;
             }

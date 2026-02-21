@@ -3218,6 +3218,41 @@ async function createThreeCanvas(scene) {
     }, 'timeOfDay.refresh', Severity.COSMETIC);
     if (isDebugLoad) dlp.end('fin.timeOfDay');
 
+    // MS-LVL-060: Pre-load masks for all floor bands DURING the loading screen.
+    // Previously this was fire-and-forget (after session.finish), causing a long
+    // pause on the first floor switch if the user navigated before it completed.
+    // Awaiting it here ensures all floor bundles are cached before interaction.
+    if (isDebugLoad) dlp.begin('fin.preloadAllFloors', 'finalize');
+    safeCall(() => loadingOverlay.setStage('final', 0.85, 'Pre-loading floors…', { keepAuto: true }), 'overlay.preloadFloors', Severity.COSMETIC);
+    await safeCallAsync(async () => {
+      const c = window.MapShine?.sceneComposer;
+      const compositor = c?._sceneMaskCompositor;
+      if (compositor && typeof compositor.preloadAllFloors === 'function') {
+        await compositor.preloadAllFloors(canvas?.scene, {
+          lastMaskBasePath: c._lastMaskBasePath ?? null,
+          initialMasks: c.currentBundle?.masks ?? null,
+          activeLevelContext: window.MapShine?.activeLevelContext ?? null
+        });
+
+        // Build the floor ID texture once all floor caches are warm.
+        safeCall(() => {
+          const fs = window.MapShine?.floorStack;
+          if (!fs) return;
+          const visibleFloors = fs.getVisibleFloors?.() ?? [];
+          const floorBundles = visibleFloors
+            .map(floor => {
+              const meta = compositor._floorMeta?.get(floor.compositorKey);
+              return (meta?.masks?.length) ? { index: floor.index, bundle: { masks: meta.masks } } : null;
+            })
+            .filter(Boolean);
+          if (floorBundles.length > 0) {
+            compositor.buildFloorIdTexture(floorBundles);
+          }
+        }, 'levelMaskPreload.floorIdTexture', Severity.COSMETIC);
+      }
+    }, 'levelMaskPreload', Severity.DEGRADED);
+    if (isDebugLoad) dlp.end('fin.preloadAllFloors');
+
     _sectionStart('fin.fadeIn');
     dlp.event('fin.fadeIn: loading pipeline complete — preparing overlay transition');
 
@@ -3257,39 +3292,6 @@ async function createThreeCanvas(scene) {
     // Mark the load session as successfully completed (records duration).
     session.finish();
     if (window.MapShine) window.MapShine._loadSession = session;
-
-    // MS-LVL-060: Background-preload masks for all floor bands.
-    // P6-06: Uses GpuSceneMaskCompositor.preloadAllFloors() directly.
-    // This warms the per-floor compositor cache so level switches are instant.
-    safeCallAsync(async () => {
-      const c = window.MapShine?.sceneComposer;
-      const compositor = c?._sceneMaskCompositor;
-      if (compositor && typeof compositor.preloadAllFloors === 'function') {
-        await compositor.preloadAllFloors(canvas?.scene, {
-          lastMaskBasePath: c._lastMaskBasePath ?? null,
-          initialMasks: c.currentBundle?.masks ?? null,
-          activeLevelContext: window.MapShine?.activeLevelContext ?? null
-        });
-
-        // Build the floor ID texture once all floor caches are warm.
-        // This gives post-processing effects a world-space per-pixel floor index
-        // from the very first frame, without waiting for the first floor transition.
-        safeCall(() => {
-          const fs = window.MapShine?.floorStack;
-          if (!fs) return;
-          const visibleFloors = fs.getVisibleFloors?.() ?? [];
-          const floorBundles = visibleFloors
-            .map(floor => {
-              const meta = compositor._floorMeta?.get(floor.compositorKey);
-              return (meta?.masks?.length) ? { index: floor.index, bundle: { masks: meta.masks } } : null;
-            })
-            .filter(Boolean);
-          if (floorBundles.length > 0) {
-            compositor.buildFloorIdTexture(floorBundles);
-          }
-        }, 'levelMaskPreload.floorIdTexture', Severity.COSMETIC);
-      }
-    }, 'levelMaskPreload', Severity.COSMETIC);
 
     // Debug helper: call window.MapShine._debugRenderState() in the browser console
     // to dump the current render pipeline state for diagnosing albedo/mask issues.

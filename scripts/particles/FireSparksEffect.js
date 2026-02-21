@@ -118,13 +118,25 @@ class MultiPointEmitterShape {
 }
 
 class FireMaskShape {
-  constructor(points, width, height, offsetX, offsetY, ownerEffect) {
+  /**
+   * @param {Float32Array} points - Packed (u, v, brightness) triples
+   * @param {number} width - Scene width in world units
+   * @param {number} height - Scene height in world units
+   * @param {number} offsetX - Scene X origin in world units
+   * @param {number} offsetY - Scene Y origin in world units
+   * @param {object} ownerEffect - FireSparksEffect instance
+   * @param {number} [levelElevation=0] - Z offset above groundZ for this floor.
+   *   Must be baked in at construction time — do NOT read _activeLevelElevation
+   *   at spawn time, as that reflects the player's current floor, not this shape's floor.
+   */
+  constructor(points, width, height, offsetX, offsetY, ownerEffect, levelElevation = 0) {
     this.points = points;
     this.width = width;
     this.height = height;
     this.offsetX = offsetX;
     this.offsetY = offsetY;
     this.ownerEffect = ownerEffect;
+    this.levelElevation = Number.isFinite(levelElevation) ? levelElevation : 0;
     this.type = 'fire_mask'; 
   }
   
@@ -171,13 +183,13 @@ class FireMaskShape {
       : 1000;
 
     // When Levels is active, fire on upper floors must spawn at the floor's
-    // elevation offset above groundZ. The level elevation is set by the
-    // mask rebuild handler in canvas-replacement.js on each level change.
-    const levelElevation = Number(window.MapShine?._activeLevelElevation) || 0;
-
+    // elevation offset above groundZ. Use the elevation baked in at construction
+    // time (this.levelElevation) rather than _activeLevelElevation, which reflects
+    // the player's current floor and would be wrong for cached upper-floor systems
+    // when the player is still on the ground floor.
     p.position.x = this.offsetX + u * this.width;
     p.position.y = this.offsetY + (1.0 - v) * this.height;
-    p.position.z = groundZ + levelElevation;
+    p.position.z = groundZ + this.levelElevation;
 
     // 3. TAGGING: Check "Outdoors" mask to determine wind susceptibility.
     // We query the WeatherController using the same (u, 1-v) logic? 
@@ -1851,9 +1863,10 @@ export class FireSparksEffect extends EffectBase {
    * Internal: apply a fire mask entry (from setAssetBundle or registry callback).
    * Extracted from setAssetBundle to share logic with connectToRegistry.
    * @param {{type: string, texture: THREE.Texture}} fireMask
+   * @param {string|null} [floorKey=null] - Floor key for per-floor GPU readback
    * @private
    */
-  _applyFireMask(fireMask) {
+  _applyFireMask(fireMask, floorKey = null) {
     if (fireMask && this.particleSystemRef && this.particleSystemRef.batchRenderer) {
       const batch = this.particleSystemRef.batchRenderer;
       const scene = this.scene;
@@ -1907,7 +1920,7 @@ export class FireSparksEffect extends EffectBase {
       // 1. Convert the `_Fire` bitmap into a compact list of UVs. This is a
       //    one-time CPU pass that builds a static lookup table; all per-frame
       //    spawning is then O(1) by randomly indexing into this array.
-      const points = this._generatePoints(fireMask.texture);
+      const points = this._generatePoints(fireMask.texture, 0.1, floorKey);
       if (!points) return;
       const d = canvas.dimensions;
       // 2. Map mask UVs across the **scene rectangle**. The `_Fire` mask is
@@ -1921,6 +1934,16 @@ export class FireSparksEffect extends EffectBase {
       // Invert Y so that mask v=0 is the **visual top** of the scene and
       // v=1 is the bottom, matching the base plane and token/tile transforms.
       const sy = (d.height || height) - (d.sceneY || 0) - height;
+
+      // Derive the floor's elevation from floorKey ("bottom:top").
+      // This is baked into FireMaskShape so particles always spawn at the
+      // correct Z for their floor, regardless of which floor the player is on.
+      let floorElevation = 0;
+      if (floorKey && typeof floorKey === 'string') {
+        const bandBottom = Number(floorKey.split(':')[0]);
+        if (Number.isFinite(bandBottom) && bandBottom > 0) floorElevation = bandBottom;
+      }
+
       const BUCKET_SIZE = 2000;
       const buckets = new Map();
       const totalCount = points.length / 3;
@@ -1947,7 +1970,7 @@ export class FireSparksEffect extends EffectBase {
         const bucketPoints = new Float32Array(arr);
         const bucketCount = bucketPoints.length / 3;
         const weight = totalCount > 0 ? (bucketCount / totalCount) : 1.0;
-        const shape = new FireMaskShape(bucketPoints, width, height, sx, sy, this);
+        const shape = new FireMaskShape(bucketPoints, width, height, sx, sy, this, floorElevation);
 
         const fireSystem = this._createFireSystem({
           shape: shape,
@@ -2205,7 +2228,7 @@ export class FireSparksEffect extends EffectBase {
     ctx.putImageData(imageData, 0, 0);
   }
   
-  _generatePoints(maskTexture, threshold = 0.1) {
+  _generatePoints(maskTexture, threshold = 0.1, floorKey = null) {
     // Use GPU compositor readback ONLY when maskTexture is a compositor RT
     // (WebGLRenderTarget textures have image = {width, height} with no .src).
     // Bundle textures from the asset loader are HTMLImageElements with a .src —
@@ -2215,8 +2238,20 @@ export class FireSparksEffect extends EffectBase {
     // spawn at compositor RT positions (often wider than the bundle texture).
     const isCompositorRT = maskTexture?.image != null && !maskTexture.image.src;
     const composer = window.MapShine?.sceneComposer;
-    const gpuPixels = isCompositorRT ? composer?.getCpuPixels?.('fire') : null;
-    const dims = isCompositorRT ? composer?._sceneMaskCompositor?.getOutputDims?.('fire') : null;
+    const compositor = composer?._sceneMaskCompositor;
+    // CRITICAL: use getCpuPixelsForFloor when a floorKey is provided so we read
+    // the correct floor's RT, not the currently active floor's RT. Without this,
+    // bindFloorMasks for the upper floor reads the ground floor's fire data,
+    // causing particles to spawn across the whole scene instead of the upper tile.
+    let gpuPixels = null;
+    if (isCompositorRT) {
+      if (floorKey && compositor?.getCpuPixelsForFloor) {
+        gpuPixels = compositor.getCpuPixelsForFloor(floorKey, 'fire');
+      } else {
+        gpuPixels = composer?.getCpuPixels?.('fire') ?? null;
+      }
+    }
+    const dims = isCompositorRT ? compositor?.getOutputDims?.('fire') : null;
 
     let data, imgW, imgH;
 
@@ -2225,11 +2260,12 @@ export class FireSparksEffect extends EffectBase {
       data = gpuPixels;
       imgW = dims.width;
       imgH = dims.height;
-      // WebGL readPixels stores rows bottom-to-top: row 0 = rendered BOTTOM of scene.
-      // The CPU canvas path (drawImage) stores rows top-to-bottom: row 0 = visual TOP.
-      // _applyFireMask expects the CPU convention (v=0 at visual TOP), so flip the
-      // normalised y for GPU-sourced pixels.
-      gpuFlipY = true;
+      // NOTE: Although WebGL readPixels is traditionally bottom-to-top, our compositor
+      // shader already flips V when placing tiles into the scene-space render target.
+      // That means the RT's pixel rows align with the CPU canvas convention used by
+      // drawImage (row 0 = visual TOP of the scene). Flipping again here would mirror
+      // the result vertically, producing the observed y-flipped fire spawn locations.
+      gpuFlipY = false;
       log.info('FireSparksEffect: using GPU compositor readback for fire mask scan');
     } else {
       // Fallback: CPU canvas drawImage from the texture's HTMLImageElement.
@@ -2259,8 +2295,8 @@ export class FireSparksEffect extends EffectBase {
         const idx = i / 4;
         const x = (idx % imgW) / imgW;
         const rawY = Math.floor(idx / imgW) / imgH;
-        // GPU readback is bottom-to-top; flip to top-to-bottom to match
-        // the CPU canvas convention that _applyFireMask expects.
+        // When gpuFlipY=false (default), rawY already matches the CPU canvas convention
+        // expected by _applyFireMask (v=0 at visual TOP).
         const y = gpuFlipY ? (1.0 - rawY) : rawY;
         coords.push(x, y, b);
       }
@@ -3295,12 +3331,12 @@ export class FireSparksEffect extends EffectBase {
    */
   bindFloorMasks(bundle, floorKey) {
     // Null bundle means GpuSceneMaskCompositor.preloadAllFloors() hasn't cached
-    // this floor yet. Fire particles will continue using whatever mask was
-    // previously active — likely the wrong floor. Warn once per key.
+    // this floor yet. Warn once per key and do nothing — spawning fire from a
+    // scene-wide mask would place particles on the wrong floor.
     if (!bundle) {
       if (!this._warnedNullBundleKeys.has(floorKey)) {
         this._warnedNullBundleKeys.add(floorKey);
-        log.warn(`bindFloorMasks: null bundle for floor "${floorKey}" — FireSparksEffect will use stale fire mask (likely the wrong floor). Run: await MapShine.debug.diagnoseFloorRendering()`);
+        log.warn(`bindFloorMasks: null bundle for floor "${floorKey}" — FireSparksEffect will skip fire until compositor caches this floor`);
       }
       return;
     }
@@ -3310,6 +3346,11 @@ export class FireSparksEffect extends EffectBase {
     const masks = bundle.masks ?? [];
     const fireEntry = masks.find(m => m.id === 'fire' || m.type === 'fire');
     const floorMaskTex = fireEntry?.texture ?? null;
+
+    // Log when a bundle exists but has no fire mask — helps diagnose compositor issues.
+    if (!floorMaskTex) {
+      log.debug(`bindFloorMasks: floor "${floorKey}" bundle has no fire mask (${masks.length} masks: ${masks.map(m => m.type || m.id).join(', ')})`);
+    }
 
     // No-op: this floor is already active and mask is unchanged.
     if (this._activeFloorKey === floorKey) {
@@ -3345,7 +3386,10 @@ export class FireSparksEffect extends EffectBase {
 
     if (floorMaskTex) {
       const fireMask = { type: 'fire', texture: floorMaskTex };
-      this._applyFireMask(fireMask); // builds systems into globalSystems etc.
+      // Pass floorKey so _generatePoints reads the correct floor's GPU RT,
+      // not the currently active floor's RT (which is the ground floor during
+      // the per-floor render loop when the upper floor is being bound).
+      this._applyFireMask(fireMask, floorKey);
     }
 
     // Cache the newly-built systems for future floor visits.

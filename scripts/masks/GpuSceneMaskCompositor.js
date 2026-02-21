@@ -418,21 +418,36 @@ export class GpuSceneMaskCompositor {
       //  - preserveAcrossFloors types (water, windows, specular, etc.):
       //    transitionToFloor would 'replace' with the black mask instead of
       //    preserving the valid ground-floor mask.
-      //  - Non-preserve types (outdoors, fire, dust, etc.):
+      //  - Non-preserve types with source-over mode (outdoors, etc.):
       //    the black mask is applied as valid coverage data. For outdoors,
       //    R=0 everywhere means "fully indoors", suppressing caustics and
       //    cloud shadows in the water shader.
       //
+      // EXCEPTION: lighten-mode non-preserveAcrossFloors masks (fire, dust, ash)
+      // skip this check entirely. Their coverage is often very small (e.g. a
+      // fireplace covering <1% of the scene RT). The sparse 4×4 grid sampling
+      // (16 pixels) frequently misses these regions, incorrectly discarding the
+      // compositor's valid scene-space mask. When this happens, mergeMasks keeps
+      // the file-based tile-space bundle mask instead, and _generatePoints maps
+      // tile-space UVs to the full scene rect → particles spawn everywhere.
+      // For these types, including an empty mask is harmless: _generatePoints
+      // finds no bright pixels above threshold → no particle systems are created.
+      //
       // Skipping empty masks lets transitionToFloor either preserve (if
       // preserveAcrossFloors) or clear (falling back to default behavior,
       // e.g. no outdoors mask → treat everything as outdoors → caustics work).
-      try {
-        const isNonEmpty = this._readbackIsNonEmpty(renderer, rt);
-        if (!isNonEmpty) {
-          log.debug(`compose: skipping all-zero '${maskType}' mask`);
-          continue;
-        }
-      } catch (_) {}
+      const emr = window.MapShine?.effectMaskRegistry;
+      const maskPolicy = emr?.getPolicy?.(maskType);
+      const skipReadbackCheck = isLighten && !maskPolicy?.preserveAcrossFloors;
+      if (!skipReadbackCheck) {
+        try {
+          const isNonEmpty = this._readbackIsNonEmpty(renderer, rt);
+          if (!isNonEmpty) {
+            log.debug(`compose: skipping all-zero '${maskType}' mask`);
+            continue;
+          }
+        } catch (_) {}
+      }
 
       // The render target texture is the compositor output.
       const outTex = rt.texture;
@@ -616,7 +631,19 @@ export class GpuSceneMaskCompositor {
                     const type = m?.type || m?.id;
                     if (!type) return true;
                     const policy = emr?.getPolicy?.(type);
-                    return !policy?.preserveAcrossFloors;
+                    // Strip preserveAcrossFloors masks (e.g. water) — the registry
+                    // handles preservation; including them would replace valid
+                    // lower-floor masks.
+                    if (policy?.preserveAcrossFloors) return false;
+                    // On upper floors, also strip lighten-mode data masks (fire,
+                    // dust, ash). Bundle masks are tile-space — they match the
+                    // tile image, not the scene. On upper floors the tile doesn't
+                    // span the full scene, so mapping tile-space UVs to the scene
+                    // rect places particles everywhere. The GPU compositor is the
+                    // sole correct source for these scene-space spatial masks.
+                    const mode = COMPOSITE_MODES[type];
+                    if (bandBottom > 0 && mode === 'lighten') return false;
+                    return true;
                   });
                 }
               } catch (_) {}
@@ -636,6 +663,8 @@ export class GpuSceneMaskCompositor {
     // Step 3: Fallback — single-tile bundle load.
     // Strip preserveAcrossFloors mask types (e.g. 'water') — bundle masks are
     // shared across all floors and must not override the registry's preserved slot.
+    // On upper floors, also strip lighten-mode data masks (fire, dust, ash) —
+    // bundle masks are tile-space and can't map to scene-space correctly.
     if (!newMasks && primaryBasePath) {
       try {
         const r = await assetLoader.loadAssetBundle(primaryBasePath, null, {
@@ -647,7 +676,10 @@ export class GpuSceneMaskCompositor {
             const type = m?.type || m?.id;
             if (!type) return true;
             const policy = emr?.getPolicy?.(type);
-            return !policy?.preserveAcrossFloors;
+            if (policy?.preserveAcrossFloors) return false;
+            const mode = COMPOSITE_MODES[type];
+            if (bandBottom > 0 && mode === 'lighten') return false;
+            return true;
           });
           if (!newMasks.length) newMasks = null;
           log.info('composeFloor: fell back to single-tile bundle', { primaryBasePath });
@@ -1001,19 +1033,47 @@ export class GpuSceneMaskCompositor {
    * Performs a GPU readback on first call; subsequent calls return cached data.
    * The cache is invalidated on each compose() call.
    *
+   * Reads from the ACTIVE floor's render target. For per-floor effects that
+   * process floors other than the active one (e.g. FireSparksEffect during the
+   * floor render loop), use getCpuPixelsForFloor(floorKey, maskType) instead.
+   *
    * @param {string} maskType
    * @returns {Uint8Array|null} RGBA pixel data, or null if not available
    */
   getCpuPixels(maskType) {
-    if (this._cpuPixelCache.has(maskType)) {
+    return this.getCpuPixelsForFloor(this._activeFloorKey, maskType);
+  }
+
+  /**
+   * Get CPU pixel data for a specific floor's render target.
+   * Unlike getCpuPixels(), this reads from the named floor's RT cache rather
+   * than the currently active floor. Use this when processing a floor that is
+   * not yet the active compositor floor (e.g. during the per-floor render loop
+   * in EffectComposer where bindFloorMasks is called for each floor in turn).
+   *
+   * Results are cached per (floorKey, maskType) pair. The cache is cleared on
+   * each compose() call (via _cpuPixelCache which is keyed by maskType — this
+   * is sufficient because compose() always targets the active floor).
+   *
+   * @param {string|null} floorKey - e.g. "0:10" or "10:20"
+   * @param {string} maskType - e.g. 'fire', 'water'
+   * @returns {Uint8Array|null} RGBA pixel data, or null if not available
+   */
+  getCpuPixelsForFloor(floorKey, maskType) {
+    if (!floorKey) return null;
+
+    // Use a compound cache key so per-floor results don't collide.
+    const cacheKey = `${floorKey}::${maskType}`;
+    if (this._cpuPixelCache.has(cacheKey)) {
+      return this._cpuPixelCache.get(cacheKey);
+    }
+    // Also check the legacy single-key cache (populated by the old getCpuPixels path).
+    if (floorKey === this._activeFloorKey && this._cpuPixelCache.has(maskType)) {
       return this._cpuPixelCache.get(maskType);
     }
 
     const renderer = window.MapShine?.renderer;
     if (!renderer) return null;
-
-    const floorKey = this._activeFloorKey;
-    if (!floorKey) return null;
 
     const floorTargets = this._floorCache.get(floorKey);
     if (!floorTargets) return null;
@@ -1027,10 +1087,10 @@ export class GpuSceneMaskCompositor {
 
     try {
       renderer.readRenderTargetPixels(rt, 0, 0, w, h, buf);
-      this._cpuPixelCache.set(maskType, buf);
+      this._cpuPixelCache.set(cacheKey, buf);
       return buf;
     } catch (e) {
-      log.warn(`getCpuPixels: readback failed for '${maskType}'`, e);
+      log.warn(`getCpuPixelsForFloor: readback failed for '${maskType}' floor '${floorKey}'`, e);
       return null;
     }
   }

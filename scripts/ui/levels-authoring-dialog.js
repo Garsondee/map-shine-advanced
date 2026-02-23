@@ -47,8 +47,11 @@ function tileName(tileDoc) {
   const src = tileDoc?.texture?.src || tileDoc?.img || '';
   const lastSlash = src.lastIndexOf('/');
   const filename = lastSlash >= 0 ? src.slice(lastSlash + 1) : src;
-  // Truncate long filenames
-  return filename.length > 40 ? filename.slice(0, 37) + '...' : (filename || '(no texture)');
+  return filename || '(no texture)';
+}
+
+function tileSource(tileDoc) {
+  return String(tileDoc?.texture?.src || tileDoc?.img || '');
 }
 
 function sourceName(src, fallback = '(no source)') {
@@ -581,6 +584,7 @@ export class LevelsAuthoringDialog {
         tileAssignments.push({
           id: tileDoc.id,
           name: tileName(tileDoc),
+          src: tileSource(tileDoc),
           hasRange,
           bottom: flags.rangeBottom,
           top: flags.rangeTop,
@@ -957,7 +961,7 @@ export class LevelsAuthoringDialog {
     return `
       <div class="msa-la__tile-row" data-tile-id="${escapeHtml(t.id)}">
         <div class="msa-la__tile-main">
-          <span class="msa-la__tile-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</span>
+          <span class="msa-la__tile-name" title="${escapeHtml(t.src || t.name)}">${escapeHtml(t.name)}</span>
           ${overheadTag}
           ${levelsTag}
           <span class="msa-la__tile-range">${rangeText}</span>

@@ -4383,11 +4383,10 @@ export class WeatherParticles {
     let waterEnabled = !!(waterEffect && waterEffect.enabled);
     const waterParams = waterEffect?.params || {};
 
-    // Guard: if the registry's water mask was preserved from a different floor
-    // (preserveAcrossFloors=true), the mask coordinates belong to that other
-    // floor's geometry. The 2D post-processing water shader still benefits from
-    // the preserved mask (shows water through floor openings), but 3D particle
-    // systems (foam, splash) should not spawn at another floor's water positions.
+    // Guard: if the registry's water mask belongs to a different floor than the
+    // active one, disable foam/splash particles. With preserveAcrossFloors=false
+    // for water this should not normally occur, but kept as a belt-and-suspenders
+    // check in case of stale state during floor transitions.
     if (waterEnabled) {
       try {
         const reg = window.MapShine?.effectMaskRegistry;

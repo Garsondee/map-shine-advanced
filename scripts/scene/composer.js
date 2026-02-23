@@ -811,10 +811,13 @@ export class SceneComposer {
     // This plane spans the whole world canvas. Keep it always renderable to avoid
     // rare frustum-culling precision/center issues on very large scenes.
     bgMesh.frustumCulled = false;
+    // Keep _backgroundMesh on layer 0 ONLY — never on floor layers (1-19).
+    // FloorCompositor camera masks use layers 1-19 for floor isolation.
+    // If this mesh were on a floor layer it would fill the entire world canvas
+    // (including padding) with the background colour during that floor's pass.
+    // Layer 0 is the default and is intentionally excluded from all floor camera masks.
+    bgMesh.layers.set(0);
     // Position background slightly behind the base plane
-    // groundZ is set when basePlaneMesh is created (1000 by default)
-    // For perfect PIXI alignment with camera at Z=2000, ground should be at Z=1000
-    // This gives distanceToGround = 1000, matching the base FOV calculation
     const GROUND_Z = 1000; // Canonical ground plane Z position
     bgMesh.position.set(worldWidth / 2, worldHeight / 2, GROUND_Z - 0.1);
     this.scene.add(bgMesh);
@@ -853,6 +856,16 @@ export class SceneComposer {
     // Disable culling so large-scene bounds/precision edge cases cannot drop
     // the entire albedo pass for a frame (which then cascades into black post).
     this.basePlaneMesh.frustumCulled = false;
+
+    // ── V2 Compositor: save the raw albedo material ──────────────────────
+    // Effects (SpecularEffect, etc.) replace basePlaneMesh.material with PBR
+    // ShaderMaterials during wireBaseMeshes(). The V2 FloorCompositor needs
+    // access to the ORIGINAL albedo-only material for raw geometry passes
+    // (Steps 1-2). This reference is never disposed by effects — only by
+    // SceneComposer.dispose(). The texture ref is also saved separately so
+    // FloorCompositor can create its own material if needed.
+    this._albedoMaterial = material;
+    this._albedoTexture = texture || null;
     
     // Create red back-face for orientation debugging
     const backMaterial = new THREE.MeshBasicMaterial({

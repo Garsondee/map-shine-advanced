@@ -1241,7 +1241,14 @@ export class LightingEffect extends EffectBase {
 
     this.outdoorsMaterial = new THREE.MeshBasicMaterial({
       map: this.outdoorsMask,
-      transparent: false,
+      // transparent:true + NoBlending: write the full RGBA of the WebP directly to
+      // outdoorsTarget without any blend equation. This preserves:
+      //   .r — outdoor strength (used by lighting shader via tMasks.r)
+      //   .a — floor tile coverage (opaque=floor present, transparent=no floor)
+      // The clip pass samples .a to determine where to cut the upper floor.
+      // NoBlending avoids SrcAlpha/OneMinusSrcAlpha premultiplying .r by alpha.
+      transparent: true,
+      blending: THREE.NoBlending,
       depthWrite: false,
       depthTest: false
     });

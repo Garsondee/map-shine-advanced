@@ -446,16 +446,19 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       return;
     }
 
+    // Mipmaps are disabled for ALBEDO tile textures to prevent "mipmap bleed":
+    // gl.generateMipmap() averages opaque content texels with fully-transparent
+    // texels (whose RGB may be grey/garbage) without alpha-weighting, creating
+    // coloured halos at every mip level that grow wider at lower mip levels.
+    // This is especially visible on upper-floor transparent .webp tiles where
+    // the artwork boundary has a hard opaque→transparent transition.
+    // LinearFilter gives sufficient quality; anisotropy is kept for oblique views.
     const renderer = this._getRenderer();
-    const isWebGL2 = !!renderer?.capabilities?.isWebGL2;
-    const { w, h } = this._getTextureDimensions(texture);
-    const isPot = this._isPowerOfTwo(w) && this._isPowerOfTwo(h);
-    const canMipmap = isWebGL2 || isPot;
-
-    texture.generateMipmaps = canMipmap;
-    texture.minFilter = canMipmap ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
+    const maxAniso = Math.min(4, this._getMaxAnisotropy());
+    texture.generateMipmaps = false;
+    texture.minFilter = THREE.LinearFilter;
     texture.magFilter = THREE.LinearFilter;
-    texture.anisotropy = canMipmap ? Math.min(16, this._getMaxAnisotropy()) : 1;
+    texture.anisotropy = renderer ? maxAniso : 1;
     texture.needsUpdate = true;
   }
 
@@ -511,15 +514,17 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       if (!prev && !next) return;
       for (const { sprite } of this.tileSprites.values()) {
         const occ = sprite?.userData?.waterOccluderMesh;
-        if (!occ) continue;
-        try {
-          if (prev) prev.remove(occ);
-        } catch (_) {
+        if (occ) {
+          try { if (prev) prev.remove(occ); } catch (_) {}
+          try { if (next) next.add(occ); else this.scene.add(occ); } catch (_) {}
         }
-        try {
-          if (next) next.add(occ);
-          else this.scene.add(occ);
-        } catch (_) {
+        // Also migrate aboveFloorBlockerMesh — it lives in the same scene.
+        // Without this, blocker meshes created before setWaterOccluderScene is
+        // called end up in this.scene and are never rendered into waterOccluderTarget.
+        const blocker = sprite?.userData?.aboveFloorBlockerMesh;
+        if (blocker) {
+          try { if (prev) prev.remove(blocker); } catch (_) {}
+          try { if (next) next.add(blocker); else this.scene.add(blocker); } catch (_) {}
         }
       }
     } catch (_) {
@@ -1611,6 +1616,13 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const THREE = window.THREE;
     if (!THREE) return;
 
+    // Water occluder meshes and _Water mask loading are only needed for the
+    // V1 water effect pipeline. In V2 compositor mode all water effects are
+    // bypassed, so skip this entirely to avoid slow _Water mask probes.
+    try {
+      if (game?.settings?.get('map-shine-advanced', 'useCompositorV2')) return;
+    } catch (_) {}
+
     const sprite = spriteData?.sprite;
     if (!sprite) return;
 
@@ -1640,7 +1652,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           existing.material.uniforms.uHasTile.value = tex ? 1.0 : 0.0;
         }
       }
-      existing.visible = !!sprite.visible;
+      // Only show the occluder for tiles on the current floor — not above or below.
+      existing.visible = !!sprite.visible
+        && !sprite.userData?.levelsAbove
+        && !sprite.userData?.levelsHidden;
       return;
     }
 
@@ -1649,7 +1664,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const mesh = new THREE.Mesh(geom, mat);
     mesh.matrixAutoUpdate = false;
     mesh.layers.set(WATER_OCCLUDER_LAYER);
-    mesh.visible = !!sprite.visible;
+    // Only show for tiles on the current floor — not above or below.
+    mesh.visible = !!sprite.visible
+      && !sprite.userData?.levelsAbove
+      && !sprite.userData?.levelsHidden;
     mesh.renderOrder = 999;
     this._getWaterOccluderScene().add(mesh);
     sprite.userData.waterOccluderMesh = mesh;
@@ -1680,6 +1698,129 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       m.material.uniforms.uHasWaterMask.value = effectiveMask ? 1.0 : 0.0;
     }).catch(() => {
     });
+  }
+
+  /**
+   * Ensure an above-floor tile has a solid blocker mesh in the waterOccluderScene.
+   * This is the INVERSE of waterOccluderMesh: it is visible ONLY when levelsAbove=true,
+   * writing alpha=1 to tWaterOccluderAlpha for the upper-floor tile's pixel footprint.
+   * This causes waterOccluder=1 → waterVisible=0 in both DistortionManager and
+   * WaterEffectV2, preventing water/distortion from appearing on upper-floor tile pixels.
+   *
+   * Unlike waterOccluderMesh (which uses tile alpha to occlude water under opaque tile
+   * pixels), this blocker uses the tile alpha to block water on the UPPER floor tile
+   * surface — the same alpha shape, but the opposite visibility gate.
+   * @param {{sprite: THREE.Sprite}} spriteData
+   * @param {TileDocument} tileDoc
+   */
+  _ensureAboveFloorBlockerMesh(spriteData, tileDoc) {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const sprite = spriteData?.sprite;
+    if (!sprite) return;
+
+    // The blocker is active for two cases:
+    // 1. levelsAbove=true: a tile from a higher floor that is visible on screen
+    // 2. isOverhead=true: a current-floor ceiling/roof tile rendered above the scene
+    //    Overhead tiles have no waterOccluderMesh (no _Water mask) but their opaque
+    //    surface should still suppress water tint/caustics/distortion.
+    const isAbove = !!sprite.userData?.levelsAbove;
+    const isOverhead = !!sprite.userData?.isOverhead;
+    const shouldBlock = isAbove || isOverhead;
+    const existing = sprite.userData.aboveFloorBlockerMesh;
+
+    if (existing) {
+      // Update texture in case it loaded after mesh creation.
+      const tex = sprite.material?.map ?? null;
+      if (existing.material?.uniforms?.tTile) {
+        existing.material.uniforms.tTile.value = tex;
+        if (existing.material.uniforms.uHasTile) {
+          existing.material.uniforms.uHasTile.value = tex ? 1.0 : 0.0;
+        }
+      }
+      // Visible when this tile should block water AND the sprite is visible.
+      existing.visible = !!sprite.visible && shouldBlock;
+      return;
+    }
+
+    // Create the blocker mesh — same geometry/layer as waterOccluderMesh but
+    // with a solid-alpha material that writes alpha=1 for the tile's footprint.
+    const geom = new THREE.PlaneGeometry(1, 1);
+    const tex = sprite.material?.map ?? null;
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        tTile:    { value: tex },
+        uHasTile: { value: tex ? 1.0 : 0.0 },
+        uOpacity: { value: 1.0 }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tTile;
+        uniform float uHasTile;
+        uniform float uOpacity;
+        varying vec2 vUv;
+        void main() {
+          // Write solid alpha=1 for every opaque pixel of the above-floor tile.
+          // This blocks water/distortion from appearing on the upper floor surface.
+          float a = 1.0;
+          if (uHasTile > 0.5) {
+            a = texture2D(tTile, vUv).a;
+          }
+          float v = clamp(a * uOpacity, 0.0, 1.0);
+          gl_FragColor = vec4(v, v, v, v);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      depthTest:  false,
+      blending:      THREE.CustomBlending,
+      blendEquation: THREE.MaxEquation,
+      blendSrc:      THREE.OneFactor,
+      blendDst:      THREE.OneFactor,
+      toneMapped: false
+    });
+
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.matrixAutoUpdate = false;
+    mesh.layers.set(WATER_OCCLUDER_LAYER);
+    // Visible when this tile should block water (levelsAbove OR isOverhead).
+    mesh.visible = !!sprite.visible && shouldBlock;
+    mesh.renderOrder = 998;
+    this._getWaterOccluderScene().add(mesh);
+    sprite.userData.aboveFloorBlockerMesh = mesh;
+  }
+
+  /**
+   * Sync the above-floor blocker mesh transform to match the tile sprite.
+   * @param {THREE.Sprite} sprite
+   * @param {TileDocument} tileDoc
+   */
+  _updateAboveFloorBlockerMeshTransform(sprite, tileDoc) {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const mesh = sprite?.userData?.aboveFloorBlockerMesh;
+    if (!mesh) return;
+
+    mesh.position.copy(sprite.position);
+    mesh.scale.set(tileDoc.width, tileDoc.height, 1);
+    mesh.rotation.set(0, 0, 0);
+    if (tileDoc.rotation) {
+      mesh.rotation.z = THREE.MathUtils.degToRad(tileDoc.rotation);
+    }
+    mesh.updateMatrix();
+
+    if (mesh.material?.uniforms?.uOpacity) {
+      const a = ('alpha' in tileDoc) ? tileDoc.alpha : 1.0;
+      mesh.material.uniforms.uOpacity.value = Number.isFinite(a) ? a : 1.0;
+    }
   }
 
   _updateWaterOccluderMeshTransform(sprite, tileDoc) {
@@ -1900,6 +2041,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     if (tileDoc) {
       try {
         this._ensureWaterOccluderMesh(data, tileDoc);
+        this._ensureAboveFloorBlockerMesh(data, tileDoc);
         this._ensureFloorPresenceMesh(data, tileDoc);
         this._ensureBelowFloorPresenceMesh(data, tileDoc);
         const runtimeDoc = this._runtimeOccluderDoc;
@@ -1909,6 +2051,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         const runtimeAlpha = Number(sprite?.material?.opacity);
         runtimeDoc.alpha = Number.isFinite(runtimeAlpha) ? runtimeAlpha : (Number.isFinite(tileDoc.alpha) ? tileDoc.alpha : 1);
         this._updateWaterOccluderMeshTransform(sprite, runtimeDoc);
+        this._updateAboveFloorBlockerMeshTransform(sprite, runtimeDoc);
         this._updateFloorPresenceMeshTransform(sprite, runtimeDoc);
         this._updateBelowFloorPresenceMeshTransform(sprite, runtimeDoc);
       } catch (_) {
@@ -2706,6 +2849,14 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       // When visible, re-enable depthWrite so roofs can reliably appear above tokens.
       sprite.material.depthTest = true;
       sprite.material.depthWrite = (sprite.material.opacity ?? 1.0) > 0.01;
+
+      // Sync above-floor blocker mesh opacity so it tracks the hover-fade.
+      // Without this, the blocker stays at full opacity while the roof fades out,
+      // preventing water from showing through the transparent overhead tile.
+      const aboveBlocker = sprite.userData?.aboveFloorBlockerMesh;
+      if (aboveBlocker?.material?.uniforms?.uOpacity) {
+        aboveBlocker.material.uniforms.uOpacity.value = sprite.material.opacity ?? 1.0;
+      }
     }
 
     // If any overhead tile is mid-fade, ensure we keep rendering at full rate
@@ -3000,12 +3151,19 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       return;
     }
 
-    // Create sprite with material
+    // Create sprite with material.
+    // alphaTest is intentionally 0 (disabled): a non-zero alphaTest hard-clips
+    // semi-transparent edge pixels, producing a pixelated border. With alphaTest=0
+    // all pixels are blended, letting the compositor handle transparency smoothly.
+    // depthWrite is false: transparent tile sprites must not write to the depth
+    // buffer, otherwise their transparent regions occlude geometry behind them
+    // (e.g. the ground floor showing through the upper floor tile's empty areas).
+    // The per-floor RT isolation in EffectComposer handles depth separation.
     const material = new THREE.SpriteMaterial({
       transparent: true,
-      alphaTest: 0.1,
+      alphaTest: 0,
       depthTest: true,
-      depthWrite: true,
+      depthWrite: false,
       side: THREE.DoubleSide
     });
 
@@ -3059,6 +3217,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       this.updateSpriteTransform(sprite, tileDoc);
       this.updateSpriteVisibility(sprite, tileDoc);
 
+      // V2 compositor: texture sync is handled by FloorRenderBus.syncTextures()
+      // each frame. Do NOT call registerTile() here — the initial populate already
+      // assigned the tile to the correct floor via _resolveFloorIndex(). Calling
+      // registerTile() from this callback would use the broken _spriteFloorMap
+      // (always returns 0) and move upper-floor tiles back to floor 0.
+
       // Route tile-ready event through the binding manager.
       // The manager fans out to all registered TileBindableEffects (SpecularEffect,
       // FluidEffect, and any future per-tile overlay effects). Each effect's
@@ -3072,6 +3236,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       if (spriteData) {
         this._ensureWaterOccluderMesh(spriteData, tileDoc);
         this._updateWaterOccluderMeshTransform(sprite, tileDoc);
+        this._ensureAboveFloorBlockerMesh(spriteData, tileDoc);
+        this._updateAboveFloorBlockerMeshTransform(sprite, tileDoc);
         this._ensureFloorPresenceMesh(spriteData, tileDoc);
         this._updateFloorPresenceMeshTransform(sprite, tileDoc);
         this._ensureBelowFloorPresenceMesh(spriteData, tileDoc);
@@ -3174,6 +3340,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     this._ensureWaterOccluderMesh(this.tileSprites.get(tileDoc.id), tileDoc);
+    this._ensureAboveFloorBlockerMesh(this.tileSprites.get(tileDoc.id), tileDoc);
     this._ensureFloorPresenceMesh(this.tileSprites.get(tileDoc.id), tileDoc);
     this._ensureBelowFloorPresenceMesh(this.tileSprites.get(tileDoc.id), tileDoc);
 
@@ -3260,6 +3427,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       this.updateSpriteTransform(sprite, targetDoc);
       this._ensureWaterOccluderMesh(spriteData, targetDoc);
       this._updateWaterOccluderMeshTransform(sprite, targetDoc);
+      this._ensureAboveFloorBlockerMesh(spriteData, targetDoc);
+      this._updateAboveFloorBlockerMeshTransform(sprite, targetDoc);
       this._ensureFloorPresenceMesh(spriteData, targetDoc);
       this._updateFloorPresenceMeshTransform(sprite, targetDoc);
       this._ensureBelowFloorPresenceMesh(spriteData, targetDoc);
@@ -3355,7 +3524,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       this.updateSpriteVisibility(sprite, targetDoc);
       const occ = sprite.userData?.waterOccluderMesh;
       if (occ) {
-        occ.visible = !!sprite.visible;
+        occ.visible = !!sprite.visible
+          && !sprite.userData?.levelsAbove
+          && !sprite.userData?.levelsHidden;
       }
       if (occ?.material?.uniforms?.uOpacity) {
         const a = ('alpha' in targetDoc) ? targetDoc.alpha : 1.0;
@@ -3444,6 +3615,17 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       sprite.userData.waterOccluderMesh = null;
     }
 
+    const aboveBlocker = sprite?.userData?.aboveFloorBlockerMesh;
+    if (aboveBlocker) {
+      try {
+        this._getWaterOccluderScene().remove(aboveBlocker);
+        aboveBlocker.geometry?.dispose?.();
+        aboveBlocker.material?.dispose?.();
+      } catch (_) {
+      }
+      sprite.userData.aboveFloorBlockerMesh = null;
+    }
+
     const fp = sprite?.userData?.floorPresenceMesh;
     if (fp) {
       try {
@@ -3475,6 +3657,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     this.tileSprites.delete(tileId);
     this._overheadTileIds.delete(tileId);
     this._weatherRoofTileIds.delete(tileId);
+
+    // V2 compositor: tile removal is handled on next repopulate (bus reads tile docs directly).
+    // No incremental unregister needed.
 
     try {
       window.MapShine?.tileMotionManager?.onTileRemoved?.(tileId);
@@ -3678,6 +3863,14 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       else sprite.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
       if (!cloudTopsEnabled) sprite.layers.enable(TILE_FEATURE_LAYERS.CLOUD_TOP_BLOCKER);
       else sprite.layers.disable(TILE_FEATURE_LAYERS.CLOUD_TOP_BLOCKER);
+
+      // Compositor V2: assign tile to its floor layer for layer-based isolation.
+      // This must run AFTER the layer 0 set/disable above and AFTER ROOF_LAYER
+      // assignments so the floor layer is additive on top of existing layers.
+      const floorLayerMgr = window.MapShine?.floorLayerManager;
+      if (floorLayerMgr) {
+        floorLayerMgr.assignTileToFloor(sprite, tileDoc);
+      }
     }
 
     const occludesWaterFlag = getFlag(tileDoc, 'occludesWater');
@@ -3702,7 +3895,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         occludesWater = false;
 
         // Only kick a new probe if we're not already waiting.
-        if (state !== 'pending') {
+        // In V2 compositor mode water effects are bypassed entirely, so skip
+        // the expensive _Water mask probe — it would load textures for nothing.
+        const _v2Active = (() => { try { return !!game?.settings?.get('map-shine-advanced', 'useCompositorV2'); } catch (_) { return false; } })();
+        if (state !== 'pending' && !_v2Active) {
           sprite.userData._autoOccludesWaterState = 'pending';
           const tileId = tileDoc?.id ?? '';
           const src = tileDoc?.texture?.src ?? '';
@@ -3861,6 +4057,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     if (data) {
       this._ensureWaterOccluderMesh(data, tileDoc);
       this._updateWaterOccluderMeshTransform(sprite, tileDoc);
+      this._ensureAboveFloorBlockerMesh(data, tileDoc);
+      this._updateAboveFloorBlockerMeshTransform(sprite, tileDoc);
       this._ensureFloorPresenceMesh(data, tileDoc);
       this._updateFloorPresenceMeshTransform(sprite, tileDoc);
       this._ensureBelowFloorPresenceMesh(data, tileDoc);
@@ -3926,7 +4124,22 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // If the tile passes Foundry's baseline visibility but has Levels range
     // flags, apply elevation-based visibility gating. GMs always see
     // range-hidden tiles at reduced opacity for editing convenience.
+    //
+    // ── COMPOSITOR V2: skip elevation-based visibility entirely ──────────
+    // V2 isolates floors via Three.js layer masks. Setting sprite.visible=false
+    // here would hide floor 0 tiles when the user is on floor 1, causing
+    // only basePlaneMesh (with PBR material from SpecularEffect) to render
+    // for floor 0 → specular/_Outdoors artifacts show through floor 1's
+    // transparent gaps. This method is called from MANY code paths (tile
+    // texture load, updateTile, refreshTile, hover restore) — not just
+    // _refreshAllTileElevationVisibility() — so the guard must be here.
     if (sprite.visible) {
+      let _skipElevationVisibility = false;
+      try {
+        _skipElevationVisibility = !!game?.settings?.get('map-shine-advanced', 'useCompositorV2');
+      } catch (_) {}
+
+      if (!_skipElevationVisibility) {
       try {
         const activeLevelContext = window.MapShine?.activeLevelContext;
         const strictBandVisibility = isLevelsEnabledForScene(canvas?.scene) && hasFiniteActiveLevelBand(activeLevelContext);
@@ -3985,10 +4198,34 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         } else {
           // Elevation visible — clear below-floor tag.
           sprite.userData.levelsHidden = false;
+          // Determine if this tile is above the active floor band.
+          // Above-floor tiles are visible (rendered on top) but must not occlude
+          // ground-floor water effects — their waterOccluderMesh must stay hidden.
+          let isAbove = false;
+          if (strictBandVisibility) {
+            try {
+              const bandBottom = Number(activeLevelContext.bottom);
+              if (tileHasLevelsRange(tileDoc)) {
+                const flags = readTileLevelsFlags(tileDoc);
+                const tileBottom = Number(flags.rangeBottom);
+                if (Number.isFinite(tileBottom) && Number.isFinite(bandBottom)) {
+                  isAbove = tileBottom >= bandBottom + 1;
+                }
+              } else {
+                const elev = Number(tileDoc?.elevation);
+                if (Number.isFinite(elev) && Number.isFinite(bandBottom)) {
+                  isAbove = elev >= bandBottom + 1;
+                }
+              }
+            } catch (_) {}
+          }
+          sprite.userData.levelsAbove = isAbove;
         }
       } catch (_) {
         // Elevation visibility check failed — fail open (keep tile visible)
+        sprite.userData.levelsAbove = false;
       }
+      } // end !_skipElevationVisibility
     }
 
     // If this tile is currently hover-hidden, force opacity to zero so that
@@ -4007,14 +4244,33 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // this it may remain permanently invisible.
     // IMPORTANT: Also respect hover-hidden state so the occluder doesn't linger
     // when the tile sprite fades out during hover-hide.
+    // IMPORTANT: Gate by levelsAbove — upper-floor tiles are visible on screen
+    // but must NOT occlude ground-floor water. Only tiles on the current floor
+    // (not above, not below) should contribute to the water occluder target.
     const occ = sprite?.userData?.waterOccluderMesh;
     if (occ) {
-      occ.visible = !!sprite.visible;
+      const isAboveFloor = !!sprite.userData?.levelsAbove;
+      const isBelowFloor = !!sprite.userData?.levelsHidden;
+      occ.visible = !!sprite.visible && !isAboveFloor && !isBelowFloor;
       if (occ.material?.uniforms?.uOpacity) {
         // Use sprite's material opacity (which includes hover-hidden fades)
         // rather than just tileDoc.alpha
         const spriteOpacity = sprite?.material?.opacity ?? 1.0;
         occ.material.uniforms.uOpacity.value = Number.isFinite(spriteOpacity) ? spriteOpacity : 1.0;
+      }
+    }
+
+    // Keep above-floor blocker mesh visibility synced.
+    // Visible when levelsAbove=true (cross-floor tile) OR isOverhead=true (current-floor
+    // ceiling/roof tile). Both cases should suppress water on their opaque surface.
+    const aboveBlocker = sprite?.userData?.aboveFloorBlockerMesh;
+    if (aboveBlocker) {
+      const isAboveFloor = !!sprite.userData?.levelsAbove;
+      const isOverheadTile = !!sprite.userData?.isOverhead;
+      aboveBlocker.visible = !!sprite.visible && (isAboveFloor || isOverheadTile);
+      if (aboveBlocker.material?.uniforms?.uOpacity) {
+        const spriteOpacity = sprite?.material?.opacity ?? 1.0;
+        aboveBlocker.material.uniforms.uOpacity.value = Number.isFinite(spriteOpacity) ? spriteOpacity : 1.0;
       }
     }
 
@@ -4057,6 +4313,34 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
    */
   _refreshAllTileElevationVisibility() {
     if (!this._globalVisible) return;
+
+    // ── COMPOSITOR V2: skip V1 elevation-based visibility toggling ──────
+    // V2 isolates floors via Three.js layer masks, not by setting
+    // sprite.visible = false. If V1's visibility logic runs, it hides
+    // floor 0 tiles when the user navigates to floor 1. Then
+    // FloorCompositor renders floor 0 with only basePlaneMesh visible
+    // (no tiles), causing PBR material artifacts (specular, outdoors
+    // mask) to show through floor 1's transparent gaps.
+    //
+    // When V2 is active, ALL tiles must remain visible = true. Layer
+    // masks on the camera select which floor renders in each pass.
+    // We still request a render refresh so the compositor picks up the
+    // new floor state immediately.
+    try {
+      if (game?.settings?.get('map-shine-advanced', 'useCompositorV2')) {
+        // Ensure ALL tiles and basePlaneMesh stay visible.
+        for (const { sprite } of this.tileSprites.values()) {
+          if (sprite) sprite.visible = true;
+        }
+        const basePlane = window.MapShine?.sceneComposer?.basePlaneMesh;
+        if (basePlane) basePlane.visible = true;
+        // Still request render so V2 compositor updates immediately.
+        window.MapShine?.renderLoop?.requestRender?.();
+        return;
+      }
+    } catch (_) {
+      // Fall through to V1 path on settings error.
+    }
 
     // When Levels compatibility is off, restore defaults and bail out.
     // This prevents stale hidden state from a previous elevation context.
@@ -4184,11 +4468,19 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           // so sprite UVs remain consistent across browsers.
           // NOTE: Some browsers/drivers have inconsistent ImageBitmap upload/orientation
           // behavior with WebGL UNPACK_FLIP_Y, so we copy to a canvas to stabilize.
+          // IMPORTANT: premultiplyAlpha:'none' preserves straight alpha so that
+          // semi-transparent edge pixels are not premultiplied before upload.
+          // SpriteMaterial uses straight-alpha blending (SrcAlpha/OneMinusSrcAlpha),
+          // so premultiplied data would produce darker/greyer edges than intended.
           let bitmap = null;
           try {
-            bitmap = await createImageBitmap(blob, { imageOrientation: 'none' });
+            bitmap = await createImageBitmap(blob, { imageOrientation: 'none', premultiplyAlpha: 'none' });
           } catch (_) {
-            bitmap = await createImageBitmap(blob);
+            try {
+              bitmap = await createImageBitmap(blob, { premultiplyAlpha: 'none' });
+            } catch (_2) {
+              bitmap = await createImageBitmap(blob);
+            }
           }
           _ev(`tile.decode OK: ${_shortPath} (${bitmap.width}x${bitmap.height})`);
 
@@ -4225,7 +4517,13 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
               const canvasEl = document.createElement('canvas');
               canvasEl.width = w;
               canvasEl.height = h;
-              const ctx = canvasEl.getContext('2d');
+              // Use willReadFrequently:false (we only write, never read back).
+              // desynchronized:false ensures the canvas pixel data is stable for
+              // WebGL upload. We do NOT use premultipliedAlpha:false here because
+              // the 2D canvas always composites in premultiplied space internally;
+              // instead we rely on premultiplyAlpha:'none' in createImageBitmap
+              // above to keep straight-alpha data before it reaches drawImage.
+              const ctx = canvasEl.getContext('2d', { willReadFrequently: false });
               if (ctx) {
                 ctx.drawImage(srcBitmap, 0, 0, w, h);
                 texSource = canvasEl;

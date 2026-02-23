@@ -1451,6 +1451,8 @@ export class WaterEffectV2 extends EffectBase {
         tWaterOccluderAlpha: { value: this._waterOccluderAlpha },
         uHasWaterOccluderAlpha: { value: this._waterOccluderAlpha ? 1.0 : 0.0 },
 
+
+
         uWaterDataTexelSize: { value: new THREE.Vector2(1.0 / 1024.0, 1.0 / 1024.0) },
 
         uTintColor: { value: new THREE.Color(tint.r, tint.g, tint.b) },
@@ -1688,6 +1690,8 @@ export class WaterEffectV2 extends EffectBase {
 
         uniform sampler2D tWaterOccluderAlpha;
         uniform float uHasWaterOccluderAlpha;
+
+
 
         uniform vec2 uWaterDataTexelSize;
 
@@ -2836,24 +2840,10 @@ export class WaterEffectV2 extends EffectBase {
           if (uHasWaterOccluderAlpha > 0.5) {
             waterOccluder = texture2D(tWaterOccluderAlpha, vUv).a;
           }
-          float depthOccluder = 0.0;
-          if (uDepthEnabled > 0.5) {
-            float deviceDepth = msa_sampleDeviceDepth(vUv);
-            if (deviceDepth < 0.9999) {
-              float linearDepth = msa_linearizeDepth(deviceDepth);
-              float aboveGround = uGroundDistance - linearDepth;
-              float aboveActiveFloor = aboveGround - uActiveLevelElevation;
-              // Keep normal tile layers (BG/FG at ~+1/+2) eligible for water.
-              // Only treat higher foreground occluders (tokens/overheads, ~+3 and above)
-              // as blockers for this post-pass.
-              // IMPORTANT: Use height relative to the active Levels floor so
-              // upper-floor BG/FG tiles don't fully occlude water when viewing
-              // higher floors.
-              depthOccluder = smoothstep(2.75, 3.25, aboveActiveFloor);
-            }
-          }
+          float waterVisible = (1.0 - clamp(waterOccluder, 0.0, 1.0));
 
-          float waterVisible = (1.0 - clamp(waterOccluder, 0.0, 1.0)) * (1.0 - depthOccluder);
+
+
           inside *= waterVisible;
 
           float distInside = distortionInsideFromSdf(sdf01) * waterVisible;
@@ -3924,13 +3914,31 @@ export class WaterEffectV2 extends EffectBase {
     }
 
     // Outdoors mask (world-space scene UV). Used by wave indoor damping and rain indoor damping.
+    // IMPORTANT: Water is a post-processing effect that renders once per frame for the whole
+    // scene. It must always use the GROUND FLOOR's outdoors mask, not whatever floor the
+    // player is currently on. LightingEffect.outdoorsMask is a per-floor mutable field that
+    // is left pointing to the last floor processed by the render loop (the upper floor).
+    // When the upper floor has no outdoors mask, the fallback returns null and water loses
+    // its indoor damping / rain gating on the ground floor.
+    // Fix: read from compositor.getGroundFloorMaskTexture('outdoors') which always returns
+    // the ground floor's compositor RT texture regardless of the active floor.
     if (u.tOutdoorsMask && u.uHasOutdoorsMask) {
       let outdoorsTex = null;
       let outdoorsRec = null;
       try {
-        const mm = window.MapShine?.maskManager;
-        outdoorsTex = mm ? mm.getTexture('outdoors.scene') : null;
-        outdoorsRec = mm ? mm.getRecord?.('outdoors.scene') : null;
+        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+        // Prefer the ground floor's compositor outdoors mask — floor-independent.
+        if (compositor?.getGroundFloorMaskTexture) {
+          outdoorsTex = compositor.getGroundFloorMaskTexture('outdoors');
+        }
+        // Fallback to MaskManager (set by LightingEffect on the active floor).
+        if (!outdoorsTex) {
+          const mm = window.MapShine?.maskManager;
+          outdoorsTex = mm ? mm.getTexture('outdoors.scene') : null;
+          outdoorsRec = mm ? mm.getRecord?.('outdoors.scene') : null;
+        }
+        // Last resort: LightingEffect.outdoorsMask (stale on multi-floor scenes,
+        // but better than nothing on single-floor scenes without a compositor).
         if (!outdoorsTex) {
           const wle = window.MapShine?.windowLightEffect;
           const cloud = window.MapShine?.cloudEffect;
@@ -4477,6 +4485,36 @@ export class WaterEffectV2 extends EffectBase {
       u.uHasWaterOccluderAlpha.value = occ ? 1.0 : 0.0;
     }
 
+    // When the player is on an upper floor, swap tWaterMask to the patched version
+    // from the compositor cache. The patched mask has upper floor tile footprints
+    // subtracted from the ground floor water mask, so water does not render under
+    // upper floor tiles. When on the ground floor, the raw mask is correct.
+    if (u.tDiffuse) {
+      const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+      const reg = window.MapShine?.effectMaskRegistry;
+      const floorStack = window.MapShine?.floorStack;
+      const activeFloor = floorStack?.getActiveFloor?.();
+      const activeIdx = activeFloor?.index ?? 0;
+      const waterSlot = reg?.getSlot?.('water');
+      const waterFloorKey = waterSlot?.floorKey ?? null;
+      let waterFloorIdx = 0;
+      if (waterFloorKey && floorStack) {
+        const floors = floorStack.getVisibleFloors?.() ?? [];
+        const match = floors.find(f => f.compositorKey === waterFloorKey);
+        if (match && Number.isFinite(match.index)) waterFloorIdx = match.index;
+      }
+      // Always prefer the patched water mask from the compositor cache when
+      // available. The patched mask has upper floor tile footprints subtracted,
+      // so water never renders over upper floor tiles regardless of which floor
+      // the player is on. Falls back to the raw mask if the cache is not warm.
+      if (waterFloorKey && compositor) {
+        const patchedTex = compositor.getFloorTexture?.(waterFloorKey, 'water') ?? null;
+        if (patchedTex && u.tWaterMask) {
+          u.tWaterMask.value = patchedTex;
+        }
+      }
+    }
+
     if (u.uWaterDataTexelSize) {
       const tex = this._waterData?.texture;
       const img = tex?.image;
@@ -4757,13 +4795,15 @@ export class WaterEffectV2 extends EffectBase {
       if (texture === this.waterMask) return;
 
       if (!texture) {
-        // Mask cleared (policy allowed it) — dispose SDF data.
-        // The floor transition lock is NOT checked here because the
-        // registry's preserveAcrossFloors policy already prevented
-        // this callback from firing when water should be preserved.
+        // Mask cleared (policy allowed it) — dispose SDF data and source
+        // mask reference. With water's preserveAcrossFloors:true this branch
+        // only fires if the policy is overridden or forced. Per-pixel floor
+        // suppression is handled by uWaterMaskFloorIndex in the shader.
+        this.waterMask = null;
         this._waterData = null;
         this._waterRawMask = null;
         this._lastWaterMaskUuid = null;
+        this._lastWaterMaskCacheKey = null;
         this._surfaceModel?.dispose?.();
         return;
       }
@@ -4913,8 +4953,36 @@ export class WaterEffectV2 extends EffectBase {
   }
 
   /**
+   * Swap the active water mask to a patched scene-space texture and rebuild the
+   * SDF. Called by GpuSceneMaskCompositor after water mask patching completes so
+   * that tWaterData (the SDF used for all wave/refraction rendering) is derived
+   * from the patched mask rather than the raw registry texture.
+   *
+   * Also invalidates the _floorStates cache for the affected floor so that
+   * bindFloorMasks() rebuilds from the patched texture on the next visit.
+   *
+   * @param {THREE.Texture} patchedTex - Patched water mask texture (scene-space RT)
+   * @param {string} floorKey - Floor key the patched mask belongs to, e.g. "0:10"
+   */
+  applyPatchedWaterMask(patchedTex, floorKey) {
+    if (!patchedTex) return;
+    // Swap the active mask and force an SDF rebuild.
+    const prevLock = this._floorTransitionActive;
+    this._floorTransitionActive = false;
+    this.waterMask = patchedTex;
+    this._lastWaterMaskUuid = null;     // Force cache-key mismatch so rebuild runs
+    this._lastWaterMaskCacheKey = null;
+    this._rebuildWaterDataIfNeeded(true);
+    this._floorTransitionActive = prevLock;
+
+    // Invalidate the per-floor state cache so bindFloorMasks() rebuilds too.
+    if (floorKey) this.disposeFloorState(floorKey);
+
+    log.debug(`applyPatchedWaterMask: SDF rebuilt from patched mask for floor ${floorKey}`);
+  }
+
+  /**
    * Release GPU resources for a specific floor's cached state.
-   * Called when a floor is evicted from the LRU cache.
    * @param {string} floorKey
    */
   disposeFloorState(floorKey) {

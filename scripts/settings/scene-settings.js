@@ -360,7 +360,25 @@ export function registerSettings() {
     name: 'Per-Floor Rendering',
     hint: 'Render each visible floor separately in multi-floor Levels scenes so each floor uses its own effect masks (water, fire, specular, etc.). Disable only if visual artifacts appear on multi-floor scenes.',
     scope: 'world',
-    config: true,
+    // Legacy setting retained for backwards compatibility but hidden.
+    // Compositor V2 is now the default render path.
+    config: false,
+    type: Boolean,
+    default: true
+  });
+
+  // Compositor V2: clean-room per-floor rendering using Three.js layers for
+  // floor isolation instead of per-frame visibility toggling. When enabled,
+  // FloorCompositor handles the floor loop instead of the legacy EffectComposer
+  // floor loop. Default: true (forced default).
+  game.settings.register('map-shine-advanced', 'useCompositorV2', {
+    name: 'Compositor V2',
+    hint: 'Use the clean-room floor compositor with Three.js layer-based isolation.',
+    scope: 'world',
+    // Forced default: keep out of UI so users can’t accidentally fall back.
+    // If you need to debug legacy behavior, toggle this in console or via
+    // a temporary local dev patch.
+    config: false,
     type: Boolean,
     default: true
   });

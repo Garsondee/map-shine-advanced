@@ -225,6 +225,21 @@ export class FloorStack {
 
     const isFirstFloor = this._savedVisibility.size === 0;
 
+    // ── Base Plane (scene background) ─────────────────────────────────────────
+    // The basePlaneMesh is the scene background image. It belongs to the ground
+    // floor (index 0). On upper floors it must be hidden so that pixels without
+    // geometry remain transparent (alpha=0), allowing lower floors to show
+    // through during alpha compositing. Without this, every floor's _floorRT
+    // would be opaque and ground-floor effects (water, fire) would be invisible.
+    const basePlane = window.MapShine?.sceneComposer?.basePlaneMesh;
+    if (basePlane) {
+      if (isFirstFloor) {
+        this._savedVisibility.set(basePlane, basePlane.visible);
+      }
+      const origVisible = isFirstFloor ? basePlane.visible : (this._savedVisibility.get(basePlane) ?? basePlane.visible);
+      basePlane.visible = origVisible && (floorIndex === 0);
+    }
+
     // ── Tiles ────────────────────────────────────────────────────────────────
     const tileSprites = this._tileManager?.tileSprites;
     if (tileSprites) {

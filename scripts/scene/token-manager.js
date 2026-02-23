@@ -960,6 +960,12 @@ vec3 ms_applySceneLighting(vec3 color) {
     // Water/Distortion passes should mask tokens out using tokenMask.screen.
     sprite.layers.set(0);
 
+    // Compositor V2: assign token to its floor layer for layer-based isolation.
+    const floorLayerMgr = window.MapShine?.floorLayerManager;
+    if (floorLayerMgr) {
+      floorLayerMgr.assignTokenToFloor(sprite, tokenDoc);
+    }
+
     // Store token metadata
     sprite.userData = {
       tokenId: tokenDoc.id,
@@ -1069,6 +1075,14 @@ vec3 ms_applySceneLighting(vec3 color) {
     const { sprite } = spriteData;
     
     log.debug(`updateTokenSprite: ${tokenDoc.id} | changes:`, changes);
+
+    // Compositor V2: reassign token to correct floor layer when elevation changes.
+    if ('elevation' in changes) {
+      const floorLayerMgr = window.MapShine?.floorLayerManager;
+      if (floorLayerMgr) {
+        floorLayerMgr.assignTokenToFloor(sprite, tokenDoc);
+      }
+    }
 
     // Update transform if position/size/elevation changed
     if ('x' in changes || 'y' in changes || 'width' in changes || 

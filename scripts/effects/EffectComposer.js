@@ -11,6 +11,7 @@ import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { getCacheStats as getAssetCacheStats } from '../assets/loader.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
 import { getGlobalFrameState } from '../core/frame-state.js';
+import { FloorCompositor } from '../compositor-v2/FloorCompositor.js';
 
 const log = createLogger('EffectComposer');
 
@@ -92,11 +93,40 @@ export class EffectComposer {
     /** @type {THREE.RenderTarget} */
     this.sceneRenderTarget = null;
 
+    // ── Per-Floor Rendering Pipeline (Phase 2) ──────────────────────────────
+    // Lazily created by _ensureFloorRenderTargets() when the per-floor loop
+    // is active. Enable isolated per-floor rendering with floor-scoped
+    // post-processing and alpha compositing between floors.
+    /** @type {THREE.WebGLRenderTarget|null} Per-floor geometry + scene effects */
+    this._floorRT = null;
+    /** @type {THREE.WebGLRenderTarget|null} Floor post-processing ping-pong A */
+    this._floorPostA = null;
+    /** @type {THREE.WebGLRenderTarget|null} Floor post-processing ping-pong B */
+    this._floorPostB = null;
+    /** @type {THREE.WebGLRenderTarget|null} Accumulated composited floor stack */
+    this._accumulationRT = null;
+    /** @type {THREE.Scene|null} Dedicated scene for floor compositing fullscreen quad */
+    this._compositeScene = null;
+    /** @type {THREE.OrthographicCamera|null} Camera for compositor renders */
+    this._compositeCamera = null;
+    /** @type {THREE.ShaderMaterial|null} Alpha-over compositing material */
+    this._compositeMaterial = null;
+    /** @type {THREE.Mesh|null} Fullscreen quad for floor compositing */
+    this._compositeQuad = null;
+
     /** @type {TimeManager} - Centralized time management */
     this.timeManager = new TimeManager();
 
     /** @type {import('../scene/depth-pass-manager.js').DepthPassManager|null} */
     this._depthPassManager = null;
+
+    // ── Compositor V2 ─────────────────────────────────────────────────────────
+    // When the 'useCompositorV2' setting is enabled, the floor render loop is
+    // delegated to FloorCompositor instead of the legacy floor loop below.
+    // FloorCompositor uses Three.js layers for floor isolation (no per-frame
+    // visibility toggling). Created lazily on first use.
+    /** @type {FloorCompositor|null} */
+    this._floorCompositorV2 = null;
 
     // PERFORMANCE: Cache for resolved render order to avoid per-frame allocations
     this._cachedRenderOrder = [];
@@ -195,6 +225,233 @@ export class EffectComposer {
       this.sceneRenderTarget.setSize(size.width, size.height);
       log.debug(`Resized scene render target to: ${size.width}x${size.height}`);
     }
+  }
+
+  /**
+   * Ensure per-floor render targets exist and are sized correctly.
+   * Called lazily when the per-floor render loop is active. Each floor renders
+   * into _floorRT in isolation, floor-scoped post effects ping-pong between
+   * _floorPostA/_floorPostB, and the final floor image is alpha-composited
+   * into _accumulationRT.
+   * @private
+   */
+  _ensureFloorRenderTargets() {
+    if (!this._sizeVec2) this._sizeVec2 = new window.THREE.Vector2();
+    const size = this._sizeVec2;
+    this.renderer.getDrawingBufferSize(size);
+    const w = size.width;
+    const h = size.height;
+    const THREE = window.THREE;
+
+    const _ensureRT = (existing, label, depth) => {
+      if (!existing) {
+        const rt = new THREE.WebGLRenderTarget(w, h, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          format: THREE.RGBAFormat,
+          type: THREE.FloatType,
+          depthBuffer: !!depth,
+          stencilBuffer: false,
+        });
+        log.debug(`Created floor RT: ${label} (${w}x${h})`);
+        return rt;
+      }
+      if (existing.width !== w || existing.height !== h) {
+        existing.setSize(w, h);
+      }
+      return existing;
+    };
+
+    // Floor geometry RT needs a depth buffer for Z-tested scene rendering.
+    this._floorRT = _ensureRT(this._floorRT, '_floorRT', true);
+    // Post-processing ping-pong buffers don't need depth.
+    this._floorPostA = _ensureRT(this._floorPostA, '_floorPostA', false);
+    this._floorPostB = _ensureRT(this._floorPostB, '_floorPostB', false);
+    // Accumulation RT receives alpha-composited floor images.
+    this._accumulationRT = _ensureRT(this._accumulationRT, '_accumulationRT', false);
+  }
+
+  /**
+   * Alpha-composite a floor's completed image over the accumulation RT.
+   *
+   * Uses standard alpha-over blending (non-premultiplied):
+   *   result.rgb = floor.rgb * floor.a + accum.rgb * (1 - floor.a)
+   *   result.a   = floor.a + accum.a * (1 - floor.a)
+   *
+   * The compositor quad, scene, and camera are lazily created on first call
+   * and reused for all subsequent compositing operations.
+   *
+   * @param {THREE.WebGLRenderTarget} floorInputRT - The completed floor image
+   * @private
+   */
+  _compositeFloorToAccumulation(floorInputRT) {
+    const THREE = window.THREE;
+
+    // Lazily build the compositor infrastructure.
+    if (!this._compositeMaterial) {
+      this._compositeMaterial = new THREE.ShaderMaterial({
+        uniforms: { tFloor: { value: null } },
+        vertexShader: /* glsl */ `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = vec4(position.xy, 0.0, 1.0);
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          uniform sampler2D tFloor;
+          varying vec2 vUv;
+          void main() {
+            vec4 c = texture2D(tFloor, vUv);
+            // Enforce premultiplied-alpha invariant: RGB must be 0 when alpha is 0.
+            // The lighting shader adds ambient/darkness to ALL pixels including those
+            // with alpha=0 (transparent tile regions). Without this clamp, the non-zero
+            // RGB leaks through One/OneMinusSrcAlpha compositing and brightens the
+            // ground floor beneath upper floors.
+            c.rgb *= step(0.004, c.a);
+            gl_FragColor = c;
+          }
+        `,
+        depthTest: false,
+        depthWrite: false,
+        // Premultiplied alpha-over compositing:
+        //   result.rgb = src.rgb + dst.rgb * (1 - src.a)
+        //   result.a   = src.a   + dst.a   * (1 - src.a)
+        // _floorRT content is premultiplied: SpriteMaterial uses NormalBlending
+        // (SrcAlpha/OneMinusSrcAlpha) into a cleared (0,0,0,0) RT, which produces
+        // premultiplied RGBA. LightingEffect preserves this. So the compositor
+        // must use One (not SrcAlpha) to avoid double-premultiplying.
+        blending: THREE.CustomBlending,
+        blendSrc: THREE.OneFactor,
+        blendDst: THREE.OneMinusSrcAlphaFactor,
+        blendSrcAlpha: THREE.OneFactor,
+        blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
+        blendEquation: THREE.AddEquation,
+      });
+      const geom = new THREE.PlaneGeometry(2, 2);
+      this._compositeQuad = new THREE.Mesh(geom, this._compositeMaterial);
+      this._compositeQuad.frustumCulled = false;
+      this._compositeScene = new THREE.Scene();
+      this._compositeScene.add(this._compositeQuad);
+      this._compositeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    }
+
+    this._compositeMaterial.uniforms.tFloor.value = floorInputRT.texture;
+
+    const prevAutoClear = this.renderer.autoClear;
+    this.renderer.autoClear = false;
+    this.renderer.setRenderTarget(this._accumulationRT);
+    this.renderer.render(this._compositeScene, this._compositeCamera);
+    this.renderer.autoClear = prevAutoClear;
+  }
+
+  /**
+   * Clip upper-floor alpha using the outdoors mask from LightingEffect.
+   *
+   * Upper-floor tile images span the full scene rect but only contain room
+   * artwork in parts — the remainder is an opaque grey/grid fill (alpha 1.0).
+   * LightingEffect's outdoorsTarget is a screen-space RT whose R channel is
+   * 1.0 for outdoor pixels (no roof at this elevation) and 0.0 for indoor.
+   * Multiplying the floor RT's alpha by (1.0 − outdoors) zeroes out outdoor
+   * areas so lower floors show through during alpha compositing.
+   *
+   * Only called for floor index > 0 (the ground floor keeps its full opacity).
+   *
+   * @param {THREE.WebGLRenderTarget} floorInputRT - The floor's post-processed image
+   * @returns {THREE.WebGLRenderTarget} RT containing the clipped image (may differ from input)
+   * @private
+   */
+  _applyFloorAlphaClip(floorInputRT) {
+    const THREE = window.THREE;
+
+    // Find LightingEffect's screen-space outdoors projection.
+    const lightingEffect = this.effects.get('lighting');
+    const outdoorsRT = lightingEffect?.outdoorsTarget;
+    if (!outdoorsRT?.texture) return floorInputRT; // No outdoors data — skip clip
+
+    // Lazily create the alpha-clip shader material.
+    if (!this._floorAlphaClipMaterial) {
+      this._floorAlphaClipMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          tFloor: { value: null },
+          tOutdoors: { value: null },
+        },
+        vertexShader: /* glsl */ `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = vec4(position.xy, 0.0, 1.0);
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          uniform sampler2D tFloor;
+          uniform sampler2D tOutdoors;
+          varying vec2 vUv;
+          void main() {
+            vec4 color = texture2D(tFloor, vUv);
+            // Sample the alpha channel of the outdoors mask, NOT the red channel.
+            // The outdoors WebP has transparent areas where the floor tile doesn't
+            // exist (alpha=0) and opaque areas where it does (alpha=1). The RGB is
+            // all-black for an all-indoors floor, so .r was always 0 and the clip
+            // never fired. Alpha is the correct channel for floor boundary clipping.
+            float floorCoverage = texture2D(tOutdoors, vUv).a;
+            floorCoverage = smoothstep(0.05, 0.5, floorCoverage);
+            color.a *= floorCoverage;
+            gl_FragColor = color;
+          }
+        `,
+        depthTest: false,
+        depthWrite: false,
+      });
+    }
+
+    // Ensure compositor quad exists (created by _compositeFloorToAccumulation).
+    if (!this._compositeQuad) return floorInputRT;
+
+    // Pick an output RT that isn't the input (ping-pong).
+    const clipOut = (floorInputRT === this._floorPostA) ? this._floorPostB
+                  : (floorInputRT === this._floorPostB) ? this._floorPostA
+                  : this._floorPostA;
+
+    this._floorAlphaClipMaterial.uniforms.tFloor.value = floorInputRT.texture;
+    this._floorAlphaClipMaterial.uniforms.tOutdoors.value = outdoorsRT.texture;
+
+    // Swap material on the compositor quad, render, restore.
+    const prevMaterial = this._compositeQuad.material;
+    this._compositeQuad.material = this._floorAlphaClipMaterial;
+
+    this.renderer.setRenderTarget(clipOut);
+    this.renderer.clear();
+    this.renderer.render(this._compositeScene, this._compositeCamera);
+
+    this._compositeQuad.material = prevMaterial;
+    return clipOut;
+  }
+
+  /**
+   * Blit (copy) a render target to the screen without any blending.
+   * Used when the floor loop completes and no global post effects need to run.
+   * @param {THREE.WebGLRenderTarget} sourceRT
+   * @private
+   */
+  _blitToScreen(sourceRT) {
+    const THREE = window.THREE;
+
+    // Ensure compositor infrastructure exists (normally already created by
+    // _compositeFloorToAccumulation, but guard against edge cases).
+    if (!this._compositeMaterial) {
+      this._compositeFloorToAccumulation(sourceRT);
+      return;
+    }
+
+    // The accumulation RT contains premultiplied-alpha content. Use the same
+    // One/OneMinusSrcAlpha blend to composite over the Foundry canvas so that
+    // transparent areas (scene padding) let the Foundry background show through,
+    // while opaque areas overwrite it correctly.
+    this._compositeMaterial.uniforms.tFloor.value = sourceRT.texture;
+
+    this.renderer.setRenderTarget(null);
+    this.renderer.render(this._compositeScene, this._compositeCamera);
   }
 
   /**
@@ -551,6 +808,63 @@ export class EffectComposer {
       }
     }
 
+    // ── COMPOSITOR V2 BREAKER FUSE ─────────────────────────────────────────
+    // When V2 is active, it is the SOLE renderer. Visual effects are suppressed:
+    //   - No effect.prepareFrame()
+    //   - No effect sorting or rendering
+    //   - No _renderOverlayToScreen()
+    //   - No _renderDepthDebugOverlay()
+    // Updatables DO still run — but only ESSENTIAL ones are registered when V2
+    // is active (CameraFollower, InteractionManager, TileManager, GridRenderer,
+    // DoorMeshManager). Effect-related updatables (WeatherController, DepthPass,
+    // TileMotion, PhysicsRopes, DynamicExposure, DetectionFilter) are gated out
+    // during createThreeCanvas() via the _v2Active flag.
+    // See docs/planning/V2-MILESTONE-1-ALBEDO-ONLY.md for full rationale.
+    {
+      const _floorStackEarly = window.MapShine?.floorStack ?? null;
+      if (this._checkCompositorV2Enabled() && _floorStackEarly !== null) {
+        // ── Run updatables (camera, interaction, movement, etc.) ──────────
+        for (const updatable of this.updatables) {
+          try {
+            const hz = updatable.updateHz;
+            if (hz > 0) {
+              const accum = (this._updatableAccum.get(updatable) || 0) + timeInfo.delta;
+              const interval = 1.0 / hz;
+              if (accum < interval) {
+                this._updatableAccum.set(updatable, accum);
+                continue;
+              }
+              this._updatableAccum.set(updatable, accum % interval);
+            }
+            let t0 = 0;
+            if (doProfile) t0 = performance.now();
+            updatable.update(timeInfo);
+            if (doProfile) {
+              const dt = performance.now() - t0;
+              const name = updatable?.constructor?.name || updatable?.id || 'updatable';
+              profiler.recordUpdatable(name, dt);
+            }
+          } catch (error) {
+            log.error('Error updating updatable (V2 path):', error);
+          }
+        }
+
+        // ── Render: FloorCompositor only (no effects, no overlay) ─────────
+        const _compositorV2 = this._getFloorCompositorV2();
+        _compositorV2.render({
+          floorStack: _floorStackEarly,
+          doProfile,
+          profiler,
+        });
+        if (doProfile) profiler.endFrame();
+        this._updateDecimationState(performance.now() - _frameStartMs);
+        return;
+      }
+    }
+
+    // ── Legacy render path below ─────────────────────────────────────────────
+    // Everything below this point only runs when V2 is DISABLED.
+
     // Update registered updatables (managers, etc.)
     // Sub-rate lanes: updatables with an `updateHz` property only run when their
     // accumulated delta exceeds the interval (1/updateHz). This avoids running
@@ -615,11 +929,11 @@ export class EffectComposer {
     }
 
     // ── SCENE RENDER PATH ────────────────────────────────────────────────────
-    // Phase 3 floor loop (experimentalFloorRendering setting, default true)
-    // renders each visible floor separately bottom→top, accumulating into
-    // sceneRenderTarget, then runs global-scoped effects once after the loop.
-    // Legacy path does a single depth capture + PASS 0 + one scene render.
-    // Both paths share PASS 2 post-processing below.
+    // Per-floor rendering (experimentalFloorRendering setting): each visible
+    // floor renders into an isolated RT, receives floor-scoped post-processing
+    // (water, distortion, fog, lighting), then alpha-composites bottom→top into
+    // an accumulation buffer. Global post effects run once on the final composite.
+    // Legacy path: single depth capture + PASS 0 + one scene render + PASS 2.
     const _floorStack = window.MapShine?.floorStack ?? null;
     const _useFloorLoop = this._checkFloorLoopEnabled() && _floorStack !== null;
     const usePostProcessing = postEffects.length > 0;
@@ -627,153 +941,231 @@ export class EffectComposer {
       log.debug('Rendering with Post-Processing', { postEffects: postEffects.map(e => e.id), sceneEffects: sceneEffects.length });
     }
 
+    // ── Compositor V2 delegation (MOVED) ──────────────────────────────────────
+    // V2 early-exit is now at the TOP of render() (the "breaker fuse").
+    // If V2 is active, execution never reaches this point — it returned above
+    // before updatables, effects, or any other system could run.
+    // This block is kept as documentation; the old code has been removed.
+
     if (_useFloorLoop) {
-      // ── Phase 3: per-floor render loop ──────────────────────────────────────
-      // Floor-scoped effects run once per floor; global-scoped run once after.
-      const _floorEffects = sceneEffects.filter(e => e.floorScope !== 'global');
-      const _globalEffects = sceneEffects.filter(e => e.floorScope === 'global');
+      // ── Per-Floor Isolated Rendering ──────────────────────────────────────────
+      // Each visible floor renders into an isolated RT, receives floor-scoped
+      // post-processing (water, distortion, fog, lighting), then alpha-composites
+      // into an accumulation buffer. This isolates floor-specific effects so they
+      // cannot bleed across floor boundaries. Global post effects (bloom, color
+      // correction, etc.) run once on the final composite.
+      this._ensureFloorRenderTargets();
+
+      // Split scene effects and post effects into floor-scoped and global-scoped.
+      const _floorSceneEffects = sceneEffects.filter(e => e.floorScope !== 'global');
+      const _globalSceneEffects = sceneEffects.filter(e => e.floorScope === 'global');
+      const _floorPostEffects = postEffects.filter(e => e.floorScope !== 'global');
+      const _globalPostEffects = postEffects.filter(e => e.floorScope === 'global');
+
       const _floors = _floorStack.getVisibleFloors();
-
-      if (usePostProcessing) this.ensureSceneRenderTarget();
-
-      // Resolve the GpuSceneMaskCompositor once per frame for floor bundle lookup.
       const _maskCompositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
 
-      // Scene-layer floor-scoped effects that implement bindFloorMasks, regardless
-      // of whether shouldRenderThisFrame excluded them from sceneEffects this frame.
-      // Mask binding is a setup step — effects need their _floorStates kept current
-      // even on frames where they skip rendering (frame decimation, low-tier gating).
-      //
-      // Post-processing effects are intentionally excluded here. They receive masks
-      // via connectToRegistry() which honours the preserveAcrossFloors policy —
-      // e.g. water's ground-floor mask is preserved when the player moves to an
-      // upper floor that has no water. Calling bindFloorMasks() on them in the
-      // per-floor loop would override that preserved state with null, breaking
-      // effects like WaterEffectV2 on floors above the water surface.
+      // ALL floor-scoped effects that implement bindFloorMasks — including
+      // POST_PROCESSING effects (water, distortion, fog, lighting). Per-floor RT
+      // isolation means each floor's post effects operate on that floor's image
+      // exclusively, so cross-floor bleed is impossible by construction.
       const _allBindableFloorEffects = [];
       for (const _e of this.effects.values()) {
         if (_e.floorScope !== 'global' && typeof _e.bindFloorMasks === 'function') {
-          const _isPostProcessing = _e.layer &&
-            _e.layer.order >= RenderLayers.POST_PROCESSING.order;
-          if (!_isPostProcessing) _allBindableFloorEffects.push(_e);
+          _allBindableFloorEffects.push(_e);
         }
       }
 
+      // Clear accumulation RT to transparent black before compositing floors.
+      const _prevClearColor = this.renderer.getClearColor(new window.THREE.Color());
+      const _prevClearAlpha = this.renderer.getClearAlpha();
+      this.renderer.setClearColor(0x000000, 0);
+      this.renderer.setRenderTarget(this._accumulationRT);
+      this.renderer.clear();
+
       if (_floors.length > 0) {
-        // Render each floor bottom→top, accumulating on top of the previous.
         for (let _fi = 0; _fi < _floors.length; _fi++) {
-          const _isFirst = _fi === 0;
           const _floor = _floors[_fi];
-          // Retrieve the pre-composed mask bundle for this floor (may be null if
-          // preloadAllFloors() hasn't run yet — effects fall back to active-floor masks).
           const _floorBundle = _maskCompositor?._floorMeta?.get(_floor.compositorKey) ?? null;
-          // Isolate this floor's geometry for depth capture and scene render.
+
+          // 1. Isolate this floor's geometry.
           _floorStack.setFloorVisible(_floor.index);
-          const _floorPrevMask = this.camera.layers.mask;
+
+          // 2. Per-floor depth capture (GLOBAL_SCENE_LAYER disabled).
+          const _depthPrevMask = this.camera.layers.mask;
           this.camera.layers.disable(GLOBAL_SCENE_LAYER);
-          // Per-floor depth capture (bypasses rate limiter).
           if (this._depthPassManager) {
             try { this._depthPassManager.captureForFloor(); }
             catch (_e) { log.error('Per-floor depth capture failed:', _e); }
           }
-          // Bind floor-specific masks for ALL floor-scoped effects — not only the
-          // ones rendering this frame — so _floorStates stays current for effects
-          // that were skipped by shouldRenderThisFrame (e.g. water, lighting).
+          this.camera.layers.mask = _depthPrevMask;
+
+          // 3. Bind floor-specific masks for ALL floor-scoped effects (scene + post).
           for (const _eff of _allBindableFloorEffects) {
             try { _eff.bindFloorMasks(_floorBundle, _floor.compositorKey); }
             catch (_e) { log.error(`bindFloorMasks error (${_eff.id}):`, _e); }
           }
-          // Floor-scoped effects update + render.
-          for (const _eff of _floorEffects) {
+
+          // 4. Floor-scoped scene effects update + render.
+          for (const _eff of _floorSceneEffects) {
             try {
               let _t = 0; if (doProfile) _t = performance.now();
               _eff.update(timeInfo); if (doProfile) profiler.recordEffectUpdate(_eff.id, performance.now() - _t);
               if (doProfile) _t = performance.now();
               _eff.render(this.renderer, this.scene, this.camera); if (doProfile) profiler.recordEffectRender(_eff.id, performance.now() - _t);
-            } catch (_e) { log.error(`Floor-scope effect error (${_eff.id}):`, _e); this.handleEffectError(_eff, _e); }
+            } catch (_e) { log.error(`Floor scene effect error (${_eff.id}):`, _e); this.handleEffectError(_eff, _e); }
           }
-          // Restore camera mask for scene render (OVERLAY_THREE_LAYER re-disabled below).
-          this.camera.layers.mask = _floorPrevMask;
-          // Point renderer at the correct target; only clear on the first floor.
-          if (usePostProcessing) {
-            this.renderer.setRenderTarget(this.sceneRenderTarget);
-            if (_isFirst) this.renderer.clear();
-          } else {
-            this.renderer.setRenderTarget(null);
+
+          // 5. Render floor geometry into _floorRT (cleared to transparent black).
+          this.renderer.setRenderTarget(this._floorRT);
+          this.renderer.clear();
+          const _scenePrevMask = this.camera.layers.mask;
+          try {
+            this.camera.layers.disable(OVERLAY_THREE_LAYER);
+            this.camera.layers.disable(GLOBAL_SCENE_LAYER);
+            this.renderer.render(this.scene, this.camera);
+          } finally { this.camera.layers.mask = _scenePrevMask; }
+
+          // 6. Floor-scoped post effects ping-pong on the floor's isolated image.
+          //    Each effect reads from _fpIn and writes to _fpOut. The final output
+          //    is tracked by _floorFinalRT for compositing.
+          let _floorFinalRT = this._floorRT;
+          if (_floorPostEffects.length > 0) {
+            let _fpIn = this._floorRT;
+            let _fpOut = this._floorPostA;
+            for (let _pi = 0; _pi < _floorPostEffects.length; _pi++) {
+              const _pe = _floorPostEffects[_pi];
+              try {
+                let _t = 0; if (doProfile) _t = performance.now();
+                _pe.update(timeInfo); if (doProfile) profiler.recordEffectUpdate(_pe.id, performance.now() - _t);
+                if (typeof _pe.setInputTexture === 'function') _pe.setInputTexture(_fpIn.texture);
+                if (typeof _pe.setRenderToScreen === 'function') _pe.setRenderToScreen(false);
+                if (typeof _pe.setBuffers === 'function') _pe.setBuffers(_fpIn, _fpOut);
+                this.renderer.setRenderTarget(_fpOut);
+                this.renderer.clear();
+                if (doProfile) _t = performance.now();
+                _pe.render(this.renderer, this.scene, this.camera); if (doProfile) profiler.recordEffectRender(_pe.id, performance.now() - _t);
+              } catch (_e) { log.error(`Floor post effect error (${_pe.id}):`, _e); this.handleEffectError(_pe, _e); }
+              _floorFinalRT = _fpOut;
+              if (_pi < _floorPostEffects.length - 1) {
+                _fpIn = _fpOut;
+                _fpOut = (_fpIn === this._floorPostA) ? this._floorPostB : this._floorPostA;
+              }
+            }
           }
-          // Accumulate: do not clear colour/depth for floors after the first.
-          if (!_isFirst) { this.renderer.autoClearColor = false; this.renderer.autoClearDepth = false; }
-          const _floorScenePrevMask = this.camera.layers.mask;
-          try { this.camera.layers.disable(OVERLAY_THREE_LAYER); this.renderer.render(this.scene, this.camera); }
-          finally { this.camera.layers.mask = _floorScenePrevMask; }
-          if (!_isFirst) { this.renderer.autoClearColor = true; this.renderer.autoClearDepth = true; }
+
+          // 6b. Alpha-clip upper floors using the floorAlpha mask.
+          //     The floorAlpha mask (from GpuSceneMaskCompositor) encodes where the
+          //     upper floor tile has opaque coverage (R=1) vs transparent gaps (R=0).
+          //     Multiplying the floor RT alpha by this mask zeroes out transparent
+          //     regions so the ground floor shows through during compositing.
+          //     We use floorAlpha rather than the outdoors mask because upper floors
+          //     typically have no _Outdoors companion file — the outdoors mask would
+          //     be null/all-black and fail to clip anything.
+          if (_floor.index > 0) {
+            _floorFinalRT = this._applyFloorAlphaClip(_floorFinalRT);
+          }
+
+          // 7. Alpha-composite this floor's completed image into the accumulation buffer.
+          this._compositeFloorToAccumulation(_floorFinalRT);
         }
-        // Restore Levels-driven visibility after all floors are rendered.
+        // Restore Levels-driven visibility after all floors.
         _floorStack.restoreVisibility();
       } else {
-        // No floors available — single full-scene render as safe fallback.
-        if (usePostProcessing) { this.renderer.setRenderTarget(this.sceneRenderTarget); this.renderer.clear(); }
-        else { this.renderer.setRenderTarget(null); }
+        // No floors — single full-scene render into accumulation as fallback.
+        this.renderer.setRenderTarget(this._accumulationRT);
         const _fbPrevMask = this.camera.layers.mask;
         try { this.camera.layers.disable(OVERLAY_THREE_LAYER); this.renderer.render(this.scene, this.camera); }
         finally { this.camera.layers.mask = _fbPrevMask; }
       }
 
-      // Global-scoped effects run once after the floor loop.
-      for (const _eff of _globalEffects) {
+      // Restore renderer clear color.
+      this.renderer.setClearColor(_prevClearColor, _prevClearAlpha);
+
+      // Global-scoped scene effects run once on the accumulated image.
+      for (const _eff of _globalSceneEffects) {
         try {
           let _t = 0; if (doProfile) _t = performance.now();
           _eff.update(timeInfo); if (doProfile) profiler.recordEffectUpdate(_eff.id, performance.now() - _t);
           if (doProfile) _t = performance.now();
           _eff.render(this.renderer, this.scene, this.camera); if (doProfile) profiler.recordEffectRender(_eff.id, performance.now() - _t);
-        } catch (_e) { log.error(`Global-scope effect error (${_eff.id}):`, _e); this.handleEffectError(_eff, _e); }
+        } catch (_e) { log.error(`Global scene effect error (${_eff.id}):`, _e); this.handleEffectError(_eff, _e); }
       }
 
-      if (!usePostProcessing) {
-        this._renderOverlayToScreen(); this._renderDepthDebugOverlay();
-        if (doProfile) profiler.endFrame();
-        this._updateDecimationState(performance.now() - _frameStartMs);
-        return;
-      }
-    } else {
-      // ── Legacy single-pass path (floor loop disabled) ────────────────────────
-      // Phase 2: capture depth for active floor only, restore before scene render.
-      if (_floorStack && this._depthPassManager) {
-        const _activeFloor = _floorStack.getActiveFloor();
-        if (_activeFloor !== null) {
-          const _prevMask = this.camera.layers.mask;
+      // Global post-processing on the accumulated image → screen.
+      if (_globalPostEffects.length > 0) {
+        let _gpIn = this._accumulationRT;
+        let _gpOut = this.getRenderTarget('post_1', _gpIn.width, _gpIn.height, false);
+        const _gpPing = this.getRenderTarget('post_2', _gpIn.width, _gpIn.height, false);
+        for (let _gi = 0; _gi < _globalPostEffects.length; _gi++) {
+          const _ge = _globalPostEffects[_gi];
+          const _isLast = _gi === _globalPostEffects.length - 1;
+          const _target = _isLast ? null : _gpOut;
           try {
-            _floorStack.setFloorVisible(_activeFloor.index);
-            this.camera.layers.disable(GLOBAL_SCENE_LAYER);
-            this._depthPassManager.captureForFloor();
-          } catch (_err) { log.error('Floor-aware depth capture failed:', _err); }
-          finally { this.camera.layers.mask = _prevMask; _floorStack.restoreVisibility(); }
+            let _t = 0; if (doProfile) _t = performance.now();
+            _ge.update(timeInfo); if (doProfile) profiler.recordEffectUpdate(_ge.id, performance.now() - _t);
+            if (typeof _ge.setInputTexture === 'function') _ge.setInputTexture(_gpIn.texture);
+            if (typeof _ge.setRenderToScreen === 'function') _ge.setRenderToScreen(_isLast);
+            if (typeof _ge.setBuffers === 'function') _ge.setBuffers(_gpIn, _target);
+            this.renderer.setRenderTarget(_target);
+            if (_target) this.renderer.clear();
+            if (doProfile) _t = performance.now();
+            _ge.render(this.renderer, this.scene, this.camera); if (doProfile) profiler.recordEffectRender(_ge.id, performance.now() - _t);
+          } catch (_e) { log.error(`Global post effect error (${_ge.id}):`, _e); this.handleEffectError(_ge, _e); }
+          if (!_isLast) {
+            _gpIn = _gpOut;
+            _gpOut = (_gpIn === this.getRenderTarget('post_1')) ? _gpPing : this.getRenderTarget('post_1');
+          }
         }
+      } else {
+        // No global post effects — blit accumulation to screen.
+        this._blitToScreen(this._accumulationRT);
       }
 
-      // PASS 0: UPDATE & OPTIONAL RENDER FOR SCENE EFFECTS
-      for (const effect of sceneEffects) {
+      this._renderOverlayToScreen();
+      this._renderDepthDebugOverlay();
+      if (doProfile) profiler.endFrame();
+      this._updateDecimationState(performance.now() - _frameStartMs);
+      return;
+    }
+
+    // ── Legacy single-pass path (floor loop disabled) ──────────────────────────
+    // Capture depth for active floor only, restore before scene render.
+    if (_floorStack && this._depthPassManager) {
+      const _activeFloor = _floorStack.getActiveFloor();
+      if (_activeFloor !== null) {
+        const _prevMask = this.camera.layers.mask;
         try {
-          let t0 = 0; if (doProfile) t0 = performance.now();
-          effect.update(timeInfo); if (doProfile) profiler.recordEffectUpdate(effect.id, performance.now() - t0);
-          if (doProfile) t0 = performance.now();
-          effect.render(this.renderer, this.scene, this.camera); if (doProfile) profiler.recordEffectRender(effect.id, performance.now() - t0);
-        } catch (error) { log.error(`Scene effect update/render error (${effect.id}):`, error); this.handleEffectError(effect, error); }
+          _floorStack.setFloorVisible(_activeFloor.index);
+          this.camera.layers.disable(GLOBAL_SCENE_LAYER);
+          this._depthPassManager.captureForFloor();
+        } catch (_err) { log.error('Floor-aware depth capture failed:', _err); }
+        finally { this.camera.layers.mask = _prevMask; _floorStack.restoreVisibility(); }
       }
+    }
 
-      if (usePostProcessing) { this.ensureSceneRenderTarget(); this.renderer.setRenderTarget(this.sceneRenderTarget); this.renderer.clear(); }
-      else { this.renderer.setRenderTarget(null); }
+    // PASS 0: UPDATE & OPTIONAL RENDER FOR SCENE EFFECTS
+    for (const effect of sceneEffects) {
+      try {
+        let t0 = 0; if (doProfile) t0 = performance.now();
+        effect.update(timeInfo); if (doProfile) profiler.recordEffectUpdate(effect.id, performance.now() - t0);
+        if (doProfile) t0 = performance.now();
+        effect.render(this.renderer, this.scene, this.camera); if (doProfile) profiler.recordEffectRender(effect.id, performance.now() - t0);
+      } catch (error) { log.error(`Scene effect update/render error (${effect.id}):`, error); this.handleEffectError(effect, error); }
+    }
 
-      const prevSceneLayersMask = this.camera.layers.mask;
-      try { this.camera.layers.disable(OVERLAY_THREE_LAYER); this.renderer.render(this.scene, this.camera); }
-      finally { this.camera.layers.mask = prevSceneLayersMask; }
+    if (usePostProcessing) { this.ensureSceneRenderTarget(); this.renderer.setRenderTarget(this.sceneRenderTarget); this.renderer.clear(); }
+    else { this.renderer.setRenderTarget(null); }
 
-      if (!usePostProcessing) {
-        this._renderOverlayToScreen(); this._renderDepthDebugOverlay();
-        if (doProfile) profiler.endFrame();
-        this._updateDecimationState(performance.now() - _frameStartMs);
-        return;
-      }
+    const prevSceneLayersMask = this.camera.layers.mask;
+    try { this.camera.layers.disable(OVERLAY_THREE_LAYER); this.renderer.render(this.scene, this.camera); }
+    finally { this.camera.layers.mask = prevSceneLayersMask; }
+
+    if (!usePostProcessing) {
+      this._renderOverlayToScreen(); this._renderDepthDebugOverlay();
+      if (doProfile) profiler.endFrame();
+      this._updateDecimationState(performance.now() - _frameStartMs);
+      return;
     }
 
     // PASS 2: POST-PROCESSING ON SCENE TEXTURE
@@ -863,6 +1255,35 @@ export class EffectComposer {
     } catch (_) {
       return false;
     }
+  }
+
+  /**
+   * Check whether the Compositor V2 (layer-based floor isolation) is enabled.
+   * Reads the 'useCompositorV2' game setting.
+   * @returns {boolean}
+   * @private
+   */
+  _checkCompositorV2Enabled() {
+    try {
+      return !!game?.settings?.get('map-shine-advanced', 'useCompositorV2');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Get or lazily create the FloorCompositor V2 instance.
+   * Created on first use so the constructor doesn't run during module init.
+   * @returns {FloorCompositor}
+   * @private
+   */
+  _getFloorCompositorV2() {
+    if (!this._floorCompositorV2) {
+      this._floorCompositorV2 = new FloorCompositor(this.renderer, this.scene, this.camera);
+      this._floorCompositorV2.initialize();
+      log.info('FloorCompositor V2 created and initialized');
+    }
+    return this._floorCompositorV2;
   }
 
   /**
@@ -1191,6 +1612,17 @@ export class EffectComposer {
       log.debug(`Resized scene render target: ${renderW}x${renderH}`);
     }
 
+    // Resize per-floor render targets (lazily created — only resize if they exist)
+    if (this._floorRT) this._floorRT.setSize(renderW, renderH);
+    if (this._floorPostA) this._floorPostA.setSize(renderW, renderH);
+    if (this._floorPostB) this._floorPostB.setSize(renderW, renderH);
+    if (this._accumulationRT) this._accumulationRT.setSize(renderW, renderH);
+
+    // Resize Compositor V2 render targets
+    if (this._floorCompositorV2) {
+      this._floorCompositorV2.onResize(renderW, renderH);
+    }
+
     // Resize all named render targets
     for (const [name, target] of this.renderTargets.entries()) {
       target.setSize(renderW, renderH);
@@ -1246,6 +1678,27 @@ export class EffectComposer {
         this.sceneRenderTarget.dispose();
         this.sceneRenderTarget = null;
       }
+    } catch (e) {
+    }
+
+    // Dispose per-floor render targets and compositor resources
+    try {
+      if (this._floorRT) { this._floorRT.dispose(); this._floorRT = null; }
+      if (this._floorPostA) { this._floorPostA.dispose(); this._floorPostA = null; }
+      if (this._floorPostB) { this._floorPostB.dispose(); this._floorPostB = null; }
+      if (this._accumulationRT) { this._accumulationRT.dispose(); this._accumulationRT = null; }
+      if (this._compositeMaterial) { this._compositeMaterial.dispose(); this._compositeMaterial = null; }
+      if (this._floorAlphaClipMaterial) { this._floorAlphaClipMaterial.dispose(); this._floorAlphaClipMaterial = null; }
+      if (this._compositeQuad?.geometry) { this._compositeQuad.geometry.dispose(); }
+      this._compositeQuad = null;
+      this._compositeScene = null;
+      this._compositeCamera = null;
+    } catch (e) {
+    }
+
+    // Dispose Compositor V2 resources
+    try {
+      if (this._floorCompositorV2) { this._floorCompositorV2.dispose(); this._floorCompositorV2 = null; }
     } catch (e) {
     }
   }

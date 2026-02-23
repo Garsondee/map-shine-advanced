@@ -921,19 +921,13 @@ export class DistortionManager extends EffectBase {
             waterOccluder = texture2D(tWaterOccluderAlpha, vUv).a;
           }
 
-          // Depth-based occlusion: suppress distortion for pixels belonging to
-          // elevated surfaces (tokens at Z ~+3, overhead tiles, etc.).
-          // Ground-level tiles (BG/FG at Z ~+1/+2) are NOT occluded so water/heat
-          // distortion still applies to the base map layers.
+          // Depth occluder disabled in composite shader.
+          // The depth camera uses tight near/far bounds (groundDist ± 200) which
+          // may clip upper-floor tiles entirely — they appear as background
+          // (deviceDepth=0.9999) and cannot be detected via depth.
+          // Cross-floor suppression is handled by the above-floor blocker mesh
+          // written to tWaterOccluderAlpha (see tile-manager _ensureAboveFloorBlockerMesh).
           float depthOccluder = 0.0;
-          if (uDepthEnabled > 0.5) {
-            float deviceDepth = msa_sampleDeviceDepth(vUv);
-            if (deviceDepth < 0.9999) {
-              float linearDepth = msa_linearizeDepth(deviceDepth);
-              float aboveGround = uGroundDistance - linearDepth;
-              depthOccluder = smoothstep(2.75, 3.25, aboveGround);
-            }
-          }
 
           // Derive stable world-space coordinates (Foundry coords, then scene UV)
           vec2 foundryPos = screenUvToFoundry(vUv);
@@ -1192,6 +1186,7 @@ export class DistortionManager extends EffectBase {
 
         uHasTokenMask: { value: 0.0 },
 
+
         // Floor-presence mask: alpha of current-floor tiles.
         // tFloorPresence may be a screen-space RT or a world-space compositor RT.
         // uFloorPresenceIsWorldSpace=1 triggers scene-UV sampling in the shader.
@@ -1266,6 +1261,8 @@ export class DistortionManager extends EffectBase {
         uniform sampler2D tWaterMask;
         uniform sampler2D tWaterData;
         uniform sampler2D tWaterOccluderAlpha;
+
+
         uniform float uWaterMaskFlipY;
         uniform float uWaterMaskUseAlpha;
         uniform vec2 uWaterMaskTexelSize;
@@ -1559,53 +1556,18 @@ export class DistortionManager extends EffectBase {
             waterOccluder = texture2D(tWaterOccluderAlpha, vUv).a;
           }
 
-          // Floor-presence gate: suppress preserved cross-floor distortion
-          // (heat haze) where the current floor's tiles are opaque.
-          // floorPresence~0 at transparent gaps → lower-floor effects visible.
-          float floorPresence = 0.0;
-          if (uHasFloorPresence > 0.5) {
-            if (uFloorPresenceIsWorldSpace > 0.5) {
-              // World-space compositor RT: convert screen UV → Foundry → scene UV.
-              // Compositor RTs use GL Y-up, so flip V after foundryToSceneUv().
-              vec2 fpFoundry = screenUvToFoundry(vUv);
-              vec2 fpSceneUv = foundryToSceneUv(fpFoundry);
-              fpSceneUv.y = 1.0 - fpSceneUv.y;
-              floorPresence = texture2D(tFloorPresence, fpSceneUv).r;
-            } else {
-              floorPresence = texture2D(tFloorPresence, vUv).r;
-            }
-          }
-
-          // Below-floor-presence: bounds preserved lower-floor effects to their
-          // originating floor's tile footprint (R=1 where below-floor tiles exist).
-          // Default 1.0 so behaviour is unchanged when no below-floor data is available.
-          float belowFloorPresence = 1.0;
-          if (uHasBelowFloorPresence > 0.5) {
-            if (uBelowFloorPresenceIsWorldSpace > 0.5) {
-              vec2 bfpFoundry = screenUvToFoundry(vUv);
-              vec2 bfpSceneUv = foundryToSceneUv(bfpFoundry);
-              bfpSceneUv.y = 1.0 - bfpSceneUv.y;
-              belowFloorPresence = texture2D(tBelowFloorPresence, bfpSceneUv).r;
-            } else {
-              belowFloorPresence = texture2D(tBelowFloorPresence, vUv).r;
-            }
-          }
-
-          // Depth-based occlusion for the apply pass: suppress water shading
-          // (tint, caustics, murk, foam, sand) under elevated surfaces.
+          // Depth occluder disabled in apply shader.
+          // The depth camera's tight near/far bounds make upper-floor tile depth
+          // values unreliable for cross-floor detection.
+          // Cross-floor suppression is handled by the above-floor blocker mesh
+          // written to tWaterOccluderAlpha (see tile-manager _ensureAboveFloorBlockerMesh).
+          // Same-floor token/overhead occlusion is also removed — the water mask
+          // SDF already excludes non-water areas.
           float depthOccluder = 0.0;
-          if (uDepthEnabled > 0.5) {
-            float deviceDepth = msa_sampleDeviceDepth(vUv);
-            if (deviceDepth < 0.9999) {
-              float linearDepth = msa_linearizeDepth(deviceDepth);
-              float aboveGround = uGroundDistance - linearDepth;
-              depthOccluder = smoothstep(2.75, 3.25, aboveGround);
-            }
-          }
 
-          // Gate water surface shading by floor presence so floor-0 water doesn't
-          // render on top of floor-1 solid tiles when looking from the upper floor.
-          float waterVisible = (1.0 - waterOccluder) * (1.0 - depthOccluder) * (1.0 - floorPresence);
+          // Water visibility: gated by tile occluder, depth, and floor ID.
+          float waterVisible = (1.0 - waterOccluder) * (1.0 - depthOccluder);
+
 
           // Keep perceived distortion stable across zoom levels by scaling the
           // screen-space UV offset. (Zoom out => smaller offset.)
@@ -1618,12 +1580,9 @@ export class DistortionManager extends EffectBase {
           // Example: if maxZoom=3, then zoom=0.94 => zoomNorm~0.31 (not near 1.0).
           float zoomNorm = clamp(zoom / zoomMax, 0.0, 1.0);
 
-          // Gate the general distortion mask (heat haze from fire) by both:
-          //   belowFloorPresence — only show where the below-floor has tiles
-          //   (1-floorPresence)  — suppress under opaque current-floor tiles
-          // This prevents lower-floor heat from bleeding into current-floor areas
-          // that happen to have gaps, but no lower-floor tile underneath.
-          float mask01 = clamp(mask, 0.0, 1.0) * belowFloorPresence * (1.0 - floorPresence);
+          // General distortion mask (heat haze from fire).
+          // Floor-presence gating removed — per-floor rendering handles isolation.
+          float mask01 = clamp(mask, 0.0, 1.0);
 
           // Tokens should not be distorted/tinted by post-process effects.
           // tokenMask is authored in screen UV space, alpha = 1 inside token silhouette.
@@ -1899,12 +1858,7 @@ export class DistortionManager extends EffectBase {
                 // WindowLightEffect light target stores brightness in alpha.
                 windowBright = texture2D(tWindowLight, vUv).a;
                 windowBright = smoothstep(0.05, 0.25, windowBright);
-                // If the window light is from a preserved below-floor source, gate
-                // it by (1-floorPresence) so it only illuminates through gaps in
-                // the current floor's tiles, not under its solid surfaces.
-                if (uWindowLightBelowFloor > 0.5) {
-                  windowBright *= (1.0 - floorPresence);
-                }
+                // Floor-presence gating removed — per-floor rendering handles isolation.
               }
 
               float lightGate = max(outdoor * cloudLit, indoor * windowBright);
@@ -1981,45 +1935,6 @@ export class DistortionManager extends EffectBase {
             }
           }
           
-          // Below-floor water: show floor-0 water tint and simplified caustics through gaps.
-          // Only runs where below-floor tiles exist AND the current floor doesn't cover them.
-          if (uHasBelowWaterMask > 0.5 && uHasBelowFloorPresence > 0.5) {
-            float gapFactor = clamp(belowFloorPresence * (1.0 - floorPresence), 0.0, 1.0);
-            if (gapFactor > 0.01) {
-              vec2 bwFoundryPos = screenUvToFoundry(vUv);
-              vec2 bwSceneUv = vUv;
-              float bwInBounds = 1.0;
-              if (uHasSceneRect > 0.5) {
-                bwSceneUv = foundryToSceneUv(bwFoundryPos);
-                bwInBounds = inUnitSquare(bwSceneUv);
-                bwSceneUv = clamp(bwSceneUv, vec2(0.0), vec2(1.0));
-              }
-              float bwY = (uWaterMaskFlipY > 0.5) ? (1.0 - bwSceneUv.y) : bwSceneUv.y;
-              vec2 bwUv = vec2(bwSceneUv.x, bwY);
-              float bwDepth = waterMaskValue(texture2D(tBelowWaterMask, bwUv)) * bwInBounds * gapFactor;
-              bwDepth = clamp(bwDepth, 0.0, 1.0);
-
-              if (bwDepth > 0.01) {
-                // Simplified tint for below-floor water visible through gaps.
-                if (uWaterTintEnabled > 0.5) {
-                  float tintAmt = clamp(bwDepth * uWaterTintStrength, 0.0, 1.0);
-                  vec3 bwTinted = mix(sceneColor.rgb, uWaterTintColor, tintAmt);
-                  sceneColor.rgb = mix(sceneColor.rgb, bwTinted, tintAmt * (1.0 - 0.35 * tintAmt));
-                }
-                // Simplified caustics for below-floor water (no murk/foam to keep cost low).
-                if (uWaterCausticsEnabled > 0.5) {
-                  vec2 bwSceneUvIso = aspectCorrectSceneUv(
-                    (uWaterMaskFlipY > 0.5) ? vec2(bwSceneUv.x, 1.0 - bwSceneUv.y) : bwSceneUv
-                  );
-                  float bwC = causticsPattern(bwSceneUvIso, uTime, uWaterCausticsScale,
-                                             uWaterCausticsSpeed, uWaterCausticsSharpness);
-                  float bwCaustics = uWaterCausticsIntensity * bwDepth * 0.6 * nightVis * skyVig;
-                  vec3 bwCausticsColor = mix(vec3(1.0, 1.0, 0.85), uWaterTintColor, 0.15);
-                  sceneColor.rgb += bwCausticsColor * bwC * bwCaustics;
-                }
-              }
-            }
-          }
 
           // Debug visualization
           if (uDebugMode > 0.5) {
@@ -2640,26 +2555,34 @@ export class DistortionManager extends EffectBase {
       }
 
       // Environment/light maps for caustics gating
-      // Outdoors mask (0=indoors/covered, 1=outdoors)
+      // Outdoors mask (0=indoors/covered, 1=outdoors).
+      // IMPORTANT: DistortionManager renders once per frame for the whole scene.
+      // It must use the GROUND FLOOR's outdoors mask — not LightingEffect.outdoorsMask
+      // which is a per-floor mutable field left pointing to the last floor processed
+      // by the render loop (the upper floor). Use compositor.getGroundFloorMaskTexture.
       try {
-        const mm = window.MapShine?.maskManager;
-        const outdoorsTex = mm ? mm.getTexture('outdoors.scene') : null;
-        const outdoorsRec = mm ? mm.getRecord?.('outdoors.scene') : null;
+        let outdoorsTex = null;
+        let outdoorsRec = null;
+        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+        if (compositor?.getGroundFloorMaskTexture) {
+          outdoorsTex = compositor.getGroundFloorMaskTexture('outdoors');
+        }
+        if (!outdoorsTex) {
+          const mm = window.MapShine?.maskManager;
+          outdoorsTex = mm ? mm.getTexture('outdoors.scene') : null;
+          outdoorsRec = mm ? mm.getRecord?.('outdoors.scene') : null;
+        }
+        if (!outdoorsTex) {
+          const wle = window.MapShine?.windowLightEffect;
+          const cloud = window.MapShine?.cloudEffect;
+          outdoorsTex = wle?.outdoorsMask || cloud?.outdoorsMask || null;
+        }
         if (au.tOutdoorsMask) au.tOutdoorsMask.value = outdoorsTex;
         if (au.uHasOutdoorsMask) au.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
         if (au.uOutdoorsMaskFlipY) {
           const metaFlipY = (outdoorsRec && typeof outdoorsRec.uvFlipY === 'boolean') ? outdoorsRec.uvFlipY : null;
           const flip = (metaFlipY !== null) ? metaFlipY : (outdoorsTex?.flipY ?? false);
           au.uOutdoorsMaskFlipY.value = flip ? 1.0 : 0.0;
-        }
-
-        if (!outdoorsTex) {
-          const wle = window.MapShine?.windowLightEffect;
-          const cloud = window.MapShine?.cloudEffect;
-          const fallback = wle?.outdoorsMask || cloud?.outdoorsMask || null;
-          if (au.tOutdoorsMask) au.tOutdoorsMask.value = fallback;
-          if (au.uHasOutdoorsMask) au.uHasOutdoorsMask.value = fallback ? 1.0 : 0.0;
-          if (au.uOutdoorsMaskFlipY) au.uOutdoorsMaskFlipY.value = (fallback?.flipY ?? false) ? 1.0 : 0.0;
         }
       } catch (e) {
       }
@@ -2910,11 +2833,22 @@ export class DistortionManager extends EffectBase {
     // screen-space mesh renders (layers 23/24). The compositor bakes floor alpha
     // once at composition time so no per-frame geometry pass is needed. Only fall
     // back to the legacy screen-space renders when compositor data isn't ready.
+    //
+    // IMPORTANT: Use the PLAYER'S actual floor key (from activeLevelContext), NOT
+    // _compositor._activeFloorKey. The compositor's _activeFloorKey is updated by
+    // composeFloor() during the per-floor render loop and is left pointing to the
+    // LAST floor processed (the upper floor) after the loop ends. Using it here
+    // would bind the upper floor's floorAlpha as floorPresence, causing
+    // waterVisible=0 under the upper floor tile footprint and killing ground-floor
+    // water tint/caustics in that region.
     const _compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
-    const _activeKey  = _compositor?._activeFloorKey ?? null;
+    const _levelCtx   = window.MapShine?.activeLevelContext;
+    const _playerKey  = (_levelCtx && Number.isFinite(Number(_levelCtx.bottom)) && Number.isFinite(Number(_levelCtx.top)))
+      ? `${Number(_levelCtx.bottom)}:${Number(_levelCtx.top)}`
+      : (_compositor?._activeFloorKey ?? null);
     const _belowKey   = _compositor?._belowFloorKey  ?? null;
-    const _activeTgts = _activeKey ? _compositor._floorCache?.get(_activeKey) : null;
-    const _belowTgts  = _belowKey  ? _compositor._floorCache?.get(_belowKey)  : null;
+    const _activeTgts = _playerKey ? _compositor?._floorCache?.get(_playerKey) : null;
+    const _belowTgts  = _belowKey  ? _compositor?._floorCache?.get(_belowKey)  : null;
     this._wsFloorAlphaTex      = _activeTgts?.get('floorAlpha')?.texture ?? null;
     this._wsBefloorAlphaTex    = _belowTgts?.get('floorAlpha')?.texture  ?? null;
 
@@ -2944,6 +2878,36 @@ export class DistortionManager extends EffectBase {
         au.uHasFloorPresence.value        = fpTex ? 1.0 : 0.0;
         au.uFloorPresenceIsWorldSpace.value = this._wsFloorAlphaTex ? 1.0 : 0.0;
       }
+      // When the player is on an upper floor, swap tWaterMask to the patched
+      // version from the compositor cache. The patched mask has upper floor tile
+      // footprints subtracted from the ground floor water mask, so water
+      // tint/caustics don't render under upper floor tiles.
+      // Falls back to the raw mask (already set above) if the cache is not warm.
+      {
+        const _compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+        const _reg = window.MapShine?.effectMaskRegistry;
+        const _floorStack = window.MapShine?.floorStack;
+        const _activeFloor = _floorStack?.getActiveFloor?.();
+        const _activeIdx = _activeFloor?.index ?? 0;
+        const _waterSlot = _reg?.getSlot?.('water');
+        const _waterFloorKey = _waterSlot?.floorKey ?? null;
+        let _waterFloorIdx = 0;
+        if (_waterFloorKey && _floorStack) {
+          const _floors = _floorStack.getVisibleFloors?.() ?? [];
+          const _match = _floors.find(f => f.compositorKey === _waterFloorKey);
+          if (_match && Number.isFinite(_match.index)) _waterFloorIdx = _match.index;
+        }
+        // Always prefer the patched water mask when available — it has upper floor
+        // tile footprints subtracted, so water never renders over upper floor tiles
+        // regardless of which floor the player is on.
+        if (_waterFloorKey && _compositor) {
+          const _patchedTex = _compositor.getFloorTexture?.(_waterFloorKey, 'water') ?? null;
+          if (_patchedTex) {
+            if (au.tWaterMask) au.tWaterMask.value = _patchedTex;
+          }
+        }
+      }
+
       if (au.tBelowFloorPresence) {
         const bfpTex = this._wsBefloorAlphaTex ?? this.belowFloorPresenceTarget?.texture ?? null;
         au.tBelowFloorPresence.value             = bfpTex;

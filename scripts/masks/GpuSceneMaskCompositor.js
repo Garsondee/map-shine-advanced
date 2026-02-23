@@ -212,6 +212,44 @@ const FLOOR_ID_FRAG = /* glsl */`
   }
 `;
 
+/**
+ * Fragment shader for patching a lower floor's water mask after all floors are composed.
+ *
+ * Operation per pixel (all in scene UV space):
+ *   result = max(0, currentWater - upperFloorAlpha) + upperFloorWater
+ *
+ * This punches out the upper floor's opaque tile footprint from the ground floor
+ * water mask, then adds back any water that exists on the upper floor itself.
+ *
+ * Uniforms:
+ *   tCurrentWater    — the lower floor's water RT (greyscale, R channel)
+ *   tUpperFloorAlpha — the upper floor's tile albedo alpha RT (greyscale, R channel)
+ *   tUpperWater      — the upper floor's water RT (greyscale, R channel); may be null
+ *   uHasUpperWater   — 1.0 if tUpperWater is valid, 0.0 otherwise
+ */
+const WATER_PATCH_FRAG = /* glsl */`
+  precision highp float;
+
+  uniform sampler2D tCurrentWater;
+  uniform sampler2D tUpperFloorAlpha;
+  uniform sampler2D tUpperWater;
+  uniform float uHasUpperWater;
+
+  varying vec2 vSceneUv;
+
+  void main() {
+    float water      = texture2D(tCurrentWater,    vSceneUv).r;
+    float upperAlpha = texture2D(tUpperFloorAlpha, vSceneUv).r;
+    float upperWater = (uHasUpperWater > 0.5) ? texture2D(tUpperWater, vSceneUv).r : 0.0;
+
+    // Subtract upper floor tile footprint, then add back upper floor water.
+    float result = clamp(water - upperAlpha, 0.0, 1.0) + upperWater;
+    result = clamp(result, 0.0, 1.0);
+
+    gl_FragColor = vec4(result, result, result, result);
+  }
+`;
+
 // ── GpuSceneMaskCompositor ────────────────────────────────────────────────────
 
 export class GpuSceneMaskCompositor {
@@ -313,6 +351,22 @@ export class GpuSceneMaskCompositor {
      * @type {THREE.WebGLRenderTarget|null}
      */
     this._floorIdTarget = null;
+
+    /** @type {THREE.RawShaderMaterial|null} Material for the water mask patch pass. */
+    this._waterPatchMaterial = null;
+
+    /** @type {THREE.Mesh|null} Full-screen quad mesh for the water mask patch pass. */
+    this._waterPatchMesh = null;
+
+    /** @type {THREE.Scene|null} Minimal scene for the water mask patch pass. */
+    this._waterPatchScene = null;
+
+    /**
+     * Temporary RT used as a ping-pong buffer during water mask patching.
+     * Reused across patch calls to avoid per-call allocations.
+     * @type {THREE.WebGLRenderTarget|null}
+     */
+    this._waterPatchTempRt = null;
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -631,10 +685,11 @@ export class GpuSceneMaskCompositor {
                     const type = m?.type || m?.id;
                     if (!type) return true;
                     const policy = emr?.getPolicy?.(type);
-                    // Strip preserveAcrossFloors masks (e.g. water) — the registry
-                    // handles preservation; including them would replace valid
-                    // lower-floor masks.
-                    if (policy?.preserveAcrossFloors) return false;
+                    // Strip preserveAcrossFloors masks (e.g. water) on UPPER floors
+                    // only. The ground floor (bandBottom ≤ 0) is the originator of
+                    // these masks and must keep them so the per-floor render pipeline
+                    // receives a complete mask set via bindFloorMasks().
+                    if (policy?.preserveAcrossFloors && bandBottom > 0) return false;
                     // On upper floors, also strip lighten-mode data masks (fire,
                     // dust, ash). Bundle masks are tile-space — they match the
                     // tile image, not the scene. On upper floors the tile doesn't
@@ -676,7 +731,8 @@ export class GpuSceneMaskCompositor {
             const type = m?.type || m?.id;
             if (!type) return true;
             const policy = emr?.getPolicy?.(type);
-            if (policy?.preserveAcrossFloors) return false;
+            // Only strip on upper floors — ground floor keeps its own masks.
+            if (policy?.preserveAcrossFloors && bandBottom > 0) return false;
             const mode = COMPOSITE_MODES[type];
             if (bandBottom > 0 && mode === 'lighten') return false;
             return true;
@@ -913,9 +969,214 @@ export class GpuSceneMaskCompositor {
           }
         }
       } catch (_refreshErr) {}
+
+      // After all floors are composed, patch each lower floor's water mask by
+      // subtracting upper floor tile alpha footprints. This prevents water from
+      // appearing on overhead tile surfaces (the core cross-floor water flooding bug).
+      try {
+        // Build sortedKeys from _floorCache (GPU-composited upper floors) plus any
+        // _floorMeta keys whose floor band owns the active registry water slot.
+        // The ground floor is never in _floorCache (preserveAcrossFloors strips water
+        // from composeFloor output), but it must be in sortedKeys so the patch loop
+        // can bootstrap a water RT from the registry and subtract upper floor alpha.
+        const _reg = window.MapShine?.effectMaskRegistry;
+        const _waterSlot = _reg?.getSlot?.('water');
+        const _waterFloorKey = _waterSlot?.floorKey ?? null;
+        const _patchKeySet = new Set(this._floorCache.keys());
+        if (_waterFloorKey && !_patchKeySet.has(_waterFloorKey)) {
+          _patchKeySet.add(_waterFloorKey);
+        }
+        if (_patchKeySet.size >= 2) {
+          // Sort all floor keys by bandBottom ascending (lowest floor first).
+          const sortedKeys = [..._patchKeySet].sort((a, b) => {
+            const aBottom = Number(a.split(':')[0]);
+            const bBottom = Number(b.split(':')[0]);
+            return aBottom - bBottom;
+          });
+          this._patchWaterMasksForUpperFloors(sortedKeys);
+          log.info('preloadAllFloors: water mask patch applied for', sortedKeys.length, 'floors');
+
+          // Push the patched water mask into WaterEffectV2 so it rebuilds its SDF
+          // from the patched texture. Swapping tWaterMask in update() is not enough —
+          // tWaterData (the SDF) drives all wave/refraction rendering and is built
+          // from this.waterMask. applyPatchedWaterMask() swaps the mask and forces
+          // a full SDF rebuild, then invalidates the per-floor state cache.
+          try {
+            const we = window.MapShine?.waterEffect;
+            if (we && typeof we.applyPatchedWaterMask === 'function') {
+              // Only push the patched mask for lower floors (those that had water
+              // bootstrapped and patched). Upper floors have no water RT.
+              for (const key of sortedKeys) {
+                const patchedRt = this._floorCache.get(key)?.get('water');
+                if (patchedRt?.texture) {
+                  we.applyPatchedWaterMask(patchedRt.texture, key);
+                  log.debug('preloadAllFloors: pushed patched water mask to WaterEffectV2 for floor', key);
+                }
+              }
+            }
+          } catch (_weErr) {
+            log.warn('preloadAllFloors: applyPatchedWaterMask failed', _weErr);
+          }
+        }
+      } catch (_patchErr) {
+        log.warn('preloadAllFloors: water mask patch failed', _patchErr);
+      }
+
       log.info('preloadAllFloors: done,', this._floorMeta.size, 'floors cached');
     } catch (e) {
       log.debug('preloadAllFloors: error', e);
+    }
+  }
+
+  /**
+   * Post-composition water mask patch: for each lower floor's water RT, subtract
+   * every upper floor's tile alpha footprint and add back the upper floor's own
+   * water mask (if it exists).
+   *
+   * This is the correct fix for water flooding overhead tiles. The water SDF is
+   * built from the ground floor _Water mask, which covers the entire scene area
+   * including pixels that are visually covered by upper floor tiles. This patch
+   * punches out those pixels in world space at composition time, before the SDF
+   * is built, so the water effect never applies to overhead tile surfaces.
+   *
+   * Must be called after all floors have been composed (i.e. at the end of
+   * preloadAllFloors). Operates on the cached floor RTs in _floorCache.
+   *
+   * @param {string[]} sortedFloorKeys - Floor keys sorted by bandBottom ascending
+   * @private
+   */
+  _patchWaterMasksForUpperFloors(sortedFloorKeys) {
+    const renderer = window.MapShine?.renderer;
+    const THREE = window.THREE;
+    if (!THREE || !renderer || !sortedFloorKeys || sortedFloorKeys.length < 2) return;
+
+    this._ensureGpuResources(THREE);
+
+    const mat = this._waterPatchMaterial;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+
+    try {
+      // For each lower floor, apply patches from every higher floor above it.
+      for (let lowerIdx = 0; lowerIdx < sortedFloorKeys.length - 1; lowerIdx++) {
+        const lowerKey = sortedFloorKeys[lowerIdx];
+        // Get or create the floor targets map. For the ground floor, _floorCache
+        // may have no entry (preserveAcrossFloors strips water from composeFloor
+        // output and the ground floor has no tile-based masks). Create the map so
+        // the bootstrap path below can populate it with the registry water RT.
+        const lowerTargets = this._floorCache.has(lowerKey)
+          ? this._floorCache.get(lowerKey)
+          : this._getOrCreateFloorTargets(lowerKey);
+
+        let lowerWaterRt = lowerTargets.get('water');
+        if (!lowerWaterRt) {
+          // The ground floor water mask is loaded via the registry (scene background
+          // image), not the GPU compositor — composeFloor strips preserveAcrossFloors
+          // mask types so _floorCache never gets a water RT for it. Bootstrap one
+          // directly from the registry's scene-space water texture.
+          // The registry texture IS scene-space (full scene dimensions, same UV space
+          // as floorAlpha), so uTileRect=(0,0,1,1) is correct — no tile placement needed.
+          const reg = window.MapShine?.effectMaskRegistry;
+          const regTex = reg?.getSlot?.('water')?.texture ?? null;
+          if (!regTex) continue; // No water mask for this floor — nothing to patch.
+
+          // Use the upper floor's floorAlpha RT to determine output resolution.
+          const upperKey = sortedFloorKeys[lowerIdx + 1];
+          const upperTargets = this._floorCache.get(upperKey);
+          const refRt = upperTargets?.get('floorAlpha') ?? null;
+          const w = refRt?.width ?? regTex.image?.width ?? 1024;
+          const h = refRt?.height ?? regTex.image?.height ?? 1024;
+
+          // Blit the scene-space registry texture into a new GPU RT.
+          lowerWaterRt = this._createRenderTarget(THREE, w, h, 'water');
+          const blitMat = this._tileMaterial;
+          const prevBlitMat = this._quadMesh.material;
+          blitMat.uniforms.tMask.value     = regTex;
+          blitMat.uniforms.uTileRect.value.set(0, 0, 1, 1);
+          blitMat.uniforms.uScaleSign.value.set(1, 1);
+          blitMat.uniforms.uRotation.value = 0.0;
+          blitMat.uniforms.uMode.value     = 0; // lighten: max(r,g,b)*a — correct for greyscale mask
+          blitMat.blending = THREE.NoBlending;
+          blitMat.needsUpdate = true;
+          this._quadMesh.material = blitMat;
+          renderer.autoClear = true;
+          renderer.setRenderTarget(lowerWaterRt);
+          renderer.clear();
+          renderer.render(this._quadScene, this._orthoCamera);
+          this._quadMesh.material = prevBlitMat;
+
+          lowerTargets.set('water', lowerWaterRt);
+          log.debug(`_patchWaterMasksForUpperFloors: bootstrapped water RT from registry for floor ${lowerKey}`);
+        }
+
+        // Apply each upper floor's patch in order (lowest upper floor first).
+        for (let upperIdx = lowerIdx + 1; upperIdx < sortedFloorKeys.length; upperIdx++) {
+          const upperKey = sortedFloorKeys[upperIdx];
+          const upperTargets = this._floorCache.get(upperKey);
+          if (!upperTargets) continue;
+
+          const upperFloorAlphaRt = upperTargets.get('floorAlpha');
+          if (!upperFloorAlphaRt) continue; // No tile coverage data for upper floor
+
+          const upperWaterRt = upperTargets.get('water') ?? null;
+
+          // Ensure a temp RT exists at the same resolution as the lower water RT.
+          const w = lowerWaterRt.width;
+          const h = lowerWaterRt.height;
+          if (!this._waterPatchTempRt ||
+              this._waterPatchTempRt.width !== w ||
+              this._waterPatchTempRt.height !== h) {
+            this._waterPatchTempRt?.dispose();
+            this._waterPatchTempRt = this._createRenderTarget(THREE, w, h, 'waterPatchTemp');
+          }
+
+          // Pass 1: render patched result into temp RT.
+          mat.uniforms.tCurrentWater.value    = lowerWaterRt.texture;
+          mat.uniforms.tUpperFloorAlpha.value = upperFloorAlphaRt.texture;
+          mat.uniforms.tUpperWater.value      = upperWaterRt?.texture ?? upperFloorAlphaRt.texture;
+          mat.uniforms.uHasUpperWater.value   = upperWaterRt ? 1.0 : 0.0;
+          mat.needsUpdate = true;
+
+          renderer.autoClear = true;
+          renderer.setRenderTarget(this._waterPatchTempRt);
+          renderer.clear();
+          renderer.render(this._waterPatchScene, this._orthoCamera);
+
+          // Pass 2: blit temp RT back into the lower water RT.
+          // uMode=2 (alpha-extract) outputs s.a directly — since the patch shader
+          // writes vec4(result, result, result, result), s.a == result. This avoids
+          // the uMode=0 squaring bug (lum*alpha = result*result).
+          const blitMat = this._tileMaterial;
+          blitMat.uniforms.tMask.value     = this._waterPatchTempRt.texture;
+          blitMat.uniforms.uTileRect.value.set(0, 0, 1, 1);
+          blitMat.uniforms.uScaleSign.value.set(1, 1);
+          blitMat.uniforms.uRotation.value = 0.0;
+          blitMat.uniforms.uMode.value     = 2; // alpha-extract: outputs s.a directly
+          blitMat.blending = THREE.NoBlending;
+          blitMat.needsUpdate = true;
+
+          const blitMesh = this._quadMesh;
+          const prevMat = blitMesh.material;
+          blitMesh.material = blitMat;
+
+          renderer.setRenderTarget(lowerWaterRt);
+          renderer.clear();
+          renderer.render(this._quadScene, this._orthoCamera);
+
+          blitMesh.material = prevMat;
+
+          log.debug(`_patchWaterMasksForUpperFloors: patched floor ${lowerKey} with upper floor ${upperKey}`);
+        }
+      }
+    } catch (e) {
+      log.warn('_patchWaterMasksForUpperFloors: error during patch', e);
+    } finally {
+      renderer.setRenderTarget(prevTarget);
+      renderer.autoClear = prevAutoClear;
+      // Clear uniforms to release texture references.
+      mat.uniforms.tCurrentWater.value    = null;
+      mat.uniforms.tUpperFloorAlpha.value = null;
+      mat.uniforms.tUpperWater.value      = null;
     }
   }
 
@@ -1096,6 +1357,49 @@ export class GpuSceneMaskCompositor {
   }
 
   /**
+   * Return the mask texture for a given mask type from a specific floor's
+   * cached bundle. Returns null if the floor or mask type is not cached.
+   *
+   * @param {string} floorKey - e.g. "0:200"
+   * @param {string} maskType - e.g. "outdoors", "water", "fire"
+   * @returns {THREE.Texture|null}
+   */
+  getMaskTextureForFloor(floorKey, maskType) {
+    if (!floorKey || !maskType) return null;
+    const meta = this._floorMeta.get(floorKey);
+    if (!meta?.masks?.length) return null;
+    const entry = meta.masks.find(m => (m.id === maskType || m.type === maskType));
+    return entry?.texture ?? null;
+  }
+
+  /**
+   * Return the mask texture for a given mask type from the ground floor
+   * (the cached floor with the lowest bandBottom, typically "0:N").
+   * This is the correct source for post-processing effects like WaterEffectV2
+   * and DistortionManager that render once per frame for the whole scene —
+   * they must not read LightingEffect.outdoorsMask which is a per-floor
+   * mutable field left pointing to the last floor processed by the render loop.
+   *
+   * @param {string} maskType - e.g. "outdoors", "water"
+   * @returns {THREE.Texture|null}
+   */
+  getGroundFloorMaskTexture(maskType) {
+    if (!maskType) return null;
+    // Find the cached floor with the lowest bandBottom.
+    let groundKey = null;
+    let groundBottom = Infinity;
+    for (const [key] of this._floorMeta) {
+      const kb = Number(key.split(':')[0]);
+      if (Number.isFinite(kb) && kb < groundBottom) {
+        groundBottom = kb;
+        groundKey = key;
+      }
+    }
+    if (!groundKey) return null;
+    return this.getMaskTextureForFloor(groundKey, maskType);
+  }
+
+  /**
    * Scan the preloaded floor cache and return the floor key with the highest
    * bandBottom that is still strictly below `currentBandBottom`.
    * Used when no explicit floor transition has set _belowFloorKey — e.g. when
@@ -1258,6 +1562,14 @@ export class GpuSceneMaskCompositor {
     try { this._floorIdTarget?.dispose(); } catch (_) {}
     this._floorIdTarget = null;
 
+    try { this._waterPatchMaterial?.dispose(); } catch (_) {}
+    this._waterPatchMaterial = null;
+    this._waterPatchMesh = null;
+    this._waterPatchScene = null;
+
+    try { this._waterPatchTempRt?.dispose(); } catch (_) {}
+    this._waterPatchTempRt = null;
+
     this._quadMesh = null;
     this._quadScene = null;
     this._orthoCamera = null;
@@ -1369,6 +1681,37 @@ export class GpuSceneMaskCompositor {
     if (!this._floorIdScene) {
       this._floorIdScene = new THREE.Scene();
       this._floorIdScene.add(this._floorIdMesh);
+    }
+
+    if (!this._waterPatchMaterial) {
+      this._waterPatchMaterial = new THREE.RawShaderMaterial({
+        vertexShader: TILE_VERT,
+        fragmentShader: WATER_PATCH_FRAG,
+        uniforms: {
+          tCurrentWater:    { value: null },
+          tUpperFloorAlpha: { value: null },
+          tUpperWater:      { value: null },
+          uHasUpperWater:   { value: 0.0 },
+          // TILE_VERT uniforms — identity (full-screen pass)
+          uTileRect:  { value: new THREE.Vector4(0, 0, 1, 1) },
+          uScaleSign: { value: new THREE.Vector2(1, 1) },
+          uRotation:  { value: 0.0 },
+        },
+        depthTest:   false,
+        depthWrite:  false,
+        transparent: false,
+        blending:    THREE.NoBlending,
+      });
+    }
+
+    if (!this._waterPatchMesh) {
+      this._waterPatchMesh = new THREE.Mesh(this._quadGeo, this._waterPatchMaterial);
+      this._waterPatchMesh.frustumCulled = false;
+    }
+
+    if (!this._waterPatchScene) {
+      this._waterPatchScene = new THREE.Scene();
+      this._waterPatchScene.add(this._waterPatchMesh);
     }
   }
 

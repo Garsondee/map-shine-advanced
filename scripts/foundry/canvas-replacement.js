@@ -80,6 +80,7 @@ import { DoorMeshManager } from '../scene/DoorMeshManager.js';
 import { DrawingManager } from '../scene/drawing-manager.js';
 import { NoteManager } from '../scene/note-manager.js';
 import { FloorStack } from '../scene/FloorStack.js';
+import { FloorLayerManager } from '../compositor-v2/FloorLayerManager.js';
 import { TemplateManager } from '../scene/template-manager.js';
 import { LightIconManager } from '../scene/light-icon-manager.js';
 import { EnhancedLightIconManager } from '../scene/enhanced-light-icon-manager.js';
@@ -570,12 +571,48 @@ export function initialize() {
         }
       }, 'levelMaskRebuild.floorStackUpdate', Severity.COSMETIC);
 
+      // Compositor V2: reassign sprites to floor layers after floor bands rebuild.
+      // This is a no-op if floor bands haven't changed (assignTileToFloor checks
+      // previous assignment). Cheap — just layer mask bit operations, no GPU work.
+      safeCall(() => {
+        const flm = window.MapShine?.floorLayerManager;
+        const tm = window.MapShine?.tileManager;
+        const tkm = window.MapShine?.tokenManager;
+        if (flm && tm) {
+          flm.reassignAllLayers(tm, tkm);
+          // V2: FloorRenderBus repopulates lazily on first render frame from tile docs.
+          // No manual populateRenderBus() call needed.
+        }
+      }, 'levelMaskRebuild.floorLayerReassign', Severity.COSMETIC);
+
       safeCallAsync(async () => {
         const ms = window.MapShine;
         const waterEffectRef = ms?.waterEffect;
         const reg = effectMaskRegistry ?? ms?.effectMaskRegistry;
         try {
         if (!sceneSettings.isEnabled(canvas?.scene)) return;
+
+        // ── COMPOSITOR V2: skip ALL mask compositing + effect redistribution ──
+        // When V2 is active, the FloorCompositor renders raw geometry only
+        // (Steps 1-2). There is no need to:
+        //   - Load per-tile masks from disk (composeFloor)
+        //   - GPU-composite masks into scene-space RTs
+        //   - Notify effect subscribers via transitionToFloor()
+        //   - Build floor ID textures
+        //   - Redistribute masks to MaskManager
+        // All of this is V1 effect infrastructure. Skipping it makes floor
+        // transitions instant instead of waiting 200-500ms+ for async IO/GPU.
+        // Effects will be re-integrated in Build Step 3+ via the Central Bus.
+        try {
+          if (game?.settings?.get('map-shine-advanced', 'useCompositorV2')) {
+            log.info('Level context changed (V2 active): skipping mask compositing + effect redistribution');
+            ms?.renderLoop?.requestRender?.();
+            return;
+          }
+        } catch (_) {
+          // Fall through to V1 path on settings error.
+        }
+
         const composer = ms?.sceneComposer ?? sceneComposer;
         if (!composer) return;
 
@@ -641,8 +678,10 @@ export function initialize() {
         // All mask-consuming effects are subscribed to the EffectMaskRegistry.
         // A single transitionToFloor() call atomically applies per-type
         // preserve/replace/clear policies and notifies all subscribers.
-        // Water's preserveAcrossFloors policy ensures ground-floor water
-        // survives when switching to a floor without a _Water mask.
+        // Water has preserveAcrossFloors:true — the ground-floor mask is
+        // preserved when switching to a floor without _Water. Per-pixel
+        // suppression under upper-floor tiles is handled by the floor ID
+        // gate (uWaterMaskFloorIndex) in the water shaders.
         safeCall(() => {
           const floorKey = `${payload?.context?.bottom ?? ''}:${payload?.context?.top ?? ''}`;
           if (reg) {
@@ -1378,6 +1417,10 @@ function onCanvasTearDown(canvas) {
     window.MapShine.visibilityController = null;
     window.MapShine.detectionFilterEffect = null;
     window.MapShine.floorStack = null;
+    if (window.MapShine.floorLayerManager) {
+      window.MapShine.floorLayerManager.dispose();
+      window.MapShine.floorLayerManager = null;
+    }
     window.MapShine.tileManager = null;
     window.MapShine.tileMotionManager = null;
     window.MapShine.surfaceRegistry = null;
@@ -1604,6 +1647,17 @@ async function createThreeCanvas(scene) {
       return;
     }
   }
+
+  // ── V2 MILESTONE 1 GATE (early) ──────────────────────────────────────────
+  // NOTE: This MUST be defined before any downstream code attempts to gate
+  // V1 mask/effect infrastructure (MaskManager, EffectMaskRegistry, etc.).
+  //
+  // A previous implementation declared _v2Active later (after EffectComposer
+  // creation), which caused a TDZ ReferenceError when earlier code paths
+  // referenced _v2Active.
+  const _v2Active = (() => {
+    try { return !!game?.settings?.get('map-shine-advanced', 'useCompositorV2'); } catch (_) { return false; }
+  })();
 
   const lp = globalLoadingProfiler;
   const doLoadProfile = !!lp?.enabled;
@@ -1933,72 +1987,71 @@ async function createThreeCanvas(scene) {
     // CRITICAL: Expose sceneComposer early so effects can access groundZ during initialization
     mapShine.sceneComposer = sceneComposer;
 
-    if (isDebugLoad) dlp.begin('maskManager.register', 'texture');
-    mapShine.maskManager = new MaskManager();
-    mapShine.maskManager.setRenderer(renderer);
-    safeCall(() => {
-      const mm = mapShine.maskManager;
-      if (mm && bundle?.masks && Array.isArray(bundle.masks)) {
-        for (const m of bundle.masks) {
-          if (!m || !m.id || !m.texture) continue;
-          mm.setTexture(`${m.id}.scene`, m.texture, {
-            space: 'sceneUv',
-            source: 'assetMask',
-            colorSpace: m.texture.colorSpace ?? null,
-            uvFlipY: m.texture.flipY ?? null,
-            lifecycle: 'staticPerScene'
-          });
-        }
-      }
-
-      if (mm && typeof mm.defineDerivedMask === 'function') {
-        mm.defineDerivedMask('indoor.scene', { op: 'invert', input: 'outdoors.scene' });
-        mm.defineDerivedMask('roofVisible.screen', { op: 'threshold', input: 'roofAlpha.screen', lo: 0.05, hi: 0.15 });
-        mm.defineDerivedMask('roofClear.screen', { op: 'invert', input: 'roofVisible.screen' });
-        mm.defineDerivedMask('precipVisibility.screen', { op: 'max', a: 'outdoors.screen', b: 'roofClear.screen' });
-      }
-    }, 'MaskManager.registerBundleMasks', Severity.DEGRADED);
-    if (isDebugLoad) dlp.end('maskManager.register');
-
-    // Wire the _Outdoors (roof/indoor) mask into the WeatherController so
-    // precipitation effects (rain, snow, puddles) can respect covered areas.
-    safeCall(() => {
-      if (bundle?.masks?.length) {
-        const outdoorsMask = bundle.masks.find(m => m.id === 'outdoors' || m.type === 'outdoors');
-        if (outdoorsMask?.texture && weatherController?.setRoofMap) {
-          weatherController.setRoofMap(outdoorsMask.texture);
-          log.info('WeatherController roof map set from _Outdoors mask texture');
-        } else {
-          log.debug('No _Outdoors mask texture found for this scene');
-        }
-      }
-    }, 'weatherController.setRoofMap', Severity.DEGRADED);
-
-    // Step 1b: Initialize EffectMaskRegistry — central mask state manager.
-    // Created after SceneComposer (which loads the initial bundle with masks)
-    // and before EffectComposer (which creates effects that will subscribe).
-    // The registry owns mask lifecycle; effects read masks from it instead of
-    // storing their own references. See MULTI-LEVEL-RENDERING-ARCHITECTURE.md.
-    safeCall(() => {
-      effectMaskRegistry = new EffectMaskRegistry();
-
-      // Seed the registry with the initial bundle's masks (ground floor).
-      if (bundle?.masks?.length) {
-        for (const m of bundle.masks) {
-          const maskType = m.type || m.id;
-          if (maskType && m.texture) {
-            effectMaskRegistry.setMask(maskType, m.texture, null, 'bundle');
+    // V2: MaskManager, WeatherController roof map, and EffectMaskRegistry are
+    // all V1 mask infrastructure. V2 renders raw geometry only — skip.
+    if (!_v2Active) {
+      if (isDebugLoad) dlp.begin('maskManager.register', 'texture');
+      mapShine.maskManager = new MaskManager();
+      mapShine.maskManager.setRenderer(renderer);
+      safeCall(() => {
+        const mm = mapShine.maskManager;
+        if (mm && bundle?.masks && Array.isArray(bundle.masks)) {
+          for (const m of bundle.masks) {
+            if (!m || !m.id || !m.texture) continue;
+            mm.setTexture(`${m.id}.scene`, m.texture, {
+              space: 'sceneUv',
+              source: 'assetMask',
+              colorSpace: m.texture.colorSpace ?? null,
+              uvFlipY: m.texture.flipY ?? null,
+              lifecycle: 'staticPerScene'
+            });
           }
         }
-        log.info('EffectMaskRegistry seeded with initial bundle masks', {
-          types: bundle.masks.filter(m => m.texture).map(m => m.type || m.id)
-        });
-      }
 
-      if (window.MapShine) window.MapShine.effectMaskRegistry = effectMaskRegistry;
-      // P5-04: Expose the TextureBudgetTracker singleton so debug panels can access it.
-      if (window.MapShine) window.MapShine.textureBudgetTracker = getTextureBudgetTracker();
-    }, 'effectMaskRegistry.init', Severity.DEGRADED);
+        if (mm && typeof mm.defineDerivedMask === 'function') {
+          mm.defineDerivedMask('indoor.scene', { op: 'invert', input: 'outdoors.scene' });
+          mm.defineDerivedMask('roofVisible.screen', { op: 'threshold', input: 'roofAlpha.screen', lo: 0.05, hi: 0.15 });
+          mm.defineDerivedMask('roofClear.screen', { op: 'invert', input: 'roofVisible.screen' });
+          mm.defineDerivedMask('precipVisibility.screen', { op: 'max', a: 'outdoors.screen', b: 'roofClear.screen' });
+        }
+      }, 'MaskManager.registerBundleMasks', Severity.DEGRADED);
+      if (isDebugLoad) dlp.end('maskManager.register');
+
+      // Wire the _Outdoors (roof/indoor) mask into the WeatherController so
+      // precipitation effects (rain, snow, puddles) can respect covered areas.
+      safeCall(() => {
+        if (bundle?.masks?.length) {
+          const outdoorsMask = bundle.masks.find(m => m.id === 'outdoors' || m.type === 'outdoors');
+          if (outdoorsMask?.texture && weatherController?.setRoofMap) {
+            weatherController.setRoofMap(outdoorsMask.texture);
+            log.info('WeatherController roof map set from _Outdoors mask texture');
+          } else {
+            log.debug('No _Outdoors mask texture found for this scene');
+          }
+        }
+      }, 'weatherController.setRoofMap', Severity.DEGRADED);
+
+      // Step 1b: Initialize EffectMaskRegistry — central mask state manager.
+      safeCall(() => {
+        effectMaskRegistry = new EffectMaskRegistry();
+
+        // Seed the registry with the initial bundle's masks (ground floor).
+        if (bundle?.masks?.length) {
+          for (const m of bundle.masks) {
+            const maskType = m.type || m.id;
+            if (maskType && m.texture) {
+              effectMaskRegistry.setMask(maskType, m.texture, null, 'bundle');
+            }
+          }
+          log.info('EffectMaskRegistry seeded with initial bundle masks', {
+            types: bundle.masks.filter(m => m.texture).map(m => m.type || m.id)
+          });
+        }
+
+        if (window.MapShine) window.MapShine.effectMaskRegistry = effectMaskRegistry;
+        if (window.MapShine) window.MapShine.textureBudgetTracker = getTextureBudgetTracker();
+      }, 'effectMaskRegistry.init', Severity.DEGRADED);
+    }
 
     // Step 2: Initialize effect composer
     if (isDebugLoad) dlp.begin('effectComposer.initialize', 'setup');
@@ -2012,22 +2065,31 @@ async function createThreeCanvas(scene) {
       effectComposer.getTimeManager()?.setFoundryPaused?.(paused, 0);
     }, 'timeManager.syncPause', Severity.COSMETIC);
 
+    // ── V2 MILESTONE 1 GATE (log marker) ───────────────────────────────────
+    // _v2Active is computed once at the top of createThreeCanvas().
+    if (_v2Active) {
+      log.info('V2 MILESTONE 1: Compositor V2 active — skipping ALL effect construction, masks, and pre-warming');
+      dlp.event('V2 MILESTONE 1: effect pipeline BYPASSED');
+    }
+
     // Initialize module-wide depth pass manager.
-    // Must be after effectComposer (uses renderer/scene/camera) and MaskManager (publishes depth texture).
-    if (isDebugLoad) dlp.begin('depthPassManager.init', 'setup');
-    safeCall(() => {
-      if (depthPassManager) {
-        safeDispose(() => { effectComposer?.removeUpdatable?.(depthPassManager); }, 'removeUpdatable(depthPass)');
-        safeDispose(() => depthPassManager.dispose(), 'depthPassManager.dispose(reinit)');
-      }
-      depthPassManager = new DepthPassManager();
-      depthPassManager.initialize(renderer, threeScene, camera);
-      depthPassManager.setMaskManager(mapShine.maskManager);
-      effectComposer.addUpdatable(depthPassManager);
-      effectComposer.setDepthPassManager(depthPassManager);
-      if (window.MapShine) window.MapShine.depthPassManager = depthPassManager;
-    }, 'DepthPassManager.init', Severity.DEGRADED);
-    if (isDebugLoad) dlp.end('depthPassManager.init');
+    // V2: Depth passes are not used — FloorCompositor renders MeshBasicMaterial only.
+    if (!_v2Active) {
+      if (isDebugLoad) dlp.begin('depthPassManager.init', 'setup');
+      safeCall(() => {
+        if (depthPassManager) {
+          safeDispose(() => { effectComposer?.removeUpdatable?.(depthPassManager); }, 'removeUpdatable(depthPass)');
+          safeDispose(() => depthPassManager.dispose(), 'depthPassManager.dispose(reinit)');
+        }
+        depthPassManager = new DepthPassManager();
+        depthPassManager.initialize(renderer, threeScene, camera);
+        depthPassManager.setMaskManager(mapShine.maskManager);
+        effectComposer.addUpdatable(depthPassManager);
+        effectComposer.setDepthPassManager(depthPassManager);
+        if (window.MapShine) window.MapShine.depthPassManager = depthPassManager;
+      }, 'DepthPassManager.init', Severity.DEGRADED);
+      if (isDebugLoad) dlp.end('depthPassManager.init');
+    }
 
     safeCall(() => {
       loadingOverlay.setStage('effects.core', 0.0, 'Initializing effects…', { immediate: true });
@@ -2045,28 +2107,39 @@ async function createThreeCanvas(scene) {
     };
 
     // Ensure WeatherController is initialized and driven by the centralized TimeManager.
-    // This allows precipitation, wind, etc. to update every frame and drive GPU effects
-    // like the particle-based weather system without requiring manual console snippets.
-    if (isDebugLoad) dlp.begin('weatherController.initialize', 'weather');
-    await weatherController.initialize();
-    if (isDebugLoad) dlp.end('weatherController.initialize');
+    // V2: Weather particles, precipitation, and wind are not rendered — skip entirely.
+    if (!_v2Active) {
+      if (isDebugLoad) dlp.begin('weatherController.initialize', 'weather');
+      await weatherController.initialize();
+      if (isDebugLoad) dlp.end('weatherController.initialize');
 
-    safeCall(() => effectComposer.addUpdatable(weatherController), 'effectComposer.addUpdatable(weather)', Severity.DEGRADED);
+      safeCall(() => effectComposer.addUpdatable(weatherController), 'effectComposer.addUpdatable(weather)', Severity.DEGRADED);
 
-    safeCall(() => loadingOverlay.setStage('effects.core', 0.02, 'Initializing weather…', { keepAuto: true }), 'overlay.weather', Severity.COSMETIC);
+      safeCall(() => loadingOverlay.setStage('effects.core', 0.02, 'Initializing weather…', { keepAuto: true }), 'overlay.weather', Severity.COSMETIC);
+    }
 
     if (session.isStale()) {
       safeDispose(() => destroyThreeCanvas(), 'destroyThreeCanvas(stale)');
       return;
     }
 
+    // ── V2 GATE: Skip ALL effect construction, initialization, and wiring ──
+    // When V2 is active, no effects are created. An empty effectMap is used so
+    // downstream code that references it (initializeUI, exposeGlobals) doesn't crash.
+    _sectionStart('effectInit');
+    const effectMap = new Map();
+
+    if (_v2Active) {
+      dlp.event('effectInit: SKIPPED — V2 compositor active, no effects needed');
+      _sectionEnd('effectInit');
+    }
+
+    if (!_v2Active) {
     // P1.2: Parallel Effect Initialization via registerEffectBatch().
     // All independent effects are constructed first (synchronous), then their
     // initialize() calls run concurrently with a concurrency limit of 4 to
     // avoid GPU/driver contention from too many simultaneous shader compilations.
     // Map insertion order is preserved so render order is deterministic.
-    _sectionStart('effectInit');
-    const effectMap = new Map();
 
     const independentEffectDefs = getIndependentEffectDefs();
 
@@ -2426,6 +2499,7 @@ async function createThreeCanvas(scene) {
     }, 'effects.connectToRegistry', Severity.DEGRADED);
 
     _sectionEnd('setBaseMesh');
+    } // end if (!_v2Active) — effect construction, initialization, and wiring
 
     _sectionStart('sceneSync');
     safeCall(() => {
@@ -2475,24 +2549,27 @@ async function createThreeCanvas(scene) {
 
     // Step 4 (cont): Initialize visibility controller — delegates to Foundry's
     // testVisibility() so we get full detection mode / status effect parity for free.
-    if (isDebugLoad) dlp.begin('manager.VisibilityController.init', 'manager');
-    safeCall(() => {
-      if (visibilityController) visibilityController.dispose();
-      visibilityController = new VisibilityController(tokenManager);
-      visibilityController.initialize();
-    }, 'VisibilityController.init', Severity.DEGRADED);
-    if (isDebugLoad) dlp.end('manager.VisibilityController.init');
+    // V2: Vision occlusion, detection filters, and eye adaptation are effect-dependent — skip.
+    if (!_v2Active) {
+      if (isDebugLoad) dlp.begin('manager.VisibilityController.init', 'manager');
+      safeCall(() => {
+        if (visibilityController) visibilityController.dispose();
+        visibilityController = new VisibilityController(tokenManager);
+        visibilityController.initialize();
+      }, 'VisibilityController.init', Severity.DEGRADED);
+      if (isDebugLoad) dlp.end('manager.VisibilityController.init');
 
-    // Step 4 (cont): Detection filter rendering — glow/outline on tokens
-    // detected via special detection modes (tremorsense, see invisible, etc.)
-    if (isDebugLoad) dlp.begin('manager.DetectionFilter.init', 'manager');
-    safeCall(() => {
-      if (detectionFilterEffect) detectionFilterEffect.dispose();
-      detectionFilterEffect = new DetectionFilterEffect(tokenManager, visibilityController);
-      detectionFilterEffect.initialize();
-      effectComposer.addUpdatable(detectionFilterEffect);
-    }, 'DetectionFilterEffect.init', Severity.COSMETIC);
-    if (isDebugLoad) dlp.end('manager.DetectionFilter.init');
+      // Step 4 (cont): Detection filter rendering — glow/outline on tokens
+      // detected via special detection modes (tremorsense, see invisible, etc.)
+      if (isDebugLoad) dlp.begin('manager.DetectionFilter.init', 'manager');
+      safeCall(() => {
+        if (detectionFilterEffect) detectionFilterEffect.dispose();
+        detectionFilterEffect = new DetectionFilterEffect(tokenManager, visibilityController);
+        detectionFilterEffect.initialize();
+        effectComposer.addUpdatable(detectionFilterEffect);
+      }, 'DetectionFilterEffect.init', Severity.COSMETIC);
+      if (isDebugLoad) dlp.end('manager.DetectionFilter.init');
+    }
 
     // CRITICAL: Expose managers on window.MapShine so other subsystems
     // (e.g. TokenManager.updateSpriteVisibility) can check VC state.
@@ -2505,78 +2582,89 @@ async function createThreeCanvas(scene) {
     }
 
     // Step 4a: Dynamic Exposure Manager (token-based eye adaptation)
-    if (isDebugLoad) dlp.begin('manager.DynamicExposure.init', 'manager');
-    safeCall(() => {
-      if (!dynamicExposureManager) {
-        dynamicExposureManager = new DynamicExposureManager({
-          renderer,
-          camera,
-          weatherController,
-          tokenManager,
-          colorCorrectionEffect
-        });
-      } else {
-        dynamicExposureManager.renderer = renderer;
-        dynamicExposureManager.camera = camera;
-        dynamicExposureManager.setWeatherController?.(weatherController);
-        dynamicExposureManager.setTokenManager?.(tokenManager);
-        dynamicExposureManager.setColorCorrectionEffect?.(colorCorrectionEffect);
-      }
+    // V2: No color correction or exposure effects — skip.
+    if (!_v2Active) {
+      if (isDebugLoad) dlp.begin('manager.DynamicExposure.init', 'manager');
+      safeCall(() => {
+        if (!dynamicExposureManager) {
+          dynamicExposureManager = new DynamicExposureManager({
+            renderer,
+            camera,
+            weatherController,
+            tokenManager,
+            colorCorrectionEffect
+          });
+        } else {
+          dynamicExposureManager.renderer = renderer;
+          dynamicExposureManager.camera = camera;
+          dynamicExposureManager.setWeatherController?.(weatherController);
+          dynamicExposureManager.setTokenManager?.(tokenManager);
+          dynamicExposureManager.setColorCorrectionEffect?.(colorCorrectionEffect);
+        }
 
-      effectComposer.addUpdatable(dynamicExposureManager);
-      if (window.MapShine) window.MapShine.dynamicExposureManager = dynamicExposureManager;
-    }, 'DynamicExposureManager.init', Severity.DEGRADED);
-    if (isDebugLoad) dlp.end('manager.DynamicExposure.init');
+        effectComposer.addUpdatable(dynamicExposureManager);
+        if (window.MapShine) window.MapShine.dynamicExposureManager = dynamicExposureManager;
+      }, 'DynamicExposureManager.init', Severity.DEGRADED);
+      if (isDebugLoad) dlp.end('manager.DynamicExposure.init');
+    }
 
     safeCall(() => loadingOverlay.setStage('scene.sync', 0.0, 'Syncing tokens…', { keepAuto: true }), 'overlay.tokens', Severity.COSMETIC);
 
     // Step 4b: Initialize tile manager
+    // V2: TileManager is kept for tile selection/interaction in the Foundry UI,
+    // but FloorRenderBus loads textures independently (via THREE.TextureLoader).
+    // All effect-dependent wiring (specular, fluid, binding manager, floor
+    // presence scenes, water occluder) is skipped.
     if (isDebugLoad) dlp.begin('manager.TileManager.init', 'manager');
     tileManager = new TileManager(threeScene);
-    tileManager.setSpecularEffect(specularEffect);
-    const _fluidEffect = window.MapShine?.fluidEffect ?? effectMap.get('Fluid') ?? null;
-    tileManager.setFluidEffect(_fluidEffect);
+    if (!_v2Active) {
+      tileManager.setSpecularEffect(specularEffect);
+      const _fluidEffect = window.MapShine?.fluidEffect ?? effectMap.get('Fluid') ?? null;
+      tileManager.setFluidEffect(_fluidEffect);
 
-    // Wire the TileEffectBindingManager — centralizes all per-tile overlay routing.
-    // Effects register here; TileManager calls the manager at every tile lifecycle
-    // point instead of calling effects directly.
-    safeCall(() => {
-      const bindingMgr = new TileEffectBindingManager();
-      if (specularEffect) bindingMgr.registerEffect(specularEffect);
-      if (_fluidEffect) bindingMgr.registerEffect(_fluidEffect);
-      // Tree, Bush, and Iridescence now support per-tile overlays via TileBindableEffect interface.
-      const _treeEffect = effectMap.get('Trees');
-      const _bushEffect = effectMap.get('Bushes');
-      if (_treeEffect) bindingMgr.registerEffect(_treeEffect);
-      if (_bushEffect) bindingMgr.registerEffect(_bushEffect);
-      if (iridescenceEffect) bindingMgr.registerEffect(iridescenceEffect);
-      tileManager.setTileBindingManager(bindingMgr);
-      if (window.MapShine) window.MapShine.tileBindingManager = bindingMgr;
-      log.info('TileEffectBindingManager wired with', bindingMgr._effects.length, 'effects');
-    }, 'tileManager.bindingManager', Severity.DEGRADED);
-    // Route water occluder meshes into DistortionManager's dedicated scene so
-    // the occluder render pass avoids traversing the full world scene.
-    safeCall(() => tileManager.setWaterOccluderScene(distortionManager?.waterOccluderScene ?? null), 'tileManager.setWaterOccluder', Severity.COSMETIC);
-    // Route floor-presence meshes (layer 23) into a shared THREE.Scene that
-    // DistortionManager renders each frame to produce the floor-presence RT.
-    // Also route below-floor-presence meshes (layer 24) for the below-floor RT
-    // which bounds preserved lower-floor effects to their originating tile footprint.
-    safeCall(() => {
-      if (tileManager && distortionManager) {
-        const fpScene = new (window.THREE.Scene)();
-        tileManager.setFloorPresenceScene(fpScene);
-        distortionManager.setFloorPresenceScene(fpScene);
+      // Wire the TileEffectBindingManager — centralizes all per-tile overlay routing.
+      // Effects register here; TileManager calls the manager at every tile lifecycle
+      // point instead of calling effects directly.
+      safeCall(() => {
+        const bindingMgr = new TileEffectBindingManager();
+        if (specularEffect) bindingMgr.registerEffect(specularEffect);
+        if (_fluidEffect) bindingMgr.registerEffect(_fluidEffect);
+        // Tree, Bush, and Iridescence now support per-tile overlays via TileBindableEffect interface.
+        const _treeEffect = effectMap.get('Trees');
+        const _bushEffect = effectMap.get('Bushes');
+        if (_treeEffect) bindingMgr.registerEffect(_treeEffect);
+        if (_bushEffect) bindingMgr.registerEffect(_bushEffect);
+        if (iridescenceEffect) bindingMgr.registerEffect(iridescenceEffect);
+        tileManager.setTileBindingManager(bindingMgr);
+        if (window.MapShine) window.MapShine.tileBindingManager = bindingMgr;
+        log.info('TileEffectBindingManager wired with', bindingMgr._effects.length, 'effects');
+      }, 'tileManager.bindingManager', Severity.DEGRADED);
+      // Route water occluder meshes into DistortionManager's dedicated scene so
+      // the occluder render pass avoids traversing the full world scene.
+      safeCall(() => tileManager.setWaterOccluderScene(distortionManager?.waterOccluderScene ?? null), 'tileManager.setWaterOccluder', Severity.COSMETIC);
+      // Route floor-presence meshes (layer 23) into a shared THREE.Scene that
+      // DistortionManager renders each frame to produce the floor-presence RT.
+      // Also route below-floor-presence meshes (layer 24) for the below-floor RT
+      // which bounds preserved lower-floor effects to their originating tile footprint.
+      safeCall(() => {
+        if (tileManager && distortionManager) {
+          const fpScene = new (window.THREE.Scene)();
+          tileManager.setFloorPresenceScene(fpScene);
+          distortionManager.setFloorPresenceScene(fpScene);
 
-        const bfpScene = new (window.THREE.Scene)();
-        tileManager.setBelowFloorPresenceScene(bfpScene);
-        distortionManager.setBelowFloorPresenceScene(bfpScene);
-      }
-    }, 'tileManager.setFloorPresenceScene', Severity.COSMETIC);
+          const bfpScene = new (window.THREE.Scene)();
+          tileManager.setBelowFloorPresenceScene(bfpScene);
+          distortionManager.setBelowFloorPresenceScene(bfpScene);
+        }
+      }, 'tileManager.setFloorPresenceScene', Severity.COSMETIC);
+    } // end if (!_v2Active) — TileManager effect wiring
     tileManager.initialize();
     if (isDebugLoad) dlp.end('manager.TileManager.init');
     if (isDebugLoad) dlp.begin('manager.TileManager.syncAll', 'sync');
     tileManager.syncAllTiles();
-    tileManager.setWindowLightEffect(windowLightEffect); // Link for overhead tile lighting
+    if (!_v2Active) {
+      tileManager.setWindowLightEffect(windowLightEffect); // Link for overhead tile lighting
+    }
     effectComposer.addUpdatable(tileManager); // Register for occlusion updates
     if (isDebugLoad) dlp.end('manager.TileManager.syncAll');
     log.info('Tile manager initialized and synced');
@@ -2584,6 +2672,7 @@ async function createThreeCanvas(scene) {
     // Step 4b.0: Initialize FloorStack — derives per-floor elevation bands from
     // the LevelsImportSnapshot and provides the setFloorVisible() API used by
     // the per-floor render loop (Phase 2) and depth captures.
+    // KEEP for V2 — FloorStack is essential for floor band discovery.
     floorStack = new FloorStack();
     floorStack.setManagers(tileManager, tokenManager);
     floorStack.rebuildFloors(
@@ -2593,23 +2682,36 @@ async function createThreeCanvas(scene) {
     if (window.MapShine) window.MapShine.floorStack = floorStack;
     log.info('FloorStack initialized');
 
+    // Step 4b.0.1: Initialize FloorLayerManager (Compositor V2).
+    // KEEP for V2 — essential for assigning tiles to floor layers.
+    const floorLayerManager = new FloorLayerManager();
+    floorLayerManager.setFloorStack(floorStack);
+    if (window.MapShine) window.MapShine.floorLayerManager = floorLayerManager;
+    log.info('FloorLayerManager initialized');
+
     // Step 4b.1: Initialize tile motion runtime manager
-    if (isDebugLoad) dlp.begin('manager.TileMotion.init', 'manager');
-    tileMotionManager = new TileMotionManager(tileManager);
-    await tileMotionManager.initialize();
-    effectComposer.addUpdatable(tileMotionManager);
-    if (window.MapShine) window.MapShine.tileMotionManager = tileMotionManager;
-    if (isDebugLoad) dlp.end('manager.TileMotion.init');
-    log.info('Tile motion manager initialized');
+    // V2: Tile motion (animated tiles) is not needed for raw geometry — skip.
+    if (!_v2Active) {
+      if (isDebugLoad) dlp.begin('manager.TileMotion.init', 'manager');
+      tileMotionManager = new TileMotionManager(tileManager);
+      await tileMotionManager.initialize();
+      effectComposer.addUpdatable(tileMotionManager);
+      if (window.MapShine) window.MapShine.tileMotionManager = tileMotionManager;
+      if (isDebugLoad) dlp.end('manager.TileMotion.init');
+      log.info('Tile motion manager initialized');
+    }
 
     safeCall(() => loadingOverlay.setStage('scene.sync', 0.35, 'Syncing tiles…', { keepAuto: true }), 'overlay.tiles', Severity.COSMETIC);
 
-    if (isDebugLoad) dlp.begin('manager.SurfaceRegistry.init', 'manager');
-    surfaceRegistry = new SurfaceRegistry();
-    surfaceRegistry.initialize({ sceneComposer, tileManager });
-    mapShine.surfaceRegistry = surfaceRegistry;
-    mapShine.surfaceReport = surfaceRegistry.refresh();
-    if (isDebugLoad) dlp.end('manager.SurfaceRegistry.init');
+    // V2: SurfaceRegistry is effect infrastructure — skip.
+    if (!_v2Active) {
+      if (isDebugLoad) dlp.begin('manager.SurfaceRegistry.init', 'manager');
+      surfaceRegistry = new SurfaceRegistry();
+      surfaceRegistry.initialize({ sceneComposer, tileManager });
+      mapShine.surfaceRegistry = surfaceRegistry;
+      mapShine.surfaceReport = surfaceRegistry.refresh();
+      if (isDebugLoad) dlp.end('manager.SurfaceRegistry.init');
+    }
 
     // Step 4c: Initialize wall manager
     if (isDebugLoad) dlp.begin('manager.WallManager.init', 'manager');
@@ -2684,18 +2786,25 @@ async function createThreeCanvas(scene) {
     log.info('Parallel manager batch initialized (Door, Drawing, Note, Template, LightIcon, EnhancedLightIcon, MapPoints)');
 
     // Wire map points to particle effects (fire, candle flame, smelly flies, etc.)
-    wireMapPointsToEffects(effectMap, mapPointsManager);
+    // V2: No particle effects — skip wiring.
+    if (!_v2Active) {
+      wireMapPointsToEffects(effectMap, mapPointsManager);
+    }
 
     // Step 4i: Initialize physics ropes (rope/chain map points)
-    if (isDebugLoad) dlp.begin('manager.PhysicsRope.init', 'manager');
-    physicsRopeManager = new PhysicsRopeManager(threeScene, sceneComposer, mapPointsManager);
-    physicsRopeManager.initialize();
-    effectComposer.addUpdatable(physicsRopeManager);
-    mapShine.physicsRopeManager = physicsRopeManager;
-    if (isDebugLoad) dlp.end('manager.PhysicsRope.init');
-    log.info('Physics rope manager initialized');
+    // V2: Ropes are visual effects — skip.
+    if (!_v2Active) {
+      if (isDebugLoad) dlp.begin('manager.PhysicsRope.init', 'manager');
+      physicsRopeManager = new PhysicsRopeManager(threeScene, sceneComposer, mapPointsManager);
+      physicsRopeManager.initialize();
+      effectComposer.addUpdatable(physicsRopeManager);
+      mapShine.physicsRopeManager = physicsRopeManager;
+      if (isDebugLoad) dlp.end('manager.PhysicsRope.init');
+      log.info('Physics rope manager initialized');
+    }
 
     // Step 5: Initialize interaction manager (Selection, Drag/Drop)
+    // KEEP for V2 — user interaction is essential.
     if (isDebugLoad) dlp.begin('manager.Interaction.init', 'manager');
     interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager, wallManager, lightIconManager);
     interactionManager.initialize();
@@ -2704,12 +2813,14 @@ async function createThreeCanvas(scene) {
     log.info('Interaction manager initialized');
 
     // Wire token movement hook for ash disturbance.
-    // MUST be after InteractionManager.initialize() which also registers a listener.
-    safeCall(() => {
-      tokenManager.addOnTokenMovementStart((tokenId) => {
-        ashDisturbanceEffect?.handleTokenMovement?.(tokenId);
-      });
-    }, 'wireAshDisturbance', Severity.COSMETIC);
+    // V2: No ash disturbance effect — skip.
+    if (!_v2Active) {
+      safeCall(() => {
+        tokenManager.addOnTokenMovementStart((tokenId) => {
+          ashDisturbanceEffect?.handleTokenMovement?.(tokenId);
+        });
+      }, 'wireAshDisturbance', Severity.COSMETIC);
+    }
 
     // Sync Selection Box UI params (loaded from scene settings) into the InteractionManager.
     // initializeUI() runs earlier during startup, before InteractionManager exists.
@@ -2888,50 +2999,59 @@ async function createThreeCanvas(scene) {
 
     // Step 7.5: Progressive shader warmup.
     //
-    // Renders each effect one at a time through the EffectComposer pipeline,
-    // calling gl.finish() after each to force synchronous compilation, then
-    // yielding to the event loop so the loading overlay can update with
-    // per-effect progress.  This replaces the old monolithic
-    // effectComposer.render(0) which blocked the main thread for 50+ seconds
-    // with zero feedback.
+    // When V2 compositor is active, all effect shaders are bypassed at runtime.
+    // V2 uses MeshBasicMaterial only — no custom shaders to warm up.
+    // Skip the full progressive warmup to avoid compiling 30+ unused shaders.
     _sectionStart('gpu.shaderCompile');
     if (isDebugLoad) dlp.begin('gpu.shaderCompile', 'gpu');
-    safeCall(() => loadingOverlay.setStage('final', 0.05, 'Compiling shaders…', { keepAuto: true }), 'overlay.shaderCompile', Severity.COSMETIC);
     {
-      const gl = renderer.getContext?.();
-      const hasParallelCompile = !!gl?.getExtension?.('KHR_parallel_shader_compile');
-      const startPrograms = Array.isArray(renderer.info?.programs) ? renderer.info.programs.length : 0;
+      const _v2Active = (() => {
+        try { return !!game?.settings?.get('map-shine-advanced', 'useCompositorV2'); } catch (_) { return false; }
+      })();
 
-      dlp.event(`gpu.shaderCompile: BEGIN — progressive warmup, ${startPrograms} programs already compiled, ` +
-        `KHR_parallel_shader_compile=${hasParallelCompile ? 'YES' : 'NO'}`);
-      if (!hasParallelCompile) {
-        dlp.event('gpu.shaderCompile: WARNING — KHR_parallel_shader_compile not available. ' +
-          'Each shader compiles synchronously (~500-1500ms on ANGLE/older GPUs).', 'warn');
-      }
+      if (_v2Active) {
+        safeCall(() => loadingOverlay.setStage('final', 0.9, 'Shaders ready (V2 mode)…', { keepAuto: true }), 'overlay.shaderCompile', Severity.COSMETIC);
+        dlp.event('gpu.shaderCompile: SKIPPED — V2 compositor active, effect shaders not needed');
+        log.info('Shader warmup skipped: V2 compositor active');
+      } else {
+        // Legacy path: compile all effect shaders one at a time with progress feedback.
+        // Renders each effect one at a time through the EffectComposer pipeline,
+        // calling gl.finish() after each to force synchronous compilation, then
+        // yielding to the event loop so the loading overlay can update with
+        // per-effect progress.
+        safeCall(() => loadingOverlay.setStage('final', 0.05, 'Compiling shaders…', { keepAuto: true }), 'overlay.shaderCompile', Severity.COSMETIC);
+        const gl = renderer.getContext?.();
+        const hasParallelCompile = !!gl?.getExtension?.('KHR_parallel_shader_compile');
+        const startPrograms = Array.isArray(renderer.info?.programs) ? renderer.info.programs.length : 0;
 
-      try {
-        const result = await effectComposer.progressiveWarmup(({ step, totalSteps, effectId, type, timeMs, newPrograms, totalPrograms }) => {
-          // Per-effect diagnostic line in the event log
-          const tag = newPrograms > 0
-            ? `+${newPrograms} prog → ${totalPrograms}`
-            : `(no new, ${totalPrograms} total)`;
-          dlp.event(`shader.warmup[${step}/${totalSteps}]: ${effectId} (${type}) — ${timeMs.toFixed(0)}ms ${tag}`);
+        dlp.event(`gpu.shaderCompile: BEGIN — progressive warmup, ${startPrograms} programs already compiled, ` +
+          `KHR_parallel_shader_compile=${hasParallelCompile ? 'YES' : 'NO'}`);
+        if (!hasParallelCompile) {
+          dlp.event('gpu.shaderCompile: WARNING — KHR_parallel_shader_compile not available. ' +
+            'Each shader compiles synchronously (~500-1500ms on ANGLE/older GPUs).', 'warn');
+        }
 
-          // Update the loading overlay so the user sees progress
-          safeCall(() => {
-            const pct = 0.05 + 0.85 * (step / totalSteps);
-            loadingOverlay.setStage('final', pct,
-              `Compiling shaders (${step}/${totalSteps})…`, { keepAuto: true });
-          }, 'overlay.shaderProgress', Severity.COSMETIC);
-        });
+        try {
+          const result = await effectComposer.progressiveWarmup(({ step, totalSteps, effectId, type, timeMs, newPrograms, totalPrograms }) => {
+            const tag = newPrograms > 0
+              ? `+${newPrograms} prog → ${totalPrograms}`
+              : `(no new, ${totalPrograms} total)`;
+            dlp.event(`shader.warmup[${step}/${totalSteps}]: ${effectId} (${type}) — ${timeMs.toFixed(0)}ms ${tag}`);
+            safeCall(() => {
+              const pct = 0.05 + 0.85 * (step / totalSteps);
+              loadingOverlay.setStage('final', pct,
+                `Compiling shaders (${step}/${totalSteps})…`, { keepAuto: true });
+            }, 'overlay.shaderProgress', Severity.COSMETIC);
+          });
 
-        dlp.event(`gpu.shaderCompile: COMPLETE — ${result.totalMs.toFixed(0)}ms, ` +
-          `${result.programsCompiled} new programs, ${result.totalPrograms} total`);
-        log.info(`Shader compilation: ${result.totalMs.toFixed(0)}ms ` +
-          `(${result.programsCompiled} new, ${result.totalPrograms} total programs)`);
-      } catch (e) {
-        dlp.event(`gpu.shaderCompile: ERROR — ${e?.message}`, 'error');
-        log.warn('Progressive shader warmup failed:', e);
+          dlp.event(`gpu.shaderCompile: COMPLETE — ${result.totalMs.toFixed(0)}ms, ` +
+            `${result.programsCompiled} new programs, ${result.totalPrograms} total`);
+          log.info(`Shader compilation: ${result.totalMs.toFixed(0)}ms ` +
+            `(${result.programsCompiled} new, ${result.totalPrograms} total programs)`);
+        } catch (e) {
+          dlp.event(`gpu.shaderCompile: ERROR — ${e?.message}`, 'error');
+          log.warn('Progressive shader warmup failed:', e);
+        }
       }
     }
     if (isDebugLoad) dlp.end('gpu.shaderCompile');
@@ -2983,19 +3103,18 @@ async function createThreeCanvas(scene) {
       frameCoordinatorInitialized = frameCoordinator.initialize();
       if (frameCoordinatorInitialized) {
         // Register fog effect for synchronized vision rendering.
-        // This runs AFTER Foundry's PIXI tick has recomputed LOS polygons,
-        // so token.vision.los is guaranteed to be fresh.
-        frameCoordinator.onPostPixi((frameState) => {
-          const fog = fogEffect;
-          if (!fog) return;
-          // The git version uses _needsVisionUpdate + _renderVisionMask() in update().
-          // Just mark it dirty so the next Three.js render picks up fresh LOS data.
-          if (typeof fog.syncVisionFromPixi === 'function') {
-            fog.syncVisionFromPixi();
-          } else if (fog._needsVisionUpdate !== undefined) {
-            fog._needsVisionUpdate = true;
-          }
-        });
+        // V2: No fog effect — skip fog sync wiring.
+        if (!_v2Active) {
+          frameCoordinator.onPostPixi((frameState) => {
+            const fog = fogEffect;
+            if (!fog) return;
+            if (typeof fog.syncVisionFromPixi === 'function') {
+              fog.syncVisionFromPixi();
+            } else if (fog._needsVisionUpdate !== undefined) {
+              fog._needsVisionUpdate = true;
+            }
+          });
+        }
         
         log.info('Frame coordinator initialized - PIXI/Three.js sync enabled');
       } else {
@@ -3005,51 +3124,47 @@ async function createThreeCanvas(scene) {
     mapShine.frameCoordinator = frameCoordinator;
 
     // Notify WorldSpaceFogEffect when Foundry fog is reset via UI (Lighting controls).
-    // Foundry's reset button calls canvas.fog.reset() → canvas.fog._handleReset().
-    // Foundry handles clearing its own exploration textures natively; we just notify
-    // the effect so it can log/respond if needed.
-    safeCall(() => {
-      const fogMgr = canvas?.fog;
-      if (fogMgr && typeof fogMgr._handleReset === 'function' && !fogMgr._mapShineWrappedHandleReset) {
-        const originalHandleReset = fogMgr._handleReset.bind(fogMgr);
-        fogMgr._handleReset = async (...args) => {
-          const result = await originalHandleReset(...args);
-          safeCall(() => {
-            const fog = window.MapShine?.fogEffect;
-            if (fog && typeof fog.resetExploration === 'function') {
-              fog.resetExploration();
-            }
-          }, 'fogReset.exploration', Severity.COSMETIC);
-          return result;
-        };
-        fogMgr._mapShineWrappedHandleReset = true;
-      }
+    // V2: No WorldSpaceFogEffect — skip all fog manager wrapping.
+    if (!_v2Active) {
+      safeCall(() => {
+        const fogMgr = canvas?.fog;
+        if (fogMgr && typeof fogMgr._handleReset === 'function' && !fogMgr._mapShineWrappedHandleReset) {
+          const originalHandleReset = fogMgr._handleReset.bind(fogMgr);
+          fogMgr._handleReset = async (...args) => {
+            const result = await originalHandleReset(...args);
+            safeCall(() => {
+              const fog = window.MapShine?.fogEffect;
+              if (fog && typeof fog.resetExploration === 'function') {
+                fog.resetExploration();
+              }
+            }, 'fogReset.exploration', Severity.COSMETIC);
+            return result;
+          };
+          fogMgr._mapShineWrappedHandleReset = true;
+        }
 
-      // Suppress Foundry's native fog commit/save when our WorldSpaceFogEffect
-      // is active. The native PIXI fog pipeline tries to extract and compress
-      // fog buffers, but since we've taken over fog rendering with Three.js,
-      // those PIXI textures are in a bad state and cause IndexSizeError crashes.
-      // We handle fog persistence ourselves via _saveExplorationToFoundry().
-      if (fogMgr && typeof fogMgr.commit === 'function' && !fogMgr._mapShineWrappedCommit) {
-        const originalCommit = fogMgr.commit.bind(fogMgr);
-        fogMgr.commit = function(...args) {
-          // Only suppress if our fog effect is initialized and enabled
-          const fog = window.MapShine?.fogEffect;
-          if (fog?._initialized && fog?.params?.enabled) return;
-          return originalCommit(...args);
-        };
-        fogMgr._mapShineWrappedCommit = true;
-      }
-      if (fogMgr && typeof fogMgr.save === 'function' && !fogMgr._mapShineWrappedSave) {
-        const originalSave = fogMgr.save.bind(fogMgr);
-        fogMgr.save = async function(...args) {
-          const fog = window.MapShine?.fogEffect;
-          if (fog?._initialized && fog?.params?.enabled) return;
-          return originalSave(...args);
-        };
-        fogMgr._mapShineWrappedSave = true;
-      }
-    }, 'wrapFogManager', Severity.DEGRADED);
+        // Suppress Foundry's native fog commit/save when our WorldSpaceFogEffect
+        // is active.
+        if (fogMgr && typeof fogMgr.commit === 'function' && !fogMgr._mapShineWrappedCommit) {
+          const originalCommit = fogMgr.commit.bind(fogMgr);
+          fogMgr.commit = function(...args) {
+            const fog = window.MapShine?.fogEffect;
+            if (fog?._initialized && fog?.params?.enabled) return;
+            return originalCommit(...args);
+          };
+          fogMgr._mapShineWrappedCommit = true;
+        }
+        if (fogMgr && typeof fogMgr.save === 'function' && !fogMgr._mapShineWrappedSave) {
+          const originalSave = fogMgr.save.bind(fogMgr);
+          fogMgr.save = async function(...args) {
+            const fog = window.MapShine?.fogEffect;
+            if (fog?._initialized && fog?.params?.enabled) return;
+            return originalSave(...args);
+          };
+          fogMgr._mapShineWrappedSave = true;
+        }
+      }, 'wrapFogManager', Severity.DEGRADED);
+    }
 
     // Expose all managers, effects, and functions on window.MapShine for diagnostics
     exposeGlobals(mapShine, {
@@ -3093,16 +3208,61 @@ async function createThreeCanvas(scene) {
     }, 5000);
 
     // Initialize Tweakpane UI
+    // V2: We still need UI so we can validate layering / debugging, but we do NOT
+    // register effect controls or apply weather snapshots.
     _sectionStart('fin.initializeUI');
     if (isDebugLoad) dlp.begin('fin.initializeUI', 'finalize');
-    await safeCallAsync(async () => {
-      if (session.isStale()) return;
-      await initializeUI(effectMap);
+    if (_v2Active) {
+      await safeCallAsync(async () => {
+        if (session.isStale()) return;
 
-      // Ensure the scene loads with the last persisted weather snapshot even if UI initialization
-      // (Control Panel / Tweakpane) applied other defaults during startup.
-      weatherController._loadWeatherSnapshotFromScene?.();
-    }, 'initializeUI', Severity.DEGRADED);
+        safeCall(() => { if (window.MapShine) window.MapShine.stateApplier = stateApplier; }, 'exposeStateApplier(V2)', Severity.COSMETIC);
+
+        if (!uiManager) {
+          uiManager = new TweakpaneManager();
+          await uiManager.initialize();
+          if (window.MapShine) window.MapShine.uiManager = uiManager;
+        }
+
+        if (!controlPanel) {
+          controlPanel = new ControlPanelManager();
+          await controlPanel.initialize();
+          if (window.MapShine) window.MapShine.controlPanel = controlPanel;
+        }
+
+        if (!cinematicCameraManager) {
+          cinematicCameraManager = new CinematicCameraManager();
+          cinematicCameraManager.initialize();
+          if (window.MapShine) window.MapShine.cinematicCameraManager = cinematicCameraManager;
+        }
+
+        if (!cameraPanel) {
+          cameraPanel = new CameraPanelManager(cinematicCameraManager);
+          cameraPanel.initialize();
+          if (window.MapShine) window.MapShine.cameraPanel = cameraPanel;
+        } else {
+          safeCall(() => cameraPanel.setCinematicManager(cinematicCameraManager), 'cameraPanel.sync(V2)', Severity.COSMETIC);
+        }
+
+        // Levels Authoring Dialog (GM only) — required to validate tile floor assignments.
+        if (!levelsAuthoring && game.user?.isGM) {
+          levelsAuthoring = new LevelsAuthoringDialog();
+          levelsAuthoring.initialize();
+          safeCall(() => { if (window.MapShine) window.MapShine.levelsAuthoring = levelsAuthoring; }, 'exposeLevelsAuthoring(V2)', Severity.COSMETIC);
+        }
+
+        log.info('V2: UI initialized (minimal mode)');
+      }, 'initializeUI(V2)', Severity.DEGRADED);
+    } else {
+      await safeCallAsync(async () => {
+        if (session.isStale()) return;
+        await initializeUI(effectMap);
+
+        // Ensure the scene loads with the last persisted weather snapshot even if UI initialization
+        // (Control Panel / Tweakpane) applied other defaults during startup.
+        weatherController._loadWeatherSnapshotFromScene?.();
+      }, 'initializeUI', Severity.DEGRADED);
+    }
     if (isDebugLoad) dlp.end('fin.initializeUI');
     _sectionEnd('fin.initializeUI');
 
@@ -3114,30 +3274,32 @@ async function createThreeCanvas(scene) {
     }, 'overlay.finalProgress', Severity.COSMETIC);
 
     // P1.2: Wait for all effects to be ready before fading overlay
-    // This ensures textures are loaded and GPU operations are complete
-    _sectionStart('fin.effectReadiness');
-    if (isDebugLoad) dlp.begin('fin.effectReadiness', 'finalize');
-    safeCall(() => loadingOverlay.setStage('final', 0.45, 'Finishing textures…', { keepAuto: true }), 'overlay.textures', Severity.COSMETIC);
-    await safeCallAsync(async () => {
-      const effectReadinessPromises = [];
-      for (const effect of effectComposer.effects.values()) {
-        if (typeof effect.getReadinessPromise === 'function') {
-          const promise = effect.getReadinessPromise();
-          if (promise && typeof promise.then === 'function') {
-            effectReadinessPromises.push(promise);
+    // V2: No effects registered — skip readiness wait entirely.
+    if (!_v2Active) {
+      _sectionStart('fin.effectReadiness');
+      if (isDebugLoad) dlp.begin('fin.effectReadiness', 'finalize');
+      safeCall(() => loadingOverlay.setStage('final', 0.45, 'Finishing textures…', { keepAuto: true }), 'overlay.textures', Severity.COSMETIC);
+      await safeCallAsync(async () => {
+        const effectReadinessPromises = [];
+        for (const effect of effectComposer.effects.values()) {
+          if (typeof effect.getReadinessPromise === 'function') {
+            const promise = effect.getReadinessPromise();
+            if (promise && typeof promise.then === 'function') {
+              effectReadinessPromises.push(promise);
+            }
           }
         }
-      }
-      
-      if (effectReadinessPromises.length > 0) {
-        await Promise.race([
-          Promise.all(effectReadinessPromises),
-          new Promise(r => setTimeout(r, 15000)) // 15s timeout
-        ]);
-      }
-    }, 'effectReadinessWait', Severity.COSMETIC);
-    if (isDebugLoad) dlp.end('fin.effectReadiness');
-    _sectionEnd('fin.effectReadiness');
+        
+        if (effectReadinessPromises.length > 0) {
+          await Promise.race([
+            Promise.all(effectReadinessPromises),
+            new Promise(r => setTimeout(r, 15000)) // 15s timeout
+          ]);
+        }
+      }, 'effectReadinessWait', Severity.COSMETIC);
+      if (isDebugLoad) dlp.end('fin.effectReadiness');
+      _sectionEnd('fin.effectReadiness');
+    }
 
     // P1.3: Tile loading is NON-BLOCKING.
     // Tiles load in the background and appear when their fetch/decode completes.
@@ -3201,56 +3363,109 @@ async function createThreeCanvas(scene) {
     }
     _sectionEnd('fin.waitForThreeFrames');
 
-    if (isDebugLoad) dlp.begin('fin.timeOfDay', 'finalize');
-    await safeCallAsync(async () => {
-      const controlHour = window.MapShine?.controlPanel?.controlState?.timeOfDay;
-      const hour = Number.isFinite(controlHour) ? controlHour : Number(weatherController?.timeOfDay);
-      if (Number.isFinite(hour)) {
-        await stateApplier.applyTimeOfDay(hour, false, true);
-        safeCall(() => {
-          const cloudEffect = window.MapShine?.cloudEffect;
-          if (cloudEffect) {
-            if (typeof cloudEffect.requestRecompose === 'function') cloudEffect.requestRecompose(3);
-            if (typeof cloudEffect.requestUpdate === 'function') cloudEffect.requestUpdate(3);
-          }
-        }, 'cloudEffect.recompose', Severity.COSMETIC);
-      }
-    }, 'timeOfDay.refresh', Severity.COSMETIC);
-    if (isDebugLoad) dlp.end('fin.timeOfDay');
+    // V2: Time-of-day drives lighting/sky/shadow effects — skip.
+    if (!_v2Active) {
+      if (isDebugLoad) dlp.begin('fin.timeOfDay', 'finalize');
+      await safeCallAsync(async () => {
+        const controlHour = window.MapShine?.controlPanel?.controlState?.timeOfDay;
+        const hour = Number.isFinite(controlHour) ? controlHour : Number(weatherController?.timeOfDay);
+        if (Number.isFinite(hour)) {
+          await stateApplier.applyTimeOfDay(hour, false, true);
+          safeCall(() => {
+            const cloudEffect = window.MapShine?.cloudEffect;
+            if (cloudEffect) {
+              if (typeof cloudEffect.requestRecompose === 'function') cloudEffect.requestRecompose(3);
+              if (typeof cloudEffect.requestUpdate === 'function') cloudEffect.requestUpdate(3);
+            }
+          }, 'cloudEffect.recompose', Severity.COSMETIC);
+        }
+      }, 'timeOfDay.refresh', Severity.COSMETIC);
+      if (isDebugLoad) dlp.end('fin.timeOfDay');
+    }
 
-    // MS-LVL-060: Pre-load masks for all floor bands DURING the loading screen.
-    // Previously this was fire-and-forget (after session.finish), causing a long
-    // pause on the first floor switch if the user navigated before it completed.
-    // Awaiting it here ensures all floor bundles are cached before interaction.
+    // ── Floor pre-loading: V2 vs V1 paths ─────────────────────────────────────
     if (isDebugLoad) dlp.begin('fin.preloadAllFloors', 'finalize');
     safeCall(() => loadingOverlay.setStage('final', 0.85, 'Pre-loading floors…', { keepAuto: true }), 'overlay.preloadFloors', Severity.COSMETIC);
-    await safeCallAsync(async () => {
-      const c = window.MapShine?.sceneComposer;
-      const compositor = c?._sceneMaskCompositor;
-      if (compositor && typeof compositor.preloadAllFloors === 'function') {
-        await compositor.preloadAllFloors(canvas?.scene, {
-          lastMaskBasePath: c._lastMaskBasePath ?? null,
-          initialMasks: c.currentBundle?.masks ?? null,
-          activeLevelContext: window.MapShine?.activeLevelContext ?? null
-        });
 
-        // Build the floor ID texture once all floor caches are warm.
-        safeCall(() => {
-          const fs = window.MapShine?.floorStack;
-          if (!fs) return;
-          const visibleFloors = fs.getVisibleFloors?.() ?? [];
-          const floorBundles = visibleFloors
-            .map(floor => {
-              const meta = compositor._floorMeta?.get(floor.compositorKey);
-              return (meta?.masks?.length) ? { index: floor.index, bundle: { masks: meta.masks } } : null;
-            })
-            .filter(Boolean);
-          if (floorBundles.length > 0) {
-            compositor.buildFloorIdTexture(floorBundles);
-          }
-        }, 'levelMaskPreload.floorIdTexture', Severity.COSMETIC);
-      }
-    }, 'levelMaskPreload', Severity.DEGRADED);
+    if (_v2Active) {
+      // V2 PATH: Only assign tiles to floor layers and populate FloorRenderBus.
+      // No mask compositing, no floor ID textures, no effect pre-warming.
+      safeCall(() => {
+        const flm = window.MapShine?.floorLayerManager;
+        const tm = window.MapShine?.tileManager;
+        const tkm = window.MapShine?.tokenManager;
+        if (flm && tm) {
+          flm.reassignAllLayers(tm, tkm);
+          log.info('V2: FloorLayerManager — all sprites assigned to floor layers');
+          // V2: FloorRenderBus repopulates lazily on first render frame from tile docs.
+        }
+      }, 'v2.floorLayerAssignment', Severity.DEGRADED);
+    } else {
+      // V1 PATH: Full mask compositing, floor ID textures, and effect pre-warming.
+      await safeCallAsync(async () => {
+        const c = window.MapShine?.sceneComposer;
+        const compositor = c?._sceneMaskCompositor;
+        if (compositor && typeof compositor.preloadAllFloors === 'function') {
+          await compositor.preloadAllFloors(canvas?.scene, {
+            lastMaskBasePath: c._lastMaskBasePath ?? null,
+            initialMasks: c.currentBundle?.masks ?? null,
+            activeLevelContext: window.MapShine?.activeLevelContext ?? null
+          });
+
+          // Build the floor ID texture once all floor caches are warm.
+          safeCall(() => {
+            const fs = window.MapShine?.floorStack;
+            if (!fs) return;
+            const visibleFloors = fs.getVisibleFloors?.() ?? [];
+            const floorBundles = visibleFloors
+              .map(floor => {
+                const meta = compositor._floorMeta?.get(floor.compositorKey);
+                return (meta?.masks?.length) ? { index: floor.index, bundle: { masks: meta.masks } } : null;
+              })
+              .filter(Boolean);
+            if (floorBundles.length > 0) {
+              compositor.buildFloorIdTexture(floorBundles);
+            }
+          }, 'levelMaskPreload.floorIdTexture', Severity.COSMETIC);
+
+          // Pre-warm per-floor effect state caches.
+          safeCall(() => {
+            const ec = window.MapShine?.effectComposer;
+            if (!ec) return;
+            const allEffects = ec.effects instanceof Map ? [...ec.effects.values()] : [];
+            const bindable = allEffects.filter(
+              e => e.floorScope !== 'global' && typeof e.bindFloorMasks === 'function'
+            );
+            if (bindable.length === 0) return;
+
+            let warmedCount = 0;
+            for (const [floorKey, meta] of compositor._floorMeta) {
+              if (!meta?.masks?.length) continue;
+              for (const eff of bindable) {
+                try {
+                  eff.bindFloorMasks(meta, floorKey);
+                  warmedCount++;
+                } catch (_e) {
+                  log.debug(`Pre-warm bindFloorMasks failed for ${eff.id} on floor ${floorKey}:`, _e);
+                }
+              }
+            }
+            log.info(`Pre-warmed ${warmedCount} effect×floor bindings during loading`);
+          }, 'levelMaskPreload.prewarmEffectStates', Severity.COSMETIC);
+
+          // Assign tiles to floor layers (also used by V1 when compositor V2 setting is off).
+          safeCall(() => {
+            const flm = window.MapShine?.floorLayerManager;
+            const tm = window.MapShine?.tileManager;
+            const tkm = window.MapShine?.tokenManager;
+            if (flm && tm) {
+              flm.reassignAllLayers(tm, tkm);
+              log.info('FloorLayerManager: all sprites assigned to floor layers during loading');
+            }
+          }, 'levelMaskPreload.floorLayerAssignment', Severity.COSMETIC);
+        }
+      }, 'levelMaskPreload', Severity.DEGRADED);
+    }
     if (isDebugLoad) dlp.end('fin.preloadAllFloors');
 
     _sectionStart('fin.fadeIn');

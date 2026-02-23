@@ -1101,7 +1101,190 @@ export function installConsoleHelpers() {
       }
     };
     
+    // Water occluder diagnostic — call MapShine.debugWaterOccluder() in the browser console
+    // to dump the actual runtime state of all blocker meshes and the occluder RT.
+    window.MapShine.debugWaterOccluder = () => {
+      const tm = window.MapShine?.tileManager;
+      const dm = window.MapShine?.distortionManager;
+      if (!tm || !dm) { console.warn('tileManager or distortionManager not ready'); return; }
+
+      const occScene = dm.waterOccluderScene;
+      const occTarget = dm.waterOccluderTarget;
+      console.log('=== Water Occluder Diagnostic ===');
+      console.log('distortionManager.waterOccluderScene:', occScene);
+      console.log('distortionManager.waterOccluderTarget:', occTarget);
+      console.log('waterOccluderScene child count:', occScene?.children?.length ?? 'N/A');
+
+      let blockerCount = 0, blockerVisible = 0, blockerInWrongScene = 0;
+      let occluderCount = 0, occluderVisible = 0;
+      const rows = [];
+
+      for (const [id, { sprite, tileDoc }] of (tm.tileSprites ?? new Map())) {
+        if (!sprite) continue;
+        const ud = sprite.userData;
+        const blocker = ud.aboveFloorBlockerMesh;
+        const occluder = ud.waterOccluderMesh;
+
+        if (blocker) {
+          blockerCount++;
+          if (blocker.visible) blockerVisible++;
+          // Check if blocker is in the correct scene
+          const inOccScene = occScene?.children?.includes(blocker);
+          if (!inOccScene) blockerInWrongScene++;
+          rows.push({
+            tileId: id,
+            name: tileDoc?.name ?? tileDoc?.texture?.src?.split('/').pop() ?? '?',
+            isOverhead: ud.isOverhead,
+            levelsAbove: ud.levelsAbove,
+            levelsHidden: ud.levelsHidden,
+            shouldBlock: ud.isOverhead || ud.levelsAbove,
+            blockerVisible: blocker.visible,
+            blockerInOccScene: inOccScene,
+            occluderVisible: occluder?.visible ?? null,
+            spriteVisible: sprite.visible,
+            opacity: sprite.material?.opacity?.toFixed(2) ?? '?'
+          });
+        }
+
+        if (occluder) {
+          occluderCount++;
+          if (occluder.visible) occluderVisible++;
+        }
+      }
+
+      console.log(`Blocker meshes: ${blockerCount} total, ${blockerVisible} visible, ${blockerInWrongScene} in WRONG scene`);
+      console.log(`Occluder meshes: ${occluderCount} total, ${occluderVisible} visible`);
+      console.table(rows.filter(r => r.isOverhead || r.levelsAbove || r.blockerVisible));
+      console.log('Full rows (all tiles with blockers):', rows);
+
+      // Also check if WaterEffectV2 has the occluder texture bound
+      const we = window.MapShine?.waterEffect;
+      if (we) {
+        const u = we._material?.uniforms;
+        console.log('WaterEffectV2 tWaterOccluderAlpha:', u?.tWaterOccluderAlpha?.value);
+        console.log('WaterEffectV2 uHasWaterOccluderAlpha:', u?.uHasWaterOccluderAlpha?.value);
+      }
+
+      return rows;
+    };
+
+    // ── Water flooding root-cause diagnostic ─────────────────────────────────
+    // Call MapShine.diagWater() in the browser console while the flooding is
+    // visible. It reads the actual runtime state of every system involved in
+    // cross-floor water suppression and prints a clear pass/fail for each one.
+    window.MapShine.diagWater = () => {
+      const ms   = window.MapShine;
+      const we   = ms?.waterEffect;
+      const dm   = ms?.distortionManager;
+      const comp = ms?.sceneComposer?._sceneMaskCompositor;
+      const fs   = ms?.floorStack;
+
+      console.group('=== Water Flooding Diagnostic ===');
+
+      // ── 1. Floor stack ───────────────────────────────────────────────────
+      console.group('1. Floor stack');
+      const activeFloor = fs?.getActiveFloor?.() ?? null;
+      const allFloors   = fs?.getAllFloors?.()   ?? [];
+      console.log('floorStack:', fs ?? 'NULL — floorStack not on window.MapShine');
+      console.log('activeFloor:', activeFloor);
+      console.log('activeFloor.index:', activeFloor?.index ?? 'N/A');
+      console.log('activeFloor.compositorKey:', activeFloor?.compositorKey ?? 'N/A');
+      console.log('all floors:', allFloors.map(f => `index=${f.index} key=${f.compositorKey}`));
+      console.groupEnd();
+
+      // ── 2. Floor ID texture ──────────────────────────────────────────────
+      console.group('2. Floor ID texture (compositor.floorIdTarget)');
+      const floorIdTarget = comp?.floorIdTarget ?? null;
+      console.log('compositor:', comp ?? 'NULL');
+      console.log('floorIdTarget:', floorIdTarget);
+      console.log('floorIdTarget.texture:', floorIdTarget?.texture ?? 'NULL');
+      if (floorIdTarget) {
+        console.log('  size:', floorIdTarget.width, 'x', floorIdTarget.height);
+        // GPU readback — sample a 4x4 grid to see what values are actually in the texture
+        try {
+          const renderer = ms?.renderer;
+          if (renderer) {
+            const w = floorIdTarget.width, h = floorIdTarget.height;
+            const buf = new Uint8Array(4);
+            const prev = renderer.getRenderTarget();
+            renderer.setRenderTarget(floorIdTarget);
+            // Sample center pixel
+            renderer.readRenderTargetPixels(floorIdTarget, Math.floor(w/2), Math.floor(h/2), 1, 1, buf);
+            renderer.setRenderTarget(prev);
+            console.log('  center pixel RGBA:', buf[0], buf[1], buf[2], buf[3],
+              '→ floor index =', Math.round(buf[0] / 255 * 255));
+          }
+        } catch (e) { console.warn('  readback failed:', e); }
+      } else {
+        console.warn('  floorIdTarget is NULL — floor ID gate is DISABLED (uHasFloorIdTex=0)');
+      }
+      console.groupEnd();
+
+      // ── 3. WaterEffectV2 uniforms ────────────────────────────────────────
+      console.group('3. WaterEffectV2 uniforms');
+      const wu = we?._material?.uniforms;
+      if (!wu) {
+        console.warn('WaterEffectV2 material not ready');
+      } else {
+        console.log('uHasFloorIdTex:', wu.uHasFloorIdTex?.value, wu.uHasFloorIdTex?.value > 0.5 ? '✅' : '❌ GATE DISABLED');
+        console.log('uActiveFloorIndex:', wu.uActiveFloorIndex?.value, '→ floor index =', Math.round((wu.uActiveFloorIndex?.value ?? 0) * 255));
+        console.log('tFloorIdTex:', wu.tFloorIdTex?.value ?? 'NULL');
+        console.log('uHasWaterData:', wu.uHasWaterData?.value);
+        console.log('uHasWaterOccluderAlpha:', wu.uHasWaterOccluderAlpha?.value);
+        console.log('uWaterEnabled:', wu.uWaterEnabled?.value);
+        console.log('uDebugView:', wu.uDebugView?.value);
+      }
+      console.groupEnd();
+
+      // ── 4. DistortionManager apply uniforms ──────────────────────────────
+      console.group('4. DistortionManager apply uniforms');
+      const au = dm?.applyMaterial?.uniforms;
+      if (!au) {
+        console.warn('DistortionManager applyMaterial not ready');
+      } else {
+        console.log('uHasFloorIdTex:', au.uHasFloorIdTex?.value, au.uHasFloorIdTex?.value > 0.5 ? '✅' : '❌ GATE DISABLED');
+        console.log('uActiveFloorIndex:', au.uActiveFloorIndex?.value, '→ floor index =', Math.round((au.uActiveFloorIndex?.value ?? 0) * 255));
+        console.log('tFloorIdTex:', au.tFloorIdTex?.value ?? 'NULL');
+        console.log('uHasWaterOccluderAlpha:', au.uHasWaterOccluderAlpha?.value);
+      }
+      console.groupEnd();
+
+      // ── 5. Compositor floor cache ────────────────────────────────────────
+      console.group('5. Compositor floor cache');
+      if (!comp) {
+        console.warn('compositor not found at sceneComposer._sceneMaskCompositor');
+      } else {
+        console.log('_activeFloorKey:', comp._activeFloorKey);
+        console.log('_floorCache keys:', [...(comp._floorCache?.keys() ?? [])]);
+        console.log('_floorMeta keys:', [...(comp._floorMeta?.keys() ?? [])]);
+        for (const [key, targets] of (comp._floorCache ?? new Map())) {
+          const maskTypes = [...targets.keys()];
+          console.log(`  floor "${key}": masks = [${maskTypes.join(', ')}]`);
+        }
+      }
+      console.groupEnd();
+
+      // ── 6. activeLevelContext ────────────────────────────────────────────
+      console.group('6. activeLevelContext');
+      console.log('window.MapShine.activeLevelContext:', ms?.activeLevelContext);
+      console.groupEnd();
+
+      console.groupEnd();
+      console.log('📋 Copy the above and paste it into the issue tracker.');
+    };
+
+    // Shortcut to visualize the water occluder RT in WaterEffectV2 (debug view 8 = waterOccluder)
+    window.MapShine.showOccluderDebug = (view = 8) => {
+      const we = window.MapShine?.waterEffect;
+      if (!we?._material?.uniforms?.uDebugView) { console.warn('WaterEffectV2 not ready or no uDebugView uniform'); return; }
+      we._material.uniforms.uDebugView.value = view;
+      console.log(`WaterEffectV2 debug view set to ${view}. Call MapShine.showOccluderDebug(0) to reset.`);
+    };
+
     log.info('Console helpers installed: MapShine.debug');
     console.log('💡 Type MapShine.debug.help() for debugging commands');
+    console.log('💡 Type MapShine.debugWaterOccluder() to diagnose water occluder state');
+    console.log('💡 Type MapShine.showOccluderDebug(8) to visualize tWaterOccluderAlpha');
+    console.log('💡 Type MapShine.diagWater() to diagnose cross-floor water flooding (reads actual runtime state)');
   }
 }

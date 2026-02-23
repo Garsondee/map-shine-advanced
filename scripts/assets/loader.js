@@ -427,12 +427,15 @@ async function probeMaskTexture(basePath, suffix, suppressProbeErrors = false) {
  * @returns {Promise<{path: string} | null>}
  */
 export async function probeMaskFile(basePath, suffix, options = {}) {
-  // IMPORTANT: This must not generate network requests for missing files.
-  // We only report a mask as present if FilePicker directory listing includes it.
   void options;
   try {
     const availableFiles = await discoverAvailableFiles(basePath);
-    if (!Array.isArray(availableFiles) || availableFiles.length === 0) return null;
+    if (!Array.isArray(availableFiles) || availableFiles.length === 0) {
+      // FilePicker returned nothing (player client, permissions issue, etc.).
+      // Fall back to direct HEAD-request probing — same as loadAssetBundle does.
+      const url = await probeMaskUrl(basePath, suffix);
+      return url ? { path: url } : null;
+    }
     const maskFile = findMaskInFiles(availableFiles, basePath, suffix);
     if (!maskFile) return null;
     return { path: maskFile };

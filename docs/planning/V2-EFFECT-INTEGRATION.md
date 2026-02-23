@@ -188,11 +188,18 @@ V1 features preserved:
 - Spatial bucketing for culling efficiency
 
 **Validation:**
-- [ ] Fire particles visible on ground floor
-- [ ] Fire particles visible on upper floors
-- [ ] Switching floors shows/hides fire correctly
-- [ ] No fire from floor N appearing on floor M
-- [ ] Particle animation runs smoothly
+- [x] Fire particles visible on ground floor
+- [x] Fire particles visible on upper floors
+- [x] Switching floors shows/hides fire correctly
+- [x] No fire from floor N appearing on floor M
+- [x] Particle animation runs smoothly
+
+**Lessons learned / gotchas:**
+- Quarks `BatchedRenderer` renders child `SpriteBatch` meshes on layer 0; if the camera layer mask excludes layer 0 (floor isolation masks often do), particles become invisible. The bus render pass must ensure layer 0 (and any overlay layer) is enabled on the camera.
+- `FloorCompositor.render()` must receive `timeInfo` so `FireEffectV2.update()` runs every frame; if `timeInfo` is omitted, quarks never ticks (`particleNum: 0`, `firstTimeUpdate: true`).
+- Adaptive FPS throttling can make particles look choppy when idled down to `renderIdleFps`. The V2 path needs to request continuous rendering while fire is active.
+- Emitters must be part of the scene graph (or a descendant of the `BatchedRenderer`) so quarks can update world matrices.
+- Mask point coordinates: `generateFirePoints()` outputs tile-local UVs and must be remapped to scene-global UVs before merging per-floor; otherwise particles spawn in the wrong place.
 
 ---
 
@@ -208,25 +215,258 @@ through windows. Intensity can be animated (day/night cycle).
 - `bindFloorMasks()` for per-floor window mask swap
 
 **V2 approach:**
-1. Load `_Windows` mask via `THREE.TextureLoader`.
-2. Create window light overlay meshes in the bus scene at same position as tiles,
-   slightly higher Z (above albedo, below upper floor).
-3. Additive or screen blending for the glow.
-4. Per-floor: each floor's tiles get their own window mask.
+1. Implemented as `compositor-v2/effects/WindowLightEffectV2.js`.
+2. Per-tile overlay meshes are registered with `FloorRenderBus.addEffectOverlay()` for
+   floor isolation via `setVisibleFloors()`.
+3. Mask discovery uses `probeMaskFile(basePath, '_Windows')` with a fallback to
+   `_Structural` for legacy content.
+4. Mask interpretation matches V1:
+   - RGB luminance encodes the light pool shape/intensity
+   - Alpha provides additional cutout/clipping (prevents leaking outside intended areas)
+5. Coordinates and floor assignment match `FloorRenderBus` / `SpecularEffectV2`:
+   - Three-space center = `(x + w/2, worldH - (y + h/2))`
+   - Floor index resolved from Levels `rangeBottom`/`rangeTop` when present
+6. Shader safety: overlays discard until the mask texture has loaded (`uMaskReady`).
 
 **Infrastructure needed:**
 - Mask texture loader (shared)
 - Overlay mesh factory (reusable pattern for Specular/WindowLight/Iridescence)
 
 **Validation:**
-- [ ] Window glow visible on ground floor windows
-- [ ] Window glow visible on upper floor windows
-- [ ] No window glow bleed between floors
-- [ ] Switching floors shows/hides window glow correctly
+- [x] Window glow visible on ground floor windows (tentative)
+- [x] Window glow visible on upper floor windows (tentative)
+- [x] Correct alpha/clipping from mask (no obvious leak) (tentative)
+- [x] No window glow bleed between floors
+- [x] Switching floors shows/hides window glow correctly
+- [ ] Visual balance confirmed after screen-space + color-correction passes are re-enabled
 
 ---
 
-### Step 4: Water Effect
+### Step 4: Render Target Infrastructure ✅ IMPLEMENTED
+
+**What it does:** Introduces the RT pipeline so the bus scene renders to an
+offscreen target instead of directly to the screen. This is the gating
+prerequisite for every post-processing and screen-space effect.
+
+**V2 implementation:**
+
+Files:
+- `compositor-v2/FloorRenderBus.js` — Added `renderTo(renderer, camera, target)` method
+- `compositor-v2/FloorCompositor.js` — Scene RT, ping-pong post RTs, blit quad + ortho camera
+
+Infrastructure:
+1. `_sceneRT` (HalfFloat, HDR headroom) allocated in `initialize()`.
+2. `_postA` / `_postB` ping-pong pair for post-processing chain (no depth).
+3. Fullscreen blit quad with `toneMapped = false` to prevent double tone mapping.
+4. Render chain: bus → sceneRT → post chain → blit to screen.
+5. `onResize()` keeps all RTs in sync with viewport.
+6. `renderTo(renderer, camera, target)` accepts null for screen or RT for offscreen.
+
+**Validation:**
+- [x] Scene renders identically after RT introduction (no visual diff)
+- [x] Camera pan/zoom still works
+- [x] No performance regression from the extra blit
+- [x] No brightness shift (toneMapped=false fix applied)
+
+---
+
+### Step 5: LightingEffect ✅ IMPLEMENTED
+
+**What it does:** Foundational post-processing pass that applies ambient light
+(day/night), dynamic light sources (Foundry AmbientLight documents), darkness
+sources, and light coloration to the bus scene RT.
+
+**V2 implementation:**
+
+Files:
+- `compositor-v2/effects/LightingEffectV2.js` — Post-processing effect class
+- `compositor-v2/FloorCompositor.js` — Wired into initialize/update/render/dispose
+
+Architecture:
+1. Reuses V1 `ThreeLightSource` and `ThreeDarknessSource` classes for individual
+   light mesh rendering — they output additive contribution to dedicated RTs.
+2. Dedicated `_lightScene` and `_darknessScene` with separate accumulation RTs.
+3. Compose pass (fullscreen quad): reads sceneRT + lightRT + darknessRT → lit output.
+4. Compose shader: ambient day/night interpolation, darkness punch (lights reduce
+   local darkness), darkness mask, coloration, minimum illumination floor.
+5. Foundry hooks (`createAmbientLight`, `updateAmbientLight`, `deleteAmbientLight`)
+   for live CRUD sync.
+6. Lazy light sync on first render frame via `syncAllLights()`.
+7. Light animations updated per frame via `updateAnimation()`.
+
+**Simplifications vs V1 (to be addressed in later steps):**
+- No outdoors mask differentiation (Step 7+)
+- No overhead/building/bush/tree/cloud shadow integration (Steps 8–9)
+- No upper floor transmission
+- No roof alpha pass
+- No rope/token mask passes
+- No lightning flash integration (Step 11)
+- No sun light buffer (Step 7+)
+
+**Validation:**
+- [x] Scene visible with ambient lighting
+- [x] Dynamic lights create visible pools of illumination
+- [x] Darkness level slider adjusts scene brightness
+- [x] Light animations (torch flicker) animate
+- [x] Existing bus effects (specular, fire, window light) still work
+- [x] Floor switching still works
+
+---
+
+### Step 6: SkyColorEffect ✅ IMPLEMENTED
+
+**What it does:** Screen-space color grading post-processing pass driven by
+time-of-day and weather. Applies exposure, white balance (temperature + tint),
+brightness, contrast, saturation, vibrance, lift/gamma/gain, optional tone
+mapping (ACES Filmic, Reinhard), vignette, and film grain.
+
+**V2 implementation:**
+
+Files:
+- `compositor-v2/effects/SkyColorEffectV2.js` — Post-processing effect class
+- `compositor-v2/FloorCompositor.js` — Wired into initialize/update/render/dispose
+
+Architecture:
+1. Fullscreen quad post-processing pass: reads lit scene RT → outputs graded result.
+2. Two automation modes preserved from V1:
+   - **Analytic** (mode 1): Sunrise/sunset sun model, golden hour, weather integration
+     (turbidity, Rayleigh/Mie scattering, overcast desaturation, haze lift).
+   - **Preset Blend** (mode 0): Weighted blend of dawn/day/dusk/night presets.
+3. Exposes `currentSkyTintColor` for downstream systems (Darkness Response lights
+   adopt sky hue during golden/blue hour).
+4. Auto-intensity: scales effect strength based on dayFactor, overcast, storm, darkness.
+5. Inserted in post chain after LightingEffectV2: postA → postB.
+
+**Simplifications vs V1 (to be addressed later):**
+- No outdoors mask gating (grading applied globally)
+- No roof alpha, rope mask, or token mask
+- No cloud top mask integration
+
+**Validation:**
+- [x] Color grading visually active (exposure, temperature shifts visible)
+- [x] Time-of-day automation produces dawn/day/dusk/night transitions
+- [x] Existing effects (specular, fire, window light, lighting) still work
+- [x] Floor switching still works
+- [ ] Weather integration confirmed (needs active weather)
+- [ ] Outdoors mask gating (deferred until mask system available)
+
+---
+
+### Steps 7–13: Environmental Effects (DEFERRED)
+
+Steps 7–13 are complex ENVIRONMENTAL effects with deep V1 coupling (EffectBase,
+EffectMaskRegistry, maskManager, blocker layer traversal, etc.). When V2 is
+active, the V1 render loop doesn't execute, so these effects don't run.
+Porting them requires either:
+- A full V2 rewrite (e.g., CloudEffect is ~2800 lines)
+- Running them as standalone services called from FloorCompositor
+
+**Deferred until simpler post-processing effects are complete.**
+
+| Step | Effect                   | V1 Layer          | Status | Notes |
+|-----:|--------------------------|--------------------|--------|-------|
+|    7 | CloudEffect              | ENVIRONMENTAL      | ⏳ Deferred | ~2800 lines. Procedural noise + shadow + cloud tops + wind + blockers. |
+|    8 | BuildingShadowsEffect    | ENVIRONMENTAL      | ⏳ Deferred | Needs `_Structural` mask + cloud state (Step 7). |
+|    9 | OverheadShadowsEffect    | ENVIRONMENTAL      | ⏳ Deferred | Roof/floor isolation. |
+|   10 | PlayerLightEffect        | ENVIRONMENTAL      | ⏳ Deferred | Token-based dynamic lights. |
+|   11 | LightningEffect          | ENVIRONMENTAL      | ⏳ Deferred | Weather lightning flashes. |
+|   12 | CandleFlamesEffect       | ENVIRONMENTAL      | ⏳ Deferred | Candle/torch particles. |
+|   13 | AtmosphericFogEffect     | POST_PROCESSING    | ⏳ Deferred | Distance/height fog. |
+
+---
+
+### Step 16: ColorCorrectionEffect ✅ IMPLEMENTED
+
+**What it does:** Static user-authored color grade applied near the end of the
+post-processing chain. Provides the base "look" of the scene (exposure, white
+balance, contrast, saturation, lift/gamma/gain, tone mapping, vignette, grain).
+
+**V2 implementation:**
+
+Files:
+- `compositor-v2/effects/ColorCorrectionEffectV2.js` — Post-processing effect class
+- `compositor-v2/FloorCompositor.js` — Wired into initialize/update/render/dispose
+
+Architecture:
+1. Fullscreen quad post-processing pass: reads sky-graded RT → outputs final grade.
+2. Same shader pipeline as V1: exposure × dynamicExposure → WB → brightness →
+   contrast → saturation/vibrance → lift/gamma/gain → tone mapping → vignette → grain.
+3. Defaults tuned to match Foundry PIXI brightness (exposure=0.9, masterGamma=2.0).
+4. `dynamicExposure` uniform available for DynamicExposureManager integration.
+5. Ping-pong RT: outputs to whichever of postA/postB isn't the current input.
+
+**Validation:**
+- [x] Color correction visually active (scene brightness matches V1)
+- [x] Existing effects still work
+- [x] Floor switching still works
+- [ ] DynamicExposureManager integration (deferred)
+
+---
+
+### Step 14: BloomEffect ✅ IMPLEMENTED
+
+**What it does:** Screen-space glow effect. Bright pixels above a threshold are
+extracted, progressively blurred through a multi-mip chain, and additively
+composited back onto the scene.
+
+**V2 implementation:**
+
+Files:
+- `compositor-v2/effects/BloomEffectV2.js` — Post-processing effect class
+- `compositor-v2/FloorCompositor.js` — Wired into initialize/update/render/resize/dispose
+
+Architecture:
+1. Wraps `THREE.UnrealBloomPass` (multi-mip progressive bloom).
+2. Uses internal `_bloomInputRT` as the pass's read buffer.
+3. Flow: copy inputRT → _bloomInputRT → run pass → copy result → outputRT.
+4. Bloom tint color (all mip levels) and blend opacity controls preserved.
+5. Runs after SkyColor, before ColorCorrection in the post chain.
+
+**Simplifications vs V1 (to be addressed later):**
+- No vision masking via FoundryFogBridge
+- No scene-rect padding exclusion (V2 compositor handles this)
+- No ember hotspot layer injection (BLOOM_HOTSPOT_LAYER)
+
+**Validation:**
+- [x] Bloom glow visible on bright areas (fire, window lights)
+- [x] Strength/radius/threshold controls work
+- [x] Existing effects still function
+- [x] Floor switching still works
+- [ ] Ember hotspot layer (deferred)
+- [ ] Vision masking (deferred)
+
+---
+
+### Steps 17 & 18: FilmGrain + Sharpen ✅ IMPLEMENTED
+
+**FilmGrainEffectV2** — Animated noise grain overlay. Disabled by default.
+**SharpenEffectV2** — Unsharp mask sharpening filter. Disabled by default.
+
+Files:
+- `compositor-v2/effects/FilmGrainEffectV2.js`
+- `compositor-v2/effects/SharpenEffectV2.js`
+
+Both run at the very end of the post chain (after color correction).
+Both are disabled by default — users opt in via the control panel.
+
+---
+
+### Steps 15 & 19: Remaining Post-Processing Effects
+
+| Step | Effect                   | V1 Layer          | Priority | Notes |
+|-----:|--------------------------|--------------------|----------|-------|
+|   15 | VisionModeEffect         | POST_PROCESSING    | 95 | Darkvision, tremorsense, etc. overlays. Depends on lighting state. |
+|   19 | Stylistic & Debug        | POST_PROCESSING    |200+| AsciiEffect, DotScreenEffect, HalftoneEffect, DazzleOverlayEffect, MaskDebugEffect. Optional / niche — activate last. |
+
+**General validation for each step:**
+- [ ] Effect visually active and correct
+- [ ] No regression in previously-enabled effects
+- [ ] Floor switching still works
+- [ ] Performance acceptable
+
+---
+
+### Step 20: Water Effect
 
 **What it does:** Screen-space post-processing effect that applies water tint,
 caustic patterns, and ripple distortion to areas marked by the `_Water` depth mask.
@@ -241,16 +481,11 @@ Reads the rendered scene as input, outputs modified scene with water overlay.
 
 **V2 approach:**
 1. Load `_Water` mask via `THREE.TextureLoader`.
-2. This is the first effect that requires **render targets**: the albedo scene must be
-   rendered to an RT first, then the water post-process reads it and writes to screen.
-3. Add RT allocation to `FloorCompositor.initialize()` (scene RT + post RT).
-4. Modify `FloorCompositor.render()`: render bus → scene RT, then water post → screen.
-5. Per-floor: water mask is floor-specific. Water tint only applied where that floor's
-   water mask has data.
+2. Uses the RT infrastructure from Step 4 (bus → scene RT → water post → screen).
+3. Per-floor: water mask is floor-specific. Water tint only applied where that
+   floor's water mask has data.
 
 **Infrastructure needed:**
-- Scene render target (first RT introduction since Milestone 1 stripped them)
-- Fullscreen quad + ortho camera for post-processing passes
 - Water shader (simplified V2 version — start with tint + caustics, add distortion later)
 - Per-floor water mask compositing
 
@@ -258,8 +493,8 @@ Reads the rendered scene as input, outputs modified scene with water overlay.
 - [ ] Water tint visible on water areas
 - [ ] Water only on correct floor (no ground-floor water bleeding to upper floor)
 - [ ] Caustic animation runs
-- [ ] No visual artifacts from RT pipeline introduction
-- [ ] Camera pan/zoom still works after RT changes
+- [ ] No visual artifacts
+- [ ] Camera pan/zoom still works
 
 ---
 
@@ -334,8 +569,19 @@ masks at 8192×8192. This is expensive and tightly coupled.
 | Step | Effect | Status | Date |
 |---|---|---|---|
 | 0 | Albedo baseline (Milestone 1) | ✅ Complete | 2025-02-23 |
-| 1 | Specular | ⬜ Not started | |
-| 2 | Fire Sparks | ⬜ Not started | |
-| 3 | Window Lights | ⬜ Not started | |
-| 4 | Water | ⬜ Not started | |
-| 5+ | Remaining effects | ⬜ Not started | |
+| 1 | Specular | ✅ Complete | 2025-02-23 |
+| 2 | Fire Sparks | ✅ Complete | 2025-02-23 |
+| 3 | Window Lights | ✅ Complete | 2025-02-23 |
+| 4 | RT Infrastructure | ✅ Complete | 2026-02-23 |
+| 5 | LightingEffect | ✅ Complete | 2026-02-23 |
+| 6 | SkyColorEffect | ✅ Complete | 2026-02-23 |
+| 7–13 | Environmental effects (Cloud, Shadows, etc.) | ⏳ Deferred | |
+| 16 | ColorCorrectionEffect | ✅ Complete | 2026-02-23 |
+| 14 | BloomEffect | ✅ Complete | 2026-02-23 |
+| 17 | FilmGrainEffect | ✅ Complete | 2026-02-23 |
+| 18 | SharpenEffect | ✅ Complete | 2026-02-23 |
+| 15, 19 | VisionMode + Stylistic/Debug | ⬜ Not started | |
+| 20 | Water | ⬜ Not started | |
+
+REMEMBER TO ENABLE TWEAKPANE CONTROLS FOR EFFECTS AS YOU GO ALONG
+

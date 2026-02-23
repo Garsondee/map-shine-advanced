@@ -170,7 +170,7 @@ export class FloorRenderBus {
   }
 
   /**
-   * Render the bus scene directly to the screen (null render target).
+   * Render the bus scene to the given target (or screen if null).
    * Uses the main perspective camera for correct world-space projection.
    *
    * Saves and restores renderer state (autoClear, clearColor, renderTarget)
@@ -178,8 +178,9 @@ export class FloorRenderBus {
    *
    * @param {import('three').WebGLRenderer} renderer
    * @param {import('three').Camera} camera
+   * @param {import('three').WebGLRenderTarget|null} [target=null] - Render target, or null for screen.
    */
-  renderToScreen(renderer, camera) {
+  renderTo(renderer, camera, target = null) {
     if (!this._initialized || !this._scene) return;
     const THREE = window.THREE;
 
@@ -198,8 +199,8 @@ export class FloorRenderBus {
     camera.layers.enable(0);
     camera.layers.enable(OVERLAY_THREE_LAYER);
 
-    // Render to screen with a black clear so no white flash while textures load.
-    renderer.setRenderTarget(null);
+    // Render with a black clear so no white flash while textures load.
+    renderer.setRenderTarget(target);
     renderer.setClearColor(0x000000, 1);
     renderer.autoClear = true;
     renderer.render(this._scene, camera);
@@ -209,6 +210,15 @@ export class FloorRenderBus {
     renderer.autoClear = prevAutoClear;
     renderer.setClearColor(prevColor, prevAlpha);
     renderer.setRenderTarget(prevTarget);
+  }
+
+  /**
+   * Convenience: render the bus scene directly to the screen framebuffer.
+   * @param {import('three').WebGLRenderer} renderer
+   * @param {import('three').Camera} camera
+   */
+  renderToScreen(renderer, camera) {
+    this.renderTo(renderer, camera, null);
   }
 
   // ── Cleanup ──────────────────────────────────────────────────────────────────
@@ -266,6 +276,109 @@ export class FloorRenderBus {
       entry.mesh.visible = entry.floorIndex <= maxFloorIndex;
     }
     log.debug(`FloorRenderBus: showing floors 0–${maxFloorIndex}`);
+  }
+
+  // ── Floor Mask Rendering ────────────────────────────────────────────────────
+
+  /**
+   * Render only tiles at `floorIndex >= minFloorIndex` to a target RT.
+   * Used to generate an upper-floor occlusion mask for the water effect:
+   * wherever the mask has non-zero alpha, ground-floor water is hidden.
+   *
+   * Temporarily toggles tile visibility, renders, then restores the original
+   * visibility state so the main render loop is unaffected.
+   *
+   * @param {import('three').WebGLRenderer} renderer
+   * @param {import('three').Camera} camera
+   * @param {number} minFloorIndex - Minimum floor index to include in the mask
+   * @param {import('three').WebGLRenderTarget} target - Render target for the mask
+   */
+  renderFloorMaskTo(renderer, camera, minFloorIndex, target) {
+    if (!this._initialized || !this._scene) return;
+    const THREE = window.THREE;
+
+    // Save each tile's current visibility so we can restore it after.
+    const savedVisibility = new Map();
+    const savedMaterialState = new Map();
+    for (const [tileId, entry] of this._tiles) {
+      savedVisibility.set(tileId, entry.mesh.visible);
+
+      // Background planes (__bg_*) should be hidden — they're not floor geometry.
+      // Effect overlays (__*) should also be hidden.
+      if (tileId.startsWith('__')) {
+        entry.mesh.visible = false;
+        continue;
+      }
+
+      // Show only tiles on floors >= minFloorIndex.
+      entry.mesh.visible = entry.floorIndex >= minFloorIndex;
+
+      // Skip tiles whose textures haven't loaded yet. If we render them, the
+      // MeshBasicMaterial will output opaque black and incorrectly occlude water.
+      const mat = entry.material;
+      const hasMap = !!mat?.map;
+      if (!hasMap) {
+        entry.mesh.visible = false;
+        continue;
+      }
+
+      // Temporarily force tiles to render as a pure alpha mask:
+      // white RGB, alpha from the tile's original opacity * texture alpha.
+      savedMaterialState.set(tileId, {
+        transparent: mat.transparent,
+        opacity: mat.opacity,
+        color: mat.color ? mat.color.clone() : null,
+        depthTest: mat.depthTest,
+        depthWrite: mat.depthWrite,
+        blending: mat.blending,
+      });
+      if (mat.color) mat.color.set(1, 1, 1);
+      mat.transparent = true;
+      mat.depthTest = false;
+      mat.depthWrite = false;
+      mat.blending = THREE.NormalBlending;
+      mat.needsUpdate = true;
+    }
+
+    // Save and configure renderer state.
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const prevColor = renderer.getClearColor(new THREE.Color());
+    const prevAlpha = renderer.getClearAlpha();
+    const prevLayerMask = camera.layers.mask;
+    camera.layers.enable(0);
+
+    // Clear to transparent black — alpha=0 means "no upper floor coverage".
+    renderer.setRenderTarget(target);
+    renderer.setClearColor(0x000000, 0);
+    renderer.autoClear = true;
+    renderer.render(this._scene, camera);
+
+    // Restore camera layer mask and renderer state.
+    camera.layers.mask = prevLayerMask;
+    renderer.autoClear = prevAutoClear;
+    renderer.setClearColor(prevColor, prevAlpha);
+    renderer.setRenderTarget(prevTarget);
+
+    // Restore original tile visibility.
+    for (const [tileId, wasVisible] of savedVisibility) {
+      const entry = this._tiles.get(tileId);
+      if (entry) entry.mesh.visible = wasVisible;
+    }
+
+    // Restore original material state.
+    for (const [tileId, st] of savedMaterialState) {
+      const entry = this._tiles.get(tileId);
+      const mat = entry?.material;
+      if (!mat) continue;
+      mat.transparent = st.transparent;
+      mat.opacity = st.opacity;
+      if (st.color && mat.color) mat.color.copy(st.color);
+      mat.depthTest = st.depthTest;
+      mat.depthWrite = st.depthWrite;
+      mat.blending = st.blending;
+      mat.needsUpdate = true;
+    }
   }
 
   // ── Effect Overlay API ──────────────────────────────────────────────────────

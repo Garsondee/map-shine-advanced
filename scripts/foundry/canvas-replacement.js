@@ -3251,7 +3251,94 @@ async function createThreeCanvas(scene) {
           safeCall(() => { if (window.MapShine) window.MapShine.levelsAuthoring = levelsAuthoring; }, 'exposeLevelsAuthoring(V2)', Severity.COSMETIC);
         }
 
-        log.info('V2: UI initialized (minimal mode)');
+        // ── Register V2 effect controls in Tweakpane ──────────────────────
+        // V1 effects are NOT constructed in V2 mode, but we still need UI
+        // controls for the V2 post-processing effects on FloorCompositor.
+        // Schemas come from V1 static getControlSchema() (classes are imported).
+        // Callbacks use lazy lookup so they work even though FloorCompositor
+        // is lazily created on first render frame.
+        const _propagateToV2 = (effectKey, paramId, value) => {
+          try {
+            const fc = window.MapShine?.effectComposer?._floorCompositorV2;
+            if (!fc) return;
+            const effect = fc[effectKey];
+            if (!effect) return;
+
+            // Prefer effect.enabled setter when present (several V2 overlay effects
+            // keep enabled state on the instance and mirror it into params).
+            if (paramId === 'enabled' || paramId === 'masterEnabled') {
+              if (typeof effect.enabled !== 'undefined') {
+                try { effect.enabled = !!value; } catch (_) {}
+              }
+              if (effect.params && Object.prototype.hasOwnProperty.call(effect.params, 'enabled')) {
+                effect.params.enabled = !!value;
+              }
+              return;
+            }
+
+            if (effect.params && Object.prototype.hasOwnProperty.call(effect.params, paramId)) {
+              effect.params[paramId] = value;
+            }
+          } catch (_) {}
+        };
+
+        const _makeV2Callback = (effectKey) => (effectId, paramId, value) => {
+          _propagateToV2(effectKey, paramId, value);
+        };
+
+        safeCall(() => {
+          uiManager.registerEffect('lighting', 'Lighting & Tone Mapping',
+            LightingEffect.getControlSchema(), _makeV2Callback('_lightingEffect'), 'global');
+        }, 'v2.registerLightingUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('specular', 'Metallic / Specular',
+            SpecularEffect.getControlSchema(), _makeV2Callback('_specularEffect'), 'surface');
+        }, 'v2.registerSpecularUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('sky-color', 'Sky Color',
+            SkyColorEffect.getControlSchema(), _makeV2Callback('_skyColorEffect'), 'global');
+        }, 'v2.registerSkyColorUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('windowLight', 'Window Light',
+            WindowLightEffect.getControlSchema(), _makeV2Callback('_windowLightEffect'), 'structure');
+        }, 'v2.registerWindowLightUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('fire-sparks', 'Fire',
+            FireSparksEffect.getControlSchema(), _makeV2Callback('_fireEffect'), 'particle');
+        }, 'v2.registerFireUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('bloom', 'Bloom (Glow)',
+            BloomEffect.getControlSchema(), _makeV2Callback('_bloomEffect'), 'global');
+        }, 'v2.registerBloomUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('colorCorrection', 'Color Grading & VFX',
+            ColorCorrectionEffect.getControlSchema(), _makeV2Callback('_colorCorrectionEffect'), 'global');
+        }, 'v2.registerColorCorrectionUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('filmGrain', 'Film Grain',
+            FilmGrainEffect.getControlSchema(), _makeV2Callback('_filmGrainEffect'), 'global');
+        }, 'v2.registerFilmGrainUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('sharpen', 'Sharpen',
+            SharpenEffect.getControlSchema(), _makeV2Callback('_sharpenEffect'), 'global');
+        }, 'v2.registerSharpenUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('water', 'Water',
+            WaterEffectV2.getControlSchema(), _makeV2Callback('_waterEffect'), 'surface');
+        }, 'v2.registerWaterUI', Severity.COSMETIC);
+
+        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, Bloom, ColorCorrection, FilmGrain, Sharpen, Water)');
+
+        log.info('V2: UI initialized');
       }, 'initializeUI(V2)', Severity.DEGRADED);
     } else {
       await safeCallAsync(async () => {
@@ -4468,6 +4555,24 @@ async function initializeUI(effectMap) {
     }
   }
 
+  // ── V2 Compositor Effect Propagation ──────────────────────────────────────
+  // When the V2 compositor is active, UI param changes must also reach the V2
+  // effect instances (which have their own params objects separate from V1).
+  // This helper writes to the V2 effect if V2 is active; it's a no-op otherwise.
+  const _propagateToV2 = (effectKey, paramId, value) => {
+    try {
+      const fc = window.MapShine?.effectComposer?._floorCompositorV2;
+      if (!fc) return;
+      const effect = fc[effectKey];
+      if (!effect?.params) return;
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        effect.params.enabled = !!value;
+      } else if (Object.prototype.hasOwnProperty.call(effect.params, paramId)) {
+        effect.params[paramId] = value;
+      }
+    } catch (_) {}
+  };
+
   if (lightingEffect) {
     const lightingSchema = LightingEffect.getControlSchema();
 
@@ -4485,6 +4590,7 @@ async function initializeUI(effectMap) {
         }
         log.debug(`Lighting.${paramId} = ${value}`);
       }
+      _propagateToV2('_lightingEffect', paramId, value);
     };
 
     uiManager.registerEffect(
@@ -4528,6 +4634,7 @@ async function initializeUI(effectMap) {
         skyColorEffect.params[paramId] = value;
         log.debug(`SkyColor.${paramId} = ${value}`);
       }
+      _propagateToV2('_skyColorEffect', paramId, value);
     };
 
     uiManager.registerEffect(
@@ -4552,6 +4659,7 @@ async function initializeUI(effectMap) {
         bloomEffect.params[paramId] = value;
         log.debug(`Bloom.${paramId} = ${value}`);
       }
+      _propagateToV2('_bloomEffect', paramId, value);
     };
 
     uiManager.registerEffect(
@@ -5510,6 +5618,7 @@ async function initializeUI(effectMap) {
         colorCorrectionEffect.params[paramId] = value;
         log.debug(`ColorCorrection.${paramId} =`, value);
       }
+      _propagateToV2('_colorCorrectionEffect', paramId, value);
     };
 
     uiManager.registerEffect(
@@ -5581,20 +5690,21 @@ async function initializeUI(effectMap) {
   if (filmGrainEffect) {
     const schema = FilmGrainEffect.getControlSchema();
 
-    const onUpdate = (effectId, paramId, value) => {
+    const onFilmGrainUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
         filmGrainEffect.enabled = value;
         log.debug(`FilmGrain effect ${value ? 'enabled' : 'disabled'}`);
       } else if (filmGrainEffect.params && Object.prototype.hasOwnProperty.call(filmGrainEffect.params, paramId)) {
         filmGrainEffect.params[paramId] = value;
       }
+      _propagateToV2('_filmGrainEffect', paramId, value);
     };
 
     uiManager.registerEffect(
       'filmGrain',
       'Film Grain',
       schema,
-      onUpdate,
+      onFilmGrainUpdate,
       'global'
     );
   }
@@ -5652,6 +5762,7 @@ async function initializeUI(effectMap) {
         sharpenEffect.params[paramId] = value;
         log.debug(`Sharpen.${paramId} =`, value);
       }
+      _propagateToV2('_sharpenEffect', paramId, value);
     };
 
     uiManager.registerEffect(

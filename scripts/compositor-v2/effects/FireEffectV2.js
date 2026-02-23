@@ -149,7 +149,12 @@ export class FireEffectV2 {
   // ── Public API ─────────────────────────────────────────────────────────────
 
   get enabled() { return this._enabled; }
-  set enabled(v) { this._enabled = v; }
+  set enabled(v) {
+    this._enabled = !!v;
+    if (this.params && Object.prototype.hasOwnProperty.call(this.params, 'enabled')) {
+      this.params.enabled = this._enabled;
+    }
+  }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 

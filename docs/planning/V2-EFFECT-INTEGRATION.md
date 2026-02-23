@@ -144,45 +144,55 @@ V1 features preserved:
 - World-space pattern coordinates for seamless cross-tile patterns
 
 **Validation:**
-- [ ] Specular highlights visible on ground floor tiles
-- [ ] Specular highlights visible on upper floor tiles
-- [ ] Switching floors hides/shows correct specular overlays
-- [ ] No specular from floor N bleeding onto floor M
-- [ ] Performance: no per-frame mask rebinding overhead
+- [x] Specular highlights visible on ground floor tiles
+- [x] Specular highlights visible on upper floor tiles
+- [x] Switching floors hides/shows correct specular overlays
+- [x] No specular from floor N bleeding onto floor M
+- [x] Performance: no per-frame mask rebinding overhead
 
 ---
 
-### Step 2: Fire Sparks Effect
+### Step 2: Fire Sparks Effect ✅ IMPLEMENTED
 
-**What it does:** GPU particle system that spawns fire sparks and embers from areas
-marked by the `_Fire` mask. Uses the "Lookup Map" technique: CPU scans the mask once,
-collects bright pixels as normalized UVs + brightness, packs into a `THREE.DataTexture`
-(position map). Vertex shader samples this position map to place particles.
+**What it does:** GPU particle system that spawns fire sparks, embers, and smoke from
+areas marked by the `_Fire` mask. Uses three.quarks `BatchedRenderer` for efficient
+GPU-instanced billboard rendering.
 
-**V1 coupling points:**
-- `_Fire` mask from `EffectMaskRegistry` / `GpuSceneMaskCompositor`
-- Position map generation from mask data
-- `ParticleSystem` base class (smoke is a dependent system)
-- `bindFloorMasks()` for per-floor fire mask swap
+**V2 implementation:**
 
-**V2 approach:**
-1. Load `_Fire` mask via `THREE.TextureLoader`.
-2. Build position map from mask pixels (reuse existing CPU scan logic).
-3. Create particle mesh in the bus scene at the correct floor Z.
-4. Per-floor: separate position maps per floor (each floor's fire mask → its own
-   particle emitter group).
-5. Visibility toggled by `setVisibleFloors()` like albedo tiles.
+Files:
+- `compositor-v2/effects/fire-behaviors.js` — Extracted behavior classes (FlameLifecycleBehavior,
+  EmberLifecycleBehavior, SmokeLifecycleBehavior, FireSpinBehavior, FireMaskShape,
+  ParticleTimeScaledBehavior) + gradient data + `generateFirePoints()` CPU mask scanner
+- `compositor-v2/effects/FireEffectV2.js` — Effect class managing per-floor particle system
+  sets, BatchedRenderer, mask discovery, floor switching
+- `compositor-v2/FloorCompositor.js` — Wired into initialize/populate/update/dispose lifecycle
 
-**Infrastructure needed:**
-- Mask texture loader (shared with Specular)
-- Position map builder utility (extract from V1 FireSparksEffect)
-- Time uniform for animation
+Architecture:
+1. Per-tile `_Fire` mask discovery via `probeMaskFile()` + image loading.
+2. CPU mask scanning (`generateFirePoints()`) produces (u, v, brightness) Float32Arrays.
+3. Points merged per floor, spatially bucketed (2000px), each bucket → fire + ember + smoke systems.
+4. `BatchedRenderer` added to bus scene via `addEffectOverlay()` — renders in same pass.
+5. Floor isolation: system swapping — all floors `<= maxFloorIndex` have their systems
+   in the BatchedRenderer; others are removed. Differential activation on floor change.
+6. No EffectMaskRegistry, no GpuSceneMaskCompositor, no bindFloorMasks.
+
+V1 features preserved:
+- FlameLifecycleBehavior: temperature-driven blackbody gradients (cold/standard/hot), HDR emission
+- EmberLifecycleBehavior: cooling color + emission curves
+- SmokeLifecycleBehavior: warm/cool color blend, 3-point alpha envelope, size growth
+- SmartWindBehavior: per-particle indoor/outdoor wind response
+- FireSpinBehavior: random sprite rotation
+- Weather guttering: rain + wind kills exposed fire
+- Indoor life/time scaling
+- Spatial bucketing for culling efficiency
 
 **Validation:**
-- [ ] Fire particles visible on correct floor
-- [ ] No fire particles from ground floor appearing on upper floor
-- [ ] Particle animation runs smoothly
+- [ ] Fire particles visible on ground floor
+- [ ] Fire particles visible on upper floors
 - [ ] Switching floors shows/hides fire correctly
+- [ ] No fire from floor N appearing on floor M
+- [ ] Particle animation runs smoothly
 
 ---
 

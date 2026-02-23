@@ -25,6 +25,7 @@
 
 import { createLogger } from '../core/log.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
+import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
 
 const log = createLogger('FloorRenderBus');
 
@@ -188,13 +189,23 @@ export class FloorRenderBus {
     const prevColor     = renderer.getClearColor(new THREE.Color());
     const prevAlpha     = renderer.getClearAlpha();
 
+    // Save camera layer mask and ensure layer 0 + OVERLAY_THREE_LAYER are enabled.
+    // The FloorLayerManager may have set the camera mask to only a specific floor
+    // layer (e.g. bit 20 for floor 0), which excludes layer 0. The bus scene's
+    // tile meshes and quarks SpriteBatch children all live on layer 0, so they
+    // would be invisible without this. We restore the mask after rendering.
+    const prevLayerMask = camera.layers.mask;
+    camera.layers.enable(0);
+    camera.layers.enable(OVERLAY_THREE_LAYER);
+
     // Render to screen with a black clear so no white flash while textures load.
     renderer.setRenderTarget(null);
     renderer.setClearColor(0x000000, 1);
     renderer.autoClear = true;
     renderer.render(this._scene, camera);
 
-    // Restore renderer state.
+    // Restore camera layer mask and renderer state.
+    camera.layers.mask = prevLayerMask;
     renderer.autoClear = prevAutoClear;
     renderer.setClearColor(prevColor, prevAlpha);
     renderer.setRenderTarget(prevTarget);
@@ -246,8 +257,9 @@ export class FloorRenderBus {
   setVisibleFloors(maxFloorIndex) {
     if (!this._initialized) return;
     for (const [tileId, entry] of this._tiles) {
-      // Background planes are always visible regardless of active floor.
-      if (tileId === '__bg_solid__' || tileId === '__bg_image__') {
+      // Background planes and internal effect overlays (prefixed '__') are always
+      // visible — their content visibility is managed by the effect itself.
+      if (tileId.startsWith('__')) {
         entry.mesh.visible = true;
         continue;
       }

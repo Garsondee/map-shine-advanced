@@ -158,6 +158,22 @@ export class EffectComposer {
    * @returns {boolean}
    */
   wantsContinuousRender() {
+    // Compositor V2 path: effects are suppressed, but the V2 FloorCompositor
+    // may still drive continuously-animated systems (e.g. quarks particles).
+    // If it requests continuous rendering, honor it so animation doesn't
+    // degrade to the idle FPS cap.
+    try {
+      if (this._checkCompositorV2Enabled && this._checkCompositorV2Enabled()) {
+        const fc = this._floorCompositorV2;
+        if (fc && typeof fc.wantsContinuousRender === 'function') {
+          if (fc.wantsContinuousRender()) return true;
+        }
+      }
+    } catch (_) {
+      // Fail safe: if the probe throws, keep rendering continuously.
+      return true;
+    }
+
     for (const effect of this.effects.values()) {
       if (!effect || !effect.enabled) continue;
       if (!effect.requiresContinuousRender) continue;
@@ -853,6 +869,7 @@ export class EffectComposer {
         const _compositorV2 = this._getFloorCompositorV2();
         _compositorV2.render({
           floorStack: _floorStackEarly,
+          timeInfo,
           doProfile,
           profiler,
         });

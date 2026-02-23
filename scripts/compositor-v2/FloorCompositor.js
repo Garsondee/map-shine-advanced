@@ -10,6 +10,9 @@
  *   - **SpecularEffectV2**: Per-tile additive overlays driven by _Specular
  *     masks. Overlay meshes sit at a small Z offset above their albedo tile
  *     and use AdditiveBlending for natural specular compositing.
+ *   - **FireEffectV2**: Per-floor particle systems (fire + embers + smoke)
+ *     driven by _Fire masks. Uses three.quarks BatchedRenderer in the bus
+ *     scene. Floor isolation via system swapping on floor change.
  *
  * Remaining effects will be added one at a time. Render targets and
  * post-processing infrastructure will be added only when an effect
@@ -23,6 +26,7 @@
 import { createLogger } from '../core/log.js';
 import { FloorRenderBus } from './FloorRenderBus.js';
 import { SpecularEffectV2 } from './effects/SpecularEffectV2.js';
+import { FireEffectV2 } from './effects/FireEffectV2.js';
 
 const log = createLogger('FloorCompositor');
 
@@ -60,6 +64,13 @@ export class FloorCompositor {
      */
     this._specularEffect = new SpecularEffectV2(this._renderBus);
 
+    /**
+     * V2 Fire Effect: per-floor particle systems (fire + embers + smoke)
+     * driven by _Fire masks. BatchedRenderer lives in the bus scene.
+     * @type {FireEffectV2}
+     */
+    this._fireEffect = new FireEffectV2(this._renderBus);
+
     /** @type {boolean} Whether the render bus has been populated this session. */
     this._busPopulated = false;
 
@@ -95,6 +106,7 @@ export class FloorCompositor {
 
     this._renderBus.initialize();
     this._specularEffect.initialize();
+    this._fireEffect.initialize();
 
     // Listen for floor/level changes so we can update tile mesh visibility.
     this._levelHookId = Hooks.on('mapShineLevelContextChanged', (payload) => {
@@ -103,6 +115,27 @@ export class FloorCompositor {
 
     this._initialized = true;
     log.info(`FloorCompositor initialized (${w}x${h})`);
+  }
+
+  /**
+   * Hook for EffectComposer/RenderLoop adaptive FPS.
+   * When true, the render loop will prefer the "continuous" FPS cap so
+   * time-varying systems (particles) stay smooth.
+   *
+   * @returns {boolean}
+   */
+  wantsContinuousRender() {
+    try {
+      const fire = this._fireEffect;
+      if (!fire || !fire.enabled) return false;
+      // If any floors are active, we have live particle systems that should
+      // animate smoothly (not at idle FPS).
+      if (fire._activeFloors && fire._activeFloors.size > 0) return true;
+      return false;
+    } catch (_) {
+      // Fail safe: if anything about the probe throws, treat as active.
+      return true;
+    }
   }
 
   // ── Render ──────────────────────────────────────────────────────────────────
@@ -150,6 +183,12 @@ export class FloorCompositor {
         }).catch(err => {
           log.error('SpecularEffectV2 populate failed:', err);
         });
+        // Populate fire particle systems from _Fire masks.
+        this._fireEffect.populate(sc.foundrySceneData).then(() => {
+          this._applyCurrentFloorVisibility();
+        }).catch(err => {
+          log.error('FireEffectV2 populate failed:', err);
+        });
       } else {
         log.warn('FloorCompositor.render: no sceneComposer available for populate');
       }
@@ -158,6 +197,7 @@ export class FloorCompositor {
     // ── Update effects (time-varying uniforms) ───────────────────────────────
     if (timeInfo) {
       this._specularEffect.update(timeInfo);
+      this._fireEffect.update(timeInfo);
     }
 
     // ── Bind per-frame textures and camera to effects ────────────────────────
@@ -192,6 +232,8 @@ export class FloorCompositor {
     const activeFloor = floorStack.getActiveFloor();
     const maxFloorIndex = activeFloor?.index ?? Infinity;
     this._renderBus.setVisibleFloors(maxFloorIndex);
+    // Notify fire effect of floor change so it can swap active particle systems.
+    this._fireEffect.onFloorChange(maxFloorIndex);
     log.debug(`FloorCompositor: visibility set to floors 0–${maxFloorIndex}`);
   }
 
@@ -215,6 +257,7 @@ export class FloorCompositor {
    * Dispose all GPU resources. Call on scene teardown.
    */
   dispose() {
+    this._fireEffect.dispose();
     this._specularEffect.dispose();
     this._renderBus.dispose();
     this._busPopulated = false;

@@ -91,7 +91,8 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
   const {
     skipBaseTexture = false,
     suppressProbeErrors = false,
-    bypassCache = false
+    bypassCache = false,
+    skipMaskIds = null
   } = options || {};
   log.info(`Loading asset bundle: ${basePath}${skipBaseTexture ? ' (masks only)' : ''}`);
 
@@ -103,10 +104,21 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
   const _dlp = debugLoadingProfiler;
   const _isDbg = _dlp.debugMode;
   const _shortBase = basePath.split('/').pop() || basePath;
+  const _skipMaskSet = (() => {
+    try {
+      if (!skipMaskIds) return null;
+      if (skipMaskIds instanceof Set) return skipMaskIds;
+      if (Array.isArray(skipMaskIds)) return new Set(skipMaskIds.map((v) => String(v).toLowerCase()));
+      return new Set([String(skipMaskIds).toLowerCase()]);
+    } catch (e) {
+      return null;
+    }
+  })();
   
   try {
     // Check cache first
-    const cacheKey = `${basePath}::${skipBaseTexture ? 'masks' : 'full'}`;
+    const _skipKey = _skipMaskSet ? Array.from(_skipMaskSet).sort().join(',') : '';
+    const cacheKey = `${basePath}::${skipBaseTexture ? 'masks' : 'full'}::skip=${_skipKey}`;
     if (!bypassCache && assetCache.has(cacheKey)) {
       const cached = assetCache.get(cacheKey);
       const cachedMaskCount = Array.isArray(cached?.masks) ? cached.masks.length : 0;
@@ -232,6 +244,15 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
       const _maskDbgId = `al.mask.${maskId}[${_shortBase}]`;
       if (_isDbg) _dlp.begin(_maskDbgId, 'texture');
       try {
+        // Optional: allow callers to skip specific mask types entirely.
+        // This is used by Compositor V2 to avoid loading legacy bundle masks
+        // (e.g. _Water) that the V2 pipeline doesn't consume.
+        if (_skipMaskSet && _skipMaskSet.has(String(maskId).toLowerCase())) {
+          loaded++;
+          if (_isDbg) _dlp.end(_maskDbgId, { result: 'skipped (caller)' });
+          return null;
+        }
+
         // Resolve the mask file path: from FilePicker results or via direct URL probe
         let maskFile = null;
         if (useDirectProbe) {

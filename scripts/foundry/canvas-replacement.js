@@ -81,6 +81,7 @@ import { DrawingManager } from '../scene/drawing-manager.js';
 import { NoteManager } from '../scene/note-manager.js';
 import { FloorStack } from '../scene/FloorStack.js';
 import { FloorLayerManager } from '../compositor-v2/FloorLayerManager.js';
+import { CloudEffectV2 } from '../compositor-v2/effects/CloudEffectV2.js';
 import { TemplateManager } from '../scene/template-manager.js';
 import { LightIconManager } from '../scene/light-icon-manager.js';
 import { EnhancedLightIconManager } from '../scene/enhanced-light-icon-manager.js';
@@ -3336,7 +3337,19 @@ async function createThreeCanvas(scene) {
             WaterEffectV2.getControlSchema(), _makeV2Callback('_waterEffect'), 'surface');
         }, 'v2.registerWaterUI', Severity.COSMETIC);
 
-        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, Bloom, ColorCorrection, FilmGrain, Sharpen, Water)');
+        // Cloud controls: registered as a top-level effect in V2 mode.
+        // The 'weather' parent effect is not registered in V2 (WeatherController
+        // is not initialized in V2), so registerEffectUnderEffect would silently
+        // fail. Using a direct registerEffect with 'atmospheric' category groups
+        // it visually with other weather-adjacent controls.
+        safeCall(() => {
+          uiManager.registerEffect(
+            'cloud', 'Cloud and Cloud Shadow Appearance',
+            CloudEffectV2.getControlSchema(), _makeV2Callback('_cloudEffect'), 'atmospheric'
+          );
+        }, 'v2.registerCloudUI', Severity.COSMETIC);
+
+        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, Bloom, ColorCorrection, FilmGrain, Sharpen, Water, Cloud)');
 
         log.info('V2: UI initialized');
       }, 'initializeUI(V2)', Severity.DEGRADED);
@@ -5106,17 +5119,27 @@ async function initializeUI(effectMap) {
   );
 
   // --- Cloud & Cloud Shadow Appearance (Weather Subcategory) ---
-  if (cloudEffect) {
-    const cloudSchema = CloudEffect.getControlSchema();
+  // Register controls unconditionally: use V1 schema when V1 cloudEffect exists,
+  // otherwise use CloudEffectV2 schema (V2-only mode). Param names are identical
+  // so the same _propagateToV2 path drives both systems.
+  {
+    const cloudSchema = cloudEffect
+      ? CloudEffect.getControlSchema()
+      : CloudEffectV2.getControlSchema();
 
     const onCloudUpdate = (effectId, paramId, value) => {
-      if (paramId === 'enabled' || paramId === 'masterEnabled') {
-        cloudEffect.enabled = !!value;
-        log.debug(`Cloud effect ${value ? 'enabled' : 'disabled'}`);
-      } else if (cloudEffect.params && Object.prototype.hasOwnProperty.call(cloudEffect.params, paramId)) {
-        cloudEffect.params[paramId] = value;
-        log.debug(`Cloud.${paramId} =`, value);
+      // V1 update (no-op when V1 cloudEffect is absent)
+      if (cloudEffect) {
+        if (paramId === 'enabled' || paramId === 'masterEnabled') {
+          cloudEffect.enabled = !!value;
+          log.debug(`Cloud effect ${value ? 'enabled' : 'disabled'}`);
+        } else if (cloudEffect.params && Object.prototype.hasOwnProperty.call(cloudEffect.params, paramId)) {
+          cloudEffect.params[paramId] = value;
+          log.debug(`Cloud.${paramId} =`, value);
+        }
       }
+      // Mirror to V2 CloudEffectV2 when the V2 compositor is active.
+      _propagateToV2('_cloudEffect', paramId, value);
     };
 
     uiManager.registerEffectUnderEffect(

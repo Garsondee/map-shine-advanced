@@ -310,44 +310,26 @@ export class FloorRenderBus {
         continue;
       }
 
-      // All tiles on any floor are visible in the occluder mask.
-      // Tiles BELOW minFloorIndex render as fully opaque (alpha=1) — they are
-      // lower-floor geometry that should never receive water from upper floors.
-      // Tiles AT or ABOVE minFloorIndex render with their real texture alpha —
-      // transparent areas in upper-floor tiles are genuine openings where water
-      // on the floor below can show through.
-      entry.mesh.visible = true;
+      // Only tiles AT or ABOVE minFloorIndex should contribute to the occluder.
+      // This mask is used to suppress ground-floor water under the currently
+      // viewed floor (upper-floor) geometry. Including lower floors here would
+      // make the occluder alpha become 1 everywhere (because floor 0 typically
+      // covers the entire map), which would incorrectly suppress ALL water.
 
       const mat = entry.material;
       const hasMap = !!mat?.map;
       const isBelowFloor = entry.floorIndex < minFloorIndex;
 
       if (isBelowFloor) {
-        // Below-floor tiles: render as fully opaque white regardless of texture.
-        // This ensures floor 0 pixels are always occluded and never get water.
-        savedMaterialState.set(tileId, {
-          transparent: mat.transparent,
-          opacity: mat.opacity,
-          color: mat.color ? mat.color.clone() : null,
-          map: mat.map,
-          depthTest: mat.depthTest,
-          depthWrite: mat.depthWrite,
-          blending: mat.blending,
-        });
-        if (mat.color) mat.color.set(1, 1, 1);
-        mat.map = null;
-        mat.transparent = false;
-        mat.opacity = 1.0;
-        mat.depthTest = false;
-        mat.depthWrite = false;
-        mat.blending = THREE.NormalBlending;
-        mat.needsUpdate = true;
+        // Below minFloorIndex: do not render into the occluder mask.
+        entry.mesh.visible = false;
       } else {
         // At or above minFloorIndex: skip tiles without textures (avoid opaque black).
         if (!hasMap) {
           entry.mesh.visible = false;
           continue;
         }
+        entry.mesh.visible = true;
         // Render with real texture alpha so transparent areas are genuine openings.
         savedMaterialState.set(tileId, {
           transparent: mat.transparent,

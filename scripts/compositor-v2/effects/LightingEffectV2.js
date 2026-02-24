@@ -11,12 +11,15 @@
  *
  * Simplified compared to V1 LightingEffect:
  *   - No outdoors mask differentiation (Step 7+)
- *   - No overhead/building/bush/tree/cloud shadow integration (Step 8+)
+ *   - No overhead/building/bush/tree shadow integration (Step 8+)
  *   - No upper floor transmission (later)
  *   - No roof alpha pass (later)
  *   - No rope/token mask passes (later)
  *
- * These will be layered in as subsequent effects come online.
+ * Cloud shadow IS integrated: a shadow factor texture (1.0=lit, 0.0=shadowed)
+ * is passed in from CloudEffectV2 and multiplies totalIllumination so the scene
+ * darkens under cloud cover. Lights still punch through (they add on top of the
+ * shadow-dimmed ambient rather than being gated by it).
  *
  * @module compositor-v2/effects/LightingEffectV2
  */
@@ -125,6 +128,11 @@ export class LightingEffectV2 {
         tScene:   { value: null },
         tLight:   { value: null },
         tDarkness: { value: null },
+        // Cloud shadow: factor texture from CloudEffectV2 (1.0=lit, 0.0=shadowed).
+        // Multiplies totalIllumination so ambient dims under clouds while dynamic
+        // lights (which add on top) still punch through the shadow.
+        tCloudShadow:    { value: null },
+        uHasCloudShadow: { value: 0 },
         uDarknessLevel:      { value: 0.0 },
         uAmbientBrightest:   { value: new THREE.Color(1, 1, 1) },
         uAmbientDarkness:    { value: new THREE.Color(0.141, 0.141, 0.282) },
@@ -145,6 +153,8 @@ export class LightingEffectV2 {
         uniform sampler2D tScene;
         uniform sampler2D tLight;
         uniform sampler2D tDarkness;
+        uniform sampler2D tCloudShadow;
+        uniform float uHasCloudShadow;
         uniform float uDarknessLevel;
         uniform vec3 uAmbientBrightest;
         uniform vec3 uAmbientDarkness;
@@ -195,6 +205,15 @@ export class LightingEffectV2 {
 
           // Total illumination = ambient (after darkness) + dynamic lights.
           vec3 totalIllumination = ambientAfterDark + vec3(lightI) * master;
+
+          // Cloud shadow: dims the ambient component only.
+          // Dynamic lights are NOT gated so torches/lamps still punch through clouds.
+          if (uHasCloudShadow > 0.5) {
+            float shadowFactor = clamp(texture2D(tCloudShadow, vUv).r, 0.0, 1.0);
+            // Only dim the ambient portion; keep dynamic-light additive intact.
+            vec3 ambientPortion = ambientAfterDark;
+            totalIllumination = ambientPortion * shadowFactor + vec3(lightI) * master;
+          }
 
           // Minimum illumination floor to prevent pure black.
           vec3 minIllum = mix(ambientDay, ambientNight, localDarknessLevel) * 0.1;
@@ -459,8 +478,10 @@ export class LightingEffectV2 {
    * @param {THREE.WebGLRenderTarget} outputRT - Where to write the lit result
    * @param {THREE.Scene|null} [windowLightScene=null] - Optional extra scene
    *   rendered additively into lightRT after ThreeLightSource meshes.
+   * @param {THREE.Texture|null} [cloudShadowTexture=null] - Shadow factor from
+   *   CloudEffectV2 (1.0=lit, 0.0=shadowed). Dims ambient illumination under clouds.
    */
-  render(renderer, camera, sceneRT, outputRT, windowLightScene = null) {
+  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._darknessRT || !this._composeMaterial) return;
 
@@ -530,6 +551,14 @@ export class LightingEffectV2 {
     cu.tScene.value = sceneRT.texture;
     cu.tLight.value = this._lightRT.texture;
     cu.tDarkness.value = this._darknessRT.texture;
+    // Bind cloud shadow factor texture (null-safe: shader gates on uHasCloudShadow).
+    if (cloudShadowTexture) {
+      cu.tCloudShadow.value    = cloudShadowTexture;
+      cu.uHasCloudShadow.value = 1;
+    } else {
+      cu.tCloudShadow.value    = null;
+      cu.uHasCloudShadow.value = 0;
+    }
 
     renderer.setRenderTarget(outputRT);
     renderer.autoClear = true;

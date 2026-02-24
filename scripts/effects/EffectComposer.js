@@ -1325,6 +1325,7 @@ export class EffectComposer {
         'filmGrain':        '_filmGrainEffect',
         'sharpen':          '_sharpenEffect',
         'water':            '_waterEffect',
+        'cloud':            '_cloudEffect',
       };
 
       try {

@@ -265,24 +265,14 @@ export class WaterSurfaceModel {
         const shoreDistInside = Math.max(0.0, -sdfPx);
         const exposure01 = this._clamp01(shoreDistInside / exposureScale);
 
-        const gx = this._sdfAt(distToLand, distToWater, mask, w, h, x + 1, y) - this._sdfAt(distToLand, distToWater, mask, w, h, x - 1, y);
-        const gy = this._sdfAt(distToLand, distToWater, mask, w, h, x, y + 1) - this._sdfAt(distToLand, distToWater, mask, w, h, x, y - 1);
-        let nx = gx;
-        let ny = gy;
-        const nlen = Math.hypot(nx, ny);
-        if (nlen > 1e-6) {
-          nx /= nlen;
-          ny /= nlen;
-        } else {
-          nx = 0.0;
-          ny = 0.0;
-        }
-
+        // BA channels are intentionally left as neutral (128, 128 = vec2(0,0) when decoded).
+        // SDF gradient normals were previously baked here but caused diagonal specular
+        // artifacts via GPU bilinear interpolation leaking into the water shader.
         const o = idx * 4;
         out[o] = Math.round(sdf01 * 255);
         out[o + 1] = Math.round(exposure01 * 255);
-        out[o + 2] = Math.round(this._clamp01(nx * 0.5 + 0.5) * 255);
-        out[o + 3] = Math.round(this._clamp01(ny * 0.5 + 0.5) * 255);
+        out[o + 2] = 128;
+        out[o + 3] = 128;
       }
     }
 

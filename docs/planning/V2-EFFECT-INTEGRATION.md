@@ -466,35 +466,262 @@ Both are disabled by default — users opt in via the control panel.
 
 ---
 
-### Step 20: Water Effect
+### Step 20: Water Effect 🔧 IN PROGRESS
 
 **What it does:** Screen-space post-processing effect that applies water tint,
-caustic patterns, and ripple distortion to areas marked by the `_Water` depth mask.
-Reads the rendered scene as input, outputs modified scene with water overlay.
+wave distortion, multi-tap refraction, chromatic aberration, specular highlights
+(GGX), caustic patterns, murk (silt/algae), sand sediment, shore foam, and rain
+ripples to water areas defined by `_Water` depth masks. Reads the lit scene RT as
+input, outputs a modified scene with all water layers composited on top.
 
-**V1 coupling points:**
-- `_Water` mask from `EffectMaskRegistry` (depth data texture)
-- `WaterSurfaceModel` builds SDF from mask for caustic generation
-- Screen-space post-processing (reads scene RT, writes to output RT)
-- `DistortionManager` integration for ripple UV offsets
-- `bindFloorMasks()` for per-floor water mask swap
+---
 
-**V2 approach:**
-1. Load `_Water` mask via `THREE.TextureLoader`.
-2. Uses the RT infrastructure from Step 4 (bus → scene RT → water post → screen).
-3. Per-floor: water mask is floor-specific. Water tint only applied where that
-   floor's water mask has data.
+#### Current V2 Status (as of 2026-02-24)
 
-**Infrastructure needed:**
-- Water shader (simplified V2 version — start with tint + caustics, add distortion later)
-- Per-floor water mask compositing
+**Working:**
+- [x] `_Water` mask discovery and per-floor compositing
+- [x] `WaterSurfaceModel` SDF build from mask (R=SDF, G=exposure, B/A=normals)
+- [x] Per-floor water data switching on floor change (`onFloorChange`)
+- [x] Water tint applied inside SDF-gated region
+- [x] Wave distortion (smooth, world-locked, zoom-stable) using verbatim V1 wave math
+- [x] Distortion pinned at water edges — `refractTapValid()` continuous weight scales `offsetUv → 0` near boundary
+- [x] Multi-tap refraction with renormalized weights for valid taps
+- [x] Chromatic aberration (RGB shift) gated by occluder + `distMask`
+- [x] Per-floor occluder mask (`_waterOccluderRT`) prevents distortion/tint/CA bleeding through upper-floor geometry
+- [x] Sand layer (`USE_SAND` define)
+- [x] Foam layer (shader-computed `getFoamBaseAmount` + `getShaderFlecks`)
+- [x] Murk (`applyMurk` with wind-driven grain)
+- [x] Rain ripples (`computeRainOffsetPx`)
+- [x] `uTime` / `uWindTime` driven from `performance.now()` for smooth 120fps animation
 
-**Validation:**
-- [ ] Water tint visible on water areas
-- [ ] Water only on correct floor (no ground-floor water bleeding to upper floor)
-- [ ] Caustic animation runs
-- [ ] No visual artifacts
-- [ ] Camera pan/zoom still works
+---
+
+#### Missing System Connections (critical for correct appearance)
+
+The following V1 integrations exist in the shader and `WaterEffectV2.js` but are
+**not yet wired into `FloorCompositor`** or their source systems. Each has a
+dedicated section below.
+
+---
+
+##### 20a. Specular GGX — Partially Broken
+
+**Symptom:** Specular highlights barely visible, no bright reflections on water surface.
+
+**Root cause analysis:**
+The GGX specular chain in the shader is:
+```
+spec = BRDF(N, L, V) * NoL
+spec *= specMask               ← pow(distInside, specMaskGamma)
+spec *= shoreBias               ← mix(1, shore, specShoreBias)
+spec *= strength * sunIntensity
+spec *= mix(1.0, 0.05, uSceneDarkness)
+col += spec * skyCol * skySpecI ← skySpecI = mix(0.08, 1.0, uSkyIntensity)
+```
+
+**Known issues:**
+1. **`uSkyColor` is hardcoded** — `vec3(0.5, 0.6, 0.8)` in `_buildUniforms`, never
+   updated from `SkyColorEffectV2.currentSkyTintColor`. Sky tint mismatch kills the
+   final spec multiply.
+2. **`uSkyIntensity` was unbounded** — fixed in current session (now bound from
+   `params.skyIntensity`), but still not fed from the actual sky system.
+3. **`specMask = pow(distInside, specMaskGamma)`** — `distInside` is the SDF-gated
+   inside metric. If the SDF is built but shallow, `distInside` is low everywhere
+   and crushes spec. `specMaskGamma` default lowered to 0.5 to mitigate.
+4. **Sun direction** is static (azimuth/elevation from params, not from a live sun
+   position system). This is acceptable for now.
+
+**Fix required:**
+- Wire `SkyColorEffectV2.currentSkyTintColor` → `u.uSkyColor` in
+  `FloorCompositor.render()` or `WaterEffectV2.update()`.
+- Wire `SkyColorEffectV2.skyIntensity` (or a proxy) → `u.uSkyIntensity`.
+
+---
+
+##### 20b. Caustics — Look Grey, Not Like Light
+
+**Symptom:** Caustic patterns visible but appear as grey smears instead of bright
+warm-white light filaments.
+
+**Root cause analysis:**
+Caustics are correctly additive (`col += causticsColor * c * causticsAmt * 1.35`)
+so the blending is right. The problem is that the scene has already passed through:
+1. `LightingEffectV2` — ambient darkness applied, scene may be dark
+2. `SkyColorEffectV2` — color grade shifts hue/saturation
+3. Water shader reads `tDiffuse` which is the **pre-water lit RT**
+
+Caustics are added on top of the already-darkened/graded scene. When the scene
+is dark (night, dungeon) caustics have nothing bright to work with — they need to
+be **rendered additively against the final bright scene**, or their intensity needs
+to compensate for `uSceneDarkness`.
+
+The shader does apply `col += causticsColor * c * causticsAmt * 1.35` but:
+- `causticsAmt *= edge * causticsCloudLit * inside` — all three can be ≪ 1
+- `causticsColor = mix(vec3(1.0, 1.0, 0.85), uTintColor, 0.15)` — tinted by water
+  tint which may be dark blue
+
+**Fix required:**
+- Caustics should be rendered in the **same additive manner as `WindowLightEffectV2`**:
+  boost the caustics color to be HDR (> 1.0) before the color grade clamps it, or
+  ensure water runs **after** `SkyColorEffect` + `ColorCorrectionEffect` so caustics
+  add directly on the final graded image.
+- Currently water runs **before** sky grading. Consider moving water **after**
+  `ColorCorrectionEffectV2` in the post chain, or separating caustics into their
+  own additive overlay pass.
+- Alternatively: scale `causticsColor` upward (e.g. `vec3(2.5, 2.3, 1.8)`) to punch
+  through the downstream color grade.
+
+---
+
+##### 20c. Foam Particles — WeatherParticles Bridge Incomplete
+
+**Symptom:** No foam particles visible on water surface.
+
+**Root cause:**
+`WaterEffectV2._syncLegacyFoamParticles()` calls:
+```js
+window.MapShineParticles?.weatherParticles?.setWaterDataTexture(tex, bounds)
+window.MapShineParticles?.weatherParticles?.setFoamParams(params, elapsed)
+```
+This bridge exists, but requires:
+1. `window.MapShineParticles.weatherParticles` to be populated — this is the V1
+   `WeatherParticles` system. **In V2, the V1 render loop is replaced**, so
+   `WeatherParticles` may not be initialized.
+2. `WeatherParticles.setWaterDataTexture` and `setFoamParams` must exist on the
+   instance — these are V1-era APIs that may not be present in all builds.
+
+**Foam in the shader vs particles:**
+The shader already computes `getFoamBaseAmount()` (procedural shore foam) and
+`getShaderFlecks()` (fine bubble flecks). These are **shader-driven** and work
+now. The missing "foam particles" are the **floating foam clump sprites**
+(`foam.webp` billboards) that V1's `WeatherParticles` spawned at water surface
+positions — they are a separate GPU particle system layered above the water post pass.
+
+**Fix required:**
+- Determine whether `WeatherParticles` is running in V2 mode. Check
+  `window.MapShineParticles?.weatherParticles` at runtime.
+- If not running: consider porting the foam particle system into
+  `WaterEffectV2` itself (similar architecture to `FireEffectV2` — scan the
+  water SDF for spawn positions, create a `three.quarks` BatchedRenderer,
+  register with `FloorRenderBus`).
+- Short-term: the shader foam layer is functional — foam particles are a visual
+  quality enhancement, not a blocker.
+
+---
+
+##### 20d. Cloud Shadow Integration — Not Wired
+
+**Symptom:** `uHasCloudShadow` is always 0.0 — cloud shadows have no effect on
+water specular kill or caustics suppression.
+
+**Root cause:**
+`tCloudShadow` and `uHasCloudShadow` uniforms exist in both the shader and
+`_buildUniforms()`. But **`FloorCompositor` has no `CloudEffect`** (deferred in
+Steps 7–13), so there is no `_cloudShadowRT` to bind.
+
+**Impact on water:**
+- `uCloudShadowEnabled > 0.5` path in specular: `spec *= litPow` — cloud shadows
+  would kill specular under clouds (correct). Currently always unaffected.
+- `causticsCloudLit` in caustics: caustics would be suppressed under clouds.
+  Currently always lit.
+
+**Fix required:**
+- When `CloudEffectV2` is implemented (Step 7), its shadow RT should be passed
+  to `WaterEffectV2.render()` and bound to `tCloudShadow` / `uHasCloudShadow`.
+- Until then, set `params.cloudShadowEnabled = false` to avoid computing the
+  cloud path with empty data.
+
+---
+
+##### 20e. Outdoors Mask — Not Wired
+
+**Symptom:** `uHasOutdoorsMask` is always 0.0 — indoor/outdoor damping has no
+effect on wave strength or rain intensity inside covered areas.
+
+**Root cause:**
+`tOutdoorsMask` and `uHasOutdoorsMask` uniforms exist in the shader and
+`_buildUniforms()`. The `_Outdoors` mask exists per tile. But in V2, no system
+currently builds or provides this texture to `WaterEffectV2`.
+
+**Impact on water:**
+- `uWaveIndoorDampingEnabled` path: wave strength is damped by `outdoorStrength`
+  inside covered areas. Without the mask, `outdoorStrength = 1.0` everywhere —
+  waves are equally strong indoors and outdoors.
+- `uRainIndoorDampingEnabled` path: rain ripples are damped indoors. Same issue.
+
+**Fix required:**
+- The `_Outdoors` mask is needed by multiple systems (CloudEffect, BuildingShadows,
+  OverheadShadows). Build a shared `OutdoorsMaskProvider` that composites `_Outdoors`
+  tiles per floor into a single RT. Pass it to `WaterEffectV2.render()` and bind to
+  `tOutdoorsMask` / `uHasOutdoorsMask`.
+- This is a prerequisite for Steps 7–9 anyway.
+
+---
+
+##### 20f. Sky Color Coupling — Partially Wired
+
+**Symptom:** Water specular tint doesn't match the sky/time-of-day color (always a
+fixed blue-grey).
+
+**Root cause:**
+`uSkyColor` is initialized to `vec3(0.5, 0.6, 0.8)` and never updated.
+`SkyColorEffectV2` exposes `currentSkyTintColor` (a `THREE.Color`) that tracks the
+live sky hue. This is not yet fed to `WaterEffectV2`.
+
+`uSkyIntensity` is now bound from `params.skyIntensity` (fixed this session) but
+not automatically linked to `SkyColorEffectV2`'s computed sky intensity.
+
+**Fix required (low complexity):**
+In `FloorCompositor.render()` after `_skyColorEffect.update()`:
+```js
+const skyTint = this._skyColorEffect.currentSkyTintColor;
+if (skyTint) this._waterEffect.setSkyColor(skyTint.r, skyTint.g, skyTint.b);
+```
+Add `setSkyColor(r, g, b)` method to `WaterEffectV2` that writes `u.uSkyColor`.
+
+---
+
+#### Post-Chain Position
+
+Water currently runs in `FloorCompositor.render()` **after** `LightingEffectV2` but
+**before** `SkyColorEffectV2` and `ColorCorrectionEffectV2`. This means:
+- Caustics and specular are added to the lit-but-ungraded image.
+- Downstream color grading (exposure, saturation, tone mapping) applies on top.
+- **Caustics appear grey** because their warm-white additive boost is desaturated
+  by the color grade.
+
+**Recommended fix:**
+Move the water pass to run **after** `ColorCorrectionEffectV2`, immediately before
+`BloomEffectV2`. This means:
+- Caustics and specular add on the final-grade image → bloom picks them up → they
+  glow correctly.
+- `tDiffuse` in the shader will be the fully graded scene — this is the correct
+  base for refraction.
+- Water tint will also be grade-correct (currently tint is applied pre-grade).
+
+Alternatively, run a two-phase water pass: refraction/tint/murk before grade,
+caustics/specular after grade.
+
+---
+
+#### Validation Checklist
+
+- [x] Water tint visible on water areas
+- [x] Water only on correct floor (no bleeding to upper floor)
+- [x] Distortion pinned at edges — no "holes" at water boundary
+- [x] Upper-floor occluder mask prevents distortion bleeding through upper geometry
+- [x] Wave animation smooth at 120fps
+- [x] RGB shift (chromatic aberration) stays inside water boundary
+- [x] Sand layer visible in shallow areas
+- [x] Shore foam visible (shader-computed)
+- [x] Murk (silt/algae) visible in deep areas
+- [ ] Specular highlights visible as bright reflections on water surface
+- [ ] Caustics look like light (bright warm-white filaments, not grey smears)
+- [ ] Foam particles (floating foam.webp clumps at water surface)
+- [ ] Cloud shadows suppress specular and caustics dynamically
+- [ ] Indoor/outdoor damping reduces wave strength under covered areas
+- [ ] Sky color tint propagated from SkyColorEffectV2 to water specular
+- [ ] Water runs after color grade so caustics/specular bloom correctly
 
 ---
 
@@ -581,7 +808,17 @@ masks at 8192×8192. This is expensive and tightly coupled.
 | 17 | FilmGrainEffect | ✅ Complete | 2026-02-23 |
 | 18 | SharpenEffect | ✅ Complete | 2026-02-23 |
 | 15, 19 | VisionMode + Stylistic/Debug | ⬜ Not started | |
-| 20 | Water | ⬜ Not started | |
+| 20 | Water | 🔧 In Progress | 2026-02-24 |
 
 REMEMBER TO ENABLE TWEAKPANE CONTROLS FOR EFFECTS AS YOU GO ALONG
+
+---
+
+## Next Steps for Water (Priority Order)
+
+1. **Move water post-pass after ColorCorrectionEffectV2** in `FloorCompositor.render()` — this is the single highest-impact change for caustics + specular appearance. Caustics and spec will then be added to the final graded image and bloom picks them up.
+2. **Wire `SkyColorEffectV2.currentSkyTintColor` → `u.uSkyColor`** — low complexity, big impact on specular tint accuracy.
+3. **Build `OutdoorsMaskProvider`** — composites `_Outdoors` tiles per floor into a single RT. Shared by water (indoor wave damping), and all deferred environmental effects (Steps 7–9).
+4. **Foam particle system** — port into `WaterEffectV2` using `FireEffectV2` architecture (scan water SDF for spawn positions, `three.quarks` BatchedRenderer). Blocked by confirming `WeatherParticles` is/isn't running.
+5. **Cloud shadow RT** — deferred until `CloudEffectV2` is implemented (Step 7). Disable `cloudShadowEnabled` in water params until then.
 

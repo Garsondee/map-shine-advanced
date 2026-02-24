@@ -177,18 +177,29 @@ export class WaterEffectV2 {
       advectionSpeed: 1.5,
 
       // Specular (GGX)
-      specStrength: 35.0,
+      specStrength: 80.0,
       specPower: 8.0,
+      specModel: 1,
+      specClamp: 0.65,
       specSunAzimuthDeg: 135.0,
       specSunElevationDeg: 45.0,
-      specSunIntensity: 1.0,
+      specSunIntensity: 2.5,
       specNormalStrength: 1.2,
       specNormalScale: 0.6,
-      specRoughnessMin: 0.15,
-      specRoughnessMax: 0.55,
+      specNormalMode: 3,
+      specMicroStrength: 0.6,
+      specMicroScale: 1.8,
+      specAAStrength: 0.0,
+      specWaveStepMul: 2.0,
+      specForceFlatNormal: false,
+      specDisableMasking: false,
+      specDisableRainSlope: false,
+      specRoughnessMin: 0.05,
+      specRoughnessMax: 0.30,
       specF0: 0.04,
-      specMaskGamma: 1.5,
+      specMaskGamma: 0.5,
       specSkyTint: 0.3,
+      skyIntensity: 1.0,
       specShoreBias: 0.3,
       specDistortionNormalStrength: 0.5,
       specAnisotropy: 0.0,
@@ -203,12 +214,18 @@ export class WaterEffectV2 {
 
       // Caustics
       causticsEnabled: true,
-      causticsIntensity: 4.0,
+      causticsIntensity: 8.0,
       causticsScale: 33.4,
       causticsSpeed: 1.05,
-      causticsSharpness: 0.1,
-      causticsEdgeLo: 0.11,
+      causticsSharpness: 0.25,
+      causticsEdgeLo: 0.0,
       causticsEdgeHi: 1.0,
+
+      // Caustics brightness thresholding (V1: brightness mask gate)
+      causticsBrightnessMaskEnabled: false,
+      causticsBrightnessThreshold: 0.55,
+      causticsBrightnessSoftness: 0.20,
+      causticsBrightnessGamma: 1.0,
 
       // Foam
       foamColor: { r: 0.85, g: 0.90, b: 0.88 },
@@ -251,12 +268,12 @@ export class WaterEffectV2 {
       murkDepthFade: 1.5,
 
       // Sand
-      sandEnabled: false,
+      sandEnabled: true,
       sandIntensity: 0.5,
       sandColor: { r: 0.76, g: 0.68, b: 0.50 },
       sandContrast: 1.5,
-      sandChunkScale: 1.5,
-      sandChunkSpeed: 0.02,
+      sandChunkScale: 5.0,
+      sandChunkSpeed: 0.15,
       sandGrainScale: 120.0,
       sandGrainSpeed: 0.1,
       sandBillowStrength: 0.4,
@@ -280,6 +297,8 @@ export class WaterEffectV2 {
       maskExpandPx: 0.0,
       sdfRangePx: 64,
       shoreWidthPx: 24,
+
+      useSdfMask: true,
 
       // Debug
       debugView: 0,
@@ -313,12 +332,26 @@ export class WaterEffectV2 {
     /** @type {THREE.DataTexture|null} */
     this._noiseTexture = null;
 
+    // ── Fallback 1x1 textures for optional samplers ──────────────────────
+    // WebGL requires all declared sampler2D uniforms to be bound to a valid
+    // texture at all times. These are used when the real texture is unavailable.
+    /** @type {THREE.DataTexture|null} */
+    this._fallbackBlack = null;
+    /** @type {THREE.DataTexture|null} */
+    this._fallbackWhite = null;
+
     // ── Wind / time state ────────────────────────────────────────────────
     this._windTime = 0;
     this._windOffsetUvX = 0;
     this._windOffsetUvY = 0;
     this._smoothedWindDirX = 1.0;
     this._smoothedWindDirY = 0.0;
+    this._smoothedWindSpeed01 = 0.0;
+
+    // Cached trigonometry for advection angle offset (avoids per-frame sin/cos).
+    this._cachedAdvectionDirOffsetDeg = null;
+    this._cachedAdvectionDirCos = 1.0;
+    this._cachedAdvectionDirSin = 0.0;
     this._lastTimeValue = null;
 
     // ── Cached sun direction ─────────────────────────────────────────────
@@ -331,10 +364,39 @@ export class WaterEffectV2 {
     // ── Defines tracking ─────────────────────────────────────────────────
     this._lastDefinesKey = -1;
 
+    // ── First-render diagnostic flag ─────────────────────────────────────
+    this._firstRenderDone = false;
+
     // ── Reusable vectors ─────────────────────────────────────────────────
     this._sizeVec = null;
 
+    // ── Sky state (fed by SkyColorEffectV2; used by water specular) ───────
+    this._skyColorR = 1.0;
+    this._skyColorG = 1.0;
+    this._skyColorB = 1.0;
+
     log.debug('WaterEffectV2 created');
+  }
+
+  setSkyColor(r, g, b) {
+    if (Number.isFinite(r)) this._skyColorR = r;
+    if (Number.isFinite(g)) this._skyColorG = g;
+    if (Number.isFinite(b)) this._skyColorB = b;
+    try {
+      const u = this._composeMaterial?.uniforms;
+      if (u?.uSkyColor?.value?.set) {
+        u.uSkyColor.value.set(this._skyColorR, this._skyColorG, this._skyColorB);
+      }
+    } catch (_) {}
+  }
+
+  setSkyIntensity01(v) {
+    const vv = Math.max(0, Math.min(1, Number(v) || 0));
+    this.params.skyIntensity = vv;
+    try {
+      const u = this._composeMaterial?.uniforms;
+      if (u?.uSkyIntensity) u.uSkyIntensity.value = vv;
+    } catch (_) {}
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -388,6 +450,10 @@ export class WaterEffectV2 {
 
     this._sizeVec = new THREE.Vector2();
 
+    // Fallback textures for optional samplers (must exist before _buildUniforms)
+    this._fallbackBlack = this._make1x1(THREE, 0, 0, 0, 255);
+    this._fallbackWhite = this._make1x1(THREE, 255, 255, 255, 255);
+
     // Noise texture (512x512 RGBA, deterministic seeded LCG)
     this._noiseTexture = WaterEffectV2._createNoiseTexture(THREE);
 
@@ -398,12 +464,335 @@ export class WaterEffectV2 {
     if (this.params.refractionMultiTapEnabled) defines.USE_WATER_REFRACTION_MULTITAP = 1;
     if (this.params.chromaticAberrationEnabled) defines.USE_WATER_CHROMATIC_ABERRATION = 1;
 
+    // DEBUG: Mask-gated tint + wave distortion shader.
+    // Uses the EXACT same wave functions as the full water-shader.js — verbatim.
+    // No invented noise: fbmNoise -> warpUv -> calculateWave -> waveGrad2D pipeline.
+    // distMask is approximated from raw mask value (no SDF yet).
+    const DEBUG_MASK_TINT_ONLY = false;
+    const fragSrc = DEBUG_MASK_TINT_ONLY
+      ? `
+        // ── Samplers ────────────────────────────────────────────────────────
+        uniform sampler2D tDiffuse;
+        uniform sampler2D tNoiseMap;
+        uniform sampler2D tWaterRawMask;
+        uniform float uHasWaterRawMask;
+
+        uniform sampler2D tWaterOccluderAlpha;
+        uniform float uHasWaterOccluderAlpha;
+
+        // ── Tint ────────────────────────────────────────────────────────────
+        uniform vec3 uTintColor;
+        uniform float uTintStrength;
+
+        // ── Wave uniforms (identical to full water-shader.js) ────────────────
+        uniform float uTime;
+        uniform float uWindTime;
+        uniform vec2  uWindDir;
+        uniform vec2  uWindOffsetUv;
+        uniform float uWaveScale;
+        uniform float uWaveStrength;
+        uniform float uDistortionStrengthPx;
+        uniform float uWaveWarpLargeStrength;
+        uniform float uWaveWarpSmallStrength;
+        uniform float uWaveWarpMicroStrength;
+        uniform float uWaveWarpTimeSpeed;
+        uniform float uWaveEvolutionEnabled;
+        uniform float uWaveEvolutionSpeed;
+        uniform float uWaveEvolutionAmount;
+        uniform float uWaveEvolutionScale;
+        uniform float uLockWaveTravelToWind;
+        uniform float uWaveDirOffsetRad;
+        uniform float uWaveAppearanceRotRad;
+        uniform vec2  uResolution;
+        uniform float uZoom;
+
+        // ── Chromatic aberration (RGB shift) ───────────────────────────────
+        uniform float uChromaticAberrationStrengthPx;
+        uniform float uChromaticAberrationEdgeCenter;
+        uniform float uChromaticAberrationEdgeFeather;
+        uniform float uChromaticAberrationEdgeGamma;
+        uniform float uChromaticAberrationEdgeMin;
+
+        // ── Coordinate conversion uniforms ──────────────────────────────────
+        uniform vec4  uViewBounds;      // (minX, minY, maxX, maxY) Three world
+        uniform vec2  uSceneDimensions; // Foundry canvas (width, height)
+        uniform vec4  uSceneRect;       // (sceneX, sceneY, sceneW, sceneH) Foundry
+        uniform float uHasSceneRect;
+
+        varying vec2 vUv;
+
+        // ── Coordinate conversion (verbatim from water-shader.js) ────────────
+        vec2 screenUvToFoundry(vec2 screenUv) {
+          float threeX = mix(uViewBounds.x, uViewBounds.z, screenUv.x);
+          float threeY = mix(uViewBounds.y, uViewBounds.w, screenUv.y);
+          return vec2(threeX, uSceneDimensions.y - threeY);
+        }
+        vec2 foundryToSceneUv(vec2 foundryPos) {
+          return (foundryPos - uSceneRect.xy) / max(uSceneRect.zw, vec2(1e-5));
+        }
+
+        // ── Noise (verbatim from water-shader.js) ────────────────────────────
+        const float NOISE_INV = 1.0 / 512.0;
+
+        float hash12(vec2 p) {
+          vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+          p3 += dot(p3, p3.yzx + 33.33);
+          return fract((p3.x + p3.y) * p3.z);
+        }
+
+        float fbmNoise(vec2 p) {
+          const mat2 octRot = mat2(0.8, 0.6, -0.6, 0.8);
+          vec2 i, f, u;
+          i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
+          float n0 = mix(mix(
+            texture2D(tNoiseMap, (i + 0.5) * NOISE_INV).r,
+            texture2D(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV).r, u.x), mix(
+            texture2D(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV).r,
+            texture2D(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV).r, u.x), u.y);
+          p = octRot * p * 2.0;
+          i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
+          float n1 = mix(mix(
+            texture2D(tNoiseMap, (i + 0.5) * NOISE_INV).g,
+            texture2D(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV).g, u.x), mix(
+            texture2D(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV).g,
+            texture2D(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV).g, u.x), u.y);
+          p = octRot * p * 2.0;
+          i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
+          float n2 = mix(mix(
+            texture2D(tNoiseMap, (i + 0.5) * NOISE_INV).b,
+            texture2D(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV).b, u.x), mix(
+            texture2D(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV).b,
+            texture2D(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV).b, u.x), u.y);
+          p = octRot * p * 2.0;
+          i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
+          float n3 = mix(mix(
+            texture2D(tNoiseMap, (i + 0.5) * NOISE_INV).a,
+            texture2D(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV).a, u.x), mix(
+            texture2D(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV).a,
+            texture2D(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV).a, u.x), u.y);
+          return (n0 - 0.5) * 1.1 + (n1 - 0.5) * 0.605
+               + (n2 - 0.5) * 0.33275 + (n3 - 0.5) * 0.183;
+        }
+
+        // ── Wave system (verbatim from water-shader.js) ──────────────────────
+        vec2 rotate2D(vec2 v, float a) {
+          float s = sin(a); float c = cos(a);
+          return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+        }
+
+        float hash11(float p) { return fract(sin(p) * 43758.5453123); }
+
+        void waveMods(vec2 lf, float seed, out float kMul, out float dirRot) {
+          float a = lf.x; float b = lf.y;
+          float r1 = hash11(seed * 13.17 + 1.0);
+          float r2 = hash11(seed * 29.73 + 2.0);
+          dirRot = clamp((a * (0.20 + 0.60 * r1) + b * (0.20 + 0.60 * r2)) * 0.35, -0.55, 0.55);
+          float km = 1.0 + (a * (0.15 + 0.25 * r2) + b * (0.10 + 0.25 * r1)) * 0.10;
+          kMul = clamp(km, 0.75, 1.25);
+        }
+
+        float sharpSin(float phase, float sharpness, out float dHdPhase) {
+          float s = sin(phase);
+          float a = max(abs(s), 1e-5);
+          float shaped = sign(s) * pow(a, sharpness);
+          dHdPhase = sharpness * pow(a, sharpness - 1.0) * cos(phase);
+          return shaped;
+        }
+
+        void addWave(vec2 p, vec2 dir, float k, float amp, float sharpness, float omega, float t, inout float h, inout vec2 gSceneUv) {
+          float phase = dot(p, dir) * k - omega * t;
+          float d;
+          float w = sharpSin(phase, sharpness, d);
+          h += amp * w;
+          float bunch = 1.0 + 0.35 * abs(w);
+          gSceneUv += amp * d * (k * dir) * uWaveScale * bunch;
+        }
+
+        float waveSeaState(vec2 sceneUv, float motion01) {
+          if (uWaveEvolutionEnabled < 0.5) return 0.5;
+          float sp = max(0.0, uWaveEvolutionSpeed) * clamp(motion01, 0.0, 1.0);
+          float sc = max(0.01, uWaveEvolutionScale);
+          float n = fbmNoise(sceneUv * sc + vec2(uTime * sp * 0.23, -uTime * sp * 0.19));
+          float phase = uTime * sp + n * 2.7;
+          return 0.5 + 0.5 * sin(phase);
+        }
+
+        vec2 warpUv(vec2 sceneUv, float motion01) {
+          float m = clamp(motion01, 0.0, 1.0);
+          vec2 windOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y) * m;
+          vec2 uv = sceneUv - windOffsetUv;
+          float timeWarp = uTime * max(0.0, uWaveWarpTimeSpeed) * m;
+          float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+          vec2 windF = uWindDir;
+          float wl = length(windF);
+          windF = (wl > 1e-6) ? (windF / wl) : vec2(1.0, 0.0);
+          vec2 windDir = vec2(windF.x, -windF.y);
+          vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
+          vec2 windPerp = vec2(-windBasis.y, windBasis.x);
+          vec2 basis = vec2(sceneUv.x * sceneAspect, sceneUv.y);
+          float along = dot(basis, windBasis);
+          float across = dot(basis, windPerp);
+          vec2 streakUv = windBasis * (along * 2.75) + windPerp * (across * 1.0);
+          float largeWarpPulse = 0.90 + 0.10 * sin(uTime * 0.27);
+          float lf1 = fbmNoise(streakUv * 0.23 + vec2(19.1, 7.3) + vec2(timeWarp * 0.07, -timeWarp * 0.05));
+          float lf2 = fbmNoise(streakUv * 0.23 + vec2(3.7, 23.9) + vec2(-timeWarp * 0.04, timeWarp * 0.06));
+          uv += vec2(lf1, lf2) * clamp(uWaveWarpLargeStrength, 0.0, 1.0) * largeWarpPulse;
+          float n1 = fbmNoise((uv * 2.1) + vec2(13.7, 9.2) + vec2(timeWarp * 0.11, timeWarp * 0.09));
+          float n2 = fbmNoise((uv * 2.1) + vec2(41.3, 27.9) + vec2(-timeWarp * 0.08, timeWarp * 0.10));
+          uv += vec2(n1, n2) * clamp(uWaveWarpSmallStrength, 0.0, 1.0);
+          float n3 = fbmNoise(uv * 4.7 + vec2(7.9, 19.1) + vec2(timeWarp * 0.15, -timeWarp * 0.12));
+          float n4 = fbmNoise(uv * 4.7 + vec2(29.4, 3.3) + vec2(-timeWarp * 0.13, -timeWarp * 0.10));
+          uv += vec2(n3, n4) * clamp(uWaveWarpMicroStrength, 0.0, 1.0);
+          return uv;
+        }
+
+        vec3 calculateWave(vec2 sceneUv, float t, float motion01) {
+          const float TAU = 6.2831853;
+          vec2 windF = uWindDir;
+          float wl = length(windF);
+          windF = (wl > 1e-5) ? (windF / wl) : vec2(1.0, 0.0);
+          vec2 wind = vec2(windF.x, -windF.y);
+          float travelRot = (uLockWaveTravelToWind > 0.5) ? 0.0 : uWaveDirOffsetRad;
+          wind = rotate2D(wind, travelRot);
+          vec2 uvF = warpUv(sceneUv, motion01);
+          vec2 p = uvF * uWaveScale;
+          vec2 lf = vec2(fbmNoise(sceneUv * 0.11 + vec2(11.3, 17.9)), fbmNoise(sceneUv * 0.11 + vec2(37.1, 5.7)));
+          float h = 0.0; vec2 g = vec2(0.0);
+          float sea01 = waveSeaState(sceneUv, motion01);
+          float evoAmt = clamp(uWaveEvolutionAmount, 0.0, 1.0);
+          float evo = mix(1.0 - evoAmt, 1.0 + evoAmt, sea01);
+          float breathing = 0.8 + 0.2 * sin(uTime * 0.5 * clamp(motion01, 0.0, 1.0));
+          float wavePulse = evo * breathing;
+          vec2 swellP = p;
+          vec2 chopP = p * 2.618;
+          vec2 crossWind = rotate2D(wind, 0.78);
+          float chopBreathing = 0.7 + 0.3 * cos(uTime * 0.7 * clamp(motion01, 0.0, 1.0));
+          float chopPulse = evo * chopBreathing;
+          float kMul0; float r0; waveMods(lf, 1.0, kMul0, r0);
+          float k0 = (TAU * 0.61) * kMul0;
+          addWave(swellP, rotate2D(wind, -0.60 + r0), k0, 0.40 * wavePulse, 2.20, (1.05 + 0.62 * sqrt(k0)), t, h, g);
+          float kMul1; float r1; waveMods(lf, 2.0, kMul1, r1);
+          float k1 = (TAU * 0.97) * kMul1;
+          addWave(swellP, rotate2D(wind, -0.15 + r1), k1, 0.28 * wavePulse, 2.55, (1.05 + 0.62 * sqrt(k1)), t, h, g);
+          float kMul2; float r2; waveMods(lf, 3.0, kMul2, r2);
+          float k2 = (TAU * 1.43) * kMul2;
+          addWave(swellP, rotate2D(wind, 0.20 + r2), k2, 0.16 * wavePulse, 2.85, (1.05 + 0.62 * sqrt(k2)), t, h, g);
+          float kMul3; float r3; waveMods(lf, 4.0, kMul3, r3);
+          float k3 = (TAU * 1.88) * kMul3;
+          addWave(chopP, rotate2D(crossWind, 0.25 + r3), k3, 0.10 * chopPulse, 3.10, (1.18 + 0.72 * sqrt(k3)), t, h, g);
+          float kMul4; float r4; waveMods(lf, 5.0, kMul4, r4);
+          float k4 = (TAU * 2.71) * kMul4;
+          addWave(chopP, rotate2D(crossWind, -0.35 + r4), k4, 0.06 * chopPulse, 3.35, (1.18 + 0.72 * sqrt(k4)), t, h, g);
+          return vec3(h, g / max(uWaveScale, 1e-3));
+        }
+
+        vec2 waveGrad2D(vec2 sceneUv, float t, float motion01) { return calculateWave(sceneUv, t, motion01).yz; }
+
+        // ── Chromatic aberration edge mask (blueprint from water-shader.js) ─
+        // The full shader uses SDF distance (sdf01) to gate chroma near shore.
+        // In debug mode we don't have SDF, so we approximate using the raw mask
+        // value as a pseudo "inside" metric.
+        float chromaticInsideFromMask(float maskVal01) {
+          float c = clamp(uChromaticAberrationEdgeCenter, 0.0, 1.0);
+          float f = max(0.0, uChromaticAberrationEdgeFeather);
+          float inside = (f > 1e-6) ? smoothstep(c + f, c - f, maskVal01) : step(maskVal01, c);
+          inside = pow(clamp(inside, 0.0, 1.0), max(0.01, uChromaticAberrationEdgeGamma));
+          return max(clamp(uChromaticAberrationEdgeMin, 0.0, 1.0), inside);
+        }
+
+        // ── Main ─────────────────────────────────────────────────────────────
+        void main() {
+          vec4 base = texture2D(tDiffuse, vUv);
+
+          // ── Occluder gating (verbatim policy from full shader) ───────────
+          // Any strong occluder alpha means this pixel is covered by an upper-floor
+          // tile and should not receive water shading.
+          if (uHasWaterOccluderAlpha > 0.5) {
+            float occ = texture2D(tWaterOccluderAlpha, vUv).a;
+            if (occ > 0.5) { gl_FragColor = base; return; }
+          }
+
+          // ── Screen UV -> scene UV conversion (verbatim from full shader) ────
+          float maskVal = 0.0;
+          vec2 sceneUv = vUv;
+          bool inScene = false;
+          if (uHasWaterRawMask > 0.5 && uHasSceneRect > 0.5) {
+            vec2 foundryPos = screenUvToFoundry(vUv);
+            sceneUv = foundryToSceneUv(foundryPos);
+            if (sceneUv.x >= 0.0 && sceneUv.x <= 1.0 && sceneUv.y >= 0.0 && sceneUv.y <= 1.0) {
+              inScene = true;
+              maskVal = texture2D(tWaterRawMask, sceneUv).r;
+            }
+          }
+
+          if (!inScene || maskVal < 0.01) { gl_FragColor = base; return; }
+
+          // ── Wave distortion (verbatim logic from full shader main()) ─────────
+          // waveGrad2D evaluated at scene UV (world-locked). motion01=1.0 (fully open).
+          vec2 waveGrad = waveGrad2D(sceneUv, uWindTime, 1.0);
+          waveGrad = rotate2D(waveGrad, uWaveAppearanceRotRad + 1.5707963);
+
+          // Combine and normalise exactly as the full shader does.
+          vec2 combinedVec = waveGrad * uWaveStrength;
+          combinedVec = combinedVec / (1.0 + 0.75 * length(combinedVec));
+          float m = length(combinedVec);
+          float dirMask = smoothstep(0.01, 0.06, m);
+          vec2 combinedN = (m > 1e-6) ? (combinedVec / m) * dirMask : vec2(0.0);
+          float amp = smoothstep(0.0, 0.30, m); amp *= amp;
+
+          vec2 texel = 1.0 / max(uResolution, vec2(1.0));
+          float px = clamp(uDistortionStrengthPx, 0.0, 64.0);
+          float zoom = max(uZoom, 0.001);
+          // distMask: smooth edge-fade so distortion pins to zero at the mask
+          // boundary, preventing holes where displaced pixels sample outside water.
+          // smoothstep 0→0.15 gives a narrow shore-fade, matching the full
+          // shader's SDF-based distortion fade behaviour (no SDF available yet).
+          float distMask = smoothstep(0.0, 0.15, maskVal);
+          vec2 offsetUv = combinedN * (px * texel) * amp * zoom * distMask;
+          vec2 uv1 = clamp(vUv + offsetUv, vec2(0.001), vec2(0.999));
+
+          // Refraction sampling (blueprint from water-shader.js)
+          #ifdef USE_WATER_REFRACTION_MULTITAP
+          vec2 uv0 = clamp(vUv + offsetUv * 0.55, vec2(0.001), vec2(0.999));
+          vec2 uv2 = clamp(vUv + offsetUv * 1.55, vec2(0.001), vec2(0.999));
+          vec4 refracted = texture2D(tDiffuse, uv0) * 0.25 + texture2D(tDiffuse, uv1) * 0.50 + texture2D(tDiffuse, uv2) * 0.25;
+          #else
+          vec4 refracted = texture2D(tDiffuse, uv1);
+          #endif
+
+          // Chromatic aberration (RGB shift) — deadened at edges
+          // Blueprint from water-shader.js, using a mask-derived edge gate.
+          {
+            vec2 texel2 = texel;
+            float caPx = clamp(uChromaticAberrationStrengthPx, 0.0, 12.0);
+            vec2 dir = offsetUv; float dirLen = length(dir);
+            vec2 dirN = (dirLen > 1e-6) ? (dir / dirLen) : vec2(1.0, 0.0);
+            // Two-stage gating:
+            // - distMask: pins distortion to water body
+            // - chromaticInsideFromMask: user-tunable edge falloff so RGB shift doesn't
+            //   sample from above-water pixels near the shoreline.
+            float caEdgeMask = chromaticInsideFromMask(clamp(maskVal, 0.0, 1.0)) * clamp(distMask, 0.0, 1.0);
+            vec2 caUv = dirN * (caPx * texel2) * clamp(0.25 + 2.0 * distMask, 0.0, 2.5) * zoom * caEdgeMask;
+            vec2 uvR = clamp(uv1 + caUv, vec2(0.001), vec2(0.999));
+            vec2 uvB = clamp(uv1 - caUv, vec2(0.001), vec2(0.999));
+            refracted.rgb = vec3(texture2D(tDiffuse, uvR).r, refracted.g, texture2D(tDiffuse, uvB).b);
+          }
+
+          vec4 col = refracted;
+          float t = clamp(uTintStrength, 0.0, 1.0) * distMask;
+          vec3 tintMul = 1.0 + uTintColor;
+          col.rgb = mix(col.rgb, col.rgb * tintMul, t);
+          gl_FragColor = col;
+        }
+      `
+      : getFragmentShader();
+
     // Create shader material with all uniforms
     this._composeMaterial = new THREE.ShaderMaterial({
       uniforms: this._buildUniforms(THREE),
       vertexShader: getVertexShader(),
-      fragmentShader: getFragmentShader(),
-      defines,
+      fragmentShader: fragSrc,
+      defines: DEBUG_MASK_TINT_ONLY ? {} : defines,
       depthTest: false,
       depthWrite: false,
       transparent: false,
@@ -616,14 +1005,14 @@ export class WaterEffectV2 {
     try {
       waterData = this._surfaceModel.buildFromMaskTexture(canvasTex, {
         resolution: this.params.buildResolution || 2048,
-        threshold: this.params.maskThreshold ?? 0.65,
-        channel: this.params.maskChannel ?? 'luma',
+        threshold: this.params.maskThreshold ?? 0.15,
+        channel: this.params.maskChannel ?? 'auto',
         invert: !!this.params.maskInvert,
         blurRadius: this.params.maskBlurRadius ?? 0.0,
         blurPasses: this.params.maskBlurPasses ?? 0,
-        expandPx: this.params.maskExpandPx ?? -0.3,
-        sdfRangePx: this.params.sdfRangePx ?? 12,
-        exposureWidthPx: this.params.shoreWidthPx ?? 128,
+        expandPx: this.params.maskExpandPx ?? 0.0,
+        sdfRangePx: this.params.sdfRangePx ?? 64,
+        exposureWidthPx: this.params.shoreWidthPx ?? 24,
       });
     } catch (err) {
       log.error('_compositeFloorMask: SDF build failed:', err);
@@ -735,8 +1124,13 @@ export class WaterEffectV2 {
     if (!this._initialized || !this._composeMaterial) return;
     const u = this._composeMaterial.uniforms;
     const p = this.params;
-    const dt = timeInfo.delta || 0;
-    const elapsed = timeInfo.elapsed || 0;
+    // Use real wall time for smooth shader animation. Some upstream paths can
+    // throttle/quantize timeInfo updates even when the render loop runs fast.
+    // Water needs continuous time for fluid motion.
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() * 0.001 : (timeInfo?.elapsed ?? 0);
+    const dt = (this._lastTimeValue == null) ? 0 : Math.max(0, now - this._lastTimeValue);
+    this._lastTimeValue = now;
+    const elapsed = now;
 
     // ── Time ──────────────────────────────────────────────────────────────
     u.uTime.value = elapsed;
@@ -777,23 +1171,74 @@ export class WaterEffectV2 {
       }
     }
 
-    this._windTime += dt * windSpeed01;
+    // Wind speed smoothing (V1): asymmetric (fast gain, slow loss).
+    // Desired behavior: wind-driven speed-ups should decay at ~half the rate
+    // they build up. This prevents advection reversal/ping-pong.
+    {
+      const resp = Math.max(0.05, Number(p.windDirResponsiveness) || 2.5);
+      const respUp = resp;
+      const respDown = resp * 0.5;
+      const current = Number.isFinite(this._smoothedWindSpeed01) ? this._smoothedWindSpeed01 : 0.0;
+      const target = Math.max(0.0, Math.min(1.0, windSpeed01));
+      const useResp = target > current ? respUp : respDown;
+      const kSpeed = 1.0 - Math.exp(-dt * useResp);
+      this._smoothedWindSpeed01 = current + (target - current) * Math.min(1.0, Math.max(0.0, kSpeed));
+      windSpeed01 = this._smoothedWindSpeed01;
+    }
+
+    // ── Waves (compute early: used to advance uWindTime) ─────────────────
+    const waveSpeed = (p.waveSpeedUseWind ? Math.max(p.waveSpeedWindMinFactor ?? 1.0, windSpeed01) : 1.0) * (p.waveSpeed ?? 1.0);
+    const waveStrength = (p.waveStrengthUseWind ? Math.max(p.waveStrengthWindMinFactor ?? 1.0, windSpeed01) : 1.0) * (p.waveStrength ?? 0.6);
+
+    // waveSpeed drives the animation rate of the wave pattern itself.
+    // windSpeed01 only scales uWindTime when waveSpeedUseWind is enabled.
+    // Without wind coupling the wave animation must run at full real-time speed
+    // (dt * waveSpeed), otherwise the 0.15 default windSpeed01 makes waves
+    // appear to run at 15% speed (choppy / slow-motion appearance).
+    const windTimeScale = p.waveSpeedUseWind ? windSpeed01 : 1.0;
+    this._windTime += dt * windTimeScale * waveSpeed;
     u.uWindTime.value = this._windTime;
     u.uWindDir.value.set(windDirX, windDirY);
     u.uWindSpeed.value = windSpeed01;
 
-    // Advection offset (UV drift from wind)
-    const advSpeed = this._resolveAdvectionSpeed01(p);
-    const advDeg = p.advectionDirOffsetDeg ?? 0;
-    const advRad = advDeg * (Math.PI / 180);
-    const advDirX = windDirX * Math.cos(advRad) - windDirY * Math.sin(advRad);
-    const advDirY = windDirX * Math.sin(advRad) + windDirY * Math.cos(advRad);
-    this._windOffsetUvX += advDirX * windSpeed01 * advSpeed * dt;
-    this._windOffsetUvY += advDirY * windSpeed01 * advSpeed * dt;
-    u.uWindOffsetUv.value.set(this._windOffsetUvX, this._windOffsetUvY);
+    // Advection offset (UV drift from wind) — V1 monotonic integration.
+    // Compute drift in scene pixels/sec, normalize by scene dimensions.
+    // This produces coherent, non-oscillating pattern travel.
+    if (dt > 0.0 && u.uWindOffsetUv) {
+      const rect = canvas?.dimensions?.sceneRect;
+      const sceneW = rect?.width || 1;
+      const sceneH = rect?.height || 1;
+
+      const advSpeed01 = this._resolveAdvectionSpeed01(p);
+      const advMulLegacy = Number.isFinite(p.advectionSpeed) ? Math.max(0.0, Number(p.advectionSpeed)) : null;
+      const advMul = (advMulLegacy != null) ? advMulLegacy : (advSpeed01 * 4.0);
+
+      const pxPerSec = (35.0 + 220.0 * windSpeed01) * advMul;
+
+      const adDeg = Number.isFinite(p.advectionDirOffsetDeg) ? p.advectionDirOffsetDeg : 0.0;
+      if (this._cachedAdvectionDirOffsetDeg !== adDeg) {
+        const adRad = (adDeg * Math.PI) / 180.0;
+        this._cachedAdvectionDirCos = Math.cos(adRad);
+        this._cachedAdvectionDirSin = Math.sin(adRad);
+        this._cachedAdvectionDirOffsetDeg = adDeg;
+      }
+
+      const cs = this._cachedAdvectionDirCos;
+      const sn = this._cachedAdvectionDirSin;
+      const dx = cs * windDirX - sn * windDirY;
+      const dy = sn * windDirX + cs * windDirY;
+
+      const du = dx * (pxPerSec * dt) / Math.max(1.0, sceneW);
+      const dv = dy * (pxPerSec * dt) / Math.max(1.0, sceneH);
+
+      this._windOffsetUvX += du;
+      this._windOffsetUvY += dv;
+      u.uWindOffsetUv.value.set(this._windOffsetUvX, this._windOffsetUvY);
+    }
 
     // ── Enable ────────────────────────────────────────────────────────────
     u.uWaterEnabled.value = this.enabled ? 1.0 : 0.0;
+    if (u.uUseSdfMask) u.uUseSdfMask.value = p.useSdfMask === false ? 0.0 : 1.0;
 
     // ── Tint ──────────────────────────────────────────────────────────────
     const tint = normalizeRgb01(p.tintColor, { r: 0.02, g: 0.18, b: 0.28 });
@@ -801,8 +1246,6 @@ export class WaterEffectV2 {
     u.uTintStrength.value = p.tintStrength;
 
     // ── Waves ─────────────────────────────────────────────────────────────
-    const waveSpeed = (p.waveSpeedUseWind ? Math.max(p.waveSpeedWindMinFactor ?? 1.0, windSpeed01) : 1.0) * (p.waveSpeed ?? 1.0);
-    const waveStrength = (p.waveStrengthUseWind ? Math.max(p.waveStrengthWindMinFactor ?? 1.0, windSpeed01) : 1.0) * (p.waveStrength ?? 0.6);
     u.uWaveScale.value = p.waveScale;
     u.uWaveSpeed.value = waveSpeed;
     u.uWaveStrength.value = waveStrength;
@@ -908,9 +1351,19 @@ export class WaterEffectV2 {
     // ── Specular (GGX) ───────────────────────────────────────────────────
     u.uSpecStrength.value = p.specStrength;
     u.uSpecPower.value = p.specPower;
+    if (u.uSpecModel) u.uSpecModel.value = (p.specModel ?? 0) ? 1.0 : 0.0;
+    if (u.uSpecClamp) u.uSpecClamp.value = p.specClamp ?? 0.0;
     u.uSpecSunIntensity.value = p.specSunIntensity;
     u.uSpecNormalStrength.value = p.specNormalStrength;
     u.uSpecNormalScale.value = p.specNormalScale;
+    u.uSpecNormalMode.value = Number.isFinite(Number(p.specNormalMode)) ? Number(p.specNormalMode) : 0.0;
+    u.uSpecMicroStrength.value = p.specMicroStrength ?? 0.0;
+    u.uSpecMicroScale.value = p.specMicroScale ?? 1.0;
+    u.uSpecAAStrength.value = p.specAAStrength ?? 0.0;
+    u.uSpecWaveStepMul.value = p.specWaveStepMul ?? 1.0;
+    if (u.uSpecForceFlatNormal) u.uSpecForceFlatNormal.value = p.specForceFlatNormal ? 1.0 : 0.0;
+    if (u.uSpecDisableMasking) u.uSpecDisableMasking.value = p.specDisableMasking ? 1.0 : 0.0;
+    if (u.uSpecDisableRainSlope) u.uSpecDisableRainSlope.value = p.specDisableRainSlope ? 1.0 : 0.0;
     u.uSpecRoughnessMin.value = p.specRoughnessMin;
     u.uSpecRoughnessMax.value = p.specRoughnessMax;
     u.uSpecF0.value = p.specF0;
@@ -934,6 +1387,10 @@ export class WaterEffectV2 {
     u.uCausticsSharpness.value = p.causticsSharpness ?? 0.1;
     u.uCausticsEdgeLo.value = p.causticsEdgeLo ?? 0.11;
     u.uCausticsEdgeHi.value = p.causticsEdgeHi ?? 1.0;
+    if (u.uCausticsBrightnessMaskEnabled) u.uCausticsBrightnessMaskEnabled.value = p.causticsBrightnessMaskEnabled ? 1.0 : 0.0;
+    if (u.uCausticsBrightnessThreshold) u.uCausticsBrightnessThreshold.value = Number.isFinite(p.causticsBrightnessThreshold) ? Math.max(0.0, p.causticsBrightnessThreshold) : 0.55;
+    if (u.uCausticsBrightnessSoftness) u.uCausticsBrightnessSoftness.value = Number.isFinite(p.causticsBrightnessSoftness) ? Math.max(0.0, p.causticsBrightnessSoftness) : 0.20;
+    if (u.uCausticsBrightnessGamma) u.uCausticsBrightnessGamma.value = Number.isFinite(p.causticsBrightnessGamma) ? Math.max(0.01, p.causticsBrightnessGamma) : 1.0;
 
     // Sun direction from azimuth + elevation (cached to avoid per-frame trig)
     const az = p.specSunAzimuthDeg ?? 135;
@@ -1010,6 +1467,11 @@ export class WaterEffectV2 {
     u.uSandDistortionStrength.value = p.sandDistortionStrength;
     u.uSandAdditive.value = p.sandAdditive;
 
+    // ── Sky / environment ─────────────────────────────────────────────────
+    // uSkyIntensity feeds skySpecI = mix(0.08, 1.0, skyI) in the shader.
+    // Default 0.5 in _buildUniforms cuts specular by half — bind from params.
+    u.uSkyIntensity.value = Math.max(0, Math.min(1, p.skyIntensity ?? 1.0));
+
     // ── Debug ─────────────────────────────────────────────────────────────
     u.uDebugView.value = p.debugView ?? 0;
 
@@ -1047,145 +1509,63 @@ export class WaterEffectV2 {
   }
 
   /**
-   * Post-processing render pass: reads inputRT, writes water effect to outputRT.
+   * Minimal post-processing render pass.
+   * For bisection: this is an unconditional passthrough blit (inputRT -> outputRT).
+   *
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.Camera} camera
    * @param {THREE.WebGLRenderTarget} inputRT
    * @param {THREE.WebGLRenderTarget} outputRT
-   * @param {THREE.WebGLRenderTarget|null} [occluderRT=null] - Screen-space alpha mask of
-   *   upper-floor tiles. Alpha > 0 means the pixel is covered and water should be skipped.
+   * @param {THREE.WebGLRenderTarget|null} [occluderRT=null]
+   * @returns {boolean} true when the pass wrote to outputRT
    */
   render(renderer, camera, inputRT, outputRT, occluderRT = null) {
-    if (!this._initialized || !this._composeMaterial || !inputRT) return;
+    if (!this._initialized || !this._composeMaterial || !this._composeScene || !this._composeCamera) return false;
+    if (!renderer || !inputRT || !outputRT) return false;
+
     const u = this._composeMaterial.uniforms;
-
-    // ── Bind input texture ────────────────────────────────────────────────
     u.tDiffuse.value = inputRT.texture;
+    u.uWaterEnabled.value = this.enabled ? 1.0 : 0.0;
 
-    // ── Upper-floor occluder mask (screen-space) ─────────────────────────
-    // Provided by FloorCompositor (rendered from upper-floor tiles).
-    // Validated behavior: this is the primary masking path that keeps lower-floor
-    // water visible through real openings while fully suppressing water under
-    // upper-floor geometry.
-    const occ = occluderRT?.texture ?? null;
-    if (u.tWaterOccluderAlpha && u.uHasWaterOccluderAlpha) {
-      u.tWaterOccluderAlpha.value = occ;
-      u.uHasWaterOccluderAlpha.value = occ ? 1.0 : 0.0;
-    }
-
-    // Outdoors mask (world-space scene UV) for indoor damping paths.
-    if (u.tOutdoorsMask && u.uHasOutdoorsMask) {
-      let outdoorsTex = null;
-      let outdoorsRec = null;
-      try {
-        const mm = window.MapShine?.maskManager;
-        outdoorsTex = mm?.getTexture?.('outdoors') ?? null;
-        outdoorsRec = mm?.textures?.get?.('outdoors') ?? null;
-      } catch (_) {}
-      u.tOutdoorsMask.value = outdoorsTex;
-      u.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
-      if (u.uOutdoorsMaskFlipY) {
-        const metaFlipY = (outdoorsRec && typeof outdoorsRec.uvFlipY === 'boolean') ? outdoorsRec.uvFlipY : null;
-        const flip = (metaFlipY !== null) ? metaFlipY : (outdoorsTex?.flipY ?? false);
-        u.uOutdoorsMaskFlipY.value = flip ? 1.0 : 0.0;
-      }
-    }
-
-    // Cloud shadow texture (screen-space).
-    if (u.tCloudShadow && u.uHasCloudShadow) {
-      let cloudTex = null;
-      try {
-        const mm = window.MapShine?.maskManager;
-        cloudTex = mm?.getTexture?.('cloudShadow') ?? null;
-      } catch (_) {}
-      u.tCloudShadow.value = cloudTex;
-      u.uHasCloudShadow.value = cloudTex ? 1.0 : 0.0;
-    }
-
-    // Active level elevation for depth-relative occlusion.
-    if (u.uActiveLevelElevation) {
-      const activeBottom = Number(window.MapShine?.activeLevelContext?.bottom);
-      u.uActiveLevelElevation.value = Number.isFinite(activeBottom) ? activeBottom : 0.0;
-    }
-
-    // ── Depth pass binding (for upper-floor occlusion) ───────────────────
-    DepthShaderChunks.bindDepthPass(u);
-
-    // ── Resolution ────────────────────────────────────────────────────────
-    renderer.getDrawingBufferSize(this._sizeVec);
-    const w = Math.max(1, this._sizeVec.x);
-    const h = Math.max(1, this._sizeVec.y);
-    u.uResolution.value.set(w, h);
-
-    // ── Zoom (FOV-based from sceneComposer) ───────────────────────────────
+    // Bind screen-space occluder alpha (upper-floor coverage mask)
     try {
-      u.uZoom.value = window.MapShine?.sceneComposer?.currentZoom ?? 1.0;
-    } catch (_) {
-      u.uZoom.value = 1.0;
-    }
-
-    // ── View bounds (Three.js world-space frustum on the ground plane) ────
-    // Reconstruct the four corners of the camera frustum at the ground Z.
-    try {
-      const THREE = window.THREE;
-      if (camera && THREE) {
-        // Perspective camera needs ray intersection with the ground plane.
-        // The previous implementation unprojected NDC corners at z=0 which
-        // corresponds to the near plane, causing unstable/incorrect bounds.
-        if (camera.isOrthographicCamera) {
-          const camPos = camera.position;
-          const minX = camPos.x + camera.left / camera.zoom;
-          const maxX = camPos.x + camera.right / camera.zoom;
-          const minY = camPos.y + camera.bottom / camera.zoom;
-          const maxY = camPos.y + camera.top / camera.zoom;
-          u.uViewBounds.value.set(minX, minY, maxX, maxY);
-        } else if (camera.isPerspectiveCamera) {
-          const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
-          const ndc = new THREE.Vector3();
-          const world = new THREE.Vector3();
-          const dir = new THREE.Vector3();
-
-          let minX = Infinity;
-          let minY = Infinity;
-          let maxX = -Infinity;
-          let maxY = -Infinity;
-
-          // NDC corners (same set used by V1)
-          const corners = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
-          for (const c of corners) {
-            ndc.set(c[0], c[1], 0.5);
-            world.copy(ndc).unproject(camera);
-            dir.copy(world).sub(camera.position);
-            const dz = dir.z;
-            if (Math.abs(dz) < 1e-6) continue;
-            const t = (groundZ - camera.position.z) / dz;
-            if (!Number.isFinite(t) || t <= 0) continue;
-
-            const ix = camera.position.x + dir.x * t;
-            const iy = camera.position.y + dir.y * t;
-
-            if (ix < minX) minX = ix;
-            if (iy < minY) minY = iy;
-            if (ix > maxX) maxX = ix;
-            if (iy > maxY) maxY = iy;
-          }
-
-          if (minX !== Infinity && minY !== Infinity && maxX !== -Infinity && maxY !== -Infinity) {
-            u.uViewBounds.value.set(minX, minY, maxX, maxY);
-          }
+      if (u.tWaterOccluderAlpha && u.uHasWaterOccluderAlpha) {
+        if (occluderRT?.texture) {
+          u.tWaterOccluderAlpha.value = occluderRT.texture;
+          u.uHasWaterOccluderAlpha.value = 1.0;
+        } else {
+          // Leave fallback texture but mark as unavailable.
+          u.uHasWaterOccluderAlpha.value = 0.0;
         }
       }
-    } catch (_) { /* view bounds remain as last set */ }
+    } catch (_) {}
 
-    // ── Scene dimensions + rect ────────────────────────────────────────────────────
+    // Bind resolution and zoom — required by the wave distortion formula.
+    // uZoom scales pixel offsets so distortion magnitude is visually consistent
+    // at all zoom levels, matching the full water shader's behaviour exactly.
     try {
-      // Use globalThis.canvas to avoid ReferenceError in strict ES module scope.
+      if (u.uResolution && this._sizeVec) {
+        renderer.getDrawingBufferSize(this._sizeVec);
+        u.uResolution.value.set(Math.max(1, this._sizeVec.x), Math.max(1, this._sizeVec.y));
+      }
+      if (u.uZoom && camera) {
+        // Orthographic: camera.zoom is the actual zoom factor.
+        // Perspective: use sceneComposer.currentZoom (FOV-based).
+        const zoom = camera.isOrthographicCamera
+          ? (camera.zoom ?? 1.0)
+          : (window.MapShine?.sceneComposer?.currentZoom ?? 1.0);
+        u.uZoom.value = Math.max(0.001, zoom);
+      }
+    } catch (_) {}
+
+    // Bind coordinate conversion uniforms so the debug shader can map
+    // screen UV → Foundry world → scene UV to correctly sample the water mask.
+    try {
       const dims = globalThis.canvas?.dimensions;
-      if (dims) {
+      if (dims && u.uSceneDimensions && u.uSceneRect && u.uHasSceneRect) {
         const totalW = dims.width ?? 1;
         const totalH = dims.height ?? 1;
         u.uSceneDimensions.value.set(totalW, totalH);
-
         const rect = dims.sceneRect ?? null;
         const sx = rect?.x ?? dims.sceneX ?? 0;
         const sy = rect?.y ?? dims.sceneY ?? 0;
@@ -1194,23 +1574,44 @@ export class WaterEffectV2 {
         u.uSceneRect.value.set(sx, sy, sw, sh);
         u.uHasSceneRect.value = 1.0;
       }
-    } catch (e) { log.warn('WaterEffectV2: scene rect update failed:', e); }
+    } catch (_) {}
 
-    // ── Sky color (from V1 skyColor if available) ─────────────────────────
+    // Bind view bounds (Three.js world-space frustum corners at ground plane).
     try {
-      const skyEffect = window.MapShine?.effectComposer?.effects?.get('sky-color');
-      if (skyEffect) {
-        const sc = skyEffect.skyColor;
-        if (sc) {
-          u.uSkyColor.value.set(
-            sc.r ?? 0.5, sc.g ?? 0.6, sc.b ?? 0.8
+      const THREE = window.THREE;
+      if (camera && THREE && u.uViewBounds) {
+        if (camera.isOrthographicCamera) {
+          const camPos = camera.position;
+          u.uViewBounds.value.set(
+            camPos.x + camera.left / camera.zoom,
+            camPos.y + camera.bottom / camera.zoom,
+            camPos.x + camera.right / camera.zoom,
+            camPos.y + camera.top / camera.zoom
           );
-          u.uSkyIntensity.value = skyEffect.skyIntensity ?? 0.5;
+        } else if (camera.isPerspectiveCamera) {
+          const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+          const ndc = new THREE.Vector3();
+          const world = new THREE.Vector3();
+          const dir = new THREE.Vector3();
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          for (const c of [[-1,-1],[1,-1],[-1,1],[1,1]]) {
+            ndc.set(c[0], c[1], 0.5);
+            world.copy(ndc).unproject(camera);
+            dir.copy(world).sub(camera.position);
+            const dz = dir.z;
+            if (Math.abs(dz) < 1e-6) continue;
+            const t = (groundZ - camera.position.z) / dz;
+            if (!Number.isFinite(t) || t <= 0) continue;
+            const ix = camera.position.x + dir.x * t;
+            const iy = camera.position.y + dir.y * t;
+            if (ix < minX) minX = ix; if (iy < minY) minY = iy;
+            if (ix > maxX) maxX = ix; if (iy > maxY) maxY = iy;
+          }
+          if (minX !== Infinity) u.uViewBounds.value.set(minX, minY, maxX, maxY);
         }
       }
     } catch (_) {}
 
-    // ── Render post-processing pass ───────────────────────────────────────
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
 
@@ -1220,8 +1621,8 @@ export class WaterEffectV2 {
 
     renderer.autoClear = prevAutoClear;
     renderer.setRenderTarget(prevTarget);
+    return true;
   }
-
   /**
    * Handle floor change — swap active water SDF data.
    * @param {number} maxFloorIndex
@@ -1277,11 +1678,18 @@ export class WaterEffectV2 {
     try { this._noiseTexture?.dispose(); } catch (_) {}
     this._noiseTexture = null;
 
+    // Dispose fallback textures
+    try { this._fallbackBlack?.dispose(); } catch (_) {}
+    try { this._fallbackWhite?.dispose(); } catch (_) {}
+    this._fallbackBlack = null;
+    this._fallbackWhite = null;
+
     // Reset state
     this._windTime = 0;
     this._windOffsetUvX = 0;
     this._windOffsetUvY = 0;
     this._lastDefinesKey = -1;
+    this._firstRenderDone = false;
     this._activeFloorIndex = 0;
 
     this._initialized = false;
@@ -1302,16 +1710,20 @@ export class WaterEffectV2 {
     const foamColor = normalizeRgb01(p.foamColor, { r: 0.85, g: 0.9, b: 0.88 });
     const murkColor = normalizeRgb01(p.murkColor, { r: 0.15, g: 0.22, b: 0.12 });
     const sandColor = normalizeRgb01(p.sandColor, { r: 0.76, g: 0.68, b: 0.5 });
-    const black1x1 = this._make1x1(THREE, 0, 0, 0, 255);
+    // Use the shared fallback textures created in initialize() so they are
+    // properly tracked and disposed. Never use null for sampler2D uniforms.
+    const fb = this._fallbackBlack;
+    const fw = this._fallbackWhite;
     return {
-      tDiffuse:            { value: null },
+      tDiffuse:            { value: fb },
       tNoiseMap:           { value: this._noiseTexture },
-      tWaterData:          { value: black1x1 },
+      tWaterData:          { value: fb },
       uHasWaterData:       { value: 0.0 },
       uWaterEnabled:       { value: this.enabled ? 1.0 : 0.0 },
-      tWaterRawMask:       { value: black1x1 },
+      uUseSdfMask:         { value: p.useSdfMask === false ? 0.0 : 1.0 },
+      tWaterRawMask:       { value: fb },
       uHasWaterRawMask:    { value: 0.0 },
-      tWaterOccluderAlpha: { value: null },
+      tWaterOccluderAlpha: { value: fb },
       uHasWaterOccluderAlpha: { value: 0.0 },
       uWaterDataTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
 
@@ -1358,7 +1770,7 @@ export class WaterEffectV2 {
       uRainSplit:          { value: p.rainSplit },
       uRainBlend:          { value: p.rainBlend },
       uRainGlobalStrength: { value: p.rainGlobalStrength },
-      tOutdoorsMask:       { value: null },
+      tOutdoorsMask:       { value: fw },
       uHasOutdoorsMask:    { value: 0.0 },
       uOutdoorsMaskFlipY:  { value: 0.0 },
       uRainIndoorDampingEnabled: { value: p.rainIndoorDampingEnabled ? 1.0 : 0.0 },
@@ -1407,10 +1819,20 @@ export class WaterEffectV2 {
       // Specular (GGX)
       uSpecStrength:        { value: p.specStrength },
       uSpecPower:           { value: p.specPower },
+      uSpecModel:           { value: (p.specModel ?? 0) ? 1.0 : 0.0 },
+      uSpecClamp:           { value: p.specClamp ?? 0.0 },
       uSpecSunDir:          { value: new THREE.Vector3(0.5, 0.5, 0.707) },
       uSpecSunIntensity:    { value: p.specSunIntensity },
       uSpecNormalStrength:  { value: p.specNormalStrength },
       uSpecNormalScale:     { value: p.specNormalScale },
+      uSpecNormalMode:      { value: Number.isFinite(Number(p.specNormalMode)) ? Number(p.specNormalMode) : 0.0 },
+      uSpecMicroStrength:   { value: p.specMicroStrength ?? 0.0 },
+      uSpecMicroScale:      { value: p.specMicroScale ?? 1.0 },
+      uSpecAAStrength:      { value: p.specAAStrength ?? 0.0 },
+      uSpecWaveStepMul:     { value: p.specWaveStepMul ?? 1.0 },
+      uSpecForceFlatNormal: { value: p.specForceFlatNormal ? 1.0 : 0.0 },
+      uSpecDisableMasking:  { value: p.specDisableMasking ? 1.0 : 0.0 },
+      uSpecDisableRainSlope:{ value: p.specDisableRainSlope ? 1.0 : 0.0 },
       uSpecRoughnessMin:    { value: p.specRoughnessMin },
       uSpecRoughnessMax:    { value: p.specRoughnessMax },
       uSpecF0:              { value: p.specF0 },
@@ -1420,7 +1842,7 @@ export class WaterEffectV2 {
       uSpecDistortionNormalStrength: { value: p.specDistortionNormalStrength },
       uSpecAnisotropy:      { value: p.specAnisotropy },
       uSpecAnisoRatio:      { value: p.specAnisoRatio },
-      tCloudShadow:         { value: null },
+      tCloudShadow:         { value: fb },
       uHasCloudShadow:      { value: 0.0 },
       uCloudShadowEnabled:  { value: p.cloudShadowEnabled ? 1.0 : 0.0 },
       uCloudShadowDarkenStrength: { value: p.cloudShadowDarkenStrength ?? 1.25 },
@@ -1436,6 +1858,10 @@ export class WaterEffectV2 {
       uCausticsSharpness:    { value: p.causticsSharpness ?? 0.1 },
       uCausticsEdgeLo:       { value: p.causticsEdgeLo ?? 0.11 },
       uCausticsEdgeHi:       { value: p.causticsEdgeHi ?? 1.0 },
+      uCausticsBrightnessMaskEnabled: { value: p.causticsBrightnessMaskEnabled ? 1.0 : 0.0 },
+      uCausticsBrightnessThreshold:   { value: Number.isFinite(p.causticsBrightnessThreshold) ? Math.max(0.0, p.causticsBrightnessThreshold) : 0.55 },
+      uCausticsBrightnessSoftness:    { value: Number.isFinite(p.causticsBrightnessSoftness) ? Math.max(0.0, p.causticsBrightnessSoftness) : 0.20 },
+      uCausticsBrightnessGamma:       { value: Number.isFinite(p.causticsBrightnessGamma) ? Math.max(0.01, p.causticsBrightnessGamma) : 1.0 },
 
       // Foam
       uFoamColor:     { value: new THREE.Vector3(foamColor.r, foamColor.g, foamColor.b) },
@@ -1572,8 +1998,8 @@ export class WaterEffectV2 {
     const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.UnsignedByteType);
     tex.wrapS = THREE.RepeatWrapping;
     tex.wrapT = THREE.RepeatWrapping;
-    tex.magFilter = THREE.NearestFilter;
-    tex.minFilter = THREE.NearestFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearFilter;
     tex.generateMipmaps = false;
     tex.needsUpdate = true;
     return tex;

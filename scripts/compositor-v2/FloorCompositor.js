@@ -16,7 +16,10 @@
  *   - **FireEffectV2**: Per-floor particle systems driven by _Fire masks.
  *
  * Post-processing effects (step 2):
- *   - **LightingEffectV2**: Ambient + dynamic lights + darkness.
+ *   - **CloudEffectV2**: Procedural clouds — generates shadow RT (fed into Lighting)
+ *     and cloud-top RT (blitted after lighting). Shadow occlusion is floor-aware via
+ *     the overhead-tile blocker pass.
+ *   - **LightingEffectV2**: Ambient + dynamic lights + darkness, with cloud shadow.
  *     Window light overlays are fed into the light accumulation RT here so
  *     the compose shader tints them by surface albedo (preserving hue).
  *   - **WaterEffectV2**: Water tint/distortion/specular/foam driven by _Water masks.
@@ -43,6 +46,7 @@ import { BloomEffectV2 } from './effects/BloomEffectV2.js';
 import { FilmGrainEffectV2 } from './effects/FilmGrainEffectV2.js';
 import { SharpenEffectV2 } from './effects/SharpenEffectV2.js';
 import { WaterEffectV2 } from './effects/WaterEffectV2.js';
+import { CloudEffectV2 } from './effects/CloudEffectV2.js';
 
 const log = createLogger('FloorCompositor');
 
@@ -134,6 +138,16 @@ export class FloorCompositor {
      * @type {SharpenEffectV2}
      */
     this._sharpenEffect = new SharpenEffectV2();
+
+    /**
+     * V2 Cloud Effect: procedural cloud density, shadow, and cloud-top passes.
+     * - Shadow RT is fed into LightingEffectV2 as an illumination multiplier.
+     * - Cloud-top RT is blitted (alpha-over) after the lighting pass.
+     * - Blocker mask is built from overhead bus sprites each frame so
+     *   floor-level rooftops correctly occlude shadows (free with bus visibility).
+     * @type {CloudEffectV2}
+     */
+    this._cloudEffect = new CloudEffectV2();
 
     /**
      * V2 Water Effect: screen-space water post-processing pass driven by
@@ -281,6 +295,8 @@ export class FloorCompositor {
     this._specularEffect.initialize();
     this._fireEffect.initialize();
     this._windowLightEffect.initialize();
+    // Cloud effect needs the bus scene and main camera for the overhead blocker pass.
+    this._cloudEffect.initialize(this.renderer, this._renderBus._scene, this.camera);
     this._lightingEffect.initialize(w, h);
     this._skyColorEffect.initialize();
     this._colorCorrectionEffect.initialize();
@@ -389,9 +405,12 @@ export class FloorCompositor {
 
     // ── Update effects (time-varying uniforms) ───────────────────────────
     if (timeInfo) {
+      // Wind must advance before update() so accumulation is 1× per frame.
+      this._cloudEffect.advanceWind(timeInfo.delta ?? 0.016);
       this._specularEffect.update(timeInfo);
       this._fireEffect.update(timeInfo);
       this._windowLightEffect.update(timeInfo);
+      this._cloudEffect.update(timeInfo);
       this._lightingEffect.update(timeInfo);
       this._waterEffect.update(timeInfo);
       this._skyColorEffect.update(timeInfo);
@@ -409,6 +428,14 @@ export class FloorCompositor {
     // Window light is NOT in the bus scene — it renders after lighting.
     this._renderBus.renderTo(this.renderer, this.camera, this._sceneRT);
 
+    // ── Cloud passes (before lighting) ───────────────────────────────────
+    // Must run after bus render so the blocker pass sees current tile visibility.
+    // Outputs: _cloudEffect.cloudShadowTexture (fed into lighting compose shader)
+    //          _cloudEffect._cloudTopRT        (blitted after lighting)
+    if (this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
+      this._cloudEffect.render(this.renderer);
+    }
+
     // ── Step 2: Post-processing chain ────────────────────────────────────
     // Post effects read sceneRT and chain through _postA/_postB.
     // `currentInput` tracks which RT holds the latest result.
@@ -419,12 +446,43 @@ export class FloorCompositor {
     // alongside ThreeLightSources — the compose shader then applies
     // litColor = albedo * totalIllumination, which tints the glow by the
     // surface colour instead of washing it out with pure white addition.
+    // Cloud shadow RT is also passed so illumination is multiplied by the shadow factor.
     const winScene = this._windowLightEffect.enabled
       ? this._windowLightEffect._scene : null;
-    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene);
+    const cloudShadowTex = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
+      ? this._cloudEffect.cloudShadowTexture : null;
+    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex);
     currentInput = this._postA;
 
-    // Water pass: refracts/tints/specular the lit scene before atmospheric grading.
+    // Sky color grading pass (time-of-day atmospheric grading). Ping-pongs.
+    if (this._skyColorEffect.params.enabled) {
+      const skyOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      this._skyColorEffect.render(this.renderer, currentInput, skyOutput);
+      currentInput = skyOutput;
+    }
+
+    // Color correction pass: global user-authored grade (exposure, contrast, saturation, etc.).
+    // Ping-pongs: whichever is current → the other.
+    if (this._colorCorrectionEffect.params.enabled) {
+      const ccOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      this._colorCorrectionEffect.render(this.renderer, currentInput, ccOutput);
+      currentInput = ccOutput;
+    }
+
+    // Feed sky state into water (specular tint) after sky+CC have updated.
+    // Water runs after grading so caustics/specular add onto the final image and bloom can pick them up.
+    try {
+      const tint = this._skyColorEffect?.currentSkyTintColor;
+      if (tint && typeof this._waterEffect?.setSkyColor === 'function') {
+        this._waterEffect.setSkyColor(tint.r, tint.g, tint.b);
+      }
+      const skyIntensity01 = this._skyColorEffect?._composeMaterial?.uniforms?.uIntensity?.value;
+      if (typeof this._waterEffect?.setSkyIntensity01 === 'function' && Number.isFinite(skyIntensity01)) {
+        this._waterEffect.setSkyIntensity01(skyIntensity01);
+      }
+    } catch (_) {}
+
+    // Water pass: refracts/tints/specular the fully graded scene.
     // Occlusion is handled via a deterministic occluder mask (upper floor tiles)
     // plus depth pass fallback inside the shader.
     if (this._waterEffect.enabled) {
@@ -440,15 +498,11 @@ export class FloorCompositor {
       } catch (_) {}
 
       const waterOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      this._waterEffect.render(this.renderer, this.camera, currentInput, waterOutput, occluderRT);
-      currentInput = waterOutput;
-    }
-
-    // Sky color grading pass (time-of-day atmospheric grading). Ping-pongs.
-    if (this._skyColorEffect.params.enabled) {
-      const skyOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      this._skyColorEffect.render(this.renderer, currentInput, skyOutput);
-      currentInput = skyOutput;
+      // render() returns true if it wrote to waterOutput, false if it returned early.
+      // Only advance currentInput when the pass actually ran — otherwise waterOutput
+      // is an unwritten (black) RT and advancing would black out the entire scene.
+      const waterWrote = this._waterEffect.render(this.renderer, this.camera, currentInput, waterOutput, occluderRT);
+      if (waterWrote) currentInput = waterOutput;
     }
 
     // Bloom pass: screen-space glow (threshold → mip blur → additive composite).
@@ -458,12 +512,13 @@ export class FloorCompositor {
       currentInput = bloomOutput;
     }
 
-    // Color correction pass: global user-authored grade (exposure, contrast, saturation, etc.).
-    // Ping-pongs: whichever is current → the other.
-    if (this._colorCorrectionEffect.params.enabled) {
-      const ccOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      this._colorCorrectionEffect.render(this.renderer, currentInput, ccOutput);
-      currentInput = ccOutput;
+    // Cloud-top blit: alpha-over after the full post chain (sky, CC, water, bloom).
+    // Placed here so cloud tops are never refracted by water, never double-graded
+    // by sky-color/CC, and sit visually above everything except grain and sharpen.
+    // bloom has already run so cloud edges can still receive glow via the bloom
+    // pass below, while cloud tops themselves remain crisp and unaffected.
+    if (this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
+      this._cloudEffect.blitCloudTops(this.renderer, currentInput);
     }
 
     // Film grain pass (disabled by default — optional artistic effect).
@@ -578,6 +633,9 @@ export class FloorCompositor {
     this._fireEffect.onFloorChange(maxFloorIndex);
     // Update window light overlay visibility (isolated scene, not bus-managed).
     this._windowLightEffect.onFloorChange(maxFloorIndex);
+    // Cloud effect: blocker pass is automatically floor-isolated via bus visibility;
+    // no extra state needed, but notify for any future floor-aware work.
+    this._cloudEffect.onFloorChange(maxFloorIndex);
     // Swap active water SDF data for the new floor.
     this._waterEffect.onFloorChange(maxFloorIndex);
     log.debug(`FloorCompositor: visibility set to floors 0–${maxFloorIndex}`);
@@ -597,6 +655,7 @@ export class FloorCompositor {
     if (this._postA)   this._postA.setSize(w, h);
     if (this._postB)   this._postB.setSize(w, h);
     if (this._waterOccluderRT) this._waterOccluderRT.setSize(w, h);
+    this._cloudEffect.onResize(w, h);
     this._lightingEffect.onResize(w, h);
     this._bloomEffect.onResize(w, h);
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);
@@ -608,6 +667,7 @@ export class FloorCompositor {
    * Dispose all GPU resources. Call on scene teardown.
    */
   dispose() {
+    try { this._cloudEffect.dispose(); } catch (_) {}
     try { this._waterEffect.dispose(); } catch (_) {}
     try { this._sharpenEffect.dispose(); } catch (_) {}
     try { this._filmGrainEffect.dispose(); } catch (_) {}

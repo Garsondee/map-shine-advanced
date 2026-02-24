@@ -1299,6 +1299,49 @@ export class EffectComposer {
       this._floorCompositorV2 = new FloorCompositor(this.renderer, this.scene, this.camera);
       this._floorCompositorV2.initialize();
       log.info('FloorCompositor V2 created and initialized');
+
+      // ── Replay saved params ─────────────────────────────────────────────
+      // The Tweakpane UI fires its initial callbacks (loadEffectParameters →
+      // _propagateToV2) during initializeUI, which runs BEFORE the first
+      // render frame that lazily creates this FloorCompositor. Those callbacks
+      // find _floorCompositorV2 === null and silently drop every saved value,
+      // leaving all effects at their hardcoded constructor defaults.
+      //
+      // Fix: immediately after creation, pull the current params from each
+      // registered effect folder in uiManager and push them into the effects.
+      // This is the same data the initial callbacks would have pushed if the
+      // FloorCompositor had existed at that time.
+      //
+      // effectId → FloorCompositor property name mapping must match the
+      // _makeV2Callback() calls in canvas-replacement.js.
+      const EFFECT_KEY_MAP = {
+        'lighting':         '_lightingEffect',
+        'specular':         '_specularEffect',
+        'sky-color':        '_skyColorEffect',
+        'windowLight':      '_windowLightEffect',
+        'fire-sparks':      '_fireEffect',
+        'bloom':            '_bloomEffect',
+        'colorCorrection':  '_colorCorrectionEffect',
+        'filmGrain':        '_filmGrainEffect',
+        'sharpen':          '_sharpenEffect',
+        'water':            '_waterEffect',
+      };
+
+      try {
+        const uiManager = window.MapShine?.uiManager;
+        if (uiManager?.effectFolders) {
+          for (const [effectId, effectKey] of Object.entries(EFFECT_KEY_MAP)) {
+            const effectData = uiManager.effectFolders[effectId];
+            if (!effectData?.params) continue;
+            for (const [paramId, value] of Object.entries(effectData.params)) {
+              this._floorCompositorV2.applyParam(effectKey, paramId, value);
+            }
+          }
+          log.info('FloorCompositor V2: replayed saved params from uiManager');
+        }
+      } catch (err) {
+        log.warn('FloorCompositor V2: param replay failed:', err);
+      }
     }
     return this._floorCompositorV2;
   }

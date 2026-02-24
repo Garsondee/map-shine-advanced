@@ -310,34 +310,61 @@ export class FloorRenderBus {
         continue;
       }
 
-      // Show only tiles on floors >= minFloorIndex.
-      entry.mesh.visible = entry.floorIndex >= minFloorIndex;
+      // All tiles on any floor are visible in the occluder mask.
+      // Tiles BELOW minFloorIndex render as fully opaque (alpha=1) — they are
+      // lower-floor geometry that should never receive water from upper floors.
+      // Tiles AT or ABOVE minFloorIndex render with their real texture alpha —
+      // transparent areas in upper-floor tiles are genuine openings where water
+      // on the floor below can show through.
+      entry.mesh.visible = true;
 
-      // Skip tiles whose textures haven't loaded yet. If we render them, the
-      // MeshBasicMaterial will output opaque black and incorrectly occlude water.
       const mat = entry.material;
       const hasMap = !!mat?.map;
-      if (!hasMap) {
-        entry.mesh.visible = false;
-        continue;
-      }
+      const isBelowFloor = entry.floorIndex < minFloorIndex;
 
-      // Temporarily force tiles to render as a pure alpha mask:
-      // white RGB, alpha from the tile's original opacity * texture alpha.
-      savedMaterialState.set(tileId, {
-        transparent: mat.transparent,
-        opacity: mat.opacity,
-        color: mat.color ? mat.color.clone() : null,
-        depthTest: mat.depthTest,
-        depthWrite: mat.depthWrite,
-        blending: mat.blending,
-      });
-      if (mat.color) mat.color.set(1, 1, 1);
-      mat.transparent = true;
-      mat.depthTest = false;
-      mat.depthWrite = false;
-      mat.blending = THREE.NormalBlending;
-      mat.needsUpdate = true;
+      if (isBelowFloor) {
+        // Below-floor tiles: render as fully opaque white regardless of texture.
+        // This ensures floor 0 pixels are always occluded and never get water.
+        savedMaterialState.set(tileId, {
+          transparent: mat.transparent,
+          opacity: mat.opacity,
+          color: mat.color ? mat.color.clone() : null,
+          map: mat.map,
+          depthTest: mat.depthTest,
+          depthWrite: mat.depthWrite,
+          blending: mat.blending,
+        });
+        if (mat.color) mat.color.set(1, 1, 1);
+        mat.map = null;
+        mat.transparent = false;
+        mat.opacity = 1.0;
+        mat.depthTest = false;
+        mat.depthWrite = false;
+        mat.blending = THREE.NormalBlending;
+        mat.needsUpdate = true;
+      } else {
+        // At or above minFloorIndex: skip tiles without textures (avoid opaque black).
+        if (!hasMap) {
+          entry.mesh.visible = false;
+          continue;
+        }
+        // Render with real texture alpha so transparent areas are genuine openings.
+        savedMaterialState.set(tileId, {
+          transparent: mat.transparent,
+          opacity: mat.opacity,
+          color: mat.color ? mat.color.clone() : null,
+          map: mat.map,
+          depthTest: mat.depthTest,
+          depthWrite: mat.depthWrite,
+          blending: mat.blending,
+        });
+        if (mat.color) mat.color.set(1, 1, 1);
+        mat.transparent = true;
+        mat.depthTest = false;
+        mat.depthWrite = false;
+        mat.blending = THREE.NormalBlending;
+        mat.needsUpdate = true;
+      }
     }
 
     // Save and configure renderer state.
@@ -374,6 +401,7 @@ export class FloorRenderBus {
       mat.transparent = st.transparent;
       mat.opacity = st.opacity;
       if (st.color && mat.color) mat.color.copy(st.color);
+      if ('map' in st) mat.map = st.map;
       mat.depthTest = st.depthTest;
       mat.depthWrite = st.depthWrite;
       mat.blending = st.blending;

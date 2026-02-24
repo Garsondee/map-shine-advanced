@@ -17,15 +17,14 @@
  * Simplifications vs V1 (layered in as V2 systems come online):
  *   - No EffectMaskRegistry / GpuSceneMaskCompositor
  *   - No DistortionManager integration
- *   - No depth pass (uDepthEnabled always 0)
  *   - No token mask / cloud shadow / outdoors mask
- *   - No water occluder alpha
  *   - No floor transition locks (bus visibility handles floor isolation)
  *
  * @module compositor-v2/effects/WaterEffectV2
  */
 
 import { createLogger } from '../../core/log.js';
+import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
 import { WaterSurfaceModel } from '../../effects/WaterSurfaceModel.js';
@@ -39,6 +38,31 @@ const DEF_SAND        = 1 << 0;
 const DEF_FOAM_FLECKS = 1 << 1;
 const DEF_MULTITAP    = 1 << 2;
 const DEF_CHROM_AB    = 1 << 3;
+
+/**
+ * Accept either 0..1 or 0..255 color channels and normalize to 0..1.
+ * This keeps V2 tolerant of legacy V1 preset values.
+ * @param {{r:number,g:number,b:number}|null|undefined} c
+ * @param {{r:number,g:number,b:number}} fallback
+ * @returns {{r:number,g:number,b:number}}
+ */
+function normalizeRgb01(c, fallback = { r: 0, g: 0, b: 0 }) {
+  if (!c || typeof c !== 'object') return fallback;
+  let r = typeof c.r === 'number' ? c.r : fallback.r;
+  let g = typeof c.g === 'number' ? c.g : fallback.g;
+  let b = typeof c.b === 'number' ? c.b : fallback.b;
+  const maxv = Math.max(r, g, b);
+  if (maxv > 1.0) {
+    r /= 255.0;
+    g /= 255.0;
+    b /= 255.0;
+  }
+  return {
+    r: Math.max(0.0, Math.min(1.0, r)),
+    g: Math.max(0.0, Math.min(1.0, g)),
+    b: Math.max(0.0, Math.min(1.0, b)),
+  };
+}
 
 // ─── WaterEffectV2 ──────────────────────────────────────────────────────────
 
@@ -68,9 +92,20 @@ export class WaterEffectV2 {
       waveEvolutionSpeed: 0.15,
       waveEvolutionAmount: 0.3,
       waveEvolutionScale: 0.5,
+      waveSpeedUseWind: false,
+      waveSpeedWindMinFactor: 1.0,
+      waveStrengthUseWind: false,
+      waveStrengthWindMinFactor: 1.0,
+      waveIndoorDampingEnabled: false,
+      waveIndoorDampingStrength: 1.0,
+      waveIndoorMinFactor: 0.05,
+      useTargetWindDirection: false,
+      windDirResponsiveness: 10.0,
 
       // Chromatic aberration
-      chromaticAberrationEnabled: false,
+      // Keep enabled by default for V1 visual parity (subtle RGB separation
+      // on distortion edges). This was accidentally left disabled in early V2.
+      chromaticAberrationEnabled: true,
       chromaticAberrationStrengthPx: 2.5,
       chromaticAberrationEdgeCenter: 0.50,
       chromaticAberrationEdgeFeather: 0.10,
@@ -87,10 +122,16 @@ export class WaterEffectV2 {
       distortionShoreMin: 0.0,
 
       // Refraction
+      // Keep multi-tap enabled by default to preserve the softer V1 water look.
       refractionMultiTapEnabled: true,
 
       // Rain
       rainPrecipitation: 0.0,
+      rainDistortionEnabled: true,
+      rainDistortionUseWeather: true,
+      rainDistortionPrecipitationOverride: 0.0,
+      rainIndoorDampingEnabled: true,
+      rainIndoorDampingStrength: 1.0,
       rainSplit: 0.5,
       rainBlend: 0.1,
       rainGlobalStrength: 1.0,
@@ -130,8 +171,10 @@ export class WaterEffectV2 {
       lockWaveTravelToWind: true,
       waveDirOffsetDeg: 0.0,
       waveAppearanceRotDeg: 0.0,
+      waveAppearanceOffsetDeg: 0.0,
       advectionDirOffsetDeg: 0.0,
       advectionSpeed01: 0.15,
+      advectionSpeed: 1.5,
 
       // Specular (GGX)
       specStrength: 35.0,
@@ -150,6 +193,22 @@ export class WaterEffectV2 {
       specDistortionNormalStrength: 0.5,
       specAnisotropy: 0.0,
       specAnisoRatio: 2.0,
+
+      // Cloud shadow modulation
+      cloudShadowEnabled: true,
+      cloudShadowDarkenStrength: 1.25,
+      cloudShadowDarkenCurve: 1.5,
+      cloudShadowSpecularKill: 1.0,
+      cloudShadowSpecularCurve: 6.0,
+
+      // Caustics
+      causticsEnabled: true,
+      causticsIntensity: 4.0,
+      causticsScale: 33.4,
+      causticsSpeed: 1.05,
+      causticsSharpness: 0.1,
+      causticsEdgeLo: 0.11,
+      causticsEdgeHi: 1.0,
 
       // Foam
       foamColor: { r: 0.85, g: 0.90, b: 0.88 },
@@ -258,6 +317,8 @@ export class WaterEffectV2 {
     this._windTime = 0;
     this._windOffsetUvX = 0;
     this._windOffsetUvY = 0;
+    this._smoothedWindDirX = 1.0;
+    this._smoothedWindDirY = 0.0;
     this._lastTimeValue = null;
 
     // ── Cached sun direction ─────────────────────────────────────────────
@@ -277,6 +338,44 @@ export class WaterEffectV2 {
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
+
+  /**
+   * Resolve advection speed with backward compatibility.
+   * V2 uses advectionSpeed01; legacy V1 presets may set advectionSpeed.
+   * @param {object} p
+   * @returns {number}
+   * @private
+   */
+  _resolveAdvectionSpeed01(p) {
+    const direct = Number(p.advectionSpeed01);
+    const legacy = Number(p.advectionSpeed);
+    // If V2 value is left at the stock default and a legacy value exists,
+    // prefer the legacy value for backwards-compatible preset loading.
+    if (Number.isFinite(legacy) && (!Number.isFinite(direct) || Math.abs(direct - 0.15) < 1e-6)) {
+      return Math.max(0, legacy * 0.1);
+    }
+    if (Number.isFinite(direct)) return Math.max(0, direct);
+    return 0.15;
+  }
+
+  /**
+   * Resolve wave appearance rotation in degrees with V1 alias compatibility.
+   * V2 name: waveAppearanceRotDeg
+   * V1 name: waveAppearanceOffsetDeg
+   * @param {object} p
+   * @returns {number}
+   * @private
+   */
+  _resolveWaveAppearanceDeg(p) {
+    const rot = Number(p.waveAppearanceRotDeg);
+    const legacy = Number(p.waveAppearanceOffsetDeg);
+    if (Number.isFinite(legacy) && (!Number.isFinite(rot) || Math.abs(rot) < 1e-6)) {
+      return legacy;
+    }
+    if (Number.isFinite(rot)) return rot;
+    if (Number.isFinite(legacy)) return legacy;
+    return 0;
+  }
 
   /**
    * Create GPU resources: fullscreen quad, shader material, noise texture.
@@ -367,9 +466,10 @@ export class WaterEffectV2 {
     }
 
     if (this._waterTiles.length === 0) {
-      log.info('populate: no _Water masks found');
+      log.warn('WaterEffectV2 populate: no _Water masks found in any tile. Checked', tileDocs.length, 'tiles.');
       return;
     }
+    log.info(`WaterEffectV2 populate: found ${this._waterTiles.length} _Water mask(s)`, this._waterTiles.map(t => t.maskPath));
 
     // ── Step 2: Group tiles by floor ─────────────────────────────────────
     /** @type {Map<number, Array>} */
@@ -446,7 +546,10 @@ export class WaterEffectV2 {
     for (let i = 0; i < entries.length; i++) {
       if (images[i]) validPairs.push({ entry: entries[i], img: images[i] });
     }
-    if (validPairs.length === 0) return null;
+    if (validPairs.length === 0) {
+      log.warn('_compositeFloorMask: all mask images failed to load');
+      return null;
+    }
 
     // Determine canvas resolution (proportional to scene, capped at buildResolution)
     const maxRes = this.params.buildResolution || 2048;
@@ -576,6 +679,41 @@ export class WaterEffectV2 {
   }
 
   /**
+   * Feed active-floor water data to legacy WeatherParticles foam systems.
+   * @param {number} elapsedSeconds
+   * @private
+   */
+  _syncLegacyFoamParticles(elapsedSeconds) {
+    try {
+      const wp = window.MapShineParticles?.weatherParticles;
+      if (!wp) return;
+
+      const floorData = this._floorWater.get(this._activeFloorIndex);
+      const waterDataTex = floorData?.waterData?.texture ?? null;
+
+      // Optional scene bounds for world->scene UV mapping on particle behaviors.
+      let sceneBounds = null;
+      const THREE = window.THREE;
+      const dims = canvas?.dimensions;
+      if (THREE && dims) {
+        const rect = dims.sceneRect ?? dims;
+        const sx = rect?.x ?? dims.sceneX ?? 0;
+        const sy = rect?.y ?? dims.sceneY ?? 0;
+        const sw = rect?.width ?? dims.sceneWidth ?? dims.width ?? 1;
+        const sh = rect?.height ?? dims.sceneHeight ?? dims.height ?? 1;
+        sceneBounds = new THREE.Vector4(sx, sy, sw, sh);
+      }
+
+      if (typeof wp.setWaterDataTexture === 'function') {
+        wp.setWaterDataTexture(waterDataTex, sceneBounds);
+      }
+      if (typeof wp.setFoamParams === 'function') {
+        wp.setFoamParams(this.params, elapsedSeconds);
+      }
+    } catch (_) {}
+  }
+
+  /**
    * Dispose all per-floor water data.
    * @private
    */
@@ -603,11 +741,41 @@ export class WaterEffectV2 {
     // ── Time ──────────────────────────────────────────────────────────────
     u.uTime.value = elapsed;
 
-    // ── Wind state (simple time-based fallback; WeatherController integration in Phase 3) ──
-    // Default gentle wind from east
-    const windDirX = 1.0;
-    const windDirY = 0.0;
-    const windSpeed01 = 0.15;
+    // ── Wind state (WeatherController-coupled with deterministic fallback) ──
+    // Keep fallback values stable so the effect behaves consistently when weather
+    // is disabled/unavailable.
+    let windDirX = 1.0;
+    let windDirY = 0.0;
+    let windSpeed01 = 0.15;
+    try {
+      const ws = weatherController?.getCurrentState?.();
+      if (ws) {
+        const wx = Number(ws.windDirection?.x);
+        const wy = Number(ws.windDirection?.y);
+        const wv = Number(ws.windSpeed);
+        if (Number.isFinite(wx) && Number.isFinite(wy)) {
+          const len = Math.hypot(wx, wy);
+          if (len > 1e-5) {
+            windDirX = wx / len;
+            windDirY = wy / len;
+          }
+        }
+        if (Number.isFinite(wv)) windSpeed01 = Math.max(0, Math.min(1, wv));
+      }
+    } catch (_) {}
+
+    // Optional wind-direction smoothing (legacy V1 behavior parity).
+    if (p.useTargetWindDirection) {
+      const responsiveness = Math.max(0, Number(p.windDirResponsiveness) || 0);
+      const lerpT = 1.0 - Math.exp(-responsiveness * dt);
+      this._smoothedWindDirX += (windDirX - this._smoothedWindDirX) * lerpT;
+      this._smoothedWindDirY += (windDirY - this._smoothedWindDirY) * lerpT;
+      const smoothLen = Math.hypot(this._smoothedWindDirX, this._smoothedWindDirY);
+      if (smoothLen > 1e-5) {
+        windDirX = this._smoothedWindDirX / smoothLen;
+        windDirY = this._smoothedWindDirY / smoothLen;
+      }
+    }
 
     this._windTime += dt * windSpeed01;
     u.uWindTime.value = this._windTime;
@@ -615,7 +783,7 @@ export class WaterEffectV2 {
     u.uWindSpeed.value = windSpeed01;
 
     // Advection offset (UV drift from wind)
-    const advSpeed = Math.max(0, p.advectionSpeed01 ?? 0.15);
+    const advSpeed = this._resolveAdvectionSpeed01(p);
     const advDeg = p.advectionDirOffsetDeg ?? 0;
     const advRad = advDeg * (Math.PI / 180);
     const advDirX = windDirX * Math.cos(advRad) - windDirY * Math.sin(advRad);
@@ -628,13 +796,16 @@ export class WaterEffectV2 {
     u.uWaterEnabled.value = this.enabled ? 1.0 : 0.0;
 
     // ── Tint ──────────────────────────────────────────────────────────────
-    u.uTintColor.value.set(p.tintColor.r, p.tintColor.g, p.tintColor.b);
+    const tint = normalizeRgb01(p.tintColor, { r: 0.02, g: 0.18, b: 0.28 });
+    u.uTintColor.value.set(tint.r, tint.g, tint.b);
     u.uTintStrength.value = p.tintStrength;
 
     // ── Waves ─────────────────────────────────────────────────────────────
+    const waveSpeed = (p.waveSpeedUseWind ? Math.max(p.waveSpeedWindMinFactor ?? 1.0, windSpeed01) : 1.0) * (p.waveSpeed ?? 1.0);
+    const waveStrength = (p.waveStrengthUseWind ? Math.max(p.waveStrengthWindMinFactor ?? 1.0, windSpeed01) : 1.0) * (p.waveStrength ?? 0.6);
     u.uWaveScale.value = p.waveScale;
-    u.uWaveSpeed.value = p.waveSpeed;
-    u.uWaveStrength.value = p.waveStrength;
+    u.uWaveSpeed.value = waveSpeed;
+    u.uWaveStrength.value = waveStrength;
     u.uDistortionStrengthPx.value = p.distortionStrengthPx;
     u.uWaveWarpLargeStrength.value = p.waveWarpLargeStrength;
     u.uWaveWarpSmallStrength.value = p.waveWarpSmallStrength;
@@ -644,11 +815,15 @@ export class WaterEffectV2 {
     u.uWaveEvolutionSpeed.value = p.waveEvolutionSpeed;
     u.uWaveEvolutionAmount.value = p.waveEvolutionAmount;
     u.uWaveEvolutionScale.value = p.waveEvolutionScale;
+    u.uWaveIndoorDampingEnabled.value = p.waveIndoorDampingEnabled ? 1.0 : 0.0;
+    u.uWaveIndoorDampingStrength.value = p.waveIndoorDampingStrength ?? 1.0;
+    u.uWaveIndoorMinFactor.value = p.waveIndoorMinFactor ?? 0.05;
 
     // ── Wave direction ────────────────────────────────────────────────────
     u.uLockWaveTravelToWind.value = p.lockWaveTravelToWind ? 1.0 : 0.0;
     u.uWaveDirOffsetRad.value = (p.waveDirOffsetDeg ?? 0) * (Math.PI / 180);
-    u.uWaveAppearanceRotRad.value = (p.waveAppearanceRotDeg ?? 0) * (Math.PI / 180);
+    const waveAppearanceDeg = this._resolveWaveAppearanceDeg(p);
+    u.uWaveAppearanceRotRad.value = waveAppearanceDeg * (Math.PI / 180);
 
     // ── Distortion edge ───────────────────────────────────────────────────
     u.uDistortionEdgeCenter.value = p.distortionEdgeCenter;
@@ -666,13 +841,38 @@ export class WaterEffectV2 {
     u.uChromaticAberrationEdgeGamma.value = p.chromaticAberrationEdgeGamma;
     u.uChromaticAberrationEdgeMin.value = p.chromaticAberrationEdgeMin;
 
-    // ── Rain (uses default precipitation; WeatherController integration in Phase 3) ──
-    const precip = p.rainPrecipitation ?? 0;
+    // ── Rain (parameter + WeatherController coupling) ─────────────────────
+    // Preserve manual tuning (`rainPrecipitation`) but allow live weather to
+    // drive intensity when it is stronger.
+    let precip = p.rainPrecipitation ?? 0;
+    const rainDistortionEnabled = (p.rainDistortionEnabled ?? true) !== false;
+    if (!rainDistortionEnabled) {
+      precip = 0;
+    } else {
+      const rainUseWeather = (p.rainDistortionUseWeather ?? true) !== false;
+      if (!rainUseWeather) {
+        precip = Math.max(0, Math.min(1, Number(p.rainDistortionPrecipitationOverride ?? precip) || 0));
+      } else {
+        try {
+          const ws = weatherController?.getCurrentState?.();
+          const weatherPrecip = Number(ws?.precipitation);
+          const precipType = Number(ws?.precipType);
+          // Treat type=1 (RAIN) and type=3 (HAIL) as liquid precipitation coupling.
+          const isLiquid = (precipType === 1 || precipType === 3);
+          if (isLiquid && Number.isFinite(weatherPrecip)) {
+            precip = Math.max(precip, Math.max(0, Math.min(1, weatherPrecip)));
+          }
+        } catch (_) {}
+      }
+    }
     u.uRainEnabled.value = precip > 0.001 ? 1.0 : 0.0;
     u.uRainPrecipitation.value = precip;
-    u.uRainSplit.value = p.rainSplit;
-    u.uRainBlend.value = p.rainBlend;
-    u.uRainGlobalStrength.value = p.rainGlobalStrength;
+    u.uRainSplit.value = (p.rainDistortionSplit ?? p.rainSplit ?? 0.5);
+    u.uRainBlend.value = (p.rainDistortionBlend ?? p.rainBlend ?? 0.1);
+    const rainGlobalStrength = (p.rainDistortionGlobalStrength ?? p.rainGlobalStrength ?? 1.0);
+    u.uRainGlobalStrength.value = rainGlobalStrength;
+    u.uRainIndoorDampingEnabled.value = p.rainIndoorDampingEnabled ? 1.0 : 0.0;
+    u.uRainIndoorDampingStrength.value = p.rainIndoorDampingStrength ?? 1.0;
     u.uRainRippleStrengthPx.value = p.rainRippleStrengthPx;
     u.uRainRippleScale.value = p.rainRippleScale;
     u.uRainRippleSpeed.value = p.rainRippleSpeed;
@@ -720,6 +920,20 @@ export class WaterEffectV2 {
     u.uSpecDistortionNormalStrength.value = p.specDistortionNormalStrength;
     u.uSpecAnisotropy.value = p.specAnisotropy;
     u.uSpecAnisoRatio.value = p.specAnisoRatio;
+    u.uCloudShadowEnabled.value = p.cloudShadowEnabled ? 1.0 : 0.0;
+    u.uCloudShadowDarkenStrength.value = p.cloudShadowDarkenStrength ?? 1.25;
+    u.uCloudShadowDarkenCurve.value = p.cloudShadowDarkenCurve ?? 1.5;
+    u.uCloudShadowSpecularKill.value = p.cloudShadowSpecularKill ?? 1.0;
+    u.uCloudShadowSpecularCurve.value = p.cloudShadowSpecularCurve ?? 6.0;
+
+    // Caustics
+    u.uCausticsEnabled.value = p.causticsEnabled ? 1.0 : 0.0;
+    u.uCausticsIntensity.value = p.causticsIntensity ?? 4.0;
+    u.uCausticsScale.value = p.causticsScale ?? 33.4;
+    u.uCausticsSpeed.value = p.causticsSpeed ?? 1.05;
+    u.uCausticsSharpness.value = p.causticsSharpness ?? 0.1;
+    u.uCausticsEdgeLo.value = p.causticsEdgeLo ?? 0.11;
+    u.uCausticsEdgeHi.value = p.causticsEdgeHi ?? 1.0;
 
     // Sun direction from azimuth + elevation (cached to avoid per-frame trig)
     const az = p.specSunAzimuthDeg ?? 135;
@@ -736,7 +950,8 @@ export class WaterEffectV2 {
     u.uSpecSunDir.value.set(this._cachedSunDirX, this._cachedSunDirY, this._cachedSunDirZ);
 
     // ── Foam ──────────────────────────────────────────────────────────────
-    u.uFoamColor.value.set(p.foamColor.r, p.foamColor.g, p.foamColor.b);
+    const foamColor = normalizeRgb01(p.foamColor, { r: 0.85, g: 0.9, b: 0.88 });
+    u.uFoamColor.value.set(foamColor.r, foamColor.g, foamColor.b);
     u.uFoamStrength.value = p.foamStrength;
     u.uFoamThreshold.value = p.foamThreshold;
     u.uFoamScale.value = p.foamScale;
@@ -764,7 +979,8 @@ export class WaterEffectV2 {
     // ── Murk ──────────────────────────────────────────────────────────────
     u.uMurkEnabled.value = p.murkEnabled ? 1.0 : 0.0;
     u.uMurkIntensity.value = p.murkIntensity;
-    u.uMurkColor.value.set(p.murkColor.r, p.murkColor.g, p.murkColor.b);
+    const murkColor = normalizeRgb01(p.murkColor, { r: 0.15, g: 0.22, b: 0.12 });
+    u.uMurkColor.value.set(murkColor.r, murkColor.g, murkColor.b);
     u.uMurkScale.value = p.murkScale;
     u.uMurkSpeed.value = p.murkSpeed;
     u.uMurkDepthLo.value = p.murkDepthLo;
@@ -776,7 +992,8 @@ export class WaterEffectV2 {
 
     // ── Sand ──────────────────────────────────────────────────────────────
     u.uSandIntensity.value = p.sandIntensity;
-    u.uSandColor.value.set(p.sandColor.r, p.sandColor.g, p.sandColor.b);
+    const sandColor = normalizeRgb01(p.sandColor, { r: 0.76, g: 0.68, b: 0.5 });
+    u.uSandColor.value.set(sandColor.r, sandColor.g, sandColor.b);
     u.uSandContrast.value = p.sandContrast;
     u.uSandChunkScale.value = p.sandChunkScale;
     u.uSandChunkSpeed.value = p.sandChunkSpeed;
@@ -795,6 +1012,12 @@ export class WaterEffectV2 {
 
     // ── Debug ─────────────────────────────────────────────────────────────
     u.uDebugView.value = p.debugView ?? 0;
+
+    // ── Legacy foam particle bridge ───────────────────────────────────────
+    // WeatherParticles already has mature foam.webp spawning/behavior logic.
+    // Feed it the active floor's WaterData + current water params so V2 keeps
+    // foam particle complexity while the post water shader remains authoritative.
+    this._syncLegacyFoamParticles(elapsed);
 
     // ── Foundry environment ───────────────────────────────────────────────
     try {
@@ -841,10 +1064,48 @@ export class WaterEffectV2 {
 
     // ── Upper-floor occluder mask (screen-space) ─────────────────────────
     // Provided by FloorCompositor (rendered from upper-floor tiles).
+    // Validated behavior: this is the primary masking path that keeps lower-floor
+    // water visible through real openings while fully suppressing water under
+    // upper-floor geometry.
     const occ = occluderRT?.texture ?? null;
     if (u.tWaterOccluderAlpha && u.uHasWaterOccluderAlpha) {
       u.tWaterOccluderAlpha.value = occ;
       u.uHasWaterOccluderAlpha.value = occ ? 1.0 : 0.0;
+    }
+
+    // Outdoors mask (world-space scene UV) for indoor damping paths.
+    if (u.tOutdoorsMask && u.uHasOutdoorsMask) {
+      let outdoorsTex = null;
+      let outdoorsRec = null;
+      try {
+        const mm = window.MapShine?.maskManager;
+        outdoorsTex = mm?.getTexture?.('outdoors') ?? null;
+        outdoorsRec = mm?.textures?.get?.('outdoors') ?? null;
+      } catch (_) {}
+      u.tOutdoorsMask.value = outdoorsTex;
+      u.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
+      if (u.uOutdoorsMaskFlipY) {
+        const metaFlipY = (outdoorsRec && typeof outdoorsRec.uvFlipY === 'boolean') ? outdoorsRec.uvFlipY : null;
+        const flip = (metaFlipY !== null) ? metaFlipY : (outdoorsTex?.flipY ?? false);
+        u.uOutdoorsMaskFlipY.value = flip ? 1.0 : 0.0;
+      }
+    }
+
+    // Cloud shadow texture (screen-space).
+    if (u.tCloudShadow && u.uHasCloudShadow) {
+      let cloudTex = null;
+      try {
+        const mm = window.MapShine?.maskManager;
+        cloudTex = mm?.getTexture?.('cloudShadow') ?? null;
+      } catch (_) {}
+      u.tCloudShadow.value = cloudTex;
+      u.uHasCloudShadow.value = cloudTex ? 1.0 : 0.0;
+    }
+
+    // Active level elevation for depth-relative occlusion.
+    if (u.uActiveLevelElevation) {
+      const activeBottom = Number(window.MapShine?.activeLevelContext?.bottom);
+      u.uActiveLevelElevation.value = Number.isFinite(activeBottom) ? activeBottom : 0.0;
     }
 
     // ── Depth pass binding (for upper-floor occlusion) ───────────────────
@@ -1037,6 +1298,10 @@ export class WaterEffectV2 {
    */
   _buildUniforms(THREE) {
     const p = this.params;
+    const tint = normalizeRgb01(p.tintColor, { r: 0.02, g: 0.18, b: 0.28 });
+    const foamColor = normalizeRgb01(p.foamColor, { r: 0.85, g: 0.9, b: 0.88 });
+    const murkColor = normalizeRgb01(p.murkColor, { r: 0.15, g: 0.22, b: 0.12 });
+    const sandColor = normalizeRgb01(p.sandColor, { r: 0.76, g: 0.68, b: 0.5 });
     const black1x1 = this._make1x1(THREE, 0, 0, 0, 255);
     return {
       tDiffuse:            { value: null },
@@ -1051,7 +1316,7 @@ export class WaterEffectV2 {
       uWaterDataTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
 
       // Tint
-      uTintColor:    { value: new THREE.Vector3(p.tintColor.r, p.tintColor.g, p.tintColor.b) },
+      uTintColor:    { value: new THREE.Vector3(tint.r, tint.g, tint.b) },
       uTintStrength: { value: p.tintStrength },
 
       // Waves
@@ -1067,6 +1332,9 @@ export class WaterEffectV2 {
       uWaveEvolutionSpeed:     { value: p.waveEvolutionSpeed },
       uWaveEvolutionAmount:    { value: p.waveEvolutionAmount },
       uWaveEvolutionScale:     { value: p.waveEvolutionScale },
+      uWaveIndoorDampingEnabled: { value: p.waveIndoorDampingEnabled ? 1.0 : 0.0 },
+      uWaveIndoorDampingStrength: { value: p.waveIndoorDampingStrength ?? 1.0 },
+      uWaveIndoorMinFactor: { value: p.waveIndoorMinFactor ?? 0.05 },
 
       // Chromatic aberration
       uChromaticAberrationStrengthPx:  { value: p.chromaticAberrationStrengthPx },
@@ -1090,6 +1358,11 @@ export class WaterEffectV2 {
       uRainSplit:          { value: p.rainSplit },
       uRainBlend:          { value: p.rainBlend },
       uRainGlobalStrength: { value: p.rainGlobalStrength },
+      tOutdoorsMask:       { value: null },
+      uHasOutdoorsMask:    { value: 0.0 },
+      uOutdoorsMaskFlipY:  { value: 0.0 },
+      uRainIndoorDampingEnabled: { value: p.rainIndoorDampingEnabled ? 1.0 : 0.0 },
+      uRainIndoorDampingStrength: { value: p.rainIndoorDampingStrength ?? 1.0 },
       uRainRippleStrengthPx:          { value: p.rainRippleStrengthPx },
       uRainRippleScale:               { value: p.rainRippleScale },
       uRainRippleSpeed:               { value: p.rainRippleSpeed },
@@ -1147,9 +1420,25 @@ export class WaterEffectV2 {
       uSpecDistortionNormalStrength: { value: p.specDistortionNormalStrength },
       uSpecAnisotropy:      { value: p.specAnisotropy },
       uSpecAnisoRatio:      { value: p.specAnisoRatio },
+      tCloudShadow:         { value: null },
+      uHasCloudShadow:      { value: 0.0 },
+      uCloudShadowEnabled:  { value: p.cloudShadowEnabled ? 1.0 : 0.0 },
+      uCloudShadowDarkenStrength: { value: p.cloudShadowDarkenStrength ?? 1.25 },
+      uCloudShadowDarkenCurve: { value: p.cloudShadowDarkenCurve ?? 1.5 },
+      uCloudShadowSpecularKill: { value: p.cloudShadowSpecularKill ?? 1.0 },
+      uCloudShadowSpecularCurve: { value: p.cloudShadowSpecularCurve ?? 6.0 },
+
+      // Caustics
+      uCausticsEnabled:      { value: p.causticsEnabled ? 1.0 : 0.0 },
+      uCausticsIntensity:    { value: p.causticsIntensity ?? 4.0 },
+      uCausticsScale:        { value: p.causticsScale ?? 33.4 },
+      uCausticsSpeed:        { value: p.causticsSpeed ?? 1.05 },
+      uCausticsSharpness:    { value: p.causticsSharpness ?? 0.1 },
+      uCausticsEdgeLo:       { value: p.causticsEdgeLo ?? 0.11 },
+      uCausticsEdgeHi:       { value: p.causticsEdgeHi ?? 1.0 },
 
       // Foam
-      uFoamColor:     { value: new THREE.Vector3(p.foamColor.r, p.foamColor.g, p.foamColor.b) },
+      uFoamColor:     { value: new THREE.Vector3(foamColor.r, foamColor.g, foamColor.b) },
       uFoamStrength:  { value: p.foamStrength },
       uFoamThreshold: { value: p.foamThreshold },
       uFoamScale:     { value: p.foamScale },
@@ -1177,7 +1466,7 @@ export class WaterEffectV2 {
       // Murk
       uMurkEnabled:       { value: p.murkEnabled ? 1.0 : 0.0 },
       uMurkIntensity:     { value: p.murkIntensity },
-      uMurkColor:         { value: new THREE.Vector3(p.murkColor.r, p.murkColor.g, p.murkColor.b) },
+      uMurkColor:         { value: new THREE.Vector3(murkColor.r, murkColor.g, murkColor.b) },
       uMurkScale:         { value: p.murkScale },
       uMurkSpeed:         { value: p.murkSpeed },
       uMurkDepthLo:       { value: p.murkDepthLo },
@@ -1189,7 +1478,7 @@ export class WaterEffectV2 {
 
       // Sand
       uSandIntensity:          { value: p.sandIntensity },
-      uSandColor:              { value: new THREE.Vector3(p.sandColor.r, p.sandColor.g, p.sandColor.b) },
+      uSandColor:              { value: new THREE.Vector3(sandColor.r, sandColor.g, sandColor.b) },
       uSandContrast:           { value: p.sandContrast },
       uSandChunkScale:         { value: p.sandChunkScale },
       uSandChunkSpeed:         { value: p.sandChunkSpeed },
@@ -1220,6 +1509,7 @@ export class WaterEffectV2 {
       uSkyColor:        { value: new THREE.Vector3(0.5, 0.6, 0.8) },
       uSkyIntensity:    { value: 0.5 },
       uSceneDarkness:   { value: 0.0 },
+      uActiveLevelElevation: { value: 0.0 },
 
       // Depth pass (shared module uniforms for depth-aware occlusion)
       ...DepthShaderChunks.createUniforms(),

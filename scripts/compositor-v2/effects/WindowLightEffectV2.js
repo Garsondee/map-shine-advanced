@@ -1,15 +1,21 @@
 /**
  * @fileoverview V2 Window Light Effect — per-tile additive window glow overlays.
  *
- * Minimal V2 implementation:
+ * Architecture:
  *   - For each tile that has a `_Windows` (or legacy `_Structural`) mask, create
- *     an additive overlay mesh in the FloorRenderBus scene.
- *   - Floor isolation is handled by FloorRenderBus.setVisibleFloors() because
- *     overlays are registered with addEffectOverlay() using the tile's floorIndex.
+ *     an additive overlay mesh in an ISOLATED scene (NOT the FloorRenderBus scene).
+ *   - FloorCompositor passes `_scene` directly into `LightingEffectV2.render()` as
+ *     the `windowLightScene` argument. LightingEffectV2 renders it additively into
+ *     `_lightRT` (the light accumulation buffer) BEFORE the compose step.
  *
- * This is intentionally simpler than the V1 WindowLightEffect (no extra RTs,
- * no separate light-only pass, no rain-on-glass). It establishes the V2 pattern
- * (mask-driven bus overlay) and can be extended later.
+ * Why this is correct:
+ *   The lighting compose shader does `litColor = albedo * totalIllumination`.
+ *   By contributing to `totalIllumination` (via `_lightRT`), window light naturally
+ *   tints itself by the surface albedo — a red surface stays red under warm light.
+ *   Pure additive post-lighting would add white light uniformly, desaturating colours.
+ *
+ * Floor isolation is handled by manually toggling mesh visibility in
+ * onFloorChange() since the overlays are not in the bus scene.
  *
  * @module compositor-v2/effects/WindowLightEffectV2
  */
@@ -24,18 +30,22 @@ const log = createLogger('WindowLightEffectV2');
 const WINDOW_Z_OFFSET = 0.2;
 
 export class WindowLightEffectV2 {
-  /**
-   * @param {import('../FloorRenderBus.js').FloorRenderBus} renderBus
-   */
-  constructor(renderBus) {
-    /** @type {import('../FloorRenderBus.js').FloorRenderBus} */
-    this._renderBus = renderBus;
-
+  constructor() {
     /** @type {boolean} */
     this._enabled = true;
 
     /** @type {boolean} */
     this._initialized = false;
+
+    /**
+     * Isolated Three.js scene — overlays live here, NOT in the FloorRenderBus
+     * scene, so they are rendered after the lighting pass.
+     * @type {THREE.Scene|null}
+     */
+    this._scene = null;
+
+    /** @type {number} Active floor index for visibility gating. */
+    this._activeMaxFloor = Infinity;
 
     /**
      * Per-tile overlay entries.
@@ -54,6 +64,9 @@ export class WindowLightEffectV2 {
       flickerEnabled: false,
       flickerSpeed: 0.35,
       flickerAmount: 0.15,
+      // RGB shift (chromatic dispersion / refraction)
+      rgbShiftAmount: 1.9,  // pixels
+      rgbShiftAngle: 76.0,  // degrees
     };
 
     log.debug('WindowLightEffectV2 created');
@@ -75,6 +88,9 @@ export class WindowLightEffectV2 {
     const THREE = window.THREE;
     if (!THREE) { log.warn('initialize: THREE not available'); return; }
 
+    this._scene = new THREE.Scene();
+    this._scene.name = 'WindowLightScene';
+
     this._buildSharedUniforms();
 
     this._initialized = true;
@@ -82,8 +98,8 @@ export class WindowLightEffectV2 {
   }
 
   clear() {
-    for (const [tileId, entry] of this._overlays) {
-      try { this._renderBus.removeEffectOverlay(`${tileId}_windows`); } catch (_) {}
+    for (const [, entry] of this._overlays) {
+      try { this._scene?.remove(entry.mesh); } catch (_) {}
       try { entry.material?.dispose(); } catch (_) {}
       try { entry.mesh?.geometry?.dispose(); } catch (_) {}
     }
@@ -92,8 +108,21 @@ export class WindowLightEffectV2 {
 
   dispose() {
     this.clear();
+    this._scene = null;
     this._initialized = false;
     this._sharedUniforms = null;
+  }
+
+  /**
+   * Update overlay visibility when the active floor changes.
+   * Mirrors the FloorRenderBus.setVisibleFloors() logic.
+   * @param {number} maxFloorIndex
+   */
+  onFloorChange(maxFloorIndex) {
+    this._activeMaxFloor = maxFloorIndex;
+    for (const entry of this._overlays.values()) {
+      entry.mesh.visible = entry.floorIndex <= maxFloorIndex;
+    }
   }
 
   /**
@@ -179,7 +208,8 @@ export class WindowLightEffectV2 {
 
     const c = this.params.color;
     if (c && typeof c === 'object') {
-      u.uColor.value.set(
+      // THREE.Color.set() takes a single arg; use setRGB for component-wise assignment.
+      u.uColor.value.setRGB(
         Number(c.r) || 0,
         Number(c.g) || 0,
         Number(c.b) || 0
@@ -189,6 +219,11 @@ export class WindowLightEffectV2 {
     u.uFlickerEnabled.value = this.params.flickerEnabled ? 1.0 : 0.0;
     u.uFlickerSpeed.value = Math.max(0.0, Number(this.params.flickerSpeed) || 0);
     u.uFlickerAmount.value = Math.max(0.0, Number(this.params.flickerAmount) || 0);
+
+    // RGB shift — convert angle from degrees to radians each frame so live
+    // tweaks take effect without requiring a repopulate.
+    u.uRgbShiftAmount.value = Math.max(0.0, Number(this.params.rgbShiftAmount) || 0);
+    u.uRgbShiftAngle.value = (Number(this.params.rgbShiftAngle) || 0) * (Math.PI / 180.0);
   }
 
   /**
@@ -208,27 +243,25 @@ export class WindowLightEffectV2 {
     const THREE = window.THREE;
     if (!THREE) return;
 
+    const c = this.params.color;
+    const cr = (c && typeof c === 'object') ? (Number(c.r) || 0) : 1.0;
+    const cg = (c && typeof c === 'object') ? (Number(c.g) || 0) : 0.96;
+    const cb = (c && typeof c === 'object') ? (Number(c.b) || 0) : 0.85;
+
     this._sharedUniforms = {
       uEffectEnabled: { value: this._enabled ? 1.0 : 0.0 },
       uTime: { value: 0.0 },
       uIntensity: { value: Math.max(0.0, Number(this.params.intensity) || 0) },
       uFalloff: { value: Math.max(0.01, Number(this.params.falloff) || 1) },
-      uColor: { value: new THREE.Color(1.0, 0.96, 0.85) },
+      uColor: { value: new THREE.Color(cr, cg, cb) },
       uFlickerEnabled: { value: 0.0 },
       uFlickerSpeed: { value: 0.35 },
       uFlickerAmount: { value: 0.15 },
-      // uMask is intentionally NOT here — it is per-overlay only.
+      // RGB shift (chromatic dispersion) — pixel offset split into R/B channels.
+      uRgbShiftAmount: { value: Math.max(0.0, Number(this.params.rgbShiftAmount) || 0) },
+      uRgbShiftAngle: { value: (Number(this.params.rgbShiftAngle) || 0) * (Math.PI / 180.0) },
+      // uWindowTexelSize and uMask are per-overlay only (set in _createOverlay).
     };
-
-    // Apply default color.
-    const c = this.params.color;
-    if (c && typeof c === 'object') {
-      this._sharedUniforms.uColor.value.set(
-        Number(c.r) || 0,
-        Number(c.g) || 0,
-        Number(c.b) || 0
-      );
-    }
   }
 
   _createOverlay(tileId, floorIndex, { maskUrl, centerX, centerY, w, h, z, rotation }) {
@@ -237,11 +270,17 @@ export class WindowLightEffectV2 {
 
     const geo = new THREE.PlaneGeometry(w, h);
 
+    // uWindowTexelSize is per-overlay because each tile has its own pixel dimensions.
+    // It is updated once the texture loads (actual texel size from tex.image).
+    // uMask and uMaskReady are also per-overlay.
+    // All other uniforms reference the shared objects so param changes propagate
+    // to every overlay without iterating them.
     const uniforms = {
       ...this._sharedUniforms,
-      // Per-overlay uniforms — not shared.
       uMask: { value: null },
       uMaskReady: { value: 0.0 },
+      // 1/texWidth, 1/texHeight — set once texture loads.
+      uWindowTexelSize: { value: new THREE.Vector2(1.0 / w, 1.0 / h) },
     };
 
     const material = new THREE.ShaderMaterial({
@@ -266,36 +305,66 @@ export class WindowLightEffectV2 {
         uniform float uFlickerEnabled;
         uniform float uFlickerSpeed;
         uniform float uFlickerAmount;
+        uniform float uRgbShiftAmount;
+        uniform float uRgbShiftAngle;
+        uniform vec2  uWindowTexelSize;
         uniform sampler2D uMask;
         uniform float uMaskReady;
         varying vec2 vUv;
+
+        float msLuminance(vec3 c) {
+          return dot(c, vec3(0.2126, 0.7152, 0.0722));
+        }
 
         void main() {
           // Discard until the mask texture has finished loading to avoid
           // white-tile flash caused by sampling a null/uninitialized sampler.
           if (uEffectEnabled < 0.5 || uMaskReady < 0.5) discard;
 
-          vec4 m = texture2D(uMask, vUv);
-          // _Windows/_Structural mask: RGB luminance = light pool shape/colour,
-          // alpha = boundary cutout (prevents light leaking outside the map).
-          float maskScalar = dot(m.rgb, vec3(0.2126, 0.7152, 0.0722)) * m.a;
+          // Boundary alpha check at the unshifted UV — cuts out areas outside
+          // the map tile footprint.
+          vec4 mCenter = texture2D(uMask, vUv);
+          if (mCenter.a < 0.01) discard;
+
+          // RGB Shift (chromatic dispersion / refraction):
+          // Sample the mask three times — R channel offset forward along the
+          // shift direction, G channel unshifted, B channel offset backward.
+          // This replicates the V1 WindowLightEffect refraction behaviour.
+          vec2 shiftDir = vec2(cos(uRgbShiftAngle), sin(uRgbShiftAngle));
+          vec2 rOffset  = shiftDir * uRgbShiftAmount * uWindowTexelSize;
+          vec2 bOffset  = -rOffset;
+
+          float maskR = msLuminance(texture2D(uMask, clamp(vUv + rOffset, 0.001, 0.999)).rgb);
+          float maskG = msLuminance(mCenter.rgb);
+          float maskB = msLuminance(texture2D(uMask, clamp(vUv + bOffset, 0.001, 0.999)).rgb);
+
+          // Average luminance drives the overall shape/falloff.
+          float maskScalar = (maskR + maskG + maskB) / 3.0;
           if (maskScalar <= 0.001) discard;
 
           // Shape with gamma-like falloff — matches V1 uFalloff usage.
-          float shaped = pow(clamp(maskScalar, 0.0, 1.0), uFalloff);
+          // Apply falloff per-channel so the RGB split is visible in the shaped output.
+          vec3 shaped = pow(clamp(vec3(maskR, maskG, maskB), 0.0, 1.0), vec3(uFalloff));
 
           // Optional subtle flicker.
           float flicker = 1.0;
           if (uFlickerEnabled > 0.5) {
-            float s = sin(uTime * 6.28318 * uFlickerSpeed);
-            flicker = 1.0 + (s * 0.5 + 0.5) * uFlickerAmount;
+            // Use two sine frequencies for a less mechanical flicker.
+            float s = sin(uTime * 6.28318 * uFlickerSpeed)
+                    * 0.7 + sin(uTime * 6.28318 * uFlickerSpeed * 2.73) * 0.3;
+            flicker = 1.0 + s * uFlickerAmount;
           }
 
-          // Tint with the mask's own RGB colour, modulated by the configured colour.
-          vec3 tintedColor = m.rgb * uColor;
+          // The _Windows mask is a greyscale luminance/shape map — its RGB
+          // channels are all equal and carry no color information. Use the
+          // per-channel shaped luminance directly and tint with uColor only.
+          // This matches V1 behaviour: mask drives shape, uColor drives tint.
+          vec3 lightOut = shaped * uColor * uIntensity * flicker;
 
-          float lum = uIntensity * shaped * flicker;
-          gl_FragColor = vec4(tintedColor * lum, shaped);
+          // Output raw linear light — no tone mapping on additive overlays.
+          // AdditiveBlending: dst += src.rgb * src.a. Alpha=1 so the full
+          // light value is added; intensity is baked into RGB.
+          gl_FragColor = vec4(lightOut, 1.0);
         }
       `,
     });
@@ -308,20 +377,31 @@ export class WindowLightEffectV2 {
     mesh.rotation.z = rotation;
     mesh.renderOrder = 40;
 
-    // Register with the bus so floor visibility is handled automatically.
-    this._renderBus.addEffectOverlay(`${tileId}_windows`, mesh, floorIndex);
+    // Add to the isolated window light scene (not the bus scene).
+    // Floor visibility is managed by onFloorChange() instead of the bus.
+    this._scene.add(mesh);
     this._overlays.set(tileId, { mesh, material, floorIndex });
 
     // Load texture asynchronously.
     const loader = new THREE.TextureLoader();
     loader.load(maskUrl, (tex) => {
-      // Window masks are data-ish; keep linear.
+      // Window masks are greyscale luminance/shape data — treat as linear.
+      // Setting SRGBColorSpace would gamma-decode the mask values, making the
+      // shape brighter than intended and breaking the luminance-driven falloff.
+      tex.colorSpace = THREE.NoColorSpace;
       tex.wrapS = THREE.ClampToEdgeWrapping;
       tex.wrapT = THREE.ClampToEdgeWrapping;
       tex.minFilter = THREE.LinearFilter;
       tex.magFilter = THREE.LinearFilter;
       tex.generateMipmaps = false;
       tex.needsUpdate = true;
+
+      // Update texel size from actual image dimensions so the RGB shift is
+      // expressed in true pixels regardless of tile display size.
+      const imgW = tex.image?.width ?? w;
+      const imgH = tex.image?.height ?? h;
+      material.uniforms.uWindowTexelSize.value.set(1.0 / imgW, 1.0 / imgH);
+
       material.uniforms.uMask.value = tex;
       material.uniforms.uMaskReady.value = 1.0;
       material.needsUpdate = true;

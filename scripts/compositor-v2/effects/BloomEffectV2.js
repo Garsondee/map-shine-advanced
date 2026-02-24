@@ -88,7 +88,9 @@ export class BloomEffectV2 {
       this.params.threshold
     );
 
-    // Internal RT for the pass to read from and write back to
+    // Internal RT for the pass to read from and write back to.
+    // LinearSRGBColorSpace: bloom operates in linear space so the threshold
+    // and additive composite are physically correct.
     this._bloomInputRT = new THREE.WebGLRenderTarget(w, h, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
@@ -97,6 +99,7 @@ export class BloomEffectV2 {
       depthBuffer: false,
       stencilBuffer: false,
     });
+    this._bloomInputRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
 
     // Copy scene for RT-to-RT blits
     this._copyScene = new THREE.Scene();

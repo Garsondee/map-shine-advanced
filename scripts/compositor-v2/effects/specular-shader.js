@@ -335,13 +335,11 @@ export function getFragmentShader(maxLights = 64) {
       }
     }
 
-    // ── Tone mapping ──────────────────────────────────────────────────────────
-
-    vec3 reinhardJodie(vec3 c) {
-      float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-      vec3 tc = c / (c + 1.0);
-      return mix(c / (l + 1.0), tc, tc);
-    }
+    // NOTE: No tone mapping here. Additive overlay shaders must output raw
+    // linear light values so they add correctly onto the linear scene RT.
+    // Applying tone mapping before additive blending compresses HDR values
+    // to [0,1], causing saturation to white/grey at high intensities instead
+    // of bright light. The final blit to screen handles the sRGB encode.
 
     // ── Main ──────────────────────────────────────────────────────────────────
 
@@ -571,9 +569,8 @@ export function getFragmentShader(maxLights = 64) {
 
       // ── Final composite (specular only — additive blending handles albedo) ─
       vec3 litSpecular = specularColor + wetSpecularColor + frostSpecularColor;
-      vec3 outColor = reinhardJodie(litSpecular);
-
-      gl_FragColor = vec4(outColor, 1.0);
+      // Output raw linear light — no tone mapping on additive overlays.
+      gl_FragColor = vec4(litSpecular, 1.0);
     }
   `;
 }

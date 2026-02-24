@@ -7,13 +7,14 @@
  *
  * Carried over verbatim from V1 WaterEffectV2 — the full water shader.
  *
- * Stripped from V1:
- *   - Depth pass occlusion
+ * Still stripped from V1:
  *   - Token mask (tTokenMask)
+ *
+ * Backfilled in V2:
+ *   - Depth pass occlusion
  *   - Cloud shadow integration (tCloudShadow)
  *   - Outdoors mask / indoor damping (tOutdoorsMask)
  *   - Water occluder alpha (tWaterOccluderAlpha)
- *   These will be layered in as corresponding V2 systems come online.
  *
  * Preserved from V1 (all visual features):
  *   - Texture-based noise (replaces procedural hash for fast compile)
@@ -86,6 +87,9 @@ uniform float uWaveEvolutionEnabled;
 uniform float uWaveEvolutionSpeed;
 uniform float uWaveEvolutionAmount;
 uniform float uWaveEvolutionScale;
+uniform float uWaveIndoorDampingEnabled;
+uniform float uWaveIndoorDampingStrength;
+uniform float uWaveIndoorMinFactor;
 
 // ── Chromatic aberration ─────────────────────────────────────────────────
 uniform float uChromaticAberrationStrengthPx;
@@ -109,6 +113,11 @@ uniform float uRainPrecipitation;
 uniform float uRainSplit;
 uniform float uRainBlend;
 uniform float uRainGlobalStrength;
+uniform sampler2D tOutdoorsMask;
+uniform float uHasOutdoorsMask;
+uniform float uOutdoorsMaskFlipY;
+uniform float uRainIndoorDampingEnabled;
+uniform float uRainIndoorDampingStrength;
 
 uniform float uRainRippleStrengthPx;
 uniform float uRainRippleScale;
@@ -173,6 +182,22 @@ uniform float uSpecShoreBias;
 uniform float uSpecDistortionNormalStrength;
 uniform float uSpecAnisotropy;
 uniform float uSpecAnisoRatio;
+uniform sampler2D tCloudShadow;
+uniform float uHasCloudShadow;
+uniform float uCloudShadowEnabled;
+uniform float uCloudShadowDarkenStrength;
+uniform float uCloudShadowDarkenCurve;
+uniform float uCloudShadowSpecularKill;
+uniform float uCloudShadowSpecularCurve;
+
+// ── Caustics ─────────────────────────────────────────────────────────────
+uniform float uCausticsEnabled;
+uniform float uCausticsIntensity;
+uniform float uCausticsScale;
+uniform float uCausticsSpeed;
+uniform float uCausticsSharpness;
+uniform float uCausticsEdgeLo;
+uniform float uCausticsEdgeHi;
 
 // ── Foam ─────────────────────────────────────────────────────────────────
 uniform vec3 uFoamColor;
@@ -254,6 +279,7 @@ uniform float uHasSceneRect;
 uniform vec3 uSkyColor;
 uniform float uSkyIntensity;
 uniform float uSceneDarkness;
+uniform float uActiveLevelElevation;
 
 ${DepthShaderChunks.uniforms}
 ${DepthShaderChunks.linearize}
@@ -629,6 +655,12 @@ vec2 foundryToSceneUv(vec2 foundryPos) {
 
 float remap01(float v, float lo, float hi) { return clamp((v - lo) / max(1e-5, hi - lo), 0.0, 1.0); }
 
+float sampleOutdoorsMask(vec2 sceneUv01) {
+  float y = (uOutdoorsMaskFlipY > 0.5) ? (1.0 - sceneUv01.y) : sceneUv01.y;
+  vec2 uv = vec2(sceneUv01.x, y);
+  return texture2D(tOutdoorsMask, uv).r;
+}
+
 float shoreFactor(float shore01) {
   float lo = clamp(uDistortionShoreRemapLo, 0.0, 1.0);
   float hi = clamp(uDistortionShoreRemapHi, 0.0, 1.0);
@@ -690,6 +722,43 @@ float getShaderFlecks(vec2 sceneUv, float shore, float inside, float foamAmount)
 #else
 float getShaderFlecks(vec2 sceneUv, float shore, float inside, float foamAmount) { return 0.0; }
 #endif
+
+// V1-accurate FBM: layered value noise with lacunarity/gain, returns [-1..1].
+// Matches DistortionManager's fbm(p, octaves, lacunarity, gain) exactly.
+float waterFbm(vec2 p, int octaves, float lacunarity, float gain) {
+  float sum = 0.0;
+  float amp = 1.0;
+  float freq = 1.0;
+  float maxAmp = 0.0;
+  for (int i = 0; i < 8; i++) {
+    if (i >= octaves) break;
+    // valueNoise returns [0..1]; remap to [-1..1] for signed accumulation.
+    sum += (valueNoise(p * freq) * 2.0 - 1.0) * amp;
+    maxAmp += amp;
+    freq *= lacunarity;
+    amp *= gain;
+  }
+  return sum / maxAmp;
+}
+
+// V1-accurate caustics: ridged FBM produces thin bright filaments, not blobs.
+// Matches DistortionManager causticsPattern() exactly.
+float causticsPattern(vec2 sceneUv, float t, float scale, float speed, float sharpness) {
+  vec2 p = sceneUv * scale;
+  float tt = t * speed;
+  float n1 = waterFbm(p + vec2(tt * 0.12, -tt * 0.09), 4, 2.0, 0.5);
+  float n2 = waterFbm(p * 1.7 + vec2(-tt * 0.08, tt * 0.11), 3, 2.1, 0.55);
+  // Blend two FBM layers, then remap to [0..1].
+  float n = 0.6 * n1 + 0.4 * n2;
+  float nn = clamp(0.5 + 0.5 * n, 0.0, 1.0);
+  // Ridged transform: 1 - |2x - 1| creates thin bright filaments at peaks.
+  float ridge = 1.0 - abs(2.0 * nn - 1.0);
+  // Sharpness controls filament width: high sharpness = narrower, brighter lines.
+  float s = max(0.1, sharpness);
+  float w = 0.18 / (1.0 + s * 0.65);
+  float c = smoothstep(1.0 - w, 1.0, ridge);
+  return c;
+}
 ` + getFragmentShaderPart2();
 }
 
@@ -900,7 +969,10 @@ void main() {
     if (deviceDepth < 0.9999) {
       float storedLinear = msa_linearizeDepth(deviceDepth);
       float ratio = storedLinear / max(uGroundDistance, 1.0);
-      if (ratio < 0.99995) {
+      float aboveGround = max(0.0, uGroundDistance - storedLinear);
+      float aboveActiveFloor = aboveGround - uActiveLevelElevation;
+      // Relative threshold so upper-floor tiles don't fully cull lower-floor water.
+      if (ratio < 0.99995 && aboveActiveFloor > 0.5) {
         gl_FragColor = base;
         return;
       }
@@ -925,6 +997,10 @@ void main() {
   float shore = clamp(exposure01, 0.0, 1.0);
   float distInside = distortionInsideFromSdf(sdf01);
   float distMask = distInside * shoreFactor(shore);
+  float outdoorStrength = 1.0;
+  if (uHasOutdoorsMask > 0.5) {
+    outdoorStrength = sampleOutdoorsMask(worldSceneUv);
+  }
 
   // Debug views
   if (uDebugView > 0.5) {
@@ -957,6 +1033,12 @@ void main() {
   waveGrad = rotate2D(waveGrad, uWaveAppearanceRotRad + 1.5707963);
   vec2 flowN = smoothFlow2D(sceneUv);
   float waveStrength = uWaveStrength;
+  if (uWaveIndoorDampingEnabled > 0.5) {
+    float dampStrength = clamp(uWaveIndoorDampingStrength, 0.0, 1.0);
+    float minFactor = clamp(uWaveIndoorMinFactor, 0.0, 1.0);
+    float waveMult = mix(1.0, mix(minFactor, 1.0, outdoorStrength), dampStrength);
+    waveStrength *= waveMult;
+  }
   float distortionPx = uDistortionStrengthPx;
   vec2 combinedVec = waveGrad * waveStrength + flowN * 0.35;
   combinedVec = combinedVec / (1.0 + 0.75 * length(combinedVec));
@@ -971,6 +1053,11 @@ void main() {
 
   // Rain distortion
   vec2 rainOffPx = computeRainOffsetPx(worldSceneUv);
+  if (uRainIndoorDampingEnabled > 0.5) {
+    float dampStrength = clamp(uRainIndoorDampingStrength, 0.0, 1.0);
+    float indoorMult = mix(1.0, outdoorStrength, dampStrength);
+    rainOffPx *= indoorMult;
+  }
   offsetUvRaw += (rainOffPx * texel) * zoom;
   vec2 offsetUv = offsetUvRaw * distMask;
   vec2 uv1 = clamp(vUv + offsetUv, vec2(0.001), vec2(0.999));
@@ -997,6 +1084,17 @@ void main() {
 
   vec3 col = refracted.rgb;
 
+  // Cloud shadows (screen-space), shared from CloudEffect output.
+  float cloudShadow = 0.0;
+  if (uCloudShadowEnabled > 0.5 && uHasCloudShadow > 0.5) {
+    float cloudLitRaw = texture2D(tCloudShadow, vUv).r;
+    cloudShadow = clamp(1.0 - cloudLitRaw, 0.0, 1.0);
+    float dStrength = clamp(uCloudShadowDarkenStrength, 0.0, 4.0);
+    float dCurve = max(0.01, uCloudShadowDarkenCurve);
+    float darken = dStrength * pow(cloudShadow, dCurve);
+    col *= max(0.0, 1.0 - darken);
+  }
+
   // Murk
   float murkFactor = 0.0;
   col = applyMurk(col, sceneUv, shore, inside, uTime, murkFactor);
@@ -1005,6 +1103,42 @@ void main() {
   float effectiveTint = clamp(uTintStrength, 0.0, 1.0) * (1.0 - (murkFactor * 0.5));
   float k = effectiveTint * inside * shore;
   col = mix(col, uTintColor, k);
+
+  // Caustics (underwater highlight patterns) — V1-accurate ridged-FBM filaments.
+  if (uCausticsEnabled > 0.5) {
+    float lo = clamp(uCausticsEdgeLo, 0.0, 1.0);
+    float hi = clamp(uCausticsEdgeHi, 0.0, 1.0);
+    float edgeLo = min(lo, hi - 0.001);
+    float edgeHi = max(hi, edgeLo + 0.001);
+    // V1: edge blur uses blurred depth; we use shore directly (no separate blur tap).
+    float edge = smoothstep(edgeLo, edgeHi, clamp(shore, 0.0, 1.0));
+
+    // V1-accurate depth/coverage: shallow water + shoreline boost.
+    float depth = clamp(1.0 - shore, 0.0, 1.0);
+    float shallow = pow(1.0 - depth, 1.1);
+    float baseCoverage = 0.22;
+    float shoreBoost = clamp(shore, 0.0, 1.0);
+    float coverage = max(shallow, mix(baseCoverage, 1.0, shoreBoost));
+
+    // V1-accurate dual-layer blend: soft base + sharp detail.
+    float cSharp = causticsPattern(sceneUv, uTime, uCausticsScale, uCausticsSpeed, uCausticsSharpness);
+    float cSoft  = causticsPattern(sceneUv, uTime * 0.85, uCausticsScale * 0.55, uCausticsSpeed * 0.65, max(0.1, uCausticsSharpness * 0.35));
+    float c = clamp(0.65 * cSoft + 0.95 * cSharp, 0.0, 1.0);
+
+    // V1-accurate cloud-shadow caustics kill.
+    float causticsCloudLit = 1.0;
+    if (uCloudShadowEnabled > 0.5 && uHasCloudShadow > 0.5) {
+      float cloudLitRaw = texture2D(tCloudShadow, vUv).r;
+      float cs = clamp(1.0 - cloudLitRaw, 0.0, 1.0);
+      causticsCloudLit = max(0.0, 1.0 - cs);
+    }
+
+    float causticsAmt = clamp(uCausticsIntensity, 0.0, 8.0) * coverage;
+    causticsAmt *= edge * causticsCloudLit * inside;
+    // V1 tint-blended caustics colour (warm white + water tint).
+    vec3 causticsColor = mix(vec3(1.0, 1.0, 0.85), uTintColor, 0.15);
+    col += causticsColor * c * causticsAmt * 1.35;
+  }
 
   // Sand
   #ifdef USE_SAND
@@ -1074,6 +1208,13 @@ void main() {
   vec3 F = F0 + (1.0 - F0) * pow(1.0 - VoH, 5.0);
   vec3 specBRDF = (D * G) * F / max(1e-6, 4.0 * NoV * NoL);
   vec3 spec = specBRDF * NoL;
+
+  if (uCloudShadowEnabled > 0.5 && cloudShadow > 1e-5) {
+    float kStrength = clamp(uCloudShadowSpecularKill, 0.0, 1.0);
+    float kCurve = max(0.01, uCloudShadowSpecularCurve);
+    float litPow = pow(clamp(1.0 - cloudShadow, 0.0, 1.0), kCurve);
+    spec *= mix(1.0, litPow, kStrength);
+  }
   float specMask = pow(clamp(distInside, 0.0, 1.0), clamp(uSpecMaskGamma, 0.05, 12.0));
   spec *= specMask;
   float shoreBias = mix(1.0, shore, clamp(uSpecShoreBias, 0.0, 1.0));

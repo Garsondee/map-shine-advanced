@@ -104,10 +104,14 @@ export class LightingEffectV2 {
       stencilBuffer: false,
     };
     this._lightRT = new THREE.WebGLRenderTarget(w, h, rtOpts);
+    // Linear storage: light accumulation is additive in linear space.
+    this._lightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
     this._darknessRT = new THREE.WebGLRenderTarget(w, h, {
       ...rtOpts,
       type: THREE.UnsignedByteType,
     });
+    // Linear storage: darkness mask is a scalar, not a colour.
+    this._darknessRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
 
     // ── Scenes for light/darkness meshes ──────────────────────────────
     this._lightScene = new THREE.Scene();
@@ -441,21 +445,35 @@ export class LightingEffectV2 {
   /**
    * Execute the lighting post-processing pass:
    *   1. Render light meshes → lightRT (additive accumulation)
+   *   1b. Render windowLightScene → lightRT (additive, no clear)
    *   2. Render darkness meshes → darknessRT
    *   3. Compose: sceneRT * (ambient + lights - darkness) → outputRT
+   *
+   * Window light is fed into the light accumulation buffer so the compose
+   * shader applies it as `albedo * totalIllumination` — this tints the glow
+   * by the surface colour, preserving hue instead of washing it out.
    *
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.Camera} camera - The main perspective camera
    * @param {THREE.WebGLRenderTarget} sceneRT - Bus scene input
    * @param {THREE.WebGLRenderTarget} outputRT - Where to write the lit result
+   * @param {THREE.Scene|null} [windowLightScene=null] - Optional extra scene
+   *   rendered additively into lightRT after ThreeLightSource meshes.
    */
-  render(renderer, camera, sceneRT, outputRT) {
+  render(renderer, camera, sceneRT, outputRT, windowLightScene = null) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._darknessRT || !this._composeMaterial) return;
 
     // Lazy sync lights on first render frame
     if (!this._lightsSynced) {
       this.syncAllLights();
+      // One-shot diagnostic: confirm pipeline inputs are valid.
+      log.info('LightingEffectV2 first render:',
+        'sceneRT', sceneRT?.width, 'x', sceneRT?.height,
+        '| lightRT', this._lightRT?.width, 'x', this._lightRT?.height,
+        '| outputRT', outputRT?.width, 'x', outputRT?.height,
+        '| windowLightScene children', windowLightScene?.children?.length ?? 'none'
+      );
     }
 
     // Ensure RTs match drawing buffer size
@@ -480,6 +498,20 @@ export class LightingEffectV2 {
     renderer.autoClear = true;
     if (this._lightScene) {
       renderer.render(this._lightScene, camera);
+    }
+
+    // ── Pass 1b: Window light → lightRT (additive, no clear) ─────────
+    // Window light overlays use AdditiveBlending so they accumulate on top
+    // of the ThreeLightSource contributions without clearing the buffer.
+    if (windowLightScene) {
+      try {
+        renderer.autoClear = false;
+        renderer.render(windowLightScene, camera);
+      } catch (err) {
+        log.error('LightingEffectV2: window light render failed:', err);
+      } finally {
+        renderer.autoClear = true;
+      }
     }
 
     // ── Pass 2: Accumulate darkness contributions ─────────────────────

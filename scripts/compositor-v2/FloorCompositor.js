@@ -14,10 +14,11 @@
  * Current effects (bus overlays — rendered in step 1):
  *   - **SpecularEffectV2**: Per-tile additive overlays driven by _Specular masks.
  *   - **FireEffectV2**: Per-floor particle systems driven by _Fire masks.
- *   - **WindowLightEffectV2**: Per-tile additive overlays driven by _Windows masks.
  *
  * Post-processing effects (step 2):
  *   - **LightingEffectV2**: Ambient + dynamic lights + darkness.
+ *     Window light overlays are fed into the light accumulation RT here so
+ *     the compose shader tints them by surface albedo (preserving hue).
  *   - **WaterEffectV2**: Water tint/distortion/specular/foam driven by _Water masks.
  *   - **SkyColorEffectV2**: Time-of-day atmospheric color grading.
  *   - **BloomEffectV2**: Screen-space glow via UnrealBloomPass.
@@ -88,10 +89,11 @@ export class FloorCompositor {
 
     /**
      * V2 Window Light Effect: per-tile additive overlays driven by _Windows masks.
-     * Overlay meshes live in the bus scene so they benefit from floor visibility.
+     * Overlays live in an ISOLATED scene rendered AFTER the lighting pass so they
+     * are not multiplied by ambient/darkness (which would wash out saturation).
      * @type {WindowLightEffectV2}
      */
-    this._windowLightEffect = new WindowLightEffectV2(this._renderBus);
+    this._windowLightEffect = new WindowLightEffectV2();
 
     /**
      * V2 Lighting Effect: post-processing pass that applies ambient light,
@@ -198,8 +200,17 @@ export class FloorCompositor {
     const w = Math.max(1, this._sizeVec.x);
     const h = Math.max(1, this._sizeVec.y);
 
-    // ── Render targets ────────────────────────────────────────────────────
+    // ── Render targets ────────────────────────────────────────────────
     // HalfFloat for HDR headroom (additive specular/window light can exceed 1.0).
+    //
+    // IMPORTANT: All intermediate RTs must use LinearSRGBColorSpace so that
+    // Three.js does NOT apply sRGB encoding on write or decoding on read.
+    // With renderer.outputColorSpace = SRGBColorSpace, Three.js would otherwise
+    // gamma-compress every render-to-RT, causing post-processing shaders to
+    // receive sRGB-encoded values where additive operations (caustics, window
+    // light, specular) produce grey mist instead of bright light.
+    // The sRGB encode happens exactly once: in the final blit to the screen
+    // framebuffer (null render target).
     const rtOpts = {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
@@ -209,13 +220,19 @@ export class FloorCompositor {
       stencilBuffer: false,
     };
     this._sceneRT = new THREE.WebGLRenderTarget(w, h, rtOpts);
+    this._sceneRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
 
     // Ping-pong pair for post-processing chain. No depth needed for post passes.
     const postOpts = { ...rtOpts, depthBuffer: false };
     this._postA = new THREE.WebGLRenderTarget(w, h, postOpts);
+    this._postA.texture.colorSpace = THREE.LinearSRGBColorSpace;
     this._postB = new THREE.WebGLRenderTarget(w, h, postOpts);
+    this._postB.texture.colorSpace = THREE.LinearSRGBColorSpace;
 
     // Water occluder mask: screen-space alpha mask of currently viewed floor tiles.
+    // Validated approach: this mask is sampled directly in the water post shader
+    // to suppress water under upper-floor geometry while preserving water through
+    // true openings. Keep this path as the primary occlusion mechanism.
     // UnsignedByte is sufficient; we only sample alpha.
     this._waterOccluderRT = new THREE.WebGLRenderTarget(w, h, {
       minFilter: THREE.LinearFilter,
@@ -386,11 +403,10 @@ export class FloorCompositor {
 
     // ── Bind per-frame textures and camera to effects ────────────────────
     this._specularEffect.render(this.renderer, this.camera);
-    this._windowLightEffect.render(this.renderer, this.camera);
 
     // ── Step 1: Render bus scene → sceneRT ───────────────────────────────
-    // The bus scene contains albedo tiles + specular/window-light/fire overlays.
-    // Additive blending on the overlays composites them on top of albedo.
+    // The bus scene contains albedo tiles + specular/fire overlays.
+    // Window light is NOT in the bus scene — it renders after lighting.
     this._renderBus.renderTo(this.renderer, this.camera, this._sceneRT);
 
     // ── Step 2: Post-processing chain ────────────────────────────────────
@@ -398,8 +414,14 @@ export class FloorCompositor {
     // `currentInput` tracks which RT holds the latest result.
     let currentInput = this._sceneRT;
 
-    // Lighting pass: sceneRT → postA (ambient + dynamic lights + darkness).
-    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA);
+    // Lighting pass: sceneRT → postA.
+    // Window light scene is passed in so it accumulates into the light RT
+    // alongside ThreeLightSources — the compose shader then applies
+    // litColor = albedo * totalIllumination, which tints the glow by the
+    // surface colour instead of washing it out with pure white addition.
+    const winScene = this._windowLightEffect.enabled
+      ? this._windowLightEffect._scene : null;
+    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene);
     currentInput = this._postA;
 
     // Water pass: refracts/tints/specular the lit scene before atmospheric grading.
@@ -483,6 +505,52 @@ export class FloorCompositor {
     renderer.setRenderTarget(prevTarget);
   }
 
+  // ── Settings Replay ───────────────────────────────────────────────────────
+
+  /**
+   * Apply a single saved parameter to the named effect.
+   *
+   * This is called by EffectComposer immediately after lazy creation to replay
+   * all params that the Tweakpane UI already loaded from scene flags — because
+   * the UI fires its initial callbacks before the FloorCompositor exists.
+   *
+   * Mirrors the logic of `_propagateToV2` in canvas-replacement.js.
+   *
+   * @param {string} effectKey - Property name on FloorCompositor (e.g. '_lightingEffect')
+   * @param {string} paramId   - Parameter key (e.g. 'intensity')
+   * @param {*}      value     - Value to apply
+   */
+  applyParam(effectKey, paramId, value) {
+    try {
+      const effect = this[effectKey];
+      if (!effect) return;
+
+      // 'enabled' / 'masterEnabled': use the getter/setter when the effect has
+      // a proper accessor (backed by _enabled). Effects like WaterEffectV2 use
+      // a plain `this.enabled` property as a render-pass gate — writing false
+      // to that would silently disable the entire pass. Detect accessor vs plain
+      // property by checking whether the prototype defines a getter.
+      if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        const proto = Object.getPrototypeOf(effect);
+        const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'enabled') : null;
+        const hasAccessor = descriptor && typeof descriptor.get === 'function';
+        if (hasAccessor) {
+          // Proper getter/setter — use it so internal state (uniform, _enabled) stays in sync.
+          try { effect.enabled = !!value; } catch (_) {}
+        }
+        // Also update params.enabled if the effect exposes it, so update() picks it up.
+        if (effect.params && Object.prototype.hasOwnProperty.call(effect.params, 'enabled')) {
+          effect.params.enabled = !!value;
+        }
+        return;
+      }
+
+      if (effect.params && Object.prototype.hasOwnProperty.call(effect.params, paramId)) {
+        effect.params[paramId] = value;
+      }
+    } catch (_) {}
+  }
+
   // ── Floor Visibility ──────────────────────────────────────────────────────
 
   /**
@@ -508,6 +576,8 @@ export class FloorCompositor {
     this._renderBus.setVisibleFloors(maxFloorIndex);
     // Notify fire effect of floor change so it can swap active particle systems.
     this._fireEffect.onFloorChange(maxFloorIndex);
+    // Update window light overlay visibility (isolated scene, not bus-managed).
+    this._windowLightEffect.onFloorChange(maxFloorIndex);
     // Swap active water SDF data for the new floor.
     this._waterEffect.onFloorChange(maxFloorIndex);
     log.debug(`FloorCompositor: visibility set to floors 0–${maxFloorIndex}`);

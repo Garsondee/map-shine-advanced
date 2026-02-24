@@ -1021,7 +1021,7 @@ export class WaterEffectV2 {
 
     // ── Foundry environment ───────────────────────────────────────────────
     try {
-      u.uSceneDarkness.value = canvas?.environment?.darknessLevel ?? 0;
+      u.uSceneDarkness.value = globalThis.canvas?.environment?.darknessLevel ?? 0;
     } catch (_) {}
 
     // ── Shader defines (conditional compilation) ──────────────────────────
@@ -1177,23 +1177,24 @@ export class WaterEffectV2 {
       }
     } catch (_) { /* view bounds remain as last set */ }
 
-    // ── Scene dimensions + rect ───────────────────────────────────────────
+    // ── Scene dimensions + rect ────────────────────────────────────────────────────
     try {
-      const dims = canvas?.dimensions;
+      // Use globalThis.canvas to avoid ReferenceError in strict ES module scope.
+      const dims = globalThis.canvas?.dimensions;
       if (dims) {
         const totalW = dims.width ?? 1;
         const totalH = dims.height ?? 1;
         u.uSceneDimensions.value.set(totalW, totalH);
 
-        const rect = dims.sceneRect ?? dims;
-        const sx = rect.x ?? dims.sceneX ?? 0;
-        const sy = rect.y ?? dims.sceneY ?? 0;
-        const sw = rect.width ?? dims.sceneWidth ?? totalW;
-        const sh = rect.height ?? dims.sceneHeight ?? totalH;
+        const rect = dims.sceneRect ?? null;
+        const sx = rect?.x ?? dims.sceneX ?? 0;
+        const sy = rect?.y ?? dims.sceneY ?? 0;
+        const sw = rect?.width ?? dims.sceneWidth ?? totalW;
+        const sh = rect?.height ?? dims.sceneHeight ?? totalH;
         u.uSceneRect.value.set(sx, sy, sw, sh);
         u.uHasSceneRect.value = 1.0;
       }
-    } catch (_) {}
+    } catch (e) { log.warn('WaterEffectV2: scene rect update failed:', e); }
 
     // ── Sky color (from V1 skyColor if available) ─────────────────────────
     try {
@@ -1239,7 +1240,6 @@ export class WaterEffectV2 {
     if (bestFloor >= 0 && bestFloor !== this._activeFloorIndex) {
       this._activeFloorIndex = bestFloor;
       this._applyFloorWaterData(bestFloor);
-      log.debug(`WaterEffectV2: switched to floor ${bestFloor} water data`);
     } else if (bestFloor < 0) {
       // No water on any visible floor — disable water data
       if (this._composeMaterial) {

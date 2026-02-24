@@ -945,7 +945,6 @@ void main() {
   vec4 base = texture2D(tDiffuse, vUv);
   float isEnabled = step(0.5, uWaterEnabled) * step(0.5, uHasWaterData);
   if (isEnabled < 0.5) { gl_FragColor = base; return; }
-
   // Occluder mask: when viewing upper floors, we render upper-floor tiles
   // into this mask. Any non-zero alpha means the current pixel is covered
   // by an upper-floor tile and should not receive water shading.

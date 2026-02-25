@@ -133,6 +133,21 @@ export class LightingEffectV2 {
         // lights (which add on top) still punch through the shadow.
         tCloudShadow:    { value: null },
         uHasCloudShadow: { value: 0 },
+        // Building shadow: greyscale factor from BuildingShadowsEffectV2.
+        // Applied after cloud shadow — dims only the ambient component.
+        tBuildingShadow:     { value: null },
+        uHasBuildingShadow:  { value: 0 },
+        uBuildingShadowOpacity: { value: 0.75 },
+        // World-space UV reconstruction for building shadow sampling.
+        // The bake RT is in scene UV space (0..1 = scene rect in Foundry world coords).
+        // To sample it correctly, reconstruct world XY per fragment from the
+        // camera frustum corners (same approach as CloudEffectV2).
+        // uViewBoundsMin/Max: world-space XY of the viewport corners at ground plane.
+        // uSceneOrigin/Size: scene rect origin + size in Foundry world coords (pixels).
+        uBldViewBoundsMin: { value: new THREE.Vector2(0, 0) },
+        uBldViewBoundsMax: { value: new THREE.Vector2(1, 1) },
+        uBldSceneOrigin:   { value: new THREE.Vector2(0, 0) },
+        uBldSceneSize:     { value: new THREE.Vector2(1, 1) },
         uDarknessLevel:      { value: 0.0 },
         uAmbientBrightest:   { value: new THREE.Color(1, 1, 1) },
         uAmbientDarkness:    { value: new THREE.Color(0.141, 0.141, 0.282) },
@@ -155,6 +170,13 @@ export class LightingEffectV2 {
         uniform sampler2D tDarkness;
         uniform sampler2D tCloudShadow;
         uniform float uHasCloudShadow;
+        uniform sampler2D tBuildingShadow;
+        uniform float uHasBuildingShadow;
+        uniform float uBuildingShadowOpacity;
+        uniform vec2 uBldViewBoundsMin;
+        uniform vec2 uBldViewBoundsMax;
+        uniform vec2 uBldSceneOrigin;
+        uniform vec2 uBldSceneSize;
         uniform float uDarknessLevel;
         uniform vec3 uAmbientBrightest;
         uniform vec3 uAmbientDarkness;
@@ -213,6 +235,34 @@ export class LightingEffectV2 {
             // Only dim the ambient portion; keep dynamic-light additive intact.
             vec3 ambientPortion = ambientAfterDark;
             totalIllumination = ambientPortion * shadowFactor + vec3(lightI) * master;
+          }
+
+          // Building shadow: dims only the ambient component.
+          // World-stable UV reconstruction: vUv maps 0..1 across the viewport.
+          // Reconstruct world XY by lerping the camera frustum corners, then
+          // normalise by scene rect to get scene UV (0..1 = scene rect).
+          // This matches CloudEffectV2's uViewBoundsMin/Max approach exactly.
+          if (uHasBuildingShadow > 0.5) {
+            // Reconstruct world XY at this fragment.
+            vec2 worldXY = mix(uBldViewBoundsMin, uBldViewBoundsMax, vUv);
+            // Convert Foundry world Y: Foundry is Y-down, Three.js is Y-up.
+            // The bake mask uses Foundry Y-down space, so flip Y back.
+            // uBldViewBoundsMin/Max are in Three.js Y-up coords; convert to Foundry:
+            //   foundryY = sceneOrigin.y + sceneSize.y - (worldXY.y - sceneOrigin.y)
+            // But since the mask UV just needs 0..1 within the scene rect, and the
+            // scene rect is symmetric, we can derive directly:
+            float sceneUvX = (worldXY.x - uBldSceneOrigin.x) / uBldSceneSize.x;
+            // Y: Three world Y increases upward; Foundry scene rect Y increases downward.
+            // The bake canvas is Foundry-space (flipY=false), so invert Y for scene UV.
+            float sceneUvY = 1.0 - (worldXY.y - uBldSceneOrigin.y) / uBldSceneSize.y;
+            vec2 sceneUv = clamp(vec2(sceneUvX, sceneUvY), 0.0, 1.0);
+            float bldShadow = clamp(texture2D(tBuildingShadow, sceneUv).r, 0.0, 1.0);
+            // Blend: 1.0 = shadow has full effect, 0.0 = no effect.
+            float shadowMix = mix(1.0, bldShadow, uBuildingShadowOpacity);
+            // Apply only to ambient contribution; dynamic lights punch through.
+            vec3 ambientComponent = totalIllumination - vec3(lightI) * master;
+            ambientComponent *= shadowMix;
+            totalIllumination = ambientComponent + vec3(lightI) * master;
           }
 
           // Minimum illumination floor to prevent pure black.
@@ -480,8 +530,11 @@ export class LightingEffectV2 {
    *   rendered additively into lightRT after ThreeLightSource meshes.
    * @param {THREE.Texture|null} [cloudShadowTexture=null] - Shadow factor from
    *   CloudEffectV2 (1.0=lit, 0.0=shadowed). Dims ambient illumination under clouds.
+   * @param {THREE.Texture|null} [buildingShadowTexture=null] - Shadow factor from
+   *   BuildingShadowsEffectV2 (1.0=lit, 0.0=shadowed). Applied in scene UV space;
+   *   uSceneBounds + uCanvasSize are updated from canvas.dimensions each frame.
    */
-  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null) {
+  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, buildingShadowTexture = null) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._darknessRT || !this._composeMaterial) return;
 
@@ -558,6 +611,56 @@ export class LightingEffectV2 {
     } else {
       cu.tCloudShadow.value    = null;
       cu.uHasCloudShadow.value = 0;
+    }
+    // Bind building shadow factor texture (null-safe: shader gates on uHasBuildingShadow).
+    if (buildingShadowTexture) {
+      cu.tBuildingShadow.value    = buildingShadowTexture;
+      cu.uHasBuildingShadow.value = 1;
+      cu.uBuildingShadowOpacity.value = 0.75; // driven from params when wired
+      // World-stable UV reconstruction — same approach as CloudEffectV2:
+      // Pass camera frustum world-space corners + scene rect so the fragment
+      // shader can reconstruct world XY and convert to scene UV per-pixel.
+      // This is view-stable at any pan/zoom level.
+      try {
+        const dims = canvas?.dimensions;
+        const sc = window.MapShine?.sceneComposer;
+        const cam = camera;
+        if (cam && dims) {
+          let vMinX = 0, vMinY = 0, vMaxX = 1, vMaxY = 1;
+          if (cam.isOrthographicCamera) {
+            vMinX = cam.position.x + cam.left   / cam.zoom;
+            vMinY = cam.position.y + cam.bottom / cam.zoom;
+            vMaxX = cam.position.x + cam.right  / cam.zoom;
+            vMaxY = cam.position.y + cam.top    / cam.zoom;
+          } else {
+            const groundZ = sc?.groundZ ?? 0;
+            const dist = Math.max(1e-3, Math.abs((cam.position?.z ?? 0) - groundZ));
+            const fovRad = (Number(cam.fov) || 60) * Math.PI / 180;
+            const halfH = dist * Math.tan(fovRad * 0.5);
+            const aspect = Number(cam.aspect) || 1;
+            const halfW = halfH * aspect;
+            vMinX = cam.position.x - halfW;
+            vMaxX = cam.position.x + halfW;
+            vMinY = cam.position.y - halfH;
+            vMaxY = cam.position.y + halfH;
+          }
+          cu.uBldViewBoundsMin.value.set(vMinX, vMinY);
+          cu.uBldViewBoundsMax.value.set(vMaxX, vMaxY);
+          // Scene rect in Foundry world coords (Y-down). The bake canvas is
+          // authored in this space (see OutdoorsMaskProviderV2: flipY=false).
+          // Three.js camera Y is also world-space Y (matching Foundry scene coords
+          // after Coordinates.toWorld conversion), so no extra flip needed here.
+          const sr = dims.sceneRect ?? dims;
+          cu.uBldSceneOrigin.value.set(sr.x ?? 0, sr.y ?? 0);
+          cu.uBldSceneSize.value.set(
+            sr.width  ?? dims.sceneWidth  ?? 1,
+            sr.height ?? dims.sceneHeight ?? 1
+          );
+        }
+      } catch (_) {}
+    } else {
+      cu.tBuildingShadow.value    = null;
+      cu.uHasBuildingShadow.value = 0;
     }
 
     renderer.setRenderTarget(outputRT);

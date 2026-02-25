@@ -361,17 +361,373 @@ Porting them requires either:
 - A full V2 rewrite (e.g., CloudEffect is ~2800 lines)
 - Running them as standalone services called from FloorCompositor
 
-**Deferred until simpler post-processing effects are complete.**
+**Status update:** Cloud rendering has been brought back as `CloudEffectV2` and is
+now part of the V2 post chain. The remaining environmental effects are still
+deferred.
 
 | Step | Effect                   | V1 Layer          | Status | Notes |
 |-----:|--------------------------|--------------------|--------|-------|
-|    7 | CloudEffect              | ENVIRONMENTAL      | ⏳ Deferred | ~2800 lines. Procedural noise + shadow + cloud tops + wind + blockers. |
-|    8 | BuildingShadowsEffect    | ENVIRONMENTAL      | ⏳ Deferred | Needs `_Structural` mask + cloud state (Step 7). |
+|    7 | CloudEffect              | ENVIRONMENTAL      | ✅ Implemented | `CloudEffectV2` generates a shadow RT (fed into `LightingEffectV2`) and a cloud-top RT (alpha-over blit). |
+|    8 | BuildingShadowsEffect    | ENVIRONMENTAL      | ⏳ Deferred | Needs `_Structural` mask + cloud state. |
 |    9 | OverheadShadowsEffect    | ENVIRONMENTAL      | ⏳ Deferred | Roof/floor isolation. |
 |   10 | PlayerLightEffect        | ENVIRONMENTAL      | ⏳ Deferred | Token-based dynamic lights. |
 |   11 | LightningEffect          | ENVIRONMENTAL      | ⏳ Deferred | Weather lightning flashes. |
 |   12 | CandleFlamesEffect       | ENVIRONMENTAL      | ⏳ Deferred | Candle/torch particles. |
 |   13 | AtmosphericFogEffect     | POST_PROCESSING    | ⏳ Deferred | Distance/height fog. |
+
+---
+
+### Step 8: Building Shadows — Research & Design
+
+> **Status:** Research complete. Implementation not yet started.
+
+---
+
+#### 8.1 — What V1 Does (Ground Truth)
+
+`BuildingShadowsEffect` (`scripts/effects/BuildingShadowsEffect.js`) works as follows:
+
+1. **Input:** A single `_Outdoors` mask texture (white = outdoor/ground, black = building/wall
+   interior). This is the same texture that `OutdoorsMaskProviderV2` already composites
+   per floor.
+
+2. **Occluder definition:** Black (indoor) pixels ARE the casters. The shadow is the dark
+   region that an indoor/building pixel throws onto nearby outdoor pixels by marching
+   *in the sun direction* away from each outdoor pixel. If any step hits an indoor pixel,
+   that outdoor pixel is shadowed.
+
+3. **Bake pass (expensive — world-space UV, baked into a 2048×2048 RT):**
+   - UV-space fullscreen quad (bakeCamera covers 0..1).
+   - Fragment raymarches `uSampleCount` steps of length `t * uLength` along `uSunDir`.
+   - Penumbra: `uPenumbraSamples` perpendicular taps at each step, weighted by distance.
+   - Output is a greyscale shadow factor (1.0=lit, 0.0=shadowed) stored in
+     `worldShadowTarget` (2048×2048, fixed resolution, reused across frames).
+   - Rebakes only when sun direction / params / mask change (`needsBake` + hash check).
+
+4. **Display pass (cheap — every frame):**
+   - `shadowMesh` = the same PlaneGeometry as `baseMesh`, world-positioned, sampling
+     `worldShadowTarget` via standard UV.
+   - Renders to `shadowTarget` (screen-space, viewport-sized).
+   - `LightingEffect` samples `shadowTarget` and multiplies it into illumination via
+     `uBuildingShadowOpacity * timeIntensity`.
+
+5. **Sun direction:**
+   - `x = -sin(azimuth)`, `y = -cos(azimuth) * sunLatitude`.
+   - Azimuth sweeps from −π/2 (sunrise) to +π/2 (sunset) as hour goes 0→24.
+   - `timeIntensity` fades shadows near dawn/dusk and zeroes them at night.
+   - Sunrise/sunset anchors come from `getFoundryTimePhaseHours()` when time is Foundry-linked.
+
+6. **Shadow suppression from `SpecularEffect`:**
+   - V1 `SpecularEffect` samples `worldShadowTarget` to suppress specular in shadow.
+   - This is a pure read dependency — the shadow map is the single source of truth.
+
+---
+
+#### 8.2 — Multi-Floor Problem Analysis
+
+This is the core complexity of the V2 port.
+
+##### 8.2.1 — What "longer shadows from stacked floors" means
+
+In a multi-floor scene, the ground floor has building walls (black) that cast short
+shadows across the outdoor ground. The upper floor has *its own* set of building walls
+(again, black in its `_Outdoors` mask) at a higher elevation.
+
+In reality, a tall building casts a **longer shadow** than a short one because the sun
+strikes the top of the taller structure from a lower angle. In a 2.5D top-down map, we
+cannot simulate true 3D height, but we *can* approximate this:
+
+> **Key insight:** The combined (union) of all `_Outdoors` masks up to and including the
+> currently viewed floor represents the *full silhouette* of all structures visible from
+> above. A shadow baked from this union mask will naturally produce longer shadows where
+> upper-floor building footprints extend further than the ground-floor footprint (stacked
+> wall extensions). The length multiplier can additionally scale by floor count to
+> simulate elevation-contributed length.
+
+##### 8.2.2 — Per-floor vs. combined mask: what each approach produces
+
+| Approach | What it produces | Risk |
+|---|---|---|
+| **A: Only active floor mask** | Shadow from walls at exactly the viewed floor. No contribution from other floors. Short shadows. | Shadows disappear or shrink when ascending floors, even though tall buildings should cast longer shadows. |
+| **B: Only floor 0 (ground) mask** | Shadow always from ground-floor structures, regardless of active floor. | Upper-floor rooftop boundaries are ignored — shadow shape doesn't update for upper-floor structures. |
+| **C: Union of all floors ≤ active** | Shadow from every structure at or below the viewed floor. Naturally longer where upper stories extend the footprint. | Need a fast per-frame mask union. Bake cost scales with N floors if re-baked separately. |
+| **D: Union of ALL floors regardless of active** | Longest possible shadows (full building silhouette from any viewing level). Simpler — single bake. | May be visually wrong: shadows from upper-floor walls appear on the ground floor even when player hasn't ascended. |
+
+**Recommended approach: C (union of floors ≤ active)** with a single bake that rebuilds
+when the active floor changes.
+
+- `OutdoorsMaskProviderV2` already composites per-floor masks separately. It has a
+  `getFloorTexture(floorIndex)` and `getFloorTextureArray(count)` API.
+- A union composite is cheap: draw floor 0, 1, ... N mask canvases with `ctx.globalCompositeOperation = 'lighten'` (union of white/black masks). Or in a shader: `max(floor0, floor1, ..., floorN)`.
+- The union mask is stored in a dedicated `_unionShadowMaskRT` and passed to the bake shader.
+- When `maxFloorIndex` increases (player ascends) → recomposite union + rebake. When player descends → same.
+
+##### 8.2.3 — Shadow receiver: which pixels *receive* the shadow
+
+The shadow is a darkening applied to **outdoor, ground-level pixels** in the scene. In V2:
+
+- The shadow factor texture is consumed by `LightingEffectV2` as a multiplier on
+  `totalIllumination` (exactly as V1 `LightingEffect` uses `uBuildingShadowOpacity`).
+- The shadow receiver is simply the screen — every pixel of the final scene image.
+- Indoor pixels (inside a building) do **not** need to be excluded from the shadow because
+  they are already dark from the lighting pass. The shadow multiplier darkening an already-dark
+  pixel is a no-op visually.
+
+**This means the shadow factor can be applied globally as a screen-space multiply** — no
+per-pixel floor classification is needed in the shadow itself.
+
+##### 8.2.4 — Occluder isolation: which pixels *cast* the shadow
+
+Only outdoor→indoor *boundaries* produce shadows. A solid-black outdoor mask pixel
+(building interior) casts; a solid-white pixel (open ground) casts nothing. This is
+handled entirely by the V1 raymarcher shader and requires no change.
+
+The UV space of the bake uses the mask's native UV. As long as the mask is composited
+in scene UV space (which `OutdoorsMaskProviderV2` does — Foundry Y-down, 1024px canvas),
+the bake shader can directly sample it. The mask UV = scene UV, which = the display mesh
+UV = baked shadow UV. All three align.
+
+##### 8.2.5 — Shadow length scale by floor
+
+To simulate a taller building casting a longer shadow:
+
+```glsl
+// In the bake shader, after receiving uFloorCount:
+float heightScale = 1.0 + (uFloorCount - 1.0) * uFloorHeightShadowScale;
+float effectiveLength = uLength * heightScale;
+```
+
+- `uFloorCount` = number of floors contributing to the union (= `maxFloorIndex + 1`).
+- `uFloorHeightShadowScale` = tunable param (default ~0.5: each extra floor adds 50% more length).
+- This is additive, not multiplicative — avoids explosion at high floor counts.
+
+---
+
+#### 8.3 — V2 Architecture Design
+
+##### 8.3.1 — How V1 is decomposed for V2
+
+V1 has three concerns mixed together:
+1. **Input acquisition** — `outdoorsMask` via `EffectMaskRegistry` or `setBaseMesh`.
+2. **Bake pass** — expensive UV-space raymarcher → `worldShadowTarget` (world-space RT).
+3. **Display pass** — world-pinned mesh sampling `worldShadowTarget` → `shadowTarget` (screen-space RT).
+
+V2 can simplify this because `OutdoorsMaskProviderV2` already owns mask acquisition and
+union-compositing. The V2 effect only needs items 2 and 3.
+
+##### 8.3.2 — Proposed V2 class: `BuildingShadowsEffectV2`
+
+**Location:** `scripts/compositor-v2/effects/BuildingShadowsEffectV2.js`
+
+**Inputs:**
+- `_outdoorsMask` provider (via `subscribe()` callback from `OutdoorsMaskProviderV2`)
+- `maxFloorIndex` (from `FloorCompositor._applyCurrentFloorVisibility`)
+- `weatherController.timeOfDay` and phase anchors
+- `SkyColorEffectV2.currentSunAzimuthDeg` / `currentSunElevationDeg` (already exposed — use this for sun direction instead of re-computing in the shadow effect)
+
+**Outputs:**
+- `shadowFactorTexture` (a `THREE.Texture`, the greyscale 1.0=lit map) — fed into `LightingEffectV2`.
+
+**GPU resources:**
+- `_unionMaskCanvas` + `_unionMaskTexture` — 2D canvas composite of ≤N floor masks (rebuilt on floor change).
+- `_bakeRT` — fixed `BAKE_SIZE × BAKE_SIZE` (e.g. 1024×1024 or 2048×2048) world-space shadow factor.
+- `_bakeMaterial` — the raymarching `ShaderMaterial` (same shader as V1, no changes needed).
+- `_bakeScene` / `_bakeCamera` — orthographic 0..1 bake environment.
+- **No display mesh / no screen-space pass.** In V2 the shadow factor is fed directly into
+  `LightingEffectV2` as a texture input (exactly like `cloudShadowTexture`). The lighting
+  compose shader samples it using `vUv` (screen UV). The world-to-UV mapping is already
+  handled by the bake pass (bake is in mask UV = scene UV). We **do not need** the world-pinned
+  display mesh at all — that was a V1 workaround to project world-space baked data back into
+  screen-space. `LightingEffectV2` renders a fullscreen quad so `vUv` is already correct.
+
+**This is a significant simplification over V1:** no `shadowMesh`, no `shadowScene`, no
+`shadowTarget` (screen-space RT). The bake RT is consumed directly.
+
+##### 8.3.3 — Integration into LightingEffectV2
+
+Add to `LightingEffectV2`:
+- New uniform: `tBuildingShadow` + `uHasBuildingShadow` + `uBuildingShadowOpacity`.
+- In the compose shader:
+  ```glsl
+  if (uHasBuildingShadow > 0.5) {
+    float shadowFactor = texture2D(tBuildingShadow, vUv).r;
+    // Shadow only dims the ambient — dynamic lights still punch through.
+    ambientAfterDark *= mix(1.0, shadowFactor, uBuildingShadowOpacity);
+  }
+  ```
+- `render()` signature gains `buildingShadowTexture` parameter (same pattern as `cloudShadowTexture`).
+
+Wire in `FloorCompositor.render()`:
+```js
+const shadowTex = this._buildingShadowEffect?.shadowFactorTexture ?? null;
+this._lightingEffect.render(renderer, camera, currentInput, this._postA,
+  winScene, cloudShadowTex, shadowTex);
+```
+
+##### 8.3.4 — Union mask compositing
+
+`OutdoorsMaskProviderV2.getFloorTextureArray(count)` returns `THREE.CanvasTexture[]`. To
+union N floor masks cheaply on the CPU:
+
+```js
+_rebuildUnionMask(maxFloorIndex) {
+  const masks = this._outdoorsMaskProvider.getFloorTextureArray(maxFloorIndex + 1);
+  // ctx.globalCompositeOperation = 'lighten' = max(src, dst) per channel.
+  // Floor 0 is the base (ground = all black). Each successive floor adds more white.
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h);
+  for (let i = 0; i <= maxFloorIndex; i++) {
+    const img = masks[i]?.image; // CanvasTexture stores the source canvas as .image
+    if (!img) continue;
+    ctx.globalCompositeOperation = 'lighten';
+    ctx.drawImage(img, 0, 0, w, h);
+  }
+  this._unionMaskTexture.needsUpdate = true;
+}
+```
+
+This runs only on floor change — not every frame. The union canvas is at the same
+1024px resolution as the individual floor canvases. The bake RT only needs to match
+the mask resolution (1024×1024 is sufficient for shadow shapes; shadows are blurry anyway).
+
+##### 8.3.5 — Bake trigger conditions
+
+Rebake when any of the following changes:
+- `sunDir` changes (hash of `x.toFixed(3), y.toFixed(3)`)
+- `params.length`, `params.quality`, penumbra params change
+- `maxFloorIndex` changes (→ new union mask → new shadow shape)
+- Mask texture UUID changes (content changed)
+
+Same hash-based `lastBakeHash` / `needsBake` pattern as V1.
+
+##### 8.3.6 — Correct UV space for multi-floor bake
+
+The bake shader samples `tOutdoors` (the union mask) using `vUv`, which is in scene UV
+space (0..1 across the scene rect, Y-down). This is exactly how `OutdoorsMaskProviderV2`
+composites the mask canvas — Foundry x/y relative to `sceneRect`, Y-down, no flip.
+
+**The bake shader needs zero changes** — it already uses UV-space `vUv` to sample the mask
+and to march along `uSunDir`. As long as the union mask is in the same UV convention as the
+individual floor masks (which it is, being a lighten-composite of them), the bake is correct
+for any number of floors.
+
+The bake RT's UV matches the display mesh UV (both are scene UV). `LightingEffectV2`'s
+fullscreen compose quad uses `vUv` which is 0..1 in screen space. 
+
+**Problem:** The bake UV is *scene* UV (0..1 across the scene rect). But the compose quad's
+`vUv` is *screen* UV (0..1 across the entire viewport, which includes padding). These can
+differ when the Foundry canvas has padding.
+
+**Solution (same as V1's world-pinned mesh approach):** Pass the scene rect bounds as
+uniforms to the compose shader so it can remap screen UV to scene UV before sampling the
+shadow texture:
+
+```glsl
+// In LightingEffectV2 compose shader:
+uniform vec4 uSceneBounds; // (sceneX, sceneY, sceneW, sceneH) in world pixels
+uniform vec2 uCanvasSize;  // full canvas size (width, height)
+
+// Remap screen UV to scene UV:
+vec2 sceneUv = (vUv * uCanvasSize - uSceneBounds.xy) / uSceneBounds.zw;
+// sceneUv.y must be flipped because scene UV is Y-down, screen UV is also Y-down (for ortho camera)
+// so if both are Y-down, no flip needed.
+float shadowFactor = texture2D(tBuildingShadow, clamp(sceneUv, 0.0, 1.0)).r;
+```
+
+These bounds are cheap to update once per frame (read from `canvas.dimensions`).
+
+Alternatively (simpler): Render the bake RT at **screen resolution** (not a fixed 2048×2048)
+by using the world-pinned mesh approach BUT only in the compose pass — render the shadow mesh
+into a screen-sized RT using the main camera, then sample that RT in the compose. This is
+what V1 `shadowTarget` does. For V2 this could be a dedicated single-pass step in
+`BuildingShadowsEffectV2.render()`.
+
+**Verdict:** The UV remapping via `uSceneBounds` is cleaner (no extra RT, no world-mesh).
+The bake is at fixed 1024px; the compose samples it with clamped UV. Aliasing at the
+padding boundary is not visible because the shadow is always zero outside the scene rect
+(no mask content in padding → no shadow there).
+
+---
+
+#### 8.4 — Risk Register
+
+| Risk | Likelihood | Severity | Mitigation |
+|---|---|---|---|
+| **Union mask CPU compositing is slow** on very large tile counts | Low | Medium | `ctx.drawImage` with `lighten` blend is GPU-accelerated in most browsers. Even with 8+ floors it's < 1ms. Only runs on floor change, not per-frame. |
+| **Bake cost spikes on floor change** when union mask changes | Medium | Low | Bake is 1024×1024 raymarcher at 80 samples = ~83M taps. GPU handles this in <2ms. Triggered at most once per floor change, not every frame. |
+| **UV mismatch between bake and screen** (padding issue) | High | High | Use `uSceneBounds` remapping in the consume shader as detailed in §8.3.6. Test with scenes that have large Foundry padding. |
+| **Mask canvas `.image` property is a `<canvas>` not `<img>`** | Confirmed | Low | `THREE.CanvasTexture` stores its canvas as `.source.data` (Three r150+) or `.image`. Check both. Alternatively call `OutdoorsMaskProviderV2` to expose the raw canvas elements. |
+| **Sun direction disagreement** between building shadows and specular/cloud shadow | Medium | Medium | Use `SkyColorEffectV2.currentSunAzimuthDeg` / `currentSunElevationDeg` as the single source of truth for all effects. Wire in `FloorCompositor`. |
+| **Shadow on upper floor bleeds down** through transparent tile regions | Low | Medium | Not an issue: the shadow factor is applied in the lighting compose (screen-space, fullscreen quad). It dims whatever the lit scene shows at those pixels. If the upper-floor tile is transparent, those pixels already show ground-floor content — which is correct (shadow falls on the ground there). |
+| **Shadow shape wrong on upper floor** because union mask includes ground-floor buildings not visible from upper floor | Medium | Medium | Acceptable artistic trade-off. The union adds "more shadow" which reads as a taller building. If it becomes noticeable, an option is to weight each floor's contribution: `shadow = max(floor0 * 0.4, floor1 * 0.7, floor2 * 1.0)` so lower floors contribute less. |
+| **SpecularEffectV2 needs building shadow suppression** | High | Low | V1 SpecularEffect samples `worldShadowTarget`. V2 SpecularEffectV2 will need to receive the bake RT texture and sample it. The shared UV remap (via `uSceneBounds`) should be identical. Deferred until building shadows are working. |
+
+---
+
+#### 8.5 — Implementation Plan (ordered tasks)
+
+1. **`OutdoorsMaskProviderV2`: expose raw canvas per floor.**
+   Add `getFloorCanvas(floorIndex): HTMLCanvasElement|null` to expose the 2D canvas that was
+   used to build each floor's `CanvasTexture`. This avoids extracting `.image` from the texture
+   and gives the union compositor a direct drawing source.
+
+2. **`BuildingShadowsEffectV2`: class stub + bake pass.**
+   - Subscribe to `OutdoorsMaskProviderV2` for per-floor canvases.
+   - On floor change: `_rebuildUnionMask(maxFloorIndex)` → `needsBake = true`.
+   - On bake trigger: render bake scene (0..1 ortho, raymarcher shader) → `_bakeRT`.
+   - Expose `get shadowFactorTexture()` returning `_bakeRT.texture`.
+
+3. **`BuildingShadowsEffectV2`: sun direction from `SkyColorEffectV2`.**
+   Accept a `setSunAngles(azimuthDeg, elevationDeg)` call from `FloorCompositor` (same
+   pattern as `_waterEffect.setSunAngles()`). Compute `uSunDir` from these angles.
+
+4. **`LightingEffectV2`: accept building shadow texture.**
+   Add `tBuildingShadow` + `uHasBuildingShadow` + `uBuildingShadowOpacity` uniforms.
+   Add `uSceneBounds` + `uCanvasSize` for UV remapping. Amend compose shader.
+
+5. **`FloorCompositor`: wire both effects.**
+   - Instantiate `BuildingShadowsEffectV2`.
+   - In `initialize()`: subscribe it to `OutdoorsMaskProviderV2`.
+   - In `_applyCurrentFloorVisibility()`: call `buildingShadowEffect.onFloorChange(maxFloorIndex)`.
+   - In `render()` update loop: call `buildingShadowEffect.update(timeInfo)`.
+   - In `render()` after update: pass `buildingShadowEffect.shadowFactorTexture` to `lightingEffect.render()`.
+   - Feed `SkyColorEffectV2` sun angles into `buildingShadowEffect`.
+
+6. **UV remapping validation.**
+   Test with a scene with heavy Foundry padding. Verify that the shadow aligns correctly with
+   building edges at all zoom levels and pan positions.
+
+7. **SpecularEffectV2 shadow suppression (deferred).**
+   Once the bake RT is stable, wire it into `SpecularEffectV2` so specular is suppressed inside
+   building shadows (matches V1 `buildingShadowSuppressionEnabled` behaviour).
+
+---
+
+#### 8.6 — Shader Changes Summary
+
+**Bake shader (from V1 `BuildingShadowsEffect.bakeMaterial`):**
+- Add `uniform float uFloorCount` and `uniform float uFloorHeightShadowScale`.
+- Scale `uLength` by `1.0 + (uFloorCount - 1.0) * uFloorHeightShadowScale` before raymarching.
+- No other changes needed.
+
+**LightingEffectV2 compose shader addition:**
+```glsl
+uniform sampler2D tBuildingShadow;
+uniform float uHasBuildingShadow;
+uniform float uBuildingShadowOpacity;
+uniform vec4 uSceneBounds;   // (sceneX_px, sceneY_px, sceneW_px, sceneH_px)
+uniform vec2 uCanvasSize;    // (canvasW_px, canvasH_px) 
+
+// Inside main(), after computing ambientAfterDark:
+if (uHasBuildingShadow > 0.5) {
+  // Remap screen UV → scene UV (both Y-down, no flip needed for ortho compose)
+  vec2 fragPx  = vUv * uCanvasSize;
+  vec2 sceneUv = (fragPx - uSceneBounds.xy) / uSceneBounds.zw;
+  sceneUv = clamp(sceneUv, 0.0, 1.0);
+  float shadowFactor = texture2D(tBuildingShadow, sceneUv).r;
+  // Apply to ambient only — dynamic lights punch through
+  ambientAfterDark *= mix(1.0, shadowFactor, uBuildingShadowOpacity);
+}
+```
 
 ---
 
@@ -573,88 +929,73 @@ The shader does apply `col += causticsColor * c * causticsAmt * 1.35` but:
 
 ---
 
-##### 20c. Foam Particles — WeatherParticles Bridge Incomplete
+##### 20c. Foam Particles — WeatherParticles Bridge ✅ FIXED
 
-**Symptom:** No foam particles visible on water surface.
+**Previous symptom:** No foam particles visible on water surface.
 
-**Root cause:**
-`WaterEffectV2._syncLegacyFoamParticles()` calls:
-```js
-window.MapShineParticles?.weatherParticles?.setWaterDataTexture(tex, bounds)
-window.MapShineParticles?.weatherParticles?.setFoamParams(params, elapsed)
-```
-This bridge exists, but requires:
-1. `window.MapShineParticles.weatherParticles` to be populated — this is the V1
-   `WeatherParticles` system. **In V2, the V1 render loop is replaced**, so
-   `WeatherParticles` may not be initialized.
-2. `WeatherParticles.setWaterDataTexture` and `setFoamParams` must exist on the
-   instance — these are V1-era APIs that may not be present in all builds.
+**Fix applied (weather integration session):**
+`WeatherParticlesV2` (`scripts/compositor-v2/effects/WeatherParticlesV2.js`) was created as
+a thin adapter that:
+1. Creates a shared `BatchedRenderer` added to the FloorRenderBus scene.
+2. Instantiates the V1 `WeatherParticles` pointed at that scene.
+3. Exposes `window.MapShineParticles.weatherParticles` so the existing
+   `WaterEffectV2._syncLegacyFoamParticles()` bridge works unmodified.
+4. Drives `WeatherController.update()` each frame so weather state is live.
 
-**Foam in the shader vs particles:**
-The shader already computes `getFoamBaseAmount()` (procedural shore foam) and
-`getShaderFlecks()` (fine bubble flecks). These are **shader-driven** and work
-now. The missing "foam particles" are the **floating foam clump sprites**
-(`foam.webp` billboards) that V1's `WeatherParticles` spawned at water surface
-positions — they are a separate GPU particle system layered above the water post pass.
+`WeatherParticlesV2` is initialized and driven by `FloorCompositor`:
+- `initialize(busScene)` — called in `FloorCompositor.initialize()`
+- `update(timeInfo)` — called before the bus render each frame
+- `dispose()` — called in `FloorCompositor.dispose()`
 
-**Fix required:**
-- Determine whether `WeatherParticles` is running in V2 mode. Check
-  `window.MapShineParticles?.weatherParticles` at runtime.
-- If not running: consider porting the foam particle system into
-  `WaterEffectV2` itself (similar architecture to `FireEffectV2` — scan the
-  water SDF for spawn positions, create a `three.quarks` BatchedRenderer,
-  register with `FloorRenderBus`).
-- Short-term: the shader foam layer is functional — foam particles are a visual
-  quality enhancement, not a blocker.
+`WeatherController.initialize()` is now called in V2 mode in `canvas-replacement.js`
+(previously skipped). It provides wind/precipitation/cloud state to all V2 effects.
 
 ---
 
-##### 20d. Cloud Shadow Integration — Not Wired
+##### 20d. Cloud Shadow Integration ✅ WIRED
 
-**Symptom:** `uHasCloudShadow` is always 0.0 — cloud shadows have no effect on
-water specular kill or caustics suppression.
+**Previous symptom:** `uHasCloudShadow` was always 0.0.
 
-**Root cause:**
-`tCloudShadow` and `uHasCloudShadow` uniforms exist in both the shader and
-`_buildUniforms()`. But **`FloorCompositor` has no `CloudEffect`** (deferred in
-Steps 7–13), so there is no `_cloudShadowRT` to bind.
+**Fix applied (weather integration session):**
+- `WaterEffectV2.setCloudShadowTexture(shadowTex)` method added — accepts a
+  `THREE.Texture` (from `CloudEffectV2.cloudShadowTexture` getter) and binds it
+  to `tCloudShadow` / `uHasCloudShadow` each frame.
+- `FloorCompositor.render()` now calls `this._waterEffect.setCloudShadowTexture(cloudShadowTex)`
+  immediately after the lighting pass (where `cloudShadowTex` is already computed),
+  before water renders. When clouds are disabled, passes `null` → fallback white
+  texture → shadow factor = 1.0 (no effect).
 
-**Impact on water:**
-- `uCloudShadowEnabled > 0.5` path in specular: `spec *= litPow` — cloud shadows
-  would kill specular under clouds (correct). Currently always unaffected.
-- `causticsCloudLit` in caustics: caustics would be suppressed under clouds.
-  Currently always lit.
-
-**Fix required:**
-- When `CloudEffectV2` is implemented (Step 7), its shadow RT should be passed
-  to `WaterEffectV2.render()` and bound to `tCloudShadow` / `uHasCloudShadow`.
-- Until then, set `params.cloudShadowEnabled = false` to avoid computing the
-  cloud path with empty data.
+Cloud shadows now dynamically suppress water specular and caustics under cloud cover.
 
 ---
 
-##### 20e. Outdoors Mask — Not Wired
+##### 20e. Outdoors Mask ✅ WIRED
 
-**Symptom:** `uHasOutdoorsMask` is always 0.0 — indoor/outdoor damping has no
-effect on wave strength or rain intensity inside covered areas.
+**Previous symptom:** `uHasOutdoorsMask` was always 0.0.
 
-**Root cause:**
-`tOutdoorsMask` and `uHasOutdoorsMask` uniforms exist in the shader and
-`_buildUniforms()`. The `_Outdoors` mask exists per tile. But in V2, no system
-currently builds or provides this texture to `WaterEffectV2`.
+**Fix applied:**
+`OutdoorsMaskProviderV2` (`scripts/compositor-v2/effects/OutdoorsMaskProviderV2.js`) was
+created as a shared outdoors mask supplier. Architecture:
 
-**Impact on water:**
-- `uWaveIndoorDampingEnabled` path: wave strength is damped by `outdoorStrength`
-  inside covered areas. Without the mask, `outdoorStrength = 1.0` everywhere —
-  waves are equally strong indoors and outdoors.
-- `uRainIndoorDampingEnabled` path: rain ripples are damped indoors. Same issue.
+1. `populate(foundrySceneData)` — discovers `_Outdoors` mask images on all scene tiles
+   (same `probeMaskFile` pattern as WaterEffectV2), composites per-floor into a
+   scene-UV `THREE.CanvasTexture` (Foundry Y-down, `flipY=false`, 1024px).
+2. `subscribe(callback)` — pub/sub distribution to all consumers. Fires immediately
+   with current mask and again on every `onFloorChange()`.
+3. `onFloorChange(maxFloorIndex)` — swaps to the best floor mask (highest ≤ max,
+   fallback to floor 0), then notifies all subscribers.
 
-**Fix required:**
-- The `_Outdoors` mask is needed by multiple systems (CloudEffect, BuildingShadows,
-  OverheadShadows). Build a shared `OutdoorsMaskProvider` that composites `_Outdoors`
-  tiles per floor into a single RT. Pass it to `WaterEffectV2.render()` and bind to
-  `tOutdoorsMask` / `uHasOutdoorsMask`.
-- This is a prerequisite for Steps 7–9 anyway.
+**Consumers wired in `FloorCompositor.initialize()`:**
+- `CloudEffectV2.setOutdoorsMask(tex)` — cloud shadow/tops gate to outdoor areas
+- `WaterEffectV2.setOutdoorsMask(tex)` — wave/rain indoor damping now active;
+  `uOutdoorsMaskFlipY` set to 0.0 (canvas is already Foundry Y-down)
+- `WeatherController.setRoofMap(tex)` — foam fleck particle spawn gating
+
+**Coordinate space note:**
+The canvas composite is authored in Foundry Y-down space (matching tile `x`/`y`
+Foundry coordinates). The cloud shadow shader samples `vUv` directly (also Y-down
+on screen), so no flip is needed. The water shader's `sampleOutdoorsMask()` accepts
+a `sceneUv01` already in Foundry space and the `uOutdoorsMaskFlipY=0` path is correct.
 
 ---
 
@@ -717,11 +1058,11 @@ caustics/specular after grade.
 - [x] Murk (silt/algae) visible in deep areas
 - [ ] Specular highlights visible as bright reflections on water surface
 - [ ] Caustics look like light (bright warm-white filaments, not grey smears)
-- [ ] Foam particles (floating foam.webp clumps at water surface)
-- [ ] Cloud shadows suppress specular and caustics dynamically
-- [ ] Indoor/outdoor damping reduces wave strength under covered areas
-- [ ] Sky color tint propagated from SkyColorEffectV2 to water specular
-- [ ] Water runs after color grade so caustics/specular bloom correctly
+- [x] Foam particles (floating foam.webp clumps at water surface)
+- [x] Cloud shadows suppress specular and caustics dynamically
+- [x] Indoor/outdoor damping reduces wave strength under covered areas
+- [x] Sky color tint propagated from SkyColorEffectV2 to water specular
+- [x] Water runs after color grade so caustics/specular bloom correctly
 
 ---
 
@@ -793,32 +1134,37 @@ masks at 8192×8192. This is expensive and tightly coupled.
 
 ## Progress Tracker
 
-| Step | Effect | Status | Date |
-|---|---|---|---|
-| 0 | Albedo baseline (Milestone 1) | ✅ Complete | 2025-02-23 |
-| 1 | Specular | ✅ Complete | 2025-02-23 |
-| 2 | Fire Sparks | ✅ Complete | 2025-02-23 |
-| 3 | Window Lights | ✅ Complete | 2025-02-23 |
-| 4 | RT Infrastructure | ✅ Complete | 2026-02-23 |
-| 5 | LightingEffect | ✅ Complete | 2026-02-23 |
-| 6 | SkyColorEffect | ✅ Complete | 2026-02-23 |
-| 7–13 | Environmental effects (Cloud, Shadows, etc.) | ⏳ Deferred | |
-| 16 | ColorCorrectionEffect | ✅ Complete | 2026-02-23 |
-| 14 | BloomEffect | ✅ Complete | 2026-02-23 |
-| 17 | FilmGrainEffect | ✅ Complete | 2026-02-23 |
-| 18 | SharpenEffect | ✅ Complete | 2026-02-23 |
-| 15, 19 | VisionMode + Stylistic/Debug | ⬜ Not started | |
-| 20 | Water | 🔧 In Progress | 2026-02-24 |
+This table is intended to be exhaustive and implementation-grounded.
 
-REMEMBER TO ENABLE TWEAKPANE CONTROLS FOR EFFECTS AS YOU GO ALONG
+**Legend:**
+- **✅ Complete**: Implemented and wired in `FloorCompositor`.
+- **🔧 In progress**: Implemented but still missing key visual parity or validation checks.
+- **⏳ Deferred**: Not yet ported to V2.
+- **⬜ Not started**: No V2 implementation exists.
 
----
-
-## Next Steps for Water (Priority Order)
-
-1. **Move water post-pass after ColorCorrectionEffectV2** in `FloorCompositor.render()` — this is the single highest-impact change for caustics + specular appearance. Caustics and spec will then be added to the final graded image and bloom picks them up.
-2. **Wire `SkyColorEffectV2.currentSkyTintColor` → `u.uSkyColor`** — low complexity, big impact on specular tint accuracy.
-3. **Build `OutdoorsMaskProvider`** — composites `_Outdoors` tiles per floor into a single RT. Shared by water (indoor wave damping), and all deferred environmental effects (Steps 7–9).
-4. **Foam particle system** — port into `WaterEffectV2` using `FireEffectV2` architecture (scan water SDF for spawn positions, `three.quarks` BatchedRenderer). Blocked by confirming `WeatherParticles` is/isn't running.
-5. **Cloud shadow RT** — deferred until `CloudEffectV2` is implemented (Step 7). Disable `cloudShadowEnabled` in water params until then.
-
+| Step | Component | Status | Last change (date / commit) | Key files | Validation / notes |
+|---:|---|---|---|---|---|
+| 0 | Albedo baseline (FloorRenderBus) | ✅ Complete | 2026-02-24 / `c48d7a0` | `scripts/compositor-v2/FloorRenderBus.js` | Loads tile textures via `THREE.TextureLoader` (straight alpha). Floor isolation via `setVisibleFloors(maxFloorIndex)`. Includes solid bg + scene bg image plane. |
+| 0b | V2 orchestrator (FloorCompositor) | ✅ Complete | 2026-02-24 / `c48d7a0` | `scripts/compositor-v2/FloorCompositor.js` | Owns RT chain, effect lifecycle, and floor-change hook (`mapShineLevelContextChanged`). V2 render path integrated via `EffectComposer` delegation. |
+| 1 | Specular (tile overlays) | ✅ Complete | 2026-02-23 / `50ce5bd` | `scripts/compositor-v2/effects/specular-shader.js`, `scripts/compositor-v2/effects/SpecularEffectV2.js` | Per-tile additive overlays registered via `FloorRenderBus.addEffectOverlay`. No registry/compositor deps. Light tracking via Foundry light hooks. |
+| 2 | Fire sparks (mask-driven particles) | ✅ Complete | 2026-02-23 / `b671a3b` | `scripts/compositor-v2/effects/fire-behaviors.js`, `scripts/compositor-v2/effects/FireEffectV2.js` | Mask scan → per-floor bucketed Quarks systems. Floor isolation via activation swap on `onFloorChange`. Requires continuous render when active. |
+| 3 | Window lights (mask-driven overlay) | ✅ Complete | 2026-02-24 / `b640720` | `scripts/compositor-v2/effects/WindowLightEffectV2.js` | Rendered as an isolated scene and fed into `LightingEffectV2` so glow is tinted by albedo during lighting compose (prevents saturation wash-out). Floor isolation handled in `WindowLightEffectV2.onFloorChange`. |
+| 4 | Render targets + post chain infrastructure | ✅ Complete | 2026-02-24 / `c48d7a0` | `scripts/compositor-v2/FloorCompositor.js` | `sceneRT` + ping-pong post RTs (`HalfFloat`, `LinearSRGBColorSpace`) + final blit quad with `toneMapped=false`. |
+| 5 | Lighting (post) | ✅ Complete | 2026-02-24 / `c48d7a0` | `scripts/compositor-v2/effects/LightingEffectV2.js` | Composes ambient + dynamic lights + darkness onto bus `sceneRT`. Accepts window-light scene and cloud-shadow texture as inputs. |
+| 6 | Sky color grading (post) | ✅ Complete | 2026-02-23 / `b671a3b` | `scripts/compositor-v2/effects/SkyColorEffectV2.js` | Time-of-day atmospheric grade. Exposes `currentSkyTintColor` and sun angles; used to drive water specular tint. |
+| 7 | Clouds (shadow RT + cloud tops) | ✅ Complete | 2026-02-24 / `c48d7a0` | `scripts/compositor-v2/effects/CloudEffectV2.js` | Generates `cloudShadowTexture` (fed into lighting) and cloud-top RT (alpha-over blit after bloom/water chain). Overhead shadow occlusion uses FloorRenderBus visibility + blocker pass. |
+| 7b | Weather particles bridge | ✅ Complete | 2026-02-24 / `c48d7a0` | `scripts/compositor-v2/effects/WeatherParticlesV2.js` | Wrapper around V1 `WeatherParticles`. Adds shared Quarks `BatchedRenderer` to bus scene. Drives `WeatherController.update()` and exposes `window.MapShineParticles.weatherParticles` for water foam sync. |
+| 7c | Outdoors mask provider (shared infra) | ✅ Complete | (uncommitted / new file) | `scripts/compositor-v2/effects/OutdoorsMaskProviderV2.js` | Discovers `_Outdoors` masks and composites per-floor `CanvasTexture` (Foundry Y-down, `flipY=false`). Wired to Cloud/Water/WeatherController via subscriptions in `FloorCompositor.initialize()`. |
+| 8 | Building shadows | 📋 Researched | — | — | Deep research complete — see Step 8 detail section below. Multi-floor mask combination, occluder-only bake, shadow receiver plane. |
+| 9 | Overhead shadows | ⏳ Deferred | — | — | Not yet ported. Needs roof alpha / occluder semantics in V2. |
+| 10 | Player lights | ⏳ Deferred | — | — | Not yet ported. Token-driven lights. |
+| 11 | Lightning | ⏳ Deferred | — | — | Not yet ported. Weather-driven global flashes. |
+| 12 | Candle flames | ⏳ Deferred | — | — | Not yet ported. Particle/light driven. |
+| 13 | Atmospheric fog | ⏳ Deferred | — | — | Not yet ported. Screen-space depth fog. |
+| 14 | Bloom (post) | ✅ Complete | 2026-02-24 / `b640720` | `scripts/compositor-v2/effects/BloomEffectV2.js` | Wraps `UnrealBloomPass`. Runs after water, before cloud-top blit + grain/sharpen. |
+| 15 | Vision mode (post) | ⬜ Not started | — | — | No V2 implementation yet. |
+| 16 | Color correction (post) | ✅ Complete | 2026-02-23 / `b671a3b` | `scripts/compositor-v2/effects/ColorCorrectionEffectV2.js` | Static grade near end of chain. Dynamic exposure integration deferred. |
+| 17 | Film grain (post) | ✅ Complete | 2026-02-23 / `b671a3b` | `scripts/compositor-v2/effects/FilmGrainEffectV2.js` | Optional; disabled by default. |
+| 18 | Sharpen (post) | ✅ Complete | 2026-02-23 / `b671a3b` | `scripts/compositor-v2/effects/SharpenEffectV2.js` | Optional; disabled by default. |
+| 19 | Stylistic/debug post FX | ⬜ Not started | — | — | No V2 implementations yet (ASCII, dot screen, halftone, mask debug, etc.). |
+| 20 | Water (post) | 🔧 In progress | 2026-02-24 / `c48d7a0` | `scripts/compositor-v2/effects/water-shader.js`, `scripts/compositor-v2/effects/WaterEffectV2.js` | Implemented + wired, including: per-floor SDF switching, upper-floor occluder RT, outdoors mask, cloud shadow, sky tint coupling, and post-chain ordering (after grading, before bloom). Remaining gaps are primarily **specular/caustics visual tuning** + manual parity validation. |

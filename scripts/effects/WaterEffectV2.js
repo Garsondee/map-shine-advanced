@@ -1065,7 +1065,8 @@ export class WaterEffectV2 extends EffectBase {
           type: 'folder',
           expanded: false,
           parameters: [
-            'debugView'
+            'debugView',
+            'debugWindArrow'
           ]
         }
       ],
@@ -1418,6 +1419,12 @@ export class WaterEffectV2 extends EffectBase {
             FoamMask: 11
           },
           default: 0
+        },
+
+        debugWindArrow: {
+          type: 'boolean',
+          label: 'Show Wind Arrow',
+          default: false
         }
       }
     };

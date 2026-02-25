@@ -1314,6 +1314,13 @@ export class EffectComposer {
       //
       // effectId → FloorCompositor property name mapping must match the
       // _makeV2Callback() calls in canvas-replacement.js.
+      // NOTE: 'water' is intentionally omitted from this replay map.
+      // uiManager.effectFolders['water'].params is seeded with V1 schema defaults
+      // for params not present in scene flags. Those V1 defaults differ substantially
+      // from V2 WaterEffectV2 constructor defaults (sand, murk, foam, etc.), so
+      // replaying them would corrupt the V2 effect's appearance.
+      // Water params that were actually saved to scene flags are replayed below
+      // via a separate flags-only path. V2 constructor defaults are used for all others.
       const EFFECT_KEY_MAP = {
         'lighting':         '_lightingEffect',
         'specular':         '_specularEffect',
@@ -1324,7 +1331,6 @@ export class EffectComposer {
         'colorCorrection':  '_colorCorrectionEffect',
         'filmGrain':        '_filmGrainEffect',
         'sharpen':          '_sharpenEffect',
-        'water':            '_waterEffect',
         'cloud':            '_cloudEffect',
       };
 
@@ -1339,6 +1345,28 @@ export class EffectComposer {
             }
           }
           log.info('FloorCompositor V2: replayed saved params from uiManager');
+        }
+
+        // ── Replay water params from scene flags only (not schema defaults) ──
+        // Reads directly from scene flags so we never push V1 schema defaults
+        // into the V2 WaterEffectV2 instance.
+        try {
+          const scene = globalThis.canvas?.scene;
+          const allSettings = scene?.getFlag('map-shine-advanced', 'settings') || {};
+          const waterFlags = allSettings?.mapMaker?.effects?.water || {};
+          const waterEffect = this._floorCompositorV2._waterEffect;
+          if (waterEffect?.params) {
+            for (const [k, v] of Object.entries(waterFlags)) {
+              if (Object.prototype.hasOwnProperty.call(waterEffect.params, k)) {
+                waterEffect.params[k] = v;
+              }
+            }
+            if (Object.keys(waterFlags).length > 0) {
+              log.info(`FloorCompositor V2: replayed ${Object.keys(waterFlags).length} water params from scene flags`);
+            }
+          }
+        } catch (err) {
+          log.warn('FloorCompositor V2: water flag replay failed:', err);
         }
       } catch (err) {
         log.warn('FloorCompositor V2: param replay failed:', err);

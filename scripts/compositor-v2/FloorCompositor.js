@@ -14,6 +14,8 @@
  * Current effects (bus overlays — rendered in step 1):
  *   - **SpecularEffectV2**: Per-tile additive overlays driven by _Specular masks.
  *   - **FireEffectV2**: Per-floor particle systems driven by _Fire masks.
+ *   - **WeatherParticlesV2**: Rain, snow, ash, foam, and splash particles via
+ *     shared BatchedRenderer in the bus scene.
  *
  * Post-processing effects (step 2):
  *   - **CloudEffectV2**: Procedural clouds — generates shadow RT (fed into Lighting)
@@ -47,6 +49,10 @@ import { FilmGrainEffectV2 } from './effects/FilmGrainEffectV2.js';
 import { SharpenEffectV2 } from './effects/SharpenEffectV2.js';
 import { WaterEffectV2 } from './effects/WaterEffectV2.js';
 import { CloudEffectV2 } from './effects/CloudEffectV2.js';
+import { WeatherParticlesV2 } from './effects/WeatherParticlesV2.js';
+import { OutdoorsMaskProviderV2 } from './effects/OutdoorsMaskProviderV2.js';
+import { BuildingShadowsEffectV2 } from './effects/BuildingShadowsEffectV2.js';
+import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('FloorCompositor');
 
@@ -157,6 +163,31 @@ export class FloorCompositor {
      */
     this._waterEffect = new WaterEffectV2();
 
+    /**
+     * V2 Weather Particles: rain, snow, ash, foam, and rain-splash particles.
+     * Wraps the V1 WeatherParticles class using a shared BatchedRenderer that
+     * lives in the FloorRenderBus scene. Also drives WeatherController.update()
+     * each frame so weather state is live in V2.
+     * @type {WeatherParticlesV2}
+     */
+    this._weatherParticles = new WeatherParticlesV2();
+
+    /**
+     * V2 Outdoors mask provider: discovers _Outdoors tiles per floor, composites
+     * them into a scene-UV canvas texture, and notifies all consumers (cloud shadow,
+     * water indoor damping, weather particle roof gating).
+     * @type {OutdoorsMaskProviderV2}
+     */
+    this._outdoorsMask = new OutdoorsMaskProviderV2();
+
+    /**
+     * V2 Building Shadows Effect: bakes a greyscale shadow-factor texture from the
+     * union of all _Outdoors masks up to the active floor. Fed into LightingEffectV2
+     * as `tBuildingShadow`.
+     * @type {BuildingShadowsEffectV2}
+     */
+    this._buildingShadowEffect = new BuildingShadowsEffectV2();
+
     /** @type {boolean} Whether the render bus has been populated this session. */
     this._busPopulated = false;
 
@@ -168,6 +199,9 @@ export class FloorCompositor {
 
     /** @type {number|null} Foundry hook ID for mapShineLevelContextChanged */
     this._levelHookId = null;
+
+    /** @type {string|null} Last applied active level context key (bottom:top) */
+    this._lastAppliedLevelContextKey = null;
 
     // ── RT Infrastructure (Step 4) ───────────────────────────────────────────
     // Bus renders to sceneRT instead of screen. Post-processing effects will
@@ -297,6 +331,30 @@ export class FloorCompositor {
     this._windowLightEffect.initialize();
     // Cloud effect needs the bus scene and main camera for the overhead blocker pass.
     this._cloudEffect.initialize(this.renderer, this._renderBus._scene, this.camera);
+    // Weather particles live in the bus scene so they render in the same pass as tiles.
+    this._weatherParticles.initialize(this._renderBus._scene);
+
+    // Subscribe outdoors mask consumers so they receive the texture as soon as
+    // populate() builds it, and again on every floor change.
+    // CloudEffectV2: cloud shadows and cloud tops only fall on outdoor areas.
+    // We set both the legacy single-texture path (setOutdoorsMask, which is the one
+    // actually sampled since V2 has no floorIdTarget) AND the per-floor array so the
+    // multi-floor path is ready if a floorIdTexture is ever wired up.
+    this._outdoorsMask.subscribe((tex) => {
+      try {
+        this._cloudEffect.setOutdoorsMask(tex);
+        this._cloudEffect.setOutdoorsMasks(this._outdoorsMask.getFloorTextureArray(4));
+      } catch (_) {}
+    });
+    // WaterEffectV2: wave/rain indoor damping.
+    this._outdoorsMask.subscribe((tex) => {
+      try { this._waterEffect.setOutdoorsMask(tex); } catch (_) {}
+    });
+    // WeatherController: particle foam fleck roof gating (roofMap CPU readback).
+    this._outdoorsMask.subscribe((tex) => {
+      try { if (weatherController?.initialized) weatherController.setRoofMap(tex ?? null); } catch (_) {}
+    });
+
     this._lightingEffect.initialize(w, h);
     this._skyColorEffect.initialize();
     this._colorCorrectionEffect.initialize();
@@ -304,6 +362,11 @@ export class FloorCompositor {
     this._filmGrainEffect.initialize();
     this._sharpenEffect.initialize();
     this._waterEffect.initialize();
+    this._buildingShadowEffect.initialize(this.renderer);
+    // Register the outdoors mask provider so building shadows can union-composite
+    // per-floor canvases. The provider fires the callback immediately (even if not
+    // yet populated) so the effect sets up its subscription before populate() runs.
+    this._buildingShadowEffect.setOutdoorsMaskProvider(this._outdoorsMask);
 
     // Listen for floor/level changes so we can update tile mesh visibility.
     this._levelHookId = Hooks.on('mapShineLevelContextChanged', (payload) => {
@@ -398,10 +461,34 @@ export class FloorCompositor {
         }).catch(err => {
           log.error('WaterEffectV2 populate failed:', err);
         });
+        // Populate outdoors mask (discovers _Outdoors tiles, notifies all consumers).
+        this._outdoorsMask.populate(sc.foundrySceneData).catch(err => {
+          log.error('OutdoorsMaskProviderV2 populate failed:', err);
+        });
       } else {
         log.warn('FloorCompositor.render: no sceneComposer available for populate');
       }
     }
+
+    // ── Robust floor change handling (per-frame self-correction) ─────────────
+    // Some floor changes can occur before the compositor is bus-populated, or
+    // via pathways that do not reliably trigger our hook listener. To prevent
+    // effects from getting stuck on floor 0 (e.g. BuildingShadowsEffectV2),
+    // detect activeLevelContext band changes each frame and re-apply floor
+    // visibility + effect floor notifications.
+    try {
+      const ctx = window.MapShine?.activeLevelContext ?? null;
+      const b = Number(ctx?.bottom);
+      const t = Number(ctx?.top);
+      // Only treat as a multi-floor context if both ends are finite.
+      const key = (Number.isFinite(b) && Number.isFinite(t)) ? `${b}:${t}` : 'single';
+      if (this._lastAppliedLevelContextKey !== key) {
+        this._lastAppliedLevelContextKey = key;
+        if (this._busPopulated) {
+          this._applyCurrentFloorVisibility({ context: ctx });
+        }
+      }
+    } catch (_) {}
 
     // ── Update effects (time-varying uniforms) ───────────────────────────
     if (timeInfo) {
@@ -412,22 +499,44 @@ export class FloorCompositor {
       this._windowLightEffect.update(timeInfo);
       this._cloudEffect.update(timeInfo);
       this._lightingEffect.update(timeInfo);
+      // Weather particles must update BEFORE the bus render so their BatchedRenderer
+      // positions are current when the bus scene is drawn this frame.
+      this._weatherParticles.update(timeInfo);
       this._waterEffect.update(timeInfo);
       this._skyColorEffect.update(timeInfo);
       this._colorCorrectionEffect.update(timeInfo);
       this._bloomEffect.update(timeInfo);
       this._filmGrainEffect.update(timeInfo);
       this._sharpenEffect.update(timeInfo);
+      // Building shadows: update sun direction + bake hash. Must run after
+      // sky color so sun angles are current before being fed to the shadow effect.
+      this._buildingShadowEffect.update(timeInfo);
     }
 
-    // ── Bind per-frame textures and camera to effects ────────────────────
+    // ── Bind per-frame textures and camera to effects ────────────────────────
     this._specularEffect.render(this.renderer, this.camera);
+
+    // Feed live sun angles from SkyColorEffectV2 into building shadows
+    // so both systems share the same sun direction (single source of truth).
+    try {
+      const sky = this._skyColorEffect;
+      if (sky && typeof sky.currentSunAzimuthDeg === 'number') {
+        this._buildingShadowEffect.setSunAngles(
+          sky.currentSunAzimuthDeg,
+          sky.currentSunElevationDeg ?? 45
+        );
+      }
+    } catch (_) {}
+
+    // Bake building shadow map if needed (triggered by sun change or floor change).
+    this._buildingShadowEffect.render(this.renderer);
 
     // ── Step 1: Render bus scene → sceneRT ───────────────────────────────
     // The bus scene contains albedo tiles + specular/fire overlays.
     // Window light is NOT in the bus scene — it renders after lighting.
     this._renderBus.renderTo(this.renderer, this.camera, this._sceneRT);
 
+    // ...
     // ── Cloud passes (before lighting) ───────────────────────────────────
     // Must run after bus render so the blocker pass sees current tile visibility.
     // Outputs: _cloudEffect.cloudShadowTexture (fed into lighting compose shader)
@@ -451,7 +560,14 @@ export class FloorCompositor {
       ? this._windowLightEffect._scene : null;
     const cloudShadowTex = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
       ? this._cloudEffect.cloudShadowTexture : null;
-    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex);
+    const buildingShadowTex = (this._buildingShadowEffect.params.enabled)
+      ? this._buildingShadowEffect.shadowFactorTexture : null;
+    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, buildingShadowTex);
+
+    // Feed live cloud shadow into WaterEffectV2 so caustics/specular are
+    // correctly suppressed under cloud cover. Must be set before water renders.
+    // cloudShadowTex is already a THREE.Texture|null from the getter.
+    try { this._waterEffect.setCloudShadowTexture(cloudShadowTex ?? null); } catch (_) {}
     currentInput = this._postA;
 
     // Sky color grading pass (time-of-day atmospheric grading). Ping-pongs.
@@ -469,16 +585,22 @@ export class FloorCompositor {
       currentInput = ccOutput;
     }
 
-    // Feed sky state into water (specular tint) after sky+CC have updated.
+    // Feed sky state into water (specular tint + live sun direction) after sky+CC have updated.
     // Water runs after grading so caustics/specular add onto the final image and bloom can pick them up.
     try {
-      const tint = this._skyColorEffect?.currentSkyTintColor;
+      const sky = this._skyColorEffect;
+      const tint = sky?.currentSkyTintColor;
       if (tint && typeof this._waterEffect?.setSkyColor === 'function') {
         this._waterEffect.setSkyColor(tint.r, tint.g, tint.b);
       }
-      const skyIntensity01 = this._skyColorEffect?._composeMaterial?.uniforms?.uIntensity?.value;
+      const skyIntensity01 = sky?._composeMaterial?.uniforms?.uIntensity?.value;
       if (typeof this._waterEffect?.setSkyIntensity01 === 'function' && Number.isFinite(skyIntensity01)) {
         this._waterEffect.setSkyIntensity01(skyIntensity01);
+      }
+      // Drive specular sun direction from live time-of-day so the highlight
+      // angle changes as the sun moves across the sky.
+      if (sky && typeof this._waterEffect?.setSunAngles === 'function') {
+        this._waterEffect.setSunAngles(sky.currentSunAzimuthDeg, sky.currentSunElevationDeg);
       }
     } catch (_) {}
 
@@ -615,19 +737,54 @@ export class FloorCompositor {
    */
   _onLevelContextChanged(payload) {
     if (!this._busPopulated) return;
-    this._applyCurrentFloorVisibility();
+    this._applyCurrentFloorVisibility(payload);
   }
 
   /**
    * Read the current active floor index from FloorStack and apply it to the bus.
    * @private
    */
-  _applyCurrentFloorVisibility() {
+  _applyCurrentFloorVisibility(payload = null) {
     const floorStack = window.MapShine?.floorStack;
     if (!floorStack) return;
 
+    // Prefer the hook payload's active level band (authoritative) to avoid
+    // getting stuck when FloorStack.activeFloorIndex wasn't updated elsewhere.
+    // CameraFollower._emitLevelContextChanged updates window.MapShine.activeLevelContext
+    // then fires this hook with { context:{bottom,top}, ... }.
+    try {
+      const ctx = payload?.context ?? window.MapShine?.activeLevelContext ?? null;
+      const floors = floorStack.getFloors?.() ?? [];
+      const b = Number(ctx?.bottom);
+      const t = Number(ctx?.top);
+      if (floors.length > 1 && Number.isFinite(b) && Number.isFinite(t)) {
+        const mid = (b + t) / 2;
+        let bestIdx = 0;
+        for (let i = 0; i < floors.length; i++) {
+          const f = floors[i];
+          if (Number(f?.elevationMin) === b && Number(f?.elevationMax) === t) {
+            bestIdx = i;
+            break;
+          }
+          if (mid >= Number(f?.elevationMin) && mid <= Number(f?.elevationMax)) {
+            bestIdx = i;
+          }
+        }
+        floorStack.setActiveFloor(bestIdx);
+      }
+    } catch (_) {}
+
     const activeFloor = floorStack.getActiveFloor();
-    const maxFloorIndex = activeFloor?.index ?? Infinity;
+    // IMPORTANT: never fall back to Infinity here. Several effects (including
+    // BuildingShadowsEffectV2) treat non-finite floor indices as "floor 0" to
+    // avoid infinite loops, which would make the effect appear stuck on the
+    // ground-floor state.
+    const maxFloorIndex = Number.isFinite(activeFloor?.index) ? activeFloor.index : 0;
+    if (!Number.isFinite(activeFloor?.index)) {
+      log.info('FloorCompositor: activeFloor.index missing; falling back to 0', activeFloor);
+    } else {
+      log.info(`FloorCompositor: active floor index = ${maxFloorIndex}`);
+    }
     this._renderBus.setVisibleFloors(maxFloorIndex);
     // Notify fire effect of floor change so it can swap active particle systems.
     this._fireEffect.onFloorChange(maxFloorIndex);
@@ -636,12 +793,16 @@ export class FloorCompositor {
     // Cloud effect: blocker pass is automatically floor-isolated via bus visibility;
     // no extra state needed, but notify for any future floor-aware work.
     this._cloudEffect.onFloorChange(maxFloorIndex);
+    // Weather particles are global (rain falls on all visible floors); no-op.
+    this._weatherParticles.onFloorChange(maxFloorIndex);
+    // Swap active outdoors mask for the new floor (notifies all consumers).
+    this._outdoorsMask.onFloorChange(maxFloorIndex);
     // Swap active water SDF data for the new floor.
     this._waterEffect.onFloorChange(maxFloorIndex);
-    log.debug(`FloorCompositor: visibility set to floors 0–${maxFloorIndex}`);
+    // Building shadows: rebuild union mask for the new floor set.
+    this._buildingShadowEffect.onFloorChange(maxFloorIndex);
+    log.info(`FloorCompositor: visibility set to floors 0–${maxFloorIndex}`);
   }
-
-  // ── Size Management ─────────────────────────────────────────────────────────
 
   /**
    * External resize handler — call when the viewport size changes.
@@ -658,6 +819,7 @@ export class FloorCompositor {
     this._cloudEffect.onResize(w, h);
     this._lightingEffect.onResize(w, h);
     this._bloomEffect.onResize(w, h);
+    this._weatherParticles.onResize(w, h);
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);
   }
 
@@ -668,6 +830,9 @@ export class FloorCompositor {
    */
   dispose() {
     try { this._cloudEffect.dispose(); } catch (_) {}
+    try { this._weatherParticles.dispose(); } catch (_) {}
+    try { this._outdoorsMask.dispose(); } catch (_) {}
+    try { this._buildingShadowEffect.dispose(); } catch (_) {}
     try { this._waterEffect.dispose(); } catch (_) {}
     try { this._sharpenEffect.dispose(); } catch (_) {}
     try { this._filmGrainEffect.dispose(); } catch (_) {}

@@ -144,8 +144,17 @@ export class CloudEffectV2 {
     /** @type {THREE.Scene|null} FloorRenderBus scene — used for blocker pass */
     this._busScene    = null;
     this._mainCamera  = null;
-    /** @type {THREE.Texture|null} Outdoors mask from FloorCompositor */
+    /** @type {THREE.Texture|null} Outdoors mask (legacy single-texture path) */
     this._outdoorsMask = null;
+
+    /** @type {Array<THREE.Texture|null>} Per-floor outdoors masks (0..3) */
+    this._outdoorsMasks = [null, null, null, null];
+
+    /** @type {THREE.Texture|null} World-space floor ID texture (topmost floor per pixel) */
+    this._floorIdTex = null;
+
+    /** @type {THREE.DataTexture|null} */
+    this._fallbackWhite = null;
 
     // ── Wind simulation ───────────────────────────────────────────────
     this._windOffset    = null;
@@ -200,15 +209,15 @@ export class CloudEffectV2 {
    * Create GPU resources. Called by FloorCompositor after renderer is ready.
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.Scene}  busScene   FloorRenderBus scene (used in blocker pass)
-   * @param {THREE.Camera} camera     Main perspective camera
+   * @param {THREE.Camera} mainCamera Main perspective camera
    */
-  initialize(renderer, busScene, camera) {
+  initialize(renderer, busScene, mainCamera) {
     const THREE = window.THREE;
     if (!THREE) { log.error('THREE not available'); return; }
 
     this._renderer   = renderer;
     this._busScene   = busScene;
-    this._mainCamera = camera;
+    this._mainCamera = mainCamera;
 
     // Wind state
     this._windOffset           = new THREE.Vector2(0, 0);
@@ -257,12 +266,37 @@ export class CloudEffectV2 {
     this._createShadowMaterial();
     this._createCloudTopMaterial();
 
+    this._ensureFallbackWhite();
+
     this._initialized = true;
     log.info('CloudEffectV2 initialized');
   }
 
-  /** Supply the outdoors mask texture. Called by FloorCompositor after populate(). */
+  /** Supply the outdoors mask texture (legacy single-texture path). */
   setOutdoorsMask(texture) { this._outdoorsMask = texture ?? null; }
+
+  /** Supply per-floor outdoors masks (indices 0..3). Missing entries may be null. */
+  setOutdoorsMasks(textures) {
+    if (!Array.isArray(textures)) return;
+    for (let i = 0; i < 4; i++) this._outdoorsMasks[i] = textures[i] ?? null;
+  }
+
+  /** Supply the compositor floor ID texture (GpuSceneMaskCompositor.floorIdTarget.texture). */
+  setFloorIdTexture(texture) { this._floorIdTex = texture ?? null; }
+
+  /** @private */
+  _ensureFallbackWhite() {
+    const THREE = window.THREE;
+    if (!THREE) return;
+    if (this._fallbackWhite) return;
+    const data = new Uint8Array([255, 255, 255, 255]);
+    this._fallbackWhite = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+    this._fallbackWhite.needsUpdate = true;
+    this._fallbackWhite.flipY = false;
+    this._fallbackWhite.generateMipmaps = false;
+    this._fallbackWhite.minFilter = THREE.NearestFilter;
+    this._fallbackWhite.magFilter = THREE.NearestFilter;
+  }
 
   // ── Wind advance ──────────────────────────────────────────────────────────
 
@@ -363,13 +397,28 @@ export class CloudEffectV2 {
     const sc = window.MapShine?.sceneComposer;
     let vMinX = 0, vMinY = 0, vMaxX = sceneW, vMaxY = sceneH;
     if (sc && this._mainCamera) {
-      const zoom = sc.currentZoom || 1;
-      const vpW  = sc.baseViewportWidth  || window.innerWidth;
-      const vpH  = sc.baseViewportHeight || window.innerHeight;
-      const camX = this._mainCamera.position.x;
-      const camY = this._mainCamera.position.y;
-      vMinX = camX - vpW / zoom / 2; vMinY = camY - vpH / zoom / 2;
-      vMaxX = camX + vpW / zoom / 2; vMaxY = camY + vpH / zoom / 2;
+      const cam = this._mainCamera;
+      if (cam.isOrthographicCamera) {
+        const camPos = cam.position;
+        vMinX = camPos.x + cam.left   / cam.zoom;
+        vMinY = camPos.y + cam.bottom / cam.zoom;
+        vMaxX = camPos.x + cam.right  / cam.zoom;
+        vMaxY = camPos.y + cam.top    / cam.zoom;
+      } else {
+        // Perspective camera: derive stable view bounds at ground plane.
+        // The camera is top-down, looking along -Z with no tilt, and zoom is
+        // implemented by varying FOV (see SceneComposer.setupCamera()).
+        const groundZ = sc.groundZ ?? 0;
+        const dist = Math.max(1e-3, Math.abs((cam.position?.z ?? 0) - groundZ));
+        const fovRad = (Number(cam.fov) || 60) * Math.PI / 180;
+        const halfH = dist * Math.tan(fovRad * 0.5);
+        const aspect = Number(cam.aspect) || ((sc.baseViewportWidth || 1) / Math.max(1, (sc.baseViewportHeight || 1)));
+        const halfW = halfH * aspect;
+        vMinX = cam.position.x - halfW;
+        vMaxX = cam.position.x + halfW;
+        vMinY = cam.position.y - halfH;
+        vMaxY = cam.position.y + halfH;
+      }
     }
 
     const p  = this.params;
@@ -410,6 +459,10 @@ export class CloudEffectV2 {
       su.uSceneSize.value.set(sceneW, sceneH);
       su.uViewBoundsMin.value.set(vMinX, vMinY);
       su.uViewBoundsMax.value.set(vMaxX, vMaxY);
+      su.uSceneDimensions.value.set(
+        canvas?.dimensions?.width  ?? sceneW,
+        canvas?.dimensions?.height ?? sceneH
+      );
 
       // World-space shadow offset (sun-direction displacement)
       const offW = p.shadowOffsetScale * 5000;
@@ -428,13 +481,25 @@ export class CloudEffectV2 {
       su.uDensityBoundsMin.value.set(vMinX - mX, vMinY - mY);
       su.uDensityBoundsMax.value.set(vMaxX + mX, vMaxY + mY);
 
-      if (this._outdoorsMask) {
-        su.tOutdoorsMask.value    = this._outdoorsMask;
-        su.uHasOutdoorsMask.value = 1;
-      } else {
-        su.tOutdoorsMask.value    = null;
-        su.uHasOutdoorsMask.value = 0;
-      }
+      // Multi-floor outdoors mask selection: provide floorId + per-floor masks.
+      // Fallback: legacy single outdoors mask.
+      su.tFloorIdTex.value    = this._floorIdTex ?? null;
+      su.uHasFloorIdTex.value = this._floorIdTex ? 1 : 0;
+      const fw = this._fallbackWhite;
+      su.tOutdoorsMask0.value = this._outdoorsMasks[0] ?? fw ?? null;
+      su.tOutdoorsMask1.value = this._outdoorsMasks[1] ?? fw ?? null;
+      su.tOutdoorsMask2.value = this._outdoorsMasks[2] ?? fw ?? null;
+      su.tOutdoorsMask3.value = this._outdoorsMasks[3] ?? fw ?? null;
+      const anyPerFloor = !!(this._outdoorsMasks[0] || this._outdoorsMasks[1] || this._outdoorsMasks[2] || this._outdoorsMasks[3]);
+      su.uHasOutdoorsMask.value = (anyPerFloor || this._outdoorsMask) ? 1 : 0;
+      // Legacy binding for scenes without floorId support.
+      su.tOutdoorsMask.value = this._outdoorsMask ?? fw ?? null;
+
+      // Outdoors mask textures are authored in Foundry Y-down space.
+      // If the GPU texture has flipY=true, we must flip the sampling Y to match.
+      // (This mirrors WaterEffectV2's uOutdoorsMaskFlipY concept.)
+      const anyTex = this._outdoorsMasks.find(t => !!t) ?? this._outdoorsMask ?? null;
+      su.uOutdoorsMaskFlipY.value = anyTex?.flipY ? 1.0 : 0.0;
     }
 
     const tu = this._cloudTopMat?.uniforms;
@@ -477,13 +542,28 @@ export class CloudEffectV2 {
       const tint = this._calcTimeOfDayTint();
       if (tint) tu.uTimeOfDayTint.value.copy(tint);
 
-      if (this._outdoorsMask) {
-        tu.tOutdoorsMask.value    = this._outdoorsMask;
-        tu.uHasOutdoorsMask.value = 1;
-      } else {
-        tu.tOutdoorsMask.value    = null;
-        tu.uHasOutdoorsMask.value = 0;
-      }
+      tu.tFloorIdTex.value    = this._floorIdTex ?? null;
+      tu.uHasFloorIdTex.value = this._floorIdTex ? 1 : 0;
+      const fw = this._fallbackWhite;
+      tu.tOutdoorsMask0.value = this._outdoorsMasks[0] ?? fw ?? null;
+      tu.tOutdoorsMask1.value = this._outdoorsMasks[1] ?? fw ?? null;
+      tu.tOutdoorsMask2.value = this._outdoorsMasks[2] ?? fw ?? null;
+      tu.tOutdoorsMask3.value = this._outdoorsMasks[3] ?? fw ?? null;
+      const anyPerFloor = !!(this._outdoorsMasks[0] || this._outdoorsMasks[1] || this._outdoorsMasks[2] || this._outdoorsMasks[3]);
+      tu.uHasOutdoorsMask.value = (anyPerFloor || this._outdoorsMask) ? 1 : 0;
+      tu.tOutdoorsMask.value = this._outdoorsMask ?? fw ?? null;
+
+      const anyTex = this._outdoorsMasks.find(t => !!t) ?? this._outdoorsMask ?? null;
+      tu.uOutdoorsMaskFlipY.value = anyTex?.flipY ? 1.0 : 0.0;
+      // Keep view→scene transform in sync so world-anchored mask sampling is correct.
+      tu.uViewBoundsMin.value.set(vMinX, vMinY);
+      tu.uViewBoundsMax.value.set(vMaxX, vMaxY);
+      tu.uSceneOrigin.value.set(sceneX, sceneY);
+      tu.uSceneSize.value.set(sceneW, sceneH);
+      tu.uSceneDimensions.value.set(
+        canvas?.dimensions?.width  ?? sceneW,
+        canvas?.dimensions?.height ?? sceneH
+      );
     }
   }
 
@@ -1088,8 +1168,15 @@ export class CloudEffectV2 {
       uniforms: {
         tCloudDensity:      { value: null },
         uDensityMode:       { value: 0 },
+        tFloorIdTex:        { value: null },
+        uHasFloorIdTex:     { value: 0 },
         tOutdoorsMask:      { value: null },
+        tOutdoorsMask0:     { value: null },
+        tOutdoorsMask1:     { value: null },
+        tOutdoorsMask2:     { value: null },
+        tOutdoorsMask3:     { value: null },
         uHasOutdoorsMask:   { value: 0 },
+        uOutdoorsMaskFlipY: { value: 0 },
         tBlockerMask:       { value: null },
         uHasBlockerMask:    { value: 0 },
         uShadowOpacity:     { value: 0.7 },
@@ -1102,6 +1189,7 @@ export class CloudEffectV2 {
         uViewBoundsMax:     { value: new THREE.Vector2(4000, 3000) },
         uSceneOrigin:       { value: new THREE.Vector2(0, 0) },
         uSceneSize:         { value: new THREE.Vector2(4000, 3000) },
+        uSceneDimensions:   { value: new THREE.Vector2(4000, 3000) },
         uDensityBoundsMin:  { value: new THREE.Vector2(0, 0) },
         uDensityBoundsMax:  { value: new THREE.Vector2(4000, 3000) },
       },
@@ -1112,8 +1200,15 @@ export class CloudEffectV2 {
       fragmentShader: /* glsl */`
         uniform sampler2D tCloudDensity;
         uniform float uDensityMode;
+        uniform sampler2D tFloorIdTex;
+        uniform float uHasFloorIdTex;
         uniform sampler2D tOutdoorsMask;
+        uniform sampler2D tOutdoorsMask0;
+        uniform sampler2D tOutdoorsMask1;
+        uniform sampler2D tOutdoorsMask2;
+        uniform sampler2D tOutdoorsMask3;
         uniform float uHasOutdoorsMask;
+        uniform float uOutdoorsMaskFlipY;
         uniform sampler2D tBlockerMask;
         uniform float uHasBlockerMask;
         uniform float uShadowOpacity;
@@ -1126,20 +1221,46 @@ export class CloudEffectV2 {
         uniform vec2  uViewBoundsMax;
         uniform vec2  uSceneOrigin;
         uniform vec2  uSceneSize;
+        uniform vec2  uSceneDimensions;
         uniform vec2  uDensityBoundsMin;
         uniform vec2  uDensityBoundsMax;
         varying vec2 vUv;
+
+        // Convert Three world position → Foundry scene UV.
+        // Matches water-shader.js screenUvToFoundry + foundryToSceneUv exactly.
+        vec2 worldToSceneUv(vec2 worldPos) {
+          float foundryX = worldPos.x;
+          float foundryY = uSceneDimensions.y - worldPos.y;
+          return (vec2(foundryX, foundryY) - uSceneOrigin) / max(uSceneSize, vec2(1e-5));
+        }
 
         float readDensity(vec2 uv) {
           vec4 t = texture2D(tCloudDensity, uv);
           return (uDensityMode < 0.5) ? t.r : t.a;
         }
 
+        float readOutdoors(vec2 sceneUvFoundry) {
+          if (uHasOutdoorsMask < 0.5) return 1.0;
+          vec2 maskUv = vec2(sceneUvFoundry.x, (uOutdoorsMaskFlipY > 0.5) ? (1.0 - sceneUvFoundry.y) : sceneUvFoundry.y);
+          if (uHasFloorIdTex > 0.5) {
+            // floorIdTarget is authored in Three Y-up scene UV; flip Y to sample it.
+            vec2 sceneUvThree = vec2(sceneUvFoundry.x, 1.0 - sceneUvFoundry.y);
+            float fid = texture2D(tFloorIdTex, sceneUvThree).r;
+            float idx = floor(fid * 255.0 + 0.5);
+            // _Outdoors masks are Foundry Y-down — sample with sceneUvFoundry.
+            if (idx < 0.5) return texture2D(tOutdoorsMask0, maskUv).r;
+            if (idx < 1.5) return texture2D(tOutdoorsMask1, maskUv).r;
+            if (idx < 2.5) return texture2D(tOutdoorsMask2, maskUv).r;
+            return texture2D(tOutdoorsMask3, maskUv).r;
+          }
+          return texture2D(tOutdoorsMask, maskUv).r;
+        }
+
         void main() {
           vec2 baseWorld = mix(uViewBoundsMin, uViewBoundsMax, vUv);
-          vec2 sMax = uSceneOrigin + uSceneSize;
-          if (baseWorld.x < uSceneOrigin.x || baseWorld.y < uSceneOrigin.y ||
-              baseWorld.x > sMax.x || baseWorld.y > sMax.y) {
+          vec2 sceneUvCheck = worldToSceneUv(baseWorld);
+          if (sceneUvCheck.x < 0.0 || sceneUvCheck.x > 1.0 ||
+              sceneUvCheck.y < 0.0 || sceneUvCheck.y > 1.0) {
             gl_FragColor = vec4(1.0); return;
           }
 
@@ -1162,9 +1283,12 @@ export class CloudEffectV2 {
           float density = accum / max(wsum, 0.001);
           float factor = max(1.0 - density * uShadowOpacity, uMinBrightness);
 
-          // Outdoors mask: shadow only falls outdoors
+          // Outdoors mask: shadow only falls outdoors.
+          // Sample at scene UV derived from world position so the mask is
+          // anchored to the world, not stretched across the screen (vUv).
           if (uHasOutdoorsMask > 0.5) {
-            float outdoors = texture2D(tOutdoorsMask, vUv).r;
+            vec2 sceneUvFoundry = clamp(worldToSceneUv(baseWorld), vec2(0.0), vec2(1.0));
+            float outdoors = readOutdoors(sceneUvFoundry);
             factor = mix(1.0, factor, outdoors);
           }
 
@@ -1190,9 +1314,22 @@ export class CloudEffectV2 {
         tCloudDensity:         { value: null },
         uDensityMode:          { value: 0 },
         uTime:                 { value: 0 },
+        tFloorIdTex:           { value: null },
+        uHasFloorIdTex:        { value: 0 },
         tOutdoorsMask:         { value: null },
+        tOutdoorsMask0:        { value: null },
+        tOutdoorsMask1:        { value: null },
+        tOutdoorsMask2:        { value: null },
+        tOutdoorsMask3:        { value: null },
         uHasOutdoorsMask:      { value: 0 },
         uOutdoorsMaskStrength: { value: 1 },
+        uOutdoorsMaskFlipY:    { value: 0 },
+        // View→world→scene UV conversion for outdoors mask sampling
+        uViewBoundsMin:        { value: new THREE.Vector2(0, 0) },
+        uViewBoundsMax:        { value: new THREE.Vector2(4000, 3000) },
+        uSceneOrigin:          { value: new THREE.Vector2(0, 0) },
+        uSceneSize:            { value: new THREE.Vector2(4000, 3000) },
+        uSceneDimensions:      { value: new THREE.Vector2(4000, 3000) },
         tBlockerMask:          { value: null },
         uHasBlockerMask:       { value: 0 },
         uCloudTopOpacity:      { value: 1 },
@@ -1225,9 +1362,21 @@ export class CloudEffectV2 {
         uniform sampler2D tCloudDensity;
         uniform float uDensityMode;
         uniform float uTime;
+        uniform sampler2D tFloorIdTex;
+        uniform float uHasFloorIdTex;
         uniform sampler2D tOutdoorsMask;
+        uniform sampler2D tOutdoorsMask0;
+        uniform sampler2D tOutdoorsMask1;
+        uniform sampler2D tOutdoorsMask2;
+        uniform sampler2D tOutdoorsMask3;
         uniform float uHasOutdoorsMask;
         uniform float uOutdoorsMaskStrength;
+        uniform float uOutdoorsMaskFlipY;
+        uniform vec2  uViewBoundsMin;
+        uniform vec2  uViewBoundsMax;
+        uniform vec2  uSceneOrigin;
+        uniform vec2  uSceneSize;
+        uniform vec2  uSceneDimensions;
         uniform sampler2D tBlockerMask;
         uniform float uHasBlockerMask;
         uniform float uCloudTopOpacity;
@@ -1261,6 +1410,31 @@ export class CloudEffectV2 {
           return mix(mix(a,b,u.x),mix(c,d,u.x),u.y);
         }
         float fbm2D(vec2 p){ float v=0.0,a=0.5; for(int i=0;i<4;i++){v+=a*noise2D(p);p*=2.02;a*=0.5;} return v; }
+
+        // Convert Three world position → Foundry scene UV.
+        // Matches water-shader.js screenUvToFoundry + foundryToSceneUv exactly.
+        vec2 worldToSceneUv(vec2 worldPos) {
+          float foundryX = worldPos.x;
+          float foundryY = uSceneDimensions.y - worldPos.y;
+          return (vec2(foundryX, foundryY) - uSceneOrigin) / max(uSceneSize, vec2(1e-5));
+        }
+
+        float readOutdoors(vec2 sceneUvFoundry) {
+          if (uHasOutdoorsMask < 0.5) return 1.0;
+          vec2 maskUv = vec2(sceneUvFoundry.x, (uOutdoorsMaskFlipY > 0.5) ? (1.0 - sceneUvFoundry.y) : sceneUvFoundry.y);
+          if (uHasFloorIdTex > 0.5) {
+            // floorIdTarget is authored in Three Y-up scene UV; flip Y to sample it.
+            vec2 sceneUvThree = vec2(sceneUvFoundry.x, 1.0 - sceneUvFoundry.y);
+            float fid = texture2D(tFloorIdTex, sceneUvThree).r;
+            float idx = floor(fid * 255.0 + 0.5);
+            // _Outdoors masks are Foundry Y-down — sample with sceneUvFoundry.
+            if (idx < 0.5) return texture2D(tOutdoorsMask0, maskUv).r;
+            if (idx < 1.5) return texture2D(tOutdoorsMask1, maskUv).r;
+            if (idx < 2.5) return texture2D(tOutdoorsMask2, maskUv).r;
+            return texture2D(tOutdoorsMask3, maskUv).r;
+          }
+          return texture2D(tOutdoorsMask, maskUv).r;
+        }
 
         float readDensity(vec2 uv) {
           vec4 t = texture2D(tCloudDensity, uv);
@@ -1316,7 +1490,10 @@ export class CloudEffectV2 {
           if (uShadingEnabled > 0.5) color = shadeCloud(vUv, density, color);
 
           if (uHasOutdoorsMask > 0.5) {
-            float o = texture2D(tOutdoorsMask, vUv).r;
+            // Reconstruct world position from vUv then convert to Foundry scene UV.
+            vec2 worldPos = mix(uViewBoundsMin, uViewBoundsMax, vUv);
+            vec2 sceneUvFoundry = clamp(worldToSceneUv(worldPos), vec2(0.0), vec2(1.0));
+            float o = readOutdoors(sceneUvFoundry);
             alpha *= mix(1.0, o, clamp(uOutdoorsMaskStrength, 0.0, 1.0));
           }
           if (uHasBlockerMask > 0.5) {
@@ -1345,6 +1522,9 @@ export class CloudEffectV2 {
 
     const mats = ['_densityMat', '_shadowMat', '_cloudTopMat', '_cloudTopBlitMat'];
     for (const k of mats) { try { this[k]?.dispose(); } catch (_) {} this[k] = null; }
+
+    try { this._fallbackWhite?.dispose(); } catch (_) {}
+    this._fallbackWhite = null;
 
     try { this._quad?.geometry?.dispose(); } catch (_) {}
     try { this._blitQuad?.geometry?.dispose(); } catch (_) {}

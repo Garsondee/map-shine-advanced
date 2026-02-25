@@ -548,30 +548,46 @@ vec2 curlNoise2D(vec2 p) {
 // ── Wave / Warp ──────────────────────────────────────────────────────────
 vec2 warpUv(vec2 sceneUv, float motion01) {
   float m = clamp(motion01, 0.0, 1.0);
-  vec2 windOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y) * m;
-  vec2 uv = sceneUv - windOffsetUv;
-  float timeWarp = uTime * max(0.0, uWaveWarpTimeSpeed) * m;
+  // Important: do NOT advect the wave *domain* using uWindOffsetUv.
+  // The waves already travel via the phase term in addWave() (omega * uWindTime).
+  // Advecting the domain as well can partially cancel / overtake the phase travel
+  // and produces a standing-wave / ping-pong look.
+  vec2 uv = sceneUv;
+  // Use uWindTime (monotonically wind-driven) for warp drift speed.
+  // This keeps all warp motion locked to the wind: as wind increases the
+  // warp pattern advances faster, and it never reverses direction.
+  float warpT = uWindTime * max(0.0, uWaveWarpTimeSpeed) * m;
   float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
   vec2 windF = uWindDir;
   float wl = length(windF);
   windF = (wl > 1e-6) ? (windF / wl) : vec2(1.0, 0.0);
-  vec2 windDir = vec2(windF.x, -windF.y);
+  // Keep wind in Foundry/scene UV space (Y-down), matching CloudEffectV2.
+  vec2 windDir = vec2(windF.x, windF.y);
   vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
   vec2 windPerp = vec2(-windBasis.y, windBasis.x);
   vec2 basis = vec2(sceneUv.x * sceneAspect, sceneUv.y);
   float along = dot(basis, windBasis);
   float across = dot(basis, windPerp);
   vec2 streakUv = windBasis * (along * 2.75) + windPerp * (across * 1.0);
-  float largeWarpPulse = 0.90 + 0.10 * sin(uTime * 0.27);
-  float lf1 = fbmNoise(streakUv * 0.23 + vec2(19.1, 7.3) + vec2(timeWarp * 0.07, -timeWarp * 0.05));
-  float lf2 = fbmNoise(streakUv * 0.23 + vec2(3.7, 23.9) + vec2(-timeWarp * 0.04, timeWarp * 0.06));
-  uv += vec2(lf1, lf2) * clamp(uWaveWarpLargeStrength, 0.0, 1.0) * largeWarpPulse;
-  float n1 = fbmNoise((uv * 2.1) + vec2(13.7, 9.2) + vec2(timeWarp * 0.11, timeWarp * 0.09));
-  float n2 = fbmNoise((uv * 2.1) + vec2(41.3, 27.9) + vec2(-timeWarp * 0.08, timeWarp * 0.10));
-  uv += vec2(n1, n2) * clamp(uWaveWarpSmallStrength, 0.0, 1.0);
-  float n3 = fbmNoise(uv * 4.7 + vec2(7.9, 19.1) + vec2(timeWarp * 0.15, -timeWarp * 0.12));
-  float n4 = fbmNoise(uv * 4.7 + vec2(29.4, 3.3) + vec2(-timeWarp * 0.13, -timeWarp * 0.10));
-  uv += vec2(n3, n4) * clamp(uWaveWarpMicroStrength, 0.0, 1.0);
+  // No oscillating pulse — warp strength is controlled by uWaveWarpLargeStrength.
+  // Any sin/cos multiplier here would cause periodic amplitude variation that
+  // contributes to the ping-pong appearance.
+  // All FBM offsets are along/across the wind axis using warpT.
+  // Previously these used fixed screen axes (e.g. vec2(t*0.07, -t*0.05))
+  // which caused the sampled UV to drift perpendicular to the wave travel
+  // direction, making waves appear to reverse and ping-pong.
+  // Sample two noise values per warp layer: one for along-wind, one for cross-wind.
+  // Displace uv along windBasis/windPerp so warp is coherent with wave travel.
+  // Raw vec2(nA, nB) displacement causes arbitrary-direction warp drift -> ping-pong.
+  float lf1 = fbmNoise(streakUv * 0.23 + vec2(19.1, 7.3) + windBasis * (warpT * 0.07));
+  float lf2 = fbmNoise(streakUv * 0.23 + vec2(3.7, 23.9) + windPerp  * (warpT * 0.04));
+  uv += (windBasis * lf1 + windPerp * lf2) * clamp(uWaveWarpLargeStrength, 0.0, 1.0);
+  float n1 = fbmNoise((uv * 2.1) + vec2(13.7, 9.2) + windBasis * (warpT * 0.11));
+  float n2 = fbmNoise((uv * 2.1) + vec2(41.3, 27.9) + windPerp  * (warpT * 0.06));
+  uv += (windBasis * n1 + windPerp * n2) * clamp(uWaveWarpSmallStrength, 0.0, 1.0);
+  float n3 = fbmNoise(uv * 4.7 + vec2(7.9, 19.1) + windBasis * (warpT * 0.15));
+  float n4 = fbmNoise(uv * 4.7 + vec2(29.4, 3.3) + windPerp  * (warpT * 0.05));
+  uv += (windBasis * n3 + windPerp * n4) * clamp(uWaveWarpMicroStrength, 0.0, 1.0);
   return uv;
 }
 
@@ -579,9 +595,17 @@ float waveSeaState(vec2 sceneUv, float motion01) {
   if (uWaveEvolutionEnabled < 0.5) return 0.5;
   float sp = max(0.0, uWaveEvolutionSpeed) * clamp(motion01, 0.0, 1.0);
   float sc = max(0.01, uWaveEvolutionScale);
-  float n = fbmNoise(sceneUv * sc + vec2(uTime * sp * 0.23, -uTime * sp * 0.19));
-  float phase = uTime * sp + n * 2.7;
-  return 0.5 + 0.5 * sin(phase);
+  // Sample spatially-varying noise to break up the evolution into patches.
+  // Use uWindTime so the pattern only advances with wind, never reverses.
+  float n = fbmNoise(sceneUv * sc + vec2(uWindTime * sp * 0.23, -uWindTime * sp * 0.19));
+  // Convert noise [0,1] into a smooth forward-only 0..1 value.
+  // Critically: do NOT use sin() here. sin() cycles fully through negative values
+  // which makes the amplitude envelope periodically flip sign -> ping-pong.
+  // Instead, map each pixel's noise to a slowly-crawling phase using fract and
+  // smooth it with a triangle wave that stays in [0,1] (never negative ramp).
+  float phase = fract(uWindTime * sp * 0.05 + n);
+  // Smooth triangle: 0->1->0 over [0,1] range, all positive, no reversal.
+  return 1.0 - abs(phase * 2.0 - 1.0);
 }
 
 vec2 rotate2D(vec2 v, float a) {
@@ -613,6 +637,9 @@ float sharpSin(float phase, float sharpness, out float dHdPhase) {
 }
 
 void addWave(vec2 p, vec2 dir, float k, float amp, float sharpness, float omega, float t, inout float h, inout vec2 gSceneUv) {
+  // phase = k*dot(p,dir) - omega*t  → crests travel in +dir as t increases.
+  // Wind direction from WeatherController means "blowing toward" (same as clouds),
+  // so dir already points the way clouds move. No Y-flip or sign inversion needed.
   float phase = dot(p, dir) * k - omega * t;
   float d;
   float w = sharpSin(phase, sharpness, d);
@@ -626,7 +653,8 @@ vec3 calculateWave(vec2 sceneUv, float t, float motion01) {
   vec2 windF = uWindDir;
   float wl = length(windF);
   windF = (wl > 1e-5) ? (windF / wl) : vec2(1.0, 0.0);
-  vec2 wind = vec2(windF.x, -windF.y);
+  // Keep wind in Foundry/scene UV space (Y-down), matching CloudEffectV2.
+  vec2 wind = vec2(windF.x, windF.y);
   float travelRot = (uLockWaveTravelToWind > 0.5) ? 0.0 : uWaveDirOffsetRad;
   wind = rotate2D(wind, travelRot);
   vec2 uvF = warpUv(sceneUv, motion01);
@@ -636,12 +664,18 @@ vec3 calculateWave(vec2 sceneUv, float t, float motion01) {
   float sea01 = waveSeaState(sceneUv, motion01);
   float evoAmt = clamp(uWaveEvolutionAmount, 0.0, 1.0);
   float evo = mix(1.0 - evoAmt, 1.0 + evoAmt, sea01);
-  float breathing = 0.8 + 0.2 * sin(uTime * 0.5 * clamp(motion01, 0.0, 1.0));
+  // Breathing envelopes: use fract-based triangle (stays in [0,1]) so amplitude
+  // never goes negative. sin/cos cycle through negative values which reverses the
+  // gradient contribution from addWave, producing the visual ping-pong.
+  float m01 = clamp(motion01, 0.0, 1.0);
+  float breathPhase = fract(uWindTime * 0.08 * m01);
+  float breathing = 0.8 + 0.2 * (1.0 - abs(breathPhase * 2.0 - 1.0));
   float wavePulse = evo * breathing;
   vec2 swellP = p;
   vec2 chopP = p * 2.618;
   vec2 crossWind = rotate2D(wind, 0.78);
-  float chopBreathing = 0.7 + 0.3 * cos(uTime * 0.7 * clamp(motion01, 0.0, 1.0));
+  float chopBreathPhase = fract(uWindTime * 0.11 * m01 + 0.5);
+  float chopBreathing = 0.7 + 0.3 * (1.0 - abs(chopBreathPhase * 2.0 - 1.0));
   float chopPulse = evo * chopBreathing;
 
   float kMul0; float r0; waveMods(lf, 1.0, kMul0, r0);
@@ -678,7 +712,7 @@ vec2 specMicroSlope2D(vec2 sceneUv, float t) {
   vec2 basis = vec2(sceneUv.x * sceneAspect, sceneUv.y);
   vec2 windF = uWindDir; float wl = length(windF);
   windF = (wl > 1e-6) ? (windF / wl) : vec2(1.0, 0.0);
-  windF.y = -windF.y;
+  // Keep wind in Foundry/scene UV space (Y-down).
   vec2 windBasis = normalize(vec2(windF.x * sceneAspect, windF.y));
 
   float scale = max(0.01, uSpecMicroScale);
@@ -706,6 +740,95 @@ vec2 specMicroSlope2D(vec2 sceneUv, float t) {
   // Keep it gentle; the caller scales further via uniforms.
   return dh * 2.0;
  }
+
+// ── Flow-aligned specular slope (Mode 4) ────────────────────────────────
+// Produces a specular normal field whose dominant direction is always
+// windward. Unlike wave-gradient normals (which oscillate due to wave
+// interference) or combinedVec (coupled to refractive distortion), this
+// field is built from a monotonically-advected FBM domain, so the highlight
+// never "boomerangs" even as individual wave crests pass through.
+//
+// Three-layer construction:
+//   L0  Low-freq base flow  — FBM domain advected by uWindOffsetUv (CPU
+//       accumulator: always increases along wind, never reverses). Finite
+//       differences give a gradient that has a net component pointing in
+//       the downwind half-plane on every frame.
+//   L1  Mid-freq curl warp  — curl noise over the advected domain adds
+//       organic lateral swirl without reversing the dominant direction.
+//   L2  High-freq micro     — specMicroSlope2D at low weight for sparkle.
+//
+// All arithmetic stays in the wind-aligned (windBasis, windPerp) basis so
+// per-frame sign changes due to multi-wave interference are eliminated.
+vec2 specFlowAlignedSlope2D(vec2 sceneUv, float t) {
+  float sceneAspect = (uHasSceneRect > 0.5)
+    ? (uSceneRect.z / max(1.0, uSceneRect.w))
+    : (uResolution.x / max(1.0, uResolution.y));
+
+  // Wind basis in scene UV space (Y-down, matches CloudEffectV2 convention).
+  vec2 windF = uWindDir;
+  float wl = length(windF);
+  windF = (wl > 1e-6) ? (windF / wl) : vec2(1.0, 0.0);
+  vec2 windBasis = normalize(vec2(windF.x * sceneAspect, windF.y));
+  vec2 windPerp  = vec2(-windBasis.y, windBasis.x);
+
+  // Aspect-corrected scene position.
+  vec2 basis = vec2(sceneUv.x * sceneAspect, sceneUv.y);
+
+  // ── L0: Low-frequency base flow ───────────────────────────────────────
+  // Shift the FBM domain by the monotonic CPU-side wind offset.
+  // uWindOffsetUv grows strictly in the wind direction, so this domain
+  // never reverses — the resulting gradient always has a positive projection
+  // onto windBasis.
+  //
+  // We project the offset onto the wind/perp axes independently so the
+  // domain shift is always coherent with the wind frame (avoids arbitrary-
+  // angle drift that could partially cancel the base flow).
+  float flowScale = max(0.01, uSpecMicroScale * 0.45);
+  vec2 windOff = uWindOffsetUv; // monotonic (x,y) in scene-UV units
+  float offAlong  = dot(windOff, windBasis);
+  float offAcross = dot(windOff, windPerp);
+  // Stretch more along wind than across to produce elongated streaks.
+  vec2 flowDomain = basis * flowScale
+                  + windBasis * (offAlong  * 2.5)
+                  + windPerp  * (offAcross * 0.8);
+
+  // Finite-difference gradient of the FBM — gives slope direction.
+  // We use a relatively large epsilon so the gradient captures the
+  // low-frequency surface tilt rather than noise texture detail.
+  float eps0 = 0.55;
+  float f0  = fbmNoise(flowDomain);
+  float fx0 = fbmNoise(flowDomain + windBasis * eps0);
+  float fy0 = fbmNoise(flowDomain + windPerp  * eps0);
+  // Gradient in (along, across) space then convert back to sceneUv.
+  vec2 gradL0 = vec2((fx0 - f0) / eps0, (fy0 - f0) / eps0);
+  // Bias toward wind direction: add a small constant component so the net
+  // slope is always partially "downwind" regardless of the noise value.
+  // This is the key difference from Mode 1/2: even in calm areas the
+  // specular highlight tilts slightly windward instead of sitting flat.
+  gradL0 += vec2(0.30, 0.0); // constant downwind component
+  // Convert from wind-basis to sceneUv basis.
+  vec2 slopeL0 = windBasis * gradL0.x + windPerp * gradL0.y;
+
+  // ── L1: Mid-frequency curl detail ────────────────────────────────────
+  // Curl noise over the same advected domain — produces lateral swirl that
+  // reads as water surface turbulence. Curl of a scalar field is guaranteed
+  // divergence-free, so it adds variation without cancelling the base flow.
+  float curlScale = max(0.01, uSpecMicroScale * 1.2);
+  // Advance the curl domain with uWindTime (also monotonic) at a slower rate
+  // so the swirl patterns evolve smoothly over time.
+  vec2 curlDomain = basis * curlScale + windBasis * (t * 0.07) + windPerp * (t * 0.031);
+  vec2 curlSlope  = curlNoise2D(curlDomain) * 0.5;
+
+  // ── L2: High-frequency micro sparkle ─────────────────────────────────
+  // The existing specMicroSlope2D is kept at low weight so individual sun
+  // sparkles remain on the surface. It already uses uWindTime monotonically.
+  vec2 microSlope = specMicroSlope2D(sceneUv, t) * 0.25;
+
+  // ── Combine ───────────────────────────────────────────────────────────
+  // L0 dominates (sets the windward "tilt"), L1 adds swirl, L2 adds sparkle.
+  vec2 combined = slopeL0 * 0.65 + curlSlope * 0.25 + microSlope * 0.10;
+  return combined;
+}
 
 // ── Coordinate conversion ────────────────────────────────────────────────
 vec2 screenUvToFoundry(vec2 screenUv) {
@@ -755,21 +878,22 @@ float chromaticInsideFromSdf(float sdf01) {
 
 // ── Foam flecks (shader-based) ───────────────────────────────────────────
 #ifdef USE_FOAM_FLECKS
-float getShaderFlecks(vec2 sceneUv, float shore, float inside, float foamAmount) {
+float getShaderFlecks(vec2 sceneUv, float inside, float shore, float rainAmt, vec2 rainOffPx) {
   if (uFoamFlecksIntensity < 0.01) return 0.0;
   float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
   vec2 windF = uWindDir; float windLen = length(windF);
   windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
-  vec2 windDir = vec2(windF.x, -windF.y);
+  vec2 windDir = vec2(windF.x, windF.y);
   vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
   float tWind = uWindTime;
   float fleckSpeed = uFoamSpeed * 2.5 + 0.15;
   vec2 fleckOffset = windBasis * (tWind * fleckSpeed);
-  vec2 foamWindOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
+  vec2 foamWindOffsetUv = uWindOffsetUv;
   vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
   vec2 fleckBasis = vec2(foamSceneUv.x * sceneAspect, foamSceneUv.y);
   fleckBasis += windBasis * 0.02;
-  vec2 fleckUv1 = fleckBasis * 800.0 - fleckOffset * 400.0;
+  float fleckScale = clamp(uFoamScale, 0.1, 6000.0);
+  vec2 fleckUv1 = fleckBasis * fleckScale - fleckOffset * 400.0;
   vec2 fleckUv2 = fleckBasis * 1200.0 - fleckOffset * 600.0;
   vec2 fleckUv3 = fleckBasis * 500.0 - fleckOffset * 250.0;
   float n1 = valueNoise(fleckUv1);
@@ -780,12 +904,12 @@ float getShaderFlecks(vec2 sceneUv, float shore, float inside, float foamAmount)
   float dot2 = smoothstep(threshold + 0.02, threshold + 0.10, n2);
   float dot3 = smoothstep(threshold - 0.02, threshold + 0.06, n3);
   float fleckDots = dot1 * 0.5 + dot2 * 0.3 + dot3 * 0.2;
-  float fleckMask = smoothstep(0.2, 0.6, foamAmount);
+  float fleckMask = smoothstep(0.2, 0.6, rainAmt);
   float windFactor = 0.3 + 0.7 * clamp(uWindSpeed, 0.0, 1.0);
   return clamp(fleckDots * fleckMask * windFactor * clamp(uFoamFlecksIntensity, 0.0, 2.0), 0.0, 1.0);
 }
 #else
-float getShaderFlecks(vec2 sceneUv, float shore, float inside, float foamAmount) { return 0.0; }
+float getShaderFlecks(vec2 sceneUv, float inside, float shore, float rainAmt, vec2 rainOffPx) { return 0.0; }
 #endif
 
 // V1-accurate FBM: layered value noise with lacunarity/gain, returns [-1..1].
@@ -833,17 +957,17 @@ function getFragmentShaderPart2() {
 
 // ── Foam ─────────────────────────────────────────────────────────────────
 float getFoamBaseAmount(vec2 sceneUv, float shore, float inside, vec2 rainOffPx) {
-  vec2 foamWindOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
+  vec2 foamWindOffsetUv = uWindOffsetUv;
   vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
   float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
   vec2 foamBasis = vec2(foamSceneUv.x * sceneAspect, foamSceneUv.y);
   vec2 windF = uWindDir; float windLen = length(windF);
   windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
-  vec2 windDir = vec2(windF.x, -windF.y);
+  vec2 windDir = vec2(windF.x, windF.y);
   vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
   float tWind = uWindTime;
   vec2 curlP = foamBasis * max(0.01, uFoamCurlScale) - windBasis * (tWind * uFoamCurlSpeed);
-  foamBasis += curlNoise2D(curlP) * clamp(uFoamCurlStrength, 0.0, 1.0);
+  vec2 curl = curlNoise2D(curlP) * clamp(uFoamCurlStrength, 0.0, 2.0);
   vec2 foamUv = foamBasis * max(0.1, uFoamScale) - windBasis * (tWind * uFoamSpeed * 0.5);
   float f1 = valueNoise(foamUv);
   float f2 = valueNoise(foamUv * 1.7 + 1.2);
@@ -897,7 +1021,7 @@ float sandMask(vec2 sceneUv, float shore, float inside, float sceneAspect) {
   float lo = min(dLo, dHi - 0.001);
   float hi = max(dHi, lo + 0.001);
   float depthMask = smoothstep(lo, hi, depth);
-  vec2 sandWindOffsetUv = vec2(uWindOffsetUv.x, -uWindOffsetUv.y);
+  vec2 sandWindOffsetUv = uWindOffsetUv;
   vec2 sandSceneUv = sceneUv - (sandWindOffsetUv * max(0.0, uSandChunkSpeed));
   float sandDist = clamp(uSandDistortionStrength, 0.0, 1.0);
   if (sandDist > 1e-4) {
@@ -909,7 +1033,7 @@ float sandMask(vec2 sceneUv, float shore, float inside, float sceneAspect) {
   vec2 sandBasis = vec2(sandSceneUv.x * sceneAspect, sandSceneUv.y);
   vec2 windF = uWindDir; float wl = length(windF);
   windF = (wl > 1e-6) ? (windF / wl) : vec2(1.0, 0.0);
-  windF.y = -windF.y;
+  // Keep wind in Foundry/scene UV space (Y-down).
   vec2 windBasis = normalize(vec2(windF.x * sceneAspect, windF.y));
   vec2 perp = vec2(-windBasis.y, windBasis.x);
   float aniso = clamp(uSandAnisotropy, 0.0, 1.0);
@@ -955,7 +1079,10 @@ vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorSt
   float murkScale = max(0.1, uMurkScale);
   float murkSpeed = max(0.0, uMurkSpeed);
   float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
-  vec2 murkBasis = vec2(sceneUv.x * sceneAspect, sceneUv.y);
+  // Offset by a large constant so the FBM domain centre sits far from the
+  // scene UV [0,1] boundary. Without this offset the low-frequency FBM bands
+  // have a visible seam/edge at the scene extents (tiling artifact).
+  vec2 murkBasis = vec2(sceneUv.x * sceneAspect, sceneUv.y) + vec2(47.3, 31.7);
   vec2 windF = uWindDir; float windLen = length(windF);
   windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
   vec2 windBasis = normalize(vec2(windF.x * sceneAspect, windF.y));
@@ -976,7 +1103,9 @@ vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorSt
   float depthFactor = pow(depthMask, max(0.1, uMurkDepthFade));
   float grainScale = max(10.0, uMurkGrainScale);
   float grainSpeed = max(0.0, uMurkGrainSpeed);
-  vec2 grainBasis = vec2(sceneUv.x * sceneAspect, sceneUv.y);
+  // Same domain offset as murkBasis to keep grain seamlessly continuous
+  // across the scene UV [0,1] extents.
+  vec2 grainBasis = vec2(sceneUv.x * sceneAspect, sceneUv.y) + vec2(47.3, 31.7);
   float grainPhase = tWind * (murkSpeed + grainSpeed);
   vec2 grainDrift = windBasis * (grainPhase * 1.8);
   vec2 grainEvo = vec2(t * grainSpeed * 0.85, -t * grainSpeed * 0.71);
@@ -1307,12 +1436,19 @@ void main() {
   col = mix(col, foamCol, foamAlpha);
 
   // Shader flecks
-  float shaderFlecks = getShaderFlecks(sceneUv, shore, inside, foamAlpha);
+  float shaderFlecks = getShaderFlecks(sceneUv, inside, shore, foamAlpha, rainOffPx);
   col += foamCol * shaderFlecks * 0.8;
 
   // Specular (GGX)
   vec2 slope;
-  if (uSpecNormalMode > 2.5) {
+  if (uSpecNormalMode > 3.5) {
+    // Mode 4 (default): flow-aligned slope.
+    // Built from a monotonically-advected FBM domain (uWindOffsetUv) so the
+    // dominant highlight direction is always windward and never ping-pongs.
+    // curl noise adds organic lateral swirl; specMicroSlope2D adds sparkle.
+    slope = specFlowAlignedSlope2D(sceneUv, uWindTime) * clamp(uSpecNormalStrength, 0.0, 10.0);
+    slope *= clamp(uSpecNormalScale, 0.0, 1.0);
+  } else if (uSpecNormalMode > 2.5) {
     // Mode 3: use the stabilized distortion vector as the specular slope.
     // This is intentionally coupled to the same field that drives refraction,
     // and avoids the problematic wave normal/height gradients.
@@ -1351,7 +1487,6 @@ void main() {
   if (an > 1e-4) {
     vec2 wd2 = uWindDir; float wl2 = length(wd2);
     wd2 = (wl2 > 1e-6) ? (wd2 / wl2) : vec2(1.0, 0.0);
-    wd2.y = -wd2.y;
     vec2 t = wd2; vec2 b = vec2(-t.y, t.x);
     vec2 s = vec2(dot(slope, t), dot(slope, b));
     float ratio = clamp(uSpecAnisoRatio, 1.0, 16.0);

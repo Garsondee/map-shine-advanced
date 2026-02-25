@@ -246,7 +246,7 @@ export const LEVELS_TILE_FLAG_DEFAULTS = Object.freeze({
  * @returns {LevelsTileFlags}
  */
 export function readTileLevelsFlags(tileDoc) {
-  const elevation = Number(tileDoc?.elevation ?? 0);
+  const elevation = Number(tileDoc?.elevation ?? tileDoc?.document?.elevation ?? 0);
   const safeElevation = Number.isFinite(elevation) ? elevation : 0;
 
   const defaults = {
@@ -284,8 +284,20 @@ export function readTileLevelsFlags(tileDoc) {
     }
   }
 
+  // rangeBottom: prefer explicit Levels flag if present; otherwise fall back to
+  // the core elevation property (Levels V12+ migration path).
+  let rangeBottom = safeElevation;
+  if (flags.rangeBottom !== undefined && flags.rangeBottom !== null) {
+    const n = Number(flags.rangeBottom);
+    if (Number.isFinite(n)) {
+      rangeBottom = n;
+    } else if (flags.rangeBottom !== Infinity && flags.rangeBottom !== -Infinity) {
+      _recordFlagDiagnostic('readTileLevelsFlags', 'rangeBottom', flags.rangeBottom, rangeBottom, docId);
+    }
+  }
+
   return {
-    rangeBottom: safeElevation,
+    rangeBottom,
     rangeTop,
     showIfAbove: flags.showIfAbove === true,
     showAboveRange,
@@ -308,6 +320,10 @@ export function tileHasLevelsRange(tileDoc) {
   if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
   if (!tileDoc?.flags?.levels) return false;
   const flags = tileDoc.flags.levels;
+  // Levels V12+ may store the authoritative bottom elevation in rangeBottom
+  // while leaving rangeTop unset (implicitly Infinity). Treat rangeBottom as
+  // a meaningful signal that this tile participates in Levels range logic.
+  if (flags.rangeBottom !== undefined && flags.rangeBottom !== null) return true;
   // A tile has a meaningful range if rangeTop is set to something other than
   // the default Infinity (Levels only writes rangeTop when configured).
   if (flags.rangeTop !== undefined && flags.rangeTop !== null) return true;

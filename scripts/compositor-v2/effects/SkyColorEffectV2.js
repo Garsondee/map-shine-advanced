@@ -151,6 +151,20 @@ export class SkyColorEffectV2 {
      */
     this.currentSkyTintColor = { r: 1.0, g: 1.0, b: 1.0 };
 
+    /**
+     * Current sun azimuth in degrees (0=North, 90=East, 180=South, 270=West).
+     * Derived from time-of-day: sun rises in the East (~90°) and sets in the West (~270°).
+     * Updated each frame. Downstream systems (water specular) should read this.
+     */
+    this.currentSunAzimuthDeg = 180.0;
+
+    /**
+     * Current sun elevation in degrees above the horizon (0=horizon, 90=zenith).
+     * Derived from time-of-day: peaks at solar noon, 0 at sunrise/sunset.
+     * Updated each frame.
+     */
+    this.currentSunElevationDeg = 45.0;
+
     // ── GPU resources (created in initialize) ───────────────────────────
     /** @type {THREE.Scene|null} */
     this._composeScene = null;
@@ -489,6 +503,19 @@ export class SkyColorEffectV2 {
         vibrance = Math.max(-1.0, Math.min(1.0, vibrance * analyticStrength));
 
         this._lastDayFactor = dayFactor;
+
+        // Update sun position for downstream systems (water specular, etc.).
+        // Azimuth: sun rises East (90°) travels through South (180°) and sets West (270°).
+        // dayProgress 0→1 maps sunrise→sunset: 0→East, 0.5→South, 1→West.
+        if (dayProgress >= 0.0) {
+          this.currentSunAzimuthDeg = 90.0 + dayProgress * 180.0;
+          // Elevation: sin curve peaks at noon (dayProgress=0.5).
+          this.currentSunElevationDeg = Math.max(2.0, Math.sin(Math.PI * clamp01(dayProgress)) * 85.0);
+        } else {
+          // Night: sun is below horizon; use a low angle from the opposite side.
+          this.currentSunAzimuthDeg = 270.0;
+          this.currentSunElevationDeg = 2.0;
+        }
 
         const tNight = clamp01(effectiveDarkness);
         vignetteStrength = lerp(this.params.dayVignetteStrength ?? 0.0, this.params.nightVignetteStrength ?? 0.0, tNight);

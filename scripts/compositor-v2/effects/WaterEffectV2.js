@@ -34,10 +34,9 @@ import { getVertexShader, getFragmentShader } from './water-shader.js';
 const log = createLogger('WaterEffectV2');
 
 // Bitmask flags for conditional shader defines.
-const DEF_SAND        = 1 << 0;
-const DEF_FOAM_FLECKS = 1 << 1;
-const DEF_MULTITAP    = 1 << 2;
-const DEF_CHROM_AB    = 1 << 3;
+const DEF_FOAM_FLECKS = 1 << 0;
+const DEF_MULTITAP    = 1 << 1;
+const DEF_CHROM_AB    = 1 << 2;
 
 /**
  * Accept either 0..1 or 0..255 color channels and normalize to 0..1.
@@ -73,6 +72,9 @@ export class WaterEffectV2 {
     /** @type {boolean} */
     this.enabled = true;
 
+    /** @type {string} */
+    this._instanceId = `we2_${Math.random().toString(16).slice(2, 8)}`;
+
     // ── Effect parameters (V1 defaults for visual parity) ────────────────
     this.params = {
       // Tint
@@ -92,14 +94,14 @@ export class WaterEffectV2 {
       waveEvolutionSpeed: 0.15,
       waveEvolutionAmount: 0.3,
       waveEvolutionScale: 0.5,
-      waveSpeedUseWind: false,
-      waveSpeedWindMinFactor: 1.0,
-      waveStrengthUseWind: false,
-      waveStrengthWindMinFactor: 1.0,
+      waveSpeedUseWind: true,
+      waveSpeedWindMinFactor: 0.2,
+      waveStrengthUseWind: true,
+      waveStrengthWindMinFactor: 0.55,
       waveIndoorDampingEnabled: false,
       waveIndoorDampingStrength: 1.0,
       waveIndoorMinFactor: 0.05,
-      useTargetWindDirection: false,
+      useTargetWindDirection: true,
       windDirResponsiveness: 10.0,
 
       // Chromatic aberration
@@ -302,6 +304,7 @@ export class WaterEffectV2 {
 
       // Debug
       debugView: 0,
+      debugWindArrow: false,
     };
 
     // ── Per-floor water state ────────────────────────────────────────────
@@ -348,6 +351,12 @@ export class WaterEffectV2 {
     this._smoothedWindDirY = 0.0;
     this._smoothedWindSpeed01 = 0.0;
 
+    // ── Debug arrow DOM overlay ──────────────────────────────────────────
+    /** @type {HTMLElement|null} */
+    this._windDebugArrow = null;
+
+    log.info(`WaterEffectV2 constructed (${this._instanceId})`);
+
     // Cached trigonometry for advection angle offset (avoids per-frame sin/cos).
     this._cachedAdvectionDirOffsetDeg = null;
     this._cachedAdvectionDirCos = 1.0;
@@ -375,6 +384,12 @@ export class WaterEffectV2 {
     this._skyColorG = 1.0;
     this._skyColorB = 1.0;
 
+    // One-time runtime signatures for debugging whether this exact file is executing.
+    // These are intentionally low-noise (log once) so they can be left in during
+    // investigation without spamming the console.
+    this._debugSignatureLogged = false;
+    this._debugSignatureUpdateLogged = false;
+
     log.debug('WaterEffectV2 created');
   }
 
@@ -397,6 +412,58 @@ export class WaterEffectV2 {
       const u = this._composeMaterial?.uniforms;
       if (u?.uSkyIntensity) u.uSkyIntensity.value = vv;
     } catch (_) {}
+  }
+
+  /**
+   * Feed the live _Outdoors mask texture into the water shader.
+   * Called by OutdoorsMaskProviderV2 subscriber whenever the active floor mask changes.
+   * When tex is null (no _Outdoors tiles on this floor), indoor damping is disabled.
+   *
+   * The canvas composite is Foundry Y-down (flipY=false), matching the scene UV
+   * convention used in sampleOutdoorsMask(). uOutdoorsMaskFlipY stays 0.0.
+   *
+   * @param {THREE.Texture|null} outdoorsTex
+   */
+  setOutdoorsMask(outdoorsTex) {
+    try {
+      const u = this._composeMaterial?.uniforms;
+      if (!u) return;
+      if (u.tOutdoorsMask)    u.tOutdoorsMask.value    = outdoorsTex ?? this._fallbackWhite;
+      if (u.uHasOutdoorsMask) u.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
+      // Canvas composite is already Foundry Y-down — no flip needed in the shader.
+      if (u.uOutdoorsMaskFlipY) u.uOutdoorsMaskFlipY.value = 0.0;
+    } catch (_) {}
+  }
+
+  /**
+   * Feed the live cloud shadow texture into the water shader.
+   * Called by FloorCompositor each frame after CloudEffectV2 renders its shadow.
+   * Pass `CloudEffectV2.cloudShadowTexture` (a THREE.Texture) directly.
+   * When tex is null (clouds disabled), the uniform is bound to the white fallback
+   * so specular/caustics are unaffected (shadow factor = 1.0).
+   * @param {THREE.Texture|null} shadowTex
+   */
+  setCloudShadowTexture(shadowTex) {
+    try {
+      const u = this._composeMaterial?.uniforms;
+      if (!u) return;
+      if (u.tCloudShadow) u.tCloudShadow.value = shadowTex ?? this._fallbackWhite;
+      if (u.uHasCloudShadow) u.uHasCloudShadow.value = shadowTex ? 1.0 : 0.0;
+    } catch (_) {}
+  }
+
+  /**
+   * Set the specular sun direction from live time-of-day azimuth and elevation.
+   * Called by FloorCompositor each frame after SkyColorEffectV2 updates.
+   * @param {number} azimuthDeg - Degrees: 0=North, 90=East, 180=South, 270=West
+   * @param {number} elevationDeg - Degrees above horizon (0=horizon, 90=zenith)
+   */
+  setSunAngles(azimuthDeg, elevationDeg) {
+    if (!Number.isFinite(azimuthDeg) || !Number.isFinite(elevationDeg)) return;
+    this.params.specSunAzimuthDeg = azimuthDeg;
+    this.params.specSunElevationDeg = elevationDeg;
+    // Reset the cache so update() recomputes the direction vector this frame.
+    this._cachedSunAzDeg = null;
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -459,7 +526,12 @@ export class WaterEffectV2 {
 
     // Build initial defines based on default params
     const defines = {};
-    if (this.params.sandEnabled) defines.USE_SAND = 1;
+    // NOTE: Sand is always compiled in.
+    // Toggling a define at runtime forces shader recompilation; on some drivers
+    // this can lead to WebGL instability (context loss / repeated compile errors)
+    // that looks like a full render freeze.
+    // We instead gate sand via uniforms (uSandIntensity/uSandAdditive).
+    defines.USE_SAND = 1;
     if (this.params.foamFlecksEnabled) defines.USE_FOAM_FLECKS = 1;
     if (this.params.refractionMultiTapEnabled) defines.USE_WATER_REFRACTION_MULTITAP = 1;
     if (this.params.chromaticAberrationEnabled) defines.USE_WATER_CHROMATIC_ABERRATION = 1;
@@ -811,6 +883,17 @@ export class WaterEffectV2 {
 
     this._initialized = true;
     log.info('WaterEffectV2 initialized');
+
+    // Runtime signature: proves this compositor-v2 WaterEffectV2 is the one executing.
+    try {
+      if (!this._debugSignatureLogged) {
+        this._debugSignatureLogged = true;
+        const sig = 'MSA_SIGNATURE: compositor-v2 WaterEffectV2 initialized';
+        // Expose a global marker so you can verify from the devtools console.
+        if (window.MapShine) window.MapShine.__waterEffectV2Signature = sig;
+        log.warn(sig);
+      }
+    } catch (_) {}
   }
 
   /**
@@ -1132,6 +1215,21 @@ export class WaterEffectV2 {
     this._lastTimeValue = now;
     const elapsed = now;
 
+    // Runtime signature: log once on first update with key Wind & Flow params.
+    try {
+      if (!this._debugSignatureUpdateLogged) {
+        this._debugSignatureUpdateLogged = true;
+        log.warn('MSA_SIGNATURE: WaterEffectV2.update live', {
+          waveSpeedUseWind: p.waveSpeedUseWind,
+          waveSpeedWindMinFactor: p.waveSpeedWindMinFactor,
+          waveStrengthUseWind: p.waveStrengthUseWind,
+          waveStrengthWindMinFactor: p.waveStrengthWindMinFactor,
+          advectionSpeed: p.advectionSpeed,
+          advectionSpeed01: p.advectionSpeed01,
+        });
+      }
+    } catch (_) {}
+
     // ── Time ──────────────────────────────────────────────────────────────
     u.uTime.value = elapsed;
 
@@ -1142,7 +1240,11 @@ export class WaterEffectV2 {
     let windDirY = 0.0;
     let windSpeed01 = 0.15;
     try {
-      const ws = weatherController?.getCurrentState?.();
+      // V2 mode does not always initialize WeatherController.
+      // Match CloudEffectV2 behavior: only read WC when initialized; otherwise
+      // fall back to the V2 cloud effect's own resolved weather state.
+      const wcInitialized = weatherController?.initialized === true;
+      const ws = wcInitialized ? weatherController?.getCurrentState?.() : null;
       if (ws) {
         const wx = Number(ws.windDirection?.x);
         const wy = Number(ws.windDirection?.y);
@@ -1155,6 +1257,24 @@ export class WaterEffectV2 {
           }
         }
         if (Number.isFinite(wv)) windSpeed01 = Math.max(0, Math.min(1, wv));
+      } else {
+        // CloudEffectV2 maintains its own deterministic fallback wind state.
+        // Pull from it so water matches clouds in V2 mode.
+        const cloud = window.MapShine?.effectComposer?._floorCompositorV2?._cloudEffect;
+        const cs = cloud?._getWeatherState?.();
+        if (cs) {
+          const wx = Number(cs.windDirX);
+          const wy = Number(cs.windDirY);
+          const wv = Number(cs.windSpeed);
+          if (Number.isFinite(wx) && Number.isFinite(wy)) {
+            const len = Math.hypot(wx, wy);
+            if (len > 1e-5) {
+              windDirX = wx / len;
+              windDirY = wy / len;
+            }
+          }
+          if (Number.isFinite(wv)) windSpeed01 = Math.max(0, Math.min(1, wv));
+        }
       }
     } catch (_) {}
 
@@ -1187,8 +1307,13 @@ export class WaterEffectV2 {
     }
 
     // ── Waves (compute early: used to advance uWindTime) ─────────────────
-    const waveSpeed = (p.waveSpeedUseWind ? Math.max(p.waveSpeedWindMinFactor ?? 1.0, windSpeed01) : 1.0) * (p.waveSpeed ?? 1.0);
-    const waveStrength = (p.waveStrengthUseWind ? Math.max(p.waveStrengthWindMinFactor ?? 1.0, windSpeed01) : 1.0) * (p.waveStrength ?? 0.6);
+    // windSpeed01 mixes between the "at wind=0" factor and 1.0 (full wind).
+    // Math.max was wrong: it treated minFactor as a floor and ignored the slider
+    // whenever wind exceeded it. lerp gives smooth, visible control.
+    const speedMin = Math.max(0.0, p.waveSpeedWindMinFactor ?? 0.2);
+    const strengthMin = Math.max(0.0, p.waveStrengthWindMinFactor ?? 0.55);
+    const waveSpeed = (p.waveSpeedUseWind ? (speedMin + (1.0 - speedMin) * windSpeed01) : 1.0) * (p.waveSpeed ?? 1.0);
+    const waveStrength = (p.waveStrengthUseWind ? (strengthMin + (1.0 - strengthMin) * windSpeed01) : 1.0) * (p.waveStrength ?? 0.6);
 
     // waveSpeed drives the animation rate of the wave pattern itself.
     // windSpeed01 only scales uWindTime when waveSpeedUseWind is enabled.
@@ -1198,8 +1323,17 @@ export class WaterEffectV2 {
     const windTimeScale = p.waveSpeedUseWind ? windSpeed01 : 1.0;
     this._windTime += dt * windTimeScale * waveSpeed;
     u.uWindTime.value = this._windTime;
-    u.uWindDir.value.set(windDirX, windDirY);
+
+    // Water uses the Y-flipped wind direction.
+    // Ground-truth from the on-screen arrows: the raw vector was vertically inverted
+    // relative to the intended wind direction.
+    const waterWindDirX = windDirX;
+    const waterWindDirY = -windDirY;
+    u.uWindDir.value.set(waterWindDirX, waterWindDirY);
     u.uWindSpeed.value = windSpeed01;
+
+    // Debug arrow: visualize the wind direction vector actually used by water.
+    this._updateWindDebugArrow(waterWindDirX, waterWindDirY, windSpeed01, !!p.debugWindArrow);
 
     // Advection offset (UV drift from wind) — V1 monotonic integration.
     // Compute drift in scene pixels/sec, normalize by scene dimensions.
@@ -1225,12 +1359,16 @@ export class WaterEffectV2 {
 
       const cs = this._cachedAdvectionDirCos;
       const sn = this._cachedAdvectionDirSin;
-      const dx = cs * windDirX - sn * windDirY;
-      const dy = sn * windDirX + cs * windDirY;
+      // Integrate advection using the same wind vector sent to the shader.
+      const dx = cs * waterWindDirX - sn * waterWindDirY;
+      const dy = sn * waterWindDirX + cs * waterWindDirY;
 
       const du = dx * (pxPerSec * dt) / Math.max(1.0, sceneW);
       const dv = dy * (pxPerSec * dt) / Math.max(1.0, sceneH);
 
+      // Shader sampling uses `sceneUv - uWindOffsetUv`, so increasing the offset
+      // moves the visible pattern along +offset. Accumulate forward along the
+      // wind direction so waves/foam drift with the wind.
       this._windOffsetUvX += du;
       this._windOffsetUvY += dv;
       u.uWindOffsetUv.value.set(this._windOffsetUvX, this._windOffsetUvY);
@@ -1448,7 +1586,9 @@ export class WaterEffectV2 {
     u.uMurkDepthFade.value = p.murkDepthFade;
 
     // ── Sand ──────────────────────────────────────────────────────────────
-    u.uSandIntensity.value = p.sandIntensity;
+    // Gate sand with uniforms (never via defines) for runtime safety.
+    const sandEnabled = !!p.sandEnabled;
+    u.uSandIntensity.value = sandEnabled ? p.sandIntensity : 0.0;
     const sandColor = normalizeRgb01(p.sandColor, { r: 0.76, g: 0.68, b: 0.5 });
     u.uSandColor.value.set(sandColor.r, sandColor.g, sandColor.b);
     u.uSandContrast.value = p.sandContrast;
@@ -1465,7 +1605,7 @@ export class WaterEffectV2 {
     u.uSandDepthHi.value = p.sandDepthHi;
     u.uSandAnisotropy.value = p.sandAnisotropy;
     u.uSandDistortionStrength.value = p.sandDistortionStrength;
-    u.uSandAdditive.value = p.sandAdditive;
+    u.uSandAdditive.value = sandEnabled ? p.sandAdditive : 0.0;
 
     // ── Sky / environment ─────────────────────────────────────────────────
     // uSkyIntensity feeds skySpecI = mix(0.08, 1.0, skyI) in the shader.
@@ -1487,18 +1627,15 @@ export class WaterEffectV2 {
     } catch (_) {}
 
     // ── Shader defines (conditional compilation) ──────────────────────────
-    const sandEnabled = !!p.sandEnabled;
     const flecksEnabled = !!p.foamFlecksEnabled;
     const multiTapEnabled = !!p.refractionMultiTapEnabled;
     const chromEnabled = !!p.chromaticAberrationEnabled;
-    const definesKey = (sandEnabled ? DEF_SAND : 0)
-      | (flecksEnabled ? DEF_FOAM_FLECKS : 0)
+    const definesKey = (flecksEnabled ? DEF_FOAM_FLECKS : 0)
       | (multiTapEnabled ? DEF_MULTITAP : 0)
       | (chromEnabled ? DEF_CHROM_AB : 0);
 
     if (definesKey !== this._lastDefinesKey) {
       const d = this._composeMaterial.defines || {};
-      if (sandEnabled) d.USE_SAND = 1; else delete d.USE_SAND;
       if (flecksEnabled) d.USE_FOAM_FLECKS = 1; else delete d.USE_FOAM_FLECKS;
       if (multiTapEnabled) d.USE_WATER_REFRACTION_MULTITAP = 1; else delete d.USE_WATER_REFRACTION_MULTITAP;
       if (chromEnabled) d.USE_WATER_CHROMATIC_ABERRATION = 1; else delete d.USE_WATER_CHROMATIC_ABERRATION;
@@ -1684,6 +1821,12 @@ export class WaterEffectV2 {
     this._fallbackBlack = null;
     this._fallbackWhite = null;
 
+    // Remove debug arrow DOM element if present
+    if (this._windDebugArrow) {
+      try { document.body.removeChild(this._windDebugArrow); } catch (_) {}
+      this._windDebugArrow = null;
+    }
+
     // Reset state
     this._windTime = 0;
     this._windOffsetUvX = 0;
@@ -1693,10 +1836,103 @@ export class WaterEffectV2 {
     this._activeFloorIndex = 0;
 
     this._initialized = false;
-    log.info('WaterEffectV2 disposed');
+    log.info(`WaterEffectV2 disposed (${this._instanceId})`);
   }
 
   // ── Private Helpers ────────────────────────────────────────────────────────
+
+  /**
+   * Creates (lazily) and updates the wind direction debug arrow DOM overlay.
+   * The arrow points in the direction the wind is blowing toward in screen space,
+   * using the same (windDirX, windDirY) vector that is sent to the shader as uWindDir.
+   * This lets us visually verify the coordinate-space convention before adjusting shaders.
+   *
+   * windDirX/Y are in Foundry Y-down space. Screen Y is also down, so the mapping is direct:
+   *   angle = atan2(x, -y)  →  degrees clockwise from screen-up (north).
+   *
+   * @param {number} windDirX - Normalized wind X (Foundry Y-down space)
+   * @param {number} windDirY - Normalized wind Y (Foundry Y-down space)
+   * @param {number} speed01  - Wind speed 0-1
+   * @param {boolean} visible - Whether the overlay should be shown
+   * @private
+   */
+  _updateWindDebugArrow(windDirX, windDirY, speed01, visible) {
+    if (!visible) {
+      if (this._windDebugArrow) this._windDebugArrow.style.display = 'none';
+      return;
+    }
+
+    // Lazy creation — only build the DOM element when first needed.
+    if (!this._windDebugArrow) {
+      const el = document.createElement('div');
+      el.id = 'ms-wind-debug-arrow';
+      el.style.cssText = [
+        'position:fixed',
+        'top:20px',
+        'left:50%',
+        'transform:translateX(-50%)',
+        'width:90px',
+        'height:90px',
+        'pointer-events:none',
+        'z-index:99999',
+        'display:flex',
+        'flex-direction:column',
+        'align-items:center',
+        'justify-content:center',
+        'background:rgba(0,0,0,0.60)',
+        'border-radius:50%',
+        'border:2px solid #f00',
+        'box-sizing:border-box',
+      ].join(';');
+      // SVG arrow — rotated each frame via transform on the <svg> element.
+      // Arrow points UP by default; CSS rotation turns it toward the wind direction.
+      // The label sits below the circle via absolute positioning.
+      el.innerHTML = `
+        <div style="position:relative;width:58px;height:58px;flex-shrink:0">
+          <svg id="ms-wind-svg-raw" width="58" height="58" viewBox="-1 -1 2 2"
+               style="position:absolute;left:0;top:0;display:block;overflow:visible">
+            <line x1="0" y1="0.55" x2="0" y2="-0.45"
+                  stroke="#ff2222" stroke-width="0.13" stroke-linecap="round"/>
+            <polygon points="0,-0.90 -0.22,-0.42 0.22,-0.42" fill="#ff2222"/>
+            <circle cx="0" cy="0" r="0.10" fill="#ff2222"/>
+          </svg>
+          <svg id="ms-wind-svg-yflip" width="58" height="58" viewBox="-1 -1 2 2"
+               style="position:absolute;left:0;top:0;display:block;overflow:visible">
+            <line x1="0" y1="0.55" x2="0" y2="-0.45"
+                  stroke="#22aaff" stroke-width="0.11" stroke-linecap="round"/>
+            <polygon points="0,-0.90 -0.20,-0.44 0.20,-0.44" fill="#22aaff"/>
+          </svg>
+        </div>
+        <div id="ms-wind-label"
+             style="position:absolute;bottom:-18px;font:10px/1 monospace;
+                    color:#ff2222;text-align:center;white-space:nowrap;
+                    text-shadow:0 1px 2px #000"></div>
+      `;
+      document.body.appendChild(el);
+      this._windDebugArrow = el;
+    }
+
+    this._windDebugArrow.style.display = 'flex';
+
+    // Two-arrow display:
+    // - RAW (red): what the water effect is currently using.
+    // - Y-FLIP (blue): same vector but with Y negated, for diagnosing the common
+    //   "everything is Y-flipped" mismatch between Foundry (Y-down) and Three (Y-up).
+    //
+    // Both are rendered as clockwise degrees from screen-up.
+    const angleRawDeg  = Math.atan2(windDirX,  windDirY) * (180 / Math.PI);
+    const angleFlipDeg = Math.atan2(windDirX, -windDirY) * (180 / Math.PI);
+
+    const svgRaw = this._windDebugArrow.querySelector('#ms-wind-svg-raw');
+    if (svgRaw) svgRaw.style.transform = `rotate(${angleRawDeg.toFixed(1)}deg)`;
+    const svgFlip = this._windDebugArrow.querySelector('#ms-wind-svg-yflip');
+    if (svgFlip) svgFlip.style.transform = `rotate(${angleFlipDeg.toFixed(1)}deg)`;
+
+    const lbl = this._windDebugArrow.querySelector('#ms-wind-label');
+    if (lbl) {
+      lbl.textContent = `${this._instanceId} | raw ${Math.round(angleRawDeg)}° | yflip ${Math.round(angleFlipDeg)}° | spd ${speed01.toFixed(2)}`;
+    }
+  }
 
   /**
    * Build the uniforms object for the water shader material.

@@ -2108,16 +2108,19 @@ async function createThreeCanvas(scene) {
     };
 
     // Ensure WeatherController is initialized and driven by the centralized TimeManager.
-    // V2: Weather particles, precipitation, and wind are not rendered — skip entirely.
+    // V2: WeatherController is pure state data (wind, precipitation, cloud cover, wetness).
+    //     CloudEffectV2 and WaterEffectV2 read it directly, so it must be initialized in
+    //     both modes. The EffectComposer updatable registration is V1-only because V2
+    //     drives WeatherController updates via FloorCompositor → WeatherParticlesV2.
+    if (isDebugLoad) dlp.begin('weatherController.initialize', 'weather');
+    await weatherController.initialize();
+    if (isDebugLoad) dlp.end('weatherController.initialize');
+
     if (!_v2Active) {
-      if (isDebugLoad) dlp.begin('weatherController.initialize', 'weather');
-      await weatherController.initialize();
-      if (isDebugLoad) dlp.end('weatherController.initialize');
-
       safeCall(() => effectComposer.addUpdatable(weatherController), 'effectComposer.addUpdatable(weather)', Severity.DEGRADED);
-
-      safeCall(() => loadingOverlay.setStage('effects.core', 0.02, 'Initializing weather…', { keepAuto: true }), 'overlay.weather', Severity.COSMETIC);
     }
+
+    safeCall(() => loadingOverlay.setStage('effects.core', 0.02, 'Initializing weather…', { keepAuto: true }), 'overlay.weather', Severity.COSMETIC);
 
     if (session.isStale()) {
       safeDispose(() => destroyThreeCanvas(), 'destroyThreeCanvas(stale)');
@@ -3260,10 +3263,45 @@ async function createThreeCanvas(scene) {
         // is lazily created on first render frame.
         const _propagateToV2 = (effectKey, paramId, value) => {
           try {
+            // Queue param updates until FloorCompositorV2 exists.
+            // In V2 mode the compositor is created lazily on first render; UI can
+            // initialize (and users can tweak values) before it exists.
+            // Without this queue, early UI changes are dropped and appear to do nothing.
+            if (window.MapShine) {
+              if (!window.MapShine.__pendingV2EffectParams) window.MapShine.__pendingV2EffectParams = {};
+              const pendAll = window.MapShine.__pendingV2EffectParams;
+              if (!pendAll[effectKey]) pendAll[effectKey] = {};
+              pendAll[effectKey][paramId] = value;
+            }
+
             const fc = window.MapShine?.effectComposer?._floorCompositorV2;
             if (!fc) return;
             const effect = fc[effectKey];
             if (!effect) return;
+
+            // Flush any queued params for this effect now that it exists.
+            try {
+              const pend = window.MapShine?.__pendingV2EffectParams?.[effectKey];
+              if (pend && typeof pend === 'object') {
+                for (const [k, v] of Object.entries(pend)) {
+                  // Prefer effect.enabled setter when present.
+                  if (k === 'enabled' || k === 'masterEnabled') {
+                    if (typeof effect.enabled !== 'undefined') {
+                      try { effect.enabled = !!v; } catch (_) {}
+                    }
+                    if (effect.params && Object.prototype.hasOwnProperty.call(effect.params, 'enabled')) {
+                      effect.params.enabled = !!v;
+                    }
+                    continue;
+                  }
+                  if (effect.params && Object.prototype.hasOwnProperty.call(effect.params, k)) {
+                    effect.params[k] = v;
+                  }
+                }
+                // Clear after flush so future updates apply directly.
+                window.MapShine.__pendingV2EffectParams[effectKey] = {};
+              }
+            } catch (_) {}
 
             // Prefer effect.enabled setter when present (several V2 overlay effects
             // keep enabled state on the instance and mirror it into params).
@@ -3333,8 +3371,17 @@ async function createThreeCanvas(scene) {
         }, 'v2.registerSharpenUI', Severity.COSMETIC);
 
         safeCall(() => {
+          const waterSchema = WaterEffectV2.getControlSchema();
           uiManager.registerEffect('water', 'Water',
-            WaterEffectV2.getControlSchema(), _makeV2Callback('_waterEffect'), 'surface');
+            waterSchema, _makeV2Callback('_waterEffect'), 'surface');
+          // NOTE: Do NOT push V1 schema defaults into the V2 effect here.
+          // The V2 WaterEffectV2 has its own correct constructor defaults which differ
+          // substantially from V1 schema defaults (sand, murk, foam, etc.).
+          // Pushing V1 defaults queues them in __pendingV2EffectParams and they get
+          // flushed wholesale on the first user interaction, overwriting all V2 defaults
+          // and producing a completely different-looking water. The scene-flag-saved
+          // params are replayed by _getFloorCompositorV2() after lazy creation, which
+          // is the correct source of truth for persisted values.
         }, 'v2.registerWaterUI', Severity.COSMETIC);
 
         // Cloud controls: registered as a top-level effect in V2 mode.

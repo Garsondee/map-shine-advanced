@@ -14,7 +14,9 @@
  * Current effects (bus overlays — rendered in step 1):
  *   - **SpecularEffectV2**: Per-tile additive overlays driven by _Specular masks.
  *   - **FireEffectV2**: Per-floor particle systems driven by _Fire masks.
- *   - **WeatherParticlesV2**: Rain, snow, ash, foam, and splash particles via
+ *   - **WaterSplashesEffectV2**: Per-floor foam plume + rain splash particles
+ *     driven by _Water masks. Own BatchedRenderer in the bus scene.
+ *   - **WeatherParticlesV2**: Rain, snow, and ash particles via
  *     shared BatchedRenderer in the bus scene.
  *
  * Post-processing effects (step 2):
@@ -50,6 +52,7 @@ import { SharpenEffectV2 } from './effects/SharpenEffectV2.js';
 import { WaterEffectV2 } from './effects/WaterEffectV2.js';
 import { CloudEffectV2 } from './effects/CloudEffectV2.js';
 import { WeatherParticlesV2 } from './effects/WeatherParticlesV2.js';
+import { WaterSplashesEffectV2 } from './effects/WaterSplashesEffectV2.js';
 import { OutdoorsMaskProviderV2 } from './effects/OutdoorsMaskProviderV2.js';
 import { BuildingShadowsEffectV2 } from './effects/BuildingShadowsEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
@@ -164,7 +167,15 @@ export class FloorCompositor {
     this._waterEffect = new WaterEffectV2();
 
     /**
-     * V2 Weather Particles: rain, snow, ash, foam, and rain-splash particles.
+     * V2 Water Splashes Effect: per-floor foam plume + rain splash particle
+     * systems driven by _Water masks. Own BatchedRenderer in the bus scene.
+     * Replaces the legacy foam bridge (WaterEffectV2 → WeatherParticles).
+     * @type {WaterSplashesEffectV2}
+     */
+    this._waterSplashesEffect = new WaterSplashesEffectV2(this._renderBus);
+
+    /**
+     * V2 Weather Particles: rain, snow, and ash particles.
      * Wraps the V1 WeatherParticles class using a shared BatchedRenderer that
      * lives in the FloorRenderBus scene. Also drives WeatherController.update()
      * each frame so weather state is live in V2.
@@ -331,6 +342,8 @@ export class FloorCompositor {
     this._windowLightEffect.initialize();
     // Cloud effect needs the bus scene and main camera for the overhead blocker pass.
     this._cloudEffect.initialize(this.renderer, this._renderBus._scene, this.camera);
+    // Water splashes: own BatchedRenderer added via addEffectOverlay.
+    this._waterSplashesEffect.initialize();
     // Weather particles live in the bus scene so they render in the same pass as tiles.
     this._weatherParticles.initialize(this._renderBus._scene);
 
@@ -387,10 +400,9 @@ export class FloorCompositor {
   wantsContinuousRender() {
     try {
       const fire = this._fireEffect;
-      if (!fire || !fire.enabled) return false;
-      // If any floors are active, we have live particle systems that should
-      // animate smoothly (not at idle FPS).
-      if (fire._activeFloors && fire._activeFloors.size > 0) return true;
+      if (fire?.enabled && fire._activeFloors?.size > 0) return true;
+      const splash = this._waterSplashesEffect;
+      if (splash?.enabled && splash._activeFloors?.size > 0) return true;
       return false;
     } catch (_) {
       // Fail safe: if anything about the probe throws, treat as active.
@@ -461,6 +473,12 @@ export class FloorCompositor {
         }).catch(err => {
           log.error('WaterEffectV2 populate failed:', err);
         });
+        // Populate water splash particle systems from _Water masks.
+        this._waterSplashesEffect.populate(sc.foundrySceneData).then(() => {
+          this._applyCurrentFloorVisibility();
+        }).catch(err => {
+          log.error('WaterSplashesEffectV2 populate failed:', err);
+        });
         // Populate outdoors mask (discovers _Outdoors tiles, notifies all consumers).
         this._outdoorsMask.populate(sc.foundrySceneData).catch(err => {
           log.error('OutdoorsMaskProviderV2 populate failed:', err);
@@ -496,6 +514,7 @@ export class FloorCompositor {
       this._cloudEffect.advanceWind(timeInfo.delta ?? 0.016);
       this._specularEffect.update(timeInfo);
       this._fireEffect.update(timeInfo);
+      this._waterSplashesEffect.update(timeInfo);
       this._windowLightEffect.update(timeInfo);
       this._cloudEffect.update(timeInfo);
       this._lightingEffect.update(timeInfo);
@@ -788,6 +807,8 @@ export class FloorCompositor {
     this._renderBus.setVisibleFloors(maxFloorIndex);
     // Notify fire effect of floor change so it can swap active particle systems.
     this._fireEffect.onFloorChange(maxFloorIndex);
+    // Notify water splashes of floor change so it can swap active systems.
+    this._waterSplashesEffect.onFloorChange(maxFloorIndex);
     // Update window light overlay visibility (isolated scene, not bus-managed).
     this._windowLightEffect.onFloorChange(maxFloorIndex);
     // Cloud effect: blocker pass is automatically floor-isolated via bus visibility;
@@ -830,6 +851,7 @@ export class FloorCompositor {
    */
   dispose() {
     try { this._cloudEffect.dispose(); } catch (_) {}
+    try { this._waterSplashesEffect.dispose(); } catch (_) {}
     try { this._weatherParticles.dispose(); } catch (_) {}
     try { this._outdoorsMask.dispose(); } catch (_) {}
     try { this._buildingShadowEffect.dispose(); } catch (_) {}

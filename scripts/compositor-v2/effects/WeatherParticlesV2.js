@@ -75,6 +75,120 @@ export class WeatherParticlesV2 {
 
     /** Accumulated time for WeatherController sub-rate throttle */
     this._wcAccum = 0;
+
+    /** One-time debug guard for registration failures */
+    this._msLoggedRegistrationFailureOnce = false;
+  }
+
+  _ensureSystemRegistered(sys, label = '') {
+    if (!sys || !this._batchRenderer) return;
+    const map = this._batchRenderer.systemToBatchIndex;
+    if (map && typeof map.has === 'function' && map.has(sys)) return;
+    try {
+      this._batchRenderer.addSystem(sys);
+    } catch (e) {
+      const dbg = window.MapShine?.debugWeatherFoamLogs === true;
+      if (dbg && !this._msLoggedRegistrationFailureOnce) {
+        this._msLoggedRegistrationFailureOnce = true;
+        log.warn('[WeatherParticlesV2] addSystem threw', {
+          label,
+          message: String(e?.message ?? e),
+          hasRenderer: !!this._batchRenderer,
+          mapSize: this._batchRenderer?.systemToBatchIndex?.size ?? null
+        });
+      }
+      return;
+    }
+
+    // Verify it actually registered. This is the same check the user ran manually.
+    try {
+      const ok = !!(map && typeof map.has === 'function' && map.has(sys));
+      if (!ok) {
+        const dbg = window.MapShine?.debugWeatherFoamLogs === true;
+        if (dbg && !this._msLoggedRegistrationFailureOnce) {
+          this._msLoggedRegistrationFailureOnce = true;
+          log.warn('[WeatherParticlesV2] addSystem did not register system', {
+            label,
+            sysCtor: sys?.constructor?.name ?? null,
+            emitterUuid: sys?.emitter?.uuid ?? null,
+            emission: sys?.emissionOverTime?.value ?? null,
+            mapSize: this._batchRenderer?.systemToBatchIndex?.size ?? null,
+            batches: this._batchRenderer?.batches?.length ?? null
+          });
+        }
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Re-attach the BatchedRenderer and all particle emitters to the bus scene
+   * if they've been evicted. FloorRenderBus.clear() wipes all scene children
+   * (including the BatchedRenderer and every WeatherParticles emitter) on every
+   * populate() call (floor change, scene reload). Without this, emitters exist
+   * and emit but are never rendered because they have no scene parent.
+   * @private
+   */
+  _ensureSceneAttachment() {
+    const scene = this._busScene;
+    if (!scene) return;
+
+    // Re-add BatchedRenderer if it was removed from the scene.
+    if (this._batchRenderer && !this._batchRenderer.parent) {
+      scene.add(this._batchRenderer);
+    }
+
+    // Re-add every particle emitter if it was removed from the scene.
+    const wp = this._weatherParticles;
+    if (!wp) return;
+
+    const reattach = (sys) => {
+      if (sys?.emitter && !sys.emitter.parent) {
+        scene.add(sys.emitter);
+      }
+    };
+
+    reattach(wp.rainSystem);
+    reattach(wp.snowSystem);
+    reattach(wp.ashSystem);
+    reattach(wp.ashEmberSystem);
+    reattach(wp.splashSystem);
+    if (wp.splashSystems) {
+      for (const s of wp.splashSystems) reattach(s);
+    }
+    if (wp._waterHitSplashSystems) {
+      for (const entry of wp._waterHitSplashSystems) reattach(entry?.system);
+    }
+    // Foam/splash particles are now owned by WaterSplashesEffectV2 — no reattach needed.
+  }
+
+  _ensureWeatherSystemsRegistered() {
+    // IMPORTANT: Use the globally exposed WeatherParticles instance when present.
+    // In some V2 lifecycles, window.MapShineParticles.weatherParticles can be
+    // overwritten by another initializer; the debug probes the user runs also
+    // read from window.MapShineParticles. Registering systems from a different
+    // instance will not make the probed systems render.
+    const wp = window.MapShineParticles?.weatherParticles || this._weatherParticles;
+    if (!wp) return;
+
+    // Core precipitation systems
+    this._ensureSystemRegistered(wp.rainSystem, 'rain');
+    this._ensureSystemRegistered(wp.snowSystem, 'snow');
+    this._ensureSystemRegistered(wp.ashSystem, 'ash');
+    this._ensureSystemRegistered(wp.ashEmberSystem, 'ashEmber');
+
+    // Splash variants
+    this._ensureSystemRegistered(wp.splashSystem, 'splash');
+    if (wp.splashSystems && wp.splashSystems.length) {
+      let i = 0;
+      for (const s of wp.splashSystems) this._ensureSystemRegistered(s, `splash[${i++}]`);
+    }
+    if (wp._waterHitSplashSystems && wp._waterHitSplashSystems.length) {
+      let i = 0;
+      for (const entry of wp._waterHitSplashSystems) this._ensureSystemRegistered(entry?.system, `waterHitSplash[${i++}]`);
+    }
+
+    // Water foam/splash particles are now handled by WaterSplashesEffectV2.
+    // No need to register foam systems here.
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────────
@@ -141,10 +255,56 @@ export class WeatherParticlesV2 {
 
     const deltaSec = typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016;
 
+    // Re-attach BatchedRenderer and emitters if FloorRenderBus.clear() evicted them.
+    // This is the ROOT CAUSE fix: clear() wipes all bus scene children (including
+    // the BatchedRenderer and every particle emitter) on every populate() call.
+    // Without this guard the systems emit but are never rendered (no scene parent).
+    try { this._ensureSceneAttachment(); } catch (_) {}
+
+    // Runtime stamp: proves which WeatherParticlesV2 code is actually executing.
+    // Read from console: window.MapShine._wpV2Stamp
+    try {
+      if (window.MapShine) window.MapShine._wpV2Stamp = 'WeatherParticlesV2:reg-verify:2026-02-25a';
+    } catch (_) {}
+
+    // Re-assert global pointers so external bridges (WaterEffectV2 foam sync)
+    // and runtime debug probes always see the authoritative instance.
+    try {
+      if (!window.MapShineParticles) window.MapShineParticles = {};
+      window.MapShineParticles.weatherParticles = this._weatherParticles;
+      window.MapShineParticles.batchRenderer = this._batchRenderer;
+    } catch (_) {}
+
+    // Always ensure systems are registered before any other logic that might
+    // throw/early-exit. If systems aren't in systemToBatchIndex, Quarks will
+    // never simulate or render them.
+    try {
+      this._ensureWeatherSystemsRegistered();
+      const dbg = window.MapShine?.debugWeatherFoamLogs === true;
+      if (dbg && !this._msLoggedRegistrationOnce) {
+        this._msLoggedRegistrationOnce = true;
+        const br = this._batchRenderer;
+        const wp = this._weatherParticles;
+        const hasFoam = !!(br && wp && br.systemToBatchIndex?.has?.(wp._foamSystem));
+        const hasRain = !!(br && wp && br.systemToBatchIndex?.has?.(wp.rainSystem));
+        log.info('[WeatherParticlesV2] registration probe', {
+          mapSize: br?.systemToBatchIndex?.size ?? null,
+          batches: br?.batches?.length ?? null,
+          hasFoam,
+          hasRain
+        });
+      }
+    } catch (_) {}
+
     // ── 1. Advance WeatherController state ──────────────────────────────
     // WeatherController has its own sub-rate throttle (15 Hz), so calling
     // update() every frame is fine — it internally skips when not due.
     try {
+      // Match FireEffectV2: ensure the controller is initialized before update().
+      // In V2 mode there is no guarantee some other effect initialized it first.
+      if (weatherController && weatherController.initialized !== true && typeof weatherController.initialize === 'function') {
+        void weatherController.initialize();
+      }
       if (weatherController && typeof weatherController.update === 'function') {
         weatherController.update(timeInfo);
       }
@@ -277,15 +437,20 @@ export class WeatherParticlesV2 {
       if (!ps || !ps.emitter) return;
       const emitter = ps.emitter;
       const ud = emitter.userData || (emitter.userData = {});
-      if (ud.msAutoCull === false) return;
 
       // Force all quarks batches onto the overlay layer so the bus render
-      // pass includes them (it enables all layers including OVERLAY_THREE_LAYER).
+      // pass includes them. This must run even when msAutoCull is disabled
+      // (foam systems set msAutoCull=false) — otherwise the batch can end up
+      // on a layer the camera isn't rendering and appear "missing".
       try {
         const idx = systemMap.get(ps);
         const batch = (idx !== undefined && batches) ? batches[idx] : null;
         if (batch?.layers?.set) batch.layers.set(OVERLAY_THREE_LAYER);
       } catch (_) {}
+
+      // Allow specific systems (e.g. full-scene foam overlays) to opt out of
+      // frustum-based pause/play culling while still being layer-forced above.
+      if (ud.msAutoCull === false) return;
 
       // Compute a bounding sphere radius for this emitter.
       const pos = emitter.position;

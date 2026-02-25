@@ -26,6 +26,7 @@ export async function bootstrap(options = {}) {
     log.setLogLevel(log.LogLevel.DEBUG);
   }
 
+  console.log('[MSA BOOT] bootstrap: start');
   logger.info('Starting bootstrap sequence...');
 
   /** @type {MapShineState} */
@@ -42,14 +43,18 @@ export async function bootstrap(options = {}) {
 
   try {
     // Step 1: Load three.js (bundled from node_modules via build script)
+    console.log('[MSA BOOT] bootstrap: loading three.js');
     logger.info('Loading three.js...');
     const THREE = await import('../vendor/three/three.custom.js');
     window.THREE = THREE; // Expose globally for debugging
     logger.info(`three.js r${THREE.REVISION} loaded`);
+    console.log('[MSA BOOT] bootstrap: three.js loaded, revision', THREE.REVISION);
 
     // Step 2: Detect GPU capabilities
+    console.log('[MSA BOOT] bootstrap: detecting GPU capabilities');
     logger.info('Detecting GPU capabilities...');
     state.capabilities = await capabilities.detect();
+    console.log('[MSA BOOT] bootstrap: capabilities detected, tier=', state.capabilities.tier);
 
     // Step 3: Check if any rendering tier is available
     if (state.capabilities.tier === 'none') {
@@ -60,8 +65,10 @@ export async function bootstrap(options = {}) {
     }
 
     // Step 4: Initialize renderer with fallback strategy
+    console.log('[MSA BOOT] bootstrap: creating renderer');
     logger.info('Initializing renderer...');
     const { renderer, rendererType } = await rendererStrategy.create(THREE, state.capabilities);
+    console.log('[MSA BOOT] bootstrap: renderer created=', !!renderer, 'type=', rendererType);
 
     if (!renderer) {
       state.error = 'Renderer initialization failed';

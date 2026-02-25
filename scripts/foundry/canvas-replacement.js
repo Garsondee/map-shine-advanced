@@ -82,6 +82,7 @@ import { NoteManager } from '../scene/note-manager.js';
 import { FloorStack } from '../scene/FloorStack.js';
 import { FloorLayerManager } from '../compositor-v2/FloorLayerManager.js';
 import { CloudEffectV2 } from '../compositor-v2/effects/CloudEffectV2.js';
+import { WaterSplashesEffectV2 } from '../compositor-v2/effects/WaterSplashesEffectV2.js';
 import { TemplateManager } from '../scene/template-manager.js';
 import { LightIconManager } from '../scene/light-icon-manager.js';
 import { EnhancedLightIconManager } from '../scene/enhanced-light-icon-manager.js';
@@ -2136,6 +2137,43 @@ async function createThreeCanvas(scene) {
     if (_v2Active) {
       dlp.event('effectInit: SKIPPED — V2 compositor active, no effects needed');
       _sectionEnd('effectInit');
+
+      // V2: Eagerly initialize FloorCompositor and warm up shaders NOW during
+      // scene loading, NOT lazily on the first render frame.
+      //
+      // Without this, the 69KB water fragment shader compiles synchronously
+      // on the GPU driver the first time renderer.render() is called, which
+      // freezes the browser main thread for multiple seconds and manifests as
+      // the loading screen stuck at 0% with parts of the UI not loading in.
+      //
+      // By force-creating the FloorCompositor here and calling renderer.compile()
+      // on its scene, the driver compiles all shaders during the loading phase
+      // where a brief stall is acceptable and the loading bar is already visible.
+      safeCall(() => {
+        loadingOverlay.setStage('effects.core', 0.0, 'Initializing V2 compositor…', { immediate: true });
+        loadingOverlay.startAutoProgress(0.55, 0.015);
+      }, 'overlay.v2CompositorInit', Severity.COSMETIC);
+
+      if (isDebugLoad) dlp.begin('v2.floorCompositor.warmup', 'setup');
+      // Yield one frame so the browser can paint the loading screen BEFORE the
+      // synchronous GPU shader compilation stall. Without this yield, the stall
+      // happens before the first paint and the loading screen appears frozen at 0%.
+      await new Promise(resolve => setTimeout(resolve, 50));
+      safeCall(() => {
+        // Force-create the FloorCompositor so all ShaderMaterials are built now.
+        const fc = effectComposer._getFloorCompositorV2();
+        if (fc && renderer) {
+          // renderer.compile() triggers GLSL compilation for all materials in
+          // the compositor's scenes. Uses a throwaway 1x1 camera so no pixels
+          // are actually rendered — purely a driver-side compile trigger.
+          const warmupCamera = new window.THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+          if (fc._composeScene) renderer.compile(fc._composeScene, warmupCamera);
+          if (fc._blitScene)    renderer.compile(fc._blitScene,    warmupCamera);
+          if (fc._renderBus?._scene) renderer.compile(fc._renderBus._scene, warmupCamera);
+          log.info('V2 FloorCompositor shaders pre-compiled during scene load');
+        }
+      }, 'v2.floorCompositor.warmup', Severity.DEGRADED);
+      if (isDebugLoad) dlp.end('v2.floorCompositor.warmup');
     }
 
     if (!_v2Active) {
@@ -2662,6 +2700,25 @@ async function createThreeCanvas(scene) {
         }
       }, 'tileManager.setFloorPresenceScene', Severity.COSMETIC);
     } // end if (!_v2Active) — TileManager effect wiring
+
+    // V2 STILL needs floor-presence targets for cross-floor occlusion (particles, etc.).
+    // TileManager is active in V2, so we reuse the existing layer-23/24 presence
+    // meshes and let DistortionManager render them into its RTs.
+    if (_v2Active) {
+      safeCall(() => {
+        if (!tileManager || !distortionManager || !window.THREE) return;
+        // Water occluders are also used by water distortion/ripples; wire in V2.
+        tileManager.setWaterOccluderScene(distortionManager?.waterOccluderScene ?? null);
+
+        const fpScene = new (window.THREE.Scene)();
+        tileManager.setFloorPresenceScene(fpScene);
+        distortionManager.setFloorPresenceScene(fpScene);
+
+        const bfpScene = new (window.THREE.Scene)();
+        tileManager.setBelowFloorPresenceScene(bfpScene);
+        distortionManager.setBelowFloorPresenceScene(bfpScene);
+      }, 'tileManager.setFloorPresenceScene(V2)', Severity.COSMETIC);
+    }
     tileManager.initialize();
     if (isDebugLoad) dlp.end('manager.TileManager.init');
     if (isDebugLoad) dlp.begin('manager.TileManager.syncAll', 'sync');
@@ -3351,6 +3408,11 @@ async function createThreeCanvas(scene) {
         }, 'v2.registerFireUI', Severity.COSMETIC);
 
         safeCall(() => {
+          uiManager.registerEffect('water-splashes', 'Water Splashes',
+            WaterSplashesEffectV2.getControlSchema(), _makeV2Callback('_waterSplashesEffect'), 'particle');
+        }, 'v2.registerWaterSplashesUI', Severity.COSMETIC);
+
+        safeCall(() => {
           uiManager.registerEffect('bloom', 'Bloom (Glow)',
             BloomEffect.getControlSchema(), _makeV2Callback('_bloomEffect'), 'global');
         }, 'v2.registerBloomUI', Severity.COSMETIC);
@@ -3396,7 +3458,7 @@ async function createThreeCanvas(scene) {
           );
         }, 'v2.registerCloudUI', Severity.COSMETIC);
 
-        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, Bloom, ColorCorrection, FilmGrain, Sharpen, Water, Cloud)');
+        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, WaterSplashes, Bloom, ColorCorrection, FilmGrain, Sharpen, Water, Cloud)');
 
         log.info('V2: UI initialized');
       }, 'initializeUI(V2)', Severity.DEGRADED);

@@ -302,33 +302,6 @@ export class WaterEffectV2 {
 
       useSdfMask: true,
 
-      // Organic wave system
-      // Phase noise: wobbles each wave family's crest independently.
-      phaseNoiseStrength: 0.0,  // 0=off (default off; presets enable)
-      phaseNoiseScale: 1.8,
-      phaseNoiseSpeed: 0.06,
-
-      // Per-octave direction jitter: each wave train angles up to ±45°.
-      dirJitterStrength: 0.0,   // 0=off
-      dirJitterScale: 0.6,
-      dirJitterSpeed: 0.04,
-
-      // Extra organic domain warp (on top of existing warpUv).
-      organicWarpStrength: 0.0, // 0=off
-      organicWarpScale: 0.5,
-      organicWarpSpeed: 0.08,
-
-      // Procedural impact/splash ripples.
-      impactRipplesEnabled: false,
-      impactRippleStrength: 0.4,
-      impactRippleRate: 1.2,
-      impactRippleRadius: 0.18,
-      impactRippleDecay: 3.5,
-      impactRippleFreq: 18.0,
-
-      // Active wave style preset id (for UI display; does not drive behaviour).
-      waveStylePreset: 'default',
-
       // Debug
       debugView: 0,
       debugWindArrow: false,
@@ -546,188 +519,6 @@ export class WaterEffectV2 {
     if (Number.isFinite(rot)) return rot;
     if (Number.isFinite(legacy)) return legacy;
     return 0;
-  }
-
-  // ── Wave Style Presets ─────────────────────────────────────────────────────
-
-  /**
-   * Named wave style presets.  Each entry overrides only the organic-wave-system
-   * params (phaseNoise*, dirJitter*, organicWarp*, impactRipples*) plus a few
-   * wave core params where the preset benefits from them.  All other params
-   * keep their existing values so the preset blends cleanly over any tint/foam
-   * configuration the user has already set up.
-   *
-   * Preset ids:
-   *   'default'  – all organic features off; pure wave-warp baseline.
-   *   'subtle'   – Combo A: light phase noise + mild jitter only.
-   *                Read: calm lake, gentle irregularity.
-   *   'gusty'    – Combo B: spatial direction field + amplitude noise via
-   *                multi-train evolution + heavy warp pulses.
-   *                Read: windy/gusty surface, competing wave sets.
-   *   'organic'  – Combo C: strong domain warp + heavy phase noise + jitter.
-   *                Read: most broken-up, chaotic surface; swamp / sea chop.
-   *   'splashy'  – Combo D: Combo A base + impact ripples + foam shredding.
-   *                Read: alive, splashy, rainy surface with constant disturbance.
-   */
-  static get WAVE_STYLE_PRESETS() {
-    return {
-      default: {
-        label: 'Default',
-        desc: 'All organic features off — pure wind-driven wave baseline.',
-        params: {
-          phaseNoiseStrength:  0.0,
-          phaseNoiseScale:     1.8,
-          phaseNoiseSpeed:     0.06,
-          dirJitterStrength:   0.0,
-          dirJitterScale:      0.6,
-          dirJitterSpeed:      0.04,
-          organicWarpStrength: 0.0,
-          organicWarpScale:    0.5,
-          organicWarpSpeed:    0.08,
-          impactRipplesEnabled: false,
-          impactRippleStrength: 0.4,
-          impactRippleRate:    1.2,
-          impactRippleRadius:  0.18,
-          impactRippleDecay:   3.5,
-          impactRippleFreq:    18.0,
-        },
-      },
-
-      subtle: {
-        label: 'Subtle Realism',
-        desc: 'Phase noise + mild direction jitter. Calm lake, gentle irregularity.',
-        params: {
-          // Phase noise: crests wobble softly, each family independently.
-          phaseNoiseStrength:  0.45,
-          phaseNoiseScale:     1.4,
-          phaseNoiseSpeed:     0.05,
-          // Light directional nudge — barely noticeable alone but breaks parallel lines.
-          dirJitterStrength:   0.22,
-          dirJitterScale:      0.5,
-          dirJitterSpeed:      0.03,
-          // No extra domain warp — keep the clean look.
-          organicWarpStrength: 0.0,
-          organicWarpScale:    0.5,
-          organicWarpSpeed:    0.08,
-          // No impact ripples.
-          impactRipplesEnabled: false,
-          impactRippleStrength: 0.3,
-          impactRippleRate:    0.8,
-          impactRippleRadius:  0.12,
-          impactRippleDecay:   4.0,
-          impactRippleFreq:    16.0,
-        },
-      },
-
-      gusty: {
-        label: 'Gusty / Windy',
-        desc: 'Strong direction jitter + organic warp patches. Competing wave sets, gusty feel.',
-        params: {
-          // Moderate phase noise to break crest alignment.
-          phaseNoiseStrength:  0.65,
-          phaseNoiseScale:     1.2,
-          phaseNoiseSpeed:     0.08,
-          // Strong per-octave direction jitter — wave families diverge noticeably.
-          dirJitterStrength:   0.70,
-          dirJitterScale:      0.4,
-          dirJitterSpeed:      0.06,
-          // Gentle organic warp — patches of different wave behaviour.
-          organicWarpStrength: 0.28,
-          organicWarpScale:    0.35,
-          organicWarpSpeed:    0.10,
-          // Small ripple contribution as if gusts create micro-disturbances.
-          impactRipplesEnabled: true,
-          impactRippleStrength: 0.25,
-          impactRippleRate:    0.7,
-          impactRippleRadius:  0.22,
-          impactRippleDecay:   5.0,
-          impactRippleFreq:    14.0,
-        },
-      },
-
-      organic: {
-        label: 'Organic / Broken',
-        desc: 'Heavy domain warp + strong phase noise + max jitter. Chaotic, swamp or sea chop.',
-        params: {
-          // Strong phase noise — crests never align across any region.
-          phaseNoiseStrength:  1.20,
-          phaseNoiseScale:     1.0,
-          phaseNoiseSpeed:     0.10,
-          // Full 45° direction jitter — each family goes its own way.
-          dirJitterStrength:   1.0,
-          dirJitterScale:      0.3,
-          dirJitterSpeed:      0.07,
-          // Heavy organic warp — the surface "bends" visibly.
-          organicWarpStrength: 0.55,
-          organicWarpScale:    0.28,
-          organicWarpSpeed:    0.12,
-          // Medium splash activity.
-          impactRipplesEnabled: true,
-          impactRippleStrength: 0.50,
-          impactRippleRate:    1.4,
-          impactRippleRadius:  0.20,
-          impactRippleDecay:   3.0,
-          impactRippleFreq:    20.0,
-        },
-      },
-
-      splashy: {
-        label: 'Splashy / Alive',
-        desc: 'Subtle base + dense impact ripples + high rate. Rainy, lively surface.',
-        params: {
-          // Subtle-level phase + jitter for a clean base.
-          phaseNoiseStrength:  0.40,
-          phaseNoiseScale:     1.5,
-          phaseNoiseSpeed:     0.05,
-          dirJitterStrength:   0.25,
-          dirJitterScale:      0.55,
-          dirJitterSpeed:      0.03,
-          // Gentle organic warp so splashes don't swim around too much.
-          organicWarpStrength: 0.12,
-          organicWarpScale:    0.45,
-          organicWarpSpeed:    0.07,
-          // Dense fast-decaying ripples — the "alive" quality.
-          impactRipplesEnabled: true,
-          impactRippleStrength: 0.65,
-          impactRippleRate:    2.2,
-          impactRippleRadius:  0.15,
-          impactRippleDecay:   4.5,
-          impactRippleFreq:    22.0,
-        },
-      },
-    };
-  }
-
-  /**
-   * Apply a named wave style preset by merging its params into this.params.
-   * Only the organic wave system params are touched; everything else is left as-is.
-   *
-   * @param {string} presetId - One of: 'default','subtle','gusty','organic','splashy'
-   * @returns {boolean} true if the preset was found and applied
-   */
-  applyWaveStylePreset(presetId) {
-    const preset = WaterEffectV2.WAVE_STYLE_PRESETS[presetId];
-    if (!preset) {
-      log.warn(`applyWaveStylePreset: unknown preset '${presetId}'. Valid: ${Object.keys(WaterEffectV2.WAVE_STYLE_PRESETS).join(', ')}`);
-      return false;
-    }
-    Object.assign(this.params, preset.params);
-    this.params.waveStylePreset = presetId;
-    log.info(`applyWaveStylePreset: applied '${presetId}' (${preset.label})`);
-    return true;
-  }
-
-  /**
-   * Return all available presets as an array suitable for a dropdown.
-   * Each entry: { id, label, desc }
-   * @returns {Array<{id:string, label:string, desc:string}>}
-   */
-  static getWaveStylePresetList() {
-    return Object.entries(WaterEffectV2.WAVE_STYLE_PRESETS).map(([id, p]) => ({
-      id,
-      label: p.label,
-      desc:  p.desc,
-    }));
   }
 
   /**
@@ -1340,6 +1131,27 @@ export class WaterEffectV2 {
   }
 
   /**
+   * Return the active floor's raw water mask texture (used by V1 WeatherParticles
+   * for foam point-cloud generation). Returns null when no water data is loaded.
+   * @returns {THREE.Texture|null}
+   */
+  getWaterMaskTexture() {
+    const floorData = this._floorWater.get(this._activeFloorIndex);
+    return floorData?.rawMask ?? null;
+  }
+
+  /**
+   * Return the active floor's SDF/water-data texture (used by V1 WeatherParticles
+   * foam behaviors for spawn gating and flow-field sampling).
+   * Returns null when no water data is loaded.
+   * @returns {THREE.Texture|null}
+   */
+  getWaterDataTexture() {
+    const floorData = this._floorWater.get(this._activeFloorIndex);
+    return floorData?.waterData?.texture ?? null;
+  }
+
+  /**
    * Apply a floor's water data textures to the shader uniforms.
    * @param {number} floorIndex
    * @private
@@ -1836,31 +1648,8 @@ export class WaterEffectV2 {
     // Default 0.5 in _buildUniforms cuts specular by half — bind from params.
     u.uSkyIntensity.value = Math.max(0, Math.min(1, p.skyIntensity ?? 1.0));
 
-    // ── Organic wave system ───────────────────────────────────────────────
-    if (u.uPhaseNoiseStrength)   u.uPhaseNoiseStrength.value   = p.phaseNoiseStrength   ?? 0.0;
-    if (u.uPhaseNoiseScale)      u.uPhaseNoiseScale.value      = p.phaseNoiseScale      ?? 1.8;
-    if (u.uPhaseNoiseSpeed)      u.uPhaseNoiseSpeed.value      = p.phaseNoiseSpeed      ?? 0.06;
-    if (u.uDirJitterStrength)    u.uDirJitterStrength.value    = p.dirJitterStrength    ?? 0.0;
-    if (u.uDirJitterScale)       u.uDirJitterScale.value       = p.dirJitterScale       ?? 0.6;
-    if (u.uDirJitterSpeed)       u.uDirJitterSpeed.value       = p.dirJitterSpeed       ?? 0.04;
-    if (u.uOrganicWarpStrength)  u.uOrganicWarpStrength.value  = p.organicWarpStrength  ?? 0.0;
-    if (u.uOrganicWarpScale)     u.uOrganicWarpScale.value     = p.organicWarpScale     ?? 0.5;
-    if (u.uOrganicWarpSpeed)     u.uOrganicWarpSpeed.value     = p.organicWarpSpeed     ?? 0.08;
-    if (u.uImpactRipplesEnabled) u.uImpactRipplesEnabled.value = p.impactRipplesEnabled ? 1.0 : 0.0;
-    if (u.uImpactRippleStrength) u.uImpactRippleStrength.value = p.impactRippleStrength ?? 0.4;
-    if (u.uImpactRippleRate)     u.uImpactRippleRate.value     = p.impactRippleRate     ?? 1.2;
-    if (u.uImpactRippleRadius)   u.uImpactRippleRadius.value   = p.impactRippleRadius   ?? 0.18;
-    if (u.uImpactRippleDecay)    u.uImpactRippleDecay.value    = p.impactRippleDecay    ?? 3.5;
-    if (u.uImpactRippleFreq)     u.uImpactRippleFreq.value     = p.impactRippleFreq     ?? 18.0;
-
     // ── Debug ─────────────────────────────────────────────────────────────
     u.uDebugView.value = p.debugView ?? 0;
-
-    // ── Legacy foam particle bridge ───────────────────────────────────────
-    // WeatherParticles already has mature foam.webp spawning/behavior logic.
-    // Feed it the active floor's WaterData + current water params so V2 keeps
-    // foam particle complexity while the post water shader remains authoritative.
-    this._syncLegacyFoamParticles(elapsed);
 
     // ── Foundry environment ───────────────────────────────────────────────
     try {
@@ -2280,23 +2069,6 @@ export class WaterEffectV2 {
       uRainStormMicroScale:    { value: p.rainStormMicroScale },
       uRainStormMicroSpeed:    { value: p.rainStormMicroSpeed },
       uRainMaxCombinedStrengthPx: { value: p.rainMaxCombinedStrengthPx },
-
-      // Organic wave system
-      uPhaseNoiseStrength:   { value: p.phaseNoiseStrength   ?? 0.0 },
-      uPhaseNoiseScale:      { value: p.phaseNoiseScale      ?? 1.8 },
-      uPhaseNoiseSpeed:      { value: p.phaseNoiseSpeed      ?? 0.06 },
-      uDirJitterStrength:    { value: p.dirJitterStrength    ?? 0.0 },
-      uDirJitterScale:       { value: p.dirJitterScale       ?? 0.6 },
-      uDirJitterSpeed:       { value: p.dirJitterSpeed       ?? 0.04 },
-      uOrganicWarpStrength:  { value: p.organicWarpStrength  ?? 0.0 },
-      uOrganicWarpScale:     { value: p.organicWarpScale     ?? 0.5 },
-      uOrganicWarpSpeed:     { value: p.organicWarpSpeed     ?? 0.08 },
-      uImpactRipplesEnabled: { value: p.impactRipplesEnabled ? 1.0 : 0.0 },
-      uImpactRippleStrength: { value: p.impactRippleStrength ?? 0.4 },
-      uImpactRippleRate:     { value: p.impactRippleRate     ?? 1.2 },
-      uImpactRippleRadius:   { value: p.impactRippleRadius   ?? 0.18 },
-      uImpactRippleDecay:    { value: p.impactRippleDecay    ?? 3.5 },
-      uImpactRippleFreq:     { value: p.impactRippleFreq     ?? 18.0 },
 
       // Wind
       uWindDir:      { value: new THREE.Vector2(1, 0) },

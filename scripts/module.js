@@ -710,6 +710,7 @@ Hooks.once('init', async function() {
  * Main bootstrap happens here
  */
 Hooks.once('ready', async function() {
+  console.log('[MSA BOOT] ready hook: fired');
   try {
     // Defer slightly so the rest of Foundry UI finishes settling before we show a modal.
     setTimeout(() => showExperimentalWarningDialog(), 250);
@@ -722,7 +723,9 @@ Hooks.once('ready', async function() {
     console.warn('Map Shine: failed to update loading overlay', e);
   }
   // Run bootstrap sequence
+  console.log('[MSA BOOT] ready hook: calling bootstrap');
   const state = await bootstrap({ verbose: false });
+  console.log('[MSA BOOT] ready hook: bootstrap complete, initialized=', state?.initialized);
   
   // Update global state
   Object.assign(MapShine, state);
@@ -748,5 +751,18 @@ Hooks.once('ready', async function() {
     }
   } catch (e) {
     console.warn('Map Shine: failed to initialize Loading Screen Manager', e);
+  }
+
+  // Safety net: when Foundry has no active scene, it calls #drawBlank() which
+  // does NOT fire the canvasReady hook. Without this check the loading overlay
+  // shown during `init` is never dismissed and the module appears frozen at 0%.
+  // canvasReady will fire normally when the user later navigates to a scene.
+  try {
+    if (!canvas?.scene) {
+      info('No active scene — dismissing loading overlay');
+      loadingOverlay.fadeIn(500).catch(() => {});
+    }
+  } catch (e) {
+    console.warn('Map Shine: failed to dismiss overlay for no-scene case', e);
   }
 });

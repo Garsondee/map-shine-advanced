@@ -1300,6 +1300,16 @@ export class EffectComposer {
       this._floorCompositorV2.initialize();
       log.info('FloorCompositor V2 created and initialized');
 
+      // Expose WaterEffectV2 on window.MapShine.waterEffect so V1
+      // WeatherParticles foam systems can read water mask/data textures
+      // and params. Without this, foam.webp particles are entirely disabled
+      // because WeatherParticles.update() gates on waterEffect.enabled.
+      try {
+        if (window.MapShine && this._floorCompositorV2._waterEffect) {
+          window.MapShine.waterEffect = this._floorCompositorV2._waterEffect;
+        }
+      } catch (_) {}
+
       // ── Replay saved params ─────────────────────────────────────────────
       // The Tweakpane UI fires its initial callbacks (loadEffectParameters →
       // _propagateToV2) during initializeUI, which runs BEFORE the first

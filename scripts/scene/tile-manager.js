@@ -3275,17 +3275,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       }
       this._markInitialTileLoaded(tileDoc?.id, isOverheadForLoad);
     }).catch(error => {
-      // AbortError / "operation was aborted" fires when the browser cancels an
-      // in-flight fetch (canvas reload, Foundry texture-cache dedup abort, etc.).
-      // The tile still renders correctly once the cache settles, so downgrade to
-      // debug to avoid alarming noise in the console.
-      const isAbort = error?.name === 'AbortError' ||
-        (typeof error?.message === 'string' && error.message.toLowerCase().includes('aborted'));
-      if (isAbort) {
-        log.debug(`Tile texture fetch aborted (non-fatal): ${texturePath}`);
-      } else {
-        log.error(`Failed to load tile texture: ${texturePath}`, error);
-      }
+      log.error(`Failed to load tile texture: ${texturePath}`, error);
       // Guard: if the profiler session already ended (tile loading is non-blocking),
       // the entry was closed as orphaned by endSession(). Don't call end() again.
       if (_dlp.debugMode && _dlp._openEntries?.has(_tileDbgId)) {

@@ -20,24 +20,38 @@ export async function detect() {
     tier: 'none'
   };
 
-  // Check WebGL2 availability
-  const canvas = document.createElement('canvas');
-  const gl2 = canvas.getContext('webgl2');
+  // Check WebGL2 availability.
+  // IMPORTANT: Use a minimal 1x1 canvas and explicitly release the context
+  // after probing. Leaked WebGL contexts exhaust the browser's context limit
+  // (typically 8-16), causing other contexts (e.g. PIXI's) to be evicted with
+  // a "WebGL context was lost" error that freezes the loading screen.
+  const probeCanvas = document.createElement('canvas');
+  probeCanvas.width = 1;
+  probeCanvas.height = 1;
+  const gl2 = probeCanvas.getContext('webgl2');
   capabilities.webgl2 = !!gl2;
-  
+
   if (gl2) {
     log.debug('WebGL2 context created successfully');
+    // Explicitly release the probe context so the slot is freed immediately.
+    const loseCtx = gl2.getExtension('WEBGL_lose_context');
+    if (loseCtx) loseCtx.loseContext();
   }
 
   // Check WebGL 1.0 availability (only if WebGL2 failed)
   if (!capabilities.webgl2) {
-    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+    const gl = probeCanvas.getContext('webgl') || probeCanvas.getContext('experimental-webgl');
     capabilities.webgl = !!gl;
-    
+
     if (gl) {
       log.debug('WebGL 1.0 context created successfully');
+      const loseCtx = gl.getExtension('WEBGL_lose_context');
+      if (loseCtx) loseCtx.loseContext();
     }
   }
+
+  // Remove the probe canvas from any potential DOM attachment and allow GC.
+  probeCanvas.remove();
 
   // Determine rendering tier based on capabilities (WebGL-only)
   if (capabilities.webgl2) {

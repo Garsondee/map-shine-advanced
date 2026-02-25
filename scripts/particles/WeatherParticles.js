@@ -1453,8 +1453,18 @@ class FoamPlumeBehavior {
 
   initialize(particle, system) {
     if (!particle) return;
-    if (particle.size && !particle._foamBaseSize) {
-      particle._foamBaseSize = particle.size.clone();
+    if (particle.size !== undefined && particle._foamBaseSize === undefined) {
+      // three.quarks supports different particle size representations depending on
+      // build / render mode. Some versions store `particle.size` as a Vector3-like
+      // object (with clone/copy), while others store it as a scalar number.
+      // Store a compatible "base size" and handle both forms in update().
+      if (particle.size && typeof particle.size.clone === 'function') {
+        particle._foamBaseSize = particle.size.clone();
+      } else if (typeof particle.size === 'number') {
+        particle._foamBaseSize = particle.size;
+      } else {
+        particle._foamBaseSize = 1.0;
+      }
     }
     if (particle.color) {
       particle._foamBaseAlpha = particle.color.w;
@@ -1489,11 +1499,22 @@ class FoamPlumeBehavior {
     const g0 = Math.max(0.0, Math.min(1.0, t / growEnd));
     const g = 1.0 - Math.pow(1.0 - g0, 3.0);
     const scale = this.startScale + (this.maxScale - this.startScale) * g;
-    if (particle.size && particle._foamBaseSize) {
-      particle.size.copy(particle._foamBaseSize).multiplyScalar(scale);
-      // Apply random X/Y flips for visual variety (negative size = mirrored UV).
-      if (particle._foamFlipX === -1.0) particle.size.x *= -1.0;
-      if (particle._foamFlipY === -1.0) particle.size.y *= -1.0;
+    if (particle.size !== undefined && particle._foamBaseSize !== undefined) {
+      // Vector size path.
+      if (particle.size && typeof particle.size.copy === 'function' && particle._foamBaseSize && typeof particle._foamBaseSize === 'object') {
+        particle.size.copy(particle._foamBaseSize).multiplyScalar(scale);
+        // Apply random X/Y flips for visual variety (negative size = mirrored UV).
+        if (particle._foamFlipX === -1.0 && typeof particle.size.x === 'number') particle.size.x *= -1.0;
+        if (particle._foamFlipY === -1.0 && typeof particle.size.y === 'number') particle.size.y *= -1.0;
+      } else {
+        // Scalar size path.
+        const base = (typeof particle._foamBaseSize === 'number') ? particle._foamBaseSize : 1.0;
+        let next = base * scale;
+        // When size is scalar, we can't do independent X/Y flips. Preserve at least
+        // a stable sign flip for variety.
+        if (particle._foamFlipX === -1.0) next *= -1.0;
+        particle.size = next;
+      }
     }
 
     const pt = Math.max(0.01, Math.min(0.6, this.peakTime));
@@ -1860,6 +1881,45 @@ export class WeatherParticles {
     this._lastPrecipitation = null;
 
     this._initSystems();
+    // Defensive: ensure all quarks systems created in _initSystems are actually
+    // registered with the shared BatchedRenderer. In V2 we observed cases where
+    // WeatherParticles.*System objects existed and updated, but the BatchedRenderer
+    // had no systemToBatchIndex entry for them, meaning they could never simulate
+    // or render. This re-add is cheap (Map.has) and safe (BatchedRenderer.addSystem
+    // will no-op into an existing batch when settings match).
+    this._ensureAllSystemsRegistered();
+  }
+
+  _ensureSystemRegistered(sys) {
+    if (!sys || !this.batchRenderer) return;
+    const map = this.batchRenderer.systemToBatchIndex;
+    if (map && typeof map.has === 'function' && map.has(sys)) return;
+    try {
+      this.batchRenderer.addSystem(sys);
+    } catch (e) {
+      try { log.warn('WeatherParticles: failed to register quarks system', e); } catch (_) {}
+    }
+  }
+
+  _ensureAllSystemsRegistered() {
+    // Core precipitation systems
+    this._ensureSystemRegistered(this.rainSystem);
+    this._ensureSystemRegistered(this.snowSystem);
+    this._ensureSystemRegistered(this.ashSystem);
+    this._ensureSystemRegistered(this.ashEmberSystem);
+
+    // Splash variants
+    this._ensureSystemRegistered(this.splashSystem);
+    if (this.splashSystems && this.splashSystems.length) {
+      for (const s of this.splashSystems) this._ensureSystemRegistered(s);
+    }
+    if (this._waterHitSplashSystems && this._waterHitSplashSystems.length) {
+      for (const entry of this._waterHitSplashSystems) this._ensureSystemRegistered(entry?.system);
+    }
+
+    // Water foam.webp systems
+    this._ensureSystemRegistered(this._foamSystem);
+    this._ensureSystemRegistered(this._foamFleckSystem);
   }
 
   _deleteMaskPixelCacheEntry(key) {
@@ -2985,7 +3045,11 @@ export class WeatherParticles {
       startSpeed: new ConstantValue(0),
       startSize: new IntervalValue(40, 90),
       startColor: new ColorRange(new Vector4(1.0, 1.0, 1.0, 1.0), new Vector4(1.0, 1.0, 1.0, 1.0)),
-      worldSpace: true,
+      // IMPORTANT: Foam plume emitter returns particle positions in emitter-local
+      // space (centered around the scene center), so the emitter's transform must
+      // be applied. Using worldSpace=true would treat those local positions as
+      // world positions, typically placing particles near (0,0) and off-screen.
+      worldSpace: false,
       maxParticles: 2500,
       emissionOverTime: new ConstantValue(0),
       shape: this._waterFoamShape,
@@ -2999,6 +3063,14 @@ export class WeatherParticles {
     this._foamSystem.emitter.position.set(centerX, centerY, groundZ + 10);
     this._foamSystem.emitter.rotation.set(0, 0, 0);
     this._foamSystem.emitter.layers.set(OVERLAY_THREE_LAYER);
+    // WeatherParticlesV2 applies an additional frustum-culling pass that can pause
+    // particle systems when their emitter bounding sphere doesn't intersect the
+    // camera frustum. Foam emitters cover the full scene and should never be culled;
+    // disable auto-cull so foam.webp doesn't disappear due to culling mismatches.
+    try {
+      this._foamSystem.emitter.userData = this._foamSystem.emitter.userData || {};
+      this._foamSystem.emitter.userData.msAutoCull = false;
+    } catch (_) {}
     if (this.scene) this.scene.add(this._foamSystem.emitter);
     this.batchRenderer.addSystem(this._foamSystem);
 
@@ -3057,6 +3129,11 @@ export class WeatherParticles {
     this._foamFleckSystem.emitter.position.set(centerX, centerY, groundZ + 10);
     this._foamFleckSystem.emitter.rotation.set(0, 0, 0);
     this._foamFleckSystem.emitter.layers.set(OVERLAY_THREE_LAYER);
+    // Same reasoning as foam plume: flecks should not be frustum-culled by the V2 wrapper.
+    try {
+      this._foamFleckSystem.emitter.userData = this._foamFleckSystem.emitter.userData || {};
+      this._foamFleckSystem.emitter.userData.msAutoCull = false;
+    } catch (_) {}
     if (this.scene) this.scene.add(this._foamFleckSystem.emitter);
     this.batchRenderer.addSystem(this._foamFleckSystem);
 
@@ -3517,8 +3594,14 @@ export class WeatherParticles {
       '    );\n' +
       '    \n' +
       '    // Quick bounds check to avoid sampling outside the mask.\n' +
-      '    if (uvMask.x < 0.0 || uvMask.x > 1.0 || uvMask.y < 0.0 || uvMask.y > 1.0) {\n' +
-      '      discard;\n' +
+      '    // IMPORTANT: Only enforce this when a mask feature is enabled.\n' +
+      '    // When all mask features are disabled (debugging / fallback mode),\n' +
+      '    // we must not discard purely due to uSceneBounds/vRoofWorldPos mismatch.\n' +
+      '    bool msAnyMaskEnabled = (uRoofMaskEnabled > 0.5) || (uWaterMaskEnabled > 0.5) || (uHasWaterOccluderAlpha > 0.5);\n' +
+      '    if (msAnyMaskEnabled) {\n' +
+      '      if (uvMask.x < 0.0 || uvMask.x > 1.0 || uvMask.y < 0.0 || uvMask.y > 1.0) {\n' +
+      '        discard;\n' +
+      '      }\n' +
       '    }\n' +
       '    \n' +
       '    // Sample _Outdoors mask (world-space): white=outdoors, black=indoors\n' +
@@ -4115,31 +4198,52 @@ export class WeatherParticles {
   update(dt, sceneBoundsVec4) {
     // Global Weather checkbox kill-switch.
     // When weather is disabled we must:
-    // - hide all precipitation emitters immediately (no frozen rain/snow)
-    // - stop emitting new particles
-    // We intentionally do NOT stop the Quarks BatchedRenderer globally since
-    // other particle effects (fire, dust, etc.) may still be active.
-    if (weatherController && weatherController.enabled === false) {
+    // - hide precipitation emitters immediately (no frozen rain/snow)
+    // - stop emitting new precipitation particles
+    //
+    // IMPORTANT: Do NOT early-return here.
+    // Water foam.webp systems are authored as part of WeatherParticles, but they are
+    // driven by WaterEffectV2 (water mask + foam params), not by precipitation.
+    // If we return early, foam never updates/spawns.
+    const suppressPrecip = !!(
+      (weatherController && weatherController.enabled === false)
+      || (weatherController && weatherController.elevationWeatherSuppressed === true)
+    );
+
+    if (suppressPrecip) {
       this._zeroWeatherEmissions();
       this._clearAllRainSplashes();
-      this._setWeatherSystemsVisible(false);
-      return;
+      // Hide precipitation/ash/splashes, but keep foam systems visible so they can
+      // continue to render when water is active.
+      try {
+        if (this.rainSystem?.emitter) this.rainSystem.emitter.visible = false;
+        if (this.snowSystem?.emitter) this.snowSystem.emitter.visible = false;
+        if (this.ashSystem?.emitter) this.ashSystem.emitter.visible = false;
+        if (this.ashEmberSystem?.emitter) this.ashEmberSystem.emitter.visible = false;
+        if (this.splashSystem?.emitter) this.splashSystem.emitter.visible = false;
+        if (this.splashSystems && this.splashSystems.length) {
+          for (const s of this.splashSystems) {
+            if (s?.emitter) s.emitter.visible = false;
+          }
+        }
+        if (this._waterHitSplashSystems && this._waterHitSplashSystems.length) {
+          for (const entry of this._waterHitSplashSystems) {
+            if (entry?.system?.emitter) entry.system.emitter.visible = false;
+          }
+        }
+      } catch (_) {}
+    } else {
+      // Normal mode: all systems visible.
+      this._setWeatherSystemsVisible(true);
     }
-
-    // MS-LVL-051: Suppress weather particles when viewer is below weatherElevation.
-    // Uses the same hide-and-zero pattern as the global enabled kill-switch so
-    // existing rain/snow clears immediately when the viewer descends underground.
-    if (weatherController && weatherController.elevationWeatherSuppressed === true) {
-      this._zeroWeatherEmissions();
-      this._clearAllRainSplashes();
-      this._setWeatherSystemsVisible(false);
-      return;
-    }
-
-    this._setWeatherSystemsVisible(true);
 
     const weather = weatherController.getCurrentState();
     if (!weather) return;
+
+    // Defensive: if some external code or an internal quarks rebuild caused our
+    // ParticleSystem references to be missing from the BatchedRenderer map,
+    // re-register them so they can render.
+    this._ensureAllSystemsRegistered();
 
     // T2-A: Control-rate throttle — the expensive control path (emission bounds,
     // sizing, emission rates, uniform updates, mask lookups) only runs at _controlHz.
@@ -6218,6 +6322,30 @@ export class WeatherParticles {
     }
 
     try {
+      // Fast path for DataTexture images (e.g. WaterSurfaceModel rawMaskTexture).
+      // These have { data: TypedArray, width, height } instead of a drawable
+      // HTMLImageElement, so ctx.drawImage() would throw.
+      if (image.data && (image.data instanceof Uint8Array || image.data instanceof Uint8ClampedArray || image.data instanceof Float32Array)) {
+        let pixelData = image.data;
+        // If the data is RGBA and the right length, use it directly.
+        if (pixelData.length === w * h * 4) {
+          // Float32Array needs conversion to 0-255 range for the point generators.
+          if (pixelData instanceof Float32Array) {
+            const u8 = new Uint8Array(pixelData.length);
+            for (let i = 0; i < pixelData.length; i++) {
+              u8[i] = Math.max(0, Math.min(255, Math.round(pixelData[i] * 255)));
+            }
+            pixelData = u8;
+          }
+          const entry = { width: w, height: h, data: pixelData, byteLength: pixelData.byteLength };
+          this._maskPixelCache.set(key, entry);
+          if (typeof entry.byteLength === 'number' && Number.isFinite(entry.byteLength) && entry.byteLength > 0) {
+            this._maskPixelCacheBytes = (this._maskPixelCacheBytes || 0) + entry.byteLength;
+          }
+          return entry;
+        }
+      }
+
       if (!this._maskReadCanvas) {
         this._maskReadCanvas = document.createElement('canvas');
       }

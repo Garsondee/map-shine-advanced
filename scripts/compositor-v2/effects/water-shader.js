@@ -155,6 +155,34 @@ uniform float uRainStormMicroSpeed;
 
 uniform float uRainMaxCombinedStrengthPx;
 
+// ── Organic Wave System ───────────────────────────────────────────────────
+// Phase noise: perturbs each wave's phase using evolving FBM so crests wobble
+// rather than travelling in perfect parallel lines.
+uniform float uPhaseNoiseStrength;    // 0=off, ~0.4 subtle, ~1.5 strong
+uniform float uPhaseNoiseScale;       // spatial frequency of the noise field
+uniform float uPhaseNoiseSpeed;       // how fast the noise field evolves
+
+// Per-octave direction jitter: each wave family gets its own direction angle
+// sampled from a slow spatially-varying noise field (max ±45°).
+uniform float uDirJitterStrength;     // 0=off, 1=full ±45° jitter
+uniform float uDirJitterScale;        // spatial frequency of jitter field
+uniform float uDirJitterSpeed;        // evolution speed of jitter field
+
+// Extra organic domain warp: a second independent warp pass layered on top
+// of the existing warpUv() result.  Produces "bending" across the surface.
+uniform float uOrganicWarpStrength;   // 0=off, ~0.3 gentle, ~0.8 heavy
+uniform float uOrganicWarpScale;      // spatial scale of the organic warp
+uniform float uOrganicWarpSpeed;      // how fast the warp pattern moves
+
+// Impact ripples: procedural splash rings (rain drops / disturbances).
+// Several hash-seeded rings spawn across the surface at randomised positions.
+uniform float uImpactRipplesEnabled;  // 1.0 = on, 0.0 = off
+uniform float uImpactRippleStrength;  // height amplitude of each ring
+uniform float uImpactRippleRate;      // spawns per second (density)
+uniform float uImpactRippleRadius;    // max propagation radius (scene-UV units)
+uniform float uImpactRippleDecay;     // ring fade speed (higher = shorter life)
+uniform float uImpactRippleFreq;      // ring oscillation frequency
+
 // ── Wind ─────────────────────────────────────────────────────────────────
 uniform vec2 uWindDir;
 uniform float uWindSpeed;
@@ -648,6 +676,124 @@ void addWave(vec2 p, vec2 dir, float k, float amp, float sharpness, float omega,
   gSceneUv += amp * d * (k * dir) * uWaveScale * bunch;
 }
 
+// ── Organic wave helpers ─────────────────────────────────────────────────
+
+// Samples a spatially-varying, slowly-evolving phase nudge for a given
+// wave family (seedId 0..4).  Returns a value in roughly [-1..1] that is
+// added to the wave phase so crests wobble rather than travel in straight
+// parallel lines.
+//
+// Design: two FBM layers offset by the wave seed so each family gets an
+// independent noise field.  The domain drifts along windBasis monotonically
+// (via uWindTime) so the perturbation never reverses direction.
+float samplePhaseNoise(vec2 sceneUv, float seedId, float t,
+                       vec2 windBasis, float sceneAspect) {
+  // Skip all texture work when phase noise is disabled — avoids 4 texture
+  // fetches per call × 5 wave families = 20 saved fetches per fragment.
+  if (uPhaseNoiseStrength < 1e-4) return 0.0;
+  float sc = max(0.01, uPhaseNoiseScale);
+  float sp = max(0.0,  uPhaseNoiseSpeed);
+  // Seed offset ensures wave families see different noise fields.
+  vec2 seed = vec2(seedId * 17.3 + 3.7, seedId * 9.1 + 11.9);
+  // Aspect-correct basis so the noise has equal spatial frequency in X/Y.
+  vec2 basis = vec2(sceneUv.x * sceneAspect, sceneUv.y);
+  // Drift the domain monotonically along wind (never reverses).
+  vec2 drift = windBasis * (t * sp);
+  float n = fbmNoise(basis * sc + seed + drift);
+  return n; // already centred ≈ 0, range ≈ [-0.5..0.5] from fbmNoise
+}
+
+// Returns a direction-jitter angle in radians for wave family seedId.
+// The jitter evolves slowly and varies spatially, capped at ±PI/4 (45°).
+float sampleDirJitter(vec2 sceneUv, float seedId, float t,
+                      vec2 windBasis, float sceneAspect) {
+  // Skip all texture work when direction jitter is disabled — same cost saving.
+  if (uDirJitterStrength < 1e-4) return 0.0;
+  float sc = max(0.01, uDirJitterScale);
+  float sp = max(0.0,  uDirJitterSpeed);
+  vec2 seed = vec2(seedId * 23.1 + 5.3, seedId * 13.7 + 7.3);
+  vec2 basis = vec2(sceneUv.x * sceneAspect, sceneUv.y);
+  vec2 drift = windBasis * (t * sp * 0.5);
+  float n = fbmNoise(basis * sc + seed + drift);
+  // Map FBM result to ±PI/4, scaled by jitter strength.
+  const float HALF_PI4 = 0.7853982; // PI/4
+  return n * (HALF_PI4 * 2.0) * clamp(uDirJitterStrength, 0.0, 1.0);
+}
+
+// Extra organic domain warp — layered on top of the base warpUv().
+// Uses curl noise in the aspect-corrected scene basis so the "bend" is
+// isotropic and doesn't follow the wind stripes.  Drift uses uWindTime
+// monotonically to stay one-directional.
+vec2 organicWarp(vec2 sceneUv, float t, vec2 windBasis, float sceneAspect) {
+  float str = clamp(uOrganicWarpStrength, 0.0, 2.0);
+  if (str < 1e-4) return sceneUv;
+  float sc  = max(0.01, uOrganicWarpScale);
+  float sp  = max(0.0,  uOrganicWarpSpeed);
+  vec2 basis = vec2(sceneUv.x * sceneAspect, sceneUv.y);
+  vec2 drift = windBasis * (t * sp * 0.07);
+  // Two independent curl passes at different scales for richer deformation.
+  vec2 c1 = curlNoise2D(basis * sc        + drift + vec2(5.1, 11.7));
+  vec2 c2 = curlNoise2D(basis * sc * 2.3  + drift * 1.5 + vec2(23.9, 3.7));
+  vec2 warp = (c1 * 0.65 + c2 * 0.35) * str;
+  // Return in sceneUv space (undo aspect scaling on the output displacement).
+  return sceneUv + vec2(warp.x / max(sceneAspect, 1e-3), warp.y);
+}
+
+// Procedural impact ripples — N independent hash-seeded rings that spawn
+// across the surface at pseudo-random positions and times.
+// Each ring contributes a gradient (slope) to the distortion field, matching
+// how addWave() accumulates into gSceneUv.
+// Ring count is fixed at 8 for predictable GPU cost; rate/density is
+// controlled by how frequently each ring "resets".
+vec2 impactRipples(vec2 sceneUv, float t) {
+  if (uImpactRipplesEnabled < 0.5) return vec2(0.0);
+  float str   = max(0.0, uImpactRippleStrength);
+  if (str < 1e-5) return vec2(0.0);
+  float rate  = max(0.01, uImpactRippleRate);
+  float maxR  = max(0.01, uImpactRippleRadius);
+  float decay = max(0.1,  uImpactRippleDecay);
+  float freq  = max(1.0,  uImpactRippleFreq);
+
+  vec2 accum = vec2(0.0);
+  // 8 rings — enough for a lively surface without GPU cost concern.
+  for (int i = 0; i < 8; i++) {
+    float fi = float(i);
+    // Each ring has its own lifecycle clock: floor(t*rate + seed) gives the
+    // current "generation" for this ring slot.  The fractional part is its
+    // normalised age [0..1).
+    float seed = hash12(vec2(fi * 13.7 + 3.1, fi * 7.9 + 1.3));
+    float clock = t * rate + seed * 31.7;
+    float gen   = floor(clock);
+    float age01 = fract(clock);           // [0,1) within this generation
+
+    // Spawn position: hash the generation and ring slot for a stable
+    // pseudo-random position in [0.1..0.9] scene UV (avoid tight edges).
+    vec2 h2 = hash22(vec2(gen * 1.4 + fi, gen * 2.3 + fi * 0.7));
+    vec2 pos = vec2(0.1) + h2 * 0.8;
+
+    // Propagating ring radius grows from 0 to maxR over the lifetime.
+    float r = length(sceneUv - pos);
+    float ringR = age01 * maxR;
+
+    // Amplitude envelope: quick in, exponential fade out.
+    float env = exp(-age01 * decay);
+
+    // Ring thickness: narrow Gaussian around the wavefront.
+    float width = max(0.004, maxR * 0.04);
+    float ring  = exp(-pow((r - ringR) / width, 2.0));
+
+    // Oscillating gradient magnitude (sine of radial phase).
+    float phase = ringR * freq * 6.2831853;
+    float osc   = cos(phase);
+
+    // Gradient direction: radially outward from impact centre.
+    vec2 dir = (r > 1e-5) ? ((sceneUv - pos) / r) : vec2(0.0);
+
+    accum += dir * ring * osc * env * str;
+  }
+  return accum;
+}
+
 vec3 calculateWave(vec2 sceneUv, float t, float motion01) {
   const float TAU = 6.2831853;
   vec2 windF = uWindDir;
@@ -657,7 +803,16 @@ vec3 calculateWave(vec2 sceneUv, float t, float motion01) {
   vec2 wind = vec2(windF.x, windF.y);
   float travelRot = (uLockWaveTravelToWind > 0.5) ? 0.0 : uWaveDirOffsetRad;
   wind = rotate2D(wind, travelRot);
+
+  float sceneAspect = (uHasSceneRect > 0.5)
+    ? (uSceneRect.z / max(1.0, uSceneRect.w))
+    : (uResolution.x / max(1.0, uResolution.y));
+  vec2 windBasis = normalize(vec2(windF.x * sceneAspect, windF.y));
+
+  // Apply organic domain warp on top of the base warp so waves "bend" spatially.
   vec2 uvF = warpUv(sceneUv, motion01);
+  uvF = organicWarp(uvF, uWindTime, windBasis, sceneAspect);
+
   vec2 p = uvF * uWaveScale;
   vec2 lf = vec2(fbmNoise(sceneUv * 0.11 + vec2(11.3, 17.9)), fbmNoise(sceneUv * 0.11 + vec2(37.1, 5.7)));
   float h = 0.0; vec2 g = vec2(0.0);
@@ -678,21 +833,45 @@ vec3 calculateWave(vec2 sceneUv, float t, float motion01) {
   float chopBreathing = 0.7 + 0.3 * (1.0 - abs(chopBreathPhase * 2.0 - 1.0));
   float chopPulse = evo * chopBreathing;
 
+  // Phase noise strength scaled by uPhaseNoiseStrength.
+  // Each wave family samples an independent noise field so crests wobble
+  // independently rather than all shifting together.
+  float phaseNStr = clamp(uPhaseNoiseStrength, 0.0, 4.0);
+
   float kMul0; float r0; waveMods(lf, 1.0, kMul0, r0);
+  // Direction jitter: nudge r0 (existing per-family rotation) by a
+  // slowly-varying spatial noise angle, giving each family its own "current".
+  r0 += sampleDirJitter(sceneUv, 0.0, uWindTime, windBasis, sceneAspect);
   float k0 = (TAU * 0.61) * kMul0;
-  addWave(swellP, rotate2D(wind, -0.60 + r0), k0, 0.40 * wavePulse, 2.20, (1.05 + 0.62 * sqrt(k0)), t, h, g);
+  float ph0 = phaseNStr * samplePhaseNoise(sceneUv, 0.0, uWindTime, windBasis, sceneAspect);
+  addWave(swellP + vec2(ph0 * 0.1, ph0 * 0.05), rotate2D(wind, -0.60 + r0), k0, 0.40 * wavePulse, 2.20, (1.05 + 0.62 * sqrt(k0)), t + ph0 * 0.12, h, g);
+
   float kMul1; float r1; waveMods(lf, 2.0, kMul1, r1);
+  r1 += sampleDirJitter(sceneUv, 1.0, uWindTime, windBasis, sceneAspect);
   float k1 = (TAU * 0.97) * kMul1;
-  addWave(swellP, rotate2D(wind, -0.15 + r1), k1, 0.28 * wavePulse, 2.55, (1.05 + 0.62 * sqrt(k1)), t, h, g);
+  float ph1 = phaseNStr * samplePhaseNoise(sceneUv, 1.0, uWindTime, windBasis, sceneAspect);
+  addWave(swellP + vec2(ph1 * 0.08, ph1 * 0.08), rotate2D(wind, -0.15 + r1), k1, 0.28 * wavePulse, 2.55, (1.05 + 0.62 * sqrt(k1)), t + ph1 * 0.10, h, g);
+
   float kMul2; float r2; waveMods(lf, 3.0, kMul2, r2);
+  r2 += sampleDirJitter(sceneUv, 2.0, uWindTime, windBasis, sceneAspect);
   float k2 = (TAU * 1.43) * kMul2;
-  addWave(swellP, rotate2D(wind, 0.20 + r2), k2, 0.16 * wavePulse, 2.85, (1.05 + 0.62 * sqrt(k2)), t, h, g);
+  float ph2 = phaseNStr * samplePhaseNoise(sceneUv, 2.0, uWindTime, windBasis, sceneAspect);
+  addWave(swellP + vec2(ph2 * 0.06, ph2 * 0.09), rotate2D(wind, 0.20 + r2), k2, 0.16 * wavePulse, 2.85, (1.05 + 0.62 * sqrt(k2)), t + ph2 * 0.09, h, g);
+
   float kMul3; float r3; waveMods(lf, 4.0, kMul3, r3);
+  r3 += sampleDirJitter(sceneUv, 3.0, uWindTime, windBasis, sceneAspect);
   float k3 = (TAU * 1.88) * kMul3;
-  addWave(chopP, rotate2D(crossWind, 0.25 + r3), k3, 0.10 * chopPulse, 3.10, (1.18 + 0.72 * sqrt(k3)), t, h, g);
+  float ph3 = phaseNStr * samplePhaseNoise(sceneUv, 3.0, uWindTime, windBasis, sceneAspect);
+  addWave(chopP + vec2(ph3 * 0.05, ph3 * 0.07), rotate2D(crossWind, 0.25 + r3), k3, 0.10 * chopPulse, 3.10, (1.18 + 0.72 * sqrt(k3)), t + ph3 * 0.08, h, g);
+
   float kMul4; float r4; waveMods(lf, 5.0, kMul4, r4);
+  r4 += sampleDirJitter(sceneUv, 4.0, uWindTime, windBasis, sceneAspect);
   float k4 = (TAU * 2.71) * kMul4;
-  addWave(chopP, rotate2D(crossWind, -0.35 + r4), k4, 0.06 * chopPulse, 3.35, (1.18 + 0.72 * sqrt(k4)), t, h, g);
+  float ph4 = phaseNStr * samplePhaseNoise(sceneUv, 4.0, uWindTime, windBasis, sceneAspect);
+  addWave(chopP + vec2(ph4 * 0.04, ph4 * 0.06), rotate2D(crossWind, -0.35 + r4), k4, 0.06 * chopPulse, 3.35, (1.18 + 0.72 * sqrt(k4)), t + ph4 * 0.07, h, g);
+
+  // Impact ripples: add procedural splash gradients on top.
+  g += impactRipples(sceneUv, t);
 
   return vec3(h, g / max(uWaveScale, 1e-3));
 }

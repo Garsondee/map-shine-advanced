@@ -98,6 +98,9 @@ export class WaterSplashesEffectV2 {
     /** @type {THREE.Vector2|null} reused drawing-buffer size vector */
     this._tempVec2 = null;
 
+    /** @type {{ sx:number, syWorld:number, sw:number, sh:number }|null} cached scene bounds for mask sampling */
+    this._sceneBounds = null;
+
     /** @type {Array<QuarksParticleSystem>} reused systems list */
     this._tempSystems = [];
 
@@ -149,29 +152,179 @@ export class WaterSplashesEffectV2 {
   _patchFloorPresenceMaterial(material) {
     const THREE = window.THREE;
     if (!material || !THREE) return;
-    if (material.userData && material.userData._msFloorPresenceUniforms) return;
+    // Re-patch if we already patched an older version (before water-mask clipping).
+    const existing = material.userData?._msFloorPresenceUniforms;
+    if (existing && existing.uWaterMask && existing.uSceneBounds) return;
 
     const uniforms = {
       uFloorPresenceMap: { value: null },
       uHasFloorPresenceMap: { value: 0.0 },
       uResolution: { value: new THREE.Vector2(1, 1) },
+
+      // Water mask clipping (scene-UV space raw water mask, R channel)
+      uWaterMask: { value: null },
+      uHasWaterMask: { value: 0.0 },
+      // Matches legacy foam: flip V based on mask metadata / THREE.Texture.flipY
+      uWaterFlipV: { value: 0.0 },
+      // Scene bounds in Three world coords: (sceneX, sceneY, sceneW, sceneH)
+      uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
     };
 
     material.userData = material.userData || {};
     material.userData._msFloorPresenceUniforms = uniforms;
 
+    const isShaderMat = material.isShaderMaterial === true;
+    const marker = '/* MS_WATER_SPLASHES_MASKING_V1 */';
+
+    // Direct patch path for three.quarks SpriteBatch ShaderMaterial.
+    // onBeforeCompile does NOT run for already-compiled ShaderMaterials.
+    if (isShaderMat) {
+      const uni = material.uniforms || (material.uniforms = {});
+      uni.uFloorPresenceMap = uniforms.uFloorPresenceMap;
+      uni.uHasFloorPresenceMap = uniforms.uHasFloorPresenceMap;
+      uni.uResolution = uniforms.uResolution;
+      uni.uWaterMask = uniforms.uWaterMask;
+      uni.uHasWaterMask = uniforms.uHasWaterMask;
+      uni.uWaterFlipV = uniforms.uWaterFlipV;
+      uni.uSceneBounds = uniforms.uSceneBounds;
+
+      let shaderChanged = false;
+
+      // Vertex shader: add varying world position.
+      if (typeof material.vertexShader === 'string') {
+        const beforeVS = material.vertexShader;
+        let vs = material.vertexShader;
+
+        if (!vs.includes('varying vec3 vMsWorldPos')) {
+          vs = vs.replace('void main() {', 'varying vec3 vMsWorldPos;\nvoid main() {');
+        }
+
+        // Prefer per-vertex world pos for correct sprite clipping. If quarks uses
+        // rotatedPosition (billboard corner offset), include it so the varying
+        // interpolates across the full quad.
+        const hasRotatedPosition = /\brotatedPosition\b/.test(vs);
+        const legacyAssign = 'vMsWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;';
+        const desiredAssign = hasRotatedPosition
+          ? 'vMsWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;\n  vMsWorldPos.xy += rotatedPosition;'
+          : legacyAssign;
+
+        if (vs.includes(legacyAssign) && !vs.includes(desiredAssign)) {
+          vs = vs.replace(legacyAssign, desiredAssign);
+        }
+        if (!vs.includes('vMsWorldPos =') && vs.includes('#include <soft_vertex>')) {
+          vs = vs.replace('#include <soft_vertex>', '#include <soft_vertex>\n  ' + desiredAssign);
+        }
+
+        if (vs !== beforeVS) {
+          material.vertexShader = vs;
+          shaderChanged = true;
+        }
+      }
+
+      // Fragment shader: inject water mask clip + floor occluder.
+      if (typeof material.fragmentShader === 'string') {
+        const beforeFS = material.fragmentShader;
+        let fs = material.fragmentShader;
+
+        if (!fs.includes(marker)) {
+          fs = fs.replace(
+            'void main() {',
+            marker + '\n' +
+            'varying vec3 vMsWorldPos;\n' +
+            'uniform sampler2D uFloorPresenceMap;\n' +
+            'uniform float uHasFloorPresenceMap;\n' +
+            'uniform vec2 uResolution;\n' +
+            'uniform sampler2D uWaterMask;\n' +
+            'uniform float uHasWaterMask;\n' +
+            'uniform float uWaterFlipV;\n' +
+            'uniform vec4 uSceneBounds;\n' +
+            'void main() {'
+          );
+
+          const maskBlock =
+            '  // Water mask clip: suppress particles outside the raw _Water mask (prevents land leaks).\n' +
+            '  if (uHasWaterMask > 0.5) {\n' +
+            '    vec2 uvMask = vec2(\n' +
+            '      (vMsWorldPos.x - uSceneBounds.x) / uSceneBounds.z,\n' +
+            '      (vMsWorldPos.y - uSceneBounds.y) / uSceneBounds.w\n' +
+            '    );\n' +
+            '    if (uWaterFlipV > 0.5) uvMask.y = 1.0 - uvMask.y;\n' +
+            '    if (uvMask.x < 0.0 || uvMask.x > 1.0 || uvMask.y < 0.0 || uvMask.y > 1.0) {\n' +
+            '      gl_FragColor.a *= 0.0;\n' +
+            '    } else {\n' +
+            '      float m = texture2D(uWaterMask, uvMask).r;\n' +
+            '      gl_FragColor.a *= m;\n' +
+            '    }\n' +
+            '  }\n' +
+            '  // Floor-presence gate: occlude particles under the current floor\'s solid tiles.\n' +
+            '  if (uHasFloorPresenceMap > 0.5) {\n' +
+            '    vec2 fpScreenUV = gl_FragCoord.xy / uResolution;\n' +
+            '    float floorPresence = texture2D(uFloorPresenceMap, fpScreenUV).a;\n' +
+            '    gl_FragColor.a *= (1.0 - floorPresence);\n' +
+            '  }\n';
+
+          if (fs.includes('#include <soft_fragment>')) {
+            fs = fs.replace('#include <soft_fragment>', maskBlock + '#include <soft_fragment>');
+          } else {
+            // Fallback: inject at top of main; no guarantee of soft particles.
+            fs = fs.replace(marker + '\n', marker + '\n' + maskBlock);
+          }
+
+          material.fragmentShader = fs;
+          shaderChanged = true;
+        }
+
+        if (material.fragmentShader !== beforeFS) shaderChanged = true;
+      }
+
+      if (shaderChanged) material.needsUpdate = true;
+      return;
+    }
+
     material.onBeforeCompile = (shader) => {
       shader.uniforms.uFloorPresenceMap = uniforms.uFloorPresenceMap;
       shader.uniforms.uHasFloorPresenceMap = uniforms.uHasFloorPresenceMap;
       shader.uniforms.uResolution = uniforms.uResolution;
+      shader.uniforms.uWaterMask = uniforms.uWaterMask;
+      shader.uniforms.uHasWaterMask = uniforms.uHasWaterMask;
+      shader.uniforms.uWaterFlipV = uniforms.uWaterFlipV;
+      shader.uniforms.uSceneBounds = uniforms.uSceneBounds;
+
+      // Inject world position varying (works for quarks SpriteBatch and MeshBasicMaterial)
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          'void main() {',
+          'varying vec3 vMsWorldPos;\nvoid main() {'
+        )
+        .replace(
+          '#include <soft_vertex>',
+          '#include <soft_vertex>\n  vMsWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;'
+        );
 
       shader.fragmentShader = shader.fragmentShader
         .replace(
           'void main() {',
-          'uniform sampler2D uFloorPresenceMap;\nuniform float uHasFloorPresenceMap;\nuniform vec2 uResolution;\nvoid main() {'
+          'varying vec3 vMsWorldPos;\n' +
+          'uniform sampler2D uFloorPresenceMap;\nuniform float uHasFloorPresenceMap;\nuniform vec2 uResolution;\n' +
+          'uniform sampler2D uWaterMask;\nuniform float uHasWaterMask;\nuniform float uWaterFlipV;\nuniform vec4 uSceneBounds;\n' +
+          'void main() {'
         )
         .replace(
           '#include <soft_fragment>',
+          '  // Water mask clip: suppress particles outside the raw _Water mask (prevents land leaks).\n' +
+          '  if (uHasWaterMask > 0.5) {\n' +
+          '    vec2 uvMask = vec2(\n' +
+          '      (vMsWorldPos.x - uSceneBounds.x) / uSceneBounds.z,\n' +
+          '      (vMsWorldPos.y - uSceneBounds.y) / uSceneBounds.w\n' +
+          '    );\n' +
+          '    if (uWaterFlipV > 0.5) uvMask.y = 1.0 - uvMask.y;\n' +
+          '    if (uvMask.x < 0.0 || uvMask.x > 1.0 || uvMask.y < 0.0 || uvMask.y > 1.0) {\n' +
+          '      gl_FragColor.a *= 0.0;\n' +
+          '    } else {\n' +
+          '      float m = texture2D(uWaterMask, uvMask).r;\n' +
+          '      gl_FragColor.a *= m;\n' +
+          '    }\n' +
+          '  }\n' +
           '  // Floor-presence gate: occlude particles under the current floor\'s solid tiles.\n' +
           '  if (uHasFloorPresenceMap > 0.5) {\n' +
           '    vec2 fpScreenUV = gl_FragCoord.xy / uResolution;\n' +
@@ -248,6 +401,14 @@ export class WaterSplashesEffectV2 {
     // Three.js scene origin (Y-up).
     const sceneX = foundrySceneX;
     const sceneY = (d.height || sceneHeight) - foundrySceneY - sceneHeight;
+
+    // Cache for per-frame shader uniform binding.
+    this._sceneBounds = {
+      sx: sceneX,
+      syWorld: sceneY,
+      sw: sceneWidth,
+      sh: sceneHeight,
+    };
 
     // Collect water edge + interior points per floor from all tiles.
     // Key: floorIndex, Value: { edgeArrays: Float32Array[], interiorArrays: Float32Array[] }
@@ -430,6 +591,29 @@ export class WaterSplashesEffectV2 {
       // It is already aligned with the main camera and sampled in screen UV.
       const fc = window.MapShine?.effectComposer?._floorCompositorV2 ?? null;
       const fpTex = fc?._waterOccluderRT?.texture ?? null;
+      const waterMaskTex = (fc?._waterEffect && typeof fc._waterEffect.getWaterMaskTexture === 'function')
+        ? fc._waterEffect.getWaterMaskTexture()
+        : null;
+
+      // Legacy foam determines whether the mask needs V flipping (mask metadata / texture.flipY).
+      let waterFlipV = false;
+      if (waterMaskTex) {
+        try {
+          const mm = window.MapShine?.maskManager;
+          const rec = mm?.getRecord ? mm.getRecord('water.scene') : null;
+          if (rec && typeof rec.uvFlipY === 'boolean') {
+            waterFlipV = rec.uvFlipY;
+          } else if (typeof waterMaskTex?.flipY === 'boolean') {
+            waterFlipV = waterMaskTex.flipY === false;
+          } else {
+            waterFlipV = false;
+          }
+        } catch (_) {
+          waterFlipV = waterMaskTex?.flipY === false;
+        }
+      }
+
+      const sceneBounds = this._sceneBounds;
 
       const renderer = window.MapShine?.renderer || window.canvas?.app?.renderer;
       let resX = 1, resY = 1;
@@ -474,6 +658,12 @@ export class WaterSplashesEffectV2 {
             u.uFloorPresenceMap.value = fpTex;
             u.uHasFloorPresenceMap.value = fpTex ? 1.0 : 0.0;
             u.uResolution.value.set(resX, resY);
+            u.uWaterMask.value = waterMaskTex;
+            u.uHasWaterMask.value = waterMaskTex ? 1.0 : 0.0;
+            if (u.uWaterFlipV) u.uWaterFlipV.value = waterFlipV ? 1.0 : 0.0;
+            if (sceneBounds && u.uSceneBounds?.value?.set) {
+              u.uSceneBounds.value.set(sceneBounds.sx, sceneBounds.syWorld, sceneBounds.sw, sceneBounds.sh);
+            }
           }
         }
 
@@ -488,6 +678,12 @@ export class WaterSplashesEffectV2 {
             u.uFloorPresenceMap.value = fpTex;
             u.uHasFloorPresenceMap.value = fpTex ? 1.0 : 0.0;
             u.uResolution.value.set(resX, resY);
+            u.uWaterMask.value = waterMaskTex;
+            u.uHasWaterMask.value = waterMaskTex ? 1.0 : 0.0;
+            if (u.uWaterFlipV) u.uWaterFlipV.value = waterFlipV ? 1.0 : 0.0;
+            if (sceneBounds && u.uSceneBounds?.value?.set) {
+              u.uSceneBounds.value.set(sceneBounds.sx, sceneBounds.syWorld, sceneBounds.sw, sceneBounds.sh);
+            }
           }
         }
       }

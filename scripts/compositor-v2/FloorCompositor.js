@@ -175,6 +175,12 @@ export class FloorCompositor {
     this._waterSplashesEffect = new WaterSplashesEffectV2(this._renderBus);
 
     /**
+     * V2 Underwater Bubbles controls: proxy to the bubbles layer inside WaterSplashesEffectV2.
+     * This exists solely for UI + persistence routing.
+     */
+    this._underwaterBubblesEffect = this._waterSplashesEffect.bubbles;
+
+    /**
      * V2 Weather Particles: rain, snow, and ash particles.
      * Wraps the V1 WeatherParticles class using a shared BatchedRenderer that
      * lives in the FloorRenderBus scene. Also drives WeatherController.update()
@@ -513,8 +519,16 @@ export class FloorCompositor {
       // Wind must advance before update() so accumulation is 1× per frame.
       this._cloudEffect.advanceWind(timeInfo.delta ?? 0.016);
       this._specularEffect.update(timeInfo);
-      this._fireEffect.update(timeInfo);
-      this._waterSplashesEffect.update(timeInfo);
+      try {
+        this._fireEffect.update(timeInfo);
+      } catch (err) {
+        log.warn('FireEffectV2 update threw, skipping frame:', err);
+      }
+      try {
+        this._waterSplashesEffect.update(timeInfo);
+      } catch (err) {
+        log.warn('WaterSplashesEffectV2 update threw, skipping frame:', err);
+      }
       this._windowLightEffect.update(timeInfo);
       this._cloudEffect.update(timeInfo);
       this._lightingEffect.update(timeInfo);
@@ -555,7 +569,6 @@ export class FloorCompositor {
     // Window light is NOT in the bus scene — it renders after lighting.
     this._renderBus.renderTo(this.renderer, this.camera, this._sceneRT);
 
-    // ...
     // ── Cloud passes (before lighting) ───────────────────────────────────
     // Must run after bus render so the blocker pass sees current tile visibility.
     // Outputs: _cloudEffect.cloudShadowTexture (fed into lighting compose shader)

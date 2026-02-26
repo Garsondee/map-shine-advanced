@@ -21,6 +21,9 @@ import { weatherController } from '../../core/WeatherController.js';
 // Gradient / Envelope Constants
 // ═══════════════════════════════════════════════════════════════════════════════
 
+const clamp01 = (n) => Math.max(0.0, Math.min(1.0, n));
+const lerp = (a, b, t) => a + (b - a) * t;
+
 // Foam plume alpha envelope: quick fade-in, sustained peak, slow fade-out.
 export const FOAM_ALPHA_STOPS = [
   { t: 0.00, v: 0.00 },
@@ -129,6 +132,7 @@ export class WaterEdgeMaskShape {
    * @param {number} [floorElevation=0] - Z offset above groundZ for this floor
    */
   constructor(points, sceneWidth, sceneHeight, sceneX, sceneY, groundZ = 1000, floorElevation = 0) {
+    this._allPoints = points;
     this.points = points;
     this.sceneWidth = sceneWidth;
     this.sceneHeight = sceneHeight;
@@ -137,6 +141,58 @@ export class WaterEdgeMaskShape {
     this.groundZ = groundZ;
     this.floorElevation = Number.isFinite(floorElevation) ? floorElevation : 0;
     this.type = 'water_edge_mask';
+
+    // View-dependent filtering cache.
+    this._lastView = null;
+    this._viewPoints = null;
+  }
+
+  /** @returns {number} active point count (triples) */
+  getActivePointCount() {
+    return Math.floor((this.points?.length ?? 0) / 3);
+  }
+
+  /**
+   * Filter the active points to those inside the given view rectangle in scene UV.
+   * Points are packed (u, v, strength) triples.
+   * @param {number} uMin
+   * @param {number} uMax
+   * @param {number} vMin
+   * @param {number} vMax
+   */
+  setViewBoundsUv(uMin, uMax, vMin, vMax) {
+    const all = this._allPoints;
+    if (!all || all.length < 3) {
+      this.points = all;
+      return;
+    }
+
+    const view = this._lastView;
+    if (view && Math.abs(view.uMin - uMin) < 1e-6 && Math.abs(view.uMax - uMax) < 1e-6
+      && Math.abs(view.vMin - vMin) < 1e-6 && Math.abs(view.vMax - vMax) < 1e-6) {
+      return;
+    }
+    this._lastView = { uMin, uMax, vMin, vMax };
+
+    const tmp = [];
+    for (let i = 0; i < all.length; i += 3) {
+      const u = all[i];
+      const v = all[i + 1];
+      if (u < uMin || u > uMax || v < vMin || v > vMax) continue;
+      tmp.push(u, v, all[i + 2]);
+    }
+
+    // Avoid allocations when nothing changed materially.
+    if (tmp.length === all.length) {
+      this.points = all;
+      return;
+    }
+
+    if (!this._viewPoints || this._viewPoints.length !== tmp.length) {
+      this._viewPoints = new Float32Array(tmp.length);
+    }
+    this._viewPoints.set(tmp);
+    this.points = this._viewPoints;
   }
 
   initialize(p) {
@@ -218,6 +274,7 @@ export class WaterInteriorMaskShape {
    * @param {number} [floorElevation=0]
    */
   constructor(points, sceneWidth, sceneHeight, sceneX, sceneY, groundZ = 1000, floorElevation = 0) {
+    this._allPoints = points;
     this.points = points;
     this.sceneWidth = sceneWidth;
     this.sceneHeight = sceneHeight;
@@ -226,6 +283,57 @@ export class WaterInteriorMaskShape {
     this.groundZ = groundZ;
     this.floorElevation = Number.isFinite(floorElevation) ? floorElevation : 0;
     this.type = 'water_interior_mask';
+
+    // View-dependent filtering cache.
+    this._lastView = null;
+    this._viewPoints = null;
+  }
+
+  /** @returns {number} active point count (triples) */
+  getActivePointCount() {
+    return Math.floor((this.points?.length ?? 0) / 3);
+  }
+
+  /**
+   * Filter the active points to those inside the given view rectangle in scene UV.
+   * Points are packed (u, v, brightness) triples.
+   * @param {number} uMin
+   * @param {number} uMax
+   * @param {number} vMin
+   * @param {number} vMax
+   */
+  setViewBoundsUv(uMin, uMax, vMin, vMax) {
+    const all = this._allPoints;
+    if (!all || all.length < 3) {
+      this.points = all;
+      return;
+    }
+
+    const view = this._lastView;
+    if (view && Math.abs(view.uMin - uMin) < 1e-6 && Math.abs(view.uMax - uMax) < 1e-6
+      && Math.abs(view.vMin - vMin) < 1e-6 && Math.abs(view.vMax - vMax) < 1e-6) {
+      return;
+    }
+    this._lastView = { uMin, uMax, vMin, vMax };
+
+    const tmp = [];
+    for (let i = 0; i < all.length; i += 3) {
+      const u = all[i];
+      const v = all[i + 1];
+      if (u < uMin || u > uMax || v < vMin || v > vMax) continue;
+      tmp.push(u, v, all[i + 2]);
+    }
+
+    if (tmp.length === all.length) {
+      this.points = all;
+      return;
+    }
+
+    if (!this._viewPoints || this._viewPoints.length !== tmp.length) {
+      this._viewPoints = new Float32Array(tmp.length);
+    }
+    this._viewPoints.set(tmp);
+    this.points = this._viewPoints;
   }
 
   initialize(p) {
@@ -294,6 +402,12 @@ export class FoamPlumeLifecycleBehavior {
     this._windX = 1.0;
     this._windY = 0.0;
     this._windSpeed01 = 0.0;
+
+    // Color tint jitter.
+    this._tintStrength = 0.0;
+    this._tintJitter = 1.0;
+    this._tintA = { r: 0.85, g: 0.92, b: 1.00 };
+    this._tintB = { r: 0.10, g: 0.55, b: 0.75 };
   }
 
   initialize(particle) {
@@ -314,6 +428,9 @@ export class FoamPlumeLifecycleBehavior {
     // Random UV flips for visual variety.
     particle._foamFlipX = Math.random() < 0.5 ? -1.0 : 1.0;
     particle._foamFlipY = Math.random() < 0.5 ? -1.0 : 1.0;
+
+    // Random tint mix selection for this particle (stable over its lifetime).
+    particle._msTintRand = Math.random();
   }
 
   update(particle, delta) {
@@ -326,9 +443,27 @@ export class FoamPlumeLifecycleBehavior {
     const alphaBase = lerpScalarStops(FOAM_ALPHA_STOPS, t);
     const edgeStr = particle._edgeStrength ?? 1.0;
     const opRand = particle._foamOpacityRand ?? 1.0;
-    particle.color.x = this._foamColorR;
-    particle.color.y = this._foamColorG;
-    particle.color.z = this._foamColorB;
+
+    let r = this._foamColorR;
+    let g = this._foamColorG;
+    let b = this._foamColorB;
+
+    // Apply optional two-color tint jitter to better match water/sky mood.
+    if (this._tintStrength > 0.0001) {
+      const rand = particle._msTintRand ?? 0.5;
+      const tMix = clamp01(0.5 + (rand - 0.5) * this._tintJitter);
+      const tr = lerp(this._tintA.r, this._tintB.r, tMix);
+      const tg = lerp(this._tintA.g, this._tintB.g, tMix);
+      const tb = lerp(this._tintA.b, this._tintB.b, tMix);
+      const s = clamp01(this._tintStrength);
+      r = lerp(r, tr, s);
+      g = lerp(g, tg, s);
+      b = lerp(b, tb, s);
+    }
+
+    particle.color.x = r;
+    particle.color.y = g;
+    particle.color.z = b;
     particle.color.w = alphaBase * this._peakOpacity * edgeStr * opRand;
 
     // Size growth.
@@ -361,6 +496,21 @@ export class FoamPlumeLifecycleBehavior {
     this._foamColorG = p?.foamColorG ?? 0.90;
     this._foamColorB = p?.foamColorB ?? 0.88;
     this._windDriftScale = Math.max(0.0, p?.foamWindDriftScale ?? 0.3);
+
+    this._tintStrength = clamp01(p?.tintStrength ?? 0.0);
+    this._tintJitter = clamp01(p?.tintJitter ?? 1.0) * 2.0;
+    if (p) {
+      this._tintA = {
+        r: clamp01(p.tintAColorR ?? this._tintA.r),
+        g: clamp01(p.tintAColorG ?? this._tintA.g),
+        b: clamp01(p.tintAColorB ?? this._tintA.b),
+      };
+      this._tintB = {
+        r: clamp01(p.tintBColorR ?? this._tintB.r),
+        g: clamp01(p.tintBColorG ?? this._tintB.g),
+        b: clamp01(p.tintBColorB ?? this._tintB.b),
+      };
+    }
 
     // Read current wind direction from weather controller.
     try {
@@ -395,6 +545,12 @@ export class SplashRingLifecycleBehavior {
     this.ownerEffect = ownerEffect;
     this._peakOpacity = 0.70;
     this._precipMult = 1.0;
+
+    // Color tint jitter.
+    this._tintStrength = 0.0;
+    this._tintJitter = 1.0;
+    this._tintA = { r: 0.85, g: 0.92, b: 1.00 };
+    this._tintB = { r: 0.10, g: 0.55, b: 0.75 };
   }
 
   initialize(particle) {
@@ -408,6 +564,9 @@ export class SplashRingLifecycleBehavior {
       }
     }
     particle._splashOpacityRand = 0.6 + Math.random() * 0.4;
+
+    // Random tint mix selection for this particle (stable over its lifetime).
+    particle._msTintRand = Math.random();
   }
 
   update(particle, delta) {
@@ -419,10 +578,26 @@ export class SplashRingLifecycleBehavior {
     // Alpha: sharp pop then rapid fade.
     const alpha = lerpScalarStops(SPLASH_ALPHA_STOPS, t);
     const opRand = particle._splashOpacityRand ?? 1.0;
-    // Splashes are white/translucent.
-    particle.color.x = 0.95;
-    particle.color.y = 0.97;
-    particle.color.z = 1.00;
+    // Splashes are near-white/translucent (tint jitter can pull them toward the water tone).
+    let r = 0.95;
+    let g = 0.97;
+    let b = 1.00;
+
+    if (this._tintStrength > 0.0001) {
+      const rand = particle._msTintRand ?? 0.5;
+      const tMix = clamp01(0.5 + (rand - 0.5) * this._tintJitter);
+      const tr = lerp(this._tintA.r, this._tintB.r, tMix);
+      const tg = lerp(this._tintA.g, this._tintB.g, tMix);
+      const tb = lerp(this._tintA.b, this._tintB.b, tMix);
+      const s = clamp01(this._tintStrength);
+      r = lerp(r, tr, s);
+      g = lerp(g, tg, s);
+      b = lerp(b, tb, s);
+    }
+
+    particle.color.x = r;
+    particle.color.y = g;
+    particle.color.z = b;
     particle.color.w = alpha * this._peakOpacity * opRand * this._precipMult;
 
     // Size: expand outward from impact.
@@ -434,6 +609,21 @@ export class SplashRingLifecycleBehavior {
   frameUpdate(delta) {
     const p = this.ownerEffect?.params;
     this._peakOpacity = Math.max(0.0, Math.min(1.0, p?.splashPeakOpacity ?? 0.70));
+
+    this._tintStrength = clamp01(p?.tintStrength ?? 0.0);
+    this._tintJitter = clamp01(p?.tintJitter ?? 1.0) * 2.0;
+    if (p) {
+      this._tintA = {
+        r: clamp01(p.tintAColorR ?? this._tintA.r),
+        g: clamp01(p.tintAColorG ?? this._tintA.g),
+        b: clamp01(p.tintAColorB ?? this._tintA.b),
+      };
+      this._tintB = {
+        r: clamp01(p.tintBColorR ?? this._tintB.r),
+        g: clamp01(p.tintBColorG ?? this._tintB.g),
+        b: clamp01(p.tintBColorB ?? this._tintB.b),
+      };
+    }
 
     // Scale splash intensity by current precipitation.
     try {

@@ -1337,6 +1337,8 @@ export class EffectComposer {
         'sky-color':        '_skyColorEffect',
         'windowLight':      '_windowLightEffect',
         'fire-sparks':      '_fireEffect',
+        'water-splashes':   '_waterSplashesEffect',
+        'underwater-bubbles':'_underwaterBubblesEffect',
         'bloom':            '_bloomEffect',
         'colorCorrection':  '_colorCorrectionEffect',
         'filmGrain':        '_filmGrainEffect',

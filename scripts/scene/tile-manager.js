@@ -3275,7 +3275,19 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       }
       this._markInitialTileLoaded(tileDoc?.id, isOverheadForLoad);
     }).catch(error => {
-      log.error(`Failed to load tile texture: ${texturePath}`, error);
+      const msg = String(error?.message ?? '');
+      const name = String(error?.name ?? '');
+      // Aborted loads are expected during scene reload / teardown (e.g. Foundry
+      // restarting the canvas, navigation changes, or rapid tile refresh). Don’t
+      // treat these as hard errors or they’ll spam logs and obscure real failures.
+      const aborted = name === 'AbortError'
+        || msg.includes('The operation was aborted')
+        || msg.includes('aborted');
+      if (!aborted) {
+        log.error(`Failed to load tile texture: ${texturePath}`, error);
+      } else {
+        log.debug(`Tile texture load aborted (expected): ${texturePath}`);
+      }
       // Guard: if the profiler session already ended (tile loading is non-blocking),
       // the entry was closed as orphaned by endSession(). Don't call end() again.
       if (_dlp.debugMode && _dlp._openEntries?.has(_tileDbgId)) {

@@ -664,6 +664,7 @@ export class LightingEffectV2 {
     }
 
     renderer.setRenderTarget(outputRT);
+    renderer.setClearColor(0x000000, 0);
     renderer.autoClear = true;
     renderer.render(this._composeScene, this._composeCamera);
 

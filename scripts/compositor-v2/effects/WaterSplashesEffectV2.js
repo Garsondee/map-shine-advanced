@@ -104,9 +104,71 @@ export class WaterSplashesEffectV2 {
     /** @type {Array<QuarksParticleSystem>} reused systems list */
     this._tempSystems = [];
 
+    /** @type {Array<QuarksParticleSystem>} reused foam systems list */
+    this._tempFoamSystems = [];
+    /** @type {Array<QuarksParticleSystem>} reused splash systems list */
+    this._tempSplashSystems = [];
+
+    /**
+     * Hardcoded parameters for the built-in underwater bubbles layer.
+     * These are intentionally not exposed to the UI — edit here to tune.
+     * The bubbles layer runs inside the same BatchedRenderer as splashes.
+     */
+    this.bubblesParams = {
+      enabled: true,
+
+      tintStrength: 1.00,
+      tintJitter: 1.00,
+      tintAColorR: 0.74,
+      tintAColorG: 1.28,
+      tintAColorB: 0.71,
+      tintBColorR: 0.51,
+      tintBColorG: 0.87,
+      tintBColorB: 0.76,
+
+      foamEnabled: true,
+      foamRate: 10.3,
+      foamSizeMin: 35,
+      foamSizeMax: 373,
+      foamLifeMin: 1.20,
+      foamLifeMax: 10.00,
+      foamPeakOpacity: 0.58,
+      foamColorR: 0.85,
+      foamColorG: 0.90,
+      foamColorB: 0.88,
+      foamWindDriftScale: 0.40,
+
+      splashEnabled: true,
+      splashRate: 20.2,
+      splashSizeMin: 35,
+      splashSizeMax: 77,
+      splashLifeMin: 0.30,
+      splashLifeMax: 0.80,
+      splashPeakOpacity: 0.70,
+    };
+
+    // Controller wrapper so the V2 UI callback can target `_waterSplashesEffect.bubbles`
+    // and use the same param propagation + persistence logic as other effects.
+    // This is intentionally a thin proxy over `bubblesParams`.
+    this.bubbles = {
+      params: this.bubblesParams,
+      get enabled() { return !!this.params.enabled; },
+      set enabled(v) { this.params.enabled = !!v; },
+    };
+
     // Effect parameters — tuneable from Tweakpane UI.
     this.params = {
       enabled: true,
+
+      // Tint jitter (applied in lifecycle behaviors)
+      tintStrength: 0.0,
+      tintJitter: 0.75,
+      tintAColorR: 0.85,
+      tintAColorG: 0.92,
+      tintAColorB: 1.00,
+      tintBColorR: 0.10,
+      tintBColorG: 0.55,
+      tintBColorB: 0.75,
 
       // Foam plumes (shoreline)
       foamEnabled: true,
@@ -502,7 +564,8 @@ export class WaterSplashesEffectV2 {
         mergedEdge, mergedInterior, sceneWidth, sceneHeight, sceneX, sceneY, floorIndex
       );
       this._floorStates.set(floorIndex, state);
-      totalSystems += state.foamSystems.length + state.splashSystems.length;
+      totalSystems += state.foamSystems.length + state.splashSystems.length
+        + (state.foamSystems2?.length ?? 0) + (state.splashSystems2?.length ?? 0);
     }
 
     if (!this._loggedPopulateCountsOnce) {
@@ -533,7 +596,9 @@ export class WaterSplashesEffectV2 {
    */
   update(timeInfo) {
     if (!this._initialized || !this._batchRenderer || !this._enabled) return;
-    if (!this.params.enabled) return;
+    const splashesEnabled = !!this.params?.enabled;
+    const bubblesEnabled = !!this.bubblesParams?.enabled;
+    if (!splashesEnabled && !bubblesEnabled) return;
 
     // Optional diagnostics for cases where systems were activated before the
     // user set the debug flag. This runs once when enabled and prints the
@@ -581,8 +646,13 @@ export class WaterSplashesEffectV2 {
       ? weatherController.simulationSpeed : 2.0;
     const dt = clampedDelta * 0.001 * 750 * simSpeed;
 
+    // View-dependent spawn concentration (legacy foam behavior):
+    // filter point clouds to camera-visible bounds (+ margin) and renormalize
+    // emission weights across only the visible buckets.
+    this._updateViewDependentSpawning();
+
     // Update per-frame emission rates and params.
-    this._updateSystemParams();
+    this._updateSystemParams(splashesEnabled, bubblesEnabled);
 
     // Bind floor-presence occlusion uniforms.
     try {
@@ -641,6 +711,8 @@ export class WaterSplashesEffectV2 {
         if (!st) continue;
         if (st.foamSystems && st.foamSystems.length) systems.push(...st.foamSystems);
         if (st.splashSystems && st.splashSystems.length) systems.push(...st.splashSystems);
+        if (st.foamSystems2 && st.foamSystems2.length) systems.push(...st.foamSystems2);
+        if (st.splashSystems2 && st.splashSystems2.length) systems.push(...st.splashSystems2);
       }
 
       const br = this._batchRenderer;
@@ -690,7 +762,139 @@ export class WaterSplashesEffectV2 {
     } catch (_) {}
 
     // Step the BatchedRenderer.
-    this._batchRenderer.update(dt);
+    try {
+      this._batchRenderer.update(dt);
+    } catch (err) {
+      log.warn('WaterSplashesEffectV2: BatchedRenderer.update threw, skipping frame:', err);
+    }
+  }
+
+  /**
+   * Reduce spawn points and emission to the camera-visible world rectangle (+margin).
+   * This matches legacy WeatherParticles foam behavior to avoid spreading emission
+   * across the entire map when the camera is zoomed in.
+   * @private
+   */
+  _updateViewDependentSpawning() {
+    try {
+      const sceneComposer = window.MapShine?.sceneComposer;
+      const mainCamera = sceneComposer?.camera;
+      if (!sceneComposer || !mainCamera) return;
+
+      const zoom = Number.isFinite(sceneComposer.currentZoom)
+        ? sceneComposer.currentZoom
+        : (Number.isFinite(sceneComposer.zoom) ? sceneComposer.zoom : 1.0);
+
+      const viewportWidth = sceneComposer.baseViewportWidth || window.innerWidth;
+      const viewportHeight = sceneComposer.baseViewportHeight || window.innerHeight;
+      const visibleW = viewportWidth / Math.max(1e-6, zoom);
+      const visibleH = viewportHeight / Math.max(1e-6, zoom);
+
+      const marginScale = 1.2;
+      const desiredW = visibleW * marginScale;
+      const desiredH = visibleH * marginScale;
+
+      // Clamp the view rectangle to the scene rect in world-space (Y-up).
+      let sceneX = 0;
+      let sceneY = 0;
+      let sceneW = 0;
+      let sceneH = 0;
+      try {
+        const d = canvas?.dimensions;
+        const rect = d?.sceneRect;
+        const totalH = d?.height ?? 0;
+        if (rect && typeof rect.x === 'number') {
+          sceneX = rect.x;
+          sceneW = rect.width;
+          sceneH = rect.height;
+          sceneY = (totalH > 0) ? (totalH - (rect.y + rect.height)) : rect.y;
+        } else if (d) {
+          sceneX = d.sceneX ?? 0;
+          sceneW = d.sceneWidth ?? d.width ?? 0;
+          sceneH = d.sceneHeight ?? d.height ?? 0;
+          sceneY = (totalH > 0) ? (totalH - ((d.sceneY ?? 0) + sceneH)) : (d.sceneY ?? 0);
+        }
+      } catch (_) {}
+
+      const camX = mainCamera.position.x;
+      const camY = mainCamera.position.y;
+
+      let minX = camX - desiredW / 2;
+      let maxX = camX + desiredW / 2;
+      let minY = camY - desiredH / 2;
+      let maxY = camY + desiredH / 2;
+
+      if (sceneW > 0 && sceneH > 0) {
+        const sMinX = sceneX;
+        const sMaxX = sceneX + sceneW;
+        const sMinY = sceneY;
+        const sMaxY = sceneY + sceneH;
+        minX = Math.max(sMinX, minX);
+        maxX = Math.min(sMaxX, maxX);
+        minY = Math.max(sMinY, minY);
+        maxY = Math.min(sMaxY, maxY);
+      }
+
+      const emitW = Math.max(1, maxX - minX);
+      const emitH = Math.max(1, maxY - minY);
+      if (emitW <= 1 || emitH <= 1) return;
+
+      // Convert world-space view bounds to scene UV bounds used by mask scan points.
+      // Points were built in Foundry scene-UV (Y-down), so v = 1 - (worldY - sceneY) / sceneH.
+      const u0 = (minX - sceneX) / Math.max(1e-6, sceneW);
+      const u1 = (maxX - sceneX) / Math.max(1e-6, sceneW);
+      const v0 = 1.0 - ((minY - sceneY) / Math.max(1e-6, sceneH));
+      const v1 = 1.0 - ((maxY - sceneY) / Math.max(1e-6, sceneH));
+      const uMin = Math.max(0.0, Math.min(1.0, Math.min(u0, u1)));
+      const uMax = Math.max(0.0, Math.min(1.0, Math.max(u0, u1)));
+      const vMin = Math.max(0.0, Math.min(1.0, Math.min(v0, v1)));
+      const vMax = Math.max(0.0, Math.min(1.0, Math.max(v0, v1)));
+
+      // Collect active systems by type (avoid per-frame allocations).
+      const foamSystems = this._tempFoamSystems;
+      const splashSystems = this._tempSplashSystems;
+      foamSystems.length = 0;
+      splashSystems.length = 0;
+      for (const floorIndex of this._activeFloors) {
+        const st = this._floorStates.get(floorIndex);
+        if (!st) continue;
+        if (st.foamSystems && st.foamSystems.length) foamSystems.push(...st.foamSystems);
+        if (st.splashSystems && st.splashSystems.length) splashSystems.push(...st.splashSystems);
+      }
+
+      const updateWeightsFor = (systems) => {
+        // First pass: filter shapes + accumulate visible points.
+        let totalVisible = 0;
+        for (const sys of systems) {
+          if (!sys?.userData) continue;
+          const shape = sys.emitterShape || sys.shape;
+          if (shape && typeof shape.setViewBoundsUv === 'function') {
+            shape.setViewBoundsUv(uMin, uMax, vMin, vMax);
+          }
+          const activeCount = (shape && typeof shape.getActivePointCount === 'function')
+            ? shape.getActivePointCount()
+            : null;
+          sys.userData._msActivePointCount = Number.isFinite(activeCount) ? activeCount : null;
+          if (Number.isFinite(activeCount) && activeCount > 0) totalVisible += activeCount;
+        }
+
+        // Second pass: normalize dynamic emission weights.
+        for (const sys of systems) {
+          if (!sys?.userData) continue;
+          const activeCount = sys.userData._msActivePointCount;
+          if (!Number.isFinite(activeCount) || activeCount <= 0 || totalVisible <= 0) {
+            sys.userData._msEmissionScaleDynamic = 0.0;
+          } else {
+            sys.userData._msEmissionScaleDynamic = activeCount / totalVisible;
+          }
+        }
+      };
+
+      updateWeightsFor(foamSystems);
+      updateWeightsFor(splashSystems);
+    } catch (_) {
+      // If anything about the camera/view state isn't available, leave full-scene emission.
+    }
   }
 
   /**
@@ -754,7 +958,7 @@ export class WaterSplashesEffectV2 {
    * @private
    */
   _buildFloorSystems(edgePoints, interiorPoints, sceneW, sceneH, sceneX, sceneY, floorIndex) {
-    const state = { foamSystems: [], splashSystems: [] };
+    const state = { foamSystems: [], splashSystems: [], foamSystems2: [], splashSystems2: [] };
 
     // Build foam plume systems from edge points.
     if (edgePoints && edgePoints.length >= 3 && this.params.foamEnabled) {
@@ -790,6 +994,40 @@ export class WaterSplashesEffectV2 {
       }
     }
 
+    // Build underwater bubbles foam systems (same edge points, separate params/lifecycle).
+    if (edgePoints && edgePoints.length >= 3 && this.bubblesParams.enabled && this.bubblesParams.foamEnabled) {
+      const buckets = this._spatialBucket(edgePoints, sceneW, sceneH, sceneX, sceneY);
+      const totalEdge = edgePoints.length / 3;
+      for (const [, arr] of buckets) {
+        if (arr.length < 3) continue;
+        const bucketPoints = new Float32Array(arr);
+        const weight = totalEdge > 0 ? (bucketPoints.length / 3 / totalEdge) : 1.0;
+        const shape = new WaterEdgeMaskShape(
+          bucketPoints, sceneW, sceneH, sceneX, sceneY,
+          GROUND_Z + (Number(floorIndex) || 0), 0.3
+        );
+        const sys = this._createBubbleFoamSystem(shape, weight);
+        if (sys) state.foamSystems2.push(sys);
+      }
+    }
+
+    // Build underwater bubbles splash systems (same interior points, separate params/lifecycle).
+    if (interiorPoints && interiorPoints.length >= 3 && this.bubblesParams.enabled && this.bubblesParams.splashEnabled) {
+      const buckets = this._spatialBucket(interiorPoints, sceneW, sceneH, sceneX, sceneY);
+      const totalInterior = interiorPoints.length / 3;
+      for (const [, arr] of buckets) {
+        if (arr.length < 3) continue;
+        const bucketPoints = new Float32Array(arr);
+        const weight = totalInterior > 0 ? (bucketPoints.length / 3 / totalInterior) : 1.0;
+        const shape = new WaterInteriorMaskShape(
+          bucketPoints, sceneW, sceneH, sceneX, sceneY,
+          GROUND_Z + (Number(floorIndex) || 0), 0.3
+        );
+        const sys = this._createBubbleSplashSystem(shape, weight);
+        if (sys) state.splashSystems2.push(sys);
+      }
+    }
+
     return state;
   }
 
@@ -819,7 +1057,7 @@ export class WaterSplashesEffectV2 {
     // (e.g. 30–50), naive `rate * weight` can drop below 0.1 and effectively not render.
     // FireEffectV2 works largely because its base emission rates are an order of magnitude
     // higher; match that expectation here.
-    const foamRateMult = 20.0;
+    const foamRateMult = 40.0;
     const foamRate = Math.max(0.0, Number(p.foamRate) || 0) * foamRateMult;
 
     const foamLifecycle = new FoamPlumeLifecycleBehavior(this);
@@ -877,7 +1115,7 @@ export class WaterSplashesEffectV2 {
     const sizeMin = Math.max(0.1, p.splashSizeMin ?? 8);
     const sizeMax = Math.max(sizeMin, p.splashSizeMax ?? 25);
 
-    const splashRateMult = 20.0;
+    const splashRateMult = 40.0;
     const splashRate = Math.max(0.0, Number(p.splashRate) || 0) * splashRateMult;
 
     const splashLifecycle = new SplashRingLifecycleBehavior(this);
@@ -915,6 +1153,132 @@ export class WaterSplashesEffectV2 {
     return system;
   }
 
+  /**
+   * Create a foam plume system for the underwater bubbles layer.
+   * Uses bubblesParams for size/rate/life, and its own lifecycle behavior
+   * instance so the tint/opacity params are independent from splashes.
+   * @private
+   */
+  _createBubbleFoamSystem(shape, weight) {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+
+    const material = new THREE.MeshBasicMaterial({
+      map: this._foamTexture,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.AdditiveBlending,
+      color: 0xffffff,
+      side: THREE.DoubleSide,
+    });
+    material.toneMapped = false;
+
+    const p = this.bubblesParams;
+    const lifeMin = Math.max(0.01, p.foamLifeMin ?? 1.2);
+    const lifeMax = Math.max(lifeMin, p.foamLifeMax ?? 10.0);
+    const sizeMin = Math.max(0.1, p.foamSizeMin ?? 35);
+    const sizeMax = Math.max(sizeMin, p.foamSizeMax ?? 373);
+
+    const foamRateMult = 20.0;
+    const foamRate = Math.max(0.0, Number(p.foamRate) || 0) * foamRateMult;
+
+    // Lifecycle behavior reads from a params-like object — pass bubblesParams.
+    const foamLifecycle = new FoamPlumeLifecycleBehavior({ params: p });
+
+    const system = new QuarksParticleSystem({
+      duration: 1,
+      looping: true,
+      startLife: new IntervalValue(lifeMin, lifeMax),
+      startSpeed: new ConstantValue(0),
+      startSize: new IntervalValue(sizeMin, sizeMax),
+      startColor: new ColorRange(new Vector4(1, 1, 1, 1), new Vector4(1, 1, 1, 1)),
+      worldSpace: true,
+      maxParticles: 3000,
+      emissionOverTime: new IntervalValue(
+        Math.max(1.0, foamRate * weight * 0.5),
+        Math.max(2.0, foamRate * weight)
+      ),
+      shape,
+      material,
+      renderMode: RenderMode.BillBoard,
+      renderOrder: 49,
+      startRotation: new IntervalValue(0, Math.PI * 2),
+      behaviors: [foamLifecycle],
+    });
+
+    system.userData = {
+      ownerEffect: this,
+      _msEmissionScale: weight,
+      isFoam: true,
+      isBubbles: true,
+    };
+
+    return system;
+  }
+
+  /**
+   * Create a splash ring system for the underwater bubbles layer.
+   * Uses bubblesParams for size/rate/life.
+   * @private
+   */
+  _createBubbleSplashSystem(shape, weight) {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+
+    const material = new THREE.MeshBasicMaterial({
+      map: this._splashTexture || this._foamTexture,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.AdditiveBlending,
+      color: 0xffffff,
+      side: THREE.DoubleSide,
+    });
+    material.toneMapped = false;
+
+    const p = this.bubblesParams;
+    const lifeMin = Math.max(0.01, p.splashLifeMin ?? 0.3);
+    const lifeMax = Math.max(lifeMin, p.splashLifeMax ?? 0.8);
+    const sizeMin = Math.max(0.1, p.splashSizeMin ?? 35);
+    const sizeMax = Math.max(sizeMin, p.splashSizeMax ?? 77);
+
+    const splashRateMult = 20.0;
+    const splashRate = Math.max(0.0, Number(p.splashRate) || 0) * splashRateMult;
+
+    const splashLifecycle = new SplashRingLifecycleBehavior({ params: p });
+
+    const system = new QuarksParticleSystem({
+      duration: 1,
+      looping: true,
+      startLife: new IntervalValue(lifeMin, lifeMax),
+      startSpeed: new ConstantValue(0),
+      startSize: new IntervalValue(sizeMin, sizeMax),
+      startColor: new ColorRange(new Vector4(1, 1, 1, 1), new Vector4(1, 1, 1, 1)),
+      worldSpace: true,
+      maxParticles: 4000,
+      emissionOverTime: new IntervalValue(
+        Math.max(1.0, splashRate * weight * 0.5),
+        Math.max(2.0, splashRate * weight)
+      ),
+      shape,
+      material,
+      renderMode: RenderMode.BillBoard,
+      renderOrder: 49,
+      startRotation: new IntervalValue(0, Math.PI * 2),
+      behaviors: [splashLifecycle],
+    });
+
+    system.userData = {
+      ownerEffect: this,
+      _msEmissionScale: weight,
+      isSplash: true,
+      isBubbles: true,
+    };
+
+    return system;
+  }
+
   // ── Private: Floor switching ───────────────────────────────────────────────
 
   /** Activate all floors up to the current active floor. @private */
@@ -930,7 +1294,10 @@ export class WaterSplashesEffectV2 {
     const state = this._floorStates.get(floorIndex);
     if (!state || !this._batchRenderer) return;
 
-    const allSystems = [...state.foamSystems, ...state.splashSystems];
+    const allSystems = [
+      ...state.foamSystems, ...state.splashSystems,
+      ...(state.foamSystems2 ?? []), ...(state.splashSystems2 ?? []),
+    ];
     for (const sys of allSystems) {
       try { this._batchRenderer.addSystem(sys); } catch (_) {}
       // Emitters as children of BatchedRenderer — transitive scene membership.
@@ -976,7 +1343,10 @@ export class WaterSplashesEffectV2 {
     const state = this._floorStates.get(floorIndex);
     if (!state) return;
 
-    const allSystems = [...state.foamSystems, ...state.splashSystems];
+    const allSystems = [
+      ...state.foamSystems, ...state.splashSystems,
+      ...(state.foamSystems2 ?? []), ...(state.splashSystems2 ?? []),
+    ];
     for (const sys of allSystems) {
       try { this._batchRenderer.deleteSystem(sys); } catch (_) {}
       if (sys.emitter) this._batchRenderer.remove(sys.emitter);
@@ -986,7 +1356,10 @@ export class WaterSplashesEffectV2 {
 
   /** Dispose all systems in a floor state. @private */
   _disposeFloorState(state) {
-    const allSystems = [...state.foamSystems, ...state.splashSystems];
+    const allSystems = [
+      ...state.foamSystems, ...state.splashSystems,
+      ...(state.foamSystems2 ?? []), ...(state.splashSystems2 ?? []),
+    ];
     for (const sys of allSystems) {
       try {
         if (this._batchRenderer) this._batchRenderer.deleteSystem(sys);
@@ -998,18 +1371,20 @@ export class WaterSplashesEffectV2 {
     }
     state.foamSystems.length = 0;
     state.splashSystems.length = 0;
+    if (state.foamSystems2) state.foamSystems2.length = 0;
+    if (state.splashSystems2) state.splashSystems2.length = 0;
   }
 
   // ── Private: Per-frame param sync ──────────────────────────────────────────
 
   /** Update emission rates based on current params + weather. @private */
-  _updateSystemParams() {
+  _updateSystemParams(splashesEnabled = true, bubblesEnabled = true) {
     const p = this.params;
 
     // Keep emission strong enough to remain visible after spatial bucketing.
     // `_createFoamSystem/_createSplashSystem` apply the same multipliers.
-    const foamRateMult = 20.0;
-    const splashRateMult = 20.0;
+    const foamRateMult = 40.0;
+    const splashRateMult = 40.0;
 
     // Get current precipitation for splash rate modulation.
     let precip = 0;
@@ -1020,10 +1395,36 @@ export class WaterSplashesEffectV2 {
     } catch (_) {}
 
     for (const [, state] of this._floorStates) {
+      if (!state) continue;
+
       // Foam systems: emission proportional to foamRate.
-      for (const sys of state.foamSystems) {
+      if (splashesEnabled) for (const sys of state.foamSystems) {
         if (!sys?.userData) continue;
-        const w = sys.userData._msEmissionScale ?? 1.0;
+
+        // Live-sync life/size so Tweakpane changes take effect immediately for new particles.
+        try {
+          const lifeMin = Math.max(0.01, Number(p.foamLifeMin) || 0.8);
+          const lifeMax = Math.max(lifeMin, Number(p.foamLifeMax) || 2.0);
+          if (sys.startLife) {
+            sys.startLife.a = lifeMin;
+            sys.startLife.b = lifeMax;
+          }
+          const sizeMin = Math.max(0.1, Number(p.foamSizeMin) || 30);
+          const sizeMax = Math.max(sizeMin, Number(p.foamSizeMax) || 90);
+          if (sys.startSize) {
+            sys.startSize.a = sizeMin;
+            sys.startSize.b = sizeMax;
+          }
+        } catch (_) {}
+
+        const w = (sys.userData._msEmissionScaleDynamic ?? sys.userData._msEmissionScale) ?? 1.0;
+        if (!Number.isFinite(w) || w <= 0) {
+          if (sys.emissionOverTime) {
+            sys.emissionOverTime.a = 0.0;
+            sys.emissionOverTime.b = 0.0;
+          }
+          continue;
+        }
         const foamRate = Math.max(0.0, Number(p.foamRate) || 0) * foamRateMult;
         if (sys.emissionOverTime) {
           sys.emissionOverTime.a = Math.max(1.0, foamRate * w * 0.5);
@@ -1032,9 +1433,33 @@ export class WaterSplashesEffectV2 {
       }
 
       // Splash systems: emission modulated by precipitation.
-      for (const sys of state.splashSystems) {
+      if (splashesEnabled) for (const sys of state.splashSystems) {
         if (!sys?.userData) continue;
-        const w = sys.userData._msEmissionScale ?? 1.0;
+
+        // Live-sync life/size so Tweakpane changes take effect immediately for new particles.
+        try {
+          const lifeMin = Math.max(0.01, Number(p.splashLifeMin) || 0.3);
+          const lifeMax = Math.max(lifeMin, Number(p.splashLifeMax) || 0.8);
+          if (sys.startLife) {
+            sys.startLife.a = lifeMin;
+            sys.startLife.b = lifeMax;
+          }
+          const sizeMin = Math.max(0.1, Number(p.splashSizeMin) || 8);
+          const sizeMax = Math.max(sizeMin, Number(p.splashSizeMax) || 25);
+          if (sys.startSize) {
+            sys.startSize.a = sizeMin;
+            sys.startSize.b = sizeMax;
+          }
+        } catch (_) {}
+
+        const w = (sys.userData._msEmissionScaleDynamic ?? sys.userData._msEmissionScale) ?? 1.0;
+        if (!Number.isFinite(w) || w <= 0) {
+          if (sys.emissionOverTime) {
+            sys.emissionOverTime.a = 0.0;
+            sys.emissionOverTime.b = 0.0;
+          }
+          continue;
+        }
         const splashRate = Math.max(0.0, Number(p.splashRate) || 0) * splashRateMult;
         // Scale emission by precipitation so splashes only appear when it rains.
         const precipScale = Math.max(0, Math.min(1.0, precip));
@@ -1045,6 +1470,37 @@ export class WaterSplashesEffectV2 {
           const baseB = splashRate * w;
           sys.emissionOverTime.a = Math.max(0.2, baseA * precipScale);
           sys.emissionOverTime.b = Math.max(0.5, baseB * precipScale);
+        }
+      }
+
+      // Bubbles foam systems: hardcoded rates from bubblesParams.
+      const bp = this.bubblesParams;
+      const bubbleFoamRate = Math.max(0.0, Number(bp.foamRate) || 0) * foamRateMult;
+      if (bubblesEnabled) for (const sys of (state.foamSystems2 ?? [])) {
+        if (!sys?.userData) continue;
+        const w = (sys.userData._msEmissionScaleDynamic ?? sys.userData._msEmissionScale) ?? 1.0;
+        if (!Number.isFinite(w) || w <= 0) {
+          if (sys.emissionOverTime) { sys.emissionOverTime.a = 0.0; sys.emissionOverTime.b = 0.0; }
+          continue;
+        }
+        if (sys.emissionOverTime) {
+          sys.emissionOverTime.a = Math.max(1.0, bubbleFoamRate * w * 0.5);
+          sys.emissionOverTime.b = Math.max(2.0, bubbleFoamRate * w);
+        }
+      }
+
+      // Bubbles splash systems: hardcoded rates from bubblesParams.
+      const bubbleSplashRate = Math.max(0.0, Number(bp.splashRate) || 0) * splashRateMult;
+      if (bubblesEnabled) for (const sys of (state.splashSystems2 ?? [])) {
+        if (!sys?.userData) continue;
+        const w = (sys.userData._msEmissionScaleDynamic ?? sys.userData._msEmissionScale) ?? 1.0;
+        if (!Number.isFinite(w) || w <= 0) {
+          if (sys.emissionOverTime) { sys.emissionOverTime.a = 0.0; sys.emissionOverTime.b = 0.0; }
+          continue;
+        }
+        if (sys.emissionOverTime) {
+          sys.emissionOverTime.a = Math.max(1.0, bubbleSplashRate * w * 0.5);
+          sys.emissionOverTime.b = Math.max(2.0, bubbleSplashRate * w);
         }
       }
     }
@@ -1196,6 +1652,21 @@ export class WaterSplashesEffectV2 {
       enabled: true,
       groups: [
         {
+          name: 'tint-jitter',
+          label: 'Tint (Jitter)',
+          type: 'inline',
+          parameters: [
+            'tintStrength',
+            'tintJitter',
+            'tintAColorR',
+            'tintAColorG',
+            'tintAColorB',
+            'tintBColorR',
+            'tintBColorG',
+            'tintBColorB',
+          ]
+        },
+        {
           name: 'foam',
           label: 'Foam (Shoreline)',
           type: 'inline',
@@ -1241,29 +1712,131 @@ export class WaterSplashesEffectV2 {
         }
       ],
       parameters: {
+        tintStrength: { type: 'slider', label: 'Strength', min: 0, max: 2, step: 0.01, default: 0.0 },
+        tintJitter: { type: 'slider', label: 'Jitter', min: 0, max: 2, step: 0.01, default: 0.75 },
+        tintAColorR: { type: 'slider', label: 'A R', min: 0, max: 2, step: 0.01, default: 0.85 },
+        tintAColorG: { type: 'slider', label: 'A G', min: 0, max: 2, step: 0.01, default: 0.92 },
+        tintAColorB: { type: 'slider', label: 'A B', min: 0, max: 2, step: 0.01, default: 1.00 },
+        tintBColorR: { type: 'slider', label: 'B R', min: 0, max: 2, step: 0.01, default: 0.10 },
+        tintBColorG: { type: 'slider', label: 'B G', min: 0, max: 2, step: 0.01, default: 0.55 },
+        tintBColorB: { type: 'slider', label: 'B B', min: 0, max: 2, step: 0.01, default: 0.75 },
+
         foamEnabled: { type: 'boolean', label: 'Enabled', default: true },
-        foamRate: { type: 'slider', label: 'Rate', min: 0, max: 25, step: 0.1, default: 3.0 },
+        foamRate: { type: 'slider', label: 'Rate', min: 0, max: 200, step: 0.1, default: 3.0 },
         foamPeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0, max: 1, step: 0.01, default: 0.65 },
-        foamLifeMin: { type: 'slider', label: 'Life Min', min: 0.05, max: 10, step: 0.05, default: 0.8 },
-        foamLifeMax: { type: 'slider', label: 'Life Max', min: 0.05, max: 10, step: 0.05, default: 2.0 },
-        foamSizeMin: { type: 'slider', label: 'Size Min', min: 1, max: 300, step: 1, default: 30 },
-        foamSizeMax: { type: 'slider', label: 'Size Max', min: 1, max: 500, step: 1, default: 90 },
-        foamWindDriftScale: { type: 'slider', label: 'Wind Drift', min: 0, max: 3, step: 0.01, default: 0.3 },
-        foamColorR: { type: 'slider', label: 'Color R', min: 0, max: 1.5, step: 0.01, default: 0.85 },
-        foamColorG: { type: 'slider', label: 'Color G', min: 0, max: 1.5, step: 0.01, default: 0.90 },
-        foamColorB: { type: 'slider', label: 'Color B', min: 0, max: 1.5, step: 0.01, default: 0.88 },
+        foamLifeMin: { type: 'slider', label: 'Life Min', min: 0.05, max: 20, step: 0.05, default: 0.80 },
+        foamLifeMax: { type: 'slider', label: 'Life Max', min: 0.05, max: 20, step: 0.05, default: 2.00 },
+        foamSizeMin: { type: 'slider', label: 'Size Min', min: 1, max: 1000, step: 1, default: 30 },
+        foamSizeMax: { type: 'slider', label: 'Size Max', min: 1, max: 1000, step: 1, default: 90 },
+        foamWindDriftScale: { type: 'slider', label: 'Wind Drift', min: 0, max: 2, step: 0.01, default: 0.30 },
+        foamColorR: { type: 'slider', label: 'Color R', min: 0, max: 2, step: 0.01, default: 0.85 },
+        foamColorG: { type: 'slider', label: 'Color G', min: 0, max: 2, step: 0.01, default: 0.90 },
+        foamColorB: { type: 'slider', label: 'Color B', min: 0, max: 2, step: 0.01, default: 0.88 },
 
         splashEnabled: { type: 'boolean', label: 'Enabled', default: true },
-        splashRate: { type: 'slider', label: 'Rate', min: 0, max: 40, step: 0.1, default: 5.0 },
+        splashRate: { type: 'slider', label: 'Rate', min: 0, max: 400, step: 0.1, default: 5.0 },
         splashPeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0, max: 1, step: 0.01, default: 0.70 },
-        splashLifeMin: { type: 'slider', label: 'Life Min', min: 0.05, max: 5, step: 0.05, default: 0.3 },
-        splashLifeMax: { type: 'slider', label: 'Life Max', min: 0.05, max: 5, step: 0.05, default: 0.8 },
-        splashSizeMin: { type: 'slider', label: 'Size Min', min: 1, max: 200, step: 1, default: 8 },
-        splashSizeMax: { type: 'slider', label: 'Size Max', min: 1, max: 300, step: 1, default: 25 },
+        splashLifeMin: { type: 'slider', label: 'Life Min', min: 0.05, max: 10, step: 0.05, default: 0.30 },
+        splashLifeMax: { type: 'slider', label: 'Life Max', min: 0.05, max: 10, step: 0.05, default: 0.80 },
+        splashSizeMin: { type: 'slider', label: 'Size Min', min: 1, max: 1000, step: 1, default: 8 },
+        splashSizeMax: { type: 'slider', label: 'Size Max', min: 1, max: 1000, step: 1, default: 25 },
 
         maskThreshold: { type: 'slider', label: 'Water Threshold', min: 0.0, max: 1.0, step: 0.01, default: 0.15 },
         edgeScanStride: { type: 'slider', label: 'Edge Stride', min: 1, max: 16, step: 1, default: 2 },
         interiorScanStride: { type: 'slider', label: 'Interior Stride', min: 1, max: 32, step: 1, default: 4 },
+      }
+    };
+  }
+
+  /**
+   * Separate Tweakpane control schema for the built-in underwater bubbles layer.
+   * This maps to `effect.bubblesParams` via special-case routing in FloorCompositor
+   * and canvas-replacement.
+   *
+   * @returns {object}
+   */
+  static getBubblesControlSchema() {
+    return {
+      enabled: true,
+      groups: [
+        {
+          name: 'tint-jitter',
+          label: 'Tint (Jitter)',
+          type: 'inline',
+          parameters: [
+            'tintStrength',
+            'tintJitter',
+            'tintAColorR',
+            'tintAColorG',
+            'tintAColorB',
+            'tintBColorR',
+            'tintBColorG',
+            'tintBColorB',
+          ]
+        },
+        {
+          name: 'foam',
+          label: 'Bubbles (Shoreline)',
+          type: 'inline',
+          parameters: [
+            'foamEnabled',
+            'foamRate',
+            'foamPeakOpacity',
+            'foamLifeMin',
+            'foamLifeMax',
+            'foamSizeMin',
+            'foamSizeMax',
+            'foamWindDriftScale',
+            'foamColorR',
+            'foamColorG',
+            'foamColorB',
+          ]
+        },
+        {
+          name: 'splashes',
+          label: 'Rings (Interior)',
+          type: 'inline',
+          separator: true,
+          parameters: [
+            'splashEnabled',
+            'splashRate',
+            'splashPeakOpacity',
+            'splashLifeMin',
+            'splashLifeMax',
+            'splashSizeMin',
+            'splashSizeMax',
+          ]
+        },
+      ],
+      parameters: {
+        tintStrength: { type: 'slider', label: 'Strength', min: 0, max: 2, step: 0.01, default: 1.00 },
+        tintJitter: { type: 'slider', label: 'Jitter', min: 0, max: 2, step: 0.01, default: 1.00 },
+        tintAColorR: { type: 'slider', label: 'A R', min: 0, max: 2, step: 0.01, default: 0.74 },
+        tintAColorG: { type: 'slider', label: 'A G', min: 0, max: 2, step: 0.01, default: 1.28 },
+        tintAColorB: { type: 'slider', label: 'A B', min: 0, max: 2, step: 0.01, default: 0.71 },
+        tintBColorR: { type: 'slider', label: 'B R', min: 0, max: 2, step: 0.01, default: 0.51 },
+        tintBColorG: { type: 'slider', label: 'B G', min: 0, max: 2, step: 0.01, default: 0.87 },
+        tintBColorB: { type: 'slider', label: 'B B', min: 0, max: 2, step: 0.01, default: 0.76 },
+
+        foamEnabled: { type: 'boolean', label: 'Enabled', default: true },
+        foamRate: { type: 'slider', label: 'Rate', min: 0, max: 200, step: 0.1, default: 10.3 },
+        foamPeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0, max: 1, step: 0.01, default: 0.58 },
+        foamLifeMin: { type: 'slider', label: 'Life Min', min: 0.05, max: 20, step: 0.05, default: 1.20 },
+        foamLifeMax: { type: 'slider', label: 'Life Max', min: 0.05, max: 20, step: 0.05, default: 10.00 },
+        foamSizeMin: { type: 'slider', label: 'Size Min', min: 1, max: 1000, step: 1, default: 35 },
+        foamSizeMax: { type: 'slider', label: 'Size Max', min: 1, max: 1000, step: 1, default: 373 },
+        foamWindDriftScale: { type: 'slider', label: 'Wind Drift', min: 0, max: 2, step: 0.01, default: 0.40 },
+        foamColorR: { type: 'slider', label: 'Color R', min: 0, max: 2, step: 0.01, default: 0.85 },
+        foamColorG: { type: 'slider', label: 'Color G', min: 0, max: 2, step: 0.01, default: 0.90 },
+        foamColorB: { type: 'slider', label: 'Color B', min: 0, max: 2, step: 0.01, default: 0.88 },
+
+        splashEnabled: { type: 'boolean', label: 'Enabled', default: true },
+        splashRate: { type: 'slider', label: 'Rate', min: 0, max: 400, step: 0.1, default: 20.2 },
+        splashPeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0, max: 1, step: 0.01, default: 0.70 },
+        splashLifeMin: { type: 'slider', label: 'Life Min', min: 0.05, max: 10, step: 0.05, default: 0.30 },
+        splashLifeMax: { type: 'slider', label: 'Life Max', min: 0.05, max: 10, step: 0.05, default: 0.80 },
+        splashSizeMin: { type: 'slider', label: 'Size Min', min: 1, max: 1000, step: 1, default: 35 },
+        splashSizeMax: { type: 'slider', label: 'Size Max', min: 1, max: 1000, step: 1, default: 77 },
       }
     };
   }

@@ -263,9 +263,16 @@ uniform vec3 uSandColor;
 uniform float uSandContrast;
 uniform float uSandChunkScale;
 uniform float uSandChunkSpeed;
+uniform float uSandWindDriftScale;
 uniform float uSandGrainScale;
 uniform float uSandGrainSpeed;
 uniform float uSandBillowStrength;
+
+uniform float uSandLayeringEnabled;
+uniform float uSandLayerScaleSpread;
+uniform float uSandLayerIntensitySpread;
+uniform float uSandLayerDriftSpread;
+uniform float uSandLayerEvolutionSpread;
 
 uniform float uSandCoverage;
 uniform float uSandChunkSoftness;
@@ -1014,15 +1021,21 @@ float getFoamBaseAmount(vec2 sceneUv, float shore, float inside, vec2 rainOffPx)
 
 // ── Sand / Sediment ──────────────────────────────────────────────────────
 #ifdef USE_SAND
-float sandMask(vec2 sceneUv, float shore, float inside, float sceneAspect) {
+float sandMaskLayer(vec2 sceneUv, float shore, float inside, float sceneAspect,
+  float driftScale, float chunkScale, float grainScale,
+  float chunkEvoSpeed, float grainEvoSpeed,
+  float layerIntensityMul) {
+
   float depth = clamp(1.0 - shore, 0.0, 1.0);
   float dLo = clamp(uSandDepthLo, 0.0, 1.0);
   float dHi = clamp(uSandDepthHi, 0.0, 1.0);
   float lo = min(dLo, dHi - 0.001);
   float hi = max(dHi, lo + 0.001);
   float depthMask = smoothstep(lo, hi, depth);
-  vec2 sandWindOffsetUv = uWindOffsetUv;
-  vec2 sandSceneUv = sceneUv - (sandWindOffsetUv * max(0.0, uSandChunkSpeed));
+
+  float drift = clamp(driftScale, 0.0, 3.0);
+  vec2 sandSceneUv = sceneUv - (uWindOffsetUv * drift);
+
   float sandDist = clamp(uSandDistortionStrength, 0.0, 1.0);
   if (sandDist > 1e-4) {
     vec2 waveGrad = waveGrad2D(sceneUv, uWindTime, 1.0);
@@ -1030,43 +1043,115 @@ float sandMask(vec2 sceneUv, float shore, float inside, float sceneAspect) {
     vec2 warp = waveGrad * uWaveStrength;
     sandSceneUv += warp * (0.045 * sandDist);
   }
+
   vec2 sandBasis = vec2(sandSceneUv.x * sceneAspect, sandSceneUv.y);
-  vec2 windF = uWindDir; float wl = length(windF);
+
+  vec2 windF = uWindDir;
+  float wl = length(windF);
   windF = (wl > 1e-6) ? (windF / wl) : vec2(1.0, 0.0);
-  // Keep wind in Foundry/scene UV space (Y-down).
   vec2 windBasis = normalize(vec2(windF.x * sceneAspect, windF.y));
   vec2 perp = vec2(-windBasis.y, windBasis.x);
+  float tWind = uWindTime;
+
+  float chunkEvo = tWind * max(0.0, chunkEvoSpeed) * 0.06;
+  float grainEvo = tWind * max(0.0, grainEvoSpeed) * 0.10;
+
   float aniso = clamp(uSandAnisotropy, 0.0, 1.0);
   float alongScale = mix(1.0, 0.35, aniso);
   float acrossScale = mix(1.0, 3.0, aniso);
   float along2 = dot(sandBasis, windBasis) * alongScale;
   float across2 = dot(sandBasis, perp) * acrossScale;
   sandBasis = windBasis * along2 + perp * across2;
-  vec2 curlP = sandBasis * (0.5 + 1.25 * max(0.01, uSandChunkScale)) - windBasis * (uTime * (0.03 + 0.14 * max(0.0, uSandChunkSpeed)));
+
+  float cScale = max(0.01, chunkScale);
+  vec2 curlP = sandBasis * (0.5 + 1.25 * cScale) - windBasis * (chunkEvo * 0.85);
   sandBasis += curlNoise2D(curlP) * clamp(uSandBillowStrength, 0.0, 1.0) * 0.35;
-  float chunkN = clamp(0.5 + 0.5 * fbmNoise(sandBasis * max(0.05, uSandChunkScale) + vec2(uTime * 0.05, -uTime * 0.04)), 0.0, 1.0);
-  float evolveN = clamp(0.5 + 0.5 * fbmNoise(sandBasis * max(0.03, uSandChunkScale * 0.65) + vec2(-uTime * 0.03, uTime * 0.02)), 0.0, 1.0);
+
+  vec2 evoOffset = windBasis * chunkEvo + perp * (chunkEvo * 0.17);
+  float chunkN = clamp(0.5 + 0.5 * fbmNoise((sandBasis + evoOffset) * max(0.05, cScale)), 0.0, 1.0);
+  float evolveN = clamp(0.5 + 0.5 * fbmNoise((sandBasis + evoOffset * 0.73) * max(0.03, cScale * 0.65) + perp * 0.17), 0.0, 1.0);
   float chunk = 0.55 * chunkN + 0.45 * evolveN;
+
   float cov = clamp(uSandCoverage, 0.0, 1.0);
   float chunkTh = mix(0.85, 0.45, cov);
   float chunkSoft = max(0.001, uSandChunkSoftness);
   float chunkMask = smoothstep(chunkTh, chunkTh + chunkSoft, chunk);
+
   float sandContrast = max(0.01, uSandContrast);
   chunkMask = pow(clamp(chunkMask, 0.0, 1.0), sandContrast);
-  vec2 grainUv = sandBasis * max(1.0, uSandGrainScale);
-  grainUv += windBasis * (uTime * (0.08 + 0.35 * max(0.0, uSandGrainSpeed)));
-  grainUv += curlNoise2D(grainUv * 0.02 + vec2(uTime * 0.4, -uTime * 0.3)) * 0.65;
-  float g1 = valueNoise(grainUv + vec2(uTime * uSandGrainSpeed * 0.6));
-  float g2 = valueNoise(grainUv * 1.7 + 3.1 + vec2(-uTime * uSandGrainSpeed * 0.45));
+
+  float gScale = max(1.0, grainScale);
+  vec2 grainUv = sandBasis * gScale;
+  vec2 grainOffset = windBasis * grainEvo + perp * (grainEvo * 0.12);
+  grainUv += grainOffset;
+  grainUv += curlNoise2D(grainUv * 0.02 + windBasis * (grainEvo * 0.65) + perp * (grainEvo * 0.23)) * 0.65;
+
+  float g1 = valueNoise(grainUv);
+  float g2 = valueNoise(grainUv * 1.7 + 3.1);
   float grit = (g1 * 0.65 + g2 * 0.35);
+
   float speckCov = clamp(uSandSpeckCoverage, 0.0, 1.0);
   float speckTh = mix(0.95, 0.55, speckCov);
   float speckSoft = max(0.001, uSandSpeckSoftness);
   float speck = smoothstep(speckTh, speckTh + speckSoft, grit);
   speck = pow(clamp(speck, 0.0, 1.0), sandContrast);
+
   float sandAlpha = speck * chunkMask * inside * depthMask;
   sandAlpha *= clamp(uSandIntensity, 0.0, 1.0) * 1.15;
+  sandAlpha *= clamp(layerIntensityMul, 0.0, 2.0);
   return sandAlpha;
+}
+
+float sandMask(vec2 sceneUv, float shore, float inside, float sceneAspect) {
+  float baseDrift = uSandWindDriftScale;
+  float baseChunkScale = uSandChunkScale;
+  float baseGrainScale = uSandGrainScale;
+  float baseChunkEvo = uSandChunkSpeed;
+  float baseGrainEvo = uSandGrainSpeed;
+
+  float base = sandMaskLayer(sceneUv, shore, inside, sceneAspect,
+    baseDrift, baseChunkScale, baseGrainScale,
+    baseChunkEvo, baseGrainEvo,
+    1.0);
+
+  if (uSandLayeringEnabled < 0.5) return base;
+
+  float spread = clamp(uSandLayerScaleSpread, 0.0, 1.0);
+  float iSpread = clamp(uSandLayerIntensitySpread, 0.0, 1.0);
+  float dSpread = clamp(uSandLayerDriftSpread, 0.0, 1.0);
+  float eSpread = clamp(uSandLayerEvolutionSpread, 0.0, 1.0);
+
+  // "Small" layer: smaller features => higher domain scale.
+  float smallScaleMul = mix(1.15, 1.85, spread);
+  // "Large" layer: larger features => lower domain scale.
+  float largeScaleMul = mix(0.85, 0.55, spread);
+
+  float smallDriftMul = mix(0.90, 0.70, dSpread);
+  float largeDriftMul = mix(1.10, 1.35, dSpread);
+
+  float smallEvoMul = mix(0.95, 0.65, eSpread);
+  float largeEvoMul = mix(1.05, 1.45, eSpread);
+
+  // Side layers are additive detail; keep their strength bounded.
+  float sideI = 0.55 * iSpread;
+
+  float small = sandMaskLayer(sceneUv, shore, inside, sceneAspect,
+    baseDrift * smallDriftMul,
+    baseChunkScale * smallScaleMul,
+    baseGrainScale * smallScaleMul,
+    baseChunkEvo * smallEvoMul,
+    baseGrainEvo * smallEvoMul,
+    sideI);
+
+  float large = sandMaskLayer(sceneUv, shore, inside, sceneAspect,
+    baseDrift * largeDriftMul,
+    baseChunkScale * largeScaleMul,
+    baseGrainScale * largeScaleMul,
+    baseChunkEvo * largeEvoMul,
+    baseGrainEvo * largeEvoMul,
+    sideI);
+
+  return clamp(base + small + large, 0.0, 1.0);
 }
 #endif
 
@@ -1108,7 +1193,9 @@ vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorSt
   vec2 grainBasis = vec2(sceneUv.x * sceneAspect, sceneUv.y) + vec2(47.3, 31.7);
   float grainPhase = tWind * (murkSpeed + grainSpeed);
   vec2 grainDrift = windBasis * (grainPhase * 1.8);
-  vec2 grainEvo = vec2(t * grainSpeed * 0.85, -t * grainSpeed * 0.71);
+  // Keep the fine-grain evolution locked to the wind basis so the suspended
+  // silt motion always aligns with wind direction.
+  vec2 grainEvo = windBasis * (tWind * grainSpeed * 0.95) + windPerp * (tWind * grainSpeed * 0.22);
   vec2 gUv1 = grainBasis * (grainScale * 1.0) - grainDrift + grainEvo;
   vec2 gUv2 = grainBasis * (grainScale * 2.35) - grainDrift * 2.1 - grainEvo * 1.6 + vec2(23.4, 7.1);
   vec2 gUv3 = grainBasis * (grainScale * 4.9) - grainDrift * 3.0 + grainEvo * 2.4 + vec2(-11.8, 31.6);

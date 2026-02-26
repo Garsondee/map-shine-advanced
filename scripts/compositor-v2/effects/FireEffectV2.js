@@ -323,7 +323,11 @@ export class FireEffectV2 {
     this._updateSystemParams();
 
     // Step the BatchedRenderer.
-    this._batchRenderer.update(dt);
+    try {
+      this._batchRenderer.update(dt);
+    } catch (err) {
+      log.warn('FireEffectV2: BatchedRenderer.update threw, skipping frame:', err);
+    }
   }
 
   /**

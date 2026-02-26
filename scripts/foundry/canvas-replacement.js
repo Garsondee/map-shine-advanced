@@ -3413,6 +3413,11 @@ async function createThreeCanvas(scene) {
         }, 'v2.registerWaterSplashesUI', Severity.COSMETIC);
 
         safeCall(() => {
+          uiManager.registerEffect('underwater-bubbles', 'Underwater Bubbles',
+            WaterSplashesEffectV2.getBubblesControlSchema(), _makeV2Callback('_underwaterBubblesEffect'), 'particle');
+        }, 'v2.registerUnderwaterBubblesUI', Severity.COSMETIC);
+
+        safeCall(() => {
           uiManager.registerEffect('bloom', 'Bloom (Glow)',
             BloomEffect.getControlSchema(), _makeV2Callback('_bloomEffect'), 'global');
         }, 'v2.registerBloomUI', Severity.COSMETIC);

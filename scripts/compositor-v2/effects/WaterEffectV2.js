@@ -274,17 +274,23 @@ export class WaterEffectV2 {
       sandIntensity: 0.5,
       sandColor: { r: 0.76, g: 0.68, b: 0.50 },
       sandContrast: 1.5,
-      sandChunkScale: 5.0,
+      sandChunkScale: 12.0,
       sandChunkSpeed: 0.15,
-      sandGrainScale: 120.0,
+      sandGrainScale: 600.0,
       sandGrainSpeed: 0.1,
+      sandWindDriftScale: 0.5,
+      sandLayeringEnabled: false,
+      sandLayerScaleSpread: 0.5,
+      sandLayerIntensitySpread: 0.65,
+      sandLayerDriftSpread: 0.4,
+      sandLayerEvolutionSpread: 0.5,
       sandBillowStrength: 0.4,
       sandCoverage: 0.4,
       sandChunkSoftness: 0.15,
       sandSpeckCoverage: 0.3,
       sandSpeckSoftness: 0.1,
       sandDepthLo: 0.0,
-      sandDepthHi: 0.4,
+      sandDepthHi: 0.85,
       sandAnisotropy: 0.3,
       sandDistortionStrength: 0.3,
       sandAdditive: 0.15,
@@ -541,12 +547,16 @@ export class WaterEffectV2 {
 
     // Build initial defines based on default params
     const defines = {};
-    // NOTE: Sand is always compiled in.
-    // Toggling a define at runtime forces shader recompilation; on some drivers
-    // this can lead to WebGL instability (context loss / repeated compile errors)
-    // that looks like a full render freeze.
-    // We instead gate sand via uniforms (uSandIntensity/uSandAdditive).
-    defines.USE_SAND = 1;
+    // IMPORTANT: Sand is extremely expensive to compile on some Windows GPU
+    // drivers. We've seen the first WaterEffectV2 render hang indefinitely while
+    // compiling the shader when USE_SAND is enabled, even if sandEnabled=false.
+    //
+    // To keep the compositor stable, we default to NOT compiling sand.
+    // Sand is still uniform-gated, but the shader code is removed at compile time.
+    //
+    // If you later want sand, we can add a controlled (opt-in) shader recompile path.
+    // For now: stability first.
+    // defines.USE_SAND = 1;
     if (this.params.foamFlecksEnabled) defines.USE_FOAM_FLECKS = 1;
     if (this.params.refractionMultiTapEnabled) defines.USE_WATER_REFRACTION_MULTITAP = 1;
     if (this.params.chromaticAberrationEnabled) defines.USE_WATER_CHROMATIC_ABERRATION = 1;
@@ -1628,10 +1638,36 @@ export class WaterEffectV2 {
     const sandColor = normalizeRgb01(p.sandColor, { r: 0.76, g: 0.68, b: 0.5 });
     u.uSandColor.value.set(sandColor.r, sandColor.g, sandColor.b);
     u.uSandContrast.value = p.sandContrast;
-    u.uSandChunkScale.value = p.sandChunkScale;
+    // Very low scales produce extremely large "brick" blobs. Clamp to a
+    // sane range defensively so out-of-date saved params can't break visuals.
+    u.uSandChunkScale.value = Math.max(1.0, Math.min(60.0, p.sandChunkScale));
     u.uSandChunkSpeed.value = p.sandChunkSpeed;
-    u.uSandGrainScale.value = p.sandGrainScale;
+    u.uSandGrainScale.value = Math.max(50.0, Math.min(12000.0, p.sandGrainScale));
     u.uSandGrainSpeed.value = p.sandGrainSpeed;
+    if (u.uSandWindDriftScale) {
+      const v = p.sandWindDriftScale;
+      // Desired default: sand drift at ~50% of the global wind advection.
+      u.uSandWindDriftScale.value = Number.isFinite(v) ? Math.max(0.0, Math.min(3.0, v)) : 0.5;
+    }
+    if (u.uSandLayeringEnabled) {
+      u.uSandLayeringEnabled.value = (p.sandLayeringEnabled === true) ? 1.0 : 0.0;
+    }
+    if (u.uSandLayerScaleSpread) {
+      const v = p.sandLayerScaleSpread;
+      u.uSandLayerScaleSpread.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.5;
+    }
+    if (u.uSandLayerIntensitySpread) {
+      const v = p.sandLayerIntensitySpread;
+      u.uSandLayerIntensitySpread.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.65;
+    }
+    if (u.uSandLayerDriftSpread) {
+      const v = p.sandLayerDriftSpread;
+      u.uSandLayerDriftSpread.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.4;
+    }
+    if (u.uSandLayerEvolutionSpread) {
+      const v = p.sandLayerEvolutionSpread;
+      u.uSandLayerEvolutionSpread.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.5;
+    }
     u.uSandBillowStrength.value = p.sandBillowStrength;
     u.uSandCoverage.value = p.sandCoverage;
     u.uSandChunkSoftness.value = p.sandChunkSoftness;
@@ -1784,6 +1820,7 @@ export class WaterEffectV2 {
 
     renderer.setRenderTarget(outputRT);
     renderer.autoClear = true;
+    renderer.setClearColor(0x000000, 0);
     renderer.render(this._composeScene, this._composeCamera);
 
     renderer.autoClear = prevAutoClear;
@@ -2173,6 +2210,12 @@ export class WaterEffectV2 {
       uSandChunkSpeed:         { value: p.sandChunkSpeed },
       uSandGrainScale:         { value: p.sandGrainScale },
       uSandGrainSpeed:         { value: p.sandGrainSpeed },
+      uSandWindDriftScale:     { value: p.sandWindDriftScale ?? 0.5 },
+      uSandLayeringEnabled:    { value: (p.sandLayeringEnabled === true) ? 1.0 : 0.0 },
+      uSandLayerScaleSpread:   { value: p.sandLayerScaleSpread ?? 0.5 },
+      uSandLayerIntensitySpread:{ value: p.sandLayerIntensitySpread ?? 0.65 },
+      uSandLayerDriftSpread:   { value: p.sandLayerDriftSpread ?? 0.4 },
+      uSandLayerEvolutionSpread:{ value: p.sandLayerEvolutionSpread ?? 0.5 },
       uSandBillowStrength:     { value: p.sandBillowStrength },
       uSandCoverage:           { value: p.sandCoverage },
       uSandChunkSoftness:      { value: p.sandChunkSoftness },

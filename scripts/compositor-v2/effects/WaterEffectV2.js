@@ -90,6 +90,21 @@ export class WaterEffectV2 {
       waveWarpSmallStrength: 0.08,
       waveWarpMicroStrength: 0.04,
       waveWarpTimeSpeed: 0.15,
+
+      waveBreakupStrength: 0.22,
+      waveBreakupScale: 80.0,
+      waveBreakupSpeed: 0.18,
+      waveBreakupWarp: 0.85,
+      waveBreakupDistortionStrength: 0.10,
+      waveBreakupSpecularStrength: 0.35,
+
+      waveMicroNormalStrength: 0.22,
+      waveMicroNormalScale: 80.0,
+      waveMicroNormalSpeed: 0.18,
+      waveMicroNormalWarp: 0.85,
+      waveMicroNormalDistortionStrength: 0.10,
+      waveMicroNormalSpecularStrength: 0.35,
+
       waveEvolutionEnabled: true,
       waveEvolutionSpeed: 0.15,
       waveEvolutionAmount: 0.3,
@@ -174,6 +189,11 @@ export class WaterEffectV2 {
       waveDirOffsetDeg: 0.0,
       waveAppearanceRotDeg: 0.0,
       waveAppearanceOffsetDeg: 0.0,
+      // Wave direction field (patchwise crisscrossing)
+      waveDirFieldEnabled: true,
+      waveDirFieldMaxDeg: 45.0,
+      waveDirFieldScale: 0.65,
+      waveDirFieldSpeed: 0.35,
       advectionDirOffsetDeg: 0.0,
       advectionSpeed01: 0.15,
       advectionSpeed: 1.5,
@@ -356,6 +376,15 @@ export class WaterEffectV2 {
     this._smoothedWindDirX = 1.0;
     this._smoothedWindDirY = 0.0;
     this._smoothedWindSpeed01 = 0.0;
+
+    // Dual-spectrum wind-direction blending.
+    // We keep a "previous" direction and "target" direction and blend between
+    // the two in the shader so the wavefield doesn't snap when wind rotates.
+    this._prevWindDirX = 1.0;
+    this._prevWindDirY = 0.0;
+    this._targetWindDirX = 1.0;
+    this._targetWindDirY = 0.0;
+    this._windDirBlend01 = 1.0;
 
     // ── Debug arrow DOM overlay ──────────────────────────────────────────
     /** @type {HTMLElement|null} */
@@ -561,12 +590,29 @@ export class WaterEffectV2 {
     if (this.params.refractionMultiTapEnabled) defines.USE_WATER_REFRACTION_MULTITAP = 1;
     if (this.params.chromaticAberrationEnabled) defines.USE_WATER_CHROMATIC_ABERRATION = 1;
 
+    // DEBUG/Bisect: allow forcing a minimal shader to isolate shader compilation stalls.
+    //
+    // localStorage.setItem('msa-water-minimal-shader','1') => compile minimal pass-through water shader
+    // localStorage.removeItem('msa-water-minimal-shader')  => compile full shader
+    const FORCE_MINIMAL_SHADER = (() => {
+      try { return globalThis.localStorage?.getItem?.('msa-water-minimal-shader') === '1'; } catch (_) { return false; }
+    })();
+
     // DEBUG: Mask-gated tint + wave distortion shader.
     // Uses the EXACT same wave functions as the full water-shader.js — verbatim.
     // No invented noise: fbmNoise -> warpUv -> calculateWave -> waveGrad2D pipeline.
     // distMask is approximated from raw mask value (no SDF yet).
     const DEBUG_MASK_TINT_ONLY = false;
-    const fragSrc = DEBUG_MASK_TINT_ONLY
+
+    const fragSrc = FORCE_MINIMAL_SHADER
+      ? `
+        uniform sampler2D tDiffuse;
+        varying vec2 vUv;
+        void main() {
+          gl_FragColor = texture2D(tDiffuse, vUv);
+        }
+      `
+      : (DEBUG_MASK_TINT_ONLY
       ? `
         // ── Samplers ────────────────────────────────────────────────────────
         uniform sampler2D tDiffuse;
@@ -882,18 +928,23 @@ export class WaterEffectV2 {
           gl_FragColor = col;
         }
       `
-      : getFragmentShader();
+      : getFragmentShader());
 
     // Create shader material with all uniforms
+    const _matStartMs = performance?.now?.() ?? Date.now();
     this._composeMaterial = new THREE.ShaderMaterial({
       uniforms: this._buildUniforms(THREE),
       vertexShader: getVertexShader(),
       fragmentShader: fragSrc,
-      defines: DEBUG_MASK_TINT_ONLY ? {} : defines,
+      defines: (FORCE_MINIMAL_SHADER || DEBUG_MASK_TINT_ONLY) ? {} : defines,
       depthTest: false,
       depthWrite: false,
       transparent: false,
     });
+    const _matEndMs = performance?.now?.() ?? Date.now();
+    try {
+      log.warn(`[crisis] WaterEffectV2 ShaderMaterial created (minimal=${FORCE_MINIMAL_SHADER}, debugMaskTint=${DEBUG_MASK_TINT_ONLY}) in ${(_matEndMs - _matStartMs).toFixed?.(1) ?? (_matEndMs - _matStartMs)}ms`);
+    } catch (_) {}
     this._composeMaterial.toneMapped = false;
 
     // Fullscreen quad
@@ -1294,7 +1345,8 @@ export class WaterEffectV2 {
       if (ws) {
         const wx = Number(ws.windDirection?.x);
         const wy = Number(ws.windDirection?.y);
-        const wv = Number(ws.windSpeed);
+        const wvMS = Number(ws.windSpeedMS);
+        const wv01 = Number(ws.windSpeed);
         if (Number.isFinite(wx) && Number.isFinite(wy)) {
           const len = Math.hypot(wx, wy);
           if (len > 1e-5) {
@@ -1302,7 +1354,11 @@ export class WaterEffectV2 {
             windDirY = wy / len;
           }
         }
-        if (Number.isFinite(wv)) windSpeed01 = Math.max(0, Math.min(1, wv));
+        if (Number.isFinite(wvMS)) {
+          windSpeed01 = Math.max(0.0, Math.min(1.0, wvMS / 78.0));
+        } else if (Number.isFinite(wv01)) {
+          windSpeed01 = Math.max(0.0, Math.min(1.0, wv01));
+        }
       } else {
         // CloudEffectV2 maintains its own deterministic fallback wind state.
         // Pull from it so water matches clouds in V2 mode.
@@ -1335,6 +1391,41 @@ export class WaterEffectV2 {
         windDirX = this._smoothedWindDirX / smoothLen;
         windDirY = this._smoothedWindDirY / smoothLen;
       }
+    }
+
+    // Dual-spectrum blend setup.
+    // - waterWindDir is the final direction used by non-wave systems (foam drift,
+    //   sand drift, etc.)
+    // - uPrevWindDir/uTargetWindDir/uWindDirBlend are used ONLY by the wavefield
+    //   to avoid snapping on direction changes.
+    {
+      const len = Math.hypot(windDirX, windDirY);
+      const nx = len > 1e-6 ? (windDirX / len) : 1.0;
+      const ny = len > 1e-6 ? (windDirY / len) : 0.0;
+
+      // If the target changed meaningfully, start a new blend.
+      const dot = (this._targetWindDirX * nx + this._targetWindDirY * ny);
+      const angDelta = Math.acos(Math.max(-1.0, Math.min(1.0, dot)));
+      const changed = angDelta > (5.0 * (Math.PI / 180.0));
+
+      if (changed) {
+        // Previous becomes the current effective direction, and we blend to the new target.
+        this._prevWindDirX = this._targetWindDirX;
+        this._prevWindDirY = this._targetWindDirY;
+        this._targetWindDirX = nx;
+        this._targetWindDirY = ny;
+        this._windDirBlend01 = 0.0;
+      }
+
+      // Blend progression. We use the same responsiveness knob (seconds-ish) but
+      // clamp so it can't be absurdly fast.
+      const resp = Math.max(0.05, Number(p.windDirResponsiveness) || 2.5);
+      const k = 1.0 - Math.exp(-resp * dt);
+      this._windDirBlend01 = Math.min(1.0, Math.max(0.0, this._windDirBlend01 + (1.0 - this._windDirBlend01) * k));
+
+      if (u.uPrevWindDir) u.uPrevWindDir.value.set(this._prevWindDirX, -this._prevWindDirY);
+      if (u.uTargetWindDir) u.uTargetWindDir.value.set(this._targetWindDirX, -this._targetWindDirY);
+      if (u.uWindDirBlend) u.uWindDirBlend.value = this._windDirBlend01;
     }
 
     // Wind speed smoothing (V1): asymmetric (fast gain, slow loss).
@@ -1434,6 +1525,28 @@ export class WaterEffectV2 {
     u.uWaveSpeed.value = waveSpeed;
     u.uWaveStrength.value = waveStrength;
     u.uDistortionStrengthPx.value = p.distortionStrengthPx;
+
+    // Wave breakup noise (new). If unset, fall back to legacy waveMicroNormal* params.
+    const breakupStrength = (p.waveBreakupStrength ?? p.waveMicroNormalStrength) ?? 0.0;
+    const breakupScale = (p.waveBreakupScale ?? p.waveMicroNormalScale) ?? 1.0;
+    const breakupSpeed = (p.waveBreakupSpeed ?? p.waveMicroNormalSpeed) ?? 0.0;
+    const breakupWarp = (p.waveBreakupWarp ?? p.waveMicroNormalWarp) ?? 0.0;
+    const breakupDist = (p.waveBreakupDistortionStrength ?? p.waveMicroNormalDistortionStrength) ?? 0.0;
+    const breakupSpec = (p.waveBreakupSpecularStrength ?? p.waveMicroNormalSpecularStrength) ?? 0.0;
+    if (u.uWaveBreakupStrength) u.uWaveBreakupStrength.value = breakupStrength;
+    if (u.uWaveBreakupScale) u.uWaveBreakupScale.value = breakupScale;
+    if (u.uWaveBreakupSpeed) u.uWaveBreakupSpeed.value = breakupSpeed;
+    if (u.uWaveBreakupWarp) u.uWaveBreakupWarp.value = breakupWarp;
+    if (u.uWaveBreakupDistortionStrength) u.uWaveBreakupDistortionStrength.value = breakupDist;
+    if (u.uWaveBreakupSpecularStrength) u.uWaveBreakupSpecularStrength.value = breakupSpec;
+
+    if (u.uWaveMicroNormalStrength) u.uWaveMicroNormalStrength.value = p.waveMicroNormalStrength ?? 0.0;
+    if (u.uWaveMicroNormalScale) u.uWaveMicroNormalScale.value = p.waveMicroNormalScale ?? 1.0;
+    if (u.uWaveMicroNormalSpeed) u.uWaveMicroNormalSpeed.value = p.waveMicroNormalSpeed ?? 0.0;
+    if (u.uWaveMicroNormalWarp) u.uWaveMicroNormalWarp.value = p.waveMicroNormalWarp ?? 0.0;
+    if (u.uWaveMicroNormalDistortionStrength) u.uWaveMicroNormalDistortionStrength.value = p.waveMicroNormalDistortionStrength ?? 0.0;
+    if (u.uWaveMicroNormalSpecularStrength) u.uWaveMicroNormalSpecularStrength.value = p.waveMicroNormalSpecularStrength ?? 0.0;
+
     u.uWaveWarpLargeStrength.value = p.waveWarpLargeStrength;
     u.uWaveWarpSmallStrength.value = p.waveWarpSmallStrength;
     u.uWaveWarpMicroStrength.value = p.waveWarpMicroStrength;
@@ -1451,6 +1564,12 @@ export class WaterEffectV2 {
     u.uWaveDirOffsetRad.value = (p.waveDirOffsetDeg ?? 0) * (Math.PI / 180);
     const waveAppearanceDeg = this._resolveWaveAppearanceDeg(p);
     u.uWaveAppearanceRotRad.value = waveAppearanceDeg * (Math.PI / 180);
+
+    // Patchwise wave direction field
+    u.uWaveDirFieldEnabled.value = (p.waveDirFieldEnabled === false) ? 0.0 : 1.0;
+    u.uWaveDirFieldMaxRad.value = (Number(p.waveDirFieldMaxDeg ?? 45.0) * (Math.PI / 180));
+    u.uWaveDirFieldScale.value = Number(p.waveDirFieldScale ?? 0.65);
+    u.uWaveDirFieldSpeed.value = Number(p.waveDirFieldSpeed ?? 0.35);
 
     // ── Distortion edge ───────────────────────────────────────────────────
     u.uDistortionEdgeCenter.value = p.distortionEdgeCenter;
@@ -2036,6 +2155,20 @@ export class WaterEffectV2 {
       uWaveSpeed:              { value: p.waveSpeed },
       uWaveStrength:           { value: p.waveStrength },
       uDistortionStrengthPx:   { value: p.distortionStrengthPx },
+
+      uWaveBreakupStrength: { value: (p.waveBreakupStrength ?? p.waveMicroNormalStrength) ?? 0.0 },
+      uWaveBreakupScale:    { value: (p.waveBreakupScale ?? p.waveMicroNormalScale) ?? 1.0 },
+      uWaveBreakupSpeed:    { value: (p.waveBreakupSpeed ?? p.waveMicroNormalSpeed) ?? 0.0 },
+      uWaveBreakupWarp:     { value: (p.waveBreakupWarp ?? p.waveMicroNormalWarp) ?? 0.0 },
+      uWaveBreakupDistortionStrength: { value: (p.waveBreakupDistortionStrength ?? p.waveMicroNormalDistortionStrength) ?? 0.0 },
+      uWaveBreakupSpecularStrength:   { value: (p.waveBreakupSpecularStrength ?? p.waveMicroNormalSpecularStrength) ?? 0.0 },
+
+      uWaveMicroNormalStrength: { value: p.waveMicroNormalStrength ?? 0.0 },
+      uWaveMicroNormalScale:    { value: p.waveMicroNormalScale ?? 1.0 },
+      uWaveMicroNormalSpeed:    { value: p.waveMicroNormalSpeed ?? 0.0 },
+      uWaveMicroNormalWarp:     { value: p.waveMicroNormalWarp ?? 0.0 },
+      uWaveMicroNormalDistortionStrength: { value: p.waveMicroNormalDistortionStrength ?? 0.0 },
+      uWaveMicroNormalSpecularStrength:   { value: p.waveMicroNormalSpecularStrength ?? 0.0 },
       uWaveWarpLargeStrength:  { value: p.waveWarpLargeStrength },
       uWaveWarpSmallStrength:  { value: p.waveWarpSmallStrength },
       uWaveWarpMicroStrength:  { value: p.waveWarpMicroStrength },
@@ -2109,12 +2242,21 @@ export class WaterEffectV2 {
 
       // Wind
       uWindDir:      { value: new THREE.Vector2(1, 0) },
+      uPrevWindDir:  { value: new THREE.Vector2(1, 0) },
+      uTargetWindDir:{ value: new THREE.Vector2(1, 0) },
+      uWindDirBlend: { value: 1.0 },
       uWindSpeed:    { value: 0.0 },
       uWindOffsetUv: { value: new THREE.Vector2(0, 0) },
       uWindTime:     { value: 0.0 },
       uLockWaveTravelToWind: { value: p.lockWaveTravelToWind ? 1.0 : 0.0 },
       uWaveDirOffsetRad:     { value: 0.0 },
       uWaveAppearanceRotRad: { value: 0.0 },
+
+      // Patchwise wave direction field
+      uWaveDirFieldEnabled: { value: (p.waveDirFieldEnabled === false) ? 0.0 : 1.0 },
+      uWaveDirFieldMaxRad: { value: (Number(p.waveDirFieldMaxDeg ?? 45.0) * (Math.PI / 180)) },
+      uWaveDirFieldScale: { value: Number(p.waveDirFieldScale ?? 0.65) },
+      uWaveDirFieldSpeed: { value: Number(p.waveDirFieldSpeed ?? 0.35) },
 
       // Specular (GGX)
       uSpecStrength:        { value: p.specStrength },

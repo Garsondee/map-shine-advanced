@@ -157,6 +157,9 @@ uniform float uRainMaxCombinedStrengthPx;
 
 // ── Wind ─────────────────────────────────────────────────────────────────
 uniform vec2 uWindDir;
+uniform vec2 uPrevWindDir;
+uniform vec2 uTargetWindDir;
+uniform float uWindDirBlend;
 uniform float uWindSpeed;
 uniform vec2 uWindOffsetUv;
 uniform float uWindTime;
@@ -655,9 +658,9 @@ void addWave(vec2 p, vec2 dir, float k, float amp, float sharpness, float omega,
   gSceneUv += amp * d * (k * dir) * uWaveScale * bunch;
 }
 
-vec3 calculateWave(vec2 sceneUv, float t, float motion01) {
+vec3 calculateWaveForWind(vec2 sceneUv, float t, float motion01, vec2 windDirInput) {
   const float TAU = 6.2831853;
-  vec2 windF = uWindDir;
+  vec2 windF = windDirInput;
   float wl = length(windF);
   windF = (wl > 1e-5) ? (windF / wl) : vec2(1.0, 0.0);
   // Keep wind in Foundry/scene UV space (Y-down), matching CloudEffectV2.
@@ -702,6 +705,19 @@ vec3 calculateWave(vec2 sceneUv, float t, float motion01) {
   addWave(chopP, rotate2D(crossWind, -0.35 + r4), k4, 0.06 * chopPulse, 3.35, (1.18 + 0.72 * sqrt(k4)), t, h, g);
 
   return vec3(h, g / max(uWaveScale, 1e-3));
+}
+
+vec3 calculateWave(vec2 sceneUv, float t, float motion01) {
+  // Dual-spectrum wind direction blending: evaluate wavefield for the previous
+  // and target wind directions and blend height + gradient.
+  // This prevents the low-frequency wave domain from “snapping” when wind rotates.
+  float s = clamp(uWindDirBlend, 0.0, 1.0);
+  if (s < 1e-4) return calculateWaveForWind(sceneUv, t, motion01, uPrevWindDir);
+  if (s > 0.9999) return calculateWaveForWind(sceneUv, t, motion01, uTargetWindDir);
+
+  vec3 a = calculateWaveForWind(sceneUv, t, motion01, uPrevWindDir);
+  vec3 b = calculateWaveForWind(sceneUv, t, motion01, uTargetWindDir);
+  return mix(a, b, s);
 }
 
 float waveHeight(vec2 sceneUv, float t, float motion01) { return calculateWave(sceneUv, t, motion01).x; }

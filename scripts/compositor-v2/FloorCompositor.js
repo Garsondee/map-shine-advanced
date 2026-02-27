@@ -49,10 +49,12 @@ import { ColorCorrectionEffectV2 } from './effects/ColorCorrectionEffectV2.js';
 import { BloomEffectV2 } from './effects/BloomEffectV2.js';
 import { FilmGrainEffectV2 } from './effects/FilmGrainEffectV2.js';
 import { SharpenEffectV2 } from './effects/SharpenEffectV2.js';
+import { FilterEffectV2 } from './effects/FilterEffectV2.js';
 import { WaterEffectV2 } from './effects/WaterEffectV2.js';
 import { CloudEffectV2 } from './effects/CloudEffectV2.js';
 import { WeatherParticlesV2 } from './effects/WeatherParticlesV2.js';
 import { WaterSplashesEffectV2 } from './effects/WaterSplashesEffectV2.js';
+import { getCircuitBreaker } from '../core/circuit-breaker.js';
 import { OutdoorsMaskProviderV2 } from './effects/OutdoorsMaskProviderV2.js';
 import { BuildingShadowsEffectV2 } from './effects/BuildingShadowsEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
@@ -130,6 +132,15 @@ export class FloorCompositor {
     this._colorCorrectionEffect = new ColorCorrectionEffectV2();
 
     /**
+     * V2 Filter Effect: multiplicative overlay pass. Intended for ink/AO-style
+     * darkening and simple multiply tints. Runs after color correction so it can
+     * be authored in the final look space, and before bloom so darkening can
+     * suppress glow regions.
+     * @type {FilterEffectV2}
+     */
+    this._filterEffect = new FilterEffectV2();
+
+    /**
      * V2 Bloom Effect: screen-space glow via UnrealBloomPass.
      * Runs after sky color, before color correction.
      * @type {BloomEffectV2}
@@ -158,13 +169,21 @@ export class FloorCompositor {
      */
     this._cloudEffect = new CloudEffectV2();
 
+    // Circuit breaker: central, client-local effect kill-switches.
+    this._circuitBreaker = getCircuitBreaker();
+
     /**
      * V2 Water Effect: screen-space water post-processing pass driven by
      * `_Water` mask textures. Runs after lighting (refracts the lit scene),
      * before sky color grading.
      * @type {WaterEffectV2}
      */
-    this._waterEffect = new WaterEffectV2();
+    // Back-compat: preserve the previous ad-hoc flag as an alias.
+    const legacyDisableWater = (() => {
+      try { return globalThis.localStorage?.getItem?.('msa-disable-water-effect') === '1'; } catch (_) { return false; }
+    })();
+    const waterDisabled = legacyDisableWater || this._circuitBreaker.isDisabled('v2.water');
+    this._waterEffect = waterDisabled ? null : new WaterEffectV2();
 
     /**
      * V2 Water Splashes Effect: per-floor foam plume + rain splash particle
@@ -172,13 +191,13 @@ export class FloorCompositor {
      * Replaces the legacy foam bridge (WaterEffectV2 → WeatherParticles).
      * @type {WaterSplashesEffectV2}
      */
-    this._waterSplashesEffect = new WaterSplashesEffectV2(this._renderBus);
+    this._waterSplashesEffect = this._circuitBreaker.isDisabled('v2.waterSplashes') ? null : new WaterSplashesEffectV2(this._renderBus);
 
     /**
      * V2 Underwater Bubbles controls: proxy to the bubbles layer inside WaterSplashesEffectV2.
      * This exists solely for UI + persistence routing.
      */
-    this._underwaterBubblesEffect = this._waterSplashesEffect.bubbles;
+    this._underwaterBubblesEffect = this._waterSplashesEffect ? this._waterSplashesEffect.bubbles : null;
 
     /**
      * V2 Weather Particles: rain, snow, and ash particles.
@@ -187,7 +206,7 @@ export class FloorCompositor {
      * each frame so weather state is live in V2.
      * @type {WeatherParticlesV2}
      */
-    this._weatherParticles = new WeatherParticlesV2();
+    this._weatherParticles = this._circuitBreaker.isDisabled('v2.weatherParticles') ? null : new WeatherParticlesV2();
 
     /**
      * V2 Outdoors mask provider: discovers _Outdoors tiles per floor, composites
@@ -195,7 +214,7 @@ export class FloorCompositor {
      * water indoor damping, weather particle roof gating).
      * @type {OutdoorsMaskProviderV2}
      */
-    this._outdoorsMask = new OutdoorsMaskProviderV2();
+    this._outdoorsMask = this._circuitBreaker.isDisabled('v2.outdoorsMask') ? null : new OutdoorsMaskProviderV2();
 
     /**
      * V2 Building Shadows Effect: bakes a greyscale shadow-factor texture from the
@@ -203,7 +222,7 @@ export class FloorCompositor {
      * as `tBuildingShadow`.
      * @type {BuildingShadowsEffectV2}
      */
-    this._buildingShadowEffect = new BuildingShadowsEffectV2();
+    this._buildingShadowEffect = this._circuitBreaker.isDisabled('v2.buildingShadows') ? null : new BuildingShadowsEffectV2();
 
     /** @type {boolean} Whether the render bus has been populated this session. */
     this._busPopulated = false;
@@ -349,9 +368,13 @@ export class FloorCompositor {
     // Cloud effect needs the bus scene and main camera for the overhead blocker pass.
     this._cloudEffect.initialize(this.renderer, this._renderBus._scene, this.camera);
     // Water splashes: own BatchedRenderer added via addEffectOverlay.
-    this._waterSplashesEffect.initialize();
+    try { this._waterSplashesEffect?.initialize?.(); } catch (err) {
+      log.warn('FloorCompositor: WaterSplashesEffectV2 initialize failed:', err);
+    }
     // Weather particles live in the bus scene so they render in the same pass as tiles.
-    this._weatherParticles.initialize(this._renderBus._scene);
+    try { this._weatherParticles?.initialize?.(this._renderBus._scene); } catch (err) {
+      log.warn('FloorCompositor: WeatherParticlesV2 initialize failed:', err);
+    }
 
     // Subscribe outdoors mask consumers so they receive the texture as soon as
     // populate() builds it, and again on every floor change.
@@ -359,33 +382,42 @@ export class FloorCompositor {
     // We set both the legacy single-texture path (setOutdoorsMask, which is the one
     // actually sampled since V2 has no floorIdTarget) AND the per-floor array so the
     // multi-floor path is ready if a floorIdTexture is ever wired up.
-    this._outdoorsMask.subscribe((tex) => {
-      try {
-        this._cloudEffect.setOutdoorsMask(tex);
-        this._cloudEffect.setOutdoorsMasks(this._outdoorsMask.getFloorTextureArray(4));
-      } catch (_) {}
-    });
-    // WaterEffectV2: wave/rain indoor damping.
-    this._outdoorsMask.subscribe((tex) => {
-      try { this._waterEffect.setOutdoorsMask(tex); } catch (_) {}
-    });
-    // WeatherController: particle foam fleck roof gating (roofMap CPU readback).
-    this._outdoorsMask.subscribe((tex) => {
-      try { if (weatherController?.initialized) weatherController.setRoofMap(tex ?? null); } catch (_) {}
-    });
+    if (this._outdoorsMask) {
+      this._outdoorsMask.subscribe((tex) => {
+        try {
+          this._cloudEffect.setOutdoorsMask(tex);
+          this._cloudEffect.setOutdoorsMasks(this._outdoorsMask.getFloorTextureArray(4));
+        } catch (_) {}
+      });
+      // WaterEffectV2: wave/rain indoor damping.
+      this._outdoorsMask.subscribe((tex) => {
+        try { this._waterEffect?.setOutdoorsMask?.(tex); } catch (_) {}
+      });
+      // WeatherController: particle foam fleck roof gating (roofMap CPU readback).
+      this._outdoorsMask.subscribe((tex) => {
+        try { if (weatherController?.initialized) weatherController.setRoofMap(tex ?? null); } catch (_) {}
+      });
+    }
 
     this._lightingEffect.initialize(w, h);
     this._skyColorEffect.initialize();
     this._colorCorrectionEffect.initialize();
+    this._filterEffect.initialize();
     this._bloomEffect.initialize(w, h);
     this._filmGrainEffect.initialize();
     this._sharpenEffect.initialize();
-    this._waterEffect.initialize();
-    this._buildingShadowEffect.initialize(this.renderer);
+    if (this._waterEffect) {
+      this._waterEffect.initialize();
+    } else {
+      log.warn('FloorCompositor: WaterEffectV2 disabled via localStorage (msa-disable-water-effect=1)');
+    }
+    try { this._buildingShadowEffect?.initialize?.(this.renderer); } catch (err) {
+      log.warn('FloorCompositor: BuildingShadowsEffectV2 initialize failed:', err);
+    }
     // Register the outdoors mask provider so building shadows can union-composite
     // per-floor canvases. The provider fires the callback immediately (even if not
     // yet populated) so the effect sets up its subscription before populate() runs.
-    this._buildingShadowEffect.setOutdoorsMaskProvider(this._outdoorsMask);
+    try { this._buildingShadowEffect?.setOutdoorsMaskProvider?.(this._outdoorsMask); } catch (_) {}
 
     // Listen for floor/level changes so we can update tile mesh visibility.
     this._levelHookId = Hooks.on('mapShineLevelContextChanged', (payload) => {
@@ -474,21 +506,27 @@ export class FloorCompositor {
           log.error('WindowLightEffectV2 populate failed:', err);
         });
         // Populate water mask discovery + SDF building.
-        this._waterEffect.populate(sc.foundrySceneData).then(() => {
-          this._applyCurrentFloorVisibility();
-        }).catch(err => {
-          log.error('WaterEffectV2 populate failed:', err);
-        });
+        if (this._waterEffect) {
+          this._waterEffect.populate(sc.foundrySceneData).then(() => {
+            this._applyCurrentFloorVisibility();
+          }).catch(err => {
+            log.error('WaterEffectV2 populate failed:', err);
+          });
+        }
         // Populate water splash particle systems from _Water masks.
-        this._waterSplashesEffect.populate(sc.foundrySceneData).then(() => {
-          this._applyCurrentFloorVisibility();
-        }).catch(err => {
-          log.error('WaterSplashesEffectV2 populate failed:', err);
-        });
+        if (this._waterSplashesEffect) {
+          this._waterSplashesEffect.populate(sc.foundrySceneData).then(() => {
+            this._applyCurrentFloorVisibility();
+          }).catch(err => {
+            log.error('WaterSplashesEffectV2 populate failed:', err);
+          });
+        }
         // Populate outdoors mask (discovers _Outdoors tiles, notifies all consumers).
-        this._outdoorsMask.populate(sc.foundrySceneData).catch(err => {
-          log.error('OutdoorsMaskProviderV2 populate failed:', err);
-        });
+        if (this._outdoorsMask) {
+          this._outdoorsMask.populate(sc.foundrySceneData).catch(err => {
+            log.error('OutdoorsMaskProviderV2 populate failed:', err);
+          });
+        }
       } else {
         log.warn('FloorCompositor.render: no sceneComposer available for populate');
       }
@@ -525,7 +563,7 @@ export class FloorCompositor {
         log.warn('FireEffectV2 update threw, skipping frame:', err);
       }
       try {
-        this._waterSplashesEffect.update(timeInfo);
+        this._waterSplashesEffect?.update?.(timeInfo);
       } catch (err) {
         log.warn('WaterSplashesEffectV2 update threw, skipping frame:', err);
       }
@@ -534,16 +572,23 @@ export class FloorCompositor {
       this._lightingEffect.update(timeInfo);
       // Weather particles must update BEFORE the bus render so their BatchedRenderer
       // positions are current when the bus scene is drawn this frame.
-      this._weatherParticles.update(timeInfo);
-      this._waterEffect.update(timeInfo);
+      try { this._weatherParticles?.update?.(timeInfo); } catch (err) {
+        log.warn('WeatherParticlesV2 update threw, skipping weather update:', err);
+      }
+      try { this._waterEffect?.update?.(timeInfo); } catch (err) {
+        log.warn('WaterEffectV2 update threw, skipping water update:', err);
+      }
       this._skyColorEffect.update(timeInfo);
       this._colorCorrectionEffect.update(timeInfo);
+      this._filterEffect.update(timeInfo);
       this._bloomEffect.update(timeInfo);
       this._filmGrainEffect.update(timeInfo);
       this._sharpenEffect.update(timeInfo);
       // Building shadows: update sun direction + bake hash. Must run after
       // sky color so sun angles are current before being fed to the shadow effect.
-      this._buildingShadowEffect.update(timeInfo);
+      try { this._buildingShadowEffect?.update?.(timeInfo); } catch (err) {
+        log.warn('BuildingShadowsEffectV2 update threw, skipping building shadow update:', err);
+      }
     }
 
     // ── Bind per-frame textures and camera to effects ────────────────────────
@@ -554,7 +599,7 @@ export class FloorCompositor {
     try {
       const sky = this._skyColorEffect;
       if (sky && typeof sky.currentSunAzimuthDeg === 'number') {
-        this._buildingShadowEffect.setSunAngles(
+        this._buildingShadowEffect?.setSunAngles?.(
           sky.currentSunAzimuthDeg,
           sky.currentSunElevationDeg ?? 45
         );
@@ -562,7 +607,9 @@ export class FloorCompositor {
     } catch (_) {}
 
     // Bake building shadow map if needed (triggered by sun change or floor change).
-    this._buildingShadowEffect.render(this.renderer);
+    try { this._buildingShadowEffect?.render?.(this.renderer); } catch (err) {
+      log.warn('BuildingShadowsEffectV2 render threw, skipping shadow bake:', err);
+    }
 
     // ── Step 1: Render bus scene → sceneRT ───────────────────────────────
     // The bus scene contains albedo tiles + specular/fire overlays.
@@ -592,14 +639,14 @@ export class FloorCompositor {
       ? this._windowLightEffect._scene : null;
     const cloudShadowTex = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
       ? this._cloudEffect.cloudShadowTexture : null;
-    const buildingShadowTex = (this._buildingShadowEffect.params.enabled)
+    const buildingShadowTex = (this._buildingShadowEffect?.params?.enabled)
       ? this._buildingShadowEffect.shadowFactorTexture : null;
     this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, buildingShadowTex);
 
     // Feed live cloud shadow into WaterEffectV2 so caustics/specular are
     // correctly suppressed under cloud cover. Must be set before water renders.
     // cloudShadowTex is already a THREE.Texture|null from the getter.
-    try { this._waterEffect.setCloudShadowTexture(cloudShadowTex ?? null); } catch (_) {}
+    try { this._waterEffect?.setCloudShadowTexture?.(cloudShadowTex ?? null); } catch (_) {}
     currentInput = this._postA;
 
     // Sky color grading pass (time-of-day atmospheric grading). Ping-pongs.
@@ -615,6 +662,14 @@ export class FloorCompositor {
       const ccOutput = (currentInput === this._postA) ? this._postB : this._postA;
       this._colorCorrectionEffect.render(this.renderer, currentInput, ccOutput);
       currentInput = ccOutput;
+    }
+
+    // Filter pass: multiplicative overlay (ink AO / multiply tint). Runs after
+    // color correction and before water/bloom.
+    if (this._filterEffect.enabled && this._filterEffect.params.enabled) {
+      const fOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      this._filterEffect.render(this.renderer, currentInput, fOutput);
+      currentInput = fOutput;
     }
 
     // Feed sky state into water (specular tint + live sun direction) after sky+CC have updated.
@@ -639,7 +694,7 @@ export class FloorCompositor {
     // Water pass: refracts/tints/specular the fully graded scene.
     // Occlusion is handled via a deterministic occluder mask (upper floor tiles)
     // plus depth pass fallback inside the shader.
-    if (this._waterEffect.enabled) {
+    if (this._waterEffect?.enabled) {
       // Build occluder mask for the *currently viewed* floor.
       // If on floor 0, no occluder needed.
       let occluderRT = null;
@@ -821,20 +876,20 @@ export class FloorCompositor {
     // Notify fire effect of floor change so it can swap active particle systems.
     this._fireEffect.onFloorChange(maxFloorIndex);
     // Notify water splashes of floor change so it can swap active systems.
-    this._waterSplashesEffect.onFloorChange(maxFloorIndex);
+    try { this._waterSplashesEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Update window light overlay visibility (isolated scene, not bus-managed).
     this._windowLightEffect.onFloorChange(maxFloorIndex);
     // Cloud effect: blocker pass is automatically floor-isolated via bus visibility;
     // no extra state needed, but notify for any future floor-aware work.
     this._cloudEffect.onFloorChange(maxFloorIndex);
     // Weather particles are global (rain falls on all visible floors); no-op.
-    this._weatherParticles.onFloorChange(maxFloorIndex);
+    try { this._weatherParticles?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Swap active outdoors mask for the new floor (notifies all consumers).
-    this._outdoorsMask.onFloorChange(maxFloorIndex);
+    try { this._outdoorsMask?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Swap active water SDF data for the new floor.
-    this._waterEffect.onFloorChange(maxFloorIndex);
+    try { this._waterEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Building shadows: rebuild union mask for the new floor set.
-    this._buildingShadowEffect.onFloorChange(maxFloorIndex);
+    try { this._buildingShadowEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     log.info(`FloorCompositor: visibility set to floors 0–${maxFloorIndex}`);
   }
 
@@ -853,7 +908,7 @@ export class FloorCompositor {
     this._cloudEffect.onResize(w, h);
     this._lightingEffect.onResize(w, h);
     this._bloomEffect.onResize(w, h);
-    this._weatherParticles.onResize(w, h);
+    try { this._weatherParticles?.onResize?.(w, h); } catch (_) {}
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);
   }
 
@@ -864,11 +919,11 @@ export class FloorCompositor {
    */
   dispose() {
     try { this._cloudEffect.dispose(); } catch (_) {}
-    try { this._waterSplashesEffect.dispose(); } catch (_) {}
-    try { this._weatherParticles.dispose(); } catch (_) {}
-    try { this._outdoorsMask.dispose(); } catch (_) {}
-    try { this._buildingShadowEffect.dispose(); } catch (_) {}
-    try { this._waterEffect.dispose(); } catch (_) {}
+    try { this._waterSplashesEffect?.dispose?.(); } catch (_) {}
+    try { this._weatherParticles?.dispose?.(); } catch (_) {}
+    try { this._outdoorsMask?.dispose?.(); } catch (_) {}
+    try { this._buildingShadowEffect?.dispose?.(); } catch (_) {}
+    try { this._waterEffect?.dispose?.(); } catch (_) {}
     try { this._sharpenEffect.dispose(); } catch (_) {}
     try { this._filmGrainEffect.dispose(); } catch (_) {}
     try { this._bloomEffect.dispose(); } catch (_) {}

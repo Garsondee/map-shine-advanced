@@ -115,7 +115,20 @@ export class TileManager {
     /** @type {Map<string, THREE.Texture>} */
     this.textureCache = new Map();
 
+    /** @type {THREE.DataTexture|null} */
+    this._bypassTextureLoadingPlaceholder = null;
+
     this._texturePromises = new Map();
+
+    // Tile albedo textures can be very large (4K-8K) and decode/upload can stall
+    // the main thread or GPU driver. Loading too many tiles concurrently can
+    // create a feedback loop: event loop stalls → timeouts → retries/fallbacks →
+    // even more pressure. Cap concurrent tile texture pipelines.
+    this._tileTextureLoad = {
+      maxConcurrent: 6,
+      inFlight: 0,
+      queue: []
+    };
 
     this._tileWaterMaskCache = new Map();
     this._tileWaterMaskPromises = new Map();
@@ -262,6 +275,29 @@ export class TileManager {
     this._maxAnisotropy = null;
     
     log.debug('TileManager created');
+  }
+
+  async _acquireTileTextureLoadSlot() {
+    const lane = this._tileTextureLoad;
+    if (!lane) return;
+    if (lane.inFlight < lane.maxConcurrent) {
+      lane.inFlight++;
+      return;
+    }
+    await new Promise((resolve) => {
+      lane.queue.push(resolve);
+    });
+    lane.inFlight++;
+  }
+
+  _releaseTileTextureLoadSlot() {
+    const lane = this._tileTextureLoad;
+    if (!lane) return;
+    lane.inFlight = Math.max(0, (lane.inFlight || 0) - 1);
+    const next = lane.queue.shift();
+    if (next) {
+      try { next(); } catch (_) {}
+    }
   }
 
   setFluidEffect(fluidEffect) {
@@ -4428,6 +4464,37 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
    * @returns {Promise<THREE.Texture>}
    */
   async loadTileTexture(texturePath, options = {}) {
+    // A/B test kill-switch: bypass Map Shine tile texture loading entirely.
+    // This isolates Foundry/PIXI load stalls from our own fetch/decode/upload pipeline.
+    try {
+      if (globalThis?.localStorage?.getItem('msa-disable-texture-loading') === '1') {
+        const THREE = window.THREE;
+        if (!THREE) throw new Error('THREE.js not available');
+
+        if (!this._bypassTextureLoadingPlaceholder) {
+          const data = new Uint8Array([255, 255, 255, 255]);
+          const tex = new THREE.DataTexture(data, 1, 1);
+          tex.needsUpdate = true;
+          tex.generateMipmaps = false;
+          tex.minFilter = THREE.NearestFilter;
+          tex.magFilter = THREE.NearestFilter;
+          tex.wrapS = THREE.ClampToEdgeWrapping;
+          tex.wrapT = THREE.ClampToEdgeWrapping;
+          this._bypassTextureLoadingPlaceholder = tex;
+        }
+
+        const role = options?.role || 'ALBEDO';
+        const tex = this._bypassTextureLoadingPlaceholder;
+        try {
+          tex.flipY = (role === 'DATA_MASK') ? false : true;
+          tex.colorSpace = (role === 'DATA_MASK') ? THREE.NoColorSpace : THREE.SRGBColorSpace;
+        } catch (_) {
+        }
+        return tex;
+      }
+    } catch (_) {
+    }
+
     if (this.textureCache.has(texturePath)) {
       const cached = this.textureCache.get(texturePath);
       this._normalizeTileTextureSource(cached, options?.role || 'ALBEDO');
@@ -4444,14 +4511,93 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
       const role = options?.role || 'ALBEDO';
       const _shortPath = texturePath.split('/').pop() || texturePath;
-      // 120s timeout: shader compilation via gl.finish() can block the event loop for
-      // 25-50+ seconds on GPUs without KHR_parallel_shader_compile (ANGLE/D3D11).
-      // During that stall, both the fetch completion callback and this setTimeout are
-      // queued as macrotasks. If the timeout is shorter than the compile stall, the
-      // timeout wins Promise.race and rejects even though the fetch already succeeded.
-      const TILE_FETCH_TIMEOUT_MS = 120000;
+
+      // ── PIXI cache fast-path ──────────────────────────────────────────────
+      // Foundry uses PIXI.Assets to pre-load all tile textures before the scene
+      // is drawn. If the tile is already in PIXI's cache, we can extract its
+      // pixel data directly without any network request.
+      //
+      // This is critical when the server connection drops during load — the raw
+      // fetch() path would time out after 15s per tile, but PIXI already has the
+      // decoded image data in memory from when Foundry rendered the PIXI canvas.
+      //
+      // We use Foundry's own loadTexture() which checks PIXI.Assets cache first
+      // and only falls back to a network request if the texture isn't cached.
+      // The same approach is used by scripts/assets/loader.js:loadTextureAsync.
+      try {
+        const loadTextureFn = globalThis.foundry?.canvas?.loadTexture ?? globalThis.loadTexture;
+        if (loadTextureFn) {
+          // Normalize to absolute path the same way loader.js does
+          const absolutePath = texturePath.startsWith('http') || texturePath.startsWith('/')
+            ? texturePath
+            : `/${texturePath}`;
+          const pixiTexture = await loadTextureFn(absolutePath);
+          if (pixiTexture?.baseTexture?.resource?.source) {
+            const resource = pixiTexture.baseTexture.resource;
+            let texSource = resource.source;
+            // Copy to a stable canvas so THREE upload is not affected by PIXI
+            // later invalidating or reusing the source image/bitmap element.
+            try {
+              const w = Number(texSource?.naturalWidth ?? texSource?.width ?? 0);
+              const h = Number(texSource?.naturalHeight ?? texSource?.height ?? 0);
+              if (w > 0 && h > 0) {
+                const canvasEl = document.createElement('canvas');
+                canvasEl.width = w;
+                canvasEl.height = h;
+                const ctx = canvasEl.getContext('2d', { willReadFrequently: false });
+                if (ctx) {
+                  ctx.drawImage(texSource, 0, 0, w, h);
+                  texSource = canvasEl;
+                }
+              }
+            } catch (_) {}
+            const texture = new THREE.Texture(texSource);
+            texture.flipY = (role === 'DATA_MASK') ? false : true;
+            texture.colorSpace = (role === 'DATA_MASK') ? THREE.NoColorSpace : THREE.SRGBColorSpace;
+            this._configureTileTextureFiltering(texture, role);
+            this._normalizeTileTextureSource(texture, role);
+            texture.needsUpdate = true;
+            this.textureCache.set(texturePath, texture);
+            debugLoadingProfiler.event(`tile.PIXI_CACHE HIT: ${_shortPath}`);
+            return texture;
+          }
+        }
+      } catch (_pixiErr) {
+        // PIXI cache miss or extraction failed — fall through to fetch pipeline
+        debugLoadingProfiler.event(`tile.PIXI_CACHE MISS: ${_shortPath} — ${_pixiErr?.message ?? _pixiErr}`);
+      }
+
+      // ── Fetch/decode pipeline (network) ───────────────────────────────────
+      // Concurrency limiter: ensures large scenes don't start N simultaneous
+      // decode/upload pipelines which can wedge the browser/GPU.
+      await this._acquireTileTextureLoadSlot();
+      try {
+      // 15s timeout per stage. V2 pre-compiles shaders during loading, so the old
+      // 120s allowance for synchronous gl.finish() stalls is no longer needed.
+      // 15s is generous for any normal network fetch + image decode and prevents
+      // cascading multi-minute stalls when the server connection drops (the old
+      // 120s × N tiles could block createThreeCanvas for 12+ minutes).
+      const TILE_FETCH_TIMEOUT_MS = 15000;
+      const TILE_NETWORK_TIMEOUT_MS = 15000;
+      const TILE_DECODE_TIMEOUT_MS = 15000;
       const _dlp = debugLoadingProfiler;
       const _ev = (msg, lvl) => { _dlp.event(msg, lvl); };
+
+      const _withTimeout = async (p, timeoutMs, onTimeout) => {
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return await p;
+        let timeoutId = null;
+        try {
+          const timeoutP = new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+              try { onTimeout?.(); } catch (_) {}
+              reject(new Error(`timed out after ${timeoutMs}ms`));
+            }, timeoutMs);
+          });
+          return await Promise.race([p, timeoutP]);
+        } finally {
+          if (timeoutId) clearTimeout(timeoutId);
+        }
+      };
 
       // Prefer createImageBitmap for faster/off-thread decoding where supported.
       // Fallback to THREE.TextureLoader when unavailable.
@@ -4461,20 +4607,56 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       const canUseFetchPath = !disableImageBitmapTiles && typeof fetch === 'function' && typeof createImageBitmap === 'function';
 
       if (canUseFetchPath) {
-        // Use Promise.race with a hard timeout — this is INESCAPABLE.
-        // AbortController doesn't reliably abort in-progress .blob() body downloads
-        // in all browsers. The body continues streaming for 56+ seconds despite abort().
-        // Promise.race guarantees the timeout fires regardless of event loop health.
         const controller = new AbortController();
         _ev(`tile.fetch START: ${_shortPath}`);
 
         const fetchPipeline = (async () => {
-          const res = await fetch(texturePath, { signal: controller.signal });
+          let stage = 'network';
+
+          let res;
+          let blob;
+          try {
+            res = await _withTimeout(
+              fetch(texturePath, { signal: controller.signal }),
+              TILE_NETWORK_TIMEOUT_MS,
+              () => {
+                stage = 'network';
+                _ev(`tile.NETWORK TIMEOUT: ${_shortPath} — aborting after ${TILE_NETWORK_TIMEOUT_MS}ms`, 'warn');
+                controller.abort();
+              }
+            );
+          } catch (err) {
+            const msg = String(err?.message ?? '');
+            if (msg.includes('timed out')) {
+              throw new Error(`Tile texture network fetch timed out after ${TILE_NETWORK_TIMEOUT_MS}ms: ${_shortPath}`);
+            }
+            throw err;
+          }
+
           _ev(`tile.fetch headers OK: ${_shortPath} (status=${res.status})`);
           if (!res.ok) throw new Error(`Failed to fetch texture (${res.status})`);
-          const blob = await res.blob();
+
+          try {
+            blob = await _withTimeout(
+              res.blob(),
+              TILE_NETWORK_TIMEOUT_MS,
+              () => {
+                stage = 'network-body';
+                _ev(`tile.NETWORK BODY TIMEOUT: ${_shortPath} — aborting after ${TILE_NETWORK_TIMEOUT_MS}ms`, 'warn');
+                controller.abort();
+              }
+            );
+          } catch (err) {
+            const msg = String(err?.message ?? '');
+            if (msg.includes('timed out')) {
+              throw new Error(`Tile texture download timed out after ${TILE_NETWORK_TIMEOUT_MS}ms: ${_shortPath}`);
+            }
+            throw err;
+          }
+
           _ev(`tile.fetch body OK: ${_shortPath} (${blob.size} bytes)`);
 
+          stage = 'decode';
           _ev(`tile.decode START: ${_shortPath}`);
           // Keep tile textures in the same orientation as THREE.TextureLoader
           // so sprite UVs remain consistent across browsers.
@@ -4486,12 +4668,33 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           // so premultiplied data would produce darker/greyer edges than intended.
           let bitmap = null;
           try {
-            bitmap = await createImageBitmap(blob, { imageOrientation: 'none', premultiplyAlpha: 'none' });
+            bitmap = await _withTimeout(
+              createImageBitmap(blob, { imageOrientation: 'none', premultiplyAlpha: 'none' }),
+              TILE_DECODE_TIMEOUT_MS,
+              () => {
+                stage = 'decode';
+                _ev(`tile.DECODE TIMEOUT: ${_shortPath} (${TILE_DECODE_TIMEOUT_MS}ms)`, 'warn');
+              }
+            );
           } catch (_) {
             try {
-              bitmap = await createImageBitmap(blob, { premultiplyAlpha: 'none' });
+              bitmap = await _withTimeout(
+                createImageBitmap(blob, { premultiplyAlpha: 'none' }),
+                TILE_DECODE_TIMEOUT_MS,
+                () => {
+                  stage = 'decode';
+                  _ev(`tile.DECODE TIMEOUT: ${_shortPath} (${TILE_DECODE_TIMEOUT_MS}ms)`, 'warn');
+                }
+              );
             } catch (_2) {
-              bitmap = await createImageBitmap(blob);
+              bitmap = await _withTimeout(
+                createImageBitmap(blob),
+                TILE_DECODE_TIMEOUT_MS,
+                () => {
+                  stage = 'decode';
+                  _ev(`tile.DECODE TIMEOUT: ${_shortPath} (${TILE_DECODE_TIMEOUT_MS}ms)`, 'warn');
+                }
+              );
             }
           }
           _ev(`tile.decode OK: ${_shortPath} (${bitmap.width}x${bitmap.height})`);
@@ -4513,9 +4716,16 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
               const newH = Math.max(1, Math.round(origH * scale));
               _ev(`tile.downscale: ${_shortPath} ${origW}x${origH} → ${newW}x${newH}`);
               try {
-                const resized = await createImageBitmap(bitmap, 0, 0, origW, origH, {
-                  resizeWidth: newW, resizeHeight: newH, resizeQuality: 'medium'
-                });
+                const resized = await _withTimeout(
+                  createImageBitmap(bitmap, 0, 0, origW, origH, {
+                    resizeWidth: newW, resizeHeight: newH, resizeQuality: 'medium'
+                  }),
+                  TILE_DECODE_TIMEOUT_MS,
+                  () => {
+                    stage = 'decode-resize';
+                    _ev(`tile.DECODE RESIZE TIMEOUT: ${_shortPath} (${TILE_DECODE_TIMEOUT_MS}ms)`, 'warn');
+                  }
+                );
                 bitmap.close();
                 srcBitmap = resized;
               } catch (_resizeErr) {
@@ -4574,29 +4784,31 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           return texture;
         })();
 
-        const timeoutRejection = new Promise((_, reject) => {
-          setTimeout(() => {
-            _ev(`tile.TIMEOUT: ${_shortPath} — aborting after ${TILE_FETCH_TIMEOUT_MS}ms`, 'warn');
-            controller.abort(); // Also kill the underlying network request
-            reject(new Error(`Tile texture fetch timed out after ${TILE_FETCH_TIMEOUT_MS}ms: ${_shortPath}`));
-          }, TILE_FETCH_TIMEOUT_MS);
-        });
-
-        // Promise.race: whichever settles first wins. The timeout rejection is
-        // inescapable — it doesn't depend on AbortController or event loop health.
         try {
-          return await Promise.race([fetchPipeline, timeoutRejection]);
+          // Keep a coarse overall timeout as a safety net, but report it clearly
+          // as an overall pipeline stall, not a "fetch timed out".
+          return await _withTimeout(
+            fetchPipeline,
+            TILE_FETCH_TIMEOUT_MS,
+            () => {
+              _ev(`tile.PIPELINE TIMEOUT: ${_shortPath} — aborting after ${TILE_FETCH_TIMEOUT_MS}ms`, 'warn');
+              controller.abort();
+            }
+          );
         } catch (err) {
-          // If it was our timeout or an abort, do NOT fall through to TextureLoader
-          // (which would create a second stuck request on the same URL).
-          const isTimeout = err?.message?.includes('timed out');
-          const isAbort = err?.name === 'AbortError';
-          if (isTimeout || isAbort) {
-            _ev(`tile.FAILED (timeout/abort): ${_shortPath}`, 'error');
+          const msg = String(err?.message ?? '');
+          const isTimeout = msg.includes('timed out');
+          const isAbort = err?.name === 'AbortError' || msg.includes('aborted');
+          if (isTimeout) {
+            _ev(`tile.FAILED (pipeline timeout): ${_shortPath}`, 'error');
+            throw new Error(`Tile texture pipeline timed out after ${TILE_FETCH_TIMEOUT_MS}ms: ${_shortPath}`);
+          }
+          if (isAbort) {
+            _ev(`tile.FAILED (abort): ${_shortPath}`, 'error');
             throw err;
           }
           // Non-timeout error (e.g. createImageBitmap unsupported) — fall through
-          _ev(`tile.fetch error (falling back to TextureLoader): ${_shortPath} — ${err?.message}`, 'warn');
+          _ev(`tile.fetch/decode error (falling back to TextureLoader): ${_shortPath} — ${msg}`, 'warn');
         }
       }
 
@@ -4608,47 +4820,46 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           _ev(`tile.TextureLoader TIMEOUT: ${_shortPath} (${TILE_FETCH_TIMEOUT_MS}ms)`, 'warn');
           reject(new Error(`TextureLoader timed out after ${TILE_FETCH_TIMEOUT_MS}ms: ${_shortPath}`));
         }, TILE_FETCH_TIMEOUT_MS);
+
         this.textureLoader.load(
           texturePath,
           (texture) => {
             clearTimeout(fallbackTimeout);
-            _ev(`tile.TextureLoader OK: ${_shortPath}`);
-            texture.colorSpace = (role === 'DATA_MASK') ? THREE.NoColorSpace : THREE.SRGBColorSpace;
-            texture.flipY = (role === 'DATA_MASK') ? false : true;
-            this._configureTileTextureFiltering(texture, role);
-            this._normalizeTileTextureSource(texture, role);
-            texture.needsUpdate = true;
-            this.textureCache.set(texturePath, texture);
-            // P5-05: Register with budget tracker (TextureLoader fallback path).
-            const _img = texture.image;
-            const _tw2 = _img?.width || _img?.naturalWidth || 0;
-            const _th2 = _img?.height || _img?.naturalHeight || 0;
-            if (_tw2 > 0 && _th2 > 0) {
-              getTextureBudgetTracker().register(
-                texture,
-                `tile:${_shortPath}`,
-                estimateTextureBytes(_tw2, _th2, 'ubyte'),
-                { source: 'tileMask' }
-              );
+            try {
+              if (texture) {
+                texture.colorSpace = (role === 'DATA_MASK') ? THREE.NoColorSpace : THREE.SRGBColorSpace;
+                texture.flipY = (role === 'DATA_MASK') ? false : true;
+                this._configureTileTextureFiltering(texture, role);
+                this._normalizeTileTextureSource(texture, role);
+                texture.needsUpdate = true;
+                this.textureCache.set(texturePath, texture);
+              }
+            } catch (_) {
             }
+            _ev(`tile.TextureLoader OK: ${_shortPath}`);
             resolve(texture);
           },
           undefined,
-          (err) => {
+          (error) => {
             clearTimeout(fallbackTimeout);
-            _ev(`tile.TextureLoader FAILED: ${_shortPath} — ${err?.message}`, 'error');
-            reject(err);
+            _ev(`tile.TextureLoader FAILED: ${_shortPath} — ${error?.message || 'unknown'}`, 'error');
+            reject(error);
           }
         );
       });
-    })();
-
-    this._texturePromises.set(texturePath, promise);
-    try {
-      return await promise;
     } finally {
-      this._texturePromises.delete(texturePath);
+      this._releaseTileTextureLoadSlot();
     }
+  })();
+
+  this._texturePromises.set(texturePath, promise);
+  try {
+    const tex = await promise;
+    return tex;
+  } finally {
+    this._texturePromises.delete(texturePath);
+  }
+
   }
 
   /**

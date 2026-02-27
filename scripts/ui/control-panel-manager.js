@@ -65,7 +65,9 @@ export class ControlPanelManager {
       directedPresetId: 'Clear (Dry)',
       directedTransitionMinutes: 5.0,
       // Wind controls
-      windSpeed: 0.5,
+      // Real-world wind speed in m/s (0..MAX_WIND_MS). WeatherController will still expose
+      // a derived legacy 0..1 `windSpeed` for existing effects.
+      windSpeedMS: 39.0,
       windDirection: 180.0,
       gustiness: 'moderate', // 'calm', 'light', 'moderate', 'strong', 'extreme'
       // Tile motion transport controls (runtime state still lives in tileMotion scene flag)
@@ -388,12 +390,19 @@ export class ControlPanelManager {
   _formatWeatherLine(state) {
     if (!state) return '—';
     const pct = (v) => `${Math.round((Number(v) || 0) * 100)}%`;
+    const windMS = (() => {
+      const ms = Number(state.windSpeedMS);
+      if (Number.isFinite(ms)) return Math.max(0.0, Math.min(78.0, ms));
+      const legacy01 = Number(state.windSpeed);
+      if (Number.isFinite(legacy01)) return Math.max(0.0, Math.min(78.0, legacy01 * 78.0));
+      return 0.0;
+    })();
     const freeze = Math.max(0, Math.min(1, Number(state.freezeLevel) || 0));
     const tempLabel = freeze > 0.75 ? 'Snow' : (freeze > 0.45 ? 'Sleet' : 'Rain');
     return [
       `Precipitation: ${pct(state.precipitation)}`,
       `Humidity (Clouds): ${pct(state.cloudCover)}`,
-      `Wind Strength: ${pct(state.windSpeed)}`,
+      `Wind Speed: ${windMS.toFixed(1)} m/s`,
       `Fog: ${pct(state.fogDensity)}`,
       `Temperature: ${Math.round(freeze * 100)}% (${tempLabel})`
     ].join('\n');
@@ -576,15 +585,22 @@ export class ControlPanelManager {
       this._windArrow.style.transform = `translate(-50%, 0%) rotate(${90 - angleDeg}deg)`;
     }
 
-    const windSpeed = Math.max(0, Math.min(1, Number(state.windSpeed) || 0));
-    const pct = `${Math.round(windSpeed * 100)}%`;
-    this._setFolderTag('wind', pct);
+    const windMS = (() => {
+      const ms = Number(state?.windSpeedMS);
+      if (Number.isFinite(ms)) return Math.max(0.0, Math.min(78.0, ms));
+      const legacy01 = Number(state?.windSpeed);
+      if (Number.isFinite(legacy01)) return Math.max(0.0, Math.min(78.0, legacy01 * 78.0));
+      return 0.0;
+    })();
+    const wind01 = Math.max(0.0, Math.min(1.0, windMS / 78.0));
+    const label = `${windMS.toFixed(1)} m/s`;
+    this._setFolderTag('wind', label);
 
     if (this._windStrengthBarInner) {
-      this._windStrengthBarInner.style.width = `${windSpeed * 100}%`;
+      this._windStrengthBarInner.style.width = `${wind01 * 100}%`;
     }
     if (this._windStrengthText) {
-      this._windStrengthText.textContent = pct;
+      this._windStrengthText.textContent = label;
     }
   }
 
@@ -1589,11 +1605,11 @@ export class ControlPanelManager {
     const includeGustiness = options?.includeGustiness !== false;
     const controls = {};
 
-    controls.speed = parentFolder.addBinding(this.controlState, 'windSpeed', {
-      label: 'Wind Speed',
+    controls.speed = parentFolder.addBinding(this.controlState, 'windSpeedMS', {
+      label: 'Wind Speed (m/s)',
       min: 0.0,
-      max: 1.0,
-      step: 0.05
+      max: 78.0,
+      step: 0.5
     }).on('change', (ev) => {
       void this._applyWindState();
       if (ev?.last) this.debouncedSave();
@@ -1634,7 +1650,9 @@ export class ControlPanelManager {
       expanded: false
     });
     this._registerTopLevelFolder(windFolder);
-    this._ensureFolderTag(windFolder, 'wind', `${Math.round((Number(this.controlState.windSpeed) || 0) * 100)}%`);
+    const initialWindMs = Number(this.controlState.windSpeedMS) || 0;
+    const initialPct = `${Math.round(Math.max(0, Math.min(1, initialWindMs / 78.0)) * 100)}%`;
+    this._ensureFolderTag(windFolder, 'wind', initialPct);
 
     const quickWindFolder = windFolder.addFolder({
       title: 'Quick Wind',
@@ -1646,10 +1664,10 @@ export class ControlPanelManager {
     quickWindFolder.addBlade({ view: 'separator' });
 
     const beats = {
-      Calm: { speed: 0.1, gustiness: 'calm' },
-      Breezy: { speed: 0.35, gustiness: 'light' },
-      Windy: { speed: 0.6, gustiness: 'strong' },
-      Storm: { speed: 0.85, gustiness: 'extreme' }
+      Calm: { speedMS: 4.0, gustiness: 'calm' },
+      Breezy: { speedMS: 14.0, gustiness: 'light' },
+      Windy: { speedMS: 28.0, gustiness: 'strong' },
+      Storm: { speedMS: 50.0, gustiness: 'extreme' }
     };
 
     const contentElement = quickWindFolder.element.querySelector('.tp-fldv_c') || quickWindFolder.element;
@@ -1670,7 +1688,7 @@ export class ControlPanelManager {
       btn.style.color = 'inherit';
       btn.style.cursor = 'pointer';
       btn.addEventListener('click', () => {
-        this.controlState.windSpeed = cfg.speed;
+        this.controlState.windSpeedMS = cfg.speedMS;
         this.controlState.gustiness = cfg.gustiness;
         try {
           this.pane?.refresh?.();
@@ -2060,7 +2078,10 @@ export class ControlPanelManager {
       // Also: windDirection is expected to be a THREE.Vector2 after initialize(); never replace it.
       const applyToState = (state) => {
         if (!state) return;
-        state.windSpeed = this.controlState.windSpeed;
+        const windMS = Number(this.controlState.windSpeedMS);
+        const clampedMS = Number.isFinite(windMS) ? Math.max(0.0, Math.min(78.0, windMS)) : 0.0;
+        state.windSpeedMS = clampedMS;
+        state.windSpeed = clampedMS / 78.0;
 
         const wd = state.windDirection;
         if (wd && typeof wd.set === 'function') {
@@ -2097,7 +2118,7 @@ export class ControlPanelManager {
       }
 
       log.debug('Applied wind state:', {
-        speed: this.controlState.windSpeed,
+        speedMS: this.controlState.windSpeedMS,
         direction: this.controlState.windDirection,
         gustiness: this.controlState.gustiness
       });
@@ -2152,7 +2173,7 @@ export class ControlPanelManager {
       dynamicPaused: false,
       directedPresetId: 'Clear (Dry)',
       directedTransitionMinutes: 5.0,
-      windSpeed: 0.5,
+      windSpeedMS: 39.0,
       windDirection: 180.0,
       gustiness: 'moderate',
       tileMotionSpeedPercent: 100,
@@ -2194,11 +2215,19 @@ export class ControlPanelManager {
         return;
       }
 
+      const windMS = (() => {
+        const ms = Number(state.windSpeedMS);
+        if (Number.isFinite(ms)) return Math.max(0.0, Math.min(78.0, ms));
+        const legacy01 = Number(state.windSpeed);
+        if (Number.isFinite(legacy01)) return Math.max(0.0, Math.min(78.0, legacy01 * 78.0));
+        return 0.0;
+      })();
+
       const weatherText = `
 Current Weather:
 - Precipitation: ${(state.precipitation * 100).toFixed(0)}%
 - Cloud Cover: ${(state.cloudCover * 100).toFixed(0)}%
-- Wind Speed: ${(state.windSpeed * 100).toFixed(0)}%
+- Wind Speed: ${windMS.toFixed(1)} m/s
 - Fog Density: ${(state.fogDensity * 100).toFixed(0)}%
 - Temperature: ${state.freezeLevel < 0.5 ? 'Warm' : 'Cold'}
 - Time: ${Math.floor(this.controlState.timeOfDay).toString().padStart(2, '0')}:${Math.floor((this.controlState.timeOfDay % 1) * 60).toString().padStart(2, '0')}
@@ -2229,6 +2258,19 @@ Current Weather:
       if (saved) {
         // Merge with defaults to handle missing properties
         Object.assign(this.controlState, saved);
+
+        // Backwards compatibility: older scenes saved legacy windSpeed (0..1).
+        // If windSpeedMS is missing, derive it from windSpeed.
+        if (!Number.isFinite(this.controlState.windSpeedMS)) {
+          const legacy01 = Number(saved?.windSpeed);
+          if (Number.isFinite(legacy01)) {
+            this.controlState.windSpeedMS = Math.max(0.0, Math.min(78.0, legacy01 * 78.0));
+          }
+        }
+        // Cleanup: don't keep the legacy field around in the live control state.
+        if ('windSpeed' in this.controlState) {
+          try { delete this.controlState.windSpeed; } catch (_) {}
+        }
         log.info('Loaded control state from scene flags');
         return true;
       }

@@ -947,7 +947,11 @@ export class CloudEffectV2 {
         const wcInitialized = weatherController.initialized === true;
         if (s && wcInitialized) {
           if (typeof s.cloudCover === 'number') cloudCover = s.cloudCover;
-          if (typeof s.windSpeed  === 'number') windSpeed  = s.windSpeed;
+          if (typeof s.windSpeedMS === 'number' && Number.isFinite(s.windSpeedMS)) {
+            windSpeed = Math.max(0.0, Math.min(1.0, s.windSpeedMS / 78.0));
+          } else if (typeof s.windSpeed === 'number' && Number.isFinite(s.windSpeed)) {
+            windSpeed = Math.max(0.0, Math.min(1.0, s.windSpeed));
+          }
           if (s.windDirection) {
             windDirX = s.windDirection.x ?? windDirX;
             windDirY = s.windDirection.y ?? windDirY;

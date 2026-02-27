@@ -1341,6 +1341,7 @@ export class EffectComposer {
         'underwater-bubbles':'_underwaterBubblesEffect',
         'bloom':            '_bloomEffect',
         'colorCorrection':  '_colorCorrectionEffect',
+        'filter':           '_filterEffect',
         'filmGrain':        '_filmGrainEffect',
         'sharpen':          '_sharpenEffect',
         'cloud':            '_cloudEffect',

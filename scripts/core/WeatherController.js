@@ -25,7 +25,8 @@ export const PrecipitationType = {
  * @property {number} precipitation - 0.0 (dry) to 1.0 (monsoon)
  * @property {number} precipType - Enum value from PrecipitationType
  * @property {number} cloudCover - 0.0 (clear) to 1.0 (overcast)
- * @property {number} windSpeed - 0.0 to 1.0 (hurricane)
+ * @property {number} windSpeed - Normalized 0.0..1.0 legacy wind speed (derived)
+ * @property {number} [windSpeedMS] - Real-world wind speed in meters/second (authoritative when present)
  * @property {THREE.Vector2} windDirection - Normalized 2D vector
  * @property {number} fogDensity - 0.0 to 1.0
  * @property {number} wetness - Accumulation logic (lagging behind precipitation)
@@ -41,6 +42,8 @@ export const PrecipitationType = {
  */
 
 export class WeatherController {
+  static MAX_WIND_MS = 78.0;
+
   constructor() {
     /**
      * Sub-rate update lane — weather state math (transition lerp, noise, wetness)
@@ -65,6 +68,7 @@ export class WeatherController {
       precipitation: 0.0,
       precipType: PrecipitationType.NONE,
       cloudCover: 0.0,
+      windSpeedMS: 0.44 * WeatherController.MAX_WIND_MS,
       windSpeed: 0.44,
       windDirection: { x: 1, y: 0 }, // 0deg, upgraded to Vector2 in initialize() (Y-down world)
       fogDensity: 0.0,
@@ -83,6 +87,7 @@ export class WeatherController {
       precipitation: 0.0,
       precipType: PrecipitationType.NONE,
       cloudCover: 0.0,
+      windSpeedMS: 0.0,
       windSpeed: 0.0,
       windDirection: { x: 1, y: 0 },
       fogDensity: 0.0,
@@ -96,6 +101,7 @@ export class WeatherController {
       precipitation: 0.0,
       precipType: PrecipitationType.NONE,
       cloudCover: 0.0,
+      windSpeedMS: 0.44 * WeatherController.MAX_WIND_MS,
       windSpeed: 0.44,
       windDirection: { x: 1, y: 0 },
       fogDensity: 0.0,
@@ -353,6 +359,35 @@ export class WeatherController {
 
     /** @type {function|null} Unsubscribe from EffectMaskRegistry */
     this._registryUnsub = null;
+  }
+
+  _clamp01(n) {
+    return Math.max(0.0, Math.min(1.0, Number.isFinite(n) ? n : 0.0));
+  }
+
+  _clampWindMS(ms) {
+    const max = WeatherController.MAX_WIND_MS;
+    const v = Number.isFinite(ms) ? ms : 0.0;
+    return Math.max(0.0, Math.min(max, v));
+  }
+
+  _wind01FromMS(ms) {
+    const max = WeatherController.MAX_WIND_MS;
+    if (!Number.isFinite(ms) || max <= 0) return 0.0;
+    return this._clamp01(ms / max);
+  }
+
+  _windMSFrom01(w01) {
+    return this._clampWindMS(this._clamp01(w01) * WeatherController.MAX_WIND_MS);
+  }
+
+  _syncWindUnits(state) {
+    if (!state) return;
+    const ms = Number.isFinite(state.windSpeedMS)
+      ? this._clampWindMS(state.windSpeedMS)
+      : this._windMSFrom01(state.windSpeed);
+    state.windSpeedMS = ms;
+    state.windSpeed = this._wind01FromMS(ms);
   }
 
   /**
@@ -653,6 +688,7 @@ export class WeatherController {
     if (!this.isTransitioning && this.dynamicEnabled !== true && this.variability <= 0) {
       if (!this._staticSnapped) {
         this._copyState(this.targetState, this.currentState);
+        this._syncWindUnits(this.currentState);
         this._updateWetness(dt);
         this._updateEnvironmentOutputs();
         this._staticSnapped = true;
@@ -686,6 +722,7 @@ export class WeatherController {
         : 1 - Math.pow(-2 * progress + 2, 3) / 2;
 
       this._lerpState(this.startState, this.targetState, t);
+      this._syncWindUnits(this.currentState);
 
       if (progress >= 1.0) {
         this.isTransitioning = false;
@@ -717,6 +754,7 @@ export class WeatherController {
     } else {
       // Snap to target state (base for this frame)
       this._copyState(this.targetState, this.currentState);
+      this._syncWindUnits(this.currentState);
     }
 
     // 2. Apply Wanderer Loop (Noise)
@@ -737,6 +775,7 @@ export class WeatherController {
       precipType: Number(state?.precipType) || 0,
       cloudCover: Number(state?.cloudCover) || 0.0,
       windSpeed: Number(state?.windSpeed) || 0.0,
+      windSpeedMS: Number(state?.windSpeedMS) || 0.0,
       windDirection: {
         x: Number(state?.windDirection?.x) || 1,
         y: Number(state?.windDirection?.y) || 0
@@ -753,7 +792,13 @@ export class WeatherController {
     dest.precipitation = Number(serialized.precipitation) || 0.0;
     dest.precipType = Number(serialized.precipType) || 0;
     dest.cloudCover = Number(serialized.cloudCover) || 0.0;
-    dest.windSpeed = Number(serialized.windSpeed) || 0.0;
+    if (Number.isFinite(serialized.windSpeedMS)) {
+      dest.windSpeedMS = this._clampWindMS(Number(serialized.windSpeedMS));
+      dest.windSpeed = this._wind01FromMS(dest.windSpeedMS);
+    } else {
+      dest.windSpeed = Number(serialized.windSpeed) || 0.0;
+      dest.windSpeedMS = this._windMSFrom01(dest.windSpeed);
+    }
     dest.fogDensity = Number(serialized.fogDensity) || 0.0;
     dest.wetness = Number(serialized.wetness) || 0.0;
     dest.freezeLevel = Number(serialized.freezeLevel) || 0.0;
@@ -875,14 +920,23 @@ export class WeatherController {
         this.timeOfDay = stored.timeOfDay % 24;
       }
 
-      // Restore scene darkness if available and user is GM
+      // Restore scene darkness if available and user is GM.
+      // Wrapped in a 5s timeout because canvas.scene.update() is a Foundry
+      // server call that can hang indefinitely if the server is slow or
+      // socket.io has backpressure — blocking the entire loading pipeline.
+      const SCENE_UPDATE_TIMEOUT_MS = 5000;
       const hasStoredDarkness = Number.isFinite(stored.sceneDarkness);
       if (hasStoredDarkness && game?.user?.isGM && canvas?.scene) {
         try {
-          await canvas.scene.update({ 'environment.darknessLevel': stored.sceneDarkness });
+          await Promise.race([
+            canvas.scene.update({ 'environment.darknessLevel': stored.sceneDarkness }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error(
+              `scene.update timed out after ${SCENE_UPDATE_TIMEOUT_MS}ms`
+            )), SCENE_UPDATE_TIMEOUT_MS))
+          ]);
           log.debug(`Restored scene darkness: ${stored.sceneDarkness.toFixed(3)}`);
         } catch (e) {
-          log.warn('Failed to restore scene darkness:', e);
+          log.warn('Failed to restore scene darkness (continuing without it):', e?.message ?? e);
         }
       }
 
@@ -914,7 +968,9 @@ export class WeatherController {
 
       this._updateEnvironmentOutputs();
       
-      // Ensure time-driven systems (color grading, scene darkness) update with restored time
+      // Ensure time-driven systems (color grading, scene darkness) update with restored time.
+      // Wrapped in a 5s timeout for the same reason as the darkness restore above —
+      // applyTimeOfDay may call canvas.scene.update() internally.
       if (Number.isFinite(stored.timeOfDay)) {
         try {
           const stateApplier = window.MapShine?.stateApplier;
@@ -923,10 +979,15 @@ export class WeatherController {
             // from timeOfDay here (would overwrite restored value). For older snapshots that
             // don't have sceneDarkness, fall back to recomputing from timeOfDay.
             const applyDarkness = !hasStoredDarkness;
-            await stateApplier.applyTimeOfDay(stored.timeOfDay % 24, false, applyDarkness);
+            await Promise.race([
+              stateApplier.applyTimeOfDay(stored.timeOfDay % 24, false, applyDarkness),
+              new Promise((_, reject) => setTimeout(() => reject(new Error(
+                `applyTimeOfDay timed out after ${SCENE_UPDATE_TIMEOUT_MS}ms`
+              )), SCENE_UPDATE_TIMEOUT_MS))
+            ]);
           }
         } catch (e) {
-          log.warn('Failed to apply restored timeOfDay to time-driven systems:', e);
+          log.warn('Failed to apply restored timeOfDay (continuing without it):', e?.message ?? e);
         }
       }
       
@@ -1970,7 +2031,14 @@ export class WeatherController {
     dest.precipitation = source.precipitation;
     dest.precipType = source.precipType;
     dest.cloudCover = source.cloudCover;
-    dest.windSpeed = source.windSpeed;
+    // `windSpeedMS` is authoritative; `windSpeed` is a legacy 0..1 derived value.
+    if (Number.isFinite(source.windSpeedMS)) {
+      dest.windSpeedMS = this._clampWindMS(source.windSpeedMS);
+      dest.windSpeed = this._wind01FromMS(dest.windSpeedMS);
+    } else {
+      dest.windSpeed = source.windSpeed;
+      dest.windSpeedMS = this._windMSFrom01(dest.windSpeed);
+    }
     dest.fogDensity = source.fogDensity;
     dest.freezeLevel = source.freezeLevel;
     dest.ashIntensity = source.ashIntensity ?? 0.0;
@@ -1997,9 +2065,15 @@ export class WeatherController {
     const THREE = window.THREE;
     if (!THREE) return;
 
+    // Ensure both endpoints have synced wind units. This preserves backwards compatibility
+    // with older snapshots/presets that only populated `windSpeed`.
+    this._syncWindUnits(start);
+    this._syncWindUnits(end);
+
     this.currentState.precipitation = THREE.MathUtils.lerp(start.precipitation, end.precipitation, t);
     this.currentState.cloudCover = THREE.MathUtils.lerp(start.cloudCover, end.cloudCover, t);
-    this.currentState.windSpeed = THREE.MathUtils.lerp(start.windSpeed, end.windSpeed, t);
+    this.currentState.windSpeedMS = THREE.MathUtils.lerp(start.windSpeedMS, end.windSpeedMS, t);
+    this.currentState.windSpeed = this._wind01FromMS(this.currentState.windSpeedMS);
     this.currentState.fogDensity = THREE.MathUtils.lerp(start.fogDensity, end.fogDensity, t);
     this.currentState.freezeLevel = THREE.MathUtils.lerp(start.freezeLevel, end.freezeLevel, t);
     this.currentState.ashIntensity = THREE.MathUtils.lerp(start.ashIntensity ?? 0.0, end.ashIntensity ?? 0.0, t);
@@ -2122,20 +2196,22 @@ export class WeatherController {
 
     // --- Apply to State ---
 
-    // Wind Speed = Target + Meander + Gust
-    // We scale the add-ons by the target speed so 0 wind doesn't have gusts (unless we want it to?)
-    // Let's allow gusts to exist even at low wind, but maybe scale them slightly so they aren't overwhelming
-    const windBase = this.targetState.windSpeed;
-    // Allow gusts to boost speed significantly, but clamp to 0..1
-    // The '0.2' ensures that even at 0 target wind, we can get small breezes if variability is high
-    const magnitudeScale = Math.min(1.0, windBase + 0.2); 
+    // Wind Speed (m/s) = Target + Meander + Gust
+    // This keeps the existing 0..1 gust/meander shaping, but converts it into m/s so UI and
+    // future consumers can reason about real-world values. We still expose `windSpeed` as legacy
+    // normalized 0..1 for existing effects.
+    this._syncWindUnits(this.targetState);
+    const windBaseMS = this.targetState.windSpeedMS;
+    const windBase01 = this._wind01FromMS(windBaseMS);
+    const magnitudeScale01 = Math.min(1.0, windBase01 + 0.2);
 
-    // Apply meander as signed (small) variation, but apply gust as strictly additive boost.
-    // This guarantees: during gusts, windSpeed never decreases relative to the non-gusting baseline.
-    const baseSpeed = windBase + meander * magnitudeScale;
-    const gustBoost = gustComponent * magnitudeScale;
-    let newSpeed = baseSpeed + gustBoost;
-    this.currentState.windSpeed = THREE.MathUtils.clamp(newSpeed, 0, 1);
+    const base01 = windBase01 + meander * magnitudeScale01;
+    const gustBoost01 = gustComponent * magnitudeScale01;
+    const next01 = THREE.MathUtils.clamp(base01 + gustBoost01, 0.0, 1.0);
+    const nextMS = this._windMSFrom01(next01);
+
+    this.currentState.windSpeedMS = nextMS;
+    this.currentState.windSpeed = next01;
 
 
     // Wind Direction = Target + Meander

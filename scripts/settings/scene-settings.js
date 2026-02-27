@@ -123,7 +123,118 @@ export function getPlayerOverrides(scene) {
  * @public
  */
 export function isEnabled(scene) {
-  return scene.getFlag(FLAG_NAMESPACE, 'enabled') === true;
+  const val = scene.getFlag(FLAG_NAMESPACE, 'enabled');
+  const result = val === true;
+  // Diagnostic: trace every isEnabled check so we can see if/when the flag disappears
+  try {
+    console.log(`MapShine isEnabled("${scene?.name ?? scene?.id ?? '?'}") = ${result} (raw flag value: ${JSON.stringify(val)})`);
+  } catch (_) {}
+  return result;
+}
+
+function _isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function _safeParseJsonMaybe(value) {
+  try {
+    if (typeof value !== 'string') return value;
+    const s = value.trim();
+    if (!s) return null;
+    // Only attempt JSON parse for obvious JSON payloads.
+    if (!(s.startsWith('{') || s.startsWith('['))) return value;
+    return JSON.parse(s);
+  } catch (_) {
+    return value;
+  }
+}
+
+function _canEditScene(scene) {
+  try {
+    const user = game?.user;
+    if (!scene || !user) return false;
+    if (user.isGM) return true;
+    if (typeof scene.canUserModify === 'function') return scene.canUserModify(user, 'update');
+  } catch (_) {
+  }
+  return false;
+}
+
+/**
+ * Ensure the scene's Map Shine settings flag exists and has the expected shape.
+ *
+ * Old scenes (or scenes migrated from earlier versions) may have:
+ * - a JSON string stored in the flag
+ * - missing tiers (mapMaker/gm/player)
+ * - missing effects object
+ * - malformed values (null, arrays)
+ *
+ * This function is intended to be safe to call during scene initialization.
+ * It always returns a valid settings object. If the current user can edit the
+ * scene, it will also auto-repair the stored flag.
+ *
+ * @param {Scene} scene
+ * @param {{autoRepair?: boolean}} [options]
+ * @returns {Promise<any>} Valid settings object
+ */
+export async function ensureValidSceneSettings(scene, options = {}) {
+  const { autoRepair = true } = options || {};
+
+  const defaults = createDefaultSettings();
+
+  try {
+    if (!scene) return defaults;
+
+    let raw = scene.getFlag(FLAG_NAMESPACE, 'settings');
+    raw = _safeParseJsonMaybe(raw);
+
+    // If missing or totally invalid, reset.
+    if (!_isPlainObject(raw)) {
+      if (autoRepair && _canEditScene(scene)) {
+        await scene.setFlag(FLAG_NAMESPACE, 'settings', defaults);
+        log.warn('Scene settings flag was invalid; repaired to defaults');
+      }
+      return defaults;
+    }
+
+    // Normalize tiers.
+    const next = {
+      ...defaults,
+      ...raw,
+    };
+
+    if (!_isPlainObject(next.mapMaker)) next.mapMaker = { ...defaults.mapMaker };
+    if (!_isPlainObject(next.mapMaker.effects)) next.mapMaker.effects = {};
+
+    if (next.gm !== null && !_isPlainObject(next.gm)) next.gm = null;
+    if (next.gm && !_isPlainObject(next.gm.effects)) next.gm.effects = {};
+
+    if (!_isPlainObject(next.player)) next.player = {};
+
+    // Maintain version field.
+    next.version = CURRENT_VERSION;
+    next.mapMaker.version = CURRENT_VERSION;
+
+    // If anything had to be normalized, persist it.
+    if (autoRepair && _canEditScene(scene)) {
+      const changed = (raw.version !== next.version)
+        || !_isPlainObject(raw.mapMaker)
+        || !_isPlainObject(raw.mapMaker?.effects)
+        || (raw.gm !== next.gm)
+        || (raw.gm && !_isPlainObject(raw.gm?.effects))
+        || !_isPlainObject(raw.player);
+
+      if (changed) {
+        await scene.setFlag(FLAG_NAMESPACE, 'settings', next);
+        log.warn('Scene settings flag shape normalized and saved');
+      }
+    }
+
+    return next;
+  } catch (e) {
+    log.warn('Failed to ensure valid scene settings; falling back to defaults:', e?.message ?? e);
+    return defaults;
+  }
 }
 
 /**
@@ -135,8 +246,18 @@ export function isEnabled(scene) {
 export async function enable(scene) {
   const defaultSettings = createDefaultSettings();
   
+  console.warn(`MapShine enable(): setting enabled=true for scene "${scene?.name}" (${scene?.id})`);
   await scene.setFlag(FLAG_NAMESPACE, 'enabled', true);
+  
+  // Verify the flag was actually persisted
+  const verifyEnabled = scene.getFlag(FLAG_NAMESPACE, 'enabled');
+  console.warn(`MapShine enable(): verification after setFlag — getFlag('enabled') = ${JSON.stringify(verifyEnabled)}`);
+  
   await scene.setFlag(FLAG_NAMESPACE, 'settings', defaultSettings);
+  
+  // Final verification: dump the entire MSA flag namespace
+  const allFlags = scene?.flags?.['map-shine-advanced'];
+  console.warn(`MapShine enable(): final flag state — flags['map-shine-advanced'] keys: [${Object.keys(allFlags ?? {}).join(', ')}], enabled=${allFlags?.enabled}`);
   
   log.info(`Map Shine enabled for scene: ${scene.name}`);
 }
@@ -163,10 +284,15 @@ export function getEffectiveSettings(scene) {
     return null;
   }
 
-  const settings = scene.getFlag(FLAG_NAMESPACE, 'settings');
-  if (!settings) {
-    log.warn('Scene enabled but no settings found, using defaults');
-    return createDefaultSettings();
+  let settings = null;
+  try {
+    settings = _safeParseJsonMaybe(scene.getFlag(FLAG_NAMESPACE, 'settings'));
+  } catch (_) {
+    settings = null;
+  }
+  if (!_isPlainObject(settings) || !_isPlainObject(settings.mapMaker) || !_isPlainObject(settings.mapMaker.effects)) {
+    log.warn('Scene enabled but settings flag was missing/invalid, using defaults');
+    settings = createDefaultSettings();
   }
 
   // Determine user mode
@@ -180,7 +306,7 @@ export function getEffectiveSettings(scene) {
   let effectiveEffects = { ...settings.mapMaker.effects };
 
   // Apply GM overrides if present
-  if (settings.gm && settings.gm.effects) {
+  if (_isPlainObject(settings.gm) && _isPlainObject(settings.gm.effects)) {
     effectiveEffects = { ...effectiveEffects, ...settings.gm.effects };
   }
 

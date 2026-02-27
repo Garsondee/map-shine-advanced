@@ -310,11 +310,20 @@ export class SnowGeometry {
     u.uTime.value = timeInfo.elapsed;
     u.uDeltaTime.value = timeInfo.delta;
 
+    // Weather controller exposes:
+    // - windSpeedMS (m/s, 0..78) (preferred)
+    // - windSpeed (legacy 0..1) derived from windSpeedMS
+    // We keep existing tuning by mapping 78 m/s => 1.0.
+    const wind01 = (weatherState && typeof weatherState.windSpeedMS === 'number' && Number.isFinite(weatherState.windSpeedMS))
+      ? Math.max(0, Math.min(1, weatherState.windSpeedMS / 78.0))
+      : (weatherState && typeof weatherState.windSpeed === 'number' && Number.isFinite(weatherState.windSpeed))
+        ? Math.max(0, Math.min(1, weatherState.windSpeed))
+        : 0;
+
     if (weatherState && weatherState.windDirection) {
-      const windSpeed = weatherState.windSpeed || 0;
       // Match the rain mapping (1.0 -> ~1000 units/sec) so wind magnitude
       // is comparable, but the vertex shader applies drag for snow.
-      const speed = windSpeed * 1000.0;
+      const speed = wind01 * 1000.0;
       u.uWindVector.value.set(
         weatherState.windDirection.x * speed,
         weatherState.windDirection.y * speed,

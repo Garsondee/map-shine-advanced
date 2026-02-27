@@ -12,6 +12,14 @@ import { installConsoleHelpers } from '../utils/console-helpers.js';
 
 const logger = log.createLogger('Bootstrap');
 
+function _msaCrisisLog(id, message) {
+  try {
+    const n = String(id).padStart(3, '0');
+    console.log(`Crisis #${n} - ${message}`);
+  } catch (_) {
+  }
+}
+
 /**
  * Bootstrap the Map Shine Advanced module
  * @param {BootstrapOptions} [options={}] - Bootstrap options
@@ -19,12 +27,17 @@ const logger = log.createLogger('Bootstrap');
  * @public
  */
 export async function bootstrap(options = {}) {
+  _msaCrisisLog(60, 'bootstrap.js: bootstrap() entered');
   const { verbose = false, skipSceneInit = false } = options;
+
+  _msaCrisisLog(61, `bootstrap: options parsed (verbose=${!!verbose}, skipSceneInit=${!!skipSceneInit})`);
 
   // Set log level based on options
   if (verbose) {
     log.setLogLevel(log.LogLevel.DEBUG);
   }
+
+  _msaCrisisLog(62, 'bootstrap: log level configured');
 
   console.log('[MSA BOOT] bootstrap: start');
   logger.info('Starting bootstrap sequence...');
@@ -41,8 +54,11 @@ export async function bootstrap(options = {}) {
     gameSystem: null
   };
 
+  _msaCrisisLog(63, 'bootstrap: initial state object created');
+
   try {
     // Step 1: Load three.js (bundled from node_modules via build script)
+    _msaCrisisLog(64, 'bootstrap: importing three.custom.js');
     console.log('[MSA BOOT] bootstrap: loading three.js');
     logger.info('Loading three.js...');
     const THREE = await import('../vendor/three/three.custom.js');
@@ -50,14 +66,20 @@ export async function bootstrap(options = {}) {
     logger.info(`three.js r${THREE.REVISION} loaded`);
     console.log('[MSA BOOT] bootstrap: three.js loaded, revision', THREE.REVISION);
 
+    _msaCrisisLog(65, `bootstrap: three.js imported (REVISION=${THREE?.REVISION ?? 'unknown'})`);
+
     // Step 2: Detect GPU capabilities
+    _msaCrisisLog(66, 'bootstrap: capabilities.detect() about to run');
     console.log('[MSA BOOT] bootstrap: detecting GPU capabilities');
     logger.info('Detecting GPU capabilities...');
     state.capabilities = await capabilities.detect();
     console.log('[MSA BOOT] bootstrap: capabilities detected, tier=', state.capabilities.tier);
 
+    _msaCrisisLog(67, `bootstrap: capabilities detected (tier=${state?.capabilities?.tier ?? 'unknown'})`);
+
     // Step 3: Check if any rendering tier is available
     if (state.capabilities.tier === 'none') {
+      _msaCrisisLog(68, 'bootstrap: capabilities tier=none; showing compatibility error and aborting');
       state.error = 'No GPU acceleration available';
       logger.error('No compatible GPU rendering context found');
       errors.showCompatibilityError(state.capabilities);
@@ -65,12 +87,16 @@ export async function bootstrap(options = {}) {
     }
 
     // Step 4: Initialize renderer with fallback strategy
+    _msaCrisisLog(69, 'bootstrap: rendererStrategy.create() about to run');
     console.log('[MSA BOOT] bootstrap: creating renderer');
     logger.info('Initializing renderer...');
     const { renderer, rendererType } = await rendererStrategy.create(THREE, state.capabilities);
     console.log('[MSA BOOT] bootstrap: renderer created=', !!renderer, 'type=', rendererType);
 
+    _msaCrisisLog(70, `bootstrap: rendererStrategy.create() returned (hasRenderer=${!!renderer}, type=${rendererType ?? 'unknown'})`);
+
     if (!renderer) {
+      _msaCrisisLog(71, 'bootstrap: renderer was null; showing compatibility error and aborting');
       state.error = 'Renderer initialization failed';
       logger.error('Failed to initialize any renderer');
       errors.showCompatibilityError(state.capabilities);
@@ -78,22 +104,31 @@ export async function bootstrap(options = {}) {
     }
 
     // Configure renderer
+    _msaCrisisLog(72, 'bootstrap: rendererStrategy.configure() about to run');
     rendererStrategy.configure(renderer, {
       width: window.innerWidth,
       height: window.innerHeight
     });
 
+    _msaCrisisLog(73, 'bootstrap: rendererStrategy.configure() completed');
+
     state.renderer = renderer;
     state.rendererType = rendererType;
 
+    _msaCrisisLog(74, 'bootstrap: state.renderer + state.rendererType assigned');
+
     // Step 4.5: Initialize Game System Manager
+    _msaCrisisLog(75, 'bootstrap: importing GameSystemManager');
     logger.info('Initializing game system manager...');
     const { GameSystemManager } = await import('./game-system.js');
     state.gameSystem = new GameSystemManager();
     state.gameSystem.initialize();
 
+    _msaCrisisLog(76, 'bootstrap: GameSystemManager initialized');
+
     // Step 5: Create minimal scene (if not skipped)
     if (!skipSceneInit) {
+      _msaCrisisLog(77, 'bootstrap: creating initial THREE.Scene + OrthographicCamera');
       logger.info('Creating initial scene...');
       // TODO: This will be extracted to scene/ module in next milestone
       state.scene = new THREE.Scene();
@@ -107,21 +142,32 @@ export async function bootstrap(options = {}) {
       );
       state.camera.position.z = 5;
       logger.debug('Initial scene and camera created');
+
+      _msaCrisisLog(78, 'bootstrap: initial scene + camera created');
     }
 
     // Step 6: Install console helpers for debugging
+    _msaCrisisLog(79, 'bootstrap: installConsoleHelpers() about to run');
     installConsoleHelpers();
+
+    _msaCrisisLog(80, 'bootstrap: installConsoleHelpers() completed');
     
     // Step 7: Mark as initialized
     state.initialized = true;
     logger.info(`Bootstrap complete: ${rendererType} (Tier: ${state.capabilities.tier})`);
 
+    _msaCrisisLog(81, `bootstrap: completed successfully (initialized=true, rendererType=${rendererType ?? 'unknown'})`);
+
     // Step 7: Show success notification
+    _msaCrisisLog(82, 'bootstrap: errors.showSuccessNotification() about to run');
     errors.showSuccessNotification(state.capabilities.tier);
+
+    _msaCrisisLog(83, 'bootstrap: errors.showSuccessNotification() completed');
 
     return state;
 
   } catch (e) {
+    _msaCrisisLog(84, `bootstrap: caught error (${e?.message ?? 'unknown'})`);
     state.error = e.message;
     logger.error('Critical bootstrap error:', e);
     errors.showInitializationError(e.message, e);

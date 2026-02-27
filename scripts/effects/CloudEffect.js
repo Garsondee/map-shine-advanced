@@ -523,7 +523,8 @@ export class CloudEffect extends EffectBase {
 
   _getEffectiveWeatherState() {
     let cloudCover = this.params.cloudCover;
-    let windSpeed = 0.07;
+    // Prefer real-world windSpeedMS (m/s) but keep existing tuning by mapping 78 m/s => 1.0.
+    let windSpeed01 = 0.07;
     let windDirX = 1.0;
     let windDirY = 0.0;
 
@@ -531,7 +532,11 @@ export class CloudEffect extends EffectBase {
       const state = weatherController?.getCurrentState?.();
       if (state) {
         cloudCover = state.cloudCover ?? cloudCover;
-        windSpeed = state.windSpeed ?? windSpeed;
+        if (typeof state.windSpeedMS === 'number' && Number.isFinite(state.windSpeedMS)) {
+          windSpeed01 = Math.max(0.0, Math.min(1.0, state.windSpeedMS / 78.0));
+        } else if (typeof state.windSpeed === 'number' && Number.isFinite(state.windSpeed)) {
+          windSpeed01 = Math.max(0.0, Math.min(1.0, state.windSpeed));
+        }
         if (state.windDirection) {
           windDirX = state.windDirection.x ?? windDirX;
           windDirY = state.windDirection.y ?? windDirY;
@@ -544,7 +549,7 @@ export class CloudEffect extends EffectBase {
     return {
       weatherEnabled: !(weatherController && weatherController.enabled === false) && this.enabled,
       cloudCover: normalizedCloudCover,
-      windSpeed,
+      windSpeed: windSpeed01,
       windDirX,
       windDirY
     };

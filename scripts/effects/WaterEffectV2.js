@@ -678,6 +678,13 @@ export class WaterEffectV2 extends EffectBase {
             'waveEvolutionAmount',
             'waveEvolutionScale',
 
+            'waveMicroNormalStrength',
+            'waveMicroNormalScale',
+            'waveMicroNormalSpeed',
+            'waveMicroNormalWarp',
+            'waveMicroNormalDistortionStrength',
+            'waveMicroNormalSpecularStrength',
+
             'waveIndoorDampingEnabled',
             'waveIndoorDampingStrength',
             'waveIndoorMinFactor'
@@ -699,9 +706,31 @@ export class WaterEffectV2 extends EffectBase {
             'windDirResponsiveness',
 
             'waveDirOffsetDeg',
+            'waveAppearanceRotDeg',
             'waveAppearanceOffsetDeg',
+
+            'waveDirFieldEnabled',
+            'waveDirFieldMaxDeg',
+            'waveDirFieldScale',
+            'waveDirFieldSpeed',
+
             'advectionDirOffsetDeg',
+            'advectionSpeed01',
             'advectionSpeed'
+          ]
+        },
+        {
+          name: 'wave-breakup',
+          label: 'Wave Breakup',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'waveBreakupStrength',
+            'waveBreakupScale',
+            'waveBreakupSpeed',
+            'waveBreakupWarp',
+            'waveBreakupDistortionStrength',
+            'waveBreakupSpecularStrength'
           ]
         },
         {
@@ -762,16 +791,27 @@ export class WaterEffectV2 extends EffectBase {
           type: 'folder',
           expanded: false,
           parameters: [
+            'specModel',
+            'specClamp',
             'specSunAzimuthDeg',
             'specSunElevationDeg',
             'specSunIntensity',
             'specNormalStrength',
             'specNormalScale',
+            'specNormalMode',
+            'specMicroStrength',
+            'specMicroScale',
+            'specAAStrength',
+            'specWaveStepMul',
+            'specForceFlatNormal',
+            'specDisableMasking',
+            'specDisableRainSlope',
             'specRoughnessMin',
             'specRoughnessMax',
             'specF0',
             'specMaskGamma',
             'specSkyTint',
+            'skyIntensity',
             'specShoreBias',
             'specDistortionNormalStrength',
             'specAnisotropy',
@@ -1139,6 +1179,13 @@ export class WaterEffectV2 extends EffectBase {
         waveStrengthWindMinFactor: { type: 'slider', label: 'Wave Strength @ Wind=0', min: 0.0, max: 1.0, step: 0.01, default: 1 },
         distortionStrengthPx: { type: 'slider', label: 'Distortion Strength (px)', min: 0, max: 64.0, step: 0.01, default: 14.84 },
 
+        waveMicroNormalStrength: { type: 'slider', label: 'Micro Normal Strength', min: 0.0, max: 2.0, step: 0.01, default: 0.22 },
+        waveMicroNormalScale: { type: 'slider', label: 'Micro Normal Scale', min: 0.1, max: 600.0, step: 0.1, default: 80.0 },
+        waveMicroNormalSpeed: { type: 'slider', label: 'Micro Normal Speed', min: 0.0, max: 5.0, step: 0.01, default: 0.18 },
+        waveMicroNormalWarp: { type: 'slider', label: 'Micro Normal Warp', min: 0.0, max: 2.0, step: 0.01, default: 0.85 },
+        waveMicroNormalDistortionStrength: { type: 'slider', label: 'Micro→Distortion', min: 0.0, max: 2.0, step: 0.01, default: 0.10 },
+        waveMicroNormalSpecularStrength: { type: 'slider', label: 'Micro→Specular', min: 0.0, max: 2.0, step: 0.01, default: 0.35 },
+
         shoreNoiseDistortionEnabled: { type: 'boolean', label: 'Shore Noise Enabled', default: true },
         shoreNoiseDistortionStrengthPx: { type: 'slider', label: 'Shore Noise Strength (px)', min: 0.0, max: 64.0, step: 0.01, default: 12.75 },
         shoreNoiseDistortionFrequency: { type: 'slider', label: 'Shore Noise Frequency', min: 0.1, max: 1200.0, step: 0.1, default: 526.1 },
@@ -1234,11 +1281,27 @@ export class WaterEffectV2 extends EffectBase {
         lockWaveTravelToWind: { type: 'boolean', label: 'Lock Wave Travel To Wind', default: false },
         waveDirOffsetDeg: { type: 'slider', label: 'Wave Travel Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: -42 },
         waveAppearanceOffsetDeg: { type: 'slider', label: 'Wave Facing Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
+
+        waveDirFieldEnabled: { type: 'boolean', label: 'Direction Field Enabled', default: true },
+        waveDirFieldMaxDeg: { type: 'slider', label: 'Dir Field Max (deg)', min: 0.0, max: 90.0, step: 1.0, default: 45.0 },
+        waveDirFieldScale: { type: 'slider', label: 'Dir Field Scale', min: 0.01, max: 5.0, step: 0.01, default: 0.65 },
+        waveDirFieldSpeed: { type: 'slider', label: 'Dir Field Speed', min: 0.0, max: 2.0, step: 0.01, default: 0.35 },
         advectionDirOffsetDeg: { type: 'slider', label: 'Advection Dir Offset (deg)', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
+        advectionSpeed01: { type: 'slider', label: 'Advection Speed (0-1)', min: 0.0, max: 1.0, step: 0.01, default: 0.15 },
         advectionSpeed: { type: 'slider', label: 'Advection Speed', min: 0.0, max: 4.0, step: 0.01, default: 0.51 },
         windDirResponsiveness: { type: 'slider', label: 'Wind Dir Responsiveness', min: 0.1, max: 10.0, step: 0.1, default: 10 },
         useTargetWindDirection: { type: 'boolean', label: 'Use Target Wind Dir', default: true },
 
+        specModel: {
+          type: 'list',
+          label: 'Specular Model',
+          options: {
+            Phong: 0,
+            GGX: 1
+          },
+          default: 1
+        },
+        specClamp: { type: 'slider', label: 'Specular Clamp', min: 0.0, max: 2.0, step: 0.01, default: 0.65 },
         specStrength: { type: 'slider', label: 'Specular Strength', min: 0, max: 250.0, step: 0.01, default: 250 },
         specPower: { type: 'slider', label: 'Specular Power', min: 1, max: 24, step: 0.5, default: 1.5 },
 
@@ -1247,11 +1310,30 @@ export class WaterEffectV2 extends EffectBase {
         specSunIntensity: { type: 'slider', label: 'Sun Intensity', min: 0.0, max: 5.0, step: 0.01, default: 4.08 },
         specNormalStrength: { type: 'slider', label: 'Normal Strength', min: 0.0, max: 5.0, step: 0.01, default: 5 },
         specNormalScale: { type: 'slider', label: 'Normal Scale', min: 0.0, max: 0.25, step: 0.001, default: 0.25 },
+        specNormalMode: {
+          type: 'list',
+          label: 'Normal Mode',
+          options: {
+            Off: 0,
+            Distortion: 1,
+            Waves: 2,
+            Combined: 3
+          },
+          default: 3
+        },
+        specMicroStrength: { type: 'slider', label: 'Micro Strength', min: 0.0, max: 2.0, step: 0.01, default: 0.6 },
+        specMicroScale: { type: 'slider', label: 'Micro Scale', min: 0.1, max: 10.0, step: 0.01, default: 1.8 },
+        specAAStrength: { type: 'slider', label: 'Specular AA', min: 0.0, max: 2.0, step: 0.01, default: 0.0 },
+        specWaveStepMul: { type: 'slider', label: 'Wave Step Mul', min: 0.25, max: 8.0, step: 0.01, default: 2.0 },
+        specForceFlatNormal: { type: 'boolean', label: 'Force Flat Normal', default: false },
+        specDisableMasking: { type: 'boolean', label: 'Disable Masking', default: false },
+        specDisableRainSlope: { type: 'boolean', label: 'Disable Rain Slope', default: false },
         specRoughnessMin: { type: 'slider', label: 'Roughness Min', min: 0.001, max: 1.0, step: 0.001, default: 0.001 },
         specRoughnessMax: { type: 'slider', label: 'Roughness Max', min: 0.001, max: 1.0, step: 0.001, default: 1 },
         specF0: { type: 'slider', label: 'F0 (Reflectance)', min: 0.0, max: 0.12, step: 0.001, default: 0.069 },
         specMaskGamma: { type: 'slider', label: 'Mask Gamma', min: 0.1, max: 6.0, step: 0.01, default: 2.6 },
         specSkyTint: { type: 'slider', label: 'Sky Tint', min: 0.0, max: 1.0, step: 0.01, default: 0.6 },
+        skyIntensity: { type: 'slider', label: 'Sky Intensity', min: 0.0, max: 2.0, step: 0.01, default: 1.0 },
         specShoreBias: { type: 'slider', label: 'Shore Bias', min: 0.0, max: 1.0, step: 0.01, default: 1 },
 
         specDistortionNormalStrength: { type: 'slider', label: 'Distortion→Normal', min: 0.0, max: 2.0, step: 0.01, default: 2 },

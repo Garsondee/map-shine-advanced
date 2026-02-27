@@ -94,6 +94,35 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
     bypassCache = false,
     skipMaskIds = null
   } = options || {};
+
+  // A/B test kill-switch: completely bypass Map Shine asset bundle loading.
+  // This helps isolate Foundry/PIXI load stalls vs module-driven texture/mask pipelines.
+  try {
+    if (globalThis?.localStorage?.getItem('msa-disable-texture-loading') === '1') {
+      log.warn('msa-disable-texture-loading=1 — bypassing asset bundle load (returning empty masks)', { basePath });
+      if (typeof onProgress === 'function') {
+        try {
+          // Preserve progress contract so loading UI does not wedge.
+          onProgress(1, 1, 'Asset loading bypassed');
+        } catch (_) {
+        }
+      }
+      return {
+        success: true,
+        bundle: {
+          basePath,
+          baseTexture: null,
+          masks: [],
+          isMapShineCompatible: false
+        },
+        warnings: ['Asset loading bypassed via msa-disable-texture-loading'],
+        error: null,
+        cacheHit: false
+      };
+    }
+  } catch (_) {
+  }
+
   log.info(`Loading asset bundle: ${basePath}${skipBaseTexture ? ' (masks only)' : ''}`);
 
   const lp = globalLoadingProfiler;

@@ -2011,20 +2011,45 @@ export class TweakpaneManager {
 
       try {
         await sceneSettings.enable(s);
-        ui.notifications?.info?.('Map Shine: Scene enabled for Map Shine Advanced. Reloading Foundry to activate the 3D canvas...');
 
-        setTimeout(() => {
-          try {
-            const utils = globalThis.foundry?.utils;
-            if (typeof utils?.debouncedReload === 'function') {
-              utils.debouncedReload();
-            } else {
+        // Verify the flag actually persisted before proceeding
+        const verified = sceneSettings.isEnabled(s);
+        if (!verified) {
+          console.error('MapShine enable button: flag did NOT persist after enable(). Aborting.');
+          ui.notifications?.error?.('Map Shine: Failed to persist scene flag. Check console for details.');
+          return;
+        }
+
+        ui.notifications?.info?.('Map Shine: Scene enabled — activating 3D canvas…');
+
+        // Redraw the canvas instead of reloading the page. This is more
+        // robust because it avoids the reload-dependent failure path where
+        // a missing tile texture crashes Foundry's Canvas.#draw() and
+        // prevents the canvasReady hook from ever firing.
+        //
+        // canvas.draw() triggers our _drawWrapper → Foundry's #draw →
+        // canvasReady (or our recovery sentinel) → onCanvasReady →
+        // createThreeCanvas. The PIXI background alpha is set to 0 at
+        // runtime by createThreeCanvas, so canvasConfig transparency
+        // from the initial page load is not required.
+        try {
+          await canvas.draw(s);
+        } catch (drawErr) {
+          console.warn('MapShine enable button: canvas.draw() threw — falling back to page reload:', drawErr);
+          // Fallback: reload the page if canvas.draw() fails outright
+          setTimeout(() => {
+            try {
+              const utils = globalThis.foundry?.utils;
+              if (typeof utils?.debouncedReload === 'function') {
+                utils.debouncedReload();
+              } else {
+                globalThis.location?.reload?.();
+              }
+            } catch (_) {
               globalThis.location?.reload?.();
             }
-          } catch (e) {
-            globalThis.location?.reload?.();
-          }
-        }, 250);
+          }, 250);
+        }
       } catch (e) {
         log.error('Failed to enable Map Shine Advanced for scene:', e);
         ui.notifications?.error?.('Map Shine: Failed to enable this scene. Check console for details.');

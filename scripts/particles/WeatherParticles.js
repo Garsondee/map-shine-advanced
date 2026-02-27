@@ -4292,7 +4292,12 @@ export class WeatherParticles {
     this._time += safeDt;
 
     // Wind acceleration signal for foam flecks (spawn only when wind speed increases).
-    const windSpeed01 = Number.isFinite(weather.windSpeed) ? Math.max(0.0, Math.min(1.0, weather.windSpeed)) : 0.0;
+    // Prefer real-world windSpeedMS (m/s) but keep legacy tuning by mapping 78 m/s => 1.0.
+    const windSpeed01 = (weather && typeof weather.windSpeedMS === 'number' && Number.isFinite(weather.windSpeedMS))
+      ? Math.max(0.0, Math.min(1.0, weather.windSpeedMS / 78.0))
+      : Number.isFinite(weather?.windSpeed)
+        ? Math.max(0.0, Math.min(1.0, weather.windSpeed))
+        : 0.0;
     if (safeDt > 1e-6) {
       const dWind = windSpeed01 - (this._foamFleckLastWindSpeed01 ?? 0.0);
       this._foamFleckLastWindSpeed01 = windSpeed01;
@@ -5226,7 +5231,7 @@ export class WeatherParticles {
       }
       const foamEnabled = (waterParams?.shoreFoamEnabled ?? true) === true;
       const foamIntensity = Number.isFinite(waterParams?.shoreFoamIntensity) ? waterParams.shoreFoamIntensity : 1.0;
-      const windSpeed = weather.windSpeed || 0;
+      const windSpeed = windSpeed01;
 
       const plumeEnabled = foamEnabled && (waterParams?.foamPlumeEnabled ?? true) === true;
       const maxParticles = Number.isFinite(waterParams?.foamPlumeMaxParticles)

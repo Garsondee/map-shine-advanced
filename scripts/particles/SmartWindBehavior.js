@@ -37,7 +37,13 @@ export class SmartWindBehavior {
 
     // 2. Get Global Wind State
     const state = weatherController.getCurrentState();
-    let windSpeed = state && typeof state.windSpeed === 'number' ? state.windSpeed : 0;
+    // Prefer real-world windSpeedMS (m/s) but keep existing tuning by mapping 78 m/s => 1.0.
+    let windSpeed = 0;
+    if (state && typeof state.windSpeedMS === 'number' && Number.isFinite(state.windSpeedMS)) {
+      windSpeed = Math.max(0.0, Math.min(1.0, state.windSpeedMS / 78.0));
+    } else if (state && typeof state.windSpeed === 'number' && Number.isFinite(state.windSpeed)) {
+      windSpeed = Math.max(0.0, Math.min(1.0, state.windSpeed));
+    }
     if (!Number.isFinite(windSpeed) || windSpeed <= 0.001) return;
 
     const windDir = state && state.windDirection; // Vector2

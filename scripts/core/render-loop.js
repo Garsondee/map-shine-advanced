@@ -200,6 +200,14 @@ export class RenderLoop {
   render() {
     if (!this.isRunning) return;
 
+    // Skip rendering when the WebGL context is lost.
+    // Without this guard, every render call returns GL_INVALID_OPERATION (1282)
+    // and fills the console with shader VALIDATE_STATUS errors. The rAF loop
+    // itself continues so we resume immediately when the context is restored.
+    try {
+      if (this.renderer?.getContext?.()?.isContextLost?.()) return;
+    } catch (_) {}
+
     // Schedule next frame
     this.animationFrameId = requestAnimationFrame(this.render);
 

@@ -2321,8 +2321,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     this._initialLoad.pendingOverhead = 0;
     this._initialLoad.trackedIds = new Set();
 
+    let _syncIdx = 0;
     for (const tileDoc of tiles) {
       const tileId = tileDoc?.id;
+      const _texSrc = tileDoc?.texture?.src ?? 'no-texture';
+      const _texName = _texSrc.split('/').pop() || _texSrc;
+      console.log(`[Map Shine Advanced: Loading]     tile ${++_syncIdx}/${tiles.size}: ${tileId} (${_texName})`);
       if (tileId) {
         this._initialLoad.trackedIds.add(tileId);
         this._initialLoad.pendingAll++;
@@ -3187,6 +3191,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       return;
     }
 
+    const _ctsId = tileDoc.id;
+    console.log(`[Map Shine Advanced: Loading]       createTileSprite START: ${_ctsId}`);
+
     // Create sprite with material.
     // alphaTest is intentionally 0 (disabled): a non-zero alphaTest hard-clips
     // semi-transparent edge pixels, producing a pixelated border. With alphaTest=0
@@ -3227,10 +3234,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     // Install overhead CC shader patch early so it compiles with the material.
     // Uniform values will be populated once overhead classification is known.
+    console.log(`[Map Shine Advanced: Loading]       createTileSprite [${_ctsId}]: _ensureOverheadColorCorrection...`);
     try {
       this._ensureOverheadColorCorrection(material);
     } catch (_) {
     }
+    console.log(`[Map Shine Advanced: Loading]       createTileSprite [${_ctsId}]: _ensureOverheadColorCorrection DONE`);
 
     const isOverheadForLoad = isTileOverhead(tileDoc);
 
@@ -3336,7 +3345,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     });
 
     // Set initial transform and visibility
+    console.log(`[Map Shine Advanced: Loading]       createTileSprite [${_ctsId}]: updateSpriteTransform...`);
     this.updateSpriteTransform(sprite, tileDoc);
+    console.log(`[Map Shine Advanced: Loading]       createTileSprite [${_ctsId}]: updateSpriteTransform DONE`);
     
     this.scene.add(sprite);
 
@@ -3387,10 +3398,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     } catch (_) {
     }
 
+    console.log(`[Map Shine Advanced: Loading]       createTileSprite [${_ctsId}]: _ensure*Mesh...`);
     this._ensureWaterOccluderMesh(this.tileSprites.get(tileDoc.id), tileDoc);
     this._ensureAboveFloorBlockerMesh(this.tileSprites.get(tileDoc.id), tileDoc);
     this._ensureFloorPresenceMesh(this.tileSprites.get(tileDoc.id), tileDoc);
     this._ensureBelowFloorPresenceMesh(this.tileSprites.get(tileDoc.id), tileDoc);
+    console.log(`[Map Shine Advanced: Loading]       createTileSprite [${_ctsId}]: _ensure*Mesh DONE`);
 
     if (sprite.userData.isOverhead) {
       this._overheadTileIds.add(tileDoc.id);
@@ -3417,6 +3430,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     } catch (_) {
     }
 
+    console.log(`[Map Shine Advanced: Loading]       createTileSprite END: ${_ctsId}`);
     log.debug(`Created tile sprite: ${tileDoc.id}`);
   }
 
@@ -4464,37 +4478,6 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
    * @returns {Promise<THREE.Texture>}
    */
   async loadTileTexture(texturePath, options = {}) {
-    // A/B test kill-switch: bypass Map Shine tile texture loading entirely.
-    // This isolates Foundry/PIXI load stalls from our own fetch/decode/upload pipeline.
-    try {
-      if (globalThis?.localStorage?.getItem('msa-disable-texture-loading') === '1') {
-        const THREE = window.THREE;
-        if (!THREE) throw new Error('THREE.js not available');
-
-        if (!this._bypassTextureLoadingPlaceholder) {
-          const data = new Uint8Array([255, 255, 255, 255]);
-          const tex = new THREE.DataTexture(data, 1, 1);
-          tex.needsUpdate = true;
-          tex.generateMipmaps = false;
-          tex.minFilter = THREE.NearestFilter;
-          tex.magFilter = THREE.NearestFilter;
-          tex.wrapS = THREE.ClampToEdgeWrapping;
-          tex.wrapT = THREE.ClampToEdgeWrapping;
-          this._bypassTextureLoadingPlaceholder = tex;
-        }
-
-        const role = options?.role || 'ALBEDO';
-        const tex = this._bypassTextureLoadingPlaceholder;
-        try {
-          tex.flipY = (role === 'DATA_MASK') ? false : true;
-          tex.colorSpace = (role === 'DATA_MASK') ? THREE.NoColorSpace : THREE.SRGBColorSpace;
-        } catch (_) {
-        }
-        return tex;
-      }
-    } catch (_) {
-    }
-
     if (this.textureCache.has(texturePath)) {
       const cached = this.textureCache.get(texturePath);
       this._normalizeTileTextureSource(cached, options?.role || 'ALBEDO');

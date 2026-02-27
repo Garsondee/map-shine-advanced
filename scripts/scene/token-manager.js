@@ -903,17 +903,61 @@ vec3 ms_applySceneLighting(vec3 color) {
       return;
     }
 
+    // Fire-and-forget async sync. This avoids blocking canvasReady handlers while
+    // still allowing callers (e.g. canvas-replacement.js) to await a bounded sync.
+    void this.syncAllTokensAsync();
+  }
+
+  /**
+   * Async token sync with optional yielding and progress callbacks.
+   * This is used by the loading pipeline to avoid appearing stuck on scenes
+   * with many tokens.
+   *
+   * NOTE: This sync only creates sprites and kicks off async texture loads.
+   * It does not wait for textures to finish downloading.
+   *
+   * @param {object} [opts]
+   * @param {number} [opts.yieldEvery=25] - Yield to the browser every N tokens
+   * @param {(completed:number,total:number,tokenId:string)=>void} [opts.onProgress]
+   * @returns {Promise<void>}
+   */
+  async syncAllTokensAsync(opts = undefined) {
+    if (!canvas || !canvas.tokens) {
+      log.warn('Canvas or tokens layer not available');
+      return;
+    }
+
+    const yieldEvery = Number.isFinite(opts?.yieldEvery) ? Math.max(1, opts.yieldEvery) : 25;
+    const onProgress = (typeof opts?.onProgress === 'function') ? opts.onProgress : null;
+
     const tokens = canvas.tokens.placeables || [];
     log.info(`Syncing ${tokens.length} tokens`);
 
     this._highlightAllTokensActive = !!canvas?.tokens?.highlightObjects;
 
+    let completed = 0;
     for (const token of tokens) {
-      this.createTokenSprite(token.document);
+      try {
+        this.createTokenSprite(token.document);
+      } catch (e) {
+        log.error('Failed to create token sprite during syncAllTokensAsync', e);
+      }
+
+      completed++;
+      if (onProgress) {
+        try { onProgress(completed, tokens.length, token?.document?.id ?? ''); } catch (_) {}
+      }
+
+      if (completed % yieldEvery === 0) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
     }
 
-    this.refreshAllTokenOverlayStates();
-    this.refreshAllTargetIndicators();
+    try {
+      this.refreshAllTokenOverlayStates();
+      this.refreshAllTargetIndicators();
+    } catch (_) {
+    }
   }
 
   /**
@@ -2110,23 +2154,40 @@ vec3 ms_applySceneLighting(vec3 color) {
       return this.textureCache.get(texturePath);
     }
 
-    // Load new texture
+    // Load new texture with a safety timeout.
+    // Some environments (or context-loss edge cases) can cause loader callbacks
+    // to never fire; this prevents stalls where callers await texture promises.
+    const LOAD_TIMEOUT_MS = 20000;
     return new Promise((resolve, reject) => {
+      let done = false;
+      const t = setTimeout(() => {
+        if (done) return;
+        done = true;
+        reject(new Error(`Token texture load timed out after ${LOAD_TIMEOUT_MS}ms`));
+      }, LOAD_TIMEOUT_MS);
+
       this.textureLoader.load(
         texturePath,
         (texture) => {
+          if (done) return;
+          done = true;
+          clearTimeout(t);
+
           // Configure texture
           texture.colorSpace = THREE.SRGBColorSpace;
           this._configureTokenTextureFiltering(texture);
           texture.needsUpdate = true;
-          
+
           // Cache for reuse
           this.textureCache.set(texturePath, texture);
-          
+
           resolve(texture);
         },
-        undefined, // onProgress
+        undefined,
         (error) => {
+          if (done) return;
+          done = true;
+          clearTimeout(t);
           reject(error);
         }
       );

@@ -125,7 +125,16 @@ export class FloorRenderBus {
     let tileCount = 0;
     const floorCounts = {};
 
-    for (const tileDoc of tileDocs) {
+    // Pre-sort tiles by Foundry sort field so visual stacking is correct.
+    // Lower sort = behind, higher sort = in front.  Stable sort preserves
+    // document order for tiles with identical sort values.
+    const sortedTileDocs = [...tileDocs].sort((a, b) => {
+      const sa = Number(a?.sort) || 0;
+      const sb = Number(b?.sort) || 0;
+      return sa - sb;
+    });
+
+    for (const tileDoc of sortedTileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
       if (!src) continue;
 
@@ -144,8 +153,19 @@ export class FloorRenderBus {
       const z = GROUND_Z + floorIndex * Z_PER_FLOOR;
       const tileId = tileDoc.id ?? tileDoc._id ?? `tile_${tileCount}`;
 
+      // Render order: ensures correct visual stacking within and across floors.
+      // Layout: [floor 0 regular] [floor 0 overhead] [floor 1 regular] ...
+      // Within each group, tiles are ordered by Foundry sort (ascending).
+      const isOverhead = tileDoc.overhead === true;
+      const RENDER_ORDER_PER_FLOOR = 10000;
+      const OVERHEAD_OFFSET = 5000;
+      const sortWithinFloor = tileCount; // Already in sort order from pre-sort above
+      const renderOrder = floorIndex * RENDER_ORDER_PER_FLOOR
+        + (isOverhead ? OVERHEAD_OFFSET : 0)
+        + sortWithinFloor;
+
       // Create mesh immediately with null texture (invisible until loaded).
-      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha);
+      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder);
 
       // Load texture via THREE.TextureLoader — HTML <img>, straight alpha.
       this._loader.load(src, (tex) => {
@@ -166,7 +186,17 @@ export class FloorRenderBus {
       floorCounts[floorIndex] = (floorCounts[floorIndex] ?? 0) + 1;
     }
 
-    log.info(`FloorRenderBus populated: ${tileCount} tiles`, floorCounts);
+    // Diagnostic: log overhead tile assignment so we can spot mis-classified tiles.
+    const overheadDiag = sortedTileDocs
+      .filter(td => td.overhead === true)
+      .map(td => {
+        const fi = this._resolveFloorIndex(td, floors);
+        return { id: td.id, floor: fi, src: (td.texture?.src ?? td.img ?? '').split('/').pop() };
+      });
+    if (overheadDiag.length > 0) {
+      log.info(`FloorRenderBus: ${overheadDiag.length} overhead tiles:`, overheadDiag);
+    }
+    log.info(`FloorRenderBus populated: ${tileCount} tiles (${floors.length} floors)`, floorCounts);
   }
 
   /**
@@ -532,7 +562,7 @@ export class FloorRenderBus {
    * @param {number} alpha
    * @private
    */
-  _addTileMesh(tileId, floorIndex, texture, cx, cy, z, w, h, rotation, alpha) {
+  _addTileMesh(tileId, floorIndex, texture, cx, cy, z, w, h, rotation, alpha, renderOrder = 0) {
     const THREE = window.THREE;
 
     const mat = new THREE.MeshBasicMaterial({
@@ -550,6 +580,9 @@ export class FloorRenderBus {
     mesh.frustumCulled = false;
     mesh.position.set(cx, cy, z);
     mesh.rotation.z = rotation;
+    // renderOrder controls visual stacking: lower = behind, higher = in front.
+    // Three.js sorts transparent objects by renderOrder first, then by distance.
+    mesh.renderOrder = renderOrder;
 
     this._scene.add(mesh);
     this._tiles.set(tileId, { mesh, material: mat, floorIndex });

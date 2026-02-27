@@ -4,6 +4,11 @@
  * @module module
  */
 
+// Static import: keybindings MUST be registered synchronously during the init
+// hook, before any await. Dynamic imports yield control back to Foundry, which
+// then considers the init phase complete and rejects late registrations.
+import { registerLevelNavigationKeybindings } from './foundry/level-navigation-keybindings.js';
+
 function _msaCrisisLog(id, message) {
   try {
     const n = String(id).padStart(3, '0');
@@ -141,6 +146,33 @@ try {
   console.warn('MapShine DIAG loaded module.js from:', import.meta?.url ?? '(no import.meta.url)');
 } catch (_) {
 }
+
+// ── Crisis kill-switch cleanup ───────────────────────────────────────────
+// These localStorage flags were temporary debugging measures during the
+// 0%/98% load-stall investigation. They are now treated as deprecated and
+// are forcibly cleared on startup so they cannot silently break rendering.
+try {
+  globalThis.localStorage?.removeItem?.('msa-disable-texture-loading');
+} catch (_) {}
+try {
+  globalThis.localStorage?.removeItem?.('msa-disable-water-effect');
+} catch (_) {}
+
+// Some older builds (or other modules) may re-set these keys during early
+// startup. Scrub them for a few seconds so the session is reliably unblocked.
+try {
+  if (!globalThis.__msaDeprecatedKillSwitchScrubInstalled) {
+    globalThis.__msaDeprecatedKillSwitchScrubInstalled = true;
+    let remaining = 10;
+    const scrub = () => {
+      try { globalThis.localStorage?.removeItem?.('msa-disable-texture-loading'); } catch (_) {}
+      try { globalThis.localStorage?.removeItem?.('msa-disable-water-effect'); } catch (_) {}
+      remaining--;
+      if (remaining > 0) setTimeout(scrub, 500);
+    };
+    setTimeout(scrub, 0);
+  }
+} catch (_) {}
 
 try {
   if (!window.__msaCrisisGlobalHandlersInstalled) {
@@ -315,11 +347,22 @@ Hooks.once('init', async function() {
   } catch (_) {
   }
 
-  const [{ info }, sceneSettings, canvasReplacement, { registerLevelNavigationKeybindings }, { registerUISettings }, loadingService, debugLoadingProfilerMod] = await Promise.all([
+  // Register keybindings SYNCHRONOUSLY before any await. Foundry's hook system
+  // does not await async handlers — after the first yield, Foundry considers the
+  // init phase complete and rejects late keybinding registrations with:
+  // "You cannot register a Keybinding after the init hook"
+  try {
+    registerLevelNavigationKeybindings(MODULE_ID);
+    _msaCrisisLog(9, 'init: registerLevelNavigationKeybindings() completed (pre-await)');
+  } catch (e) {
+    console.warn('Map Shine: failed to register level navigation keybindings', e);
+    _msaCrisisLog(9, 'init: registerLevelNavigationKeybindings() threw (pre-await)');
+  }
+
+  const [{ info }, sceneSettings, canvasReplacement, { registerUISettings }, loadingService, debugLoadingProfilerMod] = await Promise.all([
     import('./core/log.js'),
     import('./settings/scene-settings.js'),
     import('./foundry/canvas-replacement.js'),
-    import('./foundry/level-navigation-keybindings.js'),
     import('./ui/tweakpane-manager.js'),
     import('./ui/loading-screen/loading-screen-service.js'),
     import('./core/debug-loading-profiler.js')
@@ -361,13 +404,14 @@ Hooks.once('init', async function() {
     _msaCrisisLog(20, 'init: loadingOverlay.showBlack() threw');
   }
 
+
   console.log("%c GNU Terry Pratchett %c \n“A man is not dead while his name is still spoken.”",
   "background: #313131ff; color: #FFD700; font-weight: bold; padding: 4px 8px; border-radius: 4px;",
   "color: #888; font-style: italic;"
 );
 
-  registerLevelNavigationKeybindings(MODULE_ID);
-  _msaCrisisLog(21, 'init: registerLevelNavigationKeybindings() completed');
+  // Keybinding registration moved before the first await (see above).
+  _msaCrisisLog(21, 'init: keybinding registration already done (pre-await)');
   // Sync Debug Loading Mode from Foundry settings on startup.
   debugLoadingProfiler.debugMode = sceneSettings.getDebugLoadingModeEnabled();
   _msaCrisisLog(22, 'init: debugLoadingProfiler.debugMode synced');
@@ -796,17 +840,38 @@ Hooks.once('ready', async function() {
     console.warn('Map Shine: failed to update loading overlay', e);
     _msaCrisisLog(47, 'ready: loadingOverlay.setMessage threw');
   }
-  // Run bootstrap sequence
+  // Run bootstrap sequence — wrapped in try/catch so a failed import (e.g.
+  // game-system.js 404) doesn't silently hang createThreeCanvas forever.
   _msaCrisisLog(48, 'ready: importing bootstrap + LoadingScreenManager');
-  const [{ bootstrap }, { LoadingScreenManager }] = await Promise.all([
-    import('./core/bootstrap.js'),
-    import('./ui/loading-screen/loading-screen-manager.js')
-  ]);
-
-  _msaCrisisLog(49, 'ready: bootstrap + LoadingScreenManager imports resolved');
+  let bootstrap = null;
+  let LoadingScreenManager = null;
+  try {
+    _msaCrisisLog(48.1, 'ready: importing bootstrap.js...');
+    const bsMod = await import('./core/bootstrap.js');
+    bootstrap = bsMod.bootstrap;
+    _msaCrisisLog(48.2, 'ready: bootstrap.js imported, importing loading-screen-manager.js...');
+    const lsmMod = await import('./ui/loading-screen/loading-screen-manager.js');
+    LoadingScreenManager = lsmMod.LoadingScreenManager;
+    _msaCrisisLog(49, 'ready: bootstrap + LoadingScreenManager imports resolved');
+  } catch (importErr) {
+    console.error('Map Shine: failed to import bootstrap or LoadingScreenManager', importErr);
+    _msaCrisisLog(49, `ready: import FAILED (${importErr?.message ?? 'unknown'}) — marking bootstrapComplete`);
+    MapShine.bootstrapComplete = true;
+    MapShine.bootstrapError = importErr?.message ?? 'import failed';
+    return; // nothing more we can do without bootstrap
+  }
 
   _msaCrisisLog(50, 'ready: calling bootstrap({verbose:false})');
-  const state = await bootstrap({ verbose: false });
+  let state = null;
+  try {
+    state = await bootstrap({ verbose: false });
+  } catch (bootstrapErr) {
+    console.error('Map Shine: failed to run bootstrap', bootstrapErr);
+    _msaCrisisLog(51, `ready: bootstrap FAILED (${bootstrapErr?.message ?? 'unknown'}) — marking bootstrapComplete`);
+    MapShine.bootstrapComplete = true;
+    MapShine.bootstrapError = bootstrapErr?.message ?? 'bootstrap failed';
+    return; // nothing more we can do without bootstrap
+  }
 
   _msaCrisisLog(51, `ready: bootstrap returned (initialized=${state?.initialized})`);
 

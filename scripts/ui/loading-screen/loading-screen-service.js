@@ -64,6 +64,10 @@ class LoadingScreenService {
     this._activeRenderer = this.legacy;
   }
 
+  _active() {
+    return this._activeRenderer ?? this.legacy;
+  }
+
   createDefaultSettings() {
     return {
       enabled: true,
@@ -215,15 +219,15 @@ class LoadingScreenService {
   }
 
   // API compatibility methods
-  configureStages(stages) { this._renderer().configureStages?.(stages); }
-  startStages(opts) { this._renderer().startStages?.(opts); }
-  setStage(stageId, progress01, message, opts) { this._renderer().setStage?.(stageId, progress01, message, opts); }
-  ensure() { if (this.shouldHandleLoading()) this._renderer().ensure?.(); }
-  setSceneName(name) { this._renderer().setSceneName?.(name); }
-  setMessage(message) { this._renderer().setMessage?.(message); }
-  setProgress(value01, opts) { this._renderer().setProgress?.(value01, opts); }
-  startAutoProgress(target01, rate01PerSec) { this._renderer().startAutoProgress?.(target01, rate01PerSec); }
-  stopAutoProgress() { this._renderer().stopAutoProgress?.(); }
+  configureStages(stages) { this._active().configureStages?.(stages); }
+  startStages(opts) { this._active().startStages?.(opts); }
+  setStage(stageId, progress01, message, opts) { this._active().setStage?.(stageId, progress01, message, opts); }
+  ensure() { this._active().ensure?.(); }
+  setSceneName(name) { this._active().setSceneName?.(name); }
+  setMessage(message) { this._active().setMessage?.(message); }
+  setProgress(value01, opts) { this._active().setProgress?.(value01, opts); }
+  startAutoProgress(target01, rate01PerSec) { this._active().startAutoProgress?.(target01, rate01PerSec); }
+  stopAutoProgress() { this._active().stopAutoProgress?.(); }
   showBlack(message) { if (!this.shouldHandleLoading()) return; this._prepareStyledWallpaperForShow(); this._renderer().showBlack?.(message); }
   showLoading(message) { if (!this.shouldHandleLoading()) return; this._prepareStyledWallpaperForShow(); this._renderer().showLoading?.(message); }
   hide() { this._renderer().hide?.(); }
@@ -238,12 +242,12 @@ class LoadingScreenService {
     await this._renderer().fadeIn?.(durationMs, contentFadeMs);
   }
 
-  enableDebugMode() { this._renderer().enableDebugMode?.(); }
-  disableDebugMode() { this._renderer().disableDebugMode?.(); }
-  appendDebugLine(line) { this._renderer().appendDebugLine?.(line); }
-  setDebugLog(text) { this._renderer().setDebugLog?.(text); }
-  showDebugDismiss(callback) { this._renderer().showDebugDismiss?.(callback); }
-  getElapsedSeconds() { return this._renderer().getElapsedSeconds?.() ?? 0; }
+  enableDebugMode() { this._active().enableDebugMode?.(); }
+  disableDebugMode() { this._active().disableDebugMode?.(); }
+  appendDebugLine(line) { this._active().appendDebugLine?.(line); }
+  setDebugLog(text) { this._active().setDebugLog?.(text); }
+  showDebugDismiss(callback) { this._active().showDebugDismiss?.(callback); }
+  getElapsedSeconds() { return this._active().getElapsedSeconds?.() ?? 0; }
 
   _renderer() {
     return this.shouldHandleLoading() ? this._activeRenderer : this.noop;

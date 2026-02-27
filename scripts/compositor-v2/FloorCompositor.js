@@ -178,11 +178,7 @@ export class FloorCompositor {
      * before sky color grading.
      * @type {WaterEffectV2}
      */
-    // Back-compat: preserve the previous ad-hoc flag as an alias.
-    const legacyDisableWater = (() => {
-      try { return globalThis.localStorage?.getItem?.('msa-disable-water-effect') === '1'; } catch (_) { return false; }
-    })();
-    const waterDisabled = legacyDisableWater || this._circuitBreaker.isDisabled('v2.water');
+    const waterDisabled = this._circuitBreaker.isDisabled('v2.water');
     this._waterEffect = waterDisabled ? null : new WaterEffectV2();
 
     /**
@@ -239,6 +235,10 @@ export class FloorCompositor {
     /** @type {string|null} Last applied active level context key (bottom:top) */
     this._lastAppliedLevelContextKey = null;
 
+    // Diagnostic: log the first frame's major render stages once.
+    // This helps pinpoint which stage stalls the main thread on some GPUs.
+    this._debugFirstFrameStagesLogged = false;
+
     // ── RT Infrastructure (Step 4) ───────────────────────────────────────────
     // Bus renders to sceneRT instead of screen. Post-processing effects will
     // read sceneRT and chain through ping-pong buffers. Final result is blit
@@ -255,7 +255,7 @@ export class FloorCompositor {
     this._waterOccluderRT = null;
 
     /** @type {THREE.Scene|null} Dedicated scene for fullscreen blit quad */
-    this._blitScene = null;
+    this._blitScene  = null;
     /** @type {THREE.OrthographicCamera|null} Camera for blit renders */
     this._blitCamera = null;
     /** @type {THREE.ShaderMaterial|null} Simple passthrough blit material */
@@ -408,8 +408,6 @@ export class FloorCompositor {
     this._sharpenEffect.initialize();
     if (this._waterEffect) {
       this._waterEffect.initialize();
-    } else {
-      log.warn('FloorCompositor: WaterEffectV2 disabled via localStorage (msa-disable-water-effect=1)');
     }
     try { this._buildingShadowEffect?.initialize?.(this.renderer); } catch (err) {
       log.warn('FloorCompositor: BuildingShadowsEffectV2 initialize failed:', err);
@@ -606,23 +604,34 @@ export class FloorCompositor {
       }
     } catch (_) {}
 
+    const _dbgStages = !this._debugFirstFrameStagesLogged;
+    if (_dbgStages) {
+      try { log.info('[V2 Frame] ▶ FloorCompositor.render: BEGIN'); } catch (_) {}
+    }
+
     // Bake building shadow map if needed (triggered by sun change or floor change).
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: buildingShadows.bake'); } catch (_) {} }
     try { this._buildingShadowEffect?.render?.(this.renderer); } catch (err) {
       log.warn('BuildingShadowsEffectV2 render threw, skipping shadow bake:', err);
     }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: buildingShadows.bake DONE'); } catch (_) {} }
 
     // ── Step 1: Render bus scene → sceneRT ───────────────────────────────
     // The bus scene contains albedo tiles + specular/fire overlays.
     // Window light is NOT in the bus scene — it renders after lighting.
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: bus.renderTo(sceneRT)'); } catch (_) {} }
     this._renderBus.renderTo(this.renderer, this.camera, this._sceneRT);
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: bus.renderTo(sceneRT) DONE'); } catch (_) {} }
 
     // ── Cloud passes (before lighting) ───────────────────────────────────
     // Must run after bus render so the blocker pass sees current tile visibility.
     // Outputs: _cloudEffect.cloudShadowTexture (fed into lighting compose shader)
     //          _cloudEffect._cloudTopRT        (blitted after lighting)
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloud.render'); } catch (_) {} }
     if (this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
       this._cloudEffect.render(this.renderer);
     }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloud.render DONE'); } catch (_) {} }
 
     // ── Step 2: Post-processing chain ────────────────────────────────────
     // Post effects read sceneRT and chain through _postA/_postB.
@@ -641,7 +650,9 @@ export class FloorCompositor {
       ? this._cloudEffect.cloudShadowTexture : null;
     const buildingShadowTex = (this._buildingShadowEffect?.params?.enabled)
       ? this._buildingShadowEffect.shadowFactorTexture : null;
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lighting.render(sceneRT→postA)'); } catch (_) {} }
     this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, buildingShadowTex);
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lighting.render(sceneRT→postA) DONE'); } catch (_) {} }
 
     // Feed live cloud shadow into WaterEffectV2 so caustics/specular are
     // correctly suppressed under cloud cover. Must be set before water renders.
@@ -650,27 +661,33 @@ export class FloorCompositor {
     currentInput = this._postA;
 
     // Sky color grading pass (time-of-day atmospheric grading). Ping-pongs.
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: skyColor.render'); } catch (_) {} }
     if (this._skyColorEffect.params.enabled) {
       const skyOutput = (currentInput === this._postA) ? this._postB : this._postA;
       this._skyColorEffect.render(this.renderer, currentInput, skyOutput);
       currentInput = skyOutput;
     }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: skyColor.render DONE'); } catch (_) {} }
 
     // Color correction pass: global user-authored grade (exposure, contrast, saturation, etc.).
     // Ping-pongs: whichever is current → the other.
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: colorCorrection.render'); } catch (_) {} }
     if (this._colorCorrectionEffect.params.enabled) {
       const ccOutput = (currentInput === this._postA) ? this._postB : this._postA;
       this._colorCorrectionEffect.render(this.renderer, currentInput, ccOutput);
       currentInput = ccOutput;
     }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: colorCorrection.render DONE'); } catch (_) {} }
 
     // Filter pass: multiplicative overlay (ink AO / multiply tint). Runs after
     // color correction and before water/bloom.
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: filter.render'); } catch (_) {} }
     if (this._filterEffect.enabled && this._filterEffect.params.enabled) {
       const fOutput = (currentInput === this._postA) ? this._postB : this._postA;
       this._filterEffect.render(this.renderer, currentInput, fOutput);
       currentInput = fOutput;
     }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: filter.render DONE'); } catch (_) {} }
 
     // Feed sky state into water (specular tint + live sun direction) after sky+CC have updated.
     // Water runs after grading so caustics/specular add onto the final image and bloom can pick them up.
@@ -710,42 +727,59 @@ export class FloorCompositor {
       // render() returns true if it wrote to waterOutput, false if it returned early.
       // Only advance currentInput when the pass actually ran — otherwise waterOutput
       // is an unwritten (black) RT and advancing would black out the entire scene.
+      if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: water.render'); } catch (_) {} }
       const waterWrote = this._waterEffect.render(this.renderer, this.camera, currentInput, waterOutput, occluderRT);
       if (waterWrote) currentInput = waterOutput;
+      if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: water.render DONE'); } catch (_) {} }
     }
 
     // Bloom pass: screen-space glow (threshold → mip blur → additive composite).
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: bloom.render'); } catch (_) {} }
     if (this._bloomEffect.params.enabled) {
       const bloomOutput = (currentInput === this._postA) ? this._postB : this._postA;
       this._bloomEffect.render(this.renderer, currentInput, bloomOutput);
       currentInput = bloomOutput;
     }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: bloom.render DONE'); } catch (_) {} }
 
     // Cloud-top blit: alpha-over after the full post chain (sky, CC, water, bloom).
     // Placed here so cloud tops are never refracted by water, never double-graded
     // by sky-color/CC, and sit visually above everything except grain and sharpen.
     // bloom has already run so cloud edges can still receive glow via the bloom
     // pass below, while cloud tops themselves remain crisp and unaffected.
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloudTops.blit'); } catch (_) {} }
     if (this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
       this._cloudEffect.blitCloudTops(this.renderer, currentInput);
     }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloudTops.blit DONE'); } catch (_) {} }
 
     // Film grain pass (disabled by default — optional artistic effect).
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: filmGrain.render'); } catch (_) {} }
     if (this._filmGrainEffect.params.enabled) {
       const fgOutput = (currentInput === this._postA) ? this._postB : this._postA;
       this._filmGrainEffect.render(this.renderer, currentInput, fgOutput);
       currentInput = fgOutput;
     }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: filmGrain.render DONE'); } catch (_) {} }
 
     // Sharpen pass (disabled by default — optional artistic effect).
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: sharpen.render'); } catch (_) {} }
     if (this._sharpenEffect.params.enabled) {
       const shOutput = (currentInput === this._postA) ? this._postB : this._postA;
       this._sharpenEffect.render(this.renderer, currentInput, shOutput);
       currentInput = shOutput;
     }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: sharpen.render DONE'); } catch (_) {} }
 
     // ── Step 3: Blit final result to screen ──────────────────────────────
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: blitToScreen'); } catch (_) {} }
     this._blitToScreen(currentInput);
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: blitToScreen DONE'); } catch (_) {} }
+
+    if (_dbgStages) {
+      this._debugFirstFrameStagesLogged = true;
+      try { log.info('[V2 Frame] ✔ FloorCompositor.render: END'); } catch (_) {}
+    }
   }
 
   /**

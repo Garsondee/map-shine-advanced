@@ -20,6 +20,87 @@ import { peekSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
 
 const log = createLogger('DiagnosticCenter');
 
+function _captureConsoleOutput(fn) {
+  const captured = {
+    error: [],
+    warn: [],
+    info: [],
+    log: []
+  };
+
+  const original = {
+    error: console.error,
+    warn: console.warn,
+    info: console.info,
+    log: console.log
+  };
+
+  const mkWrap = (key) => (...args) => {
+    try {
+      captured[key].push(args.map((a) => {
+        try {
+          if (typeof a === 'string') return a;
+          if (a && typeof a === 'object') return JSON.stringify(a);
+          return String(a);
+        } catch (_) {
+          return String(a);
+        }
+      }).join(' '));
+    } catch (_) {
+    }
+    try {
+      original[key](...args);
+    } catch (_) {
+    }
+  };
+
+  try {
+    console.error = mkWrap('error');
+    console.warn = mkWrap('warn');
+    console.info = mkWrap('info');
+    console.log = mkWrap('log');
+    return fn(captured);
+  } finally {
+    try { console.error = original.error; } catch (_) {}
+    try { console.warn = original.warn; } catch (_) {}
+    try { console.info = original.info; } catch (_) {}
+    try { console.log = original.log; } catch (_) {}
+  }
+}
+
+function _looksLikeShaderError(line) {
+  const s = String(line || '');
+  return (
+    s.includes('THREE.WebGLProgram') ||
+    s.includes('Shader Error') ||
+    s.includes('VALIDATE_STATUS') ||
+    s.includes('fragment shader') ||
+    s.includes('vertex shader')
+  );
+}
+
+function _summarizeShaderErrors(captured) {
+  const all = [];
+  for (const key of ['error', 'warn', 'info', 'log']) {
+    for (const line of (captured?.[key] || [])) all.push({ level: key, line });
+  }
+  const shader = all.filter((e) => _looksLikeShaderError(e.line));
+  return {
+    capturedTotal: all.length,
+    shaderLines: shader,
+    shaderLineCount: shader.length
+  };
+}
+
+function _safeGetRendererContextLost(renderer) {
+  try {
+    const gl = renderer?.getContext?.();
+    if (gl && typeof gl.isContextLost === 'function') return gl.isContextLost();
+  } catch (_) {
+  }
+  return null;
+}
+
 function _extractBasePath(src) {
   const s = String(src || '').split('?')[0].split('#')[0];
   const lastDot = s.lastIndexOf('.');
@@ -489,6 +570,11 @@ export class DiagnosticCenterDialog {
     const ms = window.MapShine;
     const surfaceReport = ms?.surfaceRegistry?.refresh?.() || ms?.surfaceReport || null;
 
+    const renderer = ms?.renderer || ms?.effectComposer?.renderer || null;
+    const effectComposer = ms?.effectComposer || null;
+    const threeScene = effectComposer?.scene || ms?.scene || null;
+    const threeCamera = effectComposer?.camera || ms?.camera || null;
+
     const now = Date.now();
 
     const levelController = ms?.levelNavigationController || null;
@@ -499,6 +585,159 @@ export class DiagnosticCenterDialog {
     const gameplayMode = Boolean(ms?.sceneComposer && ms?.isMapMakerMode !== true);
     const levelsInterop = detectLevelsRuntimeInteropState({ gameplayMode });
     const compatibilityMode = getLevelsCompatibilityMode();
+
+    // --- Pipeline mode ---
+    try {
+      const v2Enabled = Boolean(effectComposer?._checkCompositorV2Enabled?.() && effectComposer?._floorCompositorV2);
+      const floorLoopEnabled = Boolean(effectComposer?._checkFloorLoopEnabled?.() && window.MapShine?.floorStack);
+      const modeLabel = v2Enabled ? 'V2 compositor' : (floorLoopEnabled ? 'V1 per-floor loop' : 'V1 legacy single-pass');
+      checks.push(_mkCheck('Runtime', 'runtime.pipeline.mode', 'INFO', `Pipeline: ${modeLabel}`, {
+        v2Enabled,
+        floorLoopEnabled,
+      }));
+    } catch (_) {
+      checks.push(_mkCheck('Runtime', 'runtime.pipeline.mode', 'INFO', 'Pipeline: (unknown)'));
+    }
+
+    // --- Runtime / Renderer diagnostics ---
+    if (renderer) {
+      checks.push(_mkCheck('Runtime', 'runtime.renderer.exists', 'PASS', 'Three renderer is available'));
+      try {
+        const lost = _safeGetRendererContextLost(renderer);
+        if (lost === true) {
+          checks.push(_mkCheck('Runtime', 'runtime.renderer.contextLost', 'FAIL', 'WebGL context is lost'));
+        } else if (lost === false) {
+          checks.push(_mkCheck('Runtime', 'runtime.renderer.contextLost', 'PASS', 'WebGL context is not lost'));
+        } else {
+          checks.push(_mkCheck('Runtime', 'runtime.renderer.contextLost', 'INFO', 'Could not determine context lost state'));
+        }
+      } catch (e) {
+        checks.push(_mkCheck('Runtime', 'runtime.renderer.contextLost', 'WARN', 'Error while checking context lost state', {
+          error: String(e?.message || e)
+        }));
+      }
+
+      try {
+        const caps = renderer.capabilities || {};
+        const precision = caps.precision || null;
+        const isWebGL2 = Boolean(caps.isWebGL2);
+        const maxTextures = caps.maxTextures ?? null;
+        const maxVertexTextures = caps.maxVertexTextures ?? null;
+        const maxTextureSize = caps.maxTextureSize ?? null;
+        const maxCubemapSize = caps.maxCubemapSize ?? null;
+        checks.push(_mkCheck('Runtime', 'runtime.renderer.capabilities', 'INFO', `Renderer: ${isWebGL2 ? 'WebGL2' : 'WebGL1'} | precision=${precision}`, {
+          isWebGL2,
+          precision,
+          maxTextures,
+          maxVertexTextures,
+          maxTextureSize,
+          maxCubemapSize,
+          logarithmicDepthBuffer: Boolean(caps.logarithmicDepthBuffer),
+          floatFragmentTextures: Boolean(caps.floatFragmentTextures),
+          floatVertexTextures: Boolean(caps.floatVertexTextures),
+        }));
+      } catch (e) {
+        checks.push(_mkCheck('Runtime', 'runtime.renderer.capabilities', 'WARN', 'Failed to read renderer capabilities', {
+          error: String(e?.message || e)
+        }));
+      }
+    } else {
+      checks.push(_mkCheck('Runtime', 'runtime.renderer.exists', 'FAIL', 'No Three renderer found on window.MapShine'));
+    }
+
+    if (effectComposer) {
+      const total = effectComposer.effects?.size ?? 0;
+      let enabledCount = 0;
+      let continuousCount = 0;
+      const enabled = [];
+      try {
+        for (const [key, effect] of (effectComposer.effects?.entries?.() || [])) {
+          if (!effect) continue;
+          if (effect.enabled) {
+            enabledCount++;
+            enabled.push(key);
+          }
+          if (effect.enabled && effect.requiresContinuousRender) continuousCount++;
+        }
+      } catch (_) {
+      }
+
+      checks.push(_mkCheck('Runtime', 'runtime.effects.summary', total > 0 ? 'PASS' : 'WARN', `Effects registered: ${total} (enabled: ${enabledCount})`, {
+        total,
+        enabledCount,
+        continuousCount,
+        enabled: enabled.slice(0, 50)
+      }));
+
+      // Per-effect health snapshot (instrumented in EffectComposer)
+      try {
+        const health = typeof effectComposer.getEffectHealthSnapshot === 'function'
+          ? effectComposer.getEffectHealthSnapshot()
+          : null;
+
+        if (health?.effects?.length) {
+          const nowMs = Date.now();
+          const enabled = health.effects.filter(e => e.enabled);
+          const lazy = health.effects.filter(e => e.lazyInitPending);
+          const errored = health.effects.filter(e => e.lastErrorAtMs !== null);
+          const neverRan = enabled.filter(e => !e.lastUpdateAtMs && !e.lastRenderAtMs);
+          const stalled = enabled.filter(e => {
+            const last = Math.max(e.lastUpdateAtMs || 0, e.lastRenderAtMs || 0);
+            return last > 0 && (nowMs - last) > 30000;
+          });
+
+          const status = (errored.length > 0 || neverRan.length > 0) ? 'WARN' : 'PASS';
+          checks.push(_mkCheck('Runtime', 'runtime.effects.health', status,
+            `Effect health: enabled=${enabled.length}, lazyInitPending=${lazy.length}, errored=${errored.length}, enabledNeverRan=${neverRan.length}`, {
+              generatedAtMs: health.generatedAtMs,
+              enabled: enabled.map(e => e.id),
+              lazyInitPending: lazy.map(e => e.id),
+              errored: errored.slice(0, 20).map(e => ({ id: e.id, lastErrorAtMs: e.lastErrorAtMs, lastErrorMessage: e.lastErrorMessage })),
+              enabledNeverRan: neverRan.map(e => e.id),
+              enabledStalled30s: stalled.map(e => e.id),
+              effects: health.effects,
+            }));
+
+          if (neverRan.length > 0) {
+            checks.push(_mkCheck('Runtime', 'runtime.effects.enabledNeverRan', 'WARN',
+              `Enabled effects that never ran update/render: ${neverRan.slice(0, 12).map(e => e.id).join(', ')}`, {
+                ids: neverRan.map(e => e.id)
+              }));
+          }
+          if (lazy.length > 0) {
+            checks.push(_mkCheck('Runtime', 'runtime.effects.lazyInitPending', 'INFO',
+              `Lazy-init pending effects: ${lazy.slice(0, 12).map(e => e.id).join(', ')}`, {
+                ids: lazy.map(e => e.id)
+              }));
+          }
+          if (errored.length > 0) {
+            checks.push(_mkCheck('Runtime', 'runtime.effects.errors', 'WARN',
+              `Effects with errors: ${errored.slice(0, 12).map(e => e.id).join(', ')}`, {
+                effects: errored.map(e => ({ id: e.id, lastErrorAtMs: e.lastErrorAtMs, lastErrorMessage: e.lastErrorMessage }))
+              }));
+          }
+        } else {
+          checks.push(_mkCheck('Runtime', 'runtime.effects.health', 'INFO', 'Effect health telemetry not available'));
+        }
+      } catch (e) {
+        checks.push(_mkCheck('Runtime', 'runtime.effects.health', 'WARN', 'Failed to read effect health telemetry', {
+          error: String(e?.message || e)
+        }));
+      }
+
+      // Render target sanity
+      try {
+        const rts = effectComposer.renderTargets || null;
+        const sceneRT = effectComposer.sceneRenderTarget || null;
+        checks.push(_mkCheck('Runtime', 'runtime.renderTargets.summary', 'INFO', `Composer RTs: map=${rts?.size ?? 0}, sceneRT=${sceneRT ? `${sceneRT.width}x${sceneRT.height}` : 'null'}`, {
+          mapSize: rts?.size ?? 0,
+          sceneRenderTarget: sceneRT ? { width: sceneRT.width, height: sceneRT.height, depthBuffer: Boolean(sceneRT.depthBuffer) } : null,
+        }));
+      } catch (_) {
+      }
+    } else {
+      checks.push(_mkCheck('Runtime', 'runtime.effects.summary', 'WARN', 'EffectComposer not found; effects may not be initialized'));
+    }
 
     checks.push(_mkCheck('Levels', 'levels.compatibility.mode', 'INFO', `Compatibility mode: ${compatibilityMode}`, {
       mode: compatibilityMode,
@@ -934,6 +1173,67 @@ export class DiagnosticCenterDialog {
     const registry = getEffectMaskRegistry();
     const knownMaskIds = Object.keys(registry);
 
+    // --- Shader compilation probe (best-effort) ---
+    if (renderer && threeScene && threeCamera) {
+      const compileTargets = [];
+      compileTargets.push({ label: 'mainScene', scene: threeScene, camera: threeCamera });
+      try {
+        const effects = effectComposer?.effects;
+        if (effects && typeof effects.values === 'function') {
+          for (const effect of effects.values()) {
+            if (!effect) continue;
+            const s = effect.scene || effect._scene || null;
+            const c = effect.camera || effect._camera || null;
+            if (s && c) compileTargets.push({ label: effect.id || effect.key || effect.name || 'effectScene', scene: s, camera: c });
+          }
+        }
+      } catch (_) {
+      }
+
+      let shaderProbeSummary = null;
+      try {
+        await _captureConsoleOutput(async (captured) => {
+          for (const t of compileTargets) {
+            try {
+              renderer.compile(t.scene, t.camera);
+            } catch (e) {
+              captured.error.push(`[MapShine Diagnostic] compile(${t.label}) threw: ${String(e?.message || e)}`);
+            }
+          }
+        });
+
+        // Run again to get captured output (capture wrapper returns fn result; we use side-effects)
+        shaderProbeSummary = await _captureConsoleOutput(async (captured) => {
+          for (const t of compileTargets) {
+            try {
+              renderer.compile(t.scene, t.camera);
+            } catch (e) {
+              captured.error.push(`[MapShine Diagnostic] compile(${t.label}) threw: ${String(e?.message || e)}`);
+            }
+          }
+          return _summarizeShaderErrors(captured);
+        });
+      } catch (e) {
+        checks.push(_mkCheck('Shaders', 'shaders.compileProbe', 'WARN', 'Shader compile probe failed to run', {
+          error: String(e?.message || e)
+        }));
+      }
+
+      if (shaderProbeSummary) {
+        const status = shaderProbeSummary.shaderLineCount > 0 ? 'FAIL' : 'PASS';
+        const msg = shaderProbeSummary.shaderLineCount > 0
+          ? `Shader compile/link errors detected (${shaderProbeSummary.shaderLineCount} line(s)). See details.`
+          : 'No shader compile/link errors detected during compile sweep';
+        checks.push(_mkCheck('Shaders', 'shaders.compileProbe', status, msg, {
+          compileTargets: compileTargets.map((t) => t.label).slice(0, 40),
+          ...shaderProbeSummary,
+          shaderLines: shaderProbeSummary.shaderLines.slice(0, 20)
+        }));
+      }
+    } else {
+      checks.push(_mkCheck('Shaders', 'shaders.compileProbe', 'INFO', 'Shader compile probe skipped (renderer/scene/camera not available)'));
+    }
+
     if (basePath) {
       try {
         const res = await loadAssetBundle(basePath, null, {
@@ -1098,7 +1398,7 @@ export class DiagnosticCenterDialog {
       groups.get(cat).push(c);
     }
 
-    const order = ['Levels', 'Tile', 'Scene', 'Flags', 'Three', 'Surface', 'Assets', 'Other'];
+    const order = ['Shaders', 'Runtime', 'Levels', 'Tile', 'Scene', 'Flags', 'Three', 'Surface', 'Assets', 'Other'];
     const cats = Array.from(groups.keys());
     cats.sort((a, b) => {
       const ai = order.indexOf(a);

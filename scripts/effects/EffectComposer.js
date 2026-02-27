@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { getCircuitBreaker, CIRCUIT_BREAKER_EFFECTS } from '../core/circuit-breaker.js';
 import { TimeManager } from '../core/time.js';
 import { globalProfiler } from '../core/profiler.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
@@ -135,6 +136,13 @@ export class EffectComposer {
     // PERFORMANCE: Reusable arrays for scene/post effect splitting
     this._sceneEffects = [];
     this._postEffects = [];
+
+    /**
+     * Per-effect health telemetry for diagnostics.
+     * This is intentionally lightweight: timestamps and last error only.
+     * @type {Map<string, {id: string, enabled: boolean, lazyInitPending: boolean, lastPrepareFrameAtMs: number|null, lastUpdateAtMs: number|null, lastRenderAtMs: number|null, lastUpdateDurationMs: number|null, lastRenderDurationMs: number|null, lastErrorAtMs: number|null, lastErrorMessage: string|null}>}
+     */
+    this._effectHealth = new Map();
     
     // Explicitly enable EXT_float_blend if available to suppress warnings
     try {
@@ -146,6 +154,53 @@ export class EffectComposer {
     }
     
     log.info('EffectComposer created');
+  }
+
+  _getOrCreateEffectHealth(effect) {
+    const id = String(effect?.id || '');
+    if (!id) return null;
+    let entry = this._effectHealth.get(id);
+    if (!entry) {
+      entry = {
+        id,
+        enabled: false,
+        lazyInitPending: false,
+        lastPrepareFrameAtMs: null,
+        lastUpdateAtMs: null,
+        lastRenderAtMs: null,
+        lastUpdateDurationMs: null,
+        lastRenderDurationMs: null,
+        lastErrorAtMs: null,
+        lastErrorMessage: null,
+      };
+      this._effectHealth.set(id, entry);
+    }
+    entry.enabled = Boolean(effect?.enabled);
+    entry.lazyInitPending = Boolean(effect?._lazyInitPending);
+    return entry;
+  }
+
+  _recordEffectError(effect, error) {
+    const entry = this._getOrCreateEffectHealth(effect);
+    if (!entry) return;
+    entry.lastErrorAtMs = Date.now();
+    entry.lastErrorMessage = String(error?.message || error);
+  }
+
+  /**
+   * Snapshot of effect health for the Diagnostic Center.
+   * @returns {{generatedAtMs: number, effects: Array<object>}}
+   */
+  getEffectHealthSnapshot() {
+    const out = [];
+    for (const effect of (this.effects?.values?.() || [])) {
+      if (!effect?.id) continue;
+      const entry = this._getOrCreateEffectHealth(effect);
+      if (!entry) continue;
+      out.push({ ...entry });
+    }
+    out.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    return { generatedAtMs: Date.now(), effects: out };
   }
 
   /**
@@ -527,7 +582,8 @@ export class EffectComposer {
    * @returns {Promise<{registered: string[], skipped: string[], deferred: string[], timings: Array<{id: string, durationMs: number}>}>}
    */
   async registerEffectBatch(effects, opts = {}) {
-    const concurrency = Math.max(1, opts?.concurrency ?? 4);
+    // DIAGNOSTIC: Force sequential (concurrency=1) so loading logs are linear
+    const concurrency = 1;
     const onProgress = typeof opts?.onProgress === 'function' ? opts.onProgress : null;
     const skipIds = opts?.skipIds instanceof Set ? opts.skipIds : null;
 
@@ -548,6 +604,7 @@ export class EffectComposer {
         continue;
       }
       this.effects.set(effect.id, effect);
+      this._getOrCreateEffectHealth(effect);
 
       // P2.1: Defer initialization for effects the user has disabled via Graphics Settings.
       // They remain in the Map (preserving render order) but won't compile shaders until
@@ -555,6 +612,7 @@ export class EffectComposer {
       if (skipIds && skipIds.has(effect.id)) {
         effect.enabled = false;
         effect._lazyInitPending = true;
+        this._getOrCreateEffectHealth(effect);
         deferred.push(effect.id);
         log.debug(`Effect deferred (lazy init): ${effect.id}`);
         continue;
@@ -585,6 +643,7 @@ export class EffectComposer {
 
     const initPromises = toInit.map(async (effect) => {
       await acquire();
+      console.log(`[Map Shine Advanced: Loading] ▶ Effect INIT START: ${effect.id}`);
       const t0 = performance.now();
       const spanId = doLoadProfile ? `effect:${effect.id}:initialize` : null;
       if (doLoadProfile) {
@@ -601,6 +660,7 @@ export class EffectComposer {
       const dt = performance.now() - t0;
       timings.push({ id: effect.id, durationMs: dt });
       completed++;
+      console.log(`[Map Shine Advanced: Loading] ✔ Effect INIT DONE:  ${effect.id} (${dt.toFixed(1)}ms) [${completed}/${total}]`);
       if (onProgress) {
         try { onProgress(completed, total, effect.id); } catch (_) {}
       }
@@ -939,9 +999,12 @@ export class EffectComposer {
     for (const effect of effects) {
       if (!effect.enabled) continue;
       try {
+        const _eh = this._getOrCreateEffectHealth(effect);
+        if (_eh) _eh.lastPrepareFrameAtMs = Date.now();
         effect.prepareFrame(timeInfo);
       } catch (error) {
         log.error(`Effect prepareFrame error (${effect.id}):`, error);
+        this._recordEffectError(effect, error);
       }
     }
 
@@ -1026,11 +1089,26 @@ export class EffectComposer {
           // 4. Floor-scoped scene effects update + render.
           for (const _eff of _floorSceneEffects) {
             try {
-              let _t = 0; if (doProfile) _t = performance.now();
-              _eff.update(timeInfo); if (doProfile) profiler.recordEffectUpdate(_eff.id, performance.now() - _t);
-              if (doProfile) _t = performance.now();
-              _eff.render(this.renderer, this.scene, this.camera); if (doProfile) profiler.recordEffectRender(_eff.id, performance.now() - _t);
-            } catch (_e) { log.error(`Floor scene effect error (${_eff.id}):`, _e); this.handleEffectError(_eff, _e); }
+              const _eh = this._getOrCreateEffectHealth(_eff);
+              let _t = 0;
+              _t = performance.now();
+              if (_eh) _eh.lastUpdateAtMs = Date.now();
+              _eff.update(timeInfo);
+              const _dtU = performance.now() - _t;
+              if (_eh) _eh.lastUpdateDurationMs = _dtU;
+              if (doProfile) profiler.recordEffectUpdate(_eff.id, _dtU);
+
+              _t = performance.now();
+              if (_eh) _eh.lastRenderAtMs = Date.now();
+              _eff.render(this.renderer, this.scene, this.camera);
+              const _dtR = performance.now() - _t;
+              if (_eh) _eh.lastRenderDurationMs = _dtR;
+              if (doProfile) profiler.recordEffectRender(_eff.id, _dtR);
+            } catch (_e) {
+              log.error(`Floor scene effect error (${_eff.id}):`, _e);
+              this._recordEffectError(_eff, _e);
+              this.handleEffectError(_eff, _e);
+            }
           }
 
           // 5. Render floor geometry into _floorRT (cleared to transparent black).
@@ -1053,16 +1131,31 @@ export class EffectComposer {
             for (let _pi = 0; _pi < _floorPostEffects.length; _pi++) {
               const _pe = _floorPostEffects[_pi];
               try {
-                let _t = 0; if (doProfile) _t = performance.now();
-                _pe.update(timeInfo); if (doProfile) profiler.recordEffectUpdate(_pe.id, performance.now() - _t);
+                const _eh = this._getOrCreateEffectHealth(_pe);
+                let _t = 0;
+                _t = performance.now();
+                if (_eh) _eh.lastUpdateAtMs = Date.now();
+                _pe.update(timeInfo);
+                const _dtU = performance.now() - _t;
+                if (_eh) _eh.lastUpdateDurationMs = _dtU;
+                if (doProfile) profiler.recordEffectUpdate(_pe.id, _dtU);
                 if (typeof _pe.setInputTexture === 'function') _pe.setInputTexture(_fpIn.texture);
                 if (typeof _pe.setRenderToScreen === 'function') _pe.setRenderToScreen(false);
                 if (typeof _pe.setBuffers === 'function') _pe.setBuffers(_fpIn, _fpOut);
                 this.renderer.setRenderTarget(_fpOut);
                 this.renderer.clear();
-                if (doProfile) _t = performance.now();
-                _pe.render(this.renderer, this.scene, this.camera); if (doProfile) profiler.recordEffectRender(_pe.id, performance.now() - _t);
-              } catch (_e) { log.error(`Floor post effect error (${_pe.id}):`, _e); this.handleEffectError(_pe, _e); }
+
+                _t = performance.now();
+                if (_eh) _eh.lastRenderAtMs = Date.now();
+                _pe.render(this.renderer, this.scene, this.camera);
+                const _dtR = performance.now() - _t;
+                if (_eh) _eh.lastRenderDurationMs = _dtR;
+                if (doProfile) profiler.recordEffectRender(_pe.id, _dtR);
+              } catch (_e) {
+                log.error(`Floor post effect error (${_pe.id}):`, _e);
+                this._recordEffectError(_pe, _e);
+                this.handleEffectError(_pe, _e);
+              }
               _floorFinalRT = _fpOut;
               if (_pi < _floorPostEffects.length - 1) {
                 _fpIn = _fpOut;
@@ -1102,11 +1195,26 @@ export class EffectComposer {
       // Global-scoped scene effects run once on the accumulated image.
       for (const _eff of _globalSceneEffects) {
         try {
-          let _t = 0; if (doProfile) _t = performance.now();
-          _eff.update(timeInfo); if (doProfile) profiler.recordEffectUpdate(_eff.id, performance.now() - _t);
-          if (doProfile) _t = performance.now();
-          _eff.render(this.renderer, this.scene, this.camera); if (doProfile) profiler.recordEffectRender(_eff.id, performance.now() - _t);
-        } catch (_e) { log.error(`Global scene effect error (${_eff.id}):`, _e); this.handleEffectError(_eff, _e); }
+          const _eh = this._getOrCreateEffectHealth(_eff);
+          let _t = 0;
+          _t = performance.now();
+          if (_eh) _eh.lastUpdateAtMs = Date.now();
+          _eff.update(timeInfo);
+          const _dtU = performance.now() - _t;
+          if (_eh) _eh.lastUpdateDurationMs = _dtU;
+          if (doProfile) profiler.recordEffectUpdate(_eff.id, _dtU);
+
+          _t = performance.now();
+          if (_eh) _eh.lastRenderAtMs = Date.now();
+          _eff.render(this.renderer, this.scene, this.camera);
+          const _dtR = performance.now() - _t;
+          if (_eh) _eh.lastRenderDurationMs = _dtR;
+          if (doProfile) profiler.recordEffectRender(_eff.id, _dtR);
+        } catch (_e) {
+          log.error(`Global scene effect error (${_eff.id}):`, _e);
+          this._recordEffectError(_eff, _e);
+          this.handleEffectError(_eff, _e);
+        }
       }
 
       // Global post-processing on the accumulated image → screen.
@@ -1119,16 +1227,31 @@ export class EffectComposer {
           const _isLast = _gi === _globalPostEffects.length - 1;
           const _target = _isLast ? null : _gpOut;
           try {
-            let _t = 0; if (doProfile) _t = performance.now();
-            _ge.update(timeInfo); if (doProfile) profiler.recordEffectUpdate(_ge.id, performance.now() - _t);
+            const _eh = this._getOrCreateEffectHealth(_ge);
+            let _t = 0;
+            _t = performance.now();
+            if (_eh) _eh.lastUpdateAtMs = Date.now();
+            _ge.update(timeInfo);
+            const _dtU = performance.now() - _t;
+            if (_eh) _eh.lastUpdateDurationMs = _dtU;
+            if (doProfile) profiler.recordEffectUpdate(_ge.id, _dtU);
             if (typeof _ge.setInputTexture === 'function') _ge.setInputTexture(_gpIn.texture);
             if (typeof _ge.setRenderToScreen === 'function') _ge.setRenderToScreen(_isLast);
             if (typeof _ge.setBuffers === 'function') _ge.setBuffers(_gpIn, _target);
             this.renderer.setRenderTarget(_target);
             if (_target) this.renderer.clear();
-            if (doProfile) _t = performance.now();
-            _ge.render(this.renderer, this.scene, this.camera); if (doProfile) profiler.recordEffectRender(_ge.id, performance.now() - _t);
-          } catch (_e) { log.error(`Global post effect error (${_ge.id}):`, _e); this.handleEffectError(_ge, _e); }
+
+            _t = performance.now();
+            if (_eh) _eh.lastRenderAtMs = Date.now();
+            _ge.render(this.renderer, this.scene, this.camera);
+            const _dtR = performance.now() - _t;
+            if (_eh) _eh.lastRenderDurationMs = _dtR;
+            if (doProfile) profiler.recordEffectRender(_ge.id, _dtR);
+          } catch (_e) {
+            log.error(`Global post effect error (${_ge.id}):`, _e);
+            this._recordEffectError(_ge, _e);
+            this.handleEffectError(_ge, _e);
+          }
           if (!_isLast) {
             _gpIn = _gpOut;
             _gpOut = (_gpIn === this.getRenderTarget('post_1')) ? _gpPing : this.getRenderTarget('post_1');
@@ -1164,11 +1287,26 @@ export class EffectComposer {
     // PASS 0: UPDATE & OPTIONAL RENDER FOR SCENE EFFECTS
     for (const effect of sceneEffects) {
       try {
-        let t0 = 0; if (doProfile) t0 = performance.now();
-        effect.update(timeInfo); if (doProfile) profiler.recordEffectUpdate(effect.id, performance.now() - t0);
-        if (doProfile) t0 = performance.now();
-        effect.render(this.renderer, this.scene, this.camera); if (doProfile) profiler.recordEffectRender(effect.id, performance.now() - t0);
-      } catch (error) { log.error(`Scene effect update/render error (${effect.id}):`, error); this.handleEffectError(effect, error); }
+        const _eh = this._getOrCreateEffectHealth(effect);
+        let t0 = 0;
+        t0 = performance.now();
+        if (_eh) _eh.lastUpdateAtMs = Date.now();
+        effect.update(timeInfo);
+        const dtU = performance.now() - t0;
+        if (_eh) _eh.lastUpdateDurationMs = dtU;
+        if (doProfile) profiler.recordEffectUpdate(effect.id, dtU);
+
+        t0 = performance.now();
+        if (_eh) _eh.lastRenderAtMs = Date.now();
+        effect.render(this.renderer, this.scene, this.camera);
+        const dtR = performance.now() - t0;
+        if (_eh) _eh.lastRenderDurationMs = dtR;
+        if (doProfile) profiler.recordEffectRender(effect.id, dtR);
+      } catch (error) {
+        log.error(`Scene effect update/render error (${effect.id}):`, error);
+        this._recordEffectError(effect, error);
+        this.handleEffectError(effect, error);
+      }
     }
 
     if (usePostProcessing) { this.ensureSceneRenderTarget(); this.renderer.setRenderTarget(this.sceneRenderTarget); this.renderer.clear(); }
@@ -1296,6 +1434,37 @@ export class EffectComposer {
    */
   _getFloorCompositorV2() {
     if (!this._floorCompositorV2) {
+      // “Enable Everything” overrides are intentionally OPT-IN.
+      // Forcing heavy V2 post passes on during initial scene load can trigger
+      // a GPU driver shader compilation hang (symptom: all-white scene + locked UI).
+      //
+      // To enable the overrides, set:
+      //   localStorage.setItem('msa-enable-everything', '1')
+      // and reload.
+      const enableEverything = (() => {
+        try { return globalThis.localStorage?.getItem?.('msa-enable-everything') === '1'; } catch (_) { return false; }
+      })();
+
+      if (enableEverything) {
+        try {
+          const cb = getCircuitBreaker();
+          cb.ensureKnown(CIRCUIT_BREAKER_EFFECTS);
+          cb.clearAll();
+
+          // Legacy client-local kill switches that can make effects appear “off”.
+          try { globalThis.localStorage?.removeItem?.('msa-disable-water-effect'); } catch (_) {}
+          try { globalThis.localStorage?.removeItem?.('msa-disable-texture-loading'); } catch (_) {}
+          try {
+            const sceneId = globalThis.canvas?.scene?.id || 'no-scene';
+            const userId = globalThis.game?.user?.id || 'no-user';
+            const storageKey = `map-shine-advanced.graphicsOverrides.${sceneId}.${userId}`;
+            globalThis.localStorage?.removeItem?.(storageKey);
+          } catch (_) {}
+
+          log.warn('FloorCompositor V2: enable-everything overrides ACTIVE (msa-enable-everything=1)');
+        } catch (_) {}
+      }
+
       this._floorCompositorV2 = new FloorCompositor(this.renderer, this.scene, this.camera);
       this._floorCompositorV2.initialize();
       log.info('FloorCompositor V2 created and initialized');
@@ -1384,6 +1553,11 @@ export class EffectComposer {
       } catch (err) {
         log.warn('FloorCompositor V2: param replay failed:', err);
       }
+
+      // NOTE: Do not force-enable effects here by default. Let persisted params +
+      // circuit breaker govern effect enablement. When enableEverything is on,
+      // we still avoid forcing heavy passes during loading; users can then
+      // enable them manually after the scene is responsive.
     }
     return this._floorCompositorV2;
   }

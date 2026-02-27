@@ -90,9 +90,44 @@ export async function openCircuitBreakerPanel() {
             for (const def of CIRCUIT_BREAKER_EFFECTS) {
               cb.setDisabled(def.id, false);
             }
-            globalThis.ui?.notifications?.info?.('All effects enabled in circuit breaker. Reload Foundry to take effect.');
+
+            // Also clear other client-local "kill switches" that can hard-gate effects
+            // even when the circuit breaker is fully enabled.
+            //
+            // 1) Legacy single-flag water disable (kept for backwards compat)
+            try { globalThis.localStorage?.removeItem?.('msa-disable-water-effect'); } catch (_) {}
+
+            // 1b) A/B test kill-switch: bypass Map Shine texture/mask loading entirely.
+            // If left on, effects will appear "disabled" because no masks ever load.
+            try { globalThis.localStorage?.removeItem?.('msa-disable-texture-loading'); } catch (_) {}
+
+            // 2) Graphics overrides (can set globalDisableAll=true or per-effect enabled=false)
+            try {
+              const sceneId = globalThis.canvas?.scene?.id || 'no-scene';
+              const userId = globalThis.game?.user?.id || 'no-user';
+              const storageKey = `map-shine-advanced.graphicsOverrides.${sceneId}.${userId}`;
+              globalThis.localStorage?.removeItem?.(storageKey);
+            } catch (_) {}
+
+            globalThis.ui?.notifications?.info?.('All effects enabled (circuit breaker + cleared client override gates). Reload Foundry to take effect.');
           } catch (e) {
             console.error('Circuit Breaker enableAll failed', e);
+          }
+        },
+      },
+      disableV2: {
+        icon: '<i class="fas fa-layer-group"></i>',
+        label: 'Disable V2 Compositor',
+        callback: async () => {
+          try {
+            // Compositor V2 is a hard gate: when enabled, createThreeCanvas() intentionally
+            // bypasses the legacy (V1) effect stack. Disable it when you want the full
+            // legacy effect pipeline to instantiate.
+            await globalThis.game?.settings?.set?.('map-shine-advanced', 'useCompositorV2', false);
+            globalThis.ui?.notifications?.info?.('Compositor V2 disabled. Reload Foundry to take effect.');
+          } catch (e) {
+            console.error('Circuit Breaker disableV2 failed', e);
+            globalThis.ui?.notifications?.warn?.('Failed to disable V2 compositor. Check console.');
           }
         },
       },

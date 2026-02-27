@@ -9,6 +9,7 @@ import * as capabilities from './capabilities.js';
 import * as rendererStrategy from './renderer-strategy.js';
 import * as errors from './errors.js';
 import { installConsoleHelpers } from '../utils/console-helpers.js';
+import { GameSystemManager } from './game-system.js';
 
 const logger = log.createLogger('Bootstrap');
 
@@ -117,14 +118,17 @@ export async function bootstrap(options = {}) {
 
     _msaCrisisLog(74, 'bootstrap: state.renderer + state.rendererType assigned');
 
-    // Step 4.5: Initialize Game System Manager
-    _msaCrisisLog(75, 'bootstrap: importing GameSystemManager');
-    logger.info('Initializing game system manager...');
-    const { GameSystemManager } = await import('./game-system.js');
-    state.gameSystem = new GameSystemManager();
-    state.gameSystem.initialize();
-
-    _msaCrisisLog(76, 'bootstrap: GameSystemManager initialized');
+    // Step 4.5: Initialize Game System Manager (non-fatal — rendering works without it)
+    _msaCrisisLog(75, 'bootstrap: creating GameSystemManager');
+    try {
+      logger.info('Initializing game system manager...');
+      state.gameSystem = new GameSystemManager();
+      state.gameSystem.initialize();
+      _msaCrisisLog(76, 'bootstrap: GameSystemManager initialized');
+    } catch (gsErr) {
+      logger.warn('GameSystemManager failed to initialize — game-system features disabled', gsErr);
+      _msaCrisisLog(76, `bootstrap: GameSystemManager failed (${gsErr?.message ?? 'unknown'}) — continuing`);
+    }
 
     // Step 5: Create minimal scene (if not skipped)
     if (!skipSceneInit) {

@@ -75,6 +75,9 @@ export class RenderLoop {
     // Track first-frame timing to diagnose residual shader compilation
     this._firstFrameLogged = false;
 
+    // Throttle context-lost logs so we don't spam console while the rAF loop keeps running.
+    this._lastContextLostLogMs = -Infinity;
+
     // Bind render method to preserve context
     this.render = this.render.bind(this);
   }
@@ -200,16 +203,25 @@ export class RenderLoop {
   render() {
     if (!this.isRunning) return;
 
+    // Schedule next frame FIRST.
+    // Important: If the WebGL context is lost we still want the rAF loop to keep
+    // running so we can resume immediately when the context is restored.
+    this.animationFrameId = requestAnimationFrame(this.render);
+
     // Skip rendering when the WebGL context is lost.
     // Without this guard, every render call returns GL_INVALID_OPERATION (1282)
-    // and fills the console with shader VALIDATE_STATUS errors. The rAF loop
-    // itself continues so we resume immediately when the context is restored.
+    // and fills the console with shader VALIDATE_STATUS errors.
     try {
-      if (this.renderer?.getContext?.()?.isContextLost?.()) return;
+      const lost = this.renderer?.getContext?.()?.isContextLost?.();
+      if (lost) {
+        const now = performance.now();
+        if ((now - (this._lastContextLostLogMs || 0)) > 2000) {
+          this._lastContextLostLogMs = now;
+          log.warn('WebGL context is lost — skipping render this frame (rAF loop continues)');
+        }
+        return;
+      }
     } catch (_) {}
-
-    // Schedule next frame
-    this.animationFrameId = requestAnimationFrame(this.render);
 
     // Calculate delta time
     const now = performance.now();

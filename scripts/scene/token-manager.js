@@ -1383,8 +1383,21 @@ vec3 ms_applySceneLighting(vec3 color) {
 
     this._disposeTokenOverlays(spriteData);
 
-    // Remove from scene
-    this.scene.remove(sprite);
+    // Remove from whichever scene currently owns the sprite.
+    // In V2, tokens are parented under the FloorRenderBus scene, not the main scene.
+    try {
+      if (sprite.parent) {
+        sprite.parent.remove(sprite);
+      }
+    } catch (_) {
+    }
+    // Defense-in-depth: explicitly remove from both possible scenes.
+    try { this.scene?.remove?.(sprite); } catch (_) {}
+    try {
+      const busScene = this._getV2BusScene();
+      busScene?.remove?.(sprite);
+    } catch (_) {
+    }
 
     // Dispose material and geometry
     if (sprite.material) {

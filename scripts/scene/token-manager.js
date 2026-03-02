@@ -1005,9 +1005,17 @@ vec3 ms_applySceneLighting(vec3 color) {
     sprite.layers.set(0);
 
     // Compositor V2: assign token to its floor layer for layer-based isolation.
-    const floorLayerMgr = window.MapShine?.floorLayerManager;
-    if (floorLayerMgr) {
-      floorLayerMgr.assignTokenToFloor(sprite, tokenDoc);
+    // IMPORTANT: This must be V2-only. In the V1 pipeline, the camera often
+    // renders only layer 0. If we move tokens off layer 0, they can disappear
+    // from the main render unless camera layers are explicitly enabled.
+    const _v2Active = (() => {
+      try { return !!game?.settings?.get('map-shine-advanced', 'useCompositorV2'); } catch (_) { return false; }
+    })();
+    if (_v2Active) {
+      const floorLayerMgr = window.MapShine?.floorLayerManager;
+      if (floorLayerMgr) {
+        floorLayerMgr.assignTokenToFloor(sprite, tokenDoc);
+      }
     }
 
     // Store token metadata
@@ -1122,9 +1130,14 @@ vec3 ms_applySceneLighting(vec3 color) {
 
     // Compositor V2: reassign token to correct floor layer when elevation changes.
     if ('elevation' in changes) {
-      const floorLayerMgr = window.MapShine?.floorLayerManager;
-      if (floorLayerMgr) {
-        floorLayerMgr.assignTokenToFloor(sprite, tokenDoc);
+      const _v2Active = (() => {
+        try { return !!game?.settings?.get('map-shine-advanced', 'useCompositorV2'); } catch (_) { return false; }
+      })();
+      if (_v2Active) {
+        const floorLayerMgr = window.MapShine?.floorLayerManager;
+        if (floorLayerMgr) {
+          floorLayerMgr.assignTokenToFloor(sprite, tokenDoc);
+        }
       }
     }
 

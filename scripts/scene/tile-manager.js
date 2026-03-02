@@ -12,7 +12,7 @@ import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { isTileVisibleForPerspective, isBackgroundVisibleForPerspective, isWeatherVisibleForPerspective } from '../foundry/elevation-context.js';
 import { tileHasLevelsRange, isLevelsEnabledForScene, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
 import { applyTileLevelDefaults } from '../foundry/levels-create-defaults.js';
-import { getEffectMaskRegistry } from '../assets/loader.js';
+import { getEffectMaskRegistry, probeMaskFile as probeMaskFileFromLoader } from '../assets/loader.js';
 import { getTextureBudgetTracker, estimateTextureBytes } from '../assets/TextureBudgetTracker.js';
 import { TileEffectBindingManager } from './TileEffectBindingManager.js';
 
@@ -907,7 +907,17 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       hasFilePickerListing = false;
     }
 
-    if (!hasFilePickerListing) return null;
+    // If FilePicker browsing is unavailable (common for non-owner clients),
+    // fall back to the asset loader's probe helper which uses direct HEAD
+    // probing when directory listing returns no files.
+    if (!hasFilePickerListing) {
+      try {
+        const probe = await probeMaskFileFromLoader(parts.pathNoExt, suffix);
+        if (probe?.path) return probe.path;
+      } catch (_) {
+      }
+      return null;
+    }
 
     for (const url of candidates) {
       try {
@@ -915,6 +925,16 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         const exists = await this._fileExistsViaFilePicker(noQuery);
         if (exists) return url;
       } catch (_) {}
+    }
+
+    // FilePicker listing exists, but none of our expected candidates were found.
+    // This can happen when the tile src path normalization differs from what
+    // FilePicker returns (URL encoding differences, storage adapters, etc.).
+    // As a last resort, try the loader's probe helper.
+    try {
+      const probe = await probeMaskFileFromLoader(parts.pathNoExt, suffix);
+      if (probe?.path) return probe.path;
+    } catch (_) {
     }
     return null;
   }
@@ -3929,9 +3949,14 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       // Compositor V2: assign tile to its floor layer for layer-based isolation.
       // This must run AFTER the layer 0 set/disable above and AFTER ROOF_LAYER
       // assignments so the floor layer is additive on top of existing layers.
-      const floorLayerMgr = window.MapShine?.floorLayerManager;
-      if (floorLayerMgr) {
-        floorLayerMgr.assignTileToFloor(sprite, tileDoc);
+      const _v2Active = (() => {
+        try { return !!game?.settings?.get('map-shine-advanced', 'useCompositorV2'); } catch (_) { return false; }
+      })();
+      if (_v2Active) {
+        const floorLayerMgr = window.MapShine?.floorLayerManager;
+        if (floorLayerMgr) {
+          floorLayerMgr.assignTileToFloor(sprite, tileDoc);
+        }
       }
     }
 
@@ -4217,7 +4242,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           // (it relies on roof occlusion which Map Shine doesn't use), so
           // without this check selecting Floor 2 would still show Floor 1
           // tiles, appearing "inverted" to the user.
-          if (elevationVisible && strictBandVisibility) {
+          if (elevationVisible && strictBandVisibility && !sprite?.userData?.isOverhead) {
             const flags = readTileLevelsFlags(tileDoc);
             const tileBottom = Number(flags.rangeBottom);
             const tileTop = Number(flags.rangeTop);
@@ -4237,7 +4262,23 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         } else if (strictBandVisibility) {
           // For tiles without explicit Levels flags, use tile elevation as the
           // fallback floor assignment when an active level context exists.
-          elevationVisible = isElevationWithinActiveBand(tileDoc?.elevation, activeLevelContext);
+          //
+          // IMPORTANT: Overhead tiles act like roofs/ceilings. When a lower floor
+          // is selected, we still need upper roofs to remain visible (they are
+          // the thing covering that floor). Without this, any overhead tile that
+          // lacks Levels flags but has a higher elevation than the active band
+          // is hard-hidden, making overhead layers appear to "not render".
+          if (sprite?.userData?.isOverhead) {
+            const elev = Number(tileDoc?.elevation);
+            const bandTop = Number(activeLevelContext?.top);
+            if (Number.isFinite(elev) && Number.isFinite(bandTop)) {
+              elevationVisible = elev >= bandTop;
+            } else {
+              elevationVisible = true;
+            }
+          } else {
+            elevationVisible = isElevationWithinActiveBand(tileDoc?.elevation, activeLevelContext);
+          }
         }
 
         if (!elevationVisible) {

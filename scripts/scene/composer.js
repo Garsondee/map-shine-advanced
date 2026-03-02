@@ -542,6 +542,62 @@ export class SceneComposer {
           },
           { skipBaseTexture: true, skipMaskIds: _skipMaskIds } // Skip base texture since we got it from Foundry
         );
+
+        // If we got a partial/legacy cached bundle missing critical masks,
+        // retry once with bypassCache:true. This is especially important for
+        // optional-but-authored masks like _Tree/_Bush which can be omitted from
+        // a cached bundle built during a transient FilePicker/probe issue.
+        try {
+          const maskIds = new Set(
+            (result?.bundle?.masks || [])
+              .map((m) => String(m?.id || m?.type || '').toLowerCase())
+              .filter(Boolean)
+          );
+          const hasAny = maskIds.size > 0;
+          const hasOutdoors = maskIds.has('outdoors');
+          const hasTree = maskIds.has('tree');
+          const hasBush = maskIds.has('bush');
+          const hasFire = maskIds.has('fire');
+          
+          // Retry if we're missing ANY critical V1 masks (not just if we have some masks)
+          const missingCritical = !hasOutdoors || !hasTree || !hasBush || !hasFire;
+          
+          if (missingCritical) {
+            log.warn('Asset bundle missing critical V1 masks; retrying with bypassCache', {
+              basePath: bgPath,
+              currentMasks: [...maskIds],
+              hasOutdoors,
+              hasTree,
+              hasBush,
+              hasFire
+            });
+            
+            const retryResult = await assetLoader.loadAssetBundle(bgPath, null, {
+              skipBaseTexture: true,
+              suppressProbeErrors: true,
+              bypassCache: true,
+              skipMaskIds: _skipMaskIds
+            });
+            
+            log.info('Bypass-cache retry completed', {
+              success: retryResult?.success,
+              originalMaskCount: result?.bundle?.masks?.length ?? 0,
+              retryMaskCount: retryResult?.bundle?.masks?.length ?? 0,
+              originalMasks: (result?.bundle?.masks || []).map(m => m.id || m.type),
+              retryMasks: (retryResult?.bundle?.masks || []).map(m => m.id || m.type)
+            });
+            
+            // Use retry result if it found more masks
+            if (retryResult.success && retryResult.bundle?.masks?.length > (result?.bundle?.masks?.length ?? 0)) {
+              result = retryResult;
+              log.info('Using retry result (found more masks)');
+            } else {
+              log.warn('Retry did not find more masks, keeping original result');
+            }
+          }
+        } catch (retryErr) {
+          log.error('Bypass-cache retry failed', retryErr);
+        }
       } finally {
         if (_isDbg) _dlp.end('sc.loadAssetBundle');
         if (doLoadProfile) {
@@ -589,6 +645,13 @@ export class SceneComposer {
     if (bgPath && (result?.bundle?.masks?.length > 0)) {
       this._lastMaskBasePath = bgPath;
     }
+
+    // Log final result state before creating currentBundle
+    log.info('SceneComposer.initialize: final result before currentBundle assignment', {
+      success: result?.success,
+      maskCount: result?.bundle?.masks?.length ?? 0,
+      masks: (result?.bundle?.masks || []).map(m => m.id || m.type)
+    });
 
     // Create bundle with Foundry's texture + any masks that loaded successfully
     this.currentBundle = {
@@ -876,6 +939,11 @@ export class SceneComposer {
     // the entire albedo pass for a frame (which then cascades into black post).
     this.basePlaneMesh.frustumCulled = false;
 
+    // IMPORTANT: The base plane must remain on layer 0 in the V1 pipeline.
+    // The main camera usually renders layer 0 only. If another system reassigns
+    // the base plane into floor layers (1-19), the albedo will vanish.
+    this.basePlaneMesh.layers.set(0);
+
     // ── V2 Compositor: save the raw albedo material ──────────────────────
     // Effects (SpecularEffect, etc.) replace basePlaneMesh.material with PBR
     // ShaderMaterials during wireBaseMeshes(). The V2 FloorCompositor needs
@@ -893,6 +961,8 @@ export class SceneComposer {
     });
     const backMesh = new THREE.Mesh(geometry, backMaterial);
     backMesh.name = 'BasePlane_Back';
+    // Keep child mesh on layer 0 as well.
+    backMesh.layers.set(0);
     this.basePlaneMesh.add(backMesh);
     this._backFaceMesh = backMesh;
     

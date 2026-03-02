@@ -135,7 +135,7 @@ export function exposeGlobals(mapShine, refs) {
     'overlayUIManager', 'lightEditor', 'gridRenderer', 'mapPointsManager',
     'tileMotionManager',
     'weatherController', 'renderLoop', 'sceneDebug', 'controlsIntegration',
-    'dynamicExposureManager', 'physicsRopeManager',
+    'dynamicExposureManager', 'physicsRopeManager', 'assetLoader',
   ];
 
   for (const key of MANAGER_EXPOSURES) {

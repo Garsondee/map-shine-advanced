@@ -58,9 +58,14 @@ const EFFECT_MASKS = {
   // emissive: { suffix: '_Emissive', required: false, description: 'Self-illumination mask' }
 };
 
-// These masks gate many systems (specular, roof/outdoor logic, water, particles).
+// These masks gate many systems (specular, roof/outdoor logic, vegetation).
 // If a cached bundle is missing any of these, we should not trust the cache.
-const CRITICAL_MASK_IDS = new Set(['specular', 'outdoors']);
+//
+// NOTE: tree/bush are marked critical because a cached bundle built during a
+// transient FilePicker permission/availability issue can permanently omit them.
+// They are optional for some maps, but if they exist on disk we need them to
+// reliably load without requiring a manual cache bust.
+const CRITICAL_MASK_IDS = new Set(['specular', 'outdoors', 'tree', 'bush']);
 
 export function getEffectMaskRegistry() {
   return EFFECT_MASKS;
@@ -254,12 +259,23 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
           return null;
         }
 
-        // Resolve the mask file path: from FilePicker results or via direct URL probe
+        // Resolve the mask file path: from FilePicker results or via direct URL probe.
+        // Robustness: if FilePicker returns some files but misses a CRITICAL mask
+        // (outdoors/tree/bush/specular), fall back to direct probing anyway. This
+        // prevents stale/partial directory listings from permanently hiding
+        // authored masks.
         let maskFile = null;
         if (useDirectProbe) {
           maskFile = await probeMaskUrl(basePath, maskDef.suffix);
         } else {
           maskFile = findMaskInFiles(availableFiles, basePath, maskDef.suffix);
+          if (!maskFile && CRITICAL_MASK_IDS.has(String(maskId).toLowerCase())) {
+            try {
+              maskFile = await probeMaskUrl(basePath, maskDef.suffix);
+            } catch (_) {
+              maskFile = null;
+            }
+          }
         }
 
         // Fast-path: if an optional water mask is not present, skip the loading step entirely
@@ -751,9 +767,14 @@ async function probeMaskUrl(basePath, suffix) {
   // Build parallel probes — all formats fire simultaneously
   const probes = SUPPORTED_FORMATS.map(async (format) => {
     const url = normalizePath(`${basePath}${suffix}.${format}`);
-    const resp = await fetch(url, { method: 'HEAD' });
-    if (!resp.ok) throw new Error(`${resp.status}`);
-    return url;
+    try {
+      const resp = await fetch(url, { method: 'HEAD' });
+      if (!resp.ok) throw new Error(`${resp.status}`);
+      return url;
+    } catch (e) {
+      // Suppress console spam - 404s are expected for optional masks
+      throw e;
+    }
   });
 
   try {
@@ -1159,4 +1180,28 @@ export function getCacheStats() {
       ? (_cacheHits / (_cacheHits + _cacheMisses) * 100).toFixed(1) + '%'
       : 'N/A'
   };
+}
+
+/**
+ * Force a full module reload by clearing all caches and reloading the page.
+ * This is a nuclear option for debugging when code changes aren't taking effect.
+ * @public
+ */
+export function forceModuleReload() {
+  log.warn('Forcing full module reload - clearing all caches and reloading page');
+  clearCache();
+  // Clear browser cache for this module's scripts
+  if (window.caches) {
+    window.caches.keys().then(names => {
+      names.forEach(name => {
+        if (name.includes('map-shine')) {
+          window.caches.delete(name);
+        }
+      });
+    });
+  }
+  // Reload with cache bypass
+  setTimeout(() => {
+    window.location.reload(true);
+  }, 100);
 }

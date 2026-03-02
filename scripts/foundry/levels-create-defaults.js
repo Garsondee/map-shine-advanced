@@ -14,6 +14,20 @@ function _isMissing(value) {
   return value === undefined || value === null;
 }
 
+function _getFallbackCreateBandForTileData(data) {
+  const isOverhead = data?.overhead === true
+    || data?.isOverhead === true
+    || data?.flags?.levels?.overhead === true;
+  if (isOverhead) {
+    return { bottom: 10, top: 20, center: 15 };
+  }
+  return { bottom: 0, top: 10, center: 5 };
+}
+
+function _getFallbackCreateBandForLightData(_data) {
+  return { bottom: 0, top: 10, center: 5 };
+}
+
 /**
  * Read the currently selected Levels UI range when the Levels range UI is active.
  *
@@ -156,23 +170,25 @@ export function applyTileLevelDefaults(data, options = {}) {
   // context, even if compatibility mode is set to OFF.
   if (!shouldApplyLevelCreateDefaults(scene, { allowWhenModeOff: true })) return data;
 
-  const band = getFiniteActiveLevelBand();
+  const band = getFiniteActiveLevelBand() || _getFallbackCreateBandForTileData(data);
   if (!band) return data;
 
   const hasElevation = !_isMissing(data.elevation);
+  const hasRangeBottom = !_isMissing(data.flags?.levels?.rangeBottom);
   const hasRangeTop = !_isMissing(data.flags?.levels?.rangeTop);
-  if (hasElevation && hasRangeTop) return data;
+  if (hasElevation && hasRangeBottom && hasRangeTop) return data;
 
   if (!hasElevation) {
     data.elevation = band.center;
   }
 
-  if (!hasRangeTop) {
+  if (!hasRangeBottom || !hasRangeTop) {
     data.flags = (data.flags && typeof data.flags === 'object') ? data.flags : {};
     data.flags.levels = (data.flags.levels && typeof data.flags.levels === 'object')
       ? data.flags.levels
       : {};
-    data.flags.levels.rangeTop = band.top;
+    if (!hasRangeBottom) data.flags.levels.rangeBottom = band.bottom;
+    if (!hasRangeTop) data.flags.levels.rangeTop = band.top;
   }
 
   return data;
@@ -191,23 +207,25 @@ export function applyAmbientLightLevelDefaults(data, options = {}) {
   const scene = options.scene ?? canvas?.scene;
   if (!shouldApplyLevelCreateDefaults(scene)) return data;
 
-  const band = getFiniteActiveLevelBand();
+  const band = getFiniteActiveLevelBand() || _getFallbackCreateBandForLightData(data);
   if (!band) return data;
 
   const hasElevation = !_isMissing(data.elevation);
+  const hasRangeBottom = !_isMissing(data.flags?.levels?.rangeBottom);
   const hasRangeTop = !_isMissing(data.flags?.levels?.rangeTop);
-  if (hasElevation && hasRangeTop) return data;
+  if (hasElevation && hasRangeBottom && hasRangeTop) return data;
 
   if (!hasElevation) {
     data.elevation = band.center;
   }
 
-  if (!hasRangeTop) {
+  if (!hasRangeBottom || !hasRangeTop) {
     data.flags = (data.flags && typeof data.flags === 'object') ? data.flags : {};
     data.flags.levels = (data.flags.levels && typeof data.flags.levels === 'object')
       ? data.flags.levels
       : {};
-    data.flags.levels.rangeTop = band.top;
+    if (!hasRangeBottom) data.flags.levels.rangeBottom = band.bottom;
+    if (!hasRangeTop) data.flags.levels.rangeTop = band.top;
   }
 
   return data;

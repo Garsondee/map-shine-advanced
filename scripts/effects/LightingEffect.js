@@ -246,6 +246,51 @@ export class LightingEffect extends EffectBase {
     return null;
   }
 
+  _applyFoundryEnhancements(doc) {
+    if (!doc) return doc;
+
+    // Always work with a plain object so we can safely merge config fields.
+    let base;
+    try {
+      base = (typeof doc.toObject === 'function') ? doc.toObject() : doc;
+    } catch (_) {
+      base = doc;
+    }
+
+    if (!base || typeof base !== 'object') return doc;
+
+    // Normalize id (Foundry toObject() sometimes returns _id).
+    const id = String(base.id ?? base._id ?? '');
+    if (!id) return base;
+
+    // MapShine-native lights already include enhancements in their config.
+    if (id.startsWith('mapshine:')) return base;
+
+    let enhCfg = null;
+    try {
+      const store = window.MapShine?.lightEnhancementStore;
+      enhCfg = store?.getCached?.(id)?.config ?? null;
+    } catch (_) {
+      enhCfg = null;
+    }
+
+    if (!enhCfg) {
+      try {
+        enhCfg = this._getFoundryEnhancementConfigFallback(id);
+      } catch (_) {
+        enhCfg = null;
+      }
+    }
+
+    if (!enhCfg || typeof enhCfg !== 'object') return base;
+
+    const baseConfig = (base.config && typeof base.config === 'object') ? base.config : {};
+    const enhancedConfig = { ...baseConfig, ...enhCfg };
+
+    // Ensure the merged doc always preserves the normalized id.
+    return { ...base, id, config: enhancedConfig };
+  }
+
   static getControlSchema() {
     return {
       enabled: true,

@@ -94,6 +94,7 @@ import { PhysicsRopeManager } from '../scene/physics-rope-manager.js';
 import { DropHandler } from './drop-handler.js';
 import { sceneDebug } from '../utils/scene-debug.js';
 import { clearCache as clearAssetCache, warmupBundleTextures, getCacheStats } from '../assets/loader.js';
+import * as assetLoader from '../assets/loader.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { weatherController } from '../core/WeatherController.js';
@@ -1435,6 +1436,14 @@ export function initialize() {
       // This is a no-op if floor bands haven't changed (assignTileToFloor checks
       // previous assignment). Cheap — just layer mask bit operations, no GPU work.
       safeCall(() => {
+        // IMPORTANT: FloorLayerManager must only be used when Compositor V2 is active.
+        // It disables layer 0 and assigns sprites (including basePlaneMesh) into
+        // floor layers. In the V1 pipeline the main camera typically renders layer 0
+        // only, so moving the base plane off layer 0 makes the entire albedo vanish.
+        let v2Enabled = false;
+        try { v2Enabled = !!game?.settings?.get('map-shine-advanced', 'useCompositorV2'); } catch (_) {}
+        if (!v2Enabled) return;
+
         const flm = window.MapShine?.floorLayerManager;
         const tm = window.MapShine?.tileManager;
         const tkm = window.MapShine?.tokenManager;
@@ -4570,27 +4579,93 @@ async function createThreeCanvas(scene) {
             // compositor paths. Seeding them would set currentTexture to non-null,
             // which causes a spurious CLEAR action on the first floor UP (since
             // the upper floor has no compositor data for them → newTexture=null,
-            // currentTexture=seeded → clear → fire particles destroyed).
+            // and preserveAcrossFloors=false → clear).
             const policy = reg.getPolicy?.(type);
-            if (!policy?.preserveAcrossFloors) continue;
-
-            const slot = reg._slots?.get(type);
-            if (slot) {
-              slot.texture = m.texture;
-              slot.floorKey = null;
-              slot.source = 'bundle';
-              slot.timestamp = performance.now();
-              seededTypes.push(type);
+            if (policy?.preserveAcrossFloors) {
+              try {
+                reg.setMask(type, m.texture, null, 'bundle');
+                seededTypes.push(type);
+              } catch (_) {
+              }
             }
           }
         }
         if (seededTypes.length) {
-          log.info('EffectMaskRegistry seeded with preserveAcrossFloors bundle masks (silent)', {
-            types: seededTypes
+          log.info('EffectMaskRegistry: seeded preserveAcrossFloors mask slots', seededTypes);
+        }
+
+        // IMPORTANT: Manually populate registry slots with all bundle masks.
+        // DO NOT use transitionToFloor() here - it will clear masks that aren't
+        // in the newFloorMasks array, which happens because the compositor hasn't
+        // composed floor-specific masks yet during initial load.
+        //
+        // Instead, directly call setMask() for each mask in the bundle to ensure
+        // they're immediately available to effects.
+        
+        const floorKey = '0:20'; // Default ground floor
+        
+        log.info('EffectMaskRegistry: populating initial masks', {
+          bundleMaskCount: bundle?.masks?.length ?? 0,
+          bundleMasks: (bundle?.masks || []).map(m => m.id || m.type).filter(Boolean)
+        });
+        
+        // Manually populate registry with all bundle masks
+        if (bundle?.masks?.length > 0) {
+          for (const mask of bundle.masks) {
+            const type = mask.id || mask.type;
+            if (!type || !mask.texture) continue;
+            try {
+              reg.setMask(type, mask.texture, floorKey, 'init');
+            } catch (e) {
+              log.warn(`setMask('${type}') failed:`, e);
+            }
+          }
+
+          // Keep the compositor floor bundle in sync so bindFloorMasks() can
+          // consume the same masks the registry has. This mirrors the working
+          // console recovery snippet.
+          const compositor = sceneComposer?._sceneMaskCompositor;
+          if (compositor?._floorMeta) {
+            try {
+              let floorBundle = compositor._floorMeta.get(floorKey);
+              if (!floorBundle) {
+                floorBundle = { masks: [] };
+                compositor._floorMeta.set(floorKey, floorBundle);
+              }
+              floorBundle.masks = bundle.masks;
+            } catch (e) {
+              log.warn('EffectMaskRegistry: failed to update compositor floor bundle', e);
+            }
+          }
+
+          // Ensure floor-scoped effects actually bind the masks.
+          try {
+            const floorBundle = compositor?._floorMeta?.get(floorKey) ?? { masks: bundle.masks };
+            const tree = effectMap.get('Trees');
+            const bush = effectMap.get('Bushes');
+            const overhead = effectMap.get('Overhead Shadows');
+
+            if (tree && typeof tree.bindFloorMasks === 'function') tree.bindFloorMasks(floorBundle, floorKey);
+            if (bush && typeof bush.bindFloorMasks === 'function') bush.bindFloorMasks(floorBundle, floorKey);
+            if (overhead && typeof overhead.bindFloorMasks === 'function') overhead.bindFloorMasks(floorBundle, floorKey);
+
+            log.info('EffectMaskRegistry: bindFloorMasks applied', {
+              floorKey,
+              treeVisible: tree?.mesh?.visible,
+              bushVisible: bush?.mesh?.visible,
+              overheadMesh: !!overhead?.mesh
+            });
+          } catch (e) {
+            log.warn('EffectMaskRegistry: bindFloorMasks failed', e);
+          }
+          
+          log.info('EffectMaskRegistry: initial masks populated', {
+            maskCount: bundle.masks.length,
+            maskTypes: bundle.masks.map(m => m.id || m.type).filter(Boolean)
           });
         }
       }
-    }, 'effects.connectToRegistry', Severity.DEGRADED);
+    }, 'connectEffectsToRegistry', Severity.COSMETIC);
     console.log('[Map Shine Advanced: Loading] ✔ Step: effects.connectToRegistry DONE');
 
     _sectionEnd('setBaseMesh');
@@ -4856,7 +4931,7 @@ async function createThreeCanvas(scene) {
     tileManager.syncAllTiles();
     console.log('[Map Shine Advanced: Loading]   ▸ TileManager: syncAllTiles DONE');
     if (!_v2Active) {
-      tileManager.setWindowLightEffect(windowLightEffect); // Link for overhead tile lighting
+      tileManager.setWindowLightEffect(effectMap.get('Window Lights') ?? null); // Link for overhead tile lighting
     }
     effectComposer.addUpdatable(tileManager); // Register for occlusion updates
     if (isDebugLoad) dlp.end('manager.TileManager.syncAll');
@@ -5410,7 +5485,7 @@ async function createThreeCanvas(scene) {
       overlayUIManager, lightEditor, gridRenderer, mapPointsManager,
       tileMotionManager,
       weatherController, renderLoop, sceneDebug, controlsIntegration,
-      dynamicExposureManager, physicsRopeManager,
+      dynamicExposureManager, physicsRopeManager, assetLoader,
       setMapMakerMode, resetScene, isMapMakerMode
     });
 
@@ -5889,12 +5964,19 @@ async function createThreeCanvas(scene) {
 
           // Assign tiles to floor layers (also used by V1 when compositor V2 setting is off).
           safeCall(() => {
+            // IMPORTANT: FloorLayerManager re-layering is a V2-only mechanism.
+            // Running it in V1 will move basePlaneMesh off layer 0 and can blank the map.
+            // V1 uses visibility toggling + mask compositing instead.
+            let v2Enabled = false;
+            try { v2Enabled = !!game?.settings?.get('map-shine-advanced', 'useCompositorV2'); } catch (_) {}
+            if (!v2Enabled) return;
+
             const flm = window.MapShine?.floorLayerManager;
             const tm = window.MapShine?.tileManager;
             const tkm = window.MapShine?.tokenManager;
             if (flm && tm) {
               flm.reassignAllLayers(tm, tkm);
-              log.info('FloorLayerManager: all sprites assigned to floor layers during loading');
+              log.info('V2: FloorLayerManager: all sprites assigned to floor layers during loading');
             }
           }, 'levelMaskPreload.floorLayerAssignment', Severity.COSMETIC);
         }

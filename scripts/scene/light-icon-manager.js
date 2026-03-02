@@ -174,9 +174,11 @@ export class LightIconManager {
       if (userId && game?.user?.id && userId !== game.user.id) return;
 
       const hasElevation = data?.elevation !== undefined && data?.elevation !== null;
+      const hasRangeBottom = data?.flags?.levels?.rangeBottom !== undefined
+        && data?.flags?.levels?.rangeBottom !== null;
       const hasRangeTop = data?.flags?.levels?.rangeTop !== undefined
         && data?.flags?.levels?.rangeTop !== null;
-      if (hasElevation && hasRangeTop) return;
+      if (hasElevation && hasRangeBottom && hasRangeTop) return;
 
       const defaults = {};
       applyAmbientLightLevelDefaults(defaults, { scene: doc?.parent ?? canvas?.scene });
@@ -186,11 +188,19 @@ export class LightIconManager {
         patch.elevation = defaults.elevation;
       }
 
+      const seededRangeBottom = defaults?.flags?.levels?.rangeBottom;
       const seededRangeTop = defaults?.flags?.levels?.rangeTop;
-      if (!hasRangeTop && seededRangeTop !== undefined && seededRangeTop !== null) {
+      if ((!hasRangeBottom && seededRangeBottom !== undefined && seededRangeBottom !== null)
+        || (!hasRangeTop && seededRangeTop !== undefined && seededRangeTop !== null)) {
         patch.flags = {
           levels: {
-            rangeTop: seededRangeTop,
+            ...(patch.flags?.levels || {}),
+            ...((!hasRangeBottom && seededRangeBottom !== undefined && seededRangeBottom !== null)
+              ? { rangeBottom: seededRangeBottom }
+              : {}),
+            ...((!hasRangeTop && seededRangeTop !== undefined && seededRangeTop !== null)
+              ? { rangeTop: seededRangeTop }
+              : {}),
           },
         };
       }

@@ -429,35 +429,6 @@ export class BushEffect extends EffectBase {
 
   /**
    * Phase 4+: per-floor mask swap called by the EffectComposer floor loop.
-   * Swaps the bush mask and pushes it to both the scene mesh and shadow mesh materials.
-   *
-   * @param {{masks: Array}|null} bundle - Floor mask bundle from the GPU compositor.
-   * @param {string} floorKey - Compositor key for this floor (e.g. "0:200").
-   */
-  bindFloorMasks(bundle, floorKey) {
-    const bushEntry = bundle?.masks?.find?.(m => m.id === 'bush' || m.type === 'bush');
-    const newMask = bushEntry?.texture ?? null;
-
-    const cached = this._floorStates.get(floorKey);
-    if (cached?.bushMask === newMask) return;
-
-    this._floorStates.set(floorKey, { bushMask: newMask });
-    this.bushMask = newMask;
-
-    // Handle enable/disable based on mask presence.
-    this.enabled = !!newMask;
-
-    // Push updated mask into both render materials.
-    if (this.material?.uniforms?.uBushMask)       this.material.uniforms.uBushMask.value = newMask;
-    if (this.shadowMaterial?.uniforms?.uBushMask) this.shadowMaterial.uniforms.uBushMask.value = newMask;
-  }
-
-  // ── TileBindableEffect interface ────────────────────────────────────────────
-
-  /**
-   * TileBindableEffect: load the per-tile _Bush mask texture.
-   * Called by TileEffectBindingManager before bindTileSprite().
-   * @param {object} tileDoc
    * @returns {Promise<THREE.Texture|null>}
    */
   async loadTileMask(tileDoc) {
@@ -895,12 +866,17 @@ export class BushEffect extends EffectBase {
 
     this.mesh = new THREE.Mesh(this.baseMesh.geometry, this.material);
     this.mesh.position.copy(this.baseMesh.position);
+    // Keep bushes slightly above the ground plane to avoid z-fighting with the
+    // base plane (and to ensure they aren't depth-rejected when the base plane
+    // is rendered first).
+    this.mesh.position.z = (this.baseMesh.position?.z ?? 0) + 0.25;
     this.mesh.rotation.copy(this.baseMesh.rotation);
     this.mesh.scale.copy(this.baseMesh.scale);
-    this.mesh.renderOrder = (this.baseMesh.renderOrder || 0) + 1;
+    // Bushes should render above the ground plane but below canopy/roof layers.
+    this.mesh.renderOrder = (this.baseMesh.renderOrder || 0) + 10;
 
     this.scene.add(this.mesh);
-    this.mesh.visible = this._enabled;
+    this.mesh.visible = !!this._enabled && !!this.bushMask;
   }
 
   update(timeInfo) {

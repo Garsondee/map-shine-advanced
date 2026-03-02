@@ -484,6 +484,74 @@ Disposing MapShine’s `FrameCoordinator` helps reduce extra PIXI flush renderin
 
 ---
 
+## 9. V2 Token Rendering — Root Causes + Fixes
+
+### Symptoms
+
+- Tokens were not visible in V2.
+- Sometimes tokens existed (selectable / keyboard-movable) but were not rendered.
+- Tokens could appear only when newly placed, but would disappear on hard refresh.
+
+### V2 token render pipeline (authoritative)
+
+- V2 only renders **`FloorRenderBus._scene`** via `FloorCompositor.render()`.
+- Anything kept only in the main Three scene (`threeScene`) will not appear in V2.
+
+### Root causes found
+
+- **Wrong scene graph**
+  - Tokens were initially being added to the main Three scene, but V2 renders the bus scene.
+  - Additionally, the first attempt at bus-scene routing looked up the compositor on the wrong object (`sceneComposer`), so tokens kept falling back to the main scene.
+
+- **Camera layer mismatch**
+  - `FloorLayerManager.assignTokenToFloor()` moves tokens off layer 0 and onto a floor layer (1–19).
+  - The V2 render path was only enabling layer 0 on the camera during bus render.
+
+- **Depth/Z mismatch between V1 and V2**
+  - V2 bus tiles are placed at `Z≈1000` (`GROUND_Z=1000`).
+  - Tokens were placed at `Z≈3`, so they were behind the entire albedo stack.
+
+- **Bus populate clearing / lifecycle ordering hazards**
+  - `FloorRenderBus.populate()` calls `clear()`. The original clear behavior removed *all* children from the bus scene.
+  - This could wipe tokens/effect objects added to the bus scene.
+
+- **Hard refresh token sync ordering**
+  - On some refresh/recovery init paths, `TokenManager` could initialize after `canvasReady` had already fired (or been skipped).
+  - That meant `syncAllTokens()` didn’t run, so only *new* tokens created after load appeared.
+
+### Fixes implemented (code)
+
+- **Add tokens to the V2 bus scene (correct compositor lookup)** (`scripts/scene/token-manager.js`)
+  - Use `window.MapShine.effectComposer._floorCompositorV2._renderBus._scene` as the authoritative bus scene.
+  - Add token sprites to that bus scene so V2 can render them.
+
+- **Enable floor layers during bus render** (`scripts/compositor-v2/FloorRenderBus.js`)
+  - In `renderTo()`, temporarily enable layer 0, overlay, and floor layers 1–19 on the camera before rendering the bus scene.
+
+- **Preserve tokens across bus repopulation** (`scripts/compositor-v2/FloorRenderBus.js`)
+  - `clear()` no longer blindly removes all scene children.
+  - Tokens are preserved by recognizing token objects (via `userData.type === 'token'` and/or naming).
+
+- **Fix token Z placement for V2** (`scripts/scene/token-manager.js`)
+  - Token Z now uses a V2-specific base (`TOKEN_BASE_Z_V2 = 1003.0`) when the V2 bus scene exists.
+  - V1 continues to use a small base offset (`TOKEN_BASE_Z_V1 = 3.0`).
+
+- **Refresh resilience: force initial token sync even if `canvasReady` hook is missed** (`scripts/scene/token-manager.js`)
+  - On `TokenManager.initialize()`, if `canvas.ready` is already true, schedule `syncAllTokens()` immediately (microtask) and retry once shortly after.
+
+- **V2 self-heal migration** (`scripts/scene/token-manager.js`)
+  - Each frame, if a bus scene exists, ensure every token sprite is parented under the bus scene (handles lifecycle ordering issues).
+  - Also repair stranded invisible sprites after migration (ensure `visible=true`, `opacity=1.0` when needed).
+
+- **Token deletion correctness in V2** (`scripts/scene/token-manager.js`)
+  - `removeTokenSprite()` now removes the sprite from `sprite.parent` (bus scene in V2) and also defensively removes from both main scene and bus scene.
+
+### Current known follow-ups
+
+- Mouse dragging / raycasting selection still needs investigation (keyboard movement works, mouse drag does not).
+
+---
+
 ## 9. Immediate Next Steps
 
 1. **Lock in PIXI suppression in V2**

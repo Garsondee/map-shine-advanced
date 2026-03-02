@@ -59,6 +59,7 @@ import { OutdoorsMaskProviderV2 } from './effects/OutdoorsMaskProviderV2.js';
 import { BuildingShadowsEffectV2 } from './effects/BuildingShadowsEffectV2.js';
 import { OverheadShadowsEffectV2 } from './effects/OverheadShadowsEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
+import { WorldSpaceFogEffect } from '../effects/WorldSpaceFogEffect.js';
 
 const log = createLogger('FloorCompositor');
 
@@ -228,6 +229,19 @@ export class FloorCompositor {
      * @type {OverheadShadowsEffectV2}
      */
     this._overheadShadowEffect = this._circuitBreaker.isDisabled('v2.overheadShadows') ? null : new OverheadShadowsEffectV2(this._renderBus);
+
+    /**
+     * Fog of War overlay (reuses the V1 WorldSpaceFogEffect implementation).
+     *
+     * In V1, the fog plane is added to the main scene and renders during the
+     * main scene pass. In V2, the main scene is not rendered (we blit RTs), so
+     * we render the fog plane in a dedicated overlay scene after the final blit.
+     * @type {WorldSpaceFogEffect|null}
+     */
+    this._fogEffect = this._circuitBreaker.isDisabled('v2.fog') ? null : new WorldSpaceFogEffect();
+
+    /** @type {THREE.Scene|null} Dedicated scene that contains the fog plane mesh. */
+    this._fogScene = null;
 
     /** @type {boolean} Whether the render bus has been populated this session. */
     this._busPopulated = false;
@@ -433,6 +447,20 @@ export class FloorCompositor {
       log.warn('FloorCompositor: OverheadShadowsEffectV2 initialize failed:', err);
     }
 
+    // Fog of War overlay: initialize into a dedicated overlay scene.
+    if (this._fogEffect) {
+      try {
+        this._fogScene = new THREE.Scene();
+        this._fogScene.name = 'FogOverlaySceneV2';
+        this._fogEffect.initialize(this.renderer, this._fogScene, this.camera);
+        try { if (window.MapShine) window.MapShine.fogEffect = this._fogEffect; } catch (_) {}
+      } catch (err) {
+        log.warn('FloorCompositor: Fog effect initialize failed:', err);
+        this._fogEffect = null;
+        this._fogScene = null;
+      }
+    }
+
     // Listen for floor/level changes so we can update tile mesh visibility.
     this._levelHookId = Hooks.on('mapShineLevelContextChanged', (payload) => {
       this._onLevelContextChanged(payload);
@@ -605,6 +633,11 @@ export class FloorCompositor {
       }
       // Overhead shadows: no per-frame update needed — sun angles are pushed
       // directly below from SkyColorEffectV2 before render().
+
+      // Fog of war: updates vision/exploration RTs and toggles fog plane visibility.
+      try { this._fogEffect?.update?.(timeInfo); } catch (err) {
+        log.warn('Fog effect update threw, skipping fog update:', err);
+      }
     }
 
     // ── Bind per-frame textures and camera to effects ────────────────────────
@@ -698,6 +731,31 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: blitToScreen'); } catch (_) {} }
     this._blitToScreen(currentInput);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: blitToScreen DONE'); } catch (_) {} }
+
+    // ── Fog of War overlay pass ─────────────────────────────────────────
+    // Render fog AFTER the final blit. This overlays the already-lit scene
+    // with the fog plane (transparent shader). We must NOT clear the screen.
+    if (this._fogEffect && this._fogScene && this._fogEffect.enabled && this._fogEffect.params?.enabled !== false) {
+      try {
+        const renderer = this.renderer;
+        const prevTarget = renderer.getRenderTarget();
+        const prevAutoClear = renderer.autoClear;
+        const prevLayerMask = this.camera.layers.mask;
+
+        // Ensure the fog plane's layer is visible.
+        this.camera.layers.enableAll();
+
+        renderer.setRenderTarget(null);
+        renderer.autoClear = false;
+        renderer.render(this._fogScene, this.camera);
+
+        this.camera.layers.mask = prevLayerMask;
+        renderer.autoClear = prevAutoClear;
+        renderer.setRenderTarget(prevTarget);
+      } catch (err) {
+        log.warn('FloorCompositor: fog overlay render failed:', err);
+      }
+    }
     
     if (_dbgStages) {
       this._debugFirstFrameStagesLogged = true;
@@ -1024,6 +1082,7 @@ export class FloorCompositor {
     this._lightingEffect.onResize(w, h);
     this._bloomEffect.onResize(w, h);
     try { this._weatherParticles?.onResize?.(w, h); } catch (_) {}
+    try { this._fogEffect?.resize?.(w, h); } catch (_) {}
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);
   }
 
@@ -1049,6 +1108,7 @@ export class FloorCompositor {
     try { this._fireEffect.dispose(); } catch (_) {}
     try { this._specularEffect.dispose(); } catch (_) {}
     try { this._windowLightEffect.dispose(); } catch (_) {}
+    try { this._fogEffect?.dispose?.(); } catch (_) {}
     try { this._renderBus.dispose(); } catch (_) {}
     this._busPopulated = false;
 
@@ -1069,6 +1129,9 @@ export class FloorCompositor {
     this._blitCamera = null;
     this._blitMaterial = null;
     this._blitQuad = null;
+
+    this._fogEffect = null;
+    this._fogScene = null;
 
     // Unregister the level-change hook.
     if (this._levelHookId !== null) {

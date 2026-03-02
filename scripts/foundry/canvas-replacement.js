@@ -4865,6 +4865,11 @@ async function createThreeCanvas(scene) {
         }, 'v2.registerSharpenUI', Severity.COSMETIC);
 
         safeCall(() => {
+          uiManager.registerEffect('fog', 'Fog of War',
+            WorldSpaceFogEffect.getControlSchema(), _makeV2Callback('_fogEffect'), 'global');
+        }, 'v2.registerFogUI', Severity.COSMETIC);
+
+        safeCall(() => {
           const waterSchema = WaterEffectV2.getControlSchema();
           uiManager.registerEffect('water', 'Water',
             waterSchema, _makeV2Callback('_waterEffect'), 'surface');
@@ -4901,7 +4906,7 @@ async function createThreeCanvas(scene) {
           );
         }, 'v2.registerOverheadShadowsUI', Severity.COSMETIC);
 
-        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, WaterSplashes, Bloom, ColorCorrection, FilmGrain, Sharpen, Water, Cloud, OverheadShadows)');
+        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, WaterSplashes, Bloom, ColorCorrection, FilmGrain, Sharpen, Fog, Water, Cloud, OverheadShadows)');
 
         log.info('V2: UI initialized');
       }, 'initializeUI(V2)', Severity.DEGRADED);

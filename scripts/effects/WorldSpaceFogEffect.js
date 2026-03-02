@@ -14,7 +14,19 @@
  * @module effects/WorldSpaceFogEffect
  */
 
-import { EffectBase, RenderLayers, OVERLAY_THREE_LAYER } from './EffectComposer.js';
+// NOTE: WorldSpaceFogEffect must NOT import from EffectComposer.js.
+// EffectComposer imports the V2 FloorCompositor, which imports WorldSpaceFogEffect
+// for V2 fog support. Importing EffectComposer here creates a circular module
+// dependency that can trigger a TDZ crash:
+//   "can't access lexical declaration 'EffectBase' before initialization"
+//
+// To avoid this, WorldSpaceFogEffect is implemented as a standalone effect-like
+// class that exposes the same public fields used by the engine (`id`, `layer`,
+// `enabled`, `floorScope`, etc.) without extending EffectBase.
+const OVERLAY_THREE_LAYER = 31;
+
+// Minimal layer descriptor matching EffectComposer.RenderLayers.ENVIRONMENTAL.
+const ENVIRONMENTAL_LAYER = { order: 400, name: 'Environmental', requiresDepth: false };
 import { createLogger } from '../core/log.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
 import { VisionSDF } from '../vision/VisionSDF.js';
@@ -44,9 +56,20 @@ const log = createLogger('WorldSpaceFogEffect');
  */
 const FOG_PLANE_Z_OFFSET = 0.05; // Nearly coplanar with the ground plane to avoid parallax/perspective peeking
 
-export class WorldSpaceFogEffect extends EffectBase {
+export class WorldSpaceFogEffect {
   constructor() {
-    super('fog', RenderLayers.ENVIRONMENTAL, 'low');
+    /** @type {string} */
+    this.id = 'fog';
+    /** @type {object} */
+    this.layer = ENVIRONMENTAL_LAYER;
+    /** @type {string} */
+    this.requiredTier = 'low';
+    /** @type {boolean} */
+    this.enabled = true;
+    /** @type {number} */
+    this.priority = 10;
+    /** @type {boolean} */
+    this.alwaysRender = false;
 
     // The fog plane is a global overlay — it covers the fully-accumulated floor
     // image rather than any individual floor. Running it per-floor would
@@ -55,8 +78,6 @@ export class WorldSpaceFogEffect extends EffectBase {
     // (EffectComposer disables OVERLAY_THREE_LAYER during each floor pass) and
     // is presented exactly once per frame via _renderOverlayToScreen().
     this.floorScope = 'global';
-    
-    this.priority = 10;
     
     this.params = {
       enabled: true,

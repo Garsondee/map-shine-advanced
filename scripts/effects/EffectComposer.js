@@ -898,7 +898,7 @@ export class EffectComposer {
     // See docs/planning/V2-MILESTONE-1-ALBEDO-ONLY.md for full rationale.
     {
       const _floorStackEarly = window.MapShine?.floorStack ?? null;
-      if (this._checkCompositorV2Enabled() && _floorStackEarly !== null) {
+      if (this._checkCompositorV2Enabled()) {
         // ── Run updatables (camera, interaction, movement, etc.) ──────────
         for (const updatable of this.updatables) {
           try {
@@ -928,6 +928,9 @@ export class EffectComposer {
         // ── Render: FloorCompositor only (no effects, no overlay) ─────────
         const _compositorV2 = this._getFloorCompositorV2();
         _compositorV2.render({
+          // floorStack can be transiently null during early Foundry boot or
+          // recovery init paths. V2 must still be the sole renderer in that
+          // case; FloorCompositor will treat missing floor info as floor 0.
           floorStack: _floorStackEarly,
           timeInfo,
           doProfile,

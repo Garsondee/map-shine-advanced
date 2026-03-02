@@ -244,6 +244,19 @@ export class RenderLoop {
       try {
         const inContinuousWindow = now < (this._continuousRenderUntilMs || 0);
 
+        // V2 compositor safety: if render-throttling mis-detects camera motion,
+        // the screen-space blit can appear "stuck" (stale RT) while Foundry/PIXI
+        // continues to accept pan/zoom input. Until V2 is fully stabilized, we
+        // prefer correctness over idle FPS savings and refresh every RAF.
+        let v2Active = false;
+        try {
+          v2Active = typeof this.effectComposer._checkCompositorV2Enabled === 'function'
+            ? !!this.effectComposer._checkCompositorV2Enabled()
+            : false;
+        } catch (_) {
+          v2Active = false;
+        }
+
         // Idle throttling: if camera is not moving, render at a reduced rate.
         // Prefer PIXI camera state (stage pivot/scale) to avoid 1-frame latency.
         const stage = canvas?.stage;
@@ -285,7 +298,7 @@ export class RenderLoop {
         // Fast path: when adaptive mode is on, nothing can render faster than the
         // highest configured mode cap. On high-refresh displays this avoids extra
         // per-RAF work (camera checks + effect scans) between allowed render ticks.
-        if (adaptiveFpsEnabled) {
+        if (adaptiveFpsEnabled && !v2Active) {
           const since = now - (this._lastComposerRenderTime || 0);
           const fastestFps = Math.max(idleFps, activeFps, continuousFps);
           const minIntervalMs = 1000 / Math.max(1, fastestFps);
@@ -299,7 +312,7 @@ export class RenderLoop {
           effectWantsContinuous = this._getEffectWantsContinuous(now);
         }
 
-        let shouldRender = inContinuousWindow || effectWantsContinuous || this._forceNextRender || cameraChanged;
+        let shouldRender = v2Active || inContinuousWindow || effectWantsContinuous || this._forceNextRender || cameraChanged;
         if (!shouldRender) {
           const since = now - (this._lastComposerRenderTime || 0);
           if (since >= idleIntervalMs) shouldRender = true;
@@ -309,7 +322,7 @@ export class RenderLoop {
         // - active: camera/interactions/forced updates
         // - continuous: ongoing animated effects requesting full-rate updates
         // - idle: falls back to the existing idle throttle target
-        if (shouldRender && adaptiveFpsEnabled) {
+        if (shouldRender && adaptiveFpsEnabled && !v2Active) {
           let targetFps = idleFps;
           if (inContinuousWindow || effectWantsContinuous) targetFps = continuousFps;
           else if (this._forceNextRender || cameraChanged) targetFps = activeFps;

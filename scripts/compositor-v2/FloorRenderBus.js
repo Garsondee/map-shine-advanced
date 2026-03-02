@@ -238,7 +238,13 @@ export class FloorRenderBus {
     // Restore camera layer mask and renderer state.
     camera.layers.mask = prevLayerMask;
     renderer.autoClear = prevAutoClear;
-    renderer.setClearColor(prevColor, prevAlpha);
+    // CRITICAL (V2): Do not restore a transparent clearAlpha.
+    // A clearAlpha of 0 makes the Three canvas effectively transparent and can
+    // reveal underlying stale content as a camera-locked "ghost" overlay.
+    renderer.setClearColor(prevColor, 1);
+    if (typeof renderer.setClearAlpha === 'function') {
+      try { renderer.setClearAlpha(1); } catch (_) {}
+    }
     renderer.setRenderTarget(prevTarget);
   }
 
@@ -396,7 +402,13 @@ export class FloorRenderBus {
     // Restore camera layer mask and renderer state.
     camera.layers.mask = prevLayerMask;
     renderer.autoClear = prevAutoClear;
-    renderer.setClearColor(prevColor, prevAlpha);
+    // CRITICAL (V2): Do not restore a transparent clearAlpha.
+    // This pass intentionally clears its TARGET to alpha=0, but the renderer's
+    // default clear alpha must remain opaque for subsequent screen blits.
+    renderer.setClearColor(prevColor, 1);
+    if (typeof renderer.setClearAlpha === 'function') {
+      try { renderer.setClearAlpha(1); } catch (_) {}
+    }
     renderer.setRenderTarget(prevTarget);
 
     // Restore original tile visibility.

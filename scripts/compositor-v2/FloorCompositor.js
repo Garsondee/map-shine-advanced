@@ -352,11 +352,14 @@ export class FloorCompositor {
         uniform sampler2D tDiffuse;
         varying vec2 vUv;
         void main() {
-          gl_FragColor = texture2D(tDiffuse, vUv);
+          vec4 c = texture2D(tDiffuse, vUv);
+          gl_FragColor = vec4(c.rgb, 1.0);
         }
       `,
       depthTest: false,
       depthWrite: false,
+      transparent: false,
+      blending: THREE.NoBlending,
     });
     // Prevent the blit pass from re-applying tone mapping to the already
     // tone-mapped scene RT. Without this, the scene is tone-mapped twice
@@ -839,11 +842,43 @@ export class FloorCompositor {
 
     const prevTarget    = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
+    const THREE = window.THREE;
+    const prevClearColor = (THREE && typeof renderer.getClearColor === 'function')
+      ? renderer.getClearColor(new THREE.Color())
+      : null;
+    const prevClearAlpha = (typeof renderer.getClearAlpha === 'function')
+      ? renderer.getClearAlpha()
+      : null;
 
     this._blitMaterial.uniforms.tDiffuse.value = sourceRT.texture;
     renderer.setRenderTarget(null);
     renderer.autoClear = false;
-    renderer.render(this._blitScene, this._blitCamera);
+    try {
+      // Ensure an opaque clear. If the renderer's clearAlpha is 0, the blit quad
+      // can appear semi-transparent over underlying canvases/frames.
+      if (typeof renderer.setClearColor === 'function') {
+        renderer.setClearColor(0x000000, 1);
+      }
+      if (typeof renderer.setClearAlpha === 'function') {
+        renderer.setClearAlpha(1);
+      }
+      if (typeof renderer.clear === 'function') {
+        renderer.clear(true, true, true);
+      }
+      renderer.render(this._blitScene, this._blitCamera);
+    } finally {
+      // CRITICAL (V2): do not restore a transparent clear alpha.
+      // If we restore clearAlpha=0 here, the renderer ends the frame in a
+      // transparent state and the canvas can show underlying stale content.
+      if (prevClearColor && typeof renderer.setClearColor === 'function') {
+        try {
+          renderer.setClearColor(prevClearColor, 1);
+        } catch (_) {}
+      }
+      if (typeof renderer.setClearAlpha === 'function') {
+        try { renderer.setClearAlpha(1); } catch (_) {}
+      }
+    }
 
     renderer.autoClear = prevAutoClear;
     renderer.setRenderTarget(prevTarget);

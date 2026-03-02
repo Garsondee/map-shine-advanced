@@ -409,9 +409,161 @@ No more per-effect UI wiring in `canvas-replacement.js`.
 
 ---
 
-## 8. Immediate Next Steps
+## 8. Implementation Progress
 
-1. **Read and acknowledge this plan.**
-2. **Decide on Phase 0 timing** (before or after P0 effects).
-3. **Start Phase 0** — remove the toggle, clean `canvas-replacement.js`.
-4. **Start fog V2** — this is the single most important missing effect.
+### Phase 0: Kill the Toggle — IN PROGRESS
+
+**Status:** V2 is now the active renderer. Foundry loads successfully without freezing.
+
+**Completed:**
+- ✅ V2 compositor is running as the sole renderer
+- ✅ Foundry loads without freezing
+- ✅ Specular effect is working correctly
+
+### Blocker: Camera-Locked Albedo / Stuck Overlay — UNRESOLVED
+
+**Summary:** A semi-transparent “albedo-like” image remains stuck to the screen (camera-locked) in V2 mode. It appears perfectly aligned with the scene at initial load, then becomes screen-space locked during pan/zoom. The artifact can change when selecting/deselecting tokens (vision/fog refresh events), which suggests an interaction with Foundry’s internal PIXI rendering/vision pipeline.
+
+**Why this blocks migration:** This prevents reliable validation of the V2 compositor as the exclusive renderer. Until PIXI’s scene output is fully suppressed (or the overlay source is conclusively removed), it’s not possible to confidently proceed with Phase 0 cleanup and Phase 1 effect ports.
+
+**What we tried (high level):**
+
+- **V2 final blit / clear hardening** (`scripts/compositor-v2/FloorCompositor.js`)
+  - Forced an opaque clear before blitting the final fullscreen quad.
+  - Forced the blit quad to be fully opaque (alpha=1 / no blending).
+  - Adjusted renderer state restore so clearAlpha does not end frames as transparent.
+
+- **Render cadence hardening** (`scripts/core/render-loop.js`)
+  - Disabled adaptive frame skipping in V2 mode to reduce stale-frame artifacts during camera movement.
+
+- **Renderer alpha hardening**
+  - Forced `renderer.setClearColor(..., 1)` and `renderer.setClearAlpha(1)` in multiple locations (renderer setup, renderer attach, and V2 final blit).
+  - Confirmed at runtime that `MapShine.renderer.getClearAlpha()` was returning `0` initially, and later `1` after adjustments — the overlay persisted even when `getClearAlpha()` reported `1`.
+
+- **PIXI suppression attempts** (`scripts/foundry/canvas-replacement.js`)
+  - Hid Foundry fog/visibility layers (`canvas.fog`, `canvas.visibility`) and disabled some layer filters.
+  - Forced PIXI canvas opacity to 0.
+  - Strengthened suppression to `display:none` / `visibility:hidden` for PIXI canvas.
+  - Added explicit hiding for Foundry’s `#board` canvas after `dumpCanvasStack()` revealed it was visible with `z-index: 10` above `#map-shine-canvas` (`z-index: 1`).
+  - Added hooks to re-apply suppression on common vision/token/UI events.
+
+**Evidence gathered (instrumentation added):**
+
+- **Three “screen draw” tracing** (in `scripts/foundry/canvas-replacement.js`, gated by `localStorage['msa-screen-trace']`)
+  - Logs every `renderer.render()` that targets the screen framebuffer (renderTarget null) with stack traces.
+  - Observed only the expected V2 path rendering to screen:
+    - `FloorCompositor._blitToScreen()` → `FloorCompositor.render()` → `EffectComposer.render()` → `RenderLoop.render()`
+  - This suggests the overlay is not caused by a second unexpected Three render-to-screen pass.
+
+- **DOM canvas stack dump** (`window.MapShine.dumpCanvasStack()`)
+  - Enumerates all `<canvas>` elements and their computed styles.
+  - Observed `#board` canvas visible (`opacity: 1`, `display: block`, `visibility: visible`) with `zIndex: 10`, above the Three canvas (`#map-shine-canvas` at `zIndex: 1`).
+
+**Root Cause Identified:**
+
+The camera-locked albedo overlay is caused by **Foundry's FrameCoordinator calling `canvas.app.renderer.render(canvas.stage)` every frame**.
+
+In `scripts/core/frame-coordinator.js:185`:
+```javascript
+flushPixi() {
+  if (!canvas?.app?.renderer) return;
+  
+  try {
+    // Force PIXI to render its current state
+    // This ensures textures like vision masks are up-to-date
+    canvas.app.renderer.render(canvas.stage);  // ← THIS IS THE CULPRIT
+  } catch (e) {
+    log.warn('Failed to flush PIXI render:', e);
+  }
+}
+```
+
+This method is called from the PIXI ticker callback (`_onPixiTick`) via post-PIXI callbacks. Even though we've hidden the `#board` canvas with `display:none`, **PIXI is still rendering to it every frame**. The browser compositor then shows this stale/semi-transparent content as a camera-locked overlay because:
+
+1. PIXI renders the scene (tiles, fog, vision) to the `#board` canvas
+2. The canvas is hidden via CSS, but the GPU framebuffer content persists
+3. During certain browser/GPU states (especially during vision/token selection changes), the hidden canvas content "bleeds through" as a semi-transparent overlay
+4. Because PIXI's camera is independent of Three's camera, the overlay appears "stuck" to screen-space when you pan/zoom
+
+**Why suppression attempts failed:**
+
+- Hiding `#board` with CSS (`display:none`, `visibility:hidden`, `opacity:0`) doesn't prevent PIXI from **rendering to it**
+- The `canvas.app.renderer.render(canvas.stage)` call still executes and writes pixels to the canvas
+- The browser/GPU can show these pixels in certain edge cases (context switches, compositing glitches, vision updates)
+
+**The Fix:**
+
+**Option 1: Stop calling `flushPixi()` in V2 mode (RECOMMENDED)**
+
+In V2 mode, we don't need PIXI to render vision masks or fog textures because:
+- V2 has its own fog system (will be ported in Phase 1 P0)
+- V2 doesn't sample PIXI textures for rendering
+- The only reason `flushPixi()` exists is to ensure PIXI textures are current before V1 effects sample them
+
+**Implementation:**
+1. Add a V2 mode check in `FrameCoordinator.flushPixi()` to skip the render call
+2. OR: Don't register the post-PIXI callback that calls `flushPixi()` when V2 is active
+3. OR: Dispose the FrameCoordinator entirely in V2 mode (cleanest)
+
+**Option 2: Replace PIXI renderer with a noop renderer**
+
+More invasive, but guarantees PIXI can never render:
+```javascript
+if (_v2Active) {
+  const noopRenderer = {
+    render: () => {},
+    resize: () => {},
+    // ... other methods as noops
+  };
+  canvas.app.renderer = noopRenderer;
+}
+```
+
+**Option 3: Clear the canvas immediately after PIXI renders**
+
+Less clean, but works:
+```javascript
+flushPixi() {
+  if (!canvas?.app?.renderer) return;
+  try {
+    canvas.app.renderer.render(canvas.stage);
+    // Immediately clear the canvas so no pixels persist
+    const ctx = canvas.app.view?.getContext('2d');
+    if (ctx) ctx.clearRect(0, 0, canvas.app.view.width, canvas.app.view.height);
+  } catch (e) {
+    log.warn('Failed to flush PIXI render:', e);
+  }
+}
+```
+
+**Recommended Action:**
+
+**Dispose FrameCoordinator in V2 mode.** It was built for V1 to synchronize PIXI fog/vision texture sampling. V2 doesn't need it.
+
+In `canvas-replacement.js`, after the V2 compositor is created:
+```javascript
+if (_v2Active && frameCoordinator?.initialized) {
+  frameCoordinator.dispose();
+  log.info('FrameCoordinator disposed - not needed in V2 mode');
+}
+```
+
+This will:
+- Stop `canvas.app.renderer.render(canvas.stage)` from being called every frame
+- Eliminate the camera-locked overlay artifact
+- Remove unnecessary overhead (V2 doesn't need frame coordination)
+
+**Next Steps:**
+1. **Implement the fix** — Dispose FrameCoordinator when V2 is active
+2. **Validate** — Confirm the overlay is gone and V2 renders correctly
+3. **Continue Phase 0 cleanup** — Remove V1 effect construction code from `canvas-replacement.js`
+4. **Start Phase 1 P0** — Port WorldSpaceFogEffect and PlayerLightEffect to V2
+
+---
+
+## 9. Immediate Next Steps
+
+1. **Implement the FrameCoordinator fix** — Dispose FrameCoordinator when V2 is active to stop PIXI rendering
+2. **Validate the fix** — Confirm the camera-locked overlay is gone and V2 renders correctly
+3. **Continue Phase 0 cleanup** — Remove V1 effect construction code from `canvas-replacement.js`
+4. **Start Phase 1 P0** — Port WorldSpaceFogEffect and PlayerLightEffect to V2

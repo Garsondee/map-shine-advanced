@@ -136,6 +136,31 @@ export class ControlsIntegration {
       log.warn('Controls integration already initialized');
       return true;
     }
+
+    // Foundry can temporarily report canvas.ready=false during early boot or
+    // immediately after certain scene updates (grid/style changes). Treat this
+    // as a transient state and retry shortly instead of entering ERROR/FALLBACK.
+    try {
+      if (!canvas?.ready || !canvas?.stage || !canvas?.app?.renderer || !canvas?.app?.view) {
+        // Avoid spamming retries.
+        if (!this._pendingInitRetry) {
+          this._pendingInitRetry = true;
+          setTimeout(() => {
+            try {
+              this._pendingInitRetry = false;
+              // Only retry if we still aren't initialized.
+              if (!this._initialized) this.initialize();
+            } catch (_) {
+              this._pendingInitRetry = false;
+            }
+          }, 250);
+        }
+        log.warn('ControlsIntegration.initialize: canvas not ready yet; deferring init');
+        return false;
+      }
+    } catch (_) {
+      // If anything goes wrong probing canvas state, fall through to normal init.
+    }
     
     this.transition(IntegrationState.INITIALIZING, 'Starting initialization');
     
@@ -143,6 +168,23 @@ export class ControlsIntegration {
       // Validate canvas state
       const validation = this.validateCanvasState();
       if (!validation.valid) {
+        // Canvas can become partially invalid transiently; retry rather than
+        // entering fallback which hides Three.
+        if (validation.issues?.includes('Canvas not ready') || validation.issues?.includes('Stage not initialized')) {
+          if (!this._pendingInitRetry) {
+            this._pendingInitRetry = true;
+            setTimeout(() => {
+              try {
+                this._pendingInitRetry = false;
+                if (!this._initialized) this.initialize();
+              } catch (_) {
+                this._pendingInitRetry = false;
+              }
+            }, 250);
+          }
+          log.warn(`ControlsIntegration.initialize: transient invalid canvas state (${validation.issues.join(', ')}); retrying`);
+          return false;
+        }
         throw new Error(`Canvas state invalid: ${validation.issues.join(', ')}`);
       }
       

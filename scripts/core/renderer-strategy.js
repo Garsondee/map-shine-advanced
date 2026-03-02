@@ -118,6 +118,13 @@ export function configure(renderer, options = {}) {
     renderer.setClearColor(0x000000, 1); // Black, fully opaque
   }
 
+  // Defense-in-depth: some renderer paths can still retain a non-opaque clearAlpha.
+  // Ensure the default clear alpha is fully opaque so nothing behind the Three
+  // canvas can bleed through.
+  if (typeof renderer.setClearAlpha === 'function') {
+    renderer.setClearAlpha(1);
+  }
+
   // Configure color space and tone mapping for correct brightness matching with Foundry PIXI
   // See docs/CONTRAST-DARKNESS-ANALYSIS.md for rationale
   const THREE = window.THREE;

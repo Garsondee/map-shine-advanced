@@ -158,6 +158,9 @@ try {
 /** @type {ControlsIntegration|null} */
 let controlsIntegration = null;
 
+/** @type {Array<{hook: string, id: number}>} */
+let _pixiSuppressionHookIds = [];
+
 /** @type {boolean} */
 let isHooked = false;
 
@@ -853,6 +856,45 @@ export function initialize() {
     // canvasReady fires (e.g. during Foundry's internal asset loading).
     let _lastCanvasDrawStartedAtMs = 0;
     let _canvasReadyWatchdogId = null;
+
+    // Debug helper: dump the DOM canvas stack + computed styles.
+    // Useful for diagnosing "stuck overlay" artifacts that may come from a
+    // different canvas element than the Three renderer.
+    try {
+      if (!window.MapShine) window.MapShine = {};
+      if (!window.MapShine.dumpCanvasStack) {
+        window.MapShine.dumpCanvasStack = () => {
+          try {
+            const els = Array.from(document.querySelectorAll('canvas'));
+            const rows = els.map((el) => {
+              let cs = null;
+              try { cs = getComputedStyle(el); } catch (_) {}
+              let r = null;
+              try { r = el.getBoundingClientRect(); } catch (_) {}
+              return {
+                id: el.id || null,
+                className: el.className || null,
+                width: el.width,
+                height: el.height,
+                display: cs?.display,
+                visibility: cs?.visibility,
+                opacity: cs?.opacity,
+                zIndex: cs?.zIndex,
+                position: cs?.position,
+                top: cs?.top,
+                left: cs?.left,
+                rect: r ? { x: r.x, y: r.y, w: r.width, h: r.height } : null,
+              };
+            });
+            console.table(rows);
+            return rows;
+          } catch (e) {
+            console.error('dumpCanvasStack failed:', e);
+            return null;
+          }
+        };
+      }
+    } catch (_) {}
 
     // CRITICAL: Hook into canvasConfig to make PIXI canvas transparent
     // This hook is called BEFORE the PIXI.Application is created, allowing us
@@ -3624,6 +3666,18 @@ async function createThreeCanvas(scene) {
     if (isDebugLoad) dlp.begin('canvas.create', 'setup');
     _setCreateThreeCanvasProgress('canvas.create');
     console.log('[Map Shine Advanced: Loading] ▶ Step: canvas.create');
+
+    // Hard safety: ensure we never end up with multiple MapShine canvases.
+    // A stale canvas can retain the first rendered frame and appear as a
+    // camera-locked, semi-transparent overlay when the active renderer canvas
+    // updates during pan/zoom.
+    safeCall(() => {
+      const existing = Array.from(document.querySelectorAll('#map-shine-canvas'));
+      for (const el of existing) {
+        try { el.remove(); } catch (_) {}
+      }
+    }, 'canvas.create.removeDuplicates', Severity.COSMETIC);
+
     threeCanvas = document.createElement('canvas');
     threeCanvas.id = 'map-shine-canvas';
     threeCanvas.style.position = 'absolute';
@@ -3715,6 +3769,7 @@ async function createThreeCanvas(scene) {
     rendererCanvas.style.height = '100%';
     rendererCanvas.style.zIndex = '1'; // Below PIXI (but PIXI is transparent, so Three.js shows through)
     rendererCanvas.style.pointerEvents = 'auto'; // Three.js handles interaction in gameplay mode
+    rendererCanvas.style.opacity = '1';
     // Use Foundry's scene background colour so padded region matches core Foundry
     rendererCanvas.style.backgroundColor = sceneBgColorStr;
 
@@ -3724,6 +3779,84 @@ async function createThreeCanvas(scene) {
     // If updateStyle=true, three will set style width/height to fixed pixel values,
     // preventing future container resizes from affecting the canvas element.
     _applyRenderResolutionToRenderer(rect.width, rect.height);
+
+    // CRITICAL: ensure the Three renderer clears opaquely.
+    // If clearAlpha is 0, the Three canvas becomes effectively transparent and
+    // underlying stale content can appear as a screen-locked "ghost" aligned
+    // with the scene at load time.
+    safeCall(() => {
+      if (renderer?.setClearColor) renderer.setClearColor(0x000000, 1);
+      if (typeof renderer?.setClearAlpha === 'function') renderer.setClearAlpha(1);
+    }, 'renderer.forceOpaqueClear', Severity.COSMETIC);
+
+    // Optional debug: trace what actually renders to the screen framebuffer.
+    // Enable at runtime via:
+    //   localStorage.setItem('msa-screen-trace','1'); location.reload();
+    // or:
+    //   window.MapShine.debugScreenTrace = true;
+    safeCall(() => {
+      if (!renderer || globalThis.__msaScreenTraceInstalled) return;
+      globalThis.__msaScreenTraceInstalled = true;
+
+      const enabled = () => {
+        try {
+          if (window.MapShine?.debugScreenTrace) return true;
+          return localStorage.getItem('msa-screen-trace') === '1';
+        } catch (_) {
+          return false;
+        }
+      };
+
+      // Track the last setRenderTarget() call.
+      const origSetRenderTarget = renderer.setRenderTarget?.bind(renderer);
+      if (origSetRenderTarget) {
+        renderer.setRenderTarget = (rt, ...rest) => {
+          try {
+            renderer.__msaLastRenderTargetIsScreen = (rt === null);
+            renderer.__msaLastRenderTargetLabel = (rt === null)
+              ? 'SCREEN'
+              : (rt?.texture?.name || rt?.name || 'RT');
+          } catch (_) {}
+          return origSetRenderTarget(rt, ...rest);
+        };
+      }
+
+      const origRender = renderer.render?.bind(renderer);
+      if (!origRender) return;
+
+      let lastLogAt = -Infinity;
+      renderer.render = (scene, camera, ...rest) => {
+        const result = origRender(scene, camera, ...rest);
+        try {
+          if (!enabled()) return result;
+          const isScreen = (renderer.getRenderTarget?.() === null) || (renderer.__msaLastRenderTargetIsScreen === true);
+          if (!isScreen) return result;
+
+          const now = performance.now();
+          if ((now - lastLogAt) < 250) return result;
+          lastLogAt = now;
+
+          const sceneName = scene?.name ?? scene?.type ?? 'scene';
+          const camName = camera?.name ?? (camera?.isPerspectiveCamera ? 'PerspectiveCamera' : camera?.isOrthographicCamera ? 'OrthoCamera' : 'camera');
+          const label = renderer.__msaLastRenderTargetLabel ?? 'SCREEN';
+          const ca = (typeof renderer.getClearAlpha === 'function') ? renderer.getClearAlpha() : null;
+
+          // Stack trace is expensive; keep it short.
+          const stack = (() => {
+            try { throw new Error('screen-render-trace'); } catch (e) { return e?.stack ?? null; }
+          })();
+
+          console.warn('[MSA ScreenTrace] renderer.render -> SCREEN', {
+            target: label,
+            clearAlpha: ca,
+            scene: sceneName,
+            camera: camName,
+            stack,
+          });
+        } catch (_) {}
+        return result;
+      };
+    }, 'renderer.installScreenTrace', Severity.COSMETIC);
 
     safeCall(() => renderer.setSize(rect.width, rect.height, false), 'renderer.setSize', Severity.DEGRADED, {
       onError: () => renderer.setSize(rect.width, rect.height)
@@ -4408,6 +4541,31 @@ async function createThreeCanvas(scene) {
     controlsIntegration = null;
     log.info('Controls integration SKIPPED (V2 baseline mode)');
 
+    // V2: Re-apply PIXI suppression on common Foundry vision/token events.
+    // Foundry can re-show board/fog/visibility containers during these updates.
+    safeCall(() => {
+      // Clear any previous installs (scene resets / recovery init).
+      for (const h of _pixiSuppressionHookIds) {
+        try { Hooks.off(h.hook, h.id); } catch (_) {}
+      }
+      _pixiSuppressionHookIds = [];
+
+      const install = (hook) => {
+        try {
+          const id = Hooks.on(hook, () => {
+            try { _enforceGameplayPixiSuppression(); } catch (_) {}
+          });
+          _pixiSuppressionHookIds.push({ hook, id });
+        } catch (_) {}
+      };
+
+      install('sightRefresh');
+      install('controlToken');
+      install('refreshToken');
+      install('updateToken');
+      install('renderSceneControls');
+    }, 'pixiSuppress.installHooks', Severity.COSMETIC);
+
     dlp.event('sceneSync: DONE — entering finalization');
     _sectionEnd('sceneSync');
     _sectionStart('finalization');
@@ -4491,18 +4649,30 @@ async function createThreeCanvas(scene) {
 
     // Step 9: Initialize Frame Coordinator for PIXI/Three.js synchronization
     // This hooks into Foundry's ticker to ensure we render after PIXI updates complete
-    if (!frameCoordinatorInitialized) {
-      frameCoordinatorInitialized = frameCoordinator.initialize();
+    if (_v2Active) {
+      // V2 compositor does not sample PIXI textures. The FrameCoordinator exists to
+      // synchronize PIXI → Three sampling (fog/vision masks) and calls
+      // canvas.app.renderer.render(canvas.stage) each tick via flushPixi(), which can
+      // leave a camera-locked PIXI overlay in the browser compositor.
       if (frameCoordinatorInitialized) {
-        // Register fog effect for synchronized vision rendering.
-        // V2: No fog effect — skip fog sync wiring.
-        
-        log.info('Frame coordinator initialized - PIXI/Three.js sync enabled');
-      } else {
-        log.warn('Frame coordinator failed to initialize - fog may lag during rapid camera movement');
+        safeDispose(() => {
+          frameCoordinator.dispose();
+          frameCoordinatorInitialized = false;
+        }, 'frameCoordinator.dispose(v2)');
       }
+      mapShine.frameCoordinator = null;
+    } else {
+      if (!frameCoordinatorInitialized) {
+        frameCoordinatorInitialized = frameCoordinator.initialize();
+        if (frameCoordinatorInitialized) {
+          // Register fog effect for synchronized vision rendering.
+          log.info('Frame coordinator initialized - PIXI/Three.js sync enabled');
+        } else {
+          log.warn('Frame coordinator failed to initialize - fog may lag during rapid camera movement');
+        }
+      }
+      mapShine.frameCoordinator = frameCoordinator;
     }
-    mapShine.frameCoordinator = frameCoordinator;
 
     // Notify WorldSpaceFogEffect when Foundry fog is reset via UI (Lighting controls).
     // V2: No WorldSpaceFogEffect — skip all fog manager wrapping.
@@ -7838,6 +8008,19 @@ function enableSystem() {
     pixiCanvas.style.opacity = '1'; // Keep visible for overlay layers (drawings, templates, notes)
     pixiCanvas.style.zIndex = '10'; // On top
     pixiCanvas.style.pointerEvents = 'none'; // Default to pass-through; InputRouter enables for edit tools
+
+    // V2: PIXI should not visually render the scene. Foundry's board canvas
+    // (#board) is the actual composited PIXI output and can sit above Three.
+    // Hide it immediately so it cannot flash the albedo/fog overlay during boot.
+    safeCall(() => {
+      const board = document.getElementById('board');
+      if (board && board.tagName === 'CANVAS') {
+        board.style.display = 'none';
+        board.style.visibility = 'hidden';
+        board.style.opacity = '0';
+        board.style.pointerEvents = 'none';
+      }
+    }, 'createThreeCanvas.hideBoardEarly', Severity.COSMETIC);
   }
   
   // CRITICAL: Set PIXI renderer background to transparent
@@ -7901,8 +8084,72 @@ function _enforceGameplayPixiSuppression() {
     if (!canvas?.ready) return;
     if (isMapMakerMode) return;
 
+    // V2 goal: PIXI should never visually render the scene. Foundry can keep its
+    // internal computations (vision sources, layer state, measurements), but the
+    // PIXI canvas output must be fully suppressed so no fog/visibility/primary
+    // artifacts can appear.
+    safeCall(() => {
+      const pixiCanvas = canvas.app?.view;
+      if (pixiCanvas) {
+        // Use display:none as the strongest guarantee that PIXI cannot contribute
+        // any pixels to the final composed frame. Opacity=0 still allows some
+        // browser/driver edge cases where a stale frame can appear during
+        // rapid canvas swaps or context churn.
+        pixiCanvas.style.display = 'none';
+        pixiCanvas.style.visibility = 'hidden';
+        pixiCanvas.style.opacity = '0';
+        pixiCanvas.style.pointerEvents = 'none';
+
+        // Optional debug: when screen tracing is enabled, log computed style so
+        // we can confirm PIXI is truly suppressed.
+        try {
+          const trace = (window.MapShine?.debugScreenTrace === true) || (localStorage.getItem('msa-screen-trace') === '1');
+          if (trace) {
+            const cs = getComputedStyle(pixiCanvas);
+            console.warn('[MSA ScreenTrace] PIXI canvas style', {
+              display: cs.display,
+              visibility: cs.visibility,
+              opacity: cs.opacity,
+              zIndex: cs.zIndex,
+            });
+          }
+        } catch (_) {}
+      }
+    }, 'pixiSuppress.pixiCanvasOpacity', Severity.COSMETIC);
+
+    // Foundry's primary PIXI canvas element is typically #board. In some
+    // Foundry versions/skins, canvas.app.view may not be the top-level board
+    // element that is actually composited above Three. Hide it explicitly.
+    safeCall(() => {
+      const board = document.getElementById('board');
+      if (board && board.tagName === 'CANVAS') {
+        board.style.display = 'none';
+        board.style.visibility = 'hidden';
+        board.style.opacity = '0';
+        board.style.pointerEvents = 'none';
+      }
+    }, 'pixiSuppress.boardCanvas', Severity.COSMETIC);
+
     // V12+: primary can render tiles/overheads/roofs. Keep it hidden in gameplay.
     safeCall(() => { if (canvas.primary) canvas.primary.visible = false; }, 'pixiSuppress.primary', Severity.COSMETIC);
+
+    // Fog of war / visibility: in V2 we do not use Foundry's fog visuals.
+    // Leaving these visible can produce a fullscreen, camera-locked semi-transparent
+    // overlay that changes when a token becomes the active vision source.
+    safeCall(() => {
+      if (canvas.fog) canvas.fog.visible = false;
+    }, 'pixiSuppress.fog', Severity.COSMETIC);
+    safeCall(() => {
+      if (!canvas.visibility) return;
+      canvas.visibility.visible = false;
+      if (canvas.visibility.filter) canvas.visibility.filter.enabled = false;
+      if (canvas.visibility.vision) canvas.visibility.vision.visible = false;
+      if (Array.isArray(canvas.visibility.children)) {
+        for (const child of canvas.visibility.children) {
+          if (child && typeof child.visible !== 'undefined') child.visible = false;
+        }
+      }
+    }, 'pixiSuppress.visibility', Severity.COSMETIC);
 
     // Tiles are fully Three-owned in gameplay mode. Keep PIXI tile visuals suppressed.
     const alpha = 0;

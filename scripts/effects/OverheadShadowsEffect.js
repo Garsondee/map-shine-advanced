@@ -199,7 +199,20 @@ export class OverheadShadowsEffect extends EffectBase {
    */
   bindFloorMasks(bundle, floorKey) {
     const outdoorsEntry = bundle?.masks?.find?.(m => m.id === 'outdoors' || m.type === 'outdoors');
-    const newMask = outdoorsEntry?.texture ?? null;
+    const floorMask = outdoorsEntry?.texture ?? null;
+
+    // Early-init / compositor timing:
+    // The per-floor pipeline can invoke bindFloorMasks() before the compositor has
+    // populated the floor bundle for this key. In that case, floorMask is null,
+    // but we may already have a valid global/registry outdoors mask (from setBaseMesh
+    // or EffectMaskRegistry seeding). Do NOT clobber outdoorsMask to null.
+    let registryMask = null;
+    try {
+      registryMask = window.MapShine?.effectMaskRegistry?.getMask?.('outdoors') ?? null;
+    } catch (_) {
+      registryMask = null;
+    }
+    const effectiveMask = floorMask ?? this.outdoorsMask ?? registryMask;
 
     const cached = this._floorStates.get(floorKey);
     if (cached) {
@@ -210,8 +223,8 @@ export class OverheadShadowsEffect extends EffectBase {
       return;
     }
 
-    this._floorStates.set(floorKey, { outdoorsMask: newMask });
-    this.outdoorsMask = newMask;
+    this._floorStates.set(floorKey, { outdoorsMask: effectiveMask });
+    this.outdoorsMask = effectiveMask;
   }
 
   /**

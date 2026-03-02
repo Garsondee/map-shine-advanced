@@ -159,7 +159,7 @@ export class BushEffect extends EffectBase {
   get enabled() { return this._enabled; }
   set enabled(value) {
     this._enabled = !!value;
-    if (this.mesh) this.mesh.visible = !!value && !!this.bushMask;
+    if (this.mesh) this.mesh.visible = !!value;
   }
 
   static getControlSchema() {
@@ -644,7 +644,7 @@ export class BushEffect extends EffectBase {
       `,
       transparent: true,
       depthWrite: false,
-      depthTest: true
+      depthTest: false
     });
     mat._isTileOverlay = true;
     this._tileOverlayMaterials.add(mat);
@@ -861,7 +861,7 @@ export class BushEffect extends EffectBase {
       `,
       transparent: true,
       depthWrite: false,
-      depthTest: true
+      depthTest: false
     });
 
     this.mesh = new THREE.Mesh(this.baseMesh.geometry, this.material);
@@ -874,9 +874,12 @@ export class BushEffect extends EffectBase {
     this.mesh.scale.copy(this.baseMesh.scale);
     // Bushes should render above the ground plane but below canopy/roof layers.
     this.mesh.renderOrder = (this.baseMesh.renderOrder || 0) + 10;
+    
+    // Ensure mesh is on layer 0 (default camera layer)
+    this.mesh.layers.set(0);
 
     this.scene.add(this.mesh);
-    this.mesh.visible = !!this._enabled && !!this.bushMask;
+    this.mesh.visible = true;
   }
 
   update(timeInfo) {

@@ -3872,11 +3872,16 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
             // Inclusive overlap test to handle shared boundaries (e.g. tile top
             // exactly equals band bottom). This must be inclusive so same-floor
             // tiles at boundary elevations don't get misclassified as overhead.
-            treatAsCurrentFloor = !(tileTop < bandBottom || tileBottom > bandTop);
+            // IMPORTANT: Use an exclusive top boundary to match the Levels
+            // visibility semantics used elsewhere in MapShine.
+            // A tile whose bottom == bandTop belongs to the floor above.
+            // A tile whose top == bandBottom belongs to the floor below.
+            treatAsCurrentFloor = !(tileTop <= bandBottom || tileBottom >= bandTop);
           }
         } else if (Number.isFinite(tileElevation)) {
           // Fallback for tiles without explicit Levels flags.
-          treatAsCurrentFloor = tileElevation >= bandBottom && tileElevation <= bandTop;
+          // Exclusive top boundary: elevation==bandTop belongs to the floor above.
+          treatAsCurrentFloor = tileElevation >= bandBottom && tileElevation < bandTop;
         }
       }
     } catch (_) {
@@ -4259,6 +4264,20 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
               }
             }
           }
+
+          // Overhead tiles are ceilings/roofs. The Levels visibility algorithm can
+          // legitimately hide them (it expects PIXI roof occlusion), but MapShine
+          // needs overhead art to remain visible so it can:
+          //  - render overhead layers correctly
+          //  - capture ROOF_LAYER into overhead-shadow passes
+          //
+          // CRITICAL: Always keep overhead tiles visible when Levels is active.
+          // Many overhead tiles have no Levels flags or undefined elevation, and
+          // the Levels perspective check (isTileVisibleForPerspective) will hide
+          // them. Without this override, overhead layers disappear entirely.
+          if (strictBandVisibility && sprite?.userData?.isOverhead) {
+            elevationVisible = true;
+          }
         } else if (strictBandVisibility) {
           // For tiles without explicit Levels flags, use tile elevation as the
           // fallback floor assignment when an active level context exists.
@@ -4268,14 +4287,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           // the thing covering that floor). Without this, any overhead tile that
           // lacks Levels flags but has a higher elevation than the active band
           // is hard-hidden, making overhead layers appear to "not render".
+          //
+          // CRITICAL: Overhead tiles with undefined elevation must default to VISIBLE.
+          // Many overhead tiles (roofs, ceilings) have no elevation set because they
+          // are meant to cover all floors. Hiding them breaks overhead shadow capture.
           if (sprite?.userData?.isOverhead) {
-            const elev = Number(tileDoc?.elevation);
-            const bandTop = Number(activeLevelContext?.top);
-            if (Number.isFinite(elev) && Number.isFinite(bandTop)) {
-              elevationVisible = elev >= bandTop;
-            } else {
-              elevationVisible = true;
-            }
+            elevationVisible = true;
           } else {
             elevationVisible = isElevationWithinActiveBand(tileDoc?.elevation, activeLevelContext);
           }

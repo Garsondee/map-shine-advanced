@@ -4569,9 +4569,29 @@ async function createThreeCanvas(scene) {
       // work (fire mask scanning, water SDF rebuild) before the render loop
       // starts, potentially before particle systems or other dependencies are
       // fully wired.
-      if (reg && bundle?.masks?.length) {
+      // NOTE: On some loads, sceneComposer._assetBundle is not retained, but the
+      // scene mask compositor still has floor bundles in _floorMeta. Tree/Bush
+      // effects rely on EffectMaskRegistry for initial mask binding, so we must
+      // be able to seed from either source.
+      const compositor = sceneComposer?._sceneMaskCompositor;
+      const activeCtx = window.MapShine?.activeLevelContext;
+      const derivedFloorKey = (activeCtx && Number.isFinite(Number(activeCtx.bottom)) && Number.isFinite(Number(activeCtx.top)))
+        ? `${Number(activeCtx.bottom)}:${Number(activeCtx.top)}`
+        : null;
+
+      // Prefer the asset bundle when present; otherwise fall back to the active
+      // compositor floor bundle.
+      const fallbackFloorBundle = (derivedFloorKey && compositor?._floorMeta?.get?.(derivedFloorKey))
+        ? compositor._floorMeta.get(derivedFloorKey)
+        : null;
+
+      const masksSource = (bundle?.masks?.length)
+        ? bundle
+        : (fallbackFloorBundle?.masks?.length ? fallbackFloorBundle : null);
+
+      if (reg && masksSource?.masks?.length) {
         const seededTypes = [];
-        for (const m of bundle.masks) {
+        for (const m of masksSource.masks) {
           const type = m?.type || m?.id;
           if (type && m?.texture) {
             // Only seed preserveAcrossFloors types. Non-preserve types (fire,
@@ -4594,7 +4614,7 @@ async function createThreeCanvas(scene) {
           log.info('EffectMaskRegistry: seeded preserveAcrossFloors mask slots', seededTypes);
         }
 
-        // IMPORTANT: Manually populate registry slots with all bundle masks.
+        // IMPORTANT: Manually populate registry slots with all masks.
         // DO NOT use transitionToFloor() here - it will clear masks that aren't
         // in the newFloorMasks array, which happens because the compositor hasn't
         // composed floor-specific masks yet during initial load.
@@ -4602,16 +4622,21 @@ async function createThreeCanvas(scene) {
         // Instead, directly call setMask() for each mask in the bundle to ensure
         // they're immediately available to effects.
         
-        const floorKey = '0:20'; // Default ground floor
+        // Use the active level context when available so masks are seeded for the
+        // currently-selected floor band (e.g. 0:10 in your scene).
+        const floorKey = derivedFloorKey
+          ?? (compositor?._floorMeta?.keys?.().next?.().value ?? '0:0');
         
         log.info('EffectMaskRegistry: populating initial masks', {
-          bundleMaskCount: bundle?.masks?.length ?? 0,
-          bundleMasks: (bundle?.masks || []).map(m => m.id || m.type).filter(Boolean)
+          floorKey,
+          source: (masksSource === bundle) ? 'assetBundle' : 'compositorFloorMeta',
+          bundleMaskCount: masksSource?.masks?.length ?? 0,
+          bundleMasks: (masksSource?.masks || []).map(m => m.id || m.type).filter(Boolean)
         });
         
         // Manually populate registry with all bundle masks
-        if (bundle?.masks?.length > 0) {
-          for (const mask of bundle.masks) {
+        if (masksSource?.masks?.length > 0) {
+          for (const mask of masksSource.masks) {
             const type = mask.id || mask.type;
             if (!type || !mask.texture) continue;
             try {
@@ -4624,7 +4649,6 @@ async function createThreeCanvas(scene) {
           // Keep the compositor floor bundle in sync so bindFloorMasks() can
           // consume the same masks the registry has. This mirrors the working
           // console recovery snippet.
-          const compositor = sceneComposer?._sceneMaskCompositor;
           if (compositor?._floorMeta) {
             try {
               let floorBundle = compositor._floorMeta.get(floorKey);
@@ -4632,7 +4656,7 @@ async function createThreeCanvas(scene) {
                 floorBundle = { masks: [] };
                 compositor._floorMeta.set(floorKey, floorBundle);
               }
-              floorBundle.masks = bundle.masks;
+              floorBundle.masks = masksSource.masks;
             } catch (e) {
               log.warn('EffectMaskRegistry: failed to update compositor floor bundle', e);
             }
@@ -4876,9 +4900,10 @@ async function createThreeCanvas(scene) {
         // Tree, Bush, and Iridescence now support per-tile overlays via TileBindableEffect interface.
         const _treeEffect = effectMap.get('Trees');
         const _bushEffect = effectMap.get('Bushes');
+        const _iridescenceEffect = effectMap.get('Iridescence');
         if (_treeEffect) bindingMgr.registerEffect(_treeEffect);
         if (_bushEffect) bindingMgr.registerEffect(_bushEffect);
-        if (iridescenceEffect) bindingMgr.registerEffect(iridescenceEffect);
+        if (_iridescenceEffect) bindingMgr.registerEffect(_iridescenceEffect);
         tileManager.setTileBindingManager(bindingMgr);
         if (window.MapShine) window.MapShine.tileBindingManager = bindingMgr;
         log.info('TileEffectBindingManager wired with', bindingMgr._effects.length, 'effects');
@@ -5263,13 +5288,20 @@ async function createThreeCanvas(scene) {
     // Step 6b: Initialize controls integration (PIXI overlay system)
     console.log('[Map Shine Advanced: Loading] ▶ Manager: ControlsIntegration');
     if (isDebugLoad) dlp.begin('manager.ControlsIntegration.init', 'manager');
+    _setCreateThreeCanvasProgress('scene.managers.controlsIntegration.init');
     controlsIntegration = new ControlsIntegration({ 
       sceneComposer,
       effectComposer
     });
     {
-      const ok = await controlsIntegration.initialize();
-      if (!ok) throw new Error('ControlsIntegration initialization failed');
+      const timeoutMs = 15000;
+      const ok = await Promise.race([
+        controlsIntegration.initialize(),
+        new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs))
+      ]);
+      if (!ok) {
+        log.warn(`ControlsIntegration initialization failed or timed out after ${timeoutMs}ms; continuing without it`);
+      }
     }
     if (isDebugLoad) dlp.end('manager.ControlsIntegration.init');
     console.log('[Map Shine Advanced: Loading] ✔ Manager: ControlsIntegration DONE');

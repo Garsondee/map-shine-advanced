@@ -820,7 +820,7 @@ export class TreeEffect extends EffectBase {
       fragmentShader: this.material?.fragmentShader || this._getTileFragmentShader(),
       transparent: true,
       depthWrite: false,
-      depthTest: true
+      depthTest: false
     });
     // Tag so update() can sync uniforms to all tile overlay materials.
     mat._isTileOverlay = true;
@@ -1121,7 +1121,7 @@ export class TreeEffect extends EffectBase {
       `,
       transparent: true,
       depthWrite: false,
-      depthTest: true
+      depthTest: false
     });
 
     this.mesh = new THREE.Mesh(this.baseMesh.geometry, this.material);

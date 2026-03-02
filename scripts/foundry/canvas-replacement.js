@@ -3527,14 +3527,7 @@ async function createThreeCanvas(scene) {
   // A previous implementation declared _v2Active later (after EffectComposer
   // creation), which caused a TDZ ReferenceError when earlier code paths
   // referenced _v2Active.
-  const _v2Active = (() => {
-    try {
-      return !!game?.settings?.get('map-shine-advanced', 'useCompositorV2');
-    } catch (e) {
-      log.warn('Failed to read useCompositorV2 setting — falling back to V1 mode:', e?.message ?? e);
-      return false;
-    }
-  })();
+  const _v2Active = true;
 
   const lp = globalLoadingProfiler;
   const doLoadProfile = !!lp?.enabled;
@@ -3935,74 +3928,6 @@ async function createThreeCanvas(scene) {
 
     // V2: MaskManager, WeatherController roof map, and EffectMaskRegistry are
     // all V1 mask infrastructure. V2 renders raw geometry only — skip.
-    if (!_v2Active) {
-      _setCreateThreeCanvasProgress('maskManager.register');
-      if (isDebugLoad) dlp.begin('maskManager.register', 'texture');
-      console.log('[Map Shine Advanced: Loading] ▶ Step: maskManager.register');
-      mapShine.maskManager = new MaskManager();
-      mapShine.maskManager.setRenderer(renderer);
-      safeCall(() => {
-        const mm = mapShine.maskManager;
-        if (mm && bundle?.masks && Array.isArray(bundle.masks)) {
-          for (const m of bundle.masks) {
-            if (!m || !m.id || !m.texture) continue;
-            mm.setTexture(`${m.id}.scene`, m.texture, {
-              space: 'sceneUv',
-              source: 'assetMask',
-              colorSpace: m.texture.colorSpace ?? null,
-              uvFlipY: m.texture.flipY ?? null,
-              lifecycle: 'staticPerScene'
-            });
-          }
-        }
-
-        if (mm && typeof mm.defineDerivedMask === 'function') {
-          mm.defineDerivedMask('indoor.scene', { op: 'invert', input: 'outdoors.scene' });
-          mm.defineDerivedMask('roofVisible.screen', { op: 'threshold', input: 'roofAlpha.screen', lo: 0.05, hi: 0.15 });
-          mm.defineDerivedMask('roofClear.screen', { op: 'invert', input: 'roofVisible.screen' });
-          mm.defineDerivedMask('precipVisibility.screen', { op: 'max', a: 'outdoors.screen', b: 'roofClear.screen' });
-        }
-      }, 'MaskManager.registerBundleMasks', Severity.DEGRADED);
-      if (isDebugLoad) dlp.end('maskManager.register');
-      console.log('[Map Shine Advanced: Loading] ✔ Step: maskManager.register DONE');
-
-      // Wire the _Outdoors (roof/indoor) mask into the WeatherController so
-      // precipitation effects (rain, snow, puddles) can respect covered areas.
-      safeCall(() => {
-        if (bundle?.masks?.length) {
-          const outdoorsMask = bundle.masks.find(m => m.id === 'outdoors' || m.type === 'outdoors');
-          if (outdoorsMask?.texture && weatherController?.setRoofMap) {
-            weatherController.setRoofMap(outdoorsMask.texture);
-            log.info('WeatherController roof map set from _Outdoors mask texture');
-          } else {
-            log.debug('No _Outdoors mask texture found for this scene');
-          }
-        }
-      }, 'weatherController.setRoofMap', Severity.DEGRADED);
-
-      // Step 1b: Initialize EffectMaskRegistry — central mask state manager.
-      console.log('[Map Shine Advanced: Loading] ▶ Step: effectMaskRegistry.init');
-      safeCall(() => {
-        effectMaskRegistry = new EffectMaskRegistry();
-
-        // Seed the registry with the initial bundle's masks (ground floor).
-        if (bundle?.masks?.length) {
-          for (const m of bundle.masks) {
-            const maskType = m.type || m.id;
-            if (maskType && m.texture) {
-              effectMaskRegistry.setMask(maskType, m.texture, null, 'bundle');
-            }
-          }
-          log.info('EffectMaskRegistry seeded with initial bundle masks', {
-            types: bundle.masks.filter(m => m.texture).map(m => m.type || m.id)
-          });
-        }
-
-        if (window.MapShine) window.MapShine.effectMaskRegistry = effectMaskRegistry;
-        if (window.MapShine) window.MapShine.textureBudgetTracker = getTextureBudgetTracker();
-      }, 'effectMaskRegistry.init', Severity.DEGRADED);
-      console.log('[Map Shine Advanced: Loading] ✔ Step: effectMaskRegistry.init DONE');
-    }
 
     // Step 2: Initialize effect composer
     console.log('[Map Shine Advanced: Loading] ▶ Step: effectComposer.initialize');
@@ -4027,24 +3952,6 @@ async function createThreeCanvas(scene) {
 
     // Initialize module-wide depth pass manager.
     // V2: Depth passes are not used — FloorCompositor renders MeshBasicMaterial only.
-    if (!_v2Active) {
-      console.log('[Map Shine Advanced: Loading] ▶ Step: depthPassManager.init');
-      if (isDebugLoad) dlp.begin('depthPassManager.init', 'setup');
-      safeCall(() => {
-        if (depthPassManager) {
-          safeDispose(() => { effectComposer?.removeUpdatable?.(depthPassManager); }, 'removeUpdatable(depthPass)');
-          safeDispose(() => depthPassManager.dispose(), 'depthPassManager.dispose(reinit)');
-        }
-        depthPassManager = new DepthPassManager();
-        depthPassManager.initialize(renderer, threeScene, camera);
-        depthPassManager.setMaskManager(mapShine.maskManager);
-        effectComposer.addUpdatable(depthPassManager);
-        effectComposer.setDepthPassManager(depthPassManager);
-        if (window.MapShine) window.MapShine.depthPassManager = depthPassManager;
-      }, 'DepthPassManager.init', Severity.DEGRADED);
-      if (isDebugLoad) dlp.end('depthPassManager.init');
-      console.log('[Map Shine Advanced: Loading] ✔ Step: depthPassManager.init DONE');
-    }
 
     safeCall(() => {
       loadingOverlay.setStage('effects.core', 0.0, 'Initializing effects…', { immediate: true, keepAuto: true });
@@ -4073,9 +3980,6 @@ async function createThreeCanvas(scene) {
     console.log('[Map Shine Advanced: Loading] ✔ Step: weatherController.initialize DONE');
     if (isDebugLoad) dlp.end('weatherController.initialize');
 
-    if (!_v2Active) {
-      safeCall(() => effectComposer.addUpdatable(weatherController), 'effectComposer.addUpdatable(weather)', Severity.DEGRADED);
-    }
 
     safeCall(() => loadingOverlay.setStage('effects.core', 0.05, 'Weather initialized…', { keepAuto: true }), 'overlay.weather', Severity.COSMETIC);
 
@@ -4111,78 +4015,30 @@ async function createThreeCanvas(scene) {
 
       if (isDebugLoad) dlp.begin('v2.floorCompositor.warmup', 'setup');
       log.info('[loading] V2 FloorCompositor warmup START');
-      // Yield one frame so the browser can paint the loading screen BEFORE the
-      // synchronous GPU shader compilation stall. Without this yield, the stall
-      // happens before the first paint and the loading screen appears frozen at 0%.
+      
+      // Yield before creating the compositor so the loading screen can paint.
       await new Promise(resolve => setTimeout(resolve, 50));
+      
+      // Force-create the FloorCompositor. This is synchronous and can be expensive
+      // (creates render targets, registers hooks, syncs lights). Wrap in safeCall
+      // but don't await it — we just need the compositor instance created.
+      let fc = null;
       safeCall(() => {
-        // Force-create the FloorCompositor so all ShaderMaterials are built now.
-        const fc = effectComposer._getFloorCompositorV2();
-        if (fc && renderer) {
-          const THREE = window.THREE;
-          // Build a temporary warmup scene containing the compositor's REAL
-          // post-processing materials so renderer.compile() actually triggers
-          // GLSL compilation for the expensive shaders (water, lighting, cloud, etc.).
-          // Previously this compiled empty/trivial scenes which was effectively a no-op.
-          const warmupCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-          const warmupScene = new THREE.Scene();
-          const warmupGeo = new THREE.PlaneGeometry(2, 2);
-
-          // Collect all ShaderMaterials from the compositor's post-processing effects.
-          // Most V2 effects use _composeMaterial; CloudEffectV2 has multiple
-          // materials (_densityMat, _shadowMat, _cloudTopMat, _cloudTopBlitMat);
-          // LightingEffectV2 also has _lightMaterial for the light accumulation pass.
-          const effectProps = [
-            '_lightingEffect', '_waterEffect', '_cloudEffect',
-            '_skyColorEffect', '_colorCorrectionEffect', '_filterEffect',
-            '_bloomEffect', '_filmGrainEffect', '_sharpenEffect',
-          ];
-          // Property names that may hold ShaderMaterials on each effect instance
-          const matProps = [
-            '_composeMaterial', 'material', '_material',
-            '_lightMaterial',   // LightingEffectV2 light accumulation
-            '_densityMat', '_shadowMat', '_cloudTopMat', '_cloudTopBlitMat', // CloudEffectV2
-          ];
-          const warmupMaterials = [];
-          for (const prop of effectProps) {
-            try {
-              const effect = fc[prop];
-              if (!effect) continue;
-              for (const mp of matProps) {
-                const mat = effect[mp];
-                if (mat && mat.isShaderMaterial) {
-                  warmupMaterials.push(mat);
-                }
-              }
-            } catch (_) {}
-          }
-
-          // Add temporary meshes to the warmup scene for compilation
-          const tempMeshes = [];
-          for (const mat of warmupMaterials) {
-            const mesh = new THREE.Mesh(warmupGeo, mat);
-            mesh.frustumCulled = false;
-            warmupScene.add(mesh);
-            tempMeshes.push(mesh);
-          }
-
-          // NOTE: renderer.compile() is intentionally NOT called here.
-          // It is a synchronous GPU operation that can hang the browser main thread
-          // indefinitely on certain GPU/driver combinations (observed: NVIDIA on Windows).
-          // Shaders will compile lazily on the first render frame instead, producing
-          // a brief first-frame stall that is far preferable to a permanent freeze.
-          log.info(`V2 FloorCompositor: skipping renderer.compile() (${warmupMaterials.length} materials will compile lazily on first render)`);
-          console.log(`[Map Shine Advanced: Loading]   warmup: skipped renderer.compile() — ${warmupMaterials.length} shader materials will compile lazily`);
-
-          // Clean up temporary objects (materials are NOT disposed — they belong to the compositor)
-          for (const mesh of tempMeshes) {
-            warmupScene.remove(mesh);
-          }
-          warmupGeo.dispose();
-
-          log.info('V2 FloorCompositor shaders pre-compiled during scene load');
-        }
-      }, 'v2.floorCompositor.warmup', Severity.DEGRADED);
+        fc = effectComposer._getFloorCompositorV2();
+        log.info('V2 FloorCompositor instance created');
+      }, 'v2.floorCompositor.create', Severity.DEGRADED);
+      
+      // Yield again after creation to let the browser breathe.
+      await new Promise(resolve => setTimeout(resolve, 10));
+      
+      // Skip the expensive renderer.compile() warmup. Shaders will compile lazily
+      // on the first render frame instead. This prevents indefinite freezes on
+      // certain GPU/driver combinations (observed: NVIDIA on Windows).
+      if (fc) {
+        log.info('V2 FloorCompositor: skipping shader warmup (will compile lazily on first render)');
+        console.log('[Map Shine Advanced: Loading]   warmup: skipped — shaders will compile lazily');
+      }
+      
       log.info('[loading] V2 FloorCompositor warmup DONE');
       if (isDebugLoad) dlp.end('v2.floorCompositor.warmup');
 
@@ -4209,658 +4065,34 @@ async function createThreeCanvas(scene) {
       console.log('[Map Shine Advanced: Loading]   V2 yield 3/3 done — exiting V2 warmup block');
     }
 
-    if (!_v2Active) {
-    // P1.2: Parallel Effect Initialization via registerEffectBatch().
-    // All independent effects are constructed first (synchronous), then their
-    // initialize() calls run concurrently with a concurrency limit of 4 to
-    // avoid GPU/driver contention from too many simultaneous shader compilations.
-    // Map insertion order is preserved so render order is deterministic.
-    console.log('[Map Shine Advanced: Loading] ▶ Step: registerEffectBatch (independent effects)');
 
-    const independentEffectDefs = getIndependentEffectDefs();
-
-    // Construct all effect instances (synchronous) and build name→instance map
-    const effectInstances = [];
-    const nameByEffectId = new Map();
-    for (const [name, EffectClass] of independentEffectDefs) {
-      const effect = new EffectClass();
-      effectInstances.push(effect);
-      effectMap.set(name, effect);
-      nameByEffectId.set(effect.id, name);
-    }
-
-    // P2.1: Pre-read graphics settings from localStorage to find disabled effects.
-    // Effects the user has disabled don't need shader compilation during loading —
-    // they'll be lazily initialized if the user re-enables them later.
-    const lazySkipIds = readLazySkipIds();
-
-    // Initialize effects. In debug mode, concurrency is forced to 1 (sequential)
-    // so that per-effect timings are accurate and not overlapping.
-    // Normal mode uses concurrency=4 for faster loading.
-    const effectConcurrency = isDebugLoad ? 1 : 4;
-    const _batchStartMs = performance.now();
-    dlp.event(`effectInit: BEGIN — ${effectInstances.length} effects, concurrency=${effectConcurrency}, lazy-skip=${lazySkipIds?.size ?? 0}`);
-    const batchResult = await effectComposer.registerEffectBatch(effectInstances, {
-      concurrency: effectConcurrency,
-      skipIds: lazySkipIds,
-      onProgress: (completed, total, effectId) => {
-        const t = Math.max(0, Math.min(1, completed / total));
-        const label = nameByEffectId.get(effectId) || effectId;
-        safeCall(() => loadingOverlay.setStage('effects.core', t, `Initialized ${label}…`, { keepAuto: true }), 'overlay.effectBatch', Severity.COSMETIC);
-      }
-    });
-
-    console.log('[Map Shine Advanced: Loading] ✔ Step: registerEffectBatch DONE (' + (batchResult?.registered?.length ?? 0) + ' registered, ' + (batchResult?.deferred?.length ?? 0) + ' deferred)');
-    dlp.event(`effectInit: DONE — ${batchResult?.registered?.length ?? 0} registered, ${batchResult?.deferred?.length ?? 0} deferred, ${(performance.now() - _batchStartMs).toFixed(0)}ms`);
-
-    // Log per-effect timings (top 10 slowest) and feed into debug profiler
-    safeCall(() => {
-      const effectTimings = (batchResult?.timings || [])
-        .map(t => ({ name: nameByEffectId.get(t.id) || t.id, durationMs: t.durationMs, id: t.id }))
-        .sort((a, b) => b.durationMs - a.durationMs);
-      const top10 = effectTimings.slice(0, 10);
-      const deferredCount = batchResult?.deferred?.length || 0;
-      log.info(`Effect batch init: ${batchResult.registered.length} registered, ${deferredCount} deferred (lazy), ${batchResult.skipped.length} skipped (concurrency=${effectConcurrency})`);
-      log.info('Effect init timings (top 10 slowest):');
-      for (const { name, durationMs } of top10) {
-        log.info(`  ${name}: ${durationMs.toFixed(1)}ms`);
-      }
-      window.MapShine._effectInitTimings = effectTimings;
-
-      // Add effect batch summary to debug profiler diagnostics
-      if (isDebugLoad) {
-        const deferredCount = batchResult?.deferred?.length || 0;
-        const skippedCount = batchResult?.skipped?.length || 0;
-        dlp.addDiagnostic('Effect Batch Init', {
-          'Registered': batchResult?.registered?.length ?? 0,
-          'Deferred (lazy)': deferredCount > 0 ? `${deferredCount} [${batchResult.deferred.join(', ')}]` : '0',
-          'Skipped': skippedCount > 0 ? `${skippedCount} [${batchResult.skipped.join(', ')}]` : '0',
-          'Concurrency': effectConcurrency,
-          'Lazy skip IDs': lazySkipIds?.size > 0 ? Array.from(lazySkipIds).join(', ') : '(none)',
-          'Total batch time': `${(performance.now() - _batchStartMs).toFixed(0)}ms`
-        });
-      }
-
-      // Feed individual effect timings into the debug profiler for the log.
-      // The batch result only contains { id, durationMs } per effect. Since debug
-      // mode forces concurrency=1 (sequential), we compute approximate start times
-      // by accumulating durations from the batch start timestamp.
-      if (isDebugLoad && batchResult?.timings) {
-        let cursor = _batchStartMs;
-        for (const t of batchResult.timings) {
-          const displayName = nameByEffectId.get(t.id) || t.id;
-          const entryId = `effect.${displayName}.initialize`;
-          const dur = t.durationMs ?? 0;
-          const entry = {
-            id: entryId,
-            category: 'effect',
-            startMs: cursor,
-            endMs: cursor + dur,
-            durationMs: dur,
-            meta: null
-          };
-          cursor += dur;
-          dlp.entries.push(entry);
-          if (dlp.onEntryComplete) {
-            try { dlp.onEntryComplete(entry); } catch (_) {}
-          }
-        }
-      }
-    }, 'logEffectTimings', Severity.COSMETIC);
-    _sectionEnd('effectInit');
-    
-    // Switch to wiring/graphics-settings stage
-    safeCall(() => loadingOverlay.setStage('effects.wire', 0.0, 'Wiring effects…', { keepAuto: true }), 'overlay.wire', Severity.COSMETIC);
-
-    const specularEffect = effectMap.get('Specular');
-    const iridescenceEffect = effectMap.get('Iridescence');
-    const windowLightEffect = effectMap.get('Window Lights');
-    const colorCorrectionEffect = effectMap.get('Color Correction');
-    const filmGrainEffect = effectMap.get('Film Grain');
-    const dotScreenEffect = effectMap.get('Dot Screen');
-    const halftoneEffect = effectMap.get('Halftone');
-    const sharpenEffect = effectMap.get('Sharpen');
-    const asciiEffect = effectMap.get('ASCII');
-    const lightningEffect_temp = effectMap.get('Lightning');
-    const prismEffect = effectMap.get('Prism');
-    const waterEffect = effectMap.get('Water');
-    const fogEffect_temp = effectMap.get('Fog');
-    const bushEffect = effectMap.get('Bushes');
-    const treeEffect = effectMap.get('Trees');
-    const overheadShadowsEffect = effectMap.get('Overhead Shadows');
-    const buildingShadowsEffect = effectMap.get('Building Shadows');
-    const cloudEffect = effectMap.get('Clouds');
-    const atmosphericFogEffect = effectMap.get('Atmospheric Fog');
-    const distortionManager = effectMap.get('Distortion');
-    const bloomEffect = effectMap.get('Bloom');
-    const lensflareEffect = effectMap.get('Lensflare');
-    const dazzleOverlayEffect = effectMap.get('Dazzle Overlay');
-    const maskDebugEffect = effectMap.get('Mask Debug');
-    const debugLayerEffect = effectMap.get('Debug Layers');
-    const playerLightEffect = effectMap.get('Player Lights');
-    const skyColorEffect_temp = effectMap.get('Sky Color');
-
-    // --- Graphics Settings (Essential Feature) ---
-    // Create once per canvas lifecycle, register known effects, and expose globally.
-    if (isDebugLoad) dlp.begin('graphicsSettings.init', 'graphics');
-    safeCall(() => {
-      if (!effectCapabilitiesRegistry) effectCapabilitiesRegistry = new EffectCapabilitiesRegistry();
-      registerAllCapabilities(effectCapabilitiesRegistry);
-    }, 'registerEffectCapabilities', Severity.DEGRADED);
-
-    _setCreateThreeCanvasProgress('graphicsSettings.initialize');
-    await safeCallAsync(async () => {
-      if (!graphicsSettings) {
-        graphicsSettings = new GraphicsSettingsManager(effectComposer, effectCapabilitiesRegistry, {
-          onApplyRenderResolution: () => {
-            safeCall(() => {
-              if (!threeCanvas) return;
-              const rect = threeCanvas.getBoundingClientRect();
-              resize(rect.width, rect.height);
-            }, 'graphicsSettings.resize', Severity.COSMETIC);
-          }
-        });
-        await graphicsSettings.initialize();
-        if (window.MapShine) window.MapShine.graphicsSettings = graphicsSettings;
-      }
-
-      // Wire all effect instances so the manager can toggle them safely.
-      wireGraphicsSettings(graphicsSettings, effectMap);
-    }, 'graphicsSettings.initAndWire', Severity.DEGRADED);
-    if (isDebugLoad) dlp.end('graphicsSettings.init');
-
-    // Assign to module-level variables for later reference
-    lightningEffect = lightningEffect_temp;
-    fogEffect = fogEffect_temp;
-    skyColorEffect = skyColorEffect_temp;
-
-    // Expose a subset of effects on window.MapShine early — needed by cross-references
-    exposeEffectsEarly(window.MapShine, effectMap);
-
-    // Phase 2: Register dependent effects sequentially (must maintain order)
-    safeCall(() => loadingOverlay.setStage('effects.deps', 0.0, 'Initializing particles…', { keepAuto: true }), 'overlay.deps', Severity.COSMETIC);
-
-    // Step 3.8: Register Particle System (must be before FireSparksEffect)
-    _setEffectInitStep('Particles');
-    _setCreateThreeCanvasProgress('effect.register.ParticleSystem');
-    if (isDebugLoad) dlp.begin('effect.ParticleSystem.register', 'effect');
-    console.log('[Map Shine Advanced: Loading] ▶ Dependent Effect: ParticleSystem');
-    const particleSystem = new ParticleSystem();
-    await effectComposer.registerEffect(particleSystem);
-    console.log('[Map Shine Advanced: Loading] ✔ Dependent Effect: ParticleSystem DONE');
-    if (isDebugLoad) dlp.end('effect.ParticleSystem.register');
-
-    // Step 3.9: Register Fire Sparks Effect (depends on ParticleSystem)
-    _setEffectInitStep('Fire');
-    _setCreateThreeCanvasProgress('effect.register.FireSparks');
-    if (isDebugLoad) dlp.begin('effect.FireSparks.register', 'effect');
-    console.log('[Map Shine Advanced: Loading] ▶ Dependent Effect: FireSparks');
-    const fireSparksEffect = new FireSparksEffect();
-    fireSparksEffect.setParticleSystem(particleSystem);
-    await effectComposer.registerEffect(fireSparksEffect);
-    if (bundle) {
-      fireSparksEffect.setAssetBundle(bundle);
-    }
-    console.log('[Map Shine Advanced: Loading] ✔ Dependent Effect: FireSparks DONE');
-    if (isDebugLoad) dlp.end('effect.FireSparks.register');
-
-    safeCall(() => { graphicsSettings?.registerEffectInstance('fire-sparks', fireSparksEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(fire-sparks)', Severity.COSMETIC);
-
-    // Step 3.10: Register Dust Motes (can use particle system if needed)
-    _setEffectInitStep('Dust Motes');
-    _setCreateThreeCanvasProgress('effect.register.DustMotes');
-    if (isDebugLoad) dlp.begin('effect.DustMotes.register', 'effect');
-    console.log('[Map Shine Advanced: Loading] ▶ Dependent Effect: DustMotes');
-    const dustMotesEffect = new DustMotesEffect();
-    await effectComposer.registerEffect(dustMotesEffect);
-    if (bundle) {
-      dustMotesEffect.setAssetBundle(bundle);
-    }
-    console.log('[Map Shine Advanced: Loading] ✔ Dependent Effect: DustMotes DONE');
-    if (isDebugLoad) dlp.end('effect.DustMotes.register');
-
-    safeCall(() => { graphicsSettings?.registerEffectInstance('dust-motes', dustMotesEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(dust-motes)', Severity.COSMETIC);
-
-    // Step 3.11: Register Ash Disturbance (token movement bursts)
-    _setEffectInitStep('Ash Disturbance');
-    _setCreateThreeCanvasProgress('effect.register.AshDisturbance');
-    if (isDebugLoad) dlp.begin('effect.AshDisturbance.register', 'effect');
-    console.log('[Map Shine Advanced: Loading] ▶ Dependent Effect: AshDisturbance');
-    ashDisturbanceEffect = new AshDisturbanceEffect();
-    await effectComposer.registerEffect(ashDisturbanceEffect);
-    if (bundle) {
-      ashDisturbanceEffect.setAssetBundle(bundle);
-    }
-    console.log('[Map Shine Advanced: Loading] ✔ Dependent Effect: AshDisturbance DONE');
-    if (isDebugLoad) dlp.end('effect.AshDisturbance.register');
-
-    safeCall(() => { graphicsSettings?.registerEffectInstance('ash-disturbance', ashDisturbanceEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(ash-disturbance)', Severity.COSMETIC);
-
-    // Step 3.12: Register Smelly Flies (depends on ParticleSystem for BatchedRenderer)
-    _setEffectInitStep('Smelly Flies');
-    _setCreateThreeCanvasProgress('effect.register.SmellyFlies');
-    if (isDebugLoad) dlp.begin('effect.SmellyFlies.register', 'effect');
-    console.log('[Map Shine Advanced: Loading] ▶ Dependent Effect: SmellyFlies');
-    const smellyFliesEffect = new SmellyFliesEffect();
-    await effectComposer.registerEffect(smellyFliesEffect);
-    console.log('[Map Shine Advanced: Loading] ✔ Dependent Effect: SmellyFlies DONE');
-    if (isDebugLoad) dlp.end('effect.SmellyFlies.register');
-
-    safeCall(() => { graphicsSettings?.registerEffectInstance('smelly-flies', smellyFliesEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(smelly-flies)', Severity.COSMETIC);
-
-    // Step 3.13.5: Initialize LightEnhancementStore BEFORE LightingEffect
-    // CRITICAL: The enhancement store must be created and loaded before LightingEffect.initialize()
-    // runs, otherwise the first syncAllLights() will fail to apply cookie enhancements.
-    // See docs/LIGHT-COOKIE-RESET-ISSUE.md for full analysis.
-    _setEffectInitStep('Light Enhancement Store');
-    if (isDebugLoad) dlp.begin('effect.LightEnhancementStore.init', 'effect');
-    console.log('[Map Shine Advanced: Loading] ▶ Dependent Effect: LightEnhancementStore');
-    await safeCallAsync(async () => {
-      mapShine.lightEnhancementStore = new LightEnhancementStore();
-      await mapShine.lightEnhancementStore.load?.();
-      log.info('LightEnhancementStore loaded before LightingEffect');
-    }, 'LightEnhancementStore.init', Severity.DEGRADED, {
-      onError: () => { mapShine.lightEnhancementStore = null; }
-    });
-    console.log('[Map Shine Advanced: Loading] ✔ Dependent Effect: LightEnhancementStore DONE');
-    if (isDebugLoad) dlp.end('effect.LightEnhancementStore.init');
-
-    // Step 3.14: Register Lighting Effect (must be before CandleFlamesEffect)
-    _setEffectInitStep('Lighting');
-    _setCreateThreeCanvasProgress('effect.register.Lighting');
-    if (isDebugLoad) dlp.begin('effect.Lighting.register', 'effect');
-    console.log('[Map Shine Advanced: Loading] ▶ Dependent Effect: LightingEffect');
-    lightingEffect = new LightingEffect();
-    await effectComposer.registerEffect(lightingEffect);
-    if (window.MapShine) window.MapShine.lightingEffect = lightingEffect;
-    console.log('[Map Shine Advanced: Loading] ✔ Dependent Effect: LightingEffect DONE');
-    if (isDebugLoad) dlp.end('effect.Lighting.register');
-
-    safeCall(() => { graphicsSettings?.registerEffectInstance('lighting', lightingEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(lighting)', Severity.COSMETIC);
-
-    // Step 3.15: Register Candle Flames (depends on LightingEffect)
-    _setEffectInitStep('Candle Flames');
-    _setCreateThreeCanvasProgress('effect.register.CandleFlames');
-    if (isDebugLoad) dlp.begin('effect.CandleFlames.register', 'effect');
-    console.log('[Map Shine Advanced: Loading] ▶ Dependent Effect: CandleFlames');
-    const candleFlamesEffect = new CandleFlamesEffect();
-    candleFlamesEffect.setLightingEffect(lightingEffect);
-    await effectComposer.registerEffect(candleFlamesEffect);
-    if (window.MapShine) window.MapShine.candleFlamesEffect = candleFlamesEffect;
-    console.log('[Map Shine Advanced: Loading] ✔ Dependent Effect: CandleFlames DONE');
-    if (isDebugLoad) dlp.end('effect.CandleFlames.register');
-
-      safeCall(() => { graphicsSettings?.registerEffectInstance('candle-flames', candleFlamesEffect); graphicsSettings?.applyOverrides?.(); }, 'gfx.register(candle-flames)', Severity.COSMETIC);
-
-      // Add dependent effects to the shared effectMap so initializeUI and
-      // cross-wiring code can access all effects by display name.
-      effectMap.set('Particle System', particleSystem);
-      effectMap.set('Fire Sparks', fireSparksEffect);
-      effectMap.set('Dust Motes', dustMotesEffect);
-      effectMap.set('Ash Disturbance', ashDisturbanceEffect);
-      effectMap.set('Smelly Flies', smellyFliesEffect);
-      effectMap.set('Lighting', lightingEffect);
-      effectMap.set('Candle Flames', candleFlamesEffect);
-
-    if (session.isStale()) {
-      safeDispose(() => destroyThreeCanvas(), 'destroyThreeCanvas(stale)');
-      return;
-    }
-
-    // Provide the base mesh and asset bundle to surface/environmental effects
-    const basePlane = sceneComposer.getBasePlane();
-
-    _sectionStart('setBaseMesh');
-    console.log('[Map Shine Advanced: Loading] ▶ Step: wireBaseMeshes');
-    if (isDebugLoad) dlp.begin('wireBaseMeshes', 'sync');
-    wireBaseMeshes(effectMap, basePlane, bundle, (label, dt) => {
-      log.info(`  setBaseMesh(${label}): ${dt.toFixed(1)}ms`);
-    });
-    if (isDebugLoad) dlp.end('wireBaseMeshes');
-    console.log('[Map Shine Advanced: Loading] ✔ Step: wireBaseMeshes DONE');
-
-    // Connect all mask-consuming effects to the EffectMaskRegistry now that
-    // both the effects and registry are initialized. Registry subscriptions
-    // replace direct mask management during floor transitions.
-    safeCall(() => {
-      const reg = effectMaskRegistry ?? window.MapShine?.effectMaskRegistry;
-      if (!reg) return;
-
-      const connectIfPresent = (key, label) => {
-        const eff = effectMap.get(key);
-        if (eff && typeof eff.connectToRegistry === 'function') {
-          eff.connectToRegistry(reg);
-          log.info(`${label ?? key} connected to EffectMaskRegistry`);
-        }
-      };
-
-      connectIfPresent('Water', 'WaterEffectV2');
-      connectIfPresent('Lighting', 'LightingEffect');
-      connectIfPresent('Window Lights', 'WindowLightEffect');
-      connectIfPresent('Building Shadows', 'BuildingShadowsEffect');
-      connectIfPresent('Overhead Shadows', 'OverheadShadowsEffect');
-      connectIfPresent('Clouds', 'CloudEffect');
-      connectIfPresent('Atmospheric Fog', 'AtmosphericFogEffect');
-      connectIfPresent('Trees', 'TreeEffect');
-      connectIfPresent('Bushes', 'BushEffect');
-      connectIfPresent('Iridescence', 'IridescenceEffect');
-      connectIfPresent('Prism', 'PrismEffect');
-      connectIfPresent('Specular', 'SpecularEffect');
-      connectIfPresent('Fire Sparks', 'FireSparksEffect');
-      connectIfPresent('Dust Motes', 'DustMotesEffect');
-      connectIfPresent('Ash Disturbance', 'AshDisturbanceEffect');
-
-      // WeatherController is a singleton, not in effectMap
-      const wc = window.MapShine?.weatherController;
-      if (wc && typeof wc.connectToRegistry === 'function') {
-        wc.connectToRegistry(reg);
-        log.info('WeatherController connected to EffectMaskRegistry');
-      }
-      // Seed the registry slots with the initial bundle masks so all slots have
-      // valid textures from the start. This ensures transitionToFloor's preserve
-      // logic works on the very first floor transition (preserve requires
-      // currentTexture to be non-null). Without this, the registry starts empty
-      // and preserved types are silently skipped until a trip back to the ground
-      // floor populates them.
-      //
-      // IMPORTANT: Seed slots SILENTLY (no subscriber notifications). Effects
-      // already have their masks from setBaseMesh — we only need populated slots
-      // for the preserve logic. Notifying subscribers here would trigger heavy
-      // work (fire mask scanning, water SDF rebuild) before the render loop
-      // starts, potentially before particle systems or other dependencies are
-      // fully wired.
-      // NOTE: On some loads, sceneComposer._assetBundle is not retained, but the
-      // scene mask compositor still has floor bundles in _floorMeta. Tree/Bush
-      // effects rely on EffectMaskRegistry for initial mask binding, so we must
-      // be able to seed from either source.
-      const compositor = sceneComposer?._sceneMaskCompositor;
-      const activeCtx = window.MapShine?.activeLevelContext;
-      const derivedFloorKey = (activeCtx && Number.isFinite(Number(activeCtx.bottom)) && Number.isFinite(Number(activeCtx.top)))
-        ? `${Number(activeCtx.bottom)}:${Number(activeCtx.top)}`
-        : null;
-
-      // Prefer the asset bundle when present; otherwise fall back to the active
-      // compositor floor bundle.
-      const fallbackFloorBundle = (derivedFloorKey && compositor?._floorMeta?.get?.(derivedFloorKey))
-        ? compositor._floorMeta.get(derivedFloorKey)
-        : null;
-
-      const masksSource = (bundle?.masks?.length)
-        ? bundle
-        : (fallbackFloorBundle?.masks?.length ? fallbackFloorBundle : null);
-
-      if (reg && masksSource?.masks?.length) {
-        const seededTypes = [];
-        for (const m of masksSource.masks) {
-          const type = m?.type || m?.id;
-          if (type && m?.texture) {
-            // Only seed preserveAcrossFloors types. Non-preserve types (fire,
-            // outdoors, dust, ash) are managed by setAssetBundle and their own
-            // compositor paths. Seeding them would set currentTexture to non-null,
-            // which causes a spurious CLEAR action on the first floor UP (since
-            // the upper floor has no compositor data for them → newTexture=null,
-            // and preserveAcrossFloors=false → clear).
-            const policy = reg.getPolicy?.(type);
-            if (policy?.preserveAcrossFloors) {
-              try {
-                reg.setMask(type, m.texture, null, 'bundle');
-                seededTypes.push(type);
-              } catch (_) {
-              }
-            }
-          }
-        }
-        if (seededTypes.length) {
-          log.info('EffectMaskRegistry: seeded preserveAcrossFloors mask slots', seededTypes);
-        }
-
-        // IMPORTANT: Manually populate registry slots with all masks.
-        // DO NOT use transitionToFloor() here - it will clear masks that aren't
-        // in the newFloorMasks array, which happens because the compositor hasn't
-        // composed floor-specific masks yet during initial load.
-        //
-        // Instead, directly call setMask() for each mask in the bundle to ensure
-        // they're immediately available to effects.
-        
-        // Use the active level context when available so masks are seeded for the
-        // currently-selected floor band (e.g. 0:10 in your scene).
-        const floorKey = derivedFloorKey
-          ?? (compositor?._floorMeta?.keys?.().next?.().value ?? '0:0');
-        
-        log.info('EffectMaskRegistry: populating initial masks', {
-          floorKey,
-          source: (masksSource === bundle) ? 'assetBundle' : 'compositorFloorMeta',
-          bundleMaskCount: masksSource?.masks?.length ?? 0,
-          bundleMasks: (masksSource?.masks || []).map(m => m.id || m.type).filter(Boolean)
-        });
-        
-        // Manually populate registry with all bundle masks
-        if (masksSource?.masks?.length > 0) {
-          for (const mask of masksSource.masks) {
-            const type = mask.id || mask.type;
-            if (!type || !mask.texture) continue;
-            try {
-              reg.setMask(type, mask.texture, floorKey, 'init');
-            } catch (e) {
-              log.warn(`setMask('${type}') failed:`, e);
-            }
-          }
-
-          // Keep the compositor floor bundle in sync so bindFloorMasks() can
-          // consume the same masks the registry has. This mirrors the working
-          // console recovery snippet.
-          if (compositor?._floorMeta) {
-            try {
-              let floorBundle = compositor._floorMeta.get(floorKey);
-              if (!floorBundle) {
-                floorBundle = { masks: [] };
-                compositor._floorMeta.set(floorKey, floorBundle);
-              }
-              floorBundle.masks = masksSource.masks;
-            } catch (e) {
-              log.warn('EffectMaskRegistry: failed to update compositor floor bundle', e);
-            }
-          }
-
-          // Ensure floor-scoped effects actually bind the masks.
-          try {
-            const floorBundle = compositor?._floorMeta?.get(floorKey) ?? { masks: bundle.masks };
-            const tree = effectMap.get('Trees');
-            const bush = effectMap.get('Bushes');
-            const overhead = effectMap.get('Overhead Shadows');
-
-            if (tree && typeof tree.bindFloorMasks === 'function') tree.bindFloorMasks(floorBundle, floorKey);
-            if (bush && typeof bush.bindFloorMasks === 'function') bush.bindFloorMasks(floorBundle, floorKey);
-            if (overhead && typeof overhead.bindFloorMasks === 'function') overhead.bindFloorMasks(floorBundle, floorKey);
-
-            log.info('EffectMaskRegistry: bindFloorMasks applied', {
-              floorKey,
-              treeVisible: tree?.mesh?.visible,
-              bushVisible: bush?.mesh?.visible,
-              overheadMesh: !!overhead?.mesh
-            });
-          } catch (e) {
-            log.warn('EffectMaskRegistry: bindFloorMasks failed', e);
-          }
-          
-          log.info('EffectMaskRegistry: initial masks populated', {
-            maskCount: bundle.masks.length,
-            maskTypes: bundle.masks.map(m => m.id || m.type).filter(Boolean)
-          });
-        }
-      }
-    }, 'connectEffectsToRegistry', Severity.COSMETIC);
-    console.log('[Map Shine Advanced: Loading] ✔ Step: effects.connectToRegistry DONE');
-
-    _sectionEnd('setBaseMesh');
-    } // end if (!_v2Active) — effect construction, initialization, and wiring
-    console.log('[Map Shine Advanced: Loading] ▶ Past V1/V2 gate — entering sceneSync');
-
-    _sectionStart('sceneSync');
-    safeCall(() => {
-      loadingOverlay.setStage('scene.managers', 0.0, 'Syncing scene…', { immediate: true, keepAuto: true });
-      loadingOverlay.startAutoProgress(0.85, 0.012);
-    }, 'overlay.sceneManagers', Severity.COSMETIC);
-    log.info('[loading] entered scene.managers stage (60%)');
-    _setCreateThreeCanvasProgress('scene.managers.entered');
-    // Yield so the browser can paint the 60% progress bar update before
-    // synchronous manager initialization blocks the main thread.
-    await new Promise(r => setTimeout(r, 0));
-
-    console.log('[Map Shine Advanced: Loading]   session.isStale() = ' + session.isStale());
-    if (session.isStale()) {
-      console.log('[Map Shine Advanced: Loading]   ⚠ SESSION STALE — aborting loading!');
-      safeDispose(() => destroyThreeCanvas(), 'destroyThreeCanvas(stale)');
-      return;
-    }
-
-    // Step 3b: Initialize grid renderer
-    if (isDebugLoad) dlp.begin('manager.Grid.init', 'manager');
-    _setCreateThreeCanvasProgress('scene.managers.grid.init');
-    console.log('[Map Shine Advanced: Loading] ▶ Manager: GridRenderer');
-    gridRenderer = new GridRenderer(threeScene);
-    gridRenderer.initialize();
-    gridRenderer.updateGrid();
-    safeCall(() => { if (effectComposer) effectComposer.addUpdatable(gridRenderer); }, 'addUpdatable(grid)', Severity.COSMETIC);
-    if (isDebugLoad) dlp.end('manager.Grid.init');
-    console.log('[Map Shine Advanced: Loading] ✔ Manager: GridRenderer DONE');
-    log.info('Grid renderer initialized');
-
-    safeCall(() => loadingOverlay.setStage('scene.managers', 0.25, 'Syncing grid…', { keepAuto: true }), 'overlay.grid', Severity.COSMETIC);
-
-    // Step 4: Initialize token manager
+    // Step 4a: Initialize token manager
+    // V2: TokenManager is required for token rendering + interaction parity.
     if (isDebugLoad) dlp.begin('manager.TokenManager.init', 'manager');
     _setCreateThreeCanvasProgress('scene.managers.tokens.init');
     console.log('[Map Shine Advanced: Loading] ▶ Manager: TokenManager');
+    if (tokenManager) {
+      safeDispose(() => tokenManager.dispose(), 'tokenManager.dispose(reinit)');
+      tokenManager = null;
+    }
     tokenManager = new TokenManager(threeScene);
-    tokenManager.setEffectComposer(effectComposer); // Connect to main loop
+    tokenManager.setEffectComposer(effectComposer);
     tokenManager.initialize();
-
-    // P4-02/03: Apply persisted tokenDepthInteraction setting and wire live changes.
-    safeCall(() => {
-      if (graphicsSettings) {
-        tokenManager.setDepthInteraction(graphicsSettings.getTokenDepthInteraction());
-        graphicsSettings._onTokenDepthInteractionChanged = (enabled) => {
-          tokenManager?.setDepthInteraction(enabled);
-        };
-      }
-    }, 'tokenManager.wireDepthInteraction', Severity.COSMETIC);
-
+    if (window.MapShine) window.MapShine.tokenManager = tokenManager;
     if (isDebugLoad) dlp.end('manager.TokenManager.init');
-
-    // Sync existing tokens immediately (we're already in canvasReady, so the hook won't fire)
-    if (isDebugLoad) dlp.begin('manager.TokenManager.syncAll', 'sync');
-    _setCreateThreeCanvasProgress('scene.managers.tokens.syncAll');
-    if (_v2Active) {
-      // V2 compositor currently does not render tokens. Token syncing can be expensive
-      // on large scenes (many token sprites + textures) and can make the loading
-      // overlay appear stuck at "Syncing tokens…" even though V2 doesn't need the
-      // token meshes to proceed.
-      //
-      // Defer the full sync until after the scene is responsive.
-      try {
-        setTimeout(() => {
-          try {
-            if (!window.MapShine) return;
-            if (window.MapShine.__msaSceneLoading) return;
-            tokenManager?.syncAllTokens?.();
-          } catch (_) {
-          }
-        }, 500);
-      } catch (_) {
-      }
-    } else {
-      // Yielding, bounded token sync. Prevents the loading overlay from appearing
-      // stuck on large scenes and avoids pathological stalls from a single bad token.
-      // This does NOT wait for all token textures to download; it only ensures
-      // sprite creation completes.
-      try {
-        const tokenCount = canvas?.tokens?.placeables?.length ?? 0;
-        safeCall(() => loadingOverlay.setStage('scene.managers', 0.45, `Syncing tokens (${tokenCount})…`, { keepAuto: true }), 'overlay.tokens.syncing', Severity.COSMETIC);
-
-        const p = tokenManager.syncAllTokensAsync({
-          yieldEvery: 10,
-          onProgress: (completed, total) => {
-            const denom = total > 0 ? total : 1;
-            const t = Math.max(0, Math.min(1, completed / denom));
-            // Use stage progress to show liveness during long token sync.
-            safeCall(() => loadingOverlay.setStage('scene.managers', 0.45 + 0.10 * t, `Syncing tokens (${completed}/${total})…`, { keepAuto: true }), 'overlay.tokens.progress', Severity.COSMETIC);
-          }
-        });
-
-        await _withTimeout(p, 15000, 'TokenManager.syncAllTokensAsync');
-      } catch (e) {
-        log.warn('[loading] Token sync step timed out/failed — continuing load without full token sync', e);
-        safeCall(() => loadingOverlay.setStage('scene.managers', 0.55, 'Token sync skipped (timeout) — continuing…', { keepAuto: true }), 'overlay.tokens.timeout', Severity.COSMETIC);
-      }
-    }
-    if (isDebugLoad) dlp.end('manager.TokenManager.syncAll');
-    console.log('[Map Shine Advanced: Loading] ✔ Manager: TokenManager DONE (synced)');
-    log.info('Token manager initialized and synced');
-
-    // Step 4 (cont): Initialize visibility controller — delegates to Foundry's
-    // testVisibility() so we get full detection mode / status effect parity for free.
-    // V2: Vision occlusion, detection filters, and eye adaptation are effect-dependent — skip.
-    if (!_v2Active) {
-      if (isDebugLoad) dlp.begin('manager.VisibilityController.init', 'manager');
-      _setCreateThreeCanvasProgress('scene.managers.visibilityController.init');
-      safeCall(() => {
-        if (visibilityController) visibilityController.dispose();
-        visibilityController = new VisibilityController(tokenManager);
-        visibilityController.initialize();
-      }, 'VisibilityController.init', Severity.DEGRADED);
-      if (isDebugLoad) dlp.end('manager.VisibilityController.init');
-
-      // Step 4 (cont): Detection filter rendering — glow/outline on tokens
-      // detected via special detection modes (tremorsense, see invisible, etc.)
-      if (isDebugLoad) dlp.begin('manager.DetectionFilter.init', 'manager');
-      _setCreateThreeCanvasProgress('scene.managers.detectionFilter.init');
-      safeCall(() => {
-        if (detectionFilterEffect) detectionFilterEffect.dispose();
-        detectionFilterEffect = new DetectionFilterEffect(tokenManager, visibilityController);
-        detectionFilterEffect.initialize();
-        effectComposer.addUpdatable(detectionFilterEffect);
-      }, 'DetectionFilterEffect.init', Severity.COSMETIC);
-      if (isDebugLoad) dlp.end('manager.DetectionFilter.init');
-    }
+    console.log('[Map Shine Advanced: Loading] ✔ Manager: TokenManager DONE');
 
     // CRITICAL: Expose managers on window.MapShine so other subsystems
     // (e.g. TokenManager.updateSpriteVisibility) can check VC state.
     // Without this, the VC early-return path is never taken and
     // refreshToken hooks constantly override sprite.visible.
     if (window.MapShine) {
-      window.MapShine.tokenManager = tokenManager;
       window.MapShine.visibilityController = visibilityController;
       window.MapShine.detectionFilterEffect = detectionFilterEffect;
     }
 
     // Step 4a: Dynamic Exposure Manager (token-based eye adaptation)
     // V2: No color correction or exposure effects — skip.
-    if (!_v2Active) {
-      if (isDebugLoad) dlp.begin('manager.DynamicExposure.init', 'manager');
-      _setCreateThreeCanvasProgress('scene.managers.dynamicExposure.init');
-      safeCall(() => {
-        if (!dynamicExposureManager) {
-          dynamicExposureManager = new DynamicExposureManager({
-            renderer,
-            camera,
-            weatherController,
-            tokenManager,
-            colorCorrectionEffect
-          });
-        } else {
-          dynamicExposureManager.renderer = renderer;
-          dynamicExposureManager.camera = camera;
-          dynamicExposureManager.setWeatherController?.(weatherController);
-          dynamicExposureManager.setTokenManager?.(tokenManager);
-          dynamicExposureManager.setColorCorrectionEffect?.(colorCorrectionEffect);
-        }
-
-        effectComposer.addUpdatable(dynamicExposureManager);
-        if (window.MapShine) window.MapShine.dynamicExposureManager = dynamicExposureManager;
-      }, 'DynamicExposureManager.init', Severity.DEGRADED);
-      if (isDebugLoad) dlp.end('manager.DynamicExposure.init');
-    }
 
     safeCall(() => {
       const msg = _v2Active ? 'Preparing tiles…' : 'Syncing tokens…';
@@ -4881,83 +4113,6 @@ async function createThreeCanvas(scene) {
     console.log('[Map Shine Advanced: Loading]   ▸ TileManager: constructor...');
     tileManager = new TileManager(threeScene);
     console.log('[Map Shine Advanced: Loading]   ▸ TileManager: constructor DONE');
-    if (!_v2Active) {
-      const _specularEffect = window.MapShine?.specularEffect
-        ?? effectMap.get('Specular')
-        ?? effectMap.get('SpecularEffect')
-        ?? null;
-      tileManager.setSpecularEffect(_specularEffect);
-      const _fluidEffect = window.MapShine?.fluidEffect ?? effectMap.get('Fluid') ?? null;
-      tileManager.setFluidEffect(_fluidEffect);
-
-      // Wire the TileEffectBindingManager — centralizes all per-tile overlay routing.
-      // Effects register here; TileManager calls the manager at every tile lifecycle
-      // point instead of calling effects directly.
-      safeCall(() => {
-        const bindingMgr = new TileEffectBindingManager();
-        if (_specularEffect) bindingMgr.registerEffect(_specularEffect);
-        if (_fluidEffect) bindingMgr.registerEffect(_fluidEffect);
-        // Tree, Bush, and Iridescence now support per-tile overlays via TileBindableEffect interface.
-        const _treeEffect = effectMap.get('Trees');
-        const _bushEffect = effectMap.get('Bushes');
-        const _iridescenceEffect = effectMap.get('Iridescence');
-        if (_treeEffect) bindingMgr.registerEffect(_treeEffect);
-        if (_bushEffect) bindingMgr.registerEffect(_bushEffect);
-        if (_iridescenceEffect) bindingMgr.registerEffect(_iridescenceEffect);
-        tileManager.setTileBindingManager(bindingMgr);
-        if (window.MapShine) window.MapShine.tileBindingManager = bindingMgr;
-        log.info('TileEffectBindingManager wired with', bindingMgr._effects.length, 'effects');
-      }, 'tileManager.bindingManager', Severity.DEGRADED);
-      // Route water occluder meshes into DistortionManager's dedicated scene so
-      // the occluder render pass avoids traversing the full world scene.
-      safeCall(() => tileManager.setWaterOccluderScene(distortionManager?.waterOccluderScene ?? null), 'tileManager.setWaterOccluder', Severity.COSMETIC);
-      // Route floor-presence meshes (layer 23) into a shared THREE.Scene that
-      // DistortionManager renders each frame to produce the floor-presence RT.
-      // Also route below-floor-presence meshes (layer 24) for the below-floor RT
-      // which bounds preserved lower-floor effects to their originating tile footprint.
-      safeCall(() => {
-        if (tileManager && distortionManager) {
-          const fpScene = new (window.THREE.Scene)();
-          tileManager.setFloorPresenceScene(fpScene);
-          distortionManager.setFloorPresenceScene(fpScene);
-
-          const bfpScene = new (window.THREE.Scene)();
-          tileManager.setBelowFloorPresenceScene(bfpScene);
-          distortionManager.setBelowFloorPresenceScene(bfpScene);
-        }
-      }, 'tileManager.setFloorPresenceScene', Severity.COSMETIC);
-    } // end if (!_v2Active) — TileManager effect wiring
-
-    // V2 STILL needs floor-presence targets for cross-floor occlusion (particles, etc.).
-    // TileManager is active in V2, so we reuse the existing layer-23/24 presence
-    // meshes and let DistortionManager render them into its RTs.
-    if (_v2Active) {
-      safeCall(() => {
-        if (!tileManager || !distortionManager || !window.THREE) return;
-        // Water occluders are also used by water distortion/ripples; wire in V2.
-        tileManager.setWaterOccluderScene(distortionManager?.waterOccluderScene ?? null);
-
-        const fpScene = new (window.THREE.Scene)();
-        tileManager.setFloorPresenceScene(fpScene);
-        distortionManager.setFloorPresenceScene(fpScene);
-
-        const bfpScene = new (window.THREE.Scene)();
-        tileManager.setBelowFloorPresenceScene(bfpScene);
-        distortionManager.setBelowFloorPresenceScene(bfpScene);
-      }, 'tileManager.setFloorPresenceScene(V2)', Severity.COSMETIC);
-    }
-    console.log('[Map Shine Advanced: Loading]   ▸ TileManager: initialize (hooks)...');
-    tileManager.initialize();
-    console.log('[Map Shine Advanced: Loading]   ▸ TileManager: initialize DONE');
-    if (isDebugLoad) dlp.end('manager.TileManager.init');
-    if (isDebugLoad) dlp.begin('manager.TileManager.syncAll', 'sync');
-    _setCreateThreeCanvasProgress('scene.managers.tiles.syncAll');
-    console.log('[Map Shine Advanced: Loading]   ▸ TileManager: syncAllTiles (' + (canvas?.scene?.tiles?.size ?? '?') + ' tiles)...');
-    tileManager.syncAllTiles();
-    console.log('[Map Shine Advanced: Loading]   ▸ TileManager: syncAllTiles DONE');
-    if (!_v2Active) {
-      tileManager.setWindowLightEffect(effectMap.get('Window Lights') ?? null); // Link for overhead tile lighting
-    }
     effectComposer.addUpdatable(tileManager); // Register for occlusion updates
     if (isDebugLoad) dlp.end('manager.TileManager.syncAll');
     console.log('[Map Shine Advanced: Loading] ✔ Manager: TileManager DONE (synced)');
@@ -4991,28 +4146,10 @@ async function createThreeCanvas(scene) {
 
     // Step 4b.1: Initialize tile motion runtime manager
     // V2: Tile motion (animated tiles) is not needed for raw geometry — skip.
-    if (!_v2Active) {
-      if (isDebugLoad) dlp.begin('manager.TileMotion.init', 'manager');
-      _setCreateThreeCanvasProgress('scene.managers.tileMotion.init');
-      tileMotionManager = new TileMotionManager(tileManager);
-      await tileMotionManager.initialize();
-      effectComposer.addUpdatable(tileMotionManager);
-      if (window.MapShine) window.MapShine.tileMotionManager = tileMotionManager;
-      if (isDebugLoad) dlp.end('manager.TileMotion.init');
-      log.info('Tile motion manager initialized');
-    }
 
     safeCall(() => loadingOverlay.setStage('scene.sync', 0.35, 'Syncing tiles…', { keepAuto: true }), 'overlay.tiles', Severity.COSMETIC);
 
     // V2: SurfaceRegistry is effect infrastructure — skip.
-    if (!_v2Active) {
-      if (isDebugLoad) dlp.begin('manager.SurfaceRegistry.init', 'manager');
-      surfaceRegistry = new SurfaceRegistry();
-      surfaceRegistry.initialize({ sceneComposer, tileManager });
-      mapShine.surfaceRegistry = surfaceRegistry;
-      mapShine.surfaceReport = surfaceRegistry.refresh();
-      if (isDebugLoad) dlp.end('manager.SurfaceRegistry.init');
-    }
 
     // Step 4c: Initialize wall manager
     if (isDebugLoad) dlp.begin('manager.WallManager.init', 'manager');
@@ -5100,21 +4237,9 @@ async function createThreeCanvas(scene) {
 
     // Wire map points to particle effects (fire, candle flame, smelly flies, etc.)
     // V2: No particle effects — skip wiring.
-    if (!_v2Active) {
-      wireMapPointsToEffects(effectMap, mapPointsManager);
-    }
 
     // Step 4i: Initialize physics ropes (rope/chain map points)
     // V2: Ropes are visual effects — skip.
-    if (!_v2Active) {
-      if (isDebugLoad) dlp.begin('manager.PhysicsRope.init', 'manager');
-      physicsRopeManager = new PhysicsRopeManager(threeScene, sceneComposer, mapPointsManager);
-      physicsRopeManager.initialize();
-      effectComposer.addUpdatable(physicsRopeManager);
-      mapShine.physicsRopeManager = physicsRopeManager;
-      if (isDebugLoad) dlp.end('manager.PhysicsRope.init');
-      log.info('Physics rope manager initialized');
-    }
 
     // Step 5: Initialize interaction manager (Selection, Drag/Drop)
     // KEEP for V2 — user interaction is essential.
@@ -5130,13 +4255,6 @@ async function createThreeCanvas(scene) {
 
     // Wire token movement hook for ash disturbance.
     // V2: No ash disturbance effect — skip.
-    if (!_v2Active) {
-      safeCall(() => {
-        tokenManager.addOnTokenMovementStart((tokenId) => {
-          ashDisturbanceEffect?.handleTokenMovement?.(tokenId);
-        });
-      }, 'wireAshDisturbance', Severity.COSMETIC);
-    }
 
     // Sync Selection Box UI params (loaded from scene settings) into the InteractionManager.
     // initializeUI() runs earlier during startup, before InteractionManager exists.
@@ -5285,28 +4403,10 @@ async function createThreeCanvas(scene) {
     if (isDebugLoad) dlp.end('manager.CinematicCamera.init');
     log.info('Cinematic camera manager initialized');
 
-    // Step 6b: Initialize controls integration (PIXI overlay system)
-    console.log('[Map Shine Advanced: Loading] ▶ Manager: ControlsIntegration');
-    if (isDebugLoad) dlp.begin('manager.ControlsIntegration.init', 'manager');
-    _setCreateThreeCanvasProgress('scene.managers.controlsIntegration.init');
-    controlsIntegration = new ControlsIntegration({ 
-      sceneComposer,
-      effectComposer
-    });
-    {
-      const timeoutMs = 15000;
-      const ok = await Promise.race([
-        controlsIntegration.initialize(),
-        new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs))
-      ]);
-      if (!ok) {
-        log.warn(`ControlsIntegration initialization failed or timed out after ${timeoutMs}ms; continuing without it`);
-      }
-    }
-    if (isDebugLoad) dlp.end('manager.ControlsIntegration.init');
-    console.log('[Map Shine Advanced: Loading] ✔ Manager: ControlsIntegration DONE');
-    
-    log.info('Controls integration initialized');
+    // BASELINE: Skip ControlsIntegration (V1 component causing crashes in V2 mode)
+    console.log('[Map Shine Advanced: Loading] ▶ Manager: ControlsIntegration SKIPPED (V2 baseline)');
+    controlsIntegration = null;
+    log.info('Controls integration SKIPPED (V2 baseline mode)');
 
     dlp.event('sceneSync: DONE — entering finalization');
     _sectionEnd('sceneSync');
@@ -5339,56 +4439,10 @@ async function createThreeCanvas(scene) {
     _sectionStart('gpu.shaderCompile');
     if (isDebugLoad) dlp.begin('gpu.shaderCompile', 'gpu');
     {
-      const _v2Active = (() => {
-        try { return !!game?.settings?.get('map-shine-advanced', 'useCompositorV2'); } catch (_) { return false; }
-      })();
-
-      if (_v2Active) {
-        safeCall(() => loadingOverlay.setStage('final', 0.9, 'Shaders ready (V2 mode)…', { keepAuto: true }), 'overlay.shaderCompile', Severity.COSMETIC);
-        dlp.event('gpu.shaderCompile: SKIPPED — V2 compositor active, effect shaders not needed');
-        log.info('Shader warmup skipped: V2 compositor active');
-      } else {
-        console.log('[Map Shine Advanced: Loading] ▶ Step: gpu.shaderCompile (progressive warmup)');
-        // Legacy path: compile all effect shaders one at a time with progress feedback.
-        // Renders each effect one at a time through the EffectComposer pipeline,
-        // calling gl.finish() after each to force synchronous compilation, then
-        // yielding to the event loop so the loading overlay can update with
-        // per-effect progress.
-        safeCall(() => loadingOverlay.setStage('final', 0.05, 'Compiling shaders…', { keepAuto: true }), 'overlay.shaderCompile', Severity.COSMETIC);
-        const gl = renderer.getContext?.();
-        const hasParallelCompile = !!gl?.getExtension?.('KHR_parallel_shader_compile');
-        const startPrograms = Array.isArray(renderer.info?.programs) ? renderer.info.programs.length : 0;
-
-        dlp.event(`gpu.shaderCompile: BEGIN — progressive warmup, ${startPrograms} programs already compiled, ` +
-          `KHR_parallel_shader_compile=${hasParallelCompile ? 'YES' : 'NO'}`);
-        if (!hasParallelCompile) {
-          dlp.event('gpu.shaderCompile: WARNING — KHR_parallel_shader_compile not available. ' +
-            'Each shader compiles synchronously (~500-1500ms on ANGLE/older GPUs).', 'warn');
-        }
-
-        try {
-          const result = await effectComposer.progressiveWarmup(({ step, totalSteps, effectId, type, timeMs, newPrograms, totalPrograms }) => {
-            const tag = newPrograms > 0
-              ? `+${newPrograms} prog → ${totalPrograms}`
-              : `(no new, ${totalPrograms} total)`;
-            dlp.event(`shader.warmup[${step}/${totalSteps}]: ${effectId} (${type}) — ${timeMs.toFixed(0)}ms ${tag}`);
-            safeCall(() => {
-              const pct = 0.05 + 0.85 * (step / totalSteps);
-              loadingOverlay.setStage('final', pct,
-                `Compiling shaders (${step}/${totalSteps})…`, { keepAuto: true });
-            }, 'overlay.shaderProgress', Severity.COSMETIC);
-          });
-
-          dlp.event(`gpu.shaderCompile: COMPLETE — ${result.totalMs.toFixed(0)}ms, ` +
-            `${result.programsCompiled} new programs, ${result.totalPrograms} total`);
-          console.log('[Map Shine Advanced: Loading] ✔ Step: gpu.shaderCompile DONE (' + result.totalMs.toFixed(0) + 'ms, ' + result.programsCompiled + ' new programs)');
-          log.info(`Shader compilation: ${result.totalMs.toFixed(0)}ms ` +
-            `(${result.programsCompiled} new, ${result.totalPrograms} total programs)`);
-        } catch (e) {
-          dlp.event(`gpu.shaderCompile: ERROR — ${e?.message}`, 'error');
-          log.warn('Progressive shader warmup failed:', e);
-        }
-      }
+      // V2 compositor is always-on. Legacy V1 progressive shader warmup has been removed.
+      safeCall(() => loadingOverlay.setStage('final', 0.9, 'Shaders ready…', { keepAuto: true }), 'overlay.shaderCompile', Severity.COSMETIC);
+      dlp.event('gpu.shaderCompile: SKIPPED — V2 compositor active');
+      log.info('Shader warmup skipped: V2 compositor active');
     }
     if (isDebugLoad) dlp.end('gpu.shaderCompile');
     _sectionEnd('gpu.shaderCompile');
@@ -5442,17 +4496,6 @@ async function createThreeCanvas(scene) {
       if (frameCoordinatorInitialized) {
         // Register fog effect for synchronized vision rendering.
         // V2: No fog effect — skip fog sync wiring.
-        if (!_v2Active) {
-          frameCoordinator.onPostPixi((frameState) => {
-            const fog = fogEffect;
-            if (!fog) return;
-            if (typeof fog.syncVisionFromPixi === 'function') {
-              fog.syncVisionFromPixi();
-            } else if (fog._needsVisionUpdate !== undefined) {
-              fog._needsVisionUpdate = true;
-            }
-          });
-        }
         
         log.info('Frame coordinator initialized - PIXI/Three.js sync enabled');
       } else {
@@ -5463,46 +4506,6 @@ async function createThreeCanvas(scene) {
 
     // Notify WorldSpaceFogEffect when Foundry fog is reset via UI (Lighting controls).
     // V2: No WorldSpaceFogEffect — skip all fog manager wrapping.
-    if (!_v2Active) {
-      safeCall(() => {
-        const fogMgr = canvas?.fog;
-        if (fogMgr && typeof fogMgr._handleReset === 'function' && !fogMgr._mapShineWrappedHandleReset) {
-          const originalHandleReset = fogMgr._handleReset.bind(fogMgr);
-          fogMgr._handleReset = async (...args) => {
-            const result = await originalHandleReset(...args);
-            safeCall(() => {
-              const fog = window.MapShine?.fogEffect;
-              if (fog && typeof fog.resetExploration === 'function') {
-                fog.resetExploration();
-              }
-            }, 'fogReset.exploration', Severity.COSMETIC);
-            return result;
-          };
-          fogMgr._mapShineWrappedHandleReset = true;
-        }
-
-        // Suppress Foundry's native fog commit/save when our WorldSpaceFogEffect
-        // is active.
-        if (fogMgr && typeof fogMgr.commit === 'function' && !fogMgr._mapShineWrappedCommit) {
-          const originalCommit = fogMgr.commit.bind(fogMgr);
-          fogMgr.commit = function(...args) {
-            const fog = window.MapShine?.fogEffect;
-            if (fog?._initialized && fog?.params?.enabled) return;
-            return originalCommit(...args);
-          };
-          fogMgr._mapShineWrappedCommit = true;
-        }
-        if (fogMgr && typeof fogMgr.save === 'function' && !fogMgr._mapShineWrappedSave) {
-          const originalSave = fogMgr.save.bind(fogMgr);
-          fogMgr.save = async function(...args) {
-            const fog = window.MapShine?.fogEffect;
-            if (fog?._initialized && fog?.params?.enabled) return;
-            return originalSave(...args);
-          };
-          fogMgr._mapShineWrappedSave = true;
-        }
-      }, 'wrapFogManager', Severity.DEGRADED);
-    }
 
     // Expose all managers, effects, and functions on window.MapShine for diagnostics
     exposeGlobals(mapShine, {
@@ -5787,32 +4790,6 @@ async function createThreeCanvas(scene) {
 
     // P1.2: Wait for all effects to be ready before fading overlay
     // V2: No effects registered — skip readiness wait entirely.
-    if (!_v2Active) {
-      _sectionStart('fin.effectReadiness');
-      if (isDebugLoad) dlp.begin('fin.effectReadiness', 'finalize');
-      _setCreateThreeCanvasProgress('effectReadinessWait');
-      safeCall(() => loadingOverlay.setStage('final', 0.45, 'Finishing textures…', { keepAuto: true }), 'overlay.textures', Severity.COSMETIC);
-      await safeCallAsync(async () => {
-        const effectReadinessPromises = [];
-        for (const effect of effectComposer.effects.values()) {
-          if (typeof effect.getReadinessPromise === 'function') {
-            const promise = effect.getReadinessPromise();
-            if (promise && typeof promise.then === 'function') {
-              effectReadinessPromises.push(promise);
-            }
-          }
-        }
-        
-        if (effectReadinessPromises.length > 0) {
-          await Promise.race([
-            Promise.all(effectReadinessPromises),
-            new Promise(r => setTimeout(r, 15000)) // 15s timeout
-          ]);
-        }
-      }, 'effectReadinessWait', Severity.COSMETIC);
-      if (isDebugLoad) dlp.end('fin.effectReadiness');
-      _sectionEnd('fin.effectReadiness');
-    }
 
     // P1.3: Tile loading is NON-BLOCKING.
     // Tiles load in the background and appear when their fetch/decode completes.
@@ -5902,25 +4879,6 @@ async function createThreeCanvas(scene) {
     _sectionEnd('fin.waitForThreeFrames');
 
     // V2: Time-of-day drives lighting/sky/shadow effects — skip.
-    if (!_v2Active) {
-      if (isDebugLoad) dlp.begin('fin.timeOfDay', 'finalize');
-      _setCreateThreeCanvasProgress('timeOfDay.refresh');
-      await safeCallAsync(async () => {
-        const controlHour = window.MapShine?.controlPanel?.controlState?.timeOfDay;
-        const hour = Number.isFinite(controlHour) ? controlHour : Number(weatherController?.timeOfDay);
-        if (Number.isFinite(hour)) {
-          await stateApplier.applyTimeOfDay(hour, false, true);
-          safeCall(() => {
-            const cloudEffect = window.MapShine?.cloudEffect;
-            if (cloudEffect) {
-              if (typeof cloudEffect.requestRecompose === 'function') cloudEffect.requestRecompose(3);
-              if (typeof cloudEffect.requestUpdate === 'function') cloudEffect.requestUpdate(3);
-            }
-          }, 'cloudEffect.recompose', Severity.COSMETIC);
-        }
-      }, 'timeOfDay.refresh', Severity.COSMETIC);
-      if (isDebugLoad) dlp.end('fin.timeOfDay');
-    }
 
     // ── Floor pre-loading: V2 vs V1 paths ─────────────────────────────────────
     if (isDebugLoad) dlp.begin('fin.preloadAllFloors', 'finalize');
@@ -6046,7 +5004,11 @@ async function createThreeCanvas(scene) {
         const elapsed = loadingOverlay.getElapsedSeconds();
         const readyMsg = elapsed > 0 ? `Ready! (${elapsed.toFixed(1)}s)` : 'Ready!';
         loadingOverlay.setStage('final', 1.0, readyMsg, { immediate: true });
-        await loadingOverlay.fadeIn(2000, 800);
+        // Add timeout to prevent indefinite hang if fadeIn never resolves
+        await Promise.race([
+          loadingOverlay.fadeIn(2000, 800),
+          new Promise(resolve => setTimeout(resolve, 5000))
+        ]);
       }, 'overlay.fadeIn', Severity.COSMETIC);
       console.log('[Map Shine Advanced: Loading] ✔ Step: overlay.fadeIn DONE');
     }

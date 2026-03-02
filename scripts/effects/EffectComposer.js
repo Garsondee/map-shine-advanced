@@ -1414,16 +1414,12 @@ export class EffectComposer {
 
   /**
    * Check whether the Compositor V2 (layer-based floor isolation) is enabled.
-   * Reads the 'useCompositorV2' game setting.
+   * V2 is now always active.
    * @returns {boolean}
    * @private
    */
   _checkCompositorV2Enabled() {
-    try {
-      return !!game?.settings?.get('map-shine-advanced', 'useCompositorV2');
-    } catch (_) {
-      return false;
-    }
+    return true;
   }
 
   /**

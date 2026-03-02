@@ -682,11 +682,29 @@ export class FloorCompositor {
     this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, buildingShadowTex, overheadShadowTex);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lighting.render(sceneRT→postA) DONE'); } catch (_) {} }
 
-    // Feed live cloud shadow into WaterEffectV2 so caustics/specular are
-    // correctly suppressed under cloud cover. Must be set before water renders.
-    // cloudShadowTex is already a THREE.Texture|null from the getter.
-    try { this._waterEffect?.setCloudShadowTexture?.(cloudShadowTex ?? null); } catch (_) {}
+    // BASELINE: Skip ALL post-processing to establish stable rendering.
+    // Post-processing causes freeze on second frame. We'll re-enable passes
+    // one by one once we have a stable baseline.
     currentInput = this._postA;
+    
+    if (_dbgStages) {
+      try { log.warn('[V2 BASELINE] Skipping ALL post-processing - establishing stable baseline'); } catch (_) {}
+    }
+    
+    // Jump straight to blit
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: blitToScreen'); } catch (_) {} }
+    this._blitToScreen(currentInput);
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: blitToScreen DONE'); } catch (_) {} }
+    
+    if (_dbgStages) {
+      this._debugFirstFrameStagesLogged = true;
+      try { log.info('[V2 Frame] ✔ FloorCompositor.render: END (baseline mode)'); } catch (_) {}
+    }
+    return;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // POST-PROCESSING DISABLED - ALL CODE BELOW IS UNREACHABLE
+    // ═══════════════════════════════════════════════════════════════════════
 
     // Sky color grading pass (time-of-day atmospheric grading). Ping-pongs.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: skyColor.render'); } catch (_) {} }

@@ -493,22 +493,6 @@ export function registerSettings() {
     default: true
   });
 
-  // Compositor V2: clean-room per-floor rendering using Three.js layers for
-  // floor isolation instead of per-frame visibility toggling. When enabled,
-  // FloorCompositor handles the floor loop instead of the legacy EffectComposer
-  // floor loop. Default: true (forced default).
-  game.settings.register('map-shine-advanced', 'useCompositorV2', {
-    name: 'Compositor V2',
-    hint: 'Use the clean-room floor compositor with Three.js layer-based isolation.',
-    scope: 'world',
-    // Forced default: keep out of UI so users can’t accidentally fall back.
-    // If you need to debug legacy behavior, toggle this in console or via
-    // a temporary local dev patch.
-    config: false,
-    type: Boolean,
-    default: true
-  });
-
   game.settings.register('map-shine-advanced', 'dismissExperimentalWarning', {
     name: 'Dismiss Experimental Warning',
     hint: 'When enabled, the experimental warning dialog will no longer be shown for this user.',

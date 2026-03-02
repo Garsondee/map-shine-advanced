@@ -1672,12 +1672,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    // Water occluder meshes and _Water mask loading are only needed for the
-    // V1 water effect pipeline. In V2 compositor mode all water effects are
-    // bypassed, so skip this entirely to avoid slow _Water mask probes.
-    try {
-      if (game?.settings?.get('map-shine-advanced', 'useCompositorV2')) return;
-    } catch (_) {}
+    // V2 compositor is always active - skip V1 water occluder pipeline
+    return;
 
     const sprite = spriteData?.sprite;
     if (!sprite) return;
@@ -3954,14 +3950,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       // Compositor V2: assign tile to its floor layer for layer-based isolation.
       // This must run AFTER the layer 0 set/disable above and AFTER ROOF_LAYER
       // assignments so the floor layer is additive on top of existing layers.
-      const _v2Active = (() => {
-        try { return !!game?.settings?.get('map-shine-advanced', 'useCompositorV2'); } catch (_) { return false; }
-      })();
-      if (_v2Active) {
-        const floorLayerMgr = window.MapShine?.floorLayerManager;
-        if (floorLayerMgr) {
-          floorLayerMgr.assignTileToFloor(sprite, tileDoc);
-        }
+      const floorLayerMgr = window.MapShine?.floorLayerManager;
+      if (floorLayerMgr) {
+        floorLayerMgr.assignTileToFloor(sprite, tileDoc);
       }
     }
 
@@ -3986,11 +3977,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         // Unknown state (or pending). Default to disabled until the async probe resolves.
         occludesWater = false;
 
-        // Only kick a new probe if we're not already waiting.
-        // In V2 compositor mode water effects are bypassed entirely, so skip
-        // the expensive _Water mask probe — it would load textures for nothing.
-        const _v2Active = (() => { try { return !!game?.settings?.get('map-shine-advanced', 'useCompositorV2'); } catch (_) { return false; } })();
-        if (state !== 'pending' && !_v2Active) {
+        // V2 compositor is always active - skip V1 water mask probe
+        if (false) {
           sprite.userData._autoOccludesWaterState = 'pending';
           const tileId = tileDoc?.id ?? '';
           const src = tileDoc?.texture?.src ?? '';
@@ -4226,12 +4214,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // texture load, updateTile, refreshTile, hover restore) — not just
     // _refreshAllTileElevationVisibility() — so the guard must be here.
     if (sprite.visible) {
-      let _skipElevationVisibility = false;
-      try {
-        _skipElevationVisibility = !!game?.settings?.get('map-shine-advanced', 'useCompositorV2');
-      } catch (_) {}
-
-      if (!_skipElevationVisibility) {
+      // V2 compositor is always active - skip V1 elevation visibility
+      if (false) {
       try {
         const activeLevelContext = window.MapShine?.activeLevelContext;
         const strictBandVisibility = isLevelsEnabledForScene(canvas?.scene) && hasFiniteActiveLevelBand(activeLevelContext);
@@ -4443,24 +4427,16 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // mask) to show through floor 1's transparent gaps.
     //
     // When V2 is active, ALL tiles must remain visible = true. Layer
-    // masks on the camera select which floor renders in each pass.
-    // We still request a render refresh so the compositor picks up the
-    // new floor state immediately.
-    try {
-      if (game?.settings?.get('map-shine-advanced', 'useCompositorV2')) {
-        // Ensure ALL tiles and basePlaneMesh stay visible.
-        for (const { sprite } of this.tileSprites.values()) {
-          if (sprite) sprite.visible = true;
-        }
-        const basePlane = window.MapShine?.sceneComposer?.basePlaneMesh;
-        if (basePlane) basePlane.visible = true;
-        // Still request render so V2 compositor updates immediately.
-        window.MapShine?.renderLoop?.requestRender?.();
-        return;
-      }
-    } catch (_) {
-      // Fall through to V1 path on settings error.
+    // V2 compositor is always active - ensure all tiles and basePlaneMesh stay visible.
+    // Layer masks on the camera select which floor renders in each pass.
+    for (const { sprite } of this.tileSprites.values()) {
+      if (sprite) sprite.visible = true;
     }
+    const basePlane = window.MapShine?.sceneComposer?.basePlaneMesh;
+    if (basePlane) basePlane.visible = true;
+    // Request render so V2 compositor updates immediately.
+    window.MapShine?.renderLoop?.requestRender?.();
+    return;
 
     // When Levels compatibility is off, restore defaults and bail out.
     // This prevents stale hidden state from a previous elevation context.

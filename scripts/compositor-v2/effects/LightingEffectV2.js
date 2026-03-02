@@ -138,6 +138,11 @@ export class LightingEffectV2 {
         tBuildingShadow:     { value: null },
         uHasBuildingShadow:  { value: 0 },
         uBuildingShadowOpacity: { value: 0.75 },
+        // Overhead shadow: per-frame screen-space shadow from OverheadShadowsEffectV2.
+        // Sampled directly at vUv (screen-space RT). Dims ambient only.
+        tOverheadShadow:     { value: null },
+        uHasOverheadShadow:  { value: 0 },
+        uOverheadShadowOpacity: { value: 1.0 },
         // World-space UV reconstruction for building shadow sampling.
         // The bake RT is in scene UV space (0..1 = scene rect in Foundry world coords).
         // To sample it correctly, reconstruct world XY per fragment from the
@@ -177,6 +182,9 @@ export class LightingEffectV2 {
         uniform vec2 uBldViewBoundsMax;
         uniform vec2 uBldSceneOrigin;
         uniform vec2 uBldSceneSize;
+        uniform sampler2D tOverheadShadow;
+        uniform float uHasOverheadShadow;
+        uniform float uOverheadShadowOpacity;
         uniform float uDarknessLevel;
         uniform vec3 uAmbientBrightest;
         uniform vec3 uAmbientDarkness;
@@ -263,6 +271,17 @@ export class LightingEffectV2 {
             vec3 ambientComponent = totalIllumination - vec3(lightI) * master;
             ambientComponent *= shadowMix;
             totalIllumination = ambientComponent + vec3(lightI) * master;
+          }
+
+          // Overhead shadow: screen-space shadow from overhead tiles.
+          // Sampled directly at vUv since the RT is already in screen UV space.
+          // Dims ambient only — dynamic lights punch through.
+          if (uHasOverheadShadow > 0.5) {
+            float ovShadow = clamp(texture2D(tOverheadShadow, vUv).r, 0.0, 1.0);
+            float ovMix = mix(1.0, ovShadow, clamp(uOverheadShadowOpacity, 0.0, 1.0));
+            vec3 ambientComp = totalIllumination - vec3(lightI) * master;
+            ambientComp *= ovMix;
+            totalIllumination = ambientComp + vec3(lightI) * master;
           }
 
           // Minimum illumination floor to prevent pure black.
@@ -476,10 +495,39 @@ export class LightingEffectV2 {
   update(timeInfo) {
     if (!this._initialized || !this._enabled) return;
 
-    // Sync darkness level from Foundry canvas
+    // Sync darkness level and ambient colors from Foundry canvas environment.
+    // canvas.environment exposes darknessLevel (0=bright, 1=dark) and the
+    // scene's configured ambient colors for brightest/darkest lighting states.
     try {
-      if (canvas?.environment) {
-        this.params.darknessLevel = canvas.environment.darknessLevel ?? 0;
+      const env = canvas?.environment;
+      if (env) {
+        this.params.darknessLevel = env.darknessLevel ?? 0;
+
+        // Sync ambient colors if Foundry exposes them (v11+).
+        // ambientBrightest / ambientDarkness are Color objects or hex strings.
+        const u = this._composeMaterial?.uniforms;
+        if (u) {
+          if (env.ambientBrightest) {
+            try {
+              const c = env.ambientBrightest;
+              if (typeof c === 'object' && 'r' in c) {
+                u.uAmbientBrightest.value.setRGB(c.r ?? 1, c.g ?? 1, c.b ?? 1);
+              } else if (typeof c === 'number') {
+                u.uAmbientBrightest.value.setHex(c);
+              }
+            } catch (_) {}
+          }
+          if (env.ambientDarkness) {
+            try {
+              const c = env.ambientDarkness;
+              if (typeof c === 'object' && 'r' in c) {
+                u.uAmbientDarkness.value.setRGB(c.r ?? 0.141, c.g ?? 0.141, c.b ?? 0.282);
+              } else if (typeof c === 'number') {
+                u.uAmbientDarkness.value.setHex(c);
+              }
+            } catch (_) {}
+          }
+        }
       }
     } catch (_) {}
 
@@ -533,8 +581,10 @@ export class LightingEffectV2 {
    * @param {THREE.Texture|null} [buildingShadowTexture=null] - Shadow factor from
    *   BuildingShadowsEffectV2 (1.0=lit, 0.0=shadowed). Applied in scene UV space;
    *   uSceneBounds + uCanvasSize are updated from canvas.dimensions each frame.
+   * @param {THREE.Texture|null} [overheadShadowTexture=null] - Screen-space shadow
+   *   factor from OverheadShadowsEffectV2 (1.0=lit, 0.0=shadowed). Sampled at vUv.
    */
-  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, buildingShadowTexture = null) {
+  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, buildingShadowTexture = null, overheadShadowTexture = null) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._darknessRT || !this._composeMaterial) return;
 
@@ -661,6 +711,15 @@ export class LightingEffectV2 {
     } else {
       cu.tBuildingShadow.value    = null;
       cu.uHasBuildingShadow.value = 0;
+    }
+    // Bind overhead shadow texture (screen-space, sampled directly at vUv).
+    if (overheadShadowTexture) {
+      cu.tOverheadShadow.value       = overheadShadowTexture;
+      cu.uHasOverheadShadow.value    = 1;
+      cu.uOverheadShadowOpacity.value = 1.0;
+    } else {
+      cu.tOverheadShadow.value    = null;
+      cu.uHasOverheadShadow.value = 0;
     }
 
     renderer.setRenderTarget(outputRT);

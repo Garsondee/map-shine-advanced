@@ -57,6 +57,7 @@ import { WaterSplashesEffectV2 } from './effects/WaterSplashesEffectV2.js';
 import { getCircuitBreaker } from '../core/circuit-breaker.js';
 import { OutdoorsMaskProviderV2 } from './effects/OutdoorsMaskProviderV2.js';
 import { BuildingShadowsEffectV2 } from './effects/BuildingShadowsEffectV2.js';
+import { OverheadShadowsEffectV2 } from './effects/OverheadShadowsEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('FloorCompositor');
@@ -219,6 +220,14 @@ export class FloorCompositor {
      * @type {BuildingShadowsEffectV2}
      */
     this._buildingShadowEffect = this._circuitBreaker.isDisabled('v2.buildingShadows') ? null : new BuildingShadowsEffectV2();
+
+    /**
+     * V2 Overhead Shadows Effect: per-frame soft shadow cast by overhead tiles
+     * (tileDoc.overhead === true) onto the scene below. Fed into LightingEffectV2
+     * as `tOverheadShadow` — dims ambient only, dynamic lights punch through.
+     * @type {OverheadShadowsEffectV2}
+     */
+    this._overheadShadowEffect = this._circuitBreaker.isDisabled('v2.overheadShadows') ? null : new OverheadShadowsEffectV2(this._renderBus);
 
     /** @type {boolean} Whether the render bus has been populated this session. */
     this._busPopulated = false;
@@ -417,6 +426,10 @@ export class FloorCompositor {
     // yet populated) so the effect sets up its subscription before populate() runs.
     try { this._buildingShadowEffect?.setOutdoorsMaskProvider?.(this._outdoorsMask); } catch (_) {}
 
+    try { this._overheadShadowEffect?.initialize?.(this.renderer); } catch (err) {
+      log.warn('FloorCompositor: OverheadShadowsEffectV2 initialize failed:', err);
+    }
+
     // Listen for floor/level changes so we can update tile mesh visibility.
     this._levelHookId = Hooks.on('mapShineLevelContextChanged', (payload) => {
       this._onLevelContextChanged(payload);
@@ -587,20 +600,22 @@ export class FloorCompositor {
       try { this._buildingShadowEffect?.update?.(timeInfo); } catch (err) {
         log.warn('BuildingShadowsEffectV2 update threw, skipping building shadow update:', err);
       }
+      // Overhead shadows: no per-frame update needed — sun angles are pushed
+      // directly below from SkyColorEffectV2 before render().
     }
 
     // ── Bind per-frame textures and camera to effects ────────────────────────
     this._specularEffect.render(this.renderer, this.camera);
 
-    // Feed live sun angles from SkyColorEffectV2 into building shadows
-    // so both systems share the same sun direction (single source of truth).
+    // Feed live sun angles from SkyColorEffectV2 into building shadows and
+    // overhead shadows — single source of truth for sun direction.
     try {
       const sky = this._skyColorEffect;
       if (sky && typeof sky.currentSunAzimuthDeg === 'number') {
-        this._buildingShadowEffect?.setSunAngles?.(
-          sky.currentSunAzimuthDeg,
-          sky.currentSunElevationDeg ?? 45
-        );
+        const az  = sky.currentSunAzimuthDeg;
+        const el  = sky.currentSunElevationDeg ?? 45;
+        this._buildingShadowEffect?.setSunAngles?.(az, el);
+        this._overheadShadowEffect?.setSunAngles?.(az, el);
       }
     } catch (_) {}
 
@@ -615,6 +630,17 @@ export class FloorCompositor {
       log.warn('BuildingShadowsEffectV2 render threw, skipping shadow bake:', err);
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: buildingShadows.bake DONE'); } catch (_) {} }
+
+    // Capture overhead tile alpha + compute soft shadow factor (per-frame, screen-space).
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: overheadShadows.render'); } catch (_) {} }
+    try {
+      const activeFloor = window.MapShine?.floorStack?.getActiveFloor();
+      const maxFloorIdx = Number.isFinite(activeFloor?.index) ? activeFloor.index : 0;
+      this._overheadShadowEffect?.render?.(this.renderer, this.camera, maxFloorIdx);
+    } catch (err) {
+      log.warn('OverheadShadowsEffectV2 render threw, skipping overhead shadow pass:', err);
+    }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: overheadShadows.render DONE'); } catch (_) {} }
 
     // ── Step 1: Render bus scene → sceneRT ───────────────────────────────
     // The bus scene contains albedo tiles + specular/fire overlays.
@@ -650,8 +676,10 @@ export class FloorCompositor {
       ? this._cloudEffect.cloudShadowTexture : null;
     const buildingShadowTex = (this._buildingShadowEffect?.params?.enabled)
       ? this._buildingShadowEffect.shadowFactorTexture : null;
+    const overheadShadowTex = (this._overheadShadowEffect?.params?.enabled)
+      ? this._overheadShadowEffect.shadowFactorTexture : null;
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lighting.render(sceneRT→postA)'); } catch (_) {} }
-    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, buildingShadowTex);
+    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, buildingShadowTex, overheadShadowTex);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lighting.render(sceneRT→postA) DONE'); } catch (_) {} }
 
     // Feed live cloud shadow into WaterEffectV2 so caustics/specular are
@@ -964,6 +992,7 @@ export class FloorCompositor {
     try { this._colorCorrectionEffect.dispose(); } catch (_) {}
     try { this._skyColorEffect.dispose(); } catch (_) {}
     try { this._lightingEffect.dispose(); } catch (_) {}
+    try { this._overheadShadowEffect?.dispose?.(); } catch (_) {}
     try { this._fireEffect.dispose(); } catch (_) {}
     try { this._specularEffect.dispose(); } catch (_) {}
     try { this._windowLightEffect.dispose(); } catch (_) {}

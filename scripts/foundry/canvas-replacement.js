@@ -4783,7 +4783,11 @@ async function createThreeCanvas(scene) {
     tileManager = new TileManager(threeScene);
     console.log('[Map Shine Advanced: Loading]   ▸ TileManager: constructor DONE');
     if (!_v2Active) {
-      tileManager.setSpecularEffect(specularEffect);
+      const _specularEffect = window.MapShine?.specularEffect
+        ?? effectMap.get('Specular')
+        ?? effectMap.get('SpecularEffect')
+        ?? null;
+      tileManager.setSpecularEffect(_specularEffect);
       const _fluidEffect = window.MapShine?.fluidEffect ?? effectMap.get('Fluid') ?? null;
       tileManager.setFluidEffect(_fluidEffect);
 
@@ -4792,7 +4796,7 @@ async function createThreeCanvas(scene) {
       // point instead of calling effects directly.
       safeCall(() => {
         const bindingMgr = new TileEffectBindingManager();
-        if (specularEffect) bindingMgr.registerEffect(specularEffect);
+        if (_specularEffect) bindingMgr.registerEffect(_specularEffect);
         if (_fluidEffect) bindingMgr.registerEffect(_fluidEffect);
         // Tree, Bush, and Iridescence now support per-tile overlays via TileBindableEffect interface.
         const _treeEffect = effectMap.get('Trees');
@@ -5636,7 +5640,18 @@ async function createThreeCanvas(scene) {
           );
         }, 'v2.registerCloudUI', Severity.COSMETIC);
 
-        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, WaterSplashes, Bloom, ColorCorrection, FilmGrain, Sharpen, Water, Cloud)');
+        // Overhead shadows: uses V1 schema (opacity, length, softness) but routes
+        // to _overheadShadowEffect on FloorCompositor. Only core params are wired
+        // (opacity, length, softness, enabled) — V1-only passes (fluid, tile projection,
+        // indoor shadow) have no V2 equivalent yet and are silently ignored.
+        safeCall(() => {
+          uiManager.registerEffect(
+            'overhead-shadows', 'Overhead Shadows',
+            OverheadShadowsEffect.getControlSchema(), _makeV2Callback('_overheadShadowEffect'), 'global'
+          );
+        }, 'v2.registerOverheadShadowsUI', Severity.COSMETIC);
+
+        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, WaterSplashes, Bloom, ColorCorrection, FilmGrain, Sharpen, Water, Cloud, OverheadShadows)');
 
         log.info('V2: UI initialized');
       }, 'initializeUI(V2)', Severity.DEGRADED);

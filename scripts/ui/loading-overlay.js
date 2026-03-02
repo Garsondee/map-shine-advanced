@@ -32,6 +32,9 @@ export class LoadingOverlay {
     this._debugMode = false;
     /** @type {Function|null} callback when dismiss is clicked */
     this._debugDismissCallback = null;
+
+    /** @type {(e: KeyboardEvent)=>void|null} */
+    this._debugKeyHandler = null;
   }
 
   configureStages(stages) {
@@ -729,6 +732,26 @@ export class LoadingOverlay {
     if (this._debugContainerEl) this._debugContainerEl.style.pointerEvents = 'auto';
     if (this._debugLogEl) this._debugLogEl.textContent = '';
     if (this._debugDismissBtn) this._debugDismissBtn.style.display = 'none';
+
+    // Escape hatch: allow closing the overlay even if the button becomes unclickable
+    // due to unexpected pointer-events/z-index interactions.
+    if (!this._debugKeyHandler) {
+      this._debugKeyHandler = (e) => {
+        try {
+          if (e.key !== 'Escape') return;
+          // Only handle Escape when the overlay is actually visible.
+          if (!this.el || this.el.style.display === 'none') return;
+          this._onDebugDismiss();
+          e.preventDefault();
+          e.stopPropagation();
+        } catch (_) {
+        }
+      };
+      try {
+        window.addEventListener('keydown', this._debugKeyHandler, true);
+      } catch (_) {
+      }
+    }
   }
 
   /**
@@ -740,6 +763,14 @@ export class LoadingOverlay {
     if (this._debugContainerEl) this._debugContainerEl.style.display = 'none';
     if (this._debugContainerEl) this._debugContainerEl.style.pointerEvents = 'none';
     if (this._debugDismissBtn) this._debugDismissBtn.style.display = 'none';
+
+    if (this._debugKeyHandler) {
+      try {
+        window.removeEventListener('keydown', this._debugKeyHandler, true);
+      } catch (_) {
+      }
+      this._debugKeyHandler = null;
+    }
   }
 
   /**
@@ -775,9 +806,12 @@ export class LoadingOverlay {
     this._debugDismissCallback = callback || null;
     // Ensure the overlay is interactive so the user can click the button.
     if (this.el) this.el.style.pointerEvents = 'auto';
+    if (this._contentEl) this._contentEl.style.pointerEvents = 'auto';
+    if (this._debugContainerEl) this._debugContainerEl.style.pointerEvents = 'auto';
     if (this._debugDismissBtn) {
       this._debugDismissBtn.style.display = 'block';
       this._debugDismissBtn.style.pointerEvents = 'auto';
+      try { this._debugDismissBtn.disabled = false; } catch (_) {}
     }
   }
 
@@ -818,8 +852,22 @@ export class LoadingOverlay {
       try { this._debugDismissCallback(); } catch (_) { /* ignore */ }
       this._debugDismissCallback = null;
     }
-    // Fade out the overlay
-    this.fadeIn(2000, 800).catch(() => {});
+    // Fade out the overlay. Fail-safe: if the fade stalls for any reason,
+    // hide the overlay anyway so the user is never soft-locked.
+    try {
+      const p = this.fadeIn(2000, 800);
+      // If fadeIn never resolves (unexpected), force-hide after a short delay.
+      Promise.race([
+        p,
+        new Promise((resolve) => setTimeout(resolve, 3500))
+      ]).then(() => {
+        try { this.hide(); } catch (_) {}
+      }).catch(() => {
+        try { this.hide(); } catch (_) {}
+      });
+    } catch (_) {
+      try { this.hide(); } catch (_) {}
+    }
   }
 
   // ---------------------------------------------------------------------------

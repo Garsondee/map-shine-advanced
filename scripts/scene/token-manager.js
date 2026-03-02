@@ -14,10 +14,12 @@ const log = createLogger('TokenManager');
 
 /**
  * Z-position base for tokens.
- * Tokens render at this z-position + elevation above the scene groundZ.
+ * V1: groundZ + small offset.
+ * V2: FloorRenderBus uses GROUND_Z=1000 for tiles, so tokens must be above tiles.
  * Layer ordering: ground(0) → BG(1.0) → FG(2.0) → TOKEN(3.0) → OVERHEAD(4.0)
  */
-const TOKEN_BASE_Z = 3.0;
+const TOKEN_BASE_Z_V1 = 3.0;
+const TOKEN_BASE_Z_V2 = 1003.0;
 
 /**
  * TokenManager - Synchronizes Foundry VTT tokens to THREE.js sprites
@@ -621,6 +623,43 @@ vec3 ms_applySceneLighting(vec3 color) {
     }
     
     log.info('TokenManager initialized');
+
+    // Refresh resilience: on hard refresh / recovery init paths, TokenManager can
+    // initialize after Foundry's canvasReady hook has already fired (or been
+    // skipped). In that case relying on the hook means we never create sprites
+    // for existing token docs, and only newly-created tokens appear.
+    //
+    // If the canvas is already ready, schedule an immediate sync.
+    try {
+      const isReady = !!globalThis.canvas?.ready;
+      if (isReady) {
+        queueMicrotask(() => {
+          try { this.syncAllTokens(); } catch (_) {}
+        });
+        setTimeout(() => {
+          try {
+            // Safety: if something delayed the token layer, retry once.
+            if (this.tokenSprites.size === 0) this.syncAllTokens();
+          } catch (_) {}
+        }, 250);
+      }
+    } catch (_) {
+    }
+  }
+
+  /**
+   * V2 helper: resolve the FloorRenderBus scene if the V2 compositor exists.
+   * @returns {import('three').Scene|null}
+   * @private
+   */
+  _getV2BusScene() {
+    try {
+      const effectComposer = window.MapShine?.effectComposer;
+      const floorCompositor = effectComposer?._floorCompositorV2;
+      return floorCompositor?._renderBus?._scene ?? null;
+    } catch (_) {
+      return null;
+    }
   }
 
   /**
@@ -628,6 +667,37 @@ vec3 ms_applySceneLighting(vec3 color) {
    * @param {TimeInfo} timeInfo 
    */
   update(timeInfo) {
+    // V2 self-heal: tokens can be created during canvasReady before the V2 compositor
+    // has been instantiated/rendered. In that case they get added to the main scene
+    // and never become visible (V2 renders the FloorRenderBus scene only).
+    // Each frame, if the V2 bus scene exists, ensure all token sprites are parented
+    // under it.
+    try {
+      const busScene = this._getV2BusScene();
+      if (busScene) {
+        for (const data of this.tokenSprites.values()) {
+          const sprite = data?.sprite;
+          if (!sprite) continue;
+          if (sprite.parent !== busScene) {
+            busScene.add(sprite);
+          }
+
+          // If the sprite was created before V2 was ready, it may have been initialized
+          // with opacity=0 (anti-flash) and never recovered because it wasn't being
+          // rendered. Make sure we don't strand tokens invisible after migration.
+          // VisibilityController can still override later once it initializes.
+          try {
+            if (sprite.visible === false) sprite.visible = true;
+            if (sprite.material && typeof sprite.material.opacity === 'number' && sprite.material.opacity <= 0) {
+              sprite.material.opacity = 1.0;
+            }
+          } catch (_) {
+          }
+        }
+      }
+    } catch (_) {
+    }
+
     // Update window light texture + P4-10: lighting target + outdoors mask for all tokens.
     try {
       const wle = window.MapShine?.windowLightEffect;
@@ -996,6 +1066,9 @@ vec3 ms_applySceneLighting(vec3 color) {
     this._ensureTokenColorCorrection(material);
 
     const sprite = new THREE.Sprite(material);
+    // Tag tokens so the V2 FloorRenderBus can preserve them across populate()/clear().
+    sprite.userData = sprite.userData || {};
+    sprite.userData.type = 'token';
     sprite.name = `Token_${tokenDoc.id}`;
     sprite.matrixAutoUpdate = false;
 
@@ -1050,21 +1123,52 @@ vec3 ms_applySceneLighting(vec3 color) {
     this.updateSpriteTransform(sprite, tokenDoc);
     this.updateSpriteVisibility(sprite, tokenDoc);
 
-    // When VC is active, new sprites must start hidden. The VC will set
-    // correct visibility on the next sightRefresh / _refreshVisibility pass.
-    // Without this, the THREE.js default (visible=true) would flash tokens.
-    const vc = window.MapShine?.visibilityController;
-    if (vc?._initialized) {
-      sprite.visible = false;
-    }
+    // Add to scene FIRST (before layer assignment)
+    // V2: Tokens must be in the FloorRenderBus scene to be rendered by FloorCompositor.
+    // V1: Tokens are in the main scene.
     
-    // Start with 0 opacity to prevent white flash before texture loads
-    sprite.material.opacity = 0;
+    // CRITICAL: FloorCompositor is on effectComposer, not sceneComposer
+    const effectComposer = window.MapShine?.effectComposer;
+    const floorCompositor = effectComposer?._floorCompositorV2;
+    const renderBus = floorCompositor?._renderBus;
+    const busScene = renderBus?._scene;
+    const isV2 = !!busScene;
+    
+    log.warn(`[V2 DEBUG] Token ${tokenDoc.id} scene assignment check:`);
+    log.warn(`  - effectComposer exists: ${!!effectComposer}`);
+    log.warn(`  - _floorCompositorV2 exists: ${!!floorCompositor}`);
+    log.warn(`  - _renderBus exists: ${!!renderBus}`);
+    log.warn(`  - _scene exists: ${!!busScene}`);
+    log.warn(`  - isV2: ${isV2}`);
+    
+    if (busScene) {
+      busScene.add(sprite);
+      log.info(`[V2] Token ${tokenDoc.id} added to FloorRenderBus scene (children: ${busScene.children.length})`);
+    } else {
+      this.scene.add(sprite);
+      log.warn(`[V1 fallback] Token ${tokenDoc.id} added to main scene - FloorCompositor not available`);
+    }
 
-    // Add to scene
-    // DEBUG: TEMPORARILY DISABLED TOKEN RENDERING
-    // log.warn(`DEBUG: Token rendering disabled for ${tokenDoc.id}`);
-    this.scene.add(sprite);
+    // V2 DEBUG: Make tokens immediately visible to diagnose rendering
+    // In V2, bypass VisibilityController and show tokens with full opacity
+    // This helps us see if the rendering pipeline works at all
+    if (isV2) {
+      sprite.visible = true;
+      sprite.material.opacity = 1.0;
+      log.warn(`[V2 DEBUG] Token ${tokenDoc.id} forced visible for debugging`);
+      log.warn(`[V2 DEBUG] Token ${tokenDoc.id} position: (${sprite.position.x.toFixed(1)}, ${sprite.position.y.toFixed(1)}, ${sprite.position.z.toFixed(1)})`);
+      log.warn(`[V2 DEBUG] Token ${tokenDoc.id} layers: ${sprite.layers.mask.toString(2)}`);
+      log.warn(`[V2 DEBUG] Token ${tokenDoc.id} material: map=${!!sprite.material.map}, opacity=${sprite.material.opacity}, transparent=${sprite.material.transparent}`);
+      log.warn(`[V2 DEBUG] Bus scene children count: ${busScene.children.length}`);
+    } else {
+      // V1: Use normal VisibilityController flow
+      const vc = window.MapShine?.visibilityController;
+      if (vc?._initialized) {
+        sprite.visible = false;
+      }
+      // Start with 0 opacity to prevent white flash before texture loads
+      sprite.material.opacity = 0;
+    }
 
     const foundryToken = canvas?.tokens?.get?.(tokenDoc.id) || null;
 
@@ -1336,9 +1440,12 @@ vec3 ms_applySceneLighting(vec3 color) {
     const centerY = sceneHeight - (tokenDoc.y + rectHeight / 2);
     
     // Z-position = groundZ + base + elevation
+    // V2 renders tiles at ~1000 Z, so tokens must be above that.
     const elevation = tokenDoc.elevation || 0;
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
-    const zPosition = groundZ + TOKEN_BASE_Z + elevation;
+    const busScene = this._getV2BusScene();
+    const baseZ = busScene ? TOKEN_BASE_Z_V2 : TOKEN_BASE_Z_V1;
+    const zPosition = groundZ + baseZ + elevation;
 
     log.debug(`Calculated Sprite Pos: (${centerX}, ${centerY}, ${zPosition}) from Token (${tokenDoc.x}, ${tokenDoc.y})`);
     log.debug(`Current Sprite Pos: (${sprite.position.x}, ${sprite.position.y}, ${sprite.position.z})`);

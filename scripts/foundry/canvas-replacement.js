@@ -3571,6 +3571,12 @@ async function createThreeCanvas(scene) {
   // referenced _v2Active.
   const _v2Active = true;
 
+  // Defense-in-depth: allow other subsystems (e.g. FrameCoordinator) to detect
+  // that V2 compositor is active and avoid PIXI flush rendering.
+  safeCall(() => {
+    if (window.MapShine) window.MapShine.__v2Active = _v2Active;
+  }, 'exposeV2ActiveFlag', Severity.COSMETIC);
+
   const lp = globalLoadingProfiler;
   const doLoadProfile = !!lp?.enabled;
   if (doLoadProfile) {
@@ -3701,9 +3707,42 @@ async function createThreeCanvas(scene) {
     // Strategy: Three.js handles interaction in gameplay by default; PIXI starts as a
     // transparent overlay (no pointer events) and InputRouter/ControlsIntegration
     // enable PIXI input when edit tools are active.
-    pixiCanvas.style.opacity = '1'; // Keep visible for overlay layers (drawings, templates, notes)
-    pixiCanvas.style.zIndex = '10'; // On top
-    pixiCanvas.style.pointerEvents = 'none'; // Pass pointer events to Three.js by default
+    if (_v2Active) {
+      // V2 goal: Three owns all pixels. PIXI must not visually render fog/tokens/etc.
+      pixiCanvas.style.display = 'none';
+      pixiCanvas.style.visibility = 'hidden';
+      pixiCanvas.style.opacity = '0';
+      pixiCanvas.style.zIndex = '-1';
+      pixiCanvas.style.pointerEvents = 'none';
+
+      // Foundry (or other modules) can re-apply styles during layer/tool changes.
+      // In V2 we must keep #board suppressed so PIXI cannot contribute pixels.
+      safeCall(() => {
+        if (globalThis.__msaV2BoardSuppressionObserverInstalled) return;
+        globalThis.__msaV2BoardSuppressionObserverInstalled = true;
+
+        const enforce = () => {
+          try {
+            const el = document.getElementById('board');
+            if (!el || el.tagName !== 'CANVAS') return;
+            el.style.display = 'none';
+            el.style.visibility = 'hidden';
+            el.style.opacity = '0';
+            el.style.zIndex = '-1';
+            el.style.pointerEvents = 'none';
+          } catch (_) {}
+        };
+
+        enforce();
+
+        const obs = new MutationObserver(() => enforce());
+        obs.observe(pixiCanvas, { attributes: true, attributeFilter: ['style', 'class'] });
+      }, 'v2.boardSuppressionObserver', Severity.COSMETIC);
+    } else {
+      pixiCanvas.style.opacity = '1'; // Keep visible for overlay layers (drawings, templates, notes)
+      pixiCanvas.style.zIndex = '10'; // On top
+      pixiCanvas.style.pointerEvents = 'none'; // Pass pointer events to Three.js by default
+    }
     
     // CRITICAL: Set PIXI renderer background to transparent
     // Without this, the PIXI background color renders over Three.js content
@@ -3788,75 +3827,6 @@ async function createThreeCanvas(scene) {
       if (renderer?.setClearColor) renderer.setClearColor(0x000000, 1);
       if (typeof renderer?.setClearAlpha === 'function') renderer.setClearAlpha(1);
     }, 'renderer.forceOpaqueClear', Severity.COSMETIC);
-
-    // Optional debug: trace what actually renders to the screen framebuffer.
-    // Enable at runtime via:
-    //   localStorage.setItem('msa-screen-trace','1'); location.reload();
-    // or:
-    //   window.MapShine.debugScreenTrace = true;
-    safeCall(() => {
-      if (!renderer || globalThis.__msaScreenTraceInstalled) return;
-      globalThis.__msaScreenTraceInstalled = true;
-
-      const enabled = () => {
-        try {
-          if (window.MapShine?.debugScreenTrace) return true;
-          return localStorage.getItem('msa-screen-trace') === '1';
-        } catch (_) {
-          return false;
-        }
-      };
-
-      // Track the last setRenderTarget() call.
-      const origSetRenderTarget = renderer.setRenderTarget?.bind(renderer);
-      if (origSetRenderTarget) {
-        renderer.setRenderTarget = (rt, ...rest) => {
-          try {
-            renderer.__msaLastRenderTargetIsScreen = (rt === null);
-            renderer.__msaLastRenderTargetLabel = (rt === null)
-              ? 'SCREEN'
-              : (rt?.texture?.name || rt?.name || 'RT');
-          } catch (_) {}
-          return origSetRenderTarget(rt, ...rest);
-        };
-      }
-
-      const origRender = renderer.render?.bind(renderer);
-      if (!origRender) return;
-
-      let lastLogAt = -Infinity;
-      renderer.render = (scene, camera, ...rest) => {
-        const result = origRender(scene, camera, ...rest);
-        try {
-          if (!enabled()) return result;
-          const isScreen = (renderer.getRenderTarget?.() === null) || (renderer.__msaLastRenderTargetIsScreen === true);
-          if (!isScreen) return result;
-
-          const now = performance.now();
-          if ((now - lastLogAt) < 250) return result;
-          lastLogAt = now;
-
-          const sceneName = scene?.name ?? scene?.type ?? 'scene';
-          const camName = camera?.name ?? (camera?.isPerspectiveCamera ? 'PerspectiveCamera' : camera?.isOrthographicCamera ? 'OrthoCamera' : 'camera');
-          const label = renderer.__msaLastRenderTargetLabel ?? 'SCREEN';
-          const ca = (typeof renderer.getClearAlpha === 'function') ? renderer.getClearAlpha() : null;
-
-          // Stack trace is expensive; keep it short.
-          const stack = (() => {
-            try { throw new Error('screen-render-trace'); } catch (e) { return e?.stack ?? null; }
-          })();
-
-          console.warn('[MSA ScreenTrace] renderer.render -> SCREEN', {
-            target: label,
-            clearAlpha: ca,
-            scene: sceneName,
-            camera: camName,
-            stack,
-          });
-        } catch (_) {}
-        return result;
-      };
-    }, 'renderer.installScreenTrace', Severity.COSMETIC);
 
     safeCall(() => renderer.setSize(rect.width, rect.height, false), 'renderer.setSize', Severity.DEGRADED, {
       onError: () => renderer.setSize(rect.width, rect.height)
@@ -5163,8 +5133,21 @@ async function createThreeCanvas(scene) {
       const readyMsg = elapsed > 0 ? `Debug load complete (${elapsed.toFixed(1)}s) — review log below` : 'Debug load complete — review log below';
       safeCall(() => loadingOverlay.setStage('final', 1.0, readyMsg, { immediate: true }), 'overlay.debugReady', Severity.COSMETIC);
 
-      // Show dismiss button; clicking it triggers the normal fadeIn
-      safeCall(() => loadingOverlay.showDebugDismiss(), 'overlay.showDismiss', Severity.COSMETIC);
+      // Auto-dismiss the overlay in debug mode.
+      // The dismiss button can become unclickable due to pointer-events/z-index
+      // interactions during Foundry boot. We still keep the full log in the
+      // overlay while it's visible, and expose the profiler on window for review.
+      safeCall(() => {
+        setTimeout(() => {
+          try {
+            loadingOverlay.fadeIn(1200, 400).catch(() => {
+              try { loadingOverlay.hide(); } catch (_) {}
+            });
+          } catch (_) {
+            try { loadingOverlay.hide(); } catch (_) {}
+          }
+        }, 250);
+      }, 'overlay.debugAutoDismiss', Severity.COSMETIC);
 
       // Expose the profiler on window.MapShine for console access
       if (window.MapShine) window.MapShine.debugLoadingProfiler = dlp;
@@ -8100,20 +8083,6 @@ function _enforceGameplayPixiSuppression() {
         pixiCanvas.style.opacity = '0';
         pixiCanvas.style.pointerEvents = 'none';
 
-        // Optional debug: when screen tracing is enabled, log computed style so
-        // we can confirm PIXI is truly suppressed.
-        try {
-          const trace = (window.MapShine?.debugScreenTrace === true) || (localStorage.getItem('msa-screen-trace') === '1');
-          if (trace) {
-            const cs = getComputedStyle(pixiCanvas);
-            console.warn('[MSA ScreenTrace] PIXI canvas style', {
-              display: cs.display,
-              visibility: cs.visibility,
-              opacity: cs.opacity,
-              zIndex: cs.zIndex,
-            });
-          }
-        } catch (_) {}
       }
     }, 'pixiSuppress.pixiCanvasOpacity', Severity.COSMETIC);
 

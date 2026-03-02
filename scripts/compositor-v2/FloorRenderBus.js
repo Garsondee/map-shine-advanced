@@ -220,14 +220,17 @@ export class FloorRenderBus {
     const prevColor     = renderer.getClearColor(new THREE.Color());
     const prevAlpha     = renderer.getClearAlpha();
 
-    // Save camera layer mask and ensure layer 0 + OVERLAY_THREE_LAYER are enabled.
-    // The FloorLayerManager may have set the camera mask to only a specific floor
-    // layer (e.g. bit 20 for floor 0), which excludes layer 0. The bus scene's
-    // tile meshes and quarks SpriteBatch children all live on layer 0, so they
-    // would be invisible without this. We restore the mask after rendering.
+    // Save camera layer mask and enable all floor layers + layer 0 + OVERLAY_THREE_LAYER.
+    // Tokens and tiles are assigned to floor layers (1-19) by FloorLayerManager,
+    // so we must enable those layers to render them. Layer 0 is kept for legacy
+    // compatibility and OVERLAY_THREE_LAYER for UI overlays.
     const prevLayerMask = camera.layers.mask;
     camera.layers.enable(0);
     camera.layers.enable(OVERLAY_THREE_LAYER);
+    // Enable all floor layers (1-19) so tokens/tiles assigned to floors are visible.
+    for (let i = 1; i <= 19; i++) {
+      camera.layers.enable(i);
+    }
 
     // Render with a black clear so no white flash while textures load.
     renderer.setRenderTarget(target);
@@ -264,6 +267,9 @@ export class FloorRenderBus {
    */
   clear() {
     if (!this._scene) return;
+    
+    log.info(`[V2 DEBUG] FloorRenderBus.clear() called - scene has ${this._scene.children.length} children before clear`);
+    
     for (const { mesh, material } of this._tiles.values()) {
       this._scene.remove(mesh);
       material.map?.dispose();
@@ -271,10 +277,42 @@ export class FloorRenderBus {
       mesh.geometry.dispose();
     }
     this._tiles.clear();
-    // Remove any remaining children (e.g. background meshes not tracked in _tiles).
-    while (this._scene.children.length > 0) {
-      this._scene.remove(this._scene.children[0]);
+    
+    // Remove background meshes and effect overlays, but preserve tokens.
+    // Tokens are added by TokenManager and should not be destroyed when
+    // repopulating tiles. Only remove objects with tileId starting with '__'
+    // (background planes, effect overlays) that are not tracked in _tiles.
+    const childrenToRemove = [];
+    let tokenCount = 0;
+    let otherCount = 0;
+    
+    for (const child of this._scene.children) {
+      const userData = child?.userData;
+      const type = userData?.type;
+      const name = child?.name || 'unnamed';
+      
+      // Preserve tokens (type === 'token')
+      if (type === 'token') {
+        tokenCount++;
+        log.info(`[V2 DEBUG] Preserving token: ${name} (type=${type})`);
+        continue;
+      }
+      // Preserve particle systems and other effect objects
+      if (child.name?.startsWith('Token_')) {
+        tokenCount++;
+        log.info(`[V2 DEBUG] Preserving token by name: ${name}`);
+        continue;
+      }
+      // Remove everything else (background planes, old effect overlays)
+      otherCount++;
+      childrenToRemove.push(child);
     }
+    
+    for (const child of childrenToRemove) {
+      this._scene.remove(child);
+    }
+    
+    log.info(`[V2 DEBUG] FloorRenderBus.clear() complete - preserved ${tokenCount} tokens, removed ${otherCount} other objects, ${this._scene.children.length} children remain`);
   }
 
   /**

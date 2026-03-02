@@ -178,6 +178,14 @@ export class FrameCoordinator {
    */
   flushPixi() {
     if (!canvas?.app?.renderer) return;
+
+    // Defense-in-depth: When MapShine's V2 compositor is active, we must not
+    // force PIXI to render the full canvas stage. V2 does not sample PIXI fog/
+    // vision textures, and the forced render can leave a camera-locked overlay
+    // in the browser compositor even if the #board canvas is hidden.
+    try {
+      if (window?.MapShine?.__v2Active === true) return;
+    } catch (_) {}
     
     try {
       // Force PIXI to render its current state

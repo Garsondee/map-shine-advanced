@@ -447,123 +447,55 @@ No more per-effect UI wiring in `canvas-replacement.js`.
   - Added explicit hiding for Foundry’s `#board` canvas after `dumpCanvasStack()` revealed it was visible with `z-index: 10` above `#map-shine-canvas` (`z-index: 1`).
   - Added hooks to re-apply suppression on common vision/token/UI events.
 
-**Evidence gathered (instrumentation added):**
-
-- **Three “screen draw” tracing** (in `scripts/foundry/canvas-replacement.js`, gated by `localStorage['msa-screen-trace']`)
-  - Logs every `renderer.render()` that targets the screen framebuffer (renderTarget null) with stack traces.
-  - Observed only the expected V2 path rendering to screen:
-    - `FloorCompositor._blitToScreen()` → `FloorCompositor.render()` → `EffectComposer.render()` → `RenderLoop.render()`
-  - This suggests the overlay is not caused by a second unexpected Three render-to-screen pass.
+**Evidence gathered:**
 
 - **DOM canvas stack dump** (`window.MapShine.dumpCanvasStack()`)
   - Enumerates all `<canvas>` elements and their computed styles.
-  - Observed `#board` canvas visible (`opacity: 1`, `display: block`, `visibility: visible`) with `zIndex: 10`, above the Three canvas (`#map-shine-canvas` at `zIndex: 1`).
+  - Observed Foundry’s `#board` canvas (PIXI output) compositing above Three (e.g. `zIndex: 10` vs Three `zIndex: 1`).
 
-**Root Cause Identified:**
+**Root Cause Identified (final):**
 
-The camera-locked albedo overlay is caused by **Foundry's FrameCoordinator calling `canvas.app.renderer.render(canvas.stage)` every frame**.
+The “camera-locked albedo / semi-transparent stuck overlay” was **PIXI’s `#board` canvas being left visible and composited above Three**.
 
-In `scripts/core/frame-coordinator.js:185`:
-```javascript
-flushPixi() {
-  if (!canvas?.app?.renderer) return;
-  
-  try {
-    // Force PIXI to render its current state
-    // This ensures textures like vision masks are up-to-date
-    canvas.app.renderer.render(canvas.stage);  // ← THIS IS THE CULPRIT
-  } catch (e) {
-    log.warn('Failed to flush PIXI render:', e);
-  }
-}
-```
+Even if Three is rendering correctly, as long as `#board` is on-screen, you can see:
 
-This method is called from the PIXI ticker callback (`_onPixiTick`) via post-PIXI callbacks. Even though we've hidden the `#board` canvas with `display:none`, **PIXI is still rendering to it every frame**. The browser compositor then shows this stale/semi-transparent content as a camera-locked overlay because:
+1. **Foundry fog-of-war** (not ported to V2 yet)
+2. **Faint token artwork** (PIXI token meshes/sprites)
 
-1. PIXI renders the scene (tiles, fog, vision) to the `#board` canvas
-2. The canvas is hidden via CSS, but the GPU framebuffer content persists
-3. During certain browser/GPU states (especially during vision/token selection changes), the hidden canvas content "bleeds through" as a semi-transparent overlay
-4. Because PIXI's camera is independent of Three's camera, the overlay appears "stuck" to screen-space when you pan/zoom
+Disposing MapShine’s `FrameCoordinator` helps reduce extra PIXI flush rendering, but it **does not** prevent Foundry from drawing to (and compositing) its own `#board` canvas.
 
-**Why suppression attempts failed:**
+**Fix Implemented:**
 
-- Hiding `#board` with CSS (`display:none`, `visibility:hidden`, `opacity:0`) doesn't prevent PIXI from **rendering to it**
-- The `canvas.app.renderer.render(canvas.stage)` call still executes and writes pixels to the canvas
-- The browser/GPU can show these pixels in certain edge cases (context switches, compositing glitches, vision updates)
+- **Hard-hide `#board` in V2 during createThreeCanvas** (`scripts/foundry/canvas-replacement.js`)
+  - Set `display:none`, `visibility:hidden`, `opacity:0`, `zIndex:-1`, `pointerEvents:none`.
+  - This ensures PIXI cannot contribute any pixels in V2 gameplay.
 
-**The Fix:**
+- **Keep `#board` suppressed even if Foundry re-applies styles**
+  - Added a `MutationObserver` in V2 to re-enforce the hidden styles on `#board` whenever `style`/`class` changes.
 
-**Option 1: Stop calling `flushPixi()` in V2 mode (RECOMMENDED)**
+- **FrameCoordinator defense-in-depth**
+  - In V2, dispose FrameCoordinator (do not initialize it).
+  - Also gate `FrameCoordinator.flushPixi()` to no-op when `window.MapShine.__v2Active === true`.
 
-In V2 mode, we don't need PIXI to render vision masks or fog textures because:
-- V2 has its own fog system (will be ported in Phase 1 P0)
-- V2 doesn't sample PIXI textures for rendering
-- The only reason `flushPixi()` exists is to ensure PIXI textures are current before V1 effects sample them
+**Validation (confirmed):**
 
-**Implementation:**
-1. Add a V2 mode check in `FrameCoordinator.flushPixi()` to skip the render call
-2. OR: Don't register the post-PIXI callback that calls `flushPixi()` when V2 is active
-3. OR: Dispose the FrameCoordinator entirely in V2 mode (cleanest)
-
-**Option 2: Replace PIXI renderer with a noop renderer**
-
-More invasive, but guarantees PIXI can never render:
-```javascript
-if (_v2Active) {
-  const noopRenderer = {
-    render: () => {},
-    resize: () => {},
-    // ... other methods as noops
-  };
-  canvas.app.renderer = noopRenderer;
-}
-```
-
-**Option 3: Clear the canvas immediately after PIXI renders**
-
-Less clean, but works:
-```javascript
-flushPixi() {
-  if (!canvas?.app?.renderer) return;
-  try {
-    canvas.app.renderer.render(canvas.stage);
-    // Immediately clear the canvas so no pixels persist
-    const ctx = canvas.app.view?.getContext('2d');
-    if (ctx) ctx.clearRect(0, 0, canvas.app.view.width, canvas.app.view.height);
-  } catch (e) {
-    log.warn('Failed to flush PIXI render:', e);
-  }
-}
-```
-
-**Recommended Action:**
-
-**Dispose FrameCoordinator in V2 mode.** It was built for V1 to synchronize PIXI fog/vision texture sampling. V2 doesn't need it.
-
-In `canvas-replacement.js`, after the V2 compositor is created:
-```javascript
-if (_v2Active && frameCoordinator?.initialized) {
-  frameCoordinator.dispose();
-  log.info('FrameCoordinator disposed - not needed in V2 mode');
-}
-```
-
-This will:
-- Stop `canvas.app.renderer.render(canvas.stage)` from being called every frame
-- Eliminate the camera-locked overlay artifact
-- Remove unnecessary overhead (V2 doesn't need frame coordination)
-
-**Next Steps:**
-1. **Implement the fix** — Dispose FrameCoordinator when V2 is active
-2. **Validate** — Confirm the overlay is gone and V2 renders correctly
-3. **Continue Phase 0 cleanup** — Remove V1 effect construction code from `canvas-replacement.js`
-4. **Start Phase 1 P0** — Port WorldSpaceFogEffect and PlayerLightEffect to V2
+- With `#board` hard-hidden, PIXI fog-of-war and token sprites no longer appear.
+- The Three output is visually stable (no stuck semi-transparent overlay).
 
 ---
 
 ## 9. Immediate Next Steps
 
-1. **Implement the FrameCoordinator fix** — Dispose FrameCoordinator when V2 is active to stop PIXI rendering
-2. **Validate the fix** — Confirm the camera-locked overlay is gone and V2 renders correctly
-3. **Continue Phase 0 cleanup** — Remove V1 effect construction code from `canvas-replacement.js`
-4. **Start Phase 1 P0** — Port WorldSpaceFogEffect and PlayerLightEffect to V2
+1. **Lock in PIXI suppression in V2**
+   - Ensure Foundry’s `#board` canvas stays hard-hidden in V2 (`display:none`, etc.).
+   - Keep the MutationObserver enforcement so Foundry/modules can’t re-enable it.
+   - Keep FrameCoordinator disabled/gated in V2 as defense-in-depth.
+2. **Bring V2 fog online next (highest priority missing visual)**
+   - With PIXI fog suppressed, V2 needs its own fog to restore baseline gameplay readability.
+   - Target: `WorldSpaceFogEffect` → V2 compositor integration.
+3. **Then bring V2 player light online**
+   - Port `PlayerLightEffect` to V2 after fog is stable.
+4. **Investigate Specular layer parity**
+   - Observation: Specular appears to work for one overhead layer but not the main background image layer.
+   - Likely causes: layer classification / which meshes get the specular material / floor bus routing.
+   - Action: confirm which FloorLayer(s) the background tile is assigned to, and whether its mesh uses the specular-enabled material.

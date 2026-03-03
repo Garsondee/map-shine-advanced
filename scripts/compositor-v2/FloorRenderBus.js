@@ -25,6 +25,7 @@
 
 import { createLogger } from '../core/log.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
+import { isTileOverhead } from '../scene/tile-manager.js';
 import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
 
 const log = createLogger('FloorRenderBus');
@@ -156,7 +157,7 @@ export class FloorRenderBus {
       // Render order: ensures correct visual stacking within and across floors.
       // Layout: [floor 0 regular] [floor 0 overhead] [floor 1 regular] ...
       // Within each group, tiles are ordered by Foundry sort (ascending).
-      const isOverhead = tileDoc.overhead === true;
+      const isOverhead = isTileOverhead(tileDoc);
       const RENDER_ORDER_PER_FLOOR = 10000;
       const OVERHEAD_OFFSET = 5000;
       const sortWithinFloor = tileCount; // Already in sort order from pre-sort above
@@ -165,7 +166,7 @@ export class FloorRenderBus {
         + sortWithinFloor;
 
       // Create mesh immediately with null texture (invisible until loaded).
-      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder);
+      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead);
 
       // Load texture via THREE.TextureLoader — HTML <img>, straight alpha.
       this._loader.load(src, (tex) => {
@@ -188,7 +189,7 @@ export class FloorRenderBus {
 
     // Diagnostic: log overhead tile assignment so we can spot mis-classified tiles.
     const overheadDiag = sortedTileDocs
-      .filter(td => td.overhead === true)
+      .filter(td => isTileOverhead(td))
       .map(td => {
         const fi = this._resolveFloorIndex(td, floors);
         return { id: td.id, floor: fi, src: (td.texture?.src ?? td.img ?? '').split('/').pop() };
@@ -367,7 +368,14 @@ export class FloorRenderBus {
         entry.mesh.visible = true;
         continue;
       }
-      entry.mesh.visible = entry.floorIndex <= maxFloorIndex;
+
+      // Overhead tiles act as ceilings/roofs for the floor below.
+      // When the user is on floor N, we must keep overhead tiles on floor N+1
+      // visible; otherwise overhead art disappears entirely and the overhead
+      // shadow capture pass has nothing to sample.
+      const isOverhead = entry.mesh?.userData?.isOverhead === true;
+      const extraCeilingFloor = isOverhead ? 1 : 0;
+      entry.mesh.visible = entry.floorIndex <= (maxFloorIndex + extraCeilingFloor);
     }
     log.debug(`FloorRenderBus: showing floors 0–${maxFloorIndex}`);
   }
@@ -632,7 +640,7 @@ export class FloorRenderBus {
    * @param {number} alpha
    * @private
    */
-  _addTileMesh(tileId, floorIndex, texture, cx, cy, z, w, h, rotation, alpha, renderOrder = 0) {
+  _addTileMesh(tileId, floorIndex, texture, cx, cy, z, w, h, rotation, alpha, renderOrder = 0, isOverhead = false) {
     const THREE = window.THREE;
 
     const mat = new THREE.MeshBasicMaterial({
@@ -648,6 +656,8 @@ export class FloorRenderBus {
     const mesh = new THREE.Mesh(geom, mat);
     mesh.name = `BusTile_${tileId}`;
     mesh.frustumCulled = false;
+    mesh.userData = mesh.userData || {};
+    mesh.userData.isOverhead = isOverhead;
     mesh.position.set(cx, cy, z);
     mesh.rotation.z = rotation;
     // renderOrder controls visual stacking: lower = behind, higher = in front.

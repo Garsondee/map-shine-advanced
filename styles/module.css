@@ -754,6 +754,69 @@
 }
 
 /* Tile Inspector */
+.msa-la__tiles-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.msa-la__tile-tools {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgba(18, 22, 28, 0.96);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+}
+
+.msa-la__tiles-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.msa-la__tile-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  margin-bottom: 8px;
+}
+
+.msa-la__tile-search-input {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(245, 248, 255, 0.95);
+  font-size: 11px;
+  padding: 5px 8px;
+}
+
+.msa-la__tile-search-clear {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(245, 248, 255, 0.9);
+  width: 26px;
+  height: 26px;
+  cursor: pointer;
+  line-height: 1;
+  font-size: 16px;
+}
+
+.msa-la__tile-search-clear:hover {
+  border-color: rgba(140, 195, 255, 0.45);
+  background: rgba(140, 195, 255, 0.16);
+}
+
 .msa-la__tile-group {
   margin-bottom: 10px;
 }
@@ -847,6 +910,15 @@
   cursor: default;
 }
 
+.msa-la__tile-row:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.msa-la__tile-row--selected {
+  background: rgba(120, 210, 160, 0.14);
+  border: 1px solid rgba(120, 210, 160, 0.25);
+}
+
 .msa-la__tile-main {
   display: flex;
   align-items: center;
@@ -923,10 +995,6 @@
 .msa-la__tile-editor-actions button:hover {
   border-color: rgba(140, 195, 255, 0.45);
   background: rgba(140, 195, 255, 0.16);
-}
-
-.msa-la__tile-row:hover {
-  background: rgba(255, 255, 255, 0.06);
 }
 
 .msa-la__tile-name {

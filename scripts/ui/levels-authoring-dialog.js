@@ -455,6 +455,15 @@ export class LevelsAuthoringDialog {
     /** @type {'all'|'assigned'|'unassigned'} */
     this._tileFilter = 'all';
 
+    /** @type {string} */
+    this._tileSearch = '';
+
+    /** @type {string|null} */
+    this._selectedTileId = null;
+
+    /** @type {number} */
+    this._tilesScrollTop = 0;
+
     /** @type {boolean} */
     this._eventsBound = false;
 
@@ -564,6 +573,14 @@ export class LevelsAuthoringDialog {
   _render() {
     if (!this.container) return;
 
+    if (this._activeTab === 'tiles') {
+      try {
+        const scrollEl = this.container.querySelector('.msa-la__tiles-scroll');
+        if (scrollEl) this._tilesScrollTop = scrollEl.scrollTop || 0;
+      } catch (_) {
+      }
+    }
+
     const scene = canvas?.scene;
     const mode = getLevelsCompatibilityMode();
     const enabled = isLevelsEnabledForScene(scene);
@@ -654,6 +671,22 @@ export class LevelsAuthoringDialog {
     `;
 
     this._bindEvents();
+
+    if (this._activeTab === 'tiles') {
+      const restoreScroll = () => {
+        try {
+          const scrollEl = this.container?.querySelector?.('.msa-la__tiles-scroll');
+          if (scrollEl) scrollEl.scrollTop = this._tilesScrollTop || 0;
+        } catch (_) {
+        }
+      };
+
+      try {
+        window.requestAnimationFrame(restoreScroll);
+      } catch (_) {
+        restoreScroll();
+      }
+    }
   }
 
   _renderInactiveState(mode, hasSceneLevels) {
@@ -874,7 +907,14 @@ export class LevelsAuthoringDialog {
       return '<div class="msa-la__empty">No tiles in this scene.</div>';
     }
 
-    const filteredAssignments = tileAssignments.filter((t) => matchesTileFilter(t.hasRange, this._tileFilter));
+    const search = String(this._tileSearch || '').trim().toLowerCase();
+    const filteredAssignments = tileAssignments.filter((t) => {
+      if (!matchesTileFilter(t.hasRange, this._tileFilter)) return false;
+      if (!search) return true;
+      const name = String(t.name || '').toLowerCase();
+      const src = String(t.src || '').toLowerCase();
+      return name.includes(search) || src.includes(search);
+    });
     const filterButton = (filterValue, label, title) => `
       <button
         type="button"
@@ -885,21 +925,34 @@ export class LevelsAuthoringDialog {
       >${escapeHtml(label)}</button>`;
 
     let html = `
-      <div class="msa-la__tile-tools">
-        <div class="msa-la__tile-tip">Edit tile Levels values inline below, then click <strong>Apply</strong>.</div>
-        <div class="msa-la__tile-filters">
-          ${filterButton('all', `All (${tileAssignments.length})`, 'Show all tiles')}
-          ${filterButton('unassigned', `Unassigned (${tileAssignments.filter((t) => !t.hasRange).length})`, 'Show only tiles with no Levels range')}
-          ${filterButton('assigned', `Assigned (${tileAssignments.filter((t) => t.hasRange).length})`, 'Show only tiles with Levels range')}
+      <div class="msa-la__tiles-pane">
+        <div class="msa-la__tile-tools">
+          <div class="msa-la__tile-tip">Edit tile Levels values inline below, then click <strong>Apply</strong>.</div>
+          <div class="msa-la__tile-search">
+            <input
+              type="text"
+              class="msa-la__tile-search-input"
+              placeholder="Search tiles (name or src)"
+              value="${escapeHtml(this._tileSearch)}"
+              data-action="setTileSearch"
+              aria-label="Search tiles"
+            >
+            ${this._tileSearch ? '<button type="button" class="msa-la__tile-search-clear" data-action="clearTileSearch" title="Clear search">&times;</button>' : ''}
+          </div>
+          <div class="msa-la__tile-filters">
+            ${filterButton('all', `All (${tileAssignments.length})`, 'Show all tiles')}
+            ${filterButton('unassigned', `Unassigned (${tileAssignments.filter((t) => !t.hasRange).length})`, 'Show only tiles with no Levels range')}
+            ${filterButton('assigned', `Assigned (${tileAssignments.filter((t) => t.hasRange).length})`, 'Show only tiles with Levels range')}
+          </div>
+          <div class="msa-la__tile-bulk">
+            <button type="button" data-action="selectVisibleTiles" title="Select all tiles currently visible in this list">Select Visible</button>
+            <button type="button" data-action="fixVisibleTiles" title="Set valid Levels ranges for all currently visible tiles">Fix Visible</button>
+          </div>
         </div>
-        <div class="msa-la__tile-bulk">
-          <button type="button" data-action="selectVisibleTiles" title="Select all tiles currently visible in this list">Select Visible</button>
-          <button type="button" data-action="fixVisibleTiles" title="Set valid Levels ranges for all currently visible tiles">Fix Visible</button>
-        </div>
-      </div>`;
+        <div class="msa-la__tiles-scroll">`;
 
     if (filteredAssignments.length === 0) {
-      return `${html}<div class="msa-la__tile-empty">No tiles match the current filter.</div>`;
+      return `${html}<div class="msa-la__tile-empty">No tiles match the current filter.</div></div></div>`;
     }
 
     // Group tiles by band
@@ -942,7 +995,7 @@ export class LevelsAuthoringDialog {
       html += '</div></div>';
     }
 
-    return html;
+    return `${html}</div></div>`;
   }
 
   _renderTileRow(t) {
@@ -958,8 +1011,9 @@ export class LevelsAuthoringDialog {
     const topInput = formatLevelInputValue(t.top, { allowInfinity: true });
     const showAboveRangeInput = formatLevelInputValue(t.showAboveRange, { allowInfinity: true });
 
+    const isSelected = this._selectedTileId && this._selectedTileId === t.id;
     return `
-      <div class="msa-la__tile-row" data-tile-id="${escapeHtml(t.id)}">
+      <div class="msa-la__tile-row ${isSelected ? 'msa-la__tile-row--selected' : ''}" data-tile-id="${escapeHtml(t.id)}">
         <div class="msa-la__tile-main">
           <span class="msa-la__tile-name" title="${escapeHtml(t.src || t.name)}">${escapeHtml(t.name)}</span>
           ${overheadTag}
@@ -1246,6 +1300,16 @@ export class LevelsAuthoringDialog {
     if (!this.container || this._eventsBound) return;
     this.container.addEventListener('click', this._onClick);
 
+    this.container.addEventListener('input', (e) => {
+      const el = e.target;
+      if (!(el instanceof HTMLElement)) return;
+      if (el?.dataset?.action !== 'setTileSearch') return;
+      const next = String(el.value ?? '');
+      if (next === this._tileSearch) return;
+      this._tileSearch = next;
+      this._render();
+    });
+
     // Use event delegation for the header drag so it survives innerHTML rebuilds
     this.container.addEventListener('mousedown', (e) => {
       const header = e.target?.closest?.('.msa-la__header');
@@ -1304,6 +1368,15 @@ export class LevelsAuthoringDialog {
       if (tabBtn) {
         this._activeTab = tabBtn.dataset.tab;
         this._render();
+
+        if (this._activeTab === 'tiles') {
+          try {
+            const input = this.container?.querySelector?.('.msa-la__tile-search-input');
+            input?.focus?.();
+            input?.select?.();
+          } catch (_) {
+          }
+        }
       }
       return;
     }
@@ -1371,7 +1444,11 @@ export class LevelsAuthoringDialog {
 
       case 'selectTile': {
         const tileId = target.dataset.tileId;
-        if (tileId) this._selectTileById(tileId);
+        if (tileId) {
+          this._selectedTileId = tileId;
+          this._selectTileById(tileId);
+          this._render();
+        }
         break;
       }
 
@@ -1416,6 +1493,11 @@ export class LevelsAuthoringDialog {
         }
         break;
       }
+
+      case 'clearTileSearch':
+        this._tileSearch = '';
+        this._render();
+        break;
 
       case 'selectVisibleTiles':
         this._selectVisibleTiles();

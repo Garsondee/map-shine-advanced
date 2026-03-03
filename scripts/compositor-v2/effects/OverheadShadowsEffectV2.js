@@ -319,7 +319,7 @@ export class OverheadShadowsEffectV2 {
 
       // Only render overhead tiles at the current floor (and above, since
       // upper-floor roofs cast shadows onto the floor below).
-      const isOverhead = entry.mesh.renderOrder >= (entry.floorIndex * 10000 + 5000);
+      const isOverhead = entry.mesh?.userData?.isOverhead === true;
       const inRange = entry.floorIndex <= maxFloorIndex + 1; // include one floor above
 
       if (!isOverhead || !inRange || !entry.material?.map) {

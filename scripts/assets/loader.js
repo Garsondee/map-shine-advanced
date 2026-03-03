@@ -58,13 +58,13 @@ const EFFECT_MASKS = {
   // emissive: { suffix: '_Emissive', required: false, description: 'Self-illumination mask' }
 };
 
-// These masks gate many systems (specular, roof/outdoor logic).
+// These masks gate many systems (specular rendering).
 // If a cached bundle is missing any of these, we should not trust the cache.
 //
-// NOTE: tree/bush are NOT included here to avoid 404 spam on hosted servers
-// where FilePicker browse fails. They are optional masks that should only be
-// loaded when FilePicker can confirm they exist.
-const CRITICAL_MASK_IDS = new Set(['specular', 'outdoors']);
+// NOTE: tree/bush/outdoors are NOT included here to avoid 404 spam on hosted
+// servers where FilePicker browse fails. They are optional masks that should
+// only be loaded when FilePicker can confirm they exist.
+const CRITICAL_MASK_IDS = new Set(['specular']);
 
 export function getEffectMaskRegistry() {
   return EFFECT_MASKS;

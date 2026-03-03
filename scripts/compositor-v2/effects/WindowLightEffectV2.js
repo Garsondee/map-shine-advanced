@@ -134,15 +134,54 @@ export class WindowLightEffectV2 {
     if (!this._initialized) { log.warn('populate: not initialized'); return; }
     this.clear();
 
-    // Use canvas.scene.tiles directly — same source as SpecularEffectV2.
-    // foundrySceneData.tileDocs may be structured differently or empty.
-    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
-    if (tileDocs.length === 0) { log.info('populate: no tiles'); return; }
-
     const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
     // worldH must match FloorRenderBus and SpecularEffectV2: use foundrySceneData.height
     // (full canvas height including padding), NOT canvas.scene.height (scene rect only).
     const worldH = foundrySceneData?.height ?? canvas?.scene?.height ?? 0;
+
+    let overlayCount = 0;
+
+    // ── Process scene background image ────────────────────────────────────
+    // The background is not in canvas.scene.tiles.contents — it's handled
+    // separately by FloorRenderBus as __bg_image__. Check for its _Windows
+    // or _Structural mask and create an overlay if found.
+    const bgSrc = canvas?.scene?.background?.src ?? '';
+    if (bgSrc) {
+      const dotIdx = bgSrc.lastIndexOf('.');
+      const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
+      const bgWinResult = await probeMaskFile(bgBasePath, '_Windows');
+      const bgStructResult = bgWinResult?.path ? null : await probeMaskFile(bgBasePath, '_Structural');
+      const bgMaskPath = bgWinResult?.path ?? bgStructResult?.path;
+
+      if (bgMaskPath) {
+        // Background geometry: scene rect in world space.
+        const sceneW = foundrySceneData?.sceneWidth ?? foundrySceneData?.width ?? 0;
+        const sceneH = foundrySceneData?.sceneHeight ?? foundrySceneData?.height ?? 0;
+        const sceneX = foundrySceneData?.sceneX ?? 0;
+        const sceneY = foundrySceneData?.sceneY ?? 0;
+        const centerX = sceneX + sceneW / 2;
+        const centerY = worldH - (sceneY + sceneH / 2);
+
+        // Background is always floor 0, Z just above the bg image plane.
+        const GROUND_Z = 1000;
+        const z = GROUND_Z - 1 + WINDOW_Z_OFFSET;
+
+        this._createOverlay('__bg_image__', 0, {
+          maskUrl: bgMaskPath,
+          centerX, centerY,
+          w: sceneW,
+          h: sceneH,
+          z,
+          rotation: 0,
+        });
+
+        overlayCount++;
+        log.info(`WindowLightEffectV2: created background overlay (${sceneW}x${sceneH})`);
+      }
+    }
+
+    // ── Process placed tiles ──────────────────────────────────────────────
+    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
 
     for (const tileDoc of tileDocs) {
       const tileId = tileDoc.id ?? tileDoc._id;
@@ -182,9 +221,11 @@ export class WindowLightEffectV2 {
         z,
         rotation,
       });
+
+      overlayCount++;
     }
 
-    log.info(`WindowLightEffectV2 populated: ${this._overlays.size} overlay(s)`);
+    log.info(`WindowLightEffectV2 populated: ${overlayCount} overlay(s) (${bgSrc ? '1 bg + ' : ''}${overlayCount - (bgSrc && overlayCount > 0 ? 1 : 0)} tiles)`);
   }
 
   /**

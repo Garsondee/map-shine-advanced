@@ -29,9 +29,11 @@ import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
 import { WaterSurfaceModel } from '../../effects/WaterSurfaceModel.js';
 import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
-import { getVertexShader, getFragmentShader } from './water-shader.js';
+import { getVertexShader, getFragmentShader, getFragmentShaderSafe } from './water-shader.js';
 
 const log = createLogger('WaterEffectV2');
+
+const WATER_MASK_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
 
 // Bitmask flags for conditional shader defines.
 const DEF_FOAM_FLECKS = 1 << 0;
@@ -74,6 +76,10 @@ export class WaterEffectV2 {
 
     /** @type {string} */
     this._instanceId = `we2_${Math.random().toString(16).slice(2, 8)}`;
+
+    // Cache for direct mask probing so we don't repeatedly 404-spam hosted setups.
+    // Key: basePathWithSuffix + formats. Value: { url, image } or null when missing.
+    this._directMaskCache = new Map();
 
     // ── Effect parameters (V1 defaults for visual parity) ────────────────
     this.params = {
@@ -234,8 +240,9 @@ export class WaterEffectV2 {
       cloudShadowSpecularKill: 1.0,
       cloudShadowSpecularCurve: 6.0,
 
-      // Caustics
-      causticsEnabled: true,
+      // Caustics (disabled by default — dual-layer ridged FBM is expensive
+      // on integrated GPUs and can contribute to shader compilation TDR)
+      causticsEnabled: false,
       causticsIntensity: 8.0,
       causticsScale: 33.4,
       causticsSpeed: 1.05,
@@ -315,8 +322,9 @@ export class WaterEffectV2 {
       sandDistortionStrength: 0.3,
       sandAdditive: 0.15,
 
-      // SDF build
-      buildResolution: 2048,
+      // SDF build (1024 is sufficient for water masks; 2048 causes multi-second
+      // CPU hangs during SDF generation — 4 million pixels to distance-transform)
+      buildResolution: 1024,
       maskThreshold: 0.15,
       maskChannel: 'auto',
       maskInvert: false,
@@ -426,6 +434,21 @@ export class WaterEffectV2 {
     this._debugSignatureUpdateLogged = false;
 
     log.debug('WaterEffectV2 created');
+  }
+
+  /**
+   * Returns a boot-safe water shader that removes expensive rain ripple/storm
+   * nested loops which cause GPU driver compilation hangs on some systems.
+   * Preserves core water features: tint, waves, distortion, specular, caustics, foam, murk.
+   * @returns {string} GLSL fragment shader source
+   * @private
+   */
+  _getSafeWaterShader() {
+    // Use the structured safe shader export from water-shader.js instead of
+    // fragile regex replacement. This cleanly removes the expensive rain ripple
+    // and storm 3x3 nested loops that trigger GPU compilation TDR on some systems.
+    log.info('WaterEffectV2: using safe shader (rain loops disabled to prevent GPU hang)');
+    return getFragmentShaderSafe();
   }
 
   _buildUniforms(THREE) {
@@ -598,6 +621,22 @@ export class WaterEffectV2 {
       try { return globalThis.localStorage?.getItem?.('msa-water-minimal-shader') === '1'; } catch (_) { return false; }
     })();
 
+    // Boot-safe shader mode: compiles a simplified water shader that removes expensive
+    // rain ripple/storm loops (which cause GPU driver compilation hangs on some systems)
+    // while preserving core water look (tint, waves, distortion, specular, caustics, foam).
+    //
+    // This is the DEFAULT to prevent scene-load freezes. To enable full rain effects:
+    //   localStorage.setItem('msa-water-safe-shader', '0')
+    // To re-enable safe mode:
+    //   localStorage.removeItem('msa-water-safe-shader')
+    const USE_SAFE_SHADER = (() => {
+      try {
+        const val = globalThis.localStorage?.getItem?.('msa-water-safe-shader');
+        // Default to safe (true) unless explicitly disabled
+        return val !== '0';
+      } catch (_) { return true; }
+    })();
+
     // DEBUG: Mask-gated tint + wave distortion shader.
     // Uses the EXACT same wave functions as the full water-shader.js — verbatim.
     // No invented noise: fbmNoise -> warpUv -> calculateWave -> waveGrad2D pipeline.
@@ -612,6 +651,8 @@ export class WaterEffectV2 {
           gl_FragColor = texture2D(tDiffuse, vUv);
         }
       `
+      : USE_SAFE_SHADER
+      ? this._getSafeWaterShader()
       : (DEBUG_MASK_TINT_ONLY
       ? `
         // ── Samplers ────────────────────────────────────────────────────────
@@ -987,10 +1028,42 @@ export class WaterEffectV2 {
     this._waterTiles = [];
 
     const tileDocs = canvas?.scene?.tiles?.contents ?? [];
-    if (tileDocs.length === 0) { log.info('populate: no tiles'); return; }
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const worldH = foundrySceneData?.height ?? canvas?.dimensions?.height ?? 0;
+
+    // Scene rect in Foundry coords (top-left origin, Y-down)
+    const sceneRect = canvas?.dimensions?.sceneRect ?? canvas?.dimensions;
+    const sceneX = sceneRect?.x ?? 0;
+    const sceneY = sceneRect?.y ?? 0;
+    const sceneW = sceneRect?.width ?? sceneRect?.sceneWidth ?? 1;
+    const sceneH = sceneRect?.height ?? sceneRect?.sceneHeight ?? 1;
+
+    // ── Step 0: Discover background _Water mask (if present) ─────────────
+    const bgSrc = canvas?.scene?.background?.src;
+    if (bgSrc) {
+      const dotIdx = bgSrc.lastIndexOf('.');
+      const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
+
+      let maskPath = null;
+      const waterResult = await probeMaskFile(bgBasePath, '_Water');
+      if (waterResult?.path) {
+        maskPath = waterResult.path;
+      }
+      // probeMaskFile already checked all formats and cached the result.
+      // No need for fallback GET probing - it just causes 404 spam.
+
+      if (maskPath) {
+        this._waterTiles.push({
+          tileId: '__bg_image__',
+          basePath: bgBasePath,
+          floorIndex: 0,
+          maskPath,
+          // Synthetic tileDoc so _compositeFloorMask can treat background like a tile.
+          tileDoc: { x: sceneX, y: sceneY, width: sceneW, height: sceneH, rotation: 0 },
+        });
+      }
+    }
 
     // ── Step 1: Discover _Water masks per tile ───────────────────────────
     for (const tileDoc of tileDocs) {
@@ -1002,13 +1075,19 @@ export class WaterEffectV2 {
       const dotIdx = src.lastIndexOf('.');
       const basePath = dotIdx > 0 ? src.substring(0, dotIdx) : src;
 
+      let maskPath = null;
       const waterResult = await probeMaskFile(basePath, '_Water');
-      if (!waterResult?.path) continue;
+      if (waterResult?.path) {
+        maskPath = waterResult.path;
+      }
+      // probeMaskFile already checked all formats and cached the result.
+      // No need for fallback GET probing - it just causes 404 spam.
+      if (!maskPath) continue;
 
       const floorIndex = this._resolveFloorIndex(tileDoc, floors);
       this._waterTiles.push({
         tileId, basePath, floorIndex,
-        maskPath: waterResult.path,
+        maskPath,
         tileDoc,
       });
     }
@@ -1029,24 +1108,29 @@ export class WaterEffectV2 {
     }
 
     // ── Step 3: Composite per-floor masks + build SDF ────────────────────
-    const sceneRect = canvas?.dimensions?.sceneRect ?? canvas?.dimensions;
-    const sceneX = sceneRect?.x ?? 0;
-    const sceneY = sceneRect?.y ?? 0;
-    const sceneW = sceneRect?.width ?? sceneRect?.sceneWidth ?? 1;
-    const sceneH = sceneRect?.height ?? sceneRect?.sceneHeight ?? 1;
-
+    // Reuse a single canvas across all floors to avoid allocating multiple
+    // large (e.g. 1024×1024 × 4 bytes = 4MB) canvas buffers in rapid succession,
+    // which can trigger aggressive GC on low-RAM systems.
+    let sharedCanvas = null;
     for (const [floorIndex, entries] of byFloor) {
       try {
         const floorData = await this._compositeFloorMask(
-          THREE, entries, { sceneX, sceneY, sceneW, sceneH }
+          THREE, entries, { sceneX, sceneY, sceneW, sceneH }, sharedCanvas
         );
+        // Capture the canvas from the first floor for reuse
+        if (!sharedCanvas && floorData?._canvas) {
+          sharedCanvas = floorData._canvas;
+        }
         if (floorData) {
+          delete floorData._canvas; // Don't store the canvas reference in floor data
           this._floorWater.set(floorIndex, floorData);
         }
       } catch (err) {
         log.error(`populate: floor ${floorIndex} mask compositing failed:`, err);
       }
     }
+    // Let the shared canvas be GC'd after all floors are processed
+    sharedCanvas = null;
 
     // ── Step 4: Activate the current floor's water data ──────────────────
     const activeFloor = window.MapShine?.floorStack?.getActiveFloor();
@@ -1071,20 +1155,11 @@ export class WaterEffectV2 {
    * @returns {Promise<{waterData: object, rawMask: THREE.Texture|null}|null>}
    * @private
    */
-  async _compositeFloorMask(THREE, entries, sceneGeo) {
+  async _compositeFloorMask(THREE, entries, sceneGeo, reuseCanvas = null) {
     const { sceneX, sceneY, sceneW, sceneH } = sceneGeo;
 
     // Load all mask images in parallel via HTMLImageElement (gives us CPU pixels)
-    const loadImg = (url) => new Promise((resolve) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => resolve(img);
-      img.onerror = () => {
-        log.warn(`_compositeFloorMask: failed to load ${url}`);
-        resolve(null);
-      };
-      img.src = url;
-    });
+    const loadImg = (url) => this._loadImageInternal(url, { suppressWarn: true });
 
     const imgPromises = entries.map(e => loadImg(e.maskPath));
     const images = await Promise.all(imgPromises);
@@ -1100,7 +1175,7 @@ export class WaterEffectV2 {
     }
 
     // Determine canvas resolution (proportional to scene, capped at buildResolution)
-    const maxRes = this.params.buildResolution || 2048;
+    const maxRes = this.params.buildResolution || 1024;
     const aspect = sceneW / Math.max(1, sceneH);
     let cvW, cvH;
     if (aspect >= 1) {
@@ -1113,10 +1188,14 @@ export class WaterEffectV2 {
     cvW = Math.max(8, Math.min(maxRes, cvW));
     cvH = Math.max(8, Math.min(maxRes, cvH));
 
-    // Create a canvas and composite all tile masks into it at their scene-UV positions
-    const canvas = document.createElement('canvas');
-    canvas.width = cvW;
-    canvas.height = cvH;
+    // Reuse provided canvas to avoid allocating multiple large buffers across floors.
+    // If the reusable canvas is a different size, resize it (cheap — just updates dimensions).
+    let canvas = reuseCanvas;
+    if (!canvas || canvas.width !== cvW || canvas.height !== cvH) {
+      canvas = reuseCanvas ?? document.createElement('canvas');
+      canvas.width = cvW;
+      canvas.height = cvH;
+    }
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) {
       log.warn('_compositeFloorMask: failed to get 2D context');
@@ -1163,7 +1242,7 @@ export class WaterEffectV2 {
     let waterData = null;
     try {
       waterData = this._surfaceModel.buildFromMaskTexture(canvasTex, {
-        resolution: this.params.buildResolution || 2048,
+        resolution: maxRes,
         threshold: this.params.maskThreshold ?? 0.15,
         channel: this.params.maskChannel ?? 'auto',
         invert: !!this.params.maskInvert,
@@ -1188,7 +1267,60 @@ export class WaterEffectV2 {
     }
 
     const rawMask = waterData?.rawMaskTexture ?? null;
-    return { waterData, rawMask };
+    // Return the canvas reference so the caller can reuse it for the next floor
+    return { waterData, rawMask, _canvas: canvas };
+  }
+
+  /**
+   * @param {string} url
+   * @param {{ suppressWarn?: boolean }} [opts]
+   * @returns {Promise<HTMLImageElement|null>}
+   * @private
+   */
+  _loadImageInternal(url, opts = {}) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => resolve(img);
+      img.onerror = () => {
+        if (!opts?.suppressWarn) log.warn(`Failed to load water mask image: ${url}`);
+        resolve(null);
+      };
+      img.src = url;
+    });
+  }
+
+  /**
+   * Try loading a mask image by probing common formats via Image() GET.
+   * This intentionally avoids FilePicker and HEAD probing, which can fail on
+   * some hosted setups even when GET succeeds.
+   *
+   * @param {string} basePathWithSuffix - e.g. "modules/foo/bar_Map_Water" (no extension)
+   * @param {{ formats?: string[] }} [opts]
+   * @returns {Promise<{ url: string, image: HTMLImageElement } | null>}
+   * @private
+   */
+  async _tryLoadMaskImage(basePathWithSuffix, opts = {}) {
+    if (!basePathWithSuffix) return null;
+    const formats = Array.isArray(opts?.formats) && opts.formats.length ? opts.formats : WATER_MASK_FORMATS;
+    const cacheKey = `${basePathWithSuffix}::${formats.join(',')}`;
+
+    if (this._directMaskCache?.has(cacheKey)) {
+      return this._directMaskCache.get(cacheKey);
+    }
+
+    for (const ext of formats) {
+      const url = `${basePathWithSuffix}.${ext}`;
+      const img = await this._loadImageInternal(url, { suppressWarn: true });
+      if (img) {
+        const hit = { url, image: img };
+        this._directMaskCache.set(cacheKey, hit);
+        return hit;
+      }
+    }
+
+    this._directMaskCache.set(cacheKey, null);
+    return null;
   }
 
   /**

@@ -928,14 +928,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     // FilePicker listing exists, but none of our expected candidates were found.
-    // This can happen when the tile src path normalization differs from what
-    // FilePicker returns (URL encoding differences, storage adapters, etc.).
-    // As a last resort, try the loader's probe helper.
-    try {
-      const probe = await probeMaskFileFromLoader(parts.pathNoExt, suffix);
-      if (probe?.path) return probe.path;
-    } catch (_) {
-    }
+    // Trust the FilePicker result - the mask doesn't exist. Do NOT fall back to
+    // HTTP probing as that causes 404 spam for every optional mask on every tile.
     return null;
   }
 

@@ -56,6 +56,8 @@ const GROUND_Z = 1000;
 // Spatial bucket size for splitting large fire masks into smaller emitters (px).
 const BUCKET_SIZE = 2000;
 
+const FIRE_MASK_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
+
 // ─── FireEffectV2 ────────────────────────────────────────────────────────────
 
 export class FireEffectV2 {
@@ -66,6 +68,10 @@ export class FireEffectV2 {
     this._renderBus = renderBus;
     this._enabled = true;
     this._initialized = false;
+
+    // Cache for direct mask probing so we don't repeatedly 404-spam hosted setups.
+    // Key: basePathWithSuffix (no extension). Value: { url, image } or null when missing.
+    this._directMaskCache = new Map();
 
     /** @type {BatchedRenderer|null} three.quarks batch renderer */
     this._batchRenderer = null;
@@ -188,18 +194,21 @@ export class FireEffectV2 {
    * @param {object} foundrySceneData - Scene geometry data
    */
   async populate(foundrySceneData) {
+    log.info('FireEffectV2.populate() called, initialized=' + this._initialized);
     if (!this._initialized) { log.warn('populate: not initialized'); return; }
     this.clear();
 
     // Wait for fire/ember sprite textures to load before creating systems.
-    if (this._texturesReady) await this._texturesReady;
-
-    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
-    if (tileDocs.length === 0) { log.info('populate: no tiles'); return; }
+    if (this._texturesReady) {
+      log.info('Waiting for fire textures to load...');
+      await this._texturesReady;
+      log.info('Fire textures loaded, continuing populate');
+    }
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const d = canvas?.dimensions;
     if (!d) { log.warn('populate: no canvas dimensions'); return; }
+    log.info(`populate: canvas dimensions OK, scene ${d.sceneWidth}x${d.sceneHeight}`);
 
     const sceneWidth = d.sceneWidth || d.width;
     const sceneHeight = d.sceneHeight || d.height;
@@ -210,9 +219,65 @@ export class FireEffectV2 {
     const sceneX = foundrySceneX;
     const sceneY = (d.height || sceneHeight) - foundrySceneY - sceneHeight;
 
-    // Collect fire points per floor from all tiles.
+    // Collect fire points per floor from all tiles AND background.
     // Key: floorIndex, Value: {points: Float32Array[]}
     const floorFireData = new Map();
+
+    // ── Process background image first (if it has a _Fire mask) ──────────────
+    const bgSrc = canvas?.scene?.background?.src;
+    log.info(`populate: checking background src=${bgSrc}`);
+    if (bgSrc) {
+      const dotIdx = bgSrc.lastIndexOf('.');
+      const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
+
+      log.info(`  probing for _Fire mask at: ${bgBasePath}`);
+      let image = null;
+      let resolvedPath = null;
+      const fireResult = await probeMaskFile(bgBasePath, '_Fire');
+      log.info(`  probeMaskFile result: ${fireResult?.path ?? 'null'}`);
+      if (fireResult?.path) {
+        resolvedPath = fireResult.path;
+        log.info(`  loading image from: ${resolvedPath}`);
+        image = await this._loadImage(resolvedPath);
+      }
+      // probeMaskFile already checked all formats and cached the result.
+      // No need for fallback GET probing - it just causes 404 spam.
+
+      log.info(`  image loaded: ${image ? `${image.width}x${image.height}` : 'null'}`);
+      if (image) {
+        log.info(`  calling generateFirePoints with threshold=0.01`);
+        const bgLocalPoints = generateFirePoints(image, 0.01);
+        log.info(`  generateFirePoints returned: ${bgLocalPoints ? `${bgLocalPoints.length / 3} points` : 'null'}`);
+        if (bgLocalPoints && bgLocalPoints.length > 0) {
+          log.info(`  background _Fire mask: found ${bgLocalPoints.length / 3} points from ${image.width}x${image.height} image`);
+          // Background fills the entire scene rect.
+          const bgX = foundrySceneX;
+          const bgY = foundrySceneY;
+          const bgW = sceneWidth;
+          const bgH = sceneHeight;
+
+          const sceneGlobalPoints = new Float32Array(bgLocalPoints.length);
+          for (let i = 0; i < bgLocalPoints.length; i += 3) {
+            const foundryPx = bgX + bgLocalPoints[i] * bgW;
+            const foundryPy = bgY + bgLocalPoints[i + 1] * bgH;
+            sceneGlobalPoints[i]     = (foundryPx - foundrySceneX) / sceneWidth;
+            sceneGlobalPoints[i + 1] = (foundryPy - foundrySceneY) / sceneHeight;
+            sceneGlobalPoints[i + 2] = bgLocalPoints[i + 2]; // brightness unchanged
+          }
+
+          // Background is always floor 0.
+          const floorIndex = 0;
+          if (!floorFireData.has(floorIndex)) {
+            floorFireData.set(floorIndex, { pointArrays: [] });
+          }
+          floorFireData.get(floorIndex).pointArrays.push(sceneGlobalPoints);
+          log.info(`  background → floor ${floorIndex}, ${sceneGlobalPoints.length / 3} fire points (scene ${bgW}x${bgH})`);
+        }
+      }
+    }
+
+    // ── Process tiles ─────────────────────────────────────────────────────────
+    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
 
     for (const tileDoc of tileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
@@ -224,15 +289,16 @@ export class FireEffectV2 {
       const dotIdx = src.lastIndexOf('.');
       const basePath = dotIdx > 0 ? src.substring(0, dotIdx) : src;
 
-      // Probe for _Fire mask.
+      let image = null;
       const fireResult = await probeMaskFile(basePath, '_Fire');
-      if (!fireResult?.path) continue;
-
-      // Load the fire mask image to scan for spawn points.
-      const image = await this._loadImage(fireResult.path);
+      if (fireResult?.path) {
+        image = await this._loadImage(fireResult.path);
+      }
+      // probeMaskFile already checked all formats and cached the result.
+      // No need for fallback GET probing - it just causes 404 spam.
       if (!image) continue;
 
-      const tileLocalPoints = generateFirePoints(image, 0.1);
+      const tileLocalPoints = generateFirePoints(image, 0.01);
       if (!tileLocalPoints || tileLocalPoints.length === 0) continue;
 
       // Convert tile-local UVs → scene-global UVs.
@@ -287,12 +353,22 @@ export class FireEffectV2 {
     // manage its content (active systems) ourselves on floor change.
     if (this._batchRenderer) {
       this._renderBus.addEffectOverlay('__fire_batch__', this._batchRenderer, 0);
+      log.info(`FireEffectV2: BatchedRenderer added to bus scene, parent=${this._batchRenderer.parent?.type}`);
     }
 
     // Activate the current floor's systems.
     this._activateCurrentFloor();
 
     log.info(`FireEffectV2 populated: ${floorFireData.size} floor(s), ${totalSystems} system(s), floorStates keys=[${[...this._floorStates.keys()]}]`);
+    
+    // Diagnostic: log first few fire points to verify they're in valid world space
+    if (floorFireData.size > 0) {
+      const firstFloor = floorFireData.entries().next().value;
+      if (firstFloor && firstFloor[1]?.pointArrays?.[0]) {
+        const pts = firstFloor[1].pointArrays[0];
+        log.info(`  First 3 fire points (u,v,brightness): [${pts.slice(0,9).join(', ')}]`);
+      }
+    }
   }
 
   /**
@@ -662,24 +738,38 @@ export class FireEffectV2 {
     const floorStack = window.MapShine?.floorStack;
     const activeFloor = floorStack?.getActiveFloor();
     const maxFloorIndex = activeFloor?.index ?? Infinity;
+    log.info(`FireEffectV2: _activateCurrentFloor called, activeFloor=${JSON.stringify(activeFloor)}, maxFloorIndex=${maxFloorIndex}`);
     this.onFloorChange(maxFloorIndex);
   }
 
   /** Add a floor's systems to the BatchedRenderer + scene. @private */
   _activateFloor(floorIndex) {
     const state = this._floorStates.get(floorIndex);
-    if (!state || !this._batchRenderer) return;
+    if (!state || !this._batchRenderer) {
+      log.warn(`FireEffectV2: _activateFloor(${floorIndex}) failed - state=${!!state}, batchRenderer=${!!this._batchRenderer}`);
+      return;
+    }
 
     const allSystems = [...state.systems, ...state.emberSystems, ...state.smokeSystems];
+    log.info(`FireEffectV2: activating floor ${floorIndex} with ${allSystems.length} systems (${state.systems.length} fire, ${state.emberSystems.length} ember, ${state.smokeSystems.length} smoke)`);
+    
     for (const sys of allSystems) {
-      try { this._batchRenderer.addSystem(sys); } catch (_) {}
+      try { 
+        this._batchRenderer.addSystem(sys);
+        log.debug(`  Added system to batch renderer, emitter=${!!sys.emitter}`);
+      } catch (err) {
+        log.warn(`  Failed to add system to batch renderer:`, err);
+      }
       // Emitters must be in the scene graph for three.quarks to update their
       // world matrices. Adding them as children of the BatchedRenderer (which
       // is already in the bus scene) achieves this without exposing the bus's
       // private scene reference.
-      if (sys.emitter) this._batchRenderer.add(sys.emitter);
+      if (sys.emitter) {
+        this._batchRenderer.add(sys.emitter);
+        log.debug(`  Added emitter to batch renderer as child`);
+      }
     }
-    log.debug(`FireEffectV2: activated floor ${floorIndex} (${allSystems.length} systems)`);
+    log.info(`FireEffectV2: activated floor ${floorIndex} - batch now has ${this._batchRenderer.systemToDraw?.length ?? 0} systems`);
   }
 
   /** Remove a specific floor's systems from the BatchedRenderer. @private */
@@ -830,13 +920,58 @@ export class FireEffectV2 {
    * @private
    */
   _loadImage(url) {
+    return this._loadImageInternal(url, { suppressWarn: false });
+  }
+
+  /**
+   * @param {string} url
+   * @param {{ suppressWarn?: boolean }} [opts]
+   * @returns {Promise<HTMLImageElement|null>}
+   * @private
+   */
+  _loadImageInternal(url, opts = {}) {
     return new Promise((resolve) => {
       const img = new Image();
       img.crossOrigin = 'anonymous';
       img.onload = () => resolve(img);
-      img.onerror = () => { log.warn(`Failed to load fire mask image: ${url}`); resolve(null); };
+      img.onerror = () => {
+        if (!opts?.suppressWarn) log.warn(`Failed to load fire mask image: ${url}`);
+        resolve(null);
+      };
       img.src = url;
     });
+  }
+
+  /**
+   * Try loading a mask image by probing common formats via Image() GET.
+   * This intentionally avoids FilePicker and HEAD probing, which can fail on
+   * some hosted setups even when GET succeeds.
+   *
+   * @param {string} basePathWithSuffix - e.g. "modules/foo/bar_Map_Fire" (no extension)
+   * @returns {Promise<{ url: string, image: HTMLImageElement } | null>}
+   * @private
+   */
+  async _tryLoadMaskImage(basePathWithSuffix, opts = {}) {
+    if (!basePathWithSuffix) return null;
+    const formats = Array.isArray(opts?.formats) && opts.formats.length ? opts.formats : FIRE_MASK_FORMATS;
+    const cacheKey = `${basePathWithSuffix}::${formats.join(',')}`;
+
+    if (this._directMaskCache?.has(cacheKey)) {
+      return this._directMaskCache.get(cacheKey);
+    }
+
+    for (const ext of formats) {
+      const url = `${basePathWithSuffix}.${ext}`;
+      const img = await this._loadImageInternal(url, { suppressWarn: true });
+      if (img) {
+        const hit = { url, image: img };
+        this._directMaskCache.set(cacheKey, hit);
+        return hit;
+      }
+    }
+
+    this._directMaskCache.set(cacheKey, null);
+    return null;
   }
 
   // ── Private: Floor resolution ──────────────────────────────────────────────

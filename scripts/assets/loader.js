@@ -58,14 +58,13 @@ const EFFECT_MASKS = {
   // emissive: { suffix: '_Emissive', required: false, description: 'Self-illumination mask' }
 };
 
-// These masks gate many systems (specular, roof/outdoor logic, vegetation).
+// These masks gate many systems (specular, roof/outdoor logic).
 // If a cached bundle is missing any of these, we should not trust the cache.
 //
-// NOTE: tree/bush are marked critical because a cached bundle built during a
-// transient FilePicker permission/availability issue can permanently omit them.
-// They are optional for some maps, but if they exist on disk we need them to
-// reliably load without requiring a manual cache bust.
-const CRITICAL_MASK_IDS = new Set(['specular', 'outdoors', 'tree', 'bush']);
+// NOTE: tree/bush are NOT included here to avoid 404 spam on hosted servers
+// where FilePicker browse fails. They are optional masks that should only be
+// loaded when FilePicker can confirm they exist.
+const CRITICAL_MASK_IDS = new Set(['specular', 'outdoors']);
 
 export function getEffectMaskRegistry() {
   return EFFECT_MASKS;
@@ -78,8 +77,11 @@ const assetCache = new Map();
 let _cacheHits = 0;
 let _cacheMisses = 0;
 
- /** Generic texture cache for non-map assets (e.g. light cookies/gobos) */
- const textureCache = new Map();
+/** Generic texture cache for non-map assets (e.g. light cookies/gobos) */
+const textureCache = new Map();
+
+/** Negative result cache to prevent repeated 404 probing for masks that don't exist */
+const _probeMaskNegativeCache = new Map();
 
 /**
  * Load a complete asset bundle for a scene
@@ -266,7 +268,14 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
         // authored masks.
         let maskFile = null;
         if (useDirectProbe) {
-          maskFile = await probeMaskUrl(basePath, maskDef.suffix);
+          // When FilePicker returns no files (hosted server, player permissions, etc.),
+          // ONLY probe for CRITICAL masks. Optional masks like _Bush, _Tree, _Water
+          // should be skipped to avoid 404 spam.
+          if (CRITICAL_MASK_IDS.has(String(maskId).toLowerCase())) {
+            maskFile = await probeMaskUrl(basePath, maskDef.suffix);
+          } else {
+            maskFile = null; // Skip optional masks when FilePicker unavailable
+          }
         } else {
           maskFile = findMaskInFiles(availableFiles, basePath, maskDef.suffix);
           if (!maskFile && CRITICAL_MASK_IDS.has(String(maskId).toLowerCase())) {
@@ -466,18 +475,33 @@ async function probeMaskTexture(basePath, suffix, suppressProbeErrors = false) {
  */
 export async function probeMaskFile(basePath, suffix, options = {}) {
   void options;
+  
+  // Check negative cache first to avoid repeated 404 spam
+  const cacheKey = `${basePath}::${suffix}`;
+  if (_probeMaskNegativeCache.has(cacheKey)) {
+    const cached = _probeMaskNegativeCache.get(cacheKey);
+    // Return cached result (null for negative, or {path} for positive)
+    return cached;
+  }
+  
   try {
     const availableFiles = await discoverAvailableFiles(basePath);
     if (!Array.isArray(availableFiles) || availableFiles.length === 0) {
-      // FilePicker returned nothing (player client, permissions issue, etc.).
-      // Fall back to direct HEAD-request probing — same as loadAssetBundle does.
-      const url = await probeMaskUrl(basePath, suffix);
-      return url ? { path: url } : null;
+      // FilePicker returned nothing (player client, permissions issue, hosted server, etc.).
+      // All masks probed via this function are optional. Rather than spamming HEAD requests
+      // for every format (causing 404 console noise), accept that the mask isn't available.
+      // Cache negative result to prevent repeated FilePicker attempts.
+      _probeMaskNegativeCache.set(cacheKey, null);
+      return null;
     }
     const maskFile = findMaskInFiles(availableFiles, basePath, suffix);
-    if (!maskFile) return null;
-    return { path: maskFile };
+    const result = maskFile ? { path: maskFile } : null;
+    // Cache the result (positive or negative)
+    _probeMaskNegativeCache.set(cacheKey, result);
+    return result;
   } catch (_) {
+    // Cache negative result on error
+    _probeMaskNegativeCache.set(cacheKey, null);
     return null;
   }
 }

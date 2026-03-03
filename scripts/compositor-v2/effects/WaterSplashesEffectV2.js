@@ -55,6 +55,8 @@ const GROUND_Z = 1000;
 // Spatial bucket size for splitting large water masks into smaller emitters (px).
 const BUCKET_SIZE = 2500;
 
+const WATER_MASK_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
+
 // ─── WaterSplashesEffectV2 ──────────────────────────────────────────────────
 
 export class WaterSplashesEffectV2 {
@@ -65,6 +67,10 @@ export class WaterSplashesEffectV2 {
     this._renderBus = renderBus;
     this._enabled = true;
     this._initialized = false;
+
+    // Cache for direct mask probing so we don't repeatedly 404-spam hosted setups.
+    // Key: basePathWithSuffix + formats. Value: { url, image } or null when missing.
+    this._directMaskCache = new Map();
 
     /** @type {BatchedRenderer|null} three.quarks batch renderer */
     this._batchRenderer = null;
@@ -449,7 +455,6 @@ export class WaterSplashesEffectV2 {
     if (this._texturesReady) await this._texturesReady;
 
     const tileDocs = canvas?.scene?.tiles?.contents ?? [];
-    if (tileDocs.length === 0) { log.info('populate: no tiles'); return; }
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const d = canvas?.dimensions;
@@ -476,6 +481,62 @@ export class WaterSplashesEffectV2 {
     // Key: floorIndex, Value: { edgeArrays: Float32Array[], interiorArrays: Float32Array[] }
     const floorWaterData = new Map();
 
+    // ── Process background image first (if it has a _Water mask) ─────────────
+    const bgSrc = canvas?.scene?.background?.src;
+    if (bgSrc) {
+      const dotIdx = bgSrc.lastIndexOf('.');
+      const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
+
+      let image = null;
+      const waterResult = await probeMaskFile(bgBasePath, '_Water');
+      if (waterResult?.path) {
+        image = await this._loadImage(waterResult.path);
+      }
+      // probeMaskFile already checked all formats and cached the result.
+      // No need for fallback GET probing - it just causes 404 spam.
+
+      if (image) {
+        // Background fills the entire scene rect.
+        const bgX = foundrySceneX;
+        const bgY = foundrySceneY;
+        const bgW = sceneWidth;
+        const bgH = sceneHeight;
+
+        const bgEdgePoints = scanWaterEdgePoints(
+          image, this.params.maskThreshold, this.params.edgeScanStride
+        );
+        const bgInteriorPoints = scanWaterInteriorPoints(
+          image, this.params.maskThreshold, this.params.interiorScanStride
+        );
+
+        const convertToSceneUV = (localPoints) => {
+          if (!localPoints) return null;
+          const sceneGlobal = new Float32Array(localPoints.length);
+          for (let i = 0; i < localPoints.length; i += 3) {
+            const foundryPx = bgX + localPoints[i] * bgW;
+            const foundryPy = bgY + localPoints[i + 1] * bgH;
+            sceneGlobal[i]     = (foundryPx - foundrySceneX) / sceneWidth;
+            sceneGlobal[i + 1] = (foundryPy - foundrySceneY) / sceneHeight;
+            sceneGlobal[i + 2] = localPoints[i + 2];
+          }
+          return sceneGlobal;
+        };
+
+        const sceneEdge = convertToSceneUV(bgEdgePoints);
+        const sceneInterior = convertToSceneUV(bgInteriorPoints);
+        if (sceneEdge || sceneInterior) {
+          const floorIndex = 0;
+          if (!floorWaterData.has(floorIndex)) {
+            floorWaterData.set(floorIndex, { edgeArrays: [], interiorArrays: [] });
+          }
+          const floorEntry = floorWaterData.get(floorIndex);
+          if (sceneEdge) floorEntry.edgeArrays.push(sceneEdge);
+          if (sceneInterior) floorEntry.interiorArrays.push(sceneInterior);
+          log.info(`  background → floor ${floorIndex}, ${sceneEdge ? sceneEdge.length / 3 : 0} edge pts, ${sceneInterior ? sceneInterior.length / 3 : 0} interior pts`);
+        }
+      }
+    }
+
     for (const tileDoc of tileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
       if (!src) continue;
@@ -486,12 +547,13 @@ export class WaterSplashesEffectV2 {
       const dotIdx = src.lastIndexOf('.');
       const basePath = dotIdx > 0 ? src.substring(0, dotIdx) : src;
 
-      // Probe for _Water mask.
+      let image = null;
       const waterResult = await probeMaskFile(basePath, '_Water');
-      if (!waterResult?.path) continue;
-
-      // Load the water mask image to scan for spawn points.
-      const image = await this._loadImage(waterResult.path);
+      if (waterResult?.path) {
+        image = await this._loadImage(waterResult.path);
+      }
+      // probeMaskFile already checked all formats and cached the result.
+      // No need for fallback GET probing - it just causes 404 spam.
       if (!image) continue;
 
       // Scan for edge (shoreline) points.
@@ -579,13 +641,15 @@ export class WaterSplashesEffectV2 {
       } catch (_) {}
     }
 
-    // Add the BatchedRenderer to the bus scene via the overlay API.
-    if (this._batchRenderer) {
-      this._renderBus.addEffectOverlay('__water_splash_batch__', this._batchRenderer, 0);
-    }
+    if (totalSystems > 0) {
+      // Add the BatchedRenderer to the bus scene via the overlay API.
+      if (this._batchRenderer) {
+        this._renderBus.addEffectOverlay('__water_splash_batch__', this._batchRenderer, 0);
+      }
 
-    // Activate the current floor's systems.
-    this._activateCurrentFloor();
+      // Activate the current floor's systems.
+      this._activateCurrentFloor();
+    }
 
     log.info(`WaterSplashesEffectV2 populated: ${floorWaterData.size} floor(s), ${totalSystems} system(s)`);
   }
@@ -1554,13 +1618,59 @@ export class WaterSplashesEffectV2 {
    * @private
    */
   _loadImage(url) {
+    return this._loadImageInternal(url, { suppressWarn: false });
+  }
+
+  /**
+   * @param {string} url
+   * @param {{ suppressWarn?: boolean }} [opts]
+   * @returns {Promise<HTMLImageElement|null>}
+   * @private
+   */
+  _loadImageInternal(url, opts = {}) {
     return new Promise((resolve) => {
       const img = new Image();
       img.crossOrigin = 'anonymous';
       img.onload = () => resolve(img);
-      img.onerror = () => { log.warn(`Failed to load water mask image: ${url}`); resolve(null); };
+      img.onerror = () => {
+        if (!opts?.suppressWarn) log.warn(`Failed to load water mask image: ${url}`);
+        resolve(null);
+      };
       img.src = url;
     });
+  }
+
+  /**
+   * Try loading a mask image by probing common formats via Image() GET.
+   * This intentionally avoids FilePicker and HEAD probing, which can fail on
+   * some hosted setups even when GET succeeds.
+   *
+   * @param {string} basePathWithSuffix - e.g. "modules/foo/bar_Map_Water" (no extension)
+   * @param {{ formats?: string[] }} [opts]
+   * @returns {Promise<{ url: string, image: HTMLImageElement } | null>}
+   * @private
+   */
+  async _tryLoadMaskImage(basePathWithSuffix, opts = {}) {
+    if (!basePathWithSuffix) return null;
+    const formats = Array.isArray(opts?.formats) && opts.formats.length ? opts.formats : WATER_MASK_FORMATS;
+    const cacheKey = `${basePathWithSuffix}::${formats.join(',')}`;
+
+    if (this._directMaskCache?.has(cacheKey)) {
+      return this._directMaskCache.get(cacheKey);
+    }
+
+    for (const ext of formats) {
+      const url = `${basePathWithSuffix}.${ext}`;
+      const img = await this._loadImageInternal(url, { suppressWarn: true });
+      if (img) {
+        const hit = { url, image: img };
+        this._directMaskCache.set(cacheKey, hit);
+        return hit;
+      }
+    }
+
+    this._directMaskCache.set(cacheKey, null);
+    return null;
   }
 
   // ── Private: Utility ──────────────────────────────────────────────────────

@@ -558,12 +558,57 @@ Disposing MapShine’s `FrameCoordinator` helps reduce extra PIXI flush renderin
    - Ensure Foundry’s `#board` canvas stays hard-hidden in V2 (`display:none`, etc.).
    - Keep the MutationObserver enforcement so Foundry/modules can’t re-enable it.
    - Keep FrameCoordinator disabled/gated in V2 as defense-in-depth.
-2. **Bring V2 fog online next (highest priority missing visual)**
-   - With PIXI fog suppressed, V2 needs its own fog to restore baseline gameplay readability.
-   - Target: `WorldSpaceFogEffect` → V2 compositor integration.
+2. **Bring V2 fog online next (highest priority missing visual)** ✅
+   - Implemented by integrating `WorldSpaceFogEffect` into the V2 `FloorCompositor` as a dedicated post-blit overlay pass.
+   - **Where:**
+     - `scripts/compositor-v2/FloorCompositor.js`
+     - `scripts/foundry/canvas-replacement.js` (V2 Tweakpane registration)
+     - `scripts/effects/WorldSpaceFogEffect.js` (critical circular-import hardening)
+   - **Key details:**
+     - V2 renders the bus scene into an RT and then blits; it does *not* render the main Three scene directly.
+       Because of that, fog cannot rely on “fog plane lives in the main scene” like V1.
+     - Solution: create a dedicated `FogOverlaySceneV2` and render it *after* `_blitToScreen(...)` using `autoClear=false`.
+     - Fog uniforms/vision/exploration RT generation remains inside `WorldSpaceFogEffect.update(timeInfo)`.
+   - **Critical bug fixed (TDZ / circular import):**
+     - Runtime error observed:
+       - `ReferenceError: can't access lexical declaration 'EffectBase' before initialization`
+     - Root cause:
+       - `WorldSpaceFogEffect` imported `EffectBase` from `EffectComposer.js`.
+       - `EffectComposer.js` imports the V2 `FloorCompositor`, which imports `WorldSpaceFogEffect`.
+       - This created an ES module cycle where `EffectBase` was still in the TDZ when `WorldSpaceFogEffect` evaluated.
+     - Fix:
+       - `WorldSpaceFogEffect` no longer imports from `EffectComposer.js` and no longer extends `EffectBase`.
+       - It now behaves as a standalone “effect-like” class with the same public fields (`id`, `layer`, `enabled`, `floorScope`, etc.).
+       - Inlined `OVERLAY_THREE_LAYER = 31` to avoid importing the constant.
+   - **UI wiring:**
+     - V2 Tweakpane now registers Fog as `effectKey='_fogEffect'` so parameter changes flow into `FloorCompositor._fogEffect`.
+
 3. **Then bring V2 player light online**
    - Port `PlayerLightEffect` to V2 after fog is stable.
-4. **Investigate Specular layer parity**
-   - Observation: Specular appears to work for one overhead layer but not the main background image layer.
-   - Likely causes: layer classification / which meshes get the specular material / floor bus routing.
-   - Action: confirm which FloorLayer(s) the background tile is assigned to, and whether its mesh uses the specular-enabled material.
+4. **✅ FIXED: Specular background image support**
+   - **Root cause:** `SpecularEffectV2.populate()` only iterated `canvas.scene.tiles.contents`, which contains placed tiles but NOT the scene background image.
+   - **Background handling:** The scene background is processed separately by `FloorRenderBus` with special key `__bg_image__` (not in `tileDocs`).
+   - **Fix:** Added background image processing to `SpecularEffectV2.populate()`:
+     - Probes `canvas.scene.background.src` for `_Specular` mask before processing tiles
+     - Creates overlay with `__bg_image__` key matching FloorRenderBus convention
+     - Uses scene rect geometry from `foundrySceneData` (sceneWidth/sceneHeight/sceneX/sceneY)
+     - Places at floor 0, Z = `GROUND_Z - 1 + SPECULAR_Z_OFFSET`
+   - **Pattern for other effects:** Any V2 effect that needs to process the background image must explicitly check `canvas.scene.background.src` in addition to iterating `canvas.scene.tiles.contents`.
+
+5. **✅ FIXED: Fire background image support**
+   - **Root cause:** `FireEffectV2.populate()` only iterated `canvas.scene.tiles.contents`, missing background `_Fire` masks.
+   - **Fix:** Added background image processing to `FireEffectV2.populate()`:
+     - Probes `canvas.scene.background.src` for `_Fire` mask before processing tiles
+     - Scans mask via `generateFirePoints()` to extract spawn point UVs
+     - Converts background-local UVs to scene-global UVs using scene rect geometry
+     - Assigns background fire to floor 0
+     - Merges background points with tile points before building particle systems
+   - **Result:** Fire particles now spawn from background `_Fire` masks correctly.
+   - **Hosted/Levels hardening (mask discovery + spam control):**
+     - **Problem observed:** On some hosted Foundry setups, `probeMaskFile()` can return null even when a valid `_Fire` mask exists and can be loaded via a normal browser `GET`.
+       - Common causes include FilePicker browse restrictions and/or `HEAD` probing being blocked or unreliable.
+     - **Fix:** `FireEffectV2.populate()` now falls back to direct `Image()` GET loading of `${basePath}_Fire.*` when `probeMaskFile()` fails.
+       - Background tries common formats (webp/png/jpg/jpeg).
+       - Tiles probe **webp only** to avoid multi-request 404 spam.
+     - **Spam control:** Added negative-result caching for direct mask probes so each missing tile mask only causes at most a single request per session.
+     - **Compatibility:** Works both when Levels floors are configured and when they are absent (all fire defaults to floor 0).

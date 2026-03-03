@@ -175,12 +175,18 @@ export class FloorCompositor {
     this._circuitBreaker = getCircuitBreaker();
 
     /**
-     * V2 Water Effect: screen-space water post-processing pass driven by
-     * `_Water` mask textures. Runs after lighting (refracts the lit scene),
-     * before sky color grading.
+     * V2 Water Effect: fullscreen post-process surface driven by composited _Water
+     * masks (background + tiles). Renders in the post chain.
      * @type {WaterEffectV2}
      */
-    const waterDisabled = this._circuitBreaker.isDisabled('v2.water');
+    const waterDisabled = this._circuitBreaker.isDisabled('v2.water') || (() => {
+      // Client-local emergency kill switch: if the water shader triggers a GPU driver
+      // compilation hang, Foundry can freeze before you can open any UI to disable it.
+      // Set in the browser console:
+      //   localStorage.setItem('msa-disable-v2-water', '1')
+      // and reload.
+      try { return globalThis.localStorage?.getItem?.('msa-disable-v2-water') === '1'; } catch (_) { return false; }
+    })();
     this._waterEffect = waterDisabled ? null : new WaterEffectV2();
 
     /**
@@ -727,6 +733,41 @@ export class FloorCompositor {
       try { log.warn('[V2 BASELINE] Skipping ALL post-processing - establishing stable baseline'); } catch (_) {}
     }
     
+    // Baseline step: re-enable ONLY the water pass.
+    // Water is a core look-defining effect; leaving it disabled makes V2 appear broken.
+    // Keep all other post passes disabled until the original second-frame freeze
+    // root cause is fully resolved.
+    //
+    // The water shader now defaults to a safe mode that removes expensive rain ripple/storm
+    // loops which previously caused GPU driver compilation hangs. Safe mode is enabled by
+    // default; full rain effects can be re-enabled via localStorage if needed.
+    const enableWaterBaseline = (() => {
+      // Allow disabling water pass if needed (e.g., for debugging other issues):
+      //   localStorage.setItem('msa-disable-v2-water-baseline', '1')
+      // Re-enable:
+      //   localStorage.removeItem('msa-disable-v2-water-baseline')
+      try { return globalThis.localStorage?.getItem?.('msa-disable-v2-water-baseline') !== '1'; } catch (_) { return true; }
+    })();
+
+    if (enableWaterBaseline && this._waterEffect?.enabled) {
+      // Build occluder mask for the *currently viewed* floor.
+      // If on floor 0, no occluder needed.
+      let occluderRT = null;
+      try {
+        const viewFloor = window.MapShine?.floorStack?.getActiveFloor()?.index ?? 0;
+        if (viewFloor > 0 && this._waterOccluderRT) {
+          this._renderBus.renderFloorMaskTo(this.renderer, this.camera, viewFloor, this._waterOccluderRT);
+          occluderRT = this._waterOccluderRT;
+        }
+      } catch (_) {}
+
+      const waterOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: water.render (baseline)'); } catch (_) {} }
+      const waterWrote = this._waterEffect.render(this.renderer, this.camera, currentInput, waterOutput, occluderRT);
+      if (waterWrote) currentInput = waterOutput;
+      if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: water.render (baseline) DONE'); } catch (_) {} }
+    }
+
     // Jump straight to blit
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: blitToScreen'); } catch (_) {} }
     this._blitToScreen(currentInput);

@@ -2274,44 +2274,80 @@ vec3 ms_applySceneLighting(vec3 color) {
       return this.textureCache.get(texturePath);
     }
 
-    // Load new texture with a safety timeout.
-    // Some environments (or context-loss edge cases) can cause loader callbacks
-    // to never fire; this prevents stalls where callers await texture promises.
+    // Prefer a fetch-based pipeline with an AbortController so we can reliably
+    // fail-fast on stalled/blocked requests.
     const LOAD_TIMEOUT_MS = 20000;
-    return new Promise((resolve, reject) => {
-      let done = false;
-      const t = setTimeout(() => {
-        if (done) return;
-        done = true;
-        reject(new Error(`Token texture load timed out after ${LOAD_TIMEOUT_MS}ms`));
-      }, LOAD_TIMEOUT_MS);
 
-      this.textureLoader.load(
-        texturePath,
-        (texture) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      try {
+        controller.abort(new Error(`Token texture load timed out after ${LOAD_TIMEOUT_MS}ms`));
+      } catch (e) {
+        controller.abort();
+      }
+    }, LOAD_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(texturePath, {
+        method: 'GET',
+        // Token textures are commonly served from the same Foundry origin, and
+        // may require cookies/session for access.
+        credentials: 'same-origin',
+        signal: controller.signal
+      });
+
+      if (!response.ok) {
+        throw new Error(`Token texture fetch failed (${response.status} ${response.statusText})`);
+      }
+
+      const blob = await response.blob();
+      const bitmap = await createImageBitmap(blob);
+
+      const texture = new THREE.Texture(bitmap);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      this._configureTokenTextureFiltering(texture);
+      texture.needsUpdate = true;
+
+      // Cache for reuse
+      this.textureCache.set(texturePath, texture);
+      return texture;
+    } catch (e) {
+      // Fallback to THREE.TextureLoader for cases where fetch is restricted
+      // (older environments, unusual schemes, etc.). Keep the same timeout.
+      return await new Promise((resolve, reject) => {
+        let done = false;
+        const t = setTimeout(() => {
           if (done) return;
           done = true;
-          clearTimeout(t);
+          reject(new Error(`Token texture load timed out after ${LOAD_TIMEOUT_MS}ms`));
+        }, LOAD_TIMEOUT_MS);
 
-          // Configure texture
-          texture.colorSpace = THREE.SRGBColorSpace;
-          this._configureTokenTextureFiltering(texture);
-          texture.needsUpdate = true;
+        this.textureLoader.load(
+          texturePath,
+          (texture) => {
+            if (done) return;
+            done = true;
+            clearTimeout(t);
 
-          // Cache for reuse
-          this.textureCache.set(texturePath, texture);
+            texture.colorSpace = THREE.SRGBColorSpace;
+            this._configureTokenTextureFiltering(texture);
+            texture.needsUpdate = true;
 
-          resolve(texture);
-        },
-        undefined,
-        (error) => {
-          if (done) return;
-          done = true;
-          clearTimeout(t);
-          reject(error);
-        }
-      );
-    });
+            this.textureCache.set(texturePath, texture);
+            resolve(texture);
+          },
+          undefined,
+          (error) => {
+            if (done) return;
+            done = true;
+            clearTimeout(t);
+            reject(error);
+          }
+        );
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   /**

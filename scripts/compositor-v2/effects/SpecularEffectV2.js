@@ -224,9 +224,6 @@ export class SpecularEffectV2 {
     if (!this._initialized) { log.warn('populate: not initialized'); return; }
     this.clear();
 
-    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
-    if (tileDocs.length === 0) { log.info('populate: no tiles'); return; }
-
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const worldH = foundrySceneData?.height ?? 0;
 
@@ -234,6 +231,49 @@ export class SpecularEffectV2 {
     this._syncAllLights();
 
     let overlayCount = 0;
+
+    // ── Process scene background image ────────────────────────────────────
+    // The background is not in canvas.scene.tiles.contents — it's handled
+    // separately by FloorRenderBus as __bg_image__. Check for its _Specular
+    // mask and create an overlay if found.
+    const bgSrc = canvas?.scene?.background?.src ?? '';
+    if (bgSrc) {
+      const dotIdx = bgSrc.lastIndexOf('.');
+      const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
+      const bgSpecResult = await probeMaskFile(bgBasePath, '_Specular');
+
+      if (bgSpecResult?.path) {
+        const bgRoughResult = await probeMaskFile(bgBasePath, '_Roughness');
+        const bgNormalResult = await probeMaskFile(bgBasePath, '_Normal');
+
+        // Background geometry: scene rect in world space.
+        const sceneW = foundrySceneData?.sceneWidth ?? foundrySceneData?.width ?? 0;
+        const sceneH = foundrySceneData?.sceneHeight ?? foundrySceneData?.height ?? 0;
+        const sceneX = foundrySceneData?.sceneX ?? 0;
+        const sceneY = foundrySceneData?.sceneY ?? 0;
+        const centerX = sceneX + sceneW / 2;
+        const centerY = worldH - (sceneY + sceneH / 2);
+
+        // Background is always floor 0, Z just above the bg image plane.
+        const GROUND_Z = 1000;
+        const z = GROUND_Z - 1 + SPECULAR_Z_OFFSET;
+
+        this._createOverlay('__bg_image__', 0, {
+          specularUrl: bgSpecResult.path,
+          roughnessUrl: bgRoughResult?.path ?? null,
+          normalUrl: bgNormalResult?.path ?? null,
+          albedoUrl: bgSrc,
+          centerX, centerY, z,
+          tileW: sceneW, tileH: sceneH, rotation: 0,
+        });
+
+        overlayCount++;
+        log.info(`SpecularEffectV2: created background overlay (${sceneW}x${sceneH})`);
+      }
+    }
+
+    // ── Process placed tiles ──────────────────────────────────────────────
+    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
 
     for (const tileDoc of tileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
@@ -280,7 +320,8 @@ export class SpecularEffectV2 {
       overlayCount++;
     }
 
-    log.info(`SpecularEffectV2 populated: ${overlayCount} overlay(s)`);
+    const totalCount = overlayCount;
+    log.info(`SpecularEffectV2 populated: ${totalCount} overlay(s) (${bgSrc ? '1 bg + ' : ''}${overlayCount - (bgSrc && overlayCount > 0 ? 1 : 0)} tiles)`);
   }
 
   /**
@@ -439,9 +480,15 @@ export class SpecularEffectV2 {
     }
 
     // ── Cloud shadow texture ──────────────────────────────────────────────
+    // V2: CloudEffectV2 lives under EffectComposer._floorCompositorV2.
+    // V1: CloudEffect publishes window.MapShine.cloudEffect.
     try {
-      const cloud = window.MapShine?.cloudEffect;
-      const cloudTex = (cloud?.enabled) ? cloud.cloudShadowTarget?.texture : null;
+      const v2Cloud = window.MapShine?.effectComposer?._floorCompositorV2?._cloudEffect;
+      const v1Cloud = window.MapShine?.cloudEffect;
+      const cloud = v2Cloud ?? v1Cloud;
+      const cloudTex = (cloud?.enabled)
+        ? (cloud.cloudShadowTexture ?? cloud.cloudShadowTarget?.texture ?? null)
+        : null;
       u.uHasCloudShadowMap.value = !!cloudTex;
       u.uCloudShadowMap.value = cloudTex || this._fallbackBlack;
     } catch (_) {
@@ -460,9 +507,15 @@ export class SpecularEffectV2 {
     }
 
     // ── Building shadow texture ───────────────────────────────────────────
+    // V2: BuildingShadowsEffectV2 provides shadowFactorTexture.
+    // V1: BuildingShadowsEffect provides worldShadowTarget.
     try {
-      const bse = window.MapShine?.effectComposer?.effects?.get('building-shadows');
-      const bsTex = (bse?.enabled) ? bse.worldShadowTarget?.texture : null;
+      const v2Bse = window.MapShine?.effectComposer?._floorCompositorV2?._buildingShadowEffect;
+      const v1Bse = window.MapShine?.effectComposer?.effects?.get?.('building-shadows');
+      const bse = v2Bse ?? v1Bse;
+      const bsTex = (bse?.enabled)
+        ? (bse.shadowFactorTexture ?? bse.worldShadowTarget?.texture ?? null)
+        : null;
       u.uHasBuildingShadowMap.value = !!bsTex;
       u.uBuildingShadowMap.value = bsTex || this._fallbackBlack;
     } catch (_) {
@@ -554,6 +607,17 @@ export class SpecularEffectV2 {
     mesh.frustumCulled = false;
     mesh.position.set(centerX, centerY, z);
     mesh.rotation.z = rotation;
+
+    // Ensure the specular overlay renders immediately above its corresponding
+    // albedo tile in the FloorRenderBus scene. The bus uses renderOrder to
+    // guarantee deterministic stacking for transparent materials.
+    try {
+      const baseEntry = this._renderBus?._tiles?.get?.(tileId);
+      const baseOrder = Number(baseEntry?.mesh?.renderOrder);
+      if (Number.isFinite(baseOrder)) {
+        mesh.renderOrder = baseOrder + 1;
+      }
+    } catch (_) {}
 
     // Register with the bus so floor visibility is handled automatically.
     this._renderBus.addEffectOverlay(`${tileId}_specular`, mesh, floorIndex);

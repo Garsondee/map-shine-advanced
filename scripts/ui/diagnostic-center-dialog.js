@@ -412,6 +412,70 @@ export class DiagnosticCenterDialog {
           }
         }, true);
 
+        addGridButton('Rebuild Floor Masks', async () => {
+          try {
+            const compositor = window.MapShine?.maskCompositor;
+            if (compositor && typeof compositor.rebuildMasksForActiveLevel === 'function') {
+              await compositor.rebuildMasksForActiveLevel();
+              ui?.notifications?.info?.('Map Shine: Floor masks rebuilt');
+            } else {
+              ui?.notifications?.warn?.('Map Shine: Compositor not available');
+            }
+          } catch (e) {
+            ui?.notifications?.warn?.('Map Shine: Failed to rebuild floor masks (see console)');
+            console.warn('[MapShine] Failed to rebuild floor masks', e);
+          }
+        });
+
+        addGridButton('Force Render', async () => {
+          try {
+            const renderLoop = window.MapShine?.renderLoop;
+            if (renderLoop && typeof renderLoop.requestContinuousRender === 'function') {
+              renderLoop.requestContinuousRender(100);
+              ui?.notifications?.info?.('Map Shine: Render refresh triggered');
+            } else {
+              ui?.notifications?.warn?.('Map Shine: RenderLoop not available');
+            }
+          } catch (e) {
+            ui?.notifications?.warn?.('Map Shine: Failed to force render (see console)');
+            console.warn('[MapShine] Failed to force render', e);
+          }
+        });
+
+        addGridButton('Clear Movement Locks', async () => {
+          try {
+            const movementManager = window.MapShine?.tokenMovementManager;
+            if (movementManager) {
+              movementManager._tokenMoveLocks?.clear?.();
+              movementManager._groupMoveLocks?.clear?.();
+              ui?.notifications?.info?.('Map Shine: Movement locks cleared');
+            } else {
+              ui?.notifications?.warn?.('Map Shine: Movement manager not available');
+            }
+          } catch (e) {
+            ui?.notifications?.warn?.('Map Shine: Failed to clear movement locks (see console)');
+            console.warn('[MapShine] Failed to clear movement locks', e);
+          }
+        }, true);
+
+        addGridButton('Export Markdown', async () => {
+          if (!this._lastReport) {
+            ui?.notifications?.warn?.('Diagnostic Center: no report yet');
+            return;
+          }
+          const markdown = this._exportAsMarkdown(this._lastReport);
+          await _copyTextToClipboard(markdown, 'Markdown report copied to clipboard');
+        });
+
+        addGridButton('Export HTML', async () => {
+          if (!this._lastReport) {
+            ui?.notifications?.warn?.('Diagnostic Center: no report yet');
+            return;
+          }
+          const html = this._exportAsHTML(this._lastReport);
+          await _copyTextToClipboard(html, 'HTML report copied to clipboard');
+        });
+
         contentElement.appendChild(grid);
 
         // Scope note — diagnostics are read-only, runtime-only.
@@ -586,6 +650,58 @@ export class DiagnosticCenterDialog {
     const levelsInterop = detectLevelsRuntimeInteropState({ gameplayMode });
     const compatibilityMode = getLevelsCompatibilityMode();
 
+    // --- Performance & Frame Timing ---
+    try {
+      const renderLoop = ms?.renderLoop;
+      if (renderLoop) {
+        const fps = renderLoop.fps ?? 0;
+        const frameCount = renderLoop.frameCount ?? 0;
+        const lastFrameTime = renderLoop.lastFrameTime ?? 0;
+        const timeSinceLastFrame = now - lastFrameTime;
+        const isRunning = renderLoop.isRunning ?? false;
+        
+        const fpsStatus = fps < 20 ? 'WARN' : (fps < 40 ? 'INFO' : 'PASS');
+        checks.push(_mkCheck('Performance', 'perf.fps', fpsStatus, `FPS: ${fps.toFixed(1)} (${frameCount} frames)`, {
+          fps,
+          frameCount,
+          timeSinceLastFrame: timeSinceLastFrame.toFixed(1),
+          isRunning,
+        }));
+
+        // Render mode detection
+        const continuousUntil = renderLoop._continuousRenderUntilMs ?? 0;
+        const isContinuous = continuousUntil > now;
+        const mode = isContinuous ? 'continuous' : 'adaptive';
+        checks.push(_mkCheck('Performance', 'perf.renderMode', 'INFO', `Render mode: ${mode}`, {
+          mode,
+          continuousUntilMs: continuousUntil > now ? continuousUntil : null,
+        }));
+      } else {
+        checks.push(_mkCheck('Performance', 'perf.fps', 'WARN', 'RenderLoop not available'));
+      }
+    } catch (e) {
+      checks.push(_mkCheck('Performance', 'perf.fps', 'WARN', 'Failed to read performance metrics', {
+        error: String(e?.message || e)
+      }));
+    }
+
+    // Adaptive decimation state
+    try {
+      if (effectComposer) {
+        const decimationActive = effectComposer._decimationActive ?? false;
+        const avgFrameTime = effectComposer._avgFrameTimeMs ?? 0;
+        const status = decimationActive ? 'WARN' : 'PASS';
+        checks.push(_mkCheck('Performance', 'perf.decimation', status, 
+          decimationActive ? `Adaptive decimation ACTIVE (avg frame: ${avgFrameTime.toFixed(1)}ms)` : 'Adaptive decimation inactive',
+          {
+            active: decimationActive,
+            avgFrameTimeMs: avgFrameTime,
+            enterThresholdMs: effectComposer._decimationEnterMs ?? 20,
+            exitThresholdMs: effectComposer._decimationExitMs ?? 14,
+          }));
+      }
+    } catch (_) {}
+
     // --- Pipeline mode ---
     try {
       const v2Enabled = Boolean(effectComposer?._checkCompositorV2Enabled?.() && effectComposer?._floorCompositorV2);
@@ -725,19 +841,105 @@ export class DiagnosticCenterDialog {
         }));
       }
 
-      // Render target sanity
+      // Render target health
       try {
         const rts = effectComposer.renderTargets || null;
         const sceneRT = effectComposer.sceneRenderTarget || null;
-        checks.push(_mkCheck('Runtime', 'runtime.renderTargets.summary', 'INFO', `Composer RTs: map=${rts?.size ?? 0}, sceneRT=${sceneRT ? `${sceneRT.width}x${sceneRT.height}` : 'null'}`, {
+        const viewportWidth = renderer?.domElement?.width ?? 0;
+        const viewportHeight = renderer?.domElement?.height ?? 0;
+        
+        let totalRTMemory = 0;
+        let rtDetails = [];
+        if (rts && typeof rts.forEach === 'function') {
+          rts.forEach((rt, key) => {
+            if (!rt) return;
+            const w = rt.width ?? 0;
+            const h = rt.height ?? 0;
+            const hasDepth = Boolean(rt.depthBuffer);
+            const bytes = w * h * (hasDepth ? 8 : 4); // Rough estimate
+            totalRTMemory += bytes;
+            rtDetails.push({ key, width: w, height: h, depthBuffer: hasDepth, bytes });
+          });
+        }
+        
+        if (sceneRT) {
+          const w = sceneRT.width ?? 0;
+          const h = sceneRT.height ?? 0;
+          const hasDepth = Boolean(sceneRT.depthBuffer);
+          const bytes = w * h * (hasDepth ? 8 : 4);
+          totalRTMemory += bytes;
+        }
+        
+        const sizeMismatch = sceneRT && (sceneRT.width !== viewportWidth || sceneRT.height !== viewportHeight);
+        const status = sizeMismatch ? 'WARN' : 'PASS';
+        
+        checks.push(_mkCheck('Runtime', 'runtime.renderTargets.summary', status, 
+          `Composer RTs: ${rts?.size ?? 0} (${(totalRTMemory / 1024 / 1024).toFixed(1)} MB)`, {
           mapSize: rts?.size ?? 0,
-          sceneRenderTarget: sceneRT ? { width: sceneRT.width, height: sceneRT.height, depthBuffer: Boolean(sceneRT.depthBuffer) } : null,
+          totalMemoryMB: (totalRTMemory / 1024 / 1024).toFixed(2),
+          sceneRenderTarget: sceneRT ? { 
+            width: sceneRT.width, 
+            height: sceneRT.height, 
+            depthBuffer: Boolean(sceneRT.depthBuffer),
+            matchesViewport: !sizeMismatch,
+          } : null,
+          viewportSize: { width: viewportWidth, height: viewportHeight },
+          topRTs: rtDetails.sort((a, b) => b.bytes - a.bytes).slice(0, 10),
         }));
+        
+        if (sizeMismatch) {
+          checks.push(_mkCheck('Runtime', 'runtime.renderTargets.sizeMismatch', 'WARN', 
+            `Scene RT size mismatch: ${sceneRT.width}x${sceneRT.height} vs viewport ${viewportWidth}x${viewportHeight}`));
+        }
       } catch (_) {
       }
     } else {
       checks.push(_mkCheck('Runtime', 'runtime.effects.summary', 'WARN', 'EffectComposer not found; effects may not be initialized'));
     }
+
+    // --- Asset Cache Statistics ---
+    try {
+      const cacheStats = typeof getAssetCacheStats === 'function' ? getAssetCacheStats() : null;
+      if (cacheStats) {
+        const totalTextures = cacheStats.textureCount ?? 0;
+        const totalBytes = cacheStats.totalBytes ?? 0;
+        const hitRate = cacheStats.hitRate ?? 0;
+        
+        checks.push(_mkCheck('Assets', 'assets.cache.stats', 'PASS', 
+          `Cache: ${totalTextures} textures (${(totalBytes / 1024 / 1024).toFixed(1)} MB, ${(hitRate * 100).toFixed(1)}% hit rate)`, {
+          textureCount: totalTextures,
+          totalMB: (totalBytes / 1024 / 1024).toFixed(2),
+          hitRate: (hitRate * 100).toFixed(1),
+          hits: cacheStats.hits ?? 0,
+          misses: cacheStats.misses ?? 0,
+          evictions: cacheStats.evictions ?? 0,
+        }));
+      } else {
+        checks.push(_mkCheck('Assets', 'assets.cache.stats', 'INFO', 'Asset cache statistics not available'));
+      }
+    } catch (e) {
+      checks.push(_mkCheck('Assets', 'assets.cache.stats', 'WARN', 'Failed to read asset cache stats', {
+        error: String(e?.message || e)
+      }));
+    }
+
+    // Texture budget tracking
+    try {
+      const budgetTracker = ms?.textureBudgetTracker;
+      if (budgetTracker && typeof budgetTracker.getBudgetState === 'function') {
+        const budget = budgetTracker.getBudgetState();
+        const status = budget.overBudget ? 'WARN' : 'PASS';
+        checks.push(_mkCheck('Assets', 'assets.budget', status, 
+          `VRAM budget: ${(budget.usedBytes / 1024 / 1024).toFixed(1)} / ${(budget.budgetBytes / 1024 / 1024).toFixed(0)} MB (${(budget.usedFraction * 100).toFixed(1)}%)`, {
+          usedMB: (budget.usedBytes / 1024 / 1024).toFixed(2),
+          budgetMB: (budget.budgetBytes / 1024 / 1024).toFixed(0),
+          usedFraction: (budget.usedFraction * 100).toFixed(1),
+          overBudget: budget.overBudget,
+          entryCount: budget.entryCount,
+          topEntries: budget.topEntries?.slice(0, 5),
+        }));
+      }
+    } catch (_) {}
 
     checks.push(_mkCheck('Levels', 'levels.compatibility.mode', 'INFO', `Compatibility mode: ${compatibilityMode}`, {
       mode: compatibilityMode,
@@ -1101,6 +1303,259 @@ export class DiagnosticCenterDialog {
     } catch (_) {
     }
 
+    // --- Floor Rendering Pipeline ---
+    try {
+      const floorStack = ms?.floorStack;
+      const registry = ms?.effectMaskRegistry;
+      const compositor = ms?.maskCompositor;
+      
+      if (floorStack) {
+        const floors = floorStack._floors ?? [];
+        const activeFloor = floorStack._activeFloorIndex ?? 0;
+        const visibleFloors = floorStack.getVisibleFloors?.() ?? [];
+        
+        checks.push(_mkCheck('Floor', 'floor.stack', 'PASS', `Floors: ${floors.length} (active: ${activeFloor}, visible: ${visibleFloors.length})`, {
+          totalFloors: floors.length,
+          activeFloorIndex: activeFloor,
+          visibleFloorCount: visibleFloors.length,
+          floors: floors.map((f, i) => ({
+            index: i,
+            bottom: f.bottom,
+            top: f.top,
+            visible: f.visible ?? false,
+          })),
+        }));
+      } else {
+        checks.push(_mkCheck('Floor', 'floor.stack', 'INFO', 'FloorStack not available (single-level scene or V2 mode)'));
+      }
+      
+      if (registry) {
+        const metrics = typeof registry.getMetrics === 'function' ? registry.getMetrics() : null;
+        if (metrics) {
+          const occupiedSlots = metrics.occupiedSlots ?? 0;
+          const totalSlots = metrics.totalSlots ?? 0;
+          const transitionLocked = metrics.transitionLocked ?? false;
+          
+          checks.push(_mkCheck('Floor', 'floor.registry', transitionLocked ? 'WARN' : 'PASS', 
+            `Mask registry: ${occupiedSlots}/${totalSlots} slots occupied`, {
+            occupiedSlots,
+            totalSlots,
+            transitionLocked,
+            activeMaskTypes: metrics.activeMaskTypes ?? [],
+            transitionCount: metrics.transitionCount ?? 0,
+          }));
+          
+          if (transitionLocked) {
+            checks.push(_mkCheck('Floor', 'floor.registry.locked', 'WARN', 'Mask registry is locked (floor transition in progress)'));
+          }
+        }
+      }
+      
+      if (compositor) {
+        const activeFloorKey = compositor._activeFloorKey ?? null;
+        const cacheSize = compositor._floorMaskCache?.size ?? 0;
+        
+        checks.push(_mkCheck('Floor', 'floor.compositor', 'INFO', `Compositor: active floor "${activeFloorKey}", ${cacheSize} cached floors`, {
+          activeFloorKey,
+          cacheSize,
+        }));
+      }
+    } catch (e) {
+      checks.push(_mkCheck('Floor', 'floor.pipeline', 'WARN', 'Failed to read floor pipeline state', {
+        error: String(e?.message || e)
+      }));
+    }
+
+    // --- Scene Topology ---
+    try {
+      const scene = canvas?.scene;
+      if (scene) {
+        const tokens = scene.tokens?.size ?? 0;
+        const tiles = scene.tiles?.size ?? 0;
+        const walls = scene.walls?.size ?? 0;
+        const lights = scene.lights?.size ?? 0;
+        const sounds = scene.sounds?.size ?? 0;
+        const drawings = scene.drawings?.size ?? 0;
+        const templates = scene.templates?.size ?? 0;
+        const notes = scene.notes?.size ?? 0;
+        
+        checks.push(_mkCheck('Scene', 'scene.topology', 'INFO', 
+          `Scene objects: ${tokens + tiles + walls + lights + sounds + drawings + templates + notes} total`, {
+          tokens,
+          tiles,
+          walls,
+          lights,
+          sounds,
+          drawings,
+          templates,
+          notes,
+        }));
+      }
+      
+      // Three.js scene graph
+      if (threeScene) {
+        let meshCount = 0;
+        let spriteCount = 0;
+        let lightCount = 0;
+        let totalChildren = 0;
+        
+        threeScene.traverse((obj) => {
+          totalChildren++;
+          if (obj.isMesh) meshCount++;
+          if (obj.isSprite) spriteCount++;
+          if (obj.isLight) lightCount++;
+        });
+        
+        checks.push(_mkCheck('Scene', 'scene.threeGraph', 'INFO', 
+          `Three.js graph: ${totalChildren} objects (${meshCount} meshes, ${spriteCount} sprites, ${lightCount} lights)`, {
+          totalChildren,
+          meshCount,
+          spriteCount,
+          lightCount,
+        }));
+      }
+    } catch (e) {
+      checks.push(_mkCheck('Scene', 'scene.topology', 'WARN', 'Failed to read scene topology', {
+        error: String(e?.message || e)
+      }));
+    }
+
+    // --- Time of Day & Weather ---
+    try {
+      const weatherController = ms?.weatherController;
+      const stateApplier = ms?.stateApplier;
+      
+      if (weatherController) {
+        const weather = weatherController.getWeatherState?.() ?? {};
+        const precipitation = weather.precipitation ?? 0;
+        const windSpeed = weather.windSpeed ?? 0;
+        const cloudCoverage = weather.cloudCoverage ?? 0;
+        
+        checks.push(_mkCheck('Environment', 'env.weather', 'INFO', 
+          `Weather: ${(precipitation * 100).toFixed(0)}% precip, ${(windSpeed * 100).toFixed(0)}% wind, ${(cloudCoverage * 100).toFixed(0)}% clouds`, {
+          precipitation,
+          windSpeed,
+          cloudCoverage,
+          windDirection: weather.windDirection ?? 0,
+        }));
+      }
+      
+      if (stateApplier) {
+        const timeState = stateApplier.getTimeState?.() ?? {};
+        const hour = timeState.hour ?? 12;
+        const darkness = canvas?.scene?.darkness ?? 0;
+        const linkedToFoundry = timeState.linkedToFoundry ?? false;
+        
+        checks.push(_mkCheck('Environment', 'env.time', 'INFO', 
+          `Time: ${hour.toFixed(1)}h (darkness: ${(darkness * 100).toFixed(0)}%, Foundry link: ${linkedToFoundry ? 'ON' : 'OFF'})`, {
+          hour,
+          darkness,
+          linkedToFoundry,
+        }));
+      }
+    } catch (e) {
+      checks.push(_mkCheck('Environment', 'env.state', 'WARN', 'Failed to read environment state', {
+        error: String(e?.message || e)
+      }));
+    }
+
+    // --- Pathfinding & Movement ---
+    try {
+      const movementManager = ms?.tokenMovementManager;
+      if (movementManager) {
+        const navGraphCache = movementManager._sceneNavGraphCache;
+        const doorStateRevision = movementManager._doorStateRevision ?? 0;
+        const activeTokenLocks = movementManager._tokenMoveLocks?.size ?? 0;
+        const activeGroupLocks = movementManager._groupMoveLocks?.size ?? 0;
+        
+        checks.push(_mkCheck('Movement', 'movement.pathfinding', 'INFO', 
+          `Pathfinding: ${navGraphCache?.size ?? 0} cached graphs, door rev ${doorStateRevision}`, {
+          cachedGraphs: navGraphCache?.size ?? 0,
+          doorStateRevision,
+          activeTokenLocks,
+          activeGroupLocks,
+        }));
+        
+        if (activeTokenLocks > 0 || activeGroupLocks > 0) {
+          checks.push(_mkCheck('Movement', 'movement.locks', 'WARN', 
+            `Active movement locks: ${activeTokenLocks} tokens, ${activeGroupLocks} groups (may indicate stuck movements)`, {
+            tokenLocks: activeTokenLocks,
+            groupLocks: activeGroupLocks,
+          }));
+        }
+      }
+    } catch (e) {
+      checks.push(_mkCheck('Movement', 'movement.state', 'WARN', 'Failed to read movement state', {
+        error: String(e?.message || e)
+      }));
+    }
+
+    // --- Input & Interaction ---
+    try {
+      const inputRouter = ms?.inputRouter;
+      const interactionManager = ms?.interactionManager;
+      
+      if (inputRouter) {
+        const mode = inputRouter._mode ?? 'unknown';
+        checks.push(_mkCheck('Input', 'input.router', 'INFO', `Input mode: ${mode}`, {
+          mode,
+        }));
+      }
+      
+      if (interactionManager) {
+        const dragState = interactionManager._dragState ?? {};
+        const isDragging = dragState.active ?? false;
+        
+        if (isDragging) {
+          checks.push(_mkCheck('Input', 'input.drag', 'INFO', 'Drag operation in progress', {
+            dragType: dragState.type ?? 'unknown',
+            dragStartTime: dragState.startTime ?? null,
+          }));
+        }
+      }
+      
+      // Active tool/layer
+      const activeTool = ui?.controls?.activeControl ?? 'unknown';
+      const activeLayer = canvas?.activeLayer?.constructor?.name ?? 'unknown';
+      
+      checks.push(_mkCheck('Input', 'input.context', 'INFO', `Active: ${activeTool} tool, ${activeLayer} layer`, {
+        activeTool,
+        activeLayer,
+      }));
+    } catch (e) {
+      checks.push(_mkCheck('Input', 'input.state', 'WARN', 'Failed to read input state', {
+        error: String(e?.message || e)
+      }));
+    }
+
+    // --- Memory Leak Detection ---
+    try {
+      let disposedTextureRefs = 0;
+      let orphanedRTs = 0;
+      
+      // Check for disposed textures still referenced
+      if (effectComposer?.renderTargets) {
+        effectComposer.renderTargets.forEach((rt) => {
+          if (rt?.texture?.image === null || rt?.texture?.image === undefined) {
+            disposedTextureRefs++;
+          }
+        });
+      }
+      
+      if (disposedTextureRefs > 0) {
+        checks.push(_mkCheck('Memory', 'memory.disposedTextures', 'WARN', 
+          `${disposedTextureRefs} render target(s) may reference disposed textures`, {
+          count: disposedTextureRefs,
+        }));
+      } else {
+        checks.push(_mkCheck('Memory', 'memory.disposedTextures', 'PASS', 'No disposed texture references detected'));
+      }
+    } catch (e) {
+      checks.push(_mkCheck('Memory', 'memory.leaks', 'WARN', 'Failed to check for memory leaks', {
+        error: String(e?.message || e)
+      }));
+    }
+
     // Resolve target.
     let targetKind = this._state.targetKind;
     let targetId = this._state.targetId;
@@ -1398,7 +1853,7 @@ export class DiagnosticCenterDialog {
       groups.get(cat).push(c);
     }
 
-    const order = ['Shaders', 'Runtime', 'Levels', 'Tile', 'Scene', 'Flags', 'Three', 'Surface', 'Assets', 'Other'];
+    const order = ['Performance', 'Runtime', 'Shaders', 'Assets', 'Floor', 'Scene', 'Environment', 'Movement', 'Input', 'Memory', 'Levels', 'Tile', 'Flags', 'Three', 'Surface', 'Other'];
     const cats = Array.from(groups.keys());
     cats.sort((a, b) => {
       const ai = order.indexOf(a);
@@ -1490,5 +1945,178 @@ export class DiagnosticCenterDialog {
       const list = groups.get(cat) || [];
       for (const c of list) root.appendChild(mkRow(c));
     }
+  }
+
+  /**
+   * Export report as Markdown
+   * @private
+   */
+  _exportAsMarkdown(report) {
+    const lines = [];
+    const s = report?.summary || { pass: 0, warn: 0, fail: 0, info: 0 };
+    
+    lines.push('# Map Shine Diagnostic Report');
+    lines.push('');
+    lines.push(`**Generated:** ${new Date(report.time).toISOString()}`);
+    lines.push(`**Target:** ${report?.target?.kind || '—'} | ${report?.target?.id || '—'}`);
+    if (report?.target?.src) {
+      lines.push(`**Source:** ${report.target.src}`);
+    }
+    lines.push('');
+    lines.push('## Summary');
+    lines.push('');
+    lines.push(`- ✅ PASS: ${s.pass}`);
+    lines.push(`- ⚠️ WARN: ${s.warn}`);
+    lines.push(`- ❌ FAIL: ${s.fail}`);
+    lines.push(`- ℹ️ INFO: ${s.info}`);
+    lines.push('');
+    
+    const groups = new Map();
+    for (const c of (report?.checks || [])) {
+      const cat = String(c?.category || 'Other');
+      if (!groups.has(cat)) groups.set(cat, []);
+      groups.get(cat).push(c);
+    }
+    
+    const order = ['Performance', 'Runtime', 'Shaders', 'Assets', 'Floor', 'Scene', 'Environment', 'Movement', 'Input', 'Memory', 'Levels', 'Tile', 'Flags', 'Three', 'Surface', 'Other'];
+    const cats = Array.from(groups.keys());
+    cats.sort((a, b) => {
+      const ai = order.indexOf(a);
+      const bi = order.indexOf(b);
+      if (ai !== -1 || bi !== -1) return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+      return a.localeCompare(b);
+    });
+    
+    for (const cat of cats) {
+      lines.push(`## ${cat}`);
+      lines.push('');
+      
+      const list = groups.get(cat) || [];
+      for (const c of list) {
+        const status = String(c?.status || 'INFO').toUpperCase();
+        const emoji = status === 'PASS' ? '✅' : status === 'WARN' ? '⚠️' : status === 'FAIL' ? '❌' : 'ℹ️';
+        lines.push(`### ${emoji} ${c.id}`);
+        lines.push('');
+        lines.push(`**Status:** ${status}`);
+        lines.push(`**Message:** ${c.message || ''}`);
+        
+        if (c?.details !== undefined) {
+          lines.push('');
+          lines.push('**Details:**');
+          lines.push('```json');
+          lines.push(JSON.stringify(c.details, null, 2));
+          lines.push('```');
+        }
+        lines.push('');
+      }
+    }
+    
+    return lines.join('\n');
+  }
+
+  /**
+   * Export report as HTML
+   * @private
+   */
+  _exportAsHTML(report) {
+    const s = report?.summary || { pass: 0, warn: 0, fail: 0, info: 0 };
+    const html = [];
+    
+    html.push('<!DOCTYPE html>');
+    html.push('<html lang="en">');
+    html.push('<head>');
+    html.push('<meta charset="UTF-8">');
+    html.push('<meta name="viewport" content="width=device-width, initial-scale=1.0">');
+    html.push('<title>Map Shine Diagnostic Report</title>');
+    html.push('<style>');
+    html.push('body { font-family: system-ui, -apple-system, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #1a1a1a; color: #e0e0e0; }');
+    html.push('h1 { color: #fff; border-bottom: 2px solid #444; padding-bottom: 10px; }');
+    html.push('h2 { color: #fff; margin-top: 30px; border-bottom: 1px solid #333; padding-bottom: 8px; }');
+    html.push('h3 { color: #ccc; margin-top: 20px; }');
+    html.push('.summary { display: flex; gap: 15px; margin: 20px 0; }');
+    html.push('.chip { padding: 8px 16px; border-radius: 20px; font-weight: 600; }');
+    html.push('.chip.pass { background: rgba(70, 200, 120, 0.15); border: 1px solid rgba(70, 200, 120, 0.3); color: #46c878; }');
+    html.push('.chip.warn { background: rgba(255, 200, 80, 0.15); border: 1px solid rgba(255, 200, 80, 0.3); color: #ffc850; }');
+    html.push('.chip.fail { background: rgba(255, 80, 80, 0.15); border: 1px solid rgba(255, 80, 80, 0.3); color: #ff5050; }');
+    html.push('.chip.info { background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.15); color: #aaa; }');
+    html.push('.check { margin: 15px 0; padding: 15px; border-radius: 10px; border: 1px solid #333; background: rgba(255,255,255,0.03); }');
+    html.push('.check.pass { border-color: rgba(70, 200, 120, 0.25); background: rgba(70, 200, 120, 0.05); }');
+    html.push('.check.warn { border-color: rgba(255, 200, 80, 0.3); background: rgba(255, 200, 80, 0.06); }');
+    html.push('.check.fail { border-color: rgba(255, 80, 80, 0.35); background: rgba(255, 80, 80, 0.08); }');
+    html.push('.status-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.2); margin-right: 8px; }');
+    html.push('.details { margin-top: 10px; padding: 10px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; font-family: monospace; font-size: 12px; overflow-x: auto; }');
+    html.push('pre { margin: 0; white-space: pre-wrap; }');
+    html.push('.meta { color: #888; font-size: 14px; margin: 10px 0; }');
+    html.push('</style>');
+    html.push('</head>');
+    html.push('<body>');
+    
+    html.push('<h1>Map Shine Diagnostic Report</h1>');
+    html.push(`<div class="meta"><strong>Generated:</strong> ${new Date(report.time).toLocaleString()}</div>`);
+    html.push(`<div class="meta"><strong>Target:</strong> ${report?.target?.kind || '—'} | ${report?.target?.id || '—'}</div>`);
+    if (report?.target?.src) {
+      html.push(`<div class="meta"><strong>Source:</strong> ${this._escapeHtml(report.target.src)}</div>`);
+    }
+    
+    html.push('<div class="summary">');
+    html.push(`<div class="chip pass">✅ PASS ${s.pass}</div>`);
+    html.push(`<div class="chip warn">⚠️ WARN ${s.warn}</div>`);
+    html.push(`<div class="chip fail">❌ FAIL ${s.fail}</div>`);
+    html.push(`<div class="chip info">ℹ️ INFO ${s.info}</div>`);
+    html.push('</div>');
+    
+    const groups = new Map();
+    for (const c of (report?.checks || [])) {
+      const cat = String(c?.category || 'Other');
+      if (!groups.has(cat)) groups.set(cat, []);
+      groups.get(cat).push(c);
+    }
+    
+    const order = ['Performance', 'Runtime', 'Shaders', 'Assets', 'Floor', 'Scene', 'Environment', 'Movement', 'Input', 'Memory', 'Levels', 'Tile', 'Flags', 'Three', 'Surface', 'Other'];
+    const cats = Array.from(groups.keys());
+    cats.sort((a, b) => {
+      const ai = order.indexOf(a);
+      const bi = order.indexOf(b);
+      if (ai !== -1 || bi !== -1) return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+      return a.localeCompare(b);
+    });
+    
+    for (const cat of cats) {
+      html.push(`<h2>${this._escapeHtml(cat)}</h2>`);
+      
+      const list = groups.get(cat) || [];
+      for (const c of list) {
+        const status = String(c?.status || 'INFO').toUpperCase();
+        const statusClass = status.toLowerCase();
+        const emoji = status === 'PASS' ? '✅' : status === 'WARN' ? '⚠️' : status === 'FAIL' ? '❌' : 'ℹ️';
+        
+        html.push(`<div class="check ${statusClass}">`);
+        html.push(`<h3>${emoji} ${this._escapeHtml(c.id || '')}</h3>`);
+        html.push(`<div><span class="status-badge">${status}</span>${this._escapeHtml(c.message || '')}</div>`);
+        
+        if (c?.details !== undefined) {
+          html.push('<div class="details">');
+          html.push('<pre>' + this._escapeHtml(JSON.stringify(c.details, null, 2)) + '</pre>');
+          html.push('</div>');
+        }
+        
+        html.push('</div>');
+      }
+    }
+    
+    html.push('</body>');
+    html.push('</html>');
+    
+    return html.join('\n');
+  }
+
+  /**
+   * Escape HTML special characters
+   * @private
+   */
+  _escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   }
 }

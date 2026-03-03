@@ -74,7 +74,7 @@ export class WeatherController {
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0,
-      ashIntensity: 0.93 // 0.0 (none) to 1.0 (heavy ash fall)
+      ashIntensity: 0.0 // 0.0 (none) to 1.0 (heavy ash fall)
     };
 
     /**
@@ -107,7 +107,7 @@ export class WeatherController {
       fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0,
-      ashIntensity: 0.93
+      ashIntensity: 0.0
     };
 
     /** @type {WeatherState} */

@@ -129,7 +129,7 @@ export class AshDisturbanceEffect extends EffectBase {
 
     this.priority = 2;
     this.alwaysRender = false;
-    this.enabled = true;
+    this.enabled = false;
 
     /**
      * Per-floor cached state. Keyed by FloorBand.key. Populated lazily by
@@ -146,7 +146,7 @@ export class AshDisturbanceEffect extends EffectBase {
     this.batchRenderer = null;
 
     this.params = {
-      enabled: true,
+      enabled: false,
       burstRate: 270,
       burstDuration: 1.6,
       burstRadius: 170,
@@ -209,7 +209,7 @@ export class AshDisturbanceEffect extends EffectBase {
         'Volcanic': { burstRate: 1200, burstDuration: 1.2, burstRadius: 450, maxParticles: 6000, sizeMin: 30, sizeMax: 80, lifeMin: 2.5, lifeMax: 5.5, opacityStart: 1.0, opacityEnd: 0.3, windInfluence: 1.0, curlStrength: 30, curlScale: 160 }
       },
       parameters: {
-        enabled: { type: 'boolean', default: true },
+        enabled: { type: 'boolean', default: false },
         burstRate: { type: 'slider', label: 'Burst Rate (particles/s)', min: 50, max: 2000, step: 10, default: 270, throttle: 50 },
         burstDuration: { type: 'slider', label: 'Burst Duration (s)', min: 0.1, max: 2.0, step: 0.05, default: 1.6, throttle: 50 },
         burstRadius: { type: 'slider', label: 'Burst Radius (px)', min: 50, max: 800, step: 10, default: 170, throttle: 50 },
@@ -349,6 +349,10 @@ export class AshDisturbanceEffect extends EffectBase {
   handleTokenMovement(tokenId) {
     if (!this.enabled) return;
 
+    const weather = weatherController?.getCurrentState?.() || {};
+    const ashIntensity = Number(weather.ashIntensity) || 0;
+    if (ashIntensity <= 0) return;
+
     // Attempt deferred rebuild if systems haven't been created yet.
     if (this._needsRebuild || !this._burstSystems.length) {
       this._attemptDeferredRebuild();
@@ -434,6 +438,8 @@ export class AshDisturbanceEffect extends EffectBase {
 
     const p = this.params;
     const weather = weatherController?.getCurrentState?.() || {};
+    const ashIntensity = Number(weather.ashIntensity) || 0;
+    if (ashIntensity <= 0) return;
     const windSpeed = Number(weather.windSpeed) || 0;
     const windDir = weather.windDirection || { x: 1, y: 0 };
 

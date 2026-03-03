@@ -84,6 +84,7 @@ import { FloorLayerManager } from '../compositor-v2/FloorLayerManager.js';
 import { CloudEffectV2 } from '../compositor-v2/effects/CloudEffectV2.js';
 import { FilterEffectV2 } from '../compositor-v2/effects/FilterEffectV2.js';
 import { WaterSplashesEffectV2 } from '../compositor-v2/effects/WaterSplashesEffectV2.js';
+import { AshDisturbanceEffectV2 } from '../compositor-v2/effects/AshDisturbanceEffectV2.js';
 import { TemplateManager } from '../scene/template-manager.js';
 import { LightIconManager } from '../scene/light-icon-manager.js';
 import { EnhancedLightIconManager } from '../scene/enhanced-light-icon-manager.js';
@@ -4357,7 +4358,28 @@ async function createThreeCanvas(scene) {
     log.info('Interaction manager initialized');
 
     // Wire token movement hook for ash disturbance.
-    // V2: No ash disturbance effect — skip.
+    // V2: Route into the V2 ash disturbance effect if present.
+    safeCall(() => {
+      if (window.MapShine?.__msaAshDisturbanceHookId) {
+        try { Hooks.off('updateToken', window.MapShine.__msaAshDisturbanceHookId); } catch (_) {}
+        window.MapShine.__msaAshDisturbanceHookId = null;
+      }
+
+      // Use updateToken hook so we also catch server-confirmed movements.
+      const hookId = Hooks.on('updateToken', (tokenDoc, changes) => {
+        try {
+          if (!tokenDoc?.id) return;
+          if (!('x' in (changes || {})) && !('y' in (changes || {}))) return;
+          const fc = window.MapShine?.effectComposer?._floorCompositorV2;
+          const ash = fc?._ashDisturbanceEffect;
+          if (ash && typeof ash.handleTokenMovement === 'function') {
+            ash.handleTokenMovement(tokenDoc.id);
+          }
+        } catch (_) {}
+      });
+
+      if (window.MapShine) window.MapShine.__msaAshDisturbanceHookId = hookId;
+    }, 'wireAshDisturbanceHook(V2)', Severity.COSMETIC);
 
     // Sync Selection Box UI params (loaded from scene settings) into the InteractionManager.
     // initializeUI() runs earlier during startup, before InteractionManager exists.
@@ -4840,6 +4862,11 @@ async function createThreeCanvas(scene) {
         }, 'v2.registerUnderwaterBubblesUI', Severity.COSMETIC);
 
         safeCall(() => {
+          uiManager.registerEffect('ash-disturbance', 'Ash Disturbance',
+            AshDisturbanceEffectV2.getControlSchema(), _makeV2Callback('_ashDisturbanceEffect'), 'particle');
+        }, 'v2.registerAshDisturbanceUI(V2)', Severity.COSMETIC);
+
+        safeCall(() => {
           uiManager.registerEffect('bloom', 'Bloom (Glow)',
             BloomEffect.getControlSchema(), _makeV2Callback('_bloomEffect'), 'global');
         }, 'v2.registerBloomUI', Severity.COSMETIC);
@@ -4863,6 +4890,204 @@ async function createThreeCanvas(scene) {
           uiManager.registerEffect('sharpen', 'Sharpen',
             SharpenEffect.getControlSchema(), _makeV2Callback('_sharpenEffect'), 'global');
         }, 'v2.registerSharpenUI', Severity.COSMETIC);
+
+        // Ash controls: in V2 mode WeatherController isn't constructed as an updatable, but
+        // we still expose full ash tuning controls so users can keep it disabled and
+        // adjust tuning consistently across V1/V2. The enabled toggle is implemented as a
+        // semantic gate that maps to ashIntensity (0 = off).
+        safeCall(() => {
+          const ashTuning = weatherController?.ashTuning || {};
+          const ashWeatherSchema = {
+            enabled: false,
+            groups: [
+              { name: 'ash', label: 'Ashfall', type: 'inline', parameters: ['ashIntensity', 'ashIntensityScale', 'ashEmissionRate'] },
+              { name: 'ash-appearance', label: 'Ash Appearance', type: 'inline', separator: true, parameters: ['ashSizeMin', 'ashSizeMax', 'ashLifeMin', 'ashLifeMax', 'ashSpeedMin', 'ashSpeedMax', 'ashOpacityStartMin', 'ashOpacityStartMax', 'ashOpacityEnd', 'ashColorStart', 'ashColorEnd', 'ashBrightness'] },
+              { name: 'ash-motion', label: 'Ash Motion', type: 'inline', separator: true, parameters: ['ashGravityScale', 'ashWindInfluence', 'ashCurlStrength'] },
+              { name: 'ash-cluster', label: 'Ash Clustering', type: 'inline', separator: true, parameters: ['ashClusterHoldMin', 'ashClusterHoldMax', 'ashClusterRadiusMin', 'ashClusterRadiusMax', 'ashClusterBoostMin', 'ashClusterBoostMax'] },
+              { name: 'embers', label: 'Embers', type: 'inline', separator: true, parameters: ['emberEmissionRate', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'emberSpeedMin', 'emberSpeedMax', 'emberOpacityStartMin', 'emberOpacityStartMax', 'emberOpacityEnd', 'emberColorStart', 'emberColorEnd', 'emberBrightness', 'emberGravityScale', 'emberWindInfluence', 'emberCurlStrength'] }
+            ],
+            parameters: {
+              enabled: { type: 'boolean', default: false },
+              ashIntensity: { label: 'Ash Intensity', type: 'slider', default: 0.0, min: 0.0, max: 1.0, step: 0.01 },
+              ashIntensityScale: { label: 'Intensity Scale', type: 'slider', default: ashTuning.intensityScale ?? 0.5, min: 0.0, max: 4.0, step: 0.05 },
+              ashEmissionRate: { label: 'Emission Rate', type: 'slider', default: ashTuning.emissionRate ?? 840, min: 0, max: 2400, step: 10 },
+              ashSizeMin: { label: 'Size Min', type: 'slider', default: ashTuning.sizeMin ?? 5, min: 1, max: 60, step: 1 },
+              ashSizeMax: { label: 'Size Max', type: 'slider', default: ashTuning.sizeMax ?? 17, min: 2, max: 80, step: 1 },
+              ashLifeMin: { label: 'Life Min (s)', type: 'slider', default: ashTuning.lifeMin ?? 2, min: 0.2, max: 12, step: 0.1 },
+              ashLifeMax: { label: 'Life Max (s)', type: 'slider', default: ashTuning.lifeMax ?? 4.7, min: 0.2, max: 18, step: 0.1 },
+              ashSpeedMin: { label: 'Fall Speed Min', type: 'slider', default: ashTuning.speedMin ?? 15, min: 0, max: 600, step: 5 },
+              ashSpeedMax: { label: 'Fall Speed Max', type: 'slider', default: ashTuning.speedMax ?? 25, min: 0, max: 900, step: 5 },
+              ashOpacityStartMin: { label: 'Opacity Start Min', type: 'slider', default: ashTuning.opacityStartMin ?? 0.53, min: 0.0, max: 1.0, step: 0.01 },
+              ashOpacityStartMax: { label: 'Opacity Start Max', type: 'slider', default: ashTuning.opacityStartMax ?? 0.75, min: 0.0, max: 1.0, step: 0.01 },
+              ashOpacityEnd: { label: 'Opacity End', type: 'slider', default: ashTuning.opacityEnd ?? 0.85, min: 0.0, max: 1.0, step: 0.01 },
+              ashColorStart: { type: 'color', label: 'Color Start', default: ashTuning.colorStart ?? { r: 0.45, g: 0.42, b: 0.38 } },
+              ashColorEnd: { type: 'color', label: 'Color End', default: ashTuning.colorEnd ?? { r: 0.35, g: 0.32, b: 0.28 } },
+              ashBrightness: { label: 'Brightness', type: 'slider', default: ashTuning.brightness ?? 1.0, min: 0.0, max: 3.0, step: 0.05 },
+              ashGravityScale: { label: 'Gravity Scale', type: 'slider', default: ashTuning.gravityScale ?? 0.55, min: 0.0, max: 3.0, step: 0.05 },
+              ashWindInfluence: { label: 'Wind Influence', type: 'slider', default: ashTuning.windInfluence ?? 2.1, min: 0.0, max: 4.0, step: 0.05 },
+              ashCurlStrength: { label: 'Curl Strength', type: 'slider', default: ashTuning.curlStrength ?? 3, min: 0.0, max: 3.0, step: 0.05 },
+              ashClusterHoldMin: { label: 'Cluster Hold Min (s)', type: 'slider', default: ashTuning.clusterHoldMin ?? 1.3, min: 0.5, max: 12, step: 0.1 },
+              ashClusterHoldMax: { label: 'Cluster Hold Max (s)', type: 'slider', default: ashTuning.clusterHoldMax ?? 2.3, min: 0.5, max: 18, step: 0.1 },
+              ashClusterRadiusMin: { label: 'Cluster Radius Min', type: 'slider', default: ashTuning.clusterRadiusMin ?? 1150, min: 50, max: 3000, step: 10 },
+              ashClusterRadiusMax: { label: 'Cluster Radius Max', type: 'slider', default: ashTuning.clusterRadiusMax ?? 2060, min: 100, max: 4000, step: 10 },
+              ashClusterBoostMin: { label: 'Cluster Boost Min', type: 'slider', default: ashTuning.clusterBoostMin ?? 1.1, min: 0.0, max: 2.0, step: 0.05 },
+              ashClusterBoostMax: { label: 'Cluster Boost Max', type: 'slider', default: ashTuning.clusterBoostMax ?? 2.55, min: 0.0, max: 3.0, step: 0.05 },
+              emberEmissionRate: { label: 'Ember Rate', type: 'slider', default: ashTuning.emberEmissionRate ?? 167, min: 0, max: 400, step: 1 },
+              emberSizeMin: { label: 'Ember Size Min', type: 'slider', default: ashTuning.emberSizeMin ?? 7, min: 1, max: 50, step: 1 },
+              emberSizeMax: { label: 'Ember Size Max', type: 'slider', default: ashTuning.emberSizeMax ?? 14, min: 2, max: 70, step: 1 },
+              emberLifeMin: { label: 'Ember Life Min (s)', type: 'slider', default: ashTuning.emberLifeMin ?? 12, min: 0.2, max: 12, step: 0.1 },
+              emberLifeMax: { label: 'Ember Life Max (s)', type: 'slider', default: ashTuning.emberLifeMax ?? 16, min: 0.2, max: 16, step: 0.1 },
+              emberSpeedMin: { label: 'Ember Speed Min', type: 'slider', default: ashTuning.emberSpeedMin ?? 180, min: 0, max: 800, step: 5 },
+              emberSpeedMax: { label: 'Ember Speed Max', type: 'slider', default: ashTuning.emberSpeedMax ?? 820, min: 0, max: 1000, step: 5 },
+              emberOpacityStartMin: { label: 'Ember Opacity Min', type: 'slider', default: ashTuning.emberOpacityStartMin ?? 0.87, min: 0.0, max: 1.0, step: 0.01 },
+              emberOpacityStartMax: { label: 'Ember Opacity Max', type: 'slider', default: ashTuning.emberOpacityStartMax ?? 0.94, min: 0.0, max: 1.0, step: 0.01 },
+              emberOpacityEnd: { label: 'Ember Opacity End', type: 'slider', default: ashTuning.emberOpacityEnd ?? 0.83, min: 0.0, max: 1.0, step: 0.01 },
+              emberColorStart: { type: 'color', label: 'Ember Color Start', default: ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.0 } },
+              emberColorEnd: { type: 'color', label: 'Ember Color End', default: ashTuning.emberColorEnd ?? { r: 1.0, g: 0.25, b: 0.0 } },
+              emberBrightness: { label: 'Ember Brightness', type: 'slider', default: ashTuning.emberBrightness ?? 5, min: 0.0, max: 5.0, step: 0.05 },
+              emberGravityScale: { label: 'Ember Gravity Scale', type: 'slider', default: ashTuning.emberGravityScale ?? 0, min: 0.0, max: 3.0, step: 0.05 },
+              emberWindInfluence: { label: 'Ember Wind Influence', type: 'slider', default: ashTuning.emberWindInfluence ?? 0.45, min: 0.0, max: 4.0, step: 0.05 },
+              emberCurlStrength: { label: 'Ember Curl Strength', type: 'slider', default: ashTuning.emberCurlStrength ?? 3, min: 0.0, max: 3.0, step: 0.05 }
+            }
+          };
+
+          const _applyAshIntensity = (intensity) => {
+            const v = Math.max(0.0, Math.min(1.0, Number(intensity) || 0.0));
+            try {
+              if (weatherController?.targetState) weatherController.targetState.ashIntensity = v;
+              if (weatherController?.currentState) weatherController.currentState.ashIntensity = v;
+            } catch (_) {}
+            try {
+              if (window.MapShine) window.MapShine.__v2AshIntensity = v;
+            } catch (_) {}
+          };
+
+          const _syncAshUiParam = (paramId, value) => {
+            try {
+              const data = uiManager?.effectFolders?.['ash-weather'];
+              if (!data?.params) return;
+              data.params[paramId] = value;
+              if (data.bindings?.[paramId]) {
+                data.bindings[paramId].refresh();
+              }
+            } catch (_) {}
+          };
+
+          const onAshWeatherUpdate = (effectId, paramId, value) => {
+            try {
+              // Enabled toggle semantics: disabling forces intensity to 0 while remembering the last nonzero intensity.
+              if (paramId === 'enabled' || paramId === 'masterEnabled') {
+                const nextEnabled = !!value;
+                if (!window.MapShine) return;
+                if (!window.MapShine.__v2AshWeatherState) window.MapShine.__v2AshWeatherState = {};
+                const st = window.MapShine.__v2AshWeatherState;
+
+                const currentIntensity = Number(weatherController?.targetState?.ashIntensity ?? window.MapShine.__v2AshIntensity ?? 0) || 0;
+                if (nextEnabled === false) {
+                  if (currentIntensity > 0) st.lastIntensity = currentIntensity;
+                  _applyAshIntensity(0.0);
+                  _syncAshUiParam('ashIntensity', 0.0);
+                } else {
+                  const restore = Number(st.lastIntensity ?? 0.25) || 0.25;
+                  _applyAshIntensity(restore);
+                  _syncAshUiParam('ashIntensity', restore);
+                }
+                return;
+              }
+
+              if (paramId === 'ashIntensity') {
+                const v = Number(value) || 0;
+                if (window.MapShine) {
+                  if (!window.MapShine.__v2AshWeatherState) window.MapShine.__v2AshWeatherState = {};
+                  if (v > 0) window.MapShine.__v2AshWeatherState.lastIntensity = v;
+                }
+                _applyAshIntensity(v);
+                // Slider movement implies enabled=true when intensity>0.
+                if (v > 0) _syncAshUiParam('enabled', true);
+                return;
+              }
+
+              // Tuning updates
+              if (!weatherController.ashTuning) weatherController.ashTuning = {};
+              const t = weatherController.ashTuning;
+
+              if (paramId === 'ashIntensityScale') t.intensityScale = value;
+              else if (paramId === 'ashEmissionRate') t.emissionRate = value;
+              else if (paramId === 'ashSizeMin') t.sizeMin = value;
+              else if (paramId === 'ashSizeMax') t.sizeMax = value;
+              else if (paramId === 'ashLifeMin') t.lifeMin = value;
+              else if (paramId === 'ashLifeMax') t.lifeMax = value;
+              else if (paramId === 'ashSpeedMin') t.speedMin = value;
+              else if (paramId === 'ashSpeedMax') t.speedMax = value;
+              else if (paramId === 'ashOpacityStartMin') t.opacityStartMin = value;
+              else if (paramId === 'ashOpacityStartMax') t.opacityStartMax = value;
+              else if (paramId === 'ashOpacityEnd') t.opacityEnd = value;
+              else if (paramId === 'ashColorStart') t.colorStart = value;
+              else if (paramId === 'ashColorEnd') t.colorEnd = value;
+              else if (paramId === 'ashBrightness') t.brightness = value;
+              else if (paramId === 'ashGravityScale') t.gravityScale = value;
+              else if (paramId === 'ashWindInfluence') t.windInfluence = value;
+              else if (paramId === 'ashCurlStrength') t.curlStrength = value;
+              else if (paramId === 'ashClusterHoldMin') t.clusterHoldMin = value;
+              else if (paramId === 'ashClusterHoldMax') t.clusterHoldMax = value;
+              else if (paramId === 'ashClusterRadiusMin') t.clusterRadiusMin = value;
+              else if (paramId === 'ashClusterRadiusMax') t.clusterRadiusMax = value;
+              else if (paramId === 'ashClusterBoostMin') t.clusterBoostMin = value;
+              else if (paramId === 'ashClusterBoostMax') t.clusterBoostMax = value;
+              else if (paramId === 'emberEmissionRate') t.emberEmissionRate = value;
+              else if (paramId === 'emberSizeMin') t.emberSizeMin = value;
+              else if (paramId === 'emberSizeMax') t.emberSizeMax = value;
+              else if (paramId === 'emberLifeMin') t.emberLifeMin = value;
+              else if (paramId === 'emberLifeMax') t.emberLifeMax = value;
+              else if (paramId === 'emberSpeedMin') t.emberSpeedMin = value;
+              else if (paramId === 'emberSpeedMax') t.emberSpeedMax = value;
+              else if (paramId === 'emberOpacityStartMin') t.emberOpacityStartMin = value;
+              else if (paramId === 'emberOpacityStartMax') t.emberOpacityStartMax = value;
+              else if (paramId === 'emberOpacityEnd') t.emberOpacityEnd = value;
+              else if (paramId === 'emberColorStart') t.emberColorStart = value;
+              else if (paramId === 'emberColorEnd') t.emberColorEnd = value;
+              else if (paramId === 'emberBrightness') t.emberBrightness = value;
+              else if (paramId === 'emberGravityScale') t.emberGravityScale = value;
+              else if (paramId === 'emberWindInfluence') t.emberWindInfluence = value;
+              else if (paramId === 'emberCurlStrength') t.emberCurlStrength = value;
+            } catch (_) {}
+          };
+
+          uiManager.registerEffect(
+            'ash-weather',
+            'Ash (Weather)',
+            ashWeatherSchema,
+            onAshWeatherUpdate,
+            'particle'
+          );
+        }, 'v2.registerAshWeatherUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          const ashSchema = AshDisturbanceEffect.getControlSchema();
+          const onAshDisturbanceUpdate = (effectId, paramId, value) => {
+            try {
+              if (window.MapShine) {
+                if (!window.MapShine.__v2AshDisturbance) window.MapShine.__v2AshDisturbance = {};
+                window.MapShine.__v2AshDisturbance[paramId] = value;
+              }
+
+              // If a live V1 AshDisturbanceEffect instance exists (e.g. user toggled back to V1
+              // without a full reload), apply the change directly.
+              const live = window.MapShine?.effectMap?.get?.('Ash Disturbance') || window.MapShine?.ashDisturbanceEffect;
+              if (live && typeof live.applyParamChange === 'function') {
+                live.applyParamChange(paramId, value);
+              }
+            } catch (_) {}
+          };
+
+          uiManager.registerEffect(
+            'ash-disturbance',
+            'Ash Disturbance',
+            ashSchema,
+            onAshDisturbanceUpdate,
+            'particle'
+          );
+        }, 'v2.registerAshDisturbanceUI', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('fog', 'Fog of War',
@@ -7007,7 +7232,7 @@ async function initializeUI(effectMap) {
         { name: 'embers', label: 'Embers', type: 'inline', separator: true, parameters: ['emberEmissionRate', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'emberSpeedMin', 'emberSpeedMax', 'emberOpacityStartMin', 'emberOpacityStartMax', 'emberOpacityEnd', 'emberColorStart', 'emberColorEnd', 'emberBrightness', 'emberGravityScale', 'emberWindInfluence', 'emberCurlStrength'] }
       ],
       parameters: {
-        ashIntensity: { label: 'Ash Intensity', type: 'slider', default: weatherController.targetState.ashIntensity ?? 0.93, min: 0.0, max: 1.0, step: 0.01 },
+        ashIntensity: { label: 'Ash Intensity', type: 'slider', default: 0.0, min: 0.0, max: 1.0, step: 0.01 },
         ashIntensityScale: { label: 'Intensity Scale', type: 'slider', default: ashTuning.intensityScale ?? 0.5, min: 0.0, max: 4.0, step: 0.05 },
         ashEmissionRate: { label: 'Emission Rate', type: 'slider', default: ashTuning.emissionRate ?? 840, min: 0, max: 2400, step: 10 },
         ashSizeMin: { label: 'Size Min', type: 'slider', default: ashTuning.sizeMin ?? 5, min: 1, max: 60, step: 1 },

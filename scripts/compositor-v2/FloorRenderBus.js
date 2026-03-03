@@ -272,9 +272,29 @@ export class FloorRenderBus {
     
     for (const { mesh, material } of this._tiles.values()) {
       this._scene.remove(mesh);
-      material.map?.dispose();
-      material.dispose();
-      mesh.geometry.dispose();
+
+      // Tiles and some overlays are Mesh instances with materials/geometries.
+      // Others (e.g. quarks BatchedRenderer) are Object3D renderers with no
+      // `material` or `geometry`. Treat those as effect-owned and only detach.
+      try {
+        const mat = material ?? mesh?.material ?? null;
+        if (mat) {
+          // Support arrays for multi-material meshes.
+          const mats = Array.isArray(mat) ? mat : [mat];
+          for (const m of mats) {
+            if (!m) continue;
+            try { m.map?.dispose?.(); } catch (_) {}
+            try { m.dispose?.(); } catch (_) {}
+          }
+        }
+      } catch (_) {}
+
+      try {
+        const geom = mesh?.geometry ?? null;
+        if (geom && typeof geom.dispose === 'function') {
+          geom.dispose();
+        }
+      } catch (_) {}
     }
     this._tiles.clear();
     

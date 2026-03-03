@@ -38,9 +38,9 @@ import { createLogger } from '../../core/log.js';
 
 const log = createLogger('OverheadShadowsEffectV2');
 
-// Shadow RT resolution. Half of typical viewport is sufficient — shadow edges
-// are naturally soft so aliasing is not visible.
-const SHADOW_RT_SIZE = 512;
+// Shadow RT downscale factor relative to the renderer drawing buffer.
+// Keep aspect ratio identical to the viewport to avoid UV stretch/drift.
+const SHADOW_RT_DOWNSCALE = 0.75;
 
 export class OverheadShadowsEffectV2 {
   /**
@@ -112,13 +112,15 @@ export class OverheadShadowsEffectV2 {
       wrapT: THREE.ClampToEdgeWrapping,
     };
 
-    // Roof capture RT: records overhead tile alpha in screen UV space this frame.
-    this._roofAlphaRT = new THREE.WebGLRenderTarget(SHADOW_RT_SIZE, SHADOW_RT_SIZE, rtOpts);
+    // Allocate RTs sized to the current drawing buffer (downscaled, aspect-correct).
+    const size = renderer.getDrawingBufferSize(this._sizeVec);
+    this._roofAlphaRT = new THREE.WebGLRenderTarget(1, 1, rtOpts);
     this._roofAlphaRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
+    this._shadowRT = new THREE.WebGLRenderTarget(1, 1, rtOpts);
+    this._resizeTargets(size.x, size.y);
 
-    // Shadow factor RT: output passed to LightingEffectV2. Cleared to white (fully lit)
+    // Shadow factor RT: output passed to LightingEffectV2. Clear to white (fully lit)
     // so the scene is unaffected before the first render.
-    this._shadowRT = new THREE.WebGLRenderTarget(SHADOW_RT_SIZE, SHADOW_RT_SIZE, rtOpts);
     renderer.setRenderTarget(this._shadowRT);
     renderer.setClearColor(0xffffff, 1);
     renderer.clear();
@@ -133,11 +135,12 @@ export class OverheadShadowsEffectV2 {
       uniforms: {
         tRoof:        { value: null },
         uSunDir:      { value: new THREE.Vector2(0, -1) },
-        uLength:      { value: this.params.length },
+        // Shadow offset length in pixels (derived each frame from params.length and RT size).
+        uLength:      { value: 0.0 },
         uOpacity:     { value: this.params.opacity },
         uSoftness:    { value: this.params.softness },
-        // Texel size for blur kernel (1/SHADOW_RT_SIZE by default, updated on resize)
-        uTexelSize:   { value: new THREE.Vector2(1 / SHADOW_RT_SIZE, 1 / SHADOW_RT_SIZE) },
+        // Texel size for blur kernel. Updated whenever RT size changes.
+        uTexelSize:   { value: new THREE.Vector2(1, 1) },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -164,18 +167,21 @@ export class OverheadShadowsEffectV2 {
         }
 
         float sampleRoofBlurred(vec2 uv) {
-          float blur = uSoftness * 0.005; // Convert softness (1–5) to UV-space radius
+          // Zoom/resolution stability:
+          // Express blur in *pixels* then convert to UV via uTexelSize.
+          float blurPx = max(uSoftness, 0.0) * 1.5;
+          vec2 blurUv = uTexelSize * blurPx;
           float a = sampleRoof(uv);
-          a += sampleRoof(uv + vec2( blur, 0.0));
-          a += sampleRoof(uv + vec2(-blur, 0.0));
-          a += sampleRoof(uv + vec2(0.0,  blur));
-          a += sampleRoof(uv + vec2(0.0, -blur));
+          a += sampleRoof(uv + vec2( blurUv.x, 0.0));
+          a += sampleRoof(uv + vec2(-blurUv.x, 0.0));
+          a += sampleRoof(uv + vec2(0.0,  blurUv.y));
+          a += sampleRoof(uv + vec2(0.0, -blurUv.y));
           // Extra diagonal taps for wider penumbra without banding artefacts.
-          float diag = blur * 0.707;
-          a += sampleRoof(uv + vec2( diag,  diag));
-          a += sampleRoof(uv + vec2(-diag,  diag));
-          a += sampleRoof(uv + vec2( diag, -diag));
-          a += sampleRoof(uv + vec2(-diag, -diag));
+          vec2 diagUv = blurUv * 0.707;
+          a += sampleRoof(uv + vec2( diagUv.x,  diagUv.y));
+          a += sampleRoof(uv + vec2(-diagUv.x,  diagUv.y));
+          a += sampleRoof(uv + vec2( diagUv.x, -diagUv.y));
+          a += sampleRoof(uv + vec2(-diagUv.x, -diagUv.y));
           return a / 9.0;
         }
 
@@ -183,7 +189,7 @@ export class OverheadShadowsEffectV2 {
           // The shadow falls OFFSET from the roof silhouette in the sun direction.
           // Sample roofAlphaRT at uv MINUS the offset so at ground level we read
           // the roof that is "above" us in the shadow direction.
-          vec2 shadowUv = vUv - uSunDir * uLength;
+          vec2 shadowUv = vUv - uSunDir * (uTexelSize * uLength);
 
           float roofAlpha = sampleRoofBlurred(shadowUv);
 
@@ -213,7 +219,29 @@ export class OverheadShadowsEffectV2 {
     this._shadowScene.add(this._shadowQuad);
 
     this._initialized = true;
-    log.info(`OverheadShadowsEffectV2 initialized (RT: ${SHADOW_RT_SIZE}×${SHADOW_RT_SIZE})`);
+    log.info(`OverheadShadowsEffectV2 initialized (RT: ${this._shadowRT?.width ?? '?'}×${this._shadowRT?.height ?? '?'})`);
+  }
+
+  /**
+   * Resize internal RTs to match viewport aspect (downscaled).
+   * @param {number} w
+   * @param {number} h
+   * @private
+   */
+  _resizeTargets(w, h) {
+    if (!this._roofAlphaRT || !this._shadowRT || !this._shadowMaterial) {
+      // Material isn't created until after RT allocation in initialize(); we still
+      // want RT sizing during that early stage.
+    }
+    const safeW = Math.max(1, Math.floor((Number.isFinite(w) ? w : 1) * SHADOW_RT_DOWNSCALE));
+    const safeH = Math.max(1, Math.floor((Number.isFinite(h) ? h : 1) * SHADOW_RT_DOWNSCALE));
+
+    try { this._roofAlphaRT?.setSize(safeW, safeH); } catch (_) {}
+    try { this._shadowRT?.setSize(safeW, safeH); } catch (_) {}
+
+    if (this._shadowMaterial?.uniforms?.uTexelSize?.value) {
+      this._shadowMaterial.uniforms.uTexelSize.value.set(1 / safeW, 1 / safeH);
+    }
   }
 
   // ── Sun direction ─────────────────────────────────────────────────
@@ -335,7 +363,13 @@ export class OverheadShadowsEffectV2 {
 
     // ── Pass 2: Shadow offset + blur → _shadowRT ──────────────────────
     this._shadowMaterial.uniforms.tRoof.value    = this._roofAlphaRT.texture;
-    this._shadowMaterial.uniforms.uLength.value  = this.params.length;
+    // `params.length` is treated as a fraction of the shadow RT's smaller dimension.
+    // Convert to pixels so the shader can use uTexelSize for resolution stability.
+    const rtW = this._shadowRT.width ?? 1;
+    const rtH = this._shadowRT.height ?? 1;
+    const minDim = Math.max(1, Math.min(rtW, rtH));
+    const lengthPx = Math.max(0.0, (Number(this.params.length) || 0.0) * minDim);
+    this._shadowMaterial.uniforms.uLength.value  = lengthPx;
     this._shadowMaterial.uniforms.uOpacity.value = this.params.opacity;
     this._shadowMaterial.uniforms.uSoftness.value = this.params.softness;
 
@@ -365,12 +399,13 @@ export class OverheadShadowsEffectV2 {
 
   /**
    * Resize internal RTs. Called by FloorCompositor.onResize().
-   * The shadow RT stays at SHADOW_RT_SIZE (fixed resolution) but we
-   * update uTexelSize if the blit scale changes.
+   * Targets are resized (downscaled) to keep aspect ratio identical to
+   * the viewport, so screen-space sampling remains aligned.
    */
   onResize(_w, _h) {
-    // Shadow RT is fixed-res; no RT resize needed.
-    // texelSize stays correct as long as RT stays SHADOW_RT_SIZE × SHADOW_RT_SIZE.
+    // Resize RTs to match the viewport aspect to keep sampling aligned in screen UV.
+    // FloorCompositor passes drawing-buffer size here.
+    this._resizeTargets(_w, _h);
   }
 
   // ── Cleanup ───────────────────────────────────────────────────────

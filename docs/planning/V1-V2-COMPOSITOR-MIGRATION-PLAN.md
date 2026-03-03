@@ -604,6 +604,14 @@ Disposing MapShine’s `FrameCoordinator` helps reduce extra PIXI flush renderin
      - Assigns background fire to floor 0
      - Merges background points with tile points before building particle systems
    - **Result:** Fire particles now spawn from background `_Fire` masks correctly.
+   - **✅ FIXED: Upper-floor fire not rendering (multi-floor scenes)**
+     - **Symptom:** Fire masks were discovered and systems were registered in the Quarks `BatchedRenderer`, but nothing appeared visually when fire lived on an upper floor.
+     - **Root cause:** `FloorRenderBus` tiles use very large `renderOrder` values (`floorIndex * 10000 + sort`). Fire’s `BatchedRenderer` and particle systems were using `renderOrder ~ 50`, so they rendered *before* tiles and were completely overwritten.
+     - **Fix:** Raised V2 fire draw order well above the tile range:
+       - `FireEffectV2._batchRenderer.renderOrder = 200000`
+       - Fire/ember/smoke particle systems use `renderOrder = 200000 / 200001 / 200002`
+     - **Additional fix:** Ensure systems actually start emitting by calling `system.play()` after creating each Quarks particle system.
+   - **Diagnostics quality-of-life:** `EffectComposer._getFloorCompositorV2()` now exposes V2 instances on `window.MapShine` (`floorCompositorV2`, `fireEffectV2`, etc.) so runtime inspection is straightforward in V2 (effects are not registered in the legacy `EffectComposer.effects` map).
    - **Hosted/Levels hardening (mask discovery + spam control):**
      - **Problem observed:** On some hosted Foundry setups, `probeMaskFile()` can return null even when a valid `_Fire` mask exists and can be loaded via a normal browser `GET`.
        - Common causes include FilePicker browse restrictions and/or `HEAD` probing being blocked or unreliable.

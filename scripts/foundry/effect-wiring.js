@@ -45,6 +45,7 @@ import { DebugLayerEffect } from '../effects/DebugLayerEffect.js';
 import { PlayerLightEffect } from '../effects/PlayerLightEffect.js';
 import { SkyColorEffect } from '../effects/SkyColorEffect.js';
 import { VisionModeEffect } from '../effects/VisionModeEffect.js';
+import { AshDisturbanceEffect } from '../particles/AshDisturbanceEffect.js';
 
 import { createLogger } from '../core/log.js';
 
@@ -64,6 +65,7 @@ export {
   SharpenEffect,
   AsciiEffect,
   SmellyFliesEffect,
+  AshDisturbanceEffect,
   LightningEffect,
   PrismEffect,
   WaterEffectV2,
@@ -123,7 +125,8 @@ export function getIndependentEffectDefs() {
     ['Debug Layers', DebugLayerEffect],
     ['Player Lights', PlayerLightEffect],
     ['Sky Color', SkyColorEffect],
-    ['Vision Mode', VisionModeEffect]
+    ['Vision Mode', VisionModeEffect],
+    ['Ash Disturbance', AshDisturbanceEffect]
   ];
 }
 
@@ -158,6 +161,7 @@ const CAPABILITIES = [
   { effectId: 'fire-sparks',       displayName: 'Fire & Embers',            category: 'particle',     performanceImpact: 'high' },
   { effectId: 'dust-motes',        displayName: 'Dust Motes',               category: 'particle',     performanceImpact: 'low' },
   { effectId: 'smelly-flies',      displayName: 'Smelly Flies',             category: 'particle',     performanceImpact: 'low' },
+  { effectId: 'ash-disturbance',   displayName: 'Ash Disturbance',          category: 'particle',     performanceImpact: 'low' },
   { effectId: 'lightning',         displayName: 'Lightning',                category: 'particle',     performanceImpact: 'medium' },
   { effectId: 'atmospheric-fog',   displayName: 'Atmospheric Fog',          category: 'atmospheric',  performanceImpact: 'medium' },
   { effectId: 'ascii',             displayName: 'ASCII',                    category: 'global',       performanceImpact: 'high' },
@@ -204,6 +208,7 @@ const GS_ID_TO_EFFECT_MAP_NAME = [
   ['sharpen',           'Sharpen'],
   ['ascii',             'ASCII'],
   ['lightning',         'Lightning'],
+  ['ash-disturbance',   'Ash Disturbance'],
   ['prism',             'Prism'],
   ['water',             'Water'],
   ['fog',               'Fog'],

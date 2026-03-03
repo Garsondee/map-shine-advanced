@@ -54,6 +54,7 @@ import { WaterEffectV2 } from './effects/WaterEffectV2.js';
 import { CloudEffectV2 } from './effects/CloudEffectV2.js';
 import { WeatherParticlesV2 } from './effects/WeatherParticlesV2.js';
 import { WaterSplashesEffectV2 } from './effects/WaterSplashesEffectV2.js';
+import { AshDisturbanceEffectV2 } from './effects/AshDisturbanceEffectV2.js';
 import { getCircuitBreaker } from '../core/circuit-breaker.js';
 import { OutdoorsMaskProviderV2 } from './effects/OutdoorsMaskProviderV2.js';
 import { BuildingShadowsEffectV2 } from './effects/BuildingShadowsEffectV2.js';
@@ -211,6 +212,13 @@ export class FloorCompositor {
      * @type {WeatherParticlesV2}
      */
     this._weatherParticles = this._circuitBreaker.isDisabled('v2.weatherParticles') ? null : new WeatherParticlesV2();
+
+    /**
+     * V2 Ash Disturbance Effect: token-movement driven ash bursts from _Ash masks.
+     * Own BatchedRenderer lives in the bus scene.
+     * @type {AshDisturbanceEffectV2}
+     */
+    this._ashDisturbanceEffect = this._circuitBreaker.isDisabled('v2.ashDisturbance') ? null : new AshDisturbanceEffectV2(this._renderBus);
 
     /**
      * V2 Outdoors mask provider: discovers _Outdoors tiles per floor, composites
@@ -408,6 +416,11 @@ export class FloorCompositor {
       log.warn('FloorCompositor: WeatherParticlesV2 initialize failed:', err);
     }
 
+    // Ash disturbance bursts: owns its own batch renderer and registers it via renderBus overlay.
+    try { this._ashDisturbanceEffect?.initialize?.(); } catch (err) {
+      log.warn('FloorCompositor: AshDisturbanceEffectV2 initialize failed:', err);
+    }
+
     // Subscribe outdoors mask consumers so they receive the texture as soon as
     // populate() builds it, and again on every floor change.
     // CloudEffectV2: cloud shadows and cloud tops only fall on outdoor areas.
@@ -569,6 +582,15 @@ export class FloorCompositor {
             log.error('WaterSplashesEffectV2 populate failed:', err);
           });
         }
+
+        // Populate ash disturbance per-floor point sets from _Ash masks.
+        if (this._ashDisturbanceEffect) {
+          this._ashDisturbanceEffect.populate(sc.foundrySceneData).then(() => {
+            this._applyCurrentFloorVisibility();
+          }).catch(err => {
+            log.error('AshDisturbanceEffectV2 populate failed:', err);
+          });
+        }
         // Populate outdoors mask (discovers _Outdoors tiles, notifies all consumers).
         if (this._outdoorsMask) {
           this._outdoorsMask.populate(sc.foundrySceneData).catch(err => {
@@ -614,6 +636,11 @@ export class FloorCompositor {
         this._waterSplashesEffect?.update?.(timeInfo);
       } catch (err) {
         log.warn('WaterSplashesEffectV2 update threw, skipping frame:', err);
+      }
+      try {
+        this._ashDisturbanceEffect?.update?.(timeInfo);
+      } catch (err) {
+        log.warn('AshDisturbanceEffectV2 update threw, skipping frame:', err);
       }
       this._windowLightEffect.update(timeInfo);
       this._cloudEffect.update(timeInfo);
@@ -1091,6 +1118,8 @@ export class FloorCompositor {
     this._fireEffect.onFloorChange(maxFloorIndex);
     // Notify water splashes of floor change so it can swap active systems.
     try { this._waterSplashesEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
+    // Notify ash disturbance so it can swap active burst system sets.
+    try { this._ashDisturbanceEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Update window light overlay visibility (isolated scene, not bus-managed).
     this._windowLightEffect.onFloorChange(maxFloorIndex);
     // Cloud effect: blocker pass is automatically floor-isolated via bus visibility;
@@ -1136,6 +1165,7 @@ export class FloorCompositor {
     try { this._cloudEffect.dispose(); } catch (_) {}
     try { this._waterSplashesEffect?.dispose?.(); } catch (_) {}
     try { this._weatherParticles?.dispose?.(); } catch (_) {}
+    try { this._ashDisturbanceEffect?.dispose?.(); } catch (_) {}
     try { this._outdoorsMask?.dispose?.(); } catch (_) {}
     try { this._buildingShadowEffect?.dispose?.(); } catch (_) {}
     try { this._waterEffect?.dispose?.(); } catch (_) {}

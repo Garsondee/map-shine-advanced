@@ -171,7 +171,10 @@ export class FireEffectV2 {
 
     // Create a dedicated BatchedRenderer for V2 fire particles.
     this._batchRenderer = new BatchedRenderer();
-    this._batchRenderer.renderOrder = 50;
+    // IMPORTANT (V2): FloorRenderBus tiles use very large renderOrder values
+    // (floorIndex * 10000 + sort). If we keep the quarks renderer at ~50 it will
+    // render BEFORE tiles and get fully overwritten by tile draws.
+    this._batchRenderer.renderOrder = 200000;
     this._batchRenderer.frustumCulled = false;
     try {
       if (this._batchRenderer.layers && typeof this._batchRenderer.layers.enable === 'function') {
@@ -572,7 +575,7 @@ export class FireEffectV2 {
       shape,
       material,
       renderMode: RenderMode.BillBoard,
-      renderOrder: 50,
+      renderOrder: 200000,
       uTileCount: 1,
       vTileCount: 1,
       startTileIndex: new ConstantValue(0),
@@ -589,6 +592,9 @@ export class FireEffectV2 {
       baseCurlStrength: new THREE.Vector3(80, 80, 30),
       _msEmissionScale: weight,
     };
+
+    // Start the system so it becomes active and emits particles.
+    if (typeof system.play === 'function') system.play();
 
     return system;
   }
@@ -640,7 +646,7 @@ export class FireEffectV2 {
       shape,
       material,
       renderMode: RenderMode.BillBoard,
-      renderOrder: 51,
+      renderOrder: 200001,
       behaviors: [
         new ParticleTimeScaledBehavior(buoyancy),
         windForce,
@@ -660,6 +666,9 @@ export class FireEffectV2 {
       isEmber: true,
       _msEmissionScale: weight,
     };
+
+    // Start the system so it becomes active and emits particles.
+    if (typeof system.play === 'function') system.play();
 
     return system;
   }
@@ -712,7 +721,7 @@ export class FireEffectV2 {
       shape,
       material,
       renderMode: RenderMode.BillBoard,
-      renderOrder: 52,
+      renderOrder: 200002,
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [windForce, smokeUpdraft, turbulence, new FireSpinBehavior(), smokeLifecycle],
     });
@@ -728,6 +737,9 @@ export class FireEffectV2 {
       _msEmissionScale: weight,
     };
 
+    // Start the system so it becomes active and emits particles.
+    if (typeof system.play === 'function') system.play();
+
     return system;
   }
 
@@ -737,7 +749,9 @@ export class FireEffectV2 {
   _activateCurrentFloor() {
     const floorStack = window.MapShine?.floorStack;
     const activeFloor = floorStack?.getActiveFloor();
-    const maxFloorIndex = activeFloor?.index ?? Infinity;
+    // Default to 0 (ground floor only) if active floor not available.
+    // Using Infinity would attempt to activate all possible floor indices.
+    const maxFloorIndex = Number.isFinite(activeFloor?.index) ? activeFloor.index : 0;
     log.info(`FireEffectV2: _activateCurrentFloor called, activeFloor=${JSON.stringify(activeFloor)}, maxFloorIndex=${maxFloorIndex}`);
     this.onFloorChange(maxFloorIndex);
   }
@@ -756,20 +770,21 @@ export class FireEffectV2 {
     for (const sys of allSystems) {
       try { 
         this._batchRenderer.addSystem(sys);
-        log.debug(`  Added system to batch renderer, emitter=${!!sys.emitter}`);
       } catch (err) {
-        log.warn(`  Failed to add system to batch renderer:`, err);
+        log.warn(`  addSystem() failed:`, err);
       }
       // Emitters must be in the scene graph for three.quarks to update their
       // world matrices. Adding them as children of the BatchedRenderer (which
       // is already in the bus scene) achieves this without exposing the bus's
       // private scene reference.
       if (sys.emitter) {
-        this._batchRenderer.add(sys.emitter);
-        log.debug(`  Added emitter to batch renderer as child`);
+        try {
+          this._batchRenderer.add(sys.emitter);
+        } catch (err) {
+          log.warn(`  Failed to add emitter:`, err);
+        }
       }
     }
-    log.info(`FireEffectV2: activated floor ${floorIndex} - batch now has ${this._batchRenderer.systemToDraw?.length ?? 0} systems`);
   }
 
   /** Remove a specific floor's systems from the BatchedRenderer. @private */

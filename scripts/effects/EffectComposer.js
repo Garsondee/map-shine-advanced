@@ -1468,6 +1468,20 @@ export class EffectComposer {
       this._floorCompositorV2.initialize();
       log.info('FloorCompositor V2 created and initialized');
 
+      // Expose FloorCompositor V2 and its effects for runtime diagnostics and
+      // console debugging. In V2 mode, effects are not registered in the legacy
+      // EffectComposer.effects map, so without this it's hard to inspect state.
+      try {
+        if (window.MapShine) {
+          window.MapShine.floorCompositorV2 = this._floorCompositorV2;
+          window.MapShine.fireEffectV2 = this._floorCompositorV2._fireEffect;
+          window.MapShine.specularEffectV2 = this._floorCompositorV2._specularEffect;
+          window.MapShine.windowLightEffectV2 = this._floorCompositorV2._windowLightEffect;
+          window.MapShine.cloudEffectV2 = this._floorCompositorV2._cloudEffect;
+          window.MapShine.waterSplashesEffectV2 = this._floorCompositorV2._waterSplashesEffect;
+        }
+      } catch (_) {}
+
       // Expose WaterEffectV2 on window.MapShine.waterEffect so V1
       // WeatherParticles foam systems can read water mask/data textures
       // and params. Without this, foam.webp particles are entirely disabled

@@ -370,10 +370,9 @@ export class ControlsIntegration {
       }
     }
 
-    // Also hide the native Fog of War visual layers. We replace fog
-    // rendering with WorldSpaceFogEffect which renders fog as a world-space
-    // plane mesh. Turning these layers invisible prevents double-fog artifacts.
-    // Foundry's vision sources are still computed - we just hide the visual output.
+    // Also hide native Fog of War visual layers in Three-driven rendering mode.
+    // We keep Foundry vision/exploration computation active, but suppress the
+    // PIXI fog draw pass so it doesn't conflict with Map Shine rendering.
     
     // canvas.fog contains the exploration sprite
     if (canvas.fog) {
@@ -385,9 +384,8 @@ export class ControlsIntegration {
       }
     }
     
-    // canvas.visibility is the layer that applies the actual fog filter
-    // This is the main source of the "double fog" issue - it renders
-    // Foundry's native visibility filter which we're replacing with WorldSpaceFogEffect
+    // canvas.visibility is the layer that applies the actual fog filter.
+    // Suppress its visual output in Three-driven mode to avoid duplicate overlays.
     // 
     // IMPORTANT: We set visible=false but keep the layer's internal rendering active
     // so that canvas.effects.visionSources continues to be computed. The visibility layer

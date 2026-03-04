@@ -704,9 +704,9 @@ export class DiagnosticCenterDialog {
 
     // --- Pipeline mode ---
     try {
-      const v2Enabled = Boolean(effectComposer?._checkCompositorV2Enabled?.() && effectComposer?._floorCompositorV2);
-      const floorLoopEnabled = Boolean(effectComposer?._checkFloorLoopEnabled?.() && window.MapShine?.floorStack);
-      const modeLabel = v2Enabled ? 'V2 compositor' : (floorLoopEnabled ? 'V1 per-floor loop' : 'V1 legacy single-pass');
+      const v2Enabled = Boolean(effectComposer?._floorCompositorV2);
+      const floorLoopEnabled = false;
+      const modeLabel = 'V2 compositor';
       checks.push(_mkCheck('Runtime', 'runtime.pipeline.mode', 'INFO', `Pipeline: ${modeLabel}`, {
         v2Enabled,
         floorLoopEnabled,

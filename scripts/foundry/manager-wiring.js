@@ -98,20 +98,11 @@ export function exposeGlobals(mapShine, refs) {
   // Expose effects by their window.MapShine property name
   const EFFECT_EXPOSURES = [
     ['Specular',          'specularEffect'],
-    ['Iridescence',       'iridescenceEffect'],
-    ['Window Lights',     'windowLightEffect'],
     ['Overhead Shadows',  'overheadShadowsEffect'],
     ['Building Shadows',  'buildingShadowsEffect'],
-    ['Smelly Flies',      'smellyFliesEffect'],
-    ['Dust Motes',        'dustMotesEffect'],
-    ['Lightning',         'lightningEffect'],
     ['Ash Disturbance',   'ashDisturbanceEffect'],
     ['Water',             'waterEffect'],
-    ['Fog',               'fogEffect'],
     ['Sky Color',         'skyColorEffect'],
-    ['Distortion',        'distortionManager'],
-    ['Debug Layers',      'debugLayerEffect'],
-    ['Player Lights',     'playerLightEffect'],
     ['Lighting',          'lightingEffect'],
     ['Candle Flames',     'candleFlamesEffect'],
   ];

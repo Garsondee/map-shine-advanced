@@ -508,17 +508,8 @@ export class SceneComposer {
     // Load effect masks if we have a background path
     let result = { success: false, bundle: { masks: [] }, warnings: [] };
     if (bgPath) {
-      const _skipMaskIds = (() => {
-        try {
-          // Compositor V2 has its own mask discovery pipeline and does not
-          // consume the legacy scene bundle _Water mask.
-          // Skipping it avoids unnecessary network/decode work and removes
-          // the loading progress step.
-          if (!!game?.settings?.get('map-shine-advanced', 'useCompositorV2')) return ['water'];
-        } catch (e) {
-        }
-        return null;
-      })();
+      // V2-only runtime: scene bundle no longer consumes legacy _Water mask.
+      const _skipMaskIds = ['water'];
 
       if (doLoadProfile) {
         try {
@@ -623,13 +614,7 @@ export class SceneComposer {
           if (probed) {
             bgPath = probed;
             log.info(`Probed mask basePath: ${bgPath}`);
-            const _skipMaskIds = (() => {
-              try {
-                if (!!game?.settings?.get('map-shine-advanced', 'useCompositorV2')) return ['water'];
-              } catch (e) {
-              }
-              return null;
-            })();
+            const _skipMaskIds = ['water'];
             result = await assetLoader.loadAssetBundle(bgPath, null, { skipBaseTexture: true, suppressProbeErrors: true, skipMaskIds: _skipMaskIds });
           }
         } catch (e) {

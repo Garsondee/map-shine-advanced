@@ -3812,11 +3812,8 @@ export class InteractionManager {
     // But if we are "near a line", we probably want the line.
     if (hitFound) return;
 
-    // Tree canopy hover-hide is a V1-only feature. Skip when V2 compositor is active.
-    try {
-      const useV2 = !!(window.MapShine?.effectComposer?._checkCompositorV2Enabled?.());
-      if (useV2) return;
-    } catch (_) {}
+    // Tree canopy hover-hide is a V1-only feature. V2 runtime skips it.
+    if (window.MapShine?.__v2Active === true) return;
 
     const mapShine = window.MapShine || window.mapShine;
     const treeEffect = mapShine?.treeEffect;

@@ -33,7 +33,7 @@
  *   - **FilmGrainEffectV2**: Animated noise overlay (disabled by default).
  *   - **SharpenEffectV2**: Unsharp mask filter (disabled by default).
  *
- * Called by EffectComposer.render() when the `useCompositorV2` setting is on.
+ * Called by EffectComposer.render() in the V2-only runtime.
  *
  * @module compositor-v2/FloorCompositor
  */
@@ -58,7 +58,6 @@ import { AshDisturbanceEffectV2 } from './effects/AshDisturbanceEffectV2.js';
 import { FluidEffectV2 } from './effects/FluidEffectV2.js';
 import { BushEffectV2 } from './effects/BushEffectV2.js';
 import { TreeEffectV2 } from './effects/TreeEffectV2.js';
-import { getCircuitBreaker } from '../core/circuit-breaker.js';
 import { OverheadShadowsEffectV2 } from './effects/OverheadShadowsEffectV2.js';
 import { BuildingShadowsEffectV2 } from './effects/BuildingShadowsEffectV2.js';
 import { DotScreenEffectV2 } from './effects/DotScreenEffectV2.js';
@@ -69,7 +68,6 @@ import { VisionModeEffectV2 } from './effects/VisionModeEffectV2.js';
 import { InvertEffectV2 } from './effects/InvertEffectV2.js';
 import { SepiaEffectV2 } from './effects/SepiaEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
-import { WorldSpaceFogEffect } from '../effects/WorldSpaceFogEffect.js';
 
 const log = createLogger('FloorCompositor');
 
@@ -202,23 +200,12 @@ export class FloorCompositor {
      */
     this._cloudEffect = new CloudEffectV2();
 
-    // Circuit breaker: central, client-local effect kill-switches.
-    this._circuitBreaker = getCircuitBreaker();
-
     /**
      * V2 Water Effect: fullscreen post-process surface driven by composited _Water
      * masks (background + tiles). Renders in the post chain.
      * @type {WaterEffectV2}
      */
-    const waterDisabled = this._circuitBreaker.isDisabled('v2.water') || (() => {
-      // Client-local emergency kill switch: if the water shader triggers a GPU driver
-      // compilation hang, Foundry can freeze before you can open any UI to disable it.
-      // Set in the browser console:
-      //   localStorage.setItem('msa-disable-v2-water', '1')
-      // and reload.
-      try { return globalThis.localStorage?.getItem?.('msa-disable-v2-water') === '1'; } catch (_) { return false; }
-    })();
-    this._waterEffect = waterDisabled ? null : new WaterEffectV2();
+    this._waterEffect = new WaterEffectV2();
 
     /**
      * V2 Water Splashes Effect: per-floor foam plume + rain splash particle
@@ -226,7 +213,7 @@ export class FloorCompositor {
      * Replaces the legacy foam bridge (WaterEffectV2 → WeatherParticles).
      * @type {WaterSplashesEffectV2}
      */
-    this._waterSplashesEffect = this._circuitBreaker.isDisabled('v2.waterSplashes') ? null : new WaterSplashesEffectV2(this._renderBus);
+    this._waterSplashesEffect = new WaterSplashesEffectV2(this._renderBus);
 
     /**
      * V2 Underwater Bubbles controls: proxy to the bubbles layer inside WaterSplashesEffectV2.
@@ -241,14 +228,14 @@ export class FloorCompositor {
      * each frame so weather state is live in V2.
      * @type {WeatherParticlesV2}
      */
-    this._weatherParticles = this._circuitBreaker.isDisabled('v2.weatherParticles') ? null : new WeatherParticlesV2();
+    this._weatherParticles = new WeatherParticlesV2();
 
     /**
      * V2 Ash Disturbance Effect: token-movement driven ash bursts from _Ash masks.
      * Own BatchedRenderer lives in the bus scene.
      * @type {AshDisturbanceEffectV2}
      */
-    this._ashDisturbanceEffect = this._circuitBreaker.isDisabled('v2.ashDisturbance') ? null : new AshDisturbanceEffectV2(this._renderBus);
+    this._ashDisturbanceEffect = new AshDisturbanceEffectV2(this._renderBus);
 
     // Outdoors mask is now provided by EffectMaskRegistry (central asset system)
 
@@ -258,7 +245,7 @@ export class FloorCompositor {
      * as `tOverheadShadow` — dims ambient only, dynamic lights punch through.
      * @type {OverheadShadowsEffectV2}
      */
-    this._overheadShadowEffect = this._circuitBreaker.isDisabled('v2.overheadShadows') ? null : new OverheadShadowsEffectV2(this._renderBus);
+    this._overheadShadowEffect = new OverheadShadowsEffectV2(this._renderBus);
 
     /**
      * V2 Building Shadows Effect: projects _Outdoors dark regions (building footprints)
@@ -266,69 +253,56 @@ export class FloorCompositor {
      * Fed into LightingEffectV2 as `tBuildingShadow`.
      * @type {BuildingShadowsEffectV2}
      */
-    this._buildingShadowEffect = this._circuitBreaker.isDisabled('v2.buildingShadows') ? null : new BuildingShadowsEffectV2();
+    this._buildingShadowEffect = new BuildingShadowsEffectV2();
 
     /**
      * V2 Dot Screen Effect: artistic dot-screen halftone filter.
      * Post-processing pass. Disabled by default.
      * @type {DotScreenEffectV2}
      */
-    this._dotScreenEffect = this._circuitBreaker.isDisabled('v2.dotScreen') ? null : new DotScreenEffectV2();
+    this._dotScreenEffect = new DotScreenEffectV2();
 
     /**
      * V2 Halftone Effect: CMYK halftone printing effect.
      * Post-processing pass. Disabled by default.
      * @type {HalftoneEffectV2}
      */
-    this._halftoneEffect = this._circuitBreaker.isDisabled('v2.halftone') ? null : new HalftoneEffectV2();
+    this._halftoneEffect = new HalftoneEffectV2();
 
     /**
      * V2 ASCII Effect: shader-based ASCII art post-processing effect.
      * Disabled by default.
      * @type {AsciiEffectV2}
      */
-    this._asciiEffect = this._circuitBreaker.isDisabled('v2.ascii') ? null : new AsciiEffectV2();
+    this._asciiEffect = new AsciiEffectV2();
 
     /**
      * V2 Dazzle Overlay Effect: bright light exposure overlay.
      * Post-processing pass. Disabled by default (enabled by DynamicExposureManager).
      * @type {DazzleOverlayEffectV2}
      */
-    this._dazzleOverlayEffect = this._circuitBreaker.isDisabled('v2.dazzleOverlay') ? null : new DazzleOverlayEffectV2();
+    this._dazzleOverlayEffect = new DazzleOverlayEffectV2();
 
     /**
      * V2 Vision Mode Effect: vision mode post-processing adjustments.
      * Post-processing pass. Enabled by default.
      * @type {VisionModeEffectV2}
      */
-    this._visionModeEffect = this._circuitBreaker.isDisabled('v2.visionMode') ? null : new VisionModeEffectV2();
+    this._visionModeEffect = new VisionModeEffectV2();
 
     /**
      * V2 Invert Effect: color inversion effect.
      * Post-processing pass. Disabled by default.
      * @type {InvertEffectV2}
      */
-    this._invertEffect = this._circuitBreaker.isDisabled('v2.invert') ? null : new InvertEffectV2();
+    this._invertEffect = new InvertEffectV2();
 
     /**
      * V2 Sepia Effect: sepia tone color grading.
      * Post-processing pass. Disabled by default.
      * @type {SepiaEffectV2}
      */
-    this._sepiaEffect = this._circuitBreaker.isDisabled('v2.sepia') ? null : new SepiaEffectV2();
-
-    /**
-     * Fog of War overlay (reuses the V1 WorldSpaceFogEffect implementation).
-     *
-     * In V1, the fog plane is added to the main scene and renders during the
-     * main scene pass. In V2, the main scene is not rendered (we blit RTs), so
-     * we render the fog plane in a dedicated overlay scene after the final blit.
-     * @type {WorldSpaceFogEffect|null}
-     */
-    this._fogEffect = this._circuitBreaker.isDisabled('v2.fog') ? null : new WorldSpaceFogEffect();
-
-    /** @type {THREE.Scene|null} Dedicated scene that contains the fog plane mesh. */
-    this._fogScene = null;
+    this._sepiaEffect = new SepiaEffectV2();
 
     /** @type {boolean} Whether the render bus has been populated this session. */
     this._busPopulated = false;
@@ -562,20 +536,6 @@ export class FloorCompositor {
     }
     try { this._sepiaEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: SepiaEffectV2 initialize failed:', err);
-    }
-
-    // Fog of War overlay: initialize into a dedicated overlay scene.
-    if (this._fogEffect) {
-      try {
-        this._fogScene = new THREE.Scene();
-        this._fogScene.name = 'FogOverlaySceneV2';
-        this._fogEffect.initialize(this.renderer, this._fogScene, this.camera);
-        try { if (window.MapShine) window.MapShine.fogEffect = this._fogEffect; } catch (_) {}
-      } catch (err) {
-        log.warn('FloorCompositor: Fog effect initialize failed:', err);
-        this._fogEffect = null;
-        this._fogScene = null;
-      }
     }
 
     // Listen for floor/level changes so we can update tile mesh visibility.
@@ -823,10 +783,6 @@ export class FloorCompositor {
       // Overhead shadows: no per-frame update needed — sun angles are pushed
       // directly below from SkyColorEffectV2 before render().
 
-      // Fog of war: updates vision/exploration RTs and toggles fog plane visibility.
-      try { this._fogEffect?.update?.(timeInfo); } catch (err) {
-        log.warn('Fog effect update threw, skipping fog update:', err);
-      }
     }
 
     // ── Bind per-frame textures and camera to effects ────────────────────────
@@ -909,110 +865,7 @@ export class FloorCompositor {
     this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, buildingShadowTex, overheadShadowTex, buildingShadowOpacity);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lighting.render(sceneRT→postA) DONE'); } catch (_) {} }
 
-    // BASELINE: Skip ALL post-processing to establish stable rendering.
-    // Post-processing causes freeze on second frame. We'll re-enable passes
-    // one by one once we have a stable baseline.
     currentInput = this._postA;
-    
-    if (_dbgStages) {
-      try { log.warn('[V2 BASELINE] Skipping ALL post-processing - establishing stable baseline'); } catch (_) {}
-    }
-    
-    // Baseline step: re-enable ONLY the water pass.
-    // Water is a core look-defining effect; leaving it disabled makes V2 appear broken.
-    // Keep all other post passes disabled until the original second-frame freeze
-    // root cause is fully resolved.
-    //
-    // The water shader now defaults to a safe mode that removes expensive rain ripple/storm
-    // loops which previously caused GPU driver compilation hangs. Safe mode is enabled by
-    // default; full rain effects can be re-enabled via localStorage if needed.
-    const enableWaterBaseline = (() => {
-      // Allow disabling water pass if needed (e.g., for debugging other issues):
-      //   localStorage.setItem('msa-disable-v2-water-baseline', '1')
-      // Re-enable:
-      //   localStorage.removeItem('msa-disable-v2-water-baseline')
-      try { return globalThis.localStorage?.getItem?.('msa-disable-v2-water-baseline') !== '1'; } catch (_) { return true; }
-    })();
-
-    if (enableWaterBaseline && this._waterEffect?.enabled) {
-      // Build occluder mask for the *currently viewed* floor.
-      // If on floor 0, no occluder needed.
-      let occluderRT = null;
-      try {
-        const viewFloor = window.MapShine?.floorStack?.getActiveFloor()?.index ?? 0;
-        if (viewFloor > 0 && this._waterOccluderRT) {
-          this._renderBus.renderFloorMaskTo(this.renderer, this.camera, viewFloor, this._waterOccluderRT);
-          occluderRT = this._waterOccluderRT;
-        }
-      } catch (_) {}
-
-      const waterOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: water.render (baseline)'); } catch (_) {} }
-      const waterWrote = this._waterEffect.render(this.renderer, this.camera, currentInput, waterOutput, occluderRT);
-      if (waterWrote) currentInput = waterOutput;
-      if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: water.render (baseline) DONE'); } catch (_) {} }
-    }
-
-    // Baseline-compatible ASCII pass.
-    // Keep this before final blit so the effect can run while the broader
-    // post-processing chain remains disabled behind the temporary early return.
-    if (this._asciiEffect?.enabled) {
-      const asciiOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      if (this._asciiEffect.render(this.renderer, this.camera, currentInput, asciiOutput)) {
-        currentInput = asciiOutput;
-      }
-    }
-
-    // Baseline-compatible cloud-top composite.
-    // CloudEffectV2.render() already produced _cloudTopRT earlier in this frame,
-    // but the main cloud-top blit block is below the temporary early return.
-    // Without this, only cloud shadows affect lighting and visible cloud tops
-    // never appear in baseline mode.
-    if (this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
-      if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloudTops.blit (baseline)'); } catch (_) {} }
-      this._cloudEffect.blitCloudTops(this.renderer, currentInput);
-      if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloudTops.blit (baseline) DONE'); } catch (_) {} }
-    }
-
-    // Jump straight to blit
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: blitToScreen'); } catch (_) {} }
-    this._blitToScreen(currentInput);
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: blitToScreen DONE'); } catch (_) {} }
-
-    // ── Fog of War overlay pass ─────────────────────────────────────────
-    // Render fog AFTER the final blit. This overlays the already-lit scene
-    // with the fog plane (transparent shader). We must NOT clear the screen.
-    if (this._fogEffect && this._fogScene && this._fogEffect.enabled && this._fogEffect.params?.enabled !== false) {
-      try {
-        const renderer = this.renderer;
-        const prevTarget = renderer.getRenderTarget();
-        const prevAutoClear = renderer.autoClear;
-        const prevLayerMask = this.camera.layers.mask;
-
-        // Ensure the fog plane's layer is visible.
-        this.camera.layers.enableAll();
-
-        renderer.setRenderTarget(null);
-        renderer.autoClear = false;
-        renderer.render(this._fogScene, this.camera);
-
-        this.camera.layers.mask = prevLayerMask;
-        renderer.autoClear = prevAutoClear;
-        renderer.setRenderTarget(prevTarget);
-      } catch (err) {
-        log.warn('FloorCompositor: fog overlay render failed:', err);
-      }
-    }
-    
-    if (_dbgStages) {
-      this._debugFirstFrameStagesLogged = true;
-      try { log.info('[V2 Frame] ✔ FloorCompositor.render: END (baseline mode)'); } catch (_) {}
-    }
-    return;
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // POST-PROCESSING DISABLED - ALL CODE BELOW IS UNREACHABLE
-    // ═══════════════════════════════════════════════════════════════════════
 
     // Sky color grading pass (time-of-day atmospheric grading). Ping-pongs.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: skyColor.render'); } catch (_) {} }
@@ -1523,7 +1376,6 @@ export class FloorCompositor {
     try { this._visionModeEffect?.onResize?.(w, h); } catch (_) {}
     try { this._invertEffect?.onResize?.(w, h); } catch (_) {}
     try { this._sepiaEffect?.onResize?.(w, h); } catch (_) {}
-    try { this._fogEffect?.resize?.(w, h); } catch (_) {}
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);
   }
 
@@ -1566,7 +1418,6 @@ export class FloorCompositor {
     try { this._fireEffect.dispose(); } catch (_) {}
     try { this._specularEffect.dispose(); } catch (_) {}
     try { this._windowLightEffect.dispose(); } catch (_) {}
-    try { this._fogEffect?.dispose?.(); } catch (_) {}
     try { this._renderBus?.dispose?.(); } catch (_) {}
     this._busPopulated = false;
 
@@ -1587,9 +1438,6 @@ export class FloorCompositor {
     this._blitCamera = null;
     this._blitMaterial = null;
     this._blitQuad = null;
-
-    this._fogEffect = null;
-    this._fogScene = null;
 
     // Unregister the level-change hook.
     if (this._levelHookId !== null) {

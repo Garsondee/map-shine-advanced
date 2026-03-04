@@ -542,29 +542,6 @@ Hooks.once('init', async function() {
         });
 
         ensureTool(tokenControls, {
-          name: 'map-shine-circuit-breaker',
-          title: 'Map Shine Circuit Breaker',
-          icon: 'fas fa-bolt',
-          button: true,
-          order: 107,
-          visible: true,
-          toolclip: {
-            src: '',
-            heading: 'MAPSHINE.ToolTitle',
-            items: [{ paragraph: 'Disable effects before they load (debugging).' }]
-          },
-          onChange: async () => {
-            try {
-              const mod = await import('./ui/circuit-breaker-panel.js');
-              await mod.openCircuitBreakerPanel();
-            } catch (e) {
-              console.error('Map Shine: failed to open Circuit Breaker Panel', e);
-              ui.notifications?.warn?.('Circuit Breaker Panel is not available yet.');
-            }
-          }
-        });
-
-        ensureTool(tokenControls, {
           name: 'map-shine-loading-screens',
           title: 'Map Shine Loading Screens',
           icon: 'fas fa-images',

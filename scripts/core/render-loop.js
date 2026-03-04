@@ -244,18 +244,9 @@ export class RenderLoop {
       try {
         const inContinuousWindow = now < (this._continuousRenderUntilMs || 0);
 
-        // V2 compositor safety: if render-throttling mis-detects camera motion,
-        // the screen-space blit can appear "stuck" (stale RT) while Foundry/PIXI
-        // continues to accept pan/zoom input. Until V2 is fully stabilized, we
-        // prefer correctness over idle FPS savings and refresh every RAF.
-        let v2Active = false;
-        try {
-          v2Active = typeof this.effectComposer._checkCompositorV2Enabled === 'function'
-            ? !!this.effectComposer._checkCompositorV2Enabled()
-            : false;
-        } catch (_) {
-          v2Active = false;
-        }
+        // V2-only runtime: always treat compositor mode as V2.
+        // This keeps rendering on every RAF to avoid stale screen-space outputs.
+        const v2Active = true;
 
         // Idle throttling: if camera is not moving, render at a reduced rate.
         // Prefer PIXI camera state (stage pivot/scale) to avoid 1-frame latency.

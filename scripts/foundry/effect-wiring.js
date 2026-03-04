@@ -29,19 +29,7 @@ import { FireEffectV2 } from '../compositor-v2/effects/FireEffectV2.js';
 import { AshDisturbanceEffectV2 } from '../compositor-v2/effects/AshDisturbanceEffectV2.js';
 import { CloudEffectV2 } from '../compositor-v2/effects/CloudEffectV2.js';
 import { AsciiEffectV2 } from '../compositor-v2/effects/AsciiEffectV2.js';
-// V1 effects with no V2 equivalent — retained
-import { IridescenceEffect } from '../effects/IridescenceEffect.js';
-import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
-import { LightningEffect } from '../effects/LightningEffect.js';
-import { PrismEffect } from '../effects/PrismEffect.js';
 import { WaterEffectV2 } from '../compositor-v2/effects/WaterEffectV2.js';
-import { WorldSpaceFogEffect } from '../effects/WorldSpaceFogEffect.js';
-import { AtmosphericFogEffect } from '../effects/AtmosphericFogEffect.js';
-import { DistortionManager } from '../effects/DistortionManager.js';
-import { LensflareEffect } from '../effects/LensflareEffect.js';
-import { MaskDebugEffect } from '../effects/MaskDebugEffect.js';
-import { DebugLayerEffect } from '../effects/DebugLayerEffect.js';
-import { PlayerLightEffect } from '../effects/PlayerLightEffect.js';
 
 import { createLogger } from '../core/log.js';
 
@@ -64,18 +52,7 @@ export {
   AshDisturbanceEffectV2,
   CloudEffectV2,
   AsciiEffectV2,
-  IridescenceEffect,
-  SmellyFliesEffect,
-  LightningEffect,
-  PrismEffect,
   WaterEffectV2,
-  WorldSpaceFogEffect,
-  AtmosphericFogEffect,
-  DistortionManager,
-  LensflareEffect,
-  MaskDebugEffect,
-  DebugLayerEffect,
-  PlayerLightEffect,
 };
 
 // ── Independent Effect Definitions ──────────────────────────────────────────
@@ -87,20 +64,8 @@ export {
  * @returns {Array<[string, Function]>}
  */
 export function getIndependentEffectDefs() {
-  // V2-ported effects are no longer instantiated here; they live in FloorCompositor.
-  // Remaining entries are effects with no V2 equivalent yet.
-  return [
-    ['Iridescence', IridescenceEffect],
-    ['Lightning', LightningEffect],
-    ['Prism', PrismEffect],
-    ['Fog', WorldSpaceFogEffect],
-    ['Atmospheric Fog', AtmosphericFogEffect],
-    ['Distortion', DistortionManager],
-    ['Lensflare', LensflareEffect],
-    ['Mask Debug', MaskDebugEffect],
-    ['Debug Layers', DebugLayerEffect],
-    ['Player Lights', PlayerLightEffect],
-  ];
+  // V2-only runtime: all compositor effects are owned by FloorCompositor.
+  return [];
 }
 
 // ── Graphics Capabilities Registry ──────────────────────────────────────────
@@ -118,35 +83,24 @@ export function getIndependentEffectDefs() {
 const CAPABILITIES = [
   { effectId: 'specular',          displayName: 'Metallic / Specular',       category: 'surface',      performanceImpact: 'medium' },
   { effectId: 'fluid',             displayName: 'Fluid',                     category: 'surface',      performanceImpact: 'medium' },
-  { effectId: 'iridescence',       displayName: 'Iridescence',               category: 'surface',      performanceImpact: 'low' },
   { effectId: 'window-lights',     displayName: 'Window Lights',             category: 'structure',    performanceImpact: 'medium' },
   { effectId: 'water',             displayName: 'Water',                     category: 'water',        performanceImpact: 'high' },
-  { effectId: 'fog',               displayName: 'Fog of War',               category: 'global',       performanceImpact: 'medium' },
   { effectId: 'bloom',             displayName: 'Bloom',                     category: 'global',       performanceImpact: 'high' },
-  { effectId: 'lensflare',         displayName: 'Lensflare',                category: 'global',       performanceImpact: 'medium' },
   { effectId: 'color-correction',  displayName: 'Color Correction',          category: 'global',       performanceImpact: 'low' },
   { effectId: 'film-grain',        displayName: 'Film Grain',                category: 'global',       performanceImpact: 'low' },
   { effectId: 'dot-screen',        displayName: 'Dot Screen',                category: 'global',       performanceImpact: 'low' },
   { effectId: 'clouds',            displayName: 'Clouds',                   category: 'atmospheric',  performanceImpact: 'medium' },
   { effectId: 'overhead-shadows',  displayName: 'Overhead Shadows',         category: 'structure',    performanceImpact: 'medium' },
   { effectId: 'building-shadows',  displayName: 'Building Shadows',         category: 'structure',    performanceImpact: 'medium' },
-  { effectId: 'distortion',        displayName: 'Distortion',               category: 'global',       performanceImpact: 'medium' },
   { effectId: 'fire-sparks',       displayName: 'Fire & Embers',            category: 'particle',     performanceImpact: 'high' },
-  { effectId: 'dust-motes',        displayName: 'Dust Motes',               category: 'particle',     performanceImpact: 'low' },
-  { effectId: 'smelly-flies',      displayName: 'Smelly Flies',             category: 'particle',     performanceImpact: 'low' },
   { effectId: 'ash-disturbance',   displayName: 'Ash Disturbance',          category: 'particle',     performanceImpact: 'low' },
-  { effectId: 'lightning',         displayName: 'Lightning',                category: 'particle',     performanceImpact: 'medium' },
-  { effectId: 'atmospheric-fog',   displayName: 'Atmospheric Fog',          category: 'atmospheric',  performanceImpact: 'medium' },
   { effectId: 'ascii',             displayName: 'ASCII',                    category: 'global',       performanceImpact: 'high' },
   { effectId: 'halftone',          displayName: 'Halftone',                 category: 'global',       performanceImpact: 'medium' },
   { effectId: 'sharpen',           displayName: 'Sharpen',                  category: 'global',       performanceImpact: 'low' },
-  { effectId: 'prism',             displayName: 'Prism / Refraction',       category: 'surface',      performanceImpact: 'medium' },
   { effectId: 'sky-color',         displayName: 'Sky Color',                category: 'global',       performanceImpact: 'low' },
-  { effectId: 'player-light',      displayName: 'Player Lights',            category: 'global',       performanceImpact: 'low' },
   { effectId: 'window-light',      displayName: 'Window Lights',            category: 'surface',      performanceImpact: 'low' },
   { effectId: 'trees',             displayName: 'Animated Trees (Canopy)',   category: 'surface',      performanceImpact: 'medium' },
   { effectId: 'bushes',            displayName: 'Animated Bushes',          category: 'surface',      performanceImpact: 'medium' },
-  { effectId: 'candle-flames',     displayName: 'Candle Flames',            category: 'particle',     performanceImpact: 'low' },
   { effectId: 'lighting',          displayName: 'Lighting',                 category: 'global',       performanceImpact: 'high' },
   { effectId: 'visionMode',        displayName: 'Vision Mode',              category: 'global',       performanceImpact: 'low' },
 ];
@@ -173,20 +127,7 @@ export function registerAllCapabilities(registry) {
 // Maps graphics-settings IDs to effectMap display names for effects that still have V1 instances.
 // V2-ported effects are no longer in effectMap and have been removed from this table.
 const GS_ID_TO_EFFECT_MAP_NAME = [
-  ['iridescence',       'Iridescence'],
-  ['lightning',         'Lightning'],
-  ['prism',             'Prism'],
-  ['fog',               'Fog'],
-  ['bushes',            'Bushes'],
-  ['trees',             'Trees'],
-  ['atmospheric-fog',   'Atmospheric Fog'],
-  ['distortion',        'Distortion'],
-  ['lensflare',         'Lensflare'],
-  ['player-light',      'Player Lights'],
-  // Dependent effects (registered after batch init)
-  ['dust-motes',        'Dust Motes'],
-  ['smelly-flies',      'Smelly Flies'],
-  ['candle-flames',     'Candle Flames'],
+  // V2-only runtime: no legacy effectMap instances are wired via this table.
 ];
 
 /**
@@ -217,7 +158,6 @@ const GS_ID_TO_EFFECT_ID = new Map([
   ['film-grain', 'filmGrain'],
   ['dot-screen', 'dotScreen'],
   ['color-correction', 'colorCorrection'],
-  ['distortion', 'distortion-manager'],
 ]);
 
 /**
@@ -265,8 +205,6 @@ export function readLazySkipIds() {
 // Only effects that are still V1 instances and use setBaseMesh() go here.
 // V2 effects get their tile/scene data via FloorRenderBus.populate().
 const BASE_MESH_EFFECTS = [
-  'Iridescence',
-  'Prism',
   'Bushes',
   'Trees',
 ];
@@ -311,8 +249,6 @@ export function wireBaseMeshes(effectMap, basePlane, bundle, logFn) {
 // V2-ported effects are accessed via window.MapShine.effectComposer._getFloorCompositorV2().
 // Only remaining V1 instances are exposed here.
 const GLOBAL_EFFECT_EXPOSURES = [
-  ['Atmospheric Fog',   'atmosphericFogEffect'],
-  ['Distortion',        'distortionManager'],
   ['Dazzle Overlay',    'dazzleOverlayEffect'],
 ];
 

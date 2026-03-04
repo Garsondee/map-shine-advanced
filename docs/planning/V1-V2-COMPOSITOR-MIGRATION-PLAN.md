@@ -697,3 +697,47 @@ BuildingShadowsEffectV2 projects indoor casters from this mask onto outdoor rece
 - Fine-tuned artistic calibration of length/softness parity between overhead and building shadows.
 - Optional debug visualizations (resolved outdoors source key, per-consumer binding state).
 - Additional policy tuning for unusual multi-floor scenes with sparse floor-id coverage.
+
+## 12. Success Story: Clouds Rendering Restored in V2 Baseline Path
+
+**Status:** Fixed and confirmed in Foundry.
+
+### Symptoms
+
+- Cloud shadows could still influence lighting, but visible cloud tops were missing.
+- Runtime diagnostics showed cloud passes executing every frame, yet output remained neutral.
+
+### Root causes identified
+
+1. **Baseline render-path omission:**
+   - The temporary baseline early-return path in `FloorCompositor.render()` skipped the normal cloud-top blit block.
+   - Result: cloud shadow RT could still be consumed by lighting, but cloud-top overlay never reached the final frame.
+
+2. **Cloud cover source forcing neutral output:**
+   - `CloudEffectV2._getWeatherState()` was resolving weather cloud cover to `0` in active weather-clear states, which forced neutral cloud output.
+   - This overrode the effect's own `params.cloudCover` authoring intent in V2 baseline usage.
+
+3. **Over-broad blocker masking:**
+   - Cloud blocker capture treated all overhead-marked meshes as blockers regardless of floor relationship.
+   - In multi-floor scenes this could suppress clouds too aggressively.
+
+### Fixes applied
+
+1. **Baseline cloud-top composite restored** (`scripts/compositor-v2/FloorCompositor.js`)
+   - Added a baseline-compatible `cloudEffect.blitCloudTops(...)` call before final blit in the early-return path.
+
+2. **Cloud-cover resolution hardened** (`scripts/compositor-v2/effects/CloudEffectV2.js`)
+   - Updated weather/cloud merge logic so effective cover is:
+     - `max(params.cloudCover, weather.cloudCover)`
+   - Kept weather as a driver while preserving local cloud authoring floor.
+   - Aligned `weatherEnabled` gating with V1 semantics (`WeatherController.enabled` respected).
+
+3. **Floor-aware blocker filtering added** (`scripts/compositor-v2/effects/CloudEffectV2.js` + `scripts/compositor-v2/FloorRenderBus.js`)
+   - Added `mesh.userData.floorIndex` to bus tiles.
+   - Blocker pass now only treats overhead blockers above the active floor as cloud blockers.
+
+### Outcome
+
+- Cloud tops now render in the V2 baseline path.
+- Cloud shadow + cloud-top composition is coherent again.
+- Multi-floor blocker behavior is more accurate and no longer globally suppresses clouds.

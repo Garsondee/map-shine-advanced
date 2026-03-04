@@ -1663,87 +1663,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   }
 
   _ensureWaterOccluderMesh(spriteData, tileDoc) {
-    const THREE = window.THREE;
-    if (!THREE) return;
-
-    // V2 compositor is always active - skip V1 water occluder pipeline
+    // V2-only runtime: legacy V1 water occluder path removed.
     return;
-
-    const sprite = spriteData?.sprite;
-    if (!sprite) return;
-
-    const occludesWater = !!sprite.userData?.occludesWater;
-    const existing = sprite.userData.waterOccluderMesh;
-
-    if (!occludesWater) {
-      if (existing) {
-        try {
-          this._getWaterOccluderScene().remove(existing);
-          existing.geometry?.dispose?.();
-          existing.material?.dispose?.();
-        } catch (_) {
-        }
-        sprite.userData.waterOccluderMesh = null;
-      }
-      return;
-    }
-
-    if (existing) {
-      // Keep uniforms in sync in case the mesh was created before the tile
-      // texture finished loading.
-      const tex = sprite.material?.map ?? null;
-      if (existing.material?.uniforms?.tTile) {
-        existing.material.uniforms.tTile.value = tex;
-        if (existing.material.uniforms.uHasTile) {
-          existing.material.uniforms.uHasTile.value = tex ? 1.0 : 0.0;
-        }
-      }
-      // Only show the occluder for tiles on the current floor — not above or below.
-      existing.visible = !!sprite.visible
-        && !sprite.userData?.levelsAbove
-        && !sprite.userData?.levelsHidden;
-      return;
-    }
-
-    const geom = new THREE.PlaneGeometry(1, 1);
-    const mat = this._createWaterOccluderMaterial(sprite.material?.map ?? null, null);
-    const mesh = new THREE.Mesh(geom, mat);
-    mesh.matrixAutoUpdate = false;
-    mesh.layers.set(WATER_OCCLUDER_LAYER);
-    // Only show for tiles on the current floor — not above or below.
-    mesh.visible = !!sprite.visible
-      && !sprite.userData?.levelsAbove
-      && !sprite.userData?.levelsHidden;
-    mesh.renderOrder = 999;
-    this._getWaterOccluderScene().add(mesh);
-    sprite.userData.waterOccluderMesh = mesh;
-
-    this.loadTileWaterMaskTexture(tileDoc).then((maskTex) => {
-      const m = sprite.userData?.waterOccluderMesh;
-      if (!m || !m.material?.uniforms) return;
-
-      // Defensive heuristic:
-      // If the tile's _Water mask is effectively "all water" (nearly white everywhere),
-      // then using it for occlusion would produce near-zero occluder alpha and cause
-      // WaterEffect tint/distortion to apply across the whole tile. That makes props
-      // (boats) look like they're not receiving the same grading as the scene.
-      //
-      // In that degenerate case, ignore the mask and fall back to tile alpha occlusion.
-      let effectiveMask = maskTex;
-      try {
-        const resolvedUrl = spriteData?.resolvedWaterMaskUrl ?? null;
-        const coverage = (maskTex && maskTex.image) ? this._estimateWaterMaskCoverage01(maskTex, resolvedUrl || null) : null;
-        if (coverage !== null && Number.isFinite(coverage) && coverage > 0.98) {
-          effectiveMask = null;
-        }
-      } catch (_) {
-        effectiveMask = maskTex;
-      }
-
-      m.material.uniforms.tWaterMask.value = effectiveMask;
-      m.material.uniforms.uHasWaterMask.value = effectiveMask ? 1.0 : 0.0;
-    }).catch(() => {
-    });
   }
 
   /**
@@ -3970,62 +3891,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       } else {
         // Unknown state (or pending). Default to disabled until the async probe resolves.
         occludesWater = false;
-
-        // V2 compositor is always active - skip V1 water mask probe
-        if (false) {
-          sprite.userData._autoOccludesWaterState = 'pending';
-          const tileId = tileDoc?.id ?? '';
-          const src = tileDoc?.texture?.src ?? '';
-          const requestKey = `${tileId}|${src}`;
-          sprite.userData._autoOccludesWaterRequestKey = requestKey;
-
-          this.loadTileWaterMaskTexture(tileDoc).then((maskTex) => {
-            // Tile could have been removed or changed while awaiting.
-            const current = this.tileSprites.get(tileId);
-            const s = current?.sprite;
-            if (!s || s !== sprite) return;
-
-            if (s.userData?._autoOccludesWaterState === 'overridden') return;
-            if (s.userData?._autoOccludesWaterRequestKey !== requestKey) return;
-
-            if (maskTex) {
-              s.userData._autoOccludesWaterState = 'enabled';
-              s.userData.occludesWater = true;
-
-              // Ensure occluder mesh exists and update its uniforms immediately.
-              try {
-                this._ensureWaterOccluderMesh(current, tileDoc);
-                this._updateWaterOccluderMeshTransform(s, tileDoc);
-                const occ = s.userData?.waterOccluderMesh;
-                if (occ?.material?.uniforms?.tWaterMask) {
-                  occ.material.uniforms.tWaterMask.value = maskTex;
-                  if (occ.material.uniforms.uHasWaterMask) {
-                    occ.material.uniforms.uHasWaterMask.value = 1.0;
-                  }
-                }
-              } catch (_) {
-              }
-            } else {
-              s.userData._autoOccludesWaterState = 'disabled';
-              s.userData.occludesWater = false;
-              try {
-                this._ensureWaterOccluderMesh(current, tileDoc);
-              } catch (_) {
-              }
-            }
-          }).catch(() => {
-            const current = this.tileSprites.get(tileDoc?.id);
-            const s = current?.sprite;
-            if (!s || s !== sprite) return;
-            if (s.userData?._autoOccludesWaterState === 'overridden') return;
-            s.userData._autoOccludesWaterState = 'disabled';
-            s.userData.occludesWater = false;
-            try {
-              this._ensureWaterOccluderMesh(current, tileDoc);
-            } catch (_) {
-            }
-          });
-        }
+        sprite.userData._autoOccludesWaterState = 'disabled';
+        sprite.userData._autoOccludesWaterRequestKey = null;
       }
     }
 
@@ -4208,122 +4075,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // texture load, updateTile, refreshTile, hover restore) — not just
     // _refreshAllTileElevationVisibility() — so the guard must be here.
     if (sprite.visible) {
-      // V2 compositor is always active - skip V1 elevation visibility
-      if (false) {
-      try {
-        const activeLevelContext = window.MapShine?.activeLevelContext;
-        const strictBandVisibility = isLevelsEnabledForScene(canvas?.scene) && hasFiniteActiveLevelBand(activeLevelContext);
-
-        let elevationVisible = true;
-
-        if (tileHasLevelsRange(tileDoc)) {
-          elevationVisible = isTileVisibleForPerspective(tileDoc);
-
-          // When a specific floor is selected via the level navigator, also
-          // enforce that the tile's elevation range overlaps the active band.
-          // The Levels algorithm alone doesn't hide tiles below the viewer
-          // (it relies on roof occlusion which Map Shine doesn't use), so
-          // without this check selecting Floor 2 would still show Floor 1
-          // tiles, appearing "inverted" to the user.
-          if (elevationVisible && strictBandVisibility && !sprite?.userData?.isOverhead) {
-            const flags = readTileLevelsFlags(tileDoc);
-            const tileBottom = Number(flags.rangeBottom);
-            const tileTop = Number(flags.rangeTop);
-            const bandBottom = Number(activeLevelContext.bottom);
-            const bandTop = Number(activeLevelContext.top);
-            if (Number.isFinite(tileBottom) && Number.isFinite(bandBottom) && Number.isFinite(bandTop)) {
-              // Finite rangeTop: tile must overlap the active band
-              if (Number.isFinite(tileTop)) {
-                elevationVisible = !(tileTop <= bandBottom || tileBottom >= bandTop);
-              } else {
-                // Roof tiles (rangeTop=Infinity): visible if the tile's bottom
-                // is within or below the active band (roofs cover their floor)
-                elevationVisible = tileBottom < bandTop;
-              }
-            }
-          }
-
-          // Overhead tiles are ceilings/roofs. The Levels visibility algorithm can
-          // legitimately hide them (it expects PIXI roof occlusion), but MapShine
-          // needs overhead art to remain visible so it can:
-          //  - render overhead layers correctly
-          //  - capture ROOF_LAYER into overhead-shadow passes
-          //
-          // CRITICAL: Always keep overhead tiles visible when Levels is active.
-          // Many overhead tiles have no Levels flags or undefined elevation, and
-          // the Levels perspective check (isTileVisibleForPerspective) will hide
-          // them. Without this override, overhead layers disappear entirely.
-          if (strictBandVisibility && sprite?.userData?.isOverhead) {
-            elevationVisible = true;
-          }
-        } else if (strictBandVisibility) {
-          // For tiles without explicit Levels flags, use tile elevation as the
-          // fallback floor assignment when an active level context exists.
-          //
-          // IMPORTANT: Overhead tiles act like roofs/ceilings. When a lower floor
-          // is selected, we still need upper roofs to remain visible (they are
-          // the thing covering that floor). Without this, any overhead tile that
-          // lacks Levels flags but has a higher elevation than the active band
-          // is hard-hidden, making overhead layers appear to "not render".
-          //
-          // CRITICAL: Overhead tiles with undefined elevation must default to VISIBLE.
-          // Many overhead tiles (roofs, ceilings) have no elevation set because they
-          // are meant to cover all floors. Hiding them breaks overhead shadow capture.
-          if (sprite?.userData?.isOverhead) {
-            elevationVisible = true;
-          } else {
-            elevationVisible = isElevationWithinActiveBand(tileDoc?.elevation, activeLevelContext);
-          }
-        }
-
-        if (!elevationVisible) {
-          // When a specific level is active, enforce strict hide/reveal behavior
-          // so upper/lower floors do not bleed through, even for GMs.
-          if (strictBandVisibility) {
-            sprite.visible = false;
-            // Tag for D++ specular: below-floor tiles keep their specular color
-            // pass alive so it can render through transparent upper-floor gaps
-            // (gated by floor presence in the shader).
-            sprite.userData.levelsHidden = true;
-          } else if (isGM) {
-            // GM: show elevation-hidden tiles at reduced opacity in non-strict mode
-            sprite.material.opacity = Math.min(sprite.material.opacity, 0.25);
-            sprite.userData.levelsHidden = false;
-          } else {
-            sprite.visible = false;
-            sprite.userData.levelsHidden = true;
-          }
-        } else {
-          // Elevation visible — clear below-floor tag.
-          sprite.userData.levelsHidden = false;
-          // Determine if this tile is above the active floor band.
-          // Above-floor tiles are visible (rendered on top) but must not occlude
-          // ground-floor water effects — their waterOccluderMesh must stay hidden.
-          let isAbove = false;
-          if (strictBandVisibility) {
-            try {
-              const bandBottom = Number(activeLevelContext.bottom);
-              if (tileHasLevelsRange(tileDoc)) {
-                const flags = readTileLevelsFlags(tileDoc);
-                const tileBottom = Number(flags.rangeBottom);
-                if (Number.isFinite(tileBottom) && Number.isFinite(bandBottom)) {
-                  isAbove = tileBottom >= bandBottom + 1;
-                }
-              } else {
-                const elev = Number(tileDoc?.elevation);
-                if (Number.isFinite(elev) && Number.isFinite(bandBottom)) {
-                  isAbove = elev >= bandBottom + 1;
-                }
-              }
-            } catch (_) {}
-          }
-          sprite.userData.levelsAbove = isAbove;
-        }
-      } catch (_) {
-        // Elevation visibility check failed — fail open (keep tile visible)
-        sprite.userData.levelsAbove = false;
-      }
-      } // end !_skipElevationVisibility
+      // V2-only runtime: floor visibility is handled by layer assignment.
+      sprite.userData.levelsHidden = false;
+      sprite.userData.levelsAbove = false;
     }
 
     // If this tile is currently hover-hidden, force opacity to zero so that

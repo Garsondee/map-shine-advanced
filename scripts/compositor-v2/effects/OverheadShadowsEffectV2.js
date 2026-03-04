@@ -441,7 +441,7 @@ export class OverheadShadowsEffectV2 {
         indoorShadowEnabled: {
           type: 'checkbox',
           label: 'Enable Indoor Shadow',
-          default: false,
+          default: true,
           tooltip: 'Enable projected shadow contribution from _Outdoors dark regions'
         },
         indoorShadowOpacity: {
@@ -794,9 +794,13 @@ export class OverheadShadowsEffectV2 {
           float maskPixelLenBase = uLength * 1080.0;
           float maskPixelLenIndoor = maskPixelLenBase * uIndoorShadowLengthScale;
           float maskPixelLenProjected = maskPixelLenBase * tileProjectionLengthScale;
-          vec2 maskOffsetUvBase = vUv + dir * maskPixelLenBase * maskTexelSize;
-          vec2 maskOffsetUvIndoor = vUv + dir * maskPixelLenIndoor * maskTexelSize;
-          vec2 maskOffsetUvProjected = vUv + dir * maskPixelLenProjected * maskTexelSize;
+          // Match BuildingShadows projection convention for _Outdoors-based casters.
+          // This keeps indoor dark-region projection on the same apparent cast side
+          // as the dedicated building-shadow pass.
+          vec2 maskProjectDir = -dir;
+          vec2 maskOffsetUvBase = vUv + maskProjectDir * maskPixelLenBase * maskTexelSize;
+          vec2 maskOffsetUvIndoor = vUv + maskProjectDir * maskPixelLenIndoor * maskTexelSize;
+          vec2 maskOffsetUvProjected = vUv + maskProjectDir * maskPixelLenProjected * maskTexelSize;
 
           // Receiver-space classification (at the current fragment).
           // White in _Outdoors = outdoors, black = indoors.
@@ -1213,7 +1217,10 @@ export class OverheadShadowsEffectV2 {
     const camZoom = this._getEffectiveZoom();
     const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${this.params.indoorShadowOpacity}_${this.params.indoorShadowLengthScale}_${this.params.indoorShadowSoftness}_${this.params.indoorFluidShadowSoftness}_${this.params.indoorFluidShadowIntensityBoost}_${this.params.indoorFluidColorSaturation}_${this.params.tileProjectionEnabled}_${this.params.tileProjectionOpacity}_${this.params.tileProjectionLengthScale}_${this.params.tileProjectionSoftness}_${this.params.tileProjectionThreshold}_${this.params.tileProjectionPower}_${this.params.tileProjectionOutdoorOpacityScale}_${this.params.tileProjectionIndoorOpacityScale}_${this.params.tileProjectionSortBias}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidShadowSoftness}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}`;
     
-    if (this._lastUpdateHash === updateHash && this.sunDir) return;
+    // Floor/mask transitions can swap outdoorsMask without changing any scalar params.
+    // Do not short-circuit in that case or uOutdoorsMask/uHasOutdoorsMask goes stale.
+    const outdoorsMaskChanged = this._lastOutdoorsMaskRef !== this.outdoorsMask;
+    if (this._lastUpdateHash === updateHash && this.sunDir && !outdoorsMaskChanged) return;
     this._lastUpdateHash = updateHash;
 
     // Map hour to a sun azimuth over a half-orbit.
@@ -1290,6 +1297,7 @@ export class OverheadShadowsEffectV2 {
       const activeMask = this.outdoorsMask;
       if (u.uOutdoorsMask) u.uOutdoorsMask.value = activeMask;
       if (u.uHasOutdoorsMask) u.uHasOutdoorsMask.value = activeMask ? 1.0 : 0.0;
+      this._lastOutdoorsMaskRef = activeMask;
     }
   }
 

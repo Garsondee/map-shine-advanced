@@ -38,8 +38,7 @@ export class BuildingShadowsEffectV2 {
       blurStrength: 0.3,
     };
 
-    /** @type {import('./OutdoorsMaskProviderV2.js').OutdoorsMaskProviderV2|null} */
-    this._outdoorsMaskProvider = null;
+    // Outdoors mask now obtained from GpuSceneMaskCompositor (central asset system)
 
     /** @type {HTMLCanvasElement|null} */
     this._unionCanvas = null;
@@ -160,19 +159,6 @@ export class BuildingShadowsEffectV2 {
    * Building shadows are bake-on-change; they do not require continuous rendering.
    */
   wantsContinuousRender() { return false; }
-
-  /**
-   * @param {import('./OutdoorsMaskProviderV2.js').OutdoorsMaskProviderV2} provider
-   */
-  setOutdoorsMaskProvider(provider) {
-    this._outdoorsMaskProvider = provider;
-    // When the provider repopulates (e.g., tiles load), rebuild the union for the
-    // current visible floor range.
-    provider.subscribe(() => {
-      this._rebuildUnionMask();
-      this._needsBake = true;
-    });
-  }
 
   /**
    * FloorCompositor pushes sun angles from SkyColorEffectV2.
@@ -460,19 +446,27 @@ export class BuildingShadowsEffectV2 {
 
   _rebuildUnionMask() {
     if (!this._unionCanvas || !this._unionCtx || !this._unionTexture) return;
-    if (!this._outdoorsMaskProvider) return;
 
-    // Match the provider's per-floor canvas resolution/aspect so scene-UV sampling stays stable.
-    const desiredCanvas = (() => {
-      const floorMax = Math.max(0, this._maxFloorIndex);
-      for (let i = floorMax; i >= 0; i--) {
-        const c = this._outdoorsMaskProvider.getFloorCanvas(i);
-        if (c) return c;
+    // Get outdoors masks from GpuSceneMaskCompositor
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+    if (!compositor) return;
+
+    // Find the first available floor texture to determine canvas size
+    const floorMax = Math.max(0, this._maxFloorIndex);
+    let refTexture = null;
+    for (let i = floorMax; i >= 0; i--) {
+      const ctx = window.MapShine?.activeLevelContext;
+      const floorKey = ctx ? `${ctx.bottom}:${ctx.top}` : 'ground';
+      const tex = compositor.getFloorTexture(floorKey, 'outdoors');
+      if (tex?.image) {
+        refTexture = tex;
+        break;
       }
-      return null;
-    })();
-    const desiredW = desiredCanvas?.width ?? DEFAULT_BAKE_SIZE;
-    const desiredH = desiredCanvas?.height ?? DEFAULT_BAKE_SIZE;
+    }
+    if (!refTexture?.image) return;
+
+    const desiredW = refTexture.image.width;
+    const desiredH = refTexture.image.height;
 
     if (this._unionCanvas.width !== desiredW || this._unionCanvas.height !== desiredH) {
       this._unionCanvas.width = desiredW;
@@ -497,8 +491,8 @@ export class BuildingShadowsEffectV2 {
     }
 
     const ctx = this._unionCtx;
-    const w = this._unionCanvas.width;
-    const h = this._unionCanvas.height;
+    const w = refTexture.image.width;
+    const h = refTexture.image.height;
 
     ctx.save();
     ctx.globalCompositeOperation = 'source-over';
@@ -506,12 +500,13 @@ export class BuildingShadowsEffectV2 {
     ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, w, h);
 
-    const floorMax = Math.max(0, this._maxFloorIndex);
     for (let i = 0; i <= floorMax; i++) {
-      const canvas = this._outdoorsMaskProvider.getFloorCanvas(i);
-      if (!canvas) continue;
-      ctx.globalCompositeOperation = 'lighten';
-      ctx.drawImage(canvas, 0, 0, w, h);
+      const ctx = window.MapShine?.activeLevelContext;
+      const floorKey = ctx ? `${ctx.bottom}:${ctx.top}` : 'ground';
+      const tex = compositor.getFloorTexture(floorKey, 'outdoors');
+      if (!tex?.image) continue;
+      this._unionCtx.globalCompositeOperation = 'lighten';
+      this._unionCtx.drawImage(tex.image, 0, 0, w, h);
     }
 
     ctx.restore();
@@ -548,7 +543,7 @@ export class BuildingShadowsEffectV2 {
   }
 
   dispose() {
-    this._outdoorsMaskProvider = null;
+    // Outdoors mask provider removed
 
     if (this._bakeTarget) {
       this._bakeTarget.dispose();

@@ -57,7 +57,6 @@ import { WaterSplashesEffectV2 } from './effects/WaterSplashesEffectV2.js';
 import { AshDisturbanceEffectV2 } from './effects/AshDisturbanceEffectV2.js';
 import { FluidEffectV2 } from './effects/FluidEffectV2.js';
 import { getCircuitBreaker } from '../core/circuit-breaker.js';
-import { OutdoorsMaskProviderV2 } from './effects/OutdoorsMaskProviderV2.js';
 import { BuildingShadowsEffectV2 } from './effects/BuildingShadowsEffectV2.js';
 import { OverheadShadowsEffectV2 } from './effects/OverheadShadowsEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
@@ -228,13 +227,7 @@ export class FloorCompositor {
      */
     this._ashDisturbanceEffect = this._circuitBreaker.isDisabled('v2.ashDisturbance') ? null : new AshDisturbanceEffectV2(this._renderBus);
 
-    /**
-     * V2 Outdoors mask provider: discovers _Outdoors tiles per floor, composites
-     * them into a scene-UV canvas texture, and notifies all consumers (cloud shadow,
-     * water indoor damping, weather particle roof gating).
-     * @type {OutdoorsMaskProviderV2}
-     */
-    this._outdoorsMask = this._circuitBreaker.isDisabled('v2.outdoorsMask') ? null : new OutdoorsMaskProviderV2();
+    // Outdoors mask is now provided by EffectMaskRegistry (central asset system)
 
     /**
      * V2 Building Shadows Effect: bakes a greyscale shadow-factor texture from the
@@ -457,28 +450,7 @@ export class FloorCompositor {
     // populate() builds it, and again on every floor change.
     // CloudEffectV2: cloud shadows and cloud tops only fall on outdoor areas.
     // We set both the legacy single-texture path (setOutdoorsMask, which is the one
-    // actually sampled since V2 has no floorIdTarget) AND the per-floor array so the
-    // multi-floor path is ready if a floorIdTexture is ever wired up.
-    if (this._outdoorsMask) {
-      this._outdoorsMask.subscribe((tex) => {
-        try {
-          this._cloudEffect.setOutdoorsMask(tex);
-          this._cloudEffect.setOutdoorsMasks(this._outdoorsMask.getFloorTextureArray(4));
-        } catch (_) {}
-      });
-      // WaterEffectV2: wave/rain indoor damping.
-      this._outdoorsMask.subscribe((tex) => {
-        try { this._waterEffect?.setOutdoorsMask?.(tex); } catch (_) {}
-      });
-      // WeatherController: particle foam fleck roof gating (roofMap CPU readback).
-      this._outdoorsMask.subscribe((tex) => {
-        try { if (weatherController?.initialized) weatherController.setRoofMap(tex ?? null); } catch (_) {}
-      });
-      // OverheadShadowsEffectV2: optional indoor dark-region projection from _Outdoors.
-      this._outdoorsMask.subscribe((tex) => {
-        try { this._overheadShadowEffect?.setOutdoorsMask?.(tex ?? null); } catch (_) {}
-      });
-    }
+    // Outdoors mask subscribers now wired via EffectMaskRegistry in initialize()
 
     this._lightingEffect.initialize(w, h);
     this._skyColorEffect.initialize();
@@ -495,17 +467,9 @@ export class FloorCompositor {
     } catch (err) {
       log.warn('FloorCompositor: BuildingShadowsEffectV2 initialize failed:', err);
     }
-    // Register the outdoors mask provider so building shadows can union-composite
-    // per-floor canvases. The provider fires the callback immediately (even if not
-    // yet populated) so the effect sets up its subscription before populate() runs.
-    try { this._buildingShadowEffect?.setOutdoorsMaskProvider?.(this._outdoorsMask); } catch (_) {}
-
-    // V1-based effects handle _Outdoors masks through OutdoorsMaskProviderV2
-    // No need to create base mesh - V1 effects work with their existing architecture
-
+    // OverheadShadowsEffectV2 initialization
     try { 
-      this._overheadShadowEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera); 
-      this._overheadShadowEffect?.setOutdoorsMaskProvider?.(this._outdoorsMask);
+      this._overheadShadowEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera);
     } catch (err) {
       log.warn('FloorCompositor: OverheadShadowsEffectV2 initialize failed:', err);
     }
@@ -655,11 +619,28 @@ export class FloorCompositor {
             log.error('AshDisturbanceEffectV2 populate failed:', err);
           });
         }
-        // Populate outdoors mask (discovers _Outdoors tiles, notifies all consumers).
-        if (this._outdoorsMask) {
-          this._outdoorsMask.populate(sc.foundrySceneData).catch(err => {
-            log.error('OutdoorsMaskProviderV2 populate failed:', err);
-          });
+        // Wire outdoors mask from GpuSceneMaskCompositor to all effects that need it.
+        // The compositor already discovers _Outdoors tiles and composites them per floor.
+        const compositor = sc._sceneMaskCompositor;
+        if (compositor) {
+          try {
+            // Get the current floor's outdoors mask from the compositor
+            const ctx = window.MapShine?.activeLevelContext ?? null;
+            const floorKey = ctx ? `${ctx.bottom}:${ctx.top}` : 'ground';
+            const outdoorsTex = compositor.getFloorTexture(floorKey, 'outdoors');
+            
+            // Distribute to all consumers
+            if (outdoorsTex) {
+              this._cloudEffect?.setOutdoorsMask?.(outdoorsTex);
+              this._waterEffect?.setOutdoorsMask?.(outdoorsTex);
+              this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
+              if (weatherController?.initialized) {
+                weatherController.setRoofMap(outdoorsTex);
+              }
+            }
+          } catch (err) {
+            log.warn('FloorCompositor: failed to wire outdoors mask from compositor:', err);
+          }
         }
       } else {
         log.warn('FloorCompositor.render: no sceneComposer available for populate');
@@ -1195,6 +1176,28 @@ export class FloorCompositor {
     try { this._waterSplashesEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Notify ash disturbance so it can swap active burst system sets.
     try { this._ashDisturbanceEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
+    
+    // Update outdoors mask for the new floor from GpuSceneMaskCompositor
+    try {
+      const sc = window.MapShine?.sceneComposer;
+      const compositor = sc?._sceneMaskCompositor;
+      if (compositor) {
+        const ctx = payload?.context ?? window.MapShine?.activeLevelContext ?? null;
+        const floorKey = ctx ? `${ctx.bottom}:${ctx.top}` : 'ground';
+        const outdoorsTex = compositor.getFloorTexture(floorKey, 'outdoors');
+        if (outdoorsTex) {
+          this._cloudEffect?.setOutdoorsMask?.(outdoorsTex);
+          this._waterEffect?.setOutdoorsMask?.(outdoorsTex);
+          this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
+          if (weatherController?.initialized) {
+            weatherController.setRoofMap(outdoorsTex);
+          }
+        }
+      }
+    } catch (err) {
+      log.warn('FloorCompositor: failed to update outdoors mask on floor change:', err);
+    }
+    
     // Update window light overlay visibility (isolated scene, not bus-managed).
     this._windowLightEffect.onFloorChange(maxFloorIndex);
     // Cloud effect: blocker pass is automatically floor-isolated via bus visibility;
@@ -1202,8 +1205,7 @@ export class FloorCompositor {
     this._cloudEffect.onFloorChange(maxFloorIndex);
     // Weather particles are global (rain falls on all visible floors); no-op.
     try { this._weatherParticles?.onFloorChange?.(maxFloorIndex); } catch (_) {}
-    // Swap active outdoors mask for the new floor (notifies all consumers).
-    try { this._outdoorsMask?.onFloorChange?.(maxFloorIndex); } catch (_) {}
+    // Outdoors mask floor changes are handled above via GpuSceneMaskCompositor
     // Swap active water SDF data for the new floor.
     try { this._waterEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Building shadows: rebuild union mask for the new floor set.

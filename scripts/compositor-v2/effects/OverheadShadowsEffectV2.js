@@ -42,8 +42,7 @@ export class OverheadShadowsEffectV2 {
     /** @type {THREE.WebGLRenderTarget|null} */
     this.shadowTarget = null; // Final overhead shadow factor texture
 
-    /** @type {import('./OutdoorsMaskProviderV2.js').OutdoorsMaskProviderV2|null} */
-    this._outdoorsMaskProvider = null;
+    // Outdoors mask now obtained from GpuSceneMaskCompositor via FloorCompositor
 
     /** @type {THREE.Texture|null} */
     this.fluidRoofTarget = null; // Fluid-only roof pass (for optional shadow tint)
@@ -179,12 +178,7 @@ export class OverheadShadowsEffectV2 {
    */
   setBaseMesh(baseMesh) {
     this.baseMesh = baseMesh;
-    
-    // Get _Outdoors mask from provider if available
-    if (this._outdoorsMaskProvider) {
-      this.outdoorsMask = this._outdoorsMaskProvider.texture;
-    }
-
+    // Outdoors mask is set by FloorCompositor via setOutdoorsMask()
     // If we've already been initialized, build the shadow mesh now.
     // Without this, render() will early-out with material=null and targets
     // will remain uninitialized.
@@ -196,15 +190,11 @@ export class OverheadShadowsEffectV2 {
   }
 
   /**
-   * Set OutdoorsMaskProviderV2 for V2 integration
-   * @param {import('./OutdoorsMaskProviderV2.js').OutdoorsMaskProviderV2} provider
+   * Set outdoors mask texture (called by FloorCompositor)
+   * @param {THREE.Texture|null} texture
    */
-  setOutdoorsMaskProvider(provider) {
-    this._outdoorsMaskProvider = provider;
-    // Subscribe to provider changes
-    provider.subscribe(() => {
-      this.outdoorsMask = provider.texture;
-    });
+  setOutdoorsMask(texture) {
+    this.outdoorsMask = texture;
   }
 
   /**

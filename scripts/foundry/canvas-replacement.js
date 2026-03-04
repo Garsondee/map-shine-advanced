@@ -128,7 +128,6 @@ import { installSnapshotStoreHooks, getSnapshot as getLevelsSnapshot } from '../
 import { installLevelsApiFacade } from './levels-api-facade.js';
 import { ZoneManager } from './zone-manager.js';
 import { LevelsPerspectiveBridge } from './levels-perspective-bridge.js';
-import { EffectMaskRegistry } from '../assets/EffectMaskRegistry.js';
 
 const log = createLogger('Canvas');
 
@@ -466,8 +465,7 @@ let _autoSafeModeApplied = false;
 /** @type {EffectCapabilitiesRegistry|null} */
 let effectCapabilitiesRegistry = null;
 
-/** @type {EffectMaskRegistry|null} Central mask state manager for multi-level rendering. */
-let effectMaskRegistry = null;
+// EffectMaskRegistry removed - GpuSceneMaskCompositor is the actual working system
 
 function _applyRenderResolutionToRenderer(viewportWidthCss, viewportHeightCss) {
   if (!renderer || typeof renderer.setPixelRatio !== 'function') return;
@@ -3257,12 +3255,7 @@ function onCanvasTearDown(canvas) {
     }, 'frameCoordinator.dispose');
   }
 
-  if (effectMaskRegistry) {
-    safeDispose(() => {
-      effectMaskRegistry.dispose();
-      effectMaskRegistry = null;
-    }, 'EffectMaskRegistry.dispose');
-  }
+  // EffectMaskRegistry removed - GpuSceneMaskCompositor handles all masks
 
   if (window.MapShine?.maskManager && typeof window.MapShine.maskManager.dispose === 'function') {
     safeDispose(() => window.MapShine.maskManager.dispose(), 'MaskManager.dispose');
@@ -3326,7 +3319,7 @@ function onCanvasTearDown(canvas) {
     window.MapShine.waterEffect = null;
     window.MapShine.distortionManager = null;
     window.MapShine.cloudEffect = null;
-    window.MapShine.effectMaskRegistry = null;
+    // effectMaskRegistry removed
     window.MapShine.textureBudgetTracker = null;
     // Keep renderer and capabilities - they're reusable
   }

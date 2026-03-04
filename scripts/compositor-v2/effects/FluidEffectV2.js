@@ -135,6 +135,91 @@ export class FluidEffectV2 {
     }
   }
 
+  // ── UI schema (moved from V1 FluidEffect) ────────────────────────────────
+
+  static getControlSchema() {
+    return {
+      enabled: true,
+      groups: [
+        { name: 'appearance', label: 'Appearance', type: 'inline', parameters: ['intensity', 'opacity', 'colorA', 'colorB', 'ageGamma'] },
+        { name: 'masking', label: 'Mask Thresholds', type: 'folder', expanded: false, parameters: ['maskThresholdLo', 'maskThresholdHi'] },
+        { name: 'motion', label: 'Flow & Motion', type: 'folder', expanded: false, parameters: ['flowMode', 'flowSpeed', 'pulseFrequency', 'pulseStrength', 'slugWidth', 'edgeSoftness'] },
+        { name: 'detail', label: 'Noise & Bubbles', type: 'folder', expanded: false, parameters: ['noiseScale', 'noiseStrength', 'bubbleScale', 'bubbleStrength'] },
+        { name: 'edges', label: 'Edge Effects', type: 'folder', expanded: false, parameters: ['edgeNoiseScale', 'edgeNoiseAmp', 'meniscusStrength'] },
+        { name: 'foam', label: 'Foam', type: 'folder', expanded: false, parameters: ['foamStrength', 'foamScale', 'foamWidth', 'foamTint', 'foamTrailStrength', 'edgeFoamStrength', 'foamDensity', 'foamFrothiness'] },
+        { name: 'surface', label: 'Surface Effects', type: 'folder', expanded: false, parameters: ['causticEnabled', 'causticStrength', 'causticScale', 'rgbShift'] },
+        { name: 'iridescence', label: 'Iridescence', type: 'folder', expanded: false, parameters: ['iridescenceStrength', 'iriSpeed', 'iriScale', 'iriFresnel', 'iriBreakup', 'iriFlowAdvect', 'iriSpectralSpread', 'iriThicknessContrast', 'iriSwirlScale', 'iriSwirlSpeed', 'iriDetailScale', 'iriDetailWeight', 'iriSaturation'] },
+        { name: 'churn', label: 'Churn & Distortion', type: 'folder', expanded: false, parameters: ['churnEnabled', 'churnStrength', 'churnScale', 'churnSpeed', 'churnOctaves', 'churnFlowBias'] },
+        { name: 'hdrBoost', label: 'HDR / Bloom Boost', type: 'folder', expanded: false, parameters: ['hdrBoostEnabled', 'hdrBoostStrength', 'hdrBoostPulseSpeed', 'hdrBoostEdge', 'hdrBoostCenter'] },
+        { name: 'pools', label: 'Endpoint Pools', type: 'folder', expanded: false, parameters: ['poolStart', 'poolEnd', 'poolSoftness'] },
+        { name: 'roof', label: 'Roof Occlusion', type: 'folder', expanded: false, parameters: ['roofOcclusionEnabled', 'roofAlphaThreshold'] }
+      ],
+      parameters: {
+        intensity:          { type: 'slider', label: 'Intensity',          min: 0,   max: 3,    step: 0.01, default: 1.0 },
+        opacity:            { type: 'slider', label: 'Opacity',            min: 0,   max: 1,    step: 0.01, default: 0.7 },
+        colorA:             { type: 'color',  label: 'Color A (Young)',    default: '#26a6ff' },
+        colorB:             { type: 'color',  label: 'Color B (Old)',      default: '#a60dff' },
+        ageGamma:           { type: 'slider', label: 'Age Gamma',          min: 0.1, max: 4,    step: 0.01, default: 1.0 },
+        maskThresholdLo:    { type: 'slider', label: 'Low Threshold',      min: 0,   max: 0.5,  step: 0.001, default: 0.05 },
+        maskThresholdHi:    { type: 'slider', label: 'High Threshold',     min: 0,   max: 1,    step: 0.01,  default: 0.2 },
+        flowMode:           { type: 'slider', label: 'Flow Mode (0=Ping-Pong, 1=Directional)', min: 0, max: 1, step: 1, default: 1.0 },
+        flowSpeed:          { type: 'slider', label: 'Flow Speed',         min: 0,   max: 2,    step: 0.01, default: 0.35 },
+        pulseFrequency:     { type: 'slider', label: 'Slug Count',         min: 0.5, max: 20,   step: 0.1,  default: 3.0 },
+        pulseStrength:      { type: 'slider', label: 'Gap Transparency',   min: 0,   max: 1,    step: 0.01, default: 0.7 },
+        slugWidth:          { type: 'slider', label: 'Slug Width',         min: 0.05, max: 0.95, step: 0.01, default: 0.4 },
+        edgeSoftness:       { type: 'slider', label: 'Edge Softness',      min: 0.005, max: 0.2, step: 0.005, default: 0.02 },
+        noiseScale:         { type: 'slider', label: 'Noise Scale',        min: 0.5, max: 30,   step: 0.1,  default: 6.0 },
+        noiseStrength:      { type: 'slider', label: 'Noise Strength',     min: 0,   max: 1,    step: 0.01, default: 0.25 },
+        bubbleScale:        { type: 'slider', label: 'Bubble Scale',       min: 1,   max: 60,   step: 0.5,  default: 18.0 },
+        bubbleStrength:     { type: 'slider', label: 'Bubble Strength',    min: 0,   max: 0.5,  step: 0.01, default: 0.12 },
+        edgeNoiseScale:     { type: 'slider', label: 'Edge Noise Scale',   min: 0.5, max: 20,   step: 0.1,  default: 4.0 },
+        edgeNoiseAmp:       { type: 'slider', label: 'Edge Noise Amp',     min: 0,   max: 0.3,  step: 0.005, default: 0.08 },
+        meniscusStrength:   { type: 'slider', label: 'Meniscus Strength',  min: 0,   max: 1,    step: 0.01, default: 0.3 },
+        foamStrength:       { type: 'slider', label: 'Foam Strength',      min: 0,   max: 1,    step: 0.01, default: 0.3 },
+        foamScale:          { type: 'slider', label: 'Foam Scale',         min: 5,   max: 80,   step: 0.5,  default: 30.0 },
+        foamWidth:          { type: 'slider', label: 'Foam Width',         min: 0.02, max: 0.5,  step: 0.01, default: 0.15 },
+        foamTint:           { type: 'slider', label: 'Foam Tint',          min: 0,   max: 1,    step: 0.01, default: 0.15 },
+        foamTrailStrength:  { type: 'slider', label: 'Trailing Foam',      min: 0,   max: 1,    step: 0.01, default: 0.15 },
+        edgeFoamStrength:   { type: 'slider', label: 'Edge Foam',          min: 0,   max: 1,    step: 0.01, default: 0.2 },
+        foamDensity:        { type: 'slider', label: 'Foam Density',       min: 0,   max: 1,    step: 0.01, default: 0.5 },
+        foamFrothiness:     { type: 'slider', label: 'Foam Frothiness',    min: 0,   max: 1,    step: 0.01, default: 0.3 },
+        causticEnabled:     { type: 'boolean', label: 'Caustics Enabled',  default: false },
+        causticStrength:    { type: 'slider', label: 'Caustic Strength',   min: 0,   max: 2,    step: 0.01, default: 0.3 },
+        causticScale:       { type: 'slider', label: 'Caustic Scale',      min: 1,   max: 60,   step: 0.5,  default: 12.0 },
+        iridescenceStrength: { type: 'slider', label: 'Strength',          min: 0,   max: 3,    step: 0.01, default: 0.0 },
+        iriSpeed:           { type: 'slider', label: 'Animation Speed',    min: 0,   max: 3,    step: 0.01, default: 0.5 },
+        iriScale:           { type: 'slider', label: 'Film Scale',         min: 0.5, max: 15,   step: 0.1,  default: 3.0 },
+        iriFresnel:         { type: 'slider', label: 'Edge Enhancement',   min: 0,   max: 1,    step: 0.01, default: 0.6 },
+        iriBreakup:         { type: 'slider', label: 'Patchiness',         min: 0,   max: 1,    step: 0.01, default: 0.3 },
+        iriFlowAdvect:      { type: 'slider', label: 'Flow Advection',     min: 0,   max: 1,    step: 0.01, default: 0.5 },
+        iriSpectralSpread:  { type: 'slider', label: 'Spectral Spread',    min: 0,   max: 1,    step: 0.01, default: 0.4 },
+        iriThicknessContrast: { type: 'slider', label: 'Thickness Contrast', min: 0.2, max: 3,  step: 0.01, default: 1.2 },
+        iriSwirlScale:      { type: 'slider', label: 'Swirl Scale',        min: 0.5, max: 8,    step: 0.1,  default: 1.5 },
+        iriSwirlSpeed:      { type: 'slider', label: 'Swirl Speed',        min: 0,   max: 0.5,  step: 0.005, default: 0.08 },
+        iriDetailScale:     { type: 'slider', label: 'Detail Scale',       min: 1,   max: 30,   step: 0.5,  default: 8.0 },
+        iriDetailWeight:    { type: 'slider', label: 'Detail Weight',      min: 0,   max: 1,    step: 0.01, default: 0.2 },
+        iriSaturation:      { type: 'slider', label: 'Color Saturation',   min: 0,   max: 2,    step: 0.01, default: 1.0 },
+        rgbShift:           { type: 'slider', label: 'RGB Shift',          min: 0,   max: 10,   step: 0.05, default: 0.0 },
+        churnEnabled:       { type: 'boolean', label: 'Enable Churn',      default: true },
+        churnStrength:      { type: 'slider', label: 'Distortion Amount',  min: 0,   max: 0.08, step: 0.001, default: 0.015 },
+        churnScale:         { type: 'slider', label: 'Churn Scale',        min: 0.5, max: 15,   step: 0.1,  default: 4.0 },
+        churnSpeed:         { type: 'slider', label: 'Churn Speed',        min: 0,   max: 1,    step: 0.01, default: 0.2 },
+        churnOctaves:       { type: 'slider', label: 'Detail (Octave Mix)', min: 0,  max: 1,    step: 0.01, default: 0.4 },
+        churnFlowBias:      { type: 'slider', label: 'Flow Bias',          min: 0,   max: 1,    step: 0.01, default: 0.3 },
+        hdrBoostEnabled:    { type: 'boolean', label: 'Enable HDR Boost',  default: false },
+        hdrBoostStrength:   { type: 'slider', label: 'Boost Intensity',    min: 0,   max: 5,    step: 0.05, default: 1.5 },
+        hdrBoostPulseSpeed: { type: 'slider', label: 'Pulse Speed',        min: 0,   max: 5,    step: 0.05, default: 1.0 },
+        hdrBoostEdge:       { type: 'slider', label: 'Edge Glow',          min: 0,   max: 1,    step: 0.01, default: 0.3 },
+        hdrBoostCenter:     { type: 'slider', label: 'Center Glow',        min: 0,   max: 1,    step: 0.01, default: 0.2 },
+        poolStart:          { type: 'slider', label: 'Start Pool',         min: 0,   max: 0.5,  step: 0.01, default: 0.0 },
+        poolEnd:            { type: 'slider', label: 'End Pool',           min: 0,   max: 0.5,  step: 0.01, default: 0.0 },
+        poolSoftness:       { type: 'slider', label: 'Pool Softness',      min: 0.005, max: 0.2, step: 0.005, default: 0.05 },
+        roofOcclusionEnabled: { type: 'boolean', label: 'Enable Roof Occlusion', default: true },
+        roofAlphaThreshold:   { type: 'slider', label: 'Roof Alpha Threshold', min: 0, max: 1, step: 0.01, default: 0.1 }
+      }
+    };
+  }
+
   initialize() {
     if (this._initialized) return;
     const THREE = window.THREE;

@@ -74,6 +74,44 @@ export class ColorCorrectionEffectV2 {
     this._composeQuad = null;
   }
 
+  // ── UI schema (moved from V1 ColorCorrectionEffect) ──────────────────────
+
+  static getControlSchema() {
+    return {
+      enabled: true,
+      groups: [
+        { name: 'exposure', label: 'Exposure & WB', type: 'inline', parameters: ['exposure', 'temperature', 'tint'] },
+        { name: 'basics', label: 'Basic Adjustments', type: 'inline', parameters: ['contrast', 'brightness', 'saturation', 'vibrance'] },
+        { name: 'grading', label: 'Color Grading', type: 'folder', expanded: false, parameters: ['toneMapping', 'liftColor', 'gammaColor', 'gainColor', 'masterGamma'] },
+        { name: 'artistic', label: 'Effects (Vignette/Grain)', type: 'folder', expanded: false, parameters: ['vignetteStrength', 'vignetteSoftness', 'grainStrength'] }
+      ],
+      parameters: {
+        enabled: { type: 'boolean', default: true, hidden: true },
+        exposure: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.9 },
+        temperature: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
+        tint: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
+        brightness: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.0 },
+        contrast: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0 },
+        saturation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.9 },
+        vibrance: { type: 'slider', min: -1, max: 1, step: 0.01, default: -0.15 },
+        liftColor: { type: 'color', default: { r: 0, g: 0, b: 0 } },
+        gammaColor: { type: 'color', default: { r: 0.5, g: 0.5, b: 0.5 } },
+        gainColor: { type: 'color', default: { r: 1, g: 1, b: 1 } },
+        masterGamma: { type: 'slider', min: 0.1, max: 3, step: 0.01, default: 2.0 },
+        toneMapping: { type: 'list', options: { 'None': 0, 'ACES Filmic': 1, 'Reinhard': 2 }, default: 0 },
+        vignetteStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.0 },
+        vignetteSoftness: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0 },
+        grainStrength: { type: 'slider', min: 0, max: 0.5, step: 0.01, default: 0.0 }
+      },
+      presets: {
+        'Cinematic': { toneMapping: 1, contrast: 1.1, saturation: 1.1, vignetteStrength: 0.4, temperature: 0.1 },
+        'Noir': { toneMapping: 1, saturation: 0.0, contrast: 1.4, grainStrength: 0.15, vignetteStrength: 0.6 },
+        'Warm & Cozy': { toneMapping: 1, temperature: 0.3, tint: 0.1, saturation: 1.1, gammaColor: { r: 1.0, g: 0.95, b: 0.9 } },
+        'Cold Horror': { toneMapping: 2, temperature: -0.4, saturation: 0.6, contrast: 1.2, grainStrength: 0.1, gainColor: { r: 0.9, g: 0.95, b: 1.0 } }
+      }
+    };
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
   initialize() {

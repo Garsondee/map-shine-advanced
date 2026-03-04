@@ -65,6 +65,42 @@ export class BloomEffectV2 {
     this._lastTintB = null;
   }
 
+  // ── UI schema (moved from V1 BloomEffect) ────────────────────────────────
+
+  static getControlSchema() {
+    return {
+      enabled: true,
+      groups: [
+        {
+          name: 'bloom',
+          label: 'Bloom Settings',
+          type: 'inline',
+          parameters: ['strength', 'radius', 'threshold', 'sparksHotspotIntensity', 'tintColor', 'blendOpacity', 'blendMode']
+        }
+      ],
+      parameters: {
+        enabled: { type: 'boolean', default: true, hidden: true },
+        strength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 0.63 },
+        radius: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.82 },
+        threshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.86 },
+        sparksHotspotIntensity: { type: 'slider', label: 'Ember Hotspots', min: 0, max: 10, step: 0.05, default: 0.0 },
+        tintColor: { type: 'color', default: { r: 1, g: 1, b: 1 } },
+        blendOpacity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0 },
+        blendMode: {
+          type: 'select',
+          options: { 'Additive': 'add', 'Screen': 'screen', 'Soft Light': 'soft' },
+          default: 'add'
+        }
+      },
+      presets: {
+        'Subtle': { strength: 0.8, radius: 0.2, threshold: 0.9 },
+        'Strong': { strength: 2.0, radius: 0.8, threshold: 0.7 },
+        'Dreamy': { strength: 1.5, radius: 1.0, threshold: 0.6 },
+        'Neon': { strength: 2.5, radius: 0.3, threshold: 0.2 }
+      }
+    };
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
   /**

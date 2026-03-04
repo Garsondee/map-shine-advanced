@@ -15,15 +15,23 @@
  */
 
 // ── Effect Class Imports ────────────────────────────────────────────────────
-import { SpecularEffect } from '../effects/SpecularEffect.js';
+// V2 effect classes (V1 equivalents deleted — use V2 for getControlSchema())
+import { SpecularEffectV2 } from '../compositor-v2/effects/SpecularEffectV2.js';
+import { FluidEffectV2 } from '../compositor-v2/effects/FluidEffectV2.js';
+import { WindowLightEffectV2 } from '../compositor-v2/effects/WindowLightEffectV2.js';
+import { ColorCorrectionEffectV2 } from '../compositor-v2/effects/ColorCorrectionEffectV2.js';
+import { FilmGrainEffectV2 } from '../compositor-v2/effects/FilmGrainEffectV2.js';
+import { SharpenEffectV2 } from '../compositor-v2/effects/SharpenEffectV2.js';
+import { BloomEffectV2 } from '../compositor-v2/effects/BloomEffectV2.js';
+import { SkyColorEffectV2 } from '../compositor-v2/effects/SkyColorEffectV2.js';
+import { LightingEffectV2 } from '../compositor-v2/effects/LightingEffectV2.js';
+import { FireEffectV2 } from '../compositor-v2/effects/FireEffectV2.js';
+import { AshDisturbanceEffectV2 } from '../compositor-v2/effects/AshDisturbanceEffectV2.js';
+import { CloudEffectV2 } from '../compositor-v2/effects/CloudEffectV2.js';
+// V1 effects with no V2 equivalent — retained
 import { IridescenceEffect } from '../effects/IridescenceEffect.js';
-import { FluidEffect } from '../effects/FluidEffect.js';
-import { WindowLightEffect } from '../effects/WindowLightEffect.js';
-import { ColorCorrectionEffect } from '../effects/ColorCorrectionEffect.js';
-import { FilmGrainEffect } from '../effects/FilmGrainEffect.js';
 import { DotScreenEffect } from '../effects/DotScreenEffect.js';
 import { HalftoneEffect } from '../effects/HalftoneEffect.js';
-import { SharpenEffect } from '../effects/SharpenEffect.js';
 import { AsciiEffect } from '../effects/AsciiEffect.js';
 import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { LightningEffect } from '../effects/LightningEffect.js';
@@ -34,18 +42,14 @@ import { BushEffect } from '../effects/BushEffect.js';
 import { TreeEffect } from '../effects/TreeEffect.js';
 import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
 import { BuildingShadowsEffect } from '../effects/BuildingShadowsEffect.js';
-import { CloudEffect } from '../effects/CloudEffect.js';
 import { AtmosphericFogEffect } from '../effects/AtmosphericFogEffect.js';
 import { DistortionManager } from '../effects/DistortionManager.js';
-import { BloomEffect } from '../effects/BloomEffect.js';
 import { LensflareEffect } from '../effects/LensflareEffect.js';
 import { DazzleOverlayEffect } from '../effects/DazzleOverlayEffect.js';
 import { MaskDebugEffect } from '../effects/MaskDebugEffect.js';
 import { DebugLayerEffect } from '../effects/DebugLayerEffect.js';
 import { PlayerLightEffect } from '../effects/PlayerLightEffect.js';
-import { SkyColorEffect } from '../effects/SkyColorEffect.js';
 import { VisionModeEffect } from '../effects/VisionModeEffect.js';
-import { AshDisturbanceEffect } from '../particles/AshDisturbanceEffect.js';
 
 import { createLogger } from '../core/log.js';
 
@@ -53,19 +57,25 @@ const log = createLogger('EffectWiring');
 
 // Re-export effect classes so consumers (initializeUI) can access static methods
 // like getControlSchema() from a single import instead of 30+ individual imports.
+// V2 classes replace deleted V1 originals for all ported effects.
 export {
-  SpecularEffect,
+  SpecularEffectV2,
+  FluidEffectV2,
+  WindowLightEffectV2,
+  ColorCorrectionEffectV2,
+  FilmGrainEffectV2,
+  SharpenEffectV2,
+  BloomEffectV2,
+  SkyColorEffectV2,
+  LightingEffectV2,
+  FireEffectV2,
+  AshDisturbanceEffectV2,
+  CloudEffectV2,
   IridescenceEffect,
-  FluidEffect,
-  WindowLightEffect,
-  ColorCorrectionEffect,
-  FilmGrainEffect,
   DotScreenEffect,
   HalftoneEffect,
-  SharpenEffect,
   AsciiEffect,
   SmellyFliesEffect,
-  AshDisturbanceEffect,
   LightningEffect,
   PrismEffect,
   WaterEffectV2,
@@ -74,16 +84,13 @@ export {
   TreeEffect,
   OverheadShadowsEffect,
   BuildingShadowsEffect,
-  CloudEffect,
   AtmosphericFogEffect,
   DistortionManager,
-  BloomEffect,
   LensflareEffect,
   DazzleOverlayEffect,
   MaskDebugEffect,
   DebugLayerEffect,
   PlayerLightEffect,
-  SkyColorEffect,
   VisionModeEffect
 };
 
@@ -96,37 +103,26 @@ export {
  * @returns {Array<[string, Function]>}
  */
 export function getIndependentEffectDefs() {
+  // V2-ported effects are no longer instantiated here; they live in FloorCompositor.
+  // Remaining entries are effects with no V2 equivalent yet.
   return [
-    ['Specular', SpecularEffect],
     ['Iridescence', IridescenceEffect],
-    ['Fluid', FluidEffect],
-    ['Window Lights', WindowLightEffect],
-    ['Color Correction', ColorCorrectionEffect],
-    ['Film Grain', FilmGrainEffect],
     ['Dot Screen', DotScreenEffect],
     ['Halftone', HalftoneEffect],
-    ['Sharpen', SharpenEffect],
     ['ASCII', AsciiEffect],
     ['Lightning', LightningEffect],
     ['Prism', PrismEffect],
-    ['Water', WaterEffectV2],
     ['Fog', WorldSpaceFogEffect],
     ['Bushes', BushEffect],
     ['Trees', TreeEffect],
-    ['Overhead Shadows', OverheadShadowsEffect],
-    ['Building Shadows', BuildingShadowsEffect],
-    ['Clouds', CloudEffect],
     ['Atmospheric Fog', AtmosphericFogEffect],
     ['Distortion', DistortionManager],
-    ['Bloom', BloomEffect],
     ['Lensflare', LensflareEffect],
     ['Dazzle Overlay', DazzleOverlayEffect],
     ['Mask Debug', MaskDebugEffect],
     ['Debug Layers', DebugLayerEffect],
     ['Player Lights', PlayerLightEffect],
-    ['Sky Color', SkyColorEffect],
     ['Vision Mode', VisionModeEffect],
-    ['Ash Disturbance', AshDisturbanceEffect]
   ];
 }
 
@@ -197,39 +193,26 @@ export function registerAllCapabilities(registry) {
  * entry here — but many effects have mismatched IDs.
  * @type {Array<[string, string]>}
  */
+// Maps graphics-settings IDs to effectMap display names for effects that still have V1 instances.
+// V2-ported effects are no longer in effectMap and have been removed from this table.
 const GS_ID_TO_EFFECT_MAP_NAME = [
-  ['specular',          'Specular'],
   ['iridescence',       'Iridescence'],
-  ['window-light',      'Window Lights'],
-  ['color-correction',  'Color Correction'],
-  ['film-grain',        'Film Grain'],
   ['dot-screen',        'Dot Screen'],
   ['halftone',          'Halftone'],
-  ['sharpen',           'Sharpen'],
   ['ascii',             'ASCII'],
   ['lightning',         'Lightning'],
-  ['ash-disturbance',   'Ash Disturbance'],
   ['prism',             'Prism'],
-  ['water',             'Water'],
   ['fog',               'Fog'],
   ['bushes',            'Bushes'],
   ['trees',             'Trees'],
-  ['overhead-shadows',  'Overhead Shadows'],
-  ['building-shadows',  'Building Shadows'],
-  ['clouds',            'Clouds'],
   ['atmospheric-fog',   'Atmospheric Fog'],
   ['distortion',        'Distortion'],
-  ['bloom',             'Bloom'],
   ['lensflare',         'Lensflare'],
   ['player-light',      'Player Lights'],
-  ['sky-color',         'Sky Color'],
   // Dependent effects (registered after batch init)
-  ['fire-sparks',       'Fire Sparks'],
   ['dust-motes',        'Dust Motes'],
-  ['ash-disturbance',   'Ash Disturbance'],
   ['smelly-flies',      'Smelly Flies'],
   ['candle-flames',     'Candle Flames'],
-  ['lighting',          'Lighting'],
   ['visionMode',        'Vision Mode'],
 ];
 
@@ -306,18 +289,13 @@ export function readLazySkipIds() {
  * Order doesn't matter for correctness but is kept alphabetical for readability.
  * @type {string[]} - Display names from the effectMap
  */
+// Only effects that are still V1 instances and use setBaseMesh() go here.
+// V2 effects get their tile/scene data via FloorRenderBus.populate().
 const BASE_MESH_EFFECTS = [
-  'Specular',
   'Iridescence',
   'Prism',
-  'Water',
-  'Window Lights',
   'Bushes',
   'Trees',
-  'Lighting',
-  'Overhead Shadows',
-  'Building Shadows',
-  'Clouds',
 ];
 
 /**
@@ -357,17 +335,12 @@ export function wireBaseMeshes(effectMap, basePlane, bundle, logFn) {
  * effectMap display name → window.MapShine property name.
  * @type {Array<[string, string]>}
  */
+// V2-ported effects are accessed via window.MapShine.effectComposer._getFloorCompositorV2().
+// Only remaining V1 instances are exposed here.
 const GLOBAL_EFFECT_EXPOSURES = [
-  ['Fluid',            'fluidEffect'],
-  ['Window Lights',     'windowLightEffect'],
-  ['Color Correction',  'colorCorrectionEffect'],
-  ['Clouds',            'cloudEffect'],
   ['Atmospheric Fog',   'atmosphericFogEffect'],
   ['Distortion',        'distortionManager'],
-  ['Bloom',             'bloomEffect'],
   ['Dazzle Overlay',    'dazzleOverlayEffect'],
-  ['Sky Color',         'skyColorEffect'],
-  ['Water',             'waterEffect'],
 ];
 
 /**

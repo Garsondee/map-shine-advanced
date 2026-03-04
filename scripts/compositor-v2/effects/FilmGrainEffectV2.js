@@ -33,6 +33,35 @@ export class FilmGrainEffectV2 {
     this._composeQuad = null;
   }
 
+  // ── UI schema (moved from V1 FilmGrainEffect) ─────────────────────────────
+
+  static getControlSchema() {
+    return {
+      enabled: false,
+      groups: [
+        {
+          name: 'filmGrain',
+          label: 'Film Grain',
+          type: 'inline',
+          parameters: ['intensity', 'scale', 'speed', 'grayscale']
+        }
+      ],
+      parameters: {
+        enabled: { type: 'boolean', default: false, hidden: true },
+        intensity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.12 },
+        scale: { type: 'slider', min: 0.25, max: 6.0, step: 0.05, default: 1.0 },
+        speed: { type: 'slider', min: 0.0, max: 4.0, step: 0.05, default: 1.0 },
+        grayscale: { type: 'boolean', default: false }
+      },
+      presets: {
+        Off: { intensity: 0.0, scale: 1.0, speed: 1.0, grayscale: false },
+        Subtle: { intensity: 0.08, scale: 1.0, speed: 1.0, grayscale: false },
+        Cinematic: { intensity: 0.18, scale: 1.4, speed: 1.2, grayscale: false },
+        Noir: { intensity: 0.22, scale: 1.2, speed: 1.0, grayscale: true }
+      }
+    };
+  }
+
   initialize() {
     const THREE = window.THREE;
     if (!THREE) return;

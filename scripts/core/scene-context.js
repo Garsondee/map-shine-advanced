@@ -125,7 +125,7 @@ export class SceneContext {
     // --- Named Effect References ---
     // Effects that need direct references beyond what effectComposer.effects provides
     // (e.g., for cross-wiring, fog hook registration, mode switching)
-    /** @type {import('../effects/LightingEffect.js').LightingEffect|null} */
+    /** @type {import('../compositor-v2/effects/LightingEffectV2.js').LightingEffectV2|null} */
     this.lightingEffect = null;
 
     /** @type {import('../effects/LightningEffect.js').LightningEffect|null} */
@@ -134,13 +134,13 @@ export class SceneContext {
     /** @type {import('../effects/WorldSpaceFogEffect.js').WorldSpaceFogEffect|null} */
     this.fogEffect = null;
 
-    /** @type {import('../effects/SkyColorEffect.js').SkyColorEffect|null} */
+    /** @type {import('../compositor-v2/effects/SkyColorEffectV2.js').SkyColorEffectV2|null} */
     this.skyColorEffect = null;
 
     /** @type {import('../effects/CandleFlamesEffect.js').CandleFlamesEffect|null} */
     this.candleFlamesEffect = null;
 
-    /** @type {import('../particles/AshDisturbanceEffect.js').AshDisturbanceEffect|null} */
+    /** @type {import('../compositor-v2/effects/AshDisturbanceEffectV2.js').AshDisturbanceEffectV2|null} */
     this.ashDisturbanceEffect = null;
 
     /**

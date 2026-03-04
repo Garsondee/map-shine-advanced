@@ -179,6 +179,119 @@ export class SkyColorEffectV2 {
     this._lastDayFactor = 0.5;
   }
 
+  // ── UI schema (moved from V1 SkyColorEffect) ─────────────────────────────
+
+  static getControlSchema() {
+    const stageParams = (prefix, labelPrefix) => {
+      const p = (name) => `${prefix}${name}`;
+      return {
+        groups: [
+          { name: `${prefix.toLowerCase()}-exposure-wb`, label: `${labelPrefix} Exposure & WB`, type: 'inline', parameters: [p('Exposure'), p('Temperature'), p('Tint')] },
+          { name: `${prefix.toLowerCase()}-basics`, label: `${labelPrefix} Basic Adjustments`, type: 'inline', parameters: [p('Contrast'), p('Brightness'), p('Saturation'), p('Vibrance')] },
+          { name: `${prefix.toLowerCase()}-grading`, label: `${labelPrefix} Color Grading`, type: 'folder', expanded: false, parameters: [p('ToneMapping'), p('LiftColor'), p('GammaColor'), p('GainColor'), p('MasterGamma')] },
+          { name: `${prefix.toLowerCase()}-artistic`, label: `${labelPrefix} Effects (Vignette/Grain)`, type: 'folder', expanded: false, parameters: [p('VignetteStrength'), p('VignetteSoftness'), p('GrainStrength')] }
+        ],
+        parameters: {
+          [p('Exposure')]: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
+          [p('Temperature')]: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
+          [p('Tint')]: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
+          [p('Brightness')]: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.0 },
+          [p('Contrast')]: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0 },
+          [p('Saturation')]: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0 },
+          [p('Vibrance')]: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
+          [p('LiftColor')]: { type: 'color', default: { r: 0, g: 0, b: 0 } },
+          [p('GammaColor')]: { type: 'color', default: { r: 0.5, g: 0.5, b: 0.5 } },
+          [p('GainColor')]: { type: 'color', default: { r: 1, g: 1, b: 1 } },
+          [p('MasterGamma')]: { type: 'slider', min: 0.1, max: 3, step: 0.01, default: 1.0 },
+          [p('ToneMapping')]: { type: 'list', options: { 'None': 0, 'ACES Filmic': 1, 'Reinhard': 2 }, default: 0 },
+          [p('VignetteStrength')]: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.0 },
+          [p('VignetteSoftness')]: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5 },
+          [p('GrainStrength')]: { type: 'slider', min: 0, max: 0.5, step: 0.01, default: 0.0 }
+        }
+      };
+    };
+
+    const dawn = stageParams('dawn', 'Dawn');
+    const day = stageParams('day', 'Day');
+    const dusk = stageParams('dusk', 'Dusk');
+    const night = stageParams('night', 'Night');
+
+    dawn.parameters.dawnExposure.default = 0.70; dawn.parameters.dawnTemperature.default = 1.00;
+    dawn.parameters.dawnBrightness.default = -0.05; dawn.parameters.dawnContrast.default = 0.90;
+    dawn.parameters.dawnSaturation.default = 1.15; dawn.parameters.dawnVignetteStrength.default = 0.72;
+    dawn.parameters.dawnVignetteSoftness.default = 1.00; dawn.parameters.dawnGammaColor.default = { r: 1.00, g: 1.00, b: 1.00 };
+    dawn.parameters.dawnGainColor.default = { r: 1.00, g: 1.00, b: 1.00 }; dawn.parameters.dawnMasterGamma.default = 1.00;
+    day.parameters.dayExposure.default = 0.50; day.parameters.dayMasterGamma.default = 2.00;
+    dusk.parameters.duskExposure.default = 0.70; dusk.parameters.duskTemperature.default = 1.00;
+    dusk.parameters.duskBrightness.default = -0.05; dusk.parameters.duskContrast.default = 0.90;
+    dusk.parameters.duskSaturation.default = 1.15; dusk.parameters.duskVignetteStrength.default = 0.72;
+    dusk.parameters.duskVignetteSoftness.default = 1.00;
+    night.parameters.nightExposure.default = 0.00; night.parameters.nightTemperature.default = -0.50;
+    night.parameters.nightSaturation.default = 0.33; night.parameters.nightVibrance.default = -0.58;
+    night.parameters.nightGammaColor.default = { r: 1.00, g: 1.00, b: 1.00 }; night.parameters.nightMasterGamma.default = 1.00;
+    night.parameters.nightVignetteStrength.default = 0.25; night.parameters.nightVignetteSoftness.default = 1.00;
+
+    return {
+      enabled: true,
+      groups: [
+        { name: 'sky-color', label: 'Sky Color', type: 'inline', parameters: ['intensity', 'saturationBoost', 'vibranceBoost', 'skyTintDarknessLightsEnabled', 'skyTintDarknessLightsIntensity'] },
+        { name: 'sky-automation', label: 'Automation (Analytic)', type: 'folder', expanded: false, parameters: ['automationMode', 'sunriseHour', 'sunsetHour', 'goldenHourWidth', 'goldenStrength', 'goldenPower', 'nightFloor', 'analyticStrength', 'turbidity', 'rayleighStrength', 'mieStrength', 'forwardScatter', 'weatherInfluence', 'cloudToTurbidity', 'precipToTurbidity', 'overcastDesaturate', 'overcastContrastReduce', 'tempWarmAtHorizon', 'tempCoolAtNoon', 'nightCoolBoost', 'goldenSaturationBoost', 'nightSaturationFloor', 'hazeLift', 'hazeContrastLoss', 'autoIntensityEnabled', 'autoIntensityStrength'] },
+        { name: 'time-of-day', label: 'Time of Day Grading', type: 'folder', expanded: false, parameters: [] },
+        { name: 'dawn', label: 'Dawn', type: 'folder', expanded: false, parameters: [] },
+        ...dawn.groups,
+        { name: 'day', label: 'Day', type: 'folder', expanded: false, parameters: [] },
+        ...day.groups,
+        { name: 'dusk', label: 'Dusk', type: 'folder', expanded: false, parameters: [] },
+        ...dusk.groups,
+        { name: 'night', label: 'Night', type: 'folder', expanded: false, parameters: [] },
+        ...night.groups,
+        { name: 'automation', label: 'Automation vs Manual', type: 'inline', separator: true, parameters: ['debugOverride', 'exposure', 'saturation', 'contrast'] }
+      ],
+      parameters: {
+        enabled: { type: 'boolean', default: true },
+        intensity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0, label: 'Intensity', throttle: 50 },
+        saturationBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.35, label: 'Sat Boost', throttle: 50 },
+        vibranceBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.0, label: 'Vibrance', throttle: 50 },
+        automationMode: { type: 'list', options: { 'Preset Blend (Legacy)': 0, 'Analytic (Sun + Weather)': 1 }, default: 1, label: 'Automation Mode' },
+        sunriseHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 6.0, label: 'Sunrise', throttle: 50 },
+        sunsetHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 18.0, label: 'Sunset', throttle: 50 },
+        goldenHourWidth: { type: 'slider', min: 0.25, max: 6.0, step: 0.05, default: 2.5, label: 'Golden Width', throttle: 50 },
+        goldenStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 2.0, label: 'Golden Strength', throttle: 50 },
+        goldenPower: { type: 'slider', min: 0.5, max: 3.0, step: 0.01, default: 1.35, label: 'Golden Power', throttle: 50 },
+        nightFloor: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.0, label: 'Night Floor', throttle: 50 },
+        analyticStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 1.75, label: 'Analytic Strength', throttle: 50 },
+        turbidity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.22, label: 'Turbidity', throttle: 50 },
+        rayleighStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.63, label: 'Rayleigh', throttle: 50 },
+        mieStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.35, label: 'Mie', throttle: 50 },
+        forwardScatter: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.3, label: 'Forward Scatter', throttle: 50 },
+        weatherInfluence: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.7, label: 'Weather Influence', throttle: 50 },
+        cloudToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.25, label: 'Cloud→Turbidity', throttle: 50 },
+        precipToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.72, label: 'Precip→Turbidity', throttle: 50 },
+        overcastDesaturate: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.2, label: 'Overcast Desat', throttle: 50 },
+        overcastContrastReduce: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.22, label: 'Overcast Contrast', throttle: 50 },
+        tempWarmAtHorizon: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.85, label: 'Warm Horizon', throttle: 50 },
+        tempCoolAtNoon: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.45, label: 'Cool Noon', throttle: 50 },
+        nightCoolBoost: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.25, label: 'Night Cool', throttle: 50 },
+        goldenSaturationBoost: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.18, label: 'Golden Sat', throttle: 50 },
+        nightSaturationFloor: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.33, label: 'Night Sat Floor', throttle: 50 },
+        hazeLift: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.12, label: 'Haze Lift', throttle: 50 },
+        hazeContrastLoss: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.0, label: 'Haze Contrast', throttle: 50 },
+        autoIntensityEnabled: { type: 'boolean', default: true, label: 'Auto Intensity' },
+        autoIntensityStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Auto Strength', throttle: 50 },
+        skyTintDarknessLightsEnabled: { type: 'boolean', default: true, label: 'Tint Sun Lights' },
+        skyTintDarknessLightsIntensity: { type: 'slider', min: 0.0, max: 5.0, step: 0.01, default: 1.0, label: 'Sun Light Tint Intensity', throttle: 50 },
+        ...dawn.parameters,
+        ...day.parameters,
+        ...dusk.parameters,
+        ...night.parameters,
+        debugOverride: { type: 'boolean', default: false, label: 'Manual Override' },
+        exposure: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0, label: 'Exposure (Manual)', throttle: 50 },
+        saturation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0, label: 'Saturation (Manual)', throttle: 50 },
+        contrast: { type: 'slider', min: 0.5, max: 1.5, step: 0.01, default: 1.0, label: 'Contrast (Manual)', throttle: 50 }
+      }
+    };
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
   initialize() {

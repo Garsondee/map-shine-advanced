@@ -87,6 +87,55 @@ export class LightingEffectV2 {
     this._sizeVec = null;
   }
 
+  // ── UI schema (moved from V1 LightingEffect) ─────────────────────────────
+
+  static getControlSchema() {
+    return {
+      enabled: true,
+      groups: [
+        { name: 'illumination', label: 'Global Illumination', type: 'inline', parameters: ['globalIllumination', 'lightIntensity', 'colorationStrength'] },
+        { name: 'occlusion', label: 'Occlusion', type: 'inline', parameters: ['wallInsetPx', 'upperFloorTransmissionEnabled', 'upperFloorTransmissionStrength', 'upperFloorTransmissionSoftness'] },
+        { name: 'darkness', label: 'Darkness Response', type: 'inline', parameters: ['darknessEffect', 'outdoorBrightness', 'negativeDarknessStrength', 'darknessPunchGain'] },
+        { name: 'sun', label: 'Sun Lights (Indoor Fill)', type: 'inline', parameters: ['sunIndoorGain', 'sunBlurRadiusPx'] },
+        { name: 'lightAnim', label: 'Light Animation Behaviour', type: 'inline', parameters: ['lightAnimWindInfluence', 'lightAnimOutdoorPower'] },
+        {
+          name: 'lightning', label: 'Lightning (Outside)', type: 'inline',
+          parameters: ['lightningOutsideEnabled', 'lightningOutsideGain', 'lightningOutsideShadowEnabled', 'lightningOutsideShadowStrength', 'lightningOutsideShadowRadiusPx', 'lightningOutsideShadowEdgeGain', 'lightningOutsideShadowInvert']
+        },
+        { name: 'debug', label: 'Debug', type: 'folder', expanded: false, parameters: ['debugShowLightBuffer', 'debugLightBufferExposure', 'debugShowDarknessBuffer', 'debugShowRopeMask'] }
+      ],
+      parameters: {
+        enabled: { type: 'boolean', default: true, hidden: true },
+        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.2 },
+        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.2, label: 'Light Intensity' },
+        colorationStrength: { type: 'slider', min: 0, max: 500, step: 0.05, default: 3.0, label: 'Coloration Strength' },
+        wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
+        upperFloorTransmissionEnabled: { type: 'boolean', default: false, label: 'Upper Floor Through-Gaps' },
+        upperFloorTransmissionStrength: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.6, label: 'Upper Light Strength' },
+        upperFloorTransmissionSoftness: { type: 'slider', min: 0.25, max: 4, step: 0.05, default: 1.5, label: 'Upper Light Softness' },
+        darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.5, label: 'Darkness Effect' },
+        outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.7, label: 'Outdoor Brightness' },
+        lightAnimWindInfluence: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.0, label: 'Wind Influence' },
+        lightAnimOutdoorPower: { type: 'slider', min: 0, max: 6, step: 0.25, default: 2.0, label: 'Outdoor Power' },
+        lightningOutsideEnabled: { type: 'boolean', default: true, label: 'Enabled' },
+        lightningOutsideGain: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.25, label: 'Flash Gain' },
+        lightningOutsideShadowEnabled: { type: 'boolean', default: true, label: 'Edge Shadows' },
+        lightningOutsideShadowStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.75, label: 'Shadow Strength' },
+        lightningOutsideShadowRadiusPx: { type: 'slider', min: 0, max: 2500, step: 10, default: 520.0, label: 'Shadow Radius (px)' },
+        lightningOutsideShadowEdgeGain: { type: 'slider', min: 0, max: 25, step: 0.25, default: 6.0, label: 'Edge Gain' },
+        lightningOutsideShadowInvert: { type: 'boolean', default: false, label: 'Invert Side' },
+        negativeDarknessStrength: { type: 'slider', min: 0, max: 3, step: 0.1, default: 1.0, label: 'Negative Darkness Strength' },
+        darknessPunchGain: { type: 'slider', min: 0, max: 10, step: 0.1, default: 2.0, label: 'Darkness Punch Gain' },
+        sunIndoorGain: { type: 'slider', min: 0, max: 20, step: 0.25, default: 1.0, label: 'Indoor Gain' },
+        sunBlurRadiusPx: { type: 'slider', min: 0, max: 40, step: 1, default: 5.0, label: 'Blur Radius (px)' },
+        debugShowLightBuffer: { type: 'boolean', default: false },
+        debugLightBufferExposure: { type: 'number', default: 1.0 },
+        debugShowDarknessBuffer: { type: 'boolean', default: false },
+        debugShowRopeMask: { type: 'boolean', default: false }
+      }
+    };
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
   /**

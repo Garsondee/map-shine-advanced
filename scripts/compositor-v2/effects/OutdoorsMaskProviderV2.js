@@ -79,6 +79,9 @@ export class OutdoorsMaskProviderV2 {
      * @type {Array<(tex: THREE.Texture|null) => void>}
      */
     this._consumers = [];
+
+    /** @type {Set<string>} */
+    this._negativeCache = new Set();
   }
 
   /**
@@ -174,18 +177,69 @@ export class OutdoorsMaskProviderV2 {
     // ── Step 1: Discover _Outdoors masks ─────────────────────────────────
     const tileEntries = [];
 
+    const tryLoadImage = (url) => new Promise((resolve) => {
+      try {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => resolve(true);
+        img.onerror = () => resolve(false);
+        img.src = url;
+      } catch (_) {
+        resolve(false);
+      }
+    });
+
+    const toAbsoluteAssetUrl = (url) => {
+      try {
+        if (typeof url !== 'string') return url;
+        const trimmed = url.trim();
+        if (!trimmed) return trimmed;
+        // If already absolute (http/https) or root-absolute, keep as-is.
+        if (/^https?:\/\//i.test(trimmed) || trimmed.startsWith('/')) return trimmed;
+        // Foundry module/system/world assets are typically referenced as
+        // 'modules/...', 'systems/...', 'worlds/...'. These must be root-absolute
+        // on hosted setups to avoid resolving relative to the current route.
+        if (trimmed.startsWith('modules/') || trimmed.startsWith('systems/') || trimmed.startsWith('worlds/')) {
+          return `/${trimmed}`;
+        }
+        return trimmed;
+      } catch (_) {
+        return url;
+      }
+    };
+
+    const resolveMaskUrl = async (basePath) => {
+      if (!basePath) return null;
+
+      // Primary probe: uses FilePicker browse to avoid 404 spam.
+      const result = await probeMaskFile(basePath, '_Outdoors');
+      if (result?.path) return result.path;
+
+      // Contract fallback: direct image load (GET) for hosted/player clients
+      // where FilePicker browse returns empty. Negative-cache misses so we
+      // don't re-request every populate().
+      if (this._negativeCache.has(basePath)) return null;
+      for (const ext of ['webp', 'png', 'jpg', 'jpeg']) {
+        const candidate = toAbsoluteAssetUrl(`${basePath}_Outdoors.${ext}`);
+        const ok = await tryLoadImage(candidate);
+        if (ok) return candidate;
+      }
+      this._negativeCache.add(basePath);
+      return null;
+    };
+
     // Check scene background first (floor 0)
     const bgSrc = canvas?.scene?.background?.src ?? foundrySceneData?.background?.src ?? '';
     if (bgSrc) {
       const dotIdx = bgSrc.lastIndexOf('.');
       const basePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
       log.info(`OutdoorsMaskProviderV2: checking background: ${basePath}`);
-      const result = await probeMaskFile(basePath, '_Outdoors');
-      if (result?.path) {
-        log.info(`OutdoorsMaskProviderV2: found background _Outdoors mask: ${result.path}`);
+      const maskUrl = await resolveMaskUrl(basePath);
+      if (maskUrl) {
+        log.info(`OutdoorsMaskProviderV2: found background _Outdoors mask: ${maskUrl}`);
         tileEntries.push({
           tileDoc: { x: 0, y: 0, width: canvas?.scene?.width ?? 0, height: canvas?.scene?.height ?? 0 },
-          maskPath: result.path,
+          maskPath: maskUrl,
           floorIndex: 0, // Background is always floor 0
         });
       }
@@ -206,14 +260,13 @@ export class OutdoorsMaskProviderV2 {
       checkedCount++;
 
       log.debug(`OutdoorsMaskProviderV2: probing tile ${checkedCount}/${tileDocs.length}: ${basePath}`);
-      const result = await probeMaskFile(basePath, '_Outdoors');
-      log.debug(`OutdoorsMaskProviderV2: probeMaskFile result:`, result);
-      if (!result?.path) continue;
+      const maskUrl = await resolveMaskUrl(basePath);
+      if (!maskUrl) continue;
 
-      log.info(`OutdoorsMaskProviderV2: found _Outdoors mask: ${result.path}`);
+      log.info(`OutdoorsMaskProviderV2: found _Outdoors mask: ${maskUrl}`);
       tileEntries.push({
         tileDoc,
-        maskPath: result.path,
+        maskPath: maskUrl,
         floorIndex: this._resolveFloorIndex(tileDoc, floors),
       });
     }

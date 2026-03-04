@@ -193,6 +193,97 @@ export class SpecularEffectV2 {
     }
   }
 
+  // ── UI schema (moved from V1 SpecularEffect) ─────────────────────────────
+
+  static getControlSchema() {
+    return {
+      enabled: true,
+      groups: [
+        { name: 'status', label: 'Effect Status', type: 'inline', parameters: ['textureStatus'] },
+        { name: 'material', label: 'Material Properties', type: 'inline', parameters: ['intensity', 'roughness'] },
+        { name: 'stripe-settings', label: 'Stripe Settings', type: 'inline', separator: true, parameters: ['stripeEnabled', 'stripeBlendMode', 'parallaxStrength', 'stripeMaskThreshold', 'worldPatternScale'] },
+        { name: 'layer1', label: 'Layer 1', type: 'folder', separator: true, expanded: false, parameters: ['stripe1Enabled', 'stripe1Frequency', 'stripe1Speed', 'stripe1Angle', 'stripe1Width', 'stripe1Intensity', 'stripe1Parallax', 'stripe1Wave', 'stripe1Gaps', 'stripe1Softness'] },
+        { name: 'layer2', label: 'Layer 2', type: 'folder', expanded: false, parameters: ['stripe2Enabled', 'stripe2Frequency', 'stripe2Speed', 'stripe2Angle', 'stripe2Width', 'stripe2Intensity', 'stripe2Parallax', 'stripe2Wave', 'stripe2Gaps', 'stripe2Softness'] },
+        { name: 'layer3', label: 'Layer 3', type: 'folder', expanded: false, parameters: ['stripe3Enabled', 'stripe3Frequency', 'stripe3Speed', 'stripe3Angle', 'stripe3Width', 'stripe3Intensity', 'stripe3Parallax', 'stripe3Wave', 'stripe3Gaps', 'stripe3Softness'] },
+        { name: 'sparkle', label: 'Micro Sparkle', type: 'folder', expanded: false, parameters: ['sparkleEnabled', 'sparkleIntensity', 'sparkleScale', 'sparkleSpeed'] },
+        { name: 'outdoor-cloud-specular', label: 'Outdoor Cloud Specular', type: 'folder', expanded: false, parameters: ['outdoorCloudSpecularEnabled', 'outdoorStripeBlend', 'cloudSpecularIntensity'] },
+        { name: 'wet-surface', label: 'Wet Surface (Rain)', type: 'folder', expanded: false, parameters: ['wetSpecularEnabled', 'wetInputBrightness', 'wetInputGamma', 'wetSpecularContrast', 'wetBlackPoint', 'wetWhitePoint', 'wetSpecularIntensity', 'wetOutputMax', 'wetOutputGamma'] },
+        { name: 'frost-glaze', label: 'Frost / Ice Glaze', type: 'folder', expanded: false, parameters: ['frostGlazeEnabled', 'frostThreshold', 'frostIntensity', 'frostTintStrength'] },
+        { name: 'dynamic-light-tint', label: 'Dynamic Light Tinting', type: 'folder', expanded: false, parameters: ['dynamicLightTintEnabled', 'dynamicLightTintStrength'] },
+        { name: 'wind-driven-stripes', label: 'Wind-Driven Stripes', type: 'folder', expanded: false, parameters: ['windDrivenStripesEnabled', 'windStripeInfluence'] },
+        { name: 'building-shadow-suppression', label: 'Building Shadow Suppression', type: 'folder', expanded: false, parameters: ['buildingShadowSuppressionEnabled', 'buildingShadowSuppressionStrength'] }
+      ],
+      parameters: {
+        hasSpecularMask: { type: 'boolean', default: true },
+        textureStatus: { type: 'string', label: 'Mask Status', default: 'Checking...', readonly: true },
+        intensity: { type: 'slider', label: 'Specular Intensity', min: 0, max: 2, step: 0.01, default: 0.53, throttle: 100 },
+        roughness: { type: 'slider', label: 'Roughness', min: 0, max: 1, step: 0.01, default: 0.0, throttle: 100 },
+        stripeEnabled: { type: 'boolean', label: 'Enable Stripes', default: true },
+        stripeBlendMode: { type: 'list', label: 'Stripe Blend Mode', options: { 'Add': 0, 'Multiply': 1, 'Screen': 2, 'Overlay': 3 }, default: 0 },
+        stripeMaskThreshold: { type: 'slider', label: 'Stripe Brightness Threshold', min: 0, max: 1, step: 0.01, default: 0.1, throttle: 100 },
+        worldPatternScale: { type: 'slider', label: 'Specular World Scale', min: 256, max: 8192, step: 16, default: 3072, throttle: 100 },
+        parallaxStrength: { type: 'slider', label: 'Parallax Strength', min: 0, max: 2, step: 0.1, default: 1.5, throttle: 100 },
+        stripe1Enabled: { type: 'boolean', label: 'Layer 1 Enabled', default: true },
+        stripe1Frequency: { type: 'slider', label: 'Layer 1 Frequency', min: 0.5, max: 20, step: 0.5, default: 11.0, throttle: 100 },
+        stripe1Speed: { type: 'slider', label: 'Layer 1 Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100 },
+        stripe1Angle: { type: 'slider', label: 'Layer 1 Angle', min: 0, max: 360, step: 1, default: 115, throttle: 100 },
+        stripe1Width: { type: 'slider', label: 'Layer 1 Width', min: 0, max: 1, step: 0.01, default: 0.21, throttle: 100 },
+        stripe1Intensity: { type: 'slider', label: 'Layer 1 Intensity', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100 },
+        stripe1Parallax: { type: 'slider', label: 'Layer 1 Parallax', min: -2, max: 2, step: 0.1, default: 0.2, throttle: 100 },
+        stripe1Wave: { type: 'slider', label: 'Layer 1 Wave', min: 0, max: 2, step: 0.1, default: 1.7, throttle: 100 },
+        stripe1Gaps: { type: 'slider', label: 'Layer 1 Gaps', min: 0, max: 1, step: 0.01, default: 0.31, throttle: 100 },
+        stripe1Softness: { type: 'slider', label: 'Layer 1 Softness', min: 0, max: 5, step: 0.01, default: 2.14, throttle: 100 },
+        stripe2Enabled: { type: 'boolean', label: 'Layer 2 Enabled', default: true },
+        stripe2Frequency: { type: 'slider', label: 'Layer 2 Frequency', min: 0.5, max: 20, step: 0.5, default: 15.5, throttle: 100 },
+        stripe2Speed: { type: 'slider', label: 'Layer 2 Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100 },
+        stripe2Angle: { type: 'slider', label: 'Layer 2 Angle', min: 0, max: 360, step: 1, default: 111, throttle: 100 },
+        stripe2Width: { type: 'slider', label: 'Layer 2 Width', min: 0, max: 1, step: 0.01, default: 0.38, throttle: 100 },
+        stripe2Intensity: { type: 'slider', label: 'Layer 2 Intensity', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100 },
+        stripe2Parallax: { type: 'slider', label: 'Layer 2 Parallax', min: -2, max: 2, step: 0.1, default: 0.1, throttle: 100 },
+        stripe2Wave: { type: 'slider', label: 'Layer 2 Wave', min: 0, max: 2, step: 0.1, default: 1.6, throttle: 100 },
+        stripe2Gaps: { type: 'slider', label: 'Layer 2 Gaps', min: 0, max: 1, step: 0.01, default: 0.5, throttle: 100 },
+        stripe2Softness: { type: 'slider', label: 'Layer 2 Softness', min: 0, max: 5, step: 0.01, default: 3.93, throttle: 100 },
+        stripe3Enabled: { type: 'boolean', label: 'Layer 3 Enabled', default: true },
+        stripe3Frequency: { type: 'slider', label: 'Layer 3 Frequency', min: 0.5, max: 20, step: 0.5, default: 5.0, throttle: 100 },
+        stripe3Speed: { type: 'slider', label: 'Layer 3 Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100 },
+        stripe3Angle: { type: 'slider', label: 'Layer 3 Angle', min: 0, max: 360, step: 1, default: 162, throttle: 100 },
+        stripe3Width: { type: 'slider', label: 'Layer 3 Width', min: 0, max: 1, step: 0.01, default: 0.09, throttle: 100 },
+        stripe3Intensity: { type: 'slider', label: 'Layer 3 Intensity', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100 },
+        stripe3Parallax: { type: 'slider', label: 'Layer 3 Parallax', min: -2, max: 2, step: 0.1, default: -0.1, throttle: 100 },
+        stripe3Wave: { type: 'slider', label: 'Layer 3 Wave', min: 0, max: 2, step: 0.1, default: 0.4, throttle: 100 },
+        stripe3Gaps: { type: 'slider', label: 'Layer 3 Gaps', min: 0, max: 1, step: 0.01, default: 0.37, throttle: 100 },
+        stripe3Softness: { type: 'slider', label: 'Layer 3 Softness', min: 0, max: 5, step: 0.01, default: 3.44, throttle: 100 },
+        sparkleEnabled: { type: 'boolean', label: 'Enable Sparkle', default: false },
+        sparkleIntensity: { type: 'slider', label: 'Sparkle Intensity', min: 0, max: 2, step: 0.01, default: 0.95, throttle: 100 },
+        sparkleScale: { type: 'slider', label: 'Sparkle Scale', min: 100, max: 10000, step: 1, default: 2460, throttle: 100 },
+        sparkleSpeed: { type: 'slider', label: 'Sparkle Speed', min: 0, max: 5, step: 0.01, default: 1.38, throttle: 100 },
+        outdoorCloudSpecularEnabled: { type: 'boolean', label: 'Enable Cloud Specular', default: true },
+        outdoorStripeBlend: { type: 'slider', label: 'Outdoor Stripe Blend', min: 0, max: 1, step: 0.01, default: 0.8, throttle: 100 },
+        cloudSpecularIntensity: { type: 'slider', label: 'Cloud Specular Intensity', min: 0, max: 3, step: 0.01, default: 3.0, throttle: 100 },
+        wetSpecularEnabled: { type: 'boolean', label: 'Enable Wet Surface', default: true },
+        wetSpecularThreshold: { type: 'slider', label: 'Rain Threshold', min: 0, max: 1, step: 0.01, default: 0.5, throttle: 100 },
+        wetInputBrightness: { type: 'slider', label: 'Input Brightness', min: -0.5, max: 0.5, step: 0.01, default: 0.0, throttle: 100 },
+        wetInputGamma: { type: 'slider', label: 'Input Gamma', min: 0.1, max: 3.0, step: 0.01, default: 1.0, throttle: 100 },
+        wetSpecularContrast: { type: 'slider', label: 'Input Contrast', min: 1, max: 10, step: 0.1, default: 3.0, throttle: 100 },
+        wetBlackPoint: { type: 'slider', label: 'Black Point', min: 0.0, max: 1.0, step: 0.01, default: 0.2, throttle: 100 },
+        wetWhitePoint: { type: 'slider', label: 'White Point', min: 0.0, max: 1.0, step: 0.01, default: 1.0, throttle: 100 },
+        wetSpecularIntensity: { type: 'slider', label: 'Output Intensity', min: 0, max: 5, step: 0.01, default: 1.5, throttle: 100 },
+        wetOutputMax: { type: 'slider', label: 'Output Max (Clamp)', min: 0.0, max: 3.0, step: 0.01, default: 1.0, throttle: 100 },
+        wetOutputGamma: { type: 'slider', label: 'Output Gamma', min: 0.1, max: 3.0, step: 0.01, default: 1.0, throttle: 100 },
+        frostGlazeEnabled: { type: 'boolean', label: 'Enable Frost Glaze', default: true },
+        frostThreshold: { type: 'slider', label: 'Freeze Threshold', min: 0, max: 1, step: 0.01, default: 0.55, throttle: 100 },
+        frostIntensity: { type: 'slider', label: 'Frost Intensity', min: 0, max: 3, step: 0.01, default: 1.2, throttle: 100 },
+        frostTintStrength: { type: 'slider', label: 'Blue Tint Strength', min: 0, max: 1, step: 0.01, default: 0.4, throttle: 100 },
+        dynamicLightTintEnabled: { type: 'boolean', label: 'Enable Light Tinting', default: true },
+        dynamicLightTintStrength: { type: 'slider', label: 'Tint Strength', min: 0, max: 1, step: 0.01, default: 0.6, throttle: 100 },
+        windDrivenStripesEnabled: { type: 'boolean', label: 'Enable Wind Stripes', default: true },
+        windStripeInfluence: { type: 'slider', label: 'Wind Influence', min: 0, max: 1, step: 0.01, default: 0.5, throttle: 100 },
+        buildingShadowSuppressionEnabled: { type: 'boolean', label: 'Enable Shadow Suppression', default: true },
+        buildingShadowSuppressionStrength: { type: 'slider', label: 'Suppression Strength', min: 0, max: 1, step: 0.01, default: 0.8, throttle: 100 }
+      }
+    };
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   /**

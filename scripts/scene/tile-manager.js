@@ -246,13 +246,13 @@ export class TileManager {
     };
     
     // Window light effect reference for overhead tile lighting
-    /** @type {WindowLightEffect|null} */
+    /** @type {import('../compositor-v2/effects/WindowLightEffectV2.js').WindowLightEffectV2|null} */
     this.windowLightEffect = null;
 
-    /** @type {SpecularEffect|null} */
+    /** @type {import('../compositor-v2/effects/SpecularEffectV2.js').SpecularEffectV2|null} */
     this.specularEffect = null;
 
-    /** @type {import('../effects/FluidEffect.js').FluidEffect|null} */
+    /** @type {import('../compositor-v2/effects/FluidEffectV2.js').FluidEffectV2|null} */
     this.fluidEffect = null;
 
     /**

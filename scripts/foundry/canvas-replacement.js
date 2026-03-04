@@ -13,12 +13,9 @@ import { PixiInputBridge } from './pixi-input-bridge.js';
 import { CinematicCameraManager } from './cinematic-camera-manager.js';
 import { EffectComposer } from '../effects/EffectComposer.js';
 // Dependent effects still constructed directly in createThreeCanvas
-import { LightingEffect } from '../effects/LightingEffect.js';
 import { CandleFlamesEffect } from '../effects/CandleFlamesEffect.js';
 import { MaskManager } from '../masks/MaskManager.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
-import { FireSparksEffect } from '../particles/FireSparksEffect.js';
-import { AshDisturbanceEffect } from '../particles/AshDisturbanceEffect.js';
 import { DustMotesEffect } from '../particles/DustMotesEffect.js';
 // Effect wiring — tables, helpers, and re-exported effect classes (for static getControlSchema() calls)
 import {
@@ -28,16 +25,23 @@ import {
   readLazySkipIds,
   wireBaseMeshes,
   exposeEffectsEarly,
-  // Effect classes re-exported for initializeUI's static getControlSchema() calls
-  SpecularEffect,
+  // V2 effect classes for initializeUI's static getControlSchema() calls
+  SpecularEffectV2,
+  FluidEffectV2,
+  WindowLightEffectV2,
+  ColorCorrectionEffectV2,
+  FilmGrainEffectV2,
+  SharpenEffectV2,
+  BloomEffectV2,
+  SkyColorEffectV2,
+  LightingEffectV2,
+  FireEffectV2,
+  AshDisturbanceEffectV2,
+  CloudEffectV2,
+  // V1 effects with no V2 equivalent — retained
   IridescenceEffect,
-  FluidEffect,
-  WindowLightEffect,
-  ColorCorrectionEffect,
-  FilmGrainEffect,
   DotScreenEffect,
   HalftoneEffect,
-  SharpenEffect,
   AsciiEffect,
   SmellyFliesEffect,
   LightningEffect,
@@ -48,16 +52,13 @@ import {
   TreeEffect,
   OverheadShadowsEffect,
   BuildingShadowsEffect,
-  CloudEffect,
   AtmosphericFogEffect,
   DistortionManager,
-  BloomEffect,
   LensflareEffect,
   DazzleOverlayEffect,
   MaskDebugEffect,
   DebugLayerEffect,
   PlayerLightEffect,
-  SkyColorEffect,
   VisionModeEffect
 } from './effect-wiring.js';
 import { TileEffectBindingManager } from '../scene/TileEffectBindingManager.js';
@@ -81,10 +82,8 @@ import { DrawingManager } from '../scene/drawing-manager.js';
 import { NoteManager } from '../scene/note-manager.js';
 import { FloorStack } from '../scene/FloorStack.js';
 import { FloorLayerManager } from '../compositor-v2/FloorLayerManager.js';
-import { CloudEffectV2 } from '../compositor-v2/effects/CloudEffectV2.js';
 import { FilterEffectV2 } from '../compositor-v2/effects/FilterEffectV2.js';
 import { WaterSplashesEffectV2 } from '../compositor-v2/effects/WaterSplashesEffectV2.js';
-import { AshDisturbanceEffectV2 } from '../compositor-v2/effects/AshDisturbanceEffectV2.js';
 import { TemplateManager } from '../scene/template-manager.js';
 import { LightIconManager } from '../scene/light-icon-manager.js';
 import { EnhancedLightIconManager } from '../scene/enhanced-light-icon-manager.js';
@@ -4309,7 +4308,12 @@ async function createThreeCanvas(scene) {
     console.log('[Map Shine Advanced: Loading] ▶ Manager: Lightweight batch (Door, Drawing, Note, Template, LightIcon, EnhancedLightIcon, MapPoints)');
 
     if (!sceneComposer) {
-      throw new Error('createThreeCanvas: SceneComposer was null after initialize(); aborting manager init');
+      // This can happen if the scene load session becomes stale (scene switch)
+      // or teardown/context-loss logic clears globals mid-initialize.
+      // Treat it as a graceful abort instead of hard-crashing the entire init.
+      log.warn('createThreeCanvas: SceneComposer was null after initialize(); aborting manager init gracefully');
+      safeDispose(() => destroyThreeCanvas(), 'destroyThreeCanvas(sceneComposer-null)');
+      return;
     }
 
     // Use the camera returned by SceneComposer.initialize() rather than reading
@@ -4848,32 +4852,32 @@ async function createThreeCanvas(scene) {
 
         safeCall(() => {
           uiManager.registerEffect('lighting', 'Lighting & Tone Mapping',
-            LightingEffect.getControlSchema(), _makeV2Callback('_lightingEffect'), 'global');
+            LightingEffectV2.getControlSchema(), _makeV2Callback('_lightingEffect'), 'global');
         }, 'v2.registerLightingUI', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('specular', 'Metallic / Specular',
-            SpecularEffect.getControlSchema(), _makeV2Callback('_specularEffect'), 'surface');
+            SpecularEffectV2.getControlSchema(), _makeV2Callback('_specularEffect'), 'surface');
         }, 'v2.registerSpecularUI', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('fluid', 'Fluid',
-            FluidEffect.getControlSchema(), _makeV2Callback('_fluidEffect'), 'surface');
+            FluidEffectV2.getControlSchema(), _makeV2Callback('_fluidEffect'), 'surface');
         }, 'v2.registerFluidUI', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('sky-color', 'Sky Color',
-            SkyColorEffect.getControlSchema(), _makeV2Callback('_skyColorEffect'), 'global');
+            SkyColorEffectV2.getControlSchema(), _makeV2Callback('_skyColorEffect'), 'global');
         }, 'v2.registerSkyColorUI', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('windowLight', 'Window Light',
-            WindowLightEffect.getControlSchema(), _makeV2Callback('_windowLightEffect'), 'structure');
+            WindowLightEffectV2.getControlSchema(), _makeV2Callback('_windowLightEffect'), 'structure');
         }, 'v2.registerWindowLightUI', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('fire-sparks', 'Fire',
-            FireSparksEffect.getControlSchema(), _makeV2Callback('_fireEffect'), 'particle');
+            FireEffectV2.getControlSchema(), _makeV2Callback('_fireEffect'), 'particle');
         }, 'v2.registerFireUI', Severity.COSMETIC);
 
         safeCall(() => {
@@ -4893,12 +4897,12 @@ async function createThreeCanvas(scene) {
 
         safeCall(() => {
           uiManager.registerEffect('bloom', 'Bloom (Glow)',
-            BloomEffect.getControlSchema(), _makeV2Callback('_bloomEffect'), 'global');
+            BloomEffectV2.getControlSchema(), _makeV2Callback('_bloomEffect'), 'global');
         }, 'v2.registerBloomUI', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('colorCorrection', 'Color Grading & VFX',
-            ColorCorrectionEffect.getControlSchema(), _makeV2Callback('_colorCorrectionEffect'), 'global');
+            ColorCorrectionEffectV2.getControlSchema(), _makeV2Callback('_colorCorrectionEffect'), 'global');
         }, 'v2.registerColorCorrectionUI', Severity.COSMETIC);
 
         safeCall(() => {
@@ -4908,12 +4912,12 @@ async function createThreeCanvas(scene) {
 
         safeCall(() => {
           uiManager.registerEffect('filmGrain', 'Film Grain',
-            FilmGrainEffect.getControlSchema(), _makeV2Callback('_filmGrainEffect'), 'global');
+            FilmGrainEffectV2.getControlSchema(), _makeV2Callback('_filmGrainEffect'), 'global');
         }, 'v2.registerFilmGrainUI', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('sharpen', 'Sharpen',
-            SharpenEffect.getControlSchema(), _makeV2Callback('_sharpenEffect'), 'global');
+            SharpenEffectV2.getControlSchema(), _makeV2Callback('_sharpenEffect'), 'global');
         }, 'v2.registerSharpenUI', Severity.COSMETIC);
 
         // Ash controls: in V2 mode WeatherController isn't constructed as an updatable, but
@@ -5087,32 +5091,7 @@ async function createThreeCanvas(scene) {
           );
         }, 'v2.registerAshWeatherUI', Severity.COSMETIC);
 
-        safeCall(() => {
-          const ashSchema = AshDisturbanceEffect.getControlSchema();
-          const onAshDisturbanceUpdate = (effectId, paramId, value) => {
-            try {
-              if (window.MapShine) {
-                if (!window.MapShine.__v2AshDisturbance) window.MapShine.__v2AshDisturbance = {};
-                window.MapShine.__v2AshDisturbance[paramId] = value;
-              }
-
-              // If a live V1 AshDisturbanceEffect instance exists (e.g. user toggled back to V1
-              // without a full reload), apply the change directly.
-              const live = window.MapShine?.effectMap?.get?.('Ash Disturbance') || window.MapShine?.ashDisturbanceEffect;
-              if (live && typeof live.applyParamChange === 'function') {
-                live.applyParamChange(paramId, value);
-              }
-            } catch (_) {}
-          };
-
-          uiManager.registerEffect(
-            'ash-disturbance',
-            'Ash Disturbance',
-            ashSchema,
-            onAshDisturbanceUpdate,
-            'particle'
-          );
-        }, 'v2.registerAshDisturbanceUI', Severity.COSMETIC);
+        // ash-disturbance is already registered above via AshDisturbanceEffectV2.getControlSchema()
 
         safeCall(() => {
           uiManager.registerEffect('fog', 'Fog of War',
@@ -6204,29 +6183,6 @@ async function initializeUI(effectMap) {
     }
   }
 
-  // Get Specular effect schema from effect class (centralized definition)
-  const specularSchema = SpecularEffect.getControlSchema();
-
-  // Update callback for Specular effect
-  const onSpecularUpdate = (effectId, paramId, value) => {
-    if (paramId === 'enabled' || paramId === 'masterEnabled') {
-      specularEffect.enabled = value;
-      log.debug(`Specular effect ${value ? 'enabled' : 'disabled'}`);
-    } else if (specularEffect.params[paramId] !== undefined) {
-      specularEffect.params[paramId] = value;
-      log.debug(`Specular.${paramId} = ${value}`);
-    }
-  };
-
-  // Register effect with UI (Surface & Material category)
-  uiManager.registerEffect(
-    'specular',
-    'Metallic / Specular',
-    specularSchema,
-    onSpecularUpdate,
-    'surface'
-  );
-
   // --- Fog Settings ---
   if (fogEffect) {
     const fogSchema = WorldSpaceFogEffect.getControlSchema();
@@ -6332,7 +6288,7 @@ async function initializeUI(effectMap) {
 
   // --- Fluid Settings ---
   if (fluidEffect) {
-    const fluidSchema = FluidEffect.getControlSchema();
+    const fluidSchema = FluidEffectV2.getControlSchema();
 
     const onFluidUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -6351,23 +6307,6 @@ async function initializeUI(effectMap) {
       onFluidUpdate,
       'surface'
     );
-  }
-
-  // Sync dynamic status from effect to UI immediately
-  if (uiManager.effectFolders['specular']) {
-    const folderData = uiManager.effectFolders['specular'];
-    
-    // Update internal params in UI manager
-    folderData.params.textureStatus = specularEffect.params.textureStatus;
-    folderData.params.hasSpecularMask = specularEffect.params.hasSpecularMask;
-    
-    // Refresh status display
-    if (folderData.bindings.textureStatus) {
-      folderData.bindings.textureStatus.refresh();
-    }
-    
-    // Update status light
-    uiManager.updateEffectiveState('specular');
   }
 
   // --- Prism Settings ---
@@ -6423,7 +6362,7 @@ async function initializeUI(effectMap) {
   };
 
   if (lightingEffect) {
-    const lightingSchema = LightingEffect.getControlSchema();
+    const lightingSchema = LightingEffectV2.getControlSchema();
 
     const onLightingUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -6473,7 +6412,7 @@ async function initializeUI(effectMap) {
 
   // --- Sky Color Settings (Global & Post) ---
   if (skyColorEffect) {
-    const skySchema = SkyColorEffect.getControlSchema();
+    const skySchema = SkyColorEffectV2.getControlSchema();
 
     const onSkyUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -6498,7 +6437,7 @@ async function initializeUI(effectMap) {
   // --- Bloom Settings ---
   if (bloomEffect) {
     // ... (rest of the code remains the same)
-    const bloomSchema = BloomEffect.getControlSchema();
+    const bloomSchema = BloomEffectV2.getControlSchema();
     
     const onBloomUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -7012,7 +6951,7 @@ async function initializeUI(effectMap) {
 
   // --- Window Light Settings ---
   if (windowLightEffect) {
-    const windowSchema = WindowLightEffect.getControlSchema();
+    const windowSchema = WindowLightEffectV2.getControlSchema();
 
     const onWindowUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -7103,7 +7042,7 @@ async function initializeUI(effectMap) {
 
   // --- Fire Debug Settings ---
   if (fireSparksEffect) {
-    const fireSchema = FireSparksEffect.getControlSchema();
+    const fireSchema = FireEffectV2.getControlSchema();
     
     const onFireUpdate = (effectId, paramId, value) => {
       fireSparksEffect.applyParamChange(paramId, value);
@@ -7467,7 +7406,7 @@ async function initializeUI(effectMap) {
 
   // --- Color Correction & Grading (Post-Processing) ---
   if (colorCorrectionEffect) {
-    const ccSchema = ColorCorrectionEffect.getControlSchema();
+    const ccSchema = ColorCorrectionEffectV2.getControlSchema();
 
     const onColorCorrectionUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -7547,7 +7486,7 @@ async function initializeUI(effectMap) {
   }
 
   if (filmGrainEffect) {
-    const schema = FilmGrainEffect.getControlSchema();
+    const schema = FilmGrainEffectV2.getControlSchema();
 
     const onFilmGrainUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -7611,7 +7550,7 @@ async function initializeUI(effectMap) {
   }
 
   if (sharpenEffect) {
-    const sharpenSchema = SharpenEffect.getControlSchema();
+    const sharpenSchema = SharpenEffectV2.getControlSchema();
 
     const onSharpenUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {

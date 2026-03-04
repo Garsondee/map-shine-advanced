@@ -491,7 +491,7 @@ export class FloorCompositor {
       this._waterEffect.initialize();
     }
     try {
-      this._buildingShadowEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera);
+      this._buildingShadowEffect?.initialize?.(this.renderer);
     } catch (err) {
       log.warn('FloorCompositor: BuildingShadowsEffectV2 initialize failed:', err);
     }
@@ -597,7 +597,6 @@ export class FloorCompositor {
         try {
           const basePlaneMesh = sc.basePlaneMesh ?? null;
           if (basePlaneMesh) {
-            this._buildingShadowEffect?.setBaseMesh?.(basePlaneMesh);
             this._overheadShadowEffect?.setBaseMesh?.(basePlaneMesh);
           }
         } catch (_) {}
@@ -768,7 +767,7 @@ export class FloorCompositor {
     // Building shadow render (V1 signature - renderer + scene + camera)
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: buildingShadows.render'); } catch (_) {} }
     try { 
-      this._buildingShadowEffect?.render?.(this.renderer, this._renderBus._scene, this.camera);
+      this._buildingShadowEffect?.render?.(this.renderer);
     } catch (err) {
       log.warn('BuildingShadowsEffectV2 render threw, skipping building shadow pass:', err);
     }

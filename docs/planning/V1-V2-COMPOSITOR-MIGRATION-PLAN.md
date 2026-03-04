@@ -620,3 +620,35 @@ Disposing MapShine’s `FrameCoordinator` helps reduce extra PIXI flush renderin
        - Tiles probe **webp only** to avoid multi-request 404 spam.
      - **Spam control:** Added negative-result caching for direct mask probes so each missing tile mask only causes at most a single request per session.
      - **Compatibility:** Works both when Levels floors are configured and when they are absent (all fire defaults to floor 0).
+
+## 10. Success Story: FluidEffect → FluidEffectV2 (Per-tile overlay)
+
+**Status:** Working in V2 (confirmed in Foundry).
+
+**What it is:** A per-tile animated overlay driven by `_Fluid` luminance masks (same content workflow as V1). Each tile/background image with a `_Fluid` mask gets its own Three.js overlay mesh (ShaderMaterial) that animates over time.
+
+**Implementation (V2 pattern):**
+- New effect: `scripts/compositor-v2/effects/FluidEffectV2.js`
+- Wiring:
+  - `scripts/compositor-v2/FloorCompositor.js`
+    - Constructed as `this._fluidEffect`
+    - Initialized in `initialize()`
+    - Populated alongside other overlays on first-frame bus population
+    - Updated per-frame to advance `uTime`
+    - Included in `wantsContinuousRender()` so animation stays smooth
+  - `scripts/foundry/canvas-replacement.js`
+    - V2 Tweakpane registration uses `FluidEffect.getControlSchema()`
+    - Callback targets `FloorCompositor._fluidEffect`
+
+**Behavior details:**
+- Runs as a **bus overlay** via `FloorRenderBus.addEffectOverlay(...)` so it inherits floor visibility (no cross-floor bleed).
+- Discovers `_Fluid` masks for:
+  - The scene background (`__bg_image__` convention)
+  - Individual tiles
+
+**Known limitations (current V2):**
+- V1 fluid supported roof-alpha gating and depth-occlusion integration.
+- V2 FluidEffectV2 currently runs without:
+  - Roof alpha map occlusion
+  - Depth texture occlusion
+- The effect is visually correct and animated, but may draw through geometry until V2 provides equivalent occlusion inputs.

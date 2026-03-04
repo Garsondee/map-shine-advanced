@@ -32,6 +32,34 @@ export class SharpenEffectV2 {
     this._composeQuad = null;
   }
 
+  // ── UI schema (moved from V1 SharpenEffect) ───────────────────────────────
+
+  static getControlSchema() {
+    return {
+      enabled: false,
+      groups: [
+        {
+          name: 'sharpen',
+          label: 'Sharpen',
+          type: 'inline',
+          parameters: ['amount', 'radiusPx', 'threshold']
+        }
+      ],
+      parameters: {
+        enabled: { type: 'boolean', default: false, hidden: true },
+        amount: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.5 },
+        radiusPx: { type: 'slider', min: 0.0, max: 6.0, step: 0.1, default: 3.5 },
+        threshold: { type: 'slider', min: 0.0, max: 0.25, step: 0.005, default: 0.045 }
+      },
+      presets: {
+        'Off': { amount: 0.0, radiusPx: 1.0, threshold: 0.0 },
+        'Subtle': { amount: 0.25, radiusPx: 1.0, threshold: 0.02 },
+        'Crisp': { amount: 0.55, radiusPx: 1.2, threshold: 0.015 },
+        'Strong': { amount: 1.0, radiusPx: 1.5, threshold: 0.02 }
+      }
+    };
+  }
+
   initialize() {
     const THREE = window.THREE;
     if (!THREE) return;

@@ -38,28 +38,20 @@ import {
   FireEffectV2,
   AshDisturbanceEffectV2,
   CloudEffectV2,
+  AsciiEffectV2,
   // V1 effects with no V2 equivalent — retained
   IridescenceEffect,
-  DotScreenEffect,
-  HalftoneEffect,
-  AsciiEffect,
   SmellyFliesEffect,
   LightningEffect,
   PrismEffect,
   WaterEffectV2,
   WorldSpaceFogEffect,
-  BushEffect,
-  TreeEffect,
-  OverheadShadowsEffect,
-  BuildingShadowsEffect,
   AtmosphericFogEffect,
   DistortionManager,
   LensflareEffect,
-  DazzleOverlayEffect,
   MaskDebugEffect,
   DebugLayerEffect,
   PlayerLightEffect,
-  VisionModeEffect
 } from './effect-wiring.js';
 import { TileEffectBindingManager } from '../scene/TileEffectBindingManager.js';
 import { RenderLoop } from '../core/render-loop.js';
@@ -84,6 +76,16 @@ import { FloorStack } from '../scene/FloorStack.js';
 import { FloorLayerManager } from '../compositor-v2/FloorLayerManager.js';
 import { FilterEffectV2 } from '../compositor-v2/effects/FilterEffectV2.js';
 import { WaterSplashesEffectV2 } from '../compositor-v2/effects/WaterSplashesEffectV2.js';
+import { OverheadShadowsEffectV2 } from '../compositor-v2/effects/OverheadShadowsEffectV2.js';
+import { BuildingShadowsEffectV2 } from '../compositor-v2/effects/BuildingShadowsEffectV2.js';
+import { BushEffectV2 } from '../compositor-v2/effects/BushEffectV2.js';
+import { TreeEffectV2 } from '../compositor-v2/effects/TreeEffectV2.js';
+import { DotScreenEffectV2 } from '../compositor-v2/effects/DotScreenEffectV2.js';
+import { HalftoneEffectV2 } from '../compositor-v2/effects/HalftoneEffectV2.js';
+import { DazzleOverlayEffectV2 } from '../compositor-v2/effects/DazzleOverlayEffectV2.js';
+import { VisionModeEffectV2 } from '../compositor-v2/effects/VisionModeEffectV2.js';
+import { InvertEffectV2 } from '../compositor-v2/effects/InvertEffectV2.js';
+import { SepiaEffectV2 } from '../compositor-v2/effects/SepiaEffectV2.js';
 import { TemplateManager } from '../scene/template-manager.js';
 import { LightIconManager } from '../scene/light-icon-manager.js';
 import { EnhancedLightIconManager } from '../scene/enhanced-light-icon-manager.js';
@@ -4913,6 +4915,41 @@ async function createThreeCanvas(scene) {
             SharpenEffectV2.getControlSchema(), _makeV2Callback('_sharpenEffect'), 'global');
         }, 'v2.registerSharpenUI', Severity.COSMETIC);
 
+        safeCall(() => {
+          uiManager.registerEffect('dotScreen', 'Dot Screen',
+            DotScreenEffectV2.getControlSchema(), _makeV2Callback('_dotScreenEffect'), 'global');
+        }, 'v2.registerDotScreenUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('halftone', 'Halftone',
+            HalftoneEffectV2.getControlSchema(), _makeV2Callback('_halftoneEffect'), 'global');
+        }, 'v2.registerHalftoneUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('ascii', 'ASCII Art',
+            AsciiEffectV2.getControlSchema(), _makeV2Callback('_asciiEffect'), 'global');
+        }, 'v2.registerAsciiUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('dazzleOverlay', 'Dazzle Overlay',
+            DazzleOverlayEffectV2.getControlSchema(), _makeV2Callback('_dazzleOverlayEffect'), 'global');
+        }, 'v2.registerDazzleOverlayUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('visionMode', 'Vision Mode',
+            VisionModeEffectV2.getControlSchema(), _makeV2Callback('_visionModeEffect'), 'global');
+        }, 'v2.registerVisionModeUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('invert', 'Color Invert',
+            InvertEffectV2.getControlSchema(), _makeV2Callback('_invertEffect'), 'global');
+        }, 'v2.registerInvertUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('sepia', 'Sepia Tone',
+            SepiaEffectV2.getControlSchema(), _makeV2Callback('_sepiaEffect'), 'global');
+        }, 'v2.registerSepiaUI', Severity.COSMETIC);
+
         // Ash controls: in V2 mode WeatherController isn't constructed as an updatable, but
         // we still expose full ash tuning controls so users can keep it disabled and
         // adjust tuning consistently across V1/V2. The enabled toggle is implemented as a
@@ -5122,15 +5159,14 @@ async function createThreeCanvas(scene) {
         safeCall(() => {
           uiManager.registerEffect(
             'overhead-shadows', 'Overhead Shadows',
-            OverheadShadowsEffect.getControlSchema(), _makeV2Callback('_overheadShadowEffect'), 'global'
+            OverheadShadowsEffectV2.getControlSchema(), _makeV2Callback('_overheadShadowEffect'), 'global'
           );
         }, 'v2.registerOverheadShadowsUI', Severity.COSMETIC);
 
-        // Building shadows: uses V1 schema but routes to _buildingShadowEffect on FloorCompositor.
         safeCall(() => {
           uiManager.registerEffect(
             'building-shadows', 'Building Shadows',
-            BuildingShadowsEffect.getControlSchema(), _makeV2Callback('_buildingShadowEffect'), 'global'
+            BuildingShadowsEffectV2.getControlSchema(), _makeV2Callback('_buildingShadowEffect'), 'global'
           );
         }, 'v2.registerBuildingShadowsUI', Severity.COSMETIC);
 
@@ -5565,7 +5601,6 @@ async function initializeUI(effectMap) {
   const dotScreenEffect = effectMap.get('Dot Screen');
   const halftoneEffect = effectMap.get('Halftone');
   const sharpenEffect = effectMap.get('Sharpen');
-  const asciiEffect = effectMap.get('ASCII');
   const prismEffect = effectMap.get('Prism');
   const lightingEffect = effectMap.get('Lighting');
   const skyColorEffect = effectMap.get('Sky Color');
@@ -5580,8 +5615,6 @@ async function initializeUI(effectMap) {
   const buildingShadowsEffect = effectMap.get('Building Shadows');
   const cloudEffect = effectMap.get('Clouds');
   const atmosphericFogEffect = effectMap.get('Atmospheric Fog');
-  const bushEffect = effectMap.get('Bushes');
-  const treeEffect = effectMap.get('Trees');
   const waterEffect = effectMap.get('Water');
   const fogEffect = effectMap.get('Fog');
   const distortionManager = effectMap.get('Distortion');
@@ -6200,47 +6233,25 @@ async function initializeUI(effectMap) {
   }
 
   // --- Animated Bushes Settings ---
-  if (bushEffect) {
-    const bushSchema = BushEffect.getControlSchema();
-
-    const onBushUpdate = (effectId, paramId, value) => {
-      if (paramId === 'enabled' || paramId === 'masterEnabled') {
-        bushEffect.enabled = value;
-        log.debug(`Bush effect ${value ? 'enabled' : 'disabled'}`);
-      } else if (bushEffect.params && Object.prototype.hasOwnProperty.call(bushEffect.params, paramId)) {
-        bushEffect.params[paramId] = value;
-        log.debug(`Bush.${paramId} = ${value}`);
-      }
-    };
-
+  {
+    const bushSchema = BushEffectV2.getControlSchema();
     uiManager.registerEffect(
       'bush',
       'Animated Bushes',
       bushSchema,
-      onBushUpdate,
+      _makeV2Callback('_bushEffect'),
       'surface'
     );
   }
 
   // --- Animated Trees Settings ---
-  if (treeEffect) {
-    const treeSchema = TreeEffect.getControlSchema();
-
-    const onTreeUpdate = (effectId, paramId, value) => {
-      if (paramId === 'enabled' || paramId === 'masterEnabled') {
-        treeEffect.enabled = value;
-        log.debug(`Tree effect ${value ? 'enabled' : 'disabled'}`);
-      } else if (treeEffect.params && Object.prototype.hasOwnProperty.call(treeEffect.params, paramId)) {
-        treeEffect.params[paramId] = value;
-        log.debug(`Tree.${paramId} = ${value}`);
-      }
-    };
-
+  {
+    const treeSchema = TreeEffectV2.getControlSchema();
     uiManager.registerEffect(
       'tree',
       'Animated Trees (Canopy)',
       treeSchema,
-      onTreeUpdate,
+      _makeV2Callback('_treeEffect'),
       'surface'
     );
   }
@@ -6989,7 +7000,7 @@ async function initializeUI(effectMap) {
 
   // --- Overhead Shadows Settings ---
   if (overheadShadowsEffect) {
-    const overheadSchema = OverheadShadowsEffect.getControlSchema();
+    const overheadSchema = OverheadShadowsEffectV2.getControlSchema();
 
     const onOverheadUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -7012,7 +7023,7 @@ async function initializeUI(effectMap) {
 
   // --- Building Shadows Settings ---
   if (buildingShadowsEffect) {
-    const buildingSchema = BuildingShadowsEffect.getControlSchema();
+    const buildingSchema = BuildingShadowsEffectV2.getControlSchema();
 
     const onBuildingUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -7501,7 +7512,7 @@ async function initializeUI(effectMap) {
   }
 
   if (dotScreenEffect) {
-    const schema = DotScreenEffect.getControlSchema();
+    const schema = DotScreenEffectV2.getControlSchema();
 
     const onUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -7522,7 +7533,7 @@ async function initializeUI(effectMap) {
   }
 
   if (halftoneEffect) {
-    const schema = HalftoneEffect.getControlSchema();
+    const schema = HalftoneEffectV2.getControlSchema();
 
     const onUpdate = (effectId, paramId, value) => {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -7563,47 +7574,6 @@ async function initializeUI(effectMap) {
       onSharpenUpdate,
       'global'
     );
-  }
-
-  // --- ASCII Effect ---
-  if (asciiEffect) {
-    const asciiSchema = AsciiEffect.getControlSchema();
-    
-    const onAsciiUpdate = (effectId, paramId, value) => {
-      if (paramId === 'enabled') {
-        const enabled = !!value;
-        if (asciiEffect.params && Object.prototype.hasOwnProperty.call(asciiEffect.params, 'enabled')) {
-          asciiEffect.params.enabled = enabled;
-        }
-
-        // masterEnabled is a global gate; it must never force-enable ASCII.
-        const master = asciiEffect._masterEnabled !== false;
-        asciiEffect.enabled = enabled && master;
-        log.debug(`Ascii effect ${asciiEffect.enabled ? 'enabled' : 'disabled'}`);
-        return;
-      }
-
-      if (paramId === 'masterEnabled') {
-        asciiEffect._masterEnabled = !!value;
-        const local = !!(asciiEffect.params?.enabled);
-        asciiEffect.enabled = local && asciiEffect._masterEnabled;
-        log.debug(`Ascii effect ${asciiEffect.enabled ? 'enabled' : 'disabled'}`);
-        return;
-      }
-
-      if (asciiEffect.params && Object.prototype.hasOwnProperty.call(asciiEffect.params, paramId)) {
-        asciiEffect.params[paramId] = value;
-      }
-    };
-    
-    uiManager.registerEffect(
-      'ascii',
-      'ASCII Art',
-      asciiSchema,
-      onAsciiUpdate,
-      'global'
-    );
-    log.info('ASCII effect wired to UI');
   }
 
   if (maskDebugEffect) {

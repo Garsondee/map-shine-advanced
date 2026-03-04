@@ -1519,6 +1519,8 @@ export class EffectComposer {
         'sky-color':        '_skyColorEffect',
         'windowLight':      '_windowLightEffect',
         'fire-sparks':      '_fireEffect',
+        'bush':             '_bushEffect',
+        'tree':             '_treeEffect',
         'water-splashes':   '_waterSplashesEffect',
         'underwater-bubbles':'_underwaterBubblesEffect',
         'bloom':            '_bloomEffect',
@@ -1527,6 +1529,13 @@ export class EffectComposer {
         'filmGrain':        '_filmGrainEffect',
         'sharpen':          '_sharpenEffect',
         'cloud':            '_cloudEffect',
+        'dotScreen':        '_dotScreenEffect',
+        'halftone':         '_halftoneEffect',
+        'ascii':            '_asciiEffect',
+        'dazzleOverlay':    '_dazzleOverlayEffect',
+        'visionMode':       '_visionModeEffect',
+        'invert':           '_invertEffect',
+        'sepia':            '_sepiaEffect',
       };
 
       try {

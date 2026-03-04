@@ -28,28 +28,20 @@ import { LightingEffectV2 } from '../compositor-v2/effects/LightingEffectV2.js';
 import { FireEffectV2 } from '../compositor-v2/effects/FireEffectV2.js';
 import { AshDisturbanceEffectV2 } from '../compositor-v2/effects/AshDisturbanceEffectV2.js';
 import { CloudEffectV2 } from '../compositor-v2/effects/CloudEffectV2.js';
+import { AsciiEffectV2 } from '../compositor-v2/effects/AsciiEffectV2.js';
 // V1 effects with no V2 equivalent — retained
 import { IridescenceEffect } from '../effects/IridescenceEffect.js';
-import { DotScreenEffect } from '../effects/DotScreenEffect.js';
-import { HalftoneEffect } from '../effects/HalftoneEffect.js';
-import { AsciiEffect } from '../effects/AsciiEffect.js';
 import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { LightningEffect } from '../effects/LightningEffect.js';
 import { PrismEffect } from '../effects/PrismEffect.js';
-import { WaterEffectV2 } from '../effects/WaterEffectV2.js';
+import { WaterEffectV2 } from '../compositor-v2/effects/WaterEffectV2.js';
 import { WorldSpaceFogEffect } from '../effects/WorldSpaceFogEffect.js';
-import { BushEffect } from '../effects/BushEffect.js';
-import { TreeEffect } from '../effects/TreeEffect.js';
-import { OverheadShadowsEffect } from '../effects/OverheadShadowsEffect.js';
-import { BuildingShadowsEffect } from '../effects/BuildingShadowsEffect.js';
 import { AtmosphericFogEffect } from '../effects/AtmosphericFogEffect.js';
 import { DistortionManager } from '../effects/DistortionManager.js';
 import { LensflareEffect } from '../effects/LensflareEffect.js';
-import { DazzleOverlayEffect } from '../effects/DazzleOverlayEffect.js';
 import { MaskDebugEffect } from '../effects/MaskDebugEffect.js';
 import { DebugLayerEffect } from '../effects/DebugLayerEffect.js';
 import { PlayerLightEffect } from '../effects/PlayerLightEffect.js';
-import { VisionModeEffect } from '../effects/VisionModeEffect.js';
 
 import { createLogger } from '../core/log.js';
 
@@ -71,27 +63,19 @@ export {
   FireEffectV2,
   AshDisturbanceEffectV2,
   CloudEffectV2,
+  AsciiEffectV2,
   IridescenceEffect,
-  DotScreenEffect,
-  HalftoneEffect,
-  AsciiEffect,
   SmellyFliesEffect,
   LightningEffect,
   PrismEffect,
   WaterEffectV2,
   WorldSpaceFogEffect,
-  BushEffect,
-  TreeEffect,
-  OverheadShadowsEffect,
-  BuildingShadowsEffect,
   AtmosphericFogEffect,
   DistortionManager,
   LensflareEffect,
-  DazzleOverlayEffect,
   MaskDebugEffect,
   DebugLayerEffect,
   PlayerLightEffect,
-  VisionModeEffect
 };
 
 // ── Independent Effect Definitions ──────────────────────────────────────────
@@ -107,22 +91,15 @@ export function getIndependentEffectDefs() {
   // Remaining entries are effects with no V2 equivalent yet.
   return [
     ['Iridescence', IridescenceEffect],
-    ['Dot Screen', DotScreenEffect],
-    ['Halftone', HalftoneEffect],
-    ['ASCII', AsciiEffect],
     ['Lightning', LightningEffect],
     ['Prism', PrismEffect],
     ['Fog', WorldSpaceFogEffect],
-    ['Bushes', BushEffect],
-    ['Trees', TreeEffect],
     ['Atmospheric Fog', AtmosphericFogEffect],
     ['Distortion', DistortionManager],
     ['Lensflare', LensflareEffect],
-    ['Dazzle Overlay', DazzleOverlayEffect],
     ['Mask Debug', MaskDebugEffect],
     ['Debug Layers', DebugLayerEffect],
     ['Player Lights', PlayerLightEffect],
-    ['Vision Mode', VisionModeEffect],
   ];
 }
 
@@ -197,9 +174,6 @@ export function registerAllCapabilities(registry) {
 // V2-ported effects are no longer in effectMap and have been removed from this table.
 const GS_ID_TO_EFFECT_MAP_NAME = [
   ['iridescence',       'Iridescence'],
-  ['dot-screen',        'Dot Screen'],
-  ['halftone',          'Halftone'],
-  ['ascii',             'ASCII'],
   ['lightning',         'Lightning'],
   ['prism',             'Prism'],
   ['fog',               'Fog'],
@@ -213,7 +187,6 @@ const GS_ID_TO_EFFECT_MAP_NAME = [
   ['dust-motes',        'Dust Motes'],
   ['smelly-flies',      'Smelly Flies'],
   ['candle-flames',     'Candle Flames'],
-  ['visionMode',        'Vision Mode'],
 ];
 
 /**

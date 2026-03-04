@@ -56,9 +56,18 @@ import { WeatherParticlesV2 } from './effects/WeatherParticlesV2.js';
 import { WaterSplashesEffectV2 } from './effects/WaterSplashesEffectV2.js';
 import { AshDisturbanceEffectV2 } from './effects/AshDisturbanceEffectV2.js';
 import { FluidEffectV2 } from './effects/FluidEffectV2.js';
+import { BushEffectV2 } from './effects/BushEffectV2.js';
+import { TreeEffectV2 } from './effects/TreeEffectV2.js';
 import { getCircuitBreaker } from '../core/circuit-breaker.js';
-import { BuildingShadowsEffectV2 } from './effects/BuildingShadowsEffectV2.js';
 import { OverheadShadowsEffectV2 } from './effects/OverheadShadowsEffectV2.js';
+import { BuildingShadowsEffectV2 } from './effects/BuildingShadowsEffectV2.js';
+import { DotScreenEffectV2 } from './effects/DotScreenEffectV2.js';
+import { HalftoneEffectV2 } from './effects/HalftoneEffectV2.js';
+import { AsciiEffectV2 } from './effects/AsciiEffectV2.js';
+import { DazzleOverlayEffectV2 } from './effects/DazzleOverlayEffectV2.js';
+import { VisionModeEffectV2 } from './effects/VisionModeEffectV2.js';
+import { InvertEffectV2 } from './effects/InvertEffectV2.js';
+import { SepiaEffectV2 } from './effects/SepiaEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
 import { WorldSpaceFogEffect } from '../effects/WorldSpaceFogEffect.js';
 
@@ -104,6 +113,20 @@ export class FloorCompositor {
      * @type {FluidEffectV2}
      */
     this._fluidEffect = new FluidEffectV2(this._renderBus);
+
+    /**
+     * V2 Bush Effect: animated per-tile overlays driven by _Bush masks.
+     * Overlays live in the bus scene and are floor-visible via the bus.
+     * @type {BushEffectV2}
+     */
+    this._bushEffect = new BushEffectV2(this._renderBus);
+
+    /**
+     * V2 Tree Effect: animated high-canopy overlays driven by _Tree masks.
+     * Overlays live in the bus scene and are floor-visible via the bus.
+     * @type {TreeEffectV2}
+     */
+    this._treeEffect = new TreeEffectV2(this._renderBus);
 
     /**
      * V2 Fire Effect: per-floor particle systems (fire + embers + smoke)
@@ -230,20 +253,69 @@ export class FloorCompositor {
     // Outdoors mask is now provided by EffectMaskRegistry (central asset system)
 
     /**
-     * V2 Building Shadows Effect: bakes a greyscale shadow-factor texture from the
-     * union of all _Outdoors masks up to the active floor. Fed into LightingEffectV2
-     * as `tBuildingShadow`.
-     * @type {BuildingShadowsEffectV2}
-     */
-    this._buildingShadowEffect = this._circuitBreaker.isDisabled('v2.buildingShadows') ? null : new BuildingShadowsEffectV2();
-
-    /**
      * V2 Overhead Shadows Effect: per-frame soft shadow cast by overhead tiles
      * (tileDoc.overhead === true) onto the scene below. Fed into LightingEffectV2
      * as `tOverheadShadow` — dims ambient only, dynamic lights punch through.
      * @type {OverheadShadowsEffectV2}
      */
     this._overheadShadowEffect = this._circuitBreaker.isDisabled('v2.overheadShadows') ? null : new OverheadShadowsEffectV2(this._renderBus);
+
+    /**
+     * V2 Building Shadows Effect: projects _Outdoors dark regions (building footprints)
+     * along sun direction and combines all upper floors into one scene-space shadow map.
+     * Fed into LightingEffectV2 as `tBuildingShadow`.
+     * @type {BuildingShadowsEffectV2}
+     */
+    this._buildingShadowEffect = this._circuitBreaker.isDisabled('v2.buildingShadows') ? null : new BuildingShadowsEffectV2();
+
+    /**
+     * V2 Dot Screen Effect: artistic dot-screen halftone filter.
+     * Post-processing pass. Disabled by default.
+     * @type {DotScreenEffectV2}
+     */
+    this._dotScreenEffect = this._circuitBreaker.isDisabled('v2.dotScreen') ? null : new DotScreenEffectV2();
+
+    /**
+     * V2 Halftone Effect: CMYK halftone printing effect.
+     * Post-processing pass. Disabled by default.
+     * @type {HalftoneEffectV2}
+     */
+    this._halftoneEffect = this._circuitBreaker.isDisabled('v2.halftone') ? null : new HalftoneEffectV2();
+
+    /**
+     * V2 ASCII Effect: shader-based ASCII art post-processing effect.
+     * Disabled by default.
+     * @type {AsciiEffectV2}
+     */
+    this._asciiEffect = this._circuitBreaker.isDisabled('v2.ascii') ? null : new AsciiEffectV2();
+
+    /**
+     * V2 Dazzle Overlay Effect: bright light exposure overlay.
+     * Post-processing pass. Disabled by default (enabled by DynamicExposureManager).
+     * @type {DazzleOverlayEffectV2}
+     */
+    this._dazzleOverlayEffect = this._circuitBreaker.isDisabled('v2.dazzleOverlay') ? null : new DazzleOverlayEffectV2();
+
+    /**
+     * V2 Vision Mode Effect: vision mode post-processing adjustments.
+     * Post-processing pass. Enabled by default.
+     * @type {VisionModeEffectV2}
+     */
+    this._visionModeEffect = this._circuitBreaker.isDisabled('v2.visionMode') ? null : new VisionModeEffectV2();
+
+    /**
+     * V2 Invert Effect: color inversion effect.
+     * Post-processing pass. Disabled by default.
+     * @type {InvertEffectV2}
+     */
+    this._invertEffect = this._circuitBreaker.isDisabled('v2.invert') ? null : new InvertEffectV2();
+
+    /**
+     * V2 Sepia Effect: sepia tone color grading.
+     * Post-processing pass. Disabled by default.
+     * @type {SepiaEffectV2}
+     */
+    this._sepiaEffect = this._circuitBreaker.isDisabled('v2.sepia') ? null : new SepiaEffectV2();
 
     /**
      * Fog of War overlay (reuses the V1 WorldSpaceFogEffect implementation).
@@ -273,6 +345,12 @@ export class FloorCompositor {
     /** @type {string|null} Last applied active level context key (bottom:top) */
     this._lastAppliedLevelContextKey = null;
 
+    /** @type {THREE.Texture|null} Last outdoors mask pushed to V2 consumers */
+    this._lastOutdoorsTexture = null;
+
+    /** @type {string|null} Last resolved floor key used for outdoors sync diagnostics */
+    this._lastOutdoorsFloorKey = null;
+
     // Diagnostic: log the first frame's major render stages once.
     // This helps pinpoint which stage stalls the main thread on some GPUs.
     this._debugFirstFrameStagesLogged = false;
@@ -291,9 +369,6 @@ export class FloorCompositor {
 
     /** @type {THREE.WebGLRenderTarget|null} Upper-floor occluder mask for water effect */
     this._waterOccluderRT = null;
-
-    /** @type {THREE.WebGLRenderTarget|null} Building shadow screen-space factor texture */
-    this._buildingShadowRT = null;
 
     /** @type {THREE.Scene|null} Dedicated scene for fullscreen blit quad */
     this._blitScene  = null;
@@ -378,16 +453,6 @@ export class FloorCompositor {
       stencilBuffer: false,
     });
 
-    // Building shadow RT: screen-space shadow factor from BuildingShadowsEffectV2
-    this._buildingShadowRT = new THREE.WebGLRenderTarget(w, h, {
-      minFilter: THREE.LinearFilter,
-      magFilter: THREE.LinearFilter,
-      format: THREE.RGBAFormat,
-      type: THREE.UnsignedByteType,
-      depthBuffer: false,
-      stencilBuffer: false,
-    });
-
     // ── Fullscreen blit quad ──────────────────────────────────────────────
     this._blitScene  = new THREE.Scene();
     this._blitCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -428,6 +493,8 @@ export class FloorCompositor {
     this._renderBus.initialize();
     this._specularEffect.initialize();
     this._fluidEffect.initialize();
+    this._bushEffect.initialize();
+    this._treeEffect.initialize();
     this._fireEffect.initialize();
     this._windowLightEffect.initialize();
     // Cloud effect needs the bus scene and main camera for the overhead blocker pass.
@@ -462,16 +529,39 @@ export class FloorCompositor {
     if (this._waterEffect) {
       this._waterEffect.initialize();
     }
+    // OverheadShadowsEffectV2 initialization
+    try { 
+      this._overheadShadowEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera, null);
+    } catch (err) {
+      log.warn('FloorCompositor: OverheadShadowsEffectV2 initialize failed:', err);
+    }
     try {
-      this._buildingShadowEffect?.initialize?.(this.renderer);
+      this._buildingShadowEffect?.initialize?.(this.renderer, this.camera);
     } catch (err) {
       log.warn('FloorCompositor: BuildingShadowsEffectV2 initialize failed:', err);
     }
-    // OverheadShadowsEffectV2 initialization
-    try { 
-      this._overheadShadowEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera);
-    } catch (err) {
-      log.warn('FloorCompositor: OverheadShadowsEffectV2 initialize failed:', err);
+
+    // Artistic post-processing effects (disabled by default)
+    try { this._dotScreenEffect?.initialize?.(); } catch (err) {
+      log.warn('FloorCompositor: DotScreenEffectV2 initialize failed:', err);
+    }
+    try { this._halftoneEffect?.initialize?.(); } catch (err) {
+      log.warn('FloorCompositor: HalftoneEffectV2 initialize failed:', err);
+    }
+    try { this._asciiEffect?.initialize?.(); } catch (err) {
+      log.warn('FloorCompositor: AsciiEffectV2 initialize failed:', err);
+    }
+    try { this._dazzleOverlayEffect?.initialize?.(); } catch (err) {
+      log.warn('FloorCompositor: DazzleOverlayEffectV2 initialize failed:', err);
+    }
+    try { this._visionModeEffect?.initialize?.(); } catch (err) {
+      log.warn('FloorCompositor: VisionModeEffectV2 initialize failed:', err);
+    }
+    try { this._invertEffect?.initialize?.(); } catch (err) {
+      log.warn('FloorCompositor: InvertEffectV2 initialize failed:', err);
+    }
+    try { this._sepiaEffect?.initialize?.(); } catch (err) {
+      log.warn('FloorCompositor: SepiaEffectV2 initialize failed:', err);
     }
 
     // Fog of War overlay: initialize into a dedicated overlay scene.
@@ -510,6 +600,10 @@ export class FloorCompositor {
       // render so uTime advances and the effect animates.
       const fluid = this._fluidEffect;
       if (fluid?.enabled && (fluid?._overlays?.size ?? 0) > 0) return true;
+      const bush = this._bushEffect;
+      if (bush?.enabled && (bush?._overlays?.size ?? 0) > 0) return true;
+      const tree = this._treeEffect;
+      if (tree?.enabled && (tree?._overlays?.size ?? 0) > 0) return true;
       const fire = this._fireEffect;
       if (fire?.enabled && fire._activeFloors?.size > 0) return true;
       const splash = this._waterSplashesEffect;
@@ -582,6 +676,20 @@ export class FloorCompositor {
         }).catch(err => {
           log.error('FluidEffectV2 populate failed:', err);
         });
+
+        // Populate bush overlays from _Bush masks.
+        this._bushEffect.populate(sc.foundrySceneData).then(() => {
+          this._applyCurrentFloorVisibility();
+        }).catch(err => {
+          log.error('BushEffectV2 populate failed:', err);
+        });
+
+        // Populate tree overlays from _Tree masks.
+        this._treeEffect.populate(sc.foundrySceneData).then(() => {
+          this._applyCurrentFloorVisibility();
+        }).catch(err => {
+          log.error('TreeEffectV2 populate failed:', err);
+        });
         // Populate fire particle systems from _Fire masks.
         this._fireEffect.populate(sc.foundrySceneData).then(() => {
           this._applyCurrentFloorVisibility();
@@ -619,29 +727,12 @@ export class FloorCompositor {
             log.error('AshDisturbanceEffectV2 populate failed:', err);
           });
         }
-        // Wire outdoors mask from GpuSceneMaskCompositor to all effects that need it.
-        // The compositor already discovers _Outdoors tiles and composites them per floor.
-        const compositor = sc._sceneMaskCompositor;
-        if (compositor) {
-          try {
-            // Get the current floor's outdoors mask from the compositor
-            const ctx = window.MapShine?.activeLevelContext ?? null;
-            const floorKey = ctx ? `${ctx.bottom}:${ctx.top}` : 'ground';
-            const outdoorsTex = compositor.getFloorTexture(floorKey, 'outdoors');
-            
-            // Distribute to all consumers
-            if (outdoorsTex) {
-              this._cloudEffect?.setOutdoorsMask?.(outdoorsTex);
-              this._waterEffect?.setOutdoorsMask?.(outdoorsTex);
-              this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
-              if (weatherController?.initialized) {
-                weatherController.setRoofMap(outdoorsTex);
-              }
-            }
-          } catch (err) {
-            log.warn('FloorCompositor: failed to wire outdoors mask from compositor:', err);
-          }
-        }
+        // Push current outdoors mask immediately; async compositor cache warmup
+        // can still update this later via the per-frame sync below.
+        this._syncOutdoorsMaskConsumers({
+          context: window.MapShine?.activeLevelContext ?? null,
+          force: true,
+        });
       } else {
         log.warn('FloorCompositor.render: no sceneComposer available for populate');
       }
@@ -667,6 +758,10 @@ export class FloorCompositor {
       }
     } catch (_) {}
 
+    // Keep outdoors consumers in sync even when the compositor cache populates
+    // asynchronously after initial render, or when floor-context hooks were missed.
+    this._syncOutdoorsMaskConsumers({ context: window.MapShine?.activeLevelContext ?? null });
+
     // ── Update effects (time-varying uniforms) ───────────────────────────
     if (timeInfo) {
       // Wind must advance before update() so accumulation is 1× per frame.
@@ -674,6 +769,12 @@ export class FloorCompositor {
       this._specularEffect.update(timeInfo);
       try { this._fluidEffect.update(timeInfo); } catch (err) {
         log.warn('FluidEffectV2 update threw, skipping fluid update:', err);
+      }
+      try { this._bushEffect.update(timeInfo); } catch (err) {
+        log.warn('BushEffectV2 update threw, skipping bush update:', err);
+      }
+      try { this._treeEffect.update(timeInfo); } catch (err) {
+        log.warn('TreeEffectV2 update threw, skipping tree update:', err);
       }
       try {
         this._fireEffect.update(timeInfo);
@@ -707,14 +808,17 @@ export class FloorCompositor {
       this._bloomEffect.update(timeInfo);
       this._filmGrainEffect.update(timeInfo);
       this._sharpenEffect.update(timeInfo);
+      // Artistic post-processing effects
+      try { this._dotScreenEffect?.update?.(timeInfo); } catch (_) {}
+      try { this._halftoneEffect?.update?.(timeInfo); } catch (_) {}
+      try { this._asciiEffect?.update?.(timeInfo); } catch (_) {}
+      try { this._dazzleOverlayEffect?.update?.(timeInfo); } catch (_) {}
+      try { this._visionModeEffect?.update?.(timeInfo); } catch (_) {}
+      try { this._invertEffect?.update?.(timeInfo); } catch (_) {}
+      try { this._sepiaEffect?.update?.(timeInfo); } catch (_) {}
       // Overhead shadows: update sun direction + uniform params from controls.
       try { this._overheadShadowEffect?.update?.(timeInfo); } catch (err) {
         log.warn('OverheadShadowsEffectV2 update threw, skipping overhead shadow update:', err);
-      }
-      // Building shadows: update sun direction + bake hash. Must run after
-      // sky color so sun angles are current before being fed to the shadow effect.
-      try { this._buildingShadowEffect?.update?.(timeInfo); } catch (err) {
-        log.warn('BuildingShadowsEffectV2 update threw, skipping building shadow update:', err);
       }
       // Overhead shadows: no per-frame update needed — sun angles are pushed
       // directly below from SkyColorEffectV2 before render().
@@ -735,8 +839,8 @@ export class FloorCompositor {
       if (sky && typeof sky.currentSunAzimuthDeg === 'number') {
         const az  = sky.currentSunAzimuthDeg;
         const el  = sky.currentSunElevationDeg ?? 45;
-        this._buildingShadowEffect?.setSunAngles?.(az, el);
         this._overheadShadowEffect?.setSunAngles?.(az, el);
+        this._buildingShadowEffect?.setSunAngles?.(az, el);
       }
     } catch (_) {}
 
@@ -744,15 +848,6 @@ export class FloorCompositor {
     if (_dbgStages) {
       try { log.info('[V2 Frame] ▶ FloorCompositor.render: BEGIN'); } catch (_) {}
     }
-
-    // Building shadow render (V1 signature - renderer + scene + camera)
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: buildingShadows.render'); } catch (_) {} }
-    try { 
-      this._buildingShadowEffect?.render?.(this.renderer);
-    } catch (err) {
-      log.warn('BuildingShadowsEffectV2 render threw, skipping building shadow pass:', err);
-    }
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: buildingShadows.render DONE'); } catch (_) {} }
 
     // Capture overhead tile alpha + compute soft shadow factor (V1 signature)
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: overheadShadows.render'); } catch (_) {} }
@@ -762,6 +857,14 @@ export class FloorCompositor {
       log.warn('OverheadShadowsEffectV2 render threw, skipping overhead shadow pass:', err);
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: overheadShadows.render DONE'); } catch (_) {} }
+
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: buildingShadows.render'); } catch (_) {} }
+    try {
+      this._buildingShadowEffect?.render?.(this.renderer, this.camera);
+    } catch (err) {
+      log.warn('BuildingShadowsEffectV2 render threw, skipping building shadow pass:', err);
+    }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: buildingShadows.render DONE'); } catch (_) {} }
 
     // ── Step 1: Render bus scene → sceneRT ───────────────────────────────
     // The bus scene contains albedo tiles + specular/fire overlays.
@@ -795,13 +898,10 @@ export class FloorCompositor {
       ? this._windowLightEffect._scene : null;
     const cloudShadowTex = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
       ? this._cloudEffect.cloudShadowTexture : null;
-    const buildingEffect = this._buildingShadowEffect;
-    const buildingShadowTex = (buildingEffect?.params?.enabled)
-      ? buildingEffect.shadowFactorTexture
-      : null;
-    const buildingShadowOpacity = Number.isFinite(buildingEffect?.params?.opacity)
-      ? buildingEffect.params.opacity
-      : 0.75;
+    const buildingShadowTex = (this._buildingShadowEffect?.params?.enabled)
+      ? this._buildingShadowEffect.shadowFactorTexture : null;
+    const buildingShadowOpacity = Number.isFinite(this._buildingShadowEffect?.params?.opacity)
+      ? this._buildingShadowEffect.params.opacity : 0.75;
     const overheadShadowTex = (this._overheadShadowEffect?.params?.enabled)
       ? this._overheadShadowEffect.shadowFactorTexture : null;
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lighting.render(sceneRT→postA)'); } catch (_) {} }
@@ -851,6 +951,16 @@ export class FloorCompositor {
       const waterWrote = this._waterEffect.render(this.renderer, this.camera, currentInput, waterOutput, occluderRT);
       if (waterWrote) currentInput = waterOutput;
       if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: water.render (baseline) DONE'); } catch (_) {} }
+    }
+
+    // Baseline-compatible ASCII pass.
+    // Keep this before final blit so the effect can run while the broader
+    // post-processing chain remains disabled behind the temporary early return.
+    if (this._asciiEffect?.enabled) {
+      const asciiOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      if (this._asciiEffect.render(this.renderer, this.camera, currentInput, asciiOutput)) {
+        currentInput = asciiOutput;
+      }
     }
 
     // Jump straight to blit
@@ -1004,6 +1114,50 @@ export class FloorCompositor {
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: sharpen.render DONE'); } catch (_) {} }
 
+    // Artistic post-processing effects (disabled by default).
+    if (this._dotScreenEffect?.enabled) {
+      const dsOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      if (this._dotScreenEffect.render(this.renderer, this.camera, currentInput, dsOutput)) {
+        currentInput = dsOutput;
+      }
+    }
+    if (this._halftoneEffect?.enabled) {
+      const htOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      if (this._halftoneEffect.render(this.renderer, this.camera, currentInput, htOutput)) {
+        currentInput = htOutput;
+      }
+    }
+    if (this._asciiEffect?.enabled) {
+      const asciiOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      if (this._asciiEffect.render(this.renderer, this.camera, currentInput, asciiOutput)) {
+        currentInput = asciiOutput;
+      }
+    }
+    if (this._dazzleOverlayEffect?.enabled) {
+      const dzOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      if (this._dazzleOverlayEffect.render(this.renderer, this.camera, currentInput, dzOutput)) {
+        currentInput = dzOutput;
+      }
+    }
+    if (this._visionModeEffect?.enabled) {
+      const vmOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      if (this._visionModeEffect.render(this.renderer, this.camera, currentInput, vmOutput)) {
+        currentInput = vmOutput;
+      }
+    }
+    if (this._invertEffect?.enabled) {
+      const invOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      if (this._invertEffect.render(this.renderer, this.camera, currentInput, invOutput)) {
+        currentInput = invOutput;
+      }
+    }
+    if (this._sepiaEffect?.enabled) {
+      const sepOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      if (this._sepiaEffect.render(this.renderer, this.camera, currentInput, sepOutput)) {
+        currentInput = sepOutput;
+      }
+    }
+
     // ── Step 3: Blit final result to screen ──────────────────────────────
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: blitToScreen'); } catch (_) {} }
     this._blitToScreen(currentInput);
@@ -1125,6 +1279,139 @@ export class FloorCompositor {
   }
 
   /**
+   * Resolve the best available outdoors texture for the supplied level context.
+   *
+   * Fallback order:
+   * 1) Explicit payload/active context key (`bottom:top`)
+   * 2) Active floor key from FloorStack (compositorKey)
+   * 3) Compositor active floor key
+   * 4) Ground floor outdoors texture
+   *
+   * @param {{bottom:number,top:number}|null} context
+   * @returns {{texture: THREE.Texture|null, floorKey: string|null}}
+   * @private
+   */
+  _resolveOutdoorsMask(context = null) {
+    const sc = window.MapShine?.sceneComposer;
+    const compositor = sc?._sceneMaskCompositor;
+    if (!compositor) {
+      // Fallbacks when compositor cache is not ready yet.
+      const bundleMask = sc?.currentBundle?.masks?.find?.(m => (m?.id === 'outdoors' || m?.type === 'outdoors'))?.texture ?? null;
+      if (bundleMask) return { texture: bundleMask, floorKey: 'bundle' };
+      const mmMask = window.MapShine?.maskManager?.getTexture?.('outdoors.scene') ?? null;
+      if (mmMask) return { texture: mmMask, floorKey: 'maskManager' };
+      const roofMap = weatherController?.roofMap ?? null;
+      return { texture: roofMap, floorKey: roofMap ? 'weatherController' : null };
+    }
+
+    const candidateKeys = [];
+
+    const cb = Number(context?.bottom);
+    const ct = Number(context?.top);
+    if (Number.isFinite(cb) && Number.isFinite(ct)) candidateKeys.push(`${cb}:${ct}`);
+
+    try {
+      const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.();
+      const activeCompositorKey = activeFloor?.compositorKey;
+      if (activeCompositorKey) candidateKeys.push(String(activeCompositorKey));
+    } catch (_) {}
+
+    const compositorActiveKey = compositor._activeFloorKey ?? null;
+    if (compositorActiveKey) candidateKeys.push(String(compositorActiveKey));
+
+    const uniqueKeys = [...new Set(candidateKeys.filter(Boolean))];
+    for (const key of uniqueKeys) {
+      const tex = compositor.getFloorTexture?.(key, 'outdoors') ?? null;
+      if (tex) return { texture: tex, floorKey: key };
+    }
+
+    const groundTex = compositor.getGroundFloorMaskTexture?.('outdoors') ?? null;
+    if (groundTex) return { texture: groundTex, floorKey: 'ground' };
+
+    // Last-ditch fallbacks for transient compose timing windows.
+    const bundleMask = sc?.currentBundle?.masks?.find?.(m => (m?.id === 'outdoors' || m?.type === 'outdoors'))?.texture ?? null;
+    if (bundleMask) return { texture: bundleMask, floorKey: 'bundle' };
+
+    const mmMask = window.MapShine?.maskManager?.getTexture?.('outdoors.scene') ?? null;
+    if (mmMask) return { texture: mmMask, floorKey: 'maskManager' };
+
+    const roofMap = weatherController?.roofMap ?? null;
+    return { texture: roofMap, floorKey: roofMap ? 'weatherController' : null };
+  }
+
+  /**
+   * Push outdoors mask texture to all V2 consumers.
+   * Uses identity-based change detection to avoid redundant uniform writes.
+   *
+   * @param {{context?: {bottom:number,top:number}|null, force?: boolean}} [options]
+   * @private
+   */
+  _syncOutdoorsMaskConsumers(options = {}) {
+    const { context = null, force = false } = options;
+    try {
+      const resolved = this._resolveOutdoorsMask(context);
+      let outdoorsTex = resolved.texture ?? null;
+
+      // Do not clobber a valid outdoors texture with transient null while floor
+      // caches are still warming asynchronously.
+      if (!outdoorsTex && this._lastOutdoorsTexture) {
+        outdoorsTex = this._lastOutdoorsTexture;
+      }
+
+      if (!force && outdoorsTex === this._lastOutdoorsTexture) return;
+
+      this._lastOutdoorsTexture = outdoorsTex;
+      this._lastOutdoorsFloorKey = resolved.floorKey;
+
+      // Always propagate (including null) so consumers cannot keep stale masks.
+      this._cloudEffect?.setOutdoorsMask?.(outdoorsTex);
+      this._waterEffect?.setOutdoorsMask?.(outdoorsTex);
+      this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
+      this._buildingShadowEffect?.setOutdoorsMask?.(outdoorsTex);
+
+      // CloudEffectV2 supports floor-aware outdoors masking when provided with
+      // per-floor textures and the compositor floor-id texture.
+      try {
+        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+        if (compositor) {
+          const floors = window.MapShine?.floorStack?.getVisibleFloors?.() ?? [];
+          const perFloor = [null, null, null, null];
+          let floorIdSupported = true;
+          let anyPerFloorMask = false;
+          for (const floor of floors) {
+            const idx = Number(floor?.index);
+            const key = floor?.compositorKey;
+            if (!Number.isFinite(idx) || idx < 0 || idx > 3) {
+              floorIdSupported = false;
+              continue;
+            }
+            if (!key) continue;
+            perFloor[idx] = compositor.getFloorTexture?.(key, 'outdoors') ?? null;
+            if (perFloor[idx]) anyPerFloorMask = true;
+          }
+
+          // CloudEffectV2 shader only has per-floor outdoors samplers for indices 0..3.
+          // If the visible floor set isn't representable, force legacy single-mask mode.
+          if (floorIdSupported && anyPerFloorMask) {
+            const floorIdTex = compositor.floorIdTarget?.texture ?? null;
+            this._cloudEffect?.setFloorIdTexture?.(floorIdTex);
+            this._cloudEffect?.setOutdoorsMasks?.(perFloor);
+          } else {
+            this._cloudEffect?.setFloorIdTexture?.(null);
+            this._cloudEffect?.setOutdoorsMasks?.([null, null, null, null]);
+          }
+        }
+      } catch (_) {}
+
+      if (typeof weatherController?.setRoofMap === 'function') {
+        weatherController.setRoofMap(outdoorsTex);
+      }
+    } catch (err) {
+      log.warn('FloorCompositor: outdoors mask sync failed:', err);
+    }
+  }
+
+  /**
    * Read the current active floor index from FloorStack and apply it to the bus.
    * @private
    */
@@ -1176,27 +1463,14 @@ export class FloorCompositor {
     try { this._waterSplashesEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Notify ash disturbance so it can swap active burst system sets.
     try { this._ashDisturbanceEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
+    // Bush/Tree overlays are bus-managed; still notify for any internal floor state.
+    try { this._bushEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
+    try { this._treeEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     
-    // Update outdoors mask for the new floor from GpuSceneMaskCompositor
-    try {
-      const sc = window.MapShine?.sceneComposer;
-      const compositor = sc?._sceneMaskCompositor;
-      if (compositor) {
-        const ctx = payload?.context ?? window.MapShine?.activeLevelContext ?? null;
-        const floorKey = ctx ? `${ctx.bottom}:${ctx.top}` : 'ground';
-        const outdoorsTex = compositor.getFloorTexture(floorKey, 'outdoors');
-        if (outdoorsTex) {
-          this._cloudEffect?.setOutdoorsMask?.(outdoorsTex);
-          this._waterEffect?.setOutdoorsMask?.(outdoorsTex);
-          this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
-          if (weatherController?.initialized) {
-            weatherController.setRoofMap(outdoorsTex);
-          }
-        }
-      }
-    } catch (err) {
-      log.warn('FloorCompositor: failed to update outdoors mask on floor change:', err);
-    }
+    this._syncOutdoorsMaskConsumers({
+      context: payload?.context ?? window.MapShine?.activeLevelContext ?? null,
+      force: true,
+    });
     
     // Update window light overlay visibility (isolated scene, not bus-managed).
     this._windowLightEffect.onFloorChange(maxFloorIndex);
@@ -1208,8 +1482,6 @@ export class FloorCompositor {
     // Outdoors mask floor changes are handled above via GpuSceneMaskCompositor
     // Swap active water SDF data for the new floor.
     try { this._waterEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
-    // Building shadows: rebuild union mask for the new floor set.
-    try { this._buildingShadowEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     log.info(`FloorCompositor: visibility set to floors 0–${maxFloorIndex}`);
   }
 
@@ -1225,11 +1497,21 @@ export class FloorCompositor {
     if (this._postA)   this._postA.setSize(w, h);
     if (this._postB)   this._postB.setSize(w, h);
     if (this._waterOccluderRT) this._waterOccluderRT.setSize(w, h);
+    try { this._bushEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._treeEffect?.onResize?.(w, h); } catch (_) {}
     this._cloudEffect.onResize(w, h);
     this._lightingEffect.onResize(w, h);
     this._bloomEffect.onResize(w, h);
     try { this._overheadShadowEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._buildingShadowEffect?.onResize?.(w, h); } catch (_) {}
     try { this._weatherParticles?.onResize?.(w, h); } catch (_) {}
+    try { this._dotScreenEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._halftoneEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._asciiEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._dazzleOverlayEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._visionModeEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._invertEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._sepiaEffect?.onResize?.(w, h); } catch (_) {}
     try { this._fogEffect?.resize?.(w, h); } catch (_) {}
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);
   }
@@ -1250,6 +1532,8 @@ export class FloorCompositor {
     // Effects
     try { this._specularEffect?.dispose?.(); } catch (_) {}
     try { this._fluidEffect?.dispose?.(); } catch (_) {}
+    try { this._bushEffect?.dispose?.(); } catch (_) {}
+    try { this._treeEffect?.dispose?.(); } catch (_) {}
     try { this._fireEffect?.dispose?.(); } catch (_) {}
     try { this._windowLightEffect?.dispose?.(); } catch (_) {}
     try { this._cloudEffect?.dispose?.(); } catch (_) {}
@@ -1260,6 +1544,14 @@ export class FloorCompositor {
     try { this._skyColorEffect.dispose(); } catch (_) {}
     try { this._lightingEffect.dispose(); } catch (_) {}
     try { this._overheadShadowEffect?.dispose?.(); } catch (_) {}
+    try { this._buildingShadowEffect?.dispose?.(); } catch (_) {}
+    try { this._dotScreenEffect?.dispose?.(); } catch (_) {}
+    try { this._halftoneEffect?.dispose?.(); } catch (_) {}
+    try { this._asciiEffect?.dispose?.(); } catch (_) {}
+    try { this._dazzleOverlayEffect?.dispose?.(); } catch (_) {}
+    try { this._visionModeEffect?.dispose?.(); } catch (_) {}
+    try { this._invertEffect?.dispose?.(); } catch (_) {}
+    try { this._sepiaEffect?.dispose?.(); } catch (_) {}
     try { this._fireEffect.dispose(); } catch (_) {}
     try { this._specularEffect.dispose(); } catch (_) {}
     try { this._windowLightEffect.dispose(); } catch (_) {}

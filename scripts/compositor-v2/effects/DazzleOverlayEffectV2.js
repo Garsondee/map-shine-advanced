@@ -1,65 +1,58 @@
-import { EffectBase, RenderLayers } from './EffectComposer.js';
-import { createLogger } from '../core/log.js';
+import { createLogger } from '../../core/log.js';
 
-const log = createLogger('DazzleOverlayEffect');
+const log = createLogger('DazzleOverlayEffectV2');
 
-export class DazzleOverlayEffect extends EffectBase {
+/**
+ * DazzleOverlayEffectV2 - Bright light exposure overlay
+ * 
+ * Archetype: C (Post-Processing Effect)
+ * Full-screen overlay that simulates retinal flare from bright light exposure.
+ * Disabled by default - DynamicExposureManager enables it when intensity > 0.
+ */
+export class DazzleOverlayEffectV2 {
   constructor() {
-    super('dazzle-overlay', RenderLayers.POST_PROCESSING, 'low');
+    this._enabled = false;
+    this._initialized = false;
 
-    // Must run last. This effect is a full-screen overlay/grade on top of the final scene.
-    this.priority = 1000;
-
-    // Disabled by default; DynamicExposureManager enables it only while intensity > 0.
-    this.enabled = false;
-
-    this.quadScene = null;
-    this.quadCamera = null;
-    this.mesh = null;
-    this.material = null;
-
-    this._inputTexture = null;
+    this._quadScene = null;
+    this._quadCamera = null;
+    this._mesh = null;
+    this._material = null;
 
     this._tempResolution = null;
 
     this.params = {
       intensity: 0.0,
-
-      // Overall exposure-like lift. 0 disables.
       exposureLift: 0.9,
-
-      // Additive white washout (simulates retinal flare).
       whiteAdd: 0.65,
-
-      // Desaturate toward grayscale as intensity rises.
       desaturate: 0.35,
-
-      // Radial glare / bloom-ish center weighting.
       glareStrength: 0.55,
       glarePower: 2.0,
-
-      // Chromatic separation in pixels.
       rgbShiftPx: 1.35
     };
   }
 
-  initialize(renderer, scene, camera) {
+  get enabled() { return this._enabled; }
+  set enabled(v) {
+    this._enabled = !!v;
+  }
+
+  initialize() {
     const THREE = window.THREE;
     if (!THREE) {
       log.error('THREE not available');
       return;
     }
 
-    this.quadScene = new THREE.Scene();
-    this.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._quadScene = new THREE.Scene();
+    this._quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
     this._tempResolution = new THREE.Vector2(1, 1);
 
-    this.material = new THREE.ShaderMaterial({
+    this._material = new THREE.ShaderMaterial({
       uniforms: {
         tDiffuse: { value: null },
         uResolution: { value: this._tempResolution },
-
         uIntensity: { value: this.params.intensity },
         uExposureLift: { value: this.params.exposureLift },
         uWhiteAdd: { value: this.params.whiteAdd },
@@ -145,25 +138,21 @@ export class DazzleOverlayEffect extends EffectBase {
         }
       `,
       depthWrite: false,
-      depthTest: false
+      depthTest: false,
+      toneMapped: false
     });
 
     const geometry = new THREE.PlaneGeometry(2, 2);
-    this.mesh = new THREE.Mesh(geometry, this.material);
-    this.quadScene.add(this.mesh);
-  }
+    this._mesh = new THREE.Mesh(geometry, this._material);
+    this._quadScene.add(this._mesh);
 
-  setInputTexture(texture) {
-    this._inputTexture = texture;
-    if (this.material?.uniforms?.tDiffuse) {
-      this.material.uniforms.tDiffuse.value = texture;
-    }
+    this._initialized = true;
   }
 
   update(timeInfo) {
-    if (!this.material) return;
+    if (!this._initialized || !this._material) return;
 
-    const u = this.material.uniforms;
+    const u = this._material.uniforms;
     const p = this.params;
 
     u.uIntensity.value = Number.isFinite(p.intensity) ? p.intensity : 0.0;
@@ -175,29 +164,49 @@ export class DazzleOverlayEffect extends EffectBase {
     u.uRgbShiftPx.value = Number.isFinite(p.rgbShiftPx) ? p.rgbShiftPx : 1.35;
   }
 
-  render(renderer, scene, camera) {
-    if (!this.material) return;
+  render(renderer, camera, inputRT, outputRT) {
+    if (!this._enabled || !this._initialized || !this._material) return false;
 
-    const inputTexture =
-      this.material.uniforms?.tDiffuse?.value ||
-      this._inputTexture;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
 
-    if (inputTexture) {
-      this.material.uniforms.tDiffuse.value = inputTexture;
-    }
+    this._material.uniforms.tDiffuse.value = inputRT.texture;
 
     if (this._tempResolution) {
       renderer.getDrawingBufferSize(this._tempResolution);
       const w = Math.max(1, this._tempResolution.x);
       const h = Math.max(1, this._tempResolution.y);
-      if (this.material.uniforms.uResolution) {
-        this.material.uniforms.uResolution.value.set(w, h);
+      if (this._material.uniforms.uResolution) {
+        this._material.uniforms.uResolution.value.set(w, h);
       }
     }
 
-    const prevAutoClear = renderer.autoClear;
+    renderer.setRenderTarget(outputRT);
     renderer.autoClear = false;
-    renderer.render(this.quadScene, this.quadCamera);
+    renderer.render(this._quadScene, this._quadCamera);
+
     renderer.autoClear = prevAutoClear;
+    renderer.setRenderTarget(prevTarget);
+
+    return true;
+  }
+
+  onResize(width, height) {
+    // No internal RTs to resize
+  }
+
+  dispose() {
+    if (this._material) {
+      this._material.dispose();
+      this._material = null;
+    }
+    if (this._mesh) {
+      if (this._mesh.geometry) this._mesh.geometry.dispose();
+      this._mesh = null;
+    }
+    this._quadScene = null;
+    this._quadCamera = null;
+    this._tempResolution = null;
+    this._initialized = false;
   }
 }

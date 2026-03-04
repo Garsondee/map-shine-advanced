@@ -3551,7 +3551,15 @@ export class InteractionManager {
           safeCall(() => { if (this.hoveredWallId) { this.wallManager?.setHighlight?.(this.hoveredWallId, false); this.hoveredWallId = null; } }, 'hover.clearWall', Severity.COSMETIC);
           safeCall(() => { if (this.hoveredTokenId) { this.tokenManager?.setHover?.(this.hoveredTokenId, false); this.hoveredTokenId = null; } }, 'hover.clearToken', Severity.COSMETIC);
           safeCall(() => { if (this.hoveredOverheadTileId && this.tileManager?.setTileHoverHidden) { this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false); this.hoveredOverheadTileId = null; } }, 'hover.clearTile', Severity.COSMETIC);
-          safeCall(() => { if (this.hoveringTreeCanopy) { const treeEffect = (window.MapShine || window.mapShine)?.treeEffect; treeEffect?.setHoverHidden?.(false); this.hoveringTreeCanopy = false; } }, 'hover.clearTree', Severity.COSMETIC);
+          // Tree canopy hover-hide is a V1-only feature (TreeEffect mesh raycast).
+          // In V2, tree overlays are per-tile meshes managed by FloorRenderBus.
+          safeCall(() => {
+            if (this.hoveringTreeCanopy) {
+              const treeEffect = (window.MapShine || window.mapShine)?.treeEffect;
+              treeEffect?.setHoverHidden?.(false);
+              this.hoveringTreeCanopy = false;
+            }
+          }, 'hover.clearTree', Severity.COSMETIC);
 
           this.canvasElement.style.cursor = 'pointer';
           return;
@@ -3803,6 +3811,12 @@ export class InteractionManager {
     // If we hit a wall, we might still want to check tokens if the wall didn't claim it?
     // But if we are "near a line", we probably want the line.
     if (hitFound) return;
+
+    // Tree canopy hover-hide is a V1-only feature. Skip when V2 compositor is active.
+    try {
+      const useV2 = !!(window.MapShine?.effectComposer?._checkCompositorV2Enabled?.());
+      if (useV2) return;
+    } catch (_) {}
 
     const mapShine = window.MapShine || window.mapShine;
     const treeEffect = mapShine?.treeEffect;

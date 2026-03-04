@@ -330,10 +330,9 @@ export class LightingEffectV2 {
             vec2 sceneUvFoundry = (vec2(foundryX, foundryY) - uBldSceneOrigin) / max(uBldSceneSize, vec2(1e-5));
             sceneUvFoundry = clamp(sceneUvFoundry, 0.0, 1.0);
 
-            // Building shadow texture is a WebGLRenderTarget (Y-up). Convert Foundry Y-down
-            // scene UV into render-target UV.
-            vec2 sceneUvThree = vec2(sceneUvFoundry.x, 1.0 - sceneUvFoundry.y);
-            float bldShadow = clamp(texture2D(tBuildingShadow, sceneUvThree).r, 0.0, 1.0);
+            // BuildingShadowsEffectV2 now outputs scene-space UV directly aligned
+            // with sceneUvFoundry, so do not apply an additional Y flip here.
+            float bldShadow = clamp(texture2D(tBuildingShadow, sceneUvFoundry).r, 0.0, 1.0);
 
             // Blend: 1.0 = shadow has full effect, 0.0 = no effect.
             float shadowMix = mix(1.0, bldShadow, uBuildingShadowOpacity);

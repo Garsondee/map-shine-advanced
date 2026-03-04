@@ -100,8 +100,6 @@ export function exposeGlobals(mapShine, refs) {
     ['Specular',          'specularEffect'],
     ['Iridescence',       'iridescenceEffect'],
     ['Window Lights',     'windowLightEffect'],
-    ['Bushes',            'bushEffect'],
-    ['Trees',             'treeEffect'],
     ['Overhead Shadows',  'overheadShadowsEffect'],
     ['Building Shadows',  'buildingShadowsEffect'],
     ['Smelly Flies',      'smellyFliesEffect'],

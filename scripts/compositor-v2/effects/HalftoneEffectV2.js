@@ -1,25 +1,23 @@
-import { EffectBase, RenderLayers } from './EffectComposer.js';
-import { createLogger } from '../core/log.js';
+import { createLogger } from '../../core/log.js';
 
-const log = createLogger('HalftoneEffect');
+const log = createLogger('HalftoneEffectV2');
 
-export class HalftoneEffect extends EffectBase {
+/**
+ * HalftoneEffectV2 - CMYK halftone printing effect
+ * 
+ * Archetype: C (Post-Processing Effect)
+ * Simulates traditional halftone printing with configurable dot shapes and blending modes.
+ * Disabled by default - users opt in via control panel.
+ */
+export class HalftoneEffectV2 {
   constructor() {
-    super('halftone', RenderLayers.POST_PROCESSING, 'low');
+    this._enabled = false;
+    this._initialized = false;
 
-    this.enabled = false;
-
-    this.priority = 130;
-    this.alwaysRender = false;
-
-    this.quadScene = null;
-    this.quadCamera = null;
-    this.mesh = null;
-    this.material = null;
-
-    this._readBuffer = null;
-    this._writeBuffer = null;
-    this._inputTexture = null;
+    this._quadScene = null;
+    this._quadCamera = null;
+    this._mesh = null;
+    this._material = null;
 
     this._tempResolution = null;
 
@@ -32,6 +30,11 @@ export class HalftoneEffect extends EffectBase {
       blendingMode: 1,
       greyscale: false
     };
+  }
+
+  get enabled() { return this._enabled; }
+  set enabled(v) {
+    this._enabled = !!v;
   }
 
   static getControlSchema() {
@@ -83,19 +86,19 @@ export class HalftoneEffect extends EffectBase {
     };
   }
 
-  initialize(renderer, scene, camera) {
+  initialize() {
     const THREE = window.THREE;
     if (!THREE) {
       log.error('THREE not available');
       return;
     }
 
-    this.quadScene = new THREE.Scene();
-    this.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._quadScene = new THREE.Scene();
+    this._quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
     this._tempResolution = new THREE.Vector2(1, 1);
 
-    this.material = new THREE.ShaderMaterial({
+    this._material = new THREE.ShaderMaterial({
       uniforms: {
         tDiffuse: { value: null },
         shape: { value: this.params.shape },
@@ -336,30 +339,21 @@ export class HalftoneEffect extends EffectBase {
         }
       `,
       depthWrite: false,
-      depthTest: false
+      depthTest: false,
+      toneMapped: false
     });
 
     const geometry = new THREE.PlaneGeometry(2, 2);
-    this.mesh = new THREE.Mesh(geometry, this.material);
-    this.quadScene.add(this.mesh);
-  }
+    this._mesh = new THREE.Mesh(geometry, this._material);
+    this._quadScene.add(this._mesh);
 
-  setInputTexture(texture) {
-    this._inputTexture = texture;
-    if (this.material?.uniforms?.tDiffuse) {
-      this.material.uniforms.tDiffuse.value = texture;
-    }
-  }
-
-  setBuffers(readBuffer, writeBuffer) {
-    this._readBuffer = readBuffer;
-    this._writeBuffer = writeBuffer;
+    this._initialized = true;
   }
 
   update(timeInfo) {
-    if (!this.material) return;
+    if (!this._initialized || !this._material) return;
 
-    const u = this.material.uniforms;
+    const u = this._material.uniforms;
     const p = this.params;
 
     u.radius.value = p.radius;
@@ -370,29 +364,48 @@ export class HalftoneEffect extends EffectBase {
     u.greyscale.value = !!p.greyscale;
   }
 
-  render(renderer, scene, camera) {
-    if (!this.material) return;
+  render(renderer, camera, inputRT, outputRT) {
+    if (!this._enabled || !this._initialized || !this._material) return false;
 
-    const inputTexture =
-      this.material.uniforms?.tDiffuse?.value ||
-      this._readBuffer?.texture ||
-      this._inputTexture;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
 
-    if (inputTexture) {
-      this.material.uniforms.tDiffuse.value = inputTexture;
-    }
+    this._material.uniforms.tDiffuse.value = inputRT.texture;
 
     if (this._tempResolution) {
       renderer.getDrawingBufferSize(this._tempResolution);
       const w = Math.max(1, this._tempResolution.x);
       const h = Math.max(1, this._tempResolution.y);
-      if (this.material.uniforms.width) this.material.uniforms.width.value = w;
-      if (this.material.uniforms.height) this.material.uniforms.height.value = h;
+      if (this._material.uniforms.width) this._material.uniforms.width.value = w;
+      if (this._material.uniforms.height) this._material.uniforms.height.value = h;
     }
 
-    const prevAutoClear = renderer.autoClear;
+    renderer.setRenderTarget(outputRT);
     renderer.autoClear = false;
-    renderer.render(this.quadScene, this.quadCamera);
+    renderer.render(this._quadScene, this._quadCamera);
+
     renderer.autoClear = prevAutoClear;
+    renderer.setRenderTarget(prevTarget);
+
+    return true;
+  }
+
+  onResize(width, height) {
+    // No internal RTs to resize
+  }
+
+  dispose() {
+    if (this._material) {
+      this._material.dispose();
+      this._material = null;
+    }
+    if (this._mesh) {
+      if (this._mesh.geometry) this._mesh.geometry.dispose();
+      this._mesh = null;
+    }
+    this._quadScene = null;
+    this._quadCamera = null;
+    this._tempResolution = null;
+    this._initialized = false;
   }
 }

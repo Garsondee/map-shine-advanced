@@ -84,7 +84,7 @@ export class OverheadShadowsEffectV2 {
       verticalOnly: true,  // v1: primarily vertical motion in screen space
       affectsLights: 0.0,
       sunLatitude: 0.1,    // 0=flat east/west, 1=maximum north/south arc
-      indoorShadowEnabled: false, // Use _Outdoors dark regions as extra projected building shadow
+      indoorShadowEnabled: true, // Use _Outdoors dark regions as extra projected building shadow
       indoorShadowOpacity: 0.5,   // Opacity of dark-region projection contribution
       indoorShadowLengthScale: 1.0,
       indoorShadowSoftness: 3.0,

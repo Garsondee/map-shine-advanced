@@ -658,6 +658,7 @@ export class FloorRenderBus {
     mesh.frustumCulled = false;
     mesh.userData = mesh.userData || {};
     mesh.userData.isOverhead = isOverhead;
+    mesh.userData.floorIndex = floorIndex;
 
     // Layer conventions:
     // - Layer 0: normal bus rendering (FloorCompositor camera enables it)

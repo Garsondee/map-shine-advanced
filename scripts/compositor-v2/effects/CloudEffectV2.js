@@ -733,6 +733,10 @@ export class CloudEffectV2 {
   _renderBlockerMask(renderer) {
     if (!this._busScene || !this._mainCamera || !this._blockerRT) return;
 
+    const activeFloorIndex = Number(
+      window.MapShine?.floorStack?.getActiveFloor?.()?.index ?? 0
+    );
+
     const overrideObjs = this._blockerOverrideObjs;
     const overrideVis  = this._blockerOverrideVis;
     let count = 0;
@@ -740,7 +744,11 @@ export class CloudEffectV2 {
     // Walk bus scene — hide non-blocker objects, record state to restore
     this._busScene.traverse((obj) => {
       if (!obj.isMesh && !obj.isSprite) return;
-      const isBlocker = obj.userData?.isOverhead || obj.userData?.cloudShadowBlocker;
+      const floorIndex = Number(obj.userData?.floorIndex);
+      const blocksByFloor = Number.isFinite(floorIndex)
+        ? floorIndex > activeFloorIndex
+        : true;
+      const isBlocker = (obj.userData?.isOverhead || obj.userData?.cloudShadowBlocker) && blocksByFloor;
       if (!isBlocker && obj.visible) {
         // Pool expansion: grow arrays on demand (no GC after warm-up)
         if (count >= overrideObjs.length) {
@@ -946,7 +954,14 @@ export class CloudEffectV2 {
         // would suppress all clouds and shadows in V2.
         const wcInitialized = weatherController.initialized === true;
         if (s && wcInitialized) {
-          if (typeof s.cloudCover === 'number') cloudCover = s.cloudCover;
+          if (typeof s.cloudCover === 'number') {
+            // V2 baseline often runs with WeatherController active but cloudCover=0
+            // (clear weather). If we hard-override with 0, clouds disappear even
+            // when the CloudEffect's own control panel cloudCover is non-zero.
+            // Treat weather cloud cover as a driver while keeping local cloudCover
+            // as a minimum floor so cloud controls remain visible/authorable.
+            cloudCover = Math.max(Number(this.params.cloudCover) || 0, s.cloudCover);
+          }
           if (typeof s.windSpeedMS === 'number' && Number.isFinite(s.windSpeedMS)) {
             windSpeed = Math.max(0.0, Math.min(1.0, s.windSpeedMS / 78.0));
           } else if (typeof s.windSpeed === 'number' && Number.isFinite(s.windSpeed)) {
@@ -962,9 +977,8 @@ export class CloudEffectV2 {
 
     const normalized = Math.max(0, Math.min(1, Number(cloudCover) || 0));
     return {
-      // weatherEnabled mirrors V1: only false if the effect itself is disabled.
-      // WeatherController being uninitialized does not disable clouds.
-      weatherEnabled: this.enabled !== false,
+      // Mirror V1 semantics: weather can be disabled globally.
+      weatherEnabled: !(weatherController && weatherController.enabled === false) && this.enabled,
       cloudCover: normalized,
       windDirX,
       windDirY,

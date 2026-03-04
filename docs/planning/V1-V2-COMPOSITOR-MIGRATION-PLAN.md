@@ -652,3 +652,48 @@ Disposing MapShine’s `FrameCoordinator` helps reduce extra PIXI flush renderin
   - Roof alpha map occlusion
   - Depth texture occlusion
 - The effect is visually correct and animated, but may draw through geometry until V2 provides equivalent occlusion inputs.
+
+## 11. Basic Version Working: BuildingShadowsEffectV2 + _Outdoors mask
+
+**Status:** Basic version working in V2 (confirmed in Foundry).
+
+**What this delivers now:**
+- Building-projected ambient shadowing driven by indoor regions from `_Outdoors`.
+- Shadow direction aligned with OverheadShadows.
+- Shadow field anchored to the scene/world (not screen-space drifting).
+- No border smear from out-of-bounds projection taps.
+
+### Why `_Outdoors` is the critical dependency
+
+`_Outdoors` is the authoritative indoor/outdoor classifier in this pipeline:
+- Bright (`~1`) = outdoors receiver/caster space.
+- Dark (`~0`) = indoor/building footprint.
+
+BuildingShadowsEffectV2 projects indoor casters from this mask onto outdoor receivers. If `_Outdoors` is missing, stale, wrong-floor, or sampled in the wrong UV convention, the result immediately looks wrong (inverted direction/placement, full-scene suppression, or no visible contribution).
+
+### Working V2 data path (current)
+
+1. `GpuSceneMaskCompositor` composes per-floor scene-space `_Outdoors` textures (`source-over` policy).
+2. `FloorCompositor` resolves the current outdoors texture with fallbacks and syncs all consumers.
+3. `BuildingShadowsEffectV2` consumes keyed floor outdoors textures (with direct fallback texture support).
+4. Building shadow RT is produced and consumed by `LightingEffectV2` as ambient dimming.
+
+### `_Outdoors` handling hardening included
+
+- Centralized outdoors-mask resolution in `FloorCompositor` with deterministic fallback order.
+- Consumer fan-out now includes cloud/water/overhead/building + WeatherController roof map updates.
+- Null-clobber protection during compositor warmup (retain last valid outdoors texture across transient gaps).
+- Cloud floor-aware binding is guarded (only enabled when floor-id/per-floor slots are representable).
+
+### Coordinate and sampling fixes that were required
+
+- Building shadows were moved to scene-space target sizing to align with world/scene UV usage.
+- Lighting composition removed the extra Y inversion when sampling building shadow RT (this was the persistent 100% Y-flip source once scene-space output was correct).
+- Projection direction in BuildingShadows was inverted to match OverheadShadows' apparent cast direction.
+- Kernel sampling now clips out-of-bounds taps from both numerator and denominator to avoid edge artifacts.
+
+### Remaining scope (explicitly out of this “basic working” milestone)
+
+- Fine-tuned artistic calibration of length/softness parity between overhead and building shadows.
+- Optional debug visualizations (resolved outdoors source key, per-consumer binding state).
+- Additional policy tuning for unusual multi-floor scenes with sparse floor-id coverage.

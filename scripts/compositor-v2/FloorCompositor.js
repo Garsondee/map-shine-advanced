@@ -963,6 +963,17 @@ export class FloorCompositor {
       }
     }
 
+    // Baseline-compatible cloud-top composite.
+    // CloudEffectV2.render() already produced _cloudTopRT earlier in this frame,
+    // but the main cloud-top blit block is below the temporary early return.
+    // Without this, only cloud shadows affect lighting and visible cloud tops
+    // never appear in baseline mode.
+    if (this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
+      if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloudTops.blit (baseline)'); } catch (_) {} }
+      this._cloudEffect.blitCloudTops(this.renderer, currentInput);
+      if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloudTops.blit (baseline) DONE'); } catch (_) {} }
+    }
+
     // Jump straight to blit
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: blitToScreen'); } catch (_) {} }
     this._blitToScreen(currentInput);

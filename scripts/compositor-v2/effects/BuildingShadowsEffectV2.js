@@ -208,8 +208,8 @@ export class BuildingShadowsEffectV2 {
               vec2 sampleUv = vUv + baseOffsetUv + jitter;
               float valid = uvInBounds(sampleUv);
               float w = (dx == 0 && dy == 0) ? 2.0 : 1.0;
-              float casterOutdoors = readOutdoorsMask(sampleUv) * valid;
-              float casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate;
+              float casterOutdoors = readOutdoorsMask(sampleUv);
+              float casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
               accum += casterIndoor * w;
               weightSum += w * valid;
             }
